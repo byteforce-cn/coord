@@ -1,0 +1,14 @@
+document:
+  dsl: "1.0.0"
+  namespace: coord
+  name: circular-reference
+  version: "1.0.0"
+do:
+  - stepA:
+      set:
+        x: 1
+      then: stepB
+  - stepB:
+      set:
+        y: 2
+      then: stepA

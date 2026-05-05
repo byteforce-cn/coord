@@ -1,0 +1,13 @@
+# Cargo 配置 —— Byteforce 私有 Nexus registry 接入
+#
+# coord-core / coord-proto 发布在 byteforce registry，本仓库以版本号方式引用。
+# 凭据由用户或流水线 cargo login --registry byteforce 注入到
+# ~/.cargo/credentials.toml，或通过环境变量
+# CARGO_REGISTRIES_BYTEFORCE_TOKEN 提供。
+# 不要把任何凭据写入本文件或仓库。
+
+[registries.byteforce]
+index = "sparse+https://nexus.byteforce.cn/repository/cargo-repo/"
+
+[net]
+git-fetch-with-cli = true

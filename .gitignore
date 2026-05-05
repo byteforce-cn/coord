@@ -1,0 +1,39 @@
+# Build artifacts
+target/
+**/target/
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.cache/
+**/.cache/
+*.tsbuildinfo
+
+# Lock files for transient tools — keep workspace Cargo.lock under VCS
+# (intentionally not ignored): /Cargo.lock, /sdk/rust/Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# TLS material — never commit live keys
+e2e/tls/*.pem
+e2e/tls/*.crt
+e2e/tls/*.key
+e2e/tls/*.csr
+!e2e/tls/.gitkeep
+
+# Benchmark reports
+benchmark/reports/report_*.json
+benchmark/reports/report_*.md
+
+# Local data
+*.log
+*.pid
+data.d/
+logs.d/

@@ -1,0 +1,181 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── 构建多平台二进制 ────────────────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_REGISTRIES_BYTEFORCE_TOKEN: ${{ secrets.BYTEFORCE_CARGO_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Set up Cargo registry credentials
+        run: |
+          mkdir -p ~/.cargo
+          printf '[registry]\nglobal-credential-providers = ["cargo:token"]\n' \
+            >> ~/.cargo/config.toml
+
+      - name: Install Rust 1.93.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.0
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (aarch64 linux only)
+        if: matrix.cross == true
+        run: cargo install cross --locked
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Build coord-server
+        run: |
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            cross build --release --locked -p coord-server --target ${{ matrix.target }}
+          else
+            cargo build --release --locked -p coord-server --target ${{ matrix.target }}
+          fi
+
+      - name: Build coord-ctl
+        run: |
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            cross build --release --locked -p coord-ctl --target ${{ matrix.target }}
+          else
+            cargo build --release --locked -p coord-ctl --target ${{ matrix.target }}
+          fi
+
+      - name: Package binaries
+        id: package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE_NAME="coord-${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/${ARCHIVE_NAME}"
+          cp "target/${{ matrix.target }}/release/coord-server" "dist/${ARCHIVE_NAME}/" 2>/dev/null || \
+          cp "target/${{ matrix.target }}/release/coord-server.exe" "dist/${ARCHIVE_NAME}/" 2>/dev/null || true
+          cp "target/${{ matrix.target }}/release/coord-ctl" "dist/${ARCHIVE_NAME}/" 2>/dev/null || \
+          cp "target/${{ matrix.target }}/release/coord-ctl.exe" "dist/${ARCHIVE_NAME}/" 2>/dev/null || true
+          cp README.md LICENSE CHANGELOG.md "dist/${ARCHIVE_NAME}/"
+          cd dist
+          tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}/"
+          echo "asset=${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "asset_path=dist/${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.asset }}
+          path: ${{ steps.package.outputs.asset_path }}
+          retention-days: 1
+
+  # ── 构建 UI Console ─────────────────────────────────────────────────────────
+  build-ui:
+    name: Build UI Console
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Set up pnpm 10.8.1
+        uses: pnpm/action-setup@v4.1.0
+        with:
+          version: '10.8.1'
+
+      - name: Set up Node.js 22.19.0
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '22.19.0'
+          cache: 'pnpm'
+          cache-dependency-path: 'ui/console/pnpm-lock.yaml'
+
+      - name: Install dependencies
+        working-directory: ui/console
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        working-directory: ui/console
+        run: pnpm build
+
+      - name: Upload UI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-console-dist
+          path: ui/console/dist/
+          retention-days: 1
+
+  # ── 创建 GitHub Release ─────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: [build, build-ui]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Extract release notes from CHANGELOG.md
+        id: changelog
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # 提取当前版本的 CHANGELOG 段落
+          NOTES=$(awk "/^## \[$VERSION\]/{found=1; next} found && /^## \[/{exit} found{print}" CHANGELOG.md)
+          if [[ -z "$NOTES" ]]; then
+            NOTES="请查阅 [CHANGELOG.md](CHANGELOG.md) 了解本次变更详情。"
+          fi
+          # 写入多行文本到 GITHUB_OUTPUT
+          {
+            echo "notes<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.notes }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            release-artifacts/**/*.tar.gz

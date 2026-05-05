@@ -1,0 +1,22 @@
+# e2e/.dockerignore — 排除宿主机大目录，加速 Docker build context 传输
+# 对 coord-cluster/Dockerfile (cargo-chef) 和 mock-services/Dockerfile 均生效
+
+# Rust 构建输出（可能几 GB）
+target/
+
+# Java 构建输出（避免把宿主机编译的 jar 带入）
+*/target/
+e2e/coord-e2e-tests/target/
+e2e/mock-services/*/target/
+
+# VCS
+.git/
+.gitignore
+
+# 文档 / UI（不需要进入 build context）
+ui/
+doc/
+sdk/go/
+
+# macOS
+.DS_Store

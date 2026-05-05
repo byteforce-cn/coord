@@ -1,0 +1,46 @@
+# docker-compose.override.yml — 开发模式（默认自动叠加）
+#
+# 在宿主机用本地 Maven 编译 jar 后，直接挂载到轻量级 JRE 容器，
+# 无需重建镜像，启动耗时从 2~5 分钟降至 10~15 秒。
+#
+# 使用方式：
+#   make jars          # 本地编译三个业务服务 fat-jar
+#   make up-dev        # 挂载 jar 启动，跳过镜像构建
+#   make test-fast     # 本地直接跑测试，无需构建 e2e-tests 镜像
+#
+# CI 环境（完整镜像构建）：
+#   make up-ci         # 显式指定只用 docker-compose.yml，跳过 override
+
+services:
+  order-service:
+    image: eclipse-temurin:17-jre-jammy
+    build: !reset null
+    working_dir: /app
+    command: ["java", "-jar", "/app/app.jar"]
+    volumes:
+      - ./mock-services/order-service/target/order-service.jar:/app/app.jar:ro
+
+  pay-service:
+    image: eclipse-temurin:17-jre-jammy
+    build: !reset null
+    working_dir: /app
+    command: ["java", "-jar", "/app/app.jar"]
+    volumes:
+      - ./mock-services/pay-service/target/pay-service.jar:/app/app.jar:ro
+
+  inventory-service:
+    image: eclipse-temurin:17-jre-jammy
+    build: !reset null
+    working_dir: /app
+    command: ["java", "-jar", "/app/app.jar"]
+    volumes:
+      - ./mock-services/inventory-service/target/inventory-service.jar:/app/app.jar:ro
+
+  # e2e-tests 也挂载源码，make test-fast 时直接在宿主机跑，不走这个容器
+  e2e-tests:
+    environment:
+      # 支持 Docker-in-Docker CI：若 DOCKER_HOST 已设置（如 tcp://docker:2375），
+      # DockerComposeHelper 将使用该地址而非 /var/run/docker.sock。
+      - DOCKER_HOST=${DOCKER_HOST:-unix:///var/run/docker.sock}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

@@ -1,0 +1,22 @@
+# ── Rust build artifacts ─────────────────────────────────────
+target/
+**/target/
+
+# UI
+ui/console/node_modules/
+ui/console/dist/
+ui/console/.pnpm-store/
+
+# Go mod cache
+sdk/go/vendor/
+
+# Git / IDE
+.git/
+.idea/
+.vscode/
+**/.DS_Store
+
+# Benchmark reports (not needed for any build)
+benchmark/reports/
+# NOTE: e2e/, sdk/, proto/ are intentionally NOT excluded —
+# Java builds need sdk/java, proto, and e2e/mock-services sources.

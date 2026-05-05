@@ -1,0 +1,10 @@
+document:
+  dsl: "1.0.0"
+  namespace: coord
+  name: unknown-task-ref
+  version: "1.0.0"
+do:
+  - stepA:
+      set:
+        x: 1
+      then: nonExistentTask

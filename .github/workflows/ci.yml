@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Rust: fmt / clippy / test / guardrails ──────────────────────────────────
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRIES_BYTEFORCE_TOKEN: ${{ secrets.BYTEFORCE_CARGO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Set up Cargo registry credentials
+        run: |
+          mkdir -p ~/.cargo
+          # Cargo 1.74+ requires an explicit credential-provider for authenticated registries
+          printf '[registry]\nglobal-credential-providers = ["cargo:token"]\n' \
+            >> ~/.cargo/config.toml
+
+      - name: Install Rust 1.93.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.0
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: fmt check
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --workspace --locked -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --locked
+
+      - name: guardrails
+        run: bash scripts/ci-guardrails.sh
+
+  # ── UI Console ──────────────────────────────────────────────────────────────
+  ui-console:
+    name: UI Console
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Set up pnpm 10.8.1
+        uses: pnpm/action-setup@v4.1.0
+        with:
+          version: '10.8.1'
+
+      - name: Set up Node.js 22.19.0
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '22.19.0'
+          cache: 'pnpm'
+          cache-dependency-path: 'ui/console/pnpm-lock.yaml'
+
+      - name: Install dependencies
+        working-directory: ui/console
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        working-directory: ui/console
+        run: pnpm lint
+
+      - name: Typecheck
+        working-directory: ui/console
+        run: pnpm typecheck
+
+      - name: Test
+        working-directory: ui/console
+        run: pnpm test
+
+      - name: Build
+        working-directory: ui/console
+        run: pnpm build

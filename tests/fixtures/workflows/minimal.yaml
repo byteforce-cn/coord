@@ -1,0 +1,12 @@
+document:
+  dsl: "1.0.0"
+  namespace: coord
+  name: minimal
+  version: "1.0.0"
+do:
+  - greet:
+      call: http
+      with:
+        method: get
+        endpoint:
+          uri: https://example.com/hello

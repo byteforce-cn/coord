@@ -1,0 +1,23 @@
+document:
+  dsl: "1.0.0"
+  namespace: coord
+  name: retry-with-backoff
+  version: "1.0.0"
+do:
+  - attempt:
+      try:
+        - callPayment:
+            call: http
+            with:
+              method: post
+              endpoint:
+                uri: https://payment-service/charge
+      catch:
+        errors:
+          with:
+            status: 503
+        retry:
+          delay: PT2S
+          backoff: exponential
+          limit:
+            count: 3

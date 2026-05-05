@@ -1,0 +1,50 @@
+document:
+  dsl: "1.0.0"
+  namespace: coord
+  name: order-processing
+  version: "1.0.0"
+do:
+  - validateOrder:
+      call: http
+      with:
+        method: post
+        endpoint:
+          uri: https://order-service/validate
+      input:
+        from: ".order"
+      output:
+        as_expr: ".validation"
+  - checkResult:
+      switch:
+        - valid:
+            when: ".validation.is_valid == true"
+            then: processPayment
+        - invalid:
+            when: ".validation.is_valid == false"
+            then: rejectOrder
+  - processPayment:
+      call: grpc
+      with:
+        proto: payment.proto
+        service: PaymentService
+        method: Charge
+  - notifyAndShip:
+      fork:
+        branches:
+          - sendNotification:
+              call: http
+              with:
+                method: post
+                endpoint:
+                  uri: https://notification-service/send
+          - startShipping:
+              call: http
+              with:
+                method: post
+                endpoint:
+                  uri: https://shipping-service/ship
+      then: end
+  - rejectOrder:
+      set:
+        status: rejected
+      then: end

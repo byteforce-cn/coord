@@ -1,0 +1,122 @@
+/*
+ * Design tokens — single source of truth per doc/ui-design-spec.md §2.
+ *
+ * Every visual primitive (color / typography / radius / shadow / spacing
+ * / motion) is exposed as a CSS variable so Tailwind, shadcn components
+ * and ad-hoc CSS all share one contract. Components MUST consume these
+ * tokens (via Tailwind utility classes or `var(...)`) and MUST NOT
+ * hard-code pixel values, hex codes, or HSL triples.
+ */
+
+:root {
+  /* surface */
+  --color-bg-base: hsl(0 0% 100%);
+  --color-bg-subtle: hsl(220 14% 97%);
+  --color-bg-muted: hsl(220 13% 93%);
+  --color-bg-elevated: hsl(0 0% 100%);
+  --color-bg-overlay: hsl(220 30% 10% / 0.6);
+
+  /* text */
+  --color-fg-default: hsl(222 47% 11%);
+  --color-fg-muted: hsl(215 16% 47%);
+  --color-fg-subtle: hsl(215 14% 65%);
+  --color-fg-on-accent: hsl(0 0% 100%);
+
+  /* border */
+  --color-border-default: hsl(220 13% 88%);
+  --color-border-strong: hsl(220 13% 76%);
+  --color-border-focus: hsl(221 83% 53%);
+
+  /* accent */
+  --color-accent: hsl(221 83% 53%);
+  --color-accent-hover: hsl(221 83% 45%);
+  --color-accent-subtle: hsl(221 83% 96%);
+
+  /* status */
+  --color-success: hsl(152 60% 36%);
+  --color-success-subtle: hsl(152 70% 95%);
+  --color-warning: hsl(38 92% 50%);
+  --color-warning-subtle: hsl(48 96% 95%);
+  --color-danger: hsl(0 72% 51%);
+  --color-danger-subtle: hsl(0 86% 97%);
+  --color-info: hsl(199 89% 48%);
+  --color-info-subtle: hsl(199 95% 95%);
+
+  /* domain palette (aligned to coord modules for sidebar / chip) */
+  --color-domain-cluster: hsl(221 83% 53%);
+  --color-domain-registry: hsl(199 89% 48%);
+  --color-domain-config: hsl(262 83% 58%);
+  --color-domain-lock: hsl(38 92% 50%);
+  --color-domain-workflow: hsl(152 60% 36%);
+  --color-domain-transit: hsl(280 70% 50%);
+  --color-domain-pki: hsl(20 90% 50%);
+  --color-domain-security: hsl(0 72% 51%);
+  --color-domain-backup: hsl(215 16% 47%);
+
+  /* typography */
+  --font-sans:
+    'Inter', 'PingFang SC', system-ui, -apple-system, 'Segoe UI', Roboto,
+    sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'JetBrains Mono', Menlo, Consolas, monospace;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 1.875rem;
+
+  /* radii */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+
+  /* shadows */
+  --shadow-sm: 0 1px 2px 0 hsl(220 43% 11% / 0.04);
+  --shadow-md:
+    0 4px 12px -2px hsl(220 43% 11% / 0.08),
+    0 2px 4px -2px hsl(220 43% 11% / 0.04);
+  --shadow-lg:
+    0 12px 32px -8px hsl(220 43% 11% / 0.18),
+    0 4px 8px -4px hsl(220 43% 11% / 0.08);
+
+  /* motion */
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+  --motion-slow: 320ms;
+  --easing-standard: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+[data-theme='dark'] {
+  --color-bg-base: hsl(222 47% 7%);
+  --color-bg-subtle: hsl(222 40% 10%);
+  --color-bg-muted: hsl(222 30% 16%);
+  --color-bg-elevated: hsl(222 40% 12%);
+  --color-bg-overlay: hsl(0 0% 0% / 0.7);
+
+  --color-fg-default: hsl(220 20% 95%);
+  --color-fg-muted: hsl(215 16% 70%);
+  --color-fg-subtle: hsl(215 14% 55%);
+  --color-fg-on-accent: hsl(0 0% 100%);
+
+  --color-border-default: hsl(222 30% 22%);
+  --color-border-strong: hsl(222 30% 32%);
+  --color-border-focus: hsl(221 83% 63%);
+
+  --color-accent: hsl(221 83% 63%);
+  --color-accent-hover: hsl(221 83% 72%);
+  --color-accent-subtle: hsl(221 50% 20%);
+
+  --color-success-subtle: hsl(152 50% 15%);
+  --color-warning-subtle: hsl(38 60% 18%);
+  --color-danger-subtle: hsl(0 55% 18%);
+  --color-info-subtle: hsl(199 60% 18%);
+}
+
+/* High contrast — opt-in via `data-theme="hc"` */
+[data-theme='hc'] {
+  --color-border-default: hsl(222 47% 30%);
+  --color-fg-muted: hsl(222 47% 20%);
+}

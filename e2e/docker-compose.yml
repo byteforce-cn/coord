@@ -1,0 +1,180 @@
+networks:
+  coord-net:
+    driver: bridge
+
+volumes:
+  coord-data-1:
+  coord-data-2:
+  coord-data-3:
+
+# ── Coord 3-node cluster ──────────────────────────────────────────────────────
+services:
+  coord-1:
+    build:
+      context: ..
+      dockerfile: e2e/coord-cluster/Dockerfile
+    container_name: coord-1
+    hostname: coord-1
+    networks: [coord-net]
+    ports:
+      - "9090:9090"
+      - "8080:8080"
+    environment:
+      COORD_NODE_ID: "1"
+      COORD_GRPC_ADDR: "0.0.0.0:9090"
+      COORD_HTTP_ADDR: "0.0.0.0:8080"
+      COORD_CLUSTER_PEERS: "coord-2:9090,coord-3:9090"
+      COORD_BOOTSTRAP: "true"
+      COORD_DATA_DIR: "/data"
+    volumes:
+      - coord-data-1:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  coord-2:
+    build:
+      context: ..
+      dockerfile: e2e/coord-cluster/Dockerfile
+    container_name: coord-2
+    hostname: coord-2
+    networks: [coord-net]
+    ports:
+      - "19090:9090"
+      - "8181:8080"
+    environment:
+      COORD_NODE_ID: "2"
+      COORD_GRPC_ADDR: "0.0.0.0:9090"
+      COORD_HTTP_ADDR: "0.0.0.0:8080"
+      COORD_CLUSTER_PEERS: ""
+      COORD_BOOTSTRAP: "false"
+      COORD_DATA_DIR: "/data"
+    volumes:
+      - coord-data-2:/data
+    depends_on:
+      coord-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    profiles: [cluster]
+
+  coord-3:
+    build:
+      context: ..
+      dockerfile: e2e/coord-cluster/Dockerfile
+    container_name: coord-3
+    hostname: coord-3
+    networks: [coord-net]
+    ports:
+      - "29090:9090"
+      - "8281:8080"
+    environment:
+      COORD_NODE_ID: "3"
+      COORD_GRPC_ADDR: "0.0.0.0:9090"
+      COORD_HTTP_ADDR: "0.0.0.0:8080"
+      COORD_CLUSTER_PEERS: ""
+      COORD_BOOTSTRAP: "false"
+      COORD_DATA_DIR: "/data"
+    volumes:
+      - coord-data-3:/data
+    depends_on:
+      coord-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    profiles: [cluster]
+
+  # ── Mock business services ────────────────────────────────────────────────────
+  order-service:
+    build:
+      context: ..
+      dockerfile: e2e/mock-services/order-service/Dockerfile
+    container_name: order-service
+    networks: [coord-net]
+    ports:
+      - "18080:18080"
+    environment:
+      COORD_GRPC_ADDRESS: "coord-1:9090"
+      SERVER_PORT: "18080"
+    depends_on:
+      coord-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18080/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  pay-service:
+    build:
+      context: ..
+      dockerfile: e2e/mock-services/pay-service/Dockerfile
+    container_name: pay-service
+    networks: [coord-net]
+    ports:
+      - "18081:18081"
+    environment:
+      COORD_GRPC_ADDRESS: "coord-1:9090"
+      SERVER_PORT: "18081"
+    depends_on:
+      coord-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18081/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  inventory-service:
+    build:
+      context: ..
+      dockerfile: e2e/mock-services/inventory-service/Dockerfile
+    container_name: inventory-service
+    networks: [coord-net]
+    ports:
+      - "18082:18082"
+    environment:
+      COORD_GRPC_ADDRESS: "coord-1:9090"
+      SERVER_PORT: "18082"
+    depends_on:
+      coord-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18082/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── E2E test runner (opt-in via profile) ─────────────────────────────────────
+  e2e-tests:
+    build:
+      context: ..
+      dockerfile: e2e/coord-e2e-tests/Dockerfile
+    container_name: e2e-tests
+    networks: [coord-net]
+    environment:
+      COORD_GRPC_ADDRESS: "coord-1:9090"
+      COORD_HTTP_ADDRESS: "http://coord-1:8080"
+      ORDER_SERVICE_URL: "http://order-service:18080"
+      PAY_SERVICE_URL: "http://pay-service:18081"
+      INVENTORY_SERVICE_URL: "http://inventory-service:18082"
+    depends_on:
+      order-service:
+        condition: service_healthy
+      pay-service:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+    profiles: [test]

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.3.0</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>cn.byteforce.mock</groupId>
+  <artifactId>mock-services</artifactId>
+  <version>0.1.0</version>
+  <packaging>pom</packaging>
+  <name>coord-mock-services</name>
+
+  <modules>
+    <module>order-service</module>
+    <module>pay-service</module>
+    <module>inventory-service</module>
+  </modules>
+
+  <properties>
+    <java.version>17</java.version>
+    <grpc.version>1.66.0</grpc.version>
+    <protobuf.version>3.25.3</protobuf.version>
+    <coord-sdk.version>0.1.0</coord-sdk.version>
+  </properties>
+
+  <build>
+    <!-- 不带版本号的 jar 名称，方便 docker-compose.override.yml 挂载固定路径 -->
+    <finalName>${project.artifactId}</finalName>
+  </build>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- Coord Java SDK (grpc stubs) -->
+      <dependency>
+        <groupId>cn.byteforce</groupId>
+        <artifactId>coord-sdk-java</artifactId>
+        <version>${coord-sdk.version}</version>
+      </dependency>
+      <!-- gRPC -->
+      <dependency>
+        <groupId>io.grpc</groupId>
+        <artifactId>grpc-netty-shaded</artifactId>
+        <version>${grpc.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.grpc</groupId>
+        <artifactId>grpc-protobuf</artifactId>
+        <version>${grpc.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.grpc</groupId>
+        <artifactId>grpc-stub</artifactId>
+        <version>${grpc.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.google.protobuf</groupId>
+        <artifactId>protobuf-java</artifactId>
+        <version>${protobuf.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>javax.annotation</groupId>
+        <artifactId>javax.annotation-api</artifactId>
+        <version>1.3.2</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>

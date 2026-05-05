@@ -1,0 +1,65 @@
+# docker-compose TLS overlay for the coord e2e cluster.
+#
+# Usage:
+#   1. Generate certificates once:   ./e2e/scripts/gen-tls-ca.sh
+#   2. Run with the overlay:
+#        docker compose -f e2e/docker-compose.yml \
+#                       -f e2e/docker-compose.tls.yml up --build
+#
+# Each coord node mounts its per-hostname server cert + the shared CA.
+# Mock services get the CA bundle at /etc/coord/tls/ca.crt; the Java
+# SDK's TlsOptions and the Go SDK's TLSOptions both accept a CA-cert
+# path and will negotiate TLS with the coord cluster.
+#
+# mTLS is enabled server-side (COORD_TLS_CLIENT_CA). Mock-service SDKs
+# must present the client cert mounted at /etc/coord/tls/client.{crt,key}
+# — see the README in e2e/ for SDK wiring snippets.
+
+services:
+  coord-1:
+    environment:
+      COORD_TLS_CERT: "/etc/coord/tls/coord-1.crt"
+      COORD_TLS_KEY: "/etc/coord/tls/coord-1.key"
+      COORD_TLS_CLIENT_CA: "/etc/coord/tls/ca.crt"
+    volumes:
+      - ./tls:/etc/coord/tls:ro
+
+  coord-2:
+    environment:
+      COORD_TLS_CERT: "/etc/coord/tls/coord-2.crt"
+      COORD_TLS_KEY: "/etc/coord/tls/coord-2.key"
+      COORD_TLS_CLIENT_CA: "/etc/coord/tls/ca.crt"
+    volumes:
+      - ./tls:/etc/coord/tls:ro
+
+  coord-3:
+    environment:
+      COORD_TLS_CERT: "/etc/coord/tls/coord-3.crt"
+      COORD_TLS_KEY: "/etc/coord/tls/coord-3.key"
+      COORD_TLS_CLIENT_CA: "/etc/coord/tls/ca.crt"
+    volumes:
+      - ./tls:/etc/coord/tls:ro
+
+  order-service:
+    environment:
+      COORD_TLS_CA: "/etc/coord/tls/ca.crt"
+      COORD_TLS_CLIENT_CERT: "/etc/coord/tls/client.crt"
+      COORD_TLS_CLIENT_KEY: "/etc/coord/tls/client.key"
+    volumes:
+      - ./tls:/etc/coord/tls:ro
+
+  pay-service:
+    environment:
+      COORD_TLS_CA: "/etc/coord/tls/ca.crt"
+      COORD_TLS_CLIENT_CERT: "/etc/coord/tls/client.crt"
+      COORD_TLS_CLIENT_KEY: "/etc/coord/tls/client.key"
+    volumes:
+      - ./tls:/etc/coord/tls:ro
+
+  inventory-service:
+    environment:
+      COORD_TLS_CA: "/etc/coord/tls/ca.crt"
+      COORD_TLS_CLIENT_CERT: "/etc/coord/tls/client.crt"
+      COORD_TLS_CLIENT_KEY: "/etc/coord/tls/client.key"
+    volumes:
+      - ./tls:/etc/coord/tls:ro
