@@ -4,13 +4,10 @@
 //! replication surface. All `coord_proto::coord::v1::Raft*` types enter
 //! and leave the server through the pure functions in this file; the
 //! rest of the code base deals exclusively with the domain enums
-//! defined in [`crate::raft_store`].
+//! defined in [`coord_core::raft_runtime`].
 //!
-//! The two impl methods `PersistedLogEntry::{from_proto,to_proto}`
-//! delegate to [`log_entry_from_proto`] / [`log_entry_to_proto`] so
-//! call sites remain stable while the conversion lives here.
-
 use anyhow::anyhow;
+use coord_core::raft_runtime::{MembershipNode, PersistedLogEntry, StateMachineCommand};
 
 pub use coord_proto::coord::v1::raft_command::Op as RaftOp;
 pub use coord_proto::coord::v1::{
@@ -18,8 +15,6 @@ pub use coord_proto::coord::v1::{
     RaftFinalizeMembershipCommand, RaftLogEntry, RaftMemberAddCommand, RaftMemberNode,
     RaftMemberRemoveCommand, RaftRestoreRuntimeSnapshotCommand,
 };
-
-use crate::raft_store::{MembershipNode, PersistedLogEntry, StateMachineCommand};
 
 /// Build a [`PersistedLogEntry`] from the on-wire proto representation.
 ///

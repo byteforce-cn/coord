@@ -4,6 +4,53 @@
 //! Extracted from `raft_runtime.rs` as part of Batch 4c stage 3.
 
 use super::*;
+use coord_core::raft_runtime::{
+    RuntimeSnapshotRestoreContext, RuntimeSnapshotRestorer, apply_state_machine_entry,
+};
+
+struct ServerRuntimeSnapshotRestorer {
+    state: CoordinatorState,
+    store: RaftStore,
+    modules: ReplicatedModuleRegistry,
+}
+
+#[async_trait::async_trait]
+impl RuntimeSnapshotRestorer for ServerRuntimeSnapshotRestorer {
+    async fn restore_runtime_snapshot(
+        &self,
+        payload_json: &str,
+        _payload_version: u32,
+        context: RuntimeSnapshotRestoreContext,
+    ) -> Result<(), String> {
+        let mut payload = persistence::payload_v5_from_json(payload_json)
+            .map_err(|err| format!("failed to parse restore payload json from raft log: {err}"))?;
+
+        if payload.consistency.replay_strategy != "raft_log_replay" {
+            return Err(format!(
+                "unsupported restore replay strategy in raft log command: {}",
+                payload.consistency.replay_strategy
+            ));
+        }
+
+        persistence::annotate_payload_v5_with_raft_metadata(
+            &mut payload,
+            context.commit_index,
+            context.last_applied_index,
+        );
+
+        persistence::restore_payload_v5_for_raft_replay(&self.state, payload.clone())
+            .await
+            .map_err(|err| format!("failed to apply restore payload during raft replay: {err}"))?;
+
+        restore_extra_registered_module_snapshots(&self.modules, &payload.modules).await?;
+
+        self.store.save_runtime_snapshot(&payload).map_err(|err| {
+            format!("failed to persist replayed runtime snapshot into redb: {err}")
+        })?;
+
+        Ok(())
+    }
+}
 
 impl RaftRuntime {
     pub async fn handle_append_entries(
@@ -90,7 +137,7 @@ impl RaftRuntime {
         let mut entries = Vec::with_capacity(request.entries.len());
         for entry in request.entries {
             entries.push(
-                PersistedLogEntry::from_proto(entry)
+                crate::wire::raft::log_entry_from_proto(entry)
                     .map_err(|err| format!("failed to parse raft log entry: {err}"))?,
             );
         }
@@ -359,7 +406,10 @@ impl RaftRuntime {
                 term,
                 prev_log_index,
                 prev_log_term,
-                entries: entries.iter().map(PersistedLogEntry::to_proto).collect(),
+                entries: entries
+                    .iter()
+                    .map(crate::wire::raft::log_entry_to_proto)
+                    .collect(),
                 leader_commit,
                 leader_addr: self.grpc_addr.clone(),
             };
@@ -489,136 +539,27 @@ impl RaftRuntime {
     }
 
     pub(super) async fn apply_entry(&self, entry: &PersistedLogEntry) -> Result<(), String> {
-        match &entry.command {
-            StateMachineCommand::MemberAdd { node_id, address } => {
-                let mut members = self.state.members().write().await;
-                members.insert(node_id.clone(), address.clone());
-                info!(node_id = %node_id, address = %address, index = entry.index, "applied raft member add");
-                Ok(())
-            }
-            StateMachineCommand::MemberRemove { node_id } => {
-                let mut members = self.state.members().write().await;
-                members.remove(node_id);
-                info!(node_id = %node_id, index = entry.index, "applied raft member remove");
-                Ok(())
-            }
-            StateMachineCommand::BeginJointConsensus {
-                old_members,
-                new_members,
-            } => {
-                let old_map = nodes_to_members(old_members);
-                let new_map = nodes_to_members(new_members);
-                let mut merged = old_map.clone();
-                for (node_id, address) in &new_map {
-                    merged.insert(node_id.clone(), address.clone());
-                }
+        let metadata = self.store.load_metadata().map_err(|err| {
+            format!("failed to load raft metadata while applying log entry: {err}")
+        })?;
+        let restorer = ServerRuntimeSnapshotRestorer {
+            state: self.state.clone(),
+            store: self.store.clone(),
+            modules: self.modules.clone(),
+        };
 
-                {
-                    let mut joint = self.joint_consensus.write().await;
-                    *joint = Some(JointConsensusState {
-                        old_members: old_map,
-                        new_members: new_map,
-                    });
-                }
-
-                {
-                    let mut members = self.state.members().write().await;
-                    *members = merged;
-                }
-
-                info!(index = entry.index, "applied raft joint-consensus begin");
-                Ok(())
-            }
-            StateMachineCommand::FinalizeMembership { members } => {
-                let finalized = nodes_to_members(members);
-
-                {
-                    let mut joint = self.joint_consensus.write().await;
-                    *joint = None;
-                }
-
-                {
-                    let mut runtime_members = self.state.members().write().await;
-                    *runtime_members = finalized;
-                }
-
-                info!(index = entry.index, "applied raft joint-consensus finalize");
-                Ok(())
-            }
-            StateMachineCommand::RestoreRuntimeSnapshot {
-                payload_json,
-                payload_version,
-            } => {
-                let mut payload =
-                    persistence::payload_v5_from_json(payload_json).map_err(|err| {
-                        format!("failed to parse restore payload json from raft log: {err}")
-                    })?;
-
-                if payload.consistency.replay_strategy != "raft_log_replay" {
-                    return Err(format!(
-                        "unsupported restore replay strategy in raft log command: {}",
-                        payload.consistency.replay_strategy
-                    ));
-                }
-
-                let metadata = self.store.load_metadata().map_err(|err| {
-                    format!("failed to load raft metadata while applying restore command: {err}")
-                })?;
-                persistence::annotate_payload_v5_with_raft_metadata(
-                    &mut payload,
-                    metadata.commit_index,
-                    metadata.last_applied_index,
-                );
-
-                persistence::restore_payload_v5_for_raft_replay(&self.state, payload.clone())
-                    .await
-                    .map_err(|err| {
-                        format!("failed to apply restore payload during raft replay: {err}")
-                    })?;
-
-                self.store.save_runtime_snapshot(&payload).map_err(|err| {
-                    format!("failed to persist replayed runtime snapshot into redb: {err}")
-                })?;
-
-                info!(
-                    index = entry.index,
-                    payload_version, "applied raft runtime snapshot restore command"
-                );
-                Ok(())
-            }
-            StateMachineCommand::BusinessCommand { namespace, payload } => {
-                // 插件化路由：根据 namespace 分发命令到对应模块
-                let modules = self.modules.read().await;
-                let module = modules.get(namespace).ok_or_else(|| {
-                    format!("no replicated module registered for namespace: {namespace}")
-                })?;
-
-                let ctx = coord_core::replication::ApplyContext {
-                    log_index: entry.index,
-                    log_term: entry.term,
-                };
-
-                let apply_result = module
-                    .apply(payload, &ctx)
-                    .await
-                    .map_err(|err| format!("module '{}' apply failed: {}", namespace, err));
-
-                // 通知等待该日志索引的命令结果（仅 leader propose 路径有 waiter）
-                {
-                    let mut pending = self
-                        .pending_results
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    if let Some(sender) = pending.remove(&entry.index) {
-                        let _ = sender.send(apply_result.clone());
-                    }
-                }
-
-                apply_result.map(|_| ())?;
-
-                info!(namespace = %namespace, index = entry.index, "applied raft business command");
-                Ok(())
-            }
-        }
+        apply_state_machine_entry(
+            &self.state,
+            &self.joint_consensus,
+            &self.modules,
+            &self.pending_results,
+            entry,
+            Some(&restorer),
+            RuntimeSnapshotRestoreContext {
+                commit_index: metadata.commit_index,
+                last_applied_index: metadata.last_applied_index,
+            },
+        )
+        .await
     }
 }

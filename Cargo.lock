@@ -583,9 +583,7 @@ dependencies = [
 
 [[package]]
 name = "coord-core"
-version = "0.1.0"
-source = "sparse+https://nexus.byteforce.cn/repository/cargo-repo/"
-checksum = "ad5f0ba28bb82c0496ae3b5ac93f495c3de5054879e2ef718fd7766438d5b2a4"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "anyhow",

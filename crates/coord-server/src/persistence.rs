@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::path::Path;
-
 use anyhow::Context;
 use coord_core::clock::{Clock, SystemClock};
 use coord_core::config::ConfigEntry;
@@ -11,6 +8,7 @@ use coord_core::security::{EncryptedSecurityDomainBlob, SecurityPersistenceSnaps
 use coord_core::state::CoordinatorState;
 use coord_core::transit::TransitKeySnapshot;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Current canonical backup format version written by this binary.
 pub const BACKUP_PAYLOAD_VERSION: u32 = 5;
@@ -392,6 +390,7 @@ pub fn payload_v5_from_json(payload_json: &str) -> anyhow::Result<BackupPayloadV
     Ok(normalize_payload_v5(payload))
 }
 
+#[cfg(test)]
 pub async fn restore_from_json(
     state: &CoordinatorState,
     payload_json: &str,
@@ -403,16 +402,6 @@ pub async fn restore_from_json(
     let payload = payload_v5_from_json(payload_json)?;
     restore_payload_v5(state, payload).await?;
     Ok(true)
-}
-
-pub async fn restore_from_file(state: &CoordinatorState, file_path: &Path) -> anyhow::Result<bool> {
-    if !file_path.exists() {
-        return Ok(false);
-    }
-
-    let payload_json = std::fs::read_to_string(file_path)
-        .with_context(|| format!("failed to read snapshot file: {}", file_path.display()))?;
-    restore_from_json(state, &payload_json).await
 }
 
 #[cfg(test)]

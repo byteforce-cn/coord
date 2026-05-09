@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
-#[cfg(feature = "workflow-preview")]
-use crate::workflow_adapters::{CoordWorkflowRuntime, new_coord_workflow_runtime};
+use crate::workflow_adapters::CoordWorkflowRuntime;
 use coord_core::clock::{Clock, SystemClock};
 use coord_core::config::ConfigEntry;
 use coord_core::idgen::Snowflake;
@@ -17,11 +16,8 @@ use coord_core::security::{
 };
 use coord_core::state::RuntimeConfig;
 use coord_core::validation::validate_key;
-#[cfg(feature = "workflow-preview")]
 use coord_core::workflow::engine::InstanceStatus;
-#[cfg(feature = "workflow-preview")]
 use coord_core::workflow::parser::parse_yaml;
-#[cfg(feature = "workflow-preview")]
 use coord_core::workflow::ports::WorkflowStore;
 use coord_proto::coord::v1::admin_service_server::AdminService;
 use coord_proto::coord::v1::auth_service_server::AuthService;
@@ -32,7 +28,6 @@ use coord_proto::coord::v1::pki_service_server::PkiService;
 use coord_proto::coord::v1::registry_service_server::RegistryService;
 use coord_proto::coord::v1::seal_service_server::SealService;
 use coord_proto::coord::v1::transit_service_server::TransitService;
-#[cfg(feature = "workflow-preview")]
 use coord_proto::coord::v1::workflow_service_server::WorkflowService;
 use coord_proto::coord::v1::{
     AcmeChallenge as ProtoAcmeChallenge, AutoRenewedCertificate as ProtoAutoRenewedCertificate,
@@ -60,7 +55,6 @@ use coord_proto::coord::v1::{
     ServiceQuery, SnowflakeRequest, SnowflakeResponse, UnsealRequest, UnsealResponse,
     UpdateAutoRenewPolicyRequest, UpdateAutoRenewPolicyResponse,
 };
-#[cfg(feature = "workflow-preview")]
 use coord_proto::coord::v1::{
     DeployWorkflowDefinitionRequest, DeployWorkflowDefinitionResponse,
     GetWorkflowDefinitionRequest, GetWorkflowDefinitionResponse, GetWorkflowInstanceRequest,
@@ -91,7 +85,6 @@ mod pki;
 mod registry;
 mod seal;
 mod transit;
-#[cfg(feature = "workflow-preview")]
 mod workflow;
 
 pub use admin::AdminGrpc;
@@ -103,5 +96,4 @@ pub use pki::PkiGrpc;
 pub use registry::RegistryGrpc;
 pub use seal::SealGrpc;
 pub use transit::TransitGrpc;
-#[cfg(feature = "workflow-preview")]
 pub use workflow::WorkflowGrpc;

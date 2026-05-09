@@ -3,6 +3,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use coord_core::config::ConfigEntry;
+use coord_core::raft_runtime::{
+    JointConsensusHandle, Members, PendingApplyResults, PersistedLogEntry,
+    ReplicatedModuleRegistry, StateMachineCommand, new_joint_consensus_handle,
+    new_pending_apply_results, new_replicated_module_registry, register_replicated_module,
+};
 use coord_core::replication::ReplicatedModule;
 use coord_core::state::CoordinatorState;
 use coord_proto::coord::v1::raft_internal_service_client::RaftInternalServiceClient;
@@ -16,7 +21,7 @@ use tonic::Request;
 use tracing::{debug, info, warn};
 
 use crate::persistence;
-use crate::raft_store::{PersistedLogEntry, RaftStore, StateMachineCommand};
+use crate::raft_store::RaftStore;
 
 mod election;
 mod helpers;
@@ -27,20 +32,10 @@ mod role;
 
 #[cfg(test)]
 use helpers::{ELECTION_TIMEOUT_BASE, ELECTION_TIMEOUT_JITTER_MAX};
-use helpers::{
-    majority, members_to_nodes, nodes_to_members, normalize_endpoint, random_election_timeout,
-};
+use helpers::{majority, members_to_nodes, normalize_endpoint, random_election_timeout};
 
 pub const RAFT_TICK_INTERVAL: Duration = Duration::from_millis(800);
 const LEADER_QUORUM_LOSS_TIMEOUT: Duration = Duration::from_secs(6);
-
-type Members = HashMap<String, String>;
-
-#[derive(Clone, Debug)]
-struct JointConsensusState {
-    old_members: Members,
-    new_members: Members,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NodeRole {
@@ -78,16 +73,15 @@ pub struct RaftRuntime {
     last_leader_contact: Arc<Mutex<Instant>>,
     election_deadline: Arc<Mutex<Instant>>,
     last_quorum_contact: Arc<Mutex<Instant>>,
-    joint_consensus: Arc<RwLock<Option<JointConsensusState>>>,
+    joint_consensus: JointConsensusHandle,
     /// 插件化模块注册表：namespace -> ReplicatedModule
-    modules: Arc<RwLock<HashMap<String, Arc<dyn ReplicatedModule>>>>,
+    modules: ReplicatedModuleRegistry,
     /// 命令应用结果等待通道：log_index -> oneshot sender
     ///
     /// 由 `propose_business_command_for_result` 写入，由 `apply_entry` 读取并通知。
     /// 仅 leader propose 路径登记 waiter，follower apply 时此表为空。
     #[allow(clippy::type_complexity)] // one-shot waiter map — introduced in T-P0-03
-    pending_results:
-        Arc<std::sync::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>>>,
+    pending_results: PendingApplyResults,
 }
 
 impl RaftRuntime {
@@ -104,9 +98,9 @@ impl RaftRuntime {
             last_leader_contact: Arc::new(Mutex::new(now)),
             election_deadline: Arc::new(Mutex::new(election_deadline)),
             last_quorum_contact: Arc::new(Mutex::new(now)),
-            joint_consensus: Arc::new(RwLock::new(None)),
-            modules: Arc::new(RwLock::new(HashMap::new())),
-            pending_results: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            joint_consensus: new_joint_consensus_handle(),
+            modules: new_replicated_module_registry(),
+            pending_results: new_pending_apply_results(),
         }
     }
 
@@ -121,10 +115,31 @@ impl RaftRuntime {
     /// 必须在 Raft 启动前完成所有模块的注册。
     /// 如果 namespace 重复，后注册的模块会覆盖先前的。
     pub async fn register_module(&self, module: Arc<dyn ReplicatedModule>) {
-        let namespace = module.namespace().to_string();
-        let mut modules = self.modules.write().await;
-        modules.insert(namespace.clone(), module);
+        let namespace = register_replicated_module(&self.modules, module).await;
         info!(namespace = %namespace, "registered replicated module");
+    }
+
+    pub async fn snapshot_extra_modules(&self) -> Result<HashMap<String, Vec<u8>>, String> {
+        let modules = self.modules.read().await;
+        let mut snapshots = HashMap::new();
+        for (namespace, module) in modules.iter() {
+            if is_builtin_snapshot_namespace(namespace) {
+                continue;
+            }
+            let bytes = module
+                .snapshot()
+                .await
+                .map_err(|err| format!("failed to snapshot module '{namespace}': {err}"))?;
+            snapshots.insert(namespace.clone(), bytes);
+        }
+        Ok(snapshots)
+    }
+
+    pub async fn restore_extra_modules(
+        &self,
+        module_snapshots: &HashMap<String, Vec<u8>>,
+    ) -> Result<(), String> {
+        restore_extra_registered_module_snapshots(&self.modules, module_snapshots).await
     }
 
     pub async fn initialize_local_member(&self) {
@@ -220,6 +235,40 @@ impl RaftRuntime {
             .map_err(|err| format!("failed to read last log entry: {err}"))
             .map(|entry| entry.map(|value| value.term).unwrap_or_default())
     }
+}
+
+fn is_builtin_snapshot_namespace(namespace: &str) -> bool {
+    matches!(
+        namespace,
+        "members"
+            | "registry"
+            | "config"
+            | "lock"
+            | "transit"
+            | "pki"
+            | "security_state"
+            | "security_domain"
+    )
+}
+
+pub(super) async fn restore_extra_registered_module_snapshots(
+    registry: &ReplicatedModuleRegistry,
+    module_snapshots: &HashMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let modules = registry.read().await;
+    for (namespace, bytes) in module_snapshots {
+        if is_builtin_snapshot_namespace(namespace) {
+            continue;
+        }
+        let Some(module) = modules.get(namespace) else {
+            continue;
+        };
+        module
+            .restore(bytes)
+            .await
+            .map_err(|err| format!("failed to restore module '{namespace}': {err}"))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

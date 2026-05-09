@@ -2,14 +2,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
+use coord_core::raft_runtime::{PersistedLogEntry, StateMachineCommand};
 use openraft::{BasicNode, Config as RaftConfig};
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use coord_proto::coord::v1::RaftLogEntry;
-
 use crate::persistence;
-use crate::wire;
 
 const RAFT_META_TABLE: TableDefinition<&str, &str> = TableDefinition::new("raft_meta");
 const RAFT_LOG_TABLE: TableDefinition<u64, &str> = TableDefinition::new("raft_log");
@@ -24,59 +22,6 @@ pub struct RaftMetadata {
     pub last_log_index: u64,
     pub last_applied_index: u64,
     pub commit_index: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MembershipNode {
-    pub node_id: String,
-    pub address: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum StateMachineCommand {
-    MemberAdd {
-        node_id: String,
-        address: String,
-    },
-    MemberRemove {
-        node_id: String,
-    },
-    BeginJointConsensus {
-        old_members: Vec<MembershipNode>,
-        new_members: Vec<MembershipNode>,
-    },
-    FinalizeMembership {
-        members: Vec<MembershipNode>,
-    },
-    RestoreRuntimeSnapshot {
-        payload_json: String,
-        payload_version: u32,
-    },
-    /// 通用业务命令（插件化接口）
-    ///
-    /// 通过 namespace 路由到对应的 ReplicatedModule 实现。
-    /// 替代原有的硬编码命令（如 PutConfig），实现状态机插件化。
-    BusinessCommand {
-        namespace: String,
-        payload: Vec<u8>,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PersistedLogEntry {
-    pub index: u64,
-    pub term: u64,
-    pub command: StateMachineCommand,
-}
-
-impl PersistedLogEntry {
-    pub fn from_proto(entry: RaftLogEntry) -> anyhow::Result<Self> {
-        wire::raft::log_entry_from_proto(entry)
-    }
-
-    pub fn to_proto(&self) -> RaftLogEntry {
-        wire::raft::log_entry_to_proto(self)
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -462,7 +407,9 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::{RaftStore, StateMachineCommand};
+    use coord_core::raft_runtime::{PersistedLogEntry, StateMachineCommand};
+
+    use super::RaftStore;
 
     fn unique_temp_dir(tag: &str) -> PathBuf {
         let path =
@@ -520,7 +467,7 @@ mod tests {
                 RaftStore::open(&data_dir, "node-a", "127.0.0.1:9090").expect("open raft store");
             store
                 .append_entries_from_leader(&[
-                    super::PersistedLogEntry {
+                    PersistedLogEntry {
                         index: 1,
                         term: 1,
                         command: StateMachineCommand::MemberAdd {
@@ -528,7 +475,7 @@ mod tests {
                             address: "127.0.0.1:9090".to_string(),
                         },
                     },
-                    super::PersistedLogEntry {
+                    PersistedLogEntry {
                         index: 2,
                         term: 1,
                         command: StateMachineCommand::MemberAdd {

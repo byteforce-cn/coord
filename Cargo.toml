@@ -27,7 +27,7 @@ rust-version = "1.93.0"
 # ---------------------------------------------------------------------------
 [workspace.dependencies]
 # 私有 registry 上的 coord 内部 crate
-coord-core = { version = "0.1.0", registry = "byteforce" }
+coord-core = { version = "0.1.1", registry = "byteforce" }
 coord-proto = { version = "0.1.1", registry = "byteforce" }
 
 # 基础

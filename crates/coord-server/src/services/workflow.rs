@@ -11,25 +11,30 @@
 //! 对应接口：`deploy_workflow_definition`、`start_workflow_v2`、`resume_workflow`、
 //! `get_workflow_instance`、`list_workflow_instances`、`list_workflow_definitions`、
 //! `get_workflow_definition`。
-//!
-//! **开发预览**：当前使用 `MemoryWorkflowStore`，重启后状态丢失，不可用于生产。
 
 use super::*;
 use crate::wire::error::coord_status;
 use coord_core::error::CoordError;
+use coord_core::workflow::engine::WorkflowInstance;
+use coord_core::workflow::store::MemoryWorkflowStore;
 
 #[derive(Clone)]
 pub struct WorkflowGrpc {
     metrics: Arc<CoordMetrics>,
-    /// v2 runtime (development-preview; MemoryWorkflowStore only).
     v2_runtime: Arc<CoordWorkflowRuntime>,
+    raft: RaftRuntime,
 }
 
 impl WorkflowGrpc {
-    pub fn new(metrics: Arc<CoordMetrics>) -> Self {
+    pub fn new(
+        metrics: Arc<CoordMetrics>,
+        raft: RaftRuntime,
+        v2_runtime: Arc<CoordWorkflowRuntime>,
+    ) -> Self {
         Self {
             metrics,
-            v2_runtime: Arc::new(new_coord_workflow_runtime()),
+            v2_runtime,
+            raft,
         }
     }
 }
@@ -59,12 +64,13 @@ impl WorkflowService for WorkflowGrpc {
             req.definition_id.clone()
         };
 
-        self.v2_runtime
-            .deploy(def)
+        self.raft
+            .propose_business_command_for_result(
+                "workflow",
+                MemoryWorkflowStore::encode_deploy_definition_bytes(&def),
+            )
             .await
             .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?;
-
-        self.metrics.coord_workflow_instances_total.inc();
 
         Ok(Response::new(DeployWorkflowDefinitionResponse {
             namespace: ns,
@@ -118,9 +124,9 @@ impl WorkflowService for WorkflowGrpc {
             (req.namespace, req.name, req.version)
         };
 
-        let instance = self
+        let planned = self
             .v2_runtime
-            .start(&ns, &name, &version, input)
+            .start_detached(&ns, &name, &version, input)
             .await
             .map_err(|e| {
                 coord_status(CoordError::NotFound {
@@ -129,6 +135,18 @@ impl WorkflowService for WorkflowGrpc {
                 })
             })?;
 
+        let bytes = self
+            .raft
+            .propose_business_command_for_result(
+                "workflow",
+                MemoryWorkflowStore::encode_upsert_instance_bytes(&planned),
+            )
+            .await
+            .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?;
+        let instance: WorkflowInstance = serde_json::from_slice(&bytes)
+            .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?;
+
+        self.metrics.coord_workflow_instances_total.inc();
         let status = instance_status_str(&instance.status);
         Ok(Response::new(StartWorkflowV2Response {
             instance_id: instance.id,
@@ -152,9 +170,9 @@ impl WorkflowService for WorkflowGrpc {
             })?
         };
 
-        let instance = self
+        let planned = self
             .v2_runtime
-            .resume(&req.instance_id, result)
+            .resume_detached(&req.instance_id, result)
             .await
             .map_err(|e| {
                 coord_status(CoordError::NotFound {
@@ -162,6 +180,17 @@ impl WorkflowService for WorkflowGrpc {
                     id: e.to_string(),
                 })
             })?;
+
+        let bytes = self
+            .raft
+            .propose_business_command_for_result(
+                "workflow",
+                MemoryWorkflowStore::encode_upsert_instance_bytes(&planned),
+            )
+            .await
+            .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?;
+        let instance: WorkflowInstance = serde_json::from_slice(&bytes)
+            .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?;
 
         Ok(Response::new(ResumeWorkflowResponse {
             instance_id: instance.id,

@@ -1,16 +1,9 @@
 //! Concrete port adapters for WorkflowRuntime used in coord-server.
 //!
-//! ## ⚠️ 开发预览 / Development Preview
-//!
-//! 当前 v2 工作流运行时使用内存存储（[`MemoryWorkflowStore`]）和占位调度器
-//! （[`NoOpTaskDispatcher`]），**不可用于生产环境**：
-//!
-//! - `MemoryWorkflowStore`：实例状态在重启后丢失。
-//!   生产环境需实现 `RaftWorkflowStore`（通过 Raft 日志持久化）。
-//! - `NoOpTaskDispatcher`：所有 `call` 任务均会返回错误。
-//!   生产环境需实现真实的 HTTP/gRPC 调度器。
-//!
-//! 详见 `doc/adr/adr-001-workflow-migration.md`（ADR-001）。
+//! The workflow runtime is configured in durable mode. Blocking tasks (`wait`,
+//! `call`, `listen`) persist suspension metadata through the Raft-backed
+//! `workflow` replicated module; external completion is driven through
+//! `ResumeWorkflow`.
 
 use async_trait::async_trait;
 use coord_core::clock::SystemClock;
@@ -25,8 +18,10 @@ use tokio::sync::broadcast;
 
 // ─── NoOpTaskDispatcher ───────────────────────────────────────────────────────
 
-/// Stub dispatcher that returns an error for all calls.
-/// Replace with a real HTTP/gRPC dispatcher in production.
+/// Dispatcher used by durable workflow mode.
+///
+/// In durable mode `call` tasks suspend before dispatching. External workers
+/// observe the persisted suspension and complete it through `ResumeWorkflow`.
 pub struct NoOpTaskDispatcher;
 
 #[async_trait]
@@ -110,6 +105,19 @@ fn event_matches(event: &CloudEvent, filter: &EventFilter) -> bool {
     {
         return false;
     }
+    if let Some(correlation_id) = &filter.correlation_id {
+        let Some(data) = &event.data else {
+            return false;
+        };
+        if data
+            .get("correlation_id")
+            .and_then(|value| value.as_str())
+            .map(|value| value != correlation_id)
+            .unwrap_or(true)
+        {
+            return false;
+        }
+    }
     true
 }
 
@@ -123,16 +131,13 @@ pub type CoordWorkflowRuntime = WorkflowRuntime<
     MemoryWorkflowStore,
 >;
 
-/// Factory: build the default (development-preview) workflow runtime.
-///
-/// **⚠️ 非生产就绪**：使用 `MemoryWorkflowStore` 和 `NoOpTaskDispatcher`。
-/// 生产环境需替换为 Raft-backed 存储和真实 dispatcher（见 ADR-001）。
-pub fn new_coord_workflow_runtime() -> CoordWorkflowRuntime {
-    CoordWorkflowRuntime::new(
+/// Factory: build the coord workflow runtime over a replicated workflow store.
+pub fn new_coord_workflow_runtime(store: Arc<MemoryWorkflowStore>) -> CoordWorkflowRuntime {
+    CoordWorkflowRuntime::new_durable(
         Arc::new(SystemClock),
         Arc::new(JqEvaluator),
         Arc::new(NoOpTaskDispatcher),
         Arc::new(BroadcastEventBus::new(256)),
-        Arc::new(MemoryWorkflowStore::new()),
+        store,
     )
 }

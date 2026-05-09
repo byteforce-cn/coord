@@ -6,10 +6,14 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use anyhow::Context;
 use coord_core::security::SecurityDomainSnapshot;
 use coord_core::state::{CoordinatorState, RuntimeConfig};
+use coord_core::workflow::engine::InstanceStatus;
+use coord_core::workflow::ports::WorkflowStore;
+use coord_core::workflow::store::MemoryWorkflowStore;
 use coord_proto::coord::v1::admin_service_server::AdminServiceServer;
 use coord_proto::coord::v1::auth_service_server::AuthServiceServer;
 use coord_proto::coord::v1::config_service_server::ConfigServiceServer;
@@ -20,7 +24,6 @@ use coord_proto::coord::v1::raft_internal_service_server::RaftInternalServiceSer
 use coord_proto::coord::v1::registry_service_server::RegistryServiceServer;
 use coord_proto::coord::v1::seal_service_server::SealServiceServer;
 use coord_proto::coord::v1::transit_service_server::TransitServiceServer;
-#[cfg(feature = "workflow-preview")]
 use coord_proto::coord::v1::workflow_service_server::WorkflowServiceServer;
 use tokio::time::{Duration, sleep};
 use tonic::transport::Server;
@@ -37,7 +40,6 @@ mod raft_store;
 mod services;
 mod telemetry;
 mod wire;
-#[cfg(feature = "workflow-preview")]
 mod workflow_adapters;
 
 use clap::Parser;
@@ -54,12 +56,12 @@ use application::config_app::ConfigApp;
 use application::lock_app::LockApp;
 use application::pki_app::PkiApp;
 use application::transit_app::TransitApp;
-#[cfg(feature = "workflow-preview")]
 use services::WorkflowGrpc;
 use services::{
     AdminGrpc, AuthGrpc, ConfigGrpc, IdGenGrpc, LockGrpc, PkiGrpc, RegistryGrpc, SealGrpc,
     TransitGrpc,
 };
+use workflow_adapters::new_coord_workflow_runtime;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -120,18 +122,23 @@ async fn main() -> anyhow::Result<()> {
     )
     .context("failed to initialize OpenRaft+Redb store")?;
     let raft_runtime = RaftRuntime::new(state.clone(), raft_store.clone(), args.grpc_addr.clone());
+    let workflow_store = Arc::new(MemoryWorkflowStore::new());
+    let workflow_runtime = Arc::new(new_coord_workflow_runtime(workflow_store.clone()));
+
+    // Register all ReplicatedModules before snapshot restore and committed-log replay.
+    // BusinessCommand entries cannot be replayed safely until their namespace is present.
+    raft_runtime.register_module(state.config().clone()).await;
+    raft_runtime.register_module(state.locks().clone()).await;
+    raft_runtime.register_module(state.registry().clone()).await;
+    raft_runtime.register_module(state.transit().clone()).await;
+    raft_runtime.register_module(state.pki().clone()).await;
+    raft_runtime.register_module(workflow_store.clone()).await;
 
     // ── Cluster auto-join: decide bootstrap role and probe peer node ids ──
     let peer_addrs = parse_peers(&args.peers);
     let is_bootstrap = resolve_bootstrap_flag(&args.bootstrap, peer_addrs.is_empty());
     if !peer_addrs.is_empty() {
         info!(peers = ?peer_addrs, bootstrap = is_bootstrap, "cluster peers configured");
-    }
-
-    if is_bootstrap {
-        raft_runtime.initialize_local_member().await;
-    } else {
-        info!("non-bootstrap node: deferring local member init until leader contact");
     }
 
     let raft_metadata = raft_store
@@ -160,9 +167,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let snapshot_file = state.runtime().data_dir.join("state_snapshot.json");
-    restore_runtime_state(&state, &snapshot_file, &raft_store).await;
+    restore_runtime_state(&state, &snapshot_file, &raft_store, &raft_runtime).await;
     if is_bootstrap {
         raft_runtime.initialize_local_member().await;
+    } else {
+        info!("non-bootstrap node: deferring local member init until leader contact");
     }
     if let Err(err) = raft_runtime.replay_committed_entries_on_startup().await {
         error!(error = %err, "failed to replay committed raft log entries on startup");
@@ -209,7 +218,8 @@ async fn main() -> anyhow::Result<()> {
 
     spawn_housekeeping(state.clone());
     spawn_raft_tick_loop(raft_runtime.clone());
-    spawn_snapshot_persist(state.clone(), raft_store.clone());
+    spawn_snapshot_persist(state.clone(), raft_store.clone(), raft_runtime.clone());
+    spawn_workflow_timer_driver(raft_runtime.clone(), workflow_runtime.clone());
 
     // ── Build application facades ───────────────────────────────────────────
     let config_app = ConfigApp::new(
@@ -230,13 +240,6 @@ async fn main() -> anyhow::Result<()> {
 
     spawn_pki_auto_renew_loop(state.clone(), pki_app.clone(), raft_runtime.clone());
 
-    // ── Register all ReplicatedModules so BusinessCommand log entries are applied ──
-    raft_runtime.register_module(state.config().clone()).await;
-    raft_runtime.register_module(state.locks().clone()).await;
-    raft_runtime.register_module(state.registry().clone()).await;
-    raft_runtime.register_module(state.transit().clone()).await;
-    raft_runtime.register_module(state.pki().clone()).await;
-
     if is_bootstrap && !peer_addrs.is_empty() {
         spawn_cluster_auto_join(raft_runtime.clone(), peer_addrs.clone());
     }
@@ -255,6 +258,7 @@ async fn main() -> anyhow::Result<()> {
 
     let shutdown_state = state.clone();
     let shutdown_raft_store = raft_store.clone();
+    let shutdown_raft_runtime = raft_runtime.clone();
 
     let security_gw = SecurityGateway::new(state.security().clone(), state.metrics().clone());
 
@@ -307,9 +311,10 @@ async fn main() -> anyhow::Result<()> {
             raft_runtime.clone(),
         )));
 
-    #[cfg(feature = "workflow-preview")]
     let grpc_router = grpc_router.add_service(WorkflowServiceServer::new(WorkflowGrpc::new(
         state.metrics().clone(),
+        raft_runtime.clone(),
+        workflow_runtime.clone(),
     )));
 
     grpc_router
@@ -324,13 +329,13 @@ async fn main() -> anyhow::Result<()> {
         )))
         .serve_with_shutdown(
             grpc_addr,
-            shutdown_signal(shutdown_state, shutdown_raft_store),
+            shutdown_signal(shutdown_state, shutdown_raft_store, shutdown_raft_runtime),
         )
         .await
         .context("gRPC server failed")
 }
 
-async fn shutdown_signal(state: CoordinatorState, raft_store: RaftStore) {
+async fn shutdown_signal(state: CoordinatorState, raft_store: RaftStore, raft: RaftRuntime) {
     #[cfg(unix)]
     {
         let mut terminate = match tokio::signal::unix::signal(
@@ -341,7 +346,7 @@ async fn shutdown_signal(state: CoordinatorState, raft_store: RaftStore) {
                 error!(error = %err, "failed to register SIGTERM handler, falling back to ctrl-c only");
                 let _ = tokio::signal::ctrl_c().await;
                 info!("shutdown signal received, flushing runtime snapshot");
-                persist_runtime_snapshot(&state, &raft_store, "shutdown").await;
+                persist_runtime_snapshot(&state, &raft_store, &raft, "shutdown").await;
                 return;
             }
         };
@@ -358,7 +363,7 @@ async fn shutdown_signal(state: CoordinatorState, raft_store: RaftStore) {
     }
 
     info!("shutdown signal received, flushing runtime snapshot");
-    persist_runtime_snapshot(&state, &raft_store, "shutdown").await;
+    persist_runtime_snapshot(&state, &raft_store, &raft, "shutdown").await;
 }
 
 fn spawn_housekeeping(state: CoordinatorState) {
@@ -428,10 +433,84 @@ fn spawn_pki_auto_renew_loop(state: CoordinatorState, pki_app: PkiApp, raft: Raf
     });
 }
 
-fn spawn_snapshot_persist(state: CoordinatorState, raft_store: RaftStore) {
+fn current_unix_ms() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis().min(i64::MAX as u128) as i64,
+        Err(_) => 0,
+    }
+}
+
+fn spawn_workflow_timer_driver(
+    raft: RaftRuntime,
+    runtime: Arc<workflow_adapters::CoordWorkflowRuntime>,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            ticker.tick().await;
+
+            if raft.role_label().await != "Leader" {
+                continue;
+            }
+
+            let now_ms = current_unix_ms();
+            let store = runtime.store();
+            let instances = match store.list_instances().await {
+                Ok(instances) => instances,
+                Err(err) => {
+                    warn!(error = %err, "workflow timer driver failed to list instances");
+                    continue;
+                }
+            };
+
+            for instance in instances {
+                if !matches!(instance.status, InstanceStatus::Suspended) {
+                    continue;
+                }
+                let Some(meta) = instance.suspension_meta.as_ref() else {
+                    continue;
+                };
+                if meta.reason != "wait" {
+                    continue;
+                }
+                let Some(until_ms) = meta.until_ms else {
+                    continue;
+                };
+                if until_ms > now_ms {
+                    continue;
+                }
+
+                let planned = match runtime
+                    .resume_detached(&instance.id, serde_json::json!({}))
+                    .await
+                {
+                    Ok(instance) => instance,
+                    Err(err) => {
+                        warn!(instance_id = %instance.id, error = %err, "workflow timer resume failed");
+                        continue;
+                    }
+                };
+
+                if let Err(err) = raft
+                    .propose_business_command(
+                        "workflow",
+                        MemoryWorkflowStore::encode_upsert_instance_bytes(&planned),
+                    )
+                    .await
+                {
+                    warn!(instance_id = %instance.id, error = %err, "workflow timer resume proposal failed");
+                }
+            }
+        }
+    });
+}
+
+fn spawn_snapshot_persist(state: CoordinatorState, raft_store: RaftStore, raft: RaftRuntime) {
     tokio::spawn(async move {
         loop {
-            persist_runtime_snapshot(&state, &raft_store, "periodic_snapshot").await;
+            persist_runtime_snapshot(&state, &raft_store, &raft, "periodic_snapshot").await;
             sleep(Duration::from_secs(5)).await;
         }
     });
@@ -539,7 +618,12 @@ fn spawn_cluster_auto_join(raft: RaftRuntime, peer_addrs: Vec<String>) {
     });
 }
 
-async fn persist_runtime_snapshot(state: &CoordinatorState, raft_store: &RaftStore, reason: &str) {
+async fn persist_runtime_snapshot(
+    state: &CoordinatorState,
+    raft_store: &RaftStore,
+    raft: &RaftRuntime,
+    reason: &str,
+) {
     let mut payload = match persistence::snapshot_payload_v5(state).await {
         Ok(p) => p,
         Err(err) => {
@@ -551,6 +635,21 @@ async fn persist_runtime_snapshot(state: &CoordinatorState, raft_store: &RaftSto
             return;
         }
     };
+    match raft.snapshot_extra_modules().await {
+        Ok(extra_modules) => {
+            for (namespace, bytes) in extra_modules {
+                payload.modules.insert(namespace, bytes);
+            }
+        }
+        Err(err) => {
+            error!(
+                error = %err,
+                reason = %reason,
+                "failed to collect extra replicated module snapshots"
+            );
+            return;
+        }
+    }
     match raft_store.load_metadata() {
         Ok(metadata) => {
             persistence::annotate_payload_v5_with_raft_metadata(
@@ -603,21 +702,28 @@ async fn restore_runtime_state(
     state: &CoordinatorState,
     snapshot_file: &Path,
     raft_store: &RaftStore,
+    raft: &RaftRuntime,
 ) {
     match raft_store.load_runtime_snapshot() {
-        Ok(Some(payload)) => match persistence::restore_payload_v5(state, payload).await {
-            Ok(()) => {
-                info!(path = %raft_store.db_path().display(), "restored runtime snapshot from redb");
-                return;
+        Ok(Some(payload)) => {
+            let modules = payload.modules.clone();
+            match persistence::restore_payload_v5(state, payload).await {
+                Ok(()) => {
+                    if let Err(err) = raft.restore_extra_modules(&modules).await {
+                        error!(error = %err, "failed to restore extra replicated module snapshots from redb");
+                    }
+                    info!(path = %raft_store.db_path().display(), "restored runtime snapshot from redb");
+                    return;
+                }
+                Err(err) => {
+                    error!(
+                        error = %err,
+                        path = %raft_store.db_path().display(),
+                        "failed to restore runtime snapshot from redb, falling back to file"
+                    );
+                }
             }
-            Err(err) => {
-                error!(
-                    error = %err,
-                    path = %raft_store.db_path().display(),
-                    "failed to restore runtime snapshot from redb, falling back to file"
-                );
-            }
-        },
+        }
         Ok(None) => {
             info!(path = %raft_store.db_path().display(), "no runtime snapshot found in redb");
         }
@@ -630,53 +736,88 @@ async fn restore_runtime_state(
         }
     }
 
-    match persistence::restore_from_file(state, snapshot_file).await {
-        Ok(true) => {
-            info!(path = %snapshot_file.display(), "restored runtime snapshot from disk");
-
-            match persistence::snapshot_payload_v5(state).await {
-                Ok(mut payload) => {
-                    match raft_store.load_metadata() {
-                        Ok(metadata) => {
-                            persistence::annotate_payload_v5_with_raft_metadata(
-                                &mut payload,
-                                metadata.commit_index,
-                                metadata.last_applied_index,
-                            );
+    match std::fs::read_to_string(snapshot_file) {
+        Ok(payload_json) => match persistence::payload_v5_from_json(&payload_json) {
+            Ok(payload) => {
+                let modules = payload.modules.clone();
+                match persistence::restore_payload_v5(state, payload).await {
+                    Ok(()) => {
+                        if let Err(err) = raft.restore_extra_modules(&modules).await {
+                            error!(error = %err, "failed to restore extra replicated module snapshots from disk");
                         }
-                        Err(err) => {
-                            error!(
-                                error = %err,
-                                path = %raft_store.db_path().display(),
-                                "failed to load raft metadata while mirroring file snapshot"
-                            );
+                        info!(path = %snapshot_file.display(), "restored runtime snapshot from disk");
+
+                        match persistence::snapshot_payload_v5(state).await {
+                            Ok(mut payload) => {
+                                match raft.snapshot_extra_modules().await {
+                                    Ok(extra_modules) => {
+                                        for (namespace, bytes) in extra_modules {
+                                            payload.modules.insert(namespace, bytes);
+                                        }
+                                    }
+                                    Err(err) => {
+                                        error!(error = %err, path = %raft_store.db_path().display(), "failed to collect extra module snapshots for redb mirror");
+                                        return;
+                                    }
+                                }
+                                match raft_store.load_metadata() {
+                                    Ok(metadata) => {
+                                        persistence::annotate_payload_v5_with_raft_metadata(
+                                            &mut payload,
+                                            metadata.commit_index,
+                                            metadata.last_applied_index,
+                                        );
+                                    }
+                                    Err(err) => {
+                                        error!(
+                                            error = %err,
+                                            path = %raft_store.db_path().display(),
+                                            "failed to load raft metadata while mirroring file snapshot"
+                                        );
+                                    }
+                                }
+                                if let Err(err) = raft_store.save_runtime_snapshot(&payload) {
+                                    error!(
+                                        error = %err,
+                                        path = %raft_store.db_path().display(),
+                                        "failed to mirror file snapshot into redb"
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                error!(
+                                    error = %err,
+                                    path = %raft_store.db_path().display(),
+                                    "failed to collect v5 snapshot for redb mirror"
+                                );
+                            }
                         }
                     }
-                    if let Err(err) = raft_store.save_runtime_snapshot(&payload) {
+                    Err(err) => {
                         error!(
                             error = %err,
-                            path = %raft_store.db_path().display(),
-                            "failed to mirror file snapshot into redb"
+                            path = %snapshot_file.display(),
+                            "failed to restore runtime snapshot from disk"
                         );
                     }
                 }
-                Err(err) => {
-                    error!(
-                        error = %err,
-                        path = %raft_store.db_path().display(),
-                        "failed to collect v5 snapshot for redb mirror"
-                    );
-                }
             }
-        }
-        Ok(false) => {
+            Err(err) => {
+                error!(
+                    error = %err,
+                    path = %snapshot_file.display(),
+                    "failed to parse runtime snapshot from disk"
+                );
+            }
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             info!(path = %snapshot_file.display(), "no runtime snapshot found on disk");
         }
         Err(err) => {
             error!(
                 error = %err,
                 path = %snapshot_file.display(),
-                "failed to restore runtime snapshot from disk"
+                "failed to read runtime snapshot from disk"
             );
         }
     }
