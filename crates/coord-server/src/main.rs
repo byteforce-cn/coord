@@ -1013,14 +1013,13 @@ async fn maybe_dev_auto_init_and_unseal(
         return Ok(());
     }
 
-    let share =
-        std::fs::read_to_string(&share_file).with_context(|| {
-            format!(
-                "dev auto-unseal: cannot read share file {}; \
+    let share = std::fs::read_to_string(&share_file).with_context(|| {
+        format!(
+            "dev auto-unseal: cannot read share file {}; \
                  wipe the data directory to reinitialise",
-                share_file.display()
-            )
-        })?;
+            share_file.display()
+        )
+    })?;
     let share = share.trim().to_string();
 
     state.metrics().coord_security_unseal_attempts_total.inc();
