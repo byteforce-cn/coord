@@ -1,0 +1,104 @@
+# coord 三节点 Raft 集群环境
+#
+# 用法（在任意目录执行）：
+#   docker compose -f docker/docker-compose.cluster.yml up -d
+#
+# 指定版本：
+#   COORD_VERSION=0.1.2 docker compose -f docker/docker-compose.cluster.yml up -d
+#
+# 停止并清理数据：
+#   docker compose -f docker/docker-compose.cluster.yml down -v
+#
+# 节点端口映射：
+#   coord-1  gRPC=9090   HTTP=8080
+#   coord-2  gRPC=19090  HTTP=18080
+#   coord-3  gRPC=29090  HTTP=28080
+
+networks:
+  coord-net:
+    driver: bridge
+
+volumes:
+  coord-data-1:
+  coord-data-2:
+  coord-data-3:
+
+services:
+  coord-1:
+    image: registry.cn-hangzhou.aliyuncs.com/byteforce/coord:${COORD_VERSION:-latest}
+    container_name: coord-1
+    hostname: coord-1
+    networks: [coord-net]
+    ports:
+      - "9090:9090"
+      - "8080:8080"
+    environment:
+      COORD_NODE_ID: "1"
+      COORD_GRPC_ADDR: "0.0.0.0:9090"
+      COORD_HTTP_ADDR: "0.0.0.0:8080"
+      COORD_CLUSTER_PEERS: "coord-2:9090,coord-3:9090"
+      COORD_BOOTSTRAP: "true"
+      COORD_DATA_DIR: "/data"
+    volumes:
+      - coord-data-1:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
+  coord-2:
+    image: registry.cn-hangzhou.aliyuncs.com/byteforce/coord:${COORD_VERSION:-latest}
+    container_name: coord-2
+    hostname: coord-2
+    networks: [coord-net]
+    ports:
+      - "19090:9090"
+      - "18080:8080"
+    environment:
+      COORD_NODE_ID: "2"
+      COORD_GRPC_ADDR: "0.0.0.0:9090"
+      COORD_HTTP_ADDR: "0.0.0.0:8080"
+      COORD_CLUSTER_PEERS: ""
+      COORD_BOOTSTRAP: "false"
+      COORD_DATA_DIR: "/data"
+    volumes:
+      - coord-data-2:/data
+    depends_on:
+      coord-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  coord-3:
+    image: registry.cn-hangzhou.aliyuncs.com/byteforce/coord:${COORD_VERSION:-latest}
+    container_name: coord-3
+    hostname: coord-3
+    networks: [coord-net]
+    ports:
+      - "29090:9090"
+      - "28080:8080"
+    environment:
+      COORD_NODE_ID: "3"
+      COORD_GRPC_ADDR: "0.0.0.0:9090"
+      COORD_HTTP_ADDR: "0.0.0.0:8080"
+      COORD_CLUSTER_PEERS: ""
+      COORD_BOOTSTRAP: "false"
+      COORD_DATA_DIR: "/data"
+    volumes:
+      - coord-data-3:/data
+    depends_on:
+      coord-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
