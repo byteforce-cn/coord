@@ -25,7 +25,7 @@ volumes:
 
 services:
   coord-1:
-    image: registry.cn-hangzhou.aliyuncs.com/byteforce/coord:${COORD_VERSION:-latest}
+    image: nexus.byteforce.cn/image-private/coord:${COORD_VERSION:-0.1.9}
     container_name: coord-1
     hostname: coord-1
     networks: [coord-net]
@@ -50,7 +50,7 @@ services:
     restart: unless-stopped
 
   coord-2:
-    image: registry.cn-hangzhou.aliyuncs.com/byteforce/coord:${COORD_VERSION:-latest}
+    image: nexus.byteforce.cn/image-private/coord:${COORD_VERSION:-0.1.9}
     container_name: coord-2
     hostname: coord-2
     networks: [coord-net]
@@ -77,7 +77,7 @@ services:
     restart: unless-stopped
 
   coord-3:
-    image: registry.cn-hangzhou.aliyuncs.com/byteforce/coord:${COORD_VERSION:-latest}
+    image: nexus.byteforce.cn/image-private/coord:${COORD_VERSION:-0.1.9}
     container_name: coord-3
     hostname: coord-3
     networks: [coord-net]

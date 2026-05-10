@@ -11,7 +11,7 @@
 
 services:
   coord:
-    image: registry.cn-hangzhou.aliyuncs.com/byteforce/coord:${COORD_VERSION:-latest}
+    image: nexus.byteforce.cn/image-private/coord:${COORD_VERSION:-0.1.9}
     container_name: coord-dev
     command: ["dev"]
     ports:
