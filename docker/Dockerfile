@@ -38,24 +38,28 @@ RUN cargo chef prepare --recipe-path recipe.json
 # ── Stage 3: Builder — cook 依赖（重量级缓存层），再增量编译业务代码 ───────────
 FROM chef AS builder
 
-# 配置 cargo:token 凭据提供者（从 CARGO_REGISTRIES_BYTEFORCE_TOKEN 读取）
-# 注意：~/.cargo/config.toml 与项目 .cargo/config.toml 合并生效
-RUN mkdir -p ~/.cargo && \
-    printf '[registry]\nglobal-credential-providers = ["cargo:token"]\n' \
-    > ~/.cargo/config.toml
+# 项目级 cargo 配置（仅含 registry index，不含凭据）
+COPY .cargo/config.toml .cargo/config.toml
 
 # 先 cook 依赖（Cargo.lock 不变则命中缓存，跳过所有依赖编译）
+# 凭据写入 credentials.toml 供 cargo:token provider 读取，
+# 用完即删——BuildKit 单条 RUN 的最终文件系统才提交为 layer，不会留下 token。
 COPY --from=planner /app/recipe.json recipe.json
-COPY .cargo/config.toml .cargo/config.toml
 RUN --mount=type=secret,id=cargo_token \
-    CARGO_REGISTRIES_BYTEFORCE_TOKEN=$(cat /run/secrets/cargo_token) \
-    cargo chef cook --release --recipe-path recipe.json
+    mkdir -p ~/.cargo && \
+    printf '[registries.byteforce]\ntoken = "%s"\n' "$(cat /run/secrets/cargo_token)" \
+    > ~/.cargo/credentials.toml && \
+    cargo chef cook --release --recipe-path recipe.json && \
+    rm ~/.cargo/credentials.toml
 
 # 再编译业务代码（依赖已缓存，仅重新编译源码）
 COPY . .
 RUN --mount=type=secret,id=cargo_token \
-    CARGO_REGISTRIES_BYTEFORCE_TOKEN=$(cat /run/secrets/cargo_token) \
-    cargo build --release --locked -p coord-server -p coord-ctl
+    mkdir -p ~/.cargo && \
+    printf '[registries.byteforce]\ntoken = "%s"\n' "$(cat /run/secrets/cargo_token)" \
+    > ~/.cargo/credentials.toml && \
+    cargo build --release --locked -p coord-server -p coord-ctl && \
+    rm ~/.cargo/credentials.toml
 
 # ── Stage 4: Runtime — 最小运行时镜像 ────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime

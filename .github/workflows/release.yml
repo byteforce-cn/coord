@@ -181,15 +181,32 @@ jobs:
             release-artifacts/**/*.tar.gz
 
   # ── 构建并推送 Docker 镜像 ──────────────────────────────────────────────────
+  # 直接复用 build job 产出的 Linux 二进制，无需重新编译，无需 Cargo 凭据。
   docker:
     name: Build & Push Docker Image
     needs: [release]
     runs-on: ubuntu-latest
     env:
       IMAGE: registry.cn-hangzhou.aliyuncs.com/byteforce/coord
-      CARGO_REGISTRIES_BYTEFORCE_TOKEN: ${{ secrets.BYTEFORCE_CARGO_TOKEN }}
     steps:
       - uses: actions/checkout@v4.2.2
+
+      # 下载 build job 上传的 Linux 平台产物（x86_64 + aarch64）
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: '*linux*'
+
+      # 将二进制按 TARGETARCH 摆放，供 Dockerfile.release 的 COPY ${TARGETARCH}/ 使用
+      - name: Stage binaries by arch
+        shell: bash
+        run: |
+          mkdir -p docker-stage/amd64 docker-stage/arm64
+          find release-artifacts -name '*x86_64-unknown-linux-gnu.tar.gz' \
+            -exec tar -xzf {} --strip-components=1 -C docker-stage/amd64/ \;
+          find release-artifacts -name '*aarch64-unknown-linux-gnu.tar.gz' \
+            -exec tar -xzf {} --strip-components=1 -C docker-stage/arm64/ \;
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -212,13 +229,11 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/Dockerfile
+          file: docker/Dockerfile.release
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
             ${{ env.IMAGE }}:latest
-          secrets: |
-            cargo_token=${{ secrets.BYTEFORCE_CARGO_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

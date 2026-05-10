@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1.7
+# ═══════════════════════════════════════════════════════════════════════════════
+# coord — CI 专用运行时镜像
+#
+# 本文件由 GitHub Actions release workflow 中的 docker job 使用。
+# 不含编译步骤，不需要 Cargo registry 凭据。
+#
+# CI 在调用 docker buildx build 之前，将各平台预编译二进制放入：
+#   docker-stage/amd64/coord-server
+#   docker-stage/amd64/coord-ctl
+#   docker-stage/arm64/coord-server
+#   docker-stage/arm64/coord-ctl
+#
+# 本地 docker build（需要从源码编译）请使用 docker/Dockerfile。
+# ═══════════════════════════════════════════════════════════════════════════════
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# docker buildx 根据 --platform 自动设置 TARGETARCH（amd64 / arm64）
+ARG TARGETARCH
+COPY docker-stage/${TARGETARCH}/coord-server /usr/local/bin/coord-server
+COPY docker-stage/${TARGETARCH}/coord-ctl    /usr/local/bin/coord-ctl
+
+EXPOSE 9090 8080
+
+ENTRYPOINT ["coord-server"]
+CMD ["serve"]
