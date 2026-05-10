@@ -250,13 +250,26 @@ else
     esac
 fi
 
-# ── 更新 Cargo.toml workspace.package.version ────────────────────────────────
+# ── 本地编译验证（在修改任何文件之前，失败不留脏状态）────────────────────────
+echo ""
+echo "运行 cargo fmt --check..."
+cargo fmt --check
+
+echo "运行 cargo clippy..."
+cargo clippy --workspace --locked -- -D warnings
+
+echo "运行 cargo test..."
+cargo test --workspace --locked
+
+# ── 所有检查通过后，统一修改文件 ─────────────────────────────────────────────
+
+# 更新 Cargo.toml workspace.package.version
 echo ""
 echo "更新 Cargo.toml 版本号..."
 sed -i.bak "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" Cargo.toml
 rm -f Cargo.toml.bak
 
-# ── 更新 doc/ 中的镜像版本引用 ───────────────────────────────────────────────
+# 更新 doc/ 中的镜像版本引用
 echo "更新 doc/ 文档中的版本引用 ($CURRENT_VERSION → $NEW_VERSION)..."
 find "$REPO_ROOT/doc" -name "*.md" | while read -r f; do
     sed -i.bak "s/coord:$CURRENT_VERSION/coord:$NEW_VERSION/g" "$f"
@@ -266,16 +279,6 @@ done
 # 更新 Cargo.lock（允许失败，私有 registry 在本地可能不可达）
 echo "更新 Cargo.lock..."
 cargo generate-lockfile 2>/dev/null || true
-
-# ── 本地编译验证 ──────────────────────────────────────────────────────────────
-echo "运行 cargo fmt --check..."
-cargo fmt --check
-
-echo "运行 cargo clippy..."
-cargo clippy --workspace --locked -- -D warnings
-
-echo "运行 cargo test..."
-cargo test --workspace --locked
 
 # ── 提交 & 打 tag ─────────────────────────────────────────────────────────────
 echo ""
