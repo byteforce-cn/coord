@@ -11,7 +11,7 @@ docker run -d --name coord-dev \
   -p 9090:9090 \
   -p 8080:8080 \
   -v coord-data:/data \
-  nexus.byteforce.cn/image-private/coord:0.1.9 \
+  nexus.byteforce.cn/image-private/coord:0.1.10 \
   dev
 ```
 
@@ -59,7 +59,7 @@ docker run -d --name coord-dev \
   -p 9090:9090 -p 8080:8080 \
   -v coord-data:/data \
   -e COORD_DEV_ROOT_TOKEN=s.my-test-token \
-  nexus.byteforce.cn/image-private/coord:0.1.9 \
+  nexus.byteforce.cn/image-private/coord:0.1.10 \
   dev
 ```
 

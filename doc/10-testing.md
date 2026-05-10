@@ -39,7 +39,7 @@ import org.testcontainers.utility.DockerImageName;
 
 public abstract class CoordIntegrationBase {
 
-    static final String COORD_IMAGE = "nexus.byteforce.cn/image-private/coord:0.1.9";
+    static final String COORD_IMAGE = "nexus.byteforce.cn/image-private/coord:0.1.10";
     static final int    GRPC_PORT   = 9090;
     static final int    HTTP_PORT   = 8080;
     static final String ROOT_TOKEN  = "s.integration-test-root";
@@ -174,7 +174,7 @@ async fn test_coord_transit() {
 ```yaml
 services:
   coord-test:
-    image: nexus.byteforce.cn/image-private/coord:0.1.9
+    image: nexus.byteforce.cn/image-private/coord:0.1.10
     command: ["dev"]
     ports:
       - "9090:9090"

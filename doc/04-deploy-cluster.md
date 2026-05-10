@@ -99,7 +99,7 @@ coord-ctl member remove coord-4 --force-unreachable
 ```yaml
 services:
   coord-1:
-    image: nexus.byteforce.cn/image-private/coord:0.1.9
+    image: nexus.byteforce.cn/image-private/coord:0.1.10
     environment:
       COORD_NODE_ID: "node-1"
       COORD_GRPC_ADDR: "0.0.0.0:9090"

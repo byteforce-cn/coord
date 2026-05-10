@@ -93,5 +93,5 @@ cargo test -p coord-server
 使用 Docker 时直接拉取预构建镜像，跳过本地编译：
 
 ```bash
-docker pull nexus.byteforce.cn/image-private/coord:0.1.9
+docker pull nexus.byteforce.cn/image-private/coord:0.1.10
 ```

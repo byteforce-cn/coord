@@ -130,7 +130,7 @@ coord-ctl \
 ```yaml
 services:
   coord:
-    image: nexus.byteforce.cn/image-private/coord:0.1.9
+    image: nexus.byteforce.cn/image-private/coord:0.1.10
     command: ["serve"]
     ports:
       - "9090:9090"
