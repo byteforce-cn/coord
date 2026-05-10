@@ -187,7 +187,7 @@ jobs:
     needs: [release]
     runs-on: ubuntu-latest
     env:
-      IMAGE: nexus.byteforce.cn/repository/image-private/coord
+      IMAGE: nexus.byteforce.cn/image-private/coord
     steps:
       - uses: actions/checkout@v4.2.2
 
