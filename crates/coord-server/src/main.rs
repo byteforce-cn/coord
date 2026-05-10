@@ -9,7 +9,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Context;
-use coord_core::security::SecurityDomainSnapshot;
+use coord_core::security::{
+    SecurityDomainSnapshot, SecurityRoleSnapshot, create_root_token_snapshot, generate_root_token,
+};
 use coord_core::state::{CoordinatorState, RuntimeConfig};
 use coord_core::workflow::engine::InstanceStatus;
 use coord_core::workflow::ports::WorkflowStore;
@@ -79,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
         tls_key: None,
         tls_client_ca: None,
         otlp_endpoint: None,
+        dev_root_token: None,
     })) {
         Command::Dev(args) => (args, true),
         Command::Serve(args) => (args, false),
@@ -175,6 +178,15 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Err(err) = raft_runtime.replay_committed_entries_on_startup().await {
         error!(error = %err, "failed to replay committed raft log entries on startup");
+    }
+
+    // Dev auto-init: initialise the security domain with a (optionally fixed)
+    // root token and immediately unseal on first startup.  Idempotent across
+    // restarts because the share is persisted next to the data directory.
+    if dev_mode {
+        maybe_dev_auto_init_and_unseal(&state, args.dev_root_token.as_deref())
+            .await
+            .context("dev auto-init-and-unseal failed")?;
     }
 
     // A'4: warn when auto-unseal is enabled in production (non-dev) mode.
@@ -905,6 +917,165 @@ async fn maybe_auto_unseal_from_file(
         ));
     }
 
+    Ok(())
+}
+
+/// Dev-mode auto-init + auto-unseal.
+///
+/// On the **first** startup the security domain is not yet initialised.  This
+/// function initialises it with a 1-of-1 Shamir split so that no manual
+/// `unseal` call is required, and embeds a root token that callers can
+/// hard-code in tests.
+///
+/// The single unseal share is written to `<data_dir>/dev-unseal.share`
+/// (mode 0600) and the root token to `<data_dir>/dev-root-token.txt`
+/// (mode 0600).  On subsequent restarts the function reads the share from
+/// disk and unseals automatically, so the data directory must persist across
+/// container/process restarts if token stability is required.
+///
+/// `requested_root_token` — when `Some`, the token value is used as-is;
+/// when `None`, a cryptographically random token is generated instead and
+/// printed to the INFO log so operators can copy it out.
+async fn maybe_dev_auto_init_and_unseal(
+    state: &CoordinatorState,
+    requested_root_token: Option<&str>,
+) -> anyhow::Result<()> {
+    let data_dir = state.runtime().data_dir.clone();
+    let share_file = data_dir.join("dev-unseal.share");
+    let token_file = data_dir.join("dev-root-token.txt");
+
+    let status = state.security().seal_status().await;
+
+    if !status.initialized {
+        // First startup — initialise the domain.
+        let root_token = match requested_root_token {
+            Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+            _ => generate_root_token(),
+        };
+
+        // Build a domain snapshot that includes the root token so it
+        // survives seal / unseal cycles (mirrors SealGrpc::do_init).
+        let root_token_snapshot = create_root_token_snapshot(&root_token, 86400 * 365);
+        let mut domain = state
+            .domain_lifecycle()
+            .capture(state.security().export_auth_state_snapshot().await)
+            .await;
+        domain.auth.roles.push(SecurityRoleSnapshot {
+            role_id: "root".to_string(),
+            role_name: "root".to_string(),
+            policies: vec!["*".to_string()],
+            token_ttl_seconds: 86400 * 365,
+            secret_id_ttl_seconds: 86400 * 365,
+            secret_id_num_uses: 0,
+        });
+        domain.auth.access_tokens.push(root_token_snapshot);
+
+        let shares = state
+            .security()
+            .init_security_with_domain(1, 1, domain)
+            .await
+            .map_err(anyhow::Error::msg)
+            .context("dev auto-init: init_security_with_domain failed")?;
+
+        // Clear runtime-protected modules right after init (same as SealGrpc::do_init).
+        state
+            .domain_lifecycle()
+            .clear()
+            .await
+            .map_err(anyhow::Error::msg)
+            .context("dev auto-init: domain clear failed")?;
+        state.metrics().coord_security_sealed.set(1);
+
+        let share = shares
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("dev auto-init: no shares returned"))?;
+
+        // Persist share and root token (0600).
+        write_secret_file(&share_file, &share)
+            .context("dev auto-init: failed to write dev-unseal.share")?;
+        write_secret_file(&token_file, &root_token)
+            .context("dev auto-init: failed to write dev-root-token.txt")?;
+
+        info!(
+            root_token = %root_token,
+            share_file = %share_file.display(),
+            token_file = %token_file.display(),
+            "dev security domain initialised (1-of-1 Shamir)"
+        );
+    }
+
+    // (Re-)unseal using the persisted share — covers both first boot after
+    // init above and subsequent restarts.
+    let status = state.security().seal_status().await;
+    if !status.sealed {
+        info!("dev security domain already unsealed; skipping auto-unseal");
+        return Ok(());
+    }
+
+    let share =
+        std::fs::read_to_string(&share_file).with_context(|| {
+            format!(
+                "dev auto-unseal: cannot read share file {}; \
+                 wipe the data directory to reinitialise",
+                share_file.display()
+            )
+        })?;
+    let share = share.trim().to_string();
+
+    state.metrics().coord_security_unseal_attempts_total.inc();
+    let unseal_status = state
+        .security()
+        .unseal(&share)
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("dev auto-unseal: unseal call failed")?;
+
+    if unseal_status.sealed {
+        return Err(anyhow::anyhow!(
+            "dev auto-unseal: domain still sealed after submitting the share"
+        ));
+    }
+
+    if let Some(domain) = state.security().take_unsealed_domain_snapshot().await {
+        restore_runtime_security_domain(state, domain).await?;
+    }
+    state.metrics().coord_security_sealed.set(0);
+    info!(
+        token_file = %token_file.display(),
+        "dev security domain unsealed"
+    );
+    Ok(())
+}
+
+/// Write `content` to `path` with permissions 0600, creating or truncating.
+fn write_secret_file(path: &Path, content: &str) -> anyhow::Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("open {}", path.display()))?;
+        f.write_all(content.as_bytes())
+            .with_context(|| format!("write {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .with_context(|| format!("open {}", path.display()))?;
+        f.write_all(content.as_bytes())
+            .with_context(|| format!("write {}", path.display()))?;
+    }
     Ok(())
 }
 

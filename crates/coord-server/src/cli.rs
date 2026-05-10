@@ -71,6 +71,12 @@ pub(crate) struct ServeArgs {
     /// OTLP exporter wiring is applied when the infra rollout stabilizes.
     #[arg(long, env = "COORD_OTLP_ENDPOINT")]
     pub otlp_endpoint: Option<String>,
+    /// Dev mode only: fix the root token returned by the first `init` call.
+    /// Allows unit / integration tests to hard-code a stable token value
+    /// (`COORD_DEV_ROOT_TOKEN=s.test`) instead of parsing it from logs.
+    /// This flag is **silently ignored** in `serve` (production) mode.
+    #[arg(long, env = "COORD_DEV_ROOT_TOKEN")]
+    pub dev_root_token: Option<String>,
 }
 
 /// Initialize the global tracing subscriber with a sensible default filter.
