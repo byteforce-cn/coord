@@ -2,6 +2,11 @@
 
 本文件记录 coord 的所有重要变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.7] - 2026-05-10
+
+### 修改
+- 修复私有 nexus 仓库报错
+
 ## [0.1.6] - 2026-05-10
 
 ### 修改
