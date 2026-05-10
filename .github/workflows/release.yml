@@ -26,14 +26,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive: tar.gz
-            cross: true
           - target: x86_64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-          - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
     steps:
@@ -51,10 +44,6 @@ jobs:
           toolchain: 1.93.0
           targets: ${{ matrix.target }}
 
-      - name: Install cross (aarch64 linux only)
-        if: matrix.cross == true
-        run: cargo install cross --locked
-
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -67,20 +56,10 @@ jobs:
           restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: Build coord-server
-        run: |
-          if [[ "${{ matrix.cross }}" == "true" ]]; then
-            cross build --release --locked -p coord-server --target ${{ matrix.target }}
-          else
-            cargo build --release --locked -p coord-server --target ${{ matrix.target }}
-          fi
+        run: cargo build --release --locked -p coord-server --target ${{ matrix.target }}
 
       - name: Build coord-ctl
-        run: |
-          if [[ "${{ matrix.cross }}" == "true" ]]; then
-            cross build --release --locked -p coord-ctl --target ${{ matrix.target }}
-          else
-            cargo build --release --locked -p coord-ctl --target ${{ matrix.target }}
-          fi
+        run: cargo build --release --locked -p coord-ctl --target ${{ matrix.target }}
 
       - name: Package binaries
         id: package
@@ -191,7 +170,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4.2.2
 
-      # 下载 build job 上传的 Linux 平台产物（x86_64 + aarch64）
+      # 下载 build job 上传的 Linux 平台产物（x86_64）
       - name: Download Linux artifacts
         uses: actions/download-artifact@v4
         with:
@@ -202,14 +181,9 @@ jobs:
       - name: Stage binaries by arch
         shell: bash
         run: |
-          mkdir -p docker-stage/amd64 docker-stage/arm64
+          mkdir -p docker-stage/amd64
           find release-artifacts -name '*x86_64-unknown-linux-gnu.tar.gz' \
             -exec tar -xzf {} --strip-components=1 -C docker-stage/amd64/ \;
-          find release-artifacts -name '*aarch64-unknown-linux-gnu.tar.gz' \
-            -exec tar -xzf {} --strip-components=1 -C docker-stage/arm64/ \;
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -230,7 +204,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.release
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: |
             ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
