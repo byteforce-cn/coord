@@ -2,6 +2,13 @@
 
 本文件记录 coord 的所有重要变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.10] - 2026-05-10
+
+### 修改
+- 增加 doc
+- 增加 root-token 参数化启动 方便集成测试
+- 调整 docker base image
+
 ## [0.1.9] - 2026-05-10
 
 ### 修改

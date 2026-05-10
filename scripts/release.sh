@@ -256,6 +256,13 @@ echo "更新 Cargo.toml 版本号..."
 sed -i.bak "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" Cargo.toml
 rm -f Cargo.toml.bak
 
+# ── 更新 doc/ 中的镜像版本引用 ───────────────────────────────────────────────
+echo "更新 doc/ 文档中的版本引用 ($CURRENT_VERSION → $NEW_VERSION)..."
+find "$REPO_ROOT/doc" -name "*.md" | while read -r f; do
+    sed -i.bak "s/coord:$CURRENT_VERSION/coord:$NEW_VERSION/g" "$f"
+    rm -f "${f}.bak"
+done
+
 # 更新 Cargo.lock（允许失败，私有 registry 在本地可能不可达）
 echo "更新 Cargo.lock..."
 cargo generate-lockfile 2>/dev/null || true
@@ -273,7 +280,7 @@ cargo test --workspace --locked
 # ── 提交 & 打 tag ─────────────────────────────────────────────────────────────
 echo ""
 echo "提交版本变更..."
-git add Cargo.toml Cargo.lock CHANGELOG.md
+git add Cargo.toml Cargo.lock CHANGELOG.md doc/
 git commit -m "chore: release $TAG"
 
 echo "打 tag $TAG ..."
