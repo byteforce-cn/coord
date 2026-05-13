@@ -744,7 +744,9 @@ dependencies = [
 
 [[package]]
 name = "coord-core"
-version = "0.1.2"
+version = "0.1.3"
+source = "sparse+https://nexus.byteforce.cn/repository/cargo-repo/"
+checksum = "10e5c170797a5ddb33453bc01cc29eadd0e91b92306b6d6c01aebfc566a5f25f"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -787,9 +789,9 @@ dependencies = [
 
 [[package]]
 name = "coord-proto"
-version = "0.1.1"
+version = "0.1.3"
 source = "sparse+https://nexus.byteforce.cn/repository/cargo-repo/"
-checksum = "c22391762bf8723878fa867994354b2570a43dc2371510b9b81d83d3751d164f"
+checksum = "4f790706fdc36467fe8b892e77e8de9518a4b78a1694fbad17343da9ef213d8f"
 dependencies = [
  "anyhow",
  "prost",
@@ -2350,7 +2352,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "once_cell",
@@ -2370,7 +2372,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
