@@ -280,8 +280,7 @@ pub(crate) async fn run(args: CtlArgs) -> anyhow::Result<()> {
             } => {
                 let yaml = fs::read_to_string(&file)
                     .context(format!("failed to read workflow definition file: {file}"))?;
-                let mut workflow_client =
-                    WorkflowServiceClient::new(header.build_channel().await?);
+                let mut workflow_client = WorkflowServiceClient::new(header.build_channel().await?);
                 let resp = workflow_client
                     .deploy_workflow_definition(DeployWorkflowDefinitionRequest {
                         definition_id: definition_id.unwrap_or_default(),
@@ -302,8 +301,7 @@ pub(crate) async fn run(args: CtlArgs) -> anyhow::Result<()> {
                 version,
                 input_json,
             } => {
-                let mut workflow_client =
-                    WorkflowServiceClient::new(header.build_channel().await?);
+                let mut workflow_client = WorkflowServiceClient::new(header.build_channel().await?);
                 let resp = workflow_client
                     .start_workflow_v2(StartWorkflowV2Request {
                         definition_id,
@@ -318,8 +316,7 @@ pub(crate) async fn run(args: CtlArgs) -> anyhow::Result<()> {
                 println!("status: {}", resp.status);
             }
             WorkflowSubCommand::Get { instance_id } => {
-                let mut workflow_client =
-                    WorkflowServiceClient::new(header.build_channel().await?);
+                let mut workflow_client = WorkflowServiceClient::new(header.build_channel().await?);
                 let resp = workflow_client
                     .get_workflow_instance(GetWorkflowInstanceRequest { instance_id })
                     .await?
@@ -345,8 +342,7 @@ pub(crate) async fn run(args: CtlArgs) -> anyhow::Result<()> {
                 namespace,
                 definition_name,
             } => {
-                let mut workflow_client =
-                    WorkflowServiceClient::new(header.build_channel().await?);
+                let mut workflow_client = WorkflowServiceClient::new(header.build_channel().await?);
                 let resp = workflow_client
                     .list_workflow_instances(ListWorkflowInstancesRequest {
                         namespace,
@@ -370,8 +366,7 @@ pub(crate) async fn run(args: CtlArgs) -> anyhow::Result<()> {
                 }
             }
             WorkflowSubCommand::Definitions { namespace } => {
-                let mut workflow_client =
-                    WorkflowServiceClient::new(header.build_channel().await?);
+                let mut workflow_client = WorkflowServiceClient::new(header.build_channel().await?);
                 let resp = workflow_client
                     .list_workflow_definitions(ListWorkflowDefinitionsRequest { namespace })
                     .await?
@@ -390,8 +385,7 @@ pub(crate) async fn run(args: CtlArgs) -> anyhow::Result<()> {
                 definition_id,
                 version,
             } => {
-                let mut workflow_client =
-                    WorkflowServiceClient::new(header.build_channel().await?);
+                let mut workflow_client = WorkflowServiceClient::new(header.build_channel().await?);
                 let resp = workflow_client
                     .get_workflow_definition(GetWorkflowDefinitionRequest {
                         definition_id,
@@ -404,8 +398,7 @@ pub(crate) async fn run(args: CtlArgs) -> anyhow::Result<()> {
         },
         CtlCommand::Transit(transit) => match transit.command {
             TransitSubCommand::CreateKey { key_name } => {
-                let mut transit_client =
-                    TransitServiceClient::new(header.build_channel().await?);
+                let mut transit_client = TransitServiceClient::new(header.build_channel().await?);
                 let resp = transit_client
                     .create_key(request_with_token(
                         CreateKeyRequest {
@@ -423,8 +416,7 @@ pub(crate) async fn run(args: CtlArgs) -> anyhow::Result<()> {
                 key_name,
                 plaintext,
             } => {
-                let mut transit_client =
-                    TransitServiceClient::new(header.build_channel().await?);
+                let mut transit_client = TransitServiceClient::new(header.build_channel().await?);
                 let resp = transit_client
                     .encrypt(request_with_token(
                         EncryptRequest {
@@ -442,8 +434,7 @@ pub(crate) async fn run(args: CtlArgs) -> anyhow::Result<()> {
                 key_name,
                 ciphertext,
             } => {
-                let mut transit_client =
-                    TransitServiceClient::new(header.build_channel().await?);
+                let mut transit_client = TransitServiceClient::new(header.build_channel().await?);
                 let resp = transit_client
                     .decrypt(request_with_token(
                         DecryptRequest {
@@ -462,8 +453,7 @@ pub(crate) async fn run(args: CtlArgs) -> anyhow::Result<()> {
                 println!("plaintext_utf8: {}", resp.plaintext);
             }
             TransitSubCommand::RotateKey { key_name } => {
-                let mut transit_client =
-                    TransitServiceClient::new(header.build_channel().await?);
+                let mut transit_client = TransitServiceClient::new(header.build_channel().await?);
                 let resp = transit_client
                     .rotate_key(request_with_token(
                         RotateKeyRequest { key_name },
@@ -475,8 +465,7 @@ pub(crate) async fn run(args: CtlArgs) -> anyhow::Result<()> {
                 println!("primary_version: {}", resp.primary_version);
             }
             TransitSubCommand::HmacSign { key_name, data } => {
-                let mut transit_client =
-                    TransitServiceClient::new(header.build_channel().await?);
+                let mut transit_client = TransitServiceClient::new(header.build_channel().await?);
                 let resp = transit_client
                     .hmac_sign(request_with_token(
                         HmacSignRequest {
@@ -495,8 +484,7 @@ pub(crate) async fn run(args: CtlArgs) -> anyhow::Result<()> {
                 data,
                 signature,
             } => {
-                let mut transit_client =
-                    TransitServiceClient::new(header.build_channel().await?);
+                let mut transit_client = TransitServiceClient::new(header.build_channel().await?);
                 let resp = transit_client
                     .hmac_verify(request_with_token(
                         HmacVerifyRequest {

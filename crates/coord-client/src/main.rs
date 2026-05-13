@@ -47,12 +47,9 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // 启动 Gossip 代理
-    let gossip_agent = ChitchatGossipAgent::start(
-        local_member,
-        args.cluster_id.clone(),
-        args.seeds.clone(),
-    )
-    .await?;
+    let gossip_agent =
+        ChitchatGossipAgent::start(local_member, args.cluster_id.clone(), args.seeds.clone())
+            .await?;
     let gossip = Arc::new(gossip_agent);
 
     // 发现缓存
@@ -82,11 +79,8 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // 加入 Gossip 环
-    let seed_addrs: Vec<std::net::SocketAddr> = args
-        .seeds
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
+    let seed_addrs: Vec<std::net::SocketAddr> =
+        args.seeds.iter().filter_map(|s| s.parse().ok()).collect();
     gossip.join(&seed_addrs).await?;
 
     info!("coord-client running; press Ctrl-C to stop");

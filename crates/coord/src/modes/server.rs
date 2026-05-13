@@ -43,13 +43,12 @@ use crate::application::registry_app::RegistryApp;
 use crate::application::security_app::SecurityApp;
 use crate::application::transit_app::TransitApp;
 use crate::application::workflow_app::WorkflowApp;
-use coord_core::proposer::RaftProposer;
-use coord_core::workflow::ports::WorkflowRunner;
 use crate::cli::{
     ServeArgs, load_unseal_shares_from_file, parse_peers, resolve_bootstrap_flag, resolve_node_id,
 };
-use axum_server;
-use crate::interceptors::{CapabilityLayer, GrpcRateLimitLayer, GrpcRedMetricsLayer, SecurityGateway};
+use crate::interceptors::{
+    CapabilityLayer, GrpcRateLimitLayer, GrpcRedMetricsLayer, SecurityGateway,
+};
 use crate::raft_internal::RaftInternalGrpc;
 use crate::raft_runtime::{RAFT_TICK_INTERVAL, RaftRuntime};
 use crate::raft_store::RaftStore;
@@ -58,6 +57,9 @@ use crate::services::{
     TransitGrpc, WorkflowGrpc,
 };
 use crate::workflow_adapters::new_coord_workflow_runtime;
+use axum_server;
+use coord_core::proposer::RaftProposer;
+use coord_core::workflow::ports::WorkflowRunner;
 
 /// Entry point for `coord server` (dev_mode = false) and `coord dev` (dev_mode = true).
 pub(crate) async fn run(args: ServeArgs, dev_mode: bool) -> anyhow::Result<()> {
@@ -231,10 +233,7 @@ pub(crate) async fn run(args: ServeArgs, dev_mode: bool) -> anyhow::Result<()> {
         state.metrics().clone(),
         raft_proposer.clone(),
     );
-    let idgen_app = IdGenApp::new(
-        state.idgen().clone(),
-        state.metrics().clone(),
-    );
+    let idgen_app = IdGenApp::new(state.idgen().clone(), state.metrics().clone());
 
     spawn_pki_auto_renew_loop(state.clone(), pki_app.clone(), raft_runtime.clone());
 
@@ -322,9 +321,7 @@ pub(crate) async fn run(args: ServeArgs, dev_mode: bool) -> anyhow::Result<()> {
         .add_service(RaftInternalServiceServer::new(RaftInternalGrpc::new(
             raft_runtime,
         )))
-        .add_service(IdGenServiceServer::new(IdGenGrpc::new(
-            idgen_app,
-        )))
+        .add_service(IdGenServiceServer::new(IdGenGrpc::new(idgen_app)))
         .serve_with_shutdown(
             grpc_addr,
             shutdown_signal(shutdown_state, shutdown_raft_store, shutdown_raft_runtime),
@@ -1086,8 +1083,14 @@ async fn spawn_http_control_plane(
     ui_dist_dir: PathBuf,
     tls: Option<coord_core::tls::TlsMaterial>,
 ) -> anyhow::Result<()> {
-    let app =
-        crate::http_api::build_http_router(state, raft, config_app, transit_app, pki_app, ui_dist_dir);
+    let app = crate::http_api::build_http_router(
+        state,
+        raft,
+        config_app,
+        transit_app,
+        pki_app,
+        ui_dist_dir,
+    );
 
     match tls {
         None => {

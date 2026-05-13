@@ -80,7 +80,8 @@ impl HealthScheduler {
 
         // 将健康状态更新到 Gossip 的 self_node_state（ServiceDelta.healthy 字段）
         // 此处仅更新本节点广播的 delta；其他节点通过 Scuttlebutt 同步
-        let _ = self.gossip
+        let _ = self
+            .gossip
             .put_service_delta(ServiceDelta {
                 service_name: payload.service_name.clone(),
                 instance_id: payload.instance_id.clone(),

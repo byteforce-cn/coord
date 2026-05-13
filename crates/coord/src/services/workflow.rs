@@ -31,12 +31,10 @@ impl WorkflowGrpc {
 
 fn workflow_app_error_to_status(e: WorkflowAppError) -> Status {
     match &e {
-        WorkflowAppError::Runtime(_) => {
-            coord_status(CoordError::NotFound {
-                resource: "workflow",
-                id: e.to_string(),
-            })
-        }
+        WorkflowAppError::Runtime(_) => coord_status(CoordError::NotFound {
+            resource: "workflow",
+            id: e.to_string(),
+        }),
         _ => coord_status(CoordError::Internal(e.to_string())),
     }
 }

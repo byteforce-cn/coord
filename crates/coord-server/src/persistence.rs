@@ -486,10 +486,7 @@ pub async fn snapshot_payload_v6(state: &CoordinatorState) -> anyhow::Result<Bac
             ));
         }
         let pki = state.pki().snapshot().await;
-        modules.push(BackupModuleEntry::new(
-            "pki",
-            &serde_json::to_vec(&pki)?,
-        ));
+        modules.push(BackupModuleEntry::new("pki", &serde_json::to_vec(&pki)?));
     }
 
     Ok(BackupPayloadV6 {
@@ -581,8 +578,7 @@ async fn restore_payload_v6_with_policy(
 
 /// 序列化 v6 载荷为格式化 JSON。
 pub fn payload_to_json_v6(payload: &BackupPayloadV6) -> anyhow::Result<String> {
-    serde_json::to_string_pretty(payload)
-        .context("failed to serialize v6 backup payload to json")
+    serde_json::to_string_pretty(payload).context("failed to serialize v6 backup payload to json")
 }
 
 /// 从 JSON 解析 v6 备份载荷，版本字段必须为 `6`。
@@ -1126,11 +1122,7 @@ mod tests {
     #[tokio::test]
     async fn v6_all_modules_have_sha256() {
         let state = test_state("node-v6-cs", unique_temp_dir("v6-checksums"));
-        state
-            .transit()
-            .create_key("k1")
-            .await
-            .expect("create key");
+        state.transit().create_key("k1").await.expect("create key");
         let payload = snapshot_payload_v6(&state).await.expect("v6 snapshot");
         for entry in &payload.modules {
             assert!(
@@ -1138,7 +1130,11 @@ mod tests {
                 "module '{}' must have sha256 in v6 snapshot",
                 entry.name
             );
-            assert!(entry.verify(true).is_ok(), "checksum must pass for '{}'", entry.name);
+            assert!(
+                entry.verify(true).is_ok(),
+                "checksum must pass for '{}'",
+                entry.name
+            );
         }
     }
 
@@ -1169,16 +1165,16 @@ mod tests {
             "config value must survive v6 round-trip"
         );
         let members = restored.members().read().await;
-        assert!(members.contains_key("peer-a"), "member must survive v6 round-trip");
+        assert!(
+            members.contains_key("peer-a"),
+            "member must survive v6 round-trip"
+        );
     }
 
     #[tokio::test]
     async fn restore_v6_rejects_corrupted_checksum() {
         let state = test_state("node-v6-corrupt", unique_temp_dir("v6-corrupt"));
-        state
-            .config()
-            .put("/k".to_string(), "v".to_string())
-            .await;
+        state.config().put("/k".to_string(), "v".to_string()).await;
 
         let mut payload = snapshot_payload_v6(&state).await.expect("v6 snapshot");
         // 篡改第一个模块的 base64 数据，但保留原 sha256
@@ -1187,7 +1183,10 @@ mod tests {
             first.data_b64 = BASE64.encode(b"tampered bytes that won't match checksum");
         }
 
-        let target = test_state("node-v6-corrupt-target", unique_temp_dir("v6-corrupt-target"));
+        let target = test_state(
+            "node-v6-corrupt-target",
+            unique_temp_dir("v6-corrupt-target"),
+        );
         let err = restore_payload_v6(&target, payload)
             .await
             .expect_err("restore must fail for corrupted checksum");
@@ -1251,7 +1250,8 @@ mod tests {
         let json = r#"{"version": 5, "created_unix_ms": 0, "modules": {}}"#;
         let err = payload_v6_from_json(json).expect_err("v5 must be rejected by v6 parser");
         assert!(
-            err.to_string().contains("expected version 6") || err.to_string().contains("unsupported"),
+            err.to_string().contains("expected version 6")
+                || err.to_string().contains("unsupported"),
             "error must mention version: {err}"
         );
     }
@@ -1261,7 +1261,8 @@ mod tests {
         let json = r#"{"version": 4, "created_unix_ms": 0, "modules": []}"#;
         let err = payload_v6_from_json(json).expect_err("v4 must be rejected by v6 parser");
         assert!(
-            err.to_string().contains("expected version 6") || err.to_string().contains("unsupported"),
+            err.to_string().contains("expected version 6")
+                || err.to_string().contains("unsupported"),
             "error must mention version: {err}"
         );
     }

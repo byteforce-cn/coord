@@ -112,10 +112,7 @@ impl DiscoveryProvider for ClientAgent {
         ))
     }
 
-    async fn discover(
-        &self,
-        service_name: &str,
-    ) -> Result<Vec<ServiceInstance>, DiscoveryError> {
+    async fn discover(&self, service_name: &str) -> Result<Vec<ServiceInstance>, DiscoveryError> {
         // 优先命中本地缓存
         if let Some(cached) = self.cache.get(service_name) {
             return Ok(cached);

@@ -105,11 +105,7 @@ pub(crate) struct ClientArgs {
     #[arg(long, env = "COORD_CLIENT_HTTP_ADDR", default_value = "127.0.0.1:9091")]
     pub local_http_addr: String,
     /// UDP address for the gossip (SWIM/Scuttlebutt) membership protocol.
-    #[arg(
-        long,
-        env = "COORD_CLIENT_GOSSIP_ADDR",
-        default_value = "0.0.0.0:7946"
-    )]
+    #[arg(long, env = "COORD_CLIENT_GOSSIP_ADDR", default_value = "0.0.0.0:7946")]
     pub gossip_addr: String,
     /// Comma-separated gossip seed addresses (host:port) for initial cluster discovery.
     #[arg(long, env = "COORD_CLIENT_GOSSIP_PEERS", default_value = "")]

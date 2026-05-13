@@ -96,11 +96,7 @@ impl SealService for SealGrpc {
 
     #[tracing::instrument(skip(self, _request))]
     async fn seal(&self, _request: Request<SealRequest>) -> Result<Response<SealResponse>, Status> {
-        let status = self
-            .security_app
-            .seal()
-            .await
-            .map_err(coord_status)?;
+        let status = self.security_app.seal().await.map_err(coord_status)?;
 
         Ok(Response::new(SealResponse {
             sealed: status.sealed,

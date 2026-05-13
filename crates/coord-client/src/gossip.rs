@@ -14,9 +14,7 @@ use std::time::Duration;
 use anyhow::Context;
 use chitchat::transport::UdpTransport;
 use chitchat::{ChitchatConfig, ChitchatId, FailureDetectorConfig, spawn_chitchat};
-use coord_core::gossip_types::{
-    GossipAgent, GossipMember, GossipNodeRole, ServiceDelta,
-};
+use coord_core::gossip_types::{GossipAgent, GossipMember, GossipNodeRole, ServiceDelta};
 
 /// 基于 chitchat 0.10.1 的 Gossip 代理实现。
 pub struct ChitchatGossipAgent {
@@ -41,11 +39,7 @@ impl ChitchatGossipAgent {
             .with_context(|| format!("invalid gossip_addr: {}", local.gossip_addr))?;
         let advertise_addr: SocketAddr = listen_addr; // 同地址广播
 
-        let chitchat_id = ChitchatId::new(
-            local.node_id.clone(),
-            local.generation,
-            advertise_addr,
-        );
+        let chitchat_id = ChitchatId::new(local.node_id.clone(), local.generation, advertise_addr);
 
         let seed_nodes: Vec<String> = seeds;
 
@@ -68,7 +62,10 @@ impl ChitchatGossipAgent {
         let initial_kvs: Vec<(String, String)> = vec![
             ("coord/role".to_string(), role_str.to_string()),
             ("coord/grpc_addr".to_string(), local.grpc_addr.clone()),
-            ("coord/api_version".to_string(), local.api_version.to_string()),
+            (
+                "coord/api_version".to_string(),
+                local.api_version.to_string(),
+            ),
         ];
 
         let transport = UdpTransport;
@@ -76,10 +73,7 @@ impl ChitchatGossipAgent {
             .await
             .context("failed to spawn chitchat")?;
 
-        Ok(Self {
-            handle,
-            local,
-        })
+        Ok(Self { handle, local })
     }
 
     // ─── 内部辅助 ─────────────────────────────────────────────────────────────
