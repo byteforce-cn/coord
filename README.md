@@ -70,10 +70,10 @@ coord 是一个基于 [OpenRaft](https://github.com/datafuselabs/openraft) 构�
 cargo test --workspace
 
 # 启动单节点 dev 服务（gRPC :9090，HTTP 控制面 :9091）
-cargo run -p coord-server -- dev
+cargo run -p coord -- dev
 
 # 查看集群状态
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 cluster status
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 cluster status
 
 # 健康检查 & 指标
 curl http://127.0.0.1:9091/healthz
@@ -94,8 +94,9 @@ Dev 模式默认参数：
 
 ```
 crates/
-  coord-server/     gRPC + HTTP 服务端运行时
-  coord-ctl/        命令行管理工具
+  coord/            统一二进制：server / dev / client / ctl 四种模式
+  coord-server/     （保留）原 gRPC + HTTP 服务端运行时（Phase 0.5 后废弃）
+  coord-ctl/        （保留）原命令行管理工具（Phase 0.5 后废弃）
 benchmark/          多场景压测工具 + 报告生成器
 e2e/                集成测试套件（Cucumber/Docker Compose）
 ui/console/         React + Tailwind 运维控制台
@@ -121,7 +122,7 @@ coord 服务通过标准 gRPC 对外暴露 API，可使用任意语言的 gRPC �
 cd ui/console && npm install && npm run build
 
 # 启动服务端
-cd ../.. && cargo run -p coord-server -- dev
+cd ../.. && cargo run -p coord -- dev
 
 # 浏览器访问
 # http://127.0.0.1:9091/ui
@@ -138,16 +139,16 @@ cd ../.. && cargo run -p coord-server -- dev
 
 ```bash
 # 初始化安全域（返回 Shamir 拆分份额）
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 operator init --shares-total 3 --threshold 2
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 operator init --shares-total 3 --threshold 2
 
 # 解封（提供 threshold 份额）
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 operator unseal <share-1>
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 operator unseal <share-2>
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 operator unseal <share-1>
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 operator unseal <share-2>
 
 # 创建 AppRole 并获取 token
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 auth approle create svc-a --policy transit.encrypt
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 auth approle generate-secret-id <role-id>
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 auth approle login <role-id> <secret-id>
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 auth approle create svc-a --policy transit.encrypt
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 auth approle generate-secret-id <role-id>
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 auth approle login <role-id> <secret-id>
 ```
 
 </details>
@@ -156,10 +157,10 @@ cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 auth approle login <r
 <summary>Transit 加密</summary>
 
 ```bash
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 transit create-key app-key
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 transit encrypt app-key "hello-coord"
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 transit decrypt app-key "<ciphertext>"
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 transit rotate-key app-key
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 transit create-key app-key
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 transit encrypt app-key "hello-coord"
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 transit decrypt app-key "<ciphertext>"
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 transit rotate-key app-key
 ```
 
 </details>
@@ -169,15 +170,15 @@ cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 transit rotate-key ap
 
 ```bash
 # 签发证书
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 pki issue svc-a.internal \
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 pki issue svc-a.internal \
   --san svc-a.internal --san 127.0.0.1 --ttl-seconds 86400
 
 # 续期 / 吊销 / CA 链 / CRL / OCSP
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 pki renew <serial>
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 pki revoke <serial> --reason key-compromise
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 pki ca-chain
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 pki crl
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 pki ocsp <serial>
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 pki renew <serial>
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 pki revoke <serial> --reason key-compromise
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 pki ca-chain
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 pki crl
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 pki ocsp <serial>
 ```
 
 </details>
@@ -189,19 +190,19 @@ cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 pki ocsp <serial>
 
 ```bash
 # 1) 部署工作流定义（YAML 文件，遵循 CNCF Serverless Workflow DSL v2 规范）
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 workflow deploy --file payment.yaml
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 workflow deploy --file payment.yaml
 
 # 2) 启动工作流实例
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 workflow start \
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 workflow start \
   --definition-id payment --namespace default --input-json '{"order_id":"123"}'
 
 # 3) 查询实例状态
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 workflow get <instance-id>
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 workflow get <instance-id>
 
 # 4) 列出实例 / 定义
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 workflow list --namespace default
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 workflow definitions --namespace default
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 workflow definition <definition-id>
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 workflow list --namespace default
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 workflow definitions --namespace default
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 workflow definition <definition-id>
 ```
 
 </details>
@@ -211,12 +212,12 @@ cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 workflow definition <
 
 ```bash
 # 成员变更（通过 Raft 联合共识路径）
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 member add node-2 10.0.0.2:9090
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 member remove node-2
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 member add node-2 10.0.0.2:9090
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 member remove node-2
 
 # 备份 & 恢复
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 backup create --file /tmp/coord-backup.json
-cargo run -p coord-ctl -- --endpoint http://127.0.0.1:9090 backup restore /tmp/coord-backup.json
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 backup create --file /tmp/coord-backup.json
+cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 backup restore /tmp/coord-backup.json
 ```
 
 </details>

@@ -1,7 +1,10 @@
-#![cfg_attr(
-    not(test),
-    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
-)]
+//! Server 与 Dev 运行模式。
+//!
+//! 该模块包含原 `coord-server` `main()` 函数的全部逻辑，
+//! 不改变任何行为：
+//!
+//! - `coord server` ≡ `coord-server serve`
+//! - `coord dev`    ≡ `coord-server dev`
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -32,65 +35,33 @@ use tokio::time::{Duration, sleep};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 
-mod application;
-mod cli;
-mod http_api;
-mod interceptors;
-mod persistence;
-mod raft_internal;
-mod raft_runtime;
-mod raft_store;
-mod services;
-mod telemetry;
-mod wire;
-mod workflow_adapters;
-
-use clap::Parser;
-use cli::{
-    Cli, Command, ServeArgs, init_tracing, load_unseal_shares_from_file, parse_peers,
-    resolve_bootstrap_flag, resolve_node_id,
+use crate::application::config_app::ConfigApp;
+use crate::application::idgen_app::IdGenApp;
+use crate::application::lock_app::LockApp;
+use crate::application::pki_app::PkiApp;
+use crate::application::registry_app::RegistryApp;
+use crate::application::security_app::SecurityApp;
+use crate::application::transit_app::TransitApp;
+use crate::application::workflow_app::WorkflowApp;
+use coord_core::proposer::RaftProposer;
+use coord_core::workflow::ports::WorkflowRunner;
+use crate::cli::{
+    ServeArgs, load_unseal_shares_from_file, parse_peers, resolve_bootstrap_flag, resolve_node_id,
 };
-use interceptors::{CapabilityLayer, GrpcRateLimitLayer, GrpcRedMetricsLayer, SecurityGateway};
-use raft_internal::RaftInternalGrpc;
-use raft_runtime::{RAFT_TICK_INTERVAL, RaftRuntime};
-use raft_store::RaftStore;
-
-use application::config_app::ConfigApp;
-use application::lock_app::LockApp;
-use application::pki_app::PkiApp;
-use application::transit_app::TransitApp;
-use services::WorkflowGrpc;
-use services::{
+use axum_server;
+use crate::interceptors::{CapabilityLayer, GrpcRateLimitLayer, GrpcRedMetricsLayer, SecurityGateway};
+use crate::raft_internal::RaftInternalGrpc;
+use crate::raft_runtime::{RAFT_TICK_INTERVAL, RaftRuntime};
+use crate::raft_store::RaftStore;
+use crate::services::{
     AdminGrpc, AuthGrpc, ConfigGrpc, IdGenGrpc, LockGrpc, PkiGrpc, RegistryGrpc, SealGrpc,
-    TransitGrpc,
+    TransitGrpc, WorkflowGrpc,
 };
-use workflow_adapters::new_coord_workflow_runtime;
+use crate::workflow_adapters::new_coord_workflow_runtime;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-
-    let (args, dev_mode) = match cli.command.unwrap_or(Command::Dev(ServeArgs {
-        grpc_addr: "0.0.0.0:9090".to_string(),
-        http_addr: "0.0.0.0:9091".to_string(),
-        data_dir: "/tmp/coord-dev".to_string(),
-        node_id: None,
-        auto_unseal_shares_file: None,
-        peers: String::new(),
-        bootstrap: String::new(),
-        tls_cert: None,
-        tls_key: None,
-        tls_client_ca: None,
-        otlp_endpoint: None,
-        dev_root_token: None,
-        gossip_addr: None,
-    })) {
-        Command::Dev(args) => (args, true),
-        Command::Serve(args) => (args, false),
-    };
-
-    init_tracing(dev_mode);
-    telemetry::init_telemetry(args.otlp_endpoint.as_deref());
+/// Entry point for `coord server` (dev_mode = false) and `coord dev` (dev_mode = true).
+pub(crate) async fn run(args: ServeArgs, dev_mode: bool) -> anyhow::Result<()> {
+    crate::telemetry::init_telemetry(args.otlp_endpoint.as_deref());
 
     // Install rustls default crypto provider before any TLS backend (axum-server
     // or tonic) constructs a ServerConfig. rustls 0.23 deliberately removed
@@ -222,7 +193,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|m| m.mtls_required())
         .unwrap_or(false);
 
-    info!(node_id = %node_id, dev_mode, "starting coord-server");
+    info!(node_id = %node_id, dev_mode, "starting coord");
     info!(
         grpc_addr = %grpc_addr,
         http_addr = %http_addr,
@@ -237,20 +208,32 @@ async fn main() -> anyhow::Result<()> {
     spawn_workflow_timer_driver(raft_runtime.clone(), workflow_runtime.clone());
 
     // ── Build application facades ───────────────────────────────────────────
+    // RaftRuntime 实现 RaftProposer trait，包入 Arc 以满足 facade 的端口约束。
+    let raft_proposer: Arc<dyn RaftProposer> = Arc::new(raft_runtime.clone());
+
     let config_app = ConfigApp::new(
         state.config().clone(),
         state.metrics().clone(),
-        raft_runtime.clone(),
+        raft_proposer.clone(),
     );
     let transit_app = TransitApp::new(
         state.transit().clone(),
         state.metrics().clone(),
-        raft_runtime.clone(),
+        raft_proposer.clone(),
     );
     let pki_app = PkiApp::new(
         state.pki().clone(),
         state.metrics().clone(),
-        raft_runtime.clone(),
+        raft_proposer.clone(),
+    );
+    let registry_app = RegistryApp::new(
+        state.registry().clone(),
+        state.metrics().clone(),
+        raft_proposer.clone(),
+    );
+    let idgen_app = IdGenApp::new(
+        state.idgen().clone(),
+        state.metrics().clone(),
     );
 
     spawn_pki_auto_renew_loop(state.clone(), pki_app.clone(), raft_runtime.clone());
@@ -258,7 +241,7 @@ async fn main() -> anyhow::Result<()> {
     if is_bootstrap && !peer_addrs.is_empty() {
         spawn_cluster_auto_join(raft_runtime.clone(), peer_addrs.clone());
     }
-    let ui_dist_dir = http_api::resolve_ui_dist_dir();
+    let ui_dist_dir = crate::http_api::resolve_ui_dist_dir();
     spawn_http_control_plane(
         state.clone(),
         raft_runtime.clone(),
@@ -295,29 +278,28 @@ async fn main() -> anyhow::Result<()> {
         .layer(GrpcRateLimitLayer::new())
         .layer(CapabilityLayer::new(security_gw))
         .add_service(RegistryServiceServer::new(RegistryGrpc::new(
-            state.registry().clone(),
-            state.metrics().clone(),
-            raft_runtime.clone(),
+            registry_app.clone(),
         )))
         .add_service(ConfigServiceServer::new(ConfigGrpc::new(ConfigApp::new(
             state.config().clone(),
             state.metrics().clone(),
-            raft_runtime.clone(),
+            raft_proposer.clone(),
         ))))
         .add_service(LockServiceServer::new(LockGrpc::new(LockApp::new(
             state.locks().clone(),
             state.metrics().clone(),
-            raft_runtime.clone(),
+            raft_proposer.clone(),
         ))))
-        .add_service(SealServiceServer::new(SealGrpc::new(
+        .add_service(SealServiceServer::new(SealGrpc::new(SecurityApp::new(
             state.security().clone(),
             state.domain_lifecycle().clone(),
             state.metrics().clone(),
-        )))
-        .add_service(AuthServiceServer::new(AuthGrpc::new(
+        ))))
+        .add_service(AuthServiceServer::new(AuthGrpc::new(SecurityApp::new(
             state.security().clone(),
+            state.domain_lifecycle().clone(),
             state.metrics().clone(),
-        )))
+        ))))
         .add_service(AdminServiceServer::new(AdminGrpc::new(
             state.members().clone(),
             state.locks().clone(),
@@ -327,9 +309,11 @@ async fn main() -> anyhow::Result<()> {
         )));
 
     let grpc_router = grpc_router.add_service(WorkflowServiceServer::new(WorkflowGrpc::new(
-        state.metrics().clone(),
-        raft_runtime.clone(),
-        workflow_runtime.clone(),
+        WorkflowApp::new(
+            workflow_runtime.clone() as Arc<dyn WorkflowRunner>,
+            state.metrics().clone(),
+            raft_proposer.clone(),
+        ),
     )));
 
     grpc_router
@@ -339,8 +323,7 @@ async fn main() -> anyhow::Result<()> {
             raft_runtime,
         )))
         .add_service(IdGenServiceServer::new(IdGenGrpc::new(
-            state.idgen().clone(),
-            state.metrics().clone(),
+            idgen_app,
         )))
         .serve_with_shutdown(
             grpc_addr,
@@ -457,7 +440,7 @@ fn current_unix_ms() -> i64 {
 
 fn spawn_workflow_timer_driver(
     raft: RaftRuntime,
-    runtime: Arc<workflow_adapters::CoordWorkflowRuntime>,
+    runtime: Arc<crate::workflow_adapters::CoordWorkflowRuntime>,
 ) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(1));
@@ -639,7 +622,7 @@ async fn persist_runtime_snapshot(
     raft: &RaftRuntime,
     reason: &str,
 ) {
-    let mut payload = match persistence::snapshot_payload_v5(state).await {
+    let mut payload = match crate::persistence::snapshot_payload_v5(state).await {
         Ok(p) => p,
         Err(err) => {
             error!(
@@ -667,7 +650,7 @@ async fn persist_runtime_snapshot(
     }
     match raft_store.load_metadata() {
         Ok(metadata) => {
-            persistence::annotate_payload_v5_with_raft_metadata(
+            crate::persistence::annotate_payload_v5_with_raft_metadata(
                 &mut payload,
                 metadata.commit_index,
                 metadata.last_applied_index,
@@ -722,7 +705,7 @@ async fn restore_runtime_state(
     match raft_store.load_runtime_snapshot() {
         Ok(Some(payload)) => {
             let modules = payload.modules.clone();
-            match persistence::restore_payload_v5(state, payload).await {
+            match crate::persistence::restore_payload_v5(state, payload).await {
                 Ok(()) => {
                     if let Err(err) = raft.restore_extra_modules(&modules).await {
                         error!(error = %err, "failed to restore extra replicated module snapshots from redb");
@@ -752,17 +735,17 @@ async fn restore_runtime_state(
     }
 
     match std::fs::read_to_string(snapshot_file) {
-        Ok(payload_json) => match persistence::payload_v5_from_json(&payload_json) {
+        Ok(payload_json) => match crate::persistence::payload_v5_from_json(&payload_json) {
             Ok(payload) => {
                 let modules = payload.modules.clone();
-                match persistence::restore_payload_v5(state, payload).await {
+                match crate::persistence::restore_payload_v5(state, payload).await {
                     Ok(()) => {
                         if let Err(err) = raft.restore_extra_modules(&modules).await {
                             error!(error = %err, "failed to restore extra replicated module snapshots from disk");
                         }
                         info!(path = %snapshot_file.display(), "restored runtime snapshot from disk");
 
-                        match persistence::snapshot_payload_v5(state).await {
+                        match crate::persistence::snapshot_payload_v5(state).await {
                             Ok(mut payload) => {
                                 match raft.snapshot_extra_modules().await {
                                     Ok(extra_modules) => {
@@ -777,7 +760,7 @@ async fn restore_runtime_state(
                                 }
                                 match raft_store.load_metadata() {
                                     Ok(metadata) => {
-                                        persistence::annotate_payload_v5_with_raft_metadata(
+                                        crate::persistence::annotate_payload_v5_with_raft_metadata(
                                             &mut payload,
                                             metadata.commit_index,
                                             metadata.last_applied_index,
@@ -1104,7 +1087,7 @@ async fn spawn_http_control_plane(
     tls: Option<coord_core::tls::TlsMaterial>,
 ) -> anyhow::Result<()> {
     let app =
-        http_api::build_http_router(state, raft, config_app, transit_app, pki_app, ui_dist_dir);
+        crate::http_api::build_http_router(state, raft, config_app, transit_app, pki_app, ui_dist_dir);
 
     match tls {
         None => {

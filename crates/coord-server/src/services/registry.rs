@@ -117,10 +117,12 @@ impl RegistryService for RegistryGrpc {
         self.metrics.coord_service_instances_heartbeat_total.inc();
 
         let lease = request.into_inner();
-        // Look up TTL from current state to compute new expiry.
-        let renewed = self
+        // P4A fix：仅读取当前租约信息（只读操作），不直接写状态；
+        // 状态更新通过 Raft propose → apply_heartbeat 确定性地应用，
+        // 避免 leader 直接写 + Raft apply 造成双写。
+        let current = self
             .registry
-            .heartbeat(&lease.lease_id)
+            .get_lease(&lease.lease_id)
             .await
             .ok_or_else(|| {
                 coord_status(CoordError::NotFound {
@@ -129,7 +131,7 @@ impl RegistryService for RegistryGrpc {
                 })
             })?;
 
-        let new_expires_unix_ms = SystemClock.now_ms() + renewed.ttl_seconds * 1000;
+        let new_expires_unix_ms = SystemClock.now_ms() + current.ttl_seconds * 1000;
         let payload = ServiceRegistry::encode_heartbeat_bytes(&lease.lease_id, new_expires_unix_ms);
         self.raft
             .propose_business_command("registry", payload)
@@ -141,8 +143,8 @@ impl RegistryService for RegistryGrpc {
             })?;
 
         Ok(Response::new(Lease {
-            lease_id: renewed.lease_id,
-            ttl_seconds: renewed.ttl_seconds,
+            lease_id: current.lease_id,
+            ttl_seconds: current.ttl_seconds,
             expires_unix_ms: new_expires_unix_ms,
         }))
     }

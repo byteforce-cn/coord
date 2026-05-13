@@ -58,7 +58,7 @@ RUN --mount=type=secret,id=cargo_token \
     mkdir -p ~/.cargo && \
     printf '[registries.byteforce]\ntoken = "%s"\n' "$(cat /run/secrets/cargo_token)" \
     > ~/.cargo/credentials.toml && \
-    cargo build --release --locked -p coord-server -p coord-ctl && \
+    cargo build --release --locked -p coord && \
     rm ~/.cargo/credentials.toml
 
 # ── Stage 4: Runtime — 最小运行时镜像 ────────────────────────────────────────
@@ -69,10 +69,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/coord-server /usr/local/bin/coord-server
-COPY --from=builder /app/target/release/coord-ctl    /usr/local/bin/coord-ctl
+COPY --from=builder /app/target/release/coord /usr/local/bin/coord
 
-EXPOSE 9090 8080
+EXPOSE 9090 9091
 
-ENTRYPOINT ["coord-server"]
-CMD ["serve"]
+ENTRYPOINT ["coord"]
+CMD ["server"]

@@ -13,29 +13,31 @@
 //! `get_workflow_definition`。
 
 use super::*;
+use crate::application::workflow_app::{WorkflowApp, WorkflowAppError};
 use crate::wire::error::coord_status;
 use coord_core::error::CoordError;
 use coord_core::workflow::engine::WorkflowInstance;
-use coord_core::workflow::raft_store::RaftWorkflowStore;
 
 #[derive(Clone)]
 pub struct WorkflowGrpc {
-    metrics: Arc<CoordMetrics>,
-    v2_runtime: Arc<CoordWorkflowRuntime>,
-    raft: RaftRuntime,
+    workflow_app: WorkflowApp,
 }
 
 impl WorkflowGrpc {
-    pub fn new(
-        metrics: Arc<CoordMetrics>,
-        raft: RaftRuntime,
-        v2_runtime: Arc<CoordWorkflowRuntime>,
-    ) -> Self {
-        Self {
-            metrics,
-            v2_runtime,
-            raft,
+    pub fn new(workflow_app: WorkflowApp) -> Self {
+        Self { workflow_app }
+    }
+}
+
+fn workflow_app_error_to_status(e: WorkflowAppError) -> Status {
+    match &e {
+        WorkflowAppError::Runtime(_) => {
+            coord_status(CoordError::NotFound {
+                resource: "workflow",
+                id: e.to_string(),
+            })
         }
+        _ => coord_status(CoordError::Internal(e.to_string())),
     }
 }
 
@@ -64,13 +66,10 @@ impl WorkflowService for WorkflowGrpc {
             req.definition_id.clone()
         };
 
-        self.raft
-            .propose_business_command_for_result(
-                "workflow",
-                RaftWorkflowStore::encode_deploy_definition_bytes(&def),
-            )
+        self.workflow_app
+            .deploy(def)
             .await
-            .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?;
+            .map_err(workflow_app_error_to_status)?;
 
         Ok(Response::new(DeployWorkflowDefinitionResponse {
             namespace: ns,
@@ -96,13 +95,13 @@ impl WorkflowService for WorkflowGrpc {
             })?
         };
 
-        // Support definition_id as an alias for name lookup
+        // Resolve definition by id/name + optional version.
         let (ns, name, version) = if !req.definition_id.is_empty() {
-            let store = self.v2_runtime.store();
-            let defs = store
+            let defs = self
+                .workflow_app
                 .list_definitions(None)
                 .await
-                .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?;
+                .map_err(workflow_app_error_to_status)?;
             let def = defs
                 .into_iter()
                 .find(|d| {
@@ -124,29 +123,12 @@ impl WorkflowService for WorkflowGrpc {
             (req.namespace, req.name, req.version)
         };
 
-        let planned = self
-            .v2_runtime
-            .start_detached(&ns, &name, &version, input)
+        let instance = self
+            .workflow_app
+            .start(&ns, &name, &version, input)
             .await
-            .map_err(|e| {
-                coord_status(CoordError::NotFound {
-                    resource: "workflow_definition",
-                    id: e.to_string(),
-                })
-            })?;
+            .map_err(workflow_app_error_to_status)?;
 
-        let bytes = self
-            .raft
-            .propose_business_command_for_result(
-                "workflow",
-                RaftWorkflowStore::encode_upsert_instance_bytes(&planned),
-            )
-            .await
-            .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?;
-        let instance: WorkflowInstance = serde_json::from_slice(&bytes)
-            .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?;
-
-        self.metrics.coord_workflow_instances_total.inc();
         let status = instance_status_str(&instance.status);
         Ok(Response::new(StartWorkflowV2Response {
             instance_id: instance.id,
@@ -170,27 +152,11 @@ impl WorkflowService for WorkflowGrpc {
             })?
         };
 
-        let planned = self
-            .v2_runtime
-            .resume_detached(&req.instance_id, result)
+        let instance = self
+            .workflow_app
+            .resume(&req.instance_id, result)
             .await
-            .map_err(|e| {
-                coord_status(CoordError::NotFound {
-                    resource: "workflow_instance",
-                    id: e.to_string(),
-                })
-            })?;
-
-        let bytes = self
-            .raft
-            .propose_business_command_for_result(
-                "workflow",
-                RaftWorkflowStore::encode_upsert_instance_bytes(&planned),
-            )
-            .await
-            .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?;
-        let instance: WorkflowInstance = serde_json::from_slice(&bytes)
-            .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?;
+            .map_err(workflow_app_error_to_status)?;
 
         Ok(Response::new(ResumeWorkflowResponse {
             instance_id: instance.id,
@@ -203,11 +169,11 @@ impl WorkflowService for WorkflowGrpc {
         request: Request<GetWorkflowInstanceRequest>,
     ) -> Result<Response<GetWorkflowInstanceResponse>, Status> {
         let req = request.into_inner();
-        let store = self.v2_runtime.store();
-        let instance = store
-            .load_instance(&req.instance_id)
+        let instance = self
+            .workflow_app
+            .get_instance(&req.instance_id)
             .await
-            .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?
+            .map_err(workflow_app_error_to_status)?
             .ok_or_else(|| {
                 coord_status(CoordError::NotFound {
                     resource: "workflow_instance",
@@ -224,20 +190,18 @@ impl WorkflowService for WorkflowGrpc {
         &self,
         request: Request<ListWorkflowInstancesRequest>,
     ) -> Result<Response<ListWorkflowInstancesResponse>, Status> {
-        let store = self.v2_runtime.store();
-        let all = store
-            .list_instances()
-            .await
-            .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?;
-
         let req = request.into_inner();
-        let instances = all
+        let definition_name = if req.definition_name.is_empty() {
+            req.definition_id
+        } else {
+            req.definition_name
+        };
+        let instances = self
+            .workflow_app
+            .list_instances(&req.namespace, &definition_name)
+            .await
+            .map_err(workflow_app_error_to_status)?
             .into_iter()
-            .filter(|i| {
-                (req.namespace.is_empty() || i.definition_ns == req.namespace)
-                    && (req.definition_name.is_empty() || i.definition_name == req.definition_name)
-                    && (req.definition_id.is_empty() || i.definition_name == req.definition_id)
-            })
             .map(to_proto_instance_info)
             .collect();
 
@@ -248,16 +212,17 @@ impl WorkflowService for WorkflowGrpc {
         &self,
         request: Request<ListWorkflowDefinitionsRequest>,
     ) -> Result<Response<ListWorkflowDefinitionsResponse>, Status> {
-        let store = self.v2_runtime.store();
         let req = request.into_inner();
-        let defs = store
-            .list_definitions(if req.namespace.is_empty() {
-                None
-            } else {
-                Some(&req.namespace)
-            })
+        let ns_filter = if req.namespace.is_empty() {
+            None
+        } else {
+            Some(req.namespace.as_str())
+        };
+        let defs = self
+            .workflow_app
+            .list_definitions(ns_filter)
             .await
-            .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?;
+            .map_err(workflow_app_error_to_status)?;
 
         let definitions = defs
             .into_iter()
@@ -279,17 +244,11 @@ impl WorkflowService for WorkflowGrpc {
         request: Request<GetWorkflowDefinitionRequest>,
     ) -> Result<Response<GetWorkflowDefinitionResponse>, Status> {
         let req = request.into_inner();
-        let store = self.v2_runtime.store();
-        let defs = store
-            .list_definitions(None)
+        let def = self
+            .workflow_app
+            .get_definition(&req.definition_id, &req.version)
             .await
-            .map_err(|e| coord_status(CoordError::Internal(e.to_string())))?;
-        let def = defs
-            .into_iter()
-            .find(|d| {
-                d.document.name == req.definition_id
-                    && (req.version.is_empty() || d.document.version == req.version)
-            })
+            .map_err(workflow_app_error_to_status)?
             .ok_or_else(|| {
                 coord_status(CoordError::NotFound {
                     resource: "workflow_definition",

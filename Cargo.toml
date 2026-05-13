@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/coord",
+    "crates/coord-client",
     "crates/coord-server",
     "crates/coord-ctl",
     "benchmark/coord-bench",
@@ -27,8 +29,8 @@ rust-version = "1.93.0"
 # ---------------------------------------------------------------------------
 [workspace.dependencies]
 # 私有 registry 上的 coord 内部 crate
-coord-core = { version = "0.1.1", registry = "byteforce" }
-coord-proto = { version = "0.1.1", registry = "byteforce" }
+coord-core = { version = "0.1.3", registry = "byteforce" }
+coord-proto = { version = "0.1.3", registry = "byteforce" }
 
 # 基础
 anyhow = "1.0"
@@ -72,6 +74,11 @@ tower = { version = "0.4", features = ["util"] }
 # 共识 / 存储
 openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
 redb = "2.6.3"
+
+# Gossip / 成员发现
+chitchat = "0.10"
+foca = { version = "1.0", features = ["serde"] }
+dashmap = "6"
 
 [workspace.lints.clippy]
 # 生产代码不得在 #[cfg(test)] 之外使用 unwrap/expect/panic。

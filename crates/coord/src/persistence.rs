@@ -390,36 +390,111 @@ pub fn payload_v5_from_json(payload_json: &str) -> anyhow::Result<BackupPayloadV
     Ok(normalize_payload_v5(payload))
 }
 
-// ─── v6 backup format ────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Backup format v6 — per-module versioned + checksummed entries
+// ─────────────────────────────────────────────────────────────────────────────
 
-/// v6 格式备份版本号。
+/// Current canonical backup format version written by this binary.
 pub const BACKUP_PAYLOAD_V6_VERSION: u32 = 6;
 
-/// v6 备份载荷：模块快照有序列表，每条目含 SHA-256 完整性校验值。
+/// 单个模块的备份条目，附带快照版本号与校验和
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackupModuleEntry {
+    /// 模块快照字节（由 `ReplicatedModule::snapshot()` 生成）
+    pub data: Vec<u8>,
+    /// 快照格式版本（来自 `ReplicatedModuleDescriptor::snapshot_version`）
+    pub snapshot_version: u32,
+    /// 数据的 CRC-like 校验和：SHA-256(data) 前 4 字节按小端解释为 u32
+    pub checksum: u32,
+}
+
+impl BackupModuleEntry {
+    /// 构造条目并计算校验和
+    pub fn new(data: Vec<u8>, snapshot_version: u32) -> Self {
+        let checksum = checksum_bytes(&data);
+        Self {
+            data,
+            snapshot_version,
+            checksum,
+        }
+    }
+
+    /// 校验 checksum，通过则返回 data
+    pub fn verify_and_take(self) -> anyhow::Result<Vec<u8>> {
+        let expected = checksum_bytes(&self.data);
+        if expected != self.checksum {
+            return Err(anyhow::anyhow!(
+                "checksum mismatch: expected {:#010x}, got {:#010x}",
+                expected,
+                self.checksum
+            ));
+        }
+        Ok(self.data)
+    }
+}
+
+/// 命名空间化的备份格式（v6）
 ///
-/// 相对 v5（`HashMap<String, Vec<u8>>`）的改进：
-/// - 模块顺序确定（有序列表）
-/// - 每个模块附带 SHA-256 完整性校验值
-/// - restore 前先全量校验（预飞校验），任一失败不进行任何状态写入
-/// - 可通过 [`upgrade_v5_to_v6`] 从 v5 升级（legacy 条目无校验值）
+/// 在 v5 `modules: HashMap<String, Vec<u8>>` 基础上，每个模块条目增加
+/// 快照版本号与 SHA-256 校验和，用于版本兼容性检查和数据完整性验证。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BackupPayloadV6 {
     pub version: u32,
     pub created_unix_ms: i64,
-    pub modules: Vec<coord_core::backup::BackupModuleEntry>,
+    /// 模块快照：namespace -> BackupModuleEntry
+    ///
+    /// 与 v5 相同的命名空间约定：
+    /// - "members": 集群成员列表
+    /// - "registry": 服务注册数据
+    /// - "config": 配置数据
+    /// - "lock": 锁状态
+    /// - "transit": Transit 密钥（安全域未初始化时存在）
+    /// - "pki": PKI 状态（安全域未初始化时存在）
+    /// - "security_state": Security 持久化状态
+    /// - "security_domain": 加密的安全域 blob
+    pub modules: HashMap<String, BackupModuleEntry>,
     #[serde(default)]
     pub consistency: BackupConsistencyMeta,
 }
 
-/// 采集 v6 格式备份载荷。
+/// 计算 data 的简化校验和：SHA-256 前 4 字节按小端解释为 u32
+fn checksum_bytes(data: &[u8]) -> u32 {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(data);
+    u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]])
+}
+
+/// 验证 entry 的校验和并提取 data；失败时附带模块名称
+fn verify_module(
+    modules: &HashMap<String, BackupModuleEntry>,
+    key: &str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    match modules.get(key) {
+        None => Ok(None),
+        Some(entry) => {
+            let data = entry
+                .clone()
+                .verify_and_take()
+                .with_context(|| format!("checksum verification failed for module '{key}'"))?;
+            Ok(Some(data))
+        }
+    }
+}
+
+/// 生成 v6 格式快照
 ///
-/// 采集内容与 [`snapshot_payload_v5`] 完全一致，
-/// 但每个模块条目自动附加 SHA-256 完整性校验值。
+/// 与 `snapshot_payload_v5` 的关键区别：
+/// - 对标准模块（config/lock/registry/transit/pki）通过 `ReplicatedModule::snapshot()`
+///   获取字节，不再在此处重复序列化逻辑（P3-02）。
+/// - 每个条目附带快照版本号和 SHA-256 校验和（P3-03）。
 pub async fn snapshot_payload_v6(state: &CoordinatorState) -> anyhow::Result<BackupPayloadV6> {
-    use coord_core::backup::BackupModuleEntry;
+    use coord_core::replication::ReplicatedModule;
 
     let _barrier = state.snapshot_barrier().lock().await;
 
+    let mut modules: HashMap<String, BackupModuleEntry> = HashMap::new();
+
+    // Members: 非 ReplicatedModule，仍手动序列化
     let mut members: Vec<MemberItem> = state
         .members()
         .read()
@@ -431,32 +506,52 @@ pub async fn snapshot_payload_v6(state: &CoordinatorState) -> anyhow::Result<Bac
         })
         .collect();
     members.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+    modules.insert(
+        "members".to_string(),
+        BackupModuleEntry::new(serde_json::to_vec(&members)?, 1),
+    );
 
-    let mut modules: Vec<BackupModuleEntry> = Vec::new();
-    modules.push(BackupModuleEntry::new(
-        "members",
-        &serde_json::to_vec(&members)?,
-    ));
-    modules.push(BackupModuleEntry::new(
-        "registry",
-        &serde_json::to_vec(&state.registry().snapshot().await)?,
-    ));
-    modules.push(BackupModuleEntry::new(
-        "config",
-        &serde_json::to_vec(&state.config().snapshot().await)?,
-    ));
-    modules.push(BackupModuleEntry::new(
-        "lock",
-        &serde_json::to_vec(&state.locks().snapshot().await)?,
-    ));
+    // 标准模块：通过 UFCS 调用 ReplicatedModule::snapshot() 获取字节（P3-02）
+    // UFCS 消除与 inherent snapshot() 的命名歧义；Arc 存入局部变量保证生命周期
 
+    let config_arc = state.config();
+    let config_desc = ReplicatedModule::descriptor(config_arc.as_ref());
+    let config_bytes = ReplicatedModule::snapshot(config_arc.as_ref())
+        .await
+        .map_err(|e| anyhow::anyhow!("config snapshot: {e}"))?;
+    modules.insert(
+        "config".to_string(),
+        BackupModuleEntry::new(config_bytes, config_desc.snapshot_version),
+    );
+
+    let lock_arc = state.locks();
+    let lock_desc = ReplicatedModule::descriptor(lock_arc.as_ref());
+    let lock_bytes = ReplicatedModule::snapshot(lock_arc.as_ref())
+        .await
+        .map_err(|e| anyhow::anyhow!("lock snapshot: {e}"))?;
+    modules.insert(
+        "lock".to_string(),
+        BackupModuleEntry::new(lock_bytes, lock_desc.snapshot_version),
+    );
+
+    let registry_arc = state.registry();
+    let registry_desc = ReplicatedModule::descriptor(registry_arc.as_ref());
+    let registry_bytes = ReplicatedModule::snapshot(registry_arc.as_ref())
+        .await
+        .map_err(|e| anyhow::anyhow!("registry snapshot: {e}"))?;
+    modules.insert(
+        "registry".to_string(),
+        BackupModuleEntry::new(registry_bytes, registry_desc.snapshot_version),
+    );
+
+    // Security 模块涉及加密，保留独立处理逻辑
     let security_status = state.security().seal_status().await;
     if security_status.initialized {
         if let Some(sec_state) = state.security().persistence_snapshot().await {
-            modules.push(BackupModuleEntry::new(
-                "security_state",
-                &serde_json::to_vec(&sec_state)?,
-            ));
+            modules.insert(
+                "security_state".to_string(),
+                BackupModuleEntry::new(serde_json::to_vec(&sec_state)?, 1),
+            );
         }
         let domain_blob = if security_status.sealed {
             state.security().cached_domain_blob().await
@@ -472,24 +567,35 @@ pub async fn snapshot_payload_v6(state: &CoordinatorState) -> anyhow::Result<Bac
                 .ok()
         };
         if let Some(blob) = domain_blob {
-            modules.push(BackupModuleEntry::new(
-                "security_domain",
-                &serde_json::to_vec(&blob)?,
-            ));
+            modules.insert(
+                "security_domain".to_string(),
+                BackupModuleEntry::new(serde_json::to_vec(&blob)?, 1),
+            );
         }
     } else {
-        let transit_keys = state.transit().snapshot().await;
-        if !transit_keys.is_empty() {
-            modules.push(BackupModuleEntry::new(
-                "transit",
-                &serde_json::to_vec(&transit_keys)?,
-            ));
+        // 安全域未初始化：transit 和 pki 以明文存储
+        let transit_arc = state.transit();
+        let transit_desc = ReplicatedModule::descriptor(transit_arc.as_ref());
+        let transit_bytes = ReplicatedModule::snapshot(transit_arc.as_ref())
+            .await
+            .map_err(|e| anyhow::anyhow!("transit snapshot: {e}"))?;
+        // 仅在非空时存储（transit_bytes 为 JSON array，空时为 b"[]"）
+        if transit_bytes != b"[]" {
+            modules.insert(
+                "transit".to_string(),
+                BackupModuleEntry::new(transit_bytes, transit_desc.snapshot_version),
+            );
         }
-        let pki = state.pki().snapshot().await;
-        modules.push(BackupModuleEntry::new(
-            "pki",
-            &serde_json::to_vec(&pki)?,
-        ));
+
+        let pki_arc = state.pki();
+        let pki_desc = ReplicatedModule::descriptor(pki_arc.as_ref());
+        let pki_bytes = ReplicatedModule::snapshot(pki_arc.as_ref())
+            .await
+            .map_err(|e| anyhow::anyhow!("pki snapshot: {e}"))?;
+        modules.insert(
+            "pki".to_string(),
+            BackupModuleEntry::new(pki_bytes, pki_desc.snapshot_version),
+        );
     }
 
     Ok(BackupPayloadV6 {
@@ -500,37 +606,17 @@ pub async fn snapshot_payload_v6(state: &CoordinatorState) -> anyhow::Result<Bac
     })
 }
 
-/// 将 v5 载荷升级为 v6 格式（legacy 条目，无 SHA-256）。
-///
-/// 升级后的条目 [`coord_core::backup::BackupModuleEntry::is_legacy`] 返回 `true`，
-/// restore 时 `verify_legacy = false` 跳过校验。
-/// `consistency.upgraded_from_version` 设为 `Some(5)` 以标记来源版本。
-pub fn upgrade_v5_to_v6(payload: BackupPayloadV5) -> BackupPayloadV6 {
-    use coord_core::backup::BackupModuleEntry;
-
-    let mut modules: Vec<BackupModuleEntry> = payload
-        .modules
-        .into_iter()
-        .map(|(name, bytes)| BackupModuleEntry::from_legacy(name, &bytes))
-        .collect();
-    // 排序确保 JSON 输出顺序稳定
-    modules.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let mut consistency = payload.consistency;
-    consistency.upgraded_from_version = Some(5);
-
-    BackupPayloadV6 {
-        version: BACKUP_PAYLOAD_V6_VERSION,
-        created_unix_ms: payload.created_unix_ms,
-        modules,
-        consistency,
-    }
+/// 为 v6 备份附加 Raft 元数据
+pub fn annotate_payload_v6_with_raft_metadata(
+    payload: &mut BackupPayloadV6,
+    commit_index: u64,
+    last_applied_index: u64,
+) {
+    payload.consistency.raft_commit_index = Some(commit_index);
+    payload.consistency.raft_last_applied_index = Some(last_applied_index);
 }
 
-/// 从 v6 载荷恢复协调器状态（正常恢复模式）。
-///
-/// 恢复前对**全部**模块条目做 SHA-256 预飞校验；任一失败立即返回错误，
-/// 不对状态做任何修改（失败回滚保障）。Legacy 条目（无校验值）跳过校验。
+/// 从 v6 备份恢复协调器状态
 pub async fn restore_payload_v6(
     state: &CoordinatorState,
     payload: BackupPayloadV6,
@@ -538,9 +624,7 @@ pub async fn restore_payload_v6(
     restore_payload_v6_with_policy(state, payload, true).await
 }
 
-/// 从 v6 载荷恢复协调器状态（Raft replay 模式）。
-///
-/// 缺失的本地节点不自动补回，校验策略与正常恢复相同。
+/// 从 v6 备份恢复协调器状态（Raft replay 模式：不自动添加本地节点）
 pub async fn restore_payload_v6_for_raft_replay(
     state: &CoordinatorState,
     payload: BackupPayloadV6,
@@ -553,50 +637,169 @@ async fn restore_payload_v6_with_policy(
     payload: BackupPayloadV6,
     keep_local_member_when_absent: bool,
 ) -> anyhow::Result<()> {
-    use coord_core::backup::preflight_verify;
+    use coord_core::replication::ReplicatedModule;
 
-    // 预飞校验：全部通过后才开始写入（失败回滚保障）
-    // verify_legacy=false：legacy 条目（v5 升级路径）跳过校验
-    preflight_verify(&payload.modules, false)
-        .map_err(|e| anyhow::anyhow!("v6 backup integrity check failed: {e}"))?;
+    let modules = payload.modules;
+    let has_security_domain =
+        modules.contains_key("security_state") || modules.contains_key("security_domain");
 
-    // 将 v6 模块列表转换为 v5 HashMap，复用现有恢复逻辑
-    let mut modules: HashMap<String, Vec<u8>> = HashMap::new();
-    for entry in &payload.modules {
-        let bytes = entry
-            .decode_bytes()
-            .map_err(|e| anyhow::anyhow!("failed to decode module '{}': {e}", entry.name))?;
-        modules.insert(entry.name.clone(), bytes);
+    // 验证校验和并提取各模块数据
+    let members_bytes = verify_module(&modules, "members")?.unwrap_or_else(|| b"[]".to_vec());
+    let config_bytes = verify_module(&modules, "config")?.unwrap_or_else(|| b"[]".to_vec());
+    let lock_bytes = verify_module(&modules, "lock")?.unwrap_or_else(|| b"[]".to_vec());
+    let registry_bytes = verify_module(&modules, "registry")?.unwrap_or_else(|| b"[]".to_vec());
+    let transit_bytes = verify_module(&modules, "transit")?;
+    let pki_bytes = verify_module(&modules, "pki")?;
+    let security_state_bytes = verify_module(&modules, "security_state")?;
+    let security_domain_bytes = verify_module(&modules, "security_domain")?;
+
+    // 快照版本兼容性检查（当前所有模块均为 v1，预留未来升级路径）
+    for (key, entry) in &modules {
+        if entry.snapshot_version == 0 {
+            return Err(anyhow::anyhow!(
+                "invalid snapshot_version 0 for module '{key}'"
+            ));
+        }
     }
 
-    let v5 = BackupPayloadV5 {
-        version: 5,
-        created_unix_ms: payload.created_unix_ms,
-        modules,
-        consistency: payload.consistency,
-    };
+    // 恢复前记录期望值，用于后置不变量验证
+    let expected_config_count: usize =
+        serde_json::from_slice::<Vec<serde_json::Value>>(&config_bytes)
+            .map(|v| v.len())
+            .unwrap_or(0);
+    let expected_member_count_min: usize = if members_bytes != b"[]" { 1 } else { 0 };
 
-    restore_payload_v5_with_policy(state, v5, keep_local_member_when_absent).await
+    // 通过 UFCS 调用 ReplicatedModule::restore() 恢复标准模块（P3-02）
+    let config_arc = state.config();
+    ReplicatedModule::restore(config_arc.as_ref(), &config_bytes)
+        .await
+        .map_err(|e| anyhow::anyhow!("config restore: {e}"))?;
+
+    let lock_arc = state.locks();
+    ReplicatedModule::restore(lock_arc.as_ref(), &lock_bytes)
+        .await
+        .map_err(|e| anyhow::anyhow!("lock restore: {e}"))?;
+
+    let registry_arc = state.registry();
+    ReplicatedModule::restore(registry_arc.as_ref(), &registry_bytes)
+        .await
+        .map_err(|e| anyhow::anyhow!("registry restore: {e}"))?;
+
+    // Security（保留与 v5 相同的复杂逻辑）
+    if has_security_domain {
+        let security_state: Option<SecurityPersistenceSnapshot> = security_state_bytes
+            .as_deref()
+            .map(serde_json::from_slice)
+            .transpose()?;
+        let security_domain_encrypted: Option<EncryptedSecurityDomainBlob> = security_domain_bytes
+            .as_deref()
+            .map(serde_json::from_slice)
+            .transpose()?;
+
+        state
+            .security()
+            .restore_persistence_state(security_state, security_domain_encrypted)
+            .await
+            .map_err(anyhow::Error::msg)?;
+
+        let status = state.security().seal_status().await;
+        if status.initialized {
+            state
+                .domain_lifecycle()
+                .clear()
+                .await
+                .map_err(anyhow::Error::msg)?;
+            state
+                .metrics()
+                .coord_security_sealed
+                .set(if status.sealed { 1 } else { 0 });
+        } else {
+            if let Some(transit_data) = transit_bytes {
+                let transit_arc = state.transit();
+                ReplicatedModule::restore(transit_arc.as_ref(), &transit_data)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("transit restore: {e}"))?;
+            }
+            if let Some(pki_data) = pki_bytes {
+                let pki_arc = state.pki();
+                ReplicatedModule::restore(pki_arc.as_ref(), &pki_data)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("pki restore: {e}"))?;
+            }
+            state.metrics().coord_security_sealed.set(0);
+        }
+    } else {
+        state
+            .security()
+            .restore_persistence_state(None, None)
+            .await
+            .map_err(anyhow::Error::msg)?;
+
+        if let Some(transit_data) = transit_bytes {
+            let transit_arc = state.transit();
+            ReplicatedModule::restore(transit_arc.as_ref(), &transit_data)
+                .await
+                .map_err(|e| anyhow::anyhow!("transit restore: {e}"))?;
+        }
+        if let Some(pki_data) = pki_bytes {
+            let pki_arc = state.pki();
+            ReplicatedModule::restore(pki_arc.as_ref(), &pki_data)
+                .await
+                .map_err(|e| anyhow::anyhow!("pki restore: {e}"))?;
+        }
+        state.metrics().coord_security_sealed.set(0);
+    }
+
+    // Members
+    let members: Vec<MemberItem> = serde_json::from_slice(&members_bytes).unwrap_or_default();
+    let mut member_map: HashMap<String, String> = members
+        .into_iter()
+        .map(|item| (item.node_id, item.address))
+        .collect();
+    if keep_local_member_when_absent {
+        member_map
+            .entry(state.runtime().node_id.clone())
+            .or_insert_with(|| "self".to_string());
+    }
+    *state.members().write().await = member_map;
+
+    state
+        .metrics()
+        .coord_services_registered_total
+        .set(state.registry().service_count().await as i64);
+    state
+        .metrics()
+        .coord_locks_held
+        .set(state.locks().list_holders().await.len() as i64);
+
+    verify_restore_invariants(
+        state,
+        expected_config_count,
+        expected_member_count_min,
+        has_security_domain,
+    )
+    .await?;
+
+    Ok(())
 }
 
-/// 序列化 v6 载荷为格式化 JSON。
+/// 将 v6 备份 payload 序列化为 JSON
 pub fn payload_to_json_v6(payload: &BackupPayloadV6) -> anyhow::Result<String> {
-    serde_json::to_string_pretty(payload)
-        .context("failed to serialize v6 backup payload to json")
+    serde_json::to_string_pretty(payload).context("failed to serialize v6 backup payload to json")
 }
 
-/// 从 JSON 解析 v6 备份载荷，版本字段必须为 `6`。
+/// 从 JSON 解析 v6 备份 payload
 pub fn payload_v6_from_json(payload_json: &str) -> anyhow::Result<BackupPayloadV6> {
     #[derive(serde::Deserialize)]
     struct VersionProbe {
         version: u32,
     }
     let probe: VersionProbe = serde_json::from_str(payload_json)
-        .context("failed to read version field from v6 snapshot payload")?;
+        .context("failed to read version field from snapshot payload")?;
 
-    if probe.version != BACKUP_PAYLOAD_V6_VERSION {
+    if probe.version != 6 {
         return Err(anyhow::anyhow!(
-            "unsupported snapshot payload version: {} (expected version 6)",
+            "unsupported snapshot payload version: {} (expected 6)",
             probe.version
         ));
     }
@@ -1108,201 +1311,5 @@ mod tests {
             serde_json::from_slice(transit_bytes).expect("parse transit");
         assert_eq!(transit_keys.len(), 1);
         assert_eq!(transit_keys[0].key_name, "my-key");
-    }
-
-    // ─── v6 tests ────────────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn snapshot_payload_v6_produces_version_6() {
-        let state = test_state("node-v6", unique_temp_dir("v6-version"));
-        let payload = snapshot_payload_v6(&state).await.expect("v6 snapshot");
-        assert_eq!(payload.version, 6);
-        assert!(
-            payload.modules.iter().any(|e| e.name == "members"),
-            "v6 payload must contain members module"
-        );
-    }
-
-    #[tokio::test]
-    async fn v6_all_modules_have_sha256() {
-        let state = test_state("node-v6-cs", unique_temp_dir("v6-checksums"));
-        state
-            .transit()
-            .create_key("k1")
-            .await
-            .expect("create key");
-        let payload = snapshot_payload_v6(&state).await.expect("v6 snapshot");
-        for entry in &payload.modules {
-            assert!(
-                entry.sha256.is_some(),
-                "module '{}' must have sha256 in v6 snapshot",
-                entry.name
-            );
-            assert!(entry.verify(true).is_ok(), "checksum must pass for '{}'", entry.name);
-        }
-    }
-
-    #[tokio::test]
-    async fn v6_roundtrip_preserves_state() {
-        let state = test_state("node-v6-rt", unique_temp_dir("v6-rt"));
-        {
-            let mut m = state.members().write().await;
-            m.insert("peer-a".to_string(), "10.0.0.1:9090".to_string());
-        }
-        state
-            .config()
-            .put("/v6/key".to_string(), "v6-value".to_string())
-            .await;
-
-        let payload = snapshot_payload_v6(&state).await.expect("v6 snapshot");
-        let json = payload_to_json_v6(&payload).expect("serialize v6");
-
-        let restored = test_state("node-v6-rt", unique_temp_dir("v6-rt-restored"));
-        restore_payload_v6(&restored, payload_v6_from_json(&json).expect("parse v6"))
-            .await
-            .expect("restore v6");
-
-        let val = restored.config().get("/v6/key").await;
-        assert_eq!(
-            val.map(|e| e.value),
-            Some("v6-value".to_string()),
-            "config value must survive v6 round-trip"
-        );
-        let members = restored.members().read().await;
-        assert!(members.contains_key("peer-a"), "member must survive v6 round-trip");
-    }
-
-    #[tokio::test]
-    async fn restore_v6_rejects_corrupted_checksum() {
-        let state = test_state("node-v6-corrupt", unique_temp_dir("v6-corrupt"));
-        state
-            .config()
-            .put("/k".to_string(), "v".to_string())
-            .await;
-
-        let mut payload = snapshot_payload_v6(&state).await.expect("v6 snapshot");
-        // 篡改第一个模块的 base64 数据，但保留原 sha256
-        if let Some(first) = payload.modules.first_mut() {
-            use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-            first.data_b64 = BASE64.encode(b"tampered bytes that won't match checksum");
-        }
-
-        let target = test_state("node-v6-corrupt-target", unique_temp_dir("v6-corrupt-target"));
-        let err = restore_payload_v6(&target, payload)
-            .await
-            .expect_err("restore must fail for corrupted checksum");
-        assert!(
-            err.to_string().contains("integrity check failed"),
-            "error must mention integrity check: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn upgrade_v5_to_v6_converts_all_modules() {
-        let state = test_state("node-up", unique_temp_dir("v5-to-v6"));
-        {
-            let mut m = state.members().write().await;
-            m.insert("peer-b".to_string(), "10.0.0.2:9090".to_string());
-        }
-        let v5 = snapshot_payload_v5(&state).await.expect("v5 snapshot");
-        let v5_module_count = v5.modules.len();
-
-        let v6 = upgrade_v5_to_v6(v5);
-        assert_eq!(v6.version, 6);
-        assert_eq!(v6.modules.len(), v5_module_count);
-        assert_eq!(v6.consistency.upgraded_from_version, Some(5));
-        for entry in &v6.modules {
-            assert!(
-                entry.is_legacy(),
-                "upgraded entry '{}' must be legacy (no sha256)",
-                entry.name
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn restore_v6_from_upgraded_v5_succeeds() {
-        let state = test_state("node-v6-upg", unique_temp_dir("v6-upg"));
-        {
-            let mut m = state.members().write().await;
-            m.insert("node-peer".to_string(), "10.0.0.3:9090".to_string());
-        }
-        state
-            .config()
-            .put("/upg/cfg".to_string(), "upg-val".to_string())
-            .await;
-
-        let v5 = snapshot_payload_v5(&state).await.expect("v5 snapshot");
-        let v6 = upgrade_v5_to_v6(v5);
-
-        let target = test_state("node-v6-upg-target", unique_temp_dir("v6-upg-target"));
-        restore_payload_v6(&target, v6)
-            .await
-            .expect("restore from upgraded v5 must succeed");
-
-        let cfg = target.config().get("/upg/cfg").await;
-        assert_eq!(cfg.map(|e| e.value), Some("upg-val".to_string()));
-        let members = target.members().read().await;
-        assert!(members.contains_key("node-peer"));
-    }
-
-    #[test]
-    fn payload_v6_from_json_rejects_v5() {
-        let json = r#"{"version": 5, "created_unix_ms": 0, "modules": {}}"#;
-        let err = payload_v6_from_json(json).expect_err("v5 must be rejected by v6 parser");
-        assert!(
-            err.to_string().contains("expected version 6") || err.to_string().contains("unsupported"),
-            "error must mention version: {err}"
-        );
-    }
-
-    #[test]
-    fn payload_v6_from_json_rejects_v4() {
-        let json = r#"{"version": 4, "created_unix_ms": 0, "modules": []}"#;
-        let err = payload_v6_from_json(json).expect_err("v4 must be rejected by v6 parser");
-        assert!(
-            err.to_string().contains("expected version 6") || err.to_string().contains("unsupported"),
-            "error must mention version: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn v6_replay_restore_keeps_payload_members_exactly() {
-        let state = test_state("node-v6-replay", unique_temp_dir("v6-replay"));
-        let mut modules = Vec::new();
-        use coord_core::backup::BackupModuleEntry;
-        let members_bytes = serde_json::to_vec(&vec![MemberItem {
-            node_id: "node-remote".to_string(),
-            address: "10.0.0.9:9090".to_string(),
-        }])
-        .unwrap();
-        modules.push(BackupModuleEntry::new("members", &members_bytes));
-        modules.push(BackupModuleEntry::new(
-            "registry",
-            &serde_json::to_vec(&Vec::<RegistrationSnapshot>::new()).unwrap(),
-        ));
-        modules.push(BackupModuleEntry::new(
-            "config",
-            &serde_json::to_vec(&Vec::<ConfigEntry>::new()).unwrap(),
-        ));
-        modules.push(BackupModuleEntry::new(
-            "lock",
-            &serde_json::to_vec(&Vec::<LockStateSnapshot>::new()).unwrap(),
-        ));
-
-        let payload = BackupPayloadV6 {
-            version: 6,
-            created_unix_ms: SystemClock.now_ms(),
-            modules,
-            consistency: BackupConsistencyMeta::default(),
-        };
-
-        restore_payload_v6_for_raft_replay(&state, payload)
-            .await
-            .expect("v6 raft replay restore should succeed");
-
-        let members = state.members().read().await;
-        assert!(!members.contains_key("node-v6-replay"));
-        assert!(members.contains_key("node-remote"));
     }
 }

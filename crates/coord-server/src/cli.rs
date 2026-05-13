@@ -77,6 +77,11 @@ pub(crate) struct ServeArgs {
     /// This flag is **silently ignored** in `serve` (production) mode.
     #[arg(long, env = "COORD_DEV_ROOT_TOKEN")]
     pub dev_root_token: Option<String>,
+    /// 可选：Gossip UDP 监听地址（host:port）。设置后节点会加入 Gossip 环，
+    /// 将自身服务信息广播给 coord-client 代理节点。
+    /// 示例：`COORD_GOSSIP_ADDR=0.0.0.0:7946`
+    #[arg(long, env = "COORD_GOSSIP_ADDR")]
+    pub gossip_addr: Option<String>,
 }
 
 /// Initialize the global tracing subscriber with a sensible default filter.
