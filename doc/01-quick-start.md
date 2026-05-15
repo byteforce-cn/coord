@@ -12,7 +12,7 @@
 # 以 dev 模式启动（gRPC :9090，HTTP/metrics :9091）
 docker run -d --name coord-dev \
   -p 9090:9090 -p 9091:9091 \
-  nexus.byteforce.cn/image-private/coord:0.1.13 dev
+  nexus.byteforce.cn/image-private/coord:0.1.14 dev
 ```
 
 验证服务就绪：

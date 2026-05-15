@@ -53,7 +53,7 @@ cargo build --release
 ## 四、使用 Docker 镜像（无需本地编译）
 
 ```bash
-docker pull nexus.byteforce.cn/image-private/coord:0.1.13
+docker pull nexus.byteforce.cn/image-private/coord:0.1.14
 ```
 
 镜像标签约定：
