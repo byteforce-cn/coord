@@ -55,8 +55,8 @@ use crate::raft_internal::RaftInternalGrpc;
 use crate::raft_runtime::{RAFT_TICK_INTERVAL, RaftRuntime};
 use crate::raft_store::RaftStore;
 use crate::services::{
-    AdminGrpc, AuthGrpc, ConfigGrpc, IdGenGrpc, LockGrpc, PkiGrpc, PolicyGrpc, RegistryGrpc, SealGrpc,
-    TransitGrpc, WorkflowGrpc,
+    AdminGrpc, AuthGrpc, ConfigGrpc, IdGenGrpc, LockGrpc, PkiGrpc, PolicyGrpc, RegistryGrpc,
+    SealGrpc, TransitGrpc, WorkflowGrpc,
 };
 use crate::workflow_adapters::new_coord_workflow_runtime;
 use coord_core::proposer::RaftProposer;
@@ -119,7 +119,9 @@ pub(crate) async fn run(args: ServeArgs, dev_mode: bool) -> anyhow::Result<()> {
     let policy_raft_store = Arc::new(coord_core::policy::raft_store::PolicyReplicatedStore::new(
         policy_store.clone(),
     ));
-    raft_runtime.register_module(policy_raft_store.clone()).await;
+    raft_runtime
+        .register_module(policy_raft_store.clone())
+        .await;
 
     // ── Cluster auto-join: decide bootstrap role and probe peer node ids ──
     let peer_addrs = parse_peers(&args.peers);
@@ -243,8 +245,9 @@ pub(crate) async fn run(args: ServeArgs, dev_mode: bool) -> anyhow::Result<()> {
     );
     let idgen_app = IdGenApp::new(state.idgen().clone(), state.metrics().clone());
 
-    let policy_evaluator: Arc<dyn coord_core::policy::evaluator::PolicyEvaluator> =
-        Arc::new(coord_core::policy::evaluator::RegorusEvaluator::new(policy_store.clone()));
+    let policy_evaluator: Arc<dyn coord_core::policy::evaluator::PolicyEvaluator> = Arc::new(
+        coord_core::policy::evaluator::RegorusEvaluator::new(policy_store.clone()),
+    );
     let policy_app = PolicyApp::new(
         policy_store.clone(),
         policy_evaluator,

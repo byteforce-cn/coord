@@ -28,10 +28,12 @@ fn policy_error_status(err: &PolicyError) -> Status {
         PolicyError::Evaluation { message } => {
             Status::internal(format!("policy evaluation error: {message}"))
         }
-        PolicyError::InputTooLarge { size, limit } => Status::invalid_argument(format!(
-            "input too large: {size} bytes (limit {limit})"
-        )),
-        PolicyError::Store { message } => Status::internal(format!("policy store error: {message}")),
+        PolicyError::InputTooLarge { size, limit } => {
+            Status::invalid_argument(format!("input too large: {size} bytes (limit {limit})"))
+        }
+        PolicyError::Store { message } => {
+            Status::internal(format!("policy store error: {message}"))
+        }
     }
 }
 

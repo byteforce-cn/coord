@@ -17,6 +17,7 @@ use coord_proto::coord::v1::config_service_server::ConfigService;
 use coord_proto::coord::v1::id_gen_service_server::IdGenService;
 use coord_proto::coord::v1::lock_service_server::LockService;
 use coord_proto::coord::v1::pki_service_server::PkiService;
+use coord_proto::coord::v1::policy_service_server::PolicyService;
 use coord_proto::coord::v1::registry_service_server::RegistryService;
 use coord_proto::coord::v1::seal_service_server::SealService;
 use coord_proto::coord::v1::transit_service_server::TransitService;
@@ -48,18 +49,17 @@ use coord_proto::coord::v1::{
     UpdateAutoRenewPolicyRequest, UpdateAutoRenewPolicyResponse,
 };
 use coord_proto::coord::v1::{
+    DeletePolicyBundleRequest, EvaluateRequest, EvaluateResponse, ExplainResponse,
+    ListPolicyBundlesRequest, ListPolicyBundlesResponse, PolicyBundleInfo, PutPolicyBundleRequest,
+    PutPolicyBundleResponse, SetBundleEnabledRequest,
+};
+use coord_proto::coord::v1::{
     DeployWorkflowDefinitionRequest, DeployWorkflowDefinitionResponse,
     GetWorkflowDefinitionRequest, GetWorkflowDefinitionResponse, GetWorkflowInstanceRequest,
     GetWorkflowInstanceResponse, ListWorkflowDefinitionsRequest, ListWorkflowDefinitionsResponse,
     ListWorkflowInstancesRequest, ListWorkflowInstancesResponse, ResumeWorkflowRequest,
     ResumeWorkflowResponse, StartWorkflowV2Request, StartWorkflowV2Response,
     WorkflowDefinitionInfo, WorkflowInstanceInfo,
-};
-use coord_proto::coord::v1::policy_service_server::PolicyService;
-use coord_proto::coord::v1::{
-    DeletePolicyBundleRequest, EvaluateRequest, EvaluateResponse, ExplainResponse,
-    ListPolicyBundlesRequest, ListPolicyBundlesResponse, PolicyBundleInfo,
-    PutPolicyBundleRequest, PutPolicyBundleResponse, SetBundleEnabledRequest,
 };
 use futures::Stream;
 use futures::StreamExt;
