@@ -55,11 +55,8 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
 
-      - name: Build coord-server
-        run: cargo build --release --locked -p coord-server --target ${{ matrix.target }}
-
-      - name: Build coord-ctl
-        run: cargo build --release --locked -p coord-ctl --target ${{ matrix.target }}
+      - name: Build coord
+        run: cargo build --release --locked -p coord --target ${{ matrix.target }}
 
       - name: Package binaries
         id: package
@@ -68,10 +65,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           ARCHIVE_NAME="coord-${VERSION}-${{ matrix.target }}"
           mkdir -p "dist/${ARCHIVE_NAME}"
-          cp "target/${{ matrix.target }}/release/coord-server" "dist/${ARCHIVE_NAME}/" 2>/dev/null || \
-          cp "target/${{ matrix.target }}/release/coord-server.exe" "dist/${ARCHIVE_NAME}/" 2>/dev/null || true
-          cp "target/${{ matrix.target }}/release/coord-ctl" "dist/${ARCHIVE_NAME}/" 2>/dev/null || \
-          cp "target/${{ matrix.target }}/release/coord-ctl.exe" "dist/${ARCHIVE_NAME}/" 2>/dev/null || true
+          cp "target/${{ matrix.target }}/release/coord" "dist/${ARCHIVE_NAME}/" 2>/dev/null || \
+          cp "target/${{ matrix.target }}/release/coord.exe" "dist/${ARCHIVE_NAME}/" 2>/dev/null || true
           cp README.md LICENSE CHANGELOG.md "dist/${ARCHIVE_NAME}/"
           cd dist
           tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}/"

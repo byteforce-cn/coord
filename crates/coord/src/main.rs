@@ -8,6 +8,7 @@ use cli::{Cli, Command, init_tracing};
 
 mod application;
 mod cli;
+mod client;
 mod ctl;
 mod http_api;
 mod interceptors;
@@ -37,6 +38,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Client(args) => {
             init_tracing(false);
             modes::client::run(args).await
+        }
+        Command::All(args) => {
+            init_tracing(true);
+            modes::all::run(args).await
         }
         Command::Ctl(args) => ctl::run(args).await,
     }

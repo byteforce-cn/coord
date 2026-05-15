@@ -31,8 +31,10 @@ pub(crate) enum Command {
     Server(ServeArgs),
     /// Run as Raft server in development mode (auto-init, single-node, fixed root token).
     Dev(ServeArgs),
-    /// Run as gossip client proxy (Phase 4D — not yet implemented).
+    /// Run as gossip client proxy (AP discovery cache + Gossip membership + CP passthrough).
     Client(ClientArgs),
+    /// Start CP server + AP gossip agent in a single process (development / single-machine).
+    All(AllArgs),
     /// Admin CLI — connect to a running coord server.
     Ctl(CtlArgs),
 }
@@ -95,24 +97,39 @@ pub(crate) struct ServeArgs {
 
 // ─── Client (gossip proxy) args ───────────────────────────────────────────────
 
-/// Arguments for `coord client` (Phase 4D gossip proxy — stub).
+/// Arguments for `coord client` (gossip sidecar proxy mode).
 #[derive(Debug, Clone, Args)]
 pub(crate) struct ClientArgs {
+    /// Stable node identity for this client proxy. Auto-generated UUID when omitted.
+    #[arg(long, env = "COORD_CLIENT_NODE_ID")]
+    pub node_id: Option<String>,
+    /// UDP address for the Gossip (Scuttlebutt) membership protocol.
+    #[arg(long, env = "COORD_CLIENT_GOSSIP_ADDR", default_value = "0.0.0.0:7947")]
+    pub gossip_addr: String,
+    /// Externally advertised Gossip address (public IP:port). Defaults to gossip_addr.
+    #[arg(long, env = "COORD_CLIENT_GOSSIP_ADVERTISE_ADDR")]
+    pub gossip_advertise_addr: Option<String>,
     /// gRPC address this proxy listens on for local services.
     #[arg(long, env = "COORD_CLIENT_GRPC_ADDR", default_value = "127.0.0.1:9090")]
     pub local_grpc_addr: String,
     /// HTTP/metrics address this proxy listens on.
     #[arg(long, env = "COORD_CLIENT_HTTP_ADDR", default_value = "127.0.0.1:9091")]
     pub local_http_addr: String,
-    /// UDP address for the gossip (SWIM/Scuttlebutt) membership protocol.
-    #[arg(long, env = "COORD_CLIENT_GOSSIP_ADDR", default_value = "0.0.0.0:7946")]
-    pub gossip_addr: String,
-    /// Comma-separated gossip seed addresses (host:port) for initial cluster discovery.
-    #[arg(long, env = "COORD_CLIENT_GOSSIP_PEERS", default_value = "")]
-    pub gossip_peers: String,
-    /// Comma-separated gRPC endpoints of coord server nodes for fallback direct access.
-    #[arg(long, env = "COORD_CLIENT_SERVER_ENDPOINTS", default_value = "")]
-    pub server_endpoints: String,
+    /// Gossip seed addresses (host:port), comma-separated.
+    #[arg(long, env = "COORD_CLIENT_GOSSIP_SEEDS", value_delimiter = ',')]
+    pub gossip_seeds: Vec<String>,
+    /// Gossip cluster ID — all nodes in the same cluster must use the same value.
+    #[arg(long, env = "COORD_CLIENT_CLUSTER_ID", default_value = "coord-cluster")]
+    pub cluster_id: String,
+    /// gRPC endpoints of coord-server nodes for CP fallback, comma-separated.
+    #[arg(long, env = "COORD_CLIENT_SERVER_ENDPOINTS", value_delimiter = ',')]
+    pub server_endpoints: Vec<String>,
+    /// How long (seconds) to cache service-endpoint mappings from the gossip ring.
+    #[arg(long, env = "COORD_CLIENT_CACHE_TTL_SECONDS", default_value_t = 30)]
+    pub cache_ttl_seconds: u64,
+    /// Health-check interval in seconds.
+    #[arg(long, env = "COORD_CLIENT_HEALTH_INTERVAL_SECONDS", default_value_t = 10)]
+    pub health_interval_seconds: u64,
     /// PEM-encoded CA for verifying server TLS certificates.
     #[arg(long, env = "COORD_CLIENT_TLS_CA")]
     pub tls_ca: Option<PathBuf>,
@@ -122,12 +139,28 @@ pub(crate) struct ClientArgs {
     /// Client private key (PEM) for mTLS.
     #[arg(long, env = "COORD_CLIENT_TLS_KEY")]
     pub tls_key: Option<PathBuf>,
-    /// How long (seconds) to cache service-endpoint mappings from the gossip ring.
+}
+
+// ─── All (server + client) args ──────────────────────────────────────────────
+
+/// Arguments for `coord all` — starts CP server and AP gossip agent in one process.
+///
+/// Server behaviour is identical to `coord dev` (auto-init, single-node, fixed root token).
+/// The embedded gossip agent connects to the same gRPC endpoint the server binds to.
+#[derive(Debug, Args)]
+pub(crate) struct AllArgs {
+    /// All server arguments (same as `coord dev`).
+    #[command(flatten)]
+    pub server: ServeArgs,
+    /// UDP port for the embedded gossip agent.
+    #[arg(long, env = "COORD_CLIENT_GOSSIP_PORT", default_value = "7947")]
+    pub gossip_port: u16,
+    /// Gossip cluster ID — must match all other nodes in the cluster.
+    #[arg(long, env = "COORD_CLIENT_CLUSTER_ID", default_value = "coord-cluster")]
+    pub cluster_id: String,
+    /// Service-endpoint cache TTL in seconds.
     #[arg(long, env = "COORD_CLIENT_CACHE_TTL_SECONDS", default_value_t = 30)]
     pub cache_ttl_seconds: u64,
-    /// Stable node identity for this client proxy.
-    #[arg(long, env = "COORD_CLIENT_NODE_ID")]
-    pub node_id: Option<String>,
 }
 
 // ─── Ctl args ─────────────────────────────────────────────────────────────────
