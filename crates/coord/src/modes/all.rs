@@ -5,8 +5,10 @@
 //! - Gossip 代理自动对接本地服务端的 gRPC 地址
 //!
 //! 关闭信号（Ctrl-C / SIGTERM）：
+//!
 //! - 服务端通过自身的 `shutdown_signal` future 接收信号并持久化 snapshot
 //! - Gossip 代理通过 `tokio::signal::ctrl_c()` 接收信号并执行 gossip leave
+//!
 //! 两者独立注册信号处理，并发等待，互不阻塞。
 
 use std::sync::Arc;
@@ -18,7 +20,7 @@ use coord_core::gossip_types::{GossipAgent, GossipMember, GossipNodeRole};
 use tracing::info;
 use uuid::Uuid;
 
-use crate::cli::{AllArgs, ClientArgs};
+use crate::cli::AllArgs;
 use crate::client::agent::ClientAgent;
 use crate::client::gossip::ChitchatGossipAgent;
 use crate::client::proxy::ProxyClient;
