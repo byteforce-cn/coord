@@ -128,7 +128,11 @@ pub(crate) struct ClientArgs {
     #[arg(long, env = "COORD_CLIENT_CACHE_TTL_SECONDS", default_value_t = 30)]
     pub cache_ttl_seconds: u64,
     /// Health-check interval in seconds.
-    #[arg(long, env = "COORD_CLIENT_HEALTH_INTERVAL_SECONDS", default_value_t = 10)]
+    #[arg(
+        long,
+        env = "COORD_CLIENT_HEALTH_INTERVAL_SECONDS",
+        default_value_t = 10
+    )]
     pub health_interval_seconds: u64,
     /// PEM-encoded CA for verifying server TLS certificates.
     #[arg(long, env = "COORD_CLIENT_TLS_CA")]
