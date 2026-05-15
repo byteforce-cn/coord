@@ -1,3 +1,4 @@
+#![allow(dead_code)] // P4D-05 代理模块尚未接入主流程，待后续 sprint 完成后移除
 //! P4D-05: `ProxyClient` — 透传 CP 操作到 coord-server。
 //!
 //! 在 gossip 环中发现 coord-server gRPC 端点，随机轮询（或后续实现 leader sticky）。

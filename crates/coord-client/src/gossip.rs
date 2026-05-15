@@ -8,7 +8,6 @@
 //! - `coord/health/{svc}/{id}` → JSON `HealthPayload`
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;

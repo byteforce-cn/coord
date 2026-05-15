@@ -88,9 +88,10 @@ build: sdk-base
 
 ## sdk-base — Build coord-sdk-base:local (SDK + Maven repo, shared by all Java builds)
 ## sdk-base — Build coord-sdk-base:local (pulls coord-sdk-java from Nexus)
-# NEXUS_PASSWORD env var must be set (e.g. export NEXUS_PASSWORD=xxx)
+# NEXUS_USER / NEXUS_PASSWORD env vars must be set
 sdk-base:
 	docker build -f sdk-base/Dockerfile \
+	  --build-arg NEXUS_USER="$(NEXUS_USER)" \
 	  --build-arg NEXUS_PASSWORD="$(NEXUS_PASSWORD)" \
 	  -t coord-sdk-base:local ..
 

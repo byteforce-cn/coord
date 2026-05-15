@@ -775,23 +775,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "coord-ctl"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "clap",
- "coord-proto",
- "prost-types",
- "tokio",
- "tonic",
-]
-
-[[package]]
 name = "coord-proto"
-version = "0.1.3"
+version = "0.1.4"
 source = "sparse+https://nexus.byteforce.cn/repository/cargo-repo/"
-checksum = "4f790706fdc36467fe8b892e77e8de9518a4b78a1694fbad17343da9ef213d8f"
+checksum = "0a6cf5eceac0d0387aab065c42a9d7557738fc813a8cc3e0ee214c0ec1674bc9"
 dependencies = [
  "anyhow",
  "prost",
@@ -799,40 +786,6 @@ dependencies = [
  "protoc-bin-vendored",
  "tonic",
  "tonic-build",
-]
-
-[[package]]
-name = "coord-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "axum-server",
- "base64",
- "bytes",
- "clap",
- "coord-core",
- "coord-proto",
- "futures",
- "http",
- "http-body-util",
- "openraft",
- "prost-types",
- "rand 0.8.6",
- "rcgen",
- "redb",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-stream",
- "tonic",
- "tower 0.4.13",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -2352,7 +2305,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.11.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "once_cell",
@@ -2372,7 +2325,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.11.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",

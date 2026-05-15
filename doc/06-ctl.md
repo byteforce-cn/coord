@@ -1,20 +1,22 @@
-# coord-ctl 命令参考
+# coord ctl 命令参考
 
-`coord-ctl` 是 coord 的命令行管理工具，通过 gRPC 与 `coord-server` 通信。
+`coord ctl` 是内置的管理 CLI，通过 gRPC 连接运行中的 coord 实例。
+
+命令组：`cluster` · `member` · `operator` · `auth` · `transit` · `pki` · `workflow` · `lock` · `backup`
 
 ---
 
 ## 全局选项
 
 ```
-coord-ctl [全局选项] <命令> [子命令] [参数]
+coord ctl [全局选项] <命令> [子命令] [参数]
 ```
 
 | 选项 | 环境变量 | 默认值 | 说明 |
 |------|----------|--------|------|
 | `--endpoint <URL>` | — | `http://127.0.0.1:9090` | 服务端 gRPC 地址 |
 | `--token <TOKEN>` | — | — | 请求鉴权 token（需要能力授权的端点必填） |
-| `--tls-ca <PATH>` | `COORD_TLS_CA` | — | PEM CA 证书（自签名/私有 CA 时验证服务端证书） |
+| `--tls-ca <PATH>` | `COORD_TLS_CA` | — | PEM CA 证书（自签名 / 私有 CA 时验证服务端证书） |
 | `--tls-cert <PATH>` | `COORD_TLS_CERT` | — | PEM 客户端证书（mTLS） |
 | `--tls-key <PATH>` | `COORD_TLS_KEY` | — | PEM 客户端私钥（mTLS） |
 | `--tls-domain <DOMAIN>` | `COORD_TLS_DOMAIN` | 端点 hostname | SNI / 证书验证域名覆盖 |
@@ -23,14 +25,14 @@ coord-ctl [全局选项] <命令> [子命令] [参数]
 
 ---
 
-## cluster — 集群管理
+## cluster — 集群状态
 
 ### `cluster status`
 
-查询节点状态和集群成员。
+查询节点状态和集群成员列表。
 
 ```bash
-coord-ctl cluster status
+coord ctl cluster status
 ```
 
 输出示例：
@@ -38,7 +40,7 @@ coord-ctl cluster status
 ```
 node_id: node-1
 state:   Leader
-dev_mode: true
+dev_mode: false
 members: node-1, node-2, node-3
 ```
 
@@ -51,18 +53,18 @@ members: node-1, node-2, node-3
 将新节点加入集群（通常由 auto-join 自动处理）。
 
 ```bash
-coord-ctl member add node-4 coord-4:9090
+coord ctl member add node-4 coord-4:9090
 ```
 
 ### `member remove <NODE_ID>`
 
-优雅移除节点。
+优雅移除节点（或强制移除不可达节点）。
 
 ```bash
-coord-ctl member remove node-4
+coord ctl member remove node-4
 
 # 节点已不可达时强制移除
-coord-ctl member remove node-4 --force-unreachable
+coord ctl member remove node-4 --force-unreachable
 ```
 
 ---
@@ -74,9 +76,7 @@ coord-ctl member remove node-4 --force-unreachable
 初始化安全域，返回 Shamir shares 和 root_token。**每个集群生命周期只执行一次**。
 
 ```bash
-coord-ctl operator init \
-  --shares-total 5 \
-  --threshold 3
+coord ctl operator init --shares-total 5 --threshold 3
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -84,77 +84,51 @@ coord-ctl operator init \
 | `--shares-total` | `5` | 总份额数 |
 | `--threshold` | `3` | 解封最低份额数 |
 
-输出：
-
-```
-initialized: true
-sealed:      true
-shares_total: 5
-threshold:   3
-unseal_shares:
-shamir:AAAAAAA...
-shamir:BBBBBBB...
-shamir:CCCCCCC...
-shamir:DDDDDDD...
-shamir:EEEEEEE...
-root_token: s.xxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-> ⚠️ **立即保存**上述输出。丢失 threshold 个以上 share 将导致安全域中的数据永久不可恢复。
-
 ### `operator seal-status`
 
-查询当前 seal 状态。
+查看当前 seal 状态。
 
 ```bash
-coord-ctl operator seal-status
+coord ctl operator seal-status
 ```
 
 ### `operator seal`
 
-立即密封安全域（需要 root_token）。
+封印安全域（操作后所有受保护 API 将返回 `FAILED_PRECONDITION`）。
 
 ```bash
-coord-ctl --token <root_token> operator seal
+coord ctl --token <root_token> operator seal
 ```
 
 ### `operator unseal <SHARE>`
 
-提交一个 Shamir share。达到 threshold 后自动解封。
+提交一个 Shamir 份额。提交 threshold 份后自动解封。
 
 ```bash
-coord-ctl operator unseal shamir:AAAAAAA...
-# → sealed: true, progress: 1/3
-
-coord-ctl operator unseal shamir:BBBBBBB...
-# → sealed: true, progress: 2/3
-
-coord-ctl operator unseal shamir:CCCCCCC...
-# → sealed: false, progress: 0
+coord ctl operator unseal shamir:AAAA...
 ```
 
 ### `operator rotate-root-key`
 
-在已解封状态下轮换根密钥，返回新的 shares（旧 shares 立即失效）。
+轮换根加密密钥，生成新的 Shamir shares（旧 shares 作废）。
 
 ```bash
-coord-ctl --token <root_token> operator rotate-root-key \
-  --shares-total 5 \
-  --threshold 3
+coord ctl --token <root_token> operator rotate-root-key \
+  --shares-total 5 --threshold 3
 ```
 
 ---
 
-## auth — 身份认证
+## auth — AppRole 认证管理
 
 ### `auth approle create <ROLE_NAME>`
 
 创建 AppRole。
 
 ```bash
-coord-ctl --token <root_token> auth approle create order-svc \
+coord ctl --token <root_token> auth approle create order-service \
+  --policy read-config \
   --policy transit.encrypt \
-  --policy config.read \
   --token-ttl-seconds 3600 \
   --secret-id-ttl-seconds 86400 \
   --secret-id-num-uses 10
@@ -162,141 +136,100 @@ coord-ctl --token <root_token> auth approle create order-svc \
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--policy` | （必填，可多次） | 附加能力策略 |
-| `--token-ttl-seconds` | `3600` | 登录后 token 有效期（秒） |
+| `--policy` | — | 附加策略名称（可重复） |
+| `--token-ttl-seconds` | `3600` | Token 有效期（秒） |
 | `--secret-id-ttl-seconds` | `86400` | SecretId 有效期（秒） |
-| `--secret-id-num-uses` | `10` | SecretId 最多使用次数（0 = 无限制） |
-
-输出：
-
-```
-role_id: uuid-xxx
-role_name: order-svc
-policies: transit.encrypt, config.read
-```
+| `--secret-id-num-uses` | `10` | SecretId 最大使用次数（0=不限） |
 
 ### `auth approle generate-secret-id <ROLE_ID>`
 
-为指定 role 生成一次性 SecretId。
+为指定 AppRole 生成一次性 SecretId。
 
 ```bash
-coord-ctl --token <root_token> auth approle generate-secret-id <role_id>
-```
-
-输出：
-
-```
-role_id: uuid-xxx
-secret_id: sid-xxx
-expires_unix_seconds: 1700000000
+coord ctl --token <root_token> auth approle generate-secret-id <role_id>
 ```
 
 ### `auth approle login <ROLE_ID> <SECRET_ID>`
 
-用 role_id + secret_id 换取 access_token。
+使用 AppRole 凭证登录，返回 access token。
 
 ```bash
-coord-ctl auth approle login <role_id> <secret_id>
-```
-
-输出：
-
-```
-access_token: tok-xxx
-role_id: uuid-xxx
-policies: transit.encrypt, config.read
-expires_unix_seconds: 1700003600
+coord ctl auth approle login <role_id> <secret_id>
 ```
 
 ### `auth approle lookup <ACCESS_TOKEN>`
 
-验证并查看 token 信息。
+验证 token 有效性并查看附加策略。
 
 ```bash
-coord-ctl auth approle lookup <access_token>
+coord ctl auth approle lookup <access_token>
 ```
 
 ### `auth approle revoke <ACCESS_TOKEN>`
 
-吊销 token。
+吊销 token（立即失效）。
 
 ```bash
-coord-ctl --token <root_token> auth approle revoke <access_token>
+coord ctl --token <root_token> auth approle revoke <access_token>
 ```
 
 ---
 
-## transit — Transit 加密
-
-> 所有 transit 写操作需要携带有 `transit.*` 策略的 token。
+## transit — 加密密钥管理
 
 ### `transit create-key <KEY_NAME>`
 
-创建加密密钥（AES-256-GCM）。
+创建新的加密密钥（默认算法 AES-256-GCM）。
 
 ```bash
-coord-ctl --token <token> transit create-key app-key
-# → key_name: app-key, primary_version: 1
+coord ctl --token <token> transit create-key my-key
 ```
 
 ### `transit encrypt <KEY_NAME> <PLAINTEXT>`
 
-加密明文字符串。
-
 ```bash
-coord-ctl --token <token> transit encrypt app-key "hello coord"
-# → ciphertext: vault:v1:AAAAAA..., version: 1
+coord ctl --token <token> transit encrypt my-key "hello world"
+# → vault:v1:AAAA...
 ```
 
 ### `transit decrypt <KEY_NAME> <CIPHERTEXT>`
 
-解密密文，输出 base64 和 UTF-8 明文。
-
 ```bash
-coord-ctl --token <token> transit decrypt app-key "vault:v1:AAAAAA..."
-# → plaintext_utf8: hello coord
+coord ctl --token <token> transit decrypt my-key "vault:v1:AAAA..."
+# → hello world
 ```
 
 ### `transit rotate-key <KEY_NAME>`
 
-轮换密钥（新 primary version + 1，旧版本密文仍可解密）。
+轮换密钥（旧版本仍可解密；新版本用于加密）。
 
 ```bash
-coord-ctl --token <token> transit rotate-key app-key
-# → primary_version: 2
+coord ctl --token <token> transit rotate-key my-key
 ```
 
 ### `transit hmac-sign <KEY_NAME> <DATA>`
 
-HMAC 签名。
-
 ```bash
-coord-ctl --token <token> transit hmac-sign app-key "payload-to-sign"
-# → signature: hmac:v1:BBBBBB..., version: 1
+coord ctl --token <token> transit hmac-sign my-hmac-key "payload"
 ```
 
 ### `transit hmac-verify <KEY_NAME> <DATA> <SIGNATURE>`
 
-验证 HMAC 签名。
-
 ```bash
-coord-ctl --token <token> transit hmac-verify app-key "payload-to-sign" "hmac:v1:BBBBBB..."
-# → ok: true
+coord ctl --token <token> transit hmac-verify my-hmac-key "payload" "hmac:v1:..."
 ```
 
 ---
 
-## pki — PKI 证书管理
-
-> PKI 写操作需要有 `pki.*` 策略的 token。
+## pki — 证书管理
 
 ### `pki issue <COMMON_NAME>`
 
-签发叶证书。
+颁发 X.509 证书。
 
 ```bash
-coord-ctl --token <token> pki issue svc-a.internal \
-  --san svc-a.internal \
+coord ctl --token <token> pki issue api.internal \
+  --san api.internal \
   --san 127.0.0.1 \
   --ttl-seconds 86400 \
   --auto-renew
@@ -304,105 +237,83 @@ coord-ctl --token <token> pki issue svc-a.internal \
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--san` | （可多次） | Subject Alternative Name（域名或 IP） |
-| `--ttl-seconds` | `86400` | 证书有效期 |
-| `--auto-renew` | `false` | 到期前自动续期 |
-| `--renew-before-seconds` | `3600` | 提前续期时间窗口 |
+| `--san` | — | Subject Alternative Name（可重复） |
+| `--ttl-seconds` | `86400` | 证书有效期（秒） |
+| `--auto-renew` | `false` | 启用自动续期 |
+| `--renew-before-seconds` | `3600` | 到期前多少秒触发续期 |
 
-输出：`serial_number`, `certificate_pem`, `private_key_pem`, `ca_certificate_pem`
+### `pki renew <SERIAL_NUMBER>`
 
-### `pki renew <SERIAL>`
-
-手动续期证书。
+续期已有证书。
 
 ```bash
-coord-ctl --token <token> pki renew <serial_number> --ttl-seconds 86400
+coord ctl --token <token> pki renew <serial> --ttl-seconds 86400
 ```
 
-### `pki revoke <SERIAL>`
+### `pki revoke <SERIAL_NUMBER>`
 
 吊销证书。
 
 ```bash
-coord-ctl --token <token> pki revoke <serial_number> --reason key-compromise
+coord ctl --token <token> pki revoke <serial> --reason key-compromise
 ```
-
-可选 reason：`unspecified` | `key-compromise` | `ca-compromise` | `affiliation-changed` | `superseded` | `cessation-of-operation`
 
 ### `pki ca-chain`
 
-输出 PEM 格式 CA 证书链。
+获取 CA 证书链（PEM 格式）。
 
 ```bash
-coord-ctl pki ca-chain > ca-chain.pem
+coord ctl pki ca-chain
 ```
 
 ### `pki crl`
 
-输出 PEM 格式证书吊销列表（CRL）。
+获取证书吊销列表（CRL）。
 
 ```bash
-coord-ctl pki crl --next-update-seconds 600
+coord ctl pki crl
 ```
 
-### `pki ocsp <SERIAL>`
+### `pki ocsp <SERIAL_NUMBER>`
 
-查询证书 OCSP 状态。
-
-```bash
-coord-ctl pki ocsp <serial_number>
-```
-
-### `pki set-auto-renew-policy <SERIAL>`
-
-设置证书自动续期策略。
+查询单张证书的 OCSP 状态。
 
 ```bash
-coord-ctl --token <token> pki set-auto-renew-policy <serial> \
-  --enabled true \
-  --renew-before-seconds 3600
+coord ctl pki ocsp <serial>
 ```
 
 ### `pki run-auto-renew`
 
-立即触发一次自动续期扫描。
+手动触发自动续期任务（通常由内部定时器自动调用）。
 
 ```bash
-coord-ctl --token <token> pki run-auto-renew
+coord ctl --token <token> pki run-auto-renew
 ```
 
-### ACME 工作流
+### ACME 相关
 
 ```bash
 # 1. 创建 ACME 订单
-coord-ctl --token <token> pki acme-order \
-  --domain example.com \
-  --domain www.example.com \
-  --ttl-seconds 7776000 \
-  --challenge-type http-01
+coord ctl --token <token> pki acme-order \
+  --domain example.com --domain www.example.com
 
-# 2. 完成 HTTP-01 挑战（将 token 内容部署到 .well-known/acme-challenge/）
-coord-ctl --token <token> pki acme-challenge \
-  <order_id> example.com <token>
+# 2. 完成 HTTP-01 challenge
+coord ctl --token <token> pki acme-challenge <order_id> example.com <token>
 
-# 3. Finalize，获取证书
-coord-ctl --token <token> pki acme-finalize \
-  <order_id> --common-name example.com
+# 3. 颁发证书
+coord ctl --token <token> pki acme-finalize <order_id>
 ```
 
 ---
 
-## workflow — 工作流引擎
-
-> **开发预览**：使用 `MemoryWorkflowStore`，重启后实例状态丢失。
+## workflow — 工作流管理
 
 ### `workflow deploy <FILE>`
 
-部署 CNCF Serverless Workflow DSL v2 定义文件。
+部署工作流定义（YAML 格式）。
 
 ```bash
-coord-ctl workflow deploy payment.yaml \
-  --definition-id payment-v1
+coord ctl --token <token> workflow deploy ./order-flow.yaml
 ```
 
 ### `workflow start`
@@ -410,26 +321,25 @@ coord-ctl workflow deploy payment.yaml \
 启动工作流实例。
 
 ```bash
-coord-ctl workflow start \
-  --definition-id payment-v1 \
-  --namespace default \
-  --input-json '{"order_id":"123","amount":100}'
+coord ctl --token <token> workflow start \
+  --definition-id order-flow \
+  --input-json '{"order_id":"o-123"}'
 ```
 
 ### `workflow get <INSTANCE_ID>`
 
-查询实例状态。
+查看工作流实例状态。
 
 ```bash
-coord-ctl workflow get <instance_id>
+coord ctl --token <token> workflow get <instance_id>
 ```
 
 ### `workflow list`
 
-列出实例。
+列出工作流实例。
 
 ```bash
-coord-ctl workflow list --namespace default --definition-name payment
+coord ctl --token <token> workflow list --namespace payments
 ```
 
 ### `workflow definitions`
@@ -437,15 +347,19 @@ coord-ctl workflow list --namespace default --definition-name payment
 列出已部署的工作流定义。
 
 ```bash
-coord-ctl workflow definitions --namespace default
+coord ctl --token <token> workflow definitions
 ```
 
-### `workflow definition <DEFINITION_ID>`
+---
 
-查看定义 YAML。
+## lock — 分布式锁
+
+### `lock list`
+
+列出当前所有活跃锁。
 
 ```bash
-coord-ctl workflow definition payment-v1
+coord ctl --token <token> lock list
 ```
 
 ---
@@ -454,54 +368,14 @@ coord-ctl workflow definition payment-v1
 
 ### `backup create`
 
-创建集群状态快照。
-
 ```bash
-coord-ctl backup create --file coord-backup.json
+coord ctl --token <token> backup create --file coord-backup.json
 ```
 
 ### `backup restore`
 
-从快照恢复。
+> ⚠️ **危险操作**：会覆盖当前状态，操作前务必停服或确认数据。
 
 ```bash
-coord-ctl backup restore coord-backup.json
-```
-
----
-
-## lock — 分布式锁（查询）
-
-### `lock list`
-
-列出当前所有持有中的锁。
-
-```bash
-coord-ctl lock list
-```
-
-输出示例：
-
-```
-lock=db-migration owner=svc-a-pod-1 expires_unix_ms=1700000000000
-```
-
----
-
-## TLS 连接示例
-
-```bash
-# 服务端自签名 CA 场景
-coord-ctl \
-  --endpoint https://coord.internal:9090 \
-  --tls-ca /etc/coord/ca.pem \
-  cluster status
-
-# mTLS 场景
-coord-ctl \
-  --endpoint https://coord.internal:9090 \
-  --tls-ca /etc/coord/ca.pem \
-  --tls-cert /etc/coord/client.crt \
-  --tls-key /etc/coord/client.key \
-  cluster status
+coord ctl --token <token> backup restore coord-backup.json
 ```

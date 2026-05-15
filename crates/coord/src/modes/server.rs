@@ -26,6 +26,7 @@ use coord_proto::coord::v1::config_service_server::ConfigServiceServer;
 use coord_proto::coord::v1::id_gen_service_server::IdGenServiceServer;
 use coord_proto::coord::v1::lock_service_server::LockServiceServer;
 use coord_proto::coord::v1::pki_service_server::PkiServiceServer;
+use coord_proto::coord::v1::policy_service_server::PolicyServiceServer;
 use coord_proto::coord::v1::raft_internal_service_server::RaftInternalServiceServer;
 use coord_proto::coord::v1::registry_service_server::RegistryServiceServer;
 use coord_proto::coord::v1::seal_service_server::SealServiceServer;
@@ -39,6 +40,7 @@ use crate::application::config_app::ConfigApp;
 use crate::application::idgen_app::IdGenApp;
 use crate::application::lock_app::LockApp;
 use crate::application::pki_app::PkiApp;
+use crate::application::policy_app::PolicyApp;
 use crate::application::registry_app::RegistryApp;
 use crate::application::security_app::SecurityApp;
 use crate::application::transit_app::TransitApp;
@@ -53,11 +55,10 @@ use crate::raft_internal::RaftInternalGrpc;
 use crate::raft_runtime::{RAFT_TICK_INTERVAL, RaftRuntime};
 use crate::raft_store::RaftStore;
 use crate::services::{
-    AdminGrpc, AuthGrpc, ConfigGrpc, IdGenGrpc, LockGrpc, PkiGrpc, RegistryGrpc, SealGrpc,
+    AdminGrpc, AuthGrpc, ConfigGrpc, IdGenGrpc, LockGrpc, PkiGrpc, PolicyGrpc, RegistryGrpc, SealGrpc,
     TransitGrpc, WorkflowGrpc,
 };
 use crate::workflow_adapters::new_coord_workflow_runtime;
-use axum_server;
 use coord_core::proposer::RaftProposer;
 use coord_core::workflow::ports::WorkflowRunner;
 
@@ -112,6 +113,13 @@ pub(crate) async fn run(args: ServeArgs, dev_mode: bool) -> anyhow::Result<()> {
     raft_runtime.register_module(state.transit().clone()).await;
     raft_runtime.register_module(state.pki().clone()).await;
     raft_runtime.register_module(workflow_store.clone()).await;
+
+    // Policy: create standalone store + raft adapter (not part of CoordinatorState)
+    let policy_store = Arc::new(coord_core::policy::store::PolicyStore::new());
+    let policy_raft_store = Arc::new(coord_core::policy::raft_store::PolicyReplicatedStore::new(
+        policy_store.clone(),
+    ));
+    raft_runtime.register_module(policy_raft_store.clone()).await;
 
     // ── Cluster auto-join: decide bootstrap role and probe peer node ids ──
     let peer_addrs = parse_peers(&args.peers);
@@ -235,6 +243,15 @@ pub(crate) async fn run(args: ServeArgs, dev_mode: bool) -> anyhow::Result<()> {
     );
     let idgen_app = IdGenApp::new(state.idgen().clone(), state.metrics().clone());
 
+    let policy_evaluator: Arc<dyn coord_core::policy::evaluator::PolicyEvaluator> =
+        Arc::new(coord_core::policy::evaluator::RegorusEvaluator::new(policy_store.clone()));
+    let policy_app = PolicyApp::new(
+        policy_store.clone(),
+        policy_evaluator,
+        state.metrics().clone(),
+        raft_proposer.clone(),
+    );
+
     spawn_pki_auto_renew_loop(state.clone(), pki_app.clone(), raft_runtime.clone());
 
     if is_bootstrap && !peer_addrs.is_empty() {
@@ -322,6 +339,7 @@ pub(crate) async fn run(args: ServeArgs, dev_mode: bool) -> anyhow::Result<()> {
             raft_runtime,
         )))
         .add_service(IdGenServiceServer::new(IdGenGrpc::new(idgen_app)))
+        .add_service(PolicyServiceServer::new(PolicyGrpc::new(policy_app)))
         .serve_with_shutdown(
             grpc_addr,
             shutdown_signal(shutdown_state, shutdown_raft_store, shutdown_raft_runtime),

@@ -16,7 +16,6 @@ use super::*;
 use crate::application::workflow_app::{WorkflowApp, WorkflowAppError};
 use crate::wire::error::coord_status;
 use coord_core::error::CoordError;
-use coord_core::workflow::engine::WorkflowInstance;
 
 #[derive(Clone)]
 pub struct WorkflowGrpc {

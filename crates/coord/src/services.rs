@@ -55,6 +55,12 @@ use coord_proto::coord::v1::{
     ResumeWorkflowResponse, StartWorkflowV2Request, StartWorkflowV2Response,
     WorkflowDefinitionInfo, WorkflowInstanceInfo,
 };
+use coord_proto::coord::v1::policy_service_server::PolicyService;
+use coord_proto::coord::v1::{
+    DeletePolicyBundleRequest, EvaluateRequest, EvaluateResponse, ExplainResponse,
+    ListPolicyBundlesRequest, ListPolicyBundlesResponse, PolicyBundleInfo,
+    PutPolicyBundleRequest, PutPolicyBundleResponse, SetBundleEnabledRequest,
+};
 use futures::Stream;
 use futures::StreamExt;
 use tokio::sync::{RwLock, mpsc};
@@ -74,6 +80,7 @@ mod config;
 mod idgen;
 mod lock;
 mod pki;
+mod policy;
 mod registry;
 mod seal;
 mod transit;
@@ -85,6 +92,7 @@ pub use config::ConfigGrpc;
 pub use idgen::IdGenGrpc;
 pub use lock::LockGrpc;
 pub use pki::PkiGrpc;
+pub use policy::PolicyGrpc;
 pub use registry::RegistryGrpc;
 pub use seal::SealGrpc;
 pub use transit::TransitGrpc;

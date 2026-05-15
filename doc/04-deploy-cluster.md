@@ -7,20 +7,19 @@
 ## 一、启动集群
 
 ```bash
-# 从仓库根目录执行
 docker compose -f docker/docker-compose.cluster.yml up -d
 
 # 指定版本
-COORD_VERSION=0.1.9 docker compose -f docker/docker-compose.cluster.yml up -d
+COORD_VERSION=0.1.10 docker compose -f docker/docker-compose.cluster.yml up -d
 ```
 
 ### 节点端口映射
 
 | 节点 | gRPC（宿主机） | HTTP（宿主机） |
 |------|---------------|---------------|
-| coord-1 | `9090` | `8080` |
-| coord-2 | `19090` | `18080` |
-| coord-3 | `29090` | `28080` |
+| coord-1 | `9090` | `9091` |
+| coord-2 | `19090` | `19091` |
+| coord-3 | `29090` | `29091` |
 
 ---
 
@@ -34,12 +33,12 @@ COORD_VERSION=0.1.9 docker compose -f docker/docker-compose.cluster.yml up -d
 ### 验证集群就绪
 
 ```bash
-curl http://localhost:8080/healthz   # coord-1
-curl http://localhost:18080/healthz  # coord-2
-curl http://localhost:28080/healthz  # coord-3
+curl http://localhost:9091/healthz   # coord-1
+curl http://localhost:19091/healthz  # coord-2
+curl http://localhost:29091/healthz  # coord-3
 
 # 查看 Raft 状态
-coord-ctl --endpoint http://127.0.0.1:9090 cluster status
+coord ctl cluster status
 ```
 
 ---
@@ -49,16 +48,16 @@ coord-ctl --endpoint http://127.0.0.1:9090 cluster status
 安全域初始化只需对集群 **leader** 执行一次（通常是 coord-1）：
 
 ```bash
-coord-ctl --endpoint http://127.0.0.1:9090 \
+coord ctl --endpoint http://127.0.0.1:9090 \
   operator init --shares-total 5 --threshold 3
 ```
 
-输出保存好 5 个 shares 和 root_token，然后提交 3 个 share 解封：
+保存 5 个 shares 和 root_token，然后提交 3 个 share 解封：
 
 ```bash
-coord-ctl --endpoint http://127.0.0.1:9090 operator unseal shamir:AAAA...
-coord-ctl --endpoint http://127.0.0.1:9090 operator unseal shamir:BBBB...
-coord-ctl --endpoint http://127.0.0.1:9090 operator unseal shamir:CCCC...
+coord ctl --endpoint http://127.0.0.1:9090 operator unseal shamir:AAAA...
+coord ctl --endpoint http://127.0.0.1:9090 operator unseal shamir:BBBB...
+coord ctl --endpoint http://127.0.0.1:9090 operator unseal shamir:CCCC...
 # → sealed: false
 ```
 
@@ -66,9 +65,9 @@ coord-ctl --endpoint http://127.0.0.1:9090 operator unseal shamir:CCCC...
 >
 > ```bash
 > for PORT in 9090 19090 29090; do
->   coord-ctl --endpoint http://127.0.0.1:$PORT operator unseal shamir:AAAA...
->   coord-ctl --endpoint http://127.0.0.1:$PORT operator unseal shamir:BBBB...
->   coord-ctl --endpoint http://127.0.0.1:$PORT operator unseal shamir:CCCC...
+>   coord ctl --endpoint http://127.0.0.1:$PORT operator unseal shamir:AAAA...
+>   coord ctl --endpoint http://127.0.0.1:$PORT operator unseal shamir:BBBB...
+>   coord ctl --endpoint http://127.0.0.1:$PORT operator unseal shamir:CCCC...
 > done
 > ```
 
@@ -78,32 +77,31 @@ coord-ctl --endpoint http://127.0.0.1:9090 operator unseal shamir:CCCC...
 
 ```bash
 # 查看当前成员
-coord-ctl cluster status
+coord ctl cluster status
 
 # 新增节点
-coord-ctl member add coord-4 coord-4:9090
+coord ctl member add coord-4 coord-4:9090
 
 # 移除节点（优雅下线）
-coord-ctl member remove coord-4
+coord ctl member remove coord-4
 
 # 移除不可达节点（强制）
-coord-ctl member remove coord-4 --force-unreachable
+coord ctl member remove coord-4 --force-unreachable
 ```
 
 ---
 
 ## 五、自定义 Compose 配置
 
-如需修改端口、持久化路径或添加 TLS，复制并编辑 Compose 文件：
-
 ```yaml
 services:
   coord-1:
     image: nexus.byteforce.cn/image-private/coord:0.1.10
+    command: ["server"]
     environment:
       COORD_NODE_ID: "node-1"
       COORD_GRPC_ADDR: "0.0.0.0:9090"
-      COORD_HTTP_ADDR: "0.0.0.0:8080"
+      COORD_HTTP_ADDR: "0.0.0.0:9091"
       COORD_CLUSTER_PEERS: "coord-2:9090,coord-3:9090"
       COORD_BOOTSTRAP: "true"
       COORD_DATA_DIR: "/data"
@@ -122,10 +120,10 @@ services:
 
 ```bash
 # 创建备份（快照写入本地文件）
-coord-ctl backup create --file coord-backup.json
+coord ctl backup create --file coord-backup.json
 
-# 恢复（危险！会覆盖当前状态，恢复前务必停服或确认数据）
-coord-ctl backup restore coord-backup.json
+# 恢复（危险！会覆盖当前状态，操作前务必停服或确认数据）
+coord ctl backup restore coord-backup.json
 ```
 
 ---
@@ -148,4 +146,4 @@ docker compose -f docker/docker-compose.cluster.yml down -v
 - **网络延迟**：节点间 RTT 建议 ≤ 10 ms，Raft tick 周期 100 ms。
 - **数据目录**：使用块存储（SSD）挂载 `/data`，不要使用 NFS。
 - **时钟同步**：所有节点 NTP 偏差应 ≤ 500 ms，否则影响锁 TTL 精度。
-- **端口防火墙**：节点间 gRPC 端口（默认 9090）需互通；HTTP 控制面（8080）对外暴露时建议加 Nginx/mTLS 限制。
+- **端口防火墙**：节点间 gRPC 端口（默认 9090）须互通；HTTP 控制面（9091）对外暴露时建议加 Nginx/mTLS 限制。

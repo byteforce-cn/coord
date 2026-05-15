@@ -1,3 +1,4 @@
+#![allow(dead_code)] // P4D-06 健康检查模块尚未接入主流程，待后续 sprint 完成后移除
 //! P4D-06: `HealthScheduler` — 周期性健康检查，结果通过 Gossip 广播。
 //!
 //! 每隔 `interval` 秒对 `targets` 中的每个实例执行 TCP 探针；

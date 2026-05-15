@@ -488,10 +488,16 @@ impl RaftRuntime {
                 ));
             };
 
-            self.apply_entry(&entry).await?;
+            // Always mark the entry as applied regardless of whether the
+            // business-logic apply succeeded.  If apply_entry returns an error
+            // (e.g. "transit key already exists"), leaving last_applied_index
+            // behind commit_index would cause every subsequent proposal to
+            // re-apply the same failed entry, cascading into unrelated failures.
+            let apply_result = self.apply_entry(&entry).await;
             self.store
                 .mark_applied(next_index)
                 .map_err(|err| format!("failed to mark raft log entry applied: {err}"))?;
+            apply_result?;
         }
 
         Ok(())

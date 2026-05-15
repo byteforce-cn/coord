@@ -1,248 +1,176 @@
-# Transit 加密 & PKI 指南
+# Transit 加密与 PKI
 
 ---
 
-## Transit 加密
+## 一、Transit — 信封加密
 
-Transit 是 coord 的加密即服务（Encryption-as-a-Service）模块。应用不存储密钥材料，
-只与 coord 通信完成加解密操作，密钥集中管理、轮换和审计。
-
-### 能力要求
-
-| 操作 | 需要 policy |
-|------|------------|
-| 加密 | `transit.encrypt` |
-| 解密 | `transit.decrypt` |
-| HMAC 签名/验证 | `transit.sign` |
-| 密钥管理（创建/轮换） | `*`（root） |
-
----
+Transit 提供托管密钥的加密 / 解密 / HMAC 服务，私钥始终保留在 coord 内部，不对外暴露。
 
 ### 创建密钥
 
 ```bash
-coord-ctl --token <root_token> transit create-key database-key
-# → key_name: database-key, primary_version: 1
+coord ctl --token <token> transit create-key my-key
 ```
 
----
-
-### 加密
+### 加密 / 解密
 
 ```bash
-# 加密任意字符串
-coord-ctl --token <app_token> transit encrypt database-key "user-password-hash"
-# → ciphertext: vault:v1:xyzABCDEF...
-#    version: 1
+# 加密
+coord ctl --token <token> transit encrypt my-key "sensitive data"
+# → vault:v1:AAABBBCCC...
+
+# 解密
+coord ctl --token <token> transit decrypt my-key "vault:v1:AAABBBCCC..."
+# → sensitive data
 ```
 
-密文格式 `vault:v{version}:{base64}` — 版本号用于轮换后的自动降级解密。
-
----
-
-### 解密
-
-```bash
-coord-ctl --token <app_token> transit decrypt database-key "vault:v1:xyzABCDEF..."
-# → plaintext_utf8: user-password-hash
-#    plaintext_base64: dXNlci1wYXNzd29yZC1oYXNo
-```
-
----
+密文格式 `vault:v<version>:<base64_ciphertext>`，版本号对应密钥版本。
 
 ### 密钥轮换
 
 ```bash
-coord-ctl --token <root_token> transit rotate-key database-key
-# → primary_version: 2
+coord ctl --token <token> transit rotate-key my-key
 ```
 
 轮换后：
-- 新加密使用 v2 密钥
-- 旧密文（`vault:v1:...`）仍可用 v1 密钥解密
+- 新加密使用最新版本密钥。
+- 旧密文（v1、v2…）仍可解密（向后兼容）。
 
----
-
-### HMAC 签名与验证
+### HMAC
 
 ```bash
 # 签名
-coord-ctl --token <app_token> transit hmac-sign database-key "webhook-payload"
-# → signature: hmac:v1:ABCDEF..., version: 1
+coord ctl --token <token> transit hmac-sign my-hmac-key "payload"
+# → hmac:v1:AAAA...
 
 # 验证
-coord-ctl --token <app_token> transit hmac-verify database-key \
-  "webhook-payload" "hmac:v1:ABCDEF..."
-# → ok: true
+coord ctl --token <token> transit hmac-verify my-hmac-key "payload" "hmac:v1:AAAA..."
+# → valid: true
+```
+
+### Java SDK 示例
+
+```java
+TransitServiceBlockingStub transit = TransitServiceGrpc.newBlockingStub(channel)
+    .withCallCredentials(new TokenCallCredentials(token));
+
+// 加密
+EncryptResponse resp = transit.encrypt(EncryptRequest.newBuilder()
+    .setKeyName("my-key")
+    .setPlaintext(ByteString.copyFromUtf8("sensitive data"))
+    .build());
+String ciphertext = resp.getCiphertext();
+
+// 解密
+DecryptResponse dec = transit.decrypt(DecryptRequest.newBuilder()
+    .setKeyName("my-key")
+    .setCiphertext(ciphertext)
+    .build());
 ```
 
 ---
 
-### 典型应用场景
+## 二、PKI — 内部 CA
 
-**数据库字段加密**：
-```
-应用 → transit encrypt → 存储密文 → 读取时 transit decrypt
-```
+coord 内置轻量级 CA，为微服务颁发短期 TLS 证书，无需依赖外部 PKI 基础设施。
 
-**Webhook 签名验证**：
-```
-服务端 → transit hmac-sign → 发送给接收方
-接收方 → transit hmac-verify → 验证来源合法
-```
-
----
-
-## PKI 证书服务
-
-coord 内置私有 CA，提供证书签发、自动续期、吊销、CRL、OCSP、ACME 支持。
-
-### 能力要求
-
-| 操作 | 需要 policy |
-|------|------------|
-| 签发证书 | `pki.issue` |
-| 吊销证书 | `pki.revoke` |
-| 查看 CA 链 / CRL / OCSP | 无需 token |
-
----
-
-### 签发叶证书
+### 颁发证书
 
 ```bash
-coord-ctl --token <app_token> pki issue svc-a.internal \
-  --san svc-a.internal \
-  --san svc-a \
-  --san 10.0.0.1 \
+coord ctl --token <token> pki issue api.internal \
+  --san api.internal \
+  --san 127.0.0.1 \
   --ttl-seconds 86400 \
-  --auto-renew \
-  --renew-before-seconds 3600
+  --auto-renew
 ```
 
-输出包含：
-- `serial_number`
-- `certificate_pem`（叶证书）
-- `private_key_pem`（私钥）
-- `ca_certificate_pem`（CA 证书链）
+输出：
 
-将 `certificate_pem` + `private_key_pem` 写入文件供服务使用：
-
-```bash
-coord-ctl --token <app_token> pki issue svc-a.internal \
-  --san svc-a.internal \
-  --ttl-seconds 86400 \
-  | tee /dev/stdout \
-  | grep -A9999 'certificate_pem:' | tail -n+2 > /etc/certs/svc-a.crt
+```
+serial_number: 01:AB:CD:...
+not_before:    2026-05-15T00:00:00Z
+not_after:     2026-05-16T00:00:00Z
+certificate:   -----BEGIN CERTIFICATE-----
+               ...
+               -----END CERTIFICATE-----
+ca_chain:      -----BEGIN CERTIFICATE-----
+               ...
+               -----END CERTIFICATE-----
 ```
 
----
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--san` | — | Subject Alternative Name（可重复） |
+| `--ttl-seconds` | `86400` | 证书有效期（秒） |
+| `--auto-renew` | `false` | 到期前自动续期 |
+| `--renew-before-seconds` | `3600` | 到期前多少秒触发续期 |
 
 ### 续期证书
 
 ```bash
-coord-ctl --token <app_token> pki renew <serial_number> \
-  --ttl-seconds 86400
+coord ctl --token <token> pki renew <serial_number> --ttl-seconds 86400
 ```
-
----
 
 ### 吊销证书
 
 ```bash
-coord-ctl --token <app_token> pki revoke <serial_number> \
-  --reason key-compromise
+coord ctl --token <token> pki revoke <serial_number> --reason key-compromise
+```
+
+吊销原因（`--reason`）可选值：`unspecified` · `key-compromise` · `ca-compromise` · `affiliation-changed` · `superseded` · `cessation-of-operation`
+
+### 获取 CA 链
+
+```bash
+coord ctl pki ca-chain
+# 输出 PEM 格式的 CA 证书链
+```
+
+### 获取 CRL
+
+```bash
+coord ctl pki crl
+# 输出 PEM 格式的证书吊销列表
+```
+
+### OCSP 查询
+
+```bash
+coord ctl pki ocsp <serial_number>
 ```
 
 ---
 
-### 获取 CA 证书链
+## 三、ACME 流程
 
-```bash
-coord-ctl pki ca-chain > /etc/certs/coord-ca.pem
-```
-
-将此 CA 配置到需要信任 coord 颁发证书的服务（如 mTLS 场景）。
-
----
-
-### 证书吊销列表（CRL）
-
-```bash
-# 获取 PEM 格式 CRL
-coord-ctl pki crl --next-update-seconds 600 > /etc/certs/coord.crl
-
-# 验证某证书是否在吊销列表中
-openssl verify -CAfile coord-ca.pem -CRLfile coord.crl \
-  -crl_check svc-a.crt
-```
-
----
-
-### OCSP 单证书状态查询
-
-```bash
-coord-ctl pki ocsp <serial_number>
-```
-
----
-
-### 自动续期
-
-设置 `--auto-renew` 后，coord-server 会在 `renew_before_seconds` 窗口内自动签发新证书。
-可通过以下命令手动触发：
-
-```bash
-coord-ctl --token <root_token> pki run-auto-renew
-```
-
-更新单张证书策略：
-
-```bash
-coord-ctl --token <root_token> pki set-auto-renew-policy <serial> \
-  --enabled true \
-  --renew-before-seconds 7200
-```
-
----
-
-### ACME（Let's Encrypt 兼容）工作流
+coord 支持简化版 ACME HTTP-01 challenge，适用于内部 DNS 场景。
 
 ```bash
 # 1. 创建订单
-coord-ctl --token <app_token> pki acme-order \
-  --domain example.com \
-  --domain www.example.com \
-  --ttl-seconds 7776000 \
-  --challenge-type http-01 \
-  --auto-renew
+coord ctl --token <token> pki acme-order \
+  --domain api.internal \
+  --domain www.api.internal \
+  --ttl-seconds 86400
 
-# 2. 将 token 部署到 http://<domain>/.well-known/acme-challenge/<token>
-coord-ctl --token <app_token> pki acme-challenge \
-  <order_id> example.com <challenge_token>
+# 2. 完成 HTTP-01 challenge（在目标服务暴露 /.well-known/acme-challenge/<token>）
+coord ctl --token <token> pki acme-challenge <order_id> api.internal <challenge_token>
 
-# 3. Finalize 获取证书
-coord-ctl --token <app_token> pki acme-finalize <order_id> \
-  --common-name example.com
+# 3. 颁发证书
+coord ctl --token <token> pki acme-finalize <order_id>
 ```
 
 ---
 
-### 在微服务 mTLS 场景中使用 coord PKI
+## 四、自动续期
+
+设置自动续期策略后，coord 内部定时任务会在证书到期前自动续期：
 
 ```bash
-# 服务 A 获取证书
-coord-ctl --token <svc-a-token> pki issue svc-a.internal \
-  --san svc-a.internal --ttl-seconds 86400
+# 设置策略
+coord ctl --token <token> pki set-auto-renew-policy <serial_number> \
+  --enabled true \
+  --renew-before-seconds 3600
 
-# 服务 B 获取证书
-coord-ctl --token <svc-b-token> pki issue svc-b.internal \
-  --san svc-b.internal --ttl-seconds 86400
-
-# 双方都信任 coord CA，从而实现 mTLS
-coord-ctl pki ca-chain > /etc/certs/coord-ca.pem
+# 手动触发（调试用）
+coord ctl --token <token> pki run-auto-renew
 ```
-
-应用配置 TLS 时：
-- 证书：来自 `pki issue` 的 `certificate_pem`
-- 私钥：来自 `pki issue` 的 `private_key_pem`
-- CA 信任链：来自 `pki ca-chain` 的输出

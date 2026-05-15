@@ -1,3 +1,4 @@
+#![allow(dead_code)] // v6 backup API 尚未全部接入 CLI/HTTP，待 P4D-08 完成后移除
 use anyhow::Context;
 use coord_core::clock::{Clock, SystemClock};
 use coord_core::config::ConfigEntry;

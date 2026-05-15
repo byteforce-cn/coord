@@ -1,97 +1,90 @@
-# 安装指南
+# 安装与构建
 
-## 环境要求
+---
 
-| 工具 | 版本 | 备注 |
+## 一、前提条件
+
+| 工具 | 版本 | 用途 |
 |------|------|------|
-| Rust | 1.93.0 | `rust-toolchain.toml` 自动锁定；`rustup` 首次构建自动安装 |
-| protoc | 3.x | 编译 proto 桩代码，`apt install protobuf-compiler` |
-| Docker + Compose v2 | 26+ | 仅集成测试需要 |
+| Rust toolchain | 1.93.0 | 编译 coord |
+| protoc | 3.x | 生成 protobuf 代码 |
+| Docker | 27+ | 容器运行 / e2e 测试 |
 
 ---
 
-## 一、配置私有 Cargo registry
+## 二、配置 Byteforce 私有 Cargo registry
 
-`coord-core` 与 `coord-proto` 发布在 Byteforce 私有 registry。
+coord 依赖发布在 Byteforce 私有 Nexus 上的 crate（`coord-proto`、`coord-core` 等）。
 
-### 1.1 本地开发
-
-```bash
-# 一次性写入凭据
-cargo login --registry byteforce
-# 提示 token: 填写 nexus 凭据（格式 Basic <base64(user:password)>）
-```
-
-或直接编辑 `~/.cargo/credentials.toml`：
+在 `~/.cargo/config.toml` 中添加：
 
 ```toml
 [registries.byteforce]
-token = "Basic <base64(user:password)>"
+index = "sparse+https://nexus.byteforce.cn/repository/cargo-repo/"
+credential-provider = ["cargo:token"]
 ```
 
-`~/.cargo/config.toml` 中已声明 registry 地址（项目级 `.cargo/config.toml` 同步）：
+在 `~/.cargo/credentials.toml` 中添加凭据：
 
 ```toml
 [registries.byteforce]
-index = "https://nexus.byteforce.cn/repository/cargo-repo/"
-```
-
-### 1.2 CI / CD
-
-```bash
-export CARGO_REGISTRIES_BYTEFORCE_TOKEN="Basic <base64>"
+token = "Bearer <your-nexus-token>"
 ```
 
 ---
 
-## 二、编译
+## 三、源码构建
 
 ```bash
-# 仅编译服务端和 ctl
-cargo build --release -p coord-server -p coord-ctl
+git clone https://github.com/byteforce/coord.git
+cd coord
 
-# 编译整个工作区（含 benchmark）
-cargo build --release --workspace
+# 仅构建服务端二进制
+cargo build --release -p coord
+
+# 全量构建（含 SDK）
+cargo build --release
 ```
 
-输出二进制：
-
-```
-target/release/coord-server
-target/release/coord-ctl
-```
-
-### 安装到系统路径
-
-```bash
-cargo install --path crates/coord-server
-cargo install --path crates/coord-ctl
-```
+产物路径：`target/release/coord`
 
 ---
 
-## 三、运行测试
-
-```bash
-# 所有单元测试
-cargo test --workspace
-
-# 仅 coord-server 的集成测试
-cargo test -p coord-server
-```
-
-> **集成测试**（`tests/` 目录）会启动真实 Raft 节点，需要空闲端口。
-> E2E 测试（`e2e/`）使用 Docker Compose，需要私有镜像。
-
----
-
-## 四、运行时依赖
-
-生产部署只需单一二进制 `coord-server`，无其他动态库依赖（静态链接 musl 构建）。
-`coord-ctl` 同样单一二进制，可复制到任意机器使用。
-
-使用 Docker 时直接拉取预构建镜像，跳过本地编译：
+## 四、使用 Docker 镜像（无需本地编译）
 
 ```bash
 docker pull nexus.byteforce.cn/image-private/coord:0.1.10
+```
+
+镜像标签约定：
+
+| 标签 | 说明 |
+|------|------|
+| `0.1.10` | 固定版本（生产推荐） |
+| `latest` | 最新 main 分支构建 |
+
+---
+
+## 五、二进制结构
+
+`coord` 是单一自包含二进制：
+
+```
+coord server    # 生产服务端（Raft + gRPC + HTTP）
+coord dev       # 开发模式（自动 init/unseal，调试日志）
+coord ctl       # 管理 CLI（连接运行中的 coord 实例）
+coord client    # gossip 代理模式（Phase 4D，开发中）
+```
+
+`coord ctl` 通过 gRPC 连接远程实例，不依赖本地运行的服务端进程。
+
+---
+
+## 六、验证安装
+
+```bash
+coord --version
+# coord 0.1.10
+
+coord ctl --help
 ```

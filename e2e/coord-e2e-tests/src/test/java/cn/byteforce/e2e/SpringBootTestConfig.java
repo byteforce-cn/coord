@@ -91,4 +91,7 @@ public class SpringBootTestConfig {
     @Bean public AdminServiceGrpc.AdminServiceBlockingStub adminStub(ManagedChannel ch) {
         return AdminServiceGrpc.newBlockingStub(ch);
     }
+    @Bean public PolicyServiceGrpc.PolicyServiceBlockingStub policyStub(ManagedChannel ch) {
+        return PolicyServiceGrpc.newBlockingStub(ch);
+    }
 }

@@ -1,40 +1,38 @@
-# ── Stage 1: Base image with toolchain + cargo-chef ──────────
-FROM rust:1.88-slim AS chef
+# ── Stage 1: Builder ──────────────────────────────────────────
+# cargo registry + incremental target/ are stored in BuildKit cache volumes.
+# These survive --no-cache and layer invalidation; only `docker builder prune`
+# clears them. Result: true incremental builds on every code change.
+FROM local/gitea-runner-toolchain:ubuntu-22.04 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/* \
-    && cargo install cargo-chef --locked
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /root/.cargo && printf '\
+[registries.byteforce]\n\
+index = "sparse+https://nexus.byteforce.cn/repository/cargo-repo/"\n\
+credential-provider = ["cargo:token"]\n' >> /root/.cargo/config.toml
 
 WORKDIR /app
-
-# ── Stage 2: Planner — generate recipe.json from manifests ───
-# Only re-runs when Cargo.toml / Cargo.lock changes.
-FROM chef AS planner
+COPY .cargo /app/.cargo
 COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
 
-# ── Stage 3: Builder — cook deps (cached), then compile ───────
-FROM chef AS builder
+RUN --mount=type=cache,id=coord-cargo-registry,target=/root/.cargo/registry \
+    --mount=type=cache,id=coord-cargo-git,target=/root/.cargo/git \
+    --mount=type=cache,id=coord-cargo-target,target=/app/target \
+    --mount=type=secret,id=cargo_credentials,dst=/root/.cargo/credentials.toml \
+    cargo build --release -p coord && \
+    cp /app/target/release/coord /coord
 
-# 1. Restore dependency layers from recipe (heavy, but CACHED)
-COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
-
-# 2. Copy source and build (fast incremental after deps are cached)
-COPY . .
-RUN cargo build --release -p coord-server -p coord-ctl
-
-# ── Stage 4: Runtime ──────────────────────────────────────────
+# ── Stage 2: Runtime ──────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/coord-server /usr/local/bin/coord-server
-COPY --from=builder /app/target/release/coord-ctl    /usr/local/bin/coord-ctl
+COPY --from=builder /coord /usr/local/bin/coord
 
 EXPOSE 9090 8080
 
-ENTRYPOINT ["coord-server", "serve"]
+ENTRYPOINT ["coord", "server"]

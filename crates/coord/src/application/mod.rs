@@ -10,6 +10,7 @@ pub use coord_core::application::config_app;
 pub use coord_core::application::idgen_app;
 pub use coord_core::application::lock_app;
 pub use coord_core::application::pki_app;
+pub use coord_core::application::policy_app;
 pub use coord_core::application::registry_app;
 pub use coord_core::application::security_app;
 pub use coord_core::application::transit_app;

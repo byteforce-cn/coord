@@ -42,10 +42,11 @@ static RATE_LIMITED_METHODS: OnceLock<HashMap<&'static str, &'static str>> = Onc
 pub fn get_rate_limited_methods() -> &'static HashMap<&'static str, &'static str> {
     RATE_LIMITED_METHODS.get_or_init(|| {
         let mut m: HashMap<&'static str, &'static str> = HashMap::new();
-        m.insert("/coord.v1.SealService/Init", "seal.init");
-        m.insert("/coord.v1.SealService/InitSeal", "seal.init");
-        m.insert("/coord.v1.SealService/Unseal", "seal.unseal");
-        m.insert("/coord.v1.SealService/GetSealStatus", "seal.get_status");
+        // Init / InitSeal / Unseal require Shamir key shares — cryptographic
+        // material that cannot be brute-forced, so rate-limiting adds no security
+        // value and breaks test suites that seal/unseal many times.
+        // GetSealStatus is read-only — also not rate-limited.
+        // Only credential-based endpoints remain rate-limited.
         m.insert("/coord.v1.AuthService/LoginAppRole", "auth.login");
         m.insert("/coord.v1.AuthService/LookupToken", "auth.lookup");
         m
@@ -292,6 +293,14 @@ pub fn get_policy() -> &'static HashMap<&'static str, &'static str> {
         m.insert("/coord.v1.AuthService/GenerateSecretId", "security.admin");
         m.insert("/coord.v1.AuthService/RevokeToken", "security.admin");
         m.insert("/coord.v1.AuthService/GetAppRoleId", "security.admin");
+
+        // ── Policy (PDP) ───────────────────────────────────────────────────
+        m.insert("/coord.v1.PolicyService/PutPolicyBundle", "policy.write");
+        m.insert("/coord.v1.PolicyService/SetBundleEnabled", "policy.write");
+        m.insert("/coord.v1.PolicyService/DeletePolicyBundle", "policy.write");
+        m.insert("/coord.v1.PolicyService/ListPolicyBundles", "policy.read");
+        m.insert("/coord.v1.PolicyService/Evaluate", "policy.evaluate");
+        m.insert("/coord.v1.PolicyService/Explain", "policy.evaluate");
 
         m
     })
@@ -687,6 +696,12 @@ mod tests {
             "/coord.v1.AuthService/GenerateSecretId",
             "/coord.v1.AuthService/RevokeToken",
             "/coord.v1.AuthService/GetAppRoleId",
+            "/coord.v1.PolicyService/PutPolicyBundle",
+            "/coord.v1.PolicyService/SetBundleEnabled",
+            "/coord.v1.PolicyService/DeletePolicyBundle",
+            "/coord.v1.PolicyService/ListPolicyBundles",
+            "/coord.v1.PolicyService/Evaluate",
+            "/coord.v1.PolicyService/Explain",
         ];
         for path in &expected {
             assert!(
@@ -772,16 +787,26 @@ mod tests {
     #[test]
     fn rate_limited_methods_covers_open_high_risk_paths() {
         let rl = get_rate_limited_methods();
+        // Only credential-based endpoints are rate-limited.
+        // Seal lifecycle (Init/Unseal/GetSealStatus) use Shamir shares –
+        // brute-force is infeasible, so they are intentionally not rate-limited.
         for path in [
-            "/coord.v1.SealService/Init",
-            "/coord.v1.SealService/Unseal",
-            "/coord.v1.SealService/GetSealStatus",
             "/coord.v1.AuthService/LoginAppRole",
             "/coord.v1.AuthService/LookupToken",
         ] {
             assert!(
                 rl.contains_key(path),
                 "rate-limited table must include {path}"
+            );
+        }
+        for path in [
+            "/coord.v1.SealService/Init",
+            "/coord.v1.SealService/Unseal",
+            "/coord.v1.SealService/GetSealStatus",
+        ] {
+            assert!(
+                !rl.contains_key(path),
+                "seal path {path} must NOT be rate-limited"
             );
         }
     }

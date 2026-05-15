@@ -88,6 +88,7 @@ impl RaftRuntime {
         ))
     }
 
+    #[allow(dead_code)] // 待 CLI backup 命令接入后移除
     pub async fn propose_put_config(
         &self,
         key: String,

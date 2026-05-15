@@ -1,6 +1,6 @@
 # Build context: project root (coord/)
 # Requires: coord-sdk-base:local (built by `make build`)
-FROM maven:3.9-eclipse-temurin-17 AS build
+FROM maven:3.9.11-eclipse-temurin-21 AS build
 WORKDIR /build
 
 COPY --from=coord-sdk-base:local /root/.m2 /root/.m2
@@ -14,7 +14,7 @@ RUN mvn -f mock-services/pom.xml -pl inventory-service dependency:go-offline -q
 COPY e2e/mock-services/inventory-service/src mock-services/inventory-service/src
 RUN mvn -f mock-services/pom.xml -pl inventory-service package -DskipTests -q
 
-FROM eclipse-temurin:17-jre-jammy
+FROM eclipse-temurin:21-jre-jammy
 WORKDIR /app
 COPY --from=build /build/mock-services/inventory-service/target/inventory-service-*.jar app.jar
 EXPOSE 18082

@@ -20,6 +20,8 @@ public class ScenarioState {
     // Registry
     public String registeredLeaseId;
     public List<Coord.ServiceInstance> discoveredInstances = new ArrayList<>();
+    public List<String> discoveredInstanceIdsSnapshot = new ArrayList<>();
+    public io.grpc.StatusRuntimeException lastHeartbeatException;
 
     // Config
     public Coord.ConfigResponse lastConfigResponse;
@@ -76,6 +78,13 @@ public class ScenarioState {
     public io.grpc.StatusRuntimeException lastLoginError;
     public boolean lastPermDenied;
 
+    // Policy (PDP)
+    public Coord.PutPolicyBundleResponse lastPolicyBundle;
+    public String lastPolicyBundleId;
+    public Coord.EvaluateResponse lastEvaluateResponse;
+    public Coord.ExplainResponse lastExplainResponse;
+    public Coord.ListPolicyBundlesResponse lastPolicyBundleList;
+
     // Order flow
     public String orderId;
     public String orderId2;
@@ -97,6 +106,8 @@ public class ScenarioState {
         clusterStatuses.clear();
         lastCiphertext = null;
         discoveredInstances.clear();
+        discoveredInstanceIdsSnapshot.clear();
+        lastHeartbeatException = null;
         generatedIds.clear();
         unsealShares.clear();
         concurrentOrderResults.clear();
@@ -146,6 +157,11 @@ public class ScenarioState {
         lastOrderResponse.clear();
         lastConfigWriteKey = null;
         lastConfigWriteValue = null;
+        lastPolicyBundle = null;
+        lastPolicyBundleId = null;
+        lastEvaluateResponse = null;
+        lastExplainResponse = null;
+        lastPolicyBundleList = null;
         lastConfigWriteSucceeded = true;
     }
 }

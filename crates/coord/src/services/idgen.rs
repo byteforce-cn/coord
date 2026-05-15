@@ -24,7 +24,7 @@ impl IdGenService for IdGenGrpc {
         request: Request<SnowflakeRequest>,
     ) -> Result<Response<SnowflakeResponse>, Status> {
         let req = request.into_inner();
-        let ids = self.idgen_app.generate(req.batch.max(1) as u32);
+        let ids = self.idgen_app.generate(req.batch.max(1));
         Ok(Response::new(SnowflakeResponse { ids }))
     }
 }

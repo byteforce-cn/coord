@@ -166,6 +166,7 @@ public class Hooks {
 
         state.clusterStatuses.clear();
         state.discoveredInstances.clear();
+        state.discoveredInstanceIdsSnapshot.clear();
         state.generatedIds.clear();
         state.lastConfigResponse = null;
 
@@ -186,6 +187,17 @@ public class Hooks {
         state.concurrentOrderResults.clear();
         state.orderConfig = null;
         state.lastOrderResponse.clear();
+
+        // Registry error
+        state.lastHeartbeatException = null;
+        state.registeredLeaseId = null;
+
+        // Policy (PDP)
+        state.lastPolicyBundle = null;
+        state.lastPolicyBundleId = null;
+        state.lastEvaluateResponse = null;
+        state.lastExplainResponse = null;
+        state.lastPolicyBundleList = null;
 
         // Reset mock service in-memory state so that order idempotency caches and
         // payment records from previous scenarios do not bleed into the current one.

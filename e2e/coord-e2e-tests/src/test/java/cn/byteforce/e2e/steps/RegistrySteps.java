@@ -6,14 +6,19 @@ import cn.byteforce.e2e.util.RetryHelper;
 import io.cucumber.java.en.Given;
 import io.cucumber.java.en.Then;
 import io.cucumber.java.en.When;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class RegistrySteps {
 
@@ -129,6 +134,35 @@ public class RegistrySteps {
         assertThat(found).as("metadata version=" + version).isTrue();
     }
 
+    @Then("任一实例元数据包含 {word}={word}")
+    public void verifyAnyMetadataEntry(String key, String value) {
+        boolean found = state.discoveredInstances.stream()
+                .anyMatch(inst -> value.equals(inst.getMetadataMap().get(key)));
+        assertThat(found).as("metadata %s=%s", key, value).isTrue();
+    }
+
+    @When("对未知租约 {string} 发送心跳")
+    public void heartbeatUnknownLease(String leaseId) {
+        state.lastHeartbeatException = null;
+        try {
+            registryStub.heartbeat(Coord.Lease.newBuilder()
+                    .setLeaseId(leaseId)
+                    .setTtlSeconds(30)
+                    .build());
+        } catch (StatusRuntimeException e) {
+            state.lastHeartbeatException = e;
+        }
+    }
+
+    @Then("应收到 NOT_FOUND 错误")
+    public void verifyNotFoundError() {
+        assertThat(state.lastHeartbeatException)
+                .as("expected a StatusRuntimeException with NOT_FOUND")
+                .isNotNull();
+        assertThat(state.lastHeartbeatException.getStatus().getCode())
+                .isEqualTo(Status.NOT_FOUND.getCode());
+    }
+
     // ── Deregister / Heartbeat ────────────────────────────────
 
     @When("注销服务 lease_id")
@@ -143,6 +177,14 @@ public class RegistrySteps {
         RetryHelper.waitSeconds(seconds);
     }
 
+    @When("记录当前发现实例 ID 列表")
+    public void snapshotDiscoveredInstanceIds() {
+        state.discoveredInstanceIdsSnapshot = state.discoveredInstances.stream()
+                .map(Coord.ServiceInstance::getInstanceId)
+                .filter(id -> !id.isBlank())
+                .collect(Collectors.toList());
+    }
+
     @When("发送 {int} 次心跳续约")
     public void sendHeartbeats(int count) {
         for (int i = 0; i < count; i++) {
@@ -150,6 +192,17 @@ public class RegistrySteps {
                     .setLeaseId(state.registeredLeaseId).setTtlSeconds(30).build());
             try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
         }
+    }
+
+    @Then("仍包含先前记录的任一实例")
+    public void verifyStillContainsAnySnapshottedInstance() {
+        Set<String> currentInstanceIds = state.discoveredInstances.stream()
+                .map(Coord.ServiceInstance::getInstanceId)
+                .collect(Collectors.toSet());
+        boolean found = state.discoveredInstanceIdsSnapshot.stream().anyMatch(currentInstanceIds::contains);
+        assertThat(found)
+                .as("current discover result should retain at least one previously discovered instance")
+                .isTrue();
     }
 
     // ── Helpers ───────────────────────────────────────────────
