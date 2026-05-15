@@ -95,8 +95,6 @@ Dev 模式默认参数：
 ```
 crates/
   coord/            统一二进制：server / dev / client / ctl 四种模式
-  coord-server/     （保留）原 gRPC + HTTP 服务端运行时（Phase 0.5 后废弃）
-  coord-ctl/        （保留）原命令行管理工具（Phase 0.5 后废弃）
 benchmark/          多场景压测工具 + 报告生成器
 e2e/                集成测试套件（Cucumber/Docker Compose）
 ui/console/         React + Tailwind 运维控制台

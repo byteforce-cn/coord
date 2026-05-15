@@ -22,10 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # docker buildx 根据 --platform 自动设置 TARGETARCH（amd64 / arm64）
 ARG TARGETARCH
-COPY docker-stage/${TARGETARCH}/coord-server /usr/local/bin/coord-server
-COPY docker-stage/${TARGETARCH}/coord-ctl    /usr/local/bin/coord-ctl
+COPY docker-stage/${TARGETARCH}/coord /usr/local/bin/coord
 
-EXPOSE 9090 8080 9527
+EXPOSE 9090 8080 9527 7947
 
-ENTRYPOINT ["coord-server"]
-CMD ["serve"]
+ENTRYPOINT ["coord"]
+CMD ["all"]
