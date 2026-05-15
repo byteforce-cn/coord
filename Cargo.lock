@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "coord"
-version = "0.1.0"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
