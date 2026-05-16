@@ -14,7 +14,7 @@ docker run -d --name coord-dev \
   --log-opt max-size=10m \
   --log-opt max-file=3 \
   -p 9090:9090 -p 9091:9091 \
-  nexus.byteforce.cn/image-private/coord:0.1.14 dev
+  nexus.byteforce.cn/image-private/coord:0.1.15 dev
 ```
 
 验证服务就绪：

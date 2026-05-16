@@ -16,7 +16,7 @@ docker run -d --name coord-dev \
   -v coord-data:/data \
   -e COORD_NODE_ID=coord-dev-node-1 \
   -e COORD_DATA_DIR=/data \
-  nexus.byteforce.cn/image-private/coord:0.1.14 \
+  nexus.byteforce.cn/image-private/coord:0.1.15 \
   dev
 ```
 
@@ -120,7 +120,7 @@ docker run -d --name coord-dev \
   -e COORD_NODE_ID=coord-dev-node-1 \
   -e COORD_DATA_DIR=/data \
   -e COORD_DEV_ROOT_TOKEN=s.my-test-token \
-  nexus.byteforce.cn/image-private/coord:0.1.14 \
+  nexus.byteforce.cn/image-private/coord:0.1.15 \
   dev
 ```
 
