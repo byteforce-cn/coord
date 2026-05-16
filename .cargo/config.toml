@@ -8,6 +8,7 @@
 
 [registries.byteforce]
 index = "sparse+https://nexus.byteforce.cn/repository/cargo-repo/"
+credential-provider = ["cargo:token"]
 
 [net]
 git-fetch-with-cli = true

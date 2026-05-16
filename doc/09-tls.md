@@ -103,7 +103,14 @@ services:
       COORD_TLS_CLIENT_CA: "/certs/ca.crt"
     volumes:
       - ./certs:/certs:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 ```
+
+> TLS / mTLS 配置不影响日志轮转；长时间运行时同样建议限制容器日志大小。
 
 ---
 

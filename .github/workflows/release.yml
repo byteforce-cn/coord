@@ -18,7 +18,7 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     env:
-      CARGO_REGISTRIES_BYTEFORCE_TOKEN: ${{ secrets.BYTEFORCE_CARGO_TOKEN }}
+      CARGO_REGISTRIES_BYTEFORCE_TOKEN: ${{ secrets.CARGO_REGISTRIES_BYTEFORCE_TOKEN }}
     strategy:
       fail-fast: false
       matrix:

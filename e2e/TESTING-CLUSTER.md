@@ -21,6 +21,16 @@ make e2e-up-cluster
 docker ps --format '{{.Names}}\t{{.Status}}' | grep coord
 ```
 
+> `make e2e-up-cluster` 会自动注入 `COORD_1_CLUSTER_PEERS=coord-2:9090,coord-3:9090`，使 `coord-1` 以三节点 auto-join 模式启动。若绕过 Makefile 直接执行 `docker compose`，需手工带上该环境变量。
+
+等价的原生命令：
+
+```bash
+COORD_1_CLUSTER_PEERS=coord-2:9090,coord-3:9090 \
+  docker compose --profile cluster up -d --build \
+  coord-1 coord-2 coord-3 order-service pay-service inventory-service
+```
+
 预期状态：
 
 ```
@@ -90,4 +100,7 @@ make e2e-up-cluster
 
 - `e2e-reset` 会清除 `.cache/e2e-security.json`，下次测试将重新初始化 security domain，**不需要**手动干预。
 - coord-2 和 coord-3 在 `docker-compose.yml` 中标记为 `profiles: [cluster]`，默认 `make e2e-up` 不启动它们。
+- 直接执行 `docker compose --profile cluster up ...` 时，如未设置 `COORD_1_CLUSTER_PEERS`，`coord-1` 会保持单节点模式，`coord-2` / `coord-3` 不会被自动加入集群。
+- `coord-1/2/3` 的 Docker 日志已配置 `json-file` 轮转，单容器上限为 `10m x 3`。
+- 周期性 `persisted runtime snapshot to redb` 日志为 `debug` 级别，集群默认 `info` 日志下不会持续刷屏。
 - Failover 场景要求 Raft quorum，至少 2/3 节点在线。

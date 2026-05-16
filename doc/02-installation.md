@@ -60,8 +60,10 @@ docker pull nexus.byteforce.cn/image-private/coord:0.1.14
 
 | 标签 | 说明 |
 |------|------|
-| `0.1.10` | 固定版本（生产推荐） |
-| `latest` | 最新 main 分支构建 |
+| `0.1.14` | 当前文档示例使用的稳定版本 |
+| 其他显式语义化版本号 | 按目标发布版本精确指定，例如 `0.1.13` |
+
+> 生产、测试与 CI 均建议使用明确版本号，不使用 `latest`。
 
 ---
 
@@ -84,7 +86,7 @@ coord client    # gossip 代理模式（Phase 4D，开发中）
 
 ```bash
 coord --version
-# coord 0.1.10
+# coord 0.1.14
 
 coord ctl --help
 ```

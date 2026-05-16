@@ -2,7 +2,7 @@
 # Reuse coord-sdk-base:local — 由 `make sdk-base` 提前构建，避免在此重复编译 SDK jar。
 
 # Stage 1: Compile e2e tests (reuse Maven repo from sdk-base)
-FROM maven:3.9.11-eclipse-temurin-21 AS build
+FROM docker.1ms.run/maven:3.9.11-eclipse-temurin-21 AS build
 WORKDIR /build
 
 # 复用 sdk-base 中已安装的 SDK jar 及 Maven 本地仓库，跳过 SDK 重复构建
@@ -17,7 +17,7 @@ RUN mvn -f e2e-tests/pom.xml test-compile -q
 RUN mvn -f e2e-tests/pom.xml dependency:resolve-plugins -q
 
 # Stage 2: Runtime — run tests against live environment
-FROM maven:3.9.11-eclipse-temurin-21
+FROM docker.1ms.run/maven:3.9.11-eclipse-temurin-21
 WORKDIR /app
 COPY --from=build /build/e2e-tests /app
 COPY --from=build /root/.m2 /root/.m2

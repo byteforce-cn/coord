@@ -7,12 +7,19 @@ volumes:
   coord-data-2:
   coord-data-3:
 
+# CARGO_REGISTRIES_BYTEFORCE_TOKEN 必须在宿主机环境变量中设置
+secrets:
+  cargo_token:
+    environment: CARGO_REGISTRIES_BYTEFORCE_TOKEN
+
 # ── Coord 3-node cluster ──────────────────────────────────────────────────────
 services:
   coord-1:
     build:
       context: ..
       dockerfile: e2e/coord-cluster/Dockerfile
+      secrets:
+        - cargo_token
     container_name: coord-1
     hostname: coord-1
     networks: [coord-net]
@@ -23,11 +30,16 @@ services:
       COORD_NODE_ID: "1"
       COORD_GRPC_ADDR: "0.0.0.0:9090"
       COORD_HTTP_ADDR: "0.0.0.0:8080"
-      COORD_CLUSTER_PEERS: "coord-2:9090,coord-3:9090"
+      COORD_CLUSTER_PEERS: "${COORD_1_CLUSTER_PEERS:-}"
       COORD_BOOTSTRAP: "true"
       COORD_DATA_DIR: "/data"
     volumes:
       - coord-data-1:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 5s
@@ -39,6 +51,8 @@ services:
     build:
       context: ..
       dockerfile: e2e/coord-cluster/Dockerfile
+      secrets:
+        - cargo_token
     container_name: coord-2
     hostname: coord-2
     networks: [coord-net]
@@ -54,6 +68,11 @@ services:
       COORD_DATA_DIR: "/data"
     volumes:
       - coord-data-2:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on:
       coord-1:
         condition: service_healthy
@@ -68,6 +87,8 @@ services:
     build:
       context: ..
       dockerfile: e2e/coord-cluster/Dockerfile
+      secrets:
+        - cargo_token
     container_name: coord-3
     hostname: coord-3
     networks: [coord-net]
@@ -83,6 +104,11 @@ services:
       COORD_DATA_DIR: "/data"
     volumes:
       - coord-data-3:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on:
       coord-1:
         condition: service_healthy

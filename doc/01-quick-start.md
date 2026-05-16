@@ -11,6 +11,8 @@
 ```bash
 # 以 dev 模式启动（gRPC :9090，HTTP/metrics :9091）
 docker run -d --name coord-dev \
+  --log-opt max-size=10m \
+  --log-opt max-file=3 \
   -p 9090:9090 -p 9091:9091 \
   nexus.byteforce.cn/image-private/coord:0.1.14 dev
 ```
@@ -34,6 +36,8 @@ docker exec coord-dev coord ctl operator unseal <share>
 
 > **快捷方式**：dev 模式支持 `COORD_DEV_ROOT_TOKEN` 环境变量，启动时自动 init + unseal，
 > 无需手动操作。详见 [单节点 Docker 部署](03-deploy-docker.md#dev-root-token)。
+>
+> **日志说明**：上例已启用 Docker `json-file` 日志轮转；如需持久化数据、固定 node id 和更完整的 Compose 配置，参见 [03-deploy-docker.md](03-deploy-docker.md)。
 
 ---
 

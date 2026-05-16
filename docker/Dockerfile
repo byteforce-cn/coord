@@ -23,7 +23,12 @@
 # ── Stage 1: Base（Rust 1.93 + cargo-chef）────────────────────────────────────
 FROM rust:1.93-slim AS chef
 
+# 替换 Debian 源为国内镜像（可选 ali、ustc、tuna）
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources \
+    && sed -i 's/security.debian.org/mirrors.aliyun.com\/debian-security/g' /etc/apt/sources.list.d/debian.sources
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
         protobuf-compiler \
     && rm -rf /var/lib/apt/lists/* \
     && cargo install cargo-chef --locked
@@ -46,23 +51,29 @@ COPY .cargo/config.toml .cargo/config.toml
 # 用完即删——BuildKit 单条 RUN 的最终文件系统才提交为 layer，不会留下 token。
 COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=secret,id=cargo_token \
-    mkdir -p ~/.cargo && \
+    CARGO_DIR="${CARGO_HOME:-$HOME/.cargo}" && \
+    mkdir -p "$CARGO_DIR" && \
     printf '[registries.byteforce]\ntoken = "%s"\n' "$(cat /run/secrets/cargo_token)" \
-    > ~/.cargo/credentials.toml && \
+    > "$CARGO_DIR/credentials.toml" && \
     cargo chef cook --release --recipe-path recipe.json && \
-    rm ~/.cargo/credentials.toml
+    rm "$CARGO_DIR/credentials.toml"
 
 # 再编译业务代码（依赖已缓存，仅重新编译源码）
 COPY . .
 RUN --mount=type=secret,id=cargo_token \
-    mkdir -p ~/.cargo && \
+    CARGO_DIR="${CARGO_HOME:-$HOME/.cargo}" && \
+    mkdir -p "$CARGO_DIR" && \
     printf '[registries.byteforce]\ntoken = "%s"\n' "$(cat /run/secrets/cargo_token)" \
-    > ~/.cargo/credentials.toml && \
+    > "$CARGO_DIR/credentials.toml" && \
     cargo build --release --locked -p coord && \
-    rm ~/.cargo/credentials.toml
+    rm "$CARGO_DIR/credentials.toml"
 
 # ── Stage 4: Runtime — 最小运行时镜像 ────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
+
+# 替换 Debian 源为国内镜像（可选 ali、ustc、tuna）
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources \
+    && sed -i 's/security.debian.org/mirrors.aliyun.com\/debian-security/g' /etc/apt/sources.list.d/debian.sources
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \

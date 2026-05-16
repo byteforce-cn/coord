@@ -82,6 +82,11 @@ environment:
   COORD_TLS_KEY: "/certs/server.key"
   COORD_TLS_CLIENT_CA: "/certs/ca.crt"
   COORD_OTLP_ENDPOINT: "http://otel-collector:4317"
+logging:
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 ```
 
 ---
@@ -100,3 +105,5 @@ RUST_LOG=info
 # 针对特定模块调试
 RUST_LOG=coord=debug,coord_core::raft=trace
 ```
+
+> 周期性 `persisted runtime snapshot to redb` 日志为 `debug` 级别；生产推荐的 `RUST_LOG=info` 默认不会输出这类高频快照日志。

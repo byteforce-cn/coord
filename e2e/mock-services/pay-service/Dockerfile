@@ -1,6 +1,6 @@
 # Build context: project root (coord/)
 # Requires: coord-sdk-base:local (built by `make build`)
-FROM maven:3.9.11-eclipse-temurin-21 AS build
+FROM docker.1ms.run/maven:3.9.11-eclipse-temurin-21 AS build
 WORKDIR /build
 
 COPY --from=coord-sdk-base:local /root/.m2 /root/.m2
@@ -14,7 +14,7 @@ RUN mvn -f mock-services/pom.xml -pl pay-service dependency:go-offline -q
 COPY e2e/mock-services/pay-service/src mock-services/pay-service/src
 RUN mvn -f mock-services/pom.xml -pl pay-service package -DskipTests -q
 
-FROM eclipse-temurin:21-jre-jammy
+FROM docker.1ms.run/eclipse-temurin:21-jre-jammy
 WORKDIR /app
 COPY --from=build /build/mock-services/pay-service/target/pay-service-*.jar app.jar
 EXPOSE 18081

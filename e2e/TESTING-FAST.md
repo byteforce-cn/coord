@@ -32,6 +32,8 @@ make e2e-smoke
 make e2e-test
 ```
 
+> `make e2e-up` 只启动 `coord-1` 与 3 个业务服务。此路径下 `coord-1` 默认以 `COORD_CLUSTER_PEERS=""` 创建，不会再持续探测 `coord-2` / `coord-3`。
+
 ## 后续运行（环境已存在）
 
 ```bash
@@ -73,7 +75,7 @@ make e2e-up
 ## 调试技巧
 
 ```bash
-# 查看实时日志
+# 查看实时日志（默认 info，不含 periodic snapshot debug 日志）
 make logs
 
 # 查看容器状态
@@ -84,6 +86,10 @@ make reload-order-service
 make reload-pay-service
 make reload-inventory-service
 ```
+
+- `coord-1` 在单节点路径下不会输出针对 `coord-2` / `coord-3` 的 auto-join 重试告警。
+- `coord-1/2/3` 的 Docker 日志已配置 `json-file` 轮转，单容器上限为 `10m x 3`。
+- 周期性 `persisted runtime snapshot to redb` 日志已降为 `debug` 级别，默认 `info` 运行不会持续刷屏。
 
 ## 预期结果
 

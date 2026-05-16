@@ -22,20 +22,26 @@ LOCAL_TEST_PROPS := \
 # ── 环境 profile：single (默认) vs cluster ───────────────────────────────────
 SINGLE_SERVICES := coord-1 order-service pay-service inventory-service
 CLUSTER_SERVICES := coord-1 coord-2 coord-3 order-service pay-service inventory-service
+CLUSTER_COORD_1_ENV := COORD_1_CLUSTER_PEERS=coord-2:9090,coord-3:9090
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 推荐本地命令（一眼就懂）
 # ══════════════════════════════════════════════════════════════════════════════
 
 ## e2e-up — 本地启动可复用环境（单节点 + mock services，override 自动生效）
-e2e-up: jars
-	$(COMPOSE) up -d $(SINGLE_SERVICES)
+e2e-up: check-token jars
+	$(COMPOSE) up -d --build $(SINGLE_SERVICES)
 	@echo "单节点环境已启动（coord-1 + mock services）。"
 
 ## e2e-up-cluster — 本地启动 3 节点集群（failover 场景需要）
-e2e-up-cluster: jars
-	$(COMPOSE) --profile cluster up -d $(CLUSTER_SERVICES)
+e2e-up-cluster: check-token jars
+	$(CLUSTER_COORD_1_ENV) $(COMPOSE) --profile cluster up -d --build $(CLUSTER_SERVICES)
 	@echo "三节点集群已启动。"
+
+## check-token — 检查 CARGO_REGISTRIES_BYTEFORCE_TOKEN 是否已设置
+check-token:
+	@test -n "$${CARGO_REGISTRIES_BYTEFORCE_TOKEN}" || \
+	  (echo "ERROR: CARGO_REGISTRIES_BYTEFORCE_TOKEN is not set" && exit 1)
 
 ## e2e-test — 本地默认回归（排除 @failover 和 @slow，宿主机 JVM 执行）
 e2e-test:
@@ -64,7 +70,7 @@ e2e-feature:
 
 ## e2e-full — 完整链路（CI 或发布前自检，容器化 runner）
 e2e-full: build
-	$(COMPOSE_CI) --profile cluster --profile test up -d --build $(CLUSTER_SERVICES)
+	$(CLUSTER_COORD_1_ENV) $(COMPOSE_CI) --profile cluster --profile test up -d --build $(CLUSTER_SERVICES)
 	$(COMPOSE_CI) --profile cluster --profile test run --rm e2e-tests
 	@echo "Full E2E suite finished."
 
@@ -101,7 +107,7 @@ jars:
 
 ## up — (兼容) 同 e2e-up-cluster
 up: jars
-	$(COMPOSE) --profile cluster up -d $(CLUSTER_SERVICES)
+	$(CLUSTER_COORD_1_ENV) $(COMPOSE) --profile cluster up -d $(CLUSTER_SERVICES)
 	@echo "All services ready."
 
 ## up-dev — (兼容) 同 e2e-up
@@ -109,7 +115,7 @@ up-dev: e2e-up
 
 ## up-ci — 显式关闭 override，使用完整镜像构建（CI 使用）
 up-ci: build
-	$(COMPOSE_CI) --profile cluster up -d --build $(CLUSTER_SERVICES)
+	$(CLUSTER_COORD_1_ENV) $(COMPOSE_CI) --profile cluster up -d --build $(CLUSTER_SERVICES)
 	@echo "All services started in CI mode (full image build)."
 
 ## tls-certs — 生成自签 CA + per-node 服务端证书 + 客户端证书到 e2e/tls/
@@ -118,7 +124,7 @@ tls-certs:
 
 ## up-tls — 启用 TLS / mTLS 叠加层启动集群（需先执行 make tls-certs）
 up-tls: tls-certs
-	$(COMPOSE_TLS) up -d --build coord-1 coord-2 coord-3
+	$(CLUSTER_COORD_1_ENV) $(COMPOSE_TLS) up -d --build coord-1 coord-2 coord-3
 	@echo "Coord cluster started with TLS + mTLS enabled (ca/cert in e2e/tls/)."
 
 ## test — (兼容) 容器化执行全量测试

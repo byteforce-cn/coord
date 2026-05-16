@@ -22,27 +22,46 @@ cargo test -p coord interceptors::tests
 
 e2e 测试位于 `e2e/` 目录，基于 Spring Boot + Cucumber（Java），对运行中的 coord Docker 容器执行黑盒验证。
 
-### 快速启动
+### 本地单节点
 
 ```bash
 cd e2e
 
-# 构建 Docker 镜像（首次约 5-10 分钟，后续增量编译约 2 分钟）
-DOCKER_HOST=unix:///var/run/docker.sock \
-  docker build \
-  --secret id=cargo_credentials,src=~/.cargo/credentials.toml \
-  -t e2e-coord-1:latest -t e2e-coord-2:latest -t e2e-coord-3:latest \
-  -f coord-cluster/Dockerfile ..
+# 编译本地业务服务 jar
+make jars
 
-# 启动测试环境
+# 启动单节点环境（coord-1 + mock services）
 make e2e-up
 
-# 运行测试
+# 冒烟 / 核心回归
+make e2e-smoke
 make e2e-test
-
-# 清理
-make e2e-reset
 ```
+
+> `make e2e-up` 只启动 `coord-1` 和 3 个业务服务。此路径下 `coord-1` 默认以 `COORD_CLUSTER_PEERS=""` 创建，不会主动探测 `coord-2` / `coord-3`。
+
+### 集群 / Failover
+
+```bash
+cd e2e
+
+# 启动三节点集群
+make e2e-up-cluster
+
+# 仅运行 failover 场景
+make e2e-failover
+```
+
+> `make e2e-up-cluster` 与 `make e2e-full` 会自动注入 `COORD_1_CLUSTER_PEERS=coord-2:9090,coord-3:9090`。若绕过 Makefile 直接执行 `docker compose`，必须手工带上该环境变量。
+
+### CI / 全量
+
+```bash
+cd e2e
+make e2e-full
+```
+
+详细步骤见 [../e2e/TESTING-FAST.md](../e2e/TESTING-FAST.md)、[../e2e/TESTING-CLUSTER.md](../e2e/TESTING-CLUSTER.md) 与 [../e2e/TESTING-CI.md](../e2e/TESTING-CI.md)。
 
 ### 运行单个 Feature
 
@@ -106,10 +125,30 @@ print(f'Passed: {passed}, Failed: {failed}')
 
 ## 四、环境变量（e2e）
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `COORD_GRPC_ENDPOINT` | `http://localhost:9090` | gRPC 端点 |
-| `COORD_HTTP_ENDPOINT` | `http://localhost:9091` | HTTP 端点 |
+宿主机直接执行 `make e2e-smoke` / `make e2e-test` / `make e2e-feature` 时，Makefile 会传入以下测试参数：
+
+| 参数 | 值 |
+|------|----|
+| `coord.grpc.address` | `localhost:9090` |
+| `coord.http.address` | `http://[::1]:8080` |
+| `order.service.url` | `http://localhost:18080` |
+| `pay.service.url` | `http://localhost:18081` |
+| `inventory.service.url` | `http://localhost:18082` |
+
+容器化 runner `make e2e-full` 使用的 compose 环境变量为：
+
+| 变量 | 值 |
+|------|----|
+| `COORD_GRPC_ADDRESS` | `coord-1:9090` |
+| `COORD_HTTP_ADDRESS` | `http://coord-1:8080` |
+| `ORDER_SERVICE_URL` | `http://order-service:18080` |
+| `PAY_SERVICE_URL` | `http://pay-service:18081` |
+| `INVENTORY_SERVICE_URL` | `http://inventory-service:18082` |
+
+补充说明：
+
+- `coord-1/2/3` 的 Docker 日志已配置 `json-file` 轮转，单容器上限为 `10m x 3`。
+- 周期性 `persisted runtime snapshot to redb` 日志为 `debug` 级别，默认 `info` 日志下不会持续刷屏。
 
 ---
 

@@ -7,7 +7,8 @@
 CI 模式使用 **容器化测试 runner**，不依赖宿主机 JDK/Maven：
 
 - `docker-compose.yml`（基础）+ 无 override（禁止 local jar 挂载）
-- profile `cluster`：启动 coord-1、coord-2、coord-3
+- 单节点路径下 `coord-1` 默认以 `COORD_CLUSTER_PEERS=""` 启动
+- profile `cluster` 路径需在创建 `coord-1` 时注入 `COORD_1_CLUSTER_PEERS=coord-2:9090,coord-3:9090`
 - profile `test`：启动 `e2e-tests` runner 容器，执行全量测试后退出
 
 ## 快速 CI 运行（全量）
@@ -29,6 +30,7 @@ make sdk-base
 docker compose -f docker-compose.yml build
 
 # 3. 启动 3 节点集群（容器化镜像，不挂载本地 jar）
+COORD_1_CLUSTER_PEERS=coord-2:9090,coord-3:9090 \
 docker compose -f docker-compose.yml --profile cluster up -d --build \
   coord-1 coord-2 coord-3 order-service pay-service inventory-service
 
@@ -53,8 +55,12 @@ docker compose -f docker-compose.yml run --rm e2e-tests \
 docker compose -f docker-compose.yml run --rm e2e-tests \
   mvn test -Dcucumber.filter.tags="not @failover and not @slow"
 
-# 阶段 4 — 集群 / Failover（约 5 分钟，3 节点已启动）
-docker compose -f docker-compose.yml --profile cluster up -d coord-2 coord-3
+# 阶段 4 — 集群 / Failover（约 5 分钟）
+# 不要只追加启动 coord-2 / coord-3；需要重建 coord-1 使其带上 cluster peers
+docker compose -f docker-compose.yml down
+COORD_1_CLUSTER_PEERS=coord-2:9090,coord-3:9090 \
+  docker compose -f docker-compose.yml --profile cluster up -d \
+  coord-1 coord-2 coord-3 order-service pay-service inventory-service
 docker compose -f docker-compose.yml run --rm e2e-tests \
   mvn test -Dcucumber.filter.tags="@failover"
 
@@ -98,6 +104,12 @@ rm -f coord-e2e-tests/.cache/e2e-security.json
 | 错误 | 原因 | 解法 |
 |------|------|------|
 | `not leader, current leader is unknown` | coord 集群未完全选主 | 增加 healthcheck 等待时间或重试 |
+| `coord-2/coord-3` 一直未加入集群 | 启动 `coord-1` 时未注入 `COORD_1_CLUSTER_PEERS` | 重新以 `COORD_1_CLUSTER_PEERS=coord-2:9090,coord-3:9090 docker compose ... up` 创建 cluster |
 | `security domain already initialised` | volume 未清理 | `docker compose down -v` |
 | `expected: 97 but was: 100` | order-service 幂等缓存残留 | 确认 `/api/internal/reset` 在每个场景前被调用（已内置于 `Hooks.java`） |
 | 构建失败 `coord-sdk-base:local not found` | 未执行 `make sdk-base` | 先运行 `make sdk-base` |
+
+补充说明：
+
+- `coord-1/2/3` 的 Docker 日志已配置 `json-file` 轮转，单容器上限为 `10m x 3`。
+- 周期性 `persisted runtime snapshot to redb` 日志为 `debug` 级别，默认 `info` 日志下不会持续刷屏。

@@ -34,7 +34,7 @@ use coord_proto::coord::v1::transit_service_server::TransitServiceServer;
 use coord_proto::coord::v1::workflow_service_server::WorkflowServiceServer;
 use tokio::time::{Duration, sleep};
 use tonic::transport::Server;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::application::config_app::ConfigApp;
 use crate::application::idgen_app::IdGenApp;
@@ -690,7 +690,7 @@ async fn persist_runtime_snapshot(
                     .metrics()
                     .raft_log_commit_index
                     .set(metadata.commit_index as i64);
-                info!(
+                debug!(
                     reason = %reason,
                     commit_index = metadata.commit_index,
                     "persisted runtime snapshot to redb"

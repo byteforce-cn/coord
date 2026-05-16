@@ -4,13 +4,20 @@
 # coord-sdk-java is now maintained in private/java-libs and published to
 # https://nexus.byteforce.cn/repository/maven-releases/
 # Build secret: NEXUS_USER / NEXUS_PASSWORD (passed via env at build time)
-FROM maven:3.9.11-eclipse-temurin-21
+FROM docker.1ms.run/maven:3.9.11-eclipse-temurin-21
 
 # Write Maven settings with Nexus credentials (injected as build arg)
 ARG NEXUS_USER
 ARG NEXUS_PASSWORD
 RUN mkdir -p /root/.m2 && printf '\
 <settings>\
+  <mirrors>\
+    <mirror>\
+      <id>aliyun-central</id>\
+      <mirrorOf>central</mirrorOf>\
+      <url>https://maven.aliyun.com/repository/central</url>\
+    </mirror>\
+  </mirrors>\
   <servers>\
     <server>\
       <id>byteforce-releases</id>\

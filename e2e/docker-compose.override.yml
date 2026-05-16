@@ -13,7 +13,7 @@
 
 services:
   order-service:
-    image: eclipse-temurin:17-jre-jammy
+    image: docker.1ms.run/eclipse-temurin:21-jre-jammy
     build: !reset null
     working_dir: /app
     command: ["java", "-jar", "/app/app.jar"]
@@ -21,7 +21,7 @@ services:
       - ./mock-services/order-service/target/order-service.jar:/app/app.jar:ro
 
   pay-service:
-    image: eclipse-temurin:17-jre-jammy
+    image: docker.1ms.run/eclipse-temurin:21-jre-jammy
     build: !reset null
     working_dir: /app
     command: ["java", "-jar", "/app/app.jar"]
@@ -29,7 +29,7 @@ services:
       - ./mock-services/pay-service/target/pay-service.jar:/app/app.jar:ro
 
   inventory-service:
-    image: eclipse-temurin:17-jre-jammy
+    image: docker.1ms.run/eclipse-temurin:21-jre-jammy
     build: !reset null
     working_dir: /app
     command: ["java", "-jar", "/app/app.jar"]
