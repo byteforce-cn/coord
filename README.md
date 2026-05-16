@@ -72,6 +72,9 @@ cargo test --workspace
 # 启动单节点 dev 服务（gRPC :9090，HTTP 控制面 :9091）
 cargo run -p coord -- dev
 
+# 启动单进程 server + embedded gossip agent（UDP gossip 默认 :7947）
+cargo run -p coord -- all
+
 # 查看集群状态
 cargo run -p coord -- ctl --endpoint http://127.0.0.1:9090 cluster status
 
@@ -88,13 +91,17 @@ Dev 模式默认参数：
 | HTTP 控制面 | `0.0.0.0:9091` |
 | 数据目录 | `/tmp/coord-dev` |
 
+`coord all` 在以上 dev 参数基础上，还会启动一个内嵌 gossip agent，默认 UDP 监听端口为 `7947`；可通过 `COORD_CLIENT_GOSSIP_PORT` 修改。多机 gossip 组网请使用 `coord client`，详见 [doc/05-server-config.md](doc/05-server-config.md)。
+
+`coord all` 复用 `coord dev` 的默认服务端参数，因此默认数据目录仍是 `/tmp/coord-dev`，默认日志级别仍是 `debug`。如果你只有一台服务器并准备长期运行或容器化部署，请显式设置持久化目录（例如 `COORD_DATA_DIR=/data`）并把 `RUST_LOG` 设为 `info`；可复制的 Docker / Compose 示例见 [doc/03-deploy-docker.md](doc/03-deploy-docker.md)。
+
 ---
 
 ## 仓库结构
 
 ```
 crates/
-  coord/            统一二进制：server / dev / client / ctl 四种模式
+  coord/            统一二进制：server / dev / client / all / ctl 五种模式
 benchmark/          多场景压测工具 + 报告生成器
 e2e/                集成测试套件（Cucumber/Docker Compose）
 ui/console/         React + Tailwind 运维控制台
