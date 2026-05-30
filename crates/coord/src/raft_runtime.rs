@@ -586,6 +586,7 @@ mod tests {
                 key: "/restore/key".to_string(),
                 value: "restored".to_string(),
                 version: 1,
+                revision: 1,
             }])
             .expect("serialize configs"),
         );
@@ -817,6 +818,7 @@ mod tests {
                     false,
                     "token-a",
                     4_102_444_800_000,
+                    1,
                 ),
             )
             .await
@@ -847,6 +849,7 @@ mod tests {
                     false,
                     "token-b",
                     4_102_444_800_001,
+                    2,
                 ),
             )
             .await
@@ -918,6 +921,7 @@ mod tests {
                     false,
                     "token-x",
                     4_102_444_800_000,
+                    1,
                 ),
             )
             .await

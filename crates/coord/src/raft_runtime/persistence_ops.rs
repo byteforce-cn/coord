@@ -112,6 +112,7 @@ impl RaftRuntime {
                     key,
                     value,
                     version: 1,
+                    revision: 0,
                 })
             })
     }

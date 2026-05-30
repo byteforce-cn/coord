@@ -89,23 +89,3 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 1
-
-# =============================================================================
-# 本地开发 patch —— 覆盖私有 registry 依赖，指向 private/rust-libs 源码。
-#
-# 使用方式：
-#   make dev      — 确保 patch 生效（默认）
-#   make ci       — 切回 registry 依赖（CI / 发布用）
-#   make check    — cargo check
-#   make test     — cargo test
-#
-# CI 构建流程：
-#   1. cp Cargo.toml.ci Cargo.toml   （切回无 patch 版本）
-#   2. cargo build --release
-#
-# 绝对不要在 CI 上使用带 [patch] 的 Cargo.toml —— patched crate 的版本号
-# 不会反映在 Cargo.lock 中，导致可重现构建失败。
-# =============================================================================
-[patch."sparse+https://nexus.byteforce.cn/repository/cargo-repo/"]
-coord-core = { path = "../../private/rust-libs/coord/coord-core" }
-coord-proto = { path = "../../private/rust-libs/coord/coord-proto" }

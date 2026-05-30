@@ -45,23 +45,27 @@ impl LockService for LockGrpc {
             LockAcquireResult::Acquired {
                 token,
                 expires_unix_ms,
+                fencing_token,
             } => LockAcquireResponse {
                 acquired: true,
                 token,
                 message: "acquired".to_string(),
                 expires_unix_ms,
+                fencing_token,
             },
             LockAcquireResult::Queued => LockAcquireResponse {
                 acquired: false,
                 token: String::new(),
                 message: "queued".to_string(),
                 expires_unix_ms: 0,
+                fencing_token: 0,
             },
             LockAcquireResult::Busy => LockAcquireResponse {
                 acquired: false,
                 token: String::new(),
                 message: "busy".to_string(),
                 expires_unix_ms: 0,
+                fencing_token: 0,
             },
         };
 
