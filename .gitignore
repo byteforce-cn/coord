@@ -1,0 +1,40 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Java
+coord-spring-boot-starter/target/
+java-example/target/
+*.class
+*.jar
+*.war
+
+# Node / coord-ui
+coord-ui/node_modules/
+coord-ui/dist/
+coord-ui/pnpm-lock.yaml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coord runtime data
+data/
+coord-dev-data/
+*.db
+*.snap
+
+# Environment
+.env
+.env.local
+
+# VS Code Copilot instructions (local only)
+.github/copilot-instructions.md
+
+docs/

@@ -1,0 +1,39 @@
+syntax = "proto3";
+package coord.watch;
+
+import "kv.proto";
+
+message WatchCreateRequest {
+  bytes key = 1;            // 监听的 Key 前缀
+  bytes range_end = 2;      // 范围结束（空=仅监听 key）
+  int64 start_revision = 3; // 起始 Revision（0=从最新开始）
+  bool prev_kv = 4;         // 是否在事件中携带旧值
+}
+
+message WatchEvent {
+  enum EventType {
+    PUT = 0;
+    DELETE = 1;
+    BUFFER_OVERFLOW = 2;   // 缓冲区溢出，需客户端全量同步
+    HISTORY_UNAVAILABLE = 3; // 历史 Changelog 已清理
+  }
+  EventType type = 1;
+  repeated coord.kv.KeyValue kvs = 2;
+  coord.kv.KeyValue prev_kv = 3;    // 旧值（prev_kv=true 时填充）
+  int64 revision = 4;      // 事件 Revision
+}
+
+message WatchRequest {
+  oneof request {
+    WatchCreateRequest create = 1;
+  }
+}
+
+message WatchResponse {
+  int64 watch_id = 1;
+  repeated WatchEvent events = 2;
+}
+
+service Watch {
+  rpc Watch(stream WatchRequest) returns (stream WatchResponse);
+}

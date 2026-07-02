@@ -1,0 +1,154 @@
+syntax = "proto3";
+package coord.auth;
+
+// ──── Auth Service ────
+
+service Auth {
+    // Auth 管理
+    rpc AuthEnable(AuthEnableRequest) returns (AuthEnableResponse);
+    rpc AuthDisable(AuthDisableRequest) returns (AuthDisableResponse);
+    rpc AuthStatus(AuthStatusRequest) returns (AuthStatusResponse);
+
+    // 用户管理
+    rpc UserAdd(UserAddRequest) returns (UserAddResponse);
+    rpc UserDelete(UserDeleteRequest) returns (UserDeleteResponse);
+    rpc UserChangePassword(UserChangePasswordRequest) returns (UserChangePasswordResponse);
+    rpc UserList(UserListRequest) returns (UserListResponse);
+    rpc UserGet(UserGetRequest) returns (UserGetResponse);
+
+    // 角色管理
+    rpc RoleAdd(RoleAddRequest) returns (RoleAddResponse);
+    rpc RoleDelete(RoleDeleteRequest) returns (RoleDeleteResponse);
+    rpc RoleGrantPermission(RoleGrantPermissionRequest) returns (RoleGrantPermissionResponse);
+    rpc RoleRevokePermission(RoleRevokePermissionRequest) returns (RoleRevokePermissionResponse);
+    rpc RoleList(RoleListRequest) returns (RoleListResponse);
+
+    // 用户-角色关联
+    rpc UserGrantRole(UserGrantRoleRequest) returns (UserGrantRoleResponse);
+    rpc UserRevokeRole(UserRevokeRoleRequest) returns (UserRevokeRoleResponse);
+
+    // 认证
+    rpc Authenticate(AuthenticateRequest) returns (AuthenticateResponse);
+}
+
+// ──── Auth 管理 ────
+
+message AuthEnableRequest {}
+message AuthEnableResponse {}
+
+message AuthDisableRequest {}
+message AuthDisableResponse {}
+
+message AuthStatusRequest {}
+message AuthStatusResponse {
+    bool enabled = 1;
+}
+
+// ──── 权限定义 ────
+
+enum PermissionType {
+    READ = 0;
+    WRITE = 1;
+    READWRITE = 2;
+}
+
+message Permission {
+    PermissionType type = 1;
+    bytes key = 2;          // Key 前缀
+    bytes range_end = 3;    // Key 范围结束（空 = 仅 key 前缀）
+}
+
+// ──── 角色 ────
+
+message Role {
+    string name = 1;
+    repeated Permission permissions = 2;
+}
+
+message RoleAddRequest {
+    string name = 1;
+}
+message RoleAddResponse {}
+
+message RoleDeleteRequest {
+    string name = 1;
+}
+message RoleDeleteResponse {}
+
+message RoleGrantPermissionRequest {
+    string name = 1;
+    Permission permission = 2;
+}
+message RoleGrantPermissionResponse {}
+
+message RoleRevokePermissionRequest {
+    string name = 1;
+    bytes key = 2;
+    bytes range_end = 3;
+}
+message RoleRevokePermissionResponse {}
+
+message RoleListRequest {}
+message RoleListResponse {
+    repeated Role roles = 1;
+}
+
+// ──── 用户 ────
+
+message User {
+    string name = 1;
+    repeated string roles = 2;
+}
+
+message UserAddRequest {
+    string name = 1;
+    string password = 2;
+}
+message UserAddResponse {}
+
+message UserDeleteRequest {
+    string name = 1;
+}
+message UserDeleteResponse {}
+
+message UserChangePasswordRequest {
+    string name = 1;
+    string password = 2;
+}
+message UserChangePasswordResponse {}
+
+message UserListRequest {}
+message UserListResponse {
+    repeated User users = 1;
+}
+
+message UserGetRequest {
+    string name = 1;
+}
+message UserGetResponse {
+    repeated string roles = 1;
+}
+
+// ──── 用户-角色关联 ────
+
+message UserGrantRoleRequest {
+    string user = 1;
+    string role = 2;
+}
+message UserGrantRoleResponse {}
+
+message UserRevokeRoleRequest {
+    string user = 1;
+    string role = 2;
+}
+message UserRevokeRoleResponse {}
+
+// ──── 认证 ────
+
+message AuthenticateRequest {
+    string name = 1;
+    string password = 2;
+}
+message AuthenticateResponse {
+    string token = 1;
+}

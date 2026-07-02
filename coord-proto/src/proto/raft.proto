@@ -1,0 +1,24 @@
+syntax = "proto3";
+package coord.raft;
+
+// Wrapper for all Raft RPC messages (bincode-serialized payload from Openraft types)
+message RaftMessage {
+  bytes payload = 1;
+  // v6.0 Multi-Raft: target Region ID for RPC demultiplexing
+  uint64 region_id = 2;
+  // v6.0 Multi-Raft: W3C Trace Context for distributed tracing
+  bytes trace_context = 3;
+}
+
+// Internal Raft RPC service for node-to-node communication
+// Runs on raft_addr (separate from client-facing gRPC)
+service Raft {
+  // AppendEntries: replicate log entries from Leader to Follower
+  rpc AppendEntries(RaftMessage) returns (RaftMessage);
+
+  // Vote: request vote during Leader election
+  rpc Vote(RaftMessage) returns (RaftMessage);
+
+  // InstallSnapshot: send full state snapshot to lagging Follower
+  rpc InstallSnapshot(RaftMessage) returns (RaftMessage);
+}

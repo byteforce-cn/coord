@@ -1,0 +1,86 @@
+syntax = "proto3";
+package coord.maintenance;
+
+message SealRequest {}
+message SealResponse {}
+
+message UnsealRequest {
+  repeated bytes shares = 1;  // Shamir 分片（Base64 解码后）
+}
+
+message UnsealResponse {
+  int32 nodes_unsealed = 1;
+  int32 total_nodes = 2;
+}
+
+message StatusRequest {}
+
+message StatusResponse {
+  int64 revision = 1;
+  int64 raft_index = 2;
+  uint64 raft_term = 3;
+  string raft_leader = 4;
+  string seal_status = 5;
+}
+
+message SnapshotRequest {}
+
+message SnapshotResponse {
+  bytes data = 1;
+  int64 last_included_index = 2;
+  uint64 last_included_term = 3;
+}
+
+// ──── Member Management ────
+
+message MemberAddRequest {
+  uint64 node_id = 1;
+  string grpc_addr = 2;
+  string raft_addr = 3;
+}
+
+message MemberAddResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message MemberRemoveRequest {
+  uint64 node_id = 1;
+}
+
+message MemberRemoveResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message MemberPromoteRequest {
+  uint64 node_id = 1;
+}
+
+message MemberPromoteResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message MemberListRequest {}
+
+message MemberNode {
+  uint64 id = 1;
+  string role = 2;       // "Leader", "Voter", "Learner"
+}
+
+message MemberListResponse {
+  repeated MemberNode nodes = 1;
+  uint64 leader_id = 2;
+}
+
+service Maintenance {
+  rpc Seal(SealRequest) returns (SealResponse);
+  rpc Unseal(UnsealRequest) returns (UnsealResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc Snapshot(SnapshotRequest) returns (stream SnapshotResponse);
+  rpc MemberAdd(MemberAddRequest) returns (MemberAddResponse);
+  rpc MemberRemove(MemberRemoveRequest) returns (MemberRemoveResponse);
+  rpc MemberPromote(MemberPromoteRequest) returns (MemberPromoteResponse);
+  rpc MemberList(MemberListRequest) returns (MemberListResponse);
+}

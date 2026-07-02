@@ -1,0 +1,62 @@
+syntax = "proto3";
+package coord.txn;
+
+import "kv.proto";
+
+// 比较操作
+message Compare {
+  enum CompareResult {
+    EQUAL = 0;
+    GREATER = 1;
+    LESS = 2;
+    NOT_EQUAL = 3;
+  }
+  enum Target {
+    VERSION = 0;   // 比较 Key 的 version 字段
+    VALUE = 1;     // 比较 Key 的 value 字段
+    MOD_REV = 2;   // 比较 Key 的 mod_revision 字段
+  }
+  CompareResult result = 1;
+  Target target = 2;
+  bytes key = 3;
+  oneof target_value {
+    int64 version = 4;
+    bytes value = 5;
+    int64 mod_revision = 6;
+  }
+}
+
+// 事务操作
+message RequestOp {
+  oneof op {
+    coord.kv.RangeRequest request_range = 1;
+    coord.kv.PutRequest request_put = 2;
+    coord.kv.DeleteRequest request_delete = 3;
+  }
+}
+
+message ResponseOp {
+  oneof op {
+    coord.kv.RangeResponse response_range = 1;
+    coord.kv.PutResponse response_put = 2;
+    coord.kv.DeleteResponse response_delete = 3;
+  }
+}
+
+// 事务请求
+message TxnRequest {
+  repeated Compare compare = 1;   // 条件列表（AND 语义）
+  repeated RequestOp success = 2; // 条件全部满足时执行的操作
+  repeated RequestOp failure = 3; // 任一条件不满足时执行的操作
+  bytes request_id = 4;
+}
+
+message TxnResponse {
+  bool succeeded = 1;              // 条件是否全部满足
+  repeated ResponseOp responses = 2;
+  int64 revision = 3;
+}
+
+service Txn {
+  rpc Txn(TxnRequest) returns (TxnResponse);
+}

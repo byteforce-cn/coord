@@ -1,0 +1,13 @@
+[package]
+name = "coord-proto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tonic = { workspace = true }
+prost = { workspace = true }
+tonic-prost = "0.14.6"
+serde = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"

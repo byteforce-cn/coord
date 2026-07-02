@@ -1,0 +1,106 @@
+[workspace]
+resolver = "2"
+members = [
+    "coord",
+    "coord-proto",
+    "coord-core",
+    "coord-macros",
+    "coord-server",
+    "coord-client",
+    "coord-agent",
+    "coord-test",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/byteforce/coord"
+authors = ["Byteforce Team"]
+
+[workspace.dependencies]
+# 异步运行时
+tokio = { version = "1.49.0", features = ["full"] }
+tokio-stream = "0.1"
+
+# gRPC 框架
+tonic = { version = "0.14.6", features = ["tls-ring"] }
+prost = "0.14.3"
+tonic-build = "0.14.6"
+prost-build = "0.14.3"
+
+# Raft 共识
+openraft = { version = "0.10.0-alpha.24", features = ["serde"] }
+
+# 存储引擎
+redb = "4.1.0"
+
+# 内存安全
+zeroize = { version = "1.8.1", features = ["zeroize_derive"] }
+
+# 序列化
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+
+# 二进制序列化
+bincode = "1.3"
+
+# 日志追踪
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# 异步 trait
+async-trait = "0.1"
+
+# 并发控制
+dashmap = "6.1.0"
+parking_lot = "0.12.5"
+
+# 异步流
+futures = "0.3"
+
+# 加密
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+hmac = "0.12"
+
+# 工具
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+bytes = "1"
+uuid = { version = "1", features = ["v4"] }
+lru = "0.14"
+moka = { version = "0.12", features = ["sync"] }
+chrono = { version = "0.4", features = ["serde"] }
+tempfile = "3"
+hex = "0.4"
+
+# BFF / HTTP 层
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# 静态资源嵌入
+rust-embed = "8"
+
+# 内部 Crate
+coord-proto = { path = "coord-proto" }
+coord-core = { path = "coord-core" }
+coord-macros = { path = "coord-macros" }
+coord-server = { path = "coord-server" }
+coord-agent = { path = "coord-agent" }
+coord-client = { path = "coord-client" }
+coord-test = { path = "coord-test" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1
