@@ -630,6 +630,7 @@ dependencies = [
  "coord-client",
  "coord-core",
  "coord-proto",
+ "coord-server",
  "dashmap",
  "hex",
  "lru 0.14.0",
@@ -676,8 +677,12 @@ dependencies = [
 name = "coord-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bytes",
+ "hmac",
  "serde",
+ "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
  "zeroize",
@@ -719,9 +724,11 @@ dependencies = [
  "futures",
  "hex",
  "hkdf",
+ "hmac",
  "lru 0.14.0",
  "openraft",
  "parking_lot",
+ "prost",
  "rand 0.8.6",
  "redb",
  "reqwest",
@@ -737,6 +744,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "uuid",
  "zeroize",
 ]
 

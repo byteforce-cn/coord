@@ -11,6 +11,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "src/proto/maintenance.proto",
                 "src/proto/raft.proto",
                 "src/proto/auth.proto",
+                "src/proto/capability.proto",
+                "src/proto/agent_api.proto",
             ],
             &["src/proto"],
         )?;

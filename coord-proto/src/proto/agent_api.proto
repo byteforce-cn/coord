@@ -1,0 +1,150 @@
+syntax = "proto3";
+package coord.agent;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.sdk.internal.proto";
+
+// ============================================================
+// Handshake
+// ============================================================
+
+service Handshake {
+    rpc Negotiate(HandshakeRequest) returns (HandshakeResponse);
+}
+
+message HandshakeRequest {
+    string client_version = 1;
+}
+
+message HandshakeResponse {
+    repeated string supported_versions = 1;
+}
+
+// ============================================================
+// Registry
+// ============================================================
+
+service Registry {
+    rpc Register(RegisterRequest) returns (RegisterResponse);
+    rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+    rpc Discover(DiscoverRequest) returns (DiscoverResponse);
+    rpc Watch(WatchRequest) returns (stream WatchEvent);
+}
+
+message RegisterRequest {
+    string service_name = 1;
+    string instance_id = 2;
+    string metadata = 3;
+    int32 ttl_seconds = 4;
+}
+
+message RegisterResponse {
+    int64 lease_id = 1;
+}
+
+message DeregisterRequest {
+    string service_name = 1;
+    string instance_id = 2;
+    int64 lease_id = 3;
+}
+
+message DeregisterResponse {}
+
+message HeartbeatRequest {
+    string service_name = 1;
+    string instance_id = 2;
+    int64 lease_id = 3;
+}
+
+message HeartbeatResponse {
+    int64 ttl = 1;
+}
+
+message ServiceInstance {
+    string instance_id = 1;
+    string service_name = 2;
+    string metadata = 3;
+}
+
+message DiscoverRequest {
+    string service_name = 1;
+}
+
+message DiscoverResponse {
+    repeated ServiceInstance instances = 1;
+    int64 revision = 2;
+}
+
+message WatchRequest {
+    string service_name = 1;
+    int64 start_revision = 2;
+}
+
+message WatchEvent {
+    enum EventType {
+        UNKNOWN = 0;
+        INSTANCES_ADDED = 1;
+        INSTANCES_REMOVED = 2;
+        INSTANCES_UPDATED = 3;
+    }
+    EventType type = 1;
+    repeated ServiceInstance instances = 2;
+    int64 revision = 3;
+}
+
+// ============================================================
+// Config
+// ============================================================
+
+service Config {
+    rpc Get(ConfigGetRequest) returns (ConfigGetResponse);
+    rpc List(ConfigListRequest) returns (ConfigListResponse);
+    rpc Watch(ConfigWatchRequest) returns (stream ConfigWatchEvent);
+}
+
+message ConfigGetRequest {
+    string key = 1;
+}
+
+message ConfigGetResponse {
+    string value = 1;  // empty means key not found
+}
+
+message ConfigListRequest {
+    string prefix = 1;
+}
+
+message ConfigListResponse {
+    map<string, string> entries = 1;
+}
+
+message ConfigWatchRequest {
+    string prefix = 1;
+    int64 start_revision = 2;
+}
+
+message ConfigWatchEvent {
+    string key = 1;
+    optional string new_value = 2;
+    int64 revision = 3;
+}
+
+// ============================================================
+// Health
+// ============================================================
+
+service Health {
+    rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+    enum ServingStatus {
+        UNKNOWN = 0;
+        SERVING = 1;
+        NOT_SERVING = 2;
+    }
+    ServingStatus status = 1;
+}

@@ -13,6 +13,7 @@
 //
 // 参见 docs/client-agent-architecture-v3.md。
 
+pub mod auth;
 pub mod cache;
 pub mod config_watcher;
 mod discovery;

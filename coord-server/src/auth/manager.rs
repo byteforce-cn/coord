@@ -70,10 +70,24 @@ impl Permission {
 
 // ──── Role ────
 
+/// A capability grant assigned to a role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityGrant {
+    /// Full capability ID: "data:kv:read"
+    pub capability_id: String,
+    /// Scope restriction (empty = no restriction)
+    pub scope: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Role {
     pub name: String,
+    /// Legacy key-prefix permissions (deprecated, kept for backward compat)
     pub permissions: Vec<Permission>,
+    /// Capability-based grants (Phase 2.4)
+    pub capability_grants: Vec<CapabilityGrant>,
+    /// Whether this role is high-sensitivity (forces server lookup every request)
+    pub high_sensitive: bool,
 }
 
 // ──── User ────
@@ -126,7 +140,7 @@ impl AuthManager {
         };
         self.users.write().insert("root".to_string(), root_entry);
 
-        // root role: ReadWrite on all keys
+        // root role: ReadWrite on all keys, all capabilities, high_sensitive
         let root_role = Role {
             name: "root".to_string(),
             permissions: vec![Permission {
@@ -134,6 +148,8 @@ impl AuthManager {
                 key_prefix: vec![],
                 range_end: vec![],
             }],
+            capability_grants: vec![],
+            high_sensitive: true,
         };
         self.roles.write().insert("root".to_string(), root_role);
     }
@@ -234,6 +250,8 @@ impl AuthManager {
             Role {
                 name: name.to_string(),
                 permissions: Vec::new(),
+                capability_grants: Vec::new(),
+                high_sensitive: false,
             },
         );
         Ok(())
@@ -314,6 +332,83 @@ impl AuthManager {
     /// List all roles
     pub fn role_list(&self) -> Vec<Role> {
         self.roles.read().values().cloned().collect()
+    }
+
+    // ──── Capability Grant management (Phase 2.4) ────
+
+    /// Grant a capability to a role.
+    pub fn role_grant_capability(
+        &self,
+        role_name: &str,
+        capability_id: &str,
+        scope: &str,
+    ) -> Result<()> {
+        let mut roles = self.roles.write();
+        let role = roles
+            .get_mut(role_name)
+            .ok_or_else(|| Error::NotFound { resource: "role", key: role_name.to_string() })?;
+
+        // Check for duplicate
+        let is_dup = role
+            .capability_grants
+            .iter()
+            .any(|g| g.capability_id == capability_id && g.scope == scope);
+        if is_dup {
+            return Err(Error::AlreadyExists {
+                resource: "capability-grant",
+                key: format!("{role_name}:{capability_id}"),
+            });
+        }
+
+        role.capability_grants.push(CapabilityGrant {
+            capability_id: capability_id.to_string(),
+            scope: scope.to_string(),
+        });
+        Ok(())
+    }
+
+    /// Revoke a capability grant from a role.
+    pub fn role_revoke_capability(
+        &self,
+        role_name: &str,
+        capability_id: &str,
+        scope: &str,
+    ) -> Result<()> {
+        let mut roles = self.roles.write();
+        let role = roles
+            .get_mut(role_name)
+            .ok_or_else(|| Error::NotFound { resource: "role", key: role_name.to_string() })?;
+
+        let before = role.capability_grants.len();
+        role.capability_grants
+            .retain(|g| !(g.capability_id == capability_id && g.scope == scope));
+
+        if role.capability_grants.len() == before {
+            return Err(Error::NotFound {
+                resource: "capability-grant",
+                key: format!("{role_name}:{capability_id}"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Set the high_sensitive flag on a role.
+    pub fn role_set_high_sensitive(&self, role_name: &str, sensitive: bool) -> Result<()> {
+        let mut roles = self.roles.write();
+        let role = roles
+            .get_mut(role_name)
+            .ok_or_else(|| Error::NotFound { resource: "role", key: role_name.to_string() })?;
+        role.high_sensitive = sensitive;
+        Ok(())
+    }
+
+    /// Get capability grants for a role.
+    pub fn role_get_capability_grants(&self, role_name: &str) -> Result<Vec<CapabilityGrant>> {
+        let roles = self.roles.read();
+        let role = roles
+            .get(role_name)
+            .ok_or_else(|| Error::NotFound { resource: "role", key: role_name.to_string() })?;
+        Ok(role.capability_grants.clone())
     }
 
     // ──── User-Role assignment ────

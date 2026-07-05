@@ -31,6 +31,14 @@ pub mod auth {
     tonic::include_proto!("coord.auth");
 }
 
+pub mod capability {
+    tonic::include_proto!("coord.capability");
+}
+
+pub mod agent {
+    tonic::include_proto!("coord.agent");
+}
+
 // ──── 测试 ────
 
 #[cfg(test)]

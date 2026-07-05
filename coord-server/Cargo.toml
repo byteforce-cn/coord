@@ -9,6 +9,7 @@ coord-proto = { workspace = true }
 
 tokio = { workspace = true }
 tonic = { workspace = true }
+prost = { workspace = true }
 redb = { workspace = true }
 openraft = { workspace = true }
 tracing = { workspace = true }
@@ -26,10 +27,12 @@ tokio-stream = { workspace = true }
 # 安全层（P2）
 aes-gcm = { workspace = true }
 hkdf = { workspace = true }
+hmac = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
 lru = { workspace = true }
 hex = { workspace = true }
+uuid = { workspace = true }
 
 # BFF 层（UI 控制台代理）
 axum = { workspace = true }

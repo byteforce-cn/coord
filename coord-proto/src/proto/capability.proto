@@ -1,0 +1,69 @@
+syntax = "proto3";
+package coord.capability;
+
+// ──── Capability Registry Service ────
+//
+// 统一能力注册中心 gRPC 接口。
+// 能力定义以 Barrier 加密存储在 Server KV 中。
+// 参见 docs/capability-auth-implementation.md §5, §7。
+
+service CapabilityRegistry {
+    rpc Register(CapabilityRegisterRequest) returns (CapabilityRegisterResponse);
+    rpc List(CapabilityListRequest) returns (CapabilityListResponse);
+    rpc Get(CapabilityGetRequest) returns (CapabilityGetResponse);
+    rpc Deprecate(CapabilityDeprecateRequest) returns (CapabilityDeprecateResponse);
+}
+
+// ──── Capability Definition ────
+
+message CapabilityDefinition {
+    string capability_id = 1;       // "data:kv:read"
+    string domain = 2;              // data | coord | admin
+    string service = 3;             // kv | lease | registry | workflow ...
+    string action = 4;              // read | write | acquire | define ...
+    string description = 5;         // 人类可读描述
+    CapabilityType type = 6;        // READ | WRITE | ADMIN
+    bool deprecated = 7;            // 是否已废弃
+    int64 version = 8;              // 版本号（单调递增）
+    string scope_description = 9;   // Scope 字段用法说明
+}
+
+enum CapabilityType {
+    READ = 0;
+    WRITE = 1;
+    ADMIN = 2;
+}
+
+// ──── Register ────
+
+message CapabilityRegisterRequest {
+    CapabilityDefinition capability = 1;
+}
+
+message CapabilityRegisterResponse {}
+
+// ──── List ────
+
+message CapabilityListRequest {}
+
+message CapabilityListResponse {
+    repeated CapabilityDefinition capabilities = 1;
+}
+
+// ──── Get ────
+
+message CapabilityGetRequest {
+    string capability_id = 1;
+}
+
+message CapabilityGetResponse {
+    CapabilityDefinition capability = 1;
+}
+
+// ──── Deprecate ────
+
+message CapabilityDeprecateRequest {
+    string capability_id = 1;
+}
+
+message CapabilityDeprecateResponse {}

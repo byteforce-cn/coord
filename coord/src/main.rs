@@ -109,6 +109,10 @@ enum Commands {
     #[command(subcommand)]
     Auth(AuthCmd),
 
+    /// 能力注册中心管理（查看/检索能力定义）
+    #[command(subcommand)]
+    Capability(CapabilityCmd),
+
     /// 启动 Agent 守护进程（本地代理，Java 应用入口）
     Agent {
         /// Agent 本地 gRPC 监听地址（默认 127.0.0.1:19527）
@@ -502,6 +506,27 @@ enum AuthRoleCmd {
     },
 }
 
+// ──── Capability 子命令 ────
+
+#[derive(Subcommand)]
+enum CapabilityCmd {
+    /// 列出所有已注册的能力定义
+    List {
+        /// 目标节点地址
+        #[arg(long, default_value = "127.0.0.1:50051")]
+        addr: String,
+    },
+
+    /// 查看指定能力的详细信息
+    Get {
+        /// 能力 ID（如 data:kv:read, coord:lock:acquire）
+        capability_id: String,
+        /// 目标节点地址
+        #[arg(long, default_value = "127.0.0.1:50051")]
+        addr: String,
+    },
+}
+
 // ──── 入口 ────
 
 #[tokio::main]
@@ -890,6 +915,25 @@ async fn main() {
                 };
                 if let Err(e) = commands::cmd_auth_login(&addr, &name, &pass, token_only).await {
                     tracing::error!("Login failed: {e}");
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        },
+
+        Commands::Capability(cmd) => match cmd {
+            CapabilityCmd::List { addr } => {
+                tracing::info!("Listing capabilities via {}", addr);
+                if let Err(e) = commands::cmd_capability_list(&addr).await {
+                    tracing::error!("CapabilityList failed: {e}");
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            CapabilityCmd::Get { capability_id, addr } => {
+                tracing::info!("Getting capability {} via {}", capability_id, addr);
+                if let Err(e) = commands::cmd_capability_get(&addr, &capability_id).await {
+                    tracing::error!("CapabilityGet failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }

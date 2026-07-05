@@ -29,6 +29,13 @@ service Auth {
 
     // 认证
     rpc Authenticate(AuthenticateRequest) returns (AuthenticateResponse);
+
+    // CCT v3: Agent 同步接口
+    rpc ListRoles(ListRolesRequest) returns (ListRolesResponse);
+    rpc GetRevocationDelta(GetRevocationDeltaRequest) returns (GetRevocationDeltaResponse);
+
+    // Bootstrap: Agent 首次启动认证
+    rpc Bootstrap(BootstrapRequest) returns (BootstrapResponse);
 }
 
 // ──── Auth 管理 ────
@@ -58,11 +65,20 @@ message Permission {
     bytes range_end = 3;    // Key 范围结束（空 = 仅 key 前缀）
 }
 
+// ──── 能力授予（CCT v3） ────
+
+message CapabilityGrant {
+    string capability_id = 1;  // "data:kv:read"
+    string scope = 2;          // "/app/order-service/" 或 "" (无限制)
+}
+
 // ──── 角色 ────
 
 message Role {
     string name = 1;
-    repeated Permission permissions = 2;
+    repeated Permission permissions = 2;          // [deprecated] 旧 key-prefix 权限
+    repeated CapabilityGrant capability_grants = 3;  // 新能力授予列表（CCT v3）
+    bool high_sensitive = 4;                      // 若为 true，Agent 强制回查不缓存
 }
 
 message RoleAddRequest {
@@ -143,12 +159,43 @@ message UserRevokeRoleRequest {
 }
 message UserRevokeRoleResponse {}
 
-// ──── 认证 ────
+// ──── 认证（CCT v3 扩展） ────
 
 message AuthenticateRequest {
     string name = 1;
     string password = 2;
 }
 message AuthenticateResponse {
-    string token = 1;
+    string token = 1;           // [deprecated] 旧 Token
+    string cct = 2;             // 新 CCT v3
+    int64 expires_at = 3;       // Unix 秒级时间戳
+    repeated string roles = 4;  // 展示用角色列表
+}
+
+// ──── Agent 角色同步 ────
+
+message ListRolesRequest {}
+message ListRolesResponse {
+    repeated Role roles = 1;
+    int64 version = 2;          // 角色映射版本号（用于增量同步）
+}
+
+// ──── Token 吊销增量同步 ────
+
+message GetRevocationDeltaRequest {
+    int64 since_version = 1;    // 上次同步的版本号
+}
+message GetRevocationDeltaResponse {
+    repeated string revoked_jtis = 1;   // 增量吊销的 jti 列表
+    int64 current_version = 2;          // 当前最新版本号
+}
+
+// ──── Agent Bootstrap ────
+
+message BootstrapRequest {
+    string bootstrap_token = 1;  // 一次性 Bootstrap Token
+}
+message BootstrapResponse {
+    string cct = 1;             // 短期 CCT（10 分钟，仅含 admin:auth:authenticate）
+    int64 expires_at = 2;       // Unix 秒级时间戳
 }

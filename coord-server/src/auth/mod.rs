@@ -10,10 +10,17 @@
 //
 // Auth lifecycle: default off, enable/disable via AuthEnable/AuthDisable RPC.
 
+pub mod capability;
+pub mod interceptor;
 pub mod manager;
 pub mod token;
+pub mod token_signing;
+pub mod revocation;
 pub mod service;
 
+pub use capability::CapabilityRegistry;
+pub use capability::CapabilityRegistryService;
+pub use interceptor::ServerAuthInterceptor;
 pub use manager::AuthManager;
 pub use token::{TokenManager, AuthToken};
 pub use service::AuthService;

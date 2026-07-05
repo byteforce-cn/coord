@@ -7,6 +7,7 @@
 // - Region 类型与 Key 编码（Multi-Raft）
 // - Result 类型别名
 
+pub mod auth;
 pub mod discovery;
 pub mod error;
 pub mod region;
