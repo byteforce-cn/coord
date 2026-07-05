@@ -191,6 +191,8 @@ pub struct ConfigCenterService {
     healthy: ParkingRwLock<bool>,
     /// 关闭信号发送端
     shutdown_tx: ParkingRwLock<Option<watch::Sender<()>>>,
+    /// Watch 事件广播（用于 gRPC Watch 流）
+    watch_tx: tokio::sync::broadcast::Sender<ConfigWatchEvent>,
 }
 
 impl ConfigCenterService {
@@ -199,13 +201,17 @@ impl ConfigCenterService {
 
     /// 创建 ConfigCenterService
     pub fn new(inner: Arc<AgentInner>) -> Self {
+        let (watch_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             inner,
             cache: Arc::new(ParkingRwLock::new(ConfigCache::new())),
             healthy: ParkingRwLock::new(false),
             shutdown_tx: ParkingRwLock::new(None),
+            watch_tx,
         }
     }
+
+    /// 设置配置（写入 Server + 更新本地缓存）
 
     /// 设置配置（写入 Server + 更新本地缓存）
     pub async fn set(&self, key: &str, value: &str) -> ServiceResult<ConfigEntry> {
@@ -237,6 +243,13 @@ impl ConfigCenterService {
 
         // 更新本地缓存
         self.cache.write().put(entry.clone());
+
+        // 广播 Watch 事件
+        let _ = self.watch_tx.send(ConfigWatchEvent {
+            key: key.to_string(),
+            new_value: Some(value.to_string()),
+            revision: entry.version as i64,
+        });
 
         tracing::info!("ConfigCenter: set key='{key}', version={}", entry.version);
         Ok(entry)
@@ -444,6 +457,102 @@ impl std::fmt::Debug for ConfigCenterService {
             .field("cache_len", &self.cache_len())
             .field("healthy", &self.health_check())
             .finish()
+    }
+}
+
+// ──── gRPC Config trait 实现 ────
+
+use coord_proto::agent::{
+    ConfigGetRequest, ConfigGetResponse,
+    ConfigPutRequest, ConfigPutResponse,
+    ConfigListRequest, ConfigListResponse,
+    ConfigWatchRequest, ConfigWatchEvent,
+};
+use coord_proto::agent::config_server::Config;
+
+#[tonic::async_trait]
+impl Config for ConfigCenterService {
+    async fn get(
+        &self,
+        request: tonic::Request<ConfigGetRequest>,
+    ) -> Result<tonic::Response<ConfigGetResponse>, tonic::Status> {
+        let req = request.into_inner();
+        let entry = self.get(&req.key);
+        match entry {
+            Some(e) => Ok(tonic::Response::new(ConfigGetResponse {
+                value: e.value.clone(),
+                found: true,
+            })),
+            None => Ok(tonic::Response::new(ConfigGetResponse {
+                value: String::new(),
+                found: false,
+            })),
+        }
+    }
+
+    async fn put(
+        &self,
+        request: tonic::Request<ConfigPutRequest>,
+    ) -> Result<tonic::Response<ConfigPutResponse>, tonic::Status> {
+        let req = request.into_inner();
+        let entry = self.set(&req.key, &req.value).await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        Ok(tonic::Response::new(ConfigPutResponse {
+            revision: entry.version as i64,
+        }))
+    }
+
+    async fn list(
+        &self,
+        request: tonic::Request<ConfigListRequest>,
+    ) -> Result<tonic::Response<ConfigListResponse>, tonic::Status> {
+        let req = request.into_inner();
+        let entries: std::collections::HashMap<String, String> = self
+            .get_by_prefix(&req.prefix)
+            .into_iter()
+            .map(|e| (e.key, e.value))
+            .collect();
+        Ok(tonic::Response::new(ConfigListResponse { entries }))
+    }
+
+    /// Server streaming response type for the Watch method.
+    type WatchStream = tokio_stream::wrappers::ReceiverStream<
+        Result<ConfigWatchEvent, tonic::Status>,
+    >;
+
+    async fn watch(
+        &self,
+        request: tonic::Request<ConfigWatchRequest>,
+    ) -> Result<tonic::Response<Self::WatchStream>, tonic::Status> {
+        let req = request.into_inner();
+        let prefix = req.prefix.clone();
+        let mut rx = self.watch_tx.subscribe();
+        let (tx, out_rx) = tokio::sync::mpsc::channel(32);
+
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if event.key.starts_with(&prefix) {
+                            if tx.send(Ok(event)).await.is_err() {
+                                break; // client disconnected
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("ConfigCenter watch lagged by {n} events");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(tonic::Response::new(
+            tokio_stream::wrappers::ReceiverStream::new(out_rx),
+        ))
     }
 }
 

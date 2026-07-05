@@ -134,8 +134,8 @@ pub struct ServiceConfig {
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
-            registry: false,
-            config_center: false,
+            registry: true,
+            config_center: true,
             lock: false,
             idgen: false,
             leader_election: false,

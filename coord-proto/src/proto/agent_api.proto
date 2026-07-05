@@ -24,6 +24,17 @@ message HandshakeResponse {
 // Registry
 // ============================================================
 
+// Service discovery filter mode.
+// Default (0) and EXACT (1) both perform exact match for backward compatibility.
+// PREFIX (2) matches all services whose name starts with the given service_name.
+// ALL (3) returns all registered services regardless of service_name.
+enum FilterMode {
+    FILTER_MODE_UNSPECIFIED = 0;
+    FILTER_MODE_EXACT = 1;
+    FILTER_MODE_PREFIX = 2;
+    FILTER_MODE_ALL = 3;
+}
+
 service Registry {
     rpc Register(RegisterRequest) returns (RegisterResponse);
     rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
@@ -69,6 +80,7 @@ message ServiceInstance {
 
 message DiscoverRequest {
     string service_name = 1;
+    FilterMode filter_mode = 2;
 }
 
 message DiscoverResponse {
@@ -99,6 +111,7 @@ message WatchEvent {
 
 service Config {
     rpc Get(ConfigGetRequest) returns (ConfigGetResponse);
+    rpc Put(ConfigPutRequest) returns (ConfigPutResponse);
     rpc List(ConfigListRequest) returns (ConfigListResponse);
     rpc Watch(ConfigWatchRequest) returns (stream ConfigWatchEvent);
 }
@@ -108,7 +121,17 @@ message ConfigGetRequest {
 }
 
 message ConfigGetResponse {
-    string value = 1;  // empty means key not found
+    string value = 1;  // empty means key not found OR empty value stored
+    bool found = 2;    // true if key exists, false otherwise
+}
+
+message ConfigPutRequest {
+    string key = 1;
+    string value = 2;
+}
+
+message ConfigPutResponse {
+    int64 revision = 1;
 }
 
 message ConfigListRequest {

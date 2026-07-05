@@ -224,6 +224,8 @@ pub struct RegistryService {
     healthy: ParkingRwLock<bool>,
     /// 关闭信号发送端
     shutdown_tx: ParkingRwLock<Option<watch::Sender<()>>>,
+    /// Watch 事件广播（用于 gRPC Watch 流）
+    watch_tx: tokio::sync::broadcast::Sender<WatchEvent>,
 }
 
 impl RegistryService {
@@ -232,18 +234,20 @@ impl RegistryService {
 
     /// 创建 RegistryService
     pub fn new(inner: Arc<AgentInner>, cache_max_entries: usize) -> Self {
+        let (watch_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             inner,
             cache: Arc::new(ParkingRwLock::new(RegistryCache::new(cache_max_entries))),
             healthy: ParkingRwLock::new(false),
             shutdown_tx: ParkingRwLock::new(None),
+            watch_tx,
         }
     }
 
     /// 注册服务实例
     ///
     /// 在 Server 中写入服务实例数据并绑定 Lease。
-    /// 同时更新本地缓存。
+    /// 同时更新本地缓存并广播 Watch 事件。
     pub async fn register(&self, instance: ServiceInstance) -> ServiceResult<()> {
         let key = RegistryCache::storage_key(&instance.service_name, &instance.instance_id);
         let value = serde_json::to_vec(&instance)
@@ -269,6 +273,22 @@ impl RegistryService {
         // 更新本地缓存
         self.cache.write().apply_event(&key, Some(&value));
 
+        // 广播 Watch 事件（全量：该服务的全部实例）
+        let all_instances = self.cache.read().discover(&instance.service_name);
+        let proto_instances: Vec<coord_proto::agent::ServiceInstance> = all_instances
+            .iter()
+            .map(|inst| coord_proto::agent::ServiceInstance {
+                instance_id: inst.instance_id.clone(),
+                service_name: inst.service_name.clone(),
+                metadata: String::from_utf8_lossy(&inst.metadata).to_string(),
+            })
+            .collect();
+        let _ = self.watch_tx.send(WatchEvent {
+            r#type: 1, // INSTANCES_ADDED
+            instances: proto_instances,
+            revision: 0,
+        });
+
         tracing::info!(
             "RegistryService: registered {}/{} at {}",
             instance.service_name,
@@ -281,7 +301,7 @@ impl RegistryService {
     /// 注销服务实例
     ///
     /// 从 Server 中删除服务实例数据。
-    /// 同时从本地缓存移除。
+    /// 同时从本地缓存移除并广播 Watch 事件。
     pub async fn deregister(
         &self,
         service_name: &str,
@@ -298,6 +318,22 @@ impl RegistryService {
 
         // 从本地缓存移除
         self.cache.write().apply_event(&key, None);
+
+        // 广播 Watch 事件（全量：该服务的剩余实例）
+        let remaining = self.cache.read().discover(service_name);
+        let proto_instances: Vec<coord_proto::agent::ServiceInstance> = remaining
+            .iter()
+            .map(|inst| coord_proto::agent::ServiceInstance {
+                instance_id: inst.instance_id.clone(),
+                service_name: inst.service_name.clone(),
+                metadata: String::from_utf8_lossy(&inst.metadata).to_string(),
+            })
+            .collect();
+        let _ = self.watch_tx.send(WatchEvent {
+            r#type: 2, // INSTANCES_REMOVED
+            instances: proto_instances,
+            revision: 0,
+        });
 
         tracing::info!(
             "RegistryService: deregistered {}/{}",
@@ -538,6 +574,176 @@ impl std::fmt::Debug for RegistryService {
             .field("healthy", &self.health_check())
             .field("self_protection", &self.is_self_protection())
             .finish()
+    }
+}
+
+// ──── gRPC Registry trait 实现 ────
+
+use coord_proto::agent::{
+    RegisterRequest, RegisterResponse,
+    DeregisterRequest, DeregisterResponse,
+    HeartbeatRequest, HeartbeatResponse,
+    DiscoverRequest, DiscoverResponse,
+    WatchRequest, WatchEvent,
+};
+use coord_proto::agent::registry_server::Registry;
+
+#[tonic::async_trait]
+impl Registry for RegistryService {
+    async fn register(
+        &self,
+        request: tonic::Request<RegisterRequest>,
+    ) -> Result<tonic::Response<RegisterResponse>, tonic::Status> {
+        let req = request.into_inner();
+        // Create a lease for the TTL
+        let lease_id = if req.ttl_seconds > 0 {
+            self.inner
+                .client
+                .lease()
+                .grant(req.ttl_seconds as i64)
+                .await
+                .map_err(|e| tonic::Status::internal(format!("lease grant failed: {e}")))?
+        } else {
+            0
+        };
+
+        let instance = ServiceInstance {
+            service_name: req.service_name.clone(),
+            instance_id: req.instance_id.clone(),
+            address: req.metadata.clone(), // metadata field carries address info for agent_api
+            metadata: req.metadata.into_bytes(),
+            lease_id,
+            registered_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+
+        self.register(instance).await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(RegisterResponse { lease_id }))
+    }
+
+    async fn deregister(
+        &self,
+        request: tonic::Request<DeregisterRequest>,
+    ) -> Result<tonic::Response<DeregisterResponse>, tonic::Status> {
+        let req = request.into_inner();
+        self.deregister(&req.service_name, &req.instance_id).await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        Ok(tonic::Response::new(DeregisterResponse {}))
+    }
+
+    async fn heartbeat(
+        &self,
+        request: tonic::Request<HeartbeatRequest>,
+    ) -> Result<tonic::Response<HeartbeatResponse>, tonic::Status> {
+        let req = request.into_inner();
+        let ttl = self.inner
+            .client
+            .lease()
+            .keep_alive(req.lease_id)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("lease keep-alive failed: {e}")))?;
+        Ok(tonic::Response::new(HeartbeatResponse { ttl }))
+    }
+
+    async fn discover(
+        &self,
+        request: tonic::Request<DiscoverRequest>,
+    ) -> Result<tonic::Response<DiscoverResponse>, tonic::Status> {
+        let req = request.into_inner();
+        let filter_mode = req.filter_mode();
+
+        let instances: Vec<coord_proto::agent::ServiceInstance> = match filter_mode {
+            // ALL: return every registered instance across all services
+            coord_proto::agent::FilterMode::All => {
+                let all = self.discover_all();
+                all.values()
+                    .flatten()
+                    .map(|inst| coord_proto::agent::ServiceInstance {
+                        instance_id: inst.instance_id.clone(),
+                        service_name: inst.service_name.clone(),
+                        metadata: String::from_utf8_lossy(&inst.metadata).to_string(),
+                    })
+                    .collect()
+            }
+            // PREFIX: match services whose name starts with the given prefix
+            coord_proto::agent::FilterMode::Prefix => {
+                let all = self.discover_all();
+                let prefix = &req.service_name;
+                all.iter()
+                    .filter(|(svc, _)| svc.starts_with(prefix.as_str()))
+                    .flat_map(|(_, instances)| instances)
+                    .map(|inst| coord_proto::agent::ServiceInstance {
+                        instance_id: inst.instance_id.clone(),
+                        service_name: inst.service_name.clone(),
+                        metadata: String::from_utf8_lossy(&inst.metadata).to_string(),
+                    })
+                    .collect()
+            }
+            // EXACT / UNSPECIFIED: exact service name match (backward compatible)
+            _ => {
+                let result = self.discover(&req.service_name);
+                result
+                    .instances
+                    .iter()
+                    .map(|inst| coord_proto::agent::ServiceInstance {
+                        instance_id: inst.instance_id.clone(),
+                        service_name: inst.service_name.clone(),
+                        metadata: String::from_utf8_lossy(&inst.metadata).to_string(),
+                    })
+                    .collect()
+            }
+        };
+
+        Ok(tonic::Response::new(DiscoverResponse {
+            instances,
+            revision: 0,
+        }))
+    }
+
+    /// Server streaming response type for the Watch method.
+    type WatchStream = tokio_stream::wrappers::ReceiverStream<
+        Result<WatchEvent, tonic::Status>,
+    >;
+
+    async fn watch(
+        &self,
+        request: tonic::Request<WatchRequest>,
+    ) -> Result<tonic::Response<Self::WatchStream>, tonic::Status> {
+        let req = request.into_inner();
+        let service_name = req.service_name.clone();
+        let mut rx = self.watch_tx.subscribe();
+        let (tx, out_rx) = tokio::sync::mpsc::channel(32);
+
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        // 过滤：只推送匹配 service_name 的事件
+                        let has_match = event.instances.iter().any(|inst| inst.service_name == service_name);
+                        if has_match {
+                            if tx.send(Ok(event)).await.is_err() {
+                                break; // client disconnected
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("RegistryService watch lagged by {n} events");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(tonic::Response::new(
+            tokio_stream::wrappers::ReceiverStream::new(out_rx),
+        ))
     }
 }
 

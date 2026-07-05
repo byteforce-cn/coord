@@ -14,4 +14,12 @@ public interface ConfigClient {
     <T> Optional<T> getObject(String key, Class<T> type);
     Map<String, String> list(String prefix);
     ConfigWatchSubscription watch(String prefix, ConfigListener listener);
+
+    /**
+     * Put a configuration key-value pair.
+     *
+     * @param key   the configuration key
+     * @param value the configuration value
+     */
+    void put(String key, String value);
 }

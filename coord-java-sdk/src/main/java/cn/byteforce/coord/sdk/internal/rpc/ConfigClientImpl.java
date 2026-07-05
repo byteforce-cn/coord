@@ -47,8 +47,10 @@ public final class ConfigClientImpl extends AgentRpcClient implements ConfigClie
                             .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
                             .get((ConfigGetRequest) req),
                     request, "config.get");
-            String value = response.getValue();
-            return value.isEmpty() ? Optional.empty() : Optional.of(value);
+            if (response.getFound()) {
+                return Optional.of(response.getValue());
+            }
+            return Optional.empty();
         } catch (CoordException e) {
             if (e.getErrorCode() == ErrorCode.CONFIG_KEY_NOT_FOUND
                     || e.getErrorCode() == ErrorCode.REGISTRY_SERVICE_NOT_FOUND) {
@@ -56,6 +58,21 @@ public final class ConfigClientImpl extends AgentRpcClient implements ConfigClie
             }
             throw e; // Only known "not found" codes produce empty; others throw
         }
+    }
+
+    @Override
+    public void put(String key, String value) {
+        cn.byteforce.coord.sdk.internal.proto.ConfigPutRequest request =
+                cn.byteforce.coord.sdk.internal.proto.ConfigPutRequest.newBuilder()
+                        .setKey(key)
+                        .setValue(value)
+                        .build();
+        callWithRetry(
+                (ch, req) -> cn.byteforce.coord.sdk.internal.proto.ConfigGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .put((cn.byteforce.coord.sdk.internal.proto.ConfigPutRequest) req),
+                request, "config.put");
+        log.debug("Config put: key={}", key);
     }
 
     @Override

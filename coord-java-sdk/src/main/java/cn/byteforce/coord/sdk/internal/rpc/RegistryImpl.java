@@ -81,13 +81,24 @@ public final class RegistryImpl extends AgentRpcClient implements Registry {
 
     @Override
     public List<ServiceInstance> discover(String serviceName) throws CoordException {
-        return discoverWithRevision(serviceName).instances();
+        return discover(serviceName, FilterMode.EXACT);
     }
 
     @Override
     public DiscoverResult discoverWithRevision(String serviceName) throws CoordException {
+        return discoverWithRevision(serviceName, FilterMode.EXACT);
+    }
+
+    @Override
+    public List<ServiceInstance> discover(String serviceName, FilterMode filterMode) throws CoordException {
+        return discoverWithRevision(serviceName, filterMode).instances();
+    }
+
+    @Override
+    public DiscoverResult discoverWithRevision(String serviceName, FilterMode filterMode) throws CoordException {
         DiscoverRequest request = DiscoverRequest.newBuilder()
                 .setServiceName(serviceName)
+                .setFilterModeValue(filterMode.toProtoValue())
                 .build();
 
         DiscoverResponse response = callWithRetry(
@@ -95,6 +106,31 @@ public final class RegistryImpl extends AgentRpcClient implements Registry {
                         .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
                         .discover((DiscoverRequest) req),
                 request, "registry.discover");
+
+        List<ServiceInstance> instances = new ArrayList<>();
+        for (cn.byteforce.coord.sdk.internal.proto.ServiceInstance si : response.getInstancesList()) {
+            instances.add(new ServiceInstance(si.getInstanceId(), si.getServiceName(), si.getMetadata()));
+        }
+        return new DiscoverResult(instances, response.getRevision());
+    }
+
+    @Override
+    public List<ServiceInstance> discoverAll() throws CoordException {
+        return discoverAllWithRevision().instances();
+    }
+
+    @Override
+    public DiscoverResult discoverAllWithRevision() throws CoordException {
+        DiscoverRequest request = DiscoverRequest.newBuilder()
+                .setServiceName("")
+                .setFilterModeValue(FilterMode.ALL.toProtoValue())
+                .build();
+
+        DiscoverResponse response = callWithRetry(
+                (ch, req) -> RegistryGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .discover((DiscoverRequest) req),
+                request, "registry.discoverAll");
 
         List<ServiceInstance> instances = new ArrayList<>();
         for (cn.byteforce.coord.sdk.internal.proto.ServiceInstance si : response.getInstancesList()) {

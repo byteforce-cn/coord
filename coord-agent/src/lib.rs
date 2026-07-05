@@ -251,6 +251,9 @@ impl AgentServer {
         let service_manager = ServiceManager::new(self.config.services.clone());
 
         // 按配置启用高级服务（Phase E）
+        // 保存 RegistryService 的 Arc 句柄，用于后续注册 gRPC RegistryServer
+        let mut registry_grpc_svc: Option<Arc<crate::services::registry::RegistryService>> = None;
+
         if self.config.services.registry {
             if let Some(ref inner) = inner {
                 let registry_svc = Arc::new(
@@ -259,8 +262,10 @@ impl AgentServer {
                         500, // max cached instances
                     )
                 );
+                registry_grpc_svc = Some(registry_svc.clone());
                 if let Err(e) = service_manager.register(registry_svc).await {
                     tracing::error!("failed to register registry service: {e}");
+                    registry_grpc_svc = None;
                 } else {
                     tracing::info!("Registry service registered (v3.0 pluggable architecture)");
                 }
@@ -269,13 +274,18 @@ impl AgentServer {
             }
         }
 
+        // 保存 ConfigCenterService 的 Arc 句柄，用于后续注册 gRPC ConfigServer
+        let mut config_grpc_svc: Option<Arc<crate::services::config_center::ConfigCenterService>> = None;
+
         if self.config.services.config_center {
             if let Some(ref inner) = inner {
                 let config_svc = Arc::new(
                     crate::services::config_center::ConfigCenterService::new(inner.clone())
                 );
+                config_grpc_svc = Some(config_svc.clone());
                 if let Err(e) = service_manager.register(config_svc).await {
                     tracing::error!("failed to register config_center service: {e}");
+                    config_grpc_svc = None;
                 } else {
                     tracing::info!("ConfigCenter service registered (v3.0 pluggable architecture)");
                 }
@@ -414,13 +424,31 @@ impl AgentServer {
 
         tracing::info!("coord-agent gRPC server listening on {}", self.config.agent_addr);
 
-        // 构建 gRPC router：核心服务 + 可插拔服务
+        // 构建 gRPC router：核心服务 + Registry + Config + 可插拔服务
         let router = tonic::transport::Server::builder()
             .add_service(KvServer::new(KvProxy::new(inner.clone())))
             .add_service(TxnServer::new(TxnProxy::new(inner.clone())))
             .add_service(LeaseServer::new(LeaseProxy::new(inner.clone())))
             .add_service(WatchServer::new(WatchProxy::new(inner.clone())))
             .add_service(MaintenanceServer::new(MaintenanceProxy::new(inner)));
+
+        // 注册 Registry gRPC 服务（若 registry 已启用且成功初始化）
+        let router = if let Some(registry_svc) = registry_grpc_svc {
+            router.add_service(
+                coord_proto::agent::registry_server::RegistryServer::from_arc(registry_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 Config gRPC 服务（若 config_center 已启用且成功初始化）
+        let router = if let Some(config_svc) = config_grpc_svc {
+            router.add_service(
+                coord_proto::agent::config_server::ConfigServer::from_arc(config_svc)
+            )
+        } else {
+            router
+        };
 
         let router = service_manager.build_grpc_router(router);
 
