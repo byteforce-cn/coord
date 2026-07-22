@@ -129,6 +129,26 @@ pub struct ServiceConfig {
     /// 分布式调度
     #[serde(default)]
     pub scheduler: bool,
+
+    /// 熔断器
+    #[serde(default)]
+    pub circuit_breaker: bool,
+
+    /// 限流器
+    #[serde(default)]
+    pub rate_limiter: bool,
+
+    /// 特性开关
+    #[serde(default)]
+    pub feature_flags: bool,
+
+    /// 安全传输（信封加密）
+    #[serde(default)]
+    pub transit: bool,
+
+    /// PKI CA 证书签发服务
+    #[serde(default)]
+    pub pki: bool,
 }
 
 impl Default for ServiceConfig {
@@ -136,15 +156,20 @@ impl Default for ServiceConfig {
         Self {
             registry: true,
             config_center: true,
-            lock: false,
+            lock: true,
             idgen: false,
             leader_election: false,
             event_notification: false,
             cache: false,
             mq: false,
-            workflow: false,
+            workflow: true,
             policy: false,
             scheduler: false,
+            circuit_breaker: false,
+            rate_limiter: false,
+            feature_flags: false,
+            transit: true,
+            pki: true,
         }
     }
 }
@@ -379,6 +404,19 @@ mod tests {
         let config = ServiceConfig {
             registry: true,
             workflow: true,
+            lock: false,
+            idgen: false,
+            leader_election: false,
+            event_notification: false,
+            cache: false,
+            mq: false,
+            policy: false,
+            scheduler: false,
+            circuit_breaker: false,
+            rate_limiter: false,
+            feature_flags: false,
+            transit: false,
+            pki: false,
             ..Default::default()
         };
         let manager = ServiceManager::new(config);
@@ -389,18 +427,27 @@ mod tests {
     }
 
     #[test]
-    fn test_service_config_default_all_disabled() {
+    fn test_service_config_defaults() {
         let config = ServiceConfig::default();
-        assert!(!config.registry);
-        assert!(!config.config_center);
-        assert!(!config.lock);
+        // 核心基础服务 — 默认启用
+        assert!(config.registry, "registry should be enabled by default");
+        assert!(config.config_center, "config_center should be enabled by default");
+        // Phase A: 默认启用 lock / transit / pki / workflow
+        assert!(config.lock, "lock should be enabled by default (Phase A)");
+        assert!(config.transit, "transit should be enabled by default (Phase A)");
+        assert!(config.pki, "pki should be enabled by default (Phase A)");
+        assert!(config.workflow, "workflow should be enabled by default (Phase A)");
+        // 其他服务保持默认关闭
         assert!(!config.idgen);
         assert!(!config.leader_election);
         assert!(!config.event_notification);
         assert!(!config.cache);
         assert!(!config.mq);
-        assert!(!config.workflow);
         assert!(!config.policy);
+        assert!(!config.scheduler);
+        assert!(!config.circuit_breaker);
+        assert!(!config.rate_limiter);
+        assert!(!config.feature_flags);
     }
 
     #[test]

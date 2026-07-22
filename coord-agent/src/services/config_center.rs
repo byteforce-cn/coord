@@ -12,7 +12,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::RwLock as ParkingRwLock;
@@ -369,8 +368,6 @@ impl BaseService for ConfigCenterService {
                 }
             };
 
-            let mut last_event_time = std::time::Instant::now();
-
             loop {
                 tokio::select! {
                     _ = rx.changed() => {
@@ -389,7 +386,6 @@ impl BaseService for ConfigCenterService {
                                     };
                                     cache.write().apply_event(&kv.key, value);
                                 }
-                                last_event_time = std::time::Instant::now();
                                 if cache.read().is_fallback() {
                                     cache.write().exit_fallback();
                                 }
@@ -422,12 +418,6 @@ impl BaseService for ConfigCenterService {
                                     }
                                 }
                             }
-                        }
-                    }
-                    _ = tokio::time::sleep(Duration::from_secs(30)) => {
-                        // 定期 Check：若超过 60s 无事件，进入回退模式
-                        if last_event_time.elapsed() > Duration::from_secs(60) {
-                            cache.write().enter_fallback();
                         }
                     }
                 }

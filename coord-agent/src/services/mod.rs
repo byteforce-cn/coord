@@ -9,6 +9,7 @@ pub mod cache;
 pub mod circuit_breaker;
 pub mod config_center;
 pub mod event_notification;
+pub mod grpc_handlers;
 pub mod idgen;
 pub mod leader_election;
 pub mod lock;

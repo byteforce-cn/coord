@@ -60,6 +60,7 @@ impl WorkflowState {
 pub struct WorkflowInstance {
     pub instance_id: String,
     pub workflow_name: String,
+    pub definition_id: Option<String>,  // 关联的已部署工作流定义 ID
     pub state: WorkflowState,
     pub current_step: u32,
     pub input: Vec<u8>,
@@ -73,7 +74,7 @@ pub struct WorkflowInstance {
 impl WorkflowInstance {
     pub fn new(instance_id: impl Into<String>, workflow_name: impl Into<String>, input: Vec<u8>) -> Self {
         let now = unix_ts();
-        Self { instance_id: instance_id.into(), workflow_name: workflow_name.into(), state: WorkflowState::Pending, current_step: 0, input, output: Vec::new(), error_message: String::new(), lease_id: 0, created_at: now, updated_at: now }
+        Self { instance_id: instance_id.into(), workflow_name: workflow_name.into(), definition_id: None, state: WorkflowState::Pending, current_step: 0, input, output: Vec::new(), error_message: String::new(), lease_id: 0, created_at: now, updated_at: now }
     }
     pub fn storage_key(instance_id: &str) -> Vec<u8> {
         format!("/_workflow/instances/{instance_id}").into_bytes()
@@ -82,6 +83,54 @@ impl WorkflowInstance {
 
 fn unix_ts() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
+fn unix_ts_i64() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64
+}
+
+// ──── Phase B 新增数据类型 ────
+
+/// 工作流定义（Phase B.1 — deploy/get_definition 使用）
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowDefinition {
+    pub id: String,
+    pub name: String,
+    pub namespace: String,
+    pub yaml: String,
+    pub version: String,       // 语义化版本字符串，如 "1.0"
+    pub status: String,        // "active" | "deprecated"
+    pub created_at: i64,
+}
+
+/// 工作流定义摘要（Phase B.1 — list_definitions 使用）
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DefSummary {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub status: String,
+    pub created_at: i64,
+}
+
+/// 工作流实例摘要（Phase B.1 — list_instances 使用）
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InstSummary {
+    pub id: String,
+    pub workflow_id: String,
+    pub state: String,
+    pub started_at: i64,
+    pub updated_at: i64,
+    pub definition_name: String,
+}
+
+impl WorkflowDefinition {
+    pub fn storage_key(id: &str) -> Vec<u8> { format!("/_workflow/v2/defs/{id}").into_bytes() }
+    pub fn namespace_key(namespace: &str) -> Vec<u8> { format!("/_workflow/v2/ns/{namespace}/").into_bytes() }
+    /// namespace 索引键：用于按 namespace 列出所有 definition id
+    pub fn namespace_index_key(namespace: &str, id: &str) -> Vec<u8> {
+        format!("/_workflow/v2/ns/{namespace}/{id}").into_bytes()
+    }
 }
 
 // ──── WorkflowCache ────
@@ -177,6 +226,273 @@ impl WorkflowService {
             Ok(Some(inst))
         } else { Ok(None) }
     }
+
+    /// 向 workflow instance 发送 signal（记录 signal 信息到 output 字段）
+    pub async fn signal_instance(
+        &self,
+        instance_id: &str,
+        signal_name: &str,
+        payload: &[u8],
+    ) -> ServiceResult<()> {
+        let key = WorkflowInstance::storage_key(instance_id);
+        let pairs = self.inner.client.kv()
+            .range(&key, &key, 1, 0).await
+            .map_err(|e| format!("kv range: {e}"))?;
+        let (_k, v) = pairs.into_iter().next()
+            .ok_or_else(|| format!("instance '{instance_id}' not found"))?;
+        let mut inst: WorkflowInstance = serde_json::from_slice(&v)
+            .map_err(|e| format!("deserialize: {e}"))?;
+        // 将 signal 信息记录到 output 字段
+        let signal_record = format!(
+            "signal:{} payload:{}",
+            signal_name,
+            String::from_utf8_lossy(payload)
+        );
+        inst.output = signal_record.into_bytes();
+        inst.updated_at = unix_ts();
+        let new_val = serde_json::to_vec(&inst).map_err(|e| format!("serialize: {e}"))?;
+        self.inner.client.kv().put(&key, &new_val).await.map_err(|e| format!("kv put: {e}"))?;
+        self.cache.write().put_instance(inst);
+        Ok(())
+    }
+
+    // ──── Phase B.1: 工作流定义管理 ────
+
+    /// 部署工作流定义，存储到 coord-server KV 层以支持多 Agent 共享
+    pub async fn deploy_definition(
+        &self,
+        namespace: &str,
+        yaml: &str,
+    ) -> ServiceResult<(String, String, String)> {
+        // 使用时间戳+随机数生成简短 ID
+        let id = format!("{}-{:x}", namespace, unix_ts() as u32 ^ (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos()));
+        let now = unix_ts_i64();
+        // 从 YAML 中提取 name（支持缩进和引号）
+        let name = yaml.lines()
+            .find(|l| {
+                let trimmed = l.trim_start();
+                trimmed.starts_with("name:") || trimmed.starts_with("id:")
+            })
+            .and_then(|l| l.splitn(2, ':').nth(1))
+            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| id.clone());
+
+        // 从 YAML 中提取 version（语义化版本字符串）
+        let version = yaml.lines()
+            .find(|l| {
+                let trimmed = l.trim_start();
+                trimmed.starts_with("version:")
+            })
+            .and_then(|l| l.splitn(2, ':').nth(1))
+            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "1".to_string());
+
+        let def = WorkflowDefinition {
+            id: id.clone(),
+            name: name.clone(),
+            namespace: namespace.to_string(),
+            yaml: yaml.to_string(),
+            version: version.clone(),
+            status: "active".to_string(),
+            created_at: now,
+        };
+
+        let key = WorkflowDefinition::storage_key(&id);
+        let value = serde_json::to_vec(&def).map_err(|e| format!("serialize: {e}"))?;
+        self.inner.client.kv().put(&key, &value).await
+            .map_err(|e| format!("kv put definition: {e}"))?;
+
+        // 同时写入 namespace 索引，确保 list_definitions 可按 namespace 查询
+        let ns_idx_key = WorkflowDefinition::namespace_index_key(namespace, &id);
+        self.inner.client.kv().put(&ns_idx_key, &id.as_bytes().to_vec()).await
+            .map_err(|e| format!("kv put namespace index: {e}"))?;
+
+        Ok((id, version, name))
+    }
+
+    /// 列出命名空间下的工作流定义
+    pub async fn list_definitions(
+        &self,
+        namespace: &str,
+        page_size: i32,
+        _page_token: &str,
+    ) -> ServiceResult<(Vec<DefSummary>, String)> {
+        let prefix = WorkflowDefinition::namespace_key(namespace);
+        let range_end = prefix_end(&prefix);
+        let limit = if page_size > 0 { page_size as i64 } else { 50 };
+
+        // 先查 namespace 索引获取 definition id 列表
+        let pairs = self.inner.client.kv()
+            .range(&prefix, &range_end, limit, 0).await
+            .map_err(|e| format!("kv range definitions: {e}"))?;
+
+        let mut summaries: Vec<DefSummary> = Vec::new();
+        for (_k, v) in &pairs {
+            // namespace 索引值存的是 definition id
+            let def_id = String::from_utf8_lossy(v).to_string();
+            // 用 definition id 获取完整定义
+            let def_key = WorkflowDefinition::storage_key(&def_id);
+            match self.inner.client.kv()
+                .range(&def_key, &def_key, 1, 0).await
+            {
+                Ok(def_pairs) => {
+                    if let Some((_dk, dv)) = def_pairs.into_iter().next() {
+                        if let Ok(def) = serde_json::from_slice::<WorkflowDefinition>(&dv) {
+                            summaries.push(DefSummary {
+                                id: def.id,
+                                name: def.name,
+                                version: def.version,
+                                status: def.status,
+                                created_at: def.created_at,
+                            });
+                        }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+
+        // 简单分页：使用最后一条的 id 作为 next_page_token
+        let next_token = if pairs.len() as i32 >= page_size && page_size > 0 {
+            summaries.last().map(|s| s.id.clone()).unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        Ok((summaries, next_token))
+    }
+
+    /// 按 ID 获取工作流定义详情
+    pub async fn get_definition_by_id(
+        &self,
+        workflow_id: &str,
+    ) -> ServiceResult<WorkflowDefinition> {
+        let key = WorkflowDefinition::storage_key(workflow_id);
+        let pairs = self.inner.client.kv()
+            .range(&key, &key, 1, 0).await
+            .map_err(|e| format!("kv get definition: {e}"))?;
+
+        let (_k, v) = pairs.into_iter().next()
+            .ok_or_else(|| format!("definition '{workflow_id}' not found"))?;
+        let def: WorkflowDefinition = serde_json::from_slice(&v)
+            .map_err(|e| format!("deserialize definition: {e}"))?;
+        Ok(def)
+    }
+
+    /// 列出工作流实例
+    pub async fn list_instances(
+        &self,
+        workflow_id: &str,
+        _namespace: &str,
+        page_size: i32,
+        page_token: &str,
+    ) -> ServiceResult<(Vec<InstSummary>, String)> {
+        // 从 KV 存储扫描所有实例（前缀 /_workflow/instances/）
+        let prefix = b"/_workflow/instances/".to_vec();
+        let range_end = prefix_end(&prefix);
+        let kv_limit = if page_size > 0 { page_size as i64 } else { 50 };
+
+        let pairs = self.inner.client.kv()
+            .range(&prefix, &range_end, kv_limit, 0).await
+            .map_err(|e| format!("kv range instances: {e}"))?;
+
+        let mut all_instances: Vec<WorkflowInstance> = Vec::new();
+        for (_k, v) in &pairs {
+            if let Ok(inst) = serde_json::from_slice::<WorkflowInstance>(v) {
+                all_instances.push(inst);
+            }
+        }
+
+        // 按 workflow_id 或 workflow_name 过滤（空字符串表示不限制）
+        // workflow_id 参数可以是 definition ID 或 definition name
+        // 若为 definition ID：先查出 definition name，再按 name 过滤实例
+        let filter_name: Option<String> = if workflow_id.is_empty() {
+            None
+        } else {
+            // 先尝试按 definition ID 查找，获取其 name
+            let def_key = WorkflowDefinition::storage_key(workflow_id);
+            if let Ok(pairs) = self.inner.client.kv()
+                .range(&def_key, &def_key, 1, 0).await
+            {
+                if let Some((_k, v)) = pairs.into_iter().next() {
+                    if let Ok(def) = serde_json::from_slice::<WorkflowDefinition>(&v) {
+                        if !def.name.is_empty() {
+                            Some(def.name)
+                        } else {
+                            Some(workflow_id.to_string())
+                        }
+                    } else {
+                        Some(workflow_id.to_string())
+                    }
+                } else {
+                    Some(workflow_id.to_string())
+                }
+            } else {
+                Some(workflow_id.to_string())
+            }
+        };
+
+        let filtered: Vec<&WorkflowInstance> = match &filter_name {
+            None => all_instances.iter().collect(),
+            Some(name) => all_instances.iter().filter(|i| {
+                i.workflow_name == *name
+                    || i.definition_id.as_deref() == Some(workflow_id)
+            }).collect(),
+        };
+
+        // 应用分页
+        let start_idx = if page_token.is_empty() {
+            0usize
+        } else {
+            filtered.iter().position(|i| i.instance_id == page_token).map(|p| p + 1).unwrap_or(0)
+        };
+        let slice_limit = if page_size > 0 { page_size as usize } else { 50 };
+        let end_idx = (start_idx + slice_limit).min(filtered.len());
+
+        let summaries: Vec<InstSummary> = filtered[start_idx..end_idx].iter().map(|i| {
+            InstSummary {
+                id: i.instance_id.clone(),
+                workflow_id: i.definition_id.clone().unwrap_or_else(|| i.workflow_name.clone()),
+                state: format!("{:?}", i.state),
+                started_at: i.created_at as i64,
+                updated_at: i.updated_at as i64,
+                definition_name: i.workflow_name.clone(),
+            }
+        }).collect();
+
+        let next_token = if end_idx < filtered.len() {
+            filtered[end_idx].instance_id.clone()
+        } else {
+            String::new()
+        };
+
+        // 同步更新内存缓存
+        {
+            let mut cache = self.cache.write();
+            for inst in &all_instances {
+                cache.put_instance(inst.clone());
+            }
+        }
+
+        Ok((summaries, next_token))
+    }
+}
+
+/// 计算 range 前缀的结束键（前缀各字节 +1）
+fn prefix_end(prefix: &[u8]) -> Vec<u8> {
+    let mut end = prefix.to_vec();
+    for i in (0..end.len()).rev() {
+        if end[i] < 0xFF {
+            end[i] += 1;
+            end.truncate(i + 1);
+            return end;
+        }
+    }
+    // 前缀全是 0xFF，返回空前缀（匹配所有）
+    Vec::new()
 }
 
 #[async_trait]
@@ -595,5 +911,77 @@ mod tests {
         c.put_instance(WorkflowInstance::new("i1", "a", vec![]));
         assert!(c.get_instance("i1").is_some());
         assert_eq!(c.list_instances_by_workflow("a").len(), 1);
+    }
+
+    // ──── Phase B.1 新数据类型测试 ────
+
+    #[test]
+    fn test_workflow_definition_storage_key() {
+        let key = WorkflowDefinition::storage_key("wf-001");
+        assert!(key.starts_with(b"/_workflow/v2/defs/"));
+        assert!(key.ends_with(b"wf-001"));
+    }
+
+    #[test]
+    fn test_workflow_definition_namespace_key() {
+        let key = WorkflowDefinition::namespace_key("production");
+        assert!(key.starts_with(b"/_workflow/v2/ns/production/"));
+    }
+
+    #[test]
+    fn test_def_summary_fields() {
+        let s = DefSummary {
+            id: "wf-1".into(),
+            name: "test-wf".into(),
+            version: "2".into(),
+            status: "active".into(),
+            created_at: 1000,
+        };
+        assert_eq!(s.id, "wf-1");
+        assert_eq!(s.status, "active");
+    }
+
+    #[test]
+    fn test_inst_summary_fields() {
+        let s = InstSummary {
+            id: "inst-1".into(),
+            workflow_id: "wf-1".into(),
+            state: "RUNNING".into(),
+            started_at: 1000,
+            updated_at: 2000,
+            definition_name: "test-wf".into(),
+        };
+        assert_eq!(s.state, "RUNNING");
+        assert_eq!(s.workflow_id, "wf-1");
+        assert_eq!(s.definition_name, "test-wf");
+    }
+
+    #[test]
+    fn test_prefix_end_normal() {
+        let end = prefix_end(b"/_workflow/v2/ns/prod/");
+        // end should be > prefix
+        assert!(end > b"/_workflow/v2/ns/prod/".to_vec());
+        // end should be <= prefix_last_byte + 1
+        let prefix = b"/_workflow/v2/ns/prod/";
+        assert_eq!(end.len(), prefix.len());
+        assert_eq!(end[prefix.len() - 1], prefix[prefix.len() - 1] + 1);
+    }
+
+    #[test]
+    fn test_workflow_definition_serialization() {
+        let def = WorkflowDefinition {
+            id: "wf-1".into(),
+            name: "my-workflow".into(),
+            namespace: "default".into(),
+            yaml: "name: my-workflow\nstates: {}".into(),
+            version: "1".into(),
+            status: "active".into(),
+            created_at: 1000,
+        };
+        let json = serde_json::to_vec(&def).unwrap();
+        let restored: WorkflowDefinition = serde_json::from_slice(&json).unwrap();
+        assert_eq!(restored.id, "wf-1");
+        assert_eq!(restored.name, "my-workflow");
+        assert_eq!(restored.yaml, def.yaml);
     }
 }

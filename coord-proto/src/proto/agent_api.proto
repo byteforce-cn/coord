@@ -171,3 +171,817 @@ message HealthCheckResponse {
     }
     ServingStatus status = 1;
 }
+
+// ============================================================
+// Lock — Distributed Lock
+// ============================================================
+
+service Lock {
+    rpc Acquire(LockAcquireRequest) returns (LockAcquireResponse);
+    rpc Release(LockReleaseRequest) returns (LockReleaseResponse);
+    rpc Renew(LockRenewRequest) returns (LockRenewResponse);
+    rpc GetLockInfo(LockGetInfoRequest) returns (LockGetInfoResponse);
+}
+
+message LockAcquireRequest {
+    string name = 1;
+    string holder_id = 2;
+    int64 ttl_seconds = 3;
+}
+
+message LockAcquireResponse {
+    bool acquired = 1;
+    int64 lease_id = 2;
+    string holder_id = 3;
+}
+
+message LockReleaseRequest {
+    string name = 1;
+    string holder_id = 2;
+    int64 lease_id = 3;
+}
+
+message LockReleaseResponse {
+    bool released = 1;
+}
+
+message LockRenewRequest {
+    string name = 1;
+    string holder_id = 2;
+    int64 lease_id = 3;
+}
+
+message LockRenewResponse {
+    int64 new_ttl = 1;
+}
+
+message LockGetInfoRequest {
+    string name = 1;
+}
+
+message LockGetInfoResponse {
+    string name = 1;
+    string holder_id = 2;
+    int64 lease_id = 3;
+    int64 acquired_at = 4;
+    int64 ttl_seconds = 5;
+    bool exists = 6;
+}
+
+// ============================================================
+// IdGen — Distributed ID Generator
+// ============================================================
+
+service IdGen {
+    rpc NextId(IdGenNextIdRequest) returns (IdGenNextIdResponse);
+    rpc NextBatch(IdGenNextBatchRequest) returns (IdGenNextBatchResponse);
+}
+
+message IdGenNextIdRequest {
+    string name = 1;
+    int64 step = 2; // segment step size, default 1000
+}
+
+message IdGenNextIdResponse {
+    int64 id = 1;
+}
+
+message IdGenNextBatchRequest {
+    string name = 1;
+    int32 count = 2;
+    int64 step = 3;
+}
+
+message IdGenNextBatchResponse {
+    repeated int64 ids = 1;
+}
+
+// ============================================================
+// LeaderElection — Leader Election
+// ============================================================
+
+service LeaderElection {
+    rpc Campaign(LeaderCampaignRequest) returns (LeaderCampaignResponse);
+    rpc Resign(LeaderResignRequest) returns (LeaderResignResponse);
+    rpc GetLeader(LeaderGetLeaderRequest) returns (LeaderGetLeaderResponse);
+    rpc Watch(LeaderWatchRequest) returns (stream LeaderWatchEvent);
+}
+
+message LeaderCampaignRequest {
+    string group_name = 1;
+    string candidate_id = 2;
+    int64 ttl_seconds = 3;
+}
+
+message LeaderCampaignResponse {
+    bool elected = 1;
+    int64 lease_id = 2;
+    string leader_id = 3;
+}
+
+message LeaderResignRequest {
+    string group_name = 1;
+    string candidate_id = 2;
+    int64 lease_id = 3;
+}
+
+message LeaderResignResponse {
+    bool resigned = 1;
+}
+
+message LeaderGetLeaderRequest {
+    string group_name = 1;
+}
+
+message LeaderGetLeaderResponse {
+    string leader_id = 1;
+    int64 lease_id = 2;
+    int64 elected_at = 3;
+    bool exists = 4;
+}
+
+message LeaderWatchRequest {
+    string group_name = 1;
+}
+
+message LeaderWatchEvent {
+    enum EventType {
+        UNKNOWN = 0;
+        LEADER_ELECTED = 1;
+        LEADER_RESIGNED = 2;
+        LEADER_EXPIRED = 3;
+    }
+    EventType type = 1;
+    string group_name = 2;
+    string leader_id = 3;
+}
+
+// ============================================================
+// Event — Event Notification (CloudEvents 1.0)
+// ============================================================
+
+service Event {
+    rpc Publish(EventPublishRequest) returns (EventPublishResponse);
+    rpc Subscribe(EventSubscribeRequest) returns (stream CloudEventMessage);
+    rpc Unsubscribe(EventUnsubscribeRequest) returns (EventUnsubscribeResponse);
+}
+
+message EventPublishRequest {
+    string event_type = 1;
+    string source = 2;
+    bytes data = 3;
+    string data_content_type = 4;
+    string subject = 5;
+}
+
+message EventPublishResponse {
+    string event_id = 1;
+}
+
+message EventSubscribeRequest {
+    string event_type = 1; // exact match or prefix
+}
+
+message CloudEventMessage {
+    string id = 1;
+    string specversion = 2;
+    string type = 3;
+    string source = 4;
+    bytes data = 5;
+    string data_content_type = 6;
+    string subject = 7;
+    string time = 8;
+}
+
+message EventUnsubscribeRequest {
+    string subscription_id = 1;
+}
+
+message EventUnsubscribeResponse {}
+
+// ============================================================
+// Cache — Distributed Cache (Data Plane)
+// ============================================================
+
+service Cache {
+    // String operations
+    rpc Get(CacheGetRequest) returns (CacheGetResponse);
+    rpc Set(CacheSetRequest) returns (CacheSetResponse);
+    rpc Delete(CacheDeleteRequest) returns (CacheDeleteResponse);
+    // Hash operations
+    rpc HGet(CacheHGetRequest) returns (CacheHGetResponse);
+    rpc HSet(CacheHSetRequest) returns (CacheHSetResponse);
+    rpc HGetAll(CacheHGetAllRequest) returns (CacheHGetAllResponse);
+    // List operations
+    rpc LPush(CacheLPushRequest) returns (CacheLPushResponse);
+    rpc LRange(CacheLRangeRequest) returns (CacheLRangeResponse);
+    // Set operations
+    rpc SAdd(CacheSAddRequest) returns (CacheSAddResponse);
+    rpc SMembers(CacheSMembersRequest) returns (CacheSMembersResponse);
+}
+
+message CacheGetRequest {
+    string key = 1;
+}
+
+message CacheGetResponse {
+    bytes value = 1;
+    bool found = 2;
+}
+
+message CacheSetRequest {
+    string key = 1;
+    bytes value = 2;
+    int64 ttl_seconds = 3;
+}
+
+message CacheSetResponse {}
+
+message CacheDeleteRequest {
+    string key = 1;
+}
+
+message CacheDeleteResponse {
+    bool deleted = 1;
+}
+
+message CacheHGetRequest {
+    string key = 1;
+    string field = 2;
+}
+
+message CacheHGetResponse {
+    bytes value = 1;
+    bool found = 2;
+}
+
+message CacheHSetRequest {
+    string key = 1;
+    string field = 2;
+    bytes value = 3;
+}
+
+message CacheHSetResponse {}
+
+message CacheHGetAllRequest {
+    string key = 1;
+}
+
+message CacheHGetAllResponse {
+    map<string, bytes> fields = 1;
+}
+
+message CacheLPushRequest {
+    string key = 1;
+    bytes value = 2;
+}
+
+message CacheLPushResponse {
+    int64 length = 1;
+}
+
+message CacheLRangeRequest {
+    string key = 1;
+    int64 start = 2;
+    int64 stop = 3;
+}
+
+message CacheLRangeResponse {
+    repeated bytes values = 1;
+}
+
+message CacheSAddRequest {
+    string key = 1;
+    bytes member = 2;
+}
+
+message CacheSAddResponse {}
+
+message CacheSMembersRequest {
+    string key = 1;
+}
+
+message CacheSMembersResponse {
+    repeated bytes members = 1;
+}
+
+// ============================================================
+// MQ — Message Queue (Data Plane)
+// ============================================================
+
+service MQ {
+    rpc CreateTopic(MqCreateTopicRequest) returns (MqCreateTopicResponse);
+    rpc Publish(MqPublishRequest) returns (MqPublishResponse);
+    rpc Subscribe(MqSubscribeRequest) returns (stream MqMessage);
+    rpc Ack(MqAckRequest) returns (MqAckResponse);
+}
+
+message MqCreateTopicRequest {
+    string topic = 1;
+    int32 partitions = 2;
+}
+
+message MqCreateTopicResponse {}
+
+message MqPublishRequest {
+    string topic = 1;
+    int32 partition = 2;
+    bytes key = 3;
+    bytes payload = 4;
+    string idempotency_key = 5;
+}
+
+message MqPublishResponse {
+    int64 offset = 1;
+}
+
+message MqSubscribeRequest {
+    string topic = 1;
+    string consumer_group = 2;
+}
+
+message MqMessage {
+    string topic = 1;
+    int32 partition = 2;
+    int64 offset = 3;
+    bytes key = 4;
+    bytes payload = 5;
+    int64 timestamp = 6;
+}
+
+message MqAckRequest {
+    string topic = 1;
+    string consumer_group = 2;
+    int32 partition = 3;
+    int64 offset = 4;
+}
+
+message MqAckResponse {}
+
+// ============================================================
+// Scheduler — Distributed Scheduler
+// ============================================================
+
+service Scheduler {
+    rpc RegisterJob(SchedulerRegisterJobRequest) returns (SchedulerRegisterJobResponse);
+    rpc ClaimJob(SchedulerClaimJobRequest) returns (SchedulerClaimJobResponse);
+    rpc Heartbeat(SchedulerHeartbeatRequest) returns (SchedulerHeartbeatResponse);
+    rpc CompleteJob(SchedulerCompleteJobRequest) returns (SchedulerCompleteJobResponse);
+}
+
+message SchedulerRegisterJobRequest {
+    string name = 1;
+    string cron_expression = 2;
+    bytes payload = 3;
+}
+
+message SchedulerRegisterJobResponse {
+    string job_id = 1;
+}
+
+message SchedulerClaimJobRequest {
+    string name = 1;
+}
+
+message SchedulerClaimJobResponse {
+    string job_id = 1;
+    bytes payload = 2;
+    bool found = 3;
+}
+
+message SchedulerHeartbeatRequest {
+    string job_id = 1;
+}
+
+message SchedulerHeartbeatResponse {}
+
+message SchedulerCompleteJobRequest {
+    string job_id = 1;
+    bytes result = 2;
+}
+
+message SchedulerCompleteJobResponse {}
+
+// ============================================================
+// Workflow — Serverless Workflow
+// ============================================================
+
+service Workflow {
+    rpc Start(WorkflowStartRequest) returns (WorkflowStartResponse);
+    rpc GetStatus(WorkflowGetStatusRequest) returns (WorkflowGetStatusResponse);
+    rpc Signal(WorkflowSignalRequest) returns (WorkflowSignalResponse);
+    rpc Cancel(WorkflowCancelRequest) returns (WorkflowCancelResponse);
+
+    // 新增 — 工作流定义管理
+    rpc Deploy(WorkflowDeployRequest) returns (WorkflowDeployResponse);
+    rpc ListDefinitions(WorkflowListDefinitionsRequest) returns (WorkflowListDefinitionsResponse);
+    rpc GetDefinition(WorkflowGetDefinitionRequest) returns (WorkflowGetDefinitionResponse);
+
+    // 新增 — 工作流实例管理
+    rpc ListInstances(WorkflowListInstancesRequest) returns (WorkflowListInstancesResponse);
+}
+
+message WorkflowStartRequest {
+    string definition_dsl = 1; // CNCF Workflow DSL JSON
+    bytes input = 2;
+}
+
+message WorkflowStartResponse {
+    string workflow_id = 1;
+}
+
+message WorkflowGetStatusRequest {
+    string workflow_id = 1;
+}
+
+message WorkflowGetStatusResponse {
+    string workflow_id = 1;
+    string status = 2; // PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
+    bytes output = 3;
+    string error_message = 4;
+    string definition_name = 5;  // 工作流定义名称
+    bytes input = 6;             // 启动时传入的输入参数
+}
+
+message WorkflowSignalRequest {
+    string workflow_id = 1;
+    string signal_name = 2;
+    bytes payload = 3;
+}
+
+message WorkflowSignalResponse {}
+
+message WorkflowCancelRequest {
+    string workflow_id = 1;
+}
+
+message WorkflowCancelResponse {}
+
+// 工作流定义管理（Phase B.1 新增）
+
+message WorkflowDeployRequest {
+    string namespace = 1;
+    string definition_yaml = 2;
+}
+
+message WorkflowDeployResponse {
+    string workflow_id = 1;
+    string version = 2;
+    string namespace = 3;
+    string name = 4;             // YAML 中定义的 workflow name
+}
+
+message WorkflowListDefinitionsRequest {
+    string namespace = 1;
+    int32 page_size = 2;
+    string page_token = 3;
+}
+
+message WorkflowListDefinitionsResponse {
+    repeated WorkflowDefinitionSummary definitions = 1;
+    string next_page_token = 2;
+}
+
+message WorkflowDefinitionSummary {
+    string workflow_id = 1;
+    string name = 2;
+    string version = 3;
+    string status = 4;
+    int64 created_at = 5;
+}
+
+message WorkflowGetDefinitionRequest {
+    string workflow_id = 1;
+}
+
+message WorkflowGetDefinitionResponse {
+    string workflow_id = 1;
+    string name = 2;
+    string definition_yaml = 3;
+    string version = 4;
+    string status = 5;
+    int64 created_at = 6;
+}
+
+message WorkflowListInstancesRequest {
+    string workflow_id = 1;   // 可选，为空则列出全部
+    string namespace = 2;
+    int32 page_size = 3;
+    string page_token = 4;
+}
+
+message WorkflowListInstancesResponse {
+    repeated WorkflowInstanceSummary instances = 1;
+    string next_page_token = 2;
+}
+
+message WorkflowInstanceSummary {
+    string instance_id = 1;
+    string workflow_id = 2;
+    string state = 3;
+    int64 started_at = 4;
+    int64 updated_at = 5;
+    string definition_name = 6;  // 工作流定义名称（用于列表展示）
+}
+
+// ============================================================
+// Policy — OPA Policy Engine (Regorus)
+// ============================================================
+
+service Policy {
+    // 策略评估
+    rpc CheckPermission(PolicyCheckPermissionRequest) returns (PolicyCheckPermissionResponse);
+    rpc Evaluate(PolicyEvaluateRequest) returns (PolicyEvaluateResponse);
+
+    // 策略解释 — 返回决策 trace，说明为什么允许/拒绝
+    rpc Explain(PolicyExplainRequest) returns (PolicyExplainResponse);
+
+    // 策略包管理 — Rego bundle CRUD
+    rpc PutBundle(PolicyPutBundleRequest) returns (PolicyPutBundleResponse);
+    rpc DeleteBundle(PolicyDeleteBundleRequest) returns (PolicyDeleteBundleResponse);
+    rpc ListBundles(PolicyListBundlesRequest) returns (PolicyListBundlesResponse);
+    rpc SetBundleEnabled(PolicySetBundleEnabledRequest) returns (PolicySetBundleEnabledResponse);
+}
+
+message PolicyCheckPermissionRequest {
+    string principal = 1;
+    string resource = 2;
+    string action = 3;
+    bytes context = 4; // JSON
+}
+
+message PolicyCheckPermissionResponse {
+    bool allowed = 1;
+    string reason = 2;
+}
+
+message PolicyEvaluateRequest {
+    string query = 1; // Rego query
+    bytes input = 2;  // JSON input document
+}
+
+message PolicyEvaluateResponse {
+    bytes result = 1; // JSON result
+}
+
+// ——— Explain ———
+
+message PolicyExplainRequest {
+    string query = 1;   // Rego query（如 "data.rbac.allow"）
+    bytes input = 2;    // JSON input document
+}
+
+message PolicyExplainResponse {
+    bytes trace = 1;    // JSON trace: 匹配的规则、求值路径、决策原因
+}
+
+// ——— Bundle CRUD ———
+
+message PolicyPutBundleRequest {
+    string tenant_id = 1;   // 租户 ID
+    string namespace = 2;   // 命名空间（默认 "default"）
+    string name = 3;        // 策略包名称
+    string rego_content = 4;// Rego 源码内容
+}
+
+message PolicyPutBundleResponse {
+    string bundle_id = 1;   // 策略包 ID
+    string name = 2;
+    string namespace = 3;
+    int64 created_at = 4;   // UNIX epoch seconds
+    int64 updated_at = 5;
+    bool enabled = 6;
+}
+
+message PolicyDeleteBundleRequest {
+    string bundle_id = 1;
+}
+
+message PolicyDeleteBundleResponse {
+    bool deleted = 1;
+}
+
+message PolicyListBundlesRequest {
+    string tenant_id = 1;  // 租户 ID，为空则列出全部
+}
+
+message PolicyListBundlesResponse {
+    repeated PolicyBundleInfo bundles = 1;
+}
+
+message PolicyBundleInfo {
+    string bundle_id = 1;
+    string name = 2;
+    string namespace = 3;
+    string tenant_id = 4;
+    bool enabled = 5;
+    int64 created_at = 6;
+    int64 updated_at = 7;
+}
+
+message PolicySetBundleEnabledRequest {
+    string bundle_id = 1;
+    bool enabled = 2;
+}
+
+message PolicySetBundleEnabledResponse {
+    bool success = 1;
+}
+
+// ============================================================
+// Transit — Envelope Encryption
+// ============================================================
+
+service Transit {
+    rpc Encrypt(TransitEncryptRequest) returns (TransitEncryptResponse);
+    rpc Decrypt(TransitDecryptRequest) returns (TransitDecryptResponse);
+
+    // 新增 — HMAC 签名与验签 (Phase B.2)
+    rpc HmacSign(TransitHmacSignRequest) returns (TransitHmacSignResponse);
+    rpc HmacVerify(TransitHmacVerifyRequest) returns (TransitHmacVerifyResponse);
+}
+
+message TransitEncryptRequest {
+    bytes plaintext = 1;
+    bytes context = 2;
+}
+
+message TransitEncryptResponse {
+    bytes ciphertext = 1;
+}
+
+message TransitDecryptRequest {
+    bytes ciphertext = 1;
+    bytes context = 2;
+}
+
+message TransitDecryptResponse {
+    bytes plaintext = 1;
+}
+
+// Transit HMAC 签名与验签 (Phase B.2 新增)
+
+message TransitHmacSignRequest {
+    bytes data = 1;
+    string algorithm = 2;  // 默认 "HMAC-SHA256"
+}
+
+message TransitHmacSignResponse {
+    bytes signature = 1;
+    string algorithm = 2;
+}
+
+message TransitHmacVerifyRequest {
+    bytes data = 1;
+    bytes signature = 2;
+    string algorithm = 3;
+}
+
+message TransitHmacVerifyResponse {
+    bool valid = 1;
+}
+
+// ============================================================
+// CircuitBreaker — Resilience
+// ============================================================
+
+service CircuitBreaker {
+    rpc GetState(CircuitBreakerGetStateRequest) returns (CircuitBreakerGetStateResponse);
+    rpc ReportSuccess(CircuitBreakerReportSuccessRequest) returns (CircuitBreakerReportSuccessResponse);
+    rpc ReportFailure(CircuitBreakerReportFailureRequest) returns (CircuitBreakerReportFailureResponse);
+    rpc Reset(CircuitBreakerResetRequest) returns (CircuitBreakerResetResponse);
+}
+
+message CircuitBreakerGetStateRequest {
+    string name = 1;
+}
+
+message CircuitBreakerGetStateResponse {
+    string state = 1; // CLOSED, OPEN, HALF_OPEN
+    int64 last_failure_time = 2;
+}
+
+message CircuitBreakerReportSuccessRequest {
+    string name = 1;
+}
+
+message CircuitBreakerReportSuccessResponse {}
+
+message CircuitBreakerReportFailureRequest {
+    string name = 1;
+}
+
+message CircuitBreakerReportFailureResponse {}
+
+message CircuitBreakerResetRequest {
+    string name = 1;
+}
+
+message CircuitBreakerResetResponse {}
+
+// ============================================================
+// RateLimiter — Rate Limiting
+// ============================================================
+
+service RateLimiter {
+    rpc Allow(RateLimiterAllowRequest) returns (RateLimiterAllowResponse);
+}
+
+message RateLimiterAllowRequest {
+    string key = 1;
+    int32 permits = 2;
+}
+
+message RateLimiterAllowResponse {
+    bool allowed = 1;
+    int64 remaining = 2;
+    int64 reset_time = 3;
+}
+
+// ============================================================
+// FeatureFlags — Feature Flag Evaluation
+// ============================================================
+
+service FeatureFlags {
+    rpc IsEnabled(FeatureFlagIsEnabledRequest) returns (FeatureFlagIsEnabledResponse);
+    rpc Evaluate(FeatureFlagEvaluateRequest) returns (FeatureFlagEvaluateResponse);
+}
+
+message FeatureFlagIsEnabledRequest {
+    string flag_name = 1;
+    bytes context = 2; // JSON evaluation context
+}
+
+message FeatureFlagIsEnabledResponse {
+    bool enabled = 1;
+    string variant = 2;
+}
+
+message FeatureFlagEvaluateRequest {
+    string flag_name = 1;
+    bytes context = 2;
+}
+
+message FeatureFlagEvaluateResponse {
+    bytes result = 1; // JSON evaluation result
+}
+
+// ============================================================
+// PKI — Certificate Authority (CA Management)
+// ============================================================
+
+service Pki {
+    rpc InitCa(PkiInitCaRequest) returns (PkiInitCaResponse);
+    rpc IssueCert(PkiIssueCertRequest) returns (PkiIssueCertResponse);
+    rpc RenewCert(PkiRenewCertRequest) returns (PkiRenewCertResponse);
+    rpc VerifyCert(PkiVerifyCertRequest) returns (PkiVerifyCertResponse);
+    rpc GetCaCert(PkiGetCaCertRequest) returns (PkiGetCaCertResponse);
+}
+
+message PkiInitCaRequest {
+    string ca_common_name = 1;
+}
+
+message PkiInitCaResponse {}
+
+message PkiIssueCertRequest {
+    string common_name = 1;
+    int64 ttl_seconds = 2;     // 证书 TTL（秒），0 使用默认 24h
+}
+
+message PkiIssueCertResponse {
+    string common_name = 1;
+    string cert_pem = 2;
+    string key_pem = 3;
+    int64 not_before = 4;    // UNIX epoch seconds
+    int64 not_after = 5;     // UNIX epoch seconds
+    string serial = 6;       // hex-encoded
+}
+
+message PkiRenewCertRequest {
+    string serial_number = 1;  // 要续期的证书序列号（hex-encoded）
+    int64 ttl_seconds = 2;     // 新证书的 TTL（秒），0 使用默认 24h
+}
+
+message PkiRenewCertResponse {
+    string common_name = 1;
+    string cert_pem = 2;
+    string key_pem = 3;
+    int64 not_before = 4;
+    int64 not_after = 5;
+    string serial = 6;
+}
+
+message PkiVerifyCertRequest {
+    string cert_pem = 1;
+}
+
+message PkiVerifyCertResponse {
+    bool valid = 1;
+}
+
+message PkiGetCaCertRequest {}
+
+message PkiGetCaCertResponse {
+    string ca_cert_pem = 1;
+}

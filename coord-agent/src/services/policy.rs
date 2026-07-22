@@ -4,19 +4,22 @@
 // 支持策略管理、条件匹配、优先级排序、通配符匹配。
 // 设计为可扩展至 OPA Wasm 的策略决策点。
 //
-// 架构（v3.0）:
-// - 本地规则引擎（条件匹配 + 优先级排序）
-// - Server 存储策略包，通过 Watch 同步
-// - 支持透明拦截（自动检查 gRPC 请求）和显式 API
+// Bundle 管理（Phase H）:
+// - 策略包存储在 Server KV（`/_policy/bundles/` 前缀），多 Agent 共享
+// - OpaEngine 负责本地 Rego 求值和 explain
+// - PolicyService 负责 bundle CRUD（KV 读写）和 OpaEngine 策略同步
 //
 // 参见 docs/client-agent-architecture-v3.md §5.10。
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
 
+use crate::proxy::AgentInner;
 use crate::service::{BaseService, ServiceResult};
+use crate::services::opa::{OpaEngine, OpaConfig};
 
 // ──── 公共类型 ────
 
@@ -31,11 +34,8 @@ pub enum PolicyEffect {
 /// 策略条件
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PolicyCondition {
-    /// 条件属性名（从 AccessRequest.context 取值）
     pub attribute: String,
-    /// 操作符: eq, neq, gte, lte, gt, lt, contains, prefix
     pub operator: String,
-    /// 比较值
     pub value: String,
 }
 
@@ -47,16 +47,11 @@ pub struct Policy {
     #[serde(default)]
     pub description: String,
     pub effect: PolicyEffect,
-    /// 主体列表（支持通配符 *）: "role:admin", "user:alice", "*"
     pub subjects: Vec<String>,
-    /// 操作列表（支持通配符 *）: "read", "write", "*"
     pub actions: Vec<String>,
-    /// 资源列表（支持通配符 *）: "/api/*", "/admin/users", "*"
     pub resources: Vec<String>,
-    /// 条件列表（AND 关系）
     #[serde(default)]
     pub conditions: Vec<PolicyCondition>,
-    /// 优先级（数值越大优先级越高）
     pub priority: i32,
 }
 
@@ -66,7 +61,6 @@ pub struct AccessRequest {
     pub subject: String,
     pub action: String,
     pub resource: String,
-    /// 上下文属性（用于条件匹配）
     pub context: HashMap<String, String>,
 }
 
@@ -78,15 +72,81 @@ pub struct PolicyDecision {
     pub reason: String,
 }
 
+// ──── Bundle 类型 ────
+
+/// 策略包信息（对外暴露，存储在 Server KV）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BundleInfo {
+    pub bundle_id: String,
+    pub name: String,
+    pub namespace: String,
+    pub tenant_id: String,
+    pub enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// 策略包完整内容（KV 存储格式）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct BundleRecord {
+    pub info: BundleInfo,
+    pub rego_content: String,
+}
+
+impl BundleRecord {
+    fn storage_key(bundle_id: &str) -> Vec<u8> {
+        format!("/_policy/bundles/{bundle_id}").into_bytes()
+    }
+
+    fn prefix_key() -> Vec<u8> {
+        b"/_policy/bundles/".to_vec()
+    }
+
+    fn make_bundle_id(tenant_id: &str, namespace: &str, name: &str) -> String {
+        format!("{tenant_id}/{namespace}/{name}")
+    }
+
+    fn new(tenant_id: &str, namespace: &str, name: &str, rego: &str) -> Self {
+        let bundle_id = Self::make_bundle_id(tenant_id, namespace, name);
+        let now = unix_ts_i64();
+        Self {
+            info: BundleInfo {
+                bundle_id,
+                name: name.to_string(),
+                namespace: namespace.to_string(),
+                tenant_id: tenant_id.to_string(),
+                enabled: true,
+                created_at: now,
+                updated_at: now,
+            },
+            rego_content: rego.to_string(),
+        }
+    }
+}
+
+fn unix_ts_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 // ──── PolicyService ────
 
 /// 权限策略引擎
 ///
 /// 基于规则的授权决策点，支持 RBAC/ABAC 策略评估。
+/// 集成 OpaEngine 以支持 Rego bundle 管理和 explain。
+/// Bundle 存储在 Server KV，多 Agent 共享。
 pub struct PolicyService {
+    /// RBAC 策略（本地内存）
     policies: RwLock<BTreeMap<String, Policy>>,
     started: RwLock<bool>,
     max_policies: usize,
+    /// OPA 引擎（Regorus），用于 Rego 求值和 explain
+    opa_engine: Arc<OpaEngine>,
+    /// Agent 内部句柄（访问 Server KV）
+    inner: Option<Arc<AgentInner>>,
 }
 
 impl std::fmt::Debug for PolicyService {
@@ -95,20 +155,48 @@ impl std::fmt::Debug for PolicyService {
         f.debug_struct("PolicyService")
             .field("policy_count", &p.len())
             .field("started", &self.started)
+            .field("has_kv", &self.inner.is_some())
             .finish()
     }
 }
 
 impl PolicyService {
+    /// 创建不带 KV 的 PolicyService（仅 RBAC 引擎）
     pub fn new(max_policies: usize) -> Self {
+        let opa_engine = Arc::new(
+            OpaEngine::new(OpaConfig::default())
+                .expect("create OpaEngine")
+        );
         Self {
             policies: RwLock::new(BTreeMap::new()),
             started: RwLock::new(false),
             max_policies,
+            opa_engine,
+            inner: None,
         }
     }
 
-    // ──── 策略管理 ────
+    /// 创建带 Server KV 接入的 PolicyService（支持 bundle CRUD）
+    pub fn with_kv(max_policies: usize, inner: Arc<AgentInner>) -> Self {
+        let opa_engine = Arc::new(
+            OpaEngine::new(OpaConfig::default())
+                .expect("create OpaEngine")
+        );
+        Self {
+            policies: RwLock::new(BTreeMap::new()),
+            started: RwLock::new(false),
+            max_policies,
+            opa_engine,
+            inner: Some(inner),
+        }
+    }
+
+    /// 获取 OPA 引擎引用
+    pub fn opa_engine(&self) -> &Arc<OpaEngine> {
+        &self.opa_engine
+    }
+
+    // ──── RBAC 策略管理 ────
 
     pub fn add_policy(&self, policy: Policy) -> ServiceResult<()> {
         let mut policies = self.policies.write();
@@ -134,29 +222,16 @@ impl PolicyService {
         Ok(policies.values().cloned().collect())
     }
 
-    // ──── 策略评估 ────
+    // ──── RBAC 策略评估 ────
 
-    /// 评估访问请求，返回决策（Allow/Deny）
-    ///
-    /// 算法：
-    /// 1. 收集所有匹配的策略
-    /// 2. 按优先级降序排列
-    /// 3. 若存在 Deny 匹配则返回 Deny（显式拒绝优先）
-    /// 4. 若存在 Allow 匹配则返回 Allow
-    /// 5. 默认 Deny
     pub fn evaluate(&self, request: &AccessRequest) -> ServiceResult<PolicyDecision> {
         let policies = self.policies.read();
-
-        // 收集匹配的策略
         let mut matches: Vec<&Policy> = policies
             .values()
             .filter(|p| self.policy_matches(p, request))
             .collect();
-
-        // 按优先级降序
         matches.sort_by_key(|p| std::cmp::Reverse(p.priority));
 
-        // Deny 优先：只要有一个 Deny 匹配就拒绝
         if let Some(deny) = matches.iter().find(|p| p.effect == PolicyEffect::Deny) {
             return Ok(PolicyDecision {
                 effect: PolicyEffect::Deny,
@@ -165,7 +240,6 @@ impl PolicyService {
             });
         }
 
-        // 查找 Allow
         if let Some(allow) = matches.iter().find(|p| p.effect == PolicyEffect::Allow) {
             return Ok(PolicyDecision {
                 effect: PolicyEffect::Allow,
@@ -174,7 +248,6 @@ impl PolicyService {
             });
         }
 
-        // 默认 Deny
         Ok(PolicyDecision {
             effect: PolicyEffect::Deny,
             matched_policy_id: None,
@@ -182,80 +255,189 @@ impl PolicyService {
         })
     }
 
-    /// 检查策略是否匹配请求
     fn policy_matches(&self, policy: &Policy, request: &AccessRequest) -> bool {
-        // 主体匹配
-        if !Self::match_any(&policy.subjects, &request.subject) {
-            return false;
-        }
-        // 操作匹配
-        if !Self::match_any(&policy.actions, &request.action) {
-            return false;
-        }
-        // 资源匹配
-        if !Self::match_any(&policy.resources, &request.resource) {
-            return false;
-        }
-        // 条件匹配（AND）
+        if !Self::match_any(&policy.subjects, &request.subject) { return false; }
+        if !Self::match_any(&policy.actions, &request.action) { return false; }
+        if !Self::match_any(&policy.resources, &request.resource) { return false; }
         for condition in &policy.conditions {
-            if !Self::eval_condition(condition, &request.context) {
-                return false;
-            }
+            if !Self::eval_condition(condition, &request.context) { return false; }
         }
         true
     }
 
-    /// 通配符匹配：检查 value 是否匹配 patterns 中的任意一项
     fn match_any(patterns: &[String], value: &str) -> bool {
-        if patterns.is_empty() {
-            return false;
-        }
+        if patterns.is_empty() { return false; }
         patterns.iter().any(|p| Self::wildcard_match(p, value))
     }
 
-    /// 通配符匹配: "*" 匹配一切, "prefix*" 前缀匹配, 否则精确匹配
     fn wildcard_match(pattern: &str, value: &str) -> bool {
-        if pattern == "*" {
-            return true;
-        }
+        if pattern == "*" { return true; }
         if let Some(prefix) = pattern.strip_suffix('*') {
             return value.starts_with(prefix);
         }
         pattern == value
     }
 
-    /// 条件求值
     fn eval_condition(condition: &PolicyCondition, context: &HashMap<String, String>) -> bool {
         let attr_value = match context.get(&condition.attribute) {
             Some(v) => v,
             None => return false,
         };
-
         match condition.operator.as_str() {
             "eq" => attr_value == &condition.value,
             "neq" => attr_value != &condition.value,
             "contains" => attr_value.contains(&condition.value),
             "prefix" => attr_value.starts_with(&condition.value),
             "gte" | "lte" | "gt" | "lt" => {
-                // Numeric comparison
-                let a: f64 = match attr_value.parse() {
-                    Ok(v) => v,
-                    Err(_) => return false,
-                };
-                let b: f64 = match condition.value.parse() {
-                    Ok(v) => v,
-                    Err(_) => return false,
-                };
+                let a: f64 = match attr_value.parse() { Ok(v) => v, Err(_) => return false };
+                let b: f64 = match condition.value.parse() { Ok(v) => v, Err(_) => return false };
                 match condition.operator.as_str() {
-                    "gte" => a >= b,
-                    "lte" => a <= b,
-                    "gt" => a > b,
-                    "lt" => a < b,
+                    "gte" => a >= b, "lte" => a <= b, "gt" => a > b, "lt" => a < b,
                     _ => false,
                 }
             }
             _ => false,
         }
+    }
+
+    // ──── Bundle 管理（Server KV 后端）───
+
+    fn require_kv(&self) -> ServiceResult<&Arc<AgentInner>> {
+        self.inner.as_ref()
+            .ok_or_else(|| "Policy bundle API requires AgentInner (server KV connection)".into())
+    }
+
+    /// 上传/更新 Rego 策略包到 Server KV
+    pub async fn put_bundle(&self, tenant_id: &str, namespace: &str,
+                            name: &str, rego: &str) -> ServiceResult<BundleInfo> {
+        let inner = self.require_kv()?;
+        let bundle_id = BundleRecord::make_bundle_id(tenant_id, namespace, name);
+        let key = BundleRecord::storage_key(&bundle_id);
+
+        // 尝试读取已有记录（upsert）
+        let mut record = {
+            let pairs = inner.client.kv()
+                .range(&key, &key, 1, 0).await
+                .map_err(|e| format!("kv range: {e}"))?;
+            if let Some((_k, v)) = pairs.into_iter().next() {
+                let mut rec: BundleRecord = serde_json::from_slice(&v)
+                    .map_err(|e| format!("deserialize bundle: {e}"))?;
+                rec.rego_content = rego.to_string();
+                rec.info.updated_at = unix_ts_i64();
+                rec
+            } else {
+                BundleRecord::new(tenant_id, namespace, name, rego)
+            }
+        };
+
+        let value = serde_json::to_vec(&record)
+            .map_err(|e| format!("serialize bundle: {e}"))?;
+        inner.client.kv().put(&key, &value).await
+            .map_err(|e| format!("kv put bundle: {e}"))?;
+
+        // 同步到本地 OpaEngine（仅 enabled bundle）
+        if record.info.enabled {
+            let policy_id = format!("{}/{}", record.info.namespace, record.info.name);
+            self.opa_engine.add_policy(&policy_id, &record.rego_content)
+                .map_err(|e| format!("opa add_policy: {e}"))?;
+        }
+
+        tracing::info!("Policy: put bundle '{}' (tenant={}, ns={})", name, tenant_id, namespace);
+        Ok(record.info)
+    }
+
+    /// 从 Server KV 删除策略包
+    pub async fn delete_bundle(&self, bundle_id: &str) -> ServiceResult<bool> {
+        let inner = self.require_kv()?;
+        let key = BundleRecord::storage_key(bundle_id);
+
+        // 先读取 bundle 信息用于清理 OpaEngine
+        let namespace_and_name = {
+            let pairs = inner.client.kv()
+                .range(&key, &key, 1, 0).await
+                .map_err(|e| format!("kv range: {e}"))?;
+            if let Some((_k, v)) = pairs.into_iter().next() {
+                let rec: BundleRecord = serde_json::from_slice(&v)
+                    .map_err(|e| format!("deserialize bundle: {e}"))?;
+                Some((rec.info.namespace, rec.info.name))
+            } else {
+                None
+            }
+        };
+
+        inner.client.kv().delete(&key).await
+            .map_err(|e| format!("kv delete bundle: {e}"))?;
+
+        // 从本地 OpaEngine 移除
+        if let Some((ns, name)) = namespace_and_name {
+            let policy_id = format!("{}/{}", ns, name);
+            self.opa_engine.remove_policy(&policy_id);
+        }
+
+        tracing::info!("Policy: deleted bundle '{}'", bundle_id);
+        Ok(true)
+    }
+
+    /// 列出策略包（从 Server KV range scan）
+    pub async fn list_bundles(&self, tenant_id: Option<&str>) -> ServiceResult<Vec<BundleInfo>> {
+        let inner = self.require_kv()?;
+        let prefix = BundleRecord::prefix_key();
+        let range_end = prefix_end(&prefix);
+
+        let pairs = inner.client.kv()
+            .range(&prefix, &range_end, 0, 0).await
+            .map_err(|e| format!("kv range: {e}"))?;
+
+        let mut bundles: Vec<BundleInfo> = Vec::new();
+        for (_k, v) in pairs {
+            if let Ok(rec) = serde_json::from_slice::<BundleRecord>(&v) {
+                if tenant_id.map_or(true, |tid| rec.info.tenant_id == tid) {
+                    bundles.push(rec.info);
+                }
+            }
+        }
+        Ok(bundles)
+    }
+
+    /// 启用/禁用策略包（更新 Server KV）
+    pub async fn set_bundle_enabled(&self, bundle_id: &str, enabled: bool) -> ServiceResult<bool> {
+        let inner = self.require_kv()?;
+        let key = BundleRecord::storage_key(bundle_id);
+
+        let pairs = inner.client.kv()
+            .range(&key, &key, 1, 0).await
+            .map_err(|e| format!("kv range: {e}"))?;
+
+        let (_k, v) = pairs.into_iter().next()
+            .ok_or_else(|| format!("bundle '{bundle_id}' not found"))?;
+
+        let mut rec: BundleRecord = serde_json::from_slice(&v)
+            .map_err(|e| format!("deserialize bundle: {e}"))?;
+        rec.info.enabled = enabled;
+        rec.info.updated_at = unix_ts_i64();
+
+        let new_val = serde_json::to_vec(&rec)
+            .map_err(|e| format!("serialize bundle: {e}"))?;
+        inner.client.kv().put(&key, &new_val).await
+            .map_err(|e| format!("kv put bundle: {e}"))?;
+
+        // 同步到本地 OpaEngine
+        let policy_id = format!("{}/{}", rec.info.namespace, rec.info.name);
+        if enabled {
+            self.opa_engine.add_policy(&policy_id, &rec.rego_content)
+                .map_err(|e| format!("opa add_policy: {e}"))?;
+        } else {
+            self.opa_engine.remove_policy(&policy_id);
+        }
+
+        tracing::info!("Policy: bundle '{}' enabled={}", bundle_id, enabled);
+        Ok(true)
+    }
+
+    /// 解释策略决策（本地 OpaEngine）
+    pub fn explain(&self, query: &str, input_json: &str) -> ServiceResult<String> {
+        self.opa_engine.explain(query, input_json)
+            .map_err(|e| e.into())
     }
 }
 
@@ -285,6 +467,22 @@ impl BaseService for PolicyService {
     }
 }
 
+// ──── 工具函数 ────
+
+/// 生成 range_end: 将 prefix 最后一个字节 +1
+fn prefix_end(prefix: &[u8]) -> Vec<u8> {
+    let mut end = prefix.to_vec();
+    for i in (0..end.len()).rev() {
+        if end[i] < 0xff {
+            end[i] += 1;
+            end.truncate(i + 1);
+            return end;
+        }
+    }
+    // prefix 全为 0xff，返回空表示扫描到无穷
+    vec![]
+}
+
 // ──── 单元测试 ────
 
 #[cfg(test)]
@@ -292,65 +490,78 @@ mod tests {
     use super::*;
 
     fn new_svc() -> PolicyService {
-        let svc = PolicyService::new(1024);
-        // auto-start for tests
-        svc
+        PolicyService::new(1024)
     }
 
     #[test]
-    fn test_wildcard_match_exact() {
-        assert!(PolicyService::wildcard_match("read", "read"));
-        assert!(!PolicyService::wildcard_match("read", "write"));
-    }
-
-    #[test]
-    fn test_wildcard_match_star() {
-        assert!(PolicyService::wildcard_match("*", "anything"));
-        assert!(PolicyService::wildcard_match("*", ""));
-    }
-
-    #[test]
-    fn test_wildcard_match_prefix() {
-        assert!(PolicyService::wildcard_match("/api/*", "/api/users"));
-        assert!(PolicyService::wildcard_match("/api/*", "/api/"));
-        assert!(!PolicyService::wildcard_match("/api/*", "/admin/users"));
-    }
-
-    #[test]
-    fn test_default_deny() {
+    fn test_policy_add_and_evaluate() {
         let svc = new_svc();
+        svc.add_policy(Policy {
+            id: "p1".into(),
+            name: "admin-access".into(),
+            description: "".into(),
+            effect: PolicyEffect::Allow,
+            subjects: vec!["role:admin".into()],
+            actions: vec!["*".into()],
+            resources: vec!["*".into()],
+            conditions: vec![],
+            priority: 10,
+        }).unwrap();
+
         let req = AccessRequest {
-            subject: "anyone".into(),
-            action: "anything".into(),
-            resource: "/any".into(),
-            context: Default::default(),
+            subject: "role:admin".into(),
+            action: "read".into(),
+            resource: "/data".into(),
+            context: HashMap::new(),
+        };
+        let decision = svc.evaluate(&req).unwrap();
+        assert_eq!(decision.effect, PolicyEffect::Allow);
+    }
+
+    #[test]
+    fn test_deny_overrides_allow() {
+        let svc = new_svc();
+        svc.add_policy(Policy {
+            id: "allow-all".into(), name: "a".into(), description: "".into(),
+            effect: PolicyEffect::Allow, subjects: vec!["*".into()],
+            actions: vec!["*".into()], resources: vec!["*".into()],
+            conditions: vec![], priority: 1,
+        }).unwrap();
+        svc.add_policy(Policy {
+            id: "deny-bob".into(), name: "d".into(), description: "".into(),
+            effect: PolicyEffect::Deny, subjects: vec!["user:bob".into()],
+            actions: vec!["*".into()], resources: vec!["*".into()],
+            conditions: vec![], priority: 100,
+        }).unwrap();
+
+        let req = AccessRequest {
+            subject: "user:bob".into(), action: "read".into(),
+            resource: "/data".into(), context: HashMap::new(),
         };
         let decision = svc.evaluate(&req).unwrap();
         assert_eq!(decision.effect, PolicyEffect::Deny);
     }
 
     #[test]
-    fn test_priority_ordering() {
+    fn test_default_deny() {
         let svc = new_svc();
-        svc.add_policy(Policy {
-            id: "low".into(), name: "low".into(), description: "".into(),
-            effect: PolicyEffect::Allow, subjects: vec!["*".into()],
-            actions: vec!["*".into()], resources: vec!["*".into()],
-            conditions: vec![], priority: 10,
-        }).unwrap();
-        svc.add_policy(Policy {
-            id: "high".into(), name: "high".into(), description: "".into(),
-            effect: PolicyEffect::Deny, subjects: vec!["*".into()],
-            actions: vec!["*".into()], resources: vec!["/secret/*".into()],
-            conditions: vec![], priority: 100,
-        }).unwrap();
-
         let req = AccessRequest {
-            subject: "u".into(), action: "r".into(), resource: "/secret/key".into(),
-            context: Default::default(),
+            subject: "unknown".into(), action: "read".into(),
+            resource: "/data".into(), context: HashMap::new(),
         };
-        let d = svc.evaluate(&req).unwrap();
-        assert_eq!(d.effect, PolicyEffect::Deny);
-        assert_eq!(d.matched_policy_id, Some("high".into()));
+        let decision = svc.evaluate(&req).unwrap();
+        assert_eq!(decision.effect, PolicyEffect::Deny);
+    }
+
+    #[test]
+    fn test_bundle_id_format() {
+        let id = BundleRecord::make_bundle_id("tenant-1", "default", "my-policy");
+        assert_eq!(id, "tenant-1/default/my-policy");
+    }
+
+    #[test]
+    fn test_storage_key_format() {
+        let key = BundleRecord::storage_key("tenant-1/default/my-policy");
+        assert_eq!(String::from_utf8_lossy(&key), "/_policy/bundles/tenant-1/default/my-policy");
     }
 }

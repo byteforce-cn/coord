@@ -1,18 +1,22 @@
 package cn.byteforce.coord.sdk;
 
+import cn.byteforce.coord.sdk.cache.CacheClient;
 import cn.byteforce.coord.sdk.config.ConfigClient;
 import cn.byteforce.coord.sdk.health.HealthStatus;
+import cn.byteforce.coord.sdk.idgen.IdGenClient;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
 import cn.byteforce.coord.sdk.internal.proto.HealthCheckRequest;
 import cn.byteforce.coord.sdk.internal.proto.HealthCheckResponse;
 import cn.byteforce.coord.sdk.internal.proto.HealthGrpc;
-import cn.byteforce.coord.sdk.internal.rpc.ConfigClientImpl;
-import cn.byteforce.coord.sdk.internal.rpc.ErrorMapper;
-import cn.byteforce.coord.sdk.internal.rpc.RegistryImpl;
-import cn.byteforce.coord.sdk.internal.rpc.RetryTemplate;
+import cn.byteforce.coord.sdk.internal.rpc.*;
 import cn.byteforce.coord.sdk.internal.thread.ThreadPoolManager;
 import cn.byteforce.coord.sdk.internal.watch.WatchManager;
+import cn.byteforce.coord.sdk.lock.LockClient;
+import cn.byteforce.coord.sdk.pki.PkiClient;
+import cn.byteforce.coord.sdk.policy.PolicyClient;
 import cn.byteforce.coord.sdk.registry.Registry;
+import cn.byteforce.coord.sdk.transit.TransitClient;
+import cn.byteforce.coord.sdk.workflow.WorkflowClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -23,9 +27,19 @@ import java.util.concurrent.TimeUnit;
 /**
  * The main entry point for interacting with a Coord Agent.
  * <p>
- * Provides {@link #registry()} for service registration/discovery and
- * {@link #configClient()} for dynamic configuration. Must be closed
- * via {@link #close()} to release resources gracefully.
+ * Provides APIs for:
+ * <ul>
+ *   <li>{@link #registry()} — Service registration and discovery</li>
+ *   <li>{@link #configClient()} — Dynamic configuration with watch</li>
+ *   <li>{@link #lock()} — Distributed mutex locks</li>
+ *   <li>{@link #idgen()} — Distributed unique ID generation</li>
+ *   <li>{@link #cache()} — Distributed cache (String/Hash/List/Set)</li>
+ *   <li>{@link #transit()} — Envelope encryption/decryption</li>
+ *   <li>{@link #workflow()} — Workflow definition and instance management</li>
+ *   <li>{@link #policy()} — RBAC/ABAC policy evaluation</li>
+ *   <li>{@link #pki()} — Local PKI CA certificate operations</li>
+ * </ul>
+ * Must be closed via {@link #close()} to release resources gracefully.
  *
  * <pre>{@code
  * CoordConfig config = CoordConfig.builder()
@@ -52,6 +66,13 @@ public final class CoordClient implements Closeable {
     private final RetryTemplate retryTemplate;
     private final RegistryImpl registry;
     private final ConfigClientImpl configClient;
+    private final LockClientImpl lockClient;
+    private final IdGenClientImpl idgenClient;
+    private final CacheClientImpl cacheClient;
+    private final TransitClientImpl transitClient;
+    private final WorkflowClientImpl workflowClient;
+    private final PolicyClientImpl policyClient;
+    private final PkiClientImpl pkiClient;
 
     private CoordClient(CoordConfig config) {
         this.config = config;
@@ -67,6 +88,20 @@ public final class CoordClient implements Closeable {
                 threadPoolManager.getHeartbeatScheduler());
         this.configClient = new ConfigClientImpl(channelManager, errorMapper, retryTemplate,
                 config.getObservabilityProvider(), config, watchManager);
+        this.lockClient = new LockClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config);
+        this.idgenClient = new IdGenClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config);
+        this.cacheClient = new CacheClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config);
+        this.transitClient = new TransitClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config);
+        this.workflowClient = new WorkflowClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config);
+        this.policyClient = new PolicyClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config);
+        this.pkiClient = new PkiClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config);
     }
 
     /**
@@ -92,6 +127,59 @@ public final class CoordClient implements Closeable {
      */
     public ConfigClient configClient() {
         return configClient;
+    }
+
+    /**
+     * Returns the {@link LockClient} API for distributed lock operations.
+     */
+    public LockClient lock() {
+        return lockClient;
+    }
+
+    /**
+     * Returns the {@link IdGenClient} API for distributed ID generation.
+     */
+    public IdGenClient idgen() {
+        return idgenClient;
+    }
+
+    /**
+     * Returns the {@link CacheClient} API for distributed cache operations.
+     */
+    public CacheClient cache() {
+        return cacheClient;
+    }
+
+    /**
+     * Returns the {@link TransitClient} API for envelope encryption/decryption.
+     */
+    public TransitClient transit() {
+        return transitClient;
+    }
+
+    /**
+     * Returns the {@link WorkflowClient} API for workflow definition management
+     * and instance lifecycle.
+     */
+    public WorkflowClient workflow() {
+        return workflowClient;
+    }
+
+    /**
+     * Returns the {@link PolicyClient} API for RBAC/ABAC policy evaluation.
+     */
+    public PolicyClient policy() {
+        return policyClient;
+    }
+
+    /**
+     * Returns the {@link PkiClient} API for PKI CA certificate operations.
+     * <p>
+     * Backed by the Coord Agent's PKI service via gRPC.
+     * Call {@link PkiClient#initCa(String)} before issuing certificates.
+     */
+    public PkiClient pki() {
+        return pkiClient;
     }
 
     /**

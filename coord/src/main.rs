@@ -1205,6 +1205,9 @@ async fn run_server(
     node.lease_manager = Some(Arc::new(LeaseManager::new(timer_handle)));
     let node = Arc::new(node);
 
+    // 启动 Lease 过期轮询后台任务（每 200ms 清理过期 Lease 绑定的 KV key）
+    node.start_lease_expiry_worker();
+
     // 6.5. 初始化 Auth 组件（默认禁用，通过 gRPC 启用）
     let auth_manager = Arc::new(AuthManager::new());
     let token_manager = Arc::new(TokenManager::with_defaults());
@@ -1547,6 +1550,49 @@ async fn run_dev(
 
     tracing::info!("Dev server ready on {}", server_addr);
 
+    // 4.5. 等待 Raft Leader 选举完成（避免 Agent 启动时 RegistryService Watch 订阅因 Leader 未就绪而失败）
+    {
+        use coord_proto::maintenance::maintenance_client::MaintenanceClient;
+        let leader_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        let server_url = format!("http://{server_addr}");
+        loop {
+            if tokio::time::Instant::now() > leader_deadline {
+                server_handle.abort();
+                return Err(format!(
+                    "Raft leader not elected on {} within 15s after port ready",
+                    server_addr
+                )
+                .into());
+            }
+            match tonic::transport::Endpoint::from_shared(server_url.clone()) {
+                Ok(ep) => {
+                    match ep.connect_timeout(std::time::Duration::from_secs(2)).connect().await {
+                        Ok(channel) => {
+                            let mut client = MaintenanceClient::new(channel);
+                            let request = tonic::Request::new(
+                                coord_proto::maintenance::StatusRequest {},
+                            );
+                            if let Ok(resp) = client.status(request).await {
+                                let status = resp.into_inner();
+                                if !status.raft_leader.is_empty() {
+                                    tracing::info!(
+                                        "Raft leader elected: node {} on {}",
+                                        status.raft_leader,
+                                        server_addr
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+                Err(_) => {}
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    }
+
     // 5. 构建 Agent 配置并启动
     let agent_config = coord_agent::AgentConfig {
         agent_addr: agent_addr.clone(),
@@ -1557,6 +1603,15 @@ async fn run_dev(
     };
 
     tracing::info!("Dev mode: starting agent on {} (http: {})", agent_addr, http_port);
+
+    // 启动 Agent HTTP health/metrics 端点（对标 run_agent 的行为）
+    let agent_metrics = coord_agent::metrics::AgentMetrics::new();
+    let agent_has_peers = !agent_config.static_peers.is_empty();
+    let _agent_health_handle = coord_agent::health::start_health_server(
+        &agent_config.http_addr,
+        agent_metrics,
+        agent_has_peers,
+    );
 
     let agent_server = coord_agent::AgentServer::new(agent_config);
     let (agent_shutdown_tx, agent_shutdown_rx) = tokio::sync::oneshot::channel::<()>();

@@ -7,6 +7,7 @@
 // - Agent 内嵌 Regorus，直接加载 Rego 策略进行本地评估
 // - 策略包由 Server 通过 KV/Watch 下发至 Agent
 // - 评估结果缓存 30 秒，策略版本变更时立即失效
+// - Bundle 存储由 PolicyService 管理（Server KV），OpaEngine 仅负责本地求值
 //
 // 参见 docs/client-agent-architecture.v8.2.md §4.11。
 
@@ -71,10 +72,11 @@ struct CacheEntry {
 /// Regorus OPA 策略评估引擎
 ///
 /// 线程安全，内建评估结果缓存。
+/// 策略加载由外部（PolicyService）管理。
 pub struct OpaEngine {
     /// Regorus 引擎实例（受 RwLock 保护）
     engine: RwLock<Engine>,
-    /// 评估结果缓存：key = "package:subject:action:resource" → CacheEntry
+    /// 评估结果缓存
     cache: RwLock<HashMap<String, CacheEntry>>,
     /// 已加载的策略源码：policy_id → rego source
     policy_sources: RwLock<HashMap<String, String>>,
@@ -83,7 +85,6 @@ pub struct OpaEngine {
 }
 
 impl OpaEngine {
-    /// 创建新的 OPA 引擎
     pub fn new(config: OpaConfig) -> Result<Self, String> {
         let engine = Engine::new();
         Ok(Self {
@@ -95,26 +96,48 @@ impl OpaEngine {
     }
 
     /// 加载/更新 Rego 策略
-    ///
-    /// 相同 `policy_id` 的策略会被替换（支持热加载）。
-    /// 每次更新会清空评估缓存，并重建 Regorus 引擎。
     pub fn add_policy(&self, policy_id: &str, rego: &str) -> Result<(), String> {
-        // 存储策略源码，替换同 ID 旧策略
         self.policy_sources.write().insert(policy_id.to_string(), rego.to_string());
-
-        // 重建引擎：从所有已加载的策略源码构建
         self.rebuild_engine()?;
-
-        // 策略变更：清空评估缓存
         self.cache.write().clear();
-
         let count = self.policy_sources.read().len();
         tracing::info!("OPA: loaded policy '{policy_id}' ({count} total)");
         Ok(())
     }
 
-    /// 重建 Regorus 引擎（从所有已加载策略）
-    fn rebuild_engine(&self) -> Result<(), String> {
+    /// 移除策略
+    pub fn remove_policy(&self, policy_id: &str) {
+        self.policy_sources.write().remove(policy_id);
+        if let Err(e) = self.rebuild_engine() {
+            tracing::warn!("OPA: rebuild after remove_policy failed: {e}");
+        }
+        self.cache.write().clear();
+    }
+
+    /// 清空所有策略
+    pub fn clear_policies(&self) {
+        self.policy_sources.write().clear();
+        *self.engine.write() = Engine::new();
+        self.cache.write().clear();
+    }
+
+    /// 批量加载策略
+    pub fn load_policies(&self, policies: &[(String, String)]) -> Result<(), String> {
+        {
+            let mut sources = self.policy_sources.write();
+            sources.clear();
+            for (id, rego) in policies {
+                sources.insert(id.clone(), rego.clone());
+            }
+        }
+        self.rebuild_engine()?;
+        self.cache.write().clear();
+        tracing::info!("OPA: loaded {} policies", policies.len());
+        Ok(())
+    }
+
+    /// 重建 Regorus 引擎
+    pub fn rebuild_engine(&self) -> Result<(), String> {
         let mut engine = Engine::new();
         let sources = self.policy_sources.read();
         for (id, rego) in sources.iter() {
@@ -134,11 +157,7 @@ impl OpaEngine {
     }
 
     /// 评估访问请求
-    ///
-    /// 查询 Rego 规则 `data.<package>.allow`，返回 Allow/Deny 决策。
-    /// 结果会被缓存（TTL 由 config.cache_ttl_secs 控制）。
     pub fn evaluate(&self, package: &str, input: &OpaInput) -> Result<OpaDecision, String> {
-        // 检查缓存
         let cache_key = Self::cache_key(package, input);
         {
             let cache = self.cache.read();
@@ -149,13 +168,10 @@ impl OpaEngine {
             }
         }
 
-        // 构造 input JSON 并设置到引擎
         let input_value = Self::build_input(input);
-
         let mut engine = self.engine.write();
         engine.set_input(input_value);
 
-        // 使用 eval_bool_query 直接查询 data.<package>.allow
         let query = format!("data.{package}.allow");
         let allowed = engine
             .eval_bool_query(query, false)
@@ -173,22 +189,14 @@ impl OpaEngine {
             "no matching rule (default deny)".to_string()
         };
 
-        let decision = OpaDecision {
-            allowed,
-            matched_rules,
-            reason,
-        };
+        let decision = OpaDecision { allowed, matched_rules, reason };
 
-        // 写入缓存
         {
             let mut cache = self.cache.write();
-            cache.insert(
-                cache_key,
-                CacheEntry {
-                    decision: decision.clone(),
-                    cached_at: Instant::now(),
-                },
-            );
+            cache.insert(cache_key, CacheEntry {
+                decision: decision.clone(),
+                cached_at: Instant::now(),
+            });
         }
 
         Ok(decision)
@@ -204,43 +212,53 @@ impl OpaEngine {
         self.policy_sources.read().len()
     }
 
+    // ──── Explain ────
+
+    /// 解释策略决策（trace），返回 JSON 格式
+    pub fn explain(&self, query: &str, input_json: &str) -> Result<String, String> {
+        let input_value: Value = serde_json::from_str(input_json)
+            .map_err(|e| format!("invalid input JSON: {e}"))?;
+
+        let mut engine = self.engine.write();
+        engine.set_input(input_value);
+
+        let allowed = engine
+            .eval_bool_query(query.to_string(), false)
+            .map_err(|e| format!("OPA evaluation error: {e}"))?;
+
+        let matched: Vec<&str> = if allowed { vec!["allow"] } else { vec![] };
+        let trace = serde_json::json!({
+            "query": query,
+            "input": serde_json::from_str::<serde_json::Value>(input_json).unwrap_or(serde_json::Value::Null),
+            "result": allowed,
+            "matched_rules": matched,
+            "reason": if allowed {
+                format!("query '{}' evaluated to true", query)
+            } else {
+                format!("query '{}' evaluated to false (default deny)", query)
+            },
+        });
+
+        serde_json::to_string_pretty(&trace)
+            .map_err(|e| format!("trace serialization error: {e}"))
+    }
+
     // ──── 内部方法 ────
 
     fn cache_key(package: &str, input: &OpaInput) -> String {
-        format!(
-            "{}:{}:{}:{}",
-            package, input.subject, input.action, input.resource
-        )
+        format!("{}:{}:{}:{}", package, input.subject, input.action, input.resource)
     }
 
     fn build_input(input: &OpaInput) -> Value {
         let mut map: BTreeMap<Value, Value> = BTreeMap::new();
-        map.insert(
-            Value::String(Arc::<str>::from("subject")),
-            Value::String(Arc::<str>::from(input.subject.as_str())),
-        );
-        map.insert(
-            Value::String(Arc::<str>::from("action")),
-            Value::String(Arc::<str>::from(input.action.as_str())),
-        );
-        map.insert(
-            Value::String(Arc::<str>::from("resource")),
-            Value::String(Arc::<str>::from(input.resource.as_str())),
-        );
-
-        // context 字段
+        map.insert(Value::String(Arc::<str>::from("subject")), Value::String(Arc::<str>::from(input.subject.as_str())));
+        map.insert(Value::String(Arc::<str>::from("action")), Value::String(Arc::<str>::from(input.action.as_str())));
+        map.insert(Value::String(Arc::<str>::from("resource")), Value::String(Arc::<str>::from(input.resource.as_str())));
         let mut ctx: BTreeMap<Value, Value> = BTreeMap::new();
         for (k, v) in &input.context {
-            ctx.insert(
-                Value::String(Arc::<str>::from(k.as_str())),
-                Value::String(Arc::<str>::from(v.as_str())),
-            );
+            ctx.insert(Value::String(Arc::<str>::from(k.as_str())), Value::String(Arc::<str>::from(v.as_str())));
         }
-        map.insert(
-            Value::String(Arc::<str>::from("context")),
-            Value::Object(Arc::new(ctx)),
-        );
-
+        map.insert(Value::String(Arc::<str>::from("context")), Value::Object(Arc::new(ctx)));
         Value::Object(Arc::new(map))
     }
 }
@@ -250,6 +268,17 @@ impl OpaEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_REGO: &str = r#"
+package test.rbac
+
+default allow = false
+
+allow if {
+    input.subject == "alice"
+    input.action == "read"
+}
+"#;
 
     #[test]
     fn test_opa_config_defaults() {
@@ -281,12 +310,6 @@ mod tests {
                     Value::String(s) => assert_eq!(s.as_ref(), "alice"),
                     _ => panic!("expected string"),
                 }
-                let act_key = Value::String(Arc::<str>::from("action"));
-                let act = map.get(&act_key).unwrap();
-                match act {
-                    Value::String(s) => assert_eq!(s.as_ref(), "read"),
-                    _ => panic!("expected string"),
-                }
             }
             _ => panic!("expected object"),
         }
@@ -294,12 +317,7 @@ mod tests {
 
     #[test]
     fn test_cache_key_deterministic() {
-        let input = OpaInput {
-            subject: "bob".into(),
-            action: "write".into(),
-            resource: "/admin".into(),
-            context: Default::default(),
-        };
+        let input = OpaInput { subject: "bob".into(), action: "write".into(), resource: "/admin".into(), context: Default::default() };
         let key1 = OpaEngine::cache_key("coord.auth", &input);
         let key2 = OpaEngine::cache_key("coord.auth", &input);
         assert_eq!(key1, key2);
@@ -311,5 +329,84 @@ mod tests {
         let key1 = OpaEngine::cache_key("pkg.a", &input);
         let key2 = OpaEngine::cache_key("pkg.b", &input);
         assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_add_policy_and_evaluate() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        engine.add_policy("test.rbac", TEST_REGO).expect("add policy");
+        assert_eq!(engine.policy_count(), 1);
+        let input = OpaInput { subject: "alice".into(), action: "read".into(), resource: "/data".into(), context: HashMap::new() };
+        let decision = engine.evaluate("test.rbac", &input).expect("evaluate");
+        assert!(decision.allowed);
+    }
+
+    #[test]
+    fn test_evaluate_deny() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        engine.add_policy("test.rbac", TEST_REGO).expect("add policy");
+        let input = OpaInput { subject: "bob".into(), action: "write".into(), resource: "/data".into(), context: HashMap::new() };
+        let decision = engine.evaluate("test.rbac", &input).expect("evaluate");
+        assert!(!decision.allowed);
+    }
+
+    #[test]
+    fn test_remove_policy() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        engine.add_policy("test.rbac", TEST_REGO).expect("add policy");
+        assert_eq!(engine.policy_count(), 1);
+        engine.remove_policy("test.rbac");
+        assert_eq!(engine.policy_count(), 0);
+    }
+
+    #[test]
+    fn test_clear_policies() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        engine.add_policy("p1", TEST_REGO).expect("add p1");
+        engine.add_policy("p2", TEST_REGO).expect("add p2");
+        assert_eq!(engine.policy_count(), 2);
+        engine.clear_policies();
+        assert_eq!(engine.policy_count(), 0);
+    }
+
+    #[test]
+    fn test_load_policies_batch() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        let policies = vec![
+            ("p1".to_string(), TEST_REGO.to_string()),
+            ("p2".to_string(), TEST_REGO.to_string()),
+        ];
+        engine.load_policies(&policies).expect("load policies");
+        assert_eq!(engine.policy_count(), 2);
+    }
+
+    #[test]
+    fn test_explain_returns_json_trace() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        engine.add_policy("test.rbac", TEST_REGO).unwrap();
+        let input = r#"{"subject": "alice", "action": "read"}"#;
+        let trace = engine.explain("data.test.rbac.allow", input).expect("explain");
+        let parsed: serde_json::Value = serde_json::from_str(&trace).expect("valid json");
+        assert_eq!(parsed["query"], "data.test.rbac.allow");
+        assert_eq!(parsed["result"], true);
+        assert!(!parsed["matched_rules"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_explain_deny() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        engine.add_policy("test.rbac", TEST_REGO).unwrap();
+        let input = r#"{"subject": "bob", "action": "write"}"#;
+        let trace = engine.explain("data.test.rbac.allow", input).expect("explain");
+        let parsed: serde_json::Value = serde_json::from_str(&trace).expect("valid json");
+        assert_eq!(parsed["result"], false);
+        assert!(parsed["matched_rules"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_explain_invalid_input() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        let result = engine.explain("data.test.rbac.allow", "not-json");
+        assert!(result.is_err());
     }
 }

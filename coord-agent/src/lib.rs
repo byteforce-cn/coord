@@ -251,8 +251,23 @@ impl AgentServer {
         let service_manager = ServiceManager::new(self.config.services.clone());
 
         // 按配置启用高级服务（Phase E）
-        // 保存 RegistryService 的 Arc 句柄，用于后续注册 gRPC RegistryServer
+        // 保存各服务的 Arc 句柄，用于后续注册 gRPC Server
         let mut registry_grpc_svc: Option<Arc<crate::services::registry::RegistryService>> = None;
+        let mut config_grpc_svc: Option<Arc<crate::services::config_center::ConfigCenterService>> = None;
+        let mut lock_grpc_svc: Option<Arc<crate::services::lock::LockService>> = None;
+        let mut idgen_grpc_svc: Option<Arc<crate::services::idgen::IdGenService>> = None;
+        let mut election_grpc_svc: Option<Arc<crate::services::leader_election::LeaderElectionService>> = None;
+        let mut event_grpc_svc: Option<Arc<crate::services::event_notification::EventNotificationService>> = None;
+        let mut cache_grpc_svc: Option<Arc<crate::services::cache::CacheService>> = None;
+        let mut mq_grpc_svc: Option<Arc<crate::services::mq::MessageQueueService>> = None;
+        let mut scheduler_grpc_svc: Option<Arc<crate::services::scheduler::SchedulerService>> = None;
+        let mut workflow_grpc_svc: Option<Arc<crate::services::workflow::WorkflowService>> = None;
+        let mut policy_grpc_svc: Option<Arc<crate::services::policy::PolicyService>> = None;
+        let mut transit_grpc_svc: Option<Arc<crate::services::transit::TransitService>> = None;
+        let mut cb_grpc_svc: Option<Arc<crate::services::circuit_breaker::CircuitBreakerService>> = None;
+        let mut rl_grpc_svc: Option<Arc<crate::services::rate_limiter::RateLimiterService>> = None;
+        let mut ff_grpc_svc: Option<Arc<crate::feature_flags::FeatureFlagService>> = None;
+        let mut pki_grpc_svc: Option<Arc<crate::pki::PkiService>> = None;
 
         if self.config.services.registry {
             if let Some(ref inner) = inner {
@@ -275,7 +290,6 @@ impl AgentServer {
         }
 
         // 保存 ConfigCenterService 的 Arc 句柄，用于后续注册 gRPC ConfigServer
-        let mut config_grpc_svc: Option<Arc<crate::services::config_center::ConfigCenterService>> = None;
 
         if self.config.services.config_center {
             if let Some(ref inner) = inner {
@@ -299,9 +313,11 @@ impl AgentServer {
                 let lock_svc = Arc::new(
                     crate::services::lock::LockService::new(inner.clone())
                 );
+                let lock_grpc = lock_svc.clone();
                 if let Err(e) = service_manager.register(lock_svc).await {
                     tracing::error!("failed to register lock service: {e}");
                 } else {
+                    lock_grpc_svc = Some(lock_grpc);
                     tracing::info!("Lock service registered (v3.0 pluggable architecture)");
                 }
             } else {
@@ -314,9 +330,11 @@ impl AgentServer {
                 let idgen_svc = Arc::new(
                     crate::services::idgen::IdGenService::new(inner.clone(), 1000)
                 );
+                let idgen_grpc = idgen_svc.clone();
                 if let Err(e) = service_manager.register(idgen_svc).await {
                     tracing::error!("failed to register idgen service: {e}");
                 } else {
+                    idgen_grpc_svc = Some(idgen_grpc);
                     tracing::info!("ID Generator service registered (v3.0 pluggable architecture)");
                 }
             } else {
@@ -331,9 +349,11 @@ impl AgentServer {
                         inner.clone(), 1000, 256,
                     )
                 );
+                let event_grpc = event_svc.clone();
                 if let Err(e) = service_manager.register(event_svc).await {
                     tracing::error!("failed to register event_notification service: {e}");
                 } else {
+                    event_grpc_svc = Some(event_grpc);
                     tracing::info!("EventNotification service registered (v3.0 pluggable architecture)");
                 }
             } else {
@@ -348,9 +368,11 @@ impl AgentServer {
                         inner.clone(), 256,
                     )
                 );
+                let election_grpc = election_svc.clone();
                 if let Err(e) = service_manager.register(election_svc).await {
                     tracing::error!("failed to register leader_election service: {e}");
                 } else {
+                    election_grpc_svc = Some(election_grpc);
                     tracing::info!("LeaderElection service registered (v3.0 pluggable architecture)");
                 }
             } else {
@@ -363,13 +385,30 @@ impl AgentServer {
                 let workflow_svc = Arc::new(
                     crate::services::workflow::WorkflowService::new(inner.clone())
                 );
+                let workflow_grpc = workflow_svc.clone();
                 if let Err(e) = service_manager.register(workflow_svc).await {
                     tracing::error!("failed to register workflow service: {e}");
                 } else {
+                    workflow_grpc_svc = Some(workflow_grpc);
                     tracing::info!("Workflow service registered (v3.0 pluggable architecture)");
                 }
             } else {
                 tracing::warn!("Workflow service enabled but no server connection; skipping");
+            }
+        }
+
+        if self.config.services.scheduler {
+            let scheduler_svc = Arc::new(
+                crate::services::scheduler::SchedulerService::new(
+                    crate::services::scheduler::DefaultConfig::default()
+                )
+            );
+            let scheduler_grpc = scheduler_svc.clone();
+            if let Err(e) = service_manager.register(scheduler_svc).await {
+                tracing::error!("failed to register scheduler service: {e}");
+            } else {
+                scheduler_grpc_svc = Some(scheduler_grpc);
+                tracing::info!("Scheduler service registered (v3.0 pluggable architecture)");
             }
         }
 
@@ -383,9 +422,11 @@ impl AgentServer {
                     3600,               // default TTL 1 hour
                 )
             );
+            let cache_grpc = cache_svc.clone();
             if let Err(e) = service_manager.register(cache_svc).await {
                 tracing::error!("failed to register cache service: {e}");
             } else {
+                cache_grpc_svc = Some(cache_grpc);
                 tracing::info!("Cache data-plane service registered (v3.0, redb backend)");
             }
         }
@@ -398,9 +439,11 @@ impl AgentServer {
                     1024 * 1024 * 1024, // 1GB max
                 )
             );
+            let mq_grpc = mq_svc.clone();
             if let Err(e) = service_manager.register(mq_svc).await {
                 tracing::error!("failed to register mq service: {e}");
             } else {
+                mq_grpc_svc = Some(mq_grpc);
                 tracing::info!("MQ data-plane service registered (v3.0, redb backend)");
             }
         }
@@ -410,10 +453,79 @@ impl AgentServer {
             let policy_svc = Arc::new(
                 crate::services::policy::PolicyService::new(1024)
             );
+            let policy_grpc = policy_svc.clone();
             if let Err(e) = service_manager.register(policy_svc).await {
                 tracing::error!("failed to register policy service: {e}");
             } else {
+                policy_grpc_svc = Some(policy_grpc);
                 tracing::info!("Policy service registered (v3.0, RBAC/ABAC engine)");
+            }
+        }
+
+        if self.config.services.transit {
+            use crate::services::transit::TransitConfig;
+            let transit_config = TransitConfig::default();
+            match crate::services::transit::TransitService::new(transit_config) {
+                Ok(transit_svc) => {
+                    transit_grpc_svc = Some(Arc::new(transit_svc));
+                    tracing::info!("Transit service initialized (v3.0, envelope encryption)");
+                }
+                Err(e) => {
+                    tracing::error!("failed to create transit service: {e}");
+                }
+            }
+        }
+
+        if self.config.services.circuit_breaker {
+            use std::time::Duration;
+            cb_grpc_svc = Some(Arc::new(
+                crate::services::circuit_breaker::CircuitBreakerService::new(
+                    5,
+                    Duration::from_secs(30),
+                )
+            ));
+            tracing::info!("CircuitBreaker service initialized (v3.0)");
+        }
+
+        if self.config.services.rate_limiter {
+            use crate::services::rate_limiter::RateLimiterConfig;
+            let rl_config = RateLimiterConfig {
+                max_tokens: 100,
+                refill_rate: 10.0,
+            };
+            rl_grpc_svc = Some(Arc::new(
+                crate::services::rate_limiter::RateLimiterService::new(rl_config)
+            ));
+            tracing::info!("RateLimiter service initialized (v3.0)");
+        }
+
+        if self.config.services.feature_flags {
+            use crate::feature_flags::FlagConfig;
+            let ff_config = FlagConfig::default();
+            ff_grpc_svc = Some(Arc::new(
+                crate::feature_flags::FeatureFlagService::new(ff_config)
+            ));
+            tracing::info!("FeatureFlags service initialized (v3.0)");
+        }
+
+        // PKI CA 证书签发服务（Phase F）
+        if self.config.services.pki {
+            use crate::pki::PkiConfig;
+            let pki_config = PkiConfig::default();
+            match crate::pki::PkiService::new(pki_config) {
+                Ok(pki_svc) => {
+                    // 自动初始化 CA（dev 模式 / 首次启动时自动生成自签名根证书）
+                    if let Err(e) = pki_svc.init_ca("coord-agent-ca") {
+                        tracing::warn!("PKI CA auto-init failed (may already be initialized): {}", e);
+                    } else {
+                        tracing::info!("PKI CA auto-initialized: CN=coord-agent-ca");
+                    }
+                    pki_grpc_svc = Some(Arc::new(pki_svc));
+                    tracing::info!("PKI service initialized (v3.0, CA certificate management)");
+                }
+                Err(e) => {
+                    tracing::error!("failed to create PKI service: {e}");
+                }
             }
         }
 
@@ -445,6 +557,132 @@ impl AgentServer {
         let router = if let Some(config_svc) = config_grpc_svc {
             router.add_service(
                 coord_proto::agent::config_server::ConfigServer::from_arc(config_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 Lock gRPC 服务
+        let router = if let Some(lock_svc) = lock_grpc_svc {
+            router.add_service(
+                coord_proto::agent::lock_server::LockServer::from_arc(lock_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 IdGen gRPC 服务
+        let router = if let Some(idgen_svc) = idgen_grpc_svc {
+            router.add_service(
+                coord_proto::agent::id_gen_server::IdGenServer::from_arc(idgen_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 LeaderElection gRPC 服务
+        let router = if let Some(election_svc) = election_grpc_svc {
+            router.add_service(
+                coord_proto::agent::leader_election_server::LeaderElectionServer::from_arc(election_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 Event gRPC 服务
+        let router = if let Some(event_svc) = event_grpc_svc {
+            router.add_service(
+                coord_proto::agent::event_server::EventServer::from_arc(event_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 Cache gRPC 服务
+        let router = if let Some(cache_svc) = cache_grpc_svc {
+            router.add_service(
+                coord_proto::agent::cache_server::CacheServer::from_arc(cache_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 MQ gRPC 服务
+        let router = if let Some(mq_svc) = mq_grpc_svc {
+            router.add_service(
+                coord_proto::agent::mq_server::MqServer::from_arc(mq_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 Scheduler gRPC 服务
+        let router = if let Some(scheduler_svc) = scheduler_grpc_svc {
+            router.add_service(
+                coord_proto::agent::scheduler_server::SchedulerServer::from_arc(scheduler_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 Workflow gRPC 服务
+        let router = if let Some(workflow_svc) = workflow_grpc_svc {
+            router.add_service(
+                coord_proto::agent::workflow_server::WorkflowServer::from_arc(workflow_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 Policy gRPC 服务
+        let router = if let Some(policy_svc) = policy_grpc_svc {
+            router.add_service(
+                coord_proto::agent::policy_server::PolicyServer::from_arc(policy_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 Transit gRPC 服务
+        let router = if let Some(transit_svc) = transit_grpc_svc {
+            router.add_service(
+                coord_proto::agent::transit_server::TransitServer::from_arc(transit_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 CircuitBreaker gRPC 服务
+        let router = if let Some(cb_svc) = cb_grpc_svc {
+            router.add_service(
+                coord_proto::agent::circuit_breaker_server::CircuitBreakerServer::from_arc(cb_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 RateLimiter gRPC 服务
+        let router = if let Some(rl_svc) = rl_grpc_svc {
+            router.add_service(
+                coord_proto::agent::rate_limiter_server::RateLimiterServer::from_arc(rl_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 FeatureFlags gRPC 服务
+        let router = if let Some(ff_svc) = ff_grpc_svc {
+            router.add_service(
+                coord_proto::agent::feature_flags_server::FeatureFlagsServer::from_arc(ff_svc)
+            )
+        } else {
+            router
+        };
+
+        // 注册 PKI gRPC 服务
+        let router = if let Some(pki_svc) = pki_grpc_svc {
+            router.add_service(
+                coord_proto::agent::pki_server::PkiServer::from_arc(pki_svc)
             )
         } else {
             router

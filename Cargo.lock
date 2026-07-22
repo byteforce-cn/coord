@@ -633,6 +633,7 @@ dependencies = [
  "coord-server",
  "dashmap",
  "hex",
+ "hmac",
  "lru 0.14.0",
  "moka",
  "parking_lot",

@@ -692,11 +692,16 @@ impl<B: StorageBackend> MvccStorage<B> {
             let meta_key = encode_kv_meta_key(&cmp.key);
             let kv_key = encode_kv_key(&cmp.key);
 
-            let meta = tx
+            let raw_meta = tx
                 .get(TABLE_KV_META, &meta_key)?
                 .and_then(|bytes| KvMetadata::from_bytes(&bytes));
 
-            let value = tx.get(TABLE_KV, &kv_key)?;
+            // 软删除的 Key 应视为不存在：过滤掉 deleted=true 的元数据
+            let meta = raw_meta.filter(|m| !m.deleted);
+
+            // Value 读取同样受软删除影响：deleted=true 时视为无值
+            let is_deleted = raw_meta.map(|m| m.deleted).unwrap_or(false);
+            let value = if is_deleted { None } else { tx.get(TABLE_KV, &kv_key)? };
 
             let matched = match &cmp.target {
                 CompareTarget::Version => {
@@ -1448,5 +1453,102 @@ mod tests {
         let meta = storage.get_kv_metadata(b"key").unwrap().unwrap();
         assert_eq!(meta.version, 3);
         assert_eq!(meta.create_revision, rev1 as i64);
+    }
+
+    /// Txn CAS Version==0 对软删除的 Key 应返回成功（视为不存在）
+    /// 这是分布式锁 release/expire 后重新 acquire 的核心语义。
+    #[test]
+    fn test_txn_version_zero_on_deleted_key_succeeds() {
+        let (_dir, storage) = create_storage();
+
+        // 1. 创建 Key：version=1
+        storage.put(b"lock", b"holder-a", None).unwrap();
+        assert_eq!(
+            storage.get(b"lock").unwrap(),
+            Some(b"holder-a".to_vec())
+        );
+
+        // 2. 删除 Key（软删除：version=2, deleted=true）
+        storage.delete(b"lock").unwrap();
+        // get 返回 None（因为 deleted=true 过滤）
+        assert_eq!(storage.get(b"lock").unwrap(), None);
+        // 但元数据仍然存在且 version>0
+        let meta = storage.get_kv_metadata(b"lock").unwrap().unwrap();
+        assert!(meta.deleted);
+        assert_eq!(meta.version, 2);
+
+        // 3. Txn CAS Version==0 → 应成功（软删除视为不存在）
+        let compares = vec![TxnCompare {
+            key: b"lock".to_vec(),
+            target: CompareTarget::Version,
+            op: CompareOp::Equal,
+            target_value: CompareValue::Version(0),
+        }];
+        let success_ops = vec![txn_put(b"lock", b"holder-b")];
+        let failure_ops = vec![txn_put(b"lock", b"conflict")];
+
+        let result = storage
+            .execute_txn(&compares, &success_ops, &failure_ops)
+            .unwrap();
+
+        // 应成功执行 success 分支
+        assert!(result.succeeded, "Txn CAS Version==0 should succeed on soft-deleted key");
+        assert_eq!(
+            storage.get(b"lock").unwrap(),
+            Some(b"holder-b".to_vec()),
+            "holder-b should have re-acquired the lock"
+        );
+    }
+
+    /// 软删除 Key 的 ModRevision/CreateRevision 比较也应视为 0
+    #[test]
+    fn test_txn_revision_on_deleted_key_is_zero() {
+        let (_dir, storage) = create_storage();
+
+        storage.put(b"key", b"val", None).unwrap();
+        let rev1 = storage.delete(b"key").unwrap();
+
+        // 软删除后 ModRevision==0（视为不存在）
+        let compares = vec![TxnCompare {
+            key: b"key".to_vec(),
+            target: CompareTarget::ModRevision,
+            op: CompareOp::Equal,
+            target_value: CompareValue::ModRevision(0),
+        }];
+        let success_ops = vec![txn_put(b"key", b"recreated")];
+        let failure_ops = vec![];
+
+        let result = storage
+            .execute_txn(&compares, &success_ops, &failure_ops)
+            .unwrap();
+
+        assert!(result.succeeded, "ModRevision==0 should match soft-deleted key");
+        assert_eq!(storage.get(b"key").unwrap(), Some(b"recreated".to_vec()));
+    }
+
+    /// 软删除 Key 的 Value 比较应视为空
+    #[test]
+    fn test_txn_value_on_deleted_key_is_empty() {
+        let (_dir, storage) = create_storage();
+
+        storage.put(b"key", b"original", None).unwrap();
+        storage.delete(b"key").unwrap();
+
+        // 软删除后 Value==空
+        let compares = vec![TxnCompare {
+            key: b"key".to_vec(),
+            target: CompareTarget::Value,
+            op: CompareOp::Equal,
+            target_value: CompareValue::Value(vec![]),
+        }];
+        let success_ops = vec![txn_put(b"key", b"new-val")];
+        let failure_ops = vec![];
+
+        let result = storage
+            .execute_txn(&compares, &success_ops, &failure_ops)
+            .unwrap();
+
+        assert!(result.succeeded, "Value==empty should match soft-deleted key");
+        assert_eq!(storage.get(b"key").unwrap(), Some(b"new-val".to_vec()));
     }
 }

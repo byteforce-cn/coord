@@ -81,6 +81,56 @@ impl CoordNode {
         }
     }
 
+    /// 启动 Lease 过期轮询循环（后台任务）。
+    ///
+    /// 每 200ms 调用 `LeaseManager::check_expired()`，
+    /// 对已过期的 Lease 清理其绑定的 KV key。
+    ///
+    /// 应在 server 启动后调用（Leader 独占；Follower 无 LeaseManager 则跳过）。
+    pub fn start_lease_expiry_worker(self: &Arc<Self>) {
+        let node = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+            loop {
+                interval.tick().await;
+                let Some(ref lm) = node.lease_manager else {
+                    continue;
+                };
+                let actions = lm.check_expired();
+                for action in actions {
+                    match action {
+                        crate::lease::LeaseAction::Expired { lease_id, attached_keys } => {
+                            for key in &attached_keys {
+                                // 通过 Raft（集群模式）或直接删除（单节点模式）
+                                if let Some(ref raft) = node.raft {
+                                    let cmd = Command::Delete { key: key.clone() };
+                                    if let Err(e) = raft.client_write(cmd).await {
+                                        tracing::warn!(
+                                            "Lease {} expiry: failed to delete key via raft: {}",
+                                            lease_id, e
+                                        );
+                                    }
+                                } else {
+                                    if let Err(e) = node.storage.delete(key) {
+                                        tracing::warn!(
+                                            "Lease {} expiry: failed to delete key: {}",
+                                            lease_id, e
+                                        );
+                                    }
+                                }
+                            }
+                            tracing::debug!(
+                                "Lease {} expired, cleaned up {} attached keys",
+                                lease_id,
+                                attached_keys.len()
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     /// 检查幂等 request_id：若已存在则返回缓存的 revision，否则执行操作并缓存
     fn check_idempotent(&self, request_id: &[u8]) -> Option<i64> {
         if request_id.is_empty() {
@@ -575,6 +625,23 @@ impl Txn for CoordNode {
         };
 
         let responses: Vec<ResponseOp> = result.responses.iter().map(convert_response_op).collect();
+
+        // 若 Txn 成功执行，将 success_ops 中所有带 lease_id 的 Put 操作的 key 绑定到对应 Lease
+        // （与 Put handler 保持一致的 Lease-Key 绑定语义，确保 Revoke/Expiry 时能正确清理）
+        if result.succeeded {
+            if let Some(ref lm) = self.lease_manager {
+                for op in &success_ops {
+                    if let TxnOp::Put {
+                        key,
+                        lease_id: Some(lid),
+                        ..
+                    } = op
+                    {
+                        let _ = lm.attach_key(*lid, key);
+                    }
+                }
+            }
+        }
 
         // 缓存幂等结果
         self.cache_idempotent_txn(request_id, result.succeeded, result.revision as i64);

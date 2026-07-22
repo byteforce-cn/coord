@@ -421,8 +421,6 @@ impl BaseService for RegistryService {
                 }
             };
 
-            let mut last_event_time = std::time::Instant::now();
-
             loop {
                 tokio::select! {
                     _ = rx.changed() => {
@@ -441,7 +439,6 @@ impl BaseService for RegistryService {
                                     };
                                     cache.write().apply_event(&kv.key, value);
                                 }
-                                last_event_time = std::time::Instant::now();
                                 // 收到事件 = Server 可达，退出自我保护
                                 if cache.read().is_self_protection() {
                                     cache.write().exit_self_protection();
@@ -476,12 +473,6 @@ impl BaseService for RegistryService {
                                     }
                                 }
                             }
-                        }
-                    }
-                    _ = tokio::time::sleep(Duration::from_secs(30)) => {
-                        // 定期 Check：若超过 60s 无事件，进入自我保护
-                        if last_event_time.elapsed() > Duration::from_secs(60) {
-                            cache.write().enter_self_protection();
                         }
                     }
                 }

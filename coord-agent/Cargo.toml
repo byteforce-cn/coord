@@ -24,6 +24,7 @@ redb = { workspace = true }
 rand = { workspace = true }
 aes-gcm = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 zeroize = { workspace = true }
 hex = { workspace = true }
 rcgen = "0.14"
