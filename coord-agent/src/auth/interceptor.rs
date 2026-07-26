@@ -49,7 +49,7 @@ impl SignatureCache {
         }
     }
 
-    fn get(&self, jti: &str) -> bool {
+    fn _get(&self, jti: &str) -> bool {
         let mut cache = self.cache.write();
         match cache.get(jti) {
             Some(expires) => {

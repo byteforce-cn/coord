@@ -7,13 +7,12 @@
 // Registry and Config gRPC handlers remain inline in their respective
 // service files (registry.rs, config_center.rs).
 
-use std::collections::BTreeMap;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::services::{
-    lock::{LockService, LockInfo},
+    lock::LockService,
     idgen::IdGenService,
-    leader_election::{LeaderElectionService, LeaderRole, ElectionGroup},
+    leader_election::{LeaderElectionService, LeaderRole},
     event_notification::{EventNotificationService, Event, CloudEvent},
     cache::CacheService,
     mq::{MessageQueueService, TopicConfig},
@@ -584,6 +583,9 @@ impl Workflow for WorkflowService {
                 error_message: inst.error_message,
                 definition_name: inst.workflow_name,
                 input: inst.input,
+                created_at: inst.created_at as i64,
+                updated_at: inst.updated_at as i64,
+                task_stack: vec![],
             })),
             Ok(None) => Err(Status::not_found("workflow not found")),
             Err(e) => Err(Status::internal(e.to_string())),
@@ -664,10 +666,220 @@ impl Workflow for WorkflowService {
                     started_at: i.started_at,
                     updated_at: i.updated_at,
                     definition_name: i.definition_name,
+                    namespace: String::new(),
+                    output_json: vec![],
+                    context_json: vec![],
                 }).collect(),
                 next_page_token: next_token,
             })),
             Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════
+// Workflow Service (Engine) — 对接 coord-core 工作流引擎
+// ════════════════════════════════════════════════════════════
+
+use crate::services::workflow::phase4::WorkflowEngineService;
+
+#[tonic::async_trait]
+impl Workflow for WorkflowEngineService {
+    async fn start(&self, request: Request<WorkflowStartRequest>) -> Result<Response<WorkflowStartResponse>, Status> {
+        let req = request.into_inner();
+
+        let namespace = "default";
+        let def_id = self
+            .deploy_definition(namespace, &req.definition_dsl)
+            .await
+            .map_err(|e| Status::internal(format!("deploy error: {e}")))?;
+
+        let input: serde_json::Value = if req.input.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&req.input)
+                .unwrap_or(serde_json::Value::Null)
+        };
+
+        let inst = self
+            .start_instance(&def_id, input)
+            .await
+            .map_err(|e| Status::internal(format!("start error: {e}")))?;
+
+        Ok(Response::new(WorkflowStartResponse {
+            workflow_id: inst.id,
+        }))
+    }
+
+    async fn get_status(&self, request: Request<WorkflowGetStatusRequest>) -> Result<Response<WorkflowGetStatusResponse>, Status> {
+        let req = request.into_inner();
+        match self.get_instance(&req.workflow_id).await {
+            Ok(Some(inst)) => {
+                let status_str = match inst.status {
+                    coord_core::workflow::model::InstanceStatus::Running => "RUNNING",
+                    coord_core::workflow::model::InstanceStatus::Suspended => "SUSPENDED",
+                    coord_core::workflow::model::InstanceStatus::Completed => "COMPLETED",
+                    coord_core::workflow::model::InstanceStatus::Failed => "FAILED",
+                    coord_core::workflow::model::InstanceStatus::Cancelled => "CANCELLED",
+                    _ => "UNKNOWN",
+                };
+
+                let output_bytes = inst
+                    .output
+                    .as_ref()
+                    .map(|v| serde_json::to_vec(v).unwrap_or_default())
+                    .unwrap_or_default();
+
+                let input_bytes = serde_json::to_vec(&inst.context).unwrap_or_default();
+
+                Ok(Response::new(WorkflowGetStatusResponse {
+                    workflow_id: inst.id,
+                    status: status_str.to_string(),
+                    output: output_bytes,
+                    error_message: inst.fault.map(|f| f.title).unwrap_or_default(),
+                    definition_name: inst.definition_name,
+                    input: input_bytes,
+                    created_at: inst.created_at,
+                    updated_at: inst.updated_at,
+                    task_stack: vec![],
+                }))
+            }
+            Ok(None) => Err(Status::not_found("workflow instance not found")),
+            Err(e) => Err(Status::internal(e)),
+        }
+    }
+
+    async fn signal(&self, request: Request<WorkflowSignalRequest>) -> Result<Response<WorkflowSignalResponse>, Status> {
+        let req = request.into_inner();
+        let payload: serde_json::Value = if req.payload.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&req.payload).unwrap_or(serde_json::Value::Null)
+        };
+
+        let idempotency_key = if req.idempotency_key.is_empty() {
+            None
+        } else {
+            Some(req.idempotency_key.as_str())
+        };
+
+        self.resume_instance(&req.workflow_id, Some(&req.signal_name), Some(payload), idempotency_key)
+            .await
+            .map_err(|e| Status::internal(e))?;
+
+        Ok(Response::new(WorkflowSignalResponse {}))
+    }
+
+    async fn cancel(&self, request: Request<WorkflowCancelRequest>) -> Result<Response<WorkflowCancelResponse>, Status> {
+        let req = request.into_inner();
+        self.cancel_instance(&req.workflow_id)
+            .await
+            .map_err(|e| Status::internal(e))?;
+        Ok(Response::new(WorkflowCancelResponse {}))
+    }
+
+    async fn deploy(&self, request: Request<WorkflowDeployRequest>) -> Result<Response<WorkflowDeployResponse>, Status> {
+        let req = request.into_inner();
+        let workflow_id = self
+            .deploy_definition(&req.namespace, &req.definition_yaml)
+            .await
+            .map_err(|e| Status::internal(e))?;
+
+        match self.get_definition(&workflow_id).await {
+            Ok(Some(def)) => Ok(Response::new(WorkflowDeployResponse {
+                workflow_id,
+                version: def.document.version,
+                namespace: def.document.namespace,
+                name: def.document.name,
+            })),
+            _ => Ok(Response::new(WorkflowDeployResponse {
+                workflow_id,
+                version: "1.0".into(),
+                namespace: req.namespace,
+                name: String::new(),
+            })),
+        }
+    }
+
+    async fn list_definitions(&self, request: Request<WorkflowListDefinitionsRequest>) -> Result<Response<WorkflowListDefinitionsResponse>, Status> {
+        let req = request.into_inner();
+        let page_size = if req.page_size > 0 { req.page_size as usize } else { 50 };
+
+        match self.list_definitions(&req.namespace, page_size, Some(&req.page_token)).await {
+            Ok(defs) => {
+                let summaries: Vec<WorkflowDefinitionSummary> = defs
+                    .into_iter()
+                    .map(|d| WorkflowDefinitionSummary {
+                        workflow_id: d.id.unwrap_or_default(),
+                        name: d.document.name,
+                        version: d.document.version,
+                        status: "active".into(),
+                        created_at: 0,
+                    })
+                    .collect();
+                Ok(Response::new(WorkflowListDefinitionsResponse {
+                    definitions: summaries,
+                    next_page_token: String::new(),
+                }))
+            }
+            Err(e) => Err(Status::internal(e)),
+        }
+    }
+
+    async fn get_definition(&self, request: Request<WorkflowGetDefinitionRequest>) -> Result<Response<WorkflowGetDefinitionResponse>, Status> {
+        let req = request.into_inner();
+        match self.get_definition(&req.workflow_id).await {
+            Ok(Some(def)) => Ok(Response::new(WorkflowGetDefinitionResponse {
+                workflow_id: def.id.unwrap_or_default(),
+                name: def.document.name,
+                definition_yaml: def.raw_yaml.unwrap_or_default(),
+                version: def.document.version,
+                status: "active".into(),
+                created_at: 0,
+            })),
+            Ok(None) => Err(Status::not_found("definition not found")),
+            Err(e) => Err(Status::internal(e)),
+        }
+    }
+
+    async fn list_instances(&self, request: Request<WorkflowListInstancesRequest>) -> Result<Response<WorkflowListInstancesResponse>, Status> {
+        let req = request.into_inner();
+        let page_size = if req.page_size > 0 { req.page_size as usize } else { 50 };
+
+        match self.list_instances(Some(&req.namespace), None, page_size, Some(&req.page_token)).await {
+            Ok(instances) => {
+                let summaries: Vec<WorkflowInstanceSummary> = instances
+                    .into_iter()
+                    .map(|i| {
+                        let state_str = match i.status {
+                            coord_core::workflow::model::InstanceStatus::Running => "RUNNING",
+                            coord_core::workflow::model::InstanceStatus::Suspended => "SUSPENDED",
+                            coord_core::workflow::model::InstanceStatus::Completed => "COMPLETED",
+                            coord_core::workflow::model::InstanceStatus::Failed => "FAILED",
+                            coord_core::workflow::model::InstanceStatus::Cancelled => "CANCELLED",
+                            _ => "UNKNOWN",
+                        };
+                        WorkflowInstanceSummary {
+                            instance_id: i.id,
+                            workflow_id: i.definition_name.clone(),
+                            state: state_str.to_string(),
+                            started_at: i.created_at,
+                            updated_at: i.updated_at,
+                            definition_name: i.definition_name,
+                            namespace: i.definition_ns,
+                            output_json: i.output
+                                .map(|v| serde_json::to_vec(&v).unwrap_or_default())
+                                .unwrap_or_default(),
+                            context_json: serde_json::to_vec(&i.context).unwrap_or_default(),
+                        }
+                    })
+                    .collect();
+                Ok(Response::new(WorkflowListInstancesResponse {
+                    instances: summaries,
+                    next_page_token: String::new(),
+                }))
+            }
+            Err(e) => Err(Status::internal(e)),
         }
     }
 }
@@ -919,7 +1131,7 @@ fn helper_uuid() -> String {
     )
 }
 
-fn helper_unix_ts() -> u64 {
+fn _helper_unix_ts() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

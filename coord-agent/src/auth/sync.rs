@@ -7,13 +7,13 @@
 //
 // See docs/capability-auth-implementation.md §3.2, §3.4, §6.3.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use super::role_cache::{RoleCache, RoleEntry};
+use super::role_cache::RoleCache;
 
 // ──── Sync Configuration ────
 
@@ -128,7 +128,7 @@ impl SyncScheduler {
     /// This helps the caller decide when to run the next sync. Returns
     /// `(action, delay_until)` where `action` describes what to sync.
     pub fn next_sync(&self) -> (SyncAction, Duration) {
-        let now = Instant::now();
+        let _now = Instant::now();
         let role_sync_interval = self.role_sync_interval();
         let rev_sync_interval = self.revocation_sync_interval();
 
@@ -213,6 +213,7 @@ pub enum SyncAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::role_cache::RoleEntry;
     use std::thread;
 
     // ──── Phase 3.3 TDD Tests ────

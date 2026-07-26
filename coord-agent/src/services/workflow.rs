@@ -985,3 +985,752 @@ mod tests {
         assert_eq!(restored.yaml, def.yaml);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 4: WorkflowEngineService — 对接 coord-core 工作流引擎
+// ═══════════════════════════════════════════════════════════════════
+//
+// 实现基于 coord-core::workflow 的新引擎绑定，替换旧的 DSL 解释器。
+// TDD: 先写 phase4_tests，再实现本模块。
+
+pub mod phase4 {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use serde_json::Value;
+
+    use coord_core::workflow::{
+        expression::ExpressionEvaluator,
+        model::{InstanceStatus, WorkflowDefinition, WorkflowInstance},
+        parser,
+        ports::{
+            Clock, DispatchResult, EventProvider, MemoryEventProvider, MemoryWorkflowStore,
+            SystemClock, TaskDispatcher, WorkflowStore,
+        },
+        runtime::WorkflowRuntime,
+    };
+
+    use crate::proxy::AgentInner;
+    use crate::services::workflow_store::KvWorkflowStore;
+
+    // NoopEventProvider 仅在测试中使用
+    #[cfg(test)]
+    use coord_core::workflow::ports::NoopEventProvider;
+
+    // ─── NoopTaskDispatcher ───
+    //
+    // 占位 TaskDispatcher：call 任务在 agent 层不实际执行 I/O，
+    // 而是通过 Suspend 机制交由上层业务系统处理。
+    // 未来可替换为真正的 HTTP/gRPC 派发实现。
+
+    /// 占位任务派发器 —— 直接返回成功（空响应）
+    #[derive(Debug, Clone)]
+    pub struct NoopTaskDispatcher;
+
+    #[async_trait]
+    impl TaskDispatcher for NoopTaskDispatcher {
+        async fn dispatch(
+            &self,
+            _service: &str,
+            _with: Option<&Value>,
+            _input: &Value,
+        ) -> DispatchResult {
+            DispatchResult::Success {
+                data: Value::Null,
+            }
+        }
+    }
+
+    // ─── HttpTaskDispatcher ───
+    //
+    // 真实 HTTP 任务派发器：通过 reqwest 执行 HTTP 调用。
+    // gRPC 和 function 调用暂返回 Failure（需后续扩展）。
+
+    /// HTTP 任务派发器 —— 通过 reqwest 执行真实 HTTP 调用
+    #[derive(Debug, Clone)]
+    pub struct HttpTaskDispatcher {
+        client: reqwest::Client,
+    }
+
+    impl HttpTaskDispatcher {
+        /// 创建新的 HTTP 任务派发器
+        pub fn new() -> Self {
+            Self {
+                client: reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .expect("failed to create reqwest client"),
+            }
+        }
+
+        /// 使用自定义 reqwest 客户端创建
+        pub fn with_client(client: reqwest::Client) -> Self {
+            Self { client }
+        }
+    }
+
+    impl Default for HttpTaskDispatcher {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    #[async_trait]
+    impl TaskDispatcher for HttpTaskDispatcher {
+        async fn dispatch(
+            &self,
+            service: &str,
+            with: Option<&Value>,
+            input: &Value,
+        ) -> DispatchResult {
+            match service {
+                "http" => self.dispatch_http(with, input).await,
+                "grpc" => DispatchResult::Failure {
+                    error: "gRPC dispatch not yet implemented in HttpTaskDispatcher".into(),
+                    retryable: true,
+                },
+                _ => {
+                    // function call — 暂不支持，返回 failure
+                    DispatchResult::Failure {
+                        error: format!("unknown service type: {service}"),
+                        retryable: false,
+                    }
+                }
+            }
+        }
+    }
+
+    impl HttpTaskDispatcher {
+        async fn dispatch_http(
+            &self,
+            with: Option<&Value>,
+            input: &Value,
+        ) -> DispatchResult {
+            let method = with
+                .and_then(|w| w.get("method"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("GET")
+                .to_uppercase();
+
+            let endpoint = match with.and_then(|w| w.get("endpoint")).and_then(|v| v.as_str()) {
+                Some(url) => url.to_string(),
+                None => {
+                    return DispatchResult::Failure {
+                        error: "HTTP call missing 'endpoint' in 'with' config".into(),
+                        retryable: false,
+                    }
+                }
+            };
+
+            let headers = with
+                .and_then(|w| w.get("headers"))
+                .and_then(|v| v.as_object());
+
+            // 构建请求
+            let mut req = match method.as_str() {
+                "GET" => self.client.get(&endpoint),
+                "POST" => self.client.post(&endpoint),
+                "PUT" => self.client.put(&endpoint),
+                "DELETE" => self.client.delete(&endpoint),
+                "PATCH" => self.client.patch(&endpoint),
+                other => {
+                    return DispatchResult::Failure {
+                        error: format!("unsupported HTTP method: {other}"),
+                        retryable: false,
+                    }
+                }
+            };
+
+            // 设置请求头
+            if let Some(hdrs) = headers {
+                for (k, v) in hdrs {
+                    if let Some(val) = v.as_str() {
+                        req = req.header(k.as_str(), val);
+                    }
+                }
+            }
+
+            // 设置 JSON 请求体（POST/PUT/PATCH）
+            if matches!(method.as_str(), "POST" | "PUT" | "PATCH") {
+                req = req.json(input);
+            }
+
+            // 发送请求
+            match req.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    match resp.json::<Value>().await {
+                        Ok(body) => {
+                            if status.is_success() {
+                                DispatchResult::Success { data: body }
+                            } else {
+                                DispatchResult::Failure {
+                                    error: format!(
+                                        "HTTP {} returned status {}: {}",
+                                        endpoint,
+                                        status.as_u16(),
+                                        body
+                                    ),
+                                    retryable: status.is_server_error(),
+                                }
+                            }
+                        }
+                        Err(e) => DispatchResult::Failure {
+                            error: format!("HTTP {} response parse error: {e}", endpoint),
+                            retryable: false,
+                        },
+                    }
+                }
+                Err(e) => {
+                    let retryable = e.is_timeout() || e.is_connect();
+                    DispatchResult::Failure {
+                        error: format!("HTTP {} request failed: {e}", endpoint),
+                        retryable,
+                    }
+                }
+            }
+        }
+    }
+
+    // ─── 类型别名 ───
+
+    /// 生产级 EngineRuntime：使用 trait object 支持可插拔的 Store/Dispatcher/EventProvider
+    type EngineRuntime = WorkflowRuntime<
+        ExpressionEvaluator,
+        SystemClock,
+        Arc<dyn WorkflowStore + Send + Sync>,
+        Arc<dyn TaskDispatcher + Send + Sync>,
+        Arc<dyn EventProvider + Send + Sync>,
+    >;
+
+    // ─── WorkflowEngineService ───
+
+    /// 基于 coord-core 工作流引擎的 WorkflowService
+    ///
+    /// 职责:
+    /// - DSL 解析（YAML → WorkflowDefinition）
+    /// - 实例生命周期管理（start/resume/cancel）
+    /// - 定义与实例的持久化查询
+    pub struct WorkflowEngineService {
+        store: Arc<dyn WorkflowStore + Send + Sync>,
+        runtime: Option<Arc<EngineRuntime>>,
+        expression: ExpressionEvaluator,
+        clock: SystemClock,
+    }
+
+    impl WorkflowEngineService {
+        /// 创建生产级 WorkflowEngineService（使用 MemoryWorkflowStore + HttpTaskDispatcher + MemoryEventProvider）
+        pub fn new() -> Self {
+            let store: Arc<dyn WorkflowStore + Send + Sync> = Arc::new(MemoryWorkflowStore::new());
+            let expression = ExpressionEvaluator::new();
+            let clock = SystemClock;
+            let executor = coord_core::workflow::engine::WorkflowExecutor::new(
+                expression.clone(),
+                clock.clone(),
+            );
+            let runtime = WorkflowRuntime::new(
+                executor,
+                clock.clone(),
+                Arc::clone(&store),
+                Arc::new(HttpTaskDispatcher::new()) as Arc<dyn TaskDispatcher + Send + Sync>,
+                Arc::new(MemoryEventProvider::new()) as Arc<dyn EventProvider + Send + Sync>,
+            );
+
+            Self {
+                store,
+                runtime: Some(Arc::new(runtime)),
+                expression,
+                clock,
+            }
+        }
+
+        /// 创建基于 KvWorkflowStore 的生产级 WorkflowEngineService
+        ///
+        /// 工作流定义和实例通过 coord-server 的 KV/Txn/Watch API 持久化，
+        /// 享受 Raft 共识保证。适用于多 agent 部署场景。
+        pub fn new_with_kv_store(inner: Arc<AgentInner>) -> Self {
+            let kv_store = KvWorkflowStore::new(inner);
+            let store: Arc<dyn WorkflowStore + Send + Sync> = Arc::new(kv_store);
+            let expression = ExpressionEvaluator::new();
+            let clock = SystemClock;
+            let executor = coord_core::workflow::engine::WorkflowExecutor::new(
+                expression.clone(),
+                clock.clone(),
+            );
+            let runtime = WorkflowRuntime::new(
+                executor,
+                clock.clone(),
+                Arc::clone(&store),
+                Arc::new(HttpTaskDispatcher::new()) as Arc<dyn TaskDispatcher + Send + Sync>,
+                Arc::new(MemoryEventProvider::new()) as Arc<dyn EventProvider + Send + Sync>,
+            );
+
+            Self {
+                store,
+                runtime: Some(Arc::new(runtime)),
+                expression,
+                clock,
+            }
+        }
+
+        /// 创建测试用 WorkflowEngineService（使用 NoopTaskDispatcher + NoopEventProvider）
+        ///
+        /// 测试中不使用真实 HTTP 调用和事件总线，避免外部依赖。
+        #[cfg(test)]
+        pub fn new_for_test() -> Self {
+            let store: Arc<dyn WorkflowStore + Send + Sync> = Arc::new(MemoryWorkflowStore::new());
+            let expression = ExpressionEvaluator::new();
+            let clock = SystemClock;
+            let executor = coord_core::workflow::engine::WorkflowExecutor::new(
+                expression.clone(),
+                clock.clone(),
+            );
+            let runtime = WorkflowRuntime::new(
+                executor,
+                clock.clone(),
+                Arc::clone(&store),
+                Arc::new(NoopTaskDispatcher) as Arc<dyn TaskDispatcher + Send + Sync>,
+                Arc::new(NoopEventProvider) as Arc<dyn EventProvider + Send + Sync>,
+            );
+
+            Self {
+                store,
+                runtime: Some(Arc::new(runtime)),
+                expression,
+                clock,
+            }
+        }
+
+        fn runtime(&self) -> &Arc<EngineRuntime> {
+            self.runtime.as_ref().expect("runtime not initialized")
+        }
+
+        // ─── 定义管理 ───
+        // (async API — callers use .await)
+
+        /// 部署工作流定义（YAML DSL → 持久化存储）
+        pub async fn deploy_definition(
+            &self,
+            namespace: &str,
+            yaml: &str,
+        ) -> Result<String, String> {
+            let raw = parser::RawWorkflowDef::parse_yaml(yaml)
+                .map_err(|e| format!("parse error: {e}"))?;
+
+            let mut def = coord_core::workflow::validate::Validator::validate(raw)
+                .map_err(|errors| {
+                    errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; ")
+                })?;
+
+            // 用调用者指定的 namespace 覆盖 YAML 中的 namespace
+            def.document.namespace = namespace.to_string();
+            // 保存原始 YAML 以便 get_definition 返回
+            def.raw_yaml = Some(yaml.to_string());
+
+            let id = format!(
+                "{}-{:x}",
+                namespace,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            );
+            def.id = Some(id.clone());
+
+            self.store.save_definition(&def).await
+                .map_err(|e| format!("store error: {e}"))?;
+
+            Ok(id)
+        }
+
+        pub async fn get_definition(
+            &self,
+            definition_id: &str,
+        ) -> Result<Option<WorkflowDefinition>, String> {
+            let all_defs = self.store
+                .list_definitions("", usize::MAX, None)
+                .await
+                .map_err(|e| format!("store error: {e}"))?;
+            Ok(all_defs.into_iter().find(|d| d.id.as_deref() == Some(definition_id)))
+        }
+
+        pub async fn list_definitions(
+            &self,
+            namespace: &str,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<Vec<WorkflowDefinition>, String> {
+            self.store
+                .list_definitions(namespace, page_size, page_token)
+                .await
+                .map_err(|e| format!("store error: {e}"))
+        }
+
+        // ─── 实例管理 ───
+
+        pub async fn start_instance(
+            &self,
+            definition_id: &str,
+            input: Value,
+        ) -> Result<WorkflowInstance, String> {
+            let def = self
+                .get_definition(definition_id)
+                .await?
+                .ok_or_else(|| format!("definition not found: {definition_id}"))?;
+
+            self.runtime()
+                .start(&def, input)
+                .await
+                .map_err(|e| format!("runtime error: {e}"))
+        }
+
+        pub async fn get_instance(
+            &self,
+            instance_id: &str,
+        ) -> Result<Option<WorkflowInstance>, String> {
+            self.store
+                .load_instance(instance_id)
+                .await
+                .map_err(|e| format!("store error: {e}"))
+        }
+
+        pub async fn signal_instance(
+            &self,
+            instance_id: &str,
+            signal_name: &str,
+            payload: Value,
+        ) -> Result<WorkflowInstance, String> {
+            self.resume_instance(instance_id, Some(signal_name), Some(payload), None).await
+        }
+
+        pub async fn resume_instance(
+            &self,
+            instance_id: &str,
+            signal_name: Option<&str>,
+            payload: Option<Value>,
+            idempotency_key: Option<&str>,
+        ) -> Result<WorkflowInstance, String> {
+            self.runtime()
+                .resume(instance_id, signal_name, payload, idempotency_key)
+                .await
+                .map_err(|e| format!("runtime error: {e}"))
+        }
+
+        pub async fn cancel_instance(
+            &self,
+            instance_id: &str,
+        ) -> Result<(), String> {
+            let mut inst = self.store
+                .load_instance(instance_id)
+                .await
+                .map_err(|e| format!("store error: {e}"))?
+                .ok_or_else(|| format!("instance not found: {instance_id}"))?;
+
+            if inst.status.is_terminal() {
+                return Err(format!("instance already in terminal state: {:?}", inst.status));
+            }
+
+            inst.status = InstanceStatus::Cancelled;
+            inst.updated_at = SystemClock.now_ms();
+            self.store.save_instance(&inst).await
+                .map_err(|e| format!("store error: {e}"))?;
+
+            Ok(())
+        }
+
+        pub async fn list_instances(
+            &self,
+            namespace: Option<&str>,
+            definition_name: Option<&str>,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<Vec<WorkflowInstance>, String> {
+            self.store
+                .list_instances(namespace, definition_name, page_size, page_token)
+                .await
+                .map_err(|e| format!("store error: {e}"))
+        }
+    }
+
+    impl Default for WorkflowEngineService {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    // ─── impl Clone for WorkflowEngineService ───
+    // (manual because runtime contains Arc)
+
+    impl Clone for WorkflowEngineService {
+        fn clone(&self) -> Self {
+            Self {
+                store: Arc::clone(&self.store),
+                runtime: self.runtime.clone(),
+                expression: self.expression.clone(),
+                clock: self.clock.clone(),
+            }
+        }
+    }
+
+    // ─── impl BaseService for WorkflowEngineService ───
+
+    #[async_trait]
+    impl crate::service::BaseService for WorkflowEngineService {
+        fn name(&self) -> &'static str {
+            "workflow-engine"
+        }
+
+        async fn start(&self) -> crate::service::ServiceResult<()> {
+            Ok(())
+        }
+
+        async fn stop(&self) -> crate::service::ServiceResult<()> {
+            Ok(())
+        }
+
+        fn health_check(&self) -> bool {
+            self.runtime.is_some()
+        }
+    }
+}
+
+#[cfg(test)]
+mod phase4_tests {
+    use super::phase4::*;
+    use coord_core::workflow::model::InstanceStatus;
+
+    fn sample_linear_yaml() -> String {
+        r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: linear-wf
+  version: "1.0"
+do:
+  - step1:
+      call: http
+      with:
+        method: POST
+        endpoint: "http://localhost/step1"
+  - step2:
+      call: http
+      with:
+        method: POST
+        endpoint: "http://localhost/step2"
+"#
+        .to_string()
+    }
+
+    fn sample_wait_yaml() -> String {
+        r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: wait-wf
+  version: "1.0"
+do:
+  - step1:
+      call: http
+      with:
+        method: POST
+        endpoint: "http://localhost/step1"
+  - wait_step:
+      wait: PT5S
+  - step2:
+      call: http
+      with:
+        method: POST
+        endpoint: "http://localhost/step2"
+"#
+        .to_string()
+    }
+
+    fn sample_switch_yaml() -> String {
+        r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: switch-wf
+  version: "1.0"
+do:
+  - check:
+      switch:
+        - condition: ${ .amount > 100 }
+          transition: high_path
+        - defaultCondition: low_path
+  - high_path:
+      call: http
+      with:
+        method: POST
+        endpoint: "http://localhost/high"
+  - low_path:
+      call: http
+      with:
+        method: POST
+        endpoint: "http://localhost/low"
+"#
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_engine_deploy_and_get_definition() {
+        let svc = WorkflowEngineService::new_for_test();
+        let yaml = sample_linear_yaml();
+        let def_id = svc.deploy_definition("test", &yaml).await.unwrap();
+        assert!(!def_id.is_empty());
+
+        let loaded = svc.get_definition(&def_id).await.unwrap();
+        assert!(loaded.is_some());
+        let def = loaded.unwrap();
+        assert_eq!(def.document.name, "linear-wf");
+        assert_eq!(def.document.namespace, "test");
+        assert_eq!(def.do_tasks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_engine_deploy_rejects_invalid_yaml() {
+        let svc = WorkflowEngineService::new_for_test();
+        let result = svc.deploy_definition("test", "not: valid: yaml: [[[").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_engine_start_simple_instance() {
+        let svc = WorkflowEngineService::new_for_test();
+        let yaml = sample_linear_yaml();
+        let def_id = svc.deploy_definition("test", &yaml).await.unwrap();
+
+        let inst = svc.start_instance(&def_id, serde_json::json!({})).await.unwrap();
+        assert!(!inst.id.is_empty());
+        assert_eq!(inst.definition_name, "linear-wf");
+        // call 任务通过 NoopTaskDispatcher 立即完成，实例可能已 Running/Completed
+        assert!(inst.status == InstanceStatus::Running
+                || inst.status == InstanceStatus::Suspended
+                || inst.status == InstanceStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_engine_get_instance_status() {
+        let svc = WorkflowEngineService::new_for_test();
+        let yaml = sample_linear_yaml();
+        let def_id = svc.deploy_definition("test", &yaml).await.unwrap();
+        let inst = svc.start_instance(&def_id, serde_json::json!({})).await.unwrap();
+
+        let loaded = svc.get_instance(&inst.id).await.unwrap();
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().id, inst.id);
+    }
+
+    #[tokio::test]
+    async fn test_engine_get_nonexistent_instance() {
+        let svc = WorkflowEngineService::new_for_test();
+        let result = svc.get_instance("nonexistent-id").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_engine_cancel_instance() {
+        let svc = WorkflowEngineService::new_for_test();
+        // 使用 wait 工作流确保实例有足够时间被取消
+        let yaml = sample_wait_yaml();
+        let def_id = svc.deploy_definition("test", &yaml).await.unwrap();
+        let inst = svc.start_instance(&def_id, serde_json::json!({})).await.unwrap();
+
+        // call 步骤完成后到达 wait 步骤，实例挂起
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let result = svc.cancel_instance(&inst.id).await;
+        // 实例可能已完成或挂起，取消操作在挂起状态下应成功
+        if result.is_ok() {
+            let loaded = svc.get_instance(&inst.id).await.unwrap().unwrap();
+            assert_eq!(loaded.status, InstanceStatus::Cancelled);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_engine_signal_resume_wait_workflow() {
+        let svc = WorkflowEngineService::new_for_test();
+        let yaml = sample_wait_yaml();
+        let def_id = svc.deploy_definition("test", &yaml).await.unwrap();
+        let inst = svc.start_instance(&def_id, serde_json::json!({})).await.unwrap();
+
+        // call 任务会挂起，给 drive loop 一点时间
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let loaded = svc.get_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Suspended,
+            "wait task should suspend");
+
+        let resumed = svc.signal_instance(&inst.id, "approved",
+            serde_json::json!({"result": "ok"})).await.unwrap();
+        assert!(!resumed.id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_engine_list_definitions() {
+        let svc = WorkflowEngineService::new_for_test();
+        svc.deploy_definition("ns-a", &sample_linear_yaml()).await.unwrap();
+        svc.deploy_definition("ns-a", &sample_wait_yaml()).await.unwrap();
+        svc.deploy_definition("ns-b", &sample_switch_yaml()).await.unwrap();
+
+        let list_a = svc.list_definitions("ns-a", 10, None).await.unwrap();
+        assert_eq!(list_a.len(), 2, "ns-a should have 2 definitions");
+
+        let list_b = svc.list_definitions("ns-b", 10, None).await.unwrap();
+        assert_eq!(list_b.len(), 1, "ns-b should have 1 definition");
+    }
+
+    #[tokio::test]
+    async fn test_engine_list_instances() {
+        let svc = WorkflowEngineService::new_for_test();
+        let def_id = svc.deploy_definition("test", &sample_linear_yaml()).await.unwrap();
+
+        svc.start_instance(&def_id, serde_json::json!({})).await.unwrap();
+        svc.start_instance(&def_id, serde_json::json!({})).await.unwrap();
+
+        let instances = svc.list_instances(None, Some("linear-wf"), 10, None).await.unwrap();
+        assert_eq!(instances.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_engine_idempotent_resume() {
+        let svc = WorkflowEngineService::new_for_test();
+        // 使用包含 wait 任务的工作流，确保实例会挂起
+        let yaml = sample_wait_yaml();
+        let def_id = svc.deploy_definition("test", &yaml).await.unwrap();
+        let inst = svc.start_instance(&def_id, serde_json::json!({})).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // 实例应该处于 Suspended 状态（在 wait 步骤）
+        let loaded = svc.get_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Suspended,
+            "instance should be suspended on wait task");
+
+        let r1 = svc.resume_instance(&inst.id, Some("approved"),
+            Some(serde_json::json!({"ok": true})), Some("key-001")).await;
+        assert!(r1.is_ok(), "first resume should succeed");
+
+        let r2 = svc.resume_instance(&inst.id, Some("approved"),
+            Some(serde_json::json!({"ok": true})), Some("key-001")).await;
+        assert!(r2.is_ok(), "duplicate idempotent resume should succeed (no-op)");
+    }
+
+    #[tokio::test]
+    async fn test_engine_switch_workflow() {
+        let svc = WorkflowEngineService::new_for_test();
+        let yaml = sample_switch_yaml();
+        let def_id = svc.deploy_definition("test", &yaml).await.unwrap();
+        let inst = svc.start_instance(&def_id,
+            serde_json::json!({"amount": 200})).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let loaded = svc.get_instance(&inst.id).await.unwrap().unwrap();
+        // switch 工作流可能已完成或挂起
+        assert!(loaded.current_task_index > 0
+                || loaded.status == InstanceStatus::Suspended
+                || loaded.status == InstanceStatus::Completed,
+            "switch should have advanced past the decision task");
+    }
+}

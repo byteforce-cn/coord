@@ -39,6 +39,11 @@ pub mod agent {
     tonic::include_proto!("coord.agent");
 }
 
+/// Encoded file descriptor set for gRPC Server Reflection.
+/// Generated at compile time by `build.rs`.
+pub const FILE_DESCRIPTOR_SET: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/coord_descriptor.bin"));
+
 // ──── 测试 ────
 
 #[cfg(test)]

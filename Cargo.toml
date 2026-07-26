@@ -28,6 +28,8 @@ tonic = { version = "0.14.6", features = ["tls-ring"] }
 prost = "0.14.3"
 tonic-build = "0.14.6"
 prost-build = "0.14.3"
+tonic-health = "0.14.6"
+tonic-reflection = "0.14.6"
 
 # Raft 共识
 openraft = { version = "0.10.0-alpha.24", features = ["serde"] }

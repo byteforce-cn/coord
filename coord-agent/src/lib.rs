@@ -218,28 +218,47 @@ impl AgentServer {
         let addr = self.config.agent_addr.parse()
             .map_err(|e| format!("invalid agent_addr {}: {e}", self.config.agent_addr))?;
 
-        // 创建本地缓存（KV 读缓存，Registry 缓存已迁移到 RegistryService）
-        let agent_cache = AgentCache::new(
-            self.config.cache_kv_max_entries,
-            self.config.cache_kv_ttl_secs,
-            500,  // [已废弃] registry max entries，保留向后兼容
-            self.config.cache_catalog_ttl_secs,
-        );
-
         // 若配置了 Server 端点，创建内部 Client 用于请求转发
+        // 带指数退避重试（最多 30 秒），避免 Server 尚未就绪时立即降级
         let inner = if !self.config.static_peers.is_empty() {
             tracing::info!(
                 "coord-agent connecting to server cluster: {:?}",
                 self.config.static_peers
             );
-            match AgentInner::new(self.config.static_peers.clone(), agent_cache).await {
-                Ok(inner) => {
-                    tracing::info!("coord-agent connected to server cluster");
-                    Some(Arc::new(inner))
-                }
-                Err(e) => {
-                    tracing::warn!("coord-agent failed to connect to server cluster: {e}; running in skeleton mode");
-                    None
+            let retry_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut attempt = 0u32;
+            loop {
+                attempt += 1;
+                // 每次尝试创建新的 AgentCache（失败时丢弃，成功时由 AgentInner 持有）
+                let retry_cache = AgentCache::new(
+                    self.config.cache_kv_max_entries,
+                    self.config.cache_kv_ttl_secs,
+                    500,
+                    self.config.cache_catalog_ttl_secs,
+                );
+                match AgentInner::new(self.config.static_peers.clone(), retry_cache).await {
+                    Ok(inner) => {
+                        tracing::info!(
+                            "coord-agent connected to server cluster (attempt {})",
+                            attempt
+                        );
+                        break Some(Arc::new(inner));
+                    }
+                    Err(e) => {
+                        if tokio::time::Instant::now() > retry_deadline {
+                            tracing::warn!(
+                                "coord-agent failed to connect to server cluster after {} attempts in 30s: {:?}; running in skeleton mode",
+                                attempt, e
+                            );
+                            break None;
+                        }
+                        let backoff_ms = std::cmp::min(100u64 * 2u64.saturating_pow(attempt - 1), 5000);
+                        tracing::warn!(
+                            "coord-agent connection attempt {} failed: {:?}; retrying in {}ms",
+                            attempt, e, backoff_ms
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    }
                 }
             }
         } else {
@@ -261,7 +280,7 @@ impl AgentServer {
         let mut cache_grpc_svc: Option<Arc<crate::services::cache::CacheService>> = None;
         let mut mq_grpc_svc: Option<Arc<crate::services::mq::MessageQueueService>> = None;
         let mut scheduler_grpc_svc: Option<Arc<crate::services::scheduler::SchedulerService>> = None;
-        let mut workflow_grpc_svc: Option<Arc<crate::services::workflow::WorkflowService>> = None;
+        let mut workflow_grpc_svc: Option<Arc<crate::services::workflow::phase4::WorkflowEngineService>> = None;
         let mut policy_grpc_svc: Option<Arc<crate::services::policy::PolicyService>> = None;
         let mut transit_grpc_svc: Option<Arc<crate::services::transit::TransitService>> = None;
         let mut cb_grpc_svc: Option<Arc<crate::services::circuit_breaker::CircuitBreakerService>> = None;
@@ -381,19 +400,15 @@ impl AgentServer {
         }
 
         if self.config.services.workflow {
-            if let Some(ref inner) = inner {
-                let workflow_svc = Arc::new(
-                    crate::services::workflow::WorkflowService::new(inner.clone())
-                );
-                let workflow_grpc = workflow_svc.clone();
-                if let Err(e) = service_manager.register(workflow_svc).await {
-                    tracing::error!("failed to register workflow service: {e}");
-                } else {
-                    workflow_grpc_svc = Some(workflow_grpc);
-                    tracing::info!("Workflow service registered (v3.0 pluggable architecture)");
-                }
+            let workflow_svc = Arc::new(
+                crate::services::workflow::phase4::WorkflowEngineService::new()
+            );
+            let workflow_grpc = workflow_svc.clone();
+            if let Err(e) = service_manager.register(workflow_svc).await {
+                tracing::error!("failed to register workflow engine service: {e}");
             } else {
-                tracing::warn!("Workflow service enabled but no server connection; skipping");
+                workflow_grpc_svc = Some(workflow_grpc);
+                tracing::info!("Workflow engine service registered (v4.0 coord-core engine)");
             }
         }
 
@@ -690,7 +705,34 @@ impl AgentServer {
 
         let router = service_manager.build_grpc_router(router);
 
+        // 注册 gRPC Health Check 服务（标准 grpc.health.v1.Health）
+        let (health_reporter, health_service) = tonic_health::server::health_reporter();
+        health_reporter
+            .set_serving::<KvServer<KvProxy>>()
+            .await;
+        health_reporter
+            .set_serving::<TxnServer<TxnProxy>>()
+            .await;
+        health_reporter
+            .set_serving::<LeaseServer<LeaseProxy>>()
+            .await;
+        health_reporter
+            .set_serving::<WatchServer<WatchProxy>>()
+            .await;
+        health_reporter
+            .set_serving::<MaintenanceServer<MaintenanceProxy>>()
+            .await;
+
+        // 注册 gRPC Server Reflection 服务
+        let reflection_service = tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(coord_proto::FILE_DESCRIPTOR_SET)
+            .build_v1()
+            .map_err(|e| format!("failed to build reflection service: {e}"))?;
+
         router
+            .add_service(health_service)
+            .add_service(reflection_service)
             .serve_with_shutdown(addr, shutdown)
             .await?;
 

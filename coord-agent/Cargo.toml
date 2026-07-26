@@ -10,6 +10,8 @@ coord-client = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
+tonic-health = { workspace = true }
+tonic-reflection = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
@@ -32,6 +34,7 @@ x509-parser = "0.17"
 time = "0.3"
 base64 = "0.22"
 regorus = "0.10.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 coord-server = { workspace = true }

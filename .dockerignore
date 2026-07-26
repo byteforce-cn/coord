@@ -1,0 +1,44 @@
+# Rust
+target/
+**/*.rs.bk
+**/*.rlib
+**/*.profraw
+
+# Node / UI
+coord-ui/node_modules/
+coord-ui/dist/
+
+# Java SDK
+coord-java-sdk/target/
+java-example/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docs (not needed for build)
+docs/
+doc/
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# CI
+.github/
+
+# Dev data
+coord-dev-data/
+
+# Scripts (not needed for build)
+scripts/
+
+# Misc
+*.md
+LICENSE
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+SECURITY.md

@@ -20,6 +20,7 @@ import cn.byteforce.coord.sdk.internal.proto.WorkflowSignalRequest;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowSignalResponse;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowStartRequest;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowStartResponse;
+import cn.byteforce.coord.sdk.internal.proto.TaskFrame;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import cn.byteforce.coord.sdk.workflow.WorkflowClient;
 import cn.byteforce.coord.sdk.workflow.WorkflowDefinition;
@@ -35,6 +36,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -51,6 +53,8 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         super(channelManager, errorMapper, retryTemplate, observability);
         this.config = config;
     }
+
+    // ──── 实例生命周期 ────
 
     @Override
     public String start(String definitionDsl, byte[] input) {
@@ -71,6 +75,14 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
     }
 
     @Override
+    public String startByDefinition(String definitionId, byte[] input) {
+        // Reuse the start RPC with a minimal DSL wrapper referencing the definition ID.
+        // The coord-agent start handler accepts both raw DSL and definition references.
+        String dsl = "{\"definitionId\":\"" + definitionId + "\"}";
+        return start(dsl, input);
+    }
+
+    @Override
     public WorkflowStatus getStatus(String workflowId) {
         WorkflowGetStatusRequest request = WorkflowGetStatusRequest.newBuilder()
                 .setWorkflowId(workflowId)
@@ -87,19 +99,43 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         String errorMsg = response.getErrorMessage();
         String definitionName = response.getDefinitionName();
         byte[] input = response.getInput().toByteArray();
+        long createdAt = response.getCreatedAt();
+        long updatedAt = response.getUpdatedAt();
 
-        log.debug("Workflow status: id={}, state={}, defName={}", workflowId, state, definitionName);
+        // Map task_stack from proto to SDK model
+        List<cn.byteforce.coord.sdk.workflow.TaskFrame> taskStack = new ArrayList<>();
+        for (TaskFrame tf : response.getTaskStackList()) {
+            taskStack.add(new cn.byteforce.coord.sdk.workflow.TaskFrame(
+                    tf.getTaskName(), tf.getTaskType(), tf.getStatus(),
+                    tf.getInput().toByteArray(), tf.getOutput().toByteArray(),
+                    tf.getStartedAt(), tf.getEndedAt(), tf.getRetryCount()));
+        }
+
+        // currentStep derived from task stack size
+        int currentStep = taskStack.size();
+
+        log.debug("Workflow status: id={}, state={}, defName={}, taskStackSize={}",
+                workflowId, state, definitionName, taskStack.size());
         return new WorkflowStatus(response.getWorkflowId(), state,
-                0, output, errorMsg, definitionName, input);
+                currentStep, output, errorMsg, definitionName, input,
+                createdAt, updatedAt, taskStack);
     }
 
     @Override
     public void signal(String workflowId, String signalName, byte[] payload) {
+        signal(workflowId, signalName, payload, null);
+    }
+
+    @Override
+    public void signal(String workflowId, String signalName, byte[] payload, String idempotencyKey) {
         WorkflowSignalRequest.Builder req = WorkflowSignalRequest.newBuilder()
                 .setWorkflowId(workflowId)
                 .setSignalName(signalName);
         if (payload != null && payload.length > 0) {
             req.setPayload(ByteString.copyFrom(payload));
+        }
+        if (idempotencyKey != null && !idempotencyKey.isEmpty()) {
+            req.setIdempotencyKey(idempotencyKey);
         }
 
         callWithRetry(
@@ -108,7 +144,9 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                         .signal((WorkflowSignalRequest) r),
                 req.build(), "workflow.signal");
 
-        log.debug("Workflow signal sent: id={}, signal={}", workflowId, signalName);
+        log.debug("Workflow signal sent: id={}, signal={}, idemKey={}",
+                workflowId, signalName,
+                idempotencyKey != null ? idempotencyKey : "<none>");
     }
 
     @Override
@@ -126,7 +164,7 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         log.debug("Workflow cancelled: id={}", workflowId);
     }
 
-    // ──── 工作流定义管理 (Phase C.2) ────
+    // ──── 工作流定义管理 ────
 
     @Override
     public WorkflowDefinition deployDefinition(String namespace, String definitionYaml) {
@@ -141,7 +179,8 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                         .deploy((WorkflowDeployRequest) r),
                 request, "workflow.deploy");
 
-        log.debug("Workflow deployed: id={}, namespace={}, name={}", response.getWorkflowId(), response.getNamespace(), response.getName());
+        log.debug("Workflow deployed: id={}, namespace={}, name={}",
+                response.getWorkflowId(), response.getNamespace(), response.getName());
         return new WorkflowDefinition(
                 response.getWorkflowId(), response.getName(), definitionYaml,
                 response.getVersion(), "active", System.currentTimeMillis() / 1000);
@@ -182,18 +221,37 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                         .getDefinition((WorkflowGetDefinitionRequest) r),
                 request, "workflow.getDefinition");
 
-        log.debug("Workflow getDefinition: id={}, name={}", response.getWorkflowId(), response.getName());
+        log.debug("Workflow getDefinition: id={}, name={}, hasYaml={}",
+                response.getWorkflowId(), response.getName(),
+                !response.getDefinitionYaml().isEmpty());
         return new WorkflowDefinition(
                 response.getWorkflowId(), response.getName(), response.getDefinitionYaml(),
                 response.getVersion(), response.getStatus(), response.getCreatedAt());
     }
 
+    // ──── 工作流实例查询 ────
+
     @Override
     public List<WorkflowInstanceSummary> listInstances(String workflowId) {
+        return listInstances(null, workflowId, null, 50, "");
+    }
+
+    @Override
+    public List<WorkflowInstanceSummary> listInstances(
+            String namespace, String workflowId, String statusFilter, int pageSize, String pageToken) {
         WorkflowListInstancesRequest.Builder req = WorkflowListInstancesRequest.newBuilder()
-                .setPageSize(50);
+                .setPageSize(Math.max(1, Math.min(pageSize, 200)));
+        if (namespace != null && !namespace.isEmpty()) {
+            req.setNamespace(namespace);
+        }
         if (workflowId != null && !workflowId.isEmpty()) {
             req.setWorkflowId(workflowId);
+        }
+        if (statusFilter != null && !statusFilter.isEmpty()) {
+            req.setStatusFilter(statusFilter);
+        }
+        if (pageToken != null && !pageToken.isEmpty()) {
+            req.setPageToken(pageToken);
         }
 
         WorkflowListInstancesResponse response = callWithRetry(
@@ -204,11 +262,30 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
         List<WorkflowInstanceSummary> result = new ArrayList<>();
         for (cn.byteforce.coord.sdk.internal.proto.WorkflowInstanceSummary s : response.getInstancesList()) {
+            byte[] outputJson = s.getOutputJson().toByteArray();
+            byte[] contextJson = s.getContextJson().toByteArray();
             result.add(new WorkflowInstanceSummary(
                     s.getInstanceId(), s.getWorkflowId(), s.getState(),
-                    s.getStartedAt(), s.getUpdatedAt(), s.getDefinitionName()));
+                    s.getStartedAt(), s.getUpdatedAt(), s.getDefinitionName(),
+                    s.getNamespace(),
+                    outputJson.length > 0 ? outputJson : null,
+                    contextJson.length > 0 ? contextJson : null));
         }
-        log.debug("Workflow listInstances: workflowId={}, count={}", workflowId, result.size());
+        log.debug("Workflow listInstances: namespace={}, workflowId={}, statusFilter={}, count={}",
+                namespace, workflowId, statusFilter, result.size());
         return result;
+    }
+
+    // ──── 异步回调 ────
+
+    @Override
+    public CompletableFuture<WorkflowStatus> startAsync(String definitionId, byte[] input) {
+        String instanceId = startByDefinition(definitionId, input);
+        return watchInstance(instanceId);
+    }
+
+    @Override
+    public CompletableFuture<WorkflowStatus> watchInstance(String instanceId) {
+        return WorkflowWatchHandler.startWatching(instanceId, this::getStatus);
     }
 }

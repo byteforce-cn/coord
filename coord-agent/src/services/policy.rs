@@ -315,7 +315,7 @@ impl PolicyService {
         let key = BundleRecord::storage_key(&bundle_id);
 
         // 尝试读取已有记录（upsert）
-        let mut record = {
+        let record = {
             let pairs = inner.client.kv()
                 .range(&key, &key, 1, 0).await
                 .map_err(|e| format!("kv range: {e}"))?;

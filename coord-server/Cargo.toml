@@ -10,6 +10,7 @@ coord-proto = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
+tonic-health = { workspace = true }
 redb = { workspace = true }
 openraft = { workspace = true }
 tracing = { workspace = true }

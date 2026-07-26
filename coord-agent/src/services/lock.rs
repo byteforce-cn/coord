@@ -211,7 +211,7 @@ impl LockService {
 
         // 使用 Txn CAS: 比较 Version==0（key 不存在），成功则 Put + Lease
         use coord_proto::txn::compare::{CompareResult, Target};
-        use coord_proto::txn::{Compare, RequestOp, TxnRequest};
+        use coord_proto::txn::{Compare, RequestOp};
         use coord_proto::kv::PutRequest;
 
         let compare = Compare {

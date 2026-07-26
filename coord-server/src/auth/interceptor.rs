@@ -17,8 +17,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use parking_lot::RwLock;
-
 use coord_core::auth::cct::{decode_cct, is_expired, CctPayload, CctToken};
 use coord_core::auth::trie::ScopeTrie;
 

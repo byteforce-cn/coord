@@ -134,6 +134,10 @@ enum Commands {
 
     /// 开发模式：同时启动 Server + Agent（单节点集群）
     Dev {
+        /// 监听地址（默认 127.0.0.1，容器化部署需设为 0.0.0.0）
+        #[arg(long, default_value = "127.0.0.1")]
+        bind_addr: String,
+
         /// Server gRPC 端口（默认 50051）
         #[arg(long, default_value = "50051")]
         grpc_port: u16,
@@ -145,6 +149,10 @@ enum Commands {
         /// 集群名称（默认 "coord-dev"）
         #[arg(long, default_value = "coord-dev")]
         cluster_name: String,
+
+        /// 启动前清空数据目录（确保干净状态）
+        #[arg(long, default_value = "false")]
+        fresh: bool,
     },
 }
 
@@ -977,19 +985,24 @@ async fn main() {
         },
 
         Commands::Dev {
+            bind_addr,
             grpc_port,
             agent_port,
             cluster_name,
+            fresh,
         } => {
             tracing::info!(
-                "Starting coord dev mode v{}: server=127.0.0.1:{}, agent=127.0.0.1:{}, cluster={}",
+                "Starting coord dev mode v{}: bind={}, server={}:{}, agent={}:{}, cluster={}",
                 env!("CARGO_PKG_VERSION"),
+                bind_addr,
+                bind_addr,
                 grpc_port,
+                bind_addr,
                 agent_port,
                 cluster_name
             );
 
-            if let Err(e) = run_dev(grpc_port, agent_port, &cli.data_dir, &cluster_name).await {
+            if let Err(e) = run_dev(&bind_addr, grpc_port, agent_port, &cli.data_dir, &cluster_name, fresh).await {
                 tracing::error!("Dev mode exited with error: {e}");
                 std::process::exit(1);
             }
@@ -1078,6 +1091,13 @@ async fn run_server(
 
     // 1. 创建数据目录
     std::fs::create_dir_all(&data_dir)?;
+
+    // 1.5. 预绑定 gRPC 端口（在 Raft 初始化之前）：
+    //      确保 dev 模式的端口就绪检查不会因为 Raft 日志重放耗时过长而超时。
+    let grpc_socket_addr: std::net::SocketAddr = grpc_addr.parse()?;
+    let mut grpc_listener = Some(
+        tokio::net::TcpListener::bind(grpc_socket_addr).await?
+    );
 
     // 2. 初始化 Redb 存储后端（共享实例）
     let storage_config = coord_core::types::StorageConfig::default();
@@ -1208,8 +1228,18 @@ async fn run_server(
     // 启动 Lease 过期轮询后台任务（每 200ms 清理过期 Lease 绑定的 KV key）
     node.start_lease_expiry_worker();
 
-    // 6.5. 初始化 Auth 组件（默认禁用，通过 gRPC 启用）
+    // 6.5. 初始化 Auth 组件（默认禁用，通过 gRPC 或环境变量启用）
     let auth_manager = Arc::new(AuthManager::new());
+
+    // 检查 COORD_AUTH_MODE 环境变量
+    let auth_mode_env = std::env::var("COORD_AUTH_MODE").unwrap_or_default();
+    if auth_mode_env.eq_ignore_ascii_case("enabled") || auth_mode_env.eq_ignore_ascii_case("on") || auth_mode_env == "1" {
+        auth_manager.enable();
+        tracing::info!("Auth enabled (via COORD_AUTH_MODE={})", auth_mode_env);
+    } else {
+        tracing::info!("Auth disabled — all requests allowed (set COORD_AUTH_MODE=enabled to enable)");
+    }
+
     let token_manager = Arc::new(TokenManager::with_defaults());
     let auth_svc = AuthServer::new(AuthService::new(
         Arc::clone(&auth_manager),
@@ -1382,9 +1412,40 @@ async fn run_server(
         }
     });
 
-    // 10. 启动客户端 gRPC Server（grpc_addr 端口，可选 TLS）
-    let grpc_socket_addr: std::net::SocketAddr = grpc_addr.parse()?;
-    
+    // 10. 启动客户端 gRPC Server（grpc_addr 端口，可选 TLS；端口已在步骤 1.5 预绑定）
+
+    // 10a. 初始化 gRPC Health Check 服务（标准 grpc.health.v1.Health）
+    let (health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_serving::<KvServer<Arc<CoordNode>>>()
+        .await;
+    health_reporter
+        .set_serving::<TxnServer<Arc<CoordNode>>>()
+        .await;
+    health_reporter
+        .set_serving::<LeaseServer<Arc<CoordNode>>>()
+        .await;
+    health_reporter
+        .set_serving::<WatchServer<Arc<CoordNode>>>()
+        .await;
+    health_reporter
+        .set_serving::<MaintenanceServer<Arc<CoordNode>>>()
+        .await;
+    health_reporter
+        .set_serving::<AuthServer<AuthService>>()
+        .await;
+
+    // 10b. 初始化 gRPC Server Reflection 服务
+    let reflection_service = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(coord_proto::FILE_DESCRIPTOR_SET)
+        .build_v1()
+        .map_err(|e| format!("failed to build reflection service: {e}"))?;
+
+    // 取出预绑定的 listener 并转换为 tonic 可接受的 stream
+    let grpc_listener = grpc_listener.take().expect("grpc_listener already consumed");
+    let mut grpc_stream = Some(tokio_stream::wrappers::TcpListenerStream::new(grpc_listener));
+
     // 检查 TLS 配置
     let use_tls = cfg.security.tls_cert.is_some() && cfg.security.tls_key.is_some();
     if use_tls {
@@ -1404,15 +1465,24 @@ async fn run_server(
         let grpc_future = tonic::transport::Server::builder()
             .tls_config(server_tls)
             .map_err(|e| format!("TLS server config: {e}"))?
+            .add_service(health_service)
+            .add_service(reflection_service)
             .add_service(kv_svc)
             .add_service(txn_svc)
             .add_service(lease_svc)
             .add_service(watch_svc)
             .add_service(maintenance_svc)
             .add_service(auth_svc)
-            .serve_with_shutdown(grpc_socket_addr, shutdown_signal());
+            .serve_with_incoming(
+                grpc_stream.take().expect("grpc_stream already consumed"),
+            );
 
-        grpc_future.await?;
+        tokio::select! {
+            result = grpc_future => { result?; }
+            _ = shutdown_signal() => {
+                tracing::info!("gRPC server shutting down (signal received)");
+            }
+        }
     } else {
         tracing::info!(
             "Coord server v{} started: node_id={}, grpc_addr={}, raft_addr={} (no TLS)",
@@ -1423,15 +1493,24 @@ async fn run_server(
         );
 
         let grpc_future = tonic::transport::Server::builder()
+            .add_service(health_service)
+            .add_service(reflection_service)
             .add_service(kv_svc)
             .add_service(txn_svc)
             .add_service(lease_svc)
             .add_service(watch_svc)
             .add_service(maintenance_svc)
             .add_service(auth_svc)
-            .serve_with_shutdown(grpc_socket_addr, shutdown_signal());
+            .serve_with_incoming(
+                grpc_stream.take().expect("grpc_stream already consumed"),
+            );
 
-        grpc_future.await?;
+        tokio::select! {
+            result = grpc_future => { result?; }
+            _ = shutdown_signal() => {
+                tracing::info!("gRPC server shutting down (signal received)");
+            }
+        }
     }
 
     // 12. 清理：终止 Raft RPC server
@@ -1483,15 +1562,17 @@ async fn shutdown_signal() {
 ///
 /// 优雅关闭：Ctrl+C 同时触发 Server 和 Agent 的 graceful shutdown。
 async fn run_dev(
+    bind_addr: &str,
     grpc_port: u16,
     agent_port: u16,
     data_dir: &PathBuf,
     cluster_name: &str,
+    fresh: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let server_addr = format!("127.0.0.1:{}", grpc_port);
+    let server_addr = format!("{}:{}", bind_addr, grpc_port);
     let raft_port = grpc_port + 1;
-    let raft_addr = format!("127.0.0.1:{}", raft_port);
-    let agent_addr = format!("127.0.0.1:{}", agent_port);
+    let raft_addr = format!("{}:{}", bind_addr, raft_port);
+    let agent_addr = format!("{}:{}", bind_addr, agent_port);
     let http_port = agent_port + 1;
 
     // 1. 确定数据目录（开发模式使用项目本地目录，避免权限问题）
@@ -1502,6 +1583,12 @@ async fn run_dev(
     } else {
         data_dir.clone()
     };
+
+    // 1.5. --fresh: 启动前清空数据目录
+    if fresh && dev_data_dir.exists() {
+        tracing::info!("--fresh: removing existing data directory {}", dev_data_dir.display());
+        std::fs::remove_dir_all(&dev_data_dir)?;
+    }
     std::fs::create_dir_all(&dev_data_dir)?;
 
     // 2. 构建 Server 配置
@@ -1596,7 +1683,7 @@ async fn run_dev(
     // 5. 构建 Agent 配置并启动
     let agent_config = coord_agent::AgentConfig {
         agent_addr: agent_addr.clone(),
-        http_addr: format!("127.0.0.1:{}", http_port),
+        http_addr: format!("{}:{}", bind_addr, http_port),
         data_dir: dev_data_dir.join("agent").to_string_lossy().to_string(),
         static_peers: vec![server_addr_for_agent],
         ..Default::default()
@@ -1649,10 +1736,10 @@ async fn run_dev(
     // 7. 打印连接信息
     println!();
     println!("  ✓ Server 启动完成: {} (Raft: {})", server_addr, raft_addr_for_display);
-    println!("  ✓ Agent 启动完成:  {} (HTTP: 127.0.0.1:{})", agent_addr, http_port);
+    println!("  ✓ Agent 启动完成:  {} (HTTP: {}:{})", agent_addr, bind_addr, http_port);
     println!();
     println!("  连接方式:");
-    println!("    UI 控制台 → http://127.0.0.1:{}", bff_http_port);
+    println!("    UI 控制台 → http://{}:{}", bind_addr, bff_http_port);
     println!("    Java 应用  → {}", agent_addr);
     println!("    Rust SDK  → {} (Agent 模式) 或 {} (Direct 模式)", agent_addr, server_addr);
     println!("    gRPC 工具 → {}", server_addr);

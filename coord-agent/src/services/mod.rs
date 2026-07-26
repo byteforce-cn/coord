@@ -22,3 +22,4 @@ pub mod replication;
 pub mod scheduler;
 pub mod transit;
 pub mod workflow;
+pub mod workflow_store;

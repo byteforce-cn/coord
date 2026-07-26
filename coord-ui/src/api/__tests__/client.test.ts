@@ -20,10 +20,6 @@ function okJson(data: unknown) {
   return HttpResponse.json({ code: 0, data, message: 'success' })
 }
 
-function errJson(code: number, message: string) {
-  return HttpResponse.json({ code, data: null, message })
-}
-
 // ═══════════════════════════════════════════════
 // Registry API Tests
 // ═══════════════════════════════════════════════

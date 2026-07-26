@@ -18,7 +18,7 @@ use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use parking_lot::RwLock;
 use rand::RngCore;
-use sha2::{Digest, Sha256, Sha512};
+use sha2::{Digest, Sha256};
 use hmac::{Hmac, Mac};
 use zeroize::Zeroize;
 
