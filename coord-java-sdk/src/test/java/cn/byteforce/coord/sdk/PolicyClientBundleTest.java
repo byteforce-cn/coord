@@ -25,6 +25,7 @@ class PolicyClientBundleTest {
                 "default",
                 "tenant-1",
                 true,
+                3L,
                 1753000000L,
                 1753000000L);
 
@@ -33,6 +34,7 @@ class PolicyClientBundleTest {
         assertThat(info.getNamespace()).isEqualTo("default");
         assertThat(info.getTenantId()).isEqualTo("tenant-1");
         assertThat(info.isEnabled()).isTrue();
+        assertThat(info.getVersion()).isEqualTo(3L);
         assertThat(info.getCreatedAt()).isEqualTo(1753000000L);
         assertThat(info.getUpdatedAt()).isEqualTo(1753000000L);
     }
@@ -41,7 +43,7 @@ class PolicyClientBundleTest {
     @DisplayName("BundleInfo toString contains key fields")
     void testBundleInfoToString() {
         PolicyClient.BundleInfo info = new PolicyClient.BundleInfo(
-                "id-1", "test", "ns", "t1", false, 1L, 2L);
+                "id-1", "test", "ns", "t1", false, 2L, 1L, 2L);
 
         String s = info.toString();
         assertThat(s).contains("id-1");
@@ -49,6 +51,7 @@ class PolicyClientBundleTest {
         assertThat(s).contains("ns");
         assertThat(s).contains("t1");
         assertThat(s).contains("false");
+        assertThat(s).contains("version=2");
     }
 
     @Test
@@ -56,8 +59,19 @@ class PolicyClientBundleTest {
     void testBundleInfoDisabled() {
         PolicyClient.BundleInfo info = new PolicyClient.BundleInfo(
                 "id-2", "disabled-bundle", "default", "tenant-2",
-                false, 100L, 200L);
+                false, 1L, 100L, 200L);
 
         assertThat(info.isEnabled()).isFalse();
+    }
+
+    @Test
+    @DisplayName("BundleVersionInfo getters and toString")
+    void testBundleVersionInfo() {
+        PolicyClient.BundleVersionInfo v = new PolicyClient.BundleVersionInfo(3, 1753000000L, true);
+        assertThat(v.getVersion()).isEqualTo(3);
+        assertThat(v.getCreatedAt()).isEqualTo(1753000000L);
+        assertThat(v.isCurrent()).isTrue();
+        assertThat(v.toString()).contains("version=3");
+        assertThat(v.toString()).contains("current=true");
     }
 }

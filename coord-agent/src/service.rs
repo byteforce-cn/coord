@@ -149,6 +149,10 @@ pub struct ServiceConfig {
     /// PKI CA 证书签发服务
     #[serde(default)]
     pub pki: bool,
+
+    /// 跨 Agent ISR 数据复制（Cache/MQ 数据面高可用；默认关闭 = 单 agent 零破坏）
+    #[serde(default)]
+    pub replication: bool,
 }
 
 impl Default for ServiceConfig {
@@ -157,19 +161,20 @@ impl Default for ServiceConfig {
             registry: true,
             config_center: true,
             lock: true,
-            idgen: false,
+            idgen: true,
             leader_election: false,
             event_notification: false,
-            cache: false,
+            cache: true,
             mq: false,
             workflow: true,
-            policy: false,
+            policy: true,
             scheduler: false,
             circuit_breaker: false,
             rate_limiter: false,
             feature_flags: false,
             transit: true,
             pki: true,
+            replication: false,
         }
     }
 }
@@ -285,16 +290,17 @@ impl ServiceManager {
     }
 
     /// 合并所有已注册服务的 gRPC 接口到 tonic Router
-    pub fn build_grpc_router(
+    ///
+    /// 泛型于 layer 类型 L：兼容 `Server::builder().layer(...)` 自定义中间件后的
+    /// `Router<Stack<L, Identity>>`（ISSUE-000 Phase 0 鉴权层）。
+    ///
+    /// 注：`BaseService::register_grpc` 需保持 object-safe（服务以 `Arc<dyn BaseService>`
+    /// 存储），无法泛型化到 `Router<L>`；且当前所有实现均为 no-op（gRPC 服务在 serve()
+    /// 中直接注册），故带自定义 layer 的 Router 直接透传。
+    pub fn build_grpc_router<L>(
         &self,
-        mut builder: tonic::transport::server::Router,
-    ) -> tonic::transport::server::Router {
-        // 注意：此方法在同步上下文中调用，使用 try_read 避免阻塞
-        if let Ok(services) = self.services.try_read() {
-            for (_name, service) in services.iter() {
-                builder = service.register_grpc(builder);
-            }
-        }
+        builder: tonic::transport::server::Router<L>,
+    ) -> tonic::transport::server::Router<L> {
         builder
     }
 }
@@ -437,13 +443,15 @@ mod tests {
         assert!(config.transit, "transit should be enabled by default (Phase A)");
         assert!(config.pki, "pki should be enabled by default (Phase A)");
         assert!(config.workflow, "workflow should be enabled by default (Phase A)");
+        // IdGen 为数据面服务 — 默认启用（无 Server 时本地雪花降级）
+        assert!(config.idgen, "idgen should be enabled by default (data-plane)");
+        // 数据面服务 — 默认启用（无需 Server 连接）
+        assert!(config.cache, "cache should be enabled by default (data-plane)");
+        assert!(config.policy, "policy should be enabled by default (data-plane)");
         // 其他服务保持默认关闭
-        assert!(!config.idgen);
         assert!(!config.leader_election);
         assert!(!config.event_notification);
-        assert!(!config.cache);
         assert!(!config.mq);
-        assert!(!config.policy);
         assert!(!config.scheduler);
         assert!(!config.circuit_breaker);
         assert!(!config.rate_limiter);

@@ -23,6 +23,7 @@ pub mod key_util;
 pub mod metrics;
 mod proxy;
 pub mod pki;
+pub mod pki_store;
 pub mod saga;
 pub mod service;
 pub mod services;
@@ -44,6 +45,9 @@ pub use service::{BaseService, ServiceConfig, ServiceManager, ServiceResult};
 pub use threadpool::{AgentThreadPools, ThreadPoolConfig};
 pub use key_util::{KeyUtil, KeyUtilConfig, KeyStore, KeyStoreBackend, FileKeyStore, KeyStoreError};
 pub use pki::{PkiService, PkiConfig, CertInfo, PkiError};
+pub use pki_store::{
+    PkiStore, PkiStoreError, CertRecord, CertStatus, CaRecord, MemoryPkiStore, KvPkiStore,
+};
 pub use tls::{AgentTlsConfig, build_agent_tls_channel, build_agent_tls_server_config};
 
 // ──── DiscoveryMode ────
@@ -111,6 +115,15 @@ pub struct AgentConfig {
     #[serde(default)]
     pub services: ServiceConfig,
 
+    // ISR 复制配置（services.replication = true 时生效）
+    /// 跨 Agent 数据复制配置（min_isr / sync_timeout_ms）
+    #[serde(default)]
+    pub replication: crate::services::replication::ReplicationConfig,
+    /// ISR 复制对端 agent 地址列表（services.replication = true 时使用；
+    /// 首版静态成员，Registry 发现为演进路径，Q1）
+    #[serde(default)]
+    pub replication_peers: Vec<String>,
+
     // TLS/mTLS 传输安全
     /// TLS 证书配置（None = 禁用 TLS，仅用于开发环境）
     #[serde(default)]
@@ -120,7 +133,28 @@ pub struct AgentConfig {
     /// 线程池配置（v8.2 §3.2）
     #[serde(default)]
     pub thread_pools: ThreadPoolConfig,
+
+    // ISSUE-000 Phase 0: Agent 侧 CCT 鉴权
+    /// 鉴权配置（默认关闭；开启后所有 gRPC RPC 校验 CCT + capability）
+    #[serde(default)]
+    pub auth: AgentAuthConfig,
 }
+
+/// Agent 侧 CCT 鉴权配置（ISSUE-000 Phase 0：私钥集中存储前必须上鉴权）
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+pub struct AgentAuthConfig {
+    /// 是否启用鉴权（默认 false；启用后所有 gRPC RPC 均校验 CCT）
+    #[serde(default)]
+    pub enabled: bool,
+    /// CCT 签名密钥（hex 编码；与 coord-server 根密钥派生一致）
+    #[serde(default)]
+    pub signing_key_hex: String,
+    /// 时钟漂移容忍（秒，默认 300）
+    #[serde(default = "default_auth_clock_drift_secs")]
+    pub clock_drift_secs: i64,
+}
+
+fn default_auth_clock_drift_secs() -> i64 { 300 }
 
 // Serde default functions
 fn default_agent_addr() -> String { "127.0.0.1:19527".into() }
@@ -157,8 +191,11 @@ impl Default for AgentConfig {
             proxy_max_retries: 3,
             proxy_request_timeout_secs: 5,
             services: ServiceConfig::default(),
+            replication: crate::services::replication::ReplicationConfig::default(),
+            replication_peers: Vec::new(),
             tls: None,
             thread_pools: ThreadPoolConfig::default(),
+            auth: AgentAuthConfig::default(),
         }
     }
 }
@@ -279,6 +316,7 @@ impl AgentServer {
         let mut event_grpc_svc: Option<Arc<crate::services::event_notification::EventNotificationService>> = None;
         let mut cache_grpc_svc: Option<Arc<crate::services::cache::CacheService>> = None;
         let mut mq_grpc_svc: Option<Arc<crate::services::mq::MessageQueueService>> = None;
+        let mut replication_grpc_svc: Option<Arc<crate::services::grpc_handlers::ReplicaRouter>> = None;
         let mut scheduler_grpc_svc: Option<Arc<crate::services::scheduler::SchedulerService>> = None;
         let mut workflow_grpc_svc: Option<Arc<crate::services::workflow::phase4::WorkflowEngineService>> = None;
         let mut policy_grpc_svc: Option<Arc<crate::services::policy::PolicyService>> = None;
@@ -345,19 +383,20 @@ impl AgentServer {
         }
 
         if self.config.services.idgen {
-            if let Some(ref inner) = inner {
-                let idgen_svc = Arc::new(
-                    crate::services::idgen::IdGenService::new(inner.clone(), 1000)
-                );
-                let idgen_grpc = idgen_svc.clone();
-                if let Err(e) = service_manager.register(idgen_svc).await {
-                    tracing::error!("failed to register idgen service: {e}");
-                } else {
-                    idgen_grpc_svc = Some(idgen_grpc);
-                    tracing::info!("ID Generator service registered (v3.0 pluggable architecture)");
-                }
+            // IdGen 为数据面服务：无 Server 连接时降级为本地雪花生成（本机唯一）
+            let idgen_svc = Arc::new(
+                crate::services::idgen::IdGenService::new(inner.clone(), 1000)
+            );
+            let idgen_grpc = idgen_svc.clone();
+            if let Err(e) = service_manager.register(idgen_svc).await {
+                tracing::error!("failed to register idgen service: {e}");
             } else {
-                tracing::warn!("ID Generator service enabled but no server connection; skipping");
+                idgen_grpc_svc = Some(idgen_grpc);
+                if inner.is_some() {
+                    tracing::info!("ID Generator service registered (segment mode via server)");
+                } else {
+                    tracing::info!("ID Generator service registered (local snowflake mode, no server)");
+                }
             }
         }
 
@@ -463,11 +502,58 @@ impl AgentServer {
             }
         }
 
+        // ISR 跨 Agent 数据复制（v2.1 已落地）：Cache/MQ 写路径经复制管理器
+        // 同步到 ISR Followers（min_isr 可配置；单 agent 部署自动降级为 1，C6）。
+        if self.config.services.replication {
+            use crate::services::replication::ReplicationManager;
+            use crate::services::grpc_handlers::ReplicaRouter;
+
+            let manager = Arc::new(ReplicationManager::new(
+                self.config.replication.clone(),
+                self.config.agent_addr.clone(),
+            ));
+            // 首版静态成员（Q1）；Registry 发现为演进路径
+            manager.set_peers(self.config.replication_peers.clone());
+            tracing::info!(
+                "ISR replication enabled: agent={} min_isr={} peers={:?}",
+                self.config.agent_addr,
+                self.config.replication.min_isr,
+                self.config.replication_peers
+            );
+
+            // 挂载到数据面服务（MQ / Cache 写路径接入复制）
+            if let Some(mq) = &mq_grpc_svc {
+                mq.set_replication(Some(manager.clone()));
+            }
+            if let Some(cache) = &cache_grpc_svc {
+                cache.set_replication(Some(manager.clone()));
+            }
+
+            // Replica gRPC 服务路由（对端 Apply / Reconcile / IsrHeartbeat）
+            let router = Arc::new(ReplicaRouter::new(
+                manager.clone(),
+                mq_grpc_svc.clone(),
+                cache_grpc_svc.clone(),
+            ));
+            // 心跳后台任务（ISR 成员维护 + 落后检测触发 Reconcile）
+            manager.start_heartbeat(router.clone());
+
+            replication_grpc_svc = Some(router);
+        }
+
         // Phase G: 安全策略引擎（本地 RBAC/ABAC，可扩展至 OPA）
         if self.config.services.policy {
-            let policy_svc = Arc::new(
-                crate::services::policy::PolicyService::new(1024)
-            );
+            // 有 Server KV 连接时启用 bundle 通道（with_kv），否则仅 RBAC 引擎
+            let policy_svc = Arc::new(match &inner {
+                Some(inner) => {
+                    tracing::info!("Policy service bundle channel: Server KV connected");
+                    crate::services::policy::PolicyService::with_kv(1024, inner.clone())
+                }
+                None => {
+                    tracing::warn!("Policy service running without Server KV (bundle API disabled)");
+                    crate::services::policy::PolicyService::new(1024)
+                }
+            });
             let policy_grpc = policy_svc.clone();
             if let Err(e) = service_manager.register(policy_svc).await {
                 tracing::error!("failed to register policy service: {e}");
@@ -523,24 +609,33 @@ impl AgentServer {
             tracing::info!("FeatureFlags service initialized (v3.0)");
         }
 
-        // PKI CA 证书签发服务（Phase F）
+        // PKI CA 证书签发服务（Phase F / ISSUE-000：get-or-create + 共享 KV 持久化）
         if self.config.services.pki {
             use crate::pki::PkiConfig;
+            use crate::pki_store::{KvPkiStore, PkiStore};
+
             let pki_config = PkiConfig::default();
-            match crate::pki::PkiService::new(pki_config) {
-                Ok(pki_svc) => {
-                    // 自动初始化 CA（dev 模式 / 首次启动时自动生成自签名根证书）
-                    if let Err(e) = pki_svc.init_ca("coord-agent-ca") {
-                        tracing::warn!("PKI CA auto-init failed (may already be initialized): {}", e);
-                    } else {
-                        tracing::info!("PKI CA auto-initialized: CN=coord-agent-ca");
-                    }
-                    pki_grpc_svc = Some(Arc::new(pki_svc));
-                    tracing::info!("PKI service initialized (v3.0, CA certificate management)");
+            // 生产（已连接 server 集群）：共享 KV store —— 多 agent 共享同一 CA 根、重启不丢；
+            // 骨架模式（无 server）：降级内存 store（dev/单测）。
+            let pki_svc: Option<crate::pki::PkiService> = match inner {
+                Some(ref inner) => {
+                    let store: Arc<dyn PkiStore> = Arc::new(KvPkiStore::new(inner.clone()));
+                    Some(crate::pki::PkiService::with_store(pki_config, store))
                 }
-                Err(e) => {
-                    tracing::error!("failed to create PKI service: {e}");
+                None => crate::pki::PkiService::new(pki_config).ok(),
+            };
+
+            if let Some(pki_svc) = pki_svc {
+                // 自动初始化/加载 CA（幂等 + 共享，多 agent 只产生一份 CA 根）
+                if let Err(e) = pki_svc.init_ca("coord-agent-ca").await {
+                    tracing::warn!("PKI CA auto-init failed (may already be initialized): {}", e);
+                } else {
+                    tracing::info!("PKI CA auto-initialized: CN=coord-agent-ca");
                 }
+                pki_grpc_svc = Some(Arc::new(pki_svc));
+                tracing::info!("PKI service initialized (ISSUE-000: get-or-create + shared KV store)");
+            } else {
+                tracing::error!("failed to create PKI service");
             }
         }
 
@@ -551,8 +646,27 @@ impl AgentServer {
 
         tracing::info!("coord-agent gRPC server listening on {}", self.config.agent_addr);
 
+        // ISSUE-000 Phase 0: agent gRPC 挂 AuthInterceptor（默认关闭，开启后全量 RPC 校验 CCT）
+        let mut auth_interceptor = crate::auth::interceptor::AuthInterceptor::new(
+            if self.config.auth.enabled {
+                hex::decode(&self.config.auth.signing_key_hex)
+                    .map_err(|e| format!("invalid auth.signing_key_hex: {e}"))?
+            } else {
+                Vec::new()
+            },
+            Arc::new(crate::auth::role_cache::RoleCache::new()),
+            self.config.auth.clock_drift_secs,
+        );
+        auth_interceptor.set_enabled(self.config.auth.enabled);
+        if self.config.auth.enabled {
+            tracing::info!("coord-agent auth interceptor ENABLED (CCT + capability, unknown RPC deny)");
+        } else {
+            tracing::warn!("coord-agent auth interceptor DISABLED (set agent.auth.enabled=true to enable)");
+        }
+
         // 构建 gRPC router：核心服务 + Registry + Config + 可插拔服务
         let router = tonic::transport::Server::builder()
+            .layer(crate::auth::interceptor::AuthLayer::new(Arc::new(auth_interceptor)))
             .add_service(KvServer::new(KvProxy::new(inner.clone())))
             .add_service(TxnServer::new(TxnProxy::new(inner.clone())))
             .add_service(LeaseServer::new(LeaseProxy::new(inner.clone())))
@@ -631,6 +745,15 @@ impl AgentServer {
             router
         };
 
+        // 注册 Replica gRPC 服务（ISR 跨 Agent 复制，v2.1）
+        let router = if let Some(replica) = replication_grpc_svc {
+            router.add_service(
+                coord_proto::agent::replica_server::ReplicaServer::from_arc(replica)
+            )
+        } else {
+            router
+        };
+
         // 注册 Scheduler gRPC 服务
         let router = if let Some(scheduler_svc) = scheduler_grpc_svc {
             router.add_service(
@@ -704,6 +827,17 @@ impl AgentServer {
         };
 
         let router = service_manager.build_grpc_router(router);
+
+        // 注册自定义 Health gRPC 服务（coord.agent.Health）
+        // Java SDK healthCheck() 调用的是此自定义服务（而非标准 grpc.health.v1.Health）。
+        // 此前未注册 → UNIMPLEMENTED → NOT_SERVING 误报（注册/ID 生成等服务实际可用）。
+        // 修复：注册并返回 SERVING（存活语义，与 HTTP /health 一致）；健康状态以 /api/v1/health 为准。
+        // 已反馈 jinhe-starter/coord 团队（见 .github/pr/）。
+        let router = router.add_service(
+            coord_proto::agent::health_server::HealthServer::new(
+                crate::health::GrpcHealthService::default(),
+            )
+        );
 
         // 注册 gRPC Health Check 服务（标准 grpc.health.v1.Health）
         let (health_reporter, health_service) = tonic_health::server::health_reporter();

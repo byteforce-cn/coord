@@ -1,12 +1,13 @@
-// coord-agent: PKI CA 自动签发/轮换服务 (Phase F)
+// coord-agent: PKI CA 自动签发/轮换服务 (Phase F / ISSUE-000)
 //
 // v8.2 §4.12: PKI — CA 私钥受根密钥保护，为 mTLS 签发短期证书。
 //
-// 核心能力：
-// - 初始化 CA（自签名根证书）
-// - 签发短期终端证书（默认 24h TTL）
-// - 证书轮换（renew before expiry）
+// 核心能力（ISSUE-000 整改后）：
+// - 初始化 CA（自签名根证书，**持久化到共享 KV**，重启/多 agent 共享同一 CA 根）
+// - **按 CN 幂等取回（get-or-create）**：同一 CN 未过期证书直接返回既有记录
+// - 证书轮换（rotate / renew，旧证书保留至 not_after 供验签）
 // - 证书验证（链式验证）
+// - 证书列表（按 CN 取 active + 历史，验签方按 serial/kid 构建多密钥 JWKS）
 //
 // 使用 rcgen 生成 X.509 证书，x509-parser 解析验证。
 
@@ -21,6 +22,10 @@ use rcgen::{
     KeyUsagePurpose,
 };
 use time::OffsetDateTime;
+
+use crate::pki_store::{
+    CaRecord, CertRecord, CertStatus, MemoryPkiStore, PkiStore, PkiStoreError,
+};
 
 // ──── PkiConfig ────
 
@@ -69,6 +74,25 @@ pub struct CertInfo {
     pub not_after: i64,
     /// 序列号（十六进制）
     pub serial: String,
+    /// 证书状态（active / retired）
+    pub status: CertStatus,
+    /// 轮换链：本证书由哪个 serial 轮换而来（None = 首次签发）
+    pub parent_serial: Option<String>,
+}
+
+impl From<CertRecord> for CertInfo {
+    fn from(r: CertRecord) -> Self {
+        Self {
+            common_name: r.common_name,
+            cert_pem: r.cert_pem,
+            key_pem: r.key_pem,
+            not_before: r.not_before,
+            not_after: r.not_after,
+            serial: r.serial,
+            status: r.status,
+            parent_serial: r.parent_serial,
+        }
+    }
 }
 
 // ──── PkiService ────
@@ -76,10 +100,13 @@ pub struct CertInfo {
 /// PKI CA 服务
 ///
 /// 管理 CA 密钥对，签发和验证终端证书。
-/// CA 私钥仅存于内存，可通过 KeyUtil 加密持久化到磁盘。
+/// CA 与已签发证书（含私钥）通过 [`PkiStore`] 持久化到共享存储
+/// （生产为 coord-server KV，见 [`crate::pki_store::KvPkiStore`]）。
 pub struct PkiService {
     config: PkiConfig,
-    /// CA 证书 + 私钥（签发后才初始化）
+    /// 共享存储（Memory 开发 / Kv 生产）
+    store: Arc<dyn PkiStore>,
+    /// CA 证书 + 私钥（内存缓存，签发后才初始化）
     ca: Arc<RwLock<Option<CaMaterial>>>,
 }
 
@@ -87,26 +114,83 @@ struct CaMaterial {
     cert_pem: String,
     /// CA 密钥 PEM 编码（用于重建 KeyPair 签名）
     key_pem: String,
-    params: CertificateParams,
 }
 
 impl PkiService {
-    /// 创建 PKI 服务实例
+    /// 创建 PKI 服务实例（内存 store，开发/单测/骨架模式）
     pub fn new(config: PkiConfig) -> Result<Self, PkiError> {
-        Ok(Self {
-            config,
-            ca: Arc::new(RwLock::new(None)),
-        })
+        Ok(Self::with_store(config, Arc::new(MemoryPkiStore::new())))
     }
 
-    /// 初始化 CA：生成自签名根证书
-    pub fn init_ca(&self, ca_common_name: &str) -> Result<(), PkiError> {
-        let mut ca = self.ca.write();
+    /// 创建 PKI 服务实例并注入共享存储（生产：KvPkiStore）
+    pub fn with_store(config: PkiConfig, store: Arc<dyn PkiStore>) -> Self {
+        Self {
+            config,
+            store,
+            ca: Arc::new(RwLock::new(None)),
+        }
+    }
 
-        if ca.is_some() {
+    /// 初始化/加载 CA：幂等 + 共享（多 agent 只产生一份 CA 根）
+    ///
+    /// - 内存已加载 → 直接返回；
+    /// - 共享 store 已有 CA → 加载；
+    /// - 未命中 → 生成后 Txn CAS 原子写入；冲突则重读加载胜者。
+    pub async fn init_ca(&self, ca_common_name: &str) -> Result<(), PkiError> {
+        if self.ca.read().is_some() {
             return Ok(());
         }
 
+        if let Some(record) = self
+            .store
+            .get_ca()
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+        {
+            self.load_ca(record)?;
+            return Ok(());
+        }
+
+        let (cert_pem, key_pem) = Self::generate_ca(ca_common_name)?;
+        let record = CaRecord {
+            cert_pem,
+            key_pem,
+            common_name: ca_common_name.to_string(),
+        };
+        match self
+            .store
+            .create_ca(&record)
+            .await
+        {
+            Ok(()) => self.load_ca(record)?,
+            Err(PkiStoreError::AlreadyExists(_)) => {
+                // 其他 agent 已创建 → 重读并加载
+                let winner = self
+                    .store
+                    .get_ca()
+                    .await
+                    .map_err(|e| PkiError::Store(e.to_string()))?
+                    .ok_or(PkiError::CaLoadFailed)?;
+                self.load_ca(winner)?;
+            }
+            Err(e) => return Err(PkiError::Store(e.to_string())),
+        }
+        Ok(())
+    }
+
+    /// 加载 CA 到内存（校验私钥可解析）
+    fn load_ca(&self, record: CaRecord) -> Result<(), PkiError> {
+        // 校验 CA 私钥可用
+        KeyPair::from_pem(&record.key_pem).map_err(|e| PkiError::KeyGen(e.to_string()))?;
+        *self.ca.write() = Some(CaMaterial {
+            cert_pem: record.cert_pem,
+            key_pem: record.key_pem,
+        });
+        Ok(())
+    }
+
+    /// 生成自签名根证书，返回 (cert_pem, key_pem)
+    fn generate_ca(ca_common_name: &str) -> Result<(String, String), PkiError> {
         let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
             .map_err(|e| PkiError::KeyGen(e.to_string()))?;
 
@@ -130,75 +214,136 @@ impl PkiService {
             .self_signed(&key_pair)
             .map_err(|e| PkiError::CertGen(e.to_string()))?;
 
-        *ca = Some(CaMaterial {
-            cert_pem: cert.pem(),
-            key_pem,
-            params,
-        });
-
-        Ok(())
+        Ok((cert.pem(), key_pem))
     }
 
-    /// 签发终端证书
+    /// 签发终端证书（**get-or-create**）
     ///
+    /// 同一 CN 未过期证书直接返回既有记录（同 serial / 公钥 / 私钥）；
+    /// 未命中或已过期才新签发，Txn CAS 原子写入，冲突则重读返回胜者。
     /// `ttl_seconds`: 证书有效期（秒）。为 0 时使用 config.cert_ttl_hours 默认值。
-    pub fn issue_cert(&self, common_name: &str, ttl_seconds: u64) -> Result<CertInfo, PkiError> {
-        let ca_guard = self.ca.read();
-        let ca = ca_guard.as_ref().ok_or(PkiError::CaNotInitialized)?;
+    pub async fn issue_cert(&self, common_name: &str, ttl_seconds: u64) -> Result<CertInfo, PkiError> {
+        // 1. get-or-create 快路径：命中未过期 → 直接返回
+        if let Some(record) = self
+            .store
+            .get_cert(common_name)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+        {
+            if !record.is_expired(now_unix()) {
+                return Ok(record.into());
+            }
+        }
 
-        let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
-            .map_err(|e| PkiError::KeyGen(e.to_string()))?;
+        // 2. 新签发
+        let record = self.sign_new_cert(common_name, ttl_seconds, CertStatus::Active, None)?;
 
-        let mut params = CertificateParams::default();
-        params.distinguished_name.push(DnType::CommonName, common_name);
-        params.distinguished_name.push(DnType::OrganizationName, "Coord Agent");
-        params.is_ca = IsCa::NoCa;
-        params.key_usages = vec![
-            KeyUsagePurpose::DigitalSignature,
-            KeyUsagePurpose::KeyEncipherment,
-        ];
-        params.extended_key_usages = vec![
-            rcgen::ExtendedKeyUsagePurpose::ClientAuth,
-            rcgen::ExtendedKeyUsagePurpose::ServerAuth,
-        ];
-
-        let now = OffsetDateTime::now_utc();
-        let ttl = if ttl_seconds > 0 {
-            time::Duration::seconds(ttl_seconds as i64)
-        } else {
-            time::Duration::hours(self.config.cert_ttl_hours as i64)
-        };
-        params.not_before = now;
-        params.not_after = now + ttl;
-
-        let ca_key = KeyPair::from_pem(&ca.key_pem)
-            .map_err(|e| PkiError::KeyGen(e.to_string()))?;
-
-        let issuer = rcgen::Issuer::from_params(&ca.params, ca_key);
-
-        let cert = params
-            .signed_by(&key_pair, &issuer)
-            .map_err(|e| PkiError::CertGen(e.to_string()))?;
-
-        let not_before = now.unix_timestamp();
-        let not_after = (now + ttl).unix_timestamp();
-        let serial = format!("{:x}", rand::random::<u64>());
-
-        Ok(CertInfo {
-            common_name: common_name.to_string(),
-            cert_pem: cert.pem(),
-            key_pem: key_pair.serialize_pem(),
-            not_before,
-            not_after,
-            serial,
-        })
+        // 3. Txn CAS 原子写入；冲突 → 重读并返回胜者
+        match self
+            .store
+            .create_cert(common_name, &record)
+            .await
+        {
+            Ok(()) => Ok(record.into()),
+            Err(PkiStoreError::AlreadyExists(_)) => {
+                let winner = self
+                    .store
+                    .get_cert(common_name)
+                    .await
+                    .map_err(|e| PkiError::Store(e.to_string()))?
+                    .ok_or(PkiError::CertMissing)?;
+                Ok(winner.into())
+            }
+            Err(e) => Err(PkiError::Store(e.to_string())),
+        }
     }
 
-    /// 续期证书：基于序列号查找并签发新证书
+    /// 续期证书：**按 serial 查回真实 CN**，再签发新证书（新密钥 + 新 serial）
     ///
-    /// 当前简化实现：重新签一张同 CN 的新证书（新 key pair + 新序列号）。
-    /// 未来可扩展为基于原序列号匹配旧证书并续期。
-    pub fn renew_cert(&self, common_name: &str, ttl_seconds: u64) -> Result<CertInfo, PkiError> {
+    /// 修复：不再把 serial 当 CN 使用（ISSUE-000 §2.2）。
+    /// 旧证书保留至 not_after 仍可验签。
+    pub async fn renew_cert(&self, serial: &str, ttl_seconds: u64) -> Result<CertInfo, PkiError> {
+        let old = self
+            .store
+            .get_cert_by_serial(serial)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+            .ok_or_else(|| PkiError::CertNotFound(serial.to_string()))?;
+        self.rotate_locked(&old.common_name, ttl_seconds).await
+    }
+
+    /// 按 CN 显式轮换：签发新 active，旧证书标记 retired 保留至 not_after
+    pub async fn rotate_cert(&self, common_name: &str, ttl_seconds: u64) -> Result<CertInfo, PkiError> {
+        // 无 active 或已过期 → 走 get-or-create 首次签发
+        match self
+            .store
+            .get_cert(common_name)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+        {
+            Some(old) if !old.is_expired(now_unix()) => self.rotate_locked(common_name, ttl_seconds).await,
+            _ => self.issue_cert(common_name, ttl_seconds).await,
+        }
+    }
+
+    /// 轮换实现（调用方已确认存在未过期 active）：新签发 + 旧 retired 原子入历史
+    async fn rotate_locked(&self, common_name: &str, ttl_seconds: u64) -> Result<CertInfo, PkiError> {
+        let old = self
+            .store
+            .get_cert(common_name)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+            .ok_or(PkiError::CertMissing)?;
+
+        let new_record = self.sign_new_cert(
+            common_name,
+            ttl_seconds,
+            CertStatus::Active,
+            Some(old.serial.clone()),
+        )?;
+
+        let mut retired = old.clone();
+        retired.status = CertStatus::Retired;
+
+        self.store
+            .replace_active_cert(common_name, &new_record, &retired)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?;
+
+        Ok(new_record.into())
+    }
+
+    /// 按 CN 取当前 + 历史未过期证书（验签方按 serial/kid 构建多密钥 JWKS）
+    pub async fn list_certs(&self, common_name: &str) -> Result<Vec<CertInfo>, PkiError> {
+        let records = self
+            .store
+            .list_certs(common_name)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?;
+        Ok(records.into_iter().map(Into::into).collect())
+    }
+
+    /// 按 CN 幂等取回当前有效证书（含私钥；无或已过期返回 Ok(None)）
+    pub async fn get_cert_by_cn(&self, common_name: &str) -> Result<Option<CertInfo>, PkiError> {
+        match self
+            .store
+            .get_cert(common_name)
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?
+        {
+            Some(record) if !record.is_expired(now_unix()) => Ok(Some(record.into())),
+            _ => Ok(None),
+        }
+    }
+
+    /// 签发新终端证书并返回记录（不落库，由调用方决定写入策略）
+    fn sign_new_cert(
+        &self,
+        common_name: &str,
+        ttl_seconds: u64,
+        status: CertStatus,
+        parent_serial: Option<String>,
+    ) -> Result<CertRecord, PkiError> {
         let ca_guard = self.ca.read();
         let ca = ca_guard.as_ref().ok_or(PkiError::CaNotInitialized)?;
 
@@ -230,7 +375,9 @@ impl PkiService {
         let ca_key = KeyPair::from_pem(&ca.key_pem)
             .map_err(|e| PkiError::KeyGen(e.to_string()))?;
 
-        let issuer = rcgen::Issuer::from_params(&ca.params, ca_key);
+        // 从持久化的 CA 证书重建签发者（重启后无需原始 params）
+        let issuer = rcgen::Issuer::from_ca_cert_pem(&ca.cert_pem, ca_key)
+            .map_err(|e| PkiError::CertGen(e.to_string()))?;
 
         let cert = params
             .signed_by(&key_pair, &issuer)
@@ -240,18 +387,27 @@ impl PkiService {
         let not_after = (now + ttl).unix_timestamp();
         let serial = format!("{:x}", rand::random::<u64>());
 
-        Ok(CertInfo {
+        Ok(CertRecord {
             common_name: common_name.to_string(),
             cert_pem: cert.pem(),
             key_pem: key_pair.serialize_pem(),
             not_before,
             not_after,
             serial,
+            status,
+            parent_serial,
         })
     }
 }
 
 // ──── 辅助函数 ────
+
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
 
 /// 将 PEM 证书转换为 DER 字节
 fn pem_to_der(pem: &str) -> Result<Vec<u8>, PkiError> {
@@ -277,10 +433,7 @@ impl PkiService {
         let (_remainder, cert) = x509_parser::parse_x509_certificate(&cert_der)
             .map_err(|e| PkiError::CertParse(e.to_string()))?;
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = now_unix();
 
         if now < cert.validity().not_before.timestamp() {
             return Ok(false);
@@ -333,6 +486,14 @@ pub enum PkiError {
     CertGen(String),
     CertParse(String),
     Io(std::io::Error),
+    /// renew 按 serial 查不到证书
+    CertNotFound(String),
+    /// get-or-create 冲突后重读不到胜者
+    CertMissing,
+    /// CA 持久化记录加载失败
+    CaLoadFailed,
+    /// 共享存储错误
+    Store(String),
 }
 
 impl std::fmt::Display for PkiError {
@@ -343,6 +504,10 @@ impl std::fmt::Display for PkiError {
             Self::CertGen(msg) => write!(f, "certificate generation failed: {msg}"),
             Self::CertParse(msg) => write!(f, "certificate parse failed: {msg}"),
             Self::Io(e) => write!(f, "IO error: {e}"),
+            Self::CertNotFound(s) => write!(f, "certificate not found by serial: {s}"),
+            Self::CertMissing => write!(f, "certificate missing in store"),
+            Self::CaLoadFailed => write!(f, "failed to load CA from store"),
+            Self::Store(msg) => write!(f, "pki store error: {msg}"),
         }
     }
 }
@@ -359,13 +524,37 @@ impl From<std::io::Error> for PkiError {
 
 use coord_proto::agent::{
     pki_server::Pki,
+    PkiCertSummary,
+    PkiGetCaCertRequest, PkiGetCaCertResponse,
+    PkiGetCertByCnRequest, PkiGetCertByCnResponse,
     PkiInitCaRequest, PkiInitCaResponse,
     PkiIssueCertRequest, PkiIssueCertResponse,
+    PkiListCertsRequest, PkiListCertsResponse,
     PkiRenewCertRequest, PkiRenewCertResponse,
+    PkiRotateCertRequest, PkiRotateCertResponse,
     PkiVerifyCertRequest, PkiVerifyCertResponse,
-    PkiGetCaCertRequest, PkiGetCaCertResponse,
 };
 use tonic::{Request, Response, Status};
+
+fn status_to_str(status: CertStatus) -> &'static str {
+    match status {
+        CertStatus::Active => "active",
+        CertStatus::Retired => "retired",
+    }
+}
+
+fn cert_to_issue_response(cert_info: CertInfo) -> PkiIssueCertResponse {
+    PkiIssueCertResponse {
+        common_name: cert_info.common_name,
+        cert_pem: cert_info.cert_pem,
+        key_pem: cert_info.key_pem,
+        not_before: cert_info.not_before,
+        not_after: cert_info.not_after,
+        serial: cert_info.serial,
+        status: status_to_str(cert_info.status).into(),
+        parent_serial: cert_info.parent_serial.unwrap_or_default(),
+    }
+}
 
 #[tonic::async_trait]
 impl Pki for PkiService {
@@ -375,6 +564,7 @@ impl Pki for PkiService {
     ) -> Result<Response<PkiInitCaResponse>, Status> {
         let req = request.into_inner();
         PkiService::init_ca(self, &req.ca_common_name)
+            .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(PkiInitCaResponse {}))
     }
@@ -385,15 +575,9 @@ impl Pki for PkiService {
     ) -> Result<Response<PkiIssueCertResponse>, Status> {
         let req = request.into_inner();
         let cert_info = PkiService::issue_cert(self, &req.common_name, req.ttl_seconds as u64)
+            .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        Ok(Response::new(PkiIssueCertResponse {
-            common_name: cert_info.common_name,
-            cert_pem: cert_info.cert_pem,
-            key_pem: cert_info.key_pem,
-            not_before: cert_info.not_before,
-            not_after: cert_info.not_after,
-            serial: cert_info.serial,
-        }))
+        Ok(Response::new(cert_to_issue_response(cert_info)))
     }
 
     async fn renew_cert(
@@ -401,9 +585,9 @@ impl Pki for PkiService {
         request: Request<PkiRenewCertRequest>,
     ) -> Result<Response<PkiRenewCertResponse>, Status> {
         let req = request.into_inner();
-        // 当前简化实现：使用 serial_number 作为 common_name 续期
-        // 未来可通过 serial 查找已签发的证书并匹配 CN
+        // 修复（ISSUE-000 §2.2）：按 serial 查回真实 CN 再续期，不再把 serial 当 CN
         let cert_info = PkiService::renew_cert(self, &req.serial_number, req.ttl_seconds as u64)
+            .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(PkiRenewCertResponse {
             common_name: cert_info.common_name,
@@ -412,6 +596,74 @@ impl Pki for PkiService {
             not_before: cert_info.not_before,
             not_after: cert_info.not_after,
             serial: cert_info.serial,
+            status: status_to_str(cert_info.status).into(),
+            parent_serial: cert_info.parent_serial.unwrap_or_default(),
+        }))
+    }
+
+    async fn rotate_cert(
+        &self,
+        request: Request<PkiRotateCertRequest>,
+    ) -> Result<Response<PkiRotateCertResponse>, Status> {
+        let req = request.into_inner();
+        let cert_info = PkiService::rotate_cert(self, &req.common_name, req.ttl_seconds as u64)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(PkiRotateCertResponse {
+            common_name: cert_info.common_name,
+            cert_pem: cert_info.cert_pem,
+            key_pem: cert_info.key_pem,
+            not_before: cert_info.not_before,
+            not_after: cert_info.not_after,
+            serial: cert_info.serial,
+            status: status_to_str(cert_info.status).into(),
+            parent_serial: cert_info.parent_serial.unwrap_or_default(),
+        }))
+    }
+
+    async fn list_certs(
+        &self,
+        request: Request<PkiListCertsRequest>,
+    ) -> Result<Response<PkiListCertsResponse>, Status> {
+        let req = request.into_inner();
+        let certs = PkiService::list_certs(self, &req.common_name)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let summaries = certs
+            .into_iter()
+            .map(|c| PkiCertSummary {
+                common_name: c.common_name,
+                cert_pem: c.cert_pem,
+                not_before: c.not_before,
+                not_after: c.not_after,
+                serial: c.serial,
+                status: status_to_str(c.status).into(),
+                parent_serial: c.parent_serial.unwrap_or_default(),
+            })
+            .collect();
+        Ok(Response::new(PkiListCertsResponse { certs: summaries }))
+    }
+
+    async fn get_cert_by_cn(
+        &self,
+        request: Request<PkiGetCertByCnRequest>,
+    ) -> Result<Response<PkiGetCertByCnResponse>, Status> {
+        let req = request.into_inner();
+        let cert_info = PkiService::get_cert_by_cn(self, &req.common_name)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| {
+                Status::not_found(format!("no active certificate for CN: {}", req.common_name))
+            })?;
+        Ok(Response::new(PkiGetCertByCnResponse {
+            common_name: cert_info.common_name,
+            cert_pem: cert_info.cert_pem,
+            key_pem: cert_info.key_pem,
+            not_before: cert_info.not_before,
+            not_after: cert_info.not_after,
+            serial: cert_info.serial,
+            status: status_to_str(cert_info.status).into(),
+            parent_serial: cert_info.parent_serial.unwrap_or_default(),
         }))
     }
 
@@ -441,30 +693,35 @@ impl Pki for PkiService {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_init_ca_and_issue() {
-        let pki = PkiService::new(PkiConfig::default()).expect("create");
-        pki.init_ca("Test CA").expect("init");
+    fn make_pki() -> PkiService {
+        PkiService::new(PkiConfig::default()).expect("create")
+    }
 
-        let cert = pki.issue_cert("test.local", 0).expect("issue");
+    #[tokio::test]
+    async fn test_init_ca_and_issue() {
+        let pki = make_pki();
+        pki.init_ca("Test CA").await.expect("init");
+
+        let cert = pki.issue_cert("test.local", 0).await.expect("issue");
         assert_eq!(cert.common_name, "test.local");
         assert!(!cert.cert_pem.is_empty());
         assert!(!cert.key_pem.is_empty());
+        assert_eq!(cert.status, CertStatus::Active);
     }
 
-    #[test]
-    fn test_verify_valid_cert() {
-        let pki = PkiService::new(PkiConfig::default()).expect("create");
-        pki.init_ca("Verify CA").expect("init");
+    #[tokio::test]
+    async fn test_verify_valid_cert() {
+        let pki = make_pki();
+        pki.init_ca("Verify CA").await.expect("init");
 
-        let cert = pki.issue_cert("verify.local", 0).expect("issue");
+        let cert = pki.issue_cert("verify.local", 0).await.expect("issue");
         assert!(pki.verify_cert(&cert.cert_pem).expect("verify"));
     }
 
-    #[test]
-    fn test_ca_cert_export() {
-        let pki = PkiService::new(PkiConfig::default()).expect("create");
-        pki.init_ca("Export CA").expect("init");
+    #[tokio::test]
+    async fn test_ca_cert_export() {
+        let pki = make_pki();
+        pki.init_ca("Export CA").await.expect("init");
 
         let pem = pki.ca_cert_pem().expect("export");
         assert!(pem.contains("BEGIN CERTIFICATE"));
@@ -472,10 +729,10 @@ mod tests {
 
     /// RED→GREEN: 验证未初始化 CA 时 issue_cert 返回 CaNotInitialized 错误。
     /// 修复前 dev 模式 PKI CA 未自动初始化。
-    #[test]
-    fn test_ca_not_initialized_error() {
-        let pki = PkiService::new(PkiConfig::default()).expect("create");
-        let result = pki.issue_cert("test.local", 0);
+    #[tokio::test]
+    async fn test_ca_not_initialized_error() {
+        let pki = make_pki();
+        let result = pki.issue_cert("test.local", 0).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             PkiError::CaNotInitialized => {}
@@ -484,12 +741,12 @@ mod tests {
     }
 
     /// 验证 CA init_ca 幂等性（多次调用不报错）
-    #[test]
-    fn test_init_ca_idempotent() {
-        let pki = PkiService::new(PkiConfig::default()).expect("create");
-        pki.init_ca("Test CA").expect("first init");
-        pki.init_ca("Test CA").expect("second init (idempotent)");
-        let cert = pki.issue_cert("test.local", 0).expect("issue after init");
+    #[tokio::test]
+    async fn test_init_ca_idempotent() {
+        let pki = make_pki();
+        pki.init_ca("Test CA").await.expect("first init");
+        pki.init_ca("Test CA").await.expect("second init (idempotent)");
+        let cert = pki.issue_cert("test.local", 0).await.expect("issue after init");
         assert!(!cert.cert_pem.is_empty());
     }
 }

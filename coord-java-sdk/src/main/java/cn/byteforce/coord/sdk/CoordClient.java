@@ -12,6 +12,7 @@ import cn.byteforce.coord.sdk.internal.rpc.*;
 import cn.byteforce.coord.sdk.internal.thread.ThreadPoolManager;
 import cn.byteforce.coord.sdk.internal.watch.WatchManager;
 import cn.byteforce.coord.sdk.lock.LockClient;
+import cn.byteforce.coord.sdk.mq.MqClient;
 import cn.byteforce.coord.sdk.pki.PkiClient;
 import cn.byteforce.coord.sdk.policy.PolicyClient;
 import cn.byteforce.coord.sdk.registry.Registry;
@@ -34,6 +35,7 @@ import java.util.concurrent.TimeUnit;
  *   <li>{@link #lock()} — Distributed mutex locks</li>
  *   <li>{@link #idgen()} — Distributed unique ID generation</li>
  *   <li>{@link #cache()} — Distributed cache (String/Hash/List/Set)</li>
+ *   <li>{@link #mq()} — Message queue (topic/publish/poll/ack)</li>
  *   <li>{@link #transit()} — Envelope encryption/decryption</li>
  *   <li>{@link #workflow()} — Workflow definition and instance management</li>
  *   <li>{@link #policy()} — RBAC/ABAC policy evaluation</li>
@@ -69,6 +71,7 @@ public final class CoordClient implements Closeable {
     private final LockClientImpl lockClient;
     private final IdGenClientImpl idgenClient;
     private final CacheClientImpl cacheClient;
+    private final MqClientImpl mqClient;
     private final TransitClientImpl transitClient;
     private final WorkflowClientImpl workflowClient;
     private final PolicyClientImpl policyClient;
@@ -93,6 +96,8 @@ public final class CoordClient implements Closeable {
         this.idgenClient = new IdGenClientImpl(channelManager, errorMapper, retryTemplate,
                 config.getObservabilityProvider(), config);
         this.cacheClient = new CacheClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config);
+        this.mqClient = new MqClientImpl(channelManager, errorMapper, retryTemplate,
                 config.getObservabilityProvider(), config);
         this.transitClient = new TransitClientImpl(channelManager, errorMapper, retryTemplate,
                 config.getObservabilityProvider(), config);
@@ -148,6 +153,14 @@ public final class CoordClient implements Closeable {
      */
     public CacheClient cache() {
         return cacheClient;
+    }
+
+    /**
+     * Returns the {@link MqClient} API for message queue operations
+     * (topic management, publish, poll + ack consumption, DLQ observation).
+     */
+    public MqClient mq() {
+        return mqClient;
     }
 
     /**

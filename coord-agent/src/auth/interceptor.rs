@@ -10,11 +10,16 @@
 // See docs/capability-auth-implementation.md §4.2.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use lru::LruCache;
+use tonic::Status;
+use tower::{Layer, Service};
 
 use coord_core::auth::cct::{decode_cct, is_expired, CctHeader, CctPayload, CctToken};
 
@@ -123,6 +128,17 @@ pub fn infer_capability(rpc_method: &str) -> Option<String> {
 
         // Authenticate is always allowed (login endpoint)
         "/coord.auth.Auth/Authenticate" => None, // whitelisted — no capability check
+
+        // PKI（ISSUE-000 Phase 0：私钥集中存储前必须上鉴权）
+        // 能力分级：签发（写）/ 轮换（写）/ 读取（读）/ CA 初始化（管理）
+        "/coord.agent.Pki/InitCa" => Some("pki:ca:init".into()),
+        "/coord.agent.Pki/IssueCert" => Some("pki:cert:issue".into()),
+        "/coord.agent.Pki/RenewCert" => Some("pki:cert:issue".into()),
+        "/coord.agent.Pki/RotateCert" => Some("pki:cert:rotate".into()),
+        "/coord.agent.Pki/ListCerts" => Some("pki:cert:read".into()),
+        "/coord.agent.Pki/GetCertByCN" => Some("pki:cert:read".into()),
+        "/coord.agent.Pki/GetCaCert" => Some("pki:cert:read".into()),
+        "/coord.agent.Pki/VerifyCert" => Some("pki:cert:read".into()),
 
         _ => None, // Unknown RPC — deny by default
     }
@@ -249,6 +265,99 @@ impl AuthInterceptor {
         }
 
         AuthResult::Allow(cct)
+    }
+}
+
+// ──── Tower Layer / Service（接入 agent gRPC 生产路由）────
+//
+// tonic 0.14 的 Interceptor 拿不到方法路径（Request 不保留 URI），
+// 故使用 tower 中间件：从 http::Request 的 URI path 提取 gRPC 方法，
+// 校验 CCT + capability，未知 RPC / 无凭据 / 无 capability 一律拒绝（fail-closed）。
+
+/// AuthInterceptor 的 tower Layer（用于 `tonic::Server::builder().layer(...)`）
+#[derive(Clone)]
+pub struct AuthLayer {
+    interceptor: Arc<AuthInterceptor>,
+}
+
+impl AuthLayer {
+    pub fn new(interceptor: Arc<AuthInterceptor>) -> Self {
+        Self { interceptor }
+    }
+}
+
+impl<S> Layer<S> for AuthLayer {
+    type Service = AuthService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        AuthService {
+            inner,
+            interceptor: self.interceptor.clone(),
+        }
+    }
+}
+
+/// 包一层 inner 服务的鉴权中间件
+#[derive(Clone)]
+pub struct AuthService<S> {
+    inner: S,
+    interceptor: Arc<AuthInterceptor>,
+}
+
+impl<S> Service<http::Request<tonic::body::Body>> for AuthService<S>
+where
+    S: Service<http::Request<tonic::body::Body>, Response = http::Response<tonic::body::Body>>,
+{
+    type Response = http::Response<tonic::body::Body>;
+    type Error = S::Error;
+    type Future = AuthFuture<S::Future>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: http::Request<tonic::body::Body>) -> Self::Future {
+        let rpc_method = req.uri().path().to_string();
+        let auth_header = req
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        match self
+            .interceptor
+            .validate_request(&rpc_method, auth_header.as_deref(), None)
+        {
+            AuthResult::Allow(_) => AuthFuture::Allow(self.inner.call(req)),
+            AuthResult::Deny(reason) => AuthFuture::Deny(Some(Status::unauthenticated(reason))),
+        }
+    }
+}
+
+/// 鉴权中间件 future：放行转发给 inner，拒绝立即返回 gRPC 错误响应
+pub enum AuthFuture<F> {
+    Allow(F),
+    Deny(Option<Status>),
+}
+
+impl<F, E> Future for AuthFuture<F>
+where
+    F: Future<Output = Result<http::Response<tonic::body::Body>, E>>,
+{
+    type Output = Result<http::Response<tonic::body::Body>, E>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: 不移动任何字段；AuthFuture 无 pin 投影约定，字段级 pin 由我们手动保证
+        let this = unsafe { self.get_unchecked_mut() };
+        match this {
+            AuthFuture::Allow(fut) => unsafe { Pin::new_unchecked(fut) }.poll(cx),
+            AuthFuture::Deny(status) => {
+                let status = status.take().expect("polled after ready");
+                let (parts, ()) = status.into_http::<()>().into_parts();
+                let response = http::Response::from_parts(parts, tonic::body::Body::empty());
+                Poll::Ready(Ok(response))
+            }
+        }
     }
 }
 
@@ -427,6 +536,132 @@ mod tests {
         assert_eq!(infer_capability("/coord.watch.Watch/Watch"), Some("data:watch:subscribe".into()));
         assert_eq!(infer_capability("/coord.auth.Auth/Authenticate"), None);
         assert_eq!(infer_capability("/unknown.Service/Method"), None);
+    }
+
+    /// ISSUE-000 Phase 0: PKI RPC 必须映射到 capability（私钥集中存储前上鉴权）
+    #[test]
+    fn test_infer_capability_pki_mappings() {
+        assert_eq!(infer_capability("/coord.agent.Pki/InitCa"), Some("pki:ca:init".into()));
+        assert_eq!(infer_capability("/coord.agent.Pki/IssueCert"), Some("pki:cert:issue".into()));
+        assert_eq!(infer_capability("/coord.agent.Pki/RenewCert"), Some("pki:cert:issue".into()));
+        assert_eq!(infer_capability("/coord.agent.Pki/RotateCert"), Some("pki:cert:rotate".into()));
+        assert_eq!(infer_capability("/coord.agent.Pki/ListCerts"), Some("pki:cert:read".into()));
+        assert_eq!(infer_capability("/coord.agent.Pki/GetCertByCN"), Some("pki:cert:read".into()));
+        assert_eq!(infer_capability("/coord.agent.Pki/GetCaCert"), Some("pki:cert:read".into()));
+        assert_eq!(infer_capability("/coord.agent.Pki/VerifyCert"), Some("pki:cert:read".into()));
+        // 未知 PKI RPC 默认 deny（fail-closed）
+        assert_eq!(infer_capability("/coord.agent.Pki/UnknownRpc"), None);
+    }
+
+    // ──── tower 中间件测试 ────
+
+    /// 测试用透传 inner 服务
+    struct Passthrough;
+    impl Service<http::Request<tonic::body::Body>> for Passthrough {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = tonic::Status;
+        type Future =
+            std::future::Ready<Result<http::Response<tonic::body::Body>, tonic::Status>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: http::Request<tonic::body::Body>) -> Self::Future {
+            std::future::ready(Ok(http::Response::new(tonic::body::Body::empty())))
+        }
+    }
+
+    fn make_auth_service(interceptor: AuthInterceptor) -> AuthService<Passthrough> {
+        AuthService {
+            inner: Passthrough,
+            interceptor: Arc::new(interceptor),
+        }
+    }
+
+    fn make_http_request(path: &str, auth_header: Option<&str>) -> http::Request<tonic::body::Body> {
+        let mut req = http::Request::builder()
+            .uri(path)
+            .body(tonic::body::Body::empty())
+            .expect("build request");
+        if let Some(h) = auth_header {
+            req.headers_mut()
+                .insert("authorization", h.parse().expect("valid header"));
+        }
+        req
+    }
+
+    /// ISSUE-000 Phase 0: 无凭据调用 PKI RPC → 拒绝（grpc-status=UNAUTHENTICATED=16）
+    #[tokio::test]
+    async fn test_auth_service_denies_pki_without_token() {
+        let role_cache = Arc::new(RoleCache::new());
+        let mut svc = make_auth_service(AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300));
+
+        let resp = svc
+            .call(make_http_request("/coord.agent.Pki/IssueCert", None))
+            .await
+            .expect("service 不应报传输错误");
+        let grpc_status = resp
+            .headers()
+            .get("grpc-status")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        assert_eq!(grpc_status.as_deref(), Some("16"), "无凭据必须 grpc-status=UNAUTHENTICATED(16)");
+    }
+
+    /// ISSUE-000 Phase 0: 有效 CCT + 具备 capability → 放行（透传到 inner）
+    #[tokio::test]
+    async fn test_auth_service_allows_pki_with_capability() {
+        let role_cache = Arc::new(RoleCache::new());
+        role_cache.sync_full(vec![super::super::role_cache::RoleEntry {
+            name: "pki_issuer".to_string(),
+            grants: vec![super::super::role_cache::CapabilityGrant {
+                capability_id: "pki:cert:issue".to_string(),
+                scope: "".to_string(),
+            }],
+            high_sensitive: false,
+        }]);
+        let mut svc = make_auth_service(AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300));
+
+        let cct = make_test_cct(vec!["pki_issuer"], HashMap::new());
+        let header = format!("Bearer {cct}");
+        let resp = svc
+            .call(make_http_request("/coord.agent.Pki/IssueCert", Some(&header)))
+            .await
+            .expect("service 不应报传输错误");
+        assert_eq!(resp.status(), http::StatusCode::OK, "有效 CCT + pki:cert:issue 应放行");
+    }
+
+    /// ISSUE-000 Phase 0: 只读角色调用签发 RPC → 拒绝（分级授权）
+    #[tokio::test]
+    async fn test_auth_service_denies_pki_write_with_read_only_role() {
+        let role_cache = Arc::new(RoleCache::new());
+        role_cache.sync_full(vec![super::super::role_cache::RoleEntry {
+            name: "pki_reader".to_string(),
+            grants: vec![super::super::role_cache::CapabilityGrant {
+                capability_id: "pki:cert:read".to_string(),
+                scope: "".to_string(),
+            }],
+            high_sensitive: false,
+        }]);
+        let mut svc = make_auth_service(AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300));
+
+        let cct = make_test_cct(vec!["pki_reader"], HashMap::new());
+        let header = format!("Bearer {cct}");
+        let resp = svc
+            .call(make_http_request("/coord.agent.Pki/IssueCert", Some(&header)))
+            .await
+            .expect("service 不应报传输错误");
+        let grpc_status = resp
+            .headers()
+            .get("grpc-status")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        assert_eq!(
+            grpc_status.as_deref(),
+            Some("16"),
+            "只读角色调用签发必须拒绝（grpc-status=UNAUTHENTICATED(16)）"
+        );
     }
 
     #[test]

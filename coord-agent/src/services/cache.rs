@@ -1,13 +1,15 @@
-// coord-agent: 分布式缓存 (Cache Service) — 数据面（Phase F）
+// coord-agent: 缓存 (Cache Service) — 数据面（Phase F）
 //
 // 实现 BaseService trait，基于 redb 提供本地持久化缓存引擎。
-// 支持 String/Hash/List/Set 四种数据类型、TTL 过期、分片元数据管理。
+// 支持 String/Hash/List/Set 四种数据类型、TTL 过期。
 //
-// 架构（v3.0）:
-// - 本地 redb 存储引擎（替换 RocksDB，避免 C++ 依赖冲突）
-// - Server 管理分片元数据，Agent 按分片表成为 Leader/Follower
-// - 写操作由 Leader 处理，异步复制给 Follower
-// - TTL + Server 下发的全局失效通知
+// 架构（v3.0，源码核验版 + v2.1 ISR 落地）:
+// - 本地 redb 存储引擎；启用 ISR 复制后，写路径经复制管理器同步到 ISR Followers
+// - List pop 为单写事务原子出队（G2 已修复）；复制后 pop 仅 Leader 执行（C2）
+// - TTL 复制 Leader 计算的绝对到期时间戳（C5，encode_value 内嵌 expires_at）
+//
+// ✅ 状态声明（v2.1，2026-08-08）：ISR 复制**已实现并落地**（docs/cache-mq-isr-evaluation.md）。
+// 复制日志 / 持久化幂等键 / 本地序列号在 cache.redb 内与数据写同事务提交。
 //
 // 参见 docs/client-agent-architecture-v3.md §5.5。
 
@@ -74,6 +76,17 @@ const SET_TABLE: redb::TableDefinition<&[u8], u64> =
     redb::TableDefinition::new("cache:set");
 const SHARD_TABLE: redb::TableDefinition<&str, &[u8]> =
     redb::TableDefinition::new("cache:shards");
+
+// ──── 复制日志表（ISR，v2.1）────
+// 复制条目日志: key = [shard_len:u32][shard_bytes][seq:u64 BE]
+const CACHE_REPL_ENTRY_TABLE: redb::TableDefinition<&[u8], &[u8]> =
+    redb::TableDefinition::new("cache:repl_entries");
+// 持久化幂等键（Q2）: key = idempotency_key bytes
+const CACHE_REPL_APPLIED_KEYS: redb::TableDefinition<&[u8], ()> =
+    redb::TableDefinition::new("cache:repl_applied");
+// 各 shard 最后已应用序列号: key = shard bytes
+const CACHE_REPL_LOCAL_SEQ: redb::TableDefinition<&[u8], u64> =
+    redb::TableDefinition::new("cache:repl_local_seq");
 
 // ──── Key 编码辅助 ────
 
@@ -196,6 +209,8 @@ pub struct CacheService {
     db: RwLock<Option<redb::Database>>,
     started: RwLock<bool>,
     default_ttl_secs: u64,
+    /// ISR 复制管理器（None = 单 agent 本地语义，零复制路径保留，C6）
+    replication: RwLock<Option<Arc<crate::services::replication::ReplicationManager>>>,
 }
 
 impl std::fmt::Debug for CacheService {
@@ -215,7 +230,26 @@ impl CacheService {
             db: RwLock::new(None),
             started: RwLock::new(false),
             default_ttl_secs,
+            replication: RwLock::new(None),
         }
+    }
+
+    /// 挂载 ISR 复制管理器（None = 关闭复制，单 agent 零破坏）
+    pub fn set_replication(
+        &self,
+        manager: Option<Arc<crate::services::replication::ReplicationManager>>,
+    ) {
+        *self.replication.write() = manager;
+    }
+
+    /// 复制是否启用
+    pub fn replication_enabled(&self) -> bool {
+        self.replication.read().is_some()
+    }
+
+    /// 复制管理器引用（None = 复制关闭）
+    pub fn replication_manager(&self) -> Option<Arc<crate::services::replication::ReplicationManager>> {
+        self.replication.read().clone()
     }
 
     fn read_tx(&self) -> ServiceResult<redb::ReadTransaction> {
@@ -454,12 +488,18 @@ impl CacheService {
         Ok(())
     }
 
-    fn list_find_extreme(&self, key: &str, find_max: bool) -> ServiceResult<(Option<i64>, Option<Vec<u8>>)> {
+    /// 原子出队（G2，单写事务）：
+    /// 同一写事务内迭代前缀 range 找极值（跳过已过期）→ 事务内删除 → commit。
+    /// redb 单写者模型保证写事务串行化，消除并发重复出队 / 丢元素。
+    /// 已知代价（R3）：大 list 下 O(n) 定位极值，首版接受。
+    fn list_pop_atomic(&self, key: &str, find_max: bool) -> ServiceResult<Option<Vec<u8>>> {
         let prefix = list_key_prefix(key);
         let plen = prefix.len();
-        let rtx = self.read_tx()?;
-        let result = {
-            let table = rtx.open_table(LIST_TABLE)?;
+
+        let wtx = self.write_tx()?;
+        let popped: Option<Vec<u8>> = {
+            let mut table = wtx.open_table(LIST_TABLE)?;
+            // 写事务内找极值（跳过已过期）
             let mut best: Option<(i64, Vec<u8>)> = None;
             let range: std::ops::RangeFrom<&[u8]> = prefix.as_slice()..;
             for item in table.range(range)? {
@@ -478,44 +518,26 @@ impl CacheService {
                     }
                 }
             }
-            best
+            // 事务内删除
+            match best {
+                Some((idx, val)) => {
+                    let lk = encode_list_key(key, idx);
+                    table.remove(lk.as_slice())?;
+                    Some(val)
+                }
+                None => None,
+            }
         };
-        drop(rtx);
-        match result {
-            Some((idx, val)) => Ok((Some(idx), Some(val))),
-            None => Ok((None, None)),
-        }
-    }
-
-    fn list_remove_index(&self, key: &str, index: i64) -> ServiceResult<()> {
-        let lk = encode_list_key(key, index);
-        let wtx = self.write_tx()?;
-        {
-            let mut table = wtx.open_table(LIST_TABLE)?;
-            table.remove(lk.as_slice())?;
-        }
         wtx.commit()?;
-        Ok(())
+        Ok(popped)
     }
 
     pub fn list_pop_right(&self, key: &str) -> ServiceResult<Option<Vec<u8>>> {
-        let (idx, val) = self.list_find_extreme(key, true)?;
-        if let (Some(idx), Some(val)) = (idx, val) {
-            self.list_remove_index(key, idx)?;
-            Ok(Some(val))
-        } else {
-            Ok(None)
-        }
+        self.list_pop_atomic(key, true)
     }
 
     pub fn list_pop_left(&self, key: &str) -> ServiceResult<Option<Vec<u8>>> {
-        let (idx, val) = self.list_find_extreme(key, false)?;
-        if let (Some(idx), Some(val)) = (idx, val) {
-            self.list_remove_index(key, idx)?;
-            Ok(Some(val))
-        } else {
-            Ok(None)
-        }
+        self.list_pop_atomic(key, false)
     }
 
     pub fn list_range(&self, key: &str, start: i64, end: i64) -> ServiceResult<Vec<Vec<u8>>> {
@@ -822,6 +844,499 @@ impl CacheService {
     }
 }
 
+// ──── ISR 复制（v2.1 已落地）────
+//
+// 复制日志 / 持久化幂等键 / 本地序列号在本服务 redb 内与数据写同事务提交。
+// 复制条目携带 Leader 计算的**物理 key**（含 list index / hash field / set member）
+// 与 **绝对到期时间戳**（encode_value 内嵌 expires_at，C5），Follower 原样应用。
+// pop 仅 Leader 执行（C2）：Leader 单事务内原子出队 + 记录 CacheDelete 复制条目。
+//
+// 参见 docs/cache-mq-isr-evaluation.md §4。
+
+use crate::services::replication::{
+    IdempotencyKey, ReplicationEntry, ReplicationError, ReplicationOp, ReplicatedStore,
+};
+
+/// Cache 单 shard
+const CACHE_SHARD: &str = "cache";
+
+/// 复制日志 key: [shard_len:u32][shard][seq:u64 BE]
+fn encode_repl_key(shard: &str, seq: u64) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4 + shard.len() + 8);
+    v.extend_from_slice(&(shard.len() as u32).to_be_bytes());
+    v.extend_from_slice(shard.as_bytes());
+    v.extend_from_slice(&seq.to_be_bytes());
+    v
+}
+
+/// 复制日志前缀: [shard_len:u32][shard]
+fn encode_repl_prefix(shard: &str) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4 + shard.len());
+    v.extend_from_slice(&(shard.len() as u32).to_be_bytes());
+    v.extend_from_slice(shard.as_bytes());
+    v
+}
+
+/// 从复制日志 key 解码序列号
+fn decode_repl_seq(encoded: &[u8], prefix_len: usize) -> Option<u64> {
+    if encoded.len() < prefix_len + 8 {
+        return None;
+    }
+    Some(u64::from_be_bytes(encoded[prefix_len..prefix_len + 8].try_into().ok()?))
+}
+
+impl CacheService {
+    /// 生成缓存写幂等键（基于物理 key，全局唯一）
+    fn cache_idem_key(op: &str, key: &[u8]) -> IdempotencyKey {
+        IdempotencyKey::new(
+            format!("cache:{op}:{}", String::from_utf8_lossy(key)),
+            now_secs(),
+        )
+    }
+
+    /// 下一序列号（= 本地最后序列号 + 1）
+    fn next_sequence(&self) -> ServiceResult<u64> {
+        let rtx = self.read_tx()?;
+        let table = rtx.open_table(CACHE_REPL_LOCAL_SEQ)?;
+        let seq = match table.get(CACHE_SHARD.as_bytes())? {
+            Some(v) => v.value(),
+            None => 0,
+        };
+        Ok(seq + 1)
+    }
+
+    /// 在指定写事务内写入复制簿记（日志条目 + 持久化幂等键 + 本地序列号）
+    fn write_repl_bookkeeping_tx(
+        wtx: &redb::WriteTransaction,
+        entry: &ReplicationEntry,
+    ) -> ServiceResult<()> {
+        let rk = encode_repl_key(&entry.shard_id, entry.sequence_num);
+        let encoded = serde_json::to_vec(entry).map_err(|e| e.to_string())?;
+        let mut t = wtx.open_table(CACHE_REPL_ENTRY_TABLE)?;
+        t.insert(rk.as_slice(), encoded.as_slice())?;
+
+        let ik = entry.idempotency_key.to_string();
+        let mut at = wtx.open_table(CACHE_REPL_APPLIED_KEYS)?;
+        at.insert(ik.as_bytes(), ())?;
+
+        let sk = entry.shard_id.as_bytes();
+        let mut lt = wtx.open_table(CACHE_REPL_LOCAL_SEQ)?;
+        let cur = match lt.get(sk)? {
+            Some(v) => v.value(),
+            None => 0,
+        };
+        lt.insert(sk, cur.max(entry.sequence_num))?;
+        Ok(())
+    }
+
+    /// 单事务应用复制条目：幂等检查 + 数据 op（CachePut / CacheDelete）+ 簿记。
+    /// Leader 本地提交与 Follower 应用共用此路径（数据一致）。
+    fn apply_op_tx(&self, wtx: &redb::WriteTransaction, entry: &ReplicationEntry) -> ServiceResult<()> {
+        // 幂等检查（持久化键）
+        let ik = entry.idempotency_key.to_string();
+        let applied = {
+            let t = wtx.open_table(CACHE_REPL_APPLIED_KEYS)?;
+            let x = t.get(ik.as_bytes())?.is_some();
+            x
+        };
+        if applied {
+            return Ok(());
+        }
+        match &entry.operation {
+            ReplicationOp::CachePut { key, value, data_type } => match data_type.as_str() {
+                "string" => {
+                    let mut t = wtx.open_table(STRING_TABLE)?;
+                    t.insert(key.as_slice(), value.as_slice())?;
+                }
+                "hash" => {
+                    let mut t = wtx.open_table(HASH_TABLE)?;
+                    t.insert(key.as_slice(), value.as_slice())?;
+                }
+                "list" => {
+                    let mut t = wtx.open_table(LIST_TABLE)?;
+                    t.insert(key.as_slice(), value.as_slice())?;
+                }
+                "set" => {
+                    if value.len() != 8 {
+                        return Err("invalid set expires_at encoding (need 8 bytes)".into());
+                    }
+                    let exp = u64::from_be_bytes(value[..8].try_into().unwrap());
+                    let mut t = wtx.open_table(SET_TABLE)?;
+                    t.insert(key.as_slice(), exp)?;
+                }
+                other => return Err(format!("unknown cache data_type '{other}'").into()),
+            },
+            ReplicationOp::CacheDelete { key, data_type } => match data_type.as_str() {
+                "string" => {
+                    let mut t = wtx.open_table(STRING_TABLE)?;
+                    t.remove(key.as_slice())?;
+                }
+                "hash" => {
+                    let mut t = wtx.open_table(HASH_TABLE)?;
+                    t.remove(key.as_slice())?;
+                }
+                "list" => {
+                    let mut t = wtx.open_table(LIST_TABLE)?;
+                    t.remove(key.as_slice())?;
+                }
+                "set" => {
+                    let mut t = wtx.open_table(SET_TABLE)?;
+                    t.remove(key.as_slice())?;
+                }
+                other => return Err(format!("unknown cache data_type '{other}'").into()),
+            },
+            _ => return Err("cache cannot apply MqPublish op".into()),
+        }
+        Self::write_repl_bookkeeping_tx(wtx, entry)?;
+        Ok(())
+    }
+
+    /// Leader 本地单事务应用（幂等 + 数据 + 簿记）
+    fn replicated_apply_local(&self, entry: &ReplicationEntry) -> ServiceResult<()> {
+        let wtx = self.write_tx()?;
+        self.apply_op_tx(&wtx, entry)?;
+        wtx.commit()?;
+        Ok(())
+    }
+
+    /// 通用 Leader 复制写：构建 entry → 单事务本地应用 → 推送 ISR Followers →
+    /// min_isr 校验（同步复制）。返回 None 表示成功。
+    async fn replicated_write(&self, op: ReplicationOp) -> ServiceResult<()> {
+        let rm = self
+            .replication
+            .read()
+            .clone()
+            .ok_or_else(|| "replication not enabled".to_string())?;
+        if !rm.is_leader(CACHE_SHARD) {
+            return Err(format!(
+                "not leader for shard '{CACHE_SHARD}' (leader is {})",
+                rm.shard_leader(CACHE_SHARD)
+            )
+            .into());
+        }
+        let seq = self.next_sequence()?;
+        let ik = match &op {
+            ReplicationOp::CachePut { key, .. } => Self::cache_idem_key("put", key),
+            ReplicationOp::CacheDelete { key, .. } => Self::cache_idem_key("del", key),
+            _ => return Err("cache replicated_write: unexpected op".into()),
+        };
+        let entry = ReplicationEntry {
+            idempotency_key: ik,
+            shard_id: CACHE_SHARD.to_string(),
+            sequence_num: seq,
+            operation: op,
+        };
+        self.replicated_apply_local(&entry)?;
+        let acked = rm.push_to_followers(&entry).await.map_err(|e| e.to_string())?;
+        rm.ensure_isr(acked + 1).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// List 最大 index（读路径，Leader 用于分配新元素物理 key）
+    fn list_max_index(&self, key: &str) -> ServiceResult<i64> {
+        let prefix = list_key_prefix(key);
+        let plen = prefix.len();
+        let rtx = self.read_tx()?;
+        let table = rtx.open_table(LIST_TABLE)?;
+        let mut last = -1i64;
+        let range: std::ops::RangeFrom<&[u8]> = prefix.as_slice()..;
+        for item in table.range(range)? {
+            let (k, _) = item?;
+            let k = k.value();
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            if let Some(idx) = decode_list_index(k, plen) {
+                last = last.max(idx);
+            }
+        }
+        Ok(last)
+    }
+
+    /// List 最小 index（读路径，Leader 用于分配左推物理 key）
+    fn list_min_index(&self, key: &str) -> ServiceResult<i64> {
+        let prefix = list_key_prefix(key);
+        let plen = prefix.len();
+        let rtx = self.read_tx()?;
+        let table = rtx.open_table(LIST_TABLE)?;
+        let mut first: Option<i64> = None;
+        let range: std::ops::RangeFrom<&[u8]> = prefix.as_slice()..;
+        for item in table.range(range)? {
+            let (k, _) = item?;
+            let k = k.value();
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            if let Some(idx) = decode_list_index(k, plen) {
+                if first.map_or(true, |f| idx < f) {
+                    first = Some(idx);
+                }
+            }
+        }
+        Ok(first.unwrap_or(0))
+    }
+
+    // ──── 复制写路径（gRPC handler 在复制启用时调用）────
+
+    pub async fn string_put_replicated(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        ttl_secs: Option<u64>,
+    ) -> ServiceResult<()> {
+        let ttl = ttl_secs.unwrap_or(self.default_ttl_secs);
+        let encoded = encode_value(&value, ttl); // 含绝对到期时间戳（C5）
+        self.replicated_write(ReplicationOp::CachePut {
+            key: key.as_bytes().to_vec(),
+            value: encoded,
+            data_type: "string".to_string(),
+        })
+        .await
+    }
+
+    pub async fn string_delete_replicated(&self, key: &str) -> ServiceResult<bool> {
+        let existed = self.string_exists(key)?;
+        self.replicated_write(ReplicationOp::CacheDelete {
+            key: key.as_bytes().to_vec(),
+            data_type: "string".to_string(),
+        })
+        .await?;
+        Ok(existed)
+    }
+
+    pub async fn hash_field_put_replicated(
+        &self,
+        key: &str,
+        field: &str,
+        value: Vec<u8>,
+        ttl_secs: Option<u64>,
+    ) -> ServiceResult<()> {
+        let ttl = ttl_secs.unwrap_or(self.default_ttl_secs);
+        let encoded = encode_value(&value, ttl);
+        let hk = encode_hash_key(key, field);
+        self.replicated_write(ReplicationOp::CachePut {
+            key: hk,
+            value: encoded,
+            data_type: "hash".to_string(),
+        })
+        .await
+    }
+
+    pub async fn list_push_right_replicated(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        ttl_secs: Option<u64>,
+    ) -> ServiceResult<()> {
+        let ttl = ttl_secs.unwrap_or(self.default_ttl_secs);
+        let encoded = encode_value(&value, ttl);
+        let idx = self.list_max_index(key)? + 1;
+        let lk = encode_list_key(key, idx);
+        self.replicated_write(ReplicationOp::CachePut {
+            key: lk,
+            value: encoded,
+            data_type: "list".to_string(),
+        })
+        .await
+    }
+
+    pub async fn list_push_left_replicated(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        ttl_secs: Option<u64>,
+    ) -> ServiceResult<()> {
+        let ttl = ttl_secs.unwrap_or(self.default_ttl_secs);
+        let encoded = encode_value(&value, ttl);
+        let idx = self.list_min_index(key)? - 1;
+        let lk = encode_list_key(key, idx);
+        self.replicated_write(ReplicationOp::CachePut {
+            key: lk,
+            value: encoded,
+            data_type: "list".to_string(),
+        })
+        .await
+    }
+
+    /// 复制原子出队（C2：pop 仅 Leader 执行）。Leader 在单事务内
+    /// 原子出队并记录 CacheDelete 复制条目；Follower 收到删除后本地移除。
+    pub async fn list_pop_replicated(
+        &self,
+        key: &str,
+        find_max: bool,
+    ) -> ServiceResult<Option<Vec<u8>>> {
+        let rm = self
+            .replication
+            .read()
+            .clone()
+            .ok_or_else(|| "replication not enabled".to_string())?;
+        if !rm.is_leader(CACHE_SHARD) {
+            return Err(format!(
+                "not leader for shard '{CACHE_SHARD}' (leader is {})",
+                rm.shard_leader(CACHE_SHARD)
+            )
+            .into());
+        }
+        let seq = self.next_sequence()?;
+        let prefix = list_key_prefix(key);
+        let plen = prefix.len();
+        let wtx = self.write_tx()?;
+        let result: ServiceResult<Option<(Vec<u8>, ReplicationEntry)>> = (|| {
+            let mut table = wtx.open_table(LIST_TABLE)?;
+            let mut best: Option<(i64, Vec<u8>)> = None;
+            let range: std::ops::RangeFrom<&[u8]> = prefix.as_slice()..;
+            for item in table.range(range)? {
+                let (k, raw) = item?;
+                let k = k.value();
+                if !k.starts_with(&prefix) {
+                    break;
+                }
+                if let Some(idx) = decode_list_index(k, plen) {
+                    let is_better = match &best {
+                        Some((b, _)) => if find_max { idx > *b } else { idx < *b },
+                        None => true,
+                    };
+                    if is_better {
+                        if let Some(val) = decode_value(raw.value()) {
+                            best = Some((idx, val));
+                        }
+                    }
+                }
+            }
+            match best {
+                Some((idx, val)) => {
+                    let pkey = encode_list_key(key, idx);
+                    table.remove(pkey.as_slice())?;
+                    let entry = ReplicationEntry {
+                        idempotency_key: Self::cache_idem_key("pop", &pkey),
+                        shard_id: CACHE_SHARD.to_string(),
+                        sequence_num: seq,
+                        operation: ReplicationOp::CacheDelete {
+                            key: pkey,
+                            data_type: "list".to_string(),
+                        },
+                    };
+                    drop(table);
+                    Self::write_repl_bookkeeping_tx(&wtx, &entry)?;
+                    Ok(Some((val, entry)))
+                }
+                None => Ok(None),
+            }
+        })();
+        let popped = match result {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        };
+        wtx.commit()?;
+        match popped {
+            Some((val, entry)) => {
+                let acked = rm.push_to_followers(&entry).await.map_err(|e| e.to_string())?;
+                rm.ensure_isr(acked + 1).map_err(|e| e.to_string())?;
+                Ok(Some(val))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn set_add_replicated(
+        &self,
+        key: &str,
+        member: Vec<u8>,
+        ttl_secs: Option<u64>,
+    ) -> ServiceResult<bool> {
+        let ttl = ttl_secs.unwrap_or(self.default_ttl_secs);
+        let expires_at = encode_ttl(ttl);
+        let sk = encode_set_key(key, &member);
+        let existed = self.set_contains(key, &member)?;
+        self.replicated_write(ReplicationOp::CachePut {
+            key: sk,
+            value: expires_at.to_be_bytes().to_vec(),
+            data_type: "set".to_string(),
+        })
+        .await?;
+        Ok(!existed)
+    }
+}
+
+// ──── ReplicatedStore（复制存储接口实现）────
+
+impl ReplicatedStore for CacheService {
+    fn shards(&self) -> Vec<String> {
+        vec![CACHE_SHARD.to_string()]
+    }
+
+    fn last_local_sequence(&self, shard: &str) -> u64 {
+        let rtx = match self.read_tx() {
+            Ok(t) => t,
+            Err(_) => return 0,
+        };
+        let table = match rtx.open_table(CACHE_REPL_LOCAL_SEQ) {
+            Ok(t) => t,
+            Err(_) => return 0,
+        };
+        match table.get(shard.as_bytes()) {
+            Ok(Some(v)) => v.value(),
+            _ => 0,
+        }
+    }
+
+    fn apply_entry(&self, entry: &ReplicationEntry) -> Result<(), ReplicationError> {
+        let wtx = match self.write_tx() {
+            Ok(t) => t,
+            Err(e) => return Err(ReplicationError::Store(e.to_string())),
+        };
+        let result = self.apply_op_tx(&wtx, entry);
+        match result {
+            Ok(()) => {
+                wtx.commit().map_err(|e| ReplicationError::Store(e.to_string()))?;
+                Ok(())
+            }
+            Err(e) => Err(ReplicationError::Store(e.to_string())),
+        }
+    }
+
+    fn read_entries(&self, shard: &str, from_seq: u64, limit: u64) -> Vec<ReplicationEntry> {
+        let prefix = encode_repl_prefix(shard);
+        let plen = prefix.len();
+        let rtx = match self.read_tx() {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
+        };
+        let table = match rtx.open_table(CACHE_REPL_ENTRY_TABLE) {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        let range: std::ops::RangeFrom<&[u8]> = prefix.as_slice()..;
+        if let Ok(iter) = table.range(range) {
+            for item in iter {
+                let (k, raw) = match item {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let k = k.value();
+                if !k.starts_with(&prefix) {
+                    break;
+                }
+                let seq = match decode_repl_seq(k, plen) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if seq < from_seq {
+                    continue;
+                }
+                if limit > 0 && out.len() as u64 >= limit {
+                    break;
+                }
+                if let Ok(entry) = serde_json::from_slice::<ReplicationEntry>(raw.value()) {
+                    out.push(entry);
+                }
+            }
+        }
+        out
+    }
+}
+
 // ──── BaseService trait 实现 ────
 
 #[async_trait]
@@ -852,6 +1367,9 @@ impl BaseService for CacheService {
             wtx.open_table(LIST_TABLE)?;
             wtx.open_table(SET_TABLE)?;
             wtx.open_table(SHARD_TABLE)?;
+            wtx.open_table(CACHE_REPL_ENTRY_TABLE)?;
+            wtx.open_table(CACHE_REPL_APPLIED_KEYS)?;
+            wtx.open_table(CACHE_REPL_LOCAL_SEQ)?;
         }
         wtx.commit()?;
 
@@ -958,6 +1476,64 @@ mod tests {
         assert_eq!(svc.list_pop_left("l").unwrap(), Some(b"a".to_vec()));
         assert_eq!(svc.list_pop_right("l").unwrap(), Some(b"c".to_vec()));
         assert_eq!(svc.list_length("l").unwrap(), 1);
+    }
+
+    /// 并发 pop 原子性（G2，RED→GREEN）
+    ///
+    /// 不变量：无重复、无丢失、恰好 total 个、队列最终清空。
+    /// 旧实现（读事务找极值 + 写事务删除，两次提交）在高竞争下会
+    /// 重复出队（两个线程读到同一极值）→ unique < total。
+    /// 单写事务实现由 redb 单写者模型保证串行化 → 确定性通过。
+    #[test]
+    fn test_list_pop_concurrent_atomic() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let dir = temp_dir();
+        let svc = Arc::new(new_svc(&dir, 3600));
+
+        let total: usize = 200;
+        for i in 0..total {
+            svc.list_push_right("q", i.to_le_bytes().to_vec(), None).unwrap();
+        }
+
+        let threads = 8;
+        let barrier = Arc::new(Barrier::new(threads));
+        let mut handles = vec![];
+        for _ in 0..threads {
+            let svc = svc.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait(); // 同步起跑，放大竞争窗口
+                let mut got = Vec::new();
+                while let Some(v) = svc.list_pop_right("q").unwrap() {
+                    got.push(v);
+                }
+                got
+            }));
+        }
+        let mut results: Vec<Vec<u8>> = Vec::new();
+        for h in handles {
+            results.extend(h.join().unwrap());
+        }
+
+        let unique: HashSet<Vec<u8>> = results.iter().cloned().collect();
+        assert_eq!(
+            results.len(),
+            total,
+            "无丢失：应恰好 pop {} 个，实际 {}（重复出队会使总数膨胀）",
+            total,
+            results.len()
+        );
+        assert_eq!(
+            unique.len(),
+            total,
+            "无重复：应恰好 {} 个唯一值，实际 {}",
+            total,
+            unique.len()
+        );
+        assert_eq!(svc.list_length("q").unwrap(), 0, "队列应被完全清空");
     }
 
     #[test]

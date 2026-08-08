@@ -151,6 +151,38 @@ public final class CacheClientImpl extends AgentRpcClient implements CacheClient
     }
 
     @Override
+    public byte[] rpop(String key) {
+        CacheRPopRequest request = CacheRPopRequest.newBuilder().setKey(key).build();
+        try {
+            CacheRPopResponse response = callWithRetry(
+                    (ch, req) -> CacheGrpc.newBlockingStub(ch)
+                            .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                            .rPop((CacheRPopRequest) req),
+                    request, "cache.rpop");
+            return response.getFound() ? response.getValue().toByteArray() : null;
+        } catch (CoordException e) {
+            log.debug("Cache rpop failed: key={}", key);
+            return null;
+        }
+    }
+
+    @Override
+    public long llen(String key) {
+        CacheLLenRequest request = CacheLLenRequest.newBuilder().setKey(key).build();
+        try {
+            CacheLLenResponse response = callWithRetry(
+                    (ch, req) -> CacheGrpc.newBlockingStub(ch)
+                            .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                            .lLen((CacheLLenRequest) req),
+                    request, "cache.llen");
+            return response.getLength();
+        } catch (CoordException e) {
+            log.debug("Cache llen failed: key={}", key);
+            return 0;
+        }
+    }
+
+    @Override
     public void sadd(String key, byte[] member) {
         CacheSAddRequest request = CacheSAddRequest.newBuilder()
                 .setKey(key)

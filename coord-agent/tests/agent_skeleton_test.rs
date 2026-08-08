@@ -21,8 +21,11 @@ fn test_public_api_exports() {
         proxy_max_retries: 3,
         proxy_request_timeout_secs: 5,
         services: Default::default(),
+        replication: Default::default(),
+        replication_peers: Vec::new(),
         tls: None,
         thread_pools: Default::default(),
+        auth: Default::default(),
     };
 
     assert_eq!(config.agent_addr, "127.0.0.1:19527");

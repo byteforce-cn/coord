@@ -36,7 +36,9 @@ use coord_proto::lease::lease_server::LeaseServer;
 use coord_proto::watch::watch_server::WatchServer;
 use coord_proto::maintenance::maintenance_server::MaintenanceServer;
 use coord_proto::auth::auth_server::AuthServer;
+use coord_proto::capability::capability_registry_server::CapabilityRegistryServer;
 use coord_server::auth::{AuthManager, TokenManager, AuthService};
+use coord_server::auth::{CapabilityRegistry, CapabilityRegistryService};
 use coord_server::lease::LeaseManager;
 use coord_server::timer::TimerWheel;
 use coord_server::bff::{
@@ -1246,6 +1248,17 @@ async fn run_server(
         Arc::clone(&token_manager),
     ));
 
+    // 6a. Capability 注册中心（内置能力引导 + gRPC 服务）
+    let capability_registry = Arc::new(CapabilityRegistry::new());
+    capability_registry.bootstrap_builtin();
+    tracing::info!(
+        "Capability registry bootstrapped: {} built-in capabilities",
+        capability_registry.list().len()
+    );
+    let capability_svc = CapabilityRegistryServer::new(CapabilityRegistryService {
+        registry: capability_registry,
+    });
+
     // 7. 构建客户端 gRPC 服务
     let kv_svc = KvServer::from_arc(Arc::clone(&node));
     let txn_svc = TxnServer::from_arc(Arc::clone(&node));
@@ -1434,6 +1447,9 @@ async fn run_server(
     health_reporter
         .set_serving::<AuthServer<AuthService>>()
         .await;
+    health_reporter
+        .set_serving::<CapabilityRegistryServer<CapabilityRegistryService>>()
+        .await;
 
     // 10b. 初始化 gRPC Server Reflection 服务
     let reflection_service = tonic_reflection::server::Builder::configure()
@@ -1473,6 +1489,7 @@ async fn run_server(
             .add_service(watch_svc)
             .add_service(maintenance_svc)
             .add_service(auth_svc)
+            .add_service(capability_svc)
             .serve_with_incoming(
                 grpc_stream.take().expect("grpc_stream already consumed"),
             );
@@ -1501,6 +1518,7 @@ async fn run_server(
             .add_service(watch_svc)
             .add_service(maintenance_svc)
             .add_service(auth_svc)
+            .add_service(capability_svc)
             .serve_with_incoming(
                 grpc_stream.take().expect("grpc_stream already consumed"),
             );

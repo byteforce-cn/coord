@@ -21,6 +21,11 @@ use crate::proxy::AgentInner;
 use crate::service::{BaseService, ServiceResult};
 use crate::services::opa::{OpaEngine, OpaConfig};
 
+use coord_proto::kv::PutRequest;
+use coord_proto::txn::compare::{CompareResult, Target, TargetValue};
+use coord_proto::txn::request_op::Op;
+use coord_proto::txn::{Compare, RequestOp};
+
 // ──── 公共类型 ────
 
 /// 策略效果
@@ -82,8 +87,19 @@ pub struct BundleInfo {
     pub namespace: String,
     pub tenant_id: String,
     pub enabled: bool,
+    /// 当前版本号（每次成功上传/回滚 +1）
+    #[serde(default)]
+    pub version: i64,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// 策略包历史版本信息（用于回滚目标发现）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BundleVersionInfo {
+    pub version: i64,
+    pub created_at: i64,
+    pub is_current: bool,
 }
 
 /// 策略包完整内容（KV 存储格式）
@@ -94,8 +110,14 @@ struct BundleRecord {
 }
 
 impl BundleRecord {
+    /// 当前生效记录 key（唯一键 = tenant/namespace/name）
     fn storage_key(bundle_id: &str) -> Vec<u8> {
         format!("/_policy/bundles/{bundle_id}").into_bytes()
+    }
+
+    /// 历史版本快照 key（用于按版本回滚）
+    fn snapshot_key(bundle_id: &str, version: i64) -> Vec<u8> {
+        format!("/_policy/bundles/{bundle_id}@v{version}").into_bytes()
     }
 
     fn prefix_key() -> Vec<u8> {
@@ -106,9 +128,8 @@ impl BundleRecord {
         format!("{tenant_id}/{namespace}/{name}")
     }
 
-    fn new(tenant_id: &str, namespace: &str, name: &str, rego: &str) -> Self {
+    fn new(tenant_id: &str, namespace: &str, name: &str, rego: &str, version: i64, now: i64) -> Self {
         let bundle_id = Self::make_bundle_id(tenant_id, namespace, name);
-        let now = unix_ts_i64();
         Self {
             info: BundleInfo {
                 bundle_id,
@@ -116,6 +137,7 @@ impl BundleRecord {
                 namespace: namespace.to_string(),
                 tenant_id: tenant_id.to_string(),
                 enabled: true,
+                version,
                 created_at: now,
                 updated_at: now,
             },
@@ -307,43 +329,234 @@ impl PolicyService {
             .ok_or_else(|| "Policy bundle API requires AgentInner (server KV connection)".into())
     }
 
-    /// 上传/更新 Rego 策略包到 Server KV
+    /// 原子更新当前 bundle 记录（Txn CAS 基于 per-key version，防止并发覆盖丢更新）。
+    async fn cas_put_current(
+        inner: &Arc<AgentInner>,
+        key: &[u8],
+        new_value: Vec<u8>,
+        expected_version: i64,
+    ) -> Result<bool, String> {
+        let compare = Compare {
+            result: CompareResult::Equal as i32,
+            target: Target::Version as i32,
+            key: key.to_vec(),
+            target_value: Some(TargetValue::Version(expected_version)),
+        };
+        let put = RequestOp {
+            op: Some(Op::RequestPut(PutRequest {
+                key: key.to_vec(),
+                value: new_value,
+                lease_id: 0,
+                prev_kv: false,
+                request_id: vec![],
+            })),
+        };
+        let resp = inner
+            .client
+            .txn()
+            .txn(vec![compare], vec![put], vec![])
+            .await
+            .map_err(|e| format!("kv txn: {e}"))?;
+        Ok(resp.succeeded)
+    }
+
+    /// 读取当前 bundle 记录及其 per-key version（CAS 基准）。
+    /// 返回 (Option<record>, version)；记录不存在时 version 为 0。
+    async fn read_current(
+        inner: &Arc<AgentInner>,
+        key: &[u8],
+    ) -> Result<(Option<BundleRecord>, i64), String> {
+        let (kvs, _count, _rev) = inner
+            .client
+            .kv()
+            .range_with_lease_full(key, key, 1, 0, false, false)
+            .await
+            .map_err(|e| format!("kv range: {e}"))?;
+        match kvs.into_iter().next() {
+            Some((_k, v, _lease, ver)) if !v.is_empty() => {
+                let rec: BundleRecord = serde_json::from_slice(&v)
+                    .map_err(|e| format!("deserialize bundle: {e}"))?;
+                Ok((Some(rec), ver))
+            }
+            _ => Ok((None, 0)),
+        }
+    }
+
+    /// 上传/更新 Rego 策略包到 Server KV。
+    ///
+    /// 语义（按 (tenant_id, namespace, name) 唯一键）：
+    /// - 写入前先 OPA 编译校验，编译失败返回错误且不落库；
+    /// - 每次成功上传版本号 +1，并写入历史版本快照（`@v{n}`）供回滚；
+    /// - 当前记录通过 Txn CAS（per-key version）原子覆盖，并发冲突时有限重试；
+    /// - 更新保留原有 enabled 状态。
     pub async fn put_bundle(&self, tenant_id: &str, namespace: &str,
                             name: &str, rego: &str) -> ServiceResult<BundleInfo> {
         let inner = self.require_kv()?;
+
+        // 1. 写入前 OPA 编译校验（失败不落库、不改引擎）
+        self.opa_engine.validate_rego(rego)
+            .map_err(|e| format!("bundle rego compile error: {e}"))?;
+
         let bundle_id = BundleRecord::make_bundle_id(tenant_id, namespace, name);
         let key = BundleRecord::storage_key(&bundle_id);
+        let now = unix_ts_i64();
 
-        // 尝试读取已有记录（upsert）
-        let record = {
-            let pairs = inner.client.kv()
-                .range(&key, &key, 1, 0).await
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            if attempts > 5 {
+                return Err("put_bundle: too many concurrent conflicts".into());
+            }
+
+            // 2. 读取当前记录 + per-key version（CAS 基准）
+            let (current, cur_version) = Self::read_current(inner, &key).await?;
+            let new_version = current.as_ref().map_or(1, |c| c.info.version + 1);
+
+            // 3. 构建新记录（保留 enabled 状态）
+            let record = match current {
+                Some(mut rec) => {
+                    rec.rego_content = rego.to_string();
+                    rec.info.version = new_version;
+                    rec.info.updated_at = now;
+                    rec
+                }
+                None => BundleRecord::new(tenant_id, namespace, name, rego, new_version, now),
+            };
+
+            // 4. 写入历史版本快照（key 含版本号，幂等）
+            let snapshot_key = BundleRecord::snapshot_key(&bundle_id, new_version);
+            let snapshot_val = serde_json::to_vec(&record)
+                .map_err(|e| format!("serialize bundle: {e}"))?;
+            inner.client.kv().put(&snapshot_key, &snapshot_val).await
+                .map_err(|e| format!("kv put snapshot: {e}"))?;
+
+            // 5. 原子覆盖当前记录（CAS on version）
+            let value = serde_json::to_vec(&record)
+                .map_err(|e| format!("serialize bundle: {e}"))?;
+            if Self::cas_put_current(inner, &key, value, cur_version).await? {
+                // 6. 同步到本地 OpaEngine（仅 enabled bundle）
+                if record.info.enabled {
+                    let policy_id = format!("{}/{}", record.info.namespace, record.info.name);
+                    self.opa_engine.add_policy(&policy_id, &record.rego_content)
+                        .map_err(|e| format!("opa add_policy: {e}"))?;
+                }
+                tracing::info!(
+                    "Policy: put bundle '{}' v{} (tenant={}, ns={})",
+                    name, new_version, tenant_id, namespace
+                );
+                return Ok(record.info);
+            }
+            // CAS 冲突 → 重试
+        }
+    }
+
+    /// 按历史版本回滚策略包。
+    ///
+    /// 语义：读取 `@v{version}` 快照 → 编译校验 → 作为新版本（当前版本+1）原子写入，
+    /// 保留当前 enabled 状态；已是目标版本时返回错误。
+    pub async fn rollback_bundle(&self, bundle_id: &str, version: i64) -> ServiceResult<BundleInfo> {
+        let inner = self.require_kv()?;
+        if version < 1 {
+            return Err(format!("invalid rollback version: {version}").into());
+        }
+
+        // 1. 读取目标版本快照
+        let snapshot_key = BundleRecord::snapshot_key(bundle_id, version);
+        let snapshot = {
+            let kvs = inner.client.kv()
+                .range(&snapshot_key, &snapshot_key, 1, 0).await
                 .map_err(|e| format!("kv range: {e}"))?;
-            if let Some((_k, v)) = pairs.into_iter().next() {
-                let mut rec: BundleRecord = serde_json::from_slice(&v)
-                    .map_err(|e| format!("deserialize bundle: {e}"))?;
-                rec.rego_content = rego.to_string();
-                rec.info.updated_at = unix_ts_i64();
-                rec
-            } else {
-                BundleRecord::new(tenant_id, namespace, name, rego)
+            match kvs.into_iter().next() {
+                Some((_k, v)) if !v.is_empty() => {
+                    serde_json::from_slice::<BundleRecord>(&v)
+                        .map_err(|e| format!("deserialize snapshot: {e}"))?
+                }
+                _ => return Err(format!("bundle version {version} not found").into()),
             }
         };
 
-        let value = serde_json::to_vec(&record)
-            .map_err(|e| format!("serialize bundle: {e}"))?;
-        inner.client.kv().put(&key, &value).await
-            .map_err(|e| format!("kv put bundle: {e}"))?;
+        // 2. 编译校验快照 Rego
+        self.opa_engine.validate_rego(&snapshot.rego_content)
+            .map_err(|e| format!("bundle rego compile error: {e}"))?;
 
-        // 同步到本地 OpaEngine（仅 enabled bundle）
-        if record.info.enabled {
-            let policy_id = format!("{}/{}", record.info.namespace, record.info.name);
-            self.opa_engine.add_policy(&policy_id, &record.rego_content)
-                .map_err(|e| format!("opa add_policy: {e}"))?;
+        let key = BundleRecord::storage_key(bundle_id);
+        let now = unix_ts_i64();
+
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            if attempts > 5 {
+                return Err("rollback_bundle: too many concurrent conflicts".into());
+            }
+
+            // 3. 读取当前记录（存在性 + CAS 基准）
+            let (current, cur_version) = Self::read_current(inner, &key).await?;
+            let current = current.ok_or_else(|| format!("bundle '{bundle_id}' not found"))?;
+
+            if current.info.version == version {
+                return Err(format!("bundle already at version {version}").into());
+            }
+
+            // 4. 回滚 = 恢复快照内容为“新版本”（当前版本+1），保留 enabled
+            let new_version = current.info.version + 1;
+            let mut restored = snapshot.clone();
+            restored.info.version = new_version;
+            restored.info.enabled = current.info.enabled;
+            restored.info.created_at = current.info.created_at;
+            restored.info.updated_at = now;
+
+            // 5. 写回滚后的新版本快照
+            let new_snap_key = BundleRecord::snapshot_key(bundle_id, new_version);
+            let new_snap_val = serde_json::to_vec(&restored)
+                .map_err(|e| format!("serialize bundle: {e}"))?;
+            inner.client.kv().put(&new_snap_key, &new_snap_val).await
+                .map_err(|e| format!("kv put snapshot: {e}"))?;
+
+            // 6. 原子更新当前记录
+            let value = serde_json::to_vec(&restored)
+                .map_err(|e| format!("serialize bundle: {e}"))?;
+            if Self::cas_put_current(inner, &key, value, cur_version).await? {
+                let policy_id = format!("{}/{}", restored.info.namespace, restored.info.name);
+                self.opa_engine.add_policy(&policy_id, &restored.rego_content)
+                    .map_err(|e| format!("opa add_policy: {e}"))?;
+                tracing::info!(
+                    "Policy: rolled back bundle '{}' to v{} (now v{})",
+                    bundle_id, version, new_version
+                );
+                return Ok(restored.info);
+            }
+            // CAS 冲突 → 重试
         }
+    }
 
-        tracing::info!("Policy: put bundle '{}' (tenant={}, ns={})", name, tenant_id, namespace);
-        Ok(record.info)
+    /// 列出策略包的全部历史版本（用于回滚目标发现）。
+    pub async fn list_bundle_versions(&self, bundle_id: &str) -> ServiceResult<Vec<BundleVersionInfo>> {
+        let inner = self.require_kv()?;
+
+        // 当前记录（判断 is_current + 当前版本号）
+        let key = BundleRecord::storage_key(bundle_id);
+        let (current, _v) = Self::read_current(inner, &key).await?;
+        let current_version = current.as_ref().map(|c| c.info.version).unwrap_or(0);
+
+        // 扫描该 bundle 下的全部版本快照
+        let prefix = format!("/_policy/bundles/{bundle_id}@v").into_bytes();
+        let range_end = prefix_end(&prefix);
+        let pairs = inner.client.kv()
+            .range(&prefix, &range_end, 0, 0).await
+            .map_err(|e| format!("kv range: {e}"))?;
+
+        let mut versions: Vec<BundleVersionInfo> = Vec::new();
+        for (_k, v) in pairs {
+            if let Ok(rec) = serde_json::from_slice::<BundleRecord>(&v) {
+                versions.push(BundleVersionInfo {
+                    version: rec.info.version,
+                    created_at: rec.info.updated_at,
+                    is_current: rec.info.version == current_version,
+                });
+            }
+        }
+        versions.sort_by_key(|vi| vi.version);
+        Ok(versions)
     }
 
     /// 从 Server KV 删除策略包
@@ -378,7 +591,7 @@ impl PolicyService {
         Ok(true)
     }
 
-    /// 列出策略包（从 Server KV range scan）
+    /// 列出策略包（从 Server KV range scan；跳过历史版本快照）
     pub async fn list_bundles(&self, tenant_id: Option<&str>) -> ServiceResult<Vec<BundleInfo>> {
         let inner = self.require_kv()?;
         let prefix = BundleRecord::prefix_key();
@@ -389,7 +602,11 @@ impl PolicyService {
             .map_err(|e| format!("kv range: {e}"))?;
 
         let mut bundles: Vec<BundleInfo> = Vec::new();
-        for (_k, v) in pairs {
+        for (k, v) in pairs {
+            // 跳过版本快照（key 含 "@v"），仅返回当前记录
+            if String::from_utf8_lossy(&k).contains("@v") {
+                continue;
+            }
             if let Ok(rec) = serde_json::from_slice::<BundleRecord>(&v) {
                 if tenant_id.map_or(true, |tid| rec.info.tenant_id == tid) {
                     bundles.push(rec.info);
@@ -399,39 +616,49 @@ impl PolicyService {
         Ok(bundles)
     }
 
-    /// 启用/禁用策略包（更新 Server KV）
+    /// 启用/禁用策略包（更新 Server KV）。
+    ///
+    /// 语义：幂等（状态未变化直接返回成功）+ 原子（Txn CAS 基于 per-key version）。
     pub async fn set_bundle_enabled(&self, bundle_id: &str, enabled: bool) -> ServiceResult<bool> {
         let inner = self.require_kv()?;
         let key = BundleRecord::storage_key(bundle_id);
+        let now = unix_ts_i64();
 
-        let pairs = inner.client.kv()
-            .range(&key, &key, 1, 0).await
-            .map_err(|e| format!("kv range: {e}"))?;
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            if attempts > 5 {
+                return Err("set_bundle_enabled: too many concurrent conflicts".into());
+            }
 
-        let (_k, v) = pairs.into_iter().next()
-            .ok_or_else(|| format!("bundle '{bundle_id}' not found"))?;
+            let (rec, cur_version) = Self::read_current(inner, &key).await?;
+            let rec = rec.ok_or_else(|| format!("bundle '{bundle_id}' not found"))?;
 
-        let mut rec: BundleRecord = serde_json::from_slice(&v)
-            .map_err(|e| format!("deserialize bundle: {e}"))?;
-        rec.info.enabled = enabled;
-        rec.info.updated_at = unix_ts_i64();
+            // 幂等：状态未变化直接返回成功
+            if rec.info.enabled == enabled {
+                return Ok(true);
+            }
 
-        let new_val = serde_json::to_vec(&rec)
-            .map_err(|e| format!("serialize bundle: {e}"))?;
-        inner.client.kv().put(&key, &new_val).await
-            .map_err(|e| format!("kv put bundle: {e}"))?;
+            let mut rec = rec;
+            rec.info.enabled = enabled;
+            rec.info.updated_at = now;
 
-        // 同步到本地 OpaEngine
-        let policy_id = format!("{}/{}", rec.info.namespace, rec.info.name);
-        if enabled {
-            self.opa_engine.add_policy(&policy_id, &rec.rego_content)
-                .map_err(|e| format!("opa add_policy: {e}"))?;
-        } else {
-            self.opa_engine.remove_policy(&policy_id);
+            let new_val = serde_json::to_vec(&rec)
+                .map_err(|e| format!("serialize bundle: {e}"))?;
+            if Self::cas_put_current(inner, &key, new_val, cur_version).await? {
+                // 同步到本地 OpaEngine
+                let policy_id = format!("{}/{}", rec.info.namespace, rec.info.name);
+                if enabled {
+                    self.opa_engine.add_policy(&policy_id, &rec.rego_content)
+                        .map_err(|e| format!("opa add_policy: {e}"))?;
+                } else {
+                    self.opa_engine.remove_policy(&policy_id);
+                }
+                tracing::info!("Policy: bundle '{}' enabled={}", bundle_id, enabled);
+                return Ok(true);
+            }
+            // CAS 冲突 → 重试
         }
-
-        tracing::info!("Policy: bundle '{}' enabled={}", bundle_id, enabled);
-        Ok(true)
     }
 
     /// 解释策略决策（本地 OpaEngine）
@@ -563,5 +790,41 @@ mod tests {
     fn test_storage_key_format() {
         let key = BundleRecord::storage_key("tenant-1/default/my-policy");
         assert_eq!(String::from_utf8_lossy(&key), "/_policy/bundles/tenant-1/default/my-policy");
+    }
+
+    #[test]
+    fn test_snapshot_key_format() {
+        let key = BundleRecord::snapshot_key("tenant-1/default/my-policy", 3);
+        assert_eq!(String::from_utf8_lossy(&key), "/_policy/bundles/tenant-1/default/my-policy@v3");
+    }
+
+    #[test]
+    fn test_snapshot_key_distinct_from_current() {
+        // 快照 key 必须与当前记录 key 不同，且不与 list_bundles 前缀扫描混淆（@v 过滤）
+        let bundle_id = "t/d/p";
+        let current = BundleRecord::storage_key(bundle_id);
+        let snap = BundleRecord::snapshot_key(bundle_id, 1);
+        assert_ne!(current, snap);
+        assert!(String::from_utf8_lossy(&snap).contains("@v"));
+        assert!(!String::from_utf8_lossy(&current).contains("@v"));
+    }
+
+    #[test]
+    fn test_bundle_record_new_sets_version() {
+        let rec = BundleRecord::new("tenant-1", "default", "my-policy", "package p", 7, 1234);
+        assert_eq!(rec.info.version, 7);
+        assert!(rec.info.enabled);
+        assert_eq!(rec.info.created_at, 1234);
+        assert_eq!(rec.rego_content, "package p");
+    }
+
+    #[test]
+    fn test_bundle_info_version_roundtrip() {
+        // 旧记录（无 version 字段）反序列化时 version 默认 0，保持向后兼容
+        let old = br#"{"info":{"bundle_id":"t/d/p","name":"p","namespace":"d","tenant_id":"t","enabled":true,"created_at":1,"updated_at":2},"rego_content":"package p"}"#;
+        let rec: BundleRecord = serde_json::from_slice(old).expect("deserialize legacy record");
+        assert_eq!(rec.info.version, 0);
+        assert_eq!(rec.info.name, "p");
+        assert_eq!(rec.rego_content, "package p");
     }
 }

@@ -17,6 +17,11 @@ import cn.byteforce.coord.sdk.internal.proto.PolicyListBundlesRequest;
 import cn.byteforce.coord.sdk.internal.proto.PolicyListBundlesResponse;
 import cn.byteforce.coord.sdk.internal.proto.PolicySetBundleEnabledRequest;
 import cn.byteforce.coord.sdk.internal.proto.PolicySetBundleEnabledResponse;
+import cn.byteforce.coord.sdk.internal.proto.PolicyRollbackBundleRequest;
+import cn.byteforce.coord.sdk.internal.proto.PolicyRollbackBundleResponse;
+import cn.byteforce.coord.sdk.internal.proto.PolicyListBundleVersionsRequest;
+import cn.byteforce.coord.sdk.internal.proto.PolicyListBundleVersionsResponse;
+import cn.byteforce.coord.sdk.internal.proto.PolicyBundleVersionInfo;
 import cn.byteforce.coord.sdk.internal.proto.PolicyGrpc;
 import cn.byteforce.coord.sdk.policy.PolicyClient;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
@@ -122,13 +127,14 @@ public final class PolicyClientImpl extends AgentRpcClient implements PolicyClie
                         .putBundle((PolicyPutBundleRequest) r),
                 req, "policy.putBundle");
 
-        log.debug("Policy putBundle: name={}, bundleId={}", name, response.getBundleId());
+        log.debug("Policy putBundle: name={}, bundleId={}, version={}", name, response.getBundleId(), response.getVersion());
         return new PolicyClient.BundleInfo(
                 response.getBundleId(),
                 response.getName(),
                 response.getNamespace(),
                 tenantId,
                 response.getEnabled(),
+                response.getVersion(),
                 response.getCreatedAt(),
                 response.getUpdatedAt());
     }
@@ -165,6 +171,56 @@ public final class PolicyClientImpl extends AgentRpcClient implements PolicyClie
     }
 
     @Override
+    public PolicyClient.BundleInfo rollbackBundle(String bundleId, long version) {
+        PolicyRollbackBundleRequest req = PolicyRollbackBundleRequest.newBuilder()
+                .setBundleId(bundleId)
+                .setVersion(version)
+                .build();
+
+        PolicyRollbackBundleResponse response = callWithRetry(
+                (ch, r) -> PolicyGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .rollbackBundle((PolicyRollbackBundleRequest) r),
+                req, "policy.rollbackBundle");
+
+        var pb = response.getBundle();
+        log.debug("Policy rollbackBundle: bundleId={}, restored={}, now={}",
+                bundleId, response.getRestoredVersion(), response.getVersion());
+        return new PolicyClient.BundleInfo(
+                pb.getBundleId(),
+                pb.getName(),
+                pb.getNamespace(),
+                pb.getTenantId(),
+                pb.getEnabled(),
+                pb.getVersion(),
+                pb.getCreatedAt(),
+                pb.getUpdatedAt());
+    }
+
+    @Override
+    public List<PolicyClient.BundleVersionInfo> listBundleVersions(String bundleId) {
+        PolicyListBundleVersionsRequest req = PolicyListBundleVersionsRequest.newBuilder()
+                .setBundleId(bundleId)
+                .build();
+
+        PolicyListBundleVersionsResponse response = callWithRetry(
+                (ch, r) -> PolicyGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .listBundleVersions((PolicyListBundleVersionsRequest) r),
+                req, "policy.listBundleVersions");
+
+        List<PolicyClient.BundleVersionInfo> versions = new ArrayList<>();
+        for (PolicyBundleVersionInfo pv : response.getVersionsList()) {
+            versions.add(new PolicyClient.BundleVersionInfo(
+                    pv.getVersion(),
+                    pv.getCreatedAt(),
+                    pv.getIsCurrent()));
+        }
+        log.debug("Policy listBundleVersions: bundleId={}, count={}", bundleId, versions.size());
+        return versions;
+    }
+
+    @Override
     public List<PolicyClient.BundleInfo> listBundles(String tenantId) {
         PolicyListBundlesRequest.Builder reqBuilder = PolicyListBundlesRequest.newBuilder();
         if (tenantId != null && !tenantId.isEmpty()) {
@@ -185,6 +241,7 @@ public final class PolicyClientImpl extends AgentRpcClient implements PolicyClie
                     pb.getNamespace(),
                     pb.getTenantId(),
                     pb.getEnabled(),
+                    pb.getVersion(),
                     pb.getCreatedAt(),
                     pb.getUpdatedAt()));
         }

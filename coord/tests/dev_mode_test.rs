@@ -32,6 +32,8 @@ mod tests {
     use coord_proto::maintenance::maintenance_server::MaintenanceServer;
     use coord_proto::kv::kv_client::KvClient;
     use coord_proto::kv::{PutRequest, RangeRequest};
+    use coord_proto::agent::id_gen_client::IdGenClient;
+    use coord_proto::agent::IdGenNextIdRequest;
     use coord_agent::{AgentConfig, AgentServer};
     use std::collections::BTreeMap;
 
@@ -376,6 +378,64 @@ mod tests {
             .expect("agent should start even without server");
 
         tracing::info!("[dev test] Agent started in skeleton mode without server");
+
+        // 清理
+        agent_handle.abort();
+        let _ = tokio::time::timeout(Duration::from_secs(3), agent_handle).await;
+    }
+
+    // ──── 测试 4: 无 Server 时 IdGen 本地模式可用 ────
+
+    /// 验证无 Server 连接（skeleton 模式）时 IdGen gRPC 服务仍注册，
+    /// `nextId()` 返回本地雪花 ID（而非 UNIMPLEMENTED）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_dev_mode_agent_idgen_works_without_server() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("coord=info")
+            .try_init();
+
+        let agent_port = find_port();
+        let http_port = find_port();
+
+        // 启动 Agent（无 static_peers → skeleton 模式）
+        let agent_config = AgentConfig {
+            agent_addr: format!("127.0.0.1:{}", agent_port),
+            http_addr: format!("127.0.0.1:{}", http_port),
+            data_dir: "/tmp/coord-dev-agent-test".into(),
+            static_peers: vec![],
+            ..Default::default()
+        };
+
+        let server = AgentServer::new(agent_config);
+        let agent_handle = tokio::spawn(async move {
+            if let Err(e) = server.serve().await {
+                tracing::warn!("Agent server exited: {e}");
+            }
+        });
+
+        wait_for_port(&format!("127.0.0.1:{}", agent_port), Duration::from_secs(10))
+            .await
+            .expect("agent should start in skeleton mode");
+
+        // 通过 Agent gRPC 调用 IdGen.NextId（无 Server，应走本地雪花模式）
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", agent_port))
+            .unwrap()
+            .connect_timeout(Duration::from_secs(3))
+            .connect()
+            .await
+            .expect("connect to agent");
+
+        let mut idgen_client = IdGenClient::new(channel);
+        let resp = idgen_client
+            .next_id(IdGenNextIdRequest {
+                name: "test-order".to_string(),
+                step: 0,
+            })
+            .await
+            .expect("IdGen NextId should succeed without server (not UNIMPLEMENTED)");
+
+        let id = resp.into_inner().id;
+        assert!(id > 0, "local snowflake id should be positive, got {id}");
 
         // 清理
         agent_handle.abort();

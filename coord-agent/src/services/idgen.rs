@@ -6,6 +6,7 @@
 // 架构（v3.0）:
 // - 本地缓存号段，内存分配（延迟 <1ms）
 // - 断连时可继续分配（可能产生空洞）
+// - 无 Server 时降级为本地雪花生成（本机唯一、趋势递增）
 // - 支持趋势递增 / 号段模式
 //
 // 参见 docs/client-agent-architecture-v3.md §5.4。
@@ -16,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use parking_lot::RwLock as ParkingRwLock;
+use parking_lot::{Mutex, RwLock as ParkingRwLock};
 use tokio::sync::watch;
 
 use crate::proxy::AgentInner;
@@ -170,16 +171,99 @@ impl IdGenCache {
     }
 }
 
+// ──── 本地雪花生成器（无 Server 降级模式）────
+
+/// 本地雪花 ID 生成器
+///
+/// 64 位布局: [1 bit 符号(0)] [41 bit 毫秒时间戳] [10 bit 节点ID] [12 bit 序列号]
+/// 无 Server 连接时用于保证本机 ID 唯一且趋势递增。
+struct LocalSnowflake {
+    /// 10 bit 节点 ID
+    node_id: u64,
+    /// 自定义纪元（毫秒）
+    epoch_ms: u64,
+    /// 上次生成时间戳（毫秒）
+    last_ts: u64,
+    /// 同毫秒序列号
+    seq: u16,
+}
+
+impl LocalSnowflake {
+    /// 自定义纪元: 2023-11-14 00:00:00 UTC
+    const EPOCH_MS: u64 = 1_700_000_000_000;
+    /// 序列号上限（12 bit）
+    const MAX_SEQ: u16 = 0x0FFF;
+
+    fn new(node_id: u64) -> Self {
+        Self {
+            node_id: node_id & 0x3FF,
+            epoch_ms: Self::EPOCH_MS,
+            last_ts: 0,
+            seq: 0,
+        }
+    }
+
+    fn next_id(&mut self) -> u64 {
+        let now = unix_ts_ms();
+        // 时钟回拨保护：保持单调（不早于上次时间戳）
+        let mut ts = if now < self.last_ts { self.last_ts } else { now };
+
+        if ts == self.last_ts {
+            self.seq += 1;
+            if self.seq > Self::MAX_SEQ {
+                // 同毫秒序列耗尽，推进到下一毫秒
+                ts += 1;
+                self.last_ts = ts;
+                self.seq = 0;
+            }
+        } else {
+            self.last_ts = ts;
+            self.seq = 0;
+        }
+
+        let t = ts - self.epoch_ms;
+        (t << 22) | (self.node_id << 12) | self.seq as u64
+    }
+}
+
+fn unix_ts_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// 派生 10-bit 节点 ID：主机名 FNV-1a 哈希 ^ PID
+fn derive_node_id() -> u64 {
+    let host = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "coord-agent".to_string());
+    let pid = std::process::id() as u64;
+    (fnv1a(&host) ^ pid) & 0x3FF
+}
+
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 // ──── IdGenService ────
 
 /// ID 生成器服务
 ///
 /// 实现 `BaseService` trait，为应用提供高性能全局唯一 ID 生成。
+/// 有 Server 连接时使用 KV 号段模式；无 Server 时降级为本地雪花生成。
 pub struct IdGenService {
-    /// 到 Server 集群的内部客户端（共享）
-    inner: Arc<AgentInner>,
+    /// 到 Server 集群的内部客户端；None = 本地模式（无 Server）
+    inner: Option<Arc<AgentInner>>,
     /// 本地号段缓存
     cache: Arc<ParkingRwLock<IdGenCache>>,
+    /// 本地雪花生成器（仅本地模式使用）
+    local: Option<Mutex<LocalSnowflake>>,
     /// 健康状态
     healthy: ParkingRwLock<bool>,
     /// 关闭信号
@@ -189,36 +273,57 @@ pub struct IdGenService {
 impl IdGenService {
     pub const NAME: &'static str = "idgen";
 
-    pub fn new(inner: Arc<AgentInner>, default_step: u64) -> Self {
+    /// 创建 IdGen 服务。
+    ///
+    /// `inner` 为 `Some` 时使用 Server KV 号段模式；为 `None` 时降级为
+    /// 本地雪花生成（本机唯一、趋势递增，无需 Server）。
+    pub fn new(inner: Option<Arc<AgentInner>>, default_step: u64) -> Self {
+        let local = if inner.is_none() {
+            Some(Mutex::new(LocalSnowflake::new(derive_node_id())))
+        } else {
+            None
+        };
         Self {
             inner,
             cache: Arc::new(ParkingRwLock::new(IdGenCache::new(default_step))),
+            local,
             healthy: ParkingRwLock::new(false),
             shutdown_tx: ParkingRwLock::new(None),
         }
     }
 
-    /// 生成下一个 ID（本地分配，<1ms）
+    /// 生成下一个 ID
     ///
-    /// 若本地号段充足，直接返回；否则从 Server 申请新号段。
+    /// - Server 模式：本地号段充足时直接分配（<1ms），否则向 Server 申请新号段。
+    /// - 本地模式（无 Server）：雪花生成，本机唯一、趋势递增。
     pub async fn next_id(&self, name: &str) -> ServiceResult<u64> {
-        // 1. 尝试本地分配
-        if let Some(id) = self.cache.read().try_next_id(name) {
-            return Ok(id);
+        match &self.inner {
+            Some(inner) => {
+                // 1. 尝试本地分配
+                if let Some(id) = self.cache.read().try_next_id(name) {
+                    return Ok(id);
+                }
+                // 2. 本地号段耗尽，从 Server 申请新号段
+                self.allocate_segment(inner, name).await
+            }
+            None => {
+                let local = self
+                    .local
+                    .as_ref()
+                    .expect("local snowflake present in local mode");
+                Ok(local.lock().next_id())
+            }
         }
-
-        // 2. 本地号段耗尽，从 Server 申请新号段
-        self.allocate_segment(name).await
     }
 
     /// 从 Server 申请新号段
-    async fn allocate_segment(&self, name: &str) -> ServiceResult<u64> {
+    async fn allocate_segment(&self, inner: &AgentInner, name: &str) -> ServiceResult<u64> {
         let storage_key = IdSegment::storage_key(name);
         let step = self.cache.read().default_step;
 
         // 读取当前 Server 上的号段状态
         let segment = self
-            .read_or_init_segment(name, &storage_key, step)
+            .read_or_init_segment(inner, name, &storage_key, step)
             .await?;
 
         let new_max = segment.current_max + step;
@@ -233,7 +338,7 @@ impl IdGenService {
         let value = serde_json::to_vec(&updated)
             .map_err(|e| format!("serialize id segment: {e}"))?;
 
-        self.inner
+        inner
             .client
             .kv()
             .put(&storage_key, &value)
@@ -260,12 +365,12 @@ impl IdGenService {
     /// 读取或初始化 Server 上的号段
     async fn read_or_init_segment(
         &self,
+        inner: &AgentInner,
         name: &str,
         storage_key: &[u8],
         step: u64,
     ) -> ServiceResult<IdSegment> {
-        let pairs = self
-            .inner
+        let pairs = inner
             .client
             .kv()
             .range(storage_key, storage_key, 1, 0)
@@ -281,7 +386,7 @@ impl IdGenService {
             let segment = IdSegment::new(name, step);
             let value = serde_json::to_vec(&segment)
                 .map_err(|e| format!("serialize id segment: {e}"))?;
-            self.inner
+            inner
                 .client
                 .kv()
                 .put(storage_key, &value)
@@ -473,5 +578,51 @@ mod tests {
     #[test]
     fn test_id_gen_service_name_constant() {
         assert_eq!(IdGenService::NAME, "idgen");
+    }
+
+    // ──── LocalSnowflake 本地雪花生成器 ────
+
+    #[test]
+    fn test_local_snowflake_unique_and_monotonic() {
+        let mut sf = LocalSnowflake::new(42);
+        let mut prev = sf.next_id();
+        for _ in 0..10_000 {
+            let next = sf.next_id();
+            assert!(next > prev, "snowflake id must be monotonic: {next} <= {prev}");
+            prev = next;
+        }
+    }
+
+    #[test]
+    fn test_local_snowflake_node_id_bits() {
+        let mut sf = LocalSnowflake::new(0x3FF);
+        let id = sf.next_id();
+        // 节点 ID 位于 [12, 22) bit
+        assert_eq!((id >> 12) & 0x3FF, 0x3FF);
+    }
+
+    #[test]
+    fn test_local_snowflake_different_nodes_do_not_collide() {
+        let mut sf1 = LocalSnowflake::new(1);
+        let mut sf2 = LocalSnowflake::new(2);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            let id1 = sf1.next_id();
+            let id2 = sf2.next_id();
+            assert_ne!(id1, id2);
+            assert!(seen.insert(id1));
+            assert!(seen.insert(id2));
+        }
+    }
+
+    // ──── IdGenService 本地模式（无 Server）────
+
+    #[tokio::test]
+    async fn test_id_gen_service_local_mode_next_id() {
+        let svc = IdGenService::new(None, 1000);
+        let id1 = svc.next_id("orders").await.expect("next_id should work without server");
+        let id2 = svc.next_id("orders").await.expect("next_id should work without server");
+        assert!(id1 > 0);
+        assert!(id2 > id1, "local ids must be monotonic: {id2} <= {id1}");
     }
 }

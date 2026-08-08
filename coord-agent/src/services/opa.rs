@@ -97,11 +97,28 @@ impl OpaEngine {
 
     /// 加载/更新 Rego 策略
     pub fn add_policy(&self, policy_id: &str, rego: &str) -> Result<(), String> {
+        // 先编译校验：解析失败的源码不得进入 policy_sources，
+        // 避免残留坏源码毒化后续 rebuild_engine。
+        let mut probe = Engine::new();
+        probe
+            .add_policy(policy_id.to_string(), rego.to_string())
+            .map_err(|e| format!("OPA policy parse error in '{policy_id}': {e}"))?;
+
         self.policy_sources.write().insert(policy_id.to_string(), rego.to_string());
         self.rebuild_engine()?;
         self.cache.write().clear();
         let count = self.policy_sources.read().len();
         tracing::info!("OPA: loaded policy '{policy_id}' ({count} total)");
+        Ok(())
+    }
+
+    /// 仅编译校验 Rego 源码（不加载到引擎）。
+    /// 用于 bundle 写入前校验，失败时保证不落库、不改动引擎状态。
+    pub fn validate_rego(&self, rego: &str) -> Result<(), String> {
+        let mut probe = Engine::new();
+        probe
+            .add_policy("_validate".to_string(), rego.to_string())
+            .map_err(|e| format!("OPA policy parse error: {e}"))?;
         Ok(())
     }
 
@@ -243,10 +260,56 @@ impl OpaEngine {
             .map_err(|e| format!("trace serialization error: {e}"))
     }
 
+    /// 通用 Rego 求值：支持 `data.<package>.<rule>` 与纯表达式，返回 JSON 可序列化的结果值。
+    ///
+    /// 语义约定（与 CheckPermission 的 error/deny 区分）：
+    /// - 求值错误（语法/输入/运行时）→ `Err`
+    /// - 无匹配结果 → `Ok(Null)`（相当于 deny/未定义）
+    /// - 单结果单表达式 → 返回该表达式值（如 `false` / 对象 `{field,operator,value}`）
+    /// - 多结果或多表达式 → 返回数组
+    ///
+    /// 注意：原始求值不做结果缓存（query/input 任意，缓存键无法稳定界定）。
+    pub fn eval_query(&self, query: &str, input_json: &str) -> Result<Value, String> {
+        let input_value: Value = serde_json::from_str(input_json)
+            .map_err(|e| format!("invalid input JSON: {e}"))?;
+
+        let mut engine = self.engine.write();
+        engine.set_input(input_value);
+
+        let results = engine
+            .eval_query(query.to_string(), false)
+            .map_err(|e| format!("OPA evaluation error: {e}"))?;
+
+        if results.result.is_empty() {
+            return Ok(Value::Null);
+        }
+
+        let first = &results.result[0];
+        if first.expressions.len() == 1 {
+            return Ok(first.expressions[0].value.clone());
+        }
+
+        let vals: Vec<Value> = first.expressions.iter().map(|e| e.value.clone()).collect();
+        Ok(Value::Array(vals.into()))
+    }
+
     // ──── 内部方法 ────
 
     fn cache_key(package: &str, input: &OpaInput) -> String {
-        format!("{}:{}:{}:{}", package, input.subject, input.action, input.resource)
+        // context 必须纳入缓存键：相同 subject/action/resource 但不同 context
+        // （如 IP/租户/时间等 ABAC 属性）会得出不同决策，漏掉会导致错误命中。
+        let mut ctx_pairs: Vec<(String, String)> = input
+            .context
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        ctx_pairs.sort();
+        let ctx = ctx_pairs
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        format!("{}:{}:{}:{}:{}", package, input.subject, input.action, input.resource, ctx)
     }
 
     fn build_input(input: &OpaInput) -> Value {
@@ -408,5 +471,127 @@ allow if {
         let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
         let result = engine.explain("data.test.rbac.allow", "not-json");
         assert!(result.is_err());
+    }
+
+    // ──── eval_query（raw rego 求值）────
+
+    fn to_json(v: &Value) -> serde_json::Value {
+        serde_json::to_value(v).expect("serialize value")
+    }
+
+    const FILTER_REGO: &str = r#"
+package filter
+
+default conditions := {}
+
+conditions := {"field": "dept", "operator": "eq", "value": input.dept} if {
+    input.enabled == true
+}
+"#;
+
+    #[test]
+    fn test_eval_query_data_rule_bool() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        engine.add_policy("test.rbac", TEST_REGO).unwrap();
+        let result = engine.eval_query("data.test.rbac.allow", r#"{"subject":"alice","action":"read"}"#).expect("eval");
+        assert_eq!(to_json(&result), serde_json::json!(true));
+    }
+
+    #[test]
+    fn test_eval_query_deny_is_false() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        engine.add_policy("test.rbac", TEST_REGO).unwrap();
+        let result = engine.eval_query("data.test.rbac.allow", r#"{"subject":"bob","action":"write"}"#).expect("eval");
+        assert_eq!(to_json(&result), serde_json::json!(false));
+    }
+
+    #[test]
+    fn test_eval_query_pure_expression() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        // 纯表达式（不依赖策略包）
+        let result = engine.eval_query("1 + 1 == 2", "{}").expect("eval");
+        assert_eq!(to_json(&result), serde_json::json!(true));
+    }
+
+    #[test]
+    fn test_eval_query_object_result() {
+        // 结构化条件生成（{field, operator, value}）用例
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        engine.add_policy("filter.rego", FILTER_REGO).unwrap();
+        let result = engine.eval_query("data.filter.conditions", r#"{"enabled":true,"dept":"sales"}"#).expect("eval");
+        assert_eq!(
+            to_json(&result),
+            serde_json::json!({"field": "dept", "operator": "eq", "value": "sales"})
+        );
+    }
+
+    #[test]
+    fn test_eval_query_no_match_returns_null() {
+        // 无匹配结果 = deny/未定义 → null（与错误可区分）
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        engine.add_policy("filter.rego", FILTER_REGO).unwrap();
+        // 查询不存在的 rule（无 default）→ 空结果 → null
+        let result = engine.eval_query("data.filter.undefined_rule", r#"{"enabled":true}"#).expect("eval");
+        assert_eq!(to_json(&result), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_eval_query_invalid_input_errors() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        let result = engine.eval_query("data.test.rbac.allow", "not-json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_eval_query_bad_query_errors() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        let result = engine.eval_query("this is not rego!!!", "{}");
+        assert!(result.is_err());
+    }
+
+    // ──── validate_rego / 编译前置校验 ────
+
+    #[test]
+    fn test_validate_rego_ok() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        assert!(engine.validate_rego(TEST_REGO).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rego_rejects_invalid() {
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        assert!(engine.validate_rego("package broken\nallow if {").is_err());
+    }
+
+    #[test]
+    fn test_add_policy_parse_error_does_not_poison() {
+        // 回归：解析失败的源码不得残留 policy_sources，否则毒化后续 rebuild
+        let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
+        assert!(engine.add_policy("bad.rego", "package broken\nallow if {").is_err());
+        assert_eq!(engine.policy_count(), 0);
+
+        // 修复后仍可正常加载（evaluate 需用 Rego 声明的 package 名）
+        engine.add_policy("good.rego", TEST_REGO).expect("add good");
+        assert_eq!(engine.policy_count(), 1);
+        let input = OpaInput { subject: "alice".into(), action: "read".into(), resource: "/data".into(), context: HashMap::new() };
+        assert!(engine.evaluate("test.rbac", &input).unwrap().allowed);
+    }
+
+    // ──── 缓存键正确性（context 必须纳入）────
+
+    #[test]
+    fn test_cache_key_includes_context() {
+        // 相同 subject/action/resource、不同 context → 必须不同缓存键（避免错误命中）
+        let base = OpaInput { subject: "bob".into(), action: "read".into(), resource: "/data".into(), context: Default::default() };
+        let mut with_ip = base.clone();
+        with_ip.context.insert("ip".into(), "10.0.0.1".into());
+        let mut other_ip = base.clone();
+        other_ip.context.insert("ip".into(), "10.0.0.2".into());
+
+        let k1 = OpaEngine::cache_key("pkg", &base);
+        let k2 = OpaEngine::cache_key("pkg", &with_ip);
+        let k3 = OpaEngine::cache_key("pkg", &other_ip);
+        assert_ne!(k1, k2);
+        assert_ne!(k2, k3);
     }
 }

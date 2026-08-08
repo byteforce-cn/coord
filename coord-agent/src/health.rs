@@ -132,3 +132,32 @@ fn handle_health_ready(
         ("503 Service Unavailable", "application/json", r#"{"status":"NOT_READY"}"#.to_string())
     }
 }
+
+// ──── gRPC Health 服务（coord.agent.Health）────
+
+/// 自定义 `coord.agent.Health/Check` gRPC 服务实现。
+///
+/// # 背景（误报修复）
+/// coord agent 不实现标准 gRPC health 协议（grpc.health.v1.Health），
+/// Java SDK `healthCheck()` 实际调用的是 agent_api.proto 中自定义的
+/// `coord.agent.Health/Check`——此前 Agent 未注册该服务，
+/// 导致 SDK 收到 UNIMPLEMENTED → 返回 NOT_SERVING 误报，
+/// 而注册/ID 生成等服务实际可用。
+///
+/// 因此：注册本服务并返回 SERVING（存活语义，与 HTTP `/health` 一致），
+/// 消除该误报指示器；健康/就绪状态以 `/api/v1/health` 为准。
+/// 已反馈 jinhe-starter/coord 团队（见 .github/pr/）。
+#[derive(Debug, Default)]
+pub struct GrpcHealthService;
+
+#[tonic::async_trait]
+impl coord_proto::agent::health_server::Health for GrpcHealthService {
+    async fn check(
+        &self,
+        _request: tonic::Request<coord_proto::agent::HealthCheckRequest>,
+    ) -> Result<tonic::Response<coord_proto::agent::HealthCheckResponse>, tonic::Status> {
+        Ok(tonic::Response::new(coord_proto::agent::HealthCheckResponse {
+            status: coord_proto::agent::health_check_response::ServingStatus::Serving as i32,
+        }))
+    }
+}

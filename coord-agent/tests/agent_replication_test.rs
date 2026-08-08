@@ -136,14 +136,16 @@ fn test_replication_entry_mq_publish() {
         "shard-mq-1".to_string(),
         "orders".to_string(),
         0,
+        7, // Leader 分配的全局一致 offset（C1）
         b"hello world".to_vec(),
         42,
     );
 
-    assert!(matches!(entry.operation, ReplicationOp::MqPublish { .. }));
+    assert!(matches!(entry.operation, ReplicationOp::MqPublish { offset: 7, .. }));
     let json = serde_json::to_string(&entry).unwrap();
     let decoded: ReplicationEntry = serde_json::from_str(&json).unwrap();
     assert_eq!(entry.sequence_num, decoded.sequence_num);
+    assert_eq!(entry.operation, decoded.operation);
 }
 
 // ──── 5. IdempotencyGuard 幂等保护 ────

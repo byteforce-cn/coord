@@ -375,6 +375,9 @@ service Cache {
     // List operations
     rpc LPush(CacheLPushRequest) returns (CacheLPushResponse);
     rpc LRange(CacheLRangeRequest) returns (CacheLRangeResponse);
+    // 原子出队（单写事务，消除并发重复/丢失）
+    rpc RPop(CacheRPopRequest) returns (CacheRPopResponse);
+    rpc LLen(CacheLLenRequest) returns (CacheLLenResponse);
     // Set operations
     rpc SAdd(CacheSAddRequest) returns (CacheSAddResponse);
     rpc SMembers(CacheSMembersRequest) returns (CacheSMembersResponse);
@@ -450,6 +453,23 @@ message CacheLRangeResponse {
     repeated bytes values = 1;
 }
 
+message CacheRPopRequest {
+    string key = 1;
+}
+
+message CacheRPopResponse {
+    bytes value = 1;
+    bool found = 2;
+}
+
+message CacheLLenRequest {
+    string key = 1;
+}
+
+message CacheLLenResponse {
+    int64 length = 1;
+}
+
 message CacheSAddRequest {
     string key = 1;
     bytes member = 2;
@@ -474,6 +494,10 @@ service MQ {
     rpc Publish(MqPublishRequest) returns (MqPublishResponse);
     rpc Subscribe(MqSubscribeRequest) returns (stream MqMessage);
     rpc Ack(MqAckRequest) returns (MqAckResponse);
+    // 按 offset 增量拉取（Phase 1: 先 poll 后 streaming，业务侧 poll+ack 即得 at-least-once）
+    rpc Poll(MqPollRequest) returns (MqPollResponse);
+    // 读取死信队列（可选扩展：毒消息可观测）
+    rpc PollDlq(MqPollDlqRequest) returns (MqPollDlqResponse);
 }
 
 message MqCreateTopicRequest {
@@ -517,6 +541,123 @@ message MqAckRequest {
 }
 
 message MqAckResponse {}
+
+message MqPollRequest {
+    string topic = 1;
+    int32 partition = 2;
+    string consumer_group = 3;
+    int64 start_offset = 4;
+    int32 max_count = 5;
+}
+
+message MqPollResponse {
+    repeated MqMessage messages = 1;
+}
+
+message MqPollDlqRequest {
+    string topic = 1;
+    int32 partition = 2;
+    int32 max_count = 3;
+}
+
+message MqPollDlqResponse {
+    repeated MqMessage messages = 1;
+}
+
+// ============================================================
+// Replica — Agent↔Agent 数据复制 (ISR)
+// ============================================================
+
+// 跨 Agent ISR 复制服务（Phase A 已落地）。
+//
+// 数据面写路径（Cache/MQ）经分区 Leader 本地提交（含复制条目同事务持久化）
+// 后，通过本服务把 ReplicationEntry 推送到 ISR Followers 并等待确认；
+// Follower 落后时经 Reconcile 拉取缺失序列号区间重放；IsrHeartbeat 双向
+// 心跳维护 ISR 成员关系并交换各 shard 最后序列号（落后检测）。
+//
+// 语义与决策见 docs/cache-mq-isr-evaluation.md §4（C1-C7）。
+service Replica {
+    // Leader → Follower: 应用一条复制条目（幂等；重复条目返回 applied=true）
+    rpc Apply(ReplicaApplyRequest) returns (ReplicaApplyResponse);
+    // Follower → Leader: 拉取缺失序列号区间的复制条目（stream 回放）
+    rpc Reconcile(ReplicaReconcileRequest) returns (stream ReplicaEntry);
+    // 双向心跳: 维护 ISR 成员关系 + 交换各 shard 最后序列号（落后检测）
+    rpc IsrHeartbeat(ReplicaHeartbeatRequest) returns (ReplicaHeartbeatResponse);
+}
+
+message ReplicaApplyRequest {
+    ReplicaEntry entry = 1;
+}
+
+message ReplicaApplyResponse {
+    // 是否已应用（true = 已应用或幂等跳过，false = 拒绝）
+    bool applied = 1;
+    // 应用后该 shard 的最后序列号
+    uint64 last_sequence = 2;
+}
+
+message ReplicaReconcileRequest {
+    string shard_id = 1;
+    // 缺失起始序列号（含）
+    uint64 start_sequence = 2;
+    // 单次拉取上限（0 = 服务端默认 1000）
+    uint64 limit = 3;
+}
+
+message ReplicaEntry {
+    string idempotency_key = 1;
+    uint64 idempotency_timestamp_ms = 2;
+    string shard_id = 3;
+    uint64 sequence_num = 4;
+    ReplicaOp operation = 5;
+}
+
+message ReplicaOp {
+    oneof op {
+        ReplicaCachePut cache_put = 1;
+        ReplicaCacheDelete cache_delete = 2;
+        ReplicaMqPublish mq_publish = 3;
+    }
+}
+
+message ReplicaCachePut {
+    // 物理 key：string=原 key；hash=key\0field；list=key\0index；set=key\0member
+    bytes key = 1;
+    // 编码后的值（含 Leader 计算的绝对到期时间戳，TTL 决策 C5）
+    bytes value = 2;
+    string data_type = 3;
+}
+
+message ReplicaCacheDelete {
+    bytes key = 1;
+    string data_type = 2;
+}
+
+message ReplicaMqPublish {
+    string topic = 1;
+    uint32 partition = 2;
+    // Leader 独占分配的全局一致 offset（决策 C1）
+    uint64 offset = 3;
+    bytes payload = 4;
+}
+
+message ReplicaHeartbeatRequest {
+    string agent_addr = 1;
+    // 本 agent 各 shard 的最后序列号（Leader 侧用于落后检测 / Follower 侧声明进度）
+    repeated ReplicaShardProgress progress = 2;
+}
+
+message ReplicaShardProgress {
+    string shard_id = 1;
+    uint64 last_sequence = 2;
+}
+
+message ReplicaHeartbeatResponse {
+    // 本 agent 是否将该对端视为 ISR 成员
+    bool in_isr = 1;
+    // Leader 侧各 shard 的最后序列号（Follower 据此判断是否落后）
+    repeated ReplicaShardProgress leader_progress = 2;
+}
 
 // ============================================================
 // Scheduler — Distributed Scheduler
@@ -716,11 +857,15 @@ service Policy {
     // 策略解释 — 返回决策 trace，说明为什么允许/拒绝
     rpc Explain(PolicyExplainRequest) returns (PolicyExplainResponse);
 
-    // 策略包管理 — Rego bundle CRUD
+    // 策略包管理 — Rego bundle CRUD（写入前 OPA 编译校验 + 版本化 + 原子覆盖）
     rpc PutBundle(PolicyPutBundleRequest) returns (PolicyPutBundleResponse);
     rpc DeleteBundle(PolicyDeleteBundleRequest) returns (PolicyDeleteBundleResponse);
     rpc ListBundles(PolicyListBundlesRequest) returns (PolicyListBundlesResponse);
     rpc SetBundleEnabled(PolicySetBundleEnabledRequest) returns (PolicySetBundleEnabledResponse);
+    // 按历史版本回滚（恢复快照内容并生成新版本）
+    rpc RollbackBundle(PolicyRollbackBundleRequest) returns (PolicyRollbackBundleResponse);
+    // 列出 bundle 全部历史版本（用于回滚目标发现）
+    rpc ListBundleVersions(PolicyListBundleVersionsRequest) returns (PolicyListBundleVersionsResponse);
 }
 
 message PolicyCheckPermissionRequest {
@@ -771,6 +916,7 @@ message PolicyPutBundleResponse {
     int64 created_at = 4;   // UNIX epoch seconds
     int64 updated_at = 5;
     bool enabled = 6;
+    int64 version = 7;      // 当前版本号（每次成功上传 +1）
 }
 
 message PolicyDeleteBundleRequest {
@@ -797,6 +943,7 @@ message PolicyBundleInfo {
     bool enabled = 5;
     int64 created_at = 6;
     int64 updated_at = 7;
+    int64 version = 8;      // 当前版本号
 }
 
 message PolicySetBundleEnabledRequest {
@@ -806,6 +953,34 @@ message PolicySetBundleEnabledRequest {
 
 message PolicySetBundleEnabledResponse {
     bool success = 1;
+}
+
+// ——— Bundle 版本回滚 ———
+
+message PolicyRollbackBundleRequest {
+    string bundle_id = 1;   // 策略包 ID（tenant/namespace/name）
+    int64 version = 2;      // 要回滚到的历史版本号（>=1）
+}
+
+message PolicyRollbackBundleResponse {
+    bool success = 1;
+    int64 version = 2;          // 回滚后的当前版本号（原当前版本 +1）
+    int64 restored_version = 3; // 恢复到的历史版本号
+    PolicyBundleInfo bundle = 4; // 回滚后的完整 bundle 信息
+}
+
+message PolicyListBundleVersionsRequest {
+    string bundle_id = 1;
+}
+
+message PolicyListBundleVersionsResponse {
+    repeated PolicyBundleVersionInfo versions = 1;
+}
+
+message PolicyBundleVersionInfo {
+    int64 version = 1;
+    int64 created_at = 2;   // 该版本写入时间（UNIX epoch seconds）
+    bool is_current = 3;    // 是否为当前生效版本
 }
 
 // ============================================================
@@ -956,6 +1131,10 @@ service Pki {
     rpc RenewCert(PkiRenewCertRequest) returns (PkiRenewCertResponse);
     rpc VerifyCert(PkiVerifyCertRequest) returns (PkiVerifyCertResponse);
     rpc GetCaCert(PkiGetCaCertRequest) returns (PkiGetCaCertResponse);
+    // ISSUE-000 Phase 2: 平滑轮换（按 CN 轮换 + 列表 + 幂等取回）
+    rpc RotateCert(PkiRotateCertRequest) returns (PkiRotateCertResponse);
+    rpc ListCerts(PkiListCertsRequest) returns (PkiListCertsResponse);
+    rpc GetCertByCN(PkiGetCertByCNRequest) returns (PkiGetCertByCNResponse);
 }
 
 message PkiInitCaRequest {
@@ -976,6 +1155,8 @@ message PkiIssueCertResponse {
     int64 not_before = 4;    // UNIX epoch seconds
     int64 not_after = 5;     // UNIX epoch seconds
     string serial = 6;       // hex-encoded
+    string status = 7;       // active / retired
+    string parent_serial = 8; // 轮换链（首次签发为空）
 }
 
 message PkiRenewCertRequest {
@@ -990,6 +1171,61 @@ message PkiRenewCertResponse {
     int64 not_before = 4;
     int64 not_after = 5;
     string serial = 6;
+    string status = 7;
+    string parent_serial = 8;
+}
+
+// 按 CN 显式轮换：签发新 active，旧证书标记 retired 保留至 not_after
+message PkiRotateCertRequest {
+    string common_name = 1;
+    int64 ttl_seconds = 2;
+}
+
+message PkiRotateCertResponse {
+    string common_name = 1;
+    string cert_pem = 2;
+    string key_pem = 3;
+    int64 not_before = 4;
+    int64 not_after = 5;
+    string serial = 6;
+    string status = 7;
+    string parent_serial = 8;
+}
+
+// 按 CN 取当前 + 历史证书列表（验签方按 serial/kid 构建多密钥 JWKS）
+message PkiListCertsRequest {
+    string common_name = 1;
+}
+
+message PkiListCertsResponse {
+    repeated PkiCertSummary certs = 1;
+}
+
+// 证书摘要：不含私钥（ListCerts 仅用于验签方构建公钥 JWKS）
+message PkiCertSummary {
+    string common_name = 1;
+    string cert_pem = 2;
+    int64 not_before = 3;    // UNIX epoch seconds
+    int64 not_after = 4;     // UNIX epoch seconds
+    string serial = 5;       // hex-encoded
+    string status = 6;       // active / retired
+    string parent_serial = 7;
+}
+
+// 按 CN 幂等取回当前有效证书（含私钥，供持有方恢复签名能力）
+message PkiGetCertByCNRequest {
+    string common_name = 1;
+}
+
+message PkiGetCertByCNResponse {
+    string common_name = 1;
+    string cert_pem = 2;
+    string key_pem = 3;
+    int64 not_before = 4;
+    int64 not_after = 5;
+    string serial = 6;
+    string status = 7;
+    string parent_serial = 8;
 }
 
 message PkiVerifyCertRequest {

@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -39,7 +40,9 @@ class WatchManagerTest {
     @Test
     void shouldDeliverEventsToHandler() throws Exception {
         CountDownLatch latch = new CountDownLatch(2);
-        List<String> received = new ArrayList<>();
+        // WatchManager dispatches each event on its own virtual thread, so the
+        // collector must be thread-safe (a plain ArrayList can lose updates).
+        List<String> received = new CopyOnWriteArrayList<>();
 
         Iterator<String> iter = List.of("event1", "event2").iterator();
         List<Iterator<String>> iterHolder = new ArrayList<>();

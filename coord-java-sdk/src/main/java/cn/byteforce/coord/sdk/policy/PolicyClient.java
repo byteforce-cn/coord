@@ -101,6 +101,27 @@ public interface PolicyClient {
     void setBundleEnabled(String bundleId, boolean enabled);
 
     /**
+     * Roll back a policy bundle to a previous version.
+     * The restored content is written as a new version (current version + 1),
+     * keeping the current enabled state.
+     *
+     * @param bundleId the bundle ID
+     * @param version  the historical version to restore (>= 1)
+     * @return the bundle info after rollback
+     * @throws CoordException on communication failure
+     */
+    BundleInfo rollbackBundle(String bundleId, long version);
+
+    /**
+     * List all historical versions of a policy bundle (rollback target discovery).
+     *
+     * @param bundleId the bundle ID
+     * @return list of version info, ordered by version ascending
+     * @throws CoordException on communication failure
+     */
+    List<BundleVersionInfo> listBundleVersions(String bundleId);
+
+    /**
      * List all policy bundles, optionally filtered by tenant.
      *
      * @param tenantId the tenant ID, or null/empty to list all
@@ -118,17 +139,19 @@ public interface PolicyClient {
         private final String namespace;
         private final String tenantId;
         private final boolean enabled;
+        private final long version;
         private final long createdAt;
         private final long updatedAt;
 
         public BundleInfo(String bundleId, String name, String namespace,
-                          String tenantId, boolean enabled,
+                          String tenantId, boolean enabled, long version,
                           long createdAt, long updatedAt) {
             this.bundleId = bundleId;
             this.name = name;
             this.namespace = namespace;
             this.tenantId = tenantId;
             this.enabled = enabled;
+            this.version = version;
             this.createdAt = createdAt;
             this.updatedAt = updatedAt;
         }
@@ -138,6 +161,7 @@ public interface PolicyClient {
         public String getNamespace() { return namespace; }
         public String getTenantId() { return tenantId; }
         public boolean isEnabled() { return enabled; }
+        public long getVersion() { return version; }
         public long getCreatedAt() { return createdAt; }
         public long getUpdatedAt() { return updatedAt; }
 
@@ -145,7 +169,33 @@ public interface PolicyClient {
         public String toString() {
             return "BundleInfo{bundleId='" + bundleId + "', name='" + name +
                     "', namespace='" + namespace + "', tenantId='" + tenantId +
-                    "', enabled=" + enabled + '}';
+                    "', enabled=" + enabled + ", version=" + version + '}';
+        }
+    }
+
+    /**
+     * A historical version of a policy bundle.
+     */
+    class BundleVersionInfo {
+        private final long version;
+        private final long createdAt;
+        private final boolean current;
+
+        public BundleVersionInfo(long version, long createdAt, boolean current) {
+            this.version = version;
+            this.createdAt = createdAt;
+            this.current = current;
+        }
+
+        public long getVersion() { return version; }
+        public long getCreatedAt() { return createdAt; }
+        public boolean isCurrent() { return current; }
+
+        @Override
+        public String toString() {
+            return "BundleVersionInfo{version=" + version +
+                    ", createdAt=" + createdAt +
+                    ", current=" + current + '}';
         }
     }
 }

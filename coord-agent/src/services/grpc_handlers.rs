@@ -7,9 +7,14 @@
 // Registry and Config gRPC handlers remain inline in their respective
 // service files (registry.rs, config_center.rs).
 
-use tokio_stream::wrappers::ReceiverStream;
+use std::sync::Arc;
 
-use crate::services::{
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
+
+use crate::services::replication::{
+    ReplicatedStore, ReplicationEntry, ReplicationError, ReplicationManager,
+};use crate::services::{
     lock::LockService,
     idgen::IdGenService,
     leader_election::{LeaderElectionService, LeaderRole},
@@ -52,6 +57,8 @@ use coord_proto::agent::{
     CacheHGetAllRequest, CacheHGetAllResponse,
     CacheLPushRequest, CacheLPushResponse,
     CacheLRangeRequest, CacheLRangeResponse,
+    CacheRPopRequest, CacheRPopResponse,
+    CacheLLenRequest, CacheLLenResponse,
     CacheSAddRequest, CacheSAddResponse,
     CacheSMembersRequest, CacheSMembersResponse,
     mq_server::Mq,
@@ -59,6 +66,8 @@ use coord_proto::agent::{
     MqPublishRequest, MqPublishResponse,
     MqSubscribeRequest, MqMessage,
     MqAckRequest, MqAckResponse,
+    MqPollRequest, MqPollResponse,
+    MqPollDlqRequest, MqPollDlqResponse,
     scheduler_server::Scheduler,
     SchedulerRegisterJobRequest, SchedulerRegisterJobResponse,
     SchedulerClaimJobRequest, SchedulerClaimJobResponse,
@@ -83,7 +92,9 @@ use coord_proto::agent::{
     PolicyDeleteBundleRequest, PolicyDeleteBundleResponse,
     PolicyListBundlesRequest, PolicyListBundlesResponse,
     PolicySetBundleEnabledRequest, PolicySetBundleEnabledResponse,
-    PolicyBundleInfo,
+    PolicyRollbackBundleRequest, PolicyRollbackBundleResponse,
+    PolicyListBundleVersionsRequest, PolicyListBundleVersionsResponse,
+    PolicyBundleInfo, PolicyBundleVersionInfo,
     transit_server::Transit,
     TransitEncryptRequest, TransitEncryptResponse,
     TransitDecryptRequest, TransitDecryptResponse,
@@ -99,6 +110,12 @@ use coord_proto::agent::{
     feature_flags_server::FeatureFlags,
     FeatureFlagIsEnabledRequest, FeatureFlagIsEnabledResponse,
     FeatureFlagEvaluateRequest, FeatureFlagEvaluateResponse,
+    replica_server::Replica,
+    ReplicaApplyRequest, ReplicaApplyResponse,
+    ReplicaReconcileRequest,
+    ReplicaHeartbeatRequest, ReplicaHeartbeatResponse,
+    ReplicaShardProgress,
+    ReplicaEntry as ReplicaEntryProto,
 };
 
 use tonic::{Request, Response, Status};
@@ -383,17 +400,27 @@ impl Cache for CacheService {
     async fn set(&self, request: Request<CacheSetRequest>) -> Result<Response<CacheSetResponse>, Status> {
         let req = request.into_inner();
         let ttl = if req.ttl_seconds > 0 { Some(req.ttl_seconds as u64) } else { None };
-        self.string_put(&req.key, req.value, ttl)
-            .map_err(|e| Status::internal(e.to_string()))?;
+        if self.replication_enabled() {
+            self.string_put_replicated(&req.key, req.value, ttl)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        } else {
+            self.string_put(&req.key, req.value, ttl)
+                .map_err(|e| Status::internal(e.to_string()))?;
+        }
         Ok(Response::new(CacheSetResponse {}))
     }
 
     async fn delete(&self, request: Request<CacheDeleteRequest>) -> Result<Response<CacheDeleteResponse>, Status> {
         let req = request.into_inner();
-        match self.string_delete(&req.key) {
-            Ok(deleted) => Ok(Response::new(CacheDeleteResponse { deleted })),
-            Err(e) => Err(Status::internal(e.to_string())),
-        }
+        let deleted = if self.replication_enabled() {
+            self.string_delete_replicated(&req.key)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+        } else {
+            self.string_delete(&req.key).map_err(|e| Status::internal(e.to_string()))?
+        };
+        Ok(Response::new(CacheDeleteResponse { deleted }))
     }
 
     async fn h_get(&self, request: Request<CacheHGetRequest>) -> Result<Response<CacheHGetResponse>, Status> {
@@ -407,8 +434,14 @@ impl Cache for CacheService {
 
     async fn h_set(&self, request: Request<CacheHSetRequest>) -> Result<Response<CacheHSetResponse>, Status> {
         let req = request.into_inner();
-        self.hash_field_put(&req.key, &req.field, req.value, None)
-            .map_err(|e| Status::internal(e.to_string()))?;
+        if self.replication_enabled() {
+            self.hash_field_put_replicated(&req.key, &req.field, req.value, None)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        } else {
+            self.hash_field_put(&req.key, &req.field, req.value, None)
+                .map_err(|e| Status::internal(e.to_string()))?;
+        }
         Ok(Response::new(CacheHSetResponse {}))
     }
 
@@ -425,8 +458,14 @@ impl Cache for CacheService {
 
     async fn l_push(&self, request: Request<CacheLPushRequest>) -> Result<Response<CacheLPushResponse>, Status> {
         let req = request.into_inner();
-        self.list_push_left(&req.key, req.value, None)
-            .map_err(|e| Status::internal(e.to_string()))?;
+        if self.replication_enabled() {
+            self.list_push_left_replicated(&req.key, req.value, None)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        } else {
+            self.list_push_left(&req.key, req.value, None)
+                .map_err(|e| Status::internal(e.to_string()))?;
+        }
         match self.list_length(&req.key) {
             Ok(len) => Ok(Response::new(CacheLPushResponse { length: len as i64 })),
             Err(e) => Err(Status::internal(e.to_string())),
@@ -441,10 +480,41 @@ impl Cache for CacheService {
         }
     }
 
+    async fn r_pop(&self, request: Request<CacheRPopRequest>) -> Result<Response<CacheRPopResponse>, Status> {
+        let req = request.into_inner();
+        if self.replication_enabled() {
+            match self.list_pop_replicated(&req.key, true).await {
+                Ok(Some(value)) => Ok(Response::new(CacheRPopResponse { value, found: true })),
+                Ok(None) => Ok(Response::new(CacheRPopResponse { value: vec![], found: false })),
+                Err(e) => Err(Status::internal(e.to_string())),
+            }
+        } else {
+            match self.list_pop_right(&req.key) {
+                Ok(Some(value)) => Ok(Response::new(CacheRPopResponse { value, found: true })),
+                Ok(None) => Ok(Response::new(CacheRPopResponse { value: vec![], found: false })),
+                Err(e) => Err(Status::internal(e.to_string())),
+            }
+        }
+    }
+
+    async fn l_len(&self, request: Request<CacheLLenRequest>) -> Result<Response<CacheLLenResponse>, Status> {
+        let req = request.into_inner();
+        match self.list_length(&req.key) {
+            Ok(len) => Ok(Response::new(CacheLLenResponse { length: len as i64 })),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
     async fn s_add(&self, request: Request<CacheSAddRequest>) -> Result<Response<CacheSAddResponse>, Status> {
         let req = request.into_inner();
-        self.set_add(&req.key, req.member, None)
-            .map_err(|e| Status::internal(e.to_string()))?;
+        if self.replication_enabled() {
+            self.set_add_replicated(&req.key, req.member, None)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        } else {
+            self.set_add(&req.key, req.member, None)
+                .map_err(|e| Status::internal(e.to_string()))?;
+        }
         Ok(Response::new(CacheSAddResponse {}))
     }
 
@@ -478,31 +548,255 @@ impl Mq for MessageQueueService {
     async fn publish(&self, request: Request<MqPublishRequest>) -> Result<Response<MqPublishResponse>, Status> {
         let req = request.into_inner();
         let partition = if req.partition >= 0 { req.partition as u32 } else { 0 };
-        match self.produce(&req.topic, partition, req.payload, None) {
-            Ok(offset) => Ok(Response::new(MqPublishResponse { offset: offset as i64 })),
-            Err(e) => Err(Status::internal(e.to_string())),
+        if self.replication_enabled() {
+            match self.produce_replicated(&req.topic, partition, req.payload, None).await {
+                Ok(offset) => Ok(Response::new(MqPublishResponse { offset: offset as i64 })),
+                Err(e) => Err(Status::internal(e.to_string())),
+            }
+        } else {
+            match self.produce(&req.topic, partition, req.payload, None) {
+                Ok(offset) => Ok(Response::new(MqPublishResponse { offset: offset as i64 })),
+                Err(e) => Err(Status::internal(e.to_string())),
+            }
         }
     }
 
-    type SubscribeStream = ReceiverStream<Result<MqMessage, Status>>;
+    type SubscribeStream = std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<MqMessage, Status>> + Send>>;
 
-    async fn subscribe(&self, _request: Request<MqSubscribeRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
+    async fn subscribe(&self, request: Request<MqSubscribeRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
+        let req = request.into_inner();
+        // C4：复制启用时仅分区 Leader 推送；Follower 返回明确「非 Leader」错误（Q4）
+        if let Some(rm) = self.replication_manager() {
+            let shard = format!("mq:{}", req.topic);
+            if !rm.is_leader(&shard) {
+                return Err(Status::failed_precondition(format!(
+                    "not leader for shard '{shard}' (leader is {})",
+                    rm.shard_leader(&shard)
+                )));
+            }
+        }
         let (tx, out_rx) = tokio::sync::mpsc::channel(64);
-        // MQ subscribe requires long-lived state (consumer offsets + polling).
-        // For initial implementation, return a placeholder stream.
-        tokio::spawn(async move {
-            let _ = tx; // keep channel alive until client disconnects
-            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+        // Phase 4: 基于消费组 offset 的长轮询推送。注册订阅者并回放已提交
+        // 偏移之后的消息；此后 produce 直接向该 channel 推送（按偏移过滤）。
+        self.subscribe(&req.topic, &req.consumer_group, tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let topic = req.topic.clone();
+        let stream = ReceiverStream::new(out_rx).map(move |(partition, record)| {
+            Ok(MqMessage {
+                topic: topic.clone(),
+                partition: partition as i32,
+                offset: record.offset as i64,
+                key: Vec::new(),
+                payload: record.payload,
+                timestamp: record.timestamp as i64,
+            })
         });
-        Ok(Response::new(ReceiverStream::new(out_rx)))
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn ack(&self, request: Request<MqAckRequest>) -> Result<Response<MqAckResponse>, Status> {
         let req = request.into_inner();
+        // C3：消费组偏移为 Leader 本地状态；复制启用时仅 Leader 提交偏移
+        if let Some(rm) = self.replication_manager() {
+            let shard = format!("mq:{}", req.topic);
+            if !rm.is_leader(&shard) {
+                return Err(Status::failed_precondition(format!(
+                    "not leader for shard '{shard}' (leader is {})",
+                    rm.shard_leader(&shard)
+                )));
+            }
+        }
         let partition = if req.partition >= 0 { req.partition as u32 } else { 0 };
         self.commit_offset(&req.consumer_group, &req.topic, partition, req.offset as u64)
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(MqAckResponse {}))
+    }
+
+    /// Phase 1: 按 offset 批量拉取（poll + ack 即得 at-least-once + 增量游标）。
+    /// 复用引擎 `consume()`（从 start_offset 读最多 max_count 条）。
+    async fn poll(&self, request: Request<MqPollRequest>) -> Result<Response<MqPollResponse>, Status> {
+        let req = request.into_inner();
+        let partition = if req.partition >= 0 { req.partition as u32 } else { 0 };
+        let max_count = if req.max_count <= 0 { 100 } else { req.max_count as u64 };
+
+        match self.consume(&req.topic, partition, req.start_offset.max(0) as u64, max_count) {
+            Ok(records) => {
+                let messages = records.into_iter().map(|r| MqMessage {
+                    topic: req.topic.clone(),
+                    partition: partition as i32,
+                    offset: r.offset as i64,
+                    key: Vec::new(), // 引擎当前不持久化 key，见 mq.rs MessageRecord
+                    payload: r.payload,
+                    timestamp: r.timestamp as i64,
+                }).collect();
+                Ok(Response::new(MqPollResponse { messages }))
+            }
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
+    /// 读取死信队列（DLQ 可观测）
+    async fn poll_dlq(&self, request: Request<MqPollDlqRequest>) -> Result<Response<MqPollDlqResponse>, Status> {
+        let req = request.into_inner();
+        let partition = if req.partition >= 0 { req.partition as u32 } else { 0 };
+        let max_count = if req.max_count <= 0 { 100 } else { req.max_count as u64 };
+
+        match self.consume_dlq(&req.topic, partition, max_count) {
+            Ok(records) => {
+                let messages = records.into_iter().map(|r| MqMessage {
+                    topic: req.topic.clone(),
+                    partition: partition as i32,
+                    offset: r.offset as i64,
+                    key: Vec::new(),
+                    payload: r.payload,
+                    timestamp: r.timestamp as i64,
+                }).collect();
+                Ok(Response::new(MqPollDlqResponse { messages }))
+            }
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════
+// Replica Service — Agent↔Agent ISR 数据复制（v2.1 已落地）
+// ════════════════════════════════════════════════════════════
+
+/// Replica 服务路由：把复制条目分发到本 agent 的 MQ / Cache 数据面服务。
+///
+/// 实现 `ReplicatedStore`（供 ReplicationManager 心跳 / Reconcile 调用）
+/// 与 `Replica` gRPC trait（供对端 agent 推送 / 拉取 / 心跳）。
+pub struct ReplicaRouter {
+    manager: Arc<ReplicationManager>,
+    mq: Option<Arc<MessageQueueService>>,
+    cache: Option<Arc<CacheService>>,
+}
+
+impl ReplicaRouter {
+    pub fn new(
+        manager: Arc<ReplicationManager>,
+        mq: Option<Arc<MessageQueueService>>,
+        cache: Option<Arc<CacheService>>,
+    ) -> Self {
+        Self { manager, mq, cache }
+    }
+
+    pub fn manager(&self) -> Arc<ReplicationManager> {
+        self.manager.clone()
+    }
+}
+
+impl ReplicatedStore for ReplicaRouter {
+    fn shards(&self) -> Vec<String> {
+        let mut shards = Vec::new();
+        if let Some(c) = &self.cache {
+            shards.extend(c.shards());
+        }
+        if let Some(m) = &self.mq {
+            shards.extend(m.shards());
+        }
+        shards
+    }
+
+    fn last_local_sequence(&self, shard: &str) -> u64 {
+        if shard.starts_with("mq:") {
+            self.mq.as_ref().map(|m| m.last_local_sequence(shard)).unwrap_or(0)
+        } else {
+            self.cache.as_ref().map(|c| c.last_local_sequence(shard)).unwrap_or(0)
+        }
+    }
+
+    fn apply_entry(&self, entry: &ReplicationEntry) -> Result<(), ReplicationError> {
+        if entry.shard_id.starts_with("mq:") {
+            self.mq
+                .as_ref()
+                .ok_or_else(|| ReplicationError::Store("mq service not enabled".to_string()))?
+                .apply_entry(entry)
+        } else {
+            self.cache
+                .as_ref()
+                .ok_or_else(|| ReplicationError::Store("cache service not enabled".to_string()))?
+                .apply_entry(entry)
+        }
+    }
+
+    fn read_entries(&self, shard: &str, from_seq: u64, limit: u64) -> Vec<ReplicationEntry> {
+        if shard.starts_with("mq:") {
+            self.mq
+                .as_ref()
+                .map(|m| m.read_entries(shard, from_seq, limit))
+                .unwrap_or_default()
+        } else {
+            self.cache
+                .as_ref()
+                .map(|c| c.read_entries(shard, from_seq, limit))
+                .unwrap_or_default()
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl Replica for ReplicaRouter {
+    /// Leader → Follower：应用一条复制条目（幂等；重复条目 applied=true）
+    async fn apply(
+        &self,
+        request: Request<ReplicaApplyRequest>,
+    ) -> Result<Response<ReplicaApplyResponse>, Status> {
+        let req = request.into_inner();
+        let proto = req
+            .entry
+            .ok_or_else(|| Status::invalid_argument("missing entry"))?;
+        let entry = ReplicationEntry::from_proto(&proto)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        self.apply_entry(&entry).map_err(|e| Status::internal(e.to_string()))?;
+        let last = self.last_local_sequence(&entry.shard_id);
+        Ok(Response::new(ReplicaApplyResponse {
+            applied: true,
+            last_sequence: last,
+        }))
+    }
+
+    type ReconcileStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<ReplicaEntryProto, Status>> + Send>,
+    >;
+
+    /// Follower → Leader：拉取缺失序列号区间的复制条目（stream 回放）
+    async fn reconcile(
+        &self,
+        request: Request<ReplicaReconcileRequest>,
+    ) -> Result<Response<Self::ReconcileStream>, Status> {
+        let req = request.into_inner();
+        let limit = if req.limit == 0 { 1000 } else { req.limit };
+        let entries = self.read_entries(&req.shard_id, req.start_sequence, limit);
+        let stream = tokio_stream::iter(entries.into_iter().map(|e| Ok(e.to_proto())));
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    /// 双向心跳：维护 ISR 成员 + 交换各 shard 最后序列号（落后检测）
+    async fn isr_heartbeat(
+        &self,
+        request: Request<ReplicaHeartbeatRequest>,
+    ) -> Result<Response<ReplicaHeartbeatResponse>, Status> {
+        let req = request.into_inner();
+        // 记录对端心跳（ISR 成员维护；对端失败后由 manager 心跳任务移除）
+        if !req.agent_addr.is_empty() && req.agent_addr != self.manager.agent_addr() {
+            self.manager.add_peer(req.agent_addr.clone());
+        }
+        // 返回本 agent 各 shard 最后序列号（供对端落后检测触发 Reconcile）
+        let leader_progress: Vec<ReplicaShardProgress> = self
+            .shards()
+            .into_iter()
+            .map(|s| ReplicaShardProgress {
+                shard_id: s.clone(),
+                last_sequence: self.last_local_sequence(&s),
+            })
+            .collect();
+        Ok(Response::new(ReplicaHeartbeatResponse {
+            in_isr: true,
+            leader_progress,
+        }))
     }
 }
 
@@ -916,8 +1210,27 @@ impl Policy for PolicyService {
         }
     }
 
-    async fn evaluate(&self, _request: Request<PolicyEvaluateRequest>) -> Result<Response<PolicyEvaluateResponse>, Status> {
-        Err(Status::unimplemented("raw rego evaluate not yet implemented; use check_permission"))
+    async fn evaluate(&self, request: Request<PolicyEvaluateRequest>) -> Result<Response<PolicyEvaluateResponse>, Status> {
+        let req = request.into_inner();
+        if req.query.is_empty() {
+            return Err(Status::invalid_argument("query must not be empty"));
+        }
+        let input_json = String::from_utf8_lossy(&req.input).to_string();
+        let opa = self.opa_engine().clone();
+
+        // 同步 Rego 求值放到阻塞线程池，避免阻塞 agent 异步执行器。
+        // error/deny 区分：求值错误（语法/输入）→ gRPC InvalidArgument；
+        // deny/无匹配 → 成功响应且 result 为 false / null。
+        let value = tokio::task::spawn_blocking(move || {
+            opa.eval_query(&req.query, &input_json)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("evaluate task failed: {e}")))?
+        .map_err(|e| Status::invalid_argument(e))?;
+
+        let result = serde_json::to_vec(&value)
+            .map_err(|e| Status::internal(format!("serialize result: {e}")))?;
+        Ok(Response::new(PolicyEvaluateResponse { result }))
     }
 
     async fn explain(&self, request: Request<PolicyExplainRequest>) -> Result<Response<PolicyExplainResponse>, Status> {
@@ -941,6 +1254,7 @@ impl Policy for PolicyService {
                 created_at: info.created_at,
                 updated_at: info.updated_at,
                 enabled: info.enabled,
+                version: info.version,
             })),
             Err(e) => Err(Status::internal(e.to_string())),
         }
@@ -967,6 +1281,7 @@ impl Policy for PolicyService {
                     enabled: b.enabled,
                     created_at: b.created_at,
                     updated_at: b.updated_at,
+                    version: b.version,
                 }).collect();
                 Ok(Response::new(PolicyListBundlesResponse {
                     bundles: proto_bundles,
@@ -980,6 +1295,47 @@ impl Policy for PolicyService {
         let req = request.into_inner();
         match self.set_bundle_enabled(&req.bundle_id, req.enabled).await {
             Ok(success) => Ok(Response::new(PolicySetBundleEnabledResponse { success })),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
+    async fn rollback_bundle(&self, request: Request<PolicyRollbackBundleRequest>) -> Result<Response<PolicyRollbackBundleResponse>, Status> {
+        let req = request.into_inner();
+        match self.rollback_bundle(&req.bundle_id, req.version).await {
+            Ok(info) => Ok(Response::new(PolicyRollbackBundleResponse {
+                success: true,
+                version: info.version,
+                restored_version: req.version,
+                bundle: Some(PolicyBundleInfo {
+                    bundle_id: info.bundle_id,
+                    name: info.name,
+                    namespace: info.namespace,
+                    tenant_id: info.tenant_id,
+                    enabled: info.enabled,
+                    created_at: info.created_at,
+                    updated_at: info.updated_at,
+                    version: info.version,
+                }),
+            })),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
+    async fn list_bundle_versions(&self, request: Request<PolicyListBundleVersionsRequest>) -> Result<Response<PolicyListBundleVersionsResponse>, Status> {
+        let req = request.into_inner();
+        match self.list_bundle_versions(&req.bundle_id).await {
+            Ok(versions) => {
+                let proto_versions: Vec<PolicyBundleVersionInfo> = versions.into_iter()
+                    .map(|v| PolicyBundleVersionInfo {
+                        version: v.version,
+                        created_at: v.created_at,
+                        is_current: v.is_current,
+                    })
+                    .collect();
+                Ok(Response::new(PolicyListBundleVersionsResponse {
+                    versions: proto_versions,
+                }))
+            }
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
