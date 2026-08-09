@@ -283,6 +283,27 @@ pub trait WorkflowStore: Send + Sync {
     /// 保存工作流定义
     async fn save_definition(&self, def: &WorkflowDefinition) -> Result<(), StoreError>;
 
+    /// 原子保存工作流定义（对齐 policy `PutBundle` 的原子覆盖语义）
+    ///
+    /// 用于定义部署：同一 `(namespace, name, version)` 并发覆盖时防止丢更新
+    /// （KvWorkflowStore 实现为 Txn CAS，冲突自动重试）。
+    /// 默认实现回退到乐观 `save_definition()`（MemoryWorkflowStore 基于互斥锁，天然原子）。
+    async fn save_definition_atomic(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
+        self.save_definition(def).await
+    }
+
+    /// 列出某 `(namespace, name)` 定义的全部版本（回滚目标发现）
+    ///
+    /// 默认实现基于 `list_definitions` 过滤；KvWorkflowStore 可覆盖为前缀扫描。
+    async fn list_definition_versions(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Vec<WorkflowDefinition>, StoreError> {
+        let defs = self.list_definitions(namespace, usize::MAX, None).await?;
+        Ok(defs.into_iter().filter(|d| d.document.name == name).collect())
+    }
+
     /// 加载工作流定义
     async fn load_definition(
         &self,

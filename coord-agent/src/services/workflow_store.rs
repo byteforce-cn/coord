@@ -284,6 +284,83 @@ impl WorkflowStore for KvWorkflowStore {
         Ok(())
     }
 
+    /// 原子保存工作流定义 —— Txn CAS（对齐 policy `PutBundle` 原子覆盖）
+    ///
+    /// 同一 `(namespace, name, version)` 并发覆盖时防止丢更新：
+    /// - key 已存在 → Compare(VALUE == 当前值) + Put（内容 CAS）
+    /// - key 不存在 → Compare(VERSION == 0) + Put（仅当不存在时写入）
+    /// 冲突自动重试（≤5 次）。
+    async fn save_definition_atomic(
+        &self,
+        def: &WorkflowDefinition,
+    ) -> Result<(), StoreError> {
+        let key = Self::def_key(&def.document.namespace, &def.document.name, &def.document.version);
+        let value = serde_json::to_vec(def)
+            .map_err(|e| StoreError::SerializationError(e.to_string()))?;
+
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            if attempts > 5 {
+                return Err(StoreError::IoError(
+                    "save_definition_atomic: too many concurrent conflicts".into(),
+                ));
+            }
+
+            // 读取当前值（判断 key 是否存在）
+            let current = {
+                let pairs = self
+                    .inner
+                    .client
+                    .kv()
+                    .range(&key, &key, 1, 0)
+                    .await
+                    .map_err(|e| StoreError::IoError(e.to_string()))?;
+                pairs.into_iter().next().map(|(_k, v)| v)
+            };
+
+            let compare = match &current {
+                Some(cur) => Compare {
+                    result: CompareResult::Equal as i32,
+                    target: Target::Value as i32,
+                    key: key.clone(),
+                    target_value: Some(TargetValue::Value(cur.clone())),
+                },
+                None => Compare {
+                    result: CompareResult::Equal as i32,
+                    target: Target::Version as i32,
+                    key: key.clone(),
+                    target_value: Some(TargetValue::Version(0)),
+                },
+            };
+
+            let put = RequestOp {
+                op: Some(Op::RequestPut(PutRequest {
+                    key: key.clone(),
+                    value: value.clone(),
+                    lease_id: 0,
+                    prev_kv: false,
+                    request_id: vec![],
+                })),
+            };
+
+            let resp = self
+                .inner
+                .client
+                .txn()
+                .txn(vec![compare], vec![put], vec![])
+                .await
+                .map_err(|e| StoreError::IoError(e.to_string()))?;
+
+            if resp.succeeded {
+                // CAS 成功，更新本地缓存
+                self.cache.save_definition(def).await?;
+                return Ok(());
+            }
+            // CAS 冲突（并发覆盖）→ 重试
+        }
+    }
+
     async fn load_definition(
         &self,
         namespace: &str,

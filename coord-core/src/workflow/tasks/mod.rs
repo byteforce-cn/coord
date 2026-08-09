@@ -30,3 +30,4 @@ pub mod fork;
 pub mod for_each;
 pub mod try_catch;
 pub mod run;
+pub mod end;

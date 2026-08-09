@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use super::model::{
     BackoffStrategy, CallTask, CallType, CatchClause, Document, DoTask, EmitEvent, EmitTask,
-    ErrorDef, EventFilter, ForEachTask, ForkBranch, ForkTask, FunctionDef, InputConfig,
+    EndTask, ErrorDef, EventFilter, ForEachTask, ForkBranch, ForkTask, FunctionDef, InputConfig,
     JitterConfig, ListenTask, NamedTask, RaiseTask, RetryPolicy, RunTask, SetTask,
     Span, SwitchCondition, SwitchTask, Task, TimeoutConfig, TryCatchTask, UseComponents,
     ValidationError, ValidationErrorKind, WaitTask, WorkflowDefinition, WorkflowRef,
@@ -137,6 +137,7 @@ impl Validator {
             Value::Object(map) if map.contains_key("raise") => self.parse_raise(raw, map),
             Value::Object(map) if map.contains_key("try") => self.parse_try_catch(raw, map),
             Value::Object(map) if map.contains_key("run") => self.parse_run(raw, map),
+            Value::Object(map) if map.contains_key("end") => self.parse_end(raw, map),
             _ => {
                 self.errors.push(ValidationError {
                     span: Some(raw.span),
@@ -492,6 +493,11 @@ impl Validator {
 
         let input = map.get("input").cloned();
         Some(Task::Run(RunTask { workflow, input }))
+    }
+
+    /// end 任务 —— 终端任务，无需字段（`end: true` / `end: {}` 均可）
+    fn parse_end(&mut self, _raw: &RawNamedTask, _map: &serde_json::Map<String, Value>) -> Option<Task> {
+        Some(Task::End(EndTask {}))
     }
 
     fn parse_workflow_ref_short(s: &str) -> WorkflowRef {
@@ -1051,6 +1057,29 @@ do:
         assert!(matches!(def.do_tasks[1].task, Task::Wait(_)));
         assert!(matches!(def.do_tasks[2].task, Task::Switch(_)));
         assert!(matches!(def.do_tasks[3].task, Task::Call(_)));
+    }
+
+    #[test]
+    fn test_validate_end_task() {
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: end-example
+  version: "1.0"
+do:
+  - process:
+      call: http
+  - end:
+      end: true
+"#;
+
+        let result = parse_and_validate_yaml(yaml);
+        assert!(result.is_ok(), "validation failed: {:?}", result.err());
+        let def = result.unwrap();
+        assert_eq!(def.do_tasks.len(), 2);
+        assert!(matches!(def.do_tasks[0].task, Task::Call(_)));
+        assert!(matches!(def.do_tasks[1].task, Task::End(_)));
     }
 
     #[test]

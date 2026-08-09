@@ -82,6 +82,9 @@ use coord_proto::agent::{
     WorkflowListDefinitionsRequest, WorkflowListDefinitionsResponse,
     WorkflowDefinitionSummary,
     WorkflowGetDefinitionRequest, WorkflowGetDefinitionResponse,
+    WorkflowListDefinitionVersionsRequest, WorkflowListDefinitionVersionsResponse,
+    WorkflowDefinitionVersion,
+    WorkflowRollbackDefinitionRequest, WorkflowRollbackDefinitionResponse,
     WorkflowListInstancesRequest, WorkflowListInstancesResponse,
     WorkflowInstanceSummary,
     policy_server::Policy,
@@ -949,6 +952,20 @@ impl Workflow for WorkflowService {
         }
     }
 
+    // 遗留 WorkflowService（未注册，已被 WorkflowEngineService 取代）：
+    // 版本化/回滚能力由 WorkflowEngineService 提供，此处显式返回 Unimplemented。
+    async fn list_definition_versions(&self, _request: Request<WorkflowListDefinitionVersionsRequest>) -> Result<Response<WorkflowListDefinitionVersionsResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow definition versioning is provided by WorkflowEngineService (phase4); legacy WorkflowService is deprecated",
+        ))
+    }
+
+    async fn rollback_definition(&self, _request: Request<WorkflowRollbackDefinitionRequest>) -> Result<Response<WorkflowRollbackDefinitionResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow definition rollback is provided by WorkflowEngineService (phase4); legacy WorkflowService is deprecated",
+        ))
+    }
+
     async fn list_instances(&self, request: Request<WorkflowListInstancesRequest>) -> Result<Response<WorkflowListInstancesResponse>, Status> {
         let req = request.into_inner();
         match self.list_instances(&req.workflow_id, &req.namespace, req.page_size, &req.page_token).await {
@@ -975,7 +992,15 @@ impl Workflow for WorkflowService {
 // Workflow Service (Engine) — 对接 coord-core 工作流引擎
 // ════════════════════════════════════════════════════════════
 
-use crate::services::workflow::phase4::WorkflowEngineService;
+use crate::services::workflow::phase4::{DeployError, WorkflowEngineService};
+
+// 将部署错误映射为 gRPC 状态码：输入/校验问题 → InvalidArgument，存储问题 → Internal
+fn map_deploy_error(e: DeployError) -> Status {
+    match e {
+        DeployError::Validation(msg) => Status::invalid_argument(format!("deploy error: {msg}")),
+        DeployError::Store(msg) => Status::internal(format!("deploy error: {msg}")),
+    }
+}
 
 #[tonic::async_trait]
 impl Workflow for WorkflowEngineService {
@@ -986,7 +1011,7 @@ impl Workflow for WorkflowEngineService {
         let def_id = self
             .deploy_definition(namespace, &req.definition_dsl)
             .await
-            .map_err(|e| Status::internal(format!("deploy error: {e}")))?;
+            .map_err(map_deploy_error)?;
 
         let input: serde_json::Value = if req.input.is_empty() {
             serde_json::Value::Null
@@ -1077,7 +1102,7 @@ impl Workflow for WorkflowEngineService {
         let workflow_id = self
             .deploy_definition(&req.namespace, &req.definition_yaml)
             .await
-            .map_err(|e| Status::internal(e))?;
+            .map_err(map_deploy_error)?;
 
         match self.get_definition(&workflow_id).await {
             Ok(Some(def)) => Ok(Response::new(WorkflowDeployResponse {
@@ -1133,6 +1158,39 @@ impl Workflow for WorkflowEngineService {
             })),
             Ok(None) => Err(Status::not_found("definition not found")),
             Err(e) => Err(Status::internal(e)),
+        }
+    }
+
+    async fn list_definition_versions(&self, request: Request<WorkflowListDefinitionVersionsRequest>) -> Result<Response<WorkflowListDefinitionVersionsResponse>, Status> {
+        let req = request.into_inner();
+        match self.list_definition_versions(&req.namespace, &req.name).await {
+            Ok(defs) => {
+                let mut versions: Vec<WorkflowDefinitionVersion> = defs
+                    .into_iter()
+                    .map(|d| WorkflowDefinitionVersion {
+                        version: d.document.version,
+                        workflow_id: d.id.unwrap_or_default(),
+                        status: "active".into(),
+                        created_at: 0,
+                    })
+                    .collect();
+                versions.sort_by(|a, b| a.version.cmp(&b.version));
+                Ok(Response::new(WorkflowListDefinitionVersionsResponse { versions }))
+            }
+            Err(e) => Err(Status::internal(e)),
+        }
+    }
+
+    async fn rollback_definition(&self, request: Request<WorkflowRollbackDefinitionRequest>) -> Result<Response<WorkflowRollbackDefinitionResponse>, Status> {
+        let req = request.into_inner();
+        match self.rollback_definition(&req.namespace, &req.name, &req.version).await {
+            Ok(def) => Ok(Response::new(WorkflowRollbackDefinitionResponse {
+                workflow_id: def.id.unwrap_or_default(),
+                version: def.document.version,
+                namespace: def.document.namespace,
+                name: def.document.name,
+            })),
+            Err(e) => Err(map_deploy_error(e)),
         }
     }
 

@@ -82,6 +82,7 @@ impl<E: ExpressionEval, C: Clock> WorkflowExecutor<E, C> {
             Task::ForEach(for_each) => super::tasks::for_each::execute(named, for_each, inst, &self.expr, &self.clock),
             Task::TryCatch(try_catch) => super::tasks::try_catch::execute(named, try_catch, inst, &self.clock),
             Task::Run(run) => super::tasks::run::execute(named, run, inst, &self.clock),
+            Task::End(end) => super::tasks::end::execute(named, end, inst, &self.clock),
         }
     }
 }
@@ -228,6 +229,19 @@ mod tests {
     fn test_empty_do_tasks_completes() {
         let executor = make_executor();
         let def = make_definition(vec![]);
+        let inst = make_instance(0);
+
+        let result = executor.execute_step(&inst, &def);
+        assert!(matches!(result, StepResult::Completed { .. }));
+    }
+
+    #[test]
+    fn test_execute_step_end_task_completes() {
+        let executor = make_executor();
+        let def = make_definition(vec![NamedTask {
+            name: "end".into(),
+            task: Task::End(crate::workflow::model::EndTask {}),
+        }]);
         let inst = make_instance(0);
 
         let result = executor.execute_step(&inst, &def);

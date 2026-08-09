@@ -718,6 +718,10 @@ service Workflow {
     rpc ListDefinitions(WorkflowListDefinitionsRequest) returns (WorkflowListDefinitionsResponse);
     rpc GetDefinition(WorkflowGetDefinitionRequest) returns (WorkflowGetDefinitionResponse);
 
+    // 新增 — 工作流定义版本化 / 回滚（对齐 policy PutBundle 语义）
+    rpc ListDefinitionVersions(WorkflowListDefinitionVersionsRequest) returns (WorkflowListDefinitionVersionsResponse);
+    rpc RollbackDefinition(WorkflowRollbackDefinitionRequest) returns (WorkflowRollbackDefinitionResponse);
+
     // 新增 — 工作流实例管理
     rpc ListInstances(WorkflowListInstancesRequest) returns (WorkflowListInstancesResponse);
 }
@@ -818,6 +822,37 @@ message WorkflowGetDefinitionResponse {
     string version = 4;
     string status = 5;
     int64 created_at = 6;
+}
+
+// 工作流定义版本化 / 回滚（对齐 policy PutBundle：原子覆盖 + 版本化 + 回滚）
+
+message WorkflowListDefinitionVersionsRequest {
+    string namespace = 1;
+    string name = 2;
+}
+
+message WorkflowListDefinitionVersionsResponse {
+    repeated WorkflowDefinitionVersion versions = 1;
+}
+
+message WorkflowDefinitionVersion {
+    string version = 1;        // 语义化版本字符串
+    string workflow_id = 2;    // 该版本的 definition ID
+    string status = 3;
+    int64 created_at = 4;
+}
+
+message WorkflowRollbackDefinitionRequest {
+    string namespace = 1;
+    string name = 2;
+    string version = 3;        // 要恢复的版本（回滚后以新版本落地）
+}
+
+message WorkflowRollbackDefinitionResponse {
+    string workflow_id = 1;
+    string version = 2;        // 回滚后生成的新版本
+    string namespace = 3;
+    string name = 4;
 }
 
 message WorkflowListInstancesRequest {

@@ -153,9 +153,9 @@ pub struct NamedTask {
     pub task: Task,
 }
 
-// ─── 任务类型枚举（12 种） ───
+// ─── 任务类型枚举（13 种） ───
 
-/// 任务类型 —— 对应 CNCF Serverless Workflow DSL 的所有任务类型
+/// 任务类型 —— 对应 CNCF Serverless Workflow DSL 的任务类型（含 end 终端任务）
 ///
 /// 不依赖 serde(tag = "type") 枚举标签，而是按 JSON key 存在性推断类型。
 /// 序列化时通过 `#[serde(rename_all = "camelCase")]` 保持 camelCase 风格。
@@ -174,6 +174,7 @@ pub enum Task {
     Raise(RaiseTask),
     TryCatch(TryCatchTask),
     Run(RunTask),
+    End(EndTask),
 }
 
 /// call 任务 —— HTTP/gRPC/function 调用
@@ -331,6 +332,14 @@ pub struct WorkflowRef {
     pub name: String,
     pub version: String,
 }
+
+/// end 任务 —— 终止当前工作流
+///
+/// 对应 CNCF Serverless Workflow 的 end 语义：执行到该任务时立即结束工作流
+/// （Runtime 收到 `StepResult::Completed` 后标记实例 Completed 并停止驱动循环）。
+/// 由 SW→coord DSL 转换器生成，作为 switch 分支的终端，阻止分支 fall-through。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EndTask {}
 
 // ─── 工作流实例 ───
 

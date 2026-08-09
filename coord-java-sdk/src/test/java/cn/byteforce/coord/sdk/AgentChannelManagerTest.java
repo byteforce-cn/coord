@@ -8,12 +8,26 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.net.ServerSocket;
 import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class AgentChannelManagerTest {
+
+    /**
+     * Allocates a currently-free port so the test never collides with a locally
+     * running Coord agent (which occupies the default port 19527).
+     */
+    private static int freePort() {
+        try (ServerSocket socket = new ServerSocket(0)) {
+            return socket.getLocalPort();
+        } catch (IOException e) {
+            throw new IllegalStateException("Unable to allocate a free port for test", e);
+        }
+    }
 
     private CoordConfig config;
     private ThreadPoolManager threadPoolManager;
@@ -68,6 +82,12 @@ class AgentChannelManagerTest {
 
     @Test
     void awaitReadyShouldTimeoutWhenNoAgent() {
+        // Use a free port so a locally running Coord agent (default port 19527)
+        // cannot satisfy the readiness probe.
+        config = CoordConfig.builder()
+                .agentHost("localhost")
+                .agentPort(freePort())
+                .build();
         channelManager = new AgentChannelManager(config, threadPoolManager, new ObservabilityProvider() {});
         // No agent running, so should return false
         boolean ready = channelManager.awaitReady(Duration.ofMillis(200));

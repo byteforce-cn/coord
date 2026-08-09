@@ -1008,6 +1008,7 @@ pub mod phase4 {
             SystemClock, TaskDispatcher, WorkflowStore,
         },
         runtime::WorkflowRuntime,
+        sw,
     };
 
     use crate::proxy::AgentInner;
@@ -1203,6 +1204,54 @@ pub mod phase4 {
         Arc<dyn EventProvider + Send + Sync>,
     >;
 
+    // ─── 部署错误 ───
+
+    /// 工作流定义部署错误 —— 区分「输入/校验问题」与「存储/基础设施问题」
+    ///
+    /// gRPC 映射：`Validation` → `InvalidArgument`；`Store` → `Internal`。
+    /// 与 ISSUE-001 的 error/deny 区分思路一致：输入问题 ≠ 基础设施故障。
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum DeployError {
+        /// 输入解析 / DSL 校验失败（gRPC → InvalidArgument）
+        Validation(String),
+        /// 存储 / 基础设施失败（gRPC → Internal）
+        Store(String),
+    }
+
+    impl std::fmt::Display for DeployError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                DeployError::Validation(msg) => write!(f, "validation error: {msg}"),
+                DeployError::Store(msg) => write!(f, "store error: {msg}"),
+            }
+        }
+    }
+
+    impl std::error::Error for DeployError {}
+
+    /// 语义版本号 +1（回滚/新版本落地，对齐 policy 的「回滚版本 = 当前版本 +1」）
+    ///
+    /// - 纯数字点分版本（如 "1.0"、"1.2.3"）→ 末段 +1（"1.0" → "1.1"，"1.2.3" → "1.2.4"）；
+    /// - 非纯数字版本 → 追加 "-r1"（如 "1.0-beta" → "1.0-beta-r1"）。
+    fn bump_version(version: &str) -> String {
+        let is_pure_numeric = !version.is_empty()
+            && version
+                .split('.')
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+        if is_pure_numeric {
+            let mut parts: Vec<u64> = version
+                .split('.')
+                .filter_map(|p| p.parse().ok())
+                .collect();
+            if let Some(last) = parts.last_mut() {
+                *last += 1;
+            }
+            parts.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(".")
+        } else {
+            format!("{version}-r1")
+        }
+    }
+
     // ─── WorkflowEngineService ───
 
     /// 基于 coord-core 工作流引擎的 WorkflowService
@@ -1308,40 +1357,132 @@ pub mod phase4 {
         // ─── 定义管理 ───
         // (async API — callers use .await)
 
-        /// 部署工作流定义（YAML DSL → 持久化存储）
-        pub async fn deploy_definition(
-            &self,
-            namespace: &str,
-            yaml: &str,
-        ) -> Result<String, String> {
-            let raw = parser::RawWorkflowDef::parse_yaml(yaml)
-                .map_err(|e| format!("parse error: {e}"))?;
+    /// 部署工作流定义（YAML/JSON DSL → 持久化存储）
+    ///
+    /// 自动识别输入格式：
+    /// - 顶层含 `start` / `states` → **CNCF Serverless Workflow 权威格式**（原生解析，无转换层）；
+    /// - 顶层含 `document` / `do` → 遗留 coord DSL 格式（兼容保留）。
+    ///
+    /// 校验失败不落库（`DeployError::Validation`），存储失败为 `DeployError::Store`。
+    pub async fn deploy_definition(
+        &self,
+        namespace: &str,
+        dsl: &str,
+    ) -> Result<String, DeployError> {
+        let value: serde_json::Value = serde_yaml::from_str(dsl)
+            .map_err(|e| DeployError::Validation(format!("parse error: {e}")))?;
 
-            let mut def = coord_core::workflow::validate::Validator::validate(raw)
-                .map_err(|errors| {
-                    errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; ")
-                })?;
+        let mut def = if sw::looks_like_cncf_sw(&value) {
+            // CNCF SW 权威格式：start + states[] 原生解析
+            sw::parse_cncf_sw_value(value).map_err(DeployError::Validation)?
+        } else {
+            // 遗留 coord DSL 格式（document + do）
+            let raw = parser::RawWorkflowDef::parse_yaml(dsl)
+                .map_err(|e| DeployError::Validation(format!("parse error: {e}")))?;
+            coord_core::workflow::validate::Validator::validate(raw).map_err(|errors| {
+                DeployError::Validation(
+                    errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; "),
+                )
+            })?
+        };
 
-            // 用调用者指定的 namespace 覆盖 YAML 中的 namespace
-            def.document.namespace = namespace.to_string();
-            // 保存原始 YAML 以便 get_definition 返回
-            def.raw_yaml = Some(yaml.to_string());
+        // 用调用者指定的 namespace 覆盖 YAML 中的 namespace
+        def.document.namespace = namespace.to_string();
+        // 保存原始 DSL 以便 get_definition 返回
+        def.raw_yaml = Some(dsl.to_string());
 
-            let id = format!(
-                "{}-{:x}",
-                namespace,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            );
-            def.id = Some(id.clone());
+        let id = format!(
+            "{}-{:x}",
+            namespace,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        );
+        def.id = Some(id.clone());
 
-            self.store.save_definition(&def).await
-                .map_err(|e| format!("store error: {e}"))?;
+        // 原子覆盖（Txn CAS，对齐 policy PutBundle），防并发同键部署丢更新
+        self.store.save_definition_atomic(&def).await
+            .map_err(|e| DeployError::Store(format!("store error: {e}")))?;
 
-            Ok(id)
-        }
+        Ok(id)
+    }
+
+    /// 列出某 `(namespace, name)` 定义的全部版本（回滚目标发现，对齐 policy `ListBundleVersions`）
+    pub async fn list_definition_versions(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Vec<WorkflowDefinition>, String> {
+        self.store
+            .list_definition_versions(namespace, name)
+            .await
+            .map_err(|e| format!("store error: {e}"))
+    }
+
+    /// 回滚工作流定义（对齐 policy `RollbackBundle`）
+    ///
+    /// 语义：读取目标版本快照 → 重新解析 + 校验（不可部署则拒绝）→
+    /// 以**新语义版本**（当前版本 +1）原子落地，保留原始 DSL；
+    /// 不覆盖旧版本（版本化共存）。
+    pub async fn rollback_definition(
+        &self,
+        namespace: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<WorkflowDefinition, DeployError> {
+        // 1. 读取目标版本快照
+        let snapshot = self
+            .store
+            .load_definition(namespace, name, version)
+            .await
+            .map_err(|e| DeployError::Store(format!("store error: {e}")))?
+            .ok_or_else(|| {
+                DeployError::Validation(format!(
+                    "definition '{namespace}/{name}@{version}' not found"
+                ))
+            })?;
+        let raw = snapshot.raw_yaml.clone().ok_or_else(|| {
+            DeployError::Validation(format!(
+                "definition '{namespace}/{name}@{version}' has no raw DSL to restore"
+            ))
+        })?;
+
+        // 2. 重新解析 + 校验（恢复内容必须可部署）
+        let value: serde_json::Value = serde_yaml::from_str(&raw)
+            .map_err(|e| DeployError::Validation(format!("parse error: {e}")))?;
+        let mut def = if sw::looks_like_cncf_sw(&value) {
+            sw::parse_cncf_sw_value(value).map_err(DeployError::Validation)?
+        } else {
+            let raw_ir = parser::RawWorkflowDef::parse_yaml(&raw)
+                .map_err(|e| DeployError::Validation(format!("parse error: {e}")))?;
+            coord_core::workflow::validate::Validator::validate(raw_ir).map_err(|errors| {
+                DeployError::Validation(
+                    errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; "),
+                )
+            })?
+        };
+
+        // 3. 覆盖 namespace + 语义版本 bump（回滚 = 新版本落地）
+        def.document.namespace = namespace.to_string();
+        def.document.version = bump_version(version);
+        def.raw_yaml = Some(raw);
+        let id = format!(
+            "{}-{:x}",
+            namespace,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        );
+        def.id = Some(id.clone());
+
+        // 4. 原子写入新版本
+        self.store.save_definition_atomic(&def).await
+            .map_err(|e| DeployError::Store(format!("store error: {e}")))?;
+
+        Ok(def)
+    }
 
         pub async fn get_definition(
             &self,
@@ -1497,7 +1638,7 @@ pub mod phase4 {
 #[cfg(test)]
 mod phase4_tests {
     use super::phase4::*;
-    use coord_core::workflow::model::InstanceStatus;
+    use coord_core::workflow::model::{InstanceStatus, Task};
 
     fn sample_linear_yaml() -> String {
         r#"
@@ -1732,5 +1873,137 @@ do:
                 || loaded.status == InstanceStatus::Suspended
                 || loaded.status == InstanceStatus::Completed,
             "switch should have advanced past the decision task");
+    }
+
+    // ─── CNCF Serverless Workflow 权威格式 conformance（ISSUE-004） ───
+
+    /// ISSUE-004 中的 SW 文档（CNCF 权威格式，start + states[]）
+    fn sample_cncf_sw() -> &'static str {
+        r#"{
+          "id": "order-approval",
+          "version": "1.0",
+          "start": "init",
+          "functions": [
+            { "name": "approveOrder", "operation": "http://icps/approve" },
+            { "name": "sendNotify", "operation": "http://icps/notify" }
+          ],
+          "states": [
+            { "name": "init", "type": "inject",
+              "data": { "approved": false, "level": 1 },
+              "transition": "check" },
+            { "name": "check", "type": "switch",
+              "dataConditions": [
+                { "condition": "${ .amount >= 1000 }", "transition": "senior-approve" },
+                { "condition": "${ .amount < 1000 }", "transition": "notify" }
+              ],
+              "defaultCondition": { "transition": "end" } },
+            { "name": "senior-approve", "type": "operation",
+              "actions": [ { "name": "approve",
+                             "functionRef": { "refName": "approveOrder" },
+                             "arguments": { "orderId": "${ .orderId }" } } ],
+              "transition": "notify" },
+            { "name": "notify", "type": "operation",
+              "actions": [ { "name": "notify",
+                             "functionRef": { "refName": "sendNotify" } } ],
+              "end": true }
+          ]
+        }"#
+    }
+
+    /// 分支互斥 SW 文档：senior-approve / notify 各自独立终止
+    fn sample_branch_sw() -> &'static str {
+        r#"{
+          "id": "branch-wf",
+          "version": "1.0",
+          "start": "check",
+          "states": [
+            { "name": "check", "type": "switch",
+              "dataConditions": [
+                { "condition": "${ .amount >= 1000 }", "transition": "senior-approve" }
+              ],
+              "defaultCondition": { "transition": "notify" } },
+            { "name": "senior-approve", "type": "operation",
+              "actions": [ { "name": "approve", "functionRef": { "refName": "approve" } } ],
+              "transition": "end" },
+            { "name": "notify", "type": "operation",
+              "actions": [ { "name": "notify", "functionRef": { "refName": "notify" } } ],
+              "transition": "end" }
+          ]
+        }"#
+    }
+
+    #[tokio::test]
+    async fn test_deploy_accepts_cncf_sw_directly() {
+        // ISSUE-004：SW 权威文档直接喂 deployDefinition（原生解析，无转换层）
+        let svc = WorkflowEngineService::new_for_test();
+        let def_id = svc.deploy_definition("icps-flow", sample_cncf_sw()).await.unwrap();
+        assert!(!def_id.is_empty());
+
+        let loaded = svc.get_definition(&def_id).await.unwrap().unwrap();
+        assert_eq!(loaded.document.dsl, "cncf-serverless-workflow");
+        assert_eq!(loaded.document.name, "order-approval");
+        assert_eq!(loaded.document.namespace, "icps-flow");
+        // 转换结构：inject → set、operation → call、switch、终端 __end
+        assert!(loaded.do_tasks.iter().any(|t| matches!(t.task, Task::Set(_))));
+        assert!(loaded.do_tasks.iter().any(|t| matches!(t.task, Task::Call(_))));
+        assert!(loaded.do_tasks.iter().any(|t| t.name == "check"));
+        assert!(loaded.do_tasks.iter().any(|t| t.name == "__end"));
+    }
+
+    #[tokio::test]
+    async fn test_deploy_cncf_sw_invalid_returns_validation_error() {
+        let svc = WorkflowEngineService::new_for_test();
+        let bad = r#"{
+          "id": "x", "version": "1.0", "start": "s",
+          "states": [ { "name": "s", "type": "delay", "transition": "end" } ]
+        }"#;
+        let err = svc.deploy_definition("ns", bad).await.unwrap_err();
+        match err {
+            DeployError::Validation(msg) => {
+                assert!(msg.contains("unsupported type 'delay'"), "msg: {msg}")
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sw_branch_executes_only_chosen_path() {
+        // 分支互斥（端到端）：amount=1500 → senior-approve 分支，notify 不得执行
+        let svc = WorkflowEngineService::new_for_test();
+        let def_id = svc.deploy_definition("test", sample_branch_sw()).await.unwrap();
+        let inst = svc.start_instance(&def_id,
+            serde_json::json!({"amount": 1500})).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        let loaded = svc.get_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Completed,
+            "workflow should complete, fault={:?}", loaded.fault);
+
+        let ran: Vec<&str> = loaded.task_stack.iter().map(|f| f.task_name.as_str()).collect();
+        assert!(ran.contains(&"senior-approve"),
+            "senior-approve branch should run, stack={ran:?}");
+        assert!(!ran.contains(&"notify"),
+            "notify branch must NOT run (fall-through), stack={ran:?}");
+    }
+
+    #[tokio::test]
+    async fn test_sw_branch_default_path_executes() {
+        // 分支互斥（default）：amount=100 → notify 分支，senior-approve 不得执行
+        let svc = WorkflowEngineService::new_for_test();
+        let def_id = svc.deploy_definition("test", sample_branch_sw()).await.unwrap();
+        let inst = svc.start_instance(&def_id,
+            serde_json::json!({"amount": 100})).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        let loaded = svc.get_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Completed,
+            "workflow should complete, fault={:?}", loaded.fault);
+
+        let ran: Vec<&str> = loaded.task_stack.iter().map(|f| f.task_name.as_str()).collect();
+        assert!(ran.contains(&"notify"), "notify branch should run, stack={ran:?}");
+        assert!(!ran.contains(&"senior-approve"),
+            "senior-approve branch must NOT run, stack={ran:?}");
     }
 }

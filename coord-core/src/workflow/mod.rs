@@ -16,6 +16,7 @@ pub mod parser;
 pub mod ports;
 pub mod raft_store;
 pub mod retry;
+pub mod sw;
 pub mod validate;
 pub mod tasks;
 pub mod engine;

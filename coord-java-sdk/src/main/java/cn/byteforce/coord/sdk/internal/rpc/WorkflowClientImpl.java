@@ -12,10 +12,14 @@ import cn.byteforce.coord.sdk.internal.proto.WorkflowGetDefinitionResponse;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowGetStatusRequest;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowGetStatusResponse;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowGrpc;
+import cn.byteforce.coord.sdk.internal.proto.WorkflowListDefinitionVersionsRequest;
+import cn.byteforce.coord.sdk.internal.proto.WorkflowListDefinitionVersionsResponse;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowListDefinitionsRequest;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowListDefinitionsResponse;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowListInstancesRequest;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowListInstancesResponse;
+import cn.byteforce.coord.sdk.internal.proto.WorkflowRollbackDefinitionRequest;
+import cn.byteforce.coord.sdk.internal.proto.WorkflowRollbackDefinitionResponse;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowSignalRequest;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowSignalResponse;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowStartRequest;
@@ -25,6 +29,7 @@ import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import cn.byteforce.coord.sdk.workflow.WorkflowClient;
 import cn.byteforce.coord.sdk.workflow.WorkflowDefinition;
 import cn.byteforce.coord.sdk.workflow.WorkflowDefinitionSummary;
+import cn.byteforce.coord.sdk.workflow.WorkflowDefinitionVersion;
 import cn.byteforce.coord.sdk.workflow.WorkflowInstanceSummary;
 import cn.byteforce.coord.sdk.workflow.WorkflowState;
 import cn.byteforce.coord.sdk.workflow.WorkflowStatus;
@@ -227,6 +232,51 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         return new WorkflowDefinition(
                 response.getWorkflowId(), response.getName(), response.getDefinitionYaml(),
                 response.getVersion(), response.getStatus(), response.getCreatedAt());
+    }
+
+    @Override
+    public List<WorkflowDefinitionVersion> listDefinitionVersions(String namespace, String name) {
+        WorkflowListDefinitionVersionsRequest request = WorkflowListDefinitionVersionsRequest.newBuilder()
+                .setNamespace(namespace)
+                .setName(name)
+                .build();
+
+        WorkflowListDefinitionVersionsResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .listDefinitionVersions((WorkflowListDefinitionVersionsRequest) r),
+                request, "workflow.listDefinitionVersions");
+
+        List<WorkflowDefinitionVersion> result = new ArrayList<>();
+        for (cn.byteforce.coord.sdk.internal.proto.WorkflowDefinitionVersion v : response.getVersionsList()) {
+            result.add(new WorkflowDefinitionVersion(
+                    v.getVersion(), v.getWorkflowId(), v.getStatus(), v.getCreatedAt()));
+        }
+        log.debug("Workflow listDefinitionVersions: ns={}, name={}, count={}",
+                namespace, name, result.size());
+        return result;
+    }
+
+    @Override
+    public WorkflowDefinition rollbackDefinition(String namespace, String name, String version) {
+        WorkflowRollbackDefinitionRequest request = WorkflowRollbackDefinitionRequest.newBuilder()
+                .setNamespace(namespace)
+                .setName(name)
+                .setVersion(version)
+                .build();
+
+        WorkflowRollbackDefinitionResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .rollbackDefinition((WorkflowRollbackDefinitionRequest) r),
+                request, "workflow.rollbackDefinition");
+
+        log.debug("Workflow rollbackDefinition: ns={}, name={}, fromVersion={}, newVersion={}",
+                namespace, name, version, response.getVersion());
+        // 响应不含 DSL 全文；完整文档可通过 getDefinition(workflowId) 获取
+        return new WorkflowDefinition(
+                response.getWorkflowId(), response.getName(), "",
+                response.getVersion(), "active", System.currentTimeMillis() / 1000);
     }
 
     // ──── 工作流实例查询 ────

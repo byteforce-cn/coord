@@ -136,6 +136,33 @@ public interface WorkflowClient {
      */
     WorkflowDefinition getDefinition(String workflowId);
 
+    /**
+     * List all versions of a workflow definition (rollback target discovery,
+     * aligned with policy {@code listBundleVersions}).
+     *
+     * @param namespace the definition namespace
+     * @param name      the definition name
+     * @return list of definition versions (semantic version strings, sorted ascending)
+     * @throws CoordException on communication failure
+     */
+    java.util.List<WorkflowDefinitionVersion> listDefinitionVersions(String namespace, String name);
+
+    /**
+     * Roll back a workflow definition to a previous version (aligned with policy
+     * {@code rollbackBundle}: restore snapshot as a new version, keep enabled state).
+     * <p>
+     * The target version's DSL is re-validated and restored as a NEW semantic version
+     * (target version + 1, e.g. "1.0" → "1.1"); existing versions are kept intact
+     * (versioned coexistence). Fetch the full document via {@link #getDefinition}.
+     *
+     * @param namespace the definition namespace
+     * @param name      the definition name
+     * @param version   the version to restore (must exist)
+     * @return the rolled-back definition summary (definitionYaml is empty; use {@link #getDefinition})
+     * @throws CoordException on invalid target version (INVALID_ARGUMENT) or communication failure
+     */
+    WorkflowDefinition rollbackDefinition(String namespace, String name, String version);
+
     // ──── 工作流实例查询 ────
 
     /**

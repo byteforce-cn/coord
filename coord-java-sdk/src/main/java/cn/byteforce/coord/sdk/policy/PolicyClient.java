@@ -50,11 +50,28 @@ public interface PolicyClient {
 
     /**
      * Evaluate a Rego query against the policy engine.
+     * <p>
+     * The {@code query} may be a data reference such as {@code "data.rbac.allow"}
+     * (boolean decision) or {@code "data.rbac.granted_permissions"} (set/array of
+     * permission points), or a pure expression.
+     * <p>
+     * <b>Result encoding</b> (JSON, UTF-8): boolean rule → {@code true}/{@code false};
+     * set/collection rule → JSON array; object rule → JSON object; no match / undefined
+     * rule → {@code null}. Multiple expressions in one query → array of values.
+     * <p>
+     * <b>Error vs deny</b>: evaluation errors (invalid query syntax, non-JSON input,
+     * runtime errors) raise {@link CoordException} (gRPC {@code INVALID_ARGUMENT}) —
+     * treat as a policy/input problem, not as a deny decision. A deny / no-match result
+     * is returned as {@code false} or {@code null} (JSON) in a successful response.
+     * <p>
+     * Note: the query addresses the Rego <em>package</em> (e.g. {@code data.icps.order.allow}),
+     * not a bundle/tenant key. All enabled bundles share one engine, so package names must
+     * be unique across tenants/namespaces.
      *
      * @param query the Rego query string (e.g., "data.rbac.allow")
      * @param input the JSON input document for the query
-     * @return JSON result from the policy engine
-     * @throws CoordException on evaluation or communication failure
+     * @return JSON result (boolean / array / object / null) from the policy engine
+     * @throws CoordException on evaluation (INVALID_ARGUMENT) or communication failure
      */
     byte[] evaluate(String query, byte[] input);
 
