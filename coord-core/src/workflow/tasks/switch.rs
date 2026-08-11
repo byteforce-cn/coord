@@ -5,7 +5,7 @@
 // 无匹配时返回 NextTask（继续下一任务）。
 
 use crate::workflow::model::{
-    NamedTask, StepResult, SwitchTask, TaskFrame, TaskStatus, WorkflowFault, WorkflowInstance,
+    NamedTask, StepResult, SwitchTask, TaskFrame, TaskStatus, WorkflowInstance,
 };
 use crate::workflow::ports::{Clock, ExpressionEval};
 
@@ -56,12 +56,10 @@ pub fn execute(
             Ok(false) => continue,
             Err(e) => {
                 return StepResult::Failed {
-                    fault: WorkflowFault {
-                        r#type: "expression_error".into(),
-                        title: "switch condition evaluation failed".into(),
-                        status: 400,
-                        detail: e.to_string(),
-                    },
+                    fault: crate::workflow::errors::WorkflowFault::expression(
+                        "switch condition evaluation failed",
+                        e.to_string(),
+                    ),
                 };
             }
         }

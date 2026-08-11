@@ -55,9 +55,39 @@ pub trait ExpressionEval: Send + Sync {
     /// 求值表达式，返回 JSON Value
     fn evaluate(&self, expr: &str, context: &Value) -> Result<Value, ExpressionError>;
 
+    /// 求值表达式并注入标准运行时变量绑定（`$context/$input/$output/$task/$workflow/$runtime/...`）
+    ///
+    /// 默认实现忽略变量绑定（等价于 `evaluate`）；支持变量注入的实现应覆盖。
+    fn evaluate_with_vars(
+        &self,
+        expr: &str,
+        context: &Value,
+        _vars: &HashMap<String, Value>,
+    ) -> Result<Value, ExpressionError> {
+        self.evaluate(expr, context)
+    }
+
     /// 求值布尔表达式
     fn evaluate_bool(&self, expr: &str, context: &Value) -> Result<bool, ExpressionError> {
         let result = self.evaluate(expr, context)?;
+        Ok(match result {
+            Value::Bool(b) => b,
+            Value::Null => false,
+            Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
+            Value::String(s) => !s.is_empty(),
+            Value::Array(a) => !a.is_empty(),
+            Value::Object(o) => !o.is_empty(),
+        })
+    }
+
+    /// 布尔求值（变量注入版）
+    fn evaluate_bool_with_vars(
+        &self,
+        expr: &str,
+        context: &Value,
+        vars: &HashMap<String, Value>,
+    ) -> Result<bool, ExpressionError> {
+        let result = self.evaluate_with_vars(expr, context, vars)?;
         Ok(match result {
             Value::Bool(b) => b,
             Value::Null => false,
@@ -75,8 +105,26 @@ impl ExpressionEval for super::expression::ExpressionEvaluator {
         self.evaluate(expr, context)
     }
 
+    fn evaluate_with_vars(
+        &self,
+        expr: &str,
+        context: &Value,
+        vars: &HashMap<String, Value>,
+    ) -> Result<Value, ExpressionError> {
+        self.evaluate_with_vars(expr, context, vars)
+    }
+
     fn evaluate_bool(&self, expr: &str, context: &Value) -> Result<bool, ExpressionError> {
         self.evaluate_bool(expr, context)
+    }
+
+    fn evaluate_bool_with_vars(
+        &self,
+        expr: &str,
+        context: &Value,
+        vars: &HashMap<String, Value>,
+    ) -> Result<bool, ExpressionError> {
+        self.evaluate_bool_with_vars(expr, context, vars)
     }
 }
 
@@ -738,6 +786,11 @@ mod tests {
             output: None,
             timeout: None,
             use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
         raw_yaml: None,
         };
 

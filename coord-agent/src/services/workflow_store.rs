@@ -710,6 +710,11 @@ mod tests {
             output: None,
             timeout: None,
             use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
             raw_yaml: Some("name: test-wf\nversion: \"1.0\"".to_string()),
         };
 

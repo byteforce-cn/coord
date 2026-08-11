@@ -34,8 +34,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::model::{
-    CallTask, CallType, Document, EndTask, FunctionDef, NamedTask, SetTask, SwitchCondition,
-    SwitchTask, Task, UseComponents, WorkflowDefinition,
+    AuthConfig, CallTask, CallType, CatchClause, Document, EndTask, EventFilter, ForEachTask,
+    ForkBranch, ForkTask, FunctionDef, ListenTask, NamedTask, RetryPolicy, SetTask,
+    SwitchCondition, SwitchTask, Task, TimeoutConfig, TryCatchTask, UseComponents, WaitTask,
+    WorkflowDefinition,
 };
 
 // ─── CNCF SW 文档模型（子集） ───
@@ -60,9 +62,25 @@ pub struct SwWorkflowDoc {
     pub states: Vec<SwState>,
     #[serde(default)]
     pub functions: Vec<SwFunction>,
+    /// 顶层事件定义（events[]）
+    #[serde(default)]
+    pub events: Vec<SwEvent>,
+    /// 顶层重试定义（retries[]）
+    #[serde(default)]
+    pub retries: Vec<SwRetry>,
+    /// 顶层错误定义（errors[]）
+    #[serde(default)]
+    pub errors: Vec<SwError>,
+    /// 顶层超时定义（timeouts[]）
+    #[serde(default)]
+    pub timeouts: Vec<SwTimeout>,
+    /// 顶层认证定义（auth[]）
+    #[serde(default)]
+    pub auth: Vec<SwAuth>,
 }
 
-/// CNCF SW 状态（子集：inject / operation / switch + end）
+/// CNCF SW 状态（全状态：inject / operation / delay / event / callback /
+/// switch / foreach / parallel / compensate + end）
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SwState {
@@ -72,18 +90,51 @@ pub struct SwState {
     /// inject：注入的数据对象
     #[serde(default)]
     pub data: Option<Value>,
-    /// operation：动作列表（子集要求恰好一个）
+    /// operation：动作列表
     #[serde(default)]
     pub actions: Vec<SwAction>,
+    /// operation：actionMode（sequential/parallel）
+    #[serde(default)]
+    pub action_mode: Option<String>,
     /// switch：dataBasedSwitch 的条件
     #[serde(default)]
     pub data_conditions: Vec<SwCondition>,
-    /// switch：eventBasedSwitch 不支持（本子集）
+    /// switch：eventBasedSwitch 的条件
     #[serde(default)]
     pub event_conditions: Vec<SwCondition>,
     /// switch：默认条件
     #[serde(default)]
     pub default_condition: Option<SwDefaultCondition>,
+    /// delay：等待时长（ISO 8601）
+    #[serde(default)]
+    pub duration: Option<String>,
+    /// event/callback：事件定义
+    #[serde(default)]
+    pub on_events: Vec<SwEvent>,
+    /// callback：状态级动作
+    #[serde(default)]
+    pub action: Option<SwEventAction>,
+    /// callback：状态级返回事件引用
+    #[serde(rename = "eventRef", default)]
+    pub state_event_ref: Option<SwEventRef>,
+    /// foreach：迭代定义
+    #[serde(default)]
+    pub iterate: Option<SwIterate>,
+    /// parallel：并行分支
+    #[serde(default)]
+    pub branches: Vec<SwBranch>,
+    /// parallel：完成类型（allOf/atLeastOne）
+    #[serde(default)]
+    pub completion_type: Option<String>,
+    /// 错误处理（onErrors[]：retry/compensate/transition）
+    #[serde(default)]
+    pub on_errors: Vec<SwOnError>,
+    /// 补偿状态引用（compensatedBy）
+    #[serde(default)]
+    pub compensated_by: Option<String>,
+    /// 是否仅用于补偿（usedForCompensation）
+    #[serde(default)]
+    pub used_for_compensation: Option<bool>,
     /// 线性状态的后继（与 end 互斥）
     #[serde(default)]
     pub transition: Option<String>,
@@ -121,6 +172,9 @@ pub struct SwCondition {
     /// jq 布尔表达式（${...}）
     #[serde(default)]
     pub condition: Option<String>,
+    /// eventConditions：事件引用（事件名或顶层 events 定义名）
+    #[serde(rename = "eventRef", default)]
+    pub event_ref: Option<String>,
     #[serde(default)]
     pub transition: Option<String>,
     #[serde(default)]
@@ -146,6 +200,168 @@ pub struct SwFunction {
     pub operation: Option<String>,
     #[serde(default)]
     pub r#type: Option<String>,
+}
+
+/// 事件定义（顶层 events[] 与状态内 onEvents[] 共用）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwEvent {
+    /// 事件名
+    #[serde(default)]
+    pub name: Option<String>,
+    /// event 状态：事件引用
+    #[serde(default)]
+    pub event_refs: Vec<SwEventRef>,
+    /// callback 状态：动作
+    #[serde(default)]
+    pub action: Option<SwEventAction>,
+    /// 事件后的后继
+    #[serde(default)]
+    pub transition: Option<String>,
+    #[serde(default)]
+    pub end: Option<bool>,
+    /// 顶层事件定义字段
+    #[serde(rename = "type")]
+    pub r#type: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub correlation: Vec<SwCorrelation>,
+    #[serde(default)]
+    pub data: Option<Value>,
+    #[serde(default)]
+    pub context_attributes: Option<Value>,
+}
+
+/// 事件引用
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwEventRef {
+    #[serde(rename = "eventRef", default)]
+    pub event_ref: String,
+    /// callback 返回事件引用（triggerEventRef）
+    #[serde(rename = "triggerEventRef", default)]
+    pub trigger_event_ref: Option<String>,
+    #[serde(default)]
+    pub data: Option<Value>,
+    #[serde(default)]
+    pub context_attributes: Option<Value>,
+}
+
+/// callback 动作（调用函数后等待事件）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwEventAction {
+    #[serde(default)]
+    pub function_ref: Option<SwFunctionRef>,
+    #[serde(default)]
+    pub event_ref: Option<SwEventRef>,
+}
+
+/// foreach 迭代
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwIterate {
+    #[serde(default)]
+    pub input: Option<String>,
+    #[serde(default)]
+    pub iteration: Option<String>,
+    #[serde(default)]
+    pub actions: Vec<SwAction>,
+    #[serde(default)]
+    pub output: Option<String>,
+}
+
+/// parallel 分支
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwBranch {
+    pub name: String,
+    #[serde(default)]
+    pub actions: Vec<SwAction>,
+}
+
+/// onErrors 错误处理
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwOnError {
+    /// 错误引用（errors[] 名称）或标准错误类型
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub transition: Option<String>,
+    #[serde(default)]
+    pub end: Option<bool>,
+    /// 重试（内联或引用顶层 retries）
+    #[serde(default)]
+    pub retry: Option<Value>,
+}
+
+/// 顶层重试定义
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwRetry {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(rename = "delay")]
+    pub delay: Option<Value>,
+    #[serde(default)]
+    pub backoff: Option<Value>,
+    #[serde(default)]
+    pub limit: Option<Value>,
+    #[serde(default)]
+    pub jitter: Option<Value>,
+}
+
+/// 顶层错误定义
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwError {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub error_type: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub status: Option<u16>,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+/// 顶层超时定义
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwTimeout {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub after: Option<String>,
+}
+
+/// 顶层认证定义
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwAuth {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub scheme: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+/// 事件关联（correlation）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwCorrelation {
+    #[serde(rename = "contextAttributeName")]
+    pub context_attribute_name: String,
+    #[serde(rename = "contextAttributeValue")]
+    pub context_attribute_value: Option<String>,
 }
 
 // ─── 入口 ───
@@ -203,19 +419,14 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
     // ── 2. 状态类型 + 结构校验 ──
     for s in &doc.states {
         match s.state_type.as_str() {
-            "inject" | "operation" | "switch" => {}
+            "inject" | "operation" | "delay" | "event" | "callback" | "switch"
+            | "foreach" | "parallel" | "compensate" => {}
             other => {
                 return Err(format!(
-                    "state '{}': unsupported type '{other}' (supported: inject, operation, switch)",
+                    "state '{}': unsupported type '{other}' (supported: inject, operation, delay, event, callback, switch, foreach, parallel, compensate)",
                     s.name
                 ))
             }
-        }
-        if !s.event_conditions.is_empty() {
-            return Err(format!(
-                "state '{}': eventConditions (eventBasedSwitch) not supported, use dataConditions",
-                s.name
-            ));
         }
         // end 与 transition 互斥
         if s.end.is_some() && s.transition.is_some() {
@@ -227,26 +438,52 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                 s.name
             ));
         }
-        if s.state_type == "switch" && s.data_conditions.is_empty() && s.default_condition.is_none() {
+        if s.state_type == "switch"
+            && s.data_conditions.is_empty()
+            && s.event_conditions.is_empty()
+            && s.default_condition.is_none()
+        {
             return Err(format!(
-                "state '{}': switch must have dataConditions or defaultCondition",
+                "state '{}': switch must have dataConditions, eventConditions or defaultCondition",
                 s.name
             ));
         }
-        if s.state_type == "operation" && s.actions.len() != 1 {
+        if s.state_type == "operation" && s.actions.is_empty() {
             return Err(format!(
-                "state '{}': operation must have exactly one action (subset)",
+                "state '{}': operation must have at least one action",
                 s.name
             ));
         }
         if s.state_type == "operation" {
-            let action = &s.actions[0];
-            let fn_ref = action.function_ref.as_ref().ok_or_else(|| {
-                format!("state '{}': operation action requires functionRef", s.name)
-            })?;
-            if fn_ref.ref_name.is_empty() {
-                return Err(format!("state '{}': functionRef.refName must not be empty", s.name));
+            for action in &s.actions {
+                let fn_ref = action.function_ref.as_ref().ok_or_else(|| {
+                    format!("state '{}': operation action requires functionRef", s.name)
+                })?;
+                if fn_ref.ref_name.is_empty() {
+                    return Err(format!("state '{}': functionRef.refName must not be empty", s.name));
+                }
             }
+        }
+        if s.state_type == "delay" && s.duration.is_none() {
+            return Err(format!("state '{}': delay requires 'duration'", s.name));
+        }
+        if (s.state_type == "event") && s.on_events.is_empty() {
+            return Err(format!("state '{}': event requires 'onEvents'", s.name));
+        }
+        if s.state_type == "callback"
+            && s.on_events.is_empty()
+            && s.action.is_none()
+        {
+            return Err(format!(
+                "state '{}': callback requires 'onEvents' or 'action'",
+                s.name
+            ));
+        }
+        if s.state_type == "foreach" && s.iterate.is_none() {
+            return Err(format!("state '{}': foreach requires 'iterate'", s.name));
+        }
+        if s.state_type == "parallel" && s.branches.is_empty() {
+            return Err(format!("state '{}': parallel requires 'branches'", s.name));
         }
     }
 
@@ -295,17 +532,128 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                 tasks.push(transition_task(&s.name, &target));
             }
             "operation" => {
-                let action = &s.actions[0];
-                let fn_ref = action.function_ref.as_ref().unwrap();
-                let with = action
-                    .arguments
-                    .clone()
-                    .or_else(|| fn_ref.arguments.clone());
+                // 多动作支持（actionMode: sequential 默认 / parallel）
+                let action_tasks: Vec<NamedTask> = s
+                    .actions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, action)| {
+                        let fn_ref = action.function_ref.as_ref().unwrap();
+                        let with = action
+                            .arguments
+                            .clone()
+                            .or_else(|| fn_ref.arguments.clone());
+                        let name = if s.actions.len() == 1 {
+                            s.name.clone()
+                        } else {
+                            format!("{}__action_{}", s.name, i)
+                        };
+                        NamedTask {
+                            name,
+                            task: Task::Call(CallTask {
+                                call: CallType::Function(fn_ref.ref_name.clone()),
+                                with,
+                            }),
+                        }
+                    })
+                    .collect();
+
+                if s.action_mode.as_deref() == Some("parallel") && action_tasks.len() > 1 {
+                    // 并行动作 → fork
+                    tasks.push(NamedTask {
+                        name: s.name.clone(),
+                        task: Task::Fork(ForkTask {
+                            branches: action_tasks
+                                .iter()
+                                .enumerate()
+                                .map(|(i, t)| ForkBranch {
+                                    name: format!("branch_{i}"),
+                                    tasks: vec![t.clone()],
+                                })
+                                .collect(),
+                            compete: None,
+                        }),
+                    });
+                } else {
+                    for t in action_tasks {
+                        tasks.push(t);
+                    }
+                }
+                let target = linear_transition_target(s)?;
+                if target == END_TASK {
+                    needs_end = true;
+                }
+                tasks.push(transition_task(&s.name, &target));
+            }
+            "delay" => {
+                let duration = s.duration.clone().unwrap_or_default();
                 tasks.push(NamedTask {
                     name: s.name.clone(),
-                    task: Task::Call(CallTask {
-                        call: CallType::Function(fn_ref.ref_name.clone()),
-                        with,
+                    task: Task::Wait(WaitTask { wait: duration }),
+                });
+                let target = linear_transition_target(s)?;
+                if target == END_TASK {
+                    needs_end = true;
+                }
+                tasks.push(transition_task(&s.name, &target));
+            }
+            "event" => {
+                // onEvents → listen 任务（等待事件，主动订阅恢复）
+                tasks.push(NamedTask {
+                    name: s.name.clone(),
+                    task: Task::Listen(ListenTask {
+                        listen: EventFilter {
+                            event_type: first_event_type(&doc, s),
+                            source: None,
+                            subject: None,
+                        },
+                    }),
+                });
+                let target = linear_transition_target(s)?;
+                if target == END_TASK {
+                    needs_end = true;
+                }
+                tasks.push(transition_task(&s.name, &target));
+            }
+            "callback" => {
+                // callback = call（action.functionRef）+ listen（等待返回事件）
+                let action = s
+                    .action
+                    .as_ref()
+                    .or_else(|| s.on_events.first().and_then(|e| e.action.as_ref()));
+                if let Some(action) = action {
+                    if let Some(fn_ref) = &action.function_ref {
+                        let with = fn_ref.arguments.clone();
+                        tasks.push(NamedTask {
+                            name: format!("{}__call", s.name),
+                            task: Task::Call(CallTask {
+                                call: CallType::Function(fn_ref.ref_name.clone()),
+                                with,
+                            }),
+                        });
+                    }
+                }
+                tasks.push(NamedTask {
+                    name: s.name.clone(),
+                    task: Task::Listen(ListenTask {
+                        listen: EventFilter {
+                            event_type: first_event_type(&doc, s)
+                                .or_else(|| {
+                                    s.state_event_ref
+                                        .as_ref()
+                                        .and_then(|r| {
+                                            doc.events
+                                                .iter()
+                                                .find(|e| {
+                                                    e.name.as_deref()
+                                                        == Some(r.event_ref.as_str())
+                                                })
+                                                .and_then(|e| e.r#type.clone())
+                                        })
+                                }),
+                            source: None,
+                            subject: None,
+                        },
                     }),
                 });
                 let target = linear_transition_target(s)?;
@@ -328,6 +676,33 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                         condition: Some(cond),
                         transition: target,
                     });
+                }
+                // eventConditions（eventBasedSwitch）：先 listen 事件，再按事件路由
+                if !s.event_conditions.is_empty() {
+                    tasks.push(NamedTask {
+                        name: format!("{}__listen", s.name),
+                        task: Task::Listen(ListenTask {
+                            listen: EventFilter {
+                                event_type: event_condition_type(&doc, &s.event_conditions),
+                                source: None,
+                                subject: None,
+                            },
+                        }),
+                    });
+                    for c in &s.event_conditions {
+                        let target = condition_target(c)?;
+                        if target == END_TASK {
+                            needs_end = true;
+                        }
+                        let ev_type = event_condition_type(&doc, std::slice::from_ref(c));
+                        conditions.push(SwitchCondition {
+                            condition: Some(format!(
+                                "${{ _event.eventType == \"{}\" }}",
+                                ev_type.unwrap_or_default()
+                            )),
+                            transition: target,
+                        });
+                    }
                 }
                 match &s.default_condition {
                     Some(d) => {
@@ -357,11 +732,184 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                     }),
                 });
             }
+            "foreach" => {
+                let iterate = s.iterate.as_ref().unwrap();
+                let sub_tasks: Vec<NamedTask> = iterate
+                    .actions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        let fn_ref = a.function_ref.as_ref().unwrap();
+                        NamedTask {
+                            name: format!("{}__item_{}", s.name, i),
+                            task: Task::Call(CallTask {
+                                call: CallType::Function(fn_ref.ref_name.clone()),
+                                with: a
+                                    .arguments
+                                    .clone()
+                                    .or_else(|| fn_ref.arguments.clone()),
+                            }),
+                        }
+                    })
+                    .collect();
+                tasks.push(NamedTask {
+                    name: s.name.clone(),
+                    task: Task::ForEach(ForEachTask {
+                        input: iterate.input.clone().unwrap_or_else(|| ".".into()),
+                        iteration: iterate.iteration.clone().unwrap_or_else(|| "item".into()),
+                        tasks: sub_tasks,
+                    }),
+                });
+                let target = linear_transition_target(s)?;
+                if target == END_TASK {
+                    needs_end = true;
+                }
+                tasks.push(transition_task(&s.name, &target));
+            }
+            "parallel" => {
+                let branches: Vec<ForkBranch> = s
+                    .branches
+                    .iter()
+                    .map(|b| ForkBranch {
+                        name: b.name.clone(),
+                        tasks: b
+                            .actions
+                            .iter()
+                            .map(|a| {
+                                let fn_ref = a.function_ref.as_ref().unwrap();
+                                NamedTask {
+                                    name: format!("{}__{}", b.name, a.name.clone().unwrap_or_default()),
+                                    task: Task::Call(CallTask {
+                                        call: CallType::Function(fn_ref.ref_name.clone()),
+                                        with: a
+                                            .arguments
+                                            .clone()
+                                            .or_else(|| fn_ref.arguments.clone()),
+                                    }),
+                                }
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                tasks.push(NamedTask {
+                    name: s.name.clone(),
+                    task: Task::Fork(ForkTask {
+                        branches,
+                        compete: Some(s.completion_type.as_deref() == Some("atLeastOne")),
+                    }),
+                });
+                let target = linear_transition_target(s)?;
+                if target == END_TASK {
+                    needs_end = true;
+                }
+                tasks.push(transition_task(&s.name, &target));
+            }
+            "compensate" => {
+                // 补偿状态：编译为普通操作动作（由 compensatedBy 引用）
+                for (i, a) in s.actions.iter().enumerate() {
+                    let fn_ref = a.function_ref.as_ref().unwrap();
+                    let name = if s.actions.len() == 1 {
+                        s.name.clone()
+                    } else {
+                        format!("{}__comp_{}", s.name, i)
+                    };
+                    tasks.push(NamedTask {
+                        name,
+                        task: Task::Call(CallTask {
+                            call: CallType::Function(fn_ref.ref_name.clone()),
+                            with: a
+                                .arguments
+                                .clone()
+                                .or_else(|| fn_ref.arguments.clone()),
+                        }),
+                    });
+                }
+                let target = linear_transition_target(s)?;
+                if target == END_TASK {
+                    needs_end = true;
+                }
+                tasks.push(transition_task(&s.name, &target));
+            }
             _ => unreachable!(),
         }
     }
 
     if needs_end {
+        tasks.push(NamedTask {
+            name: END_TASK.into(),
+            task: Task::End(EndTask {}),
+        });
+    }
+
+    // ── 4b. onErrors / compensatedBy 错误处理包装（标准 §Error Handling / Compensation） ──
+    for s in &doc.states {
+        if s.on_errors.is_empty() && s.compensated_by.is_none() {
+            continue;
+        }
+        // 定位本状态的任务区间（name == state.name 或 "{state}__" 前缀，排除 __transition）
+        let prefix = format!("{}__", s.name);
+        let transition_name = format!("{}__transition", s.name);
+        let mut range: Option<(usize, usize)> = None;
+        let mut running: Option<usize> = None;
+        for (i, t) in tasks.iter().enumerate() {
+            if t.name == s.name || t.name.starts_with(&prefix) {
+                if t.name == transition_name {
+                    break;
+                }
+                if running.is_none() {
+                    running = Some(i);
+                }
+                range = Some((running.unwrap(), i + 1));
+            }
+        }
+        let Some((st, en)) = range else { continue };
+        if en <= st {
+            continue;
+        }
+
+        let body_tasks: Vec<NamedTask> = tasks[st..en].to_vec();
+        let mut catch_clauses: Vec<CatchClause> = Vec::new();
+
+        // compensatedBy → catch-all 转场到补偿状态（补偿状态应为单动作 operation）
+        if let Some(comp_state) = &s.compensated_by {
+            catch_clauses.push(CatchClause {
+                errors: None,
+                tasks: vec![transition_task(&s.name, comp_state)],
+            });
+        }
+
+        // onErrors → 按错误类型转场（retry 由任务级 retry 接线承载）
+        for oe in &s.on_errors {
+            let errors = oe.error.as_ref().map(|e| vec![e.clone()]);
+            let target = if oe.end == Some(true) {
+                END_TASK.to_string()
+            } else {
+                oe.transition.clone().unwrap_or_else(|| END_TASK.to_string())
+            };
+            if target == END_TASK {
+                needs_end = true;
+            }
+            catch_clauses.push(CatchClause {
+                errors,
+                tasks: vec![transition_task(&s.name, &target)],
+            });
+        }
+
+        let wrapper = NamedTask {
+            name: format!("{}__try", s.name),
+            task: Task::TryCatch(TryCatchTask {
+                r#try: body_tasks,
+                catch: catch_clauses,
+            }),
+        };
+        tasks.splice(st..en, std::iter::once(wrapper));
+    }
+
+    if needs_end
+        && !tasks
+            .iter()
+            .any(|t| t.name == END_TASK)
+    {
         tasks.push(NamedTask {
             name: END_TASK.into(),
             task: Task::End(EndTask {}),
@@ -379,7 +927,8 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
         tags: None,
     };
 
-    let use_components = if doc.functions.is_empty() {
+    let use_components = if doc.functions.is_empty() && doc.retries.is_empty() && doc.timeouts.is_empty()
+    {
         None
     } else {
         let mut functions: HashMap<String, FunctionDef> = HashMap::new();
@@ -387,17 +936,68 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
             functions.insert(
                 f.name.clone(),
                 FunctionDef {
-                    call: CallType::Http, // 子集默认 http；宿主 dispatcher 可另行解释
+                    call: CallType::Http, // 宿主 dispatcher 按 operation URI 解释
                     with: None,
                 },
             );
         }
+        let mut retries: HashMap<String, RetryPolicy> = HashMap::new();
+        for r in &doc.retries {
+            if let Some(name) = &r.name {
+                retries.insert(
+                    name.clone(),
+                    super::validate::parse_retry_policy_value(&serde_json::json!({
+                        "delay": r.delay.clone().unwrap_or_else(|| serde_json::json!("PT3S")),
+                        "backoff": r.backoff.clone().unwrap_or_else(|| serde_json::json!("constant")),
+                        "limit": r.limit.clone().unwrap_or_else(|| serde_json::json!(3)),
+                        "jitter": r.jitter.clone().unwrap_or_else(|| serde_json::json!({"factor": 0.0})),
+                    }))
+                    .unwrap_or(RetryPolicy {
+                        delay: "PT3S".to_string(),
+                        backoff: None,
+                        limit: 3,
+                        jitter: None,
+                    }),
+                );
+            }
+        }
+        let mut timeouts: HashMap<String, TimeoutConfig> = HashMap::new();
+        for t in &doc.timeouts {
+            if let Some(name) = &t.name {
+                if let Some(after) = &t.after {
+                    timeouts.insert(
+                        name.clone(),
+                        TimeoutConfig { after: after.clone() },
+                    );
+                }
+            }
+        }
         Some(UseComponents {
-            functions: Some(functions),
-            retries: None,
-            timeouts: None,
+            functions: if functions.is_empty() { None } else { Some(functions) },
+            retries: if retries.is_empty() { None } else { Some(retries) },
+            timeouts: if timeouts.is_empty() { None } else { Some(timeouts) },
         })
     };
+
+    // 顶层 auth（标准 §Authentication）→ 认证映射
+    let mut auth_map: std::collections::HashMap<String, AuthConfig> = Default::default();
+    for a in &doc.auth {
+        if let Some(name) = &a.name {
+            auth_map.insert(
+                name.clone(),
+                AuthConfig {
+                    scheme: a.scheme.clone(),
+                    username: a.username.clone(),
+                    password: a.password.clone(),
+                    token: a.token.clone(),
+                    token_url: None,
+                    client_id: None,
+                    client_secret: None,
+                    scope: None,
+                },
+            );
+        }
+    }
 
     Ok(WorkflowDefinition {
         id: None,
@@ -405,10 +1005,72 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
         do_tasks: tasks,
         input: None,
         output: None,
-        timeout: None,
+        timeout: doc
+            .timeouts
+            .iter()
+            .find(|t| t.name.as_deref() == Some("default"))
+            .and_then(|t| t.after.clone())
+            .map(|after| TimeoutConfig { after }),
         use_components,
+        schedule: Default::default(),
+        auth: auth_map,
+        secrets: Default::default(),
+        constants: Default::default(),
+        task_meta: Default::default(),
         raw_yaml: None,
     })
+}
+
+/// 取 onEvents 中首个事件的类型（解析顶层 events 定义）
+fn first_event_type(doc: &SwWorkflowDoc, s: &SwState) -> Option<String> {
+    for ev in &s.on_events {
+        if let Some(t) = &ev.r#type {
+            return Some(t.clone());
+        }
+        if let Some(name) = &ev.name {
+            // 查找顶层事件定义
+            if let Some(def) = doc.events.iter().find(|e| e.name.as_deref() == Some(name)) {
+                if let Some(t) = &def.r#type {
+                    return Some(t.clone());
+                }
+            }
+        }
+        for ev_ref in &ev.event_refs {
+            if let Some(def) = doc
+                .events
+                .iter()
+                .find(|e| e.name.as_deref() == Some(ev_ref.event_ref.as_str()))
+            {
+                if let Some(t) = &def.r#type {
+                    return Some(t.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 取 eventConditions 的监听事件类型（解析 eventRef → 顶层 events 定义 type）
+fn event_condition_type(doc: &SwWorkflowDoc, conditions: &[SwCondition]) -> Option<String> {
+    for c in conditions {
+        if let Some(ev_ref) = &c.event_ref {
+            // 直接是事件类型，或顶层 events 定义名
+            if ev_ref.contains('.') || ev_ref.contains("created") {
+                return Some(ev_ref.clone());
+            }
+            if let Some(def) = doc.events.iter().find(|e| e.name.as_deref() == Some(ev_ref.as_str())) {
+                if let Some(t) = &def.r#type {
+                    return Some(t.clone());
+                }
+            }
+        }
+    }
+    if let Some(ev) = doc.events.first() {
+        if let Some(t) = &ev.r#type {
+            return Some(t.clone());
+        }
+    }
+    None
 }
 
 /// 校验状态图：transition 引用完整性 + 无环
@@ -433,6 +1095,30 @@ fn validate_graph(
                 Ok(t) if t != END_TASK => targets.push(t),
                 Ok(_) => {}
                 Err(e) => return Err(e),
+            }
+        }
+        // eventBasedSwitch（eventConditions）的目标
+        for c in &s.event_conditions {
+            match condition_target(c) {
+                Ok(t) if t != END_TASK => targets.push(t),
+                Ok(_) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        // event/callback 状态 onEvents 的后继
+        for ev in &s.on_events {
+            if let Some(t) = ev.transition.as_deref() {
+                if t != "end" {
+                    targets.push(t.to_string());
+                }
+            }
+        }
+        // onErrors 的后继（transition/end）
+        for oe in &s.on_errors {
+            if let Some(t) = oe.transition.as_deref() {
+                if t != "end" {
+                    targets.push(t.to_string());
+                }
             }
         }
         if let Some(d) = &s.default_condition {
@@ -721,10 +1407,10 @@ mod tests {
     fn test_rejects_unsupported_state_type() {
         let v: Value = serde_json::json!({
             "id": "x", "version": "1.0", "start": "s",
-            "states": [ { "name": "s", "type": "delay", "transition": "end" } ]
+            "states": [ { "name": "s", "type": "unknown-type", "transition": "end" } ]
         });
         let err = parse_cncf_sw_value(v).unwrap_err();
-        assert!(err.contains("unsupported type 'delay'"), "err: {err}");
+        assert!(err.contains("unsupported type 'unknown-type'"), "err: {err}");
     }
 
     #[test]
@@ -793,15 +1479,30 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_event_conditions() {
+    fn test_accepts_event_conditions() {
+        // eventConditions（eventBasedSwitch）现在支持：listen + 按事件路由
         let v: Value = serde_json::json!({
             "id": "x", "version": "1.0", "start": "s",
-            "states": [ { "name": "s", "type": "switch",
-                          "eventConditions": [ { "eventRef": { "triggerEventRef": "e" } } ],
-                          "defaultCondition": { "transition": "end" } } ]
+            "states": [
+                { "name": "s", "type": "switch",
+                  "events": [],
+                  "eventConditions": [
+                      { "eventRef": "order.created", "transition": "done" }
+                  ],
+                  "defaultCondition": { "end": true } },
+                { "name": "done", "type": "inject", "data": { "ok": true }, "end": true }
+            ]
         });
-        let err = parse_cncf_sw_value(v).unwrap_err();
-        assert!(err.contains("eventConditions"), "err: {err}");
+        let def = parse_cncf_sw_value(v).expect("eventBasedSwitch should parse");
+        // 编译出 listen 任务 + switch 任务
+        assert!(def
+            .do_tasks
+            .iter()
+            .any(|t| matches!(t.task, Task::Listen(_))));
+        assert!(def
+            .do_tasks
+            .iter()
+            .any(|t| matches!(t.task, Task::Switch(_))));
     }
 
     #[test]
@@ -949,5 +1650,223 @@ mod tests {
         // init 注入生效：approved=false, level=1 进入 context
         assert_eq!(inst.context["approved"], serde_json::json!(false));
         assert_eq!(inst.context["level"].as_f64(), Some(1.0));
+    }
+
+    // ═══ P3：全状态编译（delay/event/callback/foreach/parallel/onErrors/compensatedBy） ═══
+
+    fn fn_json(name: &str) -> Value {
+        serde_json::json!({
+            "name": name,
+            "type": "operation",
+            "operation": "http://example.com/op"
+        })
+    }
+
+    #[test]
+    fn test_delay_state_compiles_to_wait() {
+        let v: Value = serde_json::json!({
+            "id": "wf", "version": "1.0", "start": "wait1",
+            "states": [
+                { "name": "wait1", "type": "delay", "duration": "PT1H", "transition": "end" }
+            ]
+        });
+        let def = parse_cncf_sw_value(v).expect("delay should parse");
+        let task = def.do_tasks.iter().find(|t| t.name == "wait1").unwrap();
+        match &task.task {
+            Task::Wait(w) => assert_eq!(w.wait, "PT1H"),
+            other => panic!("expected wait task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_event_state_compiles_to_listen() {
+        let v: Value = serde_json::json!({
+            "id": "wf", "version": "1.0", "start": "ev",
+            "states": [
+                { "name": "ev", "type": "event",
+                  "onEvents": [ { "eventRefs": [ { "eventRef": "orderCreated" } ] } ],
+                  "transition": "end" },
+                { "name": "end", "type": "inject", "data": {}, "end": true }
+            ],
+            "events": [ { "name": "orderCreated", "type": "order.created", "source": "/orders" } ]
+        });
+        let def = parse_cncf_sw_value(v).expect("event state should parse");
+        let task = def.do_tasks.iter().find(|t| t.name == "ev").unwrap();
+        match &task.task {
+            Task::Listen(l) => {
+                assert_eq!(l.listen.event_type.as_deref(), Some("order.created"));
+            }
+            other => panic!("expected listen task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_callback_state_compiles_to_call_and_listen() {
+        let v: Value = serde_json::json!({
+            "id": "wf", "version": "1.0", "start": "cb",
+            "states": [
+                { "name": "cb", "type": "callback",
+                  "action": { "functionRef": { "refName": "doWork" } },
+                  "eventRef": { "triggerEventRef": "workDone" },
+                  "transition": "end" }
+            ],
+            "functions": [ { "name": "doWork", "type": "operation", "operation": "http://x" } ]
+        });
+        let def = parse_cncf_sw_value(v).expect("callback should parse");
+        // 编译出 call 任务 + listen 任务
+        assert!(def.do_tasks.iter().any(|t| matches!(t.task, Task::Call(_))));
+        assert!(def.do_tasks.iter().any(|t| matches!(t.task, Task::Listen(_))));
+    }
+
+    #[test]
+    fn test_foreach_state_compiles_to_for_task() {
+        let v: Value = serde_json::json!({
+            "id": "wf", "version": "1.0", "start": "loop",
+            "states": [
+                { "name": "loop", "type": "foreach",
+                  "iterate": {
+                      "input": "${ .items }",
+                      "iteration": "item",
+                      "actions": [ { "name": "process", "functionRef": { "refName": "proc" } } ]
+                  },
+                  "transition": "end" }
+            ],
+            "functions": [ { "name": "proc", "type": "operation", "operation": "http://x" } ]
+        });
+        let def = parse_cncf_sw_value(v).expect("foreach should parse");
+        let task = def.do_tasks.iter().find(|t| t.name == "loop").unwrap();
+        match &task.task {
+            Task::ForEach(f) => {
+                assert_eq!(f.iteration, "item");
+                assert_eq!(f.tasks.len(), 1);
+            }
+            other => panic!("expected for_each task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parallel_state_compiles_to_fork() {
+        let v: Value = serde_json::json!({
+            "id": "wf", "version": "1.0", "start": "par",
+            "states": [
+                { "name": "par", "type": "parallel",
+                  "branches": [
+                      { "name": "b1", "actions": [ { "name": "a", "functionRef": { "refName": "f1" } } ] },
+                      { "name": "b2", "actions": [ { "name": "b", "functionRef": { "refName": "f2" } } ] }
+                  ],
+                  "completionType": "allOf",
+                  "transition": "end" }
+            ],
+            "functions": [ fn_json("f1"), fn_json("f2") ]
+        });
+        let def = parse_cncf_sw_value(v).expect("parallel should parse");
+        let task = def.do_tasks.iter().find(|t| t.name == "par").unwrap();
+        match &task.task {
+            Task::Fork(f) => {
+                assert_eq!(f.branches.len(), 2);
+                assert_eq!(f.compete, Some(false));
+            }
+            other => panic!("expected fork task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_operation_multi_action_and_parallel_mode() {
+        // actionMode: parallel → fork；sequential → 顺序 call
+        let v: Value = serde_json::json!({
+            "id": "wf", "version": "1.0", "start": "ops",
+            "states": [
+                { "name": "ops", "type": "operation", "actionMode": "parallel",
+                  "actions": [
+                      { "name": "a", "functionRef": { "refName": "f1" } },
+                      { "name": "b", "functionRef": { "refName": "f2" } }
+                  ],
+                  "transition": "end" }
+            ],
+            "functions": [ fn_json("f1"), fn_json("f2") ]
+        });
+        let def = parse_cncf_sw_value(v).expect("parallel operation should parse");
+        let task = def.do_tasks.iter().find(|t| t.name == "ops").unwrap();
+        assert!(matches!(task.task, Task::Fork(_)), "parallel actionMode → fork");
+    }
+
+    #[test]
+    fn test_on_errors_compiles_to_try_catch() {
+        let v: Value = serde_json::json!({
+            "id": "wf", "version": "1.0", "start": "call",
+            "states": [
+                { "name": "call", "type": "operation",
+                  "actions": [ { "name": "a", "functionRef": { "refName": "risky" } } ],
+                  "onErrors": [ { "error": "timeout", "transition": "fallback" } ],
+                  "transition": "end" },
+                { "name": "fallback", "type": "inject", "data": { "recovered": true }, "end": true }
+            ],
+            "functions": [ fn_json("risky") ]
+        });
+        let def = parse_cncf_sw_value(v).expect("onErrors should parse");
+        let wrapper = def
+            .do_tasks
+            .iter()
+            .find(|t| t.name == "call__try")
+            .expect("try-catch wrapper");
+        match &wrapper.task {
+            Task::TryCatch(tc) => {
+                assert_eq!(tc.r#try.len(), 1);
+                assert_eq!(tc.catch.len(), 1);
+                assert_eq!(tc.catch[0].errors.as_ref().unwrap()[0], "timeout");
+            }
+            other => panic!("expected try-catch, got {other:?}"),
+        }
+        // fallback 状态存在
+        assert!(def.do_tasks.iter().any(|t| t.name == "fallback"));
+    }
+
+    #[test]
+    fn test_compensated_by_wraps_in_catch_all() {
+        let v: Value = serde_json::json!({
+            "id": "wf", "version": "1.0", "start": "work",
+            "states": [
+                { "name": "work", "type": "operation",
+                  "actions": [ { "name": "a", "functionRef": { "refName": "doWork" } } ],
+                  "compensatedBy": "undo",
+                  "transition": "end" },
+                { "name": "undo", "type": "compensate",
+                  "actions": [ { "name": "u", "functionRef": { "refName": "undoWork" } } ],
+                  "end": true }
+            ],
+            "functions": [ fn_json("doWork"), fn_json("undoWork") ]
+        });
+        let def = parse_cncf_sw_value(v).expect("compensatedBy should parse");
+        let wrapper = def.do_tasks.iter().find(|t| t.name == "work__try").unwrap();
+        match &wrapper.task {
+            Task::TryCatch(tc) => {
+                // catch-all 转场到补偿状态
+                assert_eq!(tc.catch.len(), 1);
+                assert!(tc.catch[0].errors.is_none());
+            }
+            other => panic!("expected try-catch, got {other:?}"),
+        }
+        assert!(def.do_tasks.iter().any(|t| t.name == "undo"));
+    }
+
+    #[test]
+    fn test_top_level_retries_timeouts_auth_parsed() {
+        let v: Value = serde_json::json!({
+            "id": "wf", "version": "1.0", "start": "s",
+            "retries": [ { "name": "defaultRetry", "delay": { "seconds": 2 }, "limit": { "attempt": { "count": 4 } } } ],
+            "timeouts": [ { "name": "default", "after": "PT5M" } ],
+            "auth": [ { "name": "basicAuth", "scheme": "basic", "username": "admin", "password": "pass" } ],
+            "states": [
+                { "name": "s", "type": "inject", "data": {}, "transition": "end" },
+                { "name": "end", "type": "inject", "data": {}, "end": true }
+            ]
+        });
+        let def = parse_cncf_sw_value(v).expect("top-level defs should parse");
+        let retries = def.use_components.as_ref().unwrap().retries.as_ref().unwrap();
+        assert_eq!(retries["defaultRetry"].limit, 4);
+        assert_eq!(def.timeout.as_ref().unwrap().after, "PT5M");
+        let auth = def.auth.get("basicAuth").unwrap();
+        assert_eq!(auth.scheme.as_deref(), Some("basic"));
+        assert_eq!(auth.username.as_deref(), Some("admin"));
     }
 }

@@ -10,10 +10,13 @@
 // - call 任务返回 Suspend，由 Runtime 负责派发
 // - switch 任务返回 Goto，由 Runtime 负责跳转
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use super::model::{
-    NamedTask, StepResult, Task, WorkflowDefinition, WorkflowInstance,
+    NamedTask, StepResult, Task, TaskFrame, TaskMeta, TaskStatus, WorkflowDefinition,
+    WorkflowFault, WorkflowInstance,
 };
 use super::ports::{Clock, ExpressionEval};
 
@@ -33,9 +36,11 @@ impl<E: ExpressionEval, C: Clock> WorkflowExecutor<E, C> {
 
     /// 执行一步：根据当前实例状态推进一个任务
     ///
-    /// # 参数
-    /// - `inst`: 当前工作流实例（Running 状态）
-    /// - `definition`: 关联的工作流定义
+    /// 数据流管线（标准 §Data Flow）：
+    /// 1. 任务 `if` 条件（为假 → 跳过）
+    /// 2. 任务 `input.from` 变换 + `input.schema` 校验 → 有效任务输入
+    /// 3. 执行任务（对有效任务输入）
+    /// 4. 帧记录有效任务输入（供 runtime 的 output.as/export.as 绑定 `$input`）
     ///
     /// # 返回
     /// - `NextTask`: 推进到下一个任务
@@ -59,8 +64,104 @@ impl<E: ExpressionEval, C: Clock> WorkflowExecutor<E, C> {
             }
         };
 
-        // 根据任务类型分发
-        self.execute_named_task(current_task, inst)
+        let vars = build_expression_vars(inst, definition);
+        let meta = definition.task_meta.get(&current_task.name);
+
+        // 1) 任务 `if` 条件：条件为假 → 跳过任务（Skipped 帧，推进）
+        if let Some(meta) = meta {
+            if let Some(cond) = &meta.if_condition {
+                match self.expr.evaluate_bool_with_vars(cond, &inst.context, &vars) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let now = self.clock.now_ms();
+                        let frame = TaskFrame {
+                            task_name: current_task.name.clone(),
+                            task_type: task_type_name(&current_task.task),
+                            status: TaskStatus::Skipped,
+                            input: Some(inst.context.clone()),
+                            output: None,
+                            started_at: Some(now),
+                            ended_at: Some(now),
+                            retry_count: 0,
+                            pending_branches: None,
+                        };
+                        return StepResult::NextTask(frame);
+                    }
+                    Err(e) => {
+                        return StepResult::Failed {
+                            fault: crate::workflow::errors::WorkflowFault::expression(
+                                format!("task '{}' if condition evaluation failed", current_task.name),
+                                e.to_string(),
+                            ),
+                        };
+                    }
+                }
+            }
+        }
+
+        // 2) 任务 `input.from` 变换 + `input.schema` 校验 → 有效任务输入
+        let effective_ctx = match self.task_input(current_task, meta, inst, &vars) {
+            Ok(ctx) => ctx,
+            Err(fault) => return StepResult::Failed { fault },
+        };
+
+        let exec_inst = if effective_ctx == inst.context {
+            inst.clone()
+        } else {
+            WorkflowInstance {
+                context: effective_ctx.clone(),
+                ..inst.clone()
+            }
+        };
+
+        // 3) 执行任务（对有效任务输入）
+        let mut result = self.execute_named_task(current_task, &exec_inst);
+
+        // 4) 记录有效任务输入到帧（供 runtime output.as/export.as 绑定 `$input`）
+        set_frame_input(&mut result, effective_ctx);
+
+        result
+    }
+
+    /// 任务级输入变换/校验（`input.from` + `input.schema`）
+    fn task_input(
+        &self,
+        current_task: &NamedTask,
+        meta: Option<&TaskMeta>,
+        inst: &WorkflowInstance,
+        vars: &HashMap<String, Value>,
+    ) -> Result<Value, WorkflowFault> {
+        let Some(input_cfg) = meta.and_then(|m| m.input.as_ref()) else {
+            return Ok(inst.context.clone());
+        };
+
+        // input.from 变换
+        let transformed = if let Some(from) = &input_cfg.from {
+            match self.expr.evaluate_with_vars(from, &inst.context, vars) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(crate::workflow::errors::WorkflowFault::expression(
+                        format!("task '{}' input.from evaluation failed", current_task.name),
+                        e.to_string(),
+                    ))
+                }
+            }
+        } else {
+            inst.context.clone()
+        };
+
+        // input.schema 校验
+        if let Some(schema) = &input_cfg.schema {
+            if let Err(errs) = crate::workflow::jsonschema::validate(schema, &transformed) {
+                return Err(crate::workflow::errors::WorkflowFault::validation(
+                    format!("task '{}' input failed schema validation", current_task.name),
+                    errs.join("; "),
+                )
+                .with_instance(format!("/tasks/{}/input", current_task.name)));
+            }
+        }
+
+        Ok(transformed)
     }
 
     /// 执行命名任务 —— 委托到 tasks/ 模块
@@ -85,6 +186,79 @@ impl<E: ExpressionEval, C: Clock> WorkflowExecutor<E, C> {
             Task::End(end) => super::tasks::end::execute(named, end, inst, &self.clock),
         }
     }
+}
+
+// ─── 表达式变量绑定 ───
+
+/// 构建标准运行时表达式变量绑定
+///
+/// `$context` 由求值器固定绑定到 context 根；此处补充：
+/// `$workflow` / `$runtime` / `$authorization` / `$secrets` / `$constants`。
+/// `$input` / `$output` / `$task` 由各管线阶段按需补充。
+pub(crate) fn build_expression_vars(
+    inst: &WorkflowInstance,
+    definition: &WorkflowDefinition,
+) -> HashMap<String, Value> {
+    let mut vars = HashMap::new();
+    vars.insert(
+        "workflow".to_string(),
+        serde_json::json!({
+            "id": definition.id,
+            "name": definition.document.name,
+            "namespace": definition.document.namespace,
+            "version": definition.document.version,
+        }),
+    );
+    vars.insert(
+        "runtime".to_string(),
+        serde_json::json!({
+            "workflowInstanceId": inst.id,
+            "createdAt": inst.created_at,
+            "updatedAt": inst.updated_at,
+        }),
+    );
+    // 认证上下文（P2 注入）
+    vars.insert("authorization".to_string(), Value::Object(Default::default()));
+    // 密钥（P2 注入真实值；此处仅声明键）
+    vars.insert("secrets".to_string(), Value::Object(Default::default()));
+    if let Some(c) = &definition.constants.values {
+        vars.insert("constants".to_string(), Value::Object(c.clone()));
+    }
+    vars
+}
+
+/// 任务类型名（用于 Skipped 帧等）
+pub(crate) fn task_type_name(task: &Task) -> String {
+    match task {
+        Task::Call(_) => "call".into(),
+        Task::Do(_) => "do".into(),
+        Task::Switch(_) => "switch".into(),
+        Task::Fork(_) => "fork".into(),
+        Task::ForEach(_) => "for_each".into(),
+        Task::Wait(_) => "wait".into(),
+        Task::Listen(_) => "listen".into(),
+        Task::Emit(_) => "emit".into(),
+        Task::Set(_) => "set".into(),
+        Task::Raise(_) => "raise".into(),
+        Task::TryCatch(_) => "try".into(),
+        Task::Run(_) => "run".into(),
+        Task::End(_) => "end".into(),
+    }
+}
+
+/// 将有效任务输入写入结果帧（所有携带帧的 StepResult 变体）
+pub(crate) fn set_frame_input(result: &mut StepResult, input: Value) {
+    let frame = match result {
+        StepResult::NextTask(f)
+        | StepResult::Goto { frame: f, .. }
+        | StepResult::Suspend { frame: f, .. }
+        | StepResult::SetVariable { frame: f, .. }
+        | StepResult::Fork { frame: f, .. }
+        | StepResult::ForEach { frame: f, .. }
+        | StepResult::TryBlock { frame: f, .. } => f,
+        _ => return,
+    };
+    frame.input = Some(input);
 }
 
 // ─── ISO 8601 Duration 解析 ───
@@ -188,6 +362,11 @@ mod tests {
             output: None,
             timeout: None,
             use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
             raw_yaml: None,
         }
     }

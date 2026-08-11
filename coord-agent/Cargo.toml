@@ -9,6 +9,9 @@ coord-core = { workspace = true }
 coord-client = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+futures = { workspace = true }
+prost = { workspace = true }
+tonic-prost = "0.14.6"
 tonic = { workspace = true }
 tonic-health = { workspace = true }
 tonic-reflection = { workspace = true }

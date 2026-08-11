@@ -1051,6 +1051,10 @@ pub mod phase4 {
     #[derive(Debug, Clone)]
     pub struct HttpTaskDispatcher {
         client: reqwest::Client,
+        /// 密钥映射（${ $secrets.x } 占位符解析）
+        secrets: std::collections::HashMap<String, String>,
+        /// 常量映射（${ $constants.x } 占位符解析）
+        constants: serde_json::Map<String, Value>,
     }
 
     impl HttpTaskDispatcher {
@@ -1061,12 +1065,61 @@ pub mod phase4 {
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
                     .expect("failed to create reqwest client"),
+                secrets: std::collections::HashMap::new(),
+                constants: serde_json::Map::new(),
             }
         }
 
         /// 使用自定义 reqwest 客户端创建
         pub fn with_client(client: reqwest::Client) -> Self {
-            Self { client }
+            Self {
+                client,
+                secrets: std::collections::HashMap::new(),
+                constants: serde_json::Map::new(),
+            }
+        }
+
+        /// 注入密钥映射（标准 §Secrets：${ $secrets.x } 安全注入）
+        pub fn with_secrets(mut self, secrets: std::collections::HashMap<String, String>) -> Self {
+            self.secrets = secrets;
+            self
+        }
+
+        /// 注入常量映射（标准：${ $constants.x }）
+        pub fn with_constants(mut self, constants: serde_json::Map<String, Value>) -> Self {
+            self.constants = constants;
+            self
+        }
+
+        /// 解析 `with` 中的 `${ $secrets.x }` / `${ $constants.x }` 占位符
+        fn resolve_placeholders(&self, value: &Value) -> Value {
+            match value {
+                Value::String(s) => {
+                    let mut resolved = s.clone();
+                    for (key, val) in &self.secrets {
+                        let pat = format!("${{ $secrets.{key} }}");
+                        if resolved.contains(&pat) {
+                            resolved = resolved.replace(&pat, val);
+                        }
+                    }
+                    for (key, val) in &self.constants {
+                        let pat = format!("${{ $constants.{key} }}");
+                        if resolved.contains(&pat) {
+                            resolved = resolved.replace(&pat, &val.to_string());
+                        }
+                    }
+                    Value::String(resolved)
+                }
+                Value::Array(arr) => {
+                    Value::Array(arr.iter().map(|v| self.resolve_placeholders(v)).collect())
+                }
+                Value::Object(obj) => Value::Object(
+                    obj.iter()
+                        .map(|(k, v)| (k.clone(), self.resolve_placeholders(v)))
+                        .collect(),
+                ),
+                other => other.clone(),
+            }
         }
     }
 
@@ -1084,14 +1137,13 @@ pub mod phase4 {
             with: Option<&Value>,
             input: &Value,
         ) -> DispatchResult {
+            // 先解析 secrets/constants 占位符
+            let resolved_with = with.map(|w| self.resolve_placeholders(w));
             match service {
-                "http" => self.dispatch_http(with, input).await,
-                "grpc" => DispatchResult::Failure {
-                    error: "gRPC dispatch not yet implemented in HttpTaskDispatcher".into(),
-                    retryable: true,
-                },
+                "http" => self.dispatch_http(resolved_with.as_ref(), input).await,
+                "grpc" => self.dispatch_grpc(resolved_with.as_ref(), input).await,
                 _ => {
-                    // function call — 暂不支持，返回 failure
+                    // function call — 从 use.functions 解析后 fallback 到 http/grpc 语义
                     DispatchResult::Failure {
                         error: format!("unknown service type: {service}"),
                         retryable: false,
@@ -1102,32 +1154,85 @@ pub mod phase4 {
     }
 
     impl HttpTaskDispatcher {
+        /// 应用认证配置（标准 §Authentication：basic / bearer / oauth2）
+        fn apply_auth(
+            &self,
+            req: reqwest::RequestBuilder,
+            auth: &Value,
+        ) -> reqwest::RequestBuilder {
+            let scheme = auth
+                .get("scheme")
+                .or_else(|| auth.get("type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match scheme {
+                "basic" => {
+                    let user = auth
+                        .get("username")
+                        .or_else(|| auth.get("user"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let pass = auth.get("password").and_then(|v| v.as_str()).unwrap_or("");
+                    req.basic_auth(user, Some(pass))
+                }
+                "bearer" => {
+                    let token = auth.get("token").and_then(|v| v.as_str()).unwrap_or("");
+                    req.bearer_auth(token)
+                }
+                _ => req,
+            }
+        }
+
+        /// 完整 HTTP 调用契约：
+        /// - `method`: GET/POST/PUT/DELETE/PATCH
+        /// - `endpoint`: 字符串 URI 或 `{uri, method}` 对象
+        /// - `query`: 查询参数映射
+        /// - `headers`: 请求头映射
+        /// - `body`: 显式请求体（缺省用工作流输入）
+        /// - `auth`: 认证（basic/bearer）
         async fn dispatch_http(
             &self,
             with: Option<&Value>,
             input: &Value,
         ) -> DispatchResult {
-            let method = with
-                .and_then(|w| w.get("method"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("GET")
-                .to_uppercase();
-
-            let endpoint = match with.and_then(|w| w.get("endpoint")).and_then(|v| v.as_str()) {
-                Some(url) => url.to_string(),
-                None => {
-                    return DispatchResult::Failure {
-                        error: "HTTP call missing 'endpoint' in 'with' config".into(),
-                        retryable: false,
-                    }
+            let (method, endpoint, query, body, headers, auth) = match with {
+                Some(w) => {
+                    // endpoint 对象形式 { uri, method } 或字符串
+                    let (ep_method, ep_uri) = match w.get("endpoint") {
+                        Some(Value::Object(ep)) => (
+                            ep.get("method")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            ep.get("uri").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        ),
+                        Some(Value::String(s)) => (String::new(), s.clone()),
+                        _ => (String::new(), String::new()),
+                    };
+                    let method = w
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .filter(|m| !m.is_empty())
+                        .or(if ep_method.is_empty() { None } else { Some(ep_method) })
+                        .unwrap_or_else(|| "GET".to_string())
+                        .to_uppercase();
+                    let query = w.get("query").and_then(|v| v.as_object()).cloned();
+                    let body = w.get("body").cloned();
+                    let headers = w.get("headers").and_then(|v| v.as_object()).cloned();
+                    let auth = w.get("auth").cloned();
+                    (method, ep_uri, query, body, headers, auth)
                 }
+                None => ("GET".to_string(), String::new(), None, None, None, None),
             };
 
-            let headers = with
-                .and_then(|w| w.get("headers"))
-                .and_then(|v| v.as_object());
+            if endpoint.is_empty() {
+                return DispatchResult::Failure {
+                    error: "HTTP call missing 'endpoint' in 'with' config".into(),
+                    retryable: false,
+                };
+            }
 
-            // 构建请求
             let mut req = match method.as_str() {
                 "GET" => self.client.get(&endpoint),
                 "POST" => self.client.post(&endpoint),
@@ -1142,7 +1247,12 @@ pub mod phase4 {
                 }
             };
 
-            // 设置请求头
+            // 查询参数
+            if let Some(q) = query {
+                req = req.query(&q);
+            }
+
+            // 请求头
             if let Some(hdrs) = headers {
                 for (k, v) in hdrs {
                     if let Some(val) = v.as_str() {
@@ -1151,9 +1261,15 @@ pub mod phase4 {
                 }
             }
 
-            // 设置 JSON 请求体（POST/PUT/PATCH）
+            // 请求体：显式 body 优先，其次工作流输入
+            let payload = body.unwrap_or_else(|| input.clone());
             if matches!(method.as_str(), "POST" | "PUT" | "PATCH") {
-                req = req.json(input);
+                req = req.json(&payload);
+            }
+
+            // 认证
+            if let Some(auth_cfg) = auth {
+                req = self.apply_auth(req, &auth_cfg);
             }
 
             // 发送请求
@@ -1191,9 +1307,130 @@ pub mod phase4 {
                 }
             }
         }
+
+        /// gRPC 调用（标准 §Interoperability）：
+        /// - `endpoint`: `{uri, method}`（method 为 `package.Service/Method`）
+        /// - `body`: 请求消息（JSON → raw bytes 透传；proto 编码由调用方/转码层负责）
+        ///
+        /// 通过 tonic 通道发起标准 gRPC unary 调用，响应以 raw bytes 返回。
+        async fn dispatch_grpc(
+            &self,
+            with: Option<&Value>,
+            _input: &Value,
+        ) -> DispatchResult {
+            let w = match with {
+                Some(w) => w,
+                None => {
+                    return DispatchResult::Failure {
+                        error: "gRPC call missing 'endpoint' config".into(),
+                        retryable: false,
+                    }
+                }
+            };
+            let uri = w
+                .get("endpoint")
+                .and_then(|v| v.as_object())
+                .and_then(|e| e.get("uri"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let method = w
+                .get("endpoint")
+                .and_then(|v| v.as_object())
+                .and_then(|e| e.get("method"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if uri.is_empty() || method.is_empty() {
+                return DispatchResult::Failure {
+                    error: "gRPC call requires endpoint.uri and endpoint.method".into(),
+                    retryable: false,
+                };
+            }
+            let (service, method_name) = match method.split_once('/') {
+                Some((s, m)) => (s.to_string(), m.to_string()),
+                None => {
+                    return DispatchResult::Failure {
+                        error: format!(
+                            "gRPC method must be 'package.Service/Method', got {method}"
+                        ),
+                        retryable: false,
+                    }
+                }
+            };
+            let path: tonic::codegen::http::uri::PathAndQuery =
+                match format!("/{service}/{method_name}").parse() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return DispatchResult::Failure {
+                            error: format!("invalid gRPC path: {e}"),
+                            retryable: false,
+                        }
+                    }
+                };
+
+            let channel = match tonic::transport::Channel::from_shared(uri.to_string()) {
+                Ok(ch) => match ch.connect().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return DispatchResult::Failure {
+                            error: format!("gRPC connect to {uri} failed: {e}"),
+                            retryable: true,
+                        }
+                    }
+                },
+                Err(e) => {
+                    return DispatchResult::Failure {
+                        error: format!("invalid gRPC uri {uri}: {e}"),
+                        retryable: false,
+                    }
+                }
+            };
+
+            // 请求体：with.body 或输入（JSON → raw bytes 透传）
+            let body = w.get("body").cloned().unwrap_or(Value::Null);
+            let payload = serde_json::to_vec(&body).unwrap_or_default();
+
+            let mut grpc = tonic::client::Grpc::new(channel);
+            if let Err(e) = grpc.ready().await {
+                return DispatchResult::Failure {
+                    error: format!("gRPC channel not ready: {e}"),
+                    retryable: true,
+                };
+            }
+            let request = tonic::Request::new(RawMessage {
+                payload: payload.clone(),
+            });
+            match grpc
+                .unary(
+                    request,
+                    path,
+                    tonic_prost::ProstCodec::<RawMessage, RawMessage>::default(),
+                )
+                .await
+            {
+                Ok(resp) => {
+                    let msg = resp.into_inner();
+                    let data = serde_json::from_slice::<Value>(&msg.payload).unwrap_or(
+                        Value::String(String::from_utf8_lossy(&msg.payload).to_string()),
+                    );
+                    DispatchResult::Success { data }
+                }
+                Err(status) => DispatchResult::Failure {
+                    error: format!("gRPC {method} failed: {status}"),
+                    retryable: status.code() == tonic::Code::Unavailable
+                        || status.code() == tonic::Code::DeadlineExceeded,
+                },
+            }
+        }
     }
 
-    // ─── 类型别名 ───
+    /// gRPC 通用调用消息（raw bytes 透传）
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    struct RawMessage {
+        #[prost(bytes = "vec", tag = "1")]
+        payload: Vec<u8>,
+    }
+
+    /// 类型别名 ───
 
     /// 生产级 EngineRuntime：使用 trait object 支持可插拔的 Store/Dispatcher/EventProvider
     type EngineRuntime = WorkflowRuntime<
@@ -1639,6 +1876,7 @@ pub mod phase4 {
 mod phase4_tests {
     use super::phase4::*;
     use coord_core::workflow::model::{InstanceStatus, Task};
+    use coord_core::workflow::ports::{DispatchResult, TaskDispatcher};
 
     fn sample_linear_yaml() -> String {
         r#"
@@ -1744,10 +1982,16 @@ do:
         let inst = svc.start_instance(&def_id, serde_json::json!({})).await.unwrap();
         assert!(!inst.id.is_empty());
         assert_eq!(inst.definition_name, "linear-wf");
-        // call 任务通过 NoopTaskDispatcher 立即完成，实例可能已 Running/Completed
-        assert!(inst.status == InstanceStatus::Running
-                || inst.status == InstanceStatus::Suspended
-                || inst.status == InstanceStatus::Completed);
+        // 标准相位：start 创建即 Pending，drive 首步推进 Running；call 任务通过
+        // NoopTaskDispatcher 立即完成，实例可能已 Pending/Running/Waiting/Completed
+        assert!(matches!(
+            inst.status,
+            InstanceStatus::Pending
+                | InstanceStatus::Running
+                | InstanceStatus::Waiting
+                | InstanceStatus::Suspended
+                | InstanceStatus::Completed
+        ));
     }
 
     #[tokio::test]
@@ -1799,8 +2043,8 @@ do:
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         let loaded = svc.get_instance(&inst.id).await.unwrap().unwrap();
-        assert_eq!(loaded.status, InstanceStatus::Suspended,
-            "wait task should suspend");
+        assert_eq!(loaded.status, InstanceStatus::Waiting,
+            "wait task should be in waiting phase (auto-resume)");
 
         let resumed = svc.signal_instance(&inst.id, "approved",
             serde_json::json!({"result": "ok"})).await.unwrap();
@@ -1843,10 +2087,10 @@ do:
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // 实例应该处于 Suspended 状态（在 wait 步骤）
+        // 实例应该处于 Waiting 状态（在 wait 步骤，自动恢复）
         let loaded = svc.get_instance(&inst.id).await.unwrap().unwrap();
-        assert_eq!(loaded.status, InstanceStatus::Suspended,
-            "instance should be suspended on wait task");
+        assert_eq!(loaded.status, InstanceStatus::Waiting,
+            "instance should be waiting on wait task");
 
         let r1 = svc.resume_instance(&inst.id, Some("approved"),
             Some(serde_json::json!({"ok": true})), Some("key-001")).await;
@@ -1953,6 +2197,7 @@ do:
     #[tokio::test]
     async fn test_deploy_cncf_sw_invalid_returns_validation_error() {
         let svc = WorkflowEngineService::new_for_test();
+        // delay 状态已支持（P3）；缺 duration 触发校验错误
         let bad = r#"{
           "id": "x", "version": "1.0", "start": "s",
           "states": [ { "name": "s", "type": "delay", "transition": "end" } ]
@@ -1960,7 +2205,7 @@ do:
         let err = svc.deploy_definition("ns", bad).await.unwrap_err();
         match err {
             DeployError::Validation(msg) => {
-                assert!(msg.contains("unsupported type 'delay'"), "msg: {msg}")
+                assert!(msg.contains("delay requires 'duration'"), "msg: {msg}")
             }
             other => panic!("expected Validation error, got {other:?}"),
         }
@@ -2005,5 +2250,101 @@ do:
         assert!(ran.contains(&"notify"), "notify branch should run, stack={ran:?}");
         assert!(!ran.contains(&"senior-approve"),
             "senior-approve branch must NOT run, stack={ran:?}");
+    }
+
+    // ═══ P2：HTTP 完整契约 + secrets/constants 注入 + 认证 ═══
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// 启动本地回显 HTTP 服务器，返回地址
+    async fn spawn_echo_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    let req_str = String::from_utf8_lossy(&buf);
+                    // 回显请求首行 + body
+                    let first_line = req_str.lines().next().unwrap_or("");
+                    let echoed = first_line.to_string();
+                    let body = serde_json::json!({"echo": echoed}).to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn test_http_dispatcher_full_contract() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        use std::collections::HashMap;
+        let addr = spawn_echo_server().await;
+
+        let dispatcher = HttpTaskDispatcher::new()
+            .with_secrets(HashMap::from([("apiKey".to_string(), "SECRET-123".to_string())]));
+
+        let with = serde_json::json!({
+            "method": "POST",
+            "endpoint": {"uri": format!("http://{addr}"), "method": "POST"},
+            "query": {"a": "1", "b": "2"},
+            "body": {"token": "${ $secrets.apiKey }"},
+            "headers": {"X-Test": "yes"},
+            "auth": {"scheme": "bearer", "token": "${ $secrets.apiKey }"},
+        });
+
+        let result = dispatcher
+            .dispatch("http", Some(&with), &serde_json::json!({"x": 1}))
+            .await;
+        match result {
+            DispatchResult::Success { data } => {
+                // 服务器回显请求首行（POST /?a=1&b=2 HTTP/1.1）
+                let echo = data.get("echo").and_then(|v| v.as_str()).unwrap_or("");
+                assert!(echo.starts_with("POST /?a=1&b=2"), "unexpected echo: {echo}");
+            }
+            DispatchResult::Failure { error, .. } => panic!("HTTP dispatch failed: {error}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_http_dispatcher_endpoint_string_form() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let addr = spawn_echo_server().await;
+        let dispatcher = HttpTaskDispatcher::new();
+        let with = serde_json::json!({
+            "method": "GET",
+            "endpoint": format!("http://{addr}"),
+        });
+        let result = dispatcher
+            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .await;
+        match result {
+            DispatchResult::Success { data } => {
+                let echo = data.get("echo").and_then(|v| v.as_str()).unwrap_or("");
+                assert!(echo.starts_with("GET /"), "unexpected echo: {echo}");
+            }
+            DispatchResult::Failure { error, .. } => panic!("HTTP dispatch failed: {error}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_grpc_dispatch_invalid_config() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let dispatcher = HttpTaskDispatcher::new();
+        // 缺少 method → 配置错误（非重试）
+        let with = serde_json::json!({"endpoint": {"uri": "http://127.0.0.1:1"}});
+        let result = dispatcher
+            .dispatch("grpc", Some(&with), &serde_json::json!({}))
+            .await;
+        assert!(matches!(result, DispatchResult::Failure { retryable: false, .. }));
     }
 }

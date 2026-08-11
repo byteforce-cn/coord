@@ -12,15 +12,34 @@
 // Phase 4: 对接 coord-agent WorkflowService
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
 
 use super::engine::WorkflowExecutor;
 use super::model::{
-    InstanceStatus, StepResult, SuspendReason, TaskFrame, TaskStatus, WorkflowDefinition, WorkflowFault,
-    WorkflowInstance,
+    InstanceStatus, StepResult, SuspendReason, SuspensionMeta, TaskFrame, TaskStatus,
+    WorkflowDefinition, WorkflowFault, WorkflowInstance,
 };
 use super::ports::{Clock, DispatchResult, EventProvider, ExpressionEval, TaskDispatcher, WorkflowStore};
+use super::retry::{RetryConfig, RetryScheduler};
+
+// ─── 生命周期事件（标准 §Lifecycle Events） ───
+
+/// 生命周期 CloudEvent 类型（`io.serverlessworkflow.*`）
+pub mod lifecycle {
+    pub const WORKFLOW_STARTED: &str = "io.serverlessworkflow.workflow.started.v1";
+    pub const WORKFLOW_COMPLETED: &str = "io.serverlessworkflow.workflow.completed.v1";
+    pub const WORKFLOW_FAULTED: &str = "io.serverlessworkflow.workflow.faulted.v1";
+    pub const WORKFLOW_CANCELLED: &str = "io.serverlessworkflow.workflow.cancelled.v1";
+    pub const WORKFLOW_SUSPENDED: &str = "io.serverlessworkflow.workflow.suspended.v1";
+    pub const WORKFLOW_RESUMED: &str = "io.serverlessworkflow.workflow.resumed.v1";
+    pub const WORKFLOW_WAITING: &str = "io.serverlessworkflow.workflow.waiting.v1";
+    pub const TASK_STARTED: &str = "io.serverlessworkflow.task.started.v1";
+    pub const TASK_COMPLETED: &str = "io.serverlessworkflow.task.completed.v1";
+    pub const TASK_FAULTED: &str = "io.serverlessworkflow.task.faulted.v1";
+    pub const TASK_RETRIED: &str = "io.serverlessworkflow.task.retried.v1";
+}
 
 // ─── 运行时错误 ───
 
@@ -37,6 +56,8 @@ pub enum RuntimeError {
     StoreError(String),
     /// switch Goto 目标不存在
     GotoTargetNotFound(String),
+    /// signal/事件名与挂起实例期望不匹配
+    InvalidSignal(String),
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -53,6 +74,7 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::GotoTargetNotFound(target) => {
                 write!(f, "goto target not found in do_tasks: {target}")
             }
+            RuntimeError::InvalidSignal(msg) => write!(f, "invalid signal: {msg}"),
         }
     }
 }
@@ -129,7 +151,11 @@ where
         };
 
         for inst in instances {
-            if inst.status != InstanceStatus::Suspended {
+            // RunSubflow 挂起现为标准相位 Waiting（Suspended 兼容保留）
+            if !matches!(
+                inst.status,
+                InstanceStatus::Suspended | InstanceStatus::Waiting
+            ) {
                 continue;
             }
             // 检查是否因 RunSubflow 挂起
@@ -182,6 +208,8 @@ where
             if store.save_instance(&parent).await.is_err() {
                 continue;
             }
+            self.emit_lifecycle(lifecycle::TASK_COMPLETED, &parent).await;
+            self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &parent).await;
 
             // 加载父流程定义并重新驱动
             let parent_def = match store
@@ -203,16 +231,36 @@ where
 
     /// 启动工作流实例
     ///
-    /// 1. 创建实例（Running 状态）
-    /// 2. 持久化到存储
-    /// 3. 异步驱动执行
+    /// 1. 应用工作流 `input.default` / `input.from` / `input.schema`（标准 §Data Flow）
+    ///    —— 校验失败 → 实例直接 faulted（validation 错误）
+    /// 2. 创建实例（标准相位 `Pending`）
+    /// 3. 持久化到存储
+    /// 4. 异步驱动执行（drive 首步推进为 `Running`）
     pub async fn start(
         &self,
         definition: &WorkflowDefinition,
         input: Value,
     ) -> Result<WorkflowInstance, RuntimeError> {
         let now_ms = self.clock.now_ms();
-        let inst = WorkflowInstance::new(definition, input, now_ms);
+
+        // 工作流级输入变换/校验
+        let input_val = match self.apply_workflow_input(definition, input) {
+            Ok(v) => v,
+            Err(fault) => {
+                // 输入校验失败 → faulted 实例（RFC 7807 validation 错误）
+                let mut inst = WorkflowInstance::new(definition, Value::Null, now_ms);
+                inst.status = InstanceStatus::Failed;
+                inst.fault = Some(fault);
+                inst.updated_at = now_ms;
+                self.store
+                    .save_instance(&inst)
+                    .await
+                    .map_err(|e| RuntimeError::StoreError(e.to_string()))?;
+                return Ok(inst);
+            }
+        };
+
+        let inst = WorkflowInstance::new(definition, input_val, now_ms);
 
         self.store
             .save_instance(&inst)
@@ -229,7 +277,396 @@ where
             runtime.drive(instance_id, def, store).await;
         });
 
+        // 工作流级超时接线（标准 §Fault Tolerance）：超时 → timeout 错误（408）→ faulted
+        if let Some(t) = &definition.timeout {
+            if let Some(ms) = crate::workflow::engine::parse_iso8601_duration_ms(&t.after) {
+                self.schedule_timeout(
+                    inst.id.clone(),
+                    definition.clone(),
+                    Arc::clone(&self.store),
+                    ms.max(0) as u64,
+                    None,
+                );
+            }
+        }
+
         Ok(inst)
+    }
+
+    /// 应用工作流级输入配置：`default` → `from` 变换 → `schema` 校验
+    fn apply_workflow_input(
+        &self,
+        definition: &WorkflowDefinition,
+        input: Value,
+    ) -> Result<Value, WorkflowFault> {
+        let cfg = match &definition.input {
+            Some(c) => c,
+            None => return Ok(input),
+        };
+
+        // default：输入缺失/为空时使用默认值
+        let mut value = input;
+        let empty = value.is_null()
+            || value
+                .as_object()
+                .map(|o| o.is_empty())
+                .unwrap_or(false);
+        if empty {
+            if let Some(default) = &cfg.default {
+                value = default.clone();
+            }
+        }
+
+        // from：原始输入 → 变换后初始 context
+        if let Some(from) = &cfg.from {
+            let mut vars = super::engine::build_expression_vars(
+                &WorkflowInstance::new(definition, value.clone(), self.clock.now_ms()),
+                definition,
+            );
+            vars.insert("input".to_string(), value.clone());
+            match self.executor.expr.evaluate_with_vars(from, &value, &vars) {
+                Ok(v) => value = v,
+                Err(e) => {
+                    return Err(crate::workflow::errors::WorkflowFault::expression(
+                        "workflow input.from evaluation failed",
+                        e.to_string(),
+                    ))
+                }
+            }
+        }
+
+        // schema：输入校验（失败 → faulted，validation 错误）
+        if let Some(schema) = &cfg.schema {
+            if let Err(errs) = crate::workflow::jsonschema::validate(schema, &value) {
+                return Err(crate::workflow::errors::WorkflowFault::validation(
+                    "workflow input failed schema validation",
+                    errs.join("; "),
+                )
+                .with_instance("/input"));
+            }
+        }
+
+        Ok(value)
+    }
+
+    /// 任务完成后的输出/导出管线（标准 §Data Flow，对 Completed 帧调用）
+    ///
+    /// 1. `output.as` 变换帧输出 + `output.schema` 校验
+    /// 2. `export.as` 变换结果替换 context + `export.schema` 校验
+    ///
+    /// 返回 Err(fault) 时调用方应将实例置为 faulted。
+    fn apply_task_output(
+        &self,
+        inst: &mut WorkflowInstance,
+        definition: &WorkflowDefinition,
+        frame: &mut TaskFrame,
+    ) -> Result<(), WorkflowFault> {
+        let meta = match definition.task_meta.get(&frame.task_name) {
+            Some(m) => m,
+            None => return Ok(()),
+        };
+        if meta.output.is_none() && meta.export.is_none() {
+            return Ok(());
+        }
+
+        // 变量绑定：$input / $output / $task / $context
+        let mut vars = super::engine::build_expression_vars(inst, definition);
+        vars.insert(
+            "input".to_string(),
+            frame.input.clone().unwrap_or(Value::Null),
+        );
+        vars.insert(
+            "output".to_string(),
+            frame.output.clone().unwrap_or(Value::Null),
+        );
+        vars.insert(
+            "task".to_string(),
+            serde_json::json!({"name": frame.task_name, "type": frame.task_type}),
+        );
+
+        // output.as / output.schema
+        if let Some(out) = &meta.output {
+            if let Some(as_expr) = &out.as_expr {
+                let raw_output = frame.output.clone().unwrap_or(Value::Null);
+                vars.insert("output".to_string(), raw_output);
+                match self.executor.expr.evaluate_with_vars(as_expr, &inst.context, &vars) {
+                    Ok(v) => frame.output = Some(v),
+                    Err(e) => {
+                        return Err(crate::workflow::errors::WorkflowFault::expression(
+                            format!("task '{}' output.as evaluation failed", frame.task_name),
+                            e.to_string(),
+                        ))
+                    }
+                }
+            }
+            if let Some(schema) = &out.schema {
+                let val = frame.output.as_ref().unwrap_or(&Value::Null);
+                if let Err(errs) = crate::workflow::jsonschema::validate(schema, val) {
+                    return Err(crate::workflow::errors::WorkflowFault::validation(
+                        format!("task '{}' output failed schema validation", frame.task_name),
+                        errs.join("; "),
+                    )
+                    .with_instance(format!("/tasks/{}/output", frame.task_name)));
+                }
+            }
+        }
+
+        // export.as / export.schema —— 结果替换 context
+        if let Some(exp) = &meta.export {
+            if let Some(as_expr) = &exp.as_expr {
+                vars.insert(
+                    "output".to_string(),
+                    frame.output.clone().unwrap_or(Value::Null),
+                );
+                match self.executor.expr.evaluate_with_vars(as_expr, &inst.context, &vars) {
+                    Ok(v) => inst.context = v,
+                    Err(e) => {
+                        return Err(crate::workflow::errors::WorkflowFault::expression(
+                            format!("task '{}' export.as evaluation failed", frame.task_name),
+                            e.to_string(),
+                        ))
+                    }
+                }
+            }
+            if let Some(schema) = &exp.schema {
+                if let Err(errs) = crate::workflow::jsonschema::validate(schema, &inst.context) {
+                    return Err(crate::workflow::errors::WorkflowFault::validation(
+                        format!("task '{}' exported context failed schema validation", frame.task_name),
+                        errs.join("; "),
+                    )
+                    .with_instance(format!("/tasks/{}/export", frame.task_name)));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 应用工作流级 `output.as` / `output.schema`（Completed 时调用）
+    fn apply_workflow_output(
+        &self,
+        definition: &WorkflowDefinition,
+        inst: &WorkflowInstance,
+        raw_output: Value,
+    ) -> Result<Value, WorkflowFault> {
+        let out = match &definition.output {
+            Some(o) => o,
+            None => return Ok(raw_output),
+        };
+
+        let mut value = raw_output;
+        if let Some(as_expr) = &out.as_expr {
+            let mut vars = super::engine::build_expression_vars(inst, definition);
+            vars.insert("output".to_string(), value.clone());
+            vars.insert("context".to_string(), inst.context.clone());
+            match self.executor.expr.evaluate_with_vars(as_expr, &inst.context, &vars) {
+                Ok(v) => value = v,
+                Err(e) => {
+                    return Err(crate::workflow::errors::WorkflowFault::expression(
+                        "workflow output.as evaluation failed",
+                        e.to_string(),
+                    ))
+                }
+            }
+        }
+        if let Some(schema) = &out.schema {
+            if let Err(errs) = crate::workflow::jsonschema::validate(schema, &value) {
+                return Err(crate::workflow::errors::WorkflowFault::validation(
+                    "workflow output failed schema validation",
+                    errs.join("; "),
+                )
+                .with_instance("/output"));
+            }
+        }
+        Ok(value)
+    }
+
+    /// 发布生命周期 CloudEvent（标准 §Lifecycle Events）
+    async fn emit_lifecycle(&self, event_type: &str, inst: &WorkflowInstance) {
+        let data = serde_json::json!({
+            "workflowId": inst.id,
+            "workflowName": inst.definition_name,
+            "workflowVersion": inst.definition_version,
+            "namespace": inst.definition_ns,
+            "status": format!("{:?}", inst.status).to_lowercase(),
+            "output": inst.output,
+            "fault": inst.fault,
+        });
+        self.event_provider
+            .emit(event_type, Some("coord/workflow"), &data)
+            .await;
+    }
+
+    /// 调度自动恢复：delay 后按 reason 恢复挂起实例
+    ///
+    /// - reason="wait"：完成当前 wait 帧并推进到下一任务
+    /// - reason="retry"：重新执行当前任务（重试）
+    fn schedule_auto_resume(
+        &self,
+        instance_id: String,
+        definition: WorkflowDefinition,
+        store: Arc<S>,
+        delay_ms: u64,
+        reason: String,
+    ) {
+        let rt = self.clone_runtime();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            rt.auto_resume(instance_id, definition, store, &reason).await;
+        });
+    }
+
+    /// 自动恢复处理（wait 完成推进 / retry 重新执行）
+    async fn auto_resume(
+        &self,
+        instance_id: String,
+        definition: WorkflowDefinition,
+        store: Arc<S>,
+        reason: &str,
+    ) {
+        let mut inst = match store.load_instance(&instance_id).await {
+            Ok(Some(i)) => i,
+            _ => return,
+        };
+        // 仅当仍处于同一挂起原因才恢复（避免竞态覆盖已完成的实例）
+        if inst.status != InstanceStatus::Waiting {
+            return;
+        }
+        let meta = match &inst.suspension_meta {
+            Some(m) => m.clone(),
+            None => return,
+        };
+        if meta.reason != reason {
+            return;
+        }
+
+        if reason == "wait" {
+            // 完成 wait 帧并推进
+            if let Some(last) = inst.task_stack.last_mut() {
+                last.status = TaskStatus::Completed;
+                last.ended_at = Some(self.clock.now_ms());
+            }
+            inst.current_task_index += 1;
+            inst.status = InstanceStatus::Running;
+            inst.suspension_meta = None;
+            inst.updated_at = self.clock.now_ms();
+            let _ = store.save_instance(&inst).await;
+            self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
+            self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &inst).await;
+            self.drive(instance_id, definition, store).await;
+        } else if reason == "retry" {
+            // 重试：直接重新 drive（重新执行当前任务）
+            self.drive(instance_id, definition, store).await;
+        }
+    }
+
+    /// 事件驱动的自动恢复（标准 §Events：listen 主动订阅，事件到达 → 恢复）
+    async fn resume_by_event(
+        &self,
+        instance_id: String,
+        definition: WorkflowDefinition,
+        store: Arc<S>,
+    ) {
+        let mut inst = match store.load_instance(&instance_id).await {
+            Ok(Some(i)) => i,
+            _ => return,
+        };
+        if inst.status != InstanceStatus::Waiting {
+            return;
+        }
+        let meta = match &inst.suspension_meta {
+            Some(m) => m.clone(),
+            None => return,
+        };
+        if meta.reason != "listen" {
+            return;
+        }
+        // 事件到达：完成 listen 帧、推进、注入事件上下文
+        if let Some(last) = inst.task_stack.last_mut() {
+            last.status = TaskStatus::Completed;
+            last.ended_at = Some(self.clock.now_ms());
+        }
+        inst.current_task_index += 1;
+        inst.context["_event"] = serde_json::json!({
+            "arrived": true,
+            "eventType": meta.event_filter.as_ref().and_then(|f| f.event_type.clone()),
+        });
+        inst.status = InstanceStatus::Running;
+        inst.suspension_meta = None;
+        inst.updated_at = self.clock.now_ms();
+        let _ = store.save_instance(&inst).await;
+        self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
+        self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &inst).await;
+
+        // 后台 drive（与子流程扫描器同模式，避免在事件等待任务内嵌套 drive）
+        let rt = self.clone_runtime();
+        tokio::spawn(async move {
+            rt.drive(instance_id, definition, store).await;
+        });
+    }
+
+    /// 调度超时：after_ms 后若实例仍非终端 → faulted（timeout 错误 408）
+    ///
+    /// `expected_index`: None = 工作流级超时（任意非终端即 fault）；
+    /// Some(idx) = 任务级超时（仅当实例仍停留该任务索引才 fault）。
+    fn schedule_timeout(
+        &self,
+        instance_id: String,
+        _definition: WorkflowDefinition,
+        store: Arc<S>,
+        after_ms: u64,
+        expected_index: Option<usize>,
+    ) {
+        let rt = self.clone_runtime();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(after_ms)).await;
+            rt.apply_timeout(instance_id, store, expected_index).await;
+        });
+    }
+
+    /// 超时到期处理
+    async fn apply_timeout(
+        &self,
+        instance_id: String,
+        store: Arc<S>,
+        expected_index: Option<usize>,
+    ) {
+        let mut inst = match store.load_instance(&instance_id).await {
+            Ok(Some(i)) => i,
+            _ => return,
+        };
+        if inst.status.is_terminal() {
+            return;
+        }
+        // 任务级超时：仅当实例仍停留同一任务索引才 fault
+        if let Some(idx) = expected_index {
+            if inst.current_task_index != idx {
+                return;
+            }
+        }
+        let fault = crate::workflow::errors::WorkflowFault::timeout(
+            "workflow timeout",
+            "the workflow exceeded its configured timeout",
+        );
+        inst.status = InstanceStatus::Failed;
+        inst.fault = Some(fault);
+        inst.updated_at = self.clock.now_ms();
+        let _ = store.save_instance(&inst).await;
+        self.emit_lifecycle(lifecycle::WORKFLOW_FAULTED, &inst).await;
+    }
+
+    /// 将实例置为 faulted（Failed + fault + 生命周期事件）
+    async fn fail_instance(
+        &self,
+        inst: &mut WorkflowInstance,
+        store: Arc<S>,
+        fault: WorkflowFault,
+    ) {
+        inst.status = InstanceStatus::Failed;
+        inst.fault = Some(fault);
+        inst.updated_at = self.clock.now_ms();
+        let _ = store.save_instance(inst).await;
+        self.emit_lifecycle(lifecycle::WORKFLOW_FAULTED, inst).await;
     }
 
     /// 恢复挂起的实例
@@ -276,6 +713,35 @@ where
             return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()));
         }
 
+        // signal/事件校验（标准 §3.4）：signal 名必须匹配挂起实例的期望
+        if let Some(meta) = inst.suspension_meta.as_ref() {
+            // 人工审批挂起（expected_signal）：必须精确匹配
+            if let Some(exp) = meta.expected_signal.as_deref() {
+                let got = signal_name.unwrap_or("");
+                if got != exp {
+                    return Err(RuntimeError::InvalidSignal(format!(
+                        "instance '{}' is waiting for signal '{exp}', got '{got}'",
+                        instance_id
+                    )));
+                }
+            }
+            // 事件监听挂起（listen）：signal 名应匹配事件过滤器
+            if meta.reason == "listen" {
+                if let Some(filter) = meta.event_filter.as_ref() {
+                    if let Some(et) = filter.event_type.as_deref() {
+                        if let Some(name) = signal_name {
+                            if name != et {
+                                return Err(RuntimeError::InvalidSignal(format!(
+                                    "instance '{}' is listening for event type '{et}', got signal '{name}'",
+                                    instance_id
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 注入 signal 数据到 context
         if let Some(name) = signal_name {
             inst.context["_signal"] = serde_json::json!({
@@ -292,6 +758,8 @@ where
             .save_instance(&inst)
             .await
             .map_err(|e| RuntimeError::StoreError(e.to_string()))?;
+
+        self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &inst).await;
 
         // 需要加载 definition
         let def = self
@@ -318,12 +786,15 @@ where
     }
 
     /// 执行驱动循环 —— 在 spawn 后独立运行
-    pub(crate) async fn drive(
+    ///
+    /// 以 BoxFuture 返回（而非 async fn），避免递归异步造成的 opaque 类型循环。
+    pub(crate) fn drive(
         &self,
         instance_id: String,
         definition: WorkflowDefinition,
         store: Arc<S>,
-    ) {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
         'drive_loop: loop {
             // 加载最新实例状态
             let mut inst = match store.load_instance(&instance_id).await {
@@ -337,11 +808,20 @@ where
                 break;
             }
 
+            // 标准相位：Pending → Running（start 后首步推进）
+            if inst.status == InstanceStatus::Pending {
+                inst.status = InstanceStatus::Running;
+                inst.updated_at = self.clock.now_ms();
+                let _ = store.save_instance(&inst).await;
+                self.emit_lifecycle(lifecycle::WORKFLOW_STARTED, &inst).await;
+                continue;
+            }
+
             // 执行一步
             let step = self.executor.execute_step(&inst, &definition);
 
             match step {
-                StepResult::NextTask(frame) => {
+                StepResult::NextTask(mut frame) => {
                     // emit 任务：fire-and-forget，通过 EventProvider 发布事件
                     if frame.task_type == "emit" {
                         if let Some(ref output) = frame.output {
@@ -352,6 +832,15 @@ where
                             let data = output.get("data").unwrap_or(&serde_json::Value::Null);
                             self.event_provider.emit(event_type, source, data).await;
                         }
+                    }
+                    // 已完成帧：应用 output.as/export.as 数据流管线（Skipped 帧跳过）
+                    if frame.status == TaskStatus::Completed {
+                        if let Err(fault) = self.apply_task_output(&mut inst, &definition, &mut frame) {
+                            inst.task_stack.push(frame);
+                            self.fail_instance(&mut inst, store.clone(), fault).await;
+                            break;
+                        }
+                        self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
                     }
                     inst.task_stack.push(frame);
                     inst.current_task_index += 1;
@@ -369,12 +858,10 @@ where
                         }
                         None => {
                             inst.status = InstanceStatus::Failed;
-                            inst.fault = Some(WorkflowFault {
-                                r#type: "goto_target_not_found".into(),
-                                title: format!("switch goto target '{}' not found", target),
-                                status: 500,
-                                detail: "The switch condition referenced a task that does not exist in do_tasks".into(),
-                            });
+                            inst.fault = Some(crate::workflow::errors::WorkflowFault::not_found(
+                                format!("switch goto target '{}' not found", target),
+                                "The switch condition referenced a task that does not exist in do_tasks",
+                            ));
                             inst.updated_at = self.clock.now_ms();
                             let _ = store.save_instance(&inst).await;
                             break;
@@ -383,6 +870,23 @@ where
                 }
 
                 StepResult::Suspend { reason, frame } => {
+                    // 任务级 timeout 接线（超时 → timeout 错误 408 → faulted，仅当仍停留该任务）
+                    let task_index = inst.current_task_index;
+                    if let Some(meta) = definition.task_meta.get(&frame.task_name) {
+                        if let Some(t) = meta.timeout.as_ref() {
+                            if let Some(ms) =
+                                crate::workflow::engine::parse_iso8601_duration_ms(&t.after)
+                            {
+                                self.schedule_timeout(
+                                    inst.id.clone(),
+                                    definition.clone(),
+                                    store.clone(),
+                                    ms.max(0) as u64,
+                                    Some(task_index),
+                                );
+                            }
+                        }
+                    }
                     // ExternalCall: 先尝试通过 TaskDispatcher 同步派发
                     // 如果派发成功，直接继续执行；失败则挂起等待外部恢复
                     match &reason {
@@ -400,28 +904,106 @@ where
                                     completed_frame.status = TaskStatus::Completed;
                                     completed_frame.output = Some(data);
                                     completed_frame.ended_at = Some(self.clock.now_ms());
+                                    // 反映重试次数（retry_count 存于 suspension_meta）
+                                    if let Some(m) = inst.suspension_meta.as_ref() {
+                                        if m.reason == "retry" {
+                                            completed_frame.retry_count = m.retry_count.unwrap_or(0);
+                                        }
+                                    }
+                                    // 应用任务 output.as/export.as 数据流管线
+                                    if let Err(fault) = self.apply_task_output(
+                                        &mut inst,
+                                        &definition,
+                                        &mut completed_frame,
+                                    ) {
+                                        inst.task_stack.push(completed_frame);
+                                        self.fail_instance(&mut inst, store.clone(), fault).await;
+                                        break 'drive_loop;
+                                    }
                                     inst.task_stack.push(completed_frame);
                                     inst.current_task_index += 1;
                                     inst.updated_at = self.clock.now_ms();
+                                    inst.suspension_meta = None;
                                     let _ = store.save_instance(&inst).await;
+                                    self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
                                     continue;
                                 }
                                 DispatchResult::Failure { error, retryable } => {
                                     if !retryable {
-                                        // 不可重试的错误 → 直接失败
+                                        // 不可重试的错误 → 直接 faulted
                                         inst.task_stack.push(frame);
-                                        inst.status = InstanceStatus::Failed;
-                                        inst.fault = Some(WorkflowFault {
-                                            r#type: "external_call_failed".into(),
-                                            title: format!("call to '{}' failed: {}", service, error),
-                                            status: 502,
-                                            detail: error,
-                                        });
-                                        inst.updated_at = self.clock.now_ms();
-                                        let _ = store.save_instance(&inst).await;
+                                        self.fail_instance(
+                                            &mut inst,
+                                            store.clone(),
+                                            crate::workflow::errors::WorkflowFault::communication(
+                                                format!("call to '{}' failed: {}", service, error),
+                                                error,
+                                            ),
+                                        ).await;
                                         break 'drive_loop;
                                     }
-                                    // 可重试的错误 → 挂起等待外部恢复
+                                    // 可重试的错误 → retry 策略接线（标准 §Fault Tolerance）
+                                    let prev_retries = inst
+                                        .suspension_meta
+                                        .as_ref()
+                                        .filter(|m| m.reason == "retry")
+                                        .and_then(|m| m.retry_count)
+                                        .unwrap_or(0);
+                                    let policy = definition
+                                        .task_meta
+                                        .get(&frame.task_name)
+                                        .and_then(|m| m.retry.as_ref())
+                                        .map(|p| RetryConfig::from_policy(p, None))
+                                        .unwrap_or_default();
+                                    if prev_retries >= policy.max_attempts {
+                                        // 重试耗尽 → faulted（communication）
+                                        inst.task_stack.push(frame);
+                                        self.fail_instance(
+                                            &mut inst,
+                                            store.clone(),
+                                            crate::workflow::errors::WorkflowFault::communication(
+                                                format!(
+                                                    "call to '{}' failed after {} retries: {}",
+                                                    service, prev_retries, error
+                                                ),
+                                                error,
+                                            ),
+                                        ).await;
+                                        break 'drive_loop;
+                                    }
+                                    // 计算下次重试延迟
+                                    let default_delay = policy.delay_ms;
+                                    let mut scheduler = RetryScheduler::new(policy);
+                                    let mut delay = default_delay;
+                                    for _ in 0..=prev_retries {
+                                        if let Some(d) = scheduler.next_delay_ms() {
+                                            delay = d;
+                                        }
+                                    }
+                                    let until = self.clock.now_ms() + delay as i64;
+                                    // 进入 Waiting（自动恢复）+ 定时重试
+                                    inst.suspension_meta = Some(SuspensionMeta {
+                                        reason: "retry".to_string(),
+                                        until_ms: Some(until),
+                                        service: Some(service.clone()),
+                                        payload: Some(input.clone()),
+                                        event_filter: None,
+                                        expected_signal: None,
+                                        retry_count: Some(prev_retries + 1),
+                                        error: Some(error),
+                                    });
+                                    inst.status = InstanceStatus::Waiting;
+                                    inst.updated_at = self.clock.now_ms();
+                                    let _ = store.save_instance(&inst).await;
+                                    self.emit_lifecycle(lifecycle::TASK_RETRIED, &inst).await;
+                                    self.schedule_auto_resume(
+                                        inst.id.clone(),
+                                        definition.clone(),
+                                        store.clone(),
+                                        delay,
+                                        "retry".to_string(),
+                                    );
+                                    break 'drive_loop;
                                 }
                             }
                         }
@@ -435,15 +1017,13 @@ where
                                 Ok(None) => {
                                     inst.task_stack.push(frame);
                                     inst.status = InstanceStatus::Failed;
-                                    inst.fault = Some(WorkflowFault {
-                                        r#type: "subflow_not_found".into(),
-                                        title: format!(
+                                    inst.fault = Some(crate::workflow::errors::WorkflowFault::not_found(
+                                        format!(
                                             "subflow '{}::{}@{}' not found",
                                             workflow.namespace, workflow.name, workflow.version
                                         ),
-                                        status: 404,
-                                        detail: "The referenced sub-workflow definition does not exist".into(),
-                                    });
+                                        "The referenced sub-workflow definition does not exist",
+                                    ));
                                     inst.updated_at = self.clock.now_ms();
                                     let _ = store.save_instance(&inst).await;
                                     break 'drive_loop;
@@ -451,12 +1031,10 @@ where
                                 Err(e) => {
                                     inst.task_stack.push(frame);
                                     inst.status = InstanceStatus::Failed;
-                                    inst.fault = Some(WorkflowFault {
-                                        r#type: "subflow_load_error".into(),
-                                        title: format!("failed to load subflow: {e}"),
-                                        status: 500,
-                                        detail: e.to_string(),
-                                    });
+                                    inst.fault = Some(crate::workflow::errors::WorkflowFault::internal(
+                                        format!("failed to load subflow: {e}"),
+                                        e.to_string(),
+                                    ));
                                     inst.updated_at = self.clock.now_ms();
                                     let _ = store.save_instance(&inst).await;
                                     break 'drive_loop;
@@ -472,20 +1050,18 @@ where
                             if let Err(e) = store.save_instance(&sub_inst).await {
                                 inst.task_stack.push(frame);
                                 inst.status = InstanceStatus::Failed;
-                                inst.fault = Some(WorkflowFault {
-                                    r#type: "subflow_save_failed".into(),
-                                    title: format!("failed to save subflow instance: {e}"),
-                                    status: 500,
-                                    detail: e.to_string(),
-                                });
+                                inst.fault = Some(crate::workflow::errors::WorkflowFault::internal(
+                                    format!("failed to save subflow instance: {e}"),
+                                    e.to_string(),
+                                ));
                                 inst.updated_at = self.clock.now_ms();
                                 let _ = store.save_instance(&inst).await;
                                 break 'drive_loop;
                             }
 
-                            // 挂起父流程
+                            // 挂起父流程（标准相位：子流程自动恢复 → Waiting）
                             inst.task_stack.push(frame);
-                            inst.status = InstanceStatus::Suspended;
+                            inst.status = InstanceStatus::Waiting;
                             inst.suspension_meta = Some(
                                 SuspendReason::RunSubflow {
                                     workflow: workflow.clone(),
@@ -497,30 +1073,114 @@ where
                                 Value::String(sub_id.clone());
                             inst.updated_at = self.clock.now_ms();
                             let _ = store.save_instance(&inst).await;
+                            self.emit_lifecycle(lifecycle::WORKFLOW_WAITING, &inst).await;
 
                             // 子流程监控由后台扫描器 (start_subflow_scanner) 负责，
                             // 父流程挂起后会在子流程完成时由扫描器自动恢复。
                             break 'drive_loop;
                         }
-                        _ => {
-                            // 其他 SuspendReason（wait/listen/signal）→ 正常挂起
+                        SuspendReason::WaitingForDuration { until_ms } => {
+                            // wait 任务：标准相位 Waiting（自动恢复）
+                            inst.task_stack.push(frame);
+                            inst.status = InstanceStatus::Waiting;
+                            inst.suspension_meta = Some(reason.to_meta());
+                            inst.updated_at = self.clock.now_ms();
+                            let _ = store.save_instance(&inst).await;
+                            self.emit_lifecycle(lifecycle::WORKFLOW_WAITING, &inst).await;
+
+                            // 自动恢复定时器（wait 到期后完成帧并推进）
+                            let wait_ms = (until_ms - self.clock.now_ms()).max(0) as u64;
+                            self.schedule_auto_resume(
+                                inst.id.clone(),
+                                definition.clone(),
+                                store.clone(),
+                                wait_ms,
+                                "wait".to_string(),
+                            );
+                            break 'drive_loop;
+                        }
+                        SuspendReason::ListeningForEvent { event_filter } => {
+                            // listen 任务：标准相位 Waiting（等待事件/超时，自动恢复）
+                            let task_name = frame.task_name.clone();
+                            let filter = event_filter.clone();
+                            inst.task_stack.push(frame);
+                            inst.status = InstanceStatus::Waiting;
+                            inst.suspension_meta = Some(reason.to_meta());
+                            inst.updated_at = self.clock.now_ms();
+                            let _ = store.save_instance(&inst).await;
+                            self.emit_lifecycle(lifecycle::WORKFLOW_WAITING, &inst).await;
+
+                            // 任务级 timeout：事件超时 → faulted（仅当仍停留该任务）
+                            let mut event_timeout_ms: Option<u64> = None;
+                            let listen_index = inst.current_task_index;
+                            if let Some(meta) = definition.task_meta.get(&task_name) {
+                                if let Some(t) = meta.timeout.as_ref() {
+                                    if let Some(ms) = crate::workflow::engine::parse_iso8601_duration_ms(&t.after) {
+                                        let ms = ms.max(0) as u64;
+                                        event_timeout_ms = Some(ms);
+                                        self.schedule_timeout(
+                                            inst.id.clone(),
+                                            definition.clone(),
+                                            store.clone(),
+                                            ms,
+                                            Some(listen_index),
+                                        );
+                                    }
+                                }
+                            }
+
+                            // 主动事件等待（标准 §Events：listen 升级为主动订阅 + correlation）：
+                            // 每个挂起实例持有独立订阅，事件到达 → 自动恢复该实例。
+                            let rt = self.clone_runtime();
+                            let wait_store = store.clone();
+                            let wait_def = definition.clone();
+                            let wait_id = inst.id.clone();
+                            let filter_type = filter.event_type.clone();
+                            let filter_source = filter.source.clone();
+                            let filter_subject = filter.subject.clone();
+                            tokio::spawn(async move {
+                                let timeout_ms = event_timeout_ms.unwrap_or(60 * 60 * 1000);
+                                let arrived = rt
+                                    .event_provider
+                                    .wait_for_event(
+                                        filter_type.as_deref(),
+                                        filter_source.as_deref(),
+                                        filter_subject.as_deref(),
+                                        timeout_ms,
+                                    )
+                                    .await;
+                                if arrived {
+                                    rt.resume_by_event(wait_id, wait_def, wait_store).await;
+                                }
+                            });
+                            break 'drive_loop;
+                        }
+                        SuspendReason::WaitingForSignal { .. } => {
+                            // signal 挂起：人工恢复 → 标准相位 Suspended
+                            inst.task_stack.push(frame);
+                            inst.status = InstanceStatus::Suspended;
+                            inst.suspension_meta = Some(reason.to_meta());
+                            inst.updated_at = self.clock.now_ms();
+                            let _ = store.save_instance(&inst).await;
+                            self.emit_lifecycle(lifecycle::WORKFLOW_SUSPENDED, &inst).await;
+                            break 'drive_loop;
                         }
                     }
-
-                    inst.task_stack.push(frame);
-                    inst.status = InstanceStatus::Suspended;
-                    inst.suspension_meta = Some(reason.to_meta());
-                    inst.updated_at = self.clock.now_ms();
-                    let _ = store.save_instance(&inst).await;
-                    break; // 等待外部信号唤醒
                 }
 
-                StepResult::SetVariable { variable, value, frame } => {
+                StepResult::SetVariable { variable, value, mut frame } => {
                     inst.context[variable] = value;
+                    // 应用任务 output.as/export.as 数据流管线
+                    if let Err(fault) = self.apply_task_output(&mut inst, &definition, &mut frame) {
+                        inst.task_stack.push(frame);
+                        self.fail_instance(&mut inst, store.clone(), fault).await;
+                        break;
+                    }
                     inst.task_stack.push(frame);
                     inst.current_task_index += 1;
                     inst.updated_at = self.clock.now_ms();
                     let _ = store.save_instance(&inst).await;
+                    self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
                 }
 
                 StepResult::Fork { branches, compete, frame } => {
@@ -615,12 +1275,10 @@ where
                                 }
                                 Err(join_err) => {
                                     has_failure = true;
-                                    fork_fault = Some(WorkflowFault {
-                                        r#type: "fork_join_error".into(),
-                                        title: format!("branch task panicked: {join_err}"),
-                                        status: 500,
-                                        detail: "A fork branch task panicked during execution".into(),
-                                    });
+                                    fork_fault = Some(crate::workflow::errors::WorkflowFault::internal(
+                                        format!("branch task panicked: {join_err}"),
+                                        "A fork branch task panicked during execution",
+                                    ));
                                 }
                             }
                         }
@@ -760,6 +1418,7 @@ where
                         // 匹配 catch 子句
                         let fault_type = try_fault.as_ref().map(|f| f.r#type.as_str()).unwrap_or("");
                         let mut caught = false;
+                        let mut goto_target: Option<String> = None;
 
                         for clause in &catch_clauses {
                             let matches = match &clause.errors {
@@ -767,7 +1426,7 @@ where
                                 None => true, // catch-all
                             };
                             if matches {
-                                // 执行 catch 任务
+                                // 执行 catch 任务（onErrors 转场：Goto → 路由到目标状态）
                                 for task in &clause.tasks {
                                     let step_result = self.executor.execute_step(
                                         &WorkflowInstance {
@@ -781,6 +1440,9 @@ where
                                     );
                                     match step_result {
                                         StepResult::NextTask(_) | StepResult::Completed { .. } => {}
+                                        StepResult::Goto { target, .. } => {
+                                            goto_target = Some(target);
+                                        }
                                         StepResult::Failed { .. } => {}
                                         _ => {}
                                     }
@@ -799,33 +1461,51 @@ where
                             let _ = store.save_instance(&inst).await;
                             break;
                         }
+
+                        // 已捕获：若 catch 指定了转场目标，路由到该状态
+                        if let Some(target) = goto_target {
+                            if let Some(idx) = find_task_index(&definition.do_tasks, &target) {
+                                inst.current_task_index = idx;
+                            } else if target == "__end" {
+                                inst.current_task_index = definition.do_tasks.len();
+                            }
+                        }
                     }
 
                     completed_frame.status = TaskStatus::Completed;
                     completed_frame.ended_at = Some(self.clock.now_ms());
                     inst.task_stack.push(completed_frame);
-                    inst.current_task_index += 1;
+                    if !try_failed {
+                        inst.current_task_index += 1;
+                    }
                     inst.updated_at = self.clock.now_ms();
                     let _ = store.save_instance(&inst).await;
                 }
 
                 StepResult::Completed { output } => {
+                    // 工作流级 output.as / output.schema（标准 §Data Flow）
+                    let final_output = match self.apply_workflow_output(&definition, &inst, output) {
+                        Ok(v) => v,
+                        Err(fault) => {
+                            self.fail_instance(&mut inst, store.clone(), fault).await;
+                            break;
+                        }
+                    };
                     inst.status = InstanceStatus::Completed;
-                    inst.output = Some(output);
+                    inst.output = Some(final_output);
                     inst.updated_at = self.clock.now_ms();
                     let _ = store.save_instance(&inst).await;
+                    self.emit_lifecycle(lifecycle::WORKFLOW_COMPLETED, &inst).await;
                     break;
                 }
 
                 StepResult::Failed { fault } => {
-                    inst.status = InstanceStatus::Failed;
-                    inst.fault = Some(fault);
-                    inst.updated_at = self.clock.now_ms();
-                    let _ = store.save_instance(&inst).await;
+                    self.fail_instance(&mut inst, store.clone(), fault).await;
                     break;
                 }
             }
         }
+        })
     }
 
     /// 克隆运行时引用（用于 spawn）
@@ -920,7 +1600,7 @@ mod tests {
     use crate::workflow::engine::WorkflowExecutor;
     use crate::workflow::expression::ExpressionEvaluator;
     use crate::workflow::model::{
-        Document, NamedTask, Task, WaitTask, WorkflowDefinition,
+        Document, NamedTask, SetTask, Task, WaitTask, WorkflowDefinition,
     };
     use crate::workflow::ports::test_utils::{
         MemoryWorkflowStore, NoopEventProvider, NoopTaskDispatcher, TestClock,
@@ -959,6 +1639,11 @@ mod tests {
             output: None,
             timeout: None,
             use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
             raw_yaml: None,
         }
     }
@@ -987,7 +1672,8 @@ mod tests {
 
         let inst = runtime.start(&def, serde_json::json!({"key": "value"})).await.unwrap();
 
-        assert_eq!(inst.status, InstanceStatus::Running);
+        // 标准相位：start 创建后为 Pending，drive 循环首步推进为 Running
+        assert_eq!(inst.status, InstanceStatus::Pending);
         assert_eq!(inst.definition_name, "test-wf");
         assert_eq!(inst.context, serde_json::json!({"key": "value"}));
     }
@@ -1057,6 +1743,11 @@ mod tests {
             output: None,
             timeout: None,
             use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
         raw_yaml: None,
         };
 
@@ -1130,6 +1821,11 @@ mod tests {
             output: None,
             timeout: None,
             use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
         raw_yaml: None,
         };
 
@@ -1231,6 +1927,11 @@ mod tests {
             output: None,
             timeout: None,
             use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
         raw_yaml: None,
         };
 
@@ -1327,6 +2028,11 @@ mod tests {
             output: None,
             timeout: None,
             use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
         raw_yaml: None,
         };
 
@@ -1397,6 +2103,11 @@ mod tests {
             output: None,
             timeout: None,
             use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
         raw_yaml: None,
         };
 
@@ -1425,5 +2136,796 @@ mod tests {
         let output = fork_frame.output.as_ref().expect("fork output");
         let obj = output.as_object().expect("fork output should be object");
         assert!(obj.is_empty(), "empty fork should produce empty results");
+    }
+
+    // ═══ P0 全特性兼容测试（标准 §Data Flow / §Fault Tolerance / §Status Phases / §Lifecycle） ═══
+
+    use crate::workflow::model::{
+        CallTask, CallType, InputConfig, OutputConfig, TaskMeta, TimeoutConfig,
+    };
+    use crate::workflow::ports::test_utils::RecordingEventProvider;
+
+    fn make_definition_ext(
+        name: &str,
+        tasks: Vec<NamedTask>,
+        input: Option<InputConfig>,
+        output: Option<OutputConfig>,
+        timeout: Option<TimeoutConfig>,
+        task_meta: std::collections::HashMap<String, TaskMeta>,
+    ) -> WorkflowDefinition {
+        WorkflowDefinition {
+            id: None,
+            document: Document {
+                dsl: "1.0.0".into(),
+                namespace: "test".into(),
+                name: name.into(),
+                version: "1.0".into(),
+                title: None,
+                summary: None,
+                tags: None,
+            },
+            do_tasks: tasks,
+            input,
+            output,
+            timeout,
+            use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta,
+            raw_yaml: None,
+        }
+    }
+
+    /// 前 N 次失败（retryable）、之后成功的派发器
+    struct FlakyTaskDispatcher {
+        fail_times: u32,
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl TaskDispatcher for FlakyTaskDispatcher {
+        async fn dispatch(
+            &self,
+            _service: &str,
+            _with: Option<&Value>,
+            _input: &Value,
+        ) -> DispatchResult {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.fail_times {
+                DispatchResult::Failure {
+                    error: "temporary outage".into(),
+                    retryable: true,
+                }
+            } else {
+                DispatchResult::Success {
+                    data: serde_json::json!({"ok": true}),
+                }
+            }
+        }
+    }
+
+    // ─── 工作流 input.default / input.from / input.schema ───
+
+    #[tokio::test]
+    async fn test_workflow_input_default_applied() {
+        let runtime = make_runtime();
+        let def = make_definition_ext(
+            "input-default",
+            vec![NamedTask {
+                name: "setX".into(),
+                task: Task::Set(SetTask {
+                    variable: "probe".into(),
+                    value: "\"set\"".into(),
+                }),
+            }],
+            Some(InputConfig {
+                schema: None,
+                from: None,
+                default: Some(serde_json::json!({"amount": 42})),
+            }),
+            None,
+            None,
+            Default::default(),
+        );
+        let inst = runtime
+            .start(&def, serde_json::json!({}))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let loaded = store_of(&runtime).load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Completed);
+        assert_eq!(loaded.context["amount"], 42);
+    }
+
+    #[tokio::test]
+    async fn test_workflow_input_from_transforms_context() {
+        let runtime = make_runtime();
+        let def = make_definition_ext(
+            "input-from",
+            vec![NamedTask {
+                name: "setDone".into(),
+                task: Task::Set(SetTask {
+                    variable: "done".into(),
+                    value: "\"yes\"".into(),
+                }),
+            }],
+            Some(InputConfig {
+                schema: None,
+                from: Some("${ { \"amount\": (.raw + 1), \"kept\": .keep } }".into()),
+                default: None,
+            }),
+            None,
+            None,
+            Default::default(),
+        );
+        let inst = runtime
+            .start(&def, serde_json::json!({"raw": 41, "keep": true}))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let loaded = store_of(&runtime).load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Completed);
+        // input.from 后 context = {amount: 42, kept: true}
+        assert_eq!(loaded.context["amount"], 42);
+        assert_eq!(loaded.context["kept"], true);
+    }
+
+    #[tokio::test]
+    async fn test_workflow_input_schema_validation_faults() {
+        let runtime = make_runtime();
+        let def = make_definition_ext(
+            "input-schema",
+            vec![],
+            Some(InputConfig {
+                schema: Some(
+                    r#"{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}"#
+                        .into(),
+                ),
+                from: None,
+                default: None,
+            }),
+            None,
+            None,
+            Default::default(),
+        );
+        let inst = runtime
+            .start(&def, serde_json::json!({"amount": 5}))
+            .await
+            .unwrap();
+        // 校验失败 → faulted（validation 错误）
+        let loaded = store_of(&runtime).load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Failed);
+        let fault = loaded.fault.unwrap();
+        assert_eq!(
+            fault.r#type,
+            crate::workflow::errors::error_type(crate::workflow::errors::kind::VALIDATION)
+        );
+        assert_eq!(fault.status, 400);
+        assert_eq!(fault.instance.as_deref(), Some("/input"));
+    }
+
+    // ─── 任务 if 条件跳过 ───
+
+    #[tokio::test]
+    async fn test_task_if_false_skips_task() {
+        let runtime = make_runtime();
+        let mut meta = std::collections::HashMap::new();
+        meta.insert(
+            "maybeSet".into(),
+            TaskMeta {
+                if_condition: Some("${ .approved == true }".into()),
+                ..Default::default()
+            },
+        );
+        let def = make_definition_ext(
+            "if-skip",
+            vec![NamedTask {
+                name: "maybeSet".into(),
+                task: Task::Set(SetTask {
+                    variable: "flag".into(),
+                    value: "\"executed\"".into(),
+                }),
+            }],
+            None,
+            None,
+            None,
+            meta,
+        );
+        let inst = runtime
+            .start(&def, serde_json::json!({"approved": false}))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let loaded = store_of(&runtime).load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Completed);
+        // 任务被跳过：flag 未设置，帧状态 Skipped
+        assert!(loaded.context.get("flag").is_none());
+        let frame = &loaded.task_stack[0];
+        assert_eq!(frame.status, TaskStatus::Skipped);
+    }
+
+    // ─── 任务 input.from / output.as / export.as 数据流管线 ───
+
+    #[tokio::test]
+    async fn test_task_input_output_export_pipeline() {
+        let runtime = make_runtime();
+        let mut meta = std::collections::HashMap::new();
+        // set 任务：input.from 变换输入；output.as 变换输出；export.as 合并回 context
+        meta.insert(
+            "transform".into(),
+            TaskMeta {
+                input: Some(InputConfig {
+                    schema: None,
+                    from: Some("${ { \"x\": (.amount + 5) } }".into()),
+                    default: None,
+                }),
+                output: Some(OutputConfig {
+                    as_expr: Some("${ { \"value\": $output } }".into()),
+                    schema: None,
+                }),
+                export: Some(crate::workflow::model::ExportConfig {
+                    as_expr: Some("${ . + {\"exported\": $output.value} }".into()),
+                    schema: None,
+                }),
+                ..Default::default()
+            },
+        );
+        let def = make_definition_ext(
+            "pipeline",
+            vec![NamedTask {
+                name: "transform".into(),
+                task: Task::Set(SetTask {
+                    variable: "result".into(),
+                    value: "${ .x }".into(),
+                }),
+            }],
+            None,
+            None,
+            None,
+            meta,
+        );
+        let inst = runtime
+            .start(&def, serde_json::json!({"amount": 5}))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let loaded = store_of(&runtime).load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Completed, "context: {:?} fault: {:?}", loaded.context, loaded.fault);
+        // set 任务：value = ${ .x }，但有效输入是 input.from 变换后的 {x: 10}
+        // → context["result"] = 10
+        assert_eq!(loaded.context["result"], 10, "context: {:?}", loaded.context);
+        // export.as：context = context + {exported: 10}
+        assert_eq!(loaded.context["exported"], 10, "context: {:?}", loaded.context);
+        // 帧输出经 output.as 变换为 {value: 10}
+        assert_eq!(
+            loaded.task_stack[0].output.as_ref().unwrap(),
+            &serde_json::json!({"value": 10})
+        );
+    }
+
+    // ─── 工作流 output.as / output.schema ───
+
+    #[tokio::test]
+    async fn test_workflow_output_as_transforms() {
+        let runtime = make_runtime();
+        let def = make_definition_ext(
+            "output-as",
+            vec![NamedTask {
+                name: "produce".into(),
+                task: Task::Set(SetTask {
+                    variable: "payload".into(),
+                    value: "\"hello\"".into(),
+                }),
+            }],
+            None,
+            Some(OutputConfig {
+                as_expr: Some("${ { \"message\": $context.payload, \"len\": 5 } }".into()),
+                schema: None,
+            }),
+            None,
+            Default::default(),
+        );
+        let inst = runtime
+            .start(&def, serde_json::json!({}))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let loaded = store_of(&runtime).load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Completed);
+        let output = loaded.output.unwrap();
+        assert_eq!(output["message"], "hello");
+        assert_eq!(output["len"], 5);
+    }
+
+    // ─── retry 接线 ───
+
+    #[tokio::test]
+    async fn test_retry_wiring_on_retryable_failure() {
+        use std::sync::Arc;
+        let expr = ExpressionEvaluator::new();
+        let clock = TestClock::new(1000);
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let store = Arc::new(MemoryWorkflowStore::new());
+        let dispatcher = FlakyTaskDispatcher {
+            fail_times: 2,
+            calls: std::sync::atomic::AtomicU32::new(0),
+        };
+        let event_provider = NoopEventProvider;
+        let runtime = WorkflowRuntime::new(
+            executor,
+            clock,
+            Arc::clone(&store),
+            dispatcher,
+            event_provider,
+        );
+
+        let mut meta = std::collections::HashMap::new();
+        meta.insert(
+            "callApi".into(),
+            TaskMeta {
+                retry: Some(crate::workflow::model::RetryPolicy {
+                    delay: "PT0.01S".into(),
+                    backoff: None,
+                    limit: 5,
+                    jitter: None,
+                }),
+                ..Default::default()
+            },
+        );
+        let def = make_definition_ext(
+            "retry-wf",
+            vec![NamedTask {
+                name: "callApi".into(),
+                task: Task::Call(CallTask {
+                    call: CallType::Http,
+                    with: None,
+                }),
+            }],
+            None,
+            None,
+            None,
+            meta,
+        );
+        store.save_definition(&def).await.unwrap();
+
+        let inst = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        // 前 2 次失败（10ms 间隔）→ 第 3 次成功
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let loaded = store.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Completed);
+        let frame = &loaded.task_stack[0];
+        assert_eq!(frame.retry_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_retry_exhausted_faults() {
+        use std::sync::Arc;
+        let expr = ExpressionEvaluator::new();
+        let clock = TestClock::new(1000);
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let store = Arc::new(MemoryWorkflowStore::new());
+        let dispatcher = FlakyTaskDispatcher {
+            fail_times: 100,
+            calls: std::sync::atomic::AtomicU32::new(0),
+        };
+        let event_provider = NoopEventProvider;
+        let runtime = WorkflowRuntime::new(
+            executor,
+            clock,
+            Arc::clone(&store),
+            dispatcher,
+            event_provider,
+        );
+
+        let mut meta = std::collections::HashMap::new();
+        meta.insert(
+            "callApi".into(),
+            TaskMeta {
+                retry: Some(crate::workflow::model::RetryPolicy {
+                    delay: "PT0.01S".into(),
+                    backoff: None,
+                    limit: 2,
+                    jitter: None,
+                }),
+                ..Default::default()
+            },
+        );
+        let def = make_definition_ext(
+            "retry-exhaust",
+            vec![NamedTask {
+                name: "callApi".into(),
+                task: Task::Call(CallTask {
+                    call: CallType::Http,
+                    with: None,
+                }),
+            }],
+            None,
+            None,
+            None,
+            meta,
+        );
+        store.save_definition(&def).await.unwrap();
+
+        let inst = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let loaded = store.load_instance(&inst.id).await.unwrap().unwrap();
+        // 重试耗尽 → faulted（communication 错误）
+        assert_eq!(loaded.status, InstanceStatus::Failed);
+        let fault = loaded.fault.unwrap();
+        assert_eq!(
+            fault.r#type,
+            crate::workflow::errors::error_type(crate::workflow::errors::kind::COMMUNICATION)
+        );
+        assert_eq!(fault.status, 502);
+    }
+
+    // ─── 工作流超时 ───
+
+    #[tokio::test]
+    async fn test_workflow_timeout_faults() {
+        let runtime = make_runtime();
+        let def = make_definition_ext(
+            "timeout-wf",
+            vec![NamedTask {
+                name: "longWait".into(),
+                task: Task::Wait(WaitTask {
+                    wait: "PT10S".into(),
+                }),
+            }],
+            None,
+            None,
+            Some(TimeoutConfig {
+                after: "PT0.2S".into(),
+            }),
+            Default::default(),
+        );
+        let inst = runtime
+            .start(&def, serde_json::json!({}))
+            .await
+            .unwrap();
+        // 工作流超时 200ms → 实例 faulted（timeout 错误 408）
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let loaded = store_of(&runtime).load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Failed);
+        let fault = loaded.fault.unwrap();
+        assert_eq!(
+            fault.r#type,
+            crate::workflow::errors::error_type(crate::workflow::errors::kind::TIMEOUT)
+        );
+        assert_eq!(fault.status, 408);
+    }
+
+    // ─── wait 任务 Waiting 相位 + 自动恢复 ───
+
+    #[tokio::test]
+    async fn test_wait_task_waiting_phase_auto_resume() {
+        let runtime = make_runtime();
+        let def = make_definition_ext(
+            "wait-auto",
+            vec![
+                NamedTask {
+                    name: "pause".into(),
+                    task: Task::Wait(WaitTask {
+                        wait: "PT0.05S".into(),
+                    }),
+                },
+                NamedTask {
+                    name: "after".into(),
+                    task: Task::Set(SetTask {
+                        variable: "done".into(),
+                        value: "\"after-wait\"".into(),
+                    }),
+                },
+            ],
+            None,
+            None,
+            None,
+            Default::default(),
+        );
+        let inst = runtime
+            .start(&def, serde_json::json!({}))
+            .await
+            .unwrap();
+
+        // wait 期间：Waiting 相位
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let mid = store_of(&runtime).load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(mid.status, InstanceStatus::Waiting);
+        assert_eq!(mid.suspension_meta.as_ref().unwrap().reason, "wait");
+
+        // wait 到期后自动恢复 → 继续执行后续任务 → Completed
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let loaded = store_of(&runtime).load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Completed);
+        assert_eq!(loaded.context["done"], "after-wait");
+    }
+
+    // ─── signal 校验 ───
+
+    #[tokio::test]
+    async fn test_signal_validation_mismatch_rejected() {
+        use crate::workflow::model::ListenTask;
+        let runtime = make_runtime();
+        let def = make_definition_ext(
+            "signal-wf",
+            vec![NamedTask {
+                name: "approve".into(),
+                task: Task::Listen(ListenTask {
+                    listen: crate::workflow::model::EventFilter {
+                        event_type: Some("approval.requested".into()),
+                        source: None,
+                        subject: None,
+                    },
+                }),
+            }],
+            None,
+            None,
+            None,
+            Default::default(),
+        );
+        store_of(&runtime).save_definition(&def).await.unwrap();
+        let inst = runtime
+            .start(&def, serde_json::json!({}))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let loaded = store_of(&runtime).load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Waiting);
+        assert_eq!(loaded.suspension_meta.as_ref().unwrap().reason, "listen");
+
+        // signal 名与事件类型不匹配 → InvalidSignal
+        let err = runtime
+            .resume(&inst.id, Some("wrong.signal"), None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RuntimeError::InvalidSignal(_)));
+
+        // 匹配的信号可恢复
+        let resumed = runtime
+            .resume(&inst.id, Some("approval.requested"), Some(serde_json::json!({"ok": true})), None)
+            .await
+            .unwrap();
+        assert_eq!(resumed.status, InstanceStatus::Running);
+    }
+
+    // ─── listen 主动事件等待（标准 §Events） ───
+
+    #[tokio::test]
+    async fn test_listen_task_active_event_resume() {
+        use crate::workflow::model::ListenTask;
+        use crate::workflow::ports::MemoryEventProvider;
+        use std::sync::Arc;
+
+        let expr = ExpressionEvaluator::new();
+        let clock = TestClock::new(1000);
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let store = Arc::new(MemoryWorkflowStore::new());
+        let dispatcher = NoopTaskDispatcher;
+        let events = Arc::new(MemoryEventProvider::new());
+        let runtime = WorkflowRuntime::new(
+            executor,
+            clock,
+            Arc::clone(&store),
+            dispatcher,
+            Arc::clone(&events),
+        );
+
+        let def = make_definition_ext(
+            "listen-wf",
+            vec![
+                NamedTask {
+                    name: "waitOrder".into(),
+                    task: Task::Listen(ListenTask {
+                        listen: crate::workflow::model::EventFilter {
+                            event_type: Some("order.created".into()),
+                            source: None,
+                            subject: None,
+                        },
+                    }),
+                },
+                NamedTask {
+                    name: "after".into(),
+                    task: Task::Set(SetTask {
+                        variable: "done".into(),
+                        value: "\"after-event\"".into(),
+                    }),
+                },
+            ],
+            None,
+            None,
+            None,
+            Default::default(),
+        );
+        store.save_definition(&def).await.unwrap();
+
+        let inst = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // listen 挂起：Waiting 相位
+        let mid = store.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(mid.status, InstanceStatus::Waiting);
+        assert_eq!(mid.suspension_meta.as_ref().unwrap().reason, "listen");
+
+        // 事件到达 → 主动订阅自动恢复实例并继续执行
+        events
+            .emit("order.created", Some("coord/orders"), &serde_json::json!({"orderId": "ORD-1"}))
+            .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let loaded = store.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Completed);
+        assert_eq!(loaded.context["done"], "after-event");
+        assert_eq!(loaded.context["_event"]["arrived"], true);
+    }
+
+    // ─── listen 事件超时（标准 §Events） ───
+
+    #[tokio::test]
+    async fn test_listen_event_timeout_faults() {
+        use crate::workflow::model::ListenTask;
+        use crate::workflow::ports::MemoryEventProvider;
+        use std::sync::Arc;
+
+        let expr = ExpressionEvaluator::new();
+        let clock = TestClock::new(1000);
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let store = Arc::new(MemoryWorkflowStore::new());
+        let dispatcher = NoopTaskDispatcher;
+        let events = Arc::new(MemoryEventProvider::new());
+        let runtime = WorkflowRuntime::new(
+            executor,
+            clock,
+            Arc::clone(&store),
+            dispatcher,
+            Arc::clone(&events),
+        );
+
+        let mut meta = std::collections::HashMap::new();
+        meta.insert(
+            "waitOrder".into(),
+            TaskMeta {
+                timeout: Some(TimeoutConfig {
+                    after: "PT0.15S".into(),
+                }),
+                ..Default::default()
+            },
+        );
+        let def = make_definition_ext(
+            "listen-timeout-wf",
+            vec![NamedTask {
+                name: "waitOrder".into(),
+                task: Task::Listen(ListenTask {
+                    listen: crate::workflow::model::EventFilter {
+                        event_type: Some("never.comes".into()),
+                        source: None,
+                        subject: None,
+                    },
+                }),
+            }],
+            None,
+            None,
+            None,
+            meta,
+        );
+        store.save_definition(&def).await.unwrap();
+
+        let inst = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        // 事件超时 150ms → faulted（timeout 错误 408）
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let loaded = store.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Failed);
+        assert_eq!(
+            loaded.fault.unwrap().r#type,
+            crate::workflow::errors::error_type(crate::workflow::errors::kind::TIMEOUT)
+        );
+    }
+
+    // ─── 生命周期事件 ───
+
+    #[tokio::test]
+    async fn test_lifecycle_events_emitted() {
+        use std::sync::Arc;
+        let expr = ExpressionEvaluator::new();
+        let clock = TestClock::new(1000);
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let store = Arc::new(MemoryWorkflowStore::new());
+        let dispatcher = NoopTaskDispatcher;
+        let events = Arc::new(RecordingEventProvider::new());
+        let runtime = WorkflowRuntime::new(
+            executor,
+            clock,
+            Arc::clone(&store),
+            dispatcher,
+            Arc::clone(&events),
+        );
+
+        let def = make_definition_ext(
+            "lifecycle-wf",
+            vec![NamedTask {
+                name: "mark".into(),
+                task: Task::Set(SetTask {
+                    variable: "v".into(),
+                    value: "1".into(),
+                }),
+            }],
+            None,
+            None,
+            None,
+            Default::default(),
+        );
+        let inst = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let loaded = store.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Completed);
+
+        let emitted = events.emitted_events.lock().unwrap().clone();
+        let types: Vec<&str> = emitted.iter().map(|(t, _, _)| t.as_str()).collect();
+        assert!(
+            types.contains(&lifecycle::WORKFLOW_STARTED),
+            "expected workflow.started in {types:?}"
+        );
+        assert!(
+            types.contains(&lifecycle::WORKFLOW_COMPLETED),
+            "expected workflow.completed in {types:?}"
+        );
+        assert!(
+            types.contains(&lifecycle::TASK_COMPLETED),
+            "expected task.completed in {types:?}"
+        );
+    }
+
+    // ─── Pending → Running 相位 ───
+
+    #[tokio::test]
+    async fn test_pending_to_running_phase_transition() {
+        use std::sync::Arc;
+        let expr = ExpressionEvaluator::new();
+        let clock = TestClock::new(1000);
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let store = Arc::new(MemoryWorkflowStore::new());
+        let dispatcher = NoopTaskDispatcher;
+        let event_provider = NoopEventProvider;
+        let runtime = WorkflowRuntime::new(
+            executor,
+            clock,
+            Arc::clone(&store),
+            dispatcher,
+            event_provider,
+        );
+        // 长 wait 工作流确保实例停留在 Pending/Running 观察窗口
+        let def = make_definition_ext(
+            "phase-wf",
+            vec![NamedTask {
+                name: "pause".into(),
+                task: Task::Wait(WaitTask {
+                    wait: "PT10S".into(),
+                }),
+            }],
+            None,
+            None,
+            None,
+            Default::default(),
+        );
+        let inst = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        // start 返回 Pending（创建即 pending）
+        assert_eq!(inst.status, InstanceStatus::Pending);
+        // drive 首步推进为 Running，然后 wait 挂起为 Waiting
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let loaded = store.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Waiting);
+    }
+
+    /// 从 runtime 中取出 store（测试辅助）
+    fn store_of<E, C, S, D, B>(
+        runtime: &WorkflowRuntime<E, C, S, D, B>,
+    ) -> &Arc<S>
+    where
+        E: ExpressionEval,
+        C: Clock,
+        S: WorkflowStore,
+        D: TaskDispatcher,
+        B: EventProvider,
+    {
+        &runtime.store
     }
 }

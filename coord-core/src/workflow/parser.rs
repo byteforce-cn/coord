@@ -25,6 +25,19 @@ pub struct RawWorkflowDef {
     pub tasks: Vec<RawNamedTask>,
     pub input: Option<RawValue>,
     pub use_components: Option<RawUseComponents>,
+    /// 顶层扩展块（output/timeout/schedule/auth/secrets/constants）
+    pub ext: Option<RawDefinitionExt>,
+}
+
+/// 顶层扩展块（标准 §Data Flow / §Scheduling / §Authentication / §Secrets）
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RawDefinitionExt {
+    pub output: Option<RawValue>,
+    pub timeout: Option<RawValue>,
+    pub schedule: Option<RawValue>,
+    pub auth: Option<RawValue>,
+    pub secrets: Option<RawValue>,
+    pub constants: Option<RawValue>,
 }
 
 /// 宽松的 Document
@@ -177,12 +190,31 @@ fn parse_from_value(root: Value, span: Span) -> ParseResult<RawWorkflowDef> {
     // 解析 use 块（可选）
     let use_components = obj.get("use").map(|v| parse_use_components(v, span)).transpose()?;
 
+    // 解析顶层扩展块（可选）
+    let ext = {
+        let mut e = RawDefinitionExt::default();
+        e.output = obj.get("output").map(|v| RawValue { span, value: v.clone() });
+        e.timeout = obj.get("timeout").map(|v| RawValue { span, value: v.clone() });
+        e.schedule = obj.get("schedule").map(|v| RawValue { span, value: v.clone() });
+        e.auth = obj.get("auth").map(|v| RawValue { span, value: v.clone() });
+        e.secrets = obj.get("secrets").map(|v| RawValue { span, value: v.clone() });
+        e.constants = obj.get("constants").map(|v| RawValue { span, value: v.clone() });
+        let has_any = e.output.is_some()
+            || e.timeout.is_some()
+            || e.schedule.is_some()
+            || e.auth.is_some()
+            || e.secrets.is_some()
+            || e.constants.is_some();
+        if has_any { Some(e) } else { None }
+    };
+
     Ok(RawWorkflowDef {
         span,
         document,
         tasks,
         input,
         use_components,
+        ext,
     })
 }
 

@@ -16,6 +16,7 @@
 // - 算术: ${ .a + .b }
 // - 字符串: ${ "hello" }
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -109,6 +110,20 @@ impl ExpressionEvaluator {
     /// 表达式格式：`${ .amount > 10000 }`
     /// 自动去除 ${ } 包装，然后对 context 求值。
     pub fn evaluate(&self, expr: &str, context: &Value) -> Result<Value, ExpressionError> {
+        self.evaluate_with_vars(expr, context, &HashMap::new())
+    }
+
+    /// 求值 ${ expr } 表达式，并注入标准运行时变量绑定
+    ///
+    /// 标准参数：`$context` / `$input` / `$output` / `$task` / `$workflow` /
+    /// `$runtime` / `$authorization` / `$secrets` / `$constants`。
+    /// `$context` 始终绑定到 `context` 根；其余变量从 `vars` 查找。
+    pub fn evaluate_with_vars(
+        &self,
+        expr: &str,
+        context: &Value,
+        vars: &HashMap<String, Value>,
+    ) -> Result<Value, ExpressionError> {
         let start = Instant::now();
 
         // 沙箱检查：表达式大小（原始表达式，包括 ${}）
@@ -123,7 +138,7 @@ impl ExpressionEvaluator {
         let inner = self.unwrap_expression(expr)?;
 
         // 执行求值
-        let result = self.evaluate_inner(inner, context)?;
+        let result = self.evaluate_inner(inner, context, vars)?;
 
         // 超时检查
         let elapsed = start.elapsed();
@@ -140,9 +155,19 @@ impl ExpressionEvaluator {
         Ok(result)
     }
 
-    /// 批量求值多个表达式（用于 switch 条件匹配）
+    /// 批量求值多个表达式（用于 switch 条件匹配），支持变量注入
     pub fn evaluate_bool(&self, expr: &str, context: &Value) -> Result<bool, ExpressionError> {
-        let result = self.evaluate(expr, context)?;
+        self.evaluate_bool_with_vars(expr, context, &HashMap::new())
+    }
+
+    /// 布尔求值，支持变量注入
+    pub fn evaluate_bool_with_vars(
+        &self,
+        expr: &str,
+        context: &Value,
+        vars: &HashMap<String, Value>,
+    ) -> Result<bool, ExpressionError> {
+        let result = self.evaluate_with_vars(expr, context, vars)?;
         match result {
             Value::Bool(b) => Ok(b),
             Value::Null => Ok(false),
@@ -166,7 +191,12 @@ impl ExpressionEvaluator {
     }
 
     /// 核心求值逻辑 —— 使用 jq 语法子集
-    fn evaluate_inner(&self, expr: &str, context: &Value) -> Result<Value, ExpressionError> {
+    fn evaluate_inner(
+        &self,
+        expr: &str,
+        context: &Value,
+        vars: &HashMap<String, Value>,
+    ) -> Result<Value, ExpressionError> {
         let expr = expr.trim();
 
         // 空表达式返回 context 自身
@@ -176,28 +206,33 @@ impl ExpressionEvaluator {
 
         // 尝试解析为 jq 表达式并求值
         // 我们实现一个 jq 子集的解析器
-        self.eval_jq_subset(expr, context)
+        self.eval_jq_subset(expr, context, vars)
     }
 
     /// jq 子集求值
-    fn eval_jq_subset(&self, expr: &str, context: &Value) -> Result<Value, ExpressionError> {
+    fn eval_jq_subset(
+        &self,
+        expr: &str,
+        context: &Value,
+        vars: &HashMap<String, Value>,
+    ) -> Result<Value, ExpressionError> {
         let expr = expr.trim();
 
         // 管道操作符 |
         if let Some(pipe_pos) = Self::find_pipe_position(expr) {
             let left = &expr[..pipe_pos].trim();
             let right = &expr[pipe_pos + 1..].trim();
-            let left_val = self.eval_jq_subset(left, context)?;
-            return self.eval_jq_subset(right, &left_val);
+            let left_val = self.eval_jq_subset(left, context, vars)?;
+            return self.eval_jq_subset(right, &left_val, vars);
         }
 
         // 比较操作符 > < >= <= == !=
-        if let Some(result) = self.try_comparison(expr, context)? {
+        if let Some(result) = self.try_comparison(expr, context, vars)? {
             return Ok(result);
         }
 
         // 算术操作符 + -
-        if let Some(result) = self.try_arithmetic(expr, context)? {
+        if let Some(result) = self.try_arithmetic(expr, context, vars)? {
             return Ok(result);
         }
 
@@ -206,9 +241,14 @@ impl ExpressionEvaluator {
             return Ok(Value::String(expr[1..expr.len() - 1].to_string()));
         }
 
-        // 数字字面量
-        if let Ok(n) = expr.parse::<f64>() {
-            return Ok(serde_json::json!(n));
+        // 数字字面量（整数按 i64，小数按 f64）
+        if expr.starts_with('-') || expr.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            if let Ok(n) = expr.parse::<i64>() {
+                return Ok(serde_json::json!(n));
+            }
+            if let Ok(n) = expr.parse::<f64>() {
+                return Ok(serde_json::json!(n));
+            }
         }
 
         // 布尔字面量
@@ -222,6 +262,23 @@ impl ExpressionEvaluator {
             return Ok(Value::Null);
         }
 
+        // 对象字面量 { "key": expr, ... }（export.as 常用 . + {...}）
+        if expr.starts_with('{') && expr.ends_with('}') {
+            if let Some(v) = self.try_object_literal(expr, context, vars)? {
+                return Ok(v);
+            }
+        }
+
+        // 括号表达式 ( expr )
+        if expr.starts_with('(') && expr.ends_with(')') {
+            return self.eval_jq_subset(&expr[1..expr.len() - 1], context, vars);
+        }
+
+        // 标准运行时变量绑定：$context / $input / $output / ...
+        if expr.starts_with('$') {
+            return self.eval_variable(expr, context, vars);
+        }
+
         // 路径访问（字段/索引）
         if expr.starts_with('.') {
             return self.eval_path(&expr[1..], context);
@@ -229,6 +286,120 @@ impl ExpressionEvaluator {
 
         // 上下文作为表达式默认值
         Ok(context.clone())
+    }
+
+    /// 对象字面量求值：`{ "key": expr, "key2": expr }`
+    fn try_object_literal(
+        &self,
+        expr: &str,
+        context: &Value,
+        vars: &HashMap<String, Value>,
+    ) -> Result<Option<Value>, ExpressionError> {
+        let inner = &expr[1..expr.len() - 1].trim();
+        if inner.is_empty() {
+            return Ok(Some(Value::Object(Default::default())));
+        }
+        let mut obj = serde_json::Map::new();
+        let parts = Self::split_top_level(inner, ',');
+        for part in parts {
+            let part = part.trim();
+            // 支持 "key": value 与 key: value
+            let colon = Self::find_top_level(part, ':').ok_or_else(|| {
+                ExpressionError::SyntaxError(format!("invalid object literal entry: {part}"))
+            })?;
+            let key = part[..colon].trim();
+            let key = key
+                .strip_prefix('"')
+                .and_then(|k| k.strip_suffix('"'))
+                .map(String::from)
+                .unwrap_or_else(|| key.to_string());
+            let value_expr = part[colon + 1..].trim();
+            let value = self.eval_jq_subset(value_expr, context, vars)?;
+            obj.insert(key, value);
+        }
+        Ok(Some(Value::Object(obj)))
+    }
+
+    /// 按顶层分隔符切分（忽略引号/括号/花括号内的分隔符）
+    fn split_top_level(expr: &str, sep: char) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escape = false;
+        let mut start = 0usize;
+        for (i, ch) in expr.char_indices() {
+            if escape {
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' if in_string => escape = true,
+                '"' => in_string = !in_string,
+                '(' | '[' | '{' if !in_string => depth += 1,
+                ')' | ']' | '}' if !in_string => depth -= 1,
+                c if !in_string && depth == 0 && c == sep => {
+                    parts.push(&expr[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(&expr[start..]);
+        parts
+    }
+
+    /// 在顶层查找字符位置
+    fn find_top_level(expr: &str, target: char) -> Option<usize> {
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escape = false;
+        for (i, ch) in expr.char_indices() {
+            if escape {
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' if in_string => escape = true,
+                '"' => in_string = !in_string,
+                '(' | '[' | '{' if !in_string => depth += 1,
+                ')' | ']' | '}' if !in_string => depth -= 1,
+                c if !in_string && depth == 0 && c == target => return Some(i),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// 标准运行时变量求值：`$name` 或 `$name.path.to[0].field`
+    ///
+    /// `$context` 恒绑定 context 根；`$input`/`$output`/`$task`/`$workflow`/
+    /// `$runtime`/`$authorization`/`$secrets`/`$constants` 从 vars 查找。
+    /// 未定义变量 → 语法错误（避免静默返回整个 context 的隐患）。
+    fn eval_variable(
+        &self,
+        expr: &str,
+        context: &Value,
+        vars: &HashMap<String, Value>,
+    ) -> Result<Value, ExpressionError> {
+        let expr = expr.trim();
+        let rest = &expr[1..]; // 去掉 $
+
+        // 变量名 = 直到 '.' 或 '[' 为止
+        let name_end = rest
+            .find(|c: char| c == '.' || c == '[')
+            .unwrap_or(rest.len());
+        let name = &rest[..name_end];
+        let path_rest = &rest[name_end..];
+
+        let base = match name {
+            "context" => context.clone(),
+            _ => vars.get(name).cloned().unwrap_or(Value::Null),
+        };
+
+        if path_rest.is_empty() {
+            return Ok(base);
+        }
+        self.eval_path(path_rest, &base)
     }
 
     /// 路径求值：.field.subfield[0].another
@@ -295,10 +466,11 @@ impl ExpressionEvaluator {
         segments
     }
 
-    /// 查找管道操作符位置（不在引号内的 |）
+    /// 查找管道操作符位置（不在引号内、不在嵌套括号内的 |）
     fn find_pipe_position(expr: &str) -> Option<usize> {
         let mut in_string = false;
         let mut escape = false;
+        let mut depth = 0i32;
         for (i, ch) in expr.char_indices() {
             if escape {
                 escape = false;
@@ -307,7 +479,9 @@ impl ExpressionEvaluator {
             match ch {
                 '\\' => escape = true,
                 '"' => in_string = !in_string,
-                '|' if !in_string => return Some(i),
+                '(' | '[' | '{' if !in_string => depth += 1,
+                ')' | ']' | '}' if !in_string => depth -= 1,
+                '|' if !in_string && depth == 0 => return Some(i),
                 _ => {}
             }
         }
@@ -315,15 +489,20 @@ impl ExpressionEvaluator {
     }
 
     /// 尝试比较运算
-    fn try_comparison(&self, expr: &str, context: &Value) -> Result<Option<Value>, ExpressionError> {
+    fn try_comparison(
+        &self,
+        expr: &str,
+        context: &Value,
+        vars: &HashMap<String, Value>,
+    ) -> Result<Option<Value>, ExpressionError> {
         let ops = [">=", "<=", "!=", "==", ">", "<"];
         for op in &ops {
             if let Some(pos) = expr.find(op) {
                 // 确保不在字符串内
                 let left = expr[..pos].trim();
                 let right = expr[pos + op.len()..].trim();
-                let left_val = self.eval_jq_subset(left, context)?;
-                let right_val = self.eval_jq_subset(right, context)?;
+                let left_val = self.eval_jq_subset(left, context, vars)?;
+                let right_val = self.eval_jq_subset(right, context, vars)?;
 
                 let result = match *op {
                     ">" => Self::compare_values(&left_val, &right_val).map(|o| o == std::cmp::Ordering::Greater),
@@ -342,7 +521,12 @@ impl ExpressionEvaluator {
     }
 
     /// 尝试算术运算
-    fn try_arithmetic(&self, expr: &str, context: &Value) -> Result<Option<Value>, ExpressionError> {
+    fn try_arithmetic(
+        &self,
+        expr: &str,
+        context: &Value,
+        vars: &HashMap<String, Value>,
+    ) -> Result<Option<Value>, ExpressionError> {
         // 简单支持 + 和 - （不含比较操作符以避免误匹配）
         for op in &["+", "-"] {
             if let Some(pos) = Self::find_op_position(expr, op) {
@@ -352,8 +536,18 @@ impl ExpressionEvaluator {
                     continue;
                 }
 
-                let left_val = self.eval_jq_subset(left, context)?;
-                let right_val = self.eval_jq_subset(right, context)?;
+                let left_val = self.eval_jq_subset(left, context, vars)?;
+                let right_val = self.eval_jq_subset(right, context, vars)?;
+
+                // 整数保持（JSON 整数语义）：两个操作数均为整数时用 i64 运算
+                if let (Some(l), Some(r)) = (left_val.as_i64(), right_val.as_i64()) {
+                    let result = match *op {
+                        "+" => l.checked_add(r).unwrap_or(l),
+                        "-" => l.checked_sub(r).unwrap_or(l),
+                        _ => l,
+                    };
+                    return Ok(Some(serde_json::json!(result)));
+                }
 
                 let left_num = Self::to_f64(&left_val);
                 let right_num = Self::to_f64(&right_val);
@@ -365,6 +559,17 @@ impl ExpressionEvaluator {
                         _ => 0.0,
                     };
                     return Ok(Some(serde_json::json!(result)));
+                }
+
+                // 对象合并（export.as 常用：. + {"result": ...}）—— 先于字符串拼接
+                if *op == "+" {
+                    if let (Some(l_obj), Some(r_obj)) = (left_val.as_object(), right_val.as_object()) {
+                        let mut merged = l_obj.clone();
+                        for (k, v) in r_obj {
+                            merged.insert(k.clone(), v.clone());
+                        }
+                        return Ok(Some(Value::Object(merged)));
+                    }
                 }
 
                 // 字符串拼接
@@ -382,6 +587,7 @@ impl ExpressionEvaluator {
     fn find_op_position(expr: &str, op: &str) -> Option<usize> {
         let mut in_string = false;
         let mut escape = false;
+        let mut depth = 0i32;
         for (i, _) in expr.char_indices() {
             if i + op.len() > expr.len() {
                 break;
@@ -394,7 +600,9 @@ impl ExpressionEvaluator {
             match ch {
                 '\\' => escape = true,
                 '"' => in_string = !in_string,
-                _ if !in_string && expr[i..].starts_with(op) => return Some(i),
+                '(' | '[' | '{' if !in_string => depth += 1,
+                ')' | ']' | '}' if !in_string => depth -= 1,
+                _ if !in_string && depth == 0 && expr[i..].starts_with(op) => return Some(i),
                 _ => {}
             }
         }
@@ -599,13 +807,15 @@ mod tests {
     #[test]
     fn test_addition() {
         let result = evaluate_expression("${ .amount + 5000 }", &ctx()).unwrap();
-        assert_eq!(result, serde_json::json!(20000.0));
+        // 整数保持：15000 + 5000 = 20000（i64）
+        assert_eq!(result, serde_json::json!(20000));
     }
 
     #[test]
     fn test_subtraction() {
         let result = evaluate_expression("${ .amount - 5000 }", &ctx()).unwrap();
-        assert_eq!(result, serde_json::json!(10000.0));
+        // 整数保持
+        assert_eq!(result, serde_json::json!(10000));
     }
 
     // ─── 字面量 ───
@@ -619,7 +829,11 @@ mod tests {
     #[test]
     fn test_number_literal() {
         let result = evaluate_expression("${ 42 }", &ctx()).unwrap();
-        assert_eq!(result, serde_json::json!(42.0));
+        // 整数按 i64 解析（保持 JSON 整数语义）
+        assert_eq!(result, serde_json::json!(42));
+        // 小数按 f64
+        let float = evaluate_expression("${ 3.14 }", &ctx()).unwrap();
+        assert_eq!(float, serde_json::json!(3.14));
     }
 
     #[test]
@@ -690,5 +904,112 @@ mod tests {
         let eval = ExpressionEvaluator::new();
         let result = eval.evaluate_bool("${ .count }", &ctx()).unwrap();
         assert!(result); // non-zero number is truthy
+    }
+
+    // ─── 标准运行时变量绑定（$context/$input/$output/...） ───
+
+    fn vars() -> HashMap<String, Value> {
+        let mut v = HashMap::new();
+        v.insert("input".to_string(), serde_json::json!({"raw": 42}));
+        v.insert("output".to_string(), serde_json::json!({"result": "ok"}));
+        v.insert("task".to_string(), serde_json::json!({"name": "step1", "type": "call"}));
+        v.insert("workflow".to_string(), serde_json::json!({"name": "wf", "version": "1.0"}));
+        v.insert("secrets".to_string(), serde_json::json!({"apiKey": "secret-123"}));
+        v.insert("constants".to_string(), serde_json::json!({"region": "cn-north"}));
+        v.insert("authorization".to_string(), serde_json::json!({"role": "admin"}));
+        v
+    }
+
+    #[test]
+    fn test_variable_input_binding() {
+        let eval = ExpressionEvaluator::new();
+        let result = eval
+            .evaluate_with_vars("${ $input.raw }", &ctx(), &vars())
+            .unwrap();
+        assert_eq!(result, serde_json::json!(42));
+    }
+
+    #[test]
+    fn test_variable_output_binding() {
+        let eval = ExpressionEvaluator::new();
+        let result = eval
+            .evaluate_with_vars("${ $output.result }", &ctx(), &vars())
+            .unwrap();
+        assert_eq!(result, serde_json::json!("ok"));
+    }
+
+    #[test]
+    fn test_variable_secrets_binding() {
+        let eval = ExpressionEvaluator::new();
+        let result = eval
+            .evaluate_with_vars("${ $secrets.apiKey }", &ctx(), &vars())
+            .unwrap();
+        assert_eq!(result, serde_json::json!("secret-123"));
+    }
+
+    #[test]
+    fn test_variable_context_is_root() {
+        let eval = ExpressionEvaluator::new();
+        // $context 恒绑定 context 根
+        let result = eval
+            .evaluate_with_vars("${ $context.amount }", &ctx(), &vars())
+            .unwrap();
+        assert_eq!(result, serde_json::json!(15000));
+    }
+
+    #[test]
+    fn test_variable_workflow_binding() {
+        let eval = ExpressionEvaluator::new();
+        let result = eval
+            .evaluate_with_vars("${ $workflow.name == \"wf\" }", &ctx(), &vars())
+            .unwrap();
+        assert_eq!(result, serde_json::json!(true));
+    }
+
+    #[test]
+    fn test_variable_in_condition() {
+        let eval = ExpressionEvaluator::new();
+        let result = eval
+            .evaluate_bool_with_vars("${ $input.raw > 40 }", &ctx(), &vars())
+            .unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_variable_nested_path() {
+        let eval = ExpressionEvaluator::new();
+        let result = eval
+            .evaluate_with_vars("${ $task.name }", &ctx(), &vars())
+            .unwrap();
+        assert_eq!(result, serde_json::json!("step1"));
+    }
+
+    #[test]
+    fn test_unknown_variable_returns_null() {
+        let eval = ExpressionEvaluator::new();
+        let result = eval
+            .evaluate_with_vars("${ $nonexistent.xyz }", &ctx(), &vars())
+            .unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_variable_pipe_with_path() {
+        let eval = ExpressionEvaluator::new();
+        // $input | .raw 形式（管道左侧为变量）
+        let result = eval
+            .evaluate_with_vars("${ $input | .raw }", &ctx(), &vars())
+            .unwrap();
+        assert_eq!(result, serde_json::json!(42));
+    }
+
+    #[test]
+    fn test_object_merge_addition() {
+        let eval = ExpressionEvaluator::new();
+        // export.as 常用：. + {"result": ...} 对象合并
+        let result = eval
+            .evaluate("${ . + {\"extra\": 1} }", &serde_json::json!({"a": 1}))
+            .unwrap();
+        assert_eq!(result, serde_json::json!({"a": 1, "extra": 1}));
     }
 }

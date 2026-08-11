@@ -14,11 +14,13 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 
 use super::model::{
-    BackoffStrategy, CallTask, CallType, CatchClause, Document, DoTask, EmitEvent, EmitTask,
-    EndTask, ErrorDef, EventFilter, ForEachTask, ForkBranch, ForkTask, FunctionDef, InputConfig,
-    JitterConfig, ListenTask, NamedTask, RaiseTask, RetryPolicy, RunTask, SetTask,
-    Span, SwitchCondition, SwitchTask, Task, TimeoutConfig, TryCatchTask, UseComponents,
-    ValidationError, ValidationErrorKind, WaitTask, WorkflowDefinition, WorkflowRef,
+    AuthConfig, BackoffStrategy, CallTask, CallType, CatchClause, ConstantsConfig, Document,
+    DoTask, EmitEvent, EmitTask, EndTask, ErrorDef, EventFilter, ExportConfig, ForEachTask,
+    ForkBranch, ForkTask, FunctionDef, InputConfig, JitterConfig, ListenTask, NamedTask,
+    OutputConfig, RaiseTask, RetryPolicy, RunTask, ScheduleConfig, SecretsConfig, SetTask,
+    Span, SwitchCondition, SwitchTask, Task, TaskMeta, TimeoutConfig, TryCatchTask,
+    UseComponents, ValidationError, ValidationErrorKind, WaitTask, WorkflowDefinition,
+    WorkflowRef,
 };
 
 use super::parser::{RawFunctionDef, RawNamedTask, RawRetryPolicy, RawTimeoutConfig, RawUseComponents, RawWorkflowDef};
@@ -32,6 +34,8 @@ pub struct Validator {
     task_names: HashSet<String>,
     /// 收集所有已注册的 function 名
     function_names: HashSet<String>,
+    /// use.retries 已解析映射（任务级 `retry: <name>` 引用解析）
+    retry_refs: HashMap<String, RetryPolicy>,
 }
 
 impl Validator {
@@ -41,6 +45,7 @@ impl Validator {
             errors: Vec::new(),
             task_names: HashSet::new(),
             function_names: HashSet::new(),
+            retry_refs: HashMap::new(),
         };
 
         // 预先收集 function 名
@@ -63,7 +68,15 @@ impl Validator {
             tags: raw.document.tags,
         };
 
-        // Step 2: 解析任务类型（先收集任务名再做引用校验）
+        // Step 2: 解析 use components（先解析，供任务级 retry/timeout 引用解析）
+        let use_components = raw.use_components.map(|raw| v.resolve_use_components(raw));
+        let retry_map: HashMap<String, RetryPolicy> = use_components
+            .as_ref()
+            .and_then(|u| u.retries.clone())
+            .unwrap_or_default();
+        v.retry_refs = retry_map;
+
+        // Step 3: 解析任务类型（先收集任务名再做引用校验）
         let mut named_tasks: Vec<NamedTask> = Vec::new();
         for raw_task in &raw.tasks {
             // 重复任务名检测
@@ -84,27 +97,82 @@ impl Validator {
             }
         }
 
-        // Step 3: 校验 switch transition 引用完整性
+        // Step 4: 校验 switch transition 引用完整性
         v.check_task_refs(&named_tasks);
 
-        // Step 4: 校验 use.functions 引用
+        // Step 5: 校验 use.functions 引用
         v.check_function_refs(&named_tasks);
 
-        // Step 5: 循环依赖检测（switch transition 不能形成环）
+        // Step 6: 循环依赖检测（switch transition 不能形成环）
         v.check_cycles(&named_tasks);
 
-        // Step 6: 解析 use components
-        let use_components = raw.use_components.map(|raw| v.resolve_use_components(raw));
+        // Step 7: 收集任务级标准字段（if/input/output/export/retry/timeout）
+        let mut task_meta: HashMap<String, TaskMeta> = HashMap::new();
+        v.collect_task_meta(&raw.tasks, &mut task_meta);
 
-        // Step 7: 解析 input/output
+        // Step 8: 解析 input（schema / from / default）
         let input = raw.input.map(|rv| {
             InputConfig {
                 schema: rv.value.get("schema").and_then(|v| v.as_str()).map(String::from),
+                from: rv.value.get("from").and_then(|v| v.as_str()).map(String::from),
                 default: rv.value.get("default").cloned(),
             }
         });
 
-        let output = None; // output 在顶层 DSL 中通常不单独出现
+        // Step 9: 解析顶层扩展块（output / timeout / schedule / auth / secrets / constants）
+        let mut output: Option<OutputConfig> = None;
+        let mut timeout: Option<TimeoutConfig> = None;
+        let mut schedule = ScheduleConfig::default();
+        let mut auth: std::collections::HashMap<String, AuthConfig> = Default::default();
+        let mut secrets = SecretsConfig::default();
+        let mut constants = ConstantsConfig::default();
+
+        if let Some(ext) = raw.ext {
+            if let Some(ov) = ext.output {
+                output = Some(OutputConfig {
+                    as_expr: ov.value.get("as").and_then(|v| v.as_str()).map(String::from),
+                    schema: ov.value.get("schema").and_then(|v| v.as_str()).map(String::from),
+                });
+            }
+            if let Some(tv) = ext.timeout {
+                timeout = Some(TimeoutConfig {
+                    after: tv.value.get("after").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                });
+            }
+            if let Some(sv) = ext.schedule {
+                schedule = ScheduleConfig {
+                    every: sv.value.get("every").and_then(|v| v.as_str()).map(String::from),
+                    cron: sv.value.get("cron").and_then(|v| v.as_str()).map(String::from),
+                    after: sv.value.get("after").and_then(|v| v.as_str()).map(String::from),
+                    on: sv.value.get("on").map(|v| {
+                        EventFilter {
+                            event_type: v.get("type").and_then(|v| v.as_str()).map(String::from),
+                            source: v.get("source").and_then(|v| v.as_str()).map(String::from),
+                            subject: v.get("subject").and_then(|v| v.as_str()).map(String::from),
+                        }
+                    }),
+                };
+            }
+            if let Some(av) = ext.auth {
+                if let Some(obj) = av.value.as_object() {
+                    for (name, cfg) in obj {
+                        auth.insert(name.clone(), v.parse_auth_config(cfg));
+                    }
+                }
+            }
+            if let Some(sv) = ext.secrets {
+                secrets = SecretsConfig {
+                    keys: sv.value.as_array().map(|a| {
+                        a.iter().filter_map(|k| k.as_str().map(String::from)).collect()
+                    }),
+                };
+            }
+            if let Some(cv) = ext.constants {
+                constants = ConstantsConfig {
+                    values: cv.value.as_object().cloned(),
+                };
+            }
+        }
 
         if v.errors.is_empty() {
             Ok(WorkflowDefinition {
@@ -113,8 +181,13 @@ impl Validator {
                 do_tasks: named_tasks,
                 input,
                 output,
-                timeout: None,
+                timeout,
                 use_components,
+                schedule,
+                auth,
+                secrets,
+                constants,
+                task_meta,
                 raw_yaml: None,
             })
         } else {
@@ -751,6 +824,118 @@ impl Validator {
         }
     }
 
+    // ─── 任务级标准字段解析（if / input / output / export / retry / timeout） ───
+
+    /// 解析任务级标准字段（`if` / `input` / `output` / `export` / `retry` / `timeout`）
+    ///
+    /// `retry` 支持内联策略对象或字符串引用（`use.retries` 名称）。
+    fn parse_task_meta(&mut self, raw: &RawNamedTask) -> TaskMeta {
+        let body = match &raw.body {
+            Value::Object(m) => m,
+            _ => return TaskMeta::default(),
+        };
+        TaskMeta {
+            if_condition: body.get("if").and_then(|v| v.as_str()).map(String::from),
+            input: body.get("input").map(|v| InputConfig {
+                schema: v.get("schema").and_then(|v| v.as_str()).map(String::from),
+                from: v.get("from").and_then(|v| v.as_str()).map(String::from),
+                default: v.get("default").cloned(),
+            }),
+            output: body.get("output").map(|v| OutputConfig {
+                as_expr: v.get("as").and_then(|v| v.as_str()).map(String::from),
+                schema: v.get("schema").and_then(|v| v.as_str()).map(String::from),
+            }),
+            export: body.get("export").map(|v| ExportConfig {
+                as_expr: v.get("as").and_then(|v| v.as_str()).map(String::from),
+                schema: v.get("schema").and_then(|v| v.as_str()).map(String::from),
+            }),
+            retry: body.get("retry").and_then(|v| match v {
+                Value::String(name) => self.retry_refs.get(name).cloned(),
+                _ => parse_retry_policy_value(v),
+            }),
+            timeout: body.get("timeout").and_then(parse_timeout_value),
+        }
+    }
+
+    /// 递归收集任务级标准字段（顶层 + do/fork/for-each/try-catch 嵌套）
+    fn collect_task_meta(&mut self, raws: &[RawNamedTask], map: &mut HashMap<String, TaskMeta>) {
+        for raw in raws {
+            let meta = self.parse_task_meta(raw);
+            if !meta.is_empty() {
+                map.insert(raw.name.clone(), meta);
+            }
+            let obj = match &raw.body {
+                Value::Object(o) => o,
+                _ => continue,
+            };
+            // do / try 子任务
+            for key in ["do", "try"] {
+                if let Some(arr) = obj.get(key).and_then(|v| v.as_array()) {
+                    let nested = extract_raw_sub_tasks(arr);
+                    self.collect_task_meta(&nested, map);
+                }
+            }
+            // catch 子句
+            if let Some(catch_val) = obj.get("catch") {
+                let clauses = catch_val
+                    .as_array()
+                    .map(|a| a.to_vec())
+                    .unwrap_or_else(|| vec![catch_val.clone()]);
+                for c in &clauses {
+                    if let Some(arr) = c.get("do").and_then(|v| v.as_array()) {
+                        let nested = extract_raw_sub_tasks(arr);
+                        self.collect_task_meta(&nested, map);
+                    }
+                }
+            }
+            // fork 分支
+            if let Some(fork) = obj.get("fork") {
+                let branches = fork
+                    .as_array()
+                    .or_else(|| fork.get("branches").and_then(|v| v.as_array()));
+                if let Some(branches) = branches {
+                    for b in branches {
+                        let tasks = b
+                            .get("tasks")
+                            .and_then(|v| v.as_array())
+                            .or_else(|| b.get("do").and_then(|v| v.as_array()));
+                        if let Some(arr) = tasks {
+                            let nested = extract_raw_sub_tasks(arr);
+                            self.collect_task_meta(&nested, map);
+                        }
+                    }
+                }
+            }
+            // for-each 子任务
+            if let Some(for_val) = obj.get("for") {
+                let tasks = for_val
+                    .get("tasks")
+                    .and_then(|v| v.as_array())
+                    .or_else(|| for_val.get("do").and_then(|v| v.as_array()));
+                if let Some(arr) = tasks {
+                    let nested = extract_raw_sub_tasks(arr);
+                    self.collect_task_meta(&nested, map);
+                }
+            }
+        }
+    }
+
+    /// 解析顶层 auth 定义
+    fn parse_auth_config(&mut self, cfg: &Value) -> AuthConfig {
+        let obj = cfg.as_object().cloned().unwrap_or_default();
+        let get = |k: &str| obj.get(k).and_then(|v| v.as_str()).map(String::from);
+        AuthConfig {
+            scheme: get("scheme").or_else(|| get("type")),
+            username: get("username").or_else(|| get("user")),
+            password: get("password"),
+            token: get("token"),
+            token_url: get("tokenUrl").or_else(|| get("token_url")),
+            client_id: get("clientId").or_else(|| get("client_id")),
+            client_secret: get("clientSecret").or_else(|| get("client_secret")),
+            scope: get("scope"),
+        }
+    }
+
     fn resolve_function_def(&mut self, raw: RawFunctionDef) -> FunctionDef {
         let body = &raw.body;
         if let Some(obj) = body.as_object() {
@@ -766,8 +951,7 @@ impl Validator {
             };
             FunctionDef {
                 call: call_type,
-                with: obj.get("with").cloned(),
-            }
+                with: obj.get("with").cloned(),            }
         } else {
             FunctionDef {
                 call: CallType::Http,
@@ -852,6 +1036,110 @@ pub fn parse_and_validate_json(json: &str) -> Result<WorkflowDefinition, Vec<Val
         }]
     })?;
     Validator::validate(raw)
+}
+
+// ─── 模块级辅助：灵活 retry / timeout 值解析 ───
+
+/// 从子任务数组提取 RawNamedTask 列表（用于元数据收集）
+fn extract_raw_sub_tasks(arr: &[Value]) -> Vec<RawNamedTask> {
+    arr.iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            if obj.len() != 1 {
+                return None;
+            }
+            let (name, body) = obj.iter().next()?;
+            Some(RawNamedTask {
+                span: Span::new(0, 0, 0),
+                name: name.clone(),
+                body: body.clone(),
+            })
+        })
+        .collect()
+}
+
+/// 解析 retry 策略值，兼容两种 DSL 形状：
+/// - 简单形状: `{ delay: "PT3S", backoff: "exponential", limit: 5, jitter: {factor: 0.1} }`
+/// - DSL 形状: `{ delay: { seconds: 3 }, backoff: { linear: {} }, limit: { attempt: { count: 5 } } }`
+pub fn parse_retry_policy_value(v: &Value) -> Option<RetryPolicy> {
+    let obj = v.as_object()?;
+    let mut policy = RetryPolicy {
+        delay: "PT3S".to_string(),
+        backoff: None,
+        limit: 3,
+        jitter: None,
+    };
+
+    // delay: "PT3S" | { seconds: 3 } | { milliseconds: 3000 }
+    if let Some(d) = obj.get("delay") {
+        if let Some(s) = d.as_str() {
+            policy.delay = s.to_string();
+        } else if let Some(do_obj) = d.as_object() {
+            if let Some(secs) = do_obj.get("seconds").and_then(|x| x.as_u64()) {
+                policy.delay = format!("PT{secs}S");
+            } else if let Some(ms) = do_obj.get("milliseconds").and_then(|x| x.as_u64()) {
+                policy.delay = format!("PT{}S", ms as f64 / 1000.0);
+            }
+        }
+    }
+
+    // backoff: "linear" | { linear: {} } | { exponential: {} } | { constant: {} }
+    if let Some(b) = obj.get("backoff") {
+        if let Some(s) = b.as_str() {
+            policy.backoff = match s {
+                "constant" => Some(BackoffStrategy::Constant),
+                "linear" => Some(BackoffStrategy::Linear),
+                "exponential" => Some(BackoffStrategy::Exponential),
+                _ => None,
+            };
+        } else if let Some(bo) = b.as_object() {
+            if bo.contains_key("constant") {
+                policy.backoff = Some(BackoffStrategy::Constant);
+            } else if bo.contains_key("linear") {
+                policy.backoff = Some(BackoffStrategy::Linear);
+            } else if bo.contains_key("exponential") {
+                policy.backoff = Some(BackoffStrategy::Exponential);
+            }
+        }
+    }
+
+    // limit: 5 | { attempt: { count: 5 } }
+    if let Some(l) = obj.get("limit") {
+        if let Some(n) = l.as_u64() {
+            policy.limit = n as u32;
+        } else if let Some(lo) = l.as_object() {
+            if let Some(attempt) = lo.get("attempt") {
+                if let Some(count) = attempt.get("count").and_then(|x| x.as_u64()) {
+                    policy.limit = count as u32;
+                }
+            }
+        }
+    }
+
+    // jitter: { factor: 0.1 }
+    if let Some(j) = obj.get("jitter") {
+        if let Some(f) = j.get("factor").and_then(|x| x.as_f64()) {
+            policy.jitter = Some(JitterConfig { factor: f });
+        }
+    }
+
+    Some(policy)
+}
+
+/// 解析 timeout 值：`{ after: "PT5M" }` 或 `{ after: { seconds: 300 } }`
+pub fn parse_timeout_value(v: &Value) -> Option<TimeoutConfig> {
+    let obj = v.as_object()?;
+    if let Some(a) = obj.get("after") {
+        if let Some(s) = a.as_str() {
+            return Some(TimeoutConfig { after: s.to_string() });
+        }
+        if let Some(ao) = a.as_object() {
+            if let Some(secs) = ao.get("seconds").and_then(|x| x.as_u64()) {
+                return Some(TimeoutConfig { after: format!("PT{secs}S") });
+            }
+        }
+    }
+    None
 }
 
 // ─── 测试 ───
@@ -1326,5 +1614,182 @@ do:
             }
             _ => panic!("expected Set task"),
         }
+    }
+
+    // ═══ 任务级标准字段 / 顶层扩展块解析（P0 全特性） ═══
+
+    #[test]
+    fn test_parse_task_meta_fields() {
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: meta-wf
+  version: "1.0"
+do:
+  - guarded:
+      if: "${ .approved == true }"
+      input:
+        from: "${ { \"x\": .raw } }"
+        schema: '{"type":"object"}'
+      output:
+        as: "${ $output }"
+        schema: '{"type":"object"}'
+      export:
+        as: "${ . + {\"done\": true} }"
+        schema: '{"type":"object"}'
+      retry:
+        delay: "PT1S"
+        backoff: exponential
+        limit: 5
+      timeout:
+        after: "PT1M"
+      set:
+        variable: v
+        value: "${ .x }"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("parse meta-wf");
+        let meta = def.task_meta.get("guarded").expect("task meta for guarded");
+        assert_eq!(meta.if_condition.as_deref(), Some("${ .approved == true }"));
+        let input = meta.input.as_ref().unwrap();
+        assert_eq!(input.from.as_deref(), Some("${ { \"x\": .raw } }"));
+        assert_eq!(input.schema.as_deref(), Some("{\"type\":\"object\"}"));
+        let output = meta.output.as_ref().unwrap();
+        assert_eq!(output.as_expr.as_deref(), Some("${ $output }"));
+        let export = meta.export.as_ref().unwrap();
+        assert!(export.as_expr.is_some());
+        let retry = meta.retry.as_ref().unwrap();
+        assert_eq!(retry.limit, 5);
+        assert_eq!(retry.backoff, Some(BackoffStrategy::Exponential));
+        let timeout = meta.timeout.as_ref().unwrap();
+        assert_eq!(timeout.after, "PT1M");
+    }
+
+    #[test]
+    fn test_parse_task_retry_dsl_shape() {
+        // DSL 形状：delay.seconds / backoff.linear / limit.attempt.count
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: retry-dsl
+  version: "1.0"
+do:
+  - callApi:
+      call: http
+      retry:
+        delay:
+          seconds: 3
+        backoff:
+          linear: {}
+        limit:
+          attempt:
+            count: 5
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("parse retry-dsl");
+        let meta = def.task_meta.get("callApi").expect("task meta");
+        let retry = meta.retry.as_ref().unwrap();
+        assert_eq!(retry.delay, "PT3S");
+        assert_eq!(retry.backoff, Some(BackoffStrategy::Linear));
+        assert_eq!(retry.limit, 5);
+    }
+
+    #[test]
+    fn test_parse_task_retry_reference_to_use_retries() {
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: retry-ref
+  version: "1.0"
+use:
+  retries:
+    defaultRetry:
+      delay: "PT1S"
+      backoff: constant
+      limit: 4
+do:
+  - callApi:
+      call: http
+      retry: defaultRetry
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("parse retry-ref");
+        let meta = def.task_meta.get("callApi").expect("task meta");
+        let retry = meta.retry.as_ref().unwrap();
+        assert_eq!(retry.limit, 4);
+        assert_eq!(retry.delay, "PT1S");
+    }
+
+    #[test]
+    fn test_parse_top_level_ext_blocks() {
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: ext-wf
+  version: "1.0"
+input:
+  schema: '{"type":"object"}'
+  from: "${ . }"
+output:
+  as: "${ $output }"
+  schema: '{"type":"object"}'
+timeout:
+  after: "PT5M"
+schedule:
+  every: "PT1H"
+  cron: "0 0 * * *"
+auth:
+  myBasic:
+    scheme: basic
+    username: admin
+    password: "${ $secrets.adminPass }"
+secrets:
+  - adminPass
+constants:
+  region: cn-north
+do:
+  - step:
+      set:
+        variable: v
+        value: "1"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("parse ext-wf");
+        let input = def.input.unwrap();
+        assert_eq!(input.schema.as_deref(), Some("{\"type\":\"object\"}"));
+        assert_eq!(input.from.as_deref(), Some("${ . }"));
+        let output = def.output.unwrap();
+        assert_eq!(output.as_expr.as_deref(), Some("${ $output }"));
+        assert_eq!(def.timeout.as_ref().unwrap().after, "PT5M");
+        assert_eq!(def.schedule.every.as_deref(), Some("PT1H"));
+        assert_eq!(def.schedule.cron.as_deref(), Some("0 0 * * *"));
+        let auth = def.auth.get("myBasic").unwrap();
+        assert_eq!(auth.scheme.as_deref(), Some("basic"));
+        assert_eq!(auth.username.as_deref(), Some("admin"));
+        assert_eq!(def.secrets.keys.as_ref().unwrap(), &vec!["adminPass".to_string()]);
+        assert_eq!(def.constants.values.as_ref().unwrap().get("region").unwrap(), &Value::String("cn-north".into()));
+    }
+
+    #[test]
+    fn test_parse_nested_task_meta() {
+        // do 子任务的标准字段也会被收集
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: nested-meta
+  version: "1.0"
+do:
+  - parent:
+      do:
+        - child:
+            if: "${ .flag }"
+            set:
+              variable: c
+              value: "1"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("parse nested-meta");
+        let meta = def.task_meta.get("child").expect("child meta collected");
+        assert_eq!(meta.if_condition.as_deref(), Some("${ .flag }"));
     }
 }

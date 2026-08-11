@@ -8,7 +8,7 @@
 // 4. 收集结果
 
 use crate::workflow::model::{
-    ForEachTask, NamedTask, StepResult, TaskFrame, TaskStatus, WorkflowFault, WorkflowInstance,
+    ForEachTask, NamedTask, StepResult, TaskFrame, TaskStatus, WorkflowInstance,
 };
 use crate::workflow::ports::{Clock, ExpressionEval};
 
@@ -27,16 +27,14 @@ pub fn execute(
         Ok(array) => {
             if !array.is_array() {
                 return StepResult::Failed {
-                    fault: WorkflowFault {
-                        r#type: "type_error".into(),
-                        title: "for-each input must evaluate to an array".into(),
-                        status: 400,
-                        detail: format!(
+                    fault: crate::workflow::errors::WorkflowFault::validation(
+                        "for-each input must evaluate to an array",
+                        format!(
                             "expression '{}' evaluated to {}",
                             for_each.input,
                             if array.is_object() { "object" } else { "scalar" }
                         ),
-                    },
+                    ),
                 };
             }
 
@@ -64,12 +62,10 @@ pub fn execute(
             }
         }
         Err(e) => StepResult::Failed {
-            fault: WorkflowFault {
-                r#type: "expression_error".into(),
-                title: "for-each input expression evaluation failed".into(),
-                status: 400,
-                detail: e.to_string(),
-            },
+            fault: crate::workflow::errors::WorkflowFault::expression(
+                "for-each input expression evaluation failed",
+                e.to_string(),
+            ),
         },
     }
 }
@@ -157,7 +153,11 @@ mod tests {
 
         match result {
             StepResult::Failed { fault } => {
-                assert_eq!(fault.r#type, "type_error");
+                assert_eq!(
+                    fault.r#type,
+                    crate::workflow::errors::error_type(crate::workflow::errors::kind::VALIDATION)
+                );
+                assert_eq!(fault.status, 400);
             }
             other => panic!("expected Failed, got {:?}", other),
         }

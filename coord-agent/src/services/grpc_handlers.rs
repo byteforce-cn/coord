@@ -1035,12 +1035,13 @@ impl Workflow for WorkflowEngineService {
         match self.get_instance(&req.workflow_id).await {
             Ok(Some(inst)) => {
                 let status_str = match inst.status {
+                    coord_core::workflow::model::InstanceStatus::Pending => "PENDING",
                     coord_core::workflow::model::InstanceStatus::Running => "RUNNING",
+                    coord_core::workflow::model::InstanceStatus::Waiting => "WAITING",
                     coord_core::workflow::model::InstanceStatus::Suspended => "SUSPENDED",
                     coord_core::workflow::model::InstanceStatus::Completed => "COMPLETED",
-                    coord_core::workflow::model::InstanceStatus::Failed => "FAILED",
+                    coord_core::workflow::model::InstanceStatus::Failed => "FAULTED",
                     coord_core::workflow::model::InstanceStatus::Cancelled => "CANCELLED",
-                    _ => "UNKNOWN",
                 };
 
                 let output_bytes = inst
@@ -1051,6 +1052,22 @@ impl Workflow for WorkflowEngineService {
 
                 let input_bytes = serde_json::to_vec(&inst.context).unwrap_or_default();
 
+                // 填充 task_stack（标准 §Status Query）
+                let task_stack: Vec<coord_proto::agent::TaskFrame> = inst
+                    .task_stack
+                    .iter()
+                    .map(|tf| coord_proto::agent::TaskFrame {
+                        task_name: tf.task_name.clone(),
+                        task_type: tf.task_type.clone(),
+                        status: format!("{:?}", tf.status).to_uppercase(),
+                        input: serde_json::to_vec(&tf.input).unwrap_or_default(),
+                        output: serde_json::to_vec(&tf.output).unwrap_or_default(),
+                        started_at: tf.started_at.unwrap_or(0),
+                        ended_at: tf.ended_at.unwrap_or(0),
+                        retry_count: tf.retry_count as i32,
+                    })
+                    .collect();
+
                 Ok(Response::new(WorkflowGetStatusResponse {
                     workflow_id: inst.id,
                     status: status_str.to_string(),
@@ -1060,7 +1077,7 @@ impl Workflow for WorkflowEngineService {
                     input: input_bytes,
                     created_at: inst.created_at,
                     updated_at: inst.updated_at,
-                    task_stack: vec![],
+                    task_stack,
                 }))
             }
             Ok(None) => Err(Status::not_found("workflow instance not found")),

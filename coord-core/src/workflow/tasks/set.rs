@@ -4,7 +4,7 @@
 // jq 表达式求值 → 返回 SetVariable（Runtime 写入 context）
 
 use crate::workflow::model::{
-    NamedTask, SetTask, StepResult, TaskFrame, TaskStatus, WorkflowFault, WorkflowInstance,
+    NamedTask, SetTask, StepResult, TaskFrame, TaskStatus, WorkflowInstance,
 };
 use crate::workflow::ports::{Clock, ExpressionEval};
 
@@ -38,12 +38,10 @@ pub fn execute(
             }
         }
         Err(e) => StepResult::Failed {
-            fault: WorkflowFault {
-                r#type: "expression_error".into(),
-                title: format!("set variable '{}' evaluation failed", set.variable),
-                status: 400,
-                detail: e.to_string(),
-            },
+            fault: crate::workflow::errors::WorkflowFault::expression(
+                format!("set variable '{}' evaluation failed", set.variable),
+                e.to_string(),
+            ),
         },
     }
 }
@@ -90,8 +88,8 @@ mod tests {
         match result {
             StepResult::SetVariable { variable, value, frame } => {
                 assert_eq!(variable, "result");
-                // expression evaluator parses numbers as f64 → 42.0
-                assert_eq!(value, serde_json::json!(42.0));
+                // 整数按 i64 解析
+                assert_eq!(value, serde_json::json!(42));
                 assert_eq!(frame.task_type, "set");
                 assert_eq!(frame.status, TaskStatus::Completed);
             }
@@ -117,7 +115,8 @@ mod tests {
         match result {
             StepResult::SetVariable { variable, value, .. } => {
                 assert_eq!(variable, "doubled");
-                assert_eq!(value, serde_json::json!(1000.0));
+                // 整数保持
+                assert_eq!(value, serde_json::json!(1000));
             }
             other => panic!("expected SetVariable, got {:?}", other),
         }

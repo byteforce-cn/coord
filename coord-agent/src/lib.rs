@@ -449,6 +449,41 @@ impl AgentServer {
                 workflow_grpc_svc = Some(workflow_grpc);
                 tracing::info!("Workflow engine service registered (v4.0 coord-core engine)");
             }
+
+            // 启动工作流调度器（标准 §Scheduling：schedule.every/cron/after/on）
+            if let Some(engine) = workflow_grpc_svc.as_ref() {
+                let scheduler = Arc::new(
+                    crate::services::workflow_scheduler::WorkflowScheduler::new(
+                        Arc::clone(engine),
+                    ),
+                );
+                scheduler.spawn();
+                tracing::info!("Workflow scheduler started (every/cron/after/on)");
+
+                // on 模式：订阅 EventNotification 事件 → 触发新实例
+                if let Some(event_svc) = event_grpc_svc.as_ref() {
+                    let sched = Arc::clone(&scheduler);
+                    let mut rx = event_svc.subscribe();
+                    tokio::spawn(async move {
+                        loop {
+                            match rx.recv().await {
+                                Ok(ev) => {
+                                    let data = serde_json::from_slice(&ev.data)
+                                        .unwrap_or(serde_json::Value::Null);
+                                    let we = crate::services::workflow_scheduler::WorkflowEvent {
+                                        event_type: ev.event_type.clone(),
+                                        source: Some(ev.source.clone()),
+                                        data,
+                                    };
+                                    sched.handle_event(&we).await;
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    });
+                }
+            }
         }
 
         if self.config.services.scheduler {

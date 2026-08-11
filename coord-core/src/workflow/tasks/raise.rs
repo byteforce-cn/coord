@@ -20,6 +20,7 @@ pub fn execute(
         title: raise.raise.title.clone(),
         status: raise.raise.status.unwrap_or(500),
         detail: raise.raise.detail.clone().unwrap_or_default(),
+        instance: None,
     };
 
     StepResult::Failed { fault }

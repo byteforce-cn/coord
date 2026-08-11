@@ -32,19 +32,66 @@ pub struct Document {
 // ─── 输入/输出配置 ───
 
 /// 输入配置（对应 DSL `input` 块）
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// 标准字段：
+/// - `schema`: JSON Schema URI，输入校验（失败 → validation 错误，faulted）
+/// - `from`:   原始输入变换表达式（${ ... }），输出为初始 context
+/// - `default`: 输入缺失/为空时的默认值
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct InputConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
+    /// 输入变换表达式（纯函数步骤，${ ... }）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
 }
 
-/// 输出配置（对应 DSL `output` 块）
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl InputConfig {
+    pub fn is_empty(&self) -> bool {
+        self.schema.is_none() && self.from.is_none() && self.default.is_none()
+    }
+}
+
+/// 输出配置（对应 DSL `output` 块 / 任务 `output` 块）
+///
+/// 标准字段：
+/// - `as`:    输出变换表达式（${ ... }），把原始输出变换为最终输出
+/// - `schema`: JSON Schema URI，输出校验
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct OutputConfig {
+    /// 输出变换表达式（DSL key: `as`）
+    #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
+    pub as_expr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
+}
+
+impl OutputConfig {
+    pub fn is_empty(&self) -> bool {
+        self.as_expr.is_none() && self.schema.is_none()
+    }
+}
+
+/// 导出配置（任务 `export` 块）—— 把任务输出合并回 context
+///
+/// 标准字段：
+/// - `as`:    变换表达式（${ ... }），输出为要合并回 context 的值
+/// - `schema`: JSON Schema URI，合并前校验
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ExportConfig {
+    /// 变换表达式（DSL key: `as`）
+    #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
+    pub as_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+}
+
+impl ExportConfig {
+    pub fn is_empty(&self) -> bool {
+        self.as_expr.is_none() && self.schema.is_none()
+    }
 }
 
 // ─── 可复用组件 ───
@@ -123,6 +170,98 @@ pub struct TimeoutConfig {
     pub after: String, // ISO 8601 duration, e.g. "P7D"
 }
 
+// ─── 调度 / 认证 / 密钥（标准 §Scheduling / §Authentication / §Secrets） ───
+
+/// 调度配置（顶层 `schedule`）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ScheduleConfig {
+    /// 周期执行：ISO 8601 间隔，如 "PT1H"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every: Option<String>,
+    /// CRON 表达式（5/6 字段）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
+    /// 完成后延迟重启：ISO 8601
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// 事件触发：订阅事件启动新实例
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<EventFilter>,
+}
+
+impl ScheduleConfig {
+    pub fn is_empty(&self) -> bool {
+        self.every.is_none() && self.cron.is_none() && self.after.is_none() && self.on.is_none()
+    }
+}
+
+/// 认证配置（顶层 `auth` 或函数 `auth`）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AuthConfig {
+    /// 认证方式: basic | bearer | oauth2
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    /// basic: 用户名/密码（支持 ${ $secrets.x } 引用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// bearer / oauth2: token（支持 ${ $secrets.x } 引用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// oauth2: token 端点 / clientId / clientSecret
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+impl AuthConfig {
+    pub fn is_empty(&self) -> bool {
+        self.scheme.is_none()
+            && self.username.is_none()
+            && self.password.is_none()
+            && self.token.is_none()
+            && self.token_url.is_none()
+            && self.client_id.is_none()
+            && self.client_secret.is_none()
+            && self.scope.is_none()
+    }
+}
+
+/// 密钥引用（顶层 `secrets`）—— 求值时安全注入 `$secrets`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SecretsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
+}
+
+impl SecretsConfig {
+    pub fn is_empty(&self) -> bool {
+        self.keys.as_ref().map(|k| k.is_empty()).unwrap_or(true)
+    }
+}
+
+/// 常量定义（顶层 `constants`）—— 注入 `$constants`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConstantsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub values: Option<serde_json::Map<String, Value>>,
+}
+
+impl ConstantsConfig {
+    pub fn is_empty(&self) -> bool {
+        self.values.as_ref().map(|v| v.is_empty()).unwrap_or(true)
+    }
+}
+
+/// 认证定义集（顶层 `auth`）—— name → AuthConfig
+pub type AuthMap = HashMap<String, AuthConfig>;
+
 // ─── 工作流定义（解析后） ───
 
 /// 解析后的工作流定义 —— 可直接执行的强类型模型
@@ -141,6 +280,21 @@ pub struct WorkflowDefinition {
     pub timeout: Option<TimeoutConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_components: Option<UseComponents>,
+    /// 顶层 `schedule`（周期/CRON/after/事件触发）
+    #[serde(default, skip_serializing_if = "ScheduleConfig::is_empty")]
+    pub schedule: ScheduleConfig,
+    /// 顶层 `auth`（认证定义，name → AuthConfig）
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub auth: HashMap<String, AuthConfig>,
+    /// 顶层 `secrets`（密钥键声明）
+    #[serde(default, skip_serializing_if = "SecretsConfig::is_empty")]
+    pub secrets: SecretsConfig,
+    /// 顶层 `constants`（常量）
+    #[serde(default, skip_serializing_if = "ConstantsConfig::is_empty")]
+    pub constants: ConstantsConfig,
+    /// 任务级标准字段索引（task name → TaskMeta：if/input/output/export/retry/timeout）
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub task_meta: HashMap<String, TaskMeta>,
     /// 原始 DSL YAML 文本（部署时保存，用于 get_definition 返回）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_yaml: Option<String>,
@@ -151,6 +305,47 @@ pub struct WorkflowDefinition {
 pub struct NamedTask {
     pub name: String,
     pub task: Task,
+}
+
+/// 任务级标准字段（Open Workflow DSL §Task）
+///
+/// 覆盖：`if`（条件跳过）、`input{from,schema}`（输入变换/校验）、
+/// `output{as,schema}`（输出变换/校验）、`export{as,schema}`（合并回 context）、
+/// `retry`（重试策略）、`timeout`（任务超时）。
+///
+/// 存储于 `WorkflowDefinition.task_meta`，按任务名索引
+/// （顶层任务名唯一；嵌套任务需保证全定义内名称唯一以正确关联）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TaskMeta {
+    /// `if` 条件（${ ... }）—— 条件为假时跳过该任务
+    #[serde(rename = "if", default, skip_serializing_if = "Option::is_none")]
+    pub if_condition: Option<String>,
+    /// `input` 块（from 变换 + schema 校验）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<InputConfig>,
+    /// `output` 块（as 变换 + schema 校验）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<OutputConfig>,
+    /// `export` 块（as 变换 + schema 校验，合并回 context）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export: Option<ExportConfig>,
+    /// `retry` 重试策略（可引用 `use.retries`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryPolicy>,
+    /// `timeout` 任务超时
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<TimeoutConfig>,
+}
+
+impl TaskMeta {
+    pub fn is_empty(&self) -> bool {
+        self.if_condition.is_none()
+            && self.input.is_none()
+            && self.output.is_none()
+            && self.export.is_none()
+            && self.retry.is_none()
+            && self.timeout.is_none()
+    }
 }
 
 // ─── 任务类型枚举（13 种） ───
@@ -376,13 +571,25 @@ pub struct WorkflowInstance {
     pub suspension_meta: Option<SuspensionMeta>,
 }
 
-/// 实例状态枚举
+/// 实例状态枚举（对齐标准 §Status Phases）
+///
+/// 标准相位：pending / running / waiting / suspended / cancelled / faulted / completed
+/// - `Pending`:   实例已创建待执行（start 后进入 Running）
+/// - `Running`:   执行中
+/// - `Waiting`:   等待事件/时长/重试定时器（自动恢复）
+/// - `Suspended`: 人工挂起（等待 signal）
+/// - `Faulted`:   错误终止（序列化 "faulted"，兼容旧 "failed" 反序列化）
+/// - `Cancelled`: 人工取消
+/// - `Completed`: 正常完成
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstanceStatus {
+    Pending,
     Running,
+    Waiting,
     Suspended,
     Completed,
+    #[serde(rename = "faulted", alias = "failed")]
     Failed,
     Cancelled,
 }
@@ -396,9 +603,9 @@ impl InstanceStatus {
         )
     }
 
-    /// 是否为可恢复状态
+    /// 是否为可恢复状态（自动恢复的 Waiting + 人工恢复的 Suspended）
     pub fn is_resumable(&self) -> bool {
-        matches!(self, InstanceStatus::Suspended)
+        matches!(self, InstanceStatus::Suspended | InstanceStatus::Waiting)
     }
 }
 
@@ -436,9 +643,9 @@ pub enum TaskStatus {
 /// 挂起元信息 —— 记录暂停原因与恢复所需信息
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SuspensionMeta {
-    /// 暂停原因: "wait" | "call" | "listen" | "signal"
+    /// 暂停原因: "wait" | "call" | "listen" | "signal" | "run" | "retry"
     pub reason: String,
-    /// wait 到期时间（Unix ms）
+    /// wait/retry 到期时间（Unix ms）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until_ms: Option<i64>,
     /// call 目标服务
@@ -453,9 +660,19 @@ pub struct SuspensionMeta {
     /// signal 名称（人工审批场景）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_signal: Option<String>,
+    /// 重试次数（reason="retry" 时记录）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_count: Option<u32>,
+    /// 最近一次失败原因（reason="retry" 时记录）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-/// 工作流错误
+/// 工作流错误（RFC 7807 Problem Details）
+///
+/// 标准字段：type / title / status / detail / instance
+/// - `type`:     标准错误类型 URI（见 `errors` 模块常量），如 `.../errors/timeout`
+/// - `instance`: 错误定位（JSON Pointer），RFC 7807 要求，缺失可空
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowFault {
     pub r#type: String,
@@ -463,6 +680,8 @@ pub struct WorkflowFault {
     #[serde(default = "default_fault_status")]
     pub status: u16,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 fn default_fault_status() -> u16 {
@@ -555,6 +774,8 @@ impl SuspendReason {
                 payload: None,
                 event_filter: None,
                 expected_signal: None,
+                retry_count: None,
+                error: None,
             },
             SuspendReason::ExternalCall {
                 service,
@@ -567,6 +788,8 @@ impl SuspendReason {
                 payload: Some(input.clone()),
                 event_filter: None,
                 expected_signal: None,
+                retry_count: None,
+                error: None,
             },
             SuspendReason::ListeningForEvent { event_filter } => SuspensionMeta {
                 reason: "listen".to_string(),
@@ -575,6 +798,8 @@ impl SuspendReason {
                 payload: None,
                 event_filter: Some(event_filter.clone()),
                 expected_signal: None,
+                retry_count: None,
+                error: None,
             },
             SuspendReason::WaitingForSignal { expected_signal } => SuspensionMeta {
                 reason: "signal".to_string(),
@@ -583,6 +808,8 @@ impl SuspendReason {
                 payload: None,
                 event_filter: None,
                 expected_signal: Some(expected_signal.clone()),
+                retry_count: None,
+                error: None,
             },
             SuspendReason::RunSubflow {
                 workflow,
@@ -598,6 +825,8 @@ impl SuspendReason {
                 payload: input.clone(),
                 event_filter: None,
                 expected_signal: None,
+                retry_count: None,
+                error: None,
             },
         }
     }
@@ -673,7 +902,7 @@ impl std::fmt::Display for ValidationError {
 // ─── WorkflowInstance 构造器 ───
 
 impl WorkflowInstance {
-    /// 创建新的工作流实例
+    /// 创建新的工作流实例（标准相位：创建即 `Pending`，start 驱动后进入 `Running`）
     pub fn new(
         definition: &WorkflowDefinition,
         input: Value,
@@ -684,7 +913,7 @@ impl WorkflowInstance {
             definition_ns: definition.document.namespace.clone(),
             definition_name: definition.document.name.clone(),
             definition_version: definition.document.version.clone(),
-            status: InstanceStatus::Running,
+            status: InstanceStatus::Pending,
             context: input,
             task_stack: Vec::new(),
             current_task_index: 0,
@@ -723,11 +952,16 @@ mod tests {
             output: None,
             timeout: None,
             use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
         raw_yaml: None,
         };
 
         let inst = WorkflowInstance::new(&def, serde_json::json!({"key": "value"}), 1000);
-        assert_eq!(inst.status, InstanceStatus::Running);
+        assert_eq!(inst.status, InstanceStatus::Pending);
         assert_eq!(inst.definition_name, "minimal");
         assert_eq!(inst.current_task_index, 0);
         assert_eq!(inst.context, serde_json::json!({"key": "value"}));
@@ -890,6 +1124,11 @@ mod tests {
             output: None,
             timeout: None,
             use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
         raw_yaml: None,
         };
 
