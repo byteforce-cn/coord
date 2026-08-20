@@ -1466,6 +1466,62 @@ pub mod phase4 {
 
     impl std::error::Error for DeployError {}
 
+    /// 工作流引擎错误 —— typed 错误（ISSUE-010 §3：signal/start 错误码 typed 映射）
+    ///
+    /// gRPC 映射：`InvalidArgument` → `InvalidArgument`；`NotFound` → `NotFound`；
+    /// `FailedPrecondition` → `FailedPrecondition`；`Internal` → `Internal`。
+    /// 与 ISSUE-001 error/deny 区分思路一致：输入问题 ≠ 状态冲突 ≠ 基础设施故障。
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum WorkflowEngineError {
+        /// 输入 / signal 名不匹配（gRPC → InvalidArgument）
+        InvalidArgument(String),
+        /// 实例 / 定义未找到（gRPC → NotFound）
+        NotFound(String),
+        /// 状态冲突：对非挂起 / 终端实例操作（gRPC → FailedPrecondition）
+        FailedPrecondition(String),
+        /// 存储 / 内部（gRPC → Internal）
+        Internal(String),
+    }
+
+    impl std::fmt::Display for WorkflowEngineError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                WorkflowEngineError::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
+                WorkflowEngineError::NotFound(msg) => write!(f, "not found: {msg}"),
+                WorkflowEngineError::FailedPrecondition(msg) => {
+                    write!(f, "failed precondition: {msg}")
+                }
+                WorkflowEngineError::Internal(msg) => write!(f, "internal error: {msg}"),
+            }
+        }
+    }
+
+    impl std::error::Error for WorkflowEngineError {}
+
+    impl From<coord_core::workflow::runtime::RuntimeError> for WorkflowEngineError {
+        fn from(e: coord_core::workflow::runtime::RuntimeError) -> Self {
+            use coord_core::workflow::runtime::RuntimeError;
+            match e {
+                RuntimeError::NotFound(id) => {
+                    WorkflowEngineError::NotFound(format!("instance not found: {id}"))
+                }
+                RuntimeError::AlreadyCompleted(id) => WorkflowEngineError::FailedPrecondition(
+                    format!("instance already in terminal state: {id}"),
+                ),
+                RuntimeError::InvalidSignal(msg) => WorkflowEngineError::InvalidArgument(msg),
+                RuntimeError::DefinitionNotFound(id) => WorkflowEngineError::NotFound(format!(
+                    "workflow definition not found: {id}"
+                )),
+                RuntimeError::StoreError(msg) => {
+                    WorkflowEngineError::Internal(format!("store error: {msg}"))
+                }
+                RuntimeError::GotoTargetNotFound(t) => {
+                    WorkflowEngineError::Internal(format!("goto target not found: {t}"))
+                }
+            }
+        }
+    }
+
     /// 语义版本号 +1（回滚/新版本落地，对齐 policy 的「回滚版本 = 当前版本 +1」）
     ///
     /// - 纯数字点分版本（如 "1.0"、"1.2.3"）→ 末段 +1（"1.0" → "1.1"，"1.2.3" → "1.2.4"）；
@@ -1750,16 +1806,21 @@ pub mod phase4 {
             &self,
             definition_id: &str,
             input: Value,
-        ) -> Result<WorkflowInstance, String> {
+        ) -> Result<WorkflowInstance, WorkflowEngineError> {
             let def = self
                 .get_definition(definition_id)
-                .await?
-                .ok_or_else(|| format!("definition not found: {definition_id}"))?;
+                .await
+                .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?
+                .ok_or_else(|| {
+                    WorkflowEngineError::NotFound(format!(
+                        "workflow definition not found: {definition_id}"
+                    ))
+                })?;
 
             self.runtime()
                 .start(&def, input)
                 .await
-                .map_err(|e| format!("runtime error: {e}"))
+                .map_err(WorkflowEngineError::from)
         }
 
         pub async fn get_instance(
@@ -1777,7 +1838,7 @@ pub mod phase4 {
             instance_id: &str,
             signal_name: &str,
             payload: Value,
-        ) -> Result<WorkflowInstance, String> {
+        ) -> Result<WorkflowInstance, WorkflowEngineError> {
             self.resume_instance(instance_id, Some(signal_name), Some(payload), None).await
         }
 
@@ -1787,31 +1848,36 @@ pub mod phase4 {
             signal_name: Option<&str>,
             payload: Option<Value>,
             idempotency_key: Option<&str>,
-        ) -> Result<WorkflowInstance, String> {
+        ) -> Result<WorkflowInstance, WorkflowEngineError> {
             self.runtime()
                 .resume(instance_id, signal_name, payload, idempotency_key)
                 .await
-                .map_err(|e| format!("runtime error: {e}"))
+                .map_err(WorkflowEngineError::from)
         }
 
         pub async fn cancel_instance(
             &self,
             instance_id: &str,
-        ) -> Result<(), String> {
+        ) -> Result<(), WorkflowEngineError> {
             let mut inst = self.store
                 .load_instance(instance_id)
                 .await
-                .map_err(|e| format!("store error: {e}"))?
-                .ok_or_else(|| format!("instance not found: {instance_id}"))?;
+                .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?
+                .ok_or_else(|| {
+                    WorkflowEngineError::NotFound(format!("instance not found: {instance_id}"))
+                })?;
 
             if inst.status.is_terminal() {
-                return Err(format!("instance already in terminal state: {:?}", inst.status));
+                return Err(WorkflowEngineError::FailedPrecondition(format!(
+                    "instance already in terminal state: {:?}",
+                    inst.status
+                )));
             }
 
             inst.status = InstanceStatus::Cancelled;
             inst.updated_at = SystemClock.now_ms();
             self.store.save_instance(&inst).await
-                .map_err(|e| format!("store error: {e}"))?;
+                .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?;
 
             Ok(())
         }
@@ -2099,6 +2165,99 @@ do:
         let r2 = svc.resume_instance(&inst.id, Some("approved"),
             Some(serde_json::json!({"ok": true})), Some("key-001")).await;
         assert!(r2.is_ok(), "duplicate idempotent resume should succeed (no-op)");
+    }
+
+    // ─── ISSUE-010：startByDefinition 真契约 + event 多 onEvents 路由 + signal typed 错误 ───
+
+    /// CNCF SW 审批流：event 状态双 onEvents（approve → notify / reject → reject）
+    fn sample_approval_sw_yaml() -> String {
+        r#"
+id: approval-wf
+version: "1.0"
+start: approve
+states:
+  - name: approve
+    type: event
+    onEvents:
+      - eventRefs: [ { "eventRef": "approved" } ]
+        transition: notify
+      - eventRefs: [ { "eventRef": "rejected" } ]
+        transition: reject
+  - name: notify
+    type: inject
+    data: { result: "approved" }
+    end: true
+  - name: reject
+    type: inject
+    data: { result: "rejected" }
+    end: true
+events:
+  - name: approved
+    type: icps.approval.approved
+  - name: rejected
+    type: icps.approval.rejected
+"#
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_engine_start_by_definition_id_with_input() {
+        let svc = WorkflowEngineService::new_for_test();
+        let def_id = svc.deploy_definition("test", &sample_approval_sw_yaml()).await.unwrap();
+
+        // 真契约：按已部署定义 ID 启动（携带 input）
+        let inst = svc.start_instance(&def_id, serde_json::json!({"orderId": "ORD-1"}))
+            .await.unwrap();
+        assert_eq!(inst.definition_name, "approval-wf");
+
+        // 定义不存在 → NotFound（gRPC → NotFound）
+        let err = svc.start_instance("def-missing", serde_json::json!({})).await.unwrap_err();
+        assert!(matches!(err, WorkflowEngineError::NotFound(_)),
+            "expected NotFound, got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_engine_signal_multi_on_events_routes_and_typed_errors() {
+        let svc = WorkflowEngineService::new_for_test();
+        let def_id = svc.deploy_definition("test", &sample_approval_sw_yaml()).await.unwrap();
+        let inst = svc.start_instance(&def_id, serde_json::json!({"orderId": "ORD-1"}))
+            .await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+        // listen 挂起：Waiting + suspension_meta.reason == "listen"
+        let loaded = svc.get_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Waiting);
+        assert_eq!(loaded.suspension_meta.as_ref().unwrap().reason, "listen");
+
+        // ① signal 名不匹配期望事件类型集合 → InvalidArgument（gRPC → InvalidArgument）
+        let err = svc.resume_instance(&inst.id, Some("wrong.signal"),
+            Some(serde_json::json!({})), None).await.unwrap_err();
+        assert!(matches!(err, WorkflowEngineError::InvalidArgument(_)),
+            "expected InvalidArgument, got {err:?}");
+
+        // ② 实例不存在 → NotFound（gRPC → NotFound）
+        let err = svc.resume_instance("missing-inst", Some("icps.approval.approved"),
+            Some(serde_json::json!({})), None).await.unwrap_err();
+        assert!(matches!(err, WorkflowEngineError::NotFound(_)),
+            "expected NotFound, got {err:?}");
+
+        // ③ reject 分支：手动 signal 命中期望事件类型 → 按 _signal.name 路由到 reject，实例完成
+        let resumed = svc.resume_instance(&inst.id, Some("icps.approval.rejected"),
+            Some(serde_json::json!({"ok": false})), None).await.unwrap();
+        assert_eq!(resumed.status, InstanceStatus::Running);
+        assert_eq!(resumed.context["_signal"]["name"], "icps.approval.rejected");
+        assert_eq!(resumed.context["_event"]["eventType"], "icps.approval.rejected");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+        let done = svc.get_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(done.status, InstanceStatus::Completed,
+            "reject signal should route to reject state and complete");
+
+        // ④ 对已完成的终端实例 signal → FailedPrecondition（gRPC → FailedPrecondition）
+        let err = svc.resume_instance(&inst.id, Some("icps.approval.approved"),
+            Some(serde_json::json!({})), None).await.unwrap_err();
+        assert!(matches!(err, WorkflowEngineError::FailedPrecondition(_)),
+            "expected FailedPrecondition, got {err:?}");
     }
 
     #[tokio::test]

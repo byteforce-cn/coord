@@ -441,4 +441,204 @@ mod tests {
         agent_handle.abort();
         let _ = tokio::time::timeout(Duration::from_secs(3), agent_handle).await;
     }
+
+    // ──── 测试 5: ISSUE-011 回归 —— 默认雪花模式，fresh Server 连续调用唯一 ────
+
+    /// 验证默认实现（雪花 nodeid）：fresh Server 上同一 name 连续调用唯一且单调。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_idgen_snowflake_fresh_sequential_unique() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("coord=info")
+            .try_init();
+
+        let grpc_port = find_port();
+        let raft_port = find_port();
+        let agent_port = find_port();
+        let http_port = find_port();
+
+        let (server_addr, server_shutdown_tx, _grpc_handle, _raft_handle, _tmpdir) =
+            start_raft_server(grpc_port, raft_port).await;
+        wait_for_port(&format!("127.0.0.1:{}", grpc_port), Duration::from_secs(10))
+            .await
+            .expect("server should be ready");
+
+        let (agent_addr, agent_handle) = start_agent(agent_port, http_port, &server_addr).await;
+        wait_for_port(&format!("127.0.0.1:{}", agent_port), Duration::from_secs(10))
+            .await
+            .expect("agent should be ready");
+
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{agent_addr}"))
+            .unwrap()
+            .connect_timeout(Duration::from_secs(3))
+            .connect()
+            .await
+            .expect("connect to agent");
+        let mut idgen_client = IdGenClient::new(channel);
+
+        let mut ids: Vec<i64> = Vec::new();
+        for _ in 0..10 {
+            let resp = idgen_client
+                .next_id(IdGenNextIdRequest {
+                    name: "permission".to_string(),
+                    step: 0,
+                })
+                .await
+                .expect("NextId should succeed");
+            let id = resp.into_inner().id;
+            assert!(id > 0, "snowflake id should be positive, got {id}");
+            assert!(!ids.contains(&id), "duplicate id {id} in {ids:?}");
+            if let Some(last) = ids.last() {
+                assert!(id > *last, "snowflake id must be monotonic: {id} <= {last}");
+            }
+            ids.push(id);
+        }
+
+        drop(server_shutdown_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(5), agent_handle).await;
+    }
+
+    // ──── 测试 6: ISSUE-011 回归 —— 默认雪花模式，fresh Server 并发调用唯一 ────
+
+    /// 验证默认实现（雪花 nodeid）：同一 agent 上并发 nextId 全部唯一。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_idgen_snowflake_fresh_concurrent_unique() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("coord=info")
+            .try_init();
+
+        let grpc_port = find_port();
+        let raft_port = find_port();
+        let agent_port = find_port();
+        let http_port = find_port();
+
+        let (server_addr, server_shutdown_tx, _grpc_handle, _raft_handle, _tmpdir) =
+            start_raft_server(grpc_port, raft_port).await;
+        wait_for_port(&format!("127.0.0.1:{}", grpc_port), Duration::from_secs(10))
+            .await
+            .expect("server should be ready");
+
+        let (agent_addr, agent_handle) = start_agent(agent_port, http_port, &server_addr).await;
+        wait_for_port(&format!("127.0.0.1:{}", agent_port), Duration::from_secs(10))
+            .await
+            .expect("agent should be ready");
+
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let a = agent_addr.clone();
+            handles.push(tokio::spawn(async move {
+                let channel = tonic::transport::Endpoint::from_shared(format!("http://{a}"))
+                    .unwrap()
+                    .connect_timeout(Duration::from_secs(3))
+                    .connect()
+                    .await
+                    .expect("connect to agent");
+                let mut idgen_client = IdGenClient::new(channel);
+                let resp = idgen_client
+                    .next_id(IdGenNextIdRequest {
+                        name: "obs-change".to_string(),
+                        step: 0,
+                    })
+                    .await
+                    .expect("NextId should succeed");
+                resp.into_inner().id
+            }));
+        }
+
+        let mut ids: Vec<i64> = Vec::new();
+        for h in handles {
+            let id = h.await.expect("concurrent task should succeed");
+            assert!(id > 0, "snowflake id should be positive, got {id}");
+            assert!(!ids.contains(&id), "duplicate id {id} in {ids:?}");
+            ids.push(id);
+        }
+
+        drop(server_shutdown_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(5), agent_handle).await;
+    }
+
+    // ──── 测试 7: ISSUE-011 核心回归 —— 号段模式（opt-in），fresh Server 并发唯一 ────
+
+    /// ISSUE-011 复现场景转绿：fresh Server + 号段模式（segment）并发 nextId 同一 name → 全部唯一。
+    /// 旧实现（range + 普通 put，无 CAS）并发双方都读到 current_max=0 → 都返回 1 → duplicate key。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_idgen_segment_fresh_concurrent_unique() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("coord=info")
+            .try_init();
+
+        let grpc_port = find_port();
+        let raft_port = find_port();
+        let agent_port = find_port();
+        let http_port = find_port();
+
+        let (server_addr, server_shutdown_tx, _grpc_handle, _raft_handle, _tmpdir) =
+            start_raft_server(grpc_port, raft_port).await;
+        wait_for_port(&format!("127.0.0.1:{}", grpc_port), Duration::from_secs(10))
+            .await
+            .expect("server should be ready");
+
+        // Agent 配置为号段模式（ISSUE-011 复现场景）
+        let agent_addr = format!("127.0.0.1:{}", agent_port);
+        let agent_config = AgentConfig {
+            agent_addr: agent_addr.clone(),
+            http_addr: format!("127.0.0.1:{}", http_port),
+            data_dir: tempfile::tempdir()
+                .unwrap()
+                .path()
+                .to_string_lossy()
+                .to_string(),
+            static_peers: vec![server_addr.clone()],
+            services: coord_agent::ServiceConfig {
+                idgen_mode: "segment".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let server = AgentServer::new(agent_config);
+        let agent_handle = tokio::spawn(async move {
+            if let Err(e) = server.serve().await {
+                tracing::warn!("Agent server exited: {e}");
+            }
+        });
+        wait_for_port(&format!("127.0.0.1:{}", agent_port), Duration::from_secs(10))
+            .await
+            .expect("agent should be ready");
+
+        // 并发 20 个 nextId（同一 name，fresh 状态）
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let a = agent_addr.clone();
+            handles.push(tokio::spawn(async move {
+                let channel = tonic::transport::Endpoint::from_shared(format!("http://{a}"))
+                    .unwrap()
+                    .connect_timeout(Duration::from_secs(3))
+                    .connect()
+                    .await
+                    .expect("connect to agent");
+                let mut idgen_client = IdGenClient::new(channel);
+                let resp = idgen_client
+                    .next_id(IdGenNextIdRequest {
+                        name: "permission".to_string(),
+                        step: 0,
+                    })
+                    .await
+                    .expect("NextId should succeed");
+                resp.into_inner().id
+            }));
+        }
+
+        let mut ids: Vec<i64> = Vec::new();
+        for h in handles {
+            let id = h.await.expect("concurrent task should succeed");
+            assert!(id > 0, "segment id should be positive, got {id}");
+            assert!(
+                !ids.contains(&id),
+                "duplicate segment id {id} in {ids:?} (ISSUE-011 regression)"
+            );
+            ids.push(id);
+        }
+
+        drop(server_shutdown_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(5), agent_handle).await;
+    }
 }

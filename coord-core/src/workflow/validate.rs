@@ -147,6 +147,7 @@ impl Validator {
                     on: sv.value.get("on").map(|v| {
                         EventFilter {
                             event_type: v.get("type").and_then(|v| v.as_str()).map(String::from),
+                            event_types: vec![],
                             source: v.get("source").and_then(|v| v.as_str()).map(String::from),
                             subject: v.get("subject").and_then(|v| v.as_str()).map(String::from),
                         }
@@ -414,18 +415,21 @@ impl Validator {
         let event_filter = if let Some(obj) = obj {
             EventFilter {
                 event_type: obj.get("type").and_then(|v| v.as_str()).map(String::from),
+                event_types: vec![],
                 source: obj.get("source").and_then(|v| v.as_str()).map(String::from),
                 subject: obj.get("subject").and_then(|v| v.as_str()).map(String::from),
             }
         } else if let Some(s) = listen_val.as_str() {
             EventFilter {
                 event_type: Some(s.to_string()),
+                event_types: vec![],
                 source: None,
                 subject: None,
             }
         } else {
             EventFilter {
                 event_type: None,
+                event_types: vec![],
                 source: None,
                 subject: None,
             }

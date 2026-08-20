@@ -102,6 +102,14 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub idgen: bool,
 
+    /// ID 生成器实现模式："snowflake"（默认，nodeid 雪花）| "segment"（KV 号段，opt-in）
+    #[serde(default = "default_idgen_mode")]
+    pub idgen_mode: String,
+
+    /// 雪花节点 ID 显式覆盖（0-1023）；为空时按主机名派生 + Server 注册
+    #[serde(default)]
+    pub idgen_node_id: Option<u64>,
+
     /// Leader 选举
     #[serde(default)]
     pub leader_election: bool,
@@ -162,6 +170,8 @@ impl Default for ServiceConfig {
             config_center: true,
             lock: true,
             idgen: true,
+            idgen_mode: default_idgen_mode(),
+            idgen_node_id: None,
             leader_election: false,
             event_notification: false,
             cache: true,
@@ -177,6 +187,13 @@ impl Default for ServiceConfig {
             replication: false,
         }
     }
+}
+
+// ──── ServiceConfig 辅助 ────
+
+/// ID 生成器默认实现模式（雪花，ISSUE-011 决策）
+fn default_idgen_mode() -> String {
+    "snowflake".to_string()
 }
 
 // ──── ServiceManager ────

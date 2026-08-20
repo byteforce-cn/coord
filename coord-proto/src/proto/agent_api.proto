@@ -729,6 +729,7 @@ service Workflow {
 message WorkflowStartRequest {
     string definition_dsl = 1; // CNCF Workflow DSL JSON
     bytes input = 2;
+    string definition_id = 3;  // 可选：按已部署定义启动（与 definition_dsl 互斥）
 }
 
 message WorkflowStartResponse {
@@ -749,6 +750,17 @@ message WorkflowGetStatusResponse {
     int64 created_at = 7;        // 实例创建时间（Unix ms）
     int64 updated_at = 8;        // 实例最后更新时间（Unix ms）
     repeated TaskFrame task_stack = 9; // 当前任务执行栈（可选）
+    string current_state_name = 10;    // 当前状态名（SW 状态名 = 当前任务名）
+    SuspensionMeta suspension = 11;    // 挂起元信息（SUSPENDED/WAITING 时返回）
+}
+
+// 挂起元信息（对应 WorkflowInstance.suspension_meta）
+message SuspensionMeta {
+    string reason = 1;           // "wait" | "call" | "listen" | "signal" | "run" | "retry"
+    int64 until_ms = 2;          // wait/retry 到期时间（Unix ms，可选）
+    string expected_signal = 3;  // 期望的 signal 名（人工审批挂起，可选）
+    string event_type = 4;       // listen 事件类型（可选）
+    string service = 5;          // call 目标服务（可选）
 }
 
 // 任务栈帧（对应 WorkflowInstance.task_stack）

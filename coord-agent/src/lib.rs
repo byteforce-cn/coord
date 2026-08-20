@@ -383,19 +383,28 @@ impl AgentServer {
         }
 
         if self.config.services.idgen {
-            // IdGen 为数据面服务：无 Server 连接时降级为本地雪花生成（本机唯一）
+            // IdGen 数据面服务：默认雪花（nodeid），可选号段（segment，opt-in）
+            let idgen_mode = crate::services::idgen::IdGenMode::parse(&self.config.services.idgen_mode);
             let idgen_svc = Arc::new(
-                crate::services::idgen::IdGenService::new(inner.clone(), 1000)
+                crate::services::idgen::IdGenService::new_with_options(
+                    inner.clone(),
+                    1000,
+                    idgen_mode,
+                    self.config.services.idgen_node_id,
+                    &self.config.agent_addr,
+                ),
             );
             let idgen_grpc = idgen_svc.clone();
             if let Err(e) = service_manager.register(idgen_svc).await {
                 tracing::error!("failed to register idgen service: {e}");
             } else {
                 idgen_grpc_svc = Some(idgen_grpc);
-                if inner.is_some() {
+                if idgen_mode == crate::services::idgen::IdGenMode::Snowflake {
+                    tracing::info!("ID Generator service registered (snowflake nodeid mode)");
+                } else if inner.is_some() {
                     tracing::info!("ID Generator service registered (segment mode via server)");
                 } else {
-                    tracing::info!("ID Generator service registered (local snowflake mode, no server)");
+                    tracing::info!("ID Generator service registered (segment mode, local snowflake fallback)");
                 }
             }
         }

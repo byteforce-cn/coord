@@ -883,6 +883,8 @@ impl Workflow for WorkflowService {
                 created_at: inst.created_at as i64,
                 updated_at: inst.updated_at as i64,
                 task_stack: vec![],
+                current_state_name: String::new(),
+                suspension: None,
             })),
             Ok(None) => Err(Status::not_found("workflow not found")),
             Err(e) => Err(Status::internal(e.to_string())),
@@ -992,7 +994,7 @@ impl Workflow for WorkflowService {
 // Workflow Service (Engine) — 对接 coord-core 工作流引擎
 // ════════════════════════════════════════════════════════════
 
-use crate::services::workflow::phase4::{DeployError, WorkflowEngineService};
+use crate::services::workflow::phase4::{DeployError, WorkflowEngineError, WorkflowEngineService};
 
 // 将部署错误映射为 gRPC 状态码：输入/校验问题 → InvalidArgument，存储问题 → Internal
 fn map_deploy_error(e: DeployError) -> Status {
@@ -1002,16 +1004,28 @@ fn map_deploy_error(e: DeployError) -> Status {
     }
 }
 
+// 引擎错误 typed 映射（ISSUE-010 §3）：
+// InvalidArgument → InvalidArgument；NotFound → NotFound；FailedPrecondition → FailedPrecondition；其余 → Internal
+fn map_engine_error(e: WorkflowEngineError) -> Status {
+    match e {
+        WorkflowEngineError::InvalidArgument(msg) => Status::invalid_argument(msg),
+        WorkflowEngineError::NotFound(msg) => Status::not_found(msg),
+        WorkflowEngineError::FailedPrecondition(msg) => Status::failed_precondition(msg),
+        WorkflowEngineError::Internal(msg) => Status::internal(msg),
+    }
+}
+
 #[tonic::async_trait]
 impl Workflow for WorkflowEngineService {
     async fn start(&self, request: Request<WorkflowStartRequest>) -> Result<Response<WorkflowStartResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace = "default";
-        let def_id = self
-            .deploy_definition(namespace, &req.definition_dsl)
-            .await
-            .map_err(map_deploy_error)?;
+        // definition_id 与 definition_dsl 互斥（ISSUE-010 §1：startByDefinition 真契约）
+        if !req.definition_id.is_empty() && !req.definition_dsl.is_empty() {
+            return Err(Status::invalid_argument(
+                "definition_id and definition_dsl are mutually exclusive",
+            ));
+        }
 
         let input: serde_json::Value = if req.input.is_empty() {
             serde_json::Value::Null
@@ -1020,10 +1034,20 @@ impl Workflow for WorkflowEngineService {
                 .unwrap_or(serde_json::Value::Null)
         };
 
+        let namespace = "default";
+        let def_id = if !req.definition_id.is_empty() {
+            // 按已部署定义启动（跳过内联 deploy）
+            req.definition_id.clone()
+        } else {
+            self.deploy_definition(namespace, &req.definition_dsl)
+                .await
+                .map_err(map_deploy_error)?
+        };
+
         let inst = self
             .start_instance(&def_id, input)
             .await
-            .map_err(|e| Status::internal(format!("start error: {e}")))?;
+            .map_err(map_engine_error)?;
 
         Ok(Response::new(WorkflowStartResponse {
             workflow_id: inst.id,
@@ -1068,6 +1092,29 @@ impl Workflow for WorkflowEngineService {
                     })
                     .collect();
 
+                // 当前状态名 = 当前任务帧任务名（SW 状态名 = 当前任务名，含驳回/分支后目标）
+                let current_state_name = inst
+                    .task_stack
+                    .get(inst.current_task_index)
+                    .map(|tf| tf.task_name.clone())
+                    .or_else(|| inst.task_stack.last().map(|tf| tf.task_name.clone()))
+                    .unwrap_or_default();
+
+                // 挂起元信息（SUSPENDED/WAITING 时返回）
+                let suspension = inst.suspension_meta.as_ref().map(|m| {
+                    coord_proto::agent::SuspensionMeta {
+                        reason: m.reason.clone(),
+                        until_ms: m.until_ms.unwrap_or(0),
+                        expected_signal: m.expected_signal.clone().unwrap_or_default(),
+                        event_type: m
+                            .event_filter
+                            .as_ref()
+                            .and_then(|f| f.event_type.clone())
+                            .unwrap_or_default(),
+                        service: m.service.clone().unwrap_or_default(),
+                    }
+                });
+
                 Ok(Response::new(WorkflowGetStatusResponse {
                     workflow_id: inst.id,
                     status: status_str.to_string(),
@@ -1078,6 +1125,8 @@ impl Workflow for WorkflowEngineService {
                     created_at: inst.created_at,
                     updated_at: inst.updated_at,
                     task_stack,
+                    current_state_name,
+                    suspension,
                 }))
             }
             Ok(None) => Err(Status::not_found("workflow instance not found")),
@@ -1101,7 +1150,7 @@ impl Workflow for WorkflowEngineService {
 
         self.resume_instance(&req.workflow_id, Some(&req.signal_name), Some(payload), idempotency_key)
             .await
-            .map_err(|e| Status::internal(e))?;
+            .map_err(map_engine_error)?;
 
         Ok(Response::new(WorkflowSignalResponse {}))
     }
@@ -1110,7 +1159,7 @@ impl Workflow for WorkflowEngineService {
         let req = request.into_inner();
         self.cancel_instance(&req.workflow_id)
             .await
-            .map_err(|e| Status::internal(e))?;
+            .map_err(map_engine_error)?;
         Ok(Response::new(WorkflowCancelResponse {}))
     }
 

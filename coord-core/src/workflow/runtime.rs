@@ -561,11 +561,14 @@ where
     }
 
     /// 事件驱动的自动恢复（标准 §Events：listen 主动订阅，事件到达 → 恢复）
+    ///
+    /// `arrived_event_type`：实际到达的事件类型（多类型监听时用于路由）
     async fn resume_by_event(
         &self,
         instance_id: String,
         definition: WorkflowDefinition,
         store: Arc<S>,
+        arrived_event_type: String,
     ) {
         let mut inst = match store.load_instance(&instance_id).await {
             Ok(Some(i)) => i,
@@ -589,7 +592,7 @@ where
         inst.current_task_index += 1;
         inst.context["_event"] = serde_json::json!({
             "arrived": true,
-            "eventType": meta.event_filter.as_ref().and_then(|f| f.event_type.clone()),
+            "eventType": arrived_event_type,
         });
         inst.status = InstanceStatus::Running;
         inst.suspension_meta = None;
@@ -725,15 +728,20 @@ where
                     )));
                 }
             }
-            // 事件监听挂起（listen）：signal 名应匹配事件过滤器
+            // 事件监听挂起（listen）：signal 名应匹配事件过滤器（支持多事件类型）
             if meta.reason == "listen" {
                 if let Some(filter) = meta.event_filter.as_ref() {
-                    if let Some(et) = filter.event_type.as_deref() {
+                    let accepted: Vec<&str> = if !filter.event_types.is_empty() {
+                        filter.event_types.iter().map(|s| s.as_str()).collect()
+                    } else {
+                        filter.event_type.iter().map(|s| s.as_str()).collect()
+                    };
+                    if !accepted.is_empty() {
                         if let Some(name) = signal_name {
-                            if name != et {
+                            if !accepted.contains(&name) {
                                 return Err(RuntimeError::InvalidSignal(format!(
-                                    "instance '{}' is listening for event type '{et}', got signal '{name}'",
-                                    instance_id
+                                    "instance '{}' is listening for event types {:?}, got signal '{name}'",
+                                    instance_id, accepted
                                 )));
                             }
                         }
@@ -746,9 +754,27 @@ where
         if let Some(name) = signal_name {
             inst.context["_signal"] = serde_json::json!({
                 "name": name,
-                "payload": payload.unwrap_or(Value::Null),
+                "payload": payload.clone().unwrap_or(Value::Null),
+            });
+            // ISSUE-010 P1：手动 signal 同时注入 `_event`，使 switch+eventConditions /
+            // 多 onEvents 路由对「事件总线自动恢复」与「手动 signal」双路径一致生效
+            inst.context["_event"] = serde_json::json!({
+                "arrived": true,
+                "eventType": name,
             });
         }
+
+        // 完成当前挂起任务帧并推进（与 resume_by_event 一致）：
+        // 否则 drive 会重新执行已挂起的 listen/signal 任务，实例回到挂起态——
+        // 这是「signal 推进审批」端到端生效的必要一步（ISSUE-010 P1 端到端验证发现）
+        if let Some(last) = inst.task_stack.last_mut() {
+            last.status = TaskStatus::Completed;
+            last.ended_at = Some(self.clock.now_ms());
+            if let Some(p) = &payload {
+                last.output = Some(p.clone());
+            }
+        }
+        inst.current_task_index += 1;
 
         inst.status = InstanceStatus::Running;
         inst.suspension_meta = None;
@@ -1135,22 +1161,31 @@ where
                             let wait_store = store.clone();
                             let wait_def = definition.clone();
                             let wait_id = inst.id.clone();
-                            let filter_type = filter.event_type.clone();
+                            // 多事件类型：event 状态多 onEvents / eventConditions 多条件
+                            let filter_types: Vec<String> = if !filter.event_types.is_empty() {
+                                filter.event_types.clone()
+                            } else if let Some(et) = filter.event_type.clone() {
+                                vec![et]
+                            } else {
+                                vec![]
+                            };
                             let filter_source = filter.source.clone();
                             let filter_subject = filter.subject.clone();
                             tokio::spawn(async move {
                                 let timeout_ms = event_timeout_ms.unwrap_or(60 * 60 * 1000);
-                                let arrived = rt
+                                let type_refs: Vec<&str> =
+                                    filter_types.iter().map(|s| s.as_str()).collect();
+                                let arrived_type = rt
                                     .event_provider
                                     .wait_for_event(
-                                        filter_type.as_deref(),
+                                        &type_refs,
                                         filter_source.as_deref(),
                                         filter_subject.as_deref(),
                                         timeout_ms,
                                     )
                                     .await;
-                                if arrived {
-                                    rt.resume_by_event(wait_id, wait_def, wait_store).await;
+                                if let Some(et) = arrived_type {
+                                    rt.resume_by_event(wait_id, wait_def, wait_store, et).await;
                                 }
                             });
                             break 'drive_loop;
@@ -2655,6 +2690,7 @@ mod tests {
                 task: Task::Listen(ListenTask {
                     listen: crate::workflow::model::EventFilter {
                         event_type: Some("approval.requested".into()),
+                        event_types: vec![],
                         source: None,
                         subject: None,
                     },
@@ -2690,6 +2726,122 @@ mod tests {
         assert_eq!(resumed.status, InstanceStatus::Running);
     }
 
+    // ─── 多事件类型校验 + 手动 signal 注入 _event（ISSUE-010 P1/P2） ───
+
+    #[tokio::test]
+    async fn test_signal_multi_event_type_validation_and_event_injection() {
+        use crate::workflow::model::ListenTask;
+        let runtime = make_runtime();
+        let def = make_definition_ext(
+            "multi-event-wf",
+            vec![NamedTask {
+                name: "approve".into(),
+                task: Task::Listen(ListenTask {
+                    listen: crate::workflow::model::EventFilter {
+                        event_type: Some("icps.approval.approved".into()),
+                        event_types: vec![
+                            "icps.approval.approved".into(),
+                            "icps.approval.rejected".into(),
+                        ],
+                        source: None,
+                        subject: None,
+                    },
+                }),
+            }],
+            None,
+            None,
+            None,
+            Default::default(),
+        );
+        store_of(&runtime).save_definition(&def).await.unwrap();
+        let inst = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let loaded = store_of(&runtime).load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Waiting);
+        assert_eq!(loaded.suspension_meta.as_ref().unwrap().reason, "listen");
+
+        // 非期望集合内的类型 → InvalidSignal
+        let err = runtime
+            .resume(&inst.id, Some("wrong.type"), None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RuntimeError::InvalidSignal(_)));
+
+        // 期望集合内任一类型可恢复（多 onEvents 的 reject 分支），且同时注入 _signal 与 _event（P1）
+        let resumed = runtime
+            .resume(
+                &inst.id,
+                Some("icps.approval.rejected"),
+                Some(serde_json::json!({"ok": false})),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed.status, InstanceStatus::Running);
+        assert_eq!(resumed.context["_signal"]["name"], "icps.approval.rejected");
+        assert_eq!(resumed.context["_event"]["eventType"], "icps.approval.rejected");
+        assert_eq!(resumed.context["_event"]["arrived"], true);
+    }
+
+    // ─── signal 推进过挂起任务（ISSUE-010 P1 端到端修复回归） ───
+
+    #[tokio::test]
+    async fn test_signal_advances_past_listen_task() {
+        use crate::workflow::model::ListenTask;
+        let runtime = make_runtime();
+        let def = make_definition_ext(
+            "advance-wf",
+            vec![
+                NamedTask {
+                    name: "approve".into(),
+                    task: Task::Listen(ListenTask {
+                        listen: crate::workflow::model::EventFilter {
+                            event_type: Some("icps.approval.approved".into()),
+                            event_types: vec![],
+                            source: None,
+                            subject: None,
+                        },
+                    }),
+                },
+                NamedTask {
+                    name: "after".into(),
+                    task: Task::Set(SetTask {
+                        variable: "done".into(),
+                        value: "\"ok\"".into(),
+                    }),
+                },
+            ],
+            None,
+            None,
+            None,
+            Default::default(),
+        );
+        store_of(&runtime).save_definition(&def).await.unwrap();
+        let inst = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let loaded = store_of(&runtime).load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Waiting);
+        assert_eq!(loaded.suspension_meta.as_ref().unwrap().reason, "listen");
+
+        let resumed = runtime
+            .resume(
+                &inst.id,
+                Some("icps.approval.approved"),
+                Some(serde_json::json!({"ok": true})),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed.status, InstanceStatus::Running);
+
+        // signal 后 drive 应从 listen 之后的下一任务继续，实例最终完成
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let done = store_of(&runtime).load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(done.status, InstanceStatus::Completed,
+            "signal should advance past listen and complete");
+        assert_eq!(done.context["done"], "ok");
+    }
+
     // ─── listen 主动事件等待（标准 §Events） ───
 
     #[tokio::test]
@@ -2720,6 +2872,7 @@ mod tests {
                     task: Task::Listen(ListenTask {
                         listen: crate::workflow::model::EventFilter {
                             event_type: Some("order.created".into()),
+                            event_types: vec![],
                             source: None,
                             subject: None,
                         },
@@ -2797,6 +2950,7 @@ mod tests {
                 task: Task::Listen(ListenTask {
                     listen: crate::workflow::model::EventFilter {
                         event_type: Some("never.comes".into()),
+                        event_types: vec![],
                         source: None,
                         subject: None,
                     },

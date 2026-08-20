@@ -432,7 +432,17 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
         if s.end.is_some() && s.transition.is_some() {
             return Err(format!("state '{}': 'end' and 'transition' are mutually exclusive", s.name));
         }
-        if s.state_type != "switch" && s.end.is_none() && s.transition.is_none() {
+        // event 状态：各 onEvents 自带 transition/end 时，状态级 transition 可选（CNCF SW 权威语义）
+        let event_has_per_event_transitions = s.state_type == "event"
+            && !s.on_events.is_empty()
+            && s.on_events.iter().all(|ev| {
+                ev.transition.is_some() || ev.end == Some(true)
+            });
+        if s.state_type != "switch"
+            && s.end.is_none()
+            && s.transition.is_none()
+            && !event_has_per_event_transitions
+        {
             return Err(format!(
                 "state '{}': must have 'transition' or 'end'",
                 s.name
@@ -599,21 +609,76 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
             }
             "event" => {
                 // onEvents → listen 任务（等待事件，主动订阅恢复）
+                // 多 onEvents：多事件类型过滤器 + 按事件路由 switch（approve/reject 双路由，ISSUE-009 §2.2）
+                let event_types = all_event_types(&doc, s);
+                let filter = EventFilter {
+                    event_type: first_event_type(&doc, s),
+                    event_types: if event_types.len() > 1 {
+                        event_types
+                    } else {
+                        vec![]
+                    },
+                    source: None,
+                    subject: None,
+                };
                 tasks.push(NamedTask {
                     name: s.name.clone(),
-                    task: Task::Listen(ListenTask {
-                        listen: EventFilter {
-                            event_type: first_event_type(&doc, s),
-                            source: None,
-                            subject: None,
-                        },
-                    }),
+                    task: Task::Listen(ListenTask { listen: filter }),
                 });
-                let target = linear_transition_target(s)?;
-                if target == END_TASK {
-                    needs_end = true;
+
+                if s.on_events.len() > 1 {
+                    // 多 onEvents：按 `_signal.name` / `_event.eventType` 路由各 per-event transition
+                    // （手动 signal 与事件总线自动恢复双路径一致生效）
+                    let mut conditions: Vec<SwitchCondition> = Vec::new();
+                    for ev in &s.on_events {
+                        let ev_type = resolve_event_type(&doc, ev).ok_or_else(|| {
+                            format!(
+                                "state '{}': onEvents entry has no resolvable event type",
+                                s.name
+                            )
+                        })?;
+                        let target = event_transition_target(s, ev)?;
+                        if target == END_TASK {
+                            needs_end = true;
+                        }
+                        conditions.push(SwitchCondition {
+                            condition: Some(format!("${{ _event.eventType == \"{ev_type}\" }}")),
+                            transition: target.clone(),
+                        });
+                        conditions.push(SwitchCondition {
+                            condition: Some(format!("${{ _signal.name == \"{ev_type}\" }}")),
+                            transition: target,
+                        });
+                    }
+                    // 默认：状态级 transition；无状态级 transition 时终止（防 fall-through）
+                    let default_target = if s.end.is_some() || s.transition.is_some() {
+                        linear_transition_target(s)?
+                    } else {
+                        END_TASK.into()
+                    };
+                    if default_target == END_TASK {
+                        needs_end = true;
+                    }
+                    conditions.push(SwitchCondition {
+                        condition: None,
+                        transition: default_target,
+                    });
+                    tasks.push(NamedTask {
+                        name: format!("{}__route", s.name),
+                        task: Task::Switch(SwitchTask {
+                            conditions,
+                            default_condition: None,
+                        }),
+                    });
+                } else {
+                    let target = event_transition_target(s, s.on_events.first().ok_or_else(|| {
+                        format!("state '{}': event requires 'onEvents'", s.name)
+                    })?)?;
+                    if target == END_TASK {
+                        needs_end = true;
+                    }
+                    tasks.push(transition_task(&s.name, &target));
                 }
-                tasks.push(transition_task(&s.name, &target));
             }
             "callback" => {
                 // callback = call（action.functionRef）+ listen（等待返回事件）
@@ -651,6 +716,7 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                                                 .and_then(|e| e.r#type.clone())
                                         })
                                 }),
+                            event_types: vec![],
                             source: None,
                             subject: None,
                         },
@@ -684,6 +750,8 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                         task: Task::Listen(ListenTask {
                             listen: EventFilter {
                                 event_type: event_condition_type(&doc, &s.event_conditions),
+                                // 多条件：全部事件类型任一可恢复（手动 signal 双路径）
+                                event_types: event_condition_types(&doc, &s.event_conditions),
                                 source: None,
                                 subject: None,
                             },
@@ -1021,33 +1089,68 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
     })
 }
 
-/// 取 onEvents 中首个事件的类型（解析顶层 events 定义）
-fn first_event_type(doc: &SwWorkflowDoc, s: &SwState) -> Option<String> {
-    for ev in &s.on_events {
-        if let Some(t) = &ev.r#type {
-            return Some(t.clone());
-        }
-        if let Some(name) = &ev.name {
-            // 查找顶层事件定义
-            if let Some(def) = doc.events.iter().find(|e| e.name.as_deref() == Some(name)) {
-                if let Some(t) = &def.r#type {
-                    return Some(t.clone());
-                }
+/// 解析单个 onEvents 条目的事件类型（type 直接 / name → 顶层 events / eventRefs → 顶层 events）
+fn resolve_event_type(doc: &SwWorkflowDoc, ev: &SwEvent) -> Option<String> {
+    if let Some(t) = &ev.r#type {
+        return Some(t.clone());
+    }
+    if let Some(name) = &ev.name {
+        // 查找顶层事件定义
+        if let Some(def) = doc.events.iter().find(|e| e.name.as_deref() == Some(name)) {
+            if let Some(t) = &def.r#type {
+                return Some(t.clone());
             }
         }
-        for ev_ref in &ev.event_refs {
-            if let Some(def) = doc
-                .events
-                .iter()
-                .find(|e| e.name.as_deref() == Some(ev_ref.event_ref.as_str()))
-            {
-                if let Some(t) = &def.r#type {
-                    return Some(t.clone());
-                }
+    }
+    for ev_ref in &ev.event_refs {
+        if let Some(def) = doc
+            .events
+            .iter()
+            .find(|e| e.name.as_deref() == Some(ev_ref.event_ref.as_str()))
+        {
+            if let Some(t) = &def.r#type {
+                return Some(t.clone());
             }
         }
     }
     None
+}
+
+/// 取 onEvents 中首个事件的类型（解析顶层 events 定义）
+fn first_event_type(doc: &SwWorkflowDoc, s: &SwState) -> Option<String> {
+    for ev in &s.on_events {
+        if let Some(t) = resolve_event_type(doc, ev) {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// 全部 onEvents 的去重事件类型（多 onEvents 路由监听集）
+fn all_event_types(doc: &SwWorkflowDoc, s: &SwState) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for ev in &s.on_events {
+        if let Some(t) = resolve_event_type(doc, ev) {
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
+/// onEvents 条目的事件后继（ev.transition / ev.end，缺省回退状态级 transition）
+fn event_transition_target(s: &SwState, ev: &SwEvent) -> Result<String, String> {
+    if ev.end == Some(true) {
+        return Ok(END_TASK.into());
+    }
+    if let Some(t) = ev.transition.as_deref() {
+        if t == "end" {
+            return Ok(END_TASK.into());
+        }
+        return Ok(t.to_string());
+    }
+    linear_transition_target(s)
 }
 
 /// 取 eventConditions 的监听事件类型（解析 eventRef → 顶层 events 定义 type）
@@ -1071,6 +1174,19 @@ fn event_condition_type(doc: &SwWorkflowDoc, conditions: &[SwCondition]) -> Opti
         }
     }
     None
+}
+
+/// 全部 eventConditions 的去重事件类型（多条件监听集）
+fn event_condition_types(doc: &SwWorkflowDoc, conditions: &[SwCondition]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for c in conditions {
+        if let Some(t) = event_condition_type(doc, std::slice::from_ref(c)) {
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+    }
+    out
 }
 
 /// 校验状态图：transition 引用完整性 + 无环
@@ -1697,6 +1813,62 @@ mod tests {
                 assert_eq!(l.listen.event_type.as_deref(), Some("order.created"));
             }
             other => panic!("expected listen task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_event_state_multi_on_events_compiles_to_routing_switch() {
+        // ISSUE-010 §4：event 状态多 onEvents 生成按 _signal.name / _event.eventType 的路由 switch
+        let v: Value = serde_json::json!({
+            "id": "wf", "version": "1.0", "start": "ev",
+            "states": [
+                { "name": "ev", "type": "event",
+                  "onEvents": [
+                      { "eventRefs": [ { "eventRef": "approved" } ], "transition": "notify" },
+                      { "eventRefs": [ { "eventRef": "rejected" } ], "transition": "reject" }
+                  ] },
+                { "name": "notify", "type": "inject", "data": {}, "transition": "end" },
+                { "name": "reject", "type": "inject", "data": {}, "end": true }
+            ],
+            "events": [
+                { "name": "approved", "type": "icps.approval.approved" },
+                { "name": "rejected", "type": "icps.approval.rejected" }
+            ]
+        });
+        let def = parse_cncf_sw_value(v).expect("multi-onEvents event state should parse");
+
+        // listen 任务：多事件类型过滤器
+        let listen = def.do_tasks.iter().find(|t| t.name == "ev").unwrap();
+        match &listen.task {
+            Task::Listen(l) => {
+                assert_eq!(l.listen.event_type.as_deref(), Some("icps.approval.approved"));
+                assert_eq!(
+                    l.listen.event_types,
+                    vec![
+                        "icps.approval.approved".to_string(),
+                        "icps.approval.rejected".to_string(),
+                    ]
+                );
+            }
+            other => panic!("expected listen task, got {other:?}"),
+        }
+
+        // 路由 switch：按 _signal.name / _event.eventType 分支到 per-event transition
+        let route = def.do_tasks.iter().find(|t| t.name == "ev__route").unwrap();
+        match &route.task {
+            Task::Switch(sw) => {
+                assert!(sw.conditions.iter().any(|c| {
+                    c.condition.as_deref() == Some("${ _event.eventType == \"icps.approval.approved\" }")
+                        && c.transition == "notify"
+                }));
+                assert!(sw.conditions.iter().any(|c| {
+                    c.condition.as_deref() == Some("${ _signal.name == \"icps.approval.rejected\" }")
+                        && c.transition == "reject"
+                }));
+                // 默认：状态级 transition
+                assert!(sw.conditions.iter().any(|c| c.condition.is_none()));
+            }
+            other => panic!("expected route switch, got {other:?}"),
         }
     }
 

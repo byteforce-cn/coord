@@ -156,6 +156,37 @@ enum Commands {
         #[arg(long, default_value = "false")]
         fresh: bool,
     },
+
+    /// 清空本地数据目录（环境重置）
+    Reset {
+        /// 目标 Server 地址（--keep-idgen 时用于导出 /_idgen/ 前缀）
+        #[arg(long, default_value = "127.0.0.1:50051")]
+        addr: String,
+
+        /// 保留 ID 生成器状态：重置前导出 /_idgen/ 前缀，重置后可用 coord idgen restore 恢复
+        #[arg(long, default_value = "false")]
+        keep_idgen: bool,
+    },
+
+    /// ID 生成器运维
+    #[command(subcommand)]
+    Idgen(IdgenCmd),
+}
+
+// ──── IdGen 子命令 ────
+
+#[derive(Subcommand)]
+enum IdgenCmd {
+    /// 从备份文件恢复 ID 生成器号段状态（coord reset --keep-idgen 导出的备份）
+    Restore {
+        /// 备份文件路径
+        #[arg(long)]
+        file: PathBuf,
+
+        /// 目标 Server 地址
+        #[arg(long, default_value = "127.0.0.1:50051")]
+        addr: String,
+    },
 }
 
 // ──── Security 子命令 ────
@@ -944,6 +975,36 @@ async fn main() {
                 tracing::info!("Getting capability {} via {}", capability_id, addr);
                 if let Err(e) = commands::cmd_capability_get(&addr, &capability_id).await {
                     tracing::error!("CapabilityGet failed: {e}");
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        },
+
+        Commands::Reset { addr, keep_idgen } => {
+            tracing::info!(
+                "Resetting local data dir {} (keep_idgen={}) via {}",
+                cli.data_dir.display(),
+                keep_idgen,
+                addr
+            );
+            if let Err(e) = commands::cmd_reset(&cli.data_dir, &addr, keep_idgen).await {
+                tracing::error!("Reset failed: {e}");
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+
+        Commands::Idgen(cmd) => match cmd {
+            IdgenCmd::Restore { file, addr } => {
+                tracing::info!("Restoring idgen state from {} via {}", file.display(), addr);
+                if !file.exists() {
+                    tracing::error!("Backup file not found: {}", file.display());
+                    eprintln!("Error: backup file not found: {}", file.display());
+                    std::process::exit(1);
+                }
+                if let Err(e) = commands::cmd_idgen_restore(&file, &addr).await {
+                    tracing::error!("Idgen restore failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }

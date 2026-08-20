@@ -23,11 +23,13 @@ tracing-subscriber = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tokio-stream = "0.1"
 toml = { workspace = true }
 rand = { workspace = true }
 rpassword = "7.3"
 axum = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

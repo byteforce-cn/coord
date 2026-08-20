@@ -91,11 +91,11 @@ impl EventProvider for MqEventProvider {
 
     async fn wait_for_event(
         &self,
-        event_type: Option<&str>,
+        event_types: &[&str],
         source: Option<&str>,
         subject: Option<&str>,
         timeout_ms: u64,
-    ) -> bool {
+    ) -> Option<String> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         loop {
             let offset = *self.next_offset.lock().unwrap();
@@ -109,12 +109,13 @@ impl EventProvider for MqEventProvider {
                         for rec in &records {
                             next = rec.offset + 1;
                             if let Some((et, src, sub, _data)) = Self::decode_event(&rec.payload) {
-                                let type_match = event_type.map(|t| t == et).unwrap_or(true);
+                                let type_match =
+                                    event_types.is_empty() || event_types.contains(&et.as_str());
                                 let source_match = source.map(|s| src.as_deref() == Some(s)).unwrap_or(true);
                                 let subject_match = subject.map(|s| sub.as_deref() == Some(s)).unwrap_or(true);
                                 if type_match && source_match && subject_match {
                                     *self.next_offset.lock().unwrap() = next;
-                                    return true;
+                                    return Some(et);
                                 }
                             }
                         }
@@ -124,7 +125,7 @@ impl EventProvider for MqEventProvider {
                 Err(_) => {}
             }
             if std::time::Instant::now() >= deadline {
-                return false;
+                return None;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
@@ -171,9 +172,9 @@ mod tests {
 
         // 消费并匹配
         let found = provider
-            .wait_for_event(Some("order.created"), Some("coord/orders"), None, 2000)
+            .wait_for_event(&["order.created"], Some("coord/orders"), None, 2000)
             .await;
-        assert!(found, "should find the emitted event");
+        assert_eq!(found.as_deref(), Some("order.created"), "should find the emitted event");
     }
 
     #[tokio::test]
@@ -185,11 +186,11 @@ mod tests {
             .emit("order.created", Some("coord/orders"), &serde_json::json!({}))
             .await;
 
-        // event_type 不匹配 → 超时返回 false
+        // event_type 不匹配 → 超时返回 None
         let found = provider
-            .wait_for_event(Some("other.type"), None, None, 300)
+            .wait_for_event(&["other.type"], None, None, 300)
             .await;
-        assert!(!found);
+        assert!(found.is_none());
     }
 
     #[tokio::test]
@@ -198,8 +199,8 @@ mod tests {
         let (_mq, provider) = mq_provider(&dir).await;
 
         let found = provider
-            .wait_for_event(Some("never.comes"), None, None, 200)
+            .wait_for_event(&["never.comes"], None, None, 200)
             .await;
-        assert!(!found);
+        assert!(found.is_none());
     }
 }

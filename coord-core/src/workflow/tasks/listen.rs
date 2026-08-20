@@ -72,6 +72,7 @@ mod tests {
         let inst = make_inst();
         let filter = EventFilter {
             event_type: Some("approval.completed".into()),
+            event_types: vec![],
             source: Some("/coord/icps".into()),
             subject: None,
         };
@@ -104,6 +105,7 @@ mod tests {
         let inst = make_inst();
         let filter = EventFilter {
             event_type: None,
+            event_types: vec![],
             source: None,
             subject: None,
         };

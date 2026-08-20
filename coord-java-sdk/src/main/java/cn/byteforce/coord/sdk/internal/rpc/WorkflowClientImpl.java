@@ -20,12 +20,14 @@ import cn.byteforce.coord.sdk.internal.proto.WorkflowListInstancesRequest;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowListInstancesResponse;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowRollbackDefinitionRequest;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowRollbackDefinitionResponse;
+import cn.byteforce.coord.sdk.internal.proto.SuspensionMeta;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowSignalRequest;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowSignalResponse;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowStartRequest;
 import cn.byteforce.coord.sdk.internal.proto.WorkflowStartResponse;
 import cn.byteforce.coord.sdk.internal.proto.TaskFrame;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
+import cn.byteforce.coord.sdk.workflow.Suspension;
 import cn.byteforce.coord.sdk.workflow.WorkflowClient;
 import cn.byteforce.coord.sdk.workflow.WorkflowDefinition;
 import cn.byteforce.coord.sdk.workflow.WorkflowDefinitionSummary;
@@ -81,10 +83,23 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
     @Override
     public String startByDefinition(String definitionId, byte[] input) {
-        // Reuse the start RPC with a minimal DSL wrapper referencing the definition ID.
-        // The coord-agent start handler accepts both raw DSL and definition references.
-        String dsl = "{\"definitionId\":\"" + definitionId + "\"}";
-        return start(dsl, input);
+        // ISSUE-010 §1 真契约：按已部署定义 ID 启动（definition_id），携带 input，跳过内联 deploy。
+        // 由宿主在发布时保存 definition id（deployDefinition 返回），submit 按 id 启动，消除重复部署。
+        WorkflowStartRequest.Builder req = WorkflowStartRequest.newBuilder()
+                .setDefinitionId(definitionId);
+        if (input != null && input.length > 0) {
+            req.setInput(ByteString.copyFrom(input));
+        }
+
+        WorkflowStartResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .start((WorkflowStartRequest) r),
+                req.build(), "workflow.startByDefinition");
+
+        log.debug("Workflow started by definition: id={}, defId={}",
+                response.getWorkflowId(), definitionId);
+        return response.getWorkflowId();
     }
 
     @Override
@@ -119,11 +134,20 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         // currentStep derived from task stack size
         int currentStep = taskStack.size();
 
-        log.debug("Workflow status: id={}, state={}, defName={}, taskStackSize={}",
-                workflowId, state, definitionName, taskStack.size());
+        // ISSUE-010 §2：当前状态名 + 挂起元信息
+        String currentStateName = response.getCurrentStateName();
+        Suspension suspension = null;
+        if (response.hasSuspension()) {
+            SuspensionMeta sm = response.getSuspension();
+            suspension = new Suspension(sm.getReason(), sm.getUntilMs(),
+                    sm.getExpectedSignal(), sm.getEventType(), sm.getService());
+        }
+
+        log.debug("Workflow status: id={}, state={}, defName={}, currentState={}, taskStackSize={}",
+                workflowId, state, definitionName, currentStateName, taskStack.size());
         return new WorkflowStatus(response.getWorkflowId(), state,
                 currentStep, output, errorMsg, definitionName, input,
-                createdAt, updatedAt, taskStack);
+                createdAt, updatedAt, taskStack, currentStateName, suspension);
     }
 
     @Override

@@ -172,14 +172,16 @@ pub trait EventProvider: Send + Sync {
     /// 发布事件
     async fn emit(&self, event_type: &str, source: Option<&str>, data: &Value);
 
-    /// 等待匹配的事件（返回 true 表示事件已到达）
+    /// 等待任一匹配的事件（事件类型集合任一命中即返回）
+    ///
+    /// 返回实际到达的事件类型（`None` = 超时 / 未匹配 / 不支持）。
     async fn wait_for_event(
         &self,
-        event_type: Option<&str>,
+        event_types: &[&str],
         source: Option<&str>,
         subject: Option<&str>,
         timeout_ms: u64,
-    ) -> bool;
+    ) -> Option<String>;
 }
 
 /// 为 Arc<T> 提供 EventProvider 的委托实现（支持 trait object 类型擦除）
@@ -191,12 +193,12 @@ impl<T: EventProvider + Send + Sync + ?Sized> EventProvider for Arc<T> {
 
     async fn wait_for_event(
         &self,
-        event_type: Option<&str>,
+        event_types: &[&str],
         source: Option<&str>,
         subject: Option<&str>,
         timeout_ms: u64,
-    ) -> bool {
-        self.as_ref().wait_for_event(event_type, source, subject, timeout_ms).await
+    ) -> Option<String> {
+        self.as_ref().wait_for_event(event_types, source, subject, timeout_ms).await
     }
 }
 
@@ -210,12 +212,12 @@ impl EventProvider for NoopEventProvider {
     async fn emit(&self, _event_type: &str, _source: Option<&str>, _data: &Value) {}
     async fn wait_for_event(
         &self,
-        _event_type: Option<&str>,
+        _event_types: &[&str],
         _source: Option<&str>,
         _subject: Option<&str>,
         _timeout_ms: u64,
-    ) -> bool {
-        false
+    ) -> Option<String> {
+        None
     }
 }
 
@@ -264,59 +266,71 @@ impl EventProvider for MemoryEventProvider {
 
     async fn wait_for_event(
         &self,
-        event_type: Option<&str>,
+        event_types: &[&str],
         source: Option<&str>,
         _subject: Option<&str>,
         timeout_ms: u64,
-    ) -> bool {
-        let et = match event_type {
-            Some(et) => et.to_string(),
-            None => return false, // 不支持无过滤的通配监听
-        };
+    ) -> Option<String> {
+        if event_types.is_empty() {
+            return None; // 不支持无过滤的通配监听
+        }
 
-        let mut rx = {
+        // 为每个事件类型订阅独立 broadcast channel
+        let mut rxs: Vec<(
+            String,
+            tokio::sync::broadcast::Receiver<(String, Option<String>, Value)>,
+        )> = {
             let mut channels = self.channels.lock().unwrap();
-            channels
-                .entry(et.clone())
-                .or_insert_with(|| {
-                    let (tx, _) = tokio::sync::broadcast::channel(256);
-                    tx
+            event_types
+                .iter()
+                .map(|et| {
+                    let key = et.to_string();
+                    let rx = channels
+                        .entry(key.clone())
+                        .or_insert_with(|| {
+                            let (tx, _) = tokio::sync::broadcast::channel(256);
+                            tx
+                        })
+                        .subscribe();
+                    (key, rx)
                 })
-                .subscribe()
+                .collect()
         };
 
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_millis(timeout_ms);
 
+        // 多 channel 轮询（短超时轮流检查，避免单 channel 阻塞）
         loop {
-            match tokio::time::timeout_at(deadline, rx.recv()).await {
-                Ok(Ok((recv_type, recv_source, _data))) => {
-                    // 检查 source 过滤器
-                    if let Some(ref src_filter) = source {
-                        if recv_source.as_deref() != Some(&src_filter[..]) {
-                            continue; // source 不匹配，继续等待
+            for (et, rx) in rxs.iter_mut() {
+                match tokio::time::timeout(std::time::Duration::from_millis(10), rx.recv()).await {
+                    Ok(Ok((recv_type, recv_source, _data))) => {
+                        // 检查 source 过滤器
+                        if let Some(src_filter) = source {
+                            if recv_source.as_deref() != Some(src_filter) {
+                                continue; // source 不匹配，继续等待
+                            }
+                        }
+                        if event_types.contains(&recv_type.as_str()) {
+                            return Some(recv_type);
                         }
                     }
-                    // 检查 event_type（冗余但安全）
-                    if recv_type == et {
-                        return true;
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_n))) => {
+                        // 积压：重新订阅跳过旧消息
+                        *rx = {
+                            let channels = self.channels.lock().unwrap();
+                            channels.get(et).unwrap().subscribe()
+                        };
+                    }
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                        return None;
+                    }
+                    Err(_elapsed) => {
+                        // 该 channel 短超时，轮询下一个
                     }
                 }
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
-                    // 重新订阅以跳过积压消息
-                    let _ = n; // n = 跳过的消息数
-                    rx = {
-                        let channels = self.channels.lock().unwrap();
-                        channels.get(&et).unwrap().subscribe()
-                    };
-                    continue;
-                }
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
-                    return false;
-                }
-                Err(_elapsed) => {
-                    // 超时
-                    return false;
+                if tokio::time::Instant::now() >= deadline {
+                    return None;
                 }
             }
         }
@@ -726,12 +740,12 @@ pub mod test_utils {
         }
         async fn wait_for_event(
             &self,
-            _event_type: Option<&str>,
+            _event_types: &[&str],
             _source: Option<&str>,
             _subject: Option<&str>,
             _timeout_ms: u64,
-        ) -> bool {
-            false
+        ) -> Option<String> {
+            None
         }
     }
 
@@ -887,7 +901,7 @@ mod tests {
         // 先启动 wait（订阅），再 emit
         let p = provider.clone();
         let handle = tokio::spawn(async move {
-            p.wait_for_event(Some("order.created"), Some("/coord/orders"), None, 2000)
+            p.wait_for_event(&["order.created"], Some("/coord/orders"), None, 2000)
                 .await
         });
 
@@ -899,7 +913,7 @@ mod tests {
             .await;
 
         let received = handle.await.unwrap();
-        assert!(received, "should receive the emitted event");
+        assert_eq!(received.as_deref(), Some("order.created"), "should receive the emitted event");
     }
 
     #[tokio::test]
@@ -908,9 +922,9 @@ mod tests {
 
         // 没有 emit，应该超时
         let received = provider
-            .wait_for_event(Some("nonexistent.event"), None, None, 100)
+            .wait_for_event(&["nonexistent.event"], None, None, 100)
             .await;
-        assert!(!received, "should timeout when no event emitted");
+        assert!(received.is_none(), "should timeout when no event emitted");
     }
 
     #[tokio::test]
@@ -920,14 +934,14 @@ mod tests {
         // 启动 wait for source B（先订阅）
         let p_b = provider.clone();
         let handle_b = tokio::spawn(async move {
-            p_b.wait_for_event(Some("ping"), Some("/source/B"), None, 500)
+            p_b.wait_for_event(&["ping"], Some("/source/B"), None, 500)
                 .await
         });
 
         // 启动 wait for source A（先订阅）
         let p_a = provider.clone();
         let handle_a = tokio::spawn(async move {
-            p_a.wait_for_event(Some("ping"), Some("/source/A"), None, 2000)
+            p_a.wait_for_event(&["ping"], Some("/source/A"), None, 2000)
                 .await
         });
 
@@ -940,11 +954,11 @@ mod tests {
 
         // source B 的 wait 应该超时
         let r_b = handle_b.await.unwrap();
-        assert!(!r_b, "should not match different source");
+        assert!(r_b.is_none(), "should not match different source");
 
         // source A 的 wait 应该匹配
         let r_a = handle_a.await.unwrap();
-        assert!(r_a, "should match the emitted source");
+        assert_eq!(r_a.as_deref(), Some("ping"), "should match the emitted source");
     }
 
     #[tokio::test]
@@ -953,13 +967,13 @@ mod tests {
 
         let p1 = provider.clone();
         let h1 = tokio::spawn(async move {
-            p1.wait_for_event(Some("broadcast.test"), None, None, 2000)
+            p1.wait_for_event(&["broadcast.test"], None, None, 2000)
                 .await
         });
 
         let p2 = provider.clone();
         let h2 = tokio::spawn(async move {
-            p2.wait_for_event(Some("broadcast.test"), None, None, 2000)
+            p2.wait_for_event(&["broadcast.test"], None, None, 2000)
                 .await
         });
 
@@ -971,7 +985,7 @@ mod tests {
 
         let r1 = h1.await.unwrap();
         let r2 = h2.await.unwrap();
-        assert!(r1, "subscriber 1 should receive event");
-        assert!(r2, "subscriber 2 should receive event");
+        assert_eq!(r1.as_deref(), Some("broadcast.test"), "subscriber 1 should receive event");
+        assert_eq!(r2.as_deref(), Some("broadcast.test"), "subscriber 2 should receive event");
     }
 }

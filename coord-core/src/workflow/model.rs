@@ -448,6 +448,10 @@ pub struct ListenTask {
 pub struct EventFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_type: Option<String>,
+    /// 多事件类型（event 状态多 onEvents / eventConditions 多条件）
+    /// 非空时作为可接受信号集（优先于 event_type）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub event_types: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1219,7 +1223,7 @@ mod tests {
             Task::Fork(ForkTask { branches: vec![], compete: None }),
             Task::ForEach(ForEachTask { input: "${ .items }".into(), iteration: "item".into(), tasks: vec![] }),
             Task::Wait(WaitTask { wait: "PT5S".into() }),
-            Task::Listen(ListenTask { listen: EventFilter { event_type: None, source: None, subject: None } }),
+            Task::Listen(ListenTask { listen: EventFilter { event_type: None, event_types: vec![], source: None, subject: None } }),
             Task::Emit(EmitTask { emit: EmitEvent { event_type: "done".into(), source: None, data: None } }),
             Task::Set(SetTask { variable: "x".into(), value: "${ .a + .b }".into()}),
             Task::Raise(RaiseTask { raise: ErrorDef { r#type: "HTTPError".into(), title: "HTTP 500".into(), status: None, detail: None } }),

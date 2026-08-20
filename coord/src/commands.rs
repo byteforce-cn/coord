@@ -11,6 +11,8 @@
 
 use std::path::Path;
 
+use coord_proto::kv::kv_client::KvClient;
+use coord_proto::kv::{PutRequest, RangeRequest};
 use coord_proto::maintenance::maintenance_client::MaintenanceClient;
 use coord_proto::maintenance::{
     SealRequest, UnsealRequest,
@@ -784,6 +786,230 @@ mod capability_tests {
                 );
             }
         }
+    }
+}
+
+// ──── Reset / IdGen 运维命令（ISSUE-011）────
+
+/// idgen 备份文件名（存放于数据目录）
+pub const IDGEN_BACKUP_FILE: &str = "idgen-backup.json";
+
+/// 备份条目（hex 编码，避免非 UTF-8 字节）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IdgenBackupEntry {
+    pub key: String,
+    pub value: String,
+}
+
+/// idgen 备份文件内容
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IdgenBackup {
+    pub entries: Vec<IdgenBackupEntry>,
+}
+
+/// 清空本地数据目录（raft-log / snapshots / store.db）。
+///
+/// `keep_idgen == true` 时，先从运行中的 Server 导出 `/_idgen/` 前缀到
+/// `<data_dir>/idgen-backup.json`（此后可用 `coord idgen restore` 恢复号段基线）。
+/// 默认雪花模式下 ID 状态不落 KV，重置后无需恢复；此能力面向号段（segment）模式。
+pub async fn cmd_reset(
+    data_dir: &Path,
+    addr: &str,
+    keep_idgen: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !data_dir.exists() {
+        return Err(format!("data directory {} not found", data_dir.display()).into());
+    }
+
+    let backup_file = data_dir.join(IDGEN_BACKUP_FILE);
+    if keep_idgen {
+        tracing::info!("Exporting idgen state (/_idgen/ prefix) from {addr} ...");
+        let entries = export_idgen_prefix(addr).await?;
+        let json = serde_json::to_vec_pretty(&IdgenBackup { entries: entries.clone() })?;
+        std::fs::write(&backup_file, &json)?;
+        tracing::info!(
+            "Saved idgen backup ({} keys) to {}",
+            entries.len(),
+            backup_file.display()
+        );
+    }
+
+    let mut removed: Vec<String> = Vec::new();
+    for name in ["raft-log", "snapshots", "store.db"] {
+        let p = data_dir.join(name);
+        if p.exists() {
+            if p.is_dir() {
+                std::fs::remove_dir_all(&p)?;
+            } else {
+                std::fs::remove_file(&p)?;
+            }
+            removed.push(name.to_string());
+        }
+    }
+    println!(
+        "Reset {}: removed {}",
+        data_dir.display(),
+        if removed.is_empty() {
+            "nothing".to_string()
+        } else {
+            removed.join(", ")
+        }
+    );
+    if keep_idgen {
+        println!(
+            "ID generator baseline preserved in {} (restore after server restart with: coord idgen restore --file {} --addr {})",
+            backup_file.display(),
+            backup_file.display(),
+            addr
+        );
+    }
+    Ok(())
+}
+
+/// 从运行中的 Server 导出 `/_idgen/` 前缀的全部 KV
+pub async fn export_idgen_prefix(
+    addr: &str,
+) -> Result<Vec<IdgenBackupEntry>, Box<dyn std::error::Error>> {
+    let mut client = build_kv_client(addr).await?;
+    let prefix = b"/_idgen/".to_vec();
+    let range_end = prefix_end(&prefix);
+    let resp = client
+        .range(RangeRequest {
+            key: prefix,
+            range_end,
+            limit: 0,
+            revision: 0,
+            keys_only: false,
+            count_only: false,
+        })
+        .await?;
+    Ok(resp
+        .into_inner()
+        .kvs
+        .into_iter()
+        .map(|kv| IdgenBackupEntry {
+            key: hex::encode(kv.key),
+            value: hex::encode(kv.value),
+        })
+        .collect())
+}
+
+/// 从备份文件恢复 `/_idgen/` 前缀到运行中的 Server
+pub async fn cmd_idgen_restore(
+    file: &Path,
+    addr: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let json = std::fs::read(file)?;
+    let backup: IdgenBackup = serde_json::from_slice(&json)?;
+    if backup.entries.is_empty() {
+        println!(
+            "Backup {} contains no idgen keys; nothing to restore",
+            file.display()
+        );
+        return Ok(());
+    }
+    let mut client = build_kv_client(addr).await?;
+    let mut restored = 0usize;
+    for entry in &backup.entries {
+        let key = hex::decode(&entry.key)?;
+        let value = hex::decode(&entry.value)?;
+        client
+            .put(PutRequest {
+                key,
+                value,
+                lease_id: 0,
+                prev_kv: false,
+                request_id: vec![],
+            })
+            .await?;
+        restored += 1;
+    }
+    println!("Restored {restored} idgen keys to {addr}");
+    Ok(())
+}
+
+/// 计算前缀扫描的 range_end（prefix 最后一个字节 +1）
+fn prefix_end(prefix: &[u8]) -> Vec<u8> {
+    let mut end = prefix.to_vec();
+    for i in (0..end.len()).rev() {
+        if end[i] < 0xFF {
+            end[i] += 1;
+            end.truncate(i + 1);
+            return end;
+        }
+    }
+    // prefix 全是 0xFF，扫描到无穷
+    Vec::new()
+}
+
+/// 构建到指定地址的 KvClient（tonic 直连）
+async fn build_kv_client(
+    addr: &str,
+) -> Result<KvClient<Channel>, Box<dyn std::error::Error>> {
+    let endpoint = format!("http://{addr}");
+    let channel = Channel::from_shared(endpoint)?
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .connect()
+        .await?;
+    Ok(KvClient::new(channel))
+}
+
+// ──── Reset / IdGen 运维测试 ────
+
+#[cfg(test)]
+mod idgen_reset_tests {
+    use super::*;
+
+    #[test]
+    fn test_prefix_end_for_idgen() {
+        // "/_idgen/" → "/_idgen0"（前缀扫描范围上界）
+        let end = prefix_end(b"/_idgen/");
+        assert_eq!(String::from_utf8_lossy(&end), "/_idgen0");
+    }
+
+    #[test]
+    fn test_idgen_backup_roundtrip() {
+        let backup = IdgenBackup {
+            entries: vec![IdgenBackupEntry {
+                key: hex::encode(b"/_idgen/order-id"),
+                value: hex::encode(b"{}"),
+            }],
+        };
+        let json = serde_json::to_vec(&backup).unwrap();
+        let restored: IdgenBackup = serde_json::from_slice(&json).unwrap();
+        assert_eq!(restored.entries.len(), 1);
+        assert_eq!(
+            hex::decode(&restored.entries[0].key).unwrap(),
+            b"/_idgen/order-id"
+        );
+        assert_eq!(
+            hex::decode(&restored.entries[0].value).unwrap(),
+            b"{}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cmd_reset_removes_data_files() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let data_dir = tmpdir.path();
+        std::fs::create_dir_all(data_dir.join("raft-log")).unwrap();
+        std::fs::create_dir_all(data_dir.join("snapshots")).unwrap();
+        std::fs::write(data_dir.join("store.db"), b"x").unwrap();
+
+        cmd_reset(data_dir, "127.0.0.1:1", false)
+            .await
+            .expect("reset without keep_idgen should succeed");
+        assert!(!data_dir.join("store.db").exists());
+        assert!(!data_dir.join("raft-log").exists());
+        assert!(!data_dir.join("snapshots").exists());
+    }
+
+    #[tokio::test]
+    async fn test_cmd_reset_missing_data_dir_errors() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let missing = tmpdir.path().join("does-not-exist");
+        let result = cmd_reset(&missing, "127.0.0.1:1", false).await;
+        assert!(result.is_err(), "missing data dir should error");
     }
 }
 
