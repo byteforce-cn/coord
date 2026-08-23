@@ -12,8 +12,8 @@
 use std::time::Duration;
 
 use coord_agent::services::replication::{
-    IdempotencyKey, ReplicationConfig, ReplicationEntry, ReplicationManager, ReplicationOp,
-    ReplicatedStore,
+    IdempotencyKey, ReplicatedStore, ReplicationConfig, ReplicationEntry, ReplicationManager,
+    ReplicationOp,
 };
 use coord_agent::{AgentConfig, AgentServer, BaseService};
 
@@ -144,7 +144,10 @@ fn test_replication_entry_proto_roundtrip() {
         "string".to_string(),
         1,
     );
-    assert_eq!(cache, ReplicationEntry::from_proto(&cache.to_proto()).unwrap());
+    assert_eq!(
+        cache,
+        ReplicationEntry::from_proto(&cache.to_proto()).unwrap()
+    );
 }
 
 // ════════════════════════════════════════════════════════════
@@ -152,16 +155,18 @@ fn test_replication_entry_proto_roundtrip() {
 // ════════════════════════════════════════════════════════════
 
 async fn mq_svc(dir: &std::path::Path) -> coord_agent::services::mq::MessageQueueService {
-    let svc = coord_agent::services::mq::MessageQueueService::new(
-        dir.to_path_buf(),
-        1024 * 1024 * 1024,
-    );
+    let svc =
+        coord_agent::services::mq::MessageQueueService::new(dir.to_path_buf(), 1024 * 1024 * 1024);
     svc.start().await.expect("start mq");
     svc
 }
 
 async fn cache_svc(dir: &std::path::Path) -> coord_agent::services::cache::CacheService {
-    let svc = coord_agent::services::cache::CacheService::new(dir.to_path_buf(), 1024 * 1024 * 1024, 3600);
+    let svc = coord_agent::services::cache::CacheService::new(
+        dir.to_path_buf(),
+        1024 * 1024 * 1024,
+        3600,
+    );
     svc.start().await.expect("start cache");
     svc
 }
@@ -183,7 +188,10 @@ async fn test_mq_follower_apply_preserves_offset() {
 
     // Leader 单 agent（min_isr=1）：复制生产
     let leader_mgr = ReplicationManager::new(
-        ReplicationConfig { min_isr: 1, sync_timeout_ms: 1000 },
+        ReplicationConfig {
+            min_isr: 1,
+            sync_timeout_ms: 1000,
+        },
         "leader:1".into(),
     );
     leader.set_replication(Some(std::sync::Arc::new(leader_mgr)));
@@ -265,7 +273,11 @@ async fn test_mq_idempotency_persists_across_restart() {
     let svc = mq_svc(&path).await;
     svc.apply_entry(&entry).unwrap(); // 重复 apply → 幂等跳过
     let msgs = svc.consume("restart", 0, 0, 100).unwrap();
-    assert_eq!(msgs.len(), 1, "duplicate apply after restart must be skipped");
+    assert_eq!(
+        msgs.len(),
+        1,
+        "duplicate apply after restart must be skipped"
+    );
     assert_eq!(svc.last_local_sequence("mq:restart"), 1);
 }
 
@@ -277,7 +289,10 @@ async fn test_mq_idempotency_persists_across_restart() {
 async fn test_cache_replicated_put_and_delete() {
     let leader = cache_svc(&tempfile::tempdir().unwrap().path().to_path_buf()).await;
     let leader_mgr = ReplicationManager::new(
-        ReplicationConfig { min_isr: 1, sync_timeout_ms: 1000 },
+        ReplicationConfig {
+            min_isr: 1,
+            sync_timeout_ms: 1000,
+        },
         "leader:1".into(),
     );
     leader.set_replication(Some(std::sync::Arc::new(leader_mgr)));
@@ -285,7 +300,10 @@ async fn test_cache_replicated_put_and_delete() {
     let follower = cache_svc(&tempfile::tempdir().unwrap().path().to_path_buf()).await;
 
     // Leader 复制写 string
-    leader.string_put_replicated("k1", b"v1".to_vec(), None).await.unwrap();
+    leader
+        .string_put_replicated("k1", b"v1".to_vec(), None)
+        .await
+        .unwrap();
     // 读取复制日志 → 应用到 Follower
     let entries = leader.read_entries("cache", 1, 0);
     assert!(!entries.is_empty());
@@ -308,13 +326,19 @@ async fn test_cache_replicated_ttl_absolute() {
     // C5：复制 Leader 计算的绝对到期时间戳；Follower 原样应用，独立到期
     let leader = cache_svc(&tempfile::tempdir().unwrap().path().to_path_buf()).await;
     let leader_mgr = ReplicationManager::new(
-        ReplicationConfig { min_isr: 1, sync_timeout_ms: 1000 },
+        ReplicationConfig {
+            min_isr: 1,
+            sync_timeout_ms: 1000,
+        },
         "leader:1".into(),
     );
     leader.set_replication(Some(std::sync::Arc::new(leader_mgr)));
 
     let follower = cache_svc(&tempfile::tempdir().unwrap().path().to_path_buf()).await;
-    leader.string_put_replicated("ttl-key", b"v".to_vec(), Some(60)).await.unwrap();
+    leader
+        .string_put_replicated("ttl-key", b"v".to_vec(), Some(60))
+        .await
+        .unwrap();
     let entries = leader.read_entries("cache", 1, 0);
     for e in &entries {
         follower.apply_entry(e).unwrap();
@@ -328,7 +352,10 @@ async fn test_cache_pop_leader_only() {
     // C2：pop 仅 Leader；非 Leader 拒绝
     let leader = cache_svc(&tempfile::tempdir().unwrap().path().to_path_buf()).await;
     let leader_mgr = ReplicationManager::new(
-        ReplicationConfig { min_isr: 1, sync_timeout_ms: 1000 },
+        ReplicationConfig {
+            min_isr: 1,
+            sync_timeout_ms: 1000,
+        },
         "a:1".into(),
     );
     leader_mgr.add_peer("b:2".into());
@@ -345,7 +372,15 @@ async fn test_cache_pop_leader_only() {
 // ════════════════════════════════════════════════════════════
 
 /// 启动两个 agent，返回 (leader_addr, follower_addr)
-async fn spawn_pair(min_isr: usize, tag: &str) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>, String, String) {
+async fn spawn_pair(
+    min_isr: usize,
+    tag: &str,
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::task::JoinHandle<()>,
+    String,
+    String,
+) {
     let pa = find_port();
     let pb = find_port();
     let addr_a = format!("127.0.0.1:{pa}");
@@ -362,7 +397,9 @@ async fn spawn_pair(min_isr: usize, tag: &str) -> (tokio::task::JoinHandle<()>, 
     (ha.0, hb.0, leader_addr, follower_addr)
 }
 
-async fn mq_client(addr: &str) -> coord_proto::agent::mq_client::MqClient<tonic::transport::Channel> {
+async fn mq_client(
+    addr: &str,
+) -> coord_proto::agent::mq_client::MqClient<tonic::transport::Channel> {
     let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
         .unwrap()
         .connect()
@@ -371,7 +408,9 @@ async fn mq_client(addr: &str) -> coord_proto::agent::mq_client::MqClient<tonic:
     coord_proto::agent::mq_client::MqClient::new(channel)
 }
 
-async fn cache_client(addr: &str) -> coord_proto::agent::cache_client::CacheClient<tonic::transport::Channel> {
+async fn cache_client(
+    addr: &str,
+) -> coord_proto::agent::cache_client::CacheClient<tonic::transport::Channel> {
     let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
         .unwrap()
         .connect()
@@ -421,7 +460,11 @@ async fn test_two_agent_mq_replication() {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(poll.messages.len(), 1, "follower should have the replicated message");
+    assert_eq!(
+        poll.messages.len(),
+        1,
+        "follower should have the replicated message"
+    );
     assert_eq!(poll.messages[0].payload, b"replicated-msg".to_vec());
     assert_eq!(poll.messages[0].offset, 0);
 
@@ -485,10 +528,7 @@ async fn test_follower_write_rejected_not_leader() {
         .await;
     assert!(result.is_err(), "follower publish should be rejected");
     let status = result.unwrap_err();
-    assert!(
-        status.message().contains("not leader"),
-        "status: {status}"
-    );
+    assert!(status.message().contains("not leader"), "status: {status}");
 
     ha.abort();
     hb.abort();
@@ -527,7 +567,10 @@ async fn test_two_agent_degraded_when_follower_down() {
             idempotency_key: String::new(),
         })
         .await;
-    assert!(result.is_err(), "write should be rejected when ISR degraded");
+    assert!(
+        result.is_err(),
+        "write should be rejected when ISR degraded"
+    );
 
     handle.abort();
 }
@@ -567,7 +610,10 @@ async fn test_reconcile_catch_up() {
     let dir = tempfile::tempdir().unwrap();
     let follower = mq_svc(dir.path()).await;
     let follower_mgr = std::sync::Arc::new(ReplicationManager::new(
-        ReplicationConfig { min_isr: 1, sync_timeout_ms: 2000 },
+        ReplicationConfig {
+            min_isr: 1,
+            sync_timeout_ms: 2000,
+        },
         format!("follower:{}", find_port()),
     ));
     follower_mgr.add_peer(leader_addr.clone());

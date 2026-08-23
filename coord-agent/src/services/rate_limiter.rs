@@ -125,7 +125,10 @@ mod tests {
 
     #[test]
     fn test_basic_rate_limit() {
-        let config = RateLimiterConfig { max_tokens: 2, refill_rate: 0.0 };
+        let config = RateLimiterConfig {
+            max_tokens: 2,
+            refill_rate: 0.0,
+        };
         let rl = RateLimiterService::new(config);
         assert!(rl.try_acquire().is_ok());
         assert!(rl.try_acquire().is_ok());

@@ -907,11 +907,7 @@ impl std::fmt::Display for ValidationError {
 
 impl WorkflowInstance {
     /// 创建新的工作流实例（标准相位：创建即 `Pending`，start 驱动后进入 `Running`）
-    pub fn new(
-        definition: &WorkflowDefinition,
-        input: Value,
-        now_ms: i64,
-    ) -> Self {
+    pub fn new(definition: &WorkflowDefinition, input: Value, now_ms: i64) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             definition_ns: definition.document.namespace.clone(),
@@ -961,7 +957,7 @@ mod tests {
             secrets: Default::default(),
             constants: Default::default(),
             task_meta: Default::default(),
-        raw_yaml: None,
+            raw_yaml: None,
         };
 
         let inst = WorkflowInstance::new(&def, serde_json::json!({"key": "value"}), 1000);
@@ -1133,7 +1129,7 @@ mod tests {
             secrets: Default::default(),
             constants: Default::default(),
             task_meta: Default::default(),
-        raw_yaml: None,
+            raw_yaml: None,
         };
 
         let json = serde_json::to_string_pretty(&def).unwrap();
@@ -1217,22 +1213,73 @@ mod tests {
     fn test_all_task_types_serde() {
         // 验证所有任务类型都能正确序列化/反序列化
         let tasks: Vec<Task> = vec![
-            Task::Call(CallTask { call: CallType::Http, with: None }),
+            Task::Call(CallTask {
+                call: CallType::Http,
+                with: None,
+            }),
             Task::Do(DoTask { tasks: vec![] }),
-            Task::Switch(SwitchTask { conditions: vec![], default_condition: None }),
-            Task::Fork(ForkTask { branches: vec![], compete: None }),
-            Task::ForEach(ForEachTask { input: "${ .items }".into(), iteration: "item".into(), tasks: vec![] }),
-            Task::Wait(WaitTask { wait: "PT5S".into() }),
-            Task::Listen(ListenTask { listen: EventFilter { event_type: None, event_types: vec![], source: None, subject: None } }),
-            Task::Emit(EmitTask { emit: EmitEvent { event_type: "done".into(), source: None, data: None } }),
-            Task::Set(SetTask { variable: "x".into(), value: "${ .a + .b }".into()}),
-            Task::Raise(RaiseTask { raise: ErrorDef { r#type: "HTTPError".into(), title: "HTTP 500".into(), status: None, detail: None } }),
-            Task::TryCatch(TryCatchTask { r#try: vec![], catch: vec![] }),
-            Task::Run(RunTask { workflow: WorkflowRef { namespace: "ns".into(), name: "sub".into(), version: "1".into() }, input: None }),
+            Task::Switch(SwitchTask {
+                conditions: vec![],
+                default_condition: None,
+            }),
+            Task::Fork(ForkTask {
+                branches: vec![],
+                compete: None,
+            }),
+            Task::ForEach(ForEachTask {
+                input: "${ .items }".into(),
+                iteration: "item".into(),
+                tasks: vec![],
+            }),
+            Task::Wait(WaitTask {
+                wait: "PT5S".into(),
+            }),
+            Task::Listen(ListenTask {
+                listen: EventFilter {
+                    event_type: None,
+                    event_types: vec![],
+                    source: None,
+                    subject: None,
+                },
+            }),
+            Task::Emit(EmitTask {
+                emit: EmitEvent {
+                    event_type: "done".into(),
+                    source: None,
+                    data: None,
+                },
+            }),
+            Task::Set(SetTask {
+                variable: "x".into(),
+                value: "${ .a + .b }".into(),
+            }),
+            Task::Raise(RaiseTask {
+                raise: ErrorDef {
+                    r#type: "HTTPError".into(),
+                    title: "HTTP 500".into(),
+                    status: None,
+                    detail: None,
+                },
+            }),
+            Task::TryCatch(TryCatchTask {
+                r#try: vec![],
+                catch: vec![],
+            }),
+            Task::Run(RunTask {
+                workflow: WorkflowRef {
+                    namespace: "ns".into(),
+                    name: "sub".into(),
+                    version: "1".into(),
+                },
+                input: None,
+            }),
         ];
 
         for task in &tasks {
-            let named = NamedTask { name: "test".to_string(), task: task.clone() };
+            let named = NamedTask {
+                name: "test".to_string(),
+                task: task.clone(),
+            };
             let json = serde_json::to_string(&named).unwrap();
             let parsed: NamedTask = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed.name, "test");

@@ -5,7 +5,7 @@ message SealRequest {}
 message SealResponse {}
 
 message UnsealRequest {
-  repeated bytes shares = 1;  // Shamir 分片（Base64 解码后）
+  repeated bytes shares = 1; // Shamir 分片（Base64 解码后）
 }
 
 message UnsealResponse {
@@ -29,6 +29,17 @@ message SnapshotResponse {
   bytes data = 1;
   int64 last_included_index = 2;
   uint64 last_included_term = 3;
+}
+
+// ──── Compaction（P1-01：raft 下发 compact revision，节点一致）────
+
+message CompactRequest {
+  int64 revision = 1; // 压缩截止 revision；0 = 压缩到当前 revision
+}
+
+message CompactResponse {
+  int64 compacted_revision = 1; // 实际生效的 compacted revision
+  int64 revision = 2; // 压缩后当前 revision
 }
 
 // ──── Member Management ────
@@ -66,7 +77,7 @@ message MemberListRequest {}
 
 message MemberNode {
   uint64 id = 1;
-  string role = 2;       // "Leader", "Voter", "Learner"
+  string role = 2; // "Leader", "Voter", "Learner"
 }
 
 message MemberListResponse {
@@ -74,13 +85,30 @@ message MemberListResponse {
   uint64 leader_id = 2;
 }
 
+// ──── Join（P0-D.1：新节点加入协议，leader 重定向）────
+
+message JoinRequest {
+  uint64 node_id = 1;
+  string raft_addr = 2;
+  string grpc_addr = 3;
+}
+
+message JoinResponse {
+  bool success = 1;
+  string message = 2;
+  // 本节点非 leader 时给出 leader 的 gRPC 地址（客户端重试到 leader）
+  string forward_to = 3;
+}
+
 service Maintenance {
   rpc Seal(SealRequest) returns (SealResponse);
   rpc Unseal(UnsealRequest) returns (UnsealResponse);
   rpc Status(StatusRequest) returns (StatusResponse);
   rpc Snapshot(SnapshotRequest) returns (stream SnapshotResponse);
+  rpc Compact(CompactRequest) returns (CompactResponse);
   rpc MemberAdd(MemberAddRequest) returns (MemberAddResponse);
   rpc MemberRemove(MemberRemoveRequest) returns (MemberRemoveResponse);
   rpc MemberPromote(MemberPromoteRequest) returns (MemberPromoteResponse);
   rpc MemberList(MemberListRequest) returns (MemberListResponse);
+  rpc Join(JoinRequest) returns (JoinResponse);
 }

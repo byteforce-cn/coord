@@ -19,7 +19,7 @@ use parking_lot::RwLock;
 
 use crate::proxy::AgentInner;
 use crate::service::{BaseService, ServiceResult};
-use crate::services::opa::{OpaEngine, OpaConfig};
+use crate::services::opa::{OpaConfig, OpaEngine};
 
 use coord_proto::kv::PutRequest;
 use coord_proto::txn::compare::{CompareResult, Target, TargetValue};
@@ -128,7 +128,14 @@ impl BundleRecord {
         format!("{tenant_id}/{namespace}/{name}")
     }
 
-    fn new(tenant_id: &str, namespace: &str, name: &str, rego: &str, version: i64, now: i64) -> Self {
+    fn new(
+        tenant_id: &str,
+        namespace: &str,
+        name: &str,
+        rego: &str,
+        version: i64,
+        now: i64,
+    ) -> Self {
         let bundle_id = Self::make_bundle_id(tenant_id, namespace, name);
         Self {
             info: BundleInfo {
@@ -185,10 +192,14 @@ impl std::fmt::Debug for PolicyService {
 impl PolicyService {
     /// 创建不带 KV 的 PolicyService（仅 RBAC 引擎）
     pub fn new(max_policies: usize) -> Self {
-        let opa_engine = Arc::new(
-            OpaEngine::new(OpaConfig::default())
-                .expect("create OpaEngine")
-        );
+        // OpaEngine::new 当前无失败路径（空引擎、无 Rego 依赖）
+        let opa_engine = Arc::new(match OpaEngine::new(OpaConfig::default()) {
+            Ok(engine) => engine,
+            Err(e) => {
+                tracing::error!("create OpaEngine failed: {e}");
+                unreachable!("OpaEngine::new cannot fail")
+            }
+        });
         Self {
             policies: RwLock::new(BTreeMap::new()),
             started: RwLock::new(false),
@@ -200,10 +211,14 @@ impl PolicyService {
 
     /// 创建带 Server KV 接入的 PolicyService（支持 bundle CRUD）
     pub fn with_kv(max_policies: usize, inner: Arc<AgentInner>) -> Self {
-        let opa_engine = Arc::new(
-            OpaEngine::new(OpaConfig::default())
-                .expect("create OpaEngine")
-        );
+        // OpaEngine::new 当前无失败路径（空引擎、无 Rego 依赖）
+        let opa_engine = Arc::new(match OpaEngine::new(OpaConfig::default()) {
+            Ok(engine) => engine,
+            Err(e) => {
+                tracing::error!("create OpaEngine failed: {e}");
+                unreachable!("OpaEngine::new cannot fail")
+            }
+        });
         Self {
             policies: RwLock::new(BTreeMap::new()),
             started: RwLock::new(false),
@@ -278,22 +293,34 @@ impl PolicyService {
     }
 
     fn policy_matches(&self, policy: &Policy, request: &AccessRequest) -> bool {
-        if !Self::match_any(&policy.subjects, &request.subject) { return false; }
-        if !Self::match_any(&policy.actions, &request.action) { return false; }
-        if !Self::match_any(&policy.resources, &request.resource) { return false; }
+        if !Self::match_any(&policy.subjects, &request.subject) {
+            return false;
+        }
+        if !Self::match_any(&policy.actions, &request.action) {
+            return false;
+        }
+        if !Self::match_any(&policy.resources, &request.resource) {
+            return false;
+        }
         for condition in &policy.conditions {
-            if !Self::eval_condition(condition, &request.context) { return false; }
+            if !Self::eval_condition(condition, &request.context) {
+                return false;
+            }
         }
         true
     }
 
     fn match_any(patterns: &[String], value: &str) -> bool {
-        if patterns.is_empty() { return false; }
+        if patterns.is_empty() {
+            return false;
+        }
         patterns.iter().any(|p| Self::wildcard_match(p, value))
     }
 
     fn wildcard_match(pattern: &str, value: &str) -> bool {
-        if pattern == "*" { return true; }
+        if pattern == "*" {
+            return true;
+        }
         if let Some(prefix) = pattern.strip_suffix('*') {
             return value.starts_with(prefix);
         }
@@ -311,10 +338,19 @@ impl PolicyService {
             "contains" => attr_value.contains(&condition.value),
             "prefix" => attr_value.starts_with(&condition.value),
             "gte" | "lte" | "gt" | "lt" => {
-                let a: f64 = match attr_value.parse() { Ok(v) => v, Err(_) => return false };
-                let b: f64 = match condition.value.parse() { Ok(v) => v, Err(_) => return false };
+                let a: f64 = match attr_value.parse() {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                };
+                let b: f64 = match condition.value.parse() {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                };
                 match condition.operator.as_str() {
-                    "gte" => a >= b, "lte" => a <= b, "gt" => a > b, "lt" => a < b,
+                    "gte" => a >= b,
+                    "lte" => a <= b,
+                    "gt" => a > b,
+                    "lt" => a < b,
                     _ => false,
                 }
             }
@@ -325,7 +361,8 @@ impl PolicyService {
     // ──── Bundle 管理（Server KV 后端）───
 
     fn require_kv(&self) -> ServiceResult<&Arc<AgentInner>> {
-        self.inner.as_ref()
+        self.inner
+            .as_ref()
             .ok_or_else(|| "Policy bundle API requires AgentInner (server KV connection)".into())
     }
 
@@ -374,8 +411,8 @@ impl PolicyService {
             .map_err(|e| format!("kv range: {e}"))?;
         match kvs.into_iter().next() {
             Some((_k, v, _lease, ver)) if !v.is_empty() => {
-                let rec: BundleRecord = serde_json::from_slice(&v)
-                    .map_err(|e| format!("deserialize bundle: {e}"))?;
+                let rec: BundleRecord =
+                    serde_json::from_slice(&v).map_err(|e| format!("deserialize bundle: {e}"))?;
                 Ok((Some(rec), ver))
             }
             _ => Ok((None, 0)),
@@ -389,12 +426,18 @@ impl PolicyService {
     /// - 每次成功上传版本号 +1，并写入历史版本快照（`@v{n}`）供回滚；
     /// - 当前记录通过 Txn CAS（per-key version）原子覆盖，并发冲突时有限重试；
     /// - 更新保留原有 enabled 状态。
-    pub async fn put_bundle(&self, tenant_id: &str, namespace: &str,
-                            name: &str, rego: &str) -> ServiceResult<BundleInfo> {
+    pub async fn put_bundle(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        name: &str,
+        rego: &str,
+    ) -> ServiceResult<BundleInfo> {
         let inner = self.require_kv()?;
 
         // 1. 写入前 OPA 编译校验（失败不落库、不改引擎）
-        self.opa_engine.validate_rego(rego)
+        self.opa_engine
+            .validate_rego(rego)
             .map_err(|e| format!("bundle rego compile error: {e}"))?;
 
         let bundle_id = BundleRecord::make_bundle_id(tenant_id, namespace, name);
@@ -425,24 +468,32 @@ impl PolicyService {
 
             // 4. 写入历史版本快照（key 含版本号，幂等）
             let snapshot_key = BundleRecord::snapshot_key(&bundle_id, new_version);
-            let snapshot_val = serde_json::to_vec(&record)
-                .map_err(|e| format!("serialize bundle: {e}"))?;
-            inner.client.kv().put(&snapshot_key, &snapshot_val).await
+            let snapshot_val =
+                serde_json::to_vec(&record).map_err(|e| format!("serialize bundle: {e}"))?;
+            inner
+                .client
+                .kv()
+                .put(&snapshot_key, &snapshot_val)
+                .await
                 .map_err(|e| format!("kv put snapshot: {e}"))?;
 
             // 5. 原子覆盖当前记录（CAS on version）
-            let value = serde_json::to_vec(&record)
-                .map_err(|e| format!("serialize bundle: {e}"))?;
+            let value =
+                serde_json::to_vec(&record).map_err(|e| format!("serialize bundle: {e}"))?;
             if Self::cas_put_current(inner, &key, value, cur_version).await? {
                 // 6. 同步到本地 OpaEngine（仅 enabled bundle）
                 if record.info.enabled {
                     let policy_id = format!("{}/{}", record.info.namespace, record.info.name);
-                    self.opa_engine.add_policy(&policy_id, &record.rego_content)
+                    self.opa_engine
+                        .add_policy(&policy_id, &record.rego_content)
                         .map_err(|e| format!("opa add_policy: {e}"))?;
                 }
                 tracing::info!(
                     "Policy: put bundle '{}' v{} (tenant={}, ns={})",
-                    name, new_version, tenant_id, namespace
+                    name,
+                    new_version,
+                    tenant_id,
+                    namespace
                 );
                 return Ok(record.info);
             }
@@ -454,7 +505,11 @@ impl PolicyService {
     ///
     /// 语义：读取 `@v{version}` 快照 → 编译校验 → 作为新版本（当前版本+1）原子写入，
     /// 保留当前 enabled 状态；已是目标版本时返回错误。
-    pub async fn rollback_bundle(&self, bundle_id: &str, version: i64) -> ServiceResult<BundleInfo> {
+    pub async fn rollback_bundle(
+        &self,
+        bundle_id: &str,
+        version: i64,
+    ) -> ServiceResult<BundleInfo> {
         let inner = self.require_kv()?;
         if version < 1 {
             return Err(format!("invalid rollback version: {version}").into());
@@ -463,20 +518,22 @@ impl PolicyService {
         // 1. 读取目标版本快照
         let snapshot_key = BundleRecord::snapshot_key(bundle_id, version);
         let snapshot = {
-            let kvs = inner.client.kv()
-                .range(&snapshot_key, &snapshot_key, 1, 0).await
+            let kvs = inner
+                .client
+                .kv()
+                .range(&snapshot_key, &snapshot_key, 1, 0)
+                .await
                 .map_err(|e| format!("kv range: {e}"))?;
             match kvs.into_iter().next() {
-                Some((_k, v)) if !v.is_empty() => {
-                    serde_json::from_slice::<BundleRecord>(&v)
-                        .map_err(|e| format!("deserialize snapshot: {e}"))?
-                }
+                Some((_k, v)) if !v.is_empty() => serde_json::from_slice::<BundleRecord>(&v)
+                    .map_err(|e| format!("deserialize snapshot: {e}"))?,
                 _ => return Err(format!("bundle version {version} not found").into()),
             }
         };
 
         // 2. 编译校验快照 Rego
-        self.opa_engine.validate_rego(&snapshot.rego_content)
+        self.opa_engine
+            .validate_rego(&snapshot.rego_content)
             .map_err(|e| format!("bundle rego compile error: {e}"))?;
 
         let key = BundleRecord::storage_key(bundle_id);
@@ -507,21 +564,28 @@ impl PolicyService {
 
             // 5. 写回滚后的新版本快照
             let new_snap_key = BundleRecord::snapshot_key(bundle_id, new_version);
-            let new_snap_val = serde_json::to_vec(&restored)
-                .map_err(|e| format!("serialize bundle: {e}"))?;
-            inner.client.kv().put(&new_snap_key, &new_snap_val).await
+            let new_snap_val =
+                serde_json::to_vec(&restored).map_err(|e| format!("serialize bundle: {e}"))?;
+            inner
+                .client
+                .kv()
+                .put(&new_snap_key, &new_snap_val)
+                .await
                 .map_err(|e| format!("kv put snapshot: {e}"))?;
 
             // 6. 原子更新当前记录
-            let value = serde_json::to_vec(&restored)
-                .map_err(|e| format!("serialize bundle: {e}"))?;
+            let value =
+                serde_json::to_vec(&restored).map_err(|e| format!("serialize bundle: {e}"))?;
             if Self::cas_put_current(inner, &key, value, cur_version).await? {
                 let policy_id = format!("{}/{}", restored.info.namespace, restored.info.name);
-                self.opa_engine.add_policy(&policy_id, &restored.rego_content)
+                self.opa_engine
+                    .add_policy(&policy_id, &restored.rego_content)
                     .map_err(|e| format!("opa add_policy: {e}"))?;
                 tracing::info!(
                     "Policy: rolled back bundle '{}' to v{} (now v{})",
-                    bundle_id, version, new_version
+                    bundle_id,
+                    version,
+                    new_version
                 );
                 return Ok(restored.info);
             }
@@ -530,7 +594,10 @@ impl PolicyService {
     }
 
     /// 列出策略包的全部历史版本（用于回滚目标发现）。
-    pub async fn list_bundle_versions(&self, bundle_id: &str) -> ServiceResult<Vec<BundleVersionInfo>> {
+    pub async fn list_bundle_versions(
+        &self,
+        bundle_id: &str,
+    ) -> ServiceResult<Vec<BundleVersionInfo>> {
         let inner = self.require_kv()?;
 
         // 当前记录（判断 is_current + 当前版本号）
@@ -541,8 +608,11 @@ impl PolicyService {
         // 扫描该 bundle 下的全部版本快照
         let prefix = format!("/_policy/bundles/{bundle_id}@v").into_bytes();
         let range_end = prefix_end(&prefix);
-        let pairs = inner.client.kv()
-            .range(&prefix, &range_end, 0, 0).await
+        let pairs = inner
+            .client
+            .kv()
+            .range(&prefix, &range_end, 0, 0)
+            .await
             .map_err(|e| format!("kv range: {e}"))?;
 
         let mut versions: Vec<BundleVersionInfo> = Vec::new();
@@ -566,19 +636,26 @@ impl PolicyService {
 
         // 先读取 bundle 信息用于清理 OpaEngine
         let namespace_and_name = {
-            let pairs = inner.client.kv()
-                .range(&key, &key, 1, 0).await
+            let pairs = inner
+                .client
+                .kv()
+                .range(&key, &key, 1, 0)
+                .await
                 .map_err(|e| format!("kv range: {e}"))?;
             if let Some((_k, v)) = pairs.into_iter().next() {
-                let rec: BundleRecord = serde_json::from_slice(&v)
-                    .map_err(|e| format!("deserialize bundle: {e}"))?;
+                let rec: BundleRecord =
+                    serde_json::from_slice(&v).map_err(|e| format!("deserialize bundle: {e}"))?;
                 Some((rec.info.namespace, rec.info.name))
             } else {
                 None
             }
         };
 
-        inner.client.kv().delete(&key).await
+        inner
+            .client
+            .kv()
+            .delete(&key)
+            .await
             .map_err(|e| format!("kv delete bundle: {e}"))?;
 
         // 从本地 OpaEngine 移除
@@ -597,8 +674,11 @@ impl PolicyService {
         let prefix = BundleRecord::prefix_key();
         let range_end = prefix_end(&prefix);
 
-        let pairs = inner.client.kv()
-            .range(&prefix, &range_end, 0, 0).await
+        let pairs = inner
+            .client
+            .kv()
+            .range(&prefix, &range_end, 0, 0)
+            .await
             .map_err(|e| format!("kv range: {e}"))?;
 
         let mut bundles: Vec<BundleInfo> = Vec::new();
@@ -608,7 +688,7 @@ impl PolicyService {
                 continue;
             }
             if let Ok(rec) = serde_json::from_slice::<BundleRecord>(&v) {
-                if tenant_id.map_or(true, |tid| rec.info.tenant_id == tid) {
+                if tenant_id.is_none_or(|tid| rec.info.tenant_id == tid) {
                     bundles.push(rec.info);
                 }
             }
@@ -643,13 +723,13 @@ impl PolicyService {
             rec.info.enabled = enabled;
             rec.info.updated_at = now;
 
-            let new_val = serde_json::to_vec(&rec)
-                .map_err(|e| format!("serialize bundle: {e}"))?;
+            let new_val = serde_json::to_vec(&rec).map_err(|e| format!("serialize bundle: {e}"))?;
             if Self::cas_put_current(inner, &key, new_val, cur_version).await? {
                 // 同步到本地 OpaEngine
                 let policy_id = format!("{}/{}", rec.info.namespace, rec.info.name);
                 if enabled {
-                    self.opa_engine.add_policy(&policy_id, &rec.rego_content)
+                    self.opa_engine
+                        .add_policy(&policy_id, &rec.rego_content)
                         .map_err(|e| format!("opa add_policy: {e}"))?;
                 } else {
                     self.opa_engine.remove_policy(&policy_id);
@@ -663,7 +743,8 @@ impl PolicyService {
 
     /// 解释策略决策（本地 OpaEngine）
     pub fn explain(&self, query: &str, input_json: &str) -> ServiceResult<String> {
-        self.opa_engine.explain(query, input_json)
+        self.opa_engine
+            .explain(query, input_json)
             .map_err(|e| e.into())
     }
 }
@@ -733,7 +814,8 @@ mod tests {
             resources: vec!["*".into()],
             conditions: vec![],
             priority: 10,
-        }).unwrap();
+        })
+        .unwrap();
 
         let req = AccessRequest {
             subject: "role:admin".into(),
@@ -749,21 +831,35 @@ mod tests {
     fn test_deny_overrides_allow() {
         let svc = new_svc();
         svc.add_policy(Policy {
-            id: "allow-all".into(), name: "a".into(), description: "".into(),
-            effect: PolicyEffect::Allow, subjects: vec!["*".into()],
-            actions: vec!["*".into()], resources: vec!["*".into()],
-            conditions: vec![], priority: 1,
-        }).unwrap();
+            id: "allow-all".into(),
+            name: "a".into(),
+            description: "".into(),
+            effect: PolicyEffect::Allow,
+            subjects: vec!["*".into()],
+            actions: vec!["*".into()],
+            resources: vec!["*".into()],
+            conditions: vec![],
+            priority: 1,
+        })
+        .unwrap();
         svc.add_policy(Policy {
-            id: "deny-bob".into(), name: "d".into(), description: "".into(),
-            effect: PolicyEffect::Deny, subjects: vec!["user:bob".into()],
-            actions: vec!["*".into()], resources: vec!["*".into()],
-            conditions: vec![], priority: 100,
-        }).unwrap();
+            id: "deny-bob".into(),
+            name: "d".into(),
+            description: "".into(),
+            effect: PolicyEffect::Deny,
+            subjects: vec!["user:bob".into()],
+            actions: vec!["*".into()],
+            resources: vec!["*".into()],
+            conditions: vec![],
+            priority: 100,
+        })
+        .unwrap();
 
         let req = AccessRequest {
-            subject: "user:bob".into(), action: "read".into(),
-            resource: "/data".into(), context: HashMap::new(),
+            subject: "user:bob".into(),
+            action: "read".into(),
+            resource: "/data".into(),
+            context: HashMap::new(),
         };
         let decision = svc.evaluate(&req).unwrap();
         assert_eq!(decision.effect, PolicyEffect::Deny);
@@ -773,8 +869,10 @@ mod tests {
     fn test_default_deny() {
         let svc = new_svc();
         let req = AccessRequest {
-            subject: "unknown".into(), action: "read".into(),
-            resource: "/data".into(), context: HashMap::new(),
+            subject: "unknown".into(),
+            action: "read".into(),
+            resource: "/data".into(),
+            context: HashMap::new(),
         };
         let decision = svc.evaluate(&req).unwrap();
         assert_eq!(decision.effect, PolicyEffect::Deny);
@@ -789,13 +887,19 @@ mod tests {
     #[test]
     fn test_storage_key_format() {
         let key = BundleRecord::storage_key("tenant-1/default/my-policy");
-        assert_eq!(String::from_utf8_lossy(&key), "/_policy/bundles/tenant-1/default/my-policy");
+        assert_eq!(
+            String::from_utf8_lossy(&key),
+            "/_policy/bundles/tenant-1/default/my-policy"
+        );
     }
 
     #[test]
     fn test_snapshot_key_format() {
         let key = BundleRecord::snapshot_key("tenant-1/default/my-policy", 3);
-        assert_eq!(String::from_utf8_lossy(&key), "/_policy/bundles/tenant-1/default/my-policy@v3");
+        assert_eq!(
+            String::from_utf8_lossy(&key),
+            "/_policy/bundles/tenant-1/default/my-policy@v3"
+        );
     }
 
     #[test]

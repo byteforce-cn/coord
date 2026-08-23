@@ -8,8 +8,7 @@
 use std::sync::Arc;
 
 use coord_agent::services::policy::{
-    PolicyService, Policy, PolicyDecision, PolicyEffect, AccessRequest,
-    PolicyCondition,
+    AccessRequest, Policy, PolicyCondition, PolicyDecision, PolicyEffect, PolicyService,
 };
 use coord_agent::BaseService;
 
@@ -78,7 +77,8 @@ fn test_policy_remove() {
         resources: vec!["*".into()],
         conditions: vec![],
         priority: 0,
-    }).expect("add");
+    })
+    .expect("add");
     assert!(svc.remove_policy("pol-tmp").expect("remove"));
     assert!(svc.get_policy("pol-tmp").expect("get").is_none());
 }
@@ -97,7 +97,8 @@ fn test_policy_list() {
             resources: vec!["*".into()],
             conditions: vec![],
             priority: i * 10,
-        }).expect("add");
+        })
+        .expect("add");
     }
     let all = svc.list_policies().expect("list");
     assert_eq!(all.len(), 3);
@@ -118,7 +119,8 @@ fn test_policy_eval_allow_role_match() {
         resources: vec!["*".into()],
         conditions: vec![],
         priority: 100,
-    }).expect("add");
+    })
+    .expect("add");
 
     let req = AccessRequest {
         subject: "role:admin".into(),
@@ -145,7 +147,8 @@ fn test_policy_eval_deny_no_match() {
         resources: vec!["/api/*".into()],
         conditions: vec![],
         priority: 100,
-    }).expect("add");
+    })
+    .expect("add");
 
     let req = AccessRequest {
         subject: "role:user".into(),
@@ -175,7 +178,8 @@ fn test_policy_eval_deny_overrides_allow() {
         resources: vec!["*".into()],
         conditions: vec![],
         priority: 0,
-    }).expect("add");
+    })
+    .expect("add");
 
     // Deny specific
     svc.add_policy(Policy {
@@ -188,7 +192,8 @@ fn test_policy_eval_deny_overrides_allow() {
         resources: vec!["/admin/*".into()],
         conditions: vec![],
         priority: 100,
-    }).expect("add");
+    })
+    .expect("add");
 
     let req = AccessRequest {
         subject: "role:user".into(),
@@ -228,7 +233,8 @@ fn test_policy_eval_with_conditions() {
             },
         ],
         priority: 100,
-    }).expect("add");
+    })
+    .expect("add");
 
     // During business hours
     let req = AccessRequest {
@@ -241,7 +247,10 @@ fn test_policy_eval_with_conditions() {
             m
         },
     };
-    assert_eq!(svc.evaluate(&req).expect("eval").effect, PolicyEffect::Allow);
+    assert_eq!(
+        svc.evaluate(&req).expect("eval").effect,
+        PolicyEffect::Allow
+    );
 
     // Outside business hours
     let req2 = AccessRequest {
@@ -254,7 +263,10 @@ fn test_policy_eval_with_conditions() {
             m
         },
     };
-    assert_eq!(svc.evaluate(&req2).expect("eval").effect, PolicyEffect::Deny);
+    assert_eq!(
+        svc.evaluate(&req2).expect("eval").effect,
+        PolicyEffect::Deny
+    );
 }
 
 // ──── G.14: 优先级排序 ────
@@ -273,7 +285,8 @@ fn test_policy_priority_ordering() {
         resources: vec!["/public/*".into()],
         conditions: vec![],
         priority: 10,
-    }).expect("add");
+    })
+    .expect("add");
 
     // High priority deny - same scope
     svc.add_policy(Policy {
@@ -286,7 +299,8 @@ fn test_policy_priority_ordering() {
         resources: vec!["/public/*".into()],
         conditions: vec![],
         priority: 200,
-    }).expect("add");
+    })
+    .expect("add");
 
     let req = AccessRequest {
         subject: "role:user".into(),
@@ -313,7 +327,8 @@ fn test_policy_wildcard_matching() {
         resources: vec!["/api/v1/*".into(), "/api/v2/users".into()],
         conditions: vec![],
         priority: 100,
-    }).expect("add");
+    })
+    .expect("add");
 
     // Exact resource match
     let req = AccessRequest {
@@ -322,7 +337,10 @@ fn test_policy_wildcard_matching() {
         resource: "/api/v2/users".into(),
         context: Default::default(),
     };
-    assert_eq!(svc.evaluate(&req).expect("eval").effect, PolicyEffect::Allow);
+    assert_eq!(
+        svc.evaluate(&req).expect("eval").effect,
+        PolicyEffect::Allow
+    );
 
     // Wildcard resource match
     let req2 = AccessRequest {
@@ -331,7 +349,10 @@ fn test_policy_wildcard_matching() {
         resource: "/api/v1/orders".into(),
         context: Default::default(),
     };
-    assert_eq!(svc.evaluate(&req2).expect("eval").effect, PolicyEffect::Allow);
+    assert_eq!(
+        svc.evaluate(&req2).expect("eval").effect,
+        PolicyEffect::Allow
+    );
 
     // No resource match
     let req3 = AccessRequest {
@@ -340,7 +361,10 @@ fn test_policy_wildcard_matching() {
         resource: "/api/v3/data".into(),
         context: Default::default(),
     };
-    assert_eq!(svc.evaluate(&req3).expect("eval").effect, PolicyEffect::Deny);
+    assert_eq!(
+        svc.evaluate(&req3).expect("eval").effect,
+        PolicyEffect::Deny
+    );
 }
 
 // ──── G.16: 并发安全 ────
@@ -360,7 +384,8 @@ fn test_policy_concurrent_eval() {
         resources: vec!["*".into()],
         conditions: vec![],
         priority: 100,
-    }).expect("add");
+    })
+    .expect("add");
 
     let mut handles = vec![];
     for i in 0..20 {
@@ -376,5 +401,7 @@ fn test_policy_concurrent_eval() {
             assert_eq!(decision.effect, PolicyEffect::Allow);
         }));
     }
-    for h in handles { h.join().unwrap(); }
+    for h in handles {
+        h.join().unwrap();
+    }
 }

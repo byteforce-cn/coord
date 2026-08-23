@@ -30,7 +30,10 @@ fn test_public_api_exports() {
 
     assert_eq!(config.agent_addr, "127.0.0.1:19527");
     assert_eq!(config.http_addr, "127.0.0.1:19528");
-    assert!(matches!(config.discovery_mode, coord_agent::DiscoveryMode::Static));
+    assert!(matches!(
+        config.discovery_mode,
+        coord_agent::DiscoveryMode::Static
+    ));
     assert_eq!(config.static_peers.len(), 1);
 }
 
@@ -69,9 +72,14 @@ fn test_static_discovery_implements_trait() {
 fn test_run_agent_signature() {
     // run_agent 应该是一个异步函数，接收 AgentConfig 返回 Result
     // 我们不实际调用它（会启动真实的 gRPC server），只验证类型签名
-    let _func: fn(AgentConfig) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send>> = |_config: AgentConfig| {
-        Box::pin(async { Ok(()) })
-    };
+    let _func: fn(
+        AgentConfig,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>
+                + Send,
+        >,
+    > = |_config: AgentConfig| Box::pin(async { Ok(()) });
     // 如果上面的赋值编译通过，说明 run_agent 的函数签名与预期兼容
 }
 
@@ -95,7 +103,10 @@ proxy_request_timeout_secs = 10
 
     assert_eq!(config.agent_addr, "0.0.0.0:19527");
     assert_eq!(config.http_addr, "0.0.0.0:19528");
-    assert!(matches!(config.discovery_mode, coord_agent::DiscoveryMode::Static));
+    assert!(matches!(
+        config.discovery_mode,
+        coord_agent::DiscoveryMode::Static
+    ));
     assert_eq!(config.static_peers.len(), 3);
     assert_eq!(config.static_peers[0], "10.0.1.1:50051");
     assert_eq!(config.proxy_max_retries, 5);
@@ -122,8 +133,14 @@ static_peers = ["10.0.0.1:50051"]
 #[test]
 fn test_discovery_mode_deserialization() {
     let config: AgentConfig = toml::from_str(r#"discovery_mode = "static""#).unwrap();
-    assert!(matches!(config.discovery_mode, coord_agent::DiscoveryMode::Static));
+    assert!(matches!(
+        config.discovery_mode,
+        coord_agent::DiscoveryMode::Static
+    ));
 
     let config: AgentConfig = toml::from_str(r#"discovery_mode = "gossip""#).unwrap();
-    assert!(matches!(config.discovery_mode, coord_agent::DiscoveryMode::Gossip));
+    assert!(matches!(
+        config.discovery_mode,
+        coord_agent::DiscoveryMode::Gossip
+    ));
 }

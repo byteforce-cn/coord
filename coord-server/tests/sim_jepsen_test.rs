@@ -1,8 +1,12 @@
-// jepsen_test.rs — Phase 5: Jepsen 风格并发写入正确性测试
+// sim_jepsen_test.rs — 算法级模拟套件（P0-H：非系统验证证据）
 //
-// TDD: 验证多 Region 并发写入的一致性和线性一致性。
-// 测试覆盖：
-// - 单 Region 并发写入的线性一致性
+// ⚠ 口径声明：本套件为文件内自建内存模型（SimpleKvStore/模拟多 Region），
+// 不引用 coord_server / coord_client 任何真实模块，不得作为线性一致性系统
+// 验证证据（决策文档 §1.3 #18）。真实 checker 为 `coord/tests/jepsen_real.rs`
+// （P0-H.3，另立项施工）。
+//
+// 测试覆盖（模拟口径）：
+// - 单 Region 并发写入的线性一致性（模拟模型）
 // - 多 Region 隔离写入
 // - 并发 Split 时的写入正确性
 // - Epoch 保护的并发安全性
@@ -81,10 +85,16 @@ fn test_concurrent_puts_same_key_linearizable() {
 
     // 最终值存在且非空
     let final_value = store.get(&key);
-    assert!(final_value.is_some(), "concurrent writes should produce a value");
+    assert!(
+        final_value.is_some(),
+        "concurrent writes should produce a value"
+    );
     let val = final_value.unwrap();
     let val_str = String::from_utf8_lossy(&val);
-    assert!(val_str.starts_with("writer_"), "final value should be from a writer");
+    assert!(
+        val_str.starts_with("writer_"),
+        "final value should be from a writer"
+    );
 }
 
 #[test]
@@ -118,7 +128,11 @@ fn test_concurrent_puts_disjoint_keys_no_conflict() {
         for ki in 0..keys_per_writer {
             let key = format!("writer_{}_key_{}", writer_id, ki).into_bytes();
             let val = store.get(&key);
-            assert!(val.is_some(), "key {:?} should have a value", String::from_utf8_lossy(&key));
+            assert!(
+                val.is_some(),
+                "key {:?} should have a value",
+                String::from_utf8_lossy(&key)
+            );
         }
     }
 }
@@ -184,7 +198,10 @@ fn test_multi_region_isolation() {
     let r1 = Arc::clone(&region1);
     let h1 = thread::spawn(move || {
         for i in 0..100u32 {
-            r1.put(format!("r1_key_{}", i).into_bytes(), format!("r1_val_{}", i).into_bytes());
+            r1.put(
+                format!("r1_key_{}", i).into_bytes(),
+                format!("r1_val_{}", i).into_bytes(),
+            );
         }
     });
 
@@ -192,7 +209,10 @@ fn test_multi_region_isolation() {
     let r2 = Arc::clone(&region2);
     let h2 = thread::spawn(move || {
         for i in 0..100u32 {
-            r2.put(format!("r2_key_{}", i).into_bytes(), format!("r2_val_{}", i).into_bytes());
+            r2.put(
+                format!("r2_key_{}", i).into_bytes(),
+                format!("r2_val_{}", i).into_bytes(),
+            );
         }
     });
 
@@ -261,7 +281,10 @@ fn test_concurrent_split_and_write_no_data_loss() {
 
     // 预写入一些 key（模拟 Region 已有数据）
     for i in 0..200u32 {
-        store.put(format!("pre_key_{}", i).into_bytes(), format!("pre_val_{}", i).into_bytes());
+        store.put(
+            format!("pre_key_{}", i).into_bytes(),
+            format!("pre_val_{}", i).into_bytes(),
+        );
     }
 
     let mut handles = vec![];
@@ -288,7 +311,10 @@ fn test_concurrent_split_and_write_no_data_loss() {
     for i in 0..200u32 {
         let key = format!("pre_key_{}", i).into_bytes();
         let val = store.get(&key);
-        assert!(val.is_some(), "pre-existing key should survive concurrent writes");
+        assert!(
+            val.is_some(),
+            "pre-existing key should survive concurrent writes"
+        );
     }
 
     // 验证新写入数据存在
@@ -310,11 +336,17 @@ fn test_epoch_check_rejects_stale_write() {
     // 使用过期 Epoch 的写入应被拒绝
     use coord_core::types::RegionEpoch;
 
-    let server_epoch = RegionEpoch { conf_ver: 2, version: 3 };
-    let stale_epoch = RegionEpoch { conf_ver: 1, version: 3 };
+    let server_epoch = RegionEpoch {
+        conf_ver: 2,
+        version: 3,
+    };
+    let stale_epoch = RegionEpoch {
+        conf_ver: 1,
+        version: 3,
+    };
 
-    let is_stale = stale_epoch.conf_ver < server_epoch.conf_ver
-        || stale_epoch.version < server_epoch.version;
+    let is_stale =
+        stale_epoch.conf_ver < server_epoch.conf_ver || stale_epoch.version < server_epoch.version;
 
     assert!(is_stale, "stale conf_ver should be rejected");
 }
@@ -324,16 +356,22 @@ fn test_epoch_race_on_split() {
     // 模拟 Split 期间的 Epoch 竞态
     use coord_core::types::RegionEpoch;
 
-    let pre_split = RegionEpoch { conf_ver: 1, version: 1 };
-    let post_split = RegionEpoch { conf_ver: 1, version: 2 };
+    let pre_split = RegionEpoch {
+        conf_ver: 1,
+        version: 1,
+    };
+    let post_split = RegionEpoch {
+        conf_ver: 1,
+        version: 2,
+    };
 
     // 使用 pre_split epoch 发送的请求应被拒绝
     let request_stale = pre_split.version < post_split.version;
     assert!(request_stale);
 
     // 使用 post_split epoch 发送的请求应被接受
-    let request_fresh = post_split.version >= pre_split.version
-        && post_split.conf_ver >= pre_split.conf_ver;
+    let request_fresh =
+        post_split.version >= pre_split.version && post_split.conf_ver >= pre_split.conf_ver;
     assert!(request_fresh);
 }
 
@@ -407,7 +445,7 @@ fn test_linearizable_single_key_writes() {
 fn test_high_concurrency_stress() {
     // 高并发压力：100 个线程，每个写入 1000 个 key
     let store = Arc::new(SimpleKvStore::new());
-    let num_writers = 10;  // 减少线程数以适应测试环境
+    let num_writers = 10; // 减少线程数以适应测试环境
     let keys_per_writer = 500;
     let start = Instant::now();
 
@@ -444,7 +482,11 @@ fn test_high_concurrency_stress() {
     );
 
     // 性能断言：至少 1000 writes/sec（单线程内存存储应轻松达到）
-    assert!(writes_per_sec > 1000.0, "write throughput too low: {:.0} w/s", writes_per_sec);
+    assert!(
+        writes_per_sec > 1000.0,
+        "write throughput too low: {:.0} w/s",
+        writes_per_sec
+    );
 }
 
 // ============================================================================

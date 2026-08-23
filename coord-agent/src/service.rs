@@ -229,10 +229,7 @@ impl ServiceManager {
     /// 注册一个服务实例
     ///
     /// 若同名服务已存在，返回 Err。
-    pub async fn register(
-        &self,
-        service: Arc<dyn BaseService>,
-    ) -> ServiceResult<()> {
+    pub async fn register(&self, service: Arc<dyn BaseService>) -> ServiceResult<()> {
         let name = service.name();
         let mut services = self.services.write().await;
         if services.contains_key(name) {
@@ -267,9 +264,10 @@ impl ServiceManager {
         let services = self.services.read().await;
         for (name, service) in services.iter() {
             tracing::info!("ServiceManager: starting service '{name}'");
-            service.start().await.map_err(|e| {
-                format!("failed to start service '{name}': {e}")
-            })?;
+            service
+                .start()
+                .await
+                .map_err(|e| format!("failed to start service '{name}': {e}"))?;
             tracing::info!("ServiceManager: service '{name}' started successfully");
         }
         Ok(())
@@ -411,8 +409,14 @@ mod tests {
         let config = ServiceConfig::default();
         let manager = ServiceManager::new(config);
 
-        manager.register(Arc::new(StubService::new("s1"))).await.unwrap();
-        manager.register(Arc::new(StubService::new("s2"))).await.unwrap();
+        manager
+            .register(Arc::new(StubService::new("s1")))
+            .await
+            .unwrap();
+        manager
+            .register(Arc::new(StubService::new("s2")))
+            .await
+            .unwrap();
 
         manager.start_all().await.unwrap();
 
@@ -454,17 +458,35 @@ mod tests {
         let config = ServiceConfig::default();
         // 核心基础服务 — 默认启用
         assert!(config.registry, "registry should be enabled by default");
-        assert!(config.config_center, "config_center should be enabled by default");
+        assert!(
+            config.config_center,
+            "config_center should be enabled by default"
+        );
         // Phase A: 默认启用 lock / transit / pki / workflow
         assert!(config.lock, "lock should be enabled by default (Phase A)");
-        assert!(config.transit, "transit should be enabled by default (Phase A)");
+        assert!(
+            config.transit,
+            "transit should be enabled by default (Phase A)"
+        );
         assert!(config.pki, "pki should be enabled by default (Phase A)");
-        assert!(config.workflow, "workflow should be enabled by default (Phase A)");
+        assert!(
+            config.workflow,
+            "workflow should be enabled by default (Phase A)"
+        );
         // IdGen 为数据面服务 — 默认启用（无 Server 时本地雪花降级）
-        assert!(config.idgen, "idgen should be enabled by default (data-plane)");
+        assert!(
+            config.idgen,
+            "idgen should be enabled by default (data-plane)"
+        );
         // 数据面服务 — 默认启用（无需 Server 连接）
-        assert!(config.cache, "cache should be enabled by default (data-plane)");
-        assert!(config.policy, "policy should be enabled by default (data-plane)");
+        assert!(
+            config.cache,
+            "cache should be enabled by default (data-plane)"
+        );
+        assert!(
+            config.policy,
+            "policy should be enabled by default (data-plane)"
+        );
         // 其他服务保持默认关闭
         assert!(!config.leader_election);
         assert!(!config.event_notification);
@@ -544,7 +566,8 @@ policy = false
             &self,
             builder: tonic::transport::server::Router,
         ) -> tonic::transport::server::Router {
-            self.grpc_called.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.grpc_called
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             builder
         }
 

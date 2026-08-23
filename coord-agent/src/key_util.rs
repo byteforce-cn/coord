@@ -11,14 +11,14 @@
 // - KeyringKeyStore: Linux kernel keyring 后端 (cfg(target_os = "linux"))
 // - KeyUtil: facade，根据配置选择后端
 
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 // ──── 常量 ────
 
@@ -219,7 +219,7 @@ impl KeyStore for FileKeyStore {
         for entry in fs::read_dir(&self.data_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "enc") {
+            if path.extension().is_some_and(|ext| ext == "enc") {
                 if let Some(stem) = path.file_stem() {
                     keys.push(stem.to_string_lossy().to_string());
                 }
@@ -243,9 +243,9 @@ impl KeyUtil {
     pub fn new(config: KeyUtilConfig) -> Result<Self, KeyStoreError> {
         let backend: Box<dyn KeyStore> = match config.backend {
             KeyStoreBackend::File => {
-                let dir = config.file_path.unwrap_or_else(|| {
-                    PathBuf::from("/var/lib/coord-agent/keys")
-                });
+                let dir = config
+                    .file_path
+                    .unwrap_or_else(|| PathBuf::from("/var/lib/coord-agent/keys"));
                 Box::new(FileKeyStore::new(dir))
             }
             KeyStoreBackend::Keyring => {
@@ -256,7 +256,7 @@ impl KeyUtil {
                 #[cfg(not(target_os = "linux"))]
                 {
                     return Err(KeyStoreError::Crypto(
-                        "keyring backend is only available on Linux".into()
+                        "keyring backend is only available on Linux".into(),
                     ));
                 }
             }
@@ -309,8 +309,11 @@ impl KeyringKeyStore {
         let hex_key = hex::encode(key_data);
         let output = std::process::Command::new("keyctl")
             .args([
-                "add", "user", &format!("coord:{}", key_id),
-                &hex_key, &format!("@{}", self.keyring_name),
+                "add",
+                "user",
+                &format!("coord:{}", key_id),
+                &hex_key,
+                &format!("@{}", self.keyring_name),
             ])
             .output()
             .map_err(|e| KeyStoreError::Io(e))?;
@@ -318,7 +321,9 @@ impl KeyringKeyStore {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // keyctl 不可用时回退到文件存储
-            return Err(KeyStoreError::Crypto(format!("keyctl add failed: {stderr}")));
+            return Err(KeyStoreError::Crypto(format!(
+                "keyctl add failed: {stderr}"
+            )));
         }
         Ok(())
     }
@@ -336,15 +341,19 @@ impl KeyringKeyStore {
 
         // keyctl read 返回 hex 编码的数据
         let hex_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        hex::decode(&hex_str)
-            .map_err(|e| KeyStoreError::Crypto(format!("hex decode failed: {e}")))
+        hex::decode(&hex_str).map_err(|e| KeyStoreError::Crypto(format!("hex decode failed: {e}")))
     }
 
     /// 通过 keyctl 命令撤销密钥
     fn keyctl_revoke(&self, key_id: &str) -> Result<(), KeyStoreError> {
         // 先查找 key ID
         let output = std::process::Command::new("keyctl")
-            .args(["search", &format!("@{}", self.keyring_name), "user", &format!("coord:{}", key_id)])
+            .args([
+                "search",
+                &format!("@{}", self.keyring_name),
+                "user",
+                &format!("coord:{}", key_id),
+            ])
             .output()
             .map_err(|e| KeyStoreError::Io(e))?;
 

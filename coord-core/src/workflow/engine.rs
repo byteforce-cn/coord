@@ -70,7 +70,10 @@ impl<E: ExpressionEval, C: Clock> WorkflowExecutor<E, C> {
         // 1) 任务 `if` 条件：条件为假 → 跳过任务（Skipped 帧，推进）
         if let Some(meta) = meta {
             if let Some(cond) = &meta.if_condition {
-                match self.expr.evaluate_bool_with_vars(cond, &inst.context, &vars) {
+                match self
+                    .expr
+                    .evaluate_bool_with_vars(cond, &inst.context, &vars)
+                {
                     Ok(true) => {}
                     Ok(false) => {
                         let now = self.clock.now_ms();
@@ -90,7 +93,10 @@ impl<E: ExpressionEval, C: Clock> WorkflowExecutor<E, C> {
                     Err(e) => {
                         return StepResult::Failed {
                             fault: crate::workflow::errors::WorkflowFault::expression(
-                                format!("task '{}' if condition evaluation failed", current_task.name),
+                                format!(
+                                    "task '{}' if condition evaluation failed",
+                                    current_task.name
+                                ),
                                 e.to_string(),
                             ),
                         };
@@ -154,7 +160,10 @@ impl<E: ExpressionEval, C: Clock> WorkflowExecutor<E, C> {
         if let Some(schema) = &input_cfg.schema {
             if let Err(errs) = crate::workflow::jsonschema::validate(schema, &transformed) {
                 return Err(crate::workflow::errors::WorkflowFault::validation(
-                    format!("task '{}' input failed schema validation", current_task.name),
+                    format!(
+                        "task '{}' input failed schema validation",
+                        current_task.name
+                    ),
                     errs.join("; "),
                 )
                 .with_instance(format!("/tasks/{}/input", current_task.name)));
@@ -165,23 +174,25 @@ impl<E: ExpressionEval, C: Clock> WorkflowExecutor<E, C> {
     }
 
     /// 执行命名任务 —— 委托到 tasks/ 模块
-    fn execute_named_task(
-        &self,
-        named: &NamedTask,
-        inst: &WorkflowInstance,
-    ) -> StepResult {
+    fn execute_named_task(&self, named: &NamedTask, inst: &WorkflowInstance) -> StepResult {
         match &named.task {
             Task::Call(call) => super::tasks::call::execute(named, call, inst, &self.clock),
             Task::Do(do_task) => super::tasks::do_task::execute(named, do_task, inst, &self.clock),
-            Task::Switch(switch) => super::tasks::switch::execute(named, switch, inst, &self.expr, &self.clock),
+            Task::Switch(switch) => {
+                super::tasks::switch::execute(named, switch, inst, &self.expr, &self.clock)
+            }
             Task::Wait(wait) => super::tasks::wait::execute(named, wait, &self.clock),
             Task::Set(set) => super::tasks::set::execute(named, set, inst, &self.expr, &self.clock),
             Task::Raise(raise) => super::tasks::raise::execute(named, raise, inst, &self.clock),
             Task::Emit(emit) => super::tasks::emit::execute(named, emit, inst, &self.clock),
             Task::Listen(listen) => super::tasks::listen::execute(named, listen, inst, &self.clock),
             Task::Fork(fork) => super::tasks::fork::execute(named, fork, inst, &self.clock),
-            Task::ForEach(for_each) => super::tasks::for_each::execute(named, for_each, inst, &self.expr, &self.clock),
-            Task::TryCatch(try_catch) => super::tasks::try_catch::execute(named, try_catch, inst, &self.clock),
+            Task::ForEach(for_each) => {
+                super::tasks::for_each::execute(named, for_each, inst, &self.expr, &self.clock)
+            }
+            Task::TryCatch(try_catch) => {
+                super::tasks::try_catch::execute(named, try_catch, inst, &self.clock)
+            }
             Task::Run(run) => super::tasks::run::execute(named, run, inst, &self.clock),
             Task::End(end) => super::tasks::end::execute(named, end, inst, &self.clock),
         }
@@ -218,7 +229,10 @@ pub(crate) fn build_expression_vars(
         }),
     );
     // 认证上下文（P2 注入）
-    vars.insert("authorization".to_string(), Value::Object(Default::default()));
+    vars.insert(
+        "authorization".to_string(),
+        Value::Object(Default::default()),
+    );
     // 密钥（P2 注入真实值；此处仅声明键）
     vars.insert("secrets".to_string(), Value::Object(Default::default()));
     if let Some(c) = &definition.constants.values {
@@ -284,12 +298,11 @@ pub fn parse_iso8601_duration_ms(duration: &str) -> Option<i64> {
     }
 
     // 解析 P...T... 格式
-    let (date_part, time_part) = if let Some(t_pos) = s.find('T') {
-        (&s[1..t_pos], Some(&s[t_pos + 1..]))
-    } else if s.starts_with('P') {
-        (&s[1..], None)
+    let rest = s.strip_prefix('P')?;
+    let (date_part, time_part) = if let Some(t_pos) = rest.find('T') {
+        (&rest[..t_pos], Some(&rest[t_pos + 1..]))
     } else {
-        return None;
+        (rest, None)
     };
 
     let mut total_ms: f64 = 0.0;
@@ -396,7 +409,9 @@ mod tests {
         let executor = make_executor();
         let def = make_definition(vec![NamedTask {
             name: "only".into(),
-            task: Task::Wait(WaitTask { wait: "PT1S".into() }),
+            task: Task::Wait(WaitTask {
+                wait: "PT1S".into(),
+            }),
         }]);
         let inst = make_instance(1); // index past the only task
 

@@ -157,7 +157,7 @@ impl MergeChecker {
     fn new() -> Self {
         Self {
             merge_size_threshold: 16 * 1024 * 1024, // 16 MB
-            max_merge_size: 256 * 1024 * 1024,       // 256 MB
+            max_merge_size: 256 * 1024 * 1024,      // 256 MB
         }
     }
 
@@ -298,7 +298,11 @@ impl ReplicaChecker {
     }
 
     fn check(&self, region: &RegionMeta) -> ReplicaAction {
-        let voter_count = region.peers.iter().filter(|p| p.role == PeerRole::Voter).count();
+        let voter_count = region
+            .peers
+            .iter()
+            .filter(|p| p.role == PeerRole::Voter)
+            .count();
 
         if voter_count < self.target_replicas {
             ReplicaAction::AddReplica
@@ -320,9 +324,21 @@ fn test_replica_checker_healthy() {
         end_key: vec![],
         epoch: RegionEpoch::initial(),
         peers: vec![
-            Peer { node_id: 1, raft_addr: "a".to_string(), role: PeerRole::Voter },
-            Peer { node_id: 2, raft_addr: "b".to_string(), role: PeerRole::Voter },
-            Peer { node_id: 3, raft_addr: "c".to_string(), role: PeerRole::Voter },
+            Peer {
+                node_id: 1,
+                raft_addr: "a".to_string(),
+                role: PeerRole::Voter,
+            },
+            Peer {
+                node_id: 2,
+                raft_addr: "b".to_string(),
+                role: PeerRole::Voter,
+            },
+            Peer {
+                node_id: 3,
+                raft_addr: "c".to_string(),
+                role: PeerRole::Voter,
+            },
         ],
         approximate_size: 0,
         approximate_keys: 0,
@@ -339,9 +355,11 @@ fn test_replica_checker_needs_replica() {
         start_key: vec![],
         end_key: vec![],
         epoch: RegionEpoch::initial(),
-        peers: vec![
-            Peer { node_id: 1, raft_addr: "a".to_string(), role: PeerRole::Voter },
-        ],
+        peers: vec![Peer {
+            node_id: 1,
+            raft_addr: "a".to_string(),
+            role: PeerRole::Voter,
+        }],
         approximate_size: 0,
         approximate_keys: 0,
     };
@@ -358,17 +376,40 @@ fn test_replica_checker_too_many_replicas() {
         end_key: vec![],
         epoch: RegionEpoch::initial(),
         peers: vec![
-            Peer { node_id: 1, raft_addr: "a".to_string(), role: PeerRole::Voter },
-            Peer { node_id: 2, raft_addr: "b".to_string(), role: PeerRole::Voter },
-            Peer { node_id: 3, raft_addr: "c".to_string(), role: PeerRole::Voter },
-            Peer { node_id: 4, raft_addr: "d".to_string(), role: PeerRole::Voter },
-            Peer { node_id: 5, raft_addr: "e".to_string(), role: PeerRole::Voter },
+            Peer {
+                node_id: 1,
+                raft_addr: "a".to_string(),
+                role: PeerRole::Voter,
+            },
+            Peer {
+                node_id: 2,
+                raft_addr: "b".to_string(),
+                role: PeerRole::Voter,
+            },
+            Peer {
+                node_id: 3,
+                raft_addr: "c".to_string(),
+                role: PeerRole::Voter,
+            },
+            Peer {
+                node_id: 4,
+                raft_addr: "d".to_string(),
+                role: PeerRole::Voter,
+            },
+            Peer {
+                node_id: 5,
+                raft_addr: "e".to_string(),
+                role: PeerRole::Voter,
+            },
         ],
         approximate_size: 0,
         approximate_keys: 0,
     };
 
-    assert!(matches!(checker.check(&region), ReplicaAction::RemoveReplica(_)));
+    assert!(matches!(
+        checker.check(&region),
+        ReplicaAction::RemoveReplica(_)
+    ));
 }
 
 #[test]
@@ -380,9 +421,21 @@ fn test_replica_checker_learners_not_counted() {
         end_key: vec![],
         epoch: RegionEpoch::initial(),
         peers: vec![
-            Peer { node_id: 1, raft_addr: "a".to_string(), role: PeerRole::Voter },
-            Peer { node_id: 2, raft_addr: "b".to_string(), role: PeerRole::Voter },
-            Peer { node_id: 3, raft_addr: "c".to_string(), role: PeerRole::Learner },
+            Peer {
+                node_id: 1,
+                raft_addr: "a".to_string(),
+                role: PeerRole::Voter,
+            },
+            Peer {
+                node_id: 2,
+                raft_addr: "b".to_string(),
+                role: PeerRole::Voter,
+            },
+            Peer {
+                node_id: 3,
+                raft_addr: "c".to_string(),
+                role: PeerRole::Learner,
+            },
         ],
         approximate_size: 0,
         approximate_keys: 0,
@@ -399,11 +452,7 @@ fn test_replica_checker_learners_not_counted() {
 #[test]
 fn test_balance_finds_overloaded_node() {
     // 模拟节点负载：Node1 有 10 个 Region，Node2 有 2 个，Node3 有 3 个
-    let node_loads = vec![
-        (1u64, 10u32),
-        (2u64, 2u32),
-        (3u64, 3u32),
-    ];
+    let node_loads = vec![(1u64, 10u32), (2u64, 2u32), (3u64, 3u32)];
 
     // 平均负载 = (10 + 2 + 3) / 3 = 5
     let avg: f64 = node_loads.iter().map(|(_, c)| *c as f64).sum::<f64>() / node_loads.len() as f64;
@@ -429,11 +478,7 @@ fn test_balance_finds_overloaded_node() {
 
 #[test]
 fn test_balance_no_action_when_balanced() {
-    let node_loads = vec![
-        (1u64, 5u32),
-        (2u64, 5u32),
-        (3u64, 5u32),
-    ];
+    let node_loads = vec![(1u64, 5u32), (2u64, 5u32), (3u64, 5u32)];
 
     let avg: f64 = node_loads.iter().map(|(_, c)| *c as f64).sum::<f64>() / node_loads.len() as f64;
 
@@ -451,11 +496,26 @@ fn test_balance_no_action_when_balanced() {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Operator {
-    AddPeer { region_id: RegionId, node_id: u64 },
-    RemovePeer { region_id: RegionId, node_id: u64 },
-    TransferLeader { region_id: RegionId, to_node: u64 },
-    SplitRegion { region_id: RegionId, split_key: Vec<u8> },
-    MergeRegion { left: RegionId, right: RegionId },
+    AddPeer {
+        region_id: RegionId,
+        node_id: u64,
+    },
+    RemovePeer {
+        region_id: RegionId,
+        node_id: u64,
+    },
+    TransferLeader {
+        region_id: RegionId,
+        to_node: u64,
+    },
+    SplitRegion {
+        region_id: RegionId,
+        split_key: Vec<u8>,
+    },
+    MergeRegion {
+        left: RegionId,
+        right: RegionId,
+    },
 }
 
 #[test]
@@ -473,7 +533,13 @@ fn test_operator_add_peer() {
         region_id: 1,
         node_id: 2,
     };
-    assert!(matches!(op, Operator::AddPeer { region_id: 1, node_id: 2 }));
+    assert!(matches!(
+        op,
+        Operator::AddPeer {
+            region_id: 1,
+            node_id: 2
+        }
+    ));
 }
 
 #[test]
@@ -489,7 +555,8 @@ fn test_operator_merge_region() {
 #[test]
 fn test_pd_meta_store_basic_crud() {
     // 模拟内存 PD Meta Store
-    let mut store: std::collections::HashMap<RegionId, RegionMeta> = std::collections::HashMap::new();
+    let mut store: std::collections::HashMap<RegionId, RegionMeta> =
+        std::collections::HashMap::new();
 
     // Create
     let meta = RegionMeta {

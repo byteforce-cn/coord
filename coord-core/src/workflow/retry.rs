@@ -71,13 +71,8 @@ impl RetryConfig {
             .as_ref()
             .map(|b| RetryStrategy::from(b.clone()))
             .unwrap_or(RetryStrategy::Constant);
-        let jitter = jitter_factor.unwrap_or_else(|| {
-            policy
-                .jitter
-                .as_ref()
-                .map(|j| j.factor)
-                .unwrap_or(0.0)
-        });
+        let jitter = jitter_factor
+            .unwrap_or_else(|| policy.jitter.as_ref().map(|j| j.factor).unwrap_or(0.0));
 
         Self {
             delay_ms,
@@ -101,10 +96,7 @@ pub struct RetryScheduler {
 impl RetryScheduler {
     /// 创建新的调度器（attempt 初始为 1，即首次执行已算在内）
     pub fn new(config: RetryConfig) -> Self {
-        Self {
-            config,
-            attempt: 1,
-        }
+        Self { config, attempt: 1 }
     }
 
     /// 当前尝试次数（1-indexed）
@@ -202,12 +194,11 @@ fn parse_duration_ms(duration: &str) -> Option<u64> {
     }
 
     // Parse P...T... format
-    let (date_part, time_part) = if let Some(t_pos) = s.find('T') {
-        (&s[1..t_pos], Some(&s[t_pos + 1..]))
-    } else if s.starts_with('P') {
-        (&s[1..], None)
+    let rest = s.strip_prefix('P')?;
+    let (date_part, time_part) = if let Some(t_pos) = rest.find('T') {
+        (&rest[..t_pos], Some(&rest[t_pos + 1..]))
     } else {
-        return None;
+        (rest, None)
     };
 
     let mut total_ms: f64 = 0.0;

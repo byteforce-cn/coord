@@ -133,7 +133,8 @@ impl SnapshotRateLimiter {
 
     /// 更新限速配置
     pub fn set_rate(&self, max_bytes_per_sec: u64) {
-        self.max_bytes_per_sec.store(max_bytes_per_sec, Ordering::SeqCst);
+        self.max_bytes_per_sec
+            .store(max_bytes_per_sec, Ordering::SeqCst);
         // 重置 token bucket
         self.token_bucket.store(max_bytes_per_sec, Ordering::SeqCst);
     }
@@ -164,20 +165,23 @@ mod tests {
     #[test]
     fn test_limited_acquire_small() {
         let limiter = SnapshotRateLimiter::new(1024 * 1024); // 1 MB/s
-        // 初始 token bucket 是满的
+                                                             // 初始 token bucket 是满的
         assert!(limiter.try_acquire(512 * 1024)); // 512 KB
     }
 
     #[test]
     fn test_limited_exhaustion() {
         let limiter = SnapshotRateLimiter::new(1024 * 1024); // 1 MB/s bucket
-        // 快速消耗所有 token
+                                                             // 快速消耗所有 token
         let mut acquired = 0u64;
         while limiter.try_acquire(128 * 1024) {
             acquired += 128 * 1024;
         }
         // 至少获得了初始 tokens
-        assert!(acquired >= 512 * 1024, "should acquire at least half bucket");
+        assert!(
+            acquired >= 512 * 1024,
+            "should acquire at least half bucket"
+        );
     }
 
     #[test]
@@ -212,7 +216,7 @@ mod tests {
     #[tokio::test]
     async fn test_async_acquire_limited() {
         let limiter = SnapshotRateLimiter::new(100 * 1024 * 1024); // 100 MB/s
-        // 初始 bucket 满，应能立即获取
+                                                                   // 初始 bucket 满，应能立即获取
         let start = Instant::now();
         limiter.acquire(10 * 1024 * 1024).await;
         // 应该很快完成（< 1s）

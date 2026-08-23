@@ -68,14 +68,10 @@ pub struct CacheStats {
 
 const STRING_TABLE: redb::TableDefinition<&[u8], &[u8]> =
     redb::TableDefinition::new("cache:string");
-const HASH_TABLE: redb::TableDefinition<&[u8], &[u8]> =
-    redb::TableDefinition::new("cache:hash");
-const LIST_TABLE: redb::TableDefinition<&[u8], &[u8]> =
-    redb::TableDefinition::new("cache:list");
-const SET_TABLE: redb::TableDefinition<&[u8], u64> =
-    redb::TableDefinition::new("cache:set");
-const SHARD_TABLE: redb::TableDefinition<&str, &[u8]> =
-    redb::TableDefinition::new("cache:shards");
+const HASH_TABLE: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("cache:hash");
+const LIST_TABLE: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("cache:list");
+const SET_TABLE: redb::TableDefinition<&[u8], u64> = redb::TableDefinition::new("cache:set");
+const SHARD_TABLE: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("cache:shards");
 
 // ──── 复制日志表（ISR，v2.1）────
 // 复制条目日志: key = [shard_len:u32][shard_bytes][seq:u64 BE]
@@ -248,7 +244,9 @@ impl CacheService {
     }
 
     /// 复制管理器引用（None = 复制关闭）
-    pub fn replication_manager(&self) -> Option<Arc<crate::services::replication::ReplicationManager>> {
+    pub fn replication_manager(
+        &self,
+    ) -> Option<Arc<crate::services::replication::ReplicationManager>> {
         self.replication.read().clone()
     }
 
@@ -266,7 +264,12 @@ impl CacheService {
 
     // ──── String 操作 ────
 
-    pub fn string_put(&self, key: &str, value: Vec<u8>, ttl_secs: Option<u64>) -> ServiceResult<()> {
+    pub fn string_put(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        ttl_secs: Option<u64>,
+    ) -> ServiceResult<()> {
         let ttl = ttl_secs.unwrap_or(self.default_ttl_secs);
         let encoded = encode_value(&value, ttl);
         let wtx = self.write_tx()?;
@@ -282,10 +285,7 @@ impl CacheService {
         let rtx = self.read_tx()?;
         let raw: Option<Vec<u8>> = {
             let table = rtx.open_table(STRING_TABLE)?;
-            match table.get(key.as_bytes())? {
-                Some(v) => Some(v.value().to_vec()),
-                None => None,
-            }
+            table.get(key.as_bytes())?.map(|v| v.value().to_vec())
         };
         drop(rtx);
 
@@ -318,7 +318,13 @@ impl CacheService {
 
     // ──── Hash 操作 ────
 
-    pub fn hash_field_put(&self, key: &str, field: &str, value: Vec<u8>, ttl_secs: Option<u64>) -> ServiceResult<()> {
+    pub fn hash_field_put(
+        &self,
+        key: &str,
+        field: &str,
+        value: Vec<u8>,
+        ttl_secs: Option<u64>,
+    ) -> ServiceResult<()> {
         let ttl = ttl_secs.unwrap_or(self.default_ttl_secs);
         let encoded = encode_value(&value, ttl);
         let hk = encode_hash_key(key, field);
@@ -336,10 +342,7 @@ impl CacheService {
         let rtx = self.read_tx()?;
         let raw: Option<Vec<u8>> = {
             let table = rtx.open_table(HASH_TABLE)?;
-            match table.get(hk.as_slice())? {
-                Some(v) => Some(v.value().to_vec()),
-                None => None,
-            }
+            table.get(hk.as_slice())?.map(|v| v.value().to_vec())
         };
         drop(rtx);
 
@@ -372,8 +375,12 @@ impl CacheService {
                 }
                 let field = String::from_utf8_lossy(&k[plen..]).to_string();
                 match decode_value(raw.value()) {
-                    Some(val) => { m.insert(field, val); }
-                    None => { ex.push(field); }
+                    Some(val) => {
+                        m.insert(field, val);
+                    }
+                    None => {
+                        ex.push(field);
+                    }
                 }
             }
             (m, ex)
@@ -420,7 +427,12 @@ impl CacheService {
 
     // ──── List 操作 ────
 
-    pub fn list_push_right(&self, key: &str, value: Vec<u8>, ttl_secs: Option<u64>) -> ServiceResult<()> {
+    pub fn list_push_right(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        ttl_secs: Option<u64>,
+    ) -> ServiceResult<()> {
         let ttl = ttl_secs.unwrap_or(self.default_ttl_secs);
         let encoded = encode_value(&value, ttl);
         let prefix = list_key_prefix(key);
@@ -434,7 +446,9 @@ impl CacheService {
             for item in table.range(range)? {
                 let (k, _) = item?;
                 let k = k.value();
-                if !k.starts_with(&prefix) { break; }
+                if !k.starts_with(&prefix) {
+                    break;
+                }
                 if let Some(idx) = decode_list_index(k, plen) {
                     last = last.max(idx);
                 }
@@ -453,7 +467,12 @@ impl CacheService {
         Ok(())
     }
 
-    pub fn list_push_left(&self, key: &str, value: Vec<u8>, ttl_secs: Option<u64>) -> ServiceResult<()> {
+    pub fn list_push_left(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        ttl_secs: Option<u64>,
+    ) -> ServiceResult<()> {
         let ttl = ttl_secs.unwrap_or(self.default_ttl_secs);
         let encoded = encode_value(&value, ttl);
         let prefix = list_key_prefix(key);
@@ -467,9 +486,11 @@ impl CacheService {
             for item in table.range(range)? {
                 let (k, _) = item?;
                 let k = k.value();
-                if !k.starts_with(&prefix) { break; }
+                if !k.starts_with(&prefix) {
+                    break;
+                }
                 if let Some(idx) = decode_list_index(k, plen) {
-                    if first.map_or(true, |f| idx < f) {
+                    if first.is_none_or(|f| idx < f) {
                         first = Some(idx);
                     }
                 }
@@ -505,10 +526,18 @@ impl CacheService {
             for item in table.range(range)? {
                 let (k, raw) = item?;
                 let k = k.value();
-                if !k.starts_with(&prefix) { break; }
+                if !k.starts_with(&prefix) {
+                    break;
+                }
                 if let Some(idx) = decode_list_index(k, plen) {
                     let is_better = match &best {
-                        Some((b, _)) => if find_max { idx > *b } else { idx < *b },
+                        Some((b, _)) => {
+                            if find_max {
+                                idx > *b
+                            } else {
+                                idx < *b
+                            }
+                        }
                         None => true,
                     };
                     if is_better {
@@ -551,7 +580,9 @@ impl CacheService {
             for item in table.range(range)? {
                 let (k, raw) = item?;
                 let k = k.value();
-                if !k.starts_with(&prefix) { break; }
+                if !k.starts_with(&prefix) {
+                    break;
+                }
                 if let Some(idx) = decode_list_index(k, plen) {
                     if let Some(val) = decode_value(raw.value()) {
                         v.push((idx, val));
@@ -566,7 +597,12 @@ impl CacheService {
         let len = items.len() as i64;
         let end = if end < 0 { len + end + 1 } else { end.min(len) };
         let start = start.max(0);
-        Ok(items.into_iter().skip(start as usize).take((end - start).max(0) as usize).map(|(_, v)| v).collect())
+        Ok(items
+            .into_iter()
+            .skip(start as usize)
+            .take((end - start).max(0) as usize)
+            .map(|(_, v)| v)
+            .collect())
     }
 
     pub fn list_length(&self, key: &str) -> ServiceResult<u64> {
@@ -578,15 +614,24 @@ impl CacheService {
         for item in table.range(range)? {
             let (k, raw) = item?;
             let k = k.value();
-            if !k.starts_with(&prefix) { break; }
-            if decode_value(raw.value()).is_some() { count += 1; }
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            if decode_value(raw.value()).is_some() {
+                count += 1;
+            }
         }
         Ok(count)
     }
 
     // ──── Set 操作 ────
 
-    pub fn set_add(&self, key: &str, member: Vec<u8>, ttl_secs: Option<u64>) -> ServiceResult<bool> {
+    pub fn set_add(
+        &self,
+        key: &str,
+        member: Vec<u8>,
+        ttl_secs: Option<u64>,
+    ) -> ServiceResult<bool> {
         let ttl = ttl_secs.unwrap_or(self.default_ttl_secs);
         let expires_at = encode_ttl(ttl);
         let sk = encode_set_key(key, &member);
@@ -621,15 +666,15 @@ impl CacheService {
         let rtx = self.read_tx()?;
         let expires_at: Option<u64> = {
             let table = rtx.open_table(SET_TABLE)?;
-            match table.get(sk.as_slice())? {
-                Some(v) => Some(v.value()),
-                None => None,
-            }
+            table.get(sk.as_slice())?.map(|v| v.value())
         };
         drop(rtx);
         match expires_at {
             Some(exp) if !is_expired(exp) => Ok(true),
-            Some(_) => { let _ = self.set_remove(key, member); Ok(false) }
+            Some(_) => {
+                let _ = self.set_remove(key, member);
+                Ok(false)
+            }
             None => Ok(false),
         }
     }
@@ -646,14 +691,22 @@ impl CacheService {
             for item in table.range(range)? {
                 let (k, exp) = item?;
                 let k = k.value();
-                if !k.starts_with(&prefix) { break; }
+                if !k.starts_with(&prefix) {
+                    break;
+                }
                 let member = decode_set_member(k, plen);
-                if is_expired(exp.value()) { ex.push(member); } else { m.push(member); }
+                if is_expired(exp.value()) {
+                    ex.push(member);
+                } else {
+                    m.push(member);
+                }
             }
             (m, ex)
         };
         drop(rtx);
-        for m in &expired { let _ = self.set_remove(key, m); }
+        for m in &expired {
+            let _ = self.set_remove(key, m);
+        }
         Ok(members)
     }
 
@@ -666,8 +719,12 @@ impl CacheService {
         for item in table.range(range)? {
             let (k, exp) = item?;
             let k = k.value();
-            if !k.starts_with(&prefix) { break; }
-            if !is_expired(exp.value()) { count += 1; }
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            if !is_expired(exp.value()) {
+                count += 1;
+            }
         }
         Ok(count)
     }
@@ -689,10 +746,7 @@ impl CacheService {
         let rtx = self.read_tx()?;
         let raw: Option<Vec<u8>> = {
             let table = rtx.open_table(SHARD_TABLE)?;
-            match table.get(shard_id)? {
-                Some(v) => Some(v.value().to_vec()),
-                None => None,
-            }
+            table.get(shard_id)?.map(|v| v.value().to_vec())
         };
         drop(rtx);
         match raw {
@@ -722,7 +776,9 @@ impl CacheService {
             let mut count = 0u64;
             for item in table.iter()? {
                 let (_, raw) = item?;
-                if decode_value(raw.value()).is_some() { count += 1; }
+                if decode_value(raw.value()).is_some() {
+                    count += 1;
+                }
             }
             count
         };
@@ -770,7 +826,12 @@ impl CacheService {
                 let table = rtx.open_table(SHARD_TABLE)?;
                 table.iter()?.count() as u64
             };
-            (seen_hash.len() as u64, seen_list.len() as u64, seen_set.len() as u64, sc)
+            (
+                seen_hash.len() as u64,
+                seen_list.len() as u64,
+                seen_set.len() as u64,
+                sc,
+            )
         };
 
         Ok(CacheStats {
@@ -789,10 +850,15 @@ impl CacheService {
             let wtx = self.write_tx()?;
             let keys: Vec<Vec<u8>> = {
                 let table = wtx.open_table(STRING_TABLE)?;
-                table.iter()?.filter_map(|r| r.ok().map(|(k, _)| k.value().to_vec())).collect()
+                table
+                    .iter()?
+                    .filter_map(|r| r.ok().map(|(k, _)| k.value().to_vec()))
+                    .collect()
             };
             let mut table = wtx.open_table(STRING_TABLE)?;
-            for k in &keys { let _ = table.remove(k.as_slice()); }
+            for k in &keys {
+                let _ = table.remove(k.as_slice());
+            }
             drop(table);
             wtx.commit()?;
         }
@@ -800,10 +866,15 @@ impl CacheService {
             let wtx = self.write_tx()?;
             let keys: Vec<Vec<u8>> = {
                 let table = wtx.open_table(HASH_TABLE)?;
-                table.iter()?.filter_map(|r| r.ok().map(|(k, _)| k.value().to_vec())).collect()
+                table
+                    .iter()?
+                    .filter_map(|r| r.ok().map(|(k, _)| k.value().to_vec()))
+                    .collect()
             };
             let mut table = wtx.open_table(HASH_TABLE)?;
-            for k in &keys { let _ = table.remove(k.as_slice()); }
+            for k in &keys {
+                let _ = table.remove(k.as_slice());
+            }
             drop(table);
             wtx.commit()?;
         }
@@ -811,10 +882,15 @@ impl CacheService {
             let wtx = self.write_tx()?;
             let keys: Vec<Vec<u8>> = {
                 let table = wtx.open_table(LIST_TABLE)?;
-                table.iter()?.filter_map(|r| r.ok().map(|(k, _)| k.value().to_vec())).collect()
+                table
+                    .iter()?
+                    .filter_map(|r| r.ok().map(|(k, _)| k.value().to_vec()))
+                    .collect()
             };
             let mut table = wtx.open_table(LIST_TABLE)?;
-            for k in &keys { let _ = table.remove(k.as_slice()); }
+            for k in &keys {
+                let _ = table.remove(k.as_slice());
+            }
             drop(table);
             wtx.commit()?;
         }
@@ -822,10 +898,15 @@ impl CacheService {
             let wtx = self.write_tx()?;
             let keys: Vec<Vec<u8>> = {
                 let table = wtx.open_table(SET_TABLE)?;
-                table.iter()?.filter_map(|r| r.ok().map(|(k, _)| k.value().to_vec())).collect()
+                table
+                    .iter()?
+                    .filter_map(|r| r.ok().map(|(k, _)| k.value().to_vec()))
+                    .collect()
             };
             let mut table = wtx.open_table(SET_TABLE)?;
-            for k in &keys { let _ = table.remove(k.as_slice()); }
+            for k in &keys {
+                let _ = table.remove(k.as_slice());
+            }
             drop(table);
             wtx.commit()?;
         }
@@ -833,10 +914,15 @@ impl CacheService {
             let wtx = self.write_tx()?;
             let keys: Vec<String> = {
                 let table = wtx.open_table(SHARD_TABLE)?;
-                table.iter()?.filter_map(|r| r.ok().map(|(k, _)| k.value().to_string())).collect()
+                table
+                    .iter()?
+                    .filter_map(|r| r.ok().map(|(k, _)| k.value().to_string()))
+                    .collect()
             };
             let mut table = wtx.open_table(SHARD_TABLE)?;
-            for k in &keys { let _ = table.remove(k.as_str()); }
+            for k in &keys {
+                let _ = table.remove(k.as_str());
+            }
             drop(table);
             wtx.commit()?;
         }
@@ -854,7 +940,7 @@ impl CacheService {
 // 参见 docs/cache-mq-isr-evaluation.md §4。
 
 use crate::services::replication::{
-    IdempotencyKey, ReplicationEntry, ReplicationError, ReplicationOp, ReplicatedStore,
+    IdempotencyKey, ReplicatedStore, ReplicationEntry, ReplicationError, ReplicationOp,
 };
 
 /// Cache 单 shard
@@ -882,7 +968,9 @@ fn decode_repl_seq(encoded: &[u8], prefix_len: usize) -> Option<u64> {
     if encoded.len() < prefix_len + 8 {
         return None;
     }
-    Some(u64::from_be_bytes(encoded[prefix_len..prefix_len + 8].try_into().ok()?))
+    Some(u64::from_be_bytes(
+        encoded[prefix_len..prefix_len + 8].try_into().ok()?,
+    ))
 }
 
 impl CacheService {
@@ -931,7 +1019,11 @@ impl CacheService {
 
     /// 单事务应用复制条目：幂等检查 + 数据 op（CachePut / CacheDelete）+ 簿记。
     /// Leader 本地提交与 Follower 应用共用此路径（数据一致）。
-    fn apply_op_tx(&self, wtx: &redb::WriteTransaction, entry: &ReplicationEntry) -> ServiceResult<()> {
+    fn apply_op_tx(
+        &self,
+        wtx: &redb::WriteTransaction,
+        entry: &ReplicationEntry,
+    ) -> ServiceResult<()> {
         // 幂等检查（持久化键）
         let ik = entry.idempotency_key.to_string();
         let applied = {
@@ -943,7 +1035,11 @@ impl CacheService {
             return Ok(());
         }
         match &entry.operation {
-            ReplicationOp::CachePut { key, value, data_type } => match data_type.as_str() {
+            ReplicationOp::CachePut {
+                key,
+                value,
+                data_type,
+            } => match data_type.as_str() {
                 "string" => {
                     let mut t = wtx.open_table(STRING_TABLE)?;
                     t.insert(key.as_slice(), value.as_slice())?;
@@ -960,7 +1056,10 @@ impl CacheService {
                     if value.len() != 8 {
                         return Err("invalid set expires_at encoding (need 8 bytes)".into());
                     }
-                    let exp = u64::from_be_bytes(value[..8].try_into().unwrap());
+                    let Ok(exp_bytes) = value[..8].try_into() else {
+                        return Err("invalid set expires_at encoding (need 8 bytes)".into());
+                    };
+                    let exp = u64::from_be_bytes(exp_bytes);
                     let mut t = wtx.open_table(SET_TABLE)?;
                     t.insert(key.as_slice(), exp)?;
                 }
@@ -1027,7 +1126,10 @@ impl CacheService {
             operation: op,
         };
         self.replicated_apply_local(&entry)?;
-        let acked = rm.push_to_followers(&entry).await.map_err(|e| e.to_string())?;
+        let acked = rm
+            .push_to_followers(&entry)
+            .await
+            .map_err(|e| e.to_string())?;
         rm.ensure_isr(acked + 1).map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -1068,7 +1170,7 @@ impl CacheService {
                 break;
             }
             if let Some(idx) = decode_list_index(k, plen) {
-                if first.map_or(true, |f| idx < f) {
+                if first.is_none_or(|f| idx < f) {
                     first = Some(idx);
                 }
             }
@@ -1193,7 +1295,13 @@ impl CacheService {
                 }
                 if let Some(idx) = decode_list_index(k, plen) {
                     let is_better = match &best {
-                        Some((b, _)) => if find_max { idx > *b } else { idx < *b },
+                        Some((b, _)) => {
+                            if find_max {
+                                idx > *b
+                            } else {
+                                idx < *b
+                            }
+                        }
                         None => true,
                     };
                     if is_better {
@@ -1230,7 +1338,10 @@ impl CacheService {
         wtx.commit()?;
         match popped {
             Some((val, entry)) => {
-                let acked = rm.push_to_followers(&entry).await.map_err(|e| e.to_string())?;
+                let acked = rm
+                    .push_to_followers(&entry)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 rm.ensure_isr(acked + 1).map_err(|e| e.to_string())?;
                 Ok(Some(val))
             }
@@ -1288,7 +1399,8 @@ impl ReplicatedStore for CacheService {
         let result = self.apply_op_tx(&wtx, entry);
         match result {
             Ok(()) => {
-                wtx.commit().map_err(|e| ReplicationError::Store(e.to_string()))?;
+                wtx.commit()
+                    .map_err(|e| ReplicationError::Store(e.to_string()))?;
                 Ok(())
             }
             Err(e) => Err(ReplicationError::Store(e.to_string())),
@@ -1454,9 +1566,14 @@ mod tests {
     fn test_hash_operations() {
         let dir = temp_dir();
         let svc = new_svc(&dir, 3600);
-        svc.hash_field_put("user:1", "name", b"Alice".to_vec(), None).unwrap();
-        svc.hash_field_put("user:1", "age", b"30".to_vec(), None).unwrap();
-        assert_eq!(svc.hash_field_get("user:1", "name").unwrap(), Some(b"Alice".to_vec()));
+        svc.hash_field_put("user:1", "name", b"Alice".to_vec(), None)
+            .unwrap();
+        svc.hash_field_put("user:1", "age", b"30".to_vec(), None)
+            .unwrap();
+        assert_eq!(
+            svc.hash_field_get("user:1", "name").unwrap(),
+            Some(b"Alice".to_vec())
+        );
         let all = svc.hash_get_all("user:1").unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(svc.hash_field_count("user:1").unwrap(), 2);
@@ -1495,7 +1612,8 @@ mod tests {
 
         let total: usize = 200;
         for i in 0..total {
-            svc.list_push_right("q", i.to_le_bytes().to_vec(), None).unwrap();
+            svc.list_push_right("q", i.to_le_bytes().to_vec(), None)
+                .unwrap();
         }
 
         let threads = 8;
@@ -1585,13 +1703,17 @@ mod tests {
     fn test_shard_metadata() {
         let dir = temp_dir();
         let svc = new_svc(&dir, 3600);
-        svc.set_shard_meta("shard-1", CacheShardMeta {
-            shard_id: "shard-1".into(),
-            leader_agent: "a:9500".into(),
-            replicas: vec!["b:9500".into()],
-            key_range_start: vec![0],
-            key_range_end: vec![127],
-        }).unwrap();
+        svc.set_shard_meta(
+            "shard-1",
+            CacheShardMeta {
+                shard_id: "shard-1".into(),
+                leader_agent: "a:9500".into(),
+                replicas: vec!["b:9500".into()],
+                key_range_start: vec![0],
+                key_range_end: vec![127],
+            },
+        )
+        .unwrap();
         let meta = svc.get_shard_meta("shard-1").unwrap().unwrap();
         assert_eq!(meta.leader_agent, "a:9500");
         assert_eq!(svc.list_shards().unwrap().len(), 1);
@@ -1607,9 +1729,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheBackend {
     /// redb 持久化嵌入式数据库（默认）
-    Redb {
-        data_dir: String,
-    },
+    Redb { data_dir: String },
     /// moka 纯内存缓存（高性能，可容忍丢失）
     Moka {
         max_capacity: u64,
@@ -1626,17 +1746,9 @@ impl Default for CacheBackend {
 }
 
 /// 缓存配置
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CacheConfig {
     pub backend: CacheBackend,
-}
-
-impl Default for CacheConfig {
-    fn default() -> Self {
-        Self {
-            backend: CacheBackend::default(),
-        }
-    }
 }
 
 /// Moka 缓存服务 — 纯内存缓存后端
@@ -1657,14 +1769,15 @@ impl MokaCacheService {
     /// 使用 CacheConfig 创建 MokaCacheService
     pub fn new(config: CacheConfig) -> Self {
         let (max_capacity, ttl) = match config.backend {
-            CacheBackend::Moka { max_capacity, time_to_live } => (max_capacity, time_to_live),
+            CacheBackend::Moka {
+                max_capacity,
+                time_to_live,
+            } => (max_capacity, time_to_live),
             _ => (1000, None), // fallback
         };
 
-        let mut string_builder = moka::sync::Cache::builder()
-            .max_capacity(max_capacity);
-        let mut hash_builder = moka::sync::Cache::builder()
-            .max_capacity(max_capacity * 4);
+        let mut string_builder = moka::sync::Cache::builder().max_capacity(max_capacity);
+        let mut hash_builder = moka::sync::Cache::builder().max_capacity(max_capacity * 4);
 
         if let Some(ttl) = ttl {
             string_builder = string_builder.time_to_live(ttl);
@@ -1684,7 +1797,8 @@ impl MokaCacheService {
 
     pub fn string_set(&self, key: &str, value: &[u8]) -> crate::service::ServiceResult<()> {
         self.string_cache.insert(key.to_string(), value.to_vec());
-        self.string_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.string_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -1695,7 +1809,8 @@ impl MokaCacheService {
     pub fn string_delete(&self, key: &str) -> crate::service::ServiceResult<bool> {
         let existed = self.string_cache.remove(&key.to_string()).is_some();
         if existed {
-            self.string_count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            self.string_count
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(existed)
     }
@@ -1710,27 +1825,45 @@ impl MokaCacheService {
         format!("{key}\x00{field}")
     }
 
-    pub fn hash_field_set(&self, key: &str, field: &str, value: &[u8]) -> crate::service::ServiceResult<()> {
+    pub fn hash_field_set(
+        &self,
+        key: &str,
+        field: &str,
+        value: &[u8],
+    ) -> crate::service::ServiceResult<()> {
         let ck = Self::hash_compound_key(key, field);
         self.hash_cache.insert(ck, value.to_vec());
         // Track field in auxiliary index
         let index_key = format!("_hash_idx:{key}");
         let mut sets = self.set_cache.lock();
-        sets.entry(index_key).or_default().insert(field.as_bytes().to_vec());
+        sets.entry(index_key)
+            .or_default()
+            .insert(field.as_bytes().to_vec());
         Ok(())
     }
 
-    pub fn hash_field_get(&self, key: &str, field: &str) -> crate::service::ServiceResult<Option<Vec<u8>>> {
+    pub fn hash_field_get(
+        &self,
+        key: &str,
+        field: &str,
+    ) -> crate::service::ServiceResult<Option<Vec<u8>>> {
         let ck = Self::hash_compound_key(key, field);
         Ok(self.hash_cache.get(&ck))
     }
 
-    pub fn hash_get_all(&self, key: &str) -> crate::service::ServiceResult<BTreeMap<String, Vec<u8>>> {
+    pub fn hash_get_all(
+        &self,
+        key: &str,
+    ) -> crate::service::ServiceResult<BTreeMap<String, Vec<u8>>> {
         let index_key = format!("_hash_idx:{key}");
         let fields: Vec<String> = {
             let sets = self.set_cache.lock();
             sets.get(&index_key)
-                .map(|s| s.iter().filter_map(|b| String::from_utf8(b.clone()).ok()).collect())
+                .map(|s| {
+                    s.iter()
+                        .filter_map(|b| String::from_utf8(b.clone()).ok())
+                        .collect()
+                })
                 .unwrap_or_default()
         };
 
@@ -1798,7 +1931,12 @@ impl MokaCacheService {
         Ok(lists.get(key).map(|l| l.len()).unwrap_or(0))
     }
 
-    pub fn list_range(&self, key: &str, start: usize, end: usize) -> crate::service::ServiceResult<Vec<Vec<u8>>> {
+    pub fn list_range(
+        &self,
+        key: &str,
+        start: usize,
+        end: usize,
+    ) -> crate::service::ServiceResult<Vec<Vec<u8>>> {
         let lists = self.list_cache.lock();
         if let Some(list) = lists.get(key) {
             let end = end.min(list.len());
@@ -1815,7 +1953,10 @@ impl MokaCacheService {
 
     pub fn set_add(&self, key: &str, member: &[u8]) -> crate::service::ServiceResult<bool> {
         let mut sets = self.set_cache.lock();
-        Ok(sets.entry(key.to_string()).or_default().insert(member.to_vec()))
+        Ok(sets
+            .entry(key.to_string())
+            .or_default()
+            .insert(member.to_vec()))
     }
 
     pub fn set_remove(&self, key: &str, member: &[u8]) -> crate::service::ServiceResult<bool> {
@@ -1830,7 +1971,10 @@ impl MokaCacheService {
 
     pub fn set_members(&self, key: &str) -> crate::service::ServiceResult<Vec<Vec<u8>>> {
         let sets = self.set_cache.lock();
-        Ok(sets.get(key).map(|s| s.iter().cloned().collect()).unwrap_or_default())
+        Ok(sets
+            .get(key)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default())
     }
 
     // ──── Stats ────

@@ -1,0 +1,158 @@
+name: CI
+
+# P0-A.4 / P0-H / P1-03：PR 门禁与验收标准入 CI
+#
+# - fmt / clippy（非测试目标 -D warnings，测试目标警告级）/ panic 卡口
+# - 全量 workspace 测试（含 restart_recovery_test / lease_raft_test /
+#   snapshot_transfer_test / snapshot_rpc_test / compaction_raft_test /
+#   m0_recovery_suite 真实二进制套件）
+# - 前端 lint（coord-ui）
+# - proto 契约（buf lint + 格式 + 对 main 的 breaking 检查，P2-03）
+# - nightly 真实故障注入（chaos_real）
+# - 每周性能基准（perf_bench + 劣化 >20% 门禁，P2-06）
+# - 定时 cargo audit / cargo deny（安全依赖治理）
+#
+# 工具链版本由 rust-toolchain.toml 固定（Rust 1.93.0）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # P0-H.4：nightly 触发真实故障注入套件（chaos_real 等 #[ignore] 套件）
+  schedule:
+    - cron: "17 2 * * *"
+    # P1-03：每周依赖审计
+    - cron: "0 4 * * 1"
+    # P2-06：每周性能基准（劣化 >20% 告警）
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: fmt + clippy -D warnings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy (non-test targets, -D warnings) [P1-03]
+        run: cargo clippy --workspace --lib --bins -- -D warnings
+      - name: Clippy (all targets, warning level)
+        run: cargo clippy --workspace --all-targets
+      - name: Panic-path gate (non-test unwrap/expect/panic count = 0, P0-F.4)
+        run: bash scripts/check-panics.sh
+
+  frontend-lint:
+    name: frontend lint (coord-ui)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: coord-ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: coord-ui/pnpm-lock.yaml
+      - name: Install deps (frozen lockfile, P0-G.2)
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint
+      - name: Build
+        run: pnpm build
+
+  proto-lint:
+    name: proto contract (buf lint + breaking)
+    # P2-03：proto 契约治理——lint + 格式 + 对 main 的 breaking 检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: buf lint
+        run: buf lint coord-proto
+      - name: buf format check
+        run: buf format coord-proto --diff --exit-code
+      - name: buf breaking against main
+        # 基线（main）尚无 buf.yaml 时跳过；合入本 PR 后下一 PR 起生效
+        run: |
+          if git show origin/main:coord-proto/buf.yaml >/dev/null 2>&1; then
+            buf breaking coord-proto --against ".git#branch=origin/main,subdir=coord-proto"
+          else
+            echo "base revision has no buf.yaml; breaking gate active from next merge"
+          fi
+
+  test:
+    name: workspace tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+      - name: Build tests
+        run: cargo build --workspace --tests
+      - name: Run workspace tests
+        run: cargo test --workspace --no-fail-fast
+
+  security-audit:
+    name: cargo audit + deny (weekly / manual)
+    # P1-03：依赖安全治理定时执行
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo audit (RustSec)
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: cargo deny (licenses/bans)
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+  chaos-nightly:
+    name: real-process chaos (nightly / manual)
+    # P0-H.4：真实故障注入套件仅在 schedule 或手动触发时运行
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+      - name: Build tests
+        run: cargo build --workspace --tests
+      - name: Run real-process chaos suites
+        env:
+          CHAOS_REAL: "1"
+        run: cargo test -p coord --test chaos_real -- --ignored --nocapture
+
+  perf-bench:
+    name: weekly perf baseline (regression gate)
+    # P2-06：每周基准入仓 + 劣化 >20% 告警；也可手动触发
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+      - name: Run release benchmarks + regression gate
+        run: bash scripts/bench-ci.sh
+      - name: Upload benchmark report
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-bench-report
+          path: benchmark-results/report-*.md
+          retention-days: 30

@@ -9,14 +9,14 @@
 // Watch 是协调层核心原语之一，依赖 MVCC Storage 的 Changelog 表。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
-use coord_core::types::Revision;
 use crate::storage::mvcc::ChangeEvent;
+use coord_core::types::Revision;
 
 // ──── Watch 事件 ────
 
@@ -86,7 +86,16 @@ struct Subscriber {
     range_end: Vec<u8>,
     /// 事件发送通道（有界缓冲区）
     event_tx: mpsc::Sender<WatchEvent>,
+    /// 注册时的回放水位（P0-E.3）：回放 [start_revision, watermark]，
+    /// 实时事件从 watermark+1 续（订阅者循环按 revision 去重）
+    watermark_rev: Revision,
+    /// 溢出标志（P0-E.1）：缓冲区满时置位；订阅者循环 recv 后检查并
+    /// 合成 BufferOverflow 事件（保证溢出通知必达，不依赖竞态）
+    overflow: Arc<AtomicBool>,
 }
+
+/// 默认 watcher 总数上限（P0-E.4：超限拒绝新建）
+const DEFAULT_MAX_SUBSCRIBERS: usize = 10_000;
 
 /// 全局 Watch 事件分发器
 ///
@@ -101,6 +110,8 @@ pub struct WatchDispatcher {
     event_tx: mpsc::UnboundedSender<ChangeEvent>,
     /// 订阅者列表
     subscribers: Arc<RwLock<HashMap<u64, Subscriber>>>,
+    /// watcher 总数上限（P0-E.4）
+    max_subscribers: usize,
 }
 
 impl WatchDispatcher {
@@ -112,6 +123,7 @@ impl WatchDispatcher {
             event_rx,
             event_tx,
             subscribers: Arc::new(RwLock::new(HashMap::new())),
+            max_subscribers: DEFAULT_MAX_SUBSCRIBERS,
         }
     }
 
@@ -120,15 +132,21 @@ impl WatchDispatcher {
         self.event_tx.clone()
     }
 
-    /// 创建新的 Watch 订阅
+    /// 创建新的 Watch 订阅（P0-E.3/E.4）
     ///
-    /// 返回 (watch_id, event_receiver)。订阅者从 event_receiver 读取事件。
-    /// 如果指定了 start_revision > 0，需要在返回前回放历史事件。
-    pub async fn subscribe(
+    /// - `watermark_rev`：注册时的回放水位（调用方在注册前读取
+    ///   `MvccStorage::current_revision()`）；回放仅覆盖
+    ///   `[start_revision, watermark_rev]`，实时事件从 `watermark_rev+1` 续，
+    ///   订阅者循环按 revision 去重，杜绝回放/实时竞态重复。
+    /// - watcher 总数超限（P0-E.4）返回错误，调用方映射 `RESOURCE_EXHAUSTED`。
+    ///
+    /// 返回 (watch_id, event_receiver)。
+    pub fn subscribe(
         &self,
         request: WatchRequest,
         buffer_size: usize,
-    ) -> (u64, mpsc::Receiver<WatchEvent>) {
+        watermark_rev: Revision,
+    ) -> Result<(u64, mpsc::Receiver<WatchEvent>), String> {
         let watch_id = NEXT_WATCH_ID.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel(buffer_size);
 
@@ -137,11 +155,42 @@ impl WatchDispatcher {
             key_prefix: request.key,
             range_end: request.range_end,
             event_tx: tx,
+            watermark_rev,
+            overflow: Arc::new(AtomicBool::new(false)),
         };
 
-        self.subscribers.write().insert(watch_id, subscriber);
+        {
+            let mut subscribers = self.subscribers.write();
+            if subscribers.len() >= self.max_subscribers {
+                return Err(format!(
+                    "watch subscriber limit reached ({}); reject new watch",
+                    self.max_subscribers
+                ));
+            }
+            subscribers.insert(watch_id, subscriber);
+        }
 
-        (watch_id, rx)
+        Ok((watch_id, rx))
+    }
+
+    /// 取走并清除订阅者的溢出标志（P0-E.1）。
+    ///
+    /// 订阅者循环在每次 `recv` 后调用：置位过即返回 true，由调用方
+    /// 合成 BufferOverflow 事件下发（保证溢出通知必达）。
+    pub fn take_overflow(&self, watch_id: u64) -> bool {
+        let subscribers = self.subscribers.read();
+        match subscribers.get(&watch_id) {
+            Some(sub) => sub.overflow.swap(false, Ordering::SeqCst),
+            None => false,
+        }
+    }
+
+    /// 读取订阅者的回放水位（P0-E.3：实时事件按 revision 去重）
+    pub fn watermark(&self, watch_id: u64) -> Option<Revision> {
+        self.subscribers
+            .read()
+            .get(&watch_id)
+            .map(|s| s.watermark_rev)
     }
 
     /// 取消 Watch 订阅
@@ -181,6 +230,8 @@ impl WatchDispatcher {
                 crate::storage::mvcc::EventType::Put => WatchEventType::Put,
                 crate::storage::mvcc::EventType::Delete => WatchEventType::Delete,
                 crate::storage::mvcc::EventType::Txn => WatchEventType::Put, // Txn 内各操作可能是 Put 或 Delete
+                // Lease 事件：Revoke 携带的 changes 均为删除；Grant/KeepAlive 无 changes
+                crate::storage::mvcc::EventType::Lease => WatchEventType::Delete,
             };
 
             let watch_event = WatchEvent {
@@ -192,20 +243,12 @@ impl WatchDispatcher {
                 }],
             };
 
-            // 尝试发送；缓冲区满时丢弃最旧事件并发送溢出通知
+            // 尝试发送；缓冲区满时置溢出标志（P0-E.1）：订阅者循环
+            // recv 后检查标志并合成 BufferOverflow，保证通知必达
             match sub.event_tx.try_send(watch_event) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    // 缓冲区满：清空缓冲区并发送溢出通知
-                    // 注意：这里我们不阻塞，直接丢弃
-                    let _ = sub.event_tx.try_send(WatchEvent {
-                        watch_id: sub.watch_id,
-                        events: vec![WatchEventItem {
-                            event_type: WatchEventType::BufferOverflow,
-                            kvs: vec![],
-                            revision: event.revision,
-                        }],
-                    });
+                    sub.overflow.store(true, Ordering::SeqCst);
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     // 订阅者已断开连接
@@ -214,10 +257,11 @@ impl WatchDispatcher {
         }
     }
 
-    /// 回放历史 Changelog 事件给新订阅者
-    ///
-    /// 从 start_revision 开始读取 Changelog 表，过滤匹配 Key 前缀的事件，
-    /// 按 Revision 升序发送给订阅者。
+    /// 从 [start_revision, ∞) 读取 [start_revision, end_revision] 的历史事件
+    /// （含 start_revision）。`start_revision <= compacted_revision` 时历史已被
+    /// 压缩、不可达，必须返回 Err 由调用方下发 `HistoryUnavailable`（P1-01）。
+    /// 按 Revision 升序发送；损坏条目（严格读取）→ Err（P0-E.2）。
+    #[allow(clippy::too_many_arguments)] // 回放参数即为协议全部要素，无聚合收益
     pub fn replay_history(
         &self,
         watch_id: u64,
@@ -225,14 +269,30 @@ impl WatchDispatcher {
         key_prefix: &[u8],
         range_end: &[u8],
         start_revision: Revision,
+        end_revision: Revision,
         changelog_reader: &dyn ChangelogReader,
     ) -> Result<(), String> {
+        // P1-01：压缩水位校验 —— 历史已被压缩时不可静默缺洞
+        let compacted = changelog_reader
+            .compacted_revision()
+            .map_err(|e| format!("failed to read compacted revision: {e}"))?;
+        if start_revision > 0 && start_revision <= compacted {
+            return Err(format!(
+                "requested history from revision {start_revision} has been compacted \
+                 (compacted_revision={compacted})"
+            ));
+        }
+
         // 从 Changelog 读取 [start_revision, ∞) 的事件
         let events = changelog_reader
             .read_changelog_from(start_revision)
-            .map_err(|e| format!("failed to read changelog: {}", e))?;
+            .map_err(|e| format!("failed to read changelog: {e}"))?;
 
         for event in events {
+            // P0-E.3：回放止于水位（实时事件从 end+1 续）
+            if event.revision > end_revision {
+                break;
+            }
             let matching: Vec<WatchKeyValue> = event
                 .changes
                 .iter()
@@ -252,6 +312,8 @@ impl WatchDispatcher {
                 crate::storage::mvcc::EventType::Put => WatchEventType::Put,
                 crate::storage::mvcc::EventType::Delete => WatchEventType::Delete,
                 crate::storage::mvcc::EventType::Txn => WatchEventType::Put,
+                // Lease 事件：Revoke 携带的 changes 均为删除
+                crate::storage::mvcc::EventType::Lease => WatchEventType::Delete,
             };
 
             let watch_event = WatchEvent {
@@ -281,10 +343,15 @@ impl WatchDispatcher {
 /// MvccStorage 可实现此 trait。
 pub trait ChangelogReader: Send + Sync {
     /// 从指定 Revision 开始读取 Changelog 条目（含 start_revision）
-    fn read_changelog_from(
-        &self,
-        start_revision: Revision,
-    ) -> Result<Vec<ChangeEvent>, String>;
+    fn read_changelog_from(&self, start_revision: Revision) -> Result<Vec<ChangeEvent>, String>;
+
+    /// 已持久化的 compacted revision（P1-01）；默认 0（从未压缩）。
+    ///
+    /// 回放起始 revision <= 该值时代历史已不可达（被压缩删除），
+    /// 订阅者应收到 `HistoryUnavailable` 而非静默缺洞。
+    fn compacted_revision(&self) -> Result<Revision, String> {
+        Ok(0)
+    }
 }
 
 // ──── 辅助函数 ────
@@ -357,8 +424,9 @@ mod tests {
                         start_revision: 0,
                     },
                     1024,
+                    0,
                 )
-                .await;
+                .unwrap();
 
             assert!(id > 0);
             assert_eq!(dispatcher.subscriber_count(), 1);
@@ -382,8 +450,9 @@ mod tests {
                         start_revision: 0,
                     },
                     1024,
+                    0,
                 )
-                .await;
+                .unwrap();
 
             // 推送匹配的事件
             use crate::storage::mvcc::{EventType, KeyValueChange};
@@ -422,8 +491,9 @@ mod tests {
                         start_revision: 0,
                     },
                     1024,
+                    0,
                 )
-                .await;
+                .unwrap();
 
             // 推送不匹配的事件
             use crate::storage::mvcc::{EventType, KeyValueChange};
@@ -442,6 +512,87 @@ mod tests {
             // 不应该收到事件
             let received = rx.try_recv();
             assert!(received.is_err()); // channel empty
+        });
+    }
+
+    // ──── P0-E 验收测试 ────
+
+    /// E.1：缓冲区满置溢出标志，`take_overflow` 返回 true（通知必达不依赖竞态）。
+    #[test]
+    fn test_overflow_flag_set_when_buffer_full() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let dispatcher = WatchDispatcher::start();
+
+            let (id, _rx) = dispatcher
+                .subscribe(
+                    WatchRequest {
+                        key: b"/app/".to_vec(),
+                        range_end: vec![],
+                        start_revision: 0,
+                    },
+                    1, // 最小缓冲区
+                    0,
+                )
+                .unwrap();
+
+            use crate::storage::mvcc::{EventType, KeyValueChange};
+            for rev in 1..=5 {
+                dispatcher.dispatch(ChangeEvent {
+                    revision: rev,
+                    changes: vec![KeyValueChange {
+                        key: b"/app/k".to_vec(),
+                        value: Some(vec![rev as u8]),
+                        prev_value: None,
+                    }],
+                    event_type: EventType::Put,
+                });
+            }
+
+            // 溢出标志必被置位（缓冲区容量 1，连发 5 条必溢出）
+            assert!(dispatcher.take_overflow(id), "overflow flag must be set");
+            // 取走后清除
+            assert!(!dispatcher.take_overflow(id));
+        });
+    }
+
+    /// E.4：watcher 总数超限拒绝新建。
+    #[test]
+    fn test_watcher_cap_rejects_excess() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut dispatcher = WatchDispatcher::start();
+            // 把上限降到 2 验证拒绝逻辑
+            dispatcher.max_subscribers = 2;
+
+            for _ in 0..2 {
+                dispatcher
+                    .subscribe(
+                        WatchRequest {
+                            key: b"/app/".to_vec(),
+                            range_end: vec![],
+                            start_revision: 0,
+                        },
+                        16,
+                        0,
+                    )
+                    .unwrap();
+            }
+            let err = dispatcher
+                .subscribe(
+                    WatchRequest {
+                        key: b"/app/".to_vec(),
+                        range_end: vec![],
+                        start_revision: 0,
+                    },
+                    16,
+                    0,
+                )
+                .unwrap_err();
+            assert!(
+                err.contains("limit"),
+                "should reject excess watchers: {err}"
+            );
         });
     }
 }

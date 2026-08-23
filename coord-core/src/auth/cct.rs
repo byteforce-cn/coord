@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 
 use crate::error::{Error, Result};
 
@@ -94,7 +94,9 @@ pub fn encode_cct(header: &CctHeader, payload: &CctPayload, signing_key: &[u8]) 
 pub fn decode_cct(token: &str, signing_key: &[u8]) -> Result<CctToken> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
-        return Err(Error::InvalidToken("CCT must have 3 parts (header.payload.signature)".to_string()));
+        return Err(Error::InvalidToken(
+            "CCT must have 3 parts (header.payload.signature)".to_string(),
+        ));
     }
 
     let header_json = base64_url_decode(parts[0])
@@ -113,7 +115,11 @@ pub fn decode_cct(token: &str, signing_key: &[u8]) -> Result<CctToken> {
     let payload: CctPayload = serde_json::from_slice(&payload_json)
         .map_err(|e| Error::InvalidToken(format!("payload JSON: {e}")))?;
 
-    Ok(CctToken { header, payload, signature })
+    Ok(CctToken {
+        header,
+        payload,
+        signature,
+    })
 }
 
 /// Check if a CCT payload has expired, with optional clock drift tolerance.
@@ -178,15 +184,20 @@ mod tests {
             scope_overrides: HashMap::new(),
         };
 
-        let token = encode_cct(&header, &payload, TEST_KEY)
-            .expect("encode should succeed");
+        let token = encode_cct(&header, &payload, TEST_KEY).expect("encode should succeed");
 
         // Token should be 3-part base64url
-        assert!(token.starts_with("eyJ"), "Token should start with base64url JSON header");
-        assert_eq!(token.matches('.').count(), 2, "Token should have exactly 2 dots");
+        assert!(
+            token.starts_with("eyJ"),
+            "Token should start with base64url JSON header"
+        );
+        assert_eq!(
+            token.matches('.').count(),
+            2,
+            "Token should have exactly 2 dots"
+        );
 
-        let decoded = decode_cct(&token, TEST_KEY)
-            .expect("decode should succeed");
+        let decoded = decode_cct(&token, TEST_KEY).expect("decode should succeed");
 
         assert_eq!(decoded.header, header);
         assert_eq!(decoded.payload, payload);
@@ -271,16 +282,28 @@ mod tests {
         let token = encode_cct(&header, &payload, TEST_KEY).unwrap();
         let decoded = decode_cct(&token, TEST_KEY).unwrap();
         assert_eq!(decoded.payload.roles.len(), 2);
-        assert!(decoded.payload.roles.contains(&"service-reader".to_string()));
-        assert!(decoded.payload.roles.contains(&"config-manager".to_string()));
+        assert!(decoded
+            .payload
+            .roles
+            .contains(&"service-reader".to_string()));
+        assert!(decoded
+            .payload
+            .roles
+            .contains(&"config-manager".to_string()));
     }
 
     #[test]
     fn test_cct_with_scope_overrides() {
         let header = CctHeader::default();
         let mut overrides = HashMap::new();
-        overrides.insert("data:kv:read".to_string(), "/app/order-service/".to_string());
-        overrides.insert("data:kv:write".to_string(), "/app/order-service/".to_string());
+        overrides.insert(
+            "data:kv:read".to_string(),
+            "/app/order-service/".to_string(),
+        );
+        overrides.insert(
+            "data:kv:write".to_string(),
+            "/app/order-service/".to_string(),
+        );
 
         let payload = CctPayload {
             jti: "tok_override".to_string(),

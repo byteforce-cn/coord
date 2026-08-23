@@ -6,41 +6,36 @@
 // CoordNode 是服务端核心结构体，持有所有组件的引用。
 // 写请求（Put/Delete/Txn）通过 Raft 共识提交，读请求直接访问本地状态机。
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use parking_lot::RwLock;
-use openraft::rt::WatchReceiver;
-use openraft::ReadPolicy;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use coord_proto::kv::{
-    kv_server::Kv, DeleteRequest, DeleteResponse, KeyValue, PutRequest, PutResponse,
-    RangeRequest, RangeResponse,
+    kv_server::Kv, DeleteRequest, DeleteResponse, KeyValue, PutRequest, PutResponse, RangeRequest,
+    RangeResponse,
 };
 use coord_proto::lease::{
     lease_server::Lease, LeaseGrantRequest, LeaseGrantResponse, LeaseKeepAliveRequest,
     LeaseKeepAliveResponse, LeaseRevokeRequest, LeaseRevokeResponse,
 };
-use coord_proto::txn::{
-    txn_server::Txn, Compare, RequestOp, ResponseOp, TxnRequest, TxnResponse,
-};
-use coord_proto::watch::{
-    watch_server::Watch, WatchEvent, WatchRequest, WatchResponse,
-};
 use coord_proto::maintenance::{
-    maintenance_server::Maintenance, SealRequest, SealResponse, StatusRequest, StatusResponse,
-    UnsealRequest, UnsealResponse, SnapshotRequest, SnapshotResponse,
-    MemberAddRequest, MemberAddResponse, MemberRemoveRequest, MemberRemoveResponse,
-    MemberPromoteRequest, MemberPromoteResponse, MemberListRequest, MemberListResponse,
-    MemberNode,
+    maintenance_server::Maintenance, CompactRequest, CompactResponse, JoinRequest, JoinResponse,
+    MemberAddRequest, MemberAddResponse, MemberListRequest, MemberListResponse, MemberNode,
+    MemberPromoteRequest, MemberPromoteResponse, MemberRemoveRequest, MemberRemoveResponse,
+    SealRequest, SealResponse, SnapshotRequest, SnapshotResponse, StatusRequest, StatusResponse,
+    UnsealRequest, UnsealResponse,
 };
+use coord_proto::txn::{txn_server::Txn, Compare, RequestOp, ResponseOp, TxnRequest, TxnResponse};
+use coord_proto::watch::{watch_server::Watch, WatchEvent, WatchRequest, WatchResponse};
 
+use crate::auth::service::AuthOpProposer;
 use crate::lease::LeaseManager;
-use crate::raft::CoordRaft;
-use crate::raft::type_config::{Command, Response};
-use crate::storage::mvcc::MvccStorage;
+use crate::raft::type_config::{AuthOp, Command, LeaseOp, Response};
+use crate::raft::{CoordRaft, ReadPolicy, WatchReceiver};
+use crate::storage::mvcc::{AppliedLogId, MvccStorage};
 use crate::storage::redb_backend::RedbBackend;
 use crate::txn::{TxnCompare, TxnOp, TxnOpResponse};
 use crate::watch::WatchDispatcher;
@@ -58,6 +53,8 @@ struct IdempotentEntry {
 
 /// 服务端核心节点，持有所有组件并实现 gRPC 服务 trait
 pub struct CoordNode {
+    /// 本节点 ID（集群模式下由 main.rs 设置；单节点模式为 0）
+    pub node_id: u64,
     /// MVCC 存储层（共享引用，读写均通过此实例）
     pub storage: Arc<MvccStorage<RedbBackend>>,
     /// Raft 共识实例（可选，集群模式下设置；单节点模式为 None）
@@ -68,23 +65,120 @@ pub struct CoordNode {
     pub watch_dispatcher: Option<Arc<WatchDispatcher>>,
     /// 幂等请求去重缓存（request_id → 上次响应）
     idempotent_cache: RwLock<HashMap<Vec<u8>, IdempotentEntry>>,
+    /// 集群已知节点的 node_id → gRPC 地址（P0-D.1：Join 重定向用；best-effort）
+    node_grpc_addrs: RwLock<HashMap<u64, String>>,
+    /// 成员变更互斥（P0-D.3：单 pending change，并发变更返回 UNAVAILABLE）
+    member_change_lock: tokio::sync::Mutex<()>,
+    /// 磁盘水位只读闸（P1-02）：磁盘可用 < 5% 时写请求 RESOURCE_EXHAUSTED
+    disk_read_only: std::sync::atomic::AtomicBool,
+    /// 每 watcher 事件队列长度（P1-02 可配，默认 1024）
+    watch_buffer: std::sync::atomic::AtomicUsize,
 }
 
 impl CoordNode {
     pub fn new(storage: Arc<MvccStorage<RedbBackend>>) -> Self {
         Self {
+            node_id: 0,
             storage,
             raft: None,
             lease_manager: None,
             watch_dispatcher: None,
             idempotent_cache: RwLock::new(HashMap::new()),
+            node_grpc_addrs: RwLock::new(HashMap::new()),
+            member_change_lock: tokio::sync::Mutex::new(()),
+            disk_read_only: std::sync::atomic::AtomicBool::new(false),
+            watch_buffer: std::sync::atomic::AtomicUsize::new(1024),
         }
+    }
+
+    /// 设置每 watcher 事件队列长度（P1-02，由配置层调用；P2-02 支持 SIGHUP 热更新，新订阅生效）
+    pub fn set_watch_buffer(&self, buffer: usize) {
+        self.watch_buffer
+            .store(buffer.max(16), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 设置磁盘只读闸（P1-02：磁盘水位监控任务调用）
+    pub fn set_disk_read_only(&self, read_only: bool) {
+        self.disk_read_only
+            .store(read_only, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 磁盘只读闸校验（P1-02）：写请求入口调用，可用 < 5% 时拒绝
+    pub fn ensure_writable(&self) -> Result<(), tonic::Status> {
+        if self
+            .disk_read_only
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(tonic::Status::resource_exhausted(
+                "disk space below 5%: cluster is read-only",
+            ));
+        }
+        Ok(())
+    }
+
+    /// 注册/更新某节点的 gRPC 地址（P0-D.1）。
+    pub fn register_grpc_addr(&self, node_id: u64, addr: &str) {
+        self.node_grpc_addrs
+            .write()
+            .insert(node_id, addr.to_string());
+    }
+
+    /// 查询已知的某节点 gRPC 地址（P0-D.1：leader 重定向）。
+    pub fn grpc_addr_of(&self, node_id: u64) -> Option<String> {
+        self.node_grpc_addrs.read().get(&node_id).cloned()
+    }
+
+    /// P1-07：领导权移交（非阻塞触发；收敛由调用方轮询 `current_leader`）。
+    pub async fn transfer_leadership(&self, target: u64) -> Result<(), String> {
+        let raft = self
+            .raft
+            .as_ref()
+            .ok_or_else(|| "not a raft node".to_string())?;
+        raft.trigger()
+            .transfer_leader(target)
+            .await
+            .map_err(|e| format!("transfer_leader failed: {e}"))
+    }
+
+    /// P1-07：挑选一个非自身的 voter 作为领导权移交目标（无可用目标返回 None）。
+    pub async fn pick_transfer_target(&self) -> Option<u64> {
+        let raft = self.raft.as_ref()?;
+        let m = raft.metrics().borrow_watched().clone();
+        let voters: Vec<u64> = m.membership_config.voter_ids().collect();
+        voters.into_iter().find(|id| *id != self.node_id)
+    }
+
+    /// 尝试获取成员变更互斥锁（P0-D.3：非阻塞，占用中返回 None）。
+    fn try_lock_member_change(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        self.member_change_lock.try_lock().ok()
+    }
+    /// 当前是否为 raft leader（单节点模式恒为 true）
+    pub async fn is_raft_leader(&self) -> bool {
+        match self.raft {
+            Some(ref raft) => raft.current_leader().await == Some(self.node_id),
+            None => true,
+        }
+    }
+
+    /// Lease 准入检查（P0-B B.4.1）：仅 leader 接受 grant/keepalive/revoke；
+    /// 非 leader 返回 `UNAVAILABLE` 并携带 leader 提示。
+    pub async fn ensure_lease_leader(&self) -> Result<(), tonic::Status> {
+        if let Some(ref raft) = self.raft {
+            let leader = raft.current_leader().await;
+            if leader != Some(self.node_id) {
+                return Err(tonic::Status::unavailable(format!(
+                    "lease operations require leader: current leader is {:?}, this node is {}",
+                    leader, self.node_id
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// 启动 Lease 过期轮询循环（后台任务）。
     ///
-    /// 每 200ms 调用 `LeaseManager::check_expired()`，
-    /// 对已过期的 Lease 清理其绑定的 KV key。
+    /// 每 200ms 调用 `LeaseManager::check_expired()`，对已过期的 Lease
+    /// 经 raft 下发 `LeaseOp::Revoke{delete_keys:true}`（P0-B：任何路径不得直写本地存储）。
     ///
     /// 应在 server 启动后调用（Leader 独占；Follower 无 LeaseManager 则跳过）。
     pub fn start_lease_expiry_worker(self: &Arc<Self>) {
@@ -93,37 +187,39 @@ impl CoordNode {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
             loop {
                 interval.tick().await;
+                // P0-B B.4.2：过期检测仅 leader 执行（follower 上 LeaseManager 空转无意义，
+                // 且 follower 经 raft propose 会被 openraft 拒绝）
+                if !node.is_raft_leader().await {
+                    continue;
+                }
                 let Some(ref lm) = node.lease_manager else {
                     continue;
                 };
                 let actions = lm.check_expired();
                 for action in actions {
                     match action {
-                        crate::lease::LeaseAction::Expired { lease_id, attached_keys } => {
-                            for key in &attached_keys {
-                                // 通过 Raft（集群模式）或直接删除（单节点模式）
-                                if let Some(ref raft) = node.raft {
-                                    let cmd = Command::Delete { key: key.clone() };
-                                    if let Err(e) = raft.client_write(cmd).await {
-                                        tracing::warn!(
-                                            "Lease {} expiry: failed to delete key via raft: {}",
-                                            lease_id, e
-                                        );
-                                    }
-                                } else {
-                                    if let Err(e) = node.storage.delete(key) {
-                                        tracing::warn!(
-                                            "Lease {} expiry: failed to delete key: {}",
-                                            lease_id, e
-                                        );
-                                    }
+                        crate::lease::LeaseAction::Expired { lease_id, .. } => {
+                            let op = LeaseOp::Revoke {
+                                id: lease_id,
+                                delete_keys: true,
+                            };
+                            // 通过 Raft（集群模式）或直接 apply（单节点模式）
+                            if let Some(ref raft) = node.raft {
+                                let cmd = Command::Lease(op);
+                                if let Err(e) = raft.client_write(cmd).await {
+                                    tracing::warn!(
+                                        "Lease {} expiry: failed to revoke via raft: {}",
+                                        lease_id,
+                                        e
+                                    );
                                 }
+                            } else if let Err(e) = node.storage.apply_lease_op_standalone(&op) {
+                                tracing::warn!(
+                                    "Lease {} expiry: failed to apply revoke: {}",
+                                    lease_id,
+                                    e
+                                );
                             }
-                            tracing::debug!(
-                                "Lease {} expired, cleaned up {} attached keys",
-                                lease_id,
-                                attached_keys.len()
-                            );
                         }
                     }
                 }
@@ -131,12 +227,70 @@ impl CoordNode {
         });
     }
 
+    /// 启动 Lease failover reconciler（P0-B B.4.4）
+    ///
+    /// 每 500ms 检测 leader 身份；检测到本节点成为 leader（含启动即 leader 与
+    /// 单节点模式）时，从状态机 `/_lease/` 记录重建 LeaseManager：
+    /// - 新 leader 接管：未过期 Lease 以剩余 TTL 继续（at-least TTL），
+    /// - 已过期 Lease：立即到期，由过期 worker 经 raft propose Revoke 清理。
+    pub fn start_lease_leader_reconciler(self: &Arc<Self>) {
+        let node = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut was_leader = false;
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                let is_leader = node.is_raft_leader().await;
+                if is_leader && !was_leader {
+                    let Some(ref lm) = node.lease_manager else {
+                        was_leader = is_leader;
+                        continue;
+                    };
+                    match node.storage.list_lease_records() {
+                        Ok(records) => {
+                            let n = lm.rebuild(records).await;
+                            tracing::info!("LeaseManager rebuilt from state machine: {n} leases");
+                        }
+                        Err(e) => {
+                            tracing::warn!("failed to read lease records for rebuild: {e}")
+                        }
+                    }
+                }
+                was_leader = is_leader;
+            }
+        });
+    }
+
+    /// 提交 Lease 命令（P0-B）：集群模式走 raft，单节点模式直接 apply
+    async fn submit_lease_op(&self, op: LeaseOp) -> Result<u64, tonic::Status> {
+        if let Some(ref raft) = self.raft {
+            let cmd = Command::Lease(op);
+            let resp = raft
+                .client_write(cmd)
+                .await
+                .map_err(|e| tonic::Status::internal(format!("raft lease write failed: {e}")))?;
+            match resp.response() {
+                Response::Lease { revision } => Ok(*revision),
+                _ => Err(tonic::Status::internal("unexpected raft response")),
+            }
+        } else {
+            let revision = self
+                .storage
+                .apply_lease_op_standalone(&op)
+                .map_err(map_err)?;
+            Ok(revision)
+        }
+    }
+
     /// 检查幂等 request_id：若已存在则返回缓存的 revision，否则执行操作并缓存
     fn check_idempotent(&self, request_id: &[u8]) -> Option<i64> {
         if request_id.is_empty() {
             return None;
         }
-        self.idempotent_cache.read().get(request_id).map(|e| e.revision)
+        self.idempotent_cache
+            .read()
+            .get(request_id)
+            .map(|e| e.revision)
     }
 
     /// 缓存幂等请求结果
@@ -144,10 +298,13 @@ impl CoordNode {
         if request_id.is_empty() {
             return;
         }
-        self.idempotent_cache.write().insert(request_id, IdempotentEntry {
-            revision,
-            succeeded: true,
-        });
+        self.idempotent_cache.write().insert(
+            request_id,
+            IdempotentEntry {
+                revision,
+                succeeded: true,
+            },
+        );
     }
 
     /// 检查并缓存 Txn 幂等请求
@@ -155,7 +312,10 @@ impl CoordNode {
         if request_id.is_empty() {
             return None;
         }
-        self.idempotent_cache.read().get(request_id).map(|e| (e.succeeded, e.revision))
+        self.idempotent_cache
+            .read()
+            .get(request_id)
+            .map(|e| (e.succeeded, e.revision))
     }
 
     /// 缓存 Txn 幂等请求结果
@@ -163,10 +323,13 @@ impl CoordNode {
         if request_id.is_empty() {
             return;
         }
-        self.idempotent_cache.write().insert(request_id, IdempotentEntry {
-            revision,
-            succeeded,
-        });
+        self.idempotent_cache.write().insert(
+            request_id,
+            IdempotentEntry {
+                revision,
+                succeeded,
+            },
+        );
     }
 
     /// 确保线性一致性读：通过 ReadIndex 确认 Leader 身份和日志进度（ADP §11.2）
@@ -176,9 +339,7 @@ impl CoordNode {
         if let Some(ref raft) = self.raft {
             raft.ensure_linearizable(ReadPolicy::ReadIndex)
                 .await
-                .map_err(|e| {
-                    tonic::Status::internal(format!("linearizable read failed: {e}"))
-                })?;
+                .map_err(|e| tonic::Status::internal(format!("linearizable read failed: {e}")))?;
         }
         Ok(())
     }
@@ -215,6 +376,90 @@ fn map_err<E: std::fmt::Display>(e: E) -> tonic::Status {
     tonic::Status::internal(e.to_string())
 }
 
+// ──── AuthOp 提案器（P0-C.2：管理操作入 raft 日志）────
+
+#[async_trait::async_trait]
+impl AuthOpProposer for CoordNode {
+    async fn propose_auth_op(&self, op: AuthOp) -> Result<u64, String> {
+        if let Some(ref raft) = self.raft {
+            let resp = raft
+                .client_write(Command::Auth(op))
+                .await
+                .map_err(|e| format!("raft auth write failed: {e}"))?;
+            match resp.response() {
+                Response::Auth { revision } => Ok(*revision),
+                _ => Err("unexpected raft response for AuthOp".into()),
+            }
+        } else {
+            // 无 raft：直接本地 apply（与 Lease standalone 同口径，锁内分配 revision）
+            let revision = self.storage.current_revision().saturating_add(1);
+            self.storage
+                .apply_auth_op(&op, revision, AppliedLogId::standalone(revision))
+                .map_err(|e| e.to_string())?;
+            Ok(revision)
+        }
+    }
+}
+
+// ──── Compact 执行（P1-01：raft 下发 compact revision，节点一致）────
+
+impl CoordNode {
+    /// 执行压缩：raft 模式经 `client_write(Command::Compact)` 提案，
+    /// 单节点模式直接本地 apply。
+    ///
+    /// 前置校验（由 RPC/调用层保证）：`revision <= current_revision`；
+    /// 未来 revision 由 RPC 层返回 `INVALID_ARGUMENT`（规格 13 §三）。
+    pub async fn compact_impl(&self, revision: u64) -> Result<u64, String> {
+        if let Some(ref raft) = self.raft {
+            let resp = raft
+                .client_write(Command::Compact { revision })
+                .await
+                .map_err(|e| format!("raft compact write failed: {e}"))?;
+            match resp.response() {
+                Response::Compact { compacted_revision } => Ok(*compacted_revision),
+                _ => Err("unexpected raft response for Compact".into()),
+            }
+        } else {
+            // 单节点：compact 消耗一个 revision（无 changelog 条目，与 membership 同口径）
+            let new_rev = self.storage.current_revision().saturating_add(1);
+            let applied = AppliedLogId::standalone(new_rev);
+            self.storage
+                .apply_compact(revision, applied)
+                .map_err(|e| e.to_string())?;
+            Ok(revision.min(new_rev))
+        }
+    }
+}
+
+/// 单节点本地 apply（无 raft，测试与 dev 路径复用 `compact_impl` 的 else 分支）。
+pub fn apply_compact_local(node: &Arc<CoordNode>, revision: u64) -> Result<u64, String> {
+    if node.raft.is_some() {
+        return Err("apply_compact_local requires a raft-less node".into());
+    }
+    let new_rev = node.storage.current_revision().saturating_add(1);
+    let applied = AppliedLogId::standalone(new_rev);
+    node.storage
+        .apply_compact(revision, applied)
+        .map_err(|e| e.to_string())?;
+    Ok(revision.min(new_rev))
+}
+
+// ──── Compact 提案器（P1-01：定时压缩经 raft 下发，节点一致）────
+
+#[async_trait::async_trait]
+impl crate::storage::compaction::CompactProposer for CoordNode {
+    async fn can_propose(&self) -> bool {
+        match &self.raft {
+            None => true,
+            Some(raft) => raft.current_leader().await == Some(self.node_id),
+        }
+    }
+
+    async fn propose(&self, revision: u64) -> Result<u64, String> {
+        self.compact_impl(revision).await
+    }
+}
+
 // ──── KV Service ────
 
 #[tonic::async_trait]
@@ -223,6 +468,9 @@ impl Kv for CoordNode {
         &self,
         request: tonic::Request<PutRequest>,
     ) -> Result<tonic::Response<PutResponse>, tonic::Status> {
+        // P1-02：磁盘水位只读闸
+        self.ensure_writable()?;
+
         let req = request.into_inner();
         let request_id = req.request_id.clone();
 
@@ -246,10 +494,7 @@ impl Kv for CoordNode {
                 .get(&req.key)
                 .map_err(map_err)?
                 .map(|prev_value| {
-                    let meta = self
-                        .storage
-                        .get_kv_metadata(&req.key)
-                        .map_err(map_err)?;
+                    let meta = self.storage.get_kv_metadata(&req.key).map_err(map_err)?;
                     Ok::<_, tonic::Status>(to_kv_proto(&req.key, &prev_value, meta.as_ref()))
                 })
                 .transpose()?
@@ -264,15 +509,18 @@ impl Kv for CoordNode {
                 value: req.value.clone(),
                 lease_id,
             };
-            let resp = raft.client_write(cmd).await.map_err(|e| {
-                tonic::Status::internal(format!("raft write failed: {e}"))
-            })?;
+            let resp = raft
+                .client_write(cmd)
+                .await
+                .map_err(|e| tonic::Status::internal(format!("raft write failed: {e}")))?;
             match resp.response() {
                 Response::Put { revision } => *revision,
                 _ => return Err(tonic::Status::internal("unexpected raft response")),
             }
         } else {
-            self.storage.put(&req.key, &req.value, lease_id).map_err(map_err)?
+            self.storage
+                .put(&req.key, &req.value, lease_id)
+                .map_err(map_err)?
         };
 
         // 若关联了 Lease，将 Key 绑定到 Lease（用于 Revoke 时自动清理）
@@ -285,6 +533,7 @@ impl Kv for CoordNode {
         // 缓存幂等结果
         self.cache_idempotent(request_id, revision as i64);
 
+        tracing::debug!(revision, "KV put applied");
         Ok(tonic::Response::new(PutResponse {
             prev_kv,
             revision: revision as i64,
@@ -296,10 +545,18 @@ impl Kv for CoordNode {
         request: tonic::Request<RangeRequest>,
     ) -> Result<tonic::Response<RangeResponse>, tonic::Status> {
         let req = request.into_inner();
-        let limit = if req.limit > 0 { req.limit as usize } else { usize::MAX };
+        let limit = if req.limit > 0 {
+            req.limit as usize
+        } else {
+            usize::MAX
+        };
         let keys_only = req.keys_only;
         let count_only = req.count_only;
-        let target_revision = if req.revision > 0 { req.revision as u64 } else { 0 };
+        let target_revision = if req.revision > 0 {
+            req.revision as u64
+        } else {
+            0
+        };
 
         // 线性一致性读：确认 Leader 身份后再读取（ADP §11.2）
         self.ensure_linearizable().await?;
@@ -308,7 +565,11 @@ impl Kv for CoordNode {
 
         if target_revision > 0 && req.range_end.is_empty() {
             // 历史快照读：单键查询指定 Revision 时的值
-            if let Some(value) = self.storage.get_at_revision(&req.key, target_revision).map_err(map_err)? {
+            if let Some(value) = self
+                .storage
+                .get_at_revision(&req.key, target_revision)
+                .map_err(map_err)?
+            {
                 let meta = self.storage.get_kv_metadata(&req.key).map_err(map_err)?;
                 // 历史读取：使用查询 revision 作为 mod_revision
                 let kv = if let Some(m) = meta {
@@ -343,10 +604,7 @@ impl Kv for CoordNode {
         } else {
             // 单键精确查询（最新值）
             if let Some(value) = self.storage.get(&req.key).map_err(map_err)? {
-                let meta = self
-                    .storage
-                    .get_kv_metadata(&req.key)
-                    .map_err(map_err)?;
+                let meta = self.storage.get_kv_metadata(&req.key).map_err(map_err)?;
                 let kv = to_kv_proto(&req.key, &value, meta.as_ref());
                 kvs.push(kv);
             }
@@ -386,6 +644,9 @@ impl Kv for CoordNode {
         &self,
         request: tonic::Request<DeleteRequest>,
     ) -> Result<tonic::Response<DeleteResponse>, tonic::Status> {
+        // P1-02：磁盘水位只读闸
+        self.ensure_writable()?;
+
         let req = request.into_inner();
         let prev_kv_requested = req.prev_kv;
 
@@ -398,10 +659,7 @@ impl Kv for CoordNode {
             // 注：range_end 用于标识范围操作，实际匹配由 MvccStorage::range() 的前缀扫描完成
             // （与 range() handler 保持一致的语义）
             let results = self.storage.range(&req.key, usize::MAX).map_err(map_err)?;
-            results
-                .into_iter()
-                .map(|(k, _)| k)
-                .collect()
+            results.into_iter().map(|(k, _)| k).collect()
         } else {
             vec![req.key.clone()]
         };
@@ -411,14 +669,10 @@ impl Kv for CoordNode {
             keys_to_delete
                 .iter()
                 .filter_map(|key| {
-                    self.storage
-                        .get(key)
-                        .ok()
-                        .flatten()
-                        .map(|value| {
-                            let meta = self.storage.get_kv_metadata(key).ok().flatten();
-                            to_kv_proto(key, &value, meta.as_ref())
-                        })
+                    self.storage.get(key).ok().flatten().map(|value| {
+                        let meta = self.storage.get_kv_metadata(key).ok().flatten();
+                        to_kv_proto(key, &value, meta.as_ref())
+                    })
                 })
                 .collect()
         } else {
@@ -435,27 +689,24 @@ impl Kv for CoordNode {
 
             if let Some(ref raft) = self.raft {
                 let cmd = Command::Delete { key: key.clone() };
-                let resp = raft.client_write(cmd).await.map_err(|e| {
-                    tonic::Status::internal(format!("raft write failed: {e}"))
-                })?;
-                match resp.response() {
-                    Response::Delete { revision: rev } => {
-                        revision = *rev as i64;
-                        if exists {
-                            deleted += 1;
-                        }
+                let resp = raft
+                    .client_write(cmd)
+                    .await
+                    .map_err(|e| tonic::Status::internal(format!("raft write failed: {e}")))?;
+                if let Response::Delete { revision: rev } = resp.response() {
+                    revision = *rev as i64;
+                    if exists {
+                        deleted += 1;
                     }
-                    _ => {}
                 }
-            } else {
-                if exists {
-                    let rev = self.storage.delete(key).map_err(map_err)?;
-                    revision = rev as i64;
-                    deleted += 1;
-                }
+            } else if exists {
+                let rev = self.storage.delete(key).map_err(map_err)?;
+                revision = rev as i64;
+                deleted += 1;
             }
         }
 
+        tracing::debug!(deleted, revision, "KV delete applied");
         Ok(tonic::Response::new(DeleteResponse {
             deleted,
             prev_kvs,
@@ -467,8 +718,8 @@ impl Kv for CoordNode {
 // ──── Txn Service ────
 
 fn convert_compare(c: &Compare) -> Result<TxnCompare, tonic::Status> {
-    use coord_proto::txn::compare::{CompareResult, Target};
     use crate::txn::{CompareOp, CompareTarget, CompareValue};
+    use coord_proto::txn::compare::{CompareResult, Target};
 
     let op = match CompareResult::try_from(c.result) {
         Ok(CompareResult::Equal) => CompareOp::Equal,
@@ -513,9 +764,9 @@ fn convert_request_op(op: &RequestOp) -> Result<TxnOp, tonic::Status> {
                 None
             },
         }),
-        Some(coord_proto::txn::request_op::Op::RequestDelete(d)) => Ok(TxnOp::Delete {
-            key: d.key.clone(),
-        }),
+        Some(coord_proto::txn::request_op::Op::RequestDelete(d)) => {
+            Ok(TxnOp::Delete { key: d.key.clone() })
+        }
         Some(coord_proto::txn::request_op::Op::RequestRange(r)) => Ok(TxnOp::Range {
             key: r.key.clone(),
             range_end: r.range_end.clone(),
@@ -549,10 +800,8 @@ fn convert_response_op(resp: &TxnOpResponse) -> ResponseOp {
             count,
             revision,
         } => {
-            let proto_kvs: Vec<KeyValue> = kvs
-                .iter()
-                .map(|(k, v)| to_kv_proto(k, v, None))
-                .collect();
+            let proto_kvs: Vec<KeyValue> =
+                kvs.iter().map(|(k, v)| to_kv_proto(k, v, None)).collect();
             ResponseOp {
                 op: Some(coord_proto::txn::response_op::Op::ResponseRange(
                     RangeResponse {
@@ -572,6 +821,9 @@ impl Txn for CoordNode {
         &self,
         request: tonic::Request<TxnRequest>,
     ) -> Result<tonic::Response<TxnResponse>, tonic::Status> {
+        // P1-02：磁盘水位只读闸
+        self.ensure_writable()?;
+
         let req = request.into_inner();
         let request_id = req.request_id.clone();
 
@@ -609,13 +861,20 @@ impl Txn for CoordNode {
                 success_ops: success_ops.clone(),
                 failure_ops: failure_ops.clone(),
             };
-            let resp = raft.client_write(cmd).await.map_err(|e| {
-                tonic::Status::internal(format!("raft txn failed: {e}"))
-            })?;
+            let resp = raft
+                .client_write(cmd)
+                .await
+                .map_err(|e| tonic::Status::internal(format!("raft txn failed: {e}")))?;
             match resp.response() {
-                Response::Txn { succeeded, revision, responses } => {
-                    crate::txn::TxnResult { succeeded: *succeeded, revision: *revision, responses: responses.to_vec() }
-                }
+                Response::Txn {
+                    succeeded,
+                    revision,
+                    responses,
+                } => crate::txn::TxnResult {
+                    succeeded: *succeeded,
+                    revision: *revision,
+                    responses: responses.to_vec(),
+                },
                 _ => return Err(tonic::Status::internal("unexpected raft response")),
             }
         } else {
@@ -646,6 +905,11 @@ impl Txn for CoordNode {
         // 缓存幂等结果
         self.cache_idempotent_txn(request_id, result.succeeded, result.revision as i64);
 
+        tracing::debug!(
+            succeeded = result.succeeded,
+            revision = result.revision,
+            "KV txn applied"
+        );
         Ok(tonic::Response::new(TxnResponse {
             succeeded: result.succeeded,
             responses,
@@ -665,13 +929,35 @@ impl Lease for CoordNode {
         &self,
         request: tonic::Request<LeaseGrantRequest>,
     ) -> Result<tonic::Response<LeaseGrantResponse>, tonic::Status> {
+        // P1-02：磁盘水位只读闸
+        self.ensure_writable()?;
+
         let req = request.into_inner();
+        // P0-B B.4.1：仅 leader 接受（含 leader 提示）
+        self.ensure_lease_leader().await?;
         let lease_mgr = self
             .lease_manager
             .as_ref()
             .ok_or_else(|| tonic::Status::unavailable("lease manager not available"))?;
 
-        let id = lease_mgr.grant_with_id(req.ttl, req.id).await.map_err(map_err)?;
+        // LeaseManager 负责 TTL 校验与 ID 分配（内存 TTL 缓存）
+        let id = lease_mgr
+            .grant_with_id(req.ttl, req.id)
+            .await
+            .map_err(map_err)?;
+
+        // P0-B：Grant 入 raft 日志（状态机持久化 `/_lease/{id}`）
+        let deadline_wall_ms = crate::lease::wall_clock_now_ms() + req.ttl * 1000;
+        let op = LeaseOp::Grant {
+            id,
+            ttl: req.ttl,
+            deadline_wall_ms,
+        };
+        if let Err(e) = self.submit_lease_op(op).await {
+            // 失败则回滚本地缓存，避免幽灵 Lease
+            let _ = lease_mgr.revoke(id).await;
+            return Err(e);
+        }
 
         Ok(tonic::Response::new(LeaseGrantResponse {
             id,
@@ -684,23 +970,27 @@ impl Lease for CoordNode {
         &self,
         request: tonic::Request<LeaseRevokeRequest>,
     ) -> Result<tonic::Response<LeaseRevokeResponse>, tonic::Status> {
+        // P1-02：磁盘水位只读闸
+        self.ensure_writable()?;
+
         let req = request.into_inner();
+        // P0-B B.4.1：仅 leader 接受（含 leader 提示）
+        self.ensure_lease_leader().await?;
         let lease_mgr = self
             .lease_manager
             .as_ref()
             .ok_or_else(|| tonic::Status::unavailable("lease manager not available"))?;
 
-        // 删除所有绑定到该 Lease 的 Key（扫描 KV_META 表）
-        let _deleted = self.storage.delete_keys_by_lease(req.id).map_err(map_err)?;
+        // P0-B：Revoke 走 raft（apply 内按 KvMetadata.lease_id 索引删除绑定 Key），
+        // 禁止任何直写本地存储路径。
+        let op = LeaseOp::Revoke {
+            id: req.id,
+            delete_keys: true,
+        };
+        self.submit_lease_op(op).await?;
 
-        // 也通过 LeaseManager 的 attach_key 机制清理（双保险）
-        let attached_keys = lease_mgr.take_attached_keys(req.id);
-        for key in &attached_keys {
-            let _ = self.storage.delete(key);
-        }
-
-        // Revoke Lease
-        lease_mgr.revoke(req.id).await.map_err(map_err)?;
+        // 清理本地 TTL 缓存
+        let _ = lease_mgr.revoke(req.id).await;
 
         Ok(tonic::Response::new(LeaseRevokeResponse {}))
     }
@@ -714,6 +1004,9 @@ impl Lease for CoordNode {
             .as_ref()
             .ok_or_else(|| tonic::Status::unavailable("lease manager not available"))?;
         let lease_mgr = Arc::clone(lease_mgr);
+        let raft = self.raft.clone();
+        let storage = Arc::clone(&self.storage);
+        let node_id = self.node_id;
 
         let mut stream = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<LeaseKeepAliveResponse, tonic::Status>>(16);
@@ -721,16 +1014,91 @@ impl Lease for CoordNode {
         // 后台任务：持续接收客户端的 KeepAlive 请求并续约
         tokio::spawn(async move {
             while let Ok(Some(req)) = stream.message().await {
-                match lease_mgr.keep_alive(req.id).await {
-                    Ok((id, ttl)) => {
-                        let resp = LeaseKeepAliveResponse { id, ttl };
+                // P0-B B.4.1：leader 转移后停止服务（客户端重连新 leader）
+                let is_leader = match raft {
+                    Some(ref raft) => raft.current_leader().await == Some(node_id),
+                    None => true,
+                };
+                if !is_leader {
+                    let _ = tx
+                        .send(Err(tonic::Status::unavailable(format!(
+                            "lease keep-alive rejected: node {node_id} is not the leader"
+                        ))))
+                        .await;
+                    break;
+                }
+
+                // TTL 以本地缓存为准；deadline 由 leader 计算后随命令入日志（确定性）
+                let ttl = match lease_mgr.get_lease(req.id) {
+                    Some(lease) => lease.ttl_seconds,
+                    None => {
+                        let status = tonic::Status::not_found(format!(
+                            "keep-alive failed: lease {} not found",
+                            req.id
+                        ));
+                        let _ = tx.send(Err(status)).await;
+                        break;
+                    }
+                };
+
+                let deadline_wall_ms = crate::lease::wall_clock_now_ms() + ttl * 1000;
+                let op = LeaseOp::KeepAlive {
+                    id: req.id,
+                    deadline_wall_ms,
+                };
+
+                // P0-B：KeepAlive 入 raft 日志（推进 keepalive_revision）
+                let raft_result = if let Some(ref raft) = raft {
+                    let cmd = Command::Lease(op);
+                    raft.client_write(cmd).await.map(|_| ()).map_err(|e| {
+                        tonic::Status::internal(format!("raft lease write failed: {e}"))
+                    })
+                } else {
+                    storage
+                        .apply_lease_op_standalone(&op)
+                        .map(|_| ())
+                        .map_err(map_err)
+                };
+
+                match raft_result {
+                    Ok(_) => {
+                        // P0-B B.4.3：响应携带服务端计算的剩余 TTL（非配置 TTL）
+                        let remaining = match storage.get_lease_record(req.id) {
+                            Ok(Some(record)) => crate::lease::remaining_ttl_from_deadline(
+                                record.deadline_wall_ms,
+                                crate::lease::wall_clock_now_ms(),
+                            ),
+                            _ => 0,
+                        };
+                        if remaining <= 0 {
+                            let _ = tx
+                                .send(Err(tonic::Status::not_found(format!(
+                                    "keep-alive failed: lease {} expired",
+                                    req.id
+                                ))))
+                                .await;
+                            break;
+                        }
+
+                        // 同步本地 TTL 缓存
+                        if let Err(e) = lease_mgr.keep_alive(req.id).await {
+                            let _ = tx
+                                .send(Err(tonic::Status::not_found(format!(
+                                    "keep-alive failed: {e}"
+                                ))))
+                                .await;
+                            break;
+                        }
+                        let resp = LeaseKeepAliveResponse {
+                            id: req.id,
+                            ttl: remaining,
+                        };
                         if tx.send(Ok(resp)).await.is_err() {
                             // 客户端已断开连接，停止处理
                             break;
                         }
                     }
-                    Err(e) => {
-                        let status = tonic::Status::not_found(format!("keep-alive failed: {e}"));
+                    Err(status) => {
                         let _ = tx.send(Err(status)).await;
                         break;
                     }
@@ -746,8 +1114,7 @@ impl Lease for CoordNode {
 
 #[tonic::async_trait]
 impl Watch for CoordNode {
-    type WatchStream =
-        tokio_stream::wrappers::ReceiverStream<Result<WatchResponse, tonic::Status>>;
+    type WatchStream = tokio_stream::wrappers::ReceiverStream<Result<WatchResponse, tonic::Status>>;
 
     async fn watch(
         &self,
@@ -780,7 +1147,17 @@ impl Watch for CoordNode {
             start_revision: create_req.start_revision as u64,
         };
 
-        let (watch_id, mut event_rx) = dispatcher.subscribe(watch_req, 1024).await;
+        // P0-E.3：先注册取水位 R0（current_revision），回放 [start, R0]，
+        //        实时从 R0+1 续并按 revision 去重。
+        let watermark_rev = self.storage.current_revision();
+
+        let (watch_id, mut event_rx) = dispatcher
+            .subscribe(
+                watch_req,
+                self.watch_buffer.load(std::sync::atomic::Ordering::Relaxed),
+                watermark_rev,
+            )
+            .map_err(tonic::Status::resource_exhausted)?;
 
         let (tx, rx) = mpsc::channel::<Result<WatchResponse, tonic::Status>>(16);
 
@@ -791,7 +1168,7 @@ impl Watch for CoordNode {
         let range_end = create_req.range_end;
 
         tokio::spawn(async move {
-            // 如果指定了 start_revision > 0，先回放历史事件
+            // 如果指定了 start_revision > 0，先回放历史事件（止于水位，P0-E.3）
             if start_rev > 0 {
                 let dispatcher_for_replay = Arc::clone(&dispatcher_ref);
                 let (history_tx, mut history_rx) = mpsc::channel::<crate::watch::WatchEvent>(256);
@@ -808,6 +1185,7 @@ impl Watch for CoordNode {
                         &key_p,
                         &range_e,
                         start_rev,
+                        watermark_rev,
                         reader.as_ref(),
                     )
                 })
@@ -827,11 +1205,13 @@ impl Watch for CoordNode {
                     }
                     Ok(Err(e)) => {
                         tracing::warn!(watch_id, "watch history replay failed: {e}");
-                        // 发送 HistoryUnavailable 事件通知客户端
+                        // P0-E.2：损坏/不可用 → HistoryUnavailable 事件通知客户端
                         let resp = WatchResponse {
                             watch_id: watch_id as i64,
                             events: vec![WatchEvent {
-                                r#type: coord_proto::watch::watch_event::EventType::HistoryUnavailable as i32,
+                                r#type:
+                                    coord_proto::watch::watch_event::EventType::HistoryUnavailable
+                                        as i32,
                                 kvs: vec![],
                                 prev_kv: None,
                                 revision: 0,
@@ -845,10 +1225,35 @@ impl Watch for CoordNode {
                 }
             }
 
-            // 实时事件循环
+            // 实时事件循环（P0-E.1/E.3：溢出合成 + revision 去重）
             loop {
+                // 溢出标志：满时置位 → 合成 BufferOverflow（必达）
+                if dispatcher_ref.take_overflow(watch_id) {
+                    let resp = WatchResponse {
+                        watch_id: watch_id as i64,
+                        events: vec![WatchEvent {
+                            r#type: coord_proto::watch::watch_event::EventType::BufferOverflow
+                                as i32,
+                            kvs: vec![],
+                            prev_kv: None,
+                            revision: 0,
+                        }],
+                    };
+                    if tx.send(Ok(resp)).await.is_err() {
+                        break;
+                    }
+                }
+
                 match event_rx.recv().await {
                     Some(event) => {
+                        // P0-E.3：去重——仅投递水位之后的实时事件（回放已覆盖 ≤ 水位）
+                        if event
+                            .events
+                            .iter()
+                            .all(|item| item.revision <= watermark_rev)
+                        {
+                            continue;
+                        }
                         if let Some(resp) = convert_watch_event_to_response(watch_id, &event) {
                             if tx.send(Ok(resp)).await.is_err() {
                                 break;
@@ -969,9 +1374,92 @@ impl Maintenance for CoordNode {
         &self,
         _request: tonic::Request<SnapshotRequest>,
     ) -> Result<tonic::Response<Self::SnapshotStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented(
-            "snapshot streaming not yet implemented",
-        ))
+        // P1-08：流式快照导出（在线备份）。从本地状态机导出（任何节点可服务，
+        // 运维建议从 leader 或已追平 follower 拉取；数据为 v2 格式密文直传，
+        // 不经过 Barrier）。首块携带 last_included_index/term，客户端按块拼接。
+        let applied = self.storage.get_applied_log_id().map_err(map_err)?;
+        let last_included_index = applied.map(|a| a.index).unwrap_or(0);
+        let last_included_term = applied.map(|a| a.term).unwrap_or(0);
+
+        let snapshot_data = crate::storage::snapshot::export_snapshot_data(
+            &self.storage,
+            last_included_index,
+            last_included_term,
+        )
+        .map_err(|e| tonic::Status::internal(format!("export snapshot: {e}")))?;
+        let bytes = snapshot_data
+            .to_bytes()
+            .map_err(|e| tonic::Status::internal(format!("serialize snapshot: {e}")))?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<SnapshotResponse, tonic::Status>>(4);
+        tokio::spawn(async move {
+            const CHUNK: usize = 1024 * 1024; // 1MiB/块（流式传输内存上限）
+            for (i, chunk) in bytes.chunks(CHUNK).enumerate() {
+                let resp = SnapshotResponse {
+                    data: chunk.to_vec(),
+                    last_included_index: if i == 0 {
+                        last_included_index as i64
+                    } else {
+                        0
+                    },
+                    last_included_term: if i == 0 { last_included_term } else { 0 },
+                };
+                if tx.send(Ok(resp)).await.is_err() {
+                    break; // 客户端断开
+                }
+            }
+        });
+
+        Ok(tonic::Response::new(ReceiverStream::new(rx)))
+    }
+
+    // ──── Compaction（P1-01）────
+
+    async fn compact(
+        &self,
+        request: tonic::Request<CompactRequest>,
+    ) -> Result<tonic::Response<CompactResponse>, tonic::Status> {
+        // P1-02：磁盘水位只读闸（compact 虽删除数据但需写入 raft 日志）
+        self.ensure_writable()?;
+
+        let req = request.into_inner();
+
+        // 仅 leader 接受（非 leader 返回 UNAVAILABLE + leader 提示，规格 13 §三）
+        if let Some(ref raft) = self.raft {
+            let leader = raft.current_leader().await;
+            if leader != Some(self.node_id) {
+                let forward = leader
+                    .and_then(|l| self.grpc_addr_of(l))
+                    .unwrap_or_default();
+                return Err(tonic::Status::unavailable(format!(
+                    "not leader (leader={leader:?}); retry against the leader at {forward}"
+                )));
+            }
+        }
+
+        // 前置校验：revision 0 = 压缩到当前；未来 revision → INVALID_ARGUMENT
+        let current = self.storage.current_revision();
+        let revision = if req.revision <= 0 {
+            current
+        } else {
+            req.revision as u64
+        };
+        if revision > current {
+            return Err(tonic::Status::invalid_argument(format!(
+                "compact revision {revision} is in the future (current={current})"
+            )));
+        }
+
+        let compacted = self.compact_impl(revision).await.map_err(|e| {
+            tracing::error!("compact failed: {e}");
+            tonic::Status::internal(e)
+        })?;
+
+        tracing::debug!(compacted, "compact applied");
+        Ok(tonic::Response::new(CompactResponse {
+            compacted_revision: compacted as i64,
+            revision: self.storage.current_revision() as i64,
+        }))
     }
 
     // ──── Member Management ────
@@ -986,16 +1474,24 @@ impl Maintenance for CoordNode {
             .as_ref()
             .ok_or_else(|| tonic::Status::failed_precondition("not a raft node"))?;
 
-        // Step 1: Add as learner
-        let node = openraft::impls::BasicNode::new(&req.raft_addr);
+        // P0-D.3：变更串行化 —— 集群级互斥，并发变更返回 UNAVAILABLE
+        let _guard = self.try_lock_member_change().ok_or_else(|| {
+            tonic::Status::unavailable("another membership change is in progress")
+        })?;
+
+        // Step 1: Add as learner（blocking=true 等待复制追平，规格 D.2.1）
+        let node = crate::raft::new_basic_node(&req.raft_addr);
         raft.add_learner(req.node_id, node, true)
             .await
             .map_err(|e| tonic::Status::internal(format!("add_learner failed: {e}")))?;
 
+        // 注册 gRPC 地址（P0-D.1：leader 重定向需要）
+        self.register_grpc_addr(req.node_id, &req.grpc_addr);
+
         // Step 2: Promote to voter
         let mut voter_ids = std::collections::BTreeSet::new();
         voter_ids.insert(req.node_id);
-        raft.change_membership(openraft::ChangeMembers::AddVoterIds(voter_ids), true)
+        raft.change_membership(crate::raft::add_voter_ids(voter_ids), true)
             .await
             .map_err(|e| tonic::Status::internal(format!("change_membership failed: {e}")))?;
 
@@ -1018,11 +1514,33 @@ impl Maintenance for CoordNode {
             .as_ref()
             .ok_or_else(|| tonic::Status::failed_precondition("not a raft node"))?;
 
+        let _guard = self.try_lock_member_change().ok_or_else(|| {
+            tonic::Status::unavailable("another membership change is in progress")
+        })?;
+
+        // P1-07 / D.2.4：remove 目标是 leader。
+        // 设计决策（见 evidence/m2.md 偏差记录）：openraft 0.10 支持 leader
+        // 自移除 —— change_membership(RemoveVoters) 经 joint→uniform 配置提交，
+        // 新配置提交后旧 leader 自动退位、剩余 quorum 继续服务。若先显式
+        // transfer_leader，本节点即成为 follower，反而无法再提交该变更
+        // （openraft 拒绝非 leader 的 change_membership），而内部 gRPC 转发会
+        // 破坏鉴权 fail-closed 模型。显式移交执行器（transfer_leadership）
+        // 供维护/优雅停机路径使用。
+        if raft.current_leader().await == Some(req.node_id) {
+            tracing::info!(
+                "Removing leader node {} via openraft self-removal \
+                 (auto step-down after config commit)",
+                req.node_id
+            );
+        }
+
         let mut remove_ids = std::collections::BTreeSet::new();
         remove_ids.insert(req.node_id);
-        raft.change_membership(openraft::ChangeMembers::RemoveVoters(remove_ids), true)
+        raft.change_membership(crate::raft::remove_voter_ids(remove_ids), true)
             .await
-            .map_err(|e| tonic::Status::internal(format!("change_membership failed: {e}")))?;
+            .map_err(|e| {
+                tonic::Status::failed_precondition(format!("change_membership failed: {e}"))
+            })?;
 
         Ok(tonic::Response::new(MemberRemoveResponse {
             success: true,
@@ -1040,15 +1558,80 @@ impl Maintenance for CoordNode {
             .as_ref()
             .ok_or_else(|| tonic::Status::failed_precondition("not a raft node"))?;
 
+        let _guard = self.try_lock_member_change().ok_or_else(|| {
+            tonic::Status::unavailable("another membership change is in progress")
+        })?;
+
         let mut voter_ids = std::collections::BTreeSet::new();
         voter_ids.insert(req.node_id);
-        raft.change_membership(openraft::ChangeMembers::AddVoterIds(voter_ids), true)
+        raft.change_membership(crate::raft::add_voter_ids(voter_ids), true)
             .await
             .map_err(|e| tonic::Status::internal(format!("change_membership failed: {e}")))?;
 
         Ok(tonic::Response::new(MemberPromoteResponse {
             success: true,
             message: format!("node {} promoted to voter", req.node_id),
+        }))
+    }
+
+    async fn join(
+        &self,
+        request: tonic::Request<JoinRequest>,
+    ) -> Result<tonic::Response<JoinResponse>, tonic::Status> {
+        let req = request.into_inner();
+        let raft = self
+            .raft
+            .as_ref()
+            .ok_or_else(|| tonic::Status::failed_precondition("not a raft node"))?;
+
+        // P0-D.1：非 leader 返回 leader 重定向（客户端重试到 leader）。
+        // 注：未初始化/未加入的节点 current_leader 为 None，同样重定向
+        // （重定向到已知的其它节点；绝不能在本节点自调 add_learner）。
+        let leader = raft.current_leader().await;
+        if leader != Some(self.node_id) {
+            let forward_to = match leader {
+                Some(l) => self.grpc_addr_of(l),
+                None => self
+                    .node_grpc_addrs
+                    .read()
+                    .iter()
+                    .find(|(id, _)| **id != self.node_id)
+                    .map(|(_, addr)| addr.clone()),
+            }
+            .unwrap_or_default();
+            return Ok(tonic::Response::new(JoinResponse {
+                success: false,
+                message: format!("not leader (leader={leader:?}); retry against the leader"),
+                forward_to,
+            }));
+        }
+
+        let _guard = self.try_lock_member_change().ok_or_else(|| {
+            tonic::Status::unavailable("another membership change is in progress")
+        })?;
+
+        // add_learner(blocking=true)：等待复制追平（规格 D.2.1），再晋升 voter
+        let node = crate::raft::new_basic_node(&req.raft_addr);
+        raft.add_learner(req.node_id, node, true)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("add_learner failed: {e}")))?;
+        self.register_grpc_addr(req.node_id, &req.grpc_addr);
+
+        let mut voter_ids = std::collections::BTreeSet::new();
+        voter_ids.insert(req.node_id);
+        raft.change_membership(crate::raft::add_voter_ids(voter_ids), true)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("change_membership failed: {e}")))?;
+
+        tracing::info!(
+            "Join complete: node {} (raft={}) promoted to voter",
+            req.node_id,
+            req.raft_addr
+        );
+        Ok(tonic::Response::new(JoinResponse {
+            success: true,
+            message: format!("node {} joined as voter", req.node_id),
+            forward_to: String::new(),
         }))
     }
 
@@ -1177,7 +1760,9 @@ mod tests {
             key: b"k".to_vec(),
             result: coord_proto::txn::compare::CompareResult::Greater as i32,
             target: coord_proto::txn::compare::Target::Value as i32,
-            target_value: Some(coord_proto::txn::compare::TargetValue::Value(b"val".to_vec())),
+            target_value: Some(coord_proto::txn::compare::TargetValue::Value(
+                b"val".to_vec(),
+            )),
         };
         let result = convert_compare(&c).unwrap();
         assert!(matches!(result.op, crate::txn::CompareOp::Greater));
@@ -1194,7 +1779,10 @@ mod tests {
         };
         let result = convert_compare(&c).unwrap();
         assert!(matches!(result.op, crate::txn::CompareOp::Less));
-        assert!(matches!(result.target, crate::txn::CompareTarget::ModRevision));
+        assert!(matches!(
+            result.target,
+            crate::txn::CompareTarget::ModRevision
+        ));
     }
 
     #[test]
@@ -1238,7 +1826,11 @@ mod tests {
         };
         let result = convert_request_op(&op).unwrap();
         match result {
-            crate::txn::TxnOp::Put { key, value, lease_id } => {
+            crate::txn::TxnOp::Put {
+                key,
+                value,
+                lease_id,
+            } => {
                 assert_eq!(key, b"k");
                 assert_eq!(value, b"v");
                 assert_eq!(lease_id, None);
@@ -1282,7 +1874,11 @@ mod tests {
         };
         let result = convert_request_op(&op).unwrap();
         match result {
-            crate::txn::TxnOp::Range { key, range_end, limit } => {
+            crate::txn::TxnOp::Range {
+                key,
+                range_end,
+                limit,
+            } => {
                 assert_eq!(key, b"prefix");
                 assert_eq!(range_end, b"prefixz");
                 assert_eq!(limit, 100);
@@ -1355,5 +1951,55 @@ mod tests {
 
         let err = map_err("ok");
         assert_eq!(err.code(), tonic::Code::Internal);
+    }
+
+    // ──── P1-02 磁盘只读闸 ────
+
+    #[test]
+    fn test_disk_read_only_gate_rejects_writes() {
+        use coord_core::storage::StorageBackend;
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let config = coord_core::types::StorageConfig::default();
+        let backend = RedbBackend::open(tmpdir.path(), &config).unwrap();
+        let storage = Arc::new(MvccStorage::new(backend).unwrap());
+        let node = CoordNode::new(Arc::clone(&storage));
+
+        // 默认可写
+        assert!(node.ensure_writable().is_ok());
+
+        // 磁盘水位 < 5%：置只读闸 → RESOURCE_EXHAUSTED
+        node.set_disk_read_only(true);
+        let err = node.ensure_writable().expect_err("must be read-only");
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+
+        // 恢复后放行
+        node.set_disk_read_only(false);
+        assert!(node.ensure_writable().is_ok());
+    }
+
+    #[test]
+    fn test_watch_buffer_minimum_clamp() {
+        use coord_core::storage::StorageBackend;
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let config = coord_core::types::StorageConfig::default();
+        let backend = RedbBackend::open(tmpdir.path(), &config).unwrap();
+        let storage = Arc::new(MvccStorage::new(backend).unwrap());
+        let mut node = CoordNode::new(Arc::clone(&storage));
+
+        assert_eq!(
+            node.watch_buffer.load(std::sync::atomic::Ordering::Relaxed),
+            1024
+        );
+        node.set_watch_buffer(8);
+        assert_eq!(
+            node.watch_buffer.load(std::sync::atomic::Ordering::Relaxed),
+            16,
+            "clamped to minimum 16"
+        );
+        node.set_watch_buffer(4096);
+        assert_eq!(
+            node.watch_buffer.load(std::sync::atomic::Ordering::Relaxed),
+            4096
+        );
     }
 }

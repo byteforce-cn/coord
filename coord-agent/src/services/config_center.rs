@@ -211,8 +211,6 @@ impl ConfigCenterService {
     }
 
     /// 设置配置（写入 Server + 更新本地缓存）
-
-    /// 设置配置（写入 Server + 更新本地缓存）
     pub async fn set(&self, key: &str, value: &str) -> ServiceResult<ConfigEntry> {
         let storage_key = ConfigEntry::storage_key(key);
 
@@ -362,7 +360,9 @@ impl BaseService for ConfigCenterService {
             let mut event_rx = match inner.client.watch().watch(prefix, 0).await {
                 Ok(rx) => rx,
                 Err(e) => {
-                    tracing::warn!("ConfigCenterService: failed to subscribe Watch: {e}; entering fallback");
+                    tracing::warn!(
+                        "ConfigCenterService: failed to subscribe Watch: {e}; entering fallback"
+                    );
                     cache.write().enter_fallback();
                     return;
                 }
@@ -452,13 +452,11 @@ impl std::fmt::Debug for ConfigCenterService {
 
 // ──── gRPC Config trait 实现 ────
 
-use coord_proto::agent::{
-    ConfigGetRequest, ConfigGetResponse,
-    ConfigPutRequest, ConfigPutResponse,
-    ConfigListRequest, ConfigListResponse,
-    ConfigWatchRequest, ConfigWatchEvent,
-};
 use coord_proto::agent::config_server::Config;
+use coord_proto::agent::{
+    ConfigGetRequest, ConfigGetResponse, ConfigListRequest, ConfigListResponse, ConfigPutRequest,
+    ConfigPutResponse, ConfigWatchEvent, ConfigWatchRequest,
+};
 
 #[tonic::async_trait]
 impl Config for ConfigCenterService {
@@ -485,7 +483,9 @@ impl Config for ConfigCenterService {
         request: tonic::Request<ConfigPutRequest>,
     ) -> Result<tonic::Response<ConfigPutResponse>, tonic::Status> {
         let req = request.into_inner();
-        let entry = self.set(&req.key, &req.value).await
+        let entry = self
+            .set(&req.key, &req.value)
+            .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
         Ok(tonic::Response::new(ConfigPutResponse {
             revision: entry.version as i64,
@@ -506,9 +506,8 @@ impl Config for ConfigCenterService {
     }
 
     /// Server streaming response type for the Watch method.
-    type WatchStream = tokio_stream::wrappers::ReceiverStream<
-        Result<ConfigWatchEvent, tonic::Status>,
-    >;
+    type WatchStream =
+        tokio_stream::wrappers::ReceiverStream<Result<ConfigWatchEvent, tonic::Status>>;
 
     async fn watch(
         &self,
@@ -523,10 +522,8 @@ impl Config for ConfigCenterService {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
-                        if event.key.starts_with(&prefix) {
-                            if tx.send(Ok(event)).await.is_err() {
-                                break; // client disconnected
-                            }
+                        if event.key.starts_with(&prefix) && tx.send(Ok(event)).await.is_err() {
+                            break; // client disconnected
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

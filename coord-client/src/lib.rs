@@ -23,4 +23,4 @@ pub use client::{
 };
 pub use config::Config;
 pub use leader::LeaderDiscovery;
-pub use retry::{RetryDecision, RetryState, classify_error};
+pub use retry::{classify_error, RetryDecision, RetryState};

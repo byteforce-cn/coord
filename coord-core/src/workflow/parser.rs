@@ -131,7 +131,11 @@ impl ParseError {
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(span) = self.span {
-            write!(f, "line {}, col {}: {}", span.line, span.column, self.message)?;
+            write!(
+                f,
+                "line {}, col {}: {}",
+                span.line, span.column, self.message
+            )?;
         } else {
             write!(f, "{}", self.message)?;
         }
@@ -180,32 +184,56 @@ fn parse_from_value(root: Value, span: Span) -> ParseResult<RawWorkflowDef> {
     let tasks = parse_do_tasks(obj, span)?;
 
     // 解析 input 块（可选）
-    let input = obj
-        .get("input")
-        .map(|v| RawValue {
-            span,
-            value: v.clone(),
-        });
+    let input = obj.get("input").map(|v| RawValue {
+        span,
+        value: v.clone(),
+    });
 
     // 解析 use 块（可选）
-    let use_components = obj.get("use").map(|v| parse_use_components(v, span)).transpose()?;
+    let use_components = obj
+        .get("use")
+        .map(|v| parse_use_components(v, span))
+        .transpose()?;
 
     // 解析顶层扩展块（可选）
     let ext = {
-        let mut e = RawDefinitionExt::default();
-        e.output = obj.get("output").map(|v| RawValue { span, value: v.clone() });
-        e.timeout = obj.get("timeout").map(|v| RawValue { span, value: v.clone() });
-        e.schedule = obj.get("schedule").map(|v| RawValue { span, value: v.clone() });
-        e.auth = obj.get("auth").map(|v| RawValue { span, value: v.clone() });
-        e.secrets = obj.get("secrets").map(|v| RawValue { span, value: v.clone() });
-        e.constants = obj.get("constants").map(|v| RawValue { span, value: v.clone() });
+        let e = RawDefinitionExt {
+            output: obj.get("output").map(|v| RawValue {
+                span,
+                value: v.clone(),
+            }),
+            timeout: obj.get("timeout").map(|v| RawValue {
+                span,
+                value: v.clone(),
+            }),
+            schedule: obj.get("schedule").map(|v| RawValue {
+                span,
+                value: v.clone(),
+            }),
+            auth: obj.get("auth").map(|v| RawValue {
+                span,
+                value: v.clone(),
+            }),
+            secrets: obj.get("secrets").map(|v| RawValue {
+                span,
+                value: v.clone(),
+            }),
+            constants: obj.get("constants").map(|v| RawValue {
+                span,
+                value: v.clone(),
+            }),
+        };
         let has_any = e.output.is_some()
             || e.timeout.is_some()
             || e.schedule.is_some()
             || e.auth.is_some()
             || e.secrets.is_some()
             || e.constants.is_some();
-        if has_any { Some(e) } else { None }
+        if has_any {
+            Some(e)
+        } else {
+            None
+        }
     };
 
     Ok(RawWorkflowDef {
@@ -223,17 +251,21 @@ fn parse_document(obj: &serde_json::Map<String, Value>, span: Span) -> ParseResu
     let doc_obj = obj
         .get("document")
         .and_then(|v| v.as_object())
-        .ok_or_else(|| {
-            ParseError::new("missing required 'document' block").with_span(span)
-        })?;
+        .ok_or_else(|| ParseError::new("missing required 'document' block").with_span(span))?;
 
     let dsl = get_string_field(doc_obj, "dsl", span, "document.dsl")?;
     let namespace = get_string_field(doc_obj, "namespace", span, "document.namespace")?;
     let name = get_string_field(doc_obj, "name", span, "document.name")?;
     let version = get_string_field(doc_obj, "version", span, "document.version")?;
 
-    let title = doc_obj.get("title").and_then(|v| v.as_str()).map(String::from);
-    let summary = doc_obj.get("summary").and_then(|v| v.as_str()).map(String::from);
+    let title = doc_obj
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let summary = doc_obj
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let tags = doc_obj.get("tags").and_then(|v| {
         v.as_object().map(|m| {
             m.iter()
@@ -287,7 +319,10 @@ fn parse_do_tasks(
             .with_span(item_span));
         }
 
-        let (name, body) = obj.iter().next().unwrap();
+        let (name, body) = obj
+            .iter()
+            .next()
+            .ok_or_else(|| ParseError::new("task object must not be empty").with_span(item_span))?;
         tasks.push(RawNamedTask {
             span: item_span,
             name: name.clone(),
@@ -300,21 +335,24 @@ fn parse_do_tasks(
 
 /// 解析 use 组件块
 fn parse_use_components(use_val: &Value, span: Span) -> ParseResult<RawUseComponents> {
-    let obj = use_val.as_object().ok_or_else(|| {
-        ParseError::new("'use' must be a JSON object").with_span(span)
-    })?;
+    let obj = use_val
+        .as_object()
+        .ok_or_else(|| ParseError::new("'use' must be a JSON object").with_span(span))?;
 
-    let functions = obj.get("functions").map(|f| {
-        parse_function_map(f, span)
-    }).transpose()?;
+    let functions = obj
+        .get("functions")
+        .map(|f| parse_function_map(f, span))
+        .transpose()?;
 
-    let retries = obj.get("retries").map(|r| {
-        parse_retry_map(r, span)
-    }).transpose()?;
+    let retries = obj
+        .get("retries")
+        .map(|r| parse_retry_map(r, span))
+        .transpose()?;
 
-    let timeouts = obj.get("timeouts").map(|t| {
-        parse_timeout_map(t, span)
-    }).transpose()?;
+    let timeouts = obj
+        .get("timeouts")
+        .map(|t| parse_timeout_map(t, span))
+        .transpose()?;
 
     Ok(RawUseComponents {
         span,
@@ -325,34 +363,52 @@ fn parse_use_components(use_val: &Value, span: Span) -> ParseResult<RawUseCompon
 }
 
 fn parse_function_map(val: &Value, span: Span) -> ParseResult<HashMap<String, RawFunctionDef>> {
-    let obj = val.as_object().ok_or_else(|| {
-        ParseError::new("'use.functions' must be a JSON object").with_span(span)
-    })?;
+    let obj = val
+        .as_object()
+        .ok_or_else(|| ParseError::new("'use.functions' must be a JSON object").with_span(span))?;
     let mut map = HashMap::new();
     for (k, v) in obj {
-        map.insert(k.clone(), RawFunctionDef { span, body: v.clone() });
+        map.insert(
+            k.clone(),
+            RawFunctionDef {
+                span,
+                body: v.clone(),
+            },
+        );
     }
     Ok(map)
 }
 
 fn parse_retry_map(val: &Value, span: Span) -> ParseResult<HashMap<String, RawRetryPolicy>> {
-    let obj = val.as_object().ok_or_else(|| {
-        ParseError::new("'use.retries' must be a JSON object").with_span(span)
-    })?;
+    let obj = val
+        .as_object()
+        .ok_or_else(|| ParseError::new("'use.retries' must be a JSON object").with_span(span))?;
     let mut map = HashMap::new();
     for (k, v) in obj {
-        map.insert(k.clone(), RawRetryPolicy { span, body: v.clone() });
+        map.insert(
+            k.clone(),
+            RawRetryPolicy {
+                span,
+                body: v.clone(),
+            },
+        );
     }
     Ok(map)
 }
 
 fn parse_timeout_map(val: &Value, span: Span) -> ParseResult<HashMap<String, RawTimeoutConfig>> {
-    let obj = val.as_object().ok_or_else(|| {
-        ParseError::new("'use.timeouts' must be a JSON object").with_span(span)
-    })?;
+    let obj = val
+        .as_object()
+        .ok_or_else(|| ParseError::new("'use.timeouts' must be a JSON object").with_span(span))?;
     let mut map = HashMap::new();
     for (k, v) in obj {
-        map.insert(k.clone(), RawTimeoutConfig { span, body: v.clone() });
+        map.insert(
+            k.clone(),
+            RawTimeoutConfig {
+                span,
+                body: v.clone(),
+            },
+        );
     }
     Ok(map)
 }
@@ -413,11 +469,7 @@ do:
 "#;
 
         let result = parse_yaml(yaml);
-        assert!(
-            result.is_ok(),
-            "parse failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "parse failed: {:?}", result.err());
         let raw = result.unwrap();
         assert_eq!(raw.document.dsl, "1.0.0");
         assert_eq!(raw.document.namespace, "test");
@@ -518,8 +570,16 @@ do:
         assert!(result.is_ok(), "parse failed: {:?}", result.err());
         let raw = result.unwrap();
         let use_comp = raw.use_components.as_ref().unwrap();
-        assert!(use_comp.functions.as_ref().unwrap().contains_key("sendNotification"));
-        assert!(use_comp.retries.as_ref().unwrap().contains_key("defaultRetry"));
+        assert!(use_comp
+            .functions
+            .as_ref()
+            .unwrap()
+            .contains_key("sendNotification"));
+        assert!(use_comp
+            .retries
+            .as_ref()
+            .unwrap()
+            .contains_key("defaultRetry"));
     }
 
     #[test]
@@ -730,7 +790,10 @@ do:
 
         // 两个结果在语义上应该等价
         assert_eq!(yaml_result.document.name, json_result.document.name);
-        assert_eq!(yaml_result.document.namespace, json_result.document.namespace);
+        assert_eq!(
+            yaml_result.document.namespace,
+            json_result.document.namespace
+        );
         assert_eq!(yaml_result.tasks.len(), json_result.tasks.len());
         assert_eq!(yaml_result.tasks[0].name, json_result.tasks[0].name);
     }

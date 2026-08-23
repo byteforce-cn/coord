@@ -16,10 +16,10 @@ use std::collections::HashMap;
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
+use hmac::{Hmac, Mac};
 use parking_lot::RwLock;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use hmac::{Hmac, Mac};
 use zeroize::Zeroize;
 
 // ──── 公共类型 ────
@@ -112,15 +112,21 @@ impl TransitService {
         OsRng.fill_bytes(&mut dek);
 
         // 2. 用 KEK 加密 DEK（固定 AAD，不使用上下文）
-        let kek_cipher = Aes256Gcm::new_from_slice(&self.kek)
-            .map_err(|e| format!("invalid KEK: {e}"))?;
+        let kek_cipher =
+            Aes256Gcm::new_from_slice(&self.kek).map_err(|e| format!("invalid KEK: {e}"))?;
         let mut dek_nonce_bytes = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut dek_nonce_bytes);
         let dek_nonce = Nonce::from_slice(&dek_nonce_bytes);
 
         let fixed_aad = b"coord-transit-dek-v1";
         let mut encrypted_dek_body = kek_cipher
-            .encrypt(dek_nonce, Payload { msg: dek.as_ref(), aad: fixed_aad.as_ref() })
+            .encrypt(
+                dek_nonce,
+                Payload {
+                    msg: dek.as_ref(),
+                    aad: fixed_aad.as_ref(),
+                },
+            )
             .map_err(|e| format!("DEK encrypt failed: {e}"))?;
 
         // DEK 存储格式: nonce(12) || encrypted_body(48)
@@ -129,15 +135,21 @@ impl TransitService {
         dek_packet.append(&mut encrypted_dek_body);
 
         // 3. 用 DEK 加密数据（可选上下文绑定）
-        let data_cipher = Aes256Gcm::new_from_slice(&dek)
-            .map_err(|e| format!("invalid DEK: {e}"))?;
+        let data_cipher =
+            Aes256Gcm::new_from_slice(&dek).map_err(|e| format!("invalid DEK: {e}"))?;
         let mut data_nonce_bytes = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut data_nonce_bytes);
         let data_nonce = Nonce::from_slice(&data_nonce_bytes);
 
         let data_aad = build_context_aad(context);
         let mut ciphertext = data_cipher
-            .encrypt(data_nonce, Payload { msg: plaintext, aad: &data_aad })
+            .encrypt(
+                data_nonce,
+                Payload {
+                    msg: plaintext,
+                    aad: &data_aad,
+                },
+            )
             .map_err(|e| format!("data encrypt failed: {e}"))?;
 
         // 4. 销毁 DEK
@@ -147,14 +159,18 @@ impl TransitService {
         let dek_id = compute_dek_id(&dek_packet);
 
         // 6. 存储加密后的 DEK
-        self.dek_store.write().insert(dek_id.clone(), dek_packet.clone());
+        self.dek_store
+            .write()
+            .insert(dek_id.clone(), dek_packet.clone());
 
         // 7. 组装数据包: dek_id_len(1B) || dek_id || data_nonce(12) || dek_packet(60) || ciphertext
         let dek_id_bytes = dek_id.as_bytes();
         if dek_id_bytes.len() > 255 {
             return Err("dek_id too long".into());
         }
-        let mut packet = Vec::with_capacity(1 + dek_id_bytes.len() + NONCE_LEN + DEK_PACKET_LEN + ciphertext.len());
+        let mut packet = Vec::with_capacity(
+            1 + dek_id_bytes.len() + NONCE_LEN + DEK_PACKET_LEN + ciphertext.len(),
+        );
         packet.push(dek_id_bytes.len() as u8);
         packet.extend_from_slice(dek_id_bytes);
         packet.extend_from_slice(&data_nonce_bytes);
@@ -198,8 +214,7 @@ impl TransitService {
             let candidate_len = packet[0] as usize;
             let candidate_end = 1 + candidate_len;
             // 检查：candidate_len 合理（1-64）、候选范围不越界、且剩余数据足够
-            if candidate_len >= 1
-                && candidate_len <= 64
+            if (1..=64).contains(&candidate_len)
                 && candidate_end < packet.len()
                 && packet.len() - candidate_end >= NONCE_LEN + DEK_PACKET_LEN + TAG_LEN
             {
@@ -227,7 +242,10 @@ impl TransitService {
                 &dek_id
             };
             store.get(id_to_try).cloned().ok_or_else(|| {
-                format!("DEK '{}' not found (already used or not created)", id_to_try)
+                format!(
+                    "DEK '{}' not found (already used or not created)",
+                    id_to_try
+                )
             })?
         };
         if dek_packet_data.len() < DEK_PACKET_LEN {
@@ -235,13 +253,19 @@ impl TransitService {
         }
 
         // 2. 用 KEK 解密 DEK
-        let kek_cipher = Aes256Gcm::new_from_slice(&self.kek)
-            .map_err(|e| format!("invalid KEK: {e}"))?;
+        let kek_cipher =
+            Aes256Gcm::new_from_slice(&self.kek).map_err(|e| format!("invalid KEK: {e}"))?;
         let dek_nonce = Nonce::from_slice(&dek_packet_data[..NONCE_LEN]);
         let fixed_aad = b"coord-transit-dek-v1";
 
         let mut dek_bytes = kek_cipher
-            .decrypt(dek_nonce, Payload { msg: &dek_packet_data[NONCE_LEN..], aad: fixed_aad.as_ref() })
+            .decrypt(
+                dek_nonce,
+                Payload {
+                    msg: &dek_packet_data[NONCE_LEN..],
+                    aad: fixed_aad.as_ref(),
+                },
+            )
             .map_err(|e| format!("DEK decrypt failed: {e}"))?;
 
         if dek_bytes.len() != DEK_LEN {
@@ -261,14 +285,20 @@ impl TransitService {
         }
 
         // 4. 用 DEK 解密数据
-        let data_cipher = Aes256Gcm::new_from_slice(&dek)
-            .map_err(|e| format!("invalid DEK: {e}"))?;
+        let data_cipher =
+            Aes256Gcm::new_from_slice(&dek).map_err(|e| format!("invalid DEK: {e}"))?;
         let data_nonce = Nonce::from_slice(&packet[data_nonce_start..data_nonce_start + NONCE_LEN]);
         let ciphertext = &packet[dek_packet_start + DEK_PACKET_LEN..];
 
         let data_aad = build_context_aad(context);
         let plaintext = data_cipher
-            .decrypt(data_nonce, Payload { msg: ciphertext, aad: &data_aad })
+            .decrypt(
+                data_nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad: &data_aad,
+                },
+            )
             .map_err(|e| format!("data decrypt failed (wrong context?): {e}"))?;
 
         dek.zeroize();
@@ -280,19 +310,26 @@ impl TransitService {
     pub fn rewrap(&self, old_dek_id: &str) -> Result<String, String> {
         let dek_packet = {
             let store = self.dek_store.read();
-            store.get(old_dek_id).cloned().ok_or_else(|| {
-                format!("DEK '{old_dek_id}' not found for rewrap")
-            })?
+            store
+                .get(old_dek_id)
+                .cloned()
+                .ok_or_else(|| format!("DEK '{old_dek_id}' not found for rewrap"))?
         };
 
         // 解密旧 DEK
-        let kek_cipher = Aes256Gcm::new_from_slice(&self.kek)
-            .map_err(|e| format!("invalid KEK: {e}"))?;
+        let kek_cipher =
+            Aes256Gcm::new_from_slice(&self.kek).map_err(|e| format!("invalid KEK: {e}"))?;
         let dek_nonce = Nonce::from_slice(&dek_packet[..NONCE_LEN]);
         let fixed_aad = b"coord-transit-dek-v1";
 
         let mut dek_bytes = kek_cipher
-            .decrypt(dek_nonce, Payload { msg: &dek_packet[NONCE_LEN..], aad: fixed_aad.as_ref() })
+            .decrypt(
+                dek_nonce,
+                Payload {
+                    msg: &dek_packet[NONCE_LEN..],
+                    aad: fixed_aad.as_ref(),
+                },
+            )
             .map_err(|e| format!("DEK decrypt for rewrap failed: {e}"))?;
 
         let mut dek = [0u8; DEK_LEN];
@@ -305,7 +342,13 @@ impl TransitService {
         let new_nonce = Nonce::from_slice(&new_nonce_bytes);
 
         let mut new_body = kek_cipher
-            .encrypt(new_nonce, Payload { msg: dek.as_ref(), aad: fixed_aad.as_ref() })
+            .encrypt(
+                new_nonce,
+                Payload {
+                    msg: dek.as_ref(),
+                    aad: fixed_aad.as_ref(),
+                },
+            )
             .map_err(|e| format!("DEK re-encrypt failed: {e}"))?;
 
         let mut new_packet = Vec::with_capacity(DEK_PACKET_LEN);
@@ -336,7 +379,11 @@ impl TransitService {
     /// 支持算法: HMAC-SHA256（默认）, HMAC-SHA512
     /// 密钥仅存于内存，重启后通过 KEK 重新派生。
     pub fn hmac_sign(&self, data: &[u8], algorithm: &str) -> Result<Vec<u8>, String> {
-        let algo = if algorithm.is_empty() { "HMAC-SHA256" } else { algorithm };
+        let algo = if algorithm.is_empty() {
+            "HMAC-SHA256"
+        } else {
+            algorithm
+        };
         match algo.to_uppercase().as_str() {
             "HMAC-SHA256" => {
                 use sha2::Sha256;
@@ -358,7 +405,12 @@ impl TransitService {
     }
 
     /// 验证 HMAC 签名
-    pub fn hmac_verify(&self, data: &[u8], signature: &[u8], algorithm: &str) -> Result<bool, String> {
+    pub fn hmac_verify(
+        &self,
+        data: &[u8],
+        signature: &[u8],
+        algorithm: &str,
+    ) -> Result<bool, String> {
         let expected = self.hmac_sign(data, algorithm)?;
         // 常量时间比较
         Ok(expected.len() == signature.len() && {
@@ -494,7 +546,9 @@ mod tests {
     fn test_hmac_verify_tampered_data() {
         let svc = TransitService::new(TransitConfig::default()).expect("create");
         let sig = svc.hmac_sign(b"original", "HMAC-SHA256").expect("sign");
-        assert!(!svc.hmac_verify(b"tampered", &sig, "HMAC-SHA256").expect("verify"));
+        assert!(!svc
+            .hmac_verify(b"tampered", &sig, "HMAC-SHA256")
+            .expect("verify"));
     }
 
     #[test]

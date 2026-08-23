@@ -50,7 +50,11 @@ impl RoleEntry {
             }
         }
 
-        if has_match { Some(trie) } else { None }
+        if has_match {
+            Some(trie)
+        } else {
+            None
+        }
     }
 }
 
@@ -218,7 +222,11 @@ mod tests {
         let cache = RoleCache::new();
         let roles = vec![
             make_role("reader", vec![("data:kv:read", "/app/")], false),
-            make_role("writer", vec![("data:kv:read", "/app/"), ("data:kv:write", "/app/")], false),
+            make_role(
+                "writer",
+                vec![("data:kv:read", "/app/"), ("data:kv:write", "/app/")],
+                false,
+            ),
         ];
 
         cache.sync_full(roles);
@@ -252,11 +260,19 @@ mod tests {
         let cache = RoleCache::new();
 
         // First sync
-        cache.sync_full(vec![make_role("reader", vec![("data:kv:read", "/app/")], false)]);
+        cache.sync_full(vec![make_role(
+            "reader",
+            vec![("data:kv:read", "/app/")],
+            false,
+        )]);
         assert_eq!(cache.role_count(), 1);
 
         // Second sync replaces
-        cache.sync_full(vec![make_role("writer", vec![("data:kv:write", "/app/")], false)]);
+        cache.sync_full(vec![make_role(
+            "writer",
+            vec![("data:kv:write", "/app/")],
+            false,
+        )]);
         assert_eq!(cache.role_count(), 1);
         assert!(cache.get("reader").is_none());
         assert!(cache.get("writer").is_some());
@@ -267,7 +283,10 @@ mod tests {
         let cache = RoleCache::new();
         cache.sync_full(vec![make_role(
             "reader",
-            vec![("data:kv:read", "/app/order/"), ("data:watch:subscribe", "")],
+            vec![
+                ("data:kv:read", "/app/order/"),
+                ("data:watch:subscribe", ""),
+            ],
             false,
         )]);
 
@@ -288,19 +307,27 @@ mod tests {
         let cache = RoleCache::new();
         cache.sync_full(vec![
             make_role("reader", vec![("data:kv:read", "/app/order/")], false),
-            make_role("config_reader", vec![("coord:config:read", "/app/config/")], false),
+            make_role(
+                "config_reader",
+                vec![("coord:config:read", "/app/config/")],
+                false,
+            ),
         ]);
 
         // Both roles together grant both capabilities
-        let (granted, trie) =
-            cache.check_capability(&["reader".to_string(), "config_reader".to_string()], "data:kv:read");
+        let (granted, trie) = cache.check_capability(
+            &["reader".to_string(), "config_reader".to_string()],
+            "data:kv:read",
+        );
         assert!(granted);
         let trie = trie.unwrap();
         assert!(trie.matches("/app/order/123"));
         assert!(!trie.matches("/app/config/db"));
 
-        let (granted, trie) =
-            cache.check_capability(&["reader".to_string(), "config_reader".to_string()], "coord:config:read");
+        let (granted, trie) = cache.check_capability(
+            &["reader".to_string(), "config_reader".to_string()],
+            "coord:config:read",
+        );
         assert!(granted);
         let trie = trie.unwrap();
         assert!(trie.matches("/app/config/db"));

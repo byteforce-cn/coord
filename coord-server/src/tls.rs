@@ -56,6 +56,49 @@ impl TlsConfig {
             None => Ok(None),
         }
     }
+
+    /// P2-05：证书文件指纹快照（mtime + 长度，用于热加载变更检测）。
+    pub fn fingerprint(&self) -> Vec<FileFingerprint> {
+        let mut paths = vec![(&self.cert_path, true), (&self.key_path, true)];
+        if let Some(ca) = &self.ca_path {
+            paths.push((ca, false));
+        }
+        paths
+            .into_iter()
+            .filter_map(|(p, _)| FileFingerprint::of(p))
+            .collect()
+    }
+
+    /// P2-05：与上一快照对比，任一证书文件（mtime/长度/存在性）变化返回 `true`。
+    /// 首次调用（`previous == None`）返回 `false`（仅记录基线，不触发重载）。
+    pub fn files_changed(&self, previous: &mut Option<Vec<FileFingerprint>>) -> bool {
+        let current = self.fingerprint();
+        let changed = match previous {
+            None => false,
+            Some(prev) => current != *prev,
+        };
+        *previous = Some(current);
+        changed
+    }
+}
+
+/// P2-05：单个证书文件的指纹（路径 + 修改时间 + 长度）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileFingerprint {
+    pub path: PathBuf,
+    pub modified: Option<std::time::SystemTime>,
+    pub len: u64,
+}
+
+impl FileFingerprint {
+    fn of(path: &Path) -> Option<Self> {
+        let meta = fs::metadata(path).ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            modified: meta.modified().ok(),
+            len: meta.len(),
+        })
+    }
 }
 
 // ──── Tonic TLS 配置构建 ────
@@ -71,8 +114,7 @@ pub fn build_server_tls(
 
     let identity = tonic::transport::Identity::from_pem(&cert_pem, &key_pem);
 
-    let mut tls_config = tonic::transport::server::ServerTlsConfig::new()
-        .identity(identity);
+    let mut tls_config = tonic::transport::server::ServerTlsConfig::new().identity(identity);
 
     // mTLS: 添加客户端证书验证
     if let Some(ca_pem) = config.load_ca()? {
@@ -97,8 +139,7 @@ pub fn build_client_tls(
     let ca_pem = fs::read(ca_path).ok()?;
     let ca = tonic::transport::Certificate::from_pem(&ca_pem);
 
-    let mut tls = tonic::transport::channel::ClientTlsConfig::new()
-        .ca_certificate(ca);
+    let mut tls = tonic::transport::channel::ClientTlsConfig::new().ca_certificate(ca);
 
     // mTLS：客户端也提供证书
     if let (Some(cert), Some(key)) = (cert_path, key_path) {
@@ -143,5 +184,55 @@ mod tests {
         let result = build_client_tls(None, None, None);
         assert!(result.is_none());
     }
-}
 
+    // ──── P2-05：证书热加载变更检测 ────
+
+    #[test]
+    fn test_files_changed_baseline_and_change() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let cert = tmpdir.path().join("server.crt");
+        let key = tmpdir.path().join("server.key");
+        fs::write(&cert, b"cert-v1").unwrap();
+        fs::write(&key, b"key-v1").unwrap();
+        let config = TlsConfig::new(cert.clone(), key.clone(), None);
+
+        let mut prev: Option<Vec<FileFingerprint>> = None;
+        // 首次调用仅建立基线
+        assert!(!config.files_changed(&mut prev));
+        // 未变化
+        assert!(!config.files_changed(&mut prev));
+        // 证书内容变化（mtime/长度变化）
+        fs::write(&cert, b"cert-v2-longer").unwrap();
+        assert!(
+            config.files_changed(&mut prev),
+            "cert change must be detected"
+        );
+        // 变更后再查：回到稳定
+        assert!(!config.files_changed(&mut prev));
+        // 私钥变化
+        fs::write(&key, b"key-v2").unwrap();
+        assert!(
+            config.files_changed(&mut prev),
+            "key change must be detected"
+        );
+    }
+
+    #[test]
+    fn test_files_changed_detects_removed_file() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let cert = tmpdir.path().join("server.crt");
+        let key = tmpdir.path().join("server.key");
+        fs::write(&cert, b"cert").unwrap();
+        fs::write(&key, b"key").unwrap();
+        let config = TlsConfig::new(cert.clone(), key.clone(), None);
+
+        let mut prev: Option<Vec<FileFingerprint>> = None;
+        let _ = config.files_changed(&mut prev);
+        // 删除证书文件 → 指纹集合变化
+        fs::remove_file(&cert).unwrap();
+        assert!(
+            config.files_changed(&mut prev),
+            "removed cert must be detected"
+        );
+    }
+}

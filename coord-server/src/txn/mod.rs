@@ -162,22 +162,14 @@ mod tests {
 
     #[test]
     fn test_compare_not_equal() {
-        assert!(
-            CompareValue::Version(5).compare(&CompareValue::Version(6), &CompareOp::NotEqual)
-        );
-        assert!(
-            !CompareValue::Version(5).compare(&CompareValue::Version(5), &CompareOp::NotEqual)
-        );
+        assert!(CompareValue::Version(5).compare(&CompareValue::Version(6), &CompareOp::NotEqual));
+        assert!(!CompareValue::Version(5).compare(&CompareValue::Version(5), &CompareOp::NotEqual));
     }
 
     #[test]
     fn test_compare_greater() {
-        assert!(
-            CompareValue::Version(10).compare(&CompareValue::Version(5), &CompareOp::Greater)
-        );
-        assert!(
-            !CompareValue::Version(5).compare(&CompareValue::Version(10), &CompareOp::Greater)
-        );
+        assert!(CompareValue::Version(10).compare(&CompareValue::Version(5), &CompareOp::Greater));
+        assert!(!CompareValue::Version(5).compare(&CompareValue::Version(10), &CompareOp::Greater));
     }
 
     #[test]

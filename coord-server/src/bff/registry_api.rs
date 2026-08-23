@@ -13,10 +13,10 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
+    Json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -96,7 +96,11 @@ fn service_key(name: &str) -> Vec<u8> {
 }
 
 fn instance_key(service_name: &str, instance_id: &str) -> Vec<u8> {
-    format!("{}{}/instances/{}", REGISTRY_PREFIX, service_name, instance_id).into_bytes()
+    format!(
+        "{}{}/instances/{}",
+        REGISTRY_PREFIX, service_name, instance_id
+    )
+    .into_bytes()
 }
 
 fn instance_prefix(service_name: &str) -> Vec<u8> {
@@ -120,10 +124,15 @@ fn err_json(code: i32, message: &str) -> (StatusCode, Json<Value>) {
 }
 
 /// 验证 Token，返回用户名；验证失败返回错误响应
-fn validate_token(state: &InternalState, headers: &HeaderMap) -> Result<String, (StatusCode, Json<Value>)> {
+fn validate_token(
+    state: &InternalState,
+    headers: &HeaderMap,
+) -> Result<String, (StatusCode, Json<Value>)> {
     let token = crate::bff::internal::extract_bearer_token(headers)
         .ok_or_else(|| err_json(401, "缺少认证 Token"))?;
-    state.token_manager.validate(&token)
+    state
+        .token_manager
+        .validate(&token)
         .map_err(|_| err_json(403, "Token 无效或已过期"))
 }
 
@@ -139,15 +148,17 @@ async fn raft_put(
             value,
             lease_id: None,
         };
-        let resp = raft.client_write(cmd).await.map_err(|e| {
-            err_json(500, &format!("Raft 写入失败: {e}"))
-        })?;
+        let resp = raft
+            .client_write(cmd)
+            .await
+            .map_err(|e| err_json(500, &format!("Raft 写入失败: {e}")))?;
         match resp.response() {
             Response::Put { .. } => Ok(()),
             _ => Err(err_json(500, "意外的 Raft 响应")),
         }
     } else {
-        node.storage.put(&key, &value, None)
+        node.storage
+            .put(&key, &value, None)
             .map_err(|e| err_json(500, &format!("存储写入失败: {e}")))?;
         Ok(())
     }
@@ -200,7 +211,10 @@ pub async fn list_services(
 
         // 收集该服务的实例并统计状态
         let inst_prefix = instance_prefix(&service.name);
-        let instances_data = node.storage.range(&inst_prefix, usize::MAX).unwrap_or_default();
+        let instances_data = node
+            .storage
+            .range(&inst_prefix, usize::MAX)
+            .unwrap_or_default();
 
         let mut total = 0usize;
         let mut healthy = 0usize;
@@ -241,7 +255,12 @@ pub async fn list_services(
             name: service.name,
             tags: service.tags,
             status: service_status.to_string(),
-            instances: InstanceStats { total, healthy, warning, critical },
+            instances: InstanceStats {
+                total,
+                healthy,
+                warning,
+                critical,
+            },
             address: service.address,
             port: service.port,
         });
@@ -254,7 +273,7 @@ pub async fn list_services(
 
     // 分页
     let page = query.page.unwrap_or(1).max(1);
-    let page_size = query.page_size.unwrap_or(20).min(100).max(10);
+    let page_size = query.page_size.unwrap_or(20).clamp(10, 100);
     let start = ((page - 1) * page_size) as usize;
     let end = (start + page_size as usize).min(services.len());
 
@@ -299,7 +318,9 @@ pub async fn get_service(
 
     // 扫描实例
     let inst_prefix = instance_prefix(&name);
-    let instances_data = node.storage.range(&inst_prefix, usize::MAX)
+    let instances_data = node
+        .storage
+        .range(&inst_prefix, usize::MAX)
         .unwrap_or_default();
 
     let mut instances: Vec<InstanceInfo> = Vec::new();
@@ -373,15 +394,13 @@ pub async fn update_instance(
     inst.status = body.status;
     inst.last_check = chrono_now();
 
-    let new_value = serde_json::to_vec(&inst)
-        .unwrap_or_default();
+    let new_value = serde_json::to_vec(&inst).unwrap_or_default();
 
     if let Err(e) = raft_put(node, ik, new_value).await {
         return e.into_response();
     }
 
-    ok_json(json!({}))
-    .into_response()
+    ok_json(json!({})).into_response()
 }
 
 // ──── Handler: POST /v1/registry/services/{name}/health-check ────
@@ -423,8 +442,7 @@ pub async fn health_check(
         }
     }
 
-    ok_json(json!({"checked": instances_data.len()}))
-    .into_response()
+    ok_json(json!({"checked": instances_data.len()})).into_response()
 }
 
 // ──── 辅助: 当前时间 ISO 字符串 ────

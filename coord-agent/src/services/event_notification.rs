@@ -74,15 +74,15 @@ fn uuid_v4_like() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("{:016x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+    format!(
+        "{:016x}-{:04x}-4{:03x}-{:04x}-{:012x}",
         ts & 0xFFFFFFFFFFFFFFFF,
-        (ts >> 64) as u16 & 0xFFFF,
+        ((ts >> 64) as u16),
         (ts >> 80) as u16 & 0xFFF,
         0x8000 | ((ts >> 96) as u16 & 0x3FFF),
         ts & 0xFFFFFFFFFFFF,
     )
 }
-
 
 // ──── CloudEvents 1.0 类型 ────
 
@@ -106,7 +106,11 @@ pub struct CloudEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Vec<u8>>,
     /// 数据内容类型（如 "application/json"）
-    #[serde(default, rename = "datacontenttype", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "datacontenttype",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub datacontenttype: Option<String>,
     /// 事件主题（可选）
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -139,13 +143,21 @@ impl CloudEvent {
             event_type: event.event_type.clone(),
             source: event.source.clone(),
             id: event.id.clone(),
-            data: if event.data.is_empty() { None } else { Some(event.data.clone()) },
+            data: if event.data.is_empty() {
+                None
+            } else {
+                Some(event.data.clone())
+            },
             datacontenttype: if event.data_content_type.is_empty() {
                 None
             } else {
                 Some(event.data_content_type.clone())
             },
-            subject: if event.subject.is_empty() { None } else { Some(event.subject.clone()) },
+            subject: if event.subject.is_empty() {
+                None
+            } else {
+                Some(event.subject.clone())
+            },
             time: Some(ms_to_rfc3339(event.timestamp_ms)),
         }
     }
@@ -205,7 +217,6 @@ fn rfc3339_to_ms(_s: &str) -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
-
 
 // ──── EventCache ────
 
@@ -291,7 +302,11 @@ pub struct EventNotificationService {
 impl EventNotificationService {
     pub const NAME: &'static str = "event_notification";
 
-    pub fn new(inner: Arc<AgentInner>, max_cached_events: usize, broadcast_capacity: usize) -> Self {
+    pub fn new(
+        inner: Arc<AgentInner>,
+        max_cached_events: usize,
+        broadcast_capacity: usize,
+    ) -> Self {
         let (tx, _) = broadcast::channel(broadcast_capacity);
         Self {
             inner,
@@ -308,8 +323,8 @@ impl EventNotificationService {
     pub async fn publish(&self, event: Event) -> ServiceResult<()> {
         // 持久化到 Server
         let storage_key = Event::storage_key(&event.id);
-        let value = serde_json::to_vec(&event)
-            .map_err(|e| format!("failed to serialize event: {e}"))?;
+        let value =
+            serde_json::to_vec(&event).map_err(|e| format!("failed to serialize event: {e}"))?;
 
         self.inner
             .client
@@ -426,7 +441,11 @@ mod tests {
 
     #[test]
     fn test_event_creation() {
-        let event = Event::new("order.created", "order-service", br#"{"orderId":123}"#.to_vec());
+        let event = Event::new(
+            "order.created",
+            "order-service",
+            br#"{"orderId":123}"#.to_vec(),
+        );
         assert_eq!(event.event_type, "order.created");
         assert_eq!(event.source, "order-service");
         assert!(!event.id.is_empty());

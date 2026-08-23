@@ -30,8 +30,14 @@ async fn test_health_endpoint_live() {
 
     // 发起 HTTP GET /health
     let response = http_get(&addr, "/health").await;
-    assert!(response.contains("200 OK"), "expected 200 OK, got: {response}");
-    assert!(response.contains("SERVING"), "expected SERVING, got: {response}");
+    assert!(
+        response.contains("200 OK"),
+        "expected 200 OK, got: {response}"
+    );
+    assert!(
+        response.contains("SERVING"),
+        "expected SERVING, got: {response}"
+    );
 
     handle.abort();
 }
@@ -49,7 +55,10 @@ async fn test_health_endpoint_ready() {
 
     // 未连接 Server 时返回 503
     let response = http_get(&addr, "/health?ready=true").await;
-    assert!(response.contains("503"), "expected 503 when not ready, got: {response}");
+    assert!(
+        response.contains("503"),
+        "expected 503 when not ready, got: {response}"
+    );
 
     handle.abort();
 }
@@ -66,9 +75,15 @@ async fn test_metrics_endpoint() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let response = http_get(&addr, "/metrics").await;
-    assert!(response.contains("200 OK"), "expected 200 OK, got: {response}");
+    assert!(
+        response.contains("200 OK"),
+        "expected 200 OK, got: {response}"
+    );
     // Prometheus 格式特征
-    assert!(response.contains("coord_agent"), "expected coord_agent metric, got: {response}");
+    assert!(
+        response.contains("coord_agent"),
+        "expected coord_agent metric, got: {response}"
+    );
 
     handle.abort();
 }

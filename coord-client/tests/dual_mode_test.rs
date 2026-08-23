@@ -8,7 +8,9 @@ use coord_client::{Client, Config};
 #[test]
 fn test_connect_via_agent_signature_exists() {
     // 编译时检查：方法签名存在
-    let _check: fn(&str) -> std::pin::Pin<
+    let _check: fn(
+        &str,
+    ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Client, coord_core::error::Error>> + Send>,
     > = |addr: &str| {
         let addr = addr.to_string();
@@ -19,7 +21,9 @@ fn test_connect_via_agent_signature_exists() {
 /// 验证 connect_direct 构造器签名存在
 #[test]
 fn test_connect_direct_signature_exists() {
-    let _check: fn(Config) -> std::pin::Pin<
+    let _check: fn(
+        Config,
+    ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Client, coord_core::error::Error>> + Send>,
     > = |config: Config| Box::pin(Client::connect_direct(config));
 }
@@ -28,7 +32,9 @@ fn test_connect_direct_signature_exists() {
 #[test]
 fn test_client_new_still_works() {
     // Client::new 接受 Config，签名不变
-    let _check: fn(Config) -> std::pin::Pin<
+    let _check: fn(
+        Config,
+    ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Client, coord_core::error::Error>> + Send>,
     > = |config: Config| Box::pin(Client::new(config));
 }

@@ -166,10 +166,9 @@ impl LeaseManager {
         let timeout = Duration::from_secs(ttl_seconds as u64);
         let timer_id = self.timer.insert(timeout).await;
 
-        self.leases.write().insert(
-            lease_id,
-            LeaseRecord { lease, timer_id },
-        );
+        self.leases
+            .write()
+            .insert(lease_id, LeaseRecord { lease, timer_id });
 
         Ok(lease_id)
     }
@@ -256,15 +255,91 @@ impl LeaseManager {
 
     /// 获取 Lease 信息
     pub fn get_lease(&self, lease_id: LeaseID) -> Option<Lease> {
-        self.leases
-            .read()
-            .get(&lease_id)
-            .map(|r| r.lease.clone())
+        self.leases.read().get(&lease_id).map(|r| r.lease.clone())
     }
 
     /// 获取活跃 Lease 数量
     pub fn active_lease_count(&self) -> usize {
         self.leases.read().len()
+    }
+
+    /// 从持久化 Lease 记录重建内存视图（P0-B B.4.4 failover）
+    ///
+    /// 新 Leader 接管时调用：清空旧视图与定时器，按状态机 `/_lease/` 记录重建。
+    /// - `deadline_wall_ms` 未到 → 以剩余时长插入时间轮（"at-least TTL" 语义，
+    ///   failover 期间按墙钟重估，即 B.4.5 的重估）；
+    /// - 已过期 → 立即到期，由 leader 过期 worker 经 raft propose Revoke 清理。
+    ///   同时推进全局 LeaseID 分配器，避免重启后自动分配与存量 ID 冲突。
+    pub async fn rebuild(
+        &self,
+        records: Vec<(LeaseID, crate::storage::mvcc::LeaseRecord)>,
+    ) -> usize {
+        // 清空旧视图并取消旧定时器
+        let stale_timers: Vec<u64> = {
+            let mut leases = self.leases.write();
+            let ids = leases.values().map(|r| r.timer_id).collect();
+            leases.clear();
+            ids
+        };
+        for timer_id in stale_timers {
+            let _ = self.timer.cancel(timer_id).await;
+        }
+
+        let now_wall_ms = wall_clock_now_ms();
+        let mut rebuilt = 0usize;
+        let mut max_id = 0i64;
+
+        for (id, record) in records {
+            max_id = max_id.max(id);
+            let remaining_ms = record.deadline_wall_ms.saturating_sub(now_wall_ms);
+            let (deadline, timeout) = if remaining_ms > 0 {
+                (
+                    tokio::time::Instant::now() + Duration::from_millis(remaining_ms as u64),
+                    Duration::from_millis(remaining_ms as u64),
+                )
+            } else {
+                // 已过期：立即到期，由过期 worker 经 raft 清理（不得直写本地存储）
+                (tokio::time::Instant::now(), Duration::from_millis(1))
+            };
+            let timer_id = self.timer.insert(timeout).await;
+            self.leases.write().insert(
+                id,
+                LeaseRecord {
+                    lease: Lease {
+                        id,
+                        ttl_seconds: record.ttl,
+                        deadline,
+                        attached_keys: Vec::new(),
+                    },
+                    timer_id,
+                },
+            );
+            rebuilt += 1;
+        }
+
+        // 推进分配器，防止重启后自动分配与存量 ID 冲突
+        if max_id > 0 {
+            NEXT_LEASE_ID.fetch_max(max_id + 1, Ordering::SeqCst);
+        }
+        rebuilt
+    }
+}
+
+/// 当前墙钟毫秒（P0-B：deadline 由 leader 在 propose 前计算，保证 apply 确定性）
+pub fn wall_clock_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 按 deadline 计算剩余 TTL 秒数（向上取整；已过期返回 0）
+pub fn remaining_ttl_from_deadline(deadline_wall_ms: i64, now_wall_ms: i64) -> i64 {
+    let remaining_ms = deadline_wall_ms.saturating_sub(now_wall_ms);
+    if remaining_ms <= 0 {
+        0
+    } else {
+        (remaining_ms + 999) / 1000
     }
 }
 
@@ -395,6 +470,77 @@ mod tests {
 
             // Lease 已被 check_expired 清理
             assert!(manager.get_lease(lease_id).is_none());
+        });
+    }
+
+    // ──── P0-B failover 重建 ────
+
+    fn persisted_record(ttl: i64, deadline_wall_ms: i64) -> crate::storage::mvcc::LeaseRecord {
+        crate::storage::mvcc::LeaseRecord {
+            ttl,
+            deadline_wall_ms,
+            keepalive_revision: 1,
+        }
+    }
+
+    #[test]
+    fn test_remaining_ttl_from_deadline() {
+        assert_eq!(remaining_ttl_from_deadline(10_000, 0), 10);
+        // 向上取整
+        assert_eq!(remaining_ttl_from_deadline(10_500, 0), 11);
+        // 已过期 → 0
+        assert_eq!(remaining_ttl_from_deadline(1_000, 2_000), 0);
+        assert_eq!(remaining_ttl_from_deadline(2_000, 2_000), 0);
+    }
+
+    #[test]
+    fn test_rebuild_from_persisted_records() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let handle = TimerWheel::start();
+            let manager = LeaseManager::new(handle);
+
+            let now = wall_clock_now_ms();
+            let records = vec![
+                // 未过期：剩余 60s
+                (5, persisted_record(60, now + 60_000)),
+                // 已过期：立即到期
+                (6, persisted_record(1, now - 1_000)),
+            ];
+            let rebuilt = manager.rebuild(records).await;
+            assert_eq!(rebuilt, 2);
+            assert_eq!(manager.active_lease_count(), 2);
+
+            let live = manager.get_lease(5).unwrap();
+            assert!(!live.is_expired());
+            assert!(live.remaining_ttl_secs() > 50.0);
+
+            let expired = manager.get_lease(6).unwrap();
+            assert!(expired.is_expired());
+
+            // 已过期者由 check_expired 检出（由过期 worker 经 raft 清理）
+            let actions = manager.check_expired();
+            assert_eq!(actions.len(), 1);
+            assert_eq!(manager.active_lease_count(), 1);
+        });
+    }
+
+    #[test]
+    fn test_rebuild_replaces_previous_view() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let handle = TimerWheel::start();
+            let manager = LeaseManager::new(handle);
+
+            let old_id = manager.grant(60).await.unwrap();
+            assert_eq!(manager.active_lease_count(), 1);
+
+            let now = wall_clock_now_ms();
+            let records = vec![(42, persisted_record(30, now + 30_000))];
+            manager.rebuild(records).await;
+            assert_eq!(manager.active_lease_count(), 1);
+            assert!(manager.get_lease(old_id).is_none());
+            assert!(manager.get_lease(42).is_some());
         });
     }
 }

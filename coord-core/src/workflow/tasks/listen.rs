@@ -78,7 +78,9 @@ mod tests {
         };
         let named = NamedTask {
             name: "waitApproval".into(),
-            task: Task::Listen(ListenTask { listen: filter.clone() }),
+            task: Task::Listen(ListenTask {
+                listen: filter.clone(),
+            }),
         };
 
         let result = execute(&named, &ListenTask { listen: filter }, &inst, &clock);
@@ -111,7 +113,9 @@ mod tests {
         };
         let named = NamedTask {
             name: "listenAll".into(),
-            task: Task::Listen(ListenTask { listen: filter.clone() }),
+            task: Task::Listen(ListenTask {
+                listen: filter.clone(),
+            }),
         };
 
         let result = execute(&named, &ListenTask { listen: filter }, &inst, &clock);

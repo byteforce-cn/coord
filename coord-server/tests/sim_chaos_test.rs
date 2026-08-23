@@ -1,8 +1,11 @@
-// chaos_test.rs — Phase 5: Chaos Engineering + Soak + Performance 测试
+// sim_chaos_test.rs — 算法级模拟套件（P0-H：非系统验证证据）
 //
-// TDD: 验证系统在故障条件下的韧性和长期稳定性。
-// 测试覆盖：
-// - 节点随机故障恢复
+// ⚠ 口径声明：本套件为文件内自建内存模型（SimCluster），不引用 coord_server /
+// coord_client 任何真实模块，不得作为系统级混沌验证证据（决策文档 §1.3 #18）。
+// 真实故障注入套件为 `coord/tests/chaos_real.rs`（P0-H.2，另立项施工）。
+//
+// 测试覆盖（模拟口径）：
+// - 节点随机故障恢复（模拟状态机）
 // - 网络分区模拟
 // - 时钟偏移容忍
 // - 长期浸泡测试 (soak test)
@@ -72,7 +75,8 @@ impl SimCluster {
     fn partition_node(&mut self, node_id: u64, blocked: HashSet<u64>) {
         let blocked_str = format!("{:?}", blocked);
         self.nodes.insert(node_id, NodeStatus::Partitioned(blocked));
-        self.event_log.push_back(format!("PARTITION node {} from {}", node_id, blocked_str));
+        self.event_log
+            .push_back(format!("PARTITION node {} from {}", node_id, blocked_str));
     }
 
     fn heal_partition(&mut self, node_id: u64) {
@@ -82,7 +86,8 @@ impl SimCluster {
 
     fn slow_node(&mut self, node_id: u64, delay_ms: u64) {
         self.nodes.insert(node_id, NodeStatus::Slow(delay_ms));
-        self.event_log.push_back(format!("SLOW node {} ({}ms)", node_id, delay_ms));
+        self.event_log
+            .push_back(format!("SLOW node {} ({}ms)", node_id, delay_ms));
     }
 
     /// 检查集群是否有足够在线节点来维持法定人数
@@ -141,7 +146,10 @@ fn test_single_node_failure_preserves_quorum() {
 
     // 所有 3-replica Region 在 1 个节点宕机后仍应有法定人数
     let affected = cluster.affected_regions();
-    assert!(affected.is_empty(), "no region should lose quorum from single failure");
+    assert!(
+        affected.is_empty(),
+        "no region should lose quorum from single failure"
+    );
 }
 
 #[test]
@@ -173,7 +181,10 @@ fn test_network_partition_minority_isolated() {
 
     // 少数派被隔离不应影响多数派的法定人数
     let affected = cluster.affected_regions();
-    assert!(affected.is_empty(), "minority partition should not affect quorum");
+    assert!(
+        affected.is_empty(),
+        "minority partition should not affect quorum"
+    );
 }
 
 #[test]
@@ -201,7 +212,11 @@ fn test_partition_heal_restores_quorum() {
 
     // 所有 Region 应恢复法定人数
     for rid in 1..=5 {
-        assert!(cluster.has_quorum(rid), "region {} should have quorum after heal", rid);
+        assert!(
+            cluster.has_quorum(rid),
+            "region {} should have quorum after heal",
+            rid
+        );
     }
 }
 
@@ -219,11 +234,15 @@ fn test_sequential_kill_revive_cycle() {
             assert!(
                 affected.is_empty(),
                 "cycle {}: killing node {} should not affect quorum",
-                cycle, node_id
+                cycle,
+                node_id
             );
 
             cluster.revive_node(node_id);
-            assert!(matches!(cluster.nodes.get(&node_id), Some(NodeStatus::Online)));
+            assert!(matches!(
+                cluster.nodes.get(&node_id),
+                Some(NodeStatus::Online)
+            ));
         }
     }
 
@@ -384,10 +403,7 @@ fn test_many_regions_routing_performance() {
     for j in 0..lookup_count {
         let key = vec![(j as u8 % 255)];
         // 模拟二分查找：找到最后一个 start_key <= key 的 Region
-        let _region_id = index
-            .range(..=key)
-            .next_back()
-            .map(|(_, &rid)| rid);
+        let _region_id = index.range(..=key).next_back().map(|(_, &rid)| rid);
     }
 
     let elapsed = start.elapsed();
@@ -425,10 +441,7 @@ fn test_region_count_scaling() {
         }
         let elapsed = start.elapsed();
 
-        eprintln!(
-            "  {} regions: 10k lookups in {:?}",
-            count, elapsed
-        );
+        eprintln!("  {} regions: 10k lookups in {:?}", count, elapsed);
     }
 }
 
@@ -485,14 +498,15 @@ fn test_region_meta_serialization_roundtrip() {
         region_id: 42,
         start_key: vec![0x10, 0x20],
         end_key: vec![0x30],
-        epoch: RegionEpoch { conf_ver: 2, version: 5 },
-        peers: vec![
-            Peer {
-                node_id: 1,
-                raft_addr: "node1:50052".into(),
-                role: PeerRole::Voter,
-            },
-        ],
+        epoch: RegionEpoch {
+            conf_ver: 2,
+            version: 5,
+        },
+        peers: vec![Peer {
+            node_id: 1,
+            raft_addr: "node1:50052".into(),
+            role: PeerRole::Voter,
+        }],
         approximate_size: 1024 * 1024,
         approximate_keys: 5000,
     };

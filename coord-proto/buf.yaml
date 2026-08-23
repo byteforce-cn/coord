@@ -1,0 +1,31 @@
+# P2-03：proto 契约治理（buf lint + breaking）
+#
+# - lint：STANDARD 规则集；存量 proto 的命名类规则豁免（下表）——迁移为
+#   专项批次（按 13 号文档 §四.5 包名版本化同步推进），迁移完成前不阻断；
+#   其余规则（字段 snake_case、消息命名等）即时生效
+# - breaking：FILE 级别（proto3 + gRPC 的安全默认；PACKAGE 级别过于宽松）
+# - CI 用法：`buf lint coord-proto`、`buf format coord-proto --diff --exit-code`、
+#   `buf breaking coord-proto --against ".git#branch=origin/main,subdir=coord-proto"`
+# - 变更规约见 docs/production/13-api-governance.md §四/§六
+version: v2
+modules:
+  - path: src/proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # 包名版本化迁移完成前豁免（13 号文档 §四.5）
+    - PACKAGE_VERSION_SUFFIX
+    - SERVICE_SUFFIX
+    # 存量 proto 命名迁移专项批次（收紧计划见 13 号文档 §四.6）
+    - ENUM_VALUE_PREFIX
+    - ENUM_ZERO_VALUE_SUFFIX
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    # 单目录多包布局（`src/proto/*.proto` 平铺，迁移到按包分目录时解除）
+    - DIRECTORY_SAME_PACKAGE
+    - PACKAGE_DIRECTORY_MATCH
+breaking:
+  use:
+    - FILE

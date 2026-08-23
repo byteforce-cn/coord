@@ -3,7 +3,7 @@
 // 本 Crate 包含：
 // - storage/  : Redb 存储后端 + MVCC 存储层
 // - raft/     : Openraft Raft 共识适配（P1）
-// - pd/       : Placement Driver 全局调度器（v6.0 Multi-Raft）
+// - pd/       : Placement Driver 全局调度器（⚠️ experimental，未接线生产路径，P2-01）
 // - txn/      : Txn 原子事务执行器（P1）
 // - watch/    : Watch 变更监听（P1）
 // - lease/    : Lease 租约管理（P2）
@@ -14,6 +14,7 @@
 // - health/   : HTTP Health Check 端点
 // - tls/      : TLS/mTLS 传输安全
 
+pub mod audit;
 pub mod auth;
 pub mod bff;
 pub mod health;

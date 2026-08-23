@@ -112,18 +112,14 @@ mod tests {
             let value = make_value(size);
             let iterations: u64 = if size <= 256 { 2000 } else { 1000 };
 
-            run_bench(
-                &format!("Redb write {}B", size),
-                iterations,
-                || {
-                    backend
-                        .write(|tx| {
-                            tx.insert("kv", b"bench-key", &value)?;
-                            Ok(())
-                        })
-                        .unwrap();
-                },
-            );
+            run_bench(&format!("Redb write {}B", size), iterations, || {
+                backend
+                    .write(|tx| {
+                        tx.insert("kv", b"bench-key", &value)?;
+                        Ok(())
+                    })
+                    .unwrap();
+            });
         }
     }
 
@@ -148,15 +144,11 @@ mod tests {
             let iterations: u64 = if size <= 256 { 2000 } else { 1000 };
             let mut counter: u64 = 0;
 
-            run_bench(
-                &format!("MvccStorage write {}B", size),
-                iterations,
-                || {
-                    let key = format!("bench-{:08}", counter);
-                    counter += 1;
-                    mvcc.put(key.as_bytes(), &value, None).unwrap();
-                },
-            );
+            run_bench(&format!("MvccStorage write {}B", size), iterations, || {
+                let key = format!("bench-{:08}", counter);
+                counter += 1;
+                mvcc.put(key.as_bytes(), &value, None).unwrap();
+            });
         }
     }
 
@@ -185,31 +177,19 @@ mod tests {
         }
 
         // Single-key read
-        run_bench(
-            "Point read (single key)",
-            20000,
-            || {
-                mvcc.get(b"/app/item/000500").unwrap();
-            },
-        );
+        run_bench("Point read (single key)", 20000, || {
+            mvcc.get(b"/app/item/000500").unwrap();
+        });
 
         // Prefix scan (100 keys)
-        run_bench(
-            "Prefix scan (100 keys)",
-            2000,
-            || {
-                mvcc.range(b"/app/item/000", 100).unwrap();
-            },
-        );
+        run_bench("Prefix scan (100 keys)", 2000, || {
+            mvcc.range(b"/app/item/000", 100).unwrap();
+        });
 
         // Prefix scan (1000 keys - all)
-        run_bench(
-            "Prefix scan (1000 keys)",
-            500,
-            || {
-                mvcc.range(b"/app/item/", 0).unwrap();
-            },
-        );
+        run_bench("Prefix scan (1000 keys)", 500, || {
+            mvcc.range(b"/app/item/", 0).unwrap();
+        });
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -297,6 +277,7 @@ mod tests {
         bench_raft_log_overhead();
         bench_multi_region_write_throughput();
         bench_value_size_impact();
+        bench_watch_fanout();
 
         println!("\n---\n");
         println!("*报告由 `cargo test -p coord --test perf_bench -- --ignored --nocapture` 生成*");
@@ -369,20 +350,88 @@ mod tests {
                 format!("{}B value", size)
             };
 
-            let (elapsed, iters, ops) = run_bench(
-                &name,
-                iterations,
-                || {
-                    let key = format!("/valsize/k/{:08}", counter);
-                    counter += 1;
-                    mvcc.put(key.as_bytes(), &value, None).unwrap();
-                },
-            );
+            let (elapsed, iters, ops) = run_bench(&name, iterations, || {
+                let key = format!("/valsize/k/{:08}", counter);
+                counter += 1;
+                mvcc.put(key.as_bytes(), &value, None).unwrap();
+            });
 
             let mb_per_sec = (iters as f64 * size as f64) / elapsed.as_secs_f64() / 1_048_576.0;
             println!(
                 "| {} | {} | {:?} | {:.0} ops/s | {:.1} MB/s |",
                 name, iters, elapsed, ops, mb_per_sec,
+            );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Benchmark 8: Watch 扇出吞吐量（P2-06：N 订阅者 × M 事件投递）
+    // ═══════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    #[ignore = "performance benchmark, run with --ignored --nocapture"]
+    async fn bench_watch_fanout() {
+        use coord_server::storage::mvcc::{ChangeEvent, EventType, KeyValueChange};
+        use coord_server::watch::{WatchDispatcher, WatchRequest};
+
+        println!("\n## 8. Watch 扇出吞吐量（N 订阅者 × M 事件）\n");
+        println!("| 订阅者数 | 事件数 | 耗时 | 吞吐量 (events/s) | 总投递 (events/s) |");
+        println!("|:---|:---|:---|:---|:---|");
+
+        let configs = [(10u64, 200u64), (50, 200), (100, 200), (200, 100)];
+
+        for &(num_subs, num_events) in &configs {
+            let dispatcher = WatchDispatcher::start();
+            let req = WatchRequest {
+                key: b"/watchbench/".to_vec(),
+                range_end: Vec::new(),
+                start_revision: 0,
+            };
+            let mut receivers = Vec::with_capacity(num_subs as usize);
+            for _ in 0..num_subs {
+                let (_, rx) = dispatcher
+                    .subscribe(req.clone(), 1024, 0)
+                    .expect("subscribe for fanout bench");
+                receivers.push(rx);
+            }
+
+            let event_builder = |rev: u64| ChangeEvent {
+                revision: rev,
+                changes: vec![KeyValueChange {
+                    key: b"/watchbench/k".to_vec(),
+                    value: Some(b"v".to_vec()),
+                    prev_value: None,
+                }],
+                event_type: EventType::Put,
+            };
+
+            // 预热
+            for i in 0..10 {
+                dispatcher.dispatch(event_builder(i + 1));
+            }
+            for rx in &mut receivers {
+                while rx.try_recv().is_ok() {}
+            }
+
+            let start = Instant::now();
+            for i in 0..num_events {
+                dispatcher.dispatch(event_builder(i + 1));
+            }
+            // 等待全部投递完成（每个订阅者收满 num_events）
+            for rx in &mut receivers {
+                let mut got = 0u64;
+                while got < num_events {
+                    if rx.recv().await.is_some() {
+                        got += 1;
+                    }
+                }
+            }
+            let elapsed = start.elapsed();
+            let events_per_sec = num_events as f64 / elapsed.as_secs_f64();
+            let total_deliveries = num_events as f64 * num_subs as f64 / elapsed.as_secs_f64();
+            println!(
+                "| {} | {} | {:?} | {:.0} | {:.0} |",
+                num_subs, num_events, elapsed, events_per_sec, total_deliveries
             );
         }
     }

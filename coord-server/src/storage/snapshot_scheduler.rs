@@ -37,7 +37,7 @@ pub struct SnapshotSchedulerConfig {
 impl Default for SnapshotSchedulerConfig {
     fn default() -> Self {
         Self {
-            interval: Duration::from_secs(3600),      // 1 hour
+            interval: Duration::from_secs(3600),       // 1 hour
             retention: Duration::from_secs(7 * 86400), // 7 days
             snapshot_dir: PathBuf::from("/var/lib/coord/snapshots"),
             auto_snapshot: true,
@@ -136,9 +136,8 @@ impl<B: StorageBackend + 'static> SnapshotScheduler<B> {
         let filepath = self.config.snapshot_dir.join(&filename);
 
         let bytes = snapshot_data.to_bytes()?;
-        std::fs::write(&filepath, &bytes).map_err(|e| {
-            Error::Internal(format!("write snapshot {}: {e}", filepath.display()))
-        })?;
+        std::fs::write(&filepath, &bytes)
+            .map_err(|e| Error::Internal(format!("write snapshot {}: {e}", filepath.display())))?;
 
         // 更新最后快照时间
         *self.last_snapshot_time.write().await = now;
@@ -263,10 +262,7 @@ impl<B: StorageBackend + 'static> SnapshotScheduler<B> {
     }
 
     /// 从快照恢复数据
-    pub fn restore_from_snapshot(
-        &self,
-        snapshot_path: &Path,
-    ) -> Result<SnapshotData> {
+    pub fn restore_from_snapshot(&self, snapshot_path: &Path) -> Result<SnapshotData> {
         let bytes = std::fs::read(snapshot_path).map_err(|e| {
             Error::Internal(format!("read snapshot {}: {e}", snapshot_path.display()))
         })?;
@@ -353,15 +349,17 @@ mod tests {
     // Helper: list snapshots in a directory
     fn list_snapshots_in_dir(dir: &Path) -> Result<Vec<SnapshotInfo>> {
         let mut snapshots = Vec::new();
-        for entry in std::fs::read_dir(dir).map_err(|e| {
-            Error::Internal(format!("read dir: {e}"))
-        })? {
+        for entry in
+            std::fs::read_dir(dir).map_err(|e| Error::Internal(format!("read dir: {e}")))?
+        {
             let entry = entry.map_err(|e| Error::Internal(format!("entry: {e}")))?;
             let path = entry.path();
             if path.extension().map(|e| e != "snap").unwrap_or(true) {
                 continue;
             }
-            let meta = entry.metadata().map_err(|e| Error::Internal(format!("meta: {e}")))?;
+            let meta = entry
+                .metadata()
+                .map_err(|e| Error::Internal(format!("meta: {e}")))?;
             snapshots.push(SnapshotInfo {
                 path,
                 size_bytes: meta.len(),

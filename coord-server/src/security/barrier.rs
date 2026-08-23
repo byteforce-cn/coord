@@ -60,10 +60,18 @@ impl Barrier {
     ///
     /// 返回密文，格式：`key_id(4B BE) || nonce(12B) || ciphertext || tag(16B)`
     ///
+    /// P0-B.4/F9：sealed 态拒绝加密（`active_dek` 返回 Error，此处入口再显式
+    /// 检查一次，保证 sealed 后任何明文写入路径都被阻断）。
+    ///
     /// # 性能
     /// AES-256-GCM 在现代 CPU（AES-NI）上 < 0.05ms/KB。
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let (key_id, dek) = self.keyring.active_dek();
+        if self.keyring.is_sealed() {
+            return Err(Error::Crypto(
+                "Barrier encrypt refused: keyring is sealed".into(),
+            ));
+        }
+        let (key_id, dek) = self.keyring.active_dek()?;
 
         let key = Key::<Aes256Gcm>::from_slice(&dek[..]);
         let cipher = Aes256Gcm::new(key);
@@ -96,11 +104,10 @@ impl Barrier {
         }
 
         // 解析头部
-        let key_id = u32::from_be_bytes(
-            encrypted[..KEY_ID_LEN]
-                .try_into()
-                .expect("slice len checked above"),
-        );
+        let Ok(key_id_bytes) = encrypted[..KEY_ID_LEN].try_into() else {
+            return Err(Error::Crypto("ciphertext too short for key id".into()));
+        };
+        let key_id = u32::from_be_bytes(key_id_bytes);
 
         let nonce = Nonce::from_slice(&encrypted[KEY_ID_LEN..HEADER_LEN]);
 
@@ -133,7 +140,7 @@ mod tests {
     use super::*;
 
     fn make_barrier() -> (Barrier, crate::security::key_management::EncryptedDek) {
-        let (keyring, encrypted_dek) = Keyring::bootstrap();
+        let (keyring, encrypted_dek) = Keyring::bootstrap().unwrap();
         let barrier = Barrier::new(Arc::new(keyring));
         (barrier, encrypted_dek)
     }
@@ -176,7 +183,7 @@ mod tests {
 
     #[test]
     fn test_decrypt_with_old_key_after_rotation() {
-        let (keyring, _) = Keyring::bootstrap();
+        let (keyring, _) = Keyring::bootstrap().unwrap();
         let barrier = Barrier::new(Arc::new(keyring.clone()));
 
         // Encrypt with key_id=1
@@ -226,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_decrypt_unknown_key_id() {
-        let (keyring, _) = Keyring::bootstrap();
+        let (keyring, _) = Keyring::bootstrap().unwrap();
         let barrier = Barrier::new(Arc::new(keyring.clone()));
 
         let mut encrypted = barrier.encrypt(b"test").unwrap();
@@ -267,9 +274,7 @@ mod tests {
         let (barrier, _) = make_barrier();
 
         let encrypted = barrier.encrypt(b"test").unwrap();
-        let parsed_key_id = u32::from_be_bytes(
-            encrypted[0..4].try_into().unwrap(),
-        );
+        let parsed_key_id = u32::from_be_bytes(encrypted[0..4].try_into().unwrap());
         assert_eq!(parsed_key_id, 1);
     }
 }

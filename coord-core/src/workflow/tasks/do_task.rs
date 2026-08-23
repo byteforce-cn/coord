@@ -100,24 +100,44 @@ mod tests {
             name: "myDo".into(),
             task: Task::Do(DoTask {
                 tasks: vec![
-                    NamedTask { name: "sub1".into(), task: Task::Do(DoTask { tasks: vec![] }) },
-                    NamedTask { name: "sub2".into(), task: Task::Do(DoTask { tasks: vec![] }) },
+                    NamedTask {
+                        name: "sub1".into(),
+                        task: Task::Do(DoTask { tasks: vec![] }),
+                    },
+                    NamedTask {
+                        name: "sub2".into(),
+                        task: Task::Do(DoTask { tasks: vec![] }),
+                    },
                 ],
             }),
         };
 
-        let result = execute(&named, &DoTask {
-            tasks: vec![
-                NamedTask { name: "sub1".into(), task: Task::Do(DoTask { tasks: vec![] }) },
-                NamedTask { name: "sub2".into(), task: Task::Do(DoTask { tasks: vec![] }) },
-            ],
-        }, &inst, &clock);
+        let result = execute(
+            &named,
+            &DoTask {
+                tasks: vec![
+                    NamedTask {
+                        name: "sub1".into(),
+                        task: Task::Do(DoTask { tasks: vec![] }),
+                    },
+                    NamedTask {
+                        name: "sub2".into(),
+                        task: Task::Do(DoTask { tasks: vec![] }),
+                    },
+                ],
+            },
+            &inst,
+            &clock,
+        );
 
         match result {
             StepResult::NextTask(frame) => {
                 assert_eq!(frame.task_name, "myDo");
                 assert_eq!(frame.status, TaskStatus::Running);
-                assert_eq!(frame.pending_branches, Some(vec!["sub1".into(), "sub2".into()]));
+                assert_eq!(
+                    frame.pending_branches,
+                    Some(vec!["sub1".into(), "sub2".into()])
+                );
             }
             other => panic!("expected NextTask, got {:?}", other),
         }

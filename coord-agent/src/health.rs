@@ -69,20 +69,23 @@ pub fn start_health_server(
 
                         let (status, content_type, body) = match path.as_str() {
                             "/health" => {
-                                let is_ready = query_params.get("ready").map(|v| v.as_str()) == Some("true");
+                                let is_ready =
+                                    query_params.get("ready").map(|v| v.as_str()) == Some("true");
                                 if is_ready {
                                     handle_health_ready(&ready)
                                 } else {
-                                    ("200 OK", "application/json", r#"{"status":"SERVING"}"#.to_string())
+                                    (
+                                        "200 OK",
+                                        "application/json",
+                                        r#"{"status":"SERVING"}"#.to_string(),
+                                    )
                                 }
                             }
                             "/metrics" => {
                                 let body = metrics.render_prometheus_text();
                                 ("200 OK", "text/plain; version=0.0.4", body)
                             }
-                            _ => {
-                                ("404 Not Found", "text/plain", "Not Found".to_string())
-                            }
+                            _ => ("404 Not Found", "text/plain", "Not Found".to_string()),
                         };
 
                         let response = format!(
@@ -127,9 +130,17 @@ fn handle_health_ready(
 ) -> (&'static str, &'static str, String) {
     use std::sync::atomic::Ordering;
     if ready.load(Ordering::Relaxed) {
-        ("200 OK", "application/json", r#"{"status":"READY"}"#.to_string())
+        (
+            "200 OK",
+            "application/json",
+            r#"{"status":"READY"}"#.to_string(),
+        )
     } else {
-        ("503 Service Unavailable", "application/json", r#"{"status":"NOT_READY"}"#.to_string())
+        (
+            "503 Service Unavailable",
+            "application/json",
+            r#"{"status":"NOT_READY"}"#.to_string(),
+        )
     }
 }
 
@@ -156,8 +167,10 @@ impl coord_proto::agent::health_server::Health for GrpcHealthService {
         &self,
         _request: tonic::Request<coord_proto::agent::HealthCheckRequest>,
     ) -> Result<tonic::Response<coord_proto::agent::HealthCheckResponse>, tonic::Status> {
-        Ok(tonic::Response::new(coord_proto::agent::HealthCheckResponse {
-            status: coord_proto::agent::health_check_response::ServingStatus::Serving as i32,
-        }))
+        Ok(tonic::Response::new(
+            coord_proto::agent::HealthCheckResponse {
+                status: coord_proto::agent::health_check_response::ServingStatus::Serving as i32,
+            },
+        ))
     }
 }

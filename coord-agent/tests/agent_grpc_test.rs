@@ -12,13 +12,13 @@ use std::time::Duration;
 use coord_agent::{AgentConfig, AgentServer};
 use coord_proto::kv::kv_client::KvClient;
 use coord_proto::kv::PutRequest;
-use coord_proto::txn::txn_client::TxnClient;
-use coord_proto::txn::TxnRequest;
 use coord_proto::lease::lease_client::LeaseClient;
 use coord_proto::lease::LeaseGrantRequest;
-use coord_proto::watch::watch_client::WatchClient;
 use coord_proto::maintenance::maintenance_client::MaintenanceClient;
 use coord_proto::maintenance::StatusRequest;
+use coord_proto::txn::txn_client::TxnClient;
+use coord_proto::txn::TxnRequest;
+use coord_proto::watch::watch_client::WatchClient;
 
 /// Find an available TCP port on localhost
 fn find_port() -> u16 {
@@ -32,7 +32,7 @@ fn test_config(port: u16) -> AgentConfig {
         agent_addr: format!("127.0.0.1:{}", port),
         http_addr: format!("127.0.0.1:{}", find_port()),
         data_dir: "/tmp/coord-agent-test".into(),
-        static_peers: vec![],  // B1 骨架模式：不连接真实 Server
+        static_peers: vec![], // B1 骨架模式：不连接真实 Server
         ..Default::default()
     }
 }
@@ -41,7 +41,12 @@ fn test_config(port: u16) -> AgentConfig {
 fn test_config_isolated(port: u16, tag: &str) -> AgentConfig {
     let mut config = test_config(port);
     config.data_dir = std::env::temp_dir()
-        .join(format!("coord-agent-{}-test-{}-{}", tag, port, std::process::id()))
+        .join(format!(
+            "coord-agent-{}-test-{}-{}",
+            tag,
+            port,
+            std::process::id()
+        ))
         .to_string_lossy()
         .into_owned();
     config
@@ -133,9 +138,7 @@ async fn test_agent_all_services_registered() {
 
     // Txn service
     let mut txn_client = TxnClient::new(channel.clone());
-    let txn_resp = txn_client
-        .txn(TxnRequest::default())
-        .await;
+    let txn_resp = txn_client.txn(TxnRequest::default()).await;
     assert!(txn_resp.is_ok(), "Txn should be registered: {txn_resp:?}");
 
     // Lease service
@@ -143,7 +146,10 @@ async fn test_agent_all_services_registered() {
     let lease_resp = lease_client
         .lease_grant(LeaseGrantRequest { ttl: 30, id: 0 })
         .await;
-    assert!(lease_resp.is_ok(), "Lease should be registered: {lease_resp:?}");
+    assert!(
+        lease_resp.is_ok(),
+        "Lease should be registered: {lease_resp:?}"
+    );
 
     // Watch service (bidirectional streaming — 验证服务已注册)
     let watch_client = WatchClient::new(channel.clone());
@@ -152,10 +158,11 @@ async fn test_agent_all_services_registered() {
 
     // Maintenance service
     let mut maint_client = MaintenanceClient::new(channel.clone());
-    let status_resp = maint_client
-        .status(StatusRequest {})
-        .await;
-    assert!(status_resp.is_ok(), "Maintenance should be registered: {status_resp:?}");
+    let status_resp = maint_client.status(StatusRequest {}).await;
+    assert!(
+        status_resp.is_ok(),
+        "Maintenance should be registered: {status_resp:?}"
+    );
 
     handle.abort();
 }
@@ -224,9 +231,7 @@ async fn test_agent_mq_poll_end_to_end() {
         .expect("should connect to agent gRPC");
 
     use coord_proto::agent::mq_client::MqClient;
-    use coord_proto::agent::{
-        MqAckRequest, MqCreateTopicRequest, MqPollRequest, MqPublishRequest,
-    };
+    use coord_proto::agent::{MqAckRequest, MqCreateTopicRequest, MqPollRequest, MqPublishRequest};
 
     let mut mq = MqClient::new(channel);
 
@@ -241,29 +246,31 @@ async fn test_agent_mq_poll_end_to_end() {
     // publish × 3 → 递增 offset
     let mut offsets = Vec::new();
     for i in 0..3u8 {
-        let resp = mq.publish(MqPublishRequest {
-            topic: "orders".into(),
-            partition: 0,
-            key: vec![],
-            payload: vec![i],
-            idempotency_key: String::new(),
-        })
-        .await
-        .expect("publish should succeed");
+        let resp = mq
+            .publish(MqPublishRequest {
+                topic: "orders".into(),
+                partition: 0,
+                key: vec![],
+                payload: vec![i],
+                idempotency_key: String::new(),
+            })
+            .await
+            .expect("publish should succeed");
         offsets.push(resp.into_inner().offset);
     }
     assert_eq!(offsets, vec![0, 1, 2]);
 
     // poll：按 offset 增量拉取（最多 2 条）
-    let poll = mq.poll(MqPollRequest {
-        topic: "orders".into(),
-        partition: 0,
-        consumer_group: "cg1".into(),
-        start_offset: 0,
-        max_count: 2,
-    })
-    .await
-    .expect("poll should be implemented");
+    let poll = mq
+        .poll(MqPollRequest {
+            topic: "orders".into(),
+            partition: 0,
+            consumer_group: "cg1".into(),
+            start_offset: 0,
+            max_count: 2,
+        })
+        .await
+        .expect("poll should be implemented");
     let msgs = poll.into_inner().messages;
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[0].offset, 0);
@@ -281,15 +288,16 @@ async fn test_agent_mq_poll_end_to_end() {
     .expect("ack should succeed");
 
     // 从已确认 offset 继续拉取（at-least-once：ack 后不重复）
-    let poll2 = mq.poll(MqPollRequest {
-        topic: "orders".into(),
-        partition: 0,
-        consumer_group: "cg1".into(),
-        start_offset: 2,
-        max_count: 10,
-    })
-    .await
-    .expect("poll 2 should succeed");
+    let poll2 = mq
+        .poll(MqPollRequest {
+            topic: "orders".into(),
+            partition: 0,
+            consumer_group: "cg1".into(),
+            start_offset: 2,
+            max_count: 10,
+        })
+        .await
+        .expect("poll 2 should succeed");
     let msgs2 = poll2.into_inner().messages;
     assert_eq!(msgs2.len(), 1);
     assert_eq!(msgs2[0].offset, 2);
@@ -354,7 +362,9 @@ async fn test_agent_cache_rpop_llen() {
 
     // 空列表 rpop → found=false
     let empty = cache
-        .r_pop(CacheRPopRequest { key: "empty-q".into() })
+        .r_pop(CacheRPopRequest {
+            key: "empty-q".into(),
+        })
         .await
         .expect("rpop empty should succeed")
         .into_inner();

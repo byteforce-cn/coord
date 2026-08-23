@@ -121,4 +121,42 @@ class RetryTemplateTest {
         }));
         assertThat(calls.get()).isEqualTo(3);
     }
+
+    // ──── P2-04：重试矩阵对齐（Rust 客户端：unavailable/deadline/timeout → 重试）────
+
+    @Test
+    void shouldRetryOnDeadlineExceeded() throws Exception {
+        AtomicInteger calls = new AtomicInteger(0);
+        String result = retryTemplate.execute(ctx -> {
+            int attempt = calls.incrementAndGet();
+            if (attempt < 3) {
+                throw new CoordException(ErrorCode.DEADLINE_EXCEEDED);
+            }
+            return "ok";
+        });
+        assertThat(result).isEqualTo("ok");
+        assertThat(calls.get()).isEqualTo(3);
+    }
+
+    @Test
+    void shouldExhaustOnPersistentDeadlineExceeded() {
+        AtomicInteger calls = new AtomicInteger(0);
+        assertThatThrownBy(() -> retryTemplate.execute(ctx -> {
+            calls.incrementAndGet();
+            throw new CoordException(ErrorCode.DEADLINE_EXCEEDED);
+        })).isInstanceOf(CoordException.class)
+                .extracting(e -> ((CoordException) e).getErrorCode())
+                .isEqualTo(ErrorCode.DEADLINE_EXCEEDED);
+        assertThat(calls.get()).isEqualTo(3);
+    }
+
+    @Test
+    void shouldStillNotRetryInternal() {
+        AtomicInteger calls = new AtomicInteger(0);
+        assertThatThrownBy(() -> retryTemplate.execute(ctx -> {
+            calls.incrementAndGet();
+            throw new CoordException(ErrorCode.INTERNAL);
+        })).isInstanceOf(CoordException.class);
+        assertThat(calls.get()).isEqualTo(1);
+    }
 }

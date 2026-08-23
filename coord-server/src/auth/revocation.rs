@@ -48,9 +48,9 @@ impl BloomFilter {
 
         // Minimum constraints
         let m = m.max(1024);
-        let k = k.max(2).min(32);
+        let k = k.clamp(2, 32);
 
-        let num_bytes = ((m + 7) / 8) as usize;
+        let num_bytes = m.div_ceil(8) as usize;
         Self {
             bits: vec![0u8; num_bytes],
             num_hashes: k,
@@ -109,7 +109,9 @@ impl BloomFilter {
         let h1 = hasher.finish();
 
         // Second hash: XOR with a constant to get different distribution
-        let h2 = h1.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(data.len() as u64);
+        let h2 = h1
+            .wrapping_mul(0x9E3779B97F4A7C15)
+            .wrapping_add(data.len() as u64);
         (h1, h2)
     }
 
@@ -300,7 +302,10 @@ mod tests {
     fn test_bloom_filter_memory_budget() {
         // With p=0.0001 and 1000 expected items, memory should be < 4KB
         let bf = BloomFilter::new(1000);
-        assert!(bf.memory_bytes() < 4096, "bloom filter memory should be under 4KB for 1000 items at p=0.0001");
+        assert!(
+            bf.memory_bytes() < 4096,
+            "bloom filter memory should be under 4KB for 1000 items at p=0.0001"
+        );
     }
 
     #[test]
@@ -314,7 +319,10 @@ mod tests {
         // Verify all inserted items are found
         for i in 0..50 {
             let key = format!("token-{i:04}");
-            assert!(bf.contains(key.as_bytes()), "bloom filter must not have false negatives for '{key}'");
+            assert!(
+                bf.contains(key.as_bytes()),
+                "bloom filter must not have false negatives for '{key}'"
+            );
         }
     }
 

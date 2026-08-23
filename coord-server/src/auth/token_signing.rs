@@ -23,6 +23,8 @@ use coord_core::error::{Error, Result};
 pub const SIGNING_KEY_LEN: usize = 32;
 
 /// HKDF info string for token signing key derivation
+/// 历史 v1 派生 info（仅兼容性测试引用；生产用 `format!("coord-token-signing-v{version}")`）
+#[cfg(test)]
 const TOKEN_SIGNING_INFO: &[u8] = b"coord-token-signing-v1";
 
 /// Default key rotation period (7 days in seconds)
@@ -62,10 +64,14 @@ impl TokenSigningKey {
     }
 
     /// Derive a signing key from root key material via HKDF-SHA256.
+    ///
+    /// F2 修复（P0-C.3）：info 串混入 key version（`coord-token-signing-v{version}`），
+    /// 不同版本派生不同密钥 —— 此前常量 info 导致轮换无效（所有版本同钥）。
     pub fn derive(version: u32, root_key_material: &[u8]) -> Result<Self> {
         let hkdf = Hkdf::<Sha256>::new(None, root_key_material);
         let mut key_bytes = vec![0u8; SIGNING_KEY_LEN];
-        hkdf.expand(TOKEN_SIGNING_INFO, &mut key_bytes)
+        let info = format!("coord-token-signing-v{version}");
+        hkdf.expand(info.as_bytes(), &mut key_bytes)
             .map_err(|e| Error::Crypto(format!("HKDF expand for token signing key failed: {e}")))?;
 
         let created_at = SystemTime::now()
@@ -269,7 +275,7 @@ impl TokenSigningKeyring {
             previous.remove(0);
         }
 
-        if previous.len() > 0 {
+        if !previous.is_empty() {
             tracing::debug!(
                 "Retained {} previous token signing keys for verification",
                 previous.len()
@@ -330,12 +336,20 @@ mod tests {
         let key1 = TokenSigningKey::derive(1, &root).unwrap();
         let key2 = TokenSigningKey::derive(2, &root).unwrap();
 
-        // Different versions should produce different keys (due to different version in derivation)
-        // Note: currently version is not mixed into HKDF info, so keys will be identical.
-        // This test documents that behavior — if version-aware derivation is needed,
-        // the info string should include the version.
+        // F2 修复（P0-C.3）：不同版本必须派生不同密钥（轮换才有效）
         assert_eq!(key1.key_id, "token-signing-key-v1");
         assert_eq!(key2.key_id, "token-signing-key-v2");
+        assert_ne!(
+            &*key1.key_bytes, &*key2.key_bytes,
+            "different versions must derive different key bytes (HKDF info mixes version)"
+        );
+
+        // v1 派生保持历史兼容（info = "coord-token-signing-v1"，与修复前一致）
+        use hkdf::Hkdf;
+        let hkdf_legacy = Hkdf::<sha2::Sha256>::new(None, &root);
+        let mut legacy = vec![0u8; SIGNING_KEY_LEN];
+        hkdf_legacy.expand(TOKEN_SIGNING_INFO, &mut legacy).unwrap();
+        assert_eq!(&*key1.key_bytes, legacy.as_slice());
     }
 
     #[test]
@@ -364,7 +378,10 @@ mod tests {
         }
 
         let result = key.verify(data, &signature);
-        assert!(result.is_err(), "tampered signature should fail verification");
+        assert!(
+            result.is_err(),
+            "tampered signature should fail verification"
+        );
     }
 
     #[test]
@@ -470,7 +487,9 @@ mod tests {
 
         // Verify v1 signature with retained v1 key
         let v1_retained = keyring.find_key("token-signing-key-v1").unwrap();
-        v1_retained.verify(data, &signature).expect("v1 key should still verify");
+        v1_retained
+            .verify(data, &signature)
+            .expect("v1 key should still verify");
 
         // Sign with v2 and verify
         let v2_key = keyring.active_key();

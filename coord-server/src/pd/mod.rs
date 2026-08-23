@@ -1,3 +1,8 @@
+// ⚠️ EXPERIMENTAL（P2-01）：本模块为组件级验证实现，未接入任何生产路径
+// （全仓无 `pd::` 生产引用，仅 `coord-server/tests/region_manager_test.rs` 测试引用）。
+// Coord 生产形态为「单 Raft 组 + 定期快照备份」；Multi-Raft/PD 若需启用，
+// 须另立专项完成集成与生产验证（见 `docs/production/05-rebuild-decision-and-plan.md` §6.4 P2-01）。
+//
 // Placement Driver — Multi-Raft 全局调度器
 //
 // PD（Placement Driver）是 Coord Multi-Raft 体系的核心调度组件。
@@ -162,9 +167,8 @@ impl PlacementDriver {
         let pd = Arc::clone(self);
         let mut shutdown_rx = pd.shutdown_rx.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(
-                pd.config.balance_interval,
-            ));
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(pd.config.balance_interval));
             interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
             let mut tick: u64 = 0;
@@ -222,11 +226,7 @@ impl PlacementDriver {
             let ops = scheduler.schedule(&ctx);
             let count = ops.len();
             if count > 0 {
-                tracing::info!(
-                    "PD: {} generated {} operator(s)",
-                    scheduler.name(),
-                    count
-                );
+                tracing::info!("PD: {} generated {} operator(s)", scheduler.name(), count);
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -251,7 +251,10 @@ impl PlacementDriver {
     /// 获取并锁定下一个待执行的 Operator（标记为 Running）
     pub fn take_next_operator(&self) -> Option<Operator> {
         let mut pending = self.pending_operators.write();
-        if let Some(pos) = pending.iter().position(|e| e.status == OperatorStatus::Pending) {
+        if let Some(pos) = pending
+            .iter()
+            .position(|e| e.status == OperatorStatus::Pending)
+        {
             pending[pos].status = OperatorStatus::Running;
             Some(pending[pos].op.clone())
         } else {
@@ -272,7 +275,9 @@ impl PlacementDriver {
 
         // 清理已完成的 Operator（保留最近 1000 个）
         if pending.len() > 1000 {
-            pending.retain(|e| e.status == OperatorStatus::Pending || e.status == OperatorStatus::Running);
+            pending.retain(|e| {
+                e.status == OperatorStatus::Pending || e.status == OperatorStatus::Running
+            });
         }
     }
 
@@ -281,11 +286,26 @@ impl PlacementDriver {
         let pending = self.pending_operators.read();
         OperatorStats {
             total: pending.len(),
-            pending: pending.iter().filter(|e| e.status == OperatorStatus::Pending).count(),
-            running: pending.iter().filter(|e| e.status == OperatorStatus::Running).count(),
-            success: pending.iter().filter(|e| e.status == OperatorStatus::Success).count(),
-            failed: pending.iter().filter(|e| matches!(e.status, OperatorStatus::Failed(_))).count(),
-            cancelled: pending.iter().filter(|e| e.status == OperatorStatus::Cancelled).count(),
+            pending: pending
+                .iter()
+                .filter(|e| e.status == OperatorStatus::Pending)
+                .count(),
+            running: pending
+                .iter()
+                .filter(|e| e.status == OperatorStatus::Running)
+                .count(),
+            success: pending
+                .iter()
+                .filter(|e| e.status == OperatorStatus::Success)
+                .count(),
+            failed: pending
+                .iter()
+                .filter(|e| matches!(e.status, OperatorStatus::Failed(_)))
+                .count(),
+            cancelled: pending
+                .iter()
+                .filter(|e| e.status == OperatorStatus::Cancelled)
+                .count(),
         }
     }
 }
@@ -420,8 +440,7 @@ mod tests {
         let region = make_region_meta(1, vec![0x00], vec![0xFF]);
         pd.meta_store().create_region(region).unwrap();
 
-        pd.handle_region_heartbeat(1, 1024 * 1024, 5000, 1)
-            .unwrap();
+        pd.handle_region_heartbeat(1, 1024 * 1024, 5000, 1).unwrap();
 
         let updated = pd.meta_store().get_region(1).unwrap();
         assert_eq!(updated.approximate_size, 1024 * 1024);
@@ -545,7 +564,9 @@ mod tests {
         };
 
         // 先加入队列
-        pd.pending_operators.write().push(OperatorEntry::new(op.clone()));
+        pd.pending_operators
+            .write()
+            .push(OperatorEntry::new(op.clone()));
         // 标记完成
         pd.complete_operator(&op, true, None);
 
@@ -561,11 +582,12 @@ mod tests {
             to_node: 2,
         };
 
-        pd.pending_operators.write().push(OperatorEntry::new(op.clone()));
+        pd.pending_operators
+            .write()
+            .push(OperatorEntry::new(op.clone()));
         pd.complete_operator(&op, false, Some("timeout".into()));
 
         let stats = pd.operator_stats();
         assert_eq!(stats.failed, 1);
     }
 }
-

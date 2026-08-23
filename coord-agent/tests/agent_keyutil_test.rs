@@ -8,7 +8,7 @@
 //
 // RED stage: KeyUtil / KeyStore trait / FileKeyStore 尚未定义。
 
-use coord_agent::key_util::{KeyStore, KeyUtil, KeyStoreBackend, KeyUtilConfig, FileKeyStore};
+use coord_agent::key_util::{FileKeyStore, KeyStore, KeyStoreBackend, KeyUtil, KeyUtilConfig};
 use std::collections::HashSet;
 
 /// 验证 KeyUtilConfig 默认值
@@ -50,7 +50,11 @@ fn test_file_key_store_crud() {
     assert_eq!(loaded, key_data);
 
     // List keys
-    let keys: HashSet<String> = store.list_keys().expect("列出 keys 失败").into_iter().collect();
+    let keys: HashSet<String> = store
+        .list_keys()
+        .expect("列出 keys 失败")
+        .into_iter()
+        .collect();
     assert!(keys.contains(key_id));
 
     // Delete the key
@@ -78,7 +82,11 @@ fn test_file_key_store_encryption_at_rest() {
 
     // 磁盘存储应为加密格式：nonce(12B) + ciphertext(N B) + tag(16B)
     // 32 bytes 明文 → 32 + 16 = 48 bytes 密文 + 12 bytes nonce = 60 bytes
-    assert_eq!(disk_content.len(), 60, "加密后应为 60 bytes (nonce + ciphertext + tag)");
+    assert_eq!(
+        disk_content.len(),
+        60,
+        "加密后应为 60 bytes (nonce + ciphertext + tag)"
+    );
     // 明文 key 不应出现在磁盘文件中
     assert!(
         !disk_content.windows(key_data.len()).any(|w| w == key_data),
@@ -124,7 +132,11 @@ fn test_key_util_key_rotation() {
     assert_eq!(store.load("dek-v1").expect("加载 v1 失败"), v1_key);
     assert_eq!(store.load("dek-v2").expect("加载 v2 失败"), v2_key);
 
-    let keys: HashSet<String> = store.list_keys().expect("列出 keys 失败").into_iter().collect();
+    let keys: HashSet<String> = store
+        .list_keys()
+        .expect("列出 keys 失败")
+        .into_iter()
+        .collect();
     assert!(keys.contains("dek-v1"));
     assert!(keys.contains("dek-v2"));
 }

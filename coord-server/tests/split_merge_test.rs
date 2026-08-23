@@ -86,7 +86,7 @@ fn test_split_minimum_region_not_allowed() {
         && split_key.as_slice() < region.end_key.as_slice();
     // 若只有 1 字节范围，没有合法的 split_key
     assert!(split_key.as_slice() > vec![0x10].as_slice());
-    // 但是 [0x10, 0x80] > [0x10]，且 [0x10, 0x80] < [0x11]? 
+    // 但是 [0x10, 0x80] > [0x10]，且 [0x10, 0x80] < [0x11]?
     // 按字节比较：0x10 < 0x10,0x80? 前缀匹配时，更长的更大
     // 所以 [0x10, 0x80] > [0x10]，但 [0x10, 0x80] 与 [0x11] 比较时，
     // 第一字节 0x10 < 0x11，所以 [0x10, 0x80] < [0x11]
@@ -110,13 +110,22 @@ fn test_split_preserves_epoch_conf_ver() {
 #[test]
 fn test_split_epoch_check_prevents_stale_requests() {
     // 客户端持有旧 Epoch（version=1），Region 已 Split（version=2）
-    let client_epoch = RegionEpoch { conf_ver: 1, version: 1 };
-    let server_epoch = RegionEpoch { conf_ver: 1, version: 2 };
+    let client_epoch = RegionEpoch {
+        conf_ver: 1,
+        version: 1,
+    };
+    let server_epoch = RegionEpoch {
+        conf_ver: 1,
+        version: 2,
+    };
 
     let is_stale = client_epoch.version < server_epoch.version
         || client_epoch.conf_ver < server_epoch.conf_ver;
 
-    assert!(is_stale, "client with old epoch should be detected as stale");
+    assert!(
+        is_stale,
+        "client with old epoch should be detected as stale"
+    );
 }
 
 #[test]
@@ -125,7 +134,10 @@ fn test_split_on_empty_region_boundary() {
     let region = make_region(1, vec![0x00], vec![0x00], 0, 0);
     // start == end，应拒绝 Split
     let can_split = region.start_key < region.end_key;
-    assert!(!can_split, "region with start==end should not be splittable");
+    assert!(
+        !can_split,
+        "region with start==end should not be splittable"
+    );
 }
 
 #[test]
@@ -166,10 +178,7 @@ fn test_multiple_sequential_splits() {
     // 原始: [0x00, 0xFF)
     // 第 1 次: [0x00, 0x55) + [0x55, 0xFF)
     // 第 2 次: [0x00, 0x30) + [0x30, 0x55) + [0x55, 0xFF)
-    let splits = vec![
-        (vec![0x00], vec![0x55]),
-        (vec![0x30], vec![0x55]),
-    ];
+    let splits = vec![(vec![0x00], vec![0x55]), (vec![0x30], vec![0x55])];
 
     let mut ranges: Vec<(Vec<u8>, Vec<u8>)> = vec![(vec![0x00], vec![0xFF])];
 
@@ -188,7 +197,10 @@ fn test_multiple_sequential_splits() {
 
     // 验证连续性
     for window in final_ranges.windows(2) {
-        assert_eq!(window[0].1, window[1].0, "adjacent ranges must be contiguous");
+        assert_eq!(
+            window[0].1, window[1].0,
+            "adjacent ranges must be contiguous"
+        );
     }
 
     // 验证首尾覆盖
@@ -206,11 +218,17 @@ fn test_merge_two_small_adjacent_regions() {
     let right = make_region(2, vec![0x55], vec![0xFF], 5 * 1024 * 1024, 30_000);
 
     // 验证相邻性
-    assert_eq!(left.end_key, right.start_key, "regions must be adjacent to merge");
+    assert_eq!(
+        left.end_key, right.start_key,
+        "regions must be adjacent to merge"
+    );
 
     // 验证合并后总大小
     let total = left.approximate_size + right.approximate_size;
-    assert!(total < 256 * 1024 * 1024, "merged total must be below max size");
+    assert!(
+        total < 256 * 1024 * 1024,
+        "merged total must be below max size"
+    );
 }
 
 #[test]
@@ -218,7 +236,10 @@ fn test_merge_requires_adjacency() {
     let left = make_region(1, vec![0x00], vec![0x55], 10 * 1024 * 1024, 50_000);
     let right = make_region(2, vec![0x60], vec![0xFF], 5 * 1024 * 1024, 30_000);
 
-    assert_ne!(left.end_key, right.start_key, "non-adjacent regions should not merge");
+    assert_ne!(
+        left.end_key, right.start_key,
+        "non-adjacent regions should not merge"
+    );
 }
 
 #[test]
@@ -237,8 +258,14 @@ fn test_merge_preserves_correct_range() {
 #[test]
 fn test_merge_epoch_increments_version() {
     // Merge 后应递增 left Region 的 epoch.version
-    let mut left_epoch = RegionEpoch { conf_ver: 1, version: 1 };
-    let right_epoch = RegionEpoch { conf_ver: 1, version: 3 };
+    let mut left_epoch = RegionEpoch {
+        conf_ver: 1,
+        version: 1,
+    };
+    let right_epoch = RegionEpoch {
+        conf_ver: 1,
+        version: 3,
+    };
 
     // 模拟 Merge：left 合并 right，version 应增加
     left_epoch.version = left_epoch.version.max(right_epoch.version) + 1;
@@ -251,7 +278,10 @@ fn test_merge_tombstones_right_region() {
     let right_id: RegionId = 2;
     let tombstone_regions: Vec<RegionId> = vec![right_id];
 
-    assert!(tombstone_regions.contains(&2), "merged region should be tombstoned");
+    assert!(
+        tombstone_regions.contains(&2),
+        "merged region should be tombstoned"
+    );
 }
 
 #[test]
@@ -261,7 +291,10 @@ fn test_merge_cannot_exceed_max_size() {
 
     let total = left.approximate_size + right.approximate_size;
     let max_merge = 256 * 1024 * 1024;
-    assert!(total >= max_merge, "merged size exceeds max, should not merge");
+    assert!(
+        total >= max_merge,
+        "merged size exceeds max, should not merge"
+    );
 }
 
 #[test]
@@ -281,7 +314,10 @@ fn test_merge_chain_of_small_regions() {
 
     // 验证全部合并后的大小
     let total: u64 = regions.iter().map(|r| r.approximate_size).sum();
-    assert!(total < 256 * 1024 * 1024, "chained merge total should be below max");
+    assert!(
+        total < 256 * 1024 * 1024,
+        "chained merge total should be below max"
+    );
 }
 
 #[test]
@@ -300,8 +336,14 @@ fn test_merge_does_not_affect_unrelated_regions() {
 fn test_merge_with_split_race_condition() {
     // 模拟 Split 和 Merge 竞态：Region 在被 Merge 前又被 Split
     // Merge 应检测到 epoch 不匹配并放弃
-    let left_epoch_before = RegionEpoch { conf_ver: 1, version: 1 };
-    let left_epoch_after_split = RegionEpoch { conf_ver: 1, version: 2 };
+    let left_epoch_before = RegionEpoch {
+        conf_ver: 1,
+        version: 1,
+    };
+    let left_epoch_after_split = RegionEpoch {
+        conf_ver: 1,
+        version: 2,
+    };
 
     // 如果 Merge 持有的 epoch 是 version=1，但 Region 已被 Split 到 version=2
     let merge_stale = left_epoch_before.version < left_epoch_after_split.version;
@@ -314,8 +356,14 @@ fn test_merge_with_split_race_condition() {
 
 #[test]
 fn test_epoch_comparison_stale_conf_ver() {
-    let client = RegionEpoch { conf_ver: 1, version: 5 };
-    let server = RegionEpoch { conf_ver: 3, version: 5 };
+    let client = RegionEpoch {
+        conf_ver: 1,
+        version: 5,
+    };
+    let server = RegionEpoch {
+        conf_ver: 3,
+        version: 5,
+    };
 
     // conf_ver 落后 → stale
     assert!(client.conf_ver < server.conf_ver || client.version < server.version);
@@ -323,8 +371,14 @@ fn test_epoch_comparison_stale_conf_ver() {
 
 #[test]
 fn test_epoch_comparison_stale_version() {
-    let client = RegionEpoch { conf_ver: 3, version: 2 };
-    let server = RegionEpoch { conf_ver: 3, version: 5 };
+    let client = RegionEpoch {
+        conf_ver: 3,
+        version: 2,
+    };
+    let server = RegionEpoch {
+        conf_ver: 3,
+        version: 5,
+    };
 
     // version 落后 → stale
     assert!(client.conf_ver < server.conf_ver || client.version < server.version);
@@ -332,8 +386,14 @@ fn test_epoch_comparison_stale_version() {
 
 #[test]
 fn test_epoch_comparison_fresh() {
-    let client = RegionEpoch { conf_ver: 5, version: 5 };
-    let server = RegionEpoch { conf_ver: 5, version: 5 };
+    let client = RegionEpoch {
+        conf_ver: 5,
+        version: 5,
+    };
+    let server = RegionEpoch {
+        conf_ver: 5,
+        version: 5,
+    };
 
     // 完全相同 → fresh
     let fresh = client.conf_ver >= server.conf_ver && client.version >= server.version;

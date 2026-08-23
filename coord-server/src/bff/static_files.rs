@@ -7,7 +7,7 @@
 
 use axum::{
     body::Body,
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use rust_embed::RustEmbed;
@@ -36,19 +36,20 @@ pub fn serve_static(path: &str) -> Option<Response> {
     UiAssets::get(path).map(|asset| {
         let mime = mime_from_path(path);
         let mut headers = HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
+        headers.insert(
+            header::CONTENT_TYPE,
+            mime.parse()
+                .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+        );
 
         // 缓存策略：带 hash 的资源文件名包含 8 位十六进制 hash（如 index-BxK1vLwz.js）
         if is_hashed_asset(path) {
             headers.insert(
                 header::CACHE_CONTROL,
-                "public, max-age=31536000, immutable".parse().unwrap(),
+                HeaderValue::from_static("public, max-age=31536000, immutable"),
             );
         } else {
-            headers.insert(
-                header::CACHE_CONTROL,
-                "no-cache".parse().unwrap(),
-            );
+            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
         }
 
         (StatusCode::OK, headers, Body::from(asset.data.to_vec())).into_response()
@@ -61,12 +62,9 @@ pub fn serve_index_html() -> Response {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::CONTENT_TYPE,
-            "text/html; charset=utf-8".parse().unwrap(),
+            HeaderValue::from_static("text/html; charset=utf-8"),
         );
-        headers.insert(
-            header::CACHE_CONTROL,
-            "no-cache".parse().unwrap(),
-        );
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
         (StatusCode::OK, headers, Body::from(asset.data.to_vec())).into_response()
     } else {
         // 前端未构建时的占位页

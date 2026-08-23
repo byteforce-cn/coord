@@ -178,8 +178,7 @@ mod tests {
 
     #[test]
     fn test_with_instance_sets_json_pointer() {
-        let f = WorkflowFault::validation("bad input", "nope")
-            .with_instance("/input/amount");
+        let f = WorkflowFault::validation("bad input", "nope").with_instance("/input/amount");
         assert_eq!(f.instance.as_deref(), Some("/input/amount"));
         assert!(serde_json::to_string(&f).unwrap().contains("\"instance\""));
     }

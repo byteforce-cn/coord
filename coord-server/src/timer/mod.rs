@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tokio::time::{Instant, interval};
+use tokio::time::{interval, Instant};
 
 // ──── 配置 ────
 
@@ -118,10 +118,7 @@ impl TimerWheel {
             expire_tx: wheel_expire_tx,
         };
 
-        let handle = TimerWheelHandle {
-            cmd_tx,
-            expire_rx,
-        };
+        let handle = TimerWheelHandle { cmd_tx, expire_rx };
 
         // 启动驱动任务
         tokio::spawn(async move {
@@ -170,8 +167,7 @@ impl TimerWheel {
 
         // 处理 L0 当前槽位
         let l0_pos = self.current_pos[0];
-        let expired: Vec<TimerEntry> =
-            std::mem::take(&mut self.slots[0][l0_pos]);
+        let expired: Vec<TimerEntry> = std::mem::take(&mut self.slots[0][l0_pos]);
 
         for entry in expired {
             self.id_index.remove(&entry.id);
@@ -194,8 +190,7 @@ impl TimerWheel {
         }
 
         let pos = self.current_pos[layer];
-        let entries: Vec<TimerEntry> =
-            std::mem::take(&mut self.slots[layer][pos]);
+        let entries: Vec<TimerEntry> = std::mem::take(&mut self.slots[layer][pos]);
 
         // 将这些任务重新插入更低层
         for entry in entries {
@@ -326,10 +321,7 @@ impl TimerWheelHandle {
     /// 取消定时任务
     pub async fn cancel(&self, id: u64) -> bool {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = self.cmd_tx.send(Command::Cancel {
-            id,
-            respond_to: tx,
-        });
+        let _ = self.cmd_tx.send(Command::Cancel { id, respond_to: tx });
         rx.await.unwrap_or(false)
     }
 

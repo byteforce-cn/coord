@@ -65,8 +65,15 @@ mod tests {
         let mut inst = make_inst();
         inst.output = Some(serde_json::json!({"status": "ok"}));
 
-        let result = execute(&NamedTask { name: "end".into(), task: Task::End(EndTask {}) },
-            &EndTask {}, &inst, &clock);
+        let result = execute(
+            &NamedTask {
+                name: "end".into(),
+                task: Task::End(EndTask {}),
+            },
+            &EndTask {},
+            &inst,
+            &clock,
+        );
         match result {
             StepResult::Completed { output } => {
                 assert_eq!(output, serde_json::json!({"status": "ok"}));

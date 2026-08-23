@@ -12,10 +12,7 @@ use coord_agent::services::event_notification::CloudEvent;
 /// 验证 CloudEvent 最小必填字段
 #[test]
 fn test_cloudevent_required_fields() {
-    let event = CloudEvent::new(
-        "cn.byteforce.order.created",
-        "/coord-agent/order-service",
-    );
+    let event = CloudEvent::new("cn.byteforce.order.created", "/coord-agent/order-service");
     assert_eq!(event.specversion, "1.0");
     assert_eq!(event.event_type, "cn.byteforce.order.created");
     assert_eq!(event.source, "/coord-agent/order-service");
@@ -26,10 +23,7 @@ fn test_cloudevent_required_fields() {
 /// 验证 CloudEvent 序列化/反序列化（JSON）
 #[test]
 fn test_cloudevent_json_roundtrip() {
-    let mut event = CloudEvent::new(
-        "cn.byteforce.cache.updated",
-        "/coord-agent/cache-service",
-    );
+    let mut event = CloudEvent::new("cn.byteforce.cache.updated", "/coord-agent/cache-service");
     event.data = Some(b"hello cloud".to_vec());
     event.datacontenttype = Some("application/octet-stream".to_string());
     event.subject = Some("cache-key-001".to_string());
@@ -41,7 +35,10 @@ fn test_cloudevent_json_roundtrip() {
     assert_eq!(parsed.event_type, "cn.byteforce.cache.updated");
     assert_eq!(parsed.source, "/coord-agent/cache-service");
     assert_eq!(parsed.subject, Some("cache-key-001".to_string()));
-    assert_eq!(parsed.datacontenttype, Some("application/octet-stream".to_string()));
+    assert_eq!(
+        parsed.datacontenttype,
+        Some("application/octet-stream".to_string())
+    );
 }
 
 /// 验证每个事件 ID 唯一
@@ -71,6 +68,9 @@ fn test_cloudevent_spec_compliance() {
 
     // time 若存在应为 RFC 3339
     if let Some(ref t) = event.time {
-        assert!(t.contains('T') || t.contains('Z'), "time 应为 RFC 3339 格式");
+        assert!(
+            t.contains('T') || t.contains('Z'),
+            "time 应为 RFC 3339 格式"
+        );
     }
 }

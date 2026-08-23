@@ -14,8 +14,14 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use std::collections::HashMap;
+
 use coord_core::types::RegionId;
 use parking_lot::RwLock;
+use tower::util::ServiceExt;
+
+/// 慢请求阈值（微秒）：超过则计入 slow 并 WARN（P1-09）
+pub const SLOW_REQUEST_US: u64 = 1_000_000;
 
 // ──── 指标注册表 ────
 
@@ -39,6 +45,10 @@ struct MetricsInner {
     // ── Storage 指标 ──
     pub storage_size_bytes: AtomicU64,
     pub storage_keys_total: AtomicU64,
+
+    // ── 磁盘水位（P1-02）──
+    pub disk_available_bytes: AtomicU64,
+    pub disk_total_bytes: AtomicU64,
 
     // ── Lease 指标 ──
     pub lease_active_total: AtomicI64,
@@ -67,8 +77,25 @@ struct MetricsInner {
     /// Region ID → Arc<RegionMetrics>
     pub region_metrics: RwLock<Vec<Arc<RegionMetrics>>>,
 
+    // ── Per-Method gRPC 指标（P1-09：请求计数/延迟/错误/慢请求）──
+    /// gRPC 方法路径 → 指标
+    pub method_metrics: RwLock<HashMap<String, Arc<MethodMetrics>>>,
+
     // ── 启动时间 ──
     pub start_time: Instant,
+}
+
+/// 单个 gRPC 方法的指标（P1-09）
+#[derive(Debug, Default)]
+pub struct MethodMetrics {
+    /// 请求总数
+    pub count: AtomicU64,
+    /// 累计耗时（微秒）
+    pub duration_us: AtomicU64,
+    /// 非 OK 响应数（HTTP 状态 >= 400；gRPC 错误映射为 2xx 之外的状态码）
+    pub errors: AtomicU64,
+    /// 慢请求数（> SLOW_REQUEST_US）
+    pub slow: AtomicU64,
 }
 
 // ============================================================================
@@ -120,6 +147,8 @@ impl Default for MetricsInner {
             grpc_request_duration_us: Default::default(),
             storage_size_bytes: AtomicU64::new(0),
             storage_keys_total: AtomicU64::new(0),
+            disk_available_bytes: AtomicU64::new(0),
+            disk_total_bytes: AtomicU64::new(0),
             lease_active_total: AtomicI64::new(0),
             lease_expired_total: AtomicU64::new(0),
             seal_status: AtomicI64::new(0),
@@ -131,6 +160,7 @@ impl Default for MetricsInner {
             local_leader_count: AtomicU64::new(0),
             local_region_count: AtomicU64::new(0),
             region_metrics: RwLock::new(Vec::new()),
+            method_metrics: RwLock::new(HashMap::new()),
             start_time: Instant::now(),
         }
     }
@@ -167,7 +197,9 @@ impl Metrics {
     // ── Raft 指标更新 ──
 
     pub fn set_raft_leader_id(&self, id: u64) {
-        self.inner.raft_leader_id.store(id as i64, Ordering::Relaxed);
+        self.inner
+            .raft_leader_id
+            .store(id as i64, Ordering::Relaxed);
     }
 
     pub fn set_raft_term(&self, term: u64) {
@@ -179,7 +211,9 @@ impl Metrics {
     }
 
     pub fn set_raft_applied_index(&self, index: u64) {
-        self.inner.raft_applied_index.store(index, Ordering::Relaxed);
+        self.inner
+            .raft_applied_index
+            .store(index, Ordering::Relaxed);
     }
 
     // ── gRPC 指标更新 ──
@@ -191,28 +225,76 @@ impl Metrics {
         self.inner.grpc_request_duration_us[idx].fetch_add(duration_us, Ordering::Relaxed);
     }
 
+    /// 记录一次按完整方法路径的 gRPC 请求（P1-09：MetricsLayer 调用）。
+    ///
+    /// `code` 为 HTTP 状态码（gRPC 错误响应非 2xx）；慢请求（> SLOW_REQUEST_US）
+    /// 额外 WARN 日志。
+    pub fn record_grpc_request_by_method(&self, method: &str, duration_us: u64, code: u16) {
+        let mm = {
+            let mut map = self.inner.method_metrics.write();
+            Arc::clone(
+                map.entry(method.to_string())
+                    .or_insert_with(|| Arc::new(MethodMetrics::default())),
+            )
+        };
+        mm.count.fetch_add(1, Ordering::Relaxed);
+        mm.duration_us.fetch_add(duration_us, Ordering::Relaxed);
+        if code >= 400 {
+            mm.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        if duration_us > SLOW_REQUEST_US {
+            mm.slow.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                "slow gRPC request: method={method} duration={}ms",
+                duration_us / 1000
+            );
+        }
+    }
+
     // ── Storage 指标更新 ──
 
     pub fn set_storage_size_bytes(&self, bytes: u64) {
-        self.inner.storage_size_bytes.store(bytes, Ordering::Relaxed);
+        self.inner
+            .storage_size_bytes
+            .store(bytes, Ordering::Relaxed);
     }
 
     pub fn set_storage_keys_total(&self, count: u64) {
-        self.inner.storage_keys_total.store(count, Ordering::Relaxed);
+        self.inner
+            .storage_keys_total
+            .store(count, Ordering::Relaxed);
+    }
+
+    // ── 磁盘水位（P1-02）──
+
+    pub fn set_disk_available_bytes(&self, bytes: u64) {
+        self.inner
+            .disk_available_bytes
+            .store(bytes, Ordering::Relaxed);
+    }
+
+    pub fn set_disk_total_bytes(&self, bytes: u64) {
+        self.inner.disk_total_bytes.store(bytes, Ordering::Relaxed);
     }
 
     // ── Lease 指标更新 ──
 
     pub fn inc_lease_active(&self) {
-        self.inner.lease_active_total.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .lease_active_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn dec_lease_active(&self) {
-        self.inner.lease_active_total.fetch_sub(1, Ordering::Relaxed);
+        self.inner
+            .lease_active_total
+            .fetch_sub(1, Ordering::Relaxed);
     }
 
     pub fn inc_lease_expired(&self) {
-        self.inner.lease_expired_total.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .lease_expired_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     // ── Seal 指标 ──
@@ -235,12 +317,16 @@ impl Metrics {
 
     /// Region Split 计数 +1
     pub fn inc_region_split(&self) {
-        self.inner.region_split_total.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .region_split_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Region Merge 计数 +1
     pub fn inc_region_merge(&self) {
-        self.inner.region_merge_total.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .region_merge_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// PD Operator 计数 +1
@@ -250,12 +336,16 @@ impl Metrics {
 
     /// 设置本节点 Leader 数量
     pub fn set_local_leader_count(&self, count: u64) {
-        self.inner.local_leader_count.store(count, Ordering::Relaxed);
+        self.inner
+            .local_leader_count
+            .store(count, Ordering::Relaxed);
     }
 
     /// 设置本节点 Region 副本数
     pub fn set_local_region_count(&self, count: u64) {
-        self.inner.local_region_count.store(count, Ordering::Relaxed);
+        self.inner
+            .local_region_count
+            .store(count, Ordering::Relaxed);
     }
 
     /// 获取或创建 Per-Region 指标
@@ -352,7 +442,10 @@ impl Metrics {
 
         out.push_str("\n# HELP raft_term Current Raft term\n");
         out.push_str("# TYPE raft_term gauge\n");
-        out.push_str(&format!("raft_term {}\n", inner.raft_term.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "raft_term {}\n",
+            inner.raft_term.load(Ordering::Relaxed)
+        ));
 
         out.push_str("\n# HELP raft_commit_index Raft log commit index\n");
         out.push_str("# TYPE raft_commit_index gauge\n");
@@ -381,7 +474,9 @@ impl Metrics {
         }
 
         // gRPC 延迟
-        out.push_str("\n# HELP grpc_request_duration_us_total Total gRPC request duration in microseconds\n");
+        out.push_str(
+            "\n# HELP grpc_request_duration_us_total Total gRPC request duration in microseconds\n",
+        );
         out.push_str("# TYPE grpc_request_duration_us_total counter\n");
         for (i, name) in method_names.iter().enumerate() {
             out.push_str(&format!(
@@ -404,6 +499,21 @@ impl Metrics {
         out.push_str(&format!(
             "storage_keys_total {}\n",
             inner.storage_keys_total.load(Ordering::Relaxed)
+        ));
+
+        // 磁盘水位（P1-02）
+        out.push_str("\n# HELP disk_available_bytes Available bytes on the data volume\n");
+        out.push_str("# TYPE disk_available_bytes gauge\n");
+        out.push_str(&format!(
+            "disk_available_bytes {}\n",
+            inner.disk_available_bytes.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP disk_total_bytes Total bytes on the data volume\n");
+        out.push_str("# TYPE disk_total_bytes gauge\n");
+        out.push_str(&format!(
+            "disk_total_bytes {}\n",
+            inner.disk_total_bytes.load(Ordering::Relaxed)
         ));
 
         // Lease
@@ -482,6 +592,57 @@ impl Metrics {
         // Per-Region 指标
         out.push_str(&self.render_region_metrics());
 
+        // Per-Method gRPC 指标（P1-09）
+        {
+            let methods: Vec<(String, Arc<MethodMetrics>)> = {
+                let map = inner.method_metrics.read();
+                let mut v: Vec<(String, Arc<MethodMetrics>)> = map
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                    .collect();
+                v.sort_by(|a, b| a.0.cmp(&b.0));
+                v
+            };
+            out.push_str(
+                "\n# HELP grpc_method_requests_total Total gRPC requests by full method path\n",
+            );
+            out.push_str("# TYPE grpc_method_requests_total counter\n");
+            for (name, m) in &methods {
+                out.push_str(&format!(
+                    "grpc_method_requests_total{{method=\"{name}\"}} {}\n",
+                    m.count.load(Ordering::Relaxed)
+                ));
+            }
+            out.push_str(
+                "\n# HELP grpc_method_request_duration_us_total Total duration by method\n",
+            );
+            out.push_str("# TYPE grpc_method_request_duration_us_total counter\n");
+            for (name, m) in &methods {
+                out.push_str(&format!(
+                    "grpc_method_request_duration_us_total{{method=\"{name}\"}} {}\n",
+                    m.duration_us.load(Ordering::Relaxed)
+                ));
+            }
+            out.push_str("\n# HELP grpc_method_errors_total Non-OK responses by method\n");
+            out.push_str("# TYPE grpc_method_errors_total counter\n");
+            for (name, m) in &methods {
+                out.push_str(&format!(
+                    "grpc_method_errors_total{{method=\"{name}\"}} {}\n",
+                    m.errors.load(Ordering::Relaxed)
+                ));
+            }
+            out.push_str(
+                "\n# HELP grpc_method_slow_requests_total Slow requests (>1s) by method\n",
+            );
+            out.push_str("# TYPE grpc_method_slow_requests_total counter\n");
+            for (name, m) in &methods {
+                out.push_str(&format!(
+                    "grpc_method_slow_requests_total{{method=\"{name}\"}} {}\n",
+                    m.slow.load(Ordering::Relaxed)
+                ));
+            }
+        }
+
         out
     }
 }
@@ -489,6 +650,89 @@ impl Metrics {
 impl Default for Metrics {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ──── MetricsLayer（P1-09：tower 中间件，gRPC 全方法指标接线）────
+
+/// gRPC 指标中间件：对每个请求记录（方法路径、耗时、HTTP 状态码）。
+///
+/// 挂载于 `tonic::Server::builder().layer(MetricsLayer::new(metrics))`，
+/// 覆盖全部 gRPC 服务（KV/Txn/Lease/Watch/Maintenance/Auth/Capability），
+/// 修复"`record_grpc_request` 零调用方、`/metrics` 恒 0"的 OBS-1 问题。
+#[derive(Clone)]
+pub struct MetricsLayer {
+    metrics: Arc<Metrics>,
+}
+
+impl MetricsLayer {
+    pub fn new(metrics: Arc<Metrics>) -> Self {
+        Self { metrics }
+    }
+}
+
+impl<S> tower::Layer<S> for MetricsLayer {
+    type Service = MetricsService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        MetricsService {
+            inner,
+            metrics: Arc::clone(&self.metrics),
+        }
+    }
+}
+
+/// MetricsLayer 的 Service 包装
+#[derive(Clone)]
+pub struct MetricsService<S> {
+    inner: S,
+    metrics: Arc<Metrics>,
+}
+
+impl<S, ReqBody, ResBody> tower::Service<http::Request<ReqBody>> for MetricsService<S>
+where
+    S: tower::Service<http::Request<ReqBody>, Response = http::Response<ResBody>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    S::Error: Send + 'static,
+    ReqBody: Send + 'static,
+{
+    type Response = http::Response<ResBody>;
+    type Error = S::Error;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: http::Request<ReqBody>) -> Self::Future {
+        let method = request.uri().path().to_string();
+        let start = Instant::now();
+        let metrics = Arc::clone(&self.metrics);
+        let mut inner = self.inner.clone();
+        Box::pin(async move {
+            let response: Result<http::Response<ResBody>, S::Error> = match inner.ready().await {
+                Ok(svc) => svc.call(request).await,
+                Err(e) => Err(e),
+            };
+            let code = match &response {
+                Ok(resp) => resp.status().as_u16(),
+                Err(_) => 500,
+            };
+            metrics.record_grpc_request_by_method(
+                &method,
+                start.elapsed().as_micros() as u64,
+                code,
+            );
+            response
+        })
     }
 }
 
@@ -630,5 +874,20 @@ mod tests {
         // 应该复用同一个 Arc 实例
         rm1.size_bytes.store(123, Ordering::Relaxed);
         assert_eq!(rm1_again.size_bytes.load(Ordering::Relaxed), 123);
+    }
+
+    #[test]
+    fn test_method_metrics_registry() {
+        let m = Metrics::new();
+        m.record_grpc_request_by_method("/coord.kv.KV/Put", 500_000, 200);
+        m.record_grpc_request_by_method("/coord.kv.KV/Put", 2_000_000, 500);
+        m.record_grpc_request_by_method("/coord.kv.KV/Range", 10_000, 200);
+
+        let output = m.render_prometheus_text();
+        assert!(output.contains("grpc_method_requests_total{method=\"/coord.kv.KV/Put\"} 2"));
+        assert!(output.contains("grpc_method_errors_total{method=\"/coord.kv.KV/Put\"} 1"));
+        assert!(output.contains("grpc_method_slow_requests_total{method=\"/coord.kv.KV/Put\"} 1"));
+        assert!(output.contains("grpc_method_requests_total{method=\"/coord.kv.KV/Range\"} 1"));
+        assert!(output.contains("grpc_method_errors_total{method=\"/coord.kv.KV/Range\"} 0"));
     }
 }

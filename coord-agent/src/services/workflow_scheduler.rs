@@ -103,7 +103,7 @@ impl WorkflowScheduler {
     /// every 模式：到期触发，并推进下次触发时间
     async fn maybe_fire_interval(&self, id: &str, interval_ms: i64, now_ms: i64) {
         let should_fire = {
-            let mut fires = self.next_fires.lock().unwrap();
+            let mut fires = self.next_fires.lock().unwrap_or_else(|e| e.into_inner());
             match fires.get(id).copied() {
                 Some(n) => now_ms >= n,
                 None => {
@@ -114,10 +114,13 @@ impl WorkflowScheduler {
             }
         };
         if should_fire {
-            self.engine.start_instance(id, Value::Object(Default::default())).await.ok();
+            self.engine
+                .start_instance(id, Value::Object(Default::default()))
+                .await
+                .ok();
             self.next_fires
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .insert(id.to_string(), now_ms + interval_ms);
         }
     }
@@ -131,19 +134,20 @@ impl WorkflowScheduler {
     ) {
         let now_secs = now_ms / 1000;
         let due = {
-            let fires = self.next_fires.lock().unwrap();
+            let fires = self.next_fires.lock().unwrap_or_else(|e| e.into_inner());
             fires.get(id).copied().map(|n| now_ms >= n).unwrap_or(false)
         };
         if due {
-            self.engine.start_instance(id, Value::Object(Default::default())).await.ok();
+            self.engine
+                .start_instance(id, Value::Object(Default::default()))
+                .await
+                .ok();
         }
         // 推进到下一次匹配
-        let mut fires = self.next_fires.lock().unwrap();
+        let mut fires = self.next_fires.lock().unwrap_or_else(|e| e.into_inner());
         match fires.get(id).copied() {
             Some(_) => {
-                if let Some(next_secs) =
-                    coord_core::workflow::cron::next_fire(schedule, now_secs)
-                {
+                if let Some(next_secs) = coord_core::workflow::cron::next_fire(schedule, now_secs) {
                     fires.insert(id.to_string(), next_secs * 1000);
                 } else {
                     fires.remove(id);
@@ -160,27 +164,33 @@ impl WorkflowScheduler {
     /// after 模式：监控已完成实例，完成后延迟重启
     async fn maybe_fire_after(&self, id: &str, delay_ms: i64, now_ms: i64) {
         // 更新本定义最近一次完成时间
-        if let Ok(def) = self.engine.get_definition(id).await {
-            if let Some(def) = def {
-                let instances = self
-                    .engine
-                    .list_instances(None, Some(&def.document.name), usize::MAX, None)
-                    .await
-                    .unwrap_or_default();
-                let latest_completed = instances
-                    .iter()
-                    .filter(|i| i.status == InstanceStatus::Completed)
-                    .map(|i| i.updated_at)
-                    .max();
-                if let Some(t) = latest_completed {
-                    self.last_completed.lock().unwrap().insert(id.to_string(), t);
-                }
+        if let Ok(Some(def)) = self.engine.get_definition(id).await {
+            let instances = self
+                .engine
+                .list_instances(None, Some(&def.document.name), usize::MAX, None)
+                .await
+                .unwrap_or_default();
+            let latest_completed = instances
+                .iter()
+                .filter(|i| i.status == InstanceStatus::Completed)
+                .map(|i| i.updated_at)
+                .max();
+            if let Some(t) = latest_completed {
+                self.last_completed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(id.to_string(), t);
             }
         }
 
-        let last = self.last_completed.lock().unwrap().get(id).copied();
+        let last = self
+            .last_completed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .copied();
         let should_fire = {
-            let fires = self.next_fires.lock().unwrap();
+            let fires = self.next_fires.lock().unwrap_or_else(|e| e.into_inner());
             match last {
                 // 已有完成记录：完成后延迟重启
                 Some(t) => {
@@ -191,10 +201,13 @@ impl WorkflowScheduler {
             }
         };
         if should_fire {
-            self.engine.start_instance(id, Value::Object(Default::default())).await.ok();
+            self.engine
+                .start_instance(id, Value::Object(Default::default()))
+                .await
+                .ok();
             self.next_fires
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .insert(id.to_string(), now_ms + delay_ms);
         }
     }
@@ -271,7 +284,10 @@ do:
     async fn test_every_schedule_fires_instances() {
         let engine = make_engine();
         let def_id = engine
-            .deploy_definition("test", &make_scheduled_def_yaml("schedule:\n  every: \"PT0.05S\""))
+            .deploy_definition(
+                "test",
+                &make_scheduled_def_yaml("schedule:\n  every: \"PT0.05S\""),
+            )
             .await
             .unwrap();
         let scheduler = Arc::new(WorkflowScheduler::new(Arc::clone(&engine)));
@@ -288,8 +304,14 @@ do:
             .await
             .unwrap();
         // 首次 tick 排程 + 2 次触发 → ≥2 个实例
-        assert!(instances.len() >= 2, "expected ≥2 instances, got {}", instances.len());
-        assert!(instances.iter().any(|i| i.definition_name == "scheduled-wf"));
+        assert!(
+            instances.len() >= 2,
+            "expected ≥2 instances, got {}",
+            instances.len()
+        );
+        assert!(instances
+            .iter()
+            .any(|i| i.definition_name == "scheduled-wf"));
         let _ = def_id;
     }
 

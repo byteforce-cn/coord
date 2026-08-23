@@ -13,8 +13,8 @@
 // 参见 docs/client-agent-architecture-v3.md §5.4、docs/issue/ISSUE-011。
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -140,11 +140,7 @@ impl LocalSegment {
     /// 剩余可用 ID 数
     fn remaining(&self) -> u64 {
         let current = self.current.load(Ordering::Relaxed);
-        if current >= self.end {
-            0
-        } else {
-            self.end - current
-        }
+        self.end.saturating_sub(current)
     }
 }
 
@@ -183,13 +179,13 @@ fn build_segment_cas(
                 key: key.to_vec(),
                 target_value: Some(TargetValue::Version(0)),
             };
-            let value = serde_json::to_vec(&seg)
-                .map_err(|e| format!("serialize id segment: {e}"))?;
+            let value =
+                serde_json::to_vec(&seg).map_err(|e| format!("serialize id segment: {e}"))?;
             Ok((0, step, compare, value))
         }
         Some(v) => {
-            let old: IdSegment = serde_json::from_slice(v)
-                .map_err(|e| format!("deserialize id segment: {e}"))?;
+            let old: IdSegment =
+                serde_json::from_slice(v).map_err(|e| format!("deserialize id segment: {e}"))?;
             let new_max = old.current_max + step;
             let seg = IdSegment {
                 current_max: new_max,
@@ -202,8 +198,8 @@ fn build_segment_cas(
                 key: key.to_vec(),
                 target_value: Some(TargetValue::Value(v.to_vec())),
             };
-            let value = serde_json::to_vec(&seg)
-                .map_err(|e| format!("serialize id segment: {e}"))?;
+            let value =
+                serde_json::to_vec(&seg).map_err(|e| format!("serialize id segment: {e}"))?;
             Ok((old.current_max, new_max, compare, value))
         }
     }
@@ -303,7 +299,11 @@ impl LocalSnowflake {
     fn next_id(&mut self) -> u64 {
         let now = unix_ts_ms();
         // 时钟回拨保护：保持单调（不早于上次时间戳）
-        let mut ts = if now < self.last_ts { self.last_ts } else { now };
+        let mut ts = if now < self.last_ts {
+            self.last_ts
+        } else {
+            now
+        };
 
         if ts == self.last_ts {
             self.seq += 1;
@@ -451,7 +451,7 @@ impl IdGenService {
                 let local = self
                     .local
                     .as_ref()
-                    .expect("snowflake present in snowflake mode");
+                    .ok_or("snowflake local not initialized in snowflake mode")?;
                 Ok(local.lock().next_id())
             }
             IdGenMode::Segment => match &self.inner {
@@ -467,7 +467,7 @@ impl IdGenService {
                     let local = self
                         .local
                         .as_ref()
-                        .expect("local snowflake present in local mode");
+                        .ok_or("snowflake local not initialized in segment-local mode")?;
                     Ok(local.lock().next_id())
                 }
             },
@@ -588,7 +588,12 @@ impl IdGenService {
                 })),
             };
 
-            match inner.client.txn().txn(vec![compare], vec![put], vec![]).await {
+            match inner
+                .client
+                .txn()
+                .txn(vec![compare], vec![put], vec![])
+                .await
+            {
                 Ok(resp) if resp.succeeded => {
                     tracing::info!(
                         "IdGenService: registered snowflake node_id={node_id} (owner={})",
@@ -815,7 +820,10 @@ mod tests {
         let mut prev = sf.next_id();
         for _ in 0..10_000 {
             let next = sf.next_id();
-            assert!(next > prev, "snowflake id must be monotonic: {next} <= {prev}");
+            assert!(
+                next > prev,
+                "snowflake id must be monotonic: {next} <= {prev}"
+            );
             prev = next;
         }
     }
@@ -847,8 +855,14 @@ mod tests {
     #[tokio::test]
     async fn test_id_gen_service_local_mode_next_id() {
         let svc = IdGenService::new(None, 1000);
-        let id1 = svc.next_id("orders").await.expect("next_id should work without server");
-        let id2 = svc.next_id("orders").await.expect("next_id should work without server");
+        let id1 = svc
+            .next_id("orders")
+            .await
+            .expect("next_id should work without server");
+        let id2 = svc
+            .next_id("orders")
+            .await
+            .expect("next_id should work without server");
         assert!(id1 > 0);
         assert!(id2 > id1, "local ids must be monotonic: {id2} <= {id1}");
     }
@@ -947,7 +961,10 @@ mod tests {
         // 无法在单测内构造真实 AgentInner，这里验证：snowflake 模式始终持有本地生成器
         // （new 默认即 snowflake；有 Server 时也走雪花，不依赖 KV 号段）
         let svc = IdGenService::new_with_options(None, 1000, IdGenMode::Snowflake, Some(7), "t");
-        assert!(svc.local.is_some(), "snowflake mode must hold a local generator");
+        assert!(
+            svc.local.is_some(),
+            "snowflake mode must hold a local generator"
+        );
         assert_eq!(svc.current_node_id(), 7);
     }
 }

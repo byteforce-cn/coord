@@ -22,7 +22,12 @@ fn test_kv_key_prefix_format() {
     // /r/{region_id:016x}/kv/{user_key}
     let key = encode_region_kv_key(1, b"hello");
     let prefix = format!("/r/{:016x}/kv/", 1u64);
-    assert!(key.starts_with(prefix.as_bytes()), "key: {:?}, prefix: {:?}", key, prefix);
+    assert!(
+        key.starts_with(prefix.as_bytes()),
+        "key: {:?}, prefix: {:?}",
+        key,
+        prefix
+    );
 }
 
 #[test]

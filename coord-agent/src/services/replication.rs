@@ -35,8 +35,12 @@ pub struct ReplicationConfig {
     pub sync_timeout_ms: u64,
 }
 
-fn default_min_isr() -> usize { 2 }
-fn default_sync_timeout_ms() -> u64 { 2000 }
+fn default_min_isr() -> usize {
+    2
+}
+fn default_sync_timeout_ms() -> u64 {
+    2000
+}
 
 impl Default for ReplicationConfig {
     fn default() -> Self {
@@ -71,12 +75,15 @@ pub struct IdempotencyKey {
 impl IdempotencyKey {
     /// 创建新的幂等键
     pub fn new(key: impl Into<String>, timestamp_ms: u64) -> Self {
-        Self { key: key.into(), timestamp_ms }
+        Self {
+            key: key.into(),
+            timestamp_ms,
+        }
     }
 
-    /// 序列化为字符串
-    pub fn to_string(&self) -> String {
-        format!("{}:{}", self.key, self.timestamp_ms)
+    /// 序列化为字符串（幂等键编码，随消息/存储传递）
+    pub fn encode(&self) -> String {
+        format!("{self}")
     }
 }
 
@@ -98,10 +105,7 @@ pub enum ReplicationOp {
         data_type: String,
     },
     /// 缓存删除
-    CacheDelete {
-        key: Vec<u8>,
-        data_type: String,
-    },
+    CacheDelete { key: Vec<u8>, data_type: String },
     /// 消息发布（offset 由分区 Leader 独占分配并广播，决策 C1）
     MqPublish {
         topic: String,
@@ -141,7 +145,11 @@ impl ReplicationEntry {
             idempotency_key,
             shard_id,
             sequence_num,
-            operation: ReplicationOp::CachePut { key, value, data_type },
+            operation: ReplicationOp::CachePut {
+                key,
+                value,
+                data_type,
+            },
         }
     }
 
@@ -175,7 +183,12 @@ impl ReplicationEntry {
             idempotency_key,
             shard_id,
             sequence_num,
-            operation: ReplicationOp::MqPublish { topic, partition, offset, payload },
+            operation: ReplicationOp::MqPublish {
+                topic,
+                partition,
+                offset,
+                payload,
+            },
         }
     }
 }
@@ -273,14 +286,16 @@ impl IdempotencyGuard {
     /// 创建幂等保护，指定容量
     pub fn new(capacity: usize) -> Self {
         Self {
-            keys: lru::LruCache::new(std::num::NonZeroUsize::new(capacity.max(1)).unwrap()),
+            keys: lru::LruCache::new(
+                std::num::NonZeroUsize::new(capacity.max(1)).unwrap_or(std::num::NonZeroUsize::MIN),
+            ),
         }
     }
 
     /// 检查并记录幂等键
     /// 返回 true 表示新键（可安全应用），false 表示重复（应跳过）
     pub fn check_and_record(&mut self, key: &IdempotencyKey) -> bool {
-        let key_str = key.to_string();
+        let key_str = key.encode();
         if self.keys.contains(&key_str) {
             false
         } else {
@@ -382,7 +397,7 @@ impl ReplicationManager {
         // 幂等检查
         if !guard.check_and_record(&entry.idempotency_key) {
             return Err(ReplicationError::DuplicateIdempotencyKey {
-                key: entry.idempotency_key.to_string(),
+                key: entry.idempotency_key.encode(),
             });
         }
 
@@ -400,7 +415,7 @@ impl ReplicationManager {
         // 幂等检查
         if !guard.check_and_record(&entry.idempotency_key) {
             return Err(ReplicationError::DuplicateIdempotencyKey {
-                key: entry.idempotency_key.to_string(),
+                key: entry.idempotency_key.encode(),
             });
         }
 
@@ -489,11 +504,7 @@ impl ReconcileState {
 
     /// 缺失条目数
     pub fn missing_count(&self) -> u64 {
-        if self.local_sequence >= self.leader_sequence {
-            0
-        } else {
-            self.leader_sequence - self.local_sequence
-        }
+        self.leader_sequence.saturating_sub(self.local_sequence)
     }
 
     /// 标记已应用指定序列号
@@ -564,27 +575,32 @@ impl ReplicationEntry {
     pub fn to_proto(&self) -> ReplicaEntryProto {
         let operation = Some(coord_proto::agent::ReplicaOp {
             op: Some(match &self.operation {
-                ReplicationOp::CachePut { key, value, data_type } => {
-                    replica_op::Op::CachePut(ReplicaCachePut {
-                        key: key.clone(),
-                        value: value.clone(),
-                        data_type: data_type.clone(),
-                    })
-                }
+                ReplicationOp::CachePut {
+                    key,
+                    value,
+                    data_type,
+                } => replica_op::Op::CachePut(ReplicaCachePut {
+                    key: key.clone(),
+                    value: value.clone(),
+                    data_type: data_type.clone(),
+                }),
                 ReplicationOp::CacheDelete { key, data_type } => {
                     replica_op::Op::CacheDelete(ReplicaCacheDelete {
                         key: key.clone(),
                         data_type: data_type.clone(),
                     })
                 }
-                ReplicationOp::MqPublish { topic, partition, offset, payload } => {
-                    replica_op::Op::MqPublish(ReplicaMqPublish {
-                        topic: topic.clone(),
-                        partition: *partition,
-                        offset: *offset,
-                        payload: payload.clone(),
-                    })
-                }
+                ReplicationOp::MqPublish {
+                    topic,
+                    partition,
+                    offset,
+                    payload,
+                } => replica_op::Op::MqPublish(ReplicaMqPublish {
+                    topic: topic.clone(),
+                    partition: *partition,
+                    offset: *offset,
+                    payload: payload.clone(),
+                }),
             }),
         });
         ReplicaEntryProto {
@@ -621,7 +637,10 @@ impl ReplicationEntry {
             },
         };
         Ok(Self {
-            idempotency_key: IdempotencyKey::new(p.idempotency_key.clone(), p.idempotency_timestamp_ms),
+            idempotency_key: IdempotencyKey::new(
+                p.idempotency_key.clone(),
+                p.idempotency_timestamp_ms,
+            ),
             shard_id: p.shard_id.clone(),
             sequence_num: p.sequence_num,
             operation,
@@ -649,9 +668,10 @@ impl ReplicaClient {
         let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
             .map_err(|e| ReplicationError::Network(format!("invalid endpoint {addr}: {e}")))?
             .connect_timeout(Duration::from_secs(2));
-        let channel = endpoint.connect().await.map_err(|e| {
-            ReplicationError::Network(format!("connect {addr}: {e}"))
-        })?;
+        let channel = endpoint
+            .connect()
+            .await
+            .map_err(|e| ReplicationError::Network(format!("connect {addr}: {e}")))?;
         Ok(Self {
             inner: coord_proto::agent::replica_client::ReplicaClient::new(channel),
         })
@@ -672,9 +692,10 @@ impl ReplicaClient {
         if resp.applied {
             Ok(())
         } else {
-            Err(ReplicationError::FollowerApply(
-                format!("follower rejected entry seq={}", entry.sequence_num),
-            ))
+            Err(ReplicationError::FollowerApply(format!(
+                "follower rejected entry seq={}",
+                entry.sequence_num
+            )))
         }
     }
 
@@ -787,7 +808,9 @@ impl ReplicationManager {
 
     /// 显式分配分区 Leader（空 = 自动 min-addr）
     pub fn set_shard_leader(&self, shard: &str, leader_addr: String) {
-        self.shard_leaders.write().insert(shard.to_string(), leader_addr);
+        self.shard_leaders
+            .write()
+            .insert(shard.to_string(), leader_addr);
     }
 
     /// 分区 Leader：显式覆盖优先；否则 ISR 成员（含自身）中地址最小者。
@@ -798,7 +821,10 @@ impl ReplicationManager {
         }
         let mut addrs: Vec<String> = self.peers.read().iter().cloned().collect();
         addrs.push(self.agent_addr.clone());
-        addrs.into_iter().min().unwrap_or_else(|| self.agent_addr.clone())
+        addrs
+            .into_iter()
+            .min()
+            .unwrap_or_else(|| self.agent_addr.clone())
     }
 
     /// 本 agent 是否为指定 shard 的 Leader
@@ -836,7 +862,9 @@ impl ReplicationManager {
             return Ok(c.clone());
         }
         let client = ReplicaClient::connect(addr).await?;
-        self.clients.write().insert(addr.to_string(), client.clone());
+        self.clients
+            .write()
+            .insert(addr.to_string(), client.clone());
         Ok(client)
     }
 
@@ -850,8 +878,8 @@ impl ReplicationManager {
             .state
             .read()
             .isr_iter()
+            .filter(|&a| a != &self.agent_addr)
             .cloned()
-            .filter(|a| a != &self.agent_addr)
             .collect();
         if followers.is_empty() {
             return Ok(0);
@@ -998,7 +1026,9 @@ impl ReplicationManager {
             applied += 1;
         }
         if applied > 0 {
-            tracing::info!("replication: reconciled {applied} entries for shard {shard} from {leader}");
+            tracing::info!(
+                "replication: reconciled {applied} entries for shard {shard} from {leader}"
+            );
         }
         Ok(applied)
     }

@@ -57,7 +57,12 @@ pub struct ElectionGroup {
 }
 
 impl ElectionGroup {
-    pub fn new(name: impl Into<String>, leader_id: impl Into<String>, lease_id: i64, ttl_secs: u64) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        leader_id: impl Into<String>,
+        lease_id: i64,
+        ttl_secs: u64,
+    ) -> Self {
         Self {
             name: name.into(),
             leader_id: leader_id.into(),
@@ -224,9 +229,7 @@ impl LeaderElectionService {
                     LeaderRole::Leader,
                     Some(group_info),
                 ));
-                tracing::info!(
-                    "LeaderElection: '{candidate_id}' won election for group '{group}'"
-                );
+                tracing::info!("LeaderElection: '{candidate_id}' won election for group '{group}'");
                 Ok(LeaderRole::Leader)
             }
             Err(e) => {
@@ -239,11 +242,9 @@ impl LeaderElectionService {
                     self.cache
                         .write()
                         .set_role(group, LeaderRole::Follower, None);
-                    let _ = self.role_change_tx.send((
-                        group.to_string(),
-                        LeaderRole::Follower,
-                        None,
-                    ));
+                    let _ =
+                        self.role_change_tx
+                            .send((group.to_string(), LeaderRole::Follower, None));
                     tracing::info!(
                         "LeaderElection: '{candidate_id}' is follower for group '{group}'"
                     );
@@ -263,10 +264,9 @@ impl LeaderElectionService {
         let group_info = match self.cache.read().get_group(group) {
             Some(info) if info.leader_id == candidate_id => info.clone(),
             _ => {
-                return Err(format!(
-                    "'{candidate_id}' is not the leader of group '{group}'"
-                )
-                .into());
+                return Err(
+                    format!("'{candidate_id}' is not the leader of group '{group}'").into(),
+                );
             }
         };
 
@@ -279,7 +279,9 @@ impl LeaderElectionService {
             .map_err(|e| format!("failed to resign from group '{group}': {e}"))?;
 
         self.cache.write().remove_group(group);
-        let _ = self.role_change_tx.send((group.to_string(), LeaderRole::Follower, None));
+        let _ = self
+            .role_change_tx
+            .send((group.to_string(), LeaderRole::Follower, None));
 
         tracing::info!("LeaderElection: '{candidate_id}' resigned from group '{group}'");
         Ok(())

@@ -40,7 +40,8 @@ fn test_feature_flag_percentage_rollout() {
     let svc = FeatureFlagService::new(FlagConfig::default());
 
     // 设置 50% 灰度
-    svc.set_percentage_flag("beta-feature", true, 50).expect("设置失败");
+    svc.set_percentage_flag("beta-feature", true, 50)
+        .expect("设置失败");
 
     // 验证 flag 配置
     let state = svc.get_flag_state("beta-feature").expect("获取失败");
@@ -52,10 +53,14 @@ fn test_feature_flag_percentage_rollout() {
 #[test]
 fn test_feature_flag_context_evaluation() {
     let svc = FeatureFlagService::new(FlagConfig::default());
-    svc.set_percentage_flag("canary", true, 50).expect("设置失败");
+    svc.set_percentage_flag("canary", true, 50)
+        .expect("设置失败");
 
     // 同一用户的多次求值应该一致
-    let ctx1 = FlagEvalContext { user_id: Some("user-123".to_string()), ..Default::default() };
+    let ctx1 = FlagEvalContext {
+        user_id: Some("user-123".to_string()),
+        ..Default::default()
+    };
     let result1 = svc.evaluate("canary", &ctx1).expect("求值失败");
     let result2 = svc.evaluate("canary", &ctx1).expect("求值失败");
     assert_eq!(result1, result2, "同一用户应得到一致结果");
@@ -72,7 +77,8 @@ fn test_feature_flag_list() {
     let svc = FeatureFlagService::new(FlagConfig::default());
     svc.set_flag("flag-a", true).expect("设置失败");
     svc.set_flag("flag-b", false).expect("设置失败");
-    svc.set_percentage_flag("flag-c", true, 25).expect("设置失败");
+    svc.set_percentage_flag("flag-c", true, 25)
+        .expect("设置失败");
 
     let flags = svc.list_flags().expect("列出失败");
     assert_eq!(flags.len(), 3);

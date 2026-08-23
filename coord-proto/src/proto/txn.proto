@@ -12,9 +12,9 @@ message Compare {
     NOT_EQUAL = 3;
   }
   enum Target {
-    VERSION = 0;   // 比较 Key 的 version 字段
-    VALUE = 1;     // 比较 Key 的 value 字段
-    MOD_REV = 2;   // 比较 Key 的 mod_revision 字段
+    VERSION = 0; // 比较 Key 的 version 字段
+    VALUE = 1; // 比较 Key 的 value 字段
+    MOD_REV = 2; // 比较 Key 的 mod_revision 字段
   }
   CompareResult result = 1;
   Target target = 2;
@@ -45,14 +45,14 @@ message ResponseOp {
 
 // 事务请求
 message TxnRequest {
-  repeated Compare compare = 1;   // 条件列表（AND 语义）
+  repeated Compare compare = 1; // 条件列表（AND 语义）
   repeated RequestOp success = 2; // 条件全部满足时执行的操作
   repeated RequestOp failure = 3; // 任一条件不满足时执行的操作
   bytes request_id = 4;
 }
 
 message TxnResponse {
-  bool succeeded = 1;              // 条件是否全部满足
+  bool succeeded = 1; // 条件是否全部满足
   repeated ResponseOp responses = 2;
   int64 revision = 3;
 }

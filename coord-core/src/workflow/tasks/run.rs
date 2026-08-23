@@ -89,17 +89,26 @@ mod tests {
             }),
         };
 
-        let result = execute(&named, &RunTask {
-            workflow: wf_ref,
-            input: Some(serde_json::json!({"key": "value"})),
-        }, &inst, &clock);
+        let result = execute(
+            &named,
+            &RunTask {
+                workflow: wf_ref,
+                input: Some(serde_json::json!({"key": "value"})),
+            },
+            &inst,
+            &clock,
+        );
 
         match result {
             StepResult::Suspend { reason, frame } => {
                 assert_eq!(frame.task_name, "runSub");
                 assert_eq!(frame.task_type, "run");
                 match reason {
-                    SuspendReason::RunSubflow { workflow, input, parent_instance_id } => {
+                    SuspendReason::RunSubflow {
+                        workflow,
+                        input,
+                        parent_instance_id,
+                    } => {
                         assert_eq!(workflow.name, "child-wf");
                         assert_eq!(workflow.namespace, "sub");
                         assert_eq!(input, Some(serde_json::json!({"key": "value"})));
@@ -129,20 +138,23 @@ mod tests {
             }),
         };
 
-        let result = execute(&named, &RunTask {
-            workflow: wf_ref,
-            input: None,
-        }, &inst, &clock);
+        let result = execute(
+            &named,
+            &RunTask {
+                workflow: wf_ref,
+                input: None,
+            },
+            &inst,
+            &clock,
+        );
 
         match result {
-            StepResult::Suspend { reason, .. } => {
-                match reason {
-                    SuspendReason::RunSubflow { input, .. } => {
-                        assert!(input.is_none());
-                    }
-                    other => panic!("expected RunSubflow, got {:?}", other),
+            StepResult::Suspend { reason, .. } => match reason {
+                SuspendReason::RunSubflow { input, .. } => {
+                    assert!(input.is_none());
                 }
-            }
+                other => panic!("expected RunSubflow, got {:?}", other),
+            },
             other => panic!("expected Suspend, got {:?}", other),
         }
     }

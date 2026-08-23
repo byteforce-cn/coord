@@ -46,7 +46,9 @@ pub fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workflow::model::{CatchClause, DoTask, InstanceStatus, NamedTask, Task, WorkflowInstance};
+    use crate::workflow::model::{
+        CatchClause, DoTask, InstanceStatus, NamedTask, Task, WorkflowInstance,
+    };
     use crate::workflow::ports::test_utils::TestClock;
 
     fn make_inst() -> WorkflowInstance {
@@ -74,40 +76,52 @@ mod tests {
         let named = NamedTask {
             name: "safeOperation".into(),
             task: Task::TryCatch(TryCatchTask {
-                r#try: vec![
-                    NamedTask { name: "doRisky".into(), task: Task::Do(DoTask { tasks: vec![] }) },
-                ],
-                catch: vec![
-                    CatchClause {
-                        errors: Some(vec!["timeout".into()]),
-                        tasks: vec![
-                            NamedTask { name: "onTimeout".into(), task: Task::Do(DoTask { tasks: vec![] }) },
-                        ],
-                    },
-                ],
+                r#try: vec![NamedTask {
+                    name: "doRisky".into(),
+                    task: Task::Do(DoTask { tasks: vec![] }),
+                }],
+                catch: vec![CatchClause {
+                    errors: Some(vec!["timeout".into()]),
+                    tasks: vec![NamedTask {
+                        name: "onTimeout".into(),
+                        task: Task::Do(DoTask { tasks: vec![] }),
+                    }],
+                }],
             }),
         };
 
-        let result = execute(&named, &TryCatchTask {
-            r#try: vec![
-                NamedTask { name: "doRisky".into(), task: Task::Do(DoTask { tasks: vec![] }) },
-            ],
-            catch: vec![
-                CatchClause {
+        let result = execute(
+            &named,
+            &TryCatchTask {
+                r#try: vec![NamedTask {
+                    name: "doRisky".into(),
+                    task: Task::Do(DoTask { tasks: vec![] }),
+                }],
+                catch: vec![CatchClause {
                     errors: Some(vec!["timeout".into()]),
-                    tasks: vec![
-                        NamedTask { name: "onTimeout".into(), task: Task::Do(DoTask { tasks: vec![] }) },
-                    ],
-                },
-            ],
-        }, &inst, &clock);
+                    tasks: vec![NamedTask {
+                        name: "onTimeout".into(),
+                        task: Task::Do(DoTask { tasks: vec![] }),
+                    }],
+                }],
+            },
+            &inst,
+            &clock,
+        );
 
         match result {
-            StepResult::TryBlock { try_tasks, catch_clauses, frame } => {
+            StepResult::TryBlock {
+                try_tasks,
+                catch_clauses,
+                frame,
+            } => {
                 assert_eq!(try_tasks.len(), 1);
                 assert_eq!(try_tasks[0].name, "doRisky");
                 assert_eq!(catch_clauses.len(), 1);
-                assert_eq!(catch_clauses[0].errors.as_ref().unwrap(), &vec!["timeout".to_string()]);
+                assert_eq!(
+                    catch_clauses[0].errors.as_ref().unwrap(),
+                    &vec!["timeout".to_string()]
+                );
                 assert_eq!(frame.task_type, "try_catch");
             }
             other => panic!("expected TryBlock, got {:?}", other),
@@ -123,19 +137,36 @@ mod tests {
             task: Task::TryCatch(TryCatchTask {
                 r#try: vec![],
                 catch: vec![
-                    CatchClause { errors: Some(vec!["timeout".into()]), tasks: vec![] },
-                    CatchClause { errors: None, tasks: vec![] },
+                    CatchClause {
+                        errors: Some(vec!["timeout".into()]),
+                        tasks: vec![],
+                    },
+                    CatchClause {
+                        errors: None,
+                        tasks: vec![],
+                    },
                 ],
             }),
         };
 
-        let result = execute(&named, &TryCatchTask {
-            r#try: vec![],
-            catch: vec![
-                CatchClause { errors: Some(vec!["timeout".into()]), tasks: vec![] },
-                CatchClause { errors: None, tasks: vec![] },
-            ],
-        }, &inst, &clock);
+        let result = execute(
+            &named,
+            &TryCatchTask {
+                r#try: vec![],
+                catch: vec![
+                    CatchClause {
+                        errors: Some(vec!["timeout".into()]),
+                        tasks: vec![],
+                    },
+                    CatchClause {
+                        errors: None,
+                        tasks: vec![],
+                    },
+                ],
+            },
+            &inst,
+            &clock,
+        );
 
         match result {
             StepResult::TryBlock { catch_clauses, .. } => {
@@ -153,22 +184,31 @@ mod tests {
             name: "catchAll".into(),
             task: Task::TryCatch(TryCatchTask {
                 r#try: vec![],
-                catch: vec![
-                    CatchClause { errors: None, tasks: vec![
-                        NamedTask { name: "handleAny".into(), task: Task::Do(DoTask { tasks: vec![] }) },
-                    ]},
-                ],
+                catch: vec![CatchClause {
+                    errors: None,
+                    tasks: vec![NamedTask {
+                        name: "handleAny".into(),
+                        task: Task::Do(DoTask { tasks: vec![] }),
+                    }],
+                }],
             }),
         };
 
-        let result = execute(&named, &TryCatchTask {
-            r#try: vec![],
-            catch: vec![
-                CatchClause { errors: None, tasks: vec![
-                    NamedTask { name: "handleAny".into(), task: Task::Do(DoTask { tasks: vec![] }) },
-                ]},
-            ],
-        }, &inst, &clock);
+        let result = execute(
+            &named,
+            &TryCatchTask {
+                r#try: vec![],
+                catch: vec![CatchClause {
+                    errors: None,
+                    tasks: vec![NamedTask {
+                        name: "handleAny".into(),
+                        task: Task::Do(DoTask { tasks: vec![] }),
+                    }],
+                }],
+            },
+            &inst,
+            &clock,
+        );
 
         match result {
             StepResult::TryBlock { catch_clauses, .. } => {

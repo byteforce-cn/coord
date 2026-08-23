@@ -13,8 +13,8 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use super::model::{WorkflowDefinition, WorkflowInstance};
 use super::expression::ExpressionError;
+use super::model::{WorkflowDefinition, WorkflowInstance};
 
 // ─── Clock ───
 
@@ -25,6 +25,7 @@ pub trait Clock: Send + Sync {
 }
 
 /// 真实系统时钟
+#[derive(Default)]
 pub struct SystemClock;
 
 impl SystemClock {
@@ -143,23 +144,13 @@ pub enum DispatchResult {
 #[async_trait]
 pub trait TaskDispatcher: Send + Sync {
     /// 派发外部调用并等待结果
-    async fn dispatch(
-        &self,
-        service: &str,
-        with: Option<&Value>,
-        input: &Value,
-    ) -> DispatchResult;
+    async fn dispatch(&self, service: &str, with: Option<&Value>, input: &Value) -> DispatchResult;
 }
 
 /// 为 Arc<T> 提供 TaskDispatcher 的委托实现（支持 trait object 类型擦除）
 #[async_trait]
 impl<T: TaskDispatcher + Send + Sync + ?Sized> TaskDispatcher for Arc<T> {
-    async fn dispatch(
-        &self,
-        service: &str,
-        with: Option<&Value>,
-        input: &Value,
-    ) -> DispatchResult {
+    async fn dispatch(&self, service: &str, with: Option<&Value>, input: &Value) -> DispatchResult {
         self.as_ref().dispatch(service, with, input).await
     }
 }
@@ -198,7 +189,9 @@ impl<T: EventProvider + Send + Sync + ?Sized> EventProvider for Arc<T> {
         subject: Option<&str>,
         timeout_ms: u64,
     ) -> Option<String> {
-        self.as_ref().wait_for_event(event_types, source, subject, timeout_ms).await
+        self.as_ref()
+            .wait_for_event(event_types, source, subject, timeout_ms)
+            .await
     }
 }
 
@@ -221,6 +214,9 @@ impl EventProvider for NoopEventProvider {
     }
 }
 
+/// 事件元组类型别名（clippy::type_complexity）
+type EventTuple = (String, Option<String>, Value);
+
 /// 内存事件提供者 —— 基于 tokio::sync::broadcast
 ///
 /// 支持单进程内的 emit/listen，用于开发、测试和单节点部署。
@@ -228,9 +224,7 @@ impl EventProvider for NoopEventProvider {
 /// 等待匹配的事件到达。
 pub struct MemoryEventProvider {
     /// event_type → (broadcast sender, next_event_id)
-    channels: std::sync::Mutex<
-        HashMap<String, tokio::sync::broadcast::Sender<(String, Option<String>, Value)>>,
-    >,
+    channels: std::sync::Mutex<HashMap<String, tokio::sync::broadcast::Sender<EventTuple>>>,
 }
 
 impl MemoryEventProvider {
@@ -252,7 +246,7 @@ impl Default for MemoryEventProvider {
 impl EventProvider for MemoryEventProvider {
     async fn emit(&self, event_type: &str, source: Option<&str>, data: &Value) {
         let sender = {
-            let mut channels = self.channels.lock().unwrap();
+            let mut channels = self.channels.lock().unwrap_or_else(|e| e.into_inner());
             channels
                 .entry(event_type.to_string())
                 .or_insert_with(|| {
@@ -261,7 +255,11 @@ impl EventProvider for MemoryEventProvider {
                 })
                 .clone()
         };
-        let _ = sender.send((event_type.to_string(), source.map(|s| s.to_string()), data.clone()));
+        let _ = sender.send((
+            event_type.to_string(),
+            source.map(|s| s.to_string()),
+            data.clone(),
+        ));
     }
 
     async fn wait_for_event(
@@ -280,7 +278,7 @@ impl EventProvider for MemoryEventProvider {
             String,
             tokio::sync::broadcast::Receiver<(String, Option<String>, Value)>,
         )> = {
-            let mut channels = self.channels.lock().unwrap();
+            let mut channels = self.channels.lock().unwrap_or_else(|e| e.into_inner());
             event_types
                 .iter()
                 .map(|et| {
@@ -297,8 +295,7 @@ impl EventProvider for MemoryEventProvider {
                 .collect()
         };
 
-        let deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_millis(timeout_ms);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
 
         // 多 channel 轮询（短超时轮流检查，避免单 channel 阻塞）
         loop {
@@ -318,8 +315,11 @@ impl EventProvider for MemoryEventProvider {
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_n))) => {
                         // 积压：重新订阅跳过旧消息
                         *rx = {
-                            let channels = self.channels.lock().unwrap();
-                            channels.get(et).unwrap().subscribe()
+                            let channels = self.channels.lock().unwrap_or_else(|e| e.into_inner());
+                            match channels.get(et) {
+                                Some(ch) => ch.subscribe(),
+                                None => return None,
+                            }
                         };
                     }
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
@@ -363,7 +363,10 @@ pub trait WorkflowStore: Send + Sync {
         name: &str,
     ) -> Result<Vec<WorkflowDefinition>, StoreError> {
         let defs = self.list_definitions(namespace, usize::MAX, None).await?;
-        Ok(defs.into_iter().filter(|d| d.document.name == name).collect())
+        Ok(defs
+            .into_iter()
+            .filter(|d| d.document.name == name)
+            .collect())
     }
 
     /// 加载工作流定义
@@ -448,6 +451,7 @@ impl std::error::Error for StoreError {}
 // ─── MemoryWorkflowStore（生产可用，RaftWorkflowStore 的热缓存） ───
 
 /// 内存工作流存储 —— 用于测试和 RaftWorkflowStore 的本地热缓存
+#[derive(Default)]
 pub struct MemoryWorkflowStore {
     pub(crate) definitions: Mutex<HashMap<String, WorkflowDefinition>>,
     pub(crate) instances: Mutex<HashMap<String, WorkflowInstance>>,
@@ -582,7 +586,9 @@ impl WorkflowStore for Arc<MemoryWorkflowStore> {
         name: &str,
         version: &str,
     ) -> Result<Option<WorkflowDefinition>, StoreError> {
-        self.as_ref().load_definition(namespace, name, version).await
+        self.as_ref()
+            .load_definition(namespace, name, version)
+            .await
     }
 
     async fn save_instance(&self, inst: &WorkflowInstance) -> Result<(), StoreError> {
@@ -599,7 +605,9 @@ impl WorkflowStore for Arc<MemoryWorkflowStore> {
         page_size: usize,
         page_token: Option<&str>,
     ) -> Result<Vec<WorkflowDefinition>, StoreError> {
-        self.as_ref().list_definitions(namespace, page_size, page_token).await
+        self.as_ref()
+            .list_definitions(namespace, page_size, page_token)
+            .await
     }
 
     async fn list_instances(
@@ -609,7 +617,9 @@ impl WorkflowStore for Arc<MemoryWorkflowStore> {
         page_size: usize,
         page_token: Option<&str>,
     ) -> Result<Vec<WorkflowInstance>, StoreError> {
-        self.as_ref().list_instances(namespace, definition_name, page_size, page_token).await
+        self.as_ref()
+            .list_instances(namespace, definition_name, page_size, page_token)
+            .await
     }
 
     async fn save_resume_idempotency_key(
@@ -617,7 +627,9 @@ impl WorkflowStore for Arc<MemoryWorkflowStore> {
         instance_id: &str,
         key: &str,
     ) -> Result<bool, StoreError> {
-        self.as_ref().save_resume_idempotency_key(instance_id, key).await
+        self.as_ref()
+            .save_resume_idempotency_key(instance_id, key)
+            .await
     }
 }
 
@@ -636,7 +648,9 @@ impl WorkflowStore for Arc<dyn WorkflowStore + Send + Sync> {
         name: &str,
         version: &str,
     ) -> Result<Option<WorkflowDefinition>, StoreError> {
-        self.as_ref().load_definition(namespace, name, version).await
+        self.as_ref()
+            .load_definition(namespace, name, version)
+            .await
     }
 
     async fn save_instance(&self, inst: &WorkflowInstance) -> Result<(), StoreError> {
@@ -653,7 +667,9 @@ impl WorkflowStore for Arc<dyn WorkflowStore + Send + Sync> {
         page_size: usize,
         page_token: Option<&str>,
     ) -> Result<Vec<WorkflowDefinition>, StoreError> {
-        self.as_ref().list_definitions(namespace, page_size, page_token).await
+        self.as_ref()
+            .list_definitions(namespace, page_size, page_token)
+            .await
     }
 
     async fn list_instances(
@@ -663,7 +679,9 @@ impl WorkflowStore for Arc<dyn WorkflowStore + Send + Sync> {
         page_size: usize,
         page_token: Option<&str>,
     ) -> Result<Vec<WorkflowInstance>, StoreError> {
-        self.as_ref().list_instances(namespace, definition_name, page_size, page_token).await
+        self.as_ref()
+            .list_instances(namespace, definition_name, page_size, page_token)
+            .await
     }
 
     async fn save_resume_idempotency_key(
@@ -671,7 +689,9 @@ impl WorkflowStore for Arc<dyn WorkflowStore + Send + Sync> {
         instance_id: &str,
         key: &str,
     ) -> Result<bool, StoreError> {
-        self.as_ref().save_resume_idempotency_key(instance_id, key).await
+        self.as_ref()
+            .save_resume_idempotency_key(instance_id, key)
+            .await
     }
 }
 
@@ -708,10 +728,10 @@ impl Clock for TestClock {
 pub mod test_utils {
     use super::*;
 
-    /// 可控时钟（测试用）—— 重新导出
-    pub use super::TestClock;
     pub use super::MemoryWorkflowStore;
     pub use super::NoopEventProvider;
+    /// 可控时钟（测试用）—— 重新导出
+    pub use super::TestClock;
 
     /// 记录式事件提供者（测试用）—— 记录所有 emit 调用，支持断言
     pub struct RecordingEventProvider {
@@ -733,10 +753,11 @@ pub mod test_utils {
     #[async_trait]
     impl EventProvider for RecordingEventProvider {
         async fn emit(&self, event_type: &str, source: Option<&str>, data: &Value) {
-            self.emitted_events
-                .lock()
-                .unwrap()
-                .push((event_type.to_string(), source.map(|s| s.to_string()), data.clone()));
+            self.emitted_events.lock().unwrap().push((
+                event_type.to_string(),
+                source.map(|s| s.to_string()),
+                data.clone(),
+            ));
         }
         async fn wait_for_event(
             &self,
@@ -760,9 +781,7 @@ pub mod test_utils {
             _with: Option<&Value>,
             _input: &Value,
         ) -> DispatchResult {
-            DispatchResult::Success {
-                data: Value::Null,
-            }
+            DispatchResult::Success { data: Value::Null }
         }
     }
 }
@@ -805,7 +824,7 @@ mod tests {
             secrets: Default::default(),
             constants: Default::default(),
             task_meta: Default::default(),
-        raw_yaml: None,
+            raw_yaml: None,
         };
 
         store.save_definition(&def).await.unwrap();
@@ -839,7 +858,10 @@ mod tests {
         store.save_instance(&inst).await.unwrap();
         let loaded = store.load_instance("inst-1").await.unwrap().unwrap();
         assert_eq!(loaded.id, "inst-1");
-        assert_eq!(loaded.status, crate::workflow::model::InstanceStatus::Running);
+        assert_eq!(
+            loaded.status,
+            crate::workflow::model::InstanceStatus::Running
+        );
     }
 
     #[tokio::test]
@@ -909,11 +931,19 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         provider
-            .emit("order.created", Some("/coord/orders"), &serde_json::json!({"id": "123"}))
+            .emit(
+                "order.created",
+                Some("/coord/orders"),
+                &serde_json::json!({"id": "123"}),
+            )
             .await;
 
         let received = handle.await.unwrap();
-        assert_eq!(received.as_deref(), Some("order.created"), "should receive the emitted event");
+        assert_eq!(
+            received.as_deref(),
+            Some("order.created"),
+            "should receive the emitted event"
+        );
     }
 
     #[tokio::test]
@@ -958,7 +988,11 @@ mod tests {
 
         // source A 的 wait 应该匹配
         let r_a = handle_a.await.unwrap();
-        assert_eq!(r_a.as_deref(), Some("ping"), "should match the emitted source");
+        assert_eq!(
+            r_a.as_deref(),
+            Some("ping"),
+            "should match the emitted source"
+        );
     }
 
     #[tokio::test]
@@ -985,7 +1019,15 @@ mod tests {
 
         let r1 = h1.await.unwrap();
         let r2 = h2.await.unwrap();
-        assert_eq!(r1.as_deref(), Some("broadcast.test"), "subscriber 1 should receive event");
-        assert_eq!(r2.as_deref(), Some("broadcast.test"), "subscriber 2 should receive event");
+        assert_eq!(
+            r1.as_deref(),
+            Some("broadcast.test"),
+            "subscriber 1 should receive event"
+        );
+        assert_eq!(
+            r2.as_deref(),
+            Some("broadcast.test"),
+            "subscriber 2 should receive event"
+        );
     }
 }

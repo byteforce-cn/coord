@@ -118,8 +118,7 @@ impl BootstrapManager {
             .map_err(|e| format!("credential serialization: {e}"))?;
 
         let path = Path::new(&self.config.credential_path);
-        std::fs::write(path, json.as_bytes())
-            .map_err(|e| format!("credential write: {e}"))?;
+        std::fs::write(path, json.as_bytes()).map_err(|e| format!("credential write: {e}"))?;
 
         // Set file permissions to 0600 (owner read/write only)
         #[cfg(unix)]
@@ -129,16 +128,18 @@ impl BootstrapManager {
                 .map_err(|e| format!("credential permissions: {e}"))?;
         }
 
-        tracing::info!("Agent credential persisted to {}", self.config.credential_path);
+        tracing::info!(
+            "Agent credential persisted to {}",
+            self.config.credential_path
+        );
         Ok(())
     }
 
     /// Read and deserialize a credential from disk.
     fn read_credential(&self, path: &Path) -> Result<AgentCredential, String> {
-        let data = std::fs::read_to_string(path)
-            .map_err(|e| format!("credential read: {e}"))?;
-        let cred: AgentCredential = serde_json::from_str(&data)
-            .map_err(|e| format!("credential deserialization: {e}"))?;
+        let data = std::fs::read_to_string(path).map_err(|e| format!("credential read: {e}"))?;
+        let cred: AgentCredential =
+            serde_json::from_str(&data).map_err(|e| format!("credential deserialization: {e}"))?;
         Ok(cred)
     }
 
@@ -146,8 +147,7 @@ impl BootstrapManager {
     pub fn delete_credential(&self) -> Result<(), String> {
         let path = Path::new(&self.config.credential_path);
         if path.exists() {
-            std::fs::remove_file(path)
-                .map_err(|e| format!("credential delete: {e}"))?;
+            std::fs::remove_file(path).map_err(|e| format!("credential delete: {e}"))?;
         }
         Ok(())
     }

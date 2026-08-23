@@ -104,7 +104,9 @@ impl OpaEngine {
             .add_policy(policy_id.to_string(), rego.to_string())
             .map_err(|e| format!("OPA policy parse error in '{policy_id}': {e}"))?;
 
-        self.policy_sources.write().insert(policy_id.to_string(), rego.to_string());
+        self.policy_sources
+            .write()
+            .insert(policy_id.to_string(), rego.to_string());
         self.rebuild_engine()?;
         self.cache.write().clear();
         let count = self.policy_sources.read().len();
@@ -206,14 +208,21 @@ impl OpaEngine {
             "no matching rule (default deny)".to_string()
         };
 
-        let decision = OpaDecision { allowed, matched_rules, reason };
+        let decision = OpaDecision {
+            allowed,
+            matched_rules,
+            reason,
+        };
 
         {
             let mut cache = self.cache.write();
-            cache.insert(cache_key, CacheEntry {
-                decision: decision.clone(),
-                cached_at: Instant::now(),
-            });
+            cache.insert(
+                cache_key,
+                CacheEntry {
+                    decision: decision.clone(),
+                    cached_at: Instant::now(),
+                },
+            );
         }
 
         Ok(decision)
@@ -233,8 +242,8 @@ impl OpaEngine {
 
     /// 解释策略决策（trace），返回 JSON 格式
     pub fn explain(&self, query: &str, input_json: &str) -> Result<String, String> {
-        let input_value: Value = serde_json::from_str(input_json)
-            .map_err(|e| format!("invalid input JSON: {e}"))?;
+        let input_value: Value =
+            serde_json::from_str(input_json).map_err(|e| format!("invalid input JSON: {e}"))?;
 
         let mut engine = self.engine.write();
         engine.set_input(input_value);
@@ -256,8 +265,7 @@ impl OpaEngine {
             },
         });
 
-        serde_json::to_string_pretty(&trace)
-            .map_err(|e| format!("trace serialization error: {e}"))
+        serde_json::to_string_pretty(&trace).map_err(|e| format!("trace serialization error: {e}"))
     }
 
     /// 通用 Rego 求值：支持 `data.<package>.<rule>` 与纯表达式，返回 JSON 可序列化的结果值。
@@ -270,8 +278,8 @@ impl OpaEngine {
     ///
     /// 注意：原始求值不做结果缓存（query/input 任意，缓存键无法稳定界定）。
     pub fn eval_query(&self, query: &str, input_json: &str) -> Result<Value, String> {
-        let input_value: Value = serde_json::from_str(input_json)
-            .map_err(|e| format!("invalid input JSON: {e}"))?;
+        let input_value: Value =
+            serde_json::from_str(input_json).map_err(|e| format!("invalid input JSON: {e}"))?;
 
         let mut engine = self.engine.write();
         engine.set_input(input_value);
@@ -309,19 +317,37 @@ impl OpaEngine {
             .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join("&");
-        format!("{}:{}:{}:{}:{}", package, input.subject, input.action, input.resource, ctx)
+        format!(
+            "{}:{}:{}:{}:{}",
+            package, input.subject, input.action, input.resource, ctx
+        )
     }
 
     fn build_input(input: &OpaInput) -> Value {
         let mut map: BTreeMap<Value, Value> = BTreeMap::new();
-        map.insert(Value::String(Arc::<str>::from("subject")), Value::String(Arc::<str>::from(input.subject.as_str())));
-        map.insert(Value::String(Arc::<str>::from("action")), Value::String(Arc::<str>::from(input.action.as_str())));
-        map.insert(Value::String(Arc::<str>::from("resource")), Value::String(Arc::<str>::from(input.resource.as_str())));
+        map.insert(
+            Value::String(Arc::<str>::from("subject")),
+            Value::String(Arc::<str>::from(input.subject.as_str())),
+        );
+        map.insert(
+            Value::String(Arc::<str>::from("action")),
+            Value::String(Arc::<str>::from(input.action.as_str())),
+        );
+        map.insert(
+            Value::String(Arc::<str>::from("resource")),
+            Value::String(Arc::<str>::from(input.resource.as_str())),
+        );
         let mut ctx: BTreeMap<Value, Value> = BTreeMap::new();
         for (k, v) in &input.context {
-            ctx.insert(Value::String(Arc::<str>::from(k.as_str())), Value::String(Arc::<str>::from(v.as_str())));
+            ctx.insert(
+                Value::String(Arc::<str>::from(k.as_str())),
+                Value::String(Arc::<str>::from(v.as_str())),
+            );
         }
-        map.insert(Value::String(Arc::<str>::from("context")), Value::Object(Arc::new(ctx)));
+        map.insert(
+            Value::String(Arc::<str>::from("context")),
+            Value::Object(Arc::new(ctx)),
+        );
         Value::Object(Arc::new(map))
     }
 }
@@ -380,7 +406,12 @@ allow if {
 
     #[test]
     fn test_cache_key_deterministic() {
-        let input = OpaInput { subject: "bob".into(), action: "write".into(), resource: "/admin".into(), context: Default::default() };
+        let input = OpaInput {
+            subject: "bob".into(),
+            action: "write".into(),
+            resource: "/admin".into(),
+            context: Default::default(),
+        };
         let key1 = OpaEngine::cache_key("coord.auth", &input);
         let key2 = OpaEngine::cache_key("coord.auth", &input);
         assert_eq!(key1, key2);
@@ -397,9 +428,16 @@ allow if {
     #[test]
     fn test_add_policy_and_evaluate() {
         let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
-        engine.add_policy("test.rbac", TEST_REGO).expect("add policy");
+        engine
+            .add_policy("test.rbac", TEST_REGO)
+            .expect("add policy");
         assert_eq!(engine.policy_count(), 1);
-        let input = OpaInput { subject: "alice".into(), action: "read".into(), resource: "/data".into(), context: HashMap::new() };
+        let input = OpaInput {
+            subject: "alice".into(),
+            action: "read".into(),
+            resource: "/data".into(),
+            context: HashMap::new(),
+        };
         let decision = engine.evaluate("test.rbac", &input).expect("evaluate");
         assert!(decision.allowed);
     }
@@ -407,8 +445,15 @@ allow if {
     #[test]
     fn test_evaluate_deny() {
         let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
-        engine.add_policy("test.rbac", TEST_REGO).expect("add policy");
-        let input = OpaInput { subject: "bob".into(), action: "write".into(), resource: "/data".into(), context: HashMap::new() };
+        engine
+            .add_policy("test.rbac", TEST_REGO)
+            .expect("add policy");
+        let input = OpaInput {
+            subject: "bob".into(),
+            action: "write".into(),
+            resource: "/data".into(),
+            context: HashMap::new(),
+        };
         let decision = engine.evaluate("test.rbac", &input).expect("evaluate");
         assert!(!decision.allowed);
     }
@@ -416,7 +461,9 @@ allow if {
     #[test]
     fn test_remove_policy() {
         let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
-        engine.add_policy("test.rbac", TEST_REGO).expect("add policy");
+        engine
+            .add_policy("test.rbac", TEST_REGO)
+            .expect("add policy");
         assert_eq!(engine.policy_count(), 1);
         engine.remove_policy("test.rbac");
         assert_eq!(engine.policy_count(), 0);
@@ -448,7 +495,9 @@ allow if {
         let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
         engine.add_policy("test.rbac", TEST_REGO).unwrap();
         let input = r#"{"subject": "alice", "action": "read"}"#;
-        let trace = engine.explain("data.test.rbac.allow", input).expect("explain");
+        let trace = engine
+            .explain("data.test.rbac.allow", input)
+            .expect("explain");
         let parsed: serde_json::Value = serde_json::from_str(&trace).expect("valid json");
         assert_eq!(parsed["query"], "data.test.rbac.allow");
         assert_eq!(parsed["result"], true);
@@ -460,7 +509,9 @@ allow if {
         let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
         engine.add_policy("test.rbac", TEST_REGO).unwrap();
         let input = r#"{"subject": "bob", "action": "write"}"#;
-        let trace = engine.explain("data.test.rbac.allow", input).expect("explain");
+        let trace = engine
+            .explain("data.test.rbac.allow", input)
+            .expect("explain");
         let parsed: serde_json::Value = serde_json::from_str(&trace).expect("valid json");
         assert_eq!(parsed["result"], false);
         assert!(parsed["matched_rules"].as_array().unwrap().is_empty());
@@ -493,7 +544,12 @@ conditions := {"field": "dept", "operator": "eq", "value": input.dept} if {
     fn test_eval_query_data_rule_bool() {
         let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
         engine.add_policy("test.rbac", TEST_REGO).unwrap();
-        let result = engine.eval_query("data.test.rbac.allow", r#"{"subject":"alice","action":"read"}"#).expect("eval");
+        let result = engine
+            .eval_query(
+                "data.test.rbac.allow",
+                r#"{"subject":"alice","action":"read"}"#,
+            )
+            .expect("eval");
         assert_eq!(to_json(&result), serde_json::json!(true));
     }
 
@@ -501,7 +557,12 @@ conditions := {"field": "dept", "operator": "eq", "value": input.dept} if {
     fn test_eval_query_deny_is_false() {
         let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
         engine.add_policy("test.rbac", TEST_REGO).unwrap();
-        let result = engine.eval_query("data.test.rbac.allow", r#"{"subject":"bob","action":"write"}"#).expect("eval");
+        let result = engine
+            .eval_query(
+                "data.test.rbac.allow",
+                r#"{"subject":"bob","action":"write"}"#,
+            )
+            .expect("eval");
         assert_eq!(to_json(&result), serde_json::json!(false));
     }
 
@@ -518,7 +579,12 @@ conditions := {"field": "dept", "operator": "eq", "value": input.dept} if {
         // 结构化条件生成（{field, operator, value}）用例
         let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
         engine.add_policy("filter.rego", FILTER_REGO).unwrap();
-        let result = engine.eval_query("data.filter.conditions", r#"{"enabled":true,"dept":"sales"}"#).expect("eval");
+        let result = engine
+            .eval_query(
+                "data.filter.conditions",
+                r#"{"enabled":true,"dept":"sales"}"#,
+            )
+            .expect("eval");
         assert_eq!(
             to_json(&result),
             serde_json::json!({"field": "dept", "operator": "eq", "value": "sales"})
@@ -531,7 +597,9 @@ conditions := {"field": "dept", "operator": "eq", "value": input.dept} if {
         let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
         engine.add_policy("filter.rego", FILTER_REGO).unwrap();
         // 查询不存在的 rule（无 default）→ 空结果 → null
-        let result = engine.eval_query("data.filter.undefined_rule", r#"{"enabled":true}"#).expect("eval");
+        let result = engine
+            .eval_query("data.filter.undefined_rule", r#"{"enabled":true}"#)
+            .expect("eval");
         assert_eq!(to_json(&result), serde_json::Value::Null);
     }
 
@@ -567,13 +635,20 @@ conditions := {"field": "dept", "operator": "eq", "value": input.dept} if {
     fn test_add_policy_parse_error_does_not_poison() {
         // 回归：解析失败的源码不得残留 policy_sources，否则毒化后续 rebuild
         let engine = OpaEngine::new(OpaConfig::default()).expect("create engine");
-        assert!(engine.add_policy("bad.rego", "package broken\nallow if {").is_err());
+        assert!(engine
+            .add_policy("bad.rego", "package broken\nallow if {")
+            .is_err());
         assert_eq!(engine.policy_count(), 0);
 
         // 修复后仍可正常加载（evaluate 需用 Rego 声明的 package 名）
         engine.add_policy("good.rego", TEST_REGO).expect("add good");
         assert_eq!(engine.policy_count(), 1);
-        let input = OpaInput { subject: "alice".into(), action: "read".into(), resource: "/data".into(), context: HashMap::new() };
+        let input = OpaInput {
+            subject: "alice".into(),
+            action: "read".into(),
+            resource: "/data".into(),
+            context: HashMap::new(),
+        };
         assert!(engine.evaluate("test.rbac", &input).unwrap().allowed);
     }
 
@@ -582,7 +657,12 @@ conditions := {"field": "dept", "operator": "eq", "value": input.dept} if {
     #[test]
     fn test_cache_key_includes_context() {
         // 相同 subject/action/resource、不同 context → 必须不同缓存键（避免错误命中）
-        let base = OpaInput { subject: "bob".into(), action: "read".into(), resource: "/data".into(), context: Default::default() };
+        let base = OpaInput {
+            subject: "bob".into(),
+            action: "read".into(),
+            resource: "/data".into(),
+            context: Default::default(),
+        };
         let mut with_ip = base.clone();
         with_ip.context.insert("ip".into(), "10.0.0.1".into());
         let mut other_ip = base.clone();

@@ -166,7 +166,9 @@ impl SchedulerService {
 
         claims.insert(task_id.to_string(), claim.clone());
         drop(states);
-        self.states.write().insert(task_id.to_string(), TaskState::Running);
+        self.states
+            .write()
+            .insert(task_id.to_string(), TaskState::Running);
 
         Ok(Some(claim))
     }
@@ -177,7 +179,9 @@ impl SchedulerService {
         if let Some(claim) = claims.get(task_id) {
             if claim.worker_id == worker_id {
                 claims.remove(task_id);
-                self.states.write().insert(task_id.to_string(), TaskState::Pending);
+                self.states
+                    .write()
+                    .insert(task_id.to_string(), TaskState::Pending);
             }
         }
         Ok(())
@@ -188,13 +192,19 @@ impl SchedulerService {
         let claims = self.claims.read();
         if let Some(claim) = claims.get(task_id) {
             if claim.worker_id != worker_id {
-                return Err(format!("task {task_id} claimed by {}, not {worker_id}", claim.worker_id).into());
+                return Err(format!(
+                    "task {task_id} claimed by {}, not {worker_id}",
+                    claim.worker_id
+                )
+                .into());
             }
         }
         drop(claims);
 
         self.claims.write().remove(task_id);
-        self.states.write().insert(task_id.to_string(), TaskState::Completed);
+        self.states
+            .write()
+            .insert(task_id.to_string(), TaskState::Completed);
         Ok(())
     }
 
@@ -203,7 +213,11 @@ impl SchedulerService {
         let claims = self.claims.read();
         if let Some(claim) = claims.get(task_id) {
             if claim.worker_id != worker_id {
-                return Err(format!("task {task_id} claimed by {}, not {worker_id}", claim.worker_id).into());
+                return Err(format!(
+                    "task {task_id} claimed by {}, not {worker_id}",
+                    claim.worker_id
+                )
+                .into());
             }
         }
         drop(claims);
@@ -234,7 +248,12 @@ impl SchedulerService {
     pub fn get_task_detail(&self, task_id: &str) -> Option<TaskDetail> {
         let tasks = self.tasks.read();
         let task = tasks.get(task_id)?;
-        let state = self.states.read().get(task_id).copied().unwrap_or(TaskState::Pending);
+        let state = self
+            .states
+            .read()
+            .get(task_id)
+            .copied()
+            .unwrap_or(TaskState::Pending);
         let claimed_by = self.claims.read().get(task_id).map(|c| c.worker_id.clone());
 
         Some(TaskDetail {
@@ -288,7 +307,10 @@ impl BaseService for SchedulerService {
         "scheduler"
     }
 
-    fn register_grpc(&self, _router: tonic::transport::server::Router) -> tonic::transport::server::Router {
+    fn register_grpc(
+        &self,
+        _router: tonic::transport::server::Router,
+    ) -> tonic::transport::server::Router {
         _router
     }
 
@@ -313,8 +335,12 @@ mod tests {
     #[test]
     fn test_task_type_equality() {
         assert_eq!(
-            TaskType::Cron { expression: "*/5 * * * *".into() },
-            TaskType::Cron { expression: "*/5 * * * *".into() },
+            TaskType::Cron {
+                expression: "*/5 * * * *".into()
+            },
+            TaskType::Cron {
+                expression: "*/5 * * * *".into()
+            },
         );
         assert_ne!(TaskType::Once, TaskType::FixedRate { interval_ms: 1000 });
     }

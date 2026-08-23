@@ -19,10 +19,10 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
+    Json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -129,7 +129,11 @@ fn config_data_prefix() -> Vec<u8> {
 }
 
 fn config_version_key(group: &str, key: &str, version: u64) -> Vec<u8> {
-    format!("{}{}/{}/{:020}", CONFIG_VERSIONS_PREFIX, group, key, version).into_bytes()
+    format!(
+        "{}{}/{}/{:020}",
+        CONFIG_VERSIONS_PREFIX, group, key, version
+    )
+    .into_bytes()
 }
 
 fn config_version_prefix(group: &str, key: &str) -> Vec<u8> {
@@ -152,10 +156,15 @@ fn err_json(code: i32, message: &str) -> (StatusCode, Json<Value>) {
     )
 }
 
-fn validate_token(state: &InternalState, headers: &HeaderMap) -> Result<String, (StatusCode, Json<Value>)> {
+fn validate_token(
+    state: &InternalState,
+    headers: &HeaderMap,
+) -> Result<String, (StatusCode, Json<Value>)> {
     let token = crate::bff::internal::extract_bearer_token(headers)
         .ok_or_else(|| err_json(401, "缺少认证 Token"))?;
-    state.token_manager.validate(&token)
+    state
+        .token_manager
+        .validate(&token)
         .map_err(|_| err_json(403, "Token 无效或已过期"))
 }
 
@@ -165,36 +174,41 @@ async fn raft_put(
     value: Vec<u8>,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     if let Some(ref raft) = node.raft {
-        let cmd = Command::Put { key, value, lease_id: None };
-        let resp = raft.client_write(cmd).await.map_err(|e| {
-            err_json(500, &format!("Raft 写入失败: {e}"))
-        })?;
+        let cmd = Command::Put {
+            key,
+            value,
+            lease_id: None,
+        };
+        let resp = raft
+            .client_write(cmd)
+            .await
+            .map_err(|e| err_json(500, &format!("Raft 写入失败: {e}")))?;
         match resp.response() {
             Response::Put { .. } => Ok(()),
             _ => Err(err_json(500, "意外的 Raft 响应")),
         }
     } else {
-        node.storage.put(&key, &value, None)
+        node.storage
+            .put(&key, &value, None)
             .map_err(|e| err_json(500, &format!("存储写入失败: {e}")))?;
         Ok(())
     }
 }
 
-async fn raft_delete(
-    node: &CoordNode,
-    key: Vec<u8>,
-) -> Result<(), (StatusCode, Json<Value>)> {
+async fn raft_delete(node: &CoordNode, key: Vec<u8>) -> Result<(), (StatusCode, Json<Value>)> {
     if let Some(ref raft) = node.raft {
         let cmd = Command::Delete { key };
-        let resp = raft.client_write(cmd).await.map_err(|e| {
-            err_json(500, &format!("Raft 写入失败: {e}"))
-        })?;
+        let resp = raft
+            .client_write(cmd)
+            .await
+            .map_err(|e| err_json(500, &format!("Raft 写入失败: {e}")))?;
         match resp.response() {
             Response::Delete { .. } => Ok(()),
             _ => Err(err_json(500, "意外的 Raft 响应")),
         }
     } else {
-        node.storage.delete(&key)
+        node.storage
+            .delete(&key)
             .map_err(|e| err_json(500, &format!("存储删除失败: {e}")))?;
         Ok(())
     }
@@ -216,7 +230,9 @@ fn current_time_iso() -> String {
     let mut rd = days as i64;
     loop {
         let diy = if is_leap(y) { 366 } else { 365 };
-        if rd < diy { break; }
+        if rd < diy {
+            break;
+        }
         rd -= diy;
         y += 1;
     }
@@ -227,7 +243,9 @@ fn current_time_iso() -> String {
     };
     let mut mo = 1u32;
     for &days_in_m in &md {
-        if rd < days_in_m as i64 { break; }
+        if rd < days_in_m as i64 {
+            break;
+        }
         rd -= days_in_m as i64;
         mo += 1;
     }
@@ -299,7 +317,7 @@ pub async fn list_configs(
 
     // 分页
     let page = query.page.unwrap_or(1).max(1);
-    let page_size = query.page_size.unwrap_or(20).min(100).max(10);
+    let page_size = query.page_size.unwrap_or(20).clamp(10, 100);
     let start = ((page - 1) * page_size) as usize;
     let end = (start + page_size as usize).min(configs.len());
     let paged: Vec<&ConfigListItem> = if start < configs.len() {
@@ -410,8 +428,7 @@ pub async fn create_config(
     let vk = config_version_key(&body.group, &body.key, 1);
     let _ = raft_put(node, vk, value).await;
 
-    ok_json(json!({"version": 1}))
-    .into_response()
+    ok_json(json!({"version": 1})).into_response()
 }
 
 // ──── Handler: PUT /v1/configs/{group}/{key} ────
@@ -443,10 +460,14 @@ pub async fn update_config(
 
     // CAS 检查
     if current.version != body.version {
-        return err_json(409, &format!(
-            "CAS 冲突：期望版本 v{}，当前版本 v{}，请刷新后重试",
-            body.version, current.version
-        )).into_response();
+        return err_json(
+            409,
+            &format!(
+                "CAS 冲突：期望版本 v{}，当前版本 v{}，请刷新后重试",
+                body.version, current.version
+            ),
+        )
+        .into_response();
     }
 
     let now = current_time_iso();
@@ -481,8 +502,7 @@ pub async fn update_config(
     let vk_new = config_version_key(&group, &key, new_version);
     let _ = raft_put(node, vk_new, new_value).await;
 
-    ok_json(json!({"version": new_version}))
-    .into_response()
+    ok_json(json!({"version": new_version})).into_response()
 }
 
 // ──── Handler: DELETE /v1/configs/{group}/{key} ────
@@ -519,8 +539,7 @@ pub async fn delete_config(
         }
     }
 
-    ok_json(json!({}))
-    .into_response()
+    ok_json(json!({})).into_response()
 }
 
 // ──── Handler: GET /v1/configs/{group}/{key}/versions ────
@@ -559,8 +578,7 @@ pub async fn list_versions(
     // 按版本号降序排列（最新在前）
     versions.sort_by(|a, b| b.version.cmp(&a.version));
 
-    ok_json(json!(versions))
-    .into_response()
+    ok_json(json!(versions)).into_response()
 }
 
 // ──── Handler: GET /v1/configs/{group}/{key}/versions/{version} ────
@@ -669,6 +687,5 @@ pub async fn rollback(
     let vk_new = config_version_key(&group, &key, new_version);
     let _ = raft_put(node, vk_new, new_value).await;
 
-    ok_json(json!({"newVersion": new_version}))
-    .into_response()
+    ok_json(json!({"newVersion": new_version})).into_response()
 }

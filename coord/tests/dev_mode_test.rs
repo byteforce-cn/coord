@@ -13,28 +13,29 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use coord_agent::{AgentConfig, AgentServer};
     use coord_core::storage::StorageBackend;
     use coord_core::types::StorageConfig;
+    use coord_proto::agent::id_gen_client::IdGenClient;
+    use coord_proto::agent::IdGenNextIdRequest;
+    use coord_proto::kv::kv_client::KvClient;
+    use coord_proto::kv::kv_server::KvServer;
+    use coord_proto::kv::{PutRequest, RangeRequest};
+    use coord_proto::lease::lease_server::LeaseServer;
+    use coord_proto::maintenance::maintenance_server::MaintenanceServer;
+    use coord_proto::txn::txn_server::TxnServer;
+    use coord_proto::watch::watch_server::WatchServer;
+    use coord_server::lease::LeaseManager;
     use coord_server::raft::log_store::LogStore;
     use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
     use coord_server::raft::state_machine::StateMachineStore;
+    use coord_server::raft::{new_basic_node, new_raft, RaftConfig};
     use coord_server::server::CoordNode;
     use coord_server::storage::compaction::{CompactionConfig, CompactionManager};
     use coord_server::storage::mvcc::MvccStorage;
     use coord_server::storage::redb_backend::RedbBackend;
     use coord_server::timer::TimerWheel;
-    use coord_server::lease::LeaseManager;
     use coord_server::watch::WatchDispatcher;
-    use coord_proto::kv::kv_server::KvServer;
-    use coord_proto::txn::txn_server::TxnServer;
-    use coord_proto::lease::lease_server::LeaseServer;
-    use coord_proto::watch::watch_server::WatchServer;
-    use coord_proto::maintenance::maintenance_server::MaintenanceServer;
-    use coord_proto::kv::kv_client::KvClient;
-    use coord_proto::kv::{PutRequest, RangeRequest};
-    use coord_proto::agent::id_gen_client::IdGenClient;
-    use coord_proto::agent::IdGenNextIdRequest;
-    use coord_agent::{AgentConfig, AgentServer};
     use std::collections::BTreeMap;
 
     // ──── 工具函数 ────
@@ -83,17 +84,25 @@ mod tests {
 
         let storage_config = StorageConfig::default();
         let backend = RedbBackend::open(&data_dir, &storage_config).expect("open redb backend");
-        let mvcc_read = Arc::new(MvccStorage::new(backend.clone()).expect("create mvcc read"));
-        let mvcc_raft = MvccStorage::new(backend).expect("create mvcc raft");
+        let mvcc = Arc::new(MvccStorage::new(backend).expect("create mvcc"));
+        let snapshot_tracker =
+            Arc::new(coord_server::storage::snapshot::SnapshotTracker::default());
 
         let watch_dispatcher = Arc::new(WatchDispatcher::start());
-        let log_store = LogStore::new(&data_dir).await.expect("create raft log store");
-        let sm_store = StateMachineStore::new(mvcc_raft);
+        let log_store = LogStore::new(&data_dir)
+            .await
+            .expect("create raft log store")
+            .with_snapshot_tracker(Arc::clone(&snapshot_tracker));
+        let sm_store = StateMachineStore::new(
+            Arc::clone(&mvcc),
+            data_dir.join("snapshots"),
+            Arc::clone(&snapshot_tracker),
+        );
 
         let network_factory = RaftNetworkFactoryImpl::new(1);
         network_factory.register_node(1, raft_addr.clone());
 
-        let raft_config = openraft::Config {
+        let raft_config = RaftConfig {
             heartbeat_interval: 200,
             election_timeout_min: 800,
             election_timeout_max: 1500,
@@ -101,7 +110,7 @@ mod tests {
         };
 
         let raft_rpc_service = RaftRpcService::new();
-        let raft = openraft::Raft::new(
+        let raft = new_raft(
             1,
             Arc::new(raft_config),
             network_factory,
@@ -114,11 +123,12 @@ mod tests {
         raft_rpc_service.set_raft(raft.clone());
 
         let mut members = BTreeMap::new();
-        members.insert(1, openraft::impls::BasicNode::new(&raft_addr));
+        members.insert(1, new_basic_node(&raft_addr));
         raft.initialize(members).await.expect("raft initialize");
         let raft = Arc::new(raft);
 
-        let mut node = CoordNode::new(Arc::clone(&mvcc_read));
+        let mut node = CoordNode::new(Arc::clone(&mvcc));
+        node.node_id = 1;
         node.watch_dispatcher = Some(Arc::clone(&watch_dispatcher));
         node.raft = Some(Arc::clone(&raft));
 
@@ -128,7 +138,13 @@ mod tests {
         let node = Arc::new(node);
 
         let compaction_config = CompactionConfig::default();
-        let _compaction_mgr = CompactionManager::start(Arc::clone(&mvcc_read), compaction_config);
+        let compaction_proposer: Arc<dyn coord_server::storage::compaction::CompactProposer> =
+            node.clone();
+        let _compaction_mgr = CompactionManager::start(
+            Arc::clone(&mvcc),
+            compaction_config,
+            Some(compaction_proposer),
+        );
 
         let kv_svc = KvServer::from_arc(Arc::clone(&node));
         let txn_svc = TxnServer::from_arc(Arc::clone(&node));
@@ -227,8 +243,7 @@ mod tests {
         tracing::info!("[dev test] Server ready on {}", server_addr);
 
         // 2. 启动 Agent（连接 Server）
-        let (agent_addr, agent_handle) =
-            start_agent(agent_port, http_port, &server_addr).await;
+        let (agent_addr, agent_handle) = start_agent(agent_port, http_port, &server_addr).await;
 
         wait_for_port(&agent_addr, Duration::from_secs(10))
             .await
@@ -258,7 +273,11 @@ mod tests {
             .await
             .expect("KV Put via agent should succeed");
         let put_inner = put_resp.into_inner();
-        assert!(put_inner.revision > 0, "Put should return positive revision, got {}", put_inner.revision);
+        assert!(
+            put_inner.revision > 0,
+            "Put should return positive revision, got {}",
+            put_inner.revision
+        );
         tracing::info!("[dev test] KV Put OK");
 
         // Range
@@ -310,33 +329,75 @@ mod tests {
             .await
             .expect("server should be ready");
 
-        let (_agent_addr, agent_handle) =
-            start_agent(agent_port, http_port, &server_addr).await;
+        let (_agent_addr, agent_handle) = start_agent(agent_port, http_port, &server_addr).await;
 
-        wait_for_port(&format!("127.0.0.1:{}", agent_port), Duration::from_secs(10))
-            .await
-            .expect("agent should be ready");
+        wait_for_port(
+            &format!("127.0.0.1:{}", agent_port),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("agent should be ready");
 
         // 触发关闭
         drop(server_shutdown_tx);
 
-        // 等待 gRPC server 关闭
-        let _ = tokio::time::timeout(Duration::from_secs(5), grpc_handle).await;
+        // 给 gRPC server 一个优雅收尾窗口。Agent 的 watch/registry 长连接存在时
+        // tonic 会等待存量连接关闭而迟迟不返回；超时后必须显式 abort——
+        // 注意：`timeout` 消费并丢弃 JoinHandle 只会 detach 任务（监听端口永久
+        // 残留），故用 pin 引用，超时后调用 abort 确保端口释放。
+        let mut grpc_handle = std::pin::pin!(grpc_handle);
+        if tokio::time::timeout(Duration::from_secs(5), &mut grpc_handle)
+            .await
+            .is_err()
+        {
+            grpc_handle.as_ref().abort();
+        }
         raft_handle.abort();
 
-        // 等待端口释放（Agent 的 serve() 无 shutdown signal，abort 后需短暂等待 OS 回收）
+        // Agent 的 serve() 无 shutdown signal，abort 后其分离后台任务
+        // （watch/renew 循环）会随连接断开自然收尾。
         agent_handle.abort();
         let _ = tokio::time::timeout(Duration::from_secs(3), agent_handle).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        // 验证 Server 端口已释放（可重新绑定）
-        let rebind = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", grpc_port)).await;
-        assert!(rebind.is_ok(), "server gRPC port {} should be released after shutdown: {:?}", grpc_port, rebind.err());
-        drop(rebind);
+        // 验证 Server 端口已释放（可重新绑定）。
+        // 并行测试负载下 OS 回收 TIME_WAIT/监听端口存在延迟，做重试等待。
+        let mut server_released = false;
+        let rebind_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < rebind_deadline {
+            if tokio::net::TcpListener::bind(format!("127.0.0.1:{}", grpc_port))
+                .await
+                .is_ok()
+            {
+                server_released = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(
+            server_released,
+            "server gRPC port {} should be released after shutdown",
+            grpc_port
+        );
 
         // 验证 Agent 端口已释放
-        let rebind_agent = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", agent_port)).await;
-        assert!(rebind_agent.is_ok(), "agent port {} should be released after abort: {:?}", agent_port, rebind_agent.err());
+        let mut agent_released = false;
+        let agent_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < agent_deadline {
+            if tokio::net::TcpListener::bind(format!("127.0.0.1:{}", agent_port))
+                .await
+                .is_ok()
+            {
+                agent_released = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(
+            agent_released,
+            "agent port {} should be released after abort",
+            agent_port
+        );
 
         tracing::info!("[dev test] Ports released after shutdown");
     }
@@ -373,9 +434,12 @@ mod tests {
         });
 
         // Agent 应能启动（skeleton 模式降级）
-        wait_for_port(&format!("127.0.0.1:{}", agent_port), Duration::from_secs(10))
-            .await
-            .expect("agent should start even without server");
+        wait_for_port(
+            &format!("127.0.0.1:{}", agent_port),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("agent should start even without server");
 
         tracing::info!("[dev test] Agent started in skeleton mode without server");
 
@@ -413,17 +477,21 @@ mod tests {
             }
         });
 
-        wait_for_port(&format!("127.0.0.1:{}", agent_port), Duration::from_secs(10))
-            .await
-            .expect("agent should start in skeleton mode");
+        wait_for_port(
+            &format!("127.0.0.1:{}", agent_port),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("agent should start in skeleton mode");
 
         // 通过 Agent gRPC 调用 IdGen.NextId（无 Server，应走本地雪花模式）
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", agent_port))
-            .unwrap()
-            .connect_timeout(Duration::from_secs(3))
-            .connect()
-            .await
-            .expect("connect to agent");
+        let channel =
+            tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", agent_port))
+                .unwrap()
+                .connect_timeout(Duration::from_secs(3))
+                .connect()
+                .await
+                .expect("connect to agent");
 
         let mut idgen_client = IdGenClient::new(channel);
         let resp = idgen_client
@@ -463,9 +531,12 @@ mod tests {
             .expect("server should be ready");
 
         let (agent_addr, agent_handle) = start_agent(agent_port, http_port, &server_addr).await;
-        wait_for_port(&format!("127.0.0.1:{}", agent_port), Duration::from_secs(10))
-            .await
-            .expect("agent should be ready");
+        wait_for_port(
+            &format!("127.0.0.1:{}", agent_port),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("agent should be ready");
 
         let channel = tonic::transport::Endpoint::from_shared(format!("http://{agent_addr}"))
             .unwrap()
@@ -518,9 +589,12 @@ mod tests {
             .expect("server should be ready");
 
         let (agent_addr, agent_handle) = start_agent(agent_port, http_port, &server_addr).await;
-        wait_for_port(&format!("127.0.0.1:{}", agent_port), Duration::from_secs(10))
-            .await
-            .expect("agent should be ready");
+        wait_for_port(
+            &format!("127.0.0.1:{}", agent_port),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("agent should be ready");
 
         let mut handles = Vec::new();
         for _ in 0..20 {
@@ -600,9 +674,12 @@ mod tests {
                 tracing::warn!("Agent server exited: {e}");
             }
         });
-        wait_for_port(&format!("127.0.0.1:{}", agent_port), Duration::from_secs(10))
-            .await
-            .expect("agent should be ready");
+        wait_for_port(
+            &format!("127.0.0.1:{}", agent_port),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("agent should be ready");
 
         // 并发 20 个 nextId（同一 name，fresh 状态）
         let mut handles = Vec::new();

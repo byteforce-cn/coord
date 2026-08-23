@@ -2,8 +2,8 @@ syntax = "proto3";
 package coord.lease;
 
 message LeaseGrantRequest {
-  int64 ttl = 1;      // 租约 TTL（秒）
-  int64 id = 2;       // 0=自动分配，>0=指定 ID
+  int64 ttl = 1; // 租约 TTL（秒）
+  int64 id = 2; // 0=自动分配，>0=指定 ID
 }
 
 message LeaseGrantResponse {

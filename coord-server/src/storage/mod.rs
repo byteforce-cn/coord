@@ -9,6 +9,7 @@
 // - write_batcher:         Multi-Raft 共享写入批处理器（v6.0）
 
 pub mod compaction;
+pub mod disk_watermark;
 pub mod mvcc;
 pub mod redb_backend;
 pub mod snapshot;

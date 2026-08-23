@@ -12,16 +12,15 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 
-use openraft::RaftNetworkV2;
-use openraft::RaftNetworkFactory;
-use openraft::OptionalSend;
+use openraft::error::{RPCError, ReplicationClosed, StreamingError};
 use openraft::network::RPCOption;
 use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, VoteRequest, VoteResponse,
-    SnapshotResponse,
+    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse,
 };
 use openraft::type_config::alias::{SnapshotOf, VoteOf};
-use openraft::error::{RPCError, StreamingError, ReplicationClosed};
+use openraft::OptionalSend;
+use openraft::RaftNetworkFactory;
+use openraft::RaftNetworkV2;
 use parking_lot::RwLock;
 use tonic::transport::Channel;
 
@@ -29,16 +28,18 @@ use super::type_config::TypeConfig;
 use super::CoordRaft;
 
 // Re-export for raft_rpc_server
-use coord_proto::raft::RaftMessage as RaftMessageProto;
-pub use coord_proto::raft::raft_server::{Raft as RaftRpcTrait, RaftServer as RaftRpcServer};
 pub use coord_proto::raft::raft_client::RaftClient;
+pub use coord_proto::raft::raft_server::{Raft as RaftRpcTrait, RaftServer as RaftRpcServer};
+use coord_proto::raft::RaftMessage as RaftMessageProto;
 
 use crate::tls;
 
 // ──── 序列化工具 ────
 
-fn serialize_payload<T: serde::Serialize>(value: &T) -> Vec<u8> {
-    bincode::serialize(value).expect("bincode serialize should not fail for Raft types")
+/// P0-F.2：bincode 序列化失败返回错误（不再 expect panic）
+fn serialize_payload<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, tonic::Status> {
+    bincode::serialize(value)
+        .map_err(|e| tonic::Status::internal(format!("bincode serialize failed: {e}")))
 }
 
 fn deserialize_payload<'a, T: serde::Deserialize<'a>>(data: &'a [u8]) -> Result<T, tonic::Status> {
@@ -54,7 +55,7 @@ fn make_raft_message(payload: Vec<u8>) -> RaftMessageProto {
     let trace_context = extract_trace_context();
     RaftMessageProto {
         payload,
-        region_id: 0,  // 单 Raft 模式：region_id=0 表示未使用
+        region_id: 0, // 单 Raft 模式：region_id=0 表示未使用
         trace_context,
     }
 }
@@ -144,10 +145,7 @@ impl RaftNetworkFactoryImpl {
     ///
     /// 多个工厂可以共享同一个 blocklist，测试代码可以通过 blocklist
     /// 动态控制哪些节点之间的通信被阻止。
-    pub fn with_shared_blocklist(
-        node_id: u64,
-        blocked_nodes: Arc<RwLock<HashSet<u64>>>,
-    ) -> Self {
+    pub fn with_shared_blocklist(node_id: u64, blocked_nodes: Arc<RwLock<HashSet<u64>>>) -> Self {
         Self {
             node_id,
             node_addrs: Arc::new(RwLock::new(HashMap::new())),
@@ -185,13 +183,21 @@ impl RaftNetworkFactoryImpl {
     /// 调用后，本节点到 target_node 的所有 Raft RPC（AppendEntries/Vote/Snapshot）
     /// 将返回 Unreachable 错误，模拟网络分区。
     pub fn block_node(&self, target_node: u64) {
-        tracing::info!("[partition-sim] node {} blocking communication to node {}", self.node_id, target_node);
+        tracing::info!(
+            "[partition-sim] node {} blocking communication to node {}",
+            self.node_id,
+            target_node
+        );
         self.blocked_nodes.write().insert(target_node);
     }
 
     /// 解除对 target_node 的通信阻止（测试用）
     pub fn unblock_node(&self, target_node: u64) {
-        tracing::info!("[partition-sim] node {} unblocking communication to node {}", self.node_id, target_node);
+        tracing::info!(
+            "[partition-sim] node {} unblocking communication to node {}",
+            self.node_id,
+            target_node
+        );
         self.blocked_nodes.write().remove(&target_node);
     }
 
@@ -225,15 +231,18 @@ impl RaftNetworkImpl {
         }
 
         // Connect
-        let use_tls = self.tls_config.as_ref().map(|c| c.is_configured()).unwrap_or(false);
+        let use_tls = self
+            .tls_config
+            .as_ref()
+            .map(|c| c.is_configured())
+            .unwrap_or(false);
         let scheme = if use_tls { "https" } else { "http" };
         let endpoint = format!("{}://{}", scheme, self.target_addr);
 
         let mut channel_builder = Channel::from_shared(endpoint)
             .map_err(|e| tonic::Status::internal(format!("invalid raft addr: {e}")))?;
 
-        if use_tls {
-            let cfg = self.tls_config.as_ref().unwrap();
+        if let Some(cfg) = self.tls_config.as_ref().filter(|_| use_tls) {
             if let Some(client_tls) = tls::build_client_tls(
                 Some(&cfg.cert_path),
                 Some(&cfg.key_path),
@@ -250,17 +259,17 @@ impl RaftNetworkImpl {
             }
         }
 
-        let channel = channel_builder
-            .connect()
-            .await
-            .map_err(|e| tonic::Status::unavailable(format!(
+        let channel = channel_builder.connect().await.map_err(|e| {
+            tonic::Status::unavailable(format!(
                 "connect to node {} at {}: {e}",
                 self.target_id, self.target_addr
-            )))?;
+            ))
+        })?;
 
         tracing::debug!(
             "Raft network: connected to node {} at {}",
-            self.target_id, self.target_addr
+            self.target_id,
+            self.target_addr
         );
         let client = RaftClient::new(channel);
         *slot = Some(client.clone());
@@ -293,13 +302,19 @@ impl RaftNetwork {
     /// 每次 RPC 调用前检查目标是否被动态阻止（分区模拟）
     fn ensure_not_blocked(&self) -> Result<(), RPCError<TypeConfig>> {
         match self {
-            RaftNetwork::Real { target_id, blocked_nodes, .. } => {
+            RaftNetwork::Real {
+                target_id,
+                blocked_nodes,
+                ..
+            } => {
                 if blocked_nodes.read().contains(target_id) {
                     let status = tonic::Status::unavailable(format!(
                         "simulated network partition: node {} is unreachable",
                         target_id
                     ));
-                    return Err(RPCError::Unreachable(openraft::error::Unreachable::new(&status)));
+                    return Err(RPCError::Unreachable(openraft::error::Unreachable::new(
+                        &status,
+                    )));
                 }
                 Ok(())
             }
@@ -308,7 +323,9 @@ impl RaftNetwork {
                     "simulated network partition: node {} is unreachable",
                     target_id
                 ));
-                Err(RPCError::Unreachable(openraft::error::Unreachable::new(&status)))
+                Err(RPCError::Unreachable(openraft::error::Unreachable::new(
+                    &status,
+                )))
             }
         }
     }
@@ -335,7 +352,9 @@ impl RaftNetworkV2<TypeConfig> for RaftNetwork {
         self.ensure_not_blocked()?;
         match self {
             RaftNetwork::Real { inner, .. } => inner.append_entries(rpc, option).await,
-            RaftNetwork::Blocked { .. } => unreachable!("Blocked should have been caught by ensure_not_blocked"),
+            RaftNetwork::Blocked { .. } => {
+                unreachable!("Blocked should have been caught by ensure_not_blocked")
+            }
         }
     }
 
@@ -347,7 +366,9 @@ impl RaftNetworkV2<TypeConfig> for RaftNetwork {
         self.ensure_not_blocked()?;
         match self {
             RaftNetwork::Real { inner, .. } => inner.vote(rpc, option).await,
-            RaftNetwork::Blocked { .. } => unreachable!("Blocked should have been caught by ensure_not_blocked"),
+            RaftNetwork::Blocked { .. } => {
+                unreachable!("Blocked should have been caught by ensure_not_blocked")
+            }
         }
     }
 
@@ -360,7 +381,11 @@ impl RaftNetworkV2<TypeConfig> for RaftNetwork {
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
         // Check blocklist before snapshot transfer
         match self {
-            RaftNetwork::Real { target_id, blocked_nodes, .. } => {
+            RaftNetwork::Real {
+                target_id,
+                blocked_nodes,
+                ..
+            } => {
                 if blocked_nodes.read().contains(target_id) {
                     return Err(self.to_streaming_error());
                 }
@@ -370,7 +395,9 @@ impl RaftNetworkV2<TypeConfig> for RaftNetwork {
             }
         }
         match self {
-            RaftNetwork::Real { inner, .. } => inner.full_snapshot(vote, snapshot, cancel, option).await,
+            RaftNetwork::Real { inner, .. } => {
+                inner.full_snapshot(vote, snapshot, cancel, option).await
+            }
             RaftNetwork::Blocked { .. } => unreachable!("Blocked should have been caught above"),
         }
     }
@@ -382,24 +409,35 @@ impl RaftNetworkFactory<TypeConfig> for RaftNetworkFactoryImpl {
     async fn new_client(
         &mut self,
         target: u64,
-        _node: &openraft::impls::BasicNode,
+        node: &openraft::impls::BasicNode,
     ) -> Self::Network {
         // 检查网络分区模拟：目标节点是否被阻止
         let blocked = self.is_blocked(target);
         if blocked {
             tracing::debug!(
                 "[partition-sim] node {} → node {}: BLOCKED (simulated partition)",
-                self.node_id, target
+                self.node_id,
+                target
             );
             return RaftNetwork::Blocked { target_id: target };
         }
 
-        let addr = self
-            .node_addrs
-            .read()
-            .get(&target)
-            .cloned()
-            .unwrap_or_else(|| format!("127.0.0.1:{}", 50051 + target));
+        // P0-D.2：优先使用 openraft 传入的 membership 地址（BasicNode.addr），
+        //         静态表仅作 bootstrap 前兑底；查不到返回明确错误，不再伪造地址。
+        let addr = if !node.addr.is_empty() {
+            node.addr.clone()
+        } else {
+            match self.node_addrs.read().get(&target).cloned() {
+                Some(addr) => addr,
+                None => {
+                    tracing::error!(
+                        "no known raft address for node {target} (membership addr empty, \
+                         static table miss); refusing to fabricate an address"
+                    );
+                    return RaftNetwork::Blocked { target_id: target };
+                }
+            }
+        };
 
         // Get or create shared client slot (lazy connection, shared across instances)
         let client_slot = self
@@ -462,13 +500,13 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
         rpc: AppendEntriesRequest<TypeConfig>,
         _option: RPCOption,
     ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
-        let payload = serialize_payload(&rpc);
+        let payload = serialize_payload(&rpc)
+            .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))?;
         let req = tonic::Request::new(make_raft_message(payload));
         let mut client = self.get_client().await.map_err(to_rpc_error)?;
         let resp = client.append_entries(req).await.map_err(to_rpc_error)?;
-        deserialize_payload(&resp.into_inner().payload).map_err(|e| {
-            RPCError::Unreachable(openraft::error::Unreachable::new(&e))
-        })
+        deserialize_payload(&resp.into_inner().payload)
+            .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))
     }
 
     async fn vote(
@@ -476,13 +514,13 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
         rpc: VoteRequest<TypeConfig>,
         _option: RPCOption,
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
-        let payload = serialize_payload(&rpc);
+        let payload = serialize_payload(&rpc)
+            .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))?;
         let req = tonic::Request::new(make_raft_message(payload));
         let mut client = self.get_client().await.map_err(to_rpc_error)?;
         let resp = client.vote(req).await.map_err(to_rpc_error)?;
-        deserialize_payload(&resp.into_inner().payload).map_err(|e| {
-            RPCError::Unreachable(openraft::error::Unreachable::new(&e))
-        })
+        deserialize_payload(&resp.into_inner().payload)
+            .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))
     }
 
     async fn full_snapshot(
@@ -493,17 +531,19 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
         _option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
         let serializable = SerializableSnapshot::from_openraft(&snapshot);
-        let payload = serialize_payload(&(&vote, &serializable));
+        let payload = serialize_payload(&(&vote, &serializable))
+            .map_err(|e| StreamingError::Unreachable(openraft::error::Unreachable::new(&e)))?;
         let req = tonic::Request::new(make_raft_message(payload));
-        let mut client = self.get_client().await.map_err(|e| {
-            StreamingError::Unreachable(openraft::error::Unreachable::new(&e))
-        })?;
-        let resp = client.install_snapshot(req).await.map_err(|e| {
-            StreamingError::Unreachable(openraft::error::Unreachable::new(&e))
-        })?;
-        deserialize_payload(&resp.into_inner().payload).map_err(|e| {
-            StreamingError::Unreachable(openraft::error::Unreachable::new(&e))
-        })
+        let mut client = self
+            .get_client()
+            .await
+            .map_err(|e| StreamingError::Unreachable(openraft::error::Unreachable::new(&e)))?;
+        let resp = client
+            .install_snapshot(req)
+            .await
+            .map_err(|e| StreamingError::Unreachable(openraft::error::Unreachable::new(&e)))?;
+        deserialize_payload(&resp.into_inner().payload)
+            .map_err(|e| StreamingError::Unreachable(openraft::error::Unreachable::new(&e)))
     }
 }
 
@@ -513,6 +553,12 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
 pub struct RaftRpcService {
     /// 本地 Raft 实例（初始化后设置）
     raft: Arc<RwLock<Option<CoordRaft>>>,
+}
+
+impl Default for RaftRpcService {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RaftRpcService {
@@ -544,12 +590,12 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
         let msg = request.into_inner();
         inject_received_trace_context(&msg);
         let raft = self.get_raft()?;
-        let rpc: AppendEntriesRequest<TypeConfig> =
-            deserialize_payload(&msg.payload)?;
-        let resp = raft.append_entries(rpc).await.map_err(|e| {
-            tonic::Status::internal(format!("append_entries failed: {e}"))
-        })?;
-        let payload = serialize_payload(&resp);
+        let rpc: AppendEntriesRequest<TypeConfig> = deserialize_payload(&msg.payload)?;
+        let resp = raft
+            .append_entries(rpc)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("append_entries failed: {e}")))?;
+        let payload = serialize_payload(&resp)?;
         Ok(tonic::Response::new(make_raft_message(payload)))
     }
 
@@ -561,10 +607,11 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
         inject_received_trace_context(&msg);
         let raft = self.get_raft()?;
         let rpc: VoteRequest<TypeConfig> = deserialize_payload(&msg.payload)?;
-        let resp = raft.vote(rpc).await.map_err(|e| {
-            tonic::Status::internal(format!("vote failed: {e}"))
-        })?;
-        let payload = serialize_payload(&resp);
+        let resp = raft
+            .vote(rpc)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("vote failed: {e}")))?;
+        let payload = serialize_payload(&resp)?;
         Ok(tonic::Response::new(make_raft_message(payload)))
     }
 
@@ -578,10 +625,11 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
         let (vote, serializable): (VoteOf<TypeConfig>, SerializableSnapshot) =
             deserialize_payload(&msg.payload)?;
         let snapshot = serializable.into_openraft();
-        let resp = raft.install_full_snapshot(vote, snapshot).await.map_err(|e| {
-            tonic::Status::internal(format!("install_full_snapshot failed: {e}"))
-        })?;
-        let payload = serialize_payload(&resp);
+        let resp = raft
+            .install_full_snapshot(vote, snapshot)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("install_full_snapshot failed: {e}")))?;
+        let payload = serialize_payload(&resp)?;
         Ok(tonic::Response::new(make_raft_message(payload)))
     }
 }

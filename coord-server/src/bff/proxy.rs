@@ -10,16 +10,17 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
-    extract::State,
-    http::{StatusCode, HeaderMap},
-    response::Response,
     body::Body,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::Response,
+    Json,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::internal;
 use super::CoreClient;
 
 // ──── 请求/响应类型 ────
@@ -30,21 +31,6 @@ pub struct LoginRequest {
     pub role_id: String,
     #[serde(rename = "secretId")]
     pub secret_id: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ApiResponse<T: Serialize> {
-    pub code: i32,
-    pub data: T,
-    pub message: String,
-}
-
-fn ok_response<T: Serialize>(data: T) -> Json<ApiResponse<T>> {
-    Json(ApiResponse {
-        code: 0,
-        data,
-        message: "success".to_string(),
-    })
 }
 
 fn error_response(code: i32, message: &str) -> (StatusCode, Json<Value>) {
@@ -71,13 +57,20 @@ pub async fn login(
     });
 
     let (status, resp_body, _content_type) = core
-        .forward("POST", "/v1/auth/approle/login", &serde_json::to_vec(&body).unwrap(), None)
+        .forward(
+            "POST",
+            "/v1/auth/approle/login",
+            &serde_json::to_vec(&body)
+                .map_err(|e| error_response(500, &format!("序列化登录请求失败: {e}")))?,
+            None,
+        )
         .await
         .map_err(|e| error_response(500, &format!("Core 通信失败: {e}")))?;
 
     if status != 200 {
         let err: Value = serde_json::from_slice(&resp_body).unwrap_or(json!({}));
-        let msg = err["errors"].as_array()
+        let msg = err["errors"]
+            .as_array()
             .and_then(|a| a.first())
             .and_then(|e| e.as_str())
             .unwrap_or("登录失败");
@@ -93,7 +86,11 @@ pub async fn login(
 
     let policies: Vec<String> = resp["auth"]["policies"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     let user_data = json!({
@@ -116,14 +113,14 @@ pub async fn login(
         "data": user_data,
         "message": "success"
     }))
-    .unwrap();
+    .map_err(|e| error_response(500, &format!("序列化响应失败: {e}")))?;
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
         .header("Set-Cookie", cookie)
         .body(Body::from(body))
-        .unwrap())
+        .map_err(|e| error_response(500, &format!("构建响应失败: {e}")))
 }
 
 /// POST /api/v1/auth/renew
@@ -137,9 +134,16 @@ pub async fn renew_token(
 
 /// POST /api/v1/auth/revoke
 pub async fn revoke_token(
-    State(_core): State<Arc<dyn CoreClient>>,
-    _headers: HeaderMap,
+    State(core): State<Arc<dyn CoreClient>>,
+    headers: HeaderMap,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
+    // P0-C.5：将 token 转发内部 revoke-self 路由（CCT → raft RevokeJti）
+    if let Some(token) = internal::extract_bearer_token(&headers) {
+        let _ = core
+            .forward("POST", "/v1/auth/token/revoke-self", &[], Some(&token))
+            .await;
+    }
+
     // 清除 Cookie
     let cookie = "coord_token=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0";
     let body = serde_json::to_string(&json!({
@@ -147,14 +151,14 @@ pub async fn revoke_token(
         "data": {},
         "message": "success"
     }))
-    .unwrap();
+    .map_err(|e| error_response(500, &format!("序列化响应失败: {e}")))?;
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
         .header("Set-Cookie", cookie)
         .body(Body::from(body))
-        .unwrap())
+        .map_err(|e| error_response(500, &format!("构建响应失败: {e}")))
 }
 
 /// GET /api/v1/auth/userinfo
@@ -179,7 +183,11 @@ pub async fn userinfo(
 
     let policies: Vec<String> = resp["data"]["policies"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     Ok(Json(json!({
@@ -221,11 +229,11 @@ pub async fn forward(
         .await
         .map_err(|e| error_response(500, &format!("Core 通信失败: {e}")))?;
 
-    Ok(Response::builder()
-        .status(StatusCode::from_u16(status as u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
+    Response::builder()
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
         .header("Content-Type", content_type)
         .body(Body::from(resp_body))
-        .unwrap())
+        .map_err(|e| error_response(500, &format!("构建响应失败: {e}")))
 }
 
 // ──── 辅助函数 ────

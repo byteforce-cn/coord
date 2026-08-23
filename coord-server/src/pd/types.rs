@@ -153,7 +153,7 @@ impl NodeState {
 
     /// 节点是否处于维护模式
     pub fn is_under_maintenance(&self) -> bool {
-        self.labels.get("maintenance").map_or(false, |v| v == "true")
+        self.labels.get("maintenance").is_some_and(|v| v == "true")
     }
 }
 
@@ -391,13 +391,9 @@ mod tests {
         let node1 = make_node(1, "zone-a", "host-1");
         let node2 = make_node(2, "zone-a", "host-2");
         let node3 = make_node(3, "zone-b", "host-3");
-        let all_nodes: HashMap<_, _> = [
-            (1, node1.clone()),
-            (2, node2.clone()),
-            (3, node3.clone()),
-        ]
-        .into_iter()
-        .collect();
+        let all_nodes: HashMap<_, _> = [(1, node1.clone()), (2, node2.clone()), (3, node3.clone())]
+            .into_iter()
+            .collect();
 
         let candidates: Vec<&NodeState> = vec![&node2, &node3];
         // node3 在不同 zone，应被优先选择
@@ -411,7 +407,8 @@ mod tests {
         let mut node = make_node(1, "zone-a", "host-1");
         assert!(!node.is_under_maintenance());
 
-        node.labels.insert("maintenance".to_string(), "true".to_string());
+        node.labels
+            .insert("maintenance".to_string(), "true".to_string());
         assert!(node.is_under_maintenance());
     }
 

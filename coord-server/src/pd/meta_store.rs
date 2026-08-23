@@ -216,10 +216,7 @@ impl PdMetaStore {
     /// Phase 3+：通过 Raft 共识分配。
     pub fn allocate_region_id(&self) -> RegionId {
         let regions = self.regions.read();
-        regions
-            .last_key_value()
-            .map(|(&id, _)| id + 1)
-            .unwrap_or(1)
+        regions.last_key_value().map(|(&id, _)| id + 1).unwrap_or(1)
     }
 }
 
@@ -257,7 +254,9 @@ mod tests {
     #[test]
     fn test_create_and_get_region() {
         let store = PdMetaStore::new();
-        store.create_region(make_meta(1, vec![0x00], vec![0x55])).unwrap();
+        store
+            .create_region(make_meta(1, vec![0x00], vec![0x55]))
+            .unwrap();
         assert!(store.get_region(1).is_some());
         assert!(store.get_region(999).is_none());
     }
@@ -265,15 +264,23 @@ mod tests {
     #[test]
     fn test_create_duplicate_fails() {
         let store = PdMetaStore::new();
-        store.create_region(make_meta(1, vec![0x00], vec![0x55])).unwrap();
-        assert!(store.create_region(make_meta(1, vec![0x00], vec![0x55])).is_err());
+        store
+            .create_region(make_meta(1, vec![0x00], vec![0x55]))
+            .unwrap();
+        assert!(store
+            .create_region(make_meta(1, vec![0x00], vec![0x55]))
+            .is_err());
     }
 
     #[test]
     fn test_get_region_by_key() {
         let store = PdMetaStore::new();
-        store.create_region(make_meta(1, vec![0x00], vec![0x55])).unwrap();
-        store.create_region(make_meta(2, vec![0x55], vec![0xFF])).unwrap();
+        store
+            .create_region(make_meta(1, vec![0x00], vec![0x55]))
+            .unwrap();
+        store
+            .create_region(make_meta(2, vec![0x55], vec![0xFF]))
+            .unwrap();
 
         assert_eq!(store.get_region_by_key(&[0x00]).unwrap().region_id, 1);
         assert_eq!(store.get_region_by_key(&[0x54]).unwrap().region_id, 1);
@@ -284,7 +291,9 @@ mod tests {
     #[test]
     fn test_delete_region() {
         let store = PdMetaStore::new();
-        store.create_region(make_meta(1, vec![0x00], vec![0x55])).unwrap();
+        store
+            .create_region(make_meta(1, vec![0x00], vec![0x55]))
+            .unwrap();
         assert_eq!(store.region_count(), 1);
 
         store.delete_region(1).unwrap();
@@ -295,7 +304,9 @@ mod tests {
     #[test]
     fn test_update_region() {
         let store = PdMetaStore::new();
-        store.create_region(make_meta(1, vec![0x00], vec![0x55])).unwrap();
+        store
+            .create_region(make_meta(1, vec![0x00], vec![0x55]))
+            .unwrap();
 
         let mut updated = store.get_region(1).unwrap();
         updated.approximate_size = 1024;
@@ -307,7 +318,9 @@ mod tests {
     #[test]
     fn test_update_region_start_key() {
         let store = PdMetaStore::new();
-        store.create_region(make_meta(1, vec![0x00], vec![0xFF])).unwrap();
+        store
+            .create_region(make_meta(1, vec![0x00], vec![0xFF]))
+            .unwrap();
 
         // 分裂后缩小范围
         let mut updated = store.get_region(1).unwrap();
@@ -315,7 +328,9 @@ mod tests {
         store.update_region(updated).unwrap();
 
         // 添加新 Region
-        store.create_region(make_meta(2, vec![0x55], vec![0xFF])).unwrap();
+        store
+            .create_region(make_meta(2, vec![0x55], vec![0xFF]))
+            .unwrap();
 
         // 路由应正确
         assert_eq!(store.get_region_by_key(&[0x00]).unwrap().region_id, 1);
@@ -327,19 +342,29 @@ mod tests {
         let store = PdMetaStore::new();
         assert_eq!(store.allocate_region_id(), 1);
 
-        store.create_region(make_meta(1, vec![0x00], vec![0x55])).unwrap();
+        store
+            .create_region(make_meta(1, vec![0x00], vec![0x55]))
+            .unwrap();
         assert_eq!(store.allocate_region_id(), 2);
 
-        store.create_region(make_meta(5, vec![0x55], vec![0xFF])).unwrap();
+        store
+            .create_region(make_meta(5, vec![0x55], vec![0xFF]))
+            .unwrap();
         assert_eq!(store.allocate_region_id(), 6);
     }
 
     #[test]
     fn test_scan_regions() {
         let store = PdMetaStore::new();
-        store.create_region(make_meta(1, vec![0x00], vec![0x40])).unwrap();
-        store.create_region(make_meta(2, vec![0x40], vec![0x80])).unwrap();
-        store.create_region(make_meta(3, vec![0x80], vec![0xFF])).unwrap();
+        store
+            .create_region(make_meta(1, vec![0x00], vec![0x40]))
+            .unwrap();
+        store
+            .create_region(make_meta(2, vec![0x40], vec![0x80]))
+            .unwrap();
+        store
+            .create_region(make_meta(3, vec![0x80], vec![0xFF]))
+            .unwrap();
 
         let regions = store.scan_regions(&[0x40], 10);
         assert_eq!(regions.len(), 2); // Region 2 + Region 3
@@ -351,9 +376,15 @@ mod tests {
     #[test]
     fn test_adjacent_pairs() {
         let store = PdMetaStore::new();
-        store.create_region(make_meta(1, vec![0x00], vec![0x40])).unwrap();
-        store.create_region(make_meta(2, vec![0x40], vec![0x80])).unwrap();
-        store.create_region(make_meta(3, vec![0x80], vec![0xFF])).unwrap();
+        store
+            .create_region(make_meta(1, vec![0x00], vec![0x40]))
+            .unwrap();
+        store
+            .create_region(make_meta(2, vec![0x40], vec![0x80]))
+            .unwrap();
+        store
+            .create_region(make_meta(3, vec![0x80], vec![0xFF]))
+            .unwrap();
 
         let pairs = store.get_adjacent_pairs();
         assert_eq!(pairs.len(), 2); // (1,2) and (2,3)

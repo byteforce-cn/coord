@@ -69,16 +69,15 @@ impl std::error::Error for RaftProposeError {}
 // ─── Workflow 状态机命令 ───
 
 /// Raft 日志中的工作流命令（所有确定性状态变更的载体）
+// 大载荷变体（定义/实例）与轻量变体大小差悬殊；Box 会改变内部状态机
+// 序列化契约（虽 bincode 对 Box 透明，但保留现状以冻结 M1 前兼容面）
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkflowCommand {
     /// 部署/更新工作流定义
-    DeployDefinition {
-        definition: WorkflowDefinition,
-    },
+    DeployDefinition { definition: WorkflowDefinition },
     /// 创建或更新工作流实例
-    UpsertInstance {
-        instance: WorkflowInstance,
-    },
+    UpsertInstance { instance: WorkflowInstance },
     /// 标记实例完成
     CompleteInstance {
         instance_id: String,
@@ -107,10 +106,7 @@ pub enum WorkflowCommand {
         idempotency_key: Option<String>,
     },
     /// 取消实例
-    CancelInstance {
-        instance_id: String,
-        at_ms: i64,
-    },
+    CancelInstance { instance_id: String, at_ms: i64 },
 }
 
 /// 工作流命令的响应
@@ -241,10 +237,7 @@ impl<P: RaftProposer> RaftWorkflowStore<P> {
                 self.apply_resume_sync(instance_id, result, *next_task_index, *at_ms)?;
                 Ok(WorkflowResponse::Ok)
             }
-            WorkflowCommand::CancelInstance {
-                instance_id,
-                at_ms,
-            } => {
+            WorkflowCommand::CancelInstance { instance_id, at_ms } => {
                 self.apply_cancel_sync(instance_id, *at_ms)?;
                 Ok(WorkflowResponse::Ok)
             }
@@ -584,10 +577,7 @@ impl RaftProposer for NoopRaftProposer {
                 }
                 WorkflowResponse::Ok
             }
-            WorkflowCommand::CancelInstance {
-                instance_id,
-                at_ms,
-            } => {
+            WorkflowCommand::CancelInstance { instance_id, at_ms } => {
                 let mut instances = self
                     .store
                     .instances
@@ -601,8 +591,7 @@ impl RaftProposer for NoopRaftProposer {
             }
         };
 
-        serde_json::to_vec(&response)
-            .map_err(|e| RaftProposeError::Serialization(e.to_string()))
+        serde_json::to_vec(&response).map_err(|e| RaftProposeError::Serialization(e.to_string()))
     }
 }
 

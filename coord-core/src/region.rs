@@ -1,3 +1,7 @@
+// ⚠️ EXPERIMENTAL（P2-01）：多 Region 前缀编码为组件级验证实现，
+// 生产路径未引用（仅 `coord-core/tests/region_key_encoding_test.rs` 测试引用）。
+// Coord 生产形态为「单 Raft 组 + 定期快照备份」；Multi-Raft 若需启用须另立专项。
+//
 // Region Key 编码 — 共享存储的多 Region 前缀隔离
 //
 // 编码规范（§5.1）：

@@ -34,7 +34,10 @@ pub fn execute(
                     retry_count: 0,
                     pending_branches: None,
                 };
-                return StepResult::Goto { target: cond.transition.clone(), frame };
+                return StepResult::Goto {
+                    target: cond.transition.clone(),
+                    frame,
+                };
             }
         };
 
@@ -51,7 +54,10 @@ pub fn execute(
                     retry_count: 0,
                     pending_branches: None,
                 };
-                return StepResult::Goto { target: cond.transition.clone(), frame };
+                return StepResult::Goto {
+                    target: cond.transition.clone(),
+                    frame,
+                };
             }
             Ok(false) => continue,
             Err(e) => {
@@ -78,7 +84,10 @@ pub fn execute(
             retry_count: 0,
             pending_branches: None,
         };
-        return StepResult::Goto { target: default.transition.clone(), frame };
+        return StepResult::Goto {
+            target: default.transition.clone(),
+            frame,
+        };
     }
 
     // No match, no default → continue
@@ -130,20 +139,38 @@ mod tests {
             name: "checkAmount".into(),
             task: crate::workflow::model::Task::Switch(SwitchTask {
                 conditions: vec![
-                    SwitchCondition { condition: Some(".amount > 10000".into()), transition: "senior".into() },
-                    SwitchCondition { condition: Some(".amount > 5000".into()), transition: "manager".into() },
+                    SwitchCondition {
+                        condition: Some(".amount > 10000".into()),
+                        transition: "senior".into(),
+                    },
+                    SwitchCondition {
+                        condition: Some(".amount > 5000".into()),
+                        transition: "manager".into(),
+                    },
                 ],
                 default_condition: None,
             }),
         };
 
-        let result = execute(&named, &SwitchTask {
-            conditions: vec![
-                SwitchCondition { condition: Some(".amount > 10000".into()), transition: "senior".into() },
-                SwitchCondition { condition: Some(".amount > 5000".into()), transition: "manager".into() },
-            ],
-            default_condition: None,
-        }, &inst, &expr, &clock);
+        let result = execute(
+            &named,
+            &SwitchTask {
+                conditions: vec![
+                    SwitchCondition {
+                        condition: Some(".amount > 10000".into()),
+                        transition: "senior".into(),
+                    },
+                    SwitchCondition {
+                        condition: Some(".amount > 5000".into()),
+                        transition: "manager".into(),
+                    },
+                ],
+                default_condition: None,
+            },
+            &inst,
+            &expr,
+            &clock,
+        );
 
         match result {
             StepResult::Goto { target, .. } => assert_eq!(target, "senior"),
@@ -159,19 +186,33 @@ mod tests {
         let named = NamedTask {
             name: "checkAmount".into(),
             task: crate::workflow::model::Task::Switch(SwitchTask {
-                conditions: vec![
-                    SwitchCondition { condition: Some(".amount > 10000".into()), transition: "senior".into() },
-                ],
-                default_condition: Some(SwitchCondition { condition: None, transition: "director".into() }),
+                conditions: vec![SwitchCondition {
+                    condition: Some(".amount > 10000".into()),
+                    transition: "senior".into(),
+                }],
+                default_condition: Some(SwitchCondition {
+                    condition: None,
+                    transition: "director".into(),
+                }),
             }),
         };
 
-        let result = execute(&named, &SwitchTask {
-            conditions: vec![
-                SwitchCondition { condition: Some(".amount > 10000".into()), transition: "senior".into() },
-            ],
-            default_condition: Some(SwitchCondition { condition: None, transition: "director".into() }),
-        }, &inst, &expr, &clock);
+        let result = execute(
+            &named,
+            &SwitchTask {
+                conditions: vec![SwitchCondition {
+                    condition: Some(".amount > 10000".into()),
+                    transition: "senior".into(),
+                }],
+                default_condition: Some(SwitchCondition {
+                    condition: None,
+                    transition: "director".into(),
+                }),
+            },
+            &inst,
+            &expr,
+            &clock,
+        );
 
         match result {
             StepResult::Goto { target, .. } => assert_eq!(target, "director"),
@@ -187,19 +228,27 @@ mod tests {
         let named = NamedTask {
             name: "checkAmount".into(),
             task: crate::workflow::model::Task::Switch(SwitchTask {
-                conditions: vec![
-                    SwitchCondition { condition: Some(".amount > 10000".into()), transition: "senior".into() },
-                ],
+                conditions: vec![SwitchCondition {
+                    condition: Some(".amount > 10000".into()),
+                    transition: "senior".into(),
+                }],
                 default_condition: None,
             }),
         };
 
-        let result = execute(&named, &SwitchTask {
-            conditions: vec![
-                SwitchCondition { condition: Some(".amount > 10000".into()), transition: "senior".into() },
-            ],
-            default_condition: None,
-        }, &inst, &expr, &clock);
+        let result = execute(
+            &named,
+            &SwitchTask {
+                conditions: vec![SwitchCondition {
+                    condition: Some(".amount > 10000".into()),
+                    transition: "senior".into(),
+                }],
+                default_condition: None,
+            },
+            &inst,
+            &expr,
+            &clock,
+        );
 
         match result {
             StepResult::NextTask(frame) => {
@@ -217,19 +266,27 @@ mod tests {
         let named = NamedTask {
             name: "alwaysGo".into(),
             task: crate::workflow::model::Task::Switch(SwitchTask {
-                conditions: vec![
-                    SwitchCondition { condition: None, transition: "nextStep".into() },
-                ],
+                conditions: vec![SwitchCondition {
+                    condition: None,
+                    transition: "nextStep".into(),
+                }],
                 default_condition: None,
             }),
         };
 
-        let result = execute(&named, &SwitchTask {
-            conditions: vec![
-                SwitchCondition { condition: None, transition: "nextStep".into() },
-            ],
-            default_condition: None,
-        }, &inst, &expr, &clock);
+        let result = execute(
+            &named,
+            &SwitchTask {
+                conditions: vec![SwitchCondition {
+                    condition: None,
+                    transition: "nextStep".into(),
+                }],
+                default_condition: None,
+            },
+            &inst,
+            &expr,
+            &clock,
+        );
 
         match result {
             StepResult::Goto { target, .. } => assert_eq!(target, "nextStep"),

@@ -78,15 +78,29 @@ mod tests {
         let inst = make_inst();
         let named = NamedTask {
             name: "setResult".into(),
-            task: Task::Set(SetTask { variable: "result".into(), value: "42".into() }),
+            task: Task::Set(SetTask {
+                variable: "result".into(),
+                value: "42".into(),
+            }),
         };
 
-        let result = execute(&named, &SetTask {
-            variable: "result".into(), value: "42".into(),
-        }, &inst, &expr, &clock);
+        let result = execute(
+            &named,
+            &SetTask {
+                variable: "result".into(),
+                value: "42".into(),
+            },
+            &inst,
+            &expr,
+            &clock,
+        );
 
         match result {
-            StepResult::SetVariable { variable, value, frame } => {
+            StepResult::SetVariable {
+                variable,
+                value,
+                frame,
+            } => {
                 assert_eq!(variable, "result");
                 // 整数按 i64 解析
                 assert_eq!(value, serde_json::json!(42));
@@ -105,15 +119,27 @@ mod tests {
         // expression evaluator supports +, -, not *; use .amount + .amount
         let named = NamedTask {
             name: "doubleAmount".into(),
-            task: Task::Set(SetTask { variable: "doubled".into(), value: ".amount + .amount".into() }),
+            task: Task::Set(SetTask {
+                variable: "doubled".into(),
+                value: ".amount + .amount".into(),
+            }),
         };
 
-        let result = execute(&named, &SetTask {
-            variable: "doubled".into(), value: ".amount + .amount".into(),
-        }, &inst, &expr, &clock);
+        let result = execute(
+            &named,
+            &SetTask {
+                variable: "doubled".into(),
+                value: ".amount + .amount".into(),
+            },
+            &inst,
+            &expr,
+            &clock,
+        );
 
         match result {
-            StepResult::SetVariable { variable, value, .. } => {
+            StepResult::SetVariable {
+                variable, value, ..
+            } => {
                 assert_eq!(variable, "doubled");
                 // 整数保持
                 assert_eq!(value, serde_json::json!(1000));
@@ -129,15 +155,27 @@ mod tests {
         let inst = make_inst();
         let named = NamedTask {
             name: "concat".into(),
-            task: Task::Set(SetTask { variable: "greeting".into(), value: "\"Hello, \" + .name".into() }),
+            task: Task::Set(SetTask {
+                variable: "greeting".into(),
+                value: "\"Hello, \" + .name".into(),
+            }),
         };
 
-        let result = execute(&named, &SetTask {
-            variable: "greeting".into(), value: "\"Hello, \" + .name".into(),
-        }, &inst, &expr, &clock);
+        let result = execute(
+            &named,
+            &SetTask {
+                variable: "greeting".into(),
+                value: "\"Hello, \" + .name".into(),
+            },
+            &inst,
+            &expr,
+            &clock,
+        );
 
         match result {
-            StepResult::SetVariable { variable, value, .. } => {
+            StepResult::SetVariable {
+                variable, value, ..
+            } => {
                 assert_eq!(variable, "greeting");
                 assert_eq!(value, serde_json::json!("Hello, test"));
             }
@@ -152,15 +190,27 @@ mod tests {
         let inst = make_inst();
         let named = NamedTask {
             name: "getAmount".into(),
-            task: Task::Set(SetTask { variable: "copied".into(), value: ".amount".into() }),
+            task: Task::Set(SetTask {
+                variable: "copied".into(),
+                value: ".amount".into(),
+            }),
         };
 
-        let result = execute(&named, &SetTask {
-            variable: "copied".into(), value: ".amount".into(),
-        }, &inst, &expr, &clock);
+        let result = execute(
+            &named,
+            &SetTask {
+                variable: "copied".into(),
+                value: ".amount".into(),
+            },
+            &inst,
+            &expr,
+            &clock,
+        );
 
         match result {
-            StepResult::SetVariable { variable, value, .. } => {
+            StepResult::SetVariable {
+                variable, value, ..
+            } => {
                 assert_eq!(variable, "copied");
                 assert_eq!(value, serde_json::json!(500));
             }
@@ -176,15 +226,27 @@ mod tests {
         let inst = make_inst();
         let named = NamedTask {
             name: "unknownExpr".into(),
-            task: Task::Set(SetTask { variable: "x".into(), value: "!!!invalid!!!".into() }),
+            task: Task::Set(SetTask {
+                variable: "x".into(),
+                value: "!!!invalid!!!".into(),
+            }),
         };
 
-        let result = execute(&named, &SetTask {
-            variable: "x".into(), value: "!!!invalid!!!".into(),
-        }, &inst, &expr, &clock);
+        let result = execute(
+            &named,
+            &SetTask {
+                variable: "x".into(),
+                value: "!!!invalid!!!".into(),
+            },
+            &inst,
+            &expr,
+            &clock,
+        );
 
         match result {
-            StepResult::SetVariable { variable, value, .. } => {
+            StepResult::SetVariable {
+                variable, value, ..
+            } => {
                 assert_eq!(variable, "x");
                 // 无法识别时返回 context
                 assert_eq!(value, inst.context);

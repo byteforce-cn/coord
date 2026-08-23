@@ -221,7 +221,9 @@ pub fn validate_value(
             })
             .count();
         if count != 1 {
-            errors.push(format!("{path}: value matches {count} oneOf branches (expected 1)"));
+            errors.push(format!(
+                "{path}: value matches {count} oneOf branches (expected 1)"
+            ));
         }
     }
     if let Some(not_schema) = schema.get("not") {
@@ -385,12 +387,24 @@ mod tests {
 
     #[test]
     fn test_combinators() {
-        assert!(check(r#"{"anyOf":[{"type":"string"},{"type":"number"}]}"#, json!(1)));
-        assert!(!check(r#"{"anyOf":[{"type":"string"},{"type":"boolean"}]}"#, json!(1)));
+        assert!(check(
+            r#"{"anyOf":[{"type":"string"},{"type":"number"}]}"#,
+            json!(1)
+        ));
+        assert!(!check(
+            r#"{"anyOf":[{"type":"string"},{"type":"boolean"}]}"#,
+            json!(1)
+        ));
         assert!(check(r#"{"not":{"type":"string"}}"#, json!(1)));
         assert!(!check(r#"{"not":{"type":"string"}}"#, json!("x")));
-        assert!(check(r#"{"allOf":[{"type":"object"},{"required":["a"]}]}"#, json!({"a":1})));
-        assert!(check(r#"{"oneOf":[{"type":"number"},{"type":"string"}]}"#, json!(1)));
+        assert!(check(
+            r#"{"allOf":[{"type":"object"},{"required":["a"]}]}"#,
+            json!({"a":1})
+        ));
+        assert!(check(
+            r#"{"oneOf":[{"type":"number"},{"type":"string"}]}"#,
+            json!(1)
+        ));
     }
 
     #[test]

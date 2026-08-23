@@ -12,113 +12,73 @@ use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
+use crate::feature_flags::{FeatureFlagService, FlagEvalContext};
 use crate::services::replication::{
     ReplicatedStore, ReplicationEntry, ReplicationError, ReplicationManager,
-};use crate::services::{
-    lock::LockService,
+};
+use crate::services::{
+    cache::CacheService,
+    circuit_breaker::CircuitBreakerService,
+    event_notification::{CloudEvent, Event, EventNotificationService},
     idgen::IdGenService,
     leader_election::{LeaderElectionService, LeaderRole},
-    event_notification::{EventNotificationService, Event, CloudEvent},
-    cache::CacheService,
+    lock::LockService,
     mq::{MessageQueueService, TopicConfig},
-    scheduler::SchedulerService,
-    workflow::{WorkflowService, WorkflowInstance, WorkflowState},
-    policy::{PolicyService, AccessRequest},
-    transit::TransitService,
-    circuit_breaker::CircuitBreakerService,
+    policy::{AccessRequest, PolicyService},
     rate_limiter::RateLimiterService,
+    scheduler::SchedulerService,
+    transit::TransitService,
+    workflow::{WorkflowInstance, WorkflowService, WorkflowState},
 };
-use crate::feature_flags::{FeatureFlagService, FlagEvalContext};
 
 use coord_proto::agent::{
-    lock_server::Lock,
-    LockAcquireRequest, LockAcquireResponse,
-    LockReleaseRequest, LockReleaseResponse,
-    LockRenewRequest, LockRenewResponse,
-    LockGetInfoRequest, LockGetInfoResponse,
-    id_gen_server::IdGen,
-    IdGenNextIdRequest, IdGenNextIdResponse,
-    IdGenNextBatchRequest, IdGenNextBatchResponse,
-    leader_election_server::LeaderElection,
-    LeaderCampaignRequest, LeaderCampaignResponse,
-    LeaderResignRequest, LeaderResignResponse,
-    LeaderGetLeaderRequest, LeaderGetLeaderResponse,
-    LeaderWatchRequest, LeaderWatchEvent,
-    event_server::Event as EventSvc,
-    EventPublishRequest, EventPublishResponse,
-    EventSubscribeRequest, CloudEventMessage,
-    EventUnsubscribeRequest, EventUnsubscribeResponse,
-    cache_server::Cache,
-    CacheGetRequest, CacheGetResponse,
-    CacheSetRequest, CacheSetResponse,
-    CacheDeleteRequest, CacheDeleteResponse,
-    CacheHGetRequest, CacheHGetResponse,
-    CacheHSetRequest, CacheHSetResponse,
-    CacheHGetAllRequest, CacheHGetAllResponse,
-    CacheLPushRequest, CacheLPushResponse,
-    CacheLRangeRequest, CacheLRangeResponse,
-    CacheRPopRequest, CacheRPopResponse,
-    CacheLLenRequest, CacheLLenResponse,
-    CacheSAddRequest, CacheSAddResponse,
-    CacheSMembersRequest, CacheSMembersResponse,
-    mq_server::Mq,
-    MqCreateTopicRequest, MqCreateTopicResponse,
-    MqPublishRequest, MqPublishResponse,
-    MqSubscribeRequest, MqMessage,
-    MqAckRequest, MqAckResponse,
-    MqPollRequest, MqPollResponse,
-    MqPollDlqRequest, MqPollDlqResponse,
-    scheduler_server::Scheduler,
-    SchedulerRegisterJobRequest, SchedulerRegisterJobResponse,
-    SchedulerClaimJobRequest, SchedulerClaimJobResponse,
-    SchedulerHeartbeatRequest, SchedulerHeartbeatResponse,
-    SchedulerCompleteJobRequest, SchedulerCompleteJobResponse,
-    workflow_server::Workflow,
-    WorkflowStartRequest, WorkflowStartResponse,
-    WorkflowGetStatusRequest, WorkflowGetStatusResponse,
-    WorkflowSignalRequest, WorkflowSignalResponse,
-    WorkflowCancelRequest, WorkflowCancelResponse,
-    WorkflowDeployRequest, WorkflowDeployResponse,
-    WorkflowListDefinitionsRequest, WorkflowListDefinitionsResponse,
-    WorkflowDefinitionSummary,
-    WorkflowGetDefinitionRequest, WorkflowGetDefinitionResponse,
+    cache_server::Cache, circuit_breaker_server::CircuitBreaker, event_server::Event as EventSvc,
+    feature_flags_server::FeatureFlags, id_gen_server::IdGen,
+    leader_election_server::LeaderElection, lock_server::Lock, mq_server::Mq,
+    policy_server::Policy, rate_limiter_server::RateLimiter, replica_server::Replica,
+    scheduler_server::Scheduler, transit_server::Transit, workflow_server::Workflow,
+    CacheDeleteRequest, CacheDeleteResponse, CacheGetRequest, CacheGetResponse,
+    CacheHGetAllRequest, CacheHGetAllResponse, CacheHGetRequest, CacheHGetResponse,
+    CacheHSetRequest, CacheHSetResponse, CacheLLenRequest, CacheLLenResponse, CacheLPushRequest,
+    CacheLPushResponse, CacheLRangeRequest, CacheLRangeResponse, CacheRPopRequest,
+    CacheRPopResponse, CacheSAddRequest, CacheSAddResponse, CacheSMembersRequest,
+    CacheSMembersResponse, CacheSetRequest, CacheSetResponse, CircuitBreakerGetStateRequest,
+    CircuitBreakerGetStateResponse, CircuitBreakerReportFailureRequest,
+    CircuitBreakerReportFailureResponse, CircuitBreakerReportSuccessRequest,
+    CircuitBreakerReportSuccessResponse, CircuitBreakerResetRequest, CircuitBreakerResetResponse,
+    CloudEventMessage, EventPublishRequest, EventPublishResponse, EventSubscribeRequest,
+    EventUnsubscribeRequest, EventUnsubscribeResponse, FeatureFlagEvaluateRequest,
+    FeatureFlagEvaluateResponse, FeatureFlagIsEnabledRequest, FeatureFlagIsEnabledResponse,
+    IdGenNextBatchRequest, IdGenNextBatchResponse, IdGenNextIdRequest, IdGenNextIdResponse,
+    LeaderCampaignRequest, LeaderCampaignResponse, LeaderGetLeaderRequest, LeaderGetLeaderResponse,
+    LeaderResignRequest, LeaderResignResponse, LeaderWatchEvent, LeaderWatchRequest,
+    LockAcquireRequest, LockAcquireResponse, LockGetInfoRequest, LockGetInfoResponse,
+    LockReleaseRequest, LockReleaseResponse, LockRenewRequest, LockRenewResponse, MqAckRequest,
+    MqAckResponse, MqCreateTopicRequest, MqCreateTopicResponse, MqMessage, MqPollDlqRequest,
+    MqPollDlqResponse, MqPollRequest, MqPollResponse, MqPublishRequest, MqPublishResponse,
+    MqSubscribeRequest, PolicyBundleInfo, PolicyBundleVersionInfo, PolicyCheckPermissionRequest,
+    PolicyCheckPermissionResponse, PolicyDeleteBundleRequest, PolicyDeleteBundleResponse,
+    PolicyEvaluateRequest, PolicyEvaluateResponse, PolicyExplainRequest, PolicyExplainResponse,
+    PolicyListBundleVersionsRequest, PolicyListBundleVersionsResponse, PolicyListBundlesRequest,
+    PolicyListBundlesResponse, PolicyPutBundleRequest, PolicyPutBundleResponse,
+    PolicyRollbackBundleRequest, PolicyRollbackBundleResponse, PolicySetBundleEnabledRequest,
+    PolicySetBundleEnabledResponse, RateLimiterAllowRequest, RateLimiterAllowResponse,
+    ReplicaApplyRequest, ReplicaApplyResponse, ReplicaEntry as ReplicaEntryProto,
+    ReplicaHeartbeatRequest, ReplicaHeartbeatResponse, ReplicaReconcileRequest,
+    ReplicaShardProgress, SchedulerClaimJobRequest, SchedulerClaimJobResponse,
+    SchedulerCompleteJobRequest, SchedulerCompleteJobResponse, SchedulerHeartbeatRequest,
+    SchedulerHeartbeatResponse, SchedulerRegisterJobRequest, SchedulerRegisterJobResponse,
+    TransitDecryptRequest, TransitDecryptResponse, TransitEncryptRequest, TransitEncryptResponse,
+    TransitHmacSignRequest, TransitHmacSignResponse, TransitHmacVerifyRequest,
+    TransitHmacVerifyResponse, WorkflowCancelRequest, WorkflowCancelResponse,
+    WorkflowDefinitionSummary, WorkflowDefinitionVersion, WorkflowDeployRequest,
+    WorkflowDeployResponse, WorkflowGetDefinitionRequest, WorkflowGetDefinitionResponse,
+    WorkflowGetStatusRequest, WorkflowGetStatusResponse, WorkflowInstanceSummary,
     WorkflowListDefinitionVersionsRequest, WorkflowListDefinitionVersionsResponse,
-    WorkflowDefinitionVersion,
-    WorkflowRollbackDefinitionRequest, WorkflowRollbackDefinitionResponse,
-    WorkflowListInstancesRequest, WorkflowListInstancesResponse,
-    WorkflowInstanceSummary,
-    policy_server::Policy,
-    PolicyCheckPermissionRequest, PolicyCheckPermissionResponse,
-    PolicyEvaluateRequest, PolicyEvaluateResponse,
-    PolicyExplainRequest, PolicyExplainResponse,
-    PolicyPutBundleRequest, PolicyPutBundleResponse,
-    PolicyDeleteBundleRequest, PolicyDeleteBundleResponse,
-    PolicyListBundlesRequest, PolicyListBundlesResponse,
-    PolicySetBundleEnabledRequest, PolicySetBundleEnabledResponse,
-    PolicyRollbackBundleRequest, PolicyRollbackBundleResponse,
-    PolicyListBundleVersionsRequest, PolicyListBundleVersionsResponse,
-    PolicyBundleInfo, PolicyBundleVersionInfo,
-    transit_server::Transit,
-    TransitEncryptRequest, TransitEncryptResponse,
-    TransitDecryptRequest, TransitDecryptResponse,
-    TransitHmacSignRequest, TransitHmacSignResponse,
-    TransitHmacVerifyRequest, TransitHmacVerifyResponse,
-    circuit_breaker_server::CircuitBreaker,
-    CircuitBreakerGetStateRequest, CircuitBreakerGetStateResponse,
-    CircuitBreakerReportSuccessRequest, CircuitBreakerReportSuccessResponse,
-    CircuitBreakerReportFailureRequest, CircuitBreakerReportFailureResponse,
-    CircuitBreakerResetRequest, CircuitBreakerResetResponse,
-    rate_limiter_server::RateLimiter,
-    RateLimiterAllowRequest, RateLimiterAllowResponse,
-    feature_flags_server::FeatureFlags,
-    FeatureFlagIsEnabledRequest, FeatureFlagIsEnabledResponse,
-    FeatureFlagEvaluateRequest, FeatureFlagEvaluateResponse,
-    replica_server::Replica,
-    ReplicaApplyRequest, ReplicaApplyResponse,
-    ReplicaReconcileRequest,
-    ReplicaHeartbeatRequest, ReplicaHeartbeatResponse,
-    ReplicaShardProgress,
-    ReplicaEntry as ReplicaEntryProto,
+    WorkflowListDefinitionsRequest, WorkflowListDefinitionsResponse, WorkflowListInstancesRequest,
+    WorkflowListInstancesResponse, WorkflowRollbackDefinitionRequest,
+    WorkflowRollbackDefinitionResponse, WorkflowSignalRequest, WorkflowSignalResponse,
+    WorkflowStartRequest, WorkflowStartResponse,
 };
 
 use tonic::{Request, Response, Status};
@@ -235,7 +195,14 @@ impl LeaderElection for LeaderElectionService {
         request: Request<LeaderCampaignRequest>,
     ) -> Result<Response<LeaderCampaignResponse>, Status> {
         let req = request.into_inner();
-        match LeaderElectionService::campaign(self, &req.group_name, &req.candidate_id, req.ttl_seconds as u64).await {
+        match LeaderElectionService::campaign(
+            self,
+            &req.group_name,
+            &req.candidate_id,
+            req.ttl_seconds as u64,
+        )
+        .await
+        {
             Ok(LeaderRole::Leader) => Ok(Response::new(LeaderCampaignResponse {
                 elected: true,
                 lease_id: 0,
@@ -297,11 +264,15 @@ impl LeaderElection for LeaderElectionService {
                                 LeaderRole::Leader => 1i32,
                                 _ => 2i32,
                             };
-                            if tx.send(Ok(LeaderWatchEvent {
-                                r#type: event_type,
-                                group_name: group,
-                                leader_id: String::new(),
-                            })).await.is_err() {
+                            if tx
+                                .send(Ok(LeaderWatchEvent {
+                                    r#type: event_type,
+                                    group_name: group,
+                                    leader_id: String::new(),
+                                }))
+                                .await
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -391,18 +362,31 @@ impl EventSvc for EventNotificationService {
 
 #[tonic::async_trait]
 impl Cache for CacheService {
-    async fn get(&self, request: Request<CacheGetRequest>) -> Result<Response<CacheGetResponse>, Status> {
+    async fn get(
+        &self,
+        request: Request<CacheGetRequest>,
+    ) -> Result<Response<CacheGetResponse>, Status> {
         let req = request.into_inner();
         match self.string_get(&req.key) {
             Ok(Some(value)) => Ok(Response::new(CacheGetResponse { value, found: true })),
-            Ok(None) => Ok(Response::new(CacheGetResponse { value: vec![], found: false })),
+            Ok(None) => Ok(Response::new(CacheGetResponse {
+                value: vec![],
+                found: false,
+            })),
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
 
-    async fn set(&self, request: Request<CacheSetRequest>) -> Result<Response<CacheSetResponse>, Status> {
+    async fn set(
+        &self,
+        request: Request<CacheSetRequest>,
+    ) -> Result<Response<CacheSetResponse>, Status> {
         let req = request.into_inner();
-        let ttl = if req.ttl_seconds > 0 { Some(req.ttl_seconds as u64) } else { None };
+        let ttl = if req.ttl_seconds > 0 {
+            Some(req.ttl_seconds as u64)
+        } else {
+            None
+        };
         if self.replication_enabled() {
             self.string_put_replicated(&req.key, req.value, ttl)
                 .await
@@ -414,28 +398,41 @@ impl Cache for CacheService {
         Ok(Response::new(CacheSetResponse {}))
     }
 
-    async fn delete(&self, request: Request<CacheDeleteRequest>) -> Result<Response<CacheDeleteResponse>, Status> {
+    async fn delete(
+        &self,
+        request: Request<CacheDeleteRequest>,
+    ) -> Result<Response<CacheDeleteResponse>, Status> {
         let req = request.into_inner();
         let deleted = if self.replication_enabled() {
             self.string_delete_replicated(&req.key)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?
         } else {
-            self.string_delete(&req.key).map_err(|e| Status::internal(e.to_string()))?
+            self.string_delete(&req.key)
+                .map_err(|e| Status::internal(e.to_string()))?
         };
         Ok(Response::new(CacheDeleteResponse { deleted }))
     }
 
-    async fn h_get(&self, request: Request<CacheHGetRequest>) -> Result<Response<CacheHGetResponse>, Status> {
+    async fn h_get(
+        &self,
+        request: Request<CacheHGetRequest>,
+    ) -> Result<Response<CacheHGetResponse>, Status> {
         let req = request.into_inner();
         match self.hash_field_get(&req.key, &req.field) {
             Ok(Some(value)) => Ok(Response::new(CacheHGetResponse { value, found: true })),
-            Ok(None) => Ok(Response::new(CacheHGetResponse { value: vec![], found: false })),
+            Ok(None) => Ok(Response::new(CacheHGetResponse {
+                value: vec![],
+                found: false,
+            })),
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
 
-    async fn h_set(&self, request: Request<CacheHSetRequest>) -> Result<Response<CacheHSetResponse>, Status> {
+    async fn h_set(
+        &self,
+        request: Request<CacheHSetRequest>,
+    ) -> Result<Response<CacheHSetResponse>, Status> {
         let req = request.into_inner();
         if self.replication_enabled() {
             self.hash_field_put_replicated(&req.key, &req.field, req.value, None)
@@ -448,7 +445,10 @@ impl Cache for CacheService {
         Ok(Response::new(CacheHSetResponse {}))
     }
 
-    async fn h_get_all(&self, request: Request<CacheHGetAllRequest>) -> Result<Response<CacheHGetAllResponse>, Status> {
+    async fn h_get_all(
+        &self,
+        request: Request<CacheHGetAllRequest>,
+    ) -> Result<Response<CacheHGetAllResponse>, Status> {
         let req = request.into_inner();
         match self.hash_get_all(&req.key) {
             Ok(fields) => {
@@ -459,7 +459,10 @@ impl Cache for CacheService {
         }
     }
 
-    async fn l_push(&self, request: Request<CacheLPushRequest>) -> Result<Response<CacheLPushResponse>, Status> {
+    async fn l_push(
+        &self,
+        request: Request<CacheLPushRequest>,
+    ) -> Result<Response<CacheLPushResponse>, Status> {
         let req = request.into_inner();
         if self.replication_enabled() {
             self.list_push_left_replicated(&req.key, req.value, None)
@@ -475,7 +478,10 @@ impl Cache for CacheService {
         }
     }
 
-    async fn l_range(&self, request: Request<CacheLRangeRequest>) -> Result<Response<CacheLRangeResponse>, Status> {
+    async fn l_range(
+        &self,
+        request: Request<CacheLRangeRequest>,
+    ) -> Result<Response<CacheLRangeResponse>, Status> {
         let req = request.into_inner();
         match self.list_range(&req.key, req.start, req.stop) {
             Ok(values) => Ok(Response::new(CacheLRangeResponse { values })),
@@ -483,24 +489,36 @@ impl Cache for CacheService {
         }
     }
 
-    async fn r_pop(&self, request: Request<CacheRPopRequest>) -> Result<Response<CacheRPopResponse>, Status> {
+    async fn r_pop(
+        &self,
+        request: Request<CacheRPopRequest>,
+    ) -> Result<Response<CacheRPopResponse>, Status> {
         let req = request.into_inner();
         if self.replication_enabled() {
             match self.list_pop_replicated(&req.key, true).await {
                 Ok(Some(value)) => Ok(Response::new(CacheRPopResponse { value, found: true })),
-                Ok(None) => Ok(Response::new(CacheRPopResponse { value: vec![], found: false })),
+                Ok(None) => Ok(Response::new(CacheRPopResponse {
+                    value: vec![],
+                    found: false,
+                })),
                 Err(e) => Err(Status::internal(e.to_string())),
             }
         } else {
             match self.list_pop_right(&req.key) {
                 Ok(Some(value)) => Ok(Response::new(CacheRPopResponse { value, found: true })),
-                Ok(None) => Ok(Response::new(CacheRPopResponse { value: vec![], found: false })),
+                Ok(None) => Ok(Response::new(CacheRPopResponse {
+                    value: vec![],
+                    found: false,
+                })),
                 Err(e) => Err(Status::internal(e.to_string())),
             }
         }
     }
 
-    async fn l_len(&self, request: Request<CacheLLenRequest>) -> Result<Response<CacheLLenResponse>, Status> {
+    async fn l_len(
+        &self,
+        request: Request<CacheLLenRequest>,
+    ) -> Result<Response<CacheLLenResponse>, Status> {
         let req = request.into_inner();
         match self.list_length(&req.key) {
             Ok(len) => Ok(Response::new(CacheLLenResponse { length: len as i64 })),
@@ -508,7 +526,10 @@ impl Cache for CacheService {
         }
     }
 
-    async fn s_add(&self, request: Request<CacheSAddRequest>) -> Result<Response<CacheSAddResponse>, Status> {
+    async fn s_add(
+        &self,
+        request: Request<CacheSAddRequest>,
+    ) -> Result<Response<CacheSAddResponse>, Status> {
         let req = request.into_inner();
         if self.replication_enabled() {
             self.set_add_replicated(&req.key, req.member, None)
@@ -521,7 +542,10 @@ impl Cache for CacheService {
         Ok(Response::new(CacheSAddResponse {}))
     }
 
-    async fn s_members(&self, request: Request<CacheSMembersRequest>) -> Result<Response<CacheSMembersResponse>, Status> {
+    async fn s_members(
+        &self,
+        request: Request<CacheSMembersRequest>,
+    ) -> Result<Response<CacheSMembersResponse>, Status> {
         let req = request.into_inner();
         match self.set_members(&req.key) {
             Ok(members) => Ok(Response::new(CacheSMembersResponse { members })),
@@ -536,7 +560,10 @@ impl Cache for CacheService {
 
 #[tonic::async_trait]
 impl Mq for MessageQueueService {
-    async fn create_topic(&self, request: Request<MqCreateTopicRequest>) -> Result<Response<MqCreateTopicResponse>, Status> {
+    async fn create_topic(
+        &self,
+        request: Request<MqCreateTopicRequest>,
+    ) -> Result<Response<MqCreateTopicResponse>, Status> {
         let req = request.into_inner();
         let config = TopicConfig {
             partitions: req.partitions as u32,
@@ -548,25 +575,43 @@ impl Mq for MessageQueueService {
         Ok(Response::new(MqCreateTopicResponse {}))
     }
 
-    async fn publish(&self, request: Request<MqPublishRequest>) -> Result<Response<MqPublishResponse>, Status> {
+    async fn publish(
+        &self,
+        request: Request<MqPublishRequest>,
+    ) -> Result<Response<MqPublishResponse>, Status> {
         let req = request.into_inner();
-        let partition = if req.partition >= 0 { req.partition as u32 } else { 0 };
+        let partition = if req.partition >= 0 {
+            req.partition as u32
+        } else {
+            0
+        };
         if self.replication_enabled() {
-            match self.produce_replicated(&req.topic, partition, req.payload, None).await {
-                Ok(offset) => Ok(Response::new(MqPublishResponse { offset: offset as i64 })),
+            match self
+                .produce_replicated(&req.topic, partition, req.payload, None)
+                .await
+            {
+                Ok(offset) => Ok(Response::new(MqPublishResponse {
+                    offset: offset as i64,
+                })),
                 Err(e) => Err(Status::internal(e.to_string())),
             }
         } else {
             match self.produce(&req.topic, partition, req.payload, None) {
-                Ok(offset) => Ok(Response::new(MqPublishResponse { offset: offset as i64 })),
+                Ok(offset) => Ok(Response::new(MqPublishResponse {
+                    offset: offset as i64,
+                })),
                 Err(e) => Err(Status::internal(e.to_string())),
             }
         }
     }
 
-    type SubscribeStream = std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<MqMessage, Status>> + Send>>;
+    type SubscribeStream =
+        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<MqMessage, Status>> + Send>>;
 
-    async fn subscribe(&self, request: Request<MqSubscribeRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
+    async fn subscribe(
+        &self,
+        request: Request<MqSubscribeRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
         let req = request.into_inner();
         // C4：复制启用时仅分区 Leader 推送；Follower 返回明确「非 Leader」错误（Q4）
         if let Some(rm) = self.replication_manager() {
@@ -611,29 +656,57 @@ impl Mq for MessageQueueService {
                 )));
             }
         }
-        let partition = if req.partition >= 0 { req.partition as u32 } else { 0 };
-        self.commit_offset(&req.consumer_group, &req.topic, partition, req.offset as u64)
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let partition = if req.partition >= 0 {
+            req.partition as u32
+        } else {
+            0
+        };
+        self.commit_offset(
+            &req.consumer_group,
+            &req.topic,
+            partition,
+            req.offset as u64,
+        )
+        .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(MqAckResponse {}))
     }
 
     /// Phase 1: 按 offset 批量拉取（poll + ack 即得 at-least-once + 增量游标）。
     /// 复用引擎 `consume()`（从 start_offset 读最多 max_count 条）。
-    async fn poll(&self, request: Request<MqPollRequest>) -> Result<Response<MqPollResponse>, Status> {
+    async fn poll(
+        &self,
+        request: Request<MqPollRequest>,
+    ) -> Result<Response<MqPollResponse>, Status> {
         let req = request.into_inner();
-        let partition = if req.partition >= 0 { req.partition as u32 } else { 0 };
-        let max_count = if req.max_count <= 0 { 100 } else { req.max_count as u64 };
+        let partition = if req.partition >= 0 {
+            req.partition as u32
+        } else {
+            0
+        };
+        let max_count = if req.max_count <= 0 {
+            100
+        } else {
+            req.max_count as u64
+        };
 
-        match self.consume(&req.topic, partition, req.start_offset.max(0) as u64, max_count) {
+        match self.consume(
+            &req.topic,
+            partition,
+            req.start_offset.max(0) as u64,
+            max_count,
+        ) {
             Ok(records) => {
-                let messages = records.into_iter().map(|r| MqMessage {
-                    topic: req.topic.clone(),
-                    partition: partition as i32,
-                    offset: r.offset as i64,
-                    key: Vec::new(), // 引擎当前不持久化 key，见 mq.rs MessageRecord
-                    payload: r.payload,
-                    timestamp: r.timestamp as i64,
-                }).collect();
+                let messages = records
+                    .into_iter()
+                    .map(|r| MqMessage {
+                        topic: req.topic.clone(),
+                        partition: partition as i32,
+                        offset: r.offset as i64,
+                        key: Vec::new(), // 引擎当前不持久化 key，见 mq.rs MessageRecord
+                        payload: r.payload,
+                        timestamp: r.timestamp as i64,
+                    })
+                    .collect();
                 Ok(Response::new(MqPollResponse { messages }))
             }
             Err(e) => Err(Status::internal(e.to_string())),
@@ -641,21 +714,35 @@ impl Mq for MessageQueueService {
     }
 
     /// 读取死信队列（DLQ 可观测）
-    async fn poll_dlq(&self, request: Request<MqPollDlqRequest>) -> Result<Response<MqPollDlqResponse>, Status> {
+    async fn poll_dlq(
+        &self,
+        request: Request<MqPollDlqRequest>,
+    ) -> Result<Response<MqPollDlqResponse>, Status> {
         let req = request.into_inner();
-        let partition = if req.partition >= 0 { req.partition as u32 } else { 0 };
-        let max_count = if req.max_count <= 0 { 100 } else { req.max_count as u64 };
+        let partition = if req.partition >= 0 {
+            req.partition as u32
+        } else {
+            0
+        };
+        let max_count = if req.max_count <= 0 {
+            100
+        } else {
+            req.max_count as u64
+        };
 
         match self.consume_dlq(&req.topic, partition, max_count) {
             Ok(records) => {
-                let messages = records.into_iter().map(|r| MqMessage {
-                    topic: req.topic.clone(),
-                    partition: partition as i32,
-                    offset: r.offset as i64,
-                    key: Vec::new(),
-                    payload: r.payload,
-                    timestamp: r.timestamp as i64,
-                }).collect();
+                let messages = records
+                    .into_iter()
+                    .map(|r| MqMessage {
+                        topic: req.topic.clone(),
+                        partition: partition as i32,
+                        offset: r.offset as i64,
+                        key: Vec::new(),
+                        payload: r.payload,
+                        timestamp: r.timestamp as i64,
+                    })
+                    .collect();
                 Ok(Response::new(MqPollDlqResponse { messages }))
             }
             Err(e) => Err(Status::internal(e.to_string())),
@@ -705,9 +792,15 @@ impl ReplicatedStore for ReplicaRouter {
 
     fn last_local_sequence(&self, shard: &str) -> u64 {
         if shard.starts_with("mq:") {
-            self.mq.as_ref().map(|m| m.last_local_sequence(shard)).unwrap_or(0)
+            self.mq
+                .as_ref()
+                .map(|m| m.last_local_sequence(shard))
+                .unwrap_or(0)
         } else {
-            self.cache.as_ref().map(|c| c.last_local_sequence(shard)).unwrap_or(0)
+            self.cache
+                .as_ref()
+                .map(|c| c.last_local_sequence(shard))
+                .unwrap_or(0)
         }
     }
 
@@ -753,7 +846,8 @@ impl Replica for ReplicaRouter {
             .ok_or_else(|| Status::invalid_argument("missing entry"))?;
         let entry = ReplicationEntry::from_proto(&proto)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        self.apply_entry(&entry).map_err(|e| Status::internal(e.to_string()))?;
+        self.apply_entry(&entry)
+            .map_err(|e| Status::internal(e.to_string()))?;
         let last = self.last_local_sequence(&entry.shard_id);
         Ok(Response::new(ReplicaApplyResponse {
             applied: true,
@@ -809,22 +903,35 @@ impl Replica for ReplicaRouter {
 
 #[tonic::async_trait]
 impl Scheduler for SchedulerService {
-    async fn register_job(&self, request: Request<SchedulerRegisterJobRequest>) -> Result<Response<SchedulerRegisterJobResponse>, Status> {
+    async fn register_job(
+        &self,
+        request: Request<SchedulerRegisterJobRequest>,
+    ) -> Result<Response<SchedulerRegisterJobResponse>, Status> {
         let req = request.into_inner();
         let task = crate::services::scheduler::ScheduleTask {
             task_id: helper_uuid(),
-            task_type: crate::services::scheduler::TaskType::Cron { expression: req.cron_expression },
+            task_type: crate::services::scheduler::TaskType::Cron {
+                expression: req.cron_expression,
+            },
             description: req.name.clone(),
-            metadata: [
-                ("payload".to_string(), String::from_utf8_lossy(&req.payload).to_string()),
-            ].into_iter().collect(),
+            metadata: [(
+                "payload".to_string(),
+                String::from_utf8_lossy(&req.payload).to_string(),
+            )]
+            .into_iter()
+            .collect(),
         };
         self.register_task(task)
             .map_err(|e| Status::internal(e.to_string()))?;
-        Ok(Response::new(SchedulerRegisterJobResponse { job_id: req.name }))
+        Ok(Response::new(SchedulerRegisterJobResponse {
+            job_id: req.name,
+        }))
     }
 
-    async fn claim_job(&self, request: Request<SchedulerClaimJobRequest>) -> Result<Response<SchedulerClaimJobResponse>, Status> {
+    async fn claim_job(
+        &self,
+        request: Request<SchedulerClaimJobRequest>,
+    ) -> Result<Response<SchedulerClaimJobResponse>, Status> {
         let req = request.into_inner();
         let worker_id = helper_uuid();
         match self.try_claim(&req.name, &worker_id) {
@@ -838,14 +945,20 @@ impl Scheduler for SchedulerService {
         }
     }
 
-    async fn heartbeat(&self, request: Request<SchedulerHeartbeatRequest>) -> Result<Response<SchedulerHeartbeatResponse>, Status> {
+    async fn heartbeat(
+        &self,
+        request: Request<SchedulerHeartbeatRequest>,
+    ) -> Result<Response<SchedulerHeartbeatResponse>, Status> {
         let req = request.into_inner();
         self.renew_claim(&req.job_id, "worker")
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(SchedulerHeartbeatResponse {}))
     }
 
-    async fn complete_job(&self, request: Request<SchedulerCompleteJobRequest>) -> Result<Response<SchedulerCompleteJobResponse>, Status> {
+    async fn complete_job(
+        &self,
+        request: Request<SchedulerCompleteJobRequest>,
+    ) -> Result<Response<SchedulerCompleteJobResponse>, Status> {
         let req = request.into_inner();
         self.mark_completed(&req.job_id, "worker")
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -859,18 +972,27 @@ impl Scheduler for SchedulerService {
 
 #[tonic::async_trait]
 impl Workflow for WorkflowService {
-    async fn start(&self, request: Request<WorkflowStartRequest>) -> Result<Response<WorkflowStartResponse>, Status> {
+    async fn start(
+        &self,
+        request: Request<WorkflowStartRequest>,
+    ) -> Result<Response<WorkflowStartResponse>, Status> {
         let req = request.into_inner();
         let instance_id = helper_uuid();
         // 从 definition_dsl 中提取工作流名称（支持 YAML/JSON）
         let wf_name = extract_workflow_name(&req.definition_dsl);
         let inst = WorkflowInstance::new(&instance_id, &wf_name, req.input);
-        self.start_instance(inst).await
+        self.start_instance(inst)
+            .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        Ok(Response::new(WorkflowStartResponse { workflow_id: instance_id }))
+        Ok(Response::new(WorkflowStartResponse {
+            workflow_id: instance_id,
+        }))
     }
 
-    async fn get_status(&self, request: Request<WorkflowGetStatusRequest>) -> Result<Response<WorkflowGetStatusResponse>, Status> {
+    async fn get_status(
+        &self,
+        request: Request<WorkflowGetStatusRequest>,
+    ) -> Result<Response<WorkflowGetStatusResponse>, Status> {
         let req = request.into_inner();
         match self.get_instance(&req.workflow_id).await {
             Ok(Some(inst)) => Ok(Response::new(WorkflowGetStatusResponse {
@@ -891,27 +1013,46 @@ impl Workflow for WorkflowService {
         }
     }
 
-    async fn signal(&self, request: Request<WorkflowSignalRequest>) -> Result<Response<WorkflowSignalResponse>, Status> {
+    async fn signal(
+        &self,
+        request: Request<WorkflowSignalRequest>,
+    ) -> Result<Response<WorkflowSignalResponse>, Status> {
         let req = request.into_inner();
-        self.signal_instance(&req.workflow_id, &req.signal_name, &req.payload).await
+        self.signal_instance(&req.workflow_id, &req.signal_name, &req.payload)
+            .await
             .map_err(|e| Status::internal(e.to_string()))?;
         tracing::info!(
             "Workflow signal: id={}, signal={}",
-            req.workflow_id, req.signal_name
+            req.workflow_id,
+            req.signal_name
         );
         Ok(Response::new(WorkflowSignalResponse {}))
     }
 
-    async fn cancel(&self, request: Request<WorkflowCancelRequest>) -> Result<Response<WorkflowCancelResponse>, Status> {
+    async fn cancel(
+        &self,
+        request: Request<WorkflowCancelRequest>,
+    ) -> Result<Response<WorkflowCancelResponse>, Status> {
         let req = request.into_inner();
-        self.transition_state(&req.workflow_id, WorkflowState::Running, WorkflowState::Cancelled).await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.transition_state(
+            &req.workflow_id,
+            WorkflowState::Running,
+            WorkflowState::Cancelled,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(WorkflowCancelResponse {}))
     }
 
-    async fn deploy(&self, request: Request<WorkflowDeployRequest>) -> Result<Response<WorkflowDeployResponse>, Status> {
+    async fn deploy(
+        &self,
+        request: Request<WorkflowDeployRequest>,
+    ) -> Result<Response<WorkflowDeployResponse>, Status> {
         let req = request.into_inner();
-        match self.deploy_definition(&req.namespace, &req.definition_yaml).await {
+        match self
+            .deploy_definition(&req.namespace, &req.definition_yaml)
+            .await
+        {
             Ok((workflow_id, version, name)) => Ok(Response::new(WorkflowDeployResponse {
                 workflow_id,
                 version,
@@ -922,24 +1063,36 @@ impl Workflow for WorkflowService {
         }
     }
 
-    async fn list_definitions(&self, request: Request<WorkflowListDefinitionsRequest>) -> Result<Response<WorkflowListDefinitionsResponse>, Status> {
+    async fn list_definitions(
+        &self,
+        request: Request<WorkflowListDefinitionsRequest>,
+    ) -> Result<Response<WorkflowListDefinitionsResponse>, Status> {
         let req = request.into_inner();
-        match self.list_definitions(&req.namespace, req.page_size, &req.page_token).await {
+        match self
+            .list_definitions(&req.namespace, req.page_size, &req.page_token)
+            .await
+        {
             Ok((definitions, next_token)) => Ok(Response::new(WorkflowListDefinitionsResponse {
-                definitions: definitions.into_iter().map(|d| WorkflowDefinitionSummary {
-                    workflow_id: d.id,
-                    name: d.name,
-                    version: d.version,
-                    status: d.status,
-                    created_at: d.created_at,
-                }).collect(),
+                definitions: definitions
+                    .into_iter()
+                    .map(|d| WorkflowDefinitionSummary {
+                        workflow_id: d.id,
+                        name: d.name,
+                        version: d.version,
+                        status: d.status,
+                        created_at: d.created_at,
+                    })
+                    .collect(),
                 next_page_token: next_token,
             })),
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
 
-    async fn get_definition(&self, request: Request<WorkflowGetDefinitionRequest>) -> Result<Response<WorkflowGetDefinitionResponse>, Status> {
+    async fn get_definition(
+        &self,
+        request: Request<WorkflowGetDefinitionRequest>,
+    ) -> Result<Response<WorkflowGetDefinitionResponse>, Status> {
         let req = request.into_inner();
         match self.get_definition_by_id(&req.workflow_id).await {
             Ok(def) => Ok(Response::new(WorkflowGetDefinitionResponse {
@@ -956,33 +1109,53 @@ impl Workflow for WorkflowService {
 
     // 遗留 WorkflowService（未注册，已被 WorkflowEngineService 取代）：
     // 版本化/回滚能力由 WorkflowEngineService 提供，此处显式返回 Unimplemented。
-    async fn list_definition_versions(&self, _request: Request<WorkflowListDefinitionVersionsRequest>) -> Result<Response<WorkflowListDefinitionVersionsResponse>, Status> {
+    async fn list_definition_versions(
+        &self,
+        _request: Request<WorkflowListDefinitionVersionsRequest>,
+    ) -> Result<Response<WorkflowListDefinitionVersionsResponse>, Status> {
         Err(Status::unimplemented(
             "workflow definition versioning is provided by WorkflowEngineService (phase4); legacy WorkflowService is deprecated",
         ))
     }
 
-    async fn rollback_definition(&self, _request: Request<WorkflowRollbackDefinitionRequest>) -> Result<Response<WorkflowRollbackDefinitionResponse>, Status> {
+    async fn rollback_definition(
+        &self,
+        _request: Request<WorkflowRollbackDefinitionRequest>,
+    ) -> Result<Response<WorkflowRollbackDefinitionResponse>, Status> {
         Err(Status::unimplemented(
             "workflow definition rollback is provided by WorkflowEngineService (phase4); legacy WorkflowService is deprecated",
         ))
     }
 
-    async fn list_instances(&self, request: Request<WorkflowListInstancesRequest>) -> Result<Response<WorkflowListInstancesResponse>, Status> {
+    async fn list_instances(
+        &self,
+        request: Request<WorkflowListInstancesRequest>,
+    ) -> Result<Response<WorkflowListInstancesResponse>, Status> {
         let req = request.into_inner();
-        match self.list_instances(&req.workflow_id, &req.namespace, req.page_size, &req.page_token).await {
+        match self
+            .list_instances(
+                &req.workflow_id,
+                &req.namespace,
+                req.page_size,
+                &req.page_token,
+            )
+            .await
+        {
             Ok((instances, next_token)) => Ok(Response::new(WorkflowListInstancesResponse {
-                instances: instances.into_iter().map(|i| WorkflowInstanceSummary {
-                    instance_id: i.id,
-                    workflow_id: i.workflow_id,
-                    state: i.state,
-                    started_at: i.started_at,
-                    updated_at: i.updated_at,
-                    definition_name: i.definition_name,
-                    namespace: String::new(),
-                    output_json: vec![],
-                    context_json: vec![],
-                }).collect(),
+                instances: instances
+                    .into_iter()
+                    .map(|i| WorkflowInstanceSummary {
+                        instance_id: i.id,
+                        workflow_id: i.workflow_id,
+                        state: i.state,
+                        started_at: i.started_at,
+                        updated_at: i.updated_at,
+                        definition_name: i.definition_name,
+                        namespace: String::new(),
+                        output_json: vec![],
+                        context_json: vec![],
+                    })
+                    .collect(),
                 next_page_token: next_token,
             })),
             Err(e) => Err(Status::internal(e.to_string())),
@@ -1017,7 +1190,10 @@ fn map_engine_error(e: WorkflowEngineError) -> Status {
 
 #[tonic::async_trait]
 impl Workflow for WorkflowEngineService {
-    async fn start(&self, request: Request<WorkflowStartRequest>) -> Result<Response<WorkflowStartResponse>, Status> {
+    async fn start(
+        &self,
+        request: Request<WorkflowStartRequest>,
+    ) -> Result<Response<WorkflowStartResponse>, Status> {
         let req = request.into_inner();
 
         // definition_id 与 definition_dsl 互斥（ISSUE-010 §1：startByDefinition 真契约）
@@ -1030,8 +1206,7 @@ impl Workflow for WorkflowEngineService {
         let input: serde_json::Value = if req.input.is_empty() {
             serde_json::Value::Null
         } else {
-            serde_json::from_slice(&req.input)
-                .unwrap_or(serde_json::Value::Null)
+            serde_json::from_slice(&req.input).unwrap_or(serde_json::Value::Null)
         };
 
         let namespace = "default";
@@ -1054,7 +1229,10 @@ impl Workflow for WorkflowEngineService {
         }))
     }
 
-    async fn get_status(&self, request: Request<WorkflowGetStatusRequest>) -> Result<Response<WorkflowGetStatusResponse>, Status> {
+    async fn get_status(
+        &self,
+        request: Request<WorkflowGetStatusRequest>,
+    ) -> Result<Response<WorkflowGetStatusResponse>, Status> {
         let req = request.into_inner();
         match self.get_instance(&req.workflow_id).await {
             Ok(Some(inst)) => {
@@ -1101,19 +1279,20 @@ impl Workflow for WorkflowEngineService {
                     .unwrap_or_default();
 
                 // 挂起元信息（SUSPENDED/WAITING 时返回）
-                let suspension = inst.suspension_meta.as_ref().map(|m| {
-                    coord_proto::agent::SuspensionMeta {
-                        reason: m.reason.clone(),
-                        until_ms: m.until_ms.unwrap_or(0),
-                        expected_signal: m.expected_signal.clone().unwrap_or_default(),
-                        event_type: m
-                            .event_filter
-                            .as_ref()
-                            .and_then(|f| f.event_type.clone())
-                            .unwrap_or_default(),
-                        service: m.service.clone().unwrap_or_default(),
-                    }
-                });
+                let suspension =
+                    inst.suspension_meta
+                        .as_ref()
+                        .map(|m| coord_proto::agent::SuspensionMeta {
+                            reason: m.reason.clone(),
+                            until_ms: m.until_ms.unwrap_or(0),
+                            expected_signal: m.expected_signal.clone().unwrap_or_default(),
+                            event_type: m
+                                .event_filter
+                                .as_ref()
+                                .and_then(|f| f.event_type.clone())
+                                .unwrap_or_default(),
+                            service: m.service.clone().unwrap_or_default(),
+                        });
 
                 Ok(Response::new(WorkflowGetStatusResponse {
                     workflow_id: inst.id,
@@ -1134,7 +1313,10 @@ impl Workflow for WorkflowEngineService {
         }
     }
 
-    async fn signal(&self, request: Request<WorkflowSignalRequest>) -> Result<Response<WorkflowSignalResponse>, Status> {
+    async fn signal(
+        &self,
+        request: Request<WorkflowSignalRequest>,
+    ) -> Result<Response<WorkflowSignalResponse>, Status> {
         let req = request.into_inner();
         let payload: serde_json::Value = if req.payload.is_empty() {
             serde_json::Value::Null
@@ -1148,14 +1330,22 @@ impl Workflow for WorkflowEngineService {
             Some(req.idempotency_key.as_str())
         };
 
-        self.resume_instance(&req.workflow_id, Some(&req.signal_name), Some(payload), idempotency_key)
-            .await
-            .map_err(map_engine_error)?;
+        self.resume_instance(
+            &req.workflow_id,
+            Some(&req.signal_name),
+            Some(payload),
+            idempotency_key,
+        )
+        .await
+        .map_err(map_engine_error)?;
 
         Ok(Response::new(WorkflowSignalResponse {}))
     }
 
-    async fn cancel(&self, request: Request<WorkflowCancelRequest>) -> Result<Response<WorkflowCancelResponse>, Status> {
+    async fn cancel(
+        &self,
+        request: Request<WorkflowCancelRequest>,
+    ) -> Result<Response<WorkflowCancelResponse>, Status> {
         let req = request.into_inner();
         self.cancel_instance(&req.workflow_id)
             .await
@@ -1163,7 +1353,10 @@ impl Workflow for WorkflowEngineService {
         Ok(Response::new(WorkflowCancelResponse {}))
     }
 
-    async fn deploy(&self, request: Request<WorkflowDeployRequest>) -> Result<Response<WorkflowDeployResponse>, Status> {
+    async fn deploy(
+        &self,
+        request: Request<WorkflowDeployRequest>,
+    ) -> Result<Response<WorkflowDeployResponse>, Status> {
         let req = request.into_inner();
         let workflow_id = self
             .deploy_definition(&req.namespace, &req.definition_yaml)
@@ -1186,11 +1379,21 @@ impl Workflow for WorkflowEngineService {
         }
     }
 
-    async fn list_definitions(&self, request: Request<WorkflowListDefinitionsRequest>) -> Result<Response<WorkflowListDefinitionsResponse>, Status> {
+    async fn list_definitions(
+        &self,
+        request: Request<WorkflowListDefinitionsRequest>,
+    ) -> Result<Response<WorkflowListDefinitionsResponse>, Status> {
         let req = request.into_inner();
-        let page_size = if req.page_size > 0 { req.page_size as usize } else { 50 };
+        let page_size = if req.page_size > 0 {
+            req.page_size as usize
+        } else {
+            50
+        };
 
-        match self.list_definitions(&req.namespace, page_size, Some(&req.page_token)).await {
+        match self
+            .list_definitions(&req.namespace, page_size, Some(&req.page_token))
+            .await
+        {
             Ok(defs) => {
                 let summaries: Vec<WorkflowDefinitionSummary> = defs
                     .into_iter()
@@ -1211,7 +1414,10 @@ impl Workflow for WorkflowEngineService {
         }
     }
 
-    async fn get_definition(&self, request: Request<WorkflowGetDefinitionRequest>) -> Result<Response<WorkflowGetDefinitionResponse>, Status> {
+    async fn get_definition(
+        &self,
+        request: Request<WorkflowGetDefinitionRequest>,
+    ) -> Result<Response<WorkflowGetDefinitionResponse>, Status> {
         let req = request.into_inner();
         match self.get_definition(&req.workflow_id).await {
             Ok(Some(def)) => Ok(Response::new(WorkflowGetDefinitionResponse {
@@ -1227,9 +1433,15 @@ impl Workflow for WorkflowEngineService {
         }
     }
 
-    async fn list_definition_versions(&self, request: Request<WorkflowListDefinitionVersionsRequest>) -> Result<Response<WorkflowListDefinitionVersionsResponse>, Status> {
+    async fn list_definition_versions(
+        &self,
+        request: Request<WorkflowListDefinitionVersionsRequest>,
+    ) -> Result<Response<WorkflowListDefinitionVersionsResponse>, Status> {
         let req = request.into_inner();
-        match self.list_definition_versions(&req.namespace, &req.name).await {
+        match self
+            .list_definition_versions(&req.namespace, &req.name)
+            .await
+        {
             Ok(defs) => {
                 let mut versions: Vec<WorkflowDefinitionVersion> = defs
                     .into_iter()
@@ -1241,15 +1453,23 @@ impl Workflow for WorkflowEngineService {
                     })
                     .collect();
                 versions.sort_by(|a, b| a.version.cmp(&b.version));
-                Ok(Response::new(WorkflowListDefinitionVersionsResponse { versions }))
+                Ok(Response::new(WorkflowListDefinitionVersionsResponse {
+                    versions,
+                }))
             }
             Err(e) => Err(Status::internal(e)),
         }
     }
 
-    async fn rollback_definition(&self, request: Request<WorkflowRollbackDefinitionRequest>) -> Result<Response<WorkflowRollbackDefinitionResponse>, Status> {
+    async fn rollback_definition(
+        &self,
+        request: Request<WorkflowRollbackDefinitionRequest>,
+    ) -> Result<Response<WorkflowRollbackDefinitionResponse>, Status> {
         let req = request.into_inner();
-        match self.rollback_definition(&req.namespace, &req.name, &req.version).await {
+        match self
+            .rollback_definition(&req.namespace, &req.name, &req.version)
+            .await
+        {
             Ok(def) => Ok(Response::new(WorkflowRollbackDefinitionResponse {
                 workflow_id: def.id.unwrap_or_default(),
                 version: def.document.version,
@@ -1260,11 +1480,21 @@ impl Workflow for WorkflowEngineService {
         }
     }
 
-    async fn list_instances(&self, request: Request<WorkflowListInstancesRequest>) -> Result<Response<WorkflowListInstancesResponse>, Status> {
+    async fn list_instances(
+        &self,
+        request: Request<WorkflowListInstancesRequest>,
+    ) -> Result<Response<WorkflowListInstancesResponse>, Status> {
         let req = request.into_inner();
-        let page_size = if req.page_size > 0 { req.page_size as usize } else { 50 };
+        let page_size = if req.page_size > 0 {
+            req.page_size as usize
+        } else {
+            50
+        };
 
-        match self.list_instances(Some(&req.namespace), None, page_size, Some(&req.page_token)).await {
+        match self
+            .list_instances(Some(&req.namespace), None, page_size, Some(&req.page_token))
+            .await
+        {
             Ok(instances) => {
                 let summaries: Vec<WorkflowInstanceSummary> = instances
                     .into_iter()
@@ -1285,7 +1515,8 @@ impl Workflow for WorkflowEngineService {
                             updated_at: i.updated_at,
                             definition_name: i.definition_name,
                             namespace: i.definition_ns,
-                            output_json: i.output
+                            output_json: i
+                                .output
                                 .map(|v| serde_json::to_vec(&v).unwrap_or_default())
                                 .unwrap_or_default(),
                             context_json: serde_json::to_vec(&i.context).unwrap_or_default(),
@@ -1308,11 +1539,16 @@ impl Workflow for WorkflowEngineService {
 
 #[tonic::async_trait]
 impl Policy for PolicyService {
-    async fn check_permission(&self, request: Request<PolicyCheckPermissionRequest>) -> Result<Response<PolicyCheckPermissionResponse>, Status> {
+    async fn check_permission(
+        &self,
+        request: Request<PolicyCheckPermissionRequest>,
+    ) -> Result<Response<PolicyCheckPermissionResponse>, Status> {
         let req = request.into_inner();
         let mut context = std::collections::HashMap::new();
         if !req.context.is_empty() {
-            if let Ok(map) = serde_json::from_slice::<std::collections::HashMap<String, String>>(&req.context) {
+            if let Ok(map) =
+                serde_json::from_slice::<std::collections::HashMap<String, String>>(&req.context)
+            {
                 context = map;
             }
         }
@@ -1324,7 +1560,10 @@ impl Policy for PolicyService {
         };
         match self.evaluate(&access_req) {
             Ok(decision) => {
-                let allowed = matches!(decision.effect, crate::services::policy::PolicyEffect::Allow);
+                let allowed = matches!(
+                    decision.effect,
+                    crate::services::policy::PolicyEffect::Allow
+                );
                 Ok(Response::new(PolicyCheckPermissionResponse {
                     allowed,
                     reason: decision.reason,
@@ -1334,7 +1573,10 @@ impl Policy for PolicyService {
         }
     }
 
-    async fn evaluate(&self, request: Request<PolicyEvaluateRequest>) -> Result<Response<PolicyEvaluateResponse>, Status> {
+    async fn evaluate(
+        &self,
+        request: Request<PolicyEvaluateRequest>,
+    ) -> Result<Response<PolicyEvaluateResponse>, Status> {
         let req = request.into_inner();
         if req.query.is_empty() {
             return Err(Status::invalid_argument("query must not be empty"));
@@ -1345,19 +1587,20 @@ impl Policy for PolicyService {
         // 同步 Rego 求值放到阻塞线程池，避免阻塞 agent 异步执行器。
         // error/deny 区分：求值错误（语法/输入）→ gRPC InvalidArgument；
         // deny/无匹配 → 成功响应且 result 为 false / null。
-        let value = tokio::task::spawn_blocking(move || {
-            opa.eval_query(&req.query, &input_json)
-        })
-        .await
-        .map_err(|e| Status::internal(format!("evaluate task failed: {e}")))?
-        .map_err(|e| Status::invalid_argument(e))?;
+        let value = tokio::task::spawn_blocking(move || opa.eval_query(&req.query, &input_json))
+            .await
+            .map_err(|e| Status::internal(format!("evaluate task failed: {e}")))?
+            .map_err(Status::invalid_argument)?;
 
         let result = serde_json::to_vec(&value)
             .map_err(|e| Status::internal(format!("serialize result: {e}")))?;
         Ok(Response::new(PolicyEvaluateResponse { result }))
     }
 
-    async fn explain(&self, request: Request<PolicyExplainRequest>) -> Result<Response<PolicyExplainResponse>, Status> {
+    async fn explain(
+        &self,
+        request: Request<PolicyExplainRequest>,
+    ) -> Result<Response<PolicyExplainResponse>, Status> {
         let req = request.into_inner();
         let input_json = String::from_utf8_lossy(&req.input).to_string();
         match PolicyService::explain(self, &req.query, &input_json) {
@@ -1368,9 +1611,15 @@ impl Policy for PolicyService {
         }
     }
 
-    async fn put_bundle(&self, request: Request<PolicyPutBundleRequest>) -> Result<Response<PolicyPutBundleResponse>, Status> {
+    async fn put_bundle(
+        &self,
+        request: Request<PolicyPutBundleRequest>,
+    ) -> Result<Response<PolicyPutBundleResponse>, Status> {
         let req = request.into_inner();
-        match self.put_bundle(&req.tenant_id, &req.namespace, &req.name, &req.rego_content).await {
+        match self
+            .put_bundle(&req.tenant_id, &req.namespace, &req.name, &req.rego_content)
+            .await
+        {
             Ok(info) => Ok(Response::new(PolicyPutBundleResponse {
                 bundle_id: info.bundle_id,
                 name: info.name,
@@ -1384,7 +1633,10 @@ impl Policy for PolicyService {
         }
     }
 
-    async fn delete_bundle(&self, request: Request<PolicyDeleteBundleRequest>) -> Result<Response<PolicyDeleteBundleResponse>, Status> {
+    async fn delete_bundle(
+        &self,
+        request: Request<PolicyDeleteBundleRequest>,
+    ) -> Result<Response<PolicyDeleteBundleResponse>, Status> {
         let req = request.into_inner();
         match self.delete_bundle(&req.bundle_id).await {
             Ok(deleted) => Ok(Response::new(PolicyDeleteBundleResponse { deleted })),
@@ -1392,21 +1644,31 @@ impl Policy for PolicyService {
         }
     }
 
-    async fn list_bundles(&self, request: Request<PolicyListBundlesRequest>) -> Result<Response<PolicyListBundlesResponse>, Status> {
+    async fn list_bundles(
+        &self,
+        request: Request<PolicyListBundlesRequest>,
+    ) -> Result<Response<PolicyListBundlesResponse>, Status> {
         let req = request.into_inner();
-        let tenant_id = if req.tenant_id.is_empty() { None } else { Some(req.tenant_id.as_str()) };
+        let tenant_id = if req.tenant_id.is_empty() {
+            None
+        } else {
+            Some(req.tenant_id.as_str())
+        };
         match self.list_bundles(tenant_id).await {
             Ok(bundles) => {
-                let proto_bundles: Vec<PolicyBundleInfo> = bundles.into_iter().map(|b| PolicyBundleInfo {
-                    bundle_id: b.bundle_id,
-                    name: b.name,
-                    namespace: b.namespace,
-                    tenant_id: b.tenant_id,
-                    enabled: b.enabled,
-                    created_at: b.created_at,
-                    updated_at: b.updated_at,
-                    version: b.version,
-                }).collect();
+                let proto_bundles: Vec<PolicyBundleInfo> = bundles
+                    .into_iter()
+                    .map(|b| PolicyBundleInfo {
+                        bundle_id: b.bundle_id,
+                        name: b.name,
+                        namespace: b.namespace,
+                        tenant_id: b.tenant_id,
+                        enabled: b.enabled,
+                        created_at: b.created_at,
+                        updated_at: b.updated_at,
+                        version: b.version,
+                    })
+                    .collect();
                 Ok(Response::new(PolicyListBundlesResponse {
                     bundles: proto_bundles,
                 }))
@@ -1415,7 +1677,10 @@ impl Policy for PolicyService {
         }
     }
 
-    async fn set_bundle_enabled(&self, request: Request<PolicySetBundleEnabledRequest>) -> Result<Response<PolicySetBundleEnabledResponse>, Status> {
+    async fn set_bundle_enabled(
+        &self,
+        request: Request<PolicySetBundleEnabledRequest>,
+    ) -> Result<Response<PolicySetBundleEnabledResponse>, Status> {
         let req = request.into_inner();
         match self.set_bundle_enabled(&req.bundle_id, req.enabled).await {
             Ok(success) => Ok(Response::new(PolicySetBundleEnabledResponse { success })),
@@ -1423,7 +1688,10 @@ impl Policy for PolicyService {
         }
     }
 
-    async fn rollback_bundle(&self, request: Request<PolicyRollbackBundleRequest>) -> Result<Response<PolicyRollbackBundleResponse>, Status> {
+    async fn rollback_bundle(
+        &self,
+        request: Request<PolicyRollbackBundleRequest>,
+    ) -> Result<Response<PolicyRollbackBundleResponse>, Status> {
         let req = request.into_inner();
         match self.rollback_bundle(&req.bundle_id, req.version).await {
             Ok(info) => Ok(Response::new(PolicyRollbackBundleResponse {
@@ -1445,11 +1713,15 @@ impl Policy for PolicyService {
         }
     }
 
-    async fn list_bundle_versions(&self, request: Request<PolicyListBundleVersionsRequest>) -> Result<Response<PolicyListBundleVersionsResponse>, Status> {
+    async fn list_bundle_versions(
+        &self,
+        request: Request<PolicyListBundleVersionsRequest>,
+    ) -> Result<Response<PolicyListBundleVersionsResponse>, Status> {
         let req = request.into_inner();
         match self.list_bundle_versions(&req.bundle_id).await {
             Ok(versions) => {
-                let proto_versions: Vec<PolicyBundleVersionInfo> = versions.into_iter()
+                let proto_versions: Vec<PolicyBundleVersionInfo> = versions
+                    .into_iter()
                     .map(|v| PolicyBundleVersionInfo {
                         version: v.version,
                         created_at: v.created_at,
@@ -1471,7 +1743,10 @@ impl Policy for PolicyService {
 
 #[tonic::async_trait]
 impl Transit for TransitService {
-    async fn encrypt(&self, request: Request<TransitEncryptRequest>) -> Result<Response<TransitEncryptResponse>, Status> {
+    async fn encrypt(
+        &self,
+        request: Request<TransitEncryptRequest>,
+    ) -> Result<Response<TransitEncryptResponse>, Status> {
         let req = request.into_inner();
         match self.encrypt(&req.plaintext) {
             Ok((ciphertext, _dek_id)) => Ok(Response::new(TransitEncryptResponse { ciphertext })),
@@ -1479,7 +1754,10 @@ impl Transit for TransitService {
         }
     }
 
-    async fn decrypt(&self, request: Request<TransitDecryptRequest>) -> Result<Response<TransitDecryptResponse>, Status> {
+    async fn decrypt(
+        &self,
+        request: Request<TransitDecryptRequest>,
+    ) -> Result<Response<TransitDecryptResponse>, Status> {
         let req = request.into_inner();
         // DEK ID 现在嵌入在 ciphertext 包头中（自描述格式），不再需要外部传入
         match self.decrypt(&req.ciphertext, "") {
@@ -1488,7 +1766,10 @@ impl Transit for TransitService {
         }
     }
 
-    async fn hmac_sign(&self, request: Request<TransitHmacSignRequest>) -> Result<Response<TransitHmacSignResponse>, Status> {
+    async fn hmac_sign(
+        &self,
+        request: Request<TransitHmacSignRequest>,
+    ) -> Result<Response<TransitHmacSignResponse>, Status> {
         let req = request.into_inner();
         match self.hmac_sign(&req.data, &req.algorithm) {
             Ok(signature) => Ok(Response::new(TransitHmacSignResponse {
@@ -1499,7 +1780,10 @@ impl Transit for TransitService {
         }
     }
 
-    async fn hmac_verify(&self, request: Request<TransitHmacVerifyRequest>) -> Result<Response<TransitHmacVerifyResponse>, Status> {
+    async fn hmac_verify(
+        &self,
+        request: Request<TransitHmacVerifyRequest>,
+    ) -> Result<Response<TransitHmacVerifyResponse>, Status> {
         let req = request.into_inner();
         match self.hmac_verify(&req.data, &req.signature, &req.algorithm) {
             Ok(valid) => Ok(Response::new(TransitHmacVerifyResponse { valid })),
@@ -1514,7 +1798,10 @@ impl Transit for TransitService {
 
 #[tonic::async_trait]
 impl CircuitBreaker for CircuitBreakerService {
-    async fn get_state(&self, _request: Request<CircuitBreakerGetStateRequest>) -> Result<Response<CircuitBreakerGetStateResponse>, Status> {
+    async fn get_state(
+        &self,
+        _request: Request<CircuitBreakerGetStateRequest>,
+    ) -> Result<Response<CircuitBreakerGetStateResponse>, Status> {
         let state = self.state();
         Ok(Response::new(CircuitBreakerGetStateResponse {
             state: format!("{:?}", state),
@@ -1522,17 +1809,26 @@ impl CircuitBreaker for CircuitBreakerService {
         }))
     }
 
-    async fn report_success(&self, _request: Request<CircuitBreakerReportSuccessRequest>) -> Result<Response<CircuitBreakerReportSuccessResponse>, Status> {
+    async fn report_success(
+        &self,
+        _request: Request<CircuitBreakerReportSuccessRequest>,
+    ) -> Result<Response<CircuitBreakerReportSuccessResponse>, Status> {
         self.record_success();
         Ok(Response::new(CircuitBreakerReportSuccessResponse {}))
     }
 
-    async fn report_failure(&self, _request: Request<CircuitBreakerReportFailureRequest>) -> Result<Response<CircuitBreakerReportFailureResponse>, Status> {
+    async fn report_failure(
+        &self,
+        _request: Request<CircuitBreakerReportFailureRequest>,
+    ) -> Result<Response<CircuitBreakerReportFailureResponse>, Status> {
         self.record_failure();
         Ok(Response::new(CircuitBreakerReportFailureResponse {}))
     }
 
-    async fn reset(&self, _request: Request<CircuitBreakerResetRequest>) -> Result<Response<CircuitBreakerResetResponse>, Status> {
+    async fn reset(
+        &self,
+        _request: Request<CircuitBreakerResetRequest>,
+    ) -> Result<Response<CircuitBreakerResetResponse>, Status> {
         self.reset();
         Ok(Response::new(CircuitBreakerResetResponse {}))
     }
@@ -1544,7 +1840,10 @@ impl CircuitBreaker for CircuitBreakerService {
 
 #[tonic::async_trait]
 impl RateLimiter for RateLimiterService {
-    async fn allow(&self, request: Request<RateLimiterAllowRequest>) -> Result<Response<RateLimiterAllowResponse>, Status> {
+    async fn allow(
+        &self,
+        request: Request<RateLimiterAllowRequest>,
+    ) -> Result<Response<RateLimiterAllowResponse>, Status> {
         let req = request.into_inner();
         for _ in 0..req.permits.max(1) {
             if self.try_acquire().is_err() {
@@ -1570,7 +1869,10 @@ impl RateLimiter for RateLimiterService {
 
 #[tonic::async_trait]
 impl FeatureFlags for FeatureFlagService {
-    async fn is_enabled(&self, request: Request<FeatureFlagIsEnabledRequest>) -> Result<Response<FeatureFlagIsEnabledResponse>, Status> {
+    async fn is_enabled(
+        &self,
+        request: Request<FeatureFlagIsEnabledRequest>,
+    ) -> Result<Response<FeatureFlagIsEnabledResponse>, Status> {
         let req = request.into_inner();
         match self.is_enabled(&req.flag_name) {
             Ok(enabled) => Ok(Response::new(FeatureFlagIsEnabledResponse {
@@ -1581,7 +1883,10 @@ impl FeatureFlags for FeatureFlagService {
         }
     }
 
-    async fn evaluate(&self, request: Request<FeatureFlagEvaluateRequest>) -> Result<Response<FeatureFlagEvaluateResponse>, Status> {
+    async fn evaluate(
+        &self,
+        request: Request<FeatureFlagEvaluateRequest>,
+    ) -> Result<Response<FeatureFlagEvaluateResponse>, Status> {
         let req = request.into_inner();
         let ctx = FlagEvalContext::default();
         match FeatureFlagService::evaluate(self, &req.flag_name, &ctx) {
@@ -1602,9 +1907,10 @@ fn helper_uuid() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("{:016x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+    format!(
+        "{:016x}-{:04x}-4{:03x}-{:04x}-{:012x}",
         ts & 0xFFFFFFFFFFFFFFFF,
-        (ts >> 64) as u16 & 0xFFFF,
+        ((ts >> 64) as u16),
         (ts >> 80) as u16 & 0xFFF,
         0x8000 | ((ts >> 96) as u16 & 0x3FFF),
         ts & 0xFFFFFFFFFFFF,
@@ -1626,7 +1932,8 @@ fn helper_workflow_state_str(state: &WorkflowState) -> String {
         WorkflowState::Failed => "FAILED",
         WorkflowState::Cancelled => "CANCELLED",
         _ => "UNKNOWN",
-    }.to_string()
+    }
+    .to_string()
 }
 
 /// 从 YAML/JSON 定义中提取工作流名称
@@ -1648,7 +1955,7 @@ fn extract_workflow_name(definition_dsl: &str) -> String {
             let trimmed = l.trim_start();
             trimmed.starts_with("name:") || trimmed.starts_with("id:")
         })
-        .and_then(|l| l.splitn(2, ':').nth(1))
+        .and_then(|l| l.split_once(':').map(|x| x.1))
         .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "workflow".to_string())

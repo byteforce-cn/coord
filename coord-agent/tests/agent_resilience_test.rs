@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use coord_agent::services::circuit_breaker::{CircuitBreakerService, CircuitState};
-use coord_agent::services::rate_limiter::{RateLimiterService, RateLimiterConfig};
+use coord_agent::services::rate_limiter::{RateLimiterConfig, RateLimiterService};
 
 // ════════════════════════════════════════════════
 // Circuit Breaker Tests
@@ -32,7 +32,10 @@ fn test_circuit_breaker_opens_after_threshold() {
 
     // 达到阈值 (2)，熔断器应打开
     assert_eq!(cb.state(), CircuitState::Open);
-    assert!(!cb.allow(), "circuit should be open after threshold failures");
+    assert!(
+        !cb.allow(),
+        "circuit should be open after threshold failures"
+    );
 }
 
 /// CB.3: 成功调用重置失败计数
@@ -187,7 +190,11 @@ fn test_rate_limiter_concurrent() {
 
     let total: u32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
     // 由于没有 refill，4 线程 × 25 请求，最多获取 100 个令牌
-    assert!(total <= 100, "total acquired {} should not exceed max", total);
+    assert!(
+        total <= 100,
+        "total acquired {} should not exceed max",
+        total
+    );
     assert!(total > 0, "should acquire at least some tokens");
 }
 

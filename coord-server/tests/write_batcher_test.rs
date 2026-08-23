@@ -144,10 +144,7 @@ fn test_batcher_multiple_entries_same_region() {
     assert_eq!(storage.write_count(), 1); // 一次批量写入
 
     for i in 0..10 {
-        assert_eq!(
-            storage.read(1, i),
-            Some(format!("data_{}", i).into_bytes())
-        );
+        assert_eq!(storage.read(1, i), Some(format!("data_{}", i).into_bytes()));
     }
 }
 

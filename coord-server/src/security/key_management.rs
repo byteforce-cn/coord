@@ -47,6 +47,11 @@ const TAG_LEN: usize = 16;
 
 /// DEK 缓存容量（保留最近 N 个旧版本用于解密）
 const DEK_CACHE_SIZE: usize = 8;
+/// DEK 缓存容量（NonZeroUsize 编译期转换；DEK_CACHE_SIZE 为常量且 ≥ 1，None 分支仅静态兜底）
+const DEK_CACHE_CAP: NonZeroUsize = match NonZeroUsize::new(DEK_CACHE_SIZE) {
+    Some(v) => v,
+    None => NonZeroUsize::MIN,
+};
 
 /// DEK 加密后落盘格式：nonce(12B) || ciphertext(32B) || tag(16B) = 60 bytes
 const ENCRYPTED_DEK_LEN: usize = NONCE_LEN + DEK_LEN + TAG_LEN;
@@ -83,12 +88,12 @@ impl RootKey {
 
     /// 通过 HKDF-SHA256 派生 KEK
     /// HKDF 参数：salt=None, info=b"coord-kek-v1"
-    fn derive_kek(&self) -> Kek {
+    fn derive_kek(&self) -> Result<Kek> {
         let hkdf = Hkdf::<Sha256>::new(None, &*self.0);
         let mut kek_bytes = Zeroizing::new([0u8; KEK_LEN]);
         hkdf.expand(b"coord-kek-v1", &mut *kek_bytes)
-            .expect("HKDF-SHA256 expand to 32 bytes is infallible");
-        Kek(kek_bytes)
+            .map_err(|e| Error::Crypto(format!("HKDF expand for KEK failed: {e}")))?;
+        Ok(Kek(kek_bytes))
     }
 }
 
@@ -194,22 +199,20 @@ impl Keyring {
     /// Bootstrap：生成新的随机 Root Key，派生 KEK，生成首个 DEK。
     ///
     /// 用于集群首次初始化。调用方需要将 `encrypted_dek` 持久化到 `/_meta/dek/{key_id}`。
-    pub fn bootstrap() -> (Self, EncryptedDek) {
+    pub fn bootstrap() -> Result<(Self, EncryptedDek)> {
         let root_key = RootKey::generate();
-        let kek = root_key.derive_kek();
+        let kek = root_key.derive_kek()?;
         let (active_dek, active_key_id, next_key_id) = Self::generate_dek(&kek, 1);
 
         // 用 KEK 加密 DEK 用于落盘
-        let encrypted_bytes = kek
-            .wrap_dek(&active_dek)
-            .expect("KEK wrap of freshly generated DEK should not fail");
+        let encrypted_bytes = kek.wrap_dek(&active_dek)?;
 
         let encrypted_dek = EncryptedDek {
             key_id: active_key_id,
             encrypted_bytes,
         };
 
-        let mut cache = LruCache::new(NonZeroUsize::new(DEK_CACHE_SIZE).unwrap());
+        let mut cache = LruCache::new(DEK_CACHE_CAP);
         cache.put(active_key_id, Zeroizing::new(active_dek));
 
         let keyring = Self {
@@ -223,7 +226,7 @@ impl Keyring {
             })),
         };
 
-        (keyring, encrypted_dek)
+        Ok((keyring, encrypted_dek))
     }
 
     /// Bootstrap + Shamir 分片：生成 Root Key 并拆分为 N 个分片。
@@ -234,13 +237,11 @@ impl Keyring {
         let root_key = RootKey::generate();
         let root_key_bytes = *root_key.0; // 捕获 Root Key 明文用于分片
 
-        let kek = root_key.derive_kek();
+        let kek = root_key.derive_kek()?;
         let (active_dek, active_key_id, next_key_id) = Self::generate_dek(&kek, 1);
 
         // 用 KEK 加密 DEK 用于落盘
-        let encrypted_bytes = kek
-            .wrap_dek(&active_dek)
-            .expect("KEK wrap of freshly generated DEK should not fail");
+        let encrypted_bytes = kek.wrap_dek(&active_dek)?;
 
         let encrypted_dek = EncryptedDek {
             key_id: active_key_id,
@@ -250,7 +251,7 @@ impl Keyring {
         // 生成 Shamir 分片
         let shares = seal::split_secret(&root_key_bytes, n, k)?;
 
-        let mut cache = LruCache::new(NonZeroUsize::new(DEK_CACHE_SIZE).unwrap());
+        let mut cache = LruCache::new(DEK_CACHE_CAP);
         cache.put(active_key_id, Zeroizing::new(active_dek));
 
         let keyring = Self {
@@ -282,14 +283,11 @@ impl Keyring {
     /// 从已有的 Root Key 和持久化的 EncryptedDek 列表恢复 Keyring。
     ///
     /// 用于节点重启时恢复（Unseal 后调用）。Root Key 由 Shamir 分片重组得到。
-    pub fn from_root_key(
-        root_key_bytes: &[u8],
-        encrypted_deks: &[EncryptedDek],
-    ) -> Result<Self> {
+    pub fn from_root_key(root_key_bytes: &[u8], encrypted_deks: &[EncryptedDek]) -> Result<Self> {
         let root_key = RootKey::from_bytes(root_key_bytes)?;
-        let kek = root_key.derive_kek();
+        let kek = root_key.derive_kek()?;
 
-        let mut cache = LruCache::new(NonZeroUsize::new(DEK_CACHE_SIZE).unwrap());
+        let mut cache = LruCache::new(DEK_CACHE_CAP);
         let mut active_key_id = 0u32;
         let mut active_dek = Zeroizing::new([0u8; DEK_LEN]);
         let mut max_key_id = 0u32;
@@ -327,14 +325,16 @@ impl Keyring {
 
     // ──── 查询 API ────
 
-    /// 返回当前活跃 DEK 的引用（仅用于加密操作）。
-    /// Seal 后返回全零 DEK（调用方应在加密前通过 is_sealed() 检查）。
-    pub fn active_dek(&self) -> (u32, [u8; DEK_LEN]) {
+    /// 返回当前活跃 DEK（仅用于加密操作）。
+    ///
+    /// Seal 后返回 `Error::Crypto`（P0-B.4/F9：不得返回全零密钥，
+    /// 调用方无从区分"合法全零"与"sealed 占位"，会导致明文被全零密钥加密）。
+    pub fn active_dek(&self) -> Result<(u32, [u8; DEK_LEN])> {
         let inner = self.inner.read();
         if inner.sealed {
-            return (0, [0u8; DEK_LEN]);
+            return Err(Error::Crypto("keyring is sealed".into()));
         }
-        (inner.active_key_id, *inner.active_dek)
+        Ok((inner.active_key_id, *inner.active_dek))
     }
 
     /// 返回当前活跃 DEK 的 key_id
@@ -377,7 +377,7 @@ impl Keyring {
     /// 密钥轮换：生成新 DEK，原子切换到新密钥，旧 DEK 移入缓存。
     ///
     /// 返回新 DEK 的 EncryptedDek（调用方需持久化到 `/_meta/dek/{new_key_id}`）。
-    pub fn rotate(&self) -> EncryptedDek {
+    pub fn rotate(&self) -> Result<EncryptedDek> {
         let mut inner = self.inner.write();
 
         // 生成新 DEK
@@ -395,20 +395,17 @@ impl Keyring {
             .put(new_key_id, Zeroizing::new(new_dek_plain));
 
         // 用 KEK 加密新 DEK 用于落盘
-        let encrypted_bytes = inner
-            .kek
-            .wrap_dek(&new_dek_plain)
-            .expect("KEK wrap of freshly generated DEK should not fail");
+        let encrypted_bytes = inner.kek.wrap_dek(&new_dek_plain)?;
 
         // 原子切换
         inner.active_dek = Zeroizing::new(new_dek_plain);
         inner.active_key_id = new_key_id;
         inner.next_key_id = next_key_id;
 
-        EncryptedDek {
+        Ok(EncryptedDek {
             key_id: new_key_id,
             encrypted_bytes,
-        }
+        })
     }
 
     // ──── Seal ────
@@ -470,7 +467,7 @@ mod tests {
 
     #[test]
     fn test_bootstrap_creates_valid_keyring() {
-        let (keyring, encrypted_dek) = Keyring::bootstrap();
+        let (keyring, encrypted_dek) = Keyring::bootstrap().unwrap();
 
         assert_eq!(keyring.active_key_id(), 1);
         assert_eq!(keyring.dek_count(), 1);
@@ -480,14 +477,17 @@ mod tests {
 
     #[test]
     fn test_dek_wrap_unwrap_via_from_root_key() {
-        let (_keyring, encrypted_dek) = Keyring::bootstrap();
+        let (_keyring, encrypted_dek) = Keyring::bootstrap().unwrap();
 
         // We can't extract the RootKey bytes from outside, but we can verify
         // that from_root_key rejects invalid input.
         let result = Keyring::from_root_key(b"too_short", &[encrypted_dek.clone()]);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("must be 32 bytes"), "unexpected error: {err_msg}");
+        assert!(
+            err_msg.contains("must be 32 bytes"),
+            "unexpected error: {err_msg}"
+        );
 
         // Valid-length but wrong key should fail to unwrap DEK
         let wrong_key = [0xFFu8; ROOT_KEY_LEN];
@@ -495,20 +495,26 @@ mod tests {
         assert!(result2.is_err());
         let err_msg2 = format!("{}", result2.unwrap_err());
         // Should fail with "unwrap DEK failed" since KEK will differ
-        assert!(err_msg2.contains("unwrap DEK failed"), "unexpected error: {err_msg2}");
+        assert!(
+            err_msg2.contains("unwrap DEK failed"),
+            "unexpected error: {err_msg2}"
+        );
     }
 
     #[test]
     fn test_rotate_produces_new_dek() {
-        let (keyring, first_encrypted) = Keyring::bootstrap();
+        let (keyring, first_encrypted) = Keyring::bootstrap().unwrap();
         assert_eq!(keyring.active_key_id(), 1);
         assert_eq!(keyring.dek_count(), 1);
 
-        let second_encrypted = keyring.rotate();
+        let second_encrypted = keyring.rotate().unwrap();
         assert_eq!(keyring.active_key_id(), 2);
         assert_eq!(keyring.dek_count(), 2);
         assert_eq!(second_encrypted.key_id, 2);
-        assert_ne!(first_encrypted.encrypted_bytes, second_encrypted.encrypted_bytes);
+        assert_ne!(
+            first_encrypted.encrypted_bytes,
+            second_encrypted.encrypted_bytes
+        );
 
         // Old DEK should still be accessible
         let old_dek = keyring.get_dek(1);
@@ -517,7 +523,7 @@ mod tests {
 
     #[test]
     fn test_get_dek_nonexistent() {
-        let (keyring, _) = Keyring::bootstrap();
+        let (keyring, _) = Keyring::bootstrap().unwrap();
         let result = keyring.get_dek(999);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
@@ -526,7 +532,7 @@ mod tests {
 
     #[test]
     fn test_seal_zeroizes_keys() {
-        let (keyring, _) = Keyring::bootstrap();
+        let (keyring, _) = Keyring::bootstrap().unwrap();
         keyring.seal();
         // After seal, looking up any key should fail
         let result = keyring.get_dek(1);
@@ -535,11 +541,11 @@ mod tests {
 
     #[test]
     fn test_multiple_rotations() {
-        let (keyring, _) = Keyring::bootstrap();
+        let (keyring, _) = Keyring::bootstrap().unwrap();
         assert_eq!(keyring.active_key_id(), 1);
 
         for i in 2..=6 {
-            let enc = keyring.rotate();
+            let enc = keyring.rotate().unwrap();
             assert_eq!(keyring.active_key_id(), i);
             assert_eq!(enc.key_id, i);
         }
@@ -570,8 +576,7 @@ mod tests {
     #[test]
     fn test_bootstrap_with_shares_full_lifecycle() {
         // 1. Bootstrap: 生成 Keyring + DEK + 5 个分片（门限 3）
-        let (keyring, encrypted_dek, shares) =
-            Keyring::bootstrap_with_shares(5, 3).unwrap();
+        let (keyring, encrypted_dek, shares) = Keyring::bootstrap_with_shares(5, 3).unwrap();
 
         assert_eq!(keyring.active_key_id(), 1);
         assert!(!keyring.is_sealed());
@@ -588,8 +593,7 @@ mod tests {
         assert!(keyring.get_dek(1).is_err());
 
         // 3. Unseal: 用量 3 个分片恢复
-        let recovered =
-            Keyring::unseal(&shares[..3], &[encrypted_dek]).unwrap();
+        let recovered = Keyring::unseal(&shares[..3], &[encrypted_dek]).unwrap();
 
         assert_eq!(recovered.active_key_id(), 1);
         assert!(!recovered.is_sealed());
@@ -599,8 +603,7 @@ mod tests {
 
     #[test]
     fn test_unseal_with_wrong_shares_fails() {
-        let (keyring, encrypted_dek, mut shares) =
-            Keyring::bootstrap_with_shares(5, 3).unwrap();
+        let (keyring, encrypted_dek, mut shares) = Keyring::bootstrap_with_shares(5, 3).unwrap();
         keyring.seal();
 
         // 篡改一个分片
@@ -613,8 +616,7 @@ mod tests {
 
     #[test]
     fn test_unseal_insufficient_shares_fails() {
-        let (keyring, encrypted_dek, shares) =
-            Keyring::bootstrap_with_shares(5, 3).unwrap();
+        let (keyring, encrypted_dek, shares) = Keyring::bootstrap_with_shares(5, 3).unwrap();
         keyring.seal();
 
         // 只提供 2 个分片（需要 3 个）
@@ -629,29 +631,38 @@ mod tests {
 
     #[test]
     fn test_seal_then_rotate_while_sealed_fails() {
-        let (keyring, _encrypted_dek, _shares) =
-            Keyring::bootstrap_with_shares(5, 3).unwrap();
+        let (keyring, _encrypted_dek, _shares) = Keyring::bootstrap_with_shares(5, 3).unwrap();
 
         keyring.seal();
         assert!(keyring.is_sealed());
 
         // Rotate 在 seal 后仍可调用（生成新 DEK），但 get_dek 不可用
-        let new_enc = keyring.rotate();
+        let new_enc = keyring.rotate().unwrap();
         assert_eq!(new_enc.key_id, 2);
         // Sealed 状态下 get_dek 仍应失败
         assert!(keyring.get_dek(1).is_err());
         assert!(keyring.get_dek(2).is_err());
     }
 
+    /// P0-B.4（F9）：Seal 后 `active_dek` 必须返回 Error，禁止全零密钥加密。
+    #[test]
+    fn test_active_dek_errors_when_sealed() {
+        let (keyring, _encrypted_dek, _shares) = Keyring::bootstrap_with_shares(5, 3).unwrap();
+        assert!(keyring.active_dek().is_ok());
+        keyring.seal();
+        assert!(keyring.active_dek().is_err());
+        let err = format!("{}", keyring.active_dek().unwrap_err());
+        assert!(err.contains("sealed"), "unexpected error: {err}");
+    }
+
     #[test]
     fn test_unseal_with_rotated_keys() {
         // Bootstrap with shares
-        let (keyring, enc_dek_1, shares) =
-            Keyring::bootstrap_with_shares(5, 3).unwrap();
+        let (keyring, enc_dek_1, shares) = Keyring::bootstrap_with_shares(5, 3).unwrap();
 
         // Rotate twice
-        let enc_dek_2 = keyring.rotate();
-        let enc_dek_3 = keyring.rotate();
+        let enc_dek_2 = keyring.rotate().unwrap();
+        let enc_dek_3 = keyring.rotate().unwrap();
         assert_eq!(keyring.active_key_id(), 3);
 
         // Seal
@@ -671,8 +682,7 @@ mod tests {
 
     #[test]
     fn test_bootstrap_with_shares_custom_params() {
-        let (keyring, _, shares) =
-            Keyring::bootstrap_with_shares(7, 4).unwrap();
+        let (keyring, _, shares) = Keyring::bootstrap_with_shares(7, 4).unwrap();
 
         assert_eq!(shares.len(), 7);
         for s in &shares {

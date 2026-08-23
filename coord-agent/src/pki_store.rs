@@ -697,7 +697,10 @@ mod tests {
             .await
             .expect("rotate");
 
-        assert_eq!(store.get_cert("svc-a").await.unwrap().unwrap().serial, "0x2");
+        assert_eq!(
+            store.get_cert("svc-a").await.unwrap().unwrap().serial,
+            "0x2"
+        );
         // 旧证书可通过 serial 找回（renew/验签按 serial 还原 CN）
         let found = store.get_cert_by_serial("0x1").await.unwrap().unwrap();
         assert_eq!(found.common_name, "svc-a");
@@ -724,11 +727,7 @@ mod tests {
         for i in 0..8u64 {
             let store = store.clone();
             handles.push(tokio::spawn(async move {
-                let record = sample_cert(
-                    "svc-a",
-                    &format!("serial-{i}"),
-                    CertStatus::Active,
-                );
+                let record = sample_cert("svc-a", &format!("serial-{i}"), CertStatus::Active);
                 store.create_cert("svc-a", &record).await
             }));
         }

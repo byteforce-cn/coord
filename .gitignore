@@ -12,7 +12,7 @@ java-example/target/
 # Node / coord-ui
 coord-ui/node_modules/
 coord-ui/dist/
-coord-ui/pnpm-lock.yaml
+# P0-G.2：pnpm-lock.yaml 纳入版本控制（镜像构建 --frozen-lockfile 可重现）
 
 # IDE
 .idea/

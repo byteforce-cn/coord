@@ -48,9 +48,7 @@ mod tests {
         let elapsed = start.elapsed();
         let avg_us = elapsed.as_micros() as f64 / iterations as f64;
 
-        println!(
-            "CCT encode: {iterations} iterations in {elapsed:?}, avg = {avg_us:.1}µs/req"
-        );
+        println!("CCT encode: {iterations} iterations in {elapsed:?}, avg = {avg_us:.1}µs/req");
 
         // Target: < 1ms = 1000µs per request
         assert!(
@@ -161,9 +159,18 @@ mod tests {
     fn test_cct_with_scope_overrides_performance() {
         let header = CctHeader::default();
         let mut scope_overrides = HashMap::new();
-        scope_overrides.insert("data:kv:read".to_string(), "/app/order-service/".to_string());
-        scope_overrides.insert("data:kv:write".to_string(), "/app/order-service/".to_string());
-        scope_overrides.insert("coord:registry:discover".to_string(), "payment-service".to_string());
+        scope_overrides.insert(
+            "data:kv:read".to_string(),
+            "/app/order-service/".to_string(),
+        );
+        scope_overrides.insert(
+            "data:kv:write".to_string(),
+            "/app/order-service/".to_string(),
+        );
+        scope_overrides.insert(
+            "coord:registry:discover".to_string(),
+            "payment-service".to_string(),
+        );
 
         let payload = CctPayload {
             jti: "bench-scope-overrides".to_string(),

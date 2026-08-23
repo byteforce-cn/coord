@@ -70,20 +70,20 @@ mod gf256 {
     }
 
     /// GF(2^8) 除法：a / b = a * inv(b)
-    pub fn div(a: u8, b: u8) -> u8 {
+    pub fn div(a: u8, b: u8) -> Result<u8, &'static str> {
         if b == 0 {
-            panic!("GF(2^8) division by zero");
+            return Err("GF(2^8) division by zero");
         }
         if a == 0 {
-            return 0;
+            return Ok(0);
         }
-        mul(a, inv(b))
+        Ok(mul(a, inv(b)?))
     }
 
     /// GF(2^8) 求逆：使用扩展欧几里得算法。
-    fn inv(x: u8) -> u8 {
+    fn inv(x: u8) -> Result<u8, &'static str> {
         if x == 0 {
-            panic!("GF(2^8) inverse of zero");
+            return Err("GF(2^8) inverse of zero");
         }
         // 使用费马小定理：在有限域中 x^(2^8-1) = 1，所以 x^(-1) = x^254
         // 用指数法：x^254 = x^(11111110b) = x^2 * x^4 * x^8 * x^16 * x^32 * x^64 * x^128
@@ -98,15 +98,18 @@ mod gf256 {
         }
         // Correct approach: x^254 = x^(128+64+32+16+8+4+2) = multiply all
         // Let me be explicit:
-        let x2 = mul(x, x);       // x^2
-        let x4 = mul(x2, x2);     // x^4
-        let x8 = mul(x4, x4);     // x^8
-        let x16 = mul(x8, x8);    // x^16
-        let x32 = mul(x16, x16);  // x^32
-        let x64 = mul(x32, x32);  // x^64
+        let x2 = mul(x, x); // x^2
+        let x4 = mul(x2, x2); // x^4
+        let x8 = mul(x4, x4); // x^8
+        let x16 = mul(x8, x8); // x^16
+        let x32 = mul(x16, x16); // x^32
+        let x64 = mul(x32, x32); // x^64
         let x128 = mul(x64, x64); // x^128
-        // x^254 = x^128 * x^64 * x^32 * x^16 * x^8 * x^4 * x^2
-        mul(mul(mul(mul(mul(mul(x128, x64), x32), x16), x8), x4), x2)
+                                  // x^254 = x^128 * x^64 * x^32 * x^16 * x^8 * x^4 * x^2
+        Ok(mul(
+            mul(mul(mul(mul(mul(x128, x64), x32), x16), x8), x4),
+            x2,
+        ))
     }
 
     /// GF(2^8) 幂运算：base^exp
@@ -140,7 +143,7 @@ mod gf256 {
         fn test_mul_div_identity() {
             for a in 1..=255u8 {
                 for b in 1..=255u8 {
-                    assert_eq!(div(mul(a, b), b), a, "a={a}, b={b}");
+                    assert_eq!(div(mul(a, b), b).unwrap(), a, "a={a}, b={b}");
                 }
             }
         }
@@ -238,7 +241,9 @@ impl Share {
         let expected_checksum = &bytes[5 + ROOT_KEY_LEN..SHARE_BYTES_LEN];
         let actual_checksum = compute_checksum(&bytes[..5 + ROOT_KEY_LEN]);
         if expected_checksum != actual_checksum {
-            return Err(Error::Crypto("share checksum mismatch; data may be corrupted".into()));
+            return Err(Error::Crypto(
+                "share checksum mismatch; data may be corrupted".into(),
+            ));
         }
 
         // Validate fields
@@ -307,25 +312,23 @@ pub fn split_secret(secret: &[u8; ROOT_KEY_LEN], n: u8, k: u8) -> Result<Vec<Sha
     // coeffs[byte_idx][0] = secret[byte_idx]（常数项）
     // coeffs[byte_idx][1..k] = 随机系数
     let mut coeffs: Vec<[u8; 256]> = Vec::with_capacity(ROOT_KEY_LEN);
-    for byte_idx in 0..ROOT_KEY_LEN {
+    for &secret_byte in secret.iter() {
         let mut poly = [0u8; 256];
-        poly[0] = secret[byte_idx]; // f(0) = secret_byte
-        for coeff_idx in 1..(k as usize) {
+        poly[0] = secret_byte; // f(0) = secret_byte
+        for coeff in poly.iter_mut().take(k as usize).skip(1) {
             // 随机非零系数
             let mut c = 0u8;
             while c == 0 {
                 c = rng.next_u32() as u8;
             }
-            poly[coeff_idx] = c;
+            *coeff = c;
         }
         coeffs.push(poly);
     }
 
     // 对每个分片，计算 y = f(x) 对每个字节
     let mut shares = Vec::with_capacity(n as usize);
-    for share_idx in 0..(n as usize) {
-        let x = xs[share_idx];
-
+    for (share_idx, &x) in xs.iter().enumerate() {
         let mut y = [0u8; ROOT_KEY_LEN];
         for byte_idx in 0..ROOT_KEY_LEN {
             y[byte_idx] = evaluate_polynomial(&coeffs[byte_idx], k as usize, x);
@@ -353,10 +356,7 @@ pub fn split_secret(secret: &[u8; ROOT_KEY_LEN], n: u8, k: u8) -> Result<Vec<Sha
 /// - `Crypto`: 分片不兼容（threshold/total 不一致）或 x 坐标重复
 pub fn recover_secret(shares: &[Share]) -> Result<[u8; ROOT_KEY_LEN]> {
     if shares.is_empty() {
-        return Err(Error::InsufficientShares {
-            have: 0,
-            need: 1,
-        });
+        return Err(Error::InsufficientShares { have: 0, need: 1 });
     }
 
     let k = shares[0].threshold as usize;
@@ -409,18 +409,18 @@ pub fn recover_secret(shares: &[Share]) -> Result<[u8; ROOT_KEY_LEN]> {
             num = gf256::mul(num, used[j].x);
             den = gf256::mul(den, gf256::add(used[i].x, used[j].x));
         }
-        lagrange_basis[i] = gf256::div(num, den);
+        lagrange_basis[i] = gf256::div(num, den).map_err(|e| Error::Crypto(e.to_string()))?;
     }
 
     // 对每个字节独立恢复：secret_byte = Σ L_i(0) * y_i
     let mut secret = [0u8; ROOT_KEY_LEN];
-    for byte_idx in 0..ROOT_KEY_LEN {
+    for (byte_idx, secret_slot) in secret.iter_mut().enumerate() {
         let mut acc = 0u8;
         for i in 0..k {
             let term = gf256::mul(lagrange_basis[i], used[i].y[byte_idx]);
             acc = gf256::add(acc, term);
         }
-        secret[byte_idx] = acc;
+        *secret_slot = acc;
     }
 
     Ok(secret)
@@ -523,7 +523,8 @@ mod tests {
         assert_eq!(recovered, secret);
 
         // 用任意 3 个分片恢复
-        let recovered2 = recover_secret(&[shares[1].clone(), shares[3].clone(), shares[4].clone()]).unwrap();
+        let recovered2 =
+            recover_secret(&[shares[1].clone(), shares[3].clone(), shares[4].clone()]).unwrap();
         assert_eq!(recovered2, secret);
     }
 
@@ -553,7 +554,10 @@ mod tests {
         let result = recover_secret(&shares[..2]);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("insufficient"), "unexpected error: {err_msg}");
+        assert!(
+            err_msg.contains("insufficient"),
+            "unexpected error: {err_msg}"
+        );
     }
 
     #[test]
@@ -566,7 +570,10 @@ mod tests {
         bad_shares[0].y[0] ^= 0xFF;
 
         let recovered = recover_secret(&bad_shares).unwrap();
-        assert_ne!(recovered, secret, "tampered share should produce wrong secret");
+        assert_ne!(
+            recovered, secret,
+            "tampered share should produce wrong secret"
+        );
     }
 
     #[test]
@@ -585,7 +592,10 @@ mod tests {
         let result = recover_secret(&mixed);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("incompatible"), "unexpected error: {err_msg}");
+        assert!(
+            err_msg.contains("incompatible"),
+            "unexpected error: {err_msg}"
+        );
     }
 
     #[test]
@@ -676,7 +686,8 @@ mod tests {
         }
 
         // Recover with first K shares
-        let recovered = SealManager::recover_root_key(&shares[..DEFAULT_SHARES_K as usize]).unwrap();
+        let recovered =
+            SealManager::recover_root_key(&shares[..DEFAULT_SHARES_K as usize]).unwrap();
         assert_eq!(recovered, root_key);
     }
 
@@ -722,4 +733,3 @@ mod tests {
         assert_eq!(recovered, secret);
     }
 }
-

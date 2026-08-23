@@ -78,17 +78,14 @@ pub struct MqStats {
 
 // ──── redb 表定义 ────
 
-const TOPIC_TABLE: redb::TableDefinition<&str, &[u8]> =
-    redb::TableDefinition::new("mq:topics");
+const TOPIC_TABLE: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("mq:topics");
 // Messages: key = [topic_len:u32][topic_bytes][partition:u32][offset:u64 BE]
 const MESSAGE_TABLE: redb::TableDefinition<&[u8], &[u8]> =
     redb::TableDefinition::new("mq:messages");
 // Consumer offsets: key = [group_len:u32][group_bytes][topic_len:u32][topic_bytes][partition:u32]
-const OFFSET_TABLE: redb::TableDefinition<&[u8], u64> =
-    redb::TableDefinition::new("mq:offsets");
+const OFFSET_TABLE: redb::TableDefinition<&[u8], u64> = redb::TableDefinition::new("mq:offsets");
 // DLQ: key = [topic_len:u32][topic_bytes][partition:u32][offset:u64 BE]
-const DLQ_TABLE: redb::TableDefinition<&[u8], &[u8]> =
-    redb::TableDefinition::new("mq:dlq");
+const DLQ_TABLE: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("mq:dlq");
 // Next offset counter: key = [topic_len:u32][topic_bytes][partition:u32]
 const NEXT_OFFSET_TABLE: redb::TableDefinition<&[u8], u64> =
     redb::TableDefinition::new("mq:next_offset");
@@ -168,7 +165,9 @@ fn decode_repl_seq(encoded: &[u8], prefix_len: usize) -> Option<u64> {
     if encoded.len() < prefix_len + 8 {
         return None;
     }
-    Some(u64::from_be_bytes(encoded[prefix_len..prefix_len + 8].try_into().ok()?))
+    Some(u64::from_be_bytes(
+        encoded[prefix_len..prefix_len + 8].try_into().ok()?,
+    ))
 }
 
 fn now_millis() -> u64 {
@@ -191,11 +190,16 @@ fn encode_message(payload: &[u8], headers: &BTreeMap<String, String>) -> Vec<u8>
 
 /// Decode message: returns (payload, timestamp, headers)
 fn decode_message(raw: &[u8]) -> Option<(Vec<u8>, u64, BTreeMap<String, String>)> {
-    if raw.len() < 12 { return None; }
+    if raw.len() < 12 {
+        return None;
+    }
     let timestamp = u64::from_be_bytes(raw[..8].try_into().ok()?);
     let headers_len = u32::from_be_bytes(raw[8..12].try_into().ok()?) as usize;
-    if raw.len() < 12 + headers_len { return None; }
-    let headers: BTreeMap<String, String> = serde_json::from_slice(&raw[12..12 + headers_len]).unwrap_or_default();
+    if raw.len() < 12 + headers_len {
+        return None;
+    }
+    let headers: BTreeMap<String, String> =
+        serde_json::from_slice(&raw[12..12 + headers_len]).unwrap_or_default();
     let payload = raw[12 + headers_len..].to_vec();
     Some((payload, timestamp, headers))
 }
@@ -204,7 +208,8 @@ fn decode_message(raw: &[u8]) -> Option<(Vec<u8>, u64, BTreeMap<String, String>)
 fn encode_dlq_message(payload: &[u8], reason: &str, detail: &str) -> Vec<u8> {
     let reason_bytes = reason.as_bytes();
     let detail_bytes = detail.as_bytes();
-    let mut v = Vec::with_capacity(8 + 4 + reason_bytes.len() + 4 + detail_bytes.len() + payload.len());
+    let mut v =
+        Vec::with_capacity(8 + 4 + reason_bytes.len() + 4 + detail_bytes.len() + payload.len());
     v.extend_from_slice(&now_millis().to_be_bytes());
     v.extend_from_slice(&(reason_bytes.len() as u32).to_be_bytes());
     v.extend_from_slice(reason_bytes);
@@ -216,15 +221,27 @@ fn encode_dlq_message(payload: &[u8], reason: &str, detail: &str) -> Vec<u8> {
 
 /// Decode DLQ message
 fn decode_dlq_message(raw: &[u8]) -> Option<(Vec<u8>, u64, String, String)> {
-    if raw.len() < 16 { return None; }
+    if raw.len() < 16 {
+        return None;
+    }
     let timestamp = u64::from_be_bytes(raw[..8].try_into().ok()?);
     let reason_len = u32::from_be_bytes(raw[8..12].try_into().ok()?) as usize;
-    if raw.len() < 12 + reason_len + 4 { return None; }
+    if raw.len() < 12 + reason_len + 4 {
+        return None;
+    }
     let reason = String::from_utf8_lossy(&raw[12..12 + reason_len]).to_string();
     let detail_len_start = 12 + reason_len;
-    let detail_len = u32::from_be_bytes(raw[detail_len_start..detail_len_start + 4].try_into().ok()?) as usize;
-    if raw.len() < detail_len_start + 4 + detail_len { return None; }
-    let detail = String::from_utf8_lossy(&raw[detail_len_start + 4..detail_len_start + 4 + detail_len]).to_string();
+    let detail_len = u32::from_be_bytes(
+        raw[detail_len_start..detail_len_start + 4]
+            .try_into()
+            .ok()?,
+    ) as usize;
+    if raw.len() < detail_len_start + 4 + detail_len {
+        return None;
+    }
+    let detail =
+        String::from_utf8_lossy(&raw[detail_len_start + 4..detail_len_start + 4 + detail_len])
+            .to_string();
     let payload = raw[detail_len_start + 4 + detail_len..].to_vec();
     Some((payload, timestamp, reason, detail))
 }
@@ -237,6 +254,9 @@ fn decode_dlq_message(raw: &[u8]) -> Option<(Vec<u8>, u64, String, String)> {
 ///
 /// 订阅（subscribe）实现：produce 提交后向订阅者 channel 直接推送
 /// （按消费组偏移过滤），subscribe 时回放已提交偏移之后的消息。
+/// 订阅者条目：（consumer_group, 消息 channel）
+type SubscriberEntry = (String, mpsc::Sender<(u32, MessageRecord)>);
+
 pub struct MessageQueueService {
     db_path: PathBuf,
     db: RwLock<Option<redb::Database>>,
@@ -244,7 +264,7 @@ pub struct MessageQueueService {
     #[allow(dead_code)]
     max_size_bytes: u64,
     /// 订阅者注册表：topic → (consumer_group, 消息 channel [(partition, record)])
-    subscriptions: RwLock<HashMap<String, Vec<(String, mpsc::Sender<(u32, MessageRecord)>)>>>,
+    subscriptions: RwLock<HashMap<String, Vec<SubscriberEntry>>>,
     /// ISR 复制管理器（None = 单 agent 本地语义，零复制路径保留，C6）
     replication: RwLock<Option<Arc<crate::services::replication::ReplicationManager>>>,
 }
@@ -284,7 +304,9 @@ impl MessageQueueService {
     }
 
     /// 复制管理器引用（None = 复制关闭）
-    pub fn replication_manager(&self) -> Option<Arc<crate::services::replication::ReplicationManager>> {
+    pub fn replication_manager(
+        &self,
+    ) -> Option<Arc<crate::services::replication::ReplicationManager>> {
         self.replication.read().clone()
     }
 
@@ -366,16 +388,32 @@ impl MessageQueueService {
 
     // ──── 消息生产 ────
 
-    pub fn produce(&self, topic: &str, partition: u32, payload: Vec<u8>, headers: Option<BTreeMap<String, String>>) -> ServiceResult<u64> {
-        let config = self.get_topic_config(topic)?
+    pub fn produce(
+        &self,
+        topic: &str,
+        partition: u32,
+        payload: Vec<u8>,
+        headers: Option<BTreeMap<String, String>>,
+    ) -> ServiceResult<u64> {
+        let config = self
+            .get_topic_config(topic)?
             .ok_or_else(|| format!("topic '{topic}' not found"))?;
 
         if partition >= config.partitions {
-            return Err(format!("partition {partition} out of range for topic '{topic}' (max {})", config.partitions).into());
+            return Err(format!(
+                "partition {partition} out of range for topic '{topic}' (max {})",
+                config.partitions
+            )
+            .into());
         }
 
         if payload.len() as u64 > config.max_message_size {
-            return Err(format!("message size {} exceeds max {}", payload.len(), config.max_message_size).into());
+            return Err(format!(
+                "message size {} exceeds max {}",
+                payload.len(),
+                config.max_message_size
+            )
+            .into());
         }
 
         let headers = headers.unwrap_or_default();
@@ -418,7 +456,13 @@ impl MessageQueueService {
     }
 
     /// 消费消息：从指定 offset 开始读取最多 max_count 条
-    pub fn consume(&self, topic: &str, partition: u32, start_offset: u64, max_count: u64) -> ServiceResult<Vec<MessageRecord>> {
+    pub fn consume(
+        &self,
+        topic: &str,
+        partition: u32,
+        start_offset: u64,
+        max_count: u64,
+    ) -> ServiceResult<Vec<MessageRecord>> {
         let prefix = msg_key_prefix(topic, partition);
         let prefix_len = prefix.len();
 
@@ -430,15 +474,31 @@ impl MessageQueueService {
             for item in table.range(range)? {
                 let (k, raw) = item?;
                 let k = k.value();
-                if !k.starts_with(&prefix) { break; }
+                if !k.starts_with(&prefix) {
+                    break;
+                }
                 // Extract offset from key (last 8 bytes)
-                if k.len() < prefix_len + 8 { continue; }
-                let offset = u64::from_be_bytes(k[prefix_len..prefix_len + 8].try_into().unwrap());
-                if offset < start_offset { continue; }
-                if records.len() as u64 >= max_count { break; }
+                if k.len() < prefix_len + 8 {
+                    continue;
+                }
+                let Ok(off_bytes) = k[prefix_len..prefix_len + 8].try_into() else {
+                    continue;
+                };
+                let offset = u64::from_be_bytes(off_bytes);
+                if offset < start_offset {
+                    continue;
+                }
+                if records.len() as u64 >= max_count {
+                    break;
+                }
 
                 if let Some((payload, timestamp, headers)) = decode_message(raw.value()) {
-                    records.push(MessageRecord { offset, payload, timestamp, headers });
+                    records.push(MessageRecord {
+                        offset,
+                        payload,
+                        timestamp,
+                        headers,
+                    });
                 }
             }
         }
@@ -455,7 +515,12 @@ impl MessageQueueService {
     ///
     /// 说明：subscribe 与 poll+ack 共享同一消费组偏移；推送路径在 channel
     /// 打满（背压）时丢弃消息（try_send），**可靠消费请使用 poll + ack**。
-    pub async fn subscribe(&self, topic: &str, group: &str, tx: mpsc::Sender<(u32, MessageRecord)>) -> ServiceResult<()> {
+    pub async fn subscribe(
+        &self,
+        topic: &str,
+        group: &str,
+        tx: mpsc::Sender<(u32, MessageRecord)>,
+    ) -> ServiceResult<()> {
         let partitions = match self.get_topic_config(topic)? {
             Some(c) => c.partitions,
             None => return Err(format!("topic '{topic}' not found").into()),
@@ -488,7 +553,14 @@ impl MessageQueueService {
     }
 
     /// produce 提交后向该 topic 的订阅者推送（按消费组偏移过滤 + 自动提交）。
-    fn notify_subscribers(&self, topic: &str, partition: u32, offset: u64, payload: Vec<u8>, timestamp: u64) {
+    fn notify_subscribers(
+        &self,
+        topic: &str,
+        partition: u32,
+        offset: u64,
+        payload: Vec<u8>,
+        timestamp: u64,
+    ) {
         let subs: Vec<(String, mpsc::Sender<(u32, MessageRecord)>)> = {
             let guard = self.subscriptions.read();
             match guard.get(topic) {
@@ -519,14 +591,24 @@ impl MessageQueueService {
                 let _ = self.commit_offset(&group, topic, partition, offset + 1);
             } else {
                 // 订阅者 channel 打满或已关闭 → 丢弃并清理
-                self.subscriptions.write().entry(topic.to_string()).or_default().retain(|(g, _)| g != &group);
+                self.subscriptions
+                    .write()
+                    .entry(topic.to_string())
+                    .or_default()
+                    .retain(|(g, _)| g != &group);
             }
         }
     }
 
     // ──── Consumer Group 偏移管理 ────
 
-    pub fn commit_offset(&self, group: &str, topic: &str, partition: u32, offset: u64) -> ServiceResult<()> {
+    pub fn commit_offset(
+        &self,
+        group: &str,
+        topic: &str,
+        partition: u32,
+        offset: u64,
+    ) -> ServiceResult<()> {
         let key = encode_offset_key(group, topic, partition);
         let wtx = self.write_tx()?;
         {
@@ -537,7 +619,12 @@ impl MessageQueueService {
         Ok(())
     }
 
-    pub fn get_consumer_offset(&self, group: &str, topic: &str, partition: u32) -> ServiceResult<u64> {
+    pub fn get_consumer_offset(
+        &self,
+        group: &str,
+        topic: &str,
+        partition: u32,
+    ) -> ServiceResult<u64> {
         let key = encode_offset_key(group, topic, partition);
         let rtx = self.read_tx()?;
         let table = rtx.open_table(OFFSET_TABLE)?;
@@ -549,7 +636,14 @@ impl MessageQueueService {
 
     // ──── 死信队列 (DLQ) ────
 
-    pub fn move_to_dlq(&self, topic: &str, partition: u32, offset: u64, reason: &str, detail: &str) -> ServiceResult<()> {
+    pub fn move_to_dlq(
+        &self,
+        topic: &str,
+        partition: u32,
+        offset: u64,
+        reason: &str,
+        detail: &str,
+    ) -> ServiceResult<()> {
         // Read the message first
         let mk = encode_msg_key(topic, partition, offset);
         let rtx = self.read_tx()?;
@@ -557,7 +651,9 @@ impl MessageQueueService {
             let table = rtx.open_table(MESSAGE_TABLE)?;
             match table.get(mk.as_slice())? {
                 Some(v) => v.value().to_vec(),
-                None => return Err(format!("message {topic}/{partition}/{offset} not found").into()),
+                None => {
+                    return Err(format!("message {topic}/{partition}/{offset} not found").into())
+                }
             }
         };
         drop(rtx);
@@ -586,7 +682,12 @@ impl MessageQueueService {
         Ok(())
     }
 
-    pub fn consume_dlq(&self, topic: &str, partition: u32, max_count: u64) -> ServiceResult<Vec<DlqRecord>> {
+    pub fn consume_dlq(
+        &self,
+        topic: &str,
+        partition: u32,
+        max_count: u64,
+    ) -> ServiceResult<Vec<DlqRecord>> {
         let prefix = msg_key_prefix(topic, partition);
         let prefix_len = prefix.len();
 
@@ -598,18 +699,36 @@ impl MessageQueueService {
             for item in table.range(range)? {
                 let (k, raw) = item?;
                 let k = k.value();
-                if !k.starts_with(&prefix) { break; }
-                if k.len() < prefix_len + 8 { continue; }
-                let offset = u64::from_be_bytes(k[prefix_len..prefix_len + 8].try_into().unwrap());
-                if records.len() as u64 >= max_count { break; }
+                if !k.starts_with(&prefix) {
+                    break;
+                }
+                if k.len() < prefix_len + 8 {
+                    continue;
+                }
+                let Ok(off_bytes) = k[prefix_len..prefix_len + 8].try_into() else {
+                    continue;
+                };
+                let offset = u64::from_be_bytes(off_bytes);
+                if records.len() as u64 >= max_count {
+                    break;
+                }
 
-                if let Some((payload, timestamp, reason, detail)) = decode_dlq_message(raw.value()) {
+                if let Some((payload, timestamp, reason, detail)) = decode_dlq_message(raw.value())
+                {
                     records.push(DlqRecord {
                         offset,
                         payload,
                         timestamp,
-                        error_reason: if reason.is_empty() { None } else { Some(reason) },
-                        error_detail: if detail.is_empty() { None } else { Some(detail) },
+                        error_reason: if reason.is_empty() {
+                            None
+                        } else {
+                            Some(reason)
+                        },
+                        error_detail: if detail.is_empty() {
+                            None
+                        } else {
+                            Some(detail)
+                        },
                     });
                 }
             }
@@ -662,7 +781,7 @@ impl MessageQueueService {
 // 参见 docs/cache-mq-isr-evaluation.md §4。
 
 use crate::services::replication::{
-    IdempotencyKey, ReplicationEntry, ReplicationError, ReplicationOp, ReplicatedStore,
+    IdempotencyKey, ReplicatedStore, ReplicationEntry, ReplicationError, ReplicationOp,
 };
 
 impl MessageQueueService {
@@ -673,7 +792,10 @@ impl MessageQueueService {
 
     /// 生成发布幂等键（key 携带 topic/partition/offset，全局唯一）
     fn publish_idem_key(topic: &str, partition: u32, offset: u64) -> IdempotencyKey {
-        IdempotencyKey::new(format!("mq:publish:{topic}:{partition}:{offset}"), now_millis())
+        IdempotencyKey::new(
+            format!("mq:publish:{topic}:{partition}:{offset}"),
+            now_millis(),
+        )
     }
 
     /// 某 shard 的下一个序列号（= 本地最后序列号 + 1）
@@ -714,9 +836,12 @@ impl MessageQueueService {
     /// Leader 侧单事务提交：NEXT_OFFSET_TABLE + 消息 + 复制日志 + 幂等键 + 本地序列号。
     fn replicated_publish_local(&self, entry: &ReplicationEntry) -> ServiceResult<()> {
         let (topic, partition, offset, payload) = match &entry.operation {
-            ReplicationOp::MqPublish { topic, partition, offset, payload } => {
-                (topic.as_str(), *partition, *offset, payload)
-            }
+            ReplicationOp::MqPublish {
+                topic,
+                partition,
+                offset,
+                payload,
+            } => (topic.as_str(), *partition, *offset, payload),
             _ => return Err("replicated_publish_local: not an MqPublish op".into()),
         };
         let encoded = encode_message(payload, &BTreeMap::new());
@@ -749,9 +874,12 @@ impl MessageQueueService {
     /// NEXT_OFFSET_TABLE + 复制日志 + 幂等键 + 本地序列号）。
     fn apply_mq_publish(&self, entry: &ReplicationEntry) -> Result<(), ReplicationError> {
         let (topic, partition, offset, payload) = match &entry.operation {
-            ReplicationOp::MqPublish { topic, partition, offset, payload } => {
-                (topic.as_str(), *partition, *offset, payload)
-            }
+            ReplicationOp::MqPublish {
+                topic,
+                partition,
+                offset,
+                payload,
+            } => (topic.as_str(), *partition, *offset, payload),
             _ => {
                 return Err(ReplicationError::Store(
                     "apply_mq_publish: not an MqPublish op".to_string(),
@@ -810,7 +938,8 @@ impl MessageQueueService {
         })();
         match result {
             Ok(()) => {
-                wtx.commit().map_err(|e| ReplicationError::Store(e.to_string()))?;
+                wtx.commit()
+                    .map_err(|e| ReplicationError::Store(e.to_string()))?;
                 Ok(())
             }
             Err(e) => Err(ReplicationError::Store(e.to_string())),
@@ -884,7 +1013,10 @@ impl MessageQueueService {
         self.replicated_publish_local(&entry)?;
 
         // 同步复制：推送到 ISR Followers，min_isr 校验（自身 + 确认 follower 数）
-        let acked = rm.push_to_followers(&entry).await.map_err(|e| e.to_string())?;
+        let acked = rm
+            .push_to_followers(&entry)
+            .await
+            .map_err(|e| e.to_string())?;
         rm.ensure_isr(acked + 1).map_err(|e| e.to_string())?;
 
         // Leader 推送订阅者（C4：仅 Leader 推送）
@@ -899,7 +1031,10 @@ impl MessageQueueService {
 impl ReplicatedStore for MessageQueueService {
     fn shards(&self) -> Vec<String> {
         match self.list_topics() {
-            Ok(topics) => topics.into_iter().map(|t| Self::topic_shard(&t.name)).collect(),
+            Ok(topics) => topics
+                .into_iter()
+                .map(|t| Self::topic_shard(&t.name))
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -1060,7 +1195,15 @@ mod tests {
     fn test_create_and_list_topics() {
         let dir = temp_dir();
         let svc = new_svc(&dir);
-        svc.create_topic("t1", TopicConfig { partitions: 1, retention_secs: 60, max_message_size: 1024 }).unwrap();
+        svc.create_topic(
+            "t1",
+            TopicConfig {
+                partitions: 1,
+                retention_secs: 60,
+                max_message_size: 1024,
+            },
+        )
+        .unwrap();
         assert_eq!(svc.list_topics().unwrap().len(), 1);
     }
 
@@ -1068,7 +1211,15 @@ mod tests {
     fn test_produce_consume_basic() {
         let dir = temp_dir();
         let svc = new_svc(&dir);
-        svc.create_topic("test", TopicConfig { partitions: 1, retention_secs: 3600, max_message_size: 1024 }).unwrap();
+        svc.create_topic(
+            "test",
+            TopicConfig {
+                partitions: 1,
+                retention_secs: 3600,
+                max_message_size: 1024,
+            },
+        )
+        .unwrap();
         svc.produce("test", 0, b"hello".to_vec(), None).unwrap();
         let msgs = svc.consume("test", 0, 0, 10).unwrap();
         assert_eq!(msgs.len(), 1);
@@ -1080,7 +1231,15 @@ mod tests {
     fn test_consumer_offset() {
         let dir = temp_dir();
         let svc = new_svc(&dir);
-        svc.create_topic("test", TopicConfig { partitions: 1, retention_secs: 3600, max_message_size: 1024 }).unwrap();
+        svc.create_topic(
+            "test",
+            TopicConfig {
+                partitions: 1,
+                retention_secs: 3600,
+                max_message_size: 1024,
+            },
+        )
+        .unwrap();
         svc.produce("test", 0, b"m1".to_vec(), None).unwrap();
         svc.produce("test", 0, b"m2".to_vec(), None).unwrap();
         svc.commit_offset("g1", "test", 0, 1).unwrap();
@@ -1091,7 +1250,15 @@ mod tests {
     fn test_dlq() {
         let dir = temp_dir();
         let svc = new_svc(&dir);
-        svc.create_topic("test", TopicConfig { partitions: 1, retention_secs: 3600, max_message_size: 1024 }).unwrap();
+        svc.create_topic(
+            "test",
+            TopicConfig {
+                partitions: 1,
+                retention_secs: 3600,
+                max_message_size: 1024,
+            },
+        )
+        .unwrap();
         svc.produce("test", 0, b"bad".to_vec(), None).unwrap();
         svc.move_to_dlq("test", 0, 0, "err", "details").unwrap();
         let dlq = svc.consume_dlq("test", 0, 10).unwrap();
@@ -1107,7 +1274,15 @@ mod tests {
         {
             let svc = MessageQueueService::new(db_path.clone(), 1024 * 1024);
             rt.block_on(async { svc.start().await.unwrap() });
-            svc.create_topic("p", TopicConfig { partitions: 1, retention_secs: 60, max_message_size: 1024 }).unwrap();
+            svc.create_topic(
+                "p",
+                TopicConfig {
+                    partitions: 1,
+                    retention_secs: 60,
+                    max_message_size: 1024,
+                },
+            )
+            .unwrap();
             svc.produce("p", 0, b"data".to_vec(), None).unwrap();
         }
         {
@@ -1126,9 +1301,19 @@ mod tests {
 
         let dir = temp_dir();
         let svc = new_svc(&dir);
-        svc.create_topic("sub-topic", TopicConfig { partitions: 1, retention_secs: 3600, max_message_size: 1024 }).unwrap();
-        svc.produce("sub-topic", 0, b"pre-1".to_vec(), None).unwrap();
-        svc.produce("sub-topic", 0, b"pre-2".to_vec(), None).unwrap();
+        svc.create_topic(
+            "sub-topic",
+            TopicConfig {
+                partitions: 1,
+                retention_secs: 3600,
+                max_message_size: 1024,
+            },
+        )
+        .unwrap();
+        svc.produce("sub-topic", 0, b"pre-1".to_vec(), None)
+            .unwrap();
+        svc.produce("sub-topic", 0, b"pre-2".to_vec(), None)
+            .unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (tx, mut rx) = mpsc::channel::<(u32, MessageRecord)>(16);
@@ -1149,7 +1334,8 @@ mod tests {
         assert_eq!(received[1].1, b"pre-2".to_vec());
 
         // 新 produce → 实时推送
-        svc.produce("sub-topic", 0, b"live-3".to_vec(), None).unwrap();
+        svc.produce("sub-topic", 0, b"live-3".to_vec(), None)
+            .unwrap();
         rt.block_on(async {
             let (p, m) = rx.recv().await.expect("should be pushed");
             assert_eq!(p, 0);
@@ -1157,7 +1343,10 @@ mod tests {
         });
 
         // 偏移已自动提交 → 新订阅不重复回放
-        assert_eq!(svc.get_consumer_offset("cg-sub", "sub-topic", 0).unwrap(), 3);
+        assert_eq!(
+            svc.get_consumer_offset("cg-sub", "sub-topic", 0).unwrap(),
+            3
+        );
         let (tx2, mut rx2) = mpsc::channel::<(u32, MessageRecord)>(16);
         rt.block_on(async {
             svc.subscribe("sub-topic", "cg-sub", tx2).await.unwrap();

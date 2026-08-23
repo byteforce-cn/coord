@@ -73,15 +73,17 @@ mod tests {
         vec![
             ForkBranch {
                 name: "branchA".into(),
-                tasks: vec![
-                    NamedTask { name: "a1".into(), task: Task::Do(crate::workflow::model::DoTask { tasks: vec![] }) },
-                ],
+                tasks: vec![NamedTask {
+                    name: "a1".into(),
+                    task: Task::Do(crate::workflow::model::DoTask { tasks: vec![] }),
+                }],
             },
             ForkBranch {
                 name: "branchB".into(),
-                tasks: vec![
-                    NamedTask { name: "b1".into(), task: Task::Do(crate::workflow::model::DoTask { tasks: vec![] }) },
-                ],
+                tasks: vec![NamedTask {
+                    name: "b1".into(),
+                    task: Task::Do(crate::workflow::model::DoTask { tasks: vec![] }),
+                }],
             },
         ]
     }
@@ -93,23 +95,38 @@ mod tests {
         let branches = make_branches();
         let named = NamedTask {
             name: "parallel".into(),
-            task: Task::Fork(ForkTask { branches: branches.clone(), compete: None }),
+            task: Task::Fork(ForkTask {
+                branches: branches.clone(),
+                compete: None,
+            }),
         };
 
-        let result = execute(&named, &ForkTask {
-            branches: branches.clone(),
-            compete: None,
-        }, &inst, &clock);
+        let result = execute(
+            &named,
+            &ForkTask {
+                branches: branches.clone(),
+                compete: None,
+            },
+            &inst,
+            &clock,
+        );
 
         match result {
-            StepResult::Fork { branches: b, compete, frame } => {
+            StepResult::Fork {
+                branches: b,
+                compete,
+                frame,
+            } => {
                 assert_eq!(b.len(), 2);
                 assert_eq!(b[0].name, "branchA");
                 assert_eq!(b[1].name, "branchB");
                 assert!(!compete);
                 assert_eq!(frame.task_type, "fork");
                 assert_eq!(frame.status, TaskStatus::Running);
-                assert_eq!(frame.pending_branches, Some(vec!["branchA".into(), "branchB".into()]));
+                assert_eq!(
+                    frame.pending_branches,
+                    Some(vec!["branchA".into(), "branchB".into()])
+                );
             }
             other => panic!("expected Fork, got {:?}", other),
         }
@@ -128,10 +145,15 @@ mod tests {
             }),
         };
 
-        let result = execute(&named, &ForkTask {
-            branches,
-            compete: Some(true),
-        }, &inst, &clock);
+        let result = execute(
+            &named,
+            &ForkTask {
+                branches,
+                compete: Some(true),
+            },
+            &inst,
+            &clock,
+        );
 
         match result {
             StepResult::Fork { compete, .. } => {
@@ -147,13 +169,21 @@ mod tests {
         let inst = make_inst();
         let named = NamedTask {
             name: "emptyFork".into(),
-            task: Task::Fork(ForkTask { branches: vec![], compete: None }),
+            task: Task::Fork(ForkTask {
+                branches: vec![],
+                compete: None,
+            }),
         };
 
-        let result = execute(&named, &ForkTask {
-            branches: vec![],
-            compete: None,
-        }, &inst, &clock);
+        let result = execute(
+            &named,
+            &ForkTask {
+                branches: vec![],
+                compete: None,
+            },
+            &inst,
+            &clock,
+        );
 
         match result {
             StepResult::Fork { branches, .. } => {

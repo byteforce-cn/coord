@@ -28,8 +28,12 @@ pub struct SagaConfig {
     pub retry_backoff_ms: u64,
 }
 
-fn default_retry_max() -> u32 { 3 }
-fn default_retry_backoff() -> u64 { 1000 }
+fn default_retry_max() -> u32 {
+    3
+}
+fn default_retry_backoff() -> u64 {
+    1000
+}
 
 impl Default for SagaConfig {
     fn default() -> Self {
@@ -77,6 +81,9 @@ impl SagaContext {
 // ──── SagaStep ────
 
 /// Saga 步骤定义
+/// Saga 步骤操作闭包类型（trait object，可插拔步骤逻辑）
+pub type SagaStepFn = Box<dyn Fn(&mut SagaContext) -> Result<(), String> + Send + Sync>;
+
 ///
 /// 每个步骤包含正向操作（action）和补偿操作（compensation）。
 /// 使用 trait object 闭包实现可插拔步骤逻辑。
@@ -84,9 +91,9 @@ pub struct SagaStep {
     /// 步骤名称
     pub name: String,
     /// 正向操作
-    pub action: Box<dyn Fn(&mut SagaContext) -> Result<(), String> + Send + Sync>,
+    pub action: SagaStepFn,
     /// 补偿操作
-    pub compensation: Box<dyn Fn(&mut SagaContext) -> Result<(), String> + Send + Sync>,
+    pub compensation: SagaStepFn,
 }
 
 impl std::fmt::Debug for SagaStep {
@@ -115,13 +122,8 @@ pub enum SagaState {
 #[derive(Debug, Clone)]
 pub enum StepResult {
     Completed,
-    Failed {
-        step_name: String,
-        error: String,
-    },
-    Compensated {
-        failed_step: String,
-    },
+    Failed { step_name: String, error: String },
+    Compensated { failed_step: String },
 }
 
 // ──── SagaDefinition ────
@@ -166,11 +168,7 @@ impl SagaService {
     ///
     /// 顺序执行所有步骤的正向操作。
     /// 若某步骤失败（含重试耗尽），逆序执行已执行步骤的补偿操作。
-    pub fn execute(
-        &self,
-        saga_id: &str,
-        ctx: &mut SagaContext,
-    ) -> Result<StepResult, SagaError> {
+    pub fn execute(&self, saga_id: &str, ctx: &mut SagaContext) -> Result<StepResult, SagaError> {
         // 获取步骤列表
         let steps = {
             let mut sagas = self.sagas.write();
@@ -182,11 +180,10 @@ impl SagaService {
             // We'll access steps individually to avoid borrow issues
         };
 
-        let total_steps = steps.len();
         let mut executed_indices: Vec<usize> = Vec::new();
 
         // 正向执行
-        for i in 0..total_steps {
+        for (i, _step) in steps.iter().enumerate() {
             let step_result = self.execute_step_with_retry(saga_id, i, ctx);
 
             match step_result {
@@ -224,8 +221,13 @@ impl SagaService {
             }
 
             let sagas = self.sagas.read();
-            let def = sagas.get(saga_id).ok_or_else(|| "saga not found".to_string())?;
-            let step = def.steps.get(step_index).ok_or_else(|| "step not found".to_string())?;
+            let def = sagas
+                .get(saga_id)
+                .ok_or_else(|| "saga not found".to_string())?;
+            let step = def
+                .steps
+                .get(step_index)
+                .ok_or_else(|| "step not found".to_string())?;
 
             match (step.action)(ctx) {
                 Ok(()) => return Ok(()),
@@ -312,11 +314,14 @@ mod tests {
     fn test_simple_saga_success() {
         let svc = SagaService::new(SagaConfig::default());
         let id = "test-1";
-        svc.add_step(id, SagaStep {
-            name: "s1".into(),
-            action: Box::new(|_| Ok(())),
-            compensation: Box::new(|_| Ok(())),
-        });
+        svc.add_step(
+            id,
+            SagaStep {
+                name: "s1".into(),
+                action: Box::new(|_| Ok(())),
+                compensation: Box::new(|_| Ok(())),
+            },
+        );
 
         let mut ctx = SagaContext::new(id);
         let r = svc.execute(id, &mut ctx).unwrap();
@@ -327,16 +332,28 @@ mod tests {
     fn test_saga_compensation() {
         let svc = SagaService::new(SagaConfig::default());
         let id = "test-2";
-        svc.add_step(id, SagaStep {
-            name: "s1".into(),
-            action: Box::new(|ctx| { ctx.set("s1", "ok"); Ok(()) }),
-            compensation: Box::new(|ctx| { ctx.set("s1", "comp"); Ok(()) }),
-        });
-        svc.add_step(id, SagaStep {
-            name: "s2".into(),
-            action: Box::new(|_| Err("fail".into())),
-            compensation: Box::new(|_| Ok(())),
-        });
+        svc.add_step(
+            id,
+            SagaStep {
+                name: "s1".into(),
+                action: Box::new(|ctx| {
+                    ctx.set("s1", "ok");
+                    Ok(())
+                }),
+                compensation: Box::new(|ctx| {
+                    ctx.set("s1", "comp");
+                    Ok(())
+                }),
+            },
+        );
+        svc.add_step(
+            id,
+            SagaStep {
+                name: "s2".into(),
+                action: Box::new(|_| Err("fail".into())),
+                compensation: Box::new(|_| Ok(())),
+            },
+        );
 
         let mut ctx = SagaContext::new(id);
         let r = svc.execute(id, &mut ctx).unwrap();

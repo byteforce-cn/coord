@@ -49,13 +49,19 @@ fn test_replication_config_defaults() {
 
 #[test]
 fn test_replication_config_validation() {
-    let config = ReplicationConfig { min_isr: 0, sync_timeout_ms: 1000 };
+    let config = ReplicationConfig {
+        min_isr: 0,
+        sync_timeout_ms: 1000,
+    };
     assert!(config.validate().is_err());
 }
 
 #[test]
 fn test_replication_config_single_replica_allowed() {
-    let config = ReplicationConfig { min_isr: 1, sync_timeout_ms: 1000 };
+    let config = ReplicationConfig {
+        min_isr: 1,
+        sync_timeout_ms: 1000,
+    };
     assert!(config.validate().is_ok());
 }
 
@@ -141,7 +147,10 @@ fn test_replication_entry_mq_publish() {
         42,
     );
 
-    assert!(matches!(entry.operation, ReplicationOp::MqPublish { offset: 7, .. }));
+    assert!(matches!(
+        entry.operation,
+        ReplicationOp::MqPublish { offset: 7, .. }
+    ));
     let json = serde_json::to_string(&entry).unwrap();
     let decoded: ReplicationEntry = serde_json::from_str(&json).unwrap();
     assert_eq!(entry.sequence_num, decoded.sequence_num);
@@ -200,7 +209,10 @@ fn test_replication_manager_initialization() {
 
 #[test]
 fn test_replication_manager_add_local_isr() {
-    let config = ReplicationConfig { min_isr: 1, sync_timeout_ms: 1000 };
+    let config = ReplicationConfig {
+        min_isr: 1,
+        sync_timeout_ms: 1000,
+    };
     let manager = ReplicationManager::new(config, "agent-1:19527".to_string());
     manager.add_replica("agent-1:19527".to_string());
     assert!(manager.state().is_healthy());
@@ -208,7 +220,10 @@ fn test_replication_manager_add_local_isr() {
 
 #[test]
 fn test_replication_manager_local_write_single_replica() {
-    let config = ReplicationConfig { min_isr: 1, sync_timeout_ms: 1000 };
+    let config = ReplicationConfig {
+        min_isr: 1,
+        sync_timeout_ms: 1000,
+    };
     let manager = ReplicationManager::new(config, "agent-1:19527".to_string());
     manager.add_replica("agent-1:19527".to_string());
 
@@ -228,16 +243,29 @@ fn test_replication_manager_local_write_single_replica() {
 
 #[test]
 fn test_replication_manager_idempotent_local_write() {
-    let config = ReplicationConfig { min_isr: 1, sync_timeout_ms: 1000 };
+    let config = ReplicationConfig {
+        min_isr: 1,
+        sync_timeout_ms: 1000,
+    };
     let manager = ReplicationManager::new(config, "agent-1:19527".to_string());
     manager.add_replica("agent-1:19527".to_string());
 
     let key = IdempotencyKey::new("idem:test:1", 1000);
     let entry1 = ReplicationEntry::new_cache_put(
-        key.clone(), "shard-1".to_string(), b"k".to_vec(), b"v1".to_vec(), "String".to_string(), 1,
+        key.clone(),
+        "shard-1".to_string(),
+        b"k".to_vec(),
+        b"v1".to_vec(),
+        "String".to_string(),
+        1,
     );
     let entry2 = ReplicationEntry::new_cache_put(
-        key.clone(), "shard-1".to_string(), b"k".to_vec(), b"v2".to_vec(), "String".to_string(), 2,
+        key.clone(),
+        "shard-1".to_string(),
+        b"k".to_vec(),
+        b"v2".to_vec(),
+        "String".to_string(),
+        2,
     );
 
     assert!(manager.try_commit_local(entry1).is_ok());
@@ -247,7 +275,10 @@ fn test_replication_manager_idempotent_local_write() {
 
 #[test]
 fn test_replication_manager_sequence_monotonic() {
-    let config = ReplicationConfig { min_isr: 1, sync_timeout_ms: 1000 };
+    let config = ReplicationConfig {
+        min_isr: 1,
+        sync_timeout_ms: 1000,
+    };
     let manager = ReplicationManager::new(config, "agent-1:19527".to_string());
     manager.add_replica("agent-1:19527".to_string());
 
@@ -290,10 +321,20 @@ fn test_replication_manager_receive_duplicate_push() {
 
     let key = IdempotencyKey::new("push:dup:1", 1000);
     let entry1 = ReplicationEntry::new_cache_put(
-        key.clone(), "shard-1".to_string(), b"k".to_vec(), b"v".to_vec(), "String".to_string(), 1,
+        key.clone(),
+        "shard-1".to_string(),
+        b"k".to_vec(),
+        b"v".to_vec(),
+        "String".to_string(),
+        1,
     );
     let entry2 = ReplicationEntry::new_cache_put(
-        key.clone(), "shard-1".to_string(), b"k".to_vec(), b"v".to_vec(), "String".to_string(), 2,
+        key.clone(),
+        "shard-1".to_string(),
+        b"k".to_vec(),
+        b"v".to_vec(),
+        "String".to_string(),
+        2,
     );
 
     assert!(manager.receive_push(entry1).is_ok());
@@ -312,7 +353,8 @@ fn test_reconcile_state_creation() {
 
 #[test]
 fn test_reconcile_track_missing_entries() {
-    let mut reconcile = ReconcileState::new("agent-follower:19527".to_string(), "shard-1".to_string());
+    let mut reconcile =
+        ReconcileState::new("agent-follower:19527".to_string(), "shard-1".to_string());
     reconcile.set_local_sequence(5);
     reconcile.set_leader_sequence(10);
 
@@ -323,7 +365,8 @@ fn test_reconcile_track_missing_entries() {
 
 #[test]
 fn test_reconcile_no_missing_when_caught_up() {
-    let mut reconcile = ReconcileState::new("agent-follower:19527".to_string(), "shard-1".to_string());
+    let mut reconcile =
+        ReconcileState::new("agent-follower:19527".to_string(), "shard-1".to_string());
     reconcile.set_local_sequence(10);
     reconcile.set_leader_sequence(10);
 
@@ -334,7 +377,8 @@ fn test_reconcile_no_missing_when_caught_up() {
 
 #[test]
 fn test_reconcile_no_missing_when_ahead() {
-    let mut reconcile = ReconcileState::new("agent-follower:19527".to_string(), "shard-1".to_string());
+    let mut reconcile =
+        ReconcileState::new("agent-follower:19527".to_string(), "shard-1".to_string());
     reconcile.set_local_sequence(15);
     reconcile.set_leader_sequence(10);
 
@@ -344,7 +388,8 @@ fn test_reconcile_no_missing_when_ahead() {
 
 #[test]
 fn test_reconcile_mark_applied() {
-    let mut reconcile = ReconcileState::new("agent-follower:19527".to_string(), "shard-1".to_string());
+    let mut reconcile =
+        ReconcileState::new("agent-follower:19527".to_string(), "shard-1".to_string());
     reconcile.set_local_sequence(5);
     reconcile.set_leader_sequence(10);
 
@@ -362,10 +407,15 @@ fn test_reconcile_mark_applied() {
 
 #[test]
 fn test_replication_error_display() {
-    let err = ReplicationError::DuplicateIdempotencyKey { key: "test:key:1".to_string() };
+    let err = ReplicationError::DuplicateIdempotencyKey {
+        key: "test:key:1".to_string(),
+    };
     assert!(err.to_string().contains("test:key:1"));
 
-    let err2 = ReplicationError::IsrDegraded { required: 2, actual: 1 };
+    let err2 = ReplicationError::IsrDegraded {
+        required: 2,
+        actual: 1,
+    };
     assert!(err2.to_string().contains("2"));
     assert!(err2.to_string().contains("1"));
 }

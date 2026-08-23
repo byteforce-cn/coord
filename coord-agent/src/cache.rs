@@ -56,7 +56,12 @@ pub struct AgentCache {
 impl AgentCache {
     /// 创建 AgentCache
     #[allow(deprecated)]
-    pub fn new(kv_max_entries: usize, kv_ttl_secs: u64, registry_max_entries: usize, registry_ttl_secs: u64) -> Self {
+    pub fn new(
+        kv_max_entries: usize,
+        kv_ttl_secs: u64,
+        registry_max_entries: usize,
+        registry_ttl_secs: u64,
+    ) -> Self {
         Self {
             kv: Mutex::new(KvCache::new(kv_max_entries, kv_ttl_secs)),
             registry: Mutex::new(RegistryCache::new(registry_max_entries, registry_ttl_secs)),
@@ -89,7 +94,7 @@ impl KvCache {
     /// - `max_entries`: 最大缓存条目数
     /// - `ttl_secs`: 缓存 TTL（秒）
     pub fn new(max_entries: usize, ttl_secs: u64) -> Self {
-        let cap = NonZeroUsize::new(max_entries.max(1)).unwrap();
+        let cap = NonZeroUsize::new(max_entries.max(1)).unwrap_or(NonZeroUsize::MIN);
         Self {
             inner: LruCache::new(cap),
             ttl: Duration::from_secs(ttl_secs),
@@ -192,7 +197,10 @@ struct RegistryEntry {
 /// - 类型化 `ServiceInstance` 存储
 /// - 自我保护模式
 /// - 按服务名发现
-#[deprecated(since = "0.2.0", note = "请使用 services::registry::RegistryCache 替代")]
+#[deprecated(
+    since = "0.2.0",
+    note = "请使用 services::registry::RegistryCache 替代"
+)]
 pub struct RegistryCache {
     inner: LruCache<Vec<u8>, RegistryEntry>,
 }
@@ -204,7 +212,7 @@ impl RegistryCache {
     /// - `max_entries`: 最大缓存条目数（默认 500）
     /// - `_ttl_secs`: 缓存 TTL（秒，目前为预留，Watch 驱动更新为主要失效方式）
     pub fn new(max_entries: usize, _ttl_secs: u64) -> Self {
-        let cap = NonZeroUsize::new(max_entries.max(1)).unwrap();
+        let cap = NonZeroUsize::new(max_entries.max(1)).unwrap_or(NonZeroUsize::MIN);
         Self {
             inner: LruCache::new(cap),
         }

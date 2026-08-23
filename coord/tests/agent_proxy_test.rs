@@ -14,27 +14,28 @@ mod tests {
 
     use coord_core::storage::StorageBackend;
     use coord_core::types::StorageConfig;
+    use coord_proto::kv::kv_client::KvClient;
+    use coord_proto::kv::kv_server::KvServer;
+    use coord_proto::kv::{DeleteRequest, PutRequest, RangeRequest};
+    use coord_proto::lease::lease_client::LeaseClient;
+    use coord_proto::lease::lease_server::LeaseServer;
+    use coord_proto::lease::{LeaseGrantRequest, LeaseRevokeRequest};
+    use coord_proto::maintenance::maintenance_client::MaintenanceClient;
+    use coord_proto::maintenance::maintenance_server::MaintenanceServer;
+    use coord_proto::maintenance::StatusRequest;
+    use coord_proto::txn::txn_server::TxnServer;
+    use coord_proto::watch::watch_server::WatchServer;
+    use coord_server::lease::LeaseManager;
     use coord_server::raft::log_store::LogStore;
     use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
     use coord_server::raft::state_machine::StateMachineStore;
+    use coord_server::raft::{new_basic_node, new_raft, RaftConfig};
     use coord_server::server::CoordNode;
     use coord_server::storage::compaction::CompactionManager;
     use coord_server::storage::mvcc::MvccStorage;
     use coord_server::storage::redb_backend::RedbBackend;
     use coord_server::timer::TimerWheel;
-    use coord_server::lease::LeaseManager;
     use coord_server::watch::WatchDispatcher;
-    use coord_proto::kv::kv_server::KvServer;
-    use coord_proto::txn::txn_server::TxnServer;
-    use coord_proto::lease::lease_server::LeaseServer;
-    use coord_proto::watch::watch_server::WatchServer;
-    use coord_proto::maintenance::maintenance_server::MaintenanceServer;
-    use coord_proto::kv::kv_client::KvClient;
-    use coord_proto::kv::{PutRequest, RangeRequest, DeleteRequest};
-    use coord_proto::lease::lease_client::LeaseClient;
-    use coord_proto::lease::{LeaseGrantRequest, LeaseRevokeRequest};
-    use coord_proto::maintenance::maintenance_client::MaintenanceClient;
-    use coord_proto::maintenance::StatusRequest;
 
     use coord_agent::{AgentConfig, AgentServer};
 
@@ -63,17 +64,25 @@ mod tests {
 
         let storage_config = StorageConfig::default();
         let backend = RedbBackend::open(&data_dir, &storage_config).expect("open redb backend");
-        let mvcc_read = Arc::new(MvccStorage::new(backend.clone()).expect("create mvcc read"));
-        let mvcc_raft = MvccStorage::new(backend).expect("create mvcc raft");
+        let mvcc = Arc::new(MvccStorage::new(backend).expect("create mvcc"));
+        let snapshot_tracker =
+            Arc::new(coord_server::storage::snapshot::SnapshotTracker::default());
 
         let watch_dispatcher = Arc::new(WatchDispatcher::start());
-        let log_store = LogStore::new(&data_dir).await.expect("create raft log store");
-        let sm_store = StateMachineStore::new(mvcc_raft);
+        let log_store = LogStore::new(&data_dir)
+            .await
+            .expect("create raft log store")
+            .with_snapshot_tracker(Arc::clone(&snapshot_tracker));
+        let sm_store = StateMachineStore::new(
+            Arc::clone(&mvcc),
+            data_dir.join("snapshots"),
+            Arc::clone(&snapshot_tracker),
+        );
 
         let network_factory = RaftNetworkFactoryImpl::new(1);
         network_factory.register_node(1, raft_addr.clone());
 
-        let raft_config = openraft::Config {
+        let raft_config = RaftConfig {
             heartbeat_interval: 200,
             election_timeout_min: 800,
             election_timeout_max: 1500,
@@ -81,7 +90,7 @@ mod tests {
         };
 
         let raft_rpc_service = RaftRpcService::new();
-        let raft = openraft::Raft::new(
+        let raft = new_raft(
             1,
             Arc::new(raft_config),
             network_factory,
@@ -94,11 +103,12 @@ mod tests {
         raft_rpc_service.set_raft(raft.clone());
 
         let mut members = BTreeMap::new();
-        members.insert(1, openraft::impls::BasicNode::new(&raft_addr));
+        members.insert(1, new_basic_node(&raft_addr));
         raft.initialize(members).await.expect("raft initialize");
         let raft = Arc::new(raft);
 
-        let mut node = CoordNode::new(Arc::clone(&mvcc_read));
+        let mut node = CoordNode::new(Arc::clone(&mvcc));
+        node.node_id = 1;
         node.watch_dispatcher = Some(Arc::clone(&watch_dispatcher));
         node.raft = Some(Arc::clone(&raft));
 
@@ -108,7 +118,13 @@ mod tests {
         let node = Arc::new(node);
 
         let compaction_config = coord_server::storage::compaction::CompactionConfig::default();
-        let _compaction_mgr = CompactionManager::start(Arc::clone(&mvcc_read), compaction_config);
+        let compaction_proposer: Arc<dyn coord_server::storage::compaction::CompactProposer> =
+            node.clone();
+        let _compaction_mgr = CompactionManager::start(
+            Arc::clone(&mvcc),
+            compaction_config,
+            Some(compaction_proposer),
+        );
 
         let kv_svc = KvServer::from_arc(Arc::clone(&node));
         let txn_svc = TxnServer::from_arc(Arc::clone(&node));
@@ -166,13 +182,14 @@ mod tests {
         let (server_addr, _shutdown_tx, _grpc, _raft, _tmpdir) = start_test_server().await;
         tracing::info!("Test server running on {}", server_addr);
 
-        // 2. Start Agent connected to the server
+        // 2. Start Agent connected to the server（独立数据目录 + 就绪等待，避免并行启动竞态）
+        let agent_tmp = tempfile::tempdir().unwrap();
         let agent_port = find_port();
         let agent_addr = format!("127.0.0.1:{}", agent_port);
         let agent_config = AgentConfig {
             agent_addr: agent_addr.clone(),
             http_addr: format!("127.0.0.1:{}", find_port()),
-            data_dir: "/tmp/coord-agent-test".into(),
+            data_dir: agent_tmp.path().to_string_lossy().to_string(),
             static_peers: vec![server_addr.clone()],
             ..Default::default()
         };
@@ -181,7 +198,19 @@ mod tests {
         let agent_handle = tokio::spawn(async move {
             server.serve().await.unwrap();
         });
-        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // agent 冷启动约 1s+（PKI/服务初始化），固定 200ms 在并行负载下必竞态
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if tokio::net::TcpStream::connect(&agent_addr).await.is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "agent did not start within 30s"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
 
         // 3. Connect gRPC client to Agent (not directly to Server)
         let channel = tonic::transport::Endpoint::from_shared(format!("http://{agent_addr}"))
@@ -201,7 +230,10 @@ mod tests {
             .await
             .expect("KV Put through agent should succeed");
 
-        tracing::info!("Agent Put response: revision={}", put_resp.get_ref().revision);
+        tracing::info!(
+            "Agent Put response: revision={}",
+            put_resp.get_ref().revision
+        );
 
         // 5. Range the key back through Agent
         let range_resp = kv_client
@@ -216,7 +248,10 @@ mod tests {
         tracing::info!("Agent Range response: {} kvs", kvs.len());
 
         // GREEN 断言：Agent 应将请求转发到真实 Server 并返回实际数据
-        assert!(!kvs.is_empty(), "Agent returns empty kvs (proxy not forwarding)");
+        assert!(
+            !kvs.is_empty(),
+            "Agent returns empty kvs (proxy not forwarding)"
+        );
         if !kvs.is_empty() {
             assert_eq!(kvs[0].key, b"/agent/proxy/test-key");
             assert_eq!(kvs[0].value, b"proxy-value-42");
@@ -238,12 +273,13 @@ mod tests {
         let (server_addr, _shutdown_tx, _grpc, _raft, _tmpdir) = start_test_server().await;
         tracing::info!("Test server running on {}", server_addr);
 
+        let agent_tmp = tempfile::tempdir().unwrap();
         let agent_port = find_port();
         let agent_addr = format!("127.0.0.1:{}", agent_port);
         let agent_config = AgentConfig {
             agent_addr: agent_addr.clone(),
             http_addr: format!("127.0.0.1:{}", find_port()),
-            data_dir: "/tmp/coord-agent-test".into(),
+            data_dir: agent_tmp.path().to_string_lossy().to_string(),
             static_peers: vec![server_addr.clone()],
             ..Default::default()
         };
@@ -252,7 +288,18 @@ mod tests {
         let agent_handle = tokio::spawn(async move {
             server.serve().await.unwrap();
         });
-        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if tokio::net::TcpStream::connect(&agent_addr).await.is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "agent did not start within 30s"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
 
         let channel = tonic::transport::Endpoint::from_shared(format!("http://{agent_addr}"))
             .unwrap()
@@ -281,7 +328,10 @@ mod tests {
             })
             .await
             .expect("Range should succeed");
-        assert!(!range_resp.get_ref().kvs.is_empty(), "Key should exist before delete");
+        assert!(
+            !range_resp.get_ref().kvs.is_empty(),
+            "Key should exist before delete"
+        );
 
         // 3. Delete the key
         let delete_resp = kv_client
@@ -292,7 +342,10 @@ mod tests {
             .await
             .expect("KV Delete through agent should succeed");
 
-        assert!(delete_resp.get_ref().deleted > 0, "Delete should report deleted > 0");
+        assert!(
+            delete_resp.get_ref().deleted > 0,
+            "Delete should report deleted > 0"
+        );
 
         // 4. Verify key is gone
         let range_resp = kv_client
@@ -302,7 +355,10 @@ mod tests {
             })
             .await
             .expect("Range after delete should succeed");
-        assert!(range_resp.get_ref().kvs.is_empty(), "Key should be gone after delete");
+        assert!(
+            range_resp.get_ref().kvs.is_empty(),
+            "Key should be gone after delete"
+        );
 
         agent_handle.abort();
     }
@@ -319,12 +375,13 @@ mod tests {
         let (server_addr, _shutdown_tx, _grpc, _raft, _tmpdir) = start_test_server().await;
         tracing::info!("Test server running on {}", server_addr);
 
+        let agent_tmp = tempfile::tempdir().unwrap();
         let agent_port = find_port();
         let agent_addr = format!("127.0.0.1:{}", agent_port);
         let agent_config = AgentConfig {
             agent_addr: agent_addr.clone(),
             http_addr: format!("127.0.0.1:{}", find_port()),
-            data_dir: "/tmp/coord-agent-test".into(),
+            data_dir: agent_tmp.path().to_string_lossy().to_string(),
             static_peers: vec![server_addr.clone()],
             ..Default::default()
         };
@@ -333,7 +390,18 @@ mod tests {
         let agent_handle = tokio::spawn(async move {
             server.serve().await.unwrap();
         });
-        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if tokio::net::TcpStream::connect(&agent_addr).await.is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "agent did not start within 30s"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
 
         let channel = tonic::transport::Endpoint::from_shared(format!("http://{agent_addr}"))
             .unwrap()
@@ -387,12 +455,13 @@ mod tests {
         let (server_addr, _shutdown_tx, _grpc, _raft, _tmpdir) = start_test_server().await;
         tracing::info!("Test server running on {}", server_addr);
 
+        let agent_tmp = tempfile::tempdir().unwrap();
         let agent_port = find_port();
         let agent_addr = format!("127.0.0.1:{}", agent_port);
         let agent_config = AgentConfig {
             agent_addr: agent_addr.clone(),
             http_addr: format!("127.0.0.1:{}", find_port()),
-            data_dir: "/tmp/coord-agent-test".into(),
+            data_dir: agent_tmp.path().to_string_lossy().to_string(),
             static_peers: vec![server_addr.clone()],
             ..Default::default()
         };
@@ -401,7 +470,18 @@ mod tests {
         let agent_handle = tokio::spawn(async move {
             server.serve().await.unwrap();
         });
-        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if tokio::net::TcpStream::connect(&agent_addr).await.is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "agent did not start within 30s"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
 
         let channel = tonic::transport::Endpoint::from_shared(format!("http://{agent_addr}"))
             .unwrap()
@@ -427,7 +507,10 @@ mod tests {
         );
 
         // 基本断言：Status 应返回有效数据
-        assert!(!status.raft_leader.is_empty(), "Raft leader should be known");
+        assert!(
+            !status.raft_leader.is_empty(),
+            "Raft leader should be known"
+        );
         assert!(status.raft_term > 0, "Raft term should be positive");
         assert_eq!(status.seal_status, "unsealed", "Cluster should be unsealed");
 
@@ -446,12 +529,13 @@ mod tests {
         let (server_addr, _shutdown_tx, _grpc, _raft, _tmpdir) = start_test_server().await;
         tracing::info!("Test server running on {}", server_addr);
 
+        let agent_tmp = tempfile::tempdir().unwrap();
         let agent_port = find_port();
         let agent_addr = format!("127.0.0.1:{}", agent_port);
         let agent_config = AgentConfig {
             agent_addr: agent_addr.clone(),
             http_addr: format!("127.0.0.1:{}", find_port()),
-            data_dir: "/tmp/coord-agent-test".into(),
+            data_dir: agent_tmp.path().to_string_lossy().to_string(),
             static_peers: vec![server_addr.clone()],
             ..Default::default()
         };
@@ -460,7 +544,18 @@ mod tests {
         let agent_handle = tokio::spawn(async move {
             server.serve().await.unwrap();
         });
-        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if tokio::net::TcpStream::connect(&agent_addr).await.is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "agent did not start within 30s"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
 
         let channel = tonic::transport::Endpoint::from_shared(format!("http://{agent_addr}"))
             .unwrap()

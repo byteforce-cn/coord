@@ -18,7 +18,10 @@ fn test_moka_backend_creation() {
 #[test]
 fn test_moka_string_set_get() {
     let config = CacheConfig {
-        backend: CacheBackend::Moka { max_capacity: 100, time_to_live: None },
+        backend: CacheBackend::Moka {
+            max_capacity: 100,
+            time_to_live: None,
+        },
     };
     let svc = MokaCacheService::new(config);
     svc.string_set("greeting", b"hello").unwrap();
@@ -30,7 +33,10 @@ fn test_moka_string_set_get() {
 #[test]
 fn test_moka_string_delete() {
     let config = CacheConfig {
-        backend: CacheBackend::Moka { max_capacity: 100, time_to_live: None },
+        backend: CacheBackend::Moka {
+            max_capacity: 100,
+            time_to_live: None,
+        },
     };
     let svc = MokaCacheService::new(config);
     svc.string_set("temp", b"val").unwrap();
@@ -42,12 +48,18 @@ fn test_moka_string_delete() {
 #[test]
 fn test_moka_hash_operations() {
     let config = CacheConfig {
-        backend: CacheBackend::Moka { max_capacity: 1000, time_to_live: None },
+        backend: CacheBackend::Moka {
+            max_capacity: 1000,
+            time_to_live: None,
+        },
     };
     let svc = MokaCacheService::new(config);
     svc.hash_field_set("user:1", "name", b"Alice").unwrap();
     svc.hash_field_set("user:1", "age", b"30").unwrap();
-    assert_eq!(svc.hash_field_get("user:1", "name").unwrap(), Some(b"Alice".to_vec()));
+    assert_eq!(
+        svc.hash_field_get("user:1", "name").unwrap(),
+        Some(b"Alice".to_vec())
+    );
     assert_eq!(svc.hash_get_all("user:1").unwrap().len(), 2);
     svc.hash_field_delete("user:1", "age").unwrap();
     assert_eq!(svc.hash_get_all("user:1").unwrap().len(), 1);
@@ -56,7 +68,10 @@ fn test_moka_hash_operations() {
 #[test]
 fn test_moka_list_push_pop() {
     let config = CacheConfig {
-        backend: CacheBackend::Moka { max_capacity: 100, time_to_live: None },
+        backend: CacheBackend::Moka {
+            max_capacity: 100,
+            time_to_live: None,
+        },
     };
     let svc = MokaCacheService::new(config);
     svc.list_push_left("q", b"a".to_vec()).unwrap();
@@ -69,7 +84,10 @@ fn test_moka_list_push_pop() {
 #[test]
 fn test_moka_set_operations() {
     let config = CacheConfig {
-        backend: CacheBackend::Moka { max_capacity: 1000, time_to_live: None },
+        backend: CacheBackend::Moka {
+            max_capacity: 1000,
+            time_to_live: None,
+        },
     };
     let svc = MokaCacheService::new(config);
     svc.set_add("tags", b"rust").unwrap();
@@ -84,7 +102,10 @@ fn test_moka_set_operations() {
 #[test]
 fn test_moka_cache_stats() {
     let config = CacheConfig {
-        backend: CacheBackend::Moka { max_capacity: 100, time_to_live: None },
+        backend: CacheBackend::Moka {
+            max_capacity: 100,
+            time_to_live: None,
+        },
     };
     let svc = MokaCacheService::new(config);
     svc.string_set("k1", b"v1").unwrap();

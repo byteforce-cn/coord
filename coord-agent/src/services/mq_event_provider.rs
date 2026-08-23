@@ -98,31 +98,27 @@ impl EventProvider for MqEventProvider {
     ) -> Option<String> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         loop {
-            let offset = *self.next_offset.lock().unwrap();
-            match self
-                .mq
-                .consume(&self.topic, self.partition, offset, 16)
-            {
-                Ok(records) => {
-                    if !records.is_empty() {
-                        let mut next = offset;
-                        for rec in &records {
-                            next = rec.offset + 1;
-                            if let Some((et, src, sub, _data)) = Self::decode_event(&rec.payload) {
-                                let type_match =
-                                    event_types.is_empty() || event_types.contains(&et.as_str());
-                                let source_match = source.map(|s| src.as_deref() == Some(s)).unwrap_or(true);
-                                let subject_match = subject.map(|s| sub.as_deref() == Some(s)).unwrap_or(true);
-                                if type_match && source_match && subject_match {
-                                    *self.next_offset.lock().unwrap() = next;
-                                    return Some(et);
-                                }
+            let offset = *self.next_offset.lock().unwrap_or_else(|e| e.into_inner());
+            if let Ok(records) = self.mq.consume(&self.topic, self.partition, offset, 16) {
+                if !records.is_empty() {
+                    let mut next = offset;
+                    for rec in &records {
+                        next = rec.offset + 1;
+                        if let Some((et, src, sub, _data)) = Self::decode_event(&rec.payload) {
+                            let type_match =
+                                event_types.is_empty() || event_types.contains(&et.as_str());
+                            let source_match =
+                                source.map(|s| src.as_deref() == Some(s)).unwrap_or(true);
+                            let subject_match =
+                                subject.map(|s| sub.as_deref() == Some(s)).unwrap_or(true);
+                            if type_match && source_match && subject_match {
+                                *self.next_offset.lock().unwrap_or_else(|e| e.into_inner()) = next;
+                                return Some(et);
                             }
                         }
-                        *self.next_offset.lock().unwrap() = next;
                     }
+                    *self.next_offset.lock().unwrap_or_else(|e| e.into_inner()) = next;
                 }
-                Err(_) => {}
             }
             if std::time::Instant::now() >= deadline {
                 return None;
@@ -153,7 +149,10 @@ mod tests {
     use tempfile::TempDir;
 
     async fn mq_provider(dir: &TempDir) -> (Arc<MessageQueueService>, Arc<MqEventProvider>) {
-        let mq = Arc::new(MessageQueueService::new(dir.path().to_path_buf(), 1024 * 1024 * 1024));
+        let mq = Arc::new(MessageQueueService::new(
+            dir.path().to_path_buf(),
+            1024 * 1024 * 1024,
+        ));
         use crate::service::BaseService;
         mq.start().await.expect("start mq service");
         let provider = Arc::new(MqEventProvider::new(Arc::clone(&mq), "test.events"));
@@ -167,14 +166,22 @@ mod tests {
 
         // 发布事件
         provider
-            .emit("order.created", Some("coord/orders"), &serde_json::json!({"orderId": "1"}))
+            .emit(
+                "order.created",
+                Some("coord/orders"),
+                &serde_json::json!({"orderId": "1"}),
+            )
             .await;
 
         // 消费并匹配
         let found = provider
             .wait_for_event(&["order.created"], Some("coord/orders"), None, 2000)
             .await;
-        assert_eq!(found.as_deref(), Some("order.created"), "should find the emitted event");
+        assert_eq!(
+            found.as_deref(),
+            Some("order.created"),
+            "should find the emitted event"
+        );
     }
 
     #[tokio::test]
@@ -183,7 +190,11 @@ mod tests {
         let (_mq, provider) = mq_provider(&dir).await;
 
         provider
-            .emit("order.created", Some("coord/orders"), &serde_json::json!({}))
+            .emit(
+                "order.created",
+                Some("coord/orders"),
+                &serde_json::json!({}),
+            )
             .await;
 
         // event_type 不匹配 → 超时返回 None

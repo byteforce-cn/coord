@@ -1,0 +1,35 @@
+# cargo-deny 配置（P1-03 依赖治理，`.github/workflows/ci.yml` security-audit job）
+#
+# 维护约定（docs/production/13-api-governance.md §六.3）：
+# 新增依赖 PR 若触发 deny，必须：ADR/说明 → 更新本文件 allow 列表 → 合并。
+
+[advisories]
+# 漏洞通告：拒绝有已知漏洞的版本（默认行为）
+yanked = "deny"
+ignore = []
+
+[licenses]
+# 默认拒绝未明确列出的许可证；coord 依赖栈常用许可白名单
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+]
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = []
+skip = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = []

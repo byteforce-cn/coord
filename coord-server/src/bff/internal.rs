@@ -13,13 +13,14 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
+    Json,
 };
 use serde_json::{json, Value};
 
+use crate::auth::service::AuthService;
 use crate::auth::{AuthManager, TokenManager};
 use crate::server::CoordNode;
 
@@ -31,6 +32,8 @@ pub struct InternalState {
     pub token_manager: Arc<TokenManager>,
     /// 服务端核心节点（提供 KV 读写能力）
     pub coord_node: Arc<CoordNode>,
+    /// AuthService（P0-C.5：token 吊销经 raft RevokeJti；None = 未接线）
+    pub auth_service: Option<Arc<AuthService>>,
 }
 
 // ──── Handlers ────
@@ -43,14 +46,8 @@ pub async fn approle_login(
     State(state): State<Arc<InternalState>>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let role_id = body
-        .get("role_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let secret_id = body
-        .get("secret_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let role_id = body.get("role_id").and_then(|v| v.as_str()).unwrap_or("");
+    let secret_id = body.get("secret_id").and_then(|v| v.as_str()).unwrap_or("");
 
     // AppRole 认证：将 role_id 作为用户名，secret_id 作为密码进行认证
     match state.auth_manager.authenticate(role_id, secret_id) {
@@ -59,7 +56,10 @@ pub async fn approle_login(
             let token = state.token_manager.issue_token(role_id);
 
             // 获取用户角色
-            let roles = state.auth_manager.user_get_roles(role_id).unwrap_or_default();
+            let roles = state
+                .auth_manager
+                .user_get_roles(role_id)
+                .unwrap_or_default();
 
             let response = json!({
                 "auth": {
@@ -96,7 +96,10 @@ pub async fn token_lookup(
     match token {
         Some(t) => match state.token_manager.validate(&t) {
             Ok(username) => {
-                let roles = state.auth_manager.user_get_roles(&username).unwrap_or_default();
+                let roles = state
+                    .auth_manager
+                    .user_get_roles(&username)
+                    .unwrap_or_default();
                 let response = json!({
                     "data": {
                         "accessor": "internal",
@@ -122,6 +125,38 @@ pub async fn token_lookup(
             });
             (StatusCode::BAD_REQUEST, Json(response)).into_response()
         }
+    }
+}
+
+/// POST /v1/auth/token/revoke-self
+///
+/// 吊销请求头中的 token：CCT 经 raft `RevokeJti` 登记（P0-C.5），
+/// 遗留 token 走 token_manager。
+pub async fn token_revoke(
+    State(state): State<Arc<InternalState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    match extract_bearer_token(&headers) {
+        Some(token) => match &state.auth_service {
+            Some(svc) => match svc.revoke_token(&token).await {
+                Ok(()) => (StatusCode::OK, Json(json!({ "revoked": true }))).into_response(),
+                Err(e) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "errors": [format!("revoke failed: {e}")] })),
+                )
+                    .into_response(),
+            },
+            None => (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(json!({ "errors": ["token revocation not wired"] })),
+            )
+                .into_response(),
+        },
+        None => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "errors": ["missing token"] })),
+        )
+            .into_response(),
     }
 }
 

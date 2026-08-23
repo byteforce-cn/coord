@@ -198,11 +198,7 @@ impl WriteBatcher {
     ///
     /// 用于测试环境或非 tokio 上下文。
     #[doc(hidden)]
-    pub fn run_blocking<F>(
-        &self,
-        write_fn: F,
-        batch_interval_ms: u64,
-    ) -> Result<(), String>
+    pub fn run_blocking<F>(&self, write_fn: F, batch_interval_ms: u64) -> Result<(), String>
     where
         F: Fn(Vec<WriteBatchRequest>) -> Result<(), String>,
     {
@@ -458,6 +454,9 @@ mod tests {
         let _ = rx.await;
 
         // 关闭时应 flush 最后一批
-        assert!(flush_count.load(Ordering::SeqCst) >= 1, "should flush on shutdown");
+        assert!(
+            flush_count.load(Ordering::SeqCst) >= 1,
+            "should flush on shutdown"
+        );
     }
 }

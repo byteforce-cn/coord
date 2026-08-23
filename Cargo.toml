@@ -25,17 +25,22 @@ tokio-stream = "0.1"
 
 # gRPC 框架
 tonic = { version = "0.14.6", features = ["tls-ring"] }
+http = "1"
 prost = "0.14.3"
 tonic-build = "0.14.6"
 prost-build = "0.14.3"
 tonic-health = "0.14.6"
 tonic-reflection = "0.14.6"
 
-# Raft 共识
-openraft = { version = "0.10.0-alpha.24", features = ["serde"] }
+# Raft 共识（P1-06：版本精确锁定 =0.10.0-alpha.25，升级须走
+# docs/production/16-openraft-governance.md 升级演练）
+openraft = { version = "=0.10.0-alpha.25", features = ["serde"] }
 
 # 存储引擎
 redb = "4.1.0"
+
+# 系统调用（磁盘水位 statvfs，P1-02）
+libc = "0.2"
 
 # 内存安全
 zeroize = { version = "1.8.1", features = ["zeroize_derive"] }
@@ -65,6 +70,7 @@ futures = "0.3"
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
+argon2 = "0.5"
 rand = "0.8"
 hmac = "0.12"
 

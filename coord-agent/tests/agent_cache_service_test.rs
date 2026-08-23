@@ -57,7 +57,8 @@ fn test_cache_service_start_stop() {
 fn test_cache_string_put_get() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
-    svc.string_put("key1", b"value1".to_vec(), None).expect("put should succeed");
+    svc.string_put("key1", b"value1".to_vec(), None)
+        .expect("put should succeed");
     let val = svc.string_get("key1").expect("get should succeed");
     assert_eq!(val, Some(b"value1".to_vec()));
 }
@@ -74,7 +75,8 @@ fn test_cache_string_get_missing() {
 fn test_cache_string_delete() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
-    svc.string_put("key1", b"value1".to_vec(), None).expect("put should succeed");
+    svc.string_put("key1", b"value1".to_vec(), None)
+        .expect("put should succeed");
     let deleted = svc.string_delete("key1").expect("delete should succeed");
     assert!(deleted);
     let val = svc.string_get("key1").expect("get should succeed");
@@ -85,7 +87,9 @@ fn test_cache_string_delete() {
 fn test_cache_string_delete_missing() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
-    let deleted = svc.string_delete("nonexistent").expect("delete should succeed");
+    let deleted = svc
+        .string_delete("nonexistent")
+        .expect("delete should succeed");
     assert!(!deleted);
 }
 
@@ -93,8 +97,10 @@ fn test_cache_string_delete_missing() {
 fn test_cache_string_overwrite() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
-    svc.string_put("key1", b"v1".to_vec(), None).expect("put should succeed");
-    svc.string_put("key1", b"v2".to_vec(), None).expect("put should succeed");
+    svc.string_put("key1", b"v1".to_vec(), None)
+        .expect("put should succeed");
+    svc.string_put("key1", b"v2".to_vec(), None)
+        .expect("put should succeed");
     let val = svc.string_get("key1").expect("get should succeed");
     assert_eq!(val, Some(b"v2".to_vec()));
 }
@@ -106,7 +112,8 @@ fn test_cache_string_ttl_expiry() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async { svc.start().await.expect("start") });
     // TTL=1 second, then wait 2 seconds
-    svc.string_put("key1", b"value1".to_vec(), Some(1)).expect("put should succeed");
+    svc.string_put("key1", b"value1".to_vec(), Some(1))
+        .expect("put should succeed");
     std::thread::sleep(std::time::Duration::from_secs(2));
     let val = svc.string_get("key1").expect("get should succeed");
     assert_eq!(val, None, "expired entry should return None");
@@ -118,8 +125,11 @@ fn test_cache_string_ttl_expiry() {
 fn test_cache_hash_field_put_get() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
-    svc.hash_field_put("hash1", "field1", b"val1".to_vec(), None).expect("put should succeed");
-    let val = svc.hash_field_get("hash1", "field1").expect("get should succeed");
+    svc.hash_field_put("hash1", "field1", b"val1".to_vec(), None)
+        .expect("put should succeed");
+    let val = svc
+        .hash_field_get("hash1", "field1")
+        .expect("get should succeed");
     assert_eq!(val, Some(b"val1".to_vec()));
 }
 
@@ -127,8 +137,10 @@ fn test_cache_hash_field_put_get() {
 fn test_cache_hash_get_all() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
-    svc.hash_field_put("hash1", "f1", b"a".to_vec(), None).expect("put should succeed");
-    svc.hash_field_put("hash1", "f2", b"b".to_vec(), None).expect("put should succeed");
+    svc.hash_field_put("hash1", "f1", b"a".to_vec(), None)
+        .expect("put should succeed");
+    svc.hash_field_put("hash1", "f2", b"b".to_vec(), None)
+        .expect("put should succeed");
     let all = svc.hash_get_all("hash1").expect("get_all should succeed");
     assert_eq!(all.len(), 2);
     assert_eq!(all.get("f1").map(|v| v.as_slice()), Some(b"a".as_slice()));
@@ -139,9 +151,13 @@ fn test_cache_hash_get_all() {
 fn test_cache_hash_field_delete() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
-    svc.hash_field_put("hash1", "f1", b"a".to_vec(), None).expect("put should succeed");
-    svc.hash_field_put("hash1", "f2", b"b".to_vec(), None).expect("put should succeed");
-    let deleted = svc.hash_field_delete("hash1", "f1").expect("delete should succeed");
+    svc.hash_field_put("hash1", "f1", b"a".to_vec(), None)
+        .expect("put should succeed");
+    svc.hash_field_put("hash1", "f2", b"b".to_vec(), None)
+        .expect("put should succeed");
+    let deleted = svc
+        .hash_field_delete("hash1", "f1")
+        .expect("delete should succeed");
     assert!(deleted);
     let all = svc.hash_get_all("hash1").expect("get_all should succeed");
     assert_eq!(all.len(), 1);
@@ -152,9 +168,16 @@ fn test_cache_hash_field_delete() {
 fn test_cache_hash_field_count() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
-    assert_eq!(svc.hash_field_count("hash1").expect("count should succeed"), 0);
-    svc.hash_field_put("hash1", "f1", b"a".to_vec(), None).expect("put should succeed");
-    assert_eq!(svc.hash_field_count("hash1").expect("count should succeed"), 1);
+    assert_eq!(
+        svc.hash_field_count("hash1").expect("count should succeed"),
+        0
+    );
+    svc.hash_field_put("hash1", "f1", b"a".to_vec(), None)
+        .expect("put should succeed");
+    assert_eq!(
+        svc.hash_field_count("hash1").expect("count should succeed"),
+        1
+    );
 }
 
 // ──── F.4: List 类型操作 ────
@@ -163,8 +186,10 @@ fn test_cache_hash_field_count() {
 fn test_cache_list_push_pop() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
-    svc.list_push_left("list1", b"a".to_vec(), None).expect("push should succeed");
-    svc.list_push_left("list1", b"b".to_vec(), None).expect("push should succeed");
+    svc.list_push_left("list1", b"a".to_vec(), None)
+        .expect("push should succeed");
+    svc.list_push_left("list1", b"b".to_vec(), None)
+        .expect("push should succeed");
     // LIFO: b was pushed last to left, so left pop gives b
     let val = svc.list_pop_left("list1").expect("pop should succeed");
     assert_eq!(val, Some(b"b".to_vec()));
@@ -174,8 +199,10 @@ fn test_cache_list_push_pop() {
 fn test_cache_list_push_right_pop_right() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
-    svc.list_push_right("list1", b"a".to_vec(), None).expect("push should succeed");
-    svc.list_push_right("list1", b"b".to_vec(), None).expect("push should succeed");
+    svc.list_push_right("list1", b"a".to_vec(), None)
+        .expect("push should succeed");
+    svc.list_push_right("list1", b"b".to_vec(), None)
+        .expect("push should succeed");
     let val = svc.list_pop_right("list1").expect("pop should succeed");
     assert_eq!(val, Some(b"b".to_vec()));
 }
@@ -185,7 +212,8 @@ fn test_cache_list_range() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
     for i in 0..5u8 {
-        svc.list_push_right("list1", vec![i], None).expect("push should succeed");
+        svc.list_push_right("list1", vec![i], None)
+            .expect("push should succeed");
     }
     let range = svc.list_range("list1", 1, 4).expect("range should succeed");
     assert_eq!(range, vec![vec![1u8], vec![2], vec![3]]);
@@ -196,7 +224,8 @@ fn test_cache_list_length() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
     assert_eq!(svc.list_length("list1").expect("len should succeed"), 0);
-    svc.list_push_right("list1", b"a".to_vec(), None).expect("push should succeed");
+    svc.list_push_right("list1", b"a".to_vec(), None)
+        .expect("push should succeed");
     assert_eq!(svc.list_length("list1").expect("len should succeed"), 1);
 }
 
@@ -206,22 +235,35 @@ fn test_cache_list_length() {
 fn test_cache_set_add_contains() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
-    let added = svc.set_add("set1", b"member1".to_vec(), None).expect("add should succeed");
+    let added = svc
+        .set_add("set1", b"member1".to_vec(), None)
+        .expect("add should succeed");
     assert!(added);
-    let added2 = svc.set_add("set1", b"member1".to_vec(), None).expect("add should succeed");
+    let added2 = svc
+        .set_add("set1", b"member1".to_vec(), None)
+        .expect("add should succeed");
     assert!(!added2, "duplicate should return false");
-    assert!(svc.set_contains("set1", b"member1").expect("contains should succeed"));
-    assert!(!svc.set_contains("set1", b"member2").expect("contains should succeed"));
+    assert!(svc
+        .set_contains("set1", b"member1")
+        .expect("contains should succeed"));
+    assert!(!svc
+        .set_contains("set1", b"member2")
+        .expect("contains should succeed"));
 }
 
 #[test]
 fn test_cache_set_remove() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
-    svc.set_add("set1", b"m1".to_vec(), None).expect("add should succeed");
-    let removed = svc.set_remove("set1", b"m1").expect("remove should succeed");
+    svc.set_add("set1", b"m1".to_vec(), None)
+        .expect("add should succeed");
+    let removed = svc
+        .set_remove("set1", b"m1")
+        .expect("remove should succeed");
     assert!(removed);
-    let removed2 = svc.set_remove("set1", b"m1").expect("remove should succeed");
+    let removed2 = svc
+        .set_remove("set1", b"m1")
+        .expect("remove should succeed");
     assert!(!removed2);
 }
 
@@ -229,8 +271,10 @@ fn test_cache_set_remove() {
 fn test_cache_set_members() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
-    svc.set_add("set1", b"a".to_vec(), None).expect("add should succeed");
-    svc.set_add("set1", b"b".to_vec(), None).expect("add should succeed");
+    svc.set_add("set1", b"a".to_vec(), None)
+        .expect("add should succeed");
+    svc.set_add("set1", b"b".to_vec(), None)
+        .expect("add should succeed");
     let mut members = svc.set_members("set1").expect("members should succeed");
     members.sort();
     assert_eq!(members, vec![b"a".to_vec(), b"b".to_vec()]);
@@ -241,8 +285,10 @@ fn test_cache_set_cardinality() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
     assert_eq!(svc.set_cardinality("set1").expect("card should succeed"), 0);
-    svc.set_add("set1", b"a".to_vec(), None).expect("add should succeed");
-    svc.set_add("set1", b"b".to_vec(), None).expect("add should succeed");
+    svc.set_add("set1", b"a".to_vec(), None)
+        .expect("add should succeed");
+    svc.set_add("set1", b"b".to_vec(), None)
+        .expect("add should succeed");
     assert_eq!(svc.set_cardinality("set1").expect("card should succeed"), 2);
 }
 
@@ -258,10 +304,14 @@ fn test_cache_persistence_across_restart() {
     {
         let svc = CacheService::new(db_path.clone(), 1024 * 1024, 3600);
         rt.block_on(async { svc.start().await.expect("start") });
-        svc.string_put("persist_key", b"persist_val".to_vec(), None).expect("put should succeed");
-        svc.hash_field_put("persist_hash", "f1", b"hv".to_vec(), None).expect("hput should succeed");
-        svc.list_push_right("persist_list", b"lv".to_vec(), None).expect("lpush should succeed");
-        svc.set_add("persist_set", b"sv".to_vec(), None).expect("sadd should succeed");
+        svc.string_put("persist_key", b"persist_val".to_vec(), None)
+            .expect("put should succeed");
+        svc.hash_field_put("persist_hash", "f1", b"hv".to_vec(), None)
+            .expect("hput should succeed");
+        svc.list_push_right("persist_list", b"lv".to_vec(), None)
+            .expect("lpush should succeed");
+        svc.set_add("persist_set", b"sv".to_vec(), None)
+            .expect("sadd should succeed");
         // drop svc (closes DB)
     }
 
@@ -269,9 +319,18 @@ fn test_cache_persistence_across_restart() {
     {
         let svc = CacheService::new(db_path.clone(), 1024 * 1024, 3600);
         rt.block_on(async { svc.start().await.expect("start") });
-        assert_eq!(svc.string_get("persist_key").expect("get"), Some(b"persist_val".to_vec()));
-        assert_eq!(svc.hash_field_get("persist_hash", "f1").expect("hget"), Some(b"hv".to_vec()));
-        assert_eq!(svc.list_range("persist_list", 0, -1).expect("lrange"), vec![b"lv".to_vec()]);
+        assert_eq!(
+            svc.string_get("persist_key").expect("get"),
+            Some(b"persist_val".to_vec())
+        );
+        assert_eq!(
+            svc.hash_field_get("persist_hash", "f1").expect("hget"),
+            Some(b"hv".to_vec())
+        );
+        assert_eq!(
+            svc.list_range("persist_list", 0, -1).expect("lrange"),
+            vec![b"lv".to_vec()]
+        );
         assert!(svc.set_contains("persist_set", b"sv").expect("scontains"));
     }
 }
@@ -289,8 +348,10 @@ fn test_cache_stats() {
     assert_eq!(stats.set_count, 0);
 
     svc.string_put("k1", b"v1".to_vec(), None).expect("put");
-    svc.hash_field_put("h1", "f1", b"v1".to_vec(), None).expect("hput");
-    svc.list_push_right("l1", b"v1".to_vec(), None).expect("lpush");
+    svc.hash_field_put("h1", "f1", b"v1".to_vec(), None)
+        .expect("hput");
+    svc.list_push_right("l1", b"v1".to_vec(), None)
+        .expect("lpush");
     svc.set_add("s1", b"v1".to_vec(), None).expect("sadd");
 
     let stats = svc.stats().expect("stats should succeed");
@@ -306,15 +367,21 @@ fn test_cache_stats() {
 fn test_cache_shard_metadata() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
-    svc.set_shard_meta("shard-001", CacheShardMeta {
-        shard_id: "shard-001".into(),
-        leader_agent: "agent-a:9500".into(),
-        replicas: vec!["agent-b:9500".into(), "agent-c:9500".into()],
-        key_range_start: vec![0],
-        key_range_end: vec![127],
-    }).expect("set shard meta should succeed");
+    svc.set_shard_meta(
+        "shard-001",
+        CacheShardMeta {
+            shard_id: "shard-001".into(),
+            leader_agent: "agent-a:9500".into(),
+            replicas: vec!["agent-b:9500".into(), "agent-c:9500".into()],
+            key_range_start: vec![0],
+            key_range_end: vec![127],
+        },
+    )
+    .expect("set shard meta should succeed");
 
-    let meta = svc.get_shard_meta("shard-001").expect("get shard meta should succeed");
+    let meta = svc
+        .get_shard_meta("shard-001")
+        .expect("get shard meta should succeed");
     assert!(meta.is_some());
     let meta = meta.unwrap();
     assert_eq!(meta.shard_id, "shard-001");
@@ -327,13 +394,17 @@ fn test_cache_list_shards() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
     for i in 0..3 {
-        svc.set_shard_meta(&format!("shard-{i:03}"), CacheShardMeta {
-            shard_id: format!("shard-{i:03}"),
-            leader_agent: format!("agent-{}:9500", i),
-            replicas: vec![],
-            key_range_start: vec![i as u8],
-            key_range_end: vec![i as u8 + 1],
-        }).expect("set shard meta");
+        svc.set_shard_meta(
+            &format!("shard-{i:03}"),
+            CacheShardMeta {
+                shard_id: format!("shard-{i:03}"),
+                leader_agent: format!("agent-{}:9500", i),
+                replicas: vec![],
+                key_range_start: vec![i as u8],
+                key_range_end: vec![i as u8 + 1],
+            },
+        )
+        .expect("set shard meta");
     }
     let shards = svc.list_shards().expect("list shards should succeed");
     assert_eq!(shards.len(), 3);
@@ -346,8 +417,10 @@ fn test_cache_flush_all() {
     let dir = temp_data_dir();
     let svc = new_cache_service(&dir);
     svc.string_put("k1", b"v1".to_vec(), None).expect("put");
-    svc.hash_field_put("h1", "f1", b"v1".to_vec(), None).expect("hput");
-    svc.list_push_right("l1", b"v1".to_vec(), None).expect("lpush");
+    svc.hash_field_put("h1", "f1", b"v1".to_vec(), None)
+        .expect("hput");
+    svc.list_push_right("l1", b"v1".to_vec(), None)
+        .expect("lpush");
     svc.set_add("s1", b"v1".to_vec(), None).expect("sadd");
 
     svc.flush_all().expect("flush should succeed");

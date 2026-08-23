@@ -7,7 +7,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Data, Fields};
+use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
 /// 为结构体生成 revision 验证方法。
 ///
@@ -30,9 +30,10 @@ pub fn derive_validate_revision(input: TokenStream) -> TokenStream {
     // 检查是否包含 revision 字段
     let has_revision = match &input.data {
         Data::Struct(data) => match &data.fields {
-            Fields::Named(fields) => fields.named.iter().any(|f| {
-                f.ident.as_ref().map_or(false, |id| id == "revision")
-            }),
+            Fields::Named(fields) => fields
+                .named
+                .iter()
+                .any(|f| f.ident.as_ref().is_some_and(|id| id == "revision")),
             _ => false,
         },
         _ => false,
@@ -98,19 +99,22 @@ pub fn derive_builder(input: TokenStream) -> TokenStream {
             }
         },
         _ => {
-            return syn::Error::new_spanned(
-                &input,
-                "#[derive(Builder)] only supports structs",
-            )
-            .to_compile_error()
-            .into();
+            return syn::Error::new_spanned(&input, "#[derive(Builder)] only supports structs")
+                .to_compile_error()
+                .into();
         }
     };
 
     let setters: Vec<_> = fields
         .iter()
         .map(|f| {
-            let field_name = f.ident.as_ref().unwrap();
+            let Some(field_name) = f.ident.as_ref() else {
+                return syn::Error::new_spanned(
+                    f,
+                    "#[derive(Builder)] only supports structs with named fields",
+                )
+                .to_compile_error();
+            };
             let field_type = &f.ty;
             let method_name = quote::format_ident!("with_{}", field_name);
             quote! {
@@ -130,5 +134,3 @@ pub fn derive_builder(input: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
-
-

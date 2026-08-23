@@ -15,11 +15,17 @@
 // See docs/capability-auth-implementation.md §4.3.
 
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use coord_core::auth::cct::{decode_cct, is_expired, CctPayload, CctToken};
 use coord_core::auth::trie::ScopeTrie;
+use tonic::Status;
+use tower::{Layer, Service};
 
+use crate::auth::manager::AuthManager;
 use crate::auth::revocation::RevocationStore;
 use crate::auth::token_signing::TokenSigningKeyring;
 
@@ -55,6 +61,8 @@ fn high_risk_operations() -> HashSet<&'static str> {
     // All admin operations
     set.insert("admin:maintenance:seal");
     set.insert("admin:maintenance:unseal");
+    set.insert("admin:maintenance:snapshot");
+    set.insert("admin:maintenance:compact");
     set.insert("admin:maintenance:member_add");
     set.insert("admin:maintenance:member_remove");
     set.insert("admin:maintenance:member_promote");
@@ -113,6 +121,10 @@ pub fn is_high_risk_operation(capability_id: &str) -> bool {
 
 /// Result of server-side auth verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// 服务端鉴权结果
+// Box 化 CctToken 会改变全调用点匹配模式；Allow 载荷大但不频繁（每次请求
+// 一次），接受大小差异（P1-03 clippy 治理评估）。
+#[allow(clippy::large_enum_variant)]
 pub enum ServerAuthResult {
     /// Request is fully authorized
     Allow {
@@ -151,6 +163,10 @@ impl ServerAuthResult {
 ///
 /// Validates CCT tokens and applies differential scope verification based on
 /// caller identity (mTLS CN) and operation risk level.
+///
+/// P0-C.4：能力判定已收紧 —— 无 scope_overrides 时按服务端角色授权
+/// （`AuthManager::check_capability`）判定，无匹配即拒绝（fail-closed），
+/// 删除"有任意 role 即放行"的宽泛兜底。
 pub struct ServerAuthInterceptor {
     /// Token signing keyring for CCT signature verification
     keyring: Arc<TokenSigningKeyring>,
@@ -162,6 +178,10 @@ pub struct ServerAuthInterceptor {
     mtls_enforced: bool,
     /// Whether auth is enabled
     enabled: bool,
+    /// Server-side role → capability grants（P0-C.4；None = fail-closed）
+    role_provider: Option<Arc<AuthManager>>,
+    /// P2-08：审计日志（拒绝路径记录；可选）
+    audit: Option<Arc<crate::audit::AuditLogger>>,
 }
 
 impl ServerAuthInterceptor {
@@ -177,7 +197,23 @@ impl ServerAuthInterceptor {
             clock_drift_secs: 300,
             mtls_enforced,
             enabled: true,
+            role_provider: None,
+            audit: None,
         }
+    }
+
+    /// P2-08：挂载审计日志器（拒绝路径记录鉴权拒绝事件）。
+    pub fn with_audit_logger(mut self, logger: Arc<crate::audit::AuditLogger>) -> Self {
+        self.audit = Some(logger);
+        self
+    }
+
+    /// Attach a server-side role provider for capability authorization.
+    ///
+    /// Without a provider any token without scope_overrides is denied (fail-closed).
+    pub fn with_role_provider(mut self, manager: Arc<AuthManager>) -> Self {
+        self.role_provider = Some(manager);
+        self
     }
 
     /// Set whether auth is enabled.
@@ -288,18 +324,16 @@ impl ServerAuthInterceptor {
                 trusted_agent: true,
             },
 
-            // Case B: All other cases → full scope check required
+            // Case B: All other cases → full capability + scope check (P0-C.4 fail-closed)
             (_, true) | (false, _) => {
-                if let Some(key) = scope_key {
-                    // Verify scope from the token's scope_overrides or roles
-                    if !self.check_scope(&cct.payload, capability_id, key) {
-                        return ServerAuthResult::Deny {
-                            reason: format!(
-                                "scope restriction: key '{key}' not allowed for capability '{capability_id}'"
-                            ),
-                            trusted_agent: is_trusted,
-                        };
-                    }
+                if !self.authorize(&cct.payload, capability_id, scope_key) {
+                    return ServerAuthResult::Deny {
+                        reason: format!(
+                            "capability '{capability_id}' not granted to roles {:?} (scope key: {scope_key:?})",
+                            cct.payload.roles
+                        ),
+                        trusted_agent: is_trusted,
+                    };
                 }
 
                 ServerAuthResult::Allow {
@@ -334,35 +368,310 @@ impl ServerAuthInterceptor {
         Err("invalid CCT signature".into())
     }
 
-    /// Check if the CCT payload grants the requested scope for a capability.
+    /// Authorize a capability request for a CCT payload (P0-C.4).
     ///
-    /// First checks scope_overrides in the token, then falls back to role-based grants.
-    fn check_scope(
+    /// 1. scope_overrides（token 内嵌覆盖）优先：空 scope = 全放行；
+    ///    非空 scope 须 `scope_key` 存在且 ScopeTrie 命中（否则拒绝）。
+    /// 2. 无覆盖时按服务端角色授权（`AuthManager::check_capability`）；
+    ///    无角色提供方 → 拒绝（fail-closed）。
+    fn authorize(
         &self,
         payload: &CctPayload,
         capability_id: &str,
-        scope_key: &str,
+        scope_key: Option<&str>,
     ) -> bool {
         // Check scope_overrides first (per-token overrides)
         if let Some(allowed_scope) = payload.scope_overrides.get(capability_id) {
             if allowed_scope.is_empty() {
                 return true; // Empty scope = match-all
             }
-            let mut trie = ScopeTrie::new();
-            if trie.insert(allowed_scope).is_err() {
-                return false;
-            }
-            return trie.matches(scope_key);
+            // 非空 override 必须能对 scope_key 验证；无 scope_key → fail-closed
+            return match scope_key {
+                Some(key) => {
+                    let mut trie = ScopeTrie::new();
+                    trie.insert(allowed_scope).is_ok() && trie.matches(key)
+                }
+                None => false,
+            };
         }
 
-        // If no scope_overrides, the scope check is deferred to the agent.
-        // On the server side without role cache, we apply a generous policy:
-        // allow if the token has any roles (agent already verified scope).
-        // This is safe because:
-        // 1. Agent already performed full scope check
-        // 2. Server is the second line of defense
-        // 3. For non-trusted callers, the agent check already happened upstream
-        !payload.roles.is_empty()
+        // Server-side role grants (P0-C.4: no more "any role passes" fallback)
+        match &self.role_provider {
+            Some(provider) => provider.check_capability(&payload.roles, capability_id, scope_key),
+            None => false,
+        }
+    }
+
+    /// 仅验证 CCT 有效性（签名/过期/吊销），不做能力授权。
+    ///
+    /// 用于角色同步等"需合法凭据但不走角色授权"的端点（`GetRevocationDelta`）。
+    pub fn verify_token_only(&self, cct_str: Option<&str>) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let cct_str = cct_str.ok_or_else(|| "missing CCT token".to_string())?;
+        let cct_str = extract_bearer_token(Some(cct_str)).unwrap_or(cct_str);
+        let cct = self.decode_and_verify(cct_str)?;
+        if is_expired(&cct.payload, self.clock_drift_secs) {
+            return Err("CCT expired".into());
+        }
+        if self.revocation_store.is_revoked(&cct.payload.jti) {
+            return Err("CCT has been revoked".into());
+        }
+        Ok(())
+    }
+}
+
+// ──── RPC → Capability 映射（服务端，P0-C.1）────
+
+/// 服务端 gRPC 方法 → 能力 ID 映射（与 agent 侧映射表一致）。
+///
+/// 返回 `None` 的路径属于白名单（health check / Authenticate）或未知 RPC；
+/// 白名单判定见 [`is_whitelisted`]。
+pub fn infer_capability(rpc_method: &str) -> Option<String> {
+    match rpc_method {
+        // KV
+        "/coord.kv.KV/Range" => Some("data:kv:read".into()),
+        "/coord.kv.KV/Put" => Some("data:kv:write".into()),
+        "/coord.kv.KV/Delete" => Some("data:kv:delete".into()),
+
+        // Txn
+        "/coord.txn.Txn/Txn" => Some("data:txn:execute".into()),
+
+        // Lease
+        "/coord.lease.Lease/LeaseGrant" => Some("data:lease:grant".into()),
+        "/coord.lease.Lease/LeaseRevoke" => Some("data:lease:revoke".into()),
+        "/coord.lease.Lease/LeaseKeepAlive" => Some("data:lease:keepalive".into()),
+
+        // Watch
+        "/coord.watch.Watch/Watch" => Some("data:watch:subscribe".into()),
+
+        // Maintenance（集群管理，P0-D.5 归 cluster:admin 权限点）
+        "/coord.maintenance.Maintenance/Status" => Some("admin:maintenance:status".into()),
+        "/coord.maintenance.Maintenance/Seal" => Some("admin:maintenance:seal".into()),
+        "/coord.maintenance.Maintenance/Unseal" => Some("admin:maintenance:unseal".into()),
+        "/coord.maintenance.Maintenance/Snapshot" => Some("admin:maintenance:snapshot".into()),
+        "/coord.maintenance.Maintenance/Compact" => Some("admin:maintenance:compact".into()),
+        "/coord.maintenance.Maintenance/MemberAdd" => Some("admin:maintenance:member_add".into()),
+        "/coord.maintenance.Maintenance/MemberRemove" => {
+            Some("admin:maintenance:member_remove".into())
+        }
+        "/coord.maintenance.Maintenance/MemberPromote" => {
+            Some("admin:maintenance:member_promote".into())
+        }
+        "/coord.maintenance.Maintenance/MemberList" => Some("admin:maintenance:member_list".into()),
+
+        // Auth 管理
+        "/coord.auth.Auth/AuthEnable" => Some("admin:auth:enable".into()),
+        "/coord.auth.Auth/AuthDisable" => Some("admin:auth:disable".into()),
+        "/coord.auth.Auth/AuthStatus" => Some("admin:auth:status".into()),
+        "/coord.auth.Auth/UserAdd" => Some("admin:auth:user_add".into()),
+        "/coord.auth.Auth/UserDelete" => Some("admin:auth:user_delete".into()),
+        "/coord.auth.Auth/UserList" => Some("admin:auth:user_list".into()),
+        "/coord.auth.Auth/UserGet" => Some("admin:auth:user_list".into()),
+        "/coord.auth.Auth/UserChangePassword" => Some("admin:auth:user_add".into()),
+        "/coord.auth.Auth/RoleAdd" => Some("admin:auth:role_add".into()),
+        "/coord.auth.Auth/RoleDelete" => Some("admin:auth:role_delete".into()),
+        "/coord.auth.Auth/RoleGrantPermission" => Some("admin:auth:role_grant".into()),
+        "/coord.auth.Auth/RoleRevokePermission" => Some("admin:auth:role_revoke".into()),
+        "/coord.auth.Auth/RoleList" => Some("admin:auth:role_list".into()),
+        "/coord.auth.Auth/ListRoles" => Some("admin:auth:role_list".into()),
+        "/coord.auth.Auth/UserGrantRole" => Some("admin:auth:user_grant_role".into()),
+        "/coord.auth.Auth/UserRevokeRole" => Some("admin:auth:user_revoke_role".into()),
+
+        // Capability 查询
+        "/coord.capability.CapabilityRegistry/List" => Some("admin:capability:list".into()),
+        "/coord.capability.CapabilityRegistry/Get" => Some("admin:capability:list".into()),
+        "/coord.capability.CapabilityRegistry/Register" => Some("admin:capability:register".into()),
+        "/coord.capability.CapabilityRegistry/Deprecate" => {
+            Some("admin:capability:deprecate".into())
+        }
+
+        // Authenticate 为登录端点，白名单放行（见 is_whitelisted）
+        "/coord.auth.Auth/Authenticate" => None,
+        "/coord.auth.Auth/Bootstrap" => None, // bootstrap 需一次性 token，服务内自校验
+        "/coord.auth.Auth/GetRevocationDelta" => None, // agent 角色同步，依赖 CCT（见 ServerAuthService 特判）
+
+        _ => None, // 未知 RPC —— 默认拒绝（fail-closed）
+    }
+}
+
+/// 匿名白名单（规格 C.4.1）：仅健康检查与登录端点匿名可访问。
+///
+/// `GetRevocationDelta` 需要合法 CCT 但属于公开的角色同步端点，
+/// 由服务自身校验（agent 高频调用，不走角色授权）。
+pub fn is_whitelisted(rpc_method: &str) -> bool {
+    matches!(
+        rpc_method,
+        "/grpc.health.v1.Health/Check"
+            | "/coord.auth.Auth/Authenticate"
+            // P2-07：refresh 与登录同为认证前置端点（凭 refresh token 自证，
+            // 服务端校验单次使用语义）
+            | "/coord.auth.Auth/RefreshToken"
+    )
+}
+
+// ──── Tower Layer / Service（接入服务端 gRPC 生产路由，P0-C.1）────
+//
+// tonic 0.14 的 `tonic::service::Interceptor` 拿不到方法路径（Request 不保留
+// URI），故与 agent 侧一致使用 tower 中间件：从 http::Request 的 URI path 提取
+// gRPC 方法，校验 CCT + capability，无凭据 / 未授权一律拒绝（fail-closed）。
+//
+// 注：tower 层无法读取 TLS 对端证书（tonic 仅在 `tonic::Request` 层暴露
+// `peer_certs()`），因此 mTLS CN 信任快速路径当前不可用 —— 所有请求走全量
+// 能力校验（peer_cn=None），比快速路径更严格，符合验收口径。
+
+/// ServerAuthInterceptor 的 tower Layer（`tonic::Server::builder().layer(...)`）
+#[derive(Clone)]
+pub struct ServerAuthLayer {
+    interceptor: Arc<ServerAuthInterceptor>,
+}
+
+impl ServerAuthLayer {
+    pub fn new(interceptor: Arc<ServerAuthInterceptor>) -> Self {
+        Self { interceptor }
+    }
+}
+
+impl<S> Layer<S> for ServerAuthLayer {
+    type Service = ServerAuthService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        ServerAuthService {
+            inner,
+            interceptor: self.interceptor.clone(),
+        }
+    }
+}
+
+/// 服务端鉴权中间件：包一层 inner 服务，先鉴权后转发。
+#[derive(Clone)]
+pub struct ServerAuthService<S> {
+    inner: S,
+    interceptor: Arc<ServerAuthInterceptor>,
+}
+
+impl<S> Service<http::Request<tonic::body::Body>> for ServerAuthService<S>
+where
+    S: Service<http::Request<tonic::body::Body>, Response = http::Response<tonic::body::Body>>,
+{
+    type Response = http::Response<tonic::body::Body>;
+    type Error = S::Error;
+    type Future = ServerAuthFuture<S::Future>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: http::Request<tonic::body::Body>) -> Self::Future {
+        let rpc_method = req.uri().path().to_string();
+
+        // 白名单：健康检查 + 登录端点匿名可访问（规格 C.4.1）
+        if is_whitelisted(&rpc_method) {
+            return ServerAuthFuture::Allow(self.inner.call(req));
+        }
+
+        // GetRevocationDelta：agent 角色同步端点，需合法 CCT 但不做角色授权
+        if rpc_method == "/coord.auth.Auth/GetRevocationDelta" {
+            let auth_header = req
+                .headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            return match self.interceptor.verify_token_only(auth_header.as_deref()) {
+                Ok(()) => ServerAuthFuture::Allow(self.inner.call(req)),
+                Err(reason) => {
+                    self.audit_deny(&rpc_method, &reason);
+                    ServerAuthFuture::Deny(Some(classify_denial(&reason)))
+                }
+            };
+        }
+
+        let auth_header = req
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        // 未知 RPC：拒绝（fail-closed）
+        let Some(capability_id) = infer_capability(&rpc_method) else {
+            let reason = format!("unknown RPC method: {rpc_method}");
+            self.audit_deny(&rpc_method, &reason);
+            return ServerAuthFuture::Deny(Some(Status::permission_denied(reason)));
+        };
+
+        match self.interceptor.validate(
+            auth_header.as_deref(),
+            None, // tower 层无法读取 TLS 对端证书 → 全量校验
+            &capability_id,
+            None,
+        ) {
+            ServerAuthResult::Allow { .. } => ServerAuthFuture::Allow(self.inner.call(req)),
+            ServerAuthResult::Deny { reason, .. } => {
+                self.audit_deny(&rpc_method, &reason);
+                ServerAuthFuture::Deny(Some(classify_denial(&reason)))
+            }
+        }
+    }
+}
+
+impl<S> ServerAuthService<S> {
+    /// P2-08：记录鉴权拒绝审计事件（v1：tower 层无对端地址与主体身份，actor 记 anonymous）。
+    fn audit_deny(&self, rpc_method: &str, reason: &str) {
+        if let Some(ref audit) = self.interceptor.audit {
+            audit.record_event(
+                "anonymous",
+                rpc_method,
+                rpc_method,
+                crate::audit::RESULT_DENIED,
+                reason,
+            );
+        }
+    }
+}
+
+/// 将拒绝原因映射为 gRPC 状态码：
+/// 认证类问题（缺 token/签名/过期/吊销）→ `UNAUTHENTICATED`；
+/// 授权类问题（能力/scope 不足）→ `PERMISSION_DENIED`。
+pub fn classify_denial(reason: &str) -> Status {
+    if reason.contains("missing")
+        || reason.contains("validation")
+        || reason.contains("expired")
+        || reason.contains("revoked")
+    {
+        Status::unauthenticated(reason.to_string())
+    } else {
+        Status::permission_denied(reason.to_string())
+    }
+}
+
+/// 鉴权中间件 future：放行转发 inner；拒绝返回 gRPC 错误响应。
+pub enum ServerAuthFuture<F> {
+    Allow(F),
+    Deny(Option<Status>),
+}
+
+impl<F, E> Future for ServerAuthFuture<F>
+where
+    F: Future<Output = Result<http::Response<tonic::body::Body>, E>>,
+{
+    type Output = Result<http::Response<tonic::body::Body>, E>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: 不移动字段；AuthFuture 无 pin 投影约定，字段级 pin 由我们手动保证
+        let this = unsafe { self.get_unchecked_mut() };
+        match this {
+            ServerAuthFuture::Allow(fut) => unsafe { Pin::new_unchecked(fut) }.poll(cx),
+            ServerAuthFuture::Deny(status) => match status.take() {
+                Some(status) => {
+                    let (parts, ()) = status.into_http::<()>().into_parts();
+                    let response = http::Response::from_parts(parts, tonic::body::Body::empty());
+                    Poll::Ready(Ok(response))
+                }
+                // 已就绪后重复 poll 属 Future 契约外行为：保持 Pending，避免 panic
+                None => Poll::Pending,
+            },
+        }
     }
 }
 
@@ -389,9 +698,9 @@ pub fn extract_bearer_token(header: Option<&str>) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coord_core::auth::cct::{encode_cct, CctHeader, CctPayload};
     use crate::auth::revocation::RevocationStore;
     use crate::auth::token_signing::TokenSigningKeyring;
+    use coord_core::auth::cct::{encode_cct, CctHeader, CctPayload};
 
     fn make_keyring() -> Arc<TokenSigningKeyring> {
         let root_key = vec![0u8; 32];
@@ -444,14 +753,15 @@ mod tests {
         };
 
         // Encode
-        let cct = encode_cct(&header, &payload, &key.key_bytes)
-            .expect("encode_cct should succeed");
+        let cct = encode_cct(&header, &payload, &key.key_bytes).expect("encode_cct should succeed");
         assert!(!cct.is_empty());
-        assert!(cct.starts_with("eyJ"), "CCT should start with base64url JSON");
+        assert!(
+            cct.starts_with("eyJ"),
+            "CCT should start with base64url JSON"
+        );
 
         // Decode
-        let decoded = decode_cct(&cct, &key.key_bytes)
-            .expect("decode_cct should succeed");
+        let decoded = decode_cct(&cct, &key.key_bytes).expect("decode_cct should succeed");
         assert_eq!(decoded.payload.jti, "test-jti");
         assert_eq!(decoded.payload.roles, vec!["reader"]);
     }
@@ -570,8 +880,15 @@ mod tests {
         );
 
         match result {
-            ServerAuthResult::Allow { scope_checked, trusted_agent, .. } => {
-                assert!(!scope_checked, "scope should be skipped for trusted agent + low risk");
+            ServerAuthResult::Allow {
+                scope_checked,
+                trusted_agent,
+                ..
+            } => {
+                assert!(
+                    !scope_checked,
+                    "scope should be skipped for trusted agent + low risk"
+                );
                 assert!(trusted_agent);
             }
             ServerAuthResult::Deny { reason, .. } => {
@@ -584,12 +901,18 @@ mod tests {
     fn test_server_interceptor_non_trusted_caller_full_scope_check() {
         let keyring = make_keyring();
         let rev_store = make_revocation_store();
-        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true);
+        let auth_manager = Arc::new(AuthManager::new());
+        auth_manager.role_add("reader").unwrap();
+        auth_manager
+            .role_grant_capability("reader", "data:kv:read", "")
+            .unwrap_or(());
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true)
+            .with_role_provider(auth_manager);
 
         let cct = make_test_cct(&keyring, vec!["reader"], std::collections::HashMap::new());
         let auth_header = format!("Bearer {cct}");
 
-        // Non-trusted caller + low-risk read → still requires scope check
+        // Non-trusted caller + low-risk read → still requires full check
         let result = interceptor.validate(
             Some(&auth_header),
             Some("random-client"),
@@ -598,8 +921,15 @@ mod tests {
         );
 
         match result {
-            ServerAuthResult::Allow { scope_checked, trusted_agent, .. } => {
-                assert!(scope_checked, "scope should be checked for non-trusted caller");
+            ServerAuthResult::Allow {
+                scope_checked,
+                trusted_agent,
+                ..
+            } => {
+                assert!(
+                    scope_checked,
+                    "scope should be checked for non-trusted caller"
+                );
                 assert!(!trusted_agent);
             }
             ServerAuthResult::Deny { reason, .. } => {
@@ -612,7 +942,13 @@ mod tests {
     fn test_server_interceptor_high_risk_always_full_scope() {
         let keyring = make_keyring();
         let rev_store = make_revocation_store();
-        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true);
+        let auth_manager = Arc::new(AuthManager::new());
+        auth_manager.role_add("admin").unwrap();
+        auth_manager
+            .role_grant_capability("admin", "data:kv:write", "")
+            .unwrap_or(());
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true)
+            .with_role_provider(auth_manager);
 
         // Even trusted agent + high-risk write → force full scope check
         let cct = make_test_cct(&keyring, vec!["admin"], std::collections::HashMap::new());
@@ -626,13 +962,129 @@ mod tests {
         );
 
         match result {
-            ServerAuthResult::Allow { scope_checked, trusted_agent, .. } => {
-                assert!(scope_checked, "scope should be checked for high-risk operations");
+            ServerAuthResult::Allow {
+                scope_checked,
+                trusted_agent,
+                ..
+            } => {
+                assert!(
+                    scope_checked,
+                    "scope should be checked for high-risk operations"
+                );
                 assert!(trusted_agent);
             }
             ServerAuthResult::Deny { reason, .. } => {
                 panic!("expected Allow but got Deny: {reason}");
             }
+        }
+    }
+
+    // ──── P0-C.4：收紧后的 fail-closed 行为 ────
+
+    #[test]
+    fn test_no_scope_override_no_role_grant_is_denied() {
+        // 删除"有任意 role 即放行"兕底后：有 roles 但无授权 → 拒绝
+        let keyring = make_keyring();
+        let rev_store = make_revocation_store();
+        let auth_manager = Arc::new(AuthManager::new());
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true)
+            .with_role_provider(auth_manager);
+
+        let cct = make_test_cct(&keyring, vec!["reader"], std::collections::HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+
+        let result = interceptor.validate(
+            Some(&auth_header),
+            None,
+            "data:kv:write", // reader 未授权写
+            None,
+        );
+        assert!(matches!(result, ServerAuthResult::Deny { .. }));
+    }
+
+    #[test]
+    fn test_role_grant_without_scope_allows_capability() {
+        let keyring = make_keyring();
+        let rev_store = make_revocation_store();
+        let auth_manager = Arc::new(AuthManager::new());
+        auth_manager.role_add("reader").unwrap();
+        auth_manager
+            .role_grant_capability("reader", "data:kv:read", "")
+            .unwrap_or(());
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true)
+            .with_role_provider(auth_manager);
+
+        let cct = make_test_cct(&keyring, vec!["reader"], std::collections::HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+
+        let result = interceptor.validate(Some(&auth_header), None, "data:kv:read", None);
+        assert!(
+            result.is_allow(),
+            "capability-level grant should pass: {result:?}"
+        );
+
+        // 未授权的能力仍被拒
+        let result = interceptor.validate(Some(&auth_header), None, "data:kv:write", None);
+        assert!(matches!(result, ServerAuthResult::Deny { .. }));
+    }
+
+    #[test]
+    fn test_role_grant_with_scope_requires_scope_key() {
+        let keyring = make_keyring();
+        let rev_store = make_revocation_store();
+        let auth_manager = Arc::new(AuthManager::new());
+        auth_manager.role_add("reader").unwrap();
+        auth_manager
+            .role_grant_capability("reader", "data:kv:read", "/app/orders/")
+            .unwrap_or(());
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true)
+            .with_role_provider(auth_manager);
+
+        let cct = make_test_cct(&keyring, vec!["reader"], std::collections::HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+
+        // scope_key 命中 → 放行
+        let result = interceptor.validate(
+            Some(&auth_header),
+            None,
+            "data:kv:read",
+            Some("/app/orders/123"),
+        );
+        assert!(result.is_allow());
+
+        // scope_key 越界 → 拒绝
+        let result = interceptor.validate(
+            Some(&auth_header),
+            None,
+            "data:kv:read",
+            Some("/app/payments/1"),
+        );
+        assert!(matches!(result, ServerAuthResult::Deny { .. }));
+
+        // scope_key 缺失 → fail-closed
+        let result = interceptor.validate(Some(&auth_header), None, "data:kv:read", None);
+        assert!(matches!(result, ServerAuthResult::Deny { .. }));
+    }
+
+    #[test]
+    fn test_root_role_grants_everything() {
+        let keyring = make_keyring();
+        let rev_store = make_revocation_store();
+        let auth_manager = Arc::new(AuthManager::new());
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, true)
+            .with_role_provider(auth_manager);
+
+        let cct = make_test_cct(&keyring, vec!["root"], std::collections::HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+
+        for cap in [
+            "data:kv:read",
+            "data:kv:write",
+            "admin:auth:user_add",
+            "admin:maintenance:member_add",
+        ] {
+            let result = interceptor.validate(Some(&auth_header), None, cap, None);
+            assert!(result.is_allow(), "root role should pass {cap}");
         }
     }
 
@@ -697,8 +1149,14 @@ mod tests {
     fn test_server_interceptor_mtls_disabled_no_trusted_path() {
         let keyring = make_keyring();
         let rev_store = make_revocation_store();
+        let auth_manager = Arc::new(AuthManager::new());
+        auth_manager.role_add("reader").unwrap();
+        auth_manager
+            .role_grant_capability("reader", "data:kv:read", "")
+            .unwrap_or(());
         // mTLS NOT enforced → even coord-agent-* is not trusted
-        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, false);
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev_store, false)
+            .with_role_provider(auth_manager);
 
         let cct = make_test_cct(&keyring, vec!["reader"], std::collections::HashMap::new());
         let auth_header = format!("Bearer {cct}");
@@ -711,8 +1169,15 @@ mod tests {
         );
 
         match result {
-            ServerAuthResult::Allow { scope_checked, trusted_agent, .. } => {
-                assert!(scope_checked, "scope should be checked when mTLS is not enforced");
+            ServerAuthResult::Allow {
+                scope_checked,
+                trusted_agent,
+                ..
+            } => {
+                assert!(
+                    scope_checked,
+                    "scope should be checked when mTLS is not enforced"
+                );
                 assert!(!trusted_agent, "agent should not be trusted without mTLS");
             }
             ServerAuthResult::Deny { reason, .. } => {
@@ -754,8 +1219,14 @@ mod tests {
 
     #[test]
     fn test_bearer_token_extraction_server() {
-        assert_eq!(extract_bearer_token(Some("Bearer mytoken")), Some("mytoken"));
-        assert_eq!(extract_bearer_token(Some("eyJhbGciOiJI...")), Some("eyJhbGciOiJI..."));
+        assert_eq!(
+            extract_bearer_token(Some("Bearer mytoken")),
+            Some("mytoken")
+        );
+        assert_eq!(
+            extract_bearer_token(Some("eyJhbGciOiJI...")),
+            Some("eyJhbGciOiJI...")
+        );
         assert_eq!(extract_bearer_token(Some("coord_abc123")), None); // legacy
         assert_eq!(extract_bearer_token(None), None);
     }

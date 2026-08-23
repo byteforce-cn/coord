@@ -17,7 +17,10 @@ use coord_agent::AgentTlsConfig;
 /// 生成自签名证书（PEM 格式），返回 (cert_pem, key_pem)
 fn generate_self_signed_cert(dns_name: &str) -> (Vec<u8>, Vec<u8>) {
     let cert = rcgen::generate_simple_self_signed(vec![dns_name.into()]).unwrap();
-    (cert.cert.pem().into_bytes(), cert.signing_key.serialize_pem().into_bytes())
+    (
+        cert.cert.pem().into_bytes(),
+        cert.signing_key.serialize_pem().into_bytes(),
+    )
 }
 
 /// 写入临时 PEM 文件，返回路径
@@ -137,9 +140,8 @@ async fn test_tls_channel_with_self_signed_cert() {
 
     let port = find_port();
 
-    let server_tls = coord_agent::build_agent_tls_server_config(
-        &cert_path, &key_path, None,
-    ).unwrap();
+    let server_tls =
+        coord_agent::build_agent_tls_server_config(&cert_path, &key_path, None).unwrap();
 
     let srv_addr = format!("127.0.0.1:{}", port);
     let _server = tokio::spawn(async move {
@@ -165,16 +167,18 @@ async fn test_tls_channel_with_self_signed_cert() {
         ca_path: Some(cert_path.clone()),
     };
 
-    let result = coord_agent::build_agent_tls_channel(
-        &format!("https://127.0.0.1:{}", port),
-        &tls_config,
-    ).await;
+    let result =
+        coord_agent::build_agent_tls_channel(&format!("https://127.0.0.1:{}", port), &tls_config)
+            .await;
 
     assert!(result.is_ok(), "TLS connection failed: {:?}", result.err());
 
     if let Ok(channel) = result {
-        let mut client = coord_proto::maintenance::maintenance_client::MaintenanceClient::new(channel);
-        let resp = client.status(coord_proto::maintenance::StatusRequest::default()).await;
+        let mut client =
+            coord_proto::maintenance::maintenance_client::MaintenanceClient::new(channel);
+        let resp = client
+            .status(coord_proto::maintenance::StatusRequest::default())
+            .await;
         assert!(resp.is_ok(), "RPC over TLS failed: {:?}", resp.err());
     }
 
@@ -195,8 +199,11 @@ async fn test_mtls_rejects_without_client_cert() {
     let port = find_port();
 
     let server_tls = coord_agent::build_agent_tls_server_config(
-        &server_cert_path, &server_key_path, Some(&ca_path),
-    ).unwrap();
+        &server_cert_path,
+        &server_key_path,
+        Some(&ca_path),
+    )
+    .unwrap();
 
     let srv_addr = format!("127.0.0.1:{}", port);
     let _server = tokio::spawn(async move {
@@ -223,12 +230,14 @@ async fn test_mtls_rejects_without_client_cert() {
         ca_path: Some(ca_path.clone()),
     };
 
-    let result = coord_agent::build_agent_tls_channel(
-        &format!("https://127.0.0.1:{}", port),
-        &tls_config,
-    ).await;
+    let result =
+        coord_agent::build_agent_tls_channel(&format!("https://127.0.0.1:{}", port), &tls_config)
+            .await;
 
-    assert!(result.is_err(), "mTLS should reject connections without valid client cert");
+    assert!(
+        result.is_err(),
+        "mTLS should reject connections without valid client cert"
+    );
 
     let _ = std::fs::remove_file(&server_cert_path);
     let _ = std::fs::remove_file(&server_key_path);
@@ -252,44 +261,80 @@ impl coord_proto::maintenance::maintenance_server::Maintenance for MockMaintenan
         &self,
         _request: tonic::Request<coord_proto::maintenance::StatusRequest>,
     ) -> Result<tonic::Response<coord_proto::maintenance::StatusResponse>, tonic::Status> {
-        Ok(tonic::Response::new(coord_proto::maintenance::StatusResponse {
-            revision: 42,
-            raft_index: 1,
-            raft_term: 1,
-            raft_leader: "node-1".into(),
-            seal_status: "unsealed".into(),
-        }))
+        Ok(tonic::Response::new(
+            coord_proto::maintenance::StatusResponse {
+                revision: 42,
+                raft_index: 1,
+                raft_term: 1,
+                raft_leader: "node-1".into(),
+                seal_status: "unsealed".into(),
+            },
+        ))
     }
 
-    async fn seal(&self, _: tonic::Request<coord_proto::maintenance::SealRequest>)
-        -> Result<tonic::Response<coord_proto::maintenance::SealResponse>, tonic::Status> {
+    async fn seal(
+        &self,
+        _: tonic::Request<coord_proto::maintenance::SealRequest>,
+    ) -> Result<tonic::Response<coord_proto::maintenance::SealResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented(""))
     }
-    async fn unseal(&self, _: tonic::Request<coord_proto::maintenance::UnsealRequest>)
-        -> Result<tonic::Response<coord_proto::maintenance::UnsealResponse>, tonic::Status> {
+    async fn unseal(
+        &self,
+        _: tonic::Request<coord_proto::maintenance::UnsealRequest>,
+    ) -> Result<tonic::Response<coord_proto::maintenance::UnsealResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented(""))
     }
 
-    type SnapshotStream = std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<coord_proto::maintenance::SnapshotResponse, tonic::Status>> + Send>>;
-    async fn snapshot(&self, _: tonic::Request<coord_proto::maintenance::SnapshotRequest>)
-        -> Result<tonic::Response<Self::SnapshotStream>, tonic::Status> {
+    type SnapshotStream = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<
+                    Item = Result<coord_proto::maintenance::SnapshotResponse, tonic::Status>,
+                > + Send,
+        >,
+    >;
+    async fn snapshot(
+        &self,
+        _: tonic::Request<coord_proto::maintenance::SnapshotRequest>,
+    ) -> Result<tonic::Response<Self::SnapshotStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented(""))
+    }
+    async fn compact(
+        &self,
+        _: tonic::Request<coord_proto::maintenance::CompactRequest>,
+    ) -> Result<tonic::Response<coord_proto::maintenance::CompactResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented(""))
     }
 
-    async fn member_add(&self, _: tonic::Request<coord_proto::maintenance::MemberAddRequest>)
-        -> Result<tonic::Response<coord_proto::maintenance::MemberAddResponse>, tonic::Status> {
+    async fn member_add(
+        &self,
+        _: tonic::Request<coord_proto::maintenance::MemberAddRequest>,
+    ) -> Result<tonic::Response<coord_proto::maintenance::MemberAddResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented(""))
     }
-    async fn member_remove(&self, _: tonic::Request<coord_proto::maintenance::MemberRemoveRequest>)
-        -> Result<tonic::Response<coord_proto::maintenance::MemberRemoveResponse>, tonic::Status> {
+    async fn member_remove(
+        &self,
+        _: tonic::Request<coord_proto::maintenance::MemberRemoveRequest>,
+    ) -> Result<tonic::Response<coord_proto::maintenance::MemberRemoveResponse>, tonic::Status>
+    {
         Err(tonic::Status::unimplemented(""))
     }
-    async fn member_promote(&self, _: tonic::Request<coord_proto::maintenance::MemberPromoteRequest>)
-        -> Result<tonic::Response<coord_proto::maintenance::MemberPromoteResponse>, tonic::Status> {
+    async fn member_promote(
+        &self,
+        _: tonic::Request<coord_proto::maintenance::MemberPromoteRequest>,
+    ) -> Result<tonic::Response<coord_proto::maintenance::MemberPromoteResponse>, tonic::Status>
+    {
         Err(tonic::Status::unimplemented(""))
     }
-    async fn member_list(&self, _: tonic::Request<coord_proto::maintenance::MemberListRequest>)
-        -> Result<tonic::Response<coord_proto::maintenance::MemberListResponse>, tonic::Status> {
+    async fn member_list(
+        &self,
+        _: tonic::Request<coord_proto::maintenance::MemberListRequest>,
+    ) -> Result<tonic::Response<coord_proto::maintenance::MemberListResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(""))
+    }
+    async fn join(
+        &self,
+        _: tonic::Request<coord_proto::maintenance::JoinRequest>,
+    ) -> Result<tonic::Response<coord_proto::maintenance::JoinResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented(""))
     }
 }

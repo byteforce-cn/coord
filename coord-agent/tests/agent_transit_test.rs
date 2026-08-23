@@ -8,7 +8,7 @@
 //
 // RED stage: TransitService 尚未定义
 
-use coord_agent::services::transit::{TransitService, TransitConfig};
+use coord_agent::services::transit::{TransitConfig, TransitService};
 use std::collections::HashMap;
 
 /// 验证 TransitConfig 默认值
@@ -79,7 +79,9 @@ fn test_transit_rewrap() {
     assert_ne!(new_dek_id, old_dek_id);
 
     // Decrypt with new DEK
-    let decrypted = svc.decrypt(&ciphertext, &new_dek_id).expect("新 DEK 解密失败");
+    let decrypted = svc
+        .decrypt(&ciphertext, &new_dek_id)
+        .expect("新 DEK 解密失败");
     assert_eq!(decrypted, plaintext);
 
     // Old DEK should be invalid
@@ -100,11 +102,15 @@ fn test_transit_context_binding() {
         .expect("加密失败");
 
     // Decrypt with matching context
-    let result = svc.decrypt_with_context(&ciphertext, &dek_id, &context).expect("解密失败");
+    let result = svc
+        .decrypt_with_context(&ciphertext, &dek_id, &context)
+        .expect("解密失败");
     assert_eq!(result, plaintext);
 
     // Decrypt with wrong context should fail
     let mut wrong_ctx = HashMap::new();
     wrong_ctx.insert("tenant".to_string(), "evilcorp".to_string());
-    assert!(svc.decrypt_with_context(&ciphertext, &dek_id, &wrong_ctx).is_err());
+    assert!(svc
+        .decrypt_with_context(&ciphertext, &dek_id, &wrong_ctx)
+        .is_err());
 }

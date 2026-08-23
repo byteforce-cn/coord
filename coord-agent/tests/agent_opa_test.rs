@@ -7,8 +7,8 @@
 //
 // GREEN stage: OpaEngine 已实现，验证 Rego v1 语法策略评估。
 
+use coord_agent::services::opa::{OpaConfig, OpaEngine, OpaInput};
 use std::collections::HashMap;
-use coord_agent::services::opa::{OpaEngine, OpaConfig, OpaInput};
 
 /// 验证 OpaConfig 默认值
 #[test]
@@ -156,20 +156,30 @@ fn test_opa_multi_policy_isolation() {
     let engine = OpaEngine::new(OpaConfig::default()).expect("create OpaEngine");
 
     // Policy A: API access control
-    engine.add_policy("api.rego", r#"
+    engine
+        .add_policy(
+            "api.rego",
+            r#"
 package coord.api
 
 default allow := false
 allow if { input.action == "read" }
-"#).expect("load api policy");
+"#,
+        )
+        .expect("load api policy");
 
     // Policy B: Admin access control
-    engine.add_policy("admin.rego", r#"
+    engine
+        .add_policy(
+            "admin.rego",
+            r#"
 package coord.admin
 
 default allow := false
 allow if { input.subject == "root" }
-"#).expect("load admin policy");
+"#,
+        )
+        .expect("load admin policy");
 
     let read_input = OpaInput {
         action: "read".into(),

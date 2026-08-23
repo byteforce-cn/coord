@@ -73,7 +73,10 @@ impl RegionHealthRegistry {
 
         if regions.contains_key(&region_id) {
             // 更新已存在的 Region：调整就绪计数
-            let was_ready = regions.get(&region_id).map(|h| h.raft_ready).unwrap_or(false);
+            let was_ready = regions
+                .get(&region_id)
+                .map(|h| h.raft_ready)
+                .unwrap_or(false);
             if was_ready && !is_ready {
                 self.ready_regions.fetch_sub(1, Ordering::Relaxed);
             } else if !was_ready && is_ready {
@@ -195,8 +198,10 @@ pub async fn start_health_server_with_registry(
 
                         let (status, content_type, body) = match path.as_str() {
                             "/health" => {
-                                let is_ready_query = query_params.get("ready").map(|v| v.as_str()) == Some("true");
-                                let is_verbose = query_params.get("verbose").map(|v| v.as_str()) == Some("true");
+                                let is_ready_query =
+                                    query_params.get("ready").map(|v| v.as_str()) == Some("true");
+                                let is_verbose =
+                                    query_params.get("verbose").map(|v| v.as_str()) == Some("true");
 
                                 if is_verbose {
                                     // 详细状态
@@ -213,9 +218,7 @@ pub async fn start_health_server_with_registry(
                                 let body = metrics.render_prometheus_text();
                                 ("200 OK", "text/plain; version=0.0.4", body)
                             }
-                            _ => {
-                                ("404 Not Found", "text/plain", "Not Found".to_string())
-                            }
+                            _ => ("404 Not Found", "text/plain", "Not Found".to_string()),
                         };
 
                         let response = format!(
@@ -259,13 +262,19 @@ fn parse_path_and_query(raw: &str) -> (String, HashMap<String, String>) {
 // ──── Health Handler ────
 
 /// 存活检查：进程存活即返回 200
-fn handle_health_live(
-    raft_ready: &AtomicBool,
-) -> (&'static str, &'static str, String) {
+fn handle_health_live(raft_ready: &AtomicBool) -> (&'static str, &'static str, String) {
     if raft_ready.load(Ordering::Relaxed) {
-        ("200 OK", "application/json", r#"{"status":"SERVING"}"#.to_string())
+        (
+            "200 OK",
+            "application/json",
+            r#"{"status":"SERVING"}"#.to_string(),
+        )
     } else {
-        ("503 Service Unavailable", "application/json", r#"{"status":"NOT_SERVING"}"#.to_string())
+        (
+            "503 Service Unavailable",
+            "application/json",
+            r#"{"status":"NOT_SERVING"}"#.to_string(),
+        )
     }
 }
 
@@ -284,7 +293,8 @@ fn handle_health_ready(
                     "status": "READY",
                     "regions_ready": summary.regions_ready,
                     "regions_total": summary.regions_total
-                }).to_string();
+                })
+                .to_string();
                 ("200 OK", "application/json", body)
             } else {
                 let body = serde_json::json!({
@@ -293,16 +303,25 @@ fn handle_health_ready(
                     "regions_ready": summary.regions_ready,
                     "regions_total": summary.regions_total,
                     "pending_regions": summary.pending_regions
-                }).to_string();
+                })
+                .to_string();
                 ("503 Service Unavailable", "application/json", body)
             }
         }
         None => {
             // 无 Region 注册表：仅检查 Raft 就绪
             if raft_ok {
-                ("200 OK", "application/json", r#"{"status":"READY"}"#.to_string())
+                (
+                    "200 OK",
+                    "application/json",
+                    r#"{"status":"READY"}"#.to_string(),
+                )
             } else {
-                ("503 Service Unavailable", "application/json", r#"{"status":"NOT_READY"}"#.to_string())
+                (
+                    "503 Service Unavailable",
+                    "application/json",
+                    r#"{"status":"NOT_READY"}"#.to_string(),
+                )
             }
         }
     }
@@ -328,12 +347,15 @@ fn handle_health_verbose(
                     "applied_index": h.applied_index,
                     "has_local_replica": h.has_local_replica,
                 })).collect::<Vec<_>>()
-            }).to_string();
+            })
+            .to_string();
             ("200 OK", "application/json", body)
         }
-        None => {
-            ("200 OK", "application/json", r#"{"status":"NO_REGIONS","regions":[]}"#.to_string())
-        }
+        None => (
+            "200 OK",
+            "application/json",
+            r#"{"status":"NO_REGIONS","regions":[]}"#.to_string(),
+        ),
     }
 }
 

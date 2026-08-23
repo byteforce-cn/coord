@@ -9,8 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use coord_agent::services::workflow::{
-    WorkflowDsl, WorkflowStateDef, WorkflowInterpreter, WorkflowContext,
-    InterpreterResult,
+    InterpreterResult, WorkflowContext, WorkflowDsl, WorkflowInterpreter, WorkflowStateDef,
 };
 
 // ──── helpers ────
@@ -35,20 +34,26 @@ fn make_simple_dsl() -> WorkflowDsl {
         start_state: "step1".to_string(),
         states: {
             let mut m = BTreeMap::new();
-            m.insert("step1".to_string(), WorkflowStateDef {
-                name: "step1".into(),
-                state_type: "operation".into(),
-                action: Some("echo:hello".into()),
-                next_state: Some("step2".into()),
-                ..Default::default()
-            });
-            m.insert("step2".to_string(), WorkflowStateDef {
-                name: "step2".into(),
-                state_type: "operation".into(),
-                action: Some("echo:world".into()),
-                next_state: None, // terminal
-                ..Default::default()
-            });
+            m.insert(
+                "step1".to_string(),
+                WorkflowStateDef {
+                    name: "step1".into(),
+                    state_type: "operation".into(),
+                    action: Some("echo:hello".into()),
+                    next_state: Some("step2".into()),
+                    ..Default::default()
+                },
+            );
+            m.insert(
+                "step2".to_string(),
+                WorkflowStateDef {
+                    name: "step2".into(),
+                    state_type: "operation".into(),
+                    action: Some("echo:world".into()),
+                    next_state: None, // terminal
+                    ..Default::default()
+                },
+            );
             m
         },
     }
@@ -61,39 +66,51 @@ fn make_switch_dsl() -> WorkflowDsl {
         start_state: "check".to_string(),
         states: {
             let mut m = BTreeMap::new();
-            m.insert("check".to_string(), WorkflowStateDef {
-                name: "check".into(),
-                state_type: "switch".into(),
-                conditions: {
-                    let mut c = BTreeMap::new();
-                    c.insert("$.value == 1".into(), "path_a".into());
-                    c.insert("$.value == 2".into(), "path_b".into());
-                    c
+            m.insert(
+                "check".to_string(),
+                WorkflowStateDef {
+                    name: "check".into(),
+                    state_type: "switch".into(),
+                    conditions: {
+                        let mut c = BTreeMap::new();
+                        c.insert("$.value == 1".into(), "path_a".into());
+                        c.insert("$.value == 2".into(), "path_b".into());
+                        c
+                    },
+                    default_next: Some("default_path".into()),
+                    ..Default::default()
                 },
-                default_next: Some("default_path".into()),
-                ..Default::default()
-            });
-            m.insert("path_a".to_string(), WorkflowStateDef {
-                name: "path_a".into(),
-                state_type: "operation".into(),
-                action: Some("result:A".into()),
-                next_state: None,
-                ..Default::default()
-            });
-            m.insert("path_b".to_string(), WorkflowStateDef {
-                name: "path_b".into(),
-                state_type: "operation".into(),
-                action: Some("result:B".into()),
-                next_state: None,
-                ..Default::default()
-            });
-            m.insert("default_path".to_string(), WorkflowStateDef {
-                name: "default_path".into(),
-                state_type: "operation".into(),
-                action: Some("result:default".into()),
-                next_state: None,
-                ..Default::default()
-            });
+            );
+            m.insert(
+                "path_a".to_string(),
+                WorkflowStateDef {
+                    name: "path_a".into(),
+                    state_type: "operation".into(),
+                    action: Some("result:A".into()),
+                    next_state: None,
+                    ..Default::default()
+                },
+            );
+            m.insert(
+                "path_b".to_string(),
+                WorkflowStateDef {
+                    name: "path_b".into(),
+                    state_type: "operation".into(),
+                    action: Some("result:B".into()),
+                    next_state: None,
+                    ..Default::default()
+                },
+            );
+            m.insert(
+                "default_path".to_string(),
+                WorkflowStateDef {
+                    name: "default_path".into(),
+                    state_type: "operation".into(),
+                    action: Some("result:default".into()),
+                    next_state: None,
+                    ..Default::default()
+                },
+            );
             m
         },
     }
@@ -106,34 +123,46 @@ fn make_parallel_dsl() -> WorkflowDsl {
         start_state: "fork".to_string(),
         states: {
             let mut m = BTreeMap::new();
-            m.insert("fork".to_string(), WorkflowStateDef {
-                name: "fork".into(),
-                state_type: "parallel".into(),
-                branches: vec!["branch_a".to_string(), "branch_b".to_string()],
-                join_state: Some("join".into()),
-                ..Default::default()
-            });
-            m.insert("branch_a".to_string(), WorkflowStateDef {
-                name: "branch_a".into(),
-                state_type: "operation".into(),
-                action: Some("task:A".into()),
-                next_state: Some("join".into()),
-                ..Default::default()
-            });
-            m.insert("branch_b".to_string(), WorkflowStateDef {
-                name: "branch_b".into(),
-                state_type: "operation".into(),
-                action: Some("task:B".into()),
-                next_state: Some("join".into()),
-                ..Default::default()
-            });
-            m.insert("join".to_string(), WorkflowStateDef {
-                name: "join".into(),
-                state_type: "operation".into(),
-                action: Some("merge_results".into()),
-                next_state: None,
-                ..Default::default()
-            });
+            m.insert(
+                "fork".to_string(),
+                WorkflowStateDef {
+                    name: "fork".into(),
+                    state_type: "parallel".into(),
+                    branches: vec!["branch_a".to_string(), "branch_b".to_string()],
+                    join_state: Some("join".into()),
+                    ..Default::default()
+                },
+            );
+            m.insert(
+                "branch_a".to_string(),
+                WorkflowStateDef {
+                    name: "branch_a".into(),
+                    state_type: "operation".into(),
+                    action: Some("task:A".into()),
+                    next_state: Some("join".into()),
+                    ..Default::default()
+                },
+            );
+            m.insert(
+                "branch_b".to_string(),
+                WorkflowStateDef {
+                    name: "branch_b".into(),
+                    state_type: "operation".into(),
+                    action: Some("task:B".into()),
+                    next_state: Some("join".into()),
+                    ..Default::default()
+                },
+            );
+            m.insert(
+                "join".to_string(),
+                WorkflowStateDef {
+                    name: "join".into(),
+                    state_type: "operation".into(),
+                    action: Some("merge_results".into()),
+                    next_state: None,
+                    ..Default::default()
+                },
+            );
             m
         },
     }
@@ -198,7 +227,8 @@ fn test_interpreter_sequential_execution() {
 fn test_interpreter_switch_path_a() {
     let dsl = make_switch_dsl();
     let mut ctx = make_context();
-    ctx.variables.insert("value".to_string(), serde_json::Value::Number(1.into()));
+    ctx.variables
+        .insert("value".to_string(), serde_json::Value::Number(1.into()));
     let interpreter = WorkflowInterpreter::new(dsl);
 
     // Step 1: executes "check" (switch) → value==1 → "path_a"
@@ -214,12 +244,16 @@ fn test_interpreter_switch_path_a() {
 fn test_interpreter_switch_default() {
     let dsl = make_switch_dsl();
     let mut ctx = make_context();
-    ctx.variables.insert("value".to_string(), serde_json::Value::Number(99.into()));
+    ctx.variables
+        .insert("value".to_string(), serde_json::Value::Number(99.into()));
     let interpreter = WorkflowInterpreter::new(dsl);
 
     // Step 1: executes "check" (switch) → no match → default → "default_path"
     let result = interpreter.step(&mut ctx).expect("step should succeed");
-    assert_eq!(result, InterpreterResult::Transitioned("default_path".into()));
+    assert_eq!(
+        result,
+        InterpreterResult::Transitioned("default_path".into())
+    );
 }
 
 // ──── G.4: 并行分支 ────
@@ -239,7 +273,10 @@ fn test_interpreter_parallel_execution() {
     let mut completed = false;
     for _ in 0..20 {
         match interpreter.step(&mut ctx).expect("step should succeed") {
-            InterpreterResult::Completed => { completed = true; break; }
+            InterpreterResult::Completed => {
+                completed = true;
+                break;
+            }
             _ => {}
         }
     }
@@ -256,20 +293,26 @@ fn test_interpreter_delay_state() {
         start_state: "wait".to_string(),
         states: {
             let mut m = BTreeMap::new();
-            m.insert("wait".to_string(), WorkflowStateDef {
-                name: "wait".into(),
-                state_type: "delay".into(),
-                delay_seconds: Some(0), // immediate for test
-                next_state: Some("done".into()),
-                ..Default::default()
-            });
-            m.insert("done".to_string(), WorkflowStateDef {
-                name: "done".into(),
-                state_type: "operation".into(),
-                action: Some("finalize".into()),
-                next_state: None,
-                ..Default::default()
-            });
+            m.insert(
+                "wait".to_string(),
+                WorkflowStateDef {
+                    name: "wait".into(),
+                    state_type: "delay".into(),
+                    delay_seconds: Some(0), // immediate for test
+                    next_state: Some("done".into()),
+                    ..Default::default()
+                },
+            );
+            m.insert(
+                "done".to_string(),
+                WorkflowStateDef {
+                    name: "done".into(),
+                    state_type: "operation".into(),
+                    action: Some("finalize".into()),
+                    next_state: None,
+                    ..Default::default()
+                },
+            );
             m
         },
     };
@@ -293,13 +336,16 @@ fn test_interpreter_max_steps_protection() {
         start_state: "loop".to_string(),
         states: {
             let mut m = BTreeMap::new();
-            m.insert("loop".to_string(), WorkflowStateDef {
-                name: "loop".into(),
-                state_type: "operation".into(),
-                action: Some("tick".into()),
-                next_state: Some("loop".into()), // self-loop
-                ..Default::default()
-            });
+            m.insert(
+                "loop".to_string(),
+                WorkflowStateDef {
+                    name: "loop".into(),
+                    state_type: "operation".into(),
+                    action: Some("tick".into()),
+                    next_state: Some("loop".into()), // self-loop
+                    ..Default::default()
+                },
+            );
             m
         },
     };

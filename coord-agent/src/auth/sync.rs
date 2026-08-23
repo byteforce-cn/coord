@@ -224,7 +224,10 @@ mod tests {
         let scheduler = SyncScheduler::with_defaults(cache);
 
         assert_eq!(scheduler.role_sync_interval(), Duration::from_secs(300));
-        assert_eq!(scheduler.revocation_sync_interval(), Duration::from_secs(10));
+        assert_eq!(
+            scheduler.revocation_sync_interval(),
+            Duration::from_secs(10)
+        );
         assert!(scheduler.is_running());
     }
 

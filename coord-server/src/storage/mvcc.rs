@@ -9,9 +9,9 @@
 // 直接复用 Redb 内置 MVCC，本层只负责应用层语义（Revision 分配、Key 编码、
 // Changelog 写入），不额外建立版本管理。
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use parking_lot::RwLock;
+
+use serde::{Deserialize, Serialize};
 
 use coord_core::error::{Error, Result};
 use coord_core::storage::{StorageBackend, WriteTx};
@@ -41,11 +41,18 @@ const AUTH_PREFIX: &[u8] = b"/_auth/";
 
 // ──── Meta 子键 ────
 
-/// 全局 Revision 计数器
-pub(crate) const META_NEXT_REVISION: &[u8] = b"/_meta/next_revision";
+/// 已 Apply 的最大 Raft LogId（崩溃恢复检查点；与命令写入同一事务，D-A4）
+pub(crate) const META_LAST_APPLIED: &[u8] = b"/_meta/last_applied";
 
-/// 已 Apply 的最大 Raft Index（崩溃恢复检查点）
-pub(crate) const META_APPLIED_INDEX: &[u8] = b"/_meta/applied_index";
+/// 已持久化快照元数据（last_log_id/checksum/path，D-A4/A.6）
+pub(crate) const META_SNAPSHOT: &[u8] = b"/_meta/snapshot";
+
+/// 已持久化的 Raft membership（与 applied 持久化配套：重启后 leader 选举依赖它）
+pub(crate) const META_MEMBERSHIP: &[u8] = b"/_meta/membership";
+
+/// 已持久化的 compacted revision（P1-01：raft 下发，节点一致；
+/// 小于等于它的 changelog/tombstone 已被物理删除）
+pub(crate) const META_COMPACT_REVISION: &[u8] = b"/_meta/compacted_revision";
 
 /// Seal 状态：0=Unsealed, 1=Sealed, 2=Unsealing（P3 阶段使用）
 #[allow(dead_code)]
@@ -111,6 +118,8 @@ pub enum EventType {
     Put = 0,
     Delete = 1,
     Txn = 2,
+    /// Lease 生命周期事件（Grant/KeepAlive/Revoke，P0-B）
+    Lease = 3,
 }
 
 /// 单条 Key-Value 变更记录
@@ -129,12 +138,17 @@ pub struct ChangeEvent {
     pub event_type: EventType,
 }
 
+/// Changelog 格式版本（P0-A：版本号 +1，0.1.x 数据不承诺兼容）
+const CHANGELOG_FORMAT_VERSION: u8 = 2;
+
 impl ChangeEvent {
-    /// 序列化为字节（简化版，生产环境应使用 Protobuf）
+    /// 序列化为字节
+    ///
+    /// v2 格式：version(1) | revision(8BE) | event_type(1) | num_changes(4BE) | [key_len(4BE)|key|has_value(1)|value...]
+    /// v1（旧）格式：revision(8BE) | event_type(1) | ...，首个字节 0/1/2 可判别。
     pub fn to_bytes(&self) -> Vec<u8> {
-        // 使用简单的二进制格式：
-        // revision(8BE) | event_type(1) | num_changes(4BE) | [key_len(4BE)|key|has_value(1)|value...]
         let mut buf = Vec::new();
+        buf.push(CHANGELOG_FORMAT_VERSION);
         buf.extend_from_slice(&self.revision.to_be_bytes());
         buf.push(self.event_type as u8);
         buf.extend_from_slice(&(self.changes.len() as u32).to_be_bytes());
@@ -155,27 +169,43 @@ impl ChangeEvent {
         buf
     }
 
-    /// 从字节反序列化（简化版）
+    /// 从字节反序列化（兼容 v1 旧格式）
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         if data.len() < 13 {
             return Err(Error::DataCorruption("change event too short".into()));
         }
-        let revision = Revision::from_be_bytes(data[0..8].try_into().unwrap());
-        let event_type = match data[8] {
+        // 判别格式：v2 首个字节为版本号 2；v1 旧格式首个字节为 event_type（0/1/2）
+        let (revision_start, event_type_pos) = if data[0] == CHANGELOG_FORMAT_VERSION {
+            (1usize, 9usize)
+        } else {
+            (0usize, 8usize)
+        };
+        let revision = match data[revision_start..revision_start + 8].try_into() {
+            Ok(bytes) => Revision::from_be_bytes(bytes),
+            Err(_) => return Err(Error::DataCorruption("truncated revision".into())),
+        };
+        let event_type = match data[event_type_pos] {
             0 => EventType::Put,
             1 => EventType::Delete,
             2 => EventType::Txn,
+            3 => EventType::Lease,
             t => return Err(Error::DataCorruption(format!("unknown event type: {}", t))),
         };
-        let num_changes = u32::from_be_bytes(data[9..13].try_into().unwrap()) as usize;
+        let num_changes = match data[event_type_pos + 1..event_type_pos + 5].try_into() {
+            Ok(bytes) => u32::from_be_bytes(bytes) as usize,
+            Err(_) => return Err(Error::DataCorruption("truncated change count".into())),
+        };
 
         let mut changes = Vec::with_capacity(num_changes);
-        let mut offset = 13;
+        let mut offset = event_type_pos + 5;
         for _ in 0..num_changes {
             if offset + 4 > data.len() {
                 return Err(Error::DataCorruption("truncated change".into()));
             }
-            let key_len = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            let key_len = match data[offset..offset + 4].try_into() {
+                Ok(bytes) => u32::from_be_bytes(bytes) as usize,
+                Err(_) => return Err(Error::DataCorruption("truncated key length".into())),
+            };
             offset += 4;
             if offset + key_len > data.len() {
                 return Err(Error::DataCorruption("truncated key".into()));
@@ -193,8 +223,10 @@ impl ChangeEvent {
                 if offset + 4 > data.len() {
                     return Err(Error::DataCorruption("truncated value len".into()));
                 }
-                let val_len =
-                    u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                let val_len = match data[offset..offset + 4].try_into() {
+                    Ok(bytes) => u32::from_be_bytes(bytes) as usize,
+                    Err(_) => return Err(Error::DataCorruption("truncated value length".into())),
+                };
                 offset += 4;
                 if offset + val_len > data.len() {
                     return Err(Error::DataCorruption("truncated value".into()));
@@ -256,12 +288,16 @@ impl KvMetadata {
         if bytes.len() < 32 {
             return None;
         }
-        let deleted = if bytes.len() >= 33 { bytes[32] == 1 } else { false };
+        let deleted = if bytes.len() >= 33 {
+            bytes[32] == 1
+        } else {
+            false
+        };
         Some(Self {
-            version: i64::from_be_bytes(bytes[0..8].try_into().unwrap()),
-            create_revision: i64::from_be_bytes(bytes[8..16].try_into().unwrap()),
-            mod_revision: i64::from_be_bytes(bytes[16..24].try_into().unwrap()),
-            lease_id: i64::from_be_bytes(bytes[24..32].try_into().unwrap()),
+            version: i64::from_be_bytes(bytes[0..8].try_into().ok()?),
+            create_revision: i64::from_be_bytes(bytes[8..16].try_into().ok()?),
+            mod_revision: i64::from_be_bytes(bytes[16..24].try_into().ok()?),
+            lease_id: i64::from_be_bytes(bytes[24..32].try_into().ok()?),
             deleted,
         })
     }
@@ -300,47 +336,143 @@ impl KvMetadata {
     }
 }
 
+// ──── AppliedLogId ────
+
+/// 持久化的已 Apply LogId（D-A4：与命令写入同一事务）
+///
+/// raft apply 路径写入 `{term, node_id}` 来自 `entry.log_id`；
+/// 单节点模式（无 raft）写入 `{0, 0, revision}`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedLogId {
+    pub term: u64,
+    pub node_id: u64,
+    pub index: u64,
+}
+
+impl AppliedLogId {
+    /// 单节点模式（无 raft）的合成 LogId
+    pub fn standalone(index: u64) -> Self {
+        Self {
+            term: 0,
+            node_id: 0,
+            index,
+        }
+    }
+
+    pub(crate) fn to_bytes(self) -> Vec<u8> {
+        bincode::serialize(&self).unwrap_or_else(|_| Vec::new())
+    }
+
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        bincode::deserialize(bytes).ok()
+    }
+}
+
+// ──── LeaseRecord（P0-B：raft 状态机内持久化 lease 表） ────
+
+/// `/_lease/{id}` 的持久化记录（规格 B.3）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseRecord {
+    /// 租约 TTL（秒）
+    pub ttl: i64,
+    /// 租约过期墙钟时刻（epoch 毫秒，grant/keepalive 时由 leader 计算后入日志）
+    pub deadline_wall_ms: i64,
+    /// 最后一次续约的 revision（log index）
+    pub keepalive_revision: i64,
+}
+
+impl LeaseRecord {
+    fn to_bytes(self) -> [u8; 24] {
+        let mut buf = [0u8; 24];
+        buf[0..8].copy_from_slice(&self.ttl.to_be_bytes());
+        buf[8..16].copy_from_slice(&self.deadline_wall_ms.to_be_bytes());
+        buf[16..24].copy_from_slice(&self.keepalive_revision.to_be_bytes());
+        buf
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 24 {
+            return None;
+        }
+        Some(Self {
+            ttl: i64::from_be_bytes(bytes[0..8].try_into().ok()?),
+            deadline_wall_ms: i64::from_be_bytes(bytes[8..16].try_into().ok()?),
+            keepalive_revision: i64::from_be_bytes(bytes[16..24].try_into().ok()?),
+        })
+    }
+}
+
+/// 将 Lease ID 编码为内部存储 Key：/_lease/{id_be}
+pub(crate) fn encode_lease_key(lease_id: i64) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(LEASE_PREFIX.len() + 8);
+    encoded.extend_from_slice(LEASE_PREFIX);
+    encoded.extend_from_slice(&lease_id.to_be_bytes());
+    encoded
+}
+
+// ──── ApplyOutcome ────
+
+/// apply 结果：是否因幂等守卫（D-A3）跳过了实际写入
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApplyOutcome {
+    /// true = 该 revision 的 changelog 已存在，本次为重放，未产生副作用
+    pub replayed: bool,
+}
+
+impl ApplyOutcome {
+    pub fn applied() -> Self {
+        Self { replayed: false }
+    }
+
+    pub fn replayed() -> Self {
+        Self { replayed: true }
+    }
+}
+
+// ──── Compact（P1-01） ────
+
+/// 单次 compaction 批删除上限（P1-01：单写事务分片删除，避免巨型事务）
+pub(crate) const COMPACT_BATCH_SIZE: usize = 500;
+
+/// Compact apply 结果统计（P1-01）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactOutcome {
+    /// 被删除的 changelog 条目数
+    pub deleted_changelog: usize,
+    /// 被物理删除的 tombstone 数（KV 行 + 元数据行）
+    pub deleted_tombstones: usize,
+}
+
 // ──── MvccStorage ────
 
 /// MVCC 版本化存储
 ///
 /// 在 StorageBackend 之上提供应用层 MVCC 语义：
-/// - Revision 分配与管理
-/// - Key 空间编码
+/// - revision ≡ raft log index（D-A2：由 apply 传入，不再由本层分配）
 /// - Changelog 自动写入
-/// - 范围查询与历史快照读
+/// - applied 状态同事务持久化（D-A4）
+/// - Lease 状态表（P0-B）
+///
+/// 单实例语义（D-A1）：全链路共享一个实例；读走 redb 读事务（天然读已提交）。
 pub struct MvccStorage<B: StorageBackend> {
     backend: B,
-    /// 内存中的下一个 Revision 缓存（启动时从 _meta/next_revision 恢复）
-    next_revision: AtomicU64,
     /// 可选的存储屏障（用于 Value 加密/解密，ADP §21）
     barrier: RwLock<Option<Barrier>>,
+    /// 单节点模式（无 raft）的 revision 分配锁：保证并发写入分配不同 revision
+    /// （raft 模式下 apply 以 log index 为 revision，不需要此锁）
+    standalone_lock: parking_lot::Mutex<()>,
 }
 
 impl<B: StorageBackend> MvccStorage<B> {
-    /// 创建 MvccStorage 实例，从存储后端恢复 Revision 状态
+    /// 创建 MvccStorage 实例
+    ///
+    /// revision 不再从元数据恢复（D-A2：revision 由 raft apply 传入）。
+    /// 启动一致性校验（M0-3）由 `verify_consistency` 显式执行。
     pub fn new(backend: B) -> Result<Self> {
-        let next_rev = backend
-            .read(|tx| {
-                tx.get(TABLE_META, META_NEXT_REVISION)
-                    .map(|opt| {
-                        opt.and_then(|bytes| {
-                            if bytes.len() == 8 {
-                                Some(Revision::from_be_bytes(
-                                    bytes.as_slice().try_into().unwrap(),
-                                ))
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(1) // 首次启动从 1 开始
-                    })
-            })?;
-
         Ok(Self {
             backend,
-            next_revision: AtomicU64::new(next_rev),
             barrier: RwLock::new(None),
+            standalone_lock: parking_lot::Mutex::new(()),
         })
     }
 
@@ -382,33 +514,87 @@ impl<B: StorageBackend> MvccStorage<B> {
     }
 
     /// 获取当前 Revision（已提交的最大 Revision）
-    pub fn current_revision(&self) -> Revision {
-        self.next_revision.load(Ordering::SeqCst).saturating_sub(1)
-    }
-
-    /// 设置内存中的 Revision 计数器（快照导入后使用）
-    pub fn set_next_revision(&self, revision: Revision) {
-        self.next_revision.store(revision, Ordering::SeqCst);
-    }
-
-    /// Put 操作：写入或更新一个 Key
     ///
-    /// 返回写入分配的 Revision。该操作在一个写事务中完成：
-    /// 1. 分配 Revision
-    /// 2. 读取已有元数据（用于版本追踪）
-    /// 3. 写入用户数据
-    /// 4. 更新/创建 KV 元数据
-    /// 5. 写入 Changelog 条目
-    /// 6. 更新 Revision 计数器
-    pub fn put(
+    /// 从盘上 `META_LAST_APPLIED` 读取（D-A4），无持久化条目时为 0。
+    pub fn current_revision(&self) -> Revision {
+        self.get_applied_log_id()
+            .ok()
+            .flatten()
+            .map(|a| a.index)
+            .unwrap_or(0)
+    }
+
+    /// 读取持久化的已 Apply LogId（`META_LAST_APPLIED`）
+    pub fn get_applied_log_id(&self) -> Result<Option<AppliedLogId>> {
+        self.backend
+            .read(|tx| tx.get(TABLE_META, META_LAST_APPLIED))
+            .map(|opt| opt.and_then(|bytes| AppliedLogId::from_bytes(&bytes)))
+    }
+
+    /// 单独持久化 applied LogId（仅用于 Membership/Blank 等不写 KV 事务的条目）
+    pub fn set_last_applied(&self, applied: AppliedLogId) -> Result<()> {
+        self.backend
+            .write(|tx| tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes()))
+    }
+
+    /// 检查某 revision 的 changelog 条目是否已存在（D-A3 幂等守卫）
+    pub fn changelog_contains_revision(&self, revision: Revision) -> Result<bool> {
+        self.backend.read(|tx| {
+            tx.get(TABLE_CHANGELOG, &encode_changelog_key(revision))
+                .map(|opt| opt.is_some())
+        })
+    }
+
+    /// M0-3 启动一致性校验：`META_LAST_APPLIED` 与 changelog 尾部一致
+    ///
+    /// 返回（持久化 applied 索引、changelog 最大 revision）。不一致时调用方显式告警
+    /// 并按"快照 → 日志"顺序恢复（重放由幂等守卫兜底）。
+    pub fn verify_consistency(&self) -> Result<(u64, Option<u64>)> {
+        let applied = self.get_applied_log_id()?.map(|a| a.index).unwrap_or(0);
+        let changelog_tail = self.backend.read(|tx| {
+            let entries = tx.iter_prefix(TABLE_CHANGELOG, CHANGELOG_PREFIX)?;
+            let mut tail: Option<u64> = None;
+            for (key, _) in entries {
+                if key.len() >= CHANGELOG_PREFIX.len() + 8 {
+                    if let Ok(rev_bytes) = key[key.len() - 8..].try_into() {
+                        tail = Some(Revision::from_be_bytes(rev_bytes));
+                    }
+                }
+            }
+            Ok(tail)
+        })?;
+        Ok((applied, changelog_tail))
+    }
+
+    /// Put 操作（单节点模式入口）
+    ///
+    /// revision 取 `current_revision + 1`（在独立锁内分配，防止并发同 revision 冲突）；
+    /// 集群模式应走 `put_at_revision`（raft apply 传入）。
+    pub fn put(&self, key: &[u8], value: &[u8], lease_id: Option<LeaseID>) -> Result<Revision> {
+        let _guard = self.standalone_lock.lock();
+        let revision = self.current_revision().saturating_add(1);
+        let applied = AppliedLogId::standalone(revision);
+        self.put_at_revision(key, value, lease_id, revision, applied)?;
+        Ok(revision)
+    }
+
+    /// Put 操作（raft apply 路径）：revision ≡ log index（D-A2）
+    ///
+    /// 幂等守卫（D-A3）：该 revision 的 changelog 已存在则跳过写入。
+    /// 业务写入 + changelog + META_LAST_APPLIED 在同一写事务内原子完成（D-A4）。
+    pub fn put_at_revision(
         &self,
         key: &[u8],
         value: &[u8],
         lease_id: Option<LeaseID>,
-    ) -> Result<Revision> {
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<ApplyOutcome> {
+        if self.changelog_contains_revision(revision)? {
+            return Ok(ApplyOutcome::replayed());
+        }
         let lid = lease_id.unwrap_or(0);
         self.backend.write(|tx| {
-            let revision = self.allocate_revision(tx)?;
             let internal_key = encode_kv_key(key);
             let meta_key = encode_kv_meta_key(key);
 
@@ -446,21 +632,35 @@ impl<B: StorageBackend> MvccStorage<B> {
                 &event.to_bytes(),
             )?;
 
-            // 更新 Revision 计数器
-            tx.insert(
-                TABLE_META,
-                META_NEXT_REVISION,
-                &(revision + 1).to_be_bytes(),
-            )?;
+            // 持久化 applied 状态（D-A4：与命令写入同一事务）
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
 
-            Ok(revision)
+            Ok(ApplyOutcome::applied())
         })
     }
 
-    /// Delete 操作：删除一个 Key
-    ///
-    /// 返回操作分配的 Revision 和是否实际删除了一个存在的 Key。
+    /// Delete 操作（单节点模式入口）
     pub fn delete(&self, key: &[u8]) -> Result<Revision> {
+        let _guard = self.standalone_lock.lock();
+        let revision = self.current_revision().saturating_add(1);
+        let applied = AppliedLogId::standalone(revision);
+        self.delete_at_revision(key, revision, applied)?;
+        Ok(revision)
+    }
+
+    /// Delete 操作（raft apply 路径）：revision ≡ log index（D-A2）
+    ///
+    /// no-op delete 统一语义（D-A5）：无论 Key 是否存在，始终消耗一个 revision
+    /// 并写 changelog（与 etcd 一致），消除"回滚计数器"分支。
+    pub fn delete_at_revision(
+        &self,
+        key: &[u8],
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<ApplyOutcome> {
+        if self.changelog_contains_revision(revision)? {
+            return Ok(ApplyOutcome::replayed());
+        }
         self.backend.write(|tx| {
             let meta_key = encode_kv_meta_key(key);
 
@@ -469,44 +669,31 @@ impl<B: StorageBackend> MvccStorage<B> {
                 .get(TABLE_KV_META, &meta_key)?
                 .and_then(|bytes| KvMetadata::from_bytes(&bytes));
 
-            let revision = self.allocate_revision(tx)?;
-
-            match existing_meta {
-                Some(m) if !m.deleted => {
-                    // Key 存在且未被删除：标记为已删除
-                    let meta = m.mark_deleted(revision);
-                    tx.insert(TABLE_KV_META, &meta_key, &meta.to_bytes())?;
-
-                    // 写入 Changelog
-                    let event = ChangeEvent {
-                        revision,
-                        changes: vec![KeyValueChange {
-                            key: key.to_vec(),
-                            value: None,
-                            prev_value: None,
-                        }],
-                        event_type: EventType::Delete,
-                    };
-                    tx.insert(
-                        TABLE_CHANGELOG,
-                        &encode_changelog_key(revision),
-                        &event.to_bytes(),
-                    )?;
-
-                    tx.insert(
-                        TABLE_META,
-                        META_NEXT_REVISION,
-                        &(revision + 1).to_be_bytes(),
-                    )?;
-                }
-                _ => {
-                    // Key 不存在或已删除：不分配新 revision，回滚
-                    // 但不回滚 revision（简单实现：仍消耗一个 revision）
-                    // 返回 revision-1 表示没有实际删除
-                }
+            if let Some(m) = existing_meta.filter(|m| !m.deleted) {
+                // Key 存在且未被删除：标记为已删除
+                let meta = m.mark_deleted(revision);
+                tx.insert(TABLE_KV_META, &meta_key, &meta.to_bytes())?;
             }
+            // 无论是否存在，均写 changelog（D-A5：始终消耗 revision）
 
-            Ok(revision)
+            let event = ChangeEvent {
+                revision,
+                changes: vec![KeyValueChange {
+                    key: key.to_vec(),
+                    value: None,
+                    prev_value: None,
+                }],
+                event_type: EventType::Delete,
+            };
+            tx.insert(
+                TABLE_CHANGELOG,
+                &encode_changelog_key(revision),
+                &event.to_bytes(),
+            )?;
+
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+
+            Ok(ApplyOutcome::applied())
         })
     }
 
@@ -585,54 +772,69 @@ impl<B: StorageBackend> MvccStorage<B> {
             .map(|opt| opt.and_then(|bytes| KvMetadata::from_bytes(&bytes)))
     }
 
-    /// 查找并删除所有绑定到指定 Lease 的 Key
+    /// 在写事务内标记删除所有绑定到指定 Lease 的 Key（不写 changelog，由调用方统一写入）
     ///
-    /// 扫描 KV_META 表，删除所有 `lease_id` 匹配的 Key。
-    /// 返回被删除的 Key 数量。
-    pub fn delete_keys_by_lease(&self, target_lease_id: i64) -> Result<usize> {
-        // 收集匹配的 user_key（在单个读事务中完成）
-        let keys_to_delete: Vec<Vec<u8>> = self.backend.read(|tx| {
-            let all_meta = tx.iter_prefix(TABLE_KV_META, KV_META_PREFIX)?;
-            let mut keys = Vec::new();
-            for (meta_key_bytes, meta_value) in &all_meta {
-                if let Some(meta) = KvMetadata::from_bytes(&meta_value) {
-                    if meta.lease_id == target_lease_id && !meta.deleted {
-                        if meta_key_bytes.starts_with(KV_META_PREFIX) {
-                            let user_key = &meta_key_bytes[KV_META_PREFIX.len()..];
-                            keys.push(user_key.to_vec());
-                        }
-                    }
+    /// 返回被标记删除的 Key 列表（用于构造 Lease Revoke 的 changelog 事件）。
+    /// 仅用于 raft apply 路径（P0-B：任何路径不得直写本地存储）。
+    fn delete_keys_by_lease_in_tx(
+        tx: &mut dyn WriteTx,
+        target_lease_id: i64,
+        revision: Revision,
+    ) -> Result<Vec<Vec<u8>>> {
+        let all_meta = tx.iter_prefix(TABLE_KV_META, KV_META_PREFIX)?;
+        let mut deleted_keys = Vec::new();
+        for (meta_key_bytes, meta_value) in &all_meta {
+            if let Some(meta) = KvMetadata::from_bytes(meta_value) {
+                if meta.lease_id == target_lease_id
+                    && !meta.deleted
+                    && meta_key_bytes.starts_with(KV_META_PREFIX)
+                {
+                    let user_key = &meta_key_bytes[KV_META_PREFIX.len()..];
+                    let meta_key = encode_kv_meta_key(user_key);
+                    let tombstone = meta.mark_deleted(revision);
+                    tx.insert(TABLE_KV_META, &meta_key, &tombstone.to_bytes())?;
+                    deleted_keys.push(user_key.to_vec());
                 }
             }
-            Ok(keys)
-        })?;
-
-        let count = keys_to_delete.len();
-        for key in &keys_to_delete {
-            let _ = self.delete(key);
         }
-        Ok(count)
+        Ok(deleted_keys)
     }
 
-    /// Txn 原子事务执行
-    ///
-    /// 在单个写事务中完成：
-    /// 1. 分配 Revision
-    /// 2. 评估所有比较条件
-    /// 3. 执行 success 或 failure 分支操作
-    /// 4. 写入 Changelog
-    /// 5. 更新 Revision 计数器
+    /// Txn 原子事务执行（单节点模式入口）
     pub fn execute_txn(
         &self,
         compares: &[crate::txn::TxnCompare],
         success_ops: &[crate::txn::TxnOp],
         failure_ops: &[crate::txn::TxnOp],
     ) -> Result<crate::txn::TxnResult> {
+        let _guard = self.standalone_lock.lock();
+        let revision = self.current_revision().saturating_add(1);
+        let applied = AppliedLogId::standalone(revision);
+        self.execute_txn_at_revision(compares, success_ops, failure_ops, revision, applied)
+    }
+
+    /// Txn 原子事务执行（raft apply 路径）：revision ≡ log index（D-A2）
+    ///
+    /// 幂等守卫（D-A3）：该 revision 的 changelog 已存在则跳过并返回重放标记。
+    pub fn execute_txn_at_revision(
+        &self,
+        compares: &[crate::txn::TxnCompare],
+        success_ops: &[crate::txn::TxnOp],
+        failure_ops: &[crate::txn::TxnOp],
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<crate::txn::TxnResult> {
         use crate::txn::TxnResult;
 
-        self.backend.write(|tx| {
-            let revision = self.allocate_revision(tx)?;
+        if self.changelog_contains_revision(revision)? {
+            return Ok(TxnResult {
+                succeeded: false,
+                revision,
+                responses: Vec::new(),
+            });
+        }
 
+        self.backend.write(|tx| {
             // 1. 评估所有比较条件
             let succeeded = self.evaluate_compares_in_tx(tx, compares)?;
 
@@ -663,12 +865,8 @@ impl<B: StorageBackend> MvccStorage<B> {
                 &event.to_bytes(),
             )?;
 
-            // 5. 更新 Revision 计数器
-            tx.insert(
-                TABLE_META,
-                META_NEXT_REVISION,
-                &(revision + 1).to_be_bytes(),
-            )?;
+            // 5. 持久化 applied 状态（D-A4）
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
 
             Ok(TxnResult {
                 succeeded,
@@ -701,7 +899,11 @@ impl<B: StorageBackend> MvccStorage<B> {
 
             // Value 读取同样受软删除影响：deleted=true 时视为无值
             let is_deleted = raw_meta.map(|m| m.deleted).unwrap_or(false);
-            let value = if is_deleted { None } else { tx.get(TABLE_KV, &kv_key)? };
+            let value = if is_deleted {
+                None
+            } else {
+                tx.get(TABLE_KV, &kv_key)?
+            };
 
             let matched = match &cmp.target {
                 CompareTarget::Version => {
@@ -736,11 +938,8 @@ impl<B: StorageBackend> MvccStorage<B> {
                 }
                 CompareTarget::CreateRevision => {
                     let actual_create_rev = meta.map(|m| m.create_revision).unwrap_or(0);
-                    if let crate::txn::CompareValue::CreateRevision(target_v) =
-                        &cmp.target_value
-                    {
-                        let actual =
-                            crate::txn::CompareValue::CreateRevision(actual_create_rev);
+                    if let crate::txn::CompareValue::CreateRevision(target_v) = &cmp.target_value {
+                        let actual = crate::txn::CompareValue::CreateRevision(actual_create_rev);
                         let target = crate::txn::CompareValue::CreateRevision(*target_v);
                         actual.compare(&target, &cmp.op)
                     } else {
@@ -797,12 +996,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                     prev_value: None,
                 };
 
-                Ok((
-                    TxnOpResponse::Put {
-                        revision,
-                    },
-                    Some(change),
-                ))
+                Ok((TxnOpResponse::Put { revision }, Some(change)))
             }
             TxnOp::Delete { key } => {
                 let meta_key = encode_kv_meta_key(key);
@@ -823,12 +1017,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                     prev_value: None,
                 };
 
-                Ok((
-                    TxnOpResponse::Delete {
-                        revision,
-                    },
-                    Some(change),
-                ))
+                Ok((TxnOpResponse::Delete { revision }, Some(change)))
             }
             TxnOp::Range {
                 key,
@@ -852,7 +1041,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                     }
                     if let Some(user_key) = decode_kv_key(&ik) {
                         // 检查 range_end
-                        if !range_end.is_empty() && user_key.as_ref() >= range_end.as_slice() {
+                        if !range_end.is_empty() && user_key >= range_end.as_slice() {
                             break;
                         }
                         // 跳过 tombstone
@@ -877,41 +1066,475 @@ impl<B: StorageBackend> MvccStorage<B> {
         }
     }
 
-    /// 获取 Applied Index（崩溃恢复检查点）
-    pub fn get_applied_index(&self) -> Result<Option<u64>> {
-        self.backend.read(|tx| {
-            tx.get(TABLE_META, META_APPLIED_INDEX).map(|opt| {
-                opt.and_then(|bytes| {
-                    if bytes.len() == 8 {
-                        Some(u64::from_be_bytes(bytes.as_slice().try_into().unwrap()))
-                    } else {
-                        None
-                    }
-                })
-            })
-        })
+    // ──── Lease 状态表（P0-B：raft 状态机内持久化） ────
+
+    /// 读取 `/_lease/{id}` 记录
+    pub fn get_lease_record(&self, lease_id: i64) -> Result<Option<LeaseRecord>> {
+        let lease_key = encode_lease_key(lease_id);
+        self.backend
+            .read(|tx| tx.get(TABLE_KV, &lease_key))
+            .map(|opt| opt.and_then(|bytes| LeaseRecord::from_bytes(&bytes)))
     }
 
-    /// 设置 Applied Index（崩溃恢复检查点）
-    pub fn set_applied_index(&self, index: u64) -> Result<()> {
-        self.backend.write(|tx| {
-            tx.insert(TABLE_META, META_APPLIED_INDEX, &index.to_be_bytes())
-        })
+    /// 列出全部持久化 Lease 记录（`/_lease/` 前缀），返回 `(lease_id, record)`。
+    ///
+    /// 供 P0-B failover 重建使用：新 leader 从状态机读出全部 Lease
+    /// 重建内存 TTL 视图；损坏条目跳过并计数（由调用方决定日志级别）。
+    pub fn list_lease_records(&self) -> Result<Vec<(i64, LeaseRecord)>> {
+        let rows = self
+            .backend
+            .read(|tx| tx.iter_prefix(TABLE_KV, LEASE_PREFIX))?;
+        let mut records = Vec::with_capacity(rows.len());
+        for (key, value) in rows {
+            let Some(id_bytes) = key.strip_prefix(LEASE_PREFIX) else {
+                continue;
+            };
+            let Some(id_bytes): Option<[u8; 8]> = id_bytes.try_into().ok() else {
+                tracing::warn!("corrupt lease key in storage: {} bytes", key.len());
+                continue;
+            };
+            let id = i64::from_be_bytes(id_bytes);
+            if let Some(record) = LeaseRecord::from_bytes(&value) {
+                records.push((id, record));
+            } else {
+                tracing::warn!("corrupt lease record for lease id {id}, skipped");
+            }
+        }
+        Ok(records)
     }
 
-    /// 分配一个新的 Revision（在写事务内调用）
-    fn allocate_revision(&self, _tx: &mut dyn WriteTx) -> Result<Revision> {
-        // 从内存原子计数器获取下一个 Revision
-        // 注意：此处的原子递增仅在 Leader 节点执行，
-        // Follower 节点通过 Raft Log Apply 获得相同的 Revision
-        let revision = self.next_revision.fetch_add(1, Ordering::SeqCst);
+    /// 应用 LeaseOp（单节点模式入口）：锁内分配 revision，防止并发同 revision 冲突
+    pub fn apply_lease_op_standalone(
+        &self,
+        op: &crate::raft::type_config::LeaseOp,
+    ) -> Result<Revision> {
+        let _guard = self.standalone_lock.lock();
+        let revision = self.current_revision().saturating_add(1);
+        self.apply_lease_op(op, revision, AppliedLogId::standalone(revision))?;
+        Ok(revision)
+    }
 
-        // 确保 Revision > 0（首次启动时 next_revision=1，fetch_add 返回 1）
-        if revision == 0 {
-            return Err(Error::Internal("revision overflow".into()));
+    /// 应用 LeaseOp（raft apply 路径）：revision ≡ log index（D-A2）
+    ///
+    /// Grant/KeepAlive 写 `/_lease/{id}`；Revoke 删除记录并按 `KvMetadata.lease_id`
+    /// 扫描删除绑定 Key。全部与 changelog + META_LAST_APPLIED 同事务原子完成。
+    /// 返回 apply 结果与被删除的绑定 Key（供 Watch 事件构造）。
+    pub fn apply_lease_op(
+        &self,
+        op: &crate::raft::type_config::LeaseOp,
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<(ApplyOutcome, Vec<KeyValueChange>)> {
+        use crate::raft::type_config::LeaseOp;
+
+        if self.changelog_contains_revision(revision)? {
+            return Ok((ApplyOutcome::replayed(), Vec::new()));
         }
 
-        Ok(revision)
+        self.backend.write(|tx| {
+            let mut changes: Vec<KeyValueChange> = Vec::new();
+
+            match op {
+                LeaseOp::Grant {
+                    id,
+                    ttl,
+                    deadline_wall_ms,
+                } => {
+                    let record = LeaseRecord {
+                        ttl: *ttl,
+                        deadline_wall_ms: *deadline_wall_ms,
+                        keepalive_revision: revision as i64,
+                    };
+                    tx.insert(TABLE_KV, &encode_lease_key(*id), &record.to_bytes())?;
+                }
+                LeaseOp::KeepAlive {
+                    id,
+                    deadline_wall_ms,
+                } => {
+                    let lease_key = encode_lease_key(*id);
+                    if let Some(record) = tx
+                        .get(TABLE_KV, &lease_key)?
+                        .and_then(|bytes| LeaseRecord::from_bytes(&bytes))
+                    {
+                        let updated = LeaseRecord {
+                            deadline_wall_ms: *deadline_wall_ms,
+                            keepalive_revision: revision as i64,
+                            ..record
+                        };
+                        tx.insert(TABLE_KV, &lease_key, &updated.to_bytes())?;
+                    }
+                }
+                LeaseOp::Revoke { id, delete_keys } => {
+                    tx.remove(TABLE_KV, &encode_lease_key(*id))?;
+                    if *delete_keys {
+                        let deleted = Self::delete_keys_by_lease_in_tx(tx, *id, revision)?;
+                        for key in deleted {
+                            changes.push(KeyValueChange {
+                                key,
+                                value: None,
+                                prev_value: None,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Changelog（Lease 事件；Revoke 时携带被删 Key 供 Watch 分发）
+            let event = ChangeEvent {
+                revision,
+                changes: changes.clone(),
+                event_type: EventType::Lease,
+            };
+            tx.insert(
+                TABLE_CHANGELOG,
+                &encode_changelog_key(revision),
+                &event.to_bytes(),
+            )?;
+
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+
+            Ok((ApplyOutcome::applied(), changes))
+        })
+    }
+
+    /// 应用 AuthOp（raft apply 路径，P0-C.2）：revision ≡ log index（D-A2）
+    ///
+    /// 用户/角色/吊销登记写入 `/_sys/auth/` 前缀（原始 bincode，不经 Barrier
+    /// 加密——auth 元数据非密文，与 Lease 记录同口径），与 changelog +
+    /// META_LAST_APPLIED 同事务原子完成；幂等守卫同 lease 路径。
+    pub fn apply_auth_op(
+        &self,
+        op: &crate::raft::type_config::AuthOp,
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<ApplyOutcome> {
+        use crate::auth::manager::{
+            AuthRevocationRecord, AuthRoleRecord, AuthSessionRecord, AuthUserRecord,
+            AUTH_REVOKED_PREFIX, AUTH_ROLE_PREFIX, AUTH_SESSION_PREFIX, AUTH_USER_PREFIX,
+        };
+        use crate::raft::type_config::AuthOp;
+
+        if self.changelog_contains_revision(revision)? {
+            return Ok(ApplyOutcome::replayed());
+        }
+
+        self.backend.write(|tx| {
+            match op {
+                AuthOp::UserAdd { name, hash, roles } => {
+                    let key = [AUTH_USER_PREFIX, name.as_bytes()].concat();
+                    let rec = AuthUserRecord {
+                        name: name.clone(),
+                        password_hash: hash.as_bytes().to_vec(),
+                        roles: roles.clone(),
+                    };
+                    tx.insert(TABLE_KV, &key, &rec.to_bytes()?)?;
+                }
+                AuthOp::UserDelete { name } => {
+                    let key = [AUTH_USER_PREFIX, name.as_bytes()].concat();
+                    tx.remove(TABLE_KV, &key)?;
+                }
+                AuthOp::UserSetPassword { name, hash } => {
+                    let key = [AUTH_USER_PREFIX, name.as_bytes()].concat();
+                    if let Some(rec) = tx
+                        .get(TABLE_KV, &key)?
+                        .and_then(|bytes| AuthUserRecord::from_bytes(&bytes))
+                    {
+                        let updated = AuthUserRecord {
+                            password_hash: hash.as_bytes().to_vec(),
+                            ..rec
+                        };
+                        tx.insert(TABLE_KV, &key, &updated.to_bytes()?)?;
+                    }
+                }
+                AuthOp::UserGrantRole { name, role } => {
+                    let key = [AUTH_USER_PREFIX, name.as_bytes()].concat();
+                    if let Some(rec) = tx
+                        .get(TABLE_KV, &key)?
+                        .and_then(|bytes| AuthUserRecord::from_bytes(&bytes))
+                    {
+                        let mut roles = rec.roles;
+                        if !roles.iter().any(|r| r == role) {
+                            roles.push(role.clone());
+                        }
+                        let updated = AuthUserRecord { roles, ..rec };
+                        tx.insert(TABLE_KV, &key, &updated.to_bytes()?)?;
+                    }
+                }
+                AuthOp::UserRevokeRole { name, role } => {
+                    let key = [AUTH_USER_PREFIX, name.as_bytes()].concat();
+                    if let Some(rec) = tx
+                        .get(TABLE_KV, &key)?
+                        .and_then(|bytes| AuthUserRecord::from_bytes(&bytes))
+                    {
+                        let roles: Vec<String> =
+                            rec.roles.into_iter().filter(|r| r != role).collect();
+                        let updated = AuthUserRecord { roles, ..rec };
+                        tx.insert(TABLE_KV, &key, &updated.to_bytes()?)?;
+                    }
+                }
+                AuthOp::RoleAdd { role } => {
+                    let key = [AUTH_ROLE_PREFIX, role.as_bytes()].concat();
+                    if tx.get(TABLE_KV, &key)?.is_none() {
+                        let rec = AuthRoleRecord {
+                            name: role.clone(),
+                            permissions: Vec::new(),
+                            capability_grants: Vec::new(),
+                            high_sensitive: false,
+                        };
+                        tx.insert(TABLE_KV, &key, &rec.to_bytes()?)?;
+                    }
+                }
+                AuthOp::RoleDelete { role } => {
+                    let key = [AUTH_ROLE_PREFIX, role.as_bytes()].concat();
+                    tx.remove(TABLE_KV, &key)?;
+                    // 同时从所有用户移除该角色
+                    let users = tx.iter_prefix(TABLE_KV, AUTH_USER_PREFIX)?;
+                    let mut updates: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+                    for (k, v) in users {
+                        if let Some(rec) = AuthUserRecord::from_bytes(&v) {
+                            let before = rec.roles.len();
+                            let roles: Vec<String> =
+                                rec.roles.into_iter().filter(|r| r != role).collect();
+                            if roles.len() != before {
+                                let updated = AuthUserRecord { roles, ..rec };
+                                updates.push((k, updated.to_bytes()?));
+                            }
+                        }
+                    }
+                    for (k, v) in updates {
+                        tx.insert(TABLE_KV, &k, &v)?;
+                    }
+                }
+                AuthOp::RoleGrantPermission {
+                    role,
+                    perm_type,
+                    key,
+                    range_end,
+                } => {
+                    let role_key = [AUTH_ROLE_PREFIX, role.as_bytes()].concat();
+                    if let Some(rec) = tx
+                        .get(TABLE_KV, &role_key)?
+                        .and_then(|bytes| AuthRoleRecord::from_bytes(&bytes))
+                    {
+                        use crate::auth::manager::AuthPermissionRecord;
+                        let is_dup = rec.permissions.iter().any(|p| {
+                            p.perm_type == *perm_type
+                                && p.key_prefix == *key
+                                && p.range_end == *range_end
+                        });
+                        if !is_dup {
+                            let mut updated = rec;
+                            updated.permissions.push(AuthPermissionRecord {
+                                perm_type: *perm_type,
+                                key_prefix: key.clone(),
+                                range_end: range_end.clone(),
+                            });
+                            tx.insert(TABLE_KV, &role_key, &updated.to_bytes()?)?;
+                        }
+                    }
+                }
+                AuthOp::RoleRevokePermission {
+                    role,
+                    key,
+                    range_end,
+                } => {
+                    let role_key = [AUTH_ROLE_PREFIX, role.as_bytes()].concat();
+                    if let Some(rec) = tx
+                        .get(TABLE_KV, &role_key)?
+                        .and_then(|bytes| AuthRoleRecord::from_bytes(&bytes))
+                    {
+                        let mut updated = rec;
+                        updated
+                            .permissions
+                            .retain(|p| !(p.key_prefix == *key && p.range_end == *range_end));
+                        tx.insert(TABLE_KV, &role_key, &updated.to_bytes()?)?;
+                    }
+                }
+                AuthOp::RevokeJti { jti } => {
+                    let key = [AUTH_REVOKED_PREFIX, jti.as_bytes()].concat();
+                    if tx.get(TABLE_KV, &key)?.is_none() {
+                        let rec = AuthRevocationRecord {
+                            jti: jti.clone(),
+                            revoked_at: crate::lease::wall_clock_now_ms() / 1000,
+                        };
+                        tx.insert(TABLE_KV, &key, &rec.to_bytes()?)?;
+                    }
+                }
+                AuthOp::IssueSession {
+                    hash_hex,
+                    username,
+                    expires_at_unix,
+                    is_refresh,
+                } => {
+                    // P2-07：会话落盘（键为 token 哈希，值不含明文 token）
+                    let key = [AUTH_SESSION_PREFIX, hash_hex.as_bytes()].concat();
+                    let rec = AuthSessionRecord {
+                        username: username.clone(),
+                        expires_at_unix: *expires_at_unix,
+                        is_refresh: *is_refresh,
+                    };
+                    tx.insert(TABLE_KV, &key, &rec.to_bytes()?)?;
+                }
+                AuthOp::ConsumeSession { hash_hex } => {
+                    // P2-07：会话消费（refresh 单次使用 / 登出 / 吊销）
+                    let key = [AUTH_SESSION_PREFIX, hash_hex.as_bytes()].concat();
+                    tx.remove(TABLE_KV, &key)?;
+                }
+            }
+
+            // Changelog（Auth 事件：无 Key 变更，仅记录 revision 供 Watch 水位推进）
+            let event = ChangeEvent {
+                revision,
+                changes: Vec::new(),
+                event_type: EventType::Put,
+            };
+            tx.insert(
+                TABLE_CHANGELOG,
+                &encode_changelog_key(revision),
+                &event.to_bytes(),
+            )?;
+
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+
+            Ok(ApplyOutcome::applied())
+        })
+    }
+
+    // ──── Compact（P1-01：raft 下发 compact revision，节点一致）────
+
+    /// 读取已持久化的 compacted revision（`META_COMPACT_REVISION`）。
+    ///
+    /// 无持久化条目时返回 0（从未压缩）。
+    pub fn compacted_revision(&self) -> Result<Revision> {
+        self.backend
+            .read(|tx| tx.get(TABLE_META, META_COMPACT_REVISION))
+            .map(|opt| {
+                opt.and_then(|bytes| {
+                    let arr: [u8; 8] = bytes.as_slice().try_into().ok()?;
+                    Some(u64::from_be_bytes(arr))
+                })
+                .unwrap_or(0)
+            })
+    }
+
+    /// 应用 Compact：物理删除 `< revision` 的 changelog 条目与过期 tombstone，
+    /// 并持久化 `META_COMPACT_REVISION`（与 `META_LAST_APPLIED` 同事务）。
+    ///
+    /// 语义（P1-01 设计决策）：
+    /// - **确定性**：所有节点 apply 同一命令得到相同删除集合（删除条件只依赖
+    ///   revision 与持久化状态，不读墙钟/随机数，规格 A.4 约束 1）；
+    /// - **分片删除**：每批 `COMPACT_BATCH_SIZE` 条一个写事务，避免巨型事务；
+    /// - **幂等**：`revision <= 已持久化 compacted_revision` 为 no-op（重启重放安全）；
+    /// - **不得失败**：openraft 将 apply 错误视为致命，故 `revision > applied.index`
+    ///   时钳制为 applied.index（未来 revision 的拒绝由 RPC/提案层负责，错误码
+    ///   `INVALID_ARGUMENT`）。
+    pub fn apply_compact(
+        &self,
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<CompactOutcome> {
+        let effective = revision.min(applied.index);
+        if effective == 0 {
+            return Ok(CompactOutcome {
+                deleted_changelog: 0,
+                deleted_tombstones: 0,
+            });
+        }
+        let prev = self.compacted_revision()?;
+        if effective <= prev {
+            return Ok(CompactOutcome {
+                deleted_changelog: 0,
+                deleted_tombstones: 0,
+            });
+        }
+
+        let mut deleted_changelog = 0usize;
+        let mut deleted_tombstones = 0usize;
+
+        // 分片删除：每批一个写事务（P1-01：单写事务分片删除）
+        loop {
+            let mut batch_changelog = 0usize;
+            let mut batch_tombstones = 0usize;
+            self.backend.write(|tx| {
+                // 1. changelog 条目（rev < effective；key 编码 /_changelog/{rev_be}）
+                let mut stale: Vec<Vec<u8>> = Vec::new();
+                for (key, _) in tx.iter_prefix(TABLE_CHANGELOG, CHANGELOG_PREFIX)? {
+                    if stale.len() >= COMPACT_BATCH_SIZE {
+                        break;
+                    }
+                    let rev = key
+                        .get(CHANGELOG_PREFIX.len()..)
+                        .and_then(|tail| <[u8; 8]>::try_from(tail).ok())
+                        .map(u64::from_be_bytes);
+                    if rev.is_some_and(|r| r < effective) {
+                        stale.push(key.to_vec());
+                    }
+                }
+                for key in &stale {
+                    tx.remove(TABLE_CHANGELOG, key)?;
+                }
+                batch_changelog = stale.len();
+
+                // 2. 过期 tombstone（deleted && mod_revision < effective）：
+                //    物理删除 KV 行 + 元数据行
+                let mut stale_tomb: Vec<Vec<u8>> = Vec::new();
+                for (meta_key, meta_value) in tx.iter_prefix(TABLE_KV_META, KV_META_PREFIX)? {
+                    if stale_tomb.len() >= COMPACT_BATCH_SIZE {
+                        break;
+                    }
+                    if let Some(meta) = KvMetadata::from_bytes(&meta_value) {
+                        if meta.deleted && (meta.mod_revision as u64) < effective {
+                            stale_tomb.push(meta_key.to_vec());
+                        }
+                    }
+                }
+                for meta_key in &stale_tomb {
+                    if let Some(user_key) = meta_key.strip_prefix(KV_META_PREFIX) {
+                        let internal_key = encode_kv_key(user_key);
+                        tx.remove(TABLE_KV, &internal_key)?;
+                    }
+                    tx.remove(TABLE_KV_META, meta_key)?;
+                }
+                batch_tombstones = stale_tomb.len();
+                Ok(())
+            })?;
+
+            deleted_changelog += batch_changelog;
+            deleted_tombstones += batch_tombstones;
+            if batch_changelog == 0 && batch_tombstones == 0 {
+                break;
+            }
+        }
+
+        // 3. 持久化 compacted revision + applied（同一事务）
+        self.backend.write(|tx| {
+            tx.insert(TABLE_META, META_COMPACT_REVISION, &effective.to_be_bytes())?;
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+            Ok(())
+        })?;
+
+        tracing::info!(
+            "Compaction applied: revision={effective}, deleted_changelog={deleted_changelog}, \
+             deleted_tombstones={deleted_tombstones}"
+        );
+
+        Ok(CompactOutcome {
+            deleted_changelog,
+            deleted_tombstones,
+        })
+    }
+
+    /// 原始前缀扫描（不经 Barrier 解密）：供 `/_sys/auth/`、`/_lease/` 等
+    /// 内部元数据前缀的启动装载使用（P0-C.2）。
+    pub fn list_raw_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.backend.read(|tx| {
+            let rows = tx.iter_prefix(TABLE_KV, prefix)?;
+            let mut out = Vec::new();
+            for (k, v) in rows {
+                out.push((k.to_vec(), v.to_vec()));
+            }
+            Ok(out)
+        })
     }
 
     /// 从指定 Revision 开始读取 Changelog 条目（含 start_revision）
@@ -935,11 +1558,45 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
+    /// 严格读取 Changelog（P0-E.2）：损坏条目返回 Err（不再静默跳过）。
+    ///
+    /// Watch 历史回放使用此方法：损坏即中止回放并下发 `HistoryUnavailable`，
+    /// 客户端不再收到静默缺洞。
+    pub fn read_changelog_entries_strict(
+        &self,
+        start_revision: Revision,
+    ) -> Result<Vec<ChangeEvent>> {
+        let start_key = encode_changelog_key(start_revision);
+        self.backend.read(|tx| {
+            let entries = tx.iter_prefix(TABLE_CHANGELOG, CHANGELOG_PREFIX)?;
+            let mut events = Vec::new();
+            for (key, value) in entries {
+                if key.as_slice() < start_key.as_slice() {
+                    continue;
+                }
+                match ChangeEvent::from_bytes(&value) {
+                    Ok(event) => events.push(event),
+                    Err(_) => {
+                        return Err(coord_core::error::Error::DataCorruption(format!(
+                            "changelog entry at key {} is corrupt",
+                            String::from_utf8_lossy(&key)
+                        )))
+                    }
+                }
+            }
+            Ok(events)
+        })
+    }
+
     /// 读取 Key 在指定历史 Revision 时的值
     ///
     /// 通过扫描 Changelog 找到该 Key 在 <= target_revision 时的最后一次写入值。
     /// 如果 Key 在 target_revision 时不存在或已被删除，返回 None。
-    pub fn get_at_revision(&self, key: &[u8], target_revision: Revision) -> Result<Option<Vec<u8>>> {
+    pub fn get_at_revision(
+        &self,
+        key: &[u8],
+        target_revision: Revision,
+    ) -> Result<Option<Vec<u8>>> {
         let start_key = encode_changelog_key(1); // 从 rev 1 开始扫描
         let end_key = encode_changelog_key(target_revision.saturating_add(1));
         self.backend.read(|tx| {
@@ -976,8 +1633,14 @@ impl<B: StorageBackend> ChangelogReader for MvccStorage<B> {
         &self,
         start_revision: Revision,
     ) -> std::result::Result<Vec<ChangeEvent>, String> {
-        MvccStorage::read_changelog_entries(self, start_revision)
+        // P0-E.2：严格读取，损坏条目报错（不静默跳过）
+        MvccStorage::read_changelog_entries_strict(self, start_revision)
             .map_err(|e| format!("changelog read error: {e}"))
+    }
+
+    fn compacted_revision(&self) -> std::result::Result<Revision, String> {
+        // P1-01：压缩水位（回放起点低于它时历史不可达）
+        MvccStorage::compacted_revision(self).map_err(|e| format!("compacted revision: {e}"))
     }
 }
 
@@ -1063,12 +1726,260 @@ mod tests {
     }
 
     #[test]
-    fn test_applied_index() {
+    fn test_applied_log_id() {
         let (_dir, storage) = create_storage();
-        assert_eq!(storage.get_applied_index().unwrap(), None);
+        assert_eq!(storage.get_applied_log_id().unwrap(), None);
 
-        storage.set_applied_index(42).unwrap();
-        assert_eq!(storage.get_applied_index().unwrap(), Some(42));
+        storage
+            .set_last_applied(AppliedLogId::standalone(42))
+            .unwrap();
+        assert_eq!(
+            storage.get_applied_log_id().unwrap(),
+            Some(AppliedLogId::standalone(42))
+        );
+        assert_eq!(storage.current_revision(), 42);
+    }
+
+    // ──── P0-A 新语义：revision ≡ log index + 幂等守卫 + applied 持久化 ────
+
+    #[test]
+    fn test_put_at_revision_uses_log_index_as_revision() {
+        let (_dir, storage) = create_storage();
+        // raft log index 7 → revision 7（不再从内存计数器分配）
+        let outcome = storage
+            .put_at_revision(
+                b"k",
+                b"v",
+                None,
+                7,
+                AppliedLogId {
+                    term: 1,
+                    node_id: 1,
+                    index: 7,
+                },
+            )
+            .unwrap();
+        assert!(!outcome.replayed);
+        assert_eq!(storage.current_revision(), 7);
+        assert_eq!(
+            storage.get_applied_log_id().unwrap(),
+            Some(AppliedLogId {
+                term: 1,
+                node_id: 1,
+                index: 7
+            })
+        );
+        assert_eq!(storage.get(b"k").unwrap(), Some(b"v".to_vec()));
+    }
+
+    #[test]
+    fn test_apply_idempotence_guard() {
+        let (_dir, storage) = create_storage();
+        let applied = AppliedLogId {
+            term: 1,
+            node_id: 1,
+            index: 7,
+        };
+        let outcome1 = storage
+            .put_at_revision(b"k", b"v1", None, 7, applied)
+            .unwrap();
+        assert!(!outcome1.replayed);
+
+        // 同 revision 重复 apply（重启重放/重复 apply）→ 跳过，无副作用
+        let outcome2 = storage
+            .put_at_revision(b"k", b"v2", None, 7, applied)
+            .unwrap();
+        assert!(outcome2.replayed);
+        assert_eq!(storage.get(b"k").unwrap(), Some(b"v1".to_vec()));
+
+        // changelog 只有一条记录
+        let entries = storage.read_changelog_entries(1).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].revision, 7);
+    }
+
+    #[test]
+    fn test_delete_always_consumes_revision() {
+        let (_dir, storage) = create_storage();
+        // D-A5：不存在的 Key 也消耗 revision 并写 changelog
+        let outcome = storage
+            .delete_at_revision(b"missing", 5, AppliedLogId::standalone(5))
+            .unwrap();
+        assert!(!outcome.replayed);
+        assert_eq!(storage.current_revision(), 5);
+        let entries = storage.read_changelog_entries(5).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event_type, EventType::Delete);
+    }
+
+    #[test]
+    fn test_verify_consistency() {
+        let (_dir, storage) = create_storage();
+        // 空库
+        let (applied, tail) = storage.verify_consistency().unwrap();
+        assert_eq!(applied, 0);
+        assert_eq!(tail, None);
+
+        storage
+            .put_at_revision(b"a", b"1", None, 1, AppliedLogId::standalone(1))
+            .unwrap();
+        storage
+            .put_at_revision(b"b", b"2", None, 3, AppliedLogId::standalone(3))
+            .unwrap();
+        let (applied, tail) = storage.verify_consistency().unwrap();
+        assert_eq!(applied, 3);
+        assert_eq!(tail, Some(3));
+    }
+
+    #[test]
+    fn test_standalone_concurrent_puts_allocate_distinct_revisions() {
+        let (_dir, storage) = create_storage();
+        let storage = std::sync::Arc::new(storage);
+        let mut handles = Vec::new();
+        for i in 0..8usize {
+            let storage = std::sync::Arc::clone(&storage);
+            handles.push(std::thread::spawn(move || {
+                let key = format!("/conc/{i}");
+                storage.put(key.as_bytes(), b"v", None).unwrap()
+            }));
+        }
+        let mut revs: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        revs.sort_unstable();
+        revs.dedup();
+        assert_eq!(
+            revs.len(),
+            8,
+            "concurrent standalone puts must get distinct revisions"
+        );
+        assert_eq!(storage.current_revision(), 8);
+        for i in 0..8usize {
+            let key = format!("/conc/{i}");
+            assert_eq!(storage.get(key.as_bytes()).unwrap(), Some(b"v".to_vec()));
+        }
+    }
+
+    #[test]
+    fn test_changelog_v2_roundtrip_and_legacy_compat() {
+        let event = ChangeEvent {
+            revision: 5,
+            changes: vec![KeyValueChange {
+                key: b"k".to_vec(),
+                value: Some(b"v".to_vec()),
+                prev_value: None,
+            }],
+            event_type: EventType::Put,
+        };
+        let bytes = event.to_bytes();
+        assert_eq!(bytes[0], 2); // v2 版本号
+        let decoded = ChangeEvent::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.revision, 5);
+        assert_eq!(decoded.event_type, EventType::Put);
+
+        // v1 旧格式（无版本号字节）仍可读
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&5u64.to_be_bytes());
+        legacy.push(0u8); // Put
+        legacy.extend_from_slice(&1u32.to_be_bytes());
+        legacy.extend_from_slice(&1u32.to_be_bytes());
+        legacy.extend_from_slice(b"k");
+        legacy.push(1u8);
+        legacy.extend_from_slice(&1u32.to_be_bytes());
+        legacy.push(b'v');
+        let decoded = ChangeEvent::from_bytes(&legacy).unwrap();
+        assert_eq!(decoded.revision, 5);
+        assert_eq!(decoded.event_type, EventType::Put);
+        assert_eq!(decoded.changes.len(), 1);
+    }
+
+    // ──── P0-B Lease 状态表 ────
+
+    #[test]
+    fn test_lease_op_grant_keepalive_revoke() {
+        let (_dir, storage) = create_storage();
+        use crate::raft::type_config::LeaseOp;
+
+        // Grant @rev 1
+        let (outcome, changes) = storage
+            .apply_lease_op(
+                &LeaseOp::Grant {
+                    id: 10,
+                    ttl: 60,
+                    deadline_wall_ms: 1000,
+                },
+                1,
+                AppliedLogId::standalone(1),
+            )
+            .unwrap();
+        assert!(!outcome.replayed);
+        assert!(changes.is_empty());
+        let record = storage.get_lease_record(10).unwrap().unwrap();
+        assert_eq!(record.ttl, 60);
+        assert_eq!(record.deadline_wall_ms, 1000);
+        assert_eq!(record.keepalive_revision, 1);
+
+        // KeepAlive @rev 2
+        let (outcome, _) = storage
+            .apply_lease_op(
+                &LeaseOp::KeepAlive {
+                    id: 10,
+                    deadline_wall_ms: 2000,
+                },
+                2,
+                AppliedLogId::standalone(2),
+            )
+            .unwrap();
+        assert!(!outcome.replayed);
+        let record = storage.get_lease_record(10).unwrap().unwrap();
+        assert_eq!(record.deadline_wall_ms, 2000);
+        assert_eq!(record.keepalive_revision, 2);
+
+        // 绑定 Key 后 Revoke @rev 3 → 记录删除 + 绑定 Key 标记删除
+        storage
+            .put_at_revision(b"k", b"v", Some(10), 3, AppliedLogId::standalone(3))
+            .unwrap();
+        let (outcome, changes) = storage
+            .apply_lease_op(
+                &LeaseOp::Revoke {
+                    id: 10,
+                    delete_keys: true,
+                },
+                4,
+                AppliedLogId::standalone(4),
+            )
+            .unwrap();
+        assert!(!outcome.replayed);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].key, b"k");
+        assert!(storage.get_lease_record(10).unwrap().is_none());
+        assert_eq!(storage.get(b"k").unwrap(), None);
+    }
+
+    #[test]
+    fn test_list_lease_records() {
+        let (_dir, storage) = create_storage();
+        use crate::raft::type_config::LeaseOp;
+
+        for (i, id) in [7i64, 8, 9].into_iter().enumerate() {
+            storage
+                .apply_lease_op(
+                    &LeaseOp::Grant {
+                        id,
+                        ttl: 60,
+                        deadline_wall_ms: 1000 + i as i64,
+                    },
+                    (i + 1) as u64,
+                    AppliedLogId::standalone((i + 1) as u64),
+                )
+                .unwrap();
+        }
+        let mut records = storage.list_lease_records().unwrap();
+        records.sort_by_key(|(id, _)| *id);
+        assert_eq!(
+            records.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![7, 8, 9]
+        );
+        assert_eq!(records[0].1.deadline_wall_ms, 1000);
+        assert_eq!(records[2].1.deadline_wall_ms, 1002);
     }
 
     #[test]
@@ -1128,9 +2039,7 @@ mod tests {
 
     // ──── Txn 测试 ────
 
-    use crate::txn::{
-        CompareOp, CompareTarget, CompareValue, TxnCompare, TxnOp, TxnOpResponse,
-    };
+    use crate::txn::{CompareOp, CompareTarget, CompareValue, TxnCompare, TxnOp, TxnOpResponse};
 
     /// 辅助：创建 Value 相等比较
     fn cmp_value_eq(key: &[u8], value: &[u8]) -> TxnCompare {
@@ -1153,9 +2062,7 @@ mod tests {
 
     /// 辅助：创建 Delete 操作
     fn txn_delete(key: &[u8]) -> TxnOp {
-        TxnOp::Delete {
-            key: key.to_vec(),
-        }
+        TxnOp::Delete { key: key.to_vec() }
     }
 
     #[test]
@@ -1177,10 +2084,7 @@ mod tests {
         assert_eq!(result.responses.len(), 1);
 
         // 验证实际值已变更
-        assert_eq!(
-            storage.get(b"lock").unwrap(),
-            Some(b"locked".to_vec())
-        );
+        assert_eq!(storage.get(b"lock").unwrap(), Some(b"locked".to_vec()));
     }
 
     #[test]
@@ -1312,10 +2216,7 @@ mod tests {
         storage.put(b"b", b"2", None).unwrap();
 
         // AND 条件：a=="1" AND b=="2" → 全部满足
-        let compares = vec![
-            cmp_value_eq(b"a", b"1"),
-            cmp_value_eq(b"b", b"2"),
-        ];
+        let compares = vec![cmp_value_eq(b"a", b"1"), cmp_value_eq(b"b", b"2")];
         let success_ops = vec![txn_put(b"a", b"ok")];
         let failure_ops = vec![];
 
@@ -1348,10 +2249,7 @@ mod tests {
 
         assert!(result.succeeded);
         assert_eq!(result.responses.len(), 3);
-        assert_eq!(
-            storage.get(b"key1").unwrap(),
-            Some(b"updated".to_vec())
-        );
+        assert_eq!(storage.get(b"key1").unwrap(), Some(b"updated".to_vec()));
         assert_eq!(
             storage.get(b"key2").unwrap(),
             Some(b"also_updated".to_vec())
@@ -1463,10 +2361,7 @@ mod tests {
 
         // 1. 创建 Key：version=1
         storage.put(b"lock", b"holder-a", None).unwrap();
-        assert_eq!(
-            storage.get(b"lock").unwrap(),
-            Some(b"holder-a".to_vec())
-        );
+        assert_eq!(storage.get(b"lock").unwrap(), Some(b"holder-a".to_vec()));
 
         // 2. 删除 Key（软删除：version=2, deleted=true）
         storage.delete(b"lock").unwrap();
@@ -1492,7 +2387,10 @@ mod tests {
             .unwrap();
 
         // 应成功执行 success 分支
-        assert!(result.succeeded, "Txn CAS Version==0 should succeed on soft-deleted key");
+        assert!(
+            result.succeeded,
+            "Txn CAS Version==0 should succeed on soft-deleted key"
+        );
         assert_eq!(
             storage.get(b"lock").unwrap(),
             Some(b"holder-b".to_vec()),
@@ -1522,7 +2420,10 @@ mod tests {
             .execute_txn(&compares, &success_ops, &failure_ops)
             .unwrap();
 
-        assert!(result.succeeded, "ModRevision==0 should match soft-deleted key");
+        assert!(
+            result.succeeded,
+            "ModRevision==0 should match soft-deleted key"
+        );
         assert_eq!(storage.get(b"key").unwrap(), Some(b"recreated".to_vec()));
     }
 
@@ -1548,7 +2449,157 @@ mod tests {
             .execute_txn(&compares, &success_ops, &failure_ops)
             .unwrap();
 
-        assert!(result.succeeded, "Value==empty should match soft-deleted key");
+        assert!(
+            result.succeeded,
+            "Value==empty should match soft-deleted key"
+        );
         assert_eq!(storage.get(b"key").unwrap(), Some(b"new-val".to_vec()));
+    }
+
+    // ──── P1-01 Compaction ────
+
+    #[test]
+    fn test_apply_compact_deletes_changelog_below_revision() {
+        let (_dir, storage) = create_storage();
+        for i in 0..10u32 {
+            storage
+                .put(format!("/ck{}", i).as_bytes(), b"v", None)
+                .unwrap();
+        }
+        assert_eq!(storage.current_revision(), 10);
+
+        let outcome = storage
+            .apply_compact(5, AppliedLogId::standalone(5))
+            .unwrap();
+        assert!(
+            outcome.deleted_changelog > 0,
+            "entries below cutoff deleted"
+        );
+        assert_eq!(storage.compacted_revision().unwrap(), 5);
+
+        for rev in 1..5u64 {
+            assert!(
+                !storage.changelog_contains_revision(rev).unwrap(),
+                "changelog entry at rev {rev} should be compacted away"
+            );
+        }
+        for rev in 5..=10u64 {
+            assert!(
+                storage.changelog_contains_revision(rev).unwrap(),
+                "changelog entry at rev {rev} must survive compaction"
+            );
+        }
+        // KV 数据不受影响
+        assert_eq!(storage.get(b"/ck0").unwrap(), Some(b"v".to_vec()));
+    }
+
+    #[test]
+    fn test_apply_compact_removes_old_tombstones() {
+        let (_dir, storage) = create_storage();
+        for i in 0..20u32 {
+            storage
+                .put(format!("/tk{}", i).as_bytes(), b"v", None)
+                .unwrap();
+        }
+        for i in 0..10u32 {
+            storage.delete(format!("/tk{}", i).as_bytes()).unwrap();
+        }
+        let current = storage.current_revision();
+        assert!(current >= 30);
+
+        let outcome = storage
+            .apply_compact(current, AppliedLogId::standalone(current))
+            .unwrap();
+        // 注意：mod_revision == current 的 tombstone 恰好在截止线上，必须保留
+        // （删除条件为 mod_revision < revision），其余 9 个被物理删除。
+        assert!(
+            outcome.deleted_tombstones >= 9,
+            "old tombstones should be physically removed, got {}",
+            outcome.deleted_tombstones
+        );
+        // 物理删除后元数据不存在（不再有 deleted 标记）
+        assert!(storage.get_kv_metadata(b"/tk0").unwrap().is_none());
+        // 截止线上的 tombstone 保留（deleted 标记仍在）
+        let meta = storage.get_kv_metadata(b"/tk9").unwrap();
+        assert!(meta.is_some_and(|m| m.deleted), "cutoff tombstone retained");
+        // 未删除的 key 保留
+        assert_eq!(storage.get(b"/tk15").unwrap(), Some(b"v".to_vec()));
+    }
+
+    #[test]
+    fn test_apply_compact_idempotent_and_monotonic() {
+        let (_dir, storage) = create_storage();
+        for i in 0..5u32 {
+            storage
+                .put(format!("/id{}", i).as_bytes(), b"v", None)
+                .unwrap();
+        }
+        storage
+            .apply_compact(3, AppliedLogId::standalone(3))
+            .unwrap();
+
+        let again = storage
+            .apply_compact(3, AppliedLogId::standalone(3))
+            .unwrap();
+        assert_eq!(again.deleted_changelog, 0);
+        assert_eq!(again.deleted_tombstones, 0);
+
+        let lower = storage
+            .apply_compact(2, AppliedLogId::standalone(2))
+            .unwrap();
+        assert_eq!(lower.deleted_changelog, 0);
+
+        // 未来 revision（> 命令自身 entry index）在 apply 内钳制为该 index
+        // （apply 不得失败——openraft 视为致命；真正的"未来 revision"拒绝由
+        // RPC/提案层返回 INVALID_ARGUMENT）：钳制后 compacted_revision 推进
+        let future = storage
+            .apply_compact(999, AppliedLogId::standalone(10))
+            .unwrap();
+        assert_eq!(future.deleted_changelog, 3); // rev 3,4,5（< 钳制后的 10）
+        assert_eq!(storage.compacted_revision().unwrap(), 10);
+    }
+
+    #[test]
+    fn test_apply_compact_sharded_batches() {
+        let (_dir, storage) = create_storage();
+        // 超过单批上限（COMPACT_BATCH_SIZE）的条目数，验证分片删除
+        let total = super::COMPACT_BATCH_SIZE as u32 + 500;
+        for i in 0..total {
+            storage
+                .put(format!("/shard{}", i).as_bytes(), b"v", None)
+                .unwrap();
+        }
+        let current = storage.current_revision();
+        assert_eq!(current, total as u64);
+
+        let outcome = storage
+            .apply_compact(current, AppliedLogId::standalone(current))
+            .unwrap();
+        assert_eq!(
+            outcome.deleted_changelog as u64,
+            current - 1,
+            "all entries below cutoff must be deleted across batches"
+        );
+        assert!(storage.changelog_contains_revision(current).unwrap());
+        assert_eq!(storage.compacted_revision().unwrap(), current);
+    }
+
+    #[test]
+    fn test_compacted_revision_persists_across_reopen() {
+        let (dir, storage) = create_storage();
+        for i in 0..5u32 {
+            storage
+                .put(format!("/p{}", i).as_bytes(), b"v", None)
+                .unwrap();
+        }
+        storage
+            .apply_compact(3, AppliedLogId::standalone(3))
+            .unwrap();
+        drop(storage);
+
+        let config = StorageConfig::default();
+        let backend = RedbBackend::open(dir.path(), &config).unwrap();
+        let reopened = MvccStorage::new(backend).unwrap();
+        assert_eq!(reopened.compacted_revision().unwrap(), 3);
     }
 }

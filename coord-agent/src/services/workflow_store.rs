@@ -88,8 +88,8 @@ impl KvWorkflowStore {
         expected_mod_rev: i64,
     ) -> Result<bool, StoreError> {
         let key = Self::instance_key(&inst.id);
-        let value = serde_json::to_vec(inst)
-            .map_err(|e| StoreError::SerializationError(e.to_string()))?;
+        let value =
+            serde_json::to_vec(inst).map_err(|e| StoreError::SerializationError(e.to_string()))?;
 
         let compare = Compare {
             result: CompareResult::Equal as i32,
@@ -239,11 +239,13 @@ impl KvWorkflowStore {
                         // 根据 key 前缀决定当前策略：更新缓存
                         if key_str.starts_with("/_workflow/v3/defs/") {
                             // 定义变更：用事件携带的新值更新缓存
-                            if let Ok(def) = serde_json::from_slice::<WorkflowDefinition>(&kv.value) {
+                            if let Ok(def) = serde_json::from_slice::<WorkflowDefinition>(&kv.value)
+                            {
                                 let _ = cache.save_definition(&def).await;
                             }
                         } else if key_str.starts_with("/_workflow/v3/instances/") {
-                            if let Ok(inst) = serde_json::from_slice::<WorkflowInstance>(&kv.value) {
+                            if let Ok(inst) = serde_json::from_slice::<WorkflowInstance>(&kv.value)
+                            {
                                 let _ = cache.save_instance(&inst).await;
                             }
                         }
@@ -269,8 +271,8 @@ impl WorkflowStore for KvWorkflowStore {
         let name = &def.document.name;
         let version = &def.document.version;
         let key = Self::def_key(namespace, name, version);
-        let value = serde_json::to_vec(def)
-            .map_err(|e| StoreError::SerializationError(e.to_string()))?;
+        let value =
+            serde_json::to_vec(def).map_err(|e| StoreError::SerializationError(e.to_string()))?;
 
         self.inner
             .client
@@ -290,13 +292,14 @@ impl WorkflowStore for KvWorkflowStore {
     /// - key 已存在 → Compare(VALUE == 当前值) + Put（内容 CAS）
     /// - key 不存在 → Compare(VERSION == 0) + Put（仅当不存在时写入）
     /// 冲突自动重试（≤5 次）。
-    async fn save_definition_atomic(
-        &self,
-        def: &WorkflowDefinition,
-    ) -> Result<(), StoreError> {
-        let key = Self::def_key(&def.document.namespace, &def.document.name, &def.document.version);
-        let value = serde_json::to_vec(def)
-            .map_err(|e| StoreError::SerializationError(e.to_string()))?;
+    async fn save_definition_atomic(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
+        let key = Self::def_key(
+            &def.document.namespace,
+            &def.document.name,
+            &def.document.version,
+        );
+        let value =
+            serde_json::to_vec(def).map_err(|e| StoreError::SerializationError(e.to_string()))?;
 
         let mut attempts = 0;
         loop {
@@ -393,8 +396,8 @@ impl WorkflowStore for KvWorkflowStore {
 
     async fn save_instance(&self, inst: &WorkflowInstance) -> Result<(), StoreError> {
         let key = Self::instance_key(&inst.id);
-        let value = serde_json::to_vec(inst)
-            .map_err(|e| StoreError::SerializationError(e.to_string()))?;
+        let value =
+            serde_json::to_vec(inst).map_err(|e| StoreError::SerializationError(e.to_string()))?;
 
         self.inner
             .client
@@ -745,7 +748,7 @@ mod tests {
         // 因此 Arc<KvWorkflowStore> 可以转为 Arc<dyn WorkflowStore + Send + Sync>
         // (通过 blanket impl WorkflowStore for Arc<dyn WorkflowStore + Send + Sync>)
         fn assert_workflow_store<T: WorkflowStore + Send + Sync + ?Sized>(_: &T) {}
-        
+
         // 验证 MemoryWorkflowStore 满足约束（编译期检查）
         let mem = MemoryWorkflowStore::new();
         assert_workflow_store(&mem);

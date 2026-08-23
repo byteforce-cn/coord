@@ -81,16 +81,23 @@ mod tests {
             }),
         };
 
-        let result = execute(&named, &CallTask {
-            call: CallType::Http,
-            with: Some(serde_json::json!({"method": "POST"})),
-        }, &inst, &clock);
+        let result = execute(
+            &named,
+            &CallTask {
+                call: CallType::Http,
+                with: Some(serde_json::json!({"method": "POST"})),
+            },
+            &inst,
+            &clock,
+        );
 
         match result {
             StepResult::Suspend { reason, frame } => {
                 assert_eq!(frame.task_name, "callService");
                 assert_eq!(frame.task_type, "call");
-                assert!(matches!(reason, SuspendReason::ExternalCall { service, .. } if service == "http"));
+                assert!(
+                    matches!(reason, SuspendReason::ExternalCall { service, .. } if service == "http")
+                );
             }
             other => panic!("expected Suspend, got {:?}", other),
         }
@@ -108,14 +115,21 @@ mod tests {
             }),
         };
 
-        let result = execute(&named, &CallTask {
-            call: CallType::Function("sendEmail".into()),
-            with: None,
-        }, &inst, &clock);
+        let result = execute(
+            &named,
+            &CallTask {
+                call: CallType::Function("sendEmail".into()),
+                with: None,
+            },
+            &inst,
+            &clock,
+        );
 
         match result {
             StepResult::Suspend { reason, .. } => {
-                assert!(matches!(reason, SuspendReason::ExternalCall { service, .. } if service == "sendEmail"));
+                assert!(
+                    matches!(reason, SuspendReason::ExternalCall { service, .. } if service == "sendEmail")
+                );
             }
             other => panic!("expected Suspend, got {:?}", other),
         }
@@ -133,14 +147,21 @@ mod tests {
             }),
         };
 
-        let result = execute(&named, &CallTask {
-            call: CallType::Grpc,
-            with: None,
-        }, &inst, &clock);
+        let result = execute(
+            &named,
+            &CallTask {
+                call: CallType::Grpc,
+                with: None,
+            },
+            &inst,
+            &clock,
+        );
 
         match result {
             StepResult::Suspend { reason, .. } => {
-                assert!(matches!(reason, SuspendReason::ExternalCall { service, .. } if service == "grpc"));
+                assert!(
+                    matches!(reason, SuspendReason::ExternalCall { service, .. } if service == "grpc")
+                );
             }
             other => panic!("expected Suspend, got {:?}", other),
         }

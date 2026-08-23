@@ -17,25 +17,26 @@ mod tests {
 
     use coord_core::storage::StorageBackend;
     use coord_core::types::StorageConfig;
+    use coord_proto::kv::kv_client::KvClient;
+    use coord_proto::kv::kv_server::KvServer;
+    use coord_proto::kv::PutRequest;
+    use coord_proto::lease::lease_server::LeaseServer;
+    use coord_proto::maintenance::maintenance_server::MaintenanceServer;
+    use coord_proto::txn::txn_server::TxnServer;
+    use coord_proto::watch::watch_client::WatchClient;
+    use coord_proto::watch::watch_server::WatchServer;
+    use coord_proto::watch::{WatchCreateRequest, WatchRequest};
+    use coord_server::lease::LeaseManager;
     use coord_server::raft::log_store::LogStore;
     use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
     use coord_server::raft::state_machine::StateMachineStore;
+    use coord_server::raft::{new_basic_node, new_raft, RaftConfig};
     use coord_server::server::CoordNode;
     use coord_server::storage::compaction::CompactionManager;
     use coord_server::storage::mvcc::MvccStorage;
     use coord_server::storage::redb_backend::RedbBackend;
     use coord_server::timer::TimerWheel;
-    use coord_server::lease::LeaseManager;
     use coord_server::watch::WatchDispatcher;
-    use coord_proto::kv::kv_server::KvServer;
-    use coord_proto::txn::txn_server::TxnServer;
-    use coord_proto::lease::lease_server::LeaseServer;
-    use coord_proto::watch::watch_server::WatchServer;
-    use coord_proto::maintenance::maintenance_server::MaintenanceServer;
-    use coord_proto::kv::kv_client::KvClient;
-    use coord_proto::kv::PutRequest;
-    use coord_proto::watch::watch_client::WatchClient;
-    use coord_proto::watch::{WatchCreateRequest, WatchRequest};
 
     use coord_agent::{AgentConfig, AgentServer};
 
@@ -81,17 +82,25 @@ mod tests {
 
         let storage_config = StorageConfig::default();
         let backend = RedbBackend::open(&data_dir, &storage_config).expect("open redb backend");
-        let mvcc_read = Arc::new(MvccStorage::new(backend.clone()).expect("create mvcc read"));
-        let mvcc_raft = MvccStorage::new(backend).expect("create mvcc raft");
+        let mvcc = Arc::new(MvccStorage::new(backend).expect("create mvcc"));
+        let snapshot_tracker =
+            Arc::new(coord_server::storage::snapshot::SnapshotTracker::default());
 
         let watch_dispatcher = Arc::new(WatchDispatcher::start());
-        let log_store = LogStore::new(&data_dir).await.expect("create raft log store");
-        let sm_store = StateMachineStore::new(mvcc_raft);
+        let log_store = LogStore::new(&data_dir)
+            .await
+            .expect("create raft log store")
+            .with_snapshot_tracker(Arc::clone(&snapshot_tracker));
+        let sm_store = StateMachineStore::new(
+            Arc::clone(&mvcc),
+            data_dir.join("snapshots"),
+            Arc::clone(&snapshot_tracker),
+        );
 
         let network_factory = RaftNetworkFactoryImpl::new(1);
         network_factory.register_node(1, raft_addr.clone());
 
-        let raft_config = openraft::Config {
+        let raft_config = RaftConfig {
             heartbeat_interval: 200,
             election_timeout_min: 800,
             election_timeout_max: 1500,
@@ -99,7 +108,7 @@ mod tests {
         };
 
         let raft_rpc_service = RaftRpcService::new();
-        let raft = openraft::Raft::new(
+        let raft = new_raft(
             1,
             Arc::new(raft_config),
             network_factory,
@@ -111,11 +120,12 @@ mod tests {
 
         raft_rpc_service.set_raft(raft.clone());
         let mut members = BTreeMap::new();
-        members.insert(1, openraft::impls::BasicNode::new(&raft_addr));
+        members.insert(1, new_basic_node(&raft_addr));
         raft.initialize(members).await.expect("raft initialize");
         let raft = Arc::new(raft);
 
-        let mut node = CoordNode::new(Arc::clone(&mvcc_read));
+        let mut node = CoordNode::new(Arc::clone(&mvcc));
+        node.node_id = 1;
         node.watch_dispatcher = Some(Arc::clone(&watch_dispatcher));
         node.raft = Some(Arc::clone(&raft));
         let timer_handle = TimerWheel::start();
@@ -124,7 +134,13 @@ mod tests {
         let node = Arc::new(node);
 
         let compaction_config = coord_server::storage::compaction::CompactionConfig::default();
-        let _compaction_mgr = CompactionManager::start(Arc::clone(&mvcc_read), compaction_config);
+        let compaction_proposer: Arc<dyn coord_server::storage::compaction::CompactProposer> =
+            node.clone();
+        let _compaction_mgr = CompactionManager::start(
+            Arc::clone(&mvcc),
+            compaction_config,
+            Some(compaction_proposer),
+        );
 
         let kv_svc = KvServer::from_arc(Arc::clone(&node));
         let txn_svc = TxnServer::from_arc(Arc::clone(&node));
@@ -196,7 +212,18 @@ mod tests {
         let agent_handle = tokio::spawn(async move {
             server.serve().await.unwrap();
         });
-        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // 就绪轮询：agent 冷启动约 1s，固定 sleep 会偶发 Connection refused
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match tokio::net::TcpStream::connect(&agent_addr).await {
+                Ok(_) => break,
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(e) => panic!("agent never became ready at {agent_addr}: {e}"),
+            }
+        }
 
         let channel = tonic::transport::Endpoint::from_shared(format!("http://{agent_addr}"))
             .unwrap()
@@ -228,11 +255,12 @@ mod tests {
             .await
             .unwrap();
 
-        let watch_resp = watch_client
-            .watch(tonic::Request::new(stream_in))
-            .await;
+        let watch_resp = watch_client.watch(tonic::Request::new(stream_in)).await;
 
-        assert!(watch_resp.is_ok(), "Watch should succeed through agent: {watch_resp:?}");
+        assert!(
+            watch_resp.is_ok(),
+            "Watch should succeed through agent: {watch_resp:?}"
+        );
 
         let mut resp_stream = watch_resp.unwrap().into_inner();
 
@@ -253,21 +281,29 @@ mod tests {
         tracing::info!("Watch test: Put completed, waiting for watch event...");
 
         // 3. 等待 Watch 事件（最多 8 秒）
-        let event_result = tokio::time::timeout(Duration::from_secs(8), resp_stream.message()).await;
+        let event_result =
+            tokio::time::timeout(Duration::from_secs(8), resp_stream.message()).await;
 
         match event_result {
             Ok(Ok(Some(resp))) => {
-                tracing::info!("Watch test: received event with {} events", resp.events.len());
-                assert!(!resp.events.is_empty(), "Should contain at least one watch event");
+                tracing::info!(
+                    "Watch test: received event with {} events",
+                    resp.events.len()
+                );
+                assert!(
+                    !resp.events.is_empty(),
+                    "Should contain at least one watch event"
+                );
                 // 验证事件内容
                 for event in &resp.events {
                     for kv in &event.kvs {
                         tracing::info!("Watch event key: {:?}", String::from_utf8_lossy(&kv.key));
                     }
                 }
-                let found = resp.events.iter().any(|e| {
-                    e.kvs.iter().any(|kv| kv.key == watch_key)
-                });
+                let found = resp
+                    .events
+                    .iter()
+                    .any(|e| e.kvs.iter().any(|kv| kv.key == watch_key));
                 assert!(found, "Watch events should contain the put key");
             }
             Ok(Ok(None)) => {
@@ -277,7 +313,9 @@ mod tests {
                 tracing::warn!("Watch test: stream error: {e}");
             }
             Err(_timeout) => {
-                tracing::warn!("Watch test: timeout waiting for event — possible timing issue, continuing");
+                tracing::warn!(
+                    "Watch test: timeout waiting for event — possible timing issue, continuing"
+                );
             }
         }
 

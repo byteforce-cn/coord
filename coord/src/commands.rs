@@ -15,8 +15,8 @@ use coord_proto::kv::kv_client::KvClient;
 use coord_proto::kv::{PutRequest, RangeRequest};
 use coord_proto::maintenance::maintenance_client::MaintenanceClient;
 use coord_proto::maintenance::{
-    SealRequest, UnsealRequest,
-    MemberAddRequest, MemberRemoveRequest, MemberPromoteRequest, MemberListRequest,
+    MemberAddRequest, MemberListRequest, MemberPromoteRequest, MemberRemoveRequest, SealRequest,
+    SnapshotRequest, UnsealRequest,
 };
 use tonic::transport::Channel;
 
@@ -73,19 +73,15 @@ pub async fn cmd_init_seal(
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut root_key);
 
     // 生成 Shamir 分片
-    let shares = coord_server::security::seal::SealManager::generate_shares_with_params(
-        &root_key, n, k,
-    )?;
+    let shares =
+        coord_server::security::seal::SealManager::generate_shares_with_params(&root_key, n, k)?;
 
     // 确保输出目录存在
     std::fs::create_dir_all(output_dir)?;
 
     // 写入分片文件
     for share in &shares {
-        let filename = format!(
-            "coord-seal-share-{}-of-{}.bin",
-            share.index, n
-        );
+        let filename = format!("coord-seal-share-{}-of-{}.bin", share.index, n);
         let path = output_dir.join(&filename);
         std::fs::write(&path, share.to_bytes())?;
         tracing::info!("Wrote share {} to {}", share.index, path.display());
@@ -132,10 +128,7 @@ pub async fn cmd_member_add(
 }
 
 /// 从集群移除节点
-pub async fn cmd_member_remove(
-    addr: &str,
-    id: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_member_remove(addr: &str, id: u64) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = build_maintenance_client(addr).await?;
     let request = tonic::Request::new(MemberRemoveRequest { node_id: id });
     let resp = client.member_remove(request).await?.into_inner();
@@ -148,10 +141,7 @@ pub async fn cmd_member_remove(
 }
 
 /// 将 Learner 晋升为 Voter
-pub async fn cmd_member_promote(
-    addr: &str,
-    id: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_member_promote(addr: &str, id: u64) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = build_maintenance_client(addr).await?;
     let request = tonic::Request::new(MemberPromoteRequest { node_id: id });
     let resp = client.member_promote(request).await?.into_inner();
@@ -164,9 +154,7 @@ pub async fn cmd_member_promote(
 }
 
 /// 列出所有节点及其状态
-pub async fn cmd_member_list(
-    addr: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_member_list(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = build_maintenance_client(addr).await?;
     let request = tonic::Request::new(MemberListRequest {});
     let resp = client.member_list(request).await?.into_inner();
@@ -184,13 +172,10 @@ pub async fn cmd_member_list(
 
 use coord_proto::auth::auth_client::AuthClient;
 use coord_proto::auth::{
-    AuthEnableRequest, AuthDisableRequest, AuthStatusRequest,
-    UserAddRequest, UserDeleteRequest, UserChangePasswordRequest,
-    UserListRequest, UserGetRequest,
-    RoleAddRequest, RoleDeleteRequest,
-    RoleGrantPermissionRequest, RoleRevokePermissionRequest, RoleListRequest,
-    UserGrantRoleRequest, UserRevokeRoleRequest,
-    AuthenticateRequest, Permission, PermissionType,
+    AuthDisableRequest, AuthEnableRequest, AuthStatusRequest, AuthenticateRequest, Permission,
+    PermissionType, RoleAddRequest, RoleDeleteRequest, RoleGrantPermissionRequest, RoleListRequest,
+    RoleRevokePermissionRequest, UserAddRequest, UserChangePasswordRequest, UserDeleteRequest,
+    UserGetRequest, UserGrantRoleRequest, UserListRequest, UserRevokeRoleRequest,
 };
 
 /// AppRole 用户名前缀
@@ -211,7 +196,9 @@ fn generate_secret_id() -> String {
     use rand::Rng;
     let chars: Vec<u8> = (b'A'..=b'Z').chain(b'0'..=b'9').collect();
     let mut rng = rand::thread_rng();
-    (0..32).map(|_| chars[rng.gen_range(0..chars.len())] as char).collect()
+    (0..32)
+        .map(|_| chars[rng.gen_range(0..chars.len())] as char)
+        .collect()
 }
 
 /// 交互式读取密码（带确认）
@@ -242,7 +229,10 @@ fn parse_permission_type(s: &str) -> Result<i32, Box<dyn std::error::Error>> {
         "read" => Ok(PermissionType::Read as i32),
         "write" => Ok(PermissionType::Write as i32),
         "readwrite" => Ok(PermissionType::Readwrite as i32),
-        other => Err(format!("invalid permission type: {other}. expected read, write, or readwrite").into()),
+        other => Err(format!(
+            "invalid permission type: {other}. expected read, write, or readwrite"
+        )
+        .into()),
     }
 }
 
@@ -279,40 +269,61 @@ pub async fn cmd_auth_status(addr: &str) -> Result<(), Box<dyn std::error::Error
 // ──── 用户管理 ────
 
 /// 创建用户：调用 Auth::UserAdd
-pub async fn cmd_auth_user_add(addr: &str, name: &str, password: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_auth_user_add(
+    addr: &str,
+    name: &str,
+    password: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     // 禁止创建 approle- 前缀的普通用户
     if name.starts_with(APPROLE_PREFIX) {
-        return Err(format!("username must not start with '{APPROLE_PREFIX}' (reserved for AppRole)").into());
+        return Err(format!(
+            "username must not start with '{APPROLE_PREFIX}' (reserved for AppRole)"
+        )
+        .into());
     }
     let mut client = build_auth_client(addr).await?;
-    client.user_add(UserAddRequest {
-        name: name.to_string(),
-        password: password.to_string(),
-    }).await?;
+    client
+        .user_add(UserAddRequest {
+            name: name.to_string(),
+            password: password.to_string(),
+        })
+        .await?;
     println!("User \"{name}\" created.");
     Ok(())
 }
 
 /// 删除用户：调用 Auth::UserDelete
-pub async fn cmd_auth_user_delete(addr: &str, name: &str, force: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_auth_user_delete(
+    addr: &str,
+    name: &str,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !force {
         return Err("use --force to confirm deletion".into());
     }
     let mut client = build_auth_client(addr).await?;
-    client.user_delete(UserDeleteRequest {
-        name: name.to_string(),
-    }).await?;
+    client
+        .user_delete(UserDeleteRequest {
+            name: name.to_string(),
+        })
+        .await?;
     println!("User \"{name}\" deleted.");
     Ok(())
 }
 
 /// 修改密码：调用 Auth::UserChangePassword
-pub async fn cmd_auth_user_passwd(addr: &str, name: &str, password: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_auth_user_passwd(
+    addr: &str,
+    name: &str,
+    password: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = build_auth_client(addr).await?;
-    client.user_change_password(UserChangePasswordRequest {
-        name: name.to_string(),
-        password: password.to_string(),
-    }).await?;
+    client
+        .user_change_password(UserChangePasswordRequest {
+            name: name.to_string(),
+            password: password.to_string(),
+        })
+        .await?;
     println!("Password changed for user \"{name}\".");
     Ok(())
 }
@@ -332,9 +343,12 @@ pub async fn cmd_auth_user_list(addr: &str) -> Result<(), Box<dyn std::error::Er
 /// 查看用户详情：调用 Auth::UserGet
 pub async fn cmd_auth_user_show(addr: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = build_auth_client(addr).await?;
-    let resp = client.user_get(UserGetRequest {
-        name: name.to_string(),
-    }).await?.into_inner();
+    let resp = client
+        .user_get(UserGetRequest {
+            name: name.to_string(),
+        })
+        .await?
+        .into_inner();
     println!("User: {name}");
     let roles_display = if resp.roles.is_empty() {
         "(none)".to_string()
@@ -350,22 +364,30 @@ pub async fn cmd_auth_user_show(addr: &str, name: &str) -> Result<(), Box<dyn st
 /// 创建角色：调用 Auth::RoleAdd
 pub async fn cmd_auth_role_add(addr: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = build_auth_client(addr).await?;
-    client.role_add(RoleAddRequest {
-        name: name.to_string(),
-    }).await?;
+    client
+        .role_add(RoleAddRequest {
+            name: name.to_string(),
+        })
+        .await?;
     println!("Role \"{name}\" created.");
     Ok(())
 }
 
 /// 删除角色：调用 Auth::RoleDelete
-pub async fn cmd_auth_role_delete(addr: &str, name: &str, force: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_auth_role_delete(
+    addr: &str,
+    name: &str,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !force {
         return Err("use --force to confirm deletion".into());
     }
     let mut client = build_auth_client(addr).await?;
-    client.role_delete(RoleDeleteRequest {
-        name: name.to_string(),
-    }).await?;
+    client
+        .role_delete(RoleDeleteRequest {
+            name: name.to_string(),
+        })
+        .await?;
     println!("Role \"{name}\" deleted.");
     Ok(())
 }
@@ -380,14 +402,16 @@ pub async fn cmd_auth_role_grant(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let perm = parse_permission_type(perm_type)?;
     let mut client = build_auth_client(addr).await?;
-    client.role_grant_permission(RoleGrantPermissionRequest {
-        name: name.to_string(),
-        permission: Some(Permission {
-            r#type: perm,
-            key: key.as_bytes().to_vec(),
-            range_end: range_end.unwrap_or("").as_bytes().to_vec(),
-        }),
-    }).await?;
+    client
+        .role_grant_permission(RoleGrantPermissionRequest {
+            name: name.to_string(),
+            permission: Some(Permission {
+                r#type: perm,
+                key: key.as_bytes().to_vec(),
+                range_end: range_end.unwrap_or("").as_bytes().to_vec(),
+            }),
+        })
+        .await?;
     let range_info = if let Some(end) = range_end {
         format!("[{key}, {end})")
     } else {
@@ -405,11 +429,13 @@ pub async fn cmd_auth_role_revoke(
     range_end: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = build_auth_client(addr).await?;
-    client.role_revoke_permission(RoleRevokePermissionRequest {
-        name: name.to_string(),
-        key: key.as_bytes().to_vec(),
-        range_end: range_end.unwrap_or("").as_bytes().to_vec(),
-    }).await?;
+    client
+        .role_revoke_permission(RoleRevokePermissionRequest {
+            name: name.to_string(),
+            key: key.as_bytes().to_vec(),
+            range_end: range_end.unwrap_or("").as_bytes().to_vec(),
+        })
+        .await?;
     println!("Revoked permission on \"{key}\" from role \"{name}\".");
     Ok(())
 }
@@ -421,21 +447,25 @@ pub async fn cmd_auth_role_list(addr: &str) -> Result<(), Box<dyn std::error::Er
     println!("{:<24} {:<}", "NAME", "PERMISSIONS");
     println!("{}", "-".repeat(64));
     for role in &resp.roles {
-        let perms: Vec<String> = role.permissions.iter().map(|p| {
-            let type_str = match PermissionType::try_from(p.r#type) {
-                Ok(PermissionType::Read) => "R",
-                Ok(PermissionType::Write) => "W",
-                Ok(PermissionType::Readwrite) => "RW",
-                _ => "?",
-            };
-            let key = String::from_utf8_lossy(&p.key);
-            let range = if p.range_end.is_empty() {
-                String::new()
-            } else {
-                format!("..{}", String::from_utf8_lossy(&p.range_end))
-            };
-            format!("{type_str}:{key}{range}")
-        }).collect();
+        let perms: Vec<String> = role
+            .permissions
+            .iter()
+            .map(|p| {
+                let type_str = match PermissionType::try_from(p.r#type) {
+                    Ok(PermissionType::Read) => "R",
+                    Ok(PermissionType::Write) => "W",
+                    Ok(PermissionType::Readwrite) => "RW",
+                    _ => "?",
+                };
+                let key = String::from_utf8_lossy(&p.key);
+                let range = if p.range_end.is_empty() {
+                    String::new()
+                } else {
+                    format!("..{}", String::from_utf8_lossy(&p.range_end))
+                };
+                format!("{type_str}:{key}{range}")
+            })
+            .collect();
         println!("{:<24} {:<}", role.name, perms.join(", "));
     }
     Ok(())
@@ -445,7 +475,11 @@ pub async fn cmd_auth_role_list(addr: &str) -> Result<(), Box<dyn std::error::Er
 
 /// 为用户分配角色：调用 Auth::UserGrantRole
 /// 若 user 为 AppRole 名称（不以 approle- 开头），自动加前缀。
-pub async fn cmd_auth_grant(addr: &str, user: &str, role: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_auth_grant(
+    addr: &str,
+    user: &str,
+    role: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let internal_user = if user.starts_with(APPROLE_PREFIX) {
         user.to_string()
     } else {
@@ -455,21 +489,29 @@ pub async fn cmd_auth_grant(addr: &str, user: &str, role: &str) -> Result<(), Bo
         user.to_string()
     };
     let mut client = build_auth_client(addr).await?;
-    client.user_grant_role(UserGrantRoleRequest {
-        user: internal_user,
-        role: role.to_string(),
-    }).await?;
+    client
+        .user_grant_role(UserGrantRoleRequest {
+            user: internal_user,
+            role: role.to_string(),
+        })
+        .await?;
     println!("Granted role \"{role}\" to \"{user}\".");
     Ok(())
 }
 
 /// 撤销用户角色：调用 Auth::UserRevokeRole
-pub async fn cmd_auth_revoke(addr: &str, user: &str, role: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_auth_revoke(
+    addr: &str,
+    user: &str,
+    role: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = build_auth_client(addr).await?;
-    client.user_revoke_role(UserRevokeRoleRequest {
-        user: user.to_string(),
-        role: role.to_string(),
-    }).await?;
+    client
+        .user_revoke_role(UserRevokeRoleRequest {
+            user: user.to_string(),
+            role: role.to_string(),
+        })
+        .await?;
     println!("Revoked role \"{role}\" from \"{user}\".");
     Ok(())
 }
@@ -477,12 +519,20 @@ pub async fn cmd_auth_revoke(addr: &str, user: &str, role: &str) -> Result<(), B
 // ──── 登录 ────
 
 /// 登录获取 Token：调用 Auth::Authenticate
-pub async fn cmd_auth_login(addr: &str, name: &str, password: &str, token_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_auth_login(
+    addr: &str,
+    name: &str,
+    password: &str,
+    token_only: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = build_auth_client(addr).await?;
-    let resp = client.authenticate(AuthenticateRequest {
-        name: name.to_string(),
-        password: password.to_string(),
-    }).await?.into_inner();
+    let resp = client
+        .authenticate(AuthenticateRequest {
+            name: name.to_string(),
+            password: password.to_string(),
+        })
+        .await?
+        .into_inner();
     if token_only {
         println!("{}", resp.token);
     } else {
@@ -502,21 +552,27 @@ pub async fn cmd_auth_approle_create(
     bind_role: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let internal_name = to_approle_internal(name);
-    let secret = secret_id.map(|s| s.to_string()).unwrap_or_else(generate_secret_id);
+    let secret = secret_id
+        .map(|s| s.to_string())
+        .unwrap_or_else(generate_secret_id);
 
     // 创建内部用户（密码为 Secret ID）
     let mut client = build_auth_client(addr).await?;
-    client.user_add(UserAddRequest {
-        name: internal_name.clone(),
-        password: secret.clone(),
-    }).await?;
+    client
+        .user_add(UserAddRequest {
+            name: internal_name.clone(),
+            password: secret.clone(),
+        })
+        .await?;
 
     // 若指定绑定角色，授权
     if let Some(role) = bind_role {
-        client.user_grant_role(UserGrantRoleRequest {
-            user: internal_name,
-            role: role.to_string(),
-        }).await?;
+        client
+            .user_grant_role(UserGrantRoleRequest {
+                user: internal_name,
+                role: role.to_string(),
+            })
+            .await?;
     }
 
     println!("AppRole \"{name}\" created.");
@@ -527,21 +583,30 @@ pub async fn cmd_auth_approle_create(
 }
 
 /// 删除 AppRole：删除内部用户 approle-<name>
-pub async fn cmd_auth_approle_delete(addr: &str, name: &str, force: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_auth_approle_delete(
+    addr: &str,
+    name: &str,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !force {
         return Err("use --force to confirm deletion".into());
     }
     let internal_name = to_approle_internal(name);
     let mut client = build_auth_client(addr).await?;
-    client.user_delete(UserDeleteRequest {
-        name: internal_name,
-    }).await?;
+    client
+        .user_delete(UserDeleteRequest {
+            name: internal_name,
+        })
+        .await?;
     println!("AppRole \"{name}\" deleted.");
     Ok(())
 }
 
 /// 查看 AppRole 的 Role ID
-pub async fn cmd_auth_approle_role_id(addr: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_auth_approle_role_id(
+    addr: &str,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Role ID 恒为 AppRole 名称
     println!("Role ID: {name}");
     // 验证内部用户存在
@@ -550,15 +615,20 @@ pub async fn cmd_auth_approle_role_id(addr: &str, name: &str) -> Result<(), Box<
 }
 
 /// 重置 AppRole 的 Secret ID（修改内部用户密码）
-pub async fn cmd_auth_approle_secret_id(addr: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_auth_approle_secret_id(
+    addr: &str,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let internal_name = to_approle_internal(name);
     let new_secret = generate_secret_id();
 
     let mut client = build_auth_client(addr).await?;
-    client.user_change_password(UserChangePasswordRequest {
-        name: internal_name,
-        password: new_secret.clone(),
-    }).await?;
+    client
+        .user_change_password(UserChangePasswordRequest {
+            name: internal_name,
+            password: new_secret.clone(),
+        })
+        .await?;
 
     println!("New Secret ID for AppRole \"{name}\":");
     println!("{new_secret}");
@@ -571,7 +641,9 @@ pub async fn cmd_auth_approle_list(addr: &str) -> Result<(), Box<dyn std::error:
     let mut client = build_auth_client(addr).await?;
     let resp = client.user_list(UserListRequest {}).await?.into_inner();
 
-    let approles: Vec<_> = resp.users.iter()
+    let approles: Vec<_> = resp
+        .users
+        .iter()
         .filter(|u| u.name.starts_with(APPROLE_PREFIX))
         .collect();
 
@@ -590,12 +662,18 @@ pub async fn cmd_auth_approle_list(addr: &str) -> Result<(), Box<dyn std::error:
 }
 
 /// 查看 AppRole 详情
-pub async fn cmd_auth_approle_show(addr: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_auth_approle_show(
+    addr: &str,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let internal_name = to_approle_internal(name);
     let mut client = build_auth_client(addr).await?;
-    let resp = client.user_get(UserGetRequest {
-        name: internal_name,
-    }).await?.into_inner();
+    let resp = client
+        .user_get(UserGetRequest {
+            name: internal_name,
+        })
+        .await?
+        .into_inner();
 
     println!("AppRole: {name}");
     println!("Role ID: {name}");
@@ -611,7 +689,7 @@ pub async fn cmd_auth_approle_show(addr: &str, name: &str) -> Result<(), Box<dyn
 // ──── Capability 命令 (Phase 1.5) ────
 
 use coord_proto::capability::capability_registry_client::CapabilityRegistryClient;
-use coord_proto::capability::{CapabilityListRequest, CapabilityGetRequest};
+use coord_proto::capability::{CapabilityGetRequest, CapabilityListRequest};
 
 /// 列出所有已注册的能力定义
 pub async fn cmd_capability_list(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -623,7 +701,10 @@ pub async fn cmd_capability_list(addr: &str) -> Result<(), Box<dyn std::error::E
         return Ok(());
     }
 
-    println!("{:<40} {:<8} {:<12} {:<}", "CAPABILITY ID", "TYPE", "DOMAIN", "DESCRIPTION");
+    println!(
+        "{:<40} {:<8} {:<12} {:<}",
+        "CAPABILITY ID", "TYPE", "DOMAIN", "DESCRIPTION"
+    );
     println!("{}", "-".repeat(100));
     for cap in &resp.capabilities {
         let type_str = match cap.r#type {
@@ -648,9 +729,12 @@ pub async fn cmd_capability_get(
     capability_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = build_capability_client(addr).await?;
-    let resp = client.get(CapabilityGetRequest {
-        capability_id: capability_id.to_string(),
-    }).await?.into_inner();
+    let resp = client
+        .get(CapabilityGetRequest {
+            capability_id: capability_id.to_string(),
+        })
+        .await?
+        .into_inner();
 
     match resp.capability {
         Some(cap) => {
@@ -685,20 +769,20 @@ pub async fn cmd_capability_get(
 mod capability_tests {
     use super::*;
 
-    use std::sync::Arc;
     use coord_core::storage::StorageBackend;
     use coord_core::types::StorageConfig;
+    use coord_proto::auth::auth_server::AuthServer;
+    use coord_proto::capability::capability_registry_server::CapabilityRegistryServer;
+    use coord_server::auth::service::AuthService;
+    use coord_server::auth::CapabilityRegistry;
+    use coord_server::auth::{AuthManager, TokenManager};
     use coord_server::server::CoordNode;
     use coord_server::storage::mvcc::MvccStorage;
     use coord_server::storage::redb_backend::RedbBackend;
-    use coord_server::auth::CapabilityRegistry;
-    use coord_server::auth::service::AuthService;
-    use coord_server::auth::{AuthManager, TokenManager};
-    use coord_proto::capability::capability_registry_server::CapabilityRegistryServer;
-    use coord_proto::auth::auth_server::AuthServer;
-    use tonic::transport::Server;
-    use tokio::net::TcpListener;
+    use std::sync::Arc;
     use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tonic::transport::Server;
 
     async fn start_capability_test_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let tmpdir = tempfile::tempdir().unwrap();
@@ -726,9 +810,7 @@ mod capability_tests {
         let handle = tokio::spawn(async move {
             Server::builder()
                 .add_service(CapabilityRegistryServer::new(cap_svc))
-                .serve_with_incoming(
-                    tokio_stream::wrappers::TcpListenerStream::new(listener),
-                )
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
                 .await
                 .unwrap();
         });
@@ -749,7 +831,9 @@ mod capability_tests {
                 let msg = e.to_string();
                 // Acceptable: service not yet registered or unimplemented
                 assert!(
-                    msg.contains("not found") || msg.contains("unimplemented") || msg.contains("transport"),
+                    msg.contains("not found")
+                        || msg.contains("unimplemented")
+                        || msg.contains("transport"),
                     "unexpected error: {msg}"
                 );
             }
@@ -765,7 +849,9 @@ mod capability_tests {
             Err(e) => {
                 let msg = e.to_string();
                 assert!(
-                    msg.contains("not found") || msg.contains("unimplemented") || msg.contains("transport"),
+                    msg.contains("not found")
+                        || msg.contains("unimplemented")
+                        || msg.contains("transport"),
                     "unexpected error: {msg}"
                 );
             }
@@ -781,7 +867,9 @@ mod capability_tests {
             Err(e) => {
                 let msg = e.to_string();
                 assert!(
-                    msg.contains("not found") || msg.contains("unimplemented") || msg.contains("transport"),
+                    msg.contains("not found")
+                        || msg.contains("unimplemented")
+                        || msg.contains("transport"),
                     "unexpected error: {msg}"
                 );
             }
@@ -825,7 +913,9 @@ pub async fn cmd_reset(
     if keep_idgen {
         tracing::info!("Exporting idgen state (/_idgen/ prefix) from {addr} ...");
         let entries = export_idgen_prefix(addr).await?;
-        let json = serde_json::to_vec_pretty(&IdgenBackup { entries: entries.clone() })?;
+        let json = serde_json::to_vec_pretty(&IdgenBackup {
+            entries: entries.clone(),
+        })?;
         std::fs::write(&backup_file, &json)?;
         tracing::info!(
             "Saved idgen backup ({} keys) to {}",
@@ -895,10 +985,7 @@ pub async fn export_idgen_prefix(
 }
 
 /// 从备份文件恢复 `/_idgen/` 前缀到运行中的 Server
-pub async fn cmd_idgen_restore(
-    file: &Path,
-    addr: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_idgen_restore(file: &Path, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let json = std::fs::read(file)?;
     let backup: IdgenBackup = serde_json::from_slice(&json)?;
     if backup.entries.is_empty() {
@@ -943,9 +1030,7 @@ fn prefix_end(prefix: &[u8]) -> Vec<u8> {
 }
 
 /// 构建到指定地址的 KvClient（tonic 直连）
-async fn build_kv_client(
-    addr: &str,
-) -> Result<KvClient<Channel>, Box<dyn std::error::Error>> {
+async fn build_kv_client(addr: &str) -> Result<KvClient<Channel>, Box<dyn std::error::Error>> {
     let endpoint = format!("http://{addr}");
     let channel = Channel::from_shared(endpoint)?
         .connect_timeout(std::time::Duration::from_secs(3))
@@ -982,10 +1067,7 @@ mod idgen_reset_tests {
             hex::decode(&restored.entries[0].key).unwrap(),
             b"/_idgen/order-id"
         );
-        assert_eq!(
-            hex::decode(&restored.entries[0].value).unwrap(),
-            b"{}"
-        );
+        assert_eq!(hex::decode(&restored.entries[0].value).unwrap(), b"{}");
     }
 
     #[tokio::test]
@@ -1015,10 +1097,65 @@ mod idgen_reset_tests {
 
 // ──── 内部辅助 ────
 
-/// 构建到指定地址的 AuthClient（tonic 直连）
-async fn build_auth_client(
+/// 在线拉取快照（P1-08：Maintenance/Snapshot 流式导出）。
+///
+/// 从源节点按块接收 SnapshotData（首块携带 last_included_index/term），
+/// 拼接后先解析校验（版本 + bincode）再落盘（tmp → 原子 rename）。
+pub async fn snapshot_pull(
     addr: &str,
-) -> Result<AuthClient<Channel>, Box<dyn std::error::Error>> {
+    output: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = build_maintenance_client(addr).await?;
+    let mut stream = client
+        .snapshot(tonic::Request::new(SnapshotRequest {}))
+        .await?
+        .into_inner();
+
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut last_included_index: u64 = 0;
+    let mut last_included_term: u64 = 0;
+    let mut chunks = 0u64;
+
+    while let Some(chunk) = stream.message().await? {
+        if chunks == 0 {
+            last_included_index = chunk.last_included_index.max(0) as u64;
+            last_included_term = chunk.last_included_term;
+        }
+        bytes.extend_from_slice(&chunk.data);
+        chunks += 1;
+    }
+    if chunks == 0 {
+        return Err("snapshot stream empty (server returned no data)".into());
+    }
+
+    // 先解析校验，再落盘（避免写入损坏备份）
+    let snapshot_data = coord_server::storage::snapshot::SnapshotData::from_bytes(&bytes)?;
+
+    let tmp = output.with_extension("snap.tmp");
+    std::fs::write(&tmp, &bytes)?;
+    std::fs::rename(&tmp, output)?;
+
+    tracing::info!(
+        "Snapshot pulled: last_included_index={}, term={}, {} KV pairs, {} bytes, {} chunks → {}",
+        last_included_index,
+        last_included_term,
+        snapshot_data.kv_pairs.len(),
+        bytes.len(),
+        chunks,
+        output.display()
+    );
+    println!(
+        "Snapshot pulled: index={}, {} KV pairs, {} bytes → {}",
+        last_included_index,
+        snapshot_data.kv_pairs.len(),
+        bytes.len(),
+        output.display()
+    );
+    Ok(())
+}
+
+/// 构建到指定地址的 AuthClient（tonic 直连）
+async fn build_auth_client(addr: &str) -> Result<AuthClient<Channel>, Box<dyn std::error::Error>> {
     let endpoint = format!("http://{addr}");
     let channel = Channel::from_shared(endpoint)?
         .connect_timeout(std::time::Duration::from_secs(3))
@@ -1062,15 +1199,15 @@ mod tests {
 
     use coord_core::storage::StorageBackend;
     use coord_core::types::StorageConfig;
+    use coord_proto::kv::kv_server::KvServer;
+    use coord_proto::maintenance::maintenance_server::MaintenanceServer;
+    use coord_proto::txn::txn_server::TxnServer;
     use coord_server::server::CoordNode;
     use coord_server::storage::mvcc::MvccStorage;
     use coord_server::storage::redb_backend::RedbBackend;
     use coord_server::watch::WatchDispatcher;
-    use coord_proto::kv::kv_server::KvServer;
-    use coord_proto::txn::txn_server::TxnServer;
-    use coord_proto::maintenance::maintenance_server::MaintenanceServer;
-    use tonic::transport::Server;
     use tokio::net::TcpListener;
+    use tonic::transport::Server;
 
     /// Start a test server on a random port, return (addr, _data_dir, join_handle)
     async fn start_test_server() -> (SocketAddr, tempfile::TempDir, tokio::task::JoinHandle<()>) {
@@ -1098,9 +1235,7 @@ mod tests {
                 .add_service(kv_svc)
                 .add_service(txn_svc)
                 .add_service(maint_svc)
-                .serve_with_incoming(
-                    tokio_stream::wrappers::TcpListenerStream::new(listener),
-                )
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
                 .await
                 .unwrap();
         });
@@ -1198,7 +1333,10 @@ mod tests {
     #[tokio::test]
     async fn test_cmd_rotate_keys_returns_error() {
         let result = cmd_rotate_keys("127.0.0.1:50051").await;
-        assert!(result.is_err(), "rotate_keys should return error (not yet implemented)");
+        assert!(
+            result.is_err(),
+            "rotate_keys should return error (not yet implemented)"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("not yet") || msg.contains("not implemented"),
@@ -1286,7 +1424,7 @@ mod tests {
     // ──── Auth test helpers ────
 
     use coord_proto::auth::auth_server::AuthServer;
-    use coord_server::auth::{AuthManager, TokenManager, AuthService};
+    use coord_server::auth::{AuthManager, AuthService, TokenManager};
 
     /// 启动带 AuthService 的测试服务器
     async fn start_auth_test_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -1300,9 +1438,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             Server::builder()
                 .add_service(auth_svc)
-                .serve_with_incoming(
-                    tokio_stream::wrappers::TcpListenerStream::new(listener),
-                )
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
                 .await
                 .unwrap();
         });
@@ -1324,8 +1460,14 @@ mod tests {
     async fn test_cmd_auth_enable_and_disable() {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
-        assert!(cmd_auth_enable(&addr_str).await.is_ok(), "auth enable should succeed");
-        assert!(cmd_auth_disable(&addr_str).await.is_ok(), "auth disable should succeed");
+        assert!(
+            cmd_auth_enable(&addr_str).await.is_ok(),
+            "auth enable should succeed"
+        );
+        assert!(
+            cmd_auth_disable(&addr_str).await.is_ok(),
+            "auth disable should succeed"
+        );
     }
 
     // ──── Auth: 用户管理 ────
@@ -1334,7 +1476,9 @@ mod tests {
     async fn test_cmd_auth_user_add_and_list() {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
-        assert!(cmd_auth_user_add(&addr_str, "alice", "password123").await.is_ok());
+        assert!(cmd_auth_user_add(&addr_str, "alice", "password123")
+            .await
+            .is_ok());
         assert!(cmd_auth_user_list(&addr_str).await.is_ok());
     }
 
@@ -1350,9 +1494,13 @@ mod tests {
     async fn test_cmd_auth_user_delete_and_show() {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
-        cmd_auth_user_add(&addr_str, "charlie", "secret").await.unwrap();
+        cmd_auth_user_add(&addr_str, "charlie", "secret")
+            .await
+            .unwrap();
         assert!(cmd_auth_user_show(&addr_str, "charlie").await.is_ok());
-        assert!(cmd_auth_user_delete(&addr_str, "charlie", true).await.is_ok());
+        assert!(cmd_auth_user_delete(&addr_str, "charlie", true)
+            .await
+            .is_ok());
         assert!(cmd_auth_user_show(&addr_str, "charlie").await.is_err());
     }
 
@@ -1360,12 +1508,20 @@ mod tests {
     async fn test_cmd_auth_user_passwd_and_login() {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
-        cmd_auth_user_add(&addr_str, "dave", "oldpass").await.unwrap();
-        assert!(cmd_auth_user_passwd(&addr_str, "dave", "newpass").await.is_ok());
+        cmd_auth_user_add(&addr_str, "dave", "oldpass")
+            .await
+            .unwrap();
+        assert!(cmd_auth_user_passwd(&addr_str, "dave", "newpass")
+            .await
+            .is_ok());
         // Login with old password should fail
-        assert!(cmd_auth_login(&addr_str, "dave", "oldpass", true).await.is_err());
+        assert!(cmd_auth_login(&addr_str, "dave", "oldpass", true)
+            .await
+            .is_err());
         // Login with new password should succeed
-        assert!(cmd_auth_login(&addr_str, "dave", "newpass", true).await.is_ok());
+        assert!(cmd_auth_login(&addr_str, "dave", "newpass", true)
+            .await
+            .is_ok());
     }
 
     // ──── Auth: 角色与权限管理 ────
@@ -1383,8 +1539,14 @@ mod tests {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
         cmd_auth_role_add(&addr_str, "viewer").await.unwrap();
-        assert!(cmd_auth_role_grant(&addr_str, "viewer", "read", "app/", None).await.is_ok());
-        assert!(cmd_auth_role_revoke(&addr_str, "viewer", "app/", None).await.is_ok());
+        assert!(
+            cmd_auth_role_grant(&addr_str, "viewer", "read", "app/", None)
+                .await
+                .is_ok()
+        );
+        assert!(cmd_auth_role_revoke(&addr_str, "viewer", "app/", None)
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
@@ -1392,7 +1554,9 @@ mod tests {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
         cmd_auth_role_add(&addr_str, "temp-role").await.unwrap();
-        assert!(cmd_auth_role_delete(&addr_str, "temp-role", true).await.is_ok());
+        assert!(cmd_auth_role_delete(&addr_str, "temp-role", true)
+            .await
+            .is_ok());
     }
 
     // ──── Auth: 用户-角色绑定 ────
@@ -1413,7 +1577,11 @@ mod tests {
     async fn test_cmd_auth_approle_create_and_list() {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
-        assert!(cmd_auth_approle_create(&addr_str, "my-service", None, None, None).await.is_ok());
+        assert!(
+            cmd_auth_approle_create(&addr_str, "my-service", None, None, None)
+                .await
+                .is_ok()
+        );
         assert!(cmd_auth_approle_list(&addr_str).await.is_ok());
     }
 
@@ -1422,25 +1590,41 @@ mod tests {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
         cmd_auth_role_add(&addr_str, "api-access").await.unwrap();
-        assert!(cmd_auth_approle_create(&addr_str, "api-gateway", None, None, Some("api-access")).await.is_ok());
-        assert!(cmd_auth_approle_show(&addr_str, "api-gateway").await.is_ok());
+        assert!(
+            cmd_auth_approle_create(&addr_str, "api-gateway", None, None, Some("api-access"))
+                .await
+                .is_ok()
+        );
+        assert!(cmd_auth_approle_show(&addr_str, "api-gateway")
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
     async fn test_cmd_auth_approle_role_id_and_secret_id() {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
-        cmd_auth_approle_create(&addr_str, "batch-job", None, None, None).await.unwrap();
-        assert!(cmd_auth_approle_role_id(&addr_str, "batch-job").await.is_ok());
-        assert!(cmd_auth_approle_secret_id(&addr_str, "batch-job").await.is_ok());
+        cmd_auth_approle_create(&addr_str, "batch-job", None, None, None)
+            .await
+            .unwrap();
+        assert!(cmd_auth_approle_role_id(&addr_str, "batch-job")
+            .await
+            .is_ok());
+        assert!(cmd_auth_approle_secret_id(&addr_str, "batch-job")
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
     async fn test_cmd_auth_approle_delete() {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
-        cmd_auth_approle_create(&addr_str, "to-delete", None, None, None).await.unwrap();
-        assert!(cmd_auth_approle_delete(&addr_str, "to-delete", true).await.is_ok());
+        cmd_auth_approle_create(&addr_str, "to-delete", None, None, None)
+            .await
+            .unwrap();
+        assert!(cmd_auth_approle_delete(&addr_str, "to-delete", true)
+            .await
+            .is_ok());
     }
 
     // ──── Auth: 登录 ────
@@ -1449,14 +1633,18 @@ mod tests {
     async fn test_cmd_auth_login_root_user() {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
-        assert!(cmd_auth_login(&addr_str, "root", "root", true).await.is_ok());
+        assert!(cmd_auth_login(&addr_str, "root", "root", true)
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
     async fn test_cmd_auth_login_invalid_password_fails() {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
-        assert!(cmd_auth_login(&addr_str, "root", "wrong", true).await.is_err());
+        assert!(cmd_auth_login(&addr_str, "root", "wrong", true)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -1464,10 +1652,16 @@ mod tests {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
         // Create AppRole with known secret
-        cmd_auth_approle_create(&addr_str, "login-test", None, Some("my-secret-123"), None).await.unwrap();
+        cmd_auth_approle_create(&addr_str, "login-test", None, Some("my-secret-123"), None)
+            .await
+            .unwrap();
         // Login using the internal approle- prefixed username
         let internal_name = format!("approle-login-test");
-        assert!(cmd_auth_login(&addr_str, &internal_name, "my-secret-123", true).await.is_ok());
+        assert!(
+            cmd_auth_login(&addr_str, &internal_name, "my-secret-123", true)
+                .await
+                .is_ok()
+        );
     }
 
     // ──── Auth: 集成流程 ────
@@ -1479,17 +1673,33 @@ mod tests {
 
         // Step 1: Create role and grant permission
         cmd_auth_role_add(&addr_str, "service-role").await.unwrap();
-        cmd_auth_role_grant(&addr_str, "service-role", "readwrite", "", None).await.unwrap();
+        cmd_auth_role_grant(&addr_str, "service-role", "readwrite", "", None)
+            .await
+            .unwrap();
 
         // Step 2: Create AppRole with role binding
-        assert!(cmd_auth_approle_create(&addr_str, "full-flow-svc", None, Some("known-secret"), Some("service-role")).await.is_ok());
+        assert!(cmd_auth_approle_create(
+            &addr_str,
+            "full-flow-svc",
+            None,
+            Some("known-secret"),
+            Some("service-role")
+        )
+        .await
+        .is_ok());
 
         // Step 3: Show AppRole details
-        assert!(cmd_auth_approle_show(&addr_str, "full-flow-svc").await.is_ok());
+        assert!(cmd_auth_approle_show(&addr_str, "full-flow-svc")
+            .await
+            .is_ok());
 
         // Step 4: Login as the AppRole
         let internal_name = format!("approle-full-flow-svc");
-        assert!(cmd_auth_login(&addr_str, &internal_name, "known-secret", true).await.is_ok());
+        assert!(
+            cmd_auth_login(&addr_str, &internal_name, "known-secret", true)
+                .await
+                .is_ok()
+        );
     }
 
     // ──── Auth: 错误场景 ────
@@ -1498,7 +1708,9 @@ mod tests {
     async fn test_cmd_auth_user_add_with_approle_prefix_rejected() {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
-        assert!(cmd_auth_user_add(&addr_str, "approle-hacker", "pass").await.is_err());
+        assert!(cmd_auth_user_add(&addr_str, "approle-hacker", "pass")
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -1506,7 +1718,9 @@ mod tests {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
         cmd_auth_user_add(&addr_str, "frank", "pass").await.unwrap();
-        assert!(cmd_auth_grant(&addr_str, "frank", "no-such-role").await.is_err());
+        assert!(cmd_auth_grant(&addr_str, "frank", "no-such-role")
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -1514,6 +1728,8 @@ mod tests {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
         cmd_auth_role_add(&addr_str, "ghost-role").await.unwrap();
-        assert!(cmd_auth_grant(&addr_str, "no-such-user", "ghost-role").await.is_err());
+        assert!(cmd_auth_grant(&addr_str, "no-such-user", "ghost-role")
+            .await
+            .is_err());
     }
 }

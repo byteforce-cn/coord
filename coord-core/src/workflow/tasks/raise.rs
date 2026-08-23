@@ -3,9 +3,7 @@
 //
 // 构建 WorkflowFault → 返回 Failed（Runtime 标记实例失败）
 
-use crate::workflow::model::{
-    NamedTask, RaiseTask, StepResult, WorkflowFault, WorkflowInstance,
-};
+use crate::workflow::model::{NamedTask, RaiseTask, StepResult, WorkflowFault, WorkflowInstance};
 use crate::workflow::ports::Clock;
 
 /// 执行 raise 任务：构建错误 → Failed
@@ -69,14 +67,19 @@ mod tests {
             }),
         };
 
-        let result = execute(&named, &RaiseTask {
-            raise: ErrorDef {
-                r#type: "business_error".into(),
-                title: "Insufficient funds".into(),
-                status: Some(422),
-                detail: Some("Account balance too low".into()),
+        let result = execute(
+            &named,
+            &RaiseTask {
+                raise: ErrorDef {
+                    r#type: "business_error".into(),
+                    title: "Insufficient funds".into(),
+                    status: Some(422),
+                    detail: Some("Account balance too low".into()),
+                },
             },
-        }, &inst, &clock);
+            &inst,
+            &clock,
+        );
 
         match result {
             StepResult::Failed { fault } => {
@@ -105,14 +108,19 @@ mod tests {
             }),
         };
 
-        let result = execute(&named, &RaiseTask {
-            raise: ErrorDef {
-                r#type: "generic_error".into(),
-                title: "Something went wrong".into(),
-                status: None,
-                detail: None,
+        let result = execute(
+            &named,
+            &RaiseTask {
+                raise: ErrorDef {
+                    r#type: "generic_error".into(),
+                    title: "Something went wrong".into(),
+                    status: None,
+                    detail: None,
+                },
             },
-        }, &inst, &clock);
+            &inst,
+            &clock,
+        );
 
         match result {
             StepResult::Failed { fault } => {

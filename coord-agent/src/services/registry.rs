@@ -96,7 +96,7 @@ pub struct RegistryCache {
 impl RegistryCache {
     /// 创建 Registry 缓存
     pub fn new(max_entries: usize) -> Self {
-        let cap = NonZeroUsize::new(max_entries.max(1)).unwrap();
+        let cap = NonZeroUsize::new(max_entries.max(1)).unwrap_or(NonZeroUsize::MIN);
         Self {
             instances: LruCache::new(cap),
             self_protection: false,
@@ -126,7 +126,9 @@ impl RegistryCache {
                     self.instances.put(cache_key, inst);
                 } else {
                     // 兼容旧格式：存储原始数据，保留 key 作为索引
-                    tracing::debug!("RegistryCache: non-JSON value for key {key_str}, storing as raw");
+                    tracing::debug!(
+                        "RegistryCache: non-JSON value for key {key_str}, storing as raw"
+                    );
                 }
             }
             None => {
@@ -302,11 +304,7 @@ impl RegistryService {
     ///
     /// 从 Server 中删除服务实例数据。
     /// 同时从本地缓存移除并广播 Watch 事件。
-    pub async fn deregister(
-        &self,
-        service_name: &str,
-        instance_id: &str,
-    ) -> ServiceResult<()> {
+    pub async fn deregister(&self, service_name: &str, instance_id: &str) -> ServiceResult<()> {
         let key = RegistryCache::storage_key(service_name, instance_id);
 
         self.inner
@@ -360,11 +358,7 @@ impl RegistryService {
     }
 
     /// 获取指定实例
-    pub fn get_instance(
-        &self,
-        service_name: &str,
-        instance_id: &str,
-    ) -> Option<ServiceInstance> {
+    pub fn get_instance(&self, service_name: &str, instance_id: &str) -> Option<ServiceInstance> {
         self.cache.read().get(service_name, instance_id)
     }
 
@@ -415,7 +409,9 @@ impl BaseService for RegistryService {
             let mut event_rx = match inner.client.watch().watch(prefix, 0).await {
                 Ok(rx) => rx,
                 Err(e) => {
-                    tracing::warn!("RegistryService: failed to subscribe Watch: {e}; entering self-protection");
+                    tracing::warn!(
+                        "RegistryService: failed to subscribe Watch: {e}; entering self-protection"
+                    );
                     cache.write().enter_self_protection();
                     return;
                 }
@@ -570,14 +566,11 @@ impl std::fmt::Debug for RegistryService {
 
 // ──── gRPC Registry trait 实现 ────
 
-use coord_proto::agent::{
-    RegisterRequest, RegisterResponse,
-    DeregisterRequest, DeregisterResponse,
-    HeartbeatRequest, HeartbeatResponse,
-    DiscoverRequest, DiscoverResponse,
-    WatchRequest, WatchEvent,
-};
 use coord_proto::agent::registry_server::Registry;
+use coord_proto::agent::{
+    DeregisterRequest, DeregisterResponse, DiscoverRequest, DiscoverResponse, HeartbeatRequest,
+    HeartbeatResponse, RegisterRequest, RegisterResponse, WatchEvent, WatchRequest,
+};
 
 #[tonic::async_trait]
 impl Registry for RegistryService {
@@ -610,7 +603,8 @@ impl Registry for RegistryService {
                 .as_secs(),
         };
 
-        self.register(instance).await
+        self.register(instance)
+            .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
         Ok(tonic::Response::new(RegisterResponse { lease_id }))
@@ -621,7 +615,8 @@ impl Registry for RegistryService {
         request: tonic::Request<DeregisterRequest>,
     ) -> Result<tonic::Response<DeregisterResponse>, tonic::Status> {
         let req = request.into_inner();
-        self.deregister(&req.service_name, &req.instance_id).await
+        self.deregister(&req.service_name, &req.instance_id)
+            .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
         Ok(tonic::Response::new(DeregisterResponse {}))
     }
@@ -631,7 +626,8 @@ impl Registry for RegistryService {
         request: tonic::Request<HeartbeatRequest>,
     ) -> Result<tonic::Response<HeartbeatResponse>, tonic::Status> {
         let req = request.into_inner();
-        let ttl = self.inner
+        let ttl = self
+            .inner
             .client
             .lease()
             .keep_alive(req.lease_id)
@@ -696,9 +692,7 @@ impl Registry for RegistryService {
     }
 
     /// Server streaming response type for the Watch method.
-    type WatchStream = tokio_stream::wrappers::ReceiverStream<
-        Result<WatchEvent, tonic::Status>,
-    >;
+    type WatchStream = tokio_stream::wrappers::ReceiverStream<Result<WatchEvent, tonic::Status>>;
 
     async fn watch(
         &self,
@@ -714,11 +708,12 @@ impl Registry for RegistryService {
                 match rx.recv().await {
                     Ok(event) => {
                         // 过滤：只推送匹配 service_name 的事件
-                        let has_match = event.instances.iter().any(|inst| inst.service_name == service_name);
-                        if has_match {
-                            if tx.send(Ok(event)).await.is_err() {
-                                break; // client disconnected
-                            }
+                        let has_match = event
+                            .instances
+                            .iter()
+                            .any(|inst| inst.service_name == service_name);
+                        if has_match && tx.send(Ok(event)).await.is_err() {
+                            break; // client disconnected
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

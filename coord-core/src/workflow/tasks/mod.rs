@@ -20,14 +20,14 @@
 
 pub mod call;
 pub mod do_task;
-pub mod switch;
-pub mod wait;
-pub mod set;
-pub mod raise;
 pub mod emit;
-pub mod listen;
-pub mod fork;
-pub mod for_each;
-pub mod try_catch;
-pub mod run;
 pub mod end;
+pub mod for_each;
+pub mod fork;
+pub mod listen;
+pub mod raise;
+pub mod run;
+pub mod set;
+pub mod switch;
+pub mod try_catch;
+pub mod wait;

@@ -50,7 +50,12 @@ pub struct LockInfo {
 }
 
 impl LockInfo {
-    pub fn new(name: impl Into<String>, holder_id: impl Into<String>, lease_id: i64, ttl_secs: u64) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        holder_id: impl Into<String>,
+        lease_id: i64,
+        ttl_secs: u64,
+    ) -> Self {
         let now = unix_ts();
         Self {
             name: name.into(),
@@ -210,9 +215,9 @@ impl LockService {
             .map_err(|e| format!("failed to serialize lock info: {e}"))?;
 
         // 使用 Txn CAS: 比较 Version==0（key 不存在），成功则 Put + Lease
+        use coord_proto::kv::PutRequest;
         use coord_proto::txn::compare::{CompareResult, Target};
         use coord_proto::txn::{Compare, RequestOp};
-        use coord_proto::kv::PutRequest;
 
         let compare = Compare {
             result: CompareResult::Equal as i32,
@@ -300,7 +305,9 @@ impl LockService {
         let lock_info = match self.cache.read().get(name) {
             Some(info) if info.holder_id == holder_id => info.clone(),
             _ => {
-                tracing::warn!("LockService: cannot renew lock '{name}' — not held by '{holder_id}'");
+                tracing::warn!(
+                    "LockService: cannot renew lock '{name}' — not held by '{holder_id}'"
+                );
                 return Ok(false);
             }
         };

@@ -165,9 +165,7 @@ fn test_registry_cache_basic() {
 fn test_registry_cache_incremental() {
     let mut cache = RegistryCache::new(500, 10);
 
-    cache.load_full(vec![
-        (b"/_registry/svc/a".to_vec(), b"v1".to_vec()),
-    ]);
+    cache.load_full(vec![(b"/_registry/svc/a".to_vec(), b"v1".to_vec())]);
     assert_eq!(cache.len(), 1);
 
     // Put 事件：新增

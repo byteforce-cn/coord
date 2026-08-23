@@ -81,8 +81,10 @@ impl Scheduler for SplitChecker {
                 || region.approximate_keys >= self.keys_threshold
             {
                 // 优先使用采样 Key 的中位数，无样本时回退到数学中点
-                let split_key = if let Some(samples) = ctx.region_sample_keys.get(&region.region_id) {
-                    self.key_sampler.select_or_fallback(samples, &region.start_key, &region.end_key)
+                let split_key = if let Some(samples) = ctx.region_sample_keys.get(&region.region_id)
+                {
+                    self.key_sampler
+                        .select_or_fallback(samples, &region.start_key, &region.end_key)
                 } else {
                     mid_key(&region.start_key, &region.end_key)
                 };
@@ -224,19 +226,15 @@ impl ReplicaChecker {
             })
         } else if voter_count > self.target_replicas {
             // 移除最后一个 Voter（简化策略，生产环境应选择负载最高的节点）
-            if let Some(last_voter) = region
+            region
                 .peers
                 .iter()
                 .rev()
                 .find(|p| p.role == coord_core::types::PeerRole::Voter)
-            {
-                Some(Operator::RemovePeer {
+                .map(|last_voter| Operator::RemovePeer {
                     region_id: region.region_id,
                     node_id: last_voter.node_id,
                 })
-            } else {
-                None
-            }
         } else {
             None
         }
@@ -268,7 +266,7 @@ fn mid_key(start: &[u8], end: &[u8]) -> Vec<u8> {
     if start.is_empty() && end.is_empty() {
         return vec![0x80];
     }
-    if end.is_empty() || end == &[0xFF] {
+    if end.is_empty() || end == [0xFF] {
         // 全空间：取中间
         return vec![0x80];
     }
@@ -335,7 +333,12 @@ impl KeySampler {
     }
 
     /// 从样本中选择 Split Key，无样本时回退到数学中点
-    pub fn select_or_fallback(&self, samples: &[Vec<u8>], start_key: &[u8], end_key: &[u8]) -> Vec<u8> {
+    pub fn select_or_fallback(
+        &self,
+        samples: &[Vec<u8>],
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Vec<u8> {
         self.select_split_key(samples)
             .unwrap_or_else(|| mid_key(start_key, end_key))
     }
@@ -438,7 +441,7 @@ impl ScheduleContext {
 
     /// 检查节点是否在线
     pub fn is_online(&self, node_id: NodeID) -> bool {
-        self.nodes.get(&node_id).map_or(false, |n| n.online)
+        self.nodes.get(&node_id).is_some_and(|n| n.online)
     }
 }
 
@@ -608,9 +611,11 @@ impl Scheduler for LeaderScheduler {
         for region in ctx.regions.values() {
             // Leader 信息不在 RegionMeta 中，需要通过 peers 推断
             // Phase 4：假设第一个 Voter peer 为 Leader（生产环境应从心跳获取）
-            if let Some(first_voter) = region.peers.iter().find(|p| {
-                matches!(p.role, coord_core::types::PeerRole::Voter)
-            }) {
+            if let Some(first_voter) = region
+                .peers
+                .iter()
+                .find(|p| matches!(p.role, coord_core::types::PeerRole::Voter))
+            {
                 if ctx.is_online(first_voter.node_id) {
                     *node_leader_count.entry(first_voter.node_id).or_insert(0) += 1;
                 }
@@ -646,9 +651,8 @@ impl Scheduler for LeaderScheduler {
             let is_leader_on_max = region
                 .peers
                 .iter()
-                .filter(|p| matches!(p.role, coord_core::types::PeerRole::Voter))
-                .next()
-                .map_or(false, |p| p.node_id == max_node);
+                .find(|p| matches!(p.role, coord_core::types::PeerRole::Voter))
+                .is_some_and(|p| p.node_id == max_node);
 
             if !is_leader_on_max {
                 continue;
@@ -693,7 +697,11 @@ pub struct HotSpotScheduler {
 
 impl HotSpotScheduler {
     /// 创建新的 HotSpotScheduler
-    pub fn new(write_qps_threshold: u64, read_qps_threshold: u64, max_ops_per_round: usize) -> Self {
+    pub fn new(
+        write_qps_threshold: u64,
+        read_qps_threshold: u64,
+        max_ops_per_round: usize,
+    ) -> Self {
         Self {
             write_qps_threshold,
             read_qps_threshold,
@@ -744,9 +752,11 @@ impl HotSpotScheduler {
     fn count_leaders_per_node(&self, ctx: &ScheduleContext) -> HashMap<NodeID, usize> {
         let mut counts: HashMap<NodeID, usize> = HashMap::new();
         for region in ctx.regions.values() {
-            if let Some(first_voter) = region.peers.iter().find(|p| {
-                matches!(p.role, coord_core::types::PeerRole::Voter)
-            }) {
+            if let Some(first_voter) = region
+                .peers
+                .iter()
+                .find(|p| matches!(p.role, coord_core::types::PeerRole::Voter))
+            {
                 *counts.entry(first_voter.node_id).or_insert(0) += 1;
             }
         }
@@ -779,7 +789,14 @@ mod tests {
     use super::*;
     use coord_core::types::{Peer, PeerRole, RegionEpoch};
 
-    fn make_region(id: u64, size: u64, keys: u64, start: Vec<u8>, end: Vec<u8>, peers: Vec<Peer>) -> RegionMeta {
+    fn make_region(
+        id: u64,
+        size: u64,
+        keys: u64,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        peers: Vec<Peer>,
+    ) -> RegionMeta {
         RegionMeta {
             region_id: id,
             start_key: start,
@@ -805,7 +822,14 @@ mod tests {
     fn test_split_checker_below_threshold() {
         let config = PdConfig::default();
         let checker = SplitChecker::new(&config);
-        let region = make_region(1, 100 * 1024 * 1024, 500_000, vec![0x00], vec![0x55], vec![]);
+        let region = make_region(
+            1,
+            100 * 1024 * 1024,
+            500_000,
+            vec![0x00],
+            vec![0x55],
+            vec![],
+        );
         assert!(checker.check(&region, vec![0x30]).is_none());
     }
 
@@ -813,7 +837,14 @@ mod tests {
     fn test_split_checker_size_exceeds() {
         let config = PdConfig::default();
         let checker = SplitChecker::new(&config);
-        let region = make_region(1, 300 * 1024 * 1024, 500_000, vec![0x00], vec![0x55], vec![]);
+        let region = make_region(
+            1,
+            300 * 1024 * 1024,
+            500_000,
+            vec![0x00],
+            vec![0x55],
+            vec![],
+        );
         assert!(checker.check(&region, vec![0x30]).is_some());
     }
 
@@ -821,7 +852,14 @@ mod tests {
     fn test_split_checker_keys_exceeds() {
         let config = PdConfig::default();
         let checker = SplitChecker::new(&config);
-        let region = make_region(1, 100 * 1024 * 1024, 2_000_000, vec![0x00], vec![0x55], vec![]);
+        let region = make_region(
+            1,
+            100 * 1024 * 1024,
+            2_000_000,
+            vec![0x00],
+            vec![0x55],
+            vec![],
+        );
         assert!(checker.check(&region, vec![0x30]).is_some());
     }
 
@@ -849,7 +887,14 @@ mod tests {
     fn test_merge_checker_too_large() {
         let config = PdConfig::default();
         let checker = MergeChecker::new(&config);
-        let left = make_region(1, 200 * 1024 * 1024, 500_000, vec![0x00], vec![0x55], vec![]);
+        let left = make_region(
+            1,
+            200 * 1024 * 1024,
+            500_000,
+            vec![0x00],
+            vec![0x55],
+            vec![],
+        );
         let right = make_region(2, 5 * 1024 * 1024, 50_000, vec![0x55], vec![0xFF], vec![]);
         assert!(checker.check(&left, &right).is_none());
     }
@@ -861,7 +906,11 @@ mod tests {
         let config = PdConfig::default();
         let checker = ReplicaChecker::new(&config);
         let region = make_region(
-            1, 0, 0, vec![], vec![],
+            1,
+            0,
+            0,
+            vec![],
+            vec![],
             vec![
                 make_peer(1, PeerRole::Voter),
                 make_peer(2, PeerRole::Voter),
@@ -875,10 +924,7 @@ mod tests {
     fn test_replica_checker_needs_replica() {
         let config = PdConfig::default();
         let checker = ReplicaChecker::new(&config);
-        let region = make_region(
-            1, 0, 0, vec![], vec![],
-            vec![make_peer(1, PeerRole::Voter)],
-        );
+        let region = make_region(1, 0, 0, vec![], vec![], vec![make_peer(1, PeerRole::Voter)]);
         let op = checker.check(&region);
         assert!(matches!(op, Some(Operator::AddPeer { .. })));
     }
@@ -888,7 +934,11 @@ mod tests {
         let config = PdConfig::default();
         let checker = ReplicaChecker::new(&config);
         let region = make_region(
-            1, 0, 0, vec![], vec![],
+            1,
+            0,
+            0,
+            vec![],
+            vec![],
             vec![
                 make_peer(1, PeerRole::Voter),
                 make_peer(2, PeerRole::Voter),
@@ -906,7 +956,11 @@ mod tests {
         let config = PdConfig::default();
         let checker = ReplicaChecker::new(&config);
         let region = make_region(
-            1, 0, 0, vec![], vec![],
+            1,
+            0,
+            0,
+            vec![],
+            vec![],
             vec![
                 make_peer(1, PeerRole::Voter),
                 make_peer(2, PeerRole::Voter),
@@ -914,7 +968,10 @@ mod tests {
             ],
         );
         // 只有 2 个 Voter，需要添加
-        assert!(matches!(checker.check(&region), Some(Operator::AddPeer { .. })));
+        assert!(matches!(
+            checker.check(&region),
+            Some(Operator::AddPeer { .. })
+        ));
     }
 
     // ──── ScheduleContext 测试 ────
@@ -949,13 +1006,18 @@ mod tests {
             make_node_state(2, true),
             make_node_state(3, true),
         ];
-        let regions = vec![
-            make_region(1, 0, 0, vec![0x00], vec![0x55], vec![
+        let regions = vec![make_region(
+            1,
+            0,
+            0,
+            vec![0x00],
+            vec![0x55],
+            vec![
                 make_peer(1, PeerRole::Voter),
                 make_peer(2, PeerRole::Voter),
                 make_peer(3, PeerRole::Voter),
-            ]),
-        ];
+            ],
+        )];
         let ctx = ScheduleContext::new(regions, nodes);
         let sched = BalanceScheduler::new(5);
         let ops = sched.schedule(&ctx);
@@ -966,9 +1028,14 @@ mod tests {
     #[test]
     fn test_balance_scheduler_single_node() {
         let nodes = vec![make_node_state(1, true)];
-        let regions = vec![make_region(1, 0, 0, vec![0x00], vec![0xFF], vec![
-            make_peer(1, PeerRole::Voter),
-        ])];
+        let regions = vec![make_region(
+            1,
+            0,
+            0,
+            vec![0x00],
+            vec![0xFF],
+            vec![make_peer(1, PeerRole::Voter)],
+        )];
         let ctx = ScheduleContext::new(regions, nodes);
         let sched = BalanceScheduler::new(5);
         let ops = sched.schedule(&ctx);
@@ -977,18 +1044,25 @@ mod tests {
 
     #[test]
     fn test_balance_scheduler_imbalance() {
-        let nodes = vec![
-            make_node_state(1, true),
-            make_node_state(2, true),
-        ];
+        let nodes = vec![make_node_state(1, true), make_node_state(2, true)];
         // All replicas on node 1, none on node 2
         let regions = vec![
-            make_region(1, 0, 0, vec![0x00], vec![0x55], vec![
-                make_peer(1, PeerRole::Voter),
-            ]),
-            make_region(2, 0, 0, vec![0x55], vec![0xFF], vec![
-                make_peer(1, PeerRole::Voter),
-            ]),
+            make_region(
+                1,
+                0,
+                0,
+                vec![0x00],
+                vec![0x55],
+                vec![make_peer(1, PeerRole::Voter)],
+            ),
+            make_region(
+                2,
+                0,
+                0,
+                vec![0x55],
+                vec![0xFF],
+                vec![make_peer(1, PeerRole::Voter)],
+            ),
         ];
         let ctx = ScheduleContext::new(regions, nodes);
         let sched = BalanceScheduler::new(5);
@@ -1002,14 +1076,13 @@ mod tests {
 
     #[test]
     fn test_balance_scheduler_respects_max_ops() {
-        let nodes = vec![
-            make_node_state(1, true),
-            make_node_state(2, true),
-        ];
+        let nodes = vec![make_node_state(1, true), make_node_state(2, true)];
         let mut regions = Vec::new();
         for i in 0..20 {
             regions.push(make_region(
-                i, 0, 0,
+                i,
+                0,
+                0,
                 vec![i as u8],
                 vec![i as u8 + 1],
                 vec![make_peer(1, PeerRole::Voter)],
@@ -1034,19 +1107,24 @@ mod tests {
 
     #[test]
     fn test_leader_scheduler_no_imbalance() {
-        let nodes = vec![
-            make_node_state(1, true),
-            make_node_state(2, true),
-        ];
+        let nodes = vec![make_node_state(1, true), make_node_state(2, true)];
         let regions = vec![
-            make_region(1, 0, 0, vec![0x00], vec![0x55], vec![
-                make_peer(1, PeerRole::Voter),
-                make_peer(2, PeerRole::Voter),
-            ]),
-            make_region(2, 0, 0, vec![0x55], vec![0xFF], vec![
-                make_peer(2, PeerRole::Voter),
-                make_peer(1, PeerRole::Voter),
-            ]),
+            make_region(
+                1,
+                0,
+                0,
+                vec![0x00],
+                vec![0x55],
+                vec![make_peer(1, PeerRole::Voter), make_peer(2, PeerRole::Voter)],
+            ),
+            make_region(
+                2,
+                0,
+                0,
+                vec![0x55],
+                vec![0xFF],
+                vec![make_peer(2, PeerRole::Voter), make_peer(1, PeerRole::Voter)],
+            ),
         ];
         let ctx = ScheduleContext::new(regions, nodes);
         let sched = LeaderScheduler::new(3);
@@ -1057,20 +1135,16 @@ mod tests {
 
     #[test]
     fn test_leader_scheduler_respects_max_ops() {
-        let nodes = vec![
-            make_node_state(1, true),
-            make_node_state(2, true),
-        ];
+        let nodes = vec![make_node_state(1, true), make_node_state(2, true)];
         let mut regions = Vec::new();
         for i in 0..10 {
             regions.push(make_region(
-                i, 0, 0,
+                i,
+                0,
+                0,
                 vec![i as u8],
                 vec![i as u8 + 1],
-                vec![
-                    make_peer(1, PeerRole::Voter),
-                    make_peer(2, PeerRole::Voter),
-                ],
+                vec![make_peer(1, PeerRole::Voter), make_peer(2, PeerRole::Voter)],
             ));
         }
         let ctx = ScheduleContext::new(regions, nodes);
@@ -1092,16 +1166,15 @@ mod tests {
 
     #[test]
     fn test_hotspot_scheduler_no_hotspots() {
-        let nodes = vec![
-            make_node_state(1, true),
-            make_node_state(2, true),
-        ];
-        let regions = vec![
-            make_region(1, 10 * 1024 * 1024, 5000, vec![0x00], vec![0x55], vec![
-                make_peer(1, PeerRole::Voter),
-                make_peer(2, PeerRole::Voter),
-            ]),
-        ];
+        let nodes = vec![make_node_state(1, true), make_node_state(2, true)];
+        let regions = vec![make_region(
+            1,
+            10 * 1024 * 1024,
+            5000,
+            vec![0x00],
+            vec![0x55],
+            vec![make_peer(1, PeerRole::Voter), make_peer(2, PeerRole::Voter)],
+        )];
         let ctx = ScheduleContext::new(regions, nodes);
         let sched = HotSpotScheduler::new(100, 500, 3);
         let ops = sched.schedule(&ctx);
@@ -1111,14 +1184,13 @@ mod tests {
 
     #[test]
     fn test_hotspot_scheduler_respects_max_ops() {
-        let nodes = vec![
-            make_node_state(1, true),
-            make_node_state(2, true),
-        ];
+        let nodes = vec![make_node_state(1, true), make_node_state(2, true)];
         let mut regions = Vec::new();
         for i in 0..10 {
             regions.push(make_region(
-                i, 300 * 1024 * 1024, 2_000_000,
+                i,
+                300 * 1024 * 1024,
+                2_000_000,
                 vec![i as u8],
                 vec![i as u8 + 1],
                 vec![make_peer(1, PeerRole::Voter), make_peer(2, PeerRole::Voter)],
@@ -1139,7 +1211,14 @@ mod tests {
         assert_eq!(checker.name(), "split-checker");
 
         let nodes = vec![make_node_state(1, true)];
-        let region = make_region(1, 300 * 1024 * 1024, 500_000, vec![0x00], vec![0xFF], vec![]);
+        let region = make_region(
+            1,
+            300 * 1024 * 1024,
+            500_000,
+            vec![0x00],
+            vec![0xFF],
+            vec![],
+        );
         let ctx = ScheduleContext::new(vec![region], nodes);
         let ops = checker.schedule(&ctx);
         assert!(!ops.is_empty());
@@ -1236,18 +1315,17 @@ mod tests {
         ];
         // Sorted: a_key, b_key, c_key, d_key, e_key → median = c_key (index 2)
         let result = sampler.select_split_key(&samples);
-        assert_eq!(result, Some(b"c_key".to_vec()), "median of 5 should be the 3rd");
+        assert_eq!(
+            result,
+            Some(b"c_key".to_vec()),
+            "median of 5 should be the 3rd"
+        );
     }
 
     #[test]
     fn test_key_sampler_median_even_count() {
         let sampler = KeySampler::default();
-        let samples = vec![
-            b"a".to_vec(),
-            b"d".to_vec(),
-            b"b".to_vec(),
-            b"c".to_vec(),
-        ];
+        let samples = vec![b"a".to_vec(), b"d".to_vec(), b"b".to_vec(), b"c".to_vec()];
         // Sorted: a, b, c, d → median = c (index 2 = 4/2)
         let result = sampler.select_split_key(&samples);
         assert_eq!(result, Some(b"c".to_vec()));
@@ -1270,7 +1348,11 @@ mod tests {
             .map(|i| format!("key_{:04}", i).into_bytes())
             .collect();
         let samples = sampler.reservoir_sample(keys);
-        assert_eq!(samples.len(), 10, "reservoir should have exactly max_samples items");
+        assert_eq!(
+            samples.len(),
+            10,
+            "reservoir should have exactly max_samples items"
+        );
         // All samples should be unique (probabilistic, but highly likely)
         let mut unique: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
         for s in &samples {
@@ -1282,9 +1364,7 @@ mod tests {
     #[test]
     fn test_key_sampler_reservoir_fewer_than_max() {
         let sampler = KeySampler::new(100);
-        let keys: Vec<Vec<u8>> = (0..5)
-            .map(|i| format!("key_{}", i).into_bytes())
-            .collect();
+        let keys: Vec<Vec<u8>> = (0..5).map(|i| format!("key_{}", i).into_bytes()).collect();
         let samples = sampler.reservoir_sample(keys);
         assert_eq!(samples.len(), 5, "fewer than max: should return all");
     }
@@ -1293,9 +1373,14 @@ mod tests {
     fn test_schedule_context_with_samples() {
         use std::collections::HashMap;
         let nodes = vec![make_node_state(1, true)];
-        let regions = vec![
-            make_region(1, 300 * 1024 * 1024, 500_000, vec![0x00], vec![0xFF], vec![]),
-        ];
+        let regions = vec![make_region(
+            1,
+            300 * 1024 * 1024,
+            500_000,
+            vec![0x00],
+            vec![0xFF],
+            vec![],
+        )];
         let mut sample_keys = HashMap::new();
         sample_keys.insert(1u64, vec![b"sample_mid".to_vec(), b"sample_end".to_vec()]);
 
@@ -1311,7 +1396,14 @@ mod tests {
 
         use std::collections::HashMap;
         let nodes = vec![make_node_state(1, true)];
-        let region = make_region(1, 300 * 1024 * 1024, 500_000, vec![0x00], vec![0xFF], vec![]);
+        let region = make_region(
+            1,
+            300 * 1024 * 1024,
+            500_000,
+            vec![0x00],
+            vec![0xFF],
+            vec![],
+        );
         let mut sample_keys = HashMap::new();
         // Provide a specific sample key that should be used as split_key
         sample_keys.insert(1u64, vec![b"my_split_point".to_vec()]);
@@ -1333,7 +1425,14 @@ mod tests {
         let checker = SplitChecker::new(&config);
 
         let nodes = vec![make_node_state(1, true)];
-        let region = make_region(1, 300 * 1024 * 1024, 500_000, vec![0x10], vec![0x20], vec![]);
+        let region = make_region(
+            1,
+            300 * 1024 * 1024,
+            500_000,
+            vec![0x10],
+            vec![0x20],
+            vec![],
+        );
         let ctx = ScheduleContext::new(vec![region], nodes);
         let ops = checker.schedule(&ctx);
         assert!(!ops.is_empty());

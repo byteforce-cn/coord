@@ -6,6 +6,11 @@
 use std::collections::BTreeMap;
 use std::sync::RwLock;
 
+/// 单个表（Key → Value）
+type Table = BTreeMap<Vec<u8>, Vec<u8>>;
+/// 键值对行（前缀扫描结果条目）
+type Row = (Vec<u8>, Vec<u8>);
+
 /// 内存中的 Mock 存储后端。
 ///
 /// 使用 `BTreeMap` 模拟表结构，支持前缀扫描。
@@ -24,7 +29,7 @@ use std::sync::RwLock;
 #[derive(Debug, Default)]
 pub struct MockStorage {
     /// 表名 → (Key → Value)，使用 BTreeMap 支持有序遍历
-    tables: RwLock<BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>>,
+    tables: RwLock<BTreeMap<String, Table>>,
 }
 
 impl MockStorage {
@@ -43,22 +48,35 @@ impl MockStorage {
     }
 
     /// 在读写事务中执行操作。
-    pub fn write<T>(&self, f: impl FnOnce(&mut MockWriteTx) -> Result<T, String>) -> Result<T, String> {
-        let mut tables = self.tables.write().map_err(|e| format!("lock error: {e}"))?;
-        let mut tx = MockWriteTx { tables: &mut tables };
+    pub fn write<T>(
+        &self,
+        f: impl FnOnce(&mut MockWriteTx) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut tables = self
+            .tables
+            .write()
+            .map_err(|e| format!("lock error: {e}"))?;
+        let mut tx = MockWriteTx {
+            tables: &mut tables,
+        };
         f(&mut tx)
     }
 
     /// 获取所有表名。
     pub fn table_names(&self) -> Vec<String> {
-        self.tables.read().unwrap().keys().cloned().collect()
+        self.tables
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// 获取指定表的所有键值对。
-    pub fn dump_table(&self, table: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+    pub fn dump_table(&self, table: &str) -> Vec<Row> {
         self.tables
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(table)
             .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default()
@@ -68,7 +86,7 @@ impl MockStorage {
     pub fn key_count(&self, table: &str) -> usize {
         self.tables
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(table)
             .map(|t| t.len())
             .unwrap_or(0)
@@ -77,25 +95,17 @@ impl MockStorage {
 
 /// Mock 只读事务句柄。
 pub struct MockReadTx<'a> {
-    tables: &'a BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>,
+    tables: &'a BTreeMap<String, Table>,
 }
 
 impl<'a> MockReadTx<'a> {
     /// 读取单个键的值。
     pub fn get(&self, table: &str, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
-        Ok(self
-            .tables
-            .get(table)
-            .and_then(|t| t.get(key))
-            .cloned())
+        Ok(self.tables.get(table).and_then(|t| t.get(key)).cloned())
     }
 
     /// 前缀扫描：返回所有匹配前缀的键值对。
-    pub fn iter_prefix(
-        &self,
-        table: &str,
-        prefix: &[u8],
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+    pub fn iter_prefix(&self, table: &str, prefix: &[u8]) -> Result<Vec<Row>, String> {
         let table_data = match self.tables.get(table) {
             Some(t) => t,
             None => return Ok(Vec::new()),
@@ -123,7 +133,7 @@ impl<'a> MockReadTx<'a> {
 
 /// Mock 读写事务句柄。
 pub struct MockWriteTx<'a> {
-    tables: &'a mut BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>,
+    tables: &'a mut BTreeMap<String, Table>,
 }
 
 impl<'a> MockWriteTx<'a> {
@@ -165,9 +175,7 @@ mod tests {
             })
             .unwrap();
 
-        let value = storage
-            .read(|tx| tx.get("kv", b"hello"))
-            .unwrap();
+        let value = storage.read(|tx| tx.get("kv", b"hello")).unwrap();
 
         assert_eq!(value, Some(b"world".to_vec()));
     }
@@ -201,9 +209,7 @@ mod tests {
             })
             .unwrap();
 
-        let results = storage
-            .read(|tx| tx.iter_prefix("kv", b"/app/"))
-            .unwrap();
+        let results = storage.read(|tx| tx.iter_prefix("kv", b"/app/")).unwrap();
 
         assert_eq!(results.len(), 2);
         let keys: Vec<&[u8]> = results.iter().map(|(k, _)| k.as_slice()).collect();

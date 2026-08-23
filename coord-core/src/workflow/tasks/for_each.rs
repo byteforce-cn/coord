@@ -32,7 +32,11 @@ pub fn execute(
                         format!(
                             "expression '{}' evaluated to {}",
                             for_each.input,
-                            if array.is_object() { "object" } else { "scalar" }
+                            if array.is_object() {
+                                "object"
+                            } else {
+                                "scalar"
+                            }
                         ),
                     ),
                 };
@@ -74,7 +78,7 @@ pub fn execute(
 mod tests {
     use super::*;
     use crate::workflow::expression::ExpressionEvaluator;
-    use crate::workflow::model::{InstanceStatus, Task, DoTask};
+    use crate::workflow::model::{DoTask, InstanceStatus, Task};
     use crate::workflow::ports::test_utils::TestClock;
 
     fn make_inst() -> WorkflowInstance {
@@ -105,22 +109,35 @@ mod tests {
             task: Task::ForEach(ForEachTask {
                 input: ".items".into(),
                 iteration: "item".into(),
-                tasks: vec![
-                    NamedTask { name: "processItem".into(), task: Task::Do(DoTask { tasks: vec![] }) },
-                ],
+                tasks: vec![NamedTask {
+                    name: "processItem".into(),
+                    task: Task::Do(DoTask { tasks: vec![] }),
+                }],
             }),
         };
 
-        let result = execute(&named, &ForEachTask {
-            input: ".items".into(),
-            iteration: "item".into(),
-            tasks: vec![
-                NamedTask { name: "processItem".into(), task: Task::Do(DoTask { tasks: vec![] }) },
-            ],
-        }, &inst, &expr, &clock);
+        let result = execute(
+            &named,
+            &ForEachTask {
+                input: ".items".into(),
+                iteration: "item".into(),
+                tasks: vec![NamedTask {
+                    name: "processItem".into(),
+                    task: Task::Do(DoTask { tasks: vec![] }),
+                }],
+            },
+            &inst,
+            &expr,
+            &clock,
+        );
 
         match result {
-            StepResult::ForEach { input_expr, iteration, tasks, frame } => {
+            StepResult::ForEach {
+                input_expr,
+                iteration,
+                tasks,
+                frame,
+            } => {
                 assert_eq!(input_expr, ".items");
                 assert_eq!(iteration, "item");
                 assert_eq!(tasks.len(), 1);
@@ -145,11 +162,17 @@ mod tests {
             }),
         };
 
-        let result = execute(&named, &ForEachTask {
-            input: ".name".into(),
-            iteration: "x".into(),
-            tasks: vec![],
-        }, &inst, &expr, &clock);
+        let result = execute(
+            &named,
+            &ForEachTask {
+                input: ".name".into(),
+                iteration: "x".into(),
+                tasks: vec![],
+            },
+            &inst,
+            &expr,
+            &clock,
+        );
 
         match result {
             StepResult::Failed { fault } => {
@@ -178,11 +201,17 @@ mod tests {
             }),
         };
 
-        let result = execute(&named, &ForEachTask {
-            input: ".items".into(),
-            iteration: "x".into(),
-            tasks: vec![],
-        }, &inst, &expr, &clock);
+        let result = execute(
+            &named,
+            &ForEachTask {
+                input: ".items".into(),
+                iteration: "x".into(),
+                tasks: vec![],
+            },
+            &inst,
+            &expr,
+            &clock,
+        );
 
         match result {
             StepResult::ForEach { input_expr, .. } => {

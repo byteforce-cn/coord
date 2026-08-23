@@ -14,7 +14,9 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use coord_agent::auth::circuit_breaker::{AuthMetrics, CircuitBreaker, CircuitState, FallbackPolicy};
+    use coord_agent::auth::circuit_breaker::{
+        AuthMetrics, CircuitBreaker, CircuitState, FallbackPolicy,
+    };
     use coord_agent::auth::interceptor::AuthInterceptor;
     use coord_agent::auth::rate_limiter::LoginRateLimiter;
     use coord_agent::auth::role_cache::{CapabilityGrant, RoleCache, RoleEntry};
@@ -24,6 +26,7 @@ mod tests {
     use coord_server::auth::interceptor::{
         is_high_risk_operation, is_trusted_agent_cn, ServerAuthInterceptor,
     };
+    use coord_server::auth::manager::AuthManager;
     use coord_server::auth::revocation::RevocationStore;
     use coord_server::auth::token_signing::TokenSigningKeyring;
 
@@ -96,7 +99,10 @@ mod tests {
             Some("/app/order-123"),
         );
         assert!(
-            matches!(agent_result, coord_agent::auth::interceptor::AuthResult::Allow(_)),
+            matches!(
+                agent_result,
+                coord_agent::auth::interceptor::AuthResult::Allow(_)
+            ),
             "Agent should allow valid request"
         );
 
@@ -130,7 +136,14 @@ mod tests {
         let agent = AuthInterceptor::new(signing_key_bytes, role_cache, 300);
 
         let rev_store = Arc::new(RevocationStore::new(1000));
-        let server = make_server_interceptor(keyring.clone(), rev_store);
+        // P0-C.4 fail-closed：非信任调用方不再默认放行，需服务端角色授权。
+        let server = {
+            let mgr = Arc::new(AuthManager::new_empty());
+            mgr.role_add("reader").unwrap();
+            mgr.role_grant_capability("reader", "data:kv:read", "")
+                .unwrap();
+            make_server_interceptor(keyring.clone(), rev_store).with_role_provider(mgr)
+        };
 
         let key = keyring.active_key();
         let cct = encode_cct(
@@ -155,7 +168,10 @@ mod tests {
             Some(&format!("Bearer {cct}")),
             Some("/any/key"),
         );
-        assert!(matches!(agent_result, coord_agent::auth::interceptor::AuthResult::Allow(_)));
+        assert!(matches!(
+            agent_result,
+            coord_agent::auth::interceptor::AuthResult::Allow(_)
+        ));
 
         // Server with non-trusted caller → full scope check
         let server_result = server.validate(
@@ -221,7 +237,10 @@ mod tests {
             Some("/app/order-123"),
         );
         assert!(
-            matches!(agent_result, coord_agent::auth::interceptor::AuthResult::Deny(_)),
+            matches!(
+                agent_result,
+                coord_agent::auth::interceptor::AuthResult::Deny(_)
+            ),
             "Agent must reject write from reader role (first line of defense)"
         );
 
@@ -263,7 +282,10 @@ mod tests {
             Some("/app/payments/999"), // OUTSIDE scope "/app/orders/"
         );
         assert!(
-            matches!(result, coord_server::auth::interceptor::ServerAuthResult::Deny { .. }),
+            matches!(
+                result,
+                coord_server::auth::interceptor::ServerAuthResult::Deny { .. }
+            ),
             "Server must deny scope violation (second line of defense)"
         );
     }
@@ -389,7 +411,10 @@ mod tests {
             Some(&format!("Bearer {cct}")),
             Some("/any/key"),
         );
-        assert!(matches!(result, coord_agent::auth::interceptor::AuthResult::Allow(_)));
+        assert!(matches!(
+            result,
+            coord_agent::auth::interceptor::AuthResult::Allow(_)
+        ));
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -507,11 +532,36 @@ mod tests {
         metrics.record_cache_hit();
         metrics.record_cache_miss();
 
-        assert_eq!(metrics.requests_total.load(std::sync::atomic::Ordering::Relaxed), 2);
-        assert_eq!(metrics.denied_expired.load(std::sync::atomic::Ordering::Relaxed), 1);
-        assert_eq!(metrics.denied_signature.load(std::sync::atomic::Ordering::Relaxed), 1);
-        assert_eq!(metrics.cache_hits.load(std::sync::atomic::Ordering::Relaxed), 3);
-        assert_eq!(metrics.cache_misses.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            metrics
+                .requests_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            metrics
+                .denied_expired
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics
+                .denied_signature
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics
+                .cache_hits
+                .load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
+        assert_eq!(
+            metrics
+                .cache_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
         assert!((metrics.cache_hit_ratio() - 0.75).abs() < 0.01);
     }
 

@@ -8,22 +8,22 @@
 // 4. API 转发 — 提取 Cookie Token 注入 X-Vault-Token 头后转发 Core
 // 5. 健康检查 — /healthz, /ready, /metrics 端点
 
-mod proxy;
-pub mod internal;
-pub mod static_files;
-pub mod registry_api;
 pub mod config_api;
+pub mod internal;
+mod proxy;
+pub mod registry_api;
+pub mod static_files;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use axum::{
-    Router,
     body::Body,
     extract::{Path, State},
     http::{Request, StatusCode},
     response::IntoResponse,
     routing::{any, delete, get, post, put},
+    Router,
 };
 
 use crate::metrics::Metrics;
@@ -88,20 +88,42 @@ pub fn build_router(
             .route("/v1/auth/approle/login", post(internal::approle_login))
             .route("/v1/auth/token/lookup-self", get(internal::token_lookup))
             .route("/v1/auth/token/renew-self", post(internal::token_renew))
+            .route("/v1/auth/token/revoke-self", post(internal::token_revoke))
             // Registry 内部 API
             .route("/v1/registry/services", get(registry_api::list_services))
-            .route("/v1/registry/services/{name}", get(registry_api::get_service))
-            .route("/v1/registry/services/{name}/instances/{id}", put(registry_api::update_instance))
-            .route("/v1/registry/services/{name}/health-check", post(registry_api::health_check))
+            .route(
+                "/v1/registry/services/{name}",
+                get(registry_api::get_service),
+            )
+            .route(
+                "/v1/registry/services/{name}/instances/{id}",
+                put(registry_api::update_instance),
+            )
+            .route(
+                "/v1/registry/services/{name}/health-check",
+                post(registry_api::health_check),
+            )
             // Config 内部 API（精确路由优先于通配符）
             .route("/v1/configs", get(config_api::list_configs))
             .route("/v1/configs", post(config_api::create_config))
-            .route("/v1/configs/{group}/{key}/versions", get(config_api::list_versions))
-            .route("/v1/configs/{group}/{key}/versions/{version}", get(config_api::get_version))
-            .route("/v1/configs/{group}/{key}/rollback", post(config_api::rollback))
+            .route(
+                "/v1/configs/{group}/{key}/versions",
+                get(config_api::list_versions),
+            )
+            .route(
+                "/v1/configs/{group}/{key}/versions/{version}",
+                get(config_api::get_version),
+            )
+            .route(
+                "/v1/configs/{group}/{key}/rollback",
+                post(config_api::rollback),
+            )
             .route("/v1/configs/{group}/{key}", get(config_api::get_config))
             .route("/v1/configs/{group}/{key}", put(config_api::update_config))
-            .route("/v1/configs/{group}/{key}", delete(config_api::delete_config))
+            .route(
+                "/v1/configs/{group}/{key}",
+                delete(config_api::delete_config),
+            )
             // Catch-all（必须放在最后）
             .route("/v1/{*path}", any(internal::not_found))
             .with_state(state);
@@ -157,20 +179,38 @@ async fn metrics_handler(State(hs): State<Arc<HealthState>>) -> impl IntoRespons
     let body = hs.metrics.render_prometheus_text();
     (
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
         body,
     )
 }
 
 /// 降级健康检查（无 HealthState 时使用）
 async fn healthz_placeholder() -> impl IntoResponse {
-    (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/json")], r#"{"status":"ok"}"#)
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        r#"{"status":"ok"}"#,
+    )
 }
 async fn ready_placeholder() -> impl IntoResponse {
-    (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/json")], r#"{"status":"ready"}"#)
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        r#"{"status":"ready"}"#,
+    )
 }
 async fn metrics_placeholder() -> impl IntoResponse {
-    (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], "# placeholder\n")
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        "# placeholder\n",
+    )
 }
 
 // ──── 静态资源处理器 ────
@@ -183,11 +223,7 @@ async fn serve_static_asset(Path(path): Path<String>) -> impl IntoResponse {
     let full_path = format!("assets/{}", path);
     match static_files::serve_static(&full_path) {
         Some(response) => response,
-        None => (
-            StatusCode::NOT_FOUND,
-            "Static asset not found",
-        )
-            .into_response(),
+        None => (StatusCode::NOT_FOUND, "Static asset not found").into_response(),
     }
 }
 
@@ -253,14 +289,19 @@ impl CoreClient for ReqwestCoreClient {
         };
 
         if !body.is_empty() {
-            req = req.header("Content-Type", "application/json").body(body.to_vec());
+            req = req
+                .header("Content-Type", "application/json")
+                .body(body.to_vec());
         }
 
         if let Some(t) = token {
             req = req.header("X-Vault-Token", t);
         }
 
-        let resp = req.send().await.map_err(|e| format!("HTTP forward error: {e}"))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("HTTP forward error: {e}"))?;
 
         let status = resp.status().as_u16();
         let content_type = resp
@@ -269,7 +310,11 @@ impl CoreClient for ReqwestCoreClient {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("application/json")
             .to_string();
-        let resp_body = resp.bytes().await.map_err(|e| format!("read body: {e}"))?.to_vec();
+        let resp_body = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("read body: {e}"))?
+            .to_vec();
 
         Ok((status, resp_body, content_type))
     }

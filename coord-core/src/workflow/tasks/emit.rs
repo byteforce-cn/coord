@@ -79,13 +79,18 @@ mod tests {
             }),
         };
 
-        let result = execute(&named, &EmitTask {
-            emit: EmitEvent {
-                event_type: "order.created".into(),
-                source: Some("/coord/orders".into()),
-                data: Some(serde_json::json!({"orderId": "ORD-123"})),
+        let result = execute(
+            &named,
+            &EmitTask {
+                emit: EmitEvent {
+                    event_type: "order.created".into(),
+                    source: Some("/coord/orders".into()),
+                    data: Some(serde_json::json!({"orderId": "ORD-123"})),
+                },
             },
-        }, &inst, &clock);
+            &inst,
+            &clock,
+        );
 
         match result {
             StepResult::NextTask(frame) => {
@@ -114,13 +119,18 @@ mod tests {
             }),
         };
 
-        let result = execute(&named, &EmitTask {
-            emit: EmitEvent {
-                event_type: "ping".into(),
-                source: None,
-                data: None,
+        let result = execute(
+            &named,
+            &EmitTask {
+                emit: EmitEvent {
+                    event_type: "ping".into(),
+                    source: None,
+                    data: None,
+                },
             },
-        }, &inst, &clock);
+            &inst,
+            &clock,
+        );
 
         match result {
             StepResult::NextTask(frame) => {

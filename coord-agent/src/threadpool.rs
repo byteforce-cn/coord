@@ -35,9 +35,15 @@ pub struct ThreadPoolConfig {
     pub background_size: usize,
 }
 
-fn default_proxy_core_size() -> usize { 8 }
-fn default_dataplane_size() -> usize { 4 }
-fn default_background_size() -> usize { 2 }
+fn default_proxy_core_size() -> usize {
+    8
+}
+fn default_dataplane_size() -> usize {
+    4
+}
+fn default_background_size() -> usize {
+    2
+}
 
 impl Default for ThreadPoolConfig {
     fn default() -> Self {
@@ -106,12 +112,34 @@ impl AgentThreadPools {
     /// 优雅关闭：等待所有池中任务完成
     pub async fn shutdown(&self) {
         // 按优先级逆序等待：background → dataplane → proxy_core
-        let mut bg = self.background_tasks.lock();
-        while bg.join_next().await.is_some() {}
-        let mut dp = self.dataplane_tasks.lock();
-        while dp.join_next().await.is_some() {}
-        let mut pc = self.proxy_core_tasks.lock();
-        while pc.join_next().await.is_some() {}
+        // （锁下仅 try_join_next 非阻塞轮询，真正 await 在锁外执行）
+        loop {
+            let next = self.background_tasks.lock().try_join_next();
+            match next {
+                Some(result) => {
+                    let _ = result;
+                }
+                None => break,
+            }
+        }
+        loop {
+            let next = self.dataplane_tasks.lock().try_join_next();
+            match next {
+                Some(result) => {
+                    let _ = result;
+                }
+                None => break,
+            }
+        }
+        loop {
+            let next = self.proxy_core_tasks.lock().try_join_next();
+            match next {
+                Some(result) => {
+                    let _ = result;
+                }
+                None => break,
+            }
+        }
     }
 }
 

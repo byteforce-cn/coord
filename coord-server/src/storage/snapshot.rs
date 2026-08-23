@@ -6,14 +6,17 @@
 //
 // 快照格式使用 bincode 序列化，包含所有 KV 数据、元数据和 Raft 检查点。
 
+use std::path::PathBuf;
+
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use coord_core::error::{Error, Result};
 use coord_core::storage::StorageBackend;
 
 use super::mvcc::{
-    encode_kv_key, encode_kv_meta_key, KvMetadata, MvccStorage,
-    TABLE_KV, TABLE_KV_META, TABLE_META, META_NEXT_REVISION, META_APPLIED_INDEX,
+    encode_kv_key, encode_kv_meta_key, AppliedLogId, KvMetadata, MvccStorage, META_LAST_APPLIED,
+    TABLE_KV, TABLE_KV_META, TABLE_META,
 };
 
 // ──── Snapshot 数据结构 ────
@@ -59,14 +62,11 @@ pub struct SnapshotKvMeta {
 }
 
 impl SnapshotData {
-    /// 当前快照格式版本
-    const CURRENT_VERSION: u32 = 1;
+    /// 当前快照格式版本（P0-A：版本号 +1；0.1.x 数据不承诺兼容）
+    const CURRENT_VERSION: u32 = 2;
 
     /// 创建空快照
-    pub fn new(
-        last_included_index: u64,
-        last_included_term: u64,
-    ) -> Self {
+    pub fn new(last_included_index: u64, last_included_term: u64) -> Self {
         Self {
             version: Self::CURRENT_VERSION,
             last_included_index,
@@ -80,8 +80,7 @@ impl SnapshotData {
 
     /// 序列化为字节（用于网络传输和磁盘存储）
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self)
-            .map_err(|e| Error::Internal(format!("snapshot serialize: {e}")))
+        bincode::serialize(self).map_err(|e| Error::Internal(format!("snapshot serialize: {e}")))
     }
 
     /// 从字节反序列化
@@ -104,28 +103,13 @@ pub fn export_snapshot_data<B: StorageBackend>(
 ) -> Result<SnapshotData> {
     let mut data = SnapshotData::new(last_included_index, last_included_term);
 
-    // 读取 Revision 计数器
-    data.next_revision = storage.current_revision().saturating_add(1);
-    if data.next_revision == 0 {
-        data.next_revision = 1;
-    }
-
-    // 读取 Applied Index
+    // 读取 Revision 与 Applied 状态（D-A2/A4：revision ≡ log index，applied 持久化）
     let backend = storage.backend();
-    data.applied_index = backend
-        .read(|tx| {
-            tx.get(TABLE_META, META_APPLIED_INDEX)
-                .map(|opt| {
-                    opt.and_then(|bytes| {
-                        if bytes.len() == 8 {
-                            Some(u64::from_be_bytes(bytes.as_slice().try_into().unwrap()))
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(0)
-                })
-        })?;
+    data.applied_index = storage
+        .get_applied_log_id()?
+        .map(|a| a.index)
+        .unwrap_or(last_included_index);
+    data.next_revision = data.applied_index.saturating_add(1);
 
     // 导出 KV 数据（密文，直接读取不经过 Barrier）
     let kv_prefix = encode_kv_key(b"");
@@ -223,27 +207,62 @@ pub fn import_snapshot_data<B: StorageBackend>(
             tx.insert(TABLE_KV_META, &meta_key, &meta_bytes)?;
         }
 
-        // 更新 Revision 计数器
+        // 持久化 applied 状态（单节点/恢复语义：term/node_id 不可考，以 0 标记）
         tx.insert(
             TABLE_META,
-            META_NEXT_REVISION,
-            &data.next_revision.to_be_bytes(),
-        )?;
-
-        // 更新 Applied Index
-        tx.insert(
-            TABLE_META,
-            META_APPLIED_INDEX,
-            &data.applied_index.to_be_bytes(),
+            META_LAST_APPLIED,
+            &AppliedLogId::standalone(data.applied_index).to_bytes(),
         )?;
 
         Ok(())
     })?;
 
-    // 更新内存中的 Revision 计数器
-    storage.set_next_revision(data.next_revision);
-
     Ok(())
+}
+
+// ──── SnapshotTracker：purge 前置条件守卫（M0-5） ────
+
+/// 已持久化到磁盘的快照元数据（供 LogStore::purge 前置校验与启动检查）
+#[derive(Debug, Clone)]
+pub struct DurableSnapshot {
+    pub index: u64,
+    pub term: u64,
+    pub path: PathBuf,
+}
+
+/// 记录"最新一份已落盘（fsync + 原子 rename）快照"的共享状态
+///
+/// StateMachineStore 在快照文件持久化成功后调用 `record_durable`；
+/// LogStore::purge 在删除日志前调用 `durable_covers` 校验（openraft 仅在
+/// 快照构建成功后触发 purge，守卫保证"无快照 + 日志已删"的不可恢复状态不出现）。
+#[derive(Debug, Default)]
+pub struct SnapshotTracker {
+    durable: Mutex<Option<DurableSnapshot>>,
+}
+
+impl SnapshotTracker {
+    /// 记录一份已持久化快照（仅当 index 不小于当前记录时覆盖）
+    pub fn record_durable(&self, index: u64, term: u64, path: PathBuf) {
+        let mut durable = self.durable.lock();
+        let should_replace = durable.as_ref().map(|d| index >= d.index).unwrap_or(true);
+        if should_replace {
+            *durable = Some(DurableSnapshot { index, term, path });
+        }
+    }
+
+    /// 是否存在覆盖指定 index 的持久化快照
+    pub fn durable_covers(&self, index: u64) -> bool {
+        self.durable
+            .lock()
+            .as_ref()
+            .map(|d| d.index >= index)
+            .unwrap_or(false)
+    }
+
+    /// 读取当前记录的持久化快照
+    pub fn latest(&self) -> Option<DurableSnapshot> {
+        self.durable.lock().clone()
+    }
 }
 
 // ──── 测试 ────
@@ -291,7 +310,9 @@ mod tests {
         // 写入一些数据
         storage.put(b"/app/config", b"value1", None).unwrap();
         storage.put(b"/app/secret", b"value2", None).unwrap();
-        storage.put(b"/service/addr", b"127.0.0.1:8080", None).unwrap();
+        storage
+            .put(b"/service/addr", b"127.0.0.1:8080", None)
+            .unwrap();
 
         // 导出版本（不含 Barrier，直接读密文）
         let data = export_snapshot_data(&storage, 10, 2).unwrap();

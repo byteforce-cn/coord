@@ -1,3 +1,8 @@
+// ⚠️ EXPERIMENTAL（P2-01）：本模块为组件级验证实现，未接入任何生产路径
+// （全仓无 `RegionManager` 生产引用，仅 `coord-server/tests/region_manager_test.rs` 测试引用）。
+// Coord 生产形态为「单 Raft 组 + 定期快照备份」；Multi-Raft 若需启用须另立专项
+// （见 `docs/production/05-rebuild-decision-and-plan.md` §6.4 P2-01）。
+//
 // Region Manager — Multi-Raft Region 生命周期管理
 //
 // 本模块定义：
@@ -457,7 +462,8 @@ mod tests {
     #[test]
     fn test_route_single_region() {
         let rm = RegionManager::new(1);
-        rm.register_region(make_test_meta(1, vec![], vec![])).unwrap();
+        rm.register_region(make_test_meta(1, vec![], vec![]))
+            .unwrap();
         assert!(rm.route(b"hello").is_ok());
     }
 

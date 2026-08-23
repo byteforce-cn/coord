@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use parking_lot::RwLock;
 use lru::LruCache;
+use parking_lot::RwLock;
 use tonic::Status;
 use tower::{Layer, Service};
 
@@ -29,6 +29,8 @@ use super::role_cache::RoleCache;
 
 /// Result of auth verification
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// 鉴权结果（Allow 载荷大；Box 会改变全调用点匹配模式，接受大小差异）
+#[allow(clippy::large_enum_variant)]
 pub enum AuthResult {
     /// Authentication and authorization passed
     Allow(CctToken),
@@ -49,7 +51,9 @@ struct SignatureCache {
 impl SignatureCache {
     fn new(capacity: usize, ttl_secs: u64) -> Self {
         Self {
-            cache: RwLock::new(LruCache::new(std::num::NonZeroUsize::new(capacity.max(1)).unwrap())),
+            cache: RwLock::new(LruCache::new(
+                std::num::NonZeroUsize::new(capacity.max(1)).unwrap_or(std::num::NonZeroUsize::MIN),
+            )),
             ttl: Duration::from_secs(ttl_secs),
         }
     }
@@ -70,9 +74,7 @@ impl SignatureCache {
     }
 
     fn put(&self, jti: String) {
-        self.cache
-            .write()
-            .put(jti, Instant::now() + self.ttl);
+        self.cache.write().put(jti, Instant::now() + self.ttl);
     }
 }
 
@@ -107,8 +109,12 @@ pub fn infer_capability(rpc_method: &str) -> Option<String> {
         "/coord.maintenance.Maintenance/Unseal" => Some("admin:maintenance:unseal".into()),
         "/coord.maintenance.Maintenance/Snapshot" => Some("admin:maintenance:snapshot".into()),
         "/coord.maintenance.Maintenance/MemberAdd" => Some("admin:maintenance:member_add".into()),
-        "/coord.maintenance.Maintenance/MemberRemove" => Some("admin:maintenance:member_remove".into()),
-        "/coord.maintenance.Maintenance/MemberPromote" => Some("admin:maintenance:member_promote".into()),
+        "/coord.maintenance.Maintenance/MemberRemove" => {
+            Some("admin:maintenance:member_remove".into())
+        }
+        "/coord.maintenance.Maintenance/MemberPromote" => {
+            Some("admin:maintenance:member_promote".into())
+        }
         "/coord.maintenance.Maintenance/MemberList" => Some("admin:maintenance:member_list".into()),
 
         // Auth
@@ -162,11 +168,7 @@ pub struct AuthInterceptor {
 
 impl AuthInterceptor {
     /// Create a new auth interceptor.
-    pub fn new(
-        signing_key: Vec<u8>,
-        role_cache: Arc<RoleCache>,
-        clock_drift_secs: i64,
-    ) -> Self {
+    pub fn new(signing_key: Vec<u8>, role_cache: Arc<RoleCache>, clock_drift_secs: i64) -> Self {
         Self {
             signing_key,
             role_cache,
@@ -351,12 +353,15 @@ where
         let this = unsafe { self.get_unchecked_mut() };
         match this {
             AuthFuture::Allow(fut) => unsafe { Pin::new_unchecked(fut) }.poll(cx),
-            AuthFuture::Deny(status) => {
-                let status = status.take().expect("polled after ready");
-                let (parts, ()) = status.into_http::<()>().into_parts();
-                let response = http::Response::from_parts(parts, tonic::body::Body::empty());
-                Poll::Ready(Ok(response))
-            }
+            AuthFuture::Deny(status) => match status.take() {
+                Some(status) => {
+                    let (parts, ()) = status.into_http::<()>().into_parts();
+                    let response = http::Response::from_parts(parts, tonic::body::Body::empty());
+                    Poll::Ready(Ok(response))
+                }
+                // 已就绪后重复 poll 属 Future 契约外行为：保持 Pending，避免 panic
+                None => Poll::Pending,
+            },
         }
     }
 }
@@ -433,11 +438,8 @@ mod tests {
         let cct = make_test_cct(vec!["reader"], HashMap::new());
         let auth_header = format!("Bearer {cct}");
 
-        let result = interceptor.validate_request(
-            "/coord.auth.Auth/Authenticate",
-            Some(&auth_header),
-            None,
-        );
+        let result =
+            interceptor.validate_request("/coord.auth.Auth/Authenticate", Some(&auth_header), None);
         assert!(matches!(result, AuthResult::Allow(_)));
     }
 
@@ -491,11 +493,8 @@ mod tests {
         let auth_header = format!("Bearer {cct}");
 
         // KV Put (data:kv:write) should be denied — reader doesn't have it
-        let result = interceptor.validate_request(
-            "/coord.kv.Kv/Put",
-            Some(&auth_header),
-            Some("/app/data"),
-        );
+        let result =
+            interceptor.validate_request("/coord.kv.Kv/Put", Some(&auth_header), Some("/app/data"));
         assert!(matches!(result, AuthResult::Deny(_)));
     }
 
@@ -518,22 +517,36 @@ mod tests {
         let cct = encode_cct(&header, &payload, TEST_KEY).unwrap();
         let auth_header = format!("Bearer {cct}");
 
-        let result = interceptor.validate_request(
-            "/coord.kv.Kv/Range",
-            Some(&auth_header),
-            None,
-        );
+        let result = interceptor.validate_request("/coord.kv.Kv/Range", Some(&auth_header), None);
         assert!(matches!(result, AuthResult::Deny(_)));
     }
 
     #[test]
     fn test_infer_capability_mappings() {
-        assert_eq!(infer_capability("/coord.kv.Kv/Range"), Some("data:kv:read".into()));
-        assert_eq!(infer_capability("/coord.kv.Kv/Put"), Some("data:kv:write".into()));
-        assert_eq!(infer_capability("/coord.kv.Kv/Delete"), Some("data:kv:delete".into()));
-        assert_eq!(infer_capability("/coord.txn.Txn/Txn"), Some("data:txn:execute".into()));
-        assert_eq!(infer_capability("/coord.lease.Lease/LeaseGrant"), Some("data:lease:grant".into()));
-        assert_eq!(infer_capability("/coord.watch.Watch/Watch"), Some("data:watch:subscribe".into()));
+        assert_eq!(
+            infer_capability("/coord.kv.Kv/Range"),
+            Some("data:kv:read".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.kv.Kv/Put"),
+            Some("data:kv:write".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.kv.Kv/Delete"),
+            Some("data:kv:delete".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.txn.Txn/Txn"),
+            Some("data:txn:execute".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.lease.Lease/LeaseGrant"),
+            Some("data:lease:grant".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.watch.Watch/Watch"),
+            Some("data:watch:subscribe".into())
+        );
         assert_eq!(infer_capability("/coord.auth.Auth/Authenticate"), None);
         assert_eq!(infer_capability("/unknown.Service/Method"), None);
     }
@@ -541,14 +554,38 @@ mod tests {
     /// ISSUE-000 Phase 0: PKI RPC 必须映射到 capability（私钥集中存储前上鉴权）
     #[test]
     fn test_infer_capability_pki_mappings() {
-        assert_eq!(infer_capability("/coord.agent.Pki/InitCa"), Some("pki:ca:init".into()));
-        assert_eq!(infer_capability("/coord.agent.Pki/IssueCert"), Some("pki:cert:issue".into()));
-        assert_eq!(infer_capability("/coord.agent.Pki/RenewCert"), Some("pki:cert:issue".into()));
-        assert_eq!(infer_capability("/coord.agent.Pki/RotateCert"), Some("pki:cert:rotate".into()));
-        assert_eq!(infer_capability("/coord.agent.Pki/ListCerts"), Some("pki:cert:read".into()));
-        assert_eq!(infer_capability("/coord.agent.Pki/GetCertByCN"), Some("pki:cert:read".into()));
-        assert_eq!(infer_capability("/coord.agent.Pki/GetCaCert"), Some("pki:cert:read".into()));
-        assert_eq!(infer_capability("/coord.agent.Pki/VerifyCert"), Some("pki:cert:read".into()));
+        assert_eq!(
+            infer_capability("/coord.agent.Pki/InitCa"),
+            Some("pki:ca:init".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.agent.Pki/IssueCert"),
+            Some("pki:cert:issue".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.agent.Pki/RenewCert"),
+            Some("pki:cert:issue".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.agent.Pki/RotateCert"),
+            Some("pki:cert:rotate".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.agent.Pki/ListCerts"),
+            Some("pki:cert:read".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.agent.Pki/GetCertByCN"),
+            Some("pki:cert:read".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.agent.Pki/GetCaCert"),
+            Some("pki:cert:read".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.agent.Pki/VerifyCert"),
+            Some("pki:cert:read".into())
+        );
         // 未知 PKI RPC 默认 deny（fail-closed）
         assert_eq!(infer_capability("/coord.agent.Pki/UnknownRpc"), None);
     }
@@ -560,8 +597,7 @@ mod tests {
     impl Service<http::Request<tonic::body::Body>> for Passthrough {
         type Response = http::Response<tonic::body::Body>;
         type Error = tonic::Status;
-        type Future =
-            std::future::Ready<Result<http::Response<tonic::body::Body>, tonic::Status>>;
+        type Future = std::future::Ready<Result<http::Response<tonic::body::Body>, tonic::Status>>;
 
         fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
@@ -579,7 +615,10 @@ mod tests {
         }
     }
 
-    fn make_http_request(path: &str, auth_header: Option<&str>) -> http::Request<tonic::body::Body> {
+    fn make_http_request(
+        path: &str,
+        auth_header: Option<&str>,
+    ) -> http::Request<tonic::body::Body> {
         let mut req = http::Request::builder()
             .uri(path)
             .body(tonic::body::Body::empty())
@@ -606,7 +645,11 @@ mod tests {
             .get("grpc-status")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        assert_eq!(grpc_status.as_deref(), Some("16"), "无凭据必须 grpc-status=UNAUTHENTICATED(16)");
+        assert_eq!(
+            grpc_status.as_deref(),
+            Some("16"),
+            "无凭据必须 grpc-status=UNAUTHENTICATED(16)"
+        );
     }
 
     /// ISSUE-000 Phase 0: 有效 CCT + 具备 capability → 放行（透传到 inner）
@@ -626,10 +669,17 @@ mod tests {
         let cct = make_test_cct(vec!["pki_issuer"], HashMap::new());
         let header = format!("Bearer {cct}");
         let resp = svc
-            .call(make_http_request("/coord.agent.Pki/IssueCert", Some(&header)))
+            .call(make_http_request(
+                "/coord.agent.Pki/IssueCert",
+                Some(&header),
+            ))
             .await
             .expect("service 不应报传输错误");
-        assert_eq!(resp.status(), http::StatusCode::OK, "有效 CCT + pki:cert:issue 应放行");
+        assert_eq!(
+            resp.status(),
+            http::StatusCode::OK,
+            "有效 CCT + pki:cert:issue 应放行"
+        );
     }
 
     /// ISSUE-000 Phase 0: 只读角色调用签发 RPC → 拒绝（分级授权）
@@ -649,7 +699,10 @@ mod tests {
         let cct = make_test_cct(vec!["pki_reader"], HashMap::new());
         let header = format!("Bearer {cct}");
         let resp = svc
-            .call(make_http_request("/coord.agent.Pki/IssueCert", Some(&header)))
+            .call(make_http_request(
+                "/coord.agent.Pki/IssueCert",
+                Some(&header),
+            ))
             .await
             .expect("service 不应报传输错误");
         let grpc_status = resp
@@ -666,8 +719,14 @@ mod tests {
 
     #[test]
     fn test_extract_bearer_token_formats() {
-        assert_eq!(extract_bearer_token(Some("Bearer mytoken")), Some("mytoken"));
-        assert_eq!(extract_bearer_token(Some("eyJhbGciOiJI...")), Some("eyJhbGciOiJI..."));
+        assert_eq!(
+            extract_bearer_token(Some("Bearer mytoken")),
+            Some("mytoken")
+        );
+        assert_eq!(
+            extract_bearer_token(Some("eyJhbGciOiJI...")),
+            Some("eyJhbGciOiJI...")
+        );
         assert_eq!(extract_bearer_token(Some("coord_abc123")), None); // legacy — pass through
         assert_eq!(extract_bearer_token(None), None);
     }

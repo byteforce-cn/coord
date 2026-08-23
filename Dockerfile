@@ -85,11 +85,18 @@ WORKDIR /var/lib/coord
 # ──── Ports ────
 # 50051: gRPC API
 # 50052: Raft internal
+# 50061: HTTP health/BFF（server 模式：grpc 端口 + 10）
 # 19527: Agent gRPC
 # 19528: HTTP (health / BFF / UI)
-EXPOSE 50051 50052 19527 19528
+EXPOSE 50051 50052 50061 19527 19528
 
 VOLUME ["/var/lib/coord"]
 
+# P0-G.1：默认启动 server 模式（鉴权默认开启）；不再使用 dev --fresh（会清空数据卷）。
+# root 密码经 COORD_ROOT_PASSWORD 注入，否则随机生成并仅打印一次。
 ENTRYPOINT ["/usr/local/bin/coord"]
-CMD ["dev", "--bind-addr", "0.0.0.0", "--fresh"]
+CMD ["server", "--addr", "0.0.0.0:50051", "--raft-addr", "0.0.0.0:50052", "--bootstrap", "--data-dir", "/var/lib/coord"]
+
+# 健康检查（P1-09 前以 HTTP /healthz 为准；server 模式 HTTP 端口 = grpc + 10）
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:50061/healthz || exit 1

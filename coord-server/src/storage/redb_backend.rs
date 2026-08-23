@@ -2,13 +2,20 @@
 //
 // 将 coord-core::storage::StorageBackend trait 适配到 Redb 4.1.0。
 // 直接使用 Redb 内置 MVCC，不额外建立应用层版本管理。
+//
+// 并发模型（P1-01 改造）：内部以 `parking_lot::RwLock<Database>` 持有。
+// - 读事务持读锁并行；写事务持写锁（与 redb 单写者语义一致，仅提前阻塞）；
+// - `compact()` 需要独占 `&mut Database`（redb 4.1 API），持写锁的维护窗口内执行，
+//   期间阻塞读写 —— 这是 redb 4.1 的固有限制（决策文档 §八风险表），
+//   调度由 `CompactionManager` 以小时级间隔执行。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use coord_core::error::Result;
 use coord_core::storage::{ReadTx, StorageBackend, WriteTx};
 use coord_core::types::StorageConfig;
+use parking_lot::RwLock;
 use redb::{
     Database, ReadTransaction, ReadableDatabase, ReadableTable, ReadableTableMetadata,
     TableDefinition, WriteTransaction,
@@ -61,10 +68,12 @@ fn resolve_table(name: &str) -> Result<TableDefinition<&'static [u8], &'static [
 /// Redb 存储后端
 ///
 /// 封装 redb::Database，实现 coord_core::storage::StorageBackend trait。
-/// 内部线程安全，支持并发读写。Clone 共享底层 `Arc<Database>`。
+/// 内部线程安全，支持并发读写。Clone 共享底层 `Arc<RwLock<Database>>`。
 #[derive(Clone)]
 pub struct RedbBackend {
-    db: Arc<Database>,
+    db: Arc<RwLock<Database>>,
+    /// store.db 路径（`disk_size_bytes` 用文件系统元数据计算）
+    db_path: PathBuf,
     #[allow(dead_code)]
     config: StorageConfig,
 }
@@ -104,14 +113,15 @@ impl StorageBackend for RedbBackend {
         }
 
         Ok(Self {
-            db: Arc::new(db),
+            db: Arc::new(RwLock::new(db)),
+            db_path,
             config: config.clone(),
         })
     }
 
     fn read<T>(&self, f: impl FnOnce(&dyn ReadTx) -> Result<T>) -> Result<T> {
-        let read_tx = self
-            .db
+        let db = self.db.read();
+        let read_tx = db
             .begin_read()
             .map_err(|e| coord_core::error::Error::Storage(format!("begin read tx: {}", e)))?;
 
@@ -120,8 +130,8 @@ impl StorageBackend for RedbBackend {
     }
 
     fn write<T>(&self, f: impl FnOnce(&mut dyn WriteTx) -> Result<T>) -> Result<T> {
-        let write_tx = self
-            .db
+        let db = self.db.write();
+        let write_tx = db
             .begin_write()
             .map_err(|e| coord_core::error::Error::Storage(format!("begin write tx: {}", e)))?;
 
@@ -137,24 +147,31 @@ impl StorageBackend for RedbBackend {
     }
 
     fn compact(&self) -> Result<()> {
-        // Redb 4.1: compact() 需要 &mut self，而 self.db 在 Arc 中。
-        // Compaction 是优化操作而非正确性要求，运行时跳过。
-        // 生产环境建议通过独立 compaction 线程持有独占引用时触发。
-        tracing::warn!(
-            "RedbBackend::compact: requires exclusive DB access, skipped at runtime"
-        );
+        // P1-01：维护窗口内真实执行 redb 文件压缩（空间回收）。
+        // redb 4.1 `Database::compact(&mut self)` 需要独占引用；写锁提供互斥，
+        // 期间新读写阻塞（调度由 CompactionManager 控制，小时级间隔）。
+        let mut db = self.db.write();
+        let reclaimed = db.compact().map_err(|e| {
+            coord_core::error::Error::Storage(format!("redb compact failed: {}", e))
+        })?;
+        if reclaimed {
+            tracing::info!("redb compact: file shrunk (space reclaimed)");
+        }
         Ok(())
     }
 
     fn disk_size_bytes(&self) -> Result<u64> {
-        // Redb 不直接提供磁盘大小查询 API，通过文件系统获取
-        // 这里返回一个估算值；实际使用中可通过 db.stats() 获取
-        Ok(0)
+        // P1-01：真实文件大小（此前恒 0，磁盘水位告警/只读依赖它，见 P1-02）
+        std::fs::metadata(&self.db_path)
+            .map(|m| m.len())
+            .map_err(|e| {
+                coord_core::error::Error::Storage(format!("stat {}: {}", self.db_path.display(), e))
+            })
     }
 
     fn key_count(&self) -> Result<u64> {
-        let count = self
-            .db
+        let db = self.db.read();
+        let count = db
             .begin_read()
             .map_err(|e| coord_core::error::Error::Storage(format!("begin read tx: {}", e)))?
             .open_table(TABLE_KV)
@@ -186,10 +203,7 @@ impl ReadTx for RedbReadTx {
                 Ok(Some(v.to_vec()))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(coord_core::error::Error::Storage(format!(
-                "get key: {}",
-                e
-            ))),
+            Err(e) => Err(coord_core::error::Error::Storage(format!("get key: {}", e))),
         };
         result
     }
@@ -209,9 +223,8 @@ impl ReadTx for RedbReadTx {
             .map_err(|e| coord_core::error::Error::Storage(format!("range scan: {}", e)))?;
 
         for item in iter {
-            let (k, v) = item.map_err(|e| {
-                coord_core::error::Error::Storage(format!("iter item: {}", e))
-            })?;
+            let (k, v) =
+                item.map_err(|e| coord_core::error::Error::Storage(format!("iter item: {}", e)))?;
             let key_bytes: &[u8] = k.value();
             let val_bytes: &[u8] = v.value();
 
@@ -247,10 +260,7 @@ impl ReadTx for RedbWriteTx {
                 Ok(Some(v.to_vec()))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(coord_core::error::Error::Storage(format!(
-                "get key: {}",
-                e
-            ))),
+            Err(e) => Err(coord_core::error::Error::Storage(format!("get key: {}", e))),
         };
         result
     }
@@ -270,9 +280,8 @@ impl ReadTx for RedbWriteTx {
             .map_err(|e| coord_core::error::Error::Storage(format!("range scan: {}", e)))?;
 
         for item in iter {
-            let (k, v) = item.map_err(|e| {
-                coord_core::error::Error::Storage(format!("iter item: {}", e))
-            })?;
+            let (k, v) =
+                item.map_err(|e| coord_core::error::Error::Storage(format!("iter item: {}", e)))?;
             let key_bytes: &[u8] = k.value();
             let val_bytes: &[u8] = v.value();
 
@@ -340,9 +349,7 @@ mod tests {
             .unwrap();
 
         // 读取
-        let value = backend
-            .read(|tx| tx.get("kv", b"hello"))
-            .unwrap();
+        let value = backend.read(|tx| tx.get("kv", b"hello")).unwrap();
 
         assert_eq!(value, Some(b"world".to_vec()));
     }
@@ -389,9 +396,7 @@ mod tests {
             })
             .unwrap();
 
-        let value = backend
-            .read(|tx| tx.get("kv", b"key1"))
-            .unwrap();
+        let value = backend.read(|tx| tx.get("kv", b"key1")).unwrap();
 
         assert_eq!(value, None);
     }
@@ -404,5 +409,56 @@ mod tests {
 
         let result = backend.read(|tx| tx.get("unknown_table", b"key"));
         assert!(result.is_err());
+    }
+
+    // ──── P1-01 Compaction ────
+
+    #[test]
+    fn test_disk_size_bytes_reports_file_size() {
+        let dir = TempDir::new().unwrap();
+        let config = StorageConfig::default();
+        let backend = RedbBackend::open(dir.path(), &config).unwrap();
+
+        backend
+            .write(|tx| {
+                for i in 0..100u32 {
+                    let key = format!("/k{i}");
+                    tx.insert("kv", key.as_bytes(), &[0xABu8; 512])?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let size = backend.disk_size_bytes().unwrap();
+        assert!(size > 0, "disk size should reflect store.db file size");
+    }
+
+    #[test]
+    fn test_compact_preserves_data() {
+        let dir = TempDir::new().unwrap();
+        let config = StorageConfig::default();
+        let backend = RedbBackend::open(dir.path(), &config).unwrap();
+
+        backend
+            .write(|tx| {
+                tx.insert("kv", b"k1", b"v1")?;
+                tx.insert("kv", b"k2", b"v2")?;
+                Ok(())
+            })
+            .unwrap();
+
+        // 删除一个 key 制造空闲页，再 compact（维护窗口：独占引用）
+        backend
+            .write(|tx| {
+                tx.remove("kv", b"k1")?;
+                Ok(())
+            })
+            .unwrap();
+        backend.compact().unwrap();
+
+        let v = backend.read(|tx| tx.get("kv", b"k2")).unwrap();
+        assert_eq!(v, Some(b"v2".to_vec()));
+        let gone = backend.read(|tx| tx.get("kv", b"k1")).unwrap();
+        assert_eq!(gone, None);
     }
 }

@@ -14,16 +14,18 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 
 use super::model::{
-    AuthConfig, BackoffStrategy, CallTask, CallType, CatchClause, ConstantsConfig, Document,
-    DoTask, EmitEvent, EmitTask, EndTask, ErrorDef, EventFilter, ExportConfig, ForEachTask,
+    AuthConfig, BackoffStrategy, CallTask, CallType, CatchClause, ConstantsConfig, DoTask,
+    Document, EmitEvent, EmitTask, EndTask, ErrorDef, EventFilter, ExportConfig, ForEachTask,
     ForkBranch, ForkTask, FunctionDef, InputConfig, JitterConfig, ListenTask, NamedTask,
-    OutputConfig, RaiseTask, RetryPolicy, RunTask, ScheduleConfig, SecretsConfig, SetTask,
-    Span, SwitchCondition, SwitchTask, Task, TaskMeta, TimeoutConfig, TryCatchTask,
-    UseComponents, ValidationError, ValidationErrorKind, WaitTask, WorkflowDefinition,
-    WorkflowRef,
+    OutputConfig, RaiseTask, RetryPolicy, RunTask, ScheduleConfig, SecretsConfig, SetTask, Span,
+    SwitchCondition, SwitchTask, Task, TaskMeta, TimeoutConfig, TryCatchTask, UseComponents,
+    ValidationError, ValidationErrorKind, WaitTask, WorkflowDefinition, WorkflowRef,
 };
 
-use super::parser::{RawFunctionDef, RawNamedTask, RawRetryPolicy, RawTimeoutConfig, RawUseComponents, RawWorkflowDef};
+use super::parser::{
+    RawFunctionDef, RawNamedTask, RawRetryPolicy, RawTimeoutConfig, RawUseComponents,
+    RawWorkflowDef,
+};
 
 // ─── 校验器 ───
 
@@ -111,12 +113,18 @@ impl Validator {
         v.collect_task_meta(&raw.tasks, &mut task_meta);
 
         // Step 8: 解析 input（schema / from / default）
-        let input = raw.input.map(|rv| {
-            InputConfig {
-                schema: rv.value.get("schema").and_then(|v| v.as_str()).map(String::from),
-                from: rv.value.get("from").and_then(|v| v.as_str()).map(String::from),
-                default: rv.value.get("default").cloned(),
-            }
+        let input = raw.input.map(|rv| InputConfig {
+            schema: rv
+                .value
+                .get("schema")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            from: rv
+                .value
+                .get("from")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            default: rv.value.get("default").cloned(),
         });
 
         // Step 9: 解析顶层扩展块（output / timeout / schedule / auth / secrets / constants）
@@ -130,27 +138,50 @@ impl Validator {
         if let Some(ext) = raw.ext {
             if let Some(ov) = ext.output {
                 output = Some(OutputConfig {
-                    as_expr: ov.value.get("as").and_then(|v| v.as_str()).map(String::from),
-                    schema: ov.value.get("schema").and_then(|v| v.as_str()).map(String::from),
+                    as_expr: ov
+                        .value
+                        .get("as")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    schema: ov
+                        .value
+                        .get("schema")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
                 });
             }
             if let Some(tv) = ext.timeout {
                 timeout = Some(TimeoutConfig {
-                    after: tv.value.get("after").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    after: tv
+                        .value
+                        .get("after")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                 });
             }
             if let Some(sv) = ext.schedule {
                 schedule = ScheduleConfig {
-                    every: sv.value.get("every").and_then(|v| v.as_str()).map(String::from),
-                    cron: sv.value.get("cron").and_then(|v| v.as_str()).map(String::from),
-                    after: sv.value.get("after").and_then(|v| v.as_str()).map(String::from),
-                    on: sv.value.get("on").map(|v| {
-                        EventFilter {
-                            event_type: v.get("type").and_then(|v| v.as_str()).map(String::from),
-                            event_types: vec![],
-                            source: v.get("source").and_then(|v| v.as_str()).map(String::from),
-                            subject: v.get("subject").and_then(|v| v.as_str()).map(String::from),
-                        }
+                    every: sv
+                        .value
+                        .get("every")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    cron: sv
+                        .value
+                        .get("cron")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    after: sv
+                        .value
+                        .get("after")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    on: sv.value.get("on").map(|v| EventFilter {
+                        event_type: v.get("type").and_then(|v| v.as_str()).map(String::from),
+                        event_types: vec![],
+                        source: v.get("source").and_then(|v| v.as_str()).map(String::from),
+                        subject: v.get("subject").and_then(|v| v.as_str()).map(String::from),
                     }),
                 };
             }
@@ -164,7 +195,9 @@ impl Validator {
             if let Some(sv) = ext.secrets {
                 secrets = SecretsConfig {
                     keys: sv.value.as_array().map(|a| {
-                        a.iter().filter_map(|k| k.as_str().map(String::from)).collect()
+                        a.iter()
+                            .filter_map(|k| k.as_str().map(String::from))
+                            .collect()
                     }),
                 };
             }
@@ -225,7 +258,11 @@ impl Validator {
 
     // ─── 各任务类型解析 ───
 
-    fn parse_call(&mut self, _raw: &RawNamedTask, map: &serde_json::Map<String, Value>) -> Option<Task> {
+    fn parse_call(
+        &mut self,
+        _raw: &RawNamedTask,
+        map: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
         let call_val = &map["call"];
         let call_type = match call_val {
             Value::String(s) => {
@@ -246,7 +283,9 @@ impl Validator {
                         // 可能是自定义函数调用简写
                         // 检查 with.function 是否存在
                         if let Some(with_obj) = map.get("with").and_then(|w| w.as_object()) {
-                            if let Some(func_name) = with_obj.get("function").and_then(|f| f.as_str()) {
+                            if let Some(func_name) =
+                                with_obj.get("function").and_then(|f| f.as_str())
+                            {
                                 CallType::Function(func_name.to_string())
                             } else {
                                 CallType::Function(other.to_string())
@@ -272,23 +311,33 @@ impl Validator {
         };
 
         let with = map.get("with").cloned();
-        Some(Task::Call(CallTask { call: call_type, with }))
+        Some(Task::Call(CallTask {
+            call: call_type,
+            with,
+        }))
     }
 
-    fn parse_do(&mut self, raw: &RawNamedTask, map: &serde_json::Map<String, Value>) -> Option<Task> {
+    fn parse_do(
+        &mut self,
+        raw: &RawNamedTask,
+        map: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
         let do_val = &map["do"];
         let tasks = self.parse_sub_tasks(do_val, raw.span);
         Some(Task::Do(DoTask { tasks }))
     }
 
-    fn parse_switch(&mut self, raw: &RawNamedTask, map: &serde_json::Map<String, Value>) -> Option<Task> {
+    fn parse_switch(
+        &mut self,
+        raw: &RawNamedTask,
+        map: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
         let switch_val = &map["switch"];
         let conditions = match switch_val {
-            Value::Array(arr) => {
-                arr.iter()
-                    .filter_map(|cond| self.parse_switch_condition(cond, raw.span))
-                    .collect()
-            }
+            Value::Array(arr) => arr
+                .iter()
+                .filter_map(|cond| self.parse_switch_condition(cond, raw.span))
+                .collect(),
             _ => {
                 self.errors.push(ValidationError {
                     span: Some(raw.span),
@@ -306,13 +355,13 @@ impl Validator {
     }
 
     fn parse_switch_condition(&mut self, cond: &Value, span: Span) -> Option<SwitchCondition> {
-        let obj = match cond.as_object() {
-            Some(o) => o,
-            None => return None,
-        };
+        let obj = cond.as_object()?;
 
         // condition (optional — defaultCondition has no condition)
-        let condition = obj.get("condition").and_then(|v| v.as_str()).map(String::from);
+        let condition = obj
+            .get("condition")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         // transition or defaultCondition
         let transition = if let Some(t) = obj.get("transition").and_then(|v| v.as_str()) {
@@ -324,7 +373,9 @@ impl Validator {
         } else {
             self.errors.push(ValidationError {
                 span: Some(span),
-                kind: ValidationErrorKind::MissingRequiredField("transition or defaultCondition".into()),
+                kind: ValidationErrorKind::MissingRequiredField(
+                    "transition or defaultCondition".into(),
+                ),
                 message: "switch condition missing transition target".to_string(),
             });
             return None;
@@ -336,14 +387,17 @@ impl Validator {
         })
     }
 
-    fn parse_fork(&mut self, raw: &RawNamedTask, map: &serde_json::Map<String, Value>) -> Option<Task> {
+    fn parse_fork(
+        &mut self,
+        raw: &RawNamedTask,
+        map: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
         let fork_val = &map["fork"];
         let branches = match fork_val {
-            Value::Array(arr) => {
-                arr.iter()
-                    .filter_map(|b| self.parse_fork_branch(b, raw.span))
-                    .collect()
-            }
+            Value::Array(arr) => arr
+                .iter()
+                .filter_map(|b| self.parse_fork_branch(b, raw.span))
+                .collect(),
             Value::Object(obj) if obj.contains_key("branches") => {
                 if let Some(branches_arr) = obj["branches"].as_array() {
                     branches_arr
@@ -357,16 +411,18 @@ impl Validator {
             _ => Vec::new(),
         };
 
-        let compete = map
-            .get("compete")
-            .and_then(|v| v.as_bool());
+        let compete = map.get("compete").and_then(|v| v.as_bool());
 
         Some(Task::Fork(ForkTask { branches, compete }))
     }
 
     fn parse_fork_branch(&mut self, branch: &Value, span: Span) -> Option<ForkBranch> {
         let obj = branch.as_object()?;
-        let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let tasks = if let Some(do_val) = obj.get("do") {
             self.parse_sub_tasks(do_val, span)
         } else if let Some(tasks_val) = obj.get("tasks") {
@@ -377,12 +433,24 @@ impl Validator {
         Some(ForkBranch { name, tasks })
     }
 
-    fn parse_for_each(&mut self, raw: &RawNamedTask, map: &serde_json::Map<String, Value>) -> Option<Task> {
+    fn parse_for_each(
+        &mut self,
+        raw: &RawNamedTask,
+        map: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
         let for_val = &map["for"];
         let obj = for_val.as_object()?;
 
-        let input = obj.get("input").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let iteration = obj.get("iteration").and_then(|v| v.as_str()).unwrap_or("item").to_string();
+        let input = obj
+            .get("input")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let iteration = obj
+            .get("iteration")
+            .and_then(|v| v.as_str())
+            .unwrap_or("item")
+            .to_string();
         let tasks = if let Some(do_val) = obj.get("do") {
             self.parse_sub_tasks(do_val, raw.span)
         } else if let Some(tasks_val) = obj.get("tasks") {
@@ -398,7 +466,11 @@ impl Validator {
         }))
     }
 
-    fn parse_wait(&mut self, _raw: &RawNamedTask, map: &serde_json::Map<String, Value>) -> Option<Task> {
+    fn parse_wait(
+        &mut self,
+        _raw: &RawNamedTask,
+        map: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
         let wait_val = &map["wait"];
         let wait_str = match wait_val {
             Value::String(s) => s.clone(),
@@ -408,7 +480,11 @@ impl Validator {
         Some(Task::Wait(WaitTask { wait: wait_str }))
     }
 
-    fn parse_listen(&mut self, _raw: &RawNamedTask, map: &serde_json::Map<String, Value>) -> Option<Task> {
+    fn parse_listen(
+        &mut self,
+        _raw: &RawNamedTask,
+        map: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
         let listen_val = &map["listen"];
         let obj = listen_val.as_object();
 
@@ -417,7 +493,10 @@ impl Validator {
                 event_type: obj.get("type").and_then(|v| v.as_str()).map(String::from),
                 event_types: vec![],
                 source: obj.get("source").and_then(|v| v.as_str()).map(String::from),
-                subject: obj.get("subject").and_then(|v| v.as_str()).map(String::from),
+                subject: obj
+                    .get("subject")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
             }
         } else if let Some(s) = listen_val.as_str() {
             EventFilter {
@@ -435,16 +514,25 @@ impl Validator {
             }
         };
 
-        Some(Task::Listen(ListenTask { listen: event_filter }))
+        Some(Task::Listen(ListenTask {
+            listen: event_filter,
+        }))
     }
 
-    fn parse_emit(&mut self, _raw: &RawNamedTask, map: &serde_json::Map<String, Value>) -> Option<Task> {
+    fn parse_emit(
+        &mut self,
+        _raw: &RawNamedTask,
+        map: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
         let emit_val = &map["emit"];
         let obj = emit_val.as_object();
 
         let (event_type, source, data) = if let Some(obj) = obj {
             (
-                obj.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                obj.get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 obj.get("source").and_then(|v| v.as_str()).map(String::from),
                 obj.get("data").cloned(),
             )
@@ -461,14 +549,24 @@ impl Validator {
         }))
     }
 
-    fn parse_set(&mut self, _raw: &RawNamedTask, map: &serde_json::Map<String, Value>) -> Option<Task> {
+    fn parse_set(
+        &mut self,
+        _raw: &RawNamedTask,
+        map: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
         let set_val = &map["set"];
         let obj = set_val.as_object();
 
         let (variable, value) = if let Some(obj) = obj {
             (
-                obj.get("variable").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                obj.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                obj.get("variable")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                obj.get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             )
         } else {
             (String::new(), String::new())
@@ -477,14 +575,26 @@ impl Validator {
         Some(Task::Set(SetTask { variable, value }))
     }
 
-    fn parse_raise(&mut self, _raw: &RawNamedTask, map: &serde_json::Map<String, Value>) -> Option<Task> {
+    fn parse_raise(
+        &mut self,
+        _raw: &RawNamedTask,
+        map: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
         let raise_val = &map["raise"];
         let obj = raise_val.as_object();
 
         let error_def = if let Some(obj) = obj {
             ErrorDef {
-                r#type: obj.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                title: obj.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                r#type: obj
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                title: obj
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 status: obj.get("status").and_then(|v| v.as_u64()).map(|s| s as u16),
                 detail: obj.get("detail").and_then(|v| v.as_str()).map(String::from),
             }
@@ -500,7 +610,11 @@ impl Validator {
         Some(Task::Raise(RaiseTask { raise: error_def }))
     }
 
-    fn parse_try_catch(&mut self, raw: &RawNamedTask, map: &serde_json::Map<String, Value>) -> Option<Task> {
+    fn parse_try_catch(
+        &mut self,
+        raw: &RawNamedTask,
+        map: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
         let try_val = &map["try"];
         let try_tasks = self.parse_sub_tasks(try_val, raw.span);
 
@@ -547,15 +661,31 @@ impl Validator {
         Some(CatchClause { errors, tasks })
     }
 
-    fn parse_run(&mut self, _raw: &RawNamedTask, map: &serde_json::Map<String, Value>) -> Option<Task> {
+    fn parse_run(
+        &mut self,
+        _raw: &RawNamedTask,
+        map: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
         let run_val = &map["run"];
         let obj = run_val.as_object();
 
         let workflow = if let Some(obj) = obj {
             WorkflowRef {
-                namespace: obj.get("namespace").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                name: obj.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                version: obj.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                namespace: obj
+                    .get("namespace")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                name: obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                version: obj
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             }
         } else if let Some(s) = run_val.as_str() {
             // 简写: "namespace::name@version"
@@ -573,7 +703,11 @@ impl Validator {
     }
 
     /// end 任务 —— 终端任务，无需字段（`end: true` / `end: {}` 均可）
-    fn parse_end(&mut self, _raw: &RawNamedTask, _map: &serde_json::Map<String, Value>) -> Option<Task> {
+    fn parse_end(
+        &mut self,
+        _raw: &RawNamedTask,
+        _map: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
         Some(Task::End(EndTask {}))
     }
 
@@ -604,32 +738,32 @@ impl Validator {
     /// 解析子任务列表（do/try/catch 中的嵌套任务）
     fn parse_sub_tasks(&mut self, val: &Value, parent_span: Span) -> Vec<NamedTask> {
         match val {
-            Value::Array(arr) => {
-                arr.iter()
-                    .filter_map(|item| {
-                        let obj = item.as_object()?;
-                        if obj.len() != 1 {
-                            self.errors.push(ValidationError {
-                                span: Some(parent_span),
-                                kind: ValidationErrorKind::TypeMismatch("sub-task key count".to_string()),
-                                message: "sub-task must have exactly one key".to_string(),
-                            });
-                            return None;
-                        }
-                        let (name, body) = obj.iter().next().unwrap();
-                        let raw = RawNamedTask {
-                            span: parent_span,
-                            name: name.clone(),
-                            body: body.clone(),
-                        };
-                        self.resolve_task(&raw)
-                            .map(|task| NamedTask {
-                                name: name.clone(),
-                                task,
-                            })
+            Value::Array(arr) => arr
+                .iter()
+                .filter_map(|item| {
+                    let obj = item.as_object()?;
+                    if obj.len() != 1 {
+                        self.errors.push(ValidationError {
+                            span: Some(parent_span),
+                            kind: ValidationErrorKind::TypeMismatch(
+                                "sub-task key count".to_string(),
+                            ),
+                            message: "sub-task must have exactly one key".to_string(),
+                        });
+                        return None;
+                    }
+                    let (name, body) = obj.iter().next()?;
+                    let raw = RawNamedTask {
+                        span: parent_span,
+                        name: name.clone(),
+                        body: body.clone(),
+                    };
+                    self.resolve_task(&raw).map(|task| NamedTask {
+                        name: name.clone(),
+                        task,
                     })
-                    .collect()
-            }
+                })
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -649,7 +783,9 @@ impl Validator {
                         if !self.task_names.contains(&cond.transition) {
                             self.errors.push(ValidationError {
                                 span: None,
-                                kind: ValidationErrorKind::UnknownTaskReference(cond.transition.clone()),
+                                kind: ValidationErrorKind::UnknownTaskReference(
+                                    cond.transition.clone(),
+                                ),
                                 message: format!(
                                     "switch in '{}' references unknown task '{}'",
                                     task.name, cond.transition
@@ -747,7 +883,7 @@ impl Validator {
                         kind: ValidationErrorKind::CyclicDependency(
                             cycle.iter().map(|s| s.to_string()).collect(),
                         ),
-                        message: format!("cyclic dependency detected in switch transitions"),
+                        message: "cyclic dependency detected in switch transitions".to_string(),
                     });
                     return; // 检测到一个环就停止
                 }
@@ -775,10 +911,11 @@ impl Validator {
                         return Some(cycle);
                     }
                 } else if in_stack.contains(neighbor) {
-                    // 找到环
-                    let cycle_start = path.iter().position(|&x| x == neighbor).unwrap();
-                    let cycle: Vec<&str> = path[cycle_start..].to_vec();
-                    return Some(cycle);
+                    // 找到环（neighbor 入栈即入 path，position 必命中）
+                    if let Some(cycle_start) = path.iter().position(|&x| x == neighbor) {
+                        let cycle: Vec<&str> = path[cycle_start..].to_vec();
+                        return Some(cycle);
+                    }
                 }
             }
         }
@@ -802,8 +939,7 @@ impl Validator {
         });
 
         let retries = raw.retries.map(|rets| {
-            rets
-                .into_iter()
+            rets.into_iter()
                 .map(|(name, raw_retry)| {
                     let policy = self.resolve_retry_policy(raw_retry);
                     (name, policy)
@@ -812,8 +948,7 @@ impl Validator {
         });
 
         let timeouts = raw.timeouts.map(|tos| {
-            tos
-                .into_iter()
+            tos.into_iter()
                 .map(|(name, raw_to)| {
                     let config = self.resolve_timeout_config(raw_to);
                     (name, config)
@@ -955,7 +1090,8 @@ impl Validator {
             };
             FunctionDef {
                 call: call_type,
-                with: obj.get("with").cloned(),            }
+                with: obj.get("with").cloned(),
+            }
         } else {
             FunctionDef {
                 call: CallType::Http,
@@ -973,14 +1109,15 @@ impl Validator {
                     .and_then(|v| v.as_str())
                     .unwrap_or("PT3S")
                     .to_string(),
-                backoff: obj.get("backoff").and_then(|v| v.as_str()).map(|s| {
-                    match s {
+                backoff: obj
+                    .get("backoff")
+                    .and_then(|v| v.as_str())
+                    .map(|s| match s {
                         "constant" => BackoffStrategy::Constant,
                         "linear" => BackoffStrategy::Linear,
                         "exponential" => BackoffStrategy::Exponential,
                         _ => BackoffStrategy::Constant,
-                    }
-                }),
+                    }),
                 limit: obj.get("limit").and_then(|v| v.as_u64()).unwrap_or(3) as u32,
                 jitter: obj.get("jitter").and_then(|v| {
                     v.as_object().map(|j| JitterConfig {
@@ -1135,11 +1272,15 @@ pub fn parse_timeout_value(v: &Value) -> Option<TimeoutConfig> {
     let obj = v.as_object()?;
     if let Some(a) = obj.get("after") {
         if let Some(s) = a.as_str() {
-            return Some(TimeoutConfig { after: s.to_string() });
+            return Some(TimeoutConfig {
+                after: s.to_string(),
+            });
         }
         if let Some(ao) = a.as_object() {
             if let Some(secs) = ao.get("seconds").and_then(|x| x.as_u64()) {
-                return Some(TimeoutConfig { after: format!("PT{secs}S") });
+                return Some(TimeoutConfig {
+                    after: format!("PT{secs}S"),
+                });
             }
         }
     }
@@ -1228,7 +1369,10 @@ do:
             Task::Switch(s) => {
                 assert_eq!(s.conditions.len(), 3);
                 // 第一个条件
-                assert_eq!(s.conditions[0].condition.as_deref(), Some("${ .amount > 10000 }"));
+                assert_eq!(
+                    s.conditions[0].condition.as_deref(),
+                    Some("${ .amount > 10000 }")
+                );
                 assert_eq!(s.conditions[0].transition, "seniorApproval");
                 // defaultCondition（第三个条件，无 condition 字段）
                 assert_eq!(s.conditions[2].condition, None);
@@ -1264,7 +1408,11 @@ do:
         assert!(result.is_ok(), "validation failed: {:?}", result.err());
         let def = result.unwrap();
         let use_comp = def.use_components.as_ref().unwrap();
-        assert!(use_comp.functions.as_ref().unwrap().contains_key("sendNotification"));
+        assert!(use_comp
+            .functions
+            .as_ref()
+            .unwrap()
+            .contains_key("sendNotification"));
     }
 
     #[test]
@@ -1285,7 +1433,9 @@ do:
         let result = parse_and_validate_yaml(yaml);
         assert!(result.is_err());
         let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| matches!(e.kind, ValidationErrorKind::UnknownFunctionReference(_))));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::UnknownFunctionReference(_))));
     }
 
     #[test]
@@ -1308,7 +1458,9 @@ do:
         let result = parse_and_validate_yaml(yaml);
         assert!(result.is_err());
         let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| matches!(e.kind, ValidationErrorKind::UnknownTaskReference(_))));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::UnknownTaskReference(_))));
     }
 
     #[test]
@@ -1392,7 +1544,9 @@ do:
         let result = parse_and_validate_yaml(yaml);
         assert!(result.is_err());
         let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| matches!(e.kind, ValidationErrorKind::DuplicateTaskName(_))));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::DuplicateTaskName(_))));
     }
 
     #[test]
@@ -1571,7 +1725,9 @@ do:
         let result = parse_and_validate_yaml(yaml);
         assert!(result.is_err());
         let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| matches!(e.kind, ValidationErrorKind::CyclicDependency(_))));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::CyclicDependency(_))));
     }
 
     #[test]
@@ -1590,7 +1746,9 @@ do:
         let result = parse_and_validate_yaml(yaml);
         assert!(result.is_err());
         let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| matches!(e.kind, ValidationErrorKind::UnknownTaskType)));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::UnknownTaskType)));
     }
 
     #[test]
@@ -1770,8 +1928,19 @@ do:
         let auth = def.auth.get("myBasic").unwrap();
         assert_eq!(auth.scheme.as_deref(), Some("basic"));
         assert_eq!(auth.username.as_deref(), Some("admin"));
-        assert_eq!(def.secrets.keys.as_ref().unwrap(), &vec!["adminPass".to_string()]);
-        assert_eq!(def.constants.values.as_ref().unwrap().get("region").unwrap(), &Value::String("cn-north".into()));
+        assert_eq!(
+            def.secrets.keys.as_ref().unwrap(),
+            &vec!["adminPass".to_string()]
+        );
+        assert_eq!(
+            def.constants
+                .values
+                .as_ref()
+                .unwrap()
+                .get("region")
+                .unwrap(),
+            &Value::String("cn-north".into())
+        );
     }
 
     #[test]

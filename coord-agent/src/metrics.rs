@@ -57,7 +57,9 @@ impl AgentMetrics {
 
     /// 标记已连接 Server 集群
     pub fn set_connected(&self, connected: bool) {
-        self.inner.connected.store(if connected { 1 } else { 0 }, Ordering::Relaxed);
+        self.inner
+            .connected
+            .store(if connected { 1 } else { 0 }, Ordering::Relaxed);
     }
 
     /// 记录缓存命中
@@ -92,7 +94,9 @@ impl AgentMetrics {
         out.push_str("# TYPE coord_agent_uptime_seconds gauge\n");
         out.push_str(&format!("coord_agent_uptime_seconds {:.2}\n", uptime));
 
-        out.push_str("# HELP coord_agent_connected 1 if connected to server cluster, 0 otherwise\n");
+        out.push_str(
+            "# HELP coord_agent_connected 1 if connected to server cluster, 0 otherwise\n",
+        );
         out.push_str("# TYPE coord_agent_connected gauge\n");
         out.push_str(&format!("coord_agent_connected {}\n", connected));
 
@@ -102,14 +106,20 @@ impl AgentMetrics {
 
         out.push_str("# HELP coord_agent_cache_misses_total Total cache misses\n");
         out.push_str("# TYPE coord_agent_cache_misses_total counter\n");
-        out.push_str(&format!("coord_agent_cache_misses_total {}\n", cache_misses));
+        out.push_str(&format!(
+            "coord_agent_cache_misses_total {}\n",
+            cache_misses
+        ));
 
         let method_names = ["put", "range", "delete", "txn", "status"];
         out.push_str("# HELP coord_agent_grpc_requests_total Total gRPC requests by method\n");
         out.push_str("# TYPE coord_agent_grpc_requests_total counter\n");
         for (i, name) in method_names.iter().enumerate() {
             let count = self.inner.grpc_requests[i].load(Ordering::Relaxed);
-            out.push_str(&format!("coord_agent_grpc_requests_total{{method=\"{}\"}} {}\n", name, count));
+            out.push_str(&format!(
+                "coord_agent_grpc_requests_total{{method=\"{}\"}} {}\n",
+                name, count
+            ));
         }
 
         out.push_str("# HELP coord_agent_watch_subscribers Current watch subscriber count\n");

@@ -52,8 +52,7 @@ impl RetryState {
         self.attempts += 1;
         let wait = self.current_backoff;
         // 指数退避：每次翻倍，上限 max_backoff
-        self.current_backoff =
-            std::cmp::min(self.current_backoff * 2, self.max_backoff);
+        self.current_backoff = std::cmp::min(self.current_backoff * 2, self.max_backoff);
         Some(wait)
     }
 
@@ -146,7 +145,10 @@ mod tests {
     #[test]
     fn test_classify_unavailable() {
         let decision = classify_error("cluster unavailable: no leader");
-        assert_eq!(decision, RetryDecision::RetryAfter(Duration::from_millis(100)));
+        assert_eq!(
+            decision,
+            RetryDecision::RetryAfter(Duration::from_millis(100))
+        );
     }
 
     #[test]

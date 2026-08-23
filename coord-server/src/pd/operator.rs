@@ -32,10 +32,7 @@ pub enum Operator {
         new_region_id: RegionId,
     },
     /// 合并两个相邻 Region
-    MergeRegion {
-        left: RegionId,
-        right: RegionId,
-    },
+    MergeRegion { left: RegionId, right: RegionId },
 }
 
 impl Operator {
@@ -113,25 +110,39 @@ mod tests {
 
     #[test]
     fn test_operator_region_id_add_peer() {
-        let op = Operator::AddPeer { region_id: 1, node_id: 10, raft_addr: "127.0.0.1:9000".into() };
+        let op = Operator::AddPeer {
+            region_id: 1,
+            node_id: 10,
+            raft_addr: "127.0.0.1:9000".into(),
+        };
         assert_eq!(op.region_id(), 1);
     }
 
     #[test]
     fn test_operator_region_id_remove_peer() {
-        let op = Operator::RemovePeer { region_id: 2, node_id: 20 };
+        let op = Operator::RemovePeer {
+            region_id: 2,
+            node_id: 20,
+        };
         assert_eq!(op.region_id(), 2);
     }
 
     #[test]
     fn test_operator_region_id_transfer_leader() {
-        let op = Operator::TransferLeader { region_id: 3, to_node: 30 };
+        let op = Operator::TransferLeader {
+            region_id: 3,
+            to_node: 30,
+        };
         assert_eq!(op.region_id(), 3);
     }
 
     #[test]
     fn test_operator_region_id_split_region() {
-        let op = Operator::SplitRegion { region_id: 4, split_key: b"split".to_vec(), new_region_id: 400 };
+        let op = Operator::SplitRegion {
+            region_id: 4,
+            split_key: b"split".to_vec(),
+            new_region_id: 400,
+        };
         assert_eq!(op.region_id(), 4);
     }
 
@@ -145,25 +156,39 @@ mod tests {
 
     #[test]
     fn test_operator_name_add_peer() {
-        let op = Operator::AddPeer { region_id: 1, node_id: 10, raft_addr: String::new() };
+        let op = Operator::AddPeer {
+            region_id: 1,
+            node_id: 10,
+            raft_addr: String::new(),
+        };
         assert_eq!(op.name(), "add-peer");
     }
 
     #[test]
     fn test_operator_name_remove_peer() {
-        let op = Operator::RemovePeer { region_id: 1, node_id: 10 };
+        let op = Operator::RemovePeer {
+            region_id: 1,
+            node_id: 10,
+        };
         assert_eq!(op.name(), "remove-peer");
     }
 
     #[test]
     fn test_operator_name_transfer_leader() {
-        let op = Operator::TransferLeader { region_id: 1, to_node: 10 };
+        let op = Operator::TransferLeader {
+            region_id: 1,
+            to_node: 10,
+        };
         assert_eq!(op.name(), "transfer-leader");
     }
 
     #[test]
     fn test_operator_name_split_region() {
-        let op = Operator::SplitRegion { region_id: 1, split_key: vec![], new_region_id: 2 };
+        let op = Operator::SplitRegion {
+            region_id: 1,
+            split_key: vec![],
+            new_region_id: 2,
+        };
         assert_eq!(op.name(), "split-region");
     }
 
@@ -177,7 +202,11 @@ mod tests {
 
     #[test]
     fn test_operator_serde_roundtrip_add_peer() {
-        let op = Operator::AddPeer { region_id: 7, node_id: 70, raft_addr: "10.0.0.1:8000".into() };
+        let op = Operator::AddPeer {
+            region_id: 7,
+            node_id: 70,
+            raft_addr: "10.0.0.1:8000".into(),
+        };
         let json = serde_json::to_string(&op).unwrap();
         let decoded: Operator = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, op);
@@ -185,7 +214,11 @@ mod tests {
 
     #[test]
     fn test_operator_serde_roundtrip_split_region() {
-        let op = Operator::SplitRegion { region_id: 8, split_key: b"mid".to_vec(), new_region_id: 800 };
+        let op = Operator::SplitRegion {
+            region_id: 8,
+            split_key: b"mid".to_vec(),
+            new_region_id: 800,
+        };
         let json = serde_json::to_string(&op).unwrap();
         let decoded: Operator = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, op);
@@ -203,7 +236,10 @@ mod tests {
 
     #[test]
     fn test_operator_entry_new_is_pending() {
-        let op = Operator::RemovePeer { region_id: 100, node_id: 200 };
+        let op = Operator::RemovePeer {
+            region_id: 100,
+            node_id: 200,
+        };
         let entry = OperatorEntry::new(op);
         assert!(matches!(entry.status, OperatorStatus::Pending));
         assert!(entry.created_at > 0);
@@ -215,7 +251,11 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        let op = Operator::AddPeer { region_id: 1, node_id: 1, raft_addr: String::new() };
+        let op = Operator::AddPeer {
+            region_id: 1,
+            node_id: 1,
+            raft_addr: String::new(),
+        };
         let entry = OperatorEntry::new(op);
         let after = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -232,13 +272,19 @@ mod tests {
         assert_eq!(OperatorStatus::Pending, OperatorStatus::Pending);
         assert_eq!(OperatorStatus::Running, OperatorStatus::Running);
         assert_eq!(OperatorStatus::Success, OperatorStatus::Success);
-        assert_eq!(OperatorStatus::Failed("oops".into()), OperatorStatus::Failed("oops".into()));
+        assert_eq!(
+            OperatorStatus::Failed("oops".into()),
+            OperatorStatus::Failed("oops".into())
+        );
         assert_eq!(OperatorStatus::Cancelled, OperatorStatus::Cancelled);
     }
 
     #[test]
     fn test_operator_status_not_equal() {
         assert_ne!(OperatorStatus::Pending, OperatorStatus::Running);
-        assert_ne!(OperatorStatus::Failed("a".into()), OperatorStatus::Failed("b".into()));
+        assert_ne!(
+            OperatorStatus::Failed("a".into()),
+            OperatorStatus::Failed("b".into())
+        );
     }
 }

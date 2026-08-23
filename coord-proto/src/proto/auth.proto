@@ -4,38 +4,41 @@ package coord.auth;
 // ──── Auth Service ────
 
 service Auth {
-    // Auth 管理
-    rpc AuthEnable(AuthEnableRequest) returns (AuthEnableResponse);
-    rpc AuthDisable(AuthDisableRequest) returns (AuthDisableResponse);
-    rpc AuthStatus(AuthStatusRequest) returns (AuthStatusResponse);
+  // Auth 管理
+  rpc AuthEnable(AuthEnableRequest) returns (AuthEnableResponse);
+  rpc AuthDisable(AuthDisableRequest) returns (AuthDisableResponse);
+  rpc AuthStatus(AuthStatusRequest) returns (AuthStatusResponse);
 
-    // 用户管理
-    rpc UserAdd(UserAddRequest) returns (UserAddResponse);
-    rpc UserDelete(UserDeleteRequest) returns (UserDeleteResponse);
-    rpc UserChangePassword(UserChangePasswordRequest) returns (UserChangePasswordResponse);
-    rpc UserList(UserListRequest) returns (UserListResponse);
-    rpc UserGet(UserGetRequest) returns (UserGetResponse);
+  // 用户管理
+  rpc UserAdd(UserAddRequest) returns (UserAddResponse);
+  rpc UserDelete(UserDeleteRequest) returns (UserDeleteResponse);
+  rpc UserChangePassword(UserChangePasswordRequest) returns (UserChangePasswordResponse);
+  rpc UserList(UserListRequest) returns (UserListResponse);
+  rpc UserGet(UserGetRequest) returns (UserGetResponse);
 
-    // 角色管理
-    rpc RoleAdd(RoleAddRequest) returns (RoleAddResponse);
-    rpc RoleDelete(RoleDeleteRequest) returns (RoleDeleteResponse);
-    rpc RoleGrantPermission(RoleGrantPermissionRequest) returns (RoleGrantPermissionResponse);
-    rpc RoleRevokePermission(RoleRevokePermissionRequest) returns (RoleRevokePermissionResponse);
-    rpc RoleList(RoleListRequest) returns (RoleListResponse);
+  // 角色管理
+  rpc RoleAdd(RoleAddRequest) returns (RoleAddResponse);
+  rpc RoleDelete(RoleDeleteRequest) returns (RoleDeleteResponse);
+  rpc RoleGrantPermission(RoleGrantPermissionRequest) returns (RoleGrantPermissionResponse);
+  rpc RoleRevokePermission(RoleRevokePermissionRequest) returns (RoleRevokePermissionResponse);
+  rpc RoleList(RoleListRequest) returns (RoleListResponse);
 
-    // 用户-角色关联
-    rpc UserGrantRole(UserGrantRoleRequest) returns (UserGrantRoleResponse);
-    rpc UserRevokeRole(UserRevokeRoleRequest) returns (UserRevokeRoleResponse);
+  // 用户-角色关联
+  rpc UserGrantRole(UserGrantRoleRequest) returns (UserGrantRoleResponse);
+  rpc UserRevokeRole(UserRevokeRoleRequest) returns (UserRevokeRoleResponse);
 
-    // 认证
-    rpc Authenticate(AuthenticateRequest) returns (AuthenticateResponse);
+  // 认证
+  rpc Authenticate(AuthenticateRequest) returns (AuthenticateResponse);
 
-    // CCT v3: Agent 同步接口
-    rpc ListRoles(ListRolesRequest) returns (ListRolesResponse);
-    rpc GetRevocationDelta(GetRevocationDeltaRequest) returns (GetRevocationDeltaResponse);
+  // P2-07：refresh token 链路（单次使用，换新 access + refresh）
+  rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
 
-    // Bootstrap: Agent 首次启动认证
-    rpc Bootstrap(BootstrapRequest) returns (BootstrapResponse);
+  // CCT v3: Agent 同步接口
+  rpc ListRoles(ListRolesRequest) returns (ListRolesResponse);
+  rpc GetRevocationDelta(GetRevocationDeltaRequest) returns (GetRevocationDeltaResponse);
+
+  // Bootstrap: Agent 首次启动认证
+  rpc Bootstrap(BootstrapRequest) returns (BootstrapResponse);
 }
 
 // ──── Auth 管理 ────
@@ -48,154 +51,172 @@ message AuthDisableResponse {}
 
 message AuthStatusRequest {}
 message AuthStatusResponse {
-    bool enabled = 1;
+  bool enabled = 1;
 }
 
 // ──── 权限定义 ────
 
 enum PermissionType {
-    READ = 0;
-    WRITE = 1;
-    READWRITE = 2;
+  READ = 0;
+  WRITE = 1;
+  READWRITE = 2;
 }
 
 message Permission {
-    PermissionType type = 1;
-    bytes key = 2;          // Key 前缀
-    bytes range_end = 3;    // Key 范围结束（空 = 仅 key 前缀）
+  PermissionType type = 1;
+  bytes key = 2; // Key 前缀
+  bytes range_end = 3; // Key 范围结束（空 = 仅 key 前缀）
 }
 
 // ──── 能力授予（CCT v3） ────
 
 message CapabilityGrant {
-    string capability_id = 1;  // "data:kv:read"
-    string scope = 2;          // "/app/order-service/" 或 "" (无限制)
+  string capability_id = 1; // "data:kv:read"
+  string scope = 2; // "/app/order-service/" 或 "" (无限制)
 }
 
 // ──── 角色 ────
 
 message Role {
-    string name = 1;
-    repeated Permission permissions = 2;          // [deprecated] 旧 key-prefix 权限
-    repeated CapabilityGrant capability_grants = 3;  // 新能力授予列表（CCT v3）
-    bool high_sensitive = 4;                      // 若为 true，Agent 强制回查不缓存
+  string name = 1;
+  repeated Permission permissions = 2; // [deprecated] 旧 key-prefix 权限
+  repeated CapabilityGrant capability_grants = 3; // 新能力授予列表（CCT v3）
+  bool high_sensitive = 4; // 若为 true，Agent 强制回查不缓存
 }
 
 message RoleAddRequest {
-    string name = 1;
+  string name = 1;
 }
 message RoleAddResponse {}
 
 message RoleDeleteRequest {
-    string name = 1;
+  string name = 1;
 }
 message RoleDeleteResponse {}
 
 message RoleGrantPermissionRequest {
-    string name = 1;
-    Permission permission = 2;
+  string name = 1;
+  Permission permission = 2;
 }
 message RoleGrantPermissionResponse {}
 
 message RoleRevokePermissionRequest {
-    string name = 1;
-    bytes key = 2;
-    bytes range_end = 3;
+  string name = 1;
+  bytes key = 2;
+  bytes range_end = 3;
 }
 message RoleRevokePermissionResponse {}
 
 message RoleListRequest {}
 message RoleListResponse {
-    repeated Role roles = 1;
+  repeated Role roles = 1;
 }
 
 // ──── 用户 ────
 
 message User {
-    string name = 1;
-    repeated string roles = 2;
+  string name = 1;
+  repeated string roles = 2;
 }
 
 message UserAddRequest {
-    string name = 1;
-    string password = 2;
+  string name = 1;
+  string password = 2;
 }
 message UserAddResponse {}
 
 message UserDeleteRequest {
-    string name = 1;
+  string name = 1;
 }
 message UserDeleteResponse {}
 
 message UserChangePasswordRequest {
-    string name = 1;
-    string password = 2;
+  string name = 1;
+  string password = 2;
 }
 message UserChangePasswordResponse {}
 
 message UserListRequest {}
 message UserListResponse {
-    repeated User users = 1;
+  repeated User users = 1;
 }
 
 message UserGetRequest {
-    string name = 1;
+  string name = 1;
 }
 message UserGetResponse {
-    repeated string roles = 1;
+  repeated string roles = 1;
 }
 
 // ──── 用户-角色关联 ────
 
 message UserGrantRoleRequest {
-    string user = 1;
-    string role = 2;
+  string user = 1;
+  string role = 2;
 }
 message UserGrantRoleResponse {}
 
 message UserRevokeRoleRequest {
-    string user = 1;
-    string role = 2;
+  string user = 1;
+  string role = 2;
 }
 message UserRevokeRoleResponse {}
 
 // ──── 认证（CCT v3 扩展） ────
 
 message AuthenticateRequest {
-    string name = 1;
-    string password = 2;
+  string name = 1;
+  string password = 2;
 }
 message AuthenticateResponse {
-    string token = 1;           // [deprecated] 旧 Token
-    string cct = 2;             // 新 CCT v3
-    int64 expires_at = 3;       // Unix 秒级时间戳
-    repeated string roles = 4;  // 展示用角色列表
+  string token = 1; // [deprecated] 旧 Token
+  string cct = 2; // 新 CCT v3
+  int64 expires_at = 3; // Unix 秒级时间戳
+  repeated string roles = 4; // 展示用角色列表
+  // P2-07：会话持久化——refresh token（24h，单次使用）
+  string refresh_token = 5;
+  int64 refresh_expires_at = 6; // Unix 秒级时间戳
+}
+
+// ──── P2-07：Refresh Token ────
+
+message RefreshTokenRequest {
+  string refresh_token = 1;
+}
+
+message RefreshTokenResponse {
+  string token = 1;
+  string cct = 2;
+  int64 expires_at = 3;
+  repeated string roles = 4;
+  string refresh_token = 5;
+  int64 refresh_expires_at = 6;
 }
 
 // ──── Agent 角色同步 ────
 
 message ListRolesRequest {}
 message ListRolesResponse {
-    repeated Role roles = 1;
-    int64 version = 2;          // 角色映射版本号（用于增量同步）
+  repeated Role roles = 1;
+  int64 version = 2; // 角色映射版本号（用于增量同步）
 }
 
 // ──── Token 吊销增量同步 ────
 
 message GetRevocationDeltaRequest {
-    int64 since_version = 1;    // 上次同步的版本号
+  int64 since_version = 1; // 上次同步的版本号
 }
 message GetRevocationDeltaResponse {
-    repeated string revoked_jtis = 1;   // 增量吊销的 jti 列表
-    int64 current_version = 2;          // 当前最新版本号
+  repeated string revoked_jtis = 1; // 增量吊销的 jti 列表
+  int64 current_version = 2; // 当前最新版本号
 }
 
 // ──── Agent Bootstrap ────
 
 message BootstrapRequest {
-    string bootstrap_token = 1;  // 一次性 Bootstrap Token
+  string bootstrap_token = 1; // 一次性 Bootstrap Token
 }
 message BootstrapResponse {
-    string cct = 1;             // 短期 CCT（10 分钟，仅含 admin:auth:authenticate）
-    int64 expires_at = 2;       // Unix 秒级时间戳
+  string cct = 1; // 短期 CCT（10 分钟，仅含 admin:auth:authenticate）
+  int64 expires_at = 2; // Unix 秒级时间戳
 }

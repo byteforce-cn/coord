@@ -14,22 +14,23 @@ mod tests {
 
     use coord_core::storage::StorageBackend;
     use coord_core::types::StorageConfig;
+    use coord_proto::kv::kv_client::KvClient;
+    use coord_proto::kv::kv_server::KvServer;
+    use coord_proto::kv::{DeleteRequest, PutRequest, RangeRequest};
+    use coord_proto::lease::lease_server::LeaseServer;
+    use coord_proto::maintenance::maintenance_server::MaintenanceServer;
+    use coord_proto::txn::txn_server::TxnServer;
+    use coord_proto::watch::watch_server::WatchServer;
     use coord_server::raft::log_store::LogStore;
-    use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcService, RaftRpcServer};
+    use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
     use coord_server::raft::state_machine::StateMachineStore;
     use coord_server::raft::CoordRaft;
+    use coord_server::raft::{new_basic_node, new_raft, RaftConfig};
     use coord_server::server::CoordNode;
     use coord_server::storage::compaction::CompactionManager;
     use coord_server::storage::mvcc::MvccStorage;
     use coord_server::storage::redb_backend::RedbBackend;
     use coord_server::watch::WatchDispatcher;
-    use coord_proto::kv::kv_client::KvClient;
-    use coord_proto::kv::kv_server::KvServer;
-    use coord_proto::kv::{DeleteRequest, PutRequest, RangeRequest};
-    use coord_proto::lease::lease_server::LeaseServer;
-    use coord_proto::txn::txn_server::TxnServer;
-    use coord_proto::watch::watch_server::WatchServer;
-    use coord_proto::maintenance::maintenance_server::MaintenanceServer;
     use tonic::transport::Channel;
 
     /// Find an available port on localhost
@@ -75,12 +76,12 @@ mod tests {
 
             // 1. Initialize storage
             let storage_config = StorageConfig::default();
-            let backend =
-                RedbBackend::open(&data_dir, &storage_config).expect("open redb backend");
+            let backend = RedbBackend::open(&data_dir, &storage_config).expect("open redb backend");
 
-            // 2. Two MvccStorage instances sharing the same backend
-            let mvcc_read = Arc::new(MvccStorage::new(backend.clone()).expect("create mvcc read"));
-            let mvcc_raft = MvccStorage::new(backend).expect("create mvcc raft");
+            // 2. Single MvccStorage instance shared across all paths (D-A1)
+            let mvcc = Arc::new(MvccStorage::new(backend).expect("create mvcc"));
+            let snapshot_tracker =
+                Arc::new(coord_server::storage::snapshot::SnapshotTracker::default());
 
             // 3. Watch dispatcher
             let watch_dispatcher = Arc::new(WatchDispatcher::start());
@@ -88,25 +89,26 @@ mod tests {
             // 4. Raft log store
             let log_store = LogStore::new(&data_dir)
                 .await
-                .expect("create raft log store");
+                .expect("create raft log store")
+                .with_snapshot_tracker(Arc::clone(&snapshot_tracker));
 
             // 5. Raft state machine
-            let sm_store = StateMachineStore::new(mvcc_raft);
+            let sm_store = StateMachineStore::new(
+                Arc::clone(&mvcc),
+                data_dir.join("snapshots"),
+                Arc::clone(&snapshot_tracker),
+            );
 
             // 6. Raft network factory
-            let blocklist = Arc::new(parking_lot::RwLock::new(
-                std::collections::HashSet::new(),
-            ));
-            let network_factory = RaftNetworkFactoryImpl::with_shared_blocklist(
-                node_id,
-                Arc::clone(&blocklist),
-            );
+            let blocklist = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
+            let network_factory =
+                RaftNetworkFactoryImpl::with_shared_blocklist(node_id, Arc::clone(&blocklist));
             for (id, addr) in &all_raft_addrs {
                 network_factory.register_node(*id, addr.clone());
             }
 
             // 7. Raft config (relaxed timeouts for multi-node test stability)
-            let raft_config = openraft::Config {
+            let raft_config = RaftConfig {
                 heartbeat_interval: 200,
                 election_timeout_min: 800,
                 election_timeout_max: 1500,
@@ -117,7 +119,7 @@ mod tests {
             let raft_rpc_service = RaftRpcService::new();
 
             // 9. Create Raft instance
-            let raft = openraft::Raft::new(
+            let raft = new_raft(
                 node_id,
                 Arc::new(raft_config),
                 network_factory,
@@ -134,10 +136,11 @@ mod tests {
             if is_bootstrap {
                 let mut members = BTreeMap::new();
                 for &id in &initial_members {
-                    let addr = all_raft_addrs.get(&id).cloned().unwrap_or_else(|| {
-                        format!("127.0.0.1:{}", 50051 + id)
-                    });
-                    members.insert(id, openraft::impls::BasicNode::new(&addr));
+                    let addr = all_raft_addrs
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("127.0.0.1:{}", 50051 + id));
+                    members.insert(id, new_basic_node(&addr));
                 }
                 raft.initialize(members)
                     .await
@@ -147,16 +150,21 @@ mod tests {
             let raft = Arc::new(raft);
 
             // 11. Build CoordNode
-            let mut node = CoordNode::new(Arc::clone(&mvcc_read));
+            let mut node = CoordNode::new(Arc::clone(&mvcc));
+            node.node_id = node_id;
             node.watch_dispatcher = Some(Arc::clone(&watch_dispatcher));
             node.raft = Some(Arc::clone(&raft));
             let node = Arc::new(node);
 
-            // 12. Start compaction manager
-            let compaction_config =
-                coord_server::storage::compaction::CompactionConfig::default();
-            let _compaction_mgr =
-                CompactionManager::start(Arc::clone(&mvcc_read), compaction_config);
+            // 12. Start compaction manager（P1-01：leader 经 raft 提案）
+            let compaction_config = coord_server::storage::compaction::CompactionConfig::default();
+            let compaction_proposer: Arc<dyn coord_server::storage::compaction::CompactProposer> =
+                node.clone();
+            let _compaction_mgr = CompactionManager::start(
+                Arc::clone(&mvcc),
+                compaction_config,
+                Some(compaction_proposer),
+            );
 
             // 13. Build gRPC services
             let kv_svc = KvServer::from_arc(Arc::clone(&node));
@@ -224,12 +232,12 @@ mod tests {
 
             // 1. Initialize storage
             let storage_config = StorageConfig::default();
-            let backend =
-                RedbBackend::open(&data_dir, &storage_config).expect("open redb backend");
+            let backend = RedbBackend::open(&data_dir, &storage_config).expect("open redb backend");
 
-            // 2. Two MvccStorage instances sharing the same backend
-            let mvcc_read = Arc::new(MvccStorage::new(backend.clone()).expect("create mvcc read"));
-            let mvcc_raft = MvccStorage::new(backend).expect("create mvcc raft");
+            // 2. Single MvccStorage instance shared across all paths (D-A1)
+            let mvcc = Arc::new(MvccStorage::new(backend).expect("create mvcc"));
+            let snapshot_tracker =
+                Arc::new(coord_server::storage::snapshot::SnapshotTracker::default());
 
             // 3. Watch dispatcher
             let watch_dispatcher = Arc::new(WatchDispatcher::start());
@@ -237,25 +245,26 @@ mod tests {
             // 4. Raft log store
             let log_store = LogStore::new(&data_dir)
                 .await
-                .expect("create raft log store");
+                .expect("create raft log store")
+                .with_snapshot_tracker(Arc::clone(&snapshot_tracker));
 
             // 5. Raft state machine
-            let sm_store = StateMachineStore::new(mvcc_raft);
+            let sm_store = StateMachineStore::new(
+                Arc::clone(&mvcc),
+                data_dir.join("snapshots"),
+                Arc::clone(&snapshot_tracker),
+            );
 
             // 6. Raft network factory — pre-register ALL known node addresses
-            let blocklist = Arc::new(parking_lot::RwLock::new(
-                std::collections::HashSet::new(),
-            ));
-            let network_factory = RaftNetworkFactoryImpl::with_shared_blocklist(
-                node_id,
-                Arc::clone(&blocklist),
-            );
+            let blocklist = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
+            let network_factory =
+                RaftNetworkFactoryImpl::with_shared_blocklist(node_id, Arc::clone(&blocklist));
             for (id, addr) in &all_raft_addrs {
                 network_factory.register_node(*id, addr.clone());
             }
 
             // 7. Raft config (relaxed timeouts for multi-node test stability)
-            let raft_config = openraft::Config {
+            let raft_config = RaftConfig {
                 heartbeat_interval: 200,
                 election_timeout_min: 800,
                 election_timeout_max: 1500,
@@ -266,7 +275,7 @@ mod tests {
             let raft_rpc_service = RaftRpcService::new();
 
             // 9. Create Raft instance
-            let raft = openraft::Raft::new(
+            let raft = new_raft(
                 node_id,
                 Arc::new(raft_config),
                 network_factory,
@@ -281,25 +290,28 @@ mod tests {
             // 10. Bootstrap as single-node cluster
             if bootstrap {
                 let mut members = BTreeMap::new();
-                members.insert(node_id, openraft::impls::BasicNode::new(&raft_addr.to_string()));
-                raft.initialize(members)
-                    .await
-                    .expect("raft initialize");
+                members.insert(node_id, new_basic_node(&raft_addr.to_string()));
+                raft.initialize(members).await.expect("raft initialize");
             }
 
             let raft = Arc::new(raft);
 
             // 11. Build CoordNode
-            let mut node = CoordNode::new(Arc::clone(&mvcc_read));
+            let mut node = CoordNode::new(Arc::clone(&mvcc));
+            node.node_id = node_id;
             node.watch_dispatcher = Some(Arc::clone(&watch_dispatcher));
             node.raft = Some(Arc::clone(&raft));
             let node = Arc::new(node);
 
-            // 12. Start compaction manager
-            let compaction_config =
-                coord_server::storage::compaction::CompactionConfig::default();
-            let _compaction_mgr =
-                CompactionManager::start(Arc::clone(&mvcc_read), compaction_config);
+            // 12. Start compaction manager（P1-01：leader 经 raft 提案）
+            let compaction_config = coord_server::storage::compaction::CompactionConfig::default();
+            let compaction_proposer: Arc<dyn coord_server::storage::compaction::CompactProposer> =
+                node.clone();
+            let _compaction_mgr = CompactionManager::start(
+                Arc::clone(&mvcc),
+                compaction_config,
+                Some(compaction_proposer),
+            );
 
             // 13. Build gRPC services
             let kv_svc = KvServer::from_arc(Arc::clone(&node));
@@ -519,7 +531,11 @@ mod tests {
             Ok(resp) => {
                 let inner = resp.into_inner();
                 tracing::info!("Put succeeded: revision={}", inner.revision);
-                assert!(inner.revision > 0, "revision should be > 0, got {}", inner.revision);
+                assert!(
+                    inner.revision > 0,
+                    "revision should be > 0, got {}",
+                    inner.revision
+                );
             }
             Err(status) => {
                 panic!("Put failed with gRPC status: {:?}", status);
@@ -708,7 +724,9 @@ mod tests {
             "Node 3 local storage should have the replicated value"
         );
 
-        tracing::info!("Multi-node write consistency verified — all 3 nodes have the data in local storage");
+        tracing::info!(
+            "Multi-node write consistency verified — all 3 nodes have the data in local storage"
+        );
     }
 
     // ──── Test: Leader failover ────
@@ -742,8 +760,16 @@ mod tests {
             leader_from_n2,
             leader_from_n3
         );
-        assert_eq!(leader_from_n2, Some(1), "Node 2 should see node 1 as leader");
-        assert_eq!(leader_from_n3, Some(1), "Node 3 should see node 1 as leader");
+        assert_eq!(
+            leader_from_n2,
+            Some(1),
+            "Node 2 should see node 1 as leader"
+        );
+        assert_eq!(
+            leader_from_n3,
+            Some(1),
+            "Node 3 should see node 1 as leader"
+        );
 
         // Write data through leader — this verifies quorum works (2 of 3 voters)
         let mut kv1 = n1.kv_client().await;
@@ -760,9 +786,15 @@ mod tests {
                 .await
                 .expect("Put should succeed");
             let rev = resp.into_inner().revision;
-            assert!(rev > 0, "Put revision should be positive (quorum commit verified)");
+            assert!(
+                rev > 0,
+                "Put revision should be positive (quorum commit verified)"
+            );
         }
-        tracing::info!("Wrote {} keys through leader — quorum commit verified", test_keys.len());
+        tracing::info!(
+            "Wrote {} keys through leader — quorum commit verified",
+            test_keys.len()
+        );
 
         // Wait for replication to followers
         tokio::time::sleep(Duration::from_millis(2000)).await;
@@ -773,15 +805,29 @@ mod tests {
             let v1 = n1.read_local(key);
             let v2 = n2.read_local(key);
             let v3 = n3.read_local(key);
-            assert_eq!(v1.as_deref(), Some(expected.as_bytes()),
-                "Node 1 local should have {:?}", String::from_utf8_lossy(key));
-            assert_eq!(v2.as_deref(), Some(expected.as_bytes()),
-                "Node 2 local should have {:?} (AppendEntries from leader verified)", String::from_utf8_lossy(key));
-            assert_eq!(v3.as_deref(), Some(expected.as_bytes()),
-                "Node 3 local should have {:?}", String::from_utf8_lossy(key));
+            assert_eq!(
+                v1.as_deref(),
+                Some(expected.as_bytes()),
+                "Node 1 local should have {:?}",
+                String::from_utf8_lossy(key)
+            );
+            assert_eq!(
+                v2.as_deref(),
+                Some(expected.as_bytes()),
+                "Node 2 local should have {:?} (AppendEntries from leader verified)",
+                String::from_utf8_lossy(key)
+            );
+            assert_eq!(
+                v3.as_deref(),
+                Some(expected.as_bytes()),
+                "Node 3 local should have {:?}",
+                String::from_utf8_lossy(key)
+            );
         }
 
-        tracing::info!("3-node cluster: writes commit, AppendEntries replicates to all followers — verified");
+        tracing::info!(
+            "3-node cluster: writes commit, AppendEntries replicates to all followers — verified"
+        );
     }
 
     // ──── Test: Membership changes ────
@@ -814,7 +860,10 @@ mod tests {
         all_addrs.insert(2, format!("127.0.0.1:{}", p2_raft));
 
         let n1 = TestNode::start(1, p1_grpc, p1_raft, all_addrs.clone(), true).await;
-        assert!(n1.wait_for_leadership(3000).await, "Node 1 should be leader");
+        assert!(
+            n1.wait_for_leadership(3000).await,
+            "Node 1 should be leader"
+        );
 
         // Write some data before membership change
         let mut kv1 = n1.kv_client().await;
@@ -833,7 +882,7 @@ mod tests {
 
         tracing::info!("Adding node 2 as learner...");
         n1.raft
-            .add_learner(2, openraft::impls::BasicNode::new(&all_addrs[&2]), true)
+            .add_learner(2, new_basic_node(&all_addrs[&2]), true)
             .await
             .expect("add_learner for node 2");
 
@@ -844,7 +893,7 @@ mod tests {
         tracing::info!("Promoting node 2 to voter...");
         let voter_ids: std::collections::BTreeSet<u64> = [1, 2].into();
         n1.raft
-            .change_membership(openraft::ChangeMembers::AddVoterIds(voter_ids), true)
+            .change_membership(coord_server::raft::add_voter_ids(voter_ids), true)
             .await
             .expect("change_membership to 2 voters");
 
@@ -939,12 +988,24 @@ mod tests {
 
         // Verify all data is on all nodes' local storage before kill
         for (key, value) in &test_data {
-            assert_eq!(n1.read_local(key).as_deref(), Some(*value),
-                "Node 1 should have {:?} before kill", String::from_utf8_lossy(key));
-            assert_eq!(n2.read_local(key).as_deref(), Some(*value),
-                "Node 2 should have {:?} before kill", String::from_utf8_lossy(key));
-            assert_eq!(n3.read_local(key).as_deref(), Some(*value),
-                "Node 3 should have {:?} before kill", String::from_utf8_lossy(key));
+            assert_eq!(
+                n1.read_local(key).as_deref(),
+                Some(*value),
+                "Node 1 should have {:?} before kill",
+                String::from_utf8_lossy(key)
+            );
+            assert_eq!(
+                n2.read_local(key).as_deref(),
+                Some(*value),
+                "Node 2 should have {:?} before kill",
+                String::from_utf8_lossy(key)
+            );
+            assert_eq!(
+                n3.read_local(key).as_deref(),
+                Some(*value),
+                "Node 3 should have {:?} before kill",
+                String::from_utf8_lossy(key)
+            );
         }
 
         // Kill the leader
@@ -955,7 +1016,10 @@ mod tests {
         // Wait for a new leader to be elected (nodes 2 or 3)
         // Election timeout is 800-1500ms, plus Vote RPC round trips
         let new_leader_idx = wait_for_any_leader(&[&n2, &n3], 10000).await;
-        assert!(new_leader_idx.is_some(), "A new leader should be elected after killing node 1");
+        assert!(
+            new_leader_idx.is_some(),
+            "A new leader should be elected after killing node 1"
+        );
 
         let new_leader = if new_leader_idx == Some(0) { &n2 } else { &n3 };
         tracing::info!(
@@ -975,7 +1039,10 @@ mod tests {
                 String::from_utf8_lossy(key)
             );
         }
-        tracing::info!("All {} keys preserved after leader failover", test_data.len());
+        tracing::info!(
+            "All {} keys preserved after leader failover",
+            test_data.len()
+        );
 
         // Write new data through the new leader
         let resp = kv_new
@@ -988,7 +1055,10 @@ mod tests {
             })
             .await
             .expect("Write through new leader should succeed");
-        assert!(resp.into_inner().revision > 0, "New leader should accept writes");
+        assert!(
+            resp.into_inner().revision > 0,
+            "New leader should accept writes"
+        );
 
         // Verify new data on the remaining follower's local storage
         tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -1040,7 +1110,7 @@ mod tests {
         tracing::info!("Removing node 3 from voter set...");
         let remove_ids: std::collections::BTreeSet<u64> = [3].into();
         n1.raft
-            .change_membership(openraft::ChangeMembers::RemoveVoters(remove_ids), true)
+            .change_membership(coord_server::raft::remove_voter_ids(remove_ids), true)
             .await
             .expect("change_membership to remove node 3");
 
@@ -1048,7 +1118,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1500)).await;
 
         // Verify node 1 is still leader
-        assert!(n1.is_leader().await, "Node 1 should still be leader after removing node 3");
+        assert!(
+            n1.is_leader().await,
+            "Node 1 should still be leader after removing node 3"
+        );
 
         // Write new data — should commit with quorum of 2 (nodes 1 and 2)
         for i in 0..5 {
@@ -1063,7 +1136,10 @@ mod tests {
                 })
                 .await
                 .expect("Put after voter removal should succeed");
-            assert!(resp.into_inner().revision > 0, "Write after removal should commit");
+            assert!(
+                resp.into_inner().revision > 0,
+                "Write after removal should commit"
+            );
         }
         tracing::info!("Wrote 5 keys after removing node 3");
 
@@ -1077,7 +1153,8 @@ mod tests {
             assert_eq!(
                 local.as_deref(),
                 Some(format!("val-{}", i).as_bytes()),
-                "Node 2 should have post-remove key {} replicated", i
+                "Node 2 should have post-remove key {} replicated",
+                i
             );
         }
 
@@ -1086,7 +1163,9 @@ mod tests {
         // but since we removed it from the voter set, it should not participate in quorum.
         // We just verify node 1 and 2 are consistent.
 
-        tracing::info!("Remove voter test passed — cluster continues with 2 voters, data replicates correctly");
+        tracing::info!(
+            "Remove voter test passed — cluster continues with 2 voters, data replicates correctly"
+        );
     }
 
     // ──── Test: Cascading leader failover ────
@@ -1139,7 +1218,10 @@ mod tests {
 
         // Wait for new leader (n2 or n3) — majority of 2/3 can elect
         let new_leader_idx = wait_for_any_leader(&[&n2, &n3], 10000).await;
-        assert!(new_leader_idx.is_some(), "A new leader should be elected after killing node 1");
+        assert!(
+            new_leader_idx.is_some(),
+            "A new leader should be elected after killing node 1"
+        );
         let leader2 = if new_leader_idx == Some(0) { &n2 } else { &n3 };
         let survivor = if leader2.node_id == 2 { &n3 } else { &n2 };
         tracing::info!("Round 1 new leader: node {}", leader2.node_id);
@@ -1148,8 +1230,12 @@ mod tests {
         let mut kv_leader2 = leader2.kv_client().await;
         for (key, expected) in &round1_keys {
             let val = read_key(&mut kv_leader2, key).await;
-            assert_eq!(val.as_deref(), Some(*expected),
-                "Round 1 data {:?} should survive first failover", String::from_utf8_lossy(key));
+            assert_eq!(
+                val.as_deref(),
+                Some(*expected),
+                "Round 1 data {:?} should survive first failover",
+                String::from_utf8_lossy(key)
+            );
         }
 
         // ── Round 2: Write more data, kill new leader ──
@@ -1158,28 +1244,35 @@ mod tests {
             (b"cascade-r2-b", b"round2-echo"),
         ];
         for (key, value) in &round2_keys {
-            kv_leader2.put(PutRequest {
-                key: key.to_vec(),
-                value: value.to_vec(),
-                lease_id: 0,
-                prev_kv: false,
-                request_id: vec![],
-            })
-            .await
-            .expect("Round 2 put should succeed");
+            kv_leader2
+                .put(PutRequest {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                    lease_id: 0,
+                    prev_kv: false,
+                    request_id: vec![],
+                })
+                .await
+                .expect("Round 2 put should succeed");
         }
         tokio::time::sleep(Duration::from_millis(1000)).await;
 
         // Verify round 2 data on survivor's local storage before killing leader2
         for (key, expected) in &round2_keys {
             let local = survivor.read_local(key);
-            assert_eq!(local.as_deref(), Some(*expected),
+            assert_eq!(
+                local.as_deref(),
+                Some(*expected),
                 "Round 2 data {:?} should replicate to survivor before second failover",
-                String::from_utf8_lossy(key));
+                String::from_utf8_lossy(key)
+            );
         }
 
         // Kill the second leader — now only 1 of 3 nodes remains
-        tracing::info!("=== Round 2: Killing node {} (new leader) — quorum lost ===", leader2.node_id);
+        tracing::info!(
+            "=== Round 2: Killing node {} (new leader) — quorum lost ===",
+            leader2.node_id
+        );
         leader2.kill_ref();
         tokio::time::sleep(Duration::from_millis(3000)).await;
 
@@ -1190,7 +1283,8 @@ mod tests {
         let is_leader = survivor.is_leader().await;
         tracing::info!(
             "Last surviving node {} is_leader={} (expected: false — no quorum possible)",
-            survivor.node_id, is_leader
+            survivor.node_id,
+            is_leader
         );
 
         // Verify the last node does not claim leadership without quorum
@@ -1205,9 +1299,12 @@ mod tests {
         // Verify data is still readable from local storage on the survivor
         for (key, expected) in round1_keys.iter().chain(round2_keys.iter()) {
             let local = survivor.read_local(key);
-            assert_eq!(local.as_deref(), Some(*expected),
+            assert_eq!(
+                local.as_deref(),
+                Some(*expected),
                 "Data {:?} should be preserved in local storage on last surviving node",
-                String::from_utf8_lossy(key));
+                String::from_utf8_lossy(key)
+            );
         }
 
         tracing::info!(
@@ -1285,7 +1382,11 @@ mod tests {
         );
 
         let majority_leader = if n1.is_leader().await { &n1 } else { &n2 };
-        let majority_follower = if majority_leader.node_id == 1 { &n2 } else { &n1 };
+        let majority_follower = if majority_leader.node_id == 1 {
+            &n2
+        } else {
+            &n1
+        };
         tracing::info!(
             "Majority leader after partition: node {}, follower: node {}",
             majority_leader.node_id,
@@ -1300,19 +1401,25 @@ mod tests {
             (b"during-part-z", b"written-during-partition-z"),
         ];
         for (key, value) in &during_partition_keys {
-            let resp = kv_majority.put(PutRequest {
-                key: key.to_vec(),
-                value: value.to_vec(),
-                lease_id: 0,
-                prev_kv: false,
-                request_id: vec![],
-            })
-            .await
-            .expect("Write during partition should succeed");
-            assert!(resp.into_inner().revision > 0,
-                "Write during partition should commit (quorum of 2/3)");
+            let resp = kv_majority
+                .put(PutRequest {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                    lease_id: 0,
+                    prev_kv: false,
+                    request_id: vec![],
+                })
+                .await
+                .expect("Write during partition should succeed");
+            assert!(
+                resp.into_inner().revision > 0,
+                "Write during partition should commit (quorum of 2/3)"
+            );
         }
-        tracing::info!("Wrote {} keys during partition", during_partition_keys.len());
+        tracing::info!(
+            "Wrote {} keys during partition",
+            during_partition_keys.len()
+        );
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -1320,32 +1427,44 @@ mod tests {
         // Pre-partition data should still be readable
         for (key, expected) in &pre_partition_keys {
             let val = read_key(&mut kv_majority, key).await;
-            assert_eq!(val.as_deref(), Some(*expected),
-                "Pre-partition data should survive partition on majority leader");
+            assert_eq!(
+                val.as_deref(),
+                Some(*expected),
+                "Pre-partition data should survive partition on majority leader"
+            );
         }
 
         // During-partition data should be readable on leader
         for (key, expected) in &during_partition_keys {
             let val = read_key(&mut kv_majority, key).await;
-            assert_eq!(val.as_deref(), Some(*expected),
-                "During-partition data should be readable on majority leader");
+            assert_eq!(
+                val.as_deref(),
+                Some(*expected),
+                "During-partition data should be readable on majority leader"
+            );
         }
 
         // All data should be replicated to the majority follower's local storage
-        for (key, expected) in pre_partition_keys.iter().chain(during_partition_keys.iter()) {
+        for (key, expected) in pre_partition_keys
+            .iter()
+            .chain(during_partition_keys.iter())
+        {
             let local = majority_follower.read_local(key);
-            assert_eq!(local.as_deref(), Some(*expected),
+            assert_eq!(
+                local.as_deref(),
+                Some(*expected),
                 "Key {:?} should be replicated to majority follower during partition",
-                String::from_utf8_lossy(key));
+                String::from_utf8_lossy(key)
+            );
         }
 
         // ── Heal partition: restart node 3 and rejoin ──
         tracing::info!("=== Healing partition: restarting node 3 as new node ===");
         let mut all_addrs = BTreeMap::new();
         all_addrs.insert(1, format!("127.0.0.1:{}", p3_raft)); // placeholder, real addrs unknown at this point
-        // We construct addresses based on knowledge of running nodes
-        // Actually, we cannot easily get the raft addresses of n1 and n2.
-        // Instead, add node 3 back as a learner via membership API.
+                                                               // We construct addresses based on knowledge of running nodes
+                                                               // Actually, we cannot easily get the raft addresses of n1 and n2.
+                                                               // Instead, add node 3 back as a learner via membership API.
 
         // For the healing phase, we add a fresh node to the cluster.
         // Since we don't know n1/n2's raft addresses from outside, we
@@ -1358,31 +1477,42 @@ mod tests {
             (b"post-heal-2", b"after-partition-healed-2"),
         ];
         for (key, value) in &post_heal_keys {
-            let resp = kv_majority.put(PutRequest {
-                key: key.to_vec(),
-                value: value.to_vec(),
-                lease_id: 0,
-                prev_kv: false,
-                request_id: vec![],
-            })
-            .await
-            .expect("Post-heal write should succeed");
-            assert!(resp.into_inner().revision > 0, "Post-heal write should commit");
+            let resp = kv_majority
+                .put(PutRequest {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                    lease_id: 0,
+                    prev_kv: false,
+                    request_id: vec![],
+                })
+                .await
+                .expect("Post-heal write should succeed");
+            assert!(
+                resp.into_inner().revision > 0,
+                "Post-heal write should commit"
+            );
         }
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Verify all data on both majority nodes
-        for (key, expected) in pre_partition_keys.iter()
+        for (key, expected) in pre_partition_keys
+            .iter()
             .chain(during_partition_keys.iter())
             .chain(post_heal_keys.iter())
         {
             let val = read_key(&mut kv_majority, key).await;
-            assert_eq!(val.as_deref(), Some(*expected),
-                "All data should be preserved after partition heal on leader");
+            assert_eq!(
+                val.as_deref(),
+                Some(*expected),
+                "All data should be preserved after partition heal on leader"
+            );
             let local = majority_follower.read_local(key);
-            assert_eq!(local.as_deref(), Some(*expected),
-                "All data should be replicated to follower after partition heal");
+            assert_eq!(
+                local.as_deref(),
+                Some(*expected),
+                "All data should be replicated to follower after partition heal"
+            );
         }
 
         tracing::info!(
@@ -1420,10 +1550,8 @@ mod tests {
 
         // Write pre-partition data
         let mut kv1 = n1.kv_client().await;
-        let pre_keys: Vec<(&[u8], &[u8])> = vec![
-            (b"sym-pre-a", b"alpha"),
-            (b"sym-pre-b", b"bravo"),
-        ];
+        let pre_keys: Vec<(&[u8], &[u8])> =
+            vec![(b"sym-pre-a", b"alpha"), (b"sym-pre-b", b"bravo")];
         for (key, value) in &pre_keys {
             kv1.put(PutRequest {
                 key: key.to_vec(),
@@ -1466,7 +1594,11 @@ mod tests {
         );
 
         let majority_leader = if n1.is_leader().await { &n1 } else { &n2 };
-        let majority_follower = if majority_leader.node_id == 1 { &n2 } else { &n1 };
+        let majority_follower = if majority_leader.node_id == 1 {
+            &n2
+        } else {
+            &n1
+        };
         tracing::info!(
             "Majority leader during partition: node {}, follower: node {}",
             majority_leader.node_id,
@@ -1491,21 +1623,25 @@ mod tests {
             (b"sym-during-z", b"zulu"),
         ];
         for (key, value) in &during_keys {
-            let resp = kv_majority.put(PutRequest {
-                key: key.to_vec(),
-                value: value.to_vec(),
-                lease_id: 0,
-                prev_kv: false,
-                request_id: vec![],
-            })
-            .await
-            .expect("Write during symmetric partition should succeed");
+            let resp = kv_majority
+                .put(PutRequest {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                    lease_id: 0,
+                    prev_kv: false,
+                    request_id: vec![],
+                })
+                .await
+                .expect("Write during symmetric partition should succeed");
             assert!(
                 resp.into_inner().revision > 0,
                 "Write should commit with quorum of 2/3 during symmetric partition"
             );
         }
-        tracing::info!("Wrote {} keys on majority side during partition", during_keys.len());
+        tracing::info!(
+            "Wrote {} keys on majority side during partition",
+            during_keys.len()
+        );
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -1530,7 +1666,9 @@ mod tests {
                 String::from_utf8_lossy(key)
             );
         }
-        tracing::info!("Verified: minority node 3 does NOT have during-partition data (correct isolation)");
+        tracing::info!(
+            "Verified: minority node 3 does NOT have during-partition data (correct isolation)"
+        );
 
         // ── Heal partition ──
         tracing::info!("=== Healing symmetric partition ===");
@@ -1561,16 +1699,23 @@ mod tests {
             let is_n1 = n1.is_leader().await;
             let is_n2 = n2.is_leader().await;
             let is_n3 = n3.is_leader().await;
-            tracing::info!(
-                "Post-heal leader: n1={}, n2={}, n3={}",
-                is_n1, is_n2, is_n3
-            );
-            if is_n1 { &n1 } else if is_n2 { &n2 } else if is_n3 { &n3 } else {
+            tracing::info!("Post-heal leader: n1={}, n2={}, n3={}", is_n1, is_n2, is_n3);
+            if is_n1 {
+                &n1
+            } else if is_n2 {
+                &n2
+            } else if is_n3 {
+                &n3
+            } else {
                 // If no clear leader yet, wait and retry
                 tokio::time::sleep(Duration::from_millis(2000)).await;
-                if n1.is_leader().await { &n1 }
-                else if n2.is_leader().await { &n2 }
-                else { &n3 }
+                if n1.is_leader().await {
+                    &n1
+                } else if n2.is_leader().await {
+                    &n2
+                } else {
+                    &n3
+                }
             }
         };
 
@@ -1581,22 +1726,27 @@ mod tests {
             (b"sym-post-2", b"post-heal-2"),
         ];
         for (key, value) in &post_heal_keys {
-            let resp = kv_post_heal.put(PutRequest {
-                key: key.to_vec(),
-                value: value.to_vec(),
-                lease_id: 0,
-                prev_kv: false,
-                request_id: vec![],
-            })
-            .await
-            .expect("Post-heal write should succeed");
-            assert!(resp.into_inner().revision > 0, "Post-heal write should commit");
+            let resp = kv_post_heal
+                .put(PutRequest {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                    lease_id: 0,
+                    prev_kv: false,
+                    request_id: vec![],
+                })
+                .await
+                .expect("Post-heal write should succeed");
+            assert!(
+                resp.into_inner().revision > 0,
+                "Post-heal write should commit"
+            );
         }
 
         tokio::time::sleep(Duration::from_millis(1000)).await;
 
         // All 3 nodes should have all data after healing
-        for (key, expected) in pre_keys.iter()
+        for (key, expected) in pre_keys
+            .iter()
             .chain(during_keys.iter())
             .chain(post_heal_keys.iter())
         {
@@ -1675,7 +1825,10 @@ mod tests {
 
         // Verify leader is still available (quorum of 2/3 still possible)
         let leader_still_alive = n1.is_leader().await || n2.is_leader().await;
-        assert!(leader_still_alive, "Leader should still be available after killing one follower");
+        assert!(
+            leader_still_alive,
+            "Leader should still be available after killing one follower"
+        );
 
         let leader = if n1.is_leader().await { &n1 } else { &n2 };
         let survivor = if leader.node_id == 1 { &n2 } else { &n1 };
@@ -1693,21 +1846,25 @@ mod tests {
             (b"follower-rec-during-z", b"during-outage-zulu"),
         ];
         for (key, value) in &during_outage_keys {
-            let resp = kv_leader.put(PutRequest {
-                key: key.to_vec(),
-                value: value.to_vec(),
-                lease_id: 0,
-                prev_kv: false,
-                request_id: vec![],
-            })
-            .await
-            .expect("Write during follower outage should succeed");
+            let resp = kv_leader
+                .put(PutRequest {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                    lease_id: 0,
+                    prev_kv: false,
+                    request_id: vec![],
+                })
+                .await
+                .expect("Write during follower outage should succeed");
             assert!(
                 resp.into_inner().revision > 0,
                 "Write should commit during follower outage (quorum 2/3)"
             );
         }
-        tracing::info!("Wrote {} keys during follower outage", during_outage_keys.len());
+        tracing::info!(
+            "Wrote {} keys during follower outage",
+            during_outage_keys.len()
+        );
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -1734,8 +1891,9 @@ mod tests {
         // Phase 5: Remove dead node from voter set — cluster continues with 2 voters
         tracing::info!("Removing dead node 3 from voter set...");
         let remove_ids: std::collections::BTreeSet<u64> = [3].into();
-        leader.raft
-            .change_membership(openraft::ChangeMembers::RemoveVoters(remove_ids), true)
+        leader
+            .raft
+            .change_membership(coord_server::raft::remove_voter_ids(remove_ids), true)
             .await
             .expect("change_membership to remove dead node 3");
 
@@ -1747,16 +1905,20 @@ mod tests {
             (b"follower-rec-post-2", b"post-remove-2"),
         ];
         for (key, value) in &post_remove_keys {
-            let resp = kv_leader.put(PutRequest {
-                key: key.to_vec(),
-                value: value.to_vec(),
-                lease_id: 0,
-                prev_kv: false,
-                request_id: vec![],
-            })
-            .await
-            .expect("Write after removing dead node should succeed");
-            assert!(resp.into_inner().revision > 0, "Write should commit with 2 voters");
+            let resp = kv_leader
+                .put(PutRequest {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                    lease_id: 0,
+                    prev_kv: false,
+                    request_id: vec![],
+                })
+                .await
+                .expect("Write after removing dead node should succeed");
+            assert!(
+                resp.into_inner().revision > 0,
+                "Write should commit with 2 voters"
+            );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -1767,7 +1929,8 @@ mod tests {
         }
 
         // Verify ALL data still intact on remaining nodes
-        for (key, expected) in baseline_keys.iter()
+        for (key, expected) in baseline_keys
+            .iter()
             .chain(during_outage_keys.iter())
             .chain(post_remove_keys.iter())
         {
@@ -1781,5 +1944,73 @@ mod tests {
              all writes commit correctly, data integrity preserved, \
              dead node removed from voter set, cluster continues with 2 voters"
         );
+    }
+
+    // ──── Test: SDK（coord-client）3 节点 kill-leader 恢复（P2-04）────
+
+    /// Verify that the Rust client SDK transparently recovers after the leader
+    /// is killed: writes before the kill are preserved; writes after the kill
+    /// succeed once a new leader is elected (client retry + leader discovery +
+    /// re-route), and the new value is visible on the new leader.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_sdk_client_survives_leader_kill() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("coord=info,openraft=info")
+            .try_init();
+
+        let (n1, n2, n3) = start_3_node_cluster().await;
+        assert!(n1.is_leader().await, "Node 1 should be leader");
+
+        // SDK 指向全部 3 个节点（leader 发现与重路由）
+        let endpoints = vec![
+            n1.grpc_addr.to_string(),
+            n2.grpc_addr.to_string(),
+            n3.grpc_addr.to_string(),
+        ];
+        let client = coord_client::Client::new(coord_client::Config::new(endpoints))
+            .await
+            .expect("connect SDK client");
+
+        // 写入前置数据
+        client
+            .kv()
+            .put(b"sdk-failover-k", b"before-kill")
+            .await
+            .expect("pre-kill put");
+
+        // 杀掉 leader（node 1）
+        tracing::info!("=== P2-04: killing leader node 1 ===");
+        n1.kill();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // 新 leader 选举
+        let new_leader_idx = wait_for_any_leader(&[&n2, &n3], 10000).await;
+        assert!(new_leader_idx.is_some(), "a new leader must be elected");
+
+        // SDK 恢复：重试写入直到成功（客户端内部重试 + leader 重路由）
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            match client.kv().put(b"sdk-failover-k", b"after-kill").await {
+                Ok(_) => break,
+                Err(e) => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "SDK put did not recover after leader kill: {e}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+            }
+        }
+
+        // 数据一致性：新 leader 上读到新值
+        let leader2 = if new_leader_idx == Some(0) { &n2 } else { &n3 };
+        let mut kv_leader2 = leader2.kv_client().await;
+        let val = read_key(&mut kv_leader2, b"sdk-failover-k").await;
+        assert_eq!(
+            val.as_deref(),
+            Some(b"after-kill".as_slice()),
+            "new leader must serve the post-failover value"
+        );
+        tracing::info!("P2-04 SDK failover test passed");
     }
 }

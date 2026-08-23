@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use coord_agent::service::{BaseService, ServiceConfig};
 use coord_agent::services::scheduler::{
-    SchedulerService, ScheduleTask, TaskClaim, TaskState, TaskType,
+    ScheduleTask, SchedulerService, TaskClaim, TaskState, TaskType,
 };
 
 // ──── T1: 服务注册 ────
@@ -55,7 +55,11 @@ fn test_register_scheduled_task() {
     };
 
     let result = svc.register_task(task.clone());
-    assert!(result.is_ok(), "register_task should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "register_task should succeed: {:?}",
+        result.err()
+    );
 
     let tasks = svc.list_tasks();
     assert_eq!(tasks.len(), 1);
@@ -69,9 +73,7 @@ fn test_register_duplicate_task_fails() {
 
     let task = ScheduleTask {
         task_id: "unique-job".into(),
-        task_type: TaskType::FixedRate {
-            interval_ms: 1000,
-        },
+        task_type: TaskType::FixedRate { interval_ms: 1000 },
         description: "Test job".into(),
         metadata: HashMap::new(),
     };
@@ -143,7 +145,10 @@ fn test_claim_already_claimed_task_fails() {
 
     // worker-2 认领同一任务应失败
     let claim2 = svc.try_claim("exclusive-job", "worker-2").unwrap();
-    assert!(claim2.is_none(), "already claimed task should not be re-claimed");
+    assert!(
+        claim2.is_none(),
+        "already claimed task should not be re-claimed"
+    );
 }
 
 /// H-Sched.8: worker 可以释放已认领的任务
@@ -161,7 +166,10 @@ fn test_release_claim() {
     };
     svc.register_task(task).unwrap();
 
-    let claim = svc.try_claim("releasable-job", "worker-1").unwrap().unwrap();
+    let claim = svc
+        .try_claim("releasable-job", "worker-1")
+        .unwrap()
+        .unwrap();
     assert_eq!(claim.state, TaskState::Running);
 
     svc.release_claim("releasable-job", "worker-1").unwrap();
@@ -196,7 +204,10 @@ fn test_mark_task_completed() {
 
     // 已完成任务不可再被认领
     let re_claim = svc.try_claim("complete-me", "worker-2").unwrap();
-    assert!(re_claim.is_none(), "completed task should not be re-claimable");
+    assert!(
+        re_claim.is_none(),
+        "completed task should not be re-claimable"
+    );
 }
 
 /// H-Sched.10: 任务失败状态变更
@@ -213,14 +224,18 @@ fn test_mark_task_failed() {
     svc.register_task(task).unwrap();
 
     svc.try_claim("fail-me", "worker-1").unwrap();
-    svc.mark_failed("fail-me", "worker-1", "simulated error").unwrap();
+    svc.mark_failed("fail-me", "worker-1", "simulated error")
+        .unwrap();
 
     let state = svc.get_task_state("fail-me").unwrap();
     assert_eq!(state, TaskState::Pending); // FixedRate 失败后回到 Pending 等待重试
 
     // 固定频率任务失败后应可重试（下次调度时重新认领）
     let re_claim = svc.try_claim("fail-me", "worker-1").unwrap();
-    assert!(re_claim.is_some(), "failed FixedRate task should be re-claimable");
+    assert!(
+        re_claim.is_some(),
+        "failed FixedRate task should be re-claimable"
+    );
 }
 
 // ──── T5: 惊群缓解 ────
@@ -266,7 +281,10 @@ fn test_backoff_delay_range() {
     // 竞争者越少，退避越小
     let backoff_few = svc.compute_backoff_ms(2);
     let backoff_many = svc.compute_backoff_ms(100);
-    assert!(backoff_few <= backoff_many, "more competitors → more backoff");
+    assert!(
+        backoff_few <= backoff_many,
+        "more competitors → more backoff"
+    );
 }
 
 // ──── T6: 任务状态查询 ────
@@ -282,7 +300,8 @@ fn test_query_all_task_states() {
             task_type: TaskType::FixedRate { interval_ms: 1000 },
             description: format!("Job {}", i),
             metadata: HashMap::new(),
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     let states = svc.list_task_states();
@@ -313,9 +332,12 @@ fn test_query_task_detail() {
 
     let detail = svc.get_task_detail("detailed-job").unwrap();
     assert_eq!(detail.task_id, "detailed-job");
-    assert_eq!(detail.task_type, TaskType::Cron {
-        expression: "0 0 * * *".into(),
-    });
+    assert_eq!(
+        detail.task_type,
+        TaskType::Cron {
+            expression: "0 0 * * *".into(),
+        }
+    );
     assert_eq!(detail.description, "Daily cleanup");
     assert_eq!(detail.metadata.get("priority").unwrap(), "high");
 }

@@ -8,8 +8,8 @@
 // - build_agent_tls_channel(): 构建 TLS 加密的 tonic Channel
 // - build_agent_tls_server_config(): 构建 mTLS 服务端配置（测试用）
 
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use tonic::transport::{Certificate, ClientTlsConfig, Identity};
 
@@ -111,8 +111,7 @@ pub fn build_agent_tls_server_config(
 
     let identity = Identity::from_pem(&cert_pem, &key_pem);
 
-    let mut tls_config = tonic::transport::server::ServerTlsConfig::new()
-        .identity(identity);
+    let mut tls_config = tonic::transport::server::ServerTlsConfig::new().identity(identity);
 
     if let Some(ca_path) = ca_path {
         let ca_pem = fs::read(ca_path)?;

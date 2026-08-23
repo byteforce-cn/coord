@@ -8,8 +8,8 @@
 // - 上下文求值：支持用户级、租户级覆盖
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 
@@ -23,11 +23,15 @@ pub struct FlagConfig {
     pub default_ttl_secs: u64,
 }
 
-fn default_flag_ttl() -> u64 { 60 }
+fn default_flag_ttl() -> u64 {
+    60
+}
 
 impl Default for FlagConfig {
     fn default() -> Self {
-        Self { default_ttl_secs: 60 }
+        Self {
+            default_ttl_secs: 60,
+        }
     }
 }
 
@@ -81,7 +85,10 @@ impl FeatureFlagService {
         let mut flags = self.flags.write();
         flags.insert(
             key.to_string(),
-            FlagState { enabled, percentage: None },
+            FlagState {
+                enabled,
+                percentage: None,
+            },
         );
         Ok(())
     }
@@ -89,7 +96,12 @@ impl FeatureFlagService {
     /// 设置百分比灰度开关
     ///
     /// `percentage` 范围 0-100。
-    pub fn set_percentage_flag(&self, key: &str, enabled: bool, percentage: u8) -> Result<(), FlagError> {
+    pub fn set_percentage_flag(
+        &self,
+        key: &str,
+        enabled: bool,
+        percentage: u8,
+    ) -> Result<(), FlagError> {
         if percentage > 100 {
             return Err(FlagError::InvalidPercentage(percentage));
         }
@@ -211,7 +223,10 @@ mod tests {
         let svc = FeatureFlagService::new(FlagConfig::default());
         svc.set_percentage_flag("canary", true, 50).unwrap();
 
-        let ctx = FlagEvalContext { user_id: Some("user-1".into()), ..Default::default() };
+        let ctx = FlagEvalContext {
+            user_id: Some("user-1".into()),
+            ..Default::default()
+        };
         let r1 = svc.evaluate("canary", &ctx).unwrap();
         let r2 = svc.evaluate("canary", &ctx).unwrap();
         assert_eq!(r1, r2);

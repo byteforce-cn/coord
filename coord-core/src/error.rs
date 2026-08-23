@@ -20,17 +20,11 @@ pub enum Error {
 
     /// 资源不存在
     #[error("{resource} not found: {key}")]
-    NotFound {
-        resource: &'static str,
-        key: String,
-    },
+    NotFound { resource: &'static str, key: String },
 
     /// 资源已存在
     #[error("{resource} already exists: {key}")]
-    AlreadyExists {
-        resource: &'static str,
-        key: String,
-    },
+    AlreadyExists { resource: &'static str, key: String },
 
     /// 权限不足
     #[error("permission denied: {0}")]
@@ -43,9 +37,7 @@ pub enum Error {
     // ──── 共识层错误 ────
     /// 当前节点不是 Leader
     #[error("not leader; leader is {leader_addr:?}")]
-    NotLeader {
-        leader_addr: Option<String>,
-    },
+    NotLeader { leader_addr: Option<String> },
 
     /// 不是 Leader 且不知道 Leader 地址
     #[error("not leader, leader hint unavailable")]
@@ -66,10 +58,7 @@ pub enum Error {
 
     /// 指定的 Revision 不可用（已被 Compaction 清理）
     #[error("revision {revision} compacted; oldest available: {oldest}")]
-    RevisionCompacted {
-        revision: u64,
-        oldest: u64,
-    },
+    RevisionCompacted { revision: u64, oldest: u64 },
 
     /// 数据损坏
     #[error("data corruption: {0}")]
@@ -78,25 +67,16 @@ pub enum Error {
     // ──── Lease 错误 ────
     /// Lease 不存在或已过期
     #[error("lease {lease_id} not found or expired")]
-    LeaseNotFound {
-        lease_id: i64,
-    },
+    LeaseNotFound { lease_id: i64 },
 
     /// TTL 超出允许范围
     #[error("lease TTL {ttl}s out of range [{min}, {max}]")]
-    LeaseTTLOutOfRange {
-        ttl: i64,
-        min: i64,
-        max: i64,
-    },
+    LeaseTTLOutOfRange { ttl: i64, min: i64, max: i64 },
 
     // ──── Txn 错误 ────
     /// 事务操作过多
     #[error("txn too large: {ops} operations, max {max}")]
-    TxnTooLarge {
-        ops: usize,
-        max: usize,
-    },
+    TxnTooLarge { ops: usize, max: usize },
 
     /// CAS 条件不满足（非错误，业务判断用）
     #[error("txn compare failed")]
@@ -105,10 +85,12 @@ pub enum Error {
     // ──── Watch 错误 ────
     /// Watch 连接数达到上限
     #[error("too many watch connections: {current}/{max}")]
-    WatchTooManyConnections {
-        current: usize,
-        max: usize,
-    },
+    WatchTooManyConnections { current: usize, max: usize },
+
+    // ──── 客户端背压（P2-04）────
+    /// 客户端内部有界队列溢出（溢出信号必达，部分事件已丢弃）
+    #[error("client backpressure: {0}")]
+    Backpressure(String),
 
     // ──── 安全层错误 ────
     /// 集群处于 Sealed 状态
@@ -125,10 +107,7 @@ pub enum Error {
 
     /// Shamir 分片不足
     #[error("insufficient shares: have {have}, need {need}")]
-    InsufficientShares {
-        have: usize,
-        need: usize,
-    },
+    InsufficientShares { have: usize, need: usize },
 
     // ──── Auth 错误 ────
     /// Auth 未启用
@@ -145,23 +124,16 @@ pub enum Error {
 
     /// 用户已存在
     #[error("user {name} already exists")]
-    UserAlreadyExists {
-        name: String,
-    },
+    UserAlreadyExists { name: String },
 
     /// 角色已存在
     #[error("role {name} already exists")]
-    RoleAlreadyExists {
-        name: String,
-    },
+    RoleAlreadyExists { name: String },
 
     // ──── Multi-Raft / Region 错误 ────
-
     /// Region 不存在
     #[error("region {region_id} not found")]
-    RegionNotFound {
-        region_id: u64,
-    },
+    RegionNotFound { region_id: u64 },
 
     /// 当前节点不是目标 Region 的 Leader
     #[error("not leader for region {region_id}; leader is {leader_addr:?}")]
@@ -182,15 +154,11 @@ pub enum Error {
 
     /// Key 不属于当前 Region 的 Key Range
     #[error("key not in region {region_id} range")]
-    KeyNotInRegion {
-        region_id: u64,
-    },
+    KeyNotInRegion { region_id: u64 },
 
     /// Region 分裂进行中
     #[error("region {region_id} split in progress")]
-    RegionSplitInProgress {
-        region_id: u64,
-    },
+    RegionSplitInProgress { region_id: u64 },
 
     /// Placement Driver 不可用
     #[error("PD unavailable: {0}")]

@@ -18,6 +18,7 @@ class ErrorCodeTest {
                 ErrorCode.CONFIG_CAS_FAILED,
                 ErrorCode.WATCH_STREAM_ERROR,
                 ErrorCode.RESOURCE_EXHAUSTED,
+                ErrorCode.DEADLINE_EXCEEDED,
                 ErrorCode.INTERNAL
         );
     }
@@ -33,6 +34,7 @@ class ErrorCodeTest {
         assertThat(ErrorCode.CONFIG_CAS_FAILED.getProtoName()).isEqualTo("CONFIG_CAS_FAILED");
         assertThat(ErrorCode.WATCH_STREAM_ERROR.getProtoName()).isEqualTo("WATCH_STREAM_ERROR");
         assertThat(ErrorCode.RESOURCE_EXHAUSTED.getProtoName()).isEqualTo("RESOURCE_EXHAUSTED");
+        assertThat(ErrorCode.DEADLINE_EXCEEDED.getProtoName()).isEqualTo("DEADLINE_EXCEEDED");
         assertThat(ErrorCode.INTERNAL.getProtoName()).isEqualTo("INTERNAL");
     }
 }

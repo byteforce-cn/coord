@@ -9,11 +9,7 @@ use crate::workflow::model::{
 use crate::workflow::ports::Clock;
 
 /// 执行 wait 任务：解析 duration，返回 Suspend(WaitingForDuration)
-pub fn execute(
-    named: &NamedTask,
-    wait: &WaitTask,
-    clock: &dyn Clock,
-) -> StepResult {
+pub fn execute(named: &NamedTask, wait: &WaitTask, clock: &dyn Clock) -> StepResult {
     let duration_ms = crate::workflow::engine::parse_iso8601_duration_ms(&wait.wait).unwrap_or(0);
     let until_ms = clock.now_ms() + duration_ms;
 
@@ -64,10 +60,18 @@ mod tests {
         let clock = TestClock::new(1000);
         let named = NamedTask {
             name: "wait1h".into(),
-            task: Task::Wait(WaitTask { wait: "PT1H".into() }),
+            task: Task::Wait(WaitTask {
+                wait: "PT1H".into(),
+            }),
         };
 
-        let result = execute(&named, &WaitTask { wait: "PT1H".into() }, &clock);
+        let result = execute(
+            &named,
+            &WaitTask {
+                wait: "PT1H".into(),
+            },
+            &clock,
+        );
 
         match result {
             StepResult::Suspend { reason, frame } => {
@@ -90,14 +94,24 @@ mod tests {
         let clock = TestClock::new(5000);
         let named = NamedTask {
             name: "waitZero".into(),
-            task: Task::Wait(WaitTask { wait: "PT0S".into() }),
+            task: Task::Wait(WaitTask {
+                wait: "PT0S".into(),
+            }),
         };
 
-        let result = execute(&named, &WaitTask { wait: "PT0S".into() }, &clock);
+        let result = execute(
+            &named,
+            &WaitTask {
+                wait: "PT0S".into(),
+            },
+            &clock,
+        );
 
         match result {
             StepResult::Suspend { reason, .. } => {
-                assert!(matches!(reason, SuspendReason::WaitingForDuration { until_ms } if until_ms == 5000));
+                assert!(
+                    matches!(reason, SuspendReason::WaitingForDuration { until_ms } if until_ms == 5000)
+                );
             }
             other => panic!("expected Suspend, got {:?}", other),
         }
@@ -108,15 +122,25 @@ mod tests {
         let clock = TestClock::new(1000);
         let named = NamedTask {
             name: "waitBad".into(),
-            task: Task::Wait(WaitTask { wait: "INVALID".into() }),
+            task: Task::Wait(WaitTask {
+                wait: "INVALID".into(),
+            }),
         };
 
-        let result = execute(&named, &WaitTask { wait: "INVALID".into() }, &clock);
+        let result = execute(
+            &named,
+            &WaitTask {
+                wait: "INVALID".into(),
+            },
+            &clock,
+        );
         // Invalid duration → duration_ms = 0
 
         match result {
             StepResult::Suspend { reason, .. } => {
-                assert!(matches!(reason, SuspendReason::WaitingForDuration { until_ms } if until_ms == 1000));
+                assert!(
+                    matches!(reason, SuspendReason::WaitingForDuration { until_ms } if until_ms == 1000)
+                );
             }
             other => panic!("expected Suspend, got {:?}", other),
         }

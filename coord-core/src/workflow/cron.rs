@@ -66,15 +66,13 @@ pub fn parse_cron(expr: &str) -> Result<CronSchedule, CronError> {
         f
     } else {
         // 5 字段：秒默认为 0
-        CronField {
-            values: vec![0],
-        }
+        CronField { values: vec![0] }
     };
     let minutes = parse_field(fields[idx], 0, 59)?;
     let hours = parse_field(fields[idx + 1], 0, 23)?;
     let days = parse_field(fields[idx + 2], 1, 31)?;
-    let months = parse_field_names(fields[idx + 3], 1, 12, &MONTH_NAMES)?;
-    let weekdays = parse_field_names(fields[idx + 4], 0, 7, &WEEKDAY_NAMES)?;
+    let months = parse_field_names(fields[idx + 3], 1, 12, MONTH_NAMES)?;
+    let weekdays = parse_field_names(fields[idx + 4], 0, 7, WEEKDAY_NAMES)?;
 
     Ok(CronSchedule {
         seconds,
@@ -87,12 +85,28 @@ pub fn parse_cron(expr: &str) -> Result<CronSchedule, CronError> {
 }
 
 const MONTH_NAMES: &[(&str, u32)] = &[
-    ("jan", 1), ("feb", 2), ("mar", 3), ("apr", 4), ("may", 5), ("jun", 6),
-    ("jul", 7), ("aug", 8), ("sep", 9), ("oct", 10), ("nov", 11), ("dec", 12),
+    ("jan", 1),
+    ("feb", 2),
+    ("mar", 3),
+    ("apr", 4),
+    ("may", 5),
+    ("jun", 6),
+    ("jul", 7),
+    ("aug", 8),
+    ("sep", 9),
+    ("oct", 10),
+    ("nov", 11),
+    ("dec", 12),
 ];
 
 const WEEKDAY_NAMES: &[(&str, u32)] = &[
-    ("sun", 0), ("mon", 1), ("tue", 2), ("wed", 3), ("thu", 4), ("fri", 5), ("sat", 6),
+    ("sun", 0),
+    ("mon", 1),
+    ("tue", 2),
+    ("wed", 3),
+    ("thu", 4),
+    ("fri", 5),
+    ("sat", 6),
 ];
 
 fn month_num(name: &str) -> Option<u32> {

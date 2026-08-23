@@ -8,7 +8,7 @@
 
 </div>
 
-- **Coord** 是一个分布式协调服务，为微服务架构提供 KV 存储、原子事务、租约管理、变更监听、服务注册与工作流编排等核心原语。Coord 采用 Raft 共识协议保证数据强一致性，支持 Multi-Raft 水平扩展，并通过 Agent 模式为 Java 微服务提供零代码接入体验。
+- **Coord** 是一个分布式协调服务，为微服务架构提供 KV 存储、原子事务、租约管理、变更监听、服务注册与工作流编排等核心原语。Coord 采用 Raft 共识协议保证数据强一致性（生产形态为**单 Raft 组 + 定期快照备份**；Multi-Raft/PD 为 experimental、未接入生产路径），并通过 Agent 模式为 Java 微服务提供零代码接入体验。
 - 当前应用由 deepseek v4 协助开发，主要验证研究 deepseek v4 在中大型项目的代码能力，**不可以用于真实业务**
 ---
 
@@ -54,7 +54,7 @@ graph TD
 | **TLS/mTLS** | 传输层安全加密 | ✅ |
 | **Barrier** | AES-256-GCM 存储加密（静止数据保护） | ✅ |
 | **Seal/Unseal** | Shamir Secret Sharing 密钥分片管理 | ✅ |
-| **Multi-Raft** | Region 分片 + PD 调度，支持水平扩展 | ✅ |
+| **Multi-Raft** | Region 分片 + PD 调度（experimental，组件级、未接入生产路径；生产形态为单 Raft 组） | ⚠️ experimental |
 | **Compaction** | 自动 MVCC 版本压缩 | ✅ |
 | **Snapshot** | 快照创建/恢复 | ✅ |
 

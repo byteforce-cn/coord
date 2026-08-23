@@ -10,23 +10,21 @@ mod tests {
 
     use coord_core::storage::StorageBackend;
     use coord_core::types::StorageConfig;
+    use coord_proto::kv::kv_client::KvClient;
+    use coord_proto::kv::kv_server::KvServer;
+    use coord_proto::kv::{DeleteRequest, PutRequest, RangeRequest};
+    use coord_proto::maintenance::maintenance_client::MaintenanceClient;
+    use coord_proto::maintenance::maintenance_server::MaintenanceServer;
+    use coord_proto::maintenance::StatusRequest;
+    use coord_proto::txn::txn_client::TxnClient;
+    use coord_proto::txn::txn_server::TxnServer;
+    use coord_proto::txn::{compare::Target, Compare, RequestOp, TxnRequest};
     use coord_server::server::CoordNode;
     use coord_server::storage::mvcc::MvccStorage;
     use coord_server::storage::redb_backend::RedbBackend;
     use coord_server::watch::WatchDispatcher;
-    use coord_proto::kv::kv_client::KvClient;
-    use coord_proto::kv::{DeleteRequest, PutRequest, RangeRequest};
-    use coord_proto::maintenance::maintenance_client::MaintenanceClient;
-    use coord_proto::maintenance::StatusRequest;
-    use coord_proto::txn::txn_client::TxnClient;
-    use coord_proto::txn::{
-        compare::Target, Compare, RequestOp, TxnRequest,
-    };
-    use coord_proto::kv::kv_server::KvServer;
-    use coord_proto::txn::txn_server::TxnServer;
-    use coord_proto::maintenance::maintenance_server::MaintenanceServer;
-    use tonic::transport::{Channel, Server};
     use tokio::net::TcpListener;
+    use tonic::transport::{Channel, Server};
 
     /// Start a test server on a random port, return (addr, join_handle)
     async fn start_test_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -57,9 +55,7 @@ mod tests {
                 .add_service(kv_svc)
                 .add_service(txn_svc)
                 .add_service(maint_svc)
-                .serve_with_incoming(
-                    tokio_stream::wrappers::TcpListenerStream::new(listener),
-                )
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
                 .await
                 .unwrap();
         });
@@ -70,7 +66,13 @@ mod tests {
         (addr, handle)
     }
 
-    async fn connect(addr: SocketAddr) -> (KvClient<Channel>, TxnClient<Channel>, MaintenanceClient<Channel>) {
+    async fn connect(
+        addr: SocketAddr,
+    ) -> (
+        KvClient<Channel>,
+        TxnClient<Channel>,
+        MaintenanceClient<Channel>,
+    ) {
         let endpoint = format!("http://{}", addr);
         let channel = Channel::from_shared(endpoint)
             .unwrap()
@@ -231,20 +233,16 @@ mod tests {
                     result: coord_proto::txn::compare::CompareResult::Equal as i32,
                     target: Target::Version as i32,
                     key: b"counter".to_vec(),
-                    target_value: Some(
-                        coord_proto::txn::compare::TargetValue::Version(1),
-                    ),
+                    target_value: Some(coord_proto::txn::compare::TargetValue::Version(1)),
                 }],
                 success: vec![RequestOp {
-                    op: Some(coord_proto::txn::request_op::Op::RequestPut(
-                        PutRequest {
-                            key: b"counter".to_vec(),
-                            value: 2u64.to_be_bytes().to_vec(),
-                            lease_id: 0,
-                            prev_kv: false,
-                            request_id: vec![],
-                        },
-                    )),
+                    op: Some(coord_proto::txn::request_op::Op::RequestPut(PutRequest {
+                        key: b"counter".to_vec(),
+                        value: 2u64.to_be_bytes().to_vec(),
+                        lease_id: 0,
+                        prev_kv: false,
+                        request_id: vec![],
+                    })),
                 }],
                 failure: vec![],
                 request_id: vec![],
@@ -269,9 +267,7 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        let val = u64::from_be_bytes(
-            range_resp.kvs[0].value[..8].try_into().unwrap(),
-        );
+        let val = u64::from_be_bytes(range_resp.kvs[0].value[..8].try_into().unwrap());
         assert_eq!(val, 2, "value should be updated to 2");
 
         // CAS: compare version=1 again (should fail since version is now 2)
@@ -281,20 +277,16 @@ mod tests {
                     result: coord_proto::txn::compare::CompareResult::Equal as i32,
                     target: Target::Version as i32,
                     key: b"counter".to_vec(),
-                    target_value: Some(
-                        coord_proto::txn::compare::TargetValue::Version(1),
-                    ),
+                    target_value: Some(coord_proto::txn::compare::TargetValue::Version(1)),
                 }],
                 success: vec![RequestOp {
-                    op: Some(coord_proto::txn::request_op::Op::RequestPut(
-                        PutRequest {
-                            key: b"counter".to_vec(),
-                            value: 99u64.to_be_bytes().to_vec(),
-                            lease_id: 0,
-                            prev_kv: false,
-                            request_id: vec![],
-                        },
-                    )),
+                    op: Some(coord_proto::txn::request_op::Op::RequestPut(PutRequest {
+                        key: b"counter".to_vec(),
+                        value: 99u64.to_be_bytes().to_vec(),
+                        lease_id: 0,
+                        prev_kv: false,
+                        request_id: vec![],
+                    })),
                 }],
                 failure: vec![],
                 request_id: vec![],
@@ -303,7 +295,10 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert!(!txn_resp2.succeeded, "CAS should fail on version=1 when version is 2");
+        assert!(
+            !txn_resp2.succeeded,
+            "CAS should fail on version=1 when version is 2"
+        );
     }
 
     #[tokio::test]
@@ -311,11 +306,7 @@ mod tests {
         let (addr, _handle) = start_test_server().await;
         let (_, _, mut maint) = connect(addr).await;
 
-        let status = maint
-            .status(StatusRequest {})
-            .await
-            .unwrap()
-            .into_inner();
+        let status = maint.status(StatusRequest {}).await.unwrap().into_inner();
 
         assert!(status.revision >= 0);
         assert_eq!(status.seal_status, "unsealed");

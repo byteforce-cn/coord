@@ -3,7 +3,7 @@
 // 实现熔断器状态机：Closed → Open → HalfOpen → Closed。
 // v8.2 §4.13: 派生能力。
 
-use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

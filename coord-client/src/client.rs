@@ -4,17 +4,19 @@
 // ADP §10.2-10.3 定义完整的 Client SDK 行为。
 
 use std::sync::Arc;
-use tonic::transport::Channel;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
+use tonic::transport::Channel;
 
 use coord_core::error::{Error, Result};
-use coord_proto::kv::{
-    kv_client::KvClient as KvStub, DeleteRequest, PutRequest,
-    RangeRequest,
-};
+use coord_proto::kv::{kv_client::KvClient as KvStub, DeleteRequest, PutRequest, RangeRequest};
 use coord_proto::lease::{
-    lease_client::LeaseClient as LeaseStub, LeaseGrantRequest,
-    LeaseKeepAliveRequest, LeaseRevokeRequest,
+    lease_client::LeaseClient as LeaseStub, LeaseGrantRequest, LeaseKeepAliveRequest,
+    LeaseRevokeRequest,
+};
+use coord_proto::maintenance::{
+    maintenance_client::MaintenanceClient as MaintenanceStub, MemberListRequest, SealRequest,
+    StatusRequest, StatusResponse, UnsealRequest, UnsealResponse,
 };
 use coord_proto::txn::{
     txn_client::TxnClient as TxnStub, Compare, RequestOp, TxnRequest, TxnResponse,
@@ -22,16 +24,11 @@ use coord_proto::txn::{
 use coord_proto::watch::{
     watch_client::WatchClient as WatchStub, WatchCreateRequest, WatchEvent, WatchRequest,
 };
-use coord_proto::maintenance::{
-    maintenance_client::MaintenanceClient as MaintenanceStub, SealRequest,
-    StatusRequest, StatusResponse, UnsealRequest, UnsealResponse,
-    MemberListRequest,
-};
 
 use crate::config::Config;
 use crate::leader::LeaderDiscovery;
 use crate::pool::ConnectionPool;
-use crate::retry::{RetryState, classify_error};
+use crate::retry::{classify_error, RetryState};
 
 // ──── Error conversion ────
 
@@ -132,7 +129,9 @@ impl Client {
         // 在 Agent 模式下，将 Channel 注册到连接池中以保持一致性
         let pool = ConnectionPool::new(&config);
         // 将 channel 放入池中以便后续使用
-        let endpoint = config.endpoints.first()
+        let endpoint = config
+            .endpoints
+            .first()
             .cloned()
             .unwrap_or_else(|| "unknown".into());
         pool.put(&endpoint, channel);
@@ -266,7 +265,7 @@ impl Client {
     /// 将 tonic::Status 的错误消息用于重试分类
     #[allow(dead_code)]
     fn classify_tonic_error(&self, status: &tonic::Status) -> crate::retry::RetryDecision {
-        classify_error(&status.message())
+        classify_error(status.message())
     }
 }
 
@@ -376,11 +375,8 @@ impl KvClient {
             Ok(resp) => {
                 self.client.return_channel(&endpoint, channel);
                 let inner = resp.into_inner();
-                let kvs: Vec<(Vec<u8>, Vec<u8>)> = inner
-                    .kvs
-                    .into_iter()
-                    .map(|kv| (kv.key, kv.value))
-                    .collect();
+                let kvs: Vec<(Vec<u8>, Vec<u8>)> =
+                    inner.kvs.into_iter().map(|kv| (kv.key, kv.value)).collect();
                 Ok((kvs, inner.count, inner.revision))
             }
             Err(status) => Err(from_status(status)),
@@ -401,7 +397,9 @@ impl KvClient {
         limit: i64,
         revision: i64,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let (kvs, _count, _rev) = self.range_full(key, range_end, limit, revision, false, false).await?;
+        let (kvs, _count, _rev) = self
+            .range_full(key, range_end, limit, revision, false, false)
+            .await?;
         Ok(kvs)
     }
 
@@ -419,7 +417,10 @@ impl KvClient {
         let (kvs, _count, _rev) = self
             .range_with_lease_full(key, range_end, limit, revision, false, false)
             .await?;
-        Ok(kvs.into_iter().map(|(k, v, lid, _ver)| (k, v, lid)).collect())
+        Ok(kvs
+            .into_iter()
+            .map(|(k, v, lid, _ver)| (k, v, lid))
+            .collect())
     }
 
     /// 范围读取键值对（含 lease_id 和 version，完整选项，含 count）。
@@ -570,9 +571,8 @@ impl LeaseClient {
         let mut stub = LeaseStub::new(channel.clone());
 
         // KeepAlive 是双向流：发送 LeaseKeepAliveRequest，接收 LeaseKeepAliveResponse
-        let request = tonic::Request::new(tokio_stream::once(LeaseKeepAliveRequest {
-            id: lease_id,
-        }));
+        let request =
+            tonic::Request::new(tokio_stream::once(LeaseKeepAliveRequest { id: lease_id }));
 
         match stub.lease_keep_alive(request).await {
             Ok(resp) => {
@@ -607,10 +607,9 @@ impl LeaseClient {
 
         let mut stream_out = response.into_inner();
 
-        // 发送初始续约请求
-        tx.send(LeaseKeepAliveRequest { id: lease_id })
-            .await
-            .map_err(|e| Error::Internal(format!("keep-alive channel closed: {e}")))?;
+        // 发送初始续约请求（P2-04：有界队列 + try_send）
+        tx.try_send(LeaseKeepAliveRequest { id: lease_id })
+            .map_err(|e| Error::Internal(format!("keep-alive channel error: {e}")))?;
 
         // 启动后台续约任务
         let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
@@ -622,8 +621,17 @@ impl LeaseClient {
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(interval as u64)) => {
-                        if tx.send(LeaseKeepAliveRequest { id: lease_id_copy }).await.is_err() {
-                            break;
+                        // P2-04：try_send——队列满时跳过本拍（周期续约，下一拍补偿）；
+                        // 通道关闭才退出，不再无限阻塞挂起续约循环
+                        match tx.try_send(LeaseKeepAliveRequest { id: lease_id_copy }) {
+                            Ok(()) => {}
+                            Err(TrySendError::Full(_)) => {
+                                tracing::debug!(
+                                    "keep-alive queue full, skipping one beat (lease {})",
+                                    lease_id_copy
+                                );
+                            }
+                            Err(TrySendError::Closed(_)) => break,
                         }
                     }
                     Some(_) = stop_rx.recv() => {
@@ -729,9 +737,8 @@ impl WatchClient {
             )),
         };
         req_tx
-            .send(create_req)
-            .await
-            .map_err(|e| Error::Internal(format!("watch channel closed: {e}")))?;
+            .try_send(create_req)
+            .map_err(|e| Error::Internal(format!("watch channel error: {e}")))?;
 
         let response = stub
             .watch(tonic::Request::new(stream_in))
@@ -740,14 +747,16 @@ impl WatchClient {
 
         let mut stream_out = response.into_inner();
 
-        // 后台任务：持续接收事件并转发
+        // 后台任务：持续接收事件并转发（P2-04：有界队列 + try_send；
+        // 满时置溢出标记丢弃事件，队列有空间时优先补发 Backpressure 合成信号——对齐服务端 P0-E 语义）
         let (event_tx, event_rx) = mpsc::channel::<Result<WatchEvent>>(256);
         tokio::spawn(async move {
+            let mut overflow = false;
             loop {
                 match stream_out.message().await {
                     Ok(Some(resp)) => {
                         for event in resp.events {
-                            if event_tx.send(Ok(event)).await.is_err() {
+                            if !forward_watch_event(&event_tx, event, &mut overflow).await {
                                 return; // 接收端已关闭
                             }
                         }
@@ -767,6 +776,36 @@ impl WatchClient {
         });
 
         Ok(event_rx)
+    }
+}
+
+/// P2-04：Watch 事件转发（有界队列 + 溢出信号，对齐服务端 P0-E 语义）。
+///
+/// - 队列满：置溢出标记并丢弃当前事件（内存有界，不无限阻塞）；
+/// - 溢出标记为真时：优先补发一条 `Error::Backpressure` 合成事件（必达溢出信号），再送正常事件；
+/// - 接收端关闭：返回 `false`，调用方终止转发。
+async fn forward_watch_event(
+    tx: &mpsc::Sender<Result<WatchEvent>>,
+    event: WatchEvent,
+    overflow: &mut bool,
+) -> bool {
+    if *overflow {
+        let marker = Err(Error::Backpressure(
+            "watch event buffer full: some events were dropped".to_string(),
+        ));
+        if tx.send(marker).await.is_ok() {
+            *overflow = false;
+        } else {
+            return false;
+        }
+    }
+    match tx.try_send(Ok(event)) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => {
+            *overflow = true;
+            true
+        }
+        Err(TrySendError::Closed(_)) => false,
     }
 }
 
@@ -826,7 +865,8 @@ impl TxnClient {
         success_ops: Vec<RequestOp>,
         failure_ops: Vec<RequestOp>,
     ) -> Result<TxnResponse> {
-        self.txn_full(compares, success_ops, failure_ops, Vec::new()).await
+        self.txn_full(compares, success_ops, failure_ops, Vec::new())
+            .await
     }
 
     /// 简化的 CAS 操作：比较 key 的值，相等则写入新值。
@@ -1094,5 +1134,74 @@ mod tests {
             _ => panic!("expected InvalidArgument"),
         }
     }
-}
 
+    // ──── P2-04：客户端背压（有界队列 + try_send + 溢出信号）────
+
+    fn dummy_event() -> WatchEvent {
+        WatchEvent::default()
+    }
+
+    #[tokio::test]
+    async fn test_forward_watch_event_no_overflow() {
+        let (tx, mut rx) = mpsc::channel::<Result<WatchEvent>>(4);
+        let mut overflow = false;
+        assert!(forward_watch_event(&tx, dummy_event(), &mut overflow).await);
+        assert!(!overflow);
+        assert!(rx.recv().await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_forward_watch_event_overflow_signal_delivered() {
+        // 容量 1：连续 3 事件 → 首件入队，其余置溢出标记并丢弃；
+        // 消费时先收到事件，再收到必达的 Backpressure 合成信号。
+        let (tx, mut rx) = mpsc::channel::<Result<WatchEvent>>(1);
+        let mut overflow = false;
+        assert!(forward_watch_event(&tx, dummy_event(), &mut overflow).await);
+        assert!(forward_watch_event(&tx, dummy_event(), &mut overflow).await);
+        assert!(overflow, "second event should overflow the cap-1 queue");
+        assert!(forward_watch_event(&tx, dummy_event(), &mut overflow).await);
+        assert!(overflow);
+
+        let first = rx.recv().await.unwrap();
+        assert!(first.is_ok(), "first event must be delivered normally");
+        let second = rx.recv().await.unwrap();
+        assert!(
+            matches!(second, Err(Error::Backpressure(_))),
+            "overflow signal must be delivered: {second:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_forward_watch_event_overflow_then_recover() {
+        // 溢出后队列有空间：先补发 Backpressure 信号，后续事件恢复正常投递。
+        let (tx, mut rx) = mpsc::channel::<Result<WatchEvent>>(1);
+        let mut overflow = false;
+        assert!(forward_watch_event(&tx, dummy_event(), &mut overflow).await);
+        assert!(forward_watch_event(&tx, dummy_event(), &mut overflow).await);
+        assert!(overflow);
+
+        let marker_or_first = rx.recv().await.unwrap(); // 排空
+        assert!(marker_or_first.is_ok());
+
+        assert!(forward_watch_event(&tx, dummy_event(), &mut overflow).await);
+        assert!(!overflow, "overflow flag must clear after marker delivery");
+        let marker = rx.recv().await.unwrap();
+        assert!(
+            matches!(marker, Err(Error::Backpressure(_))),
+            "marker must precede the next event"
+        );
+        let normal = rx.recv().await.unwrap();
+        assert!(normal.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_forward_watch_event_receiver_closed() {
+        let (tx, rx) = mpsc::channel::<Result<WatchEvent>>(4);
+        drop(rx);
+        let mut overflow = false;
+        assert!(
+            !forward_watch_event(&tx, dummy_event(), &mut overflow).await,
+            "closed receiver must stop forwarding"
+        );
+    }
+}

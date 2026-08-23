@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use coord_agent::services::mq::{MessageQueueService, TopicConfig, MqStats};
+use coord_agent::services::mq::{MessageQueueService, MqStats, TopicConfig};
 use coord_agent::BaseService;
 
 // ──── helpers ────
@@ -53,11 +53,15 @@ fn test_mq_service_start_stop() {
 fn test_mq_create_topic() {
     let dir = temp_data_dir();
     let svc = new_mq_service(&dir);
-    svc.create_topic("orders", TopicConfig {
-        partitions: 3,
-        retention_secs: 3600,
-        max_message_size: 1024 * 1024,
-    }).expect("create topic should succeed");
+    svc.create_topic(
+        "orders",
+        TopicConfig {
+            partitions: 3,
+            retention_secs: 3600,
+            max_message_size: 1024 * 1024,
+        },
+    )
+    .expect("create topic should succeed");
     assert!(svc.topic_exists("orders").expect("topic exists"));
     assert!(!svc.topic_exists("nonexistent").expect("topic exists"));
 }
@@ -66,8 +70,23 @@ fn test_mq_create_topic() {
 fn test_mq_create_topic_duplicate() {
     let dir = temp_data_dir();
     let svc = new_mq_service(&dir);
-    svc.create_topic("orders", TopicConfig { partitions: 2, retention_secs: 3600, max_message_size: 1024 }).unwrap();
-    let result = svc.create_topic("orders", TopicConfig { partitions: 3, retention_secs: 7200, max_message_size: 2048 });
+    svc.create_topic(
+        "orders",
+        TopicConfig {
+            partitions: 2,
+            retention_secs: 3600,
+            max_message_size: 1024,
+        },
+    )
+    .unwrap();
+    let result = svc.create_topic(
+        "orders",
+        TopicConfig {
+            partitions: 3,
+            retention_secs: 7200,
+            max_message_size: 2048,
+        },
+    );
     assert!(result.is_err(), "duplicate topic should error");
 }
 
@@ -75,8 +94,17 @@ fn test_mq_create_topic_duplicate() {
 fn test_mq_delete_topic() {
     let dir = temp_data_dir();
     let svc = new_mq_service(&dir);
-    svc.create_topic("tmp", TopicConfig { partitions: 1, retention_secs: 60, max_message_size: 1024 }).unwrap();
-    svc.delete_topic("tmp").expect("delete topic should succeed");
+    svc.create_topic(
+        "tmp",
+        TopicConfig {
+            partitions: 1,
+            retention_secs: 60,
+            max_message_size: 1024,
+        },
+    )
+    .unwrap();
+    svc.delete_topic("tmp")
+        .expect("delete topic should succeed");
     assert!(!svc.topic_exists("tmp").expect("topic exists"));
 }
 
@@ -84,8 +112,24 @@ fn test_mq_delete_topic() {
 fn test_mq_list_topics() {
     let dir = temp_data_dir();
     let svc = new_mq_service(&dir);
-    svc.create_topic("t1", TopicConfig { partitions: 1, retention_secs: 3600, max_message_size: 1024 }).unwrap();
-    svc.create_topic("t2", TopicConfig { partitions: 2, retention_secs: 7200, max_message_size: 2048 }).unwrap();
+    svc.create_topic(
+        "t1",
+        TopicConfig {
+            partitions: 1,
+            retention_secs: 3600,
+            max_message_size: 1024,
+        },
+    )
+    .unwrap();
+    svc.create_topic(
+        "t2",
+        TopicConfig {
+            partitions: 2,
+            retention_secs: 7200,
+            max_message_size: 2048,
+        },
+    )
+    .unwrap();
     let topics = svc.list_topics().expect("list topics");
     assert_eq!(topics.len(), 2);
     assert!(topics.iter().any(|t| t.name == "t1"));
@@ -98,13 +142,25 @@ fn test_mq_list_topics() {
 fn test_mq_produce_consume() {
     let dir = temp_data_dir();
     let svc = new_mq_service(&dir);
-    svc.create_topic("orders", TopicConfig { partitions: 2, retention_secs: 3600, max_message_size: 1024 * 1024 }).unwrap();
+    svc.create_topic(
+        "orders",
+        TopicConfig {
+            partitions: 2,
+            retention_secs: 3600,
+            max_message_size: 1024 * 1024,
+        },
+    )
+    .unwrap();
 
     // Produce
-    let offset = svc.produce("orders", 0, b"hello world".to_vec(), None).expect("produce");
+    let offset = svc
+        .produce("orders", 0, b"hello world".to_vec(), None)
+        .expect("produce");
     assert_eq!(offset, 0);
 
-    let offset2 = svc.produce("orders", 0, b"second msg".to_vec(), None).expect("produce");
+    let offset2 = svc
+        .produce("orders", 0, b"second msg".to_vec(), None)
+        .expect("produce");
     assert_eq!(offset2, 1);
 
     // Consume
@@ -128,7 +184,15 @@ fn test_mq_produce_to_nonexistent_topic() {
 fn test_mq_produce_to_invalid_partition() {
     let dir = temp_data_dir();
     let svc = new_mq_service(&dir);
-    svc.create_topic("orders", TopicConfig { partitions: 2, retention_secs: 3600, max_message_size: 1024 }).unwrap();
+    svc.create_topic(
+        "orders",
+        TopicConfig {
+            partitions: 2,
+            retention_secs: 3600,
+            max_message_size: 1024,
+        },
+    )
+    .unwrap();
     let result = svc.produce("orders", 99, b"data".to_vec(), None);
     assert!(result.is_err());
 }
@@ -137,7 +201,15 @@ fn test_mq_produce_to_invalid_partition() {
 fn test_mq_consume_empty_partition() {
     let dir = temp_data_dir();
     let svc = new_mq_service(&dir);
-    svc.create_topic("orders", TopicConfig { partitions: 1, retention_secs: 3600, max_message_size: 1024 }).unwrap();
+    svc.create_topic(
+        "orders",
+        TopicConfig {
+            partitions: 1,
+            retention_secs: 3600,
+            max_message_size: 1024,
+        },
+    )
+    .unwrap();
     let msgs = svc.consume("orders", 0, 0, 10).expect("consume");
     assert!(msgs.is_empty());
 }
@@ -146,7 +218,15 @@ fn test_mq_consume_empty_partition() {
 fn test_mq_produce_multi_partition() {
     let dir = temp_data_dir();
     let svc = new_mq_service(&dir);
-    svc.create_topic("orders", TopicConfig { partitions: 3, retention_secs: 3600, max_message_size: 1024 }).unwrap();
+    svc.create_topic(
+        "orders",
+        TopicConfig {
+            partitions: 3,
+            retention_secs: 3600,
+            max_message_size: 1024,
+        },
+    )
+    .unwrap();
 
     svc.produce("orders", 0, b"p0-msg0".to_vec(), None).unwrap();
     svc.produce("orders", 1, b"p1-msg0".to_vec(), None).unwrap();
@@ -163,7 +243,15 @@ fn test_mq_produce_multi_partition() {
 fn test_mq_consumer_group_offset() {
     let dir = temp_data_dir();
     let svc = new_mq_service(&dir);
-    svc.create_topic("orders", TopicConfig { partitions: 2, retention_secs: 3600, max_message_size: 1024 }).unwrap();
+    svc.create_topic(
+        "orders",
+        TopicConfig {
+            partitions: 2,
+            retention_secs: 3600,
+            max_message_size: 1024,
+        },
+    )
+    .unwrap();
 
     // Produce 3 messages to partition 0
     for i in 0..3u8 {
@@ -171,11 +259,20 @@ fn test_mq_consumer_group_offset() {
     }
 
     // Initial offset should be 0
-    assert_eq!(svc.get_consumer_offset("cg1", "orders", 0).expect("get offset"), 0);
+    assert_eq!(
+        svc.get_consumer_offset("cg1", "orders", 0)
+            .expect("get offset"),
+        0
+    );
 
     // Commit offset
-    svc.commit_offset("cg1", "orders", 0, 2).expect("commit offset");
-    assert_eq!(svc.get_consumer_offset("cg1", "orders", 0).expect("get offset"), 2);
+    svc.commit_offset("cg1", "orders", 0, 2)
+        .expect("commit offset");
+    assert_eq!(
+        svc.get_consumer_offset("cg1", "orders", 0)
+            .expect("get offset"),
+        2
+    );
 
     // Consume from committed offset
     let msgs = svc.consume("orders", 0, 2, 10).expect("consume");
@@ -186,7 +283,15 @@ fn test_mq_consumer_group_offset() {
 fn test_mq_multiple_consumer_groups() {
     let dir = temp_data_dir();
     let svc = new_mq_service(&dir);
-    svc.create_topic("orders", TopicConfig { partitions: 1, retention_secs: 3600, max_message_size: 1024 }).unwrap();
+    svc.create_topic(
+        "orders",
+        TopicConfig {
+            partitions: 1,
+            retention_secs: 3600,
+            max_message_size: 1024,
+        },
+    )
+    .unwrap();
 
     svc.produce("orders", 0, b"msg".to_vec(), None).unwrap();
 
@@ -204,12 +309,22 @@ fn test_mq_multiple_consumer_groups() {
 fn test_mq_dead_letter_queue() {
     let dir = temp_data_dir();
     let svc = new_mq_service(&dir);
-    svc.create_topic("orders", TopicConfig { partitions: 1, retention_secs: 3600, max_message_size: 1024 }).unwrap();
+    svc.create_topic(
+        "orders",
+        TopicConfig {
+            partitions: 1,
+            retention_secs: 3600,
+            max_message_size: 1024,
+        },
+    )
+    .unwrap();
 
-    svc.produce("orders", 0, b"bad message".to_vec(), None).unwrap();
+    svc.produce("orders", 0, b"bad message".to_vec(), None)
+        .unwrap();
 
     // Move message at offset 0 to DLQ
-    svc.move_to_dlq("orders", 0, 0, "parse_error", "invalid JSON").expect("move to DLQ");
+    svc.move_to_dlq("orders", 0, 0, "parse_error", "invalid JSON")
+        .expect("move to DLQ");
 
     // DLQ should have the message
     let dlq_msgs = svc.consume_dlq("orders", 0, 10).expect("consume DLQ");
@@ -234,7 +349,15 @@ fn test_mq_persistence_across_restart() {
     {
         let svc = MessageQueueService::new(db_path.clone(), 1024 * 1024 * 1024);
         rt.block_on(async { svc.start().await.expect("start") });
-        svc.create_topic("persist", TopicConfig { partitions: 1, retention_secs: 3600, max_message_size: 1024 }).unwrap();
+        svc.create_topic(
+            "persist",
+            TopicConfig {
+                partitions: 1,
+                retention_secs: 3600,
+                max_message_size: 1024,
+            },
+        )
+        .unwrap();
         svc.produce("persist", 0, b"msg1".to_vec(), None).unwrap();
         svc.produce("persist", 0, b"msg2".to_vec(), None).unwrap();
         svc.commit_offset("cg1", "persist", 0, 1).unwrap();
@@ -257,7 +380,15 @@ fn test_mq_persistence_across_restart() {
 fn test_mq_stats() {
     let dir = temp_data_dir();
     let svc = new_mq_service(&dir);
-    svc.create_topic("orders", TopicConfig { partitions: 2, retention_secs: 3600, max_message_size: 1024 }).unwrap();
+    svc.create_topic(
+        "orders",
+        TopicConfig {
+            partitions: 2,
+            retention_secs: 3600,
+            max_message_size: 1024,
+        },
+    )
+    .unwrap();
 
     for i in 0..10u8 {
         svc.produce("orders", i as u32 % 2, vec![i], None).unwrap();
@@ -276,7 +407,15 @@ fn test_mq_concurrent_produce() {
 
     let dir = temp_data_dir();
     let svc = Arc::new(new_mq_service(&dir));
-    svc.create_topic("concurrent", TopicConfig { partitions: 4, retention_secs: 3600, max_message_size: 1024 }).unwrap();
+    svc.create_topic(
+        "concurrent",
+        TopicConfig {
+            partitions: 4,
+            retention_secs: 3600,
+            max_message_size: 1024,
+        },
+    )
+    .unwrap();
 
     let mut handles = vec![];
     for i in 0..20 {

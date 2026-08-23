@@ -242,7 +242,13 @@ impl ExpressionEvaluator {
         }
 
         // 数字字面量（整数按 i64，小数按 f64）
-        if expr.starts_with('-') || expr.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        if expr.starts_with('-')
+            || expr
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+        {
             if let Ok(n) = expr.parse::<i64>() {
                 return Ok(serde_json::json!(n));
             }
@@ -280,8 +286,8 @@ impl ExpressionEvaluator {
         }
 
         // 路径访问（字段/索引）
-        if expr.starts_with('.') {
-            return self.eval_path(&expr[1..], context);
+        if let Some(path) = expr.strip_prefix('.') {
+            return self.eval_path(path, context);
         }
 
         // 上下文作为表达式默认值
@@ -385,9 +391,7 @@ impl ExpressionEvaluator {
         let rest = &expr[1..]; // 去掉 $
 
         // 变量名 = 直到 '.' 或 '[' 为止
-        let name_end = rest
-            .find(|c: char| c == '.' || c == '[')
-            .unwrap_or(rest.len());
+        let name_end = rest.find(['.', '[']).unwrap_or(rest.len());
         let name = &rest[..name_end];
         let path_rest = &rest[name_end..];
 
@@ -409,18 +413,14 @@ impl ExpressionEvaluator {
 
         for seg in segments {
             current = match seg {
-                PathSegment::Field(name) => {
-                    match &current {
-                        Value::Object(obj) => obj.get(&name).cloned().unwrap_or(Value::Null),
-                        _ => Value::Null,
-                    }
-                }
-                PathSegment::Index(idx) => {
-                    match &current {
-                        Value::Array(arr) => arr.get(idx).cloned().unwrap_or(Value::Null),
-                        _ => Value::Null,
-                    }
-                }
+                PathSegment::Field(name) => match &current {
+                    Value::Object(obj) => obj.get(&name).cloned().unwrap_or(Value::Null),
+                    _ => Value::Null,
+                },
+                PathSegment::Index(idx) => match &current {
+                    Value::Array(arr) => arr.get(idx).cloned().unwrap_or(Value::Null),
+                    _ => Value::Null,
+                },
             };
         }
 
@@ -505,10 +505,14 @@ impl ExpressionEvaluator {
                 let right_val = self.eval_jq_subset(right, context, vars)?;
 
                 let result = match *op {
-                    ">" => Self::compare_values(&left_val, &right_val).map(|o| o == std::cmp::Ordering::Greater),
-                    "<" => Self::compare_values(&left_val, &right_val).map(|o| o == std::cmp::Ordering::Less),
-                    ">=" => Self::compare_values(&left_val, &right_val).map(|o| o != std::cmp::Ordering::Less),
-                    "<=" => Self::compare_values(&left_val, &right_val).map(|o| o != std::cmp::Ordering::Greater),
+                    ">" => Self::compare_values(&left_val, &right_val)
+                        .map(|o| o == std::cmp::Ordering::Greater),
+                    "<" => Self::compare_values(&left_val, &right_val)
+                        .map(|o| o == std::cmp::Ordering::Less),
+                    ">=" => Self::compare_values(&left_val, &right_val)
+                        .map(|o| o != std::cmp::Ordering::Less),
+                    "<=" => Self::compare_values(&left_val, &right_val)
+                        .map(|o| o != std::cmp::Ordering::Greater),
                     "==" => Ok(left_val == right_val),
                     "!=" => Ok(left_val != right_val),
                     _ => Ok(false),
@@ -563,7 +567,9 @@ impl ExpressionEvaluator {
 
                 // 对象合并（export.as 常用：. + {"result": ...}）—— 先于字符串拼接
                 if *op == "+" {
-                    if let (Some(l_obj), Some(r_obj)) = (left_val.as_object(), right_val.as_object()) {
+                    if let (Some(l_obj), Some(r_obj)) =
+                        (left_val.as_object(), right_val.as_object())
+                    {
                         let mut merged = l_obj.clone();
                         for (k, v) in r_obj {
                             merged.insert(k.clone(), v.clone());
@@ -588,7 +594,7 @@ impl ExpressionEvaluator {
         let mut in_string = false;
         let mut escape = false;
         let mut depth = 0i32;
-        for (i, _) in expr.char_indices() {
+        for (i, ch) in expr.char_indices() {
             if i + op.len() > expr.len() {
                 break;
             }
@@ -596,7 +602,6 @@ impl ExpressionEvaluator {
                 escape = false;
                 continue;
             }
-            let ch = expr[i..].chars().next().unwrap();
             match ch {
                 '\\' => escape = true,
                 '"' => in_string = !in_string,
@@ -613,8 +618,12 @@ impl ExpressionEvaluator {
     fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering, ExpressionError> {
         match (a, b) {
             (Value::Number(na), Value::Number(nb)) => {
-                let fa = na.as_f64().ok_or_else(|| ExpressionError::TypeError("not a number".into()))?;
-                let fb = nb.as_f64().ok_or_else(|| ExpressionError::TypeError("not a number".into()))?;
+                let fa = na
+                    .as_f64()
+                    .ok_or_else(|| ExpressionError::TypeError("not a number".into()))?;
+                let fb = nb
+                    .as_f64()
+                    .ok_or_else(|| ExpressionError::TypeError("not a number".into()))?;
                 Ok(fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal))
             }
             (Value::String(sa), Value::String(sb)) => Ok(sa.cmp(sb)),
@@ -832,8 +841,8 @@ mod tests {
         // 整数按 i64 解析（保持 JSON 整数语义）
         assert_eq!(result, serde_json::json!(42));
         // 小数按 f64
-        let float = evaluate_expression("${ 3.14 }", &ctx()).unwrap();
-        assert_eq!(float, serde_json::json!(3.14));
+        let float = evaluate_expression("${ 2.5 }", &ctx()).unwrap();
+        assert_eq!(float, serde_json::json!(2.5));
     }
 
     #[test]
@@ -873,7 +882,10 @@ mod tests {
         };
         let eval = ExpressionEvaluator::with_sandbox(config);
         let result = eval.evaluate("${ .amount }", &ctx());
-        assert!(matches!(result, Err(ExpressionError::ExpressionTooLarge { .. })));
+        assert!(matches!(
+            result,
+            Err(ExpressionError::ExpressionTooLarge { .. })
+        ));
     }
 
     #[test]
@@ -887,7 +899,10 @@ mod tests {
             "items": [1, 2, 3]
         });
         let result = eval.evaluate("${ .items }", &ctx);
-        assert!(matches!(result, Err(ExpressionError::ResultTooLarge { .. })));
+        assert!(matches!(
+            result,
+            Err(ExpressionError::ResultTooLarge { .. })
+        ));
     }
 
     // ─── 边界情况 ───
@@ -912,11 +927,26 @@ mod tests {
         let mut v = HashMap::new();
         v.insert("input".to_string(), serde_json::json!({"raw": 42}));
         v.insert("output".to_string(), serde_json::json!({"result": "ok"}));
-        v.insert("task".to_string(), serde_json::json!({"name": "step1", "type": "call"}));
-        v.insert("workflow".to_string(), serde_json::json!({"name": "wf", "version": "1.0"}));
-        v.insert("secrets".to_string(), serde_json::json!({"apiKey": "secret-123"}));
-        v.insert("constants".to_string(), serde_json::json!({"region": "cn-north"}));
-        v.insert("authorization".to_string(), serde_json::json!({"role": "admin"}));
+        v.insert(
+            "task".to_string(),
+            serde_json::json!({"name": "step1", "type": "call"}),
+        );
+        v.insert(
+            "workflow".to_string(),
+            serde_json::json!({"name": "wf", "version": "1.0"}),
+        );
+        v.insert(
+            "secrets".to_string(),
+            serde_json::json!({"apiKey": "secret-123"}),
+        );
+        v.insert(
+            "constants".to_string(),
+            serde_json::json!({"region": "cn-north"}),
+        );
+        v.insert(
+            "authorization".to_string(),
+            serde_json::json!({"role": "admin"}),
+        );
         v
     }
 

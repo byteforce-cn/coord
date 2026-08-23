@@ -77,10 +77,18 @@ impl AuthMetrics {
     /// Record a denied request by reason.
     pub fn record_denied(&self, reason: &str) {
         match reason {
-            "expired" => { self.denied_expired.fetch_add(1, Ordering::Relaxed); }
-            "signature" => { self.denied_signature.fetch_add(1, Ordering::Relaxed); }
-            "scope" => { self.denied_scope.fetch_add(1, Ordering::Relaxed); }
-            "revoked" => { self.denied_revoked.fetch_add(1, Ordering::Relaxed); }
+            "expired" => {
+                self.denied_expired.fetch_add(1, Ordering::Relaxed);
+            }
+            "signature" => {
+                self.denied_signature.fetch_add(1, Ordering::Relaxed);
+            }
+            "scope" => {
+                self.denied_scope.fetch_add(1, Ordering::Relaxed);
+            }
+            "revoked" => {
+                self.denied_revoked.fetch_add(1, Ordering::Relaxed);
+            }
             _ => {}
         }
     }
@@ -102,7 +110,8 @@ impl AuthMetrics {
 
     /// Record a bloom filter false positive.
     pub fn record_bloom_false_positive(&self) {
-        self.bloom_false_positive_count.fetch_add(1, Ordering::Relaxed);
+        self.bloom_false_positive_count
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Set circuit breaker state.

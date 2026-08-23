@@ -57,7 +57,11 @@ mod tests {
     fn soak_write_read_stability() {
         let duration_secs = soak_duration_secs();
         println!("\n# Coord Soak Test — 写入/读取稳定性");
-        println!("> 运行时长: {}s | 启动时间: {:?}\n", duration_secs, std::time::SystemTime::now());
+        println!(
+            "> 运行时长: {}s | 启动时间: {:?}\n",
+            duration_secs,
+            std::time::SystemTime::now()
+        );
 
         // Setup
         let tmpdir = tempfile::tempdir().unwrap();
@@ -149,8 +153,12 @@ mod tests {
                     elapsed,
                     interval_writes,
                     interval_reads,
-                    w_p50, w_p95, w_p99,
-                    r_p50, r_p95, r_p99,
+                    w_p50,
+                    w_p95,
+                    w_p99,
+                    r_p50,
+                    r_p95,
+                    r_p99,
                     db_size / 1024,
                 );
 
@@ -245,7 +253,11 @@ mod tests {
             // Also scan all keys periodically
             if scan_count % 100 == 0 {
                 let all_results = mvcc.range(b"/soak/scan/", 0).unwrap();
-                assert_eq!(all_results.len(), key_count as usize, "Full scan should return all keys");
+                assert_eq!(
+                    all_results.len(),
+                    key_count as usize,
+                    "Full scan should return all keys"
+                );
             }
         }
 
@@ -257,7 +269,10 @@ mod tests {
         println!("|:---|:---|");
         println!("| 运行时长 | {:.1}s |", elapsed.as_secs_f64());
         println!("| 扫描次数 | {} |", scan_count);
-        println!("| 扫描吞吐量 | {:.0} scans/s |", scan_count as f64 / elapsed.as_secs_f64());
+        println!(
+            "| 扫描吞吐量 | {:.0} scans/s |",
+            scan_count as f64 / elapsed.as_secs_f64()
+        );
         println!("| P50 扫描延迟 | {:.0} µs |", percentile(&latencies, 50.0));
         println!("| P95 扫描延迟 | {:.0} µs |", percentile(&latencies, 95.0));
         println!("| P99 扫描延迟 | {:.0} µs |", percentile(&latencies, 99.0));
@@ -274,7 +289,11 @@ mod tests {
     fn soak_multi_region_write_stability() {
         let duration_secs = soak_duration_secs();
         println!("\n# Coord Multi-Region Soak Test — 多 Region 写入稳定性");
-        println!("> 运行时长: {}s | 启动时间: {:?}\n", duration_secs, std::time::SystemTime::now());
+        println!(
+            "> 运行时长: {}s | 启动时间: {:?}\n",
+            duration_secs,
+            std::time::SystemTime::now()
+        );
 
         let tmpdir = tempfile::tempdir().unwrap();
         let config = StorageConfig::default();
@@ -288,7 +307,10 @@ mod tests {
         let value = make_value(value_size);
 
         // Pre-populate keys across all Regions
-        println!("## Pre-populating {} Regions × {} keys...\n", num_regions, keys_per_region);
+        println!(
+            "## Pre-populating {} Regions × {} keys...\n",
+            num_regions, keys_per_region
+        );
         for region in 0..num_regions {
             for i in 0..keys_per_region {
                 let key = format!("/r/{:02}/key/{:06}", region, i);
@@ -328,7 +350,11 @@ mod tests {
 
             // Cross-Region read
             let read_region = ((region + 3) % num_regions as usize) as usize;
-            let read_key = format!("/r/{:02}/key/{:06}", read_region, (key_idx + 7) % keys_per_region as usize);
+            let read_key = format!(
+                "/r/{:02}/key/{:06}",
+                read_region,
+                (key_idx + 7) % keys_per_region as usize
+            );
             let r_start = Instant::now();
             mvcc.get(read_key.as_bytes()).unwrap();
             interval_read_latencies.push(r_start.elapsed().as_secs_f64() * 1_000_000.0);
@@ -350,19 +376,29 @@ mod tests {
 
                 let elapsed = start.elapsed().as_secs();
                 // Show top 3 regions by write count
-                let mut region_summary: Vec<(usize, u64)> = region_write_counts.iter().enumerate()
-                    .map(|(i, &c)| (i, c)).collect();
+                let mut region_summary: Vec<(usize, u64)> = region_write_counts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &c)| (i, c))
+                    .collect();
                 region_summary.sort_by(|a, b| b.1.cmp(&a.1));
-                let top3: Vec<String> = region_summary.iter().take(3)
+                let top3: Vec<String> = region_summary
+                    .iter()
+                    .take(3)
                     .map(|(r, c)| format!("R{}=>{}", r, c))
                     .collect();
 
                 println!(
                     "| {}s | {}/{} | {:.0}/{:.0}/{:.0} µs | {:.0}/{:.0}/{:.0} µs | {} |",
                     elapsed,
-                    interval_writes, interval_reads,
-                    w_p50, w_p95, w_p99,
-                    r_p50, r_p95, r_p99,
+                    interval_writes,
+                    interval_reads,
+                    w_p50,
+                    w_p95,
+                    w_p99,
+                    r_p50,
+                    r_p95,
+                    r_p99,
                     top3.join(" "),
                 );
 
@@ -394,15 +430,24 @@ mod tests {
                 let key = format!("/r/{:02}/key/{:06}", region, i);
                 match mvcc.get(key.as_bytes()) {
                     Ok(Some(v)) if v == value => ok += 1,
-                    Ok(None) => { tracing::error!("Missing key: {}", key); fail += 1; }
+                    Ok(None) => {
+                        tracing::error!("Missing key: {}", key);
+                        fail += 1;
+                    }
                     _ => fail += 1,
                 }
             }
         }
         println!("| 数据完整性检查 | {}/{} passed |", ok, ok + fail);
-        assert_eq!(fail, 0, "Data integrity check failed: {} missing keys", fail);
+        assert_eq!(
+            fail, 0,
+            "Data integrity check failed: {} missing keys",
+            fail
+        );
 
-        println!("\n✅ Multi-Region soak test completed — all Regions stable, data integrity verified.");
+        println!(
+            "\n✅ Multi-Region soak test completed — all Regions stable, data integrity verified."
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -433,7 +478,9 @@ mod tests {
 
         // Measure initial DB size
         let get_db_size = || -> u64 {
-            tmpdir.path().read_dir()
+            tmpdir
+                .path()
+                .read_dir()
                 .map(|dir| {
                     dir.filter_map(|e| e.ok())
                         .filter_map(|e| e.metadata().ok())
@@ -455,10 +502,17 @@ mod tests {
                 next_report = Instant::now() + report_interval;
                 let elapsed = start.elapsed().as_secs();
                 let db_size = get_db_size();
-                let kb_per_write = if counter > 0 { db_size as f64 / counter as f64 } else { 0.0 };
+                let kb_per_write = if counter > 0 {
+                    db_size as f64 / counter as f64
+                } else {
+                    0.0
+                };
                 println!(
                     "| {}s | {} | {} | {:.2} |",
-                    elapsed, counter, db_size / 1024, kb_per_write
+                    elapsed,
+                    counter,
+                    db_size / 1024,
+                    kb_per_write
                 );
             }
         }
@@ -477,7 +531,10 @@ mod tests {
         println!("| 最终大小 | {} KB |", final_size / 1024);
         println!("| 增长率 | {:.1}% |", growth);
         println!("| 总写入数 | {} |", counter);
-        println!("| 平均 KB/写入 | {:.2} |", final_size as f64 / counter as f64);
+        println!(
+            "| 平均 KB/写入 | {:.2} |",
+            final_size as f64 / counter as f64
+        );
 
         println!("\n✅ Storage growth monitor completed.");
     }

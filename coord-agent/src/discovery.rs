@@ -35,10 +35,7 @@ impl StaticDiscovery {
 
     /// 从字符串列表创建，自动解析 SocketAddr
     pub fn from_strings(peer_strs: &[String]) -> Self {
-        let peers: Vec<SocketAddr> = peer_strs
-            .iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
+        let peers: Vec<SocketAddr> = peer_strs.iter().filter_map(|s| s.parse().ok()).collect();
         Self::new(peers)
     }
 }
@@ -49,15 +46,15 @@ impl MemberDiscovery for StaticDiscovery {
     }
 
     fn leader_hint(&self) -> Option<SocketAddr> {
-        *self.leader.read().unwrap()
+        *self.leader.read().unwrap_or_else(|e| e.into_inner())
     }
 
     fn set_leader(&self, addr: SocketAddr) {
-        *self.leader.write().unwrap() = Some(addr);
+        *self.leader.write().unwrap_or_else(|e| e.into_inner()) = Some(addr);
     }
 
     fn clear_leader(&self) {
-        *self.leader.write().unwrap() = None;
+        *self.leader.write().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     fn watch_changes(&self) -> Option<tokio::sync::mpsc::Receiver<DiscoveryEvent>> {
