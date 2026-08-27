@@ -1,0 +1,56 @@
+name: contract-check
+
+# ============================================================
+# 对外协议契约质量门禁（apis/contracts）
+#
+# 三道卡口：
+#   1. buf lint      — 契约文件自身规范；
+#   2. buf breaking  — 与 main 基线比对，任何 Breaking Change 置红；
+#   3. wire-sync     — 契约承诺必须与 coord-proto 线端实现一致。
+#
+# 合并策略要求：本检查为 required status check，失败时禁止合并
+# （在分支保护规则中配置，见 WHITEPAPER.md §10）。
+# ============================================================
+
+on:
+  pull_request:
+    paths:
+      - "apis/contracts/**"
+      - "coord-proto/src/proto/**"
+  push:
+    branches: [main]
+    paths:
+      - "apis/contracts/**"
+      - "coord-proto/src/proto/**"
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # buf breaking 需要完整 git 历史
+
+      - uses: bufbuild/buf-setup-action@v1
+
+      - name: buf lint
+        run: buf lint
+        working-directory: apis/contracts
+
+      - name: buf breaking（对 main 基线）
+        # 冻结后切换为：.git#tag=contracts/v1.0.0,subdir=apis/contracts
+        # 首次导入（main 上尚无 apis/contracts）时跳过基线检查。
+        run: |
+          if git ls-tree -d origin/main apis/contracts > /dev/null 2>&1 \
+             && git ls-tree origin/main apis/contracts/buf.yaml | grep -q buf.yaml; then
+            buf breaking apis/contracts \
+              --against '.git#branch=origin/main,subdir=apis/contracts'
+          else
+            echo "::notice::main 上尚无 apis/contracts（首次导入），跳过 breaking 基线检查"
+          fi
+
+      - name: wire-sync（契约 ↔ coord-proto 一致性）
+        run: bash apis/contracts/scripts/check-wire-sync.sh

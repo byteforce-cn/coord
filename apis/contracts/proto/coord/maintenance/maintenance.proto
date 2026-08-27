@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外稳定契约 — Maintenance 服务（v1，裁剪版）
+//
+// v1 仅承诺 Status 探活接口。线端服务上存在的 Seal / Unseal /
+// Snapshot / Compact / Member* / Join 等运维接口【不在对外承诺范围】：
+// 仅供平台运维侧使用，可能随时调整，业务方禁止依赖（白皮书 §2 红区）。
+//
+// StatusResponse 中编号 2-5 的字段（raft_index / raft_term /
+// raft_leader / seal_status）为内部运维字段，线端仍可能返回，
+// 但不属于承诺语义：编号在此 reserved，防止未来被误用为其他含义。
+// 基线：coord-proto/src/proto/maintenance.proto。
+// ============================================================
+
+package coord.maintenance;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.maintenance";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/maintenance;maintenance";
+
+message StatusRequest {}
+
+message StatusResponse {
+  // 节点当前已应用的全局 Revision。可用于：
+  //   - 探活：连续两次调用 revision 不退化即服务正常；
+  //   - 滞后观察：与 Leader 的 revision 对比估计副本滞后。
+  int64 revision = 1;
+  reserved 2, 3, 4, 5; // 内部运维字段，不属于 v1 承诺语义
+}
+
+service Maintenance {
+  rpc Status(StatusRequest) returns (StatusResponse);
+}

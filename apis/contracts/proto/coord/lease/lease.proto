@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外稳定契约 — Lease 服务（v1）
+//
+// 租约：为 Key 提供 TTL 生命周期与保活机制，是服务注册、
+// 分布式锁等上层模式的基础原语。兼容性规则见
+// apis/contracts/WHITEPAPER.md §3；基线：coord-proto/src/proto/lease.proto。
+// ============================================================
+
+package coord.lease;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.lease";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/lease;lease";
+
+message LeaseGrantRequest {
+  int64 ttl = 1; // 请求的 TTL（秒）。服务端可按配置上下限调整，
+                 // 以响应中实际授予的 ttl 为准；
+                 // 越界时返回 INVALID_ARGUMENT
+  int64 id = 2;  // 0 = 服务端自动分配；>0 = 指定 ID（已被占用时返回错误）
+}
+
+message LeaseGrantResponse {
+  int64 id = 1;
+  int64 ttl = 2;    // 实际授予的 TTL（秒）
+  string error = 3; // 历史保留字段。【客户端纪律】成败只依据 gRPC Status
+                    // 判定，禁止解析本字段（白皮书 §5.3）
+}
+
+message LeaseRevokeRequest {
+  int64 id = 1;
+}
+
+message LeaseRevokeResponse {}
+
+message LeaseKeepAliveRequest {
+  int64 id = 1;
+}
+
+message LeaseKeepAliveResponse {
+  int64 id = 1;
+  int64 ttl = 2; // 续期后的剩余 TTL（秒）；ttl=0 表示 Lease 已不存在
+                 // （过期或被 Revoke），客户端应重新 Grant
+}
+
+// 租约服务。
+//
+// 语义承诺：
+//   - Lease 过期或被 Revoke 时，所有绑定该 Lease 的 Key 被级联删除，
+//     删除事件正常投递给 Watch 订阅者；
+//   - KeepAlive 为双向流：客户端持续发送 LeaseKeepAliveRequest，
+//     服务端逐条回应；流断开后客户端应立即重连续期，
+//     在 TTL 内未完成续期的 Lease 将被过期回收；
+//   - 过期判定以服务端单调时钟为准，不受节点系统时钟调整影响；
+//   - 【不承诺】精确的过期时刻：实际回收时刻可能略晚于 TTL
+//     （依赖 Leader 侧定时调度，Leader 切换后由新 Leader 重建）。
+service Lease {
+  rpc LeaseGrant(LeaseGrantRequest) returns (LeaseGrantResponse);
+  rpc LeaseRevoke(LeaseRevokeRequest) returns (LeaseRevokeResponse);
+  rpc LeaseKeepAlive(stream LeaseKeepAliveRequest) returns (stream LeaseKeepAliveResponse);
+}

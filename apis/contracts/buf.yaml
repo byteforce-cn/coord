@@ -1,0 +1,27 @@
+version: v2
+
+# Coord 对外协议契约（v1）
+# 基线 tag：contracts/v1.0.0（首次冻结后创建）
+modules:
+  - path: proto
+
+lint:
+  use:
+    - STANDARD
+  except:
+    # 以下例外均为「与线端既有实现保持 wire 兼容」的刻意决定，
+    # 不是技术债，禁止为通过 lint 而修改（见 WHITEPAPER.md §3.5）：
+    - PACKAGE_VERSION_SUFFIX # 包名沿用 coord.kv 等线端包名，Major 升级才引入 .v2 新包
+    - SERVICE_SUFFIX         # 服务名 KV/Txn/Lease/Watch/Maintenance 为线端既有名称
+    - ENUM_VALUE_PREFIX      # 枚举值与线端一致，重命名即 Breaking
+    - ENUM_ZERO_VALUE_SUFFIX # 零值与线端一致（如 PUT=0），重命名即 Breaking
+  ignore:
+    # 上游标准健康检查协议原文收录，命名不可本地化修改
+    - proto/grpc/health/v1/health.proto
+
+breaking:
+  use:
+    - FILE
+  # CI 中从仓库根执行：
+  #   buf breaking apis/contracts --against '.git#branch=main,subdir=apis/contracts'
+  # 任何 Breaking Change（删字段/改编号/改类型/删 RPC）将阻断合并。

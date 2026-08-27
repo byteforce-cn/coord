@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外稳定契约 — Watch 服务（v1）
+//
+// 变更监听（双向流）。兼容性规则见 apis/contracts/WHITEPAPER.md §3；
+// 基线：coord-proto/src/proto/watch.proto。
+// ============================================================
+
+package coord.watch;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.watch";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/watch;watch";
+
+import "coord/kv/kv.proto";
+
+message WatchCreateRequest {
+  bytes key = 1;            // 监听的 Key（或前缀起点）
+  bytes range_end = 2;      // 范围结束（左闭右开）；空 = 仅监听 key 本身
+  int64 start_revision = 3; // 起始 Revision（0 = 从当前最新开始）；
+                            // 若该 Revision 的历史已清理，将收到
+                            // HISTORY_UNAVAILABLE 事件
+  bool prev_kv = 4;         // 事件中是否携带变更前的旧值
+}
+
+// 变更事件。
+//
+// 语义承诺：
+//   - 至少一次投递（at-least-once）：断线重连后以
+//     start_revision = 已确认最大 revision + 1 重建 Watch 即可续传；
+//   - 同一流内事件 revision 严格单调递增，客户端可据此去重；
+//   - 同一 Key 的事件按发生顺序投递。
+message WatchEvent {
+  enum EventType {
+    PUT = 0;
+    DELETE = 1;
+    // 服务端缓冲区溢出（慢消费者背压保护）：事件流中已发生空洞。
+    // 客户端必须：以事件携带的 revision 为起点做一次 Range 全量拉取，
+    // 然后继续 Watch（白皮书 §7.3 重同步协议）。
+    BUFFER_OVERFLOW = 2;
+    // 请求的 start_revision 历史已被压缩清理。
+    // 客户端必须先做一次 Range 全量同步，再以最新 revision 重建 Watch。
+    HISTORY_UNAVAILABLE = 3;
+  }
+  EventType type = 1;
+  repeated coord.kv.KeyValue kvs = 2;
+  coord.kv.KeyValue prev_kv = 3; // 旧值（仅创建时 prev_kv=true 且存在旧值时填充）
+  int64 revision = 4;            // 本事件的 Revision
+}
+
+message WatchRequest {
+  oneof request {
+    WatchCreateRequest create = 1;
+  }
+  // 取消监听 = 客户端直接关闭流（half-close），无需显式 Cancel 消息。
+}
+
+message WatchResponse {
+  int64 watch_id = 1;            // 服务端分配的 Watch ID，同一条流内不变
+  repeated WatchEvent events = 2;
+}
+
+service Watch {
+  rpc Watch(stream WatchRequest) returns (stream WatchResponse);
+}

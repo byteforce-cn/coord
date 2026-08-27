@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外稳定契约 — KV 服务（v1）
+//
+// 本文件是 Coord 平台对外的【能力承诺】，与内部实现解耦：
+//   - 字段编号 / 类型 / rpc 与线端实现严格一致（wire-compatible），
+//     内部重构不得改变本文件的任何既有编号与语义；
+//   - 兼容性规则见 apis/contracts/WHITEPAPER.md §3《兼容性铁律》；
+//   - 基线：coord-proto/src/proto/kv.proto @ 82eb398。
+//
+// 包名说明：v1 承诺沿用线端既有包名 coord.kv（不含版本段），
+// 未来 Major 升级将以新包 coord.kv.v2 双跑过渡（见白皮书 §4）。
+// ============================================================
+
+package coord.kv;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.kv";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/kv;kv";
+
+// 键值对及其元数据。
+//
+// 语义承诺：
+//   - create_revision / mod_revision / version 均为服务端分配的单调递增
+//     64 位标识；【不承诺】其与 Raft Log Index / Term 的任何对齐关系
+//     （防腐层：底层存储与共识引擎可替换，见白皮书 §7.1）；
+//   - 客户端只允许做相等性判断与大小比较，不得对其做算术假设。
+message KeyValue {
+  bytes key = 1;
+  bytes value = 2;           // 空 value 表示 tombstone（已删除标记）
+  int64 create_revision = 3; // 本 Key 首次创建时的 Revision
+  int64 mod_revision = 4;    // 本 Key 最近一次修改时的 Revision
+  int64 version = 5;         // 本 Key 被修改的次数（创建为 1，随写递增）
+  int64 lease_id = 6;        // 关联的 Lease ID（0 表示无绑定）
+}
+
+// 写入请求。
+message PutRequest {
+  bytes key = 1;
+  bytes value = 2;
+  int64 lease_id = 3;   // 可选：绑定 Lease；Lease 过期或被 Revoke 时本 Key 级联删除
+  bool prev_kv = 4;     // 可选：为 true 时响应携带覆盖前的旧值
+  bytes request_id = 5; // 可选：幂等去重键。同一客户端身份下，重复提交相同
+                        // request_id 的请求不会重复生效，返回首次执行的结果。
+                        // 网络重试 / 超时重发场景【建议始终携带】。
+}
+
+message PutResponse {
+  KeyValue prev_kv = 1; // 旧值（仅当请求 prev_kv=true 且 Key 曾存在时填充）
+  int64 revision = 2;   // 本次写入生效后的全局 Revision
+}
+
+// 范围读取请求。
+//
+// 一致性承诺（白皮书 §7.2）：
+//   - 默认线性一致读（服务端经 ReadIndex 确认后返回）；
+//   - 因 Leader 切换等导致读暂时不可用时，返回 UNAVAILABLE，
+//     客户端应重试而非判定为数据丢失。
+message RangeRequest {
+  bytes key = 1;       // 起始 Key（含）
+  bytes range_end = 2; // 结束 Key（不含，左闭右开）；空 = 仅精确查询 key
+  int64 limit = 3;     // 最大返回条数（0 = 无限制）
+  int64 revision = 4;  // 指定历史 Revision 读取（0 = 最新）；
+                       // 若该 Revision 已被压缩清理，返回 OUT_OF_RANGE
+  bool keys_only = 5;  // 仅返回 Key，不返回 Value
+  bool count_only = 6; // 仅返回计数（kvs 为空，count 有效）
+}
+
+message RangeResponse {
+  repeated KeyValue kvs = 1;
+  int64 count = 2;    // 命中总数（count_only=true 时仅本字段有意义）
+  int64 revision = 3; // 本次响应对应的服务端 Revision
+}
+
+// 删除请求。
+message DeleteRequest {
+  bytes key = 1;
+  bytes range_end = 2;  // 同 RangeRequest：空 = 单 Key，非空 = 左闭右开范围删
+  bool prev_kv = 3;     // 为 true 时响应携带被删除的旧值列表
+  bytes request_id = 4; // 可选：幂等去重键（语义同 PutRequest.request_id）
+}
+
+message DeleteResponse {
+  int64 deleted = 1;              // 实际删除的 Key 数量
+  repeated KeyValue prev_kvs = 2; // 被删除的旧值（仅 prev_kv=true 时填充）
+  int64 revision = 3;             // 本次删除生效后的全局 Revision
+}
+
+// 键值服务。所有写操作经共识多数派提交确认后返回（白皮书 §7.2）。
+service KV {
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Range(RangeRequest) returns (RangeResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+}

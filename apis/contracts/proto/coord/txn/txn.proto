@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外稳定契约 — Txn 服务（v1）
+//
+// 原子条件事务（Compare-And-Swap）。兼容性规则见
+// apis/contracts/WHITEPAPER.md §3；基线：coord-proto/src/proto/txn.proto。
+// ============================================================
+
+package coord.txn;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.txn";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/txn;txn";
+
+import "coord/kv/kv.proto";
+
+// 条件比较。
+//
+// 语义承诺：
+//   - compare 列表为 AND 语义：全部满足才执行 success 分支；
+//   - 对不存在的 Key：version=0 且 value 为空，按此参与比较；
+//   - 比较与两个分支内的所有操作作为【单个原子单元】生效，
+//     要么全部成功，要么全部不生效，中间状态对任何读者不可见。
+message Compare {
+  enum CompareResult {
+    EQUAL = 0;
+    GREATER = 1;
+    LESS = 2;
+    NOT_EQUAL = 3;
+  }
+  enum Target {
+    VERSION = 0; // 比较 Key 的 version 字段（常用于乐观锁：VERSION EQUAL 0 = 创建锁）
+    VALUE = 1;   // 比较 Key 的 value 字段
+    MOD_REV = 2; // 比较 Key 的 mod_revision 字段
+  }
+  CompareResult result = 1;
+  Target target = 2;
+  bytes key = 3;
+  oneof target_value {
+    int64 version = 4;
+    bytes value = 5;
+    int64 mod_revision = 6;
+  }
+}
+
+// 事务内的单个操作（Range / Put / Delete 三选一）。
+message RequestOp {
+  oneof op {
+    coord.kv.RangeRequest request_range = 1;
+    coord.kv.PutRequest request_put = 2;
+    coord.kv.DeleteRequest request_delete = 3;
+  }
+}
+
+message ResponseOp {
+  oneof op {
+    coord.kv.RangeResponse response_range = 1;
+    coord.kv.PutResponse response_put = 2;
+    coord.kv.DeleteResponse response_delete = 3;
+  }
+}
+
+// 事务请求。
+//
+// 边界声明：
+//   - 当前实现未强制操作数量上限；请勿构造超大事务。
+//     未来引入服务端强制上限时将以 INVALID_ARGUMENT 拒绝，
+//     并提前一个 Minor 版本公告（白皮书 §3.4）；
+//   - 事务不提供"实时回滚"语义：已提交事务不可回滚，
+//     业务补偿由调用方自行实现（白皮书 §8 红线 R1）。
+message TxnRequest {
+  repeated Compare compare = 1;   // 条件列表（AND 语义）；空 = 无条件执行 success
+  repeated RequestOp success = 2; // 条件全部满足时执行
+  repeated RequestOp failure = 3; // 任一条件不满足时执行
+  bytes request_id = 4;           // 可选：幂等去重键（语义同 coord.kv.PutRequest）
+}
+
+message TxnResponse {
+  bool succeeded = 1; // 条件是否全部满足（false 时执行的是 failure 分支，
+                      // 这不是错误，gRPC 状态仍为 OK）
+  repeated ResponseOp responses = 2; // 与实际执行分支内的操作一一对应
+  int64 revision = 3;                // 本事务生效后的全局 Revision
+}
+
+service Txn {
+  rpc Txn(TxnRequest) returns (TxnResponse);
+}
