@@ -13,6 +13,7 @@ zeroize = { workspace = true }
 tokio = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
 base64 = "0.22"
 uuid = { workspace = true }
 rand = { workspace = true }

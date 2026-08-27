@@ -30,6 +30,7 @@ redb = { workspace = true }
 rand = { workspace = true }
 aes-gcm = { workspace = true }
 sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
 hmac = { workspace = true }
 zeroize = { workspace = true }
 hex = { workspace = true }
@@ -50,3 +51,4 @@ toml = { workspace = true }
 tempfile = { workspace = true }
 uuid = { workspace = true }
 rcgen = { version = "0.14", features = ["x509-parser"] }
+tracing-subscriber = { workspace = true }

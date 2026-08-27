@@ -1,0 +1,130 @@
+{
+  "__inputs": [],
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(raft_leader_id, instance)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Raft leader / term / apply 进度",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "raft_leader_id{instance=~\"$instance\"}",
+          "legendFormat": "leader_id {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "raft_commit_index{instance=~\"$instance\"} - raft_applied_index{instance=~\"$instance\"}",
+          "legendFormat": "apply lag {{instance}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "gRPC 请求速率（按方法）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (method) (rate(grpc_requests_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{method}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "gRPC 错误 / 慢请求",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (method) (rate(grpc_method_errors_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "errors {{method}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (method) (rate(grpc_method_slow_requests_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "slow {{method}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Storage 磁盘与 key 数",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "storage_size_bytes{instance=~\"$instance\"}",
+          "legendFormat": "size {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "storage_keys_total{instance=~\"$instance\"}",
+          "legendFormat": "keys {{instance}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Lease / Watch / Apply",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "lease_active_total{instance=~\"$instance\"}",
+          "legendFormat": "lease active {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "coord_watch_active{instance=~\"$instance\"}",
+          "legendFormat": "watch active {{instance}}"
+        },
+        {
+          "refId": "C",
+          "expr": "coord_watch_dropped_total{instance=~\"$instance\"}",
+          "legendFormat": "watch dropped {{instance}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Txn 冲突率 / Compaction 回收 / Auth 拒绝",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(coord_txn_conflicts_total{instance=~\"$instance\"}[5m]) / clamp_min(rate(coord_txn_total{instance=~\"$instance\"}[5m]), 0.0001)",
+          "legendFormat": "txn conflict ratio {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(coord_compaction_reclaimed_bytes_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "compaction reclaimed {{instance}}"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(coord_auth_denied_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "auth denied {{instance}}"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "title": "coord-server Overview",
+  "uid": "coord-server-overview",
+  "version": 1
+}

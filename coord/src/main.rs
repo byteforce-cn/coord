@@ -75,8 +75,66 @@ struct Cli {
     #[arg(long, global = true, default_value = "pretty")]
     log_format: String,
 
+    /// TLS CA 证书（PEM 路径；提供后以 https+TLS 直连集群）
+    #[arg(long, global = true)]
+    tls_ca: Option<PathBuf>,
+
+    /// TLS 客户端证书（PEM 路径；与 --tls-key 成对提供时为 mTLS）
+    #[arg(long, global = true)]
+    tls_cert: Option<PathBuf>,
+
+    /// TLS 客户端私钥（PEM 路径）
+    #[arg(long, global = true)]
+    tls_key: Option<PathBuf>,
+
+    /// TLS SNI/server name 覆盖（经 IP 连接而证书为 DNS SAN 时使用）
+    #[arg(long, global = true)]
+    tls_server_name: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+/// 从全局 `--tls-*` 参数构建 CLI 连接用 TLS 配置（PEM 字节）。
+///
+/// - 全部缺省 → None（明文直连，开发/内网）；
+/// - `--tls-ca` → 服务端 TLS 校验；`--tls-cert/--tls-key` 成对 → mTLS 身份；
+/// - 参数组合非法或文件读取失败 → 打印错误并退出（fail-closed）。
+fn build_cli_tls(cli: &Cli) -> Option<coord_client::config::TlsConfig> {
+    fn read_pem(path: &std::path::Path) -> Vec<u8> {
+        match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("Error: failed to read TLS file {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        }
+    }
+    // --tls-ca 缺省：其余 --tls-* 参数非法（fail-closed）
+    if cli.tls_ca.is_none() {
+        if cli.tls_cert.is_some() || cli.tls_key.is_some() || cli.tls_server_name.is_some() {
+            eprintln!("Error: --tls-cert/--tls-key/--tls-server-name require --tls-ca");
+            std::process::exit(1);
+        }
+        return None;
+    }
+    // --tls-cert 与 --tls-key 必须成对（mTLS 身份）
+    match (&cli.tls_cert, &cli.tls_key) {
+        (None, None) | (Some(_), Some(_)) => {}
+        _ => {
+            eprintln!("Error: --tls-cert and --tls-key must be provided together");
+            std::process::exit(1);
+        }
+    }
+    let Some(ca_path) = cli.tls_ca.as_ref() else {
+        return None; // 前文已校验 tls_ca.is_some()
+    };
+    Some(coord_client::config::TlsConfig {
+        ca_pem: read_pem(ca_path),
+        client_cert_pem: cli.tls_cert.as_ref().map(|p| read_pem(p)),
+        client_key_pem: cli.tls_key.as_ref().map(|p| read_pem(p)),
+        server_name: cli.tls_server_name.clone(),
+    })
 }
 
 #[derive(Subcommand)]
@@ -135,26 +193,32 @@ enum Commands {
 
     /// 启动 Agent 守护进程（本地代理，Java 应用入口）
     Agent {
-        /// Agent 本地 gRPC 监听地址（默认 127.0.0.1:19527）
-        #[arg(long, default_value = "127.0.0.1:19527")]
-        agent_addr: String,
+        /// Agent 本地 gRPC 监听地址（缺省 127.0.0.1:19527；显式提供时覆盖 --agent-config 同名字段）
+        #[arg(long)]
+        agent_addr: Option<String>,
 
-        /// HTTP 可观测性监听地址（默认 127.0.0.1:19528）
-        #[arg(long, default_value = "127.0.0.1:19528")]
-        http_addr: String,
+        /// HTTP 可观测性监听地址（缺省 127.0.0.1:19528；覆盖 --agent-config 同名字段）
+        #[arg(long)]
+        http_addr: Option<String>,
 
-        /// 成员发现模式（默认 "static"）
-        #[arg(long, default_value = "static")]
-        discovery: String,
+        /// 成员发现模式（默认 "static"；覆盖 --agent-config）
+        #[arg(long)]
+        discovery: Option<String>,
 
-        /// 静态配置的 Server 节点列表（逗号分隔）
+        /// 静态配置的 Server 节点列表（逗号分隔；覆盖 --agent-config）
         #[arg(long, value_delimiter = ',')]
         static_peers: Vec<String>,
+
+        /// Agent TOML 配置文件（生产用：可含 [tls]/[services]/[replication]/[auth] 等段，
+        /// 见 docs/transport-security.md §4）
+        #[arg(long)]
+        agent_config: Option<PathBuf>,
     },
 
     /// 开发模式：同时启动 Server + Agent（单节点集群）
     Dev {
-        /// 监听地址（默认 127.0.0.1，容器化部署需设为 0.0.0.0）
+        /// 监听地址（默认 127.0.0.1；容器化部署需设为 0.0.0.0，
+        /// 此时必须显式传 --allow-insecure，R-SEC-05）
         #[arg(long, default_value = "127.0.0.1")]
         bind_addr: String,
 
@@ -173,6 +237,11 @@ enum Commands {
         /// 启动前清空数据目录（确保干净状态）
         #[arg(long, default_value = "false")]
         fresh: bool,
+
+        /// 显式确认：允许鉴权关闭的 dev 模式绑定非 loopback 地址
+        /// （仅限容器化本地调试；Agent 仍会按自身策略拒绝非 loopback，R-SEC-05）
+        #[arg(long, default_value = "false")]
+        allow_insecure: bool,
     },
 
     /// 清空本地数据目录（环境重置）
@@ -626,6 +695,9 @@ async fn main() {
         subscriber.init();
     }
 
+    // 全局 TLS 连接参数（对 TLS/mTLS 集群执行管理命令；参数非法/文件缺失即退出）
+    let cli_tls = build_cli_tls(&cli);
+
     // 加载配置文件（如果指定）
     let mut file_config = None;
     if let Some(ref config_path) = cli.config {
@@ -700,7 +772,9 @@ async fn main() {
         Commands::Security(cmd) => match cmd {
             SecurityCmd::Seal { addr } => {
                 tracing::info!("Sealing cluster via {}", addr);
-                if let Err(e) = commands::cmd_seal(&addr).await {
+                if let Err(e) =
+                    commands::cmd_seal(commands::CliConn::new(&addr, cli_tls.clone())).await
+                {
                     tracing::error!("Seal failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
@@ -721,7 +795,10 @@ async fn main() {
                         })
                     })
                     .collect();
-                if let Err(e) = commands::cmd_unseal(&addr, share_data).await {
+                if let Err(e) =
+                    commands::cmd_unseal(commands::CliConn::new(&addr, cli_tls.clone()), share_data)
+                        .await
+                {
                     tracing::error!("Unseal failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
@@ -764,8 +841,13 @@ async fn main() {
                     raft_addr,
                     addr
                 );
-                if let Err(e) =
-                    commands::cmd_member_add(&addr, id, &node_addr, raft_addr.as_deref()).await
+                if let Err(e) = commands::cmd_member_add(
+                    commands::CliConn::new(&addr, cli_tls.clone()),
+                    id,
+                    &node_addr,
+                    raft_addr.as_deref(),
+                )
+                .await
                 {
                     tracing::error!("MemberAdd failed: {e}");
                     eprintln!("Error: {e}");
@@ -774,7 +856,10 @@ async fn main() {
             }
             MemberCmd::Remove { addr, id } => {
                 tracing::info!("Removing member: id={} via {}", id, addr);
-                if let Err(e) = commands::cmd_member_remove(&addr, id).await {
+                if let Err(e) =
+                    commands::cmd_member_remove(commands::CliConn::new(&addr, cli_tls.clone()), id)
+                        .await
+                {
                     tracing::error!("MemberRemove failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
@@ -782,7 +867,10 @@ async fn main() {
             }
             MemberCmd::Promote { addr, id } => {
                 tracing::info!("Promoting member: id={} via {}", id, addr);
-                if let Err(e) = commands::cmd_member_promote(&addr, id).await {
+                if let Err(e) =
+                    commands::cmd_member_promote(commands::CliConn::new(&addr, cli_tls.clone()), id)
+                        .await
+                {
                     tracing::error!("MemberPromote failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
@@ -790,7 +878,9 @@ async fn main() {
             }
             MemberCmd::List { addr } => {
                 tracing::info!("Listing members via {}", addr);
-                if let Err(e) = commands::cmd_member_list(&addr).await {
+                if let Err(e) =
+                    commands::cmd_member_list(commands::CliConn::new(&addr, cli_tls.clone())).await
+                {
                     tracing::error!("MemberList failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
@@ -831,7 +921,10 @@ async fn main() {
             }
             SnapshotCmd::Pull { addr, output } => {
                 tracing::info!("Pulling snapshot from {} to {}", addr, output.display());
-                if let Err(e) = commands::snapshot_pull(&addr, &output).await {
+                if let Err(e) =
+                    commands::snapshot_pull(commands::CliConn::new(&addr, cli_tls.clone()), &output)
+                        .await
+                {
                     tracing::error!("Snapshot pull failed: {e}");
                     std::process::exit(1);
                 }
@@ -841,7 +934,9 @@ async fn main() {
         Commands::Auth(cmd) => match cmd {
             AuthCmd::Enable { addr } => {
                 tracing::info!("Enabling auth via {}", addr);
-                if let Err(e) = commands::cmd_auth_enable(&addr).await {
+                if let Err(e) =
+                    commands::cmd_auth_enable(commands::CliConn::new(&addr, cli_tls.clone())).await
+                {
                     tracing::error!("AuthEnable failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
@@ -849,7 +944,9 @@ async fn main() {
             }
             AuthCmd::Disable { addr } => {
                 tracing::info!("Disabling auth via {}", addr);
-                if let Err(e) = commands::cmd_auth_disable(&addr).await {
+                if let Err(e) =
+                    commands::cmd_auth_disable(commands::CliConn::new(&addr, cli_tls.clone())).await
+                {
                     tracing::error!("AuthDisable failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
@@ -857,7 +954,9 @@ async fn main() {
             }
             AuthCmd::Status { addr } => {
                 tracing::info!("Checking auth status via {}", addr);
-                if let Err(e) = commands::cmd_auth_status(&addr).await {
+                if let Err(e) =
+                    commands::cmd_auth_status(commands::CliConn::new(&addr, cli_tls.clone())).await
+                {
                     tracing::error!("AuthStatus failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
@@ -879,14 +978,26 @@ async fn main() {
                             }
                         },
                     };
-                    if let Err(e) = commands::cmd_auth_user_add(&addr, &name, &pass).await {
+                    if let Err(e) = commands::cmd_auth_user_add(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &name,
+                        &pass,
+                    )
+                    .await
+                    {
                         tracing::error!("UserAdd failed: {e}");
                         eprintln!("Error: {e}");
                         std::process::exit(1);
                     }
                 }
                 AuthUserCmd::Delete { name, force, addr } => {
-                    if let Err(e) = commands::cmd_auth_user_delete(&addr, &name, force).await {
+                    if let Err(e) = commands::cmd_auth_user_delete(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &name,
+                        force,
+                    )
+                    .await
+                    {
                         tracing::error!("UserDelete failed: {e}");
                         eprintln!("Error: {e}");
                         std::process::exit(1);
@@ -907,21 +1018,35 @@ async fn main() {
                             }
                         },
                     };
-                    if let Err(e) = commands::cmd_auth_user_passwd(&addr, &name, &pass).await {
+                    if let Err(e) = commands::cmd_auth_user_passwd(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &name,
+                        &pass,
+                    )
+                    .await
+                    {
                         tracing::error!("UserPasswd failed: {e}");
                         eprintln!("Error: {e}");
                         std::process::exit(1);
                     }
                 }
                 AuthUserCmd::List { addr } => {
-                    if let Err(e) = commands::cmd_auth_user_list(&addr).await {
+                    if let Err(e) =
+                        commands::cmd_auth_user_list(commands::CliConn::new(&addr, cli_tls.clone()))
+                            .await
+                    {
                         tracing::error!("UserList failed: {e}");
                         eprintln!("Error: {e}");
                         std::process::exit(1);
                     }
                 }
                 AuthUserCmd::Show { name, addr } => {
-                    if let Err(e) = commands::cmd_auth_user_show(&addr, &name).await {
+                    if let Err(e) = commands::cmd_auth_user_show(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &name,
+                    )
+                    .await
+                    {
                         tracing::error!("UserShow failed: {e}");
                         eprintln!("Error: {e}");
                         std::process::exit(1);
@@ -937,7 +1062,7 @@ async fn main() {
                     addr,
                 } => {
                     if let Err(e) = commands::cmd_auth_approle_create(
-                        &addr,
+                        commands::CliConn::new(&addr, cli_tls.clone()),
                         &name,
                         role_id.as_deref(),
                         secret_id.as_deref(),
@@ -951,35 +1076,61 @@ async fn main() {
                     }
                 }
                 AuthAppRoleCmd::Delete { name, force, addr } => {
-                    if let Err(e) = commands::cmd_auth_approle_delete(&addr, &name, force).await {
+                    if let Err(e) = commands::cmd_auth_approle_delete(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &name,
+                        force,
+                    )
+                    .await
+                    {
                         tracing::error!("AppRoleDelete failed: {e}");
                         eprintln!("Error: {e}");
                         std::process::exit(1);
                     }
                 }
                 AuthAppRoleCmd::RoleId { name, addr } => {
-                    if let Err(e) = commands::cmd_auth_approle_role_id(&addr, &name).await {
+                    if let Err(e) = commands::cmd_auth_approle_role_id(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &name,
+                    )
+                    .await
+                    {
                         tracing::error!("AppRoleRoleId failed: {e}");
                         eprintln!("Error: {e}");
                         std::process::exit(1);
                     }
                 }
                 AuthAppRoleCmd::SecretId { name, addr } => {
-                    if let Err(e) = commands::cmd_auth_approle_secret_id(&addr, &name).await {
+                    if let Err(e) = commands::cmd_auth_approle_secret_id(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &name,
+                    )
+                    .await
+                    {
                         tracing::error!("AppRoleSecretId failed: {e}");
                         eprintln!("Error: {e}");
                         std::process::exit(1);
                     }
                 }
                 AuthAppRoleCmd::List { addr } => {
-                    if let Err(e) = commands::cmd_auth_approle_list(&addr).await {
+                    if let Err(e) = commands::cmd_auth_approle_list(commands::CliConn::new(
+                        &addr,
+                        cli_tls.clone(),
+                    ))
+                    .await
+                    {
                         tracing::error!("AppRoleList failed: {e}");
                         eprintln!("Error: {e}");
                         std::process::exit(1);
                     }
                 }
                 AuthAppRoleCmd::Show { name, addr } => {
-                    if let Err(e) = commands::cmd_auth_approle_show(&addr, &name).await {
+                    if let Err(e) = commands::cmd_auth_approle_show(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &name,
+                    )
+                    .await
+                    {
                         tracing::error!("AppRoleShow failed: {e}");
                         eprintln!("Error: {e}");
                         std::process::exit(1);
@@ -988,14 +1139,25 @@ async fn main() {
             },
             AuthCmd::Role(cmd) => match cmd {
                 AuthRoleCmd::Add { name, addr } => {
-                    if let Err(e) = commands::cmd_auth_role_add(&addr, &name).await {
+                    if let Err(e) = commands::cmd_auth_role_add(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &name,
+                    )
+                    .await
+                    {
                         tracing::error!("RoleAdd failed: {e}");
                         eprintln!("Error: {e}");
                         std::process::exit(1);
                     }
                 }
                 AuthRoleCmd::Delete { name, force, addr } => {
-                    if let Err(e) = commands::cmd_auth_role_delete(&addr, &name, force).await {
+                    if let Err(e) = commands::cmd_auth_role_delete(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &name,
+                        force,
+                    )
+                    .await
+                    {
                         tracing::error!("RoleDelete failed: {e}");
                         eprintln!("Error: {e}");
                         std::process::exit(1);
@@ -1009,7 +1171,7 @@ async fn main() {
                     addr,
                 } => {
                     if let Err(e) = commands::cmd_auth_role_grant(
-                        &addr,
+                        commands::CliConn::new(&addr, cli_tls.clone()),
                         &name,
                         &perm,
                         &key,
@@ -1028,9 +1190,13 @@ async fn main() {
                     range_end,
                     addr,
                 } => {
-                    if let Err(e) =
-                        commands::cmd_auth_role_revoke(&addr, &name, &key, range_end.as_deref())
-                            .await
+                    if let Err(e) = commands::cmd_auth_role_revoke(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &name,
+                        &key,
+                        range_end.as_deref(),
+                    )
+                    .await
                     {
                         tracing::error!("RoleRevoke failed: {e}");
                         eprintln!("Error: {e}");
@@ -1038,7 +1204,10 @@ async fn main() {
                     }
                 }
                 AuthRoleCmd::List { addr } => {
-                    if let Err(e) = commands::cmd_auth_role_list(&addr).await {
+                    if let Err(e) =
+                        commands::cmd_auth_role_list(commands::CliConn::new(&addr, cli_tls.clone()))
+                            .await
+                    {
                         tracing::error!("RoleList failed: {e}");
                         eprintln!("Error: {e}");
                         std::process::exit(1);
@@ -1046,14 +1215,26 @@ async fn main() {
                 }
             },
             AuthCmd::Grant { user, role, addr } => {
-                if let Err(e) = commands::cmd_auth_grant(&addr, &user, &role).await {
+                if let Err(e) = commands::cmd_auth_grant(
+                    commands::CliConn::new(&addr, cli_tls.clone()),
+                    &user,
+                    &role,
+                )
+                .await
+                {
                     tracing::error!("Grant failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
             }
             AuthCmd::Revoke { user, role, addr } => {
-                if let Err(e) = commands::cmd_auth_revoke(&addr, &user, &role).await {
+                if let Err(e) = commands::cmd_auth_revoke(
+                    commands::CliConn::new(&addr, cli_tls.clone()),
+                    &user,
+                    &role,
+                )
+                .await
+                {
                     tracing::error!("Revoke failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
@@ -1071,7 +1252,14 @@ async fn main() {
                         std::process::exit(1);
                     }
                 };
-                if let Err(e) = commands::cmd_auth_login(&addr, &name, &pass, token_only).await {
+                if let Err(e) = commands::cmd_auth_login(
+                    commands::CliConn::new(&addr, cli_tls.clone()),
+                    &name,
+                    &pass,
+                    token_only,
+                )
+                .await
+                {
                     tracing::error!("Login failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
@@ -1082,7 +1270,10 @@ async fn main() {
         Commands::Capability(cmd) => match cmd {
             CapabilityCmd::List { addr } => {
                 tracing::info!("Listing capabilities via {}", addr);
-                if let Err(e) = commands::cmd_capability_list(&addr).await {
+                if let Err(e) =
+                    commands::cmd_capability_list(commands::CliConn::new(&addr, cli_tls.clone()))
+                        .await
+                {
                     tracing::error!("CapabilityList failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
@@ -1093,7 +1284,12 @@ async fn main() {
                 addr,
             } => {
                 tracing::info!("Getting capability {} via {}", capability_id, addr);
-                if let Err(e) = commands::cmd_capability_get(&addr, &capability_id).await {
+                if let Err(e) = commands::cmd_capability_get(
+                    commands::CliConn::new(&addr, cli_tls.clone()),
+                    &capability_id,
+                )
+                .await
+                {
                     tracing::error!("CapabilityGet failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
@@ -1108,7 +1304,13 @@ async fn main() {
                 keep_idgen,
                 addr
             );
-            if let Err(e) = commands::cmd_reset(&cli.data_dir, &addr, keep_idgen).await {
+            if let Err(e) = commands::cmd_reset(
+                &cli.data_dir,
+                commands::CliConn::new(&addr, cli_tls.clone()),
+                keep_idgen,
+            )
+            .await
+            {
                 tracing::error!("Reset failed: {e}");
                 eprintln!("Error: {e}");
                 std::process::exit(1);
@@ -1123,7 +1325,12 @@ async fn main() {
                     eprintln!("Error: backup file not found: {}", file.display());
                     std::process::exit(1);
                 }
-                if let Err(e) = commands::cmd_idgen_restore(&file, &addr).await {
+                if let Err(e) = commands::cmd_idgen_restore(
+                    &file,
+                    commands::CliConn::new(&addr, cli_tls.clone()),
+                )
+                .await
+                {
                     tracing::error!("Idgen restore failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
@@ -1136,30 +1343,48 @@ async fn main() {
             http_addr,
             discovery,
             static_peers,
+            agent_config,
         } => {
             tracing::info!(
-                "Starting coord-agent v{}: agent={}, http={}, discovery={}",
+                "Starting coord-agent v{}: agent={:?}, http={:?}, discovery={:?}",
                 env!("CARGO_PKG_VERSION"),
                 agent_addr,
                 http_addr,
                 discovery
             );
 
-            let agent_config = coord_agent::AgentConfig {
-                agent_addr,
-                http_addr,
-                data_dir: cli.data_dir.to_string_lossy().to_string(),
-                discovery_mode: match discovery.as_str() {
+            // 生产收口：agent 配置源 = --agent-config（TOML，含 [tls]/[services]/[replication]）
+            // > CLI 显式参数 > AgentConfig 默认值；加载失败 fail-closed。
+            let mut agent_config = match agent_config {
+                Some(path) => match coord_agent::AgentConfig::from_file(&path) {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        tracing::error!("Failed to load agent config from {}: {e}", path.display());
+                        std::process::exit(1);
+                    }
+                },
+                None => coord_agent::AgentConfig::default(),
+            };
+            if let Some(addr) = agent_addr {
+                agent_config.agent_addr = addr;
+            }
+            if let Some(addr) = http_addr {
+                agent_config.http_addr = addr;
+            }
+            if let Some(mode) = discovery {
+                agent_config.discovery_mode = match mode.as_str() {
                     "static" => coord_agent::DiscoveryMode::Static,
                     "gossip" => coord_agent::DiscoveryMode::Gossip,
                     other => {
                         tracing::error!("Unknown discovery mode: {other}");
                         std::process::exit(1);
                     }
-                },
-                static_peers,
-                ..Default::default()
-            };
+                };
+            }
+            if !static_peers.is_empty() {
+                agent_config.static_peers = static_peers;
+            }
+            agent_config.data_dir = cli.data_dir.to_string_lossy().to_string();
 
             if let Err(e) = coord_agent::run_agent(agent_config).await {
                 tracing::error!("Agent exited with error: {e}");
@@ -1173,6 +1398,7 @@ async fn main() {
             agent_port,
             cluster_name,
             fresh,
+            allow_insecure,
         } => {
             tracing::info!(
                 "Starting coord dev mode v{}: bind={}, server={}:{}, agent={}:{}, cluster={}",
@@ -1192,6 +1418,7 @@ async fn main() {
                 &cli.data_dir,
                 &cluster_name,
                 fresh,
+                allow_insecure,
             )
             .await
             {
@@ -1337,8 +1564,11 @@ async fn run_server(
     std::fs::create_dir_all(&snapshot_dir)?;
     let snapshot_tracker = Arc::new(coord_server::storage::snapshot::SnapshotTracker::default());
 
+    // 4. 初始化指标注册表（R-OBS-10：提前创建，供 Watch/Lease/状态机/拦截器埋点）
+    let metrics = Arc::new(Metrics::new());
+
     // 4. 初始化 Watch 分发器
-    let watch_dispatcher = Arc::new(WatchDispatcher::start());
+    let watch_dispatcher = Arc::new(WatchDispatcher::start().with_metrics(Arc::clone(&metrics)));
 
     // 5. 构建 Raft 栈
     // 5a. Raft LogStore（Redb 持久化，独立实例 raft-log/log.db）
@@ -1376,6 +1606,8 @@ async fn run_server(
         Arc::clone(&snapshot_tracker),
     );
     sm_store.set_watch_dispatcher(Arc::clone(&watch_dispatcher));
+    // R-OBS-10：状态机 apply/快照埋点
+    sm_store.metrics = Some(Arc::clone(&metrics));
 
     // 6.5. 初始化 Auth 组件（P0-C.1：`security.auth_enabled` 唯一开关，默认 true）
     let auth_enabled = cfg.security.auth_enabled;
@@ -1425,9 +1657,10 @@ async fn run_server(
                 },
             };
             let pw = root_password.unwrap_or_else(|| {
+                // R-SEC-05：随机 root 密码仅输出到控制台（不经过 tracing，避免落入结构化日志/日志文件）
                 let pw = generate_random_password(24);
-                tracing::warn!(
-                    "Generated random root password (shown ONCE; store it securely): {}",
+                eprintln!(
+                    "[coord] Generated random root password (shown ONCE; store it securely): {}",
                     pw
                 );
                 pw
@@ -1508,6 +1741,37 @@ async fn run_server(
         }
     }
 
+    // R-RFT-19：快照传输限速器接线（此前 SnapshotRateLimiter 为死代码）；
+    // 限速可避免快照同步占满节点间带宽影响正常 Raft 通信。
+    network_factory.set_snapshot_rate_limiter(cfg.raft.snapshot_rate_limit_bytes_per_sec);
+    if cfg.raft.snapshot_rate_limit_bytes_per_sec > 0 {
+        tracing::info!(
+            "Raft snapshot rate limit: {} bytes/sec",
+            cfg.raft.snapshot_rate_limit_bytes_per_sec
+        );
+    }
+
+    // R-SEC-03：raft 端口认证策略（mTLS 或共享密钥，否则非 loopback 拒绝启动）
+    let raft_use_tls = cfg.security.tls_cert.is_some() && cfg.security.tls_key.is_some();
+    if let Some(ref secret) = cfg.security.raft_shared_secret {
+        network_factory.set_raft_shared_secret(secret);
+        tracing::info!("Raft inter-node shared-secret (HMAC) authentication enabled");
+    }
+    if !raft_use_tls && cfg.security.raft_shared_secret.is_none() {
+        let raft_is_loopback = raft_addr.starts_with("127.")
+            || raft_addr.starts_with("localhost")
+            || raft_addr.starts_with("[::1]");
+        if !raft_is_loopback {
+            return Err(format!(
+                "refusing to start: raft_addr={raft_addr} is non-loopback with neither \
+                 raft mTLS (tls_cert/tls_key/tls_ca) nor security.raft_shared_secret \
+                 configured (R-SEC-03 fail-closed)"
+            )
+            .into());
+        }
+        tracing::warn!("Raft RPC on loopback without mTLS/shared-secret — insecure; dev/test only");
+    }
+
     // 配置 Raft 节点间 TLS（若安全配置中指定了证书，ADP §14.1）
     let raft_tls_config = if let (Some(cert), Some(key)) =
         (cfg.security.tls_cert.clone(), cfg.security.tls_key.clone())
@@ -1529,10 +1793,23 @@ async fn run_server(
     };
 
     // 5d. Raft 配置（P1-06：openraft 类型隔离，经 `coord_server::raft` 门面）
-    let raft_config = Arc::new(coord_server::raft::RaftConfig::default());
+    //     R-RFT-19：心跳/选举/安装快照超时/快照策略可经 `[raft]` 段调优。
+    let mut raft_config = coord_server::raft::RaftConfig::default();
+    coord_server::raft::apply_tuning(
+        &mut raft_config,
+        &coord_server::raft::RaftTuning {
+            heartbeat_interval_ms: cfg.raft.heartbeat_interval_ms,
+            election_timeout_min_ms: cfg.raft.election_timeout_min_ms,
+            election_timeout_max_ms: cfg.raft.election_timeout_max_ms,
+            install_snapshot_timeout_ms: cfg.raft.install_snapshot_timeout_ms,
+            snapshot_logs_since_last: cfg.raft.snapshot_logs_since_last,
+        },
+    );
+    let raft_config = Arc::new(raft_config);
 
-    // 5e. Raft RPC 服务
-    let raft_rpc_service = RaftRpcService::new();
+    // 5e. Raft RPC 服务（R-SEC-03：共享密钥验签，配置后 fail-closed）
+    let raft_rpc_service =
+        RaftRpcService::new().with_shared_secret(cfg.security.raft_shared_secret.as_deref());
 
     // 5f. 在创建 Raft 实例之前检查是否已初始化
     //     raft.metrics() 在 Raft::new() 返回后可能尚未被异步 core task 填充，
@@ -1578,9 +1855,24 @@ async fn run_server(
             join_addr
         );
         let mut target = join_addr.clone();
+        // 传输层 TLS：集群启用 mTLS（tls_ca）时 join 同样走 TLS + 客户端身份，
+        // 否则集群无法被新节点加入（与 gRPC/raft 同口径，不复明文回退）。
+        let join_client_tls = coord_server::tls::build_client_tls(
+            cfg.security.tls_cert.as_deref(),
+            cfg.security.tls_key.as_deref(),
+            cfg.security.tls_ca.as_deref(),
+        );
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
-            match send_join_request(&target, node_id, raft_addr, &grpc_addr).await {
+            match send_join_request(
+                &target,
+                node_id,
+                raft_addr,
+                &grpc_addr,
+                join_client_tls.as_ref(),
+            )
+            .await
+            {
                 Ok(resp) if resp.success => {
                     tracing::info!("Joined cluster via {}: {}", target, resp.message);
                     break;
@@ -1643,6 +1935,8 @@ async fn run_server(
     node.node_id = cfg.node.id;
     node.watch_dispatcher = Some(Arc::clone(&watch_dispatcher));
     node.raft = Some(Arc::clone(&raft));
+    // R-SVC-18：per-RPC 超时/规模上限/幂等缓存参数（[limits] 配置段）
+    node.set_limits(cfg.limits.to_runtime_limits());
     // P0-D.1：注册已知节点的 gRPC 地址（leader 重定向用，best-effort）
     node.register_grpc_addr(node_id, &grpc_addr);
     for n in &cfg.cluster.initial_nodes {
@@ -1650,9 +1944,108 @@ async fn run_server(
     }
     // 初始化 Lease 管理器（Leader 独占；Follower 上不激活到期检测）
     let timer_handle = TimerWheel::start();
-    node.lease_manager = Some(Arc::new(LeaseManager::new(timer_handle)));
+    // R-OBS-10：lease active/expired 指标埋点
+    node.lease_manager = Some(Arc::new(
+        LeaseManager::new(timer_handle).with_metrics(Arc::clone(&metrics)),
+    ));
     // P1-02：每 watcher 事件队列长度（配置可调，最小 16）
     node.set_watch_buffer(cfg.network.watch_buffer);
+
+    // 6.5b R-SEC-01：静态加密接线（Barrier/Seal/Unseal/DEK 自动轮换）
+    //     —— 此前 set_barrier 生产零调用、Seal/Unseal 为 unimplemented stub。
+    let _encryption_deks: Vec<coord_server::security::key_management::EncryptedDek> =
+        if cfg.security.encryption_enabled {
+            use coord_server::security::barrier::Barrier;
+            use coord_server::security::dek_rotation::{
+                spawn_dek_rotation_loop, DekRotationPolicy, DekRotationStore,
+            };
+            use coord_server::security::dek_store::MvccDekStore;
+            use coord_server::security::key_management::Keyring;
+            use std::time::SystemTime;
+
+            let dek_store = Arc::new(MvccDekStore::new(Arc::clone(&mvcc)));
+            let persisted_deks = dek_store
+                .load_all_encrypted_deks()
+                .map_err(|e| format!("load persisted DEKs: {e}"))?;
+
+            // root 密钥提供者（unseal 用：配置 > 环境变量 > 密钥文件）
+            let encryption_root_key = cfg.security.encryption_root_key.clone();
+            let data_dir_for_provider = data_dir.clone();
+            node.root_key_provider = Some(Arc::new(move || {
+                resolve_encryption_root_key(&data_dir_for_provider, encryption_root_key.as_deref())
+            }));
+
+            let root_key = match resolve_encryption_root_key(
+                &data_dir,
+                cfg.security.encryption_root_key.as_deref(),
+            ) {
+                Some(k) => k,
+                None if persisted_deks.is_empty() => {
+                    // 首启：生成 root 密钥并落盘（0600）
+                    use rand::RngCore;
+                    let mut key = [0u8; 32];
+                    rand::thread_rng().fill_bytes(&mut key);
+                    write_private_file(&data_dir.join("encryption-root-key.bin"), &key)?;
+                    tracing::warn!(
+                        "Generated new encryption root key at {} (0600)",
+                        data_dir.join("encryption-root-key.bin").display()
+                    );
+                    key.to_vec()
+                }
+                None => {
+                    return Err("static encryption enabled but no root key available \
+                         (set security.encryption_root_key / COORD_ENCRYPTION_ROOT_KEY, \
+                         or provide <data_dir>/encryption-root-key.bin)"
+                        .into())
+                }
+            };
+
+            let (keyring, deks) = if persisted_deks.is_empty() {
+                let (keyring, encrypted_dek) = Keyring::bootstrap_from_root_key(&root_key)
+                    .map_err(|e| format!("bootstrap keyring: {e}"))?;
+                dek_store
+                    .persist(&encrypted_dek, SystemTime::now())
+                    .map_err(|e| format!("persist encrypted DEK: {e}"))?;
+                (keyring, vec![encrypted_dek])
+            } else {
+                let keyring = Keyring::from_root_key(&root_key, &persisted_deks)
+                    .map_err(|e| format!("recover keyring: {e}"))?;
+                (keyring, persisted_deks)
+            };
+
+            let keyring = Arc::new(keyring);
+            let barrier = Barrier::new(Arc::clone(&keyring));
+            mvcc.set_barrier(barrier);
+            node.install_keyring(Arc::clone(&keyring), deks.clone());
+
+            // DEK 自动轮换循环（P2-05；随 shutdown 信号退出）
+            let (rotation_shutdown_tx, rotation_shutdown_rx) = tokio::sync::watch::channel(false);
+            {
+                let store = Arc::clone(&dek_store)
+                    as Arc<dyn coord_server::security::dek_rotation::DekRotationStore>;
+                let keyring_for_rotation = Arc::clone(&keyring);
+                tokio::spawn(async move {
+                    shutdown_signal().await;
+                    let _ = rotation_shutdown_tx.send(true);
+                });
+                spawn_dek_rotation_loop(
+                    keyring_for_rotation,
+                    store,
+                    DekRotationPolicy::default(),
+                    rotation_shutdown_rx,
+                );
+            }
+
+            tracing::info!(
+                "Static encryption enabled: Barrier active, {} DEK version(s) loaded",
+                deks.len()
+            );
+            deks
+        } else {
+            tracing::info!("Static encryption DISABLED (security.encryption_enabled=false)");
+            Vec::new()
+        };
+
     let node = Arc::new(node);
 
     // 启动 Lease 过期轮询后台任务（每 200ms 清理过期 Lease 绑定的 KV key；仅 leader 执行）
@@ -1662,12 +2055,13 @@ async fn run_server(
 
     // 6.6 Auth 根密钥：HKDF 派生 CCT 签名密钥（规格 C.4.2）。
     //     配置/环境优先，否则 <data_dir>/auth-root-key.bin 首启生成（0600）并复用。
+    //     R-SEC-06：多节点集群无配置/无 key 文件时拒绝自动生成（防止各节点 key 分歧）。
+    let multi_node = cfg.cluster.initial_nodes.len() > 1 || cfg.cluster.join_addr.is_some();
     let root_key_material =
-        load_or_create_root_key(&data_dir, cfg.security.auth_root_key.as_deref())?;
-    if cfg.cluster.initial_nodes.len() > 1 || cfg.cluster.join_addr.is_some() {
-        tracing::warn!(
-            "Multi-node cluster: all nodes MUST share the same auth root key \
-             ({} or security.auth_root_key)",
+        load_or_create_root_key(&data_dir, cfg.security.auth_root_key.as_deref(), multi_node)?;
+    if multi_node {
+        tracing::info!(
+            "Multi-node cluster: shared auth root key loaded from configuration or {}",
             data_dir.join("auth-root-key.bin").display()
         );
     }
@@ -1718,8 +2112,7 @@ async fn run_server(
     let maintenance_svc =
         MaintenanceServer::from_arc(Arc::clone(&node)).max_decoding_message_size(MAX_DECODING_MSG);
 
-    // 8. 初始化 Metrics 和 Raft 就绪状态
-    let metrics = Arc::new(Metrics::new());
+    // 8. 初始化 Raft 就绪状态（Metrics 已在 §4 提前创建）
     let raft_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // 8a. 构建 BFF axum 路由器（统一 HTTP 入口：健康检查 + API 代理 + UI 静态资源）
@@ -1729,7 +2122,13 @@ async fn run_server(
         .and_then(|p| p.parse().ok())
         .unwrap_or(50051);
     let http_port = grpc_port + 10; // HTTP 端口 = gRPC 端口 + 10
-    let http_addr = format!("0.0.0.0:{}", http_port);
+                                    // R-SEC-05：HTTP 绑定地址可配（`network.http_addr`）；默认 loopback——
+                                    // 避免无鉴权的 /metrics 与 BFF 暴露到外部网络（生产建议配置内网地址）。
+    let http_addr = if !cfg.network.http_addr.is_empty() {
+        cfg.network.http_addr.clone()
+    } else {
+        format!("127.0.0.1:{}", http_port)
+    };
     let core_http_addr = format!("http://127.0.0.1:{}", http_port);
 
     let bff_config = BffConfig {
@@ -1800,7 +2199,10 @@ async fn run_server(
     let raft_for_metrics = Arc::clone(&raft);
     let metrics_for_raft = Arc::clone(&metrics);
     let ready_for_raft = Arc::clone(&raft_ready);
+    let node_for_seal = Arc::clone(&node);
     let health_reporter_for_task = health_reporter.clone();
+    // R-OBS-10：storage 磁盘大小 / key 数采样
+    let mvcc_for_metrics = Arc::clone(&mvcc);
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
@@ -1813,7 +2215,20 @@ async fn run_server(
             metrics_for_raft
                 .set_raft_applied_index(m.last_applied.as_ref().map(|id| id.index).unwrap_or(0));
             metrics_for_raft.set_raft_leader_id(leader.unwrap_or(0));
-            metrics_for_raft.set_seal_status(0); // 默认 Unsealed
+            // R-SEC-01：seal_status 反映真实 Keyring 状态（此前硬编码 0=Unsealed）
+            let seal_state = match node_for_seal.keyring() {
+                Some(k) if k.is_sealed() => 1, // Sealed
+                Some(_) => 0,                  // Unsealed
+                None => 0,                     // 未启用静态加密
+            };
+            metrics_for_raft.set_seal_status(seal_state);
+            // R-OBS-10：storage 指标采样（磁盘大小 / 存活 key 数）
+            if let Ok(bytes) = mvcc_for_metrics.backend().disk_size_bytes() {
+                metrics_for_raft.set_storage_size_bytes(bytes);
+            }
+            if let Ok(count) = mvcc_for_metrics.backend().key_count() {
+                metrics_for_raft.set_storage_keys_total(count);
+            }
 
             // P1-02：慢 follower 告警 —— leader 视角，follower matched 滞后
             // 超过阈值（1000 条目或 >30s 无确认）时 WARN
@@ -2020,6 +2435,7 @@ async fn run_server(
         Arc::clone(&mvcc),
         compaction_config,
         Some(compaction_proposer),
+        Some(Arc::clone(&metrics)),
     );
     tracing::info!(
         "Compaction manager started: auto_compact={}, interval={:?}, retention={} revs",
@@ -2048,11 +2464,24 @@ async fn run_server(
         snapshot_dir.display()
     );
 
-    // 9. 启动 Raft RPC gRPC Server（内部节点间通信，raft_addr 端口，可选 TLS）
+    // 9. 启动 Raft RPC gRPC Server（内部节点间通信，raft 端口，可选 TLS）
     //    P0-C.7（F4）：raft 端口 mTLS fail-closed —— TLS 配置存在但构建失败/
     //    缺 CA 时拒绝启动（删除明文降级分支）。
-    let raft_socket_addr: std::net::SocketAddr = raft_addr.parse()?;
-    let raft_rpc_svc = RaftRpcServer::new(raft_rpc_service);
+    //    R-TST-16：监听地址 = raft_bind_addr（非空时），对外通告仍为 raft_addr
+    //    （bind/advertise 分离，支撑 TCP 代理分区注入等场景）。
+    let raft_socket_addr: std::net::SocketAddr = cfg.resolve_raft_bind_addr().parse()?;
+    if !cfg.network.raft_bind_addr.is_empty() {
+        tracing::info!(
+            "Raft bind/advertise split: listen on {}, advertise {}",
+            raft_socket_addr,
+            raft_addr
+        );
+    }
+    // R-RFT-06：raft RPC 解码上限显式设置（快照已分块 ≤2MiB；AppendEntries 批量大，
+    // 上限 16MiB 避免合法批量复制被默认 4MiB 拒绝）
+    const RAFT_MAX_DECODING_MSG: usize = 16 * 1024 * 1024;
+    let raft_rpc_svc =
+        RaftRpcServer::new(raft_rpc_service).max_decoding_message_size(RAFT_MAX_DECODING_MSG);
     let raft_tls_for_server = raft_tls_config.clone();
     if let Some(ref tls_cfg) = raft_tls_for_server {
         if tls_cfg.ca_path.is_none() {
@@ -2142,7 +2571,8 @@ async fn run_server(
         use_tls && cfg.security.tls_ca.is_some(),
     )
     .with_role_provider(Arc::clone(&auth_manager))
-    .with_audit_logger(Arc::clone(&audit_logger));
+    .with_audit_logger(Arc::clone(&audit_logger))
+    .with_metrics(Arc::clone(&metrics));
     auth_interceptor.set_enabled(auth_enabled);
     let auth_layer = ServerAuthLayer::new(Arc::new(auth_interceptor));
 
@@ -2339,18 +2769,24 @@ async fn run_server(
 }
 
 /// 向指定节点发送 JoinRequest（P0-D.1）
+///
+/// `tls` 为 Some 时走 https + TLS 配置（mTLS 客户端身份由服务端自身证书提供）。
 async fn send_join_request(
     addr: &str,
     node_id: u64,
     raft_addr: &str,
     grpc_addr: &str,
+    tls: Option<&tonic::transport::channel::ClientTlsConfig>,
 ) -> Result<coord_proto::maintenance::JoinResponse, Box<dyn std::error::Error + Send + Sync>> {
     use coord_proto::maintenance::maintenance_client::MaintenanceClient;
-    let endpoint = format!("http://{addr}");
-    let channel = tonic::transport::Endpoint::from_shared(endpoint)?
-        .connect_timeout(std::time::Duration::from_secs(3))
-        .connect()
-        .await?;
+    let scheme = if tls.is_some() { "https" } else { "http" };
+    let endpoint = tonic::transport::Endpoint::from_shared(format!("{scheme}://{addr}"))?
+        .connect_timeout(std::time::Duration::from_secs(3));
+    let endpoint = match tls {
+        Some(t) => endpoint.tls_config(t.clone())?,
+        None => endpoint,
+    };
+    let channel = endpoint.connect().await?;
     let mut client = MaintenanceClient::new(channel);
     let resp = client
         .join(coord_proto::maintenance::JoinRequest {
@@ -2373,6 +2809,54 @@ fn generate_random_password(len: usize) -> String {
         .collect()
 }
 
+/// 静态加密 root 密钥解析（R-SEC-01）。
+/// 优先级：`security.encryption_root_key`（hex）→ `COORD_ENCRYPTION_ROOT_KEY`
+/// 环境变量 → `<data_dir>/encryption-root-key.bin`（32 字节）。返回 None 表示未找到。
+fn resolve_encryption_root_key(
+    data_dir: &std::path::Path,
+    configured_hex: Option<&str>,
+) -> Option<Vec<u8>> {
+    if let Some(hex_str) = configured_hex {
+        if let Ok(key) = hex::decode(hex_str.trim()) {
+            if key.len() == 32 {
+                return Some(key);
+            }
+        }
+    }
+    if let Ok(hex_str) = std::env::var("COORD_ENCRYPTION_ROOT_KEY") {
+        if let Ok(key) = hex::decode(hex_str.trim()) {
+            if key.len() == 32 {
+                return Some(key);
+            }
+        }
+    }
+    let path = data_dir.join("encryption-root-key.bin");
+    if let Ok(key) = std::fs::read(&path) {
+        if key.len() == 32 {
+            return Some(key);
+        }
+    }
+    None
+}
+
+/// 以 0600 权限写入私密文件（R-SEC-01：root 密钥落盘）
+fn write_private_file(
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::io::Write;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).write(true).truncate(true).mode(0o600);
+        opts.open(path)?.write_all(bytes)?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
 /// Auth 根密钥加载/生成（规格 C.4.2）。
 ///
 /// 优先级：`security.auth_root_key`（hex）→ `<data_dir>/auth-root-key.bin`
@@ -2380,6 +2864,7 @@ fn generate_random_password(len: usize) -> String {
 fn load_or_create_root_key(
     data_dir: &std::path::Path,
     configured_hex: Option<&str>,
+    multi_node: bool,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     use rand::RngCore;
 
@@ -2409,6 +2894,18 @@ fn load_or_create_root_key(
             .into());
         }
         return Ok(key);
+    }
+
+    // R-SEC-06：多节点集群必须共享同一根密钥。配置和既有 key 文件都不存在时
+    // 拒绝自动生成——否则每节点各生成一把，CCT token 互相不认（此前仅 warning）。
+    if multi_node {
+        return Err(format!(
+            "multi-node cluster requires a shared auth root key: set \
+             security.auth_root_key in config (or pre-seed {}) on every node; \
+             refusing to auto-generate divergent per-node keys",
+            path.display()
+        )
+        .into());
     }
 
     // 首次启动：生成并持久化（0600）
@@ -2478,6 +2975,12 @@ async fn shutdown_signal() {
 
 // ──── Dev 模式启动逻辑 ────
 
+/// R-SEC-05：是否为 loopback 主机名/IP（与 server 侧 P0-G.1 同口径）。
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim();
+    host == "localhost" || host == "::1" || host.starts_with("[::1]") || host.starts_with("127.")
+}
+
 /// 开发模式：同时启动单节点 Server + Agent
 ///
 /// 对标 Consul `consul agent -dev`，一键启动本地开发环境。
@@ -2492,7 +2995,18 @@ async fn run_dev(
     data_dir: &std::path::Path,
     cluster_name: &str,
     fresh: bool,
+    allow_insecure: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // R-SEC-05：dev 模式强制关闭鉴权（root/root），绑非 loopback 必须显式确认。
+    // 该检查在创建任何监听之前执行，拒绝即快速失败。
+    if !allow_insecure && !is_loopback_host(bind_addr) {
+        return Err(format!(
+            "dev mode runs with authentication disabled; binding non-loopback \
+             address ({bind_addr}) requires explicit --allow-insecure"
+        )
+        .into());
+    }
+
     let server_addr = format!("{}:{}", bind_addr, grpc_port);
     let raft_port = grpc_port + 1;
     let raft_addr = format!("{}:{}", bind_addr, raft_port);
@@ -2623,15 +3137,18 @@ async fn run_dev(
     );
 
     // 启动 Agent HTTP health/metrics 端点（对标 run_agent 的行为）
+    // R-AGT-20：共享就绪位（连接探针实时回写，非启动快照）
     let agent_metrics = coord_agent::metrics::AgentMetrics::new();
-    let agent_has_peers = !agent_config.static_peers.is_empty();
+    let agent_ready_flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let _agent_health_handle = coord_agent::health::start_health_server(
         &agent_config.http_addr,
         agent_metrics,
-        agent_has_peers,
+        Arc::clone(&agent_ready_flag),
     );
 
-    let agent_server = coord_agent::AgentServer::new(agent_config);
+    let agent_server = coord_agent::AgentServer::new(agent_config)
+        .with_metrics(coord_agent::metrics::AgentMetrics::new())
+        .with_ready_flag(agent_ready_flag);
     let (agent_shutdown_tx, agent_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let agent_handle = tokio::spawn(async move {
@@ -2702,4 +3219,55 @@ async fn run_dev(
 
     tracing::info!("Dev mode: shutdown complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_loopback_host, load_or_create_root_key};
+
+    #[test]
+    fn test_is_loopback_host() {
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("::1"));
+        assert!(!is_loopback_host("0.0.0.0"));
+        assert!(!is_loopback_host("192.168.1.10"));
+    }
+
+    #[test]
+    fn test_root_key_single_node_generates_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let k1 = load_or_create_root_key(dir.path(), None, false).unwrap();
+        assert_eq!(k1.len(), 32);
+        let k2 = load_or_create_root_key(dir.path(), None, false).unwrap();
+        assert_eq!(k1, k2, "persisted key must be reused on restart");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(dir.path().join("auth-root-key.bin")).unwrap();
+            assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn test_root_key_multi_node_refuses_auto_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = load_or_create_root_key(dir.path(), None, true).unwrap_err();
+        assert!(
+            err.to_string().contains("shared"),
+            "error must mention shared key: {err}"
+        );
+        assert!(
+            !dir.path().join("auth-root-key.bin").exists(),
+            "no key file may be generated when refusing"
+        );
+    }
+
+    #[test]
+    fn test_root_key_multi_node_accepts_configured_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = hex::encode([0x42u8; 32]);
+        let loaded = load_or_create_root_key(dir.path(), Some(&key), true).unwrap();
+        assert_eq!(loaded, vec![0x42u8; 32]);
+    }
 }

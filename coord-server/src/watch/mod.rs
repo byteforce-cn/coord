@@ -15,6 +15,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
+use crate::metrics::Metrics;
 use crate::storage::mvcc::ChangeEvent;
 use coord_core::types::Revision;
 
@@ -112,6 +113,8 @@ pub struct WatchDispatcher {
     subscribers: Arc<RwLock<HashMap<u64, Subscriber>>>,
     /// watcher 总数上限（P0-E.4）
     max_subscribers: usize,
+    /// 指标注册表（R-OBS-10：订阅数/事件数/背压丢弃，可选）
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl WatchDispatcher {
@@ -124,7 +127,14 @@ impl WatchDispatcher {
             event_tx,
             subscribers: Arc::new(RwLock::new(HashMap::new())),
             max_subscribers: DEFAULT_MAX_SUBSCRIBERS,
+            metrics: None,
         }
+    }
+
+    /// 挂载指标注册表（R-OBS-10）。
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// 获取事件发送端的克隆（给 StateMachine 使用）
@@ -170,6 +180,11 @@ impl WatchDispatcher {
             subscribers.insert(watch_id, subscriber);
         }
 
+        // R-OBS-10：活跃订阅数 +1
+        if let Some(metrics) = &self.metrics {
+            metrics.inc_watch_active();
+        }
+
         Ok((watch_id, rx))
     }
 
@@ -195,7 +210,12 @@ impl WatchDispatcher {
 
     /// 取消 Watch 订阅
     pub fn unsubscribe(&self, watch_id: u64) {
-        self.subscribers.write().remove(&watch_id);
+        if self.subscribers.write().remove(&watch_id).is_some() {
+            // R-OBS-10：活跃订阅数 -1
+            if let Some(metrics) = &self.metrics {
+                metrics.dec_watch_active();
+            }
+        }
     }
 
     /// 获取当前订阅者数量
@@ -246,9 +266,18 @@ impl WatchDispatcher {
             // 尝试发送；缓冲区满时置溢出标志（P0-E.1）：订阅者循环
             // recv 后检查标志并合成 BufferOverflow，保证通知必达
             match sub.event_tx.try_send(watch_event) {
-                Ok(()) => {}
+                Ok(()) => {
+                    // R-OBS-10：下发事件 +1
+                    if let Some(metrics) = &self.metrics {
+                        metrics.inc_watch_events();
+                    }
+                }
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     sub.overflow.store(true, Ordering::SeqCst);
+                    // R-OBS-10：背压丢弃 +1
+                    if let Some(metrics) = &self.metrics {
+                        metrics.inc_watch_dropped();
+                    }
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     // 订阅者已断开连接

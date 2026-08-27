@@ -2,8 +2,10 @@
 //
 // ⚠ 口径声明：本套件为文件内自建内存模型（SimpleKvStore/模拟多 Region），
 // 不引用 coord_server / coord_client 任何真实模块，不得作为线性一致性系统
-// 验证证据（决策文档 §1.3 #18）。真实 checker 为 `coord/tests/jepsen_real.rs`
-// （P0-H.3，另立项施工）。
+// 验证证据（决策文档 §1.3 #18）。真实故障注入/线性一致性系统验证为
+// `coord/tests/chaos_real.rs`（真实 3 进程 + kill -9/暂停/分区注入 + 线性
+// checker，CI nightly 触发）——此前此处悬空引用不存在的 `jepsen_real.rs`，
+// R-TST-21 修正。
 //
 // 测试覆盖（模拟口径）：
 // - 单 Region 并发写入的线性一致性（模拟模型）

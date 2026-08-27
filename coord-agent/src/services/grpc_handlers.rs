@@ -83,6 +83,23 @@ use coord_proto::agent::{
 
 use tonic::{Request, Response, Status};
 
+/// 内部错误脱敏（与 coord-server 同口径）：详情只进 agent 日志，
+/// gRPC 客户端仅收到通用 `internal error`，不泄露存储/引擎内部细节。
+fn sanitized_internal<E: std::fmt::Display>(e: E) -> Status {
+    tracing::error!(error = %e, "internal error returned to client (sanitized)");
+    Status::internal("internal error")
+}
+
+/// 数据面复制/存储错误映射：安全可回传的语义错误保留（not leader 为 Q4/C2
+/// 显式契约），其余脱敏。与 coord-server `map_err` 的字符串模式识别同口径。
+fn map_service_error(e: impl std::fmt::Display) -> Status {
+    let msg = e.to_string();
+    if msg.to_ascii_lowercase().contains("not leader") {
+        return Status::failed_precondition(msg);
+    }
+    sanitized_internal(msg)
+}
+
 // ════════════════════════════════════════════════════════════
 // Lock Service
 // ════════════════════════════════════════════════════════════
@@ -105,7 +122,7 @@ impl Lock for LockService {
                 lease_id: 0,
                 holder_id: String::new(),
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -116,7 +133,7 @@ impl Lock for LockService {
         let req = request.into_inner();
         match LockService::release(self, &req.name, &req.holder_id).await {
             Ok(released) => Ok(Response::new(LockReleaseResponse { released })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -128,7 +145,7 @@ impl Lock for LockService {
         match LockService::renew(self, &req.name, &req.holder_id).await {
             Ok(true) => Ok(Response::new(LockRenewResponse { new_ttl: 0 })),
             Ok(false) => Err(Status::not_found("lock not held or expired")),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -147,7 +164,7 @@ impl Lock for LockService {
                 exists: true,
             })),
             Ok(None) => Ok(Response::new(LockGetInfoResponse::default())),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 }
@@ -165,7 +182,7 @@ impl IdGen for IdGenService {
         let req = request.into_inner();
         match IdGenService::next_id(self, &req.name).await {
             Ok(id) => Ok(Response::new(IdGenNextIdResponse { id: id as i64 })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -179,7 +196,7 @@ impl IdGen for IdGenService {
             Ok(ids) => Ok(Response::new(IdGenNextBatchResponse {
                 ids: ids.into_iter().map(|id| id as i64).collect(),
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 }
@@ -213,7 +230,7 @@ impl LeaderElection for LeaderElectionService {
                 lease_id: 0,
                 leader_id: String::new(),
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -224,7 +241,7 @@ impl LeaderElection for LeaderElectionService {
         let req = request.into_inner();
         match LeaderElectionService::resign(self, &req.group_name, &req.candidate_id).await {
             Ok(()) => Ok(Response::new(LeaderResignResponse { resigned: true })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -302,7 +319,7 @@ impl EventSvc for EventNotificationService {
         let event_id = event.id.clone();
         match EventNotificationService::publish(self, event).await {
             Ok(()) => Ok(Response::new(EventPublishResponse { event_id })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -373,7 +390,7 @@ impl Cache for CacheService {
                 value: vec![],
                 found: false,
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -390,10 +407,10 @@ impl Cache for CacheService {
         if self.replication_enabled() {
             self.string_put_replicated(&req.key, req.value, ttl)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(map_service_error)?;
         } else {
             self.string_put(&req.key, req.value, ttl)
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(sanitized_internal)?;
         }
         Ok(Response::new(CacheSetResponse {}))
     }
@@ -406,10 +423,9 @@ impl Cache for CacheService {
         let deleted = if self.replication_enabled() {
             self.string_delete_replicated(&req.key)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?
+                .map_err(map_service_error)?
         } else {
-            self.string_delete(&req.key)
-                .map_err(|e| Status::internal(e.to_string()))?
+            self.string_delete(&req.key).map_err(sanitized_internal)?
         };
         Ok(Response::new(CacheDeleteResponse { deleted }))
     }
@@ -425,7 +441,7 @@ impl Cache for CacheService {
                 value: vec![],
                 found: false,
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -437,10 +453,10 @@ impl Cache for CacheService {
         if self.replication_enabled() {
             self.hash_field_put_replicated(&req.key, &req.field, req.value, None)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(map_service_error)?;
         } else {
             self.hash_field_put(&req.key, &req.field, req.value, None)
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(sanitized_internal)?;
         }
         Ok(Response::new(CacheHSetResponse {}))
     }
@@ -455,7 +471,7 @@ impl Cache for CacheService {
                 let map: std::collections::HashMap<String, Vec<u8>> = fields.into_iter().collect();
                 Ok(Response::new(CacheHGetAllResponse { fields: map }))
             }
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -467,14 +483,14 @@ impl Cache for CacheService {
         if self.replication_enabled() {
             self.list_push_left_replicated(&req.key, req.value, None)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(map_service_error)?;
         } else {
             self.list_push_left(&req.key, req.value, None)
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(sanitized_internal)?;
         }
         match self.list_length(&req.key) {
             Ok(len) => Ok(Response::new(CacheLPushResponse { length: len as i64 })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -485,7 +501,7 @@ impl Cache for CacheService {
         let req = request.into_inner();
         match self.list_range(&req.key, req.start, req.stop) {
             Ok(values) => Ok(Response::new(CacheLRangeResponse { values })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -501,7 +517,7 @@ impl Cache for CacheService {
                     value: vec![],
                     found: false,
                 })),
-                Err(e) => Err(Status::internal(e.to_string())),
+                Err(e) => Err(map_service_error(e)),
             }
         } else {
             match self.list_pop_right(&req.key) {
@@ -510,7 +526,7 @@ impl Cache for CacheService {
                     value: vec![],
                     found: false,
                 })),
-                Err(e) => Err(Status::internal(e.to_string())),
+                Err(e) => Err(sanitized_internal(e)),
             }
         }
     }
@@ -522,7 +538,7 @@ impl Cache for CacheService {
         let req = request.into_inner();
         match self.list_length(&req.key) {
             Ok(len) => Ok(Response::new(CacheLLenResponse { length: len as i64 })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -534,10 +550,10 @@ impl Cache for CacheService {
         if self.replication_enabled() {
             self.set_add_replicated(&req.key, req.member, None)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(map_service_error)?;
         } else {
             self.set_add(&req.key, req.member, None)
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(sanitized_internal)?;
         }
         Ok(Response::new(CacheSAddResponse {}))
     }
@@ -549,7 +565,7 @@ impl Cache for CacheService {
         let req = request.into_inner();
         match self.set_members(&req.key) {
             Ok(members) => Ok(Response::new(CacheSMembersResponse { members })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 }
@@ -571,7 +587,7 @@ impl Mq for MessageQueueService {
             max_message_size: 1024 * 1024,
         };
         self.create_topic(&req.topic, config)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(sanitized_internal)?;
         Ok(Response::new(MqCreateTopicResponse {}))
     }
 
@@ -593,14 +609,14 @@ impl Mq for MessageQueueService {
                 Ok(offset) => Ok(Response::new(MqPublishResponse {
                     offset: offset as i64,
                 })),
-                Err(e) => Err(Status::internal(e.to_string())),
+                Err(e) => Err(map_service_error(e)),
             }
         } else {
             match self.produce(&req.topic, partition, req.payload, None) {
                 Ok(offset) => Ok(Response::new(MqPublishResponse {
                     offset: offset as i64,
                 })),
-                Err(e) => Err(Status::internal(e.to_string())),
+                Err(e) => Err(sanitized_internal(e)),
             }
         }
     }
@@ -628,7 +644,7 @@ impl Mq for MessageQueueService {
         // 偏移之后的消息；此后 produce 直接向该 channel 推送（按偏移过滤）。
         self.subscribe(&req.topic, &req.consumer_group, tx)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(sanitized_internal)?;
 
         let topic = req.topic.clone();
         let stream = ReceiverStream::new(out_rx).map(move |(partition, record)| {
@@ -667,7 +683,7 @@ impl Mq for MessageQueueService {
             partition,
             req.offset as u64,
         )
-        .map_err(|e| Status::internal(e.to_string()))?;
+        .map_err(sanitized_internal)?;
         Ok(Response::new(MqAckResponse {}))
     }
 
@@ -709,7 +725,7 @@ impl Mq for MessageQueueService {
                     .collect();
                 Ok(Response::new(MqPollResponse { messages }))
             }
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -745,7 +761,7 @@ impl Mq for MessageQueueService {
                     .collect();
                 Ok(Response::new(MqPollDlqResponse { messages }))
             }
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 }
@@ -846,8 +862,7 @@ impl Replica for ReplicaRouter {
             .ok_or_else(|| Status::invalid_argument("missing entry"))?;
         let entry = ReplicationEntry::from_proto(&proto)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        self.apply_entry(&entry)
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.apply_entry(&entry).map_err(sanitized_internal)?;
         let last = self.last_local_sequence(&entry.shard_id);
         Ok(Response::new(ReplicaApplyResponse {
             applied: true,
@@ -921,8 +936,7 @@ impl Scheduler for SchedulerService {
             .into_iter()
             .collect(),
         };
-        self.register_task(task)
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.register_task(task).map_err(sanitized_internal)?;
         Ok(Response::new(SchedulerRegisterJobResponse {
             job_id: req.name,
         }))
@@ -941,7 +955,7 @@ impl Scheduler for SchedulerService {
                 found: true,
             })),
             Ok(None) => Ok(Response::new(SchedulerClaimJobResponse::default())),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -951,7 +965,7 @@ impl Scheduler for SchedulerService {
     ) -> Result<Response<SchedulerHeartbeatResponse>, Status> {
         let req = request.into_inner();
         self.renew_claim(&req.job_id, "worker")
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(sanitized_internal)?;
         Ok(Response::new(SchedulerHeartbeatResponse {}))
     }
 
@@ -961,7 +975,7 @@ impl Scheduler for SchedulerService {
     ) -> Result<Response<SchedulerCompleteJobResponse>, Status> {
         let req = request.into_inner();
         self.mark_completed(&req.job_id, "worker")
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(sanitized_internal)?;
         Ok(Response::new(SchedulerCompleteJobResponse {}))
     }
 }
@@ -983,7 +997,7 @@ impl Workflow for WorkflowService {
         let inst = WorkflowInstance::new(&instance_id, &wf_name, req.input);
         self.start_instance(inst)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(sanitized_internal)?;
         Ok(Response::new(WorkflowStartResponse {
             workflow_id: instance_id,
         }))
@@ -1009,7 +1023,7 @@ impl Workflow for WorkflowService {
                 suspension: None,
             })),
             Ok(None) => Err(Status::not_found("workflow not found")),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1020,7 +1034,7 @@ impl Workflow for WorkflowService {
         let req = request.into_inner();
         self.signal_instance(&req.workflow_id, &req.signal_name, &req.payload)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(sanitized_internal)?;
         tracing::info!(
             "Workflow signal: id={}, signal={}",
             req.workflow_id,
@@ -1040,7 +1054,7 @@ impl Workflow for WorkflowService {
             WorkflowState::Cancelled,
         )
         .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        .map_err(sanitized_internal)?;
         Ok(Response::new(WorkflowCancelResponse {}))
     }
 
@@ -1059,7 +1073,7 @@ impl Workflow for WorkflowService {
                 namespace: req.namespace,
                 name,
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1085,7 +1099,7 @@ impl Workflow for WorkflowService {
                     .collect(),
                 next_page_token: next_token,
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1103,7 +1117,7 @@ impl Workflow for WorkflowService {
                 status: def.status,
                 created_at: def.created_at,
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1158,7 +1172,7 @@ impl Workflow for WorkflowService {
                     .collect(),
                 next_page_token: next_token,
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 }
@@ -1169,22 +1183,22 @@ impl Workflow for WorkflowService {
 
 use crate::services::workflow::phase4::{DeployError, WorkflowEngineError, WorkflowEngineService};
 
-// 将部署错误映射为 gRPC 状态码：输入/校验问题 → InvalidArgument，存储问题 → Internal
+// 将部署错误映射为 gRPC 状态码：输入/校验问题 → InvalidArgument，存储问题 → Internal（脱敏）
 fn map_deploy_error(e: DeployError) -> Status {
     match e {
         DeployError::Validation(msg) => Status::invalid_argument(format!("deploy error: {msg}")),
-        DeployError::Store(msg) => Status::internal(format!("deploy error: {msg}")),
+        DeployError::Store(msg) => sanitized_internal(msg),
     }
 }
 
 // 引擎错误 typed 映射（ISSUE-010 §3）：
-// InvalidArgument → InvalidArgument；NotFound → NotFound；FailedPrecondition → FailedPrecondition；其余 → Internal
+// InvalidArgument → InvalidArgument；NotFound → NotFound；FailedPrecondition → FailedPrecondition；其余 → Internal（脱敏）
 fn map_engine_error(e: WorkflowEngineError) -> Status {
     match e {
         WorkflowEngineError::InvalidArgument(msg) => Status::invalid_argument(msg),
         WorkflowEngineError::NotFound(msg) => Status::not_found(msg),
         WorkflowEngineError::FailedPrecondition(msg) => Status::failed_precondition(msg),
-        WorkflowEngineError::Internal(msg) => Status::internal(msg),
+        WorkflowEngineError::Internal(msg) => sanitized_internal(msg),
     }
 }
 
@@ -1309,7 +1323,7 @@ impl Workflow for WorkflowEngineService {
                 }))
             }
             Ok(None) => Err(Status::not_found("workflow instance not found")),
-            Err(e) => Err(Status::internal(e)),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1410,7 +1424,7 @@ impl Workflow for WorkflowEngineService {
                     next_page_token: String::new(),
                 }))
             }
-            Err(e) => Err(Status::internal(e)),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1429,7 +1443,7 @@ impl Workflow for WorkflowEngineService {
                 created_at: 0,
             })),
             Ok(None) => Err(Status::not_found("definition not found")),
-            Err(e) => Err(Status::internal(e)),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1457,7 +1471,7 @@ impl Workflow for WorkflowEngineService {
                     versions,
                 }))
             }
-            Err(e) => Err(Status::internal(e)),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1528,7 +1542,7 @@ impl Workflow for WorkflowEngineService {
                     next_page_token: String::new(),
                 }))
             }
-            Err(e) => Err(Status::internal(e)),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 }
@@ -1569,7 +1583,7 @@ impl Policy for PolicyService {
                     reason: decision.reason,
                 }))
             }
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1589,11 +1603,10 @@ impl Policy for PolicyService {
         // deny/无匹配 → 成功响应且 result 为 false / null。
         let value = tokio::task::spawn_blocking(move || opa.eval_query(&req.query, &input_json))
             .await
-            .map_err(|e| Status::internal(format!("evaluate task failed: {e}")))?
+            .map_err(sanitized_internal)?
             .map_err(Status::invalid_argument)?;
 
-        let result = serde_json::to_vec(&value)
-            .map_err(|e| Status::internal(format!("serialize result: {e}")))?;
+        let result = serde_json::to_vec(&value).map_err(sanitized_internal)?;
         Ok(Response::new(PolicyEvaluateResponse { result }))
     }
 
@@ -1607,7 +1620,7 @@ impl Policy for PolicyService {
             Ok(trace) => Ok(Response::new(PolicyExplainResponse {
                 trace: trace.into_bytes(),
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1629,7 +1642,7 @@ impl Policy for PolicyService {
                 enabled: info.enabled,
                 version: info.version,
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1640,7 +1653,7 @@ impl Policy for PolicyService {
         let req = request.into_inner();
         match self.delete_bundle(&req.bundle_id).await {
             Ok(deleted) => Ok(Response::new(PolicyDeleteBundleResponse { deleted })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1673,7 +1686,7 @@ impl Policy for PolicyService {
                     bundles: proto_bundles,
                 }))
             }
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1684,7 +1697,7 @@ impl Policy for PolicyService {
         let req = request.into_inner();
         match self.set_bundle_enabled(&req.bundle_id, req.enabled).await {
             Ok(success) => Ok(Response::new(PolicySetBundleEnabledResponse { success })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1709,7 +1722,7 @@ impl Policy for PolicyService {
                     version: info.version,
                 }),
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1732,7 +1745,7 @@ impl Policy for PolicyService {
                     versions: proto_versions,
                 }))
             }
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 }
@@ -1750,7 +1763,7 @@ impl Transit for TransitService {
         let req = request.into_inner();
         match self.encrypt(&req.plaintext) {
             Ok((ciphertext, _dek_id)) => Ok(Response::new(TransitEncryptResponse { ciphertext })),
-            Err(e) => Err(Status::internal(e)),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1762,7 +1775,7 @@ impl Transit for TransitService {
         // DEK ID 现在嵌入在 ciphertext 包头中（自描述格式），不再需要外部传入
         match self.decrypt(&req.ciphertext, "") {
             Ok(plaintext) => Ok(Response::new(TransitDecryptResponse { plaintext })),
-            Err(e) => Err(Status::internal(e)),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1776,7 +1789,7 @@ impl Transit for TransitService {
                 signature,
                 algorithm: req.algorithm,
             })),
-            Err(e) => Err(Status::internal(e)),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1787,7 +1800,7 @@ impl Transit for TransitService {
         let req = request.into_inner();
         match self.hmac_verify(&req.data, &req.signature, &req.algorithm) {
             Ok(valid) => Ok(Response::new(TransitHmacVerifyResponse { valid })),
-            Err(e) => Err(Status::internal(e)),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 }
@@ -1879,7 +1892,7 @@ impl FeatureFlags for FeatureFlagService {
                 enabled,
                 variant: String::new(),
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
     }
 
@@ -1894,8 +1907,67 @@ impl FeatureFlags for FeatureFlagService {
                 let json = serde_json::to_vec(&result).unwrap_or_default();
                 Ok(Response::new(FeatureFlagEvaluateResponse { result: json }))
             }
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(sanitized_internal(e)),
         }
+    }
+}
+
+// ════════════════════════════════════════════════════════════
+// 错误脱敏测试（与 coord-server 同口径：详情只进日志）
+// ════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// internal 错误脱敏：客户端仅收到通用 "internal error"，不含内部细节
+    #[test]
+    fn test_sanitized_internal_hides_details() {
+        let status =
+            sanitized_internal("sensitive detail: /var/lib/coord-agent/store.db table corrupted");
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), "internal error");
+        assert!(!status.message().contains("store.db"));
+    }
+
+    /// 数据面错误映射：not leader 保留为显式契约（Q4/C2），其余脱敏
+    #[test]
+    fn test_map_service_error_preserves_not_leader() {
+        let not_leader = map_service_error("not leader for shard 'mq:t' (leader is other-agent)");
+        assert_eq!(not_leader.code(), tonic::Code::FailedPrecondition);
+        assert!(not_leader.message().contains("not leader"));
+
+        let other = map_service_error("sensitive store detail");
+        assert_eq!(other.code(), tonic::Code::Internal);
+        assert_eq!(other.message(), "internal error");
+    }
+
+    /// 部署错误映射：校验错误保留细节（InvalidArgument），存储错误脱敏
+    #[test]
+    fn test_map_deploy_error_sanitizes_store() {
+        let status = map_deploy_error(DeployError::Store("sensitive store detail".into()));
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), "internal error");
+        assert!(!status.message().contains("sensitive"));
+
+        let validation = map_deploy_error(DeployError::Validation("bad yaml".into()));
+        assert_eq!(validation.code(), tonic::Code::InvalidArgument);
+        assert!(validation.message().contains("bad yaml"));
+    }
+
+    /// 引擎错误映射：Internal 脱敏，InvalidArgument/NotFound 保留细节
+    #[test]
+    fn test_map_engine_error_sanitizes_internal() {
+        let status = map_engine_error(WorkflowEngineError::Internal(
+            "sensitive engine detail".into(),
+        ));
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), "internal error");
+        assert!(!status.message().contains("sensitive"));
+
+        let invalid = map_engine_error(WorkflowEngineError::InvalidArgument("bad input".into()));
+        assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+        assert!(invalid.message().contains("bad input"));
     }
 }
 

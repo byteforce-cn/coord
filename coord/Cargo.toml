@@ -33,3 +33,4 @@ hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rcgen = { version = "0.14", features = ["x509-parser"] }

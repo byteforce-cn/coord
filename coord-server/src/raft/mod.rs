@@ -28,6 +28,50 @@ pub type CoordRaft = openraft::Raft<type_config::TypeConfig, state_machine::Stat
 /// Raft 运行配置（默认值；调用方可用结构体更新语法覆盖心跳/选举超时）
 pub type RaftConfig = openraft::Config;
 
+/// R-RFT-19：Raft 运行时调优参数（来自 `[raft]` 配置段）。
+///
+/// 全部字段为 `Option`：`None` = 保持 openraft 默认值（0.10.0-alpha.25：
+/// 心跳 50ms、选举 150–300ms、安装快照 200ms、快照策略 since_last:5000）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RaftTuning {
+    /// 心跳间隔（毫秒）
+    pub heartbeat_interval_ms: Option<u64>,
+    /// 选举超时下限（毫秒）
+    pub election_timeout_min_ms: Option<u64>,
+    /// 选举超时上限（毫秒）
+    pub election_timeout_max_ms: Option<u64>,
+    /// 安装快照超时（毫秒）
+    pub install_snapshot_timeout_ms: Option<u64>,
+    /// 快照策略：距上次快照累积的日志条数（0 = Never，禁用自动快照）
+    pub snapshot_logs_since_last: Option<u64>,
+}
+
+/// R-RFT-19：将调优参数应用到 RaftConfig（None 字段保持 openraft 默认值）。
+///
+/// 放在本模块内以维持 P1-06 的 openraft 类型隔离边界（CLI 层不直接引用
+/// openraft 路径）。
+pub fn apply_tuning(config: &mut RaftConfig, tuning: &RaftTuning) {
+    if let Some(v) = tuning.heartbeat_interval_ms {
+        config.heartbeat_interval = v;
+    }
+    if let Some(v) = tuning.election_timeout_min_ms {
+        config.election_timeout_min = v;
+    }
+    if let Some(v) = tuning.election_timeout_max_ms {
+        config.election_timeout_max = v;
+    }
+    if let Some(v) = tuning.install_snapshot_timeout_ms {
+        config.install_snapshot_timeout = v;
+    }
+    if let Some(v) = tuning.snapshot_logs_since_last {
+        config.snapshot_policy = if v == 0 {
+            openraft::SnapshotPolicy::Never
+        } else {
+            openraft::SnapshotPolicy::LogsSinceLast(v)
+        };
+    }
+}
+
 /// 集群节点描述（BasicNode：含 raft 通信地址）
 pub type RaftNode = openraft::impls::BasicNode;
 
@@ -74,4 +118,64 @@ where
     openraft::Raft::new(node_id, config, network, log_store, state_machine)
         .await
         .map_err(|e| format!("create raft instance: {e}").into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_apply_tuning_partial_and_full() {
+        let mut config = RaftConfig::default();
+        let defaults = RaftConfig::default();
+
+        // 全部 None：保持默认
+        apply_tuning(&mut config, &RaftTuning::default());
+        assert_eq!(config.heartbeat_interval, defaults.heartbeat_interval);
+        assert_eq!(config.election_timeout_min, defaults.election_timeout_min);
+        assert_eq!(config.election_timeout_max, defaults.election_timeout_max);
+
+        // 部分覆盖：仅改心跳与选举
+        apply_tuning(
+            &mut config,
+            &RaftTuning {
+                heartbeat_interval_ms: Some(100),
+                election_timeout_min_ms: Some(400),
+                election_timeout_max_ms: Some(800),
+                install_snapshot_timeout_ms: None,
+                snapshot_logs_since_last: None,
+            },
+        );
+        assert_eq!(config.heartbeat_interval, 100);
+        assert_eq!(config.election_timeout_min, 400);
+        assert_eq!(config.election_timeout_max, 800);
+        assert_eq!(
+            config.install_snapshot_timeout, defaults.install_snapshot_timeout,
+            "未配置字段保持默认"
+        );
+
+        // 快照策略：0 = Never，其余 = LogsSinceLast
+        apply_tuning(
+            &mut config,
+            &RaftTuning {
+                snapshot_logs_since_last: Some(0),
+                ..RaftTuning::default()
+            },
+        );
+        assert!(matches!(
+            config.snapshot_policy,
+            openraft::SnapshotPolicy::Never
+        ));
+        apply_tuning(
+            &mut config,
+            &RaftTuning {
+                snapshot_logs_since_last: Some(2500),
+                ..RaftTuning::default()
+            },
+        );
+        assert!(matches!(
+            config.snapshot_policy,
+            openraft::SnapshotPolicy::LogsSinceLast(2500)
+        ));
+    }
 }

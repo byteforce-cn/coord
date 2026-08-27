@@ -1,0 +1,90 @@
+# coord-server Prometheus 告警规则（R-OBS-15）
+#
+# 覆盖：leader 切换、磁盘水位、慢 follower（apply 落后）、watch 背压、
+# 鉴权拒绝风暴、Seal 状态异常。指标命名见 coord-server/src/metrics.rs。
+groups:
+  - name: coord-consensus
+    rules:
+      # Leader 切换：3 分钟内 leader id 变化次数 ≥ 2 → 可能选举风暴
+      - alert: CoordLeaderChurn
+        expr: |
+          sum(changes(raft_leader_id{job=~"coord.*"}[3m])) by (instance) >= 2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} 3 分钟内 leader 变化 {{ $value }} 次"
+
+      # 慢 follower：apply 落后 commit 超过 1000 条且持续 5 分钟
+      - alert: CoordFollowerApplyLag
+        expr: |
+          (raft_commit_index - raft_applied_index) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} apply 落后 commit {{ $value }} 条"
+
+      # 无 leader 时间过长：整个集群 60s 无任何 leader
+      - alert: CoordNoLeader
+        expr: |
+          count(raft_leader_id{job=~"coord.*"} > 0) == 0
+        for: 60s
+        labels:
+          severity: critical
+        annotations:
+          summary: "coord 集群 60 秒无 leader（可能网络分区或选举故障）"
+
+  - name: coord-storage
+    rules:
+      # 磁盘水位：可用率低于 15%（对应 storage.disk_warn_ratio 默认 0.85 使用率）
+      - alert: CoordDiskWatermarkHigh
+        expr: |
+          (disk_available_bytes / disk_total_bytes) < 0.15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} 磁盘可用率仅 {{ $value | humanizePercentage }}"
+
+      # 磁盘水位临界：可用率低于 5%（逼近 readonly 闸）
+      - alert: CoordDiskWatermarkCritical
+        expr: |
+          (disk_available_bytes / disk_total_bytes) < 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} 磁盘可用率仅 {{ $value | humanizePercentage }}，即将触发只读闸"
+
+  - name: coord-service
+    rules:
+      # watch 背压丢弃率过高：近 5 分钟丢弃事件数超过下发数的 10%
+      - alert: CoordWatchBackpressure
+        expr: |
+          rate(coord_watch_dropped_total[5m]) > 0.1 * rate(coord_watch_events_total[5m])
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} watch 事件丢弃率异常（背压）"
+
+      # 鉴权拒绝风暴：5 分钟内拒绝数 > 100
+      - alert: CoordAuthDeniedStorm
+        expr: |
+          rate(coord_auth_denied_total[5m]) > 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} 鉴权拒绝率异常（可能被扫描/爆破）"
+
+      # Seal 状态：节点处于 sealed 但仍在提供读写（配置错误信号）
+      - alert: CoordSealedNodeServing
+        expr: |
+          seal_status == 2 and grpc_requests_total{method="put"} > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "coord 节点 {{ $labels.instance }} 处于 sealed 状态仍有写入流量"

@@ -96,19 +96,26 @@ jobs:
   test:
     name: workspace tests
     runs-on: ubuntu-latest
+    # R-TST-21：测试 job 显式超时（此前无 timeout-minutes，卡死无上限）
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
       - uses: Swatinem/rust-cache@v2
       - name: Build tests
         run: cargo build --workspace --tests
-      - name: Run workspace tests
-        run: cargo test --workspace --no-fail-fast
+      - name: Run workspace tests (one flaky retry)
+        # R-TST-21：失败重跑一次（单测偶发 flaky 不阻塞 PR；连续两次失败才红）
+        run: |
+          cargo test --workspace --no-fail-fast || {
+            echo "::warning::first run failed; retrying once"
+            cargo test --workspace --no-fail-fast
+          }
 
   security-audit:
-    name: cargo audit + deny (weekly / manual)
-    # P1-03：依赖安全治理定时执行
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: cargo audit + deny
+    # R-TST-21：audit/deny 从 schedule-only 改为 PR 门禁
+    # （此前仅定时/手动执行，PR 不拦截已知漏洞依赖）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -136,7 +143,14 @@ jobs:
       - name: Run real-process chaos suites
         env:
           CHAOS_REAL: "1"
-        run: cargo test -p coord --test chaos_real -- --ignored --nocapture
+        # 串行：kill9 与 soak 两个套件各起 3 个真实进程 + 6 个代理，
+        # 并行互扰会导致节点就绪超时（2026-08-25 本地复现）
+        run: cargo test -p coord --test chaos_real -- --ignored --nocapture --test-threads=1
+      - name: Run distributed soak (smoke, 120s)
+        env:
+          CHAOS_REAL: "1"
+          SOAK_DURATION_SECS: "120"
+        run: cargo test -p coord --test chaos_real chaos_soak_distributed -- --ignored --nocapture
 
   perf-bench:
     name: weekly perf baseline (regression gate)

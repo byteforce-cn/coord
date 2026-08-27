@@ -10,6 +10,7 @@ coord-proto = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
 http = { workspace = true }
+http-body-util = { workspace = true }
 prost = { workspace = true }
 tonic-health = { workspace = true }
 redb = { workspace = true }
@@ -32,6 +33,7 @@ aes-gcm = { workspace = true }
 hkdf = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
 argon2 = { workspace = true }
 rand = { workspace = true }
 lru = { workspace = true }

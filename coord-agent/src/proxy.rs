@@ -57,8 +57,18 @@ impl std::fmt::Debug for AgentInner {
 
 impl AgentInner {
     /// 创建 AgentInner，以 Direct 模式连接到 Server 集群。
-    pub async fn new(server_endpoints: Vec<String>, cache: AgentCache) -> Result<Self, CoreError> {
-        let config = coord_client::Config::new(server_endpoints);
+    ///
+    /// `tls` 为 Some 时经 TLS/mTLS 通道连接（PEM 字节，来自 `AgentTlsConfig`）；
+    /// Server 集群启用 TLS 时必需，否则连接会失败并退化为 skeleton 模式。
+    pub async fn new(
+        server_endpoints: Vec<String>,
+        cache: AgentCache,
+        tls: Option<coord_client::config::TlsConfig>,
+    ) -> Result<Self, CoreError> {
+        let mut config = coord_client::Config::new(server_endpoints);
+        if let Some(t) = tls {
+            config = config.with_tls(t);
+        }
         let client = coord_client::Client::connect_direct(config).await?;
         Ok(Self { client, cache })
     }
@@ -487,11 +497,22 @@ impl Lease for LeaseProxy {
 #[derive(Debug, Clone)]
 pub struct WatchProxy {
     inner: Option<Arc<AgentInner>>,
+    /// R-AGT-20：指标（watch 订阅数实时回写；None = 不采集）
+    metrics: Option<crate::metrics::AgentMetrics>,
 }
 
 impl WatchProxy {
     pub fn new(inner: Option<Arc<AgentInner>>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            metrics: None,
+        }
+    }
+
+    /// R-AGT-20：挂载指标（watch 订阅数实时回写）。
+    pub fn with_metrics(mut self, metrics: Option<crate::metrics::AgentMetrics>) -> Self {
+        self.metrics = metrics;
+        self
     }
 }
 
@@ -528,6 +549,11 @@ impl Watch for WatchProxy {
         let prefix = create_req.key.clone();
         let start_revision = create_req.start_revision;
 
+        // R-AGT-20：订阅 +1（退订在转发任务结束时 -1）
+        if let Some(ref metrics) = self.metrics {
+            metrics.inc_watch_subscribers();
+        }
+
         if let Some(ref agent_inner) = self.inner {
             // 通过 coord_client 创建到 Server 的 Watch
             match agent_inner
@@ -540,7 +566,12 @@ impl Watch for WatchProxy {
                     let (tx, rx) = mpsc::channel::<Result<WatchResponse, tonic::Status>>(256);
 
                     // 后台任务：将 Server 事件转发给本地客户端
+                    let metrics_for_task = self.metrics.clone();
                     tokio::spawn(async move {
+                        // R-AGT-20：退订（任务结束/客户端断开时）
+                        let _decrement = DecrementGuard {
+                            metrics: metrics_for_task,
+                        };
                         loop {
                             match server_event_rx.recv().await {
                                 Some(Ok(event)) => {
@@ -574,6 +605,19 @@ impl Watch for WatchProxy {
 }
 
 // ──── MaintenanceProxy ────
+
+/// R-AGT-20：Watch 转发任务退订守卫（任务结束时 metrics -1）。
+struct DecrementGuard {
+    metrics: Option<crate::metrics::AgentMetrics>,
+}
+
+impl Drop for DecrementGuard {
+    fn drop(&mut self) {
+        if let Some(ref metrics) = self.metrics {
+            metrics.dec_watch_subscribers();
+        }
+    }
+}
 
 /// Maintenance 服务代理
 #[derive(Debug, Clone)]

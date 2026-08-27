@@ -15,7 +15,7 @@ use tonic::transport::Channel;
 
 use coord_core::error::{Error, Result};
 
-use crate::config::Config;
+use crate::config::{Config, TlsConfig};
 
 // ──── Pool Entry ────
 
@@ -79,6 +79,8 @@ pub struct ConnectionPool {
     max_connections_per_endpoint: usize,
     connect_timeout: Duration,
     idle_timeout: Duration,
+    /// TLS/mTLS 通道配置（None = 明文 http）
+    tls: Option<Arc<TlsConfig>>,
 }
 
 impl ConnectionPool {
@@ -90,6 +92,7 @@ impl ConnectionPool {
             max_connections_per_endpoint: config.connections_per_endpoint,
             connect_timeout: config.connect_timeout,
             idle_timeout: config.connection_idle_timeout,
+            tls: config.tls.clone().map(Arc::new),
         }
     }
 
@@ -152,11 +155,7 @@ impl ConnectionPool {
             }
         }
         // Phase 2: No existing channel, create a new connection (lock released)
-        let url = format!("http://{endpoint}");
-        Channel::from_shared(url)
-            .map_err(|e| Error::Internal(format!("invalid endpoint: {e}")))?
-            .connect_timeout(self.connect_timeout)
-            .connect()
+        crate::tls::connect(endpoint, Some(self.connect_timeout), self.tls.as_deref())
             .await
             .map_err(|e| Error::ClusterUnavailable(format!("connect failed: {e}")))
     }
@@ -170,6 +169,7 @@ impl Clone for ConnectionPool {
             max_connections_per_endpoint: self.max_connections_per_endpoint,
             connect_timeout: self.connect_timeout,
             idle_timeout: self.idle_timeout,
+            tls: self.tls.clone(),
         }
     }
 }

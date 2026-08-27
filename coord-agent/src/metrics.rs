@@ -25,6 +25,23 @@ pub struct AgentMetrics {
     inner: Arc<MetricsInner>,
 }
 
+impl std::fmt::Debug for AgentMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentMetrics")
+            .field("connected", &self.inner.connected.load(Ordering::Relaxed))
+            .field("cache_hits", &self.inner.cache_hits.load(Ordering::Relaxed))
+            .field(
+                "cache_misses",
+                &self.inner.cache_misses.load(Ordering::Relaxed),
+            )
+            .field(
+                "watch_subscribers",
+                &self.inner.watch_subscribers.load(Ordering::Relaxed),
+            )
+            .finish()
+    }
+}
+
 struct MetricsInner {
     /// 进程启动时间
     pub start_time: Instant,
@@ -77,6 +94,37 @@ impl AgentMetrics {
         if method_idx < self.inner.grpc_requests.len() {
             self.inner.grpc_requests[method_idx].fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// R-AGT-20：按 gRPC URI 路径计数（/coord.agent.KV/Put 等核心方法）。
+    /// 非核心/未知路径不计入（保持 5 槽位语义）。
+    pub fn record_grpc_method(&self, path: &str) {
+        let idx = match path {
+            p if p.ends_with("/Put") => Some(0),
+            p if p.ends_with("/Range") => Some(1),
+            p if p.ends_with("/Delete") => Some(2),
+            p if p.ends_with("/Txn") => Some(3),
+            p if p.ends_with("/Status") || p.ends_with("/MemberList") => Some(4),
+            _ => None,
+        };
+        if let Some(i) = idx {
+            self.record_grpc_request(i);
+        }
+    }
+
+    /// R-AGT-20：设置当前 Watch 订阅者数量（WatchProxy 订阅/退订时调用）。
+    pub fn set_watch_subscribers(&self, count: i64) {
+        self.inner.watch_subscribers.store(count, Ordering::Relaxed);
+    }
+
+    /// R-AGT-20：Watch 订阅 +1。
+    pub fn inc_watch_subscribers(&self) {
+        self.inner.watch_subscribers.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// R-AGT-20：Watch 订阅 -1。
+    pub fn dec_watch_subscribers(&self) {
+        self.inner.watch_subscribers.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// 渲染 Prometheus 文本格式
@@ -138,6 +186,61 @@ impl Default for AgentMetrics {
     }
 }
 
+// ──── R-AGT-20：gRPC 请求计数中间件 ────
+
+/// tower Layer：挂到 Agent gRPC router 外层，按方法路径计数（此前
+/// `record_grpc_request` 为死代码、`coord_agent_grpc_requests_total` 恒为 0）。
+#[derive(Clone)]
+pub struct AgentGrpcMetricsLayer {
+    metrics: AgentMetrics,
+}
+
+impl AgentGrpcMetricsLayer {
+    pub fn new(metrics: AgentMetrics) -> Self {
+        Self { metrics }
+    }
+}
+
+impl<S> tower::Layer<S> for AgentGrpcMetricsLayer {
+    type Service = AgentGrpcMetricsService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        AgentGrpcMetricsService {
+            inner,
+            metrics: self.metrics.clone(),
+        }
+    }
+}
+
+/// tower Service 包装：计数后透传。
+#[derive(Clone)]
+pub struct AgentGrpcMetricsService<S> {
+    inner: S,
+    metrics: AgentMetrics,
+}
+
+impl<S, ReqBody, ResBody> tower::Service<http::Request<ReqBody>> for AgentGrpcMetricsService<S>
+where
+    S: tower::Service<http::Request<ReqBody>, Response = http::Response<ResBody>> + Send + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: http::Request<ReqBody>) -> Self::Future {
+        self.metrics.record_grpc_method(req.uri().path());
+        self.inner.call(req)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +264,32 @@ mod tests {
 
         m.set_connected(true);
         assert_eq!(m.inner.connected.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_record_grpc_method_mapping() {
+        let m = AgentMetrics::new();
+        m.record_grpc_method("/coord.agent.KV/Put");
+        m.record_grpc_method("/coord.agent.KV/Range");
+        m.record_grpc_method("/coord.agent.KV/Put");
+        m.record_grpc_method("/coord.agent.Unknown/Foo"); // 不计入
+        let text = m.render_prometheus_text();
+        assert!(
+            text.contains("coord_agent_grpc_requests_total{method=\"put\"} 2"),
+            "put 计数 2: {text}"
+        );
+        assert!(text.contains("coord_agent_grpc_requests_total{method=\"range\"} 1"));
+        assert!(text.contains("coord_agent_grpc_requests_total{method=\"txn\"} 0"));
+    }
+
+    #[test]
+    fn test_watch_subscribers_setter() {
+        let m = AgentMetrics::new();
+        m.inc_watch_subscribers();
+        m.inc_watch_subscribers();
+        m.dec_watch_subscribers();
+        let text = m.render_prometheus_text();
+        assert!(text.contains("coord_agent_watch_subscribers 1"));
     }
 
     #[test]

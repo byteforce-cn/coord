@@ -340,6 +340,8 @@ pub struct ReplicationManager {
     shard_leaders: RwLock<HashMap<String, String>>,
     /// 对端复制客户端缓存
     clients: RwLock<HashMap<String, ReplicaClient>>,
+    /// 复制通道 TLS/mTLS（生产收口：Some = 复制流量加密；None = 明文，仅限 loopback/dev）
+    tls: RwLock<Option<coord_client::config::TlsConfig>>,
     /// 心跳间隔（毫秒）
     heartbeat_interval_ms: u64,
     /// 心跳后台任务句柄
@@ -363,10 +365,24 @@ impl ReplicationManager {
             peers: RwLock::new(HashSet::new()),
             shard_leaders: RwLock::new(HashMap::new()),
             clients: RwLock::new(HashMap::new()),
+            tls: RwLock::new(None),
             heartbeat_interval_ms: 2000,
             heartbeat_task: RwLock::new(None),
             heartbeat_stop: RwLock::new(None),
         }
+    }
+
+    /// 设置复制通道 TLS/mTLS（生产必配；lib.rs 从 AgentConfig.tls 注入，fail-closed）
+    pub fn set_tls(&self, tls: Option<coord_client::config::TlsConfig>) {
+        *self.tls.write() = tls;
+        tracing::info!(
+            "replication channel TLS: {}",
+            if self.tls.read().is_some() {
+                "enabled (mTLS)"
+            } else {
+                "DISABLED (plaintext, loopback/dev only)"
+            }
+        );
     }
 
     /// 获取当前 Agent 地址
@@ -651,6 +667,9 @@ impl ReplicationEntry {
 // ──── ReplicaClient（Agent↔Agent 复制客户端）────
 
 /// Agent↔Agent 复制客户端（tonic）
+///
+/// 生产收口：支持 TLS/mTLS（`ReplicationManager` 注入 `coord_client::config::TlsConfig`；
+/// 未注入时保持明文，仅限 loopback/开发）。
 #[derive(Clone)]
 pub struct ReplicaClient {
     inner: coord_proto::agent::replica_client::ReplicaClient<tonic::transport::Channel>,
@@ -663,11 +682,20 @@ impl std::fmt::Debug for ReplicaClient {
 }
 
 impl ReplicaClient {
-    /// 连接对端 agent 的 Replica 服务
-    pub async fn connect(addr: &str) -> Result<Self, ReplicationError> {
-        let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+    /// 连接对端 agent 的 Replica 服务（tls = Some 时走 https+mTLS）
+    pub async fn connect(
+        addr: &str,
+        tls: Option<&coord_client::config::TlsConfig>,
+    ) -> Result<Self, ReplicationError> {
+        let scheme = if tls.is_some() { "https" } else { "http" };
+        let mut endpoint = tonic::transport::Endpoint::from_shared(format!("{scheme}://{addr}"))
             .map_err(|e| ReplicationError::Network(format!("invalid endpoint {addr}: {e}")))?
             .connect_timeout(Duration::from_secs(2));
+        if let Some(t) = tls {
+            endpoint = endpoint
+                .tls_config(t.to_tonic())
+                .map_err(|e| ReplicationError::Network(format!("tls config for {addr}: {e}")))?;
+        }
         let channel = endpoint
             .connect()
             .await
@@ -861,7 +889,8 @@ impl ReplicationManager {
         if let Some(c) = self.clients.read().get(addr) {
             return Ok(c.clone());
         }
-        let client = ReplicaClient::connect(addr).await?;
+        let tls = self.tls.read().clone();
+        let client = ReplicaClient::connect(addr, tls.as_ref()).await?;
         self.clients
             .write()
             .insert(addr.to_string(), client.clone());

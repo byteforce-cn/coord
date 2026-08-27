@@ -26,6 +26,7 @@ use tonic::transport::Channel;
 
 use super::type_config::TypeConfig;
 use super::CoordRaft;
+use crate::storage::snapshot_limiter::SnapshotRateLimiter;
 
 // Re-export for raft_rpc_server
 pub use coord_proto::raft::raft_client::RaftClient;
@@ -50,14 +51,44 @@ fn deserialize_payload<'a, T: serde::Deserialize<'a>>(data: &'a [u8]) -> Result<
 /// 构建 RaftMessageProto（v6.0 新增 region_id 和 trace_context 字段）
 ///
 /// 从当前 tracing span 中提取 trace context，注入到 Raft 消息中，
-/// 实现跨节点的分布式追踪。
+/// 实现跨节点的分布式追踪。R-SEC-03：`auth_tag` 由调用方按需计算。
 fn make_raft_message(payload: Vec<u8>) -> RaftMessageProto {
     let trace_context = extract_trace_context();
     RaftMessageProto {
         payload,
         region_id: 0, // 单 Raft 模式：region_id=0 表示未使用
         trace_context,
+        auth_tag: Vec::new(),
     }
+}
+
+/// R-SEC-03：对 payload 计算 HMAC-SHA256 认证标签（无 mTLS 时的共享密钥认证）。
+fn compute_raft_auth_tag(payload: &[u8], secret: &[u8]) -> Result<Vec<u8>, tonic::Status> {
+    use hmac::{Hmac, Mac};
+    type HmacSha256 = Hmac<sha2::Sha256>;
+    let mut mac = HmacSha256::new_from_slice(secret)
+        .map_err(|e| tonic::Status::internal(format!("raft HMAC key invalid: {e}")))?;
+    mac.update(payload);
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+/// R-SEC-03：校验入站 raft 消息的认证标签（配置了共享密钥时强制；fail-closed）。
+fn verify_raft_auth(msg: &RaftMessageProto, secret: Option<&[u8]>) -> Result<(), tonic::Status> {
+    let Some(secret) = secret else {
+        return Ok(());
+    };
+    if msg.auth_tag.is_empty() {
+        return Err(tonic::Status::unauthenticated(
+            "missing raft auth tag (shared secret configured)",
+        ));
+    }
+    use hmac::{Hmac, Mac};
+    type HmacSha256 = Hmac<sha2::Sha256>;
+    let mut mac = HmacSha256::new_from_slice(secret)
+        .map_err(|e| tonic::Status::internal(format!("raft HMAC key invalid: {e}")))?;
+    mac.update(&msg.payload);
+    mac.verify_slice(&msg.auth_tag)
+        .map_err(|_| tonic::Status::unauthenticated("invalid raft auth tag"))
 }
 
 /// 从当前 tracing span 提取 W3C Trace Context
@@ -122,12 +153,16 @@ pub struct RaftNetworkFactoryImpl {
     node_addrs: Arc<RwLock<HashMap<u64, String>>>,
     /// Raft 节点间 TLS 配置（可选，ADP §14.1）
     raft_tls_config: Option<Arc<tls::TlsConfig>>,
+    /// R-SEC-03：raft 节点间共享密钥（无 mTLS 时的 HMAC 认证，可选）
+    shared_secret: Option<Arc<Vec<u8>>>,
     /// 连接池：目标节点 ID → 共享的 gRPC 客户端（惰性连接）
     /// 使用 tokio::sync::Mutex 因为临界区包含 async 连接操作
     client_cache: HashMap<u64, Arc<tokio::sync::Mutex<Option<RaftClient<Channel>>>>>,
     /// 模拟网络分区的黑名单：此节点无法与黑名单中的节点通信
     /// 用于测试网络分区和对称分区场景
     blocked_nodes: Arc<RwLock<HashSet<u64>>>,
+    /// R-RFT-19：快照传输限速器（token bucket，跨目标节点共享；None = 不限速）
+    snapshot_rate_limiter: Option<Arc<SnapshotRateLimiter>>,
 }
 
 impl RaftNetworkFactoryImpl {
@@ -136,8 +171,10 @@ impl RaftNetworkFactoryImpl {
             node_id,
             node_addrs: Arc::new(RwLock::new(HashMap::new())),
             raft_tls_config: None,
+            shared_secret: None,
             client_cache: HashMap::new(),
             blocked_nodes: Arc::new(RwLock::new(HashSet::new())),
+            snapshot_rate_limiter: None,
         }
     }
 
@@ -150,8 +187,10 @@ impl RaftNetworkFactoryImpl {
             node_id,
             node_addrs: Arc::new(RwLock::new(HashMap::new())),
             raft_tls_config: None,
+            shared_secret: None,
             client_cache: HashMap::new(),
             blocked_nodes,
+            snapshot_rate_limiter: None,
         }
     }
 
@@ -171,6 +210,23 @@ impl RaftNetworkFactoryImpl {
     /// 将通过 TLS 加密传输。若同时配置了 CA 证书，则启用 mTLS 双向验证。
     pub fn set_raft_tls(&mut self, tls_config: tls::TlsConfig) {
         self.raft_tls_config = Some(Arc::new(tls_config));
+    }
+
+    /// R-SEC-03：设置 raft 节点间共享密钥（无 mTLS 时的 HMAC 认证）。
+    pub fn set_raft_shared_secret(&mut self, secret: &str) {
+        self.shared_secret = Some(Arc::new(secret.as_bytes().to_vec()));
+    }
+
+    /// R-RFT-19：设置快照传输限速器（0 = 不限速）。
+    ///
+    /// 快照分块发送前按 token bucket 申请许可，避免快照同步占满节点间带宽
+    /// 影响正常 AppendEntries/Vote 通信（此前 `SnapshotRateLimiter` 为死代码）。
+    pub fn set_snapshot_rate_limiter(&mut self, max_bytes_per_sec: u64) {
+        self.snapshot_rate_limiter = Some(Arc::new(if max_bytes_per_sec == 0 {
+            SnapshotRateLimiter::unlimited()
+        } else {
+            SnapshotRateLimiter::new(max_bytes_per_sec)
+        }));
     }
 
     /// 检查 Raft 节点间 TLS 是否已配置
@@ -220,9 +276,22 @@ pub struct RaftNetworkImpl {
     client_slot: Arc<tokio::sync::Mutex<Option<RaftClient<Channel>>>>,
     /// Raft 节点间 TLS 配置（可选）
     tls_config: Option<Arc<tls::TlsConfig>>,
+    /// R-SEC-03：共享密钥（可选，HMAC 认证出站消息）
+    shared_secret: Option<Arc<Vec<u8>>>,
+    /// R-RFT-19：快照传输限速器（可选；分块发送前申请许可）
+    snapshot_rate_limiter: Option<Arc<SnapshotRateLimiter>>,
 }
 
 impl RaftNetworkImpl {
+    /// R-SEC-03：构造出站消息（配置共享密钥时计算 HMAC 标签）。
+    fn build_authed_message(&self, payload: Vec<u8>) -> Result<RaftMessageProto, tonic::Status> {
+        let mut msg = make_raft_message(payload);
+        if let Some(secret) = &self.shared_secret {
+            msg.auth_tag = compute_raft_auth_tag(&msg.payload, secret)?;
+        }
+        Ok(msg)
+    }
+
     /// 获取或建立到目标节点的 gRPC 连接（惰性、共享）
     async fn get_client(&self) -> Result<RaftClient<Channel>, tonic::Status> {
         let mut slot = self.client_slot.lock().await;
@@ -456,6 +525,8 @@ impl RaftNetworkFactory<TypeConfig> for RaftNetworkFactoryImpl {
                 target_addr: addr,
                 client_slot,
                 tls_config: self.raft_tls_config.clone(),
+                shared_secret: self.shared_secret.clone(),
+                snapshot_rate_limiter: self.snapshot_rate_limiter.clone(),
             },
             target_id: target,
             blocked_nodes: Arc::clone(&self.blocked_nodes),
@@ -494,6 +565,24 @@ impl SerializableSnapshot {
     }
 }
 
+// ──── R-RFT-06：快照流式分块传输 ────
+
+/// 快照分块大小（2MiB，低于 gRPC 默认 4MiB 解码上限，留出序列化头部余量）
+const SNAPSHOT_CHUNK_SIZE: usize = 2 * 1024 * 1024;
+
+/// 流式快照单帧（每帧承载一个分块）
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotStreamMessage {
+    /// Leader vote（follower 校验 leader 仍有效；每帧携带便于流式校验）
+    vote: VoteOf<TypeConfig>,
+    /// 分块序号（从 0 递增）
+    chunk_index: u32,
+    /// 总分块数
+    total_chunks: u32,
+    /// 分块数据
+    data: Vec<u8>,
+}
+
 impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
     async fn append_entries(
         &mut self,
@@ -502,7 +591,10 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
     ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
         let payload = serialize_payload(&rpc)
             .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))?;
-        let req = tonic::Request::new(make_raft_message(payload));
+        let req = tonic::Request::new(
+            self.build_authed_message(payload)
+                .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))?,
+        );
         let mut client = self.get_client().await.map_err(to_rpc_error)?;
         let resp = client.append_entries(req).await.map_err(to_rpc_error)?;
         deserialize_payload(&resp.into_inner().payload)
@@ -516,7 +608,10 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         let payload = serialize_payload(&rpc)
             .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))?;
-        let req = tonic::Request::new(make_raft_message(payload));
+        let req = tonic::Request::new(
+            self.build_authed_message(payload)
+                .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))?,
+        );
         let mut client = self.get_client().await.map_err(to_rpc_error)?;
         let resp = client.vote(req).await.map_err(to_rpc_error)?;
         deserialize_payload(&resp.into_inner().payload)
@@ -533,13 +628,47 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
         let serializable = SerializableSnapshot::from_openraft(&snapshot);
         let payload = serialize_payload(&(&vote, &serializable))
             .map_err(|e| StreamingError::Unreachable(openraft::error::Unreachable::new(&e)))?;
-        let req = tonic::Request::new(make_raft_message(payload));
+
+        // R-RFT-06：分块流式传输（此前整包单条 gRPC，大快照超出 4MiB 解码上限，
+        // follower 永久无法追赶）
+        let total_chunks = payload.len().div_ceil(SNAPSHOT_CHUNK_SIZE).max(1) as u32;
         let mut client = self
             .get_client()
             .await
             .map_err(|e| StreamingError::Unreachable(openraft::error::Unreachable::new(&e)))?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<RaftMessageProto>(16);
+        for (i, chunk) in payload.chunks(SNAPSHOT_CHUNK_SIZE).enumerate() {
+            // R-RFT-19：分块发送前按 token bucket 限速（配置后生效，避免快照
+            // 同步占满节点间带宽影响正常 Raft 通信）
+            if let Some(limiter) = &self.snapshot_rate_limiter {
+                limiter.acquire(chunk.len() as u64).await;
+            }
+            let frame = SnapshotStreamMessage {
+                vote,
+                chunk_index: i as u32,
+                total_chunks,
+                data: chunk.to_vec(),
+            };
+            let frame_payload = serialize_payload(&frame)
+                .map_err(|e| StreamingError::Unreachable(openraft::error::Unreachable::new(&e)))?;
+            let frame_msg = self
+                .build_authed_message(frame_payload)
+                .map_err(|e| StreamingError::Unreachable(openraft::error::Unreachable::new(&e)))?;
+            if tx.send(frame_msg).await.is_err() {
+                return Err(StreamingError::Unreachable(
+                    openraft::error::Unreachable::new(&tonic::Status::internal(
+                        "snapshot stream receiver dropped",
+                    )),
+                ));
+            }
+        }
+        drop(tx);
+
         let resp = client
-            .install_snapshot(req)
+            .install_snapshot_streaming(tonic::Request::new(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            ))
             .await
             .map_err(|e| StreamingError::Unreachable(openraft::error::Unreachable::new(&e)))?;
         deserialize_payload(&resp.into_inner().payload)
@@ -553,6 +682,8 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
 pub struct RaftRpcService {
     /// 本地 Raft 实例（初始化后设置）
     raft: Arc<RwLock<Option<CoordRaft>>>,
+    /// R-SEC-03：共享密钥（配置后强制验签，无标签拒绝）
+    shared_secret: Option<Arc<Vec<u8>>>,
 }
 
 impl Default for RaftRpcService {
@@ -565,7 +696,14 @@ impl RaftRpcService {
     pub fn new() -> Self {
         Self {
             raft: Arc::new(RwLock::new(None)),
+            shared_secret: None,
         }
+    }
+
+    /// R-SEC-03：设置共享密钥（配置后所有入站 raft 消息强制 HMAC 验签）。
+    pub fn with_shared_secret(mut self, secret: Option<&str>) -> Self {
+        self.shared_secret = secret.map(|s| Arc::new(s.as_bytes().to_vec()));
+        self
     }
 
     /// 设置 Raft 实例（在 Raft 初始化后调用）
@@ -579,6 +717,11 @@ impl RaftRpcService {
             .clone()
             .ok_or_else(|| tonic::Status::internal("raft not initialized"))
     }
+
+    /// R-SEC-03：验签（配置了共享密钥时 fail-closed）
+    fn verify_incoming(&self, msg: &RaftMessageProto) -> Result<(), tonic::Status> {
+        verify_raft_auth(msg, self.shared_secret.as_deref().map(|v| v.as_slice()))
+    }
 }
 
 #[tonic::async_trait]
@@ -589,6 +732,7 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
     ) -> Result<tonic::Response<RaftMessageProto>, tonic::Status> {
         let msg = request.into_inner();
         inject_received_trace_context(&msg);
+        self.verify_incoming(&msg)?;
         let raft = self.get_raft()?;
         let rpc: AppendEntriesRequest<TypeConfig> = deserialize_payload(&msg.payload)?;
         let resp = raft
@@ -605,6 +749,7 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
     ) -> Result<tonic::Response<RaftMessageProto>, tonic::Status> {
         let msg = request.into_inner();
         inject_received_trace_context(&msg);
+        self.verify_incoming(&msg)?;
         let raft = self.get_raft()?;
         let rpc: VoteRequest<TypeConfig> = deserialize_payload(&msg.payload)?;
         let resp = raft
@@ -621,10 +766,67 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
     ) -> Result<tonic::Response<RaftMessageProto>, tonic::Status> {
         let msg = request.into_inner();
         inject_received_trace_context(&msg);
+        self.verify_incoming(&msg)?;
         let raft = self.get_raft()?;
         let (vote, serializable): (VoteOf<TypeConfig>, SerializableSnapshot) =
             deserialize_payload(&msg.payload)?;
         let snapshot = serializable.into_openraft();
+        let resp = raft
+            .install_full_snapshot(vote, snapshot)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("install_full_snapshot failed: {e}")))?;
+        let payload = serialize_payload(&resp)?;
+        Ok(tonic::Response::new(make_raft_message(payload)))
+    }
+
+    /// R-RFT-06：流式快照接收——按序收集分块，校验完整性后重组安装。
+    async fn install_snapshot_streaming(
+        &self,
+        request: tonic::Request<tonic::Streaming<RaftMessageProto>>,
+    ) -> Result<tonic::Response<RaftMessageProto>, tonic::Status> {
+        let mut stream = request.into_inner();
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        let mut expected_index: u32 = 0;
+        let mut total_chunks: Option<u32> = None;
+
+        while let Some(msg) = stream
+            .message()
+            .await
+            .map_err(|e| tonic::Status::internal(format!("snapshot stream recv: {e}")))?
+        {
+            inject_received_trace_context(&msg);
+            self.verify_incoming(&msg)?;
+            let frame: SnapshotStreamMessage = deserialize_payload(&msg.payload)?;
+            // 分块必须严格按序（fail-closed）
+            if frame.chunk_index != expected_index {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "snapshot chunk out of order: expected {expected_index}, got {}",
+                    frame.chunk_index
+                )));
+            }
+            expected_index += 1;
+            total_chunks = Some(frame.total_chunks);
+            chunks.push(frame.data);
+        }
+
+        let total = total_chunks
+            .ok_or_else(|| tonic::Status::invalid_argument("snapshot stream missing chunks"))?;
+        if expected_index != total || chunks.is_empty() {
+            return Err(tonic::Status::invalid_argument(format!(
+                "incomplete snapshot stream: received {expected_index}/{total} chunks"
+            )));
+        }
+
+        // 重组完整快照字节
+        let mut data = Vec::with_capacity(chunks.iter().map(|c| c.len()).sum());
+        for chunk in &chunks {
+            data.extend_from_slice(chunk);
+        }
+        let (vote, serializable): (VoteOf<TypeConfig>, SerializableSnapshot) =
+            deserialize_payload(&data)?;
+        let snapshot = serializable.into_openraft();
+
+        let raft = self.get_raft()?;
         let resp = raft
             .install_full_snapshot(vote, snapshot)
             .await
@@ -664,6 +866,7 @@ mod tests {
             payload: vec![],
             region_id: 0,
             trace_context: vec![],
+            auth_tag: Vec::new(),
         };
         inject_received_trace_context(&msg);
         // 不应 panic
@@ -676,6 +879,7 @@ mod tests {
             payload: vec![],
             region_id: 0,
             trace_context: vec![0x00, 0x01, 0x02],
+            auth_tag: Vec::new(),
         };
         inject_received_trace_context(&msg);
         // 不应 panic
@@ -688,9 +892,46 @@ mod tests {
             payload: b"region_payload".to_vec(),
             region_id: 42,
             trace_context: vec![0x01, 0x02, 0x03],
+            auth_tag: Vec::new(),
         };
         assert_eq!(msg.region_id, 42);
         assert_eq!(msg.payload, b"region_payload");
         assert_eq!(msg.trace_context, vec![0x01, 0x02, 0x03]);
+    }
+
+    // ──── R-SEC-03：共享密钥 HMAC 认证 ────
+
+    #[test]
+    fn test_raft_shared_secret_roundtrip() {
+        let secret = b"test-raft-secret-16chars";
+        let payload = b"raft-payload".to_vec();
+        let tag = compute_raft_auth_tag(&payload, secret).unwrap();
+        let mut msg = make_raft_message(payload);
+        msg.auth_tag = tag;
+        assert!(verify_raft_auth(&msg, Some(secret)).is_ok());
+        // 未配置密钥时不验签（兼容明文 loopback dev/test 路径）
+        assert!(verify_raft_auth(&msg, None).is_ok());
+    }
+
+    #[test]
+    fn test_raft_shared_secret_rejects_tampered_payload() {
+        let secret = b"test-raft-secret-16chars";
+        let payload = b"raft-payload".to_vec();
+        let tag = compute_raft_auth_tag(&payload, secret).unwrap();
+        let mut msg = make_raft_message(b"tampered".to_vec());
+        msg.auth_tag = tag;
+        assert!(verify_raft_auth(&msg, Some(secret)).is_err());
+    }
+
+    #[test]
+    fn test_raft_shared_secret_requires_tag() {
+        let secret = b"test-raft-secret-16chars";
+        // 配置了密钥但消息无标签 → 拒绝
+        let msg = make_raft_message(b"x".to_vec());
+        assert!(verify_raft_auth(&msg, Some(secret)).is_err());
+        // 标签错误 → 拒绝
+        let mut msg2 = make_raft_message(b"x".to_vec());
+        msg2.auth_tag = vec![0u8; 32];
+        assert!(verify_raft_auth(&msg2, Some(secret)).is_err());
     }
 }

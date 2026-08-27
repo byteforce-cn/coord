@@ -7,6 +7,8 @@
 //
 // RED 阶段：health/metrics 模块尚不存在，此测试预期编译失败。
 
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -23,7 +25,7 @@ async fn test_health_endpoint_live() {
 
     // 启动 health server
     let addr = format!("127.0.0.1:{}", port);
-    let handle = start_health_server(&addr, metrics, false);
+    let handle = start_health_server(&addr, metrics, Arc::new(AtomicBool::new(false)));
 
     // 等待 server 启动
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -49,7 +51,7 @@ async fn test_health_endpoint_ready() {
     let metrics = AgentMetrics::new();
 
     let addr = format!("127.0.0.1:{}", port);
-    let handle = start_health_server(&addr, metrics, false);
+    let handle = start_health_server(&addr, metrics, Arc::new(AtomicBool::new(false)));
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -70,7 +72,7 @@ async fn test_metrics_endpoint() {
     let metrics = AgentMetrics::new();
 
     let addr = format!("127.0.0.1:{}", port);
-    let handle = start_health_server(&addr, metrics, true);
+    let handle = start_health_server(&addr, metrics, Arc::new(AtomicBool::new(true)));
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 

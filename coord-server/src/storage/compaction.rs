@@ -16,6 +16,7 @@ use tokio::time::MissedTickBehavior;
 use coord_core::storage::StorageBackend;
 
 use super::mvcc::MvccStorage;
+use crate::metrics::Metrics;
 
 // ──── CompactionConfig ────
 
@@ -45,6 +46,13 @@ impl Default for CompactionConfig {
         }
     }
 }
+
+/// R-RFT-19：文件级 compact 前的空闲窗口（无写入静默期）。
+/// 等待该时长内无写入再拿独占写锁，规避「compact 期间新读写全部阻塞」。
+const COMPACT_IDLE_WINDOW: Duration = Duration::from_millis(500);
+
+/// R-RFT-19：空闲窗口最长等待时间；超时仍执行 compact（空间回收优先）。
+const COMPACT_IDLE_MAX_WAIT: Duration = Duration::from_secs(30);
 
 // ──── CompactProposer ────
 
@@ -86,16 +94,20 @@ enum CompactionTrigger {
 
 impl<B: StorageBackend + Clone + 'static> CompactionManager<B> {
     /// 创建并启动 Compaction 后台任务
+    ///
+    /// `metrics`：可选指标注册表（R-OBS-10：文件级 compact 回收字节计数）。
     pub fn start(
         storage: Arc<MvccStorage<B>>,
         config: CompactionConfig,
         proposer: Option<Arc<dyn CompactProposer>>,
+        metrics: Option<Arc<Metrics>>,
     ) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<CompactionTrigger>();
 
         let storage_clone = Arc::clone(&storage);
         let config_clone = config.clone();
         let interval = config.interval;
+        let metrics_clone = metrics.clone();
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
@@ -104,13 +116,25 @@ impl<B: StorageBackend + Clone + 'static> CompactionManager<B> {
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
-                        Self::run_cycle(&storage_clone, &config_clone, proposer.as_deref()).await;
+                        Self::run_cycle(
+                            &storage_clone,
+                            &config_clone,
+                            proposer.as_deref(),
+                            metrics_clone.as_ref(),
+                        )
+                        .await;
                     }
                     msg = rx.recv() => {
                         match msg {
                             Some(CompactionTrigger::Full) => {
                                 tracing::info!("Manual compaction triggered");
-                                Self::run_cycle(&storage_clone, &config_clone, proposer.as_deref()).await;
+                                Self::run_cycle(
+                                    &storage_clone,
+                                    &config_clone,
+                                    proposer.as_deref(),
+                                    metrics_clone.as_ref(),
+                                )
+                                .await;
                             }
                             Some(CompactionTrigger::Shutdown) => {
                                 tracing::info!("Compaction manager shutting down");
@@ -135,6 +159,7 @@ impl<B: StorageBackend + Clone + 'static> CompactionManager<B> {
         storage: &MvccStorage<B>,
         config: &CompactionConfig,
         proposer: Option<&dyn CompactProposer>,
+        metrics: Option<&Arc<Metrics>>,
     ) {
         // 1. 自动压缩：仅 leader 提案（P1-01 节点一致），单节点模式直接 apply
         if config.auto_compact {
@@ -162,14 +187,25 @@ impl<B: StorageBackend + Clone + 'static> CompactionManager<B> {
         }
 
         // 2. 文件级 compact（空间回收）：redb 需要独占引用，放 spawn_blocking
-        //    执行，避免阻塞异步运行时（维护窗口期间新读写等待）。
+        //    执行，避免阻塞异步运行时。R-RFT-19：等待空闲窗口（无写入静默期）
+        //    再执行，将维护压缩与在线读写错开；超时仍执行（空间回收优先）。
+        // R-OBS-10：记录回收字节（compact 前后磁盘大小差）
+        let size_before = storage.backend().disk_size_bytes().unwrap_or(0);
         let backend = storage.backend().clone();
         let _ = tokio::task::spawn_blocking(move || {
-            if let Err(e) = backend.compact() {
+            if let Err(e) =
+                backend.compact_with_idle_window(COMPACT_IDLE_WINDOW, COMPACT_IDLE_MAX_WAIT)
+            {
                 tracing::warn!("File-level compact failed: {e}");
             }
         })
         .await;
+        let size_after = storage.backend().disk_size_bytes().unwrap_or(size_before);
+        if let Some(metrics) = metrics {
+            if size_before > size_after {
+                metrics.add_compact_reclaimed_bytes(size_before - size_after);
+            }
+        }
     }
 
     /// 手动触发完整 Compaction
@@ -298,6 +334,7 @@ mod tests {
             Some(Arc::new(StandaloneProposer {
                 storage: Arc::clone(&storage),
             })),
+            None,
         );
         mgr.shutdown();
     }
@@ -321,8 +358,13 @@ mod tests {
         let proposer = Arc::new(StandaloneProposer {
             storage: Arc::clone(&storage),
         });
-        CompactionManager::<RedbBackend>::run_cycle(&storage, &config, Some(proposer.as_ref()))
-            .await;
+        CompactionManager::<RedbBackend>::run_cycle(
+            &storage,
+            &config,
+            Some(proposer.as_ref()),
+            None,
+        )
+        .await;
 
         // cutoff = current - 50 > 0 → 提案后 compacted_revision 推进
         let compacted = storage.compacted_revision().unwrap();
@@ -351,8 +393,13 @@ mod tests {
         let proposer = Arc::new(StandaloneProposer {
             storage: Arc::clone(&storage),
         });
-        CompactionManager::<RedbBackend>::run_cycle(&storage, &config, Some(proposer.as_ref()))
-            .await;
+        CompactionManager::<RedbBackend>::run_cycle(
+            &storage,
+            &config,
+            Some(proposer.as_ref()),
+            None,
+        )
+        .await;
         assert_eq!(storage.compacted_revision().unwrap(), 0);
     }
 
@@ -376,6 +423,7 @@ mod tests {
             Some(Arc::new(StandaloneProposer {
                 storage: Arc::clone(&storage),
             })),
+            None,
         );
         mgr.trigger_compact();
         // 等待后台任务消费触发指令

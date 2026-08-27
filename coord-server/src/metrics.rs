@@ -81,6 +81,38 @@ struct MetricsInner {
     /// gRPC 方法路径 → 指标
     pub method_metrics: RwLock<HashMap<String, Arc<MethodMetrics>>>,
 
+    // ── Watch 指标（R-OBS-10）──
+    /// 当前活跃订阅数
+    pub watch_active_total: AtomicI64,
+    /// 下发事件总数
+    pub watch_events_total: AtomicU64,
+    /// 背压丢弃事件总数
+    pub watch_dropped_total: AtomicU64,
+
+    // ── Apply 指标（R-OBS-10）──
+    /// apply 命令总数
+    pub apply_total: AtomicU64,
+    /// apply 累计耗时（微秒）
+    pub apply_duration_us_total: AtomicU64,
+
+    // ── Txn 指标（R-OBS-10）──
+    /// Txn 请求总数
+    pub txn_total: AtomicU64,
+    /// Txn 条件冲突总数
+    pub txn_conflict_total: AtomicU64,
+
+    // ── 快照 / Compaction 指标（R-OBS-10）──
+    /// 快照构建总数
+    pub snapshot_total: AtomicU64,
+    /// 快照构建累计耗时（微秒）
+    pub snapshot_duration_us_total: AtomicU64,
+    /// Compaction 回收字节总数
+    pub compact_reclaimed_bytes_total: AtomicU64,
+
+    // ── Auth 指标（R-OBS-10）──
+    /// 鉴权拒绝总数
+    pub auth_denied_total: AtomicU64,
+
     // ── 启动时间 ──
     pub start_time: Instant,
 }
@@ -161,6 +193,17 @@ impl Default for MetricsInner {
             local_region_count: AtomicU64::new(0),
             region_metrics: RwLock::new(Vec::new()),
             method_metrics: RwLock::new(HashMap::new()),
+            watch_active_total: AtomicI64::new(0),
+            watch_events_total: AtomicU64::new(0),
+            watch_dropped_total: AtomicU64::new(0),
+            apply_total: AtomicU64::new(0),
+            apply_duration_us_total: AtomicU64::new(0),
+            txn_total: AtomicU64::new(0),
+            txn_conflict_total: AtomicU64::new(0),
+            snapshot_total: AtomicU64::new(0),
+            snapshot_duration_us_total: AtomicU64::new(0),
+            compact_reclaimed_bytes_total: AtomicU64::new(0),
+            auth_denied_total: AtomicU64::new(0),
             start_time: Instant::now(),
         }
     }
@@ -295,6 +338,77 @@ impl Metrics {
         self.inner
             .lease_expired_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    // ── Watch 指标更新（R-OBS-10）──
+
+    pub fn inc_watch_active(&self) {
+        self.inner
+            .watch_active_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dec_watch_active(&self) {
+        self.inner
+            .watch_active_total
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_watch_events(&self) {
+        self.inner
+            .watch_events_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_watch_dropped(&self) {
+        self.inner
+            .watch_dropped_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    // ── Apply 指标更新（R-OBS-10）──
+
+    /// 记录一次状态机 apply（命令数 + 累计耗时微秒）
+    pub fn record_apply(&self, duration_us: u64) {
+        self.inner.apply_total.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .apply_duration_us_total
+            .fetch_add(duration_us, Ordering::Relaxed);
+    }
+
+    // ── Txn 指标更新（R-OBS-10）──
+
+    /// 记录一次 Txn（`conflict` = 条件比较失败）
+    pub fn record_txn(&self, conflict: bool) {
+        self.inner.txn_total.fetch_add(1, Ordering::Relaxed);
+        if conflict {
+            self.inner
+                .txn_conflict_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    // ── 快照 / Compaction 指标更新（R-OBS-10）──
+
+    /// 记录一次快照构建耗时（微秒）
+    pub fn record_snapshot(&self, duration_us: u64) {
+        self.inner.snapshot_total.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .snapshot_duration_us_total
+            .fetch_add(duration_us, Ordering::Relaxed);
+    }
+
+    /// 累计 Compaction 回收字节
+    pub fn add_compact_reclaimed_bytes(&self, bytes: u64) {
+        self.inner
+            .compact_reclaimed_bytes_total
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    // ── Auth 指标更新（R-OBS-10）──
+
+    pub fn inc_auth_denied(&self) {
+        self.inner.auth_denied_total.fetch_add(1, Ordering::Relaxed);
     }
 
     // ── Seal 指标 ──
@@ -531,6 +645,96 @@ impl Metrics {
             inner.lease_expired_total.load(Ordering::Relaxed)
         ));
 
+        // Watch（R-OBS-10）
+        out.push_str("\n# HELP coord_watch_active Current active watch subscriptions\n");
+        out.push_str("# TYPE coord_watch_active gauge\n");
+        out.push_str(&format!(
+            "coord_watch_active {}\n",
+            inner.watch_active_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_watch_events_total Total watch events delivered\n");
+        out.push_str("# TYPE coord_watch_events_total counter\n");
+        out.push_str(&format!(
+            "coord_watch_events_total {}\n",
+            inner.watch_events_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "\n# HELP coord_watch_dropped_total Watch events dropped due to backpressure\n",
+        );
+        out.push_str("# TYPE coord_watch_dropped_total counter\n");
+        out.push_str(&format!(
+            "coord_watch_dropped_total {}\n",
+            inner.watch_dropped_total.load(Ordering::Relaxed)
+        ));
+
+        // Apply（R-OBS-10）
+        out.push_str("\n# HELP coord_apply_total Total raft commands applied\n");
+        out.push_str("# TYPE coord_apply_total counter\n");
+        out.push_str(&format!(
+            "coord_apply_total {}\n",
+            inner.apply_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "\n# HELP coord_apply_duration_seconds_total Total apply duration in seconds\n",
+        );
+        out.push_str("# TYPE coord_apply_duration_seconds_total counter\n");
+        out.push_str(&format!(
+            "coord_apply_duration_seconds_total {:.6}\n",
+            inner.apply_duration_us_total.load(Ordering::Relaxed) as f64 / 1_000_000.0
+        ));
+
+        // Txn（R-OBS-10）
+        out.push_str("\n# HELP coord_txn_total Total Txn requests\n");
+        out.push_str("# TYPE coord_txn_total counter\n");
+        out.push_str(&format!(
+            "coord_txn_total {}\n",
+            inner.txn_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_txn_conflicts_total Total Txn condition conflicts\n");
+        out.push_str("# TYPE coord_txn_conflicts_total counter\n");
+        out.push_str(&format!(
+            "coord_txn_conflicts_total {}\n",
+            inner.txn_conflict_total.load(Ordering::Relaxed)
+        ));
+
+        // 快照 / Compaction（R-OBS-10）
+        out.push_str("\n# HELP coord_snapshot_total Total snapshots built\n");
+        out.push_str("# TYPE coord_snapshot_total counter\n");
+        out.push_str(&format!(
+            "coord_snapshot_total {}\n",
+            inner.snapshot_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "\n# HELP coord_snapshot_duration_seconds_total Total snapshot build duration in seconds\n",
+        );
+        out.push_str("# TYPE coord_snapshot_duration_seconds_total counter\n");
+        out.push_str(&format!(
+            "coord_snapshot_duration_seconds_total {:.6}\n",
+            inner.snapshot_duration_us_total.load(Ordering::Relaxed) as f64 / 1_000_000.0
+        ));
+
+        out.push_str(
+            "\n# HELP coord_compaction_reclaimed_bytes_total Total bytes reclaimed by compaction\n",
+        );
+        out.push_str("# TYPE coord_compaction_reclaimed_bytes_total counter\n");
+        out.push_str(&format!(
+            "coord_compaction_reclaimed_bytes_total {}\n",
+            inner.compact_reclaimed_bytes_total.load(Ordering::Relaxed)
+        ));
+
+        // Auth（R-OBS-10）
+        out.push_str("\n# HELP coord_auth_denied_total Total auth denials\n");
+        out.push_str("# TYPE coord_auth_denied_total counter\n");
+        out.push_str(&format!(
+            "coord_auth_denied_total {}\n",
+            inner.auth_denied_total.load(Ordering::Relaxed)
+        ));
+
         // Seal
         out.push_str("\n# HELP seal_status Seal status (0=unsealed, 1=in_progress, 2=sealed)\n");
         out.push_str("# TYPE seal_status gauge\n");
@@ -722,8 +926,19 @@ where
                 Ok(svc) => svc.call(request).await,
                 Err(e) => Err(e),
             };
+            // R-OBS-10：gRPC 错误以 HTTP 200 + `grpc-status` 呈现（中间层拒绝
+            // 写入 header；服务内错误写 trailer，tower 层不消费 body 不可读）。
+            // 优先读 `grpc-status` header，否则按 HTTP 状态码兜底。
             let code = match &response {
-                Ok(resp) => resp.status().as_u16(),
+                Ok(resp) => match resp
+                    .headers()
+                    .get("grpc-status")
+                    .and_then(|v| v.to_str().ok())
+                {
+                    Some(s) if s.trim() != "0" => 500u16,
+                    Some(_) => 200u16,
+                    None => resp.status().as_u16(),
+                },
                 Err(_) => 500,
             };
             metrics.record_grpc_request_by_method(

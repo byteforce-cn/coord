@@ -229,6 +229,37 @@ impl Keyring {
         Ok((keyring, encrypted_dek))
     }
 
+    /// R-SEC-01：用**指定** Root Key 引导（用于静态加密首启——root 密钥来自
+    /// 配置/环境变量/密钥文件，而非随机生成）。返回 (Keyring, EncryptedDek)。
+    /// 调用方需将 `encrypted_dek` 持久化到 `/_meta/dek/{key_id}`。
+    pub fn bootstrap_from_root_key(root_key_bytes: &[u8]) -> Result<(Self, EncryptedDek)> {
+        let root_key = RootKey::from_bytes(root_key_bytes)?;
+        let kek = root_key.derive_kek()?;
+        let (active_dek, active_key_id, next_key_id) = Self::generate_dek(&kek, 1);
+
+        let encrypted_bytes = kek.wrap_dek(&active_dek)?;
+        let encrypted_dek = EncryptedDek {
+            key_id: active_key_id,
+            encrypted_bytes,
+        };
+
+        let mut cache = LruCache::new(DEK_CACHE_CAP);
+        cache.put(active_key_id, Zeroizing::new(active_dek));
+
+        let keyring = Self {
+            inner: Arc::new(RwLock::new(KeyringInner {
+                kek,
+                active_dek: Zeroizing::new(active_dek),
+                active_key_id,
+                next_key_id,
+                dek_cache: cache,
+                sealed: false,
+            })),
+        };
+
+        Ok((keyring, encrypted_dek))
+    }
+
     /// Bootstrap + Shamir 分片：生成 Root Key 并拆分为 N 个分片。
     ///
     /// 用于集群首次初始化（启用 Seal 能力）。返回 (Keyring, EncryptedDek, Shares)。

@@ -23,6 +23,20 @@ fn generate_self_signed_cert(dns_name: &str) -> (Vec<u8>, Vec<u8>) {
     )
 }
 
+/// 生成带 IP SAN 的自签名证书（PEM 格式），用于验证 server name 从 endpoint host 派生
+fn generate_ip_san_cert(ip: &str) -> (Vec<u8>, Vec<u8>) {
+    use rcgen::{CertificateParams, KeyPair, SanType};
+    let ip = ip.parse::<std::net::IpAddr>().unwrap();
+    let key_pair = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.subject_alt_names = vec![SanType::IpAddress(ip)];
+    let cert = params.self_signed(&key_pair).unwrap();
+    (
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    )
+}
+
 /// 写入临时 PEM 文件，返回路径
 fn write_temp_pem(data: &[u8], prefix: &str) -> PathBuf {
     use std::io::Write;
@@ -47,6 +61,7 @@ fn test_tls_config_from_paths() {
         cert_path: cert_path.clone(),
         key_path: key_path.clone(),
         ca_path: Some(cert_path.clone()),
+        server_name: None,
     };
 
     assert!(tls_config.is_configured());
@@ -74,6 +89,7 @@ fn test_tls_config_without_ca() {
         cert_path: cert_path.clone(),
         key_path: key_path.clone(),
         ca_path: None,
+        server_name: None,
     };
 
     assert!(tls_config.is_configured());
@@ -90,6 +106,7 @@ fn test_tls_config_missing_cert_returns_false() {
         cert_path: PathBuf::from("/nonexistent/cert.pem"),
         key_path: PathBuf::from("/nonexistent/key.pem"),
         ca_path: None,
+        server_name: None,
     };
     assert!(!tls_config.is_configured());
 }
@@ -108,6 +125,7 @@ data_dir = "/var/lib/coord-agent"
 cert_path = "/etc/coord-agent/agent.crt"
 key_path = "/etc/coord-agent/agent.key"
 ca_path = "/etc/coord-agent/ca.crt"
+server_name = "coord.internal"
 "#;
 
     let config: AgentConfig = toml::from_str(toml_str).unwrap();
@@ -115,6 +133,11 @@ ca_path = "/etc/coord-agent/ca.crt"
     assert_eq!(tls.cert_path, PathBuf::from("/etc/coord-agent/agent.crt"));
     assert_eq!(tls.key_path, PathBuf::from("/etc/coord-agent/agent.key"));
     assert_eq!(tls.ca_path, Some(PathBuf::from("/etc/coord-agent/ca.crt")));
+    assert_eq!(
+        tls.server_name.as_deref(),
+        Some("coord.internal"),
+        "server_name 应可配置（不再硬编码 localhost）"
+    );
 }
 
 /// A-mTLS.5: 不包含 TLS 字段时 tls 为 None
@@ -130,10 +153,11 @@ http_addr = "127.0.0.1:19528"
 
 // ──── T3: TLS Channel 集成测试 ────
 
-/// A-mTLS.6: 使用自签名证书的 TLS Channel 连接成功
+/// A-mTLS.6: TLS Channel 连接成功（server name 从 endpoint host 派生）
 #[tokio::test]
 async fn test_tls_channel_with_self_signed_cert() {
-    let (cert, key) = generate_self_signed_cert("localhost");
+    // 证书带 IP SAN（127.0.0.1），server_name 缺省 → tonic 由 URL host 派生 ServerName
+    let (cert, key) = generate_ip_san_cert("127.0.0.1");
 
     let cert_path = write_temp_pem(&cert, "srv-cert");
     let key_path = write_temp_pem(&key, "srv-key");
@@ -165,6 +189,7 @@ async fn test_tls_channel_with_self_signed_cert() {
         cert_path: cert_path.clone(),
         key_path: key_path.clone(),
         ca_path: Some(cert_path.clone()),
+        server_name: None,
     };
 
     let result =
@@ -187,14 +212,18 @@ async fn test_tls_channel_with_self_signed_cert() {
 }
 
 /// A-mTLS.7: mTLS 模式下无有效客户端证书应被拒绝
+///
+/// 注：TLS 1.3 下客户端握手可能先于服务端拒绝完成（rustls 已知竞态），
+/// 因此以「connect 失败或首个 RPC 失败」作为拒绝判据。
 #[tokio::test]
 async fn test_mtls_rejects_without_client_cert() {
-    let (server_cert, server_key) = generate_self_signed_cert("localhost");
-    let (ca_cert, _ca_key) = generate_self_signed_cert("test-ca");
+    // 服务端证书带 IP SAN（127.0.0.1），客户端以其自签名证书为 CA 通过服务端校验；
+    // 随后服务端要求客户端证书（mTLS），客户端未配置身份 → 被拒。
+    let (server_cert, server_key) = generate_ip_san_cert("127.0.0.1");
 
     let server_cert_path = write_temp_pem(&server_cert, "srv-cert");
     let server_key_path = write_temp_pem(&server_key, "srv-key");
-    let ca_path = write_temp_pem(&ca_cert, "ca");
+    let ca_path = write_temp_pem(&server_cert, "ca");
 
     let port = find_port();
 
@@ -228,20 +257,133 @@ async fn test_mtls_rejects_without_client_cert() {
         cert_path: PathBuf::from("/nonexistent/cli-cert.pem"),
         key_path: PathBuf::from("/nonexistent/cli-key.pem"),
         ca_path: Some(ca_path.clone()),
+        server_name: None,
     };
 
     let result =
         coord_agent::build_agent_tls_channel(&format!("https://127.0.0.1:{}", port), &tls_config)
             .await;
 
-    assert!(
-        result.is_err(),
-        "mTLS should reject connections without valid client cert"
-    );
+    if let Ok(channel) = result {
+        // 握手竞态下 connect 可能成功；服务端拒绝在首个 RPC 显现
+        let mut client =
+            coord_proto::maintenance::maintenance_client::MaintenanceClient::new(channel);
+        let resp = client
+            .status(coord_proto::maintenance::StatusRequest::default())
+            .await;
+        assert!(
+            resp.is_err(),
+            "mTLS RPC must fail without client cert, got: {:?}",
+            resp.map(|_| ())
+        );
+    }
+    // connect 直接失败同样视为被拒 ✓
 
     let _ = std::fs::remove_file(&server_cert_path);
     let _ = std::fs::remove_file(&server_key_path);
     let _ = std::fs::remove_file(&ca_path);
+}
+
+// ──── T4: server_name 覆盖 ────
+
+/// A-mTLS.8: 经 IP 连接、证书为 DNS SAN 时，server_name 显式覆盖 SNI 后可握手成功
+#[tokio::test]
+async fn test_tls_channel_with_server_name_override() {
+    let (cert, key) = generate_self_signed_cert("coord.internal");
+
+    let cert_path = write_temp_pem(&cert, "srv-cert");
+    let key_path = write_temp_pem(&key, "srv-key");
+
+    let port = find_port();
+    let server_tls =
+        coord_agent::build_agent_tls_server_config(&cert_path, &key_path, None).unwrap();
+
+    let srv_addr = format!("127.0.0.1:{}", port);
+    let _server = tokio::spawn(async move {
+        let addr = srv_addr.parse().unwrap();
+        tonic::transport::Server::builder()
+            .tls_config(server_tls)
+            .unwrap()
+            .add_service(
+                coord_proto::maintenance::maintenance_server::MaintenanceServer::new(
+                    MockMaintenance::default(),
+                ),
+            )
+            .serve(addr)
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let tls_config = AgentTlsConfig {
+        cert_path: cert_path.clone(),
+        key_path: key_path.clone(),
+        ca_path: Some(cert_path.clone()),
+        server_name: Some("coord.internal".to_string()),
+    };
+
+    let result =
+        coord_agent::build_agent_tls_channel(&format!("https://127.0.0.1:{}", port), &tls_config)
+            .await;
+    assert!(
+        result.is_ok(),
+        "server_name override should match cert SAN: {:?}",
+        result.err()
+    );
+
+    let _ = std::fs::remove_file(&cert_path);
+    let _ = std::fs::remove_file(&key_path);
+}
+
+/// A-mTLS.9: 未配置 server_name 时不再回退 localhost ——
+/// 证书为 DNS SAN 而连接 host 为 IP 时校验必须失败
+#[tokio::test]
+async fn test_tls_channel_rejects_hostname_mismatch_without_override() {
+    let (cert, key) = generate_self_signed_cert("coord.internal");
+
+    let cert_path = write_temp_pem(&cert, "srv-cert");
+    let key_path = write_temp_pem(&key, "srv-key");
+
+    let port = find_port();
+    let server_tls =
+        coord_agent::build_agent_tls_server_config(&cert_path, &key_path, None).unwrap();
+
+    let srv_addr = format!("127.0.0.1:{}", port);
+    let _server = tokio::spawn(async move {
+        let addr = srv_addr.parse().unwrap();
+        tonic::transport::Server::builder()
+            .tls_config(server_tls)
+            .unwrap()
+            .add_service(
+                coord_proto::maintenance::maintenance_server::MaintenanceServer::new(
+                    MockMaintenance::default(),
+                ),
+            )
+            .serve(addr)
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let tls_config = AgentTlsConfig {
+        cert_path: cert_path.clone(),
+        key_path: key_path.clone(),
+        ca_path: Some(cert_path.clone()),
+        server_name: None,
+    };
+
+    let result =
+        coord_agent::build_agent_tls_channel(&format!("https://127.0.0.1:{}", port), &tls_config)
+            .await;
+    assert!(
+        result.is_err(),
+        "DNS SAN 证书经 IP 连接且无 server_name 覆盖时必须校验失败"
+    );
+
+    let _ = std::fs::remove_file(&cert_path);
+    let _ = std::fs::remove_file(&key_path);
 }
 
 // ──── Helpers ────

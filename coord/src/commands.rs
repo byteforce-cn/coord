@@ -20,14 +20,62 @@ use coord_proto::maintenance::{
 };
 use tonic::transport::Channel;
 
+// ──── 集群连接参数（地址 + 可选 TLS/mTLS）────
+
+/// CLI 集群连接参数：目标节点地址 + 可选 TLS/mTLS。
+///
+/// 提供 `--tls-ca/--tls-cert/--tls-key/--tls-server-name` 时以 https+TLS 直连
+/// 生产（mTLS）集群；缺省 None = 明文 http（开发/内网 loopback）。
+/// 实现 `From<&str>` 便于既有调用点以裸地址构造明文连接。
+#[derive(Debug, Clone)]
+pub struct CliConn {
+    addr: String,
+    tls: Option<coord_client::config::TlsConfig>,
+}
+
+impl CliConn {
+    /// 构造连接参数（tls 由 main.rs 从全局 --tls-* 参数构建）
+    pub fn new(addr: &str, tls: Option<coord_client::config::TlsConfig>) -> Self {
+        Self {
+            addr: addr.to_string(),
+            tls,
+        }
+    }
+
+    /// 目标节点地址
+    pub fn addr(&self) -> &str {
+        &self.addr
+    }
+
+    /// 建立 tonic Channel（https + TLS 或 http 明文）
+    pub async fn connect(&self) -> Result<Channel, Box<dyn std::error::Error>> {
+        let scheme = if self.tls.is_some() { "https" } else { "http" };
+        let mut endpoint =
+            tonic::transport::Endpoint::from_shared(format!("{scheme}://{}", self.addr))?
+                .connect_timeout(std::time::Duration::from_secs(3));
+        if let Some(tls) = &self.tls {
+            endpoint = endpoint.tls_config(tls.to_tonic())?;
+        }
+        Ok(endpoint.connect().await?)
+    }
+}
+
+/// 从裸地址构造明文连接（测试/既有调用点兼容）
+impl<T: AsRef<str> + ?Sized> From<&T> for CliConn {
+    fn from(addr: &T) -> Self {
+        CliConn::new(addr.as_ref(), None)
+    }
+}
+
 // ──── Security 命令 ────
 
 /// 封存集群：通过 gRPC 调用 Maintenance::Seal
-pub async fn cmd_seal(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_maintenance_client(addr).await?;
+pub async fn cmd_seal(conn: impl Into<CliConn>) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_maintenance_client(&conn).await?;
     let request = tonic::Request::new(SealRequest {});
     client.seal(request).await?;
-    println!("Cluster sealed successfully via {addr}");
+    println!("Cluster sealed successfully via {}", conn.addr());
     Ok(())
 }
 
@@ -35,19 +83,22 @@ pub async fn cmd_seal(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// `shares` 中的每个元素作为 Shamir 分片（raw bytes）发送。
 pub async fn cmd_unseal(
-    addr: &str,
+    conn: impl Into<CliConn>,
     shares: Vec<Vec<u8>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if shares.is_empty() {
         return Err("at least one Shamir share is required for unseal".into());
     }
 
-    let mut client = build_maintenance_client(addr).await?;
+    let conn = conn.into();
+    let mut client = build_maintenance_client(&conn).await?;
     let request = tonic::Request::new(UnsealRequest { shares });
     let resp = client.unseal(request).await?.into_inner();
     println!(
-        "Cluster unsealed: {}/{} nodes unsealed via {addr}",
-        resp.nodes_unsealed, resp.total_nodes
+        "Cluster unsealed: {}/{} nodes unsealed via {}",
+        resp.nodes_unsealed,
+        resp.total_nodes,
+        conn.addr()
     );
     Ok(())
 }
@@ -106,13 +157,14 @@ pub async fn cmd_rotate_keys(_addr: &str) -> Result<(), Box<dyn std::error::Erro
 
 /// 添加节点到集群：先添加为 Learner，再晋升为 Voter
 pub async fn cmd_member_add(
-    addr: &str,
+    conn: impl Into<CliConn>,
     id: u64,
     node_addr: &str,
     raft_addr: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
     let raft = raft_addr.unwrap_or(node_addr);
-    let mut client = build_maintenance_client(addr).await?;
+    let mut client = build_maintenance_client(&conn).await?;
     let request = tonic::Request::new(MemberAddRequest {
         node_id: id,
         grpc_addr: node_addr.to_string(),
@@ -128,8 +180,12 @@ pub async fn cmd_member_add(
 }
 
 /// 从集群移除节点
-pub async fn cmd_member_remove(addr: &str, id: u64) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_maintenance_client(addr).await?;
+pub async fn cmd_member_remove(
+    conn: impl Into<CliConn>,
+    id: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_maintenance_client(&conn).await?;
     let request = tonic::Request::new(MemberRemoveRequest { node_id: id });
     let resp = client.member_remove(request).await?.into_inner();
     if resp.success {
@@ -141,8 +197,12 @@ pub async fn cmd_member_remove(addr: &str, id: u64) -> Result<(), Box<dyn std::e
 }
 
 /// 将 Learner 晋升为 Voter
-pub async fn cmd_member_promote(addr: &str, id: u64) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_maintenance_client(addr).await?;
+pub async fn cmd_member_promote(
+    conn: impl Into<CliConn>,
+    id: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_maintenance_client(&conn).await?;
     let request = tonic::Request::new(MemberPromoteRequest { node_id: id });
     let resp = client.member_promote(request).await?.into_inner();
     if resp.success {
@@ -154,8 +214,9 @@ pub async fn cmd_member_promote(addr: &str, id: u64) -> Result<(), Box<dyn std::
 }
 
 /// 列出所有节点及其状态
-pub async fn cmd_member_list(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_maintenance_client(addr).await?;
+pub async fn cmd_member_list(conn: impl Into<CliConn>) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_maintenance_client(&conn).await?;
     let request = tonic::Request::new(MemberListRequest {});
     let resp = client.member_list(request).await?.into_inner();
 
@@ -239,24 +300,27 @@ fn parse_permission_type(s: &str) -> Result<i32, Box<dyn std::error::Error>> {
 // ──── Auth 状态管理 ────
 
 /// 启用认证：调用 Auth::AuthEnable
-pub async fn cmd_auth_enable(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_auth_client(addr).await?;
+pub async fn cmd_auth_enable(conn: impl Into<CliConn>) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     client.auth_enable(AuthEnableRequest {}).await?;
     println!("Auth enabled");
     Ok(())
 }
 
 /// 禁用认证：调用 Auth::AuthDisable
-pub async fn cmd_auth_disable(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_auth_client(addr).await?;
+pub async fn cmd_auth_disable(conn: impl Into<CliConn>) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     client.auth_disable(AuthDisableRequest {}).await?;
     println!("Auth disabled");
     Ok(())
 }
 
 /// 查看认证状态：调用 Auth::AuthStatus
-pub async fn cmd_auth_status(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_auth_client(addr).await?;
+pub async fn cmd_auth_status(conn: impl Into<CliConn>) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     let resp = client.auth_status(AuthStatusRequest {}).await?.into_inner();
     if resp.enabled {
         println!("Auth is enabled");
@@ -270,7 +334,7 @@ pub async fn cmd_auth_status(addr: &str) -> Result<(), Box<dyn std::error::Error
 
 /// 创建用户：调用 Auth::UserAdd
 pub async fn cmd_auth_user_add(
-    addr: &str,
+    conn: impl Into<CliConn>,
     name: &str,
     password: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -281,7 +345,8 @@ pub async fn cmd_auth_user_add(
         )
         .into());
     }
-    let mut client = build_auth_client(addr).await?;
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     client
         .user_add(UserAddRequest {
             name: name.to_string(),
@@ -294,14 +359,15 @@ pub async fn cmd_auth_user_add(
 
 /// 删除用户：调用 Auth::UserDelete
 pub async fn cmd_auth_user_delete(
-    addr: &str,
+    conn: impl Into<CliConn>,
     name: &str,
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !force {
         return Err("use --force to confirm deletion".into());
     }
-    let mut client = build_auth_client(addr).await?;
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     client
         .user_delete(UserDeleteRequest {
             name: name.to_string(),
@@ -313,11 +379,12 @@ pub async fn cmd_auth_user_delete(
 
 /// 修改密码：调用 Auth::UserChangePassword
 pub async fn cmd_auth_user_passwd(
-    addr: &str,
+    conn: impl Into<CliConn>,
     name: &str,
     password: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_auth_client(addr).await?;
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     client
         .user_change_password(UserChangePasswordRequest {
             name: name.to_string(),
@@ -329,8 +396,11 @@ pub async fn cmd_auth_user_passwd(
 }
 
 /// 列出所有用户：调用 Auth::UserList
-pub async fn cmd_auth_user_list(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_auth_client(addr).await?;
+pub async fn cmd_auth_user_list(
+    conn: impl Into<CliConn>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     let resp = client.user_list(UserListRequest {}).await?.into_inner();
     println!("{:<24} {:<}", "NAME", "ROLES");
     println!("{}", "-".repeat(48));
@@ -341,8 +411,12 @@ pub async fn cmd_auth_user_list(addr: &str) -> Result<(), Box<dyn std::error::Er
 }
 
 /// 查看用户详情：调用 Auth::UserGet
-pub async fn cmd_auth_user_show(addr: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_auth_client(addr).await?;
+pub async fn cmd_auth_user_show(
+    conn: impl Into<CliConn>,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     let resp = client
         .user_get(UserGetRequest {
             name: name.to_string(),
@@ -362,8 +436,12 @@ pub async fn cmd_auth_user_show(addr: &str, name: &str) -> Result<(), Box<dyn st
 // ──── 角色管理 ────
 
 /// 创建角色：调用 Auth::RoleAdd
-pub async fn cmd_auth_role_add(addr: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_auth_client(addr).await?;
+pub async fn cmd_auth_role_add(
+    conn: impl Into<CliConn>,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     client
         .role_add(RoleAddRequest {
             name: name.to_string(),
@@ -375,14 +453,15 @@ pub async fn cmd_auth_role_add(addr: &str, name: &str) -> Result<(), Box<dyn std
 
 /// 删除角色：调用 Auth::RoleDelete
 pub async fn cmd_auth_role_delete(
-    addr: &str,
+    conn: impl Into<CliConn>,
     name: &str,
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !force {
         return Err("use --force to confirm deletion".into());
     }
-    let mut client = build_auth_client(addr).await?;
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     client
         .role_delete(RoleDeleteRequest {
             name: name.to_string(),
@@ -394,14 +473,15 @@ pub async fn cmd_auth_role_delete(
 
 /// 为角色授予权限：调用 Auth::RoleGrantPermission
 pub async fn cmd_auth_role_grant(
-    addr: &str,
+    conn: impl Into<CliConn>,
     name: &str,
     perm_type: &str,
     key: &str,
     range_end: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let perm = parse_permission_type(perm_type)?;
-    let mut client = build_auth_client(addr).await?;
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     client
         .role_grant_permission(RoleGrantPermissionRequest {
             name: name.to_string(),
@@ -423,12 +503,13 @@ pub async fn cmd_auth_role_grant(
 
 /// 撤销角色权限：调用 Auth::RoleRevokePermission
 pub async fn cmd_auth_role_revoke(
-    addr: &str,
+    conn: impl Into<CliConn>,
     name: &str,
     key: &str,
     range_end: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_auth_client(addr).await?;
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     client
         .role_revoke_permission(RoleRevokePermissionRequest {
             name: name.to_string(),
@@ -441,8 +522,11 @@ pub async fn cmd_auth_role_revoke(
 }
 
 /// 列出所有角色：调用 Auth::RoleList
-pub async fn cmd_auth_role_list(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_auth_client(addr).await?;
+pub async fn cmd_auth_role_list(
+    conn: impl Into<CliConn>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     let resp = client.role_list(RoleListRequest {}).await?.into_inner();
     println!("{:<24} {:<}", "NAME", "PERMISSIONS");
     println!("{}", "-".repeat(64));
@@ -476,7 +560,7 @@ pub async fn cmd_auth_role_list(addr: &str) -> Result<(), Box<dyn std::error::Er
 /// 为用户分配角色：调用 Auth::UserGrantRole
 /// 若 user 为 AppRole 名称（不以 approle- 开头），自动加前缀。
 pub async fn cmd_auth_grant(
-    addr: &str,
+    conn: impl Into<CliConn>,
     user: &str,
     role: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -488,7 +572,8 @@ pub async fn cmd_auth_grant(
         // CLI 阶段约定：grant 的用户参数若为 AppRole 名（不含前缀），内部自动补全
         user.to_string()
     };
-    let mut client = build_auth_client(addr).await?;
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     client
         .user_grant_role(UserGrantRoleRequest {
             user: internal_user,
@@ -501,11 +586,12 @@ pub async fn cmd_auth_grant(
 
 /// 撤销用户角色：调用 Auth::UserRevokeRole
 pub async fn cmd_auth_revoke(
-    addr: &str,
+    conn: impl Into<CliConn>,
     user: &str,
     role: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_auth_client(addr).await?;
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     client
         .user_revoke_role(UserRevokeRoleRequest {
             user: user.to_string(),
@@ -520,12 +606,13 @@ pub async fn cmd_auth_revoke(
 
 /// 登录获取 Token：调用 Auth::Authenticate
 pub async fn cmd_auth_login(
-    addr: &str,
+    conn: impl Into<CliConn>,
     name: &str,
     password: &str,
     token_only: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_auth_client(addr).await?;
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     let resp = client
         .authenticate(AuthenticateRequest {
             name: name.to_string(),
@@ -545,19 +632,20 @@ pub async fn cmd_auth_login(
 
 /// 创建 AppRole：内部创建 approle-<name> 用户，密码为生成的 Secret ID
 pub async fn cmd_auth_approle_create(
-    addr: &str,
+    conn: impl Into<CliConn>,
     name: &str,
     _role_id: Option<&str>,
     secret_id: Option<&str>,
     bind_role: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
     let internal_name = to_approle_internal(name);
     let secret = secret_id
         .map(|s| s.to_string())
         .unwrap_or_else(generate_secret_id);
 
     // 创建内部用户（密码为 Secret ID）
-    let mut client = build_auth_client(addr).await?;
+    let mut client = build_auth_client(&conn).await?;
     client
         .user_add(UserAddRequest {
             name: internal_name.clone(),
@@ -584,15 +672,16 @@ pub async fn cmd_auth_approle_create(
 
 /// 删除 AppRole：删除内部用户 approle-<name>
 pub async fn cmd_auth_approle_delete(
-    addr: &str,
+    conn: impl Into<CliConn>,
     name: &str,
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !force {
         return Err("use --force to confirm deletion".into());
     }
+    let conn = conn.into();
     let internal_name = to_approle_internal(name);
-    let mut client = build_auth_client(addr).await?;
+    let mut client = build_auth_client(&conn).await?;
     client
         .user_delete(UserDeleteRequest {
             name: internal_name,
@@ -604,25 +693,26 @@ pub async fn cmd_auth_approle_delete(
 
 /// 查看 AppRole 的 Role ID
 pub async fn cmd_auth_approle_role_id(
-    addr: &str,
+    conn: impl Into<CliConn>,
     name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Role ID 恒为 AppRole 名称
     println!("Role ID: {name}");
     // 验证内部用户存在
-    let _ = addr; // silence unused warning
+    let _ = conn; // silence unused warning
     Ok(())
 }
 
 /// 重置 AppRole 的 Secret ID（修改内部用户密码）
 pub async fn cmd_auth_approle_secret_id(
-    addr: &str,
+    conn: impl Into<CliConn>,
     name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
     let internal_name = to_approle_internal(name);
     let new_secret = generate_secret_id();
 
-    let mut client = build_auth_client(addr).await?;
+    let mut client = build_auth_client(&conn).await?;
     client
         .user_change_password(UserChangePasswordRequest {
             name: internal_name,
@@ -637,8 +727,11 @@ pub async fn cmd_auth_approle_secret_id(
 }
 
 /// 列出所有 AppRole：过滤 approle- 前缀用户
-pub async fn cmd_auth_approle_list(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_auth_client(addr).await?;
+pub async fn cmd_auth_approle_list(
+    conn: impl Into<CliConn>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
     let resp = client.user_list(UserListRequest {}).await?.into_inner();
 
     let approles: Vec<_> = resp
@@ -663,11 +756,12 @@ pub async fn cmd_auth_approle_list(addr: &str) -> Result<(), Box<dyn std::error:
 
 /// 查看 AppRole 详情
 pub async fn cmd_auth_approle_show(
-    addr: &str,
+    conn: impl Into<CliConn>,
     name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
     let internal_name = to_approle_internal(name);
-    let mut client = build_auth_client(addr).await?;
+    let mut client = build_auth_client(&conn).await?;
     let resp = client
         .user_get(UserGetRequest {
             name: internal_name,
@@ -692,8 +786,11 @@ use coord_proto::capability::capability_registry_client::CapabilityRegistryClien
 use coord_proto::capability::{CapabilityGetRequest, CapabilityListRequest};
 
 /// 列出所有已注册的能力定义
-pub async fn cmd_capability_list(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_capability_client(addr).await?;
+pub async fn cmd_capability_list(
+    conn: impl Into<CliConn>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_capability_client(&conn).await?;
     let resp = client.list(CapabilityListRequest {}).await?.into_inner();
 
     if resp.capabilities.is_empty() {
@@ -725,10 +822,11 @@ pub async fn cmd_capability_list(addr: &str) -> Result<(), Box<dyn std::error::E
 
 /// 查看指定能力的详细信息
 pub async fn cmd_capability_get(
-    addr: &str,
+    conn: impl Into<CliConn>,
     capability_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_capability_client(addr).await?;
+    let conn = conn.into();
+    let mut client = build_capability_client(&conn).await?;
     let resp = client
         .get(CapabilityGetRequest {
             capability_id: capability_id.to_string(),
@@ -902,17 +1000,21 @@ pub struct IdgenBackup {
 /// 默认雪花模式下 ID 状态不落 KV，重置后无需恢复；此能力面向号段（segment）模式。
 pub async fn cmd_reset(
     data_dir: &Path,
-    addr: &str,
+    conn: impl Into<CliConn>,
     keep_idgen: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !data_dir.exists() {
         return Err(format!("data directory {} not found", data_dir.display()).into());
     }
 
+    let conn = conn.into();
     let backup_file = data_dir.join(IDGEN_BACKUP_FILE);
     if keep_idgen {
-        tracing::info!("Exporting idgen state (/_idgen/ prefix) from {addr} ...");
-        let entries = export_idgen_prefix(addr).await?;
+        tracing::info!(
+            "Exporting idgen state (/_idgen/ prefix) from {} ...",
+            conn.addr()
+        );
+        let entries = export_idgen_prefix(&conn).await?;
         let json = serde_json::to_vec_pretty(&IdgenBackup {
             entries: entries.clone(),
         })?;
@@ -950,7 +1052,7 @@ pub async fn cmd_reset(
             "ID generator baseline preserved in {} (restore after server restart with: coord idgen restore --file {} --addr {})",
             backup_file.display(),
             backup_file.display(),
-            addr
+            conn.addr()
         );
     }
     Ok(())
@@ -958,9 +1060,9 @@ pub async fn cmd_reset(
 
 /// 从运行中的 Server 导出 `/_idgen/` 前缀的全部 KV
 pub async fn export_idgen_prefix(
-    addr: &str,
+    conn: &CliConn,
 ) -> Result<Vec<IdgenBackupEntry>, Box<dyn std::error::Error>> {
-    let mut client = build_kv_client(addr).await?;
+    let mut client = build_kv_client(conn).await?;
     let prefix = b"/_idgen/".to_vec();
     let range_end = prefix_end(&prefix);
     let resp = client
@@ -985,7 +1087,10 @@ pub async fn export_idgen_prefix(
 }
 
 /// 从备份文件恢复 `/_idgen/` 前缀到运行中的 Server
-pub async fn cmd_idgen_restore(file: &Path, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_idgen_restore(
+    file: &Path,
+    conn: impl Into<CliConn>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let json = std::fs::read(file)?;
     let backup: IdgenBackup = serde_json::from_slice(&json)?;
     if backup.entries.is_empty() {
@@ -995,7 +1100,8 @@ pub async fn cmd_idgen_restore(file: &Path, addr: &str) -> Result<(), Box<dyn st
         );
         return Ok(());
     }
-    let mut client = build_kv_client(addr).await?;
+    let conn = conn.into();
+    let mut client = build_kv_client(&conn).await?;
     let mut restored = 0usize;
     for entry in &backup.entries {
         let key = hex::decode(&entry.key)?;
@@ -1011,7 +1117,7 @@ pub async fn cmd_idgen_restore(file: &Path, addr: &str) -> Result<(), Box<dyn st
             .await?;
         restored += 1;
     }
-    println!("Restored {restored} idgen keys to {addr}");
+    println!("Restored {restored} idgen keys to {}", conn.addr());
     Ok(())
 }
 
@@ -1029,14 +1135,9 @@ fn prefix_end(prefix: &[u8]) -> Vec<u8> {
     Vec::new()
 }
 
-/// 构建到指定地址的 KvClient（tonic 直连）
-async fn build_kv_client(addr: &str) -> Result<KvClient<Channel>, Box<dyn std::error::Error>> {
-    let endpoint = format!("http://{addr}");
-    let channel = Channel::from_shared(endpoint)?
-        .connect_timeout(std::time::Duration::from_secs(3))
-        .connect()
-        .await?;
-    Ok(KvClient::new(channel))
+/// 构建到指定地址的 KvClient（tonic 直连；CliConn 携带可选 TLS）
+async fn build_kv_client(conn: &CliConn) -> Result<KvClient<Channel>, Box<dyn std::error::Error>> {
+    Ok(KvClient::new(conn.connect().await?))
 }
 
 // ──── Reset / IdGen 运维测试 ────
@@ -1102,10 +1203,11 @@ mod idgen_reset_tests {
 /// 从源节点按块接收 SnapshotData（首块携带 last_included_index/term），
 /// 拼接后先解析校验（版本 + bincode）再落盘（tmp → 原子 rename）。
 pub async fn snapshot_pull(
-    addr: &str,
+    conn: impl Into<CliConn>,
     output: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = build_maintenance_client(addr).await?;
+    let conn = conn.into();
+    let mut client = build_maintenance_client(&conn).await?;
     let mut stream = client
         .snapshot(tonic::Request::new(SnapshotRequest {}))
         .await?
@@ -1154,38 +1256,25 @@ pub async fn snapshot_pull(
     Ok(())
 }
 
-/// 构建到指定地址的 AuthClient（tonic 直连）
-async fn build_auth_client(addr: &str) -> Result<AuthClient<Channel>, Box<dyn std::error::Error>> {
-    let endpoint = format!("http://{addr}");
-    let channel = Channel::from_shared(endpoint)?
-        .connect_timeout(std::time::Duration::from_secs(3))
-        .connect()
-        .await?;
-    Ok(AuthClient::new(channel))
+/// 构建到指定地址的 AuthClient（tonic 直连；CliConn 携带可选 TLS）
+async fn build_auth_client(
+    conn: &CliConn,
+) -> Result<AuthClient<Channel>, Box<dyn std::error::Error>> {
+    Ok(AuthClient::new(conn.connect().await?))
 }
 
 /// 构建到指定地址的 MaintenanceClient（tonic 直连，绕过 Client leader 发现）
 async fn build_maintenance_client(
-    addr: &str,
+    conn: &CliConn,
 ) -> Result<MaintenanceClient<Channel>, Box<dyn std::error::Error>> {
-    let endpoint = format!("http://{addr}");
-    let channel = Channel::from_shared(endpoint)?
-        .connect_timeout(std::time::Duration::from_secs(3))
-        .connect()
-        .await?;
-    Ok(MaintenanceClient::new(channel))
+    Ok(MaintenanceClient::new(conn.connect().await?))
 }
 
 /// 构建到指定地址的 CapabilityRegistryClient（tonic 直连）
 async fn build_capability_client(
-    addr: &str,
+    conn: &CliConn,
 ) -> Result<CapabilityRegistryClient<Channel>, Box<dyn std::error::Error>> {
-    let endpoint = format!("http://{addr}");
-    let channel = Channel::from_shared(endpoint)?
-        .connect_timeout(std::time::Duration::from_secs(3))
-        .connect()
-        .await?;
-    Ok(CapabilityRegistryClient::new(channel))
+    Ok(CapabilityRegistryClient::new(conn.connect().await?))
 }
 
 // ──── 测试 ────
@@ -1255,12 +1344,15 @@ mod tests {
 
         match result {
             Ok(()) => {
-                // If server eventually implements seal, this path succeeds
+                // If server implements seal, this path succeeds
             }
             Err(e) => {
                 let msg = e.to_string();
+                // R-SEC-01 后：非加密节点返回 failed_precondition（此前 unimplemented）
                 assert!(
-                    msg.contains("seal") || msg.contains("unimplemented"),
+                    msg.contains("seal")
+                        || msg.contains("encryption")
+                        || msg.contains("unimplemented"),
                     "expected seal-related error, got: {msg}"
                 );
             }
@@ -1280,8 +1372,12 @@ mod tests {
             Ok(_resp) => {}
             Err(e) => {
                 let msg = e.to_string();
+                // R-SEC-01 后：非密封节点返回 failed_precondition（此前 unimplemented）
                 assert!(
-                    msg.contains("unseal") || msg.contains("unimplemented"),
+                    msg.contains("unseal")
+                        || msg.contains("sealed")
+                        || msg.contains("encryption")
+                        || msg.contains("unimplemented"),
                     "expected unseal-related error, got: {msg}"
                 );
             }

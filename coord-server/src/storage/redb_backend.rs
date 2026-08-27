@@ -8,8 +8,11 @@
 // - `compact()` 需要独占 `&mut Database`（redb 4.1 API），持写锁的维护窗口内执行，
 //   期间阻塞读写 —— 这是 redb 4.1 的固有限制（决策文档 §八风险表），
 //   调度由 `CompactionManager` 以小时级间隔执行。
+// - R-RFT-19：`compact_with_idle_window` 等待一段无写入静默期再拿独占写锁，
+//   将在线读写与压缩窗口错开，规避「长事务窗口期间新读写全部等待」。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use coord_core::error::Result;
@@ -76,6 +79,8 @@ pub struct RedbBackend {
     db_path: PathBuf,
     #[allow(dead_code)]
     config: StorageConfig,
+    /// R-RFT-19：最近一次写入时间（unix 毫秒）——compact 空闲窗口判定依据
+    last_write_ms: Arc<AtomicU64>,
 }
 
 impl StorageBackend for RedbBackend {
@@ -116,6 +121,7 @@ impl StorageBackend for RedbBackend {
             db: Arc::new(RwLock::new(db)),
             db_path,
             config: config.clone(),
+            last_write_ms: Arc::new(AtomicU64::new(now_ms())),
         })
     }
 
@@ -142,6 +148,9 @@ impl StorageBackend for RedbBackend {
             .tx
             .commit()
             .map_err(|e| coord_core::error::Error::Storage(format!("commit tx: {}", e)))?;
+
+        // R-RFT-19：写入活动时间戳（compact 空闲窗口判定依据）
+        self.last_write_ms.store(now_ms(), Ordering::Relaxed);
 
         Ok(result)
     }
@@ -237,6 +246,40 @@ impl ReadTx for RedbReadTx {
 
         Ok(results)
     }
+
+    fn iter_range(
+        &self,
+        table_name: &str,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let table_def = resolve_table(table_name)?;
+        let table = self
+            .tx
+            .open_table(table_def)
+            .map_err(|e| coord_core::error::Error::Storage(format!("open table: {}", e)))?;
+
+        let mut results = Vec::new();
+
+        let iter = table
+            .range(start..)
+            .map_err(|e| coord_core::error::Error::Storage(format!("range scan: {}", e)))?;
+
+        for item in iter {
+            let (k, v) =
+                item.map_err(|e| coord_core::error::Error::Storage(format!("iter item: {}", e)))?;
+            let key_bytes: &[u8] = k.value();
+            let val_bytes: &[u8] = v.value();
+
+            // 半开区间 [start, end)：end 非空且 key >= end 时终止
+            if !end.is_empty() && key_bytes >= end {
+                break;
+            }
+            results.push((key_bytes.to_vec(), val_bytes.to_vec()));
+        }
+
+        Ok(results)
+    }
 }
 
 // ──── RedbWriteTx 适配器 ────
@@ -293,6 +336,40 @@ impl ReadTx for RedbWriteTx {
 
         Ok(results)
     }
+
+    fn iter_range(
+        &self,
+        table_name: &str,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let table_def = resolve_table(table_name)?;
+        let table = self
+            .tx
+            .open_table(table_def)
+            .map_err(|e| coord_core::error::Error::Storage(format!("open table: {}", e)))?;
+
+        let mut results = Vec::new();
+
+        let iter = table
+            .range(start..)
+            .map_err(|e| coord_core::error::Error::Storage(format!("range scan: {}", e)))?;
+
+        for item in iter {
+            let (k, v) =
+                item.map_err(|e| coord_core::error::Error::Storage(format!("iter item: {}", e)))?;
+            let key_bytes: &[u8] = k.value();
+            let val_bytes: &[u8] = v.value();
+
+            // 半开区间 [start, end)：end 非空且 key >= end 时终止
+            if !end.is_empty() && key_bytes >= end {
+                break;
+            }
+            results.push((key_bytes.to_vec(), val_bytes.to_vec()));
+        }
+
+        Ok(results)
+    }
 }
 
 impl WriteTx for RedbWriteTx {
@@ -325,8 +402,90 @@ impl WriteTx for RedbWriteTx {
 
 // ──── 测试 ────
 
+// ──── R-RFT-19：compact 空闲窗口（独立 impl，供 CompactionManager 调用）───
+
+impl RedbBackend {
+    /// 等待 `idle` 时长的无写入静默期再执行 compact，将维护压缩与在线读写
+    /// 窗口错开，规避「compact 长事务窗口期间新读写全部阻塞」。
+    ///
+    /// - 最多等待 `max_wait`；超时仍执行（空间回收优先，不长期积压）；
+    /// - 同步实现（配合 `spawn_blocking` 调用，内部 `std::thread::sleep`）。
+    pub fn compact_with_idle_window(
+        &self,
+        idle: std::time::Duration,
+        max_wait: std::time::Duration,
+    ) -> Result<()> {
+        let deadline = std::time::Instant::now() + max_wait;
+        loop {
+            let last = self.last_write_ms.load(Ordering::Relaxed);
+            let elapsed_ms = now_ms().saturating_sub(last);
+            if elapsed_ms >= idle.as_millis() as u64 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    "redb compact: idle window not reached within {max_wait:?} (last write {elapsed_ms}ms ago); compacting anyway"
+                );
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        self.compact()
+    }
+}
+
+// ──── 工具 ────
+
+/// 当前 unix 毫秒（写入活动时间戳；墙钟精度足够用于空闲窗口判定）
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compact_with_idle_window_waits_for_quiet() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let backend = RedbBackend::open(tmpdir.path(), &StorageConfig::default()).unwrap();
+        // 刚写入后立即请求 compact：必须等待至少 idle 窗口才执行
+        backend.write(|tx| tx.insert("kv", b"k", b"v")).unwrap();
+        let start = std::time::Instant::now();
+        let idle = std::time::Duration::from_millis(120);
+        backend
+            .compact_with_idle_window(idle, std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            start.elapsed() >= idle,
+            "compact 应等待空闲窗口而非立即执行（实际 {}ms）",
+            start.elapsed().as_millis()
+        );
+    }
+
+    #[test]
+    fn test_compact_with_idle_window_immediate_when_quiet() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let backend = RedbBackend::open(tmpdir.path(), &StorageConfig::default()).unwrap();
+        backend.write(|tx| tx.insert("kv", b"k", b"v")).unwrap();
+        // 距上次写入已超 idle 窗口 → 直接执行。不断言耗时（CI 负载不可控），
+        // 以 compact 成功 + 数据完整为验证口径（等待路径见 wait 测试）。
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        backend
+            .compact_with_idle_window(
+                std::time::Duration::from_millis(10),
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(
+            backend.read(|tx| tx.get("kv", b"k")).unwrap(),
+            Some(b"v".to_vec()),
+            "compact 后数据保持完整"
+        );
+    }
     use super::*;
     use tempfile::TempDir;
 

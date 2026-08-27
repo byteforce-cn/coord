@@ -29,6 +29,12 @@ pub struct AgentTlsConfig {
     /// None = 仅 TLS（验证服务端），Some = mTLS（双向验证）
     #[serde(default)]
     pub ca_path: Option<PathBuf>,
+    /// TLS SNI / server name 覆盖（可选）。
+    ///
+    /// None（默认）= 由 endpoint URL 的 host 派生 ServerName，与证书 SAN 严格校验
+    /// （不再硬编码 "localhost"）；经 IP 连接而证书为 DNS SAN 时显式设置此字段。
+    #[serde(default)]
+    pub server_name: Option<String>,
 }
 
 impl AgentTlsConfig {
@@ -54,6 +60,28 @@ impl AgentTlsConfig {
             None => Ok(None),
         }
     }
+
+    /// 转换为 coord-client 的 TLS 配置（PEM 字节），供 AgentInner 实际连接路径使用。
+    ///
+    /// CA 为必需（校验服务端证书）；证书/私钥成对存在时附带客户端身份（mTLS）。
+    pub fn to_coord_client_tls(
+        &self,
+    ) -> Result<coord_client::config::TlsConfig, Box<dyn std::error::Error + Send + Sync>> {
+        let ca_pem = self
+            .load_ca()?
+            .ok_or("CA certificate is required for TLS connection")?;
+        let (client_cert_pem, client_key_pem) = if self.is_configured() {
+            (Some(self.load_cert()?), Some(self.load_key()?))
+        } else {
+            (None, None)
+        };
+        Ok(coord_client::config::TlsConfig {
+            ca_pem,
+            client_cert_pem,
+            client_key_pem,
+            server_name: self.server_name.clone(),
+        })
+    }
 }
 
 // ──── TLS Channel 构建 ────
@@ -77,9 +105,14 @@ pub async fn build_agent_tls_channel(
 
     let ca = Certificate::from_pem(&ca_pem);
 
-    let mut tls = ClientTlsConfig::new()
-        .ca_certificate(ca)
-        .domain_name("localhost"); // Allow localhost connections for dev
+    let mut tls = ClientTlsConfig::new().ca_certificate(ca);
+
+    // 不再硬编码 domain_name("localhost")：缺省由 endpoint URL 的 host 派生
+    // ServerName（tonic 行为，与证书 SAN 严格校验）；经 IP 连接 DNS SAN 证书时
+    // 用 tls_config.server_name 显式覆盖。
+    if let Some(name) = &tls_config.server_name {
+        tls = tls.domain_name(name.clone());
+    }
 
     // mTLS: 提供客户端证书
     if tls_config.is_configured() {
@@ -132,6 +165,7 @@ mod tests {
             cert_path: PathBuf::from("/nonexistent/cert.pem"),
             key_path: PathBuf::from("/nonexistent/key.pem"),
             ca_path: None,
+            server_name: None,
         };
         assert!(!config.is_configured());
     }

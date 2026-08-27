@@ -28,7 +28,11 @@ use coord_proto::watch::{
 use crate::config::Config;
 use crate::leader::LeaderDiscovery;
 use crate::pool::ConnectionPool;
-use crate::retry::{classify_error, RetryState};
+use crate::retry::{classify_error, RetryDecision, RetryState};
+
+/// R-SVC-08：服务端 follower 返回 leader 地址 hint 的 gRPC metadata key
+/// （与 coord-server::server::LEADER_HINT_METADATA_KEY 保持一致）
+pub const LEADER_HINT_METADATA_KEY: &str = "coord-leader-hint";
 
 // ──── Error conversion ────
 
@@ -50,6 +54,30 @@ fn from_status(status: tonic::Status) -> Error {
             key: msg,
         },
         _ => Error::Internal(msg),
+    }
+}
+
+/// R-SVC-08：按 gRPC 状态码分类错误，决定是否重试
+fn classify_tonic(status: &tonic::Status) -> RetryDecision {
+    let msg = status.message().to_lowercase();
+    if msg.contains("sealed") || msg.contains("unsealing") {
+        return RetryDecision::Abort;
+    }
+    match status.code() {
+        // follower 重定向（not leader）与连接级不可用：立即重试（换 leader）
+        tonic::Code::Unavailable => RetryDecision::RetryImmediately,
+        // 失去 quorum 的写超时：指数退避后重试
+        tonic::Code::DeadlineExceeded => {
+            RetryDecision::RetryAfter(std::time::Duration::from_millis(200))
+        }
+        // 不可恢复错误
+        tonic::Code::NotFound
+        | tonic::Code::PermissionDenied
+        | tonic::Code::Unauthenticated
+        | tonic::Code::InvalidArgument
+        | tonic::Code::AlreadyExists => RetryDecision::Abort,
+        // 未知错误：谨慎退避重试一次
+        _ => RetryDecision::RetryAfter(std::time::Duration::from_millis(100)),
     }
 }
 
@@ -213,16 +241,13 @@ impl Client {
                 None => break,
             };
 
-            let endpoint_url = format!("http://{endpoint}");
-            let channel = match Channel::from_shared(endpoint_url) {
-                Ok(ch) => ch,
-                Err(_) => continue,
-            };
-
-            let channel = match channel
-                .connect_timeout(self.inner.config.connect_timeout)
-                .connect()
-                .await
+            // TLS/mTLS 感知的通道构建（Config.tls 为 Some 时走 https）
+            let channel = match crate::tls::connect(
+                &endpoint,
+                Some(self.inner.config.connect_timeout),
+                self.inner.config.tls.as_ref(),
+            )
+            .await
             {
                 Ok(ch) => ch,
                 Err(_) => continue,
@@ -255,6 +280,77 @@ impl Client {
     #[allow(dead_code)]
     fn new_retry_state(&self) -> RetryState {
         RetryState::new(&self.inner.config)
+    }
+
+    /// R-SVC-08：写请求执行器——自动 leader 重定向 + 指数退避重试。
+    ///
+    /// 流程：
+    /// 1. 获取 leader 通道（失败则清缓存重新发现）；
+    /// 2. 执行单次请求；
+    /// 3. 失败时解析 `coord-leader-hint` metadata 更新 leader 缓存；
+    /// 4. 按错误分类决定重试（`RetryState` 指数退避，上限 `config.max_retries`）。
+    async fn execute_write_with_retry<T, Fut, F>(&self, mut attempt: F) -> Result<T>
+    where
+        F: FnMut(Channel) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+    {
+        let mut retry = RetryState::new(&self.inner.config);
+        loop {
+            // 获取 leader 通道；连接失败则清缓存并重新发现（leader 可能已切换）
+            let (endpoint, channel) = match self.get_leader_channel().await {
+                Ok(pair) => pair,
+                Err(_) => {
+                    self.inner.leader.clear_leader();
+                    match self.discover_leader().await {
+                        Ok(addr) => {
+                            let ch = self.inner.pool.get(&addr).await?;
+                            (addr, ch)
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            };
+
+            match attempt(channel.clone()).await {
+                Ok(v) => {
+                    self.return_channel(&endpoint, channel);
+                    return Ok(v);
+                }
+                Err(status) => {
+                    // 解析 leader hint：follower 返回 UNAVAILABLE + coord-leader-hint
+                    let hint = status
+                        .metadata()
+                        .get(LEADER_HINT_METADATA_KEY)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+                    match hint {
+                        Some(h) if !h.is_empty() => {
+                            self.inner.leader.set_leader(h);
+                        }
+                        _ => {
+                            // 无 hint：连接级不可用，清除缓存强制重新发现
+                            if status.code() == tonic::Code::Unavailable {
+                                self.inner.leader.clear_leader();
+                            }
+                        }
+                    }
+                    self.return_channel(&endpoint, channel);
+
+                    match classify_tonic(&status) {
+                        RetryDecision::Abort => return Err(from_status(status)),
+                        RetryDecision::RetryImmediately | RetryDecision::RetryAfter(_) => {
+                            match retry.next_attempt() {
+                                Some(wait) => {
+                                    tokio::time::sleep(wait).await;
+                                    continue;
+                                }
+                                None => return Err(from_status(status)),
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// 在 Leader hint 更新后重试
@@ -299,31 +395,27 @@ impl KvClient {
         lease_id: i64,
         request_id: &[u8],
     ) -> Result<u64> {
-        let (endpoint, channel) = self.client.get_leader_channel().await?;
-        let mut stub = KvStub::new(channel.clone());
-
-        let request = tonic::Request::new(PutRequest {
-            key: key.to_vec(),
-            value: value.to_vec(),
-            lease_id,
-            prev_kv: false,
-            request_id: request_id.to_vec(),
-        });
-
-        match stub.put(request).await {
-            Ok(resp) => {
-                self.client.return_channel(&endpoint, channel);
-                Ok(resp.into_inner().revision as u64)
-            }
-            Err(status) => {
-                if status.code() == tonic::Code::Unavailable
-                    || status.message().contains("not leader")
-                {
-                    self.client.handle_not_leader_hint(None);
+        // R-SVC-08：带 leader 重定向 + 指数退避重试
+        let client = self.client.clone();
+        let key = key.to_vec();
+        let value = value.to_vec();
+        let request_id = request_id.to_vec();
+        client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = KvStub::new(channel);
+                let request = tonic::Request::new(PutRequest {
+                    key: key.clone(),
+                    value: value.clone(),
+                    lease_id,
+                    prev_kv: false,
+                    request_id: request_id.clone(),
+                });
+                async move {
+                    let resp = stub.put(request).await?;
+                    Ok(resp.into_inner().revision as u64)
                 }
-                Err(from_status(status))
-            }
-        }
+            })
+            .await
     }
 
     /// 写入键值对（简单调用）。
@@ -473,24 +565,27 @@ impl KvClient {
         prev_kv: bool,
         request_id: &[u8],
     ) -> Result<(i64, i64)> {
-        let (endpoint, channel) = self.client.get_leader_channel().await?;
-        let mut stub = KvStub::new(channel.clone());
-
-        let request = tonic::Request::new(DeleteRequest {
-            key: key.to_vec(),
-            range_end: range_end.to_vec(),
-            prev_kv,
-            request_id: request_id.to_vec(),
-        });
-
-        match stub.delete(request).await {
-            Ok(resp) => {
-                self.client.return_channel(&endpoint, channel);
-                let inner = resp.into_inner();
-                Ok((inner.deleted, inner.revision))
-            }
-            Err(status) => Err(from_status(status)),
-        }
+        // R-SVC-08：带 leader 重定向 + 指数退避重试
+        let client = self.client.clone();
+        let key = key.to_vec();
+        let range_end = range_end.to_vec();
+        let request_id = request_id.to_vec();
+        client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = KvStub::new(channel);
+                let request = tonic::Request::new(DeleteRequest {
+                    key: key.clone(),
+                    range_end: range_end.clone(),
+                    prev_kv,
+                    request_id: request_id.clone(),
+                });
+                async move {
+                    let resp = stub.delete(request).await?;
+                    let inner = resp.into_inner();
+                    Ok((inner.deleted, inner.revision))
+                }
+            })
+            .await
     }
 
     /// 删除键值对（简单调用）。
@@ -793,10 +888,19 @@ async fn forward_watch_event(
         let marker = Err(Error::Backpressure(
             "watch event buffer full: some events were dropped".to_string(),
         ));
-        if tx.send(marker).await.is_ok() {
-            *overflow = false;
-        } else {
-            return false;
+        // P2-04 修复：marker 必须非阻塞补发——队列满时 `send().await` 会永久阻塞
+        // 生产者（消费者尚未排空）。保持溢出标记，等待后续调用在队列有空位时补发。
+        match tx.try_send(marker) {
+            Ok(()) => {
+                *overflow = false;
+                // 本次事件处于溢出窗口内被丢弃；marker 已补发（先于后续事件）
+                return true;
+            }
+            Err(TrySendError::Full(_)) => {
+                // 队列仍满：保持溢出标记，下次调用再试
+                return true;
+            }
+            Err(TrySendError::Closed(_)) => return false,
         }
     }
     match tx.try_send(Ok(event)) {
@@ -839,23 +943,20 @@ impl TxnClient {
         failure_ops: Vec<RequestOp>,
         request_id: Vec<u8>,
     ) -> Result<TxnResponse> {
-        let (endpoint, channel) = self.client.get_leader_channel().await?;
-        let mut stub = TxnStub::new(channel.clone());
-
-        let request = tonic::Request::new(TxnRequest {
-            compare: compares,
-            success: success_ops,
-            failure: failure_ops,
-            request_id,
-        });
-
-        match stub.txn(request).await {
-            Ok(resp) => {
-                self.client.return_channel(&endpoint, channel);
-                Ok(resp.into_inner())
-            }
-            Err(status) => Err(from_status(status)),
-        }
+        // R-SVC-08：带 leader 重定向 + 指数退避重试
+        let client = self.client.clone();
+        client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = TxnStub::new(channel);
+                let request = tonic::Request::new(TxnRequest {
+                    compare: compares.clone(),
+                    success: success_ops.clone(),
+                    failure: failure_ops.clone(),
+                    request_id: request_id.clone(),
+                });
+                async move { Ok(stub.txn(request).await?.into_inner()) }
+            })
+            .await
     }
 
     /// 执行原子事务（Compare-And-Swap）。
@@ -1152,28 +1253,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_forward_watch_event_overflow_signal_delivered() {
-        // 容量 1：连续 3 事件 → 首件入队，其余置溢出标记并丢弃；
-        // 消费时先收到事件，再收到必达的 Backpressure 合成信号。
+        // 容量 1：首件入队，后续事件置溢出标记并丢弃（不阻塞）；
+        // 消费者排空后，下一次转发补发必达的 Backpressure 合成信号。
         let (tx, mut rx) = mpsc::channel::<Result<WatchEvent>>(1);
         let mut overflow = false;
         assert!(forward_watch_event(&tx, dummy_event(), &mut overflow).await);
         assert!(forward_watch_event(&tx, dummy_event(), &mut overflow).await);
         assert!(overflow, "second event should overflow the cap-1 queue");
         assert!(forward_watch_event(&tx, dummy_event(), &mut overflow).await);
-        assert!(overflow);
+        assert!(overflow, "queue still full: marker not yet deliverable");
 
         let first = rx.recv().await.unwrap();
         assert!(first.is_ok(), "first event must be delivered normally");
-        let second = rx.recv().await.unwrap();
+
+        // 队列排空后，下次转发补发 Backpressure 信号并清除溢出标记（本次事件丢弃）
+        assert!(forward_watch_event(&tx, dummy_event(), &mut overflow).await);
+        assert!(!overflow, "overflow flag must clear after marker delivery");
+        let marker = rx.recv().await.unwrap();
         assert!(
-            matches!(second, Err(Error::Backpressure(_))),
-            "overflow signal must be delivered: {second:?}"
+            matches!(marker, Err(Error::Backpressure(_))),
+            "overflow signal must be delivered: {marker:?}"
         );
+
+        // 后续事件恢复正常投递（marker 之后）
+        assert!(forward_watch_event(&tx, dummy_event(), &mut overflow).await);
+        let normal = rx.recv().await.unwrap();
+        assert!(normal.is_ok());
     }
 
     #[tokio::test]
     async fn test_forward_watch_event_overflow_then_recover() {
-        // 溢出后队列有空间：先补发 Backpressure 信号，后续事件恢复正常投递。
+        // 溢出后队列有空间：先补发 Backpressure 信号（本次事件丢弃），
+        // 再排空 marker，后续事件恢复正常投递。
         let (tx, mut rx) = mpsc::channel::<Result<WatchEvent>>(1);
         let mut overflow = false;
         assert!(forward_watch_event(&tx, dummy_event(), &mut overflow).await);
@@ -1190,6 +1301,9 @@ mod tests {
             matches!(marker, Err(Error::Backpressure(_))),
             "marker must precede the next event"
         );
+
+        // marker 排空后，下一事件正常投递
+        assert!(forward_watch_event(&tx, dummy_event(), &mut overflow).await);
         let normal = rx.recv().await.unwrap();
         assert!(normal.is_ok());
     }

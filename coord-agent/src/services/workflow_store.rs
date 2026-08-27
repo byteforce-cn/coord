@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 
 use coord_core::workflow::model::{WorkflowDefinition, WorkflowInstance};
 use coord_core::workflow::ports::{MemoryWorkflowStore, StoreError, WorkflowStore};
@@ -149,11 +148,22 @@ impl KvWorkflowStore {
     // ─── 内部辅助：全量加载 ───
 
     async fn load_all_definitions(&self) -> Result<(), StoreError> {
+        Self::reconcile_definitions(&self.inner, &self.cache).await
+    }
+
+    async fn load_all_instances(&self) -> Result<(), StoreError> {
+        Self::reconcile_instances(&self.inner, &self.cache).await
+    }
+
+    /// 全量对账：重新扫描定义（覆盖缓存中的陈旧条目）。
+    async fn reconcile_definitions(
+        inner: &Arc<AgentInner>,
+        cache: &Arc<MemoryWorkflowStore>,
+    ) -> Result<(), StoreError> {
         // 全量扫描所有 namespace 的定义
         let prefix = b"/_workflow/v3/defs/".to_vec();
         let range_end = prefix_end(&prefix);
-        let pairs = self
-            .inner
+        let pairs = inner
             .client
             .kv()
             .range(&prefix, &range_end, 0, 0)
@@ -162,17 +172,20 @@ impl KvWorkflowStore {
 
         for (_k, v) in pairs {
             if let Ok(def) = serde_json::from_slice::<WorkflowDefinition>(&v) {
-                let _ = self.cache.save_definition(&def).await;
+                let _ = cache.save_definition(&def).await;
             }
         }
         Ok(())
     }
 
-    async fn load_all_instances(&self) -> Result<(), StoreError> {
+    /// 全量对账：重新扫描实例（覆盖缓存中的陈旧条目）。
+    async fn reconcile_instances(
+        inner: &Arc<AgentInner>,
+        cache: &Arc<MemoryWorkflowStore>,
+    ) -> Result<(), StoreError> {
         let prefix = Self::instance_prefix();
         let range_end = prefix_end(&prefix);
-        let pairs = self
-            .inner
+        let pairs = inner
             .client
             .kv()
             .range(&prefix, &range_end, 0, 0)
@@ -181,64 +194,89 @@ impl KvWorkflowStore {
 
         for (_k, v) in pairs {
             if let Ok(inst) = serde_json::from_slice::<WorkflowInstance>(&v) {
-                let _ = self.cache.save_instance(&inst).await;
+                let _ = cache.save_instance(&inst).await;
             }
         }
         Ok(())
     }
 
-    // ─── 内部辅助：Watch 后台任务 ───
+    // ─── 内部辅助：Watch 后台任务（R-AGT-14：断连重连 + 水位续传 + 全量对账）──
 
+    /// 启动 watch 订阅后台任务。
+    ///
+    /// 循环体：连接 → 消费事件（更新缓存并推进水位）→ 断连退避 →
+    /// 全量对账（弥补断连窗口）→ 用上次水位重连。
     async fn start_watch_background(&self) -> Result<(), StoreError> {
-        let prefix = b"/_workflow/v3/".to_vec();
+        let inner = Arc::clone(&self.inner);
         let cache = Arc::clone(&self.cache);
-
-        // 获取当前最新 revision 作为 Watch 起点
-        // 从 KV 读取任意 key 获得当前 revision
-        let start_rev = match self
-            .inner
-            .client
-            .kv()
-            .range(&prefix, &prefix_end(&prefix), 1, 0)
-            .await
-        {
-            Ok(pairs) if !pairs.is_empty() => {
-                // 需要获取 revision，使用 range_full 或直接使用 0（从最新开始）
-                // 简化：从最新开始
-                0i64
-            }
-            _ => 0i64,
-        };
-
-        let watch_rx = self
-            .inner
-            .client
-            .watch()
-            .watch(&prefix, start_rev)
-            .await
-            .map_err(|e| StoreError::IoError(e.to_string()))?;
-
-        // 后台任务：接收 Watch 事件，失效本地缓存
+        let prefix = b"/_workflow/v3/".to_vec();
         tokio::spawn(async move {
-            Self::watch_loop(watch_rx, cache).await;
-        });
+            let mut last_rev: i64 = 0;
+            let mut attempt: u32 = 0;
+            loop {
+                match Self::connect_and_consume(&inner, &prefix, last_rev, &cache).await {
+                    Ok(final_rev) => {
+                        last_rev = final_rev;
+                    }
+                    Err(e) => {
+                        tracing::warn!("KvWorkflowStore watch ended (last_rev={last_rev}): {e}");
+                    }
+                }
 
+                // 指数退避（1s → 2s → 4s → … → 上限 32s）
+                attempt += 1;
+                let backoff = std::time::Duration::from_secs(1u64 << attempt.min(5));
+                tracing::info!(
+                    "KvWorkflowStore watch reconnecting in {backoff:?} (attempt {attempt})"
+                );
+                tokio::time::sleep(backoff).await;
+
+                // 断连窗口对账：全量重载定义 + 实例（覆盖式，消除陈旧缓存）
+                if let Err(e) = Self::reconcile_definitions(&inner, &cache).await {
+                    tracing::error!("KvWorkflowStore reconcile definitions failed: {e}");
+                }
+                if let Err(e) = Self::reconcile_instances(&inner, &cache).await {
+                    tracing::error!("KvWorkflowStore reconcile instances failed: {e}");
+                }
+            }
+        });
         Ok(())
     }
 
-    /// Watch 事件处理循环
-    async fn watch_loop(
-        mut rx: mpsc::Receiver<Result<coord_proto::watch::WatchEvent, coord_core::error::Error>>,
-        cache: Arc<MemoryWorkflowStore>,
-    ) {
-        while let Some(event_result) = rx.recv().await {
+    /// 建立 watch 连接并消费事件直到断连，返回退出时的最新水位。
+    ///
+    /// - `start_rev` 为本地已知水位：断连重连时续传，避免窗口内事件丢失；
+    /// - 收到 `BufferOverflow` / `HistoryUnavailable` 时返回，
+    ///   由外层触发全量对账（缓存可能不完整）。
+    async fn connect_and_consume(
+        inner: &Arc<AgentInner>,
+        prefix: &[u8],
+        start_rev: i64,
+        cache: &Arc<MemoryWorkflowStore>,
+    ) -> Result<i64, StoreError> {
+        let mut watch_rx = inner
+            .client
+            .watch()
+            .watch(prefix, start_rev)
+            .await
+            .map_err(|e| StoreError::IoError(e.to_string()))?;
+
+        let mut last_rev = start_rev;
+        while let Some(event_result) = watch_rx.recv().await {
             match event_result {
                 Ok(event) => {
+                    use coord_proto::watch::watch_event::EventType;
+                    let needs_reconcile = matches!(
+                        event.r#type,
+                        t if t == EventType::BufferOverflow as i32
+                            || t == EventType::HistoryUnavailable as i32
+                    );
+                    if event.revision > last_rev {
+                        last_rev = event.revision;
+                    }
                     for kv in &event.kvs {
                         let key_str = String::from_utf8_lossy(&kv.key);
-                        // 根据 key 前缀决定当前策略：更新缓存
                         if key_str.starts_with("/_workflow/v3/defs/") {
-                            // 定义变更：用事件携带的新值更新缓存
                             if let Ok(def) = serde_json::from_slice::<WorkflowDefinition>(&kv.value)
                             {
                                 let _ = cache.save_definition(&def).await;
@@ -249,16 +287,21 @@ impl KvWorkflowStore {
                                 let _ = cache.save_instance(&inst).await;
                             }
                         }
-                        // idem keys 不需要缓存处理
+                    }
+                    if needs_reconcile {
+                        tracing::warn!(
+                            "KvWorkflowStore watch overflow/history-unavailable; full reconcile required"
+                        );
+                        return Ok(last_rev);
                     }
                 }
-                Err(_e) => {
-                    // Watch 连接断开，日志记录后退出（由上层重连机制处理）
-                    tracing::warn!("KvWorkflowStore watch stream disconnected");
-                    break;
+                Err(e) => {
+                    return Err(StoreError::IoError(e.to_string()));
                 }
             }
         }
+        // 流自然结束（服务端关闭）→ 上层重连
+        Ok(last_rev)
     }
 }
 

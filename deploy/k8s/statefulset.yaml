@@ -1,0 +1,193 @@
+# coord-server 3 节点 StatefulSet（可在 kind 上拉起）
+#
+# R-OBS-15 交付物。使用前：
+#   kubectl create secret generic coord-cluster \
+#     --from-literal=auth-root-key=<hex64> \
+#     --from-literal=raft-shared-secret=<>=16 chars> \
+#     --from-literal=root-password=<strong pw>
+#   # 传输层 mTLS 证书（gRPC + raft 同口径，三 Pod 共用；SAN 需覆盖 coord-0/1/2.coord）
+#   kubectl create secret generic coord-tls \
+#     --from-file=server.crt=server.crt --from-file=server.key=server.key --from-file=ca.crt=ca.crt
+#   kubectl apply -f deploy/k8s/statefulset.yaml
+#
+# 说明：
+#   - 每 Pod 挂载共享 Secret 生成配置（auth_root_key / raft_shared_secret 三副本一致）；
+#   - coord-0 bootstrap，coord-1/2 join（headless service 域名稳定）；
+#   - gRPC + raft 默认启用 mTLS（coord-tls Secret，缺 CA 拒绝启动 fail-closed）；
+#     建议同时启用 encryption_enabled；证书生产化请改用 cert-manager。
+apiVersion: v1
+kind: Service
+metadata:
+  name: coord
+  labels:
+    app: coord
+spec:
+  clusterIP: None
+  selector:
+    app: coord
+  ports:
+    - name: grpc
+      port: 50051
+    - name: raft
+      port: 50052
+    - name: http
+      port: 50061
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: coord
+  labels:
+    app: coord
+spec:
+  serviceName: coord
+  replicas: 3
+  selector:
+    matchLabels:
+      app: coord
+  # SIGTERM 领导权移交需要时间：coord 收到 SIGTERM 后先移交 leader 再退出，
+  # 宽限期内 K8s 不会强制 SIGKILL（对应 main.rs 的 terminate 分支）。
+  terminationGracePeriodSeconds: 60
+  template:
+    metadata:
+      labels:
+        app: coord
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      initContainers:
+        # 由共享 Secret 渲染 per-Pod 配置（bootstrap 仅 coord-0）
+        - name: render-config
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              ORDINAL="${HOSTNAME##*-}"
+              cat > /etc/coord/coord.toml <<EOF
+              [node]
+              id = $((ORDINAL + 1))
+              name = "${HOSTNAME}"
+
+              [network]
+              grpc_addr = "0.0.0.0:50051"
+              raft_addr = "0.0.0.0:50052"
+              http_addr = "0.0.0.0:50061"
+
+              [cluster]
+              cluster_name = "k8s-cluster"
+              bootstrap = $([ "$ORDINAL" = "0" ] && echo true || echo false)
+              $([ "$ORDINAL" != "0" ] && echo "join_addr = \"coord-0.coord:50051\"")
+
+              [storage]
+              data_dir = "/var/lib/coord"
+
+              [security]
+              auth_enabled = true
+              auth_root_key = "$AUTH_ROOT_KEY"
+              raft_shared_secret = "$RAFT_SHARED_SECRET"
+              tls_cert = "/etc/coord/tls/server.crt"
+              tls_key = "/etc/coord/tls/server.key"
+              tls_ca = "/etc/coord/tls/ca.crt"
+              reflection_enabled = false
+              EOF
+          env:
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: AUTH_ROOT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: coord-cluster
+                  key: auth-root-key
+            - name: RAFT_SHARED_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: coord-cluster
+                  key: raft-shared-secret
+          volumeMounts:
+            - name: coord-config
+              mountPath: /etc/coord
+      containers:
+        - name: coord
+          # 发布时替换为实际镜像 tag（避免 :latest 漂移）
+          image: byteforce/coord:0.1.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - coord
+            - server
+            - --config
+            - /etc/coord/coord.toml
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: COORD_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: coord-cluster
+                  key: root-password
+          ports:
+            - name: grpc
+              containerPort: 50051
+            - name: raft
+              containerPort: 50052
+            - name: http
+              containerPort: 50061
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+            - name: coord-data
+              mountPath: /var/lib/coord
+            - name: coord-config
+              mountPath: /etc/coord
+            - name: coord-tls
+              mountPath: /etc/coord/tls
+              readOnly: true
+      volumes:
+        - name: coord-config
+          emptyDir: {}
+        - name: coord-tls
+          secret:
+            secretName: coord-tls
+  volumeClaimTemplates:
+    - metadata:
+        name: coord-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+# 滚动升级/驱逐时保证 quorum：至少 2 个副本同时可用
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: coord
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: coord

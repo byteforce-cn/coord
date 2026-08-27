@@ -21,3 +21,4 @@ tracing-subscriber = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 tokio-stream = { workspace = true }
+rcgen = { version = "0.14", features = ["x509-parser"] }

@@ -16,7 +16,7 @@ use coord_proto::auth::*;
 use parking_lot::RwLock;
 use uuid::Uuid;
 
-use coord_core::auth::cct::{encode_cct, CctHeader, CctPayload};
+use coord_core::auth::cct::{encode_cct_ed25519, is_expired, CctHeader, CctPayload};
 
 use crate::auth::manager::{hash_password_argon2id, AuthManager};
 use crate::auth::revocation::RevocationStore;
@@ -197,6 +197,118 @@ impl AuthService {
         }
     }
 
+    /// R-SEC-04/R-SEC-17：管理操作调用者上下文解析（defense-in-depth + 审计身份）。
+    ///
+    /// 解析并校验 authorization CCT（签名/过期/吊销）：
+    /// - auth 未启用 / 未配置 CCT 签发（测试/单机路径）→ 返回 None（视为放行，actor="local"）；
+    /// - 解析/校验失败 → Err(permission_denied)。
+    fn admin_context(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+    ) -> Result<Option<coord_core::auth::cct::CctToken>, tonic::Status> {
+        if !self.auth_manager.is_enabled() {
+            return Ok(None);
+        }
+        let Some(keyring) = &self.signing_keyring else {
+            return Ok(None);
+        };
+        let cct_str = metadata
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                tonic::Status::permission_denied("management operation requires an admin CCT")
+            })?;
+        // 剥 "Bearer " 前缀（与 interceptor 语义一致）
+        let cct_str =
+            crate::auth::interceptor::extract_bearer_token(Some(cct_str)).unwrap_or(cct_str);
+
+        // R-SEC-02：双算法验证（HMAC 历史密钥 + Ed25519 公钥）
+        let cct = keyring
+            .decode_any(cct_str)
+            .map_err(|e| tonic::Status::permission_denied(format!("invalid CCT: {e}")))?;
+        if is_expired(&cct.payload, 300) {
+            return Err(tonic::Status::permission_denied("CCT expired"));
+        }
+        if let Some(rev) = &self.revocation_store {
+            if rev.is_revoked(&cct.payload.jti) {
+                return Err(tonic::Status::permission_denied("CCT has been revoked"));
+            }
+        }
+        Ok(Some(cct))
+    }
+
+    /// R-SEC-04：管理操作二次校验（defense-in-depth）。
+    ///
+    /// 即使绕过 interceptor 直连服务实现，管理操作也须校验调用者 CCT：
+    /// 调用者须为 `root` 角色或持有指定 admin 能力（无匹配 → 拒绝）。
+    /// 拒绝时记录审计事件（R-SEC-17）。
+    fn require_admin(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+        capability: &str,
+    ) -> Result<(), tonic::Status> {
+        let cct = match self.admin_context(metadata) {
+            Ok(Some(cct)) => cct,
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                self.record_audit(
+                    metadata,
+                    capability,
+                    "auth.mgmt",
+                    crate::audit::RESULT_DENIED,
+                    e.message(),
+                );
+                return Err(e);
+            }
+        };
+
+        let has_root = cct
+            .payload
+            .roles
+            .iter()
+            .any(|r| r == crate::auth::manager::ROOT_ROLE);
+        if has_root
+            || self
+                .auth_manager
+                .check_capability(&cct.payload.roles, capability, None)
+        {
+            Ok(())
+        } else {
+            let detail = format!("management operation requires admin capability '{capability}'");
+            self.record_audit(
+                metadata,
+                capability,
+                "auth.mgmt",
+                crate::audit::RESULT_DENIED,
+                &detail,
+            );
+            Err(tonic::Status::permission_denied(detail))
+        }
+    }
+
+    /// R-SEC-17：管理操作审计——actor 从 CCT 尽力解析（失败回落 "anonymous"）。
+    ///
+    /// resource 承载操作对象（用户名/角色名），detail 承载补充信息。
+    fn record_audit(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+        action: &str,
+        resource: &str,
+        result: &str,
+        detail: &str,
+    ) {
+        let Some(audit) = &self.audit else {
+            return;
+        };
+        let actor = self
+            .admin_context(metadata)
+            .ok()
+            .flatten()
+            .map(|cct| cct.payload.sub)
+            .unwrap_or_else(|| "anonymous".to_string());
+        audit.record_event(&actor, action, resource, result, detail);
+    }
+
     /// 吊销 token（P0-C.5）：CCT（`eyJ` 前缀）按 jti 经 raft 登记吊销；
     /// 遗留 token 走 token_manager。
     pub async fn revoke_token(&self, token: &str) -> Result<(), String> {
@@ -205,7 +317,8 @@ impl AuthService {
                 .signing_keyring
                 .as_ref()
                 .ok_or_else(|| "CCT signing not configured on server".to_string())?;
-            let cct = coord_core::auth::cct::decode_cct(token, &keyring.active_key().key_bytes)
+            let cct = keyring
+                .decode_any(token)
                 .map_err(|e| format!("decode CCT: {e}"))?;
             let op = AuthOp::RevokeJti {
                 jti: cct.payload.jti.clone(),
@@ -276,18 +389,21 @@ impl AuthService {
         let Some(ref keyring) = self.signing_keyring else {
             return (String::new(), 0);
         };
-        let active_key = keyring.active_key();
+        // R-SEC-02：签发改用 Ed25519（server 持私钥；agent 仅持公钥验证）
+        let signing_key = match keyring.ed25519_signing_key() {
+            Ok(sk) => sk,
+            Err(e) => {
+                tracing::error!("Ed25519 CCT key derivation failed: {e}");
+                return (String::new(), 0);
+            }
+        };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
         let exp = now + 3600; // 1 hour TTL
 
-        let header = CctHeader {
-            alg: "HMAC-SHA256".to_string(),
-            typ: "CCT".to_string(),
-            kid: active_key.key_id.clone(),
-        };
+        let header = CctHeader::ed25519();
 
         let payload = CctPayload {
             jti: format!("tok_{}", Uuid::new_v4()),
@@ -300,7 +416,7 @@ impl AuthService {
             scope_overrides: std::collections::HashMap::new(),
         };
 
-        match encode_cct(&header, &payload, &active_key.key_bytes) {
+        match encode_cct_ed25519(&header, &payload, &signing_key) {
             Ok(cct) => (cct, exp),
             Err(e) => {
                 tracing::error!("CCT encoding failed: {e}");
@@ -316,18 +432,38 @@ impl AuthService {
 impl AuthTrait for AuthService {
     async fn auth_enable(
         &self,
-        _request: tonic::Request<AuthEnableRequest>,
+        request: tonic::Request<AuthEnableRequest>,
     ) -> Result<tonic::Response<AuthEnableResponse>, tonic::Status> {
+        // R-SEC-04：管理操作二次校验（auth 未启用时放行，保证首次开启可执行）
+        self.require_admin(request.metadata(), "admin:auth:enable")?;
+        let caller_md = request.metadata().clone();
         self.auth_manager.enable();
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.enable",
+            "auth",
+            crate::audit::RESULT_SUCCESS,
+            "",
+        );
         tracing::info!("Auth enabled");
         Ok(tonic::Response::new(AuthEnableResponse {}))
     }
 
     async fn auth_disable(
         &self,
-        _request: tonic::Request<AuthDisableRequest>,
+        request: tonic::Request<AuthDisableRequest>,
     ) -> Result<tonic::Response<AuthDisableResponse>, tonic::Status> {
+        // R-SEC-04：管理操作二次校验
+        self.require_admin(request.metadata(), "admin:auth:disable")?;
+        let caller_md = request.metadata().clone();
         self.auth_manager.disable();
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.disable",
+            "auth",
+            crate::audit::RESULT_SUCCESS,
+            "",
+        );
         tracing::info!("Auth disabled");
         Ok(tonic::Response::new(AuthDisableResponse {}))
     }
@@ -347,6 +483,9 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<UserAddRequest>,
     ) -> Result<tonic::Response<UserAddResponse>, tonic::Status> {
+        // R-SEC-04：管理操作二次校验
+        self.require_admin(request.metadata(), "admin:auth:user_add")?;
+        let caller_md = request.metadata().clone();
         let req = request.into_inner();
         // 判重（视图由 apply 同步保持）
         if self.auth_manager.user_list().iter().any(|u| u == &req.name) {
@@ -365,6 +504,13 @@ impl AuthTrait for AuthService {
             roles: vec![],
         })
         .await?;
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.user_add",
+            &req.name,
+            crate::audit::RESULT_SUCCESS,
+            "",
+        );
         tracing::info!("User added: {}", req.name);
         Ok(tonic::Response::new(UserAddResponse {}))
     }
@@ -373,6 +519,9 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<UserDeleteRequest>,
     ) -> Result<tonic::Response<UserDeleteResponse>, tonic::Status> {
+        // R-SEC-04：管理操作二次校验
+        self.require_admin(request.metadata(), "admin:auth:user_delete")?;
+        let caller_md = request.metadata().clone();
         let req = request.into_inner();
         if !self.auth_manager.user_list().iter().any(|u| u == &req.name) {
             return Err(tonic::Status::not_found(format!(
@@ -384,6 +533,13 @@ impl AuthTrait for AuthService {
             name: req.name.clone(),
         })
         .await?;
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.user_delete",
+            &req.name,
+            crate::audit::RESULT_SUCCESS,
+            "",
+        );
         tracing::info!("User deleted: {}", req.name);
         Ok(tonic::Response::new(UserDeleteResponse {}))
     }
@@ -392,6 +548,9 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<UserChangePasswordRequest>,
     ) -> Result<tonic::Response<UserChangePasswordResponse>, tonic::Status> {
+        // R-SEC-04：管理操作二次校验
+        self.require_admin(request.metadata(), "admin:auth:user_add")?;
+        let caller_md = request.metadata().clone();
         let req = request.into_inner();
         if !self.auth_manager.user_list().iter().any(|u| u == &req.name) {
             return Err(tonic::Status::not_found(format!(
@@ -408,6 +567,13 @@ impl AuthTrait for AuthService {
             hash,
         })
         .await?;
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.user_change_password",
+            &req.name,
+            crate::audit::RESULT_SUCCESS,
+            "",
+        );
         tracing::info!("Password changed for user: {}", req.name);
         Ok(tonic::Response::new(UserChangePasswordResponse {}))
     }
@@ -445,6 +611,9 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<RoleAddRequest>,
     ) -> Result<tonic::Response<RoleAddResponse>, tonic::Status> {
+        // R-SEC-04：管理操作二次校验
+        self.require_admin(request.metadata(), "admin:auth:role_add")?;
+        let caller_md = request.metadata().clone();
         let req = request.into_inner();
         if self
             .auth_manager
@@ -461,6 +630,13 @@ impl AuthTrait for AuthService {
             role: req.name.clone(),
         })
         .await?;
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.role_add",
+            &req.name,
+            crate::audit::RESULT_SUCCESS,
+            "",
+        );
         tracing::info!("Role added: {}", req.name);
         Ok(tonic::Response::new(RoleAddResponse {}))
     }
@@ -469,6 +645,9 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<RoleDeleteRequest>,
     ) -> Result<tonic::Response<RoleDeleteResponse>, tonic::Status> {
+        // R-SEC-04：管理操作二次校验
+        self.require_admin(request.metadata(), "admin:auth:role_delete")?;
+        let caller_md = request.metadata().clone();
         let req = request.into_inner();
         if !self
             .auth_manager
@@ -485,6 +664,13 @@ impl AuthTrait for AuthService {
             role: req.name.clone(),
         })
         .await?;
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.role_delete",
+            &req.name,
+            crate::audit::RESULT_SUCCESS,
+            "",
+        );
         tracing::info!("Role deleted: {}", req.name);
         Ok(tonic::Response::new(RoleDeleteResponse {}))
     }
@@ -493,6 +679,9 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<RoleGrantPermissionRequest>,
     ) -> Result<tonic::Response<RoleGrantPermissionResponse>, tonic::Status> {
+        // R-SEC-04：管理操作二次校验
+        self.require_admin(request.metadata(), "admin:auth:role_grant")?;
+        let caller_md = request.metadata().clone();
         let req = request.into_inner();
         let perm = req
             .permission
@@ -512,6 +701,13 @@ impl AuthTrait for AuthService {
             range_end: perm.range_end,
         })
         .await?;
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.role_grant_permission",
+            &req.name,
+            crate::audit::RESULT_SUCCESS,
+            "",
+        );
         Ok(tonic::Response::new(RoleGrantPermissionResponse {}))
     }
 
@@ -519,6 +715,9 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<RoleRevokePermissionRequest>,
     ) -> Result<tonic::Response<RoleRevokePermissionResponse>, tonic::Status> {
+        // R-SEC-04：管理操作二次校验
+        self.require_admin(request.metadata(), "admin:auth:role_revoke")?;
+        let caller_md = request.metadata().clone();
         let req = request.into_inner();
         self.apply_auth_op(AuthOp::RoleRevokePermission {
             role: req.name.clone(),
@@ -526,6 +725,13 @@ impl AuthTrait for AuthService {
             range_end: req.range_end,
         })
         .await?;
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.role_revoke_permission",
+            &req.name,
+            crate::audit::RESULT_SUCCESS,
+            "",
+        );
         Ok(tonic::Response::new(RoleRevokePermissionResponse {}))
     }
 
@@ -582,6 +788,9 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<UserGrantRoleRequest>,
     ) -> Result<tonic::Response<UserGrantRoleResponse>, tonic::Status> {
+        // R-SEC-04：管理操作二次校验
+        self.require_admin(request.metadata(), "admin:auth:user_grant_role")?;
+        let caller_md = request.metadata().clone();
         let req = request.into_inner();
         if !self.auth_manager.user_list().iter().any(|u| u == &req.user) {
             return Err(tonic::Status::not_found(format!(
@@ -605,6 +814,13 @@ impl AuthTrait for AuthService {
             role: req.role.clone(),
         })
         .await?;
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.user_grant_role",
+            &format!("{}:{}", req.user, req.role),
+            crate::audit::RESULT_SUCCESS,
+            "",
+        );
         tracing::info!("Role '{}' granted to user '{}'", req.role, req.user);
         Ok(tonic::Response::new(UserGrantRoleResponse {}))
     }
@@ -613,6 +829,9 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<UserRevokeRoleRequest>,
     ) -> Result<tonic::Response<UserRevokeRoleResponse>, tonic::Status> {
+        // R-SEC-04：管理操作二次校验
+        self.require_admin(request.metadata(), "admin:auth:user_revoke_role")?;
+        let caller_md = request.metadata().clone();
         let req = request.into_inner();
         if !self.auth_manager.user_list().iter().any(|u| u == &req.user) {
             return Err(tonic::Status::not_found(format!(
@@ -625,6 +844,13 @@ impl AuthTrait for AuthService {
             role: req.role.clone(),
         })
         .await?;
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.user_revoke_role",
+            &format!("{}:{}", req.user, req.role),
+            crate::audit::RESULT_SUCCESS,
+            "",
+        );
         tracing::info!("Role '{}' revoked from user '{}'", req.role, req.user);
         Ok(tonic::Response::new(UserRevokeRoleResponse {}))
     }
@@ -635,9 +861,25 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<AuthenticateRequest>,
     ) -> Result<tonic::Response<AuthenticateResponse>, tonic::Status> {
-        // 登录限流（P0-C.6）：per-user + per-IP 令牌桶，失败消费、成功清除
+        // R-SEC-05：登录限流判定前置到 argon2 之前——防爆破时消耗 CPU 进行哈希。
+        // （失败消费、成功清除用户计数；IP 桶随尝试消费，防单 IP 分布式爆破。）
         let peer_ip = request.remote_addr();
         let req = request.into_inner();
+
+        if !self.login_limiter.allow_attempt(&req.name, peer_ip) {
+            if let Some(ref audit) = self.audit {
+                audit.record_event(
+                    &req.name,
+                    "auth.authenticate",
+                    &req.name,
+                    crate::audit::RESULT_DENIED,
+                    "rate limited before password verification",
+                );
+            }
+            return Err(tonic::Status::resource_exhausted(
+                "too many failed login attempts; retry later",
+            ));
+        }
 
         // Verify password
         if let Err(e) = self.auth_manager.authenticate(&req.name, &req.password) {
@@ -649,11 +891,6 @@ impl AuthTrait for AuthService {
                     crate::audit::RESULT_DENIED,
                     &e.to_string(),
                 );
-            }
-            if !self.login_limiter.allow_attempt(&req.name, peer_ip) {
-                return Err(tonic::Status::resource_exhausted(
-                    "too many failed login attempts; retry later",
-                ));
             }
             return Err(tonic::Status::unauthenticated(e.to_string()));
         }
@@ -875,18 +1112,17 @@ impl AuthTrait for AuthService {
 
         // Issue a short-lived CCT for the agent
         let (cct, expires_at) = if let Some(ref keyring) = self.signing_keyring {
-            let active_key = keyring.active_key();
+            // R-SEC-02：bootstrap CCT 同样 Ed25519 签发（agent 仅存公钥验证）
+            let signing_key = keyring.ed25519_signing_key().map_err(|e| {
+                tonic::Status::internal(format!("Ed25519 CCT key derivation failed: {e}"))
+            })?;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
             let exp = now + 600; // 10 minutes TTL for bootstrap CCT
 
-            let header = CctHeader {
-                alg: "HMAC-SHA256".to_string(),
-                typ: "CCT".to_string(),
-                kid: active_key.key_id.clone(),
-            };
+            let header = CctHeader::ed25519();
 
             let payload = CctPayload {
                 jti: format!("bootstrap_{}", Uuid::new_v4()),
@@ -899,7 +1135,7 @@ impl AuthTrait for AuthService {
                 scope_overrides: std::collections::HashMap::new(),
             };
 
-            match encode_cct(&header, &payload, &active_key.key_bytes) {
+            match encode_cct_ed25519(&header, &payload, &signing_key) {
                 Ok(cct) => (cct, exp),
                 Err(e) => {
                     tracing::error!("Bootstrap CCT encoding failed: {e}");
@@ -1020,7 +1256,7 @@ mod cct_tests {
     fn test_authenticate_returns_cct() {
         let svc = build_service_with_cct();
         let signing_keyring = svc.signing_keyring.as_ref().unwrap();
-        let active_key = signing_keyring.active_key();
+        let _active_key = signing_keyring.active_key();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -1071,7 +1307,6 @@ mod cct_tests {
     fn test_issued_cct_is_verifiable() {
         let svc = build_service_with_cct();
         let signing_keyring = svc.signing_keyring.as_ref().unwrap();
-        let active_key = signing_keyring.active_key();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -1090,11 +1325,12 @@ mod cct_tests {
             let inner = resp.into_inner();
             let cct = inner.cct;
 
-            // Decode and verify the CCT
-            let decoded = coord_core::auth::cct::decode_cct(&cct, &active_key.key_bytes)
+            // Decode and verify the CCT（R-SEC-02：Ed25519 签发，双算法验证）
+            let decoded = signing_keyring
+                .decode_any(&cct)
                 .expect("CCT should be decodable and verifiable");
 
-            assert_eq!(decoded.header.kid, active_key.key_id);
+            assert_eq!(decoded.header.alg, "Ed25519");
             assert_eq!(decoded.payload.sub, "verifyuser");
             assert!(decoded.payload.roles.contains(&"writer".to_string()));
             assert_eq!(decoded.payload.iss, "coord-cluster");
@@ -1303,7 +1539,7 @@ mod cct_tests {
     fn test_bootstrap_cct_is_verifiable() {
         let svc = build_service_with_cct();
         let signing_keyring = svc.signing_keyring.as_ref().unwrap();
-        let active_key = signing_keyring.active_key();
+        let _active_key = signing_keyring.active_key();
         svc.add_bootstrap_token("verify-bootstrap");
 
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1314,10 +1550,11 @@ mod cct_tests {
             let resp = svc.bootstrap(req).await.unwrap();
             let inner = resp.into_inner();
 
-            // Verify the bootstrap CCT
-            let decoded = coord_core::auth::cct::decode_cct(&inner.cct, &active_key.key_bytes)
+            // Verify the bootstrap CCT（R-SEC-02：Ed25519 签发）
+            let decoded = signing_keyring
+                .decode_any(&inner.cct)
                 .expect("bootstrap CCT should be verifiable");
-            assert_eq!(decoded.header.kid, active_key.key_id);
+            assert_eq!(decoded.header.alg, "Ed25519");
             assert_eq!(decoded.payload.sub, "coord-agent");
             assert!(decoded
                 .payload
@@ -1334,6 +1571,7 @@ mod cct_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coord_core::auth::cct::encode_cct;
 
     #[test]
     fn test_auth_service_new() {
@@ -1348,5 +1586,143 @@ mod tests {
         // 0-second TTL for testing immediate expiry
         let token_mgr = Arc::new(crate::auth::token::TokenManager::new(0, 0));
         let _service = AuthService::new(auth_mgr, token_mgr);
+    }
+
+    // ──── R-SEC-04: 管理操作二次校验 ────
+
+    fn build_admin_service() -> (AuthService, Arc<TokenSigningKeyring>) {
+        let auth_manager = Arc::new(crate::auth::manager::AuthManager::new());
+        auth_manager.enable();
+        let token_manager = Arc::new(TokenManager::with_defaults());
+        let signing_keyring =
+            Arc::new(TokenSigningKeyring::new(vec![0xCDu8; 32]).expect("keyring creation"));
+        let svc =
+            AuthService::with_cct_signing(auth_manager, token_manager, signing_keyring.clone());
+        (svc, signing_keyring)
+    }
+
+    fn cct_with_roles(keyring: &TokenSigningKeyring, roles: &[&str]) -> String {
+        let header = CctHeader::default();
+        let payload = CctPayload {
+            jti: uuid::Uuid::new_v4().to_string(),
+            iss: "test".to_string(),
+            sub: "test".to_string(),
+            aud: vec![],
+            iat: 1719990000,
+            exp: 2000000000,
+            roles: roles.iter().map(|s| s.to_string()).collect(),
+            scope_overrides: HashMap::new(),
+        };
+        let key = keyring.active_key();
+        encode_cct(&header, &payload, &key.key_bytes).unwrap()
+    }
+
+    #[test]
+    fn test_require_admin_skips_when_auth_disabled() {
+        let auth_manager = Arc::new(crate::auth::manager::AuthManager::new()); // 默认禁用
+        let token_manager = Arc::new(TokenManager::with_defaults());
+        let svc = AuthService::new(auth_manager, token_manager);
+        assert!(svc
+            .require_admin(&Default::default(), "admin:auth:user_add")
+            .is_ok());
+    }
+
+    #[test]
+    fn test_require_admin_rejects_missing_cct() {
+        let (svc, _keyring) = build_admin_service();
+        let md = tonic::metadata::MetadataMap::new();
+        assert!(svc.require_admin(&md, "admin:auth:user_add").is_err());
+    }
+
+    #[test]
+    fn test_require_admin_accepts_root_cct() {
+        let (svc, keyring) = build_admin_service();
+        let cct = cct_with_roles(&keyring, &["root"]);
+        let mut md = tonic::metadata::MetadataMap::new();
+        md.insert("authorization", cct.parse().unwrap());
+        assert!(svc.require_admin(&md, "admin:auth:user_add").is_ok());
+        assert!(svc.require_admin(&md, "admin:auth:disable").is_ok());
+    }
+
+    #[test]
+    fn test_require_admin_rejects_non_admin_cct() {
+        let (svc, keyring) = build_admin_service();
+        let cct = cct_with_roles(&keyring, &["reader"]);
+        let mut md = tonic::metadata::MetadataMap::new();
+        md.insert("authorization", cct.parse().unwrap());
+        assert!(svc.require_admin(&md, "admin:auth:user_add").is_err());
+        assert!(svc.require_admin(&md, "admin:auth:disable").is_err());
+    }
+
+    // ──── R-SEC-17: 管理操作审计 ────
+
+    struct MemAuditStore {
+        events: parking_lot::Mutex<Vec<crate::audit::AuditEvent>>,
+    }
+
+    impl crate::audit::AuditStore for MemAuditStore {
+        fn append(&self, event: &crate::audit::AuditEvent) -> coord_core::error::Result<()> {
+            self.events.lock().push(event.clone());
+            Ok(())
+        }
+
+        fn recent(&self, limit: usize) -> Vec<crate::audit::AuditEvent> {
+            self.events
+                .lock()
+                .iter()
+                .rev()
+                .take(limit)
+                .cloned()
+                .collect()
+        }
+    }
+
+    #[test]
+    fn test_management_op_audits_success_and_denial() {
+        let (mut svc, keyring) = build_admin_service();
+        let store = Arc::new(MemAuditStore {
+            events: parking_lot::Mutex::new(Vec::new()),
+        });
+        let logger = Arc::new(crate::audit::AuditLogger::new(store.clone()));
+        svc = svc.with_audit_logger(logger);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // root CCT：成功路径 → success 事件（actor 从 CCT 解析）
+            let root_cct = cct_with_roles(&keyring, &["root"]);
+            let mut md = tonic::metadata::MetadataMap::new();
+            md.insert(
+                "authorization",
+                format!("Bearer {root_cct}").parse().unwrap(),
+            );
+            let mut req = tonic::Request::new(AuthEnableRequest {});
+            *req.metadata_mut() = md;
+            assert!(svc.auth_enable(req).await.is_ok());
+
+            // 非 root CCT：拒绝路径 → denied 事件
+            let reader_cct = cct_with_roles(&keyring, &["reader"]);
+            let mut md = tonic::metadata::MetadataMap::new();
+            md.insert(
+                "authorization",
+                format!("Bearer {reader_cct}").parse().unwrap(),
+            );
+            let mut req = tonic::Request::new(AuthDisableRequest {});
+            *req.metadata_mut() = md;
+            assert!(svc.auth_disable(req).await.is_err());
+        });
+
+        let events = store.events.lock().clone();
+        assert!(
+            events.iter().any(|e| e.action == "auth.mgmt.enable"
+                && e.result == crate::audit::RESULT_SUCCESS
+                && e.actor == "test"),
+            "成功管理操作应记录 success 审计事件且 actor 为 CCT sub: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e.action == "admin:auth:disable"
+                && e.result == crate::audit::RESULT_DENIED
+                && e.actor == "test"),
+            "被拒管理操作应记录 denied 审计事件: {events:?}"
+        );
     }
 }

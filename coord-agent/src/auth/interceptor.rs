@@ -21,7 +21,7 @@ use parking_lot::RwLock;
 use tonic::Status;
 use tower::{Layer, Service};
 
-use coord_core::auth::cct::{decode_cct, is_expired, CctHeader, CctPayload, CctToken};
+use coord_core::auth::cct::{decode_cct_any, is_expired, CctHeader, CctPayload, CctToken};
 
 use super::role_cache::RoleCache;
 
@@ -154,8 +154,10 @@ pub fn infer_capability(rpc_method: &str) -> Option<String> {
 
 /// The main auth interceptor for the Agent.
 pub struct AuthInterceptor {
-    /// CCT signing key (bytes, derived from Server root key via HKDF)
+    /// CCT HMAC 签名密钥（历史对称方案，宽限期验证存量 token；可为空）
     signing_key: Vec<u8>,
+    /// R-SEC-02：CCT Ed25519 验证公钥（32 字节；提供时验证非对称签发 token）
+    verifying_key: Option<Vec<u8>>,
     /// Local role→capability cache
     role_cache: Arc<RoleCache>,
     /// Signature verification cache (LRU)
@@ -171,11 +173,18 @@ impl AuthInterceptor {
     pub fn new(signing_key: Vec<u8>, role_cache: Arc<RoleCache>, clock_drift_secs: i64) -> Self {
         Self {
             signing_key,
+            verifying_key: None,
             role_cache,
             sig_cache: SignatureCache::new(10000, 60), // 10k entries, 60s TTL
             clock_drift_secs,
             enabled: true,
         }
+    }
+
+    /// R-SEC-02：挂载 Ed25519 验证公钥（server 持私钥签发，agent 仅存公钥）。
+    pub fn with_verifying_key(mut self, verifying_key: Vec<u8>) -> Self {
+        self.verifying_key = Some(verifying_key);
+        self
     }
 
     /// Set whether auth is enabled.
@@ -217,8 +226,9 @@ impl AuthInterceptor {
             None => return AuthResult::Deny("missing or invalid Authorization header".into()),
         };
 
-        // 2. Decode and verify CCT
-        let cct = match decode_cct(cct_str, &self.signing_key) {
+        // 2. Decode and verify CCT（R-SEC-02：HMAC 历史密钥 + Ed25519 公钥双算法）
+        let cct = match decode_cct_any(cct_str, &[&self.signing_key], self.verifying_key.as_deref())
+        {
             Ok(token) => token,
             Err(e) => return AuthResult::Deny(format!("CCT validation failed: {e}")),
         };
@@ -729,5 +739,84 @@ mod tests {
         );
         assert_eq!(extract_bearer_token(Some("coord_abc123")), None); // legacy — pass through
         assert_eq!(extract_bearer_token(None), None);
+    }
+    // ──── R-SEC-02：Ed25519 非对称验证（agent 仅存公钥）───
+
+    fn reader_role_cache() -> Arc<RoleCache> {
+        let role_cache = Arc::new(RoleCache::new());
+        role_cache.sync_full(vec![super::super::role_cache::RoleEntry {
+            name: "reader".to_string(),
+            grants: vec![super::super::role_cache::CapabilityGrant {
+                capability_id: "data:kv:read".to_string(),
+                scope: "".to_string(),
+            }],
+            high_sensitive: false,
+        }]);
+        role_cache
+    }
+
+    fn ed_test_cct(signing_key: &ed25519_dalek::SigningKey, roles: Vec<&str>) -> String {
+        let header = CctHeader::ed25519();
+        let payload = CctPayload {
+            jti: uuid::Uuid::new_v4().to_string(),
+            iss: "coord-cluster".to_string(),
+            sub: "test-app".to_string(),
+            aud: vec!["coord-agent".to_string()],
+            iat: 1719990000,
+            exp: 2000000000,
+            roles: roles.into_iter().map(|s| s.to_string()).collect(),
+            scope_overrides: HashMap::new(),
+        };
+        coord_core::auth::cct::encode_cct_ed25519(&header, &payload, signing_key).unwrap()
+    }
+
+    #[test]
+    fn test_interceptor_verifies_ed25519_cct() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let pub_key = signing_key.verifying_key().to_bytes().to_vec();
+        let interceptor =
+            AuthInterceptor::new(Vec::new(), reader_role_cache(), 300).with_verifying_key(pub_key);
+
+        let cct = ed_test_cct(&signing_key, vec!["reader"]);
+        let auth_header = format!("Bearer {cct}");
+        let result = interceptor.validate_request("/coord.kv.Kv/Range", Some(&auth_header), None);
+        assert!(matches!(result, AuthResult::Allow(_)));
+    }
+
+    #[test]
+    fn test_interceptor_ed25519_rejects_forged_token() {
+        // 攻击者无 server 私钥：用自己的密钥签发的 token 必须被拒
+        let legit_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let attacker_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let pub_key = legit_key.verifying_key().to_bytes().to_vec();
+        let interceptor =
+            AuthInterceptor::new(Vec::new(), reader_role_cache(), 300).with_verifying_key(pub_key);
+
+        let forged = ed_test_cct(&attacker_key, vec!["root"]);
+        let auth_header = format!("Bearer {forged}");
+        let result = interceptor.validate_request("/coord.kv.Kv/Range", Some(&auth_header), None);
+        assert!(matches!(result, AuthResult::Deny(_)));
+    }
+
+    #[test]
+    fn test_interceptor_ed25519_fail_closed_without_pubkey() {
+        // 未配置公钥时 Ed25519 token 必须被拒（fail-closed）
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let interceptor = AuthInterceptor::new(Vec::new(), reader_role_cache(), 300);
+
+        let cct = ed_test_cct(&signing_key, vec!["reader"]);
+        let auth_header = format!("Bearer {cct}");
+        let result = interceptor.validate_request("/coord.kv.Kv/Range", Some(&auth_header), None);
+        assert!(matches!(result, AuthResult::Deny(_)));
+    }
+
+    #[test]
+    fn test_interceptor_hmac_still_accepted_grace_period() {
+        // 宽限期：存量 HMAC token 仍可用（双算法并行）
+        let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), reader_role_cache(), 300);
+        let cct = make_test_cct(vec!["reader"], HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+        let result = interceptor.validate_request("/coord.kv.Kv/Range", Some(&auth_header), None);
+        assert!(matches!(result, AuthResult::Allow(_)));
     }
 }

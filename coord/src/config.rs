@@ -31,6 +31,14 @@ pub struct Config {
     /// 安全配置
     #[serde(default)]
     pub security: SecurityConfig,
+
+    /// R-RFT-19：Raft 运行时调优（心跳/选举/快照策略；空字段 = openraft 默认）
+    #[serde(default)]
+    pub raft: RaftTuningConfig,
+
+    /// R-SVC-18：运行时资源限制（per-RPC 超时、规模上限、幂等缓存参数）
+    #[serde(default)]
+    pub limits: LimitsConfig,
 }
 
 impl Config {
@@ -97,6 +105,15 @@ impl Config {
         }
     }
 
+    /// R-TST-16：Raft 实际监听地址（raft_bind_addr 非空时使用，否则 = raft_addr）。
+    pub fn resolve_raft_bind_addr(&self) -> String {
+        if self.network.raft_bind_addr.is_empty() {
+            self.resolve_raft_addr()
+        } else {
+            self.network.raft_bind_addr.clone()
+        }
+    }
+
     /// P2-02：启动前配置校验（收集全部错误，一次报清）。
     ///
     /// 校验项：节点 ID；gRPC/Raft/HTTP 地址可解析且端口合法、互不冲突；
@@ -122,6 +139,20 @@ impl Config {
             errs.push(format!(
                 "network.raft_addr ({raft}) must differ from network.grpc_addr ({grpc})"
             ));
+        }
+
+        // 3b. R-TST-16：raft_bind_addr 非空时须可解析，且不与 grpc 冲突
+        if !self.network.raft_bind_addr.is_empty() {
+            let bind_port = validate_addr(
+                &self.network.raft_bind_addr,
+                "network.raft_bind_addr",
+                &mut errs,
+            );
+            if let (Some(b), Some(g)) = (bind_port, grpc_port) {
+                if b == g {
+                    errs.push("network.raft_bind_addr port must differ from grpc port".to_string());
+                }
+            }
         }
 
         // 4. HTTP 地址（配置非空时校验；服务端实际端口 = gRPC + 10）
@@ -233,6 +264,53 @@ impl Config {
             }
         }
 
+        // 9b. R-SEC-03：raft 共享密钥最短长度（HMAC 密钥强度下限）
+        if let Some(secret) = &self.security.raft_shared_secret {
+            if secret.len() < 16 {
+                errs.push("security.raft_shared_secret must be at least 16 characters".to_string());
+            }
+        }
+
+        // 9c. R-SEC-04：拒绝已知占位密钥/密码（示例配置默认值不得通过校验，
+        //     防止照抄示例上线：全零 root key 等价于公开密钥）。
+        for (label, key) in [
+            (
+                "security.auth_root_key",
+                self.security.auth_root_key.as_deref(),
+            ),
+            (
+                "security.encryption_root_key",
+                self.security.encryption_root_key.as_deref(),
+            ),
+        ] {
+            if let Some(key) = key {
+                if key.len() == 64 && key.bytes().all(|b| b == b'0') {
+                    errs.push(format!(
+                        "{label} is the all-zeros placeholder; generate a real key \
+                         (e.g. `openssl rand -hex 32`)"
+                    ));
+                }
+            }
+        }
+        if let Some(pw) = &self.security.root_password {
+            if is_placeholder_secret(pw) {
+                errs.push(
+                    "security.root_password must not be a placeholder value \
+                     (e.g. CHANGE_ME_STRONG_PW)"
+                        .to_string(),
+                );
+            }
+        }
+        if let Some(secret) = &self.security.raft_shared_secret {
+            if is_placeholder_secret(secret) {
+                errs.push(
+                    "security.raft_shared_secret must not be a placeholder value \
+                     (e.g. change-me-raft-secret-16chars)"
+                        .to_string(),
+                );
+            }
+        }
+
         // 10. 磁盘水位比例（0 < readonly < warn < 1）
         let warn = self.storage.disk_warn_ratio;
         let readonly = self.storage.disk_readonly_ratio;
@@ -251,6 +329,60 @@ impl Config {
                 "storage.disk_warn_ratio ({warn}) must be greater than \
                  storage.disk_readonly_ratio ({readonly})"
             ));
+        }
+
+        // 11. R-SVC-18：limits 段合法性（超时/规模/幂等参数）
+        for (label, ms) in [
+            ("limits.read_timeout_ms", self.limits.read_timeout_ms),
+            ("limits.write_timeout_ms", self.limits.write_timeout_ms),
+            ("limits.lease_timeout_ms", self.limits.lease_timeout_ms),
+            ("limits.compact_timeout_ms", self.limits.compact_timeout_ms),
+        ] {
+            if ms == 0 {
+                errs.push(format!("{label} must be > 0"));
+            }
+        }
+        if self.limits.idempotency_ttl_secs == 0 {
+            errs.push("limits.idempotency_ttl_secs must be > 0".to_string());
+        }
+        if self.limits.idempotency_max_entries < 16 {
+            errs.push(format!(
+                "limits.idempotency_max_entries must be >= 16 (got {})",
+                self.limits.idempotency_max_entries
+            ));
+        }
+
+        // 12. R-RFT-19：raft 调优段合法性（选举窗口 min ≤ max；时间参数 > 0）
+        for (label, ms) in [
+            (
+                "raft.heartbeat_interval_ms",
+                self.raft.heartbeat_interval_ms,
+            ),
+            (
+                "raft.election_timeout_min_ms",
+                self.raft.election_timeout_min_ms,
+            ),
+            (
+                "raft.election_timeout_max_ms",
+                self.raft.election_timeout_max_ms,
+            ),
+            (
+                "raft.install_snapshot_timeout_ms",
+                self.raft.install_snapshot_timeout_ms,
+            ),
+        ] {
+            if ms == Some(0) {
+                errs.push(format!("{label} must be > 0"));
+            }
+        }
+        match (
+            self.raft.election_timeout_min_ms,
+            self.raft.election_timeout_max_ms,
+        ) {
+            (Some(min), Some(max)) if min > max => errs.push(format!(
+                "raft.election_timeout_min_ms ({min}) must be <= raft.election_timeout_max_ms ({max})"
+            )),
+            _ => {}
         }
 
         if errs.is_empty() {
@@ -283,6 +415,12 @@ pub struct ReloadableConfig {
 
 /// 校验 `host:port` 地址：可解析为 SocketAddr 且端口合法。
 /// 返回端口号（合法时）。
+/// R-SEC-04：是否为占位密钥（示例模板 change-me / __FILL__ 类默认值）。
+fn is_placeholder_secret(s: &str) -> bool {
+    let s = s.trim().to_ascii_lowercase();
+    s.contains("change-me") || s.contains("change_me") || s == "changeme" || s.contains("__fill")
+}
+
 fn validate_addr(addr: &str, label: &str, errs: &mut Vec<String>) -> Option<u16> {
     match addr.parse::<std::net::SocketAddr>() {
         Ok(sa) => {
@@ -340,6 +478,13 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub raft_addr: String,
 
+    /// Raft 监听地址（可选；默认 = raft_addr）。
+    ///
+    /// R-TST-16 支撑：bind/advertise 分离（如经 TCP 代理注入分区时，
+    /// 监听真实端口、对外通告代理端口）；生产一般无需配置。
+    #[serde(default)]
+    pub raft_bind_addr: String,
+
     /// HTTP 健康检查/BFF 监听地址（默认与 gRPC 端口 +10）
     #[serde(default)]
     pub http_addr: String,
@@ -370,6 +515,7 @@ impl Default for NetworkConfig {
         Self {
             grpc_addr: "127.0.0.1:50051".to_string(),
             raft_addr: String::new(),
+            raft_bind_addr: String::new(),
             http_addr: String::new(),
             ui_enabled: false,
             watch_buffer: default_watch_buffer(),
@@ -489,6 +635,29 @@ pub struct SecurityConfig {
     /// gRPC reflection 开关（默认 **false**，生产关闭，规格 C.4.1）
     #[serde(default)]
     pub reflection_enabled: bool,
+
+    /// 静态加密开关（R-SEC-01，默认 **false**）。开启后 `/kv/` 用户数据
+    /// 经 AES-256-GCM Barrier 加密落盘，Seal/Unseal/DEK 自动轮换生效。
+    /// 缺省 root 密钥首次启动时生成并写入 `<data_dir>/encryption-root-key.bin`
+    /// （0600）；升级窗口内旧明文数据需经一次性迁移工具（见 17 号文档 R-SEC-01）。
+    #[serde(default)]
+    pub encryption_enabled: bool,
+
+    /// 静态加密 root 密钥（hex 编码 32 字节，R-SEC-01）。
+    /// 优先级：本配置 > `COORD_ENCRYPTION_ROOT_KEY` 环境变量 >
+    /// `<data_dir>/encryption-root-key.bin`。多节点各存各的本地 DEK，
+    /// 但每个节点启动都需同一 root 密钥以解密本地密文 DEK。
+    #[serde(default)]
+    pub encryption_root_key: Option<String>,
+
+    /// Raft 节点间共享密钥（R-SEC-03，默认 None）。
+    ///
+    /// raft 端口认证策略（三选一，fail-closed）：
+    /// 1. `tls_cert/tls_key + tls_ca` 已配置 → 强制 mTLS（缺 CA 拒绝启动）；
+    /// 2. 本字段配置 → 节点间 Raft RPC 消息 HMAC-SHA256 认证；
+    /// 3. 两者均无且 raft 绑定非 loopback → 拒绝启动。
+    #[serde(default)]
+    pub raft_shared_secret: Option<String>,
 }
 
 fn default_auth_enabled() -> bool {
@@ -505,6 +674,134 @@ impl Default for SecurityConfig {
             root_password: None,
             auth_root_key: None,
             reflection_enabled: false,
+            encryption_enabled: false,
+            encryption_root_key: None,
+            raft_shared_secret: None,
+        }
+    }
+}
+
+/// R-SVC-18：运行时资源限制配置（`[limits]` 段）。
+///
+/// 覆盖 per-RPC 超时（读/写/lease/compact）、Range/Txn 规模上限、
+/// 幂等缓存参数（TTL/容量）。全部字段带生产保守默认值。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LimitsConfig {
+    /// 读路径超时（毫秒）：线性一致性读 + 本地扫描
+    #[serde(default = "default_read_timeout_ms")]
+    pub read_timeout_ms: u64,
+
+    /// 写路径 raft 提交超时（毫秒）
+    #[serde(default = "default_write_timeout_ms")]
+    pub write_timeout_ms: u64,
+
+    /// Lease 写路径超时（毫秒）
+    #[serde(default = "default_lease_timeout_ms")]
+    pub lease_timeout_ms: u64,
+
+    /// Compact 提案超时（毫秒）
+    #[serde(default = "default_compact_timeout_ms")]
+    pub compact_timeout_ms: u64,
+
+    /// Range 单次扫描上限（0 = 不限制）
+    #[serde(default = "default_max_range_limit")]
+    pub max_range_limit: usize,
+
+    /// Txn compare + success + failure 操作数上限（0 = 不限制）
+    #[serde(default = "default_max_txn_ops")]
+    pub max_txn_ops: usize,
+
+    /// 幂等缓存条目 TTL（秒）
+    #[serde(default = "default_idempotency_ttl_secs")]
+    pub idempotency_ttl_secs: u64,
+
+    /// 幂等缓存容量上限（FIFO 淘汰最旧）
+    #[serde(default = "default_idempotency_max_entries")]
+    pub idempotency_max_entries: usize,
+}
+
+fn default_read_timeout_ms() -> u64 {
+    5000
+}
+fn default_write_timeout_ms() -> u64 {
+    5000
+}
+fn default_lease_timeout_ms() -> u64 {
+    5000
+}
+fn default_compact_timeout_ms() -> u64 {
+    10_000
+}
+fn default_max_range_limit() -> usize {
+    10_000
+}
+fn default_max_txn_ops() -> usize {
+    128
+}
+fn default_idempotency_ttl_secs() -> u64 {
+    60
+}
+fn default_idempotency_max_entries() -> usize {
+    4096
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            read_timeout_ms: default_read_timeout_ms(),
+            write_timeout_ms: default_write_timeout_ms(),
+            lease_timeout_ms: default_lease_timeout_ms(),
+            compact_timeout_ms: default_compact_timeout_ms(),
+            max_range_limit: default_max_range_limit(),
+            max_txn_ops: default_max_txn_ops(),
+            idempotency_ttl_secs: default_idempotency_ttl_secs(),
+            idempotency_max_entries: default_idempotency_max_entries(),
+        }
+    }
+}
+
+/// R-RFT-19：Raft 运行时调优配置（`[raft]` 段）。
+///
+/// 所有时间参数为毫秒，`None`/缺省 = 保持 openraft 默认值。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RaftTuningConfig {
+    /// 心跳间隔（毫秒）
+    #[serde(default)]
+    pub heartbeat_interval_ms: Option<u64>,
+
+    /// 选举超时下限（毫秒）
+    #[serde(default)]
+    pub election_timeout_min_ms: Option<u64>,
+
+    /// 选举超时上限（毫秒）
+    #[serde(default)]
+    pub election_timeout_max_ms: Option<u64>,
+
+    /// 安装快照超时（毫秒）
+    #[serde(default)]
+    pub install_snapshot_timeout_ms: Option<u64>,
+
+    /// 快照策略：距上次快照累积日志条数（0 = Never 禁用自动快照）
+    #[serde(default)]
+    pub snapshot_logs_since_last: Option<u64>,
+
+    /// 快照传输限速（字节/秒；0 = 不限速）
+    #[serde(default)]
+    pub snapshot_rate_limit_bytes_per_sec: u64,
+}
+
+impl LimitsConfig {
+    /// 转换为 coord-server 运行时限制（R-SVC-18）。
+    pub fn to_runtime_limits(&self) -> coord_server::server::RuntimeLimits {
+        coord_server::server::RuntimeLimits {
+            read_timeout: std::time::Duration::from_millis(self.read_timeout_ms),
+            write_timeout: std::time::Duration::from_millis(self.write_timeout_ms),
+            lease_timeout: std::time::Duration::from_millis(self.lease_timeout_ms),
+            compact_timeout: std::time::Duration::from_millis(self.compact_timeout_ms),
+            max_range_limit: self.max_range_limit,
+            max_txn_ops: self.max_txn_ops,
+            idempotency_ttl: std::time::Duration::from_secs(self.idempotency_ttl_secs),
+            idempotency_max_entries: self.idempotency_max_entries,
         }
     }
 }
@@ -677,6 +974,94 @@ auth_enabled = true
             errs.iter().any(|e| e.contains("auth_root_key")),
             "non-hex-64 auth_root_key must be rejected: {errs:?}"
         );
+    }
+
+    // ──── R-SEC-04：占位密钥/密码拒绝 ────
+
+    #[test]
+    fn test_validate_rejects_all_zero_auth_root_key() {
+        let mut config = Config::default();
+        config.security.auth_root_key = Some("0".repeat(64));
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("all-zeros")),
+            "all-zeros auth_root_key must be rejected: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_all_zero_encryption_root_key() {
+        let mut config = Config::default();
+        config.security.encryption_root_key = Some("0".repeat(64));
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("all-zeros")),
+            "all-zeros encryption_root_key must be rejected: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_placeholder_root_password() {
+        let mut config = Config::default();
+        config.security.root_password = Some("CHANGE_ME_STRONG_PW".to_string());
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("root_password")),
+            "placeholder root_password must be rejected: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_placeholder_raft_secret() {
+        let mut config = Config::default();
+        config.security.raft_shared_secret = Some("change-me-raft-secret-16chars".to_string());
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("raft_shared_secret")),
+            "placeholder raft_shared_secret must be rejected: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_fill_placeholders() {
+        let mut config = Config::default();
+        config.security.root_password = Some("__FILL_ROOT_PASSWORD__".to_string());
+        config.security.raft_shared_secret = Some("__FILL_RAFT_SHARED_SECRET__".to_string());
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("root_password"))
+                && errs.iter().any(|e| e.contains("raft_shared_secret")),
+            "fill placeholders must be rejected: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_real_secrets() {
+        let mut config = Config::default();
+        config.security.auth_root_key = Some("42".repeat(32));
+        config.security.root_password = Some("s3cure-P@ssw0rd-2026".to_string());
+        config.security.raft_shared_secret = Some("s3cure-raft-shared-secret".to_string());
+        assert!(config.validate().is_ok());
+    }
+
+    // ──── R-SEC-03：raft 共享密钥校验 ────
+
+    #[test]
+    fn test_validate_rejects_short_raft_shared_secret() {
+        let mut config = Config::default();
+        config.security.raft_shared_secret = Some("short".to_string());
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("raft_shared_secret")),
+            "short raft_shared_secret must be rejected: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_long_raft_shared_secret() {
+        let mut config = Config::default();
+        config.security.raft_shared_secret = Some("this-secret-is-long-enough".to_string());
+        assert!(config.validate().is_ok());
     }
 
     #[test]

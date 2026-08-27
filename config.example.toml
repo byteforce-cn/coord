@@ -1,0 +1,73 @@
+# coord-server 生产配置示例（对齐 docs/production/17-refactor-master-plan.md R-OBS-15）
+#
+# 三节点集群部署时：
+#   1. 每个节点一份本文件，按注释修改 node.id 与端口；
+#   2. 三节点 security.auth_root_key 必须一致（CCT 签发根密钥，hex 64 字符）；
+#   3. security.raft_shared_secret 必须一致（raft 端口 HMAC 认证，R-SEC-03）；
+#   4. 生产建议配置 tls_cert/tls_key/tls_ca（raft/gRPC mTLS，缺 CA 拒绝启动）；
+#   5. 首节点 bootstrap=true，其余节点 join_addr=首节点 grpc 地址。
+
+[node]
+id = 1                # 节点唯一 ID（1/2/3）
+name = "coord-01"
+
+[network]
+grpc_addr = "0.0.0.0:50051"   # 客户端 gRPC
+raft_addr = "0.0.0.0:50052"   # 节点间 Raft（必须与 grpc 不同端口）
+http_addr = "0.0.0.0:50061"   # HTTP /metrics /healthz（生产建议内网绑定）
+
+[cluster]
+cluster_name = "prod-cluster"
+bootstrap = true               # 仅首节点 true
+# join_addr = "coord-01:50051"  # 其余节点填首节点地址
+# initial_nodes = [             # 或显式列出全部节点（bootstrap 时使用）
+#   { id = 1, grpc = "coord-01:50051", raft = "coord-01:50052" },
+#   { id = 2, grpc = "coord-02:50051", raft = "coord-02:50052" },
+#   { id = 3, grpc = "coord-03:50051", raft = "coord-03:50052" },
+# ]
+
+[storage]
+data_dir = "/var/lib/coord"
+
+# R-RFT-19：Raft 运行时调优（全部可选，缺省 = openraft 默认：心跳 50ms、
+# 选举 150–300ms、快照策略 since_last:5000）
+[raft]
+# heartbeat_interval_ms = 50
+# election_timeout_min_ms = 150
+# election_timeout_max_ms = 300
+# install_snapshot_timeout_ms = 200
+# snapshot_logs_since_last = 5000      # 0 = 禁用自动快照
+# snapshot_rate_limit_bytes_per_sec = 52428800   # 50 MiB/s；0 = 不限速
+
+# R-SVC-18：运行时资源限制（per-RPC 超时、规模上限、幂等缓存；以下为默认值）
+[limits]
+read_timeout_ms = 5000          # 读路径（线性一致性读）超时
+write_timeout_ms = 5000         # 写路径 raft 提交超时（失去 quorum 快速失败）
+lease_timeout_ms = 5000         # Lease 写超时
+compact_timeout_ms = 10000      # Compact 提案超时
+max_range_limit = 10000         # Range 单次扫描上限（超限 INVALID_ARGUMENT）
+max_txn_ops = 128               # Txn compare+success+failure 操作数上限
+idempotency_ttl_secs = 60       # 幂等缓存 TTL
+idempotency_max_entries = 4096  # 幂等缓存容量（FIFO 淘汰）
+
+[security]
+# 生产：配置证书 + CA → raft/gRPC 强制 mTLS（缺 CA 拒绝启动，fail-closed）
+# tls_cert = "/etc/coord/server.crt"
+# tls_key  = "/etc/coord/server.key"
+# tls_ca    = "/etc/coord/ca.crt"
+
+auth_enabled = true                     # 生产默认开启（P0-C.1 唯一开关）
+
+# ── 以下三项必须显式配置（占位默认值会被启动校验拒绝，R-SEC-04）──
+# root_password：或经环境变量 COORD_ROOT_PASSWORD 注入；缺省随机生成并仅打印一次
+# root_password = "<strong-password>"
+# auth_root_key：hex 64 字符（32 字节），三节点一致；生成：openssl rand -hex 32
+# auth_root_key = "<hex-64>"
+# raft_shared_secret：≥16 字符，三节点一致；生成：openssl rand -hex 32
+# raft_shared_secret = "<hex-32>"
+
+# R-SEC-01：静态加密（开启后 /kv/ 用户数据 AES-256-GCM 落盘；灰度时先做明文迁移）
+# encryption_enabled = true
+# encryption_root_key = "…hex 64 字符…"
+
+reflection_enabled = false              # 生产关闭 gRPC 反射

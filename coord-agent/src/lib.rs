@@ -24,7 +24,6 @@ pub mod metrics;
 pub mod pki;
 pub mod pki_store;
 mod proxy;
-pub mod saga;
 pub mod service;
 pub mod services;
 pub mod threadpool;
@@ -32,6 +31,7 @@ pub mod tls;
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use coord_proto::kv::kv_server::KvServer;
 use coord_proto::lease::lease_server::LeaseServer;
@@ -148,9 +148,14 @@ pub struct AgentAuthConfig {
     /// 是否启用鉴权（默认 false；启用后所有 gRPC RPC 均校验 CCT）
     #[serde(default)]
     pub enabled: bool,
-    /// CCT 签名密钥（hex 编码；与 coord-server 根密钥派生一致）
+    /// CCT HMAC 签名密钥（hex 编码；历史对称方案，宽限期兼容验证用，
+    /// R-SEC-02 之后新签发全部为 Ed25519，此字段仅用于存量 token 验证）
     #[serde(default)]
     pub signing_key_hex: String,
+    /// R-SEC-02：CCT Ed25519 验证公钥（hex 编码 64 字符 = 32 字节）。
+    /// server 持私钥签发，agent 仅存公钥验证，任一 agent 被控无法伪造 token。
+    #[serde(default)]
+    pub verifying_key_hex: String,
     /// 时钟漂移容忍（秒，默认 300）
     #[serde(default = "default_auth_clock_drift_secs")]
     pub clock_drift_secs: i64,
@@ -224,8 +229,156 @@ impl Default for AgentConfig {
     }
 }
 
-// ──── AgentServer ────
+// ──── gRPC 服务链组装（泛型于 Server<L>：明文 Identity / TLS TlsAcceptor 共用）────
 
+/// agent gRPC 服务句柄集合（服务链组装用，由 serve_with_shutdown 收集）
+struct AgentGrpcSvcs {
+    inner: Option<Arc<crate::proxy::AgentInner>>,
+    registry: Option<Arc<crate::services::registry::RegistryService>>,
+    config: Option<Arc<crate::services::config_center::ConfigCenterService>>,
+    lock: Option<Arc<crate::services::lock::LockService>>,
+    idgen: Option<Arc<crate::services::idgen::IdGenService>>,
+    election: Option<Arc<crate::services::leader_election::LeaderElectionService>>,
+    event: Option<Arc<crate::services::event_notification::EventNotificationService>>,
+    cache: Option<Arc<crate::services::cache::CacheService>>,
+    mq: Option<Arc<crate::services::mq::MessageQueueService>>,
+    replica: Option<Arc<crate::services::grpc_handlers::ReplicaRouter>>,
+    scheduler: Option<Arc<crate::services::scheduler::SchedulerService>>,
+    workflow: Option<Arc<crate::services::workflow::phase4::WorkflowEngineService>>,
+    policy: Option<Arc<crate::services::policy::PolicyService>>,
+    transit: Option<Arc<crate::services::transit::TransitService>>,
+    cb: Option<Arc<crate::services::circuit_breaker::CircuitBreakerService>>,
+    rl: Option<Arc<crate::services::rate_limiter::RateLimiterService>>,
+    ff: Option<Arc<crate::feature_flags::FeatureFlagService>>,
+    pki: Option<Arc<crate::pki::PkiService>>,
+}
+
+/// 组装 agent gRPC 服务链（核心 5 服务 + 可插拔服务 + 自定义 Health）。
+///
+/// 泛型于 `Server<L>`（`L` = 明文 `Identity` 或 TLS `TlsAcceptor`）：调用方分别在
+/// `.tls_config()` 前后构造 builder，服务链单份组装，避免两条 serve 路径漂移。
+fn build_agent_grpc_router<L>(
+    mut server: tonic::transport::server::Server<L>,
+    svcs: AgentGrpcSvcs,
+    metrics: Option<crate::metrics::AgentMetrics>,
+    service_manager: &crate::service::ServiceManager,
+) -> Result<tonic::transport::server::Router<L>, Box<dyn std::error::Error + Send + Sync>>
+where
+    L: Clone,
+{
+    let router = server
+        .add_service(KvServer::new(crate::proxy::KvProxy::new(
+            svcs.inner.clone(),
+        )))
+        .add_service(TxnServer::new(crate::proxy::TxnProxy::new(
+            svcs.inner.clone(),
+        )))
+        .add_service(LeaseServer::new(crate::proxy::LeaseProxy::new(
+            svcs.inner.clone(),
+        )))
+        .add_service(WatchServer::new(
+            crate::proxy::WatchProxy::new(svcs.inner.clone()).with_metrics(metrics),
+        ))
+        .add_service(MaintenanceServer::new(crate::proxy::MaintenanceProxy::new(
+            svcs.inner,
+        )))
+        .add_optional_service(
+            svcs.registry
+                .map(coord_proto::agent::registry_server::RegistryServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.config
+                .map(coord_proto::agent::config_server::ConfigServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.lock
+                .map(coord_proto::agent::lock_server::LockServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.idgen
+                .map(coord_proto::agent::id_gen_server::IdGenServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.election
+                .map(coord_proto::agent::leader_election_server::LeaderElectionServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.event
+                .map(coord_proto::agent::event_server::EventServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.cache
+                .map(coord_proto::agent::cache_server::CacheServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.mq
+                .map(coord_proto::agent::mq_server::MqServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.replica
+                .map(coord_proto::agent::replica_server::ReplicaServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.scheduler
+                .map(coord_proto::agent::scheduler_server::SchedulerServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.workflow
+                .map(coord_proto::agent::workflow_server::WorkflowServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.policy
+                .map(coord_proto::agent::policy_server::PolicyServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.transit
+                .map(coord_proto::agent::transit_server::TransitServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.cb
+                .map(coord_proto::agent::circuit_breaker_server::CircuitBreakerServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.rl
+                .map(coord_proto::agent::rate_limiter_server::RateLimiterServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.ff
+                .map(coord_proto::agent::feature_flags_server::FeatureFlagsServer::from_arc),
+        )
+        .add_optional_service(
+            svcs.pki
+                .map(coord_proto::agent::pki_server::PkiServer::from_arc),
+        );
+
+    // 注册自定义 Health gRPC 服务（coord.agent.Health）
+    // Java SDK healthCheck() 调用的是此自定义服务（而非标准 grpc.health.v1.Health）。
+    // 此前未注册 → UNIMPLEMENTED → NOT_SERVING 误报（注册/ID 生成等服务实际可用）。
+    // 修复：注册并返回 SERVING（存活语义，与 HTTP /health 一致）；健康状态以 /api/v1/health 为准。
+    // 已反馈 jinhe-starter/coord 团队（见 .github/pr/）。
+    let router = router.add_service(coord_proto::agent::health_server::HealthServer::new(
+        crate::health::GrpcHealthService,
+    ));
+
+    Ok(service_manager.build_grpc_router(router))
+}
+
+/// 判断地址主机段是否 loopback（支持 `127.0.0.1:port` / `localhost:port` /
+/// `[::1]:port` / 裸地址；未知主机名按非 loopback 处理，fail-closed）。
+fn is_loopback_host(addr: &str) -> bool {
+    let host = match addr.rsplit_once(':') {
+        Some((host, _)) if host.contains(':') => host.trim_start_matches('[').trim_end_matches(']'),
+        Some((host, _)) => host,
+        None => addr,
+    };
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+// ──── AgentServer ────
 /// Agent gRPC 服务端
 ///
 /// 注册核心代理服务（KV/Txn/Lease/Watch/Maintenance）。
@@ -234,12 +387,41 @@ impl Default for AgentConfig {
 #[derive(Debug)]
 pub struct AgentServer {
     config: AgentConfig,
+    /// R-AGT-20：资源隔离线程池（可选；背景任务经 background 池 spawn）
+    thread_pools: Option<Arc<crate::threadpool::AgentThreadPools>>,
+    /// R-AGT-20：指标注册表（gRPC 计数中间件 + 连接状态）
+    metrics: Option<crate::metrics::AgentMetrics>,
+    /// R-AGT-20：就绪标志（连接探针实时回写，供 /health?ready=true）
+    ready_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl AgentServer {
     /// 创建新的 AgentServer 实例
     pub fn new(config: AgentConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            thread_pools: None,
+            metrics: None,
+            ready_flag: None,
+        }
+    }
+
+    /// R-AGT-20：挂载资源隔离线程池。
+    pub fn with_thread_pools(mut self, pools: Arc<crate::threadpool::AgentThreadPools>) -> Self {
+        self.thread_pools = Some(pools);
+        self
+    }
+
+    /// R-AGT-20：挂载指标注册表。
+    pub fn with_metrics(mut self, metrics: crate::metrics::AgentMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// R-AGT-20：挂载共享就绪标志（连接探针实时回写）。
+    pub fn with_ready_flag(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.ready_flag = Some(flag);
+        self
     }
 
     /// 获取配置引用
@@ -284,6 +466,7 @@ impl AgentServer {
 
         // P1-05：非 loopback 绑定强制 auth + TLS（与 server 侧 P0-G.1 同口径）。
         // 防止生产网络裸奔（默认 auth 关闭、TLS None，仅限本机开发）。
+        // 生产收口：TLS 不再是“仅校验配置”——下方 serve 路径真实挂载 `.tls_config()`。
         {
             let is_loopback = addr.ip().is_loopback();
             let auth_ok = self.config.auth.enabled;
@@ -297,6 +480,26 @@ impl AgentServer {
             }
         }
 
+        // 生产收口（#2）：入站 gRPC TLS 真实挂载——配置 tls 时构建 ServerTlsConfig，
+        // 证书/私钥加载失败即拒绝启动（fail-closed）；ca_path 存在时强制 mTLS。
+        let inbound_tls = match self.config.tls.as_ref() {
+            Some(t) => Some(
+                build_agent_tls_server_config(&t.cert_path, &t.key_path, t.ca_path.as_deref())
+                    .map_err(|e| format!("agent inbound TLS: {e}"))?,
+            ),
+            None => None,
+        };
+        if inbound_tls.is_some() {
+            tracing::info!(
+                "coord-agent inbound gRPC TLS enabled (mTLS={})",
+                self.config
+                    .tls
+                    .as_ref()
+                    .and_then(|t| t.ca_path.as_ref())
+                    .is_some()
+            );
+        }
+
         // 若配置了 Server 端点，创建内部 Client 用于请求转发
         // 带指数退避重试（最多 30 秒），避免 Server 尚未就绪时立即降级
         let inner = if !self.config.static_peers.is_empty() {
@@ -304,6 +507,14 @@ impl AgentServer {
                 "coord-agent connecting to server cluster: {:?}",
                 self.config.static_peers
             );
+            // TLS/mTLS：AgentConfig.tls → coord-client TlsConfig（PEM 加载，fail-closed）
+            let client_tls = match self.config.tls.as_ref() {
+                Some(t) => Some(
+                    t.to_coord_client_tls()
+                        .map_err(|e| format!("agent TLS config: {e}"))?,
+                ),
+                None => None,
+            };
             let retry_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
             let mut attempt = 0u32;
             loop {
@@ -315,12 +526,25 @@ impl AgentServer {
                     500,
                     self.config.cache_catalog_ttl_secs,
                 );
-                match AgentInner::new(self.config.static_peers.clone(), retry_cache).await {
+                match AgentInner::new(
+                    self.config.static_peers.clone(),
+                    retry_cache,
+                    client_tls.clone(),
+                )
+                .await
+                {
                     Ok(inner) => {
                         tracing::info!(
                             "coord-agent connected to server cluster (attempt {})",
                             attempt
                         );
+                        // R-AGT-20：连接成功 → 就绪位 + 连接指标实时回写
+                        if let Some(ref flag) = self.ready_flag {
+                            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        if let Some(ref metrics) = self.metrics {
+                            metrics.set_connected(true);
+                        }
                         break Some(Arc::new(inner));
                     }
                     Err(e) => {
@@ -329,6 +553,13 @@ impl AgentServer {
                                 "coord-agent failed to connect to server cluster after {} attempts in 30s: {:?}; running in skeleton mode",
                                 attempt, e
                             );
+                            // R-AGT-20：skeleton 模式 → 未就绪
+                            if let Some(ref flag) = self.ready_flag {
+                                flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            if let Some(ref metrics) = self.metrics {
+                                metrics.set_connected(false);
+                            }
                             break None;
                         }
                         let backoff_ms =
@@ -383,10 +614,11 @@ impl AgentServer {
 
         if self.config.services.registry {
             if let Some(ref inner) = inner {
-                let registry_svc = Arc::new(crate::services::registry::RegistryService::new(
-                    inner.clone(),
-                    500, // max cached instances
-                ));
+                let registry_svc = Arc::new(
+                    crate::services::registry::RegistryService::new(inner.clone(), 500)
+                        // R-AGT-20：watch/探测后台任务经 background 池
+                        .with_thread_pools(self.thread_pools.clone()),
+                );
                 registry_grpc_svc = Some(registry_svc.clone());
                 if let Err(e) = service_manager.register(registry_svc).await {
                     tracing::error!("failed to register registry service: {e}");
@@ -404,7 +636,9 @@ impl AgentServer {
         if self.config.services.config_center {
             if let Some(ref inner) = inner {
                 let config_svc = Arc::new(
-                    crate::services::config_center::ConfigCenterService::new(inner.clone()),
+                    crate::services::config_center::ConfigCenterService::new(inner.clone())
+                        // R-AGT-20：watch 后台任务经 background 池
+                        .with_thread_pools(self.thread_pools.clone()),
                 );
                 config_grpc_svc = Some(config_svc.clone());
                 if let Err(e) = service_manager.register(config_svc).await {
@@ -509,8 +743,22 @@ impl AgentServer {
         }
 
         if self.config.services.workflow {
-            let workflow_svc =
-                Arc::new(crate::services::workflow::phase4::WorkflowEngineService::new());
+            // R-AGT-09：有 server 连接时走 KvWorkflowStore（raft 持久化），
+            // 启动时 init() 全量重建本地缓存 + watch 断连重连对账；
+            // 无连接时退回内存态（单 agent 测试/离线场景）。
+            let workflow_svc = match &inner {
+                Some(inner_ref) => Arc::new(
+                    crate::services::workflow::phase4::WorkflowEngineService::new_with_kv_store(
+                        inner_ref.clone(),
+                    ),
+                ),
+                None => {
+                    tracing::warn!(
+                        "Workflow engine enabled but no server connection; using memory-only store"
+                    );
+                    Arc::new(crate::services::workflow::phase4::WorkflowEngineService::new())
+                }
+            };
             let workflow_grpc = workflow_svc.clone();
             if let Err(e) = service_manager.register(workflow_svc).await {
                 tracing::error!("failed to register workflow engine service: {e}");
@@ -606,10 +854,34 @@ impl AgentServer {
             use crate::services::grpc_handlers::ReplicaRouter;
             use crate::services::replication::ReplicationManager;
 
+            // 生产收口（#3）：复制通道 TLS——复用 AgentConfig.tls（同一 PKI）注入
+            // ReplicaClient；PEM 加载失败即拒绝启动（fail-closed）。
+            let repl_tls = match self.config.tls.as_ref() {
+                Some(t) => Some(
+                    t.to_coord_client_tls()
+                        .map_err(|e| format!("replication TLS config: {e}"))?,
+                ),
+                None => None,
+            };
+            // fail-closed：复制启用且存在非 loopback 对端时，无 TLS 拒绝启动
+            // （明文复制仅限 loopback 开发/单机）。
+            if repl_tls.is_none() {
+                for peer in &self.config.replication_peers {
+                    if !is_loopback_host(peer) {
+                        return Err(format!(
+                            "refusing to start ISR replication with non-loopback peer {peer} \
+                             without TLS (services.replication requires tls for non-loopback peers)"
+                        )
+                        .into());
+                    }
+                }
+            }
+
             let manager = Arc::new(ReplicationManager::new(
                 self.config.replication.clone(),
                 self.config.agent_addr.clone(),
             ));
+            manager.set_tls(repl_tls);
             // 首版静态成员（Q1）；Registry 发现为演进路径
             manager.set_peers(self.config.replication_peers.clone());
             tracing::info!(
@@ -765,6 +1037,18 @@ impl AgentServer {
             Arc::new(crate::auth::role_cache::RoleCache::new()),
             self.config.auth.clock_drift_secs,
         );
+        // R-SEC-02：配置 Ed25519 公钥 → 验证 server 非对称签发的 CCT（仅存公钥，不可伪造）
+        if self.config.auth.enabled && !self.config.auth.verifying_key_hex.is_empty() {
+            let vk = hex::decode(&self.config.auth.verifying_key_hex)
+                .map_err(|e| format!("invalid auth.verifying_key_hex: {e}"))?;
+            if vk.len() != 32 {
+                return Err(
+                    "auth.verifying_key_hex must be 64 hex chars (32-byte Ed25519 public key)"
+                        .into(),
+                );
+            }
+            auth_interceptor = auth_interceptor.with_verifying_key(vk);
+        }
         auth_interceptor.set_enabled(self.config.auth.enabled);
         if self.config.auth.enabled {
             tracing::info!(
@@ -776,178 +1060,32 @@ impl AgentServer {
             );
         }
 
-        // 构建 gRPC router：核心服务 + Registry + Config + 可插拔服务
-        let router = tonic::transport::Server::builder()
-            .layer(crate::auth::interceptor::AuthLayer::new(Arc::new(
-                auth_interceptor,
-            )))
-            .add_service(KvServer::new(KvProxy::new(inner.clone())))
-            .add_service(TxnServer::new(TxnProxy::new(inner.clone())))
-            .add_service(LeaseServer::new(LeaseProxy::new(inner.clone())))
-            .add_service(WatchServer::new(WatchProxy::new(inner.clone())))
-            .add_service(MaintenanceServer::new(MaintenanceProxy::new(inner)));
-
-        // 注册 Registry gRPC 服务（若 registry 已启用且成功初始化）
-        let router = if let Some(registry_svc) = registry_grpc_svc {
-            router.add_service(
-                coord_proto::agent::registry_server::RegistryServer::from_arc(registry_svc),
-            )
-        } else {
-            router
+        // 构建 gRPC router：核心服务 + Registry + Config + 可插拔服务。
+        // 生产收口（#2）：服务链泛型于 Server<L>（明文 Identity / TLS TlsAcceptor），
+        // 由 build_agent_grpc_router 单份组装；inbound_tls Some 时真实挂载 TLS。
+        // R-AGT-20：最外层挂 gRPC 请求计数中间件（record_grpc_request 接线）
+        let auth_interceptor = Arc::new(auth_interceptor);
+        let metrics_layer_value = self.metrics.clone().unwrap_or_default();
+        let svcs = AgentGrpcSvcs {
+            inner,
+            registry: registry_grpc_svc,
+            config: config_grpc_svc,
+            lock: lock_grpc_svc,
+            idgen: idgen_grpc_svc,
+            election: election_grpc_svc,
+            event: event_grpc_svc,
+            cache: cache_grpc_svc,
+            mq: mq_grpc_svc,
+            replica: replication_grpc_svc,
+            scheduler: scheduler_grpc_svc,
+            workflow: workflow_grpc_svc,
+            policy: policy_grpc_svc,
+            transit: transit_grpc_svc,
+            cb: cb_grpc_svc,
+            rl: rl_grpc_svc,
+            ff: ff_grpc_svc,
+            pki: pki_grpc_svc,
         };
-
-        // 注册 Config gRPC 服务（若 config_center 已启用且成功初始化）
-        let router = if let Some(config_svc) = config_grpc_svc {
-            router.add_service(coord_proto::agent::config_server::ConfigServer::from_arc(
-                config_svc,
-            ))
-        } else {
-            router
-        };
-
-        // 注册 Lock gRPC 服务
-        let router = if let Some(lock_svc) = lock_grpc_svc {
-            router.add_service(coord_proto::agent::lock_server::LockServer::from_arc(
-                lock_svc,
-            ))
-        } else {
-            router
-        };
-
-        // 注册 IdGen gRPC 服务
-        let router = if let Some(idgen_svc) = idgen_grpc_svc {
-            router.add_service(coord_proto::agent::id_gen_server::IdGenServer::from_arc(
-                idgen_svc,
-            ))
-        } else {
-            router
-        };
-
-        // 注册 LeaderElection gRPC 服务
-        let router = if let Some(election_svc) = election_grpc_svc {
-            router.add_service(
-                coord_proto::agent::leader_election_server::LeaderElectionServer::from_arc(
-                    election_svc,
-                ),
-            )
-        } else {
-            router
-        };
-
-        // 注册 Event gRPC 服务
-        let router = if let Some(event_svc) = event_grpc_svc {
-            router.add_service(coord_proto::agent::event_server::EventServer::from_arc(
-                event_svc,
-            ))
-        } else {
-            router
-        };
-
-        // 注册 Cache gRPC 服务
-        let router = if let Some(cache_svc) = cache_grpc_svc {
-            router.add_service(coord_proto::agent::cache_server::CacheServer::from_arc(
-                cache_svc,
-            ))
-        } else {
-            router
-        };
-
-        // 注册 MQ gRPC 服务
-        let router = if let Some(mq_svc) = mq_grpc_svc {
-            router.add_service(coord_proto::agent::mq_server::MqServer::from_arc(mq_svc))
-        } else {
-            router
-        };
-
-        // 注册 Replica gRPC 服务（ISR 跨 Agent 复制，v2.1）
-        let router = if let Some(replica) = replication_grpc_svc {
-            router.add_service(coord_proto::agent::replica_server::ReplicaServer::from_arc(
-                replica,
-            ))
-        } else {
-            router
-        };
-
-        // 注册 Scheduler gRPC 服务
-        let router = if let Some(scheduler_svc) = scheduler_grpc_svc {
-            router.add_service(
-                coord_proto::agent::scheduler_server::SchedulerServer::from_arc(scheduler_svc),
-            )
-        } else {
-            router
-        };
-
-        // 注册 Workflow gRPC 服务
-        let router = if let Some(workflow_svc) = workflow_grpc_svc {
-            router.add_service(
-                coord_proto::agent::workflow_server::WorkflowServer::from_arc(workflow_svc),
-            )
-        } else {
-            router
-        };
-
-        // 注册 Policy gRPC 服务
-        let router = if let Some(policy_svc) = policy_grpc_svc {
-            router.add_service(coord_proto::agent::policy_server::PolicyServer::from_arc(
-                policy_svc,
-            ))
-        } else {
-            router
-        };
-
-        // 注册 Transit gRPC 服务
-        let router = if let Some(transit_svc) = transit_grpc_svc {
-            router.add_service(coord_proto::agent::transit_server::TransitServer::from_arc(
-                transit_svc,
-            ))
-        } else {
-            router
-        };
-
-        // 注册 CircuitBreaker gRPC 服务
-        let router = if let Some(cb_svc) = cb_grpc_svc {
-            router.add_service(
-                coord_proto::agent::circuit_breaker_server::CircuitBreakerServer::from_arc(cb_svc),
-            )
-        } else {
-            router
-        };
-
-        // 注册 RateLimiter gRPC 服务
-        let router = if let Some(rl_svc) = rl_grpc_svc {
-            router.add_service(
-                coord_proto::agent::rate_limiter_server::RateLimiterServer::from_arc(rl_svc),
-            )
-        } else {
-            router
-        };
-
-        // 注册 FeatureFlags gRPC 服务
-        let router = if let Some(ff_svc) = ff_grpc_svc {
-            router.add_service(
-                coord_proto::agent::feature_flags_server::FeatureFlagsServer::from_arc(ff_svc),
-            )
-        } else {
-            router
-        };
-
-        // 注册 PKI gRPC 服务
-        let router = if let Some(pki_svc) = pki_grpc_svc {
-            router.add_service(coord_proto::agent::pki_server::PkiServer::from_arc(pki_svc))
-        } else {
-            router
-        };
-
-        let router = service_manager.build_grpc_router(router);
-
-        // 注册自定义 Health gRPC 服务（coord.agent.Health）
-        // Java SDK healthCheck() 调用的是此自定义服务（而非标准 grpc.health.v1.Health）。
-        // 此前未注册 → UNIMPLEMENTED → NOT_SERVING 误报（注册/ID 生成等服务实际可用）。
-        // 修复：注册并返回 SERVING（存活语义，与 HTTP /health 一致）；健康状态以 /api/v1/health 为准。
-        // 已反馈 jinhe-starter/coord 团队（见 .github/pr/）。
-        let router = router.add_service(coord_proto::agent::health_server::HealthServer::new(
-            crate::health::GrpcHealthService,
-        ));
 
         // 注册 gRPC Health Check 服务（标准 grpc.health.v1.Health）
         let (health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -970,11 +1108,43 @@ impl AgentServer {
             .build_v1()
             .map_err(|e| format!("failed to build reflection service: {e}"))?;
 
-        router
-            .add_service(health_service)
-            .add_service(reflection_service)
-            .serve_with_shutdown(addr, shutdown)
-            .await?;
+        match inbound_tls {
+            Some(server_tls) => {
+                let server = tonic::transport::Server::builder()
+                    .layer(crate::auth::interceptor::AuthLayer::new(Arc::clone(
+                        &auth_interceptor,
+                    )))
+                    .layer(crate::metrics::AgentGrpcMetricsLayer::new(
+                        metrics_layer_value.clone(),
+                    ))
+                    .tls_config(server_tls)
+                    .map_err(|e| format!("agent inbound TLS server: {e}"))?;
+                let router =
+                    build_agent_grpc_router(server, svcs, self.metrics.clone(), &service_manager)?;
+                tracing::info!("coord-agent gRPC server serving over TLS (mTLS per tls.ca_path)");
+                router
+                    .add_service(health_service)
+                    .add_service(reflection_service)
+                    .serve_with_shutdown(addr, shutdown)
+                    .await?;
+            }
+            None => {
+                let server = tonic::transport::Server::builder()
+                    .layer(crate::auth::interceptor::AuthLayer::new(Arc::clone(
+                        &auth_interceptor,
+                    )))
+                    .layer(crate::metrics::AgentGrpcMetricsLayer::new(
+                        metrics_layer_value,
+                    ));
+                let router =
+                    build_agent_grpc_router(server, svcs, self.metrics.clone(), &service_manager)?;
+                router
+                    .add_service(health_service)
+                    .add_service(reflection_service)
+                    .serve_with_shutdown(addr, shutdown)
+                    .await?;
+            }
+        }
 
         // 优雅停止可插拔服务
         let _ = service_manager.stop_all().await;
@@ -993,6 +1163,8 @@ pub async fn run_agent(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::health::start_health_server;
     use crate::metrics::AgentMetrics;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     tracing::info!(
         "coord-agent starting on {}, http on {}",
@@ -1002,10 +1174,54 @@ pub async fn run_agent(
 
     // C3: 启动 HTTP health/metrics 端点
     let metrics = AgentMetrics::new();
-    let has_peers = !config.static_peers.is_empty();
-    let _health_handle = start_health_server(&config.http_addr, metrics, has_peers);
+    // R-AGT-20：就绪标志（连接探针实时回写，非启动快照）
+    let ready_flag = Arc::new(AtomicBool::new(false));
+    let _health_handle =
+        start_health_server(&config.http_addr, metrics.clone(), Arc::clone(&ready_flag));
 
-    let server = AgentServer::new(config);
+    // R-AGT-20：连接状态探针——每 5s 探测全部 static_peers（TCP connect，1s 超时），
+    // 实时回写 ready 与 coord_agent_connected（此前 has_peers 为启动快照，
+    // 连接成功与否均不回写 readiness）。
+    {
+        let peers = config.static_peers.clone();
+        let flag = Arc::clone(&ready_flag);
+        let metrics_for_probe = metrics.clone();
+        tokio::spawn(async move {
+            loop {
+                let alive = if peers.is_empty() {
+                    false // 无 static_peers（骨架模式）不视为已连接集群
+                } else {
+                    let mut any = false;
+                    for peer in &peers {
+                        if let Ok(Ok(_)) = tokio::time::timeout(
+                            std::time::Duration::from_secs(1),
+                            tokio::net::TcpStream::connect(peer.clone()),
+                        )
+                        .await
+                        {
+                            any = true;
+                            break;
+                        }
+                    }
+                    any
+                };
+                flag.store(alive, Ordering::Relaxed);
+                metrics_for_probe.set_connected(alive);
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+    }
+
+    // R-AGT-20：资源隔离线程池接线（此前 AgentThreadPools 为死代码）——
+    // registry/config watch 与探测后台任务经 background 池 spawn。
+    let thread_pools = Arc::new(crate::threadpool::AgentThreadPools::new(
+        config.thread_pools.clone(),
+    ));
+
+    let server = AgentServer::new(config)
+        .with_thread_pools(Arc::clone(&thread_pools))
+        .with_metrics(metrics)
+        .with_ready_flag(Arc::clone(&ready_flag));
 
     // 启动 gRPC server（带优雅关闭）
     tracing::info!("coord-agent: starting gRPC services (KV/Txn/Lease/Watch/Maintenance)");

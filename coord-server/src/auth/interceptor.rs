@@ -20,14 +20,17 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use coord_core::auth::cct::{decode_cct, is_expired, CctPayload, CctToken};
+use coord_core::auth::cct::{is_expired, CctPayload, CctToken};
 use coord_core::auth::trie::ScopeTrie;
+use http_body_util::BodyExt;
+use prost::Message;
 use tonic::Status;
-use tower::{Layer, Service};
+use tower::{Layer, Service, ServiceExt};
 
 use crate::auth::manager::AuthManager;
 use crate::auth::revocation::RevocationStore;
 use crate::auth::token_signing::TokenSigningKeyring;
+use crate::metrics::Metrics;
 
 // ──── Trusted Agent Identification ────
 
@@ -182,6 +185,8 @@ pub struct ServerAuthInterceptor {
     role_provider: Option<Arc<AuthManager>>,
     /// P2-08：审计日志（拒绝路径记录；可选）
     audit: Option<Arc<crate::audit::AuditLogger>>,
+    /// R-OBS-10：指标注册表（拒绝计数；可选）
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl ServerAuthInterceptor {
@@ -199,7 +204,14 @@ impl ServerAuthInterceptor {
             enabled: true,
             role_provider: None,
             audit: None,
+            metrics: None,
         }
+    }
+
+    /// R-OBS-10：挂载指标注册表（鉴权拒绝计数）。
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// P2-08：挂载审计日志器（拒绝路径记录鉴权拒绝事件）。
@@ -239,6 +251,24 @@ impl ServerAuthInterceptor {
         peer_cn: Option<&str>,
         capability_id: &str,
         scope_key: Option<&str>,
+    ) -> ServerAuthResult {
+        match scope_key {
+            Some(key) => self.validate_keys(cct_str, peer_cn, capability_id, &[key.as_bytes()]),
+            None => self.validate_keys(cct_str, peer_cn, capability_id, &[]),
+        }
+    }
+
+    /// 多 key 校验（R-SEC-04）：Txn/Range 等触碰多个 key 的请求，
+    /// 所有 key 都须通过 scope 判定（fail-closed）。
+    ///
+    /// `scope_keys` 为空表示"无 scope key 可提取"（与 `validate(..., None)` 语义一致，
+    /// 有 scope 限制的授权将被拒绝）；非空时要求每个 key 都命中授权。
+    pub fn validate_keys(
+        &self,
+        cct_str: Option<&str>,
+        peer_cn: Option<&str>,
+        capability_id: &str,
+        scope_keys: &[&[u8]],
     ) -> ServerAuthResult {
         // If auth is disabled, allow everything
         if !self.enabled {
@@ -326,10 +356,20 @@ impl ServerAuthInterceptor {
 
             // Case B: All other cases → full capability + scope check (P0-C.4 fail-closed)
             (_, true) | (false, _) => {
-                if !self.authorize(&cct.payload, capability_id, scope_key) {
+                let scope_ok = if scope_keys.is_empty() {
+                    // 无 scope key：带 scope 的授权 fail-closed，无 scope 的授权放行
+                    self.authorize(&cct.payload, capability_id, None)
+                } else {
+                    // 所有触碰的 key 都必须命中授权（非 UTF-8 key 视为无 scope key）
+                    scope_keys.iter().all(|key| {
+                        let sk = std::str::from_utf8(key).ok();
+                        self.authorize(&cct.payload, capability_id, sk)
+                    })
+                };
+                if !scope_ok {
                     return ServerAuthResult::Deny {
                         reason: format!(
-                            "capability '{capability_id}' not granted to roles {:?} (scope key: {scope_key:?})",
+                            "capability '{capability_id}' not granted to roles {:?} (scope keys: {scope_keys:?})",
                             cct.payload.roles
                         ),
                         trusted_agent: is_trusted,
@@ -347,25 +387,9 @@ impl ServerAuthInterceptor {
 
     // ──── Internal ────
 
-    /// Decode and verify a CCT, trying all known signing keys.
+    /// Decode and verify a CCT（R-SEC-02：双算法——HMAC 历史密钥 + Ed25519 公钥）。
     fn decode_and_verify(&self, cct_str: &str) -> Result<CctToken, String> {
-        // Try active key first
-        let active = self.keyring.active_key();
-        if let Ok(token) = decode_cct(cct_str, &active.key_bytes) {
-            return Ok(token);
-        }
-
-        // Try previous keys (for tokens signed before rotation)
-        let key_ids = self.keyring.all_key_ids();
-        for key_id in &key_ids {
-            if let Some(key) = self.keyring.find_key(key_id) {
-                if let Ok(token) = decode_cct(cct_str, &key.key_bytes) {
-                    return Ok(token);
-                }
-            }
-        }
-
-        Err("invalid CCT signature".into())
+        self.keyring.decode_any(cct_str).map_err(|e| e.to_string())
     }
 
     /// Authorize a capability request for a CCT payload (P0-C.4).
@@ -419,6 +443,23 @@ impl ServerAuthInterceptor {
             return Err("CCT has been revoked".into());
         }
         Ok(())
+    }
+
+    /// P2-08：记录鉴权拒绝审计事件（异步 scope 校验路径调用）。
+    pub fn record_audit_deny(&self, rpc_method: &str, reason: &str) {
+        // R-OBS-10：拒绝计数
+        if let Some(ref metrics) = self.metrics {
+            metrics.inc_auth_denied();
+        }
+        if let Some(ref audit) = self.audit {
+            audit.record_event(
+                "anonymous",
+                rpc_method,
+                rpc_method,
+                crate::audit::RESULT_DENIED,
+                reason,
+            );
+        }
     }
 }
 
@@ -511,6 +552,98 @@ pub fn is_whitelisted(rpc_method: &str) -> bool {
     )
 }
 
+// ──── R-SEC-04：scope key 提取（tower 层缓存 body 解析 key）────
+
+/// 需要从请求 body 提取 scope key 的 RPC 方法集合。
+pub fn needs_scope_extraction(rpc_method: &str) -> bool {
+    matches!(
+        rpc_method,
+        "/coord.kv.KV/Put" | "/coord.kv.KV/Range" | "/coord.kv.KV/Delete" | "/coord.txn.Txn/Txn"
+    )
+}
+
+/// 从请求 body 提取 scope key 列表（R-SEC-04）。
+///
+/// - Put/Range/Delete：提取 `key` 字段（proto field 1）；
+/// - Txn：提取全部 compare key 与 success/failure 操作触碰的 key；
+/// - 解析失败返回 `Err`（请求本身畸形，按失败关闭拒绝）。
+///
+/// `body` 为 gRPC 帧流（5 字节前缀：1 字节压缩标志 + 4 字节大端长度），
+/// 解析前先剥离帧头；无帧头的裸 protobuf（测试路径）直接按消息解析。
+pub fn extract_scope_keys(rpc_method: &str, body: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    // 剥离 gRPC 帧头（压缩标志非 0 → 无法解析，按畸形请求拒绝）
+    let payload = if body.len() >= 5 && body[0] == 0 {
+        let msg_len = u32::from_be_bytes([body[1], body[2], body[3], body[4]]) as usize;
+        if body.len() >= 5 + msg_len {
+            &body[5..5 + msg_len]
+        } else {
+            return Err("truncated gRPC frame".to_string());
+        }
+    } else if body.len() >= 5 && body[0] == 1 {
+        return Err("compressed request body is not supported for scope extraction".to_string());
+    } else {
+        body
+    };
+
+    match rpc_method {
+        "/coord.kv.KV/Put" => {
+            let req = coord_proto::kv::PutRequest::decode(payload)
+                .map_err(|e| format!("failed to parse PutRequest body: {e}"))?;
+            Ok(vec![req.key])
+        }
+        "/coord.kv.KV/Range" => {
+            let req = coord_proto::kv::RangeRequest::decode(payload)
+                .map_err(|e| format!("failed to parse RangeRequest body: {e}"))?;
+            Ok(vec![req.key])
+        }
+        "/coord.kv.KV/Delete" => {
+            let req = coord_proto::kv::DeleteRequest::decode(payload)
+                .map_err(|e| format!("failed to parse DeleteRequest body: {e}"))?;
+            Ok(vec![req.key])
+        }
+        "/coord.txn.Txn/Txn" => {
+            let txn = coord_proto::txn::TxnRequest::decode(payload)
+                .map_err(|e| format!("failed to parse TxnRequest body: {e}"))?;
+            let mut keys: Vec<Vec<u8>> = txn.compare.iter().map(|c| c.key.clone()).collect();
+            for op in txn.success.iter().chain(txn.failure.iter()) {
+                use coord_proto::txn::request_op::Op;
+                match &op.op {
+                    Some(Op::RequestPut(p)) => keys.push(p.key.clone()),
+                    Some(Op::RequestDelete(d)) => keys.push(d.key.clone()),
+                    Some(Op::RequestRange(r)) => keys.push(r.key.clone()),
+                    None => {}
+                }
+            }
+            Ok(keys)
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// 缓存请求 body 字节后重建请求（scope key 提取用）。
+///
+/// body 为流式：先收集全部数据帧，解析 key 后以 `Full` 重建原始 body 转发。
+async fn buffer_request_body(
+    req: http::Request<tonic::body::Body>,
+) -> (http::Request<tonic::body::Body>, Option<Vec<u8>>) {
+    let (parts, body) = req.into_parts();
+    match body.collect().await {
+        Ok(collected) => {
+            let bytes = collected.to_bytes();
+            let body_bytes = bytes.to_vec();
+            let rebuilt = tonic::body::Body::new(http_body_util::Full::new(bytes));
+            (http::Request::from_parts(parts, rebuilt), Some(body_bytes))
+        }
+        Err(_) => {
+            // body 读取失败：以空 body 重建，请求将在服务层以解码错误被拒绝
+            (
+                http::Request::from_parts(parts, tonic::body::Body::empty()),
+                None,
+            )
+        }
+    }
+}
+
 // ──── Tower Layer / Service（接入服务端 gRPC 生产路由，P0-C.1）────
 //
 // tonic 0.14 的 `tonic::service::Interceptor` 拿不到方法路径（Request 不保留
@@ -553,11 +686,16 @@ pub struct ServerAuthService<S> {
 
 impl<S> Service<http::Request<tonic::body::Body>> for ServerAuthService<S>
 where
-    S: Service<http::Request<tonic::body::Body>, Response = http::Response<tonic::body::Body>>,
+    S: Service<http::Request<tonic::body::Body>, Response = http::Response<tonic::body::Body>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    S::Error: Send + 'static,
 {
     type Response = http::Response<tonic::body::Body>;
     type Error = S::Error;
-    type Future = ServerAuthFuture<S::Future>;
+    type Future = ServerAuthFuture<S::Future, S::Error>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
@@ -600,6 +738,50 @@ where
             return ServerAuthFuture::Deny(Some(Status::permission_denied(reason)));
         };
 
+        // R-SEC-04：scope 承载方法 → 缓存 body 提取 key，做多 key scope 校验
+        if needs_scope_extraction(&rpc_method) {
+            let interceptor = self.interceptor.clone();
+            let mut inner = self.inner.clone();
+            // 复杂类型别名（clippy type_complexity）
+            type BoxedResponseFuture<E> =
+                Pin<Box<dyn Future<Output = Result<http::Response<tonic::body::Body>, E>> + Send>>;
+            let fut: BoxedResponseFuture<S::Error> = Box::pin(async move {
+                let (req, body_bytes) = buffer_request_body(req).await;
+
+                // body 读取失败 → 请求无法解析，直接拒绝（服务层本也会解码失败）
+                let Some(body) = body_bytes else {
+                    let reason = "failed to read request body";
+                    interceptor.record_audit_deny(&rpc_method, reason);
+                    return Ok(deny_response(Some(Status::invalid_argument(reason))));
+                };
+                let keys = match extract_scope_keys(&rpc_method, &body) {
+                    Ok(keys) => keys,
+                    Err(reason) => {
+                        interceptor.record_audit_deny(&rpc_method, &reason);
+                        return Ok(deny_response(Some(Status::invalid_argument(reason))));
+                    }
+                };
+                let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+                match interceptor.validate_keys(
+                    auth_header.as_deref(),
+                    None, // tower 层无法读取 TLS 对端证书 → 全量校验
+                    &capability_id,
+                    &key_refs,
+                ) {
+                    ServerAuthResult::Allow { .. } => match inner.ready().await {
+                        Ok(svc) => svc.call(req).await,
+                        Err(e) => Err(e),
+                    },
+                    ServerAuthResult::Deny { reason, .. } => {
+                        interceptor.record_audit_deny(&rpc_method, &reason);
+                        Ok(deny_response(Some(classify_denial(&reason))))
+                    }
+                }
+            });
+            return ServerAuthFuture::ScopeChecked(fut);
+        }
+
+        // 其他 RPC：同步判定（无 scope key 语义）
         match self.interceptor.validate(
             auth_header.as_deref(),
             None, // tower 层无法读取 TLS 对端证书 → 全量校验
@@ -618,6 +800,10 @@ where
 impl<S> ServerAuthService<S> {
     /// P2-08：记录鉴权拒绝审计事件（v1：tower 层无对端地址与主体身份，actor 记 anonymous）。
     fn audit_deny(&self, rpc_method: &str, reason: &str) {
+        // R-OBS-10：拒绝计数 + 审计
+        if let Some(ref metrics) = self.interceptor.metrics {
+            metrics.inc_auth_denied();
+        }
         if let Some(ref audit) = self.interceptor.audit {
             audit.record_event(
                 "anonymous",
@@ -645,13 +831,24 @@ pub fn classify_denial(reason: &str) -> Status {
     }
 }
 
-/// 鉴权中间件 future：放行转发 inner；拒绝返回 gRPC 错误响应。
-pub enum ServerAuthFuture<F> {
+/// 鉴权中间件 future：放行转发 inner；拒绝返回 gRPC 错误响应；
+/// `ScopeChecked` 承载"缓存 body → 提取 scope key → 多 key 校验"的异步路径（R-SEC-04）。
+pub enum ServerAuthFuture<F, E> {
     Allow(F),
     Deny(Option<Status>),
+    ScopeChecked(
+        Pin<Box<dyn Future<Output = Result<http::Response<tonic::body::Body>, E>> + Send>>,
+    ),
 }
 
-impl<F, E> Future for ServerAuthFuture<F>
+/// 将 gRPC 状态码转换为 HTTP 拒绝响应（scope 校验路径复用）。
+fn deny_response(status: Option<Status>) -> http::Response<tonic::body::Body> {
+    let status = status.unwrap_or_else(|| Status::permission_denied("denied"));
+    let (parts, ()) = status.into_http::<()>().into_parts();
+    http::Response::from_parts(parts, tonic::body::Body::empty())
+}
+
+impl<F, E> Future for ServerAuthFuture<F, E>
 where
     F: Future<Output = Result<http::Response<tonic::body::Body>, E>>,
 {
@@ -671,6 +868,7 @@ where
                 // 已就绪后重复 poll 属 Future 契约外行为：保持 Pending，避免 panic
                 None => Poll::Pending,
             },
+            ServerAuthFuture::ScopeChecked(fut) => fut.as_mut().poll(cx),
         }
     }
 }
@@ -700,7 +898,7 @@ mod tests {
     use super::*;
     use crate::auth::revocation::RevocationStore;
     use crate::auth::token_signing::TokenSigningKeyring;
-    use coord_core::auth::cct::{encode_cct, CctHeader, CctPayload};
+    use coord_core::auth::cct::{decode_cct, encode_cct, CctHeader, CctPayload};
 
     fn make_keyring() -> Arc<TokenSigningKeyring> {
         let root_key = vec![0u8; 32];
@@ -1245,5 +1443,109 @@ mod tests {
         assert!(ops.contains("coord:policy:manage"));
         assert!(ops.contains("coord:pki:issue"));
         assert!(ops.contains("coord:pki:revoke"));
+    }
+
+    // ──── R-SEC-04: scope key 提取（tower 层 body 解析） ────
+
+    #[test]
+    fn test_extract_scope_keys_put_range_delete() {
+        // Put
+        let mut put = coord_proto::kv::PutRequest::default();
+        put.key = b"/app/orders/1".to_vec();
+        let body = put.encode_to_vec();
+        assert_eq!(
+            extract_scope_keys("/coord.kv.KV/Put", &body).unwrap(),
+            vec![b"/app/orders/1".to_vec()]
+        );
+
+        // Range
+        let mut range = coord_proto::kv::RangeRequest::default();
+        range.key = b"/app/orders".to_vec();
+        let body = range.encode_to_vec();
+        assert_eq!(
+            extract_scope_keys("/coord.kv.KV/Range", &body).unwrap(),
+            vec![b"/app/orders".to_vec()]
+        );
+
+        // Delete
+        let mut del = coord_proto::kv::DeleteRequest::default();
+        del.key = b"/app/orders/9".to_vec();
+        let body = del.encode_to_vec();
+        assert_eq!(
+            extract_scope_keys("/coord.kv.KV/Delete", &body).unwrap(),
+            vec![b"/app/orders/9".to_vec()]
+        );
+    }
+
+    #[test]
+    fn test_extract_scope_keys_txn_collects_all_keys() {
+        let mut txn = coord_proto::txn::TxnRequest::default();
+        txn.compare.push(coord_proto::txn::Compare {
+            key: b"/a/cmp".to_vec(),
+            ..Default::default()
+        });
+        use coord_proto::txn::request_op::Op;
+        txn.success.push(coord_proto::txn::RequestOp {
+            op: Some(Op::RequestPut(coord_proto::kv::PutRequest {
+                key: b"/a/put".to_vec(),
+                ..Default::default()
+            })),
+        });
+        txn.failure.push(coord_proto::txn::RequestOp {
+            op: Some(Op::RequestRange(coord_proto::kv::RangeRequest {
+                key: b"/a/range".to_vec(),
+                ..Default::default()
+            })),
+        });
+        let body = txn.encode_to_vec();
+        let keys = extract_scope_keys("/coord.txn.Txn/Txn", &body).unwrap();
+        assert_eq!(
+            keys,
+            vec![b"/a/cmp".to_vec(), b"/a/put".to_vec(), b"/a/range".to_vec()]
+        );
+    }
+
+    #[test]
+    fn test_extract_scope_keys_parse_failure() {
+        assert!(extract_scope_keys("/coord.kv.KV/Put", b"\xff\xffgarbage").is_err());
+        // 非 scope 方法返回空列表
+        assert_eq!(
+            extract_scope_keys("/coord.auth.Auth/UserAdd", b"x").unwrap(),
+            Vec::<Vec<u8>>::new()
+        );
+    }
+
+    #[test]
+    fn test_validate_keys_requires_all_keys_in_scope() {
+        let keyring = make_keyring();
+        let rev = make_revocation_store();
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev, true);
+
+        // token 带 scope override：/app/orders/ 前缀
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("data:kv:write".to_string(), "/app/orders/".to_string());
+        let cct = make_test_cct(&keyring, vec![], overrides);
+
+        // 全部命中 → 放行
+        let result = interceptor.validate_keys(
+            Some(&cct),
+            None,
+            "data:kv:write",
+            &[b"/app/orders/1", b"/app/orders/2"],
+        );
+        assert!(matches!(result, ServerAuthResult::Allow { .. }));
+
+        // 任一越界 → 拒绝（fail-closed）
+        let result = interceptor.validate_keys(
+            Some(&cct),
+            None,
+            "data:kv:write",
+            &[b"/app/orders/1", b"/other/2"],
+        );
+        assert!(matches!(result, ServerAuthResult::Deny { .. }));
+
+        // 空列表 → 语义等同 None（带 scope 的 override fail-closed）
+        let result = interceptor.validate_keys(Some(&cct), None, "data:kv:write", &[]);
+        assert!(matches!(result, ServerAuthResult::Deny { .. }));
     }
 }

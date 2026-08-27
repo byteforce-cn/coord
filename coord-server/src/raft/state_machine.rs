@@ -25,6 +25,7 @@ use super::type_config::{Command, Response, TypeConfig};
 use crate::auth::manager::AuthManager;
 use crate::auth::revocation::RevocationStore;
 use crate::auth::token::TokenManager;
+use crate::metrics::Metrics;
 use crate::storage::mvcc::{
     AppliedLogId, ChangeEvent, EventType, KeyValueChange, MvccStorage, META_MEMBERSHIP,
     META_SNAPSHOT, TABLE_META,
@@ -78,6 +79,8 @@ pub struct StateMachineStore {
     pub revocation_store: Option<Arc<RevocationStore>>,
     /// 会话表视图（P2-07：IssueSession/ConsumeSession apply 后同步，可选）
     pub session_manager: Option<Arc<TokenManager>>,
+    /// 指标注册表（R-OBS-10：apply 延迟 / 快照耗时埋点，可选）
+    pub metrics: Option<Arc<Metrics>>,
 }
 
 // Manual Debug impl since MvccStorage may not be Debug
@@ -109,7 +112,6 @@ impl StateMachineStore {
         let mut last_membership =
             StoredMembershipOf::<TypeConfig>::new(None, empty_membership.clone());
         let mut current_snapshot: Option<StoredSnapshot> = None;
-
         // 1. 从 META_SNAPSHOT 加载（A.5 步骤 1）
         let persisted = state_machine
             .backend()
@@ -195,6 +197,7 @@ impl StateMachineStore {
             auth_manager: None,
             revocation_store: None,
             session_manager: None,
+            metrics: None,
         }
     }
 
@@ -313,6 +316,35 @@ impl StateMachineStore {
                 };
                 Ok((Response::Delete { revision }, event))
             }
+            Command::DeleteRange { key, range_end } => {
+                let outcome = sm
+                    .delete_range_at_revision(key, range_end, revision, applied)
+                    .map_err(io_err)?;
+                let event = if outcome.replayed {
+                    None
+                } else {
+                    Some(ChangeEvent {
+                        revision,
+                        changes: outcome
+                            .deleted_keys
+                            .iter()
+                            .map(|k| KeyValueChange {
+                                key: k.clone(),
+                                value: None,
+                                prev_value: None,
+                            })
+                            .collect(),
+                        event_type: EventType::Delete,
+                    })
+                };
+                Ok((
+                    Response::DeleteRange {
+                        revision,
+                        deleted: outcome.deleted_keys.len() as u64,
+                    },
+                    event,
+                ))
+            }
             Command::Txn {
                 compares,
                 success_ops,
@@ -334,6 +366,11 @@ impl StateMachineStore {
                 let result = sm
                     .execute_txn_at_revision(compares, success_ops, failure_ops, revision, applied)
                     .map_err(io_err)?;
+
+                // R-OBS-10：Txn 计数（条件不满足 = 冲突）
+                if let Some(metrics) = &self.metrics {
+                    metrics.record_txn(!result.succeeded);
+                }
 
                 // 从 Txn 操作中提取变更 Key
                 // 将 success/failure 分支的操作转为 changes
@@ -462,6 +499,8 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
     {
         let entries: Vec<EntryResponder<TypeConfig>> = entries.try_collect().await?;
         let sm: &MvccStorage<RedbBackend> = &self.state_machine;
+        // R-OBS-10：apply 耗时埋点
+        let apply_start = std::time::Instant::now();
 
         for (entry, maybe_responder) in entries {
             let response = match &entry.payload {
@@ -497,6 +536,11 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                 responder.send(response);
             }
         }
+
+        // R-OBS-10：记录 apply 耗时
+        if let Some(metrics) = &self.metrics {
+            metrics.record_apply(apply_start.elapsed().as_micros() as u64);
+        }
         Ok(())
     }
 
@@ -513,8 +557,10 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
         // 恢复快照数据到 MvccStorage
         if !data.is_empty() {
-            let snapshot_data =
-                SnapshotData::from_bytes(&data).map_err(|e| io::Error::other(e.to_string()))?;
+            let snapshot_data = SnapshotData::from_bytes_migrating(&data)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            // R-RFT-06：快照携带完整 applied LogId（term/node_id/index），
+            // 导入时不再降级为 AppliedLogId::standalone（term/node_id 置零）
             import_snapshot_data(&self.state_machine, &snapshot_data)
                 .map_err(|e| io::Error::other(e.to_string()))?;
         }
@@ -567,6 +613,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             auth_manager: None,
             revocation_store: None,
             session_manager: None,
+            metrics: self.metrics.clone(),
         }
     }
 }
@@ -672,6 +719,8 @@ impl StateMachineStore {
 
 impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
     async fn build_snapshot(&mut self) -> Result<SnapshotOf<TypeConfig>, io::Error> {
+        // R-OBS-10：快照构建耗时埋点
+        let snapshot_start = std::time::Instant::now();
         let mut idx = self.snapshot_idx.lock();
         *idx += 1;
 
@@ -709,6 +758,11 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
             meta,
             data: data_bytes,
         });
+
+        // R-OBS-10：记录快照构建耗时
+        if let Some(metrics) = &self.metrics {
+            metrics.record_snapshot(snapshot_start.elapsed().as_micros() as u64);
+        }
 
         Ok(snapshot)
     }

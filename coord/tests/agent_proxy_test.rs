@@ -124,6 +124,7 @@ mod tests {
             Arc::clone(&mvcc),
             compaction_config,
             Some(compaction_proposer),
+            None,
         );
 
         let kv_svc = KvServer::from_arc(Arc::clone(&node));

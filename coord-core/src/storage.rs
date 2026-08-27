@@ -28,6 +28,18 @@ pub trait StorageBackend: Send + Sync {
     /// 触发 Compaction，清理不再被活跃事务引用的旧版本数据。
     fn compact(&self) -> Result<()>;
 
+    /// R-RFT-19：等待 `idle` 时长的无写入静默期后执行 compact。
+    ///
+    /// 默认实现直接 `compact()`；能跟踪写入活动的后端（RedbBackend）覆盖此
+    /// 方法，将维护压缩与在线读写窗口错开（规避 redb 独占写锁的长事务窗口）。
+    fn compact_with_idle_window(
+        &self,
+        _idle: std::time::Duration,
+        _max_wait: std::time::Duration,
+    ) -> Result<()> {
+        self.compact()
+    }
+
     /// 返回数据库文件在磁盘上的大小（字节）。
     fn disk_size_bytes(&self) -> Result<u64>;
 
@@ -44,6 +56,12 @@ pub trait ReadTx {
 
     /// 前缀扫描指定表的 Key 范围
     fn iter_prefix(&self, table: &str, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+
+    /// 区间扫描指定表的 Key 范围 `[start, end)`（半开区间；end 为空表示扫描到表尾）
+    ///
+    /// R-SVC-07：支撑 `[key, range_end)` 半开区间语义。返回的 Key 满足
+    /// `start <= key` 且（end 非空时）`key < end`，按 Key 字典序排列。
+    fn iter_range(&self, table: &str, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
 }
 
 /// 读写事务句柄

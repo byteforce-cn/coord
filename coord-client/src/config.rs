@@ -4,6 +4,45 @@
 
 use std::time::Duration;
 
+/// 客户端 TLS 配置（PEM 字节，与 coord-agent 的 AgentTlsConfig 对应）
+///
+/// - `ca_pem`：CA 证书（PEM），用于校验服务端证书（必需）；
+/// - `client_cert_pem` / `client_key_pem`：mTLS 客户端身份（可选，成对提供）；
+/// - `server_name`：TLS SNI / server name 覆盖（可选；缺省由 endpoint host 派生，
+///   与证书 SAN 严格校验）。
+#[derive(Debug, Clone, Default)]
+pub struct TlsConfig {
+    /// CA 证书（PEM 字节）
+    pub ca_pem: Vec<u8>,
+    /// 客户端证书（PEM 字节，mTLS）
+    pub client_cert_pem: Option<Vec<u8>>,
+    /// 客户端私钥（PEM 字节，mTLS）
+    pub client_key_pem: Option<Vec<u8>>,
+    /// TLS SNI / server name 覆盖
+    pub server_name: Option<String>,
+}
+
+impl TlsConfig {
+    /// 构建 tonic `ClientTlsConfig`（用于 Endpoint `.tls_config(...)`）
+    pub fn to_tonic(&self) -> tonic::transport::channel::ClientTlsConfig {
+        let ca = tonic::transport::Certificate::from_pem(&self.ca_pem);
+        let mut tls = tonic::transport::channel::ClientTlsConfig::new().ca_certificate(ca);
+        if let Some(name) = &self.server_name {
+            tls = tls.domain_name(name.clone());
+        }
+        if let (Some(cert), Some(key)) = (&self.client_cert_pem, &self.client_key_pem) {
+            let identity = tonic::transport::Identity::from_pem(cert, key);
+            tls = tls.identity(identity);
+        }
+        tls
+    }
+
+    /// 是否配置了 mTLS 客户端身份
+    pub fn is_mtls(&self) -> bool {
+        self.client_cert_pem.is_some() && self.client_key_pem.is_some()
+    }
+}
+
 /// 客户端配置
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -33,6 +72,9 @@ pub struct Config {
 
     /// 连接空闲超时（超过此时间自动关闭，默认 5 分钟）
     pub connection_idle_timeout: Duration,
+
+    /// TLS/mTLS 通道配置（None = 明文 http，仅限开发环境）
+    pub tls: Option<TlsConfig>,
 }
 
 impl Config {
@@ -54,6 +96,7 @@ impl Config {
             retry_max_backoff: Duration::from_millis(1600),
             connections_per_endpoint: 2,
             connection_idle_timeout: Duration::from_secs(300),
+            tls: None,
         }
     }
 
@@ -66,6 +109,12 @@ impl Config {
     /// 设置最大重试次数
     pub fn with_max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
+        self
+    }
+
+    /// 设置 TLS/mTLS 通道配置（PEM 字节；Server 集群启用 TLS 时必需）
+    pub fn with_tls(mut self, tls: TlsConfig) -> Self {
+        self.tls = Some(tls);
         self
     }
 }

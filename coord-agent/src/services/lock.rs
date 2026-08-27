@@ -10,7 +10,8 @@
 //
 // 参见 docs/client-agent-architecture-v3.md §5.3。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -139,21 +140,117 @@ impl LockCache {
 
     /// 清理已过期的锁记录
     pub fn cleanup_expired(&mut self) -> usize {
+        let names = self.cleanup_expired_names();
+        names.len()
+    }
+
+    /// 清理已过期的锁记录并返回被清理的锁名（供调用方唤醒等待者）
+    pub fn cleanup_expired_names(&mut self) -> Vec<String> {
         let expired: Vec<String> = self
             .held
             .values()
             .filter(|info| info.is_expired())
             .map(|info| info.name.clone())
             .collect();
-        let count = expired.len();
         for name in &expired {
             self.held.remove(name);
         }
-        count
+        expired
+    }
+
+    /// 刷新锁的续期时间戳（R-AGT-12：续期成功后调用）。
+    ///
+    /// 续期成功即代表 Lease 依然有效，`acquired_at` 须同步刷新，
+    /// 否则 `cleanup_expired` 会在一个 TTL 周期后误判过期并停止续约 → 丢锁。
+    /// 返回是否命中该锁（holder 不匹配视为未命中）。
+    pub fn touch(&mut self, name: &str, holder_id: &str) -> bool {
+        match self.held.get_mut(name) {
+            Some(info) if info.holder_id == holder_id => {
+                info.acquired_at = unix_ts();
+                true
+            }
+            _ => false,
+        }
     }
 }
 
 impl Default for LockCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ──── LockWaitQueue（R-AGT-12：公平锁 FIFO 等待队列）────
+
+/// 等待队列中的单个等待者
+struct Waiter {
+    /// 唯一标识（用于超时后从队列中移除自己）
+    id: u64,
+    /// 唤醒信号：锁被释放/失效时 notify
+    tx: watch::Sender<()>,
+}
+
+/// 按锁名组织的 FIFO 等待队列。
+///
+/// 释放锁或本地锁记录被清理时 `notify_next` 唤醒队首等待者；
+/// 等待者超时后按 id 将自己从队列移除，避免陈旧条目堆积。
+/// 被唤醒但未抢到锁的等待者会重新排队（队尾），保持整体 FIFO。
+pub struct LockWaitQueue {
+    queues: HashMap<String, VecDeque<Waiter>>,
+}
+
+impl LockWaitQueue {
+    pub fn new() -> Self {
+        Self {
+            queues: HashMap::new(),
+        }
+    }
+
+    /// 入队（FIFO 尾部）
+    fn enqueue(&mut self, name: &str, id: u64, tx: watch::Sender<()>) {
+        self.queues
+            .entry(name.to_string())
+            .or_default()
+            .push_back(Waiter { id, tx });
+    }
+
+    /// 移除指定等待者（超时/取消时调用）
+    fn remove(&mut self, name: &str, id: u64) {
+        if let Some(queue) = self.queues.get_mut(name) {
+            queue.retain(|w| w.id != id);
+            if queue.is_empty() {
+                self.queues.remove(name);
+            }
+        }
+    }
+
+    /// 唤醒队首等待者（接收端已取消的条目顺延）。
+    ///
+    /// 返回是否实际唤醒了一个等待者。
+    fn notify_next(&mut self, name: &str) -> bool {
+        let Some(queue) = self.queues.get_mut(name) else {
+            return false;
+        };
+        while let Some(waiter) = queue.pop_front() {
+            if waiter.tx.send(()).is_ok() {
+                if queue.is_empty() {
+                    self.queues.remove(name);
+                }
+                return true;
+            }
+        }
+        self.queues.remove(name);
+        false
+    }
+
+    /// 某锁当前等待者数量（测试断言用）
+    #[cfg(test)]
+    fn len(&self, name: &str) -> usize {
+        self.queues.get(name).map(|q| q.len()).unwrap_or(0)
+    }
+}
+
+impl Default for LockWaitQueue {
     fn default() -> Self {
         Self::new()
     }
@@ -173,6 +270,10 @@ pub struct LockService {
     healthy: ParkingRwLock<bool>,
     /// 关闭信号发送端
     shutdown_tx: ParkingRwLock<Option<watch::Sender<()>>>,
+    /// FIFO 公平等待队列（R-AGT-12）
+    waiters: Arc<ParkingRwLock<LockWaitQueue>>,
+    /// 等待者 id 生成器
+    next_waiter_id: AtomicU64,
 }
 
 impl LockService {
@@ -186,6 +287,8 @@ impl LockService {
             cache: Arc::new(ParkingRwLock::new(LockCache::new())),
             healthy: ParkingRwLock::new(false),
             shutdown_tx: ParkingRwLock::new(None),
+            waiters: Arc::new(ParkingRwLock::new(LockWaitQueue::new())),
+            next_waiter_id: AtomicU64::new(1),
         }
     }
 
@@ -291,6 +394,9 @@ impl LockService {
         // 从本地缓存移除
         self.cache.write().remove(name);
 
+        // R-AGT-12：唤醒队首等待者（公平锁）
+        self.waiters.write().notify_next(name);
+
         tracing::info!(
             "LockService: released lock '{name}' (holder='{holder_id}', lease={})",
             lock_info.lease_id
@@ -320,11 +426,69 @@ impl LockService {
             .await
             .map_err(|e| format!("failed to renew lock '{name}': {e}"))?;
 
+        // R-AGT-12：续期成功即刷新 acquired_at，防止 cleanup_expired 误判过期丢锁
+        self.cache.write().touch(name, holder_id);
+
         tracing::debug!(
             "LockService: renewed lock '{name}' (lease={})",
             lock_info.lease_id
         );
         Ok(true)
+    }
+
+    /// 阻塞获取锁（R-AGT-12：FIFO 公平等待，可选超时）。
+    ///
+    /// 立即尝试一次；失败后按 FIFO 排队等待，锁被释放/失效时被唤醒后重试。
+    /// 支持 `timeout`（`None` = 无限等待）；超时返回 `Ok(None)`。
+    /// 返回 `Some(lock)` 表示获取成功。
+    pub async fn acquire_blocking(
+        &self,
+        name: &str,
+        holder_id: &str,
+        ttl_secs: u64,
+        timeout: Option<Duration>,
+    ) -> ServiceResult<Option<LockInfo>> {
+        let waiter_id = self.next_waiter_id.fetch_add(1, Ordering::Relaxed);
+
+        loop {
+            // 快速路径：立即尝试一次
+            if let Some(lock) = self.acquire(name, holder_id, ttl_secs).await? {
+                return Ok(Some(lock));
+            }
+
+            // 排队（FIFO 尾部）
+            let (tx, mut rx) = watch::channel(());
+            let lock_was_released;
+            {
+                let mut waiters = self.waiters.write();
+                waiters.enqueue(name, waiter_id, tx);
+                // 双检：排队窗口内锁可能已被释放，此时直接重试而非等待
+                lock_was_released = self.cache.read().get(name).is_none();
+            }
+            if lock_was_released {
+                continue;
+            }
+
+            // 等待唤醒或超时
+            let wait_fut = async {
+                let _ = rx.changed().await;
+            };
+            match timeout {
+                Some(t) => {
+                    if tokio::time::timeout(t, wait_fut).await.is_err() {
+                        self.waiters.write().remove(name, waiter_id);
+                        tracing::debug!(
+                            "LockService: acquire_blocking('{name}') timed out after {t:?}"
+                        );
+                        return Ok(None);
+                    }
+                }
+                None => {
+                    wait_fut.await;
+                }
+            }
+            // 被唤醒后回到循环顶部重试；未抢到则重新排队（保持整体 FIFO）
+        }
     }
 
     /// 查询锁状态
@@ -377,6 +541,7 @@ impl BaseService for LockService {
 
         let cache = self.cache.clone();
         let inner = self.inner.clone();
+        let waiters = self.waiters.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -386,9 +551,13 @@ impl BaseService for LockService {
                     }
                     _ = tokio::time::sleep(Duration::from_secs(10)) => {
                         // 先清理本地已过期的锁记录（避免对已失效的 lease 发起无效续期）
-                        let cleaned = cache.write().cleanup_expired();
-                        if cleaned > 0 {
-                            tracing::debug!("LockService: cleaned up {} expired lock(s) from local cache", cleaned);
+                        let expired_names = cache.write().cleanup_expired_names();
+                        if !expired_names.is_empty() {
+                            tracing::debug!("LockService: cleaned up {} expired lock(s) from local cache", expired_names.len());
+                            // R-AGT-12：锁失效同样唤醒等待者
+                            for name in &expired_names {
+                                waiters.write().notify_next(name);
+                            }
                         }
 
                         // 定期续期本地持有的锁（在 TTL 的 1/3 处续期）
@@ -399,12 +568,16 @@ impl BaseService for LockService {
                                 if unix_ts() >= renew_at {
                                     match inner.client.lease().keep_alive(info.lease_id).await {
                                         Ok(_) => {
+                                            // R-AGT-12：续期成功刷新 acquired_at，避免误判过期
+                                            cache.write().touch(&info.name, &info.holder_id);
                                             tracing::debug!("LockService: auto-renewed lock '{}' (lease={})", info.name, info.lease_id);
                                         }
                                         Err(e) => {
                                             // lease 已失效（服务端重启、TTL 到期等），从本地缓存移除
                                             tracing::warn!("LockService: failed to auto-renew lock '{}' (lease={}): {} — removing from local cache", info.name, info.lease_id, e);
                                             cache.write().remove(&info.name);
+                                            // R-AGT-12：锁失效唤醒等待者
+                                            waiters.write().notify_next(&info.name);
                                         }
                                     }
                                 }
@@ -600,5 +773,91 @@ mod tests {
         // 因此 holder-B 不会调用 cache.add()。
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.get("my-lock").unwrap().holder_id, "holder-A");
+    }
+
+    // ──── R-AGT-12: 续期刷新 acquired_at ────
+
+    #[test]
+    fn test_lock_cache_touch_refreshes_acquired_at() {
+        let mut cache = LockCache::new();
+        let past = unix_ts() - 100;
+        cache.add(LockInfo {
+            name: "long-held".into(),
+            holder_id: "h1".into(),
+            lease_id: 7,
+            acquired_at: past,
+            ttl_secs: 30,
+        });
+
+        // 未 touch 前：已过期
+        assert!(cache.get("long-held").unwrap().is_expired());
+
+        // 续期成功 → touch：acquired_at 刷新，不再过期
+        assert!(cache.touch("long-held", "h1"));
+        let info = cache.get("long-held").unwrap();
+        assert!(!info.is_expired());
+        assert!(info.acquired_at >= past + 99);
+    }
+
+    #[test]
+    fn test_lock_cache_touch_wrong_holder_rejected() {
+        let mut cache = LockCache::new();
+        cache.add(LockInfo::new("l", "h1", 1, 30));
+        assert!(!cache.touch("l", "h2"));
+        assert!(!cache.touch("missing", "h1"));
+    }
+
+    // ──── R-AGT-12: FIFO 公平等待队列 ────
+
+    #[tokio::test]
+    async fn test_lock_wait_queue_fifo_order() {
+        let mut q = LockWaitQueue::new();
+        let (tx1, mut rx1) = watch::channel(());
+        let (tx2, mut rx2) = watch::channel(());
+        let (tx3, mut rx3) = watch::channel(());
+        q.enqueue("l", 1, tx1);
+        q.enqueue("l", 2, tx2);
+        q.enqueue("l", 3, tx3);
+        assert_eq!(q.len("l"), 3);
+
+        // 唤醒顺序必须为 1 → 2 → 3（FIFO）
+        assert!(q.notify_next("l"));
+        assert!(rx1.changed().await.is_ok());
+        assert_eq!(q.len("l"), 2);
+
+        assert!(q.notify_next("l"));
+        assert!(rx2.changed().await.is_ok());
+        assert_eq!(q.len("l"), 1);
+
+        assert!(q.notify_next("l"));
+        assert!(rx3.changed().await.is_ok());
+        assert_eq!(q.len("l"), 0);
+
+        // 空队列唤醒返回 false
+        assert!(!q.notify_next("l"));
+    }
+
+    #[tokio::test]
+    async fn test_lock_wait_queue_remove_stale_and_skip_cancelled() {
+        let mut q = LockWaitQueue::new();
+        let (tx1, _rx1) = watch::channel(());
+        let (tx2, mut rx2) = watch::channel(());
+        q.enqueue("l", 1, tx1);
+        q.enqueue("l", 2, tx2);
+
+        // 等待者 1 超时 → 从队列移除
+        q.remove("l", 1);
+        assert_eq!(q.len("l"), 1);
+
+        // 唤醒队首（此时是 2）
+        assert!(q.notify_next("l"));
+        assert!(rx2.changed().await.is_ok());
+
+        // 已取消接收端的等待者会被顺延跳过
+        let (tx3, _rx3_dropped) = watch::channel(());
+        drop(_rx3_dropped);
+        q.enqueue("l", 3, tx3);
+        assert!(!q.notify_next("l"));
+        assert_eq!(q.len("l"), 0);
     }
 }

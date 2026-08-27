@@ -9,7 +9,7 @@
 </div>
 
 - **Coord** 是一个分布式协调服务，为微服务架构提供 KV 存储、原子事务、租约管理、变更监听、服务注册与工作流编排等核心原语。Coord 采用 Raft 共识协议保证数据强一致性（生产形态为**单 Raft 组 + 定期快照备份**；Multi-Raft/PD 为 experimental、未接入生产路径），并通过 Agent 模式为 Java 微服务提供零代码接入体验。
-- 当前应用由 deepseek v4 协助开发，主要验证研究 deepseek v4 在中大型项目的代码能力，**不可以用于真实业务**
+- **⚠️ 当前处于生产化重构中（M1 止血阶段），尚未达到生产可用**。底层 Raft + MVCC 已真实重建，但静态加密未接线、快照链路不可信、Range/Txn 语义有缺陷、follower 写不可重定向、关键指标零写入方——详见 [`docs/production/17-refactor-master-plan.md`](docs/production/17-refactor-master-plan.md)（唯一现行执行文档）。以下特性表按「组件级 / 集成级 / 生产验证级」三级口径标注。
 ---
 
 ## 架构概览
@@ -43,20 +43,24 @@ graph TD
 
 | 原语 | 描述 | 状态 |
 |:---|:---|:---:|
-| **KV** | 分布式 Key-Value 存储，支持 Put/Get/Delete/Range | ✅ |
-| **Txn** | Compare-And-Swap 原子事务，支持多操作原子提交 | ✅ |
-| **Watch** | Key 变更监听，支持前缀匹配与历史回放 | ✅ |
-| **Lease** | 租约管理（Grant/Revoke/KeepAlive），支持 Key 绑定自动过期 | ✅ |
-| **Lock** | 分布式锁 API | ✅ |
-| **Registry** | 服务注册/发现，与 Lease 绑定实现自动过期 | ✅ |
-| **Workflow** | 工作流状态机编排 + Saga 补偿执行器 | ✅ |
-| **Auth/RBAC** | 认证鉴权（用户/角色/权限），令牌管理 | ✅ |
-| **TLS/mTLS** | 传输层安全加密 | ✅ |
-| **Barrier** | AES-256-GCM 存储加密（静止数据保护） | ✅ |
-| **Seal/Unseal** | Shamir Secret Sharing 密钥分片管理 | ✅ |
+| **KV** | 分布式 Key-Value 存储，支持 Put/Get/Delete/Range | ⚠️ 集成级（R-SVC-07 已修：半开区间 [key, range_end) 语义、历史 revision 读、原子范围删除；未过故障演练） |
+| **Txn** | Compare-And-Swap 原子事务，支持多操作原子提交 | ⚠️ 集成级（R-SVC-07 已修：Txn 内 Range 过滤软删 key；未过故障演练） |
+| **Watch** | Key 变更监听，支持前缀匹配与历史回放 | ✅ 集成级 |
+| **Lease** | 租约管理（Grant/Revoke/KeepAlive），支持 Key 绑定自动过期 | ✅ 集成级 |
+| **Lock** | 分布式锁 API | ⚠️ 集成级（R-AGT-12 已修：续期刷新 `acquired_at` + FIFO 公平等待队列；未过故障演练） |
+| **Registry** | 服务注册/发现，与 Lease 绑定实现自动过期 | ⚠️ 集成级（R-AGT-11 已修：实例真实 TCP 探测 + 跨节点 watch 回灌；未过故障演练） |
+| **Workflow** | 工作流状态机编排 + Saga 补偿执行器 | ⚠️ 集成级（R-AGT-09 已接线：KvWorkflowStore raft 持久化 + 启动全量重建 + watch 断连对账） |
+| **Auth/RBAC** | 认证鉴权（用户/角色/权限），令牌管理 | ⚠️ 集成级（R-SEC-04 已修：scope 级 RBAC 接线（body 提取 scope key）+ 管理接口二次校验；CCT 已转 Ed25519 非对称签发，R-SEC-02；登录限流已前置） |
+| **TLS/mTLS** | 传输层安全加密 | ⚠️ 集成级（R-SEC-03：raft 端口 mTLS/共享密钥 fail-closed；**2026-08-25 收口**：CLI `--tls-*` 直连 TLS 集群、agent 入站 gRPC TLS 真实挂载、复制通道 TLS 客户端均已落地，见 `docs/transport-security.md`） |
+| **Barrier** | AES-256-GCM 存储加密（静止数据保护） | ⚠️ 集成级（R-SEC-01 已接线：`encryption_enabled` 开关 + 仅加密 `/kv/` 用户数据；默认关闭） |
+| **Seal/Unseal** | Shamir Secret Sharing 密钥分片管理 | ⚠️ 集成级（R-SEC-01 已接线：真实 Seal/Unseal/status + root 密钥模式；Shamir 分片解封路径可用） |
 | **Multi-Raft** | Region 分片 + PD 调度（experimental，组件级、未接入生产路径；生产形态为单 Raft 组） | ⚠️ experimental |
-| **Compaction** | 自动 MVCC 版本压缩 | ✅ |
-| **Snapshot** | 快照创建/恢复 | ✅ |
+| **Compaction** | 自动 MVCC 版本压缩 | ✅ 集成级 |
+| **Snapshot** | 快照创建/恢复 | ⚠️ 集成级（R-RFT-06 已修：单事务导出、auth/lease/compacted 入快照、完整 LogId、2MiB 分块流式传输；未过故障演练） |
+| **cache-mq** | Agent 侧 Cache/MQ（ISR 复制为 experimental） | ⚠️ experimental（非原子提交、无故障转移，R-AGT-13） |
+| **可观测性** | Prometheus 指标 / 健康检查 | ⚠️ 集成级（R-OBS-10 已接线：watch/apply/txn/快照/compaction/auth/storage 指标 + grpc-status 错误判定） |
+| **Jepsen** | 线性一致性验证 | 🔴 未落地（`jepsen_real` 缺失，R-TST-16） |
+| **部署交付物** | compose/K8s 清单 + 监控面板 | ⚠️ 已入仓（R-OBS-15：`deploy/docker-compose` + `deploy/k8s` + `monitoring` + `config.example.toml`；待 kind/72h 验证） |
 
 ## 项目结构
 

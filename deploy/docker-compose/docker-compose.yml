@@ -1,0 +1,133 @@
+# coord-server 三节点集群（docker compose）
+#
+# R-OBS-15 交付物：`docker compose up -d` 拉起 3 节点 raft 集群，可读写。
+# 使用前：
+#   1. 复制 .env.example 为 .env 并填写三个共享密钥（三节点必须一致）；
+#   2. 构建镜像：docker compose build
+#
+# 说明：
+#   - auth_root_key / raft_shared_secret / root_password 经 .env 注入各节点配置；
+#     未填写时启动校验拒绝（fail-closed，R-SEC-04）；
+#   - 传输层 mTLS 默认开启（gRPC + raft）：首次启动前运行 ./certs/gen-certs.sh，
+#     证书挂载到 /etc/coord/tls，缺 CA 拒绝启动（fail-closed，R-SEC）；
+#   - coord-1 为 bootstrap 节点，coord-2/3 join（join 同样走 TLS）；
+#   - raft 端口保留共享密钥 HMAC 认证（R-SEC-03）；鉴权默认开启（P0-C.1）。
+
+name: coord-cluster
+
+services:
+  coord-1:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: byteforce/coord:local
+    container_name: coord-1
+    # 由 .env 的 AUTH_ROOT_KEY/RAFT_SHARED_SECRET 替换 conf 模板占位符（R-SEC-04）。
+    # 未填写时占位符保留，启动校验拒绝（fail-closed）。
+    # exec 确保 SIGTERM 直达 coord（领导权移交需要）。
+    command:
+      - /bin/sh
+      - -c
+      - |
+        sed \
+          -e "s|__FILL_AUTH_ROOT_KEY__|$${AUTH_ROOT_KEY}|g" \
+          -e "s|__FILL_RAFT_SHARED_SECRET__|$${RAFT_SHARED_SECRET}|g" \
+          /etc/coord/coord.toml > /tmp/coord-rendered.toml && \
+        exec coord server --config /tmp/coord-rendered.toml --bootstrap
+    environment:
+      COORD_ROOT_PASSWORD: ${ROOT_PASSWORD:-}
+      AUTH_ROOT_KEY: ${AUTH_ROOT_KEY:?AUTH_ROOT_KEY is required (see .env.example)}
+      RAFT_SHARED_SECRET: ${RAFT_SHARED_SECRET:?RAFT_SHARED_SECRET is required (see .env.example)}
+    volumes:
+      - coord-1-data:/var/lib/coord
+      - ./conf/coord-1.toml:/etc/coord/coord.toml:ro
+      - ./certs:/etc/coord/tls:ro
+    ports:
+      - "50051:50051"   # gRPC
+      - "50061:50061"   # HTTP /metrics /healthz
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:50061/healthz"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    restart: unless-stopped
+
+  coord-2:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: byteforce/coord:local
+    container_name: coord-2
+    command:
+      - /bin/sh
+      - -c
+      - |
+        sed \
+          -e "s|__FILL_AUTH_ROOT_KEY__|$${AUTH_ROOT_KEY}|g" \
+          -e "s|__FILL_RAFT_SHARED_SECRET__|$${RAFT_SHARED_SECRET}|g" \
+          /etc/coord/coord.toml > /tmp/coord-rendered.toml && \
+        exec coord server --config /tmp/coord-rendered.toml
+    environment:
+      COORD_ROOT_PASSWORD: ${ROOT_PASSWORD:-}
+      AUTH_ROOT_KEY: ${AUTH_ROOT_KEY:?AUTH_ROOT_KEY is required (see .env.example)}
+      RAFT_SHARED_SECRET: ${RAFT_SHARED_SECRET:?RAFT_SHARED_SECRET is required (see .env.example)}
+    volumes:
+      - coord-2-data:/var/lib/coord
+      - ./conf/coord-2.toml:/etc/coord/coord.toml:ro
+      - ./certs:/etc/coord/tls:ro
+    ports:
+      - "50052:50051"
+      - "50062:50061"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:50061/healthz"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    depends_on:
+      coord-1:
+        condition: service_healthy
+    restart: unless-stopped
+
+  coord-3:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: byteforce/coord:local
+    container_name: coord-3
+    command:
+      - /bin/sh
+      - -c
+      - |
+        sed \
+          -e "s|__FILL_AUTH_ROOT_KEY__|$${AUTH_ROOT_KEY}|g" \
+          -e "s|__FILL_RAFT_SHARED_SECRET__|$${RAFT_SHARED_SECRET}|g" \
+          /etc/coord/coord.toml > /tmp/coord-rendered.toml && \
+        exec coord server --config /tmp/coord-rendered.toml
+    environment:
+      COORD_ROOT_PASSWORD: ${ROOT_PASSWORD:-}
+      AUTH_ROOT_KEY: ${AUTH_ROOT_KEY:?AUTH_ROOT_KEY is required (see .env.example)}
+      RAFT_SHARED_SECRET: ${RAFT_SHARED_SECRET:?RAFT_SHARED_SECRET is required (see .env.example)}
+    volumes:
+      - coord-3-data:/var/lib/coord
+      - ./conf/coord-3.toml:/etc/coord/coord.toml:ro
+      - ./certs:/etc/coord/tls:ro
+    ports:
+      - "50053:50051"
+      - "50063:50061"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:50061/healthz"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    depends_on:
+      coord-1:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  coord-1-data:
+  coord-2-data:
+  coord-3-data:

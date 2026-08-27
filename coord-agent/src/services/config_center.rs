@@ -192,6 +192,8 @@ pub struct ConfigCenterService {
     shutdown_tx: ParkingRwLock<Option<watch::Sender<()>>>,
     /// Watch 事件广播（用于 gRPC Watch 流）
     watch_tx: tokio::sync::broadcast::Sender<ConfigWatchEvent>,
+    /// R-AGT-20：资源隔离线程池（可选；watch 任务经 background 池）
+    pools: Option<Arc<crate::threadpool::AgentThreadPools>>,
 }
 
 impl ConfigCenterService {
@@ -207,7 +209,17 @@ impl ConfigCenterService {
             healthy: ParkingRwLock::new(false),
             shutdown_tx: ParkingRwLock::new(None),
             watch_tx,
+            pools: None,
         }
+    }
+
+    /// R-AGT-20：挂载资源隔离线程池（watch 后台任务经 background 池）。
+    pub fn with_thread_pools(
+        mut self,
+        pools: Option<Arc<crate::threadpool::AgentThreadPools>>,
+    ) -> Self {
+        self.pools = pools;
+        self
     }
 
     /// 设置配置（写入 Server + 更新本地缓存）
@@ -290,14 +302,24 @@ impl ConfigCenterService {
 
     /// 从 Server 全量加载配置
     pub async fn load_all(&self) -> ServiceResult<Vec<ConfigEntry>> {
+        let entries = Self::reload_from_server(&self.inner, &self.cache).await?;
+        let count = entries.len();
+        tracing::info!("ConfigCenter: loaded {count} configs from server");
+        Ok(entries)
+    }
+
+    /// R-AGT-14：从 Server 全量重载并覆盖本地缓存（启动恢复 / 断连对账共用）。
+    async fn reload_from_server(
+        inner: &Arc<AgentInner>,
+        cache: &Arc<ParkingRwLock<ConfigCache>>,
+    ) -> Result<Vec<ConfigEntry>, String> {
         let prefix = b"/_config/";
         let mut range_end = prefix.to_vec();
         if let Some(last) = range_end.last_mut() {
             *last = last.wrapping_add(1);
         }
 
-        let pairs = self
-            .inner
+        let pairs = inner
             .client
             .kv()
             .range(prefix, &range_end, 0, 0)
@@ -309,9 +331,7 @@ impl ConfigCenterService {
             .filter_map(|(_k, v)| serde_json::from_slice(&v).ok())
             .collect();
 
-        let count = entries.len();
-        self.cache.write().load_full(entries.clone());
-        tracing::info!("ConfigCenter: loaded {count} configs from server");
+        cache.write().load_full(entries.clone());
         Ok(entries)
     }
 
@@ -352,77 +372,126 @@ impl BaseService for ConfigCenterService {
 
         let inner = self.inner.clone();
         let cache = self.cache.clone();
-        tokio::spawn(async move {
+        let watch_task = async move {
             tracing::info!("ConfigCenterService: Watch background task started");
-            let prefix = b"/_config/";
+            let prefix: &[u8] = b"/_config/";
+            // R-AGT-14：水位续传——记录最近一次成功接收的事件 revision，
+            // 断连重连时从该水位继续，避免窗口内变更丢失。
+            let mut last_rev: i64 = 0;
+            let mut attempt: u32 = 0;
 
-            // 首次订阅 Watch
-            let mut event_rx = match inner.client.watch().watch(prefix, 0).await {
-                Ok(rx) => rx,
-                Err(e) => {
-                    tracing::warn!(
-                        "ConfigCenterService: failed to subscribe Watch: {e}; entering fallback"
-                    );
-                    cache.write().enter_fallback();
-                    return;
-                }
-            };
-
-            loop {
-                tokio::select! {
-                    _ = rx.changed() => {
-                        tracing::info!("ConfigCenterService: Watch background task shutting down");
-                        break;
+            'outer: loop {
+                // 订阅 Watch（水位 = 0 从最新开始，>0 续传）
+                let event_rx = match inner.client.watch().watch(prefix, last_rev).await {
+                    Ok(rx) => rx,
+                    Err(e) => {
+                        tracing::warn!(
+                            "ConfigCenterService: failed to subscribe Watch: {e}; fallback + reconcile"
+                        );
+                        cache.write().enter_fallback();
+                        attempt += 1;
+                        let backoff = std::time::Duration::from_secs(1u64 << attempt.min(5));
+                        tokio::time::sleep(backoff).await;
+                        if let Err(e2) = Self::reload_from_server(&inner, &cache).await {
+                            tracing::error!(
+                                "ConfigCenterService: reconcile after subscribe failure failed: {e2}"
+                            );
+                        }
+                        continue 'outer;
                     }
-                    event = event_rx.recv() => {
-                        match event {
-                            Some(Ok(we)) => {
-                                use coord_proto::watch::watch_event::EventType;
-                                for kv in &we.kvs {
-                                    let value = if we.r#type == EventType::Delete as i32 {
-                                        None
-                                    } else {
-                                        Some(kv.value.as_slice())
-                                    };
-                                    cache.write().apply_event(&kv.key, value);
-                                }
-                                if cache.read().is_fallback() {
-                                    cache.write().exit_fallback();
-                                }
-                            }
-                            Some(Err(e)) => {
-                                tracing::warn!("ConfigCenterService: Watch stream error: {e}; reconnecting...");
-                                cache.write().enter_fallback();
-                                match inner.client.watch().watch(prefix, 0).await {
-                                    Ok(new_rx) => {
-                                        event_rx = new_rx;
-                                        tracing::info!("ConfigCenterService: Watch reconnected");
+                };
+                let mut event_rx = event_rx;
+
+                // 消费事件，断连/溢出 → 退到外层对账重连
+                loop {
+                    tokio::select! {
+                        _ = rx.changed() => {
+                            tracing::info!("ConfigCenterService: Watch background task shutting down");
+                            break 'outer;
+                        }
+                        event = event_rx.recv() => {
+                            match event {
+                                Some(Ok(we)) => {
+                                    use coord_proto::watch::watch_event::EventType;
+                                    // R-AGT-14：推进水位
+                                    if we.revision > last_rev {
+                                        last_rev = we.revision;
                                     }
-                                    Err(e2) => {
-                                        tracing::error!("ConfigCenterService: Watch reconnect failed: {e2}");
+                                    // 溢出/历史不可用 → 缓存可能不完整，须全量对账
+                                    let needs_reconcile = matches!(
+                                        we.r#type,
+                                        t if t == EventType::BufferOverflow as i32
+                                            || t == EventType::HistoryUnavailable as i32
+                                    );
+                                    for kv in &we.kvs {
+                                        let value = if we.r#type == EventType::Delete as i32 {
+                                            None
+                                        } else {
+                                            Some(kv.value.as_slice())
+                                        };
+                                        cache.write().apply_event(&kv.key, value);
+                                    }
+                                    if cache.read().is_fallback() {
+                                        cache.write().exit_fallback();
+                                    }
+                                    if needs_reconcile {
+                                        tracing::warn!(
+                                            "ConfigCenterService: Watch overflow/history-unavailable; full reconcile"
+                                        );
+                                        cache.write().enter_fallback();
                                         break;
                                     }
                                 }
-                            }
-                            None => {
-                                tracing::warn!("ConfigCenterService: Watch stream ended; reconnecting...");
-                                cache.write().enter_fallback();
-                                match inner.client.watch().watch(prefix, 0).await {
-                                    Ok(new_rx) => {
-                                        event_rx = new_rx;
-                                        tracing::info!("ConfigCenterService: Watch reconnected");
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("ConfigCenterService: Watch reconnect failed: {e}");
-                                        break;
-                                    }
+                                Some(Err(e)) => {
+                                    tracing::warn!(
+                                        "ConfigCenterService: Watch stream error: {e}; reconcile + reconnect"
+                                    );
+                                    cache.write().enter_fallback();
+                                    break;
+                                }
+                                None => {
+                                    tracing::warn!(
+                                        "ConfigCenterService: Watch stream ended; reconcile + reconnect"
+                                    );
+                                    cache.write().enter_fallback();
+                                    break;
                                 }
                             }
                         }
                     }
                 }
+
+                // R-AGT-14：断连/溢出 → 指数退避 + 全量对账（覆盖式消除断连窗口差异）
+                attempt += 1;
+                let backoff = std::time::Duration::from_secs(1u64 << attempt.min(5));
+                tracing::info!(
+                    "ConfigCenterService: reconnecting in {backoff:?} (attempt {attempt}, last_rev={last_rev})"
+                );
+                tokio::time::sleep(backoff).await;
+                match Self::reload_from_server(&inner, &cache).await {
+                    Ok(entries) => {
+                        tracing::info!(
+                            "ConfigCenterService: reconciled {} configs after disconnect",
+                            entries.len()
+                        );
+                        // 全量对账已覆盖断连窗口 → 下一次订阅从最新开始
+                        last_rev = 0;
+                        attempt = 0;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "ConfigCenterService: reconcile after disconnect failed: {e}; retrying"
+                        );
+                    }
+                }
             }
-        });
+        };
+        // R-AGT-20：watch 任务经 background 池 spawn（未挂线程池时回退 tokio::spawn）
+        if let Some(ref pools) = self.pools {
+            pools.spawn_background(watch_task);
+        } else {
+            tokio::spawn(watch_task);
+        }
 
         Ok(())
     }

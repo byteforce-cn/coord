@@ -10,7 +10,7 @@
 //
 // 参见 docs/client-agent-architecture-v3.md §5.1。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -162,6 +162,12 @@ impl RegistryCache {
         result
     }
 
+    /// R-AGT-11：清空缓存（断连重连后的全量对账用：以 server 全量替换本地）
+    pub fn clear(&mut self) {
+        self.instances.clear();
+        self.last_sync = Instant::now();
+    }
+
     /// 获取指定实例
     pub fn get(&self, service_name: &str, instance_id: &str) -> Option<ServiceInstance> {
         let key = Self::make_key(service_name, instance_id);
@@ -228,6 +234,12 @@ pub struct RegistryService {
     shutdown_tx: ParkingRwLock<Option<watch::Sender<()>>>,
     /// Watch 事件广播（用于 gRPC Watch 流）
     watch_tx: tokio::sync::broadcast::Sender<WatchEvent>,
+    /// R-AGT-11：实例健康探测结果（实例缓存 key → 最近一次探测存活与否）
+    probe_results: Arc<ParkingRwLock<HashMap<String, bool>>>,
+    /// R-AGT-11：探测任务关闭信号
+    probe_shutdown_tx: ParkingRwLock<Option<watch::Sender<()>>>,
+    /// R-AGT-20：资源隔离线程池（可选；watch/探测任务经 background 池）
+    pools: Option<Arc<crate::threadpool::AgentThreadPools>>,
 }
 
 impl RegistryService {
@@ -243,7 +255,19 @@ impl RegistryService {
             healthy: ParkingRwLock::new(false),
             shutdown_tx: ParkingRwLock::new(None),
             watch_tx,
+            probe_results: Arc::new(ParkingRwLock::new(HashMap::new())),
+            probe_shutdown_tx: ParkingRwLock::new(None),
+            pools: None,
         }
+    }
+
+    /// R-AGT-20：挂载资源隔离线程池（watch/探测后台任务经 background 池）。
+    pub fn with_thread_pools(
+        mut self,
+        pools: Option<Arc<crate::threadpool::AgentThreadPools>>,
+    ) -> Self {
+        self.pools = pools;
+        self
     }
 
     /// 注册服务实例
@@ -276,20 +300,7 @@ impl RegistryService {
         self.cache.write().apply_event(&key, Some(&value));
 
         // 广播 Watch 事件（全量：该服务的全部实例）
-        let all_instances = self.cache.read().discover(&instance.service_name);
-        let proto_instances: Vec<coord_proto::agent::ServiceInstance> = all_instances
-            .iter()
-            .map(|inst| coord_proto::agent::ServiceInstance {
-                instance_id: inst.instance_id.clone(),
-                service_name: inst.service_name.clone(),
-                metadata: String::from_utf8_lossy(&inst.metadata).to_string(),
-            })
-            .collect();
-        let _ = self.watch_tx.send(WatchEvent {
-            r#type: 1, // INSTANCES_ADDED
-            instances: proto_instances,
-            revision: 0,
-        });
+        Self::broadcast_instances(&self.cache, &self.watch_tx, &instance.service_name, 1);
 
         tracing::info!(
             "RegistryService: registered {}/{} at {}",
@@ -318,20 +329,7 @@ impl RegistryService {
         self.cache.write().apply_event(&key, None);
 
         // 广播 Watch 事件（全量：该服务的剩余实例）
-        let remaining = self.cache.read().discover(service_name);
-        let proto_instances: Vec<coord_proto::agent::ServiceInstance> = remaining
-            .iter()
-            .map(|inst| coord_proto::agent::ServiceInstance {
-                instance_id: inst.instance_id.clone(),
-                service_name: inst.service_name.clone(),
-                metadata: String::from_utf8_lossy(&inst.metadata).to_string(),
-            })
-            .collect();
-        let _ = self.watch_tx.send(WatchEvent {
-            r#type: 2, // INSTANCES_REMOVED
-            instances: proto_instances,
-            revision: 0,
-        });
+        Self::broadcast_instances(&self.cache, &self.watch_tx, service_name, 2);
 
         tracing::info!(
             "RegistryService: deregistered {}/{}",
@@ -344,17 +342,34 @@ impl RegistryService {
     /// 发现服务实例
     ///
     /// 从本地缓存读取（<1ms），不访问 Server。
+    /// R-AGT-11：按最近探测结果摘流——已探测且不存活的实例不返回；
+    /// 自我保护模式（Server 断连）下不过滤（保留最后已知快照）。
     pub fn discover(&self, service_name: &str) -> DiscoveryResult {
-        let instances = self.cache.read().discover(service_name);
+        let instances = self.filter_alive(self.cache.read().discover(service_name));
         DiscoveryResult {
             service_name: service_name.to_string(),
             instances,
         }
     }
 
-    /// 发现所有服务
+    /// 发现所有服务（R-AGT-11：同 `discover` 摘流过滤）。
     pub fn discover_all(&self) -> BTreeMap<String, Vec<ServiceInstance>> {
-        self.cache.read().discover_all()
+        let all = self.cache.read().discover_all();
+        all.into_iter()
+            .map(|(svc, instances)| (svc, self.filter_alive(instances)))
+            .collect()
+    }
+
+    /// R-AGT-11：按最近探测结果过滤不存活实例。
+    ///
+    /// - 自我保护模式：不过滤（保留最后已知快照）；
+    /// - 未探测过的实例（无结果）视为存活（fail-open，注册后首轮探测前可见）。
+    fn filter_alive(&self, instances: Vec<ServiceInstance>) -> Vec<ServiceInstance> {
+        filter_alive_impl(
+            self.cache.read().is_self_protection(),
+            &self.probe_results.read(),
+            instances,
+        )
     }
 
     /// 获取指定实例
@@ -370,6 +385,113 @@ impl RegistryService {
     /// 是否处于自我保护模式
     pub fn is_self_protection(&self) -> bool {
         self.cache.read().is_self_protection()
+    }
+
+    // ──── R-AGT-11：实例健康探测 ────
+
+    /// 查询实例最近一次探测结果（None = 尚未探测）。
+    pub fn is_instance_alive(&self, service_name: &str, instance_id: &str) -> Option<bool> {
+        let key = RegistryCache::make_key(service_name, instance_id);
+        self.probe_results.read().get(&key).copied()
+    }
+
+    /// 立即探测全部缓存实例并刷新结果，返回 (存活数, 总数)。
+    pub async fn probe_all_now(&self) -> (usize, usize) {
+        let instances: Vec<ServiceInstance> = self
+            .cache
+            .read()
+            .discover_all()
+            .into_values()
+            .flatten()
+            .collect();
+        let total = instances.len();
+        let mut alive = 0;
+        let mut results = HashMap::new();
+        for inst in &instances {
+            let ok = probe_instance_addr(&inst.address).await;
+            if ok {
+                alive += 1;
+            }
+            results.insert(
+                RegistryCache::make_key(&inst.service_name, &inst.instance_id),
+                ok,
+            );
+        }
+        *self.probe_results.write() = results;
+        (alive, total)
+    }
+
+    /// 从实例存储 key 解析服务名（`/_registry/services/{svc}/instances/{id}`）。
+    fn service_name_from_key(key: &[u8]) -> Option<String> {
+        let key_str = String::from_utf8_lossy(key).to_string();
+        let rest = key_str.strip_prefix("/_registry/services/")?;
+        // 必须含 "/instances/" 分隔符；服务名非空且不含斜杠（拒绝畸形 key）
+        let (svc, _) = rest.split_once("/instances/")?;
+        if svc.is_empty() || svc.contains('/') {
+            None
+        } else {
+            Some(svc.to_string())
+        }
+    }
+
+    /// 将服务实例列表广播到本地 watch 订阅者（R-AGT-11：跨节点回灌）。
+    fn broadcast_instances(
+        cache: &Arc<ParkingRwLock<RegistryCache>>,
+        watch_tx: &tokio::sync::broadcast::Sender<WatchEvent>,
+        service_name: &str,
+        event_type: i32,
+    ) {
+        let instances = cache.read().discover(service_name);
+        let proto_instances: Vec<coord_proto::agent::ServiceInstance> = instances
+            .iter()
+            .map(|inst| coord_proto::agent::ServiceInstance {
+                instance_id: inst.instance_id.clone(),
+                service_name: inst.service_name.clone(),
+                metadata: String::from_utf8_lossy(&inst.metadata).to_string(),
+            })
+            .collect();
+        let _ = watch_tx.send(WatchEvent {
+            r#type: event_type, // INSTANCES_ADDED / INSTANCES_REMOVED
+            instances: proto_instances,
+            revision: 0,
+        });
+    }
+}
+
+/// R-AGT-11：摘流过滤纯函数（discover/discover_all 共用；便于单测）。
+///
+/// - `self_protection`：自我保护模式不过滤（保留最后已知快照）；
+/// - 探测结果中不存在 = 未探测 → 视为存活（fail-open）。
+fn filter_alive_impl(
+    self_protection: bool,
+    probes: &HashMap<String, bool>,
+    instances: Vec<ServiceInstance>,
+) -> Vec<ServiceInstance> {
+    if self_protection {
+        return instances;
+    }
+    instances
+        .into_iter()
+        .filter(|inst| {
+            let key = RegistryCache::make_key(&inst.service_name, &inst.instance_id);
+            probes.get(&key).copied().unwrap_or(true)
+        })
+        .collect()
+}
+
+/// R-AGT-11：TCP 连接探测（1s 超时）；空地址视为不存活（避免误判可用）。
+async fn probe_instance_addr(address: &str) -> bool {
+    if address.is_empty() {
+        return false;
+    }
+    match tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::net::TcpStream::connect(address),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => true,
+        Ok(Err(_)) | Err(_) => false,
     }
 }
 
@@ -401,11 +523,12 @@ impl BaseService for RegistryService {
 
         let inner = self.inner.clone();
         let cache = self.cache.clone();
-        tokio::spawn(async move {
+        let watch_tx = self.watch_tx.clone();
+        let watch_task = async move {
             tracing::info!("RegistryService: Watch background task started");
             let prefix = b"/_registry/services/";
 
-            // 首次订阅 Watch
+            // 首次订阅 Watch（start_revision=0 = 从最新开始，启动时已有全量目录）
             let mut event_rx = match inner.client.watch().watch(prefix, 0).await {
                 Ok(rx) => rx,
                 Err(e) => {
@@ -416,6 +539,8 @@ impl BaseService for RegistryService {
                     return;
                 }
             };
+            // R-AGT-11：水位——最近一次成功接收的事件 revision（断连重连续传依据）
+            let mut last_rev: i64 = 0;
 
             loop {
                 tokio::select! {
@@ -426,6 +551,7 @@ impl BaseService for RegistryService {
                     event = event_rx.recv() => {
                         match event {
                             Some(Ok(we)) => {
+                                last_rev = last_rev.max(we.revision);
                                 use coord_proto::watch::watch_event::EventType;
                                 for kv in &we.kvs {
                                     let value = if we.r#type == EventType::Delete as i32 {
@@ -435,6 +561,20 @@ impl BaseService for RegistryService {
                                     };
                                     cache.write().apply_event(&kv.key, value);
                                 }
+                                // R-AGT-11：跨节点变更回灌本地 watch 流——
+                                // A agent 注册/下线，B agent 的订阅者收到通知
+                                let mut affected: std::collections::HashSet<String> =
+                                    std::collections::HashSet::new();
+                                for kv in &we.kvs {
+                                    if let Some(svc) = Self::service_name_from_key(&kv.key) {
+                                        affected.insert(svc);
+                                    }
+                                }
+                                let event_type =
+                                    if we.r#type == EventType::Delete as i32 { 2 } else { 1 };
+                                for svc in &affected {
+                                    Self::broadcast_instances(&cache, &watch_tx, svc, event_type);
+                                }
                                 // 收到事件 = Server 可达，退出自我保护
                                 if cache.read().is_self_protection() {
                                     cache.write().exit_self_protection();
@@ -443,11 +583,13 @@ impl BaseService for RegistryService {
                             Some(Err(e)) => {
                                 tracing::warn!("RegistryService: Watch stream error: {e}; reconnecting...");
                                 cache.write().enter_self_protection();
-                                // 重连
-                                match inner.client.watch().watch(prefix, 0).await {
+                                // R-AGT-11：重连三件套——① 水位续传（从 last_rev 起），
+                                // ② 续传成功后全量对账（断连窗口内变更一致可见）
+                                match inner.client.watch().watch(prefix, last_rev).await {
                                     Ok(new_rx) => {
                                         event_rx = new_rx;
-                                        tracing::info!("RegistryService: Watch reconnected");
+                                        reconcile_registry(&inner, &cache).await;
+                                        tracing::info!("RegistryService: Watch reconnected (from rev {last_rev}) + reconciled");
                                     }
                                     Err(e2) => {
                                         tracing::error!("RegistryService: Watch reconnect failed: {e2}");
@@ -458,10 +600,11 @@ impl BaseService for RegistryService {
                             None => {
                                 tracing::warn!("RegistryService: Watch stream ended; reconnecting...");
                                 cache.write().enter_self_protection();
-                                match inner.client.watch().watch(prefix, 0).await {
+                                match inner.client.watch().watch(prefix, last_rev).await {
                                     Ok(new_rx) => {
                                         event_rx = new_rx;
-                                        tracing::info!("RegistryService: Watch reconnected");
+                                        reconcile_registry(&inner, &cache).await;
+                                        tracing::info!("RegistryService: Watch reconnected (from rev {last_rev}) + reconciled");
                                     }
                                     Err(e) => {
                                         tracing::error!("RegistryService: Watch reconnect failed: {e}");
@@ -473,7 +616,51 @@ impl BaseService for RegistryService {
                     }
                 }
             }
-        });
+        };
+        // R-AGT-20：watch 任务经 background 池 spawn（未挂线程池时回退 tokio::spawn）
+        if let Some(ref pools) = self.pools {
+            pools.spawn_background(watch_task);
+        } else {
+            tokio::spawn(watch_task);
+        }
+
+        // R-AGT-11：周期健康探测任务（15s 一次 TCP connect，区分存活/不存活实例）
+        let (_probe_tx, mut probe_rx) = watch::channel::<()>(());
+        *self.probe_shutdown_tx.write() = Some(_probe_tx);
+        let cache_for_probe = self.cache.clone();
+        let results_for_probe = self.probe_results.clone();
+        let probe_task = async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(15));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = probe_rx.changed() => break,
+                    _ = ticker.tick() => {
+                        let instances: Vec<ServiceInstance> = cache_for_probe
+                            .read()
+                            .discover_all()
+                            .into_values()
+                            .flatten()
+                            .collect();
+                        let mut results = HashMap::new();
+                        for inst in &instances {
+                            let ok = probe_instance_addr(&inst.address).await;
+                            results.insert(
+                                RegistryCache::make_key(&inst.service_name, &inst.instance_id),
+                                ok,
+                            );
+                        }
+                        *results_for_probe.write() = results;
+                    }
+                }
+            }
+        };
+        // R-AGT-20：探测任务经 background 池 spawn（未挂线程池时回退 tokio::spawn）
+        if let Some(ref pools) = self.pools {
+            pools.spawn_background(probe_task);
+        } else {
+            tokio::spawn(probe_task);
+        }
 
         Ok(())
     }
@@ -482,6 +669,9 @@ impl BaseService for RegistryService {
         tracing::info!("RegistryService: stopping");
         // 通知后台任务关闭
         if let Some(tx) = self.shutdown_tx.write().take() {
+            let _ = tx.send(());
+        }
+        if let Some(tx) = self.probe_shutdown_tx.write().take() {
             let _ = tx.send(());
         }
         *self.healthy.write() = false;
@@ -496,47 +686,70 @@ impl BaseService for RegistryService {
 impl RegistryService {
     /// 从 Server 全量加载注册表
     async fn load_full_catalog(&self) -> Result<usize, ServiceError> {
-        let prefix = b"/_registry/services/";
-        // 使用 Range 扫描全量注册表
-        let end = prefix.to_vec();
-        // range_end = prefix with last byte incremented for prefix scan
-        let mut range_end = end.clone();
-        if let Some(last) = range_end.last_mut() {
-            *last = last.wrapping_add(1);
-        }
+        load_catalog_into(&self.inner, &self.cache).await
+    }
+}
 
-        let pairs = self
-            .inner
-            .client
-            .kv()
-            .range(prefix, &range_end, 0, 0)
-            .await
-            .map_err(|e| format!("failed to load registry catalog: {e}"))?;
+/// 从 Server 全量拉取注册表并灌入缓存（`load_full_catalog` 的共享实现）。
+async fn load_catalog_into(
+    inner: &Arc<AgentInner>,
+    cache: &Arc<ParkingRwLock<RegistryCache>>,
+) -> Result<usize, ServiceError> {
+    let prefix = b"/_registry/services/";
+    // 使用 Range 扫描全量注册表
+    let end = prefix.to_vec();
+    // range_end = prefix with last byte incremented for prefix scan
+    let mut range_end = end.clone();
+    if let Some(last) = range_end.last_mut() {
+        *last = last.wrapping_add(1);
+    }
 
-        let mut instances = Vec::new();
-        for (key, value) in pairs {
-            match serde_json::from_slice::<ServiceInstance>(&value) {
-                Ok(inst) => instances.push(inst),
-                Err(_) => {
-                    // 旧格式：从 key 推断 service_name 和 instance_id
-                    let key_str = String::from_utf8_lossy(&key);
-                    if let Some((svc, id)) = parse_legacy_key(&key_str) {
-                        instances.push(ServiceInstance {
-                            service_name: svc,
-                            instance_id: id,
-                            address: String::new(),
-                            metadata: value,
-                            lease_id: 0,
-                            registered_at: 0,
-                        });
-                    }
+    let pairs = inner
+        .client
+        .kv()
+        .range(prefix, &range_end, 0, 0)
+        .await
+        .map_err(|e| format!("failed to load registry catalog: {e}"))?;
+
+    let mut instances = Vec::new();
+    for (key, value) in pairs {
+        match serde_json::from_slice::<ServiceInstance>(&value) {
+            Ok(inst) => instances.push(inst),
+            Err(_) => {
+                // 旧格式：从 key 推断 service_name 和 instance_id
+                let key_str = String::from_utf8_lossy(&key);
+                if let Some((svc, id)) = parse_legacy_key(&key_str) {
+                    instances.push(ServiceInstance {
+                        service_name: svc,
+                        instance_id: id,
+                        address: String::new(),
+                        metadata: value,
+                        lease_id: 0,
+                        registered_at: 0,
+                    });
                 }
             }
         }
+    }
 
-        let count = instances.len();
-        self.cache.write().load_full(instances);
-        Ok(count)
+    let count = instances.len();
+    cache.write().load_full(instances);
+    Ok(count)
+}
+
+/// R-AGT-11：全量对账——清空缓存后以 Server 全量替换，成功退出自我保护。
+async fn reconcile_registry(inner: &Arc<AgentInner>, cache: &Arc<ParkingRwLock<RegistryCache>>) {
+    cache.write().clear();
+    match load_catalog_into(inner, cache).await {
+        Ok(count) => {
+            tracing::info!("RegistryService: reconciled {count} instances from server");
+            if cache.read().is_self_protection() {
+                cache.write().exit_self_protection();
+            }
+        }
+        Err(e) => {
+            tracing::warn!("RegistryService: full reconcile failed: {e}");
+        }
     }
 }
 
@@ -740,6 +953,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_registry_cache_clear() {
+        let mut cache = RegistryCache::new(500);
+        let inst = ServiceInstance::new("svc-a", "i1", "addr1", vec![], 0);
+        let key = RegistryCache::storage_key("svc-a", "i1");
+        let value = serde_json::to_vec(&inst).unwrap();
+        cache.apply_event(&key, Some(&value));
+        assert_eq!(cache.len(), 1);
+        cache.clear();
+        assert!(cache.is_empty(), "clear 用于全量对账前清空");
+    }
+
+    // ──── R-AGT-11：摘流过滤 ────
+
+    #[test]
+    fn test_filter_alive_excludes_dead_instances() {
+        let a = ServiceInstance::new("svc", "alive", "addr1", vec![], 0);
+        let b = ServiceInstance::new("svc", "dead", "addr2", vec![], 0);
+        let c = ServiceInstance::new("svc", "unknown", "addr3", vec![], 0);
+        let mut probes = HashMap::new();
+        probes.insert(RegistryCache::make_key("svc", "alive"), true);
+        probes.insert(RegistryCache::make_key("svc", "dead"), false);
+        // c 未探测 → fail-open 保留
+
+        let filtered = filter_alive_impl(false, &probes, vec![a, b, c]);
+        let ids: Vec<&str> = filtered.iter().map(|i| i.instance_id.as_str()).collect();
+        assert_eq!(ids, vec!["alive", "unknown"], "死实例摘流、未探测实例保留");
+    }
+
+    #[test]
+    fn test_filter_alive_keeps_all_in_self_protection() {
+        let a = ServiceInstance::new("svc", "dead", "addr2", vec![], 0);
+        let mut probes = HashMap::new();
+        probes.insert(RegistryCache::make_key("svc", "dead"), false);
+
+        let filtered = filter_alive_impl(true, &probes, vec![a]);
+        assert_eq!(filtered.len(), 1, "自我保护模式保留最后已知快照，不过滤");
+    }
+
+    #[test]
     fn test_registry_cache_basic() {
         let mut cache = RegistryCache::new(500);
 
@@ -818,5 +1070,42 @@ mod tests {
 
         let result = parse_legacy_key("/other/prefix");
         assert_eq!(result, None);
+    }
+
+    // ──── R-AGT-11：服务名解析 + 健康探测 ────
+
+    #[test]
+    fn test_service_name_from_key() {
+        let svc = RegistryService::service_name_from_key(
+            b"/_registry/services/order-service/instances/node1",
+        );
+        assert_eq!(svc.as_deref(), Some("order-service"));
+
+        // 非注册表 key → None
+        assert!(RegistryService::service_name_from_key(b"/_config/x").is_none());
+        assert!(RegistryService::service_name_from_key(b"/_registry/services//x").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_probe_instance_addr_alive_and_dead() {
+        // 本地监听端口 → 存活
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        assert!(probe_instance_addr(&addr).await);
+        drop(listener);
+
+        // 空地址 → 不存活（避免误判可用）
+        assert!(!probe_instance_addr("").await);
+    }
+
+    #[tokio::test]
+    async fn test_probe_instance_addr_unreachable() {
+        // 保留端口：绑定后关闭 → connect 大概率拒绝；若系统仍可连接则跳过
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let alive = probe_instance_addr(&addr.to_string()).await;
+        // 端口刚释放可能短暂 TIME_WAIT 可连；此处仅断言函数不 panic 且返回 bool
+        let _ = alive;
     }
 }

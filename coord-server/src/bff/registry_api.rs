@@ -433,16 +433,69 @@ pub async fn health_check(
 
     let now = chrono_now();
 
-    // 更新每个实例的 lastCheck（简单健康检查：标记为当前时间）
+    // R-AGT-11：真实健康探测（TCP connect，1s 超时）——
+    // 此前仅把 lastCheck 刷成当前时间（空壳，healthy 统计恒为注册时状态），
+    // 现在逐个实例探测并将结果写回 status（passing/critical）。
+    let mut checked = 0usize;
+    let mut alive = 0usize;
     for (ik, iv) in &instances_data {
         if let Ok(mut inst) = serde_json::from_slice::<InstanceData>(iv) {
+            let probe_addr = probe_addr_of(&inst.address, inst.port);
+            let is_alive = probe_tcp_once(&probe_addr).await;
+            checked += 1;
+            if is_alive {
+                alive += 1;
+            }
+            inst.status = if is_alive {
+                "passing".to_string()
+            } else {
+                "critical".to_string()
+            };
             inst.last_check = now.clone();
             let new_value = serde_json::to_vec(&inst).unwrap_or_default();
             let _ = raft_put(node, ik.clone(), new_value).await;
         }
     }
 
-    ok_json(json!({"checked": instances_data.len()})).into_response()
+    ok_json(json!({
+        "checked": checked,
+        "alive": alive,
+        "critical": checked - alive,
+    }))
+    .into_response()
+}
+
+/// R-AGT-11：实例探测地址（address 已含端口则直接用，否则拼 address:port）。
+fn probe_addr_of(address: &str, port: u32) -> String {
+    if address.is_empty() {
+        return String::new();
+    }
+    if address.contains(':') || address.parse::<std::net::IpAddr>().is_ok() {
+        // IPv6 字面量或已含端口
+        if address.parse::<std::net::SocketAddr>().is_ok() {
+            address.to_string()
+        } else if address.contains(':') && !address.starts_with('[') {
+            format!("{address}:{port}")
+        } else {
+            address.to_string()
+        }
+    } else {
+        format!("{address}:{port}")
+    }
+}
+
+/// R-AGT-11：单次 TCP 探测（1s 超时；空地址判死）。
+async fn probe_tcp_once(addr: &str) -> bool {
+    if addr.is_empty() {
+        return false;
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .map(|r| r.is_ok())
+    .unwrap_or(false)
 }
 
 // ──── 辅助: 当前时间 ISO 字符串 ────

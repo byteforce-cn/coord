@@ -429,6 +429,15 @@ impl ApplyOutcome {
     }
 }
 
+/// 范围删除（DeleteRange，R-SVC-07）apply 结果
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeleteRangeOutcome {
+    /// 实际被标记删除的 Key 列表（不含已删除/不存在的 Key）
+    pub deleted_keys: Vec<Vec<u8>>,
+    /// true = 该 revision 的 changelog 已存在，本次为重放，未产生副作用
+    pub replayed: bool,
+}
+
 // ──── Compact（P1-01） ────
 
 /// 单次 compaction 批删除上限（P1-01：单写事务分片删除，避免巨型事务）
@@ -484,16 +493,25 @@ impl<B: StorageBackend> MvccStorage<B> {
         *self.barrier.write() = Some(barrier);
     }
 
-    /// 加密 Value（如果 Barrier 已设置）
-    fn encrypt_value(&self, value: &[u8]) -> Result<Vec<u8>> {
+    /// 加密 Value（如果 Barrier 已设置）。R-SEC-01：仅加密 `/kv/` 用户数据——
+    /// `/_lease/`、`/_sys/` 等内部结构化记录（TABLE_KV 内）不加密，否则
+    /// `LeaseRecord::from_bytes` 等解析会因密文长度/内容不符而失败。
+    fn encrypt_value(&self, internal_key: &[u8], value: &[u8]) -> Result<Vec<u8>> {
+        if !internal_key.starts_with(KV_PREFIX) {
+            return Ok(value.to_vec());
+        }
         match self.barrier.read().as_ref() {
             Some(barrier) => barrier.encrypt(value),
             None => Ok(value.to_vec()),
         }
     }
 
-    /// 解密 Value（如果 Barrier 已设置）
-    fn decrypt_value(&self, encrypted: &[u8]) -> Result<Vec<u8>> {
+    /// 解密 Value（如果 Barrier 已设置）。仅解密 `/kv/` 用户数据；
+    /// 短密文（<32B，legacy 明文或内部记录）透传。
+    fn decrypt_value(&self, internal_key: &[u8], encrypted: &[u8]) -> Result<Vec<u8>> {
+        if !internal_key.starts_with(KV_PREFIX) {
+            return Ok(encrypted.to_vec());
+        }
         match self.barrier.read().as_ref() {
             Some(barrier) => {
                 // Check if this looks like encrypted data (has key_id prefix)
@@ -609,8 +627,8 @@ impl<B: StorageBackend> MvccStorage<B> {
                 None => KvMetadata::new_key(revision, lid),
             };
 
-            // 写入用户数据（经过 Barrier 加密）
-            let encrypted = self.encrypt_value(value)?;
+            // 写入用户数据（经过 Barrier 加密，仅 /kv/ 前缀）
+            let encrypted = self.encrypt_value(&internal_key, value)?;
             tx.insert(TABLE_KV, &internal_key, &encrypted)?;
 
             // 写入 KV 元数据
@@ -646,6 +664,17 @@ impl<B: StorageBackend> MvccStorage<B> {
         let applied = AppliedLogId::standalone(revision);
         self.delete_at_revision(key, revision, applied)?;
         Ok(revision)
+    }
+
+    /// 范围删除（单节点模式入口，R-SVC-07-3）：原子删除 `[start, range_end)` 内所有 Key
+    ///
+    /// 返回（revision, 实际删除的 Key 数）。
+    pub fn delete_range(&self, start: &[u8], range_end: &[u8]) -> Result<(Revision, usize)> {
+        let _guard = self.standalone_lock.lock();
+        let revision = self.current_revision().saturating_add(1);
+        let applied = AppliedLogId::standalone(revision);
+        let outcome = self.delete_range_at_revision(start, range_end, revision, applied)?;
+        Ok((revision, outcome.deleted_keys.len()))
     }
 
     /// Delete 操作（raft apply 路径）：revision ≡ log index（D-A2）
@@ -719,7 +748,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                     } else if data.is_empty() {
                         Ok(Some(Vec::new()))
                     } else {
-                        Ok(Some(self.decrypt_value(&data)?))
+                        Ok(Some(self.decrypt_value(&internal_key, &data)?))
                     }
                 }
                 None => Ok(None),
@@ -755,12 +784,179 @@ impl<B: StorageBackend> MvccStorage<B> {
                     let plaintext = if v.is_empty() {
                         Vec::new()
                     } else {
-                        self.decrypt_value(&v)?
+                        self.decrypt_value(&ik, &v)?
                     };
                     results.push((user_key.to_vec(), plaintext));
                 }
             }
             Ok(results)
+        })
+    }
+
+    /// Range 操作：半开区间 `[start, range_end)` 扫描（R-SVC-07，etcd 语义）
+    ///
+    /// 返回满足 `start <= user_key < range_end` 的所有 Key（按字典序）。
+    /// 与 `range()`（前缀扫描）不同，本方法使用底层 `iter_range` 从 `start`
+    /// 扫描到 `range_end`，区间内不共享 `start` 前缀的 Key 也能命中。
+    /// 通过元数据的 deleted 标志过滤已删除的 Key。
+    pub fn range_in(
+        &self,
+        start: &[u8],
+        range_end: &[u8],
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let internal_start = encode_kv_key(start);
+        let internal_end = encode_kv_key(range_end);
+        self.backend.read(|tx| {
+            let all = tx.iter_range(TABLE_KV, &internal_start, &internal_end)?;
+            let mut results = Vec::new();
+            for (ik, v) in all {
+                if results.len() >= limit && limit > 0 {
+                    break;
+                }
+                if let Some(user_key) = decode_kv_key(&ik) {
+                    // iter_range 已保证 [start, range_end)，此处防御性复核
+                    if !range_end.is_empty() && user_key >= range_end {
+                        break;
+                    }
+                    // 在同一事务内检查元数据的 deleted 标志
+                    let meta_key = encode_kv_meta_key(user_key);
+                    let is_deleted = tx
+                        .get(TABLE_KV_META, &meta_key)?
+                        .and_then(|bytes| KvMetadata::from_bytes(&bytes))
+                        .map(|m| m.deleted)
+                        .unwrap_or(false);
+                    if is_deleted {
+                        continue;
+                    }
+                    let plaintext = if v.is_empty() {
+                        Vec::new()
+                    } else {
+                        self.decrypt_value(&ik, &v)?
+                    };
+                    results.push((user_key.to_vec(), plaintext));
+                }
+            }
+            Ok(results)
+        })
+    }
+
+    /// Range 历史读：返回 `[start, range_end)` 在目标 revision 时刻的视图（R-SVC-07-2）
+    ///
+    /// 通过回放 `[1, target_revision]` 的 changelog 重建历史视图（与 `get_at_revision`
+    /// 同一模式）。changelog 中 value 为明文（put 时直接写入），故无需解密。
+    /// 注意：早于 `compacted_revision` 的历史不可达（与 `get_at_revision` 一致）。
+    pub fn range_at_revision(
+        &self,
+        start: &[u8],
+        range_end: &[u8],
+        limit: usize,
+        target_revision: Revision,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let end_key = encode_changelog_key(target_revision.saturating_add(1));
+        self.backend.read(|tx| {
+            let entries = tx.iter_prefix(TABLE_CHANGELOG, CHANGELOG_PREFIX)?;
+            // BTreeMap 保持 Key 字典序
+            let mut view: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
+                std::collections::BTreeMap::new();
+            for (ch_key, ch_value) in entries {
+                if ch_key.as_slice() >= end_key.as_slice() {
+                    break;
+                }
+                if let Ok(event) = ChangeEvent::from_bytes(&ch_value) {
+                    for change in &event.changes {
+                        if change.key.as_slice() < start {
+                            continue;
+                        }
+                        if !range_end.is_empty() && change.key.as_slice() >= range_end {
+                            continue;
+                        }
+                        match &change.value {
+                            Some(v) => {
+                                view.insert(change.key.clone(), v.clone());
+                            }
+                            None => {
+                                view.remove(&change.key);
+                            }
+                        }
+                    }
+                }
+            }
+            let mut results = Vec::new();
+            for (k, v) in view {
+                if results.len() >= limit && limit > 0 {
+                    break;
+                }
+                results.push((k, v));
+            }
+            Ok(results)
+        })
+    }
+
+    /// 范围删除（raft apply 路径，R-SVC-07-3）：单个写事务内原子标记
+    /// `[start, range_end)` 内所有未删除 Key 为 tombstone。
+    ///
+    /// 与 `delete_at_revision` 相同的幂等守卫（D-A3）与 applied 持久化（D-A4）。
+    pub fn delete_range_at_revision(
+        &self,
+        start: &[u8],
+        range_end: &[u8],
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<DeleteRangeOutcome> {
+        if self.changelog_contains_revision(revision)? {
+            return Ok(DeleteRangeOutcome {
+                deleted_keys: Vec::new(),
+                replayed: true,
+            });
+        }
+        let internal_start = encode_kv_key(start);
+        let internal_end = encode_kv_key(range_end);
+        self.backend.write(|tx| {
+            let all = tx.iter_range(TABLE_KV, &internal_start, &internal_end)?;
+            let mut deleted_keys = Vec::new();
+            for (ik, _v) in all {
+                if let Some(user_key) = decode_kv_key(&ik) {
+                    if !range_end.is_empty() && user_key >= range_end {
+                        break;
+                    }
+                    let meta_key = encode_kv_meta_key(user_key);
+                    let existing_meta = tx
+                        .get(TABLE_KV_META, &meta_key)?
+                        .and_then(|bytes| KvMetadata::from_bytes(&bytes));
+                    if let Some(m) = existing_meta.filter(|m| !m.deleted) {
+                        let meta = m.mark_deleted(revision);
+                        tx.insert(TABLE_KV_META, &meta_key, &meta.to_bytes())?;
+                        deleted_keys.push(user_key.to_vec());
+                    }
+                }
+            }
+
+            // 始终写 changelog（D-A5：始终消耗 revision）
+            let event = ChangeEvent {
+                revision,
+                changes: deleted_keys
+                    .iter()
+                    .map(|k| KeyValueChange {
+                        key: k.clone(),
+                        value: None,
+                        prev_value: None,
+                    })
+                    .collect(),
+                event_type: EventType::Delete,
+            };
+            tx.insert(
+                TABLE_CHANGELOG,
+                &encode_changelog_key(revision),
+                &event.to_bytes(),
+            )?;
+
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+
+            Ok(DeleteRangeOutcome {
+                deleted_keys,
+                replayed: false,
+            })
         })
     }
 
@@ -985,8 +1181,8 @@ impl<B: StorageBackend> MvccStorage<B> {
                     None => KvMetadata::new_key(revision, lid),
                 };
 
-                // 写入用户数据（经过 Barrier 加密）
-                let encrypted = self.encrypt_value(value)?;
+                // 写入用户数据（经过 Barrier 加密，仅 /kv/ 前缀）
+                let encrypted = self.encrypt_value(&internal_key, value)?;
                 tx.insert(TABLE_KV, &internal_key, &encrypted)?;
                 tx.insert(TABLE_KV_META, &meta_key, &meta.to_bytes())?;
 
@@ -1024,9 +1220,16 @@ impl<B: StorageBackend> MvccStorage<B> {
                 range_end,
                 limit,
             } => {
-                // Range 在 Txn 内部执行：扫描 KV 表
-                let internal_prefix = encode_kv_key(key);
-                let all = tx.iter_prefix(TABLE_KV, &internal_prefix)?;
+                // R-SVC-07-4：与顶层 range()/range_in() 对齐——
+                // ① 区间扫描（range_end 为空时回退前缀扫描语义）；
+                // ② 必须检查 KV_META 的 deleted 标志（值非空的软删 key 不得复活）。
+                let internal_start = encode_kv_key(key);
+                let all = if range_end.is_empty() {
+                    tx.iter_prefix(TABLE_KV, &internal_start)?
+                } else {
+                    let internal_end = encode_kv_key(range_end);
+                    tx.iter_range(TABLE_KV, &internal_start, &internal_end)?
+                };
 
                 let mut kvs = Vec::new();
                 let max = if *limit > 0 {
@@ -1040,15 +1243,25 @@ impl<B: StorageBackend> MvccStorage<B> {
                         break;
                     }
                     if let Some(user_key) = decode_kv_key(&ik) {
-                        // 检查 range_end
+                        // 半开区间上界（iter_range 已保证，防御性复核）
                         if !range_end.is_empty() && user_key >= range_end.as_slice() {
                             break;
                         }
-                        // 跳过 tombstone
-                        if v.is_empty() {
+                        // 检查元数据 deleted 标志（R-SVC-07-4）
+                        let meta_key = encode_kv_meta_key(user_key);
+                        let is_deleted = tx
+                            .get(TABLE_KV_META, &meta_key)?
+                            .and_then(|bytes| KvMetadata::from_bytes(&bytes))
+                            .map(|m| m.deleted)
+                            .unwrap_or(false);
+                        if is_deleted {
                             continue;
                         }
-                        let plaintext = self.decrypt_value(&v)?;
+                        let plaintext = if v.is_empty() {
+                            Vec::new()
+                        } else {
+                            self.decrypt_value(&ik, &v)?
+                        };
                         kvs.push((user_key.to_vec(), plaintext));
                     }
                 }
@@ -1725,6 +1938,154 @@ mod tests {
         assert_eq!(results.len(), 2);
     }
 
+    // ──── R-SVC-07：半开区间 [key, range_end) 语义 ────
+
+    #[test]
+    fn test_range_in_half_open_interval() {
+        let (_dir, storage) = create_storage();
+        storage.put(b"a", b"1", None).unwrap();
+        storage.put(b"ab", b"2", None).unwrap();
+        storage.put(b"abc", b"3", None).unwrap();
+        storage.put(b"b", b"4", None).unwrap();
+        storage.put(b"c", b"5", None).unwrap();
+
+        // [a, b) = a, ab, abc（不含 b）
+        let results = storage.range_in(b"a", b"b", 0).unwrap();
+        let keys: Vec<&[u8]> = results.iter().map(|(k, _)| k.as_slice()).collect();
+        assert_eq!(
+            keys,
+            vec![b"a".as_slice(), b"ab".as_slice(), b"abc".as_slice()]
+        );
+
+        // [b, c) = b（不含 c）
+        let results = storage.range_in(b"b", b"c", 0).unwrap();
+        let keys: Vec<&[u8]> = results.iter().map(|(k, _)| k.as_slice()).collect();
+        assert_eq!(keys, vec![b"b".as_slice()]);
+
+        // 区间内 key 不共享 start 前缀（start=ab, end=c 应含 abc、b 不含 ab）
+        let results = storage.range_in(b"ab", b"c", 0).unwrap();
+        let keys: Vec<&[u8]> = results.iter().map(|(k, _)| k.as_slice()).collect();
+        assert_eq!(
+            keys,
+            vec![b"ab".as_slice(), b"abc".as_slice(), b"b".as_slice()]
+        );
+
+        // limit 生效
+        let results = storage.range_in(b"a", b"b", 2).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // 软删除的 key 不可见
+        storage.delete(b"ab").unwrap();
+        let results = storage.range_in(b"a", b"b", 0).unwrap();
+        let keys: Vec<&[u8]> = results.iter().map(|(k, _)| k.as_slice()).collect();
+        assert_eq!(keys, vec![b"a".as_slice(), b"abc".as_slice()]);
+    }
+
+    #[test]
+    fn test_delete_range_at_revision_atomic() {
+        let (_dir, storage) = create_storage();
+        storage.put(b"a", b"1", None).unwrap();
+        storage.put(b"ab", b"2", None).unwrap();
+        storage.put(b"b", b"3", None).unwrap();
+
+        // 原子删除 [a, b)
+        let outcome = storage
+            .delete_range_at_revision(
+                b"a",
+                b"b",
+                4,
+                AppliedLogId {
+                    term: 1,
+                    node_id: 1,
+                    index: 4,
+                },
+            )
+            .unwrap();
+        assert!(!outcome.replayed);
+        assert_eq!(outcome.deleted_keys, vec![b"a".to_vec(), b"ab".to_vec()]);
+
+        // 范围内已删除、范围外保留
+        assert_eq!(storage.get(b"a").unwrap(), None);
+        assert_eq!(storage.get(b"ab").unwrap(), None);
+        assert_eq!(storage.get(b"b").unwrap(), Some(b"3".to_vec()));
+
+        // 幂等守卫：同 revision 重放不产生副作用
+        let replay = storage
+            .delete_range_at_revision(
+                b"a",
+                b"b",
+                4,
+                AppliedLogId {
+                    term: 1,
+                    node_id: 1,
+                    index: 4,
+                },
+            )
+            .unwrap();
+        assert!(replay.replayed);
+
+        // 范围读确认无残留
+        assert!(storage.range_in(b"a", b"b", 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_range_at_revision_historical_view() {
+        let (_dir, storage) = create_storage();
+        storage.put(b"a", b"v1", None).unwrap(); // rev 1
+        storage.put(b"b", b"v1", None).unwrap(); // rev 2
+        storage.put(b"a", b"v2", None).unwrap(); // rev 3
+
+        // rev 2 历史视图：a=v1, b=v1
+        let results = storage.range_at_revision(b"a", b"c", 0, 2).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&(b"a".to_vec(), b"v1".to_vec())));
+        assert!(results.contains(&(b"b".to_vec(), b"v1".to_vec())));
+
+        // rev 3 历史视图：a=v2, b=v1
+        let results = storage.range_at_revision(b"a", b"c", 0, 3).unwrap();
+        assert!(results.contains(&(b"a".to_vec(), b"v2".to_vec())));
+
+        // 删除后的历史视图：rev 3 前 b 存在，rev 4（删除 b）后不可见
+        storage.delete(b"b").unwrap(); // rev 4
+        let results = storage.range_at_revision(b"a", b"c", 0, 3).unwrap();
+        assert!(results.contains(&(b"b".to_vec(), b"v1".to_vec())));
+        let results = storage.range_at_revision(b"a", b"c", 0, 4).unwrap();
+        assert!(!results.iter().any(|(k, _)| k == b"b"));
+    }
+
+    /// R-SVC-07-4：Txn 内 Range 必须过滤已软删除的 Key（与顶层 range() 对齐）
+    #[test]
+    fn test_txn_range_filters_deleted_keys() {
+        use crate::txn::{TxnOp, TxnOpResponse};
+
+        let (_dir, storage) = create_storage();
+        storage.put(b"a", b"1", None).unwrap();
+        storage.put(b"b", b"2", None).unwrap();
+        // 软删除 a（值仍在 /kv/ 中，仅 KV_META 标记 deleted）
+        storage.delete(b"a").unwrap();
+
+        let result = storage
+            .execute_txn(
+                &[],
+                &[TxnOp::Range {
+                    key: b"a".to_vec(),
+                    range_end: b"c".to_vec(),
+                    limit: 0,
+                }],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(result.responses.len(), 1);
+        match &result.responses[0] {
+            TxnOpResponse::Range { kvs, count, .. } => {
+                assert_eq!(*count, 1, "已删除 key a 不得在 Txn Range 中复活");
+                assert_eq!(kvs.len(), 1);
+                assert_eq!(kvs[0].0, b"b".to_vec());
+            }
+            other => panic!("expected Range response, got {:?}", other),
+        }
+    }
+
     #[test]
     fn test_applied_log_id() {
         let (_dir, storage) = create_storage();
@@ -1738,6 +2099,101 @@ mod tests {
             Some(AppliedLogId::standalone(42))
         );
         assert_eq!(storage.current_revision(), 42);
+    }
+
+    // ──── R-SEC-01：静态加密接线（Barrier/Seal/Unseal） ────
+
+    #[test]
+    fn test_barrier_encrypts_user_values_on_disk() {
+        use crate::security::key_management::Keyring;
+        use std::sync::Arc;
+
+        let (_dir, storage) = create_storage();
+        let (keyring, _dek) = Keyring::bootstrap_from_root_key(&[0xABu8; 32]).unwrap();
+        storage.set_barrier(crate::security::barrier::Barrier::new(Arc::new(keyring)));
+
+        storage.put(b"secret", b"super-secret-value", None).unwrap();
+
+        // 落盘原始字节不得含明文用户值
+        let raw = storage
+            .backend()
+            .read(|tx| tx.get(TABLE_KV, &encode_kv_key(b"secret")))
+            .unwrap()
+            .unwrap();
+        assert!(
+            !raw.windows(b"super-secret-value".len())
+                .any(|w| w == b"super-secret-value"),
+            "on-disk value must not contain plaintext"
+        );
+        assert!(raw.len() >= 32, "ciphertext must carry barrier header");
+
+        // 读取仍返回明文（Barrier 透明解密）
+        assert_eq!(
+            storage.get(b"secret").unwrap(),
+            Some(b"super-secret-value".to_vec())
+        );
+        // 范围读同样解密
+        let results = storage.range_in(b"sec", b"secx", 0).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, b"super-secret-value".to_vec());
+    }
+
+    #[test]
+    fn test_barrier_seal_blocks_writes_after_unseal_restores() {
+        use crate::security::key_management::Keyring;
+        use std::sync::Arc;
+
+        let (_dir, storage) = create_storage();
+        let root_key = [0xCDu8; 32];
+        let (keyring, dek) = Keyring::bootstrap_from_root_key(&root_key).unwrap();
+        let keyring = Arc::new(keyring);
+        storage.set_barrier(crate::security::barrier::Barrier::new(Arc::clone(&keyring)));
+        storage.put(b"a", b"v1", None).unwrap();
+
+        // Seal → 写入被拒（active_dek 返回错误，非全零密钥）
+        keyring.seal();
+        assert!(keyring.is_sealed());
+        assert!(
+            storage.put(b"b", b"v2", None).is_err(),
+            "sealed: writes refused"
+        );
+
+        // Unseal（root 密钥重建）→ 读取正常
+        let recovered = Keyring::from_root_key(&root_key, &[dek]).unwrap();
+        assert!(!recovered.is_sealed());
+        storage.set_barrier(crate::security::barrier::Barrier::new(Arc::new(recovered)));
+        assert_eq!(storage.get(b"a").unwrap(), Some(b"v1".to_vec()));
+        let rev = storage.put(b"c", b"v3", None).unwrap();
+        assert!(rev > 0);
+        assert_eq!(storage.get(b"c").unwrap(), Some(b"v3".to_vec()));
+    }
+
+    /// 内部记录（lease/auth 等非 /kv/ 前缀）不得被 Barrier 加密，
+    /// 否则结构化记录（如 LeaseRecord 24B）解析会失败。
+    #[test]
+    fn test_barrier_does_not_encrypt_internal_records() {
+        use crate::security::key_management::Keyring;
+        use std::sync::Arc;
+
+        let (_dir, storage) = create_storage();
+        let (keyring, _dek) = Keyring::bootstrap_from_root_key(&[0x11u8; 32]).unwrap();
+        storage.set_barrier(crate::security::barrier::Barrier::new(Arc::new(keyring)));
+
+        // 直接写一条 /_lease/ 内部记录（绕过 raft，模拟内部记录落盘）
+        let lease_key = crate::storage::mvcc::encode_lease_key(42);
+        let record = [0u8; 24];
+        storage
+            .backend()
+            .write(|tx| tx.insert(TABLE_KV, &lease_key, &record))
+            .unwrap();
+
+        // 内部记录以明文读取（长度与内容不变，无需解密）
+        let raw = storage
+            .backend()
+            .read(|tx| tx.get(TABLE_KV, &lease_key))
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw.len(), 24, "internal records must stay plaintext");
     }
 
     // ──── P0-A 新语义：revision ≡ log index + 幂等守卫 + applied 持久化 ────

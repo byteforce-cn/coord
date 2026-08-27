@@ -1823,6 +1823,8 @@ pub mod phase4 {
     /// - 定义与实例的持久化查询
     pub struct WorkflowEngineService {
         store: Arc<dyn WorkflowStore + Send + Sync>,
+        /// R-AGT-09：生产 KV 持久化后端（Some = 启动时全量重建 + watch 对账）
+        kv_store: Option<Arc<KvWorkflowStore>>,
         runtime: Option<Arc<EngineRuntime>>,
         expression: ExpressionEvaluator,
         clock: SystemClock,
@@ -1848,6 +1850,7 @@ pub mod phase4 {
 
             Self {
                 store,
+                kv_store: None,
                 runtime: Some(Arc::new(runtime)),
                 expression,
                 clock,
@@ -1858,9 +1861,13 @@ pub mod phase4 {
         ///
         /// 工作流定义和实例通过 coord-server 的 KV/Txn/Watch API 持久化，
         /// 享受 Raft 共识保证。适用于多 agent 部署场景。
+        ///
+        /// R-AGT-09：`start()` 时调用 `KvWorkflowStore::init()`（全量重建
+        /// 本地缓存 + 启动 watch），watch 断连自动重连并对账。
         pub fn new_with_kv_store(inner: Arc<AgentInner>) -> Self {
-            let kv_store = KvWorkflowStore::new(inner);
-            let store: Arc<dyn WorkflowStore + Send + Sync> = Arc::new(kv_store);
+            let kv_store = Arc::new(KvWorkflowStore::new(inner));
+            let store: Arc<dyn WorkflowStore + Send + Sync> =
+                Arc::clone(&kv_store) as Arc<dyn WorkflowStore + Send + Sync>;
             let expression = ExpressionEvaluator::new();
             let clock = SystemClock;
             let executor = coord_core::workflow::engine::WorkflowExecutor::new(
@@ -1877,6 +1884,7 @@ pub mod phase4 {
 
             Self {
                 store,
+                kv_store: Some(kv_store),
                 runtime: Some(Arc::new(runtime)),
                 expression,
                 clock,
@@ -1905,6 +1913,7 @@ pub mod phase4 {
 
             Self {
                 store,
+                kv_store: None,
                 runtime: Some(Arc::new(runtime)),
                 expression,
                 clock,
@@ -2195,6 +2204,7 @@ pub mod phase4 {
         fn clone(&self) -> Self {
             Self {
                 store: Arc::clone(&self.store),
+                kv_store: self.kv_store.clone(),
                 runtime: self.runtime.clone(),
                 expression: self.expression.clone(),
                 clock: self.clock.clone(),
@@ -2211,6 +2221,14 @@ pub mod phase4 {
         }
 
         async fn start(&self) -> crate::service::ServiceResult<()> {
+            // R-AGT-09：KV 持久化后端启动恢复——全量重建本地缓存 + watch 订阅
+            if let Some(kv_store) = &self.kv_store {
+                kv_store
+                    .init()
+                    .await
+                    .map_err(|e| format!("workflow KvWorkflowStore init failed: {e}"))?;
+                tracing::info!("Workflow engine started with KvWorkflowStore (raft-persisted)");
+            }
             Ok(())
         }
 

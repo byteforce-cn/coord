@@ -7,6 +7,7 @@
 // 写请求（Put/Delete/Txn）通过 Raft 共识提交，读请求直接访问本地状态机。
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -35,6 +36,8 @@ use crate::auth::service::AuthOpProposer;
 use crate::lease::LeaseManager;
 use crate::raft::type_config::{AuthOp, Command, LeaseOp, Response};
 use crate::raft::{CoordRaft, ReadPolicy, WatchReceiver};
+use crate::security::barrier::Barrier;
+use crate::security::key_management::{EncryptedDek, Keyring};
 use crate::storage::mvcc::{AppliedLogId, MvccStorage};
 use crate::storage::redb_backend::RedbBackend;
 use crate::txn::{TxnCompare, TxnOp, TxnOpResponse};
@@ -42,14 +45,137 @@ use crate::watch::WatchDispatcher;
 
 // ──── CoordNode ────
 
+/// R-SVC-18：运行时资源限制（per-RPC 超时、规模上限、幂等缓存参数）。
+///
+/// 由配置层（`coord` CLI 的 `[limits]` 段）构造后经 `CoordNode::set_limits`
+/// 注入；默认值对齐生产保守口径（读/写 5s、Range 1 万、Txn 128 op）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeLimits {
+    /// 读路径超时（线性一致性读 + 本地扫描）
+    pub read_timeout: std::time::Duration,
+    /// 写路径 raft 提交超时（Put/Delete/Txn/Auth 管理操作）
+    pub write_timeout: std::time::Duration,
+    /// Lease 写路径超时（Grant/Revoke/KeepAlive）
+    pub lease_timeout: std::time::Duration,
+    /// Compact 提案超时
+    pub compact_timeout: std::time::Duration,
+    /// Range 单次扫描上限（0 = 不限制；客户端显式 limit 超过该值 → INVALID_ARGUMENT）
+    pub max_range_limit: usize,
+    /// Txn compare + success + failure 操作数上限（0 = 不限制）
+    pub max_txn_ops: usize,
+    /// 幂等缓存条目 TTL
+    pub idempotency_ttl: std::time::Duration,
+    /// 幂等缓存容量上限（FIFO 淘汰最旧条目）
+    pub idempotency_max_entries: usize,
+}
+
+impl Default for RuntimeLimits {
+    fn default() -> Self {
+        Self {
+            read_timeout: std::time::Duration::from_secs(5),
+            write_timeout: std::time::Duration::from_secs(5),
+            lease_timeout: std::time::Duration::from_secs(5),
+            compact_timeout: std::time::Duration::from_secs(10),
+            max_range_limit: 10_000,
+            max_txn_ops: 128,
+            idempotency_ttl: std::time::Duration::from_secs(60),
+            idempotency_max_entries: 4096,
+        }
+    }
+}
+
 /// 幂等请求去重缓存条目
 #[derive(Debug, Clone)]
 struct IdempotentEntry {
+    /// 写入缓存的时间（TTL 依据）
+    inserted_at: std::time::Instant,
     /// 上次响应返回的 revision
     revision: i64,
     /// 上次响应是否 succeeded（仅 Txn 使用）
     succeeded: bool,
+    /// R-SVC-18：Txn 缓存的完整响应（命中时回放，此前返回空 responses）
+    responses: Vec<ResponseOp>,
 }
+
+/// R-SVC-18：幂等去重缓存（request 维度 + 客户端身份 + TTL + 容量上限）。
+///
+/// 此前为无界 `HashMap<request_id, …>`：不同客户端复用同一 request_id 会互相
+/// 命中、条目永不过期、内存无限增长。现改为：
+/// - 键 = 客户端身份哈希（8B，取自 authorization metadata）+ request_id；
+/// - 条目带 TTL，读取时惰性过期；
+/// - FIFO 淘汰，容量上限 `idempotency_max_entries`。
+struct IdempotencyCache {
+    entries: HashMap<Vec<u8>, IdempotentEntry>,
+    /// FIFO 插入序（队头最旧，淘汰用）
+    order: std::collections::VecDeque<Vec<u8>>,
+}
+
+impl IdempotencyCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// 查询并惰性过期：命中且未超 TTL 返回条目，否则移除并返回 None。
+    fn check(&mut self, key: &[u8], ttl: std::time::Duration) -> Option<IdempotentEntry> {
+        let expired = self
+            .entries
+            .get(key)
+            .is_some_and(|e| e.inserted_at.elapsed() > ttl);
+        if expired {
+            self.remove(key);
+            return None;
+        }
+        self.entries.get(key).cloned()
+    }
+
+    /// 插入条目；容量满时 FIFO 淘汰最旧。重复 key 不覆盖（首次响应为准）。
+    fn insert(&mut self, key: Vec<u8>, entry: IdempotentEntry, max_entries: usize) {
+        if max_entries == 0 || self.entries.contains_key(&key) {
+            return;
+        }
+        while self.entries.len() >= max_entries {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+        self.order.push_back(key.clone());
+        self.entries.insert(key, entry);
+    }
+
+    fn remove(&mut self, key: &[u8]) {
+        self.entries.remove(key);
+        self.order.retain(|k| k.as_slice() != key);
+    }
+}
+
+/// R-SVC-18：幂等缓存键 = 客户端身份哈希（8B）+ request_id。
+///
+/// 身份取自 authorization metadata 的哈希——不同凭据的客户端即使使用相同
+/// request_id 也不会互相命中。无凭据的调用（如未启用 auth 的 dev 路径）
+/// 退化为仅 request_id 维度。
+fn idempotency_key(metadata: &tonic::metadata::MetadataMap, request_id: &[u8]) -> Vec<u8> {
+    use std::hash::{Hash, Hasher};
+    let identity = metadata
+        .get("authorization")
+        .and_then(|v| v.to_bytes().ok())
+        .map(|bytes| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            hasher.finish()
+        })
+        .unwrap_or(0);
+    let mut key = Vec::with_capacity(8 + request_id.len());
+    key.extend_from_slice(&identity.to_be_bytes());
+    key.extend_from_slice(request_id);
+    key
+}
+
+/// R-SVC-08：follower 重定向 hint 的 gRPC metadata key
+pub const LEADER_HINT_METADATA_KEY: &str = "coord-leader-hint";
 
 /// 服务端核心节点，持有所有组件并实现 gRPC 服务 trait
 pub struct CoordNode {
@@ -63,8 +189,10 @@ pub struct CoordNode {
     pub lease_manager: Option<Arc<LeaseManager>>,
     /// Watch 分发器
     pub watch_dispatcher: Option<Arc<WatchDispatcher>>,
-    /// 幂等请求去重缓存（request_id → 上次响应）
-    idempotent_cache: RwLock<HashMap<Vec<u8>, IdempotentEntry>>,
+    /// 幂等请求去重缓存（身份哈希 + request_id → 上次响应；TTL + FIFO 上限）
+    idempotent_cache: RwLock<IdempotencyCache>,
+    /// R-SVC-18：运行时资源限制（per-RPC 超时/规模上限/幂等参数）
+    limits: RwLock<RuntimeLimits>,
     /// 集群已知节点的 node_id → gRPC 地址（P0-D.1：Join 重定向用；best-effort）
     node_grpc_addrs: RwLock<HashMap<u64, String>>,
     /// 成员变更互斥（P0-D.3：单 pending change，并发变更返回 UNAVAILABLE）
@@ -73,6 +201,14 @@ pub struct CoordNode {
     disk_read_only: std::sync::atomic::AtomicBool,
     /// 每 watcher 事件队列长度（P1-02 可配，默认 1024）
     watch_buffer: std::sync::atomic::AtomicUsize,
+    /// R-SEC-01：静态加密 Keyring（None = 未启用静态加密）
+    keyring: parking_lot::RwLock<Option<Arc<Keyring>>>,
+    /// R-SEC-01：持久化的密文 DEK（unseal 时重建 Keyring 用）
+    encrypted_deks: parking_lot::RwLock<Vec<EncryptedDek>>,
+    /// R-SEC-01：root 密钥提供者（配置/环境变量/密钥文件；unseal 用）
+    /// R-SEC-01：root 密钥提供者（配置/环境变量/密钥文件；unseal 用）。
+    /// 由 `run_server` 在构造后（Arc 包装前）设置。
+    pub root_key_provider: Option<Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>>,
 }
 
 impl CoordNode {
@@ -83,12 +219,33 @@ impl CoordNode {
             raft: None,
             lease_manager: None,
             watch_dispatcher: None,
-            idempotent_cache: RwLock::new(HashMap::new()),
+            idempotent_cache: RwLock::new(IdempotencyCache::new()),
+            limits: RwLock::new(RuntimeLimits::default()),
             node_grpc_addrs: RwLock::new(HashMap::new()),
             member_change_lock: tokio::sync::Mutex::new(()),
             disk_read_only: std::sync::atomic::AtomicBool::new(false),
             watch_buffer: std::sync::atomic::AtomicUsize::new(1024),
+            keyring: parking_lot::RwLock::new(None),
+            encrypted_deks: parking_lot::RwLock::new(Vec::new()),
+            root_key_provider: None,
         }
+    }
+
+    /// R-SVC-18：注入运行时资源限制（由配置层在启动时调用；默认值可直接使用）。
+    pub fn set_limits(&self, limits: RuntimeLimits) {
+        *self.limits.write() = limits;
+    }
+
+    /// R-SEC-01：注入静态加密 Keyring 与持久化密文 DEK。
+    /// 由 `run_server` 在启动时调用（bootstrap/恢复/解封后）。
+    pub fn install_keyring(&self, keyring: Arc<Keyring>, encrypted_deks: Vec<EncryptedDek>) {
+        *self.keyring.write() = Some(keyring);
+        *self.encrypted_deks.write() = encrypted_deks;
+    }
+
+    /// 当前 Keyring（静态加密启用时返回 Some）
+    pub fn keyring(&self) -> Option<Arc<Keyring>> {
+        self.keyring.read().clone()
     }
 
     /// 设置每 watcher 事件队列长度（P1-02，由配置层调用；P2-02 支持 SIGHUP 热更新，新订阅生效）
@@ -126,6 +283,54 @@ impl CoordNode {
     /// 查询已知的某节点 gRPC 地址（P0-D.1：leader 重定向）。
     pub fn grpc_addr_of(&self, node_id: u64) -> Option<String> {
         self.node_grpc_addrs.read().get(&node_id).cloned()
+    }
+
+    /// R-SVC-08：将 raft `client_write` 错误映射为 gRPC Status。
+    ///
+    /// follower 上的写请求会返回 `ForwardToLeader`——映射为 `UNAVAILABLE` 并在
+    /// gRPC metadata 中携带 leader 地址 hint（`coord-leader-hint`），客户端据此
+    /// 重定向到当前 leader。其余错误映射为 `INTERNAL`。
+    fn map_client_write_error(
+        &self,
+        e: openraft::error::ClientWriteError<crate::raft::type_config::TypeConfig>,
+    ) -> tonic::Status {
+        match e {
+            openraft::error::ClientWriteError::ForwardToLeader(ftl) => {
+                let hint = ftl.leader_id.and_then(|id| self.grpc_addr_of(id));
+                let mut status =
+                    tonic::Status::unavailable("not leader: forward to current leader");
+                if let Some(addr) = hint {
+                    if let Ok(v) = tonic::metadata::MetadataValue::from_str(&addr) {
+                        status.metadata_mut().insert(LEADER_HINT_METADATA_KEY, v);
+                    }
+                }
+                status
+            }
+            other => tonic::Status::internal(format!("raft write failed: {other}")),
+        }
+    }
+
+    /// R-SVC-08：写路径超时保护——失去 quorum 时快速失败而非无限挂起。
+    /// R-SVC-18：超时从 `RuntimeLimits.write_timeout` 读取（配置可调，默认 5s）。
+    async fn client_write_with_timeout(
+        &self,
+        raft: &CoordRaft,
+        cmd: Command,
+    ) -> Result<
+        openraft::raft::ClientWriteResponse<crate::raft::type_config::TypeConfig>,
+        tonic::Status,
+    > {
+        let timeout = self.limits.read().write_timeout;
+        let fut = raft.client_write(cmd);
+        match tokio::time::timeout(timeout, fut).await {
+            Ok(res) => res.map_err(|e| match e {
+                openraft::error::RaftError::APIError(cwe) => self.map_client_write_error(cwe),
+                other => tonic::Status::internal(format!("raft write failed: {other}")),
+            }),
+            Err(_) => Err(tonic::Status::deadline_exceeded(
+                "raft write timed out (no quorum?)",
+            )),
+        }
     }
 
     /// P1-07：领导权移交（非阻塞触发；收敛由调用方轮询 `current_leader`）。
@@ -262,12 +467,16 @@ impl CoordNode {
     }
 
     /// 提交 Lease 命令（P0-B）：集群模式走 raft，单节点模式直接 apply
+    /// R-SVC-18：raft 提交带 `lease_timeout` 超时（此前无超时，quorum 丢失时无限挂起）
     async fn submit_lease_op(&self, op: LeaseOp) -> Result<u64, tonic::Status> {
         if let Some(ref raft) = self.raft {
             let cmd = Command::Lease(op);
-            let resp = raft
-                .client_write(cmd)
+            let timeout = self.limits.read().lease_timeout;
+            let resp = tokio::time::timeout(timeout, raft.client_write(cmd))
                 .await
+                .map_err(|_| {
+                    tonic::Status::deadline_exceeded("lease write timed out (no quorum?)")
+                })?
                 .map_err(|e| tonic::Status::internal(format!("raft lease write failed: {e}")))?;
             match resp.response() {
                 Response::Lease { revision } => Ok(*revision),
@@ -282,63 +491,70 @@ impl CoordNode {
         }
     }
 
-    /// 检查幂等 request_id：若已存在则返回缓存的 revision，否则执行操作并缓存
-    fn check_idempotent(&self, request_id: &[u8]) -> Option<i64> {
-        if request_id.is_empty() {
-            return None;
-        }
+    /// 检查幂等 request：命中且未过期返回缓存的 revision
+    fn check_idempotent(&self, key: &[u8]) -> Option<i64> {
+        let ttl = self.limits.read().idempotency_ttl;
         self.idempotent_cache
-            .read()
-            .get(request_id)
+            .write()
+            .check(key, ttl)
             .map(|e| e.revision)
     }
 
     /// 缓存幂等请求结果
-    fn cache_idempotent(&self, request_id: Vec<u8>, revision: i64) {
-        if request_id.is_empty() {
-            return;
-        }
+    fn cache_idempotent(&self, key: Vec<u8>, revision: i64) {
+        let max_entries = self.limits.read().idempotency_max_entries;
         self.idempotent_cache.write().insert(
-            request_id,
+            key,
             IdempotentEntry {
+                inserted_at: std::time::Instant::now(),
                 revision,
                 succeeded: true,
+                responses: Vec::new(),
             },
+            max_entries,
         );
     }
 
-    /// 检查并缓存 Txn 幂等请求
-    fn check_idempotent_txn(&self, request_id: &[u8]) -> Option<(bool, i64)> {
-        if request_id.is_empty() {
-            return None;
-        }
+    /// 检查 Txn 幂等请求：命中且未过期返回 (succeeded, revision, responses)
+    fn check_idempotent_txn(&self, key: &[u8]) -> Option<(bool, i64, Vec<ResponseOp>)> {
+        let ttl = self.limits.read().idempotency_ttl;
         self.idempotent_cache
-            .read()
-            .get(request_id)
-            .map(|e| (e.succeeded, e.revision))
+            .write()
+            .check(key, ttl)
+            .map(|e| (e.succeeded, e.revision, e.responses))
     }
 
-    /// 缓存 Txn 幂等请求结果
-    fn cache_idempotent_txn(&self, request_id: Vec<u8>, succeeded: bool, revision: i64) {
-        if request_id.is_empty() {
-            return;
-        }
+    /// 缓存 Txn 幂等请求结果（R-SVC-18：连同完整 responses 一并缓存）
+    fn cache_idempotent_txn(
+        &self,
+        key: Vec<u8>,
+        succeeded: bool,
+        revision: i64,
+        responses: Vec<ResponseOp>,
+    ) {
+        let max_entries = self.limits.read().idempotency_max_entries;
         self.idempotent_cache.write().insert(
-            request_id,
+            key,
             IdempotentEntry {
+                inserted_at: std::time::Instant::now(),
                 revision,
                 succeeded,
+                responses,
             },
+            max_entries,
         );
     }
 
     /// 确保线性一致性读：通过 ReadIndex 确认 Leader 身份和日志进度（ADP §11.2）
     ///
     /// 仅在 Raft 模式下生效；单节点模式直接返回。
+    /// R-SVC-18：带 `read_timeout` 超时（此前无超时，leader 失联时读无限挂起）。
     async fn ensure_linearizable(&self) -> Result<(), tonic::Status> {
         if let Some(ref raft) = self.raft {
-            raft.ensure_linearizable(ReadPolicy::ReadIndex)
+            let timeout = self.limits.read().read_timeout;
+            tokio::time::timeout(timeout, raft.ensure_linearizable(ReadPolicy::ReadIndex))
                 .await
+                .map_err(|_| tonic::Status::deadline_exceeded("linearizable read timed out"))?
                 .map_err(|e| tonic::Status::internal(format!("linearizable read failed: {e}")))?;
         }
         Ok(())
@@ -372,8 +588,148 @@ fn to_kv_proto(
     }
 }
 
-fn map_err<E: std::fmt::Display>(e: E) -> tonic::Status {
-    tonic::Status::internal(e.to_string())
+/// ADP §23.2：coord-core Error → tonic::Status 结构化映射。
+///
+/// 只回传安全的业务信息（key、lease id、revision 等）；
+/// 内部细节（storage/raft/crypto）只进服务端日志，不回传客户端（脱敏）。
+fn map_core_error(e: &coord_core::error::Error) -> tonic::Status {
+    use coord_core::error::Error;
+    match e {
+        Error::InvalidArgument(m) => tonic::Status::invalid_argument(m.clone()),
+        Error::NotFound { resource, key } => {
+            tonic::Status::not_found(format!("{resource} not found: {key}"))
+        }
+        Error::AlreadyExists { resource, key } => {
+            tonic::Status::already_exists(format!("{resource} already exists: {key}"))
+        }
+        Error::PermissionDenied(m) => tonic::Status::permission_denied(m.clone()),
+        Error::Unauthenticated(m) => tonic::Status::unauthenticated(m.clone()),
+        Error::NotLeader { leader_addr } => {
+            let mut status = tonic::Status::unavailable("not leader");
+            if let Some(addr) = leader_addr {
+                if let Ok(v) = tonic::metadata::MetadataValue::from_str(addr) {
+                    status.metadata_mut().insert(LEADER_HINT_METADATA_KEY, v);
+                }
+            }
+            status
+        }
+        Error::NotLeaderNoHint => tonic::Status::unavailable("not leader, leader hint unavailable"),
+        Error::ClusterUnavailable(m) => tonic::Status::unavailable(m.clone()),
+        Error::RequestTimeout => tonic::Status::deadline_exceeded("request timeout"),
+        Error::RevisionCompacted { revision, oldest } => tonic::Status::out_of_range(format!(
+            "revision {revision} compacted; oldest available: {oldest}"
+        )),
+        Error::LeaseNotFound { lease_id } => {
+            tonic::Status::not_found(format!("lease {lease_id} not found or expired"))
+        }
+        Error::LeaseTTLOutOfRange { ttl, min, max } => {
+            tonic::Status::invalid_argument(format!("lease TTL {ttl}s out of range [{min}, {max}]"))
+        }
+        Error::TxnTooLarge { ops, max } => {
+            tonic::Status::invalid_argument(format!("txn too large: {ops} operations, max {max}"))
+        }
+        Error::TxnCompareFailed => tonic::Status::failed_precondition("txn compare failed"),
+        Error::WatchTooManyConnections { current, max } => tonic::Status::resource_exhausted(
+            format!("too many watch connections: {current}/{max}"),
+        ),
+        Error::Backpressure(m) => tonic::Status::resource_exhausted(m.clone()),
+        Error::ClusterSealed => tonic::Status::unavailable("cluster is sealed"),
+        Error::ClusterUnsealing => tonic::Status::unavailable("cluster is unsealing"),
+        Error::InsufficientShares { have, need } => tonic::Status::invalid_argument(format!(
+            "insufficient shares: have {have}, need {need}"
+        )),
+        Error::AuthNotEnabled => tonic::Status::unauthenticated("auth not enabled"),
+        Error::TokenExpired => tonic::Status::unauthenticated("token expired"),
+        Error::InvalidToken(_) => tonic::Status::unauthenticated("invalid token"),
+        Error::UserAlreadyExists { name } => {
+            tonic::Status::already_exists(format!("user {name} already exists"))
+        }
+        Error::RoleAlreadyExists { name } => {
+            tonic::Status::already_exists(format!("role {name} already exists"))
+        }
+        Error::RegionNotFound { region_id } => {
+            tonic::Status::not_found(format!("region {region_id} not found"))
+        }
+        Error::RegionNotLeader {
+            region_id,
+            leader_addr,
+        } => {
+            let mut status =
+                tonic::Status::unavailable(format!("not leader for region {region_id}"));
+            if let Some(addr) = leader_addr {
+                if let Ok(v) = tonic::metadata::MetadataValue::from_str(addr) {
+                    status.metadata_mut().insert(LEADER_HINT_METADATA_KEY, v);
+                }
+            }
+            status
+        }
+        Error::EpochStale { .. } => tonic::Status::unavailable("stale epoch; refresh route table"),
+        Error::KeyNotInRegion { region_id } => {
+            tonic::Status::invalid_argument(format!("key not in region {region_id} range"))
+        }
+        Error::RegionSplitInProgress { region_id } => {
+            tonic::Status::unavailable(format!("region {region_id} split in progress"))
+        }
+        Error::PdUnavailable(m) => tonic::Status::unavailable(m.clone()),
+        Error::RouteNotReady => tonic::Status::unavailable("route table not ready"),
+        // 内部错误脱敏：详情只进服务端日志，不回传客户端
+        Error::Internal(m) => {
+            tracing::error!(error = %m, "internal error returned to client (sanitized)");
+            tonic::Status::internal("internal error")
+        }
+        Error::Storage(m) => {
+            tracing::error!(error = %m, "storage error returned to client (sanitized)");
+            tonic::Status::internal("storage error")
+        }
+        Error::DataCorruption(m) => {
+            tracing::error!(error = %m, "data corruption returned to client (sanitized)");
+            tonic::Status::internal("data corruption")
+        }
+        Error::Crypto(_) => tonic::Status::internal("crypto error"),
+    }
+}
+
+/// 将存储/raft 等内部错误映射为 gRPC Status（ADP §23.2）。
+///
+/// - `coord_core::error::Error`：结构化映射（见 [`map_core_error`]）；
+/// - `std::io::Error`：按 ErrorKind 映射；
+/// - 其余类型：仅识别安全且明确的字符串模式，兜底脱敏为 `INTERNAL`
+///   （原始信息只进服务端日志，不再原样回传客户端）。
+fn map_err<E: std::fmt::Display + 'static>(e: E) -> tonic::Status {
+    use std::any::Any;
+    let any = &e as &dyn Any;
+    if let Some(core) = any.downcast_ref::<coord_core::error::Error>() {
+        return map_core_error(core);
+    }
+    if let Some(io) = any.downcast_ref::<std::io::Error>() {
+        let code = match io.kind() {
+            std::io::ErrorKind::NotFound => tonic::Code::NotFound,
+            std::io::ErrorKind::PermissionDenied => tonic::Code::PermissionDenied,
+            std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+                tonic::Code::InvalidArgument
+            }
+            _ => tonic::Code::Internal,
+        };
+        return if code == tonic::Code::Internal {
+            tracing::error!(error = %io, "io error returned to client (sanitized)");
+            tonic::Status::internal("i/o error")
+        } else {
+            tonic::Status::new(code, io.to_string())
+        };
+    }
+    let msg = e.to_string();
+    let lowered = msg.to_ascii_lowercase();
+    if lowered.contains("not leader") {
+        return tonic::Status::unavailable("not leader");
+    }
+    if lowered.contains("compacted") {
+        return tonic::Status::out_of_range(msg);
+    }
+    if lowered.contains("timed out") || lowered.contains("timeout") {
+        return tonic::Status::deadline_exceeded(msg);
+    }
+    tracing::error!(error = %msg, "unclassified error returned to client (sanitized)");
+    tonic::Status::internal("internal error")
 }
 
 // ──── AuthOp 提案器（P0-C.2：管理操作入 raft 日志）────
@@ -382,9 +738,10 @@ fn map_err<E: std::fmt::Display>(e: E) -> tonic::Status {
 impl AuthOpProposer for CoordNode {
     async fn propose_auth_op(&self, op: AuthOp) -> Result<u64, String> {
         if let Some(ref raft) = self.raft {
-            let resp = raft
-                .client_write(Command::Auth(op))
+            let timeout = self.limits.read().write_timeout;
+            let resp = tokio::time::timeout(timeout, raft.client_write(Command::Auth(op)))
                 .await
+                .map_err(|_| "raft auth write timed out (no quorum?)".to_string())?
                 .map_err(|e| format!("raft auth write failed: {e}"))?;
             match resp.response() {
                 Response::Auth { revision } => Ok(*revision),
@@ -411,10 +768,12 @@ impl CoordNode {
     /// 未来 revision 由 RPC 层返回 `INVALID_ARGUMENT`（规格 13 §三）。
     pub async fn compact_impl(&self, revision: u64) -> Result<u64, String> {
         if let Some(ref raft) = self.raft {
-            let resp = raft
-                .client_write(Command::Compact { revision })
-                .await
-                .map_err(|e| format!("raft compact write failed: {e}"))?;
+            let timeout = self.limits.read().compact_timeout;
+            let resp =
+                tokio::time::timeout(timeout, raft.client_write(Command::Compact { revision }))
+                    .await
+                    .map_err(|_| "raft compact write timed out (no quorum?)".to_string())?
+                    .map_err(|e| format!("raft compact write failed: {e}"))?;
             match resp.response() {
                 Response::Compact { compacted_revision } => Ok(*compacted_revision),
                 _ => Err("unexpected raft response for Compact".into()),
@@ -471,15 +830,20 @@ impl Kv for CoordNode {
         // P1-02：磁盘水位只读闸
         self.ensure_writable()?;
 
+        let request_metadata = request.metadata().clone();
         let req = request.into_inner();
         let request_id = req.request_id.clone();
 
-        // 幂等检查：相同 request_id 返回缓存的 revision
-        if let Some(cached_rev) = self.check_idempotent(&request_id) {
-            return Ok(tonic::Response::new(PutResponse {
-                prev_kv: None,
-                revision: cached_rev,
-            }));
+        // 幂等检查：相同（客户端身份 + request_id）返回缓存的 revision
+        if !request_id.is_empty() {
+            if let Some(cached_rev) =
+                self.check_idempotent(&idempotency_key(&request_metadata, &request_id))
+            {
+                return Ok(tonic::Response::new(PutResponse {
+                    prev_kv: None,
+                    revision: cached_rev,
+                }));
+            }
         }
 
         let lease_id = if req.lease_id != 0 {
@@ -509,10 +873,7 @@ impl Kv for CoordNode {
                 value: req.value.clone(),
                 lease_id,
             };
-            let resp = raft
-                .client_write(cmd)
-                .await
-                .map_err(|e| tonic::Status::internal(format!("raft write failed: {e}")))?;
+            let resp = self.client_write_with_timeout(raft, cmd).await?;
             match resp.response() {
                 Response::Put { revision } => *revision,
                 _ => return Err(tonic::Status::internal("unexpected raft response")),
@@ -530,8 +891,13 @@ impl Kv for CoordNode {
             }
         }
 
-        // 缓存幂等结果
-        self.cache_idempotent(request_id, revision as i64);
+        // 缓存幂等结果（键含客户端身份，防止不同客户端同 request_id 互相命中）
+        if !request_id.is_empty() {
+            self.cache_idempotent(
+                idempotency_key(&request_metadata, &request_id),
+                revision as i64,
+            );
+        }
 
         tracing::debug!(revision, "KV put applied");
         Ok(tonic::Response::new(PutResponse {
@@ -545,10 +911,19 @@ impl Kv for CoordNode {
         request: tonic::Request<RangeRequest>,
     ) -> Result<tonic::Response<RangeResponse>, tonic::Status> {
         let req = request.into_inner();
+        // R-SVC-18：规模上限——客户端显式 limit 超过 max_range_limit 直接拒绝；
+        // 未指定 limit（0）时以 max_range_limit 兜底（此前 usize::MAX 无上限）。
+        let max_range_limit = self.limits.read().max_range_limit;
         let limit = if req.limit > 0 {
-            req.limit as usize
+            let requested = req.limit as usize;
+            if max_range_limit > 0 && requested > max_range_limit {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "range limit {requested} exceeds max {max_range_limit}"
+                )));
+            }
+            requested
         } else {
-            usize::MAX
+            max_range_limit
         };
         let keys_only = req.keys_only;
         let count_only = req.count_only;
@@ -561,9 +936,13 @@ impl Kv for CoordNode {
         // 线性一致性读：确认 Leader 身份后再读取（ADP §11.2）
         self.ensure_linearizable().await?;
 
+        // R-SVC-07-1：range_end 为空 或 range_end == key → 单键精确查询（兼容现有客户端约定）；
+        // 否则为半开区间 [key, range_end) 范围查询
+        let single_key = req.range_end.is_empty() || req.range_end == req.key;
+
         let mut kvs = Vec::new();
 
-        if target_revision > 0 && req.range_end.is_empty() {
+        if target_revision > 0 && single_key {
             // 历史快照读：单键查询指定 Revision 时的值
             if let Some(value) = self
                 .storage
@@ -593,19 +972,32 @@ impl Kv for CoordNode {
                 };
                 kvs.push(kv);
             }
-        } else if !req.range_end.is_empty() {
-            // 范围查询
-            let results = self.storage.range(&req.key, limit).map_err(map_err)?;
-            for (k, v) in results {
-                let meta = self.storage.get_kv_metadata(&k).map_err(map_err)?;
-                let kv = to_kv_proto(&k, &v, meta.as_ref());
-                kvs.push(kv);
-            }
-        } else {
+        } else if single_key {
             // 单键精确查询（最新值）
             if let Some(value) = self.storage.get(&req.key).map_err(map_err)? {
                 let meta = self.storage.get_kv_metadata(&req.key).map_err(map_err)?;
                 let kv = to_kv_proto(&req.key, &value, meta.as_ref());
+                kvs.push(kv);
+            }
+        } else if target_revision > 0 {
+            // R-SVC-07-2：带 revision 的范围读走历史扫描（changelog 重建），
+            // 返回目标 revision 的历史视图而非实时数据
+            let results = self
+                .storage
+                .range_at_revision(&req.key, &req.range_end, limit, target_revision)
+                .map_err(map_err)?;
+            for (k, v) in results {
+                kvs.push(to_kv_proto(&k, &v, None));
+            }
+        } else {
+            // R-SVC-07-1：最新范围读，半开区间 [key, range_end)
+            let results = self
+                .storage
+                .range_in(&req.key, &req.range_end, limit)
+                .map_err(map_err)?;
+            for (k, v) in results {
+                let meta = self.storage.get_kv_metadata(&k).map_err(map_err)?;
+                let kv = to_kv_proto(&k, &v, meta.as_ref());
                 kvs.push(kv);
             }
         }
@@ -653,58 +1045,83 @@ impl Kv for CoordNode {
         // 线性一致性读：确保能看到最新数据后再扫描要删除的 Key
         self.ensure_linearizable().await?;
 
-        // 收集需要删除的 Key 列表
-        let keys_to_delete: Vec<Vec<u8>> = if !req.range_end.is_empty() {
-            // 范围删除：扫描出所有匹配前缀的 Key
-            // 注：range_end 用于标识范围操作，实际匹配由 MvccStorage::range() 的前缀扫描完成
-            // （与 range() handler 保持一致的语义）
-            let results = self.storage.range(&req.key, usize::MAX).map_err(map_err)?;
-            results.into_iter().map(|(k, _)| k).collect()
-        } else {
-            vec![req.key.clone()]
-        };
+        // R-SVC-07-3：range_end 非空且 != key → 原子范围删除 [key, range_end)；
+        // 否则为单键删除
+        let is_range = !req.range_end.is_empty() && req.range_end != req.key;
 
-        // 获取 prev_kv（如果需要）
+        // 获取 prev_kv（如果需要）；R-SVC-18：范围扫描以 max_range_limit 封顶
+        let max_range_limit = self.limits.read().max_range_limit;
         let prev_kvs: Vec<KeyValue> = if prev_kv_requested {
-            keys_to_delete
-                .iter()
-                .filter_map(|key| {
-                    self.storage.get(key).ok().flatten().map(|value| {
-                        let meta = self.storage.get_kv_metadata(key).ok().flatten();
-                        to_kv_proto(key, &value, meta.as_ref())
+            if is_range {
+                self.storage
+                    .range_in(&req.key, &req.range_end, max_range_limit)
+                    .map_err(map_err)?
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let meta = self.storage.get_kv_metadata(&k).ok().flatten();
+                        to_kv_proto(&k, &v, meta.as_ref())
                     })
-                })
-                .collect()
+                    .collect()
+            } else {
+                self.storage
+                    .get(&req.key)
+                    .map_err(map_err)?
+                    .map(|value| {
+                        let meta = self.storage.get_kv_metadata(&req.key).ok().flatten();
+                        to_kv_proto(&req.key, &value, meta.as_ref())
+                    })
+                    .into_iter()
+                    .collect()
+            }
         } else {
             vec![]
         };
 
-        let mut deleted: i64 = 0;
-        let mut revision: i64 = 0;
-
-        // 通过 Raft 共识提交（集群模式），或直接写入存储（单节点模式）
-        for key in &keys_to_delete {
-            // 检查 Key 是否存在（在 Raft 写入前）
-            let exists = self.storage.get(key).map_err(map_err)?.is_some();
-
+        let (deleted, revision): (i64, i64) = if is_range {
+            // 范围删除：单个 raft Command::DeleteRange 原子执行（R-SVC-07-3）
             if let Some(ref raft) = self.raft {
-                let cmd = Command::Delete { key: key.clone() };
-                let resp = raft
-                    .client_write(cmd)
-                    .await
-                    .map_err(|e| tonic::Status::internal(format!("raft write failed: {e}")))?;
-                if let Response::Delete { revision: rev } = resp.response() {
-                    revision = *rev as i64;
-                    if exists {
-                        deleted += 1;
+                let cmd = Command::DeleteRange {
+                    key: req.key.clone(),
+                    range_end: req.range_end.clone(),
+                };
+                let resp = self.client_write_with_timeout(raft, cmd).await?;
+                match resp.response() {
+                    Response::DeleteRange { revision, deleted } => {
+                        (*deleted as i64, *revision as i64)
                     }
+                    _ => return Err(tonic::Status::internal("unexpected raft response")),
+                }
+            } else {
+                let (rev, deleted) = self
+                    .storage
+                    .delete_range(&req.key, &req.range_end)
+                    .map_err(map_err)?;
+                (deleted as i64, rev as i64)
+            }
+        } else {
+            // 单键删除（原有逻辑）
+            let exists = self.storage.get(&req.key).map_err(map_err)?.is_some();
+            if let Some(ref raft) = self.raft {
+                let cmd = Command::Delete {
+                    key: req.key.clone(),
+                };
+                let resp = self.client_write_with_timeout(raft, cmd).await?;
+                if let Response::Delete { revision: rev } = resp.response() {
+                    if exists {
+                        (1, *rev as i64)
+                    } else {
+                        (0, *rev as i64)
+                    }
+                } else {
+                    return Err(tonic::Status::internal("unexpected raft response"));
                 }
             } else if exists {
-                let rev = self.storage.delete(key).map_err(map_err)?;
-                revision = rev as i64;
-                deleted += 1;
+                let rev = self.storage.delete(&req.key).map_err(map_err)?;
+                (1, rev as i64)
+            } else {
+                (0, 0)
             }
-        }
+        };
 
         tracing::debug!(deleted, revision, "KV delete applied");
         Ok(tonic::Response::new(DeleteResponse {
@@ -824,16 +1241,30 @@ impl Txn for CoordNode {
         // P1-02：磁盘水位只读闸
         self.ensure_writable()?;
 
+        let request_metadata = request.metadata().clone();
         let req = request.into_inner();
         let request_id = req.request_id.clone();
 
-        // 幂等检查：相同 request_id 返回缓存的结果
-        if let Some((cached_succeeded, cached_rev)) = self.check_idempotent_txn(&request_id) {
-            return Ok(tonic::Response::new(TxnResponse {
-                succeeded: cached_succeeded,
-                responses: vec![],
-                revision: cached_rev,
-            }));
+        // 幂等检查：相同（客户端身份 + request_id）返回缓存结果（含完整 responses）
+        if !request_id.is_empty() {
+            if let Some((cached_succeeded, cached_rev, cached_responses)) =
+                self.check_idempotent_txn(&idempotency_key(&request_metadata, &request_id))
+            {
+                return Ok(tonic::Response::new(TxnResponse {
+                    succeeded: cached_succeeded,
+                    responses: cached_responses,
+                    revision: cached_rev,
+                }));
+            }
+        }
+
+        // R-SVC-18：Txn 规模上限——compare + success + failure 总操作数超限直接拒绝
+        let max_txn_ops = self.limits.read().max_txn_ops;
+        let total_ops = req.compare.len() + req.success.len() + req.failure.len();
+        if max_txn_ops > 0 && total_ops > max_txn_ops {
+            return Err(tonic::Status::invalid_argument(format!(
+                "txn ops {total_ops} exceeds max {max_txn_ops}"
+            )));
         }
 
         let compares: Vec<TxnCompare> = req
@@ -854,6 +1285,20 @@ impl Txn for CoordNode {
             .map(convert_request_op)
             .collect::<Result<Vec<_>, _>>()?;
 
+        // R-SVC-18：Txn 内 Range op 的 limit 同样受 max_range_limit 约束
+        {
+            let max_range_limit = self.limits.read().max_range_limit;
+            for op in success_ops.iter().chain(failure_ops.iter()) {
+                if let TxnOp::Range { limit, .. } = op {
+                    if max_range_limit > 0 && *limit > max_range_limit as i64 {
+                        return Err(tonic::Status::invalid_argument(format!(
+                            "txn range limit {limit} exceeds max {max_range_limit}"
+                        )));
+                    }
+                }
+            }
+        }
+
         // 通过 Raft 共识提交（集群模式），或直接执行（单节点模式）
         let result = if let Some(ref raft) = self.raft {
             let cmd = Command::Txn {
@@ -861,10 +1306,7 @@ impl Txn for CoordNode {
                 success_ops: success_ops.clone(),
                 failure_ops: failure_ops.clone(),
             };
-            let resp = raft
-                .client_write(cmd)
-                .await
-                .map_err(|e| tonic::Status::internal(format!("raft txn failed: {e}")))?;
+            let resp = self.client_write_with_timeout(raft, cmd).await?;
             match resp.response() {
                 Response::Txn {
                     succeeded,
@@ -902,8 +1344,15 @@ impl Txn for CoordNode {
             }
         }
 
-        // 缓存幂等结果
-        self.cache_idempotent_txn(request_id, result.succeeded, result.revision as i64);
+        // 缓存幂等结果（R-SVC-18：连同完整 responses 缓存，命中时回放）
+        if !request_id.is_empty() {
+            self.cache_idempotent_txn(
+                idempotency_key(&request_metadata, &request_id),
+                result.succeeded,
+                result.revision as i64,
+                responses.clone(),
+            );
+        }
 
         tracing::debug!(
             succeeded = result.succeeded,
@@ -1333,14 +1782,76 @@ impl Maintenance for CoordNode {
         &self,
         _request: tonic::Request<SealRequest>,
     ) -> Result<tonic::Response<SealResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("seal not yet implemented"))
+        // R-SEC-01：接线真实 Seal（此前为 unimplemented stub）
+        let keyring = self.keyring.read().clone().ok_or_else(|| {
+            tonic::Status::failed_precondition("static encryption is not enabled on this node")
+        })?;
+        keyring.seal();
+        tracing::info!("Cluster sealed: key material zeroized; writes/reads refused");
+        Ok(tonic::Response::new(SealResponse {}))
     }
 
     async fn unseal(
         &self,
-        _request: tonic::Request<UnsealRequest>,
+        request: tonic::Request<UnsealRequest>,
     ) -> Result<tonic::Response<UnsealResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("unseal not yet implemented"))
+        // R-SEC-01：接线真实 Unseal（此前为 unimplemented stub）。
+        // 优先使用 Shamir 分片；其次使用 root 密钥提供者（配置/环境变量/密钥文件）。
+        if !self.keyring.read().as_ref().is_some_and(|k| k.is_sealed()) {
+            return Err(tonic::Status::failed_precondition(
+                "keyring is not sealed; nothing to unseal",
+            ));
+        }
+        let req = request.into_inner();
+        let encrypted_deks = self.encrypted_deks.read().clone();
+        if encrypted_deks.is_empty() {
+            return Err(tonic::Status::failed_precondition(
+                "no persisted encrypted DEKs found; cannot unseal",
+            ));
+        }
+
+        // 路径 1：Shamir 分片解封
+        let mut shares = Vec::new();
+        if !req.shares.is_empty() {
+            for raw in &req.shares {
+                match crate::security::seal::Share::from_bytes(raw) {
+                    Ok(s) => shares.push(s),
+                    Err(e) => {
+                        return Err(tonic::Status::invalid_argument(format!(
+                            "invalid share: {e}"
+                        )))
+                    }
+                }
+            }
+        }
+
+        let recovered = if !shares.is_empty() {
+            Keyring::unseal(&shares, &encrypted_deks)
+                .map_err(|e| tonic::Status::unauthenticated(format!("unseal failed: {e}")))?
+        } else if let Some(provider) = &self.root_key_provider {
+            let root_key = provider().ok_or_else(|| {
+                tonic::Status::failed_precondition(
+                    "no root key available for unseal (set security.encryption_root_key)",
+                )
+            })?;
+            Keyring::from_root_key(&root_key, &encrypted_deks)
+                .map_err(|e| tonic::Status::unauthenticated(format!("unseal failed: {e}")))?
+        } else {
+            return Err(tonic::Status::failed_precondition(
+                "unseal requires Shamir shares or a root key provider",
+            ));
+        };
+
+        // 重新接线 Barrier 与 Keyring
+        let recovered = Arc::new(recovered);
+        let barrier = Barrier::new(Arc::clone(&recovered));
+        self.storage.set_barrier(barrier);
+        *self.keyring.write() = Some(Arc::clone(&recovered));
+        tracing::info!("Cluster unsealed: keyring restored, encryption active");
+        Ok(tonic::Response::new(UnsealResponse {
+            nodes_unsealed: 1,
+            total_nodes: 1,
+        }))
     }
 
     async fn status(
@@ -1361,12 +1872,19 @@ impl Maintenance for CoordNode {
             (0i64, 0u64, String::new())
         };
 
+        // R-SEC-01：seal_status 返回真实状态（此前硬编码 "unsealed"）
+        let seal_status = match self.keyring.read().as_ref() {
+            Some(k) if k.is_sealed() => "sealed".to_string(),
+            Some(_) => "unsealed".to_string(),
+            None => "unsealed".to_string(), // 未启用静态加密
+        };
+
         Ok(tonic::Response::new(StatusResponse {
             revision: revision as i64,
             raft_index,
             raft_term,
             raft_leader,
-            seal_status: String::from("unsealed"),
+            seal_status,
         }))
     }
 
@@ -1727,15 +2245,64 @@ mod tests {
     fn test_map_err_returns_internal_status() {
         let status = map_err("test error message");
         assert_eq!(status.code(), tonic::Code::Internal);
-        assert!(status.message().contains("test error message"));
+        // 脱敏：原始信息不回传客户端
+        assert!(!status.message().contains("test error message"));
+        assert_eq!(status.message(), "internal error");
     }
 
     #[test]
     fn test_map_err_with_display_type() {
         let err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let status = map_err(err);
+        assert_eq!(status.code(), tonic::Code::NotFound);
+    }
+
+    #[test]
+    fn test_map_err_classifies_core_errors() {
+        use coord_core::error::Error;
+        assert_eq!(
+            map_err(Error::NotLeader { leader_addr: None }).code(),
+            tonic::Code::Unavailable
+        );
+        assert_eq!(
+            map_err(Error::NotFound {
+                resource: "key",
+                key: "k".into()
+            })
+            .code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            map_err(Error::RevisionCompacted {
+                revision: 5,
+                oldest: 3
+            })
+            .code(),
+            tonic::Code::OutOfRange
+        );
+        assert_eq!(
+            map_err(Error::PermissionDenied("no".into())).code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            map_err(Error::TokenExpired).code(),
+            tonic::Code::Unauthenticated
+        );
+    }
+
+    #[test]
+    fn test_map_err_sanitizes_internal_core_errors() {
+        use coord_core::error::Error;
+        let status = map_err(Error::Storage(
+            "redb: table corrupted at offset 12345".into(),
+        ));
         assert_eq!(status.code(), tonic::Code::Internal);
-        assert!(status.message().contains("file not found"));
+        assert!(
+            !status.message().contains("redb"),
+            "{} != sanitized",
+            status.message()
+        );
+        assert_eq!(status.message(), "storage error");
     }
 
     // ──── convert_compare ────
@@ -2000,6 +2567,157 @@ mod tests {
         assert_eq!(
             node.watch_buffer.load(std::sync::atomic::Ordering::Relaxed),
             4096
+        );
+    }
+
+    // ──── R-SVC-18：幂等缓存（TTL / 容量 / 身份维度）───
+
+    fn cache_key(identity: u64, request_id: &[u8]) -> Vec<u8> {
+        let mut key = Vec::with_capacity(8 + request_id.len());
+        key.extend_from_slice(&identity.to_be_bytes());
+        key.extend_from_slice(request_id);
+        key
+    }
+
+    #[test]
+    fn test_runtime_limits_defaults() {
+        let limits = RuntimeLimits::default();
+        assert_eq!(limits.read_timeout, std::time::Duration::from_secs(5));
+        assert_eq!(limits.write_timeout, std::time::Duration::from_secs(5));
+        assert_eq!(limits.max_range_limit, 10_000);
+        assert_eq!(limits.max_txn_ops, 128);
+        assert_eq!(limits.idempotency_ttl, std::time::Duration::from_secs(60));
+        assert_eq!(limits.idempotency_max_entries, 4096);
+    }
+
+    #[test]
+    fn test_idempotency_cache_hit_and_ttl_expiry() {
+        let mut cache = IdempotencyCache::new();
+        let key = cache_key(7, b"req-1");
+        cache.insert(
+            key.clone(),
+            IdempotentEntry {
+                inserted_at: std::time::Instant::now(),
+                revision: 42,
+                succeeded: true,
+                responses: Vec::new(),
+            },
+            16,
+        );
+        // 命中
+        assert_eq!(
+            cache
+                .check(&key, std::time::Duration::from_secs(60))
+                .unwrap()
+                .revision,
+            42
+        );
+        // 回填插入时间（10s 前）→ 1s TTL 判定过期 → None 且条目被清除
+        let backdated = cache.entries.get_mut(&key).unwrap();
+        backdated.inserted_at = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        assert!(cache
+            .check(&key, std::time::Duration::from_secs(1))
+            .is_none());
+        assert_eq!(cache.entries.len(), 0);
+    }
+
+    #[test]
+    fn test_idempotency_cache_fifo_eviction() {
+        let mut cache = IdempotencyCache::new();
+        for i in 0..8 {
+            let key = cache_key(1, format!("req-{i}").as_bytes());
+            cache.insert(
+                key,
+                IdempotentEntry {
+                    inserted_at: std::time::Instant::now(),
+                    revision: i as i64,
+                    succeeded: true,
+                    responses: Vec::new(),
+                },
+                4,
+            );
+        }
+        assert_eq!(
+            cache.entries.len(),
+            4,
+            "capacity enforced via FIFO eviction"
+        );
+        // 最早插入的 req-0..3 被淘汰
+        for i in 0..4 {
+            assert!(cache
+                .check(
+                    &cache_key(1, format!("req-{i}").as_bytes()),
+                    std::time::Duration::from_secs(60)
+                )
+                .is_none());
+        }
+        // 最近插入的 req-4..7 仍命中
+        for i in 4..8 {
+            assert_eq!(
+                cache
+                    .check(
+                        &cache_key(1, format!("req-{i}").as_bytes()),
+                        std::time::Duration::from_secs(60)
+                    )
+                    .unwrap()
+                    .revision,
+                i as i64
+            );
+        }
+    }
+
+    #[test]
+    fn test_idempotency_key_distinguishes_clients() {
+        // 相同 request_id、不同 authorization → 不同缓存键
+        let mut md1 = tonic::metadata::MetadataMap::new();
+        md1.insert(
+            "authorization",
+            tonic::metadata::MetadataValue::from_static("Bearer token-a"),
+        );
+        let mut md2 = tonic::metadata::MetadataMap::new();
+        md2.insert(
+            "authorization",
+            tonic::metadata::MetadataValue::from_static("Bearer token-b"),
+        );
+        let k1 = idempotency_key(&md1, b"same-request");
+        let k2 = idempotency_key(&md2, b"same-request");
+        assert_ne!(k1, k2);
+        // 无凭据 → 退化为仅 request_id 维度（确定性）
+        let md_empty = tonic::metadata::MetadataMap::new();
+        let k3 = idempotency_key(&md_empty, b"same-request");
+        assert!(k3.ends_with(b"same-request"));
+    }
+
+    #[test]
+    fn test_idempotency_txn_cache_replays_responses() {
+        let mut cache = IdempotencyCache::new();
+        let key = cache_key(9, b"txn-1");
+        let responses = vec![ResponseOp {
+            op: Some(coord_proto::txn::response_op::Op::ResponsePut(
+                PutResponse {
+                    prev_kv: None,
+                    revision: 5,
+                },
+            )),
+        }];
+        cache.insert(
+            key.clone(),
+            IdempotentEntry {
+                inserted_at: std::time::Instant::now(),
+                revision: 5,
+                succeeded: true,
+                responses: responses.clone(),
+            },
+            16,
+        );
+        let hit = cache
+            .check(&key, std::time::Duration::from_secs(60))
+            .unwrap();
+        assert!(hit.succeeded);
+        assert_eq!(
+            hit.responses.len(),
+            1,
+            "Txn 命中回放完整 responses（R-SVC-18）"
         );
     }
 }

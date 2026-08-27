@@ -19,6 +19,7 @@ use parking_lot::RwLock;
 use coord_core::error::{Error, Result};
 use coord_core::types::LeaseID;
 
+use crate::metrics::Metrics;
 use crate::timer::TimerWheelHandle;
 
 // ──── Lease 状态 ────
@@ -87,6 +88,8 @@ pub struct LeaseManager {
     leases: Arc<RwLock<HashMap<LeaseID, LeaseRecord>>>,
     /// 时间轮句柄
     timer: TimerWheelHandle,
+    /// 指标注册表（R-OBS-10：active/expired，可选）
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl LeaseManager {
@@ -95,7 +98,14 @@ impl LeaseManager {
         Self {
             leases: Arc::new(RwLock::new(HashMap::new())),
             timer,
+            metrics: None,
         }
+    }
+
+    /// 挂载指标注册表（R-OBS-10）。
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// 检测并清理已过期的 Lease
@@ -117,6 +127,17 @@ impl LeaseManager {
                 true // 保留
             }
         });
+
+        // R-OBS-10：过期计数（active 减、expired 加）
+        if let Some(metrics) = &self.metrics {
+            let n = expired.len();
+            if n > 0 {
+                for _ in 0..n {
+                    metrics.dec_lease_active();
+                    metrics.inc_lease_expired();
+                }
+            }
+        }
 
         expired
     }
@@ -170,6 +191,11 @@ impl LeaseManager {
             .write()
             .insert(lease_id, LeaseRecord { lease, timer_id });
 
+        // R-OBS-10：活跃 Lease +1
+        if let Some(metrics) = &self.metrics {
+            metrics.inc_lease_active();
+        }
+
         Ok(lease_id)
     }
 
@@ -191,6 +217,11 @@ impl LeaseManager {
 
         // 取消时间轮任务（忽略结果，任务可能已到期）
         let _ = self.timer.cancel(record.timer_id).await;
+
+        // R-OBS-10：活跃 Lease -1
+        if let Some(metrics) = &self.metrics {
+            metrics.dec_lease_active();
+        }
 
         Ok(())
     }

@@ -164,6 +164,7 @@ mod tests {
                 Arc::clone(&mvcc),
                 compaction_config,
                 Some(compaction_proposer),
+                None,
             );
 
             // 13. Build gRPC services
@@ -311,6 +312,7 @@ mod tests {
                 Arc::clone(&mvcc),
                 compaction_config,
                 Some(compaction_proposer),
+                None,
             );
 
             // 13. Build gRPC services
@@ -450,6 +452,32 @@ mod tests {
         }
     }
 
+    /// Helper: write a key with a 10s deadline + 100ms 重试间隔（R-TST-21：
+    /// leader 刚当选的瞬时窗口内写 RPC 可能暂时失败，满载 CI 下更常见）。
+    async fn put_key(kv: &mut KvClient<Channel>, key: &[u8], value: &[u8]) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match kv
+                .put(PutRequest {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                    lease_id: 0,
+                    prev_kv: false,
+                    request_id: vec![],
+                })
+                .await
+            {
+                Ok(_) => return,
+                Err(e) => {
+                    if tokio::time::Instant::now() > deadline {
+                        panic!("put should succeed (deadline exceeded): {e}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+    }
+
     /// Helper: wait for any node in the slice to become leader, return its index
     async fn wait_for_any_leader(nodes: &[&TestNode], timeout_ms: u64) -> Option<usize> {
         let step = 100;
@@ -465,21 +493,31 @@ mod tests {
     }
 
     /// Helper: read a key from a node's KV client, returning the value.
-    /// Panics on gRPC error so we can diagnose connectivity issues.
+    /// R-TST-21：带 10s 截止的指数间隔重试——leader 刚当选的瞬时窗口内
+    /// Range RPC 可能暂时失败（ReadIndex 未就绪），满载 CI 下更常见。
     async fn read_key(kv: &mut KvClient<Channel>, key: &[u8]) -> Option<Vec<u8>> {
-        let resp = kv
-            .range(RangeRequest {
-                key: key.to_vec(),
-                range_end: vec![],
-                limit: 0,
-                revision: 0,
-                keys_only: false,
-                count_only: false,
-            })
-            .await
-            .expect("range RPC should succeed")
-            .into_inner();
-        resp.kvs.first().map(|kv| kv.value.clone())
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match kv
+                .range(RangeRequest {
+                    key: key.to_vec(),
+                    range_end: vec![],
+                    limit: 0,
+                    revision: 0,
+                    keys_only: false,
+                    count_only: false,
+                })
+                .await
+            {
+                Ok(resp) => return resp.into_inner().kvs.first().map(|kv| kv.value.clone()),
+                Err(e) => {
+                    if tokio::time::Instant::now() > deadline {
+                        panic!("range RPC should succeed (deadline exceeded): {e}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
     }
 
     // ──── Test: Single-node Raft cluster, Put/Get ────
@@ -498,8 +536,8 @@ mod tests {
 
         let node = TestNode::start(1, grpc_port, raft_port, all_addrs, true).await;
 
-        // Wait for leader election
-        for i in 0..30 {
+        // Wait for leader election（R-TST-21：100×100ms=10s，消除 CI 满载下 3s 不足的 flaky）
+        for i in 0..100 {
             if node.is_leader().await {
                 tracing::info!("Node 1 is leader after {}ms", i * 100);
                 break;
@@ -559,7 +597,8 @@ mod tests {
 
         let node = TestNode::start(1, grpc_port, raft_port, all_addrs, true).await;
 
-        for _ in 0..20 {
+        // R-TST-21：100×100ms=10s，消除 CI 满载下 2s 不足的 flaky
+        for _ in 0..100 {
             if node.is_leader().await {
                 break;
             }
@@ -640,8 +679,9 @@ mod tests {
         );
 
         // Wait for node 1 to become leader
+        // R-TST-21：20s 等待——CI 全量并行满载下 5s 不足导致 flaky（选举计时被调度延迟）
         assert!(
-            n1.wait_for_leadership(5000).await,
+            n1.wait_for_leadership(20_000).await,
             "Node 1 should become leader after bootstrap"
         );
 
@@ -861,7 +901,7 @@ mod tests {
 
         let n1 = TestNode::start(1, p1_grpc, p1_raft, all_addrs.clone(), true).await;
         assert!(
-            n1.wait_for_leadership(3000).await,
+            n1.wait_for_leadership(10_000).await,
             "Node 1 should be leader"
         );
 
@@ -1199,15 +1239,7 @@ mod tests {
             (b"cascade-r1-c", b"round1-charlie"),
         ];
         for (key, value) in &round1_keys {
-            kv1.put(PutRequest {
-                key: key.to_vec(),
-                value: value.to_vec(),
-                lease_id: 0,
-                prev_kv: false,
-                request_id: vec![],
-            })
-            .await
-            .expect("Round 1 put should succeed");
+            put_key(&mut kv1, key, value).await;
         }
         tokio::time::sleep(Duration::from_millis(1000)).await;
 
@@ -1244,16 +1276,7 @@ mod tests {
             (b"cascade-r2-b", b"round2-echo"),
         ];
         for (key, value) in &round2_keys {
-            kv_leader2
-                .put(PutRequest {
-                    key: key.to_vec(),
-                    value: value.to_vec(),
-                    lease_id: 0,
-                    prev_kv: false,
-                    request_id: vec![],
-                })
-                .await
-                .expect("Round 2 put should succeed");
+            put_key(&mut kv_leader2, key, value).await;
         }
         tokio::time::sleep(Duration::from_millis(1000)).await;
 

@@ -10,11 +10,13 @@
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
 use parking_lot::RwLock;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
+use coord_core::auth::cct::{decode_cct_any, CctToken};
 use coord_core::error::{Error, Result};
 
 // ──── Constants ────
@@ -160,6 +162,39 @@ impl TokenSigningKeyring {
     /// Get the active signing key bytes.
     pub fn active_key_bytes(&self) -> Zeroizing<Vec<u8>> {
         self.active.read().key_bytes.clone()
+    }
+
+    /// R-SEC-02：从 root key 派生 Ed25519 签名私钥（HKDF info `coord-cct-ed25519-v1`）。
+    ///
+    /// server 持有私钥签发，agent 仅持 `verifying_key()` 公钥验证，
+    /// 任一 agent 被控无法伪造 token（与 HMAC 对称方案的根因修复）。
+    pub fn ed25519_signing_key(&self) -> Result<SigningKey> {
+        let hkdf = Hkdf::<Sha256>::new(None, &self.root_key_material);
+        let mut seed = [0u8; 32];
+        hkdf.expand(b"coord-cct-ed25519-v1", &mut seed)
+            .map_err(|e| Error::Crypto(format!("HKDF expand for Ed25519 CCT key failed: {e}")))?;
+        Ok(SigningKey::from_bytes(&seed))
+    }
+
+    /// R-SEC-02：验证任意算法签发的 CCT。
+    ///
+    /// - `HMAC-SHA256` → 依次尝试 active + previous 密钥（历史 token 宽限期）；
+    /// - `Ed25519` → 用派生的签名密钥对应公钥验证。
+    pub fn decode_any(&self, token: &str) -> Result<CctToken> {
+        let pub_key = self
+            .ed25519_signing_key()
+            .ok()
+            .map(|sk| sk.verifying_key().to_bytes().to_vec());
+
+        let mut hmac_keys: Vec<Vec<u8>> = Vec::new();
+        hmac_keys.push(self.active_key_bytes().to_vec());
+        for key_id in self.all_key_ids() {
+            if let Some(key) = self.find_key(&key_id) {
+                hmac_keys.push(key.key_bytes.to_vec());
+            }
+        }
+        let key_refs: Vec<&[u8]> = hmac_keys.iter().map(|k| k.as_slice()).collect();
+        decode_cct_any(token, &key_refs, pub_key.as_deref())
     }
 
     /// Find a key by key_id for verification.

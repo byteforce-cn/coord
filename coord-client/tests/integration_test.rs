@@ -140,6 +140,7 @@ mod tests {
             Arc::clone(&mvcc),
             compaction_config,
             Some(compaction_proposer),
+            None,
         );
 
         // gRPC services

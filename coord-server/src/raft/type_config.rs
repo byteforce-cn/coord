@@ -89,6 +89,8 @@ pub enum Command {
     },
     /// 删除 Key
     Delete { key: Vec<u8> },
+    /// 范围删除（R-SVC-07）：单个 raft 命令原子删除 `[key, range_end)` 内所有 Key
+    DeleteRange { key: Vec<u8>, range_end: Vec<u8> },
     /// 原子条件事务
     Txn {
         /// 比较条件列表（AND 语义，全部满足才执行 success 分支）
@@ -112,6 +114,12 @@ impl std::fmt::Display for Command {
         match self {
             Command::Put { key, .. } => write!(f, "Put(key={})", String::from_utf8_lossy(key)),
             Command::Delete { key } => write!(f, "Delete(key={})", String::from_utf8_lossy(key)),
+            Command::DeleteRange { key, range_end } => write!(
+                f,
+                "DeleteRange(key={}, range_end={})",
+                String::from_utf8_lossy(key),
+                String::from_utf8_lossy(range_end)
+            ),
             Command::Txn { compares, .. } => {
                 write!(f, "Txn(compares={})", compares.len())
             }
@@ -132,6 +140,8 @@ pub enum Response {
     },
     /// Delete 操作结果
     Delete { revision: u64 },
+    /// DeleteRange 操作结果（R-SVC-07）
+    DeleteRange { revision: u64, deleted: u64 },
     /// Txn 操作结果
     Txn {
         /// 条件是否全部满足
@@ -154,6 +164,9 @@ impl std::fmt::Display for Response {
         match self {
             Response::Put { revision } => write!(f, "Put(rev={})", revision),
             Response::Delete { revision } => write!(f, "Delete(rev={})", revision),
+            Response::DeleteRange { revision, deleted } => {
+                write!(f, "DeleteRange(rev={}, deleted={})", revision, deleted)
+            }
             Response::Txn {
                 succeeded,
                 revision,

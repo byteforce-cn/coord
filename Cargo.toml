@@ -26,6 +26,7 @@ tokio-stream = "0.1"
 # gRPC 框架
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 http = "1"
+http-body-util = "0.1"
 prost = "0.14.3"
 tonic-build = "0.14.6"
 prost-build = "0.14.3"
@@ -73,6 +74,7 @@ sha2 = "0.10"
 argon2 = "0.5"
 rand = "0.8"
 hmac = "0.12"
+ed25519-dalek = "2"
 
 # 工具
 thiserror = "2"

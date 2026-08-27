@@ -15,7 +15,7 @@ use coord_agent::services::replication::{
     IdempotencyKey, ReplicatedStore, ReplicationConfig, ReplicationEntry, ReplicationManager,
     ReplicationOp,
 };
-use coord_agent::{AgentConfig, AgentServer, BaseService};
+use coord_agent::{AgentConfig, AgentServer, AgentTlsConfig, BaseService};
 
 fn find_port() -> u16 {
     use std::net::TcpListener;
@@ -48,10 +48,19 @@ fn isr_config(port: u16, peers: Vec<String>, min_isr: usize, tag: &str) -> Agent
 
 /// 启动 Agent gRPC server（后台）
 async fn spawn_agent(config: AgentConfig) -> (tokio::task::JoinHandle<()>, String) {
+    // 幂等初始化日志（首个测试生效），便于诊断 agent 启动失败
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "coord_agent=info".into()),
+        )
+        .try_init();
     let addr = config.agent_addr.clone();
     let server = AgentServer::new(config);
     let handle = tokio::spawn(async move {
-        let _ = server.serve().await;
+        if let Err(e) = server.serve().await {
+            tracing::error!("agent serve failed: {e}");
+        }
     });
     // 等待端口监听
     for _ in 0..50 {
@@ -630,4 +639,169 @@ async fn test_reconcile_catch_up() {
     assert_eq!(msgs[4].payload, b"m4".to_vec());
 
     handle.abort();
+}
+
+// ════════════════════════════════════════════════════════════
+// 7. TLS 复制通道（生产上线收口项 #3）：跨 agent 复制走 TLS/mTLS
+// ════════════════════════════════════════════════════════════
+
+/// 测试 CA（单实例，两 agent 证书同源签发，mTLS 校验可通）
+struct TlsCa {
+    params: rcgen::CertificateParams,
+    key: rcgen::KeyPair,
+    cert_pem: Vec<u8>,
+}
+
+fn tls_ca() -> TlsCa {
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "isr-test-ca");
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+    TlsCa {
+        params: ca_params,
+        key: ca_key,
+        cert_pem: ca_cert.pem().into_bytes(),
+    }
+}
+
+/// 由共享 CA 签发 agent 证书（IP SAN 127.0.0.1），返回 (cert PEM, key PEM)
+fn issue_tls_cert(ca: &TlsCa, cn: &str) -> (Vec<u8>, Vec<u8>) {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, cn);
+    params.subject_alt_names = vec![rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap())];
+    let issuer = rcgen::Issuer::from_params(&ca.params, &ca.key);
+    let cert = params.signed_by(&key, &issuer).unwrap();
+    (cert.pem().into_bytes(), key.serialize_pem().into_bytes())
+}
+
+/// 构建 TLS 客户端（信任 CA + 自身身份），连接 agent
+async fn tls_mq_client(
+    addr: &str,
+    ca_pem: &[u8],
+    cert_pem: &[u8],
+    key_pem: &[u8],
+) -> coord_proto::agent::mq_client::MqClient<tonic::transport::Channel> {
+    use tonic::transport::{Certificate, ClientTlsConfig, Identity};
+    let tls = ClientTlsConfig::new()
+        .ca_certificate(Certificate::from_pem(ca_pem))
+        .identity(Identity::from_pem(cert_pem, key_pem));
+    let channel = tonic::transport::Endpoint::from_shared(format!("https://{addr}"))
+        .unwrap()
+        .tls_config(tls)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    coord_proto::agent::mq_client::MqClient::new(channel)
+}
+
+#[tokio::test]
+async fn test_two_agent_replication_over_mtls() {
+    // 诊断用：进程内首个订阅者生效（try_init 幂等，与其他测试并行安全）
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "coord_agent=trace".into()),
+        )
+        .try_init();
+    // 两 agent 均配置 mTLS（ca_path），复制通道客户端必须走 TLS 才能打通
+    // 注：两 agent 证书必须由同一 CA 签发（tls_ca 单实例），否则 mTLS 互验失败
+    let ca = tls_ca();
+    let (cert_a, key_a) = issue_tls_cert(&ca, "agent-a");
+    let (cert_b, key_b) = issue_tls_cert(&ca, "agent-b");
+    let ca_pem = &ca.cert_pem;
+
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let cert_a_path = dir_a.path().join("agent.crt");
+    let key_a_path = dir_a.path().join("agent.key");
+    let ca_a_path = dir_a.path().join("ca.crt");
+    std::fs::write(&cert_a_path, &cert_a).unwrap();
+    std::fs::write(&key_a_path, &key_a).unwrap();
+    std::fs::write(&ca_a_path, ca_pem).unwrap();
+    let cert_b_path = dir_b.path().join("agent.crt");
+    let key_b_path = dir_b.path().join("agent.key");
+    let ca_b_path = dir_b.path().join("ca.crt");
+    std::fs::write(&cert_b_path, &cert_b).unwrap();
+    std::fs::write(&key_b_path, &key_b).unwrap();
+    std::fs::write(&ca_b_path, ca_pem).unwrap();
+
+    let pa = find_port();
+    let pb = find_port();
+    let addr_a = format!("127.0.0.1:{pa}");
+    let addr_b = format!("127.0.0.1:{pb}");
+    let (leader_addr, follower_addr) = if addr_a < addr_b {
+        (addr_a.clone(), addr_b.clone())
+    } else {
+        (addr_b.clone(), addr_a.clone())
+    };
+
+    let mut ca = isr_config(pa, vec![addr_b.clone()], 2, "tls-isr-a");
+    ca.tls = Some(AgentTlsConfig {
+        cert_path: cert_a_path,
+        key_path: key_a_path,
+        ca_path: Some(ca_a_path),
+        server_name: None,
+    });
+    let mut cb = isr_config(pb, vec![addr_a.clone()], 2, "tls-isr-b");
+    cb.tls = Some(AgentTlsConfig {
+        cert_path: cert_b_path,
+        key_path: key_b_path,
+        ca_path: Some(ca_b_path),
+        server_name: None,
+    });
+
+    let (ha, _) = spawn_agent(ca).await;
+    let (hb, _) = spawn_agent(cb).await;
+
+    // Leader 建 topic + 发布（复制通道经 mTLS 推送到 Follower）
+    let mut lc = tls_mq_client(&leader_addr, ca_pem, &cert_a, &key_a).await;
+    lc.create_topic(coord_proto::agent::MqCreateTopicRequest {
+        topic: "tls-orders".to_string(),
+        partitions: 1,
+    })
+    .await
+    .unwrap();
+    let resp = lc
+        .publish(coord_proto::agent::MqPublishRequest {
+            topic: "tls-orders".to_string(),
+            partition: 0,
+            key: Vec::new(),
+            payload: b"tls-replicated".to_vec(),
+            idempotency_key: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.offset, 0);
+
+    // Follower 经 mTLS poll（数据由复制通道同步而来）
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut fc = tls_mq_client(&follower_addr, ca_pem, &cert_b, &key_b).await;
+    let poll = fc
+        .poll(coord_proto::agent::MqPollRequest {
+            topic: "tls-orders".to_string(),
+            partition: 0,
+            consumer_group: "cg".to_string(),
+            start_offset: 0,
+            max_count: 100,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        poll.messages.len(),
+        1,
+        "follower must have the TLS-replicated message"
+    );
+    assert_eq!(poll.messages[0].payload, b"tls-replicated".to_vec());
+
+    ha.abort();
+    hb.abort();
 }

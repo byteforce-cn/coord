@@ -26,16 +26,15 @@ use crate::metrics::AgentMetrics;
 ///
 /// - `addr`: 监听地址（如 "127.0.0.1:19528"）
 /// - `metrics`: AgentMetrics 实例
-/// - `ready`: 初始就绪状态（通常 false，连接 Server 后更新）
+/// - `ready`: 共享就绪标志（R-AGT-20：连接状态探针实时回写，非启动快照）
 ///
 /// 返回 JoinHandle，可 abort 以优雅关闭。
 pub fn start_health_server(
     addr: &str,
     metrics: AgentMetrics,
-    ready: bool,
+    ready: Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     let metrics = Arc::new(metrics);
-    let ready = Arc::new(std::sync::atomic::AtomicBool::new(ready));
     let addr = addr.to_string();
 
     tokio::spawn(async move {

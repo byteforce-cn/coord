@@ -78,3 +78,59 @@ async fn test_loopback_without_auth_allowed() {
         Err(_) => panic!("serve timed out (shutdown future should have fired)"),
     }
 }
+
+/// 非 loopback 绑定且 auth+TLS 均配置 → 允许启动（P1-05 闸放行）。
+///
+/// 生产收口后，TLS 是**真实挂载**而非仅配置校验：本测试同时验证
+/// 配置了 tls 的非 loopback agent 实际启动监听（由入站 TLS 集成测试
+/// `agent_inbound_tls_test.rs` 验证握手细节）。
+#[tokio::test]
+async fn test_non_loopback_with_auth_and_tls_allowed() {
+    let port = find_port();
+    let tmpdir = tempfile::tempdir().unwrap();
+    // 自签名证书（guard 仅要求文件存在；握手验证在入站 TLS 测试覆盖）
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert_path = tmpdir.path().join("agent.crt");
+    let key_path = tmpdir.path().join("agent.key");
+    std::fs::write(&cert_path, cert.cert.pem().as_bytes()).unwrap();
+    std::fs::write(&key_path, cert.signing_key.serialize_pem().as_bytes()).unwrap();
+
+    let mut config = AgentConfig::default();
+    config.agent_addr = format!("0.0.0.0:{port}");
+    config.http_addr = format!("127.0.0.1:{}", find_port());
+    config.auth.enabled = true;
+    config.tls = Some(coord_agent::AgentTlsConfig {
+        cert_path,
+        key_path,
+        ca_path: None,
+        server_name: None,
+    });
+
+    let server = AgentServer::new(config);
+    let shutdown = async move {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "non-loopback TLS agent never became ready"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    };
+    let serve = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        server.serve_with_shutdown(shutdown),
+    )
+    .await;
+    match serve {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => panic!("non-loopback auth+TLS serve failed: {e}"),
+        Err(_) => panic!("serve timed out (shutdown future should have fired)"),
+    }
+}
