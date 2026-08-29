@@ -4,3 +4,12 @@
 
 # 或者折中：只保留行号回溯，不要完整变量调试信息（体积减少约 30%）
 # debug = 1
+
+[source.crates-io]
+replace-with = 'mirror'
+
+[source.mirror]
+registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
+
+[registries.mirror]
+index = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
