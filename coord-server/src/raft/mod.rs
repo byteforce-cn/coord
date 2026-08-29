@@ -78,6 +78,13 @@ pub type RaftNode = openraft::impls::BasicNode;
 /// 成员变更指令（AddVoterIds / RemoveVoters）
 pub type ChangeMembers = openraft::ChangeMembers<u64, RaftNode>;
 
+/// 快照数据（字节缓冲，Cursor 可读可写）。
+///
+/// 0.10.0-alpha.34 起 `RaftStateMachine::SnapshotData` 与 `RaftNetworkV2::SnapshotData`
+/// 必须为同一类型（`Raft::new` 要求 `NetSnapshot::SnapshotData ==
+/// RaftStateMachine::SnapshotData`），此处统一收敛（P1-06 门面）。
+pub type RaftSnapshotData = std::io::Cursor<Vec<u8>>;
+
 // P1-06：openraft 类型面（仅 re-export 本目录/测试实际需要的少数名字，
 // 名单有意识维护，随升级演练更新）
 pub use openraft::impls::leader_id_adv::LeaderId;
@@ -114,6 +121,11 @@ where
     N: openraft::RaftNetworkFactory<type_config::TypeConfig> + 'static,
     LS: openraft::storage::RaftLogStorage<type_config::TypeConfig> + 'static,
     SM: openraft::storage::RaftStateMachine<type_config::TypeConfig> + 'static,
+    // alpha.34：`Raft::new` 要求网络与状态机的 SnapshotData 为同一类型
+    N::Network: openraft::network::NetSnapshot<
+        type_config::TypeConfig,
+        SnapshotData = SM::SnapshotData,
+    >,
 {
     openraft::Raft::new(node_id, config, network, log_store, state_machine)
         .await

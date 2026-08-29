@@ -65,7 +65,6 @@ pub struct StateMachineStore {
     pub state_machine: Arc<MvccStorage<RedbBackend>>,
     pub last_applied: Mutex<Option<LogIdOf<TypeConfig>>>,
     pub last_membership: Mutex<StoredMembershipOf<TypeConfig>>,
-    snapshot_idx: Mutex<u64>,
     current_snapshot: Mutex<Option<StoredSnapshot>>,
     /// 快照落盘目录（A.6：临时文件 → fsync → rename → 校验和）
     snapshot_dir: PathBuf,
@@ -189,7 +188,6 @@ impl StateMachineStore {
             state_machine,
             last_applied: Mutex::new(last_applied),
             last_membership: Mutex::new(last_membership),
-            snapshot_idx: Mutex::new(0),
             current_snapshot: Mutex::new(current_snapshot),
             snapshot_dir,
             snapshot_tracker,
@@ -482,6 +480,7 @@ impl StateMachineStore {
 }
 
 impl RaftStateMachine<TypeConfig> for StateMachineStore {
+    type SnapshotData = super::RaftSnapshotData;
     type SnapshotBuilder = Self;
 
     async fn applied_state(
@@ -544,10 +543,6 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         Ok(())
     }
 
-    async fn begin_receiving_snapshot(&mut self) -> Result<Cursor<Vec<u8>>, io::Error> {
-        Ok(Cursor::new(Vec::new()))
-    }
-
     async fn install_snapshot(
         &mut self,
         meta: &SnapshotMetaOf<TypeConfig>,
@@ -589,10 +584,12 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         Ok(())
     }
 
-    async fn get_current_snapshot(&mut self) -> Result<Option<SnapshotOf<TypeConfig>>, io::Error> {
+    async fn get_current_snapshot(
+        &mut self,
+    ) -> Result<Option<SnapshotOf<TypeConfig, super::RaftSnapshotData>>, io::Error> {
         let snap = self.current_snapshot.lock();
         match snap.as_ref() {
-            Some(s) => Ok(Some(SnapshotOf::<TypeConfig> {
+            Some(s) => Ok(Some(SnapshotOf::<TypeConfig, super::RaftSnapshotData> {
                 meta: s.meta.clone(),
                 snapshot: Cursor::new(s.data.clone()),
             })),
@@ -605,7 +602,6 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             state_machine: Arc::clone(&self.state_machine),
             last_applied: Mutex::new(*self.last_applied.lock()),
             last_membership: Mutex::new(self.last_membership.lock().clone()),
-            snapshot_idx: Mutex::new(*self.snapshot_idx.lock()),
             current_snapshot: Mutex::new(self.current_snapshot.lock().clone()),
             snapshot_dir: self.snapshot_dir.clone(),
             snapshot_tracker: Arc::clone(&self.snapshot_tracker),
@@ -718,11 +714,13 @@ impl StateMachineStore {
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
-    async fn build_snapshot(&mut self) -> Result<SnapshotOf<TypeConfig>, io::Error> {
+    type SnapshotData = super::RaftSnapshotData;
+
+    async fn build_snapshot(
+        &mut self,
+    ) -> Result<SnapshotOf<TypeConfig, super::RaftSnapshotData>, io::Error> {
         // R-OBS-10：快照构建耗时埋点
         let snapshot_start = std::time::Instant::now();
-        let mut idx = self.snapshot_idx.lock();
-        *idx += 1;
 
         let last_log_id = *self.last_applied.lock();
         let last_membership = self.last_membership.lock().clone();
@@ -730,7 +728,6 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
         let meta = SnapshotMetaOf::<TypeConfig> {
             last_log_id,
             last_membership: last_membership.clone(),
-            snapshot_id: format!("snapshot-{}", *idx),
         };
 
         // 从 MvccStorage 导出真实快照数据
@@ -749,7 +746,7 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
         // A.6：落盘（临时文件 → fsync → rename → 校验和 → META_SNAPSHOT → purge 守卫）
         let (_path, _checksum) = self.persist_snapshot_file(&meta, &data_bytes)?;
 
-        let snapshot = SnapshotOf::<TypeConfig> {
+        let snapshot = SnapshotOf::<TypeConfig, super::RaftSnapshotData> {
             meta: meta.clone(),
             snapshot: Cursor::new(data_bytes.clone()),
         };

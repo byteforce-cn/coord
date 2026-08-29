@@ -278,12 +278,22 @@ fn test_backoff_delay_range() {
     assert!(backoff <= 5000, "backoff should not exceed max");
     assert!(backoff >= 0, "backoff should be non-negative");
 
-    // 竞争者越少，退避越小
-    let backoff_few = svc.compute_backoff_ms(2);
-    let backoff_many = svc.compute_backoff_ms(100);
+    // 竞争者越少，退避上限越小。
+    // 注意：返回值为随机采样（0..=range），不能比较两次采样的大小（会偶发抖动），
+    // 因此按确定性上限断言：单一竞争者无退避；2 个竞争者上限 100ms；100 个竞争者
+    // 封顶 5000ms。
+    assert_eq!(
+        svc.compute_backoff_ms(1),
+        0,
+        "single competitor → no backoff"
+    );
     assert!(
-        backoff_few <= backoff_many,
-        "more competitors → more backoff"
+        svc.compute_backoff_ms(2) <= 100,
+        "2 competitors → backoff <= 100"
+    );
+    assert!(
+        svc.compute_backoff_ms(100) <= 5000,
+        "100 competitors → backoff <= 5000"
     );
 }
 

@@ -413,6 +413,8 @@ impl RaftNetwork {
 }
 
 impl RaftNetworkV2<TypeConfig> for RaftNetwork {
+    type SnapshotData = super::RaftSnapshotData;
+
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
@@ -444,7 +446,7 @@ impl RaftNetworkV2<TypeConfig> for RaftNetwork {
     async fn full_snapshot(
         &mut self,
         vote: VoteOf<TypeConfig>,
-        snapshot: SnapshotOf<TypeConfig>,
+        snapshot: SnapshotOf<TypeConfig, super::RaftSnapshotData>,
         cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
         option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
@@ -546,7 +548,7 @@ struct SerializableSnapshot {
 }
 
 impl SerializableSnapshot {
-    fn from_openraft(snapshot: &SnapshotOf<TypeConfig>) -> Self {
+    fn from_openraft(snapshot: &SnapshotOf<TypeConfig, super::RaftSnapshotData>) -> Self {
         use std::io::Read;
         let mut data = Vec::new();
         let mut cursor = snapshot.snapshot.clone();
@@ -557,8 +559,8 @@ impl SerializableSnapshot {
         }
     }
 
-    fn into_openraft(self) -> SnapshotOf<TypeConfig> {
-        SnapshotOf::<TypeConfig> {
+    fn into_openraft(self) -> SnapshotOf<TypeConfig, super::RaftSnapshotData> {
+        SnapshotOf::<TypeConfig, super::RaftSnapshotData> {
             meta: self.meta,
             snapshot: std::io::Cursor::new(self.data),
         }
@@ -584,6 +586,8 @@ struct SnapshotStreamMessage {
 }
 
 impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
+    type SnapshotData = super::RaftSnapshotData;
+
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
@@ -621,7 +625,7 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
     async fn full_snapshot(
         &mut self,
         vote: VoteOf<TypeConfig>,
-        snapshot: SnapshotOf<TypeConfig>,
+        snapshot: SnapshotOf<TypeConfig, super::RaftSnapshotData>,
         _cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
         _option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {

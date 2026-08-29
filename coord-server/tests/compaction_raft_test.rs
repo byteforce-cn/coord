@@ -22,7 +22,7 @@ use coord_server::raft::log_store::LogStore;
 use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
 use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::type_config::{Command, Response};
-use coord_server::raft::{new_basic_node, new_raft, RaftConfig, RaftNode};
+use coord_server::raft::{new_basic_node, new_raft, RaftConfig, RaftNode, WatchReceiver};
 use coord_server::server::CoordNode;
 use coord_server::storage::mvcc::MvccStorage;
 use coord_server::storage::redb_backend::RedbBackend;
@@ -141,11 +141,19 @@ impl TestNode {
     }
 }
 
+/// 轮询等待集群选出 leader，返回 leader 节点下标。
+///
+/// openraft 0.10.0-alpha.34 起 leader 需先获得 quorum 确认（leader lease）才能
+/// 接受写入；`current_leader` 就绪不代表 lease 已建立，因此同时要求
+/// `last_quorum_acked` 为 Some，避免选举后立即 client_write 收到
+/// `ForwardToLeader(leader_id: None)`。
 async fn wait_for_leader(nodes: &[TestNode], timeout: Duration) -> Option<usize> {
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
         for (i, n) in nodes.iter().enumerate() {
-            if n.raft.current_leader().await == Some(n.node_id) {
+            let metrics = n.raft.metrics();
+            let m = metrics.borrow_watched();
+            if m.current_leader == Some(n.node_id) && m.last_quorum_acked.is_some() {
                 return Some(i);
             }
         }
