@@ -34,6 +34,7 @@ use coord_proto::watch::{watch_server::Watch, WatchEvent, WatchRequest, WatchRes
 
 use crate::auth::service::AuthOpProposer;
 use crate::lease::LeaseManager;
+use crate::raft::log_store::LogStore;
 use crate::raft::type_config::{AuthOp, Command, LeaseOp, Response};
 use crate::raft::{CoordRaft, ReadPolicy, WatchReceiver};
 use crate::security::barrier::Barrier;
@@ -185,6 +186,8 @@ pub struct CoordNode {
     pub storage: Arc<MvccStorage<RedbBackend>>,
     /// Raft 共识实例（可选，集群模式下设置；单节点模式为 None）
     pub raft: Option<Arc<CoordRaft>>,
+    /// 本地 Raft Log 存储句柄（读路径一致性校验用，防陈旧读；集群模式下设置）
+    pub raft_log_store: Option<LogStore>,
     /// Lease 管理器（可选，Leader 节点持有）
     pub lease_manager: Option<Arc<LeaseManager>>,
     /// Watch 分发器
@@ -217,6 +220,7 @@ impl CoordNode {
             node_id: 0,
             storage,
             raft: None,
+            raft_log_store: None,
             lease_manager: None,
             watch_dispatcher: None,
             idempotent_cache: RwLock::new(IdempotencyCache::new()),
@@ -549,6 +553,22 @@ impl CoordNode {
     ///
     /// 仅在 Raft 模式下生效；单节点模式直接返回。
     /// R-SVC-18：带 `read_timeout` 超时（此前无超时，leader 失联时读无限挂起）。
+    ///
+    /// 陈旧读防御（§10.4「宁可失败也不返回过期值」，对应 Jepsen partition-halves /
+    /// partition-ring 复现的陈旧读异常）：
+    /// ReadIndex 确认领导权后，再对本地状态机与提交前沿做一致性复核：
+    ///   - 节点必须处于 `Leader` 状态（双保险：防止领导权切换窗口内以非 leader 身份
+    ///     应答读请求）；
+    ///   - `last_applied.index` 不得超过 `local_committed.index`。正常 Raft 中 applied
+    ///     永远 <= committed；若 applied 的 index 超过 committed，说明本地状态机应用过
+    ///     后来被新 leader 截断的条目（"幻影态"，旧 leader 曾以失效的复制进度把未真正
+    ///     落盘的条目提交并 apply）；
+    ///   - 最关键的一层：校验本地日志在 `last_applied.index` 处的实际条目与
+    ///     `last_applied` 一致。即便 committed 已追上 applied（applied <= committed），
+    ///     若日志在该 index 的条目是新的（被新 leader 截断后重写的），而状态机 apply 的
+    ///     是旧的被截断条目，状态机仍持有过期数据——openraft 的 ReadIndex
+    ///     `applied_index_at_least` 只按 index 比较，会误判为"已追上"从而返回陈旧值。
+    ///     此处任一异常均直接以 UNAVAILABLE 拒绝读。
     async fn ensure_linearizable(&self) -> Result<(), tonic::Status> {
         if let Some(ref raft) = self.raft {
             let timeout = self.limits.read().read_timeout;
@@ -556,6 +576,65 @@ impl CoordNode {
                 .await
                 .map_err(|_| tonic::Status::deadline_exceeded("linearizable read timed out"))?
                 .map_err(|e| tonic::Status::internal(format!("linearizable read failed: {e}")))?;
+
+            // R-SVC-18 补充：ReadIndex 之后的一致性 / 身份复核（防陈旧读）
+            let m = raft.metrics().borrow_watched().clone();
+            if !matches!(m.state, openraft::ServerState::Leader) {
+                return Err(tonic::Status::unavailable(
+                    "not leader: refusing linearizable read (leadership lost during ReadIndex)",
+                ));
+            }
+            if let (Some(applied), Some(committed)) =
+                (m.last_applied.as_ref(), m.local_committed.as_ref())
+            {
+                if applied.index > committed.index {
+                    return Err(tonic::Status::unavailable(format!(
+                        "read consistency check failed: last_applied index {} exceeds \
+                         local_committed index {} (state machine ahead of commit frontier); \
+                         refusing to serve stale data",
+                        applied.index, committed.index
+                    )));
+                }
+            }
+
+            // 幻影态终检：last_applied 必须与本地日志同 index 的实际条目一致。
+            // 若该 index 已被 purge（快照覆盖），则视为合法（状态机来自快照）。
+            if let (Some(applied), Some(log_store)) =
+                (m.last_applied.as_ref(), self.raft_log_store.as_ref())
+            {
+                let covered_by_snapshot = log_store
+                    .last_purged()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|purged| applied.index <= purged.index);
+                if !covered_by_snapshot {
+                    match log_store.get_entry_at(applied.index) {
+                        Ok(Some(entry)) => {
+                            if entry.log_id != *applied {
+                                return Err(tonic::Status::unavailable(format!(
+                                    "read consistency check failed: state machine applied {:?} \
+                                     but local log at index {} is {:?} (stale/phantom state); \
+                                     refusing to serve stale data",
+                                    applied, applied.index, entry.log_id
+                                )));
+                            }
+                        }
+                        Ok(None) => {
+                            return Err(tonic::Status::unavailable(format!(
+                                "read consistency check failed: no local log entry at applied \
+                                 index {} (stale/phantom state); refusing to serve stale data",
+                                applied.index
+                            )));
+                        }
+                        Err(e) => {
+                            return Err(tonic::Status::internal(format!(
+                                "read consistency check failed: log read error at index {}: {e}",
+                                applied.index
+                            )));
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }

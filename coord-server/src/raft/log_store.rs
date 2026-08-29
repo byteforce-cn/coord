@@ -132,6 +132,33 @@ impl LogStore {
         self.read_meta(TABLE_LAST_PURGED, KEY_LAST_PURGED)
     }
 
+    /// 同步点读指定 index 的日志条目。
+    ///
+    /// 读路径一致性校验用（防陈旧读）：对比状态机 `last_applied` 与本地日志中
+    /// 同 index 的实际条目，检测"幻影态"（状态机应用过后来被新 leader 截断的条目）。
+    /// 若该 index 已被 purge（快照覆盖），返回 `Ok(None)` 由调用方结合
+    /// [`LogStore::last_purged`] 判断。
+    pub fn get_entry_at(&self, index: u64) -> Result<Option<EntryOf<TypeConfig>>, io::Error> {
+        let read_tx = self
+            .db
+            .begin_read()
+            .map_err(|e| io::Error::other(format!("begin read tx: {e}")))?;
+        let table = read_tx
+            .open_table(TABLE_LOG)
+            .map_err(|e| io::Error::other(format!("open log table: {e}")))?;
+        let key_bytes = index_key(index);
+        match table
+            .get(key_bytes.as_slice())
+            .map_err(|e| io::Error::other(format!("get log[{index}]: {e}")))?
+        {
+            Some(guard) => {
+                let entry: EntryOf<TypeConfig> = deserialize(guard.value())?;
+                Ok(Some(entry))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// 检查 Raft 集群是否已初始化（存在已提交的日志即为已初始化）
     ///
     /// 通过检查 committed 元数据判断，比依赖 `raft.metrics()` 更可靠，

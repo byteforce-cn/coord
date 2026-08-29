@@ -1729,8 +1729,20 @@ async fn run_server(
     sm_store.set_session_manager(Arc::clone(&token_manager));
 
     // 5c. Raft Network Factory（支持 Raft 节点间 TLS）
+    //     本节点通告地址优先取 initial_nodes 中解析后的可路由地址，避免把
+    //     0.0.0.0 绑定地址通告给对端（对端按 0.0.0.0 连接会落到各自本机，
+    //     形成自我应答的伪多数派——网络分区下的陈旧读根因）。
     let mut network_factory = RaftNetworkFactoryImpl::new(node_id);
-    network_factory.register_node(node_id, raft_addr.to_string());
+    let own_advertised = cfg
+        .cluster
+        .initial_nodes
+        .iter()
+        .find(|n| n.id == node_id);
+    let own_raft_addr = own_advertised.map(|n| n.raft.as_str()).unwrap_or(raft_addr);
+    let own_grpc_addr = own_advertised
+        .map(|n| n.grpc.as_str())
+        .unwrap_or(grpc_addr.as_str());
+    network_factory.register_node(node_id, own_raft_addr.to_string());
     if let Some(ref join) = cfg.cluster.join_addr {
         network_factory.register_node(0, join.to_string());
     }
@@ -1821,6 +1833,8 @@ async fn run_server(
     };
 
     // 5g. 创建 Raft 实例（P1-06 门面：new_raft）
+    //     读路径一致性校验（防陈旧读）需要访问本地日志，克隆一份 LogStore 句柄。
+    let node_raft_log = log_store.clone();
     let raft =
         coord_server::raft::new_raft(node_id, raft_config, network_factory, log_store, sm_store)
             .await
@@ -1836,7 +1850,12 @@ async fn run_server(
         } else {
             tracing::info!("Bootstrapping Raft cluster");
             let mut members = BTreeMap::new();
-            members.insert(node_id, coord_server::raft::new_basic_node(raft_addr));
+            // 本节点在集群中的通告地址：优先取 initial_nodes 中解析后的可路由地址。
+            // 此前直接使用绑定地址 raft_addr（如 0.0.0.0:50052），其他节点按该地址
+            // 连接时经 0.0.0.0 落到各自本机，把本机应答当作对端应答——形成
+            // 自我应答的伪多数派（无真实 quorum 也能提交并 apply），网络分区下
+            // 产生陈旧读（见 coord-jepsen-report.md 异常明细）。
+            members.insert(node_id, coord_server::raft::new_basic_node(own_raft_addr));
             // 注册配置中的初始节点
             for node in &cfg.cluster.initial_nodes {
                 if node.id != node_id {
@@ -1867,8 +1886,8 @@ async fn run_server(
             match send_join_request(
                 &target,
                 node_id,
-                raft_addr,
-                &grpc_addr,
+                own_raft_addr,
+                own_grpc_addr,
                 join_client_tls.as_ref(),
             )
             .await
@@ -1935,6 +1954,8 @@ async fn run_server(
     node.node_id = cfg.node.id;
     node.watch_dispatcher = Some(Arc::clone(&watch_dispatcher));
     node.raft = Some(Arc::clone(&raft));
+    // 读路径一致性校验（防陈旧读）用：本地 Raft Log 存储句柄
+    node.raft_log_store = Some(node_raft_log);
     // R-SVC-18：per-RPC 超时/规模上限/幂等缓存参数（[limits] 配置段）
     node.set_limits(cfg.limits.to_runtime_limits());
     // P0-D.1：注册已知节点的 gRPC 地址（leader 重定向用，best-effort）
