@@ -1,46 +1,64 @@
 # Coord 对外协议契约（apis/contracts）
 
-Coord 平台对上游业务方（100+ 微服务，Java/Go）的**稳定协议承诺**。
-本目录与内部实现（`coord-proto/`、Raft、存储引擎）彻底解耦：
+Coord 平台对上游业务方（100+ 微服务，Java/Go）的**服务协调能力承诺**。
 
-- **消费方只看本目录**：以这里的 proto 生成客户端，按《白皮书》编程。
-- **内部重构不伤及承诺**：CI 门禁（buf breaking + wire-sync）保证
-  `coord-proto` 的任何变更要么不越界，要么被阻断。
+契约的目的只有一个：**向业务消费者承诺协调能力**——服务注册发现、分布式锁、
+Leader 选举、分布式 ID、事件通知——并以承诺**倒逼 coord 项目将这些能力做实**。
+KV/Txn/Lease/Watch 是平台实现底座，保留稳定承诺供 SDK 与数据面对齐，
+**不构成对业务方的编排建议**：业务方不需要、也不应该用原语自行拼装协调逻辑。
 
-📜 **承诺文本：[WHITEPAPER.md](./WHITEPAPER.md)（协议兼容性白皮书，v1.0.0）**
+- 📜 承诺文本：[WHITEPAPER.md](./WHITEPAPER.md)（协议白皮书 v1.1.0）
+- 🗂 承诺台账：[STATUS.md](./STATUS.md)（三态分层 + GA/整改期限，CI 解析，单一事实来源）
 
-## v1 承诺的服务
+## 能力承诺面（v1.1，COMMITTED — GA 期限为硬截止）
 
-| 包 | 服务 | 说明 |
-|:---|:---|:---|
-| `coord.kv` | KV | Put / Range / Delete（线性一致读写、幂等 request_id） |
-| `coord.txn` | Txn | 原子条件事务（Compare-And-Swap） |
-| `coord.lease` | Lease | Grant / Revoke / KeepAlive（双向流） |
-| `coord.watch` | Watch | 变更监听（双向流，at-least-once + 重同步协议） |
-| `coord.maintenance` | Maintenance | **仅 Status**（探活；运维 RPC 不对外承诺） |
-| `grpc.health.v1` | Health | 标准 gRPC 健康检查 |
+| 能力 | 契约包 | GA 期限 |
+|:---|:---|:---:|
+| 服务注册发现 | `coord.registry.v1` | 2026-10-31 |
+| 分布式锁 | `coord.lock.v1` | 2026-11-30 |
+| Leader 选举 | `coord.election.v1` | 2026-11-30 |
+| 分布式 ID | `coord.idgen.v1` | 2026-10-31 |
+| 事件通知 | `coord.event.v1` | 2026-12-31 |
 
-红区（实验/残缺，**不在承诺范围**）：Multi-Raft/PD、Cache/MQ ISR、Seal/Unseal/静态加密、
-Workflow、Agent 侧其余服务。完整矩阵与证据见白皮书 §2。
+语义契约全文在 proto 注释中（`proto/coord/<domain>/v1/`）；期限逾期 = CI 红牌
+（倒逼机制，白皮书 §13）。
+
+## 底座原语（STABLE，实现底座）
+
+KV / Txn / Lease / Watch / Maintenance.Status / Health：稳定承诺，受
+`buf breaking` + wire-sync 硬卡口保护，供 SDK 与数据面对齐。
+
+## 承诺修复区（EXPERIMENTAL，整改承诺 + 期限）
+
+Cache / MQ / Workflow / Scheduler：缺陷清单、整改承诺与期限见 STATUS.md 与
+白皮书 §9；期限未兑现不得以任何形态对外开放。
+
+## 接入方式
+
+- 业务应用唯一入口 = **本机 Coord Agent** `127.0.0.1:19527`（协调能力经 Agent 提供）。
+- Server 端口（`:50051`/`:50052`）仅 Agent 可达，**不向业务网络开放**（白皮书 §9.3 R3）。
+- 认证：Agent 非 loopback 强制 auth + TLS；`authorization: Bearer <token>` metadata。
 
 ## 目录结构
 
 ```
 apis/contracts/
 ├── README.md                  # 本文件
-├── WHITEPAPER.md              # 协议兼容性白皮书（承诺文本）
+├── WHITEPAPER.md              # 协议白皮书（承诺文本）
 ├── CHANGELOG.md               # 契约版本记录（独立于代码版本）
+├── STATUS.md                  # 承诺台账（三态 + 期限，机器可读）
 ├── buf.yaml                   # buf 模块 / lint / breaking 配置
 ├── proto/
 │   ├── coord/
-│   │   ├── kv/kv.proto
-│   │   ├── txn/txn.proto
-│   │   ├── lease/lease.proto
-│   │   ├── watch/watch.proto
-│   │   └── maintenance/maintenance.proto   # 裁剪版：仅 Status
-│   └── grpc/health/v1/health.proto         # 标准健康检查协议
+│   │   ├── kv/ … txn/ lease/ watch/ maintenance/   # 底座原语（STABLE）
+│   │   ├── registry/v1/registry.proto              # 能力承诺面（COMMITTED）
+│   │   ├── lock/v1/lock.proto
+│   │   ├── election/v1/election.proto
+│   │   ├── idgen/v1/idgen.proto
+│   │   └── event/v1/event.proto
+│   └── grpc/health/v1/health.proto                 # 标准健康检查协议
 └── scripts/
-    └── check-wire-sync.sh     # 契约 ↔ coord-proto wire 一致性卡口
+    └── check-wire-sync.sh     # wire 一致性 + 承诺期限卡口
 ```
 
 ## 消费方式
@@ -50,19 +68,15 @@ apis/contracts/
 cd apis/contracts
 buf lint
 buf breaking --against '.git#branch=main,subdir=apis/contracts'
-bash scripts/check-wire-sync.sh
+bash scripts/check-wire-sync.sh   # wire 一致性 + STATUS 期限卡口
 
-# 生成客户端（示例：Go / Java 也可用各自 buf 插件）
+# 生成客户端（示例：Go / Java 可用各自 buf 插件）
 buf generate proto --template '{"version":"v2","plugins":[{"local":"protoc-gen-go","out":"gen/go"}]}'
 ```
-
-连接信息（默认，见 `config.example.toml`）：客户端 gRPC `:50051`。
-认证：`authorization: Bearer <token>` metadata（Auth 启用集群）。
-非 Leader 拒绝（`UNAVAILABLE`）时读取 `coord-leader-hint` metadata 重定向，详见白皮书 §5/§6。
 
 ## 版本与变更
 
 - 契约独立版本号：`contracts/v{MAJOR}.{MINOR}.{PATCH}`（git tag），与代码版本解耦。
-- 兼容性铁律、废弃策略（≥12 个月）、错误码契约：见白皮书 §3–§5。
-- 变更流程（PR Checklist + 公示模板）：见白皮书 §10；
-  CI 门禁：`.github/workflows/contract-check.yml`。
+- 兼容性铁律、废弃策略（≥12 个月）、错误码契约：白皮书 §4/§6。
+- 期限调整 = 契约变更：走白皮书 §11 流程并公示，不得静默顺延。
+- 变更记录：CHANGELOG.md；CI 门禁：`.github/workflows/contract-check.yml`。

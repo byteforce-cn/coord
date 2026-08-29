@@ -1,6 +1,36 @@
 # 契约变更记录（CHANGELOG）
 
-版本规则见 WHITEPAPER.md §4。契约版本独立于代码版本。
+版本规则见 WHITEPAPER.md §5。契约版本独立于代码版本。
+
+## [contracts/v1.1.0] — 2026-08-27（承诺面扩展：协调能力入契约）
+
+**哲学变更（WHITEPAPER 重写为 v1.1.0）**
+
+- 契约定位从「底座原语兼容性承诺」改为「服务协调能力承诺，以承诺倒逼实现」：
+  KV/Txn/Lease/Watch 降级为实现底座，业务消费面 = 协调能力。
+- 新增三态分层 STABLE / COMMITTED / EXPERIMENTAL（WHITEPAPER §1.2）。
+- 新增 `STATUS.md` 承诺台账（GA/整改期限，机器可读）；
+  `check-wire-sync.sh` 增加期限卡口：COMMITTED 服务期限逾期且未迁移至契约包 → CI 红。
+
+**纳入（COMMITTED，承诺中 + GA 硬截止）**
+
+| 能力 | 契约包 | GA 期限 |
+|:---|:---|:---:|
+| 服务注册发现 | `coord.registry.v1` | 2026-10-31 |
+| 分布式锁 | `coord.lock.v1` | 2026-11-30 |
+| Leader 选举 | `coord.election.v1` | 2026-11-30 |
+| 分布式 ID | `coord.idgen.v1` | 2026-10-31 |
+| 事件通知 | `coord.event.v1` | 2026-12-31 |
+
+wire 与 `coord.agent.*` 现行实现逐字段一致，迁移为机械式重挂载（禁止趁机改 wire）。
+
+**底座原语（STABLE，保留）**：KV / Txn / Lease / Watch / Maintenance.Status / Health。
+
+**承诺修复区（EXPERIMENTAL，整改承诺 + 期限）**：Cache / MQ / Workflow / Scheduler
+（缺陷清单与期限见 WHITEPAPER §9.1）。
+
+**接入路径修正**：业务入口 = 本机 Agent `127.0.0.1:19527`；
+Server 端口（50051/50052）仅 Agent 可达，不向业务网络开放。
 
 ## [contracts/v1.0.0] — 2026-08-27（首次冻结）
 

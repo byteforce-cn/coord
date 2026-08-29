@@ -15,6 +15,11 @@ lint:
     - SERVICE_SUFFIX         # 服务名 KV/Txn/Lease/Watch/Maintenance 为线端既有名称
     - ENUM_VALUE_PREFIX      # 枚举值与线端一致，重命名即 Breaking
     - ENUM_ZERO_VALUE_SUFFIX # 零值与线端一致（如 PUT=0），重命名即 Breaking
+    # v1.1 新增：能力承诺面沿用 coord.agent 现实现的消息/服务命名
+    # （如 EventPublishRequest / WatchEvent / LeaderElection），
+    # 重命名会破坏 wire 迁移的机械性，故例外保留：
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
   ignore:
     # 上游标准健康检查协议原文收录，命名不可本地化修改
     - proto/grpc/health/v1/health.proto

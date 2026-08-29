@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — 事件通知（能力承诺面，v1.1）
+//
+// 状态：COMMITTED（承诺中）｜ GA 期限：2026-12-31 ｜ 台账：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/agent_api.proto 的 coord.agent.Event
+//           （简化 CloudEvents 形态；完整属性封装为 v1.2 增量）
+//
+// 语义契约（WHITEPAPER.md §3.5）：
+//   - 连接存续期间 at-least-once、单订阅内按发布顺序投递；
+//   - 断线窗口不承诺补投（持久化游标 = v1.2 候选）；
+//   - event_id 服务端分配、全局唯一；specversion 固定 "1.0"。
+// ============================================================
+
+package coord.event.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.event.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/event/v1;eventv1";
+
+// 发布请求。
+message EventPublishRequest {
+  string event_type = 1;        // 事件类型（订阅匹配键）
+  string source = 2;            // 事件来源（发布方标识）
+  bytes data = 3;               // 事件负载（原始字节）
+  string data_content_type = 4; // 负载 MIME 类型（如 application/json）
+  string subject = 5;           // 事件主体（可选，业务语义）
+}
+
+message EventPublishResponse {
+  string event_id = 1; // 服务端分配、全局唯一的事件 ID
+}
+
+// 订阅请求（服务端流）。语义承诺：按 event_type 精确匹配；
+// 前缀匹配为 v1.2 候选。
+message EventSubscribeRequest {
+  string event_type = 1; // 精确匹配的事件类型
+}
+
+// 投递的事件（CloudEvents 1.0 简化形态）。
+message CloudEventMessage {
+  string id = 1;
+  string specversion = 2;      // 固定 "1.0"
+  string type = 3;
+  string source = 4;
+  bytes data = 5;
+  string data_content_type = 6;
+  string subject = 7;
+  string time = 8;             // 服务端生成时间（RFC3339）
+}
+
+// 取消订阅。subscription_id 当前由 event_type 派生；迁移时须由
+// Subscribe 显式下发（见 STATUS.md 整改项）。
+message EventUnsubscribeRequest {
+  string subscription_id = 1;
+}
+
+message EventUnsubscribeResponse {}
+
+// 事件通知服务。
+service Event {
+  rpc Publish(EventPublishRequest) returns (EventPublishResponse);
+  rpc Subscribe(EventSubscribeRequest) returns (stream CloudEventMessage);
+  rpc Unsubscribe(EventUnsubscribeRequest) returns (EventUnsubscribeResponse);
+}

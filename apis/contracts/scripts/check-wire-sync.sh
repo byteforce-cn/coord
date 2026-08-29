@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # ============================================================
-# check-wire-sync.sh — 对外契约 ↔ 内部实现的 wire 一致性卡口
+# check-wire-sync.sh — 对外契约 ↔ 内部实现的 wire 一致性与承诺期限卡口
 #
-# 防止两类腐化：
-#   1) 契约承诺了线端不存在的 rpc / 字段（空头承诺）；
-#   2) 内部重构改了字段编号 / 类型，与契约漂移（静默 Breaking）。
-#
-# 检查规则（对 contracts/proto/coord/<svc>/<svc>.proto 逐个执行）：
-#   - 契约中的每个 rpc 必须在内部 proto 中存在同名 rpc；
-#   - 契约中的每个字段（按字段名匹配）在内部 proto 中的编号必须一致；
-#   - Maintenance 为裁剪版：只校验契约中声明的子集（reserved 不校验）。
+# 三层校验：
+#   1) STABLE 层：proto/coord/<svc>/<svc>.proto ↔ coord-proto/<svc>.proto，
+#      rpc 存在性 + 字段编号一致（防空头承诺 / 静默漂移）；
+#   2) COMMITTED 层：proto/coord/<domain>/v1/<domain>.proto ↔
+#      coord-proto/src/proto/agent_api.proto，wire 逐项一致
+#      （迁移前基线 = coord.agent.* 现实现，冻结即契约）；
+#   3) 期限卡口：解析 STATUS.md，COMMITTED 服务 GA 期限已到而
+#      coord-proto 仍未落地契约包（package coord.<domain>.v1）→ 置红。
+#      —— 承诺即交付义务：逾期 = 倒逼卡口红（WHITEPAPER §13）。
 #
 # 已知限制：按字段名全文匹配内部文件，不精确到 message 作用域。
 # 字段名在各 proto 中基本唯一，对本仓库足够；若出现误报请人工复核。
@@ -19,40 +20,84 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CONTRACT_DIR="$REPO_ROOT/apis/contracts/proto/coord"
 INTERNAL_DIR="$REPO_ROOT/coord-proto/src/proto"
+STATUS_FILE="$REPO_ROOT/apis/contracts/STATUS.md"
+TODAY="$(date +%Y%m%d)"
 
 fail=0
 
-for contract in "$CONTRACT_DIR"/*/*.proto; do
-  svc="$(basename "$contract" .proto)"
-  internal="$INTERNAL_DIR/$svc.proto"
+check_wire() {
+  local contract="$1" internal="$2" label="$3"
+  local rpc_name field_name field_no
+
   if [[ ! -f "$internal" ]]; then
-    echo "FAIL: $svc — 内部 proto $internal 不存在" >&2
+    echo "FAIL: $label — 内部 proto $internal 不存在" >&2
     fail=1
-    continue
+    return
   fi
 
-  # 1) rpc 存在性
   while read -r rpc_name; do
-    if ! grep -qE "rpc ${rpc_name}\s*\(" "$internal"; then
-      echo "FAIL: $svc — rpc ${rpc_name} 在内部 proto 中不存在" >&2
+    if ! grep -qE "rpc ${rpc_name}[[:space:]]*\(" "$internal"; then
+      echo "FAIL: $label — rpc ${rpc_name} 在内部 proto 中不存在" >&2
       fail=1
     fi
-  done < <(grep -oE 'rpc [A-Za-z]+\s*\(' "$contract" | sed -E 's/rpc ([A-Za-z]+).*/\1/')
+  done < <(grep -oE 'rpc [A-Za-z]+[[:space:]]*\(' "$contract" \
+             | sed -E 's/rpc ([A-Za-z]+).*/\1/')
 
-  # 2) 字段编号一致性（跳过 reserved / oneof 包装行 / option 行）
   while read -r field_name field_no; do
     [[ -z "$field_name" ]] && continue
-    if ! grep -qE "\b${field_name}\s*=\s*${field_no}\s*;" "$internal"; then
-      echo "FAIL: $svc — 字段 ${field_name}=${field_no} 与内部 proto 不一致" >&2
+    if ! grep -qE "\b${field_name}[[:space:]]*=[[:space:]]*${field_no}[[:space:]]*;" "$internal"; then
+      echo "FAIL: $label — 字段 ${field_name}=${field_no} 与内部 proto 不一致" >&2
       fail=1
     fi
-  done < <(grep -vE 'reserved|option|//' "$contract" \
+  done < <(sed -E 's|//.*||' "$contract" \
+           | grep -vE 'reserved|option' \
            | grep -oE '[a-z_][a-z0-9_]* = [0-9]+;' \
            | sed -E 's/([a-z0-9_]+) = ([0-9]+);/\1 \2/')
+}
+
+# ── 1) STABLE 层：proto/coord/<svc>/<svc>.proto ↔ coord-proto/<svc>.proto
+for contract in "$CONTRACT_DIR"/*/*.proto; do
+  svc="$(basename "$contract" .proto)"
+  check_wire "$contract" "$INTERNAL_DIR/$svc.proto" "STABLE/$svc"
 done
 
+# ── 2) COMMITTED 层：proto/coord/<domain>/v1/<domain>.proto ↔ agent_api.proto
+AGENT_PROTO="$INTERNAL_DIR/agent_api.proto"
+for contract in "$CONTRACT_DIR"/*/v1/*.proto; do
+  domain="$(basename "$contract" .proto)"
+  check_wire "$contract" "$AGENT_PROTO" "COMMITTED/$domain"
+done
+
+# ── 3) 期限卡口：STATUS.md 中 COMMITTED 服务逾期未迁移至契约包 → 红
+if [[ ! -f "$STATUS_FILE" ]]; then
+  echo "FAIL: STATUS.md 承诺台账不存在" >&2
+  fail=1
+else
+  while read -r pkg deadline; do
+    [[ -z "$pkg" ]] && continue
+    d="${deadline//-/}"
+    if [[ "$d" -le "$TODAY" ]]; then
+      if ! grep -rFq "package ${pkg};" "$INTERNAL_DIR"; then
+        echo "FAIL: ${pkg} — GA 期限 ${deadline} 已到，coord-proto 未落地契约包（承诺未兑现，倒逼卡口置红）" >&2
+        fail=1
+      else
+        echo "OK: ${pkg} 已按期落地契约包（期限 ${deadline}）"
+      fi
+    else
+      echo "PENDING: ${pkg} GA 期限 ${deadline}（未到期）"
+    fi
+  done < <(grep -oE '\| coord\.[a-z.0-9]+ \| COMMITTED \| [0-9]{4}-[0-9]{2}-[0-9]{2} \|' "$STATUS_FILE" \
+           | sed -E 's/\| (coord\.[a-z.0-9]+) \| COMMITTED \| ([0-9-]+) \|.*/\1 \2/')
+
+  while read -r pkg deadline; do
+    [[ -z "$pkg" ]] && continue
+    echo "NOTICE: ${pkg} 整改承诺期限 ${deadline}（EXPERIMENTAL，治理跟踪，机器不置红）"
+  done < <(grep -oE '\| coord\.[a-z.0-9]+ \| EXPERIMENTAL \| [0-9]{4}-[0-9]{2}-[0-9]{2} \|' "$STATUS_FILE" \
+           | sed -E 's/\| (coord\.[a-z.0-9]+) \| EXPERIMENTAL \| ([0-9-]+) \|.*/\1 \2/')
+fi
+
 if [[ "$fail" -ne 0 ]]; then
-  echo "wire-sync 检查未通过：契约与内部实现已漂移。" >&2
+  echo "wire-sync/期限卡口未通过：契约与内部实现漂移，或承诺逾期未兑现。" >&2
   exit 1
 fi
-echo "wire-sync OK：契约承诺的 rpc/字段编号与 coord-proto 一致。"
+echo "wire-sync OK：STABLE/COMMITTED 契约与 coord-proto 一致，承诺期限无逾期。"

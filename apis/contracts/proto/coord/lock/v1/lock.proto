@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — 分布式锁（能力承诺面，v1.1）
+//
+// 状态：COMMITTED（承诺中）｜ GA 期限：2026-11-30 ｜ 台账：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/agent_api.proto 的 coord.agent.Lock
+//
+// 语义契约（判定摘要见 WHITEPAPER.md §3.2）：
+//   - 线性一致互斥：同一时刻同一锁名至多一个持有者；
+//   - 自动过期：TTL 内未 Renew 即释放；
+//   - 持有者校验：仅 (holder_id, lease_id) 匹配者可 Release/Renew；
+//   - 不承诺公平性（先进先出）与可重入。
+// ============================================================
+
+package coord.lock.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.lock.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/lock/v1;lockv1";
+
+// 获取锁请求。
+//
+// 语义承诺：
+//   - 锁名 name 为资源标识（命名空间由调用方约定）；
+//   - 已存在持有者且未过期：返回 acquired=false（正常返回，非错误）；
+//   - 获取成功即绑定租约，ttl_seconds 内无 Renew 自动释放。
+message LockAcquireRequest {
+  string name = 1;       // 锁名（资源标识）
+  string holder_id = 2;  // 持有者标识（如实例 id）
+  int64 ttl_seconds = 3; // 租约 TTL（秒）
+}
+
+message LockAcquireResponse {
+  bool acquired = 1;    // 是否获取成功
+  int64 lease_id = 2;   // 成功时分配的租约 ID
+  string holder_id = 3; // 成功时回显的持有者
+}
+
+// 释放锁请求。
+//
+// 语义承诺：
+//   - (holder_id, lease_id) 与当前持有者不匹配 → PERMISSION_DENIED；
+//   - 锁不存在或已过期 → 幂等返回 released=true（OK）。
+message LockReleaseRequest {
+  string name = 1;
+  string holder_id = 2;
+  int64 lease_id = 3;
+}
+
+message LockReleaseResponse {
+  bool released = 1; // true = 释放成功（或已不存在，幂等）
+}
+
+// 续约请求。语义承诺：仅持有者可续约；租约已失效 → new_ttl=0。
+message LockRenewRequest {
+  string name = 1;
+  string holder_id = 2;
+  int64 lease_id = 3;
+}
+
+message LockRenewResponse {
+  int64 new_ttl = 1; // 续约后的 TTL（秒）；0 = 租约已失效，锁已释放
+}
+
+// 锁信息查询。语义承诺：线性一致读；acquired_at 为 Unix 秒。
+message LockGetInfoRequest {
+  string name = 1;
+}
+
+message LockGetInfoResponse {
+  string name = 1;
+  string holder_id = 2;
+  int64 lease_id = 3;
+  int64 acquired_at = 4; // 获取时间（Unix 秒）
+  int64 ttl_seconds = 5; // 剩余 TTL 快照（秒）
+  bool exists = 6;       // 锁是否存在（已过期视为不存在）
+}
+
+// 分布式锁服务。
+service Lock {
+  rpc Acquire(LockAcquireRequest) returns (LockAcquireResponse);
+  rpc Release(LockReleaseRequest) returns (LockReleaseResponse);
+  rpc Renew(LockRenewRequest) returns (LockRenewResponse);
+  rpc GetLockInfo(LockGetInfoRequest) returns (LockGetInfoResponse);
+}
