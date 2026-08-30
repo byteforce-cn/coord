@@ -31,7 +31,11 @@ use crate::raft::type_config::AuthOp;
 #[async_trait::async_trait]
 pub trait AuthOpProposer: Send + Sync {
     /// 提案并等待应用，返回分配到的 revision。
-    async fn propose_auth_op(&self, op: AuthOp) -> Result<u64, String>;
+    ///
+    /// 错误为 gRPC Status：follower 上收到提案返回 `UNAVAILABLE`（携带
+    /// leader hint，同 KV 写路径 R-SVC-08），客户端据此重定向到当前 leader；
+    /// 超时返回 `DEADLINE_EXCEEDED`，其余为 `INTERNAL`。
+    async fn propose_auth_op(&self, op: AuthOp) -> Result<u64, tonic::Status>;
 }
 
 // ──── 登录限流（P0-C.6，F1：per-user + per-IP 内存 token bucket）────
@@ -185,11 +189,7 @@ impl AuthService {
     /// 提案 AuthOp（有 proposer）或直接改内存视图（无 proposer，兼容测试/单机）。
     async fn apply_auth_op(&self, op: AuthOp) -> Result<(), tonic::Status> {
         match &self.auth_proposer {
-            Some(proposer) => proposer
-                .propose_auth_op(op.clone())
-                .await
-                .map(|_| ())
-                .map_err(|e| tonic::Status::internal(format!("raft auth write failed: {e}"))),
+            Some(proposer) => proposer.propose_auth_op(op.clone()).await.map(|_| ()),
             None => {
                 self.auth_manager.apply_auth_op_to_view(&op);
                 Ok(())
@@ -370,8 +370,7 @@ impl AuthService {
                     is_refresh,
                 })
                 .await
-                .map(|_| ())
-                .map_err(|e| tonic::Status::internal(format!("persist session: {e}"))),
+                .map(|_| ()),
             None => {
                 self.token_manager.register_session(
                     hash_hex,
@@ -981,8 +980,7 @@ impl AuthTrait for AuthService {
                     hash_hex: hash_hex.clone(),
                 })
                 .await
-                .map(|_| ())
-                .map_err(|e| tonic::Status::internal(format!("consume session: {e}")))?,
+                .map(|_| ())?,
             None => self.token_manager.remove_session(&hash_hex),
         }
 

@@ -815,23 +815,33 @@ fn map_err<E: std::fmt::Display + 'static>(e: E) -> tonic::Status {
 
 #[async_trait::async_trait]
 impl AuthOpProposer for CoordNode {
-    async fn propose_auth_op(&self, op: AuthOp) -> Result<u64, String> {
+    async fn propose_auth_op(&self, op: AuthOp) -> Result<u64, tonic::Status> {
         if let Some(ref raft) = self.raft {
+            // 与 KV 写路径（R-SVC-08 / client_write_with_timeout）同口径：
+            // follower 上的 ForwardToLeader 映射为 UNAVAILABLE（附 leader hint），
+            // 客户端据此重定向到当前 leader；超时映射为 DEADLINE_EXCEEDED，
+            // 其余映射为 INTERNAL。修复前此处直接返回 INTERNAL，导致客户端
+            // 在任意非 leader 节点上打开会话即失败（:no-client 风暴）。
             let timeout = self.limits.read().write_timeout;
             let resp = tokio::time::timeout(timeout, raft.client_write(Command::Auth(op)))
                 .await
-                .map_err(|_| "raft auth write timed out (no quorum?)".to_string())?
-                .map_err(|e| format!("raft auth write failed: {e}"))?;
+                .map_err(|_| {
+                    tonic::Status::deadline_exceeded("raft auth write timed out (no quorum?)")
+                })?
+                .map_err(|e| match e {
+                    openraft::error::RaftError::APIError(cwe) => self.map_client_write_error(cwe),
+                    other => tonic::Status::internal(format!("raft auth write failed: {other}")),
+                })?;
             match resp.response() {
                 Response::Auth { revision } => Ok(*revision),
-                _ => Err("unexpected raft response for AuthOp".into()),
+                _ => Err(tonic::Status::internal("unexpected raft response for AuthOp")),
             }
         } else {
             // 无 raft：直接本地 apply（与 Lease standalone 同口径，锁内分配 revision）
             let revision = self.storage.current_revision().saturating_add(1);
             self.storage
                 .apply_auth_op(&op, revision, AppliedLogId::standalone(revision))
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| tonic::Status::internal(format!("auth apply failed: {e}")))?;
             Ok(revision)
         }
     }
