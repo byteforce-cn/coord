@@ -11,6 +11,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 // ──── TLS 配置 ────
 
 /// TLS 配置
@@ -57,7 +59,7 @@ impl TlsConfig {
         }
     }
 
-    /// P2-05：证书文件指纹快照（mtime + 长度，用于热加载变更检测）。
+    /// P2-05：证书文件指纹快照（mtime + 长度 + 内容 SHA-256，用于热加载变更检测）。
     pub fn fingerprint(&self) -> Vec<FileFingerprint> {
         let mut paths = vec![(&self.cert_path, true), (&self.key_path, true)];
         if let Some(ca) = &self.ca_path {
@@ -69,7 +71,7 @@ impl TlsConfig {
             .collect()
     }
 
-    /// P2-05：与上一快照对比，任一证书文件（mtime/长度/存在性）变化返回 `true`。
+    /// P2-05：与上一快照对比，任一证书文件（内容/长度/存在性）变化返回 `true`。
     /// 首次调用（`previous == None`）返回 `false`（仅记录基线，不触发重载）。
     pub fn files_changed(&self, previous: &mut Option<Vec<FileFingerprint>>) -> bool {
         let current = self.fingerprint();
@@ -82,21 +84,27 @@ impl TlsConfig {
     }
 }
 
-/// P2-05：单个证书文件的指纹（路径 + 修改时间 + 长度）。
+/// P2-05：单个证书文件的指纹（路径 + 修改时间 + 长度 + 内容 SHA-256）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileFingerprint {
     pub path: PathBuf,
     pub modified: Option<std::time::SystemTime>,
     pub len: u64,
+    /// 内容 SHA-256：变更检测不能只依赖 mtime/长度——在粗粒度时间戳
+    /// 文件系统（如 1s 粒度）上，同长度内容在同一秒内改写时 mtime 与
+    /// 长度均不变，会漏检热更新。
+    pub hash: [u8; 32],
 }
 
 impl FileFingerprint {
     fn of(path: &Path) -> Option<Self> {
+        let bytes = fs::read(path).ok()?;
         let meta = fs::metadata(path).ok()?;
         Some(Self {
             path: path.to_path_buf(),
             modified: meta.modified().ok(),
             len: meta.len(),
+            hash: Sha256::digest(&bytes).into(),
         })
     }
 }

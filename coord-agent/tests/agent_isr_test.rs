@@ -550,12 +550,20 @@ async fn test_two_agent_degraded_when_follower_down() {
     let pb = find_port();
     let addr_a = format!("127.0.0.1:{pa}");
     let addr_b = format!("127.0.0.1:{pb}");
-    let (leader_addr, _down_addr) = if addr_a < addr_b {
-        (addr_a.clone(), addr_b.clone())
+    // ReplicationManager 静态 Leader 分配 = min-addr（字符串序）；
+    // 被测 Agent 必须绑定到较小地址（成为 Leader），对端为较大地址（保持宕机）。
+    let (leader_addr, down_addr) = if addr_a < addr_b {
+        (addr_a, addr_b)
     } else {
-        (addr_b.clone(), addr_a.clone())
+        (addr_b, addr_a)
     };
-    let config = isr_config(pa, vec![addr_b], 2, "degraded");
+    let leader_port = leader_addr
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .parse::<u16>()
+        .unwrap();
+    let config = isr_config(leader_port, vec![down_addr], 2, "degraded");
     let (handle, addr) = spawn_agent(config).await;
     assert_eq!(addr, leader_addr);
 

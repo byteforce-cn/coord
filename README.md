@@ -8,15 +8,40 @@
 
 </div>
 
-**Coord** 是一个分布式协调服务，基于 Raft 共识协议为微服务架构提供强一致的 KV 存储、原子事务、租约、变更监听等共识原语；注册发现、配置中心、分布式锁、ID 生成、选举、事件通知、缓存、消息队列、工作流编排、策略引擎、调度、熔断、限流、特性开关与 PKI 证书签发等高级协调能力，则全部由 `coord-agent` 在业务侧落地。
+**Coord** 是一个分布式协调服务：基于 Raft 共识协议提供强一致的 KV 存储、原子事务、租约、变更监听、鉴权等共识原语，并通过 `coord-agent` 向业务应用交付注册发现、配置中心、分布式锁、ID 生成、选举、事件通知、缓存、消息队列、工作流编排、策略引擎、调度、熔断、限流、特性开关与 PKI 证书签发等完整协调能力。 
 
-**Coord** 使用 deepseek v4 辅助开发，主要验证ai在大型项目辅助开发的能力边界 当前应用不可以在生产环境使用 
+- 当前项目使用 deepseek v4 辅助开发 用于评估 ai 辅助开发复杂项目能力 主要用于学习验证
+- **Server（共识与存储基座）**：单 Raft 组 3 节点部署，提供 KV / Txn / Watch / Lease / Auth / 静态加密 / 快照 / 压缩等原语与 Prometheus 指标。gRPC（`50051`）与 Raft（`50052`）端口仅对 Agent 可达，**业务应用永不直连 Server 集群**。
+- **Agent（应用唯一接入方式）**：每台业务机器部署 `coord-agent`，应用经本机 gRPC（`127.0.0.1:19527`）接入。Agent 代理 Server 核心原语，并在本机落地全部高级协调服务——**服务协调能力的真正承载层是 Agent**，Server 仅作为共识与存储基座。
+- **对外契约**：`apis/contracts/` 以协议白皮书 + 承诺台账的形式向业务方承诺注册发现、分布式锁、Leader 选举、分布式 ID、事件通知五类能力（GA 期限 2026-10-31 至 2026-12-31）。
+- **Multi-Raft/PD 分片**为 experimental，未接入生产路径；**Cache/MQ ISR 复制**已实现但默认关闭，未接入生产路径。
 
-- **生产形态**：单 Raft 组 + 定期快照备份；**业务应用永不直连 Server 集群**，Server 的 gRPC/Raft 端口（`50051`/`50052`）仅对 Agent 可达。
-- **Agent 模式（应用唯一接入方式）**：每台业务机器部署 `coord-agent`，应用通过本机 gRPC（`127.0.0.1:19527`）接入。Agent 对外暴露与 Server 同契约的核心 gRPC 接口并代理转发，同时在本机落地全部高级协调服务——**服务协调能力的真正承载层是 Agent**，Server 仅作为共识与存储基座。
-- **Multi-Raft/PD 分片**为 experimental，未接入生产路径；**cache-mq ISR 复制**已实现但默认关闭，未接入生产路径。
+> **成熟度**：核心一致性与故障恢复已通过 Jepsen 全矩阵验证（2026-08-29，见下节），72 小时浸泡测试进行中（2026-08-30 启动）；共识依赖 `openraft` 仍为 alpha 版本，整体**尚未生产就绪**，不建议直接用于生产环境。
 
-> **状态（2026-08-27）**：**尚未生产就绪**。工程基座健康——`cargo fmt` / `clippy` / panic 卡口全绿，全量 workspace 测试 **75 个测试目标、1656 通过 / 0 失败 / 22 ignored**，Java SDK 124 个测试全过；但外部验证（Jepsen、72h 浸泡、第三方审计、kind 部署演练）尚未执行，共识依赖 `openraft` 仍为 alpha 版本，CI 尚未覆盖 Java/UI 测试，发布链路未演练（尚无 tag）。本 README 以下内容均为当前仓库的实测口径。
+## Jepsen 一致性验证
+
+Coord 的一致性与故障恢复能力由独立 Jepsen 测试工程验证（3 节点真实集群 + 自研 gRPC 客户端 + knossos 线性一致性检查器，工作负载 register / cas-register）。
+
+| 判据 | 结果 |
+|:---|:---|
+| 线性一致性（none / kill / kill-all / pause / partition / partition-halves / partition-ring 全矩阵） | **通过，0 异常** |
+| 持久性（kill -9 + 重启后读回一致） | 通过 |
+| 无脑裂（分区期间至多一个分区可写） | 通过 |
+| 快速失败（无 quorum 时写 ≤5s 失败，不无限挂起） | 通过 |
+
+**发现并修复了一个真实缺陷（网络分区下的间歇性陈旧读）**：验证期间曾稳定复现「已确认提交的写之后，读返回更旧的值」。根因不在读路径，而在集群成员地址通告——bootstrap 节点将绑定地址 `0.0.0.0:50052` 通告为自身 Raft 地址，对端节点按该地址连接时落到各自本机、把本机应答当作对端应答，形成**自我应答的伪多数派**，在无真实 quorum 的情况下提交并 apply 日志。修复：
+
+- 节点通告地址优先取 `initial_nodes` 中解析后的可路由地址，仅配置缺失时才回退到绑定地址（`coord/src/main.rs`）；
+- 读路径追加防御性一致性复核：ReadIndex 之后校验 Leader 状态、`applied ≤ committed` 与本地日志条目一致，不满足即返回 UNAVAILABLE——**宁可失败也不返回过期值**（`coord-server/src/server/mod.rs`）。
+
+修复后高负载档位（约 5–10 ops/s）下 partition-halves 3/3、partition-ring 2/2 复测通过，完整回归矩阵 0 异常。
+
+**72 小时浸泡（soak）**：修复后二进制自 2026-08-30 起在 3 节点集群上运行 72h 浸泡——固定速率读写（0.5 ops/s，全程约 13 万操作）+ 慢速轮转故障注入（kill / pause / 单节点 partition）+ 专用 O(n log n) 线性一致性检查器（伪造值 / 未来值 / 陈旧读三类违规 + 收敛校验）。浸泡期间配套修复：
+
+- 测试客户端鉴权令牌（1h TTL）过期后不重认证的问题——客户端现已支持自动重认证重试；
+- Server 在非 Leader 节点收到 Auth 写入时错误映射为 INTERNAL 的问题——现与 KV 写路径同口径返回 UNAVAILABLE 并附 Leader 提示（`coord-server/src/auth/service.rs`）。
+
+> 截至 2026-08-30 运行中（约 12 小时 / 72 小时），读写正常、检查器无异常输出；浸泡结束后结果在此收口。
 
 ---
 
@@ -51,9 +76,11 @@ graph TD
 
 ## 核心特性
 
-> 状态口径：✅ = 已实现且有自动化测试覆盖；⚠️ = 存在已知限制；🧪 = experimental（未接入生产路径）。均不代表已通过生产级外部验证。
+> 状态口径：✅ = 已实现且有自动化测试覆盖；⚠️ = 存在已知限制；🧪 = experimental（未接入生产路径）。
 >
 > 分工口径：共识基座由 **Server** 提供、经 Agent 代理透出；高级协调能力全部由 **Agent** 落地（Server 仅作为其 KV/Lease/Watch 存储后端）。
+>
+> 验证口径：KV / Txn / Watch / Lease 读写的线性一致性已通过独立 Jepsen 工程全矩阵验证（见「Jepsen 一致性验证」）。
 
 ### Server：共识与存储基座
 
@@ -71,6 +98,8 @@ graph TD
 | **Snapshot** | 单事务导出、2MiB 分块流式传输、auth/lease/compacted 入快照 | ✅ |
 | **可观测性** | Prometheus 指标（watch/apply/txn/snapshot/compaction/auth/storage）+ `/healthz` | ✅ |
 | **Multi-Raft/PD** | Region 分片 + PD 调度 | 🧪 |
+
+> KV / Txn / Watch / Lease 的线性一致性与故障恢复（kill/kill-all/pause/partition/partition-halves/partition-ring）已通过 Jepsen 验证。
 
 ### Agent：高级协调能力落地层（`coord.agent.*` gRPC 服务）
 
@@ -95,6 +124,18 @@ graph TD
 | **ISR Replication** | `coord.agent.Replica` | Cache/MQ 跨 Agent 同步复制：min_isr 门控、幂等应用、Reconcile 落后追赶、双向心跳 | 对端 Agent | 关 |
 
 > 「默认」列 = `[services]` 段缺省值；关闭的服务不分配任何资源。⚠️ ISR 复制已实现且有双 Agent 集成测试覆盖，但静态分区 Leader、无故障转移演练，未接入生产路径。
+
+## 对外契约
+
+`apis/contracts/` 定义 Coord 对上游业务方（100+ 微服务，Java/Go）的协调能力承诺，以协议白皮书 + 机器可读台账管理，CI 硬卡口约束，逾期未兑现即红牌：
+
+| 层级 | 内容 | 状态 |
+|:---|:---|:---|
+| 底座原语 | KV / Txn / Lease / Watch / Maintenance.Status / Health | STABLE，受 buf breaking + wire-sync 卡口保护 |
+| 能力承诺面 | 注册发现、分布式锁、Leader 选举、分布式 ID、事件通知（`coord.{registry,lock,election,idgen,event}.v1`） | COMMITTED，GA 期限 2026-10-31 至 2026-12-31 |
+| 承诺修复区 | Cache / MQ / Workflow / Scheduler | EXPERIMENTAL，缺陷清单与整改期限见 `STATUS.md` |
+
+语义契约全文在 proto 注释中；接入方式与消费说明见 [`apis/contracts/README.md`](apis/contracts/README.md)。
 
 ## coord-agent：应用接入入口与协调能力落地层
 
@@ -144,7 +185,7 @@ coord/
 ├── coord-java-sdk/     # Java SDK（cn.byteforce:coord-java-sdk）
 ├── java-example/       # Java 接入示例
 ├── coord-ui/           # Web 管理界面（React 19 + Vite + Tailwind 4）
-├── apis/contracts/     # 对外 proto 契约（kv/txn/lease/watch/maintenance/health）
+├── apis/contracts/     # 对外契约：底座原语 + 能力承诺面（registry/lock/election/idgen/event）+ 白皮书/台账
 ├── deploy/             # docker-compose 三节点 + k8s StatefulSet
 ├── monitoring/         # Grafana 面板 + Prometheus 告警规则
 ├── scripts/            # 门禁与基准脚本（check-panics/jepsen/soak/bench）
@@ -243,11 +284,13 @@ pnpm test:e2e  # playwright e2e（auth/config/registry）
 - **监控**：`monitoring/grafana-dashboard.json` 与 `monitoring/prometheus-rules.yml`（抓取配置待补）；
 - **镜像**：[`Dockerfile`](Dockerfile) 多阶段构建（Node 22 构建 UI + Rust 1.93 构建二进制 + 非 root 运行）；发布流程见 `.github/workflows/release.yml`（`v*` tag → linux x86_64/aarch64 二进制 + ghcr 镜像，**尚未演练**）。
 
-## 测试与 CI 门禁
+## 质量保障
 
-- CI（`.github/workflows/ci.yml`）：`lint`（fmt + clippy）/ `frontend-lint` / `proto-lint` / `test` / `security-audit`（cargo audit + cargo deny）/ `chaos-nightly`（夜间故障注入）/ `perf-bench`（周度基准）；
-- 本地脚本：`scripts/check-panics.sh`（panic 卡口）、`scripts/jepsen-check.sh`（一致性验证）、`scripts/soak-72h.sh`（长跑）、`scripts/bench-ci.sh` / `scripts/bench-release.sh`（基准）；
-- 已知待办：Java SDK 测试与 UI 单测/e2e 尚未接入 CI；Jepsen / 72h 浸泡 / 第三方审计 / kind 部署验证尚未执行。
+- **一致性验证**：独立 Jepsen 工程全矩阵 + 72h 浸泡（见「Jepsen 一致性验证」）；仓库内等价快速收口 `scripts/jepsen-check.sh`（真实 3 进程集群 kill -9 / 暂停 / TCP 代理分区 + 线性一致性检查器，约 2–3 分钟）；
+- **长跑与基准**：`scripts/soak-72h.sh`（72h 浸泡）、`scripts/bench-ci.sh` / `scripts/bench-release.sh`（周度/发布基准）；
+- **CI（`.github/workflows/ci.yml`）**：fmt + clippy（`-D warnings`）+ panic 卡口（非测试目标 unwrap/expect/panic 计数 = 0）、前端 lint/build、proto contract（buf lint + breaking）、workspace 测试、cargo audit + cargo deny、真实进程 chaos（夜间/手动）、周度性能基线；另有 `contract-check.yml`（承诺期限卡口）与 `release.yml`（tag 触发）；
+- 全量 workspace 测试（2026-08-30 实测）：**75 个测试目标、1656 通过 / 0 失败 / 22 ignored**；
+- 已知待办：Java SDK 测试与 UI 单测/e2e 尚未接入 CI；第三方审计与 kind 部署演练尚未执行。
 
 ## 技术栈
 
@@ -255,22 +298,29 @@ pnpm test:e2e  # playwright e2e（auth/config/registry）
 |:---|:---|:---|
 | 语言 | Rust | 1.93.0 |
 | 异步运行时 | Tokio | 1.49 |
-| gRPC 框架 | Tonic + Prost | 0.14.6 |
-| Raft 共识 | Openraft | 0.10.0-alpha.25（alpha，升级/风险接受待决策） |
+| gRPC 框架 | Tonic + Prost | 0.14.6 / 0.14.3 |
+| Raft 共识 | Openraft | 0.10.0-alpha.34（alpha 版本） |
 | 存储引擎 | Redb | 4.1.0 |
 | HTTP 层 | Axum | 0.8 |
 | CLI | Clap | 4 |
 | Java SDK | Java + gRPC-Java + protobuf-java | 21 / 1.68 / 4.28 |
-| 前端 | React + Vite + TypeScript + Tailwind CSS | 19.2 / 4.3 |
+| 前端 | React + Vite + TypeScript + Tailwind CSS | 19.2 / 8.1 / 6.0 / 4.3 |
 | UI 测试 | Vitest + Playwright | — |
 
 ## 安全
 
-漏洞报告渠道与安全特性说明见 [`SECURITY.md`](SECURITY.md)（当前渠道为邮件联系项目维护者，无 SLA）。依赖审计：`cargo audit` + `cargo deny --check deny.toml`（CI `security-audit` job 已接入）。
+- 安全特性：TLS/mTLS（缺 CA 拒绝启动）、CCT 令牌鉴权（Ed25519 + HMAC 兼容）、scope 级 RBAC、AES-256-GCM 静态加密、Shamir 分片 Seal/Unseal——详见上表与 `coord-agent` 安全小节；
+- 漏洞报告渠道见 [`SECURITY.md`](SECURITY.md)（当前为邮件联系维护者，无 SLA）；
+- 依赖审计：`cargo audit` + `cargo deny --check deny.toml`（CI 已接入）。
 
 ## 版本
 
-仓库版本 `0.1.0`，尚未发布任何 tag；发布流程见 `.github/workflows/release.yml`（tag 触发）。
+仓库版本 `0.1.0`，尚未发布任何 tag。近期里程碑：
+
+- 2026-08-29：Jepsen 全矩阵验证通过，修复网络分区下的间歇性陈旧读（bootstrap 地址通告缺陷）；
+- 2026-08-30：72h 浸泡启动；修复鉴权写请求在非 Leader 节点的错误映射。
+
+发布流程见 `.github/workflows/release.yml`（tag 触发）。
 
 ## 参与贡献
 

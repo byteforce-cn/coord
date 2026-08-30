@@ -74,6 +74,12 @@ impl TokenBucket {
             false
         }
     }
+
+    /// 查看是否有可用令牌（先 refill；不消费）。
+    fn has_token(&mut self) -> bool {
+        self.refill();
+        self.tokens >= 1.0
+    }
 }
 
 /// 登录失败限流器：key = `u:{username}` / `ip:{addr}`，成功后清除该用户计数。
@@ -88,21 +94,44 @@ impl LoginRateLimiter {
         }
     }
 
-    /// 尝试消费（用户名 + IP 双重）。任一耗尽 → false（拒绝）。
+    /// 预检查本次登录尝试是否被允许（仅查看，不消耗令牌）。
+    /// 用户名 + IP 任一桶耗尽 → false（拒绝发生在 argon2 之前，防爆破）。
+    ///
+    /// 修复（2026-08-30）：此前 allow_attempt 在密码校验**之前**对每次
+    /// 尝试都消耗令牌，且成功登录只清用户桶、IP 桶永不返还——follower
+    /// 转发（UNAVAILABLE）、无 quorum 超时、正常登录突发都会耗尽 IP 桶，
+    /// 导致合法客户端（如 Jepsen control 节点）被长期锁定
+    /// （RESOURCE_EXHAUSTED: too many failed login attempts）。
+    /// 现改为：只有密码校验失败（record_failure）才消耗令牌。
     fn allow_attempt(&self, username: &str, ip: Option<std::net::SocketAddr>) -> bool {
         let mut buckets = self.buckets.write();
         let user_ok = buckets
             .entry(format!("u:{username}"))
             .or_insert_with(TokenBucket::new)
-            .try_take();
+            .has_token();
         let ip_ok = match ip {
             Some(addr) => buckets
                 .entry(format!("ip:{addr}"))
                 .or_insert_with(TokenBucket::new)
-                .try_take(),
+                .has_token(),
             None => true,
         };
         user_ok && ip_ok
+    }
+
+    /// 登录失败（密码校验未通过）：消耗用户名 + IP 各一个令牌。
+    fn record_failure(&self, username: &str, ip: Option<std::net::SocketAddr>) {
+        let mut buckets = self.buckets.write();
+        buckets
+            .entry(format!("u:{username}"))
+            .or_insert_with(TokenBucket::new)
+            .try_take();
+        if let Some(addr) = ip {
+            buckets
+                .entry(format!("ip:{addr}"))
+                .or_insert_with(TokenBucket::new)
+                .try_take();
+        }
     }
 
     /// 登录成功后清除该用户失败计数（不惩罚正常用户）。
@@ -882,6 +911,8 @@ impl AuthTrait for AuthService {
 
         // Verify password
         if let Err(e) = self.auth_manager.authenticate(&req.name, &req.password) {
+            // 只有密码校验失败才消耗限流令牌（成功/转发/超时不消耗）。
+            self.login_limiter.record_failure(&req.name, peer_ip);
             if let Some(ref audit) = self.audit {
                 audit.record_event(
                     &req.name,
@@ -1163,21 +1194,37 @@ mod cct_tests {
     fn test_login_rate_limiter_exhausts_and_resets() {
         let limiter = LoginRateLimiter::new();
         let ip = "127.0.0.1:1234".parse().unwrap();
-        // 容量 5：前 5 次失败允许，第 6 次开始拒绝
-        for i in 0..5 {
+        // 容量 5：前 4 次失败后仍允许，第 5 次失败耗尽令牌，之后被拒绝
+        for i in 0..4 {
+            limiter.record_failure("attacker", Some(ip));
             assert!(
                 limiter.allow_attempt("attacker", Some(ip)),
-                "attempt {i} should be allowed"
+                "attempt {i} should still be allowed"
             );
         }
+        limiter.record_failure("attacker", Some(ip));
         assert!(
             !limiter.allow_attempt("attacker", Some(ip)),
             "bucket exhausted"
         );
-        // 成功登录后清除该用户计数（但同 IP 仍被限流）
+        // 成功登录后清除该用户计数（IP 桶仍被限流）；换 IP 后可再尝试
         limiter.clear_user("attacker");
         let ip2 = "127.0.0.1:9999".parse().unwrap();
         assert!(limiter.allow_attempt("attacker", Some(ip2)));
+        assert!(!limiter.allow_attempt("attacker", Some(ip)));
+    }
+
+    /// 成功登录不消耗任何令牌：合法客户端登录突发/重连不应被锁定。
+    #[test]
+    fn test_login_rate_limiter_success_does_not_consume() {
+        let limiter = LoginRateLimiter::new();
+        let ip = "127.0.0.1:1234".parse().unwrap();
+        for _ in 0..20 {
+            assert!(limiter.allow_attempt("root", Some(ip)));
+            limiter.clear_user("root"); // 模拟成功登录
+        }
+        // 从未发生失败：桶仍是满的
+        assert!(limiter.allow_attempt("root", Some(ip)));
     }
 
     /// 不同用户名互不影响。
@@ -1187,7 +1234,7 @@ mod cct_tests {
         let ip_a = "127.0.0.1:1234".parse().unwrap();
         let ip_b = "127.0.0.1:1235".parse().unwrap();
         for _ in 0..5 {
-            limiter.allow_attempt("user-a", Some(ip_a));
+            limiter.record_failure("user-a", Some(ip_a));
         }
         assert!(!limiter.allow_attempt("user-a", Some(ip_a)));
         // 不同用户 + 不同 IP 不受影响

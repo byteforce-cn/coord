@@ -1577,7 +1577,24 @@ async fn run_server(
         .map_err(|e| format!("create raft log store: {e}"))?
         .with_snapshot_tracker(Arc::clone(&snapshot_tracker));
 
-    // 5a.5 M0-5 启动检查：日志已被 purge 但无覆盖快照 → 拒绝启动（不可恢复态）
+    // 5b. Raft StateMachine（与 CoordNode 共享同一存储实例与快照守卫）
+    //     与 CoordNode 共享同一个 WatchDispatcher，确保 apply 路径的
+    //     事件分发与 gRPC Watch 订阅者使用同一订阅表。
+    let mut sm_store = StateMachineStore::new(
+        Arc::clone(&mvcc),
+        snapshot_dir.clone(),
+        Arc::clone(&snapshot_tracker),
+    );
+    sm_store.set_watch_dispatcher(Arc::clone(&watch_dispatcher));
+    // R-OBS-10：状态机 apply/快照埋点
+    sm_store.metrics = Some(Arc::clone(&metrics));
+
+    // 5b.5 M0-5 启动检查：日志已被 purge 但无覆盖快照 → 拒绝启动（不可恢复态）。
+    // 必须放在 StateMachineStore::new 之后：启动时把已落盘快照（META_SNAPSHOT）
+    // 登记进 snapshot_tracker 的正是 StateMachineStore::new；若在此前检查，
+    // tracker 为空，任何“重启前发生过 purge”的节点都会被误判为不可恢复而
+    // 拒绝启动（对应 n1 在 kill 后重启报 “unrecoverable state: raft logs
+    // purged up to index ... but no durable snapshot covers it” 的故障）。
     if let Some(purged) = log_store
         .last_purged()
         .map_err(|e| format!("read last_purged: {e}"))?
@@ -1596,18 +1613,6 @@ async fn run_server(
             purged.index
         );
     }
-
-    // 5b. Raft StateMachine（与 CoordNode 共享同一存储实例与快照守卫）
-    //     与 CoordNode 共享同一个 WatchDispatcher，确保 apply 路径的
-    //     事件分发与 gRPC Watch 订阅者使用同一订阅表。
-    let mut sm_store = StateMachineStore::new(
-        Arc::clone(&mvcc),
-        snapshot_dir.clone(),
-        Arc::clone(&snapshot_tracker),
-    );
-    sm_store.set_watch_dispatcher(Arc::clone(&watch_dispatcher));
-    // R-OBS-10：状态机 apply/快照埋点
-    sm_store.metrics = Some(Arc::clone(&metrics));
 
     // 6.5. 初始化 Auth 组件（P0-C.1：`security.auth_enabled` 唯一开关，默认 true）
     let auth_enabled = cfg.security.auth_enabled;

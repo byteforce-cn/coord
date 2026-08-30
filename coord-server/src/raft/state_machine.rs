@@ -501,6 +501,13 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         // R-OBS-10：apply 耗时埋点
         let apply_start = std::time::Instant::now();
 
+        // M0-5 修复：Normal 条目 apply 时同步内存 last_applied。此前仅在
+        // Membership 路径更新内存（持久化水位由写路径同事务写入
+        // META_LAST_APPLIED），导致 build_snapshot 用陈旧/空白的 last_log_id
+        // 生成快照 meta——openraft 按错误水位计算 purge 点（或根本跳过 purge），
+        // 重启后快照 meta 也无法覆盖已 purge 的日志。
+        let mut last_normal_log_id: Option<LogIdOf<TypeConfig>> = None;
+
         for (entry, maybe_responder) in entries {
             let response = match &entry.payload {
                 EntryPayload::Normal(cmd) => {
@@ -512,6 +519,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                         index: revision,
                     };
                     let (resp, change_event) = self.execute_command(sm, cmd, revision, applied)?;
+                    last_normal_log_id = Some(entry.log_id.clone());
 
                     // 分发 Watch 事件（非阻塞；replayed 时事件为 None）
                     if let (Some(dispatcher), Some(event)) = (&self.watch_dispatcher, change_event)
@@ -534,6 +542,11 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             if let Some(responder) = maybe_responder {
                 responder.send(response);
             }
+        }
+
+        // M0-5 修复：以本批最后一个 Normal 条目同步内存 last_applied。
+        if let Some(log_id) = last_normal_log_id {
+            *self.last_applied.lock() = Some(log_id);
         }
 
         // R-OBS-10：记录 apply 耗时
@@ -722,7 +735,15 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
         // R-OBS-10：快照构建耗时埋点
         let snapshot_start = std::time::Instant::now();
 
-        let last_log_id = *self.last_applied.lock();
+        let last_log_id = match self.load_applied() {
+            // M0-5 修复：快照 meta 以存储层 META_LAST_APPLIED 为准（与快照数据
+            // 导出同源），内存值仅作回退。此前直接读内存 last_applied，在
+            // 长时间无 Membership 变更时写入陈旧/空白水位，导致快照 meta
+            // 无法覆盖已 purge 日志或 openraft 跳过 purge。
+            Ok(Some(applied)) => Some(applied),
+            Ok(None) => *self.last_applied.lock(),
+            Err(e) => return Err(e),
+        };
         let last_membership = self.last_membership.lock().clone();
 
         let meta = SnapshotMetaOf::<TypeConfig> {
