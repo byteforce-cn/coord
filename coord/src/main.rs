@@ -1589,29 +1589,51 @@ async fn run_server(
     // R-OBS-10：状态机 apply/快照埋点
     sm_store.metrics = Some(Arc::clone(&metrics));
 
-    // 5b.5 M0-5 启动检查：日志已被 purge 但无覆盖快照 → 拒绝启动（不可恢复态）。
+    // 5b.5 M0-5 启动检查：日志已被 purge 但无覆盖快照。
     // 必须放在 StateMachineStore::new 之后：启动时把已落盘快照（META_SNAPSHOT）
     // 登记进 snapshot_tracker 的正是 StateMachineStore::new；若在此前检查，
-    // tracker 为空，任何“重启前发生过 purge”的节点都会被误判为不可恢复而
-    // 拒绝启动（对应 n1 在 kill 后重启报 “unrecoverable state: raft logs
-    // purged up to index ... but no durable snapshot covers it” 的故障）。
+    // tracker 为空，任何“重启前发生过 purge”的节点都会被误判为不可恢复。
+    //
+    // S-RCV-01：快照文件缺失时不再直接退出——
+    //   1) MVCC applied ≥ purge 点：从 MVCC 状态本地重建快照（数据同源）；
+    //   2) 否则：放行启动，依赖 leader 的 install-snapshot 补齐。
     if let Some(purged) = log_store
         .last_purged()
         .map_err(|e| format!("read last_purged: {e}"))?
     {
         if !snapshot_tracker.durable_covers(purged.index) {
-            return Err(format!(
-                "unrecoverable state: raft logs purged up to index {} but no durable \
-                 snapshot covers it (snapshot dir: {}); restore a snapshot before starting",
-                purged.index,
-                snapshot_dir.display()
-            )
-            .into());
+            let mvcc_applied = mvcc
+                .get_applied_log_id()
+                .map_err(|e| format!("read applied log id: {e}"))?;
+            if mvcc_applied
+                .as_ref()
+                .map(|a| a.index >= purged.index)
+                .unwrap_or(false)
+            {
+                let path = sm_store
+                    .rebuild_snapshot_from_mvcc()
+                    .map_err(|e| format!("rebuild snapshot from MVCC state: {e}"))?;
+                tracing::warn!(
+                    "Missing raft snapshot rebuilt from MVCC state: {} (applied={}, purged={})",
+                    path.display(),
+                    mvcc_applied.as_ref().map(|a| a.index).unwrap_or(0),
+                    purged.index
+                );
+            } else {
+                tracing::warn!(
+                    "No durable snapshot covers purged logs (purged={}, applied={:?}); \
+                     proceeding without a local snapshot — this node must receive an \
+                     install_snapshot from the leader before it can serve reads",
+                    purged.index,
+                    mvcc_applied.as_ref().map(|a| a.index)
+                );
+            }
+        } else {
+            tracing::info!(
+                "Purge guard OK: logs purged up to {}, durable snapshot covers it",
+                purged.index
+            );
         }
-        tracing::info!(
-            "Purge guard OK: logs purged up to {}, durable snapshot covers it",
-            purged.index
-        );
     }
 
     // 6.5. 初始化 Auth 组件（P0-C.1：`security.auth_enabled` 唯一开关，默认 true）
@@ -2470,12 +2492,16 @@ async fn run_server(
         retention
     );
 
-    // 8.5. 启动自动快照调度器（ADP §19.2）
+    // 8.5. 启动自动快照调度器（ADP §19.2）。
+    // S-RCV-01：scheduler 写入独立子目录 snapshots/auto/。其文件名
+    // snapshot-{unix_ts}.snap 与 Raft 快照 snapshot-{idx}-{term}.snap 冲突，
+    // 曾导致状态机清理逻辑把刚落盘的 Raft 快照误删（META_SNAPSHOT 悬空）。
+    let auto_snapshot_dir = data_dir.join("snapshots").join("auto");
     let snapshot_scheduler_config =
         coord_server::storage::snapshot_scheduler::SnapshotSchedulerConfig {
             interval: std::time::Duration::from_secs(3600), // 1 hour
             retention: std::time::Duration::from_secs(7 * 86400), // 7 days
-            snapshot_dir: data_dir.join("snapshots"),
+            snapshot_dir: auto_snapshot_dir.clone(),
             auto_snapshot: true,
         };
     let snapshot_scheduler = Arc::new(
@@ -2487,7 +2513,7 @@ async fn run_server(
     let _snapshot_handle = snapshot_scheduler.start();
     tracing::info!(
         "Snapshot scheduler started: interval=1h, retention=7d, dir={}",
-        snapshot_dir.display()
+        auto_snapshot_dir.display()
     );
 
     // 9. 启动 Raft RPC gRPC Server（内部节点间通信，raft 端口，可选 TLS）

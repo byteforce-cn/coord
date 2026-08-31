@@ -329,7 +329,11 @@ async fn m0_purged_log_restart_guard_allows_valid_snapshot() {
     {
         let tracker = Arc::new(SnapshotTracker::default());
         // 快照实际覆盖 ~5100；登记 4999 足够覆盖注入点。
-        tracker.record_durable(4999, 1, snap_dir.join("injected-cover.snap"));
+        // S-RCV-01：durable_covers 校验文件真实存在，先落一个占位文件。
+        std::fs::create_dir_all(&snap_dir).unwrap();
+        let injected = snap_dir.join("injected-cover.snap");
+        std::fs::write(&injected, b"injected snapshot cover").expect("write injected cover");
+        tracker.record_durable(4999, 1, injected);
         let mut log_store = LogStore::new(&data_dir).await.expect("open log store");
         let purged = log_store
             .last_purged()

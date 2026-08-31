@@ -406,12 +406,12 @@ impl SnapshotTracker {
         }
     }
 
-    /// 是否存在覆盖指定 index 的持久化快照
+    /// 是否存在覆盖指定 index 的持久化快照（S-RCV-01：同时校验文件仍在磁盘上）
     pub fn durable_covers(&self, index: u64) -> bool {
         self.durable
             .lock()
             .as_ref()
-            .map(|d| d.index >= index)
+            .map(|d| d.index >= index && d.path.is_file())
             .unwrap_or(false)
     }
 

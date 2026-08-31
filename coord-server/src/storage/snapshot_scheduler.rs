@@ -5,7 +5,11 @@
 // 配置项（ADP §19.2）：
 // - snapshot_interval: 自动快照间隔（默认 1 小时）
 // - snapshot_retention: 快照保留时间（默认 7 天）
-// - snapshot_dir: 快照存储目录（默认 <data_dir>/snapshots）
+// - snapshot_dir: 快照存储目录（默认 <data_dir>/snapshots/auto）
+//
+// S-RCV-01：目录必须与 Raft 快照目录隔离。scheduler 的文件名
+// snapshot-{unix_ts}.snap 与 Raft 的 snapshot-{idx}-{term}.snap 冲突，
+// 混在同一目录会导致状态机清理逻辑误删刚落盘的 Raft 快照。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,7 +43,7 @@ impl Default for SnapshotSchedulerConfig {
         Self {
             interval: Duration::from_secs(3600),       // 1 hour
             retention: Duration::from_secs(7 * 86400), // 7 days
-            snapshot_dir: PathBuf::from("/var/lib/coord/snapshots"),
+            snapshot_dir: PathBuf::from("/var/lib/coord/snapshots/auto"),
             auto_snapshot: true,
         }
     }

@@ -351,8 +351,12 @@ async fn test_purge_guard_refuses_without_durable_snapshot() {
         "error must explain the missing snapshot: {err:?}"
     );
 
-    // 登记一份覆盖快照后 purge 放行
-    tracker.record_durable(10, 1, data_dir.join("snapshots/s-10-1.snap"));
+    // 登记一份覆盖快照后 purge 放行（S-RCV-01：durable_covers 校验文件真实存在）
+    let snap_dir = data_dir.join("snapshots");
+    std::fs::create_dir_all(&snap_dir).unwrap();
+    let snap_path = snap_dir.join("s-10-1.snap");
+    std::fs::write(&snap_path, b"dummy snapshot bytes").unwrap();
+    tracker.record_durable(10, 1, snap_path);
     log_store
         .purge(log_id(1, 1, 10))
         .await

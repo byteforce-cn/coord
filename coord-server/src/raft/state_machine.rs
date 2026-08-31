@@ -699,30 +699,114 @@ impl StateMachineStore {
         self.snapshot_tracker
             .record_durable(last_idx, last_term, final_path.clone());
 
-        // 5. A.6.3：保留最近 3 份快照，清理旧份
+        // 5. A.6.3：保留最近 3 份 Raft 快照，清理旧份
+        //    （只识别 snapshot-{idx}-{term}.snap，绝不删除本次写入的文件）
         self.cleanup_old_snapshots(&final_path)?;
 
         Ok((final_path, checksum))
     }
 
-    /// 清理快照目录，仅保留最新 3 份 `.snap` 文件（A.6.3）
-    fn cleanup_old_snapshots(&self, _keep: &PathBuf) -> Result<(), io::Error> {
-        let mut snaps: Vec<PathBuf> = match std::fs::read_dir(&self.snapshot_dir) {
+    /// 解析 Raft 快照文件名 `snapshot-{idx}-{term}.snap`，返回 (idx, term)。
+    ///
+    /// S-RCV-01：scheduler 的 `snapshot-{unix_ts}.snap`（单段数字）不匹配。
+    /// 此前清理逻辑把目录下所有 `.snap` 混排，时间戳文件名（约 1.7e9）字典序
+    /// 大于 Raft 的 index 段，被误判为“更新”，导致刚落盘的 Raft 快照被立即删除
+    /// —— META_SNAPSHOT/purge 守卫随即悬空，重启即不可恢复。
+    fn parse_raft_snapshot_name(name: &str) -> Option<(u64, u64)> {
+        let rest = name.strip_prefix("snapshot-")?.strip_suffix(".snap")?;
+        let (idx_s, term_s) = rest.split_once('-')?;
+        Some((idx_s.parse().ok()?, term_s.parse().ok()?))
+    }
+
+    /// 清理快照目录，仅保留最新 3 份 Raft 快照（A.6.3）
+    fn cleanup_old_snapshots(&self, keep: &PathBuf) -> Result<(), io::Error> {
+        let mut snaps: Vec<(u64, u64, PathBuf)> = match std::fs::read_dir(&self.snapshot_dir) {
             Ok(entries) => entries
                 .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().map(|e| e == "snap").unwrap_or(false))
+                .filter_map(|e| {
+                    let name = e.file_name();
+                    let (idx, term) = Self::parse_raft_snapshot_name(name.to_str()?)?;
+                    Some((idx, term, e.path()))
+                })
                 .collect(),
             Err(_) => return Ok(()),
         };
-        snaps.sort();
-        snaps.reverse(); // 文件名以 index 开头，字典序即新到旧
-        for path in snaps.iter().skip(3) {
+        // 按 index 降序（同 index 按 term 降序），保留最新 3 份
+        snaps.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        for (_, _, path) in snaps.iter().skip(3) {
+            if path == keep {
+                continue; // 双保险：绝不删除刚写入的快照
+            }
             if let Err(e) = std::fs::remove_file(path) {
                 tracing::warn!("Failed to remove old snapshot {}: {e}", path.display());
             }
         }
         Ok(())
+    }
+
+    /// S-RCV-01 启动自愈：日志已被 purge 但快照文件缺失时，从 MVCC 的
+    /// `META_LAST_APPLIED` 重新导出并落盘快照（数据同源，无需网络安装）。
+    ///
+    /// 调用方须先确认 `META_LAST_APPLIED ≥ purge 点`（否则 MVCC 状态不足以
+    /// 覆盖已删除的日志，应放行启动、依赖 leader 的 install-snapshot 补齐）。
+    /// 成功返回快照文件路径，并同步恢复 `META_SNAPSHOT`、purge 守卫与内存视图。
+    pub fn rebuild_snapshot_from_mvcc(&self) -> Result<PathBuf, io::Error> {
+        let applied = self
+            .state_machine
+            .get_applied_log_id()
+            .map_err(io_err)?
+            .filter(|a| a.index > 0)
+            .ok_or_else(|| {
+                io::Error::other("MVCC has no applied state; cannot rebuild snapshot locally")
+            })?;
+
+        let last_log_id = LogIdOf::<TypeConfig>::new(
+            openraft::impls::leader_id_adv::LeaderId {
+                term: applied.term,
+                node_id: applied.node_id,
+            },
+            applied.index,
+        );
+
+        let last_membership = self
+            .state_machine
+            .backend()
+            .read(|tx| tx.get(TABLE_META, META_MEMBERSHIP))
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize(&bytes).ok())
+            .unwrap_or_else(|| {
+                StoredMembershipOf::<TypeConfig>::new(
+                    None,
+                    Membership::<u64, openraft::BasicNode>::new_with_defaults(vec![], vec![]),
+                )
+            });
+
+        let meta = SnapshotMetaOf::<TypeConfig> {
+            last_log_id: Some(last_log_id.clone()),
+            last_membership: last_membership.clone(),
+        };
+
+        let snapshot_data = export_snapshot_data(&self.state_machine, applied.index, applied.term)
+            .map_err(io_err)?;
+        let data_bytes = snapshot_data.to_bytes().map_err(io_err)?;
+
+        // A.6：落盘（临时文件 → fsync → rename → 校验和 → META_SNAPSHOT → purge 守卫）
+        let (path, _checksum) = self.persist_snapshot_file(&meta, &data_bytes)?;
+
+        *self.current_snapshot.lock() = Some(StoredSnapshot {
+            meta: meta.clone(),
+            data: data_bytes,
+        });
+        *self.last_applied.lock() = Some(last_log_id);
+        *self.last_membership.lock() = last_membership;
+
+        tracing::warn!(
+            "Rebuilt missing raft snapshot from MVCC state: {} (last_log_id={:?})",
+            path.display(),
+            meta.last_log_id
+        );
+        Ok(path)
     }
 }
 
