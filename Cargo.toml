@@ -36,6 +36,8 @@ tonic-reflection = "0.14.6"
 # Raft 共识（P1-06：版本精确锁定 =0.10.0-alpha.34，升级须走
 # docs/production/16-openraft-governance.md 升级演练）
 openraft = { version = "=0.10.0-alpha.34", features = ["serde"] }
+# Multi-Raft 网络共享层（与 openraft 同源同步锁定；仅允许在 coord-server/src/raft/ 内使用）
+openraft-multi = { version = "=0.10.0-alpha.34" }
 
 # 存储引擎
 redb = "4.1.0"

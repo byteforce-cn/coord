@@ -702,6 +702,7 @@ dependencies = [
  "libc",
  "lru 0.14.0",
  "openraft",
+ "openraft-multi",
  "parking_lot",
  "prost",
  "rand 0.8.6",
@@ -1986,6 +1987,16 @@ dependencies = [
  "quote",
  "semver",
  "syn 3.0.4",
+]
+
+[[package]]
+name = "openraft-multi"
+version = "0.10.0-alpha.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32da94245ece536829935e27d4f1e1894fff36c3c1ce9bf28d3b35a5a2762aab"
+dependencies = [
+ "anyerror",
+ "openraft",
 ]
 
 [[package]]
