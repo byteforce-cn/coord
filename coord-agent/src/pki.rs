@@ -113,6 +113,15 @@ struct CaMaterial {
     key_pem: String,
 }
 
+impl Clone for CaMaterial {
+    fn clone(&self) -> Self {
+        Self {
+            cert_pem: self.cert_pem.clone(),
+            key_pem: self.key_pem.clone(),
+        }
+    }
+}
+
 impl PkiService {
     /// 创建 PKI 服务实例（内存 store，开发/单测/骨架模式）
     pub fn new(config: PkiConfig) -> Result<Self, PkiError> {
@@ -148,7 +157,13 @@ impl PkiService {
             return Ok(());
         }
 
-        let (cert_pem, key_pem) = Self::generate_ca(ca_common_name)?;
+        let (cert_pem, key_pem) = {
+            let cn = ca_common_name.to_string();
+            // CPU 密集的 CA 密钥生成 + 自签移到阻塞线程池
+            tokio::task::spawn_blocking(move || Self::generate_ca(&cn))
+                .await
+                .map_err(|e| PkiError::KeyGen(format!("ca generate task join: {e}")))??
+        };
         let record = CaRecord {
             cert_pem,
             key_pem,
@@ -236,8 +251,10 @@ impl PkiService {
             }
         }
 
-        // 2. 新签发
-        let record = self.sign_new_cert(common_name, ttl_seconds, CertStatus::Active, None)?;
+        // 2. 新签发（CPU 密集 → spawn_blocking）
+        let record = self
+            .sign_new_cert_blocking(common_name, ttl_seconds, CertStatus::Active, None)
+            .await?;
 
         // 3. Txn CAS 原子写入；冲突 → 重读并返回胜者
         match self.store.create_cert(common_name, &record).await {
@@ -302,12 +319,14 @@ impl PkiService {
             .map_err(|e| PkiError::Store(e.to_string()))?
             .ok_or(PkiError::CertMissing)?;
 
-        let new_record = self.sign_new_cert(
-            common_name,
-            ttl_seconds,
-            CertStatus::Active,
-            Some(old.serial.clone()),
-        )?;
+        let new_record = self
+            .sign_new_cert_blocking(
+                common_name,
+                ttl_seconds,
+                CertStatus::Active,
+                Some(old.serial.clone()),
+            )
+            .await?;
 
         let mut retired = old.clone();
         retired.status = CertStatus::Retired;
@@ -343,74 +362,105 @@ impl PkiService {
         }
     }
 
-    /// 签发新终端证书并返回记录（不落库，由调用方决定写入策略）
-    fn sign_new_cert(
+    /// 异步签发：CPU 密集的 rcgen 密钥生成/证书签名移到阻塞线程池。
+    ///
+    /// Phase 1 T1.2（运行时隔离整改）：`issue_cert` / `rotate_locked` 等 async 路径
+    /// 原先在 worker 上内联执行 ECDSA 密钥生成 + 签名；此处先短锁 clone CA 材料与
+    /// TTL 配置（纯数据），再 `spawn_blocking` 执行纯函数，返回语义与同步版一致。
+    async fn sign_new_cert_blocking(
         &self,
         common_name: &str,
         ttl_seconds: u64,
         status: CertStatus,
         parent_serial: Option<String>,
     ) -> Result<CertRecord, PkiError> {
-        let ca_guard = self.ca.read();
-        let ca = ca_guard.as_ref().ok_or(PkiError::CaNotInitialized)?;
-
-        let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
-            .map_err(|e| PkiError::KeyGen(e.to_string()))?;
-
-        let mut params = CertificateParams::default();
-        params
-            .distinguished_name
-            .push(DnType::CommonName, common_name);
-        params
-            .distinguished_name
-            .push(DnType::OrganizationName, "Coord Agent");
-        params.is_ca = IsCa::NoCa;
-        params.key_usages = vec![
-            KeyUsagePurpose::DigitalSignature,
-            KeyUsagePurpose::KeyEncipherment,
-        ];
-        params.extended_key_usages = vec![
-            rcgen::ExtendedKeyUsagePurpose::ClientAuth,
-            rcgen::ExtendedKeyUsagePurpose::ServerAuth,
-        ];
-
-        let now = OffsetDateTime::now_utc();
-        let ttl = if ttl_seconds > 0 {
-            time::Duration::seconds(ttl_seconds as i64)
-        } else {
-            time::Duration::hours(self.config.cert_ttl_hours as i64)
+        let ca = {
+            let guard = self.ca.read();
+            guard.as_ref().cloned().ok_or(PkiError::CaNotInitialized)?
         };
-        params.not_before = now;
-        params.not_after = now + ttl;
+        let default_ttl_hours = self.config.cert_ttl_hours;
+        let cn = common_name.to_string();
 
-        let ca_key = KeyPair::from_pem(&ca.key_pem).map_err(|e| PkiError::KeyGen(e.to_string()))?;
-
-        // 从持久化的 CA 证书重建签发者（重启后无需原始 params）
-        let issuer = rcgen::Issuer::from_ca_cert_pem(&ca.cert_pem, ca_key)
-            .map_err(|e| PkiError::CertGen(e.to_string()))?;
-
-        let cert = params
-            .signed_by(&key_pair, &issuer)
-            .map_err(|e| PkiError::CertGen(e.to_string()))?;
-
-        let not_before = now.unix_timestamp();
-        let not_after = (now + ttl).unix_timestamp();
-        let serial = format!("{:x}", rand::random::<u64>());
-
-        Ok(CertRecord {
-            common_name: common_name.to_string(),
-            cert_pem: cert.pem(),
-            key_pem: key_pair.serialize_pem(),
-            not_before,
-            not_after,
-            serial,
-            status,
-            parent_serial,
+        tokio::task::spawn_blocking(move || {
+            sign_cert_with_ca(
+                &ca,
+                &cn,
+                ttl_seconds,
+                default_ttl_hours,
+                status,
+                parent_serial,
+            )
         })
+        .await
+        .map_err(|e| PkiError::CertGen(format!("sign blocking task join: {e}")))?
     }
 }
 
 // ──── 辅助函数 ────
+
+/// 纯函数：使用给定 CA 材料签发新终端证书（不读 self，可安全放入 spawn_blocking）。
+fn sign_cert_with_ca(
+    ca: &CaMaterial,
+    common_name: &str,
+    ttl_seconds: u64,
+    default_ttl_hours: u32,
+    status: CertStatus,
+    parent_serial: Option<String>,
+) -> Result<CertRecord, PkiError> {
+    let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+        .map_err(|e| PkiError::KeyGen(e.to_string()))?;
+
+    let mut params = CertificateParams::default();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, common_name);
+    params
+        .distinguished_name
+        .push(DnType::OrganizationName, "Coord Agent");
+    params.is_ca = IsCa::NoCa;
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+    ];
+    params.extended_key_usages = vec![
+        rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+        rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+    ];
+
+    let now = OffsetDateTime::now_utc();
+    let ttl = if ttl_seconds > 0 {
+        time::Duration::seconds(ttl_seconds as i64)
+    } else {
+        time::Duration::hours(default_ttl_hours as i64)
+    };
+    params.not_before = now;
+    params.not_after = now + ttl;
+
+    let ca_key = KeyPair::from_pem(&ca.key_pem).map_err(|e| PkiError::KeyGen(e.to_string()))?;
+
+    // 从持久化的 CA 证书重建签发者（重启后无需原始 params）
+    let issuer = rcgen::Issuer::from_ca_cert_pem(&ca.cert_pem, ca_key)
+        .map_err(|e| PkiError::CertGen(e.to_string()))?;
+
+    let cert = params
+        .signed_by(&key_pair, &issuer)
+        .map_err(|e| PkiError::CertGen(e.to_string()))?;
+
+    let not_before = now.unix_timestamp();
+    let not_after = (now + ttl).unix_timestamp();
+    let serial = format!("{:x}", rand::random::<u64>());
+
+    Ok(CertRecord {
+        common_name: common_name.to_string(),
+        cert_pem: cert.pem(),
+        key_pem: key_pair.serialize_pem(),
+        not_before,
+        not_after,
+        serial,
+        status,
+        parent_serial,
+    })
+}
 
 fn now_unix() -> i64 {
     SystemTime::now()

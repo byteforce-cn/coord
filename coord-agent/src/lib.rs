@@ -824,6 +824,8 @@ impl AgentServer {
                 1024 * 1024 * 1024, // 1GB max
                 3600,               // default TTL 1 hour
             ));
+            // Phase 1 T1.2：绑定自身弱引用，gRPC handler 才能升级 Arc 走 spawn_blocking
+            cache_svc.bind_self_weak(&cache_svc);
             let cache_grpc = cache_svc.clone();
             if let Err(e) = service_manager.register(cache_svc).await {
                 tracing::error!("failed to register cache service: {e}");
@@ -839,6 +841,8 @@ impl AgentServer {
                 data_dir.clone(),
                 1024 * 1024 * 1024, // 1GB max
             ));
+            // Phase 1 T1.2：绑定自身弱引用，gRPC handler 才能升级 Arc 走 spawn_blocking
+            mq_svc.bind_self_weak(&mq_svc);
             let mq_grpc = mq_svc.clone();
             if let Err(e) = service_manager.register(mq_svc).await {
                 tracing::error!("failed to register mq service: {e}");

@@ -160,6 +160,23 @@ fn unix_ts_i64() -> i64 {
         .as_secs() as i64
 }
 
+/// 在阻塞线程池执行 OpaEngine 的同步 CPU 密集操作（Rego 编译 / 引擎重建 / explain）。
+///
+/// Phase 1 T1.2（运行时隔离整改）：OpaEngine 内部 `engine.write()` + regorus 编译/求值
+/// 均为同步 CPU 操作，直接内联在 async bundle 方法里会阻塞 agent 的 tokio worker。
+/// 统一经 `spawn_blocking` 移出 worker；引擎本身受内部 RwLock 保护、线程安全，
+/// 多调用方串行化语义不变（与 grpc_handlers `Policy::evaluate` 的既有先例一致）。
+async fn opa_blocking<F, T>(f: F) -> ServiceResult<T>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("opa blocking task join error: {e}"))?
+        .map_err(|e| e.into())
+}
+
 // ──── PolicyService ────
 
 /// 权限策略引擎
@@ -435,10 +452,14 @@ impl PolicyService {
     ) -> ServiceResult<BundleInfo> {
         let inner = self.require_kv()?;
 
-        // 1. 写入前 OPA 编译校验（失败不落库、不改引擎）
-        self.opa_engine
-            .validate_rego(rego)
-            .map_err(|e| format!("bundle rego compile error: {e}"))?;
+        // 1. 写入前 OPA 编译校验（失败不落库、不改引擎）——阻塞线程池执行
+        {
+            let opa = Arc::clone(&self.opa_engine);
+            let rego_owned = rego.to_string();
+            opa_blocking(move || opa.validate_rego(&rego_owned))
+                .await
+                .map_err(|e| format!("bundle rego compile error: {e}"))?;
+        }
 
         let bundle_id = BundleRecord::make_bundle_id(tenant_id, namespace, name);
         let key = BundleRecord::storage_key(&bundle_id);
@@ -481,11 +502,13 @@ impl PolicyService {
             let value =
                 serde_json::to_vec(&record).map_err(|e| format!("serialize bundle: {e}"))?;
             if Self::cas_put_current(inner, &key, value, cur_version).await? {
-                // 6. 同步到本地 OpaEngine（仅 enabled bundle）
+                // 6. 同步到本地 OpaEngine（仅 enabled bundle）——阻塞线程池执行
                 if record.info.enabled {
                     let policy_id = format!("{}/{}", record.info.namespace, record.info.name);
-                    self.opa_engine
-                        .add_policy(&policy_id, &record.rego_content)
+                    let opa = Arc::clone(&self.opa_engine);
+                    let rego_owned = record.rego_content.clone();
+                    opa_blocking(move || opa.add_policy(&policy_id, &rego_owned))
+                        .await
                         .map_err(|e| format!("opa add_policy: {e}"))?;
                 }
                 tracing::info!(
@@ -531,10 +554,14 @@ impl PolicyService {
             }
         };
 
-        // 2. 编译校验快照 Rego
-        self.opa_engine
-            .validate_rego(&snapshot.rego_content)
-            .map_err(|e| format!("bundle rego compile error: {e}"))?;
+        // 2. 编译校验快照 Rego——阻塞线程池执行
+        {
+            let opa = Arc::clone(&self.opa_engine);
+            let rego_owned = snapshot.rego_content.clone();
+            opa_blocking(move || opa.validate_rego(&rego_owned))
+                .await
+                .map_err(|e| format!("bundle rego compile error: {e}"))?;
+        }
 
         let key = BundleRecord::storage_key(bundle_id);
         let now = unix_ts_i64();
@@ -578,8 +605,10 @@ impl PolicyService {
                 serde_json::to_vec(&restored).map_err(|e| format!("serialize bundle: {e}"))?;
             if Self::cas_put_current(inner, &key, value, cur_version).await? {
                 let policy_id = format!("{}/{}", restored.info.namespace, restored.info.name);
-                self.opa_engine
-                    .add_policy(&policy_id, &restored.rego_content)
+                let opa = Arc::clone(&self.opa_engine);
+                let rego_owned = restored.rego_content.clone();
+                opa_blocking(move || opa.add_policy(&policy_id, &rego_owned))
+                    .await
                     .map_err(|e| format!("opa add_policy: {e}"))?;
                 tracing::info!(
                     "Policy: rolled back bundle '{}' to v{} (now v{})",
@@ -658,10 +687,15 @@ impl PolicyService {
             .await
             .map_err(|e| format!("kv delete bundle: {e}"))?;
 
-        // 从本地 OpaEngine 移除
+        // 从本地 OpaEngine 移除（触发引擎重建）——阻塞线程池执行
         if let Some((ns, name)) = namespace_and_name {
             let policy_id = format!("{}/{}", ns, name);
-            self.opa_engine.remove_policy(&policy_id);
+            let opa = Arc::clone(&self.opa_engine);
+            let _ = opa_blocking(move || {
+                opa.remove_policy(&policy_id);
+                Ok::<(), String>(())
+            })
+            .await;
         }
 
         tracing::info!("Policy: deleted bundle '{}'", bundle_id);
@@ -725,14 +759,21 @@ impl PolicyService {
 
             let new_val = serde_json::to_vec(&rec).map_err(|e| format!("serialize bundle: {e}"))?;
             if Self::cas_put_current(inner, &key, new_val, cur_version).await? {
-                // 同步到本地 OpaEngine
+                // 同步到本地 OpaEngine（add/remove 均触发引擎重建）——阻塞线程池执行
                 let policy_id = format!("{}/{}", rec.info.namespace, rec.info.name);
                 if enabled {
-                    self.opa_engine
-                        .add_policy(&policy_id, &rec.rego_content)
+                    let opa = Arc::clone(&self.opa_engine);
+                    let rego_owned = rec.rego_content.clone();
+                    opa_blocking(move || opa.add_policy(&policy_id, &rego_owned))
+                        .await
                         .map_err(|e| format!("opa add_policy: {e}"))?;
                 } else {
-                    self.opa_engine.remove_policy(&policy_id);
+                    let opa = Arc::clone(&self.opa_engine);
+                    let _ = opa_blocking(move || {
+                        opa.remove_policy(&policy_id);
+                        Ok::<(), String>(())
+                    })
+                    .await;
                 }
                 tracing::info!("Policy: bundle '{}' enabled={}", bundle_id, enabled);
                 return Ok(true);

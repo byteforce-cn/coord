@@ -379,12 +379,15 @@ impl EventSvc for EventNotificationService {
 
 #[tonic::async_trait]
 impl Cache for CacheService {
+    /// 全部数据面操作（含 redb 读）经 `run_blocking` 在阻塞线程池执行，
+    /// 避免同步 redb 事务阻塞 agent 的 tokio worker（Phase 1 T1.2）。
     async fn get(
         &self,
         request: Request<CacheGetRequest>,
     ) -> Result<Response<CacheGetResponse>, Status> {
         let req = request.into_inner();
-        match self.string_get(&req.key) {
+        let key = req.key.clone();
+        match self.run_blocking(move |me| me.string_get(&key)).await {
             Ok(Some(value)) => Ok(Response::new(CacheGetResponse { value, found: true })),
             Ok(None) => Ok(Response::new(CacheGetResponse {
                 value: vec![],
@@ -409,7 +412,9 @@ impl Cache for CacheService {
                 .await
                 .map_err(map_service_error)?;
         } else {
-            self.string_put(&req.key, req.value, ttl)
+            let key = req.key.clone();
+            self.run_blocking(move |me| me.string_put(&key, req.value, ttl))
+                .await
                 .map_err(sanitized_internal)?;
         }
         Ok(Response::new(CacheSetResponse {}))
@@ -425,7 +430,10 @@ impl Cache for CacheService {
                 .await
                 .map_err(map_service_error)?
         } else {
-            self.string_delete(&req.key).map_err(sanitized_internal)?
+            let key = req.key.clone();
+            self.run_blocking(move |me| me.string_delete(&key))
+                .await
+                .map_err(sanitized_internal)?
         };
         Ok(Response::new(CacheDeleteResponse { deleted }))
     }
@@ -435,7 +443,12 @@ impl Cache for CacheService {
         request: Request<CacheHGetRequest>,
     ) -> Result<Response<CacheHGetResponse>, Status> {
         let req = request.into_inner();
-        match self.hash_field_get(&req.key, &req.field) {
+        let key = req.key.clone();
+        let field = req.field.clone();
+        match self
+            .run_blocking(move |me| me.hash_field_get(&key, &field))
+            .await
+        {
             Ok(Some(value)) => Ok(Response::new(CacheHGetResponse { value, found: true })),
             Ok(None) => Ok(Response::new(CacheHGetResponse {
                 value: vec![],
@@ -455,7 +468,10 @@ impl Cache for CacheService {
                 .await
                 .map_err(map_service_error)?;
         } else {
-            self.hash_field_put(&req.key, &req.field, req.value, None)
+            let key = req.key.clone();
+            let field = req.field.clone();
+            self.run_blocking(move |me| me.hash_field_put(&key, &field, req.value, None))
+                .await
                 .map_err(sanitized_internal)?;
         }
         Ok(Response::new(CacheHSetResponse {}))
@@ -466,7 +482,8 @@ impl Cache for CacheService {
         request: Request<CacheHGetAllRequest>,
     ) -> Result<Response<CacheHGetAllResponse>, Status> {
         let req = request.into_inner();
-        match self.hash_get_all(&req.key) {
+        let key = req.key.clone();
+        match self.run_blocking(move |me| me.hash_get_all(&key)).await {
             Ok(fields) => {
                 let map: std::collections::HashMap<String, Vec<u8>> = fields.into_iter().collect();
                 Ok(Response::new(CacheHGetAllResponse { fields: map }))
@@ -485,10 +502,13 @@ impl Cache for CacheService {
                 .await
                 .map_err(map_service_error)?;
         } else {
-            self.list_push_left(&req.key, req.value, None)
+            let key = req.key.clone();
+            self.run_blocking(move |me| me.list_push_left(&key, req.value, None))
+                .await
                 .map_err(sanitized_internal)?;
         }
-        match self.list_length(&req.key) {
+        let key = req.key.clone();
+        match self.run_blocking(move |me| me.list_length(&key)).await {
             Ok(len) => Ok(Response::new(CacheLPushResponse { length: len as i64 })),
             Err(e) => Err(sanitized_internal(e)),
         }
@@ -499,7 +519,11 @@ impl Cache for CacheService {
         request: Request<CacheLRangeRequest>,
     ) -> Result<Response<CacheLRangeResponse>, Status> {
         let req = request.into_inner();
-        match self.list_range(&req.key, req.start, req.stop) {
+        let key = req.key.clone();
+        match self
+            .run_blocking(move |me| me.list_range(&key, req.start, req.stop))
+            .await
+        {
             Ok(values) => Ok(Response::new(CacheLRangeResponse { values })),
             Err(e) => Err(sanitized_internal(e)),
         }
@@ -520,7 +544,8 @@ impl Cache for CacheService {
                 Err(e) => Err(map_service_error(e)),
             }
         } else {
-            match self.list_pop_right(&req.key) {
+            let key = req.key.clone();
+            match self.run_blocking(move |me| me.list_pop_right(&key)).await {
                 Ok(Some(value)) => Ok(Response::new(CacheRPopResponse { value, found: true })),
                 Ok(None) => Ok(Response::new(CacheRPopResponse {
                     value: vec![],
@@ -536,7 +561,8 @@ impl Cache for CacheService {
         request: Request<CacheLLenRequest>,
     ) -> Result<Response<CacheLLenResponse>, Status> {
         let req = request.into_inner();
-        match self.list_length(&req.key) {
+        let key = req.key.clone();
+        match self.run_blocking(move |me| me.list_length(&key)).await {
             Ok(len) => Ok(Response::new(CacheLLenResponse { length: len as i64 })),
             Err(e) => Err(sanitized_internal(e)),
         }
@@ -552,7 +578,9 @@ impl Cache for CacheService {
                 .await
                 .map_err(map_service_error)?;
         } else {
-            self.set_add(&req.key, req.member, None)
+            let key = req.key.clone();
+            self.run_blocking(move |me| me.set_add(&key, req.member, None))
+                .await
                 .map_err(sanitized_internal)?;
         }
         Ok(Response::new(CacheSAddResponse {}))
@@ -563,7 +591,8 @@ impl Cache for CacheService {
         request: Request<CacheSMembersRequest>,
     ) -> Result<Response<CacheSMembersResponse>, Status> {
         let req = request.into_inner();
-        match self.set_members(&req.key) {
+        let key = req.key.clone();
+        match self.run_blocking(move |me| me.set_members(&key)).await {
             Ok(members) => Ok(Response::new(CacheSMembersResponse { members })),
             Err(e) => Err(sanitized_internal(e)),
         }
@@ -586,7 +615,9 @@ impl Mq for MessageQueueService {
             retention_secs: 86400,
             max_message_size: 1024 * 1024,
         };
-        self.create_topic(&req.topic, config)
+        // redb 写事务移到阻塞线程池（Phase 1 T1.2）
+        self.run_blocking(move |me| me.create_topic(&req.topic, config))
+            .await
             .map_err(sanitized_internal)?;
         Ok(Response::new(MqCreateTopicResponse {}))
     }
@@ -612,7 +643,11 @@ impl Mq for MessageQueueService {
                 Err(e) => Err(map_service_error(e)),
             }
         } else {
-            match self.produce(&req.topic, partition, req.payload, None) {
+            let topic = req.topic.clone();
+            match self
+                .run_blocking(move |me| me.produce(&topic, partition, req.payload, None))
+                .await
+            {
                 Ok(offset) => Ok(Response::new(MqPublishResponse {
                     offset: offset as i64,
                 })),
@@ -677,12 +712,13 @@ impl Mq for MessageQueueService {
         } else {
             0
         };
-        self.commit_offset(
-            &req.consumer_group,
-            &req.topic,
-            partition,
-            req.offset as u64,
-        )
+        let topic = req.topic.clone();
+        let group = req.consumer_group.clone();
+        // redb 写事务移到阻塞线程池（Phase 1 T1.2）
+        self.run_blocking(move |me| {
+            me.commit_offset(&group, &topic, partition, req.offset as u64)
+        })
+        .await
         .map_err(sanitized_internal)?;
         Ok(Response::new(MqAckResponse {}))
     }
@@ -704,13 +740,13 @@ impl Mq for MessageQueueService {
         } else {
             req.max_count as u64
         };
+        let topic = req.topic.clone();
+        let start_offset = req.start_offset.max(0) as u64;
 
-        match self.consume(
-            &req.topic,
-            partition,
-            req.start_offset.max(0) as u64,
-            max_count,
-        ) {
+        match self
+            .run_blocking(move |me| me.consume(&topic, partition, start_offset, max_count))
+            .await
+        {
             Ok(records) => {
                 let messages = records
                     .into_iter()
@@ -745,8 +781,12 @@ impl Mq for MessageQueueService {
         } else {
             req.max_count as u64
         };
+        let topic = req.topic.clone();
 
-        match self.consume_dlq(&req.topic, partition, max_count) {
+        match self
+            .run_blocking(move |me| me.consume_dlq(&topic, partition, max_count))
+            .await
+        {
             Ok(records) => {
                 let messages = records
                     .into_iter()
@@ -851,7 +891,8 @@ impl ReplicatedStore for ReplicaRouter {
 
 #[tonic::async_trait]
 impl Replica for ReplicaRouter {
-    /// Leader → Follower：应用一条复制条目（幂等；重复条目 applied=true）
+    /// Leader → Follower：应用一条复制条目（幂等；重复条目 applied=true）。
+    /// redb 写事务移到阻塞线程池（Phase 1 T1.2）。
     async fn apply(
         &self,
         request: Request<ReplicaApplyRequest>,
@@ -862,10 +903,49 @@ impl Replica for ReplicaRouter {
             .ok_or_else(|| Status::invalid_argument("missing entry"))?;
         let entry = ReplicationEntry::from_proto(&proto)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        self.apply_entry(&entry).map_err(sanitized_internal)?;
-        let last = self.last_local_sequence(&entry.shard_id);
+        let mq = self.mq.clone();
+        let cache = self.cache.clone();
+        let shard_id = entry.shard_id.clone();
+        let entry_for_apply = entry.clone();
+        // 与 ReplicatedStore::apply_entry 同一路由逻辑（mq: 前缀 → MQ 引擎）。
+        // 应用成功即 applied=true（幂等；重复条目 applied=true）。
+        let applied = tokio::task::spawn_blocking(move || {
+            let r = if shard_id.starts_with("mq:") {
+                mq.as_ref()
+                    .ok_or_else(|| ReplicationError::Store("mq service not enabled".to_string()))?
+                    .apply_entry(&entry_for_apply)
+            } else {
+                cache
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ReplicationError::Store("cache service not enabled".to_string())
+                    })?
+                    .apply_entry(&entry_for_apply)
+            };
+            r.map(|_| true)
+        })
+        .await
+        .map_err(sanitized_internal)?
+        .map_err(sanitized_internal)?;
+        let last = {
+            let mq = self.mq.clone();
+            let cache = self.cache.clone();
+            let shard_id = entry.shard_id.clone();
+            tokio::task::spawn_blocking(move || {
+                if shard_id.starts_with("mq:") {
+                    mq.as_ref().map(|m| m.last_local_sequence(&shard_id)).unwrap_or(0)
+                } else {
+                    cache
+                        .as_ref()
+                        .map(|c| c.last_local_sequence(&shard_id))
+                        .unwrap_or(0)
+                }
+            })
+            .await
+            .map_err(sanitized_internal)?
+        };
         Ok(Response::new(ReplicaApplyResponse {
-            applied: true,
+            applied,
             last_sequence: last,
         }))
     }
@@ -874,19 +954,37 @@ impl Replica for ReplicaRouter {
         Box<dyn tokio_stream::Stream<Item = Result<ReplicaEntryProto, Status>> + Send>,
     >;
 
-    /// Follower → Leader：拉取缺失序列号区间的复制条目（stream 回放）
+    /// Follower → Leader：拉取缺失序列号区间的复制条目（stream 回放）。
+    /// redb range 读移到阻塞线程池（Phase 1 T1.2）。
     async fn reconcile(
         &self,
         request: Request<ReplicaReconcileRequest>,
     ) -> Result<Response<Self::ReconcileStream>, Status> {
         let req = request.into_inner();
         let limit = if req.limit == 0 { 1000 } else { req.limit };
-        let entries = self.read_entries(&req.shard_id, req.start_sequence, limit);
+        let mq = self.mq.clone();
+        let cache = self.cache.clone();
+        let shard_id = req.shard_id.clone();
+        let entries = tokio::task::spawn_blocking(move || {
+            if shard_id.starts_with("mq:") {
+                mq.as_ref()
+                    .map(|m| m.read_entries(&shard_id, req.start_sequence, limit))
+                    .unwrap_or_default()
+            } else {
+                cache
+                    .as_ref()
+                    .map(|c| c.read_entries(&shard_id, req.start_sequence, limit))
+                    .unwrap_or_default()
+            }
+        })
+        .await
+        .map_err(sanitized_internal)?;
         let stream = tokio_stream::iter(entries.into_iter().map(|e| Ok(e.to_proto())));
         Ok(Response::new(Box::pin(stream)))
     }
 
-    /// 双向心跳：维护 ISR 成员 + 交换各 shard 最后序列号（落后检测）
+    /// 双向心跳：维护 ISR 成员 + 交换各 shard 最后序列号（落后检测）。
+    /// 各 shard last_seq 的 redb 读移到阻塞线程池（Phase 1 T1.2）。
     async fn isr_heartbeat(
         &self,
         request: Request<ReplicaHeartbeatRequest>,
@@ -897,14 +995,36 @@ impl Replica for ReplicaRouter {
             self.manager.add_peer(req.agent_addr.clone());
         }
         // 返回本 agent 各 shard 最后序列号（供对端落后检测触发 Reconcile）
-        let leader_progress: Vec<ReplicaShardProgress> = self
-            .shards()
-            .into_iter()
-            .map(|s| ReplicaShardProgress {
-                shard_id: s.clone(),
-                last_sequence: self.last_local_sequence(&s),
-            })
-            .collect();
+        let mq = self.mq.clone();
+        let cache = self.cache.clone();
+        let leader_progress = tokio::task::spawn_blocking(move || {
+            let mut shards = Vec::new();
+            if let Some(c) = &cache {
+                shards.extend(c.shards());
+            }
+            if let Some(m) = &mq {
+                shards.extend(m.shards());
+            }
+            shards
+                .into_iter()
+                .map(|s| {
+                    let last_seq = if s.starts_with("mq:") {
+                        mq.as_ref().map(|m| m.last_local_sequence(&s)).unwrap_or(0)
+                    } else {
+                        cache
+                            .as_ref()
+                            .map(|c| c.last_local_sequence(&s))
+                            .unwrap_or(0)
+                    };
+                    ReplicaShardProgress {
+                        shard_id: s,
+                        last_sequence: last_seq,
+                    }
+                })
+                .collect::<Vec<ReplicaShardProgress>>()
+        })
+        .await
+        .map_err(sanitized_internal)?;
         Ok(Response::new(ReplicaHeartbeatResponse {
             in_isr: true,
             leader_progress,
@@ -1616,12 +1736,18 @@ impl Policy for PolicyService {
     ) -> Result<Response<PolicyExplainResponse>, Status> {
         let req = request.into_inner();
         let input_json = String::from_utf8_lossy(&req.input).to_string();
-        match PolicyService::explain(self, &req.query, &input_json) {
-            Ok(trace) => Ok(Response::new(PolicyExplainResponse {
-                trace: trace.into_bytes(),
-            })),
-            Err(e) => Err(sanitized_internal(e)),
-        }
+        let opa = self.opa_engine().clone();
+
+        // 同步 Rego explain（trace 求值）放到阻塞线程池，避免阻塞 agent 异步执行器。
+        // 错误语义与原 `PolicyService::explain` 一致：统一 sanitized internal。
+        let trace = tokio::task::spawn_blocking(move || opa.explain(&req.query, &input_json))
+            .await
+            .map_err(sanitized_internal)?
+            .map_err(sanitized_internal)?;
+
+        Ok(Response::new(PolicyExplainResponse {
+            trace: trace.into_bytes(),
+        }))
     }
 
     async fn put_bundle(

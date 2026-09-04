@@ -267,6 +267,8 @@ pub struct MessageQueueService {
     subscriptions: RwLock<HashMap<String, Vec<SubscriberEntry>>>,
     /// ISR 复制管理器（None = 单 agent 本地语义，零复制路径保留，C6）
     replication: RwLock<Option<Arc<crate::services::replication::ReplicationManager>>>,
+    /// 自身 Arc 弱引用（Phase 1 T1.2：spawn_blocking 升级用，见 bind_self_weak）
+    self_arc: RwLock<Option<std::sync::Weak<MessageQueueService>>>,
 }
 
 impl std::fmt::Debug for MessageQueueService {
@@ -287,7 +289,36 @@ impl MessageQueueService {
             max_size_bytes,
             subscriptions: RwLock::new(HashMap::new()),
             replication: RwLock::new(None),
+            self_arc: RwLock::new(None),
         }
+    }
+
+    /// 绑定自身 Arc 弱引用（Phase 1 T1.2：gRPC handler 升级为强引用后，
+    /// 把同步 redb 事务放到 `spawn_blocking`，避免阻塞 agent 异步执行器）。
+    ///
+    /// 由服务装配方在 `Arc::new` 后调用一次（lib.rs run_agent 数据面初始化）。
+    pub fn bind_self_weak(&self, me: &Arc<Self>) {
+        *self.self_arc.write() = Some(Arc::downgrade(me));
+    }
+
+    /// 升级自身强引用（未绑定或已释放返回 None）
+    pub fn self_arc(&self) -> Option<Arc<Self>> {
+        self.self_arc.read().as_ref().and_then(|w| w.upgrade())
+    }
+
+    /// 在阻塞线程池上执行同步 redb 操作（Phase 1 T1.2）。
+    /// 服务装配时必须先 `bind_self_weak`。
+    pub async fn run_blocking<F, R>(&self, f: F) -> ServiceResult<R>
+    where
+        F: FnOnce(Arc<Self>) -> ServiceResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let me = self
+            .self_arc()
+            .ok_or_else(|| "MQService self_arc not bound".to_string())?;
+        tokio::task::spawn_blocking(move || f(me))
+            .await
+            .map_err(|e| format!("mq blocking task join: {e}"))?
     }
 
     /// 挂载 ISR 复制管理器（None = 关闭复制，单 agent 零破坏）
