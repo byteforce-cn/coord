@@ -32,9 +32,12 @@ use coord_proto::maintenance::{
 use coord_proto::txn::{txn_server::Txn, Compare, RequestOp, ResponseOp, TxnRequest, TxnResponse};
 use coord_proto::watch::{watch_server::Watch, WatchEvent, WatchRequest, WatchResponse};
 
+use coord_core::types::RegionId;
+
 use crate::auth::service::AuthOpProposer;
 use crate::lease::LeaseManager;
 use crate::raft::log_store::LogStore;
+use crate::raft::region::{RegionHandle, RegionManager};
 use crate::raft::type_config::{AuthOp, Command, LeaseOp, Response};
 use crate::raft::{CoordRaft, ReadPolicy, WatchReceiver};
 use crate::security::barrier::Barrier;
@@ -188,6 +191,13 @@ pub struct CoordNode {
     pub raft: Option<Arc<CoordRaft>>,
     /// 本地 Raft Log 存储句柄（读路径一致性校验用，防陈旧读；集群模式下设置）
     pub raft_log_store: Option<LogStore>,
+    /// T2.4：Multi-Raft Region 路由/运行时管理。
+    ///
+    /// `Some` = 多 Region 模式：KV Put/Range/Delete/Txn 按 key 经
+    /// `RegionManager::route_runtime` 路由到 per-region raft/mvcc（非 leader 返回
+    /// RegionNotLeader + leader hint）。`None` = 单 Raft 模式（region 0 legacy 路径，
+    /// 使用本节点 `storage`/`raft`/`raft_log_store`，T2.6 字节级退化）。
+    pub region_manager: Option<Arc<RegionManager>>,
     /// Lease 管理器（可选，Leader 节点持有）
     pub lease_manager: Option<Arc<LeaseManager>>,
     /// Watch 分发器
@@ -214,6 +224,27 @@ pub struct CoordNode {
     pub root_key_provider: Option<Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>>,
 }
 
+/// T2.4：KV 请求解析出的执行目标（一个 Region，或 legacy 单 Raft）。
+///
+/// - region 模式（`region_manager` 为 Some）：按 key 路由到 RegionManager 装配的
+///   RegionRuntime——per-region raft + 目录隔离 MVCC + 该 Region 的 LogStore
+///   （读屏障幻影态终检需要，`RegionRuntime::raft_log_store` 与 `main.rs` 单 Raft
+///   的 `node_raft_log` 同理）。
+/// - legacy 模式（manager 为 None）：region 0 目标，使用 CoordNode 自有
+///   storage/raft/raft_log_store（单 Raft / T2.6 兼容路径，行为字节级不变）。
+struct KvTarget {
+    /// 目标 Region（legacy 模式为 0）
+    region_id: RegionId,
+    /// 该 Region 的 MVCC（读写目标）
+    mvcc: Arc<MvccStorage<RedbBackend>>,
+    /// 该 Region 的 Raft 实例（None = 单节点直写模式，仅 legacy 出现）
+    raft: Option<Arc<CoordRaft>>,
+    /// 该 Region 的 LogStore（读屏障幻影态终检用）
+    raft_log_store: Option<LogStore>,
+    /// region 模式下的 Region 句柄（key range containment 校验）；legacy 为 None
+    handle: Option<Arc<RegionHandle>>,
+}
+
 impl CoordNode {
     pub fn new(storage: Arc<MvccStorage<RedbBackend>>) -> Self {
         Self {
@@ -221,6 +252,7 @@ impl CoordNode {
             storage,
             raft: None,
             raft_log_store: None,
+            region_manager: None,
             lease_manager: None,
             watch_dispatcher: None,
             idempotent_cache: RwLock::new(IdempotencyCache::new()),
@@ -289,7 +321,95 @@ impl CoordNode {
         self.node_grpc_addrs.read().get(&node_id).cloned()
     }
 
-    /// R-SVC-08：将 raft `client_write` 错误映射为 gRPC Status。
+    // ──── T2.4：Multi-Raft KV 路由 ────
+
+    /// 将单个 key 解析为 KV 执行目标（Region 或 legacy 单 Raft）。
+    ///
+    /// region 模式经 `RegionManager::route_runtime` 路由，错误映射为既有 gRPC
+    /// Status（RouteNotReady→unavailable / RegionNotFound→not_found /
+    /// KeyNotInRegion→invalid_argument）；legacy 模式返回 region 0 目标
+    /// （CoordNode 自有 storage/raft/raft_log_store，行为与现状一致）。
+    fn kv_target_for_key(&self, key: &[u8]) -> Result<KvTarget, tonic::Status> {
+        if let Some(manager) = &self.region_manager {
+            let rt = manager.route_runtime(key).map_err(map_err)?;
+            Ok(KvTarget {
+                region_id: rt.region_id(),
+                mvcc: Arc::clone(&rt.mvcc),
+                raft: Some(Arc::new(rt.raft.clone())),
+                raft_log_store: Some(rt.raft_log_store.clone()),
+                handle: Some(rt.handle()),
+            })
+        } else {
+            Ok(KvTarget {
+                region_id: 0,
+                mvcc: Arc::clone(&self.storage),
+                raft: self.raft.clone(),
+                raft_log_store: self.raft_log_store.clone(),
+                handle: None,
+            })
+        }
+    }
+
+    /// 校验 key 属于 target Region（Txn 的多 key 同区约束）。
+    /// legacy 模式（handle=None）直接放行——与现状一致。
+    fn guard_key_in_target(&self, target: &KvTarget, key: &[u8]) -> Result<(), tonic::Status> {
+        if let Some(handle) = &target.handle {
+            if !handle.contains_key(key) {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "key {} outside region {} (range {:?}..{:?}); cross-region txn is \
+                     not supported",
+                    String::from_utf8_lossy(key),
+                    target.region_id,
+                    String::from_utf8_lossy(&handle.meta.read().start_key),
+                    String::from_utf8_lossy(&handle.meta.read().end_key),
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// 校验半开区间 [start, end) 不越过 target Region 边界。
+    ///
+    /// 单点（end 空或 end==start）无需校验——路由已保证 start 属于本 Region。
+    /// region 模式非末段（end_key 非空）且 end 越界 → INVALID_ARGUMENT
+    /// （v1 明确不支持跨 Region 范围，宁可拒绝不可静默错答）；legacy 放行。
+    fn guard_range_in_target(
+        &self,
+        target: &KvTarget,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<(), tonic::Status> {
+        if end.is_empty() || end == start {
+            return Ok(());
+        }
+        let Some(handle) = &target.handle else {
+            return Ok(());
+        };
+        let meta = handle.meta.read();
+        if !meta.end_key.is_empty() && end > meta.end_key.as_slice() {
+            return Err(tonic::Status::invalid_argument(format!(
+                "range [.., {}) crosses region {} boundary (end_key {:?}); \
+                 cross-region range is not supported",
+                String::from_utf8_lossy(end),
+                target.region_id,
+                String::from_utf8_lossy(&meta.end_key),
+            )));
+        }
+        Ok(())
+    }
+
+    /// region 模式暂不支持 Lease 绑定：LeaseManager / Lease 记录 / Revoke 均为
+    /// node 级 region-0 语义，绑定到非 0 Region 的 key 会失去过期清理。显式拒绝。
+    fn guard_lease_region_mode(&self, lease_id: Option<i64>) -> Result<(), tonic::Status> {
+        if self.region_manager.is_some() && lease_id.is_some() {
+            return Err(tonic::Status::unavailable(
+                "leases are not supported in multi-region mode yet",
+            ));
+        }
+        Ok(())
+    }
+
+    /// R-SVC-08：将 raft `client_write` 错误映射为 gRPC Status（legacy 单 Raft）。
     ///
     /// follower 上的写请求会返回 `ForwardToLeader`——映射为 `UNAVAILABLE` 并在
     /// gRPC metadata 中携带 leader 地址 hint（`coord-leader-hint`），客户端据此
@@ -314,12 +434,37 @@ impl CoordNode {
         }
     }
 
+    /// T2.4：将某 Region 的 raft `client_write` 错误映射为 gRPC Status。
+    ///
+    /// 与 legacy 版本相同的前向语义，但错误携带 Region 标识：`ForwardToLeader` →
+    /// `Error::RegionNotLeader { region_id, leader_addr }`（经 [`map_core_error`]
+    /// 统一映射为 UNAVAILABLE + `coord-leader-hint`），客户端据此按 Region 重定向。
+    fn map_region_client_write_error(
+        &self,
+        region_id: RegionId,
+        e: openraft::error::ClientWriteError<crate::raft::type_config::TypeConfig>,
+    ) -> tonic::Status {
+        match e {
+            openraft::error::ClientWriteError::ForwardToLeader(ftl) => {
+                let leader_addr = ftl.leader_id.and_then(|id| self.grpc_addr_of(id));
+                map_core_error(&coord_core::error::Error::RegionNotLeader {
+                    region_id,
+                    leader_addr,
+                })
+            }
+            other => tonic::Status::internal(format!("raft write failed: {other}")),
+        }
+    }
+
     /// R-SVC-08：写路径超时保护——失去 quorum 时快速失败而非无限挂起。
     /// R-SVC-18：超时从 `RuntimeLimits.write_timeout` 读取（配置可调，默认 5s）。
+    /// T2.4：`region_id` 用于非 0 Region 的错误映射（RegionNotLeader + hint）；
+    /// region 0 / legacy 走 [`Self::map_client_write_error`]，行为与现状一致。
     async fn client_write_with_timeout(
         &self,
         raft: &CoordRaft,
         cmd: Command,
+        region_id: RegionId,
     ) -> Result<
         openraft::raft::ClientWriteResponse<crate::raft::type_config::TypeConfig>,
         tonic::Status,
@@ -328,6 +473,9 @@ impl CoordNode {
         let fut = raft.client_write(cmd);
         match tokio::time::timeout(timeout, fut).await {
             Ok(res) => res.map_err(|e| match e {
+                openraft::error::RaftError::APIError(cwe) if region_id != 0 => {
+                    self.map_region_client_write_error(region_id, cwe)
+                }
                 openraft::error::RaftError::APIError(cwe) => self.map_client_write_error(cwe),
                 other => tonic::Status::internal(format!("raft write failed: {other}")),
             }),
@@ -549,9 +697,10 @@ impl CoordNode {
         );
     }
 
-    /// 确保线性一致性读：通过 ReadIndex 确认 Leader 身份和日志进度（ADP §11.2）
+    /// T2.4：对指定 raft / log_store 执行线性一致读屏障（region 0 legacy 与
+    /// per-region 共用；range/delete 等读路径统一经此方法）。
     ///
-    /// 仅在 Raft 模式下生效；单节点模式直接返回。
+    /// 仅在 Raft 模式下生效（raft=None——单节点直写模式直接返回）。
     /// R-SVC-18：带 `read_timeout` 超时（此前无超时，leader 失联时读无限挂起）。
     ///
     /// 陈旧读防御（§10.4「宁可失败也不返回过期值」，对应 Jepsen partition-halves /
@@ -569,8 +718,16 @@ impl CoordNode {
     ///     是旧的被截断条目，状态机仍持有过期数据——openraft 的 ReadIndex
     ///     `applied_index_at_least` 只按 index 比较，会误判为"已追上"从而返回陈旧值。
     ///     此处任一异常均直接以 UNAVAILABLE 拒绝读。
-    async fn ensure_linearizable(&self) -> Result<(), tonic::Status> {
-        if let Some(ref raft) = self.raft {
+    ///
+    /// `region_id` 仅用于日志标注（非 0 时 raft_wm 日志带 ` region=`）；region 0
+    /// 的日志格式与历史完全一致（soak 取证日志不变量）。
+    async fn ensure_linearizable_on(
+        &self,
+        raft: Option<&CoordRaft>,
+        raft_log_store: Option<&LogStore>,
+        region_id: RegionId,
+    ) -> Result<(), tonic::Status> {
+        if let Some(raft) = raft {
             let timeout = self.limits.read().read_timeout;
             let read_log_id = tokio::time::timeout(
                 timeout,
@@ -588,8 +745,13 @@ impl CoordNode {
             // 是否与状态机真实数据一致（区分「屏障/水位超前」与「读值滞后」两类缺陷）。
             let raft_wm = || {
                 format!(
-                    "raft_wm node={} state={:?} leader={:?} term={} last_log_index={:?} \
+                    "raft_wm{} node={} state={:?} leader={:?} term={} last_log_index={:?} \
                      local_committed={:?} cluster_committed={:?} last_applied={:?} read_log_id={}",
+                    if region_id != 0 {
+                        format!(" region={region_id}")
+                    } else {
+                        String::new()
+                    },
                     self.node_id,
                     m.state,
                     m.current_leader,
@@ -631,7 +793,7 @@ impl CoordNode {
             // 幻影态终检：last_applied 必须与本地日志同 index 的实际条目一致。
             // 若该 index 已被 purge（快照覆盖），则视为合法（状态机来自快照）。
             if let (Some(applied), Some(log_store)) =
-                (m.last_applied.as_ref(), self.raft_log_store.as_ref())
+                (m.last_applied.as_ref(), raft_log_store)
             {
                 let covered_by_snapshot = log_store
                     .last_purged()
@@ -989,13 +1151,20 @@ impl Kv for CoordNode {
             None
         };
 
+        // T2.4：按 key 解析执行目标 Region（legacy 单 Raft = region 0）。
+        // region 模式下 Lease 绑定暂不支持（node 级 LeaseManager 是 region-0 语义），
+        // 显式拒绝。
+        let target = self.kv_target_for_key(&req.key)?;
+        self.guard_lease_region_mode(lease_id)?;
+
         // 若请求 prev_kv，在写入前读取当前值
         let prev_kv = if req.prev_kv {
-            self.storage
+            target
+                .mvcc
                 .get(&req.key)
                 .map_err(map_err)?
                 .map(|prev_value| {
-                    let meta = self.storage.get_kv_metadata(&req.key).map_err(map_err)?;
+                    let meta = target.mvcc.get_kv_metadata(&req.key).map_err(map_err)?;
                     Ok::<_, tonic::Status>(to_kv_proto(&req.key, &prev_value, meta.as_ref()))
                 })
                 .transpose()?
@@ -1003,25 +1172,30 @@ impl Kv for CoordNode {
             None
         };
 
-        // 通过 Raft 共识提交（集群模式），或直接写入存储（单节点模式）
-        let revision: u64 = if let Some(ref raft) = self.raft {
+        // 通过 Raft 共识提交（集群模式），或直接写入存储（单节点模式）。
+        // T2.4：raft/storage 均取自目标 Region（per-region raft + 目录隔离 MVCC）。
+        let revision: u64 = if let Some(raft) = &target.raft {
             let cmd = Command::Put {
                 key: req.key.clone(),
                 value: req.value.clone(),
                 lease_id,
             };
-            let resp = self.client_write_with_timeout(raft, cmd).await?;
+            let resp = self
+                .client_write_with_timeout(raft, cmd, target.region_id)
+                .await?;
             match resp.response() {
                 Response::Put { revision } => *revision,
                 _ => return Err(tonic::Status::internal("unexpected raft response")),
             }
         } else {
-            self.storage
+            target
+                .mvcc
                 .put(&req.key, &req.value, lease_id)
                 .map_err(map_err)?
         };
 
-        // 若关联了 Lease，将 Key 绑定到 Lease（用于 Revoke 时自动清理）
+        // 若关联了 Lease，将 Key 绑定到 Lease（用于 Revoke 时自动清理）。
+        // 仅 legacy 单 Raft 模式可达（region 模式已在上方拒绝 lease_id）。
         if let Some(lid) = lease_id {
             if let Some(ref lm) = self.lease_manager {
                 let _ = lm.attach_key(lid, &req.key);
@@ -1070,8 +1244,19 @@ impl Kv for CoordNode {
             0
         };
 
-        // 线性一致性读：确认 Leader 身份后再读取（ADP §11.2）
-        self.ensure_linearizable().await?;
+        // T2.4：按起始 key 解析目标 Region；多键范围 [key, range_end) 不得越过
+        // Region 边界（跨 Region 范围 v1 不支持，显式拒绝）。
+        let target = self.kv_target_for_key(&req.key)?;
+        self.guard_range_in_target(&target, &req.key, &req.range_end)?;
+
+        // 线性一致性读：确认目标 Region Leader 身份后再读取（ADP §11.2）。
+        // T2.4：屏障按 Region 走各自 raft（含该 Region 的 LogStore 幻影态终检）。
+        self.ensure_linearizable_on(
+            target.raft.as_deref(),
+            target.raft_log_store.as_ref(),
+            target.region_id,
+        )
+        .await?;
 
         // R-SVC-07-1：range_end 为空 或 range_end == key → 单键精确查询（兼容现有客户端约定）；
         // 否则为半开区间 [key, range_end) 范围查询
@@ -1081,12 +1266,12 @@ impl Kv for CoordNode {
 
         if target_revision > 0 && single_key {
             // 历史快照读：单键查询指定 Revision 时的值
-            if let Some(value) = self
-                .storage
+            if let Some(value) = target
+                .mvcc
                 .get_at_revision(&req.key, target_revision)
                 .map_err(map_err)?
             {
-                let meta = self.storage.get_kv_metadata(&req.key).map_err(map_err)?;
+                let meta = target.mvcc.get_kv_metadata(&req.key).map_err(map_err)?;
                 // 历史读取：使用查询 revision 作为 mod_revision
                 let kv = if let Some(m) = meta {
                     KeyValue {
@@ -1111,16 +1296,16 @@ impl Kv for CoordNode {
             }
         } else if single_key {
             // 单键精确查询（最新值）
-            if let Some(value) = self.storage.get(&req.key).map_err(map_err)? {
-                let meta = self.storage.get_kv_metadata(&req.key).map_err(map_err)?;
+            if let Some(value) = target.mvcc.get(&req.key).map_err(map_err)? {
+                let meta = target.mvcc.get_kv_metadata(&req.key).map_err(map_err)?;
                 let kv = to_kv_proto(&req.key, &value, meta.as_ref());
                 kvs.push(kv);
             }
         } else if target_revision > 0 {
             // R-SVC-07-2：带 revision 的范围读走历史扫描（changelog 重建），
             // 返回目标 revision 的历史视图而非实时数据
-            let results = self
-                .storage
+            let results = target
+                .mvcc
                 .range_at_revision(&req.key, &req.range_end, limit, target_revision)
                 .map_err(map_err)?;
             for (k, v) in results {
@@ -1128,12 +1313,12 @@ impl Kv for CoordNode {
             }
         } else {
             // R-SVC-07-1：最新范围读，半开区间 [key, range_end)
-            let results = self
-                .storage
+            let results = target
+                .mvcc
                 .range_in(&req.key, &req.range_end, limit)
                 .map_err(map_err)?;
             for (k, v) in results {
-                let meta = self.storage.get_kv_metadata(&k).map_err(map_err)?;
+                let meta = target.mvcc.get_kv_metadata(&k).map_err(map_err)?;
                 let kv = to_kv_proto(&k, &v, meta.as_ref());
                 kvs.push(kv);
             }
@@ -1143,7 +1328,7 @@ impl Kv for CoordNode {
         let revision = if target_revision > 0 {
             target_revision as i64
         } else {
-            self.storage.current_revision() as i64
+            target.mvcc.current_revision() as i64
         };
 
         if count_only {
@@ -1179,32 +1364,46 @@ impl Kv for CoordNode {
         let req = request.into_inner();
         let prev_kv_requested = req.prev_kv;
 
-        // 线性一致性读：确保能看到最新数据后再扫描要删除的 Key
-        self.ensure_linearizable().await?;
-
         // R-SVC-07-3：range_end 非空且 != key → 原子范围删除 [key, range_end)；
         // 否则为单键删除
         let is_range = !req.range_end.is_empty() && req.range_end != req.key;
+
+        // T2.4：按 key 解析目标 Region；范围删除不得越过 Region 边界。
+        let target = self.kv_target_for_key(&req.key)?;
+        if is_range {
+            self.guard_range_in_target(&target, &req.key, &req.range_end)?;
+        }
+
+        // 线性一致性读：确保能看到最新数据后再扫描要删除的 Key。
+        // T2.4：屏障按目标 Region 的 raft/log_store 执行。
+        self.ensure_linearizable_on(
+            target.raft.as_deref(),
+            target.raft_log_store.as_ref(),
+            target.region_id,
+        )
+        .await?;
 
         // 获取 prev_kv（如果需要）；R-SVC-18：范围扫描以 max_range_limit 封顶
         let max_range_limit = self.limits.read().max_range_limit;
         let prev_kvs: Vec<KeyValue> = if prev_kv_requested {
             if is_range {
-                self.storage
+                target
+                    .mvcc
                     .range_in(&req.key, &req.range_end, max_range_limit)
                     .map_err(map_err)?
                     .into_iter()
                     .map(|(k, v)| {
-                        let meta = self.storage.get_kv_metadata(&k).ok().flatten();
+                        let meta = target.mvcc.get_kv_metadata(&k).ok().flatten();
                         to_kv_proto(&k, &v, meta.as_ref())
                     })
                     .collect()
             } else {
-                self.storage
+                target
+                    .mvcc
                     .get(&req.key)
                     .map_err(map_err)?
                     .map(|value| {
-                        let meta = self.storage.get_kv_metadata(&req.key).ok().flatten();
+                        let meta = target.mvcc.get_kv_metadata(&req.key).ok().flatten();
                         to_kv_proto(&req.key, &value, meta.as_ref())
                     })
                     .into_iter()
@@ -1216,12 +1415,14 @@ impl Kv for CoordNode {
 
         let (deleted, revision): (i64, i64) = if is_range {
             // 范围删除：单个 raft Command::DeleteRange 原子执行（R-SVC-07-3）
-            if let Some(ref raft) = self.raft {
+            if let Some(raft) = &target.raft {
                 let cmd = Command::DeleteRange {
                     key: req.key.clone(),
                     range_end: req.range_end.clone(),
                 };
-                let resp = self.client_write_with_timeout(raft, cmd).await?;
+                let resp = self
+                    .client_write_with_timeout(raft, cmd, target.region_id)
+                    .await?;
                 match resp.response() {
                     Response::DeleteRange { revision, deleted } => {
                         (*deleted as i64, *revision as i64)
@@ -1229,20 +1430,22 @@ impl Kv for CoordNode {
                     _ => return Err(tonic::Status::internal("unexpected raft response")),
                 }
             } else {
-                let (rev, deleted) = self
-                    .storage
+                let (rev, deleted) = target
+                    .mvcc
                     .delete_range(&req.key, &req.range_end)
                     .map_err(map_err)?;
                 (deleted as i64, rev as i64)
             }
         } else {
             // 单键删除（原有逻辑）
-            let exists = self.storage.get(&req.key).map_err(map_err)?.is_some();
-            if let Some(ref raft) = self.raft {
+            let exists = target.mvcc.get(&req.key).map_err(map_err)?.is_some();
+            if let Some(raft) = &target.raft {
                 let cmd = Command::Delete {
                     key: req.key.clone(),
                 };
-                let resp = self.client_write_with_timeout(raft, cmd).await?;
+                let resp = self
+                    .client_write_with_timeout(raft, cmd, target.region_id)
+                    .await?;
                 if let Response::Delete { revision: rev } = resp.response() {
                     if exists {
                         (1, *rev as i64)
@@ -1253,7 +1456,7 @@ impl Kv for CoordNode {
                     return Err(tonic::Status::internal("unexpected raft response"));
                 }
             } else if exists {
-                let rev = self.storage.delete(&req.key).map_err(map_err)?;
+                let rev = target.mvcc.delete(&req.key).map_err(map_err)?;
                 (1, rev as i64)
             } else {
                 (0, 0)
@@ -1436,14 +1639,69 @@ impl Txn for CoordNode {
             }
         }
 
-        // 通过 Raft 共识提交（集群模式），或直接执行（单节点模式）
-        let result = if let Some(ref raft) = self.raft {
+        // T2.4：整个 Txn 是单 Region 原子单元——所有 compare/op 引用的 key 必须落在
+        // 同一 Region。先取第一个引用的 key 路由出目标，再逐一校验同区（key 越界 /
+        // 范围越界 → INVALID_ARGUMENT）。
+        let first_key: Option<&[u8]> = compares
+            .first()
+            .map(|c| c.key.as_slice())
+            .or_else(|| {
+                success_ops
+                    .iter()
+                    .chain(failure_ops.iter())
+                    .find_map(|op| match op {
+                        TxnOp::Put { key, .. } | TxnOp::Delete { key } => Some(key.as_slice()),
+                        TxnOp::Range { key, .. } => Some(key.as_slice()),
+                    })
+            });
+        let target = match first_key {
+            Some(k) => self.kv_target_for_key(k)?,
+            // 无任何 key 引用的空 Txn：region 模式无法路由（每 Region 独立
+            // revision/MVCC），显式拒绝；legacy 模式返回 region 0 目标（保持现状）。
+            None => {
+                if self.region_manager.is_some() {
+                    return Err(tonic::Status::invalid_argument(
+                        "txn references no key; cannot route to a region",
+                    ));
+                }
+                self.kv_target_for_key(b"")?
+            }
+        };
+        for c in &compares {
+            self.guard_key_in_target(&target, &c.key)?;
+        }
+        for op in success_ops.iter().chain(failure_ops.iter()) {
+            match op {
+                TxnOp::Put { key, .. } | TxnOp::Delete { key } => {
+                    self.guard_key_in_target(&target, key)?;
+                }
+                TxnOp::Range { key, range_end, .. } => {
+                    self.guard_range_in_target(&target, key, range_end)?;
+                }
+            }
+        }
+        // region 模式：Txn 内 Put（无论 success 还是 failure 分支）同样不支持
+        // 绑定 Lease（见 guard_lease_region_mode；node 级 LeaseManager 是 region-0
+        // 语义，绑定到非 0 Region 的 key 会失去过期清理）。
+        {
+            let has_lease_put = success_ops
+                .iter()
+                .chain(failure_ops.iter())
+                .any(|op| matches!(op, TxnOp::Put { lease_id: Some(_), .. }));
+            self.guard_lease_region_mode(if has_lease_put { Some(0) } else { None })?;
+        }
+
+        // 通过 Raft 共识提交（集群模式），或直接执行（单节点模式）。
+        // T2.4：raft/storage 均取自目标 Region（compare+execute 在单 Region 状态机原子执行）。
+        let result = if let Some(raft) = &target.raft {
             let cmd = Command::Txn {
                 compares: compares.clone(),
                 success_ops: success_ops.clone(),
                 failure_ops: failure_ops.clone(),
             };
-            let resp = self.client_write_with_timeout(raft, cmd).await?;
+            let resp = self
+                .client_write_with_timeout(raft, cmd, target.region_id)
+                .await?;
             match resp.response() {
                 Response::Txn {
                     succeeded,
@@ -1457,7 +1715,8 @@ impl Txn for CoordNode {
                 _ => return Err(tonic::Status::internal("unexpected raft response")),
             }
         } else {
-            self.storage
+            target
+                .mvcc
                 .execute_txn(&compares, &success_ops, &failure_ops)
                 .map_err(map_err)?
         };

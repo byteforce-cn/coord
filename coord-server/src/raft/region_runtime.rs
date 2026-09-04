@@ -74,6 +74,10 @@ pub struct RegionRuntime {
     pub raft: CoordRaft,
     /// 该 Region 的业务存储（MVCC，目录隔离）
     pub mvcc: Arc<MvccStorage<RedbBackend>>,
+    /// 该 Region 的本地 Raft Log 句柄（读路径一致性校验用，防陈旧读；
+    /// 与 `main.rs` 单 Raft 的 `node_raft_log` 同理——T2.4 中 KV 读屏障的
+    /// 幻影态终检需按 Region 访问各自日志，LogStore 为 Clone 廉价句柄）
+    pub raft_log_store: LogStore,
     /// 该 Region 的数据目录
     pub data_dir: PathBuf,
     /// 快照跟踪器（与 LogStore/StateMachineStore 共享）
@@ -145,6 +149,10 @@ pub async fn spawn_region_runtime(
         Arc::clone(&tracker),
     );
 
+    // T2.4：读屏障幻影态终检需要访问本地日志；克隆一份 LogStore 句柄给
+    // RegionRuntime（与 main.rs 单 Raft 的 node_raft_log 同理），再移入 raft。
+    let raft_log_store = log_store.clone();
+
     // T2.2：per-region 网络门面（共享节点连接池 + 绑定 region_id）
     let region_factory = RegionRaftNetworkFactory::new(shared_factory.clone(), region_id);
     let raft = new_raft(node_id, raft_config, region_factory, log_store, sm_store)
@@ -175,6 +183,7 @@ pub async fn spawn_region_runtime(
         handle,
         raft,
         mvcc,
+        raft_log_store,
         data_dir,
         tracker,
     }))
