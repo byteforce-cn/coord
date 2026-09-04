@@ -572,14 +572,38 @@ impl CoordNode {
     async fn ensure_linearizable(&self) -> Result<(), tonic::Status> {
         if let Some(ref raft) = self.raft {
             let timeout = self.limits.read().read_timeout;
-            tokio::time::timeout(timeout, raft.ensure_linearizable(ReadPolicy::ReadIndex))
-                .await
-                .map_err(|_| tonic::Status::deadline_exceeded("linearizable read timed out"))?
-                .map_err(|e| tonic::Status::internal(format!("linearizable read failed: {e}")))?;
+            let read_log_id = tokio::time::timeout(
+                timeout,
+                raft.ensure_linearizable(ReadPolicy::ReadIndex),
+            )
+            .await
+            .map_err(|_| tonic::Status::deadline_exceeded("linearizable read timed out"))?
+            .map_err(|e| tonic::Status::internal(format!("linearizable read failed: {e}")))?;
 
             // R-SVC-18 补充：ReadIndex 之后的一致性 / 身份复核（防陈旧读）
             let m = raft.metrics().borrow_watched().clone();
+
+            // 水位观测（迭代 #2 陈旧读定位）：成功放行与每个拒绝分支都输出 raft 水位，
+            // 用于对照返回给客户端的实际值，判定 openraft 屏障声称的 applied/committed
+            // 是否与状态机真实数据一致（区分「屏障/水位超前」与「读值滞后」两类缺陷）。
+            let raft_wm = || {
+                format!(
+                    "raft_wm node={} state={:?} leader={:?} term={} last_log_index={:?} \
+                     local_committed={:?} cluster_committed={:?} last_applied={:?} read_log_id={}",
+                    self.node_id,
+                    m.state,
+                    m.current_leader,
+                    m.current_term,
+                    m.last_log_index,
+                    m.local_committed,
+                    m.cluster_committed,
+                    m.last_applied,
+                    read_log_id,
+                )
+            };
+
             if !matches!(m.state, openraft::ServerState::Leader) {
+                tracing::info!("{} read_refused=not_leader", raft_wm());
                 return Err(tonic::Status::unavailable(
                     "not leader: refusing linearizable read (leadership lost during ReadIndex)",
                 ));
@@ -588,6 +612,13 @@ impl CoordNode {
                 (m.last_applied.as_ref(), m.local_committed.as_ref())
             {
                 if applied.index > committed.index {
+                    tracing::info!(
+                        "{} read_refused=applied_ahead_of_committed applied_index={} \
+                         committed_index={}",
+                        raft_wm(),
+                        applied.index,
+                        committed.index
+                    );
                     return Err(tonic::Status::unavailable(format!(
                         "read consistency check failed: last_applied index {} exceeds \
                          local_committed index {} (state machine ahead of commit frontier); \
@@ -611,6 +642,12 @@ impl CoordNode {
                     match log_store.get_entry_at(applied.index) {
                         Ok(Some(entry)) => {
                             if entry.log_id != *applied {
+                                tracing::info!(
+                                    "{} read_refused=phantom_state applied={:?} log_entry={:?}",
+                                    raft_wm(),
+                                    applied,
+                                    entry.log_id
+                                );
                                 return Err(tonic::Status::unavailable(format!(
                                     "read consistency check failed: state machine applied {:?} \
                                      but local log at index {} is {:?} (stale/phantom state); \
@@ -620,6 +657,11 @@ impl CoordNode {
                             }
                         }
                         Ok(None) => {
+                            tracing::info!(
+                                "{} read_refused=no_local_log applied_index={}",
+                                raft_wm(),
+                                applied.index
+                            );
                             return Err(tonic::Status::unavailable(format!(
                                 "read consistency check failed: no local log entry at applied \
                                  index {} (stale/phantom state); refusing to serve stale data",
@@ -627,6 +669,11 @@ impl CoordNode {
                             )));
                         }
                         Err(e) => {
+                            tracing::info!(
+                                "{} read_refused=log_read_error applied_index={}",
+                                raft_wm(),
+                                applied.index
+                            );
                             return Err(tonic::Status::internal(format!(
                                 "read consistency check failed: log read error at index {}: {e}",
                                 applied.index
@@ -635,6 +682,7 @@ impl CoordNode {
                     }
                 }
             }
+            tracing::info!("{} read_served", raft_wm());
         }
         Ok(())
     }
