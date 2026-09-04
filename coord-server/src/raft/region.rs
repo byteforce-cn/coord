@@ -22,6 +22,9 @@ use coord_core::error::{Error, Result};
 use coord_core::types::{NodeID, RegionEpoch, RegionId, RegionMeta};
 use parking_lot::RwLock;
 
+use crate::raft::network::{RaftNetworkFactoryImpl, RaftRpcService};
+use crate::raft::region_runtime::{spawn_region_runtime, RegionRuntime, RegionRuntimeSpec};
+
 // ============================================================================
 // RegionHandle
 // ============================================================================
@@ -186,6 +189,8 @@ pub struct RegionManager {
     regions: RwLock<BTreeMap<RegionId, Arc<RegionHandle>>>,
     /// start_key → RegionId 有序索引（用于路由）
     key_index: RwLock<BTreeMap<Vec<u8>, RegionId>>,
+    /// Region 运行时注册表（T2.3：装配后的 raft/存储句柄；路由见 regions/key_index）
+    runtimes: RwLock<BTreeMap<RegionId, Arc<RegionRuntime>>>,
 }
 
 impl RegionManager {
@@ -195,6 +200,7 @@ impl RegionManager {
             node_id,
             regions: RwLock::new(BTreeMap::new()),
             key_index: RwLock::new(BTreeMap::new()),
+            runtimes: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -385,6 +391,78 @@ impl RegionManager {
         }
 
         Ok(())
+    }
+
+    // ──── Region 运行时装配（T2.3 生产接线）────
+
+    /// 装配一个 Region 运行时并注册
+    ///
+    /// 一步完成：Region 存储目录 + MvccStorage/LogStore/SnapshotTracker 打开 +
+    /// per-region Raft 创建（RegionRaftNetworkFactory 共享节点连接池）+
+    /// RaftRpcService 网络注册 + 路由（regions/key_index）与运行时注册。
+    ///
+    /// - `initialize=true`：本节点为 bootstrap，用 region meta 的 voter peers
+    ///   初始化成员（仅集群首个节点）；其余节点传 `false`，靠复制追赶。
+    /// - 存储隔离为目录级（`region_data_dir`），region 0 = legacy 根目录布局，
+    ///   见 `raft/region_runtime.rs` 模块文档。
+    pub async fn spawn_region(
+        &self,
+        shared_factory: &RaftNetworkFactoryImpl,
+        rpc: &RaftRpcService,
+        spec: RegionRuntimeSpec,
+        initialize: bool,
+    ) -> Result<Arc<RegionRuntime>> {
+        let region_id = spec.meta.region_id;
+
+        // 1) 路由注册：重复 region_id / start_key 在此拒绝
+        let handle = self.register_region(spec.meta.clone())?;
+
+        // 2) 存储 + Raft + 网络注册
+        let runtime = spawn_region_runtime(
+            self.node_id,
+            shared_factory,
+            rpc,
+            spec,
+            handle,
+            initialize,
+        )
+        .await?;
+
+        // 3) 运行时注册
+        self.runtimes
+            .write()
+            .insert(region_id, Arc::clone(&runtime));
+        tracing::info!(
+            "node {}: region {region_id} runtime spawned (data_dir={}, {} peers)",
+            self.node_id,
+            runtime.data_dir.display(),
+            runtime.meta().peers.len()
+        );
+        Ok(runtime)
+    }
+
+    /// 移除一个 Region 运行时（注销路由 + 运行时；Raft 停机由调用方负责）
+    pub fn remove_region_runtime(&self, region_id: RegionId) -> Result<()> {
+        self.unregister_region(region_id)?;
+        self.runtimes.write().remove(&region_id);
+        tracing::info!("node {}: region {region_id} runtime removed", self.node_id);
+        Ok(())
+    }
+
+    /// 通过 region_id 获取已装配的 Region 运行时
+    pub fn runtime(&self, region_id: RegionId) -> Option<Arc<RegionRuntime>> {
+        self.runtimes.read().get(&region_id).cloned()
+    }
+
+    /// 通过 key 路由到 Region 运行时（T2.4 服务端路由的基础）
+    ///
+    /// 先经 `route` 按 key range 二分定位 Region，再取其运行时；
+    /// Region 已注册但尚未装配（无运行时）时返回 RegionNotFound。
+    pub fn route_runtime(&self, key: &[u8]) -> Result<Arc<RegionRuntime>> {
+        let handle = self.route(key)?;
+        let region_id = handle.region_id();
+        self.runtime(region_id)
+            .ok_or(Error::RegionNotFound { region_id })
     }
 }
 
