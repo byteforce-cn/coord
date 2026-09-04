@@ -61,6 +61,127 @@ fn sha256_hex(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// 解析 Raft 快照文件名 `snapshot-{idx}-{term}.snap`，返回 (idx, term)。
+///
+/// S-RCV-01：scheduler 的 `snapshot-{unix_ts}.snap`（单段数字）不匹配。
+/// 此前清理逻辑把目录下所有 `.snap` 混排，时间戳文件名（约 1.7e9）字典序
+/// 大于 Raft 的 index 段，被误判为“更新”，导致刚落盘的 Raft 快照被立即删除
+/// —— META_SNAPSHOT/purge 守卫随即悬空，重启即不可恢复。
+fn parse_raft_snapshot_name_free(name: &str) -> Option<(u64, u64)> {
+    let rest = name.strip_prefix("snapshot-")?.strip_suffix(".snap")?;
+    let (idx_s, term_s) = rest.split_once('-')?;
+    Some((idx_s.parse().ok()?, term_s.parse().ok()?))
+}
+
+/// 清理快照目录，仅保留最新 3 份 Raft 快照（A.6.3；纯函数，可在 spawn_blocking 内执行）
+fn cleanup_old_snapshots_free(
+    snapshot_dir: &PathBuf,
+    keep: &PathBuf,
+) -> Result<(), io::Error> {
+    let mut snaps: Vec<(u64, u64, PathBuf)> = match std::fs::read_dir(snapshot_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name();
+                let (idx, term) = parse_raft_snapshot_name_free(name.to_str()?)?;
+                Some((idx, term, e.path()))
+            })
+            .collect(),
+        Err(_) => return Ok(()),
+    };
+    // 按 index 降序（同 index 按 term 降序），保留最新 3 份
+    snaps.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    for (_, _, path) in snaps.iter().skip(3) {
+        if path == keep {
+            continue; // 双保险：绝不删除刚写入的快照
+        }
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::warn!("Failed to remove old snapshot {}: {e}", path.display());
+        }
+    }
+    Ok(())
+}
+
+/// A.6.2 落盘纯函数：临时文件 → fsync → 原子 rename → 目录 fsync → SHA256 →
+/// `META_SNAPSHOT` 写事务 → purge 守卫登记 → 旧快照清理。
+///
+/// Phase 1 T1.3：不触碰 `StateMachineStore` 内部锁（只经传入的 `Arc` 句柄访问
+/// state_machine / snapshot_tracker），因此可放入 `spawn_blocking` 而无需持有
+/// `&mut self`。`snapshot_tracker.record_durable` 在落盘成功后执行，登记时序与
+/// 原同步实现完全一致。
+#[allow(clippy::too_many_arguments)]
+fn persist_snapshot_file_impl(
+    snapshot_dir: &PathBuf,
+    state_machine: &Arc<MvccStorage<RedbBackend>>,
+    snapshot_tracker: &Arc<SnapshotTracker>,
+    meta: &SnapshotMetaOf<TypeConfig>,
+    data: &[u8],
+) -> Result<(PathBuf, [u8; 32]), io::Error> {
+    use std::io::Write;
+
+    std::fs::create_dir_all(snapshot_dir).map_err(|e| {
+        io::Error::other(format!(
+            "create snapshot dir {}: {e}",
+            snapshot_dir.display()
+        ))
+    })?;
+
+    let last_idx = meta.last_log_id.as_ref().map(|l| l.index).unwrap_or(0);
+    let last_term = meta
+        .last_log_id
+        .as_ref()
+        .map(|l| l.leader_id.term)
+        .unwrap_or(0);
+    let final_path = snapshot_dir.join(format!("snapshot-{last_idx}-{last_term}.snap"));
+    let tmp_path = snapshot_dir.join(format!(".snapshot-{last_idx}-{last_term}.snap.tmp"));
+
+    // 1. 写临时文件并 fsync
+    {
+        let mut f = std::fs::File::create(&tmp_path)
+            .map_err(|e| io::Error::other(format!("create {}: {e}", tmp_path.display())))?;
+        f.write_all(data)
+            .map_err(|e| io::Error::other(format!("write {}: {e}", tmp_path.display())))?;
+        f.sync_all()
+            .map_err(|e| io::Error::other(format!("fsync {}: {e}", tmp_path.display())))?;
+    }
+
+    // 2. 原子 rename + 目录 fsync（尽力而为）
+    std::fs::rename(&tmp_path, &final_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        io::Error::other(format!(
+            "rename {} -> {}: {e}",
+            tmp_path.display(),
+            final_path.display()
+        ))
+    })?;
+    if let Ok(dir) = std::fs::File::open(snapshot_dir) {
+        let _ = dir.sync_all();
+    }
+
+    // 3. SHA256 校验和
+    let checksum = sha256_hex(data);
+
+    // 4. 持久化 META_SNAPSHOT + 登记 purge 守卫
+    let persisted = PersistedSnapshotMeta {
+        meta: meta.clone(),
+        checksum,
+        path: final_path.to_string_lossy().to_string(),
+    };
+    let persisted_bytes = bincode::serialize(&persisted)
+        .map_err(|e| io::Error::other(format!("serialize snapshot meta: {e}")))?;
+    state_machine
+        .backend()
+        .write(|tx| tx.insert(TABLE_META, META_SNAPSHOT, &persisted_bytes))
+        .map_err(io_err)?;
+    snapshot_tracker.record_durable(last_idx, last_term, final_path.clone());
+
+    // 5. A.6.3：保留最近 3 份 Raft 快照，清理旧份
+    //    （只识别 snapshot-{idx}-{term}.snap，绝不删除本次写入的文件）
+    cleanup_old_snapshots_free(snapshot_dir, &final_path)?;
+
+    Ok((final_path, checksum))
+}
+
 pub struct StateMachineStore {
     pub state_machine: Arc<MvccStorage<RedbBackend>>,
     pub last_applied: Mutex<Option<LogIdOf<TypeConfig>>>,
@@ -569,12 +690,16 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                 .map_err(|e| io::Error::other(e.to_string()))?;
             // R-RFT-06：快照携带完整 applied LogId（term/node_id/index），
             // 导入时不再降级为 AppliedLogId::standalone（term/node_id 置零）
-            import_snapshot_data(&self.state_machine, &snapshot_data)
+            let sm = Arc::clone(&self.state_machine);
+            tokio::task::spawn_blocking(move || import_snapshot_data(sm.as_ref(), &snapshot_data))
+                .await
+                .map_err(|e| io::Error::other(format!("snapshot import task join: {e}")))?
                 .map_err(|e| io::Error::other(e.to_string()))?;
         }
 
-        // A.6：安装的快照同样落盘（tmp → fsync → rename → 校验和），保证重启可恢复
-        let (path, checksum) = self.persist_snapshot_file(meta, &data)?;
+        // A.6：安装的快照同样落盘（tmp → fsync → rename → 校验和），保证重启可恢复。
+        // Phase 1 T1.3：fsync 落盘段在阻塞线程池执行。
+        let (path, checksum) = self.persist_snapshot_file_blocking(meta, data.clone()).await?;
 
         *self.current_snapshot.lock() = Some(StoredSnapshot {
             meta: meta.clone(),
@@ -631,117 +756,42 @@ impl StateMachineStore {
     /// A.6.2：快照字节落盘 —— 临时文件 → fsync → 原子 rename → SHA256
     ///
     /// 返回（最终路径，SHA256 校验和）。同时持久化 `META_SNAPSHOT` 并登记 purge 守卫。
+    ///
+    /// Phase 1 T1.3：磁盘 IO（create_dir_all / File::create / write_all / fsync /
+    /// rename / 目录 fsync / redb META_SNAPSHOT 写事务 / 旧快照清理）整体在阻塞线程池
+    /// 执行（见 `persist_snapshot_file_blocking`）；本方法保留同步实现供启动自愈等
+    /// 非热路径使用，内部委托同一纯函数，保证登记时序一致。
     fn persist_snapshot_file(
         &self,
         meta: &SnapshotMetaOf<TypeConfig>,
         data: &[u8],
     ) -> Result<(PathBuf, [u8; 32]), io::Error> {
-        use std::io::Write;
-
-        std::fs::create_dir_all(&self.snapshot_dir).map_err(|e| {
-            io::Error::other(format!(
-                "create snapshot dir {}: {e}",
-                self.snapshot_dir.display()
-            ))
-        })?;
-
-        let last_idx = meta.last_log_id.as_ref().map(|l| l.index).unwrap_or(0);
-        let last_term = meta
-            .last_log_id
-            .as_ref()
-            .map(|l| l.leader_id.term)
-            .unwrap_or(0);
-        let final_path = self
-            .snapshot_dir
-            .join(format!("snapshot-{last_idx}-{last_term}.snap"));
-        let tmp_path = self
-            .snapshot_dir
-            .join(format!(".snapshot-{last_idx}-{last_term}.snap.tmp"));
-
-        // 1. 写临时文件并 fsync
-        {
-            let mut f = std::fs::File::create(&tmp_path)
-                .map_err(|e| io::Error::other(format!("create {}: {e}", tmp_path.display())))?;
-            f.write_all(data)
-                .map_err(|e| io::Error::other(format!("write {}: {e}", tmp_path.display())))?;
-            f.sync_all()
-                .map_err(|e| io::Error::other(format!("fsync {}: {e}", tmp_path.display())))?;
-        }
-
-        // 2. 原子 rename + 目录 fsync（尽力而为）
-        std::fs::rename(&tmp_path, &final_path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_path);
-            io::Error::other(format!(
-                "rename {} -> {}: {e}",
-                tmp_path.display(),
-                final_path.display()
-            ))
-        })?;
-        if let Ok(dir) = std::fs::File::open(&self.snapshot_dir) {
-            let _ = dir.sync_all();
-        }
-
-        // 3. SHA256 校验和
-        let checksum = sha256_hex(data);
-
-        // 4. 持久化 META_SNAPSHOT + 登记 purge 守卫
-        let persisted = PersistedSnapshotMeta {
-            meta: meta.clone(),
-            checksum,
-            path: final_path.to_string_lossy().to_string(),
-        };
-        let persisted_bytes = bincode::serialize(&persisted)
-            .map_err(|e| io::Error::other(format!("serialize snapshot meta: {e}")))?;
-        self.state_machine
-            .backend()
-            .write(|tx| tx.insert(TABLE_META, META_SNAPSHOT, &persisted_bytes))
-            .map_err(io_err)?;
-        self.snapshot_tracker
-            .record_durable(last_idx, last_term, final_path.clone());
-
-        // 5. A.6.3：保留最近 3 份 Raft 快照，清理旧份
-        //    （只识别 snapshot-{idx}-{term}.snap，绝不删除本次写入的文件）
-        self.cleanup_old_snapshots(&final_path)?;
-
-        Ok((final_path, checksum))
+        persist_snapshot_file_impl(
+            &self.snapshot_dir,
+            &self.state_machine,
+            &self.snapshot_tracker,
+            meta,
+            data,
+        )
     }
 
-    /// 解析 Raft 快照文件名 `snapshot-{idx}-{term}.snap`，返回 (idx, term)。
-    ///
-    /// S-RCV-01：scheduler 的 `snapshot-{unix_ts}.snap`（单段数字）不匹配。
-    /// 此前清理逻辑把目录下所有 `.snap` 混排，时间戳文件名（约 1.7e9）字典序
-    /// 大于 Raft 的 index 段，被误判为“更新”，导致刚落盘的 Raft 快照被立即删除
-    /// —— META_SNAPSHOT/purge 守卫随即悬空，重启即不可恢复。
-    fn parse_raft_snapshot_name(name: &str) -> Option<(u64, u64)> {
-        let rest = name.strip_prefix("snapshot-")?.strip_suffix(".snap")?;
-        let (idx_s, term_s) = rest.split_once('-')?;
-        Some((idx_s.parse().ok()?, term_s.parse().ok()?))
-    }
-
-    /// 清理快照目录，仅保留最新 3 份 Raft 快照（A.6.3）
-    fn cleanup_old_snapshots(&self, keep: &PathBuf) -> Result<(), io::Error> {
-        let mut snaps: Vec<(u64, u64, PathBuf)> = match std::fs::read_dir(&self.snapshot_dir) {
-            Ok(entries) => entries
-                .filter_map(|e| e.ok())
-                .filter_map(|e| {
-                    let name = e.file_name();
-                    let (idx, term) = Self::parse_raft_snapshot_name(name.to_str()?)?;
-                    Some((idx, term, e.path()))
-                })
-                .collect(),
-            Err(_) => return Ok(()),
-        };
-        // 按 index 降序（同 index 按 term 降序），保留最新 3 份
-        snaps.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-        for (_, _, path) in snaps.iter().skip(3) {
-            if path == keep {
-                continue; // 双保险：绝不删除刚写入的快照
-            }
-            if let Err(e) = std::fs::remove_file(path) {
-                tracing::warn!("Failed to remove old snapshot {}: {e}", path.display());
-            }
-        }
-        Ok(())
+    /// 异步落盘：磁盘 IO 移入 `spawn_blocking`，避免阻塞 tokio worker
+    /// （Phase 1 T1.3，Multi-Raft 前置）。保持 snapshot_tracker 登记时序
+    /// （落盘成功后才 `record_durable`，与同步版完全一致）。
+    async fn persist_snapshot_file_blocking(
+        &self,
+        meta: &SnapshotMetaOf<TypeConfig>,
+        data: Vec<u8>,
+    ) -> Result<(PathBuf, [u8; 32]), io::Error> {
+        let snapshot_dir = self.snapshot_dir.clone();
+        let state_machine = Arc::clone(&self.state_machine);
+        let snapshot_tracker = Arc::clone(&self.snapshot_tracker);
+        let meta = meta.clone();
+        tokio::task::spawn_blocking(move || {
+            persist_snapshot_file_impl(&snapshot_dir, &state_machine, &snapshot_tracker, &meta, &data)
+        })
+        .await
+        .map_err(|e| io::Error::other(format!("snapshot persist task join: {e}")))?
     }
 
     /// S-RCV-01 启动自愈：日志已被 purge 但快照文件缺失时，从 MVCC 的
@@ -835,21 +885,26 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
             last_membership: last_membership.clone(),
         };
 
-        // 从 MvccStorage 导出真实快照数据
-        let sm: &MvccStorage<RedbBackend> = &self.state_machine;
-        let last_idx = last_log_id.as_ref().map(|id| id.index).unwrap_or(0);
-        let last_term = last_log_id
+        // 从 MvccStorage 导出真实快照数据（全库单读事务）——阻塞线程池执行（Phase 1 T1.3）
+        let sm = Arc::clone(&self.state_machine);
+        let export_last_idx = last_log_id.as_ref().map(|id| id.index).unwrap_or(0);
+        let export_last_term = last_log_id
             .as_ref()
             .map(|id| id.leader_id.term)
             .unwrap_or(0);
-        let snapshot_data = export_snapshot_data(sm, last_idx, last_term)
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        let data_bytes = snapshot_data
-            .to_bytes()
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let data_bytes = tokio::task::spawn_blocking(move || {
+            let snapshot_data = export_snapshot_data(sm.as_ref(), export_last_idx, export_last_term)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            snapshot_data
+                .to_bytes()
+                .map_err(|e| io::Error::other(e.to_string()))
+        })
+        .await
+        .map_err(|e| io::Error::other(format!("snapshot export task join: {e}")))??;
 
-        // A.6：落盘（临时文件 → fsync → rename → 校验和 → META_SNAPSHOT → purge 守卫）
-        let (_path, _checksum) = self.persist_snapshot_file(&meta, &data_bytes)?;
+        // A.6：落盘（临时文件 → fsync → rename → 校验和 → META_SNAPSHOT → purge 守卫）。
+        // Phase 1 T1.3：fsync 落盘段在阻塞线程池执行。
+        let (_path, _checksum) = self.persist_snapshot_file_blocking(&meta, data_bytes.clone()).await?;
 
         let snapshot = SnapshotOf::<TypeConfig, super::RaftSnapshotData> {
             meta: meta.clone(),
