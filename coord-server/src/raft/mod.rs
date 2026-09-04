@@ -7,17 +7,19 @@
 // - network:         RaftNetworkFactory + RaftNetwork 实现（Tonic gRPC）
 // - region:          Multi-Raft Region 管理器（RegionHandle + RegionManager）
 //
-// P1-06 openraft 类型隔离边界：openraft 仍为 alpha（0.10.0-alpha.25，版本
-// 精确锁定见 `docs/production/16-openraft-governance.md`）。`openraft::` 路径
-// 只允许出现在本 crate 的 `raft/` 模块内部；其余模块与 `coord` CLI、测试
-// 一律经本文件提供的别名与构造函数使用。升级 openraft 版本时，编译缺口
-// 应只出现在本目录（详见 ADR §升级演练）。
+// P1-06 openraft 类型隔离边界：openraft 仍为 alpha（0.10.0-alpha.34，版本
+// 精确锁定见 `docs/production/16-openraft-governance.md`）。`openraft::` 与
+// `openraft_multi::` 路径只允许出现在本 crate 的 `raft/` 模块内部；其余模块与
+// `coord` CLI、测试一律经本文件提供的别名与构造函数使用。升级 openraft 版本时，
+// 编译缺口应只出现在本目录（详见 ADR §升级演练）。
 
 pub mod log_store;
 pub mod network;
 pub mod region;
 pub mod state_machine;
 pub mod type_config;
+
+pub use network::{RegionRaftNetworkFactory, RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

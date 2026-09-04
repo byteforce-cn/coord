@@ -52,14 +52,21 @@ fn deserialize_payload<'a, T: serde::Deserialize<'a>>(data: &'a [u8]) -> Result<
 ///
 /// 从当前 tracing span 中提取 trace context，注入到 Raft 消息中，
 /// 实现跨节点的分布式追踪。R-SEC-03：`auth_tag` 由调用方按需计算。
-fn make_raft_message(payload: Vec<u8>) -> RaftMessageProto {
+/// 单 Raft 模式 region_id=0；Multi-Raft 下由调用方传入具体 Region。
+fn make_raft_message_for_region(payload: Vec<u8>, region_id: u64) -> RaftMessageProto {
     let trace_context = extract_trace_context();
     RaftMessageProto {
         payload,
-        region_id: 0, // 单 Raft 模式：region_id=0 表示未使用
+        region_id,
         trace_context,
         auth_tag: Vec::new(),
     }
+}
+
+/// 单 Raft 模式消息构造（region_id=0，兼容既有调用点）
+#[cfg(test)]
+fn make_raft_message(payload: Vec<u8>) -> RaftMessageProto {
+    make_raft_message_for_region(payload, 0)
 }
 
 /// R-SEC-03：对 payload 计算 HMAC-SHA256 认证标签（无 mTLS 时的共享密钥认证）。
@@ -155,14 +162,31 @@ pub struct RaftNetworkFactoryImpl {
     raft_tls_config: Option<Arc<tls::TlsConfig>>,
     /// R-SEC-03：raft 节点间共享密钥（无 mTLS 时的 HMAC 认证，可选）
     shared_secret: Option<Arc<Vec<u8>>>,
-    /// 连接池：目标节点 ID → 共享的 gRPC 客户端（惰性连接）
-    /// 使用 tokio::sync::Mutex 因为临界区包含 async 连接操作
-    client_cache: HashMap<u64, Arc<tokio::sync::Mutex<Option<RaftClient<Channel>>>>>,
+    /// 连接池：目标节点 ID → 共享的 gRPC 客户端槽位（惰性连接）。
+    /// 外层 `Arc<tokio::sync::Mutex<...>>` 使工厂可 Clone——Multi-Raft 各 Region
+    /// 的 per-region 网络工厂共享同一底层连接池（Phase 2 T2.1/T2.2）。
+    /// 使用 tokio::sync::Mutex 因为临界区包含 async 连接操作。
+    client_cache:
+        Arc<tokio::sync::Mutex<HashMap<u64, Arc<tokio::sync::Mutex<Option<RaftClient<Channel>>>>>>>,
     /// 模拟网络分区的黑名单：此节点无法与黑名单中的节点通信
     /// 用于测试网络分区和对称分区场景
     blocked_nodes: Arc<RwLock<HashSet<u64>>>,
     /// R-RFT-19：快照传输限速器（token bucket，跨目标节点共享；None = 不限速）
     snapshot_rate_limiter: Option<Arc<SnapshotRateLimiter>>,
+}
+
+impl Clone for RaftNetworkFactoryImpl {
+    fn clone(&self) -> Self {
+        Self {
+            node_id: self.node_id,
+            node_addrs: Arc::clone(&self.node_addrs),
+            raft_tls_config: self.raft_tls_config.clone(),
+            shared_secret: self.shared_secret.clone(),
+            client_cache: Arc::clone(&self.client_cache),
+            blocked_nodes: Arc::clone(&self.blocked_nodes),
+            snapshot_rate_limiter: self.snapshot_rate_limiter.clone(),
+        }
+    }
 }
 
 impl RaftNetworkFactoryImpl {
@@ -172,7 +196,7 @@ impl RaftNetworkFactoryImpl {
             node_addrs: Arc::new(RwLock::new(HashMap::new())),
             raft_tls_config: None,
             shared_secret: None,
-            client_cache: HashMap::new(),
+            client_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             blocked_nodes: Arc::new(RwLock::new(HashSet::new())),
             snapshot_rate_limiter: None,
         }
@@ -188,7 +212,7 @@ impl RaftNetworkFactoryImpl {
             node_addrs: Arc::new(RwLock::new(HashMap::new())),
             raft_tls_config: None,
             shared_secret: None,
-            client_cache: HashMap::new(),
+            client_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             blocked_nodes,
             snapshot_rate_limiter: None,
         }
@@ -261,6 +285,55 @@ impl RaftNetworkFactoryImpl {
     fn is_blocked(&self, target: u64) -> bool {
         self.blocked_nodes.read().contains(&target)
     }
+
+    /// 解析目标节点地址：优先走节点注册表（静态/初始节点），查不到返回 None。
+    fn resolve_addr(&self, target: u64, node: &openraft::impls::BasicNode) -> Option<String> {
+        if !node.addr.is_empty() {
+            Some(node.addr.clone())
+        } else {
+            self.node_addrs.read().get(&target).cloned()
+        }
+    }
+
+    /// 取或建目标节点的共享客户端槽位（跨 Multi-Raft Region 共享连接池）。
+    async fn get_or_create_client_slot(
+        &self,
+        target: u64,
+    ) -> Arc<tokio::sync::Mutex<Option<RaftClient<Channel>>>> {
+        let mut cache = self.client_cache.lock().await;
+        cache
+            .entry(target)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
+            .clone()
+    }
+
+    /// 按（target, region_id）构建一个真实网络客户端（不检查分区黑名单；
+    /// 分区模拟由调用方在 GroupRouter 层做）。region_id=0 等价单 Raft 模式。
+    async fn build_network_impl(
+        &self,
+        target: u64,
+        node: &openraft::impls::BasicNode,
+        region_id: u64,
+    ) -> Result<RaftNetworkImpl, RPCError<TypeConfig>> {
+        let addr = self.resolve_addr(target, node).ok_or_else(|| {
+            RPCError::Unreachable(openraft::error::Unreachable::new(&tonic::Status::internal(
+                format!(
+                    "no known raft address for node {target} (membership addr empty, \
+                     static table miss); refusing to fabricate an address"
+                ),
+            )))
+        })?;
+        let client_slot = self.get_or_create_client_slot(target).await;
+        Ok(RaftNetworkImpl {
+            target_id: target,
+            target_addr: addr,
+            client_slot,
+            tls_config: self.raft_tls_config.clone(),
+            shared_secret: self.shared_secret.clone(),
+            snapshot_rate_limiter: self.snapshot_rate_limiter.clone(),
+            region_id,
+        })
+    }
 }
 
 /// 到单个目标节点的 Raft 网络客户端（实现 RaftNetworkV2）
@@ -280,12 +353,15 @@ pub struct RaftNetworkImpl {
     shared_secret: Option<Arc<Vec<u8>>>,
     /// R-RFT-19：快照传输限速器（可选；分块发送前申请许可）
     snapshot_rate_limiter: Option<Arc<SnapshotRateLimiter>>,
+    /// 出站 Raft RPC 所属 Region（单 Raft = 0；Multi-Raft = RegionId）
+    region_id: u64,
 }
 
 impl RaftNetworkImpl {
     /// R-SEC-03：构造出站消息（配置共享密钥时计算 HMAC 标签）。
+    /// 携带 region_id（Multi-Raft：T2.5 按 region 解复用）。
     fn build_authed_message(&self, payload: Vec<u8>) -> Result<RaftMessageProto, tonic::Status> {
-        let mut msg = make_raft_message(payload);
+        let mut msg = make_raft_message_for_region(payload, self.region_id);
         if let Some(secret) = &self.shared_secret {
             msg.auth_tag = compute_raft_auth_tag(&msg.payload, secret)?;
         }
@@ -510,12 +586,9 @@ impl RaftNetworkFactory<TypeConfig> for RaftNetworkFactoryImpl {
             }
         };
 
-        // Get or create shared client slot (lazy connection, shared across instances)
-        let client_slot = self
-            .client_cache
-            .entry(target)
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
-            .clone();
+        // Get or create shared client slot (lazy connection, shared across instances
+        // AND across Multi-Raft regions via the Arc-backed client_cache)
+        let client_slot = self.get_or_create_client_slot(target).await;
 
         // Build the Real variant with a clone of the blocklist so that
         // subsequent RPCs on the same network object can detect dynamically
@@ -529,6 +602,7 @@ impl RaftNetworkFactory<TypeConfig> for RaftNetworkFactoryImpl {
                 tls_config: self.raft_tls_config.clone(),
                 shared_secret: self.shared_secret.clone(),
                 snapshot_rate_limiter: self.snapshot_rate_limiter.clone(),
+                region_id: 0, // 单 Raft 模式：region_id=0
             },
             target_id: target,
             blocked_nodes: Arc::clone(&self.blocked_nodes),
@@ -680,12 +754,170 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
     }
 }
 
+// ──── Multi-Raft 网络共享层（Phase 2 T2.1 / T2.2）────
+//
+// 依赖 openraft-multi 0.10.0-alpha.34（workspace 锁定，仅本 raft/ 模块内使用，
+// P1-06 隔离边界）。官方用法见 databendlabs/openraft examples/multi-raft-kv：
+// 共享 Router 实现 GroupRouter → per-region factory 包 GroupNetworkFactory →
+// new_client 返回 GroupNetworkAdapter。Coord 侧把既有 RaftNetworkFactoryImpl 连接池
+// 升级为 Arc 共享（见上），一个进程内所有 Region 的 Raft 实例共享同一出站连接池；
+// 出站 RaftMessage 携带 region_id，服务端按 region 解复用（T2.5）。
+
+impl RaftNetworkFactoryImpl {
+    /// 为（target, region_id）构建一个真实网络客户端（成员地址 + 共享连接池）。
+    /// region_id=0 等价单 Raft；供 GroupRouter 出站路径复用。
+    async fn build_group_network(
+        &self,
+        target: u64,
+        group_id: u64,
+        node: &openraft::impls::BasicNode,
+    ) -> Result<RaftNetworkImpl, RPCError<TypeConfig>> {
+        // 分区模拟：目标被阻止时直接返回 Unreachable
+        if self.is_blocked(target) {
+            let status = tonic::Status::unavailable(format!(
+                "simulated network partition: node {} is unreachable",
+                target
+            ));
+            return Err(RPCError::Unreachable(openraft::error::Unreachable::new(
+                &status,
+            )));
+        }
+        self.build_network_impl(target, node, group_id).await
+    }
+}
+
+/// Multi-Raft 出站路由（T2.1）：把 (target, group_id) 绑定到共享连接池发送，
+/// 并让所有 Region 的 Raft 实例复用同一连接。
+impl openraft_multi::GroupRouter<TypeConfig, u64> for RaftNetworkFactoryImpl {
+    type SnapshotData = super::RaftSnapshotData;
+
+    async fn append_entries(
+        &self,
+        target: u64,
+        group_id: u64,
+        rpc: AppendEntriesRequest<TypeConfig>,
+        option: RPCOption,
+    ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
+        // GroupRouter 无 node 参数，按 target 从静态地址表解析
+        let node = openraft::impls::BasicNode::new(
+            self.node_addrs
+                .read()
+                .get(&target)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        let mut net = self.build_group_network(target, group_id, &node).await?;
+        net.append_entries(rpc, option).await
+    }
+
+    async fn vote(
+        &self,
+        target: u64,
+        group_id: u64,
+        rpc: VoteRequest<TypeConfig>,
+        option: RPCOption,
+    ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
+        let node = openraft::impls::BasicNode::new(
+            self.node_addrs
+                .read()
+                .get(&target)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        let mut net = self.build_group_network(target, group_id, &node).await?;
+        net.vote(rpc, option).await
+    }
+
+    async fn full_snapshot(
+        &self,
+        target: u64,
+        group_id: u64,
+        vote: VoteOf<TypeConfig>,
+        snapshot: SnapshotOf<TypeConfig, super::RaftSnapshotData>,
+        cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
+        option: RPCOption,
+    ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
+        if self.is_blocked(target) {
+            let status = tonic::Status::unavailable(format!(
+                "simulated network partition: node {} is unreachable",
+                target
+            ));
+            return Err(StreamingError::Unreachable(
+                openraft::error::Unreachable::new(&status),
+            ));
+        }
+        let node = openraft::impls::BasicNode::new(
+            self.node_addrs
+                .read()
+                .get(&target)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        let mut net = self
+            .build_network_impl(target, &node, group_id)
+            .await
+            .map_err(|e| {
+                StreamingError::Unreachable(openraft::error::Unreachable::new(&e))
+            })?;
+        net.full_snapshot(vote, snapshot, cancel, option).await
+    }
+}
+
+/// Multi-Raft per-region 网络工厂（T2.2）：绑定一个 RegionId，实现
+/// `RaftNetworkFactory`。每个 Region 的 Raft 实例用它创建到各目标的
+/// `GroupNetworkAdapter`（出站消息自动携带本 region 的 region_id）。
+///
+/// 连接池由共享的 [`RaftNetworkFactoryImpl`]（即 GroupRouter）持有，因此
+/// N 个 Region 只维护 N 份对端连接（每节点一份），而非 N×Region 份。
+#[derive(Clone)]
+pub struct RegionRaftNetworkFactory {
+    router: RaftNetworkFactoryImpl,
+    region_id: u64,
+}
+
+impl RegionRaftNetworkFactory {
+    /// 用共享 router + region_id 构造 per-region 工厂。
+    pub fn new(router: RaftNetworkFactoryImpl, region_id: u64) -> Self {
+        Self { router, region_id }
+    }
+
+    /// 访问底层共享 router（注册节点地址等仍走它）。
+    pub fn router(&self) -> &RaftNetworkFactoryImpl {
+        &self.router
+    }
+}
+
+impl RaftNetworkFactory<TypeConfig> for RegionRaftNetworkFactory {
+    type Network =
+        openraft_multi::GroupNetworkAdapter<TypeConfig, u64, RaftNetworkFactoryImpl>;
+
+    async fn new_client(
+        &mut self,
+        target: u64,
+        node: &openraft::impls::BasicNode,
+    ) -> Self::Network {
+        // 把 membership 携带的地址同步进共享地址表（GroupRouter 按 target 查表）
+        if !node.addr.is_empty() {
+            self.router.register_node(target, node.addr.clone());
+        }
+        openraft_multi::GroupNetworkAdapter::new(
+            self.router.clone(),
+            target,
+            self.region_id,
+        )
+    }
+}
+
 // ──── Raft RPC Server (gRPC Service 实现) ────
 
-/// 接收来自其他节点的 Raft RPC 并转发给本地 Raft 实例
+/// 接收来自其他节点的 Raft RPC 并转发给本地 Raft 实例。
+///
+/// Multi-Raft（Phase 2 T2.5）：入站 RaftMessage 携带 `region_id`，按 region
+/// 解复用到对应 Raft 实例。单 Raft 模式 region_id=0 使用默认实例（`set_raft`），
+/// 兼容既有调用方。
 pub struct RaftRpcService {
-    /// 本地 Raft 实例（初始化后设置）
-    raft: Arc<RwLock<Option<CoordRaft>>>,
+    /// 本地 Raft 实例表：region_id → Raft（region 0 = 单 Raft 默认实例）
+    rafts: Arc<RwLock<HashMap<u64, CoordRaft>>>,
     /// R-SEC-03：共享密钥（配置后强制验签，无标签拒绝）
     shared_secret: Option<Arc<Vec<u8>>>,
 }
@@ -699,7 +931,7 @@ impl Default for RaftRpcService {
 impl RaftRpcService {
     pub fn new() -> Self {
         Self {
-            raft: Arc::new(RwLock::new(None)),
+            rafts: Arc::new(RwLock::new(HashMap::new())),
             shared_secret: None,
         }
     }
@@ -710,22 +942,55 @@ impl RaftRpcService {
         self
     }
 
-    /// 设置 Raft 实例（在 Raft 初始化后调用）
+    /// 设置默认 Raft 实例（region 0，单 Raft 模式；在 Raft 初始化后调用）
     pub fn set_raft(&self, raft: CoordRaft) {
-        *self.raft.write() = Some(raft);
+        self.rafts.write().insert(0, raft);
     }
 
-    fn get_raft(&self) -> Result<CoordRaft, tonic::Status> {
-        self.raft
-            .read()
-            .clone()
-            .ok_or_else(|| tonic::Status::internal("raft not initialized"))
+    /// Multi-Raft：注册某 Region 的 Raft 实例（T2.5 解复用）。
+    pub fn set_region_raft(&self, region_id: u64, raft: CoordRaft) {
+        self.rafts.write().insert(region_id, raft);
+    }
+
+    /// 移除某 Region 的 Raft 实例（Region 下线/注销时）。
+    pub fn remove_region_raft(&self, region_id: u64) {
+        self.rafts.write().remove(&region_id);
+    }
+
+    /// 按 region_id 取 Raft 实例（region 0 回退到默认实例）。
+    fn get_raft_for_region(&self, region_id: u64) -> Result<CoordRaft, tonic::Status> {
+        let rafts = self.rafts.read();
+        if let Some(r) = rafts.get(&region_id) {
+            return Ok(r.clone());
+        }
+        // 兼容：单 Raft 模式下 region_id=0 查默认；未知 region 拒绝（fail-closed）
+        if region_id != 0 {
+            if let Some(r) = rafts.get(&0) {
+                return Ok(r.clone());
+            }
+        }
+        Err(tonic::Status::internal(format!(
+            "raft not initialized for region {region_id}"
+        )))
     }
 
     /// R-SEC-03：验签（配置了共享密钥时 fail-closed）
     fn verify_incoming(&self, msg: &RaftMessageProto) -> Result<(), tonic::Status> {
         verify_raft_auth(msg, self.shared_secret.as_deref().map(|v| v.as_slice()))
     }
+}
+
+/// 单发 RPC 辅助：读 region_id、验签、取对应 Raft、反序列化请求。
+/// 返回 (raft, region_id, rpc)。
+macro_rules! dispatch_raft_rpc {
+    ($self:ident, $msg:ident, $ty:ty) => {{
+        inject_received_trace_context(&$msg);
+        $self.verify_incoming(&$msg)?;
+        let region_id = $msg.region_id;
+        let raft = $self.get_raft_for_region(region_id)?;
+        let rpc: $ty = deserialize_payload(&$msg.payload)?;
+        (raft, region_id, rpc)
+    }};
 }
 
 #[tonic::async_trait]
@@ -735,16 +1000,16 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
         request: tonic::Request<RaftMessageProto>,
     ) -> Result<tonic::Response<RaftMessageProto>, tonic::Status> {
         let msg = request.into_inner();
-        inject_received_trace_context(&msg);
-        self.verify_incoming(&msg)?;
-        let raft = self.get_raft()?;
-        let rpc: AppendEntriesRequest<TypeConfig> = deserialize_payload(&msg.payload)?;
+        let (raft, region_id, rpc) = dispatch_raft_rpc!(self, msg, AppendEntriesRequest<TypeConfig>);
         let resp = raft
             .append_entries(rpc)
             .await
             .map_err(|e| tonic::Status::internal(format!("append_entries failed: {e}")))?;
         let payload = serialize_payload(&resp)?;
-        Ok(tonic::Response::new(make_raft_message(payload)))
+        Ok(tonic::Response::new(make_raft_message_for_region(
+            payload,
+            region_id,
+        )))
     }
 
     async fn vote(
@@ -752,16 +1017,16 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
         request: tonic::Request<RaftMessageProto>,
     ) -> Result<tonic::Response<RaftMessageProto>, tonic::Status> {
         let msg = request.into_inner();
-        inject_received_trace_context(&msg);
-        self.verify_incoming(&msg)?;
-        let raft = self.get_raft()?;
-        let rpc: VoteRequest<TypeConfig> = deserialize_payload(&msg.payload)?;
+        let (raft, region_id, rpc) = dispatch_raft_rpc!(self, msg, VoteRequest<TypeConfig>);
         let resp = raft
             .vote(rpc)
             .await
             .map_err(|e| tonic::Status::internal(format!("vote failed: {e}")))?;
         let payload = serialize_payload(&resp)?;
-        Ok(tonic::Response::new(make_raft_message(payload)))
+        Ok(tonic::Response::new(make_raft_message_for_region(
+            payload,
+            region_id,
+        )))
     }
 
     async fn install_snapshot(
@@ -771,7 +1036,8 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
         let msg = request.into_inner();
         inject_received_trace_context(&msg);
         self.verify_incoming(&msg)?;
-        let raft = self.get_raft()?;
+        let region_id = msg.region_id;
+        let raft = self.get_raft_for_region(region_id)?;
         let (vote, serializable): (VoteOf<TypeConfig>, SerializableSnapshot) =
             deserialize_payload(&msg.payload)?;
         let snapshot = serializable.into_openraft();
@@ -780,10 +1046,14 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
             .await
             .map_err(|e| tonic::Status::internal(format!("install_full_snapshot failed: {e}")))?;
         let payload = serialize_payload(&resp)?;
-        Ok(tonic::Response::new(make_raft_message(payload)))
+        Ok(tonic::Response::new(make_raft_message_for_region(
+            payload,
+            region_id,
+        )))
     }
 
     /// R-RFT-06：流式快照接收——按序收集分块，校验完整性后重组安装。
+    /// Multi-Raft（T2.5）：所有分块必须携带同一 region_id，重组后按 region 解复用。
     async fn install_snapshot_streaming(
         &self,
         request: tonic::Request<tonic::Streaming<RaftMessageProto>>,
@@ -792,6 +1062,7 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
         let mut chunks: Vec<Vec<u8>> = Vec::new();
         let mut expected_index: u32 = 0;
         let mut total_chunks: Option<u32> = None;
+        let mut region_id: Option<u64> = None;
 
         while let Some(msg) = stream
             .message()
@@ -801,6 +1072,17 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
             inject_received_trace_context(&msg);
             self.verify_incoming(&msg)?;
             let frame: SnapshotStreamMessage = deserialize_payload(&msg.payload)?;
+            // 流式快照必须绑定单一 region（fail-closed）
+            match region_id {
+                None => region_id = Some(msg.region_id),
+                Some(rid) if rid != msg.region_id => {
+                    return Err(tonic::Status::invalid_argument(format!(
+                        "snapshot stream region mismatch: expected {rid}, got {}",
+                        msg.region_id
+                    )));
+                }
+                _ => {}
+            }
             // 分块必须严格按序（fail-closed）
             if frame.chunk_index != expected_index {
                 return Err(tonic::Status::invalid_argument(format!(
@@ -830,13 +1112,17 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
             deserialize_payload(&data)?;
         let snapshot = serializable.into_openraft();
 
-        let raft = self.get_raft()?;
+        let region_id = region_id.unwrap_or(0);
+        let raft = self.get_raft_for_region(region_id)?;
         let resp = raft
             .install_full_snapshot(vote, snapshot)
             .await
             .map_err(|e| tonic::Status::internal(format!("install_full_snapshot failed: {e}")))?;
         let payload = serialize_payload(&resp)?;
-        Ok(tonic::Response::new(make_raft_message(payload)))
+        Ok(tonic::Response::new(make_raft_message_for_region(
+            payload,
+            region_id,
+        )))
     }
 }
 
