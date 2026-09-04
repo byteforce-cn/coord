@@ -39,6 +39,10 @@ pub struct Config {
     /// R-SVC-18：运行时资源限制（per-RPC 超时、规模上限、幂等缓存参数）
     #[serde(default)]
     pub limits: LimitsConfig,
+
+    /// Multi-Raft 配置（`[multi_raft]` 段；Phase 2 T2.6 兼容开关 + T3.4 初始 Region 表）
+    #[serde(default)]
+    pub multi_raft: MultiRaftConfig,
 }
 
 impl Config {
@@ -352,7 +356,84 @@ impl Config {
             ));
         }
 
-        // 12. R-RFT-19：raft 调优段合法性（选举窗口 min ≤ max；时间参数 > 0）
+        // 12. R-MR-01：multi_raft 段合法性（enabled=true 时 initial_regions 须
+        //    平铺整个 keyspace：首 region start_key 为空、相邻首尾相接无空洞/重叠、
+        //    末 region end_key 为空无上界；region id 唯一且 > 0，0 保留给单
+        //    Raft/system raft；v1 仅支持静态成员——本节点必须在 cluster.initial_nodes
+        //    且不得走 join 流程）。
+        if self.multi_raft.enabled {
+            let regions = &self.multi_raft.initial_regions;
+            if regions.is_empty() {
+                errs.push(
+                    "multi_raft.enabled = true requires initial_regions (at least one region)"
+                        .to_string(),
+                );
+            }
+            let mut seen_region_ids = std::collections::HashSet::new();
+            for (i, r) in regions.iter().enumerate() {
+                if r.id == 0 {
+                    errs.push(format!(
+                        "multi_raft.initial_regions[{i}].id must be > 0 \
+                         (0 is reserved for the single-raft/system raft)"
+                    ));
+                }
+                if !seen_region_ids.insert(r.id) {
+                    errs.push(format!(
+                        "multi_raft.initial_regions[{i}].id = {} duplicated",
+                        r.id
+                    ));
+                }
+            }
+            // key range 平铺：按 start_key 排序后首尾相接；无空洞/重叠
+            let mut sorted = regions.clone();
+            sorted.sort_by(|a, b| a.start_key.cmp(&b.start_key));
+            if let Some(first) = sorted.first() {
+                if !first.start_key.is_empty() {
+                    errs.push(format!(
+                        "multi_raft.initial_regions must tile the whole keyspace: \
+                         first region (id={}) start_key must be empty",
+                        first.id
+                    ));
+                }
+            }
+            for w in sorted.windows(2) {
+                if w[0].end_key != w[1].start_key {
+                    errs.push(format!(
+                        "multi_raft.initial_regions key ranges must be contiguous \
+                         with no gap/overlap: region {} end_key ({:?}) != region {} start_key ({:?})",
+                        w[0].id, w[0].end_key, w[1].id, w[1].start_key
+                    ));
+                }
+            }
+            if let Some(last) = sorted.last() {
+                if !last.end_key.is_empty() {
+                    errs.push(format!(
+                        "multi_raft.initial_regions must tile the whole keyspace: \
+                         last region (id={}) end_key must be empty (unbounded)",
+                        last.id
+                    ));
+                }
+            }
+            // v1 静态装配约束：region 副本置于 cluster.initial_nodes；join 模式不支持
+            if self.cluster.join_addr.is_some() {
+                errs.push(
+                    "multi_raft.enabled = true with cluster.join_addr is not supported in v1 \
+                     (multi-region requires static membership in cluster.initial_nodes)"
+                        .to_string(),
+                );
+            }
+            let member_ids: std::collections::HashSet<u64> =
+                self.cluster.initial_nodes.iter().map(|n| n.id).collect();
+            if !member_ids.contains(&self.node.id) {
+                errs.push(format!(
+                    "multi_raft.enabled = true requires this node (node.id = {}) to be listed \
+                     in cluster.initial_nodes (region replicas are placed on cluster members)",
+                    self.node.id
+                ));
+            }
+        }
+
+        // 13. R-RFT-19：raft 调优段合法性（选举窗口 min ≤ max；时间参数 > 0）
         for (label, ms) in [
             (
                 "raft.heartbeat_interval_ms",
@@ -790,6 +871,52 @@ pub struct RaftTuningConfig {
     pub snapshot_rate_limit_bytes_per_sec: u64,
 }
 
+/// Multi-Raft 配置（`[multi_raft]` 段；Phase 2 T2.6/T3.4）。
+///
+/// - `enabled=false`（默认）：单 Raft 模式，本段其余字段被忽略——磁盘布局、
+///   备份、回滚均保持 legacy 字节级不变（T2.6 退化路径）。
+/// - `enabled=true`：启用多 Region 模式——节点在 `cluster.initial_nodes` 静态
+///   成员上按 `initial_regions` 装配 per-region Raft 组（region ≥1，目录级存储
+///   隔离于 `<data_dir>/regions/region-{id:016x}/`，见 raft/region_runtime.rs）；
+///   region 0 仍作为 system raft（鉴权/会话等 `/_sys/*` 系统数据）保留在根目录。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiRaftConfig {
+    /// 是否启用多 Region 模式（默认 false = 单 Raft legacy，T2.6 字节级退化）
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// 初始 Region 表（静态装配；仅 `enabled=true` 时生效）。
+    ///
+    /// 每个 Region 复制到 `cluster.initial_nodes` 全部成员（v1 静态复制，无
+    /// 按 Region 差异化分布）。key range 必须平铺整个 keyspace（无空洞/重叠）。
+    #[serde(default)]
+    pub initial_regions: Vec<InitialRegionConfig>,
+}
+
+impl Default for MultiRaftConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            initial_regions: Vec::new(),
+        }
+    }
+}
+
+/// 初始 Region 配置（`[[multi_raft.initial_regions]]`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitialRegionConfig {
+    /// Region ID（必须 > 0 且唯一；0 保留给单 Raft/system raft）
+    pub id: u64,
+
+    /// Key range 起始（包含）；空 = keyspace 起点（仅允许第一个 region）
+    #[serde(default)]
+    pub start_key: String,
+
+    /// Key range 结束（不包含）；空 = 无上界（仅允许最后一个 region）
+    #[serde(default)]
+    pub end_key: String,
+}
+
 impl LimitsConfig {
     /// 转换为 coord-server 运行时限制（R-SVC-18）。
     pub fn to_runtime_limits(&self) -> coord_server::server::RuntimeLimits {
@@ -1085,5 +1212,209 @@ auth_enabled = true
         assert_eq!(r.watch_buffer, 1024);
         assert_eq!(r.disk_warn_ratio, 0.25);
         assert_eq!(r.disk_readonly_ratio, 0.08);
+    }
+
+    // ──── Multi-Raft（[multi_raft] / T2.6 / T3.4）────
+
+    /// 构造 enabled=true + 3 region 平铺（["","b") / ["b","n") / ["n",""))
+    /// 且本节点（node_id）在 initial_nodes 中的合法配置。
+    fn multi_raft_member_config(node_id: u64) -> Config {
+        let mut config = Config::default();
+        config.node.id = node_id;
+        config.cluster.initial_nodes = vec![
+            ClusterNode {
+                id: 1,
+                grpc: "127.0.0.1:50071".to_string(),
+                raft: "127.0.0.1:50072".to_string(),
+            },
+            ClusterNode {
+                id: 2,
+                grpc: "127.0.0.1:50081".to_string(),
+                raft: "127.0.0.1:50082".to_string(),
+            },
+            ClusterNode {
+                id: 3,
+                grpc: "127.0.0.1:50091".to_string(),
+                raft: "127.0.0.1:50092".to_string(),
+            },
+        ];
+        config.security.auth_root_key = Some("ab".repeat(32));
+        config.multi_raft.enabled = true;
+        config.multi_raft.initial_regions = vec![
+            InitialRegionConfig {
+                id: 1,
+                start_key: "".to_string(),
+                end_key: "b".to_string(),
+            },
+            InitialRegionConfig {
+                id: 2,
+                start_key: "b".to_string(),
+                end_key: "n".to_string(),
+            },
+            InitialRegionConfig {
+                id: 3,
+                start_key: "n".to_string(),
+                end_key: "".to_string(),
+            },
+        ];
+        config
+    }
+
+    #[test]
+    fn test_multi_raft_default_disabled() {
+        // T2.6：默认关闭 = 单 Raft 退化路径（initial_regions 不生效）
+        let config = Config::default();
+        assert!(!config.multi_raft.enabled);
+        assert!(config.multi_raft.initial_regions.is_empty());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_multi_raft_parse_toml() {
+        let toml_str = r#"
+[multi_raft]
+enabled = true
+
+[[multi_raft.initial_regions]]
+id = 1
+start_key = ""
+end_key = "b"
+
+[[multi_raft.initial_regions]]
+id = 2
+start_key = "b"
+end_key = ""
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.multi_raft.enabled);
+        assert_eq!(config.multi_raft.initial_regions.len(), 2);
+        assert_eq!(config.multi_raft.initial_regions[0].id, 1);
+        assert_eq!(config.multi_raft.initial_regions[0].start_key, "");
+        assert_eq!(config.multi_raft.initial_regions[0].end_key, "b");
+        assert_eq!(config.multi_raft.initial_regions[1].id, 2);
+        assert_eq!(config.multi_raft.initial_regions[1].end_key, "");
+    }
+
+    #[test]
+    fn test_multi_raft_validate_ok() {
+        let config = multi_raft_member_config(1);
+        let errs = config.validate();
+        assert!(errs.is_ok(), "valid multi_raft config: {errs:?}");
+    }
+
+    #[test]
+    fn test_multi_raft_validate_empty_regions_when_enabled() {
+        let mut config = multi_raft_member_config(1);
+        config.multi_raft.initial_regions.clear();
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("initial_regions")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_multi_raft_validate_region_zero_reserved() {
+        let mut config = multi_raft_member_config(1);
+        config.multi_raft.initial_regions[0].id = 0;
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("must be > 0")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_multi_raft_validate_duplicate_region_id() {
+        let mut config = multi_raft_member_config(1);
+        config
+            .multi_raft
+            .initial_regions
+            .push(InitialRegionConfig {
+                id: 2,
+                start_key: "z".to_string(),
+                end_key: "".to_string(),
+            });
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("duplicated")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_multi_raft_validate_gap_between_ranges() {
+        // region1 结束于 "b"，region2 从 "c" 开始 → 空洞（["b","c") 无归属）
+        let mut config = multi_raft_member_config(1);
+        config.multi_raft.initial_regions = vec![
+            InitialRegionConfig {
+                id: 1,
+                start_key: "".to_string(),
+                end_key: "b".to_string(),
+            },
+            InitialRegionConfig {
+                id: 2,
+                start_key: "c".to_string(),
+                end_key: "".to_string(),
+            },
+        ];
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("contiguous")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_multi_raft_validate_first_start_not_empty() {
+        let mut config = multi_raft_member_config(1);
+        config.multi_raft.initial_regions = vec![InitialRegionConfig {
+            id: 1,
+            start_key: "a".to_string(),
+            end_key: "".to_string(),
+        }];
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("start_key")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_multi_raft_validate_last_end_not_unbounded() {
+        let mut config = multi_raft_member_config(1);
+        config.multi_raft.initial_regions = vec![InitialRegionConfig {
+            id: 1,
+            start_key: "".to_string(),
+            end_key: "z".to_string(),
+        }];
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("end_key")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_multi_raft_validate_node_not_member() {
+        // node 5 不在 initial_nodes 中（region 副本不会放在该节点上）
+        let config = multi_raft_member_config(5);
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("initial_nodes")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_multi_raft_validate_join_rejected() {
+        // v1：multi-region 仅支持静态成员（join 节点不承载 region 副本）
+        let mut config = multi_raft_member_config(1);
+        config.cluster.join_addr = Some("127.0.0.1:50071".to_string());
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("join")),
+            "{errs:?}"
+        );
     }
 }

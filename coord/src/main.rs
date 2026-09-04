@@ -21,6 +21,7 @@ use clap::{Parser, Subcommand};
 use coord_server::raft::WatchReceiver;
 
 use coord_core::storage::StorageBackend;
+use coord_core::types::{Peer, PeerRole};
 use coord_proto::auth::auth_server::AuthServer;
 use coord_proto::capability::capability_registry_server::CapabilityRegistryServer;
 use coord_proto::kv::kv_server::KvServer;
@@ -43,6 +44,7 @@ use coord_server::lease::LeaseManager;
 use coord_server::metrics::Metrics;
 use coord_server::raft::log_store::LogStore;
 use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
+use coord_server::raft::region::{spawn_configured_regions, RegionManager, RegionSeed};
 use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::server::CoordNode;
 use coord_server::storage::compaction::{CompactionConfig, CompactionManager};
@@ -1862,6 +1864,11 @@ async fn run_server(
     // 5g. 创建 Raft 实例（P1-06 门面：new_raft）
     //     读路径一致性校验（防陈旧读）需要访问本地日志，克隆一份 LogStore 句柄。
     let node_raft_log = log_store.clone();
+    // T3.4：Multi-Raft Region 装配需要共享的工厂与调优后的 RaftConfig——
+    // 工厂的节点地址表/连接池/TLS 均为 Arc 共享，克隆后再把原工厂移入
+    // 单 Raft（region 0）；装配发生在 bootstrap/join 之后、CoordNode 之前。
+    let region_shared_factory = network_factory.clone();
+    let region_raft_config = Arc::clone(&raft_config);
     let raft =
         coord_server::raft::new_raft(node_id, raft_config, network_factory, log_store, sm_store)
             .await
@@ -1976,6 +1983,64 @@ async fn run_server(
 
     let raft = Arc::new(raft);
 
+    // T2.3/T2.6/T3.4：Multi-Raft Region 装配（`[multi_raft].enabled=true` 时）。
+    //
+    // - 每个 Region 的 voter peers = `cluster.initial_nodes` 全部成员（v1 静态
+    //   复制：每个 Region N 副本分布于集群成员，与 jepsen db.clj 生成一致）；
+    // - 仅 bootstrap 节点对每个 Region 执行 initialize（其余节点靠 leader 复制）；
+    // - 每个 Region 独立 raft 组、目录级存储隔离于 `<data_dir>/regions/region-{id}`
+    //   （region 0 仍为本节点 system raft——鉴权/会话等 `/_sys/*` 系统数据——
+    //   不在 region 表内）；
+    // - region 表合法性（平铺/成员）由 Config::validate（R-MR-01）先行校验，
+    //   装配函数再做防御性校验。
+    let region_manager: Option<Arc<RegionManager>> = if cfg.multi_raft.enabled {
+        let seeds: Vec<RegionSeed> = cfg
+            .multi_raft
+            .initial_regions
+            .iter()
+            .map(|r| RegionSeed {
+                region_id: r.id,
+                start_key: r.start_key.as_bytes().to_vec(),
+                end_key: r.end_key.as_bytes().to_vec(),
+            })
+            .collect();
+        let peers: Vec<Peer> = cfg
+            .cluster
+            .initial_nodes
+            .iter()
+            .map(|n| Peer {
+                node_id: n.id,
+                raft_addr: n.raft.clone(),
+                role: PeerRole::Voter,
+            })
+            .collect();
+
+        let manager = spawn_configured_regions(
+            node_id,
+            &data_dir,
+            &region_shared_factory,
+            &raft_rpc_service,
+            region_raft_config,
+            &seeds,
+            &peers,
+            bootstrap,
+        )
+        .await
+        .map_err(|e| format!("assemble multi-raft regions: {e}"))?;
+
+        tracing::info!(
+            "Multi-Raft enabled: {} region(s) assembled on node {node_id} ({} peers)",
+            cfg.multi_raft.initial_regions.len(),
+            peers.len()
+        );
+        Some(manager)
+    } else {
+        // T2.6：multi_raft.enabled=false（默认）→ 单 Raft 退化路径，磁盘布局/
+        // 备份/快照/回滚字节级不变（region 0 根目录布局）。
+        tracing::debug!("Multi-Raft disabled: single-raft (legacy) mode");
+        None
+    };
+
     // 6. 构建 CoordNode
     let mut node = CoordNode::new(Arc::clone(&mvcc));
     node.node_id = cfg.node.id;
@@ -1983,6 +2048,9 @@ async fn run_server(
     node.raft = Some(Arc::clone(&raft));
     // 读路径一致性校验（防陈旧读）用：本地 Raft Log 存储句柄
     node.raft_log_store = Some(node_raft_log);
+    // T2.4/T2.6：多 Region 模式挂载 RegionManager（KV 按 key 路由到 per-region
+    // raft/mvcc）；None = 单 Raft 模式（legacy 路径，字节级不变）
+    node.region_manager = region_manager;
     // R-SVC-18：per-RPC 超时/规模上限/幂等缓存参数（[limits] 配置段）
     node.set_limits(cfg.limits.to_runtime_limits());
     // P0-D.1：注册已知节点的 gRPC 地址（leader 重定向用，best-effort）

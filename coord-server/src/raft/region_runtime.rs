@@ -153,14 +153,21 @@ pub async fn spawn_region_runtime(
     // RegionRuntime（与 main.rs 单 Raft 的 node_raft_log 同理），再移入 raft。
     let raft_log_store = log_store.clone();
 
+    // 重启引导（与 main.rs 单 Raft 的 already_initialized 守卫同理）：bootstrap
+    // 节点重启时 Region 日志已持久化，重复 initialize 会报错——仅在日志未初始化
+    // 时才需要 initialize（首次启动）；非首次启动靠既有日志 + leader 复制收敛。
+    let already_initialized = log_store.is_initialized().map_err(|e| {
+        Error::Storage(format!("region {region_id}: read initialized state: {e}"))
+    })?;
+
     // T2.2：per-region 网络门面（共享节点连接池 + 绑定 region_id）
     let region_factory = RegionRaftNetworkFactory::new(shared_factory.clone(), region_id);
     let raft = new_raft(node_id, raft_config, region_factory, log_store, sm_store)
         .await
         .map_err(|e| Error::Internal(format!("create region {region_id} raft: {e}")))?;
 
-    // 成员初始化（仅 bootstrap 节点）
-    if initialize {
+    // 成员初始化（仅 bootstrap 节点，且仅当本 Region 日志尚未初始化）
+    if initialize && !already_initialized {
         let members: BTreeMap<u64, RaftNode> = meta
             .voter_peers()
             .map(|p| (p.node_id, new_basic_node(&p.raft_addr)))

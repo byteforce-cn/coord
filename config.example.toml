@@ -29,6 +29,29 @@ bootstrap = true               # 仅首节点 true
 [storage]
 data_dir = "/var/lib/coord"
 
+# Multi-Raft 多 Region 模式（T2.6/T3.4；默认关闭 = 单 Raft，字节级退化）
+#
+# enabled = true 时：
+#   - 每个 initial_regions 是一个独立 Raft 组（Region ≥ 1），目录级存储隔离于
+#     <data_dir>/regions/region-{id:016x}/；region 0 保留为 system raft
+#     （鉴权/会话等系统数据）仍在根目录；
+#   - 每个 Region 复制到 cluster.initial_nodes 全部成员（v1 静态复制，每节点
+#     配置必须一致；本节点必须在 initial_nodes 中，且不支持 join 流程）；
+#   - 各 Region key range 必须平铺整个 keyspace：首个 start_key 为空、相邻
+#     首尾相接（无空洞/重叠）、最后一个 end_key 为空（无上界）；
+#   - 仅首节点 bootstrap=true（负责初始化各 Region 成员），其余节点置
+#     bootstrap=false 等待 leader 复制。
+[multi_raft]
+enabled = false
+# [[multi_raft.initial_regions]]
+# id = 1
+# start_key = ""      # 首 Region 起点（空 = keyspace 起点）
+# end_key = "m"
+# [[multi_raft.initial_regions]]
+# id = 2
+# start_key = "m"
+# end_key = ""        # 末 Region 终点（空 = 无上界）
+
 # R-RFT-19：Raft 运行时调优（全部可选，缺省 = openraft 默认：心跳 50ms、
 # 选举 150–300ms、快照策略 since_last:5000）
 [raft]

@@ -15,15 +15,19 @@
 // - 路由表 key_index：start_key → RegionId，支持高效 key → Region 查找
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use coord_core::error::{Error, Result};
-use coord_core::types::{NodeID, RegionEpoch, RegionId, RegionMeta};
+use coord_core::types::{NodeID, Peer, RegionEpoch, RegionId, RegionMeta};
 use parking_lot::RwLock;
 
 use crate::raft::network::{RaftNetworkFactoryImpl, RaftRpcService};
-use crate::raft::region_runtime::{spawn_region_runtime, RegionRuntime, RegionRuntimeSpec};
+use crate::raft::region_runtime::{
+    region_data_dir, spawn_region_runtime, RegionRuntime, RegionRuntimeSpec,
+};
+use crate::raft::RaftConfig;
 
 // ============================================================================
 // RegionHandle
@@ -464,6 +468,111 @@ impl RegionManager {
         self.runtime(region_id)
             .ok_or(Error::RegionNotFound { region_id })
     }
+}
+
+// ──── 配置驱动批量装配（T3.4 静态装配；main.rs 在 `[multi_raft].enabled=true`
+//      时调用，测试套件同路径）────
+
+/// 一个待装配 Region 的静态种子（v1 来自 `[multi_raft].initial_regions` 配置；
+/// 每个 Region 复制到同一批集群成员节点）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionSeed {
+    /// Region ID（必须 > 0 且唯一；0 保留给单 Raft/system raft）
+    pub region_id: RegionId,
+    /// Key range 起始（包含）；空 = keyspace 起点（仅允许第一个 region）
+    pub start_key: Vec<u8>,
+    /// Key range 结束（不包含）；空 = 无上界（仅允许最后一个 region）
+    pub end_key: Vec<u8>,
+}
+
+/// 装配配置声明的全部 Region，返回已装配并注册的 RegionManager。
+///
+/// - `data_dir`：节点数据根目录；每 Region 存储目录 =
+///   `region_data_dir(data_dir, id)`（region 0 保留给单 Raft/system raft，不在此表）。
+/// - `peers`：集群成员（v1 = `cluster.initial_nodes` 全部）；每个 Region 的
+///   `RegionMeta.peers = peers` 全量（v1 静态复制，无按 Region 差异化分布）。
+/// - `initialize=true`（仅集群 bootstrap 节点）：对每个 Region 用其 voter peers
+///   初始化成员；其余节点传 `false`，靠 leader 复制追赶。
+/// - 本函数对 region 表做防御性平铺校验（首 region start_key 为空、相邻首尾相接、
+///   末 region end_key 无上界），并拒绝非成员节点装配——不合法时在创建任何
+///   存储之前返回 `Err`（配置层 `Config::validate` 已先行校验，此为双保险）。
+pub async fn spawn_configured_regions(
+    node_id: NodeID,
+    data_dir: &Path,
+    shared_factory: &RaftNetworkFactoryImpl,
+    rpc: &RaftRpcService,
+    raft_config: Arc<RaftConfig>,
+    seeds: &[RegionSeed],
+    peers: &[Peer],
+    initialize: bool,
+) -> Result<Arc<RegionManager>> {
+    // 防御性平铺校验（全部在 IO 之前）
+    let mut sorted = seeds.to_vec();
+    sorted.sort_by(|a, b| a.start_key.cmp(&b.start_key));
+    if let Some(first) = sorted.first() {
+        if !first.start_key.is_empty() {
+            return Err(Error::InvalidArgument(format!(
+                "region table must start at empty start_key (got region {} start {:?})",
+                first.region_id, first.start_key
+            )));
+        }
+    }
+    for w in sorted.windows(2) {
+        if w[0].end_key != w[1].start_key {
+            return Err(Error::InvalidArgument(format!(
+                "region table must be contiguous with no gap/overlap: \
+                 region {} end {:?} != region {} start {:?}",
+                w[0].region_id, w[0].end_key, w[1].region_id, w[1].start_key
+            )));
+        }
+    }
+    if let Some(last) = sorted.last() {
+        if !last.end_key.is_empty() {
+            return Err(Error::InvalidArgument(format!(
+                "region table must end with an unbounded end_key (region {} end {:?})",
+                last.region_id, last.end_key
+            )));
+        }
+    }
+
+    let member_ids: std::collections::HashSet<u64> =
+        peers.iter().map(|p| p.node_id).collect();
+    if !member_ids.contains(&node_id) {
+        return Err(Error::InvalidArgument(format!(
+            "node {node_id} is not a member of the region peers; cannot assemble regions"
+        )));
+    }
+    if peers.is_empty() {
+        return Err(Error::InvalidArgument(
+            "region peers must not be empty".to_string(),
+        ));
+    }
+
+    let manager = Arc::new(RegionManager::new(node_id));
+    for seed in seeds {
+        let meta = RegionMeta {
+            region_id: seed.region_id,
+            start_key: seed.start_key.clone(),
+            end_key: seed.end_key.clone(),
+            epoch: RegionEpoch::initial(),
+            peers: peers.to_vec(),
+            approximate_size: 0,
+            approximate_keys: 0,
+        };
+        let spec = RegionRuntimeSpec {
+            meta,
+            data_dir: region_data_dir(data_dir, seed.region_id),
+            raft_config: Arc::clone(&raft_config),
+        };
+        manager.spawn_region(shared_factory, rpc, spec, initialize).await?;
+        tracing::info!(
+            "node {node_id}: configured region {} assembled (range {:?}..{:?})",
+            seed.region_id,
+            seed.start_key,
+            seed.end_key
+        );
+    }
+    Ok(manager)
 }
 
 // ============================================================================
