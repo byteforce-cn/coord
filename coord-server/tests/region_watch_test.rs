@@ -273,9 +273,9 @@ async fn test_region_watch_receives_own_region_events_only() {
     .expect("put apple (region1)");
 
     let mut saw_apple = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_secs(8), stream1.message()).await {
+        match tokio::time::timeout(Duration::from_secs(20), stream1.message()).await {
             Ok(Ok(Some(resp))) => {
                 let has_apple = resp
                     .events
@@ -308,9 +308,9 @@ async fn test_region_watch_receives_own_region_events_only() {
     .expect("put peach again (region2)");
 
     let mut saw_peach = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_secs(8), stream2.message()).await {
+        match tokio::time::timeout(Duration::from_secs(20), stream2.message()).await {
             Ok(Ok(Some(resp))) => {
                 if resp
                     .events

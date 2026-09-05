@@ -394,6 +394,11 @@ enum SnapshotCmd {
         /// 本地数据目录（导出源）
         #[arg(long, default_value = "/var/lib/coord")]
         data_dir: PathBuf,
+
+        /// T5.8（R-MR-05）：目标 Region（0 = region 0 / 单 Raft；>0 = 该 Region 的
+        /// <data_dir>/regions/region-{id:016x}/ 目录）
+        #[arg(long, default_value_t = 0)]
+        region: u64,
     },
 
     /// 从快照恢复节点数据
@@ -405,6 +410,11 @@ enum SnapshotCmd {
         /// 目标数据目录
         #[arg(long, default_value = "/var/lib/coord")]
         data_dir: PathBuf,
+
+        /// T5.8（R-MR-05）：目标 Region（0 = region 0 / 单 Raft；>0 = 恢复到
+        /// <data_dir>/regions/region-{id:016x}/ 目录）
+        #[arg(long, default_value_t = 0)]
+        region: u64,
     },
 
     /// 在线拉取快照（P1-08：Maintenance/Snapshot 流式导出，备份用）
@@ -416,6 +426,10 @@ enum SnapshotCmd {
         /// 快照输出文件路径
         #[arg(long, default_value = "coord-snapshot-pull.snap")]
         output: PathBuf,
+
+        /// T5.8（R-MR-05）：目标 Region（0 = region 0 / 单 Raft；>0 = 该 Region）
+        #[arg(long, default_value_t = 0)]
+        region: u64,
     },
 }
 
@@ -896,18 +910,23 @@ async fn main() {
                 addr,
                 output,
                 data_dir,
+                region,
             } => {
                 tracing::info!(
                     "Saving snapshot from {} to {}",
                     data_dir.display(),
                     output.display()
                 );
-                if let Err(e) = snapshot_save(&addr, &output, &data_dir).await {
+                if let Err(e) = snapshot_save(&output, &data_dir, region).await {
                     tracing::error!("Snapshot save failed: {e}");
                     std::process::exit(1);
                 }
             }
-            SnapshotCmd::Restore { snapshot, data_dir } => {
+            SnapshotCmd::Restore {
+                snapshot,
+                data_dir,
+                region,
+            } => {
                 tracing::info!(
                     "Restoring snapshot {} to {}",
                     snapshot.display(),
@@ -917,16 +936,23 @@ async fn main() {
                     tracing::error!("Snapshot file not found: {}", snapshot.display());
                     std::process::exit(1);
                 }
-                if let Err(e) = snapshot_restore(&snapshot, &data_dir).await {
+                if let Err(e) = snapshot_restore(&snapshot, &data_dir, region).await {
                     tracing::error!("Snapshot restore failed: {e}");
                     std::process::exit(1);
                 }
             }
-            SnapshotCmd::Pull { addr, output } => {
+            SnapshotCmd::Pull {
+                addr,
+                output,
+                region,
+            } => {
                 tracing::info!("Pulling snapshot from {} to {}", addr, output.display());
-                if let Err(e) =
-                    commands::snapshot_pull(commands::CliConn::new(&addr, cli_tls.clone()), &output)
-                        .await
+                if let Err(e) = commands::snapshot_pull(
+                    commands::CliConn::new(&addr, cli_tls.clone()),
+                    &output,
+                    region,
+                )
+                .await
                 {
                     tracing::error!("Snapshot pull failed: {e}");
                     std::process::exit(1);
@@ -1434,27 +1460,39 @@ async fn main() {
 
 // ──── Snapshot CLI 实现 ────
 
-/// 从本地数据目录导出快照（P0-A.3 过渡工具；`addr` 预留未来远程导出）
+/// 从本地数据目录导出快照（P0-A.3 过渡工具）。
+/// T5.8（R-MR-05）：region = 0 导出根目录（legacy / region 0 system raft）；
+/// region > 0 导出 `<data_dir>/regions/region-{id:016x}/`（Region 独立备份）。
 async fn snapshot_save(
-    _addr: &str,
     output: &std::path::Path,
     data_dir: &std::path::Path,
+    region: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    tracing::info!("Exporting snapshot to {}", output.display());
+    let target_dir = coord_server::raft::region_runtime::region_data_dir(data_dir, region);
+    tracing::info!(
+        "Exporting snapshot (region={region}) from {} to {}",
+        target_dir.display(),
+        output.display()
+    );
 
-    if !data_dir.exists() {
+    if !target_dir.exists() {
         return Err(format!(
             "Data directory {} not found. Is the server running?",
-            data_dir.display()
+            target_dir.display()
         )
         .into());
     }
 
     let storage_config = coord_core::types::StorageConfig::default();
-    let backend = RedbBackend::open(data_dir, &storage_config)?;
+    let backend = RedbBackend::open(&target_dir, &storage_config)?;
     let mvcc = MvccStorage::new(backend)?;
 
-    let snapshot_data = coord_server::storage::snapshot::export_snapshot_data(&mvcc, 0, 0)?;
+    let applied = mvcc.get_applied_log_id()?;
+    let snapshot_data = coord_server::storage::snapshot::export_snapshot_data(
+        &mvcc,
+        applied.map(|a| a.index).unwrap_or(0),
+        applied.map(|a| a.term).unwrap_or(0),
+    )?;
     let bytes = snapshot_data.to_bytes()?;
     std::fs::write(output, &bytes)?;
 
@@ -1469,25 +1507,30 @@ async fn snapshot_save(
     Ok(())
 }
 
-/// 从快照文件恢复到本地数据目录
+/// 从快照文件恢复到本地数据目录。
+/// T5.8（R-MR-05）：region = 0 恢复根目录；region > 0 恢复到
+/// `<data_dir>/regions/region-{id:016x}/`（Region 独立恢复，目录不存在则创建）。
 async fn snapshot_restore(
     snapshot_path: &PathBuf,
     data_dir: &std::path::Path,
+    region: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(snapshot_path)?;
     let snapshot_data = coord_server::storage::snapshot::SnapshotData::from_bytes(&bytes)?;
 
+    let target_dir = coord_server::raft::region_runtime::region_data_dir(data_dir, region);
     tracing::info!(
-        "Restoring snapshot v{}: last_included_index={}, {} KV pairs",
+        "Restoring snapshot (region={region}) v{}: last_included_index={}, {} KV pairs → {}",
         snapshot_data.version,
         snapshot_data.last_included_index,
-        snapshot_data.kv_pairs.len()
+        snapshot_data.kv_pairs.len(),
+        target_dir.display()
     );
 
     // 创建新的数据目录和存储实例
-    std::fs::create_dir_all(data_dir)?;
+    std::fs::create_dir_all(&target_dir)?;
     let storage_config = coord_core::types::StorageConfig::default();
-    let backend = RedbBackend::open(data_dir, &storage_config)?;
+    let backend = RedbBackend::open(&target_dir, &storage_config)?;
     let mvcc = MvccStorage::new(backend)?;
 
     coord_server::storage::snapshot::import_snapshot_data(&mvcc, &snapshot_data)?;
@@ -1496,12 +1539,12 @@ async fn snapshot_restore(
     tracing::info!(
         "Snapshot restored: {} KV pairs → {}",
         kv_count,
-        data_dir.display()
+        target_dir.display()
     );
     println!(
         "Snapshot restored: {} KV pairs → {}",
         kv_count,
-        data_dir.display()
+        target_dir.display()
     );
     Ok(())
 }

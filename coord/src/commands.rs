@@ -1202,14 +1202,16 @@ mod idgen_reset_tests {
 ///
 /// 从源节点按块接收 SnapshotData（首块携带 last_included_index/term），
 /// 拼接后先解析校验（版本 + bincode）再落盘（tmp → 原子 rename）。
+/// T5.8（R-MR-05）：region = 0 拉 region 0 / 单 Raft；>0 拉对应 Region。
 pub async fn snapshot_pull(
     conn: impl Into<CliConn>,
     output: &std::path::Path,
+    region: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let conn = conn.into();
     let mut client = build_maintenance_client(&conn).await?;
     let mut stream = client
-        .snapshot(tonic::Request::new(SnapshotRequest {}))
+        .snapshot(tonic::Request::new(SnapshotRequest { region_id: region }))
         .await?
         .into_inner();
 

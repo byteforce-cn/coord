@@ -150,7 +150,7 @@ async fn test_snapshot_rpc_stream_and_restore() {
             .unwrap(),
     );
     let mut stream = client
-        .snapshot(tonic::Request::new(SnapshotRequest {}))
+        .snapshot(tonic::Request::new(SnapshotRequest { region_id: 0 }))
         .await
         .expect("snapshot rpc")
         .into_inner();
@@ -235,7 +235,7 @@ async fn test_snapshot_rpc_matches_local_export() {
             .unwrap(),
     );
     let mut stream = client
-        .snapshot(tonic::Request::new(SnapshotRequest {}))
+        .snapshot(tonic::Request::new(SnapshotRequest { region_id: 0 }))
         .await
         .unwrap()
         .into_inner();

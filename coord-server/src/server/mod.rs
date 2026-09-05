@@ -2444,17 +2444,36 @@ impl Maintenance for CoordNode {
 
     async fn snapshot(
         &self,
-        _request: tonic::Request<SnapshotRequest>,
+        request: tonic::Request<SnapshotRequest>,
     ) -> Result<tonic::Response<Self::SnapshotStream>, tonic::Status> {
         // P1-08：流式快照导出（在线备份）。从本地状态机导出（任何节点可服务，
         // 运维建议从 leader 或已追平 follower 拉取；数据为 v2 格式密文直传，
         // 不经过 Barrier）。首块携带 last_included_index/term，客户端按块拼接。
-        let applied = self.storage.get_applied_log_id().map_err(map_err)?;
+        // T5.8（R-MR-05）：region_id > 0 时导出对应 Region（region ≥1 的目录级
+        // 隔离 MVCC）——region 0 / 缺省（0）= legacy 单 Raft 或 system raft。
+        let region_id = request.into_inner().region_id;
+        let target_mvcc: Arc<MvccStorage<RedbBackend>> = if region_id > 0 {
+            let Some(manager) = &self.region_manager else {
+                return Err(tonic::Status::failed_precondition(
+                    "region_id > 0 requires multi_raft mode",
+                ));
+            };
+            let Some(rt) = manager.runtime(region_id) else {
+                return Err(tonic::Status::not_found(format!(
+                    "region {region_id} not found on this node"
+                )));
+            };
+            Arc::clone(&rt.mvcc)
+        } else {
+            Arc::clone(&self.storage)
+        };
+
+        let applied = target_mvcc.get_applied_log_id().map_err(map_err)?;
         let last_included_index = applied.map(|a| a.index).unwrap_or(0);
         let last_included_term = applied.map(|a| a.term).unwrap_or(0);
 
         let snapshot_data = crate::storage::snapshot::export_snapshot_data(
-            &self.storage,
+            &target_mvcc,
             last_included_index,
             last_included_term,
         )

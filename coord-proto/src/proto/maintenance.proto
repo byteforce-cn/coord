@@ -23,7 +23,12 @@ message StatusResponse {
   string seal_status = 5;
 }
 
-message SnapshotRequest {}
+message SnapshotRequest {
+  // T5.8（R-MR-05）：目标 Region（Multi-Raft 模式）。0 = legacy 单 Raft /
+  // region 0 system raft（缺省保持兼容）；>0 = 导出 <data_dir>/regions/
+  // region-{id:016x}/ 对应 Region 的独立快照。region 未装配 → NOT_FOUND。
+  uint64 region_id = 1;
+}
 
 message SnapshotResponse {
   bytes data = 1;
