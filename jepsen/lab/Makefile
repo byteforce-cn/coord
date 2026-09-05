@@ -68,7 +68,7 @@ VG     := cd $(LAB_DIR) && vagrant
 # command must be a SINGLE quoted argument (vagrant joins args without
 # re-quoting). In docker mode the same command runs via `compose exec`.
 define runctl
-$(if $(filter docker,$(JEPSEN_PROVIDER)),$(CO) exec -T control bash -lc "$(1)",$(VG_SSH) -- 'sudo -i bash -lc "$(1)"')
+$(if $(filter docker,$(JEPSEN_PROVIDER)),$(CO) exec -T control bash -c "$(1)",$(VG_SSH) -- 'sudo -i bash -lc "$(1)"')
 endef
 
 # --- coord test ---------------------------------------------------------------
@@ -208,19 +208,19 @@ stage: binary ## Assemble $(UPLOAD_STAGE)/coord-test from jepsen/ + binary (no d
 
 upload: ## Deploy coord/jepsen + built binary to the control node (refuses if soak running)
 ifeq ($(JEPSEN_PROVIDER),docker)
-	@$(call runctl, for i in $$(seq 1 60); do [ -f /root/.ssh/id_rsa ] && [ -f /jepsen/nodes ] && break; sleep 2; done; \
-	    if test -x $(CTRL_PROJECT)/coord-soak.sh; then (cd $(CTRL_PROJECT) && ./coord-soak.sh check); fi; \
+	@$(call runctl, for i in {1..60}; do [ -f /root/.ssh/id_rsa ] && [ -f /jepsen/nodes ] && break; sleep 2; done; \
+	    if test -x $(CTRL_PROJECT)/scripts/coord-soak.sh; then (cd $(CTRL_PROJECT) && ./scripts/coord-soak.sh check); fi; \
 	    ln -sfn /opt/coord/jepsen /root/coord-test && \
 	    cp -f /root/.ssh/id_rsa /root/.ssh/id_ed25519 && \
 	    cp -f /root/.ssh/id_rsa.pub /root/.ssh/id_ed25519.pub && \
 	    ln -sfn /jepsen/nodes /root/nodes)
 	@$(MAKE) binary
 	@ln -sfn ../target/release/coord $(TEST_DIR)/coord
-	@$(call runctl, cd $(CTRL_PROJECT) && chmod +x coord-soak.sh scripts/coord-soak.sh)
+	@$(call runctl, cd $(CTRL_PROJECT) && chmod +x scripts/coord-soak.sh)
 	@echo "docker: repo bind-mounted at /opt/coord; /root/coord-test -> /opt/coord/jepsen"
 	@echo "coord @ $$(cd $(REPO_ROOT) && git rev-parse --short HEAD) (bin $$(sha256sum $(COORD_BIN) | cut -c1-8))"
 else
-	@$(call runctl, if test -x $(CTRL_PROJECT)/coord-soak.sh; then $(CTRL_PROJECT)/coord-soak.sh check; fi)
+	@$(call runctl, if test -x $(CTRL_PROJECT)/scripts/coord-soak.sh; then $(CTRL_PROJECT)/scripts/coord-soak.sh check; fi)
 	$(MAKE) stage
 	$(VG) upload $(UPLOAD_STAGE)/coord-test /tmp/coord-test control
 	$(call runctl, rm -rf $(CTRL_PROJECT) && mv /tmp/coord-test $(CTRL_PROJECT) \
@@ -269,7 +269,7 @@ matrix: ## Full regression matrix (workloads x nemeses), stops on first failure
 # ---------------------------------------------------------------------------
 
 soak: ## Start the soak in the background on control (SOAK_HOURS / SOAK_TIME_LIMIT, SOAK_RATE, SOAK_REGIONS...)
-	$(call runctl, cd $(CTRL_PROJECT) && ./coord-soak.sh start \
+	$(call runctl, cd $(CTRL_PROJECT) && ./scripts/coord-soak.sh start \
 	    $(if $(SOAK_TIME_LIMIT),--time-limit $(SOAK_TIME_LIMIT),--hours $(SOAK_HOURS)) \
 	    --rate $(SOAK_RATE) --quiet $(SOAK_QUIET) --disrupt $(SOAK_DISRUPT) \
 	    $(if $(SOAK_REGIONS),--regions $(SOAK_REGIONS)) \
@@ -277,16 +277,16 @@ soak: ## Start the soak in the background on control (SOAK_HOURS / SOAK_TIME_LIM
 	@echo "Soak started. Monitor: make soak-status   (or make soak-tail)"
 
 soak-status: ## Soak progress + latest log lines
-	$(call runctl, cd $(CTRL_PROJECT) && ./coord-soak.sh status)
+	$(call runctl, cd $(CTRL_PROJECT) && ./scripts/coord-soak.sh status)
 
 soak-tail: ## Tail the soak log (last 30 lines)
-	$(call runctl, cd $(CTRL_PROJECT) && ./coord-soak.sh tail)
+	$(call runctl, cd $(CTRL_PROJECT) && ./scripts/coord-soak.sh tail)
 
 soak-stop: ## Cancel the soak run
-	$(call runctl, cd $(CTRL_PROJECT) && ./coord-soak.sh stop)
+	$(call runctl, cd $(CTRL_PROJECT) && ./scripts/coord-soak.sh stop)
 
 soak-results: ## Summarize the latest soak results.edn
-	$(call runctl, cd $(CTRL_PROJECT) && ./coord-soak.sh results)
+	$(call runctl, cd $(CTRL_PROJECT) && ./scripts/coord-soak.sh results)
 
 soak-diag: ## Run one-shot all-node diagnostics (n1..n5) on control
 ifeq ($(JEPSEN_PROVIDER),docker)
@@ -301,7 +301,7 @@ endif
 # ---------------------------------------------------------------------------
 
 logs: ## Tail the latest test's jepsen.log (via coord-soak.sh log)
-	$(call runctl, $(CTRL_PROJECT)/coord-soak.sh log)
+	$(call runctl, $(CTRL_PROJECT)/scripts/coord-soak.sh log)
 
 # ---------------------------------------------------------------------------
 # Docker shorthand: `make docker-<target>` == `make <target> JEPSEN_PROVIDER=docker`
