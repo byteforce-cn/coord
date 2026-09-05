@@ -82,6 +82,27 @@ pub(crate) fn encode_kv_meta_key(user_key: &[u8]) -> Vec<u8> {
     encoded
 }
 
+// ──── PD 全局 operator 队列（R-MR-08 / D1-a，docs §4.5；region 0 raft）────
+
+/// PD 队列内部记录前缀（region 0 MVCC，`TABLE_KV` 原始行）。
+///
+/// 非 `/kv/` 前缀 → 不加密（同 `/_lease/`、`/_sys/auth/` 先例）；不上 Watch；
+/// 无 KvMetadata → 不经 compaction tombstone 清理（同节点重放/重启安全）。
+/// **快照覆盖为 P2 必补项**（`SnapshotData` 现仅导出 `/kv/`、`/_sys/auth/`、
+/// `/_lease/` 前缀——见 docs §4.5 P2）。
+pub const PD_QUEUE_PREFIX: &[u8] = b"/_pd/ops/";
+
+/// 终态条目保留上限（超出删最旧终态；apply 期确定性裁剪，只依赖持久状态）
+const PD_QUEUE_MAX_TERMINAL: usize = 512;
+
+/// 队列键：`/_pd/ops/{op_id:u64be}`（定宽，前缀迭代即 op_id 升序）
+pub(crate) fn encode_pd_op_key(op_id: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(PD_QUEUE_PREFIX.len() + 8);
+    key.extend_from_slice(PD_QUEUE_PREFIX);
+    key.extend_from_slice(&op_id.to_be_bytes());
+    key
+}
+
 // ──── Key 编码工具 ────
 
 /// 将用户 Key 编码为内部存储格式：/kv/{user_key}
@@ -1661,6 +1682,147 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
+    // ──── PD 全局 operator 队列（R-MR-08 / D1-a，docs §4.5；region 0 raft）────
+
+    /// apply PD 命令（region 0 raft 状态机路径）。
+    ///
+    /// 幂等守卫（D-A3）：该 revision 已 apply（changelog 存在）→ 直接返回 replayed
+    /// （无副作用）。写路径与 `apply_auth_op` 同构：raw `TABLE_KV` 记录 + 空 changes
+    /// 的 changelog 标记 + `META_LAST_APPLIED` 同一事务；不上 Watch、不产生用户
+    /// 变更事件（队列为内部控制面记录）。所有判定只依赖持久状态（确定性，
+    /// 规格 A.4 约束 1）。
+    pub fn apply_pd_op(
+        &self,
+        op: &crate::raft::type_config::PdOp,
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<ApplyOutcome> {
+        use crate::raft::type_config::PdOp;
+        use crate::raft::type_config::PdQueueEntry;
+
+        if self.changelog_contains_revision(revision)? {
+            return Ok(ApplyOutcome::replayed());
+        }
+
+        self.backend.write(|tx| {
+            match op {
+                PdOp::Enqueue {
+                    op,
+                    requester,
+                    proposed_at_unix,
+                } => {
+                    // 全局去重：存在相同 Pending/Running operator → no-op
+                    let mut dup = false;
+                    for (_, v) in tx.iter_prefix(TABLE_KV, PD_QUEUE_PREFIX)? {
+                        if let Some(e) = PdQueueEntry::from_bytes(&v) {
+                            if (e.is_pending() || e.is_running()) && e.op == *op {
+                                dup = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !dup {
+                        let entry = PdQueueEntry::new_pending(
+                            revision,
+                            op.clone(),
+                            *requester,
+                            *proposed_at_unix,
+                        );
+                        tx.insert(
+                            TABLE_KV,
+                            &encode_pd_op_key(revision),
+                            &entry.to_bytes()?,
+                        )?;
+                    }
+                }
+                PdOp::Claim { op_id, node_id } => {
+                    let key = encode_pd_op_key(*op_id);
+                    if let Some(mut e) = tx
+                        .get(TABLE_KV, &key)?
+                        .and_then(|v| PdQueueEntry::from_bytes(&v))
+                    {
+                        if e.try_claim(*node_id) {
+                            tx.insert(TABLE_KV, &key, &e.to_bytes()?)?;
+                        }
+                    }
+                }
+                PdOp::Complete {
+                    op_id,
+                    node_id,
+                    success,
+                    error,
+                } => {
+                    let key = encode_pd_op_key(*op_id);
+                    if let Some(mut e) = tx
+                        .get(TABLE_KV, &key)?
+                        .and_then(|v| PdQueueEntry::from_bytes(&v))
+                    {
+                        if e.try_complete(*node_id, *success, error) {
+                            tx.insert(TABLE_KV, &key, &e.to_bytes()?)?;
+                        }
+                    }
+                }
+                PdOp::Requeue { op_id } => {
+                    let key = encode_pd_op_key(*op_id);
+                    if let Some(mut e) = tx
+                        .get(TABLE_KV, &key)?
+                        .and_then(|v| PdQueueEntry::from_bytes(&v))
+                    {
+                        if e.try_requeue() {
+                            tx.insert(TABLE_KV, &key, &e.to_bytes()?)?;
+                        }
+                    }
+                }
+            }
+
+            // 终态裁剪（确定性：键序 = op_id 升序 = 入队序，删最旧终态）
+            let mut terminal: Vec<Vec<u8>> = Vec::new();
+            for (k, v) in tx.iter_prefix(TABLE_KV, PD_QUEUE_PREFIX)? {
+                if let Some(e) = PdQueueEntry::from_bytes(&v) {
+                    if e.is_terminal() {
+                        terminal.push(k);
+                    }
+                }
+            }
+            let excess = terminal.len().saturating_sub(PD_QUEUE_MAX_TERMINAL);
+            for k in terminal.into_iter().take(excess) {
+                tx.remove(TABLE_KV, &k)?;
+            }
+
+            // Changelog 标记（无 Key 变更，仅推进幂等守卫/水位）
+            let event = ChangeEvent {
+                revision,
+                changes: Vec::new(),
+                event_type: EventType::Put,
+            };
+            tx.insert(
+                TABLE_CHANGELOG,
+                &encode_changelog_key(revision),
+                &event.to_bytes(),
+            )?;
+
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+
+            Ok(ApplyOutcome::applied())
+        })
+    }
+
+    /// 读取 region 0 PD 全局队列快照（按 op_id 升序；执行器/测试/审计读取）
+    pub fn pd_queue_entries(&self) -> Result<Vec<crate::raft::type_config::PdQueueEntry>> {
+        use crate::raft::type_config::PdQueueEntry;
+
+        self.backend.read(|tx| {
+            let mut out = Vec::new();
+            for (_, v) in tx.iter_prefix(TABLE_KV, PD_QUEUE_PREFIX)? {
+                if let Some(e) = PdQueueEntry::from_bytes(&v) {
+                    out.push(e);
+                }
+            }
+            out.sort_by_key(|e| e.op_id);
+            Ok(out)
+        })
+    }
+
     // ──── Compact（P1-01：raft 下发 compact revision，节点一致）────
 
     /// 读取已持久化的 compacted revision（`META_COMPACT_REVISION`）。
@@ -3105,5 +3267,325 @@ mod tests {
         let backend = RedbBackend::open(dir.path(), &config).unwrap();
         let reopened = MvccStorage::new(backend).unwrap();
         assert_eq!(reopened.compacted_revision().unwrap(), 3);
+    }
+
+    // ──── R-MR-08（D1-a）：PD 全局 operator 队列状态机（apply_pd_op）────
+
+    use crate::pd::operator::{Operator, OperatorStatus};
+    use crate::raft::type_config::PdOp;
+
+    fn make_add_peer(region_id: u64, node_id: u64) -> Operator {
+        Operator::AddPeer {
+            region_id,
+            node_id,
+            raft_addr: format!("node{node_id}:50052"),
+        }
+    }
+
+    fn enqueue_at(storage: &MvccStorage<RedbBackend>, op: &Operator, rev: u64) {
+        storage
+            .apply_pd_op(
+                &PdOp::Enqueue {
+                    op: op.clone(),
+                    requester: 1,
+                    proposed_at_unix: 1_700_000_000 + rev as i64,
+                },
+                rev,
+                AppliedLogId::standalone(rev),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn test_pd_enqueue_claim_complete_roundtrip() {
+        let (_dir, storage) = create_storage();
+        let op = make_add_peer(1, 2);
+
+        // Enqueue @ rev1：op_id == revision，Pending
+        enqueue_at(&storage, &op, 1);
+        let entries = storage.pd_queue_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].op_id, 1);
+        assert!(entries[0].is_pending());
+        assert_eq!(entries[0].op, op);
+        assert_eq!(storage.current_revision(), 1);
+
+        // Claim 由 node 3（@rev2）→ Running + claimed_by=3
+        storage
+            .apply_pd_op(
+                &PdOp::Claim {
+                    op_id: 1,
+                    node_id: 3,
+                },
+                2,
+                AppliedLogId::standalone(2),
+            )
+            .unwrap();
+        let e = &storage.pd_queue_entries().unwrap()[0];
+        assert!(e.is_running());
+        assert_eq!(e.claimed_by, 3);
+
+        // 非认领者 node 2 完成 → no-op（防他节点误 Complete）
+        storage
+            .apply_pd_op(
+                &PdOp::Complete {
+                    op_id: 1,
+                    node_id: 2,
+                    success: true,
+                    error: String::new(),
+                },
+                3,
+                AppliedLogId::standalone(3),
+            )
+            .unwrap();
+        assert!(storage.pd_queue_entries().unwrap()[0].is_running());
+
+        // 认领者 node 3 完成 → Success（@rev4）
+        storage
+            .apply_pd_op(
+                &PdOp::Complete {
+                    op_id: 1,
+                    node_id: 3,
+                    success: true,
+                    error: String::new(),
+                },
+                4,
+                AppliedLogId::standalone(4),
+            )
+            .unwrap();
+        let e = &storage.pd_queue_entries().unwrap()[0];
+        assert_eq!(e.status, OperatorStatus::Success);
+        assert!(e.is_terminal());
+        assert_eq!(storage.current_revision(), 4);
+    }
+
+    #[test]
+    fn test_pd_enqueue_dedup_and_distinct_ops() {
+        let (_dir, storage) = create_storage();
+        let op = make_add_peer(1, 2);
+
+        // 相同 operator 再次入队 → no-op（全局去重）
+        enqueue_at(&storage, &op, 1);
+        enqueue_at(&storage, &op, 5);
+        let entries = storage.pd_queue_entries().unwrap();
+        assert_eq!(entries.len(), 1, "duplicate enqueue must be deduped globally");
+        assert_eq!(entries[0].op_id, 1);
+
+        // 不同目标 node 的 AddPeer = 不同 operator → 可入队
+        enqueue_at(&storage, &make_add_peer(1, 4), 9);
+        let entries = storage.pd_queue_entries().unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // 终态（已 Success）后同 operator 可再次入队（去重只覆盖 Pending/Running）
+        storage
+            .apply_pd_op(
+                &PdOp::Claim {
+                    op_id: 1,
+                    node_id: 9,
+                },
+                10,
+                AppliedLogId::standalone(10),
+            )
+            .unwrap();
+        storage
+            .apply_pd_op(
+                &PdOp::Complete {
+                    op_id: 1,
+                    node_id: 9,
+                    success: true,
+                    error: String::new(),
+                },
+                11,
+                AppliedLogId::standalone(11),
+            )
+            .unwrap();
+        assert!(storage.pd_queue_entries().unwrap()[0].is_terminal());
+
+        enqueue_at(&storage, &op, 12);
+        let entries = storage.pd_queue_entries().unwrap();
+        assert_eq!(entries.len(), 3, "same op re-enqueued after terminal");
+        assert_eq!(entries[2].op_id, 12);
+    }
+
+    #[test]
+    fn test_pd_claim_is_exclusive() {
+        let (_dir, storage) = create_storage();
+        enqueue_at(&storage, &make_add_peer(2, 5), 1);
+
+        // node 7 认领成功
+        storage
+            .apply_pd_op(
+                &PdOp::Claim {
+                    op_id: 1,
+                    node_id: 7,
+                },
+                2,
+                AppliedLogId::standalone(2),
+            )
+            .unwrap();
+        // node 9 再认领 → no-op（claimed_by 保持 7）
+        storage
+            .apply_pd_op(
+                &PdOp::Claim {
+                    op_id: 1,
+                    node_id: 9,
+                },
+                3,
+                AppliedLogId::standalone(3),
+            )
+            .unwrap();
+        let e = &storage.pd_queue_entries().unwrap()[0];
+        assert!(e.is_running());
+        assert_eq!(e.claimed_by, 7);
+
+        // 认领者 7 完成失败 → Failed 携带原因
+        storage
+            .apply_pd_op(
+                &PdOp::Complete {
+                    op_id: 1,
+                    node_id: 7,
+                    success: false,
+                    error: "region 2 not leader".into(),
+                },
+                4,
+                AppliedLogId::standalone(4),
+            )
+            .unwrap();
+        let e = &storage.pd_queue_entries().unwrap()[0];
+        assert_eq!(
+            e.status,
+            OperatorStatus::Failed("region 2 not leader".into())
+        );
+        assert_eq!(e.error, "region 2 not leader");
+    }
+
+    #[test]
+    fn test_pd_requeue_resets_running() {
+        let (_dir, storage) = create_storage();
+        enqueue_at(&storage, &make_add_peer(1, 3), 1);
+        storage
+            .apply_pd_op(
+                &PdOp::Claim {
+                    op_id: 1,
+                    node_id: 4,
+                },
+                2,
+                AppliedLogId::standalone(2),
+            )
+            .unwrap();
+        assert!(storage.pd_queue_entries().unwrap()[0].is_running());
+
+        // Requeue → Pending + 清认领者（认领者失联/可重试路径）
+        storage
+            .apply_pd_op(
+                &PdOp::Requeue { op_id: 1 },
+                3,
+                AppliedLogId::standalone(3),
+            )
+            .unwrap();
+        let e = &storage.pd_queue_entries().unwrap()[0];
+        assert!(e.is_pending());
+        assert_eq!(e.claimed_by, 0);
+
+        // Requeue 对 Pending 再执行 → no-op（仍 Pending）
+        storage
+            .apply_pd_op(
+                &PdOp::Requeue { op_id: 1 },
+                4,
+                AppliedLogId::standalone(4),
+            )
+            .unwrap();
+        assert!(storage.pd_queue_entries().unwrap()[0].is_pending());
+    }
+
+    #[test]
+    fn test_pd_apply_is_replay_idempotent() {
+        let (_dir, storage) = create_storage();
+        let op = make_add_peer(3, 1);
+        enqueue_at(&storage, &op, 1);
+
+        // 同 revision 重放 → replayed，不重复入队
+        let outcome = storage
+            .apply_pd_op(
+                &PdOp::Enqueue {
+                    op: op.clone(),
+                    requester: 1,
+                    proposed_at_unix: 1_700_000_000,
+                },
+                1,
+                AppliedLogId::standalone(1),
+            )
+            .unwrap();
+        assert!(outcome.replayed);
+        assert_eq!(storage.pd_queue_entries().unwrap().len(), 1);
+        assert_eq!(storage.current_revision(), 1);
+    }
+
+    #[test]
+    fn test_pd_queue_prunes_oldest_terminal() {
+        let (_dir, storage) = create_storage();
+        // 造 515 个唯一 operator（不同目标 node_id）→ 全部 enqueue；
+        // 前 513 个认领并完成（terminal），尾部 2 个保持 Pending。
+        for i in 0..515u64 {
+            enqueue_at(&storage, &make_add_peer(1, 100 + i), 1 + i);
+        }
+        for i in 0..513u64 {
+            storage
+                .apply_pd_op(
+                    &PdOp::Claim {
+                        op_id: 1 + i,
+                        node_id: 1,
+                    },
+                    1000 + i,
+                    AppliedLogId::standalone(1000 + i),
+                )
+                .unwrap();
+            storage
+                .apply_pd_op(
+                    &PdOp::Complete {
+                        op_id: 1 + i,
+                        node_id: 1,
+                        success: true,
+                        error: String::new(),
+                    },
+                    2000 + i,
+                    AppliedLogId::standalone(2000 + i),
+                )
+                .unwrap();
+        }
+        let entries = storage.pd_queue_entries().unwrap();
+        assert_eq!(entries.len(), 514, "one oldest terminal pruned");
+        assert_eq!(entries[0].op_id, 2, "oldest terminal op 1 pruned");
+        let terminal = entries.iter().filter(|e| e.is_terminal()).count();
+        assert_eq!(terminal, 512, "terminal retained at cap");
+        // 尾部两个（op_id 514/515）仍 Pending（未完成、不可裁剪）
+        assert!(entries[entries.len() - 2].is_pending());
+        assert!(entries[entries.len() - 1].is_pending());
+    }
+
+    #[test]
+    fn test_pd_queue_persists_across_reopen() {
+        let (dir, storage) = create_storage();
+        enqueue_at(&storage, &make_add_peer(4, 2), 1);
+        storage
+            .apply_pd_op(
+                &PdOp::Claim {
+                    op_id: 1,
+                    node_id: 2,
+                },
+                2,
+                AppliedLogId::standalone(2),
+            )
+            .unwrap();
+        drop(storage);
+
+        let config = StorageConfig::default();
+        let backend = RedbBackend::open(dir.path(), &config).unwrap();
+        let reopened = MvccStorage::new(backend).unwrap();
+        let entries = reopened.pd_queue_entries().unwrap();
+        assert_eq!(entries.len(), 1, "queue survives reopen (redb durable)");
+        assert_eq!(entries[0].op_id, 1);
+        assert!(entries[0].is_running());
+        assert_eq!(entries[0].claimed_by, 2);
     }
 }

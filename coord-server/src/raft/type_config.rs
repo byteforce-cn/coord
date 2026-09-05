@@ -4,6 +4,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use coord_core::error::{Error, Result};
+use coord_core::types::NodeID;
+
+use crate::pd::operator::{Operator, OperatorStatus};
 use crate::txn::{TxnCompare, TxnOp, TxnOpResponse};
 
 // ──── 应用层数据类型 ────
@@ -77,6 +81,157 @@ pub enum AuthOp {
     ConsumeSession { hash_hex: String },
 }
 
+// ──── PD 全局调度命令（R-MR-08 / D1-a，见 docs §4.5）────
+
+/// PD 全局 operator 队列治理命令（经 **region 0 system raft** 承载）。
+///
+/// 设计要点（docs/coord-multi-raft-production-plan-2026-09-05.md §4.5）：
+/// - 本枚举及 `Command::Pd` 变体**只允许末尾追加**（bincode 变体索引 = 旧日志/快照
+///   升级兼容）；
+/// - 仅 region 0 raft 提出并 apply；data region raft 收到（不应发生）视为其各自
+///   MVCC 上的无害记录（键前缀 `/_pd/` 不在业务 keyspace）；
+/// - apply 期**不读墙钟/随机数**（确定性约束同规格 A.4 约束 1）：`Enqueue` 携带
+///   `proposed_at_unix`（由 proposer/leader 在 propose 前填，先例
+///   `LeaseOp::Grant.deadline_wall_ms`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PdOp {
+    /// 入队一个 operator。幂等：队列中已有**相同** Pending/Running operator 时
+    /// no-op（全局去重命中点）；`op_id` = 本命令的日志 index（revision）。
+    Enqueue {
+        op: Operator,
+        /// 提出方节点（审计/归属）
+        requester: NodeID,
+        /// 提出方墙钟 Unix 秒（proposer 填；仅信息性）
+        proposed_at_unix: i64,
+    },
+    /// 认领执行（仅 Pending 生效；已被认领/Running → no-op，防双认领）
+    Claim { op_id: u64, node_id: NodeID },
+    /// 完成（仅 Running 且 `claimed_by == node_id` 生效；成功或失败携带原因）
+    Complete {
+        op_id: u64,
+        node_id: NodeID,
+        success: bool,
+        error: String,
+    },
+    /// 重新入队（Running → Pending、清认领者；认领者失联/可重试时用）
+    Requeue { op_id: u64 },
+}
+
+/// region 0 PD 队列条目（`/_pd/ops/{op_id:u64be}` 的 bincode 载荷）
+///
+/// `op_id` ≡ 入队日志 index（revision）：单调、唯一、全序、跨重放/重启稳定，
+/// 无需独立计数器。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PdQueueEntry {
+    /// 入队日志 index（revision）
+    pub op_id: u64,
+    /// 具体调度操作
+    pub op: Operator,
+    /// 生命周期（Pending → Running → Success/Failed；Running → Pending）
+    pub status: OperatorStatus,
+    /// 提出方节点（审计）
+    pub requester: NodeID,
+    /// 认领执行节点（0 = 未认领）
+    pub claimed_by: NodeID,
+    /// 提出方墙钟 Unix 秒（仅信息性，不参与决策）
+    pub proposed_at_unix: i64,
+    /// Failed 原因 / 审计信息
+    pub error: String,
+}
+
+impl PdQueueEntry {
+    /// 新建 Pending 条目（op_id = Enqueue 日志 index）
+    pub fn new_pending(
+        op_id: u64,
+        op: Operator,
+        requester: NodeID,
+        proposed_at_unix: i64,
+    ) -> Self {
+        Self {
+            op_id,
+            op,
+            status: OperatorStatus::Pending,
+            requester,
+            claimed_by: 0,
+            proposed_at_unix,
+            error: String::new(),
+        }
+    }
+
+    /// 是否待执行
+    pub fn is_pending(&self) -> bool {
+        self.status == OperatorStatus::Pending
+    }
+
+    /// 是否执行中（已被某节点认领）
+    pub fn is_running(&self) -> bool {
+        self.status == OperatorStatus::Running
+    }
+
+    /// 是否终态（Success/Failed/Cancelled；裁剪对象）
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            OperatorStatus::Success
+                | OperatorStatus::Failed(_)
+                | OperatorStatus::Cancelled
+        )
+    }
+
+    /// 认领：仅 Pending 生效（置 Running + claimed_by）。返回是否生效。
+    pub fn try_claim(&mut self, node_id: NodeID) -> bool {
+        if self.is_pending() {
+            self.status = OperatorStatus::Running;
+            self.claimed_by = node_id;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 完成：仅 Running 且认领者 == node_id 生效。返回是否生效。
+    pub fn try_complete(&mut self, node_id: NodeID, success: bool, error: &str) -> bool {
+        if self.is_running() && self.claimed_by == node_id {
+            self.status = if success {
+                OperatorStatus::Success
+            } else {
+                OperatorStatus::Failed(error.to_string())
+            };
+            self.error = if success {
+                String::new()
+            } else {
+                error.to_string()
+            };
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 重新入队：仅 Running 生效（回 Pending、清认领者与错误）。返回是否生效。
+    pub fn try_requeue(&mut self) -> bool {
+        if self.is_running() {
+            self.status = OperatorStatus::Pending;
+            self.claimed_by = 0;
+            self.error.clear();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// bincode 序列化（redb 原始行）
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self)
+            .map_err(|e| Error::Internal(format!("encode pd queue entry: {e}")))
+    }
+
+    /// bincode 反序列化（损坏行返回 None，调用方跳过）
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        bincode::deserialize(bytes).ok()
+    }
+}
+
 /// Raft 日志负载：客户端提交的状态机命令
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
@@ -114,6 +269,10 @@ pub enum Command {
     /// leader 经本命令在**各自 Region raft** 内按 `KvMetadata.lease_id` 索引
     /// 原子删除绑定 Key（apply 期扫描，避免 leader 侧扫描的 TOCTOU；幂等）。
     DeleteKeysByLease { lease_id: i64 },
+    /// R-MR-08（D1-a）：PD 全局调度命令（仅 region 0 raft 提出；§4.5）
+    ///
+    /// **末尾追加**（变体索引兼容）；data region raft 收到视为无害记录。
+    Pd(PdOp),
 }
 
 impl std::fmt::Display for Command {
@@ -136,6 +295,7 @@ impl std::fmt::Display for Command {
             Command::DeleteKeysByLease { lease_id } => {
                 write!(f, "DeleteKeysByLease(lease_id={lease_id})")
             }
+            Command::Pd(op) => write!(f, "Pd({op:?})"),
         }
     }
 }
@@ -305,6 +465,87 @@ mod tests {
             Command::Compact { revision } => assert_eq!(revision, 123456),
             _ => panic!("expected Compact"),
         }
+    }
+
+    // ──── R-MR-08（D1-a）：Command::Pd serde 往返 ────
+
+    fn test_add_peer() -> crate::pd::operator::Operator {
+        crate::pd::operator::Operator::AddPeer {
+            region_id: 1,
+            node_id: 3,
+            raft_addr: "127.0.0.1:5003".into(),
+        }
+    }
+
+    #[test]
+    fn test_command_pd_enqueue_serde_roundtrip() {
+        let cmd = Command::Pd(PdOp::Enqueue {
+            op: test_add_peer(),
+            requester: 2,
+            proposed_at_unix: 1_700_000_000,
+        });
+        let bytes = bincode::serialize(&cmd).unwrap();
+        let decoded: Command = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            Command::Pd(PdOp::Enqueue {
+                op,
+                requester,
+                proposed_at_unix,
+            }) => {
+                assert_eq!(op.region_id(), 1);
+                assert_eq!(requester, 2);
+                assert_eq!(proposed_at_unix, 1_700_000_000);
+            }
+            _ => panic!("expected Pd(Enqueue)"),
+        }
+    }
+
+    #[test]
+    fn test_command_pd_claim_complete_requeue_serde_roundtrip() {
+        let cmds = vec![
+            Command::Pd(PdOp::Claim {
+                op_id: 42,
+                node_id: 7,
+            }),
+            Command::Pd(PdOp::Complete {
+                op_id: 42,
+                node_id: 7,
+                success: false,
+                error: "region 1 not leader".into(),
+            }),
+            Command::Pd(PdOp::Requeue { op_id: 42 }),
+        ];
+        for cmd in cmds {
+            let bytes = bincode::serialize(&cmd).unwrap();
+            let decoded: Command = bincode::deserialize(&bytes).unwrap();
+            assert!(matches!(decoded, Command::Pd(_)), "roundtrip {:?}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_pd_queue_entry_serde_roundtrip() {
+        let entry = PdQueueEntry::new_pending(42, test_add_peer(), 1, 1_700_000_000);
+        let bytes = entry.to_bytes().unwrap();
+        let decoded = PdQueueEntry::from_bytes(&bytes).expect("decode");
+        assert_eq!(decoded, entry);
+        assert!(decoded.is_pending());
+        assert_eq!(decoded.op_id, 42);
+
+        // 认领后状态往返（Running + claimed_by）
+        let mut claimed = entry;
+        assert!(claimed.try_claim(7));
+        let bytes = claimed.to_bytes().unwrap();
+        let decoded = PdQueueEntry::from_bytes(&bytes).expect("decode");
+        assert!(decoded.is_running());
+        assert_eq!(decoded.claimed_by, 7);
+    }
+
+    #[test]
+    fn test_command_pd_display() {
+        let cmd = Command::Pd(PdOp::Requeue { op_id: 9 });
+        let s = format!("{cmd}");
+        assert!(s.contains("Pd"));
+        assert!(s.contains("Requeue"));
     }
 
     #[test]

@@ -631,6 +631,14 @@ impl StateMachineStore {
                 };
                 Ok((Response::DeleteRange { revision, deleted }, event))
             }
+            Command::Pd(op) => {
+                // R-MR-08（D1-a）：PD 全局队列命令 apply（region 0 raft）。
+                // 队列条目为内部记录（`/_pd/ops/*`）：不上 Watch、无用户变更事件；
+                // 幂等守卫 + META_LAST_APPLIED 由 apply_pd_op 在写事务内处理。
+                let outcome = sm.apply_pd_op(op, revision, applied).map_err(io_err)?;
+                let _ = outcome;
+                Ok((Response::Put { revision }, None))
+            }
         }
     }
 }
