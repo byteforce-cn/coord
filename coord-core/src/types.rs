@@ -33,11 +33,18 @@ pub type RegionVersion = u64;
 /// Region 配置版本号（monotonic，每次成员变更递增）
 pub type ConfVersion = u64;
 
-/// Region Epoch：防止过期请求
+/// Region Epoch：防过期客户端（v1 为防御性保留 API，见下）
 ///
-/// 客户端每次请求携带已知的 Epoch。服务端校验：
-/// - conf_ver 不匹配 → 返回 RegionNotLeader
-/// - version 不匹配 → 返回 RegionSplit（Region 已分裂）
+/// 实现说明（2026-09-05，T5.10 口径修正）：
+/// - v1 生产请求**不在线缆上携带 Epoch**：KV/Txn/Watch 全部按 key 由服务端
+///   `RegionManager::route_runtime` 路由（key range 权威，见
+///   `docs/multi-raft-limits.md`）。过期路由表最多把请求发到非 leader 节点，
+///   由 `RegionNotLeader` + leader hint 纠正——**不存在**"写入错误 Region"
+///   的可能，故本类型当前无生产请求路径调用方；
+/// - `RegionHandle::check_epoch`（coord-server）为未来 client-epoch 协议保留的
+///   防御性校验：conf_ver/version 落后 → `Error::EpochStale`（映射为
+///   UNAVAILABLE "stale epoch; refresh route table"）；
+/// - v1 无 Split（version 永不递增）；conf_ver 随成员变更/PD 对账递增。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegionEpoch {
     /// 成员变更版本：每次 add_peer / remove_peer 递增

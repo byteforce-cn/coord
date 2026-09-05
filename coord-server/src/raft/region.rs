@@ -128,6 +128,12 @@ impl RegionHandle {
     /// 校验客户端 Epoch 是否过期
     ///
     /// 若客户端 Epoch 已过期，返回相应的 Error。
+    ///
+    /// 现状（T5.10 口径）：v1 请求不在线缆上携带 Epoch——本方法是**防御性保留**
+    /// 的校验原语（供未来 client-epoch 协议使用；服务端路由按 key 权威，客户端
+    /// 过期路由表由 `RegionNotLeader` + leader hint 纠正）。conf_ver/version 落后
+    /// → `Error::EpochStale`（gRPC 映射 UNAVAILABLE "stale epoch; refresh route
+    /// table"，见 `server/mod.rs`）。
     pub fn check_epoch(&self, client_epoch: &RegionEpoch) -> Result<()> {
         let current = self.epoch();
 
@@ -160,6 +166,11 @@ impl RegionHandle {
     }
 
     /// 递增 Epoch 的 conf_ver（成员变更时调用）
+    ///
+    /// 生产 conf_ver 推进实际经 PD 对账/执行器写穿
+    /// （`pd/embedded.rs::reconcile_region_members` 直接写 `handle.meta`，
+    /// `pd/executor.rs` 写 meta_store）——本方法为 RegionHandle 侧的对称原语，
+    /// 供未来 client-epoch 协议/接线复用；当前无生产调用方。
     pub fn increment_conf_ver(&self) {
         let mut meta = self.meta.write();
         meta.epoch.conf_ver += 1;

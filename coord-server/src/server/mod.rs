@@ -2878,6 +2878,53 @@ mod tests {
         assert_eq!(status.message(), "storage error");
     }
 
+    // ──── T5.10：EpochStale 映射（此前因 check_epoch 无生产调用方而不可达）────
+
+    #[test]
+    fn test_map_err_epoch_stale_unavailable() {
+        use coord_core::error::Error;
+        // v1 无 client-epoch 协议，但 RegionHandle::check_epoch 防御性返回的
+        // EpochStale 必须映射为可重试的 UNAVAILABLE（客户端刷新路由表后重试），
+        // 而非 5xx/INTERNAL。
+        let status = map_err(Error::EpochStale {
+            region_id: 3,
+            client_conf_ver: 1,
+            client_version: 1,
+            server_conf_ver: 2,
+            server_version: 1,
+        });
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert!(
+            status.message().contains("stale epoch"),
+            "{} != stale-epoch message",
+            status.message()
+        );
+    }
+
+    #[test]
+    fn test_map_region_errors_route_table_semantics() {
+        use coord_core::error::Error;
+        // 与 v1「服务端按 key 权威路由」配套的错误面：
+        //  - RegionNotLeader → UNAVAILABLE + leader hint（客户端按 Region 重定向）
+        //  - KeyNotInRegion → INVALID_ARGUMENT（跨 Region 写被显式拒绝，不静默错答）
+        //  - RegionNotFound / RouteNotReady → 对应可重试状态
+        let not_leader = map_err(Error::RegionNotLeader {
+            region_id: 2,
+            leader_addr: Some("10.0.0.2:50051".into()),
+        });
+        assert_eq!(not_leader.code(), tonic::Code::Unavailable);
+        assert!(not_leader.message().contains("region 2"));
+
+        let key_out = map_err(Error::KeyNotInRegion { region_id: 2 });
+        assert_eq!(key_out.code(), tonic::Code::InvalidArgument);
+
+        assert_eq!(
+            map_err(Error::RegionNotFound { region_id: 9 }).code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(map_err(Error::RouteNotReady).code(), tonic::Code::Unavailable);
+    }
+
     // ──── convert_compare ────
 
     #[test]
