@@ -15,6 +15,10 @@
 //   （redb 独立文件，表 `pd_region`）；磁盘为真源——每次 create/update/delete 先
 //   同步落盘（redb commit 即 fsync）再更新内存缓存，启动时从磁盘全量恢复。
 //   `new()` 保持纯内存模式（测试 / 未启用持久化路径，行为与 Phase 2 前一致）。
+// - T3.2 例外：心跳统计更新走 `update_region_stats`（仅内存视图，不写穿落盘）。
+//   Region 心跳的 size/keys 是派生瞬态数据（下一拍重新上报），写穿会在
+//   control-plane 制造每拍 commit+fsync 写放大；磁盘为真源只约束**持久元数据**
+//   （成员/epoch/key range）变更。重启后统计回落，由首拍心跳重新填充。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -341,6 +345,29 @@ impl PdMetaStore {
             key_index.insert(new_start_key, region_id);
         }
 
+        Ok(())
+    }
+
+    /// 仅更新 Region 统计字段的内存视图（T3.2）
+    ///
+    /// Region 心跳携带的 `approximate_size` / `approximate_keys` 是**派生瞬态**
+    /// 数据——下一拍心跳即重新上报，重启后由首拍心跳重新填充。因此心跳更新走
+    /// 本方法（只改内存、不写穿落盘），避免高频心跳在 control-plane 上制造
+    /// commit+fsync 写放大；`update_region`（成员/epoch/key range 等**持久元数据**
+    /// 变更）保持写穿语义不变。统计字段含在持久化的 RegionMeta 中仅为
+    /// create/update 时顺带快照，不作为心跳真源。
+    pub fn update_region_stats(
+        &self,
+        region_id: RegionId,
+        size: u64,
+        keys: u64,
+    ) -> Result<()> {
+        let mut regions = self.regions.write();
+        let meta = regions
+            .get_mut(&region_id)
+            .ok_or(Error::RegionNotFound { region_id })?;
+        meta.approximate_size = size;
+        meta.approximate_keys = keys;
         Ok(())
     }
 
@@ -717,6 +744,39 @@ mod tests {
         assert_eq!(store.get_region_by_key(&[0x00]).unwrap().region_id, 1);
         assert_eq!(store.get_region_by_key(&[0x55]).unwrap().region_id, 2);
         assert_eq!(store.get_region_by_key(&[0x77]).unwrap().region_id, 2);
+    }
+
+    // ──── T3.2 心跳统计：内存瞬态更新，不写穿落盘 ────
+
+    #[test]
+    fn test_update_region_stats_memory_only_not_durable() {
+        // Region 心跳的 size/keys 是派生瞬态数据（下一拍即重新上报），
+        // 只更新内存视图、不写穿落盘（避免每拍心跳一次 commit+fsync 写放大）。
+        // 重启后统计回落到持久化变更写入的值，由首拍心跳重新填充。
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = PdMetaStore::open(dir.path()).unwrap();
+            store.create_region(make_meta(1, vec![], vec![])).unwrap();
+
+            // 心跳路径（模拟 handle_region_heartbeat）：更新统计
+            store.update_region_stats(1, 4096, 500).unwrap();
+            assert_eq!(store.get_region(1).unwrap().approximate_size, 4096);
+            assert_eq!(store.get_region(1).unwrap().approximate_keys, 500);
+        }
+
+        // 重启恢复：region 元数据仍在（成员/range），但统计回落到 create 时的持久值
+        let store = PdMetaStore::open(dir.path()).unwrap();
+        assert_eq!(store.region_count(), 1);
+        let r = store.get_region(1).unwrap();
+        assert_eq!(r.approximate_size, 0, "heartbeat stats must not persist");
+        assert_eq!(r.approximate_keys, 0, "heartbeat stats must not persist");
+    }
+
+    #[test]
+    fn test_update_region_stats_not_found() {
+        let store = PdMetaStore::new();
+        let err = store.update_region_stats(99, 1, 1).unwrap_err();
+        assert!(matches!(err, Error::RegionNotFound { region_id: 99 }));
     }
 
     #[test]

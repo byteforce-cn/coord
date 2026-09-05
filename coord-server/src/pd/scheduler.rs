@@ -405,6 +405,12 @@ pub struct ScheduleContext {
     pub online_nodes: Vec<NodeID>,
     /// Region ID → 采样 Key 列表（Region Leader 上报，用于 Split Key 选择）
     pub region_sample_keys: HashMap<RegionId, Vec<Vec<u8>>>,
+    /// Region ID → 心跳上报的当前 Leader（T3.2）
+    ///
+    /// 由 PD 从 Region 心跳聚合而来（`PlacementDriver.region_leaders`），是调度
+    /// 决策的运行时输入。RegionMeta 为持久 schema（成员/range），leader 不入盘；
+    /// 无心跳数据（空 map / 选举窗口）时由 Scheduler 自行回退。
+    pub leaders: HashMap<RegionId, NodeID>,
 }
 
 impl ScheduleContext {
@@ -420,7 +426,13 @@ impl ScheduleContext {
             nodes: nodes.into_iter().map(|n| (n.node_id, n)).collect(),
             online_nodes,
             region_sample_keys: HashMap::new(),
+            leaders: HashMap::new(),
         }
+    }
+
+    /// 查询 Region 当前 Leader（心跳视图；无上报返回 None）
+    pub fn leader_of(&self, region_id: RegionId) -> Option<NodeID> {
+        self.leaders.get(&region_id).copied()
     }
 
     /// 构建带采样 Key 的调度上下文
@@ -581,6 +593,10 @@ impl Scheduler for BalanceScheduler {
 /// 策略：
 ///   1. 计算每个在线节点的 Leader 数量
 ///   2. 从 Leader 最多的节点选一个 Region → 执行 TransferLeader
+///
+/// Leader 判定（T3.2）：优先取 `ScheduleContext.leaders`（Region 心跳上报的
+/// 真实 leader）；无心跳数据（组件级构造/选举窗口）时回退到「第一个 Voter
+/// peer」猜测，保证未接心跳的路径行为不变。
 pub struct LeaderScheduler {
     /// 每轮最多产生的 Operator 数量
     max_ops_per_round: usize,
@@ -590,6 +606,17 @@ impl LeaderScheduler {
     /// 创建新的 LeaderScheduler
     pub fn new(max_ops_per_round: usize) -> Self {
         Self { max_ops_per_round }
+    }
+
+    /// 判定 Region 当前 Leader：心跳视图优先，无则回退首 Voter peer
+    fn region_leader(&self, ctx: &ScheduleContext, region: &RegionMeta) -> Option<NodeID> {
+        ctx.leader_of(region.region_id).or_else(|| {
+            region
+                .peers
+                .iter()
+                .find(|p| matches!(p.role, coord_core::types::PeerRole::Voter))
+                .map(|p| p.node_id)
+        })
     }
 }
 
@@ -603,21 +630,15 @@ impl Scheduler for LeaderScheduler {
             return vec![];
         }
 
-        // 1. 计算每个在线节点的 Leader 数量
+        // 1. 计算每个在线节点的 Leader 数量（心跳视图优先）
         let mut node_leader_count: HashMap<NodeID, usize> = HashMap::new();
         for node_id in &ctx.online_nodes {
             node_leader_count.insert(*node_id, 0);
         }
         for region in ctx.regions.values() {
-            // Leader 信息不在 RegionMeta 中，需要通过 peers 推断
-            // Phase 4：假设第一个 Voter peer 为 Leader（生产环境应从心跳获取）
-            if let Some(first_voter) = region
-                .peers
-                .iter()
-                .find(|p| matches!(p.role, coord_core::types::PeerRole::Voter))
-            {
-                if ctx.is_online(first_voter.node_id) {
-                    *node_leader_count.entry(first_voter.node_id).or_insert(0) += 1;
+            if let Some(leader) = self.region_leader(ctx, region) {
+                if ctx.is_online(leader) {
+                    *node_leader_count.entry(leader).or_insert(0) += 1;
                 }
             }
         }
@@ -647,14 +668,9 @@ impl Scheduler for LeaderScheduler {
                 break;
             }
 
-            // 该 Region 的第一个 Voter 必须在 max_node 上
-            let is_leader_on_max = region
-                .peers
-                .iter()
-                .find(|p| matches!(p.role, coord_core::types::PeerRole::Voter))
-                .is_some_and(|p| p.node_id == max_node);
-
-            if !is_leader_on_max {
+            // 该 Region 的当前 Leader 必须在 max_node 上（无 leader 视图则跳过：
+            // 选举窗口不决策）
+            if self.region_leader(ctx, region) != Some(max_node) {
                 continue;
             }
 

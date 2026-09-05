@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use coord_core::error::{Error, Result};
+use coord_core::error::Result;
 use coord_core::types::{NodeID, RegionId};
 use parking_lot::RwLock;
 use tokio::sync::watch;
@@ -49,6 +49,12 @@ pub struct PlacementDriver {
     meta_store: Arc<PdMetaStore>,
     /// 活跃节点的心跳状态
     node_states: RwLock<HashMap<NodeID, NodeState>>,
+    /// Region 心跳上报的当前 leader 视图（T3.2，内存瞬态）
+    ///
+    /// 由各节点 Region 心跳填充；leader 是运行时事实（调度输入），非持久元数据，
+    /// 与 `PdMetaStore` 落盘的成员/epoch/range 分离。节点离线或选举窗口（上报
+    /// leader=0）时清除对应条目，调度器不得基于陈旧 leader 决策。
+    region_leaders: RwLock<HashMap<RegionId, NodeID>>,
     /// 调度器集合
     schedulers: Vec<Box<dyn Scheduler>>,
     /// 待执行/执行中的 Operator
@@ -69,6 +75,7 @@ impl PlacementDriver {
             config,
             meta_store,
             node_states: RwLock::new(HashMap::new()),
+            region_leaders: RwLock::new(HashMap::new()),
             schedulers,
             pending_operators: RwLock::new(Vec::new()),
             shutdown_rx,
@@ -128,9 +135,12 @@ impl PlacementDriver {
 
     // ──── Region 心跳管理 ────
 
-    /// 处理 Region 心跳上报
+    /// 处理 Region 心跳上报（T3.2）
     ///
-    /// 更新 Region 的 approximate_size、approximate_keys、Leader 信息等。
+    /// - 统计字段（size/keys）是派生瞬态数据 → 走 `update_region_stats` 内存视图，
+    ///   不写穿落盘（避免每拍心跳 commit+fsync 写放大，见 PdMetaStore 文档）；
+    /// - `leader_node_id` 记入内存 leader 视图（调度输入）：0 = 选举窗口 leader
+    ///   未知 → 清除该 Region 的陈旧视图，调度器不得基于它决策。
     pub fn handle_region_heartbeat(
         &self,
         region_id: RegionId,
@@ -138,15 +148,16 @@ impl PlacementDriver {
         keys: u64,
         leader_node_id: NodeID,
     ) -> Result<()> {
-        let mut meta = self
-            .meta_store
-            .get_region(region_id)
-            .ok_or(Error::RegionNotFound { region_id })?;
+        self.meta_store.update_region_stats(region_id, size, keys)?;
 
-        meta.approximate_size = size;
-        meta.approximate_keys = keys;
-        // Leader 信息在 RegionHandle 中维护，此处仅更新统计数据
-        self.meta_store.update_region(meta)?;
+        {
+            let mut leaders = self.region_leaders.write();
+            if leader_node_id == 0 {
+                leaders.remove(&region_id);
+            } else {
+                leaders.insert(region_id, leader_node_id);
+            }
+        }
 
         tracing::trace!(
             "PD: region {} heartbeat: size={}, keys={}, leader={}",
@@ -156,6 +167,11 @@ impl PlacementDriver {
             leader_node_id
         );
         Ok(())
+    }
+
+    /// 查询 Region 心跳上报的当前 leader（无上报 / 选举窗口为 None）
+    pub fn region_leader(&self, region_id: RegionId) -> Option<NodeID> {
+        self.region_leaders.read().get(&region_id).copied()
     }
 
     // ──── 调度循环 ────
@@ -197,10 +213,20 @@ impl PlacementDriver {
             tracing::warn!("PD: node {} marked offline", node_id);
         }
 
-        // 2. 构建调度上下文
+        // 1b. 离线节点的 leader 视图已过期：从调度视角清除（避免把 Region 的
+        //     "当前 leader" 指向已离线节点，或据此向它转移）。
+        if !offline.is_empty() {
+            let mut leaders = self.region_leaders.write();
+            for node_id in &offline {
+                leaders.retain(|_, leader| leader != node_id);
+            }
+        }
+
+        // 2. 构建调度上下文（含心跳上报的 Region leader 视图）
         let regions = self.meta_store.list_regions();
         let nodes: Vec<NodeState> = self.node_states.read().values().cloned().collect();
-        let ctx = ScheduleContext::new(regions, nodes);
+        let mut ctx = ScheduleContext::new(regions, nodes);
+        ctx.leaders = self.region_leaders.read().clone();
 
         // 3. 运行所有调度器
         let mut total_ops = 0;
@@ -452,6 +478,176 @@ mod tests {
         let (pd, _tx) = make_test_pd();
         let result = pd.handle_region_heartbeat(999, 0, 0, 1);
         assert!(result.is_err());
+    }
+
+    // ──── T3.2：Region 心跳 leader 视图 ────
+
+    #[test]
+    fn test_region_heartbeat_tracks_leader() {
+        let (pd, _tx) = make_test_pd();
+        let region = make_region_meta(1, vec![0x00], vec![0xFF]);
+        pd.meta_store().create_region(region).unwrap();
+
+        // 初始无心跳 → 无 leader 视图
+        assert_eq!(pd.region_leader(1), None);
+
+        // 心跳上报 leader=node2
+        pd.handle_region_heartbeat(1, 100, 10, 2).unwrap();
+        assert_eq!(pd.region_leader(1), Some(2));
+
+        // leader 变更（选举切换到 node3）
+        pd.handle_region_heartbeat(1, 100, 10, 3).unwrap();
+        assert_eq!(pd.region_leader(1), Some(3));
+
+        // 选举窗口 leader 未知（上报 0）→ 清除陈旧视图，调度器不得基于它决策
+        pd.handle_region_heartbeat(1, 100, 10, 0).unwrap();
+        assert_eq!(pd.region_leader(1), None);
+    }
+
+    #[test]
+    fn test_region_heartbeat_stats_not_durable() {
+        // 心跳统计更新走内存视图（update_region_stats），不写穿落盘
+        let dir = tempfile::tempdir().unwrap();
+        let meta_store = Arc::new(PdMetaStore::open(dir.path()).unwrap());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let pd = Arc::new(PlacementDriver::new(
+            PdConfig::default(),
+            meta_store,
+            shutdown_rx,
+        ));
+        let mut region = make_region_meta(1, vec![0x00], vec![0xFF]);
+        region.peers = vec![
+            Peer {
+                node_id: 1,
+                raft_addr: "node1:50052".into(),
+                role: PeerRole::Voter,
+            },
+            Peer {
+                node_id: 2,
+                raft_addr: "node2:50052".into(),
+                role: PeerRole::Voter,
+            },
+        ];
+        pd.meta_store().create_region(region).unwrap();
+
+        pd.handle_region_heartbeat(1, 8 * 1024 * 1024, 12345, 1)
+            .unwrap();
+        drop(pd);
+        drop(shutdown_tx);
+
+        // 重启恢复：region 仍在但统计回落（心跳未落盘）
+        let store = PdMetaStore::open(dir.path()).unwrap();
+        let r = store.get_region(1).unwrap();
+        assert_eq!(r.approximate_size, 0);
+        assert_eq!(r.approximate_keys, 0);
+    }
+
+    // ──── T3.2：调度 tick 使用心跳 leader ────
+
+    /// 构造 2 节点 × 2 Region 的 PD：region peers 首 Voter = node2（旧"首
+    /// Voter=leader"猜测会误判），但心跳上报真实 leader = node1。
+    /// 返回 (pd, shutdown_tx) 便于启动真实调度循环后优雅停止。
+    fn make_leader_imbalance_pd(cfg: PdConfig) -> (Arc<PlacementDriver>, watch::Sender<bool>) {
+        let meta_store = Arc::new(PdMetaStore::new());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let pd = Arc::new(PlacementDriver::new(cfg, meta_store, shutdown_rx));
+
+        pd.handle_node_heartbeat(make_node_state(1, true));
+        pd.handle_node_heartbeat(make_node_state(2, true));
+
+        for (rid, start, end) in [
+            (10u64, vec![0x00u8], vec![0x55u8]),
+            (11, vec![0x55], vec![]),
+        ] {
+            let mut region = make_region_meta(rid, start, end);
+            // 关键：peers 顺序使"第一个 Voter"= node2，而真实 leader = node1
+            region.peers = vec![
+                Peer {
+                    node_id: 2,
+                    raft_addr: "node2:50052".into(),
+                    role: PeerRole::Voter,
+                },
+                Peer {
+                    node_id: 1,
+                    raft_addr: "node1:50052".into(),
+                    role: PeerRole::Voter,
+                },
+            ];
+            pd.meta_store().create_region(region).unwrap();
+            // 两 Region 心跳 leader 均为 node1 → node1 负载 2、node2 空载
+            pd.handle_region_heartbeat(rid, 100, 10, 1).unwrap();
+        }
+        (pd, shutdown_tx)
+    }
+
+    #[test]
+    fn test_schedule_tick_leader_balance_uses_heartbeat_leader() {
+        // LeaderScheduler 的 leader 判定来自 Region 心跳（ctx.leaders），而非
+        // "第一个 Voter peer"猜测。两 Region 真实 leader 都是 node1 → 均衡应
+        // 把其中一个 leader 转移给真实空载的 node2（peers 首 Voter 是 node2，
+        // 旧猜测会把"leader"算在 node2 上 → 错误地转移到 node1）。
+        let mut cfg = PdConfig::default();
+        cfg.target_replicas = 2; // 2 voters 恰好达标，屏蔽 ReplicaChecker 噪音
+        cfg.balance_interval = 1;
+        let (pd, _shutdown_tx) = make_leader_imbalance_pd(cfg);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            pd.run_schedule_tick(0).await;
+        });
+
+        let mut found = false;
+        while let Some(op) = pd.take_next_operator() {
+            if let Operator::TransferLeader { to_node, .. } = op {
+                assert_eq!(
+                    to_node, 2,
+                    "心跳 leader=node1 → 应转移到真实空载 node2（而非被首-Voter 猜测误导）"
+                );
+                found = true;
+            }
+        }
+        assert!(found, "leader 均衡应产出 TransferLeader operator");
+    }
+
+    #[test]
+    fn test_scheduler_loop_ticks_and_shuts_down() {
+        // start_scheduler_loop 真实启动（balance_interval=1s）：产出 operator、
+        // watch 关闭信号优雅停止（handle 正常结束）。
+        let mut cfg = PdConfig::default();
+        cfg.target_replicas = 2;
+        cfg.balance_interval = 1;
+        let (pd, shutdown_tx) = make_leader_imbalance_pd(cfg);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let handle = pd.start_scheduler_loop();
+
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut found = false;
+            loop {
+                if let Some(op) = pd.take_next_operator() {
+                    if let Operator::TransferLeader { to_node, .. } = op {
+                        assert_eq!(to_node, 2);
+                        found = true;
+                        break;
+                    }
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(found, "scheduler loop 应产出 TransferLeader");
+
+            // 优雅关闭：watch 置位 → 循环退出、task 结束
+            shutdown_tx.send(true).unwrap();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), handle)
+                .await
+                .expect("scheduler loop should exit on shutdown signal");
+        });
     }
 
     // ──── Operator 队列测试 ────
