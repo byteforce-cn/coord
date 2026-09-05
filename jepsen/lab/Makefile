@@ -101,9 +101,19 @@ SOAK_QUIET      := 1800
 SOAK_DISRUPT    := 600
 SOAK_REGIONS    :=      # multi-raft mode: region count (use WORKLOAD=multi-register)
 
+# T5.20（R-MR-10）：multi-register / multi-region 档位。
+#   make matrix-multi          # multi-register x 6 nemeses, --regions $(MULTI_REGIONS)
+#   make test WORKLOAD=multi-register REGIONS=3 NEMESIS=partition-halves
+# 说明：--regions N 走 Multi-Raft（[multi_raft] 装配）；缺省（REGIONS 空）= legacy 单 Raft。
+REGIONS         :=      # 透传给 coord.clj --regions（make test / matrix-multi）
+MULTI_REGIONS   := 3
+MULTI_MATRIX    := multi-register:none      multi-register:kill \
+                   multi-register:pause     multi-register:partition \
+                   multi-register:partition-halves multi-register:partition-ring
+
 .PHONY: help info keys binary up halt destroy status provision reload \
         ssh-control ssh-node ping \
-        setup stage upload smoke quick test matrix \
+        setup stage upload smoke quick test matrix matrix-multi \
         soak soak-status soak-tail soak-stop soak-results soak-diag logs \
         docker-%
 
@@ -249,11 +259,12 @@ quick: ## 20s coord sanity run (no nemesis)
 	$(call runctl, cd $(CTRL_PROJECT) && $(LEIN_RUN) \
 	    --workload register --nemesis none --time-limit 20 --concurrency 1n)
 
-test: ## Coord test: WORKLOAD, NEMESIS, TIME_LIMIT, CONCURRENCY, RATE, CHECKER
+test: ## Coord test: WORKLOAD, NEMESIS, TIME_LIMIT, CONCURRENCY, RATE, CHECKER, REGIONS
 	$(call runctl, cd $(CTRL_PROJECT) && $(LEIN_RUN) \
 	    --workload $(WORKLOAD) --nemesis $(NEMESIS) \
 	    --time-limit $(TIME_LIMIT) --concurrency $(CONCURRENCY) \
-	    $(if $(RATE),--rate $(RATE)) $(if $(CHECKER),--checker $(CHECKER)))
+	    $(if $(RATE),--rate $(RATE)) $(if $(CHECKER),--checker $(CHECKER)) \
+	    $(if $(REGIONS),--regions $(REGIONS)))
 
 matrix: ## Full regression matrix (workloads x nemeses), stops on first failure
 	@set -e; for combo in $(MATRIX); do \
@@ -263,6 +274,16 @@ matrix: ## Full regression matrix (workloads x nemeses), stops on first failure
 	           CONCURRENCY=1n JEPSEN_PROVIDER=$(JEPSEN_PROVIDER) --no-print-directory \
 	    || { echo "MATRIX FAILED at $$w/$$n"; exit 1; }; \
 	done; echo; echo "===== ALL MATRIX PASSED ====="
+
+matrix-multi: ## T5.20（R-MR-10）multi-register 全矩阵（--regions $(MULTI_REGIONS)）
+	@set -e; for combo in $(MULTI_MATRIX); do \
+	  w=$${combo%%:*}; n=$${combo##*:}; \
+	  echo; echo "===== $$w / $$n (regions=$(MULTI_REGIONS)) ====="; \
+	  $(MAKE) test WORKLOAD=$$w NEMESIS=$$n TIME_LIMIT=$(MATRIX_TIME) \
+	           CONCURRENCY=1n REGIONS=$(MULTI_REGIONS) \
+	           JEPSEN_PROVIDER=$(JEPSEN_PROVIDER) --no-print-directory \
+	    || { echo "MULTI MATRIX FAILED at $$w/$$n"; exit 1; }; \
+	done; echo; echo "===== ALL MULTI-REGISTER MATRIX PASSED ====="
 
 # ---------------------------------------------------------------------------
 # Soak (72h)

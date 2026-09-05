@@ -151,6 +151,13 @@ jobs:
           CHAOS_REAL: "1"
           SOAK_DURATION_SECS: "120"
         run: cargo test -p coord --test chaos_real chaos_soak_distributed -- --ignored --nocapture
+      # T5.18（R-MR-09）：Multi-Raft 进程级套件挂入 nightly——3 节点 × 3 Region
+      # 真实进程 + kill/重启收敛（MULTI_RAFT_REAL=1）。与 chaos 套件同 job 串行
+      # 执行（同 host 真实进程互扰规避：kill9 会误伤对端节点导致就绪超时）。
+      - name: Run multi-raft real-process suite (T5.18)
+        env:
+          MULTI_RAFT_REAL: "1"
+        run: cargo test -p coord --test multi_raft_process_test -- --ignored --nocapture --test-threads=1
 
   perf-bench:
     name: weekly perf baseline (regression gate)
