@@ -25,6 +25,7 @@ pub mod scheduler;
 pub mod types;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,8 @@ use tokio::time::MissedTickBehavior;
 use self::meta_store::PdMetaStore;
 use self::operator::{OperatorEntry, OperatorStatus};
 use self::scheduler::{create_default_schedulers, ScheduleContext, Scheduler};
+use crate::audit::AuditLogger;
+use crate::metrics::Metrics;
 
 // Re-export 主要类型
 pub use embedded::{EmbeddedPd, NodeInfo};
@@ -70,6 +73,27 @@ pub struct PlacementDriver {
     pending_operators: RwLock<Vec<OperatorEntry>>,
     /// 优雅关闭信号
     shutdown_rx: watch::Receiver<bool>,
+    /// T5.12：调度暂停开关（true = scheduler tick 不入队新 operator；已排队的仍
+    /// 由 executor drain）。初始值取 `PdConfig.scheduler_paused`，可运行时切换。
+    scheduler_paused: AtomicBool,
+    /// T5.12：operator 审计/指标钩子（EmbeddedPd 装配后经
+    /// `attach_observability` 接线；None = 不记录，行为与现状一致）
+    observability: RwLock<Option<PdObservability>>,
+}
+
+#[derive(Clone, Default)]
+pub struct PdObservability {
+    /// operator 审计日志（actor=pd；enqueue/complete/requeue 各记一条）
+    pub audit: Option<Arc<AuditLogger>>,
+    /// 指标（operator 计数 `inc_pd_operator`）
+    pub metrics: Option<Arc<Metrics>>,
+}
+
+impl PdObservability {
+    /// 新建可观测性钩子（None 字段 = 不记录对应维度）
+    pub fn new(audit: Option<Arc<AuditLogger>>, metrics: Option<Arc<Metrics>>) -> Self {
+        Self { audit, metrics }
+    }
 }
 
 impl PlacementDriver {
@@ -80,6 +104,7 @@ impl PlacementDriver {
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         let schedulers = create_default_schedulers(&config);
+        let scheduler_paused = config.scheduler_paused;
         Self {
             config,
             meta_store,
@@ -88,6 +113,55 @@ impl PlacementDriver {
             schedulers,
             pending_operators: RwLock::new(Vec::new()),
             shutdown_rx,
+            scheduler_paused: AtomicBool::new(scheduler_paused),
+            observability: RwLock::new(None),
+        }
+    }
+
+    // ──── T5.12：调度暂停开关 ────
+
+    /// 运行时切换调度暂停（true = scheduler tick 不再产生新 operator）
+    pub fn set_scheduler_paused(&self, paused: bool) {
+        self.scheduler_paused.store(paused, Ordering::Relaxed);
+        tracing::info!(
+            "PD: scheduler {}",
+            if paused { "PAUSED" } else { "RESUMED" }
+        );
+    }
+
+    /// 当前调度是否暂停
+    pub fn is_scheduler_paused(&self) -> bool {
+        self.scheduler_paused.load(Ordering::Relaxed)
+    }
+
+    // ──── T5.12：operator 审计/指标 ────
+
+    /// 装配可观测性钩子（audit logger / metrics；None = 不记录）
+    pub fn attach_observability(&self, obs: PdObservability) {
+        *self.observability.write() = Some(obs);
+    }
+
+    /// 记录一条 operator 审计事件（actor=pd）+ 指标计数
+    fn record_operator_event(&self, op: &Operator, result: &str, detail: &str) {
+        let obs = self.observability.read().clone();
+        let Some(obs) = obs else { return };
+        if let Some(audit) = &obs.audit {
+            audit.record_event(
+                "pd",
+                &format!("operator.{}", op.name()),
+                &format!("region/{}", op.region_id()),
+                result,
+                detail,
+            );
+        }
+    }
+
+    /// operator 入队指标计数（仅调度产生/管理面注入的**新增** operator；幂等去重
+    /// 命中时不计——见 `enqueue_operator` 的 dup 分支）
+    fn count_operator_enqueued(&self) {
+        let obs = self.observability.read().clone();
+        if let Some(metrics) = obs.and_then(|o| o.metrics) {
+            metrics.inc_pd_operator();
         }
     }
 
@@ -216,6 +290,13 @@ impl PlacementDriver {
 
     /// 执行一次调度 tick
     async fn run_schedule_tick(&self, _tick: u64) {
+        // T5.12：调度暂停——维护窗口/演练时冻结调度行为（不产生新 operator）。
+        // 已排队的 operator 仍由 executor 循环 drain（见模块文档）。
+        if self.is_scheduler_paused() {
+            tracing::debug!("PD: scheduler paused; skipping schedule tick");
+            return;
+        }
+
         // 1. 检查离线节点
         let offline = self.check_offline_nodes();
         for node_id in &offline {
@@ -287,6 +368,7 @@ impl PlacementDriver {
     ///
     /// 幂等：与队列中 Pending/Running 的相同 operator 去重（相同 region +
     /// 相同动作 + 相同目标视为重复），避免调度/重试风暴。
+    /// T5.12：新增（非去重命中）operator 记审计事件 + 指标计数。
     pub fn enqueue_operator(&self, op: Operator) {
         let mut pending = self.pending_operators.write();
         let dup = pending.iter().any(|e| {
@@ -298,7 +380,11 @@ impl PlacementDriver {
         if dup {
             return;
         }
-        pending.push(OperatorEntry::new(op));
+        pending.push(OperatorEntry::new(op.clone()));
+        drop(pending);
+
+        self.count_operator_enqueued();
+        self.record_operator_event(&op, "pending", &op_summary(&op));
     }
 
     /// 查询某 operator 的当前执行状态（队列无记录 = None）
@@ -322,17 +408,31 @@ impl PlacementDriver {
     }
 
     /// 标记 Operator 执行结果
+    ///
+    /// T5.12：success/failed 均记审计事件（failed 携带原因，供事后追溯）。
     pub fn complete_operator(&self, op: &Operator, success: bool, error_msg: Option<String>) {
         let mut pending = self.pending_operators.write();
         if let Some(entry) = pending.iter_mut().find(|e| e.op == *op) {
             if success {
                 entry.status = OperatorStatus::Success;
             } else {
-                entry.status = OperatorStatus::Failed(error_msg.unwrap_or_default());
+                entry.status = OperatorStatus::Failed(error_msg.clone().unwrap_or_default());
             }
+        }
+        drop(pending);
+
+        if success {
+            self.record_operator_event(op, "success", &op_summary(op));
+        } else {
+            self.record_operator_event(
+                op,
+                "failed",
+                &format!("{}; error: {}", op_summary(op), error_msg.unwrap_or_default()),
+            );
         }
 
         // 清理已完成的 Operator（保留最近 1000 个）
+        let mut pending = self.pending_operators.write();
         if pending.len() > 1000 {
             pending.retain(|e| {
                 e.status == OperatorStatus::Pending || e.status == OperatorStatus::Running
@@ -353,6 +453,9 @@ impl PlacementDriver {
         {
             entry.status = OperatorStatus::Pending;
         }
+        drop(pending);
+
+        self.record_operator_event(op, "requeued", &op_summary(op));
     }
 
     /// 获取 Operator 队列状态
@@ -393,6 +496,36 @@ pub struct OperatorStats {
     pub success: usize,
     pub failed: usize,
     pub cancelled: usize,
+}
+
+/// 生成 operator 的审计摘要（动作 + region + 目标，人可读且稳定）。
+fn op_summary(op: &Operator) -> String {
+    match op {
+        Operator::AddPeer {
+            region_id,
+            node_id,
+            raft_addr,
+        } => format!(
+            "add-peer region={region_id} node={node_id} raft_addr={raft_addr}"
+        ),
+        Operator::RemovePeer {
+            region_id,
+            node_id,
+        } => format!("remove-peer region={region_id} node={node_id}"),
+        Operator::TransferLeader {
+            region_id,
+            to_node,
+        } => format!("transfer-leader region={region_id} to={to_node}"),
+        Operator::SplitRegion {
+            region_id,
+            split_key,
+            new_region_id,
+        } => format!(
+            "split-region region={region_id} split_key={} new_region={new_region_id}",
+            String::from_utf8_lossy(split_key)
+        ),
+        Operator::MergeRegion { left, right } => format!("merge-region left={left} right={right}"),
+    }
 }
 
 // ============================================================================

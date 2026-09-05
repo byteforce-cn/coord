@@ -57,6 +57,12 @@ pub struct PdConfig {
     /// 节点维护模式配置
     #[serde(default)]
     pub maintenance: MaintenanceConfig,
+    /// T5.12（调度暂停开关）：初始是否暂停调度（true = 启动即不产生新 operator；
+    /// 运行时经 `PlacementDriver::set_scheduler_paused` 切换）。暂停只停
+    /// **调度**（scheduler tick 不再入队新 operator），已排队的 operator 仍由
+    /// executor 循环继续 drain——用于维护窗口/演练时冻结调度行为。
+    #[serde(default)]
+    pub scheduler_paused: bool,
 }
 
 impl Default for PdConfig {
@@ -75,6 +81,7 @@ impl Default for PdConfig {
             node_heartbeat_timeout: 30,
             placement: PlacementConstraint::default(),
             maintenance: MaintenanceConfig::default(),
+            scheduler_paused: false,
         }
     }
 }

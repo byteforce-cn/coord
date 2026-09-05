@@ -120,11 +120,75 @@
           "legendFormat": "auth denied {{instance}}"
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Multi-Raft: Region 数据 / Leader / Raft 进度 (per Region)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "coord_region_size_bytes{instance=~\"$instance\"}",
+          "legendFormat": "size region {{region_id}}"
+        },
+        {
+          "refId": "B",
+          "expr": "coord_region_keys_total{instance=~\"$instance\"}",
+          "legendFormat": "keys region {{region_id}}"
+        },
+        {
+          "refId": "C",
+          "expr": "coord_region_is_leader{instance=~\"$instance\"}",
+          "legendFormat": "leader region {{region_id}}"
+        },
+        {
+          "refId": "D",
+          "expr": "coord_region_raft_log_index{instance=~\"$instance\"}",
+          "legendFormat": "raft index region {{region_id}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Multi-Raft: PD operator / 副本 / 节点",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(coord_pd_operator_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "pd operator rate {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "coord_pd_operator_total{instance=~\"$instance\"}",
+          "legendFormat": "pd operator total {{instance}}"
+        },
+        {
+          "refId": "C",
+          "expr": "coord_local_leader_count{instance=~\"$instance\"}",
+          "legendFormat": "local leader count {{instance}}"
+        },
+        {
+          "refId": "D",
+          "expr": "coord_local_region_count{instance=~\"$instance\"}",
+          "legendFormat": "local region count {{instance}}"
+        },
+        {
+          "refId": "E",
+          "expr": "coord_regions_total{instance=~\"$instance\"}",
+          "legendFormat": "regions total {{instance}}"
+        },
+        {
+          "refId": "F",
+          "expr": "coord_nodes_online{instance=~\"$instance\"}",
+          "legendFormat": "nodes online {{instance}}"
+        }
+      ]
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
   "title": "coord-server Overview",
   "uid": "coord-server-overview",
-  "version": 1
+  "version": 2
 }

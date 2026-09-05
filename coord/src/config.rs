@@ -953,6 +953,27 @@ pub struct MultiRaftConfig {
     /// `<data_dir>/pd/pd-meta.db`）。默认关闭 = 多 Region 装配但不调度。
     #[serde(default)]
     pub pd: MultiRaftPdConfig,
+
+    /// T5.15/R-MR-07：本次启动执行 Legacy → Multi-Raft 迁移
+    /// （`[multi_raft].legacy_migration = true`，一次性）。
+    ///
+    /// 存量单 Raft（用户 KV 在 region 0 根 store）升级到 multi_raft 时，boot 期
+    /// 各节点把根 store 的活用户 KV 经 raft `Put` 导入所属 Region（迁移经 raft
+    /// 日志复制——日志==状态机，follower/快照/压缩一致），完成后经 region 0
+    /// raft 写迁移标记 `/_sys/migration/legacy-v1`。迁移**只读源、不删源数据**
+    /// （回滚 = 关闭 multi_raft 用 region 0 原数据字节级恢复）。
+    ///
+    /// 语义/边界见 `coord-server/src/migration.rs` 模块文档与
+    /// `docs/multi-raft-limits.md`；fail-closed 闸（T5.16）：根 store 有未迁移
+    /// 用户 KV 且未开本开关/`allow_unmigrated` 时拒绝启动。
+    #[serde(default)]
+    pub legacy_migration: bool,
+
+    /// T5.16：救援开关——根 store 有未迁移 legacy 用户 KV 时仍强制放行启动
+    /// （跳过闸与迁移；数据 Region 为空，用户数据面由运维负责，通常仅用于
+    /// 误开 multi_raft 后回滚排查）。正常升级路径请用 `legacy_migration`。
+    #[serde(default)]
+    pub allow_unmigrated: bool,
 }
 
 impl Default for MultiRaftConfig {
@@ -961,6 +982,8 @@ impl Default for MultiRaftConfig {
             enabled: false,
             initial_regions: Vec::new(),
             pd: MultiRaftPdConfig::default(),
+            legacy_migration: false,
+            allow_unmigrated: false,
         }
     }
 }
@@ -1021,6 +1044,12 @@ pub struct MultiRaftPdConfig {
 
     /// 节点心跳超时（秒；超时标记离线，调度不基于离线节点）
     pub node_heartbeat_timeout: u64,
+
+    /// T5.12：调度暂停开关（初始值；true = 启动即不调度，仅 executor drain 已
+    /// 排队 operator）。用于维护窗口/演练冻结调度；运行时切换见
+    /// `PlacementDriver::set_scheduler_paused`（未来管理面 RPC 接入点）。
+    #[serde(default)]
+    pub scheduler_paused: bool,
 }
 
 impl Default for MultiRaftPdConfig {
@@ -1038,6 +1067,7 @@ impl Default for MultiRaftPdConfig {
             region_merge_size_mb: 16,
             target_replicas: 3,
             node_heartbeat_timeout: 30,
+            scheduler_paused: false,
         }
     }
 }
@@ -1059,6 +1089,7 @@ impl MultiRaftPdConfig {
             node_heartbeat_timeout: self.node_heartbeat_timeout,
             placement: Default::default(),
             maintenance: Default::default(),
+            scheduler_paused: self.scheduler_paused,
         }
     }
 }
@@ -1412,7 +1443,29 @@ auth_enabled = true
         let config = Config::default();
         assert!(!config.multi_raft.enabled);
         assert!(config.multi_raft.initial_regions.is_empty());
+        // T5.15/T5.16：迁移/救援开关默认关闭（不改变既有行为）
+        assert!(!config.multi_raft.legacy_migration);
+        assert!(!config.multi_raft.allow_unmigrated);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_multi_raft_migration_flags_parse() {
+        let toml_str = r#"
+[multi_raft]
+enabled = true
+legacy_migration = true
+allow_unmigrated = true
+
+[[multi_raft.initial_regions]]
+id = 1
+start_key = ""
+end_key = ""
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.multi_raft.enabled);
+        assert!(config.multi_raft.legacy_migration);
+        assert!(config.multi_raft.allow_unmigrated);
     }
 
     #[test]
@@ -1576,6 +1629,9 @@ end_key = ""
         assert!(matches!(pd.mode, coord_server::pd::PdMode::Embedded));
         assert_eq!(pd.balance_interval, 120);
         assert_eq!(pd.target_replicas, 3);
+        // T5.12：调度暂停默认 false（启动即正常调度）
+        assert!(!config.multi_raft.pd.scheduler_paused);
+        assert!(!pd.scheduler_paused);
         assert!(config.validate().is_ok());
     }
 
@@ -1598,6 +1654,7 @@ node_heartbeat_timeout = 15
 target_replicas = 2
 max_concurrent_operators = 4
 region_split_keys = 500000
+scheduler_paused = true
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         let pd_cfg = &config.multi_raft.pd;
@@ -1611,12 +1668,15 @@ region_split_keys = 500000
         // 未出现的字段走默认值
         assert_eq!(pd_cfg.split_check_interval, 30);
         assert_eq!(pd_cfg.region_split_size_mb, 256);
+        // T5.12：调度暂停开关透传
+        assert!(pd_cfg.scheduler_paused, "toml scheduler_paused=true 应被解析");
 
         // to_pd_config 映射
         let pd = pd_cfg.to_pd_config();
         assert_eq!(pd.balance_interval, 10);
         assert_eq!(pd.node_heartbeat_timeout, 15);
         assert_eq!(pd.target_replicas, 2);
+        assert!(pd.scheduler_paused, "scheduler_paused 应透传到 PdConfig");
         assert!(pd.external_addrs.is_empty());
     }
 

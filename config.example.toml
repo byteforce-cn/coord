@@ -50,10 +50,16 @@ data_dir = "/var/lib/coord"
 #         到期清理按 key 路由到所属 Region 执行删除；
 #       * 快照/压缩 per-Region：Snapshot RPC/coord snapshot --region 带 region_id，
 #         各 Region 独立 compact 水位；备份须覆盖 <data_dir>/regions/region-*/；
-#       * 存量单 Raft 用户 KV 启用前必须先 coord migrate（fail-closed 启动闸，
-#         未迁移拒绝启动；--force 需双人确认）。
+#       * 存量单 Raft 用户 KV 升级必须先迁移：`[multi_raft].legacy_migration =
+#         true` 一次性放行——boot 期各节点把 region 0 根 store 活用户 KV 经 raft
+#         导入所属 Region（经 raft 日志复制，日志==状态机；只读源、不删源数据，
+#         回滚 = 关闭 multi_raft 用原数据）并写迁移标记；未迁移又未显式授权时
+#         fail-closed 拒绝启动（allow_unmigrated=true 为救援强制放行，数据面由
+#         运维负责）。迁移语义见 coord-server/src/migration.rs 模块文档。
 [multi_raft]
 enabled = false
+# legacy_migration = false      # T5.15：本次启动执行 Legacy→Multi-Raft 迁移（一次性）
+# allow_unmigrated = false      # T5.16：救援——未迁移也强制放行（数据 Region 为空）
 # [[multi_raft.initial_regions]]
 # id = 1
 # start_key = ""      # 首 Region 起点（空 = keyspace 起点）
@@ -81,6 +87,8 @@ enabled = false
 # region_split_size_mb = 256       # 分裂大小阈值
 # region_split_keys = 1000000      # 分裂 key 数阈值
 # region_merge_size_mb = 16        # 合并大小阈值
+# scheduler_paused = false         # T5.12：初始调度暂停（true = 启动即不产生新
+#                                  # operator，仅 drain 已排队；维护窗口/演练冻结调度用）
 
 # R-RFT-19：Raft 运行时调优（全部可选，缺省 = openraft 默认：心跳 50ms、
 # 选举 150–300ms、快照策略 since_last:5000）

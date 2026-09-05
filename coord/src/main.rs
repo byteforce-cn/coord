@@ -1605,6 +1605,33 @@ async fn run_server(
         }
     }
 
+    // 3.55 T5.16（R-MR-07）：fail-closed 启动闸——multi_raft 开启但 region 0
+    // 根 store 尚有**未迁移**的 legacy 用户 KV（且无迁移标记）时拒绝启动，
+    // 防止用户数据在 multi_raft 下静默不可见。放行条件：
+    //   - 无待迁移数据 / 迁移标记已存在；或
+    //   - `[multi_raft].legacy_migration = true`（本次 boot 执行迁移）；或
+    //   - `[multi_raft].allow_unmigrated = true`（救援强制放行）。
+    // 闸在迁移执行点（region 装配后）之前运行——先探测、失败即退，零副作用。
+    if cfg.multi_raft.enabled {
+        let migrated = coord_server::migration::has_migration_marker(&mvcc)
+            .map_err(|e| format!("read migration marker: {e}"))?;
+        if !migrated {
+            let has_legacy = coord_server::migration::has_legacy_user_data(&mvcc)
+                .map_err(|e| format!("scan legacy user data: {e}"))?;
+            if let Some(reason) = coord_server::migration::boot_gate_decision(
+                has_legacy,
+                migrated,
+                cfg.multi_raft.legacy_migration,
+                cfg.multi_raft.allow_unmigrated,
+            ) {
+                return Err(format!(
+                    "refusing to start with multi_raft enabled: {reason}"
+                )
+                .into());
+            }
+        }
+    }
+
     // 3.6 M0-4/M0-5 快照目录与 purge 守卫（与 LogStore/StateMachine 共享）
     let snapshot_dir = data_dir.join("snapshots");
     std::fs::create_dir_all(&snapshot_dir)?;
@@ -2114,23 +2141,57 @@ async fn run_server(
             .collect();
         let heartbeat_interval =
             std::time::Duration::from_millis(cfg.multi_raft.pd.heartbeat_interval_ms);
-        Some(
-            EmbeddedPd::start(
-                cfg.multi_raft.pd.to_pd_config(),
-                node_id,
-                &data_dir,
-                manager,
-                &region_seeds,
-                pd_nodes,
-                heartbeat_interval,
-            )
-            .await
-            .map_err(|e| format!("start embedded PD: {e}"))?,
+        let pd = EmbeddedPd::start(
+            cfg.multi_raft.pd.to_pd_config(),
+            node_id,
+            &data_dir,
+            manager,
+            &region_seeds,
+            pd_nodes,
+            heartbeat_interval,
         )
+        .await
+        .map_err(|e| format!("start embedded PD: {e}"))?;
+
+        // T5.12：PD operator 审计/指标接线（audit logger + Metrics 在此前已构造）
+        pd.driver.attach_observability(coord_server::pd::PdObservability::new(
+            Some(Arc::clone(&audit_logger)),
+            Some(Arc::clone(&metrics)),
+        ));
+        Some(pd)
     } else {
         tracing::debug!("Multi-Raft PD disabled (multi_raft.pd.enabled=false)");
         None
     };
+
+    // 5.75 T5.15（R-MR-07）：Legacy → Multi-Raft boot 迁移。
+    //
+    // `[multi_raft].legacy_migration = true`（一次性，迁移前停写；fail-closed 闸
+    // 已放行）时，在 serving 前把 region 0 根 store 的活用户 KV 经 raft 导入
+    // 所属 Region 并写迁移标记（详见 coord-server/src/migration.rs）。已迁移
+    // （标记存在）或救援模式（allow_unmigrated）下为空操作/跳过。
+    // 迁移阻塞至本节点全部 Region 数据齐备 + 标记确认（boot 期间不 serving）。
+    if cfg.multi_raft.enabled && cfg.multi_raft.legacy_migration {
+        if cfg.multi_raft.allow_unmigrated {
+            tracing::warn!(
+                "multi_raft.legacy_migration=true and allow_unmigrated=true: \
+                 migration SKIPPED (rescue mode); user data in regions is empty"
+            );
+        } else {
+            let manager = region_manager
+                .as_ref()
+                .expect("multi_raft.enabled requires assembled region_manager");
+            coord_server::migration::migrate_legacy_to_regions(
+                node_id,
+                &mvcc,
+                &raft,
+                manager,
+                &region_seeds,
+            )
+            .await
+            .map_err(|e| format!("legacy -> multi-raft migration failed: {e}"))?;
+        }
+    }
 
     // 6. 构建 CoordNode
     let mut node = CoordNode::new(Arc::clone(&mvcc));
