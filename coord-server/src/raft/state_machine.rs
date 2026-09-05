@@ -201,6 +201,15 @@ pub struct StateMachineStore {
     pub session_manager: Option<Arc<TokenManager>>,
     /// 指标注册表（R-OBS-10：apply 延迟 / 快照耗时埋点，可选）
     pub metrics: Option<Arc<Metrics>>,
+    /// T5.7（R-MR-04）：Lease Revoke 广播（可选，仅 region 0 状态机设置）。
+    ///
+    /// region 0 的 `LeaseOp::Revoke` apply（含过期清理）后向通道广播 lease_id，
+    /// 各节点据此通知 Region raft leader 经 `Command::DeleteKeysByLease` 清理
+    /// 各自 MVCC 中绑定该 Lease 的 Key（详见 `server/mod.rs` 的
+    /// `start_region_lease_revoker`）。所有节点（含 follower）都会 apply region 0
+    /// 日志并收到广播——因此无论哪个节点最终成为某 Region 的 leader，都能
+    /// 看到广播并完成删除（幂等）。
+    pub lease_revoke_tx: Option<tokio::sync::mpsc::UnboundedSender<i64>>,
 }
 
 // Manual Debug impl since MvccStorage may not be Debug
@@ -317,7 +326,13 @@ impl StateMachineStore {
             revocation_store: None,
             session_manager: None,
             metrics: None,
+            lease_revoke_tx: None,
         }
+    }
+
+    /// 设置 Lease Revoke 广播通道（T5.7：仅 region 0 状态机调用）
+    pub fn set_lease_revoke_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<i64>) {
+        self.lease_revoke_tx = Some(tx);
     }
 
     /// 设置 Watch 事件分发器（通常在 Leader 选举后调用）
@@ -596,6 +611,26 @@ impl StateMachineStore {
                     None,
                 ))
             }
+            Command::DeleteKeysByLease { lease_id } => {
+                // T5.7（R-MR-04）：per-Region lease 清理（apply 期按 lease_id 索引扫描
+                // 删除，幂等；事件供 Watch 分发）。
+                let (outcome, changes) = sm
+                    .apply_delete_keys_by_lease(*lease_id, revision, applied)
+                    .map_err(io_err)?;
+                let (deleted, event) = if outcome.replayed {
+                    (0, None)
+                } else {
+                    (
+                        changes.len() as u64,
+                        Some(ChangeEvent {
+                            revision,
+                            changes,
+                            event_type: EventType::Lease,
+                        }),
+                    )
+                };
+                Ok((Response::DeleteRange { revision, deleted }, event))
+            }
         }
     }
 }
@@ -641,6 +676,19 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                     };
                     let (resp, change_event) = self.execute_command(sm, cmd, revision, applied)?;
                     last_normal_log_id = Some(entry.log_id.clone());
+
+                    // T5.7（R-MR-04）：region 0 状态机在 LeaseOp::Revoke apply（含
+                    // 过期清理与显式 revoke）后广播 lease_id——所有节点 apply region 0
+                    // 日志都会收到，最终由各 Region 的 raft leader 完成 per-Region
+                    // Key 清理（幂等；重复广播仅产生 no-op）。
+                    if let Some(tx) = &self.lease_revoke_tx {
+                        if let crate::raft::type_config::Command::Lease(
+                            crate::raft::type_config::LeaseOp::Revoke { id, .. },
+                        ) = cmd
+                        {
+                            let _ = tx.send(*id);
+                        }
+                    }
 
                     // 分发 Watch 事件（非阻塞；replayed 时事件为 None）
                     if let (Some(dispatcher), Some(event)) = (&self.watch_dispatcher, change_event)
@@ -748,6 +796,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             revocation_store: None,
             session_manager: None,
             metrics: self.metrics.clone(),
+            lease_revoke_tx: None,
         }
     }
 }

@@ -1592,6 +1592,15 @@ async fn run_server(
     // R-OBS-10：状态机 apply/快照埋点
     sm_store.metrics = Some(Arc::clone(&metrics));
 
+    // T5.7（R-MR-04）：region 0 Lease Revoke 广播通道——multi_raft 启用时挂到
+    // region 0 状态机（`LeaseOp::Revoke` 过期/吊销 apply 后广播 lease_id），
+    // 供 `CoordNode::start_region_lease_revoker` 驱动各 Region raft leader 经
+    // `Command::DeleteKeysByLease` 清理各自 MVCC 的绑定 Key。
+    let (lease_revoke_tx, lease_revoke_rx) = tokio::sync::mpsc::unbounded_channel::<i64>();
+    if cfg.multi_raft.enabled {
+        sm_store.set_lease_revoke_tx(lease_revoke_tx);
+    }
+
     // 5b.5 M0-5 启动检查：日志已被 purge 但无覆盖快照。
     // 必须放在 StateMachineStore::new 之后：启动时把已落盘快照（META_SNAPSHOT）
     // 登记进 snapshot_tracker 的正是 StateMachineStore::new；若在此前检查，
@@ -2207,6 +2216,13 @@ async fn run_server(
     node.start_lease_expiry_worker();
     // 启动 Lease failover reconciler（P0-B B.4.4：成为 leader 时从状态机重建）
     node.start_lease_leader_reconciler();
+    // T5.7（R-MR-04）：per-Region Lease 清理 worker（仅 multi_raft；legacy 下通道
+    // 未挂 tx——revoke 广播不会产生，worker 随通道关闭退出）
+    if cfg.multi_raft.enabled {
+        node.start_region_lease_revoker(lease_revoke_rx);
+    } else {
+        drop(lease_revoke_rx);
+    }
 
     // 6.6 Auth 根密钥：HKDF 派生 CCT 签名密钥（规格 C.4.2）。
     //     配置/环境优先，否则 <data_dir>/auth-root-key.bin 首启生成（0600）并复用。

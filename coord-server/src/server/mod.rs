@@ -398,17 +398,6 @@ impl CoordNode {
         Ok(())
     }
 
-    /// region 模式暂不支持 Lease 绑定：LeaseManager / Lease 记录 / Revoke 均为
-    /// node 级 region-0 语义，绑定到非 0 Region 的 key 会失去过期清理。显式拒绝。
-    fn guard_lease_region_mode(&self, lease_id: Option<i64>) -> Result<(), tonic::Status> {
-        if self.region_manager.is_some() && lease_id.is_some() {
-            return Err(tonic::Status::unavailable(
-                "leases are not supported in multi-region mode yet",
-            ));
-        }
-        Ok(())
-    }
-
     /// T5.6（R-MR-03）：解析 Watch 目标的 dispatcher 与历史 reader（MVCC）。
     ///
     /// - legacy（无 region_manager）：节点级 dispatcher + 节点级 storage（行为不变）；
@@ -651,6 +640,91 @@ impl CoordNode {
                             }
                         }
                     }
+                }
+            }
+        });
+    }
+
+    /// T5.7（R-MR-04）：per-Region Lease 清理 worker（region 模式）。
+    ///
+    /// region 0 状态机在 `LeaseOp::Revoke`（显式吊销或过期清理，apply 在**全部**
+    /// 节点发生）后经 `rx` 广播 lease_id。本 worker 维护待清理集合
+    /// {(region_id, lease_id)}，每 200ms 对**本节点是 leader** 的 Region 发起
+    /// `Command::DeleteKeysByLease`（region raft 内原子删除绑定 Key + Watch 事件，
+    /// 幂等）；若 Region leader 是其他节点，则该条目由对端处理（对端同样收到
+    /// region 0 广播），本端丢弃以限制内存——不会无限重试堆积。
+    ///
+    /// 语义保证：只要某 Region 有 leader、且其 region 0 raft apply 在推进，
+    /// 该 Region 中绑定被吊销 Lease 的 Key 终会被删除。
+    ///
+    /// legacy（region_manager=None）：无需启动；通道关闭后 worker 自行退出。
+    pub fn start_region_lease_revoker(
+        self: &Arc<Self>,
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<i64>,
+    ) {
+        let node = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut pending: std::collections::BTreeSet<(RegionId, i64)> = Default::default();
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+            loop {
+                tokio::select! {
+                    maybe = rx.recv() => {
+                        match maybe {
+                            Some(lease_id) => {
+                                if let Some(manager) = &node.region_manager {
+                                    for handle in manager.list_regions() {
+                                        pending.insert((handle.region_id(), lease_id));
+                                    }
+                                }
+                            }
+                            None => break, // region 0 状态机通道关闭
+                        }
+                    }
+                    _ = interval.tick() => {}
+                }
+
+                let Some(manager) = &node.region_manager else {
+                    continue;
+                };
+                let timeout = node.limits.read().write_timeout;
+                let mut done: Vec<(RegionId, i64)> = Vec::new();
+                for (region_id, lease_id) in &pending {
+                    let Some(rt) = manager.runtime(*region_id) else {
+                        done.push((*region_id, *lease_id));
+                        continue;
+                    };
+                    match rt.raft.current_leader().await {
+                        Some(leader) if leader == node.node_id => {
+                            let cmd = Command::DeleteKeysByLease { lease_id: *lease_id };
+                            let ok = match tokio::time::timeout(timeout, rt.raft.client_write(cmd))
+                                .await
+                            {
+                                Ok(Ok(_)) => true,
+                                Ok(Err(e)) => {
+                                    tracing::warn!(
+                                        region_id,
+                                        lease_id,
+                                        "region lease cleanup propose failed: {e}"
+                                    );
+                                    false
+                                }
+                                Err(_) => false,
+                            };
+                            if ok {
+                                done.push((*region_id, *lease_id));
+                            }
+                        }
+                        Some(_) => {
+                            // 其他节点是该 Region leader：对端同样收到广播并清理
+                            done.push((*region_id, *lease_id));
+                        }
+                        None => {
+                            // 选举中/leader 未知：保留待下轮重试
+                        }
+                    }
+                }
+                for key in done {
+                    pending.remove(&key);
                 }
             }
         });
@@ -1241,10 +1315,10 @@ impl Kv for CoordNode {
         };
 
         // T2.4：按 key 解析执行目标 Region（legacy 单 Raft = region 0）。
-        // region 模式下 Lease 绑定暂不支持（node 级 LeaseManager 是 region-0 语义），
-        // 显式拒绝。
+        // T5.7（R-MR-04）：region 模式允许 Lease 绑定——Lease 记录存 region 0 全局
+        // 租约表，绑定 Key 落在所属 Region MVCC（KvMetadata.lease_id）；到期/吊销
+        // 经 region 0 Revoke 广播 + 各 Region leader 的 DeleteKeysByLease 清理。
         let target = self.kv_target_for_key(&req.key)?;
-        self.guard_lease_region_mode(lease_id)?;
 
         // 若请求 prev_kv，在写入前读取当前值
         let prev_kv = if req.prev_kv {
@@ -1283,8 +1357,9 @@ impl Kv for CoordNode {
                 .map_err(map_err)?
         };
 
-        // 若关联了 Lease，将 Key 绑定到 Lease（用于 Revoke 时自动清理）。
-        // 仅 legacy 单 Raft 模式可达（region 模式已在上方拒绝 lease_id）。
+        // 若关联了 Lease，将 Key 绑定到 Lease（本地 leader 内存镜像，供即时本地
+        // 吊销；权威绑定为各 Region KV 的 KvMetadata.lease_id，到期清理按 Region
+        // raft 的 DeleteKeysByLease 走。legacy 与 region 模式均可达）。
         if let Some(lid) = lease_id {
             if let Some(ref lm) = self.lease_manager {
                 let _ = lm.attach_key(lid, &req.key);
@@ -1769,16 +1844,9 @@ impl Txn for CoordNode {
                 }
             }
         }
-        // region 模式：Txn 内 Put（无论 success 还是 failure 分支）同样不支持
-        // 绑定 Lease（见 guard_lease_region_mode；node 级 LeaseManager 是 region-0
-        // 语义，绑定到非 0 Region 的 key 会失去过期清理）。
-        {
-            let has_lease_put = success_ops
-                .iter()
-                .chain(failure_ops.iter())
-                .any(|op| matches!(op, TxnOp::Put { lease_id: Some(_), .. }));
-            self.guard_lease_region_mode(if has_lease_put { Some(0) } else { None })?;
-        }
+        // region 模式：Txn 内 Put（无论 success 还是 failure 分支）允许绑定 Lease
+        // （T5.7/R-MR-04；Lease 记录存 region 0，绑定 Key 落所属 Region，清理见
+        // region raft DeleteKeysByLease）。
 
         // 通过 Raft 共识提交（集群模式），或直接执行（单节点模式）。
         // T2.4：raft/storage 均取自目标 Region（compare+execute 在单 Region 状态机原子执行）。

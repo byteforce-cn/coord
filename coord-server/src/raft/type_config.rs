@@ -107,6 +107,13 @@ pub enum Command {
     /// 压缩历史（P1-01）：raft 下发 compact revision，节点一致删除
     /// revision 之前的 changelog/tombstone；apply 幂等（单调，低 revision 为 no-op）
     Compact { revision: u64 },
+    /// T5.7（R-MR-04）：per-Region 删除绑定到某 Lease 的全部 Key
+    ///
+    /// Multi-Raft 模式下 Lease 记录在 region 0（全局租约表），但绑定 Key 落在
+    /// 各业务 Region 的 MVCC。region 0 的 `LeaseOp::Revoke` apply 后，各 Region
+    /// leader 经本命令在**各自 Region raft** 内按 `KvMetadata.lease_id` 索引
+    /// 原子删除绑定 Key（apply 期扫描，避免 leader 侧扫描的 TOCTOU；幂等）。
+    DeleteKeysByLease { lease_id: i64 },
 }
 
 impl std::fmt::Display for Command {
@@ -126,6 +133,9 @@ impl std::fmt::Display for Command {
             Command::Lease(op) => write!(f, "Lease({op:?})"),
             Command::Auth(op) => write!(f, "Auth({op:?})"),
             Command::Compact { revision } => write!(f, "Compact(revision={revision})"),
+            Command::DeleteKeysByLease { lease_id } => {
+                write!(f, "DeleteKeysByLease(lease_id={lease_id})")
+            }
         }
     }
 }

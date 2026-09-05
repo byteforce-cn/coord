@@ -1410,6 +1410,54 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
+    /// T5.7（R-MR-04）：per-Region 删除绑定到某 Lease 的全部 Key（raft apply 路径）
+    ///
+    /// Multi-Raft 模式下由各 Region 的 raft 经 `Command::DeleteKeysByLease` 下发
+    /// （region 0 的 `LeaseOp::Revoke` 只清全局租约表 `/_lease/{id}`，业务 Key 在
+    /// 各 Region 的 MVCC）。在**apply 期事务内**按 `KvMetadata.lease_id` 索引扫描
+    /// 并标记删除（与 `apply_lease_op` Revoke 同口径，无 leader 侧扫描 TOCTOU）：
+    /// 返回被删 Key 供 Watch 事件构造；changelog + META_LAST_APPLIED 同事务原子；
+    /// 幂等守卫同 lease 路径（replayed → 无副作用、无事件）。
+    pub fn apply_delete_keys_by_lease(
+        &self,
+        lease_id: i64,
+        revision: Revision,
+        applied: AppliedLogId,
+    ) -> Result<(ApplyOutcome, Vec<KeyValueChange>)> {
+        if self.changelog_contains_revision(revision)? {
+            return Ok((ApplyOutcome::replayed(), Vec::new()));
+        }
+
+        self.backend.write(|tx| {
+            let deleted = Self::delete_keys_by_lease_in_tx(tx, lease_id, revision)?;
+            let changes: Vec<KeyValueChange> = deleted
+                .into_iter()
+                .map(|key| KeyValueChange {
+                    key,
+                    value: None,
+                    prev_value: None,
+                })
+                .collect();
+
+            // Changelog（Lease 事件；携带被删 Key 供 Watch 分发——与 apply_lease_op
+            // Revoke 同口径 EventType::Lease）
+            let event = ChangeEvent {
+                revision,
+                changes: changes.clone(),
+                event_type: EventType::Lease,
+            };
+            tx.insert(
+                TABLE_CHANGELOG,
+                &encode_changelog_key(revision),
+                &event.to_bytes(),
+            )?;
+
+            tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
+
+            Ok((ApplyOutcome::applied(), changes))
+        })
+    }
+
     /// 应用 AuthOp（raft apply 路径，P0-C.2）：revision ≡ log index（D-A2）
     ///
     /// 用户/角色/吊销登记写入 `/_sys/auth/` 前缀（原始 bincode，不经 Barrier
