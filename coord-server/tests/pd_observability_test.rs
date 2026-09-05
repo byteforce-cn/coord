@@ -28,7 +28,7 @@ fn make_replica_imbalance_pd(
 ) -> (Arc<PlacementDriver>, watch::Sender<bool>) {
     let store = Arc::new(PdMetaStore::new());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let pd = Arc::new(PlacementDriver::new(cfg, store, shutdown_rx));
+    let pd = Arc::new(PlacementDriver::new(cfg, store, shutdown_rx, 1));
 
     for id in 1..=3u64 {
         pd.handle_node_heartbeat(NodeState::new(
@@ -129,7 +129,7 @@ fn test_operator_audit_events_recorded() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     drop(shutdown_tx); // 本测试不启动循环
 
-    let pd = PlacementDriver::new(PdConfig::default(), Arc::new(PdMetaStore::new()), shutdown_rx);
+    let pd = PlacementDriver::new(PdConfig::default(), Arc::new(PdMetaStore::new()), shutdown_rx, 1);
     pd.attach_observability(PdObservability::new(Some(Arc::clone(&audit)), None));
 
     // 成功路径：add-peer
@@ -185,7 +185,7 @@ fn test_operator_audit_suppressed_without_hook() {
     // 未 attach observability → 不 panic、不记录（行为与现状一致）
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     drop(shutdown_tx);
-    let pd = PlacementDriver::new(PdConfig::default(), Arc::new(PdMetaStore::new()), shutdown_rx);
+    let pd = PlacementDriver::new(PdConfig::default(), Arc::new(PdMetaStore::new()), shutdown_rx, 1);
     let op = Operator::RemovePeer {
         region_id: 1,
         node_id: 2,

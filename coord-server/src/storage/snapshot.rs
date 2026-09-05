@@ -48,12 +48,22 @@ pub struct SnapshotData {
     pub lease_entries: Vec<SnapshotRawEntry>,
     /// R-RFT-06：changelog 压缩水位（`META_COMPACT_REVISION`，0 = 未压缩）
     pub compacted_revision: u64,
+    /// R-MR-08（D1-a）P2：region 0 PD 全局队列域原始条目（`/_pd/*` → bytes）。
+    ///
+    /// region 0 状态机含 `/_pd/ops/{op_id}` operator 治理记录（D1-a 全局去重
+    /// 队列）。快照必须携带该域——导入时 `TABLE_KV` 全表清空重灌，缺此域会让
+    /// 快照追平/恢复把队列清空（op 丢失、调度停滞）。
+    pub pd_entries: Vec<SnapshotRawEntry>,
+    /// P2：region 0 其余 system 域原始条目（`/_sys/*` 中不属于 `/_sys/auth/*`
+    /// 的行——迁移标记 `/_sys/migration/legacy-v1` 等）。恢复后启动闸/迁移
+    /// 状态跨快照不丢。
+    pub sys_entries: Vec<SnapshotRawEntry>,
 }
 
 /// R-RFT-06：快照中的原始内部条目（非用户 KV 域）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotRawEntry {
-    /// 内部存储 key（含 `/_sys/auth/` 或 `/_lease/` 前缀）
+    /// 内部存储 key（`/_sys/auth/`、`/_lease/`、`/_pd/`、`/_sys/` 等内部前缀）
     pub internal_key: Vec<u8>,
     /// 原始 value 字节（密文/序列化字节，快照不接触明文）
     pub value: Vec<u8>,
@@ -83,7 +93,9 @@ pub struct SnapshotKvMeta {
 impl SnapshotData {
     /// 当前快照格式版本（P0-A：版本号 +1；0.1.x 数据不承诺兼容）
     /// v3（R-RFT-06）：新增 auth/lease 域 + compacted 水位，导入写完整 LogId。
-    const CURRENT_VERSION: u32 = 3;
+    /// v4（R-MR-08 D1-a P2）：新增 region 0 `/_pd/*`（PD 队列）与 `/_sys/*`
+    ///   非 auth 域（迁移标记等）原始条目——region 0 状态机的内部记录不再丢失。
+    const CURRENT_VERSION: u32 = 4;
 
     /// 创建空快照
     pub fn new(last_included_index: u64, last_included_term: u64) -> Self {
@@ -100,6 +112,8 @@ impl SnapshotData {
             auth_entries: Vec::new(),
             lease_entries: Vec::new(),
             compacted_revision: 0,
+            pd_entries: Vec::new(),
+            sys_entries: Vec::new(),
         }
     }
 
@@ -116,10 +130,11 @@ impl SnapshotData {
 
     /// R-TST-21：反序列化 + 旧格式迁移（数据格式升级兼容）。
     ///
-    /// 直接解析成功且版本匹配 → 原样返回；否则尝试 v2 格式迁移
-    /// （v2 = R-RFT-06 之前：无 auth/lease 域、无 compacted 水位、
-    /// applied term/node_id 不持久化）。迁移结果：域置空、水位 0、
-    /// applied term/node_id 回退 0（与 v2 运行时语义一致）。
+    /// 直接解析成功且版本匹配 → 原样返回；否则逐级回退 v3 → v2 迁移：
+    /// - v3 = R-MR-08 P2 之前：无 `/_pd/*` 与 `/_sys/*`（非 auth）域 → 迁移后
+    ///   补空域（region 0 内部记录本就丢失，运行时会重新经 raft 收敛）；
+    /// - v2 = R-RFT-06 之前：无 auth/lease 域、无 compacted 水位、applied
+    ///   term/node_id 不持久化 → 迁移结果域置空、水位 0、applied 回退 0。
     pub fn from_bytes_migrating(data: &[u8]) -> Result<Self> {
         match bincode::deserialize::<Self>(data) {
             Ok(snapshot) if snapshot.version == Self::CURRENT_VERSION => Ok(snapshot),
@@ -129,27 +144,66 @@ impl SnapshotData {
                 Self::CURRENT_VERSION
             ))),
             Err(_) => {
-                // 尝试 v2 迁移
-                let v2: SnapshotDataV2 = bincode::deserialize(data)
-                    .map_err(|e| Error::Internal(format!("snapshot deserialize (v3+v2): {e}")))?;
-                if v2.version != 2 {
-                    return Err(Error::Internal(format!(
-                        "unsupported snapshot version: {} (expected 2 or {})",
-                        v2.version,
+                // 尝试 v3 迁移
+                match bincode::deserialize::<SnapshotDataV3>(data) {
+                    Ok(v3) if v3.version == 3 => {
+                        tracing::warn!(
+                            "snapshot v3 detected; migrating to v{} (pd/sys internal domains empty)",
+                            Self::CURRENT_VERSION
+                        );
+                        Ok(Self::migrate_v3_to_v4(v3))
+                    }
+                    Ok(v3) => Err(Error::Internal(format!(
+                        "unsupported snapshot version: {} (expected 3 or {})",
+                        v3.version,
                         Self::CURRENT_VERSION
-                    )));
+                    ))),
+                    Err(_) => {
+                        // 尝试 v2 迁移
+                        let v2: SnapshotDataV2 = bincode::deserialize(data)
+                            .map_err(|e| {
+                                Error::Internal(format!("snapshot deserialize (v4+v3+v2): {e}"))
+                            })?;
+                        if v2.version != 2 {
+                            return Err(Error::Internal(format!(
+                                "unsupported snapshot version: {} (expected 2, 3 or {})",
+                                v2.version,
+                                Self::CURRENT_VERSION
+                            )));
+                        }
+                        tracing::warn!(
+                            "snapshot v2 detected; migrating to v{} (auth/lease/pd/sys empty, compacted=0, applied standalone)",
+                            Self::CURRENT_VERSION
+                        );
+                        Ok(Self::migrate_v2_to_v4(v2))
+                    }
                 }
-                tracing::warn!(
-                    "snapshot v2 detected; migrating to v{} (auth/lease empty, compacted=0, applied standalone)",
-                    Self::CURRENT_VERSION
-                );
-                Ok(Self::migrate_v2_to_v3(v2))
             }
         }
     }
 
-    /// v2 → v3 迁移：补空 auth/lease 域、水位 0、applied term/node_id 回退 0。
-    fn migrate_v2_to_v3(v2: SnapshotDataV2) -> Self {
+    /// v3 → v4 迁移：补空 pd/sys 域（v3 无 region 0 内部记录域）。
+    fn migrate_v3_to_v4(v3: SnapshotDataV3) -> Self {
+        Self {
+            version: Self::CURRENT_VERSION,
+            last_included_index: v3.last_included_index,
+            last_included_term: v3.last_included_term,
+            next_revision: v3.next_revision,
+            applied_index: v3.applied_index,
+            applied_term: v3.applied_term,
+            applied_node_id: v3.applied_node_id,
+            kv_pairs: v3.kv_pairs,
+            kv_metadata: v3.kv_metadata,
+            auth_entries: v3.auth_entries,
+            lease_entries: v3.lease_entries,
+            compacted_revision: v3.compacted_revision,
+            pd_entries: Vec::new(),
+            sys_entries: Vec::new(),
+        }
+    }
+
+    /// v2 → v4 迁移：补空 auth/lease/pd/sys 域、水位 0、applied term/node_id 回退 0。
+    fn migrate_v2_to_v4(v2: SnapshotDataV2) -> Self {
         Self {
             version: Self::CURRENT_VERSION,
             last_included_index: v2.last_included_index,
@@ -163,8 +217,28 @@ impl SnapshotData {
             auth_entries: Vec::new(),
             lease_entries: Vec::new(),
             compacted_revision: 0,
+            pd_entries: Vec::new(),
+            sys_entries: Vec::new(),
         }
     }
+}
+
+/// R-MR-08（D1-a）P2：v3 快照格式（PD/迁移内部域之前）。字段顺序与 v3 时点
+/// 一致，仅用于旧数据升级迁移，不参与导出。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SnapshotDataV3 {
+    version: u32,
+    last_included_index: u64,
+    last_included_term: u64,
+    next_revision: u64,
+    applied_index: u64,
+    applied_term: u64,
+    applied_node_id: u64,
+    kv_pairs: Vec<SnapshotKvPair>,
+    kv_metadata: Vec<SnapshotKvMeta>,
+    auth_entries: Vec<SnapshotRawEntry>,
+    lease_entries: Vec<SnapshotRawEntry>,
+    compacted_revision: u64,
 }
 
 /// R-TST-21：v2 快照格式（R-RFT-06 之前）。字段顺序与 v2 时点一致，
@@ -191,6 +265,10 @@ struct SnapshotDataV2 {
 /// - **单读事务**导出全部表（redb 读事务提供一致性视图），消除此前
 ///   applied / kv / kv_meta 三次独立读事务的撕裂快照；
 /// - 补充 auth 域（`/_sys/auth/*`）、lease 域（`/_lease/*`）与 compacted 水位。
+///
+/// R-MR-08（D1-a）P2：
+/// - 补充 region 0 `/_pd/*`（PD 全局队列）与 `/_sys/*` 非 auth 域（迁移标记
+///   等）——region 0 状态机内部记录随快照导出，导入/追平不丢。
 pub fn export_snapshot_data<B: StorageBackend>(
     storage: &MvccStorage<B>,
     last_included_index: u64,
@@ -199,7 +277,16 @@ pub fn export_snapshot_data<B: StorageBackend>(
     let mut data = SnapshotData::new(last_included_index, last_included_term);
 
     let backend = storage.backend();
-    let (applied_bytes, compacted_bytes, kv_rows, meta_rows, auth_rows, lease_rows) = backend
+    let (
+        applied_bytes,
+        compacted_bytes,
+        kv_rows,
+        meta_rows,
+        auth_rows,
+        lease_rows,
+        pd_rows,
+        sys_rows,
+    ) = backend
         .read(|tx| {
             let applied = tx.get(TABLE_META, META_LAST_APPLIED)?;
             let compacted = tx.get(TABLE_META, META_COMPACT_REVISION)?;
@@ -210,8 +297,18 @@ pub fn export_snapshot_data<B: StorageBackend>(
             // R-RFT-06：auth / lease 域随快照导出（恢复后用户/角色/会话/租约不丢）
             let auth_rows = tx.iter_prefix(TABLE_KV, b"/_sys/auth/")?;
             let lease_rows = tx.iter_prefix(TABLE_KV, b"/_lease/")?;
+            // R-MR-08（D1-a）P2：region 0 PD 队列 / 其余 system 域随快照导出
+            let pd_rows = tx.iter_prefix(TABLE_KV, b"/_pd/")?;
+            let sys_rows = tx.iter_prefix(TABLE_KV, b"/_sys/")?;
             Ok((
-                applied, compacted, kv_rows, meta_rows, auth_rows, lease_rows,
+                applied,
+                compacted,
+                kv_rows,
+                meta_rows,
+                auth_rows,
+                lease_rows,
+                pd_rows,
+                sys_rows,
             ))
         })?;
 
@@ -266,6 +363,24 @@ pub fn export_snapshot_data<B: StorageBackend>(
         .collect();
     data.lease_entries = lease_rows
         .into_iter()
+        .map(|(internal_key, value)| SnapshotRawEntry {
+            internal_key,
+            value,
+        })
+        .collect();
+
+    // R-MR-08（D1-a）P2：`/_pd/*` 全量；`/_sys/*` 中去掉已入 auth 域的行
+    // （`/_sys/auth/*`），其余（迁移标记等）进 sys_entries。
+    data.pd_entries = pd_rows
+        .into_iter()
+        .map(|(internal_key, value)| SnapshotRawEntry {
+            internal_key,
+            value,
+        })
+        .collect();
+    data.sys_entries = sys_rows
+        .into_iter()
+        .filter(|(internal_key, _)| !internal_key.starts_with(b"/_sys/auth/"))
         .map(|(internal_key, value)| SnapshotRawEntry {
             internal_key,
             value,
@@ -344,6 +459,15 @@ pub fn import_snapshot_data<B: StorageBackend>(
             tx.insert(TABLE_KV, &entry.internal_key, &entry.value)?;
         }
         for entry in &data.lease_entries {
+            tx.insert(TABLE_KV, &entry.internal_key, &entry.value)?;
+        }
+
+        // R-MR-08（D1-a）P2：恢复 region 0 `/_pd/*`（PD 队列）与 `/_sys/*`
+        // 非 auth 域（迁移标记等）原始条目——TABLE_KV 全表清空后一并回填。
+        for entry in &data.pd_entries {
+            tx.insert(TABLE_KV, &entry.internal_key, &entry.value)?;
+        }
+        for entry in &data.sys_entries {
             tx.insert(TABLE_KV, &entry.internal_key, &entry.value)?;
         }
 
@@ -628,6 +752,75 @@ mod tests {
         assert_eq!(applied.index, 9);
     }
 
+    // ──── R-MR-08（D1-a）P2：region 0 `/_pd/` 与 `/_sys/`（非 auth）域 ────
+
+    #[test]
+    fn test_snapshot_preserves_pd_queue_and_sys_domains() {
+        let (_tmp, storage) = setup_storage();
+
+        // 直接写 region 0 内部域原始条目：`/_pd/` 队列 + `/_sys/auth/`（已有
+        // 域，确认不重复进 sys）+ `/_sys/migration/` 标记
+        let backend = storage.backend();
+        backend
+            .write(|tx| {
+                tx.insert(TABLE_KV, b"/_pd/ops/0000000000000001", b"pd-entry-1")?;
+                tx.insert(TABLE_KV, b"/_pd/ops/0000000000000002", b"pd-entry-2")?;
+                tx.insert(TABLE_KV, b"/_sys/auth/user/alice", b"hash-bytes")?;
+                tx.insert(TABLE_KV, b"/_sys/migration/legacy-v1", b"done")?;
+                Ok(())
+            })
+            .unwrap();
+
+        let data = export_snapshot_data(&storage, 9, 7).unwrap();
+        assert_eq!(data.auth_entries.len(), 1, "auth domain unchanged");
+        assert!(data.lease_entries.is_empty());
+        assert_eq!(data.pd_entries.len(), 2, "pd queue domain exported");
+        assert_eq!(
+            data.sys_entries.len(),
+            1,
+            "non-auth /_sys/ rows (migration marker) exported"
+        );
+        assert_eq!(
+            data.sys_entries[0].internal_key, b"/_sys/migration/legacy-v1",
+            "auth rows must NOT leak into sys_entries"
+        );
+
+        // 导入新 storage → 内部域逐字段一致
+        let tmp2 = TempDir::new().unwrap();
+        let backend2 = RedbBackend::open(tmp2.path(), &StorageConfig::default()).unwrap();
+        let storage2 = MvccStorage::new(backend2).unwrap();
+        import_snapshot_data(&storage2, &data).unwrap();
+
+        let backend2 = storage2.backend();
+        let pd1 = backend2
+            .read(|tx| tx.get(TABLE_KV, b"/_pd/ops/0000000000000001"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(pd1, b"pd-entry-1".to_vec());
+        let pd2 = backend2
+            .read(|tx| tx.get(TABLE_KV, b"/_pd/ops/0000000000000002"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(pd2, b"pd-entry-2".to_vec());
+        let marker = backend2
+            .read(|tx| tx.get(TABLE_KV, b"/_sys/migration/legacy-v1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(marker, b"done".to_vec());
+        let auth = backend2
+            .read(|tx| tx.get(TABLE_KV, b"/_sys/auth/user/alice"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(auth, b"hash-bytes".to_vec());
+
+        // 序列化往返（v4 直接解析）
+        let bytes = data.to_bytes().unwrap();
+        let restored = SnapshotData::from_bytes_migrating(&bytes).unwrap();
+        assert_eq!(restored.version, 4);
+        assert_eq!(restored.pd_entries.len(), 2);
+        assert_eq!(restored.sys_entries.len(), 1);
+    }
+
     #[test]
     fn test_snapshot_compacted_revision_roundtrip() {
         let (_tmp, storage) = setup_storage();
@@ -663,7 +856,59 @@ mod tests {
         assert_eq!(storage3.compacted_revision().unwrap(), 0);
     }
 
-    // ──── R-TST-21：数据格式升级兼容（v2 → v3 迁移）────
+    // ──── R-TST-21：数据格式升级兼容（v2 / v3 → v4 迁移）────
+
+    #[test]
+    fn test_snapshot_v3_upgrade_migration() {
+        // 构造一条 v3 格式快照（R-MR-08 P2 之前：无 `/_pd/` 与 `/_sys/` 非 auth 域）
+        let v3 = SnapshotDataV3 {
+            version: 3,
+            last_included_index: 11,
+            last_included_term: 6,
+            next_revision: 12,
+            applied_index: 11,
+            applied_term: 7,
+            applied_node_id: 3,
+            kv_pairs: vec![SnapshotKvPair {
+                key: b"/legacy/key".to_vec(),
+                value: b"legacy-value".to_vec(),
+            }],
+            kv_metadata: Vec::new(),
+            auth_entries: vec![SnapshotRawEntry {
+                internal_key: b"/_sys/auth/user/alice".to_vec(),
+                value: b"hash-bytes".to_vec(),
+            }],
+            lease_entries: Vec::new(),
+            compacted_revision: 5,
+        };
+        let v3_bytes = bincode::serialize(&v3).unwrap();
+
+        // v4 结构直接解析失败 → v3 迁移路径成功（域补空；既有域保留）
+        assert!(SnapshotData::from_bytes(&v3_bytes).is_err());
+        let migrated =
+            SnapshotData::from_bytes_migrating(&v3_bytes).expect("v3 快照应可迁移为 v4");
+        assert_eq!(migrated.version, 4);
+        assert_eq!(migrated.last_included_index, 11);
+        assert_eq!(migrated.applied_term, 7, "v3 applied term 保留");
+        assert_eq!(migrated.applied_node_id, 3);
+        assert_eq!(migrated.auth_entries.len(), 1, "v3 auth 域保留");
+        assert_eq!(migrated.compacted_revision, 5, "v3 水位保留");
+        assert!(migrated.pd_entries.is_empty(), "v3 无 pd 域 → 补空");
+        assert!(migrated.sys_entries.is_empty(), "v3 无 sys 域 → 补空");
+
+        // 迁移后可正常导入恢复
+        let tmp = TempDir::new().unwrap();
+        let backend = RedbBackend::open(tmp.path(), &StorageConfig::default()).unwrap();
+        let storage = MvccStorage::new(backend).unwrap();
+        import_snapshot_data(&storage, &migrated).unwrap();
+        assert_eq!(
+            storage.get(b"/legacy/key").unwrap(),
+            Some(b"legacy-value".to_vec())
+        );
+        let applied = storage.get_applied_log_id().unwrap().unwrap();
+        assert_eq!(applied.index, 11);
+        assert_eq!(applied.term, 7);
+    }
 
     #[test]
     fn test_snapshot_v2_upgrade_migration() {
@@ -689,10 +934,10 @@ mod tests {
         };
         let v2_bytes = bincode::serialize(&v2).unwrap();
 
-        // 直接解析（v3 结构）失败 → 迁移路径成功
+        // 直接解析（v4/v3 结构）失败 → 迁移路径成功
         assert!(SnapshotData::from_bytes(&v2_bytes).is_err());
-        let migrated = SnapshotData::from_bytes_migrating(&v2_bytes).expect("v2 快照应可迁移为 v3");
-        assert_eq!(migrated.version, 3);
+        let migrated = SnapshotData::from_bytes_migrating(&v2_bytes).expect("v2 快照应可迁移为 v4");
+        assert_eq!(migrated.version, 4);
         assert_eq!(migrated.last_included_index, 11);
         assert_eq!(migrated.last_included_term, 6);
         assert_eq!(migrated.applied_index, 11);
@@ -700,11 +945,13 @@ mod tests {
         assert_eq!(migrated.applied_node_id, 0);
         assert!(migrated.auth_entries.is_empty());
         assert!(migrated.lease_entries.is_empty());
+        assert!(migrated.pd_entries.is_empty());
+        assert!(migrated.sys_entries.is_empty());
         assert_eq!(migrated.compacted_revision, 0);
         assert_eq!(migrated.kv_pairs.len(), 1);
         assert_eq!(migrated.kv_pairs[0].value, b"legacy-value");
 
-        // 迁移后的 v3 快照可正常导入恢复
+        // 迁移后的 v4 快照可正常导入恢复
         let tmp = TempDir::new().unwrap();
         let backend = RedbBackend::open(tmp.path(), &StorageConfig::default()).unwrap();
         let storage = MvccStorage::new(backend).unwrap();

@@ -18,12 +18,21 @@
 //   `RegionRaftHandle` trait 抽象（定义于 `raft/region_runtime.rs`，由 raft 层
 //   自我描述能力），执行器只经 trait object 使用。
 // - **Leader 守卫**：只有 Region leader 才能发起 change_membership /
-//   transfer_leader（openraft 拒绝非 leader 调用）。执行器运行在 Region leader
-//   所在节点的 PD 上；本节点不是该 Region leader 时 operator 记 Failed——
-//   跨节点 operator 转移/去重依赖 PD 元数据与命令经 region 0 system raft
-//   复制（T3.4 接线层决策，本层不实现）。
+//   transfer_leader（openraft 拒绝非 leader 调用）。
 // - 幂等：AddPeer 目标已是 Voter / RemovePeer 目标不在成员表 → 视为已达成
 //   成功（不重复触发 raft 成员变更，也不把重试当失败）。
+//
+// 队列来源（R-MR-08 D1-a，P2 接线）：
+// - **全局队列模式**（driver 已 attach region 0 system raft，生产接线）：
+//   operator 队列经 region 0 raft 承载（`/_pd/ops/*`）。执行器从全局队列只
+//   认领「目标 Region 的当前 leader == 本节点」的 Pending 条目（本节点 raft
+//   视角），`PdOp::Claim` 经 apply CAS 防双认领——每 operator 恰好被其 Region
+//   leader 节点执行一次，无 follower Failed(not leader) 噪音、无重复 operator。
+//   认领后执行（`execute` 保留 Leader 守卫：认领后 leader 漂移 → Failed，
+//   自愈——调度器后续重新生成）。
+// - **legacy 本地队列模式**（无 region 0 raft 的测试装配/回退，P4 退役）：
+//   每节点本地生成 operator，执行器取下一个执行，本节点非该 Region leader 时
+//   记一次性 Failed(not leader)。
 //
 // T3.4 接线增强：
 // - AddPeer 的**成员真源 = raft 已提交成员**（`current_members`），不再依赖
@@ -31,9 +40,9 @@
 //   learner（openraft remove_voter 会把被移除 voter 降为 learner）→ 跳过
 //   add_learner 仅 promote（重加自愈路径）；否则 add_learner → promote。
 // - 调度器生成的 AddPeer 常以 `node_id=0` 占位（目标由 PD 选择）。接线层注入
-//   `AddPeerTargetResolver` 后，`execute_one` 在执行前把占位目标解析为具体
-//   节点；无可用目标时把 operator 放回队列（Pending）稍后重试，不记 Failed
-//   （避免 ReplicaChecker 驱动的无谓 churn）。
+//   `AddPeerTargetResolver` 后，执行器在执行前把占位目标解析为具体节点；无
+//   可用目标时把 operator 留/放回 Pending 稍后重试，不记 Failed（避免
+//   ReplicaChecker 驱动的无谓 churn）。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,8 +50,10 @@ use std::time::Duration;
 use coord_core::types::{NodeID, Peer, PeerRole, RegionId, RegionMeta};
 use tokio::time::MissedTickBehavior;
 
-use super::{Operator, PlacementDriver};
+use super::{op_summary, Operator, PlacementDriver};
 use crate::raft::region_runtime::RegionRaftHandle;
+use crate::raft::system_raft::SystemRaftHandle;
+use crate::raft::type_config::PdOp;
 
 /// Region raft 解析器：region_id → 本节点上该 Region 的 raft 句柄
 ///
@@ -96,13 +107,28 @@ impl OperatorExecutor {
 
     /// 弹出队列中下一个 Pending operator 并尝试在本节点执行
     ///
-    /// 结果经 `complete_operator` 写入队列（Success/Failed）；无 Pending
-    /// operator 时返回 None。AddPeer（node_id=0）先经目标解析器解析为具体
-    /// 节点；无可用目标时放回队列并返回 None（下次 tick 重试）。
+    /// R-MR-08（D1-a P2）模式分发：
+    /// - **全局队列模式**（driver 已 attach region 0 system raft）：从 region 0
+    ///   全局队列认领「目标 Region 的当前 leader == 本节点」的 Pending 条目，
+    ///   经 `PdOp::Claim`（apply CAS 防双认领）→ 执行 → `PdOp::Complete`；
+    /// - **legacy 本地模式**：从本节点内存队列取下一个 Pending operator，
+    ///   执行器 Leader 守卫把关（非 leader 记一次性 Failed）。
+    ///
+    /// 结果写入队列（Success/Failed）；无 Pending operator（或本 tick 无可认领
+    /// 条目）时返回 None。AddPeer（node_id=0）先经目标解析器解析为具体节点。
+    pub async fn execute_one(&self, resolve: &RegionRaftResolver) -> Option<Operator> {
+        if let Some(system) = self.pd.system_raft() {
+            self.execute_one_raft(system.as_ref(), resolve).await
+        } else {
+            self.execute_one_local(resolve).await
+        }
+    }
+
+    /// legacy 本地队列模式：本节点内存队列取下一个 Pending operator 并执行。
     ///
     /// 返回的 Operator 是（可能经解析后的）实际执行版本；队列条目的完成
     /// 状态始终记在**原始条目**（node_id=0）上（解析不改变去重身份）。
-    pub async fn execute_one(&self, resolve: &RegionRaftResolver) -> Option<Operator> {
+    async fn execute_one_local(&self, resolve: &RegionRaftResolver) -> Option<Operator> {
         let original = self.pd.take_next_operator()?;
         let op = match &original {
             Operator::AddPeer {
@@ -144,6 +170,144 @@ impl OperatorExecutor {
             Err(msg) => self.pd.complete_operator(&original, false, Some(msg)),
         }
         Some(op)
+    }
+
+    /// R-MR-08（D1-a P2）：全局队列模式执行一拍。
+    ///
+    /// 从 region 0 全局队列（本节点 MVCC 视图，op_id 升序）扫描 Pending 条目，
+    /// 认领并执行**恰好一个**「目标 Region 的当前 leader == 本节点」的 operator：
+    ///   1. 目标 Region 不在本节点 / 本节点非其 leader → 他节点认领，跳过；
+    ///   2. AddPeer 占位（node_id=0）目标暂不可解析 → 保持 Pending，跳过
+    ///     （不产生 Requeue 日志噪音；目标可用后本节点或他节点自然认领）；
+    ///   3. `PdOp::Claim`（apply CAS 防双认领）→ propose 返回后重读队列确认
+    ///     `Running(claimed_by=本节点)`；竞态失败（他节点已认领）→ 跳过；
+    ///   4. 执行（复用 `execute` 的 Leader 守卫——认领后 leader 若已漂移则
+    ///      Failed(not leader)，与本地模式一致、自愈）；
+    ///   5. `PdOp::Complete{success, error}` + 审计（success/failed 与本地
+    ///      `complete_operator` 同口径）。
+    ///
+    /// 返回已处理 operator（可观测性）；无可认领条目返回 None。
+    async fn execute_one_raft(
+        &self,
+        system: &dyn SystemRaftHandle,
+        resolve: &RegionRaftResolver,
+    ) -> Option<Operator> {
+        // 1. 读全局队列（本节点 region 0 MVCC = raft apply 后本地视图）
+        let queue = match system.pd_queue() {
+            Ok(q) => q,
+            Err(e) => {
+                tracing::warn!("PD executor: read global pd queue failed: {e}");
+                return None;
+            }
+        };
+
+        // 2. 扫描 Pending 条目
+        for entry in &queue {
+            if !entry.is_pending() {
+                continue;
+            }
+            let original = entry.op.clone();
+            let op = match &original {
+                Operator::AddPeer {
+                    region_id,
+                    node_id: 0,
+                    ..
+                } => match self
+                    .add_peer_resolver
+                    .as_ref()
+                    .and_then(|r| r(*region_id))
+                {
+                    Some((target, addr)) => Operator::AddPeer {
+                        region_id: *region_id,
+                        node_id: target,
+                        raft_addr: addr,
+                    },
+                    None => {
+                        tracing::debug!(
+                            "PD executor: add-peer region {region_id} placeholder \
+                             unresolvable; leave pending (global queue)"
+                        );
+                        continue;
+                    }
+                },
+                _ => original.clone(),
+            };
+
+            // 仅认领「本节点是该 Region 的当前 leader」的条目
+            let Some(raft) = resolve(op.region_id()) else {
+                continue; // 目标 Region 不在本节点 → 他节点执行
+            };
+            if raft.current_leader().await != Some(self.node_id) {
+                continue; // 本节点非该 Region leader → 他节点认领
+            }
+
+            // 3. Claim（apply CAS；client_write 等待 apply 后才返回）
+            let op_id = entry.op_id;
+            if let Err(e) = system
+                .propose_pd(PdOp::Claim {
+                    op_id,
+                    node_id: self.node_id,
+                })
+                .await
+            {
+                tracing::warn!("PD executor: claim op {op_id} via region 0 failed: {e}");
+                continue;
+            }
+            // 确认认领归属：并发的他节点认领若先 apply，本认领为 no-op
+            match system.pd_queue() {
+                Ok(after) => match after.into_iter().find(|e| e.op_id == op_id) {
+                    Some(e) if e.is_running() && e.claimed_by == self.node_id => {}
+                    _ => {
+                        tracing::debug!(
+                            "PD executor: lost claim race on op {op_id}; skip (claimed elsewhere)"
+                        );
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("PD executor: read global queue after claim failed: {e}");
+                    continue;
+                }
+            }
+
+            // 4. 执行 + 5. Complete
+            let outcome = match resolve(op.region_id()) {
+                Some(raft) => self.execute(&op, raft).await,
+                None => Err(format!(
+                    "region {} runtime not present on node {}",
+                    op.region_id(),
+                    self.node_id
+                )),
+            };
+            let (success, msg) = match outcome {
+                Ok(()) => (true, String::new()),
+                Err(m) => (false, m),
+            };
+            if let Err(e) = system
+                .propose_pd(PdOp::Complete {
+                    op_id,
+                    node_id: self.node_id,
+                    success,
+                    error: msg.clone(),
+                })
+                .await
+            {
+                tracing::warn!("PD executor: complete op {op_id} via region 0 failed: {e}");
+            }
+            // 审计（与本地 complete_operator 同口径；记录在原始占位条目语义上）
+            if success {
+                self.pd
+                    .record_operator_event(&original, "success", &op_summary(&original));
+            } else {
+                self.pd.record_operator_event(
+                    &original,
+                    "failed",
+                    &format!("{}; error: {}", op_summary(&original), msg),
+                );
+            }
+            return Some(op);
+        }
+        None
     }
 
     /// 后台执行循环（与调度循环并行）
@@ -396,10 +560,14 @@ impl OperatorExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use coord_core::types::{RegionEpoch, RegionMeta};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use tokio::sync::watch;
+
+    use crate::raft::system_raft::SystemRaftHandle;
+    use crate::raft::type_config::{PdOp, PdQueueEntry};
 
     /// 可控 raft 替身：记录成员变更调用、可切换 leader 视图、维护成员表
     struct FakeRaft {
@@ -524,7 +692,7 @@ mod tests {
         };
         meta_store.create_region(region).unwrap();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let pd = Arc::new(PlacementDriver::new(config, meta_store, shutdown_rx));
+        let pd = Arc::new(PlacementDriver::new(config, meta_store, shutdown_rx, node_id));
         let ex = OperatorExecutor::new(Arc::clone(&pd), node_id);
         (pd, ex, shutdown_tx)
     }
@@ -851,6 +1019,226 @@ mod tests {
             matches!(st, super::super::operator::OperatorStatus::Pending),
             "unresolvable add-peer must stay pending (not failed): {st:?}"
         );
+    }
+
+    // ──── R-MR-08（D1-a P2）：全局队列模式（region 0 raft 承载）────
+
+    /// 可编程 region 0 system raft 替身：与 `apply_pd_op` 同构的 CAS 模拟 +
+    /// 记录 propose 命令（供断言 Claim/Complete 序列）。
+    struct FakeSystemRaft {
+        leader: Mutex<Option<NodeID>>,
+        queue: Mutex<Vec<PdQueueEntry>>,
+        proposed: Mutex<Vec<PdOp>>,
+        next_op_id: std::sync::atomic::AtomicU64,
+    }
+
+    impl FakeSystemRaft {
+        fn new(leader: Option<NodeID>) -> Self {
+            Self {
+                leader: Mutex::new(leader),
+                queue: Mutex::new(Vec::new()),
+                proposed: Mutex::new(Vec::new()),
+                next_op_id: std::sync::atomic::AtomicU64::new(1),
+            }
+        }
+
+        /// 预置一条 Pending 队列条目（op_id 由调用方指定）
+        fn seed_pending(&self, op_id: u64, op: Operator, requester: NodeID) {
+            self.queue.lock().unwrap().push(PdQueueEntry::new_pending(
+                op_id, op, requester, 1_700_000_000,
+            ));
+        }
+
+        fn proposed_ops(&self) -> Vec<PdOp> {
+            self.proposed.lock().unwrap().clone()
+        }
+
+        fn queue_entry(&self, op_id: u64) -> Option<PdQueueEntry> {
+            self.queue
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|e| e.op_id == op_id)
+                .cloned()
+        }
+    }
+
+    #[async_trait]
+    impl SystemRaftHandle for FakeSystemRaft {
+        async fn current_leader(&self) -> Option<NodeID> {
+            *self.leader.lock().unwrap()
+        }
+
+        async fn propose_pd(&self, op: PdOp) -> coord_core::error::Result<u64> {
+            self.proposed.lock().unwrap().push(op.clone());
+            let mut queue = self.queue.lock().unwrap();
+            match &op {
+                PdOp::Enqueue {
+                    op,
+                    requester,
+                    proposed_at_unix,
+                } => {
+                    let dup = queue
+                        .iter()
+                        .any(|e| (e.is_pending() || e.is_running()) && &e.op == op);
+                    if !dup {
+                        let id = self
+                            .next_op_id
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        queue.push(PdQueueEntry::new_pending(
+                            id,
+                            op.clone(),
+                            *requester,
+                            *proposed_at_unix,
+                        ));
+                    }
+                    Ok(1)
+                }
+                PdOp::Claim { op_id, node_id } => {
+                    if let Some(e) = queue.iter_mut().find(|e| e.op_id == *op_id) {
+                        e.try_claim(*node_id);
+                    }
+                    Ok(1)
+                }
+                PdOp::Complete {
+                    op_id,
+                    node_id,
+                    success,
+                    error,
+                } => {
+                    if let Some(e) = queue.iter_mut().find(|e| e.op_id == *op_id) {
+                        e.try_complete(*node_id, *success, error);
+                    }
+                    Ok(1)
+                }
+                PdOp::Requeue { op_id } => {
+                    if let Some(e) = queue.iter_mut().find(|e| e.op_id == *op_id) {
+                        e.try_requeue();
+                    }
+                    Ok(1)
+                }
+            }
+        }
+
+        fn pd_queue(&self) -> coord_core::error::Result<Vec<PdQueueEntry>> {
+            Ok(self.queue.lock().unwrap().clone())
+        }
+    }
+
+    /// 全局队列模式：本节点是 Region leader → 认领（Claim CAS）→ 执行 →
+    /// 完成（Complete success）；队列终态 Success、meta 同步。
+    #[tokio::test]
+    async fn test_raft_mode_execute_claims_and_completes_when_region_leader() {
+        let (pd, ex, fake) = leader_fake(vec![voter(1)]);
+        let op = Operator::AddPeer {
+            region_id: 1,
+            node_id: 2,
+            raft_addr: "node2:50052".into(),
+        };
+        // region 0 leader = 本节点（1）；预置一条 Pending AddPeer（op_id=5）
+        let system = Arc::new(FakeSystemRaft::new(Some(1)));
+        system.seed_pending(5, op.clone(), 1);
+        pd.attach_system_raft(system.clone());
+
+        let fake2: Arc<dyn RegionRaftHandle> = fake.clone();
+        let resolve: Arc<RegionRaftResolver> = Arc::new(move |_rid| Some(fake2.clone()));
+        let ran = ex.execute_one(&*resolve).await;
+        assert!(ran.is_some(), "raft-mode executor should process leader-owned op");
+
+        // 执行落在真实 Region raft 替身
+        assert_eq!(fake.add_learner_count(), 1);
+        assert_eq!(fake.promote_calls(), vec![2]);
+        assert!(has_peer(&peers_of_meta(&pd), 2, PeerRole::Voter));
+
+        // propose 序列：先 Claim 后 Complete(success)
+        let proposed = system.proposed_ops();
+        assert_eq!(proposed.len(), 2, "proposed: {proposed:?}");
+        assert!(matches!(
+            &proposed[0],
+            PdOp::Claim { op_id: 5, node_id: 1 }
+        ));
+        assert!(matches!(
+            &proposed[1],
+            PdOp::Complete {
+                op_id: 5,
+                node_id: 1,
+                success: true,
+                ..
+            }
+        ));
+        // 队列终态 Success
+        let e = system.queue_entry(5).expect("entry present");
+        assert!(
+            matches!(e.status, super::super::operator::OperatorStatus::Success),
+            "entry must reach Success: {e:?}"
+        );
+        // 本地队列不被使用
+        assert!(pd.take_next_operator().is_none());
+    }
+
+    /// 全局队列模式：条目目标 Region 的 leader 不是本节点 → 不认领（留给
+    /// 他节点），条目保持 Pending、无 propose。
+    #[tokio::test]
+    async fn test_raft_mode_execute_skips_op_when_not_region_leader() {
+        // executor 节点 1，但 Region leader = node2
+        let (_pd, ex, _fake) = make_executor_pd(1, vec![voter(1), voter(2)]);
+        let op = Operator::AddPeer {
+            region_id: 1,
+            node_id: 3,
+            raft_addr: "node3:50052".into(),
+        };
+        let system = Arc::new(FakeSystemRaft::new(Some(1))); // region 0 leader = 本节点
+        system.seed_pending(7, op.clone(), 2);
+        _pd.attach_system_raft(system.clone());
+
+        let region_fake = Arc::new(FakeRaft::new(2, vec![voter(1), voter(2)])); // region leader=2
+        let f2: Arc<dyn RegionRaftHandle> = region_fake.clone();
+        let resolve: Arc<RegionRaftResolver> = Arc::new(move |_rid| Some(f2.clone()));
+
+        let ran = ex.execute_one(&*resolve).await;
+        assert!(ran.is_none(), "op led by node2 must not run on node1");
+        assert!(
+            system.proposed_ops().is_empty(),
+            "no claim should be proposed for non-leader op"
+        );
+        let e = system.queue_entry(7).expect("entry present");
+        assert!(e.is_pending(), "entry must stay Pending: {e:?}");
+        assert_eq!(region_fake.add_learner_count(), 0);
+    }
+
+    /// 全局队列模式：认领竞态失败（他节点已认领为 Running）→ 执行器跳过、
+    /// 不执行、不 Complete。
+    #[tokio::test]
+    async fn test_raft_mode_execute_skips_already_running_entry() {
+        let (_pd, ex, _fake) = make_executor_pd(1, vec![voter(1)]);
+        let op = Operator::RemovePeer {
+            region_id: 1,
+            node_id: 3,
+        };
+        let system = Arc::new(FakeSystemRaft::new(Some(1)));
+        // 预置一条已由 node2 认领的 Running 条目（认领竞态失败场景）
+        system.queue.lock().unwrap().push(PdQueueEntry {
+            op_id: 9,
+            op: op.clone(),
+            status: super::super::operator::OperatorStatus::Running,
+            requester: 2,
+            claimed_by: 2,
+            proposed_at_unix: 1_700_000_000,
+            error: String::new(),
+        });
+        _pd.attach_system_raft(system.clone());
+
+        let f2: Arc<dyn RegionRaftHandle> = Arc::new(FakeRaft::new(1, vec![voter(1)]));
+        let resolve: Arc<RegionRaftResolver> = Arc::new(move |_rid| Some(f2.clone()));
+
+        let ran = ex.execute_one(&*resolve).await;
+        assert!(ran.is_none(), "already-running op must not be re-executed");
+        assert!(
+            system.proposed_ops().is_empty(),
+            "no claim/complete for running entry claimed elsewhere"
+        );
+        let e = system.queue_entry(9).expect("entry present");
+        assert_eq!(e.claimed_by, 2, "claim ownership unchanged");
     }
 
     #[tokio::test]

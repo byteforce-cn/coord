@@ -88,8 +88,8 @@ pub(crate) fn encode_kv_meta_key(user_key: &[u8]) -> Vec<u8> {
 ///
 /// 非 `/kv/` 前缀 → 不加密（同 `/_lease/`、`/_sys/auth/` 先例）；不上 Watch；
 /// 无 KvMetadata → 不经 compaction tombstone 清理（同节点重放/重启安全）。
-/// **快照覆盖为 P2 必补项**（`SnapshotData` 现仅导出 `/kv/`、`/_sys/auth/`、
-/// `/_lease/` 前缀——见 docs §4.5 P2）。
+/// 快照覆盖已落地（SnapshotData v4 导出 `/_pd/` 域——R-MR-08 D1-a P2，见
+/// docs §4.5 P2 与 `storage/snapshot.rs`）。
 pub const PD_QUEUE_PREFIX: &[u8] = b"/_pd/ops/";
 
 /// 终态条目保留上限（超出删最旧终态；apply 期确定性裁剪，只依赖持久状态）

@@ -155,6 +155,8 @@ async fn start_embedded_pds(hosts: &mut [NodeHost]) {
         end_key: vec![],
     }];
     for host in hosts.iter_mut() {
+        // 测试装配无 region 0 raft → legacy 本地队列模式（R-MR-08 D1-a P2
+        // 的全局队列模式需 region 0 raft，见 pd_region0_executor_test）。
         let pd = EmbeddedPd::start(
             pd_test_config(),
             host.node_id,
@@ -163,6 +165,7 @@ async fn start_embedded_pds(hosts: &mut [NodeHost]) {
             &seeds,
             nodes_info.clone(),
             Duration::from_millis(200),
+            None,
         )
         .await
         .expect("start embedded pd");

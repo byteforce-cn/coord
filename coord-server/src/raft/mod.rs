@@ -18,12 +18,14 @@ pub mod network;
 pub mod region;
 pub mod region_runtime;
 pub mod state_machine;
+pub mod system_raft;
 pub mod type_config;
 
 pub use network::{RegionRaftNetworkFactory, RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
 pub use region_runtime::{
     region_data_dir, CoordRegionRaftHandle, RegionRaftHandle, RegionRuntime, RegionRuntimeSpec,
 };
+pub use system_raft::{CoordSystemRaftHandle, SystemRaftHandle};
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

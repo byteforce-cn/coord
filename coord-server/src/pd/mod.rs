@@ -40,6 +40,8 @@ use self::operator::{OperatorEntry, OperatorStatus};
 use self::scheduler::{create_default_schedulers, ScheduleContext, Scheduler};
 use crate::audit::AuditLogger;
 use crate::metrics::Metrics;
+use crate::raft::system_raft::SystemRaftHandle;
+use crate::raft::type_config::PdOp;
 
 // Re-export 主要类型
 pub use embedded::{EmbeddedPd, NodeInfo};
@@ -79,6 +81,19 @@ pub struct PlacementDriver {
     /// T5.12：operator 审计/指标钩子（EmbeddedPd 装配后经
     /// `attach_observability` 接线；None = 不记录，行为与现状一致）
     observability: RwLock<Option<PdObservability>>,
+    /// 本节点 ID（R-MR-08 D1-a P2：调度收敛闸——operator 生成只发生在
+    /// region 0 leader == 本节点的 PD；operator 认领 requester/归属）
+    node_id: NodeID,
+    /// R-MR-08（D1-a P2）：region 0 system raft 治理句柄。
+    ///
+    /// - `Some`：**全局队列模式**——operator 队列经 region 0 raft 承载
+    ///   （`/_pd/ops/*`）。调度收敛到 region 0 leader（唯一生成源），执行由
+    ///   目标 Region leader 节点从全局队列认领（apply CAS 防双认领）；本节点
+    ///   本地 `pending_operators` 队列不参与（P4 退役前保留为测试/回退路径）。
+    /// - `None`：**legacy 本地队列模式**（region 0 raft 不可得——无 multi_raft
+    ///   的测试装配/单元测试沿用）：现行为——每节点本地生成 + 执行器 Leader
+    ///   守卫 + 一次性 Failed(not leader)。
+    system: RwLock<Option<Arc<dyn SystemRaftHandle>>>,
 }
 
 #[derive(Clone, Default)]
@@ -102,6 +117,7 @@ impl PlacementDriver {
         config: PdConfig,
         meta_store: Arc<PdMetaStore>,
         shutdown_rx: watch::Receiver<bool>,
+        node_id: NodeID,
     ) -> Self {
         let schedulers = create_default_schedulers(&config);
         let scheduler_paused = config.scheduler_paused;
@@ -115,7 +131,30 @@ impl PlacementDriver {
             shutdown_rx,
             scheduler_paused: AtomicBool::new(scheduler_paused),
             observability: RwLock::new(None),
+            node_id,
+            system: RwLock::new(None),
         }
+    }
+
+    /// R-MR-08（D1-a P2）：装配 region 0 system raft 治理句柄（进入全局队列
+    /// 模式）。应在任何后台循环启动前调用；幂等（重复装配覆盖）。
+    pub fn attach_system_raft(&self, system: Arc<dyn SystemRaftHandle>) {
+        *self.system.write() = Some(system);
+        tracing::info!(
+            "PD: operator queue switched to region 0 system raft (global queue mode) \
+             on node {}",
+            self.node_id
+        );
+    }
+
+    /// 当前 region 0 system raft 治理句柄（None = legacy 本地队列模式）
+    pub fn system_raft(&self) -> Option<Arc<dyn SystemRaftHandle>> {
+        self.system.read().clone()
+    }
+
+    /// 本节点 ID
+    pub fn node_id(&self) -> NodeID {
+        self.node_id
     }
 
     // ──── T5.12：调度暂停开关 ────
@@ -312,6 +351,31 @@ impl PlacementDriver {
             }
         }
 
+        // R-MR-08（D1-a P2）：全局队列模式下 operator 生成只发生在 region 0
+        // raft leader 所在节点的 PD——生成源全局唯一（follower 的 PD 仍做心跳
+        // 维护与离线判定，但不生成 operator；执行器在每节点照常运行，从全局
+        // 队列认领「目标 Region leader == 本节点」的条目）。legacy 本地模式
+        // 无此闸（每节点本地生成，执行器 Leader 守卫过滤为 Failed）。
+        let system = self.system_raft();
+        if let Some(system) = &system {
+            match system.current_leader().await {
+                Some(l) if l == self.node_id => {}
+                Some(l) => {
+                    tracing::debug!(
+                        "PD: node {} is not region 0 leader (leader={}); skip scheduling \
+                         (global queue mode)",
+                        self.node_id,
+                        l
+                    );
+                    return;
+                }
+                None => {
+                    tracing::debug!("PD: region 0 leader unknown; skip scheduling");
+                    return;
+                }
+            }
+        }
+
         // 2. 构建调度上下文（含心跳上报的 Region leader 视图）
         let regions = self.meta_store.list_regions();
         let nodes: Vec<NodeState> = self.node_states.read().values().cloned().collect();
@@ -319,56 +383,137 @@ impl PlacementDriver {
         ctx.leaders = self.region_leaders.read().clone();
 
         // 3. 运行所有调度器
-        let mut total_ops = 0;
         let max_ops = self.config.max_concurrent_operators;
 
-        // 检查待处理 Operator 数量，控制并发
-        let pending_count = self.pending_operators.read().len();
+        // 并发上限：全局队列模式数全局队列 Pending/Running；本地模式数本地队列。
+        let pending_count = if let Some(system) = &system {
+            match system.pd_queue() {
+                Ok(entries) => entries
+                    .iter()
+                    .filter(|e| e.is_pending() || e.is_running())
+                    .count(),
+                Err(e) => {
+                    tracing::warn!("PD: read region 0 pd queue failed: {e}; skip tick");
+                    return;
+                }
+            }
+        } else {
+            self.pending_operators.read().len()
+        };
         if pending_count >= max_ops {
             tracing::debug!(
-                "PD: {} pending operators, skipping schedule tick",
-                pending_count
+                "PD: {} pending operators (mode={}), skipping schedule tick",
+                pending_count,
+                if system.is_some() { "global" } else { "local" }
             );
             return;
         }
 
         let remaining = max_ops - pending_count;
 
+        // 运行调度器收集候选 operator（生成逻辑两种模式共用；入队方式不同）
+        let mut generated: Vec<Operator> = Vec::new();
         for scheduler in &self.schedulers {
-            if total_ops >= remaining {
+            if generated.len() >= remaining {
                 break;
             }
-
             let ops = scheduler.schedule(&ctx);
             let count = ops.len();
             if count > 0 {
                 tracing::info!("PD: {} generated {} operator(s)", scheduler.name(), count);
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-
-                let mut pending = self.pending_operators.write();
                 for op in ops {
-                    pending.push(OperatorEntry {
-                        op,
-                        status: OperatorStatus::Pending,
-                        created_at: now,
-                    });
-                    total_ops += 1;
-                    if total_ops >= remaining {
+                    generated.push(op);
+                    if generated.len() >= remaining {
                         break;
                     }
                 }
             }
         }
+        if generated.is_empty() {
+            return;
+        }
+
+        if let Some(system) = &system {
+            self.enqueue_generated_global(system, generated).await;
+        } else {
+            self.enqueue_generated_local(generated);
+        }
     }
 
-    /// 入队一个待执行 Operator（T3.3：执行器/管理面注入）
+    /// 全局队列模式入队（R-MR-08 D1-a P2）：候选 operator 与全局队列预去重后
+    /// 经 raft `Enqueue` 写入 region 0（apply 层幂等去重兜底；单生成源下预过滤
+    /// 即权威，避免每 tick 对同一 operator 重复 Enqueue 的日志噪音）。
+    async fn enqueue_generated_global(
+        &self,
+        system: &Arc<dyn SystemRaftHandle>,
+        generated: Vec<Operator>,
+    ) {
+        let queue = match system.pd_queue() {
+            Ok(q) => q,
+            Err(e) => {
+                tracing::warn!("PD: read region 0 pd queue failed: {e}; drop generated ops");
+                return;
+            }
+        };
+        let now = now_unix_secs();
+        for op in generated {
+            let dup = queue
+                .iter()
+                .any(|e| (e.is_pending() || e.is_running()) && e.op == op);
+            if dup {
+                continue;
+            }
+            match system
+                .propose_pd(PdOp::Enqueue {
+                    op: op.clone(),
+                    requester: self.node_id,
+                    proposed_at_unix: now,
+                })
+                .await
+            {
+                Ok(rev) => {
+                    tracing::info!(
+                        "PD: enqueued operator {} to region 0 queue (log {rev})",
+                        op_summary(&op)
+                    );
+                    // T5.12：新增（非去重命中）operator 审计 + 指标
+                    self.count_operator_enqueued();
+                    self.record_operator_event(&op, "pending", &op_summary(&op));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "PD: enqueue operator {} via region 0 failed: {e}",
+                        op_summary(&op)
+                    );
+                }
+            }
+        }
+    }
+
+    /// 本地队列模式入队（legacy）：候选 operator 直接进本节点内存队列
+    /// （无 region 0 raft 的测试/回退路径；P4 退役）。
+    fn enqueue_generated_local(&self, generated: Vec<Operator>) {
+        let now = now_unix_secs();
+        let mut pending = self.pending_operators.write();
+        for op in generated {
+            pending.push(OperatorEntry {
+                op,
+                status: OperatorStatus::Pending,
+                created_at: now,
+            });
+        }
+    }
+
+    /// 入队一个待执行 Operator（T3.3：执行器/管理面注入；**本地队列模式专用**）
     ///
     /// 幂等：与队列中 Pending/Running 的相同 operator 去重（相同 region +
     /// 相同动作 + 相同目标视为重复），避免调度/重试风暴。
     /// T5.12：新增（非去重命中）operator 记审计事件 + 指标计数。
+    ///
+    /// R-MR-08（D1-a P2）：全局队列模式（`attach_system_raft` 已装配）下生产
+    /// 入队走调度器 → `PdOp::Enqueue`（raft 复制、apply 层幂等去重），本方法
+    /// 只用于本地模式/测试注入；raft 模式下直接调用只会进本地内存队列（不被
+    /// 执行器消费），调用方应改用 raft 通道。
     pub fn enqueue_operator(&self, op: Operator) {
         let mut pending = self.pending_operators.write();
         let dup = pending.iter().any(|e| {
@@ -528,6 +673,15 @@ fn op_summary(op: &Operator) -> String {
     }
 }
 
+/// 当前墙钟 Unix 秒（operator 审计/入队时间戳；apply 期不读墙钟的约束由
+/// raft 命令携带时间戳满足——见 `PdOp::Enqueue.proposed_at_unix`）。
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 // ============================================================================
 // 测试
 // ============================================================================
@@ -535,14 +689,17 @@ fn op_summary(op: &Operator) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+
+    use crate::raft::type_config::{PdOp, PdQueueEntry};
 
     fn make_test_pd() -> (Arc<PlacementDriver>, watch::Sender<bool>) {
         let config = PdConfig::default();
         let meta_store = Arc::new(PdMetaStore::new());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let pd = Arc::new(PlacementDriver::new(config, meta_store, shutdown_rx));
+        let pd = Arc::new(PlacementDriver::new(config, meta_store, shutdown_rx, 1));
         (pd, shutdown_tx)
     }
 
@@ -695,6 +852,7 @@ mod tests {
             PdConfig::default(),
             meta_store,
             shutdown_rx,
+            1,
         ));
         let mut region = make_region_meta(1, vec![0x00], vec![0xFF]);
         region.peers = vec![
@@ -731,7 +889,7 @@ mod tests {
     fn make_leader_imbalance_pd(cfg: PdConfig) -> (Arc<PlacementDriver>, watch::Sender<bool>) {
         let meta_store = Arc::new(PdMetaStore::new());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let pd = Arc::new(PlacementDriver::new(cfg, meta_store, shutdown_rx));
+        let pd = Arc::new(PlacementDriver::new(cfg, meta_store, shutdown_rx, 1));
 
         pd.handle_node_heartbeat(make_node_state(1, true));
         pd.handle_node_heartbeat(make_node_state(2, true));
@@ -926,6 +1084,159 @@ mod tests {
             "pending {} should be <= {}",
             stats.pending,
             pd.config().max_concurrent_operators
+        );
+    }
+
+    // ──── R-MR-08（D1-a P2）：全局队列模式调度（region 0 raft 承载）────
+
+    /// 可编程 region 0 system raft 替身：内存队列 + 与 `apply_pd_op` 同构的
+    /// CAS 状态机（Pending→Running(claimed_by)→Success/Failed、Enqueue 幂等
+    /// 去重、Requeue），记录全部 propose 命令供断言。
+    struct FakeSystemRaft {
+        leader: Mutex<Option<NodeID>>,
+        queue: Mutex<Vec<PdQueueEntry>>,
+        proposed: Mutex<Vec<PdOp>>,
+        next_op_id: std::sync::atomic::AtomicU64,
+    }
+
+    impl FakeSystemRaft {
+        fn new(leader: Option<NodeID>) -> Self {
+            Self {
+                leader: Mutex::new(leader),
+                queue: Mutex::new(Vec::new()),
+                proposed: Mutex::new(Vec::new()),
+                next_op_id: std::sync::atomic::AtomicU64::new(1),
+            }
+        }
+
+        /// 全部已 propose 的命令（按序）
+        fn proposed_ops(&self) -> Vec<PdOp> {
+            self.proposed.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl SystemRaftHandle for FakeSystemRaft {
+        async fn current_leader(&self) -> Option<NodeID> {
+            *self.leader.lock().unwrap()
+        }
+
+        async fn propose_pd(&self, op: PdOp) -> coord_core::error::Result<u64> {
+            // 与 MvccStorage::apply_pd_op 同构的内存模拟（Enqueue 幂等去重、
+            // Claim/Complete CAS、Requeue）
+            self.proposed.lock().unwrap().push(op.clone());
+            let mut queue = self.queue.lock().unwrap();
+            match &op {
+                PdOp::Enqueue {
+                    op,
+                    requester,
+                    proposed_at_unix,
+                } => {
+                    let dup = queue
+                        .iter()
+                        .any(|e| (e.is_pending() || e.is_running()) && &e.op == op);
+                    if !dup {
+                        let id = self
+                            .next_op_id
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        queue.push(PdQueueEntry::new_pending(
+                            id,
+                            op.clone(),
+                            *requester,
+                            *proposed_at_unix,
+                        ));
+                    }
+                    Ok(1) // 日志 index 非断言点
+                }
+                PdOp::Claim { op_id, node_id } => {
+                    if let Some(e) = queue.iter_mut().find(|e| e.op_id == *op_id) {
+                        e.try_claim(*node_id);
+                    }
+                    Ok(1)
+                }
+                PdOp::Complete {
+                    op_id,
+                    node_id,
+                    success,
+                    error,
+                } => {
+                    if let Some(e) = queue.iter_mut().find(|e| e.op_id == *op_id) {
+                        e.try_complete(*node_id, *success, error);
+                    }
+                    Ok(1)
+                }
+                PdOp::Requeue { op_id } => {
+                    if let Some(e) = queue.iter_mut().find(|e| e.op_id == *op_id) {
+                        e.try_requeue();
+                    }
+                    Ok(1)
+                }
+            }
+        }
+
+        fn pd_queue(&self) -> coord_core::error::Result<Vec<PdQueueEntry>> {
+            Ok(self.queue.lock().unwrap().clone())
+        }
+    }
+
+    /// 全局队列模式 follower（region 0 leader = node2 ≠ 本节点 node1）：
+    /// 调度 tick 不生成、不 Enqueue、不碰本地队列。
+    #[tokio::test]
+    async fn test_raft_mode_scheduler_skips_when_not_region0_leader() {
+        let mut cfg = PdConfig::default();
+        cfg.target_replicas = 2;
+        cfg.balance_interval = 1;
+        let (pd, _shutdown_tx) = make_leader_imbalance_pd(cfg);
+        let system = Arc::new(FakeSystemRaft::new(Some(2)));
+        pd.attach_system_raft(system.clone());
+
+        pd.run_schedule_tick(0).await;
+
+        assert_eq!(
+            system.proposed_ops().len(),
+            0,
+            "follower 不得 Enqueue（region 0 leader=2，本节点=1）"
+        );
+        assert!(pd.take_next_operator().is_none(), "全局模式不使用本地队列");
+        assert_eq!(pd.operator_stats().total, 0);
+    }
+
+    /// 全局队列模式 leader（region 0 leader = 本节点）：调度生成的 operator
+    /// 经 raft `Enqueue` 入全局队列（本地队列不参与）；重复 tick 预去重——同一
+    /// operator 已在队列 Pending → 不再重复 Enqueue（无日志噪音）。
+    #[tokio::test]
+    async fn test_raft_mode_scheduler_enqueues_on_leader_and_dedups_across_ticks() {
+        let mut cfg = PdConfig::default();
+        cfg.target_replicas = 2;
+        cfg.balance_interval = 1;
+        let (pd, _shutdown_tx) = make_leader_imbalance_pd(cfg);
+        let system = Arc::new(FakeSystemRaft::new(Some(1)));
+        pd.attach_system_raft(system.clone());
+
+        // tick 1：leader 均衡生成 TransferLeader → raft Enqueue
+        pd.run_schedule_tick(0).await;
+        let proposed1 = system.proposed_ops();
+        let enq1 = proposed1
+            .iter()
+            .filter(|op| matches!(op, PdOp::Enqueue { .. }))
+            .count();
+        assert!(enq1 >= 1, "leader 应把生成的 operator Enqueue 到全局队列");
+        assert!(
+            proposed1.iter().all(|op| matches!(op, PdOp::Enqueue { .. })),
+            "调度只应提出 Enqueue"
+        );
+        assert!(pd.take_next_operator().is_none(), "全局模式不使用本地队列");
+
+        // tick 2：同一 operator 仍在队列 Pending → 预去重，不重复 Enqueue
+        pd.run_schedule_tick(0).await;
+        let proposed2 = system.proposed_ops();
+        let enq2 = proposed2
+            .iter()
+            .filter(|op| matches!(op, PdOp::Enqueue { .. }))
+            .count();
+        assert_eq!(
+            enq1, enq2,
+            "重复 tick 不得重复 Enqueue 相同 operator（预去重）"
         );
     }
 

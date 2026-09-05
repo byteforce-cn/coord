@@ -28,10 +28,13 @@
 // （决策逻辑仍经 trait 抽象，见 `executor.rs` 模块文档）；不引用任何
 // `openraft::`/`openraft_multi::` 路径（P1-06 隔离由 `raft/` 层收敛）。
 //
-// 遗留（T3.4 之后的接线层决策）：operator 跨节点去重-转移（follower 节点 PD
-// 也会生成同一 operator，执行时被 Leader 守卫拒绝——v1 中为一次性 Failed、
-// 对账收敛后不再生成；若需彻底避免可后续经 region 0 system raft 承载 PD
-// 命令实现去重）。
+// R-MR-08（D1-a，2026-09-05 拍板=选项 a）：operator 跨节点去重经 region 0
+// system raft 承载（docs §4.5，P1–P4 分阶段）。P1 = raft 层基座
+// （`Command::Pd`/`PdQueueEntry`/`apply_pd_op`，commit 0d6cb17）；P2 = 本层
+// 接线——`EmbeddedPd::start` 新增 `system_raft: Option<Arc<dyn SystemRaftHandle>>`
+// 参数：main.rs 把 region 0 raft 句柄传入（全局队列模式：调度收敛 region 0
+// leader、执行器从全局队列按 Region leader 认领），无 region 0 raft 的测试
+// 装配传 None（legacy 本地队列路径，P4 退役）。
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -50,6 +53,7 @@ use super::types::NodeState;
 use super::{OperatorExecutor, PdConfig, PlacementDriver};
 use crate::raft::region::{RegionManager, RegionSeed};
 use crate::raft::region_runtime::{CoordRegionRaftHandle, RegionRaftHandle, RegionRuntime};
+use crate::raft::system_raft::SystemRaftHandle;
 
 /// 集群节点信息（节点心跳注册 + AddPeer 目标地址解析用）
 #[derive(Debug, Clone)]
@@ -85,6 +89,9 @@ impl EmbeddedPd {
     /// - `region_manager`：已装配的 RegionManager（心跳/对账/执行对象）
     /// - `seeds`：配置 Region 表（v1 静态；key range 真源，用于播种/对账）
     /// - `nodes`：集群全部成员（raft/grpc 地址；节点心跳 + AddPeer 目标池）
+    /// - `system_raft`：region 0 system raft 治理句柄（R-MR-08 D1-a P2）。
+    ///   `Some` = 全局队列模式（调度收敛 region 0 leader + 执行器全局队列
+    ///   认领）；`None` = legacy 本地队列模式（无 region 0 raft 的测试装配）
     pub async fn start(
         pd_config: PdConfig,
         node_id: NodeID,
@@ -93,6 +100,7 @@ impl EmbeddedPd {
         seeds: &[RegionSeed],
         nodes: Vec<NodeInfo>,
         heartbeat_interval: Duration,
+        system_raft: Option<Arc<dyn SystemRaftHandle>>,
     ) -> Result<Arc<Self>, coord_core::error::Error> {
         // 1. 元数据落盘 + 播种（key range 以配置为真源；持久 peers/epoch 保留）
         let meta_store = Arc::new(PdMetaStore::open(data_dir)?);
@@ -113,7 +121,12 @@ impl EmbeddedPd {
             pd_config,
             Arc::clone(&meta_store),
             shutdown_rx,
+            node_id,
         ));
+        // R-MR-08（D1-a P2）：装配 region 0 system raft 治理句柄（全局队列模式）
+        if let Some(system) = system_raft {
+            driver.attach_system_raft(system);
+        }
         for n in &nodes {
             driver.handle_node_heartbeat(NodeState::new(
                 n.node_id,
