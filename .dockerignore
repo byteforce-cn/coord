@@ -36,6 +36,9 @@ coord-dev-data/
 # Scripts (not needed for build)
 scripts/
 
+# Jepsen test project (not needed for image build; runs on the external lab)
+jepsen/
+
 # Misc
 *.md
 LICENSE

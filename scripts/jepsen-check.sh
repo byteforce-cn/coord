@@ -6,8 +6,8 @@
 #   - chaos_real_kill9_and_linearizability：kill9+暂停+分区+RegisterChecker
 #
 # 说明：本套件覆盖 Jepsen 的 nemesis（kill/pause/partition）与
-# checker（linearizability）核心要素；独立 Clojure Jepsen 作为可选外部
-# 验证（见 docs/production/evidence/m4.md 外部依赖清单）。
+# checker（linearizability）核心要素；独立 Clojure Jepsen 源码随 coord 版本化
+# （见 ./jepsen/README.md），在外部 Jepsen lab 上执行全矩阵与 72h soak。
 #
 # 用法：./scripts/jepsen-check.sh   （约 2-3 分钟）
 set -euo pipefail

@@ -1,0 +1,14 @@
+# coord release binary — never commit (deployed by the lab Makefile,
+# built from the current checkout: ../target/release/coord)
+/coord
+
+# lein / jepsen local artifacts
+/.cpcache/
+/target/
+/.lein-*
+.nrepl-port
+
+# runtime results & logs (live on the control node under /root/coord-test)
+/store/
+*.log
+soak.pid

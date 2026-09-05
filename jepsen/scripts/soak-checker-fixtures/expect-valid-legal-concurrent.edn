@@ -1,0 +1,4 @@
+{:index 0 :time 100 :type :invoke :f :write :value 1 :process 0}
+{:index 1 :time 200 :type :invoke :f :read :value nil :process 1}
+{:index 2 :time 300 :type :ok :f :read :value 1 :process 1}
+{:index 3 :time 4000 :type :ok :f :write :value 1 :process 0}

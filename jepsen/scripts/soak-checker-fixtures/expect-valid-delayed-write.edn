@@ -1,0 +1,8 @@
+{:index 0  :time 1000 :type :invoke :f :write :value 47 :process 1}
+{:index 1  :time 1100 :type :invoke :f :write :value 50 :process 2}
+{:index 2  :time 1200 :type :ok    :f :write :value 50 :process 2}
+{:index 3  :time 4000 :type :ok    :f :write :value 47 :process 1}
+{:index 4  :time 4100 :type :invoke :f :read :value nil :process 3}
+{:index 5  :time 4200 :type :ok    :f :read :value 47 :process 3 :node "n2"}
+{:index 6  :time 4300 :type :invoke :f :read :value nil :process 4}
+{:index 7  :time 4400 :type :ok    :f :read :value 47 :process 4 :node "n2"}
