@@ -105,7 +105,15 @@ pub enum PdOp {
         proposed_at_unix: i64,
     },
     /// 认领执行（仅 Pending 生效；已被认领/Running → no-op，防双认领）
-    Claim { op_id: u64, node_id: NodeID },
+    ///
+    /// `claimed_at_unix` 由认领者（执行器节点）在 propose 前填本节点墙钟
+    /// （P3：Running 超时重认领判定依赖的"Running 起始时间"——apply 期不读
+    /// 墙钟的确定性约束同 `Enqueue.proposed_at_unix` 先例）。
+    Claim {
+        op_id: u64,
+        node_id: NodeID,
+        claimed_at_unix: i64,
+    },
     /// 完成（仅 Running 且 `claimed_by == node_id` 生效；成功或失败携带原因）
     Complete {
         op_id: u64,
@@ -135,6 +143,8 @@ pub struct PdQueueEntry {
     pub claimed_by: NodeID,
     /// 提出方墙钟 Unix 秒（仅信息性，不参与决策）
     pub proposed_at_unix: i64,
+    /// 认领方墙钟 Unix 秒（P3：Running 超时重认领的依据；0 = 未认领）
+    pub claimed_at_unix: i64,
     /// Failed 原因 / 审计信息
     pub error: String,
 }
@@ -154,6 +164,7 @@ impl PdQueueEntry {
             requester,
             claimed_by: 0,
             proposed_at_unix,
+            claimed_at_unix: 0,
             error: String::new(),
         }
     }
@@ -178,11 +189,12 @@ impl PdQueueEntry {
         )
     }
 
-    /// 认领：仅 Pending 生效（置 Running + claimed_by）。返回是否生效。
-    pub fn try_claim(&mut self, node_id: NodeID) -> bool {
+    /// 认领：仅 Pending 生效（置 Running + claimed_by + 认领墙钟）。返回是否生效。
+    pub fn try_claim(&mut self, node_id: NodeID, claimed_at_unix: i64) -> bool {
         if self.is_pending() {
             self.status = OperatorStatus::Running;
             self.claimed_by = node_id;
+            self.claimed_at_unix = claimed_at_unix;
             true
         } else {
             false
@@ -208,15 +220,27 @@ impl PdQueueEntry {
         }
     }
 
-    /// 重新入队：仅 Running 生效（回 Pending、清认领者与错误）。返回是否生效。
+    /// 重新入队：仅 Running 生效（回 Pending、清认领者/认领墙钟与错误）。
+    /// 返回是否生效。
     pub fn try_requeue(&mut self) -> bool {
         if self.is_running() {
             self.status = OperatorStatus::Pending;
             self.claimed_by = 0;
+            self.claimed_at_unix = 0;
             self.error.clear();
             true
         } else {
             false
+        }
+    }
+
+    /// Running 已持续时长（秒；未认领返回 0）。供 region 0 leader 判
+    /// Running 超时重认领（P3；`claimed_at_unix` 由 Claim 命令携带，见上）。
+    pub fn running_for_secs(&self, now_unix: i64) -> i64 {
+        if self.is_running() && self.claimed_at_unix > 0 {
+            (now_unix - self.claimed_at_unix).max(0)
+        } else {
+            0
         }
     }
 
@@ -506,6 +530,7 @@ mod tests {
             Command::Pd(PdOp::Claim {
                 op_id: 42,
                 node_id: 7,
+                claimed_at_unix: 1_700_000_100,
             }),
             Command::Pd(PdOp::Complete {
                 op_id: 42,
@@ -531,13 +556,18 @@ mod tests {
         assert!(decoded.is_pending());
         assert_eq!(decoded.op_id, 42);
 
-        // 认领后状态往返（Running + claimed_by）
+        // 认领后状态往返（Running + claimed_by + claimed_at）
         let mut claimed = entry;
-        assert!(claimed.try_claim(7));
+        assert!(claimed.try_claim(7, 1_700_000_100));
         let bytes = claimed.to_bytes().unwrap();
         let decoded = PdQueueEntry::from_bytes(&bytes).expect("decode");
         assert!(decoded.is_running());
         assert_eq!(decoded.claimed_by, 7);
+        assert_eq!(decoded.claimed_at_unix, 1_700_000_100);
+        // Requeue 清认领墙钟
+        let mut requeued = decoded;
+        assert!(requeued.try_requeue());
+        assert_eq!(requeued.claimed_at_unix, 0);
     }
 
     #[test]

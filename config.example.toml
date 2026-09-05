@@ -82,6 +82,9 @@ enabled = false
 # split_check_interval = 30        # Region 分裂检查间隔（秒）
 # merge_check_interval = 60        # Region 合并检查间隔（秒）
 # node_heartbeat_timeout = 30      # 节点心跳超时（秒；超时标记离线）
+# operator_running_timeout = 300   # T5.11 P3：operator 认领超时（秒）——认领者
+#                                  # 失联/Complete 丢失时放回队列由存活 Region
+#                                  # leader 重认领（须大于单次执行时长）
 # target_replicas = 3              # 目标副本数（≤ cluster.initial_nodes 成员数）
 # max_concurrent_operators = 10    # 最大并发调度 operator 数
 # region_split_size_mb = 256       # 分裂大小阈值

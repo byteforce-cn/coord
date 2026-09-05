@@ -68,6 +68,12 @@ struct MetricsInner {
     pub region_merge_total: AtomicU64,
     /// PD 调度操作总次数
     pub pd_operator_total: AtomicU64,
+    /// P3：PD operator Running 超时重认领（Requeue）总次数
+    pub pd_operator_requeued_total: AtomicU64,
+    /// P3：region 0 PD 全局队列深度 gauge（leader 每 tick 上报）
+    pub pd_queue_pending: AtomicU64,
+    pub pd_queue_running: AtomicU64,
+    pub pd_queue_terminal: AtomicU64,
     /// 本节点 Leader 数量
     pub local_leader_count: AtomicU64,
     /// 本节点 Region 副本数
@@ -189,6 +195,10 @@ impl Default for MetricsInner {
             region_split_total: AtomicU64::new(0),
             region_merge_total: AtomicU64::new(0),
             pd_operator_total: AtomicU64::new(0),
+            pd_operator_requeued_total: AtomicU64::new(0),
+            pd_queue_pending: AtomicU64::new(0),
+            pd_queue_running: AtomicU64::new(0),
+            pd_queue_terminal: AtomicU64::new(0),
             local_leader_count: AtomicU64::new(0),
             local_region_count: AtomicU64::new(0),
             region_metrics: RwLock::new(Vec::new()),
@@ -446,6 +456,20 @@ impl Metrics {
     /// PD Operator 计数 +1
     pub fn inc_pd_operator(&self) {
         self.inner.pd_operator_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// P3：PD Operator Running 超时重认领（Requeue）计数 +1
+    pub fn inc_pd_operator_requeued(&self) {
+        self.inner
+            .pd_operator_requeued_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// P3：上报 region 0 PD 全局队列深度（gauge；leader 每 tick 设置）
+    pub fn set_pd_queue_depth(&self, pending: u64, running: u64, terminal: u64) {
+        self.inner.pd_queue_pending.store(pending, Ordering::Relaxed);
+        self.inner.pd_queue_running.store(running, Ordering::Relaxed);
+        self.inner.pd_queue_terminal.store(terminal, Ordering::Relaxed);
     }
 
     /// 设置本节点 Leader 数量
@@ -779,6 +803,36 @@ impl Metrics {
             inner.pd_operator_total.load(Ordering::Relaxed)
         ));
 
+        out.push_str(
+            "\n# HELP coord_pd_operator_requeued_total PD operators requeued after running timeout\n",
+        );
+        out.push_str("# TYPE coord_pd_operator_requeued_total counter\n");
+        out.push_str(&format!(
+            "coord_pd_operator_requeued_total {}\n",
+            inner.pd_operator_requeued_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_pd_queue_pending Pending operators in the region-0 PD queue\n");
+        out.push_str("# TYPE coord_pd_queue_pending gauge\n");
+        out.push_str(&format!(
+            "coord_pd_queue_pending {}\n",
+            inner.pd_queue_pending.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_pd_queue_running Running operators in the region-0 PD queue\n");
+        out.push_str("# TYPE coord_pd_queue_running gauge\n");
+        out.push_str(&format!(
+            "coord_pd_queue_running {}\n",
+            inner.pd_queue_running.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_pd_queue_terminal Terminal operators in the region-0 PD queue\n");
+        out.push_str("# TYPE coord_pd_queue_terminal gauge\n");
+        out.push_str(&format!(
+            "coord_pd_queue_terminal {}\n",
+            inner.pd_queue_terminal.load(Ordering::Relaxed)
+        ));
+
         out.push_str("\n# HELP coord_local_leader_count Leader count on this node\n");
         out.push_str("# TYPE coord_local_leader_count gauge\n");
         out.push_str(&format!(
@@ -1033,6 +1087,10 @@ mod tests {
         m.inc_pd_operator();
         m.set_local_leader_count(5);
         m.set_local_region_count(10);
+        // P3：Running 超时重认领计数 + 队列深度 gauge
+        m.inc_pd_operator_requeued();
+        m.inc_pd_operator_requeued();
+        m.set_pd_queue_depth(2, 1, 7);
 
         let output = m.render_prometheus_text();
         assert!(output.contains("coord_regions_total 42"));
@@ -1040,6 +1098,10 @@ mod tests {
         assert!(output.contains("coord_region_split_total 2"));
         assert!(output.contains("coord_region_merge_total 1"));
         assert!(output.contains("coord_pd_operator_total 1"));
+        assert!(output.contains("coord_pd_operator_requeued_total 2"));
+        assert!(output.contains("coord_pd_queue_pending 2"));
+        assert!(output.contains("coord_pd_queue_running 1"));
+        assert!(output.contains("coord_pd_queue_terminal 7"));
         assert!(output.contains("coord_local_leader_count 5"));
         assert!(output.contains("coord_local_region_count 10"));
     }

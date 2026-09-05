@@ -387,3 +387,114 @@ async fn test_global_queue_dedup_real_raft_and_no_local_queue() {
 
     let _ = shutdown_tx.send(true);
 }
+
+/// Test 4（P3 failover）：真实 region 0 raft 上——Running 条目认领者失联
+/// （认领墙钟远超 `operator_running_timeout`，无 Complete）→ region 0 leader
+/// 的调度 tick 经 raft `Requeue` 把它放回 Pending；存活 Region leader（本节点）
+/// 随后重认领执行并 Complete 成功——认领者故障的端到端自愈。
+#[tokio::test]
+async fn test_global_queue_requeues_stale_running_and_reclaims_via_region0_raft() {
+    let host = start_single_region0().await;
+
+    // driver（node 1）：region 0 leader = 本节点；target_replicas=1 屏蔽
+    // ReplicaChecker 噪音（region 1 单 voter 已达标）；balance_interval=1s
+    let meta_store = Arc::new(PdMetaStore::new());
+    meta_store
+        .create_region(RegionMeta {
+            region_id: 1,
+            start_key: vec![],
+            end_key: vec![],
+            epoch: RegionEpoch::initial(),
+            peers: vec![Peer {
+                node_id: 1,
+                raft_addr: "node1:50052".into(),
+                role: PeerRole::Voter,
+            }],
+            approximate_size: 0,
+            approximate_keys: 0,
+        })
+        .expect("create region meta");
+    let cfg = PdConfig {
+        balance_interval: 1,
+        target_replicas: 1,
+        operator_running_timeout: 300,
+        ..PdConfig::default()
+    };
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let driver = Arc::new(PlacementDriver::new(cfg, meta_store, shutdown_rx, 1));
+    driver.attach_system_raft(host.system.clone());
+
+    // Enqueue AddPeer(region1, node2)，随后模拟"认领者 node 2 失联"：认领墙钟
+    // 设在 10000s 前（>> operator_running_timeout=300），无 Complete
+    let op = add_peer_op(1, 2);
+    let rev = host
+        .system
+        .propose_pd(PdOp::Enqueue {
+            op: op.clone(),
+            requester: 1,
+            proposed_at_unix: 1_700_000_000,
+        })
+        .await
+        .expect("enqueue");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_secs() as i64;
+    host.system
+        .propose_pd(PdOp::Claim {
+            op_id: rev,
+            node_id: 2,
+            claimed_at_unix: now - 10_000,
+        })
+        .await
+        .expect("claim (stale)");
+    let entries = host.mvcc.pd_queue_entries().expect("read queue");
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].is_running());
+    assert_eq!(entries[0].claimed_by, 2);
+
+    // 启动调度循环（node 1 是 region 0 leader）→ 首个 tick 把卡死 Running
+    // 条目 Requeue 回 Pending（真实 raft 日志 apply）
+    let sched = driver.start_scheduler_loop();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let entries = host.mvcc.pd_queue_entries().expect("read queue");
+        if entries.len() == 1 && entries[0].is_pending() && entries[0].claimed_by == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "stale running op never requeued: {:?}",
+            entries
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    shutdown_tx.send(true).unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(3), sched)
+        .await
+        .expect("scheduler loop should exit");
+
+    // failover 收尾：存活 Region leader（本节点 1）重认领 → 执行 → Complete
+    let region_raft = Arc::new(FakeRegionRaft::new(1, 1));
+    let ex = OperatorExecutor::new(Arc::clone(&driver), 1);
+    let raft: Arc<dyn RegionRaftHandle> = region_raft.clone();
+    let resolve: Arc<coord_server::pd::executor::RegionRaftResolver> =
+        Arc::new(move |rid| if rid == 1 { Some(raft.clone()) } else { None });
+    let ran = ex.execute_one(&*resolve).await;
+    assert!(
+        ran.is_some(),
+        "requeued op must be reclaimed & executed by region leader"
+    );
+    assert_eq!(region_raft.add_learner_calls.lock().unwrap().len(), 1);
+
+    let entries = host.mvcc.pd_queue_entries().expect("read queue");
+    assert!(
+        matches!(
+            entries[0].status,
+            coord_server::pd::operator::OperatorStatus::Success
+        ),
+        "entry must end Success after failover reclaim: {:?}",
+        entries[0]
+    );
+    assert_eq!(entries[0].claimed_by, 1, "最终认领者是存活 leader");
+}

@@ -155,12 +155,21 @@ async fn test_pd_region0_channel_enqueue_dedup_and_lifecycle() {
     assert_eq!(entries.len(), 1, "duplicate enqueue must be deduped (global)");
     assert_eq!(entries[0].op_id, rev);
 
-    // Claim 由 node 3（目标 leader）→ Running
-    propose(&host.raft, PdOp::Claim { op_id: rev, node_id: 3 }).await;
+    // Claim 由 node 3（目标 leader）→ Running（认领墙钟随命令落定）
+    propose(
+        &host.raft,
+        PdOp::Claim {
+            op_id: rev,
+            node_id: 3,
+            claimed_at_unix: 1_700_000_100,
+        },
+    )
+    .await;
     let entries = host.mvcc.pd_queue_entries().expect("read queue");
     assert_eq!(entries.len(), 1);
     assert!(entries[0].is_running());
     assert_eq!(entries[0].claimed_by, 3);
+    assert_eq!(entries[0].claimed_at_unix, 1_700_000_100);
 
     // 他节点（2）Complete → no-op（保持 Running）
     propose(
@@ -217,6 +226,7 @@ async fn test_pd_region0_channel_queue_persists_across_backend_reopen() {
             &PdOp::Claim {
                 op_id: 1,
                 node_id: 5,
+                claimed_at_unix: 1_700_000_200,
             },
             2,
             coord_server::storage::mvcc::AppliedLogId::standalone(2),

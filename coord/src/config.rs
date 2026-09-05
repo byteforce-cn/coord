@@ -454,6 +454,7 @@ impl Config {
                 ("merge_check_interval", pd.merge_check_interval),
                 ("balance_interval", pd.balance_interval),
                 ("node_heartbeat_timeout", pd.node_heartbeat_timeout),
+                ("operator_running_timeout", pd.operator_running_timeout),
             ] {
                 if v == 0 {
                     errs.push(format!("multi_raft.pd.{label} must be > 0"));
@@ -1045,6 +1046,12 @@ pub struct MultiRaftPdConfig {
     /// 节点心跳超时（秒；超时标记离线，调度不基于离线节点）
     pub node_heartbeat_timeout: u64,
 
+    /// T5.11 P3：Running operator 认领超时（秒）——region 0 leader 周期扫描全局
+    /// 队列，认领超过该时长（认领者失联/Complete 丢失 → 卡死）的 operator 放回
+    /// Pending 由存活 Region leader 重认领（failover）。须大于单次 operator 正常
+    /// 执行时长（默认 300s）。
+    pub operator_running_timeout: u64,
+
     /// T5.12：调度暂停开关（初始值；true = 启动即不调度，仅 executor drain 已
     /// 排队 operator）。用于维护窗口/演练冻结调度；运行时切换见
     /// `PlacementDriver::set_scheduler_paused`（未来管理面 RPC 接入点）。
@@ -1067,6 +1074,7 @@ impl Default for MultiRaftPdConfig {
             region_merge_size_mb: 16,
             target_replicas: 3,
             node_heartbeat_timeout: 30,
+            operator_running_timeout: 300,
             scheduler_paused: false,
         }
     }
@@ -1087,6 +1095,7 @@ impl MultiRaftPdConfig {
             region_merge_size_mb: self.region_merge_size_mb,
             target_replicas: self.target_replicas,
             node_heartbeat_timeout: self.node_heartbeat_timeout,
+            operator_running_timeout: self.operator_running_timeout,
             placement: Default::default(),
             maintenance: Default::default(),
             scheduler_paused: self.scheduler_paused,
@@ -1629,6 +1638,9 @@ end_key = ""
         assert!(matches!(pd.mode, coord_server::pd::PdMode::Embedded));
         assert_eq!(pd.balance_interval, 120);
         assert_eq!(pd.target_replicas, 3);
+        // P3：Running 超时重认领默认 300s（对齐 PdConfig::default()）
+        assert_eq!(pd.operator_running_timeout, 300);
+        assert_eq!(config.multi_raft.pd.operator_running_timeout, 300);
         // T5.12：调度暂停默认 false（启动即正常调度）
         assert!(!config.multi_raft.pd.scheduler_paused);
         assert!(!pd.scheduler_paused);
@@ -1668,6 +1680,7 @@ scheduler_paused = true
         // 未出现的字段走默认值
         assert_eq!(pd_cfg.split_check_interval, 30);
         assert_eq!(pd_cfg.region_split_size_mb, 256);
+        assert_eq!(pd_cfg.operator_running_timeout, 300);
         // T5.12：调度暂停开关透传
         assert!(pd_cfg.scheduler_paused, "toml scheduler_paused=true 应被解析");
 
@@ -1677,6 +1690,7 @@ scheduler_paused = true
         assert_eq!(pd.node_heartbeat_timeout, 15);
         assert_eq!(pd.target_replicas, 2);
         assert!(pd.scheduler_paused, "scheduler_paused 应透传到 PdConfig");
+        assert_eq!(pd.operator_running_timeout, 300, "默认值应透传到 PdConfig");
         assert!(pd.external_addrs.is_empty());
     }
 
@@ -1706,6 +1720,7 @@ scheduler_paused = true
         config.multi_raft.pd.enabled = true;
         config.multi_raft.pd.heartbeat_interval_ms = 0;
         config.multi_raft.pd.balance_interval = 0;
+        config.multi_raft.pd.operator_running_timeout = 0;
         let errs = config.validate().unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("heartbeat_interval_ms")),
@@ -1713,6 +1728,10 @@ scheduler_paused = true
         );
         assert!(
             errs.iter().any(|e| e.contains("balance_interval")),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter().any(|e| e.contains("operator_running_timeout")),
             "{errs:?}"
         );
     }

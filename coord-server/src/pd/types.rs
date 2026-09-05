@@ -51,6 +51,12 @@ pub struct PdConfig {
     pub target_replicas: usize,
     /// 节点心跳超时（秒）
     pub node_heartbeat_timeout: u64,
+    /// T5.11 P3：Running operator 认领超时（秒）——region 0 leader 周期扫描
+    /// 全局队列，`Running` 超过该时长（认领者失联/Complete 丢失 → 卡死）的
+    /// 条目经 raft `PdOp::Requeue` 放回 Pending，由当前存活 Region leader
+    /// 重认领（failover 兜底）。须大于单次 operator 正常执行时长（成员变更/
+    /// transfer 等待，见 `OperatorExecutor.transfer_timeout`）。
+    pub operator_running_timeout: u64,
     /// 副本放置约束
     #[serde(default)]
     pub placement: PlacementConstraint,
@@ -79,6 +85,7 @@ impl Default for PdConfig {
             region_merge_size_mb: 16,
             target_replicas: 3,
             node_heartbeat_timeout: 30,
+            operator_running_timeout: 300,
             placement: PlacementConstraint::default(),
             maintenance: MaintenanceConfig::default(),
             scheduler_paused: false,

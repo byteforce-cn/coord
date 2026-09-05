@@ -41,7 +41,7 @@ use self::scheduler::{create_default_schedulers, ScheduleContext, Scheduler};
 use crate::audit::AuditLogger;
 use crate::metrics::Metrics;
 use crate::raft::system_raft::SystemRaftHandle;
-use crate::raft::type_config::PdOp;
+use crate::raft::type_config::{PdOp, PdQueueEntry};
 
 // Re-export 主要类型
 pub use embedded::{EmbeddedPd, NodeInfo};
@@ -204,6 +204,14 @@ impl PlacementDriver {
         }
     }
 
+    /// P3：operator 超时重认领指标计数（region 0 leader 成功 propose Requeue 时）
+    fn count_operator_requeued(&self) {
+        let obs = self.observability.read().clone();
+        if let Some(metrics) = obs.and_then(|o| o.metrics) {
+            metrics.inc_pd_operator_requeued();
+        }
+    }
+
     /// 获取 PdMetaStore 引用（供外部查询 Region 路由表）
     pub fn meta_store(&self) -> &Arc<PdMetaStore> {
         &self.meta_store
@@ -329,6 +337,17 @@ impl PlacementDriver {
 
     /// 执行一次调度 tick
     async fn run_schedule_tick(&self, _tick: u64) {
+        // R-MR-08（D1-a P3）：全局队列模式下 region 0 leader 每 tick 先做
+        // Running 超时重认领（认领者失联/Complete 丢失 → 卡死 failover 兜底）
+        // 与队列深度上报。该维护**不随 scheduler_paused 冻结**——暂停只冻结
+        // "新 operator 生成"（见下），活性恢复（防卡死）属保障语义须持续生效；
+        // legacy 本地模式无此路径（本地队列随执行进程存亡，无跨节点卡死）。
+        if let Some(system) = self.system_raft() {
+            if system.current_leader().await == Some(self.node_id) {
+                self.requeue_stale_running(system.as_ref()).await;
+            }
+        }
+
         // T5.12：调度暂停——维护窗口/演练时冻结调度行为（不产生新 operator）。
         // 已排队的 operator 仍由 executor 循环 drain（见模块文档）。
         if self.is_scheduler_paused() {
@@ -487,6 +506,85 @@ impl PlacementDriver {
                     );
                 }
             }
+        }
+    }
+
+    /// R-MR-08（D1-a P3）：region 0 leader 周期扫描全局队列，把 **Running 超时**
+    /// （认领者失联 / Complete 提出丢失 → 条目卡死）的 operator 经 raft
+    /// `Requeue` 放回 Pending，由当前存活的目标 Region leader 重认领执行——
+    /// 认领者故障的自愈兜底（failover）。
+    ///
+    /// 调用方保证本节点是 region 0 leader（唯一 propose 源）。判定基于条目内
+    /// `claimed_at_unix`（`PdOp::Claim` 命令由认领者填墙钟，apply 期不读墙钟的
+    /// 确定性约束——见 type_config.rs）；超时阈值 `operator_running_timeout`
+    /// （秒，须大于单次 operator 正常执行时长，避免误伤在途执行）。执行**失败**
+    /// 走 `Complete{Failed}` 终态（不重认领）；此处只救"卡在 Running"的活性
+    /// 故障。顺带以上报全局队列深度 gauge（leader 唯一上报）。
+    async fn requeue_stale_running(&self, system: &dyn SystemRaftHandle) {
+        let queue = match system.pd_queue() {
+            Ok(q) => q,
+            Err(e) => {
+                tracing::warn!("PD: read region 0 pd queue failed (requeue scan): {e}");
+                return;
+            }
+        };
+        let now = now_unix_secs();
+        let timeout = self.config.operator_running_timeout as i64;
+        for entry in &queue {
+            if !entry.is_running() {
+                continue;
+            }
+            let age = entry.running_for_secs(now);
+            if age < timeout {
+                continue;
+            }
+            let summary = op_summary(&entry.op);
+            match system
+                .propose_pd(PdOp::Requeue { op_id: entry.op_id })
+                .await
+            {
+                Ok(_) => {
+                    tracing::warn!(
+                        "PD: requeue op {} ({}): running {age}s >= timeout {timeout}s; \
+                         claimant node {} lost/failed to complete",
+                        entry.op_id,
+                        summary,
+                        entry.claimed_by
+                    );
+                    self.count_operator_requeued();
+                    self.record_operator_event(
+                        &entry.op,
+                        "requeued",
+                        &format!(
+                            "{}; running={age}s >= timeout={timeout}s; claimant={} lost",
+                            summary, entry.claimed_by
+                        ),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("PD: requeue op {} via region 0 failed: {e}", entry.op_id);
+                }
+            }
+        }
+        self.report_queue_depth(&queue);
+    }
+
+    /// P3：上报全局队列深度 gauge（pending/running/terminal 计数；观测未接线
+    /// no-op）。leader 每 tick 经 `requeue_stale_running` 顺带调用。
+    fn report_queue_depth(&self, queue: &[PdQueueEntry]) {
+        let (mut pending, mut running, mut terminal) = (0u64, 0u64, 0u64);
+        for e in queue {
+            if e.is_pending() {
+                pending += 1;
+            } else if e.is_running() {
+                running += 1;
+            } else if e.is_terminal() {
+                terminal += 1;
+            }
+        }
+        let obs = self.observability.read().clone();
+        if let Some(metrics) = obs.and_then(|o| o.metrics) {
+            metrics.set_pd_queue_depth(pending, running, terminal);
         }
     }
 
@@ -674,8 +772,9 @@ fn op_summary(op: &Operator) -> String {
 }
 
 /// 当前墙钟 Unix 秒（operator 审计/入队时间戳；apply 期不读墙钟的约束由
-/// raft 命令携带时间戳满足——见 `PdOp::Enqueue.proposed_at_unix`）。
-fn now_unix_secs() -> i64 {
+/// raft 命令携带时间戳满足——见 `PdOp::Enqueue.proposed_at_unix`/
+/// `PdOp::Claim.claimed_at_unix`）。executor 模块复用（Claim 填认领墙钟）。
+pub(super) fn now_unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1113,6 +1212,38 @@ mod tests {
         fn proposed_ops(&self) -> Vec<PdOp> {
             self.proposed.lock().unwrap().clone()
         }
+
+        /// 按 op_id 读取当前条目（P3 超时重认领测试断言用）
+        fn queue_entry(&self, op_id: u64) -> Option<PdQueueEntry> {
+            self.queue
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|e| e.op_id == op_id)
+                .cloned()
+        }
+
+        /// 预置一条 Running 条目（认领者/认领墙钟可指定；P3 超时重认领测试用）
+        #[allow(clippy::too_many_arguments)]
+        fn seed_running(
+            &self,
+            op_id: u64,
+            op: Operator,
+            requester: NodeID,
+            claimed_by: NodeID,
+            claimed_at_unix: i64,
+        ) {
+            self.queue.lock().unwrap().push(PdQueueEntry {
+                op_id,
+                op,
+                status: OperatorStatus::Running,
+                requester,
+                claimed_by,
+                proposed_at_unix: claimed_at_unix,
+                claimed_at_unix,
+                error: String::new(),
+            });
+        }
     }
 
     #[async_trait]
@@ -1148,9 +1279,13 @@ mod tests {
                     }
                     Ok(1) // 日志 index 非断言点
                 }
-                PdOp::Claim { op_id, node_id } => {
+                PdOp::Claim {
+                    op_id,
+                    node_id,
+                    claimed_at_unix,
+                } => {
                     if let Some(e) = queue.iter_mut().find(|e| e.op_id == *op_id) {
-                        e.try_claim(*node_id);
+                        e.try_claim(*node_id, *claimed_at_unix);
                     }
                     Ok(1)
                 }
@@ -1238,6 +1373,137 @@ mod tests {
             enq1, enq2,
             "重复 tick 不得重复 Enqueue 相同 operator（预去重）"
         );
+    }
+
+    /// P3：region 0 leader 把 Running 超时条目（认领者失联/Complete 丢失 → 卡死）
+    /// 经 raft Requeue 放回 Pending；新鲜 Running / Pending 不受影响；不 Enqueue
+    /// 新 operator（本 driver 无 region 元数据 → 调度器无产出）。
+    #[tokio::test]
+    async fn test_raft_mode_requeues_stale_running_on_region0_leader() {
+        let (pd, _tx) = make_test_pd();
+        let system = Arc::new(FakeSystemRaft::new(Some(1)));
+        let now = now_unix_secs();
+        // stale Running（认领 1000s 前 >> 默认 300s 超时）→ 应 Requeue
+        system.seed_running(
+            1,
+            Operator::TransferLeader {
+                region_id: 10,
+                to_node: 3,
+            },
+            1,
+            2,
+            now - 1000,
+        );
+        // 新鲜 Running（刚认领）→ 不应 Requeue
+        system.seed_running(
+            2,
+            Operator::RemovePeer {
+                region_id: 11,
+                node_id: 4,
+            },
+            1,
+            3,
+            now,
+        );
+        // Pending → 不涉及超时扫描
+        system.queue.lock().unwrap().push(PdQueueEntry::new_pending(
+            3,
+            Operator::AddPeer {
+                region_id: 12,
+                node_id: 5,
+                raft_addr: "node5:50052".into(),
+            },
+            1,
+            now,
+        ));
+        pd.attach_system_raft(system.clone());
+
+        pd.run_schedule_tick(0).await;
+
+        // 只有 op 1 被 Requeue
+        let proposed = system.proposed_ops();
+        let requeues: Vec<u64> = proposed
+            .iter()
+            .filter_map(|op| match op {
+                PdOp::Requeue { op_id } => Some(*op_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(requeues, vec![1], "仅超时 Running 条目被 Requeue: {proposed:?}");
+        assert!(
+            system.queue_entry(1).unwrap().is_pending(),
+            "stale running op 1 应回 Pending（claimed_by 清除）"
+        );
+        assert_eq!(system.queue_entry(1).unwrap().claimed_by, 0);
+        assert!(
+            system.queue_entry(2).unwrap().is_running(),
+            "fresh running op 2 不得被误 Requeue"
+        );
+        assert!(system.queue_entry(3).unwrap().is_pending());
+    }
+
+    /// P3：region 0 follower 不执行 Running 超时重认领（region 0 leader 是唯一
+    /// Requeue 提出源；follower 仍保留条目不动）。
+    #[tokio::test]
+    async fn test_raft_mode_follower_does_not_requeue_stale_running() {
+        let (pd, _tx) = make_test_pd();
+        let system = Arc::new(FakeSystemRaft::new(Some(2))); // region 0 leader = node 2
+        let now = now_unix_secs();
+        system.seed_running(
+            1,
+            Operator::TransferLeader {
+                region_id: 10,
+                to_node: 3,
+            },
+            1,
+            2,
+            now - 1000,
+        );
+        pd.attach_system_raft(system.clone());
+
+        pd.run_schedule_tick(0).await;
+
+        assert!(
+            system.proposed_ops().is_empty(),
+            "follower 不得提出 Requeue"
+        );
+        let e = system.queue_entry(1).unwrap();
+        assert!(e.is_running(), "follower 不得改动条目状态");
+        assert_eq!(e.claimed_by, 2);
+    }
+
+    /// P3：Running 超时重认领不受 scheduler_paused 冻结（暂停只冻结"新 operator
+    /// 生成"；活性恢复持续生效）。
+    #[tokio::test]
+    async fn test_raft_mode_requeue_runs_while_scheduler_paused() {
+        let (pd, _tx) = make_test_pd();
+        pd.set_scheduler_paused(true);
+        let system = Arc::new(FakeSystemRaft::new(Some(1)));
+        let now = now_unix_secs();
+        system.seed_running(
+            1,
+            Operator::TransferLeader {
+                region_id: 10,
+                to_node: 3,
+            },
+            1,
+            2,
+            now - 1000,
+        );
+        pd.attach_system_raft(system.clone());
+
+        pd.run_schedule_tick(0).await;
+
+        let requeues: Vec<u64> = system
+            .proposed_ops()
+            .iter()
+            .filter_map(|op| match op {
+                PdOp::Requeue { op_id } => Some(*op_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(requeues, vec![1], "暂停期间 failover 重认领仍应执行");
+        assert!(system.queue_entry(1).unwrap().is_pending());
     }
 
     // ──── Operator 生命周期测试 ────

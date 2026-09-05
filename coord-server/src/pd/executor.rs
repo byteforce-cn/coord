@@ -50,7 +50,7 @@ use std::time::Duration;
 use coord_core::types::{NodeID, Peer, PeerRole, RegionId, RegionMeta};
 use tokio::time::MissedTickBehavior;
 
-use super::{op_summary, Operator, PlacementDriver};
+use super::{now_unix_secs, op_summary, Operator, PlacementDriver};
 use crate::raft::region_runtime::RegionRaftHandle;
 use crate::raft::system_raft::SystemRaftHandle;
 use crate::raft::type_config::PdOp;
@@ -241,12 +241,15 @@ impl OperatorExecutor {
                 continue; // 本节点非该 Region leader → 他节点认领
             }
 
-            // 3. Claim（apply CAS；client_write 等待 apply 后才返回）
+            // 3. Claim（apply CAS；client_write 等待 apply 后才返回）。
+            //    P3：认领墙钟（claimed_at_unix）由认领者 propose 前填——Running
+            //    超时重认领（requeue）判定依赖它，apply 期不读墙钟。
             let op_id = entry.op_id;
             if let Err(e) = system
                 .propose_pd(PdOp::Claim {
                     op_id,
                     node_id: self.node_id,
+                    claimed_at_unix: now_unix_secs(),
                 })
                 .await
             {
@@ -269,6 +272,10 @@ impl OperatorExecutor {
                     continue;
                 }
             }
+            // T5.11 P3：认领成功审计（与 enqueue(pending)/complete(success|failed)
+            // 同口径，拼出 enqueue→claim→complete 全生命周期追踪）
+            self.pd
+                .record_operator_event(&original, "claimed", &op_summary(&original));
 
             // 4. 执行 + 5. Complete
             let outcome = match resolve(op.region_id()) {
@@ -1094,9 +1101,13 @@ mod tests {
                     }
                     Ok(1)
                 }
-                PdOp::Claim { op_id, node_id } => {
+                PdOp::Claim {
+                    op_id,
+                    node_id,
+                    claimed_at_unix,
+                } => {
                     if let Some(e) = queue.iter_mut().find(|e| e.op_id == *op_id) {
-                        e.try_claim(*node_id);
+                        e.try_claim(*node_id, *claimed_at_unix);
                     }
                     Ok(1)
                 }
@@ -1150,13 +1161,26 @@ mod tests {
         assert_eq!(fake.promote_calls(), vec![2]);
         assert!(has_peer(&peers_of_meta(&pd), 2, PeerRole::Voter));
 
-        // propose 序列：先 Claim 后 Complete(success)
+        // propose 序列：先 Claim（认领墙钟已填）后 Complete(success)
         let proposed = system.proposed_ops();
         assert_eq!(proposed.len(), 2, "proposed: {proposed:?}");
         assert!(matches!(
             &proposed[0],
-            PdOp::Claim { op_id: 5, node_id: 1 }
+            PdOp::Claim {
+                op_id: 5,
+                node_id: 1,
+                ..
+            }
         ));
+        if let PdOp::Claim {
+            claimed_at_unix, ..
+        } = &proposed[0]
+        {
+            assert!(
+                *claimed_at_unix > 0,
+                "认领者须填认领墙钟（P3 超时重认领依据）"
+            );
+        }
         assert!(matches!(
             &proposed[1],
             PdOp::Complete {
@@ -1224,6 +1248,7 @@ mod tests {
             requester: 2,
             claimed_by: 2,
             proposed_at_unix: 1_700_000_000,
+            claimed_at_unix: 1_700_000_000,
             error: String::new(),
         });
         _pd.attach_system_raft(system.clone());

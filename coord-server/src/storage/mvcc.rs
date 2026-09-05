@@ -1735,13 +1735,17 @@ impl<B: StorageBackend> MvccStorage<B> {
                         )?;
                     }
                 }
-                PdOp::Claim { op_id, node_id } => {
+                PdOp::Claim {
+                    op_id,
+                    node_id,
+                    claimed_at_unix,
+                } => {
                     let key = encode_pd_op_key(*op_id);
                     if let Some(mut e) = tx
                         .get(TABLE_KV, &key)?
                         .and_then(|v| PdQueueEntry::from_bytes(&v))
                     {
-                        if e.try_claim(*node_id) {
+                        if e.try_claim(*node_id, *claimed_at_unix) {
                             tx.insert(TABLE_KV, &key, &e.to_bytes()?)?;
                         }
                     }
@@ -3310,12 +3314,13 @@ mod tests {
         assert_eq!(entries[0].op, op);
         assert_eq!(storage.current_revision(), 1);
 
-        // Claim 由 node 3（@rev2）→ Running + claimed_by=3
+        // Claim 由 node 3（@rev2）→ Running + claimed_by=3 + claimed_at 落定
         storage
             .apply_pd_op(
                 &PdOp::Claim {
                     op_id: 1,
                     node_id: 3,
+                    claimed_at_unix: 1_700_000_200,
                 },
                 2,
                 AppliedLogId::standalone(2),
@@ -3324,6 +3329,7 @@ mod tests {
         let e = &storage.pd_queue_entries().unwrap()[0];
         assert!(e.is_running());
         assert_eq!(e.claimed_by, 3);
+        assert_eq!(e.claimed_at_unix, 1_700_000_200, "claim 墙钟随命令落定");
 
         // 非认领者 node 2 完成 → no-op（防他节点误 Complete）
         storage
@@ -3382,6 +3388,7 @@ mod tests {
                 &PdOp::Claim {
                     op_id: 1,
                     node_id: 9,
+                    claimed_at_unix: 1_700_000_300,
                 },
                 10,
                 AppliedLogId::standalone(10),
@@ -3418,6 +3425,7 @@ mod tests {
                 &PdOp::Claim {
                     op_id: 1,
                     node_id: 7,
+                    claimed_at_unix: 1_700_000_400,
                 },
                 2,
                 AppliedLogId::standalone(2),
@@ -3429,6 +3437,7 @@ mod tests {
                 &PdOp::Claim {
                     op_id: 1,
                     node_id: 9,
+                    claimed_at_unix: 1_700_000_500,
                 },
                 3,
                 AppliedLogId::standalone(3),
@@ -3468,14 +3477,17 @@ mod tests {
                 &PdOp::Claim {
                     op_id: 1,
                     node_id: 4,
+                    claimed_at_unix: 1_700_000_600,
                 },
                 2,
                 AppliedLogId::standalone(2),
             )
             .unwrap();
-        assert!(storage.pd_queue_entries().unwrap()[0].is_running());
+        let running = storage.pd_queue_entries().unwrap()[0].clone();
+        assert!(running.is_running());
+        assert_eq!(running.claimed_at_unix, 1_700_000_600);
 
-        // Requeue → Pending + 清认领者（认领者失联/可重试路径）
+        // Requeue → Pending + 清认领者/认领墙钟（认领者失联/可重试路径）
         storage
             .apply_pd_op(
                 &PdOp::Requeue { op_id: 1 },
@@ -3486,6 +3498,7 @@ mod tests {
         let e = &storage.pd_queue_entries().unwrap()[0];
         assert!(e.is_pending());
         assert_eq!(e.claimed_by, 0);
+        assert_eq!(e.claimed_at_unix, 0, "requeue 清认领墙钟");
 
         // Requeue 对 Pending 再执行 → no-op（仍 Pending）
         storage
@@ -3535,6 +3548,7 @@ mod tests {
                     &PdOp::Claim {
                         op_id: 1 + i,
                         node_id: 1,
+                        claimed_at_unix: 1_700_000_700,
                     },
                     1000 + i,
                     AppliedLogId::standalone(1000 + i),
@@ -3572,6 +3586,7 @@ mod tests {
                 &PdOp::Claim {
                     op_id: 1,
                     node_id: 2,
+                    claimed_at_unix: 1_700_000_800,
                 },
                 2,
                 AppliedLogId::standalone(2),
@@ -3587,5 +3602,6 @@ mod tests {
         assert_eq!(entries[0].op_id, 1);
         assert!(entries[0].is_running());
         assert_eq!(entries[0].claimed_by, 2);
+        assert_eq!(entries[0].claimed_at_unix, 1_700_000_800);
     }
 }
