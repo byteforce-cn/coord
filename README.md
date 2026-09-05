@@ -21,10 +21,12 @@
 ## Jepsen 一致性验证
 
 Coord 的一致性与故障恢复能力由**仓库内 Jepsen 测试工程**（[`jepsen/`](jepsen/README.md)，
-Clojure/lein，源码随 coord 一起版本化——checkout 任意 commit 即得到配套测试）在外部
-Jepsen lab 上执行验证：3 节点真实集群 + 自研 gRPC 客户端 + knossos 线性一致性检查器，
+Clojure/lein，源码随 coord 一起版本化——checkout 任意 commit 即得到配套测试）在**仓库内
+Jepsen lab**（[`jepsen/lab/`](jepsen/lab/README.md)，clone coord 即可自建，Vagrant/Docker
+双 provider）上执行验证：3 节点真实集群 + 自研 gRPC 客户端 + knossos 线性一致性检查器，
 工作负载 register / cas-register / multi-register（多 Region），nemesis kill / pause /
-partition 全矩阵与 72h soak。仓库内另有 Rust 等价快速收口 `scripts/jepsen-check.sh`。
+partition 全矩阵与 72h soak。仓库内另有 Rust 等价快速收口 `scripts/jepsen-check.sh`
+（无需 lab，约 2–3 分钟）。
 
 | 判据 | 结果 |
 |:---|:---|
@@ -189,7 +191,7 @@ coord/
 ├── coord-java-sdk/     # Java SDK（cn.byteforce:coord-java-sdk）
 ├── java-example/       # Java 接入示例
 ├── coord-ui/           # Web 管理界面（React 19 + Vite + Tailwind 4）
-├── jepsen/             # Jepsen 测试工程（Clojure/lein，随 coord 版本化；执行于外部 lab）
+├── jepsen/             # Jepsen 测试工程（Clojure/lein，随 coord 版本化；含仓内 lab jepsen/lab/）
 ├── apis/contracts/     # 对外契约：底座原语 + 能力承诺面（registry/lock/election/idgen/event）+ 白皮书/台账
 ├── deploy/             # docker-compose 三节点 + k8s StatefulSet
 ├── monitoring/         # Grafana 面板 + Prometheus 告警规则

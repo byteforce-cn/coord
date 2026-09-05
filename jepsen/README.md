@@ -32,36 +32,52 @@ Implements the full design from `docs/coord.md`:
 
 ## Run
 
-测试源码与脚本在本目录（coord 仓库 `jepsen/`）维护；实际执行在外部 Jepsen lab
-（Vagrant：控制机 `192.168.56.10`，DB 节点 n1..n5）上。lab 的 Makefile 会把**当前
-coord checkout 的 `jepsen/`** 连同新构建的 coord release 二进制一起部署到控制机
-`/root/coord-test`（staging 见 `jepsen-custom/Makefile` 的 `stage` 目标）。
+测试源码与脚本在本目录（coord 仓库 `jepsen/`）维护；实际执行在 **仓库内 lab**
+（`jepsen/lab/`，随 coord 版本化）上——clone coord 即可自建 lab。lab 提供两种
+provider（`JEPSEN_PROVIDER=vagrant|docker`，默认 vagrant）：
+
+* **vagrant**（VirtualBox/libvirt）：控制机 + n1..nN VM；全矩阵与 72h soak 首选。
+* **docker**（compose，仅需 Docker）：`jepsen-control` 官方镜像已内置
+  `lein install` 好的 `jepsen 0.3.14-SNAPSHOT`（与本目录 `project.clj` 依赖一致），
+  日常开发/冒烟/CI 首选。
+
+lab 会把**当前 coord checkout 的 `jepsen/`** 连同新构建的 coord release 二进制部署
+到控制机 `/root/coord-test`（docker 走 bind-mount；staging 见 `lab/Makefile` 的
+`stage` 目标）。详见 `jepsen/lab/README.md`。
 
 在 lab 目录执行：
 
 ```bash
-cd jepsen-custom
+cd jepsen/lab
+make up               # 首次：自动生成 keys/ + 开机并 provision
 make setup            # one-time: lein install of the local jepsen lib
-make upload           # stage ../coord/jepsen + 构建/复用 coord -> 部署控制机
+make upload           # 部署本目录(jepsen/) + 构建/复用 coord -> 控制机
 make quick            # 20s sanity run (no nemesis)
 make test             # NEMESIS=partition-halves TIME_LIMIT=60 (defaults)
 make test NEMESIS=kill TIME_LIMIT=120
 ```
 
+Docker 变体（同一套操作，前缀 `docker-` 或 `JEPSEN_PROVIDER=docker`）：
+
+```bash
+make docker-up docker-upload docker-quick docker-test
+```
+
 > `make upload` 部署前会先检查控制机上是否有 soak 在跑并拒绝覆盖；本地迁移不影响
 > 已在控制机运行的 72h soak。
 
-Manual equivalent:
+Manual equivalent（vagrant，源 = 本目录 + 同 checkout 构建的 release 二进制，
+`jepsen/coord -> ../../target/release/coord`，已 git-ignore）：
 
 ```bash
-# from the host — source of truth = THIS dir + a release binary built from the
-# same checkout (coord/jepsen -> ../../target/release/coord)
+# from the host, in the lab dir (jepsen/lab)
 rm -rf /tmp/coord-upload/coord-test && mkdir -p /tmp/coord-upload/coord-test
-cp -r . /tmp/coord-upload/coord-test/               # or rsync with --exclude store/
+cp -r ../. /tmp/coord-upload/coord-test/          # or rsync with --exclude store/
+rm -f /tmp/coord-upload/coord-test/coord
 cp ../../target/release/coord /tmp/coord-upload/coord-test/coord
 cp /tmp/coord-upload/coord-test/scripts/coord-soak.sh \
-   /tmp/coord-upload/coord-test/coord-soak.sh       # 顶层兼容入口（soak Makefile 依赖）
-vagrant upload /tmp/coord-upload/coord-test /tmp/coord-test control   # 在 lab 目录执行
+   /tmp/coord-upload/coord-test/coord-soak.sh     # 顶层兼容入口（soak Makefile 依赖）
+vagrant upload /tmp/coord-upload/coord-test /tmp/coord-test control
 vagrant ssh control -- sudo mv /tmp/coord-test /root/coord-test
 ```
 

@@ -1,0 +1,162 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+#
+# ============================================================================
+#  coord in-repo Jepsen lab (方案 D) — lives at coord/jepsen/lab/
+#
+#  Topology
+#    control  192.168.57.10   Jepsen control node (JDK21 + Leiningen + gnuplot)
+#    n1..nN   192.168.57.11+  Jepsen DB nodes (SSH root key login)
+#
+#  This Vagrantfile is versioned INSIDE the coord repository, so a fresh
+#  `git clone` of coord already contains everything needed to boot a lab and
+#  run the coord Jepsen tests against that same checkout. The coord test
+#  project (../.. = repo root, jepsen/ = test source) is deployed by the
+#  Makefile (`make upload` / `make docker-upload`); only the Vagrant provider
+#  is defined here.
+#
+#  Self-contained: the Jepsen *library* is NOT synced from the host. On first
+#  provisioning the control node clones jepsen-io/jepsen inside the VM
+#  (see provision/control.sh, overridable via JEPSEN_LIB_REPO/JEPSEN_LIB_REF),
+#  then `make setup` lein-installs it. Nothing outside this checkout is
+#  required except Vagrant + a provider (VirtualBox or libvirt).
+#
+#  Isolation: default private subnet is 192.168.57 and VM names carry the
+#  prefix coord-jepsen-, so this lab can run in PARALLEL with the legacy
+#  host-local lab (jepsen-custom, 192.168.56 / jepsen-*) without clashing.
+#
+#  Environment overrides (run on the HOST before `vagrant up`):
+#    JEPSEN_BOX        vagrant box name          (default debian/bookworm64)
+#    JEPSEN_BOX_VER    box version               (default 12.20250126.1)
+#    JEPSEN_NODES      number of DB nodes        (default 5)
+#    JEPSEN_SUBNET     private network           (default 192.168.57)
+#    JEPSEN_VM_PREFIX  VM name prefix            (default coord-jepsen)
+#    JEPSEN_MEM        control RAM in MB         (default 16384)
+#    JEPSEN_NODE_MEM   per-node RAM in MB        (default 1024)
+#    JEPSEN_CPUS       control vCPUs             (default 4)
+#    JEPSEN_NODE_CPUS  per-node vCPUs            (default 2)
+#    JEPSEN_APT_MIRROR apt mirror host           (default mirrors.aliyun.com)
+#    JEPSEN_LEIN_VER   leiningen version         (default 2.12.0)
+#    JEPSEN_XMX        jepsen test JVM heap      (default 12g)
+#    JEPSEN_LIB_REPO   jepsen lib git URL        (default https://github.com/jepsen-io/jepsen.git)
+#    JEPSEN_LIB_REF    jepsen lib branch/tag     (default main)
+# ============================================================================
+
+box        = ENV.fetch("JEPSEN_BOX", "debian/bookworm64")
+box_ver    = ENV.fetch("JEPSEN_BOX_VER", "12.20250126.1")
+n_nodes    = Integer(ENV.fetch("JEPSEN_NODES", "5"))
+subnet     = ENV.fetch("JEPSEN_SUBNET", "192.168.57")
+vm_prefix  = ENV.fetch("JEPSEN_VM_PREFIX", "coord-jepsen")
+ctrl_ip    = "#{subnet}.10"
+ctrl_mem   = Integer(ENV.fetch("JEPSEN_MEM", "16384"))
+node_mem   = Integer(ENV.fetch("JEPSEN_NODE_MEM", "1024"))
+ctrl_cpus  = Integer(ENV.fetch("JEPSEN_CPUS", "4"))
+node_cpus  = Integer(ENV.fetch("JEPSEN_NODE_CPUS", "2"))
+apt_mirror = ENV.fetch("JEPSEN_APT_MIRROR", "mirrors.aliyun.com")
+lein_ver   = ENV.fetch("JEPSEN_LEIN_VER", "2.12.0")
+xmx        = ENV.fetch("JEPSEN_XMX", "12g")
+jep_repo   = ENV.fetch("JEPSEN_LIB_REPO", "https://github.com/jepsen-io/jepsen.git")
+jep_ref    = ENV.fetch("JEPSEN_LIB_REF", "main")
+
+node_names = (1..n_nodes).map { |i| "n#{i}" }
+node_ips   = node_names.each_with_index.map { |_n, i| "#{subnet}.#{11 + i}" }
+
+hosts_entries = ["#{ctrl_ip} control"]
+node_names.each_with_index { |n, i| hosts_entries << "#{node_ips[i]} #{n}" }
+hosts_block = hosts_entries.join("\n")
+
+# --- lab SSH keypair (never committed; generated on first `up`) ---------------
+require "fileutils"
+keys_dir = File.join(__dir__, "keys")
+priv     = File.join(keys_dir, "jepsen_ed25519")
+pub      = "#{priv}.pub"
+unless File.exist?(priv) && File.exist?(pub)
+  FileUtils.mkdir_p(keys_dir)
+  puts ">> generating lab ssh keypair #{priv} (not committed)"
+  unless system("ssh-keygen", "-t", "ed25519", "-N", "", "-f", priv, "-q")
+    abort "!! failed to generate lab ssh keypair"
+  end
+end
+
+common_env = {
+  "JEPSEN_APT_MIRROR" => apt_mirror,
+  "HOSTS_ENTRIES"     => hosts_block,
+}
+
+control_env = common_env.merge(
+  "JEPSEN_LEIN_VER" => lein_ver,
+  "JEPSEN_NODES"    => n_nodes.to_s,
+  "JEPSEN_XMX"      => xmx,
+  "JEPSEN_LIB_REPO" => jep_repo,
+  "JEPSEN_LIB_REF"  => jep_ref,
+)
+
+Vagrant.configure("2") do |config|
+  config.vm.box = box
+  config.vm.box_version = box_ver
+  config.vm.box_check_update = false
+
+  # do not share this project dir into the VMs
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  # keep host timezone (requires the vagrant-timezone plugin; harmless if absent)
+  if Vagrant.has_plugin?("vagrant-timezone")
+    config.timezone.value = "Asia/Shanghai"
+  end
+
+  # --------------------------------------------------------------------------
+  # DB nodes n1 .. nN (defined first so `vagrant up` provisions them before
+  # the control node, letting control ssh-keyscan them during provisioning)
+  # --------------------------------------------------------------------------
+  node_names.each_with_index do |name, i|
+    config.vm.define name do |n|
+      n.vm.hostname = name
+      n.vm.network "private_network", ip: node_ips[i]
+
+      n.vm.provider "virtualbox" do |vb|
+        vb.memory = node_mem
+        vb.cpus   = node_cpus
+        vb.name   = "#{vm_prefix}-#{name}"
+        vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+      end
+      n.vm.provider "libvirt" do |lv|
+        lv.memory = node_mem
+        lv.cpus   = node_cpus
+      end
+
+      n.vm.provision "shell", path: "provision/common.sh", env: common_env
+      n.vm.provision "file",  source: pub,
+                              destination: "/tmp/jepsen_id.pub"
+      n.vm.provision "shell", path: "provision/node.sh",
+                              env: { "JEPSEN_APT_MIRROR" => apt_mirror }
+    end
+  end
+
+  # --------------------------------------------------------------------------
+  # Control node
+  # --------------------------------------------------------------------------
+  config.vm.define "control", primary: true do |c|
+    c.vm.hostname = "control"
+    c.vm.network "private_network", ip: ctrl_ip
+
+    c.vm.provider "virtualbox" do |vb|
+      vb.memory = ctrl_mem
+      vb.cpus   = ctrl_cpus
+      vb.name   = "#{vm_prefix}-control"
+      vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+    end
+    c.vm.provider "libvirt" do |lv|
+      lv.memory = ctrl_mem
+      lv.cpus   = ctrl_cpus
+    end
+
+    c.vm.provision "shell", path: "provision/common.sh", env: common_env
+    c.vm.provision "file",  source: priv,
+                            destination: "/tmp/jepsen_id"
+    c.vm.provision "file",  source: pub,
+                            destination: "/tmp/jepsen_id.pub"
+    c.vm.provision "file",  source: "files/lein-profiles.clj",
+                            destination: "/tmp/lein-profiles.clj"
+    c.vm.provision "shell", path: "provision/control.sh", env: control_env
+  end
+end

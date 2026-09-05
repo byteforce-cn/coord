@@ -1,0 +1,5 @@
+# in-repo Jepsen lab — runtime/host-local artifacts that must never be committed
+.vagrant/
+keys/
+*.log
+tmp/

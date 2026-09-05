@@ -1,0 +1,134 @@
+# ============================================================================
+#  coord in-repo Jepsen lab — Docker provider (方案 D)
+#  coord/jepsen/lab/docker/docker-compose.lab.yml
+#
+#  Runs the SAME coord Jepsen tests inside Docker instead of Vagrant VMs,
+#  so a developer only needs Docker (no VirtualBox/libvirt + Vagrant).
+#  The control + node images come from the community jepsen-docker project
+#  (https://github.com/nurturenature/jepsen-docker):
+#    * jepsen-control already has `lein install`-ed jepsen 0.3.14-SNAPSHOT
+#      built from jepsen-io/jepsen main at image build time — exactly the
+#      version coord/jepsen/project.clj depends on, so no library clone and
+#      no `make setup` are needed in this provider.
+#    * the shared-volume protocol generates the control RSA keypair and
+#      distributes nodes/authorized_keys (setup -> nodes -> control).
+#
+#  Images are pulled from the GitHub Container Registry by default.  Set
+#  JEPSEN_REGISTRY= (empty) and run `make docker-build` first to build them
+#  locally from a jepsen-docker checkout instead.
+#
+#  The coord repository root is bind-mounted into control at /opt/coord (rw),
+#  so `coord/jepsen/` is live-editable and test results land straight back on
+#  the host (coord/jepsen/store|soak are git-ignored). The Makefile prepares
+#  a VM-identical layout inside control (`make docker-upload`):
+#      /root/coord-test -> /opt/coord/jepsen   (symlink)
+#      /root/coord-test/coord -> release binary (host symlink, git-ignored)
+#      /root/.ssh/id_ed25519  <- copy of the generated id_rsa
+#      /root/nodes            -> /jepsen/nodes  (symlink)
+#  That keeps coord-soak.sh / db.clj defaults byte-for-byte compatible with
+#  the Vagrant provider.
+#
+#  Usage (from coord/jepsen/lab):
+#      make up JEPSEN_PROVIDER=docker     # compose up -d
+#      make upload JEPSEN_PROVIDER=docker # build binary + prep control layout
+#      make quick JEPSEN_PROVIDER=docker  # 20s sanity run
+#      make test  JEPSEN_PROVIDER=docker  # coord test
+#  ...or the shorthand targets: make docker-up / docker-upload / docker-test
+#
+#  NOTE: containers are weaker fault-injection/soak hosts than VMs. Use this
+#  provider for daily dev / smoke / CI; keep full matrix + 72h soak on the
+#  Vagrant provider.
+# ============================================================================
+
+name: coord-jepsen
+
+x-defaults: &defaults
+  privileged: true
+  cap_add:
+    - ALL
+  cgroup: host
+  tty: true
+  stop_signal: SIGRTMIN+3
+  tmpfs:
+    - /run:size=100M
+    - /run/lock:size=100M
+  volumes:
+    - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    - jepsen-shared:/var/jepsen/shared
+  networks:
+    - jepsen
+  healthcheck:
+    test: ["CMD-SHELL", "systemctl", "is-system-running"]
+    interval: 1s
+    timeout: 1s
+    start_period: 1s
+    start_interval: 1s
+    retries: 15
+
+x-node: &default-node
+  <<: *defaults
+  image: ${JEPSEN_REGISTRY:-ghcr.io/nurturenature/jepsen-docker/}jepsen-node
+  depends_on:
+    setup:
+      condition: service_completed_successfully
+
+volumes:
+  jepsen-shared:
+
+networks:
+  jepsen:
+
+services:
+  setup:
+    <<: *defaults
+    image: ${JEPSEN_REGISTRY:-ghcr.io/nurturenature/jepsen-docker/}jepsen-setup
+    container_name: jepsen-setup
+    hostname: setup
+    entrypoint: ["/usr/local/bin/jepsen-setup.sh"]
+
+  control:
+    <<: *defaults
+    image: ${JEPSEN_REGISTRY:-ghcr.io/nurturenature/jepsen-docker/}jepsen-control
+    container_name: jepsen-control
+    hostname: control
+    ports:
+      - 22
+      - 8080
+    # NOTE: explicit volumes here REPLACE the x-defaults list, so the shared
+    # volume + cgroup mount must be re-declared alongside the repo bind mount.
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - jepsen-shared:/var/jepsen/shared
+      - ../../..:/opt/coord
+    depends_on:
+      n1:
+        condition: service_healthy
+      n2:
+        condition: service_healthy
+      n3:
+        condition: service_healthy
+      n4:
+        condition: service_healthy
+      n5:
+        condition: service_healthy
+
+  n1:
+    <<: *default-node
+    container_name: jepsen-n1
+    hostname: n1
+  n2:
+    <<: *default-node
+    container_name: jepsen-n2
+    hostname: n2
+  n3:
+    <<: *default-node
+    container_name: jepsen-n3
+    hostname: n3
+  n4:
+    <<: *default-node
+    container_name: jepsen-n4
+    hostname: n4
+  n5:
+    <<: *default-node
+    container_name: jepsen-n5
+    hostname: n5
