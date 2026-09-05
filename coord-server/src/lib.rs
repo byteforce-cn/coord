@@ -22,6 +22,7 @@ pub mod bff;
 pub mod health;
 pub mod lease;
 pub mod metrics;
+pub mod migration;
 pub mod pd;
 pub mod raft;
 pub mod security;
