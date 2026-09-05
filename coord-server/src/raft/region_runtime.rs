@@ -36,6 +36,7 @@ use crate::raft::{new_basic_node, new_raft, CoordRaft, RaftConfig, RaftNode, Wat
 use crate::storage::mvcc::MvccStorage;
 use crate::storage::redb_backend::RedbBackend;
 use crate::storage::snapshot::SnapshotTracker;
+use crate::watch::WatchDispatcher;
 
 /// 节点数据目录 → Region 存储数据目录
 ///
@@ -83,6 +84,10 @@ pub struct RegionRuntime {
     pub data_dir: PathBuf,
     /// 快照跟踪器（与 LogStore/StateMachineStore 共享）
     pub tracker: Arc<SnapshotTracker>,
+    /// T5.6（R-MR-03）：该 Region 的 Watch 事件分发器（per-Region revision 语义；
+    /// 与状态机共享——apply 时把本 Region 的变更事件 dispatch 到这里，订阅者只
+    /// 见本 Region 的 key；region 0 单 Raft 路径不用此字段，沿用节点级 dispatcher）
+    pub watch_dispatcher: Arc<WatchDispatcher>,
 }
 
 impl RegionRuntime {
@@ -144,11 +149,16 @@ pub async fn spawn_region_runtime(
         .await
         .map_err(|e| Error::Storage(format!("open region {region_id} raft log: {e}")))?
         .with_snapshot_tracker(Arc::clone(&tracker));
-    let sm_store = StateMachineStore::new(
+    let mut sm_store = StateMachineStore::new(
         Arc::clone(&mvcc),
         data_dir.join("snapshots"),
         Arc::clone(&tracker),
     );
+
+    // T5.6（R-MR-03）：每 Region 独立 WatchDispatcher（per-Region revision 语义）。
+    // 必须在 new_raft 之前挂到状态机——StateMachineStore 被移入 raft 后不可再取回。
+    let watch_dispatcher = Arc::new(WatchDispatcher::start());
+    sm_store.set_watch_dispatcher(Arc::clone(&watch_dispatcher));
 
     // T2.4：读屏障幻影态终检需要访问本地日志；克隆一份 LogStore 句柄给
     // RegionRuntime（与 main.rs 单 Raft 的 node_raft_log 同理），再移入 raft。
@@ -194,6 +204,7 @@ pub async fn spawn_region_runtime(
         raft_log_store,
         data_dir,
         tracker,
+        watch_dispatcher,
     }))
 }
 

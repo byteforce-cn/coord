@@ -409,6 +409,78 @@ impl CoordNode {
         Ok(())
     }
 
+    /// T5.6（R-MR-03）：解析 Watch 目标的 dispatcher 与历史 reader（MVCC）。
+    ///
+    /// - legacy（无 region_manager）：节点级 dispatcher + 节点级 storage（行为不变）；
+    /// - region 模式：按 watch key/前缀路由到所属 Region 的 per-Region dispatcher +
+    ///   该 Region 的 MVCC（per-Region revision 语义，见 `docs/multi-raft-limits.md` L13）。
+    ///
+    /// 跨 Region 显式拒绝（对齐 G1/G3/L11，宁可拒绝不可静默丢事件）：
+    /// - 区间 `[key, range_end)`：`range_end` 越过所属 Region 边界 → 拒绝；
+    /// - 前缀（`range_end` 为空）：前缀匹配集 `[key, successor(key))` 越过边界 → 拒绝；
+    ///   空 key 前缀（匹配全 keyspace）在多 Region 下必然跨区 → 拒绝。
+    fn resolve_watch_target(
+        &self,
+        key: &[u8],
+        range_end: &[u8],
+    ) -> Result<
+        (
+            Arc<WatchDispatcher>,
+            Arc<MvccStorage<RedbBackend>>,
+        ),
+        tonic::Status,
+    > {
+        let Some(manager) = &self.region_manager else {
+            let dispatcher = self
+                .watch_dispatcher
+                .as_ref()
+                .ok_or_else(|| tonic::Status::unavailable("watch not available"))?;
+            return Ok((Arc::clone(dispatcher), Arc::clone(&self.storage)));
+        };
+
+        // region 模式：路由 + 区间/前缀跨区显式拒绝
+        let rt = manager.route_runtime(key).map_err(map_err)?;
+        let meta = rt.handle.meta.read();
+        let region_end = meta.end_key.as_slice();
+        let unbounded = region_end.is_empty();
+
+        if range_end.is_empty() {
+            // 前缀语义（WatchDispatcher：key.starts_with(prefix)，匹配集 [key, 上界)）
+            if !unbounded {
+                match prefix_successor(key) {
+                    // 匹配集 [key, upper) 完全落在本 Region [start, end) 内 → 放行
+                    Some(upper) if upper.as_slice() <= region_end => {}
+                    _ => {
+                        return Err(tonic::Status::invalid_argument(format!(
+                            "watch prefix {:?} crosses region {} boundary (end {:?}); \
+                             cross-region watch is not supported",
+                            String::from_utf8_lossy(key),
+                            rt.region_id(),
+                            String::from_utf8_lossy(region_end),
+                        )));
+                    }
+                }
+            }
+        } else if range_end != key {
+            // 区间 [key, range_end)：与 guard_range_in_target 同口径
+            if !unbounded && range_end > region_end {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "watch range [.., {:?}) crosses region {} boundary (end {:?}); \
+                     cross-region watch is not supported",
+                    String::from_utf8_lossy(range_end),
+                    rt.region_id(),
+                    String::from_utf8_lossy(region_end),
+                )));
+            }
+        }
+        drop(meta);
+
+        Ok((
+            Arc::clone(&rt.watch_dispatcher),
+            Arc::clone(&rt.mvcc),
+        ))
+    }
+
     /// R-SVC-08：将 raft `client_write` 错误映射为 gRPC Status（legacy 单 Raft）。
     ///
     /// follower 上的写请求会返回 `ForwardToLeader`——映射为 `UNAVAILABLE` 并在
@@ -1019,6 +1091,23 @@ fn map_err<E: std::fmt::Display + 'static>(e: E) -> tonic::Status {
     }
     tracing::error!(error = %msg, "unclassified error returned to client (sanitized)");
     tonic::Status::internal("internal error")
+}
+
+/// T5.6（R-MR-03）：计算「以 `prefix` 开头的全部 key」集合的最小上界字符串
+/// （字节字典序）。
+///
+/// - `Some(upper)`：任一以 `prefix` 开头的 key K 都满足 `K < upper`，且不存在更小的
+///   这样的上界（取 prefix 最后一个非 0xFF 字节 +1）；
+/// - `None`：无有限上界——`prefix` 为空（匹配全 keyspace）或全 0xFF（可任意加长）。
+pub fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
+    for i in (0..prefix.len()).rev() {
+        if prefix[i] != 0xFF {
+            let mut v = prefix[..i].to_vec();
+            v.push(prefix[i] + 1);
+            return Some(v);
+        }
+    }
+    None
 }
 
 // ──── AuthOp 提案器（P0-C.2：管理操作入 raft 日志）────
@@ -1965,11 +2054,6 @@ impl Watch for CoordNode {
         &self,
         request: tonic::Request<tonic::Streaming<WatchRequest>>,
     ) -> Result<tonic::Response<Self::WatchStream>, tonic::Status> {
-        let dispatcher = self
-            .watch_dispatcher
-            .as_ref()
-            .ok_or_else(|| tonic::Status::unavailable("watch not available"))?;
-
         let mut stream = request.into_inner();
         let first_req = stream
             .message()
@@ -1986,15 +2070,21 @@ impl Watch for CoordNode {
             }
         };
 
+        // T5.6（R-MR-03）：解析 Watch 目标——legacy 用节点级 dispatcher + storage；
+        // region 模式路由到所属 Region 的 per-Region dispatcher + MVCC（per-Region
+        // revision 语义）；跨 Region 区间/前缀在此显式拒绝（resolve_watch_target）。
+        let (dispatcher, target_mvcc) =
+            self.resolve_watch_target(&create_req.key, &create_req.range_end)?;
+
         let watch_req = crate::watch::WatchRequest {
             key: create_req.key.clone(),
             range_end: create_req.range_end.clone(),
             start_revision: create_req.start_revision as u64,
         };
 
-        // P0-E.3：先注册取水位 R0（current_revision），回放 [start, R0]，
-        //        实时从 R0+1 续并按 revision 去重。
-        let watermark_rev = self.storage.current_revision();
+        // P0-E.3：先注册取水位 R0（current_revision；region 模式 = 该 Region 的
+        //        revision），回放 [start, R0]，实时从 R0+1 续并按 revision 去重。
+        let watermark_rev = target_mvcc.current_revision();
 
         let (watch_id, mut event_rx) = dispatcher
             .subscribe(
@@ -2006,8 +2096,8 @@ impl Watch for CoordNode {
 
         let (tx, rx) = mpsc::channel::<Result<WatchResponse, tonic::Status>>(16);
 
-        let dispatcher_ref = Arc::clone(dispatcher);
-        let storage_ref = Arc::clone(&self.storage);
+        let dispatcher_ref = Arc::clone(&dispatcher);
+        let storage_ref = Arc::clone(&target_mvcc);
         let start_rev = create_req.start_revision as u64;
         let key_prefix = create_req.key;
         let range_end = create_req.range_end;
