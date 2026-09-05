@@ -32,7 +32,9 @@ use crate::raft::log_store::LogStore;
 use crate::raft::network::{RaftNetworkFactoryImpl, RaftRpcService, RegionRaftNetworkFactory};
 use crate::raft::region::RegionHandle;
 use crate::raft::state_machine::StateMachineStore;
+use crate::raft::type_config::{Command, Response};
 use crate::raft::{new_basic_node, new_raft, CoordRaft, RaftConfig, RaftNode, WatchReceiver};
+use crate::storage::compaction::CompactProposer;
 use crate::storage::mvcc::MvccStorage;
 use crate::storage::redb_backend::RedbBackend;
 use crate::storage::snapshot::SnapshotTracker;
@@ -354,6 +356,64 @@ impl RegionRaftHandle for CoordRegionRaftHandle {
             .await
             .map_err(|e| Error::Internal(format!("region raft transfer leader to {to}: {e}")))?;
         Ok(())
+    }
+}
+
+// ============================================================================
+// T5.9（R-MR-06）：per-Region Compact 提案器
+// ============================================================================
+
+/// per-Region Compaction 提案器（T5.9/R-MR-06，G7 收口）
+///
+/// 把 `Command::Compact{revision}` 提到该 Region 的 raft（节点一致 apply，
+/// 与单 Raft 的 `CoordNode` CompactProposer 同语义）。leader-only：
+/// `can_propose` = 本节点是该 Region raft 的当前 leader。提案成功后推进
+/// `RegionHandle::compaction_watermark`（此前预留未接线的水位）。
+///
+/// 由接线层（main.rs / 集成测试）为每个 RegionRuntime 构造，
+/// 供 `CompactionManager::start(region_mvcc, cfg, Some(proposer), metrics)` 使用。
+pub struct RegionCompactProposer {
+    node_id: NodeID,
+    raft: CoordRaft,
+    handle: Arc<RegionHandle>,
+}
+
+impl RegionCompactProposer {
+    /// 从 RegionRuntime 构造（捕获 node_id、raft 与路由句柄）
+    pub fn from_runtime(node_id: NodeID, rt: &RegionRuntime) -> Self {
+        Self {
+            node_id,
+            raft: rt.raft.clone(),
+            handle: Arc::clone(&rt.handle),
+        }
+    }
+}
+
+#[async_trait]
+impl CompactProposer for RegionCompactProposer {
+    async fn can_propose(&self) -> bool {
+        self.raft.current_leader().await == Some(self.node_id)
+    }
+
+    async fn propose(&self, revision: u64) -> std::result::Result<u64, String> {
+        let resp = self
+            .raft
+            .client_write(Command::Compact { revision })
+            .await
+            .map_err(|e| format!("region raft compact propose failed: {e}"))?;
+        match resp.response() {
+            Response::Compact {
+                compacted_revision,
+            } => {
+                // 推进 per-Region compact 水位（此前预留，G7 收口）
+                self.handle.compaction_watermark.store(
+                    *compacted_revision,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                Ok(*compacted_revision)
+            }
+            other => Err(format!("unexpected compact response: {other:?}")),
+        }
     }
 }
 

@@ -2615,6 +2615,39 @@ async fn run_server(
         retention
     );
 
+    // T5.9（R-MR-06）：per-Region Compaction 后台任务（G7 收口）——每个 Region ≥1
+    // 独立推进 compact 水位：leader 经该 Region raft 提案 Command::Compact（节点
+    // 一致 apply），文件级 compact 独立回收各 Region redb 空间；提案成功后推进
+    // RegionHandle::compaction_watermark。
+    let _region_compaction_mgrs: Vec<
+        coord_server::storage::compaction::CompactionManager<
+            coord_server::storage::redb_backend::RedbBackend,
+        >,
+    > = if let Some(manager) = &node.region_manager {
+        let mut mgrs = Vec::new();
+        for handle in manager.list_regions() {
+            let rid = handle.region_id();
+            if let Some(rt) = manager.runtime(rid) {
+                let proposer: Arc<dyn coord_server::storage::compaction::CompactProposer> =
+                    Arc::new(coord_server::raft::region_runtime::RegionCompactProposer::from_runtime(
+                        cfg.node.id,
+                        &rt,
+                    ));
+                let mgr = coord_server::storage::compaction::CompactionManager::start(
+                    Arc::clone(&rt.mvcc),
+                    coord_server::storage::compaction::CompactionConfig::default(),
+                    Some(proposer),
+                    Some(Arc::clone(&metrics)),
+                );
+                tracing::info!("Region {rid} compaction manager started");
+                mgrs.push(mgr);
+            }
+        }
+        mgrs
+    } else {
+        Vec::new()
+    };
+
     // 8.5. 启动自动快照调度器（ADP §19.2）。
     // S-RCV-01：scheduler 写入独立子目录 snapshots/auto/。其文件名
     // snapshot-{unix_ts}.snap 与 Raft 快照 snapshot-{idx}-{term}.snap 冲突，
