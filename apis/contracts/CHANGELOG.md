@@ -2,6 +2,25 @@
 
 版本规则见 WHITEPAPER.md §5。契约版本独立于代码版本。
 
+## [contracts/v1.1.1] — 2026-09-05（内部口径修正：Multi-Raft 实现进度更新）
+
+**不改变任何对外承诺**：Multi-Raft/PD 维持红线 §9.3（永不对外承诺，除非另立版本公告）；
+本条目仅记录内部成熟度口径更新（决策 D4 选项 a）。
+
+**口径修正（内部成熟度，非契约承诺）**
+
+- Multi-Raft/PD 内部实现进度更新：Phase 2–3（T2.1–T3.4）已完成并合入 main
+  （region 目录级存储隔离 + 内嵌 PD 已接线生产路径，`[multi_raft]` 默认关闭 opt-in），
+  不再处于「零生产路径引用」状态；WHITEPAPER §2 证据列已同步。
+- 历史条目（v1.0.0「Multi-Raft/PD（experimental，零生产路径引用）」）保留不改，
+  系当时状态的真实记录（历史条目不改原则）。
+- 功能闭环与验证（per-Region Watch/Lease/快照/压缩、进程级测试入 nightly、
+  Jepsen multi-register 矩阵、72h soak、性能基线）见
+  `docs/coord-multi-raft-production-plan-2026-09-05.md`（M5–M9）；完成后如需对外
+  承诺按红线 §9.3「另立版本公告」另行立项（本条目不含任何对外承诺）。
+
+---
+
 ## [contracts/v1.1.0] — 2026-08-27（承诺面扩展：协调能力入契约）
 
 **哲学变更（WHITEPAPER 重写为 v1.1.0）**

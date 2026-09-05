@@ -1,6 +1,10 @@
 // ⚠️ EXPERIMENTAL（P2-01）：多 Region 前缀编码为组件级验证实现，
 // 生产路径未引用（仅 `coord-core/tests/region_key_encoding_test.rs` 测试引用）。
-// Coord 生产形态为「单 Raft 组 + 定期快照备份」；Multi-Raft 若需启用须另立专项。
+// 注：「生产路径未引用」仍准确——生产 Multi-Raft（`[multi_raft] enabled=true`）走
+// **目录级存储隔离**（`coord-server/src/raft/region_runtime.rs::region_data_dir`，
+// 每 Region 独立 redb），不经过此前缀编码；`encode_pd_region_key` 仅被
+// `pd/meta_store.rs`（PD meta 落盘）引用。演进与边界见
+// `docs/coord-multi-raft-production-plan-2026-09-05.md`。
 //
 // Region Key 编码 — 共享存储的多 Region 前缀隔离
 //

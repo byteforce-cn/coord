@@ -14,7 +14,7 @@
 - **Server（共识与存储基座）**：单 Raft 组 3 节点部署，提供 KV / Txn / Watch / Lease / Auth / 静态加密 / 快照 / 压缩等原语与 Prometheus 指标。gRPC（`50051`）与 Raft（`50052`）端口仅对 Agent 可达，**业务应用永不直连 Server 集群**。
 - **Agent（应用唯一接入方式）**：每台业务机器部署 `coord-agent`，应用经本机 gRPC（`127.0.0.1:19527`）接入。Agent 代理 Server 核心原语，并在本机落地全部高级协调服务——**服务协调能力的真正承载层是 Agent**，Server 仅作为共识与存储基座。
 - **对外契约**：`apis/contracts/` 以协议白皮书 + 承诺台账的形式向业务方承诺注册发现、分布式锁、Leader 选举、分布式 ID、事件通知五类能力（GA 期限 2026-10-31 至 2026-12-31）。
-- **Multi-Raft/PD 分片**为 experimental，未接入生产路径；**Cache/MQ ISR 复制**已实现但默认关闭，未接入生产路径。
+- **Multi-Raft/PD 分片**：已接入生产路径（region 目录级存储隔离 + 内嵌 PD 调度），**默认关闭（opt-in）**——需显式配置 `[multi_raft]` 启用（见 [`config.example.toml`](config.example.toml)）；能力边界与 v1 限制（Watch/Lease/快照/扩容等）见 [`docs/multi-raft-limits.md`](docs/multi-raft-limits.md)。**Cache/MQ ISR 复制**已实现但默认关闭，未接入生产路径。
 
 > **成熟度**：核心一致性与故障恢复已通过 Jepsen 全矩阵验证（2026-08-29，见下节），72 小时浸泡测试进行中（2026-08-30 启动）；共识依赖 `openraft` 仍为 alpha 版本，整体**尚未生产就绪**，不建议直接用于生产环境。
 
@@ -82,7 +82,7 @@ graph TD
 
 ## 核心特性
 
-> 状态口径：✅ = 已实现且有自动化测试覆盖；⚠️ = 存在已知限制；🧪 = experimental（未接入生产路径）。
+> 状态口径：✅ = 已实现且有自动化测试覆盖；⚠️ = 存在已知限制/默认关闭（opt-in）；🧪 = experimental（未接入生产路径）。
 >
 > 分工口径：共识基座由 **Server** 提供、经 Agent 代理透出；高级协调能力全部由 **Agent** 落地（Server 仅作为其 KV/Lease/Watch 存储后端）。
 >
@@ -103,7 +103,7 @@ graph TD
 | **Compaction** | MVCC 版本自动压缩 | ✅ |
 | **Snapshot** | 单事务导出、2MiB 分块流式传输、auth/lease/compacted 入快照 | ✅ |
 | **可观测性** | Prometheus 指标（watch/apply/txn/snapshot/compaction/auth/storage）+ `/healthz` | ✅ |
-| **Multi-Raft/PD** | Region 分片 + PD 调度 | 🧪 |
+| **Multi-Raft/PD** | Region 分片（目录级隔离，多 Raft 组）+ 内嵌 PD 调度 | ⚠️ 默认关闭 opt-in，生产可用待验证完成后确认（边界见 [`docs/multi-raft-limits.md`](docs/multi-raft-limits.md)） |
 
 > KV / Txn / Watch / Lease 的线性一致性与故障恢复（kill/kill-all/pause/partition/partition-halves/partition-ring）已通过 Jepsen 验证。
 

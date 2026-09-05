@@ -1,7 +1,11 @@
-// ⚠️ EXPERIMENTAL（P2-01）：本模块为组件级验证实现，未接入任何生产路径
-// （全仓无 `RegionManager` 生产引用，仅 `coord-server/tests/region_manager_test.rs` 测试引用）。
-// Coord 生产形态为「单 Raft 组 + 定期快照备份」；Multi-Raft 若需启用须另立专项
-// （见 `docs/production/05-rebuild-decision-and-plan.md` §6.4 P2-01）。
+// ⚠️ Multi-Raft（默认关闭 opt-in）：本模块是 Multi-Raft 生产路径的 Region 生命周期
+// 管理核心——`coord/src/main.rs` 在 `multi_raft.enabled=true` 时经
+// `spawn_configured_regions` 装配生产路径（T2.3/T2.4），`RegionManager` 同时被
+// `pd/embedded.rs`（内嵌 PD，T3.4）引用。
+// 默认关闭：未配置 `[multi_raft]` 时走单 Raft 退化路径，region 0 根目录布局字节级不变
+// （T2.6）；已接线路径与 v1 边界（静态 Region 表、不支持 join/Split-Merge、无跨 Region
+// 语义、per-Region 快照/压缩等）见 `docs/multi-raft-limits.md`，
+// 成熟度演进见 `docs/coord-multi-raft-production-plan-2026-09-05.md`。
 //
 // Region Manager — Multi-Raft Region 生命周期管理
 //

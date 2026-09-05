@@ -40,7 +40,18 @@ data_dir = "/var/lib/coord"
 #   - 各 Region key range 必须平铺整个 keyspace：首个 start_key 为空、相邻
 #     首尾相接（无空洞/重叠）、最后一个 end_key 为空（无上界）；
 #   - 仅首节点 bootstrap=true（负责初始化各 Region 成员），其余节点置
-#     bootstrap=false 等待 leader 复制。
+#     bootstrap=false 等待 leader 复制；
+#   - v1 语义边界（详细见 docs/multi-raft-limits.md）：
+#       * 静态 Region 表：成员 = cluster.initial_nodes 全量复制，不支持 join/
+#         动态成员变更（配置含 join 即拒绝）；不支持在线 Split/Merge；
+#       * 跨 Region Txn/Range 显式拒绝（不裁剪不静默）；Watch 单 key/前缀路由到
+#         所属 Region，start_revision 为 per-Region revision（各 Region 独立）；
+#       * Lease 已支持：lease_id 全局唯一（元数据存 region 0 全局租约表），
+#         到期清理按 key 路由到所属 Region 执行删除；
+#       * 快照/压缩 per-Region：Snapshot RPC/coord snapshot --region 带 region_id，
+#         各 Region 独立 compact 水位；备份须覆盖 <data_dir>/regions/region-*/；
+#       * 存量单 Raft 用户 KV 启用前必须先 coord migrate（fail-closed 启动闸，
+#         未迁移拒绝启动；--force 需双人确认）。
 [multi_raft]
 enabled = false
 # [[multi_raft.initial_regions]]

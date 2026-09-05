@@ -81,7 +81,7 @@
 | Status / Health | STABLE | `coord/src/main.rs:2176,2692` | — |
 | Cache / MQ | EXPERIMENTAL：ISR 非原子、静态 Leader、push 背压丢消息 | R-AGT-13，ADP §25.1 | 见 §9.1 整改承诺 |
 | Workflow / Scheduler | EXPERIMENTAL：内存态 / 内存 HashMap 假实现 | ADP 口径修正 2026-08-23 | 见 §9.1 整改承诺 |
-| Multi-Raft/PD、静态加密 | 不对外承诺（红线 §9.3） | ADP 实现进度表 P2-01 | — |
+| Multi-Raft/PD、静态加密 | 不对外承诺（红线 §9.3） | Multi-Raft/PD：内部实现已接线生产路径（region 目录级隔离 + 内嵌 PD，Phase 2–3 T2.1–T3.4 已合入 main，默认关闭 opt-in）；红线 §9.3 维持 | — |
 
 ---
 
