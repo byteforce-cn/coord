@@ -19,10 +19,11 @@
 //   region 0   → `<data_dir>`（legacy 单 Raft 布局，字节级不变）
 //   region ≥1  → `<data_dir>/regions/region-{region_id:016x}/`
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use coord_core::error::{Error, Result};
 use coord_core::storage::StorageBackend;
 use coord_core::types::{NodeID, RegionId, RegionMeta, StorageConfig};
@@ -194,6 +195,113 @@ pub async fn spawn_region_runtime(
         data_dir,
         tracker,
     }))
+}
+
+// ============================================================================
+// T3.3：Region raft 成员变更能力面（PD Operator 执行器依赖端口）
+// ============================================================================
+
+/// Region raft 成员变更能力面（T3.3）
+///
+/// 定义在 raft 层（raft 自我描述能力；全部 openraft 交互收敛在本目录内——
+/// P1-06 类型隔离），pd 模块的 `OperatorExecutor` 只经 trait object 使用本端口，
+/// 不接触任何 openraft 类型。接线层（T3.4）/集成测试基于真实 `CoordRaft`
+/// 实现（`CoordRegionRaftHandle`），单元测试可用替身。
+///
+/// 语义约定（与执行器对齐，见 `pd/executor.rs` 模块文档）：
+/// - `add_learner`：将节点作为 Learner 加入并**等待复制追平**（blocking=true，
+///   对齐单 Raft `join`/`member_add` 的 D.2.1 语义）；
+/// - `promote_to_voter`：Learner → Voter（`change_membership(AddVoterIds)`）；
+/// - `remove_voter`：移除 Voter（`change_membership(RemoveVoters)`）；
+/// - `transfer_leader`：发起 leader 转移（异步完成，调用方轮询 `current_leader`）。
+#[async_trait]
+pub trait RegionRaftHandle: Send + Sync {
+    /// 当前 leader（选举窗口/未知 = None）
+    async fn current_leader(&self) -> Option<NodeID>;
+
+    /// 添加 Learner（blocking：等待复制追平后返回）
+    async fn add_learner(&self, node_id: NodeID, raft_addr: &str) -> Result<()>;
+
+    /// 晋升为 Voter
+    async fn promote_to_voter(&self, node_id: NodeID) -> Result<()>;
+
+    /// 移除 Voter
+    async fn remove_voter(&self, node_id: NodeID) -> Result<()>;
+
+    /// 发起 Leader 转移（异步完成）
+    async fn transfer_leader(&self, to: NodeID) -> Result<()>;
+}
+
+/// 真实 Region raft 的成员变更句柄（T3.3）
+///
+/// 包装某 Region 的 `CoordRaft`，把 openraft 成员变更 API 收敛到
+/// `RegionRaftHandle` 端口；错误映射为 `coord_core::error::Error`。
+pub struct CoordRegionRaftHandle {
+    raft: CoordRaft,
+}
+
+impl CoordRegionRaftHandle {
+    /// 从 Region raft 实例构建
+    pub fn new(raft: CoordRaft) -> Self {
+        Self { raft }
+    }
+
+    /// 从 Region 运行时构建（`CoordRaft` Clone 为 Arc bump，廉价）
+    pub fn from_runtime(rt: &RegionRuntime) -> Self {
+        Self {
+            raft: rt.raft.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl RegionRaftHandle for CoordRegionRaftHandle {
+    async fn current_leader(&self) -> Option<NodeID> {
+        self.raft.current_leader().await
+    }
+
+    async fn add_learner(&self, node_id: NodeID, raft_addr: &str) -> Result<()> {
+        let node = new_basic_node(raft_addr);
+        self.raft
+            .add_learner(node_id, node, true)
+            .await
+            .map_err(|e| Error::Internal(format!("region raft add_learner node {node_id}: {e}")))?;
+        Ok(())
+    }
+
+    async fn promote_to_voter(&self, node_id: NodeID) -> Result<()> {
+        let mut ids = BTreeSet::new();
+        ids.insert(node_id);
+        self.raft
+            .change_membership(crate::raft::add_voter_ids(ids), true)
+            .await
+            .map_err(|e| {
+                Error::Internal(format!("region raft promote node {node_id} to voter: {e}"))
+            })?;
+        Ok(())
+    }
+
+    async fn remove_voter(&self, node_id: NodeID) -> Result<()> {
+        let mut ids = BTreeSet::new();
+        ids.insert(node_id);
+        self.raft
+            .change_membership(crate::raft::remove_voter_ids(ids), true)
+            .await
+            .map_err(|e| {
+                Error::Internal(format!("region raft remove voter {node_id}: {e}"))
+            })?;
+        Ok(())
+    }
+
+    async fn transfer_leader(&self, to: NodeID) -> Result<()> {
+        // alpha.34：transfer_leader 在 Trigger 上（Raft::trigger() 门面）
+        self.raft
+            .trigger()
+            .transfer_leader(to)
+            .await
+            .map_err(|e| Error::Internal(format!("region raft transfer leader to {to}: {e}")))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

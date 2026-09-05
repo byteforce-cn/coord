@@ -22,6 +22,11 @@ service Raft {
   // Vote: request vote during Leader election
   rpc Vote(RaftMessage) returns (RaftMessage);
 
+  // TransferLeader: 领导权转移。Leader 向每个 voter 广播 TransferLeader 请求，
+  // 目标节点（req.to）据此立即发起带 leadership_transfer 的选举接管领导权。
+  // payload = bincode(openraft TransferLeaderRequest)；region_id 按 T2.5 解复用。
+  rpc TransferLeader(RaftMessage) returns (RaftMessage);
+
   // InstallSnapshot: send full state snapshot to lagging Follower
   rpc InstallSnapshot(RaftMessage) returns (RaftMessage);
 

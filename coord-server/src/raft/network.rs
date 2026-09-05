@@ -15,7 +15,8 @@ use std::sync::Arc;
 use openraft::error::{RPCError, ReplicationClosed, StreamingError};
 use openraft::network::RPCOption;
 use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
+    TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 use openraft::type_config::alias::{SnapshotOf, VoteOf};
 use openraft::OptionalSend;
@@ -519,6 +520,20 @@ impl RaftNetworkV2<TypeConfig> for RaftNetwork {
         }
     }
 
+    async fn transfer_leader(
+        &mut self,
+        rpc: TransferLeaderRequest<TypeConfig>,
+        option: RPCOption,
+    ) -> Result<TransferLeaderResponse<TypeConfig>, RPCError<TypeConfig>> {
+        self.ensure_not_blocked()?;
+        match self {
+            RaftNetwork::Real { inner, .. } => inner.transfer_leader(rpc, option).await,
+            RaftNetwork::Blocked { .. } => {
+                unreachable!("Blocked should have been caught by ensure_not_blocked")
+            }
+        }
+    }
+
     async fn full_snapshot(
         &mut self,
         vote: VoteOf<TypeConfig>,
@@ -696,6 +711,29 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
             .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))
     }
 
+    /// TransferLeader（P1-07 / T3.3）：把领导权转移请求发给目标节点。
+    ///
+    /// openraft `Raft::trigger().transfer_leader()` 由 leader 向每个 voter
+    /// 广播本 RPC；目标节点收到后调用本地 `handle_transfer_leader` 立即接管
+    /// （无此 RPC 时 openraft 只能退化为"等待 leader lease 超时后自由选举"，
+    /// 无法保证转移到指定目标）。消息携带 region_id（Multi-Raft 解复用）。
+    async fn transfer_leader(
+        &mut self,
+        rpc: TransferLeaderRequest<TypeConfig>,
+        _option: RPCOption,
+    ) -> Result<TransferLeaderResponse<TypeConfig>, RPCError<TypeConfig>> {
+        let payload = serialize_payload(&rpc)
+            .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))?;
+        let req = tonic::Request::new(
+            self.build_authed_message(payload)
+                .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))?,
+        );
+        let mut client = self.get_client().await.map_err(to_rpc_error)?;
+        let resp = client.transfer_leader(req).await.map_err(to_rpc_error)?;
+        deserialize_payload(&resp.into_inner().payload)
+            .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))
+    }
+
     async fn full_snapshot(
         &mut self,
         vote: VoteOf<TypeConfig>,
@@ -826,6 +864,26 @@ impl openraft_multi::GroupRouter<TypeConfig, u64> for RaftNetworkFactoryImpl {
         );
         let mut net = self.build_group_network(target, group_id, &node).await?;
         net.vote(rpc, option).await
+    }
+
+    /// T3.3：Multi-Raft 领导权转移 RPC（openraft-multi `GroupRouter` 覆盖；
+    /// `GroupNetworkAdapter::transfer_leader` 委托到本方法）。
+    async fn transfer_leader(
+        &self,
+        target: u64,
+        group_id: u64,
+        req: TransferLeaderRequest<TypeConfig>,
+        option: RPCOption,
+    ) -> Result<TransferLeaderResponse<TypeConfig>, RPCError<TypeConfig>> {
+        let node = openraft::impls::BasicNode::new(
+            self.node_addrs
+                .read()
+                .get(&target)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        let mut net = self.build_group_network(target, group_id, &node).await?;
+        net.transfer_leader(req, option).await
     }
 
     async fn full_snapshot(
@@ -1022,6 +1080,28 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
             .vote(rpc)
             .await
             .map_err(|e| tonic::Status::internal(format!("vote failed: {e}")))?;
+        let payload = serialize_payload(&resp)?;
+        Ok(tonic::Response::new(make_raft_message_for_region(
+            payload,
+            region_id,
+        )))
+    }
+
+    /// TransferLeader（P1-07 / T3.3）：leader 广播的领导权转移请求。
+    ///
+    /// 目标节点经 openraft `handle_transfer_leader` 立即发起带 leadership_transfer
+    /// 的选举（其余 voter 仅重置 lease，让目标接管）；按 region_id 解复用。
+    async fn transfer_leader(
+        &self,
+        request: tonic::Request<RaftMessageProto>,
+    ) -> Result<tonic::Response<RaftMessageProto>, tonic::Status> {
+        let msg = request.into_inner();
+        let (raft, region_id, rpc) =
+            dispatch_raft_rpc!(self, msg, TransferLeaderRequest<TypeConfig>);
+        let resp = raft
+            .handle_transfer_leader(rpc)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("handle_transfer_leader failed: {e}")))?;
         let payload = serialize_payload(&resp)?;
         Ok(tonic::Response::new(make_raft_message_for_region(
             payload,

@@ -12,6 +12,7 @@
 // - Phase 1-2：PD 内嵌于 Coord 进程，通过 Raft 共识保证 PD 元数据一致性
 // - Phase 3+：PD 可作为独立进程部署（3 节点 PD 集群）
 
+pub mod executor;
 pub mod meta_store;
 pub mod operator;
 pub mod scheduler;
@@ -32,6 +33,7 @@ use self::operator::{OperatorEntry, OperatorStatus};
 use self::scheduler::{create_default_schedulers, ScheduleContext, Scheduler};
 
 // Re-export 主要类型
+pub use executor::OperatorExecutor;
 pub use operator::Operator;
 pub use types::{NodeState, PdConfig, PdMode};
 
@@ -272,6 +274,30 @@ impl PlacementDriver {
                 }
             }
         }
+    }
+
+    /// 入队一个待执行 Operator（T3.3：执行器/管理面注入）
+    ///
+    /// 幂等：与队列中 Pending/Running 的相同 operator 去重（相同 region +
+    /// 相同动作 + 相同目标视为重复），避免调度/重试风暴。
+    pub fn enqueue_operator(&self, op: Operator) {
+        let mut pending = self.pending_operators.write();
+        let dup = pending.iter().any(|e| {
+            matches!(
+                e.status,
+                OperatorStatus::Pending | OperatorStatus::Running
+            ) && e.op == op
+        });
+        if dup {
+            return;
+        }
+        pending.push(OperatorEntry::new(op));
+    }
+
+    /// 查询某 operator 的当前执行状态（队列无记录 = None）
+    pub fn operator_status(&self, op: &Operator) -> Option<OperatorStatus> {
+        let pending = self.pending_operators.read();
+        pending.iter().find(|e| e.op == *op).map(|e| e.status.clone())
     }
 
     /// 获取并锁定下一个待执行的 Operator（标记为 Running）
