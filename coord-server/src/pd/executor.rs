@@ -24,6 +24,16 @@
 //   复制（T3.4 接线层决策，本层不实现）。
 // - 幂等：AddPeer 目标已是 Voter / RemovePeer 目标不在成员表 → 视为已达成
 //   成功（不重复触发 raft 成员变更，也不把重试当失败）。
+//
+// T3.4 接线增强：
+// - AddPeer 的**成员真源 = raft 已提交成员**（`current_members`），不再依赖
+//   meta.peers 里的 learner 记录：目标已是 raft voter → 幂等成功；已是 raft
+//   learner（openraft remove_voter 会把被移除 voter 降为 learner）→ 跳过
+//   add_learner 仅 promote（重加自愈路径）；否则 add_learner → promote。
+// - 调度器生成的 AddPeer 常以 `node_id=0` 占位（目标由 PD 选择）。接线层注入
+//   `AddPeerTargetResolver` 后，`execute_one` 在执行前把占位目标解析为具体
+//   节点；无可用目标时把 operator 放回队列（Pending）稍后重试，不记 Failed
+//   （避免 ReplicaChecker 驱动的无谓 churn）。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +50,13 @@ use crate::raft::region_runtime::RegionRaftHandle;
 /// 测试/本迭代集成测试直接构造）。
 pub type RegionRaftResolver = dyn Fn(RegionId) -> Option<Arc<dyn RegionRaftHandle>> + Send + Sync;
 
+/// AddPeer（node_id=0 占位）目标解析器：region_id → (目标 node_id, raft_addr)
+///
+/// 由接线层注入（T3.4 EmbeddedPd：从已注册集群节点中选在线且非该 Region
+/// voter 的节点）；返回 None = 当前无可用目标（执行器把 operator 放回队列
+/// 稍后重试）。
+pub type AddPeerTargetResolver = dyn Fn(RegionId) -> Option<(NodeID, String)> + Send + Sync;
+
 /// T3.3 Operator 执行器：消费 `PlacementDriver` 队列中的 operator 并应用到
 /// 本节点可执行的 Region raft。
 pub struct OperatorExecutor {
@@ -49,6 +66,8 @@ pub struct OperatorExecutor {
     node_id: NodeID,
     /// TransferLeader 发起后等待新 leader 真正上线的超时
     transfer_timeout: Duration,
+    /// AddPeer 占位目标解析器（None = 不解析：node_id=0 的 AddPeer 直接失败）
+    add_peer_resolver: Option<Arc<AddPeerTargetResolver>>,
 }
 
 impl OperatorExecutor {
@@ -59,6 +78,7 @@ impl OperatorExecutor {
             pd,
             node_id,
             transfer_timeout: Duration::from_secs(30),
+            add_peer_resolver: None,
         }
     }
 
@@ -68,12 +88,49 @@ impl OperatorExecutor {
         self
     }
 
+    /// 注入 AddPeer 占位目标解析器（T3.4 接线层）
+    pub fn with_add_peer_resolver(mut self, resolver: Arc<AddPeerTargetResolver>) -> Self {
+        self.add_peer_resolver = Some(resolver);
+        self
+    }
+
     /// 弹出队列中下一个 Pending operator 并尝试在本节点执行
     ///
     /// 结果经 `complete_operator` 写入队列（Success/Failed）；无 Pending
-    /// operator 时返回 None。
+    /// operator 时返回 None。AddPeer（node_id=0）先经目标解析器解析为具体
+    /// 节点；无可用目标时放回队列并返回 None（下次 tick 重试）。
+    ///
+    /// 返回的 Operator 是（可能经解析后的）实际执行版本；队列条目的完成
+    /// 状态始终记在**原始条目**（node_id=0）上（解析不改变去重身份）。
     pub async fn execute_one(&self, resolve: &RegionRaftResolver) -> Option<Operator> {
-        let op = self.pd.take_next_operator()?;
+        let original = self.pd.take_next_operator()?;
+        let op = match &original {
+            Operator::AddPeer {
+                region_id,
+                node_id: 0,
+                ..
+            } => match self
+                .add_peer_resolver
+                .as_ref()
+                .and_then(|r| r(*region_id))
+            {
+                Some((target, addr)) => Operator::AddPeer {
+                    region_id: *region_id,
+                    node_id: target,
+                    raft_addr: addr,
+                },
+                None => {
+                    // 暂无可选目标：放回队列（Pending）稍后重试，不记 Failed
+                    tracing::debug!(
+                        "PD executor: add-peer for region {region_id} has no resolvable \
+                         target yet; requeue for retry"
+                    );
+                    self.pd.requeue_operator(&original);
+                    return None;
+                }
+            },
+            _ => original.clone(),
+        };
         let outcome = match resolve(op.region_id()) {
             Some(raft) => self.execute(&op, raft).await,
             None => Err(format!(
@@ -83,8 +140,8 @@ impl OperatorExecutor {
             )),
         };
         match outcome {
-            Ok(()) => self.pd.complete_operator(&op, true, None),
-            Err(msg) => self.pd.complete_operator(&op, false, Some(msg)),
+            Ok(()) => self.pd.complete_operator(&original, true, None),
+            Err(msg) => self.pd.complete_operator(&original, false, Some(msg)),
         }
         Some(op)
     }
@@ -193,13 +250,24 @@ impl OperatorExecutor {
             ));
         }
 
-        let mut meta = self.region_meta_of(region_id)?;
-        let existing = meta.peers.iter().find(|p| p.node_id == peer_id).cloned();
-        match existing {
-            // 已是 Voter：幂等成功（不重复触发 raft 成员变更）
+        // T3.4：成员真源 = raft 已提交成员（current_members），不依赖
+        // meta.peers 里的 learner 记录（remove_voter 后 meta 会移除该节点，
+        // 但 raft 中它仍以 learner 存在——重加应走 promote-only 路径）。
+        let raft_members = raft
+            .current_members()
+            .await
+            .map_err(|e| format!("add-peer: read region {region_id} membership: {e}"))?;
+        let existing_raft = raft_members.iter().find(|p| p.node_id == peer_id).cloned();
+        match existing_raft {
+            // 已是 raft Voter：幂等成功（不重复触发 raft 成员变更）
             Some(p) if p.role == PeerRole::Voter => return Ok(()),
-            // 已是 Learner：跳过 add_learner，仅晋升；地址不一致则拒绝（状态漂移）
-            Some(p) if p.role == PeerRole::Learner && p.raft_addr != raft_addr => {
+            // 已是 raft Learner：跳过 add_learner，仅晋升；地址不一致则拒绝
+            // （状态漂移——learner 记录中地址未知时无法比较，放行）
+            Some(p)
+                if p.role == PeerRole::Learner
+                    && !p.raft_addr.is_empty()
+                    && p.raft_addr != raft_addr =>
+            {
                 return Err(format!(
                     "add-peer: node {peer_id} already learner at {} but requested {raft_addr}",
                     p.raft_addr
@@ -208,8 +276,11 @@ impl OperatorExecutor {
             _ => {}
         }
 
-        let is_learner = matches!(existing.as_ref().map(|p| p.role), Some(PeerRole::Learner));
-        if !is_learner {
+        let is_raft_learner = matches!(
+            existing_raft.as_ref().map(|p| p.role),
+            Some(PeerRole::Learner)
+        );
+        if !is_raft_learner {
             raft.add_learner(peer_id, raft_addr)
                 .await
                 .map_err(|e| format!("add_learner node {peer_id} (region {region_id}): {e}"))?;
@@ -219,6 +290,7 @@ impl OperatorExecutor {
             .map_err(|e| format!("promote node {peer_id} to voter (region {region_id}): {e}"))?;
 
         // 同步 PD 元数据（调度真源）：写穿落盘 + conf_ver 递增
+        let mut meta = self.region_meta_of(region_id)?;
         meta.peers.retain(|p| p.node_id != peer_id);
         meta.peers.push(Peer {
             node_id: peer_id,
@@ -329,10 +401,12 @@ mod tests {
     use std::sync::Mutex;
     use tokio::sync::watch;
 
-    /// 可控 raft 替身：记录成员变更调用、可切换 leader 视图
+    /// 可控 raft 替身：记录成员变更调用、可切换 leader 视图、维护成员表
     struct FakeRaft {
         /// 当前 leader（executor 节点视角）
         leader: Mutex<Option<NodeID>>,
+        /// raft 已提交成员表（current_members 真源；add/promote/remove 更新）
+        members: Mutex<Vec<Peer>>,
         add_learner_calls: Mutex<Vec<(NodeID, String)>>,
         promote_calls: Mutex<Vec<NodeID>>,
         remove_calls: Mutex<Vec<NodeID>>,
@@ -342,9 +416,10 @@ mod tests {
     }
 
     impl FakeRaft {
-        fn new(leader: NodeID) -> Self {
+        fn new(leader: NodeID, members: Vec<Peer>) -> Self {
             Self {
                 leader: Mutex::new(Some(leader)),
+                members: Mutex::new(members),
                 add_learner_calls: Mutex::new(Vec::new()),
                 promote_calls: Mutex::new(Vec::new()),
                 remove_calls: Mutex::new(Vec::new()),
@@ -372,6 +447,10 @@ mod tests {
             self.leader.lock().unwrap().clone()
         }
 
+        async fn current_members(&self) -> coord_core::error::Result<Vec<Peer>> {
+            Ok(self.members.lock().unwrap().clone())
+        }
+
         async fn add_learner(
             &self,
             node_id: NodeID,
@@ -381,16 +460,38 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((node_id, raft_addr.to_string()));
+            // 已存在则仅更新地址；否则以 learner 加入成员表
+            let mut members = self.members.lock().unwrap();
+            match members.iter_mut().find(|p| p.node_id == node_id) {
+                Some(p) => {
+                    p.raft_addr = raft_addr.to_string();
+                    p.role = PeerRole::Learner;
+                }
+                None => members.push(Peer {
+                    node_id,
+                    raft_addr: raft_addr.to_string(),
+                    role: PeerRole::Learner,
+                }),
+            }
             Ok(())
         }
 
         async fn promote_to_voter(&self, node_id: NodeID) -> coord_core::error::Result<()> {
             self.promote_calls.lock().unwrap().push(node_id);
+            let mut members = self.members.lock().unwrap();
+            if let Some(p) = members.iter_mut().find(|p| p.node_id == node_id) {
+                p.role = PeerRole::Voter;
+            }
             Ok(())
         }
 
         async fn remove_voter(&self, node_id: NodeID) -> coord_core::error::Result<()> {
             self.remove_calls.lock().unwrap().push(node_id);
+            // openraft 语义：被移除 voter 降级为 learner（仍收复制不投票）
+            let mut members = self.members.lock().unwrap();
+            if let Some(p) = members.iter_mut().find(|p| p.node_id == node_id) {
+                p.role = PeerRole::Learner;
+            }
             Ok(())
         }
 
@@ -445,10 +546,11 @@ mod tests {
         peers.iter().any(|p| p.node_id == node_id && p.role == role)
     }
 
-    /// 返回 (pd, executor[node1], fake raft leader=node1)
+    /// 返回 (pd, executor[node1], fake raft leader=node1，成员表=meta peers)
     fn leader_fake(peers: Vec<Peer>) -> (Arc<PlacementDriver>, OperatorExecutor, Arc<FakeRaft>) {
         let (pd, ex, _tx) = make_executor_pd(1, peers);
-        let fake = Arc::new(FakeRaft::new(1));
+        let members = pd.meta_store().get_region(1).unwrap().peers.clone();
+        let fake = Arc::new(FakeRaft::new(1, members));
         (pd, ex, fake)
     }
 
@@ -583,7 +685,7 @@ mod tests {
     #[tokio::test]
     async fn test_transfer_leader_already_target_is_noop() {
         let (_pd, ex, _fake) = make_executor_pd(2, vec![voter(1), voter(2)]);
-        let fake = Arc::new(FakeRaft::new(2)); // leader 已是 node2（executor 节点 2）
+        let fake = Arc::new(FakeRaft::new(2, vec![voter(1), voter(2)])); // leader 已是 node2（executor 节点 2）
         let op = Operator::TransferLeader {
             region_id: 1,
             to_node: 2,
@@ -626,7 +728,7 @@ mod tests {
     async fn test_execute_on_non_leader_fails() {
         // executor 节点 1，但 region leader 已是 node2 → 守卫拒绝执行
         let (_pd, ex, _fake) = make_executor_pd(1, vec![voter(1), voter(2)]);
-        let fake = Arc::new(FakeRaft::new(2));
+        let fake = Arc::new(FakeRaft::new(2, vec![voter(1), voter(2)]));
         let op = Operator::AddPeer {
             region_id: 1,
             node_id: 3,
@@ -684,12 +786,70 @@ mod tests {
             to_node: 2,
         });
         let resolve: Arc<RegionRaftResolver> =
-            Arc::new(|_rid| Some(Arc::new(FakeRaft::new(1)) as Arc<dyn RegionRaftHandle>));
+            Arc::new(|_rid| Some(Arc::new(FakeRaft::new(1, vec![voter(1)])) as Arc<dyn RegionRaftHandle>));
         let op = ex.execute_one(&*resolve).await.expect("one operator");
         let st = pd.operator_status(&op).unwrap();
         assert!(
             matches!(st, super::super::operator::OperatorStatus::Failed(_)),
             "status: {st:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_one_resolves_add_peer_placeholder_target() {
+        // T3.4：调度器以 node_id=0 占位的 AddPeer 经目标解析器落地为具体节点
+        let (pd, ex, fake) = leader_fake(vec![voter(1)]);
+        let target: Arc<AddPeerTargetResolver> =
+            Arc::new(|_rid| Some((2, "node2:50052".to_string())));
+        let ex = ex.with_add_peer_resolver(target);
+        pd.enqueue_operator(Operator::AddPeer {
+            region_id: 1,
+            node_id: 0, // 占位：由解析器选择目标
+            raft_addr: String::new(),
+        });
+
+        let fake2: Arc<dyn RegionRaftHandle> = fake.clone();
+        let resolve: Arc<RegionRaftResolver> = Arc::new(move |_rid| Some(fake2.clone()));
+        let op = ex.execute_one(&*resolve).await.expect("resolved add-peer");
+        assert_eq!(op.name(), "add-peer");
+        // 完成状态记在原始占位条目（node_id=0）上
+        let original = Operator::AddPeer {
+            region_id: 1,
+            node_id: 0,
+            raft_addr: String::new(),
+        };
+        assert!(matches!(
+            pd.operator_status(&original),
+            Some(super::super::operator::OperatorStatus::Success)
+        ));
+        assert_eq!(fake.add_learner_count(), 1);
+        assert_eq!(fake.promote_calls(), vec![2]);
+        assert!(has_peer(&peers_of_meta(&pd), 2, PeerRole::Voter));
+        // 返回的是解析后的具体目标版本（可观察性）
+        assert!(matches!(op, Operator::AddPeer { node_id: 2, .. }));
+    }
+
+    #[tokio::test]
+    async fn test_execute_one_unresolvable_add_peer_requeues() {
+        // T3.4：占位 AddPeer 无可选目标 → 放回队列（Pending）稍后重试，不记 Failed
+        let (pd, ex, _fake) = leader_fake(vec![voter(1)]);
+        let none: Arc<AddPeerTargetResolver> = Arc::new(|_rid| None);
+        let ex = ex.with_add_peer_resolver(none);
+        let op = Operator::AddPeer {
+            region_id: 1,
+            node_id: 0,
+            raft_addr: String::new(),
+        };
+        pd.enqueue_operator(op.clone());
+
+        let fake2: Arc<dyn RegionRaftHandle> = Arc::new(FakeRaft::new(1, vec![voter(1)]));
+        let resolve: Arc<RegionRaftResolver> = Arc::new(move |_rid| Some(fake2.clone()));
+        let ran = ex.execute_one(&*resolve).await;
+        assert!(ran.is_none(), "unresolvable add-peer must not run");
+        let st = pd.operator_status(&op).unwrap();
+        assert!(
+            matches!(st, super::super::operator::OperatorStatus::Pending),
+            "unresolvable add-peer must stay pending (not failed): {st:?}"
         );
     }
 
@@ -703,7 +863,7 @@ mod tests {
         });
 
         let ex = Arc::new(ex);
-        let fake = Arc::new(FakeRaft::new(1));
+        let fake = Arc::new(FakeRaft::new(1, vec![voter(1)]));
         let fake2: Arc<dyn RegionRaftHandle> = fake.clone();
         let resolve: Arc<RegionRaftResolver> = Arc::new(move |_rid| Some(fake2.clone()));
         let handle = ex.start_executor_loop(resolve, Duration::from_millis(50));

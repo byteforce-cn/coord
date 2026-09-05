@@ -46,6 +46,7 @@ use coord_server::raft::log_store::LogStore;
 use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
 use coord_server::raft::region::{spawn_configured_regions, RegionManager, RegionSeed};
 use coord_server::raft::state_machine::StateMachineStore;
+use coord_server::pd::{EmbeddedPd, NodeInfo};
 use coord_server::server::CoordNode;
 use coord_server::storage::compaction::{CompactionConfig, CompactionManager};
 use coord_server::storage::mvcc::MvccStorage;
@@ -1993,36 +1994,36 @@ async fn run_server(
     //   不在 region 表内）；
     // - region 表合法性（平铺/成员）由 Config::validate（R-MR-01）先行校验，
     //   装配函数再做防御性校验。
-    let region_manager: Option<Arc<RegionManager>> = if cfg.multi_raft.enabled {
-        let seeds: Vec<RegionSeed> = cfg
-            .multi_raft
-            .initial_regions
-            .iter()
-            .map(|r| RegionSeed {
-                region_id: r.id,
-                start_key: r.start_key.as_bytes().to_vec(),
-                end_key: r.end_key.as_bytes().to_vec(),
-            })
-            .collect();
-        let peers: Vec<Peer> = cfg
-            .cluster
-            .initial_nodes
-            .iter()
-            .map(|n| Peer {
-                node_id: n.id,
-                raft_addr: n.raft.clone(),
-                role: PeerRole::Voter,
-            })
-            .collect();
+    let region_seeds: Vec<RegionSeed> = cfg
+        .multi_raft
+        .initial_regions
+        .iter()
+        .map(|r| RegionSeed {
+            region_id: r.id,
+            start_key: r.start_key.as_bytes().to_vec(),
+            end_key: r.end_key.as_bytes().to_vec(),
+        })
+        .collect();
+    let region_peers: Vec<Peer> = cfg
+        .cluster
+        .initial_nodes
+        .iter()
+        .map(|n| Peer {
+            node_id: n.id,
+            raft_addr: n.raft.clone(),
+            role: PeerRole::Voter,
+        })
+        .collect();
 
+    let region_manager: Option<Arc<RegionManager>> = if cfg.multi_raft.enabled {
         let manager = spawn_configured_regions(
             node_id,
             &data_dir,
             &region_shared_factory,
             &raft_rpc_service,
             region_raft_config,
-            &seeds,
-            &peers,
+            &region_seeds,
+            &region_peers,
             bootstrap,
         )
         .await
@@ -2031,13 +2032,51 @@ async fn run_server(
         tracing::info!(
             "Multi-Raft enabled: {} region(s) assembled on node {node_id} ({} peers)",
             cfg.multi_raft.initial_regions.len(),
-            peers.len()
+            region_peers.len()
         );
         Some(manager)
     } else {
         // T2.6：multi_raft.enabled=false（默认）→ 单 Raft 退化路径，磁盘布局/
         // 备份/快照/回滚字节级不变（region 0 根目录布局）。
         tracing::debug!("Multi-Raft disabled: single-raft (legacy) mode");
+        None
+    };
+
+    // T3.4：内嵌 PD 接线（`[multi_raft].enabled=true` + `[multi_raft.pd]
+    // .enabled=true` 时）。R-MR-02 已保证 pd.enabled ⇒ multi_raft.enabled，故
+    // region_manager 必为 Some。PD 独立持有 RegionManager 引用（start 内
+    // Arc::clone），不影响其随后移入 CoordNode。
+    let embedded_pd: Option<Arc<EmbeddedPd>> = if cfg.multi_raft.pd.enabled {
+        let manager = region_manager
+            .as_ref()
+            .expect("multi_raft.pd.enabled requires assembled region_manager");
+        let pd_nodes: Vec<NodeInfo> = cfg
+            .cluster
+            .initial_nodes
+            .iter()
+            .map(|n| NodeInfo {
+                node_id: n.id,
+                raft_addr: n.raft.clone(),
+                grpc_addr: n.grpc.clone(),
+            })
+            .collect();
+        let heartbeat_interval =
+            std::time::Duration::from_millis(cfg.multi_raft.pd.heartbeat_interval_ms);
+        Some(
+            EmbeddedPd::start(
+                cfg.multi_raft.pd.to_pd_config(),
+                node_id,
+                &data_dir,
+                manager,
+                &region_seeds,
+                pd_nodes,
+                heartbeat_interval,
+            )
+            .await
+            .map_err(|e| format!("start embedded PD: {e}"))?,
+        )
+    } else {
+        tracing::debug!("Multi-Raft PD disabled (multi_raft.pd.enabled=false)");
         None
     };
 
@@ -2878,6 +2917,10 @@ async fn run_server(
     // 12. 清理（P1-07）：raft 排空关闭（openraft 等待 core task 退出）→
     //     等待移交任务结束 → 终止 raft RPC server。
     tracing::info!("gRPC drained; shutting down raft instance");
+    // T3.4：内嵌 PD 后台循环先于 raft 停机（executor 不再发起成员变更）
+    if let Some(pd) = &embedded_pd {
+        pd.shutdown().await;
+    }
     raft.shutdown()
         .await
         .map_err(|e| format!("raft shutdown: {e}"))?;

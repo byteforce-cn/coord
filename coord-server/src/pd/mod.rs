@@ -1,7 +1,12 @@
-// ⚠️ EXPERIMENTAL（P2-01）：本模块为组件级验证实现，未接入任何生产路径
-// （全仓无 `pd::` 生产引用，仅 `coord-server/tests/region_manager_test.rs` 测试引用）。
-// Coord 生产形态为「单 Raft 组 + 定期快照备份」；Multi-Raft/PD 若需启用，
-// 须另立专项完成集成与生产验证（见 `docs/production/05-rebuild-decision-and-plan.md` §6.4 P2-01）。
+// Placement Driver — Multi-Raft 全局调度器（Phase 3 生产化进行中）
+//
+// 演进说明：本模块在 Phase 0–3（2026-08-31 → 09-05）完成生产化改造——
+//   - T3.1（coord 554a1fe）：PdMetaStore redb 落盘（<data_dir>/pd/pd-meta.db）；
+//   - T3.2（coord 2fd8ec0）：Region 心跳 → 实时调度状态（leader 视图/统计）；
+//   - T3.3（coord d510fa9）：Operator 执行器映射真实 Region raft 成员变更；
+//   - T3.4：`EmbeddedPd`（本模块 `embedded.rs`）——main.rs 内嵌接线（心跳源、
+//     成员对账、调度/执行循环；`[multi_raft].enabled=true` + `[multi_raft.pd]
+//     .enabled=true` 时装配）。见 `docs/coord-multi-raft-plan-2026-08-31.md`。
 //
 // Placement Driver — Multi-Raft 全局调度器
 //
@@ -12,6 +17,7 @@
 // - Phase 1-2：PD 内嵌于 Coord 进程，通过 Raft 共识保证 PD 元数据一致性
 // - Phase 3+：PD 可作为独立进程部署（3 节点 PD 集群）
 
+pub mod embedded;
 pub mod executor;
 pub mod meta_store;
 pub mod operator;
@@ -33,6 +39,7 @@ use self::operator::{OperatorEntry, OperatorStatus};
 use self::scheduler::{create_default_schedulers, ScheduleContext, Scheduler};
 
 // Re-export 主要类型
+pub use embedded::{EmbeddedPd, NodeInfo};
 pub use executor::OperatorExecutor;
 pub use operator::Operator;
 pub use types::{NodeState, PdConfig, PdMode};
@@ -330,6 +337,21 @@ impl PlacementDriver {
             pending.retain(|e| {
                 e.status == OperatorStatus::Pending || e.status == OperatorStatus::Running
             });
+        }
+    }
+
+    /// 把 Running 的 operator 重新置回 Pending（T3.4 执行暂不可行时稍后重试）
+    ///
+    /// 与 `complete_operator(Failed)` 的区别：不产生 Failed 记录、不触发调度
+    /// 器重新生成同一 operator（去重仍命中 Pending/Running）——用于 AddPeer
+    /// 占位目标暂无可选节点等**可重试**场景，避免无谓 churn。
+    pub fn requeue_operator(&self, op: &Operator) {
+        let mut pending = self.pending_operators.write();
+        if let Some(entry) = pending
+            .iter_mut()
+            .find(|e| e.op == *op && e.status == OperatorStatus::Running)
+        {
+            entry.status = OperatorStatus::Pending;
         }
     }
 

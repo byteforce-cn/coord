@@ -26,13 +26,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use coord_core::error::{Error, Result};
 use coord_core::storage::StorageBackend;
-use coord_core::types::{NodeID, RegionId, RegionMeta, StorageConfig};
+use coord_core::types::{NodeID, Peer, PeerRole, RegionId, RegionMeta, StorageConfig};
 
 use crate::raft::log_store::LogStore;
 use crate::raft::network::{RaftNetworkFactoryImpl, RaftRpcService, RegionRaftNetworkFactory};
 use crate::raft::region::RegionHandle;
 use crate::raft::state_machine::StateMachineStore;
-use crate::raft::{new_basic_node, new_raft, CoordRaft, RaftConfig, RaftNode};
+use crate::raft::{new_basic_node, new_raft, CoordRaft, RaftConfig, RaftNode, WatchReceiver};
 use crate::storage::mvcc::MvccStorage;
 use crate::storage::redb_backend::RedbBackend;
 use crate::storage::snapshot::SnapshotTracker;
@@ -219,6 +219,14 @@ pub trait RegionRaftHandle: Send + Sync {
     /// 当前 leader（选举窗口/未知 = None）
     async fn current_leader(&self) -> Option<NodeID>;
 
+    /// 当前**已提交/已 apply** 的成员表（T3.4 对账用）
+    ///
+    /// 返回 raft 状态机当前 membership 的全部节点（voter 优先、按 node_id
+    /// 稳定排序），`raft_addr` 取成员节点表中自带的地址。成员经 raft 日志复制，
+    /// 是所有节点 PD 元数据收敛的对账真源；尚未有已提交成员（集群初始化 /
+    /// follower 未追平）时返回空 Vec（调用方应跳过对账，不得据此清空元数据）。
+    async fn current_members(&self) -> Result<Vec<Peer>>;
+
     /// 添加 Learner（blocking：等待复制追平后返回）
     async fn add_learner(&self, node_id: NodeID, raft_addr: &str) -> Result<()>;
 
@@ -258,6 +266,40 @@ impl CoordRegionRaftHandle {
 impl RegionRaftHandle for CoordRegionRaftHandle {
     async fn current_leader(&self) -> Option<NodeID> {
         self.raft.current_leader().await
+    }
+
+    async fn current_members(&self) -> Result<Vec<Peer>> {
+        let m = self.raft.metrics().borrow_watched().clone();
+        let membership = &m.membership_config;
+        // 无已提交成员（初始化前）→ 空表，调用方跳过对账
+        let voter_ids: std::collections::BTreeSet<u64> = membership.voter_ids().collect();
+        if voter_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut peers: Vec<Peer> = membership
+            .nodes()
+            .map(|(id, node)| Peer {
+                node_id: *id,
+                raft_addr: node.addr.clone(),
+                role: if voter_ids.contains(id) {
+                    PeerRole::Voter
+                } else {
+                    PeerRole::Learner
+                },
+            })
+            .collect();
+        // voter 优先、按 node_id 稳定排序（对账用确定性顺序）
+        peers.sort_by_key(|p| {
+            (
+                if p.role == PeerRole::Voter {
+                    0
+                } else {
+                    1
+                },
+                p.node_id,
+            )
+        });
+        Ok(peers)
     }
 
     async fn add_learner(&self, node_id: NodeID, raft_addr: &str) -> Result<()> {

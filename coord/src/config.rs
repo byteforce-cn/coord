@@ -433,6 +433,60 @@ impl Config {
             }
         }
 
+        // 12b. R-MR-02：multi_raft.pd 段合法性（Phase 3 T3.4；PD 内嵌模式 v1）。
+        //     - pd.enabled=true 要求 multi_raft.enabled=true（PD 附着于多 Region 装配）；
+        //     - 各间隔/超时 > 0；max_concurrent_operators > 0；
+        //     - target_replicas ∈ [1, cluster 成员数]（v1 静态成员下不能多于可用节点）。
+        let pd = &self.multi_raft.pd;
+        if pd.enabled && !self.multi_raft.enabled {
+            errs.push(
+                "multi_raft.pd.enabled = true requires multi_raft.enabled = true \
+                 (PD schedules the regions assembled by [multi_raft])"
+                    .to_string(),
+            );
+        }
+        if pd.enabled {
+            if pd.heartbeat_interval_ms == 0 {
+                errs.push("multi_raft.pd.heartbeat_interval_ms must be > 0".to_string());
+            }
+            for (label, v) in [
+                ("split_check_interval", pd.split_check_interval),
+                ("merge_check_interval", pd.merge_check_interval),
+                ("balance_interval", pd.balance_interval),
+                ("node_heartbeat_timeout", pd.node_heartbeat_timeout),
+            ] {
+                if v == 0 {
+                    errs.push(format!("multi_raft.pd.{label} must be > 0"));
+                }
+            }
+            if pd.max_concurrent_operators == 0 {
+                errs.push(
+                    "multi_raft.pd.max_concurrent_operators must be > 0".to_string(),
+                );
+            }
+            if pd.region_split_size_mb == 0 {
+                errs.push("multi_raft.pd.region_split_size_mb must be > 0".to_string());
+            }
+            if pd.region_split_keys == 0 {
+                errs.push("multi_raft.pd.region_split_keys must be > 0".to_string());
+            }
+            if pd.region_merge_size_mb == 0 {
+                errs.push("multi_raft.pd.region_merge_size_mb must be > 0".to_string());
+            }
+            if pd.target_replicas == 0 {
+                errs.push("multi_raft.pd.target_replicas must be > 0".to_string());
+            }
+            if pd.target_replicas > self.cluster.initial_nodes.len() {
+                errs.push(format!(
+                    "multi_raft.pd.target_replicas ({}) cannot exceed the cluster member \
+                     count ({}) in v1 (static membership; replicas are placed on \
+                     cluster.initial_nodes)",
+                    pd.target_replicas,
+                    self.cluster.initial_nodes.len()
+                ));
+            }
+        }
+
         // 13. R-RFT-19：raft 调优段合法性（选举窗口 min ≤ max；时间参数 > 0）
         for (label, ms) in [
             (
@@ -891,6 +945,14 @@ pub struct MultiRaftConfig {
     /// 按 Region 差异化分布）。key range 必须平铺整个 keyspace（无空洞/重叠）。
     #[serde(default)]
     pub initial_regions: Vec<InitialRegionConfig>,
+
+    /// PD 子配置（`[multi_raft.pd]` 段；Phase 3 T3.4 内嵌 PD）。
+    ///
+    /// 仅 `enabled=true`（多 Region 装配）时生效：节点内嵌运行 PlacementDriver
+    /// （区域/节点心跳上报 + 调度循环 + operator 执行循环，元数据落盘
+    /// `<data_dir>/pd/pd-meta.db`）。默认关闭 = 多 Region 装配但不调度。
+    #[serde(default)]
+    pub pd: MultiRaftPdConfig,
 }
 
 impl Default for MultiRaftConfig {
@@ -898,6 +960,7 @@ impl Default for MultiRaftConfig {
         Self {
             enabled: false,
             initial_regions: Vec::new(),
+            pd: MultiRaftPdConfig::default(),
         }
     }
 }
@@ -915,6 +978,89 @@ pub struct InitialRegionConfig {
     /// Key range 结束（不包含）；空 = 无上界（仅允许最后一个 region）
     #[serde(default)]
     pub end_key: String,
+}
+
+/// PD 子配置（`[multi_raft.pd]` 段；Phase 3 T3.4）。
+///
+/// v1 仅支持**内嵌模式**（PD 作为每个 Coord 进程的一部分运行，直接调度本进程
+/// 装配的 Region raft；独立 PD 进程为 Phase 3+）。字段默认值与
+/// `coord_server::pd::PdConfig::default()` 对齐；`enabled=false`（默认）时本段
+/// 全部字段被忽略（不装配 PD、不落盘 pd-meta.db、无调度/心跳循环）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MultiRaftPdConfig {
+    /// 是否在节点内嵌运行 PD（Embedded 模式）
+    pub enabled: bool,
+
+    /// Region/节点心跳上报与成员对账间隔（毫秒；PD 调度输入的数据面节拍）
+    pub heartbeat_interval_ms: u64,
+
+    /// Split Checker 检查间隔（秒）
+    pub split_check_interval: u64,
+
+    /// Merge Checker 检查间隔（秒）
+    pub merge_check_interval: u64,
+
+    /// Leader 均衡调度间隔（秒）
+    pub balance_interval: u64,
+
+    /// 最大并发调度 Operator 数
+    pub max_concurrent_operators: usize,
+
+    /// Region 分裂大小阈值（MB）
+    pub region_split_size_mb: u64,
+
+    /// Region 分裂 Key 数阈值
+    pub region_split_keys: u64,
+
+    /// Region 合并大小阈值（MB）
+    pub region_merge_size_mb: u64,
+
+    /// 目标副本数（每 Region voter 数；v1 ≤ cluster.initial_nodes 成员数）
+    pub target_replicas: usize,
+
+    /// 节点心跳超时（秒；超时标记离线，调度不基于离线节点）
+    pub node_heartbeat_timeout: u64,
+}
+
+impl Default for MultiRaftPdConfig {
+    fn default() -> Self {
+        // 与 coord_server::pd::PdConfig::default() 的对应字段保持一致
+        Self {
+            enabled: false,
+            heartbeat_interval_ms: 5000,
+            split_check_interval: 30,
+            merge_check_interval: 60,
+            balance_interval: 120,
+            max_concurrent_operators: 10,
+            region_split_size_mb: 256,
+            region_split_keys: 1_000_000,
+            region_merge_size_mb: 16,
+            target_replicas: 3,
+            node_heartbeat_timeout: 30,
+        }
+    }
+}
+
+impl MultiRaftPdConfig {
+    /// 转换为 PD 运行时配置（Embedded 模式；T3.4 main.rs 装配用）
+    pub fn to_pd_config(&self) -> coord_server::pd::PdConfig {
+        coord_server::pd::PdConfig {
+            mode: coord_server::pd::PdMode::Embedded,
+            external_addrs: Vec::new(),
+            split_check_interval: self.split_check_interval,
+            merge_check_interval: self.merge_check_interval,
+            balance_interval: self.balance_interval,
+            max_concurrent_operators: self.max_concurrent_operators,
+            region_split_size_mb: self.region_split_size_mb,
+            region_split_keys: self.region_split_keys,
+            region_merge_size_mb: self.region_merge_size_mb,
+            target_replicas: self.target_replicas,
+            node_heartbeat_timeout: self.node_heartbeat_timeout,
+            placement: Default::default(),
+            maintenance: Default::default(),
+        }
+    }
 }
 
 impl LimitsConfig {
@@ -1414,6 +1560,111 @@ end_key = ""
         let errs = config.validate().unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("join")),
+            "{errs:?}"
+        );
+    }
+
+    // ──── Multi-Raft PD（[multi_raft.pd] / Phase 3 T3.4）────
+
+    #[test]
+    fn test_multi_raft_pd_default_disabled() {
+        // T3.4：pd.enabled 默认 false = 多 Region 装配但不调度
+        let config = Config::default();
+        assert!(!config.multi_raft.pd.enabled);
+        // 默认 pd 段与 PdConfig::default() 对齐（内嵌模式转换后）
+        let pd = config.multi_raft.pd.to_pd_config();
+        assert!(matches!(pd.mode, coord_server::pd::PdMode::Embedded));
+        assert_eq!(pd.balance_interval, 120);
+        assert_eq!(pd.target_replicas, 3);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_multi_raft_pd_parse_toml() {
+        let toml_str = r#"
+[multi_raft]
+enabled = true
+
+[[multi_raft.initial_regions]]
+id = 1
+start_key = ""
+end_key = ""
+
+[multi_raft.pd]
+enabled = true
+heartbeat_interval_ms = 1000
+balance_interval = 10
+node_heartbeat_timeout = 15
+target_replicas = 2
+max_concurrent_operators = 4
+region_split_keys = 500000
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let pd_cfg = &config.multi_raft.pd;
+        assert!(pd_cfg.enabled);
+        assert_eq!(pd_cfg.heartbeat_interval_ms, 1000);
+        assert_eq!(pd_cfg.balance_interval, 10);
+        assert_eq!(pd_cfg.node_heartbeat_timeout, 15);
+        assert_eq!(pd_cfg.target_replicas, 2);
+        assert_eq!(pd_cfg.max_concurrent_operators, 4);
+        assert_eq!(pd_cfg.region_split_keys, 500_000);
+        // 未出现的字段走默认值
+        assert_eq!(pd_cfg.split_check_interval, 30);
+        assert_eq!(pd_cfg.region_split_size_mb, 256);
+
+        // to_pd_config 映射
+        let pd = pd_cfg.to_pd_config();
+        assert_eq!(pd.balance_interval, 10);
+        assert_eq!(pd.node_heartbeat_timeout, 15);
+        assert_eq!(pd.target_replicas, 2);
+        assert!(pd.external_addrs.is_empty());
+    }
+
+    #[test]
+    fn test_multi_raft_pd_validate_ok() {
+        let mut config = multi_raft_member_config(1);
+        config.multi_raft.pd.enabled = true;
+        config.multi_raft.pd.target_replicas = 3; // == 成员数
+        assert!(config.validate().is_ok(), "{:?}", config.validate().err());
+    }
+
+    #[test]
+    fn test_multi_raft_pd_requires_multi_raft_enabled() {
+        // pd.enabled=true 但 multi_raft.enabled=false → 拒绝
+        let mut config = Config::default();
+        config.multi_raft.pd.enabled = true;
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("requires multi_raft.enabled")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_multi_raft_pd_validate_zero_interval() {
+        let mut config = multi_raft_member_config(1);
+        config.multi_raft.pd.enabled = true;
+        config.multi_raft.pd.heartbeat_interval_ms = 0;
+        config.multi_raft.pd.balance_interval = 0;
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("heartbeat_interval_ms")),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter().any(|e| e.contains("balance_interval")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_multi_raft_pd_validate_target_replicas_exceeds_members() {
+        let mut config = multi_raft_member_config(1);
+        config.multi_raft.pd.enabled = true;
+        config.multi_raft.pd.target_replicas = 4; // > 3 成员
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("target_replicas")),
             "{errs:?}"
         );
     }

@@ -1,14 +1,16 @@
-// Multi-Raft 生产装配进程级验收（TDD 迭代 #8；Phase 2 / M2 出口条件）
+// Multi-Raft 生产装配进程级验收（TDD 迭代 #8；Phase 2 / M2 出口条件 + 迭代 #12 T3.4）
 //
 // 与 in-process 套件（region_assembly / region_kv_routing /
 // multi_raft_config_assembly）不同，本套件 spawn **真实 `coord server` 进程**
-// （3 节点 × 3 Region，`[multi_raft].enabled=true`），走 main.rs 的配置驱动
-// 装配路径，验证：
+// （3 节点 × 3 Region，`[multi_raft].enabled=true` + `[multi_raft.pd].enabled=
+// true`），走 main.rs 的配置驱动装配路径，验证：
 //   - 每个 Region 独立选出 leader，跨 Region KV 路由 / 收敛 / 隔离
 //     （真实 gRPC 客户端，真实网络）；
+//   - 内嵌 PD 随进程启动（T3.4）：每节点 `<data_dir>/pd/pd-meta.db` 落盘；
 //   - 依次 kill 每个节点（含各 Region 的 leader）：被 kill 节点承载的 Region
 //     副本在其余节点上**独立重新选举**，全部 Region 继续可写可读；
-//   - 重启被 kill 节点后集群重新收敛（该节点副本追平复制）。
+//   - 重启被 kill 节点后集群重新收敛（该节点副本追平复制、PD 循环随进程
+//     恢复且不崩溃）。
 //
 // 标记 `#[ignore]`：显式运行（本地），对齐 chaos_real 约定：
 //   MULTI_RAFT_REAL=1 cargo test -p coord --test multi_raft_process_test \
@@ -78,6 +80,8 @@ impl RealNode {
              [[multi_raft.initial_regions]]\nid = 1\nstart_key = \"\"\nend_key = \"b\"\n\
              [[multi_raft.initial_regions]]\nid = 2\nstart_key = \"b\"\nend_key = \"n\"\n\
              [[multi_raft.initial_regions]]\nid = 3\nstart_key = \"n\"\nend_key = \"\"\n\
+             [multi_raft.pd]\nenabled = true\nheartbeat_interval_ms = 500\n\
+             balance_interval = 5\nnode_heartbeat_timeout = 15\n\
              [security]\nauth_enabled = false\n\
              auth_root_key = \"{}\"\n",
             "ab".repeat(32) // R-SEC-06：多节点集群需共享根密钥（测试用固定值）
@@ -290,6 +294,19 @@ async fn multi_raft_real_three_nodes_three_regions() {
         let value = format!("v{region_id}-1");
         read_until(&all, key, value.as_bytes(), Duration::from_secs(30)).await;
     }
+
+    // ── Phase A.5（T3.4）：内嵌 PD 随真实进程启动——每节点 pd-meta.db 落盘
+    //    （配置 Region 表已播种）。──
+    for n in &nodes {
+        let pd_db = n.data_dir.join("pd").join("pd-meta.db");
+        assert!(
+            pd_db.exists(),
+            "node {}: embedded PD must persist pd-meta.db at {}",
+            n.id,
+            pd_db.display()
+        );
+    }
+    eprintln!("embedded PD: pd-meta.db present on all 3 nodes (regions seeded)");
 
     // ── Phase B：依次 kill 每个节点。被 kill 节点承载的 Region 副本在其余
     //    2 节点独立重新选举（若其为 leader）或直接续写（quorum 保持）——

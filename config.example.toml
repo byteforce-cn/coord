@@ -52,6 +52,25 @@ enabled = false
 # start_key = "m"
 # end_key = ""        # 末 Region 终点（空 = 无上界）
 
+# Multi-Raft PD（T3.4；[multi_raft.pd] 段；默认关闭 = 多 Region 装配但不调度）
+#
+# enabled = true（要求上方 multi_raft.enabled = true）时，每个节点内嵌运行
+# PlacementDriver：Region/节点心跳上报 + 成员对账（PD 元数据随 raft 已提交
+# 成员收敛，落盘 <data_dir>/pd/pd-meta.db）+ 调度/operator 执行循环。
+# v1 仅支持内嵌模式（独立 PD 进程为 Phase 3+）；全部字段可选，缺省见下方。
+[multi_raft.pd]
+enabled = false
+# heartbeat_interval_ms = 5000     # Region/节点心跳与成员对账节拍
+# balance_interval = 120           # Leader/副本均衡调度间隔（秒）
+# split_check_interval = 30        # Region 分裂检查间隔（秒）
+# merge_check_interval = 60        # Region 合并检查间隔（秒）
+# node_heartbeat_timeout = 30      # 节点心跳超时（秒；超时标记离线）
+# target_replicas = 3              # 目标副本数（≤ cluster.initial_nodes 成员数）
+# max_concurrent_operators = 10    # 最大并发调度 operator 数
+# region_split_size_mb = 256       # 分裂大小阈值
+# region_split_keys = 1000000      # 分裂 key 数阈值
+# region_merge_size_mb = 16        # 合并大小阈值
+
 # R-RFT-19：Raft 运行时调优（全部可选，缺省 = openraft 默认：心跳 50ms、
 # 选举 150–300ms、快照策略 since_last:5000）
 [raft]
