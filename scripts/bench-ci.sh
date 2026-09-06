@@ -17,7 +17,9 @@ TS=$(date -u +%Y-%m-%d)
 REPORT="$OUT_DIR/report-$TS.md"
 
 echo "==> running perf_bench (release) ..."
-cargo test --release -p coord --test perf_bench -- --ignored --nocapture >"$REPORT" 2>&1
+# T5.21：多 Region 吞吐 80% 阈值硬闸（PERF_GATE=1 → Benchmark 6 断言
+# 「5/10/25 Region 均 ≥ 单 Region 基线 80%」，见 coord/tests/perf_bench.rs）
+PERF_GATE=1 cargo test --release -p coord --test perf_bench -- --ignored --nocapture >"$REPORT" 2>&1
 echo "==> report written to $REPORT"
 
 python3 - "$REPORT" "$OUT_DIR/baseline.json" "${UPDATE_BASELINE:-0}" <<'PY'

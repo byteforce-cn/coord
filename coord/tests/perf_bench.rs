@@ -285,6 +285,10 @@ mod tests {
 
     // ═══════════════════════════════════════════════════════════════
     // Benchmark 6: 多 Region 写入吞吐量（Multi-Raft 场景模拟）
+    //   - Region 数 = 1 行即**单 Region 基线**；
+    //   - 末段打印多 Region/单 Region 比值汇总（T5.21 口径：
+    //     「多 Region 不低于单 Region 基线 80%」）。硬闸由
+    //     scripts/bench-ci.sh（PERF_GATE=1，解析本表行）执行。
     // ═══════════════════════════════════════════════════════════════
 
     #[test]
@@ -296,6 +300,8 @@ mod tests {
 
         let region_counts = [1u64, 5, 10, 25];
         let value = make_value(256);
+        // 吞吐量：region 数 → ops/s（region=1 行为单 Region 基线）
+        let mut ops: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
 
         for &num_regions in &region_counts {
             let tmpdir = tempfile::tempdir().unwrap();
@@ -305,7 +311,7 @@ mod tests {
             let iterations: u64 = num_regions * 200;
             let mut counter: u64 = 0;
 
-            run_bench(
+            let (_, _, rate) = run_bench(
                 &format!("{} Region(s) write 256B", num_regions),
                 iterations,
                 || {
@@ -315,6 +321,32 @@ mod tests {
                     mvcc.put(key.as_bytes(), &value, None).unwrap();
                 },
             );
+            ops.insert(num_regions, rate);
+        }
+
+        // T5.21：多 Region 与单 Region 基线比值汇总（80% 阈值口径）。
+        println!("\n**Multi/Single Region 比值（T5.21 基线口径，≥0.80 达标）**\n");
+        println!("| Region 数 | ops/s | ratio vs 单 Region(1) |");
+        println!("|:---|:---|:---|");
+        let single = ops.get(&1).copied().unwrap_or(0.0);
+        for &n in &region_counts {
+            let r = ops.get(&n).copied().unwrap_or(0.0);
+            let ratio = if single > 0.0 { r / single } else { 0.0 };
+            println!("| {} | {:.0} | {:.3} |", n, r, ratio);
+        }
+        // PERF_GATE=1 时硬断言（scripts/bench-ci.sh 每周门禁使用）：
+        // 5/10/25 Region 吞吐均不低于单 Region 基线的 80%。
+        if std::env::var("PERF_GATE").map(|v| v == "1").unwrap_or(false) && single > 0.0 {
+            for &n in &[5u64, 10, 25] {
+                let r = ops.get(&n).copied().unwrap_or(0.0);
+                let ratio = r / single;
+                assert!(
+                    ratio >= 0.80,
+                    "PERF GATE (T5.21): {n} Region throughput {r:.0} ops/s < 80% of single \
+                     Region baseline {single:.0} ops/s (ratio {ratio:.3})"
+                );
+            }
+            println!("PERF GATE (T5.21): multi-region >= 80% of single-region baseline PASSED");
         }
     }
 
