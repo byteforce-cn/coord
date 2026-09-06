@@ -18,6 +18,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use coord_proto::kv::kv_client::KvClient;
@@ -108,10 +110,21 @@ impl RealNode {
             .arg("--raft-addr")
             .arg(format!("127.0.0.1:{raft_port}"))
             .arg("--data-dir")
-            .arg(data_dir)
-            .env("RUST_LOG", "coord=warn")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .arg(data_dir);
+        // 诊断支持：设 MR_RUST_LOG / MR_DEBUG_LOG=1 时把子进程 stdout/stderr 落盘
+        // `<data_dir>/coord.log`（默认与历史行为一致：coord=warn + 丢弃）。
+        let mr_log = std::env::var("MR_DEBUG_LOG").is_ok();
+        let mr_rust_log = std::env::var("MR_RUST_LOG")
+            .unwrap_or_else(|_| "coord=warn".to_string());
+        cmd.env("RUST_LOG", &mr_rust_log);
+        if mr_log {
+            std::fs::create_dir_all(data_dir).unwrap();
+            let log_file = std::fs::File::create(data_dir.join("coord.log")).unwrap();
+            cmd.stdout(Stdio::from(log_file.try_clone().unwrap()))
+                .stderr(Stdio::from(log_file));
+        } else {
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
 
         let cfg_dir = data_dir.join("conf");
         std::fs::create_dir_all(&cfg_dir).unwrap();
@@ -701,6 +714,8 @@ async fn pd_global_queue_failover_three_nodes() {
 struct PdAuditEvent {
     action: String,
     result: String,
+    /// operator 摘要（`op_summary`，如 `transfer-leader region=1 to=2`）。
+    detail: String,
 }
 
 /// 读取节点数据目录中全部 audit 文件里 actor=pd 的事件（append-only，含当日
@@ -734,10 +749,36 @@ fn read_pd_audit(node_dir: &Path) -> Vec<PdAuditEvent> {
                     .and_then(|r| r.as_str())
                     .unwrap_or("")
                     .to_string(),
+                detail: v
+                    .get("detail")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             });
         }
     }
     out
+}
+
+/// 节点集聚合的全部 PD audit 事件。
+fn cluster_audit_events(nodes: &[&RealNode]) -> Vec<PdAuditEvent> {
+    let mut out = Vec::new();
+    for n in nodes {
+        out.extend(read_pd_audit(&n.data_dir));
+    }
+    out
+}
+
+/// 从 audit detail（`op_summary` 格式，如 `transfer-leader region=1 to=2` /
+/// `add-peer region=1 node=3 raft_addr=...`）解析 `key`（如 `"to="`、`"node="`）
+/// 后的 u64 值。
+fn detail_u64(e: &PdAuditEvent, key: &str) -> Option<u64> {
+    for part in e.detail.split_whitespace() {
+        if let Some(v) = part.strip_prefix(key) {
+            return v.parse().ok();
+        }
+    }
+    None
 }
 
 /// 某节点 operator 事件中指定 result（success/pending/claimed/failed/requeued）
@@ -822,4 +863,994 @@ async fn region0_leader_metrics(nodes: &[&RealNode]) -> Option<u64> {
         }
     }
     reported.first().map(|(_, l)| *l)
+}
+
+// ============================================================================
+// T5.14 / T5.17 / T5.22：真实进程 drill 追加（M8 前置开放项收口）
+//
+// 本段三个 drill 与上述 P4a 用例共用同一真实进程 harness（RealNode +
+// PROCESS_SUITE_LOCK 串行），覆盖剩余开放项：
+//   - T5.14（部分）：add-peer / transfer-leader 成员变更 × PD 真实进程演练
+//     （RemovePeer×PD 已由 P4a `22b78b6` 覆盖）；
+//   - T5.17：关→开→关 升级/回滚真实进程演练 + fail-closed 启动闸真实进程验证；
+//   - T5.22：chaos_real region 模式用例（kill/partition × PD）。
+// ============================================================================
+
+impl RealNode {
+    /// 完全由调用方提供 node.toml 的 spawn（T5.17/T5.22 用）：cluster /
+    /// multi_raft / network / security 全部由 `toml` 承载（bootstrap 经
+    /// `[cluster].bootstrap` 配置，对齐 spawn_full）。`raft_advertise` 传给
+    /// `--raft-addr`（集群通告地址）；R-TST-16 分区代理场景在 toml 里给
+    /// `[network].raft_bind_addr = 真实监听端口`（与通告地址分离）。
+    /// stdout/stderr 落盘 `<data_dir>/coord.log`（真实进程诊断）。
+    fn spawn_custom(
+        id: u64,
+        grpc_port: u16,
+        raft_advertise: u16,
+        data_dir: &std::path::Path,
+        toml: &str,
+    ) -> Self {
+        let bin = env!("CARGO_BIN_EXE_coord");
+        let cfg_dir = data_dir.join("conf");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let cfg_path = cfg_dir.join("node.toml");
+        std::fs::write(&cfg_path, toml).unwrap();
+        let log_file = std::fs::File::create(data_dir.join("coord.log")).unwrap();
+        let child = Command::new(bin)
+            .arg("server")
+            .arg("--id")
+            .arg(id.to_string())
+            .arg("--addr")
+            .arg(format!("127.0.0.1:{grpc_port}"))
+            .arg("--raft-addr")
+            .arg(format!("127.0.0.1:{raft_advertise}"))
+            .arg("--data-dir")
+            .arg(data_dir)
+            .arg("--config")
+            .arg(&cfg_path)
+            .env("RUST_LOG", "coord=warn")
+            .stdout(Stdio::from(log_file.try_clone().unwrap()))
+            .stderr(Stdio::from(log_file))
+            .spawn()
+            .expect("spawn coord server");
+        Self {
+            id,
+            grpc_port,
+            raft_port: raft_advertise,
+            data_dir: data_dir.to_path_buf(),
+            child,
+        }
+    }
+}
+
+/// 就地改写 `<data_dir>/conf/node.toml` 的 `[multi_raft.pd] target_replicas`
+/// （add-peer drill 滚动重启前刷新 PD 配置）。
+fn rewrite_pd_target_replicas(data_dir: &Path, target: u32) {
+    let cfg_path = data_dir.join("conf").join("node.toml");
+    let text = std::fs::read_to_string(&cfg_path).unwrap();
+    let out = text
+        .lines()
+        .map(|l| {
+            if l.trim_start().starts_with("target_replicas") {
+                format!("target_replicas = {target}")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&cfg_path, out).unwrap();
+}
+
+/// 读 key：任一节点返回 `Some(value)`（存在）或 `Some(None)`（**成功空读** =
+/// key 权威缺失，用于验证回滚边界）；timeout 内无成功读 = `None`。
+async fn read_key_maybe(
+    nodes: &[&RealNode],
+    key: &[u8],
+    timeout: Duration,
+) -> Option<Option<Vec<u8>>> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        for node in nodes {
+            let mut kv = KvClient::new(node.channel().await);
+            if let Ok(resp) = kv
+                .range(RangeRequest {
+                    key: key.to_vec(),
+                    range_end: vec![],
+                    limit: 1,
+                    revision: 0,
+                    keys_only: false,
+                    count_only: false,
+                })
+                .await
+            {
+                let inner = resp.into_inner();
+                return Some(inner.kvs.first().map(|kv| kv.value.clone()));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// T5.14：transfer-leader × PD 真实进程演练
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "real-process multi-raft suite; run explicitly: MULTI_RAFT_REAL=1"]
+async fn pd_transfer_leader_balance_real_drill() {
+    if std::env::var("MULTI_RAFT_REAL").is_err() {
+        eprintln!("skipping transfer-leader drill (set MULTI_RAFT_REAL=1 to run)");
+        return;
+    }
+    // 与同文件其余真实进程用例串行
+    let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
+
+    // 3 节点 × 3 Region，target_replicas=3（无 RemovePeer churn）、
+    // bootstrap=node 1 → 启动偏置让 node 1 最初领导全部 3 个数据 Region
+    // （P4a 实测 bootstrap 节点全 leader）。LeaderScheduler 每 balance_interval
+    // （2s）看到 3/0/0 失衡 → 生成 TransferLeader → 目标 Region 当前 leader
+    // （node 1）所在节点的执行器认领执行（exec_transfer_leader 轮询确认目标
+    // 真正当选）→ 收敛到 ~1/1/1。
+    //
+    // 硬断言 = 全局 audit 出现 >=2 条 transfer-leader success 且成功目标 >=2 个
+    // 不同节点——executor 成功 = 目标已真当选（执行器轮询确认），故证明 leader
+    // 已从 bootstrap 偏置真实摊开。KV 终态可写可读（转移不中断数据面）。
+    const PD_TOML: &str = "[multi_raft.pd]\nenabled = true\nheartbeat_interval_ms = 300\n\
+        balance_interval = 2\nnode_heartbeat_timeout = 10\nmax_concurrent_operators = 10\n\
+        target_replicas = 3\noperator_running_timeout = 5\n";
+
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let grpc_ports: Vec<u16> = (0..3).map(|_| find_port()).collect();
+    let raft_ports: Vec<u16> = (0..3).map(|_| find_port()).collect();
+    let initial_nodes: Vec<(u64, String, String)> = (0..3)
+        .map(|i| {
+            (
+                (i + 1) as u64,
+                format!("127.0.0.1:{}", grpc_ports[i]),
+                format!("127.0.0.1:{}", raft_ports[i]),
+            )
+        })
+        .collect();
+
+    let nodes: Vec<RealNode> = (0..3)
+        .map(|i| {
+            RealNode::spawn_full(
+                (i + 1) as u64,
+                grpc_ports[i],
+                raft_ports[i],
+                &base.join(format!("node{}", i + 1)),
+                &initial_nodes,
+                PD_TOML,
+                (i + 1) == 1, // bootstrap = node 1（启动偏置：全部 Region 初始 leader）
+            )
+        })
+        .collect();
+
+    for n in &nodes {
+        n.wait_ready(Duration::from_secs(90)).await;
+    }
+
+    let all: Vec<&RealNode> = nodes.iter().collect();
+    for (region_id, key) in REGION_KEYS {
+        let value = format!("v{region_id}-tl0");
+        write_until(&all, key, value.as_bytes(), Duration::from_secs(60)).await;
+    }
+    eprintln!("transfer-drill: all 3 regions writable at boot");
+
+    // 等待 leader 均衡收敛
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut last_diag = Instant::now();
+    let (successes, targets) = loop {
+        let evs = cluster_audit_events(&all);
+        let succ: Vec<&PdAuditEvent> = evs
+            .iter()
+            .filter(|e| e.action == "operator.transfer-leader" && e.result == "success")
+            .collect();
+        let successes = succ.len();
+        let mut targets: Vec<u64> = succ.iter().filter_map(|e| detail_u64(e, "to=")).collect();
+        targets.sort_unstable();
+        targets.dedup();
+        if successes >= 2 && targets.len() >= 2 {
+            break (successes, targets);
+        }
+        if last_diag.elapsed() >= Duration::from_secs(20) {
+            last_diag = Instant::now();
+            let tl: Vec<&PdAuditEvent> = evs
+                .iter()
+                .filter(|e| e.action == "operator.transfer-leader")
+                .collect();
+            eprintln!(
+                "transfer-drill [diag] transfer-leader: pending={} claimed={} success={} \
+                 failed={} requeued={}; successes detail: {:?}",
+                tl.iter().filter(|e| e.result == "pending").count(),
+                tl.iter().filter(|e| e.result == "claimed").count(),
+                tl.iter().filter(|e| e.result == "success").count(),
+                tl.iter().filter(|e| e.result == "failed").count(),
+                tl.iter().filter(|e| e.result == "requeued").count(),
+                tl.iter()
+                    .filter(|e| e.result == "success")
+                    .map(|e| e.detail.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "transfer-leader did not balance within 240s \
+             (successes={successes}, target_nodes={targets:?})"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!(
+        "transfer-drill: {successes} transfer-leader successes to nodes {targets:?}"
+    );
+
+    let all2: Vec<&RealNode> = nodes.iter().collect();
+    for (region_id, key) in REGION_KEYS {
+        let value = format!("v{region_id}-tl-final");
+        write_until(&all2, key, value.as_bytes(), Duration::from_secs(30)).await;
+        read_until(&all2, key, value.as_bytes(), Duration::from_secs(30)).await;
+    }
+    eprintln!("pd transfer-leader real drill PASSED (3 nodes)");
+}
+
+// ---------------------------------------------------------------------------
+// T5.14：add-peer × PD 真实进程演练
+//
+// 可达性说明（v1 静态配置）：region voter 集 ≡ cluster 成员（main.rs region
+// peers = cluster.initial_nodes 全量），稳定态 voter==target → ReplicaChecker
+// 的 AddPeer 在纯静态运行中不可达。本用例经**真实配置变更（target_replicas
+// 2→3）+ 滚动重启**制造 2<3 欠副本态，驱动 PD 生成并执行真实 AddPeer：
+//   1. target_replicas=2 起步 → ReplicaChecker 对每个 Region 执行 RemovePeer
+//      （peers 序末 node 3 出局，voter → {1,2}；真实 remove-peer operator）；
+//   2. 滚动重启全部节点并把 target_replicas 改成 3（PD 配置刷新）——无论
+//      region 0 leader 落在哪台都以 target=3 调度 → ReplicaChecker 看到 2<3 →
+//      AddPeer（占位 node_id=0 → resolver 选在线非 voter = node 3）→
+//      add_learner + promote → 真实 add-peer operator（执行完成 = audit success
+//      detail node=3）。
+// 硬断言 = >=1 条 add-peer success（node=3）+ 终态 KV 可写可读。
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "real-process multi-raft suite; run explicitly: MULTI_RAFT_REAL=1"]
+async fn pd_add_peer_target_increase_real_drill() {
+    if std::env::var("MULTI_RAFT_REAL").is_err() {
+        eprintln!("skipping add-peer drill (set MULTI_RAFT_REAL=1 to run)");
+        return;
+    }
+    let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
+
+    const PD_TOML_T2: &str = "[multi_raft.pd]\nenabled = true\nheartbeat_interval_ms = 300\n\
+        balance_interval = 2\nnode_heartbeat_timeout = 10\nmax_concurrent_operators = 10\n\
+        target_replicas = 2\noperator_running_timeout = 5\n";
+
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let grpc_ports: Vec<u16> = (0..3).map(|_| find_port()).collect();
+    let raft_ports: Vec<u16> = (0..3).map(|_| find_port()).collect();
+    let initial_nodes: Vec<(u64, String, String)> = (0..3)
+        .map(|i| {
+            (
+                (i + 1) as u64,
+                format!("127.0.0.1:{}", grpc_ports[i]),
+                format!("127.0.0.1:{}", raft_ports[i]),
+            )
+        })
+        .collect();
+
+    let mut nodes: Vec<RealNode> = (0..3)
+        .map(|i| {
+            RealNode::spawn_full(
+                (i + 1) as u64,
+                grpc_ports[i],
+                raft_ports[i],
+                &base.join(format!("node{}", i + 1)),
+                &initial_nodes,
+                PD_TOML_T2,
+                (i + 1) == 1,
+            )
+        })
+        .collect();
+
+    for n in &nodes {
+        n.wait_ready(Duration::from_secs(90)).await;
+    }
+
+    let all: Vec<&RealNode> = nodes.iter().collect();
+    for (region_id, key) in REGION_KEYS {
+        let value = format!("v{region_id}-ap0");
+        write_until(&all, key, value.as_bytes(), Duration::from_secs(60)).await;
+    }
+    eprintln!("add-peer drill: all 3 regions writable at boot (target_replicas=2)");
+
+    // Phase 1：ReplicaChecker 收缩副本 —— 每个 Region 真实 RemovePeer（node 3 出局）
+    let deadline = Instant::now() + Duration::from_secs(150);
+    let removed = loop {
+        let evs = cluster_audit_events(&all);
+        let removed = evs
+            .iter()
+            .filter(|e| e.action == "operator.remove-peer" && e.result == "success")
+            .count();
+        if removed >= 1 {
+            break removed;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ReplicaChecker did not shrink any region to target 2 within 150s \
+             (remove-peer success={removed})"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!("add-peer drill: {removed} remove-peer success(es) (node 3 out of voter set)");
+
+    // Phase 2：滚动重启 + target_replicas 2→3（PD 配置刷新）
+    for idx in 0..3usize {
+        let nid = (idx + 1) as u64;
+        rewrite_pd_target_replicas(&nodes[idx].data_dir, 3);
+        nodes[idx].restart();
+        nodes[idx].wait_ready(Duration::from_secs(90)).await;
+        eprintln!("add-peer drill: node {nid} restarted with target_replicas=3");
+    }
+    // 等待 region 0 重新收敛
+    let all2: Vec<&RealNode> = nodes.iter().collect();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        if region0_leader_metrics(&all2).await.map(|l| l > 0) == Some(true) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "region 0 did not reconverge after rolling restart"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    // Phase 3：欠副本（2<3）→ ReplicaChecker 生成 AddPeer → resolver 选 node 3 →
+    // add_learner + promote → 执行完成（audit success detail node=3）
+    let deadline = Instant::now() + Duration::from_secs(240);
+    let re_added = loop {
+        let evs = cluster_audit_events(&all2);
+        let re_added = evs
+            .iter()
+            .filter(|e| {
+                e.action == "operator.add-peer"
+                    && e.result == "success"
+                    && detail_u64(e, "node=") == Some(3)
+            })
+            .count();
+        if re_added >= 1 {
+            break re_added;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ReplicaChecker did not re-add node 3 after target bump (add-peer success={re_added})"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!("add-peer drill: {re_added} add-peer success(es) re-adding node 3");
+
+    // 终态：3-voter 健康下全 Region 可写可读
+    for (region_id, key) in REGION_KEYS {
+        let value = format!("v{region_id}-ap-final");
+        write_until(&all2, key, value.as_bytes(), Duration::from_secs(30)).await;
+        read_until(&all2, key, value.as_bytes(), Duration::from_secs(30)).await;
+    }
+    eprintln!("pd add-peer (target bump) real drill PASSED (3 nodes)");
+}
+
+// ---------------------------------------------------------------------------
+// T5.17：关→开→关 升级/回滚真实进程演练（单节点）
+//
+// 单个真实 `coord server` 进程 + 同一数据目录，三阶段：
+//   OFF（legacy 单 Raft）→ 写 `/legacy/*`；
+//   [fail-closed 子用例] ON（multi_raft.enabled + legacy_migration=false）→
+//     启动被启动闸拒绝（进程退出）；
+//   ON（multi_raft.enabled + legacy_migration=true）→ boot 期 raft 中介迁移
+//     → region store 出现、legacy key 经所属 Region 可读、region 模式新写可读写；
+//   OFF（回滚 = T2.6 字节级退化）→ legacy key 原值可读（迁移只读源）、
+//     region 模式新写缺失（文档化边界）、legacy 可继续写。
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "real-process multi-raft suite; run explicitly: MULTI_RAFT_REAL=1"]
+async fn mr_off_on_off_upgrade_rollback_real_drill() {
+    if std::env::var("MULTI_RAFT_REAL").is_err() {
+        eprintln!("skipping off/on/off drill (set MULTI_RAFT_REAL=1 to run)");
+        return;
+    }
+    let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let grpc = find_port();
+    let raft = find_port();
+    let data_dir = base.join("node1");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let root_key = "ab".repeat(32);
+
+    let legacy_toml = || {
+        format!(
+            "[cluster]\ncluster_name = \"mr-mig-test\"\nbootstrap = true\n\
+             [[cluster.initial_nodes]]\nid = 1\ngrpc = \"127.0.0.1:{grpc}\"\n\
+             raft = \"127.0.0.1:{raft}\"\n\
+             [security]\nauth_enabled = false\nauth_root_key = \"{root_key}\"\n"
+        )
+    };
+    // migrate = Some(true/false)：None = 连 multi_raft 都不启用。
+    let multi_toml = |migrate: bool| {
+        format!(
+            "[cluster]\ncluster_name = \"mr-mig-test\"\nbootstrap = true\n\
+             [[cluster.initial_nodes]]\nid = 1\ngrpc = \"127.0.0.1:{grpc}\"\n\
+             raft = \"127.0.0.1:{raft}\"\n\
+             [multi_raft]\nenabled = true\nlegacy_migration = {migrate}\n\
+             [[multi_raft.initial_regions]]\nid = 1\nstart_key = \"\"\nend_key = \"m\"\n\
+             [[multi_raft.initial_regions]]\nid = 2\nstart_key = \"m\"\nend_key = \"\"\n\
+             [security]\nauth_enabled = false\nauth_root_key = \"{root_key}\"\n"
+        )
+    };
+
+    // ── Phase OFF（legacy 单 Raft）：写用户 KV ──
+    {
+        let node = RealNode::spawn_custom(1, grpc, raft, &data_dir, &legacy_toml());
+        node.wait_ready(Duration::from_secs(60)).await;
+        let nr = &node;
+        assert!(put_on(&[nr], b"/legacy/app", b"legacy-v1").await.is_some());
+        assert!(put_on(&[nr], b"/legacy/keep", b"keep-v1").await.is_some());
+        read_until(&[nr], b"/legacy/app", b"legacy-v1", Duration::from_secs(20)).await;
+        read_until(&[nr], b"/legacy/keep", b"keep-v1", Duration::from_secs(20)).await;
+        eprintln!("off/on/off: legacy data written (OFF phase)");
+    } // drop → kill
+
+    // ── Phase ON（fail-closed 子用例）：multi_raft 开、无迁移授权 → 拒绝启动 ──
+    {
+        let mut node = RealNode::spawn_custom(1, grpc, raft, &data_dir, &multi_toml(false));
+        let deadline = Instant::now() + Duration::from_secs(25);
+        loop {
+            match node.child.try_wait() {
+                Ok(Some(st)) => {
+                    assert!(
+                        !st.success(),
+                        "fail-closed gate: server must refuse to start (legacy user data + \
+                         multi_raft on + no migration), but exited successfully"
+                    );
+                    break;
+                }
+                _ => {}
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fail-closed gate: server did not exit within 25s (gate not enforced?)"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        eprintln!("off/on/off: fail-closed gate refused unmigrated start (exit non-zero)");
+    }
+
+    // ── Phase ON（migrate）：raft 中介 boot 迁移 → serving ──
+    {
+        let node = RealNode::spawn_custom(1, grpc, raft, &data_dir, &multi_toml(true));
+        node.wait_ready(Duration::from_secs(120)).await;
+        // region store 已建（迁移把数据灌入所属 Region raft）；region 数据目录 =
+        // `<data_dir>/regions/region-{region_id:016x}/`（目录级前缀隔离，十六进制零填充）
+        for rid in [1u64, 2] {
+            let store = data_dir
+                .join("regions")
+                .join(format!("region-{rid:016x}"))
+                .join("store.db");
+            assert!(
+                store.exists(),
+                "region {rid} store.db must exist after migration at {}",
+                store.display()
+            );
+        }
+        let nr = &node;
+        // legacy key 经所属 Region 路由可读（迁移一致性 + serving）
+        read_until(&[nr], b"/legacy/app", b"legacy-v1", Duration::from_secs(30)).await;
+        read_until(&[nr], b"/legacy/keep", b"keep-v1", Duration::from_secs(30)).await;
+        // region 模式新写（region1 /a/*、region2 /z/*）可写可读
+        assert!(put_on(&[nr], b"/a/new1", b"region1-new").await.is_some());
+        assert!(put_on(&[nr], b"/z/new2", b"region2-new").await.is_some());
+        read_until(&[nr], b"/a/new1", b"region1-new", Duration::from_secs(20)).await;
+        read_until(&[nr], b"/z/new2", b"region2-new", Duration::from_secs(20)).await;
+        eprintln!("off/on/off: migration completed; region writes OK (ON phase)");
+    }
+
+    // ── Phase OFF（回滚 = T2.6 字节级退化）：legacy 数据原样可服务 ──
+    {
+        let node = RealNode::spawn_custom(1, grpc, raft, &data_dir, &legacy_toml());
+        node.wait_ready(Duration::from_secs(60)).await;
+        let nr = &node;
+        // legacy 原值可读（迁移只读源、不删源数据）
+        read_until(&[nr], b"/legacy/app", b"legacy-v1", Duration::from_secs(20)).await;
+        read_until(&[nr], b"/legacy/keep", b"keep-v1", Duration::from_secs(20)).await;
+        // region 模式新写不在 legacy 数据面（文档化边界：回滚丢迁移后增量）
+        let absent = read_key_maybe(&[nr], b"/a/new1", Duration::from_secs(20)).await;
+        assert_eq!(
+            absent,
+            Some(None),
+            "rollback: /a/new1 (multi_raft 期间写入) must be absent from legacy data plane"
+        );
+        // legacy 可继续写（回滚后原数据面健康）
+        assert!(put_on(&[nr], b"/legacy/rollback-new", b"rb1").await.is_some());
+        read_until(&[nr], b"/legacy/rollback-new", b"rb1", Duration::from_secs(20)).await;
+        eprintln!("off/on/off: rollback verified (legacy data intact, legacy writable)");
+    }
+    eprintln!("mr off/on/off upgrade/rollback real drill PASSED");
+}
+
+// ---------------------------------------------------------------------------
+// T5.21：真实进程 多 Region vs 单 Region（单 Raft）顺序写吞吐基线探针
+//
+// 单节点真实 `coord server`：legacy（单 Raft，region 0 根目录）对比 multi_raft
+// 3 Region（每 Region 独立 raft + fsync）。顺序 gRPC Put（每 key 一次 raft
+// commit + fsync），打印 ops/s 与比值——「多 Region 不低于单 Region 基线 80%」
+// （T5.21 口径）的真实 raft 路径证据。PERF_GATE=1 时硬断言（周报门禁用）；
+// 存储引擎级 Benchmark 6（perf_bench）另设 80% 阈值（scripts/bench-ci.sh）。
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "real-process perf probe; MULTI_RAFT_REAL=1 (run explicitly)"]
+async fn perf_multi_region_vs_single_raft_probe() {
+    if std::env::var("MULTI_RAFT_REAL").is_err() {
+        eprintln!("skipping perf probe (set MULTI_RAFT_REAL=1 to run)");
+        return;
+    }
+    let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
+
+    const N_PUTS: u32 = 200;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let root_key = "ab".repeat(32);
+
+    // 顺序写 N 个 key，返回 ops/s（单节点：每次 put = 一次 raft commit + fsync）
+    async fn bench_puts(grpc_port: u16, keys: &[(Vec<u8>, u32)]) -> f64 {
+        let ch = Channel::from_shared(format!("http://127.0.0.1:{grpc_port}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut kv = KvClient::new(ch);
+        let start = Instant::now();
+        for (key, val) in keys {
+            kv.put(PutRequest {
+                key: key.clone(),
+                value: val.to_be_bytes().to_vec(),
+                lease_id: 0,
+                prev_kv: false,
+                request_id: vec![],
+            })
+            .await
+            .unwrap();
+        }
+        let elapsed = start.elapsed();
+        keys.len() as f64 / elapsed.as_secs_f64()
+    }
+
+    // ── 单 Region 基线：legacy 单 Raft ──
+    let grpc_s = find_port();
+    let raft_s = find_port();
+    let dir_s = base.join("node-single");
+    let toml_s = format!(
+        "[cluster]\ncluster_name = \"perf-s\"\nbootstrap = true\n\
+         [[cluster.initial_nodes]]\nid = 1\ngrpc = \"127.0.0.1:{grpc_s}\"\nraft = \"127.0.0.1:{raft_s}\"\n\
+         [security]\nauth_enabled = false\nauth_root_key = \"{root_key}\"\n"
+    );
+    let single_keys: Vec<(Vec<u8>, u32)> = (0..N_PUTS)
+        .map(|i| (format!("perf/legacy/k{:05}", i).into_bytes(), i))
+        .collect();
+    let single_rate = {
+        let node = RealNode::spawn_custom(1, grpc_s, raft_s, &dir_s, &toml_s);
+        node.wait_ready(Duration::from_secs(60)).await;
+        bench_puts(grpc_s, &single_keys).await
+    }; // drop → kill
+
+    // ── 多 Region：multi_raft 3 Region（key 分布到 3 个 Region raft）──
+    let grpc_m = find_port();
+    let raft_m = find_port();
+    let dir_m = base.join("node-multi");
+    let toml_m = format!(
+        "[cluster]\ncluster_name = \"perf-m\"\nbootstrap = true\n\
+         [[cluster.initial_nodes]]\nid = 1\ngrpc = \"127.0.0.1:{grpc_m}\"\nraft = \"127.0.0.1:{raft_m}\"\n\
+         [multi_raft]\nenabled = true\n\
+         [[multi_raft.initial_regions]]\nid = 1\nstart_key = \"\"\nend_key = \"b\"\n\
+         [[multi_raft.initial_regions]]\nid = 2\nstart_key = \"b\"\nend_key = \"n\"\n\
+         [[multi_raft.initial_regions]]\nid = 3\nstart_key = \"n\"\nend_key = \"\"\n\
+         [security]\nauth_enabled = false\nauth_root_key = \"{root_key}\"\n"
+    );
+    // key 前缀分属三 Region：a*(<b) / m*(b..n) / z*(>n)
+    let prefixes = ["a", "m", "z"];
+    let multi_keys: Vec<(Vec<u8>, u32)> = (0..N_PUTS)
+        .map(|i| {
+            let p = prefixes[(i % 3) as usize];
+            (format!("{p}/perf/k{:05}", i).into_bytes(), i)
+        })
+        .collect();
+    let multi_rate = {
+        let node = RealNode::spawn_custom(1, grpc_m, raft_m, &dir_m, &toml_m);
+        node.wait_ready(Duration::from_secs(60)).await;
+        bench_puts(grpc_m, &multi_keys).await
+    }; // drop → kill
+
+    let ratio = if single_rate > 0.0 {
+        multi_rate / single_rate
+    } else {
+        0.0
+    };
+    eprintln!(
+        "perf probe: single-raft {single_rate:.0} ops/s vs multi-region(3) {multi_rate:.0} \
+         ops/s -> ratio {ratio:.3}"
+    );
+    if std::env::var("PERF_GATE").map(|v| v == "1").unwrap_or(false) {
+        assert!(
+            ratio >= 0.80,
+            "PERF GATE (T5.21 real raft): multi-region {multi_rate:.0} ops/s < 80% of \
+             single-raft {single_rate:.0} ops/s (ratio {ratio:.3})"
+        );
+        eprintln!("PERF GATE (T5.21 real raft): multi-region >= 80% of single-raft PASSED");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T5.22：chaos_real region 模式用例（kill / partition × PD，3 节点 × 3 Region）
+//
+// 复用 R-TST-16 真实进程 chaos 骨架（kill -9 + 重启循环、TCP 代理网络分区、
+// 单 register 线性一致 checker），但跑在 multi_raft region 模式 + 内嵌 PD 下：
+//   - region 0（system raft）与全部数据 Region 经每节点 raft 代理（单个代理
+//     覆盖该节点全部 raft 组：region raft 与 region 0 共享节点 raft 监听）；
+//   - target_replicas=3（无 RemovePeer churn——2-voter 用例 kill 会死锁数据面，
+//     见仓库记忆 P4a 教训）；
+//   - 注入 = kill+重启 / 分区交替；写入 = region 1 单 register key（线性一致
+//     检查），另定期校验 region 2/3 可写（跨 Region 数据面在 chaos 下健康）。
+// 硬断言 = 终态收敛 + 线性一致性 0 违规 + region 0 leader 恢复 + 全 Region 可写。
+// ---------------------------------------------------------------------------
+
+/// R-TST-16：TCP 代理分区注入器（与 chaos_real.rs 同构；每个节点一个代理，
+/// 节点全部 raft 流量经代理转发）。
+struct PartitionProxy {
+    partitioned: Arc<std::sync::atomic::AtomicBool>,
+    conns: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    _accept: tokio::task::JoinHandle<()>,
+}
+
+impl PartitionProxy {
+    fn start(public_port: u16, target_port: u16) -> Self {
+        let partitioned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let conns: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let partitioned_for_accept = Arc::clone(&partitioned);
+        let conns_for_accept = Arc::clone(&conns);
+        let accept = tokio::spawn(async move {
+            let listener = match tokio::net::TcpListener::bind(("127.0.0.1", public_port)).await {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("PartitionProxy: bind {public_port} failed: {e}");
+                    return;
+                }
+            };
+            loop {
+                let (socket, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                if partitioned_for_accept.load(Ordering::Relaxed) {
+                    drop(socket);
+                    continue;
+                }
+                let conns = Arc::clone(&conns_for_accept);
+                let handle = tokio::spawn(async move {
+                    let Ok(upstream) =
+                        tokio::net::TcpStream::connect(("127.0.0.1", target_port)).await
+                    else {
+                        return;
+                    };
+                    let (mut rs, mut ws) = socket.into_split();
+                    let (mut ut, mut uw) = upstream.into_split();
+                    let a = tokio::io::copy(&mut rs, &mut uw);
+                    let b = tokio::io::copy(&mut ut, &mut ws);
+                    tokio::select! {
+                        _ = a => {}
+                        _ = b => {}
+                    }
+                });
+                conns.lock().unwrap().push(handle);
+            }
+        });
+
+        Self {
+            partitioned,
+            conns,
+            _accept: accept,
+        }
+    }
+
+    fn partition(&self) {
+        self.partitioned.store(true, Ordering::Relaxed);
+        for handle in self.conns.lock().unwrap().drain(..) {
+            handle.abort();
+        }
+    }
+
+    fn heal(&self) {
+        self.partitioned.store(false, Ordering::Relaxed);
+    }
+}
+
+/// 简单线性一致性检查（单 register；与 chaos_real.rs 同构）。
+#[derive(Default)]
+struct RegionRegisterChecker {
+    history: Vec<(Instant, Instant, Option<String>)>,
+}
+
+impl RegionRegisterChecker {
+    fn record(&mut self, start: Instant, end: Instant, value: Option<String>) {
+        self.history.push((start, end, value));
+    }
+
+    fn numeric(v: &str) -> u64 {
+        v.strip_prefix("final-")
+            .and_then(|s| s.parse::<u64>().ok())
+            .or_else(|| v.strip_prefix('v').and_then(|s| s.parse::<u64>().ok()))
+            .unwrap_or(0)
+    }
+
+    fn verify(&self) {
+        for (i, (start_i, _end_i, val_i)) in self.history.iter().enumerate() {
+            let Some(v) = val_i else { continue };
+            let num_v = Self::numeric(v);
+            for (j, (_start_j, end_j, val_j)) in self.history.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                let Some(vj) = val_j else { continue };
+                if *end_j <= *start_i && num_v < Self::numeric(vj) {
+                    panic!(
+                        "linearizability violation (region mode): read saw '{v}' but write \
+                         '{vj}' completed earlier (entry {j})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "real-process chaos suite; MULTI_RAFT_REAL=1 (run explicitly)"]
+async fn chaos_real_region_mode_kill_partition() {
+    if std::env::var("MULTI_RAFT_REAL").is_err() {
+        eprintln!("skipping region-mode chaos (set MULTI_RAFT_REAL=1 to run)");
+        return;
+    }
+    let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
+
+    const PD_TOML: &str = "[multi_raft.pd]\nenabled = true\nheartbeat_interval_ms = 300\n\
+        balance_interval = 2\nnode_heartbeat_timeout = 10\nmax_concurrent_operators = 10\n\
+        target_replicas = 3\noperator_running_timeout = 5\n";
+    const MAX_RUNTIME: Duration = Duration::from_secs(100);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+
+    let grpc_ports: Vec<u16> = (0..3).map(|_| find_port()).collect();
+    let real_raft_ports: Vec<u16> = (0..3).map(|_| find_port()).collect();
+    let raft_ports: Vec<u16> = (0..3).map(|_| find_port()).collect();
+    let proxies: Vec<PartitionProxy> = (0..3)
+        .map(|i| PartitionProxy::start(raft_ports[i], real_raft_ports[i]))
+        .collect();
+
+    let root_key = "ab".repeat(32);
+    let mut nodes: Vec<RealNode> = Vec::new();
+    for i in 0..3usize {
+        let nid = (i + 1) as u64;
+        let mut nodes_toml = String::new();
+        for (j, (&g, &r)) in grpc_ports.iter().zip(raft_ports.iter()).enumerate() {
+            nodes_toml.push_str(&format!(
+                "[[cluster.initial_nodes]]\nid = {}\ngrpc = \"127.0.0.1:{}\"\nraft = \"127.0.0.1:{}\"\n",
+                j + 1,
+                g,
+                r
+            ));
+        }
+        let toml = format!(
+            "[cluster]\ncluster_name = \"mr-chaos\"\nbootstrap = {}\n{nodes_toml}\
+             [network]\nraft_addr = \"127.0.0.1:{}\"\nraft_bind_addr = \"127.0.0.1:{}\"\n\
+             [multi_raft]\nenabled = true\n\
+             [[multi_raft.initial_regions]]\nid = 1\nstart_key = \"\"\nend_key = \"b\"\n\
+             [[multi_raft.initial_regions]]\nid = 2\nstart_key = \"b\"\nend_key = \"n\"\n\
+             [[multi_raft.initial_regions]]\nid = 3\nstart_key = \"n\"\nend_key = \"\"\n\
+             {PD_TOML}\
+             [security]\nauth_enabled = false\nauth_root_key = \"{root_key}\"\n",
+            if nid == 1 { "true" } else { "false" },
+            raft_ports[i],
+            real_raft_ports[i]
+        );
+        let node = RealNode::spawn_custom(nid, grpc_ports[i], raft_ports[i], &base.join(format!("node{nid}")), &toml);
+        nodes.push(node);
+    }
+    for n in &nodes {
+        n.wait_ready(Duration::from_secs(90)).await;
+    }
+
+    // 基线：三 Region 可写（PD 装配 + 数据面健康）
+    let all: Vec<&RealNode> = nodes.iter().collect();
+    for (region_id, key) in REGION_KEYS {
+        let value = format!("v{region_id}-c0");
+        write_until(&all, key, value.as_bytes(), Duration::from_secs(60)).await;
+    }
+    eprintln!("region-chaos: all 3 regions writable at boot (PD on)");
+
+    let deadline = Instant::now() + MAX_RUNTIME;
+    let mut checker = RegionRegisterChecker::default();
+    let rkey = b"apple/chaos/register"; // region 1（["", "b")）
+    let mut counter: u64 = 0;
+    let mut iterations: u32 = 0;
+
+    while Instant::now() < deadline {
+        iterations += 1;
+        counter += 1;
+        let value = format!("v{counter}");
+        // 每轮现取引用集（循环内含对 nodes 的可变操作——kill/restart）
+        let all: Vec<&RealNode> = nodes.iter().collect();
+
+        // 写（任一存活节点）+ 读（leader 路径），record 进 checker
+        let start = Instant::now();
+        let mut written = false;
+        for _ in 0..5 {
+            if put_on(&all, rkey, value.as_bytes()).await.is_some() {
+                written = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        let end = Instant::now();
+        if written {
+            checker.record(start, end, Some(value.clone()));
+        }
+        let rstart = Instant::now();
+        let read = {
+            let deadline_r = Instant::now() + Duration::from_secs(5);
+            let mut got = None;
+            while Instant::now() < deadline_r {
+                for node in &all {
+                    let mut kv = KvClient::new(node.channel().await);
+                    if let Ok(resp) = kv
+                        .range(RangeRequest {
+                            key: rkey.to_vec(),
+                            range_end: vec![],
+                            limit: 1,
+                            revision: 0,
+                            keys_only: false,
+                            count_only: false,
+                        })
+                        .await
+                    {
+                        if let Some(kv) = resp.into_inner().kvs.first() {
+                            got = Some(String::from_utf8_lossy(&kv.value).to_string());
+                        }
+                    }
+                }
+                if got.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            got
+        };
+        checker.record(rstart, Instant::now(), read);
+
+        // 每 10 轮顺带确认 region 2/3 可写（跨 Region 数据面在 chaos 下健康）
+        if iterations % 10 == 0 {
+            for &(region_id, key) in &REGION_KEYS {
+                if key == b"apple" {
+                    continue; // region1 = register key 已在写
+                }
+                let value = format!("v{region_id}-c{iterations}");
+                write_until(&all, key, value.as_bytes(), Duration::from_secs(20)).await;
+            }
+        }
+        drop(all);
+
+        // 故障注入轮换：kill+重启 / 分区 4s（可变操作须在 all drop 之后）
+        let victim = (iterations as usize) % nodes.len();
+        if iterations % 2 == 1 {
+            tracing::info!("region-chaos: kill -9 node {} and restart", nodes[victim].id);
+            nodes[victim].kill9();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            nodes[victim].restart();
+            nodes[victim].wait_ready(Duration::from_secs(60)).await;
+        } else {
+            tracing::info!("region-chaos: partition node {} for 4s", victim + 1);
+            proxies[victim].partition();
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            proxies[victim].heal();
+        }
+    }
+
+    // 终态：解除全部分区 + 收敛 + 全节点一致
+    for p in &proxies {
+        p.heal();
+    }
+    let all: Vec<&RealNode> = nodes.iter().collect();
+    counter += 1;
+    let final_value = format!("final-{counter}");
+    let converge_deadline = Instant::now() + Duration::from_secs(60);
+    let mut final_ok = false;
+    while Instant::now() < converge_deadline {
+        if put_on(&all, rkey, final_value.as_bytes()).await.is_some() {
+            final_ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(final_ok, "final put after region chaos");
+    // 终态收敛：经任一存活节点（leader 自动路由）读到 final 值即视为集群收敛。
+    // 注意：range 是 leader-only——follower 节点返回 not-leader，不能逐节点直读
+    // （对齐 chaos_real 的 range_any 语义）。
+    let converge_read_deadline = Instant::now() + Duration::from_secs(60);
+    let mut converged = false;
+    while Instant::now() < converge_read_deadline {
+        for node in &all {
+            let mut kv = KvClient::new(node.channel().await);
+            if let Ok(resp) = kv
+                .range(RangeRequest {
+                    key: rkey.to_vec(),
+                    range_end: vec![],
+                    limit: 1,
+                    revision: 0,
+                    keys_only: false,
+                    count_only: false,
+                })
+                .await
+            {
+                if let Some(kv) = resp.into_inner().kvs.first() {
+                    if kv.value == final_value.as_bytes() {
+                        converged = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if converged {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        converged,
+        "cluster did not converge on final register value after region chaos \
+         (value={final_value})"
+    );
+    for n in &all {
+        eprintln!("region-chaos: node {} serving register key (post-chaos)", n.id);
+    }
+
+    // PD 健康：region 0 收敛出有效 leader
+    let deadline_r = Instant::now() + Duration::from_secs(90);
+    loop {
+        if region0_leader_metrics(&all).await.map(|l| l > 0) == Some(true) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline_r,
+            "region 0 (system raft) did not reconverge after region chaos"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    checker.verify();
+    drop(all);
+    for n in &mut nodes {
+        n.kill9();
+    }
+    for p in &proxies {
+        p._accept.abort();
+    }
+    eprintln!(
+        "chaos_real region-mode PASSED: {iterations} iterations over {:?}, \
+         linearizability verified, PD healthy",
+        MAX_RUNTIME
+    );
 }
