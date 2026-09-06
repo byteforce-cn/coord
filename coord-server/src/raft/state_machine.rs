@@ -30,6 +30,7 @@ use crate::storage::mvcc::{
     AppliedLogId, ChangeEvent, EventType, KeyValueChange, MvccStorage, META_MEMBERSHIP,
     META_SNAPSHOT, TABLE_META,
 };
+use crate::storage::object_store::ChunkStore;
 use crate::storage::redb_backend::RedbBackend;
 use crate::storage::snapshot::{
     export_snapshot_data, import_snapshot_data, SnapshotData, SnapshotTracker,
@@ -210,6 +211,10 @@ pub struct StateMachineStore {
     /// 日志并收到广播——因此无论哪个节点最终成为某 Region 的 leader，都能
     /// 看到广播并完成删除（幂等）。
     pub lease_revoke_tx: Option<tokio::sync::mpsc::UnboundedSender<i64>>,
+    /// 对象存储 chunk 文件存储（本 raft 数据目录下；`Command::ObjectStore`
+    /// apply 时写/删 chunk 文件）。None = 未启用对象存储（收到 ObjectStore 命令
+    /// 即配置不一致，apply 报错）。
+    pub object_chunk_store: Option<Arc<ChunkStore>>,
 }
 
 // Manual Debug impl since MvccStorage may not be Debug
@@ -327,7 +332,13 @@ impl StateMachineStore {
             session_manager: None,
             metrics: None,
             lease_revoke_tx: None,
+            object_chunk_store: None,
         }
+    }
+
+    /// 设置对象存储 chunk 文件存储（对象存储启用时，root/Region 各自设置）
+    pub fn set_object_chunk_store(&mut self, store: Option<Arc<ChunkStore>>) {
+        self.object_chunk_store = store;
     }
 
     /// 设置 Lease Revoke 广播通道（仅 region 0 状态机调用）
@@ -639,6 +650,20 @@ impl StateMachineStore {
                 let _ = outcome;
                 Ok((Response::Put { revision }, None))
             }
+            Command::ObjectStore(op) => {
+                // 对象存储数据面：manifest 状态迁移 + chunk 文件副作用。
+                // ok=false（冲突/no-op）不是 raft 错误——用户级竞态不得 wedge raft；
+                // 文件写失败（磁盘）→ Err（由水位/配额前置避免）。不上 Watch。
+                let ok = crate::storage::object_store::apply_object_store_op(
+                    sm,
+                    op,
+                    revision,
+                    applied,
+                    self.object_chunk_store.as_deref(),
+                )
+                .map_err(io_err)?;
+                Ok((Response::ObjectStore { revision, ok }, None))
+            }
         }
     }
 }
@@ -774,6 +799,16 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         self.snapshot_tracker
             .record_durable(last_idx, last_term, path.clone());
         tracing::info!("Installed snapshot persisted to {}", path.display());
+
+        // 对象存储数据面：快照不含 chunk 文件。本节点 MVCC 已整体替换为快照，
+        // 本地 chunk 文件可能陈旧/不完整 → 全部清空（manifest 从快照恢复；本节点
+        // 缺 chunk 的 Get 返回 UNAVAILABLE，客户端换节点重试——v1 已知边界）。
+        if let Some(store) = &self.object_chunk_store {
+            match store.clear_all() {
+                Ok(()) => tracing::warn!("Snapshot installed: cleared local object chunk store"),
+                Err(e) => tracing::error!("clear object chunk store after snapshot: {e}"),
+            }
+        }
         let _ = checksum;
         Ok(())
     }
@@ -805,6 +840,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             session_manager: None,
             metrics: self.metrics.clone(),
             lease_revoke_tx: None,
+            object_chunk_store: self.object_chunk_store.clone(),
         }
     }
 }

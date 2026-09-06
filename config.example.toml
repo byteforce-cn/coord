@@ -114,6 +114,32 @@ max_txn_ops = 128               # Txn compare+success+failure 操作数上限
 idempotency_ttl_secs = 60       # 幂等缓存 TTL
 idempotency_max_entries = 4096  # 幂等缓存容量（FIFO 淘汰）
 
+# 对象存储（experimental 数据面；默认关闭，与 [multi_raft] 正交）
+#
+# 设计（docs/volume-object-storage.md 决策记录）：
+#   - 对象 = (bucket, object_id)，manifest 走 raft 强一致（保留前缀 /obj/ 对
+#     用户 KV/Txn/Watch 不可见），chunk 数据随 raft 日志复制后落各节点本地
+#     append-only 文件（不进 MVCC、不入快照，快照仅携带 manifest）；
+#   - 流式协议 coord.storage（Put 客户端流 / Get 服务端流）：单消息 ≤
+#     chunk_size_bytes（默认 4MiB = gRPC MAX_DECODING_MSG），单对象 ≤
+#     max_object_size_bytes（默认 256MiB）；
+#   - 删除 = manifest tombstone + apply 同步删 chunk 文件 + 后台 GC；
+#   - 磁盘只读水位与 KV 写共用（ReadOnly 时对象写同样 RESOURCE_EXHAUSTED）；
+#   - 约束：全集群各节点配置必须一致；启用后不可热关（数据保留，服务消失）；
+#     enabled 与 multi_raft.legacy_migration 互斥（配置校验拒绝）；
+#     快照恢复的落后节点本地 chunk 被清空标记 rebuild（Get 返 UNAVAILABLE，
+#     客户端换节点重试——v1 已知边界）。
+[object_storage]
+enabled = false
+# chunk_size_bytes = 4194304        # 单 chunk ≤ 4MiB（RPC 解码上限）
+# max_object_size_bytes = 268435456 # 单对象上限（默认 256MiB）
+# max_total_storage_bytes = 0       # 配额（0 = 不限；admission 侧尽力而为）
+# upload_timeout_secs = 300         # Creating 对象（中断上传）过期回收
+# gc_interval_secs = 60             # 对象 GC / 孤儿文件回收扫描间隔
+# encryption_enabled = false        # chunk 文件静态加密（独立开关）
+# encryption_root_key = "…hex 64 字符…"   # 或经环境变量
+#                                      # COORD_OBJECT_STORAGE_ENCRYPTION_ROOT_KEY
+
 [security]
 # 生产：配置证书 + CA → raft/gRPC 强制 mTLS（缺 CA 拒绝启动，fail-closed）
 # tls_cert = "/etc/coord/server.crt"

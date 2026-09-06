@@ -43,6 +43,10 @@ pub struct Config {
     /// Multi-Raft 配置（`[multi_raft]` 段；兼容开关 + 初始 Region 表）
     #[serde(default)]
     pub multi_raft: MultiRaftConfig,
+
+    /// 对象存储配置（`[object_storage]` 段；默认关闭，与 `[multi_raft]` 正交）
+    #[serde(default)]
+    pub object_storage: ObjectStorageConfig,
 }
 
 impl Config {
@@ -488,6 +492,69 @@ impl Config {
             }
         }
 
+        // 12c. object_storage 段合法性。
+        //     - chunk_size ∈ (0, 4MiB]（对齐 gRPC MAX_DECODING_MSG）；单对象 ≥ chunk；
+        //     - 超时/间隔 > 0；
+        //     - encryption_enabled=true 必须提供 hex64 根密钥（配置或环境变量），
+        //       encryption_root_key 非空但开关关闭 → 拒绝（防止静默明文落盘）；
+        //     - 与 multi_raft.legacy_migration 互斥（迁移会把 /obj/ manifest 导入
+        //       Region DB，而 chunk 文件仍在根对象目录，两者失配）。
+        let os = &self.object_storage;
+        if os.enabled {
+            const MAX_CHUNK: usize = 4 * 1024 * 1024;
+            if os.chunk_size_bytes == 0 || os.chunk_size_bytes > MAX_CHUNK {
+                errs.push(format!(
+                    "object_storage.chunk_size_bytes must be in (0, {}] (got {})",
+                    MAX_CHUNK, os.chunk_size_bytes
+                ));
+            }
+            if os.max_object_size_bytes == 0
+                || os.max_object_size_bytes < os.chunk_size_bytes as u64
+            {
+                errs.push(format!(
+                    "object_storage.max_object_size_bytes must be >= chunk_size_bytes \
+                     (got {})",
+                    os.max_object_size_bytes
+                ));
+            }
+            if os.upload_timeout_secs == 0 {
+                errs.push("object_storage.upload_timeout_secs must be > 0".to_string());
+            }
+            if os.gc_interval_secs == 0 {
+                errs.push("object_storage.gc_interval_secs must be > 0".to_string());
+            }
+            if os.encryption_enabled && os.encryption_root_key.trim().is_empty() {
+                errs.push(
+                    "object_storage.encryption_enabled = true requires \
+                     object_storage.encryption_root_key (hex64) or \
+                     COORD_OBJECT_STORAGE_ENCRYPTION_ROOT_KEY"
+                        .to_string(),
+                );
+            }
+            if !os.encryption_enabled && !os.encryption_root_key.trim().is_empty() {
+                errs.push(
+                    "object_storage.encryption_root_key set but \
+                     encryption_enabled = false (misconfigured; refusing plaintext "
+                        .to_string()
+                        + "surprise)",
+                );
+            }
+            if os.encryption_enabled && os.encryption_root_key.trim().len() != 64 {
+                errs.push(
+                    "object_storage.encryption_root_key must be hex64 (32 bytes)"
+                        .to_string(),
+                );
+            }
+            if self.multi_raft.legacy_migration {
+                errs.push(
+                    "object_storage.enabled with multi_raft.legacy_migration is not \
+                     supported: migration would import /obj/ manifests into region DBs "
+                        .to_string()
+                        + "while chunk files remain under the root data dir",
+                );
+            }
+        }
+
         // 13. R-RFT-19：raft 调优段合法性（选举窗口 min ≤ max；时间参数 > 0）
         for (label, ms) in [
             (
@@ -815,6 +882,72 @@ impl Default for SecurityConfig {
             raft_shared_secret: None,
         }
     }
+}
+
+/// 对象存储配置（`[object_storage]` 段；默认关闭）。
+///
+/// 数据面闭环设计（docs/volume-object-storage.md 决策记录）：对象 = (bucket,
+/// object_id)；manifest 走 raft（/kv/ 语义强一致），chunk 数据随 raft 日志复制
+/// 后落各节点本地 append-only 文件（不进 MVCC、不入快照）。chunk 上限 ≤ 4MiB
+/// （对齐 gRPC MAX_DECODING_MSG），单对象默认 256MiB。关闭时磁盘布局字节级不变。
+///
+/// 全集群各节点配置必须一致（对齐 multi_raft 配置一致性约定）；切换 enabled 需
+/// 全集群同启同停、不可在存量对象存在时关停（关闭即不再提供服务，数据保留）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectStorageConfig {
+    /// 总开关（false = 不注册服务、不建任何目录，磁盘布局不变）
+    #[serde(default)]
+    pub enabled: bool,
+    /// 单 chunk 字节上限（≤ 4MiB = 4194304；流式单消息不得越过此值）
+    #[serde(default = "default_object_chunk_size")]
+    pub chunk_size_bytes: usize,
+    /// 单对象字节上限
+    #[serde(default = "default_object_max_size")]
+    pub max_object_size_bytes: u64,
+    /// 配额：全节点对象合计字节上限（0 = 不限；admission 侧尽力而为，非硬限制）
+    #[serde(default)]
+    pub max_total_storage_bytes: u64,
+    /// Creating 对象（上传中断）视为过期的秒数，后台 GC 将删除
+    #[serde(default = "default_object_upload_timeout")]
+    pub upload_timeout_secs: u64,
+    /// 对象 GC/孤儿回收扫描间隔（秒）
+    #[serde(default = "default_object_gc_interval")]
+    pub gc_interval_secs: u64,
+    /// chunk 文件静态加密（独立开关；不依赖 /kv/ 的 encryption_enabled）
+    #[serde(default)]
+    pub encryption_enabled: bool,
+    /// chunk 加密根密钥（hex 64 = 32 字节；encryption_enabled=true 时必须）
+    /// 或经环境变量 COORD_OBJECT_STORAGE_ENCRYPTION_ROOT_KEY 注入
+    #[serde(default)]
+    pub encryption_root_key: String,
+}
+
+impl Default for ObjectStorageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chunk_size_bytes: 4 * 1024 * 1024,
+            max_object_size_bytes: 256 * 1024 * 1024,
+            max_total_storage_bytes: 0,
+            upload_timeout_secs: 300,
+            gc_interval_secs: 60,
+            encryption_enabled: false,
+            encryption_root_key: String::new(),
+        }
+    }
+}
+
+fn default_object_chunk_size() -> usize {
+    4 * 1024 * 1024
+}
+fn default_object_max_size() -> u64 {
+    256 * 1024 * 1024
+}
+fn default_object_upload_timeout() -> u64 {
+    300
+}
+fn default_object_gc_interval() -> u64 {
+    60
 }
 
 /// R-SVC-18：运行时资源限制配置（`[limits]` 段）。

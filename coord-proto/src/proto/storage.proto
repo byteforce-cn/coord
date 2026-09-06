@@ -1,0 +1,109 @@
+syntax = "proto3";
+package coord.storage;
+
+// coord.storage 内部镜像（wire 与 apis/contracts/proto/coord/storage/storage.proto
+// 逐字节一致，由 scripts/check-wire-sync.sh 校验：rpc 存在性 + 字段编号）。
+
+// ────────────────────────────────────────────────────────────
+// 对象存储（Server 侧 EXPERIMENTAL 数据面；治理口径见 apis/contracts/STATUS.md）
+//
+// 设计要点：
+//   - 对象 = (bucket, object_id)。对象键落 `/obj/{bucket}/{object_id}` 前缀，
+//     Multi-Raft 开启时经 RegionManager 自动路由进所属 Region（共享 keyspace，
+//     initial_regions 平铺天然覆盖）；
+//   - manifest（对象元数据 + chunk 清单/哈希 + tombstone）走 raft 强一致；
+//     chunk 数据随 raft 日志复制（日志==状态机，不产生独立复制面），apply 后
+//     落 append-only chunk 文件（不进 MVCC、不入快照）；
+//   - 流式协议：禁止 unary 传大对象；单消息 ≤ chunk_size（默认 4MiB，对齐
+//     gRPC 解码上限 MAX_DECODING_MSG）；单对象 ≤ max_object_size（默认 256MiB，
+//     对齐 PD region_split_size_mb 语义）；
+//   - 删除 = manifest tombstone + 异步 chunk 文件 GC；配额 + 磁盘水位防护。
+//
+// v1 语义边界：
+//   - Put 到已存在（Committed）对象 → ALREADY_EXISTS（v1 无覆盖写）；
+//   - Delete/Stat 不存在或已删除对象 → NOT_FOUND；
+//   - 上传过程中 Region leader 变更：客户端中止本次上传、对同一对象整体重试；
+//   - 快照恢复（落后节点安装 raft 快照）后本地 chunk 文件被清空并标记
+//     rebuild：该节点对缺失 chunk 的 Get 返回 UNAVAILABLE，客户端换节点重试。
+// ────────────────────────────────────────────────────────────
+
+message ObjectRef {
+  string bucket = 1;   // 命名空间（utf8，≤255 字节，非空）
+  bytes object_id = 2; // 对象标识（≤1024 字节，非空）
+}
+
+// ──── Put（客户端流式上传；首条消息必须为 meta）────
+
+message PutRequest {
+  oneof part {
+    PutMeta meta = 1; // 首条：对象元数据
+    bytes chunk = 2;  // 后续：数据分片（≤ chunk_size，默认 4MiB）
+  }
+}
+
+message PutMeta {
+  string bucket = 1;
+  bytes object_id = 2;
+  int64 total_size = 3; // 期望总字节数（>0；配额预估与最终校验）
+}
+
+message PutResponse {
+  int64 revision = 1; // 对象 Commit 所在 raft revision
+  int64 size = 2;     // 实际落盘字节数
+  int64 chunks = 3;   // 实际 chunk 数
+}
+
+// ──── Get（服务端流式下载；首条为对象元数据）────
+
+message GetRequest {
+  string bucket = 1;
+  bytes object_id = 2;
+}
+
+message GetResponse {
+  oneof part {
+    ObjectStat stat = 1; // 首条：对象元数据
+    bytes chunk = 2;     // 后续：数据分片（≤ chunk_size）
+  }
+}
+
+// ──── Stat / Delete（unary 小请求）────
+
+message StatRequest {
+  string bucket = 1;
+  bytes object_id = 2;
+}
+
+message StatResponse {
+  ObjectStat stat = 1;
+}
+
+message DeleteRequest {
+  string bucket = 1;
+  bytes object_id = 2;
+}
+
+message DeleteResponse {
+  bool deleted = 1;   // 本次实际执行删除（此前存在且未删除）
+  int64 revision = 2; // tombstone 所在 raft revision
+}
+
+message ObjectStat {
+  string bucket = 1;
+  bytes object_id = 2;
+  int64 size = 3;     // Committed 对象字节数
+  int64 chunks = 4;   // chunk 数
+  int64 revision = 5; // 最近一次状态机写入所在 raft revision
+  bool exists = 6;    // false = 不存在或已删除（tombstone）
+  bool committed = 7; // 是否存在且已完成上传（否则为进行中/已删除）
+}
+
+service Storage {
+  // 上传对象（client-streaming）。meta 之后每个消息 = 一个 chunk；
+  // 服务端按 chunk 逐个经 raft 提交（单 chunk 单日志条目 ≤ 4MiB）。
+  rpc Put(stream PutRequest) returns (PutResponse);
+  // 下载对象（server-streaming）。首条响应携带 stat，其后为 chunk 数据。
+  rpc Get(GetRequest) returns (stream GetResponse);
+  rpc Stat(StatRequest) returns (StatResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+}

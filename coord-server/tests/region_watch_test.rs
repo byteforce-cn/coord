@@ -108,6 +108,7 @@ async fn start_two_node_two_region_watch_cluster() -> Vec<NodeHost> {
                     election_timeout_max: 1500,
                     ..Default::default()
                 }),
+                object_store: None,
             };
             manager
                 .spawn_region(&factory, &rpc, spec, node_id == 1)

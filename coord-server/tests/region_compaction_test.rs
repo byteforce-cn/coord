@@ -61,6 +61,7 @@ async fn start_single_region() -> (tempfile::TempDir, Arc<RegionManager>, Region
             election_timeout_max: 1500,
             ..Default::default()
         }),
+        object_store: None,
     };
     manager
         .spawn_region(&factory, &rpc, spec, true)

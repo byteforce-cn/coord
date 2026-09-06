@@ -136,6 +136,7 @@ async fn start_single_node_with_regions() -> Host {
                 election_timeout_max: 1500,
                 ..Default::default()
             }),
+            object_store: None,
         };
         manager
             .spawn_region(&shared_factory, &rpc, spec, true)

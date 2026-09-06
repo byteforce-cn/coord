@@ -11,6 +11,7 @@
 pub mod compaction;
 pub mod disk_watermark;
 pub mod mvcc;
+pub mod object_store;
 pub mod redb_backend;
 pub mod snapshot;
 pub mod snapshot_limiter;

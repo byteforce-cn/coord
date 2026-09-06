@@ -102,6 +102,7 @@ async fn start_three_node_one_region_cluster() -> Vec<NodeHost> {
             meta,
             data_dir: region_data_dir(&base, 1),
             raft_config: raft_test_config(),
+            object_store: None,
         };
         // 仅 n1 bootstrap initialize（成员 {n1,n2}）；n2/n3 靠复制/加入
         manager

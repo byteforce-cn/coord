@@ -137,6 +137,7 @@ async fn start_single_node_two_region_cluster() -> RegionHost {
             meta: region_meta(region_id, start, end, &raft_addrs),
             data_dir: region_data_dir(&base, region_id),
             raft_config: raft_test_config(),
+            object_store: None,
         };
         manager
             .spawn_region(&factory, &rpc, spec, true)

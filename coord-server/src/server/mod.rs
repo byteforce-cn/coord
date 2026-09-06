@@ -47,6 +47,10 @@ use crate::storage::redb_backend::RedbBackend;
 use crate::txn::{TxnCompare, TxnOp, TxnOpResponse};
 use crate::watch::WatchDispatcher;
 
+/// 对象存储 gRPC 服务实现（coord.storage，EXPERIMENTAL 数据面）。
+/// 见 `storage/object_store.rs` 与 docs/volume-object-storage.md 决策记录。
+pub mod object_storage;
+
 // ──── CoordNode ────
 
 /// R-SVC-18：运行时资源限制（per-RPC 超时、规模上限、幂等缓存参数）。
@@ -218,10 +222,17 @@ pub struct CoordNode {
     keyring: parking_lot::RwLock<Option<Arc<Keyring>>>,
     /// 持久化的密文 DEK（unseal 时重建 Keyring 用）
     encrypted_deks: parking_lot::RwLock<Vec<EncryptedDek>>,
-    /// root 密钥提供者（配置/环境变量/密钥文件；unseal 用）
+    /// root 密钥提供者（配置/环境变量/密钥文件；unseal 用）。
     /// root 密钥提供者（配置/环境变量/密钥文件；unseal 用）。
     /// 由 `run_server` 在构造后（Arc 包装前）设置。
     pub root_key_provider: Option<Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>>,
+    /// 对象存储启用（Some = 限额；None = 关闭）。
+    /// 由 `run_server` 按 `[object_storage]` 段设置；保留前缀守卫据此生效。
+    pub object_limits: Option<Arc<crate::storage::object_store::ObjectLimits>>,
+    /// 对象存储 root/legacy（region 0）chunk 文件存储（`<data_dir>/objects/`）。
+    /// Multi-Raft 模式下对象按 key 路由进数据 Region，各自 RegionRuntime 持
+    /// 有自己的 ChunkStore；本字段仅 legacy/region 0 单 Raft 路径使用。
+    pub chunk_store: Option<Arc<crate::storage::object_store::ChunkStore>>,
 }
 
 /// KV 请求解析出的执行目标（一个 Region，或 legacy 单 Raft）。
@@ -245,6 +256,21 @@ struct KvTarget {
     handle: Option<Arc<RegionHandle>>,
 }
 
+/// 对象存储执行目标（一个 Region，或 legacy 单 Raft）——对象 manifest 读写的
+/// raft/mvcc + 该目标数据目录下的 chunk 文件存储。
+struct ObjectTarget {
+    /// 目标 Region（legacy 模式为 0）
+    region_id: RegionId,
+    /// 该 Region 的 MVCC（manifest 读写目标）
+    mvcc: Arc<MvccStorage<RedbBackend>>,
+    /// 该 Region 的 Raft 实例（None = 单节点直写模式，仅测试出现）
+    raft: Option<Arc<CoordRaft>>,
+    /// 该 Region 的 LogStore（读屏障幻影态终检用）
+    raft_log_store: Option<LogStore>,
+    /// 该 Region 的 chunk 文件存储（对象存储启用时为 Some）
+    chunk_store: Option<Arc<crate::storage::object_store::ChunkStore>>,
+}
+
 impl CoordNode {
     pub fn new(storage: Arc<MvccStorage<RedbBackend>>) -> Self {
         Self {
@@ -264,6 +290,8 @@ impl CoordNode {
             keyring: parking_lot::RwLock::new(None),
             encrypted_deks: parking_lot::RwLock::new(Vec::new()),
             root_key_provider: None,
+            object_limits: None,
+            chunk_store: None,
         }
     }
 
@@ -319,6 +347,102 @@ impl CoordNode {
     /// 查询已知的某节点 gRPC 地址（leader 重定向）。
     pub fn grpc_addr_of(&self, node_id: u64) -> Option<String> {
         self.node_grpc_addrs.read().get(&node_id).cloned()
+    }
+
+    // ──── 对象存储（coord.storage）路由 / 保留前缀守卫 ────
+
+    /// 对象存储是否启用
+    pub fn object_enabled(&self) -> bool {
+        self.object_limits.is_some()
+    }
+
+    /// 校验写 key 不侵入保留对象空间（/obj/ 前缀）
+    pub fn guard_object_write_key(&self, key: &[u8]) -> Result<(), tonic::Status> {
+        if self.object_enabled() && crate::storage::object_store::key_in_object_space(key) {
+            return Err(tonic::Status::invalid_argument(
+                "key in reserved object-storage namespace /obj/ (use the coord.storage \
+                 service; object manifests are internal)",
+            ));
+        }
+        Ok(())
+    }
+
+    /// 校验写区间 [start, end) 不侵入保留对象空间（防止经 KV 删 manifest）
+    pub fn guard_object_write_range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<(), tonic::Status> {
+        if self.object_enabled()
+            && crate::storage::object_store::range_touches_object_space(start, end)
+        {
+            return Err(tonic::Status::invalid_argument(
+                "range touches reserved object-storage namespace /obj/ (use the \
+                 coord.storage service)",
+            ));
+        }
+        Ok(())
+    }
+
+    /// 将对象 (bucket, object_id) 解析为执行目标（Region 或 legacy 单 Raft）。
+    ///
+    /// 路由键 = manifest key（`/obj/m/{bucket}/{object_id}`），与 KV 共享 keyspace
+    /// 平铺——Multi-Raft 开启时经 RegionManager 自动路由进所属 Region（chunk 文件
+    /// 存该 Region 数据目录）；关闭时 = region 0 根（字节级退化）。
+    fn object_target_for(
+        &self,
+        bucket: &[u8],
+        object_id: &[u8],
+    ) -> Result<ObjectTarget, tonic::Status> {
+        use crate::storage::object_store::manifest_key;
+        let key = manifest_key(bucket, object_id);
+        if let Some(manager) = &self.region_manager {
+            let rt = manager.route_runtime(&key).map_err(map_err)?;
+            Ok(ObjectTarget {
+                region_id: rt.region_id(),
+                mvcc: Arc::clone(&rt.mvcc),
+                raft: Some(Arc::new(rt.raft.clone())),
+                raft_log_store: Some(rt.raft_log_store.clone()),
+                chunk_store: rt.chunk_store.clone(),
+            })
+        } else {
+            Ok(ObjectTarget {
+                region_id: 0,
+                mvcc: Arc::clone(&self.storage),
+                raft: self.raft.clone(),
+                raft_log_store: self.raft_log_store.clone(),
+                chunk_store: self.chunk_store.clone(),
+            })
+        }
+    }
+
+    /// 对象写路径：raft 提交 ObjectStore 命令（须先过水位/配额闸）。
+    async fn propose_object_op(
+        &self,
+        target: &ObjectTarget,
+        op: crate::raft::type_config::ObjectStoreOp,
+    ) -> Result<(u64, bool), tonic::Status> {
+        let raft = target.raft.as_ref().ok_or_else(|| {
+            tonic::Status::unavailable("object storage requires raft mode (single-node dev off)")
+        })?;
+        let cmd = crate::raft::type_config::Command::ObjectStore(op);
+        let resp = self.client_write_with_timeout(raft, cmd, target.region_id).await?;
+        match resp.response() {
+            Response::ObjectStore { revision, ok } => Ok((*revision, *ok)),
+            _ => Err(tonic::Status::internal(
+                "unexpected raft response for object op",
+            )),
+        }
+    }
+
+    /// 对象读路径：ReadIndex 线性一致屏障后返回（与 KV 读同口径）
+    async fn object_linearizable(&self, target: &ObjectTarget) -> Result<(), tonic::Status> {
+        self.ensure_linearizable_on(
+            target.raft.as_deref(),
+            target.raft_log_store.as_ref(),
+            target.region_id,
+        )
+        .await
     }
 
     // ──── Multi-Raft KV 路由 ────
@@ -1296,6 +1420,9 @@ impl Kv for CoordNode {
         let req = request.into_inner();
         let request_id = req.request_id.clone();
 
+        // 保留对象空间守卫（/obj/ 为对象存储内部 manifest，禁止经 KV 写入）
+        self.guard_object_write_key(&req.key)?;
+
         // 幂等检查：相同（客户端身份 + request_id）返回缓存的 revision
         if !request_id.is_empty() {
             if let Some(cached_rev) =
@@ -1488,6 +1615,12 @@ impl Kv for CoordNode {
             }
         }
 
+        // 对象存储启用时：保留对象空间 /obj/ 的 manifest 内部行对用户 KV 不可见
+        //（Range 整体不可见——写侧已拒绝，读侧这里过滤，避免全 keyspace 扫描被破坏）
+        if self.object_enabled() {
+            kvs.retain(|kv| !crate::storage::object_store::key_in_object_space(&kv.key));
+        }
+
         let count = kvs.len() as i64;
         let revision = if target_revision > 0 {
             target_revision as i64
@@ -1531,6 +1664,13 @@ impl Kv for CoordNode {
         // R-SVC-07-3：range_end 非空且 != key → 原子范围删除 [key, range_end)；
         // 否则为单键删除
         let is_range = !req.range_end.is_empty() && req.range_end != req.key;
+
+        // 保留对象空间守卫（/obj/ 内部 manifest：禁止经 KV 范围删除）
+        if is_range {
+            self.guard_object_write_range(&req.key, &req.range_end)?;
+        } else {
+            self.guard_object_write_key(&req.key)?;
+        }
 
         // 按 key 解析目标 Region；范围删除不得越过 Region 边界。
         let target = self.kv_target_for_key(&req.key)?;
@@ -1788,6 +1928,24 @@ impl Txn for CoordNode {
             .iter()
             .map(convert_request_op)
             .collect::<Result<Vec<_>, _>>()?;
+
+        // 保留对象空间守卫：Txn 不得读写 /obj/（manifest 内部；Txn 内 Range 无
+        // 过滤能力 → 整体拒绝）
+        if self.object_enabled() {
+            for c in &compares {
+                self.guard_object_write_key(&c.key)?;
+            }
+            for op in success_ops.iter().chain(failure_ops.iter()) {
+                match op {
+                    TxnOp::Put { key, .. } | TxnOp::Delete { key } => {
+                        self.guard_object_write_key(key)?
+                    }
+                    TxnOp::Range { key, range_end, .. } => {
+                        self.guard_object_write_range(key, range_end)?
+                    }
+                }
+            }
+        }
 
         // R-SVC-18：Txn 内 Range op 的 limit 同样受 max_range_limit 约束
         {
@@ -2137,6 +2295,18 @@ impl Watch for CoordNode {
                 ))
             }
         };
+
+        // 保留对象空间守卫：Watch 不得订阅 /obj/（内部 manifest，事件不隔离）
+        if self.object_enabled()
+            && crate::storage::object_store::range_touches_object_space(
+                &create_req.key,
+                &create_req.range_end,
+            )
+        {
+            return Err(tonic::Status::invalid_argument(
+                "watch on reserved object-storage namespace /obj/ is not supported",
+            ));
+        }
 
         // 解析 Watch 目标——legacy 用节点级 dispatcher + storage；
         // region 模式路由到所属 Region 的 per-Region dispatcher + MVCC（per-Region

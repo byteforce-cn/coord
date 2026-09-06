@@ -13,6 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "src/proto/lease.proto",
                 "src/proto/watch.proto",
                 "src/proto/maintenance.proto",
+                "src/proto/storage.proto",
                 "src/proto/raft.proto",
                 "src/proto/auth.proto",
                 "src/proto/capability.proto",

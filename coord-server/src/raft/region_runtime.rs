@@ -35,6 +35,7 @@ use crate::raft::type_config::{Command, Response};
 use crate::raft::{new_basic_node, new_raft, CoordRaft, RaftConfig, RaftNode, WatchReceiver};
 use crate::storage::compaction::CompactProposer;
 use crate::storage::mvcc::MvccStorage;
+use crate::storage::object_store::{ChunkStore, ObjectStoreCtx};
 use crate::storage::redb_backend::RedbBackend;
 use crate::storage::snapshot::SnapshotTracker;
 use crate::watch::WatchDispatcher;
@@ -62,6 +63,9 @@ pub struct RegionRuntimeSpec {
     pub data_dir: PathBuf,
     /// Raft 心跳/选举等运行参数（R-RFT-19）
     pub raft_config: Arc<RaftConfig>,
+    /// 对象存储启用配置（`Some` = 启用：本 Region 数据目录下创建 chunk 文件
+    /// 存储并挂到状态机/运行时；`None` = 未启用，布局不变）。
+    pub object_store: Option<Arc<ObjectStoreCtx>>,
 }
 
 /// 单节点内某个 Region 的运行时句柄
@@ -89,6 +93,9 @@ pub struct RegionRuntime {
     /// 与状态机共享——apply 时把本 Region 的变更事件 dispatch 到这里，订阅者只
     /// 见本 Region 的 key；region 0 单 Raft 路径不用此字段，沿用节点级 dispatcher）
     pub watch_dispatcher: Arc<WatchDispatcher>,
+    /// 对象存储 chunk 文件存储（本 Region 数据目录 `objects/` 下；对象服务按
+    /// 对象 manifest key 路由到 Region 后从这里读写 chunk；None = 未启用）
+    pub chunk_store: Option<Arc<ChunkStore>>,
 }
 
 impl RegionRuntime {
@@ -128,6 +135,7 @@ pub async fn spawn_region_runtime(
         meta,
         data_dir,
         raft_config,
+        object_store,
     } = spec;
 
     std::fs::create_dir_all(&data_dir).map_err(|e| {
@@ -136,6 +144,16 @@ pub async fn spawn_region_runtime(
             data_dir.display()
         ))
     })?;
+
+    // 对象存储 chunk 文件存储（惰性建目录；关闭时不产生任何布局变化）
+    let chunk_store = match object_store {
+        Some(ctx) => Some(ChunkStore::new(
+            &data_dir,
+            Arc::clone(&ctx.limits),
+            ctx.encryption_root_key_hex.as_deref(),
+        )?),
+        None => None,
+    };
 
     // 业务存储：store.db（KV/元数据/changelog）+ raft-log/log.db + snapshots/
     let storage_config = StorageConfig::default();
@@ -160,6 +178,11 @@ pub async fn spawn_region_runtime(
     // 必须在 new_raft 之前挂到状态机——StateMachineStore 被移入 raft 后不可再取回。
     let watch_dispatcher = Arc::new(WatchDispatcher::start());
     sm_store.set_watch_dispatcher(Arc::clone(&watch_dispatcher));
+
+    // 对象存储：chunk 文件存储同样必须在 new_raft 之前挂到状态机（apply 路径用）
+    if let Some(store) = &chunk_store {
+        sm_store.set_object_chunk_store(Some(Arc::clone(store)));
+    }
 
     // 读屏障幻影态终检需要访问本地日志；克隆一份 LogStore 句柄给
     // RegionRuntime（与 main.rs 单 Raft 的 node_raft_log 同理），再移入 raft。
@@ -206,6 +229,7 @@ pub async fn spawn_region_runtime(
         data_dir,
         tracker,
         watch_dispatcher,
+        chunk_store,
     }))
 }
 

@@ -256,6 +256,46 @@ impl PdQueueEntry {
     }
 }
 
+/// 对象存储数据面操作（docs/volume-object-storage.md 决策记录）
+///
+/// manifest 以**用户 KV** 形式存于保留前缀 `/obj/m/{bucket}/{object_id}`
+/// （自动获得 /kv/ 的加密/快照/压缩/强一致语义）；本命令仅承载 chunk 数据面
+/// （apply 时落 append-only chunk 文件，不进 MVCC、不入快照）与受控的
+/// manifest 状态迁移（Begin/Chunk/Commit/Delete）。
+///
+/// 语义（apply 内确定性执行，`storage::object_store::apply_object_store_op`）：
+/// - Begin：已存在（Committed/Creating）→ no-op 冲突；tombstone 后允许重建；
+/// - Chunk：按 seq 严格递增追加（并发/重试重叠 → no-op）；数据 ≤ chunk_size，
+///   累计 ≤ Begin 声明 total_size；文件先落盘、manifest 后提交（同 apply 串行）；
+/// - Commit：size==total_size 才置 committed（幂等）；不符 → no-op（GC 收尾）；
+/// - Delete：KV tombstone + 同步删除 chunk 文件（幂等；no-op 也消耗 revision）。
+///
+/// **末尾追加**（bincode 变体索引兼容；勿插队）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ObjectStoreOp {
+    /// 开始上传：创建 Creating manifest（声明期望总字节数）。
+    /// `started_at_unix` 由提议侧填墙钟（apply 不读墙钟，先例同 PdQueueEntry）。
+    Begin {
+        bucket: Vec<u8>,
+        object_id: Vec<u8>,
+        total_size: u64,
+        started_at_unix: i64,
+    },
+    /// 追加一个 chunk：数据随 raft 日志复制；apply 落文件 + manifest 追加记录。
+    /// `now_unix` 由提议侧填墙钟（GC 判 stale Creating）。
+    Chunk {
+        bucket: Vec<u8>,
+        object_id: Vec<u8>,
+        seq: u32,
+        data: Vec<u8>,
+        now_unix: i64,
+    },
+    /// 完成上传：校验字节数后置 committed
+    Commit { bucket: Vec<u8>, object_id: Vec<u8> },
+    /// 删除：KV tombstone + chunk 文件清理
+    Delete { bucket: Vec<u8>, object_id: Vec<u8> },
+}
+
 /// Raft 日志负载：客户端提交的状态机命令
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
@@ -297,6 +337,10 @@ pub enum Command {
     ///
     /// **末尾追加**（变体索引兼容）；data region raft 收到视为无害记录。
     Pd(PdOp),
+    /// 对象存储数据面命令（manifest 状态迁移 + chunk 文件副作用）。
+    ///
+    /// 按对象 manifest key 路由到所属 Region raft 提出；**末尾追加**。
+    ObjectStore(ObjectStoreOp),
 }
 
 impl std::fmt::Display for Command {
@@ -320,6 +364,7 @@ impl std::fmt::Display for Command {
                 write!(f, "DeleteKeysByLease(lease_id={lease_id})")
             }
             Command::Pd(op) => write!(f, "Pd({op:?})"),
+            Command::ObjectStore(op) => write!(f, "ObjectStore({op:?})"),
         }
     }
 }
@@ -350,6 +395,9 @@ pub enum Response {
     /// Auth 操作结果
     Auth { revision: u64 },
     /// Compact 操作结果：实际生效的 compacted revision
+    /// 对象存储数据面操作结果：op 是否达成语义期望
+    /// （Begin 冲突/Chunk 顺序错乱/Commit 字节不符/Delete no-op → ok=false）
+    ObjectStore { revision: u64, ok: bool },
     Compact { compacted_revision: u64 },
 }
 
@@ -368,6 +416,9 @@ impl std::fmt::Display for Response {
             } => write!(f, "Txn(succeeded={}, rev={})", succeeded, revision),
             Response::Lease { revision } => write!(f, "Lease(rev={})", revision),
             Response::Auth { revision } => write!(f, "Auth(rev={})", revision),
+            Response::ObjectStore { revision, ok } => {
+                write!(f, "ObjectStore(rev={}, ok={})", revision, ok)
+            }
             Response::Compact { compacted_revision } => {
                 write!(f, "Compact(rev={})", compacted_revision)
             }

@@ -23,6 +23,10 @@ pub mod maintenance {
     tonic::include_proto!("coord.maintenance");
 }
 
+pub mod storage {
+    tonic::include_proto!("coord.storage");
+}
+
 pub mod raft {
     tonic::include_proto!("coord.raft");
 }

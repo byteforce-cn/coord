@@ -111,6 +111,7 @@ async fn start_two_node_two_region_config_cluster() -> Vec<NodeHost> {
             &factory,
             &rpc,
             raft_test_config(),
+            None, // object storage disabled
             &seeds,
             &peers,
             node_id == 1, // 仅 bootstrap 节点 initialize 各 Region 成员
@@ -376,6 +377,7 @@ async fn test_config_assembly_rejects_invalid_region_tables() {
         &factory,
         &rpc,
         raft_test_config(),
+        None,
         &gap,
         &peers,
         true,
@@ -398,6 +400,7 @@ async fn test_config_assembly_rejects_invalid_region_tables() {
         &factory,
         &rpc,
         raft_test_config(),
+        None,
         &non_tiled,
         &peers,
         true,
@@ -425,6 +428,7 @@ async fn test_config_assembly_rejects_invalid_region_tables() {
         &factory,
         &rpc,
         raft_test_config(),
+        None,
         &tiled,
         &other_peers,
         true,

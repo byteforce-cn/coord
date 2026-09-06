@@ -27,6 +27,7 @@ use coord_proto::capability::capability_registry_server::CapabilityRegistryServe
 use coord_proto::kv::kv_server::KvServer;
 use coord_proto::lease::lease_server::LeaseServer;
 use coord_proto::maintenance::maintenance_server::MaintenanceServer;
+use coord_proto::storage::storage_server::StorageServer;
 use coord_proto::txn::txn_server::TxnServer;
 use coord_proto::watch::watch_server::WatchServer;
 use coord_server::auth::manager::hash_password_argon2id;
@@ -51,7 +52,9 @@ use coord_server::pd::{EmbeddedPd, NodeInfo};
 use coord_server::server::CoordNode;
 use coord_server::storage::compaction::{CompactionConfig, CompactionManager};
 use coord_server::storage::mvcc::MvccStorage;
+use coord_server::storage::object_store::{ChunkStore, ObjectLimits, ObjectStoreCtx};
 use coord_server::storage::redb_backend::RedbBackend;
+use coord_server::server::object_storage::object_gc_loop;
 use coord_server::timer::TimerWheel;
 use coord_server::tls::{self, TlsConfig};
 use coord_server::watch::WatchDispatcher;
@@ -1637,6 +1640,46 @@ async fn run_server(
     std::fs::create_dir_all(&snapshot_dir)?;
     let snapshot_tracker = Arc::new(coord_server::storage::snapshot::SnapshotTracker::default());
 
+    // 4b. 对象存储（`[object_storage]` 段；默认关闭，与 `[multi_raft]` 正交）。
+    //     object_ctx：启用配置（限额 + chunk 加密根密钥），供 root/Region 装配共享；
+    //     root_chunk_store：region 0/legacy 的 chunk 文件存储（`<data_dir>/objects/`，
+    //     惰性建目录，关闭时不产生任何布局变化）。
+    let object_ctx: Option<Arc<ObjectStoreCtx>> = if cfg.object_storage.enabled {
+        let mut root_key = cfg.object_storage.encryption_root_key.clone();
+        if root_key.is_empty() {
+            root_key = std::env::var("COORD_OBJECT_STORAGE_ENCRYPTION_ROOT_KEY")
+                .unwrap_or_default();
+        }
+        let encryption_key = if cfg.object_storage.encryption_enabled {
+            Some(root_key)
+        } else {
+            None
+        };
+        let limits = Arc::new(ObjectLimits {
+            chunk_size: cfg.object_storage.chunk_size_bytes,
+            max_object_size: cfg.object_storage.max_object_size_bytes,
+            quota_bytes: cfg.object_storage.max_total_storage_bytes,
+            upload_timeout_secs: cfg.object_storage.upload_timeout_secs,
+        });
+        Some(Arc::new(ObjectStoreCtx {
+            limits,
+            encryption_root_key_hex: encryption_key,
+        }))
+    } else {
+        None
+    };
+    let root_chunk_store: Option<Arc<ChunkStore>> = match &object_ctx {
+        Some(ctx) => Some(
+            ChunkStore::new(
+                &data_dir,
+                Arc::clone(&ctx.limits),
+                ctx.encryption_root_key_hex.as_deref(),
+            )
+            .map_err(|e| format!("init object chunk store: {e}"))?,
+        ),
+        None => None,
+    };
+
     // 4. 初始化指标注册表（R-OBS-10：提前创建，供 Watch/Lease/状态机/拦截器埋点）
     let metrics = Arc::new(Metrics::new());
 
@@ -1659,6 +1702,10 @@ async fn run_server(
         Arc::clone(&snapshot_tracker),
     );
     sm_store.set_watch_dispatcher(Arc::clone(&watch_dispatcher));
+    // 对象存储：root/legacy 状态机挂 chunk 文件存储（ObjectStore apply 用）
+    if let Some(store) = &root_chunk_store {
+        sm_store.set_object_chunk_store(Some(Arc::clone(store)));
+    }
     // R-OBS-10：状态机 apply/快照埋点
     sm_store.metrics = Some(Arc::clone(&metrics));
 
@@ -2101,6 +2148,7 @@ async fn run_server(
             &region_shared_factory,
             &raft_rpc_service,
             region_raft_config,
+            object_ctx.clone(),
             &region_seeds,
             &region_peers,
             bootstrap,
@@ -2218,6 +2266,9 @@ async fn run_server(
     // 多 Region 模式挂载 RegionManager（KV 按 key 路由到 per-region
     // raft/mvcc）；None = 单 Raft 模式（legacy 路径，字节级不变）
     node.region_manager = region_manager;
+    // 对象存储：限额（None = 关闭）与 root/legacy chunk 存储
+    node.object_limits = object_ctx.as_ref().map(|ctx| Arc::clone(&ctx.limits));
+    node.chunk_store = root_chunk_store.clone();
     // R-SVC-18：per-RPC 超时/规模上限/幂等缓存参数（[limits] 配置段）
     node.set_limits(cfg.limits.to_runtime_limits());
     // 注册已知节点的 gRPC 地址（leader 重定向用，best-effort）
@@ -2401,6 +2452,15 @@ async fn run_server(
         WatchServer::from_arc(Arc::clone(&node)).max_decoding_message_size(MAX_DECODING_MSG);
     let maintenance_svc =
         MaintenanceServer::from_arc(Arc::clone(&node)).max_decoding_message_size(MAX_DECODING_MSG);
+    // 对象存储（[object_storage].enabled=true 才注册；否则 reflection 不可见）
+    let storage_svc = if cfg.object_storage.enabled {
+        Some(
+            StorageServer::from_arc(Arc::clone(&node))
+                .max_decoding_message_size(MAX_DECODING_MSG),
+        )
+    } else {
+        None
+    };
 
     // 8. 初始化 Raft 就绪状态（Metrics 已在 提前创建）
     let raft_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2485,12 +2545,18 @@ async fn run_server(
     health_reporter
         .set_not_serving::<CapabilityRegistryServer<CapabilityRegistryService>>()
         .await;
+    if cfg.object_storage.enabled {
+        health_reporter
+            .set_not_serving::<StorageServer<Arc<CoordNode>>>()
+            .await;
+    }
 
     let raft_for_metrics = Arc::clone(&raft);
     let metrics_for_raft = Arc::clone(&metrics);
     let ready_for_raft = Arc::clone(&raft_ready);
     let node_for_seal = Arc::clone(&node);
     let health_reporter_for_task = health_reporter.clone();
+    let object_storage_enabled = cfg.object_storage.enabled;
     // R-OBS-10：storage 磁盘大小 / key 数采样
     let mvcc_for_metrics = Arc::clone(&mvcc);
     tokio::spawn(async move {
@@ -2568,6 +2634,11 @@ async fn run_server(
                 health_reporter_for_task
                     .set_serving::<CapabilityRegistryServer<CapabilityRegistryService>>()
                     .await;
+                if object_storage_enabled {
+                    health_reporter_for_task
+                        .set_serving::<StorageServer<Arc<CoordNode>>>()
+                        .await;
+                }
             } else {
                 health_reporter_for_task
                     .set_not_serving::<KvServer<Arc<CoordNode>>>()
@@ -2590,6 +2661,11 @@ async fn run_server(
                 health_reporter_for_task
                     .set_not_serving::<CapabilityRegistryServer<CapabilityRegistryService>>()
                     .await;
+                if object_storage_enabled {
+                    health_reporter_for_task
+                        .set_not_serving::<StorageServer<Arc<CoordNode>>>()
+                        .await;
+                }
             }
         }
     });
@@ -2766,6 +2842,42 @@ async fn run_server(
     } else {
         Vec::new()
     };
+
+    // 对象存储 GC 循环（leader-only）：回收 stale Creating 对象 + 孤儿 chunk 文件。
+    // legacy/单 Raft：root raft + root chunk store；Multi-Raft：每个数据 Region
+    // 一个（RegionRuntime 自己的 raft + chunk store）。
+    if cfg.object_storage.enabled {
+        if let (Some(store), Some(limits)) = (&root_chunk_store, &node.object_limits) {
+            tokio::spawn(object_gc_loop(
+                node_id,
+                Arc::clone(&raft),
+                Arc::clone(&mvcc),
+                Arc::clone(store),
+                Arc::clone(limits),
+                cfg.object_storage.gc_interval_secs,
+            ));
+            tracing::info!("Object gc loop started (legacy/root)");
+        }
+        if let Some(manager) = &node.region_manager {
+            for handle in manager.list_regions() {
+                let rid = handle.region_id();
+                if let Some(rt) = manager.runtime(rid) {
+                    if let (Some(store), Some(limits)) = (&rt.chunk_store, &node.object_limits)
+                    {
+                        tokio::spawn(object_gc_loop(
+                            node_id,
+                            Arc::new(rt.raft.clone()),
+                            Arc::clone(&rt.mvcc),
+                            Arc::clone(store),
+                            Arc::clone(limits),
+                            cfg.object_storage.gc_interval_secs,
+                        ));
+                        tracing::info!("Region {rid} object gc loop started");
+                    }
+                }
+            }
+        }
+    }
 
     // 8.5. 启动自动快照调度器。
     // S-RCV-01：scheduler 写入独立子目录 snapshots/auto/。其文件名
@@ -3022,6 +3134,7 @@ async fn run_server(
                 .add_service(lease_svc.clone())
                 .add_service(watch_svc.clone())
                 .add_service(maintenance_svc.clone())
+                .add_optional_service(storage_svc.clone())
                 .add_service(auth_svc.clone())
                 .add_service(capability_svc.clone())
                 .serve_with_incoming_shutdown(stream, serve_future);
@@ -3071,6 +3184,7 @@ async fn run_server(
             .add_service(lease_svc)
             .add_service(watch_svc)
             .add_service(maintenance_svc)
+            .add_optional_service(storage_svc)
             .add_service(auth_svc)
             .add_service(capability_svc)
             .serve_with_incoming_shutdown(

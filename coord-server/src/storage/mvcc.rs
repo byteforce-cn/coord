@@ -747,6 +747,14 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
+    /// 仅推进 `META_LAST_APPLIED`（小写事务；无状态变更的 Normal 条目
+    /// （对象存储 no-op/冲突分支等）用它保证 applied 水位 == revision，
+    /// 避免重启后整段重放）。
+    pub fn persist_applied(&self, _revision: Revision, applied: AppliedLogId) -> Result<()> {
+        self.backend
+            .write(|tx| tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes()))
+    }
+
     /// Get 操作：读取单个 Key 的最新值（经过 Barrier 解密）
     ///
     /// 通过元数据的 deleted 标志区分空 value put 和删除 tombstone。
