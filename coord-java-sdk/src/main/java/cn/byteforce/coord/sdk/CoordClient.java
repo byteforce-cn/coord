@@ -13,6 +13,7 @@ import cn.byteforce.coord.sdk.internal.thread.ThreadPoolManager;
 import cn.byteforce.coord.sdk.internal.watch.WatchManager;
 import cn.byteforce.coord.sdk.lock.LockClient;
 import cn.byteforce.coord.sdk.mq.MqClient;
+import cn.byteforce.coord.sdk.objectstore.ObjectStoreClient;
 import cn.byteforce.coord.sdk.pki.PkiClient;
 import cn.byteforce.coord.sdk.policy.PolicyClient;
 import cn.byteforce.coord.sdk.registry.Registry;
@@ -76,6 +77,7 @@ public final class CoordClient implements Closeable {
     private final WorkflowClientImpl workflowClient;
     private final PolicyClientImpl policyClient;
     private final PkiClientImpl pkiClient;
+    private final ObjectStoreClientImpl objectStoreClient;
 
     private CoordClient(CoordConfig config) {
         this.config = config;
@@ -107,6 +109,8 @@ public final class CoordClient implements Closeable {
                 config.getObservabilityProvider(), config);
         this.pkiClient = new PkiClientImpl(channelManager, errorMapper, retryTemplate,
                 config.getObservabilityProvider(), config);
+        this.objectStoreClient = new ObjectStoreClientImpl(channelManager, errorMapper,
+                retryTemplate, config.getObservabilityProvider(), config);
     }
 
     /**
@@ -193,6 +197,16 @@ public final class CoordClient implements Closeable {
      */
     public PkiClient pki() {
         return pkiClient;
+    }
+
+    /**
+     * Returns the {@link ObjectStoreClient} API for object storage
+     * (coord.storage, EXPERIMENTAL).
+     * <p>
+     * Proxied through the Coord Agent to the server cluster.
+     */
+    public ObjectStoreClient objectStore() {
+        return objectStoreClient;
     }
 
     /**

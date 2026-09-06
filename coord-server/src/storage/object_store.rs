@@ -10,8 +10,12 @@
 //     manifest key 的 sha256，路径可确定性推导、组件短、孤儿可回收）；
 //   - 删除 = KV tombstone（manifest 消失）+ apply 同步删除 chunk 文件；
 //     Creating 过期/孤儿文件由后台 GC（见 server 层 `object_gc_loop`）兜底；
-//   - chunk 静态加密为独立开关（默认关闭）：随机 nonce 写文件头，根密钥直接作
-//     AES-256-GCM 数据密钥（v1；轮换/独立 DEK 治理见 STATUS.md 整改要点）；
+//   - chunk 静态加密为独立开关（默认关闭）：DEK 化信封——配置根密钥（hex64）经
+//     HKDF-SHA256 派生 KEK（仅内存），KEK 包裹随机 DEK（key_id 版本化；密文落盘
+//     `<root>/objects/keys/`），新 chunk 文件头 `magic("COBJ2") || key_id(4 BE) ||
+//     nonce(12)`；v1（"COBJ1"，Phase A 根密钥直作 DEK）文件兼容读取；DEK 按
+//     `[object_storage].encryption_rotation_days` 自动轮换（仅影响新写入，旧 DEK
+//     保留解密历史——对齐 /kv/ key_management 治理，见 STATUS.md 整改要点）；
 //   - 硬前提：chunk 与 MVCC/快照物理隔离、配额 + 磁盘水位（服务层执行）、
 //     流式协议绕 4MiB RPC 上限（coord.storage proto）、容量按副本折算披露。
 
@@ -25,6 +29,8 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use coord_core::error::{Error, Result};
+use hkdf::Hkdf;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -38,12 +44,32 @@ pub const OBJECT_PREFIX: &[u8] = b"/obj/";
 pub const MANIFEST_PREFIX: &[u8] = b"/obj/m/";
 /// 对象根子目录名（位于 raft 数据目录下，如 `<data_dir>/objects/`）
 const OBJECTS_DIR: &str = "objects";
-/// chunk 文件头 magic（加密文件用）
-const CHUNK_MAGIC: &[u8; 5] = b"COBJ1";
+/// chunk 加密文件头 magic（v2 信封：key_id 版本化，见 ChunkCrypto）
+const CHUNK_MAGIC: &[u8; 5] = b"COBJ2";
+/// v1 遗留加密格式（Phase A：根密钥直作 DEK）——仅读兼容
+const CHUNK_MAGIC_V1: &[u8; 5] = b"COBJ1";
+/// chunk 文件头 key_id 长度（4 字节 BE）
+const KEY_ID_LEN: usize = 4;
 /// 加密根密钥长度（256-bit）
 const ROOT_KEY_LEN: usize = 32;
+/// DEK 长度（256-bit）
+const DEK_LEN: usize = 32;
+/// KEK 长度（256-bit）
+const KEK_LEN: usize = 32;
 /// GCM nonce 长度（96-bit）
 const NONCE_LEN: usize = 12;
+/// GCM tag 长度（128-bit）
+const TAG_LEN: usize = 16;
+/// 密钥子目录名（位于 `<root>/objects/keys/`）
+const KEYS_DIR: &str = "keys";
+/// 包裹 DEK 落盘文件 magic（4 字节）
+const WRAPPED_DEK_MAGIC: &[u8; 4] = b"ODK1";
+/// 包裹 DEK 密文长度：nonce(12) + DEK(32) + tag(16) = 60
+const WRAPPED_DEK_LEN: usize = NONCE_LEN + DEK_LEN + TAG_LEN;
+/// DEK 落盘文件长度：magic(4) + wrapped(60) = 64
+const KEY_FILE_LEN: usize = WRAPPED_DEK_MAGIC.len() + WRAPPED_DEK_LEN;
+/// 退役 DEK 内存缓存上限（FIFO；防止长运行节点缓存无限增长）
+const RETIRED_DEK_MAX: usize = 16;
 
 // ──── 上限/限额（服务层 + apply 双保险） ────
 
@@ -58,6 +84,8 @@ pub struct ObjectLimits {
     pub quota_bytes: u64,
     /// Creating 对象视为过期（无新 chunk）的秒数，之后由 GC 删除
     pub upload_timeout_secs: u64,
+    /// chunk DEK 自动轮换间隔（秒；0 = 关闭）。仅加密启用时有意义。
+    pub dek_rotation_secs: u64,
 }
 
 impl Default for ObjectLimits {
@@ -67,6 +95,7 @@ impl Default for ObjectLimits {
             max_object_size: 256 * 1024 * 1024,
             quota_bytes: 0,
             upload_timeout_secs: 300,
+            dek_rotation_secs: 0,
         }
     }
 }
@@ -222,37 +251,370 @@ impl ObjectManifest {
 
 // ──── chunk 文件存储 ────
 
-/// chunk 静态加密上下文（None = 明文）
+/// chunk 密钥环内部状态（Mutex 保护：apply 写路径串行 + GC/读多线程并发）。
+struct ChunkKeyringInner {
+    active_dek: [u8; DEK_LEN],
+    active_key_id: u32,
+    next_key_id: u32,
+    /// 已退役 DEK（key_id → 明文），供读取历史 chunk；FIFO 上限见 RETIRED_DEK_MAX
+    retired: Vec<(u32, [u8; DEK_LEN])>,
+    /// 最近一次 DEK 轮换墙钟（unix 秒）
+    last_rotation_unix: i64,
+}
+
+impl ChunkKeyringInner {
+    fn dek(&self, key_id: u32) -> Option<[u8; DEK_LEN]> {
+        if key_id == self.active_key_id {
+            return Some(self.active_dek);
+        }
+        self.retired
+            .iter()
+            .rev()
+            .find(|(id, _)| *id == key_id)
+            .map(|(_, d)| *d)
+    }
+}
+
+/// chunk 静态加密上下文（None = 明文）。
+///
+/// DEK 化信封（对齐 /kv/ `key_management` 三层密钥）：
+///   配置根密钥(hex64) → HKDF-SHA256(info="coord-obj-kek-v1") → KEK（仅内存）
+///   → AES-256-GCM wrap/unwrap 随机 DEK（key_id 单调递增；密文落盘
+///     `<root>/objects/keys/dek-{key_id:08x}.bin`）。
+/// 新 chunk 以 active DEK 加密（文件头 `COBJ2 || key_id(4BE) || nonce(12)`）；
+/// DEK 轮换后旧 DEK 保留在内存缓存供读历史 chunk。`legacy_root_dek` 仅用于
+/// 读取 v1（"COBJ1"，根密钥直作 DEK）文件——Phase A 已落盘数据的兼容路径。
 struct ChunkCrypto {
-    cipher: Aes256Gcm,
+    /// v1 兼容读的根密钥明文（仅内存；v2 数据不再直用作 DEK）
+    legacy_root_dek: [u8; DEK_LEN],
+    kek: Aes256Gcm,
+    keys_dir: PathBuf,
+    inner: std::sync::Mutex<ChunkKeyringInner>,
 }
 
 impl ChunkCrypto {
-    /// 根密钥（32 字节 hex64 解析）
-    fn from_root_key_hex(hex_key: &str) -> Result<Self> {
-        let key = decode_hex(hex_key)
-            .map_err(|_| Error::InvalidArgument("object storage root key must be hex64".into()))?;
-        if key.len() != ROOT_KEY_LEN {
+    /// 从配置根密钥引导：派生 KEK；扫描 `keys_dir` 加载全部已包裹 DEK
+    /// （active = 最大 key_id）；无密钥文件（首启/快照安装清空后）bootstrap
+    /// 首个 DEK（key_id=1）并原子落盘。`root` = raft 数据目录。
+    fn load(root: &Path, root_key_hex: &str) -> Result<Self> {
+        let root_bytes = decode_hex(root_key_hex).map_err(|_| {
+            Error::InvalidArgument("object storage root key must be hex64".into())
+        })?;
+        if root_bytes.len() != ROOT_KEY_LEN {
             return Err(Error::InvalidArgument(
                 "object storage root key must be 32 bytes (hex64)".into(),
             ));
         }
-        let key_bytes: [u8; ROOT_KEY_LEN] = key
-            .try_into()
-            .map_err(|_| Error::InvalidArgument("root key length".into()))?;
+        let mut root_key = [0u8; DEK_LEN];
+        root_key.copy_from_slice(&root_bytes);
+
+        // KEK = HKDF-SHA256(root_key, salt=None, info="coord-obj-kek-v1")
+        let hkdf = Hkdf::<Sha256>::new(None, &root_key);
+        let mut kek_bytes = [0u8; KEK_LEN];
+        hkdf.expand(b"coord-obj-kek-v1", &mut kek_bytes)
+            .map_err(|e| Error::Internal(format!("object chunk KEK derive: {e}")))?;
+        let kek = Aes256Gcm::new_from_slice(&kek_bytes)
+            .map_err(|e| Error::Internal(format!("init chunk KEK: {e}")))?;
+
+        let keys_dir = root.join(OBJECTS_DIR).join(KEYS_DIR);
+        let mut retired: Vec<(u32, [u8; DEK_LEN])> = Vec::new();
+        let mut active_key_id = 0u32;
+        let mut active_dek = [0u8; DEK_LEN];
+        let mut last_rotation_unix = 0i64;
+
+        if keys_dir.is_dir() {
+            let mut entries: Vec<_> = std::fs::read_dir(&keys_dir)
+                .map_err(|e| Error::Storage(format!("read {}: {e}", keys_dir.display())))?
+                .filter_map(|e| e.ok())
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
+            for entry in entries {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if let Some(rest) =
+                    fname.strip_prefix("dek-").and_then(|r| r.strip_suffix(".bin"))
+                {
+                    let Ok(key_id) = u32::from_str_radix(rest, 16) else {
+                        continue;
+                    };
+                    let raw = std::fs::read(entry.path()).map_err(|e| {
+                        Error::Storage(format!(
+                            "read wrapped DEK {}: {e}",
+                            entry.path().display()
+                        ))
+                    })?;
+                    let dek = unwrap_dek_file(&kek, &raw)?;
+                    if key_id > active_key_id {
+                        // 更高 key_id 成为 active；原 active（若已加载）转入退役缓存
+                        if active_key_id != 0 {
+                            retired.push((active_key_id, active_dek));
+                        }
+                        active_key_id = key_id;
+                        active_dek = dek;
+                    } else {
+                        retired.push((key_id, dek));
+                    }
+                } else if fname == "last_rotation" {
+                    if let Ok(raw) = std::fs::read(entry.path()) {
+                        if raw.len() == 8 {
+                            last_rotation_unix = i64::from_be_bytes(raw.try_into().unwrap());
+                        }
+                    }
+                }
+            }
+            if active_key_id == 0 {
+                // keys 目录存在但无 DEK（快照安装清空后残留空目录）：bootstrap 兜底
+                let (dek, id) = gen_dek(1);
+                persist_wrapped_dek(&kek, &keys_dir, id, &dek)?;
+                active_dek = dek;
+                active_key_id = id;
+            }
+        } else {
+            let (dek, id) = gen_dek(1);
+            persist_wrapped_dek(&kek, &keys_dir, id, &dek)?;
+            active_dek = dek;
+            active_key_id = id;
+        }
+        if last_rotation_unix == 0 {
+            last_rotation_unix = now_unix();
+            persist_last_rotation(&keys_dir, last_rotation_unix)?;
+        }
+
         Ok(Self {
-            cipher: Aes256Gcm::new_from_slice(&key_bytes)
-                .map_err(|e| Error::Internal(format!("init chunk cipher: {e}")))?,
+            legacy_root_dek: root_key,
+            kek,
+            keys_dir,
+            inner: std::sync::Mutex::new(ChunkKeyringInner {
+                active_dek,
+                active_key_id,
+                next_key_id: active_key_id + 1,
+                retired,
+                last_rotation_unix,
+            }),
         })
+    }
+    fn active_key_id(&self) -> u32 {
+        self.inner.lock().unwrap().active_key_id
+    }
+
+    /// 加密单个 chunk → v2 文件载荷：magic(5) || key_id(4 BE) || nonce(12) || ct
+    fn encrypt_chunk(&self, data: &[u8]) -> Result<Vec<u8>> {
+        let inner = self.inner.lock().unwrap();
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let cipher = Aes256Gcm::new_from_slice(&inner.active_dek)
+            .map_err(|e| Error::Internal(format!("init chunk DEK: {e}")))?;
+        let ct = cipher
+            .encrypt(&nonce, data)
+            .map_err(|e| Error::Internal(format!("chunk encrypt: {e}")))?;
+        let mut buf = Vec::with_capacity(CHUNK_MAGIC.len() + KEY_ID_LEN + NONCE_LEN + ct.len());
+        buf.extend_from_slice(CHUNK_MAGIC);
+        buf.extend_from_slice(&inner.active_key_id.to_be_bytes());
+        buf.extend_from_slice(&nonce);
+        buf.extend_from_slice(&ct);
+        Ok(buf)
+    }
+
+    /// 解密 chunk 文件载荷：自动识别 v2（"COBJ2" 信封）与 v1（"COBJ1" 根密钥
+    /// 直作 DEK）格式；不识别 → 错误。
+    fn decrypt_chunk(&self, bytes: &[u8], path: &Path) -> Result<Vec<u8>> {
+        // v2：COBJ2 || key_id(4 BE) || nonce(12) || ct
+        if bytes.len() >= CHUNK_MAGIC.len() + KEY_ID_LEN + NONCE_LEN
+            && &bytes[..CHUNK_MAGIC.len()] == CHUNK_MAGIC
+        {
+            let key_id = u32::from_be_bytes(
+                bytes[CHUNK_MAGIC.len()..CHUNK_MAGIC.len() + KEY_ID_LEN]
+                    .try_into()
+                    .unwrap(),
+            );
+            let nonce: [u8; NONCE_LEN] = bytes
+                [CHUNK_MAGIC.len() + KEY_ID_LEN..CHUNK_MAGIC.len() + KEY_ID_LEN + NONCE_LEN]
+                .try_into()
+                .unwrap();
+            let ct = &bytes[CHUNK_MAGIC.len() + KEY_ID_LEN + NONCE_LEN..];
+            let dek = self.inner.lock().unwrap().dek(key_id).ok_or_else(|| {
+                Error::Internal(format!(
+                    "chunk DEK key_id={key_id} unavailable ({})",
+                    path.display()
+                ))
+            })?;
+            let cipher = Aes256Gcm::new_from_slice(&dek)
+                .map_err(|e| Error::Internal(format!("init chunk DEK: {e}")))?;
+            return cipher.decrypt(Nonce::from_slice(&nonce), ct).map_err(|_| {
+                Error::Internal(format!("chunk decrypt failed ({})", path.display()))
+            });
+        }
+        // v1：COBJ1 || nonce(12) || ct（根密钥直作 DEK）
+        if bytes.len() >= CHUNK_MAGIC_V1.len() + NONCE_LEN
+            && &bytes[..CHUNK_MAGIC_V1.len()] == CHUNK_MAGIC_V1
+        {
+            let nonce: [u8; NONCE_LEN] =
+                bytes[CHUNK_MAGIC_V1.len()..CHUNK_MAGIC_V1.len() + NONCE_LEN]
+                    .try_into()
+                    .unwrap();
+            let ct = &bytes[CHUNK_MAGIC_V1.len() + NONCE_LEN..];
+            let cipher = Aes256Gcm::new_from_slice(&self.legacy_root_dek)
+                .map_err(|e| Error::Internal(format!("init legacy chunk cipher: {e}")))?;
+            return cipher.decrypt(Nonce::from_slice(&nonce), ct).map_err(|_| {
+                Error::Internal(format!(
+                    "legacy chunk decrypt failed ({})",
+                    path.display()
+                ))
+            });
+        }
+        Err(Error::Internal(format!(
+            "corrupt encrypted chunk {} (bad magic/length)",
+            path.display()
+        )))
+    }
+
+    /// DEK 轮换：生成新 DEK（next key_id）、包裹落盘、原子切换 active；
+    /// 旧 DEK 移入退役缓存。返回新 key_id。
+    fn rotate(&self) -> Result<u32> {
+        let mut inner = self.inner.lock().unwrap();
+        let key_id = inner.next_key_id;
+        let (dek, _) = gen_dek(key_id);
+        persist_wrapped_dek(&self.kek, &self.keys_dir, key_id, &dek)?;
+        let old_id = inner.active_key_id;
+        let old_dek = inner.active_dek;
+        inner.retired.push((old_id, old_dek));
+        if inner.retired.len() > RETIRED_DEK_MAX {
+            let excess = inner.retired.len() - RETIRED_DEK_MAX;
+            inner.retired.drain(..excess);
+        }
+        inner.active_dek = dek;
+        inner.active_key_id = key_id;
+        inner.next_key_id = key_id + 1;
+        inner.last_rotation_unix = now_unix();
+        persist_last_rotation(&self.keys_dir, inner.last_rotation_unix)?;
+        Ok(key_id)
+    }
+
+    /// 到期自动轮换（写路径调用；`rotation_secs` = 0 关闭）。返回新 key_id
+    /// （未触发轮换返回 0）。
+    fn maybe_rotate(&self, rotation_secs: u64) -> Result<u32> {
+        if rotation_secs == 0 {
+            return Ok(0);
+        }
+        let now = now_unix();
+        let last = self.inner.lock().unwrap().last_rotation_unix;
+        if now.saturating_sub(last) < rotation_secs as i64 {
+            return Ok(0);
+        }
+        self.rotate()
     }
 }
 
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 生成随机 DEK（key_id 由调用方分配）
+fn gen_dek(key_id: u32) -> ([u8; DEK_LEN], u32) {
+    let mut dek = [0u8; DEK_LEN];
+    rand::thread_rng().fill_bytes(&mut dek);
+    (dek, key_id)
+}
+
+/// KEK 包裹 DEK → nonce(12) || ct(32+16) = 60 字节
+fn wrap_dek(kek: &Aes256Gcm, dek: &[u8; DEK_LEN]) -> Result<Vec<u8>> {
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ct = kek
+        .encrypt(&nonce, dek.as_ref())
+        .map_err(|e| Error::Internal(format!("wrap chunk DEK: {e}")))?;
+    let mut out = Vec::with_capacity(WRAPPED_DEK_LEN);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+fn unwrap_dek(kek: &Aes256Gcm, wrapped: &[u8]) -> Result<[u8; DEK_LEN]> {
+    if wrapped.len() != WRAPPED_DEK_LEN {
+        return Err(Error::Crypto(format!(
+            "wrapped DEK must be {WRAPPED_DEK_LEN} bytes, got {}",
+            wrapped.len()
+        )));
+    }
+    let nonce = Nonce::from_slice(&wrapped[..NONCE_LEN]);
+    let ct = &wrapped[NONCE_LEN..];
+    let pt = kek
+        .decrypt(nonce, ct)
+        .map_err(|_| Error::Crypto("unwrap chunk DEK failed".into()))?;
+    if pt.len() != DEK_LEN {
+        return Err(Error::Crypto("unwrapped chunk DEK length".into()));
+    }
+    let mut dek = [0u8; DEK_LEN];
+    dek.copy_from_slice(&pt);
+    Ok(dek)
+}
+
+/// DEK 落盘文件：magic(4) || wrapped(60)；原子写（tmp + rename）
+fn persist_wrapped_dek(
+    kek: &Aes256Gcm,
+    keys_dir: &Path,
+    key_id: u32,
+    dek: &[u8; DEK_LEN],
+) -> Result<()> {
+    let wrapped = wrap_dek(kek, dek)?;
+    let mut buf = Vec::with_capacity(KEY_FILE_LEN);
+    buf.extend_from_slice(WRAPPED_DEK_MAGIC);
+    buf.extend_from_slice(&wrapped);
+    let path = keys_dir.join(format!("dek-{key_id:08x}.bin"));
+    atomic_write_file(&path, &buf)
+}
+
+fn unwrap_dek_file(kek: &Aes256Gcm, raw: &[u8]) -> Result<[u8; DEK_LEN]> {
+    if raw.len() != KEY_FILE_LEN || &raw[..WRAPPED_DEK_MAGIC.len()] != WRAPPED_DEK_MAGIC {
+        return Err(Error::Crypto("corrupt wrapped DEK file".into()));
+    }
+    unwrap_dek(kek, &raw[WRAPPED_DEK_MAGIC.len()..])
+}
+
+/// 记录最近 DEK 轮换墙钟（8 字节 BE unix 秒）
+fn persist_last_rotation(keys_dir: &Path, unix: i64) -> Result<()> {
+    atomic_write_file(&keys_dir.join("last_rotation"), &unix.to_be_bytes())
+}
+
+fn atomic_write_file(path: &Path, data: &[u8]) -> Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::Internal("key path has no parent".into()))?;
+    std::fs::create_dir_all(dir).map_err(|e| {
+        Error::Storage(format!("create key dir {}: {e}", dir.display()))
+    })?;
+    let fname = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let tmp = dir.join(format!(".{fname}.tmp"));
+    let result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::Storage(format!(
+            "atomic write {}: {e}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// 单个 raft 实例（一个 Region / 根）的 chunk 文件存储。
-/// 构造不创建任何目录（关闭时磁盘布局字节级不变）；首个对象写入时惰性建目录。
+/// 明文（加密关闭）时构造不创建任何目录（磁盘布局字节级不变），首个对象写入
+/// 惰性建目录；加密开启时引导期创建 `<root>/objects/keys/`（包裹 DEK 落盘）。
 pub struct ChunkStore {
     root: PathBuf,
     crypto: Option<Arc<ChunkCrypto>>,
     pub limits: Arc<ObjectLimits>,
+    /// DEK 自动轮换间隔（秒；0 = 关闭），来自 `limits.dek_rotation_secs`
+    rotation_secs: u64,
 }
 
 impl std::fmt::Debug for ChunkStore {
@@ -272,14 +634,17 @@ impl ChunkStore {
         limits: Arc<ObjectLimits>,
         encryption_root_key_hex: Option<&str>,
     ) -> Result<Arc<Self>> {
+        let root: PathBuf = root.into();
+        let rotation_secs = limits.dek_rotation_secs;
         let crypto = match encryption_root_key_hex {
-            Some(k) => Some(Arc::new(ChunkCrypto::from_root_key_hex(k)?)),
+            Some(k) => Some(Arc::new(ChunkCrypto::load(&root, k)?)),
             None => None,
         };
         Ok(Arc::new(Self {
-            root: root.into(),
+            root,
             crypto,
             limits,
+            rotation_secs,
         }))
     }
 
@@ -316,17 +681,9 @@ impl ChunkStore {
 
         let payload = match &self.crypto {
             Some(crypto) => {
-                // 随机 nonce + 文件头：magic(5) || nonce(12) || ciphertext
-                let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-                let ct = crypto
-                    .cipher
-                    .encrypt(&nonce, data)
-                    .map_err(|e| Error::Internal(format!("chunk encrypt: {e}")))?;
-                let mut buf = Vec::with_capacity(CHUNK_MAGIC.len() + NONCE_LEN + ct.len());
-                buf.extend_from_slice(CHUNK_MAGIC);
-                buf.extend_from_slice(&nonce);
-                buf.extend_from_slice(&ct);
-                buf
+                // DEK 到期自动轮换（多数写路径不触发；轮换仅影响新写入 chunk）
+                crypto.maybe_rotate(self.rotation_secs)?;
+                crypto.encrypt_chunk(data)?
             }
             None => data.to_vec(),
         };
@@ -367,31 +724,7 @@ impl ChunkStore {
         })?;
         match &self.crypto {
             None => Ok(bytes),
-            Some(crypto) => {
-                if bytes.len() < CHUNK_MAGIC.len() + NONCE_LEN {
-                    return Err(Error::Internal(format!(
-                        "corrupt encrypted chunk {} (too short)",
-                        path.display()
-                    )));
-                }
-                if &bytes[..CHUNK_MAGIC.len()] != CHUNK_MAGIC {
-                    return Err(Error::Internal(format!(
-                        "corrupt encrypted chunk {} (bad magic)",
-                        path.display()
-                    )));
-                }
-                let nonce: [u8; NONCE_LEN] =
-                    bytes[CHUNK_MAGIC.len()..CHUNK_MAGIC.len() + NONCE_LEN]
-                        .try_into()
-                        .unwrap();
-                let ct = &bytes[CHUNK_MAGIC.len() + NONCE_LEN..];
-                crypto
-                    .cipher
-                    .decrypt(Nonce::from_slice(&nonce), ct)
-                    .map_err(|_| {
-                        Error::Internal(format!("chunk decrypt failed ({})", path.display()))
-                    })
-            }
+            Some(crypto) => crypto.decrypt_chunk(&bytes, &path),
         }
     }
 
@@ -422,7 +755,37 @@ impl ChunkStore {
         Ok(())
     }
 
-    /// 已用磁盘字节（估算，遍历 chunk 文件；配额 admission 用）
+    /// 强制轮换 chunk DEK：生成新 key_id，旧 DEK 移入缓存仍可读历史 chunk
+    /// （管理/测试入口；生产自动轮换见 `write_chunk` 内 `maybe_rotate`）。
+    /// 未启用加密返回 0。
+    pub fn rotate_dek(&self) -> Result<u32> {
+        match &self.crypto {
+            Some(crypto) => crypto.rotate(),
+            None => Ok(0),
+        }
+    }
+
+    /// 当前活跃 chunk DEK 的 key_id（未启用加密返回 0）。
+    pub fn active_key_id(&self) -> u32 {
+        match &self.crypto {
+            Some(crypto) => crypto.active_key_id(),
+            None => 0,
+        }
+    }
+
+    /// 已部署 chunk DEK 版本数（active + 退役缓存；未加密返回 0）。
+    pub fn dek_version_count(&self) -> usize {
+        match &self.crypto {
+            Some(crypto) => {
+                let inner = crypto.inner.lock().unwrap();
+                1 + inner.retired.len()
+            }
+            None => 0,
+        }
+    }
+
+    /// 已用磁盘字节（估算，遍历 chunk 文件求和；配额 admission 用）。
+    /// 密钥目录（DEK 密文，见 KEYS_DIR）不计入对象配额。
     pub fn usage_bytes(&self) -> Result<u64> {
         let mut total = 0u64;
         let dir = self.objects_dir();
@@ -436,11 +799,26 @@ impl ChunkStore {
             if !entry.path().is_dir() {
                 continue;
             }
-            for sub in std::fs::read_dir(entry.path()).map_err(|e| {
-                Error::Storage(format!("read object subdir: {e}"))
+            // 密钥目录（DEK 密文）不计入对象配额
+            if entry.file_name() == KEYS_DIR {
+                continue;
+            }
+            let fan = entry.path();
+            for obj in std::fs::read_dir(&fan).map_err(|e| {
+                Error::Storage(format!("read fan dir {}: {e}", fan.display()))
             })? {
-                let sub = sub.map_err(|e| Error::Storage(format!("object subdir entry: {e}")))?;
-                total += file_size(&sub.path()).unwrap_or(0);
+                let obj = obj.map_err(|e| Error::Storage(format!("fan dir entry: {e}")))?;
+                if !obj.path().is_dir() {
+                    continue;
+                }
+                for f in std::fs::read_dir(obj.path()).map_err(|e| {
+                    Error::Storage(format!("read object dir {}: {e}", obj.path().display()))
+                })? {
+                    let f = f.map_err(|e| Error::Storage(format!("object dir entry: {e}")))?;
+                    if f.path().is_file() {
+                        total += file_size(&f.path()).unwrap_or(0);
+                    }
+                }
             }
         }
         Ok(total)
@@ -821,6 +1199,54 @@ mod tests {
         assert!(ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), Some("zz")).is_err());
     }
 
+    /// 测试辅助：递归收集 `<root>/objects/` 下 chunk-* 文件（不含 keys/）
+    fn chunk_files_for_test(root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.join(OBJECTS_DIR)];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.file_name() == Some(std::ffi::OsStr::new(KEYS_DIR)) {
+                    continue;
+                }
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().starts_with("chunk-"))
+                    .unwrap_or(false)
+                {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_usage_bytes_sums_chunk_files_excludes_keys() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // 明文：usage = chunk 文件字节精确和
+        let plain = ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), None).unwrap();
+        plain.write_chunk(b"b", b"o", 0, b"hello").unwrap(); // 5B
+        plain.write_chunk(b"b", b"o", 1, b"world!").unwrap(); // 6B
+        plain.write_chunk(b"b", b"o2", 0, b"abc").unwrap(); // 3B
+        assert_eq!(plain.usage_bytes().unwrap(), 14);
+
+        // 加密：usage = 落盘 chunk 文件字节合计（keys/ 目录 DEK 密文不计入）
+        let key = "ab".repeat(32);
+        let enc = ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), Some(&key)).unwrap();
+        enc.write_chunk(b"b", b"o", 2, b"zz").unwrap();
+        let mut on_disk = 0u64;
+        for f in chunk_files_for_test(dir.path()) {
+            on_disk += std::fs::metadata(f).unwrap().len();
+        }
+        assert_eq!(enc.usage_bytes().unwrap(), on_disk);
+    }
+
     #[test]
     fn test_orphan_sweep() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -831,5 +1257,112 @@ mod tests {
         assert_eq!(store.sweep_orphans(&live).unwrap(), 1);
         assert!(store.chunk_file_exists(b"live", b"o1", 0));
         assert!(!store.chunk_file_exists(b"dead", b"o2", 0));
+        // keys 目录不被孤儿回收误删
+        let key = "ab".repeat(32);
+        let enc = ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), Some(&key)).unwrap();
+        enc.write_chunk(b"live", b"o1", 1, b"c").unwrap();
+        let live2: HashSet<String> = vec![object_dir_hash(b"live", b"o1")].into_iter().collect();
+        assert_eq!(enc.sweep_orphans(&live2).unwrap(), 0);
+        assert!(dir.path().join("objects/keys/dek-00000001.bin").is_file());
+    }
+
+    /// v2 文件头：COBJ2 || key_id(4 BE) || nonce(12)；DEK 密文落盘 keys/
+    #[test]
+    fn test_chunk_store_encrypted_v2_header_and_key_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let key = "ab".repeat(32); // 64 hex chars
+        let store =
+            ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), Some(&key)).unwrap();
+        assert_eq!(store.active_key_id(), 1);
+        store.write_chunk(b"b", b"o", 0, b"payload-0").unwrap();
+        let raw = std::fs::read(store.chunk_path(b"b", b"o", 0)).unwrap();
+        assert_eq!(&raw[..5], CHUNK_MAGIC, "v2 magic expected");
+        assert_eq!(u32::from_be_bytes(raw[5..9].try_into().unwrap()), 1);
+        assert_eq!(store.read_chunk(b"b", b"o", 0).unwrap(), b"payload-0");
+        let keys = dir.path().join("objects").join("keys");
+        assert!(keys.join("dek-00000001.bin").is_file());
+        assert!(keys.join("last_rotation").is_file());
+        // 明文不可见
+        assert!(!raw.windows(9).any(|w| w == b"payload-0"));
+    }
+
+    /// DEK 轮换：新 chunk 用新 key_id，旧 chunk 仍可读；重启（同根密钥）后
+    /// 从磁盘加载全部 DEK，历史 chunk 可读。
+    #[test]
+    fn test_chunk_dek_rotation_old_readable_across_restart() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let key = "ab".repeat(32);
+        let store =
+            ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), Some(&key)).unwrap();
+        store.write_chunk(b"b", b"o", 0, b"old-chunk").unwrap();
+        assert_eq!(store.active_key_id(), 1);
+        assert_eq!(store.rotate_dek().unwrap(), 2);
+        assert_eq!(store.active_key_id(), 2);
+        assert_eq!(store.dek_version_count(), 2);
+        store.write_chunk(b"b", b"o", 1, b"new-chunk").unwrap();
+        let raw1 = std::fs::read(store.chunk_path(b"b", b"o", 1)).unwrap();
+        assert_eq!(&raw1[..5], CHUNK_MAGIC);
+        assert_eq!(u32::from_be_bytes(raw1[5..9].try_into().unwrap()), 2);
+        assert_eq!(store.read_chunk(b"b", b"o", 0).unwrap(), b"old-chunk");
+        assert_eq!(store.read_chunk(b"b", b"o", 1).unwrap(), b"new-chunk");
+        // 重启恢复
+        let store2 =
+            ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), Some(&key)).unwrap();
+        assert_eq!(store2.active_key_id(), 2);
+        assert_eq!(store2.dek_version_count(), 2);
+        assert_eq!(store2.read_chunk(b"b", b"o", 0).unwrap(), b"old-chunk");
+        assert_eq!(store2.read_chunk(b"b", b"o", 1).unwrap(), b"new-chunk");
+        assert!(dir.path().join("objects/keys/dek-00000002.bin").is_file());
+    }
+
+    /// v1（Phase A）格式兼容读：COBJ1 || nonce(12) || ct，根密钥直作 DEK
+    #[test]
+    fn test_chunk_v1_legacy_format_read_compat() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let key_hex = "ab".repeat(32);
+        let key_bytes = decode_hex(&key_hex).unwrap();
+        let store =
+            ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), Some(&key_hex)).unwrap();
+        let path = store.chunk_path(b"b", b"legacy", 0);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes).unwrap();
+        let ct = cipher.encrypt(&nonce, b"legacy-payload".as_ref()).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(CHUNK_MAGIC_V1);
+        buf.extend_from_slice(&nonce);
+        buf.extend_from_slice(&ct);
+        std::fs::write(&path, &buf).unwrap();
+        assert_eq!(
+            store.read_chunk(b"b", b"legacy", 0).unwrap(),
+            b"legacy-payload"
+        );
+    }
+
+    /// 明文模式：轮换 API 均为 no-op
+    #[test]
+    fn test_chunk_rotation_plain_noop() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), None).unwrap();
+        assert_eq!(store.active_key_id(), 0);
+        assert_eq!(store.rotate_dek().unwrap(), 0);
+        assert_eq!(store.dek_version_count(), 0);
+    }
+
+    /// 到期自动轮换：写路径在间隔到期后推进 key_id
+    #[test]
+    fn test_chunk_auto_rotate_by_age() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let key = "ab".repeat(32);
+        let mut limits = ObjectLimits::default();
+        limits.dek_rotation_secs = 1;
+        let store = ChunkStore::new(dir.path(), Arc::new(limits), Some(&key)).unwrap();
+        store.write_chunk(b"b", b"o", 0, b"a").unwrap();
+        assert_eq!(store.active_key_id(), 1);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store.write_chunk(b"b", b"o", 1, b"b").unwrap();
+        assert_eq!(store.active_key_id(), 2);
+        assert_eq!(store.read_chunk(b"b", b"o", 0).unwrap(), b"a");
+        assert_eq!(store.read_chunk(b"b", b"o", 1).unwrap(), b"b");
     }
 }

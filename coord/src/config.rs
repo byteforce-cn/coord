@@ -920,6 +920,11 @@ pub struct ObjectStorageConfig {
     /// 或经环境变量 COORD_OBJECT_STORAGE_ENCRYPTION_ROOT_KEY 注入
     #[serde(default)]
     pub encryption_root_key: String,
+    /// chunk DEK 自动轮换间隔（天；0 = 关闭自动轮换）。
+    /// 根密钥经 HKDF 派生 KEK 包裹随机 DEK（key_id 版本化），到期轮换仅
+    /// 影响新写入（旧 DEK 保留解密历史 chunk，对齐 /kv/ key_management 语义）。
+    #[serde(default = "default_object_encryption_rotation_days")]
+    pub encryption_rotation_days: u64,
 }
 
 impl Default for ObjectStorageConfig {
@@ -933,6 +938,7 @@ impl Default for ObjectStorageConfig {
             gc_interval_secs: 60,
             encryption_enabled: false,
             encryption_root_key: String::new(),
+            encryption_rotation_days: 90,
         }
     }
 }
@@ -948,6 +954,9 @@ fn default_object_upload_timeout() -> u64 {
 }
 fn default_object_gc_interval() -> u64 {
     60
+}
+fn default_object_encryption_rotation_days() -> u64 {
+    90
 }
 
 /// R-SVC-18：运行时资源限制配置（`[limits]` 段）。

@@ -18,6 +18,12 @@ use coord_proto::maintenance::{
     maintenance_client::MaintenanceClient as MaintenanceStub, MemberListRequest, SealRequest,
     StatusRequest, StatusResponse, UnsealRequest, UnsealResponse,
 };
+use coord_proto::storage::storage_client::StorageClient as StorageStub;
+use coord_proto::storage::{
+    get_response, put_request, DeleteRequest as StorageDeleteRequest,
+    GetRequest as StorageGetRequest, ObjectStat, PutMeta, PutRequest as StoragePutRequest,
+    StatRequest as StorageStatRequest,
+};
 use coord_proto::txn::{
     txn_client::TxnClient as TxnStub, Compare, RequestOp, TxnRequest, TxnResponse,
 };
@@ -200,6 +206,11 @@ impl Client {
     /// 返回 Maintenance 客户端（运维操作：Seal/Unseal/Status/Snapshot）
     pub fn maintenance(&self) -> MaintenanceClient {
         MaintenanceClient::new(self.clone())
+    }
+
+    /// 返回对象存储客户端（coord.storage；EXPERIMENTAL）
+    pub fn storage(&self) -> StorageClient {
+        StorageClient::new(self.clone())
     }
 
     // ──── 内部方法 ────
@@ -1079,6 +1090,215 @@ impl MaintenanceClient {
         let resp = stub.member_list(request).await.map_err(from_status)?;
         self.client.return_channel(&endpoint, channel);
         Ok(resp.into_inner())
+    }
+}
+
+// ──── 对象存储客户端（coord.storage；EXPERIMENTAL 数据面） ────
+
+/// 默认 chunk 分片字节数（对齐服务端 `[object_storage].chunk_size_bytes` 默认
+/// 4MiB；服务端配置更小或对象超 `max_object_size_bytes` 时 Put 返回
+/// INVALID_ARGUMENT）。
+pub const DEFAULT_OBJECT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+
+/// 单消息解码上限：单 chunk 4MiB 的 protobuf 编码消息（字段头 + varint 长度
+/// 前缀）略超 4MiB → 客户端解码上限留余量（服务端 chunk ≤ 4MiB 恒满足）。
+const STORAGE_DECODE_LIMIT: usize = 8 * 1024 * 1024;
+
+/// 对象上传结果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PutObjectResult {
+    /// 对象 Commit 所在 raft revision
+    pub revision: u64,
+    /// 实际落盘字节数
+    pub size: u64,
+    /// 实际 chunk 数
+    pub chunks: u64,
+}
+
+/// 对象下载结果（Get 首条 stat + 全量数据）
+#[derive(Debug, Clone)]
+pub struct ObjectData {
+    pub stat: ObjectStat,
+    pub data: Vec<u8>,
+}
+
+/// 对象存储客户端（coord.storage.Storage）。
+///
+/// - 对象 = (bucket, object_id)：bucket 为非空 utf8、≤255B、不含 `/`；
+///   object_id 任意字节 ≤1024B；
+/// - `put` 为客户端流式上传（meta 首条 + 逐 chunk，默认 chunk 4MiB）；
+///   已存在对象 Put → `Error::AlreadyExists`（v1 无覆盖写）；上传中断残留由
+///   服务端 GC 按 upload_timeout 回收，客户端可 Delete 后整体重试；
+/// - `get` 为服务端流式下载（ReadIndex 强一致读，自动路由 leader）；
+/// - `delete`/`stat` unary。
+#[derive(Clone)]
+pub struct StorageClient {
+    client: Client,
+}
+
+impl StorageClient {
+    fn new(client: Client) -> Self {
+        Self { client }
+    }
+
+    /// 上传整对象（默认 chunk 4MiB）。
+    ///
+    /// # Errors
+    /// - `Error::AlreadyExists`：对象已存在（Committed 或上传中）；
+    /// - `Error::InvalidArgument`：chunk 超服务端配置 / 字节与声明不符。
+    pub async fn put(&self, bucket: &str, object_id: &[u8], data: &[u8]) -> Result<PutObjectResult> {
+        self.put_chunked(bucket, object_id, data, DEFAULT_OBJECT_CHUNK_SIZE)
+            .await
+    }
+
+    /// 上传整对象（自定义 chunk 分片；≤ 4MiB 且 ≤ 服务端 chunk_size_bytes）。
+    pub async fn put_chunked(
+        &self,
+        bucket: &str,
+        object_id: &[u8],
+        data: &[u8],
+        chunk_size: usize,
+    ) -> Result<PutObjectResult> {
+        if chunk_size == 0 || chunk_size > 4 * 1024 * 1024 {
+            return Err(Error::InvalidArgument(
+                "object chunk_size must be in (0, 4MiB]".into(),
+            ));
+        }
+        if data.is_empty() {
+            return Err(Error::InvalidArgument("object data must not be empty".into()));
+        }
+        let client = self.client.clone();
+        let bucket = bucket.to_string();
+        let object_id = object_id.to_vec();
+        let data = data.to_vec();
+        client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = StorageStub::new(channel)
+                    .max_decoding_message_size(STORAGE_DECODE_LIMIT);
+                // 消息流在 closure 体内（每次调用）重建——async 块只 move 成品
+                let mut msgs = Vec::with_capacity(data.len() / chunk_size + 2);
+                msgs.push(StoragePutRequest {
+                    part: Some(put_request::Part::Meta(PutMeta {
+                        bucket: bucket.clone(),
+                        object_id: object_id.clone(),
+                        total_size: data.len() as i64,
+                    })),
+                });
+                for c in data.chunks(chunk_size) {
+                    msgs.push(StoragePutRequest {
+                        part: Some(put_request::Part::Chunk(c.to_vec())),
+                    });
+                }
+                async move {
+                    let resp = stub
+                        .put(tonic::Request::new(tokio_stream::iter(msgs)))
+                        .await?;
+                    let inner = resp.into_inner();
+                    Ok(PutObjectResult {
+                        revision: inner.revision as u64,
+                        size: inner.size as u64,
+                        chunks: inner.chunks as u64,
+                    })
+                }
+            })
+            .await
+    }
+
+    /// 下载整对象（server-streaming；首条 stat + 逐 chunk 数据）。
+    ///
+    /// # Errors
+    /// - `Error::NotFound`：对象不存在/已删除；
+    /// - `Error::FailedPrecondition` 等：上传进行中（服务端语义透传）。
+    pub async fn get(&self, bucket: &str, object_id: &[u8]) -> Result<ObjectData> {
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub = StorageStub::new(channel.clone())
+            .max_decoding_message_size(STORAGE_DECODE_LIMIT);
+        let request = tonic::Request::new(StorageGetRequest {
+            bucket: bucket.to_string(),
+            object_id: object_id.to_vec(),
+        });
+        let resp = match stub.get(request).await {
+            Ok(r) => r,
+            Err(status) => {
+                self.client.return_channel(&endpoint, channel);
+                return Err(from_status(status));
+            }
+        };
+        let mut stream = resp.into_inner();
+        let mut stat: Option<ObjectStat> = None;
+        let mut data = Vec::new();
+        loop {
+            match stream.message().await {
+                Ok(Some(msg)) => match msg.part {
+                    Some(get_response::Part::Stat(s)) => stat = Some(s),
+                    Some(get_response::Part::Chunk(c)) => data.extend_from_slice(&c),
+                    None => {}
+                },
+                Ok(None) => break,
+                Err(status) => {
+                    self.client.return_channel(&endpoint, channel);
+                    return Err(from_status(status));
+                }
+            }
+        }
+        self.client.return_channel(&endpoint, channel);
+        let stat = stat.ok_or_else(|| Error::Internal("Get stream missing stat".into()))?;
+        Ok(ObjectData { stat, data })
+    }
+
+    /// 查询对象元数据。不存在/已删除 → `Ok(None)`。
+    pub async fn stat(&self, bucket: &str, object_id: &[u8]) -> Result<Option<ObjectStat>> {
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub = StorageStub::new(channel.clone())
+            .max_decoding_message_size(STORAGE_DECODE_LIMIT);
+        let request = tonic::Request::new(StorageStatRequest {
+            bucket: bucket.to_string(),
+            object_id: object_id.to_vec(),
+        });
+        let resp = match stub.stat(request).await {
+            Ok(r) => r,
+            Err(status) if status.code() == tonic::Code::NotFound => {
+                self.client.return_channel(&endpoint, channel);
+                return Ok(None);
+            }
+            Err(status) => {
+                self.client.return_channel(&endpoint, channel);
+                return Err(from_status(status));
+            }
+        };
+        self.client.return_channel(&endpoint, channel);
+        Ok(resp.into_inner().stat)
+    }
+
+    /// 删除对象（tombstone + 服务端同步删 chunk 文件），返回 (是否实际删除,
+    /// tombstone revision)。
+    ///
+    /// # Errors
+    /// `Error::NotFound`：对象不存在。
+    pub async fn delete_full(&self, bucket: &str, object_id: &[u8]) -> Result<(bool, u64)> {
+        let client = self.client.clone();
+        let bucket = bucket.to_string();
+        let object_id = object_id.to_vec();
+        client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = StorageStub::new(channel)
+                    .max_decoding_message_size(STORAGE_DECODE_LIMIT);
+                let request = tonic::Request::new(StorageDeleteRequest {
+                    bucket: bucket.clone(),
+                    object_id: object_id.clone(),
+                });
+                async move {
+                    let resp = stub.delete(request).await?;
+                    let inner = resp.into_inner();
+                    Ok((inner.deleted, inner.revision as u64))
+                }
+            })
+            .await
+    }
+
+    /// 删除对象。`true` = 本次实际删除；对象不存在 → `Error::NotFound`。
+    pub async fn delete(&self, bucket: &str, object_id: &[u8]) -> Result<bool> {
+        Ok(self.delete_full(bucket, object_id).await?.0)
     }
 }
 

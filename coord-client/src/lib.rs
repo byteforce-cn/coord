@@ -7,7 +7,8 @@
 // - config:      客户端配置（端点、超时、重试参数、TLS 配置）
 // - leader:      Leader 发现与缓存
 // - retry:       重试策略（指数退避、错误分类）
-// - client:      主客户端 + KV/Lease/Watch/Txn/Maintenance 子客户端 + 高级 Lock API
+// - client:      主客户端 + KV/Lease/Watch/Txn/Maintenance/Storage 子客户端
+//                + 高级 Lock API
 // - tls:         TLS/mTLS Channel 构建（Config.tls，供连接池与 Leader 发现共用）
 // （R-AGT-20：route_cache 死代码已移除——单连接直连模式无需 Leader 路由缓存）
 
@@ -20,7 +21,8 @@ mod tls;
 
 // 重新导出主要类型
 pub use client::{
-    Client, KvClient, LeaseClient, LeaseKeeper, Lock, MaintenanceClient, TxnClient, WatchClient,
+    Client, KvClient, LeaseClient, LeaseKeeper, Lock, MaintenanceClient, ObjectData,
+    PutObjectResult, StorageClient, TxnClient, WatchClient, DEFAULT_OBJECT_CHUNK_SIZE,
 };
 pub use config::{Config, TlsConfig};
 pub use leader::LeaderDiscovery;

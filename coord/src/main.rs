@@ -1660,6 +1660,8 @@ async fn run_server(
             max_object_size: cfg.object_storage.max_object_size_bytes,
             quota_bytes: cfg.object_storage.max_total_storage_bytes,
             upload_timeout_secs: cfg.object_storage.upload_timeout_secs,
+            // Phase C（DEK 化）：根密钥仅派生 KEK，DEK 到期自动轮换（0 = 关闭）
+            dek_rotation_secs: cfg.object_storage.encryption_rotation_days * 86400,
         });
         Some(Arc::new(ObjectStoreCtx {
             limits,
@@ -2453,10 +2455,15 @@ async fn run_server(
     let maintenance_svc =
         MaintenanceServer::from_arc(Arc::clone(&node)).max_decoding_message_size(MAX_DECODING_MSG);
     // 对象存储（[object_storage].enabled=true 才注册；否则 reflection 不可见）
+    //
+    // 解码上限须容纳单 chunk 消息：4MiB chunk 的 protobuf 编码消息 = 字段头
+    // (1B) + varint 长度前缀(≤4B) + payload，略超 4MiB → 上限 = chunk_size +
+    // 64KiB 余量（raft RPC 另有 16MiB 上限，见 RAFT_MAX_DECODING_MSG）。
     let storage_svc = if cfg.object_storage.enabled {
+        let obj_decode_limit = cfg.object_storage.chunk_size_bytes + 64 * 1024;
         Some(
             StorageServer::from_arc(Arc::clone(&node))
-                .max_decoding_message_size(MAX_DECODING_MSG),
+                .max_decoding_message_size(obj_decode_limit),
         )
     } else {
         None

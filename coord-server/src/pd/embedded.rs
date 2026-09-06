@@ -376,24 +376,38 @@ async fn heartbeat_loop(
             let handle = CoordRegionRaftHandle::from_runtime(&rt);
             let leader = handle.current_leader().await;
 
-            // size/keys：redb 文件 stat + 表 len——移到阻塞池，避免阻塞 worker
+            // size/keys：redb 文件 stat + 表 len；storage_bytes：本 Region
+            // chunk 存储（coord.storage 数据面，`objects/` 目录）用量——若对象
+            // 存储未启用则 0。移到阻塞池，避免阻塞 worker。
             let mvcc = Arc::clone(&rt.mvcc);
-            let (size, keys) = match tokio::task::spawn_blocking(move || {
-                let b = mvcc.backend();
-                (b.disk_size_bytes(), b.key_count())
-            })
-            .await
-            {
-                Ok((Ok(size), Ok(keys))) => (size, keys),
-                Ok(_) | Err(_) => {
-                    tracing::warn!("PD heartbeat: region {region_id} stats unavailable");
-                    (0, 0)
-                }
-            };
+            let chunk_store = rt.chunk_store.clone();
+            let (size, keys, storage_bytes) =
+                match tokio::task::spawn_blocking(move || {
+                    let b = mvcc.backend();
+                    let size = b.disk_size_bytes();
+                    let keys = b.key_count();
+                    let storage = match &chunk_store {
+                        Some(store) => store.usage_bytes(),
+                        None => Ok(0),
+                    };
+                    (size, keys, storage)
+                })
+                .await
+                {
+                    Ok((Ok(size), Ok(keys), Ok(storage))) => (size, keys, storage),
+                    Ok(_) | Err(_) => {
+                        tracing::warn!("PD heartbeat: region {region_id} stats unavailable");
+                        (0, 0, 0)
+                    }
+                };
 
-            if let Err(e) =
-                driver.handle_region_heartbeat(*region_id, size, keys, leader.unwrap_or(0))
-            {
+            if let Err(e) = driver.handle_region_heartbeat(
+                *region_id,
+                size,
+                keys,
+                storage_bytes,
+                leader.unwrap_or(0),
+            ) {
                 tracing::warn!("PD heartbeat region {region_id}: {e}");
             }
 

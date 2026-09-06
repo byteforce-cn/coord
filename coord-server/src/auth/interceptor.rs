@@ -82,6 +82,8 @@ fn high_risk_operations() -> HashSet<&'static str> {
     set.insert("data:kv:write");
     set.insert("data:kv:delete");
     set.insert("data:txn:execute");
+    // 对象存储（coord.storage）写放大面（256MiB 级对象）
+    set.insert("data:storage:write");
 
     // Coordination plane sensitive
     set.insert("coord:auth:user_add");
@@ -482,6 +484,12 @@ pub fn infer_capability(rpc_method: &str) -> Option<String> {
 
         // Watch
         "/coord.watch.Watch/Watch" => Some("data:watch:subscribe".into()),
+
+        // 对象存储（coord.storage，EXPERIMENTAL 数据面）
+        "/coord.storage.Storage/Get" => Some("data:storage:read".into()),
+        "/coord.storage.Storage/Stat" => Some("data:storage:read".into()),
+        "/coord.storage.Storage/Put" => Some("data:storage:write".into()),
+        "/coord.storage.Storage/Delete" => Some("data:storage:write".into()),
 
         // Maintenance（集群管理，归 cluster:admin 权限点）
         "/coord.maintenance.Maintenance/Status" => Some("admin:maintenance:status".into()),

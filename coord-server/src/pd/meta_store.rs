@@ -19,8 +19,12 @@
 //   Region 心跳的 size/keys 是派生瞬态数据（下一拍重新上报），写穿会在
 //   control-plane 制造每拍 commit+fsync 写放大；磁盘为真源只约束**持久元数据**
 //   （成员/epoch/key range）变更。重启后统计回落，由首拍心跳重新填充。
+// - 对象存储字节维度（`update_region_storage_bytes`）同为派生瞬态内存视图：
+//   coord.storage chunk 文件落 Region 数据目录 `objects/`（不进 redb
+//   store.db），需第二个容量维度供 Split 阈值纳入与「存储重 Region 不参与
+//   自动均衡」决策；不写穿落盘、重启回落，由首拍心跳重新填充。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use coord_core::error::{Error, Result};
@@ -178,6 +182,8 @@ pub struct PdMetaStore {
     regions: RwLock<BTreeMap<RegionId, RegionMeta>>,
     /// start_key → RegionId 有序索引（用于路由查找）
     key_index: RwLock<BTreeMap<Vec<u8>, RegionId>>,
+    /// Region 心跳上报的对象存储字节（RegionId → bytes；内存视图，不落盘）
+    region_storage_bytes: RwLock<HashMap<RegionId, u64>>,
     /// 持久化后端：None = 纯内存模式；Some = redb 文件后端（变更即落盘）
     durable: Option<PdMetaDurable>,
 }
@@ -188,6 +194,7 @@ impl PdMetaStore {
         Self {
             regions: RwLock::new(BTreeMap::new()),
             key_index: RwLock::new(BTreeMap::new()),
+            region_storage_bytes: RwLock::new(HashMap::new()),
             durable: None,
         }
     }
@@ -205,6 +212,7 @@ impl PdMetaStore {
         let store = Self {
             regions: RwLock::new(BTreeMap::new()),
             key_index: RwLock::new(BTreeMap::new()),
+            region_storage_bytes: RwLock::new(HashMap::new()),
             durable: Some(durable),
         };
         for meta in loaded {
@@ -371,6 +379,41 @@ impl PdMetaStore {
         Ok(())
     }
 
+    /// 更新 Region 的对象存储字节维度（内存视图，语义同 `update_region_stats`：
+    /// 派生瞬态数据，不写穿落盘；重启后由首拍心跳重新填充）。
+    ///
+    /// coord.storage chunk 文件落该 Region 数据目录 `objects/`（不进 redb
+    /// store.db），心跳单独承载该容量维度供 Split 阈值纳入与「存储重 Region
+    /// 不参与自动均衡」决策使用。
+    pub fn update_region_storage_bytes(
+        &self,
+        region_id: RegionId,
+        bytes: u64,
+    ) -> Result<()> {
+        {
+            let regions = self.regions.read();
+            if !regions.contains_key(&region_id) {
+                return Err(Error::RegionNotFound { region_id });
+            }
+        }
+        self.region_storage_bytes.write().insert(region_id, bytes);
+        Ok(())
+    }
+
+    /// 查询 Region 的对象存储字节（无上报返回 0）
+    pub fn region_storage_bytes(&self, region_id: RegionId) -> u64 {
+        self.region_storage_bytes
+            .read()
+            .get(&region_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// 全量快照（RegionId → 对象存储字节；调度上下文构建用）
+    pub fn all_region_storage_bytes(&self) -> HashMap<RegionId, u64> {
+        self.region_storage_bytes.read().clone()
+    }
+
     /// 删除 Region 元数据
     pub fn delete_region(&self, region_id: RegionId) -> Result<()> {
         let region = {
@@ -394,6 +437,7 @@ impl PdMetaStore {
             let mut key_index = self.key_index.write();
             key_index.remove(&start_key);
         }
+        self.region_storage_bytes.write().remove(&region_id);
 
         tracing::info!("PD: deleted region {}", region_id);
         Ok(())

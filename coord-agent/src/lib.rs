@@ -36,6 +36,7 @@ use std::sync::Arc;
 use coord_proto::kv::kv_server::KvServer;
 use coord_proto::lease::lease_server::LeaseServer;
 use coord_proto::maintenance::maintenance_server::MaintenanceServer;
+use coord_proto::storage::storage_server::StorageServer;
 use coord_proto::txn::txn_server::TxnServer;
 use coord_proto::watch::watch_server::WatchServer;
 
@@ -280,6 +281,9 @@ where
             crate::proxy::WatchProxy::new(svcs.inner.clone()).with_metrics(metrics),
         ))
         .add_service(MaintenanceServer::new(crate::proxy::MaintenanceProxy::new(
+            svcs.inner.clone(),
+        )))
+        .add_service(StorageServer::new(crate::proxy::StorageProxy::new(
             svcs.inner,
         )))
         .add_optional_service(

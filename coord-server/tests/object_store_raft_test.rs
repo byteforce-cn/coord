@@ -109,6 +109,7 @@ fn build_limits(chunk_size: usize) -> Arc<ObjectLimits> {
         max_object_size: 64 * 1024 * 1024,
         quota_bytes: 0,
         upload_timeout_secs: 300,
+        dek_rotation_secs: 0,
     })
 }
 

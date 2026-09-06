@@ -139,6 +139,11 @@ enabled = false
 # encryption_enabled = false        # chunk 文件静态加密（独立开关）
 # encryption_root_key = "…hex 64 字符…"   # 或经环境变量
 #                                      # COORD_OBJECT_STORAGE_ENCRYPTION_ROOT_KEY
+# encryption_rotation_days = 90     # chunk DEK 自动轮换间隔（天；0 = 关闭）。
+#                                  # 根密钥仅经 HKDF 派生 KEK 包裹随机 DEK
+#                                  # （key_id 版本化，密文落盘
+#                                  #  <data_dir>/objects/keys/），到期轮换只影响
+#                                  # 新写入（旧 DEK 保留解密历史，对齐 /kv/）
 
 [security]
 # 生产：配置证书 + CA → raft/gRPC 强制 mTLS（缺 CA 拒绝启动，fail-closed）

@@ -5,7 +5,7 @@
 //
 // This module provides:
 // - In-memory capability store (backed by KV)
-// - Bootstrap of all 77 built-in capabilities (Appendix A)
+// - Bootstrap of all 80 built-in capabilities (Appendix A)
 // - Register/Deprecate/List/Get operations
 // - Barrier-encrypted persistence via CapabilityStore
 
@@ -182,7 +182,7 @@ impl CapabilityRegistry {
         }
     }
 
-    /// Bootstrap all 77 built-in capabilities from Appendix A.
+    /// Bootstrap all 80 built-in capabilities from Appendix A.
     pub fn bootstrap_builtin(&self) {
         let builtins = builtin_capabilities();
         let mut caps = self.capabilities.write();
@@ -304,7 +304,7 @@ impl CapabilityStore {
     }
 }
 
-// ──── Built-in Capabilities (Appendix A — 77 capabilities) ────
+// ──── Built-in Capabilities (Appendix A — 80 capabilities) ────
 
 fn builtin_capabilities() -> Vec<CapabilityDef> {
     let def = |id: &str,
@@ -327,7 +327,7 @@ fn builtin_capabilities() -> Vec<CapabilityDef> {
     };
 
     vec![
-        // ──── 数据面 (15) ────
+        // ──── 数据面 (17) ────
         def(
             "data:kv:read",
             "data",
@@ -391,6 +391,23 @@ fn builtin_capabilities() -> Vec<CapabilityDef> {
             "subscribe",
             CapabilityType::Read,
             "订阅 Key 变更事件",
+        ),
+        // 对象存储（coord.storage，EXPERIMENTAL 数据面）
+        def(
+            "data:storage:read",
+            "data",
+            "storage",
+            "read",
+            CapabilityType::Read,
+            "Get/Stat 对象（coord.storage）",
+        ),
+        def(
+            "data:storage:write",
+            "data",
+            "storage",
+            "write",
+            CapabilityType::Write,
+            "Put/Delete 对象（coord.storage）",
         ),
         def(
             "data:cache:read",
@@ -1082,8 +1099,8 @@ mod tests {
         registry.bootstrap_builtin();
         assert_eq!(
             registry.count(),
-            78,
-            "should have all 78 built-in capabilities (15 data + 37 coord + 26 admin)"
+            80,
+            "should have all 80 built-in capabilities (17 data + 37 coord + 26 admin)"
         );
     }
 
@@ -1180,19 +1197,19 @@ mod tests {
         let registry = CapabilityRegistry::new();
         registry.bootstrap_builtin();
         let all_caps = registry.list();
-        assert_eq!(all_caps.len(), 78);
+        assert_eq!(all_caps.len(), 80);
 
-        // Encrypt all 78 capabilities
+        // Encrypt all 80 capabilities
         let encrypted_all = store
             .encrypt_all(&all_caps)
             .expect("encrypt all should succeed");
-        assert_eq!(encrypted_all.len(), 78);
+        assert_eq!(encrypted_all.len(), 80);
 
         // Decrypt all
         let decrypted_all = store
             .decrypt_all(&encrypted_all)
             .expect("decrypt all should succeed");
-        assert_eq!(decrypted_all.len(), 78);
+        assert_eq!(decrypted_all.len(), 80);
 
         // Verify round-trip for each
         for (orig, dec) in all_caps.iter().zip(decrypted_all.iter()) {

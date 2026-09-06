@@ -101,6 +101,12 @@ pub fn infer_capability(rpc_method: &str) -> Option<String> {
         // Watch
         "/coord.watch.Watch/Watch" => Some("data:watch:subscribe".into()),
 
+        // 对象存储（coord.storage，EXPERIMENTAL；agent 侧代理预留）
+        "/coord.storage.Storage/Get" => Some("data:storage:read".into()),
+        "/coord.storage.Storage/Stat" => Some("data:storage:read".into()),
+        "/coord.storage.Storage/Put" => Some("data:storage:write".into()),
+        "/coord.storage.Storage/Delete" => Some("data:storage:write".into()),
+
         // Maintenance (admin)
         "/coord.maintenance.Maintenance/Status" => Some("admin:maintenance:status".into()),
         "/coord.maintenance.Maintenance/Seal" => Some("admin:maintenance:seal".into()),

@@ -264,6 +264,7 @@ impl PlacementDriver {
     ///
     /// - 统计字段（size/keys）是派生瞬态数据 → 走 `update_region_stats` 内存视图，
     ///   不写穿落盘（避免每拍心跳 commit+fsync 写放大，见 PdMetaStore 文档）；
+    /// - 对象存储字节（`storage_bytes`，coord.storage chunk 文件）同为内存视图；
     /// - `leader_node_id` 记入内存 leader 视图（调度输入）：0 = 选举窗口 leader
     ///   未知 → 清除该 Region 的陈旧视图，调度器不得基于它决策。
     pub fn handle_region_heartbeat(
@@ -271,9 +272,12 @@ impl PlacementDriver {
         region_id: RegionId,
         size: u64,
         keys: u64,
+        storage_bytes: u64,
         leader_node_id: NodeID,
     ) -> Result<()> {
         self.meta_store.update_region_stats(region_id, size, keys)?;
+        self.meta_store
+            .update_region_storage_bytes(region_id, storage_bytes)?;
 
         {
             let mut leaders = self.region_leaders.write();
@@ -285,10 +289,11 @@ impl PlacementDriver {
         }
 
         tracing::trace!(
-            "PD: region {} heartbeat: size={}, keys={}, leader={}",
+            "PD: region {} heartbeat: size={}, keys={}, storage_bytes={}, leader={}",
             region_id,
             size,
             keys,
+            storage_bytes,
             leader_node_id
         );
         Ok(())
@@ -391,11 +396,12 @@ impl PlacementDriver {
             }
         }
 
-        // 2. 构建调度上下文（含心跳上报的 Region leader 视图）
+        // 2. 构建调度上下文（含心跳上报的 Region leader 视图 + 对象存储字节）
         let regions = self.meta_store.list_regions();
         let nodes: Vec<NodeState> = self.node_states.read().values().cloned().collect();
         let mut ctx = ScheduleContext::new(regions, nodes);
         ctx.leaders = self.region_leaders.read().clone();
+        ctx.region_storage_bytes = self.meta_store.all_region_storage_bytes();
 
         // 3. 运行所有调度器；并发上限 = 全局队列 Pending/Running 数。
         let max_ops = self.config.max_concurrent_operators;
@@ -737,17 +743,25 @@ mod tests {
         let region = make_region_meta(1, vec![0x00], vec![0xFF]);
         pd.meta_store().create_region(region).unwrap();
 
-        pd.handle_region_heartbeat(1, 1024 * 1024, 5000, 1).unwrap();
+        pd.handle_region_heartbeat(1, 1024 * 1024, 5000, 0, 1).unwrap();
 
         let updated = pd.meta_store().get_region(1).unwrap();
         assert_eq!(updated.approximate_size, 1024 * 1024);
         assert_eq!(updated.approximate_keys, 5000);
+        assert_eq!(pd.meta_store().region_storage_bytes(1), 0);
+
+        // 对象存储字节维度（内存视图，独立于 redb 文件大小）
+        pd.handle_region_heartbeat(1, 100, 10, 3 * 1024 * 1024, 1).unwrap();
+        assert_eq!(
+            pd.meta_store().region_storage_bytes(1),
+            3 * 1024 * 1024
+        );
     }
 
     #[test]
     fn test_region_heartbeat_not_found() {
         let (pd, _tx) = make_test_pd();
-        let result = pd.handle_region_heartbeat(999, 0, 0, 1);
+        let result = pd.handle_region_heartbeat(999, 0, 0, 0, 1);
         assert!(result.is_err());
     }
 
@@ -763,15 +777,15 @@ mod tests {
         assert_eq!(pd.region_leader(1), None);
 
         // 心跳上报 leader=node2
-        pd.handle_region_heartbeat(1, 100, 10, 2).unwrap();
+        pd.handle_region_heartbeat(1, 100, 10, 0, 2).unwrap();
         assert_eq!(pd.region_leader(1), Some(2));
 
         // leader 变更（选举切换到 node3）
-        pd.handle_region_heartbeat(1, 100, 10, 3).unwrap();
+        pd.handle_region_heartbeat(1, 100, 10, 0, 3).unwrap();
         assert_eq!(pd.region_leader(1), Some(3));
 
         // 选举窗口 leader 未知（上报 0）→ 清除陈旧视图，调度器不得基于它决策
-        pd.handle_region_heartbeat(1, 100, 10, 0).unwrap();
+        pd.handle_region_heartbeat(1, 100, 10, 0, 0).unwrap();
         assert_eq!(pd.region_leader(1), None);
     }
 
@@ -802,7 +816,7 @@ mod tests {
         ];
         pd.meta_store().create_region(region).unwrap();
 
-        pd.handle_region_heartbeat(1, 8 * 1024 * 1024, 12345, 1)
+        pd.handle_region_heartbeat(1, 8 * 1024 * 1024, 12345, 0, 1)
             .unwrap();
         drop(pd);
         drop(shutdown_tx);
@@ -847,7 +861,7 @@ mod tests {
             ];
             pd.meta_store().create_region(region).unwrap();
             // 两 Region 心跳 leader 均为 node1 → node1 负载 2、node2 空载
-            pd.handle_region_heartbeat(rid, 100, 10, 1).unwrap();
+            pd.handle_region_heartbeat(rid, 100, 10, 0, 1).unwrap();
         }
         (pd, shutdown_tx)
     }

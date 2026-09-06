@@ -1,9 +1,12 @@
 // coord-agent: 请求代理层 (Proxy Layer)
 //
-// 实现 5 个 gRPC 服务的代理（KV/Txn/Lease/Watch/Maintenance）。
+// 实现 6 个 gRPC 服务的代理（KV/Txn/Lease/Watch/Maintenance/Storage）。
 // B1: 骨架实现，返回占位响应以验证服务注册。
 // B2 (GREEN): 通过 AgentInner 将请求转发到真实 Server 集群。
 // B4 (GREEN): Watch Fan-out — 相同 prefix 的多个订阅者共享一条 Server Watch 流。
+//
+// Storage（coord.storage 对象存储）代理 v1：经 coord-client SDK 转发，agent
+// 侧缓冲整对象（≤256MiB）后上传/回放——语义与流式协议透传，简化代理实现。
 //
 // 参见。
 
@@ -29,6 +32,14 @@ use coord_proto::maintenance::{
     MemberPromoteResponse, MemberRemoveRequest, MemberRemoveResponse, SealRequest, SealResponse,
     SnapshotRequest, SnapshotResponse, StatusRequest, StatusResponse, UnsealRequest,
     UnsealResponse,
+};
+use coord_proto::storage::storage_server::Storage;
+use coord_proto::storage::{
+    get_response, put_request, DeleteRequest as StorageDeleteRequest,
+    DeleteResponse as StorageDeleteResponse, GetRequest as StorageGetRequest,
+    GetResponse as StorageGetResponse, PutMeta, PutRequest as StoragePutRequest,
+    PutResponse as StoragePutResponse, StatRequest as StorageStatRequest,
+    StatResponse as StorageStatResponse,
 };
 use coord_proto::txn::txn_server::Txn;
 use coord_proto::txn::{TxnRequest, TxnResponse};
@@ -767,5 +778,185 @@ impl Maintenance for MaintenanceProxy {
         Err(tonic::Status::unimplemented(
             "member_list proxy not yet implemented",
         ))
+    }
+}
+
+// ──── StorageProxy（coord.storage 对象存储代理） ────
+
+/// 对象存储服务代理：经 coord-client（coord.storage SDK）转发到 Server 集群。
+///
+/// v1 透传语义（agent 侧缓冲整对象，简化代理；对象 ≤ 256MiB）：
+/// - Put：收集客户端流 → `Client::storage().put_chunked`（服务端语义原样透传：
+///   已存在 → ALREADY_EXISTS、字节不符 → INVALID_ARGUMENT、leader 变更中断由
+///   SDK 重试/错误透传）；
+/// - Get：SDK 全量下载后按 ≤4MiB 分片回放 server-stream（首条 stat）；
+/// - Stat/Delete：unary 透传（缺失 → NOT_FOUND，与 server 一致）。
+const STORAGE_PROXY_MAX_BUFFER: usize = 256 * 1024 * 1024; // 对齐 max_object_size 默认
+const STORAGE_PROXY_CHUNK: usize = 4 * 1024 * 1024; // 回放分片（对齐 chunk_size 默认）
+
+#[derive(Debug, Clone)]
+pub struct StorageProxy {
+    inner: Option<Arc<AgentInner>>,
+}
+
+impl StorageProxy {
+    pub fn new(inner: Option<Arc<AgentInner>>) -> Self {
+        Self { inner }
+    }
+}
+
+#[tonic::async_trait]
+impl Storage for StorageProxy {
+    async fn put(
+        &self,
+        request: tonic::Request<tonic::Streaming<StoragePutRequest>>,
+    ) -> Result<tonic::Response<StoragePutResponse>, tonic::Status> {
+        let Some(inner) = &self.inner else {
+            return Err(tonic::Status::failed_precondition(
+                "object storage proxy unavailable: agent not connected to a cluster",
+            ));
+        };
+        let mut stream = request.into_inner();
+        // 首条必须为 meta
+        let meta: PutMeta = match stream.message().await? {
+            Some(m) => match m.part {
+                Some(put_request::Part::Meta(meta)) => meta,
+                _ => {
+                    return Err(tonic::Status::invalid_argument(
+                        "first PutRequest message must carry meta",
+                    ))
+                }
+            },
+            None => return Err(tonic::Status::invalid_argument("empty Put stream")),
+        };
+        if meta.bucket.is_empty() {
+            return Err(tonic::Status::invalid_argument(
+                "bucket must not be empty",
+            ));
+        }
+        // 收集数据（上限防护：声明 total_size 或 256MiB）
+        let cap = (meta.total_size.max(0) as usize).min(STORAGE_PROXY_MAX_BUFFER);
+        let mut data: Vec<u8> = Vec::with_capacity(cap);
+        while let Some(m) = stream.message().await? {
+            match m.part {
+                Some(put_request::Part::Chunk(c)) => {
+                    if data.len().saturating_add(c.len()) > STORAGE_PROXY_MAX_BUFFER {
+                        return Err(tonic::Status::resource_exhausted(
+                            "object exceeds agent proxy buffer limit (256MiB)",
+                        ));
+                    }
+                    data.extend_from_slice(&c);
+                }
+                Some(put_request::Part::Meta(_)) => {
+                    return Err(tonic::Status::invalid_argument(
+                        "meta must only appear as the first message",
+                    ))
+                }
+                None => return Err(tonic::Status::invalid_argument("empty PutRequest message")),
+            }
+        }
+        if data.is_empty() {
+            return Err(tonic::Status::invalid_argument(
+                "object must contain at least one chunk",
+            ));
+        }
+        let res = inner
+            .client
+            .storage()
+            .put_chunked(&meta.bucket, &meta.object_id, &data, STORAGE_PROXY_CHUNK)
+            .await
+            .map_err(map_core_error)?;
+        Ok(tonic::Response::new(StoragePutResponse {
+            revision: res.revision as i64,
+            size: res.size as i64,
+            chunks: res.chunks as i64,
+        }))
+    }
+
+    type GetStream = ReceiverStream<Result<StorageGetResponse, tonic::Status>>;
+
+    async fn get(
+        &self,
+        request: tonic::Request<StorageGetRequest>,
+    ) -> Result<tonic::Response<Self::GetStream>, tonic::Status> {
+        let Some(inner) = &self.inner else {
+            return Err(tonic::Status::failed_precondition(
+                "object storage proxy unavailable: agent not connected to a cluster",
+            ));
+        };
+        let req = request.into_inner();
+        let od = inner
+            .client
+            .storage()
+            .get(&req.bucket, &req.object_id)
+            .await
+            .map_err(map_core_error)?;
+        let (tx, rx) = mpsc::channel::<Result<StorageGetResponse, tonic::Status>>(4);
+        tokio::spawn(async move {
+            // 首条 stat
+            let stat = StorageGetResponse {
+                part: Some(get_response::Part::Stat(od.stat)),
+            };
+            if tx.send(Ok(stat)).await.is_err() {
+                return;
+            }
+            for c in od.data.chunks(STORAGE_PROXY_CHUNK) {
+                let chunk = StorageGetResponse {
+                    part: Some(get_response::Part::Chunk(c.to_vec())),
+                };
+                if tx.send(Ok(chunk)).await.is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(tonic::Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn stat(
+        &self,
+        request: tonic::Request<StorageStatRequest>,
+    ) -> Result<tonic::Response<StorageStatResponse>, tonic::Status> {
+        let Some(inner) = &self.inner else {
+            return Err(tonic::Status::failed_precondition(
+                "object storage proxy unavailable: agent not connected to a cluster",
+            ));
+        };
+        let req = request.into_inner();
+        let stat = inner
+            .client
+            .storage()
+            .stat(&req.bucket, &req.object_id)
+            .await
+            .map_err(map_core_error)?
+            .ok_or_else(|| {
+                tonic::Status::not_found(format!(
+                    "object {}/{} not found",
+                    req.bucket,
+                    String::from_utf8_lossy(&req.object_id)
+                ))
+            })?;
+        Ok(tonic::Response::new(StorageStatResponse { stat: Some(stat) }))
+    }
+
+    async fn delete(
+        &self,
+        request: tonic::Request<StorageDeleteRequest>,
+    ) -> Result<tonic::Response<StorageDeleteResponse>, tonic::Status> {
+        let Some(inner) = &self.inner else {
+            return Err(tonic::Status::failed_precondition(
+                "object storage proxy unavailable: agent not connected to a cluster",
+            ));
+        };
+        let req = request.into_inner();
+        let (deleted, revision) = inner
+            .client
+            .storage()
+            .delete_full(&req.bucket, &req.object_id)
+            .await
+            .map_err(map_core_error)?;
+        Ok(tonic::Response::new(StorageDeleteResponse {
+            deleted,
+            revision: revision as i64,
+        }))
     }
 }

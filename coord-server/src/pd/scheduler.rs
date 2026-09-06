@@ -77,7 +77,13 @@ impl Scheduler for SplitChecker {
     fn schedule(&self, ctx: &ScheduleContext) -> Vec<Operator> {
         let mut ops = Vec::new();
         for region in ctx.regions.values() {
-            if region.approximate_size >= self.size_threshold
+            // 存储字节纳入分裂判定：对象存储 chunk 落本 Region 数据目录（不进
+            // redb store.db），由心跳单独上报——以「存储字节 + redb 文件大小」
+            // 作为 Region 容量口径（docs/volume-object-storage.md §Phase B）。
+            let total_size = region
+                .approximate_size
+                .saturating_add(ctx.storage_bytes_of(region.region_id));
+            if total_size >= self.size_threshold
                 || region.approximate_keys >= self.keys_threshold
             {
                 // 优先使用采样 Key 的中位数，无样本时回退到数学中点
@@ -411,6 +417,9 @@ pub struct ScheduleContext {
     /// 决策的运行时输入。RegionMeta 为持久 schema（成员/range），leader 不入盘；
     /// 无心跳数据（空 map / 选举窗口）时由 Scheduler 自行回退。
     pub leaders: HashMap<RegionId, NodeID>,
+    /// Region ID → 心跳上报的对象存储字节（coord.storage chunk 数据面；
+    /// 内存视图，不入 RegionMeta 持久 schema）
+    pub region_storage_bytes: HashMap<RegionId, u64>,
 }
 
 impl ScheduleContext {
@@ -427,12 +436,26 @@ impl ScheduleContext {
             online_nodes,
             region_sample_keys: HashMap::new(),
             leaders: HashMap::new(),
+            region_storage_bytes: HashMap::new(),
         }
     }
 
     /// 查询 Region 当前 Leader（心跳视图；无上报返回 None）
     pub fn leader_of(&self, region_id: RegionId) -> Option<NodeID> {
         self.leaders.get(&region_id).copied()
+    }
+
+    /// 查询 Region 心跳上报的对象存储字节（无上报返回 0）
+    pub fn storage_bytes_of(&self, region_id: RegionId) -> u64 {
+        self.region_storage_bytes
+            .get(&region_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// 是否「存储重 Region」（对象存储字节 ≥ threshold；threshold=0 恒 false）
+    pub fn is_storage_heavy(&self, region_id: RegionId, threshold: u64) -> bool {
+        threshold > 0 && self.storage_bytes_of(region_id) >= threshold
     }
 
     /// 构建带采样 Key 的调度上下文
@@ -492,15 +515,33 @@ pub trait Scheduler: Send + Sync {
 ///   1. 计算每个在线节点的 Voter 副本数
 ///   2. 找到副本最多和最少的节点
 ///   3. 从最多节点选一个 Region（优先 Follower）→ 在最少的节点添加副本
+///
+/// 存储门控：`storage_heavy_bytes > 0` 时，「对象存储字节 ≥ 阈值」的存储重
+/// Region 不参与副本均衡（AddPeer 会把 Region 复制到新节点——chunk 文件不进
+/// raft 快照，新副本无数据面 → v1 不搬存储重 Region，防平衡风暴；
+/// docs/volume-object-storage.md §Phase B）。
 pub struct BalanceScheduler {
     /// 每轮最多产生的 Operator 数量
     max_ops_per_round: usize,
+    /// 存储重阈值（字节；0 = 不启用存储门控）
+    storage_heavy_bytes: u64,
 }
 
 impl BalanceScheduler {
-    /// 创建新的 BalanceScheduler
+    /// 创建新的 BalanceScheduler（不启用存储门控）
     pub fn new(max_ops_per_round: usize) -> Self {
-        Self { max_ops_per_round }
+        Self {
+            max_ops_per_round,
+            storage_heavy_bytes: 0,
+        }
+    }
+
+    /// 创建带存储重门控的 BalanceScheduler（生产装配用）
+    pub fn with_storage_gate(max_ops_per_round: usize, storage_heavy_bytes: u64) -> Self {
+        Self {
+            max_ops_per_round,
+            storage_heavy_bytes,
+        }
     }
 }
 
@@ -559,6 +600,11 @@ impl Scheduler for BalanceScheduler {
                 continue;
             }
 
+            // 存储重 Region 不参与副本均衡（chunk 文件不进快照，v1 不搬数据面）
+            if ctx.is_storage_heavy(region.region_id, self.storage_heavy_bytes) {
+                continue;
+            }
+
             // 避免在同一个节点上添加已存在的副本
             let already_on_min = region.peers.iter().any(|p| p.node_id == min_node);
             if already_on_min {
@@ -597,15 +643,31 @@ impl Scheduler for BalanceScheduler {
 /// Leader 判定：优先取 `ScheduleContext.leaders`（Region 心跳上报的
 /// 真实 leader）；无心跳数据（组件级构造/选举窗口）时回退到「第一个 Voter
 /// peer」猜测，保证未接心跳的路径行为不变。
+///
+/// 存储门控：`storage_heavy_bytes > 0` 时存储重 Region 不参与 leader 均衡
+/// （v1 存储重 Region 默认不参与自动均衡，防平衡风暴，见 BalanceScheduler 注）。
 pub struct LeaderScheduler {
     /// 每轮最多产生的 Operator 数量
     max_ops_per_round: usize,
+    /// 存储重阈值（字节；0 = 不启用存储门控）
+    storage_heavy_bytes: u64,
 }
 
 impl LeaderScheduler {
-    /// 创建新的 LeaderScheduler
+    /// 创建新的 LeaderScheduler（不启用存储门控）
     pub fn new(max_ops_per_round: usize) -> Self {
-        Self { max_ops_per_round }
+        Self {
+            max_ops_per_round,
+            storage_heavy_bytes: 0,
+        }
+    }
+
+    /// 创建带存储重门控的 LeaderScheduler（生产装配用）
+    pub fn with_storage_gate(max_ops_per_round: usize, storage_heavy_bytes: u64) -> Self {
+        Self {
+            max_ops_per_round,
+            storage_heavy_bytes,
+        }
     }
 
     /// 判定 Region 当前 Leader：心跳视图优先，无则回退首 Voter peer
@@ -671,6 +733,11 @@ impl Scheduler for LeaderScheduler {
             // 该 Region 的当前 Leader 必须在 max_node 上（无 leader 视图则跳过：
             // 选举窗口不决策）
             if self.region_leader(ctx, region) != Some(max_node) {
+                continue;
+            }
+
+            // 存储重 Region 不参与 leader 均衡（v1 存储重 Region 默认不动）
+            if ctx.is_storage_heavy(region.region_id, self.storage_heavy_bytes) {
                 continue;
             }
 
@@ -786,12 +853,15 @@ impl HotSpotScheduler {
 
 /// 从 PD 配置创建默认调度器集合
 pub fn create_default_schedulers(config: &PdConfig) -> Vec<Box<dyn Scheduler>> {
+    // 存储重阈值 = region_split_size_mb（存储字节纳入 split 阈值的同一口径）：
+    // 对象存储字节达到该值的 Region 视为存储重，默认不参与副本/leader 自动均衡
+    let storage_heavy_bytes = config.region_split_size_mb * 1024 * 1024;
     vec![
         Box::new(SplitChecker::new(config)),
         Box::new(MergeChecker::new(config)),
         Box::new(ReplicaChecker::new(config)),
-        Box::new(BalanceScheduler::new(5)),
-        Box::new(LeaderScheduler::new(3)),
+        Box::new(BalanceScheduler::with_storage_gate(5, storage_heavy_bytes)),
+        Box::new(LeaderScheduler::with_storage_gate(3, storage_heavy_bytes)),
         Box::new(HotSpotScheduler::new(100, 500, 3)),
     ]
 }
@@ -1460,6 +1530,128 @@ mod tests {
         } else {
             panic!("expected SplitRegion operator");
         }
+    }
+
+    // ──── 存储字节维度（Phase B：coord.storage 数据面纳入调度）测试 ────
+
+    #[test]
+    fn test_split_checker_storage_bytes_included() {
+        // redb 文件大小低于阈值，但对象存储 chunk 字节推高总容量 → 触发 Split
+        let config = PdConfig::default();
+        let checker = SplitChecker::new(&config);
+        let nodes = vec![make_node_state(1, true)];
+        let region = make_region(
+            1,
+            10 * 1024 * 1024, // redb 10MiB < 256MiB 阈值
+            100_000,
+            vec![0x00],
+            vec![0xFF],
+            vec![],
+        );
+        let mut ctx = ScheduleContext::new(vec![region], nodes);
+        // 无存储字节上报 → 不触发
+        assert!(checker.schedule(&ctx).is_empty());
+        // 对象存储 300MiB（≥ 阈值）→ 触发
+        ctx.region_storage_bytes.insert(1, 300 * 1024 * 1024);
+        let ops = checker.schedule(&ctx);
+        assert!(!ops.is_empty());
+        assert!(matches!(ops[0], Operator::SplitRegion { .. }));
+    }
+
+    #[test]
+    fn test_balance_scheduler_skips_storage_heavy_region() {
+        let nodes = vec![make_node_state(1, true), make_node_state(2, true)];
+        // 两 Region 副本都只在 node1 → 失衡（node1=2, node2=0）
+        let regions = vec![
+            make_region(
+                1,
+                0,
+                0,
+                vec![0x00],
+                vec![0x55],
+                vec![make_peer(1, PeerRole::Voter)],
+            ),
+            make_region(
+                2,
+                0,
+                0,
+                vec![0x55],
+                vec![0xFF],
+                vec![make_peer(1, PeerRole::Voter)],
+            ),
+        ];
+        let mut ctx = ScheduleContext::new(regions, nodes);
+        ctx.region_storage_bytes.insert(1, 100); // region 1 存储重（≥ 阈值 100）
+        ctx.region_storage_bytes.insert(2, 1);
+
+        // 门控开启：只搬迁轻量 region 2
+        let sched = BalanceScheduler::with_storage_gate(5, 100);
+        let ops = sched.schedule(&ctx);
+        assert_eq!(ops.len(), 1, "storage-heavy region must not be moved");
+        match &ops[0] {
+            Operator::AddPeer {
+                region_id,
+                node_id,
+                ..
+            } => {
+                assert_eq!(*region_id, 2);
+                assert_eq!(*node_id, 2);
+            }
+            _ => panic!("expected AddPeer"),
+        }
+
+        // 门控关闭（new）：两 Region 都可搬迁（保持旧行为）
+        let sched = BalanceScheduler::new(5);
+        let ops = sched.schedule(&ctx);
+        assert_eq!(ops.len(), 2);
+    }
+
+    #[test]
+    fn test_leader_scheduler_skips_storage_heavy_region() {
+        let nodes = vec![make_node_state(1, true), make_node_state(2, true)];
+        let regions = vec![
+            make_region(
+                1,
+                0,
+                0,
+                vec![0x00],
+                vec![0x55],
+                vec![make_peer(1, PeerRole::Voter), make_peer(2, PeerRole::Voter)],
+            ),
+            make_region(
+                2,
+                0,
+                0,
+                vec![0x55],
+                vec![0xFF],
+                vec![make_peer(2, PeerRole::Voter), make_peer(1, PeerRole::Voter)],
+            ),
+        ];
+        let mut ctx = ScheduleContext::new(regions, nodes);
+        // 心跳视图：两 Region leader 都在 node1 → node1=2, node2=0 失衡
+        ctx.leaders.insert(1, 1);
+        ctx.leaders.insert(2, 1);
+        ctx.region_storage_bytes.insert(1, 100); // region 1 存储重
+        ctx.region_storage_bytes.insert(2, 1);
+
+        let sched = LeaderScheduler::with_storage_gate(3, 100);
+        let ops = sched.schedule(&ctx);
+        assert_eq!(ops.len(), 1, "storage-heavy region leader must not move");
+        match &ops[0] {
+            Operator::TransferLeader {
+                region_id,
+                to_node,
+            } => {
+                assert_eq!(*region_id, 2);
+                assert_eq!(*to_node, 2);
+            }
+            _ => panic!("expected TransferLeader"),
+        }
+
+        // 门控关闭：两 Region 均可转移（保持旧行为）
+        let sched = LeaderScheduler::new(3);
+        let ops = sched.schedule(&ctx);
+        assert_eq!(ops.len(), 2);
     }
 
     // ──── 辅助函数 ────
