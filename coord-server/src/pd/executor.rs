@@ -22,17 +22,15 @@
 // - 幂等：AddPeer 目标已是 Voter / RemovePeer 目标不在成员表 → 视为已达成
 //   成功（不重复触发 raft 成员变更，也不把重试当失败）。
 //
-// 队列来源（R-MR-08 D1-a，P2 接线）：
-// - **全局队列模式**（driver 已 attach region 0 system raft，生产接线）：
-//   operator 队列经 region 0 raft 承载（`/_pd/ops/*`）。执行器从全局队列只
-//   认领「目标 Region 的当前 leader == 本节点」的 Pending 条目（本节点 raft
-//   视角），`PdOp::Claim` 经 apply CAS 防双认领——每 operator 恰好被其 Region
-//   leader 节点执行一次，无 follower Failed(not leader) 噪音、无重复 operator。
-//   认领后执行（`execute` 保留 Leader 守卫：认领后 leader 漂移 → Failed，
-//   自愈——调度器后续重新生成）。
-// - **legacy 本地队列模式**（无 region 0 raft 的测试装配/回退，P4 退役）：
-//   每节点本地生成 operator，执行器取下一个执行，本节点非该 Region leader 时
-//   记一次性 Failed(not leader)。
+// 队列来源（R-MR-08 D1-a；P4b 退役 legacy 本地队列路径后唯一模式）：
+// - **全局队列模式**（driver attach region 0 system raft，生产接线）：operator
+//   队列经 region 0 raft 承载（`/_pd/ops/*`）。执行器从全局队列只认领「目标
+//   Region 的当前 leader == 本节点」的 Pending 条目（本节点 raft 视角），
+//   `PdOp::Claim` 经 apply CAS 防双认领——每 operator 恰好被其 Region leader
+//   节点执行一次，无 follower Failed(not leader) 噪音、无重复 operator。认领
+//   后执行（`execute` 保留 Leader 守卫：认领后 leader 漂移 → Failed，自愈——
+//   调度器后续重新生成）。未装配 system raft 的装配（纯元数据类测试）无可
+//   认领条目，`execute_one` 返回 None。
 //
 // T3.4 接线增强：
 // - AddPeer 的**成员真源 = raft 已提交成员**（`current_members`），不再依赖
@@ -105,86 +103,32 @@ impl OperatorExecutor {
         self
     }
 
-    /// 弹出队列中下一个 Pending operator 并尝试在本节点执行
+    /// 从 region 0 全局队列认领并执行一拍（P4b 退役本地队列路径后唯一模式；
+    /// 无 region 0 system raft 的装配无可认领条目，返回 None）。
     ///
-    /// R-MR-08（D1-a P2）模式分发：
-    /// - **全局队列模式**（driver 已 attach region 0 system raft）：从 region 0
-    ///   全局队列认领「目标 Region 的当前 leader == 本节点」的 Pending 条目，
-    ///   经 `PdOp::Claim`（apply CAS 防双认领）→ 执行 → `PdOp::Complete`；
-    /// - **legacy 本地模式**：从本节点内存队列取下一个 Pending operator，
-    ///   执行器 Leader 守卫把关（非 leader 记一次性 Failed）。
-    ///
+    /// 全局队列模式（driver 已 attach region 0 system raft，生产接线）：从
+    /// region 0 全局队列认领「目标 Region 的当前 leader == 本节点」的 Pending
+    /// 条目，经 `PdOp::Claim`（apply CAS 防双认领）→ 执行 → `PdOp::Complete`。
     /// 结果写入队列（Success/Failed）；无 Pending operator（或本 tick 无可认领
     /// 条目）时返回 None。AddPeer（node_id=0）先经目标解析器解析为具体节点。
     pub async fn execute_one(&self, resolve: &RegionRaftResolver) -> Option<Operator> {
-        if let Some(system) = self.pd.system_raft() {
-            self.execute_one_raft(system.as_ref(), resolve).await
-        } else {
-            self.execute_one_local(resolve).await
-        }
+        let system = self.pd.system_raft()?;
+        self.execute_one_raft(system.as_ref(), resolve).await
     }
 
-    /// legacy 本地队列模式：本节点内存队列取下一个 Pending operator 并执行。
-    ///
-    /// 返回的 Operator 是（可能经解析后的）实际执行版本；队列条目的完成
-    /// 状态始终记在**原始条目**（node_id=0）上（解析不改变去重身份）。
-    async fn execute_one_local(&self, resolve: &RegionRaftResolver) -> Option<Operator> {
-        let original = self.pd.take_next_operator()?;
-        let op = match &original {
-            Operator::AddPeer {
-                region_id,
-                node_id: 0,
-                ..
-            } => match self
-                .add_peer_resolver
-                .as_ref()
-                .and_then(|r| r(*region_id))
-            {
-                Some((target, addr)) => Operator::AddPeer {
-                    region_id: *region_id,
-                    node_id: target,
-                    raft_addr: addr,
-                },
-                None => {
-                    // 暂无可选目标：放回队列（Pending）稍后重试，不记 Failed
-                    tracing::debug!(
-                        "PD executor: add-peer for region {region_id} has no resolvable \
-                         target yet; requeue for retry"
-                    );
-                    self.pd.requeue_operator(&original);
-                    return None;
-                }
-            },
-            _ => original.clone(),
-        };
-        let outcome = match resolve(op.region_id()) {
-            Some(raft) => self.execute(&op, raft).await,
-            None => Err(format!(
-                "region {} runtime not present on node {}",
-                op.region_id(),
-                self.node_id
-            )),
-        };
-        match outcome {
-            Ok(()) => self.pd.complete_operator(&original, true, None),
-            Err(msg) => self.pd.complete_operator(&original, false, Some(msg)),
-        }
-        Some(op)
-    }
-
-    /// R-MR-08（D1-a P2）：全局队列模式执行一拍。
+    /// 全局队列模式执行一拍。
     ///
     /// 从 region 0 全局队列（本节点 MVCC 视图，op_id 升序）扫描 Pending 条目，
     /// 认领并执行**恰好一个**「目标 Region 的当前 leader == 本节点」的 operator：
-    ///   1. 目标 Region 不在本节点 / 本节点非其 leader → 他节点认领，跳过；
-    ///   2. AddPeer 占位（node_id=0）目标暂不可解析 → 保持 Pending，跳过
-    ///     （不产生 Requeue 日志噪音；目标可用后本节点或他节点自然认领）；
-    ///   3. `PdOp::Claim`（apply CAS 防双认领）→ propose 返回后重读队列确认
-    ///     `Running(claimed_by=本节点)`；竞态失败（他节点已认领）→ 跳过；
-    ///   4. 执行（复用 `execute` 的 Leader 守卫——认领后 leader 若已漂移则
-    ///      Failed(not leader)，与本地模式一致、自愈）；
-    ///   5. `PdOp::Complete{success, error}` + 审计（success/failed 与本地
-    ///      `complete_operator` 同口径）。
+    ///
+    /// 1. 目标 Region 不在本节点 / 本节点非其 leader → 他节点认领，跳过；
+    /// 2. AddPeer 占位（node_id=0）目标暂不可解析 → 保持 Pending，跳过
+    ///    （不产生 Requeue 日志噪音；目标可用后本节点或他节点自然认领）；
+    /// 3. `PdOp::Claim`（apply CAS 防双认领）→ propose 返回后重读队列确认
+    ///    `Running(claimed_by=本节点)`；竞态失败（他节点已认领）→ 跳过；
+    /// 4. 执行（复用 `execute` 的 Leader 守卫——认领后 leader 若已漂移则
+    ///    Failed(not leader)，自愈）；
+    /// 5. `PdOp::Complete{success, error}` + 审计（success/failed 同口径）。
     ///
     /// 返回已处理 operator（可观测性）；无可认领条目返回 None。
     async fn execute_one_raft(
@@ -935,20 +879,28 @@ mod tests {
     #[tokio::test]
     async fn test_execute_one_pulls_queue_and_completes_success() {
         let (pd, ex, fake) = leader_fake(vec![voter(1)]);
-        pd.enqueue_operator(Operator::AddPeer {
-            region_id: 1,
-            node_id: 2,
-            raft_addr: "node2:50052".into(),
-        });
+        // P4b：条目经全局队列（region 0 raft 承载）；认领→执行→完成
+        let system = Arc::new(FakeSystemRaft::new(Some(1)));
+        system.seed_pending(
+            5,
+            Operator::AddPeer {
+                region_id: 1,
+                node_id: 2,
+                raft_addr: "node2:50052".into(),
+            },
+            1,
+        );
+        pd.attach_system_raft(system.clone());
 
         let fake2: Arc<dyn RegionRaftHandle> = fake.clone();
         let resolve: Arc<RegionRaftResolver> = Arc::new(move |_rid| Some(fake2.clone()));
         let op = ex.execute_one(&*resolve).await.expect("one operator");
         assert_eq!(op.name(), "add-peer");
-        assert!(matches!(
-            pd.operator_status(&op),
-            Some(super::super::operator::OperatorStatus::Success)
-        ));
+        let e = system.queue_entry(5).expect("entry present");
+        assert!(
+            matches!(e.status, super::super::operator::OperatorStatus::Success),
+            "queue entry must be Success: {e:?}"
+        );
         // meta 已同步
         assert!(has_peer(&peers_of_meta(&pd), 2, PeerRole::Voter));
     }
@@ -956,17 +908,25 @@ mod tests {
     #[tokio::test]
     async fn test_execute_one_completes_failed_when_region_missing() {
         let (pd, ex, _fake) = make_executor_pd(1, vec![voter(1)]);
-        pd.enqueue_operator(Operator::TransferLeader {
-            region_id: 99, // meta_store 无此 region
-            to_node: 2,
-        });
+        let system = Arc::new(FakeSystemRaft::new(Some(1)));
+        system.seed_pending(
+            6,
+            Operator::TransferLeader {
+                region_id: 99, // meta_store 无此 region
+                to_node: 2,
+            },
+            1,
+        );
+        pd.attach_system_raft(system.clone());
+
         let resolve: Arc<RegionRaftResolver> =
             Arc::new(|_rid| Some(Arc::new(FakeRaft::new(1, vec![voter(1)])) as Arc<dyn RegionRaftHandle>));
         let op = ex.execute_one(&*resolve).await.expect("one operator");
-        let st = pd.operator_status(&op).unwrap();
+        assert_eq!(op.name(), "transfer-leader");
+        let e = system.queue_entry(6).expect("entry present");
         assert!(
-            matches!(st, super::super::operator::OperatorStatus::Failed(_)),
-            "status: {st:?}"
+            matches!(e.status, super::super::operator::OperatorStatus::Failed(_)),
+            "queue entry must be Failed: {e:?}"
         );
     }
 
@@ -977,26 +937,25 @@ mod tests {
         let target: Arc<AddPeerTargetResolver> =
             Arc::new(|_rid| Some((2, "node2:50052".to_string())));
         let ex = ex.with_add_peer_resolver(target);
-        pd.enqueue_operator(Operator::AddPeer {
+        let original = Operator::AddPeer {
             region_id: 1,
             node_id: 0, // 占位：由解析器选择目标
             raft_addr: String::new(),
-        });
+        };
+        let system = Arc::new(FakeSystemRaft::new(Some(1)));
+        system.seed_pending(7, original.clone(), 1);
+        pd.attach_system_raft(system.clone());
 
         let fake2: Arc<dyn RegionRaftHandle> = fake.clone();
         let resolve: Arc<RegionRaftResolver> = Arc::new(move |_rid| Some(fake2.clone()));
         let op = ex.execute_one(&*resolve).await.expect("resolved add-peer");
         assert_eq!(op.name(), "add-peer");
         // 完成状态记在原始占位条目（node_id=0）上
-        let original = Operator::AddPeer {
-            region_id: 1,
-            node_id: 0,
-            raft_addr: String::new(),
-        };
-        assert!(matches!(
-            pd.operator_status(&original),
-            Some(super::super::operator::OperatorStatus::Success)
-        ));
+        let e = system.queue_entry(7).expect("entry present");
+        assert!(
+            matches!(e.status, super::super::operator::OperatorStatus::Success),
+            "entry must reach Success: {e:?}"
+        );
         assert_eq!(fake.add_learner_count(), 1);
         assert_eq!(fake.promote_calls(), vec![2]);
         assert!(has_peer(&peers_of_meta(&pd), 2, PeerRole::Voter));
@@ -1006,7 +965,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_one_unresolvable_add_peer_requeues() {
-        // T3.4：占位 AddPeer 无可选目标 → 放回队列（Pending）稍后重试，不记 Failed
+        // T3.4：占位 AddPeer 无可选目标 → 保持 Pending 稍后重试，不记 Failed
         let (pd, ex, _fake) = leader_fake(vec![voter(1)]);
         let none: Arc<AddPeerTargetResolver> = Arc::new(|_rid| None);
         let ex = ex.with_add_peer_resolver(none);
@@ -1015,16 +974,18 @@ mod tests {
             node_id: 0,
             raft_addr: String::new(),
         };
-        pd.enqueue_operator(op.clone());
+        let system = Arc::new(FakeSystemRaft::new(Some(1)));
+        system.seed_pending(8, op.clone(), 1);
+        pd.attach_system_raft(system.clone());
 
         let fake2: Arc<dyn RegionRaftHandle> = Arc::new(FakeRaft::new(1, vec![voter(1)]));
         let resolve: Arc<RegionRaftResolver> = Arc::new(move |_rid| Some(fake2.clone()));
         let ran = ex.execute_one(&*resolve).await;
         assert!(ran.is_none(), "unresolvable add-peer must not run");
-        let st = pd.operator_status(&op).unwrap();
+        let e = system.queue_entry(8).expect("entry present");
         assert!(
-            matches!(st, super::super::operator::OperatorStatus::Pending),
-            "unresolvable add-peer must stay pending (not failed): {st:?}"
+            matches!(e.status, super::super::operator::OperatorStatus::Pending),
+            "unresolvable add-peer must stay pending (not failed): {e:?}"
         );
     }
 
@@ -1196,8 +1157,6 @@ mod tests {
             matches!(e.status, super::super::operator::OperatorStatus::Success),
             "entry must reach Success: {e:?}"
         );
-        // 本地队列不被使用
-        assert!(pd.take_next_operator().is_none());
     }
 
     /// 全局队列模式：条目目标 Region 的 leader 不是本节点 → 不认领（留给
@@ -1269,11 +1228,18 @@ mod tests {
     #[tokio::test]
     async fn test_executor_loop_executes_and_stops_on_shutdown() {
         let (pd, ex, shutdown_tx) = make_executor_pd(1, vec![voter(1)]);
-        pd.enqueue_operator(Operator::AddPeer {
-            region_id: 1,
-            node_id: 2,
-            raft_addr: "node2:50052".into(),
-        });
+        // P4b：条目经全局队列（region 0 raft 承载）入队
+        let system = Arc::new(FakeSystemRaft::new(Some(1)));
+        system.seed_pending(
+            1,
+            Operator::AddPeer {
+                region_id: 1,
+                node_id: 2,
+                raft_addr: "node2:50052".into(),
+            },
+            1,
+        );
+        pd.attach_system_raft(system.clone());
 
         let ex = Arc::new(ex);
         let fake = Arc::new(FakeRaft::new(1, vec![voter(1)]));
@@ -1281,11 +1247,16 @@ mod tests {
         let resolve: Arc<RegionRaftResolver> = Arc::new(move |_rid| Some(fake2.clone()));
         let handle = ex.start_executor_loop(resolve, Duration::from_millis(50));
 
-        // 等待 operator 被执行完成
+        // 等待 operator 被执行完成（全局队列条目终态 Success）
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            let stats = pd.operator_stats();
-            if stats.success >= 1 {
+            let done = system
+                .queue_entry(1)
+                .map(|e| {
+                    matches!(e.status, super::super::operator::OperatorStatus::Success)
+                })
+                .unwrap_or(false);
+            if done {
                 break;
             }
             assert!(

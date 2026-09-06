@@ -76,32 +76,6 @@ pub enum OperatorStatus {
     Cancelled,
 }
 
-/// 带状态的 Operator
-#[derive(Debug, Clone)]
-pub struct OperatorEntry {
-    /// 操作定义
-    pub op: Operator,
-    /// 执行状态
-    pub status: OperatorStatus,
-    /// 创建时间（Unix 时间戳）
-    pub created_at: i64,
-}
-
-impl OperatorEntry {
-    /// 创建新的待执行 Operator
-    pub fn new(op: Operator) -> Self {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        Self {
-            op,
-            status: OperatorStatus::Pending,
-            created_at: now,
-        }
-    }
-}
-
 // ──── 测试 ────
 
 #[cfg(test)]
@@ -232,39 +206,6 @@ mod tests {
         let json = serde_json::to_string(&op).unwrap();
         let decoded: Operator = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, op);
-    }
-
-    // ──── OperatorEntry ────
-
-    #[test]
-    fn test_operator_entry_new_is_pending() {
-        let op = Operator::RemovePeer {
-            region_id: 100,
-            node_id: 200,
-        };
-        let entry = OperatorEntry::new(op);
-        assert!(matches!(entry.status, OperatorStatus::Pending));
-        assert!(entry.created_at > 0);
-    }
-
-    #[test]
-    fn test_operator_entry_created_at_is_now() {
-        let before = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let op = Operator::AddPeer {
-            region_id: 1,
-            node_id: 1,
-            raft_addr: String::new(),
-        };
-        let entry = OperatorEntry::new(op);
-        let after = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        assert!(entry.created_at >= before);
-        assert!(entry.created_at <= after + 1);
     }
 
     // ──── OperatorStatus ────

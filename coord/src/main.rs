@@ -2143,14 +2143,15 @@ async fn run_server(
         let heartbeat_interval =
             std::time::Duration::from_millis(cfg.multi_raft.pd.heartbeat_interval_ms);
 
-        // R-MR-08（D1-a P2）：PD operator 队列经 region 0 system raft 承载
+        // R-MR-08（D1-a P2/P4b）：PD operator 队列经 region 0 system raft 承载
         // （全局队列模式）——region 0 raft（本节点单 Raft）与其 MVCC 包装为
-        // `SystemRaftHandle` 注入 `EmbeddedPd`：调度收敛到 region 0 leader
-        // （唯一生成源），执行器从全局队列认领「目标 Region leader == 本节点」
-        // 的条目（docs §4.5）。`CoordRaft` Clone 为 Arc bump，廉价。
-        let system_raft: Option<Arc<dyn SystemRaftHandle>> = Some(Arc::new(
+        // `SystemRaftHandle` 注入 `EmbeddedPd`（必填；P4b 退役 legacy 本地队列
+        // 路径后无 None 模式）：调度收敛到 region 0 leader（唯一生成源），执行
+        // 器从全局队列认领「目标 Region leader == 本节点」的条目（docs §4.5）。
+        // `CoordRaft` Clone 为 Arc bump，廉价。
+        let system_raft: Arc<dyn SystemRaftHandle> = Arc::new(
             CoordSystemRaftHandle::new(raft.as_ref().clone(), Arc::clone(&mvcc)),
-        ));
+        );
         let pd = EmbeddedPd::start(
             cfg.multi_raft.pd.to_pd_config(),
             node_id,

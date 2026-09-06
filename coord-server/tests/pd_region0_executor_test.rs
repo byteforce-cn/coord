@@ -13,8 +13,8 @@
 //   leader 上报为 node2（非本节点）→ executor 跳过，条目保持 Pending、无任何
 //   propose（认领留给他节点）。
 //
-//   Test 3（真实 raft 去重 + 本地队列不参与）：重复 Enqueue 同一 operator →
-//   全局队列仅一条（apply 幂等去重）；本地 pending_operators 恒空。
+//   Test 3（真实 raft 去重）：重复 Enqueue 同一 operator →
+//   全局队列仅一条（apply 幂等去重）。
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -284,9 +284,6 @@ async fn test_global_queue_executor_claims_executes_completes_via_region0_raft()
     assert_eq!(entries[0].claimed_by, 1);
     assert_eq!(entries[0].op, op);
 
-    // 本地队列不参与（恒空）
-    assert!(driver.take_next_operator().is_none());
-
     let _ = shutdown_tx.send(true);
 }
 
@@ -336,8 +333,7 @@ async fn test_global_queue_executor_leaves_op_for_other_region_leader() {
     let _ = shutdown_tx.send(true);
 }
 
-/// Test 3：真实 raft apply 幂等去重（重复 Enqueue 同 operator → 单条目）；
-/// 本地队列恒空。
+/// Test 3：真实 raft apply 幂等去重（重复 Enqueue 同 operator → 单条目）。
 #[tokio::test]
 async fn test_global_queue_dedup_real_raft_and_no_local_queue() {
     let host = start_single_region0().await;
@@ -383,7 +379,6 @@ async fn test_global_queue_dedup_real_raft_and_no_local_queue() {
         entries[0].status,
         coord_server::pd::operator::OperatorStatus::Success
     ));
-    assert!(driver.take_next_operator().is_none(), "本地队列不参与");
 
     let _ = shutdown_tx.send(true);
 }

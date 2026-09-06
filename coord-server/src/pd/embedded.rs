@@ -31,10 +31,10 @@
 // R-MR-08（D1-a，2026-09-05 拍板=选项 a）：operator 跨节点去重经 region 0
 // system raft 承载（docs §4.5，P1–P4 分阶段）。P1 = raft 层基座
 // （`Command::Pd`/`PdQueueEntry`/`apply_pd_op`，commit 0d6cb17）；P2 = 本层
-// 接线——`EmbeddedPd::start` 新增 `system_raft: Option<Arc<dyn SystemRaftHandle>>`
-// 参数：main.rs 把 region 0 raft 句柄传入（全局队列模式：调度收敛 region 0
-// leader、执行器从全局队列按 Region leader 认领），无 region 0 raft 的测试
-// 装配传 None（legacy 本地队列路径，P4 退役）。
+// 接线——`EmbeddedPd::start` 新增 `system_raft` 参数：main.rs 把 region 0 raft
+// 句柄传入（全局队列模式：调度收敛 region 0 leader、执行器从全局队列按
+// Region leader 认领）；P4b 后 system raft 为必填（legacy 本地队列路径退役，
+// 不再有 None/本地模式装配）。
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -89,9 +89,11 @@ impl EmbeddedPd {
     /// - `region_manager`：已装配的 RegionManager（心跳/对账/执行对象）
     /// - `seeds`：配置 Region 表（v1 静态；key range 真源，用于播种/对账）
     /// - `nodes`：集群全部成员（raft/grpc 地址；节点心跳 + AddPeer 目标池）
-    /// - `system_raft`：region 0 system raft 治理句柄（R-MR-08 D1-a P2）。
-    ///   `Some` = 全局队列模式（调度收敛 region 0 leader + 执行器全局队列
-    ///   认领）；`None` = legacy 本地队列模式（无 region 0 raft 的测试装配）
+    /// - `system_raft`：region 0 system raft 治理句柄（R-MR-08 D1-a P2，
+    ///   **必填**——P4b 退役 legacy 本地队列路径后，operator 队列恒经 region 0
+    ///   raft 承载：调度收敛 region 0 leader + 执行器全局队列认领）。main.rs
+    ///   传 `CoordSystemRaftHandle`（region 0 raft + MVCC）；测试装配需自行
+    ///   提供真实单节点 region 0 raft 或替身。
     pub async fn start(
         pd_config: PdConfig,
         node_id: NodeID,
@@ -100,7 +102,7 @@ impl EmbeddedPd {
         seeds: &[RegionSeed],
         nodes: Vec<NodeInfo>,
         heartbeat_interval: Duration,
-        system_raft: Option<Arc<dyn SystemRaftHandle>>,
+        system_raft: Arc<dyn SystemRaftHandle>,
     ) -> Result<Arc<Self>, coord_core::error::Error> {
         // 1. 元数据落盘 + 播种（key range 以配置为真源；持久 peers/epoch 保留）
         let meta_store = Arc::new(PdMetaStore::open(data_dir)?);
@@ -123,10 +125,9 @@ impl EmbeddedPd {
             shutdown_rx,
             node_id,
         ));
-        // R-MR-08（D1-a P2）：装配 region 0 system raft 治理句柄（全局队列模式）
-        if let Some(system) = system_raft {
-            driver.attach_system_raft(system);
-        }
+        // R-MR-08（D1-a P2/P4b）：装配 region 0 system raft 治理句柄（全局
+        // 队列模式——operator 队列唯一承载；必填）
+        driver.attach_system_raft(system_raft);
         for n in &nodes {
             driver.handle_node_heartbeat(NodeState::new(
                 n.node_id,
