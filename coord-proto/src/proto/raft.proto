@@ -34,4 +34,16 @@ service Raft {
   // 每帧为 RaftMessage（payload = bincode(SnapshotStreamMessage)），
   // follower 侧重组后安装；避免整包单条 gRPC 超出解码上限。
   rpc InstallSnapshotStreaming(stream RaftMessage) returns (RaftMessage);
+
+  // SubmitPdOp (R-MR-08 / D1-a P5): 把一条 PD 队列命令（bincode(PdOp)）提交到
+  // 目标节点 **本地的 region 0 raft** 并等待 apply，返回日志 index。
+  //
+  // 用途：PD operator 执行器在「目标 Region 的当前 leader」节点运行，但
+  // region 0（system raft）的 `client_write` 只有其 leader 节点可本地提出；
+  // 非 region 0 leader 节点的执行器经本 RPC 把 Claim/Complete/Requeue 转发到
+  // region 0 leader 节点提出（跟随 openraft 的 ForwardToLeader 语义）。
+  // 请求 region_id = 0（region 0 承载 PD 队列）；payload = bincode(PdSubmitOp)，
+  // 响应 payload = bincode(PdSubmitReply{index,error})。节点间认证（共享密钥
+  // HMAC / mTLS）与其他 Raft RPC 同口径。
+  rpc SubmitPdOp(RaftMessage) returns (RaftMessage);
 }

@@ -25,7 +25,7 @@ use openraft::RaftNetworkV2;
 use parking_lot::RwLock;
 use tonic::transport::Channel;
 
-use super::type_config::TypeConfig;
+use super::type_config::{PdOp, TypeConfig};
 use super::CoordRaft;
 use crate::storage::snapshot_limiter::SnapshotRateLimiter;
 
@@ -334,6 +334,54 @@ impl RaftNetworkFactoryImpl {
             snapshot_rate_limiter: self.snapshot_rate_limiter.clone(),
             region_id,
         })
+    }
+
+    /// SubmitPdOp（R-MR-08 / D1-a P5）：把一条 PD 队列命令提交到 `target`
+    /// 节点的 region 0 raft（目标应为 region 0 leader——PD 执行器在非 region 0
+    /// leader 节点认领 operator 时，把 Claim/Complete/Requeue 经本方法转发到
+    /// region 0 leader 提出；openraft `client_write` 仅 leader 可本地提出）。
+    ///
+    /// 复用 RaftNetworkImpl 的出站路径（连接池 + TLS/mTLS + R-SEC-03 共享密钥
+    /// HMAC），region_id = 0。返回日志 index；接收方非 leader/提出失败时返回
+    /// `Err`（调用方解析 leader 变化后重试）。
+    pub async fn submit_pd_op(&self, target: u64, op: PdOp) -> Result<u64, String> {
+        let addr = self
+            .node_addrs
+            .read()
+            .get(&target)
+            .cloned()
+            .ok_or_else(|| format!("no known raft address for node {target}"))?;
+        let client_slot = self.get_or_create_client_slot(target).await;
+        let net = RaftNetworkImpl {
+            target_id: target,
+            target_addr: addr,
+            client_slot,
+            tls_config: self.raft_tls_config.clone(),
+            shared_secret: self.shared_secret.clone(),
+            snapshot_rate_limiter: None,
+            region_id: 0,
+        };
+        let mut client = net
+            .get_client()
+            .await
+            .map_err(|e| format!("connect to node {target}: {e}"))?;
+        let req_payload = serialize_payload(&PdSubmitPayload { op })
+            .map_err(|e| format!("serialize pd submit: {e}"))?;
+        let req = tonic::Request::new(
+            net.build_authed_message(req_payload)
+                .map_err(|e| format!("auth pd submit: {e}"))?,
+        );
+        let resp = client
+            .submit_pd_op(req)
+            .await
+            .map_err(|e| format!("submit_pd_op to node {target}: {e}"))?
+            .into_inner();
+        let reply: PdSubmitReply =
+            deserialize_payload(&resp.payload).map_err(|e| format!("decode pd submit reply: {e}"))?;
+        if !reply.error.is_empty() {
+            return Err(format!("node {target} rejected pd submit: {}", reply.error));
+        }
+        Ok(reply.index)
     }
 }
 
@@ -672,6 +720,23 @@ struct SnapshotStreamMessage {
     total_chunks: u32,
     /// 分块数据
     data: Vec<u8>,
+}
+
+// ──── R-MR-08 / D1-a P5：SubmitPdOp（PD 命令跨节点转发提出）────
+
+/// SubmitPdOp 请求载荷：一条 PD 队列命令（bincode）。经 raft_addr 节点间
+/// RPC（Raft 服务）携带——认证（共享密钥 HMAC / mTLS）与其余 Raft RPC 同口径。
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PdSubmitPayload {
+    pub op: PdOp,
+}
+
+/// SubmitPdOp 响应：本地 propose 的日志 index；`error` 非空 = 提出失败
+/// （如接收方不再是 region 0 leader——调用方解析后重试到新 leader）。
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PdSubmitReply {
+    pub index: u64,
+    pub error: String,
 }
 
 impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
@@ -1202,6 +1267,46 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
         Ok(tonic::Response::new(make_raft_message_for_region(
             payload,
             region_id,
+        )))
+    }
+
+    /// SubmitPdOp（R-MR-08 / D1-a P5）：接收方在**本机 region 0 raft** 本地提出
+    /// 一条 PD 队列命令并等待 apply。openraft `client_write` 仅 leader 可本地提出
+    /// （follower 返回 ForwardToLeader）——PD 执行器在非 region 0 leader 节点认领
+    /// 目标 Region 的 operator 时，把 Claim/Complete/Requeue 经本 RPC 转发到
+    /// region 0 leader 节点提出（apply CAS 语义不变，见 raft/system_raft.rs）。
+    async fn submit_pd_op(
+        &self,
+        request: tonic::Request<RaftMessageProto>,
+    ) -> Result<tonic::Response<RaftMessageProto>, tonic::Status> {
+        let msg = request.into_inner();
+        inject_received_trace_context(&msg);
+        self.verify_incoming(&msg)?;
+        let payload: PdSubmitPayload = deserialize_payload(&msg.payload)?;
+        let raft = self.get_raft_for_region(0)?;
+        let reply = match raft
+            .client_write(crate::raft::type_config::Command::Pd(payload.op))
+            .await
+        {
+            Ok(resp) => match resp.response() {
+                crate::raft::type_config::Response::Put { revision } => PdSubmitReply {
+                    index: *revision,
+                    error: String::new(),
+                },
+                other => PdSubmitReply {
+                    index: 0,
+                    error: format!("unexpected region0 submit_pd response: {other:?}"),
+                },
+            },
+            Err(e) => PdSubmitReply {
+                index: 0,
+                error: format!("region0 raft pd propose failed: {e}"),
+            },
+        };
+        let resp_payload = serialize_payload(&reply)?;
+        Ok(tonic::Response::new(make_raft_message_for_region(
+            resp_payload,
+            0,
         )))
     }
 }

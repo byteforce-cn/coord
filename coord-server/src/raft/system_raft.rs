@@ -17,11 +17,13 @@
 // 系统数据的承载 raft）。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use coord_core::error::{Error, Result};
 use coord_core::types::NodeID;
 
+use crate::raft::network::RaftNetworkFactoryImpl;
 use crate::raft::type_config::{Command, PdOp, PdQueueEntry, Response};
 use crate::raft::CoordRaft;
 use crate::storage::mvcc::MvccStorage;
@@ -55,15 +57,42 @@ pub trait SystemRaftHandle: Send + Sync {
 /// 包装节点级单 Raft（`CoordRaft`）与其共享 MVCC，把 `client_write(Command::Pd)`
 /// / `pd_queue_entries` 收敛到 `SystemRaftHandle` 端口；错误映射为
 /// `coord_core::error::Error`。
+///
+/// **P5（2026-09-06，T5.14 transfer-leader 演练暴露）**：openraft `client_write`
+/// 只有 raft **leader** 能本地提出，follower 返回 `ForwardToLeader`。PD 执行器在
+/// 「目标 Region 的当前 leader」节点认领 operator，该节点**未必是 region 0
+/// leader**——若不转发，operator 会永远 Pending（调度器持续生成、执行器无法
+/// 认领，见 §4.5 执行协议）。`with_forwarder` 装配节点间 `SubmitPdOp` RPC 后，
+/// `propose_pd` 在本地非 leader 时把命令转发到 region 0 leader 节点提出
+/// （apply CAS 语义不变；幂等/去重仍由 apply 层保证）。
 pub struct CoordSystemRaftHandle {
     raft: CoordRaft,
     mvcc: Arc<MvccStorage<RedbBackend>>,
+    /// 本节点 ID（region 0 leader 判定）
+    node_id: NodeID,
+    /// P5：region 0 leader 转发客户端（经 raft 节点间 gRPC；None = 单节点/
+    /// 测试装配——本地提出即可）
+    forwarder: Option<RaftNetworkFactoryImpl>,
 }
 
 impl CoordSystemRaftHandle {
-    /// 从 region 0 raft + 其 MVCC 构建（`CoordRaft` Clone 为 Arc bump，廉价）
+    /// 从 region 0 raft + 其 MVCC 构建（`CoordRaft` Clone 为 Arc bump，廉价）。
+    /// 单节点/测试装配用（本地提出）；生产装配另经 `with_forwarder` 挂转发。
     pub fn new(raft: CoordRaft, mvcc: Arc<MvccStorage<RedbBackend>>) -> Self {
-        Self { raft, mvcc }
+        Self {
+            raft,
+            mvcc,
+            node_id: 0,
+            forwarder: None,
+        }
+    }
+
+    /// 装配 region 0 leader 转发（生产接线，main.rs：executor 在非 region 0
+    /// leader 节点认领 operator 时经节点间 RPC 转发提出，见模块文档 P5）。
+    pub fn with_forwarder(mut self, node_id: NodeID, factory: RaftNetworkFactoryImpl) -> Self {
+        self.node_id = node_id;
+        self.forwarder = Some(factory);
+        self
     }
 }
 
@@ -74,6 +103,56 @@ impl SystemRaftHandle for CoordSystemRaftHandle {
     }
 
     async fn propose_pd(&self, op: PdOp) -> Result<u64> {
+        // 本节点是 region 0 leader → 本地 client_write（历史路径）
+        if self.raft.current_leader().await == Some(self.node_id) {
+            return self.propose_local(op).await;
+        }
+        // 非 leader：跟随 openraft ForwardToLeader 语义把命令**转发到 region 0
+        // leader 节点**经 SubmitPdOp RPC 提出（P5；apply CAS 语义不变）。
+        let Some(factory) = self.forwarder.as_ref() else {
+            // 无转发装配（单节点测试/纯本地装配）：退回本地提出（单节点恒
+            // leader；非 leader 时错误上抛由调用方/调度器跳过处理）
+            return self.propose_local(op).await;
+        };
+        let mut last_err = "region 0 leader unknown (election window)".to_string();
+        for _attempt in 0..5 {
+            // 每次重试前刷新 leader 视图（选举/转移后 leader 可能已变化）
+            match self.raft.current_leader().await {
+                Some(l) if l == self.node_id => {
+                    return self.propose_local(op.clone()).await;
+                }
+                Some(l) => {
+                    match factory.submit_pd_op(l, op.clone()).await {
+                        Ok(idx) => return Ok(idx),
+                        Err(e) => {
+                            tracing::warn!(
+                                "PD: forward pd op to region 0 leader node {l} failed: {e}"
+                            );
+                            last_err = format!("{e}");
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!("PD: region 0 leader unknown; pd propose forward deferred");
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        Err(Error::Internal(format!(
+            "region0 raft pd propose (leader forward) failed after retries: {last_err}"
+        )))
+    }
+
+    fn pd_queue(&self) -> Result<Vec<PdQueueEntry>> {
+        self.mvcc
+            .pd_queue_entries()
+            .map_err(|e| Error::Internal(format!("read region0 pd queue: {e}")))
+    }
+}
+
+impl CoordSystemRaftHandle {
+    /// 本地 client_write（本节点 = region 0 leader 时调用）。
+    async fn propose_local(&self, op: PdOp) -> Result<u64> {
         let cmd = Command::Pd(op);
         let resp = self
             .raft
@@ -86,11 +165,5 @@ impl SystemRaftHandle for CoordSystemRaftHandle {
                 "unexpected region0 pd propose response: {other:?}"
             ))),
         }
-    }
-
-    fn pd_queue(&self) -> Result<Vec<PdQueueEntry>> {
-        self.mvcc
-            .pd_queue_entries()
-            .map_err(|e| Error::Internal(format!("read region0 pd queue: {e}")))
     }
 }

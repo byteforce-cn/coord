@@ -2149,8 +2149,13 @@ async fn run_server(
         // 路径后无 None 模式）：调度收敛到 region 0 leader（唯一生成源），执行
         // 器从全局队列认领「目标 Region leader == 本节点」的条目（docs §4.5）。
         // `CoordRaft` Clone 为 Arc bump，廉价。
+        // P5（2026-09-06，T5.14 演练暴露）：执行器在「目标 Region leader」节点
+        // 认领 operator，该节点未必是 region 0 leader——openraft client_write 仅
+        // leader 可本地提出，故装配节点间 SubmitPdOp 转发（非 region 0 leader
+        // 节点的 propose 经 raft 节点间 RPC 转发到 region 0 leader 提出）。
         let system_raft: Arc<dyn SystemRaftHandle> = Arc::new(
-            CoordSystemRaftHandle::new(raft.as_ref().clone(), Arc::clone(&mvcc)),
+            CoordSystemRaftHandle::new(raft.as_ref().clone(), Arc::clone(&mvcc))
+                .with_forwarder(node_id, region_shared_factory.clone()),
         );
         let pd = EmbeddedPd::start(
             cfg.multi_raft.pd.to_pd_config(),
