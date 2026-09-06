@@ -2,6 +2,28 @@
 
 版本规则见 WHITEPAPER.md §5。契约版本独立于代码版本。
 
+## [contracts/v1.1.2] — 2026-09-06（内部口径修正：Multi-Raft PD 治理闭环 + 演练收口）
+
+**不改变任何对外承诺**：Multi-Raft/PD 维持红线 §9.3（永不对外承诺，除非另立版本公告）；
+本条目仅记录内部成熟度口径更新（决策 D4 选项 a）。
+
+**口径修正（内部成熟度，非契约承诺）**
+
+- Multi-Raft 内部实现进度更新：PD operator 全局队列（region 0 raft 承载）补齐
+  **跨节点 propose 转发（D1-a P5）**——执行器可在「目标 Region leader」节点认领并
+  经节点间 `SubmitPdOp` RPC 把 Claim/Complete 转发到 region 0 leader 提出
+  （修复 T5.14 transfer-leader 真实进程演练暴露的「执行器仅能在 region 0 leader ==
+  Region leader 时执行」缺陷）。
+- 阶段 E 前置真实进程演练收口（`multi_raft_process_test`，本地 6/6 PASS）：
+  transfer-leader 均衡、add-peer（target bump 滚动重启）、关→开→关升级/回滚
+  （含 fail-closed 闸真实进程验证）、chaos region 模式（kill/partition × PD +
+  线性一致）。
+- 验证与收尾（Jepsen multi-register 矩阵归档、性能 80% 阈值、摘牌发布）见
+  `docs/coord-multi-raft-production-plan-2026-09-05.md`（M8–M9）；如需对外承诺按
+  红线 §9.3「另立版本公告」另行立项（本条目不含任何对外承诺）。
+
+---
+
 ## [contracts/v1.1.1] — 2026-09-05（内部口径修正：Multi-Raft 实现进度更新）
 
 **不改变任何对外承诺**：Multi-Raft/PD 维持红线 §9.3（永不对外承诺，除非另立版本公告）；
