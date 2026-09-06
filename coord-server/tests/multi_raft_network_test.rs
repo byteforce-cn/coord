@@ -1,16 +1,16 @@
-// Multi-Raft 网络共享层验收测试（Phase 2 T2.1/T2.2）
+// Multi-Raft 网络共享层验收测试
 //
 // 验证：
-// - T2.1 GroupRouter：进程内 2 节点 × 2 Region，每个节点只建 **一个** 共享
+// - GroupRouter：进程内 2 节点 × 2 Region，每个节点只建 **一个** 共享
 //   RaftNetworkFactoryImpl（连接池），N 个 Region 的出站 RPC 走同一连接池，
 //   且 RaftMessage 携带各自 region_id。
-// - T2.2 per-region RaftNetworkFactory（RegionRaftNetworkFactory → openraft-multi
+// - per-region RaftNetworkFactory（RegionRaftNetworkFactory → openraft-multi
 //   GroupNetworkAdapter）可用：每个 Region 以它创建 Raft 实例。
-// - T2.5（配套）RaftRpcService 按 region_id 解复用；两个 Region 独立选举、
+// - （配套）RaftRpcService 按 region_id 解复用；两个 Region 独立选举、
 //   独立提交互不串扰。
 //
 // 每个 Region 使用独立 data dir（各自 LogStore + MvccStorage），存储隔离由
-// RegionManager/前缀隔离（T2.3）另行验收——本测试聚焦**网络共享层**正确性。
+// RegionManager/前缀隔离另行验收——本测试聚焦**网络共享层**正确性。
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;
@@ -130,7 +130,7 @@ async fn start_two_node_two_region_cluster() -> Vec<NodeHost> {
                 Arc::clone(&tracker),
             );
 
-            // T2.2：per-region 网络工厂（绑定 region_id）
+            // per-region 网络工厂（绑定 region_id）
             let region_factory = RegionRaftNetworkFactory::new(shared_factory.clone(), region_id);
             let raft_config = RaftConfig {
                 heartbeat_interval: 200,
@@ -148,7 +148,7 @@ async fn start_two_node_two_region_cluster() -> Vec<NodeHost> {
             .await
             .expect("create region raft instance");
 
-            // T2.5：注册到 region 解复用表
+            // 注册到 region 解复用表
             raft_rpc_service.set_region_raft(region_id, raft.clone());
 
             if node_id == 1 {
@@ -204,7 +204,7 @@ async fn propose_put(raft: &coord_server::raft::CoordRaft, key: &[u8], value: &[
     }
 }
 
-/// T2.1/T2.2 核心验收：2 节点 × 2 Region，共享连接池；各自独立选举 + 独立提交。
+/// 核心验收：2 节点 × 2 Region，共享连接池；各自独立选举 + 独立提交。
 #[tokio::test]
 async fn test_two_regions_independent_election_and_write() {
     let hosts = start_two_node_two_region_cluster().await;

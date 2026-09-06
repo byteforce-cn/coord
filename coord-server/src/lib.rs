@@ -2,14 +2,14 @@
 //
 // 本 Crate 包含：
 // - storage/  : Redb 存储后端 + MVCC 存储层
-// - raft/     : Openraft Raft 共识适配（P1）
+// - raft/     : Openraft Raft 共识适配
 // - pd/       : Placement Driver 全局调度器（内嵌模式已接线生产路径——
 //               `coord/src/main.rs` 在 `[multi_raft.pd] enabled=true` 时启动
-//               EmbeddedPd：meta 落盘/心跳/operator 执行/对账，T3.4；默认关闭 opt-in）
-// - txn/      : Txn 原子事务执行器（P1）
-// - watch/    : Watch 变更监听（P1）
-// - lease/    : Lease 租约管理（P2）
-// - security/ : Barrier 加密层 + Key Management + Seal/Unseal（P2-P3）
+//               EmbeddedPd：meta 落盘/心跳/operator 执行/对账；默认关闭 opt-in）
+// - txn/      : Txn 原子事务执行器
+// - watch/    : Watch 变更监听
+// - lease/    : Lease 租约管理
+// - security/ : Barrier 加密层 + Key Management + Seal/Unseal
 // - timer/    : Timer Wheel 时间轮（P1）
 // - auth/     : Auth 认证鉴权 + RBAC（P3）
 // - metrics/  : Prometheus 指标收集

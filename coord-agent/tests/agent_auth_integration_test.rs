@@ -1,4 +1,4 @@
-// Phase 4: Integration Verification — E2E / Dual Defense / Chaos / Regression
+// Integration Verification — E2E / Dual Defense / Chaos / Regression
 //
 // Verifies the complete auth flow across Agent and Server boundaries:
 // - E2E: CCT issuance → Agent validate → Server validate
@@ -7,7 +7,7 @@
 // - Rate limiter + interceptor integration
 // - Revocation + bloom filter integration
 //
-// See docs/capability-auth-implementation.md Phase 4.
+// See 
 
 #[cfg(test)]
 mod tests {
@@ -136,7 +136,7 @@ mod tests {
         let agent = AuthInterceptor::new(signing_key_bytes, role_cache, 300);
 
         let rev_store = Arc::new(RevocationStore::new(1000));
-        // P0-C.4 fail-closed：非信任调用方不再默认放行，需服务端角色授权。
+        // fail-closed：非信任调用方不再默认放行，需服务端角色授权。
         let server = {
             let mgr = Arc::new(AuthManager::new_empty());
             mgr.role_add("reader").unwrap();
@@ -355,7 +355,7 @@ mod tests {
             },
         ]);
 
-        // High-sensitivity roles from §10 table
+        // High-sensitivity roles from table
         assert!(cache.is_high_sensitive("root"));
         assert!(cache.is_high_sensitive("security-manager"));
         assert!(!cache.is_high_sensitive("service-writer"));

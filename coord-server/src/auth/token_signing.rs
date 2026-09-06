@@ -1,12 +1,10 @@
-// Token Signing Key — HKDF-derived signing key for CCT tokens (Phase 2.2)
+// Token Signing Key — HKDF-derived signing key for CCT tokens
 //
 // Derives a signing key from the Root Key via HKDF-SHA256 with a distinct
 // info string. Supports key versioning and rotation:
 // - Active key used for signing new CCTs
 // - Previous keys retained for verification (2x Max TTL = 2 hours)
 // - Rotation period: 7 days
-//
-// See docs/capability-auth-implementation.md §3.1, §3.3, §8.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -67,7 +65,7 @@ impl TokenSigningKey {
 
     /// Derive a signing key from root key material via HKDF-SHA256.
     ///
-    /// F2 修复（P0-C.3）：info 串混入 key version（`coord-token-signing-v{version}`），
+    /// 修复：info 串混入 key version（`coord-token-signing-v{version}`），
     /// 不同版本派生不同密钥 —— 此前常量 info 导致轮换无效（所有版本同钥）。
     pub fn derive(version: u32, root_key_material: &[u8]) -> Result<Self> {
         let hkdf = Hkdf::<Sha256>::new(None, root_key_material);
@@ -164,7 +162,7 @@ impl TokenSigningKeyring {
         self.active.read().key_bytes.clone()
     }
 
-    /// R-SEC-02：从 root key 派生 Ed25519 签名私钥（HKDF info `coord-cct-ed25519-v1`）。
+    /// 从 root key 派生 Ed25519 签名私钥（HKDF info `coord-cct-ed25519-v1`）。
     ///
     /// server 持有私钥签发，agent 仅持 `verifying_key()` 公钥验证，
     /// 任一 agent 被控无法伪造 token（与 HMAC 对称方案的根因修复）。
@@ -176,7 +174,7 @@ impl TokenSigningKeyring {
         Ok(SigningKey::from_bytes(&seed))
     }
 
-    /// R-SEC-02：验证任意算法签发的 CCT。
+    /// 验证任意算法签发的 CCT。
     ///
     /// - `HMAC-SHA256` → 依次尝试 active + previous 密钥（历史 token 宽限期）；
     /// - `Ed25519` → 用派生的签名密钥对应公钥验证。
@@ -352,7 +350,7 @@ mod tests {
         key
     }
 
-    // ──── Phase 2.2: Token Signing Key derivation ────
+    // ──── Token Signing Key derivation ────
 
     #[test]
     fn test_derive_signing_key_from_root() {
@@ -371,7 +369,7 @@ mod tests {
         let key1 = TokenSigningKey::derive(1, &root).unwrap();
         let key2 = TokenSigningKey::derive(2, &root).unwrap();
 
-        // F2 修复（P0-C.3）：不同版本必须派生不同密钥（轮换才有效）
+        // 修复：不同版本必须派生不同密钥（轮换才有效）
         assert_eq!(key1.key_id, "token-signing-key-v1");
         assert_eq!(key2.key_id, "token-signing-key-v2");
         assert_ne!(

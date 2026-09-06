@@ -83,7 +83,7 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
     @Override
     public String startByDefinition(String definitionId, byte[] input) {
-        // ISSUE-010 §1 真契约：按已部署定义 ID 启动（definition_id），携带 input，跳过内联 deploy。
+        // 真契约：按已部署定义 ID 启动（definition_id），携带 input，跳过内联 deploy。
         // 由宿主在发布时保存 definition id（deployDefinition 返回），submit 按 id 启动，消除重复部署。
         WorkflowStartRequest.Builder req = WorkflowStartRequest.newBuilder()
                 .setDefinitionId(definitionId);
@@ -134,7 +134,7 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         // currentStep derived from task stack size
         int currentStep = taskStack.size();
 
-        // ISSUE-010 §2：当前状态名 + 挂起元信息
+        // 当前状态名 + 挂起元信息
         String currentStateName = response.getCurrentStateName();
         Suspension suspension = null;
         if (response.hasSuspension()) {

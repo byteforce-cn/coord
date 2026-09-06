@@ -1,6 +1,6 @@
-// coord-agent: 特性开关服务 (Feature Flags) — Phase H
+// coord-agent: 特性开关服务 (Feature Flags)
 //
-// v8.2 §4.13: 特性开关 — 基于 KV 的布尔开关，支持百分比灰度。
+// 特性开关 — 基于 KV 的布尔开关，支持百分比灰度。
 //
 // 核心机制：
 // - 简单开关：boolean toggle

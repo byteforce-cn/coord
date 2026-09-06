@@ -7,8 +7,6 @@
 // - 本地缓存全量注册表（延迟 <1ms），Watch Fan-out 维护更新
 // - 与 Server 断连时保留最后已知实例快照（自我保护）
 // - 通过 Lease 绑定实现实例自动过期
-//
-// 参见 docs/client-agent-architecture-v3.md §5.1。
 
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;

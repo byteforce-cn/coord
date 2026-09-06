@@ -42,7 +42,7 @@ import static org.mockito.Mockito.when;
 /**
  * Tests the {@link MqClient} gRPC client against an in-process stub server.
  * <p>
- * Verifies Phase 1 MQ SDK surface: createTopic / publish (increasing offsets) /
+ * Verifies MQ SDK surface: createTopic / publish (increasing offsets) /
  * poll (incremental by offset) / ack / pollDlq.
  */
 class MqClientTest {

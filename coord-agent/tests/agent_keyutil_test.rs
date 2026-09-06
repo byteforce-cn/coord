@@ -1,6 +1,6 @@
-// TDD: Agent 端 KeyUtil 适配器测试 (Phase F — 待实施)
+// TDD: Agent 端 KeyUtil 适配器测试（待实施）
 //
-// v8.2 §4.12: 密钥管理适配层
+// 密钥管理适配层
 // - 适配器模式，支持多种后端
 // - 内核 keyring 后端（Linux logon/trusted 类型），推荐生产环境
 // - 文件后端（加密的本地文件），适用于开发/测试环境

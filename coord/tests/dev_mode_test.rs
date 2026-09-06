@@ -1,7 +1,7 @@
 // TDD: coord dev 模式集成测试
 //
 // 验证单命令同时启动 Server + Agent 的开发模式行为。
-// 参见 docs/dev-mode-plan.md、agent_proxy_test.rs
+// 参见 agent_proxy_test.rs
 //
 // 测试列表:
 //   1. test_dev_mode_starts_server_and_agent — Server + Agent 并发启动，Agent 代理 KV 读写
@@ -511,7 +511,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(3), agent_handle).await;
     }
 
-    // ──── 测试 5: ISSUE-011 回归 —— 默认雪花模式，fresh Server 连续调用唯一 ────
+    // ──── 测试 5: 回归 —— 默认雪花模式，fresh Server 连续调用唯一 ────
 
     /// 验证默认实现（雪花 nodeid）：fresh Server 上同一 name 连续调用唯一且单调。
     #[tokio::test(flavor = "multi_thread")]
@@ -569,7 +569,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(5), agent_handle).await;
     }
 
-    // ──── 测试 6: ISSUE-011 回归 —— 默认雪花模式，fresh Server 并发调用唯一 ────
+    // ──── 测试 6: 回归 —— 默认雪花模式，fresh Server 并发调用唯一 ────
 
     /// 验证默认实现（雪花 nodeid）：同一 agent 上并发 nextId 全部唯一。
     #[tokio::test(flavor = "multi_thread")]
@@ -631,9 +631,9 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(5), agent_handle).await;
     }
 
-    // ──── 测试 7: ISSUE-011 核心回归 —— 号段模式（opt-in），fresh Server 并发唯一 ────
+    // ──── 测试 7: 核心回归 —— 号段模式（opt-in），fresh Server 并发唯一 ────
 
-    /// ISSUE-011 复现场景转绿：fresh Server + 号段模式（segment）并发 nextId 同一 name → 全部唯一。
+    /// 复现场景转绿：fresh Server + 号段模式（segment）并发 nextId 同一 name → 全部唯一。
     /// 旧实现（range + 普通 put，无 CAS）并发双方都读到 current_max=0 → 都返回 1 → duplicate key。
     #[tokio::test(flavor = "multi_thread")]
     async fn test_idgen_segment_fresh_concurrent_unique() {
@@ -652,7 +652,7 @@ mod tests {
             .await
             .expect("server should be ready");
 
-        // Agent 配置为号段模式（ISSUE-011 复现场景）
+        // Agent 配置为号段模式（复现场景）
         let agent_addr = format!("127.0.0.1:{}", agent_port);
         let agent_config = AgentConfig {
             agent_addr: agent_addr.clone(),

@@ -1,4 +1,4 @@
-// R-MR-07（T5.15/T5.16）Legacy → Multi-Raft 迁移验收测试
+// Legacy → Multi-Raft 迁移验收测试
 //
 // 经真实 Region raft（2 节点 × 2 Region，gRPC 网络）验证 raft 中介迁移：
 //   - 各 Region leader 把 region 0 根 store 的**活用户 KV**经 raft `Put` 导入

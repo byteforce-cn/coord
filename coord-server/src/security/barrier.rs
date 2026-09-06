@@ -1,4 +1,4 @@
-// Storage Barrier — AES-256-GCM 加密/解密屏障（P2）
+// Storage Barrier — AES-256-GCM 加密/解密屏障
 //
 // 职责：
 // - encrypt: 使用当前活跃 DEK 加密 plaintext Value，返回 `key_id || nonce || ciphertext || tag`
@@ -60,7 +60,7 @@ impl Barrier {
     ///
     /// 返回密文，格式：`key_id(4B BE) || nonce(12B) || ciphertext || tag(16B)`
     ///
-    /// P0-B.4/F9：sealed 态拒绝加密（`active_dek` 返回 Error，此处入口再显式
+    /// sealed 态拒绝加密（`active_dek` 返回 Error，此处入口再显式
     /// 检查一次，保证 sealed 后任何明文写入路径都被阻断）。
     ///
     /// # 性能

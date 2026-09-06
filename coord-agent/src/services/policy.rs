@@ -1,15 +1,13 @@
-// coord-agent: 权限策略引擎 (Policy Service) — 安全层（Phase G）
+// coord-agent: 权限策略引擎 (Policy Service) — 安全层
 //
 // 实现 BaseService trait，提供基于规则的授权决策引擎（RBAC/ABAC）。
 // 支持策略管理、条件匹配、优先级排序、通配符匹配。
 // 设计为可扩展至 OPA Wasm 的策略决策点。
 //
-// Bundle 管理（Phase H）:
+// Bundle 管理:
 // - 策略包存储在 Server KV（`/_policy/bundles/` 前缀），多 Agent 共享
 // - OpaEngine 负责本地 Rego 求值和 explain
 // - PolicyService 负责 bundle CRUD（KV 读写）和 OpaEngine 策略同步
-//
-// 参见 docs/client-agent-architecture-v3.md §5.10。
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -162,7 +160,7 @@ fn unix_ts_i64() -> i64 {
 
 /// 在阻塞线程池执行 OpaEngine 的同步 CPU 密集操作（Rego 编译 / 引擎重建 / explain）。
 ///
-/// Phase 1 T1.2（运行时隔离整改）：OpaEngine 内部 `engine.write()` + regorus 编译/求值
+/// OpaEngine 内部 `engine.write()` + regorus 编译/求值
 /// 均为同步 CPU 操作，直接内联在 async bundle 方法里会阻塞 agent 的 tokio worker。
 /// 统一经 `spawn_blocking` 移出 worker；引擎本身受内部 RwLock 保护、线程安全，
 /// 多调用方串行化语义不变（与 grpc_handlers `Policy::evaluate` 的既有先例一致）。

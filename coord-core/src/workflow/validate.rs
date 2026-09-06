@@ -1,5 +1,5 @@
 // coord-core/workflow/validate.rs
-// 语义校验器 —— Phase 2: RawWorkflowDef → WorkflowDefinition
+// 语义校验器 —— RawWorkflowDef → WorkflowDefinition
 //
 // 将宽松的中间表示（Raw IR）转为强类型的 WorkflowDefinition，同时执行：
 // 1. 任务类型推断（根据 body JSON key 推断 task 类型）

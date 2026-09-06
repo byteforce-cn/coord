@@ -613,7 +613,7 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
             }
             "event" => {
                 // onEvents → listen 任务（等待事件，主动订阅恢复）
-                // 多 onEvents：多事件类型过滤器 + 按事件路由 switch（approve/reject 双路由，ISSUE-009 §2.2）
+                // 多 onEvents：多事件类型过滤器 + 按事件路由 switch（approve/reject 双路由）
                 let event_types = all_event_types(&doc, s);
                 let filter = EventFilter {
                     event_type: first_event_type(&doc, s),
@@ -1407,7 +1407,7 @@ mod tests {
 
     // ── 样例 ──
 
-    /// ISSUE-004 conformance 示例（SW 文档）
+    /// conformance 示例（CNCF SW 文档）
     fn sample_sw_json() -> &'static str {
         r#"{
           "id": "order-approval",
@@ -1872,7 +1872,7 @@ mod tests {
 
     #[test]
     fn test_event_state_multi_on_events_compiles_to_routing_switch() {
-        // ISSUE-010 §4：event 状态多 onEvents 生成按 _signal.name / _event.eventType 的路由 switch
+        // event 状态多 onEvents 生成按 _signal.name / _event.eventType 的路由 switch
         let v: Value = serde_json::json!({
             "id": "wf", "version": "1.0", "start": "ev",
             "states": [

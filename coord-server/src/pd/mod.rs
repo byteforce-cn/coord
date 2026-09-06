@@ -1,21 +1,21 @@
-// Placement Driver — Multi-Raft 全局调度器（Phase 3 生产化进行中）
+// Placement Driver — Multi-Raft 全局调度器
 //
-// 演进说明：本模块在 Phase 0–3（2026-08-31 → 09-05）完成生产化改造——
-//   - T3.1（coord 554a1fe）：PdMetaStore redb 落盘（<data_dir>/pd/pd-meta.db）；
-//   - T3.2（coord 2fd8ec0）：Region 心跳 → 实时调度状态（leader 视图/统计）；
-//   - T3.3（coord d510fa9）：Operator 执行器映射真实 Region raft 成员变更；
-//   - T3.4：`EmbeddedPd`（本模块 `embedded.rs`）——main.rs 内嵌接线（心跳源、
+// 演进说明：本模块在 2026-08-31 → 09-05 完成生产化改造——
+//   - PdMetaStore redb 落盘（<data_dir>/pd/pd-meta.db）；
+//   - Region 心跳 → 实时调度状态（leader 视图/统计）；
+//   - Operator 执行器映射真实 Region raft 成员变更；
+//   - `EmbeddedPd`（本模块 `embedded.rs`）——main.rs 内嵌接线（心跳源、
 //     成员对账、调度/执行循环；`[multi_raft].enabled=true` + `[multi_raft.pd]
-//     .enabled=true` 时装配）。见 `docs/coord-multi-raft-plan-2026-08-31.md`。
+//     .enabled=true` 时装配）。
 //
 // Placement Driver — Multi-Raft 全局调度器
 //
 // PD（Placement Driver）是 Coord Multi-Raft 体系的核心调度组件。
 // 负责 Region 元数据管理、副本放置决策、Split/Merge 触发、热点检测与 Leader 均衡。
 //
-// 设计要点（ADP §4）：
-// - Phase 1-2：PD 内嵌于 Coord 进程，通过 Raft 共识保证 PD 元数据一致性
-// - Phase 3+：PD 可作为独立进程部署（3 节点 PD 集群）
+// 设计要点：
+// - PD 内嵌于 Coord 进程，通过 Raft 共识保证 PD 元数据一致性
+// - PD 可作为独立进程部署（3 节点 PD 集群）
 
 pub mod embedded;
 pub mod executor;
@@ -58,11 +58,11 @@ pub use types::{NodeState, PdConfig, PdMode};
 pub struct PlacementDriver {
     /// PD 配置
     config: PdConfig,
-    /// Region 元数据持久化存储（内存模式，Phase 3+ 持久化）
+    /// Region 元数据持久化存储（内存模式）
     meta_store: Arc<PdMetaStore>,
     /// 活跃节点的心跳状态
     node_states: RwLock<HashMap<NodeID, NodeState>>,
-    /// Region 心跳上报的当前 leader 视图（T3.2，内存瞬态）
+    /// Region 心跳上报的当前 leader 视图（内存瞬态）
     ///
     /// 由各节点 Region 心跳填充；leader 是运行时事实（调度输入），非持久元数据，
     /// 与 `PdMetaStore` 落盘的成员/epoch/range 分离。节点离线或选举窗口（上报
@@ -72,16 +72,16 @@ pub struct PlacementDriver {
     schedulers: Vec<Box<dyn Scheduler>>,
     /// 优雅关闭信号
     shutdown_rx: watch::Receiver<bool>,
-    /// T5.12：调度暂停开关（true = scheduler tick 不入队新 operator；已排队的仍
+    /// 调度暂停开关（true = scheduler tick 不入队新 operator；已排队的仍
     /// 由 executor drain）。初始值取 `PdConfig.scheduler_paused`，可运行时切换。
     scheduler_paused: AtomicBool,
-    /// T5.12：operator 审计/指标钩子（EmbeddedPd 装配后经
+    /// operator 审计/指标钩子（EmbeddedPd 装配后经
     /// `attach_observability` 接线；None = 不记录，行为与现状一致）
     observability: RwLock<Option<PdObservability>>,
-    /// 本节点 ID（R-MR-08 D1-a P2：调度收敛闸——operator 生成只发生在
+    /// 本节点 ID（调度收敛闸——operator 生成只发生在
     /// region 0 leader == 本节点的 PD；operator 认领 requester/归属）
     node_id: NodeID,
-    /// R-MR-08（D1-a P2）：region 0 system raft 治理句柄。
+    /// region 0 system raft 治理句柄。
     ///
     /// - `Some`：**全局队列模式**——operator 队列经 region 0 raft 承载
     ///   （`/_pd/ops/*`）。调度收敛到 region 0 leader（唯一生成源），执行由
@@ -130,7 +130,7 @@ impl PlacementDriver {
         }
     }
 
-    /// R-MR-08（D1-a P2）：装配 region 0 system raft 治理句柄（进入全局队列
+    /// 装配 region 0 system raft 治理句柄（进入全局队列
     /// 模式）。应在任何后台循环启动前调用；幂等（重复装配覆盖）。
     pub fn attach_system_raft(&self, system: Arc<dyn SystemRaftHandle>) {
         *self.system.write() = Some(system);
@@ -152,7 +152,7 @@ impl PlacementDriver {
         self.node_id
     }
 
-    // ──── T5.12：调度暂停开关 ────
+    // ──── 调度暂停开关 ────
 
     /// 运行时切换调度暂停（true = scheduler tick 不再产生新 operator）
     pub fn set_scheduler_paused(&self, paused: bool) {
@@ -168,7 +168,7 @@ impl PlacementDriver {
         self.scheduler_paused.load(Ordering::Relaxed)
     }
 
-    // ──── T5.12：operator 审计/指标 ────
+    // ──── operator 审计/指标 ────
 
     /// 装配可观测性钩子（audit logger / metrics；None = 不记录）
     pub fn attach_observability(&self, obs: PdObservability) {
@@ -260,7 +260,7 @@ impl PlacementDriver {
 
     // ──── Region 心跳管理 ────
 
-    /// 处理 Region 心跳上报（T3.2）
+    /// 处理 Region 心跳上报
     ///
     /// - 统计字段（size/keys）是派生瞬态数据 → 走 `update_region_stats` 内存视图，
     ///   不写穿落盘（避免每拍心跳 commit+fsync 写放大，见 PdMetaStore 文档）；
@@ -340,7 +340,7 @@ impl PlacementDriver {
             return;
         };
 
-        // R-MR-08（D1-a P3）：region 0 leader 每 tick 先做 Running 超时重认领
+        // region 0 leader 每 tick 先做 Running 超时重认领
         // （认领者失联/Complete 丢失 → 卡死 failover 兜底）与队列深度上报。
         // 该维护**不随 scheduler_paused 冻结**——暂停只冻结"新 operator
         // 生成"（见下），活性恢复（防卡死）属保障语义须持续生效。
@@ -348,7 +348,7 @@ impl PlacementDriver {
             self.requeue_stale_running(system.as_ref()).await;
         }
 
-        // T5.12：调度暂停——维护窗口/演练时冻结调度行为（不产生新 operator）。
+        // 调度暂停——维护窗口/演练时冻结调度行为（不产生新 operator）。
         // 已排队的 operator 仍由 executor 循环 drain（见模块文档）。
         if self.is_scheduler_paused() {
             tracing::debug!("PD: scheduler paused; skipping schedule tick");
@@ -370,7 +370,7 @@ impl PlacementDriver {
             }
         }
 
-        // R-MR-08（D1-a P2）：operator 生成只发生在 region 0 raft leader 所在
+        // operator 生成只发生在 region 0 raft leader 所在
         // 节点的 PD——生成源全局唯一（follower 的 PD 仍做心跳维护与离线判定，
         // 但不生成 operator；执行器在每节点照常运行，从全局队列认领「目标
         // Region leader == 本节点」的条目）。
@@ -444,7 +444,7 @@ impl PlacementDriver {
         self.enqueue_generated_global(&system, generated).await;
     }
 
-    /// 全局队列模式入队（R-MR-08 D1-a P2）：候选 operator 与全局队列预去重后
+    /// 全局队列模式入队：候选 operator 与全局队列预去重后
     /// 经 raft `Enqueue` 写入 region 0（apply 层幂等去重兜底；单生成源下预过滤
     /// 即权威，避免每 tick 对同一 operator 重复 Enqueue 的日志噪音）。
     async fn enqueue_generated_global(
@@ -480,7 +480,7 @@ impl PlacementDriver {
                         "PD: enqueued operator {} to region 0 queue (log {rev})",
                         op_summary(&op)
                     );
-                    // T5.12：新增（非去重命中）operator 审计 + 指标
+                    // 新增（非去重命中）operator 审计 + 指标
                     self.count_operator_enqueued();
                     self.record_operator_event(&op, "pending", &op_summary(&op));
                 }
@@ -494,7 +494,7 @@ impl PlacementDriver {
         }
     }
 
-    /// R-MR-08（D1-a P3）：region 0 leader 周期扫描全局队列，把 **Running 超时**
+    /// region 0 leader 周期扫描全局队列，把 **Running 超时**
     /// （认领者失联 / Complete 提出丢失 → 条目卡死）的 operator 经 raft
     /// `Requeue` 放回 Pending，由当前存活的目标 Region leader 重认领执行——
     /// 认领者故障的自愈兜底（failover）。
@@ -751,7 +751,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ──── T3.2：Region 心跳 leader 视图 ────
+    // ──── Region 心跳 leader 视图 ────
 
     #[test]
     fn test_region_heartbeat_tracks_leader() {
@@ -814,7 +814,7 @@ mod tests {
         assert_eq!(r.approximate_keys, 0);
     }
 
-    // ──── T3.2：调度 tick 使用心跳 leader ────
+    // ──── 调度 tick 使用心跳 leader ────
 
     /// 构造 2 节点 × 2 Region 的 PD：region peers 首 Voter = node2（旧"首
     /// Voter=leader"猜测会误判），但心跳上报真实 leader = node1。
@@ -1021,7 +1021,7 @@ mod tests {
         );
     }
 
-    // ──── R-MR-08（D1-a P2）：全局队列模式调度（region 0 raft 承载）────
+    // ──── 全局队列模式调度（region 0 raft 承载）────
 
     /// 可编程 region 0 system raft 替身：内存队列 + 与 `apply_pd_op` 同构的
     /// CAS 状态机（Pending→Running(claimed_by)→Success/Failed、Enqueue 幂等

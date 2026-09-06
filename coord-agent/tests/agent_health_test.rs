@@ -1,4 +1,4 @@
-// TDD: Agent HTTP Health/Metrics 测试 (Phase C3 — RED)
+// TDD: Agent HTTP Health/Metrics 测试 (RED)
 //
 // 验证 Agent 可观测性端点：
 // - /health         → 200 OK（进程存活）
@@ -17,7 +17,7 @@ use tokio::net::TcpStream;
 use coord_agent::health::start_health_server;
 use coord_agent::metrics::AgentMetrics;
 
-/// C3.1: /health 端点返回 200 OK
+/// /health 端点返回 200 OK
 #[tokio::test]
 async fn test_health_endpoint_live() {
     let port = find_port();
@@ -44,7 +44,7 @@ async fn test_health_endpoint_live() {
     handle.abort();
 }
 
-/// C3.2: /health?ready=true 就绪检查
+/// /health?ready=true 就绪检查
 #[tokio::test]
 async fn test_health_endpoint_ready() {
     let port = find_port();
@@ -65,7 +65,7 @@ async fn test_health_endpoint_ready() {
     handle.abort();
 }
 
-/// C3.3: /metrics 端点返回 Prometheus 格式
+/// /metrics 端点返回 Prometheus 格式
 #[tokio::test]
 async fn test_metrics_endpoint() {
     let port = find_port();

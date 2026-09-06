@@ -1,9 +1,9 @@
-// TDD: Agent 端 PKI 服务测试（Phase F / ISSUE-000 整改）
+// TDD: Agent 端 PKI 服务测试
 //
-// v8.2 §4.12: PKI — CA 私钥受根密钥保护，为 mTLS 签发短期证书
-// ISSUE-000: 按 CN 幂等取回（get-or-create）+ CA/证书共享存储持久化
+// PKI — CA 私钥受根密钥保护，为 mTLS 签发短期证书。
+// 按 CN 幂等取回（get-or-create）+ CA/证书共享存储持久化。
 //
-// 覆盖验收标准（docs/issue/ISSUE-000-test-评估与方案.md §8）：
+// 覆盖验收标准：
 // 1. 同一 CN 连续 issueCert → 相同 serial / 公钥 / 私钥
 // 2. agent 重启（store 保留）→ issueCert 仍返回同一证书；CA 不重建
 // 3. 两 agent 并发首次 issueCert(同 CN) → 仅一份密钥（CAS 单写）

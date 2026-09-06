@@ -1,6 +1,6 @@
 // TDD: coord-agent crate 骨架测试
 //
-// Phase A2 — RED stage: 在 coord-agent crate 还不存在时此测试应编译失败。
+// RED stage: 在 coord-agent crate 还不存在时此测试应编译失败。
 
 use coord_agent::{AgentConfig, AgentServer, StaticDiscovery};
 

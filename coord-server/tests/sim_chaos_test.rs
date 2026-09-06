@@ -1,8 +1,8 @@
-// sim_chaos_test.rs — 算法级模拟套件（P0-H：非系统验证证据）
+// sim_chaos_test.rs — 算法级模拟套件（非系统验证证据）
 //
 // ⚠ 口径声明：本套件为文件内自建内存模型（SimCluster），不引用 coord_server /
-// coord_client 任何真实模块，不得作为系统级混沌验证证据（决策文档 §1.3 #18）。
-// 真实故障注入套件为 `coord/tests/chaos_real.rs`（P0-H.2，另立项施工）。
+// coord_client 任何真实模块，不得作为系统级混沌验证证据（#18）。
+// 真实故障注入套件为 `coord/tests/chaos_real.rs`（另立项施工）。
 //
 // 测试覆盖（模拟口径）：
 // - 节点随机故障恢复（模拟状态机）

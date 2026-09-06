@@ -1,13 +1,13 @@
-// region 0 system raft 治理能力面（R-MR-08 / D1-a，P2）
+// region 0 system raft 治理能力面
 //
-// D1-a（docs/coord-multi-raft-production-plan-2026-09-05.md §4.5）把 PD operator
+// PD operator
 // 队列经 **region 0 system raft** 承载：全节点复制同一份全序队列，调度只发生在
 // region 0 leader 节点，执行由「目标 Region 的当前 leader」节点认领（apply CAS
 // 防双认领）。本文件定义 pd 模块依赖的 raft 端口：
 //
 //   - `SystemRaftHandle` trait：`current_leader` / `propose_pd` / `pd_queue`。
 //     定义在 raft 层（raft 自我描述能力；`openraft::` 交互收敛在本目录内——
-//     P1-06 类型隔离），`pd` 模块的 `PlacementDriver`/`OperatorExecutor` 只经
+//     openraft 类型隔离），`pd` 模块的 `PlacementDriver`/`OperatorExecutor` 只经
 //     trait object 使用本端口，不接触任何 openraft 类型（与 `RegionRaftHandle`
 //     同模式，见 `raft/region_runtime.rs`）。
 //
@@ -29,9 +29,9 @@ use crate::raft::CoordRaft;
 use crate::storage::mvcc::MvccStorage;
 use crate::storage::redb_backend::RedbBackend;
 
-/// region 0（system raft）PD 治理能力面（D1-a P2）
+/// region 0（system raft）PD 治理能力面
 ///
-/// 语义约定（与 `pd/` 模块对齐，见 §4.5 数据模型/命令集）：
+/// 语义约定（与 `pd/` 模块对齐）：
 /// - `current_leader`：调度收敛闸（operator 生成只发生在 region 0 leader
 ///   所在节点）；选举窗口 = None；
 /// - `propose_pd`：把 `PdOp`（Enqueue/Claim/Complete/Requeue）写入 region 0
@@ -52,17 +52,17 @@ pub trait SystemRaftHandle: Send + Sync {
     fn pd_queue(&self) -> Result<Vec<PdQueueEntry>>;
 }
 
-/// 真实 region 0 raft 的 PD 治理句柄（D1-a P2）
+/// 真实 region 0 raft 的 PD 治理句柄
 ///
 /// 包装节点级单 Raft（`CoordRaft`）与其共享 MVCC，把 `client_write(Command::Pd)`
 /// / `pd_queue_entries` 收敛到 `SystemRaftHandle` 端口；错误映射为
 /// `coord_core::error::Error`。
 ///
-/// **P5（2026-09-06，T5.14 transfer-leader 演练暴露）**：openraft `client_write`
+/// openraft `client_write`
 /// 只有 raft **leader** 能本地提出，follower 返回 `ForwardToLeader`。PD 执行器在
 /// 「目标 Region 的当前 leader」节点认领 operator，该节点**未必是 region 0
 /// leader**——若不转发，operator 会永远 Pending（调度器持续生成、执行器无法
-/// 认领，见 §4.5 执行协议）。`with_forwarder` 装配节点间 `SubmitPdOp` RPC 后，
+/// 认领）。`with_forwarder` 装配节点间 `SubmitPdOp` RPC 后，
 /// `propose_pd` 在本地非 leader 时把命令转发到 region 0 leader 节点提出
 /// （apply CAS 语义不变；幂等/去重仍由 apply 层保证）。
 pub struct CoordSystemRaftHandle {

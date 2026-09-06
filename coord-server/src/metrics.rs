@@ -3,7 +3,7 @@
 // 使用原子计数器实现轻量级指标收集，不引入额外依赖。
 // 通过 HTTP /metrics 端点暴露 Prometheus 文本格式。
 //
-// ADP §16.2 定义的指标类别：
+// 指标类别：
 // - Raft:  raft_leader_id, raft_term, raft_commit_index, raft_applied_index
 // - gRPC:  grpc_requests_total, grpc_request_duration_seconds
 // - Storage: storage_size_bytes, storage_keys_total
@@ -20,7 +20,7 @@ use coord_core::types::RegionId;
 use parking_lot::RwLock;
 use tower::util::ServiceExt;
 
-/// 慢请求阈值（微秒）：超过则计入 slow 并 WARN（P1-09）
+/// 慢请求阈值（微秒）：超过则计入 slow 并 WARN
 pub const SLOW_REQUEST_US: u64 = 1_000_000;
 
 // ──── 指标注册表 ────
@@ -46,7 +46,7 @@ struct MetricsInner {
     pub storage_size_bytes: AtomicU64,
     pub storage_keys_total: AtomicU64,
 
-    // ── 磁盘水位（P1-02）──
+    // ── 磁盘水位 ──
     pub disk_available_bytes: AtomicU64,
     pub disk_total_bytes: AtomicU64,
 
@@ -68,9 +68,9 @@ struct MetricsInner {
     pub region_merge_total: AtomicU64,
     /// PD 调度操作总次数
     pub pd_operator_total: AtomicU64,
-    /// P3：PD operator Running 超时重认领（Requeue）总次数
+    /// P3 阶段特性：PD operator Running 超时重认领（Requeue）总次数
     pub pd_operator_requeued_total: AtomicU64,
-    /// P3：region 0 PD 全局队列深度 gauge（leader 每 tick 上报）
+    /// region 0 PD 全局队列深度 gauge（leader 每 tick 上报）
     pub pd_queue_pending: AtomicU64,
     pub pd_queue_running: AtomicU64,
     pub pd_queue_terminal: AtomicU64,
@@ -83,7 +83,7 @@ struct MetricsInner {
     /// Region ID → Arc<RegionMetrics>
     pub region_metrics: RwLock<Vec<Arc<RegionMetrics>>>,
 
-    // ── Per-Method gRPC 指标（P1-09：请求计数/延迟/错误/慢请求）──
+    // ── Per-Method gRPC 指标（请求计数/延迟/错误/慢请求）──
     /// gRPC 方法路径 → 指标
     pub method_metrics: RwLock<HashMap<String, Arc<MethodMetrics>>>,
 
@@ -123,7 +123,7 @@ struct MetricsInner {
     pub start_time: Instant,
 }
 
-/// 单个 gRPC 方法的指标（P1-09）
+/// 单个 gRPC 方法的指标
 #[derive(Debug, Default)]
 pub struct MethodMetrics {
     /// 请求总数
@@ -278,7 +278,7 @@ impl Metrics {
         self.inner.grpc_request_duration_us[idx].fetch_add(duration_us, Ordering::Relaxed);
     }
 
-    /// 记录一次按完整方法路径的 gRPC 请求（P1-09：MetricsLayer 调用）。
+    /// 记录一次按完整方法路径的 gRPC 请求（MetricsLayer 调用）。
     ///
     /// `code` 为 HTTP 状态码（gRPC 错误响应非 2xx）；慢请求（> SLOW_REQUEST_US）
     /// 额外 WARN 日志。
@@ -318,7 +318,7 @@ impl Metrics {
             .store(count, Ordering::Relaxed);
     }
 
-    // ── 磁盘水位（P1-02）──
+    // ── 磁盘水位 ──
 
     pub fn set_disk_available_bytes(&self, bytes: u64) {
         self.inner
@@ -639,7 +639,7 @@ impl Metrics {
             inner.storage_keys_total.load(Ordering::Relaxed)
         ));
 
-        // 磁盘水位（P1-02）
+        // 磁盘水位
         out.push_str("\n# HELP disk_available_bytes Available bytes on the data volume\n");
         out.push_str("# TYPE disk_available_bytes gauge\n");
         out.push_str(&format!(
@@ -850,7 +850,7 @@ impl Metrics {
         // Per-Region 指标
         out.push_str(&self.render_region_metrics());
 
-        // Per-Method gRPC 指标（P1-09）
+        // Per-Method gRPC 指标
         {
             let methods: Vec<(String, Arc<MethodMetrics>)> = {
                 let map = inner.method_metrics.read();
@@ -911,7 +911,7 @@ impl Default for Metrics {
     }
 }
 
-// ──── MetricsLayer（P1-09：tower 中间件，gRPC 全方法指标接线）────
+// ──── MetricsLayer（tower 中间件，gRPC 全方法指标接线）────
 
 /// gRPC 指标中间件：对每个请求记录（方法路径、耗时、HTTP 状态码）。
 ///

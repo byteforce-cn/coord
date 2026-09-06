@@ -1,11 +1,11 @@
-// Seal/Unseal — 基于 Shamir 秘密共享的封存控制（P3）
+// Seal/Unseal — 基于 Shamir 秘密共享的封存控制
 //
 // 职责：
 // - Shamir Secret Sharing over GF(2^8)：将 256-bit Root Key 拆分为 N 个分片，任意 K 个可恢复
 // - SealManager：管理 Seal/Unseal 生命周期，集成 Keyring
 // - 分片格式：二进制，支持序列化/反序列化（用于 CLI 层 Base64 编码后人工分发）
 //
-// 默认参数（ADP §21.8）：
+// 默认参数：
 //   N = 5 (总分片数), K = 3 (门限)
 //
 // 分片二进制格式 (41 bytes)：

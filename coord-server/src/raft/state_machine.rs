@@ -1,7 +1,7 @@
 // Raft StateMachine — Openraft RaftStateMachine + RaftSnapshotBuilder 实现
 //
-// P0-A 重建（M0）：applied 状态同事务持久化（D-A4）、revision ≡ log index（D-A2）、
-// apply 幂等守卫（D-A3）、快照落盘生命周期（A.6）、Lease 状态表（P0-B 骨架）。
+// 重建：applied 状态同事务持久化、revision ≡ log index、
+// apply 幂等守卫、快照落盘生命周期（A.6）、Lease 状态表（骨架）。
 
 use std::fmt;
 use std::io;
@@ -46,7 +46,7 @@ struct StoredSnapshot {
     pub data: Vec<u8>,
 }
 
-/// 持久化到 `META_SNAPSHOT` 的快照元数据（M0-4：启动时加载 current_snapshot）
+/// 持久化到 `META_SNAPSHOT` 的快照元数据（启动时加载 current_snapshot）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedSnapshotMeta {
     pub meta: SnapshotMetaOf<TypeConfig>,
@@ -105,7 +105,7 @@ fn cleanup_old_snapshots_free(
 /// A.6.2 落盘纯函数：临时文件 → fsync → 原子 rename → 目录 fsync → SHA256 →
 /// `META_SNAPSHOT` 写事务 → purge 守卫登记 → 旧快照清理。
 ///
-/// Phase 1 T1.3：不触碰 `StateMachineStore` 内部锁（只经传入的 `Arc` 句柄访问
+/// 不触碰 `StateMachineStore` 内部锁（只经传入的 `Arc` 句柄访问
 /// state_machine / snapshot_tracker），因此可放入 `spawn_blocking` 而无需持有
 /// `&mut self`。`snapshot_tracker.record_durable` 在落盘成功后执行，登记时序与
 /// 原同步实现完全一致。
@@ -189,19 +189,19 @@ pub struct StateMachineStore {
     current_snapshot: Mutex<Option<StoredSnapshot>>,
     /// 快照落盘目录（A.6：临时文件 → fsync → rename → 校验和）
     snapshot_dir: PathBuf,
-    /// purge 前置条件守卫（与 LogStore 共享，M0-5）
+    /// purge 前置条件守卫（与 LogStore 共享）
     snapshot_tracker: Arc<SnapshotTracker>,
     /// Watch 事件分发器（可选，Leader 节点持有，与 CoordNode 共享同一实例）
     pub watch_dispatcher: Option<Arc<WatchDispatcher>>,
-    /// AuthManager 内存缓存视图（P0-C.2：apply 后同步，可选）
+    /// AuthManager 内存缓存视图（apply 后同步，可选）
     pub auth_manager: Option<Arc<AuthManager>>,
-    /// 吊销登记存储（P0-C.5：RevokeJti apply 后同步，可选）
+    /// 吊销登记存储（RevokeJti apply 后同步，可选）
     pub revocation_store: Option<Arc<RevocationStore>>,
-    /// 会话表视图（P2-07：IssueSession/ConsumeSession apply 后同步，可选）
+    /// 会话表视图（IssueSession/ConsumeSession apply 后同步，可选）
     pub session_manager: Option<Arc<TokenManager>>,
     /// 指标注册表（R-OBS-10：apply 延迟 / 快照耗时埋点，可选）
     pub metrics: Option<Arc<Metrics>>,
-    /// T5.7（R-MR-04）：Lease Revoke 广播（可选，仅 region 0 状态机设置）。
+    /// Lease Revoke 广播（可选，仅 region 0 状态机设置）。
     ///
     /// region 0 的 `LeaseOp::Revoke` apply（含过期清理）后向通道广播 lease_id，
     /// 各节点据此通知 Region raft leader 经 `Command::DeleteKeysByLease` 清理
@@ -330,7 +330,7 @@ impl StateMachineStore {
         }
     }
 
-    /// 设置 Lease Revoke 广播通道（T5.7：仅 region 0 状态机调用）
+    /// 设置 Lease Revoke 广播通道（仅 region 0 状态机调用）
     pub fn set_lease_revoke_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<i64>) {
         self.lease_revoke_tx = Some(tx);
     }
@@ -342,22 +342,22 @@ impl StateMachineStore {
         self.watch_dispatcher = Some(dispatcher);
     }
 
-    /// 设置 AuthManager 内存缓存视图（P0-C.2：apply AuthOp 后同步）
+    /// 设置 AuthManager 内存缓存视图（apply AuthOp 后同步）
     pub fn set_auth_manager(&mut self, manager: Arc<AuthManager>) {
         self.auth_manager = Some(manager);
     }
 
-    /// 设置吊销登记存储（P0-C.5：apply RevokeJti 后同步）
+    /// 设置吊销登记存储（apply RevokeJti 后同步）
     pub fn set_revocation_store(&mut self, store: Arc<RevocationStore>) {
         self.revocation_store = Some(store);
     }
 
-    /// 设置会话表（P2-07：apply IssueSession/ConsumeSession 后同步 TokenManager 视图）
+    /// 设置会话表（apply IssueSession/ConsumeSession 后同步 TokenManager 视图）
     pub fn set_session_manager(&mut self, manager: Arc<TokenManager>) {
         self.session_manager = Some(manager);
     }
 
-    /// 推进 applied 状态：更新内存 + 持久化 `META_LAST_APPLIED`（D-A4）
+    /// 推进 applied 状态：更新内存 + 持久化 `META_LAST_APPLIED`
     ///
     /// Normal 条目在命令事务内已持久化，此路径用于 Membership/Blank 等
     /// 不写 KV 事务的条目（单独小事务，幂等）。
@@ -397,9 +397,9 @@ impl StateMachineStore {
         }))
     }
 
-    /// 执行单个 Normal 命令：revision ≡ entry index（D-A2），返回响应与 Watch 事件
+    /// 执行单个 Normal 命令：revision ≡ entry index，返回响应与 Watch 事件
     ///
-    /// 幂等守卫（D-A3）：replayed 时返回 `(resp, None)`（不产生副作用、不分发事件）。
+    /// 幂等守卫：replayed 时返回 `(resp, None)`（不产生副作用、不分发事件）。
     fn execute_command(
         &self,
         sm: &MvccStorage<RedbBackend>,
@@ -563,7 +563,7 @@ impl StateMachineStore {
                 Ok((Response::Lease { revision }, event))
             }
             Command::Auth(op) => {
-                // P0-C.2：AuthOp 入 raft 日志，apply 持久化 `/_sys/auth/`
+                // AuthOp 入 raft 日志，apply 持久化 `/_sys/auth/`
                 let outcome = sm.apply_auth_op(op, revision, applied).map_err(io_err)?;
                 if !outcome.replayed {
                     // 同步内存缓存视图（AuthManager 与 RevocationStore）
@@ -575,7 +575,7 @@ impl StateMachineStore {
                     {
                         store.revoke(jti);
                     }
-                    // P2-07：同步会话表视图（TokenManager，各节点一致）
+                    // 同步会话表视图（TokenManager，各节点一致）
                     if let Some(ref tm) = self.session_manager {
                         match op {
                             crate::raft::type_config::AuthOp::IssueSession {
@@ -599,7 +599,7 @@ impl StateMachineStore {
                 Ok((Response::Auth { revision }, None))
             }
             Command::Compact { revision } => {
-                // P1-01：raft 下发 compact revision，apply 分片删除（幂等、确定性）。
+                // raft 下发 compact revision，apply 分片删除（幂等、确定性）。
                 // 非法 revision（> applied）在 apply 内钳制，拒绝由 RPC/提案层负责。
                 let outcome = sm.apply_compact(*revision, applied).map_err(io_err)?;
                 let _ = outcome; // 计数已由 apply 内日志记录
@@ -612,7 +612,7 @@ impl StateMachineStore {
                 ))
             }
             Command::DeleteKeysByLease { lease_id } => {
-                // T5.7（R-MR-04）：per-Region lease 清理（apply 期按 lease_id 索引扫描
+                // per-Region lease 清理（apply 期按 lease_id 索引扫描
                 // 删除，幂等；事件供 Watch 分发）。
                 let (outcome, changes) = sm
                     .apply_delete_keys_by_lease(*lease_id, revision, applied)
@@ -632,7 +632,7 @@ impl StateMachineStore {
                 Ok((Response::DeleteRange { revision, deleted }, event))
             }
             Command::Pd(op) => {
-                // R-MR-08（D1-a）：PD 全局队列命令 apply（region 0 raft）。
+                // PD 全局队列命令 apply（region 0 raft）。
                 // 队列条目为内部记录（`/_pd/ops/*`）：不上 Watch、无用户变更事件；
                 // 幂等守卫 + META_LAST_APPLIED 由 apply_pd_op 在写事务内处理。
                 let outcome = sm.apply_pd_op(op, revision, applied).map_err(io_err)?;
@@ -650,7 +650,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
     async fn applied_state(
         &mut self,
     ) -> Result<(Option<LogIdOf<TypeConfig>>, StoredMembershipOf<TypeConfig>), io::Error> {
-        // D-A4：从盘读取（修复重启后全量重放问题）
+        // 从盘读取（修复重启后全量重放问题）
         let last_applied = self.load_applied()?;
         let membership = self.last_membership.lock().clone();
         Ok((last_applied, membership))
@@ -665,7 +665,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         // R-OBS-10：apply 耗时埋点
         let apply_start = std::time::Instant::now();
 
-        // M0-5 修复：Normal 条目 apply 时同步内存 last_applied。此前仅在
+        // 修复：Normal 条目 apply 时同步内存 last_applied。此前仅在
         // Membership 路径更新内存（持久化水位由写路径同事务写入
         // META_LAST_APPLIED），导致 build_snapshot 用陈旧/空白的 last_log_id
         // 生成快照 meta——openraft 按错误水位计算 purge 点（或根本跳过 purge），
@@ -675,7 +675,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         for (entry, maybe_responder) in entries {
             let response = match &entry.payload {
                 EntryPayload::Normal(cmd) => {
-                    // D-A2：revision ≡ log index
+                    // revision ≡ log index
                     let revision = entry.log_id.index;
                     let applied = AppliedLogId {
                         term: entry.log_id.leader_id.term,
@@ -685,7 +685,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                     let (resp, change_event) = self.execute_command(sm, cmd, revision, applied)?;
                     last_normal_log_id = Some(entry.log_id.clone());
 
-                    // T5.7（R-MR-04）：region 0 状态机在 LeaseOp::Revoke apply（含
+                    // region 0 状态机在 LeaseOp::Revoke apply（含
                     // 过期清理与显式 revoke）后广播 lease_id——所有节点 apply region 0
                     // 日志都会收到，最终由各 Region 的 raft leader 完成 per-Region
                     // Key 清理（幂等；重复广播仅产生 no-op）。
@@ -721,7 +721,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             }
         }
 
-        // M0-5 修复：以本批最后一个 Normal 条目同步内存 last_applied。
+        // 修复：以本批最后一个 Normal 条目同步内存 last_applied。
         if let Some(log_id) = last_normal_log_id {
             *self.last_applied.lock() = Some(log_id);
         }
@@ -754,7 +754,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         }
 
         // A.6：安装的快照同样落盘（tmp → fsync → rename → 校验和），保证重启可恢复。
-        // Phase 1 T1.3：fsync 落盘段在阻塞线程池执行。
+        // fsync 落盘段在阻塞线程池执行。
         let (path, checksum) = self.persist_snapshot_file_blocking(meta, data.clone()).await?;
 
         *self.current_snapshot.lock() = Some(StoredSnapshot {
@@ -814,7 +814,7 @@ impl StateMachineStore {
     ///
     /// 返回（最终路径，SHA256 校验和）。同时持久化 `META_SNAPSHOT` 并登记 purge 守卫。
     ///
-    /// Phase 1 T1.3：磁盘 IO（create_dir_all / File::create / write_all / fsync /
+    /// 磁盘 IO（create_dir_all / File::create / write_all / fsync /
     /// rename / 目录 fsync / redb META_SNAPSHOT 写事务 / 旧快照清理）整体在阻塞线程池
     /// 执行（见 `persist_snapshot_file_blocking`）；本方法保留同步实现供启动自愈等
     /// 非热路径使用，内部委托同一纯函数，保证登记时序一致。
@@ -833,7 +833,7 @@ impl StateMachineStore {
     }
 
     /// 异步落盘：磁盘 IO 移入 `spawn_blocking`，避免阻塞 tokio worker
-    /// （Phase 1 T1.3，Multi-Raft 前置）。保持 snapshot_tracker 登记时序
+    /// （Multi-Raft 前置）。保持 snapshot_tracker 登记时序
     /// （落盘成功后才 `record_durable`，与同步版完全一致）。
     async fn persist_snapshot_file_blocking(
         &self,
@@ -927,7 +927,7 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
         let snapshot_start = std::time::Instant::now();
 
         let last_log_id = match self.load_applied() {
-            // M0-5 修复：快照 meta 以存储层 META_LAST_APPLIED 为准（与快照数据
+            // 修复：快照 meta 以存储层 META_LAST_APPLIED 为准（与快照数据
             // 导出同源），内存值仅作回退。此前直接读内存 last_applied，在
             // 长时间无 Membership 变更时写入陈旧/空白水位，导致快照 meta
             // 无法覆盖已 purge 日志或 openraft 跳过 purge。
@@ -942,7 +942,7 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
             last_membership: last_membership.clone(),
         };
 
-        // 从 MvccStorage 导出真实快照数据（全库单读事务）——阻塞线程池执行（Phase 1 T1.3）
+        // 从 MvccStorage 导出真实快照数据（全库单读事务）——阻塞线程池执行
         let sm = Arc::clone(&self.state_machine);
         let export_last_idx = last_log_id.as_ref().map(|id| id.index).unwrap_or(0);
         let export_last_term = last_log_id
@@ -960,7 +960,7 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
         .map_err(|e| io::Error::other(format!("snapshot export task join: {e}")))??;
 
         // A.6：落盘（临时文件 → fsync → rename → 校验和 → META_SNAPSHOT → purge 守卫）。
-        // Phase 1 T1.3：fsync 落盘段在阻塞线程池执行。
+        // fsync 落盘段在阻塞线程池执行。
         let (_path, _checksum) = self.persist_snapshot_file_blocking(&meta, data_bytes.clone()).await?;
 
         let snapshot = SnapshotOf::<TypeConfig, super::RaftSnapshotData> {

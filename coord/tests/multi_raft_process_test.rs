@@ -1,4 +1,4 @@
-// Multi-Raft 生产装配进程级验收（TDD 迭代 #8；Phase 2 / M2 出口条件 + 迭代 #12 T3.4）
+// Multi-Raft 生产装配进程级验收（TDD 迭代 #8；/ M2 出口条件 + 迭代 #12）
 //
 // 与 in-process 套件（region_assembly / region_kv_routing /
 // multi_raft_config_assembly）不同，本套件 spawn **真实 `coord server` 进程**
@@ -6,7 +6,7 @@
 // true`），走 main.rs 的配置驱动装配路径，验证：
 //   - 每个 Region 独立选出 leader，跨 Region KV 路由 / 收敛 / 隔离
 //     （真实 gRPC 客户端，真实网络）；
-//   - 内嵌 PD 随进程启动（T3.4）：每节点 `<data_dir>/pd/pd-meta.db` 落盘；
+//   - 内嵌 PD 随进程启动：每节点 `<data_dir>/pd/pd-meta.db` 落盘；
 //   - 依次 kill 每个节点（含各 Region 的 leader）：被 kill 节点承载的 Region
 //     副本在其余节点上**独立重新选举**，全部 Region 继续可写可读；
 //   - 重启被 kill 节点后集群重新收敛（该节点副本追平复制、PD 循环随进程
@@ -341,7 +341,7 @@ async fn multi_raft_real_three_nodes_three_regions() {
         n.wait_ready(Duration::from_secs(90)).await;
     }
 
-    // ── Phase A：三个 Region 各自独立选出 leader 并可写（配置驱动装配生效）──
+    // ── 三个 Region 各自独立选出 leader 并可写（配置驱动装配生效）──
     for (region_id, key) in REGION_KEYS {
         let value = format!("v{region_id}-1");
         let all: Vec<&RealNode> = nodes.iter().collect();
@@ -359,7 +359,7 @@ async fn multi_raft_real_three_nodes_three_regions() {
         read_until(&all, key, value.as_bytes(), Duration::from_secs(30)).await;
     }
 
-    // ── Phase A.5（T3.4）：内嵌 PD 随真实进程启动——每节点 pd-meta.db 落盘
+    // ── 内嵌 PD 随真实进程启动——每节点 pd-meta.db 落盘
     //    （配置 Region 表已播种）。──
     for n in &nodes {
         let pd_db = n.data_dir.join("pd").join("pd-meta.db");
@@ -372,7 +372,7 @@ async fn multi_raft_real_three_nodes_three_regions() {
     }
     eprintln!("embedded PD: pd-meta.db present on all 3 nodes (regions seeded)");
 
-    // ── Phase B：依次 kill 每个节点。被 kill 节点承载的 Region 副本在其余
+    // ── 依次 kill 每个节点。被 kill 节点承载的 Region 副本在其余
     //    2 节点独立重新选举（若其为 leader）或直接续写（quorum 保持）——
     //    无论哪种，全部 Region 必须继续可写；重启后重新收敛。──
     for victim_idx in 0..3usize {
@@ -415,21 +415,21 @@ async fn multi_raft_real_three_nodes_three_regions() {
 }
 
 // ============================================================================
-// R-MR-08 / D1-a P4a：PD operator 全局队列 failover 进程级验收（3 节点）
+// / PD operator 全局队列 failover 进程级验收（3 节点）
 //
 // 场景：3 节点 × 3 Region，`[multi_raft.pd] target_replicas=2`。静态播种把 3
 // 节点都列为每 Region 的 voter → ReplicaChecker 在首拍产生真实 `RemovePeer`
 // operator（移除 peers 序末 = node 3），把每 Region 收缩到 2 voter——由此
 // region 0 raft 全局队列（Enqueue→Claim→执行→Complete）出现**真实成员变更**
 // operator 流量，且执行窗口跨多个 executor tick（可观测、可打断）。此类流量也
-// 是 P2/P3 装配（调度收敛 region 0 leader、执行器按 Region leader 认领、P3
+// 是 装配（调度收敛 region 0 leader、执行器按 Region leader 认领、
 // Running 超时重认领）在真实进程下的端到端证据。
 //
 // kill 目标 = **bootstrap node 3**：bootstrap 使 node 3 成为 region 0 leader 与
 // 全部数据 Region 的初始 leader（真实进程基线实测：bootstrap 节点全 leader）；
 // 且 node 3 正是 ReplicaChecker 从数据 Region 移除的 voter——kill 它既不破坏
 // 数据 quorum（region voter {1,2} 或 {1,2,3} 由存活 node 1/2 独立成团），又切到
-// region 0 leader 本身，正中 P4 验收点："region 0 leader 切换后调度不中断、
+// region 0 leader 本身，正中 验收点："region 0 leader 切换后调度不中断、
 // 执行不中断、不重复执行"。
 //
 // 验证（严格 = 硬断言；观察 = 日志，不门禁）：
@@ -441,7 +441,7 @@ async fn multi_raft_real_three_nodes_three_regions() {
 //   3. 重启被 kill 节点后 region 0 重新收敛（/metrics 有效 leader）+ 全 Region
 //      KV 可写可读（严格）；
 //   4. 执行接管（观察）：kill 时仍在队列（Pending/Running）的 RemovePeer 由
-//      存活 Region leader 认领并 Complete（success 增长；Running-claim 经 P3
+//      存活 Region leader 认领并 Complete（success 增长；Running-claim 经 
 //      Requeue 兜底重执行）——多数运行数秒内完成；偶发卡于 **openraft 成员变更
 //      与 leader 死亡竞态**（被杀节点原数据 Region leader 且 RemovePeer 正在改
 //      成员时，受影响 Region 可能直到该节点回来才解除——D2 alpha 依赖风险，
@@ -465,7 +465,7 @@ async fn pd_global_queue_failover_three_nodes() {
     // 与同文件其余真实进程用例串行（见 PROCESS_SUITE_LOCK 注释）
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
 
-    // 见场景说明；operator_running_timeout 缩小（5s）让 P3 Requeue（认领者被
+    // 见场景说明；operator_running_timeout 缩小（5s）让 Requeue（认领者被
     // kill 的 Running operator 放回 Pending）在进程级快速自愈——kill 时已被
     // node 3 Claim 成 Running 的 RemovePeer 需先 Requeue 才能由存活节点接管。
     const PD_TOML: &str = "[multi_raft.pd]\nenabled = true\nheartbeat_interval_ms = 300\n\
@@ -504,7 +504,7 @@ async fn pd_global_queue_failover_three_nodes() {
         n.wait_ready(Duration::from_secs(90)).await;
     }
 
-    // ── Phase 0：三个 Region 可写（基线，与 3×3 验收同口径）──
+    // ── 三个 Region 可写（基线，与 3×3 验收同口径）──
     let all: Vec<&RealNode> = nodes.iter().collect();
     for (region_id, key) in REGION_KEYS {
         let value = format!("v{region_id}-pd0");
@@ -512,7 +512,7 @@ async fn pd_global_queue_failover_three_nodes() {
     }
     eprintln!("pd-failover: all 3 regions writable at boot");
 
-    // ── Phase 1：等待 region 0 leader == bootstrap node 3（metrics 判定）──
+    // ── 等待 region 0 leader == bootstrap node 3（metrics 判定）──
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         if region0_leader_metrics(&all).await == Some(3) {
@@ -526,7 +526,7 @@ async fn pd_global_queue_failover_three_nodes() {
     }
     eprintln!("pd-failover: region 0 leader = node 3 (bootstrap)");
 
-    // ── Phase 1b：等待 PD operator 流水线已产生至少一个 operator（pending 事件
+    // ── 等待 PD operator 流水线已产生至少一个 operator（pending 事件
     //    出现 = region 0 全局队列已接单；target_replicas=2 的收缩/补副本 churn
     //    保证持续产生）。不要求"完成执行"（2a 执行接管为观察项，不门禁）——
     //    只需 kill 时队列里大概率留有可被存活节点接管的 operator。
@@ -554,7 +554,7 @@ async fn pd_global_queue_failover_three_nodes() {
         );
     }
 
-    // ── Phase 2：kill region 0 leader = node 3（metrics 复核后立即 kill）──
+    // ── kill region 0 leader = node 3（metrics 复核后立即 kill）──
     assert_eq!(
         region0_leader_metrics(&all).await,
         Some(3),
@@ -570,7 +570,7 @@ async fn pd_global_queue_failover_three_nodes() {
     let survivors: Vec<&RealNode> = nodes.iter().filter(|n| n.id != leader_id).collect();
     eprintln!("survivors: {:?}", survivors.iter().map(|n| n.id).collect::<Vec<_>>());
 
-    // 2. region 0 leader 切换（P4 核心）：存活节点重新选出 region 0 leader
+    // 2. region 0 leader 切换（核心）：存活节点重新选出 region 0 leader
     //    （/metrics raft_leader_id 自报），且 != 被 kill 节点。
     let deadline = Instant::now() + Duration::from_secs(90);
     let new_leader = loop {
@@ -625,7 +625,7 @@ async fn pd_global_queue_failover_three_nodes() {
 
     // 2a. 执行接管（尽力观测，非致命）：kill 时仍在队列（Pending/Running）的
     //     RemovePeer 等由存活 Region leader 认领并 Complete（survivors audit
-    //     success 增长；Running-claim 经 P3 Requeue 后由存活节点重执行）。多数
+    //     success 增长；Running-claim 经 Requeue 后由存活节点重执行）。多数
     //     运行在数秒内完成；偶发卡住于 **openraft 成员变更 + leader 死亡**的
     //     竞态（被杀节点同时是数据 Region leader 且其 RemovePeer 正在改成员）——
     //     属数据面 raft 边角竞态（D2 alpha 依赖风险），非 PD failover 缺陷，故
@@ -678,7 +678,7 @@ async fn pd_global_queue_failover_three_nodes() {
     // PD 流水线活性（尽力观测，非致命）：node 3 重启回到在线后 BalanceScheduler
     // 应对其补副本产生新 operator（pending 增长）。此间 node 3 的数据 Region
     // raft 需重新以 learner 加入（其曾在 RemovePeer 中被移除）——依赖 openraft
-    // 侧重连时序，偶发跨多个 P3 requeue 周期才恢复。本用例的**硬断言** =
+    // 侧重连时序，偶发跨多个 requeue 周期才恢复。本用例的**硬断言** =
     // 上述 region 0 切换/数据独立/重启收敛 + KV（kill 阶段 2/3 与本节开头）；
     // operator 流水线活性为观察项（2b/2a/本节）。
     let deadline = Instant::now() + Duration::from_secs(45);
@@ -866,18 +866,18 @@ async fn region0_leader_metrics(nodes: &[&RealNode]) -> Option<u64> {
 }
 
 // ============================================================================
-// T5.14 / T5.17 / T5.22：真实进程 drill 追加（M8 前置开放项收口）
+// / / 真实进程 drill 追加（M8 前置开放项收口）
 //
-// 本段三个 drill 与上述 P4a 用例共用同一真实进程 harness（RealNode +
+// 本段三个 drill 与上述 用例共用同一真实进程 harness（RealNode +
 // PROCESS_SUITE_LOCK 串行），覆盖剩余开放项：
-//   - T5.14（部分）：add-peer / transfer-leader 成员变更 × PD 真实进程演练
-//     （RemovePeer×PD 已由 P4a `22b78b6` 覆盖）；
-//   - T5.17：关→开→关 升级/回滚真实进程演练 + fail-closed 启动闸真实进程验证；
-//   - T5.22：chaos_real region 模式用例（kill/partition × PD）。
+//   - （部分）：add-peer / transfer-leader 成员变更 × PD 真实进程演练
+//     （RemovePeer×PD 已由 `22b78b6` 覆盖）；
+//   - 关→开→关 升级/回滚真实进程演练 + fail-closed 启动闸真实进程验证；
+//   - chaos_real region 模式用例（kill/partition × PD）。
 // ============================================================================
 
 impl RealNode {
-    /// 完全由调用方提供 node.toml 的 spawn（T5.17/T5.22 用）：cluster /
+    /// 完全由调用方提供 node.toml 的 spawn（用）：cluster /
     /// multi_raft / network / security 全部由 `toml` 承载（bootstrap 经
     /// `[cluster].bootstrap` 配置，对齐 spawn_full）。`raft_advertise` 传给
     /// `--raft-addr`（集群通告地址）；R-TST-16 分区代理场景在 toml 里给
@@ -974,7 +974,7 @@ async fn read_key_maybe(
 }
 
 // ---------------------------------------------------------------------------
-// T5.14：transfer-leader × PD 真实进程演练
+// transfer-leader × PD 真实进程演练
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -989,7 +989,7 @@ async fn pd_transfer_leader_balance_real_drill() {
 
     // 3 节点 × 3 Region，target_replicas=3（无 RemovePeer churn）、
     // bootstrap=node 1 → 启动偏置让 node 1 最初领导全部 3 个数据 Region
-    // （P4a 实测 bootstrap 节点全 leader）。LeaderScheduler 每 balance_interval
+    // （实测 bootstrap 节点全 leader）。LeaderScheduler 每 balance_interval
     // （2s）看到 3/0/0 失衡 → 生成 TransferLeader → 目标 Region 当前 leader
     // （node 1）所在节点的执行器认领执行（exec_transfer_leader 轮询确认目标
     // 真正当选）→ 收敛到 ~1/1/1。
@@ -1097,7 +1097,7 @@ async fn pd_transfer_leader_balance_real_drill() {
 }
 
 // ---------------------------------------------------------------------------
-// T5.14：add-peer × PD 真实进程演练
+// add-peer × PD 真实进程演练
 //
 // 可达性说明（v1 静态配置）：region voter 集 ≡ cluster 成员（main.rs region
 // peers = cluster.initial_nodes 全量），稳定态 voter==target → ReplicaChecker
@@ -1165,7 +1165,7 @@ async fn pd_add_peer_target_increase_real_drill() {
     }
     eprintln!("add-peer drill: all 3 regions writable at boot (target_replicas=2)");
 
-    // Phase 1：ReplicaChecker 收缩副本 —— 每个 Region 真实 RemovePeer（node 3 出局）
+    // ReplicaChecker 收缩副本 —— 每个 Region 真实 RemovePeer（node 3 出局）
     let deadline = Instant::now() + Duration::from_secs(150);
     let removed = loop {
         let evs = cluster_audit_events(&all);
@@ -1185,7 +1185,7 @@ async fn pd_add_peer_target_increase_real_drill() {
     };
     eprintln!("add-peer drill: {removed} remove-peer success(es) (node 3 out of voter set)");
 
-    // Phase 2：滚动重启 + target_replicas 2→3（PD 配置刷新）
+    // 滚动重启 + target_replicas 2→3（PD 配置刷新）
     for idx in 0..3usize {
         let nid = (idx + 1) as u64;
         rewrite_pd_target_replicas(&nodes[idx].data_dir, 3);
@@ -1207,7 +1207,7 @@ async fn pd_add_peer_target_increase_real_drill() {
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
-    // Phase 3：欠副本（2<3）→ ReplicaChecker 生成 AddPeer → resolver 选 node 3 →
+    // 欠副本（2<3）→ ReplicaChecker 生成 AddPeer → resolver 选 node 3 →
     // add_learner + promote → 执行完成（audit success detail node=3）
     let deadline = Instant::now() + Duration::from_secs(240);
     let re_added = loop {
@@ -1241,7 +1241,7 @@ async fn pd_add_peer_target_increase_real_drill() {
 }
 
 // ---------------------------------------------------------------------------
-// T5.17：关→开→关 升级/回滚真实进程演练（单节点）
+// 关→开→关 升级/回滚真实进程演练（单节点）
 //
 // 单个真实 `coord server` 进程 + 同一数据目录，三阶段：
 //   OFF（legacy 单 Raft）→ 写 `/legacy/*`；
@@ -1249,7 +1249,7 @@ async fn pd_add_peer_target_increase_real_drill() {
 //     启动被启动闸拒绝（进程退出）；
 //   ON（multi_raft.enabled + legacy_migration=true）→ boot 期 raft 中介迁移
 //     → region store 出现、legacy key 经所属 Region 可读、region 模式新写可读写；
-//   OFF（回滚 = T2.6 字节级退化）→ legacy key 原值可读（迁移只读源）、
+//   OFF（回滚 = 字节级退化）→ legacy key 原值可读（迁移只读源）、
 //     region 模式新写缺失（文档化边界）、legacy 可继续写。
 // ---------------------------------------------------------------------------
 
@@ -1291,7 +1291,7 @@ async fn mr_off_on_off_upgrade_rollback_real_drill() {
         )
     };
 
-    // ── Phase OFF（legacy 单 Raft）：写用户 KV ──
+    // ── （legacy 单 Raft）：写用户 KV ──
     {
         let node = RealNode::spawn_custom(1, grpc, raft, &data_dir, &legacy_toml());
         node.wait_ready(Duration::from_secs(60)).await;
@@ -1303,7 +1303,7 @@ async fn mr_off_on_off_upgrade_rollback_real_drill() {
         eprintln!("off/on/off: legacy data written (OFF phase)");
     } // drop → kill
 
-    // ── Phase ON（fail-closed 子用例）：multi_raft 开、无迁移授权 → 拒绝启动 ──
+    // ── （fail-closed 子用例）：multi_raft 开、无迁移授权 → 拒绝启动 ──
     {
         let mut node = RealNode::spawn_custom(1, grpc, raft, &data_dir, &multi_toml(false));
         let deadline = Instant::now() + Duration::from_secs(25);
@@ -1328,7 +1328,7 @@ async fn mr_off_on_off_upgrade_rollback_real_drill() {
         eprintln!("off/on/off: fail-closed gate refused unmigrated start (exit non-zero)");
     }
 
-    // ── Phase ON（migrate）：raft 中介 boot 迁移 → serving ──
+    // ── （migrate）：raft 中介 boot 迁移 → serving ──
     {
         let node = RealNode::spawn_custom(1, grpc, raft, &data_dir, &multi_toml(true));
         node.wait_ready(Duration::from_secs(120)).await;
@@ -1357,7 +1357,7 @@ async fn mr_off_on_off_upgrade_rollback_real_drill() {
         eprintln!("off/on/off: migration completed; region writes OK (ON phase)");
     }
 
-    // ── Phase OFF（回滚 = T2.6 字节级退化）：legacy 数据原样可服务 ──
+    // ── （回滚 = 字节级退化）：legacy 数据原样可服务 ──
     {
         let node = RealNode::spawn_custom(1, grpc, raft, &data_dir, &legacy_toml());
         node.wait_ready(Duration::from_secs(60)).await;
@@ -1381,12 +1381,12 @@ async fn mr_off_on_off_upgrade_rollback_real_drill() {
 }
 
 // ---------------------------------------------------------------------------
-// T5.21：真实进程 多 Region vs 单 Region（单 Raft）顺序写吞吐基线探针
+// 真实进程 多 Region vs 单 Region（单 Raft）顺序写吞吐基线探针
 //
 // 单节点真实 `coord server`：legacy（单 Raft，region 0 根目录）对比 multi_raft
 // 3 Region（每 Region 独立 raft + fsync）。顺序 gRPC Put（每 key 一次 raft
 // commit + fsync），打印 ops/s 与比值——「多 Region 不低于单 Region 基线 80%」
-// （T5.21 口径）的真实 raft 路径证据。PERF_GATE=1 时硬断言（周报门禁用）；
+// 口径的真实 raft 路径证据。PERF_GATE=1 时硬断言（周报门禁用）；
 // 存储引擎级 Benchmark 6（perf_bench）另设 80% 阈值（scripts/bench-ci.sh）。
 // ---------------------------------------------------------------------------
 
@@ -1494,14 +1494,14 @@ async fn perf_multi_region_vs_single_raft_probe() {
 }
 
 // ---------------------------------------------------------------------------
-// T5.22：chaos_real region 模式用例（kill / partition × PD，3 节点 × 3 Region）
+// chaos_real region 模式用例（kill / partition × PD，3 节点 × 3 Region）
 //
 // 复用 R-TST-16 真实进程 chaos 骨架（kill -9 + 重启循环、TCP 代理网络分区、
 // 单 register 线性一致 checker），但跑在 multi_raft region 模式 + 内嵌 PD 下：
 //   - region 0（system raft）与全部数据 Region 经每节点 raft 代理（单个代理
 //     覆盖该节点全部 raft 组：region raft 与 region 0 共享节点 raft 监听）；
 //   - target_replicas=3（无 RemovePeer churn——2-voter 用例 kill 会死锁数据面，
-//     见仓库记忆 P4a 教训）；
+//     见仓库记忆 教训）；
 //   - 注入 = kill+重启 / 分区交替；写入 = region 1 单 register key（线性一致
 //     检查），另定期校验 region 2/3 可写（跨 Region 数据面在 chaos 下健康）。
 // 硬断言 = 终态收敛 + 线性一致性 0 违规 + region 0 leader 恢复 + 全 Region 可写。

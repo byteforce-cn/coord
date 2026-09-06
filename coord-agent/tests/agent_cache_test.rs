@@ -1,7 +1,7 @@
-// TDD: Agent 本地缓存测试 (Phase C1/C2)
+// TDD: Agent 本地缓存测试
 //
-// C1: KV 读缓存验证 — LruCache + TTL + Watch 失效
-// C2: Service Catalog 缓存验证 — 旧 RegistryCache（已废弃） + 新 services::registry::RegistryCache
+// KV 读缓存验证 — LruCache + TTL + Watch 失效
+// Service Catalog 缓存验证 — 旧 RegistryCache（已废弃） + 新 services::registry::RegistryCache
 //
 // v3.0 迁移说明：
 // - 旧 `cache::RegistryCache` 已废弃，测试保留向后兼容
@@ -17,10 +17,10 @@ use coord_agent::cache::RegistryCache;
 use coord_agent::services::registry::{RegistryCache as RegistryCacheV3, ServiceInstance};
 
 // ════════════════════════════════════════════════════════════════
-// C1: KV 读缓存
+// KV 读缓存
 // ════════════════════════════════════════════════════════════════
 
-/// C1.1: 缓存基本 put/get 操作
+/// 缓存基本 put/get 操作
 #[test]
 fn test_kv_cache_put_and_get() {
     let mut cache = KvCache::new(100, 30);
@@ -37,7 +37,7 @@ fn test_kv_cache_put_and_get() {
     assert_eq!(val, None);
 }
 
-/// C1.2: 缓存 hit/miss 统计
+/// 缓存 hit/miss 统计
 #[test]
 fn test_kv_cache_stats() {
     let mut cache = KvCache::new(100, 30);
@@ -61,7 +61,7 @@ fn test_kv_cache_stats() {
     assert_eq!(stats.misses, 1);
 }
 
-/// C1.3: TTL 过期
+/// TTL 过期
 #[test]
 fn test_kv_cache_ttl_expiry() {
     // 使用 1 秒 TTL
@@ -78,7 +78,7 @@ fn test_kv_cache_ttl_expiry() {
     assert_eq!(cache.get(b"key1"), None);
 }
 
-/// C1.4: LRU 淘汰
+/// LRU 淘汰
 #[test]
 fn test_kv_cache_lru_eviction() {
     // 最大 2 条
@@ -96,7 +96,7 @@ fn test_kv_cache_lru_eviction() {
     assert_eq!(cache.get(b"k3"), Some(b"v3".to_vec()));
 }
 
-/// C1.5: 缓存主动失效（Watch 驱动）
+/// 缓存主动失效（Watch 驱动）
 #[test]
 fn test_kv_cache_invalidation() {
     let mut cache = KvCache::new(100, 60);
@@ -116,7 +116,7 @@ fn test_kv_cache_invalidation() {
     assert_eq!(cache.len(), 1);
 }
 
-/// C1.6: 前缀失效（Watch prefix 事件）
+/// 前缀失效（Watch prefix 事件）
 #[test]
 fn test_kv_cache_prefix_invalidation() {
     let mut cache = KvCache::new(100, 60);
@@ -133,10 +133,10 @@ fn test_kv_cache_prefix_invalidation() {
 }
 
 // ════════════════════════════════════════════════════════════════
-// C2: Service Catalog 缓存（旧 RegistryCache，向后兼容）
+// Service Catalog 缓存（旧 RegistryCache，向后兼容）
 // ════════════════════════════════════════════════════════════════
 
-/// C2.1: [已废弃] RegistryCache 基本操作
+/// [已废弃] RegistryCache 基本操作
 #[test]
 #[allow(deprecated)]
 fn test_registry_cache_basic() {
@@ -159,7 +159,7 @@ fn test_registry_cache_basic() {
     assert_eq!(result, Some(b"{}".to_vec()));
 }
 
-/// C2.2: [已废弃] RegistryCache 增量更新
+/// [已废弃] RegistryCache 增量更新
 #[test]
 #[allow(deprecated)]
 fn test_registry_cache_incremental() {
@@ -179,10 +179,10 @@ fn test_registry_cache_incremental() {
 }
 
 // ════════════════════════════════════════════════════════════════
-// C2v3: Service Catalog 缓存（新 services::registry::RegistryCache，v3.0）
+// Service Catalog 缓存（新 services::registry::RegistryCache，v3.0）
 // ════════════════════════════════════════════════════════════════
 
-/// C2v3.1: 新 RegistryCache 类型化实例存储
+/// 新 RegistryCache 类型化实例存储
 #[test]
 fn test_registry_cache_v3_typed_instances() {
     let mut cache = RegistryCacheV3::new(500);
@@ -204,7 +204,7 @@ fn test_registry_cache_v3_typed_instances() {
     assert_eq!(discovered[0].address, "10.0.0.1:8080");
 }
 
-/// C2v3.2: 新 RegistryCache 按服务名发现
+/// 新 RegistryCache 按服务名发现
 #[test]
 fn test_registry_cache_v3_discover_by_service() {
     let mut cache = RegistryCacheV3::new(500);
@@ -224,7 +224,7 @@ fn test_registry_cache_v3_discover_by_service() {
     assert_eq!(cache.discover("nonexistent").len(), 0);
 }
 
-/// C2v3.3: 新 RegistryCache 自我保护模式
+/// 新 RegistryCache 自我保护模式
 #[test]
 fn test_registry_cache_v3_self_protection() {
     let mut cache = RegistryCacheV3::new(10);
@@ -239,7 +239,7 @@ fn test_registry_cache_v3_self_protection() {
     assert!(!cache.is_self_protection());
 }
 
-/// C2v3.4: 新 RegistryCache discover_all
+/// 新 RegistryCache discover_all
 #[test]
 fn test_registry_cache_v3_discover_all() {
     let mut cache = RegistryCacheV3::new(500);

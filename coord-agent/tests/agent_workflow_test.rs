@@ -1,9 +1,7 @@
-// coord-agent: Workflow DSL 解释器测试（Phase G）
+// coord-agent: Workflow DSL 解释器测试
 //
 // TDD RED phase: 测试 WorkflowInterpreter（Serverless Workflow DSL 执行引擎）。
 // 支持 Operation/Delay/Event/Switch/Parallel/Terminate 状态。
-//
-// 参见 docs/client-agent-architecture-v3.md §5.9。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

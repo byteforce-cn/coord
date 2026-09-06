@@ -1,18 +1,17 @@
-// Region 运行时装配（T2.3 生产接线）
+// Region 运行时装配
 //
 // 生产形态：单进程（coord server）承载多个 Region Raft 组。本模块把
 // 「每 Region 的存储（MvccStorage / LogStore / SnapshotTracker）→ per-region
 // Raft 实例 → 网络注册（RaftRpcService.set_region_raft）→ 路由注册
-// （RegionManager）」的装配封装为可复用 API，供 main.rs（region 配置落地后，
-// 见 T3.4）与集成测试共用。
+// （RegionManager）」的装配封装为可复用 API，供 main.rs 与集成测试共用。
 //
-// 存储隔离策略（T2.3 决策：目录级隔离，而非把 `/r/{region_id:016x}/...`
+// 存储隔离策略（目录级隔离，而非把 `/r/{region_id:016x}/...`
 // 前缀写进共享 redb Key）：
 //   1. redb 为单写者模型：若 N 个 Region 共享同一 Database，各 Region Raft 组
 //      并发 append/apply 会产生交叠写事务，需全局串行化（WriteBatcher 仅覆盖
 //      log append 路径，apply 路径无等价物），改造面与回归风险大；
 //   2. region 0 = 既有单 Raft 生产数据（`store.db` 平铺 Key），前缀化会改变磁盘
-//      布局，破坏既有备份/快照/回滚（T2.6：multi_raft 关闭时需字节级退化）；
+//      布局，破坏既有备份/快照/回滚（multi_raft 关闭时需字节级退化）；
 //   3. 每 Region 独立 DB 文件天然满足「日志/状态机按 Region 隔离」，且无需在
 //      MVCC/LogStore 全链路透传 region_id。
 // 目录约定（与 coord_core::region 前缀文档一一对应，物理实现等价物）：
@@ -79,14 +78,14 @@ pub struct RegionRuntime {
     /// 该 Region 的业务存储（MVCC，目录隔离）
     pub mvcc: Arc<MvccStorage<RedbBackend>>,
     /// 该 Region 的本地 Raft Log 句柄（读路径一致性校验用，防陈旧读；
-    /// 与 `main.rs` 单 Raft 的 `node_raft_log` 同理——T2.4 中 KV 读屏障的
+    /// 与 `main.rs` 单 Raft 的 `node_raft_log` 同理——KV 读屏障的
     /// 幻影态终检需按 Region 访问各自日志，LogStore 为 Clone 廉价句柄）
     pub raft_log_store: LogStore,
     /// 该 Region 的数据目录
     pub data_dir: PathBuf,
     /// 快照跟踪器（与 LogStore/StateMachineStore 共享）
     pub tracker: Arc<SnapshotTracker>,
-    /// T5.6（R-MR-03）：该 Region 的 Watch 事件分发器（per-Region revision 语义；
+    /// 该 Region 的 Watch 事件分发器（per-Region revision 语义；
     /// 与状态机共享——apply 时把本 Region 的变更事件 dispatch 到这里，订阅者只
     /// 见本 Region 的 key；region 0 单 Raft 路径不用此字段，沿用节点级 dispatcher）
     pub watch_dispatcher: Arc<WatchDispatcher>,
@@ -157,12 +156,12 @@ pub async fn spawn_region_runtime(
         Arc::clone(&tracker),
     );
 
-    // T5.6（R-MR-03）：每 Region 独立 WatchDispatcher（per-Region revision 语义）。
+    // 每 Region 独立 WatchDispatcher（per-Region revision 语义）。
     // 必须在 new_raft 之前挂到状态机——StateMachineStore 被移入 raft 后不可再取回。
     let watch_dispatcher = Arc::new(WatchDispatcher::start());
     sm_store.set_watch_dispatcher(Arc::clone(&watch_dispatcher));
 
-    // T2.4：读屏障幻影态终检需要访问本地日志；克隆一份 LogStore 句柄给
+    // 读屏障幻影态终检需要访问本地日志；克隆一份 LogStore 句柄给
     // RegionRuntime（与 main.rs 单 Raft 的 node_raft_log 同理），再移入 raft。
     let raft_log_store = log_store.clone();
 
@@ -173,7 +172,7 @@ pub async fn spawn_region_runtime(
         Error::Storage(format!("region {region_id}: read initialized state: {e}"))
     })?;
 
-    // T2.2：per-region 网络门面（共享节点连接池 + 绑定 region_id）
+    // per-region 网络门面（共享节点连接池 + 绑定 region_id）
     let region_factory = RegionRaftNetworkFactory::new(shared_factory.clone(), region_id);
     let raft = new_raft(node_id, raft_config, region_factory, log_store, sm_store)
         .await
@@ -195,7 +194,7 @@ pub async fn spawn_region_runtime(
         })?;
     }
 
-    // T2.5：网络注册（RaftRpcService 按 region_id 解复用）
+    // 网络注册（RaftRpcService 按 region_id 解复用）
     rpc.set_region_raft(region_id, raft.clone());
 
     Ok(Arc::new(RegionRuntime {
@@ -211,14 +210,14 @@ pub async fn spawn_region_runtime(
 }
 
 // ============================================================================
-// T3.3：Region raft 成员变更能力面（PD Operator 执行器依赖端口）
+// Region raft 成员变更能力面（PD Operator 执行器依赖端口）
 // ============================================================================
 
-/// Region raft 成员变更能力面（T3.3）
+/// Region raft 成员变更能力面
 ///
 /// 定义在 raft 层（raft 自我描述能力；全部 openraft 交互收敛在本目录内——
-/// P1-06 类型隔离），pd 模块的 `OperatorExecutor` 只经 trait object 使用本端口，
-/// 不接触任何 openraft 类型。接线层（T3.4）/集成测试基于真实 `CoordRaft`
+/// openraft 类型隔离），pd 模块的 `OperatorExecutor` 只经 trait object 使用本端口，
+/// 不接触任何 openraft 类型。接线层/集成测试基于真实 `CoordRaft`
 /// 实现（`CoordRegionRaftHandle`），单元测试可用替身。
 ///
 /// 语义约定（与执行器对齐，见 `pd/executor.rs` 模块文档）：
@@ -232,7 +231,7 @@ pub trait RegionRaftHandle: Send + Sync {
     /// 当前 leader（选举窗口/未知 = None）
     async fn current_leader(&self) -> Option<NodeID>;
 
-    /// 当前**已提交/已 apply** 的成员表（T3.4 对账用）
+    /// 当前**已提交/已 apply** 的成员表（对账用）
     ///
     /// 返回 raft 状态机当前 membership 的全部节点（voter 优先、按 node_id
     /// 稳定排序），`raft_addr` 取成员节点表中自带的地址。成员经 raft 日志复制，
@@ -253,7 +252,7 @@ pub trait RegionRaftHandle: Send + Sync {
     async fn transfer_leader(&self, to: NodeID) -> Result<()>;
 }
 
-/// 真实 Region raft 的成员变更句柄（T3.3）
+/// 真实 Region raft 的成员变更句柄
 ///
 /// 包装某 Region 的 `CoordRaft`，把 openraft 成员变更 API 收敛到
 /// `RegionRaftHandle` 端口；错误映射为 `coord_core::error::Error`。
@@ -360,10 +359,10 @@ impl RegionRaftHandle for CoordRegionRaftHandle {
 }
 
 // ============================================================================
-// T5.9（R-MR-06）：per-Region Compact 提案器
+// per-Region Compact 提案器
 // ============================================================================
 
-/// per-Region Compaction 提案器（T5.9/R-MR-06，G7 收口）
+/// per-Region Compaction 提案器
 ///
 /// 把 `Command::Compact{revision}` 提到该 Region 的 raft（节点一致 apply，
 /// 与单 Raft 的 `CoordNode` CompactProposer 同语义）。leader-only：

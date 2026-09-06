@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit;
  * 3. 发现依赖服务 (Range prefix scan /_registry/)
  * 4. 注销 (Revoke Lease → 绑定 key 自动删除)
  *
- * 与架构文档 §9.3 一致。
+ * 与架构文档 一致。
  */
 @DisplayName("Service Registry Integration Tests (Java → Agent gRPC)")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)

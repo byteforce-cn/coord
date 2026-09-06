@@ -1,4 +1,4 @@
-// R-MR-08（D1-a P2）：PD 全局队列 executor 真实 region 0 raft 端到端验收
+// PD 全局队列 executor 真实 region 0 raft 端到端验收
 //
 // 单节点 region 0 raft（与 pd_region0_channel_test 同型 harness）+ 真实
 // `CoordSystemRaftHandle`，验证全局队列模式下执行器的完整链路：
@@ -383,7 +383,7 @@ async fn test_global_queue_dedup_real_raft_and_no_local_queue() {
     let _ = shutdown_tx.send(true);
 }
 
-/// Test 4（P3 failover）：真实 region 0 raft 上——Running 条目认领者失联
+/// Test 4（failover）：真实 region 0 raft 上——Running 条目认领者失联
 /// （认领墙钟远超 `operator_running_timeout`，无 Complete）→ region 0 leader
 /// 的调度 tick 经 raft `Requeue` 把它放回 Pending；存活 Region leader（本节点）
 /// 随后重认领执行并 Complete 成功——认领者故障的端到端自愈。

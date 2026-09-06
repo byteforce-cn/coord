@@ -1,6 +1,6 @@
 // Raft LogStore — Openraft RaftLogStorage + RaftLogReader 实现
 //
-// 使用 Redb 独立实例持久化 Raft Log（ADP §12.5）。
+// 使用 Redb 独立实例持久化 Raft Log。
 // 与业务数据 store.db 隔离，避免 Raft Log 频繁写入影响业务读写性能。
 //
 // 物理布局：
@@ -63,7 +63,7 @@ fn index_key(index: u64) -> [u8; 8] {
 /// 线程安全（内部 `Arc<Database>`），支持 Clone。
 /// 所有写入操作通过 Redb 写事务原子提交。
 ///
-/// purge 前置条件（P0-A/M0-5）：若设置了 `SnapshotTracker`，删除日志前必须
+/// purge 前置条件：若设置了 `SnapshotTracker`，删除日志前必须
 /// 存在覆盖 purge 点的已落盘快照，否则拒绝（防止"无快照 + 日志已删"不可恢复态）。
 #[derive(Debug, Clone)]
 pub struct LogStore {
@@ -121,7 +121,7 @@ impl LogStore {
         })
     }
 
-    /// 注入快照持久化守卫（M0-5：创建 Raft 实例前调用）
+    /// 注入快照持久化守卫（创建 Raft 实例前调用）
     pub fn with_snapshot_tracker(mut self, tracker: Arc<SnapshotTracker>) -> Self {
         self.snapshot_tracker = Some(tracker);
         self
@@ -325,7 +325,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
             .open_table(TABLE_LOG)
             .map_err(|e| io::Error::other(format!("open log table: {e}")))?;
 
-        // 直接从 B-Tree 取最大 index（O(1)，无扫描上限；P0-A.2）。
+        // 直接从 B-Tree 取最大 index（O(1)，无扫描上限）。
         // 旧实现从 committed 线索向后最多扫描 1000 条，committed 落后时漏报尾部。
         let last = {
             let guard = table
@@ -376,7 +376,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
 
         // Notify Raft that the log entries have been durably written to disk.
         // Without this callback, the Raft will never commit the entries and
-        // client_write will hang forever (ADP §3.3, Openraft IOFlushed contract).
+        // client_write will hang forever .
         callback.io_completed(Ok(()));
 
         Ok(())
@@ -418,7 +418,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     }
 
     async fn purge(&mut self, log_id: LogIdOf<TypeConfig>) -> Result<(), io::Error> {
-        // P0-A/M0-5 前置条件：存在覆盖 purge 点的已落盘快照才允许删除日志。
+        // 前置条件：存在覆盖 purge 点的已落盘快照才允许删除日志。
         // openraft 仅在快照构建成功后触发 purge，此守卫防止任何顺序颠倒/回退路径。
         if let Some(ref tracker) = self.snapshot_tracker {
             if !tracker.durable_covers(log_id.index) {
@@ -609,7 +609,7 @@ mod tests {
         });
     }
 
-    /// P0-A.2 回归：`get_log_state` 不得依赖 committed 线索的有限扫描。
+    /// 回归：`get_log_state` 不得依赖 committed 线索的有限扫描。
     ///
     /// 旧实现从 committed 索引向后最多扫描 1000 条；当 committed 落后
     /// （如重启后 committed 尚未持久化、或日志尾部远超 committed）时

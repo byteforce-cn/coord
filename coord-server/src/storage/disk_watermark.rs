@@ -1,6 +1,6 @@
-// 磁盘水位检测（P1-02 资源防护）
+// 磁盘水位检测（资源防护）
 //
-// 磁盘水位三级语义（决策文档 §6.3 P1-02）：
+// 磁盘水位三级语义：
 // - Ok：剩余空间 ≥ 15%，正常服务；
 // - Warn：剩余空间 < 15%，WARN 日志 + 指标告警（仍可写）；
 // - ReadOnly：剩余空间 < 5%，写请求返回 `RESOURCE_EXHAUSTED`（读仍可用）。
@@ -47,7 +47,7 @@ pub fn classify(available_ratio: f64) -> DiskWatermark {
     classify_with(available_ratio, WARN_RATIO, READONLY_RATIO)
 }
 
-/// P2-02：依据可用比例与可热更新阈值判定水位（SIGHUP 安全子集）。
+/// 依据可用比例与可热更新阈值判定水位（SIGHUP 安全子集）。
 ///
 /// 阈值来自 `coord::config::ReloadableConfig`（`disk_warn_ratio`/`disk_readonly_ratio`），
 /// 校验由配置层保证：`0 < readonly < warn < 1`。
@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn test_classify_with_custom_thresholds() {
-        // P2-02：动态阈值（SIGHUP 热更新安全子集）
+        // 动态阈值（SIGHUP 热更新安全子集）
         assert_eq!(classify_with(0.20, 0.25, 0.10), DiskWatermark::Warn);
         assert_eq!(classify_with(0.30, 0.25, 0.10), DiskWatermark::Ok);
         assert_eq!(classify_with(0.09, 0.25, 0.10), DiskWatermark::ReadOnly);

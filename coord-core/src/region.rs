@@ -1,14 +1,13 @@
-// ⚠️ EXPERIMENTAL（P2-01）：多 Region 前缀编码为组件级验证实现，
+// ⚠️ EXPERIMENTAL：多 Region 前缀编码为组件级验证实现，
 // 生产路径未引用（仅 `coord-core/tests/region_key_encoding_test.rs` 测试引用）。
 // 注：「生产路径未引用」仍准确——生产 Multi-Raft（`[multi_raft] enabled=true`）走
 // **目录级存储隔离**（`coord-server/src/raft/region_runtime.rs::region_data_dir`，
 // 每 Region 独立 redb），不经过此前缀编码；`encode_pd_region_key` 仅被
-// `pd/meta_store.rs`（PD meta 落盘）引用。演进与边界见
-// `docs/coord-multi-raft-production-plan-2026-09-05.md`。
+// `pd/meta_store.rs`（PD meta 落盘）引用。
 //
 // Region Key 编码 — 共享存储的多 Region 前缀隔离
 //
-// 编码规范（§5.1）：
+// 编码规范：
 //   /r/{region_id:016x}/kv/{user_key}          — KV 数据
 //   /r/{region_id:016x}/kv_meta/{user_key}     — KV 元数据
 //   /r/{region_id:016x}/raft_log/{index:016x}  — Raft Log Entry

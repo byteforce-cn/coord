@@ -4,8 +4,6 @@
 // - 从 TOML 文件加载 AgentConfig
 // - 手动或定期重新加载配置
 // - 原子替换：读者始终看到一致的配置快照
-//
-// 参见 docs/client-agent-architecture.md §4.6。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

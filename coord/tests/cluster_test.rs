@@ -78,7 +78,7 @@ mod tests {
             let storage_config = StorageConfig::default();
             let backend = RedbBackend::open(&data_dir, &storage_config).expect("open redb backend");
 
-            // 2. Single MvccStorage instance shared across all paths (D-A1)
+            // 2. Single MvccStorage instance shared across all paths 
             let mvcc = Arc::new(MvccStorage::new(backend).expect("create mvcc"));
             let snapshot_tracker =
                 Arc::new(coord_server::storage::snapshot::SnapshotTracker::default());
@@ -156,7 +156,7 @@ mod tests {
             node.raft = Some(Arc::clone(&raft));
             let node = Arc::new(node);
 
-            // 12. Start compaction manager（P1-01：leader 经 raft 提案）
+            // 12. Start compaction manager（leader 经 raft 提案）
             let compaction_config = coord_server::storage::compaction::CompactionConfig::default();
             let compaction_proposer: Arc<dyn coord_server::storage::compaction::CompactProposer> =
                 node.clone();
@@ -235,7 +235,7 @@ mod tests {
             let storage_config = StorageConfig::default();
             let backend = RedbBackend::open(&data_dir, &storage_config).expect("open redb backend");
 
-            // 2. Single MvccStorage instance shared across all paths (D-A1)
+            // 2. Single MvccStorage instance shared across all paths 
             let mvcc = Arc::new(MvccStorage::new(backend).expect("create mvcc"));
             let snapshot_tracker =
                 Arc::new(coord_server::storage::snapshot::SnapshotTracker::default());
@@ -304,7 +304,7 @@ mod tests {
             node.raft = Some(Arc::clone(&raft));
             let node = Arc::new(node);
 
-            // 12. Start compaction manager（P1-01：leader 经 raft 提案）
+            // 12. Start compaction manager（leader 经 raft 提案）
             let compaction_config = coord_server::storage::compaction::CompactionConfig::default();
             let compaction_proposer: Arc<dyn coord_server::storage::compaction::CompactProposer> =
                 node.clone();
@@ -889,7 +889,7 @@ mod tests {
             .with_env_filter("coord=info,openraft=info")
             .try_init();
 
-        // Phase 1: Start single-node cluster
+        // Start single-node cluster
         let p1_grpc = find_port();
         let p1_raft = find_port();
         let p2_grpc = find_port();
@@ -917,7 +917,7 @@ mod tests {
         .await
         .expect("Put before membership change should succeed");
 
-        // Phase 2: Start node 2 and add as learner
+        // Start node 2 and add as learner
         let n2 = TestNode::start(2, p2_grpc, p2_raft, all_addrs.clone(), false).await;
 
         tracing::info!("Adding node 2 as learner...");
@@ -929,7 +929,7 @@ mod tests {
         // Wait for learner to be added
         tokio::time::sleep(Duration::from_millis(1000)).await;
 
-        // Phase 3: Promote node 2 to voter
+        // Promote node 2 to voter
         tracing::info!("Promoting node 2 to voter...");
         let voter_ids: std::collections::BTreeSet<u64> = [1, 2].into();
         n1.raft
@@ -940,7 +940,7 @@ mod tests {
         // Wait for membership to propagate
         tokio::time::sleep(Duration::from_millis(1000)).await;
 
-        // Phase 4: Write more data and verify replication to node 2's local storage
+        // Write more data and verify replication to node 2's local storage
         kv1.put(PutRequest {
             key: b"post-member-key".to_vec(),
             value: b"post-member-value".to_vec(),
@@ -1813,7 +1813,7 @@ mod tests {
         let (n1, n2, n3) = start_3_node_cluster().await;
         assert!(n1.is_leader().await, "Node 1 should be leader");
 
-        // Phase 1: Write baseline data
+        // Write baseline data
         let mut kv1 = n1.kv_client().await;
         let baseline_keys: Vec<(&[u8], &[u8])> = vec![
             (b"follower-rec-base-a", b"baseline-alpha"),
@@ -1841,7 +1841,7 @@ mod tests {
         }
         tracing::info!("Baseline data verified on all 3 nodes");
 
-        // Phase 2: Kill follower (node 3)
+        // Kill follower (node 3)
         tracing::info!("Killing follower (node 3)...");
         n3.kill();
         tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -1861,7 +1861,7 @@ mod tests {
             survivor.node_id
         );
 
-        // Phase 3: Write data during follower outage — should commit with quorum 2/3
+        // Write data during follower outage — should commit with quorum 2/3
         let mut kv_leader = leader.kv_client().await;
         let during_outage_keys: Vec<(&[u8], &[u8])> = vec![
             (b"follower-rec-during-x", b"during-outage-x-ray"),
@@ -1891,7 +1891,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // Phase 4: Verify data integrity on remaining nodes
+        // Verify data integrity on remaining nodes
         for (key, expected) in baseline_keys.iter().chain(during_outage_keys.iter()) {
             let local_leader = leader.read_local(key);
             let local_survivor = survivor.read_local(key);
@@ -1911,7 +1911,7 @@ mod tests {
             baseline_keys.len() + during_outage_keys.len()
         );
 
-        // Phase 5: Remove dead node from voter set — cluster continues with 2 voters
+        // Remove dead node from voter set — cluster continues with 2 voters
         tracing::info!("Removing dead node 3 from voter set...");
         let remove_ids: std::collections::BTreeSet<u64> = [3].into();
         leader
@@ -1969,7 +1969,7 @@ mod tests {
         );
     }
 
-    // ──── Test: SDK（coord-client）3 节点 kill-leader 恢复（P2-04）────
+    // ──── Test: SDK（coord-client）3 节点 kill-leader 恢复────
 
     /// Verify that the Rust client SDK transparently recovers after the leader
     /// is killed: writes before the kill are preserved; writes after the kill

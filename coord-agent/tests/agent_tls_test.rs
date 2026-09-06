@@ -1,4 +1,4 @@
-// TDD: Agent TLS/mTLS 测试 (Phase A-mTLS — RED→GREEN)
+// TDD: Agent TLS/mTLS 测试 (RED→GREEN)
 //
 // 验证 Agent TLS 基础设施：
 // 1. TLS 配置加载与序列化

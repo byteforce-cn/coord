@@ -3,12 +3,12 @@
 // 将 coord-core::storage::StorageBackend trait 适配到 Redb 4.1.0。
 // 直接使用 Redb 内置 MVCC，不额外建立应用层版本管理。
 //
-// 并发模型（P1-01 改造）：内部以 `parking_lot::RwLock<Database>` 持有。
+// 并发模型：内部以 `parking_lot::RwLock<Database>` 持有。
 // - 读事务持读锁并行；写事务持写锁（与 redb 单写者语义一致，仅提前阻塞）；
 // - `compact()` 需要独占 `&mut Database`（redb 4.1 API），持写锁的维护窗口内执行，
-//   期间阻塞读写 —— 这是 redb 4.1 的固有限制（决策文档 §八风险表），
+//   期间阻塞读写 —— 这是 redb 4.1 的固有限制，
 //   调度由 `CompactionManager` 以小时级间隔执行。
-// - R-RFT-19：`compact_with_idle_window` 等待一段无写入静默期再拿独占写锁，
+// - `compact_with_idle_window` 等待一段无写入静默期再拿独占写锁，
 //   将在线读写与压缩窗口错开，规避「长事务窗口期间新读写全部等待」。
 
 use std::path::{Path, PathBuf};
@@ -156,7 +156,7 @@ impl StorageBackend for RedbBackend {
     }
 
     fn compact(&self) -> Result<()> {
-        // P1-01：维护窗口内真实执行 redb 文件压缩（空间回收）。
+        // 维护窗口内真实执行 redb 文件压缩（空间回收）。
         // redb 4.1 `Database::compact(&mut self)` 需要独占引用；写锁提供互斥，
         // 期间新读写阻塞（调度由 CompactionManager 控制，小时级间隔）。
         let mut db = self.db.write();
@@ -170,7 +170,7 @@ impl StorageBackend for RedbBackend {
     }
 
     fn disk_size_bytes(&self) -> Result<u64> {
-        // P1-01：真实文件大小（此前恒 0，磁盘水位告警/只读依赖它，见 P1-02）
+        // 真实文件大小（此前恒 0，磁盘水位告警/只读依赖它）
         std::fs::metadata(&self.db_path)
             .map(|m| m.len())
             .map_err(|e| {
@@ -570,7 +570,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ──── P1-01 Compaction ────
+    // ──── Compaction ────
 
     #[test]
     fn test_disk_size_bytes_reports_file_size() {

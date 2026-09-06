@@ -1,4 +1,4 @@
-// Phase 2 T2.3/T2.6 + T3.4 配置驱动装配验收测试（TDD 迭代 #8）
+// 配置驱动装配验收测试（TDD 迭代 #8）
 //
 // 与 region_assembly_test / region_kv_routing_test（手工逐 Region `spawn_region`）
 // 不同，本测试驱动生产装配路径：`RegionSeed` + `spawn_configured_regions`——
@@ -200,7 +200,7 @@ fn range_req(key: &[u8], range_end: &[u8]) -> RangeRequest {
     }
 }
 
-/// T3.4 验收 1：配置驱动装配 → 各 Region 独立选举 → KV 路由收敛/隔离。
+/// 验收 1：配置驱动装配 → 各 Region 独立选举 → KV 路由收敛/隔离。
 #[tokio::test]
 async fn test_config_assembly_routes_and_converges_across_regions() {
     let hosts = start_two_node_two_region_config_cluster().await;
@@ -297,7 +297,7 @@ async fn test_config_assembly_routes_and_converges_across_regions() {
     );
 }
 
-/// T2.4 验收 2（经配置驱动装配路径）：写非 leader 节点 → RegionNotLeader
+/// 验收 2（经配置驱动装配路径）：写非 leader 节点 → RegionNotLeader
 /// （UNAVAILABLE）+ leader hint 指向该 Region 真实 leader 的 KV 地址。
 #[tokio::test]
 async fn test_config_assembly_write_via_follower_returns_region_not_leader_hint() {
@@ -345,7 +345,7 @@ async fn test_config_assembly_write_via_follower_returns_region_not_leader_hint(
     }
 }
 
-/// T3.4 防御性校验：不平铺 / 首 region 非空起点 / 节点非成员 → 装配前拒绝。
+/// 防御性校验：不平铺 / 首 region 非空起点 / 节点非成员 → 装配前拒绝。
 #[tokio::test]
 async fn test_config_assembly_rejects_invalid_region_tables() {
     let tmp = tempfile::tempdir().unwrap();

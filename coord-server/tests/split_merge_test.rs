@@ -1,4 +1,4 @@
-// split_merge_test.rs — Phase 5: Region Split/Merge 正确性测试
+// split_merge_test.rs — Region Split/Merge 正确性测试
 //
 // TDD: 验证 Region Split 和 Merge 在各种边界条件下的正确性。
 // 测试覆盖：

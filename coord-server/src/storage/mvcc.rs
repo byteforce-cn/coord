@@ -24,41 +24,41 @@ use crate::security::barrier::Barrier;
 /// 用户 KV 数据的 Key 前缀
 const KV_PREFIX: &[u8] = b"/kv/";
 
-/// 内部元数据的 Key 前缀（P1-P3 阶段使用）
+/// 内部元数据的 Key 前缀（阶段使用）
 #[allow(dead_code)]
 const META_PREFIX: &[u8] = b"/_meta/";
 
-/// Lease 绑定的 Key 前缀（P2 阶段使用）
+/// Lease 绑定的 Key 前缀（阶段使用）
 #[allow(dead_code)]
 const LEASE_PREFIX: &[u8] = b"/_lease/";
 
 /// 变更日志的 Key 前缀
 const CHANGELOG_PREFIX: &[u8] = b"/_changelog/";
 
-/// 认证数据的 Key 前缀（P2 阶段使用）
+/// 认证数据的 Key 前缀（阶段使用）
 #[allow(dead_code)]
 const AUTH_PREFIX: &[u8] = b"/_auth/";
 
 // ──── Meta 子键 ────
 
-/// 已 Apply 的最大 Raft LogId（崩溃恢复检查点；与命令写入同一事务，D-A4）
+/// 已 Apply 的最大 Raft LogId（崩溃恢复检查点；与命令写入同一事务）
 pub(crate) const META_LAST_APPLIED: &[u8] = b"/_meta/last_applied";
 
-/// 已持久化快照元数据（last_log_id/checksum/path，D-A4/A.6）
+/// 已持久化快照元数据（last_log_id/checksum/path）
 pub(crate) const META_SNAPSHOT: &[u8] = b"/_meta/snapshot";
 
 /// 已持久化的 Raft membership（与 applied 持久化配套：重启后 leader 选举依赖它）
 pub(crate) const META_MEMBERSHIP: &[u8] = b"/_meta/membership";
 
-/// 已持久化的 compacted revision（P1-01：raft 下发，节点一致；
+/// 已持久化的 compacted revision（raft 下发，节点一致；
 /// 小于等于它的 changelog/tombstone 已被物理删除）
 pub(crate) const META_COMPACT_REVISION: &[u8] = b"/_meta/compacted_revision";
 
-/// Seal 状态：0=Unsealed, 1=Sealed, 2=Unsealing（P3 阶段使用）
+/// Seal 状态：0=Unsealed, 1=Sealed, 2=Unsealing（阶段使用）
 #[allow(dead_code)]
 const META_SEAL_STATUS: &[u8] = b"/_meta/seal_status";
 
-/// Auth 是否启用（P2 阶段使用）
+/// Auth 是否启用（阶段使用）
 #[allow(dead_code)]
 const META_AUTH_ENABLED: &[u8] = b"/_meta/auth_enabled";
 
@@ -82,14 +82,14 @@ pub(crate) fn encode_kv_meta_key(user_key: &[u8]) -> Vec<u8> {
     encoded
 }
 
-// ──── PD 全局 operator 队列（R-MR-08 / D1-a，docs §4.5；region 0 raft）────
+// ──── PD 全局 operator 队列（/ docs region 0 raft）────
 
 /// PD 队列内部记录前缀（region 0 MVCC，`TABLE_KV` 原始行）。
 ///
 /// 非 `/kv/` 前缀 → 不加密（同 `/_lease/`、`/_sys/auth/` 先例）；不上 Watch；
 /// 无 KvMetadata → 不经 compaction tombstone 清理（同节点重放/重启安全）。
-/// 快照覆盖已落地（SnapshotData v4 导出 `/_pd/` 域——R-MR-08 D1-a P2，见
-/// docs §4.5 P2 与 `storage/snapshot.rs`）。
+/// 快照覆盖已落地（SnapshotData v4 导出 `/_pd/` 域——见
+/// docs 与 `storage/snapshot.rs`）。
 pub const PD_QUEUE_PREFIX: &[u8] = b"/_pd/ops/";
 
 /// 终态条目保留上限（超出删最旧终态；apply 期确定性裁剪，只依赖持久状态）
@@ -139,7 +139,7 @@ pub enum EventType {
     Put = 0,
     Delete = 1,
     Txn = 2,
-    /// Lease 生命周期事件（Grant/KeepAlive/Revoke，P0-B）
+    /// Lease 生命周期事件（Grant/KeepAlive/Revoke）
     Lease = 3,
 }
 
@@ -159,7 +159,7 @@ pub struct ChangeEvent {
     pub event_type: EventType,
 }
 
-/// Changelog 格式版本（P0-A：版本号 +1，0.1.x 数据不承诺兼容）
+/// Changelog 格式版本（版本号 +1，0.1.x 数据不承诺兼容）
 const CHANGELOG_FORMAT_VERSION: u8 = 2;
 
 impl ChangeEvent {
@@ -359,7 +359,7 @@ impl KvMetadata {
 
 // ──── AppliedLogId ────
 
-/// 持久化的已 Apply LogId（D-A4：与命令写入同一事务）
+/// 持久化的已 Apply LogId（与命令写入同一事务）
 ///
 /// raft apply 路径写入 `{term, node_id}` 来自 `entry.log_id`；
 /// 单节点模式（无 raft）写入 `{0, 0, revision}`。
@@ -389,9 +389,9 @@ impl AppliedLogId {
     }
 }
 
-// ──── LeaseRecord（P0-B：raft 状态机内持久化 lease 表） ────
+// ──── LeaseRecord（raft 状态机内持久化 lease 表） ────
 
-/// `/_lease/{id}` 的持久化记录（规格 B.3）
+/// `/_lease/{id}` 的持久化记录
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaseRecord {
     /// 租约 TTL（秒）
@@ -433,7 +433,7 @@ pub(crate) fn encode_lease_key(lease_id: i64) -> Vec<u8> {
 
 // ──── ApplyOutcome ────
 
-/// apply 结果：是否因幂等守卫（D-A3）跳过了实际写入
+/// apply 结果：是否因幂等守卫跳过了实际写入
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApplyOutcome {
     /// true = 该 revision 的 changelog 已存在，本次为重放，未产生副作用
@@ -459,12 +459,12 @@ pub struct DeleteRangeOutcome {
     pub replayed: bool,
 }
 
-// ──── Compact（P1-01） ────
+// ──── Compact ────
 
-/// 单次 compaction 批删除上限（P1-01：单写事务分片删除，避免巨型事务）
+/// 单次 compaction 批删除上限（单写事务分片删除，避免巨型事务）
 pub(crate) const COMPACT_BATCH_SIZE: usize = 500;
 
-/// Compact apply 结果统计（P1-01）
+/// Compact apply 结果统计
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactOutcome {
     /// 被删除的 changelog 条目数
@@ -478,15 +478,15 @@ pub struct CompactOutcome {
 /// MVCC 版本化存储
 ///
 /// 在 StorageBackend 之上提供应用层 MVCC 语义：
-/// - revision ≡ raft log index（D-A2：由 apply 传入，不再由本层分配）
+/// - revision ≡ raft log index（由 apply 传入，不再由本层分配）
 /// - Changelog 自动写入
-/// - applied 状态同事务持久化（D-A4）
-/// - Lease 状态表（P0-B）
+/// - applied 状态同事务持久化
+/// - Lease 状态表
 ///
-/// 单实例语义（D-A1）：全链路共享一个实例；读走 redb 读事务（天然读已提交）。
+/// 单实例语义：全链路共享一个实例；读走 redb 读事务（天然读已提交）。
 pub struct MvccStorage<B: StorageBackend> {
     backend: B,
-    /// 可选的存储屏障（用于 Value 加密/解密，ADP §21）
+    /// 可选的存储屏障（用于 Value 加密/解密）
     barrier: RwLock<Option<Barrier>>,
     /// 单节点模式（无 raft）的 revision 分配锁：保证并发写入分配不同 revision
     /// （raft 模式下 apply 以 log index 为 revision，不需要此锁）
@@ -496,8 +496,8 @@ pub struct MvccStorage<B: StorageBackend> {
 impl<B: StorageBackend> MvccStorage<B> {
     /// 创建 MvccStorage 实例
     ///
-    /// revision 不再从元数据恢复（D-A2：revision 由 raft apply 传入）。
-    /// 启动一致性校验（M0-3）由 `verify_consistency` 显式执行。
+    /// revision 不再从元数据恢复（revision 由 raft apply 传入）。
+    /// 启动一致性校验由 `verify_consistency` 显式执行。
     pub fn new(backend: B) -> Result<Self> {
         Ok(Self {
             backend,
@@ -514,7 +514,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         *self.barrier.write() = Some(barrier);
     }
 
-    /// 加密 Value（如果 Barrier 已设置）。R-SEC-01：仅加密 `/kv/` 用户数据——
+    /// 加密 Value（如果 Barrier 已设置）。仅加密 `/kv/` 用户数据——
     /// `/_lease/`、`/_sys/` 等内部结构化记录（TABLE_KV 内）不加密，否则
     /// `LeaseRecord::from_bytes` 等解析会因密文长度/内容不符而失败。
     fn encrypt_value(&self, internal_key: &[u8], value: &[u8]) -> Result<Vec<u8>> {
@@ -554,7 +554,7 @@ impl<B: StorageBackend> MvccStorage<B> {
 
     /// 获取当前 Revision（已提交的最大 Revision）
     ///
-    /// 从盘上 `META_LAST_APPLIED` 读取（D-A4），无持久化条目时为 0。
+    /// 从盘上 `META_LAST_APPLIED` 读取，无持久化条目时为 0。
     pub fn current_revision(&self) -> Revision {
         self.get_applied_log_id()
             .ok()
@@ -576,7 +576,7 @@ impl<B: StorageBackend> MvccStorage<B> {
             .write(|tx| tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes()))
     }
 
-    /// 检查某 revision 的 changelog 条目是否已存在（D-A3 幂等守卫）
+    /// 检查某 revision 的 changelog 条目是否已存在（幂等守卫）
     pub fn changelog_contains_revision(&self, revision: Revision) -> Result<bool> {
         self.backend.read(|tx| {
             tx.get(TABLE_CHANGELOG, &encode_changelog_key(revision))
@@ -584,7 +584,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
-    /// M0-3 启动一致性校验：`META_LAST_APPLIED` 与 changelog 尾部一致
+    /// 启动一致性校验：`META_LAST_APPLIED` 与 changelog 尾部一致
     ///
     /// 返回（持久化 applied 索引、changelog 最大 revision）。不一致时调用方显式告警
     /// 并按"快照 → 日志"顺序恢复（重放由幂等守卫兜底）。
@@ -617,10 +617,10 @@ impl<B: StorageBackend> MvccStorage<B> {
         Ok(revision)
     }
 
-    /// Put 操作（raft apply 路径）：revision ≡ log index（D-A2）
+    /// Put 操作（raft apply 路径）：revision ≡ log index
     ///
-    /// 幂等守卫（D-A3）：该 revision 的 changelog 已存在则跳过写入。
-    /// 业务写入 + changelog + META_LAST_APPLIED 在同一写事务内原子完成（D-A4）。
+    /// 幂等守卫：该 revision 的 changelog 已存在则跳过写入。
+    /// 业务写入 + changelog + META_LAST_APPLIED 在同一写事务内原子完成。
     pub fn put_at_revision(
         &self,
         key: &[u8],
@@ -671,7 +671,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                 &event.to_bytes(),
             )?;
 
-            // 持久化 applied 状态（D-A4：与命令写入同一事务）
+            // 持久化 applied 状态（与命令写入同一事务）
             tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
 
             Ok(ApplyOutcome::applied())
@@ -698,9 +698,9 @@ impl<B: StorageBackend> MvccStorage<B> {
         Ok((revision, outcome.deleted_keys.len()))
     }
 
-    /// Delete 操作（raft apply 路径）：revision ≡ log index（D-A2）
+    /// Delete 操作（raft apply 路径）：revision ≡ log index
     ///
-    /// no-op delete 统一语义（D-A5）：无论 Key 是否存在，始终消耗一个 revision
+    /// no-op delete 统一语义：无论 Key 是否存在，始终消耗一个 revision
     /// 并写 changelog（与 etcd 一致），消除"回滚计数器"分支。
     pub fn delete_at_revision(
         &self,
@@ -724,7 +724,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                 let meta = m.mark_deleted(revision);
                 tx.insert(TABLE_KV_META, &meta_key, &meta.to_bytes())?;
             }
-            // 无论是否存在，均写 changelog（D-A5：始终消耗 revision）
+            // 无论是否存在，均写 changelog（始终消耗 revision）
 
             let event = ChangeEvent {
                 revision,
@@ -917,7 +917,7 @@ impl<B: StorageBackend> MvccStorage<B> {
     /// 范围删除（raft apply 路径，R-SVC-07-3）：单个写事务内原子标记
     /// `[start, range_end)` 内所有未删除 Key 为 tombstone。
     ///
-    /// 与 `delete_at_revision` 相同的幂等守卫（D-A3）与 applied 持久化（D-A4）。
+    /// 与 `delete_at_revision` 相同的幂等守卫与 applied 持久化。
     pub fn delete_range_at_revision(
         &self,
         start: &[u8],
@@ -953,7 +953,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                 }
             }
 
-            // 始终写 changelog（D-A5：始终消耗 revision）
+            // 始终写 changelog（始终消耗 revision）
             let event = ChangeEvent {
                 revision,
                 changes: deleted_keys
@@ -992,7 +992,7 @@ impl<B: StorageBackend> MvccStorage<B> {
     /// 在写事务内标记删除所有绑定到指定 Lease 的 Key（不写 changelog，由调用方统一写入）
     ///
     /// 返回被标记删除的 Key 列表（用于构造 Lease Revoke 的 changelog 事件）。
-    /// 仅用于 raft apply 路径（P0-B：任何路径不得直写本地存储）。
+    /// 仅用于 raft apply 路径（任何路径不得直写本地存储）。
     fn delete_keys_by_lease_in_tx(
         tx: &mut dyn WriteTx,
         target_lease_id: i64,
@@ -1030,9 +1030,9 @@ impl<B: StorageBackend> MvccStorage<B> {
         self.execute_txn_at_revision(compares, success_ops, failure_ops, revision, applied)
     }
 
-    /// Txn 原子事务执行（raft apply 路径）：revision ≡ log index（D-A2）
+    /// Txn 原子事务执行（raft apply 路径）：revision ≡ log index
     ///
-    /// 幂等守卫（D-A3）：该 revision 的 changelog 已存在则跳过并返回重放标记。
+    /// 幂等守卫：该 revision 的 changelog 已存在则跳过并返回重放标记。
     pub fn execute_txn_at_revision(
         &self,
         compares: &[crate::txn::TxnCompare],
@@ -1082,7 +1082,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                 &event.to_bytes(),
             )?;
 
-            // 5. 持久化 applied 状态（D-A4）
+            // 5. 持久化 applied 状态
             tx.insert(TABLE_META, META_LAST_APPLIED, &applied.to_bytes())?;
 
             Ok(TxnResult {
@@ -1300,7 +1300,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         }
     }
 
-    // ──── Lease 状态表（P0-B：raft 状态机内持久化） ────
+    // ──── Lease 状态表（raft 状态机内持久化） ────
 
     /// 读取 `/_lease/{id}` 记录
     pub fn get_lease_record(&self, lease_id: i64) -> Result<Option<LeaseRecord>> {
@@ -1312,7 +1312,7 @@ impl<B: StorageBackend> MvccStorage<B> {
 
     /// 列出全部持久化 Lease 记录（`/_lease/` 前缀），返回 `(lease_id, record)`。
     ///
-    /// 供 P0-B failover 重建使用：新 leader 从状态机读出全部 Lease
+    /// 供 failover 重建使用：新 leader 从状态机读出全部 Lease
     /// 重建内存 TTL 视图；损坏条目跳过并计数（由调用方决定日志级别）。
     pub fn list_lease_records(&self) -> Result<Vec<(i64, LeaseRecord)>> {
         let rows = self
@@ -1348,7 +1348,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         Ok(revision)
     }
 
-    /// 应用 LeaseOp（raft apply 路径）：revision ≡ log index（D-A2）
+    /// 应用 LeaseOp（raft apply 路径）：revision ≡ log index
     ///
     /// Grant/KeepAlive 写 `/_lease/{id}`；Revoke 删除记录并按 `KvMetadata.lease_id`
     /// 扫描删除绑定 Key。全部与 changelog + META_LAST_APPLIED 同事务原子完成。
@@ -1431,7 +1431,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
-    /// T5.7（R-MR-04）：per-Region 删除绑定到某 Lease 的全部 Key（raft apply 路径）
+    /// per-Region 删除绑定到某 Lease 的全部 Key（raft apply 路径）
     ///
     /// Multi-Raft 模式下由各 Region 的 raft 经 `Command::DeleteKeysByLease` 下发
     /// （region 0 的 `LeaseOp::Revoke` 只清全局租约表 `/_lease/{id}`，业务 Key 在
@@ -1479,7 +1479,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
-    /// 应用 AuthOp（raft apply 路径，P0-C.2）：revision ≡ log index（D-A2）
+    /// 应用 AuthOp（raft apply 路径）：revision ≡ log index
     ///
     /// 用户/角色/吊销登记写入 `/_sys/auth/` 前缀（原始 bincode，不经 Barrier
     /// 加密——auth 元数据非密文，与 Lease 记录同口径），与 changelog +
@@ -1648,7 +1648,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                     expires_at_unix,
                     is_refresh,
                 } => {
-                    // P2-07：会话落盘（键为 token 哈希，值不含明文 token）
+                    // 会话落盘（键为 token 哈希，值不含明文 token）
                     let key = [AUTH_SESSION_PREFIX, hash_hex.as_bytes()].concat();
                     let rec = AuthSessionRecord {
                         username: username.clone(),
@@ -1658,7 +1658,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                     tx.insert(TABLE_KV, &key, &rec.to_bytes()?)?;
                 }
                 AuthOp::ConsumeSession { hash_hex } => {
-                    // P2-07：会话消费（refresh 单次使用 / 登出 / 吊销）
+                    // 会话消费（refresh 单次使用 / 登出 / 吊销）
                     let key = [AUTH_SESSION_PREFIX, hash_hex.as_bytes()].concat();
                     tx.remove(TABLE_KV, &key)?;
                 }
@@ -1682,15 +1682,15 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
-    // ──── PD 全局 operator 队列（R-MR-08 / D1-a，docs §4.5；region 0 raft）────
+    // ──── PD 全局 operator 队列（/ docs region 0 raft）────
 
     /// apply PD 命令（region 0 raft 状态机路径）。
     ///
-    /// 幂等守卫（D-A3）：该 revision 已 apply（changelog 存在）→ 直接返回 replayed
+    /// 幂等守卫：该 revision 已 apply（changelog 存在）→ 直接返回 replayed
     /// （无副作用）。写路径与 `apply_auth_op` 同构：raw `TABLE_KV` 记录 + 空 changes
     /// 的 changelog 标记 + `META_LAST_APPLIED` 同一事务；不上 Watch、不产生用户
     /// 变更事件（队列为内部控制面记录）。所有判定只依赖持久状态（确定性，
-    /// 规格 A.4 约束 1）。
+    /// 约束 1）。
     pub fn apply_pd_op(
         &self,
         op: &crate::raft::type_config::PdOp,
@@ -1827,7 +1827,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
-    // ──── Compact（P1-01：raft 下发 compact revision，节点一致）────
+    // ──── Compact（raft 下发 compact revision，节点一致）────
 
     /// 读取已持久化的 compacted revision（`META_COMPACT_REVISION`）。
     ///
@@ -1847,9 +1847,9 @@ impl<B: StorageBackend> MvccStorage<B> {
     /// 应用 Compact：物理删除 `< revision` 的 changelog 条目与过期 tombstone，
     /// 并持久化 `META_COMPACT_REVISION`（与 `META_LAST_APPLIED` 同事务）。
     ///
-    /// 语义（P1-01 设计决策）：
+    /// 语义（设计决策）：
     /// - **确定性**：所有节点 apply 同一命令得到相同删除集合（删除条件只依赖
-    ///   revision 与持久化状态，不读墙钟/随机数，规格 A.4 约束 1）；
+    ///   revision 与持久化状态，不读墙钟/随机数，约束 1）；
     /// - **分片删除**：每批 `COMPACT_BATCH_SIZE` 条一个写事务，避免巨型事务；
     /// - **幂等**：`revision <= 已持久化 compacted_revision` 为 no-op（重启重放安全）；
     /// - **不得失败**：openraft 将 apply 错误视为致命，故 `revision > applied.index`
@@ -1878,7 +1878,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         let mut deleted_changelog = 0usize;
         let mut deleted_tombstones = 0usize;
 
-        // 分片删除：每批一个写事务（P1-01：单写事务分片删除）
+        // 分片删除：每批一个写事务（单写事务分片删除）
         loop {
             let mut batch_changelog = 0usize;
             let mut batch_tombstones = 0usize;
@@ -1952,7 +1952,7 @@ impl<B: StorageBackend> MvccStorage<B> {
     }
 
     /// 原始前缀扫描（不经 Barrier 解密）：供 `/_sys/auth/`、`/_lease/` 等
-    /// 内部元数据前缀的启动装载使用（P0-C.2）。
+    /// 内部元数据前缀的启动装载使用。
     pub fn list_raw_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         self.backend.read(|tx| {
             let rows = tx.iter_prefix(TABLE_KV, prefix)?;
@@ -1985,7 +1985,7 @@ impl<B: StorageBackend> MvccStorage<B> {
         })
     }
 
-    /// 严格读取 Changelog（P0-E.2）：损坏条目返回 Err（不再静默跳过）。
+    /// 严格读取 Changelog：损坏条目返回 Err（不再静默跳过）。
     ///
     /// Watch 历史回放使用此方法：损坏即中止回放并下发 `HistoryUnavailable`，
     /// 客户端不再收到静默缺洞。
@@ -2060,13 +2060,13 @@ impl<B: StorageBackend> ChangelogReader for MvccStorage<B> {
         &self,
         start_revision: Revision,
     ) -> std::result::Result<Vec<ChangeEvent>, String> {
-        // P0-E.2：严格读取，损坏条目报错（不静默跳过）
+        // 严格读取，损坏条目报错（不静默跳过）
         MvccStorage::read_changelog_entries_strict(self, start_revision)
             .map_err(|e| format!("changelog read error: {e}"))
     }
 
     fn compacted_revision(&self) -> std::result::Result<Revision, String> {
-        // P1-01：压缩水位（回放起点低于它时历史不可达）
+        // 压缩水位（回放起点低于它时历史不可达）
         MvccStorage::compacted_revision(self).map_err(|e| format!("compacted revision: {e}"))
     }
 }
@@ -2315,7 +2315,7 @@ mod tests {
         assert_eq!(storage.current_revision(), 42);
     }
 
-    // ──── R-SEC-01：静态加密接线（Barrier/Seal/Unseal） ────
+    // ──── 静态加密接线（Barrier/Seal/Unseal） ────
 
     #[test]
     fn test_barrier_encrypts_user_values_on_disk() {
@@ -2410,7 +2410,7 @@ mod tests {
         assert_eq!(raw.len(), 24, "internal records must stay plaintext");
     }
 
-    // ──── P0-A 新语义：revision ≡ log index + 幂等守卫 + applied 持久化 ────
+    // ──── 新语义：revision ≡ log index + 幂等守卫 + applied 持久化 ────
 
     #[test]
     fn test_put_at_revision_uses_log_index_as_revision() {
@@ -2471,7 +2471,7 @@ mod tests {
     #[test]
     fn test_delete_always_consumes_revision() {
         let (_dir, storage) = create_storage();
-        // D-A5：不存在的 Key 也消耗 revision 并写 changelog
+        // 不存在的 Key 也消耗 revision 并写 changelog
         let outcome = storage
             .delete_at_revision(b"missing", 5, AppliedLogId::standalone(5))
             .unwrap();
@@ -2561,7 +2561,7 @@ mod tests {
         assert_eq!(decoded.changes.len(), 1);
     }
 
-    // ──── P0-B Lease 状态表 ────
+    // ──── Lease 状态表 ────
 
     #[test]
     fn test_lease_op_grant_keepalive_revoke() {
@@ -3126,7 +3126,7 @@ mod tests {
         assert_eq!(storage.get(b"key").unwrap(), Some(b"new-val".to_vec()));
     }
 
-    // ──── P1-01 Compaction ────
+    // ──── Compaction ────
 
     #[test]
     fn test_apply_compact_deletes_changelog_below_revision() {
@@ -3273,7 +3273,7 @@ mod tests {
         assert_eq!(reopened.compacted_revision().unwrap(), 3);
     }
 
-    // ──── R-MR-08（D1-a）：PD 全局 operator 队列状态机（apply_pd_op）────
+    // ──── PD 全局 operator 队列状态机（apply_pd_op）────
 
     use crate::pd::operator::{Operator, OperatorStatus};
     use crate::raft::type_config::PdOp;

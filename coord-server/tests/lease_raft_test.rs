@@ -1,12 +1,8 @@
-// P0-B 验收测试（L2 进程内多节点 raft）：Lease 全链路 raft 化
+// 验收测试（L2 进程内多节点 raft）：Lease 全链路 raft 化
 //
-// 覆盖规格 B.7：
 // - lease_revoke 走 raft，三节点 `/_lease/` 与 KV 状态一致
 // - failover：新 leader 从状态机重建 Lease 表，到期 Lease 的绑定 key 被清理
 // - follower 上 grant/keepalive/revoke 被拒绝并返回 leader 提示
-//
-// 对应文档：`docs/production/11-architecture-redesign.md` 规格 B；
-// `docs/production/15-milestone-task-breakdown.md` P0-B.5。
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;

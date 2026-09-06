@@ -1,6 +1,6 @@
-// P0-C.8 验收套件：鉴权强制执行（auth_enforcement_test）
+// 验收套件：鉴权强制执行（auth_enforcement_test）
 //
-// 决策文档 §四 P0-C 验收标准：
+// §四 验收标准：
 // - 无 token 调 KV/Txn/Lease/Watch/Maintenance 返回 UNAUTHENTICATED；
 // - 低权限 token 越权返回 PERMISSION_DENIED；
 // - Authenticate 与健康检查匿名可访问；
@@ -29,7 +29,7 @@ use coord_proto::txn::TxnRequest;
 use coord_proto::watch::watch_client::WatchClient;
 use coord_proto::watch::WatchRequest;
 
-/// 找一个空闲端口（bind :0 后释放）
+/// 找一个空闲端口（bind:0 后释放）
 fn find_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
@@ -192,7 +192,7 @@ async fn test_auth_enforcement_full_matrix() {
         }
     }
 
-    // ─── 2. 匿名白名单：健康检查 + Authenticate 匿名可访问（规格 C.4.1）───
+    // ─── 2. 匿名白名单：健康检查 + Authenticate 匿名可访问───
     let mut health = tonic_health::pb::health_client::HealthClient::new(channel(&addr).await);
     health
         .check(tonic_health::pb::HealthCheckRequest {
@@ -537,7 +537,7 @@ async fn test_cct_revocation_via_bff() {
         .await;
     assert!(ok.is_ok(), "bob CCT should work before revocation: {ok:?}");
 
-    // 经 BFF revoke 端点吊销（P0-C.5：raft RevokeJti）
+    // 经 BFF revoke 端点吊销（raft RevokeJti）
     // 诊断：先验证 HTTP helper 与 BFF 端口可用
     let probe = http_request(
         grpc_port + 10,

@@ -191,12 +191,12 @@ pub struct CoordNode {
     pub raft: Option<Arc<CoordRaft>>,
     /// 本地 Raft Log 存储句柄（读路径一致性校验用，防陈旧读；集群模式下设置）
     pub raft_log_store: Option<LogStore>,
-    /// T2.4：Multi-Raft Region 路由/运行时管理。
+    /// Multi-Raft Region 路由/运行时管理。
     ///
     /// `Some` = 多 Region 模式：KV Put/Range/Delete/Txn 按 key 经
     /// `RegionManager::route_runtime` 路由到 per-region raft/mvcc（非 leader 返回
     /// RegionNotLeader + leader hint）。`None` = 单 Raft 模式（region 0 legacy 路径，
-    /// 使用本节点 `storage`/`raft`/`raft_log_store`，T2.6 字节级退化）。
+    /// 使用本节点 `storage`/`raft`/`raft_log_store`，字节级退化）。
     pub region_manager: Option<Arc<RegionManager>>,
     /// Lease 管理器（可选，Leader 节点持有）
     pub lease_manager: Option<Arc<LeaseManager>>,
@@ -206,32 +206,32 @@ pub struct CoordNode {
     idempotent_cache: RwLock<IdempotencyCache>,
     /// R-SVC-18：运行时资源限制（per-RPC 超时/规模上限/幂等参数）
     limits: RwLock<RuntimeLimits>,
-    /// 集群已知节点的 node_id → gRPC 地址（P0-D.1：Join 重定向用；best-effort）
+    /// 集群已知节点的 node_id → gRPC 地址（Join 重定向用；best-effort）
     node_grpc_addrs: RwLock<HashMap<u64, String>>,
-    /// 成员变更互斥（P0-D.3：单 pending change，并发变更返回 UNAVAILABLE）
+    /// 成员变更互斥（单 pending change，并发变更返回 UNAVAILABLE）
     member_change_lock: tokio::sync::Mutex<()>,
-    /// 磁盘水位只读闸（P1-02）：磁盘可用 < 5% 时写请求 RESOURCE_EXHAUSTED
+    /// 磁盘水位只读闸：磁盘可用 < 5% 时写请求 RESOURCE_EXHAUSTED
     disk_read_only: std::sync::atomic::AtomicBool,
-    /// 每 watcher 事件队列长度（P1-02 可配，默认 1024）
+    /// 每 watcher 事件队列长度（可配，默认 1024）
     watch_buffer: std::sync::atomic::AtomicUsize,
-    /// R-SEC-01：静态加密 Keyring（None = 未启用静态加密）
+    /// 静态加密 Keyring（None = 未启用静态加密）
     keyring: parking_lot::RwLock<Option<Arc<Keyring>>>,
-    /// R-SEC-01：持久化的密文 DEK（unseal 时重建 Keyring 用）
+    /// 持久化的密文 DEK（unseal 时重建 Keyring 用）
     encrypted_deks: parking_lot::RwLock<Vec<EncryptedDek>>,
-    /// R-SEC-01：root 密钥提供者（配置/环境变量/密钥文件；unseal 用）
-    /// R-SEC-01：root 密钥提供者（配置/环境变量/密钥文件；unseal 用）。
+    /// root 密钥提供者（配置/环境变量/密钥文件；unseal 用）
+    /// root 密钥提供者（配置/环境变量/密钥文件；unseal 用）。
     /// 由 `run_server` 在构造后（Arc 包装前）设置。
     pub root_key_provider: Option<Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>>,
 }
 
-/// T2.4：KV 请求解析出的执行目标（一个 Region，或 legacy 单 Raft）。
+/// KV 请求解析出的执行目标（一个 Region，或 legacy 单 Raft）。
 ///
 /// - region 模式（`region_manager` 为 Some）：按 key 路由到 RegionManager 装配的
 ///   RegionRuntime——per-region raft + 目录隔离 MVCC + 该 Region 的 LogStore
 ///   （读屏障幻影态终检需要，`RegionRuntime::raft_log_store` 与 `main.rs` 单 Raft
 ///   的 `node_raft_log` 同理）。
 /// - legacy 模式（manager 为 None）：region 0 目标，使用 CoordNode 自有
-///   storage/raft/raft_log_store（单 Raft / T2.6 兼容路径，行为字节级不变）。
+///   storage/raft/raft_log_store（单 Raft / 兼容路径，行为字节级不变）。
 struct KvTarget {
     /// 目标 Region（legacy 模式为 0）
     region_id: RegionId,
@@ -272,7 +272,7 @@ impl CoordNode {
         *self.limits.write() = limits;
     }
 
-    /// R-SEC-01：注入静态加密 Keyring 与持久化密文 DEK。
+    /// 注入静态加密 Keyring 与持久化密文 DEK。
     /// 由 `run_server` 在启动时调用（bootstrap/恢复/解封后）。
     pub fn install_keyring(&self, keyring: Arc<Keyring>, encrypted_deks: Vec<EncryptedDek>) {
         *self.keyring.write() = Some(keyring);
@@ -284,19 +284,19 @@ impl CoordNode {
         self.keyring.read().clone()
     }
 
-    /// 设置每 watcher 事件队列长度（P1-02，由配置层调用；P2-02 支持 SIGHUP 热更新，新订阅生效）
+    /// 设置每 watcher 事件队列长度（由配置层调用；支持 SIGHUP 热更新，新订阅生效）
     pub fn set_watch_buffer(&self, buffer: usize) {
         self.watch_buffer
             .store(buffer.max(16), std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// 设置磁盘只读闸（P1-02：磁盘水位监控任务调用）
+    /// 设置磁盘只读闸（磁盘水位监控任务调用）
     pub fn set_disk_read_only(&self, read_only: bool) {
         self.disk_read_only
             .store(read_only, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// 磁盘只读闸校验（P1-02）：写请求入口调用，可用 < 5% 时拒绝
+    /// 磁盘只读闸校验：写请求入口调用，可用 < 5% 时拒绝
     pub fn ensure_writable(&self) -> Result<(), tonic::Status> {
         if self
             .disk_read_only
@@ -309,19 +309,19 @@ impl CoordNode {
         Ok(())
     }
 
-    /// 注册/更新某节点的 gRPC 地址（P0-D.1）。
+    /// 注册/更新某节点的 gRPC 地址。
     pub fn register_grpc_addr(&self, node_id: u64, addr: &str) {
         self.node_grpc_addrs
             .write()
             .insert(node_id, addr.to_string());
     }
 
-    /// 查询已知的某节点 gRPC 地址（P0-D.1：leader 重定向）。
+    /// 查询已知的某节点 gRPC 地址（leader 重定向）。
     pub fn grpc_addr_of(&self, node_id: u64) -> Option<String> {
         self.node_grpc_addrs.read().get(&node_id).cloned()
     }
 
-    // ──── T2.4：Multi-Raft KV 路由 ────
+    // ──── Multi-Raft KV 路由 ────
 
     /// 将单个 key 解析为 KV 执行目标（Region 或 legacy 单 Raft）。
     ///
@@ -398,11 +398,11 @@ impl CoordNode {
         Ok(())
     }
 
-    /// T5.6（R-MR-03）：解析 Watch 目标的 dispatcher 与历史 reader（MVCC）。
+    /// 解析 Watch 目标的 dispatcher 与历史 reader（MVCC）。
     ///
     /// - legacy（无 region_manager）：节点级 dispatcher + 节点级 storage（行为不变）；
     /// - region 模式：按 watch key/前缀路由到所属 Region 的 per-Region dispatcher +
-    ///   该 Region 的 MVCC（per-Region revision 语义，见 `docs/multi-raft-limits.md` L13）。
+    ///   该 Region 的 MVCC（per-Region revision 语义，见 `` L13）。
     ///
     /// 跨 Region 显式拒绝（对齐 G1/G3/L11，宁可拒绝不可静默丢事件）：
     /// - 区间 `[key, range_end)`：`range_end` 越过所属 Region 边界 → 拒绝；
@@ -495,7 +495,7 @@ impl CoordNode {
         }
     }
 
-    /// T2.4：将某 Region 的 raft `client_write` 错误映射为 gRPC Status。
+    /// 将某 Region 的 raft `client_write` 错误映射为 gRPC Status。
     ///
     /// 与 legacy 版本相同的前向语义，但错误携带 Region 标识：`ForwardToLeader` →
     /// `Error::RegionNotLeader { region_id, leader_addr }`（经 [`map_core_error`]
@@ -519,7 +519,7 @@ impl CoordNode {
 
     /// R-SVC-08：写路径超时保护——失去 quorum 时快速失败而非无限挂起。
     /// R-SVC-18：超时从 `RuntimeLimits.write_timeout` 读取（配置可调，默认 5s）。
-    /// T2.4：`region_id` 用于非 0 Region 的错误映射（RegionNotLeader + hint）；
+    /// `region_id` 用于非 0 Region 的错误映射（RegionNotLeader + hint）；
     /// region 0 / legacy 走 [`Self::map_client_write_error`]，行为与现状一致。
     async fn client_write_with_timeout(
         &self,
@@ -546,7 +546,7 @@ impl CoordNode {
         }
     }
 
-    /// P1-07：领导权移交（非阻塞触发；收敛由调用方轮询 `current_leader`）。
+    /// 领导权移交（非阻塞触发；收敛由调用方轮询 `current_leader`）。
     pub async fn transfer_leadership(&self, target: u64) -> Result<(), String> {
         let raft = self
             .raft
@@ -558,7 +558,7 @@ impl CoordNode {
             .map_err(|e| format!("transfer_leader failed: {e}"))
     }
 
-    /// P1-07：挑选一个非自身的 voter 作为领导权移交目标（无可用目标返回 None）。
+    /// 挑选一个非自身的 voter 作为领导权移交目标（无可用目标返回 None）。
     pub async fn pick_transfer_target(&self) -> Option<u64> {
         let raft = self.raft.as_ref()?;
         let m = raft.metrics().borrow_watched().clone();
@@ -566,7 +566,7 @@ impl CoordNode {
         voters.into_iter().find(|id| *id != self.node_id)
     }
 
-    /// 尝试获取成员变更互斥锁（P0-D.3：非阻塞，占用中返回 None）。
+    /// 尝试获取成员变更互斥锁（非阻塞，占用中返回 None）。
     fn try_lock_member_change(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
         self.member_change_lock.try_lock().ok()
     }
@@ -578,7 +578,7 @@ impl CoordNode {
         }
     }
 
-    /// Lease 准入检查（P0-B B.4.1）：仅 leader 接受 grant/keepalive/revoke；
+    /// Lease 准入检查（B.4.1）：仅 leader 接受 grant/keepalive/revoke；
     /// 非 leader 返回 `UNAVAILABLE` 并携带 leader 提示。
     pub async fn ensure_lease_leader(&self) -> Result<(), tonic::Status> {
         if let Some(ref raft) = self.raft {
@@ -596,7 +596,7 @@ impl CoordNode {
     /// 启动 Lease 过期轮询循环（后台任务）。
     ///
     /// 每 200ms 调用 `LeaseManager::check_expired()`，对已过期的 Lease
-    /// 经 raft 下发 `LeaseOp::Revoke{delete_keys:true}`（P0-B：任何路径不得直写本地存储）。
+    /// 经 raft 下发 `LeaseOp::Revoke{delete_keys:true}`（任何路径不得直写本地存储）。
     ///
     /// 应在 server 启动后调用（Leader 独占；Follower 无 LeaseManager 则跳过）。
     pub fn start_lease_expiry_worker(self: &Arc<Self>) {
@@ -605,7 +605,7 @@ impl CoordNode {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
             loop {
                 interval.tick().await;
-                // P0-B B.4.2：过期检测仅 leader 执行（follower 上 LeaseManager 空转无意义，
+                // B.4.2：过期检测仅 leader 执行（follower 上 LeaseManager 空转无意义，
                 // 且 follower 经 raft propose 会被 openraft 拒绝）
                 if !node.is_raft_leader().await {
                     continue;
@@ -645,7 +645,7 @@ impl CoordNode {
         });
     }
 
-    /// T5.7（R-MR-04）：per-Region Lease 清理 worker（region 模式）。
+    /// per-Region Lease 清理 worker（region 模式）。
     ///
     /// region 0 状态机在 `LeaseOp::Revoke`（显式吊销或过期清理，apply 在**全部**
     /// 节点发生）后经 `rx` 广播 lease_id。本 worker 维护待清理集合
@@ -730,7 +730,7 @@ impl CoordNode {
         });
     }
 
-    /// 启动 Lease failover reconciler（P0-B B.4.4）
+    /// 启动 Lease failover reconciler（B.4.4）
     ///
     /// 每 500ms 检测 leader 身份；检测到本节点成为 leader（含启动即 leader 与
     /// 单节点模式）时，从状态机 `/_lease/` 记录重建 LeaseManager：
@@ -764,7 +764,7 @@ impl CoordNode {
         });
     }
 
-    /// 提交 Lease 命令（P0-B）：集群模式走 raft，单节点模式直接 apply
+    /// 提交 Lease 命令：集群模式走 raft，单节点模式直接 apply
     /// R-SVC-18：raft 提交带 `lease_timeout` 超时（此前无超时，quorum 丢失时无限挂起）
     async fn submit_lease_op(&self, op: LeaseOp) -> Result<u64, tonic::Status> {
         if let Some(ref raft) = self.raft {
@@ -843,13 +843,13 @@ impl CoordNode {
         );
     }
 
-    /// T2.4：对指定 raft / log_store 执行线性一致读屏障（region 0 legacy 与
+    /// 对指定 raft / log_store 执行线性一致读屏障（region 0 legacy 与
     /// per-region 共用；range/delete 等读路径统一经此方法）。
     ///
     /// 仅在 Raft 模式下生效（raft=None——单节点直写模式直接返回）。
     /// R-SVC-18：带 `read_timeout` 超时（此前无超时，leader 失联时读无限挂起）。
     ///
-    /// 陈旧读防御（§10.4「宁可失败也不返回过期值」，对应 Jepsen partition-halves /
+    /// 陈旧读防御（「宁可失败也不返回过期值」，对应 Jepsen partition-halves /
     /// partition-ring 复现的陈旧读异常）：
     /// ReadIndex 确认领导权后，再对本地状态机与提交前沿做一致性复核：
     ///   - 节点必须处于 `Leader` 状态（双保险：防止领导权切换窗口内以非 leader 身份
@@ -1023,7 +1023,7 @@ fn to_kv_proto(
     }
 }
 
-/// ADP §23.2：coord-core Error → tonic::Status 结构化映射。
+/// coord-core Error → tonic::Status 结构化映射。
 ///
 /// 只回传安全的业务信息（key、lease id、revision 等）；
 /// 内部细节（storage/raft/crypto）只进服务端日志，不回传客户端（脱敏）。
@@ -1124,7 +1124,7 @@ fn map_core_error(e: &coord_core::error::Error) -> tonic::Status {
     }
 }
 
-/// 将存储/raft 等内部错误映射为 gRPC Status（ADP §23.2）。
+/// 将存储/raft 等内部错误映射为 gRPC Status。
 ///
 /// - `coord_core::error::Error`：结构化映射（见 [`map_core_error`]）；
 /// - `std::io::Error`：按 ErrorKind 映射；
@@ -1167,7 +1167,7 @@ fn map_err<E: std::fmt::Display + 'static>(e: E) -> tonic::Status {
     tonic::Status::internal("internal error")
 }
 
-/// T5.6（R-MR-03）：计算「以 `prefix` 开头的全部 key」集合的最小上界字符串
+/// 计算「以 `prefix` 开头的全部 key」集合的最小上界字符串
 /// （字节字典序）。
 ///
 /// - `Some(upper)`：任一以 `prefix` 开头的 key K 都满足 `K < upper`，且不存在更小的
@@ -1184,7 +1184,7 @@ pub fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-// ──── AuthOp 提案器（P0-C.2：管理操作入 raft 日志）────
+// ──── AuthOp 提案器（管理操作入 raft 日志）────
 
 #[async_trait::async_trait]
 impl AuthOpProposer for CoordNode {
@@ -1220,14 +1220,14 @@ impl AuthOpProposer for CoordNode {
     }
 }
 
-// ──── Compact 执行（P1-01：raft 下发 compact revision，节点一致）────
+// ──── Compact 执行（raft 下发 compact revision，节点一致）────
 
 impl CoordNode {
     /// 执行压缩：raft 模式经 `client_write(Command::Compact)` 提案，
     /// 单节点模式直接本地 apply。
     ///
     /// 前置校验（由 RPC/调用层保证）：`revision <= current_revision`；
-    /// 未来 revision 由 RPC 层返回 `INVALID_ARGUMENT`（规格 13 §三）。
+    /// 未来 revision 由 RPC 层返回 `INVALID_ARGUMENT`。
     pub async fn compact_impl(&self, revision: u64) -> Result<u64, String> {
         if let Some(ref raft) = self.raft {
             let timeout = self.limits.read().compact_timeout;
@@ -1265,7 +1265,7 @@ pub fn apply_compact_local(node: &Arc<CoordNode>, revision: u64) -> Result<u64, 
     Ok(revision.min(new_rev))
 }
 
-// ──── Compact 提案器（P1-01：定时压缩经 raft 下发，节点一致）────
+// ──── Compact 提案器（定时压缩经 raft 下发，节点一致）────
 
 #[async_trait::async_trait]
 impl crate::storage::compaction::CompactProposer for CoordNode {
@@ -1289,7 +1289,7 @@ impl Kv for CoordNode {
         &self,
         request: tonic::Request<PutRequest>,
     ) -> Result<tonic::Response<PutResponse>, tonic::Status> {
-        // P1-02：磁盘水位只读闸
+        // 磁盘水位只读闸
         self.ensure_writable()?;
 
         let request_metadata = request.metadata().clone();
@@ -1314,8 +1314,8 @@ impl Kv for CoordNode {
             None
         };
 
-        // T2.4：按 key 解析执行目标 Region（legacy 单 Raft = region 0）。
-        // T5.7（R-MR-04）：region 模式允许 Lease 绑定——Lease 记录存 region 0 全局
+        // 按 key 解析执行目标 Region（legacy 单 Raft = region 0）。
+        // region 模式允许 Lease 绑定——Lease 记录存 region 0 全局
         // 租约表，绑定 Key 落在所属 Region MVCC（KvMetadata.lease_id）；到期/吊销
         // 经 region 0 Revoke 广播 + 各 Region leader 的 DeleteKeysByLease 清理。
         let target = self.kv_target_for_key(&req.key)?;
@@ -1336,7 +1336,7 @@ impl Kv for CoordNode {
         };
 
         // 通过 Raft 共识提交（集群模式），或直接写入存储（单节点模式）。
-        // T2.4：raft/storage 均取自目标 Region（per-region raft + 目录隔离 MVCC）。
+        // raft/storage 均取自目标 Region（per-region raft + 目录隔离 MVCC）。
         let revision: u64 = if let Some(raft) = &target.raft {
             let cmd = Command::Put {
                 key: req.key.clone(),
@@ -1408,13 +1408,13 @@ impl Kv for CoordNode {
             0
         };
 
-        // T2.4：按起始 key 解析目标 Region；多键范围 [key, range_end) 不得越过
+        // 按起始 key 解析目标 Region；多键范围 [key, range_end) 不得越过
         // Region 边界（跨 Region 范围 v1 不支持，显式拒绝）。
         let target = self.kv_target_for_key(&req.key)?;
         self.guard_range_in_target(&target, &req.key, &req.range_end)?;
 
-        // 线性一致性读：确认目标 Region Leader 身份后再读取（ADP §11.2）。
-        // T2.4：屏障按 Region 走各自 raft（含该 Region 的 LogStore 幻影态终检）。
+        // 线性一致性读：确认目标 Region Leader 身份后再读取。
+        // 屏障按 Region 走各自 raft（含该 Region 的 LogStore 幻影态终检）。
         self.ensure_linearizable_on(
             target.raft.as_deref(),
             target.raft_log_store.as_ref(),
@@ -1522,7 +1522,7 @@ impl Kv for CoordNode {
         &self,
         request: tonic::Request<DeleteRequest>,
     ) -> Result<tonic::Response<DeleteResponse>, tonic::Status> {
-        // P1-02：磁盘水位只读闸
+        // 磁盘水位只读闸
         self.ensure_writable()?;
 
         let req = request.into_inner();
@@ -1532,14 +1532,14 @@ impl Kv for CoordNode {
         // 否则为单键删除
         let is_range = !req.range_end.is_empty() && req.range_end != req.key;
 
-        // T2.4：按 key 解析目标 Region；范围删除不得越过 Region 边界。
+        // 按 key 解析目标 Region；范围删除不得越过 Region 边界。
         let target = self.kv_target_for_key(&req.key)?;
         if is_range {
             self.guard_range_in_target(&target, &req.key, &req.range_end)?;
         }
 
         // 线性一致性读：确保能看到最新数据后再扫描要删除的 Key。
-        // T2.4：屏障按目标 Region 的 raft/log_store 执行。
+        // 屏障按目标 Region 的 raft/log_store 执行。
         self.ensure_linearizable_on(
             target.raft.as_deref(),
             target.raft_log_store.as_ref(),
@@ -1742,7 +1742,7 @@ impl Txn for CoordNode {
         &self,
         request: tonic::Request<TxnRequest>,
     ) -> Result<tonic::Response<TxnResponse>, tonic::Status> {
-        // P1-02：磁盘水位只读闸
+        // 磁盘水位只读闸
         self.ensure_writable()?;
 
         let request_metadata = request.metadata().clone();
@@ -1803,7 +1803,7 @@ impl Txn for CoordNode {
             }
         }
 
-        // T2.4：整个 Txn 是单 Region 原子单元——所有 compare/op 引用的 key 必须落在
+        // 整个 Txn 是单 Region 原子单元——所有 compare/op 引用的 key 必须落在
         // 同一 Region。先取第一个引用的 key 路由出目标，再逐一校验同区（key 越界 /
         // 范围越界 → INVALID_ARGUMENT）。
         let first_key: Option<&[u8]> = compares
@@ -1845,11 +1845,11 @@ impl Txn for CoordNode {
             }
         }
         // region 模式：Txn 内 Put（无论 success 还是 failure 分支）允许绑定 Lease
-        // （T5.7/R-MR-04；Lease 记录存 region 0，绑定 Key 落所属 Region，清理见
+        // （Lease 记录存 region 0，绑定 Key 落所属 Region，清理见
         // region raft DeleteKeysByLease）。
 
         // 通过 Raft 共识提交（集群模式），或直接执行（单节点模式）。
-        // T2.4：raft/storage 均取自目标 Region（compare+execute 在单 Region 状态机原子执行）。
+        // raft/storage 均取自目标 Region（compare+execute 在单 Region 状态机原子执行）。
         let result = if let Some(raft) = &target.raft {
             let cmd = Command::Txn {
                 compares: compares.clone(),
@@ -1931,11 +1931,11 @@ impl Lease for CoordNode {
         &self,
         request: tonic::Request<LeaseGrantRequest>,
     ) -> Result<tonic::Response<LeaseGrantResponse>, tonic::Status> {
-        // P1-02：磁盘水位只读闸
+        // 磁盘水位只读闸
         self.ensure_writable()?;
 
         let req = request.into_inner();
-        // P0-B B.4.1：仅 leader 接受（含 leader 提示）
+        // B.4.1：仅 leader 接受（含 leader 提示）
         self.ensure_lease_leader().await?;
         let lease_mgr = self
             .lease_manager
@@ -1948,7 +1948,7 @@ impl Lease for CoordNode {
             .await
             .map_err(map_err)?;
 
-        // P0-B：Grant 入 raft 日志（状态机持久化 `/_lease/{id}`）
+        // Grant 入 raft 日志（状态机持久化 `/_lease/{id}`）
         let deadline_wall_ms = crate::lease::wall_clock_now_ms() + req.ttl * 1000;
         let op = LeaseOp::Grant {
             id,
@@ -1972,18 +1972,18 @@ impl Lease for CoordNode {
         &self,
         request: tonic::Request<LeaseRevokeRequest>,
     ) -> Result<tonic::Response<LeaseRevokeResponse>, tonic::Status> {
-        // P1-02：磁盘水位只读闸
+        // 磁盘水位只读闸
         self.ensure_writable()?;
 
         let req = request.into_inner();
-        // P0-B B.4.1：仅 leader 接受（含 leader 提示）
+        // B.4.1：仅 leader 接受（含 leader 提示）
         self.ensure_lease_leader().await?;
         let lease_mgr = self
             .lease_manager
             .as_ref()
             .ok_or_else(|| tonic::Status::unavailable("lease manager not available"))?;
 
-        // P0-B：Revoke 走 raft（apply 内按 KvMetadata.lease_id 索引删除绑定 Key），
+        // Revoke 走 raft（apply 内按 KvMetadata.lease_id 索引删除绑定 Key），
         // 禁止任何直写本地存储路径。
         let op = LeaseOp::Revoke {
             id: req.id,
@@ -2016,7 +2016,7 @@ impl Lease for CoordNode {
         // 后台任务：持续接收客户端的 KeepAlive 请求并续约
         tokio::spawn(async move {
             while let Ok(Some(req)) = stream.message().await {
-                // P0-B B.4.1：leader 转移后停止服务（客户端重连新 leader）
+                // B.4.1：leader 转移后停止服务（客户端重连新 leader）
                 let is_leader = match raft {
                     Some(ref raft) => raft.current_leader().await == Some(node_id),
                     None => true,
@@ -2049,7 +2049,7 @@ impl Lease for CoordNode {
                     deadline_wall_ms,
                 };
 
-                // P0-B：KeepAlive 入 raft 日志（推进 keepalive_revision）
+                // KeepAlive 入 raft 日志（推进 keepalive_revision）
                 let raft_result = if let Some(ref raft) = raft {
                     let cmd = Command::Lease(op);
                     raft.client_write(cmd).await.map(|_| ()).map_err(|e| {
@@ -2064,7 +2064,7 @@ impl Lease for CoordNode {
 
                 match raft_result {
                     Ok(_) => {
-                        // P0-B B.4.3：响应携带服务端计算的剩余 TTL（非配置 TTL）
+                        // B.4.3：响应携带服务端计算的剩余 TTL（非配置 TTL）
                         let remaining = match storage.get_lease_record(req.id) {
                             Ok(Some(record)) => crate::lease::remaining_ttl_from_deadline(
                                 record.deadline_wall_ms,
@@ -2138,7 +2138,7 @@ impl Watch for CoordNode {
             }
         };
 
-        // T5.6（R-MR-03）：解析 Watch 目标——legacy 用节点级 dispatcher + storage；
+        // 解析 Watch 目标——legacy 用节点级 dispatcher + storage；
         // region 模式路由到所属 Region 的 per-Region dispatcher + MVCC（per-Region
         // revision 语义）；跨 Region 区间/前缀在此显式拒绝（resolve_watch_target）。
         let (dispatcher, target_mvcc) =
@@ -2150,7 +2150,7 @@ impl Watch for CoordNode {
             start_revision: create_req.start_revision as u64,
         };
 
-        // P0-E.3：先注册取水位 R0（current_revision；region 模式 = 该 Region 的
+        // 先注册取水位 R0（current_revision；region 模式 = 该 Region 的
         //        revision），回放 [start, R0]，实时从 R0+1 续并按 revision 去重。
         let watermark_rev = target_mvcc.current_revision();
 
@@ -2171,7 +2171,7 @@ impl Watch for CoordNode {
         let range_end = create_req.range_end;
 
         tokio::spawn(async move {
-            // 如果指定了 start_revision > 0，先回放历史事件（止于水位，P0-E.3）
+            // 如果指定了 start_revision > 0，先回放历史事件（止于水位）
             if start_rev > 0 {
                 let dispatcher_for_replay = Arc::clone(&dispatcher_ref);
                 let (history_tx, mut history_rx) = mpsc::channel::<crate::watch::WatchEvent>(256);
@@ -2208,7 +2208,7 @@ impl Watch for CoordNode {
                     }
                     Ok(Err(e)) => {
                         tracing::warn!(watch_id, "watch history replay failed: {e}");
-                        // P0-E.2：损坏/不可用 → HistoryUnavailable 事件通知客户端
+                        // 损坏/不可用 → HistoryUnavailable 事件通知客户端
                         let resp = WatchResponse {
                             watch_id: watch_id as i64,
                             events: vec![WatchEvent {
@@ -2228,7 +2228,7 @@ impl Watch for CoordNode {
                 }
             }
 
-            // 实时事件循环（P0-E.1/E.3：溢出合成 + revision 去重）
+            // 实时事件循环（溢出合成 + revision 去重）
             loop {
                 // 溢出标志：满时置位 → 合成 BufferOverflow（必达）
                 if dispatcher_ref.take_overflow(watch_id) {
@@ -2249,7 +2249,7 @@ impl Watch for CoordNode {
 
                 match event_rx.recv().await {
                     Some(event) => {
-                        // P0-E.3：去重——仅投递水位之后的实时事件（回放已覆盖 ≤ 水位）
+                        // 去重——仅投递水位之后的实时事件（回放已覆盖 ≤ 水位）
                         if event
                             .events
                             .iter()
@@ -2336,7 +2336,7 @@ impl Maintenance for CoordNode {
         &self,
         _request: tonic::Request<SealRequest>,
     ) -> Result<tonic::Response<SealResponse>, tonic::Status> {
-        // R-SEC-01：接线真实 Seal（此前为 unimplemented stub）
+        // 接线真实 Seal（此前为 unimplemented stub）
         let keyring = self.keyring.read().clone().ok_or_else(|| {
             tonic::Status::failed_precondition("static encryption is not enabled on this node")
         })?;
@@ -2349,7 +2349,7 @@ impl Maintenance for CoordNode {
         &self,
         request: tonic::Request<UnsealRequest>,
     ) -> Result<tonic::Response<UnsealResponse>, tonic::Status> {
-        // R-SEC-01：接线真实 Unseal（此前为 unimplemented stub）。
+        // 接线真实 Unseal（此前为 unimplemented stub）。
         // 优先使用 Shamir 分片；其次使用 root 密钥提供者（配置/环境变量/密钥文件）。
         if !self.keyring.read().as_ref().is_some_and(|k| k.is_sealed()) {
             return Err(tonic::Status::failed_precondition(
@@ -2426,7 +2426,7 @@ impl Maintenance for CoordNode {
             (0i64, 0u64, String::new())
         };
 
-        // R-SEC-01：seal_status 返回真实状态（此前硬编码 "unsealed"）
+        // seal_status 返回真实状态（此前硬编码 "unsealed"）
         let seal_status = match self.keyring.read().as_ref() {
             Some(k) if k.is_sealed() => "sealed".to_string(),
             Some(_) => "unsealed".to_string(),
@@ -2446,10 +2446,10 @@ impl Maintenance for CoordNode {
         &self,
         request: tonic::Request<SnapshotRequest>,
     ) -> Result<tonic::Response<Self::SnapshotStream>, tonic::Status> {
-        // P1-08：流式快照导出（在线备份）。从本地状态机导出（任何节点可服务，
+        // 流式快照导出（在线备份）。从本地状态机导出（任何节点可服务，
         // 运维建议从 leader 或已追平 follower 拉取；数据为 v2 格式密文直传，
         // 不经过 Barrier）。首块携带 last_included_index/term，客户端按块拼接。
-        // T5.8（R-MR-05）：region_id > 0 时导出对应 Region（region ≥1 的目录级
+        // region_id > 0 时导出对应 Region（region ≥1 的目录级
         // 隔离 MVCC）——region 0 / 缺省（0）= legacy 单 Raft 或 system raft。
         let region_id = request.into_inner().region_id;
         let target_mvcc: Arc<MvccStorage<RedbBackend>> = if region_id > 0 {
@@ -2504,18 +2504,18 @@ impl Maintenance for CoordNode {
         Ok(tonic::Response::new(ReceiverStream::new(rx)))
     }
 
-    // ──── Compaction（P1-01）────
+    // ──── Compaction────
 
     async fn compact(
         &self,
         request: tonic::Request<CompactRequest>,
     ) -> Result<tonic::Response<CompactResponse>, tonic::Status> {
-        // P1-02：磁盘水位只读闸（compact 虽删除数据但需写入 raft 日志）
+        // 磁盘水位只读闸（compact 虽删除数据但需写入 raft 日志）
         self.ensure_writable()?;
 
         let req = request.into_inner();
 
-        // 仅 leader 接受（非 leader 返回 UNAVAILABLE + leader 提示，规格 13 §三）
+        // 仅 leader 接受（非 leader 返回 UNAVAILABLE + leader 提示）
         if let Some(ref raft) = self.raft {
             let leader = raft.current_leader().await;
             if leader != Some(self.node_id) {
@@ -2565,18 +2565,18 @@ impl Maintenance for CoordNode {
             .as_ref()
             .ok_or_else(|| tonic::Status::failed_precondition("not a raft node"))?;
 
-        // P0-D.3：变更串行化 —— 集群级互斥，并发变更返回 UNAVAILABLE
+        // 变更串行化 —— 集群级互斥，并发变更返回 UNAVAILABLE
         let _guard = self.try_lock_member_change().ok_or_else(|| {
             tonic::Status::unavailable("another membership change is in progress")
         })?;
 
-        // Step 1: Add as learner（blocking=true 等待复制追平，规格 D.2.1）
+        // Step 1: Add as learner（blocking=true 等待复制追平）
         let node = crate::raft::new_basic_node(&req.raft_addr);
         raft.add_learner(req.node_id, node, true)
             .await
             .map_err(|e| tonic::Status::internal(format!("add_learner failed: {e}")))?;
 
-        // 注册 gRPC 地址（P0-D.1：leader 重定向需要）
+        // 注册 gRPC 地址（leader 重定向需要）
         self.register_grpc_addr(req.node_id, &req.grpc_addr);
 
         // Step 2: Promote to voter
@@ -2609,7 +2609,7 @@ impl Maintenance for CoordNode {
             tonic::Status::unavailable("another membership change is in progress")
         })?;
 
-        // P1-07 / D.2.4：remove 目标是 leader。
+        // / D.2.4：remove 目标是 leader。
         // 设计决策（见 evidence/m2.md 偏差记录）：openraft 0.10 支持 leader
         // 自移除 —— change_membership(RemoveVoters) 经 joint→uniform 配置提交，
         // 新配置提交后旧 leader 自动退位、剩余 quorum 继续服务。若先显式
@@ -2675,7 +2675,7 @@ impl Maintenance for CoordNode {
             .as_ref()
             .ok_or_else(|| tonic::Status::failed_precondition("not a raft node"))?;
 
-        // P0-D.1：非 leader 返回 leader 重定向（客户端重试到 leader）。
+        // 非 leader 返回 leader 重定向（客户端重试到 leader）。
         // 注：未初始化/未加入的节点 current_leader 为 None，同样重定向
         // （重定向到已知的其它节点；绝不能在本节点自调 add_learner）。
         let leader = raft.current_leader().await;
@@ -2701,7 +2701,7 @@ impl Maintenance for CoordNode {
             tonic::Status::unavailable("another membership change is in progress")
         })?;
 
-        // add_learner(blocking=true)：等待复制追平（规格 D.2.1），再晋升 voter
+        // add_learner(blocking=true)：等待复制追平，再晋升 voter
         let node = crate::raft::new_basic_node(&req.raft_addr);
         raft.add_learner(req.node_id, node, true)
             .await
@@ -2878,7 +2878,7 @@ mod tests {
         assert_eq!(status.message(), "storage error");
     }
 
-    // ──── T5.10：EpochStale 映射（此前因 check_epoch 无生产调用方而不可达）────
+    // ──── EpochStale 映射（此前因 check_epoch 无生产调用方而不可达）────
 
     #[test]
     fn test_map_err_epoch_stale_unavailable() {
@@ -3140,7 +3140,7 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::Internal);
     }
 
-    // ──── P1-02 磁盘只读闸 ────
+    // ──── 磁盘只读闸 ────
 
     #[test]
     fn test_disk_read_only_gate_rejects_writes() {

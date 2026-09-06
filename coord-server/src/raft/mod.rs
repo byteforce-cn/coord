@@ -7,11 +7,11 @@
 // - network:         RaftNetworkFactory + RaftNetwork 实现（Tonic gRPC）
 // - region:          Multi-Raft Region 管理器（RegionHandle + RegionManager）
 //
-// P1-06 openraft 类型隔离边界：openraft 仍为 alpha（0.10.0-alpha.34，版本
-// 精确锁定见 `docs/production/16-openraft-governance.md`）。`openraft::` 与
+// openraft 类型隔离边界：openraft 仍为 alpha（0.10.0-alpha.34，版本
+// 精确锁定见根 Cargo.toml 依赖）。`openraft::` 与
 // `openraft_multi::` 路径只允许出现在本 crate 的 `raft/` 模块内部；其余模块与
 // `coord` CLI、测试一律经本文件提供的别名与构造函数使用。升级 openraft 版本时，
-// 编译缺口应只出现在本目录（详见 ADR §升级演练）。
+// 编译缺口应只出现在本目录。
 
 pub mod log_store;
 pub mod network;
@@ -56,7 +56,7 @@ pub struct RaftTuning {
 
 /// R-RFT-19：将调优参数应用到 RaftConfig（None 字段保持 openraft 默认值）。
 ///
-/// 放在本模块内以维持 P1-06 的 openraft 类型隔离边界（CLI 层不直接引用
+/// 放在本模块内以维持 openraft 类型隔离边界（CLI 层不直接引用
 /// openraft 路径）。
 pub fn apply_tuning(config: &mut RaftConfig, tuning: &RaftTuning) {
     if let Some(v) = tuning.heartbeat_interval_ms {
@@ -90,10 +90,10 @@ pub type ChangeMembers = openraft::ChangeMembers<u64, RaftNode>;
 ///
 /// 0.10.0-alpha.34 起 `RaftStateMachine::SnapshotData` 与 `RaftNetworkV2::SnapshotData`
 /// 必须为同一类型（`Raft::new` 要求 `NetSnapshot::SnapshotData ==
-/// RaftStateMachine::SnapshotData`），此处统一收敛（P1-06 门面）。
+/// RaftStateMachine::SnapshotData`），此处统一收敛。
 pub type RaftSnapshotData = std::io::Cursor<Vec<u8>>;
 
-// P1-06：openraft 类型面（仅 re-export 本目录/测试实际需要的少数名字，
+// openraft 类型面（仅 re-export 本目录/测试实际需要的少数名字，
 // 名单有意识维护，随升级演练更新）
 pub use openraft::impls::leader_id_adv::LeaderId;
 pub use openraft::rt::WatchReceiver;
@@ -102,22 +102,22 @@ pub use openraft::type_config::alias::{LogIdOf, StoredMembershipOf};
 pub use openraft::Membership;
 pub use openraft::ReadPolicy;
 
-/// 构造集群节点描述（P1-06 门面）
+/// 构造集群节点描述
 pub fn new_basic_node(addr: &str) -> RaftNode {
     RaftNode::new(addr)
 }
 
-/// 构造"添加 Voter"成员变更（P1-06 门面）
+/// 构造"添加 Voter"成员变更
 pub fn add_voter_ids(ids: BTreeSet<u64>) -> ChangeMembers {
     openraft::ChangeMembers::AddVoterIds(ids)
 }
 
-/// 构造"移除 Voter"成员变更（P1-06 门面）
+/// 构造"移除 Voter"成员变更
 pub fn remove_voter_ids(ids: BTreeSet<u64>) -> ChangeMembers {
     openraft::ChangeMembers::RemoveVoters(ids)
 }
 
-/// 构造 Raft 实例（P1-06 门面：`openraft::Raft::new` 的泛型参数收敛于此）
+/// 构造 Raft 实例（`openraft::Raft::new` 的泛型参数收敛于此）
 pub async fn new_raft<N, LS, SM>(
     node_id: u64,
     config: Arc<RaftConfig>,

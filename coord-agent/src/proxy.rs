@@ -5,7 +5,7 @@
 // B2 (GREEN): 通过 AgentInner 将请求转发到真实 Server 集群。
 // B4 (GREEN): Watch Fan-out — 相同 prefix 的多个订阅者共享一条 Server Watch 流。
 //
-// 参见 docs/client-agent-architecture.md §4.3。
+// 参见。
 
 use std::sync::Arc;
 
@@ -707,7 +707,7 @@ impl Maintenance for MaintenanceProxy {
         &self,
         _request: tonic::Request<CompactRequest>,
     ) -> Result<tonic::Response<CompactResponse>, tonic::Status> {
-        // P1-01：压缩由运维经 server 直连的 Maintenance::Compact 执行；
+        // 压缩由运维经 server 直连的 Maintenance::Compact 执行；
         // agent 代理层不转发（集群管理不属 agent 面）
         Err(tonic::Status::unimplemented(
             "compact not available via agent proxy",
@@ -727,7 +727,7 @@ impl Maintenance for MaintenanceProxy {
         &self,
         _request: tonic::Request<JoinRequest>,
     ) -> Result<tonic::Response<JoinResponse>, tonic::Status> {
-        // P0-D.1：agent 代理层不提供 Join（集群管理由 server 直连）
+        // agent 代理层不提供 Join（集群管理由 server 直连）
         Err(tonic::Status::unimplemented(
             "join not available via agent proxy",
         ))

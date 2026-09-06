@@ -1,6 +1,6 @@
 // TDD: coord CLI agent 子命令测试
 //
-// Phase A3 — 验证 `coord agent` 子命令能被 clap 正确解析。
+// — 验证 `coord agent` 子命令能被 clap 正确解析。
 
 use clap::Parser;
 

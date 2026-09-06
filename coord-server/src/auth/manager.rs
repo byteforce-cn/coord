@@ -1,4 +1,4 @@
-// Auth Manager — User/Role/Permission management with RBAC (ADP §14)
+// Auth Manager — User/Role/Permission management with RBAC
 //
 // Manages:
 // - Users (name, password hash)
@@ -6,7 +6,7 @@
 // - User-Role assignments
 // - Auth enable/disable state
 //
-// 密码哈希（P0-C.6）：新密码一律 Argon2id（PHC 字符串）；遗留 SHA256 哈希首次
+// 密码哈希：新密码一律 Argon2id（PHC 字符串）；遗留 SHA256 哈希首次
 // 登录成功时透明迁移。
 // Permissions control Read/Write/ReadWrite on Key prefix ranges.
 
@@ -89,13 +89,13 @@ pub struct Role {
     pub name: String,
     /// Legacy key-prefix permissions (deprecated, kept for backward compat)
     pub permissions: Vec<Permission>,
-    /// Capability-based grants (Phase 2.4)
+    /// Capability-based grants
     pub capability_grants: Vec<CapabilityGrant>,
     /// Whether this role is high-sensitivity (forces server lookup every request)
     pub high_sensitive: bool,
 }
 impl Role {
-    /// 转换为持久化记录（P0-C.2）。
+    /// 转换为持久化记录。
     pub fn to_record(&self) -> AuthRoleRecord {
         AuthRoleRecord {
             name: self.name.clone(),
@@ -124,7 +124,7 @@ impl Role {
         }
     }
 
-    /// 从持久化记录重建（P0-C.2）。
+    /// 从持久化记录重建。
     pub fn from_record(rec: AuthRoleRecord) -> Self {
         Self {
             name: rec.name,
@@ -175,21 +175,21 @@ pub struct AuthManager {
     roles: Arc<RwLock<HashMap<String, Role>>>,
 }
 
-/// 引导管理员角色名：该角色在服务端能力判定中全能力放行（P0-C.4）。
+/// 引导管理员角色名：该角色在服务端能力判定中全能力放行。
 pub const ROOT_ROLE: &str = "root";
 
-// ──── 持久化记录（P0-C.2：`/_sys/auth/` 前缀，bincode 序列化）────
+// ──── 持久化记录（`/_sys/auth/` 前缀，bincode 序列化）────
 
 /// 用户条目存储前缀 `/_sys/auth/user/{name}`
 pub const AUTH_USER_PREFIX: &[u8] = b"/_sys/auth/user/";
 /// 角色条目存储前缀 `/_sys/auth/role/{role}`
 pub const AUTH_ROLE_PREFIX: &[u8] = b"/_sys/auth/role/";
-/// 吊销登记存储前缀 `/_sys/auth/revoked/{jti}`（P0-C.5）
+/// 吊销登记存储前缀 `/_sys/auth/revoked/{jti}`
 pub const AUTH_REVOKED_PREFIX: &[u8] = b"/_sys/auth/revoked/";
-/// 会话落盘存储前缀 `/_sys/auth/sessions/{hash_hex}`（P2-07）
+/// 会话落盘存储前缀 `/_sys/auth/sessions/{hash_hex}`
 pub const AUTH_SESSION_PREFIX: &[u8] = b"/_sys/auth/sessions/";
 
-/// P2-07：持久化的会话条目（token 明文不入盘，仅存 SHA256 hex 为键）
+/// 持久化的会话条目（token 明文不入盘，仅存 SHA256 hex 为键）
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct AuthSessionRecord {
     pub username: String,
@@ -287,7 +287,7 @@ impl AuthManager {
     /// Create a new AuthManager (auth disabled by default).
     ///
     /// 创建 root/root 默认用户（**仅限 dev 模式**；server 模式必须用
-    /// [`AuthManager::new_empty`] + 强制 root 密码，见规格 C.4.8）。
+    /// [`AuthManager::new_empty`] + 强制 root 密码）。
     pub fn new() -> Self {
         let manager = Self::new_empty();
 
@@ -419,7 +419,7 @@ impl AuthManager {
 
     /// Authenticate a user with password.
     ///
-    /// 遗留 SHA256 哈希验证成功后透明升级为 Argon2id（P0-C.6，F5/F10）。
+    /// 遗留 SHA256 哈希验证成功后透明升级为 Argon2id。
     pub fn authenticate(&self, name: &str, password: &str) -> Result<()> {
         // 先读校验
         let (stored, is_legacy, valid) = {
@@ -448,7 +448,7 @@ impl AuthManager {
         Ok(())
     }
 
-    // ──── 服务端能力判定（P0-C.4：删除"有任意 role 即放行"兜底）────
+    // ──── 服务端能力判定（删除"有任意 role 即放行"兜底）────
 
     /// 按用户角色判定服务端能力（第二道防线，取代 `!roles.is_empty()` 兜底）。
     ///
@@ -513,7 +513,7 @@ impl AuthManager {
         false
     }
 
-    // ──── P0-C.2：apply 派生视图更新与启动装载 ────
+    // ──── apply 派生视图更新与启动装载 ────
 
     /// apply 后同步内存缓存视图（`AuthManager` 不再是权威数据源）。
     pub fn apply_auth_op_to_view(&self, op: &crate::raft::type_config::AuthOp) {
@@ -601,7 +601,7 @@ impl AuthManager {
                 // 吊销登记由 RevocationStore 处理（state_machine apply 钩子）
             }
             AuthOp::IssueSession { .. } | AuthOp::ConsumeSession { .. } => {
-                // P2-07：会话表由 TokenManager 视图处理（state_machine apply 钩子）
+                // 会话表由 TokenManager 视图处理（state_machine apply 钩子）
             }
         }
     }
@@ -612,7 +612,7 @@ impl AuthManager {
     /// 无任何持久化条目（首次启动）时保持现有内存状态（含刚创建的 root）。
     pub fn load_from_entries(&self, entries: Vec<(Vec<u8>, Vec<u8>)>) {
         if entries.is_empty() {
-            // 首次启动：无持久化鉴权状态，保留内存中刚创建的 root（P0-C.2）
+            // 首次启动：无持久化鉴权状态，保留内存中刚创建的 root
             return;
         }
         let root_role = self.roles.read().get(ROOT_ROLE).cloned();
@@ -748,7 +748,7 @@ impl AuthManager {
         self.roles.read().values().cloned().collect()
     }
 
-    // ──── Capability Grant management (Phase 2.4) ────
+    // ──── Capability Grant management ────
 
     /// Grant a capability to a role.
     pub fn role_grant_capability(
@@ -918,12 +918,12 @@ impl AuthManager {
     }
 }
 
-// ──── Password hashing（P0-C.6：Argon2id + 遗留 SHA256 迁移）────
+// ──── Password hashing（Argon2id + 遗留 SHA256 迁移）────
 
 /// Argon2id PHC 字符串前缀（用于区分遗留 SHA256 摘要）
 pub const ARGON2ID_PREFIX: &str = "$argon2id$";
 
-/// Argon2id 密码哈希（P0-C.6）；pub 供 AuthService 构造 AuthOp 使用。
+/// Argon2id 密码哈希；pub 供 AuthService 构造 AuthOp 使用。
 pub fn hash_password_argon2id(password: &str) -> std::result::Result<Vec<u8>, String> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
@@ -982,7 +982,7 @@ mod tests {
         assert!(mgr.authenticate("bob", "wrong").is_err());
     }
 
-    // ──── P0-C.6：Argon2id 与遗留迁移 ────
+    // ──── Argon2id 与遗留迁移 ────
 
     #[test]
     fn test_user_add_uses_argon2id() {

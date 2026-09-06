@@ -8,9 +8,7 @@
 // - interceptor: Auth interceptor for all gRPC requests
 // - bootstrap: Agent bootstrap token mechanism
 // - circuit_breaker: Auth circuit breaker + Prometheus metrics
-// - rate_limiter: IP-based rate limiting for login endpoint (Phase 3.6)
-//
-// See docs/capability-auth-implementation.md §3, §4, §6.
+// - rate_limiter: IP-based rate limiting for login endpoint
 
 pub mod bootstrap;
 pub mod circuit_breaker;

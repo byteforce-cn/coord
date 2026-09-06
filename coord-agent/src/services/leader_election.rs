@@ -7,8 +7,6 @@
 // - 封装选举逻辑，提供角色变化回调
 // - 支持单 Leader / 多 Leader 分组选举
 // - Leader 持有 Lease，Follower Watch 等待
-//
-// 参见 docs/client-agent-architecture-v3.md §5.8。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

@@ -1,7 +1,7 @@
 // BFF 静态资源服务
 //
 // 使用 rust-embed 在编译时将前端 dist/ 嵌入二进制。
-// 职责（ADP/UI 开发文档 §3.2/§7.2）：
+// 职责：
 // 1. 静态资源服务 — 嵌入的 JS/CSS/图片，含缓存头
 // 2. SPA Fallback — 对非 /api 路径返回 index.html
 

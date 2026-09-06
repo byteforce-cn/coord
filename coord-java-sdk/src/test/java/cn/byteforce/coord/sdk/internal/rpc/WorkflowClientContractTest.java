@@ -26,7 +26,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * ISSUE-010 契约测试 —— 验证 Java SDK 与 coord 契约对齐（业务方为 Java）。
+ * 契约测试 —— 验证 Java SDK 与 coord 契约对齐（业务方为 Java）。
  *
  * <p>针对 in-process stub server 验证：
  * <ul>

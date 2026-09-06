@@ -1,9 +1,7 @@
-// HMAC-SHA256 Performance Benchmark (Phase 0.2)
+// HMAC-SHA256 Performance Benchmark
 //
 // Validates that CCT token signing + verification meets the < 1ms/req
-// performance target specified in the design doc.
-//
-// See docs/capability-auth-implementation.md §0.2, §4.4.
+// performance target.
 
 #[cfg(test)]
 mod tests {
@@ -27,7 +25,7 @@ mod tests {
         }
     }
 
-    // ──── Phase 0.2: Encode benchmark ────
+    // ──── Encode benchmark ────
 
     #[test]
     fn test_cct_encode_performance_target() {
@@ -57,7 +55,7 @@ mod tests {
         );
     }
 
-    // ──── Phase 0.2: Decode + verify benchmark ────
+    // ──── Decode + verify benchmark ────
 
     #[test]
     fn test_cct_decode_performance_target() {
@@ -90,7 +88,7 @@ mod tests {
         );
     }
 
-    // ──── Phase 0.2: Combined encode-decode roundtrip ────
+    // ──── Combined encode-decode roundtrip ────
 
     #[test]
     fn test_cct_roundtrip_performance_target() {
@@ -117,7 +115,7 @@ mod tests {
         );
     }
 
-    // ──── Phase 0.2: Token with multiple roles ────
+    // ──── Token with multiple roles ────
 
     #[test]
     fn test_cct_with_many_roles_performance() {
@@ -153,7 +151,7 @@ mod tests {
         );
     }
 
-    // ──── Phase 0.2: Scope override performance ────
+    // ──── Scope override performance ────
 
     #[test]
     fn test_cct_with_scope_overrides_performance() {

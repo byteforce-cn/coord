@@ -3,10 +3,8 @@
 // 实现 BaseService trait，提供工作流定义管理与实例执行能力。
 // 基于 Coord 核心原语（KV + Txn + Lease + Watch）构建。
 //
-// 当前状态（Phase D）: 基础工作流定义 CRUD + 实例状态管理。
-// 完整的 DSL 解释器和 Saga 补偿执行器为 Phase G 蓝图。
-//
-// 参见 docs/client-agent-architecture-v3.md §5.9。
+// 当前状态: 基础工作流定义 CRUD + 实例状态管理。
+// 完整的 DSL 解释器和 Saga 补偿执行器为后续扩展蓝图。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -138,9 +136,9 @@ fn unix_ts_i64() -> i64 {
         .as_secs() as i64
 }
 
-// ──── Phase B 新增数据类型 ────
+// ──── 新增数据类型 ────
 
-/// 工作流定义（Phase B.1 — deploy/get_definition 使用）
+/// 工作流定义（deploy/get_definition 使用）
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkflowDefinition {
     pub id: String,
@@ -152,7 +150,7 @@ pub struct WorkflowDefinition {
     pub created_at: i64,
 }
 
-/// 工作流定义摘要（Phase B.1 — list_definitions 使用）
+/// 工作流定义摘要（list_definitions 使用）
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DefSummary {
     pub id: String,
@@ -162,7 +160,7 @@ pub struct DefSummary {
     pub created_at: i64,
 }
 
-/// 工作流实例摘要（Phase B.1 — list_instances 使用）
+/// 工作流实例摘要（list_instances 使用）
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InstSummary {
     pub id: String,
@@ -418,7 +416,7 @@ impl WorkflowService {
         Ok(())
     }
 
-    // ──── Phase B.1: 工作流定义管理 ────
+    // ──── 工作流定义管理 ────
 
     /// 部署工作流定义，存储到 coord-server KV 层以支持多 Agent 共享
     pub async fn deploy_definition(
@@ -743,7 +741,7 @@ impl std::fmt::Debug for WorkflowService {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Phase G: Serverless Workflow DSL 解释器
+// Serverless Workflow DSL 解释器
 // ═══════════════════════════════════════════════════════════════════
 
 /// 动作类型
@@ -1177,7 +1175,7 @@ mod tests {
         assert_eq!(c.list_instances_by_workflow("a").len(), 1);
     }
 
-    // ──── Phase B.1 新数据类型测试 ────
+    // ──── 新数据类型测试 ────
 
     #[test]
     fn test_workflow_definition_storage_key() {
@@ -1251,7 +1249,7 @@ mod tests {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Phase 4: WorkflowEngineService — 对接 coord-core 工作流引擎
+// WorkflowEngineService — 对接 coord-core 工作流引擎
 // ═══════════════════════════════════════════════════════════════════
 //
 // 实现基于 coord-core::workflow 的新引擎绑定，替换旧的 DSL 解释器。
@@ -1713,7 +1711,7 @@ pub mod phase4 {
     /// 工作流定义部署错误 —— 区分「输入/校验问题」与「存储/基础设施问题」
     ///
     /// gRPC 映射：`Validation` → `InvalidArgument`；`Store` → `Internal`。
-    /// 与 ISSUE-001 的 error/deny 区分思路一致：输入问题 ≠ 基础设施故障。
+    /// 输入问题 ≠ 基础设施故障（error/deny 区分思路）。
     #[derive(Debug, Clone, PartialEq)]
     pub enum DeployError {
         /// 输入解析 / DSL 校验失败（gRPC → InvalidArgument）
@@ -1733,11 +1731,11 @@ pub mod phase4 {
 
     impl std::error::Error for DeployError {}
 
-    /// 工作流引擎错误 —— typed 错误（ISSUE-010 §3：signal/start 错误码 typed 映射）
+    /// 工作流引擎错误 —— typed 错误（signal/start 错误码 typed 映射）
     ///
     /// gRPC 映射：`InvalidArgument` → `InvalidArgument`；`NotFound` → `NotFound`；
     /// `FailedPrecondition` → `FailedPrecondition`；`Internal` → `Internal`。
-    /// 与 ISSUE-001 error/deny 区分思路一致：输入问题 ≠ 状态冲突 ≠ 基础设施故障。
+    /// 输入问题 ≠ 状态冲突 ≠ 基础设施故障（error/deny 区分思路）。
     #[derive(Debug, Clone, PartialEq)]
     pub enum WorkflowEngineError {
         /// 输入 / signal 名不匹配（gRPC → InvalidArgument）
@@ -2525,7 +2523,7 @@ do:
         );
     }
 
-    // ─── ISSUE-010：startByDefinition 真契约 + event 多 onEvents 路由 + signal typed 错误 ───
+    // ─── startByDefinition 真契约 + event 多 onEvents 路由 + signal typed 错误 ───
 
     /// CNCF SW 审批流：event 状态双 onEvents（approve → notify / reject → reject）
     fn sample_approval_sw_yaml() -> String {
@@ -2695,9 +2693,9 @@ events:
         );
     }
 
-    // ─── CNCF Serverless Workflow 权威格式 conformance（ISSUE-004） ───
+    // ─── CNCF Serverless Workflow 权威格式 conformance ───
 
-    /// ISSUE-004 中的 SW 文档（CNCF 权威格式，start + states[]）
+    /// SW 文档（CNCF 权威格式，start + states[]）
     fn sample_cncf_sw() -> &'static str {
         r#"{
           "id": "order-approval",
@@ -2754,7 +2752,7 @@ events:
 
     #[tokio::test]
     async fn test_deploy_accepts_cncf_sw_directly() {
-        // ISSUE-004：SW 权威文档直接喂 deployDefinition（原生解析，无转换层）
+        // SW 权威文档直接喂 deployDefinition（原生解析，无转换层）
         let svc = WorkflowEngineService::new_for_test();
         let def_id = svc
             .deploy_definition("icps-flow", sample_cncf_sw())

@@ -44,7 +44,7 @@ public final class ErrorMapper {
             case ALREADY_EXISTS -> ErrorCode.REGISTRY_INSTANCE_ALREADY_EXISTS;
             case UNAVAILABLE -> ErrorCode.AGENT_UNAVAILABLE;
             case RESOURCE_EXHAUSTED -> ErrorCode.RESOURCE_EXHAUSTED;
-            // P2-04：对齐 Rust 客户端重试矩阵（unavailable/deadline/timeout → 重试）
+            // 对齐 Rust 客户端重试矩阵（unavailable/deadline/timeout → 重试）
             case DEADLINE_EXCEEDED -> ErrorCode.DEADLINE_EXCEEDED;
             default -> ErrorCode.INTERNAL;
         };

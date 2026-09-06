@@ -1,4 +1,4 @@
-// PD 内嵌接线层（Phase 3 T3.4）
+// PD 内嵌接线层
 //
 // 把 PD 组件（PdMetaStore / PlacementDriver / OperatorExecutor）与生产 Region
 // 装配（RegionManager + per-region RegionRuntime）接起来，作为 main.rs 的
@@ -26,15 +26,13 @@
 //
 // 模块边界：本层是装配/编排代码，接触 RegionRuntime 等 raft 层具体类型
 // （决策逻辑仍经 trait 抽象，见 `executor.rs` 模块文档）；不引用任何
-// `openraft::`/`openraft_multi::` 路径（P1-06 隔离由 `raft/` 层收敛）。
+// `openraft::`/`openraft_multi::` 路径（类型隔离由 `raft/` 层收敛）。
 //
-// R-MR-08（D1-a，2026-09-05 拍板=选项 a）：operator 跨节点去重经 region 0
-// system raft 承载（docs §4.5，P1–P4 分阶段）。P1 = raft 层基座
-// （`Command::Pd`/`PdQueueEntry`/`apply_pd_op`，commit 0d6cb17）；P2 = 本层
-// 接线——`EmbeddedPd::start` 新增 `system_raft` 参数：main.rs 把 region 0 raft
-// 句柄传入（全局队列模式：调度收敛 region 0 leader、执行器从全局队列按
-// Region leader 认领）；P4b 后 system raft 为必填（legacy 本地队列路径退役，
-// 不再有 None/本地模式装配）。
+// operator 跨节点去重经 region 0 system raft 承载（分阶段落地）。基座 =
+// `Command::Pd`/`PdQueueEntry`/`apply_pd_op`；再为本层接线——`EmbeddedPd::start`
+// 新增 `system_raft` 参数：main.rs 把 region 0 raft 句柄传入（全局队列模式：
+// 调度收敛 region 0 leader、执行器从全局队列按 Region leader 认领）；此后
+// system raft 为必填（legacy 本地队列路径退役，不再有 None/本地模式装配）。
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -89,8 +87,8 @@ impl EmbeddedPd {
     /// - `region_manager`：已装配的 RegionManager（心跳/对账/执行对象）
     /// - `seeds`：配置 Region 表（v1 静态；key range 真源，用于播种/对账）
     /// - `nodes`：集群全部成员（raft/grpc 地址；节点心跳 + AddPeer 目标池）
-    /// - `system_raft`：region 0 system raft 治理句柄（R-MR-08 D1-a P2，
-    ///   **必填**——P4b 退役 legacy 本地队列路径后，operator 队列恒经 region 0
+    /// - `system_raft`：region 0 system raft 治理句柄（
+    ///   **必填**——退役 legacy 本地队列路径后，operator 队列恒经 region 0
     ///   raft 承载：调度收敛 region 0 leader + 执行器全局队列认领）。main.rs
     ///   传 `CoordSystemRaftHandle`（region 0 raft + MVCC）；测试装配需自行
     ///   提供真实单节点 region 0 raft 或替身。
@@ -125,7 +123,7 @@ impl EmbeddedPd {
             shutdown_rx,
             node_id,
         ));
-        // R-MR-08（D1-a P2/P4b）：装配 region 0 system raft 治理句柄（全局
+        // 装配 region 0 system raft 治理句柄（全局
         // 队列模式——operator 队列唯一承载；必填）
         driver.attach_system_raft(system_raft);
         for n in &nodes {

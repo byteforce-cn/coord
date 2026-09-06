@@ -1,11 +1,10 @@
 // ⚠️ Multi-Raft（默认关闭 opt-in）：本模块是 Multi-Raft 生产路径的 Region 生命周期
 // 管理核心——`coord/src/main.rs` 在 `multi_raft.enabled=true` 时经
-// `spawn_configured_regions` 装配生产路径（T2.3/T2.4），`RegionManager` 同时被
-// `pd/embedded.rs`（内嵌 PD，T3.4）引用。
-// 默认关闭：未配置 `[multi_raft]` 时走单 Raft 退化路径，region 0 根目录布局字节级不变
-// （T2.6）；已接线路径与 v1 边界（静态 Region 表、不支持 join/Split-Merge、无跨 Region
-// 语义、per-Region 快照/压缩等）见 `docs/multi-raft-limits.md`，
-// 成熟度演进见 `docs/coord-multi-raft-production-plan-2026-09-05.md`。
+// `spawn_configured_regions` 装配生产路径，`RegionManager` 同时被
+// `pd/embedded.rs`（内嵌 PD）引用。
+// 默认关闭：未配置 `[multi_raft]` 时走单 Raft 退化路径，region 0 根目录布局字节级不变；
+// 已接线路径与 v1 边界（静态 Region 表、不支持 join/Split-Merge、无跨 Region
+// 语义、per-Region 快照/压缩等）。
 //
 // Region Manager — Multi-Raft Region 生命周期管理
 //
@@ -13,7 +12,7 @@
 // - RegionHandle：  单个 Region 的运行时句柄（包含 Raft 实例引用）
 // - RegionManager： 单节点内所有 Region 的管理器（路由、注册、注销）
 //
-// 设计要点（ADP §2.2, §3）：
+// 设计要点：
 // - 使用 BTreeMap 而非 HashMap：按 start_key 有序排列，路由时二分查找 O(log N)
 // - 每个 Region 维护独立的 Raft 实例（共享存储引擎、共享网络层）
 // - 路由表 key_index：start_key → RegionId，支持高效 key → Region 查找
@@ -129,7 +128,7 @@ impl RegionHandle {
     ///
     /// 若客户端 Epoch 已过期，返回相应的 Error。
     ///
-    /// 现状（T5.10 口径）：v1 请求不在线缆上携带 Epoch——本方法是**防御性保留**
+    /// v1 请求不在线缆上携带 Epoch——本方法是**防御性保留**
     /// 的校验原语（供未来 client-epoch 协议使用；服务端路由按 key 权威，客户端
     /// 过期路由表由 `RegionNotLeader` + leader hint 纠正）。conf_ver/version 落后
     /// → `Error::EpochStale`（gRPC 映射 UNAVAILABLE "stale epoch; refresh route
@@ -208,7 +207,7 @@ pub struct RegionManager {
     regions: RwLock<BTreeMap<RegionId, Arc<RegionHandle>>>,
     /// start_key → RegionId 有序索引（用于路由）
     key_index: RwLock<BTreeMap<Vec<u8>, RegionId>>,
-    /// Region 运行时注册表（T2.3：装配后的 raft/存储句柄；路由见 regions/key_index）
+    /// Region 运行时注册表（装配后的 raft/存储句柄；路由见 regions/key_index）
     runtimes: RwLock<BTreeMap<RegionId, Arc<RegionRuntime>>>,
 }
 
@@ -412,7 +411,7 @@ impl RegionManager {
         Ok(())
     }
 
-    // ──── Region 运行时装配（T2.3 生产接线）────
+    // ──── Region 运行时装配 ────
 
     /// 装配一个 Region 运行时并注册
     ///
@@ -473,7 +472,7 @@ impl RegionManager {
         self.runtimes.read().get(&region_id).cloned()
     }
 
-    /// 通过 key 路由到 Region 运行时（T2.4 服务端路由的基础）
+    /// 通过 key 路由到 Region 运行时（服务端路由的基础）
     ///
     /// 先经 `route` 按 key range 二分定位 Region，再取其运行时；
     /// Region 已注册但尚未装配（无运行时）时返回 RegionNotFound。
@@ -485,7 +484,7 @@ impl RegionManager {
     }
 }
 
-// ──── 配置驱动批量装配（T3.4 静态装配；main.rs 在 `[multi_raft].enabled=true`
+// ──── 配置驱动批量装配（静态装配；main.rs 在 `[multi_raft].enabled=true`
 //      时调用，测试套件同路径）────
 
 /// 一个待装配 Region 的静态种子（v1 来自 `[multi_raft].initial_regions` 配置；

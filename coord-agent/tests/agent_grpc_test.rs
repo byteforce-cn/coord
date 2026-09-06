@@ -1,4 +1,4 @@
-// TDD: Agent gRPC Server 启动测试 (Phase B1 — RED)
+// TDD: Agent gRPC Server 启动测试 (RED)
 //
 // 验证 Agent 可以：
 // 1. 在指定端口启动 gRPC server
@@ -153,7 +153,7 @@ async fn test_agent_all_services_registered() {
 
     // Watch service (bidirectional streaming — 验证服务已注册)
     let watch_client = WatchClient::new(channel.clone());
-    // 仅验证 stub 可以构造并连接（stream 调用在 Phase B4 详细测试）
+    // 仅验证 stub 可以构造并连接（stream 调用在后续测试覆盖）
     let _ = watch_client; // 服务注册验证：若服务未注册，构造不会失败但首帧会报错
 
     // Maintenance service
@@ -207,7 +207,7 @@ async fn test_agent_custom_health_service_serving() {
     handle.abort();
 }
 
-/// MQ 数据面端到端（Phase 1 — Poll RPC，RED→GREEN）
+/// MQ 数据面端到端（Poll RPC，RED→GREEN）
 ///
 /// createTopic → publish（递增 offset）→ poll（按 offset 增量拉取）→ ack
 /// （提交消费组偏移）→ 从已确认 offset 继续拉取（at-least-once）。
@@ -305,7 +305,7 @@ async fn test_agent_mq_poll_end_to_end() {
     handle.abort();
 }
 
-/// Cache 数据面：RPop / LLen（Phase 2，原子出队）
+/// Cache 数据面：RPop / LLen（原子出队）
 ///
 /// lpush 入队 → llen 计数 → rpop 出队（FIFO 语义 rpop 取队尾）→ 再次 llen。
 #[tokio::test]
@@ -381,7 +381,7 @@ async fn test_agent_cache_rpop_llen() {
     handle.abort();
 }
 
-/// MQ 流式 subscribe（Phase 4）：回放已提交偏移后的消息 + produce 实时推送
+/// MQ 流式 subscribe：回放已提交偏移后的消息 + produce 实时推送
 #[tokio::test]
 async fn test_agent_mq_subscribe_stream() {
     let port = find_port();

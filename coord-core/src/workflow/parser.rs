@@ -1,8 +1,8 @@
 // coord-core/workflow/parser.rs
 // DSL 解析器 —— 两阶段架构
 //
-// Phase 1 (本模块): YAML/JSON → RawWorkflowDef（宽松中间表示，保留位置信息）
-// Phase 2 (validate 模块): RawWorkflowDef → WorkflowDefinition（强类型语义校验）
+// 解析阶段（本模块）: YAML/JSON → RawWorkflowDef（宽松中间表示，保留位置信息）
+// 校验阶段（validate 模块）: RawWorkflowDef → WorkflowDefinition（强类型语义校验）
 //
 // 设计要点：
 // - 不依赖 serde(tag = "type") 做任务枚举分发

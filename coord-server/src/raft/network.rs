@@ -1,12 +1,12 @@
 // Raft Network — RaftNetworkFactory + RaftNetworkV2 实现
 //
-// 基于 Tonic gRPC 实现节点间 Raft RPC 通信（ADP §3.3）：
+// 基于 Tonic gRPC 实现节点间 Raft RPC 通信：
 // - RaftNetworkFactory：为每个目标节点创建 Raft 网络客户端
 // - RaftNetworkV2：发送 AppendEntries / Vote / FullSnapshot RPC
 // - RaftRpcServer：接收并处理来自其他节点的 Raft RPC
 //
 // 通信使用 raft_addr 端口（与客户端 gRPC 端口分离），消息体使用 bincode 序列化。
-// 支持可选的 TLS/mTLS 加密节点间通信（ADP §14.1, §7 差距 #14）。
+// 支持可选的 TLS/mTLS 加密节点间通信（差距 #14）。
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -38,7 +38,7 @@ use crate::tls;
 
 // ──── 序列化工具 ────
 
-/// P0-F.2：bincode 序列化失败返回错误（不再 expect panic）
+/// bincode 序列化失败返回错误（不再 expect panic）
 fn serialize_payload<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, tonic::Status> {
     bincode::serialize(value)
         .map_err(|e| tonic::Status::internal(format!("bincode serialize failed: {e}")))
@@ -52,7 +52,7 @@ fn deserialize_payload<'a, T: serde::Deserialize<'a>>(data: &'a [u8]) -> Result<
 /// 构建 RaftMessageProto（v6.0 新增 region_id 和 trace_context 字段）
 ///
 /// 从当前 tracing span 中提取 trace context，注入到 Raft 消息中，
-/// 实现跨节点的分布式追踪。R-SEC-03：`auth_tag` 由调用方按需计算。
+/// 实现跨节点的分布式追踪。`auth_tag` 由调用方按需计算。
 /// 单 Raft 模式 region_id=0；Multi-Raft 下由调用方传入具体 Region。
 fn make_raft_message_for_region(payload: Vec<u8>, region_id: u64) -> RaftMessageProto {
     let trace_context = extract_trace_context();
@@ -70,7 +70,7 @@ fn make_raft_message(payload: Vec<u8>) -> RaftMessageProto {
     make_raft_message_for_region(payload, 0)
 }
 
-/// R-SEC-03：对 payload 计算 HMAC-SHA256 认证标签（无 mTLS 时的共享密钥认证）。
+/// 对 payload 计算 HMAC-SHA256 认证标签（无 mTLS 时的共享密钥认证）。
 fn compute_raft_auth_tag(payload: &[u8], secret: &[u8]) -> Result<Vec<u8>, tonic::Status> {
     use hmac::{Hmac, Mac};
     type HmacSha256 = Hmac<sha2::Sha256>;
@@ -80,7 +80,7 @@ fn compute_raft_auth_tag(payload: &[u8], secret: &[u8]) -> Result<Vec<u8>, tonic
     Ok(mac.finalize().into_bytes().to_vec())
 }
 
-/// R-SEC-03：校验入站 raft 消息的认证标签（配置了共享密钥时强制；fail-closed）。
+/// 校验入站 raft 消息的认证标签（配置了共享密钥时强制；fail-closed）。
 fn verify_raft_auth(msg: &RaftMessageProto, secret: Option<&[u8]>) -> Result<(), tonic::Status> {
     let Some(secret) = secret else {
         return Ok(());
@@ -159,13 +159,13 @@ pub struct RaftNetworkFactoryImpl {
     node_id: u64,
     /// 节点 ID → Raft 地址 映射
     node_addrs: Arc<RwLock<HashMap<u64, String>>>,
-    /// Raft 节点间 TLS 配置（可选，ADP §14.1）
+    /// Raft 节点间 TLS 配置（可选）
     raft_tls_config: Option<Arc<tls::TlsConfig>>,
-    /// R-SEC-03：raft 节点间共享密钥（无 mTLS 时的 HMAC 认证，可选）
+    /// raft 节点间共享密钥（无 mTLS 时的 HMAC 认证，可选）
     shared_secret: Option<Arc<Vec<u8>>>,
     /// 连接池：目标节点 ID → 共享的 gRPC 客户端槽位（惰性连接）。
     /// 外层 `Arc<tokio::sync::Mutex<...>>` 使工厂可 Clone——Multi-Raft 各 Region
-    /// 的 per-region 网络工厂共享同一底层连接池（Phase 2 T2.1/T2.2）。
+    /// 的 per-region 网络工厂共享同一底层连接池。
     /// 使用 tokio::sync::Mutex 因为临界区包含 async 连接操作。
     client_cache:
         Arc<tokio::sync::Mutex<HashMap<u64, Arc<tokio::sync::Mutex<Option<RaftClient<Channel>>>>>>>,
@@ -229,7 +229,7 @@ impl RaftNetworkFactoryImpl {
         self.node_addrs.write().insert(node_id, raft_addr);
     }
 
-    /// 设置 Raft 节点间 TLS 配置（ADP §14.1）
+    /// 设置 Raft 节点间 TLS 配置
     ///
     /// 若配置了 TLS，所有节点间 Raft RPC（AppendEntries/Vote/InstallSnapshot）
     /// 将通过 TLS 加密传输。若同时配置了 CA 证书，则启用 mTLS 双向验证。
@@ -237,7 +237,7 @@ impl RaftNetworkFactoryImpl {
         self.raft_tls_config = Some(Arc::new(tls_config));
     }
 
-    /// R-SEC-03：设置 raft 节点间共享密钥（无 mTLS 时的 HMAC 认证）。
+    /// 设置 raft 节点间共享密钥（无 mTLS 时的 HMAC 认证）。
     pub fn set_raft_shared_secret(&mut self, secret: &str) {
         self.shared_secret = Some(Arc::new(secret.as_bytes().to_vec()));
     }
@@ -336,12 +336,12 @@ impl RaftNetworkFactoryImpl {
         })
     }
 
-    /// SubmitPdOp（R-MR-08 / D1-a P5）：把一条 PD 队列命令提交到 `target`
+    /// SubmitPdOp：把一条 PD 队列命令提交到 `target`
     /// 节点的 region 0 raft（目标应为 region 0 leader——PD 执行器在非 region 0
     /// leader 节点认领 operator 时，把 Claim/Complete/Requeue 经本方法转发到
     /// region 0 leader 提出；openraft `client_write` 仅 leader 可本地提出）。
     ///
-    /// 复用 RaftNetworkImpl 的出站路径（连接池 + TLS/mTLS + R-SEC-03 共享密钥
+    /// 复用 RaftNetworkImpl 的出站路径（连接池 + TLS/mTLS + 共享密钥
     /// HMAC），region_id = 0。返回日志 index；接收方非 leader/提出失败时返回
     /// `Err`（调用方解析 leader 变化后重试）。
     pub async fn submit_pd_op(&self, target: u64, op: PdOp) -> Result<u64, String> {
@@ -398,7 +398,7 @@ pub struct RaftNetworkImpl {
     client_slot: Arc<tokio::sync::Mutex<Option<RaftClient<Channel>>>>,
     /// Raft 节点间 TLS 配置（可选）
     tls_config: Option<Arc<tls::TlsConfig>>,
-    /// R-SEC-03：共享密钥（可选，HMAC 认证出站消息）
+    /// 共享密钥（可选，HMAC 认证出站消息）
     shared_secret: Option<Arc<Vec<u8>>>,
     /// R-RFT-19：快照传输限速器（可选；分块发送前申请许可）
     snapshot_rate_limiter: Option<Arc<SnapshotRateLimiter>>,
@@ -407,8 +407,8 @@ pub struct RaftNetworkImpl {
 }
 
 impl RaftNetworkImpl {
-    /// R-SEC-03：构造出站消息（配置共享密钥时计算 HMAC 标签）。
-    /// 携带 region_id（Multi-Raft：T2.5 按 region 解复用）。
+    /// 构造出站消息（配置共享密钥时计算 HMAC 标签）。
+    /// 携带 region_id（Multi-Raft：按 region 解复用）。
     fn build_authed_message(&self, payload: Vec<u8>) -> Result<RaftMessageProto, tonic::Status> {
         let mut msg = make_raft_message_for_region(payload, self.region_id);
         if let Some(secret) = &self.shared_secret {
@@ -632,7 +632,7 @@ impl RaftNetworkFactory<TypeConfig> for RaftNetworkFactoryImpl {
             return RaftNetwork::Blocked { target_id: target };
         }
 
-        // P0-D.2：优先使用 openraft 传入的 membership 地址（BasicNode.addr），
+        // 优先使用 openraft 传入的 membership 地址（BasicNode.addr），
         //         静态表仅作 bootstrap 前兑底；查不到返回明确错误，不再伪造地址。
         let addr = if !node.addr.is_empty() {
             node.addr.clone()
@@ -722,7 +722,7 @@ struct SnapshotStreamMessage {
     data: Vec<u8>,
 }
 
-// ──── R-MR-08 / D1-a P5：SubmitPdOp（PD 命令跨节点转发提出）────
+// ──── / SubmitPdOp（PD 命令跨节点转发提出）────
 
 /// SubmitPdOp 请求载荷：一条 PD 队列命令（bincode）。经 raft_addr 节点间
 /// RPC（Raft 服务）携带——认证（共享密钥 HMAC / mTLS）与其余 Raft RPC 同口径。
@@ -776,7 +776,7 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
             .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))
     }
 
-    /// TransferLeader（P1-07 / T3.3）：把领导权转移请求发给目标节点。
+    /// TransferLeader：把领导权转移请求发给目标节点。
     ///
     /// openraft `Raft::trigger().transfer_leader()` 由 leader 向每个 voter
     /// 广播本 RPC；目标节点收到后调用本地 `handle_transfer_leader` 立即接管
@@ -857,14 +857,14 @@ impl RaftNetworkV2<TypeConfig> for RaftNetworkImpl {
     }
 }
 
-// ──── Multi-Raft 网络共享层（Phase 2 T2.1 / T2.2）────
+// ──── Multi-Raft 网络共享层────
 //
 // 依赖 openraft-multi 0.10.0-alpha.34（workspace 锁定，仅本 raft/ 模块内使用，
-// P1-06 隔离边界）。官方用法见 databendlabs/openraft examples/multi-raft-kv：
+// 隔离边界）。官方用法见 databendlabs/openraft examples/multi-raft-kv：
 // 共享 Router 实现 GroupRouter → per-region factory 包 GroupNetworkFactory →
 // new_client 返回 GroupNetworkAdapter。Coord 侧把既有 RaftNetworkFactoryImpl 连接池
 // 升级为 Arc 共享（见上），一个进程内所有 Region 的 Raft 实例共享同一出站连接池；
-// 出站 RaftMessage 携带 region_id，服务端按 region 解复用（T2.5）。
+// 出站 RaftMessage 携带 region_id，服务端按 region 解复用。
 
 impl RaftNetworkFactoryImpl {
     /// 为（target, region_id）构建一个真实网络客户端（成员地址 + 共享连接池）。
@@ -889,7 +889,7 @@ impl RaftNetworkFactoryImpl {
     }
 }
 
-/// Multi-Raft 出站路由（T2.1）：把 (target, group_id) 绑定到共享连接池发送，
+/// Multi-Raft 出站路由：把 (target, group_id) 绑定到共享连接池发送，
 /// 并让所有 Region 的 Raft 实例复用同一连接。
 impl openraft_multi::GroupRouter<TypeConfig, u64> for RaftNetworkFactoryImpl {
     type SnapshotData = super::RaftSnapshotData;
@@ -931,7 +931,7 @@ impl openraft_multi::GroupRouter<TypeConfig, u64> for RaftNetworkFactoryImpl {
         net.vote(rpc, option).await
     }
 
-    /// T3.3：Multi-Raft 领导权转移 RPC（openraft-multi `GroupRouter` 覆盖；
+    /// Multi-Raft 领导权转移 RPC（openraft-multi `GroupRouter` 覆盖；
     /// `GroupNetworkAdapter::transfer_leader` 委托到本方法）。
     async fn transfer_leader(
         &self,
@@ -986,7 +986,7 @@ impl openraft_multi::GroupRouter<TypeConfig, u64> for RaftNetworkFactoryImpl {
     }
 }
 
-/// Multi-Raft per-region 网络工厂（T2.2）：绑定一个 RegionId，实现
+/// Multi-Raft per-region 网络工厂：绑定一个 RegionId，实现
 /// `RaftNetworkFactory`。每个 Region 的 Raft 实例用它创建到各目标的
 /// `GroupNetworkAdapter`（出站消息自动携带本 region 的 region_id）。
 ///
@@ -1035,13 +1035,13 @@ impl RaftNetworkFactory<TypeConfig> for RegionRaftNetworkFactory {
 
 /// 接收来自其他节点的 Raft RPC 并转发给本地 Raft 实例。
 ///
-/// Multi-Raft（Phase 2 T2.5）：入站 RaftMessage 携带 `region_id`，按 region
+/// Multi-Raft：入站 RaftMessage 携带 `region_id`，按 region
 /// 解复用到对应 Raft 实例。单 Raft 模式 region_id=0 使用默认实例（`set_raft`），
 /// 兼容既有调用方。
 pub struct RaftRpcService {
     /// 本地 Raft 实例表：region_id → Raft（region 0 = 单 Raft 默认实例）
     rafts: Arc<RwLock<HashMap<u64, CoordRaft>>>,
-    /// R-SEC-03：共享密钥（配置后强制验签，无标签拒绝）
+    /// 共享密钥（配置后强制验签，无标签拒绝）
     shared_secret: Option<Arc<Vec<u8>>>,
 }
 
@@ -1059,7 +1059,7 @@ impl RaftRpcService {
         }
     }
 
-    /// R-SEC-03：设置共享密钥（配置后所有入站 raft 消息强制 HMAC 验签）。
+    /// 设置共享密钥（配置后所有入站 raft 消息强制 HMAC 验签）。
     pub fn with_shared_secret(mut self, secret: Option<&str>) -> Self {
         self.shared_secret = secret.map(|s| Arc::new(s.as_bytes().to_vec()));
         self
@@ -1070,7 +1070,7 @@ impl RaftRpcService {
         self.rafts.write().insert(0, raft);
     }
 
-    /// Multi-Raft：注册某 Region 的 Raft 实例（T2.5 解复用）。
+    /// Multi-Raft：注册某 Region 的 Raft 实例（解复用）。
     pub fn set_region_raft(&self, region_id: u64, raft: CoordRaft) {
         self.rafts.write().insert(region_id, raft);
     }
@@ -1097,7 +1097,7 @@ impl RaftRpcService {
         )))
     }
 
-    /// R-SEC-03：验签（配置了共享密钥时 fail-closed）
+    /// 验签（配置了共享密钥时 fail-closed）
     fn verify_incoming(&self, msg: &RaftMessageProto) -> Result<(), tonic::Status> {
         verify_raft_auth(msg, self.shared_secret.as_deref().map(|v| v.as_slice()))
     }
@@ -1152,7 +1152,7 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
         )))
     }
 
-    /// TransferLeader（P1-07 / T3.3）：leader 广播的领导权转移请求。
+    /// TransferLeader：leader 广播的领导权转移请求。
     ///
     /// 目标节点经 openraft `handle_transfer_leader` 立即发起带 leadership_transfer
     /// 的选举（其余 voter 仅重置 lease，让目标接管）；按 region_id 解复用。
@@ -1198,7 +1198,7 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
     }
 
     /// R-RFT-06：流式快照接收——按序收集分块，校验完整性后重组安装。
-    /// Multi-Raft（T2.5）：所有分块必须携带同一 region_id，重组后按 region 解复用。
+    /// Multi-Raft：所有分块必须携带同一 region_id，重组后按 region 解复用。
     async fn install_snapshot_streaming(
         &self,
         request: tonic::Request<tonic::Streaming<RaftMessageProto>>,
@@ -1270,7 +1270,7 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
         )))
     }
 
-    /// SubmitPdOp（R-MR-08 / D1-a P5）：接收方在**本机 region 0 raft** 本地提出
+    /// SubmitPdOp：接收方在**本机 region 0 raft** 本地提出
     /// 一条 PD 队列命令并等待 apply。openraft `client_write` 仅 leader 可本地提出
     /// （follower 返回 ForwardToLeader）——PD 执行器在非 region 0 leader 节点认领
     /// 目标 Region 的 operator 时，把 Claim/Complete/Requeue 经本 RPC 转发到
@@ -1374,7 +1374,7 @@ mod tests {
         assert_eq!(msg.trace_context, vec![0x01, 0x02, 0x03]);
     }
 
-    // ──── R-SEC-03：共享密钥 HMAC 认证 ────
+    // ──── 共享密钥 HMAC 认证 ────
 
     #[test]
     fn test_raft_shared_secret_roundtrip() {

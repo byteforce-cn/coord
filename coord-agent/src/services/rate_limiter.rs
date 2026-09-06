@@ -1,7 +1,7 @@
-// coord-agent: 限流服务 (Rate Limiter) — Phase H
+// coord-agent: 限流服务 (Rate Limiter)
 //
 // 基于令牌桶算法的分布式限流。
-// v8.2 §4.13: 派生能力 — "分布式限流（最终一致近似，误差约5-10%）"
+// 派生能力 — "分布式限流（最终一致近似，误差约5-10%）"
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

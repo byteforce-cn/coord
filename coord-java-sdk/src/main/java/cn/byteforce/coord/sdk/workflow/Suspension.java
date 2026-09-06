@@ -1,7 +1,7 @@
 package cn.byteforce.coord.sdk.workflow;
 
 /**
- * 挂起元信息 —— 工作流实例当前挂起原因与恢复信息（ISSUE-010 §2）。
+ * 挂起元信息 —— 工作流实例当前挂起原因与恢复信息。
  *
  * <p>对应 proto {@code SuspensionMeta}：
  * <ul>

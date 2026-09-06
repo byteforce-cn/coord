@@ -1,9 +1,9 @@
-# coord-server 生产配置示例（对齐 docs/production/17-refactor-master-plan.md R-OBS-15）
+# coord-server 生产配置示例（对齐 R-OBS-15）
 #
 # 三节点集群部署时：
 #   1. 每个节点一份本文件，按注释修改 node.id 与端口；
 #   2. 三节点 security.auth_root_key 必须一致（CCT 签发根密钥，hex 64 字符）；
-#   3. security.raft_shared_secret 必须一致（raft 端口 HMAC 认证，R-SEC-03）；
+#   3. security.raft_shared_secret 必须一致（raft 端口 HMAC 认证）；
 #   4. 生产建议配置 tls_cert/tls_key/tls_ca（raft/gRPC mTLS，缺 CA 拒绝启动）；
 #   5. 首节点 bootstrap=true，其余节点 join_addr=首节点 grpc 地址。
 
@@ -29,7 +29,7 @@ bootstrap = true               # 仅首节点 true
 [storage]
 data_dir = "/var/lib/coord"
 
-# Multi-Raft 多 Region 模式（T2.6/T3.4；默认关闭 = 单 Raft，字节级退化）
+# Multi-Raft 多 Region 模式（默认关闭 = 单 Raft，字节级退化）
 #
 # enabled = true 时：
 #   - 每个 initial_regions 是一个独立 Raft 组（Region ≥ 1），目录级存储隔离于
@@ -41,7 +41,7 @@ data_dir = "/var/lib/coord"
 #     首尾相接（无空洞/重叠）、最后一个 end_key 为空（无上界）；
 #   - 仅首节点 bootstrap=true（负责初始化各 Region 成员），其余节点置
 #     bootstrap=false 等待 leader 复制；
-#   - v1 语义边界（详细见 docs/multi-raft-limits.md）：
+#   - v1 语义边界：
 #       * 静态 Region 表：成员 = cluster.initial_nodes 全量复制，不支持 join/
 #         动态成员变更（配置含 join 即拒绝）；不支持在线 Split/Merge；
 #       * 跨 Region Txn/Range 显式拒绝（不裁剪不静默）；Watch 单 key/前缀路由到
@@ -58,8 +58,8 @@ data_dir = "/var/lib/coord"
 #         运维负责）。迁移语义见 coord-server/src/migration.rs 模块文档。
 [multi_raft]
 enabled = false
-# legacy_migration = false      # T5.15：本次启动执行 Legacy→Multi-Raft 迁移（一次性）
-# allow_unmigrated = false      # T5.16：救援——未迁移也强制放行（数据 Region 为空）
+# legacy_migration = false      # 本次启动执行 Legacy→Multi-Raft 迁移（一次性）
+# allow_unmigrated = false      # 救援——未迁移也强制放行（数据 Region 为空）
 # [[multi_raft.initial_regions]]
 # id = 1
 # start_key = ""      # 首 Region 起点（空 = keyspace 起点）
@@ -69,12 +69,12 @@ enabled = false
 # start_key = "m"
 # end_key = ""        # 末 Region 终点（空 = 无上界）
 
-# Multi-Raft PD（T3.4；[multi_raft.pd] 段；默认关闭 = 多 Region 装配但不调度）
+# Multi-Raft PD（[multi_raft.pd] 段；默认关闭 = 多 Region 装配但不调度）
 #
 # enabled = true（要求上方 multi_raft.enabled = true）时，每个节点内嵌运行
 # PlacementDriver：Region/节点心跳上报 + 成员对账（PD 元数据随 raft 已提交
 # 成员收敛，落盘 <data_dir>/pd/pd-meta.db）+ 调度/operator 执行循环。
-# v1 仅支持内嵌模式（独立 PD 进程为 Phase 3+）；全部字段可选，缺省见下方。
+# v1 仅支持内嵌模式（独立 PD 进程为后续演进方向）；全部字段可选，缺省见下方。
 [multi_raft.pd]
 enabled = false
 # heartbeat_interval_ms = 5000     # Region/节点心跳与成员对账节拍
@@ -82,7 +82,7 @@ enabled = false
 # split_check_interval = 30        # Region 分裂检查间隔（秒）
 # merge_check_interval = 60        # Region 合并检查间隔（秒）
 # node_heartbeat_timeout = 30      # 节点心跳超时（秒；超时标记离线）
-# operator_running_timeout = 300   # T5.11 P3：operator 认领超时（秒）——认领者
+# operator_running_timeout = 300   # operator 认领超时（秒）——认领者
 #                                  # 失联/Complete 丢失时放回队列由存活 Region
 #                                  # leader 重认领（须大于单次执行时长）
 # target_replicas = 3              # 目标副本数（≤ cluster.initial_nodes 成员数）
@@ -90,7 +90,7 @@ enabled = false
 # region_split_size_mb = 256       # 分裂大小阈值
 # region_split_keys = 1000000      # 分裂 key 数阈值
 # region_merge_size_mb = 16        # 合并大小阈值
-# scheduler_paused = false         # T5.12：初始调度暂停（true = 启动即不产生新
+# scheduler_paused = false         # 初始调度暂停（true = 启动即不产生新
 #                                  # operator，仅 drain 已排队；维护窗口/演练冻结调度用）
 
 # R-RFT-19：Raft 运行时调优（全部可选，缺省 = openraft 默认：心跳 50ms、
@@ -120,9 +120,9 @@ idempotency_max_entries = 4096  # 幂等缓存容量（FIFO 淘汰）
 # tls_key  = "/etc/coord/server.key"
 # tls_ca    = "/etc/coord/ca.crt"
 
-auth_enabled = true                     # 生产默认开启（P0-C.1 唯一开关）
+auth_enabled = true                     # 生产默认开启（唯一开关）
 
-# ── 以下三项必须显式配置（占位默认值会被启动校验拒绝，R-SEC-04）──
+# ── 以下三项必须显式配置（占位默认值会被启动校验拒绝）──
 # root_password：或经环境变量 COORD_ROOT_PASSWORD 注入；缺省随机生成并仅打印一次
 # root_password = "<strong-password>"
 # auth_root_key：hex 64 字符（32 字节），三节点一致；生成：openssl rand -hex 32
@@ -130,7 +130,7 @@ auth_enabled = true                     # 生产默认开启（P0-C.1 唯一开�
 # raft_shared_secret：≥16 字符，三节点一致；生成：openssl rand -hex 32
 # raft_shared_secret = "<hex-32>"
 
-# R-SEC-01：静态加密（开启后 /kv/ 用户数据 AES-256-GCM 落盘；灰度时先做明文迁移）
+# 静态加密（开启后 /kv/ 用户数据 AES-256-GCM 落盘；灰度时先做明文迁移）
 # encryption_enabled = true
 # encryption_root_key = "…hex 64 字符…"
 

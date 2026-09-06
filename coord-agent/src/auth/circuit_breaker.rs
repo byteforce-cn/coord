@@ -1,4 +1,4 @@
-// Auth Circuit Breaker (Phase 3.5)
+// Auth Circuit Breaker
 //
 // Protects the Agent auth layer from cascading failures. When auth verification
 // failure rate exceeds a configurable threshold, the circuit breaker opens and
@@ -12,8 +12,6 @@
 // Fallback policies:
 // - DenyAll: Reject all requests (security-first, production default)
 // - AllowReads: Allow read-only requests (availability-first, dev/test)
-//
-// See docs/capability-auth-implementation.md §4.5.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -45,7 +43,7 @@ pub enum FallbackPolicy {
 
 // ──── Auth Metrics ────
 
-/// Prometheus-compatible auth metrics (Phase 3.5).
+/// Prometheus-compatible auth metrics.
 ///
 /// In production, these would be registered with a Prometheus registry.
 /// For now, they are simple counters accessible via HTTP endpoint or logs.

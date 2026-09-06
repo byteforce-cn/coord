@@ -1,6 +1,6 @@
 // coord-agent: PkiStore —— PKI 状态共享存储抽象（Memory / Kv）
 //
-// 目标（ISSUE-000）：PKI 按 CN 幂等取回（get-or-create）。
+// 目标：PKI 按 CN 幂等取回（get-or-create）。
 // - CA 与已签发证书（含私钥）必须落在**共享存储**（coord-server KV，redb + Barrier 加密），
 //   agent 变无状态：重启不丢、多 agent 共享同一 CA 根、跨 agent 可互验。
 // - 并发 get-or-create 用 Txn CAS（Version==0）保证只产生一份密钥，无竞态双签发。
@@ -9,8 +9,6 @@
 //   /_pki/v1/ca                     → CaRecord（CA 证书 + 私钥）
 //   /_pki/v1/certs/{CN}             → CertRecord（当前 active）
 //   /_pki/v1/history/{CN}/{serial}  → CertRecord（轮换后的 retired 历史，保留至 not_after）
-//
-// 参见 docs/client-agent-architecture.v8.2.md §4.12
 
 use std::collections::HashMap;
 use std::sync::Arc;

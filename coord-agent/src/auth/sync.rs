@@ -1,11 +1,9 @@
-// Auth Sync Scheduler (Phase 3.3)
+// Auth Sync Scheduler
 //
 // Orchestrates periodic synchronization between Agent and Server:
 // - Role mapping: full sync every 5 minutes (configurable)
 // - Revocation delta: incremental sync every 10 seconds
 // - High-sensitivity role detection: forces server lookup each request
-//
-// See docs/capability-auth-implementation.md §3.2, §3.4, §6.3.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -216,7 +214,7 @@ mod tests {
     use crate::auth::role_cache::RoleEntry;
     use std::thread;
 
-    // ──── Phase 3.3 TDD Tests ────
+    // ──── TDD Tests ────
 
     #[test]
     fn test_sync_scheduler_default_config() {

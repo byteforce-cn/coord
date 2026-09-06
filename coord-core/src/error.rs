@@ -1,7 +1,7 @@
 // 公共错误类型定义
 //
 // 所有 Crate 共享此错误类型。coord-server 在 gRPC 响应中将 Error 映射为
-// 对应的 tonic::Status code（参见 ADP.md §23.2）。
+// 对应的 tonic::Status code。
 
 /// coord-core 公共 Result 类型
 pub type Result<T> = std::result::Result<T, Error>;
@@ -87,7 +87,7 @@ pub enum Error {
     #[error("too many watch connections: {current}/{max}")]
     WatchTooManyConnections { current: usize, max: usize },
 
-    // ──── 客户端背压（P2-04）────
+    // ──── 客户端背压 ────
     /// 客户端内部有界队列溢出（溢出信号必达，部分事件已丢弃）
     #[error("client backpressure: {0}")]
     Backpressure(String),

@@ -2,7 +2,7 @@
 //
 // 基于 CNCF Serverless Workflow 1.0 DSL 规范，提供：
 // - model:   领域模型（12种任务类型、实例、状态机）
-// - parser:  DSL 两阶段解析器（Phase 1: 语法解析, Phase 2: 语义校验）
+// - parser:  DSL 两阶段解析器（语法解析 / 语义校验）
 // - validate: 语义校验器
 // - expression: jq 表达式引擎
 // - ports:   端口 trait 抽象层（Clock, Store, Dispatcher 等）

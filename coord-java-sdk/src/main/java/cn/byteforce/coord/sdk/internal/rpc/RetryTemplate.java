@@ -15,7 +15,7 @@ import java.util.function.Function;
  *   <li>Max 3 attempts total (1 initial + 2 retries).</li>
  *   <li>Retries on {@link ErrorCode#AGENT_UNAVAILABLE},
  *       {@link ErrorCode#RESOURCE_EXHAUSTED} and {@link ErrorCode#DEADLINE_EXCEEDED}
- *       (P2-04：与 Rust 客户端矩阵对齐——unavailable/deadline/timeout 均重试；
+ *       (与 Rust 客户端矩阵对齐——unavailable/deadline/timeout 均重试；
  *       leader 切换窗口内的 NotLeader→UNAVAILABLE 也经 AGENT_UNAVAILABLE 覆盖)。</li>
  *   <li>Backoff: 100ms, 200ms, 500ms for retry attempts 2, 3.</li>
  * </ul>

@@ -68,7 +68,7 @@ public interface TransitClient {
      */
     byte[] decrypt(byte[] ciphertext, byte[] context);
 
-    // ──── HMAC 签名与验签 (Phase C.1) ────
+    // ──── HMAC 签名与验签 ────
 
     /**
      * Sign data using HMAC-SHA256 (default algorithm).

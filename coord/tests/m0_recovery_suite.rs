@@ -1,10 +1,7 @@
-// M0 验收套件（L3 进程级，真实二进制 + kill -9）：
-// - M0-3：kill -9 重启后 applied 恢复、revision 不重复、数据不丢
-// - M0-5：写入 >5000 条触发自动快照，purge 后重启可正常启动并服务
-//
-// 对应文档：`docs/production/12-test-strategy.md` §4.1（M0 浸泡标准）、
-// `docs/production/15-milestone-task-breakdown.md` M0-7。
-// 迭代次数可用环境变量 M0_KILL9_ITERATIONS 调节（默认 3；里程碑出口按 10/节点执行）。
+// 验收套件（L3 进程级，真实二进制 + kill -9）：
+// - kill -9 重启后 applied 恢复、revision 不重复、数据不丢
+// - 写入 >5000 条触发自动快照，purge 后重启可正常启动并服务
+// 迭代次数可用环境变量 _KILL9_ITERATIONS 调节（默认 3；里程碑出口按 10/节点执行）。
 
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -79,7 +76,7 @@ async fn wait_ready(addr: &str, timeout: Duration) -> Client {
     }
 }
 
-/// M0-3/M0-7：kill -9 重启循环 —— revision 不重复、数据不丢、重启后从 applied+1 续
+/// kill -9 重启循环 —— revision 不重复、数据不丢、重启后从 applied+1 续
 #[tokio::test]
 async fn m0_kill9_restart_revision_stable() {
     let iterations: u64 = std::env::var("M0_KILL9_ITERATIONS")
@@ -157,7 +154,7 @@ async fn m0_kill9_restart_revision_stable() {
     }
 }
 
-/// M0-5：写入 >5000 条触发自动快照 + purge，kill -9 后重启可正常启动并服务
+/// 写入 >5000 条触发自动快照 + purge，kill -9 后重启可正常启动并服务
 #[tokio::test]
 async fn m0_snapshot_purge_then_restart() {
     let tmp = tempfile::tempdir().unwrap();
@@ -257,10 +254,10 @@ async fn m0_snapshot_purge_then_restart() {
     let _ = child.wait();
 }
 
-/// M0-5b：purge 落盘后 kill -9 重启必须放行（真实二进制启动路径）。
+/// b：purge 落盘后 kill -9 重启必须放行（真实二进制启动路径）。
 ///
 /// 回归 2026-08-30 soak 故障：follower 安装快照后 openraft 会 purge 日志
-/// （last_purged 落盘），而启动时的 M0-5 检查曾在 `StateMachineStore` 从
+/// （last_purged 落盘），而启动时的 检查曾在 `StateMachineStore` 从
 /// `META_SNAPSHOT` 登记快照**之前**用空 tracker 判定，导致任何“重启前发生
 /// 过 purge”的节点都被误判为不可恢复而拒绝启动（n1 在 kill 后永久下线）。
 ///
@@ -357,7 +354,7 @@ async fn m0_purged_log_restart_guard_allows_valid_snapshot() {
         assert!(final_purged >= 100, "purge point must be persisted");
     }
 
-    // 重启：M0-5 检查必须放行（快照覆盖 purge 点），并正常服务。
+    // 重启：检查必须放行（快照覆盖 purge 点），并正常服务。
     let mut child = spawn_server(&data_dir, grpc_port, raft_port);
     let client2 = wait_ready(&addr, Duration::from_secs(120)).await;
 

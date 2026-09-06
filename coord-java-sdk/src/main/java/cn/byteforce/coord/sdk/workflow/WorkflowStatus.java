@@ -22,7 +22,7 @@ public final class WorkflowStatus {
     private final Suspension suspension;
 
     /**
-     * Full constructor with all fields (ISSUE-010 §2：当前状态名 + 挂起元信息).
+     * Full constructor with all fields (当前状态名 + 挂起元信息).
      */
     public WorkflowStatus(String workflowId, WorkflowState state,
                           int currentStep, byte[] output, String errorMessage,

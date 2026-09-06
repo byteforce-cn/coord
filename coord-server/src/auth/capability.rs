@@ -1,7 +1,7 @@
 // Capability Registry — stores, manages, and bootstraps capability definitions
 //
 // Capabilities are stored in Server KV under /_system/capabilities/{id},
-// encrypted with Barrier (DEK). See docs/capability-auth-implementation.md §5.
+// encrypted with Barrier (DEK).
 //
 // This module provides:
 // - In-memory capability store (backed by KV)
@@ -242,7 +242,7 @@ impl CapabilityDef {
     }
 }
 
-// ──── Capability Store (Phase 1.4: Barrier-encrypted persistence) ────
+// ──── Capability Store (Barrier-encrypted persistence) ────
 
 /// Encrypted capability persistence layer.
 ///
@@ -963,7 +963,7 @@ fn builtin_capabilities() -> Vec<CapabilityDef> {
 mod tests {
     use super::*;
 
-    // ──── Phase 1.2: Capability Registry CRUD ────
+    // ──── Capability Registry CRUD ────
 
     #[test]
     fn test_register_and_get_capability() {
@@ -1074,7 +1074,7 @@ mod tests {
         assert_eq!(all.len(), 2);
     }
 
-    // ──── Phase 1.3: Bootstrap built-in capabilities ────
+    // ──── Bootstrap built-in capabilities ────
 
     #[test]
     fn test_bootstrap_all_capabilities() {
@@ -1125,7 +1125,7 @@ mod tests {
         assert_eq!(admin_op.cap_type, CapabilityType::Admin);
     }
 
-    // ──── Phase 1.4: Barrier-encrypted capability storage ────
+    // ──── Barrier-encrypted capability storage ────
 
     /// Helper: create a Barrier + CapabilityStore for testing.
     fn make_store() -> CapabilityStore {

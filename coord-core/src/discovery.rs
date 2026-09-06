@@ -1,7 +1,6 @@
 // coord-core: 成员发现适配器
 //
 // 定义 MemberDiscovery trait 和 DiscoveryEvent 类型，统一静态配置和 Gossip 协议。
-// 参见 docs/client-agent-architecture.md §5。
 
 use std::net::SocketAddr;
 

@@ -68,7 +68,7 @@ impl RetryState {
     }
 }
 
-/// 根据错误类型决定重试策略（ADP §10.3.2）
+/// 根据错误类型决定重试策略
 pub fn classify_error(error_msg: &str) -> RetryDecision {
     let msg = error_msg.to_lowercase();
 

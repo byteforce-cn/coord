@@ -85,7 +85,7 @@ public final class TransitClientImpl extends AgentRpcClient implements TransitCl
         return plaintext;
     }
 
-    // ──── HMAC 签名与验签 (Phase C.1) ────
+    // ──── HMAC 签名与验签 ────
 
     @Override
     public byte[] hmacSign(byte[] data) {

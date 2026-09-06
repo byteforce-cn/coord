@@ -1,6 +1,6 @@
-// Compaction 调度与管理（P1-01 重接）
+// Compaction 调度与管理
 //
-// P1-01 设计决策（`docs/production/05-rebuild-decision-and-plan.md` §6.3）：
+// 设计决策：
 // - **节点一致的压缩修订号**：changelog/tombstone 删除不再由各节点本地自决，
 //   而是经 raft 下发 `Command::Compact{revision}`（apply 内分片删除、确定性）；
 // - **文件级空间回收**：redb `compact()` 需要独占引用，由本管理器定时在维护
@@ -56,7 +56,7 @@ const COMPACT_IDLE_MAX_WAIT: Duration = Duration::from_secs(30);
 
 // ──── CompactProposer ────
 
-/// Compact 提案器（P1-01：压缩修订号经 raft 下发，节点一致）
+/// Compact 提案器（压缩修订号经 raft 下发，节点一致）
 ///
 /// 由持有 Raft 句柄的层实现（`coord-server/src/server/mod.rs` 对 `CoordNode` 实现）。
 #[async_trait::async_trait]
@@ -161,7 +161,7 @@ impl<B: StorageBackend + Clone + 'static> CompactionManager<B> {
         proposer: Option<&dyn CompactProposer>,
         metrics: Option<&Arc<Metrics>>,
     ) {
-        // 1. 自动压缩：仅 leader 提案（P1-01 节点一致），单节点模式直接 apply
+        // 1. 自动压缩：仅 leader 提案（节点一致），单节点模式直接 apply
         if config.auto_compact {
             if let Some(p) = proposer {
                 if p.can_propose().await {

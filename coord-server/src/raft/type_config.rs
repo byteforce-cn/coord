@@ -12,10 +12,10 @@ use crate::txn::{TxnCompare, TxnOp, TxnOpResponse};
 
 // ──── 应用层数据类型 ────
 
-/// Lease 生命周期操作（P0-B：入 raft 日志，apply 持久化到 `/_lease/{id}`）
+/// Lease 生命周期操作（入 raft 日志，apply 持久化到 `/_lease/{id}`）
 ///
 /// deadline_wall_ms 由 leader 在 propose 前计算（墙钟毫秒），保证 apply 确定性
-/// （规格 A.4 约束 1：apply 返回值仅依赖日志内容）。
+/// （约束 1：apply 返回值仅依赖日志内容）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LeaseOp {
     /// 首次绑定/重置：id 由 LeaseManager 分配后随命令入日志
@@ -30,10 +30,10 @@ pub enum LeaseOp {
     Revoke { id: i64, delete_keys: bool },
 }
 
-/// 鉴权元数据操作（P0-C.2：入 raft 日志，apply 持久化到 `/_sys/auth/` 前缀）
+/// 鉴权元数据操作（入 raft 日志，apply 持久化到 `/_sys/auth/` 前缀）
 ///
 /// 用户/角色/吊销登记全部经 raft 达成集群一致；`AuthManager` 内存表为 apply
-/// 派生的缓存视图。密码哈希为 Argon2id PHC 字符串（P0-C.6）。
+/// 派生的缓存视图。密码哈希为 Argon2id PHC 字符串。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AuthOp {
     /// 创建用户（含 Argon2id 哈希与初始角色）
@@ -67,9 +67,9 @@ pub enum AuthOp {
         key: Vec<u8>,
         range_end: Vec<u8>,
     },
-    /// 吊销登记（P0-C.5：写入 `/_sys/auth/revoked/{jti}`）
+    /// 吊销登记（写入 `/_sys/auth/revoked/{jti}`）
     RevokeJti { jti: String },
-    /// P2-07：会话落盘（写入 `/_sys/auth/sessions/{hash_hex}`，重启不失效）
+    /// 会话落盘（写入 `/_sys/auth/sessions/{hash_hex}`，重启不失效）
     IssueSession {
         /// token 的 SHA256 hex（存储键，不落明文 token）
         hash_hex: String,
@@ -77,20 +77,20 @@ pub enum AuthOp {
         expires_at_unix: u64,
         is_refresh: bool,
     },
-    /// P2-07：会话消费/删除（refresh 单次使用、登出、吊销同路径）
+    /// 会话消费/删除（refresh 单次使用、登出、吊销同路径）
     ConsumeSession { hash_hex: String },
 }
 
-// ──── PD 全局调度命令（R-MR-08 / D1-a，见 docs §4.5）────
+// ──── PD 全局调度命令（/ 见 docs）────
 
 /// PD 全局 operator 队列治理命令（经 **region 0 system raft** 承载）。
 ///
-/// 设计要点（docs/coord-multi-raft-production-plan-2026-09-05.md §4.5）：
+/// 设计要点：
 /// - 本枚举及 `Command::Pd` 变体**只允许末尾追加**（bincode 变体索引 = 旧日志/快照
 ///   升级兼容）；
 /// - 仅 region 0 raft 提出并 apply；data region raft 收到（不应发生）视为其各自
 ///   MVCC 上的无害记录（键前缀 `/_pd/` 不在业务 keyspace）；
-/// - apply 期**不读墙钟/随机数**（确定性约束同规格 A.4 约束 1）：`Enqueue` 携带
+/// - apply 期**不读墙钟/随机数**（确定性约束同约束 1）：`Enqueue` 携带
 ///   `proposed_at_unix`（由 proposer/leader 在 propose 前填，先例
 ///   `LeaseOp::Grant.deadline_wall_ms`）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,7 +107,7 @@ pub enum PdOp {
     /// 认领执行（仅 Pending 生效；已被认领/Running → no-op，防双认领）
     ///
     /// `claimed_at_unix` 由认领者（执行器节点）在 propose 前填本节点墙钟
-    /// （P3：Running 超时重认领判定依赖的"Running 起始时间"——apply 期不读
+    /// （Running 超时重认领判定依赖的"Running 起始时间"——apply 期不读
     /// 墙钟的确定性约束同 `Enqueue.proposed_at_unix` 先例）。
     Claim {
         op_id: u64,
@@ -143,7 +143,7 @@ pub struct PdQueueEntry {
     pub claimed_by: NodeID,
     /// 提出方墙钟 Unix 秒（仅信息性，不参与决策）
     pub proposed_at_unix: i64,
-    /// 认领方墙钟 Unix 秒（P3：Running 超时重认领的依据；0 = 未认领）
+    /// 认领方墙钟 Unix 秒（Running 超时重认领的依据；0 = 未认领）
     pub claimed_at_unix: i64,
     /// Failed 原因 / 审计信息
     pub error: String,
@@ -235,7 +235,7 @@ impl PdQueueEntry {
     }
 
     /// Running 已持续时长（秒；未认领返回 0）。供 region 0 leader 判
-    /// Running 超时重认领（P3；`claimed_at_unix` 由 Claim 命令携带，见上）。
+    /// Running 超时重认领（`claimed_at_unix` 由 Claim 命令携带，见上）。
     pub fn running_for_secs(&self, now_unix: i64) -> i64 {
         if self.is_running() && self.claimed_at_unix > 0 {
             (now_unix - self.claimed_at_unix).max(0)
@@ -279,21 +279,21 @@ pub enum Command {
         /// 任一条件不满足时执行的操作
         failure_ops: Vec<TxnOp>,
     },
-    /// Lease 生命周期操作（P0-B）
+    /// Lease 生命周期操作
     Lease(LeaseOp),
-    /// 鉴权元数据操作（P0-C）
+    /// 鉴权元数据操作
     Auth(AuthOp),
-    /// 压缩历史（P1-01）：raft 下发 compact revision，节点一致删除
+    /// 压缩历史：raft 下发 compact revision，节点一致删除
     /// revision 之前的 changelog/tombstone；apply 幂等（单调，低 revision 为 no-op）
     Compact { revision: u64 },
-    /// T5.7（R-MR-04）：per-Region 删除绑定到某 Lease 的全部 Key
+    /// per-Region 删除绑定到某 Lease 的全部 Key
     ///
     /// Multi-Raft 模式下 Lease 记录在 region 0（全局租约表），但绑定 Key 落在
     /// 各业务 Region 的 MVCC。region 0 的 `LeaseOp::Revoke` apply 后，各 Region
     /// leader 经本命令在**各自 Region raft** 内按 `KvMetadata.lease_id` 索引
     /// 原子删除绑定 Key（apply 期扫描，避免 leader 侧扫描的 TOCTOU；幂等）。
     DeleteKeysByLease { lease_id: i64 },
-    /// R-MR-08（D1-a）：PD 全局调度命令（仅 region 0 raft 提出；§4.5）
+    /// PD 全局调度命令（仅 region 0 raft 提出）
     ///
     /// **末尾追加**（变体索引兼容）；data region raft 收到视为无害记录。
     Pd(PdOp),
@@ -345,11 +345,11 @@ pub enum Response {
         /// 执行分支中每个操作的响应
         responses: Vec<TxnOpResponse>,
     },
-    /// Lease 操作结果（P0-B）
+    /// Lease 操作结果
     Lease { revision: u64 },
-    /// Auth 操作结果（P0-C）
+    /// Auth 操作结果
     Auth { revision: u64 },
-    /// Compact 操作结果（P1-01）：实际生效的 compacted revision
+    /// Compact 操作结果：实际生效的 compacted revision
     Compact { compacted_revision: u64 },
 }
 
@@ -478,7 +478,7 @@ mod tests {
         }
     }
 
-    // ──── P1-01 Compact serde ────
+    // ──── Compact serde ────
 
     #[test]
     fn test_command_compact_serde_roundtrip() {
@@ -491,7 +491,7 @@ mod tests {
         }
     }
 
-    // ──── R-MR-08（D1-a）：Command::Pd serde 往返 ────
+    // ──── Command::Pd serde 往返 ────
 
     fn test_add_peer() -> crate::pd::operator::Operator {
         crate::pd::operator::Operator::AddPeer {

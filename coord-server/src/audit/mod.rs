@@ -1,11 +1,11 @@
-// 审计日志子系统（P2-08）
+// 审计日志子系统
 //
-// v1 范围（决策文档 §6.4 P2-08）：
+// v1 范围：
 // - `AuditEvent`：actor / action / resource / result / detail / 时间戳；
 // - `AuditLogger::record`：异步追加到 `<data_dir>/audit/audit-<date>.log`
 //   （每行一条 JSON，行缓冲 + 可配置 flush 策略）；
 // - 内存环形缓冲（最近 N 条）供 `recent()` 查询接口；
-// - 挂载点：鉴权拒绝（interceptor fail-closed 路径，P2-08）+ 认证成功/失败、
+// - 挂载点：鉴权拒绝（interceptor fail-closed 路径）+ 认证成功/失败、
 //   refresh 成功/失败（AuthService）。管理操作的调用方身份传递为 v2 backlog
 //   （tower 层无对端地址/令牌主体，已文档化）。
 //
@@ -57,7 +57,7 @@ impl AuditEvent {
     }
 }
 
-/// 审计存储接口（P2-08：存储与查询接口）
+/// 审计存储接口（存储与查询接口）
 pub trait AuditStore: Send + Sync {
     /// 追加一条事件（生产实现：追加到当日日志文件）
     fn append(&self, event: &AuditEvent) -> Result<()>;

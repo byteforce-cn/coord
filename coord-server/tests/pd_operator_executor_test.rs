@@ -1,4 +1,4 @@
-// Phase 3 T3.3 Operator 执行器验收测试（TDD 迭代 #11）
+// Operator 执行器验收测试（TDD 迭代 #11）
 //
 // M3 验收「PD 能完成一次 add-peer 与 transfer-leader」的组件级到真实 raft 的
 // 证明：3 节点 × 1 Region 真实 raft（gRPC 网络），Region 成员从 {n1,n2} 起步、
@@ -9,7 +9,7 @@
 //   - TransferLeader → n3：等待真实 leader 切换，n3 成为 leader 后继续提交；
 //   - RemovePeer{n2}：成员收缩 {n1,n3}，meta 同步，后续对 n2 的转移被拒。
 //
-// 一致性边界（T3.4 接线层）：执行器运行在 Region leader 所在节点（真实部署
+// 一致性边界（接线层）：执行器运行在 Region leader 所在节点（真实部署
 // 中每节点内嵌 PD；operator 跨节点去重/转移依赖 region 0 system raft 复制 PD
 // 命令——本迭代不覆盖）。本测试把 PD 挂在 leader 节点上驱动。
 
@@ -63,7 +63,7 @@ struct NodeHost {
 /// 成员关系：n1 bootstrap（initialize=true，成员 {n1,n2}）；n2 为成员但靠
 /// 复制追赶（initialize=false）；**n3 空节点**（非成员、initialize=false）——
 /// 模拟加入路径（与 coord 单 Raft join 中"新节点未初始化"状态一致），供
-/// T3.3 AddPeer 把其拉入成员。
+/// AddPeer 把其拉入成员。
 async fn start_three_node_one_region_cluster() -> Vec<NodeHost> {
     let raft_addrs: BTreeMap<u64, String> = (1..=3)
         .map(|id| (id, format!("127.0.0.1:{}", find_port())))
@@ -231,7 +231,7 @@ fn make_pd_on(hosts: &[NodeHost], leader_idx: usize) -> (Arc<PlacementDriver>, O
     let meta_store = Arc::new(PdMetaStore::open(&dir).expect("open pd meta store"));
 
     // 成员 {n1,n2}：raft_addr 字段仅作元数据记录（执行器对 raft 的交互经真实
-    // RegionRaftHandle；地址一致性是 T3.4 接线层把 handle/addr 对齐的职责）
+    // RegionRaftHandle；地址一致性是 接线层把 handle/addr 对齐的职责）
     let meta = RegionMeta {
         region_id: 1,
         start_key: vec![],

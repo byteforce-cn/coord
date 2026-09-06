@@ -1,4 +1,4 @@
-// R-SEC-05：dev 模式非 loopback 绑定防护测试
+// dev 模式非 loopback 绑定防护测试
 //
 // dev 模式强制关闭鉴权（root/root 默认凭据），绑定非 loopback 地址必须显式
 // 传 --allow-insecure，否则拒绝启动。拒绝发生在任何监听之前（快速失败，

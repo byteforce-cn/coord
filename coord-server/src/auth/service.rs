@@ -1,4 +1,4 @@
-// Auth gRPC Service — implements auth.proto Auth service (ADP §14)
+// Auth gRPC Service — implements auth.proto Auth service
 //
 // Provides:
 // - Auth enable/disable/status
@@ -24,7 +24,7 @@ use crate::auth::token::TokenManager;
 use crate::auth::token_signing::TokenSigningKeyring;
 use crate::raft::type_config::AuthOp;
 
-// ──── AuthOp 提案器（P0-C.2：管理操作入 raft 日志）────
+// ──── AuthOp 提案器（管理操作入 raft 日志）────
 
 /// 将 AuthOp 经 raft 提案（`Command::Auth`）执行；由持有 Raft 句柄的层实现
 /// （`coord-server/src/server/mod.rs` 对 `CoordNode` 实现）。
@@ -38,7 +38,7 @@ pub trait AuthOpProposer: Send + Sync {
     async fn propose_auth_op(&self, op: AuthOp) -> Result<u64, tonic::Status>;
 }
 
-// ──── 登录限流（P0-C.6，F1：per-user + per-IP 内存 token bucket）────
+// ──── 登录限流（per-user + per-IP 内存 token bucket）────
 
 /// 简单令牌桶：容量 5，每 2s 补充 1 个（防爆破，同时不误伤正常登录重试）。
 const BUCKET_CAPACITY: f64 = 5.0;
@@ -151,17 +151,17 @@ impl LoginRateLimiter {
 pub struct AuthService {
     auth_manager: Arc<AuthManager>,
     token_manager: Arc<TokenManager>,
-    /// Token signing keyring for CCT issuance (Phase 2.3)
+    /// Token signing keyring for CCT issuance
     signing_keyring: Option<Arc<TokenSigningKeyring>>,
-    /// Bootstrap token whitelist (Phase 2.6)
+    /// Bootstrap token whitelist
     bootstrap_tokens: Arc<RwLock<HashSet<String>>>,
-    /// 登录失败限流（P0-C.6）
+    /// 登录失败限流
     login_limiter: Arc<LoginRateLimiter>,
-    /// AuthOp 提案器（P0-C.2：Some = raft 模式，管理操作入日志）
+    /// AuthOp 提案器（Some = raft 模式，管理操作入日志）
     auth_proposer: Option<Arc<dyn AuthOpProposer>>,
-    /// 吊销登记存储（P0-C.5：delta 同步 + 无 proposer 时的直接吊销）
+    /// 吊销登记存储（delta 同步 + 无 proposer 时的直接吊销）
     revocation_store: Option<Arc<RevocationStore>>,
-    /// P2-08：审计日志（认证/refresh 成功与失败事件；可选）
+    /// 审计日志（认证/refresh 成功与失败事件；可选）
     audit: Option<Arc<crate::audit::AuditLogger>>,
 }
 
@@ -179,7 +179,7 @@ impl AuthService {
         }
     }
 
-    /// P2-08：挂载审计日志器。
+    /// 挂载审计日志器。
     pub fn with_audit_logger(mut self, logger: Arc<crate::audit::AuditLogger>) -> Self {
         self.audit = Some(logger);
         self
@@ -203,13 +203,13 @@ impl AuthService {
         }
     }
 
-    /// 挂载 AuthOp 提案器（P0-C.2）：设置后管理操作经 raft 提交。
+    /// 挂载 AuthOp 提案器：设置后管理操作经 raft 提交。
     pub fn with_proposer(mut self, proposer: Arc<dyn AuthOpProposer>) -> Self {
         self.auth_proposer = Some(proposer);
         self
     }
 
-    /// 挂载吊销登记存储（P0-C.5）。
+    /// 挂载吊销登记存储。
     pub fn with_revocation_store(mut self, store: Arc<RevocationStore>) -> Self {
         self.revocation_store = Some(store);
         self
@@ -226,7 +226,7 @@ impl AuthService {
         }
     }
 
-    /// R-SEC-04/R-SEC-17：管理操作调用者上下文解析（defense-in-depth + 审计身份）。
+    /// 管理操作调用者上下文解析（defense-in-depth + 审计身份）。
     ///
     /// 解析并校验 authorization CCT（签名/过期/吊销）：
     /// - auth 未启用 / 未配置 CCT 签发（测试/单机路径）→ 返回 None（视为放行，actor="local"）；
@@ -251,7 +251,7 @@ impl AuthService {
         let cct_str =
             crate::auth::interceptor::extract_bearer_token(Some(cct_str)).unwrap_or(cct_str);
 
-        // R-SEC-02：双算法验证（HMAC 历史密钥 + Ed25519 公钥）
+        // 双算法验证（HMAC 历史密钥 + Ed25519 公钥）
         let cct = keyring
             .decode_any(cct_str)
             .map_err(|e| tonic::Status::permission_denied(format!("invalid CCT: {e}")))?;
@@ -266,11 +266,11 @@ impl AuthService {
         Ok(Some(cct))
     }
 
-    /// R-SEC-04：管理操作二次校验（defense-in-depth）。
+    /// 管理操作二次校验（defense-in-depth）。
     ///
     /// 即使绕过 interceptor 直连服务实现，管理操作也须校验调用者 CCT：
     /// 调用者须为 `root` 角色或持有指定 admin 能力（无匹配 → 拒绝）。
-    /// 拒绝时记录审计事件（R-SEC-17）。
+    /// 拒绝时记录审计事件。
     fn require_admin(
         &self,
         metadata: &tonic::metadata::MetadataMap,
@@ -315,7 +315,7 @@ impl AuthService {
         }
     }
 
-    /// R-SEC-17：管理操作审计——actor 从 CCT 尽力解析（失败回落 "anonymous"）。
+    /// 管理操作审计——actor 从 CCT 尽力解析（失败回落 "anonymous"）。
     ///
     /// resource 承载操作对象（用户名/角色名），detail 承载补充信息。
     fn record_audit(
@@ -338,7 +338,7 @@ impl AuthService {
         audit.record_event(&actor, action, resource, result, detail);
     }
 
-    /// 吊销 token（P0-C.5）：CCT（`eyJ` 前缀）按 jti 经 raft 登记吊销；
+    /// 吊销 token：CCT（`eyJ` 前缀）按 jti 经 raft 登记吊销；
     /// 遗留 token 走 token_manager。
     pub async fn revoke_token(&self, token: &str) -> Result<(), String> {
         if token.starts_with("eyJ") {
@@ -382,7 +382,7 @@ impl AuthService {
         self.bootstrap_tokens.write().remove(token)
     }
 
-    /// P2-07：将签发的会话经 raft 持久化（proposer None 时仅本地视图）。
+    /// 将签发的会话经 raft 持久化（proposer None 时仅本地视图）。
     async fn persist_session(
         &self,
         hash_hex: &str,
@@ -417,7 +417,7 @@ impl AuthService {
         let Some(ref keyring) = self.signing_keyring else {
             return (String::new(), 0);
         };
-        // R-SEC-02：签发改用 Ed25519（server 持私钥；agent 仅持公钥验证）
+        // 签发改用 Ed25519（server 持私钥；agent 仅持公钥验证）
         let signing_key = match keyring.ed25519_signing_key() {
             Ok(sk) => sk,
             Err(e) => {
@@ -462,7 +462,7 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<AuthEnableRequest>,
     ) -> Result<tonic::Response<AuthEnableResponse>, tonic::Status> {
-        // R-SEC-04：管理操作二次校验（auth 未启用时放行，保证首次开启可执行）
+        // 管理操作二次校验（auth 未启用时放行，保证首次开启可执行）
         self.require_admin(request.metadata(), "admin:auth:enable")?;
         let caller_md = request.metadata().clone();
         self.auth_manager.enable();
@@ -481,7 +481,7 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<AuthDisableRequest>,
     ) -> Result<tonic::Response<AuthDisableResponse>, tonic::Status> {
-        // R-SEC-04：管理操作二次校验
+        // 管理操作二次校验
         self.require_admin(request.metadata(), "admin:auth:disable")?;
         let caller_md = request.metadata().clone();
         self.auth_manager.disable();
@@ -511,7 +511,7 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<UserAddRequest>,
     ) -> Result<tonic::Response<UserAddResponse>, tonic::Status> {
-        // R-SEC-04：管理操作二次校验
+        // 管理操作二次校验
         self.require_admin(request.metadata(), "admin:auth:user_add")?;
         let caller_md = request.metadata().clone();
         let req = request.into_inner();
@@ -547,7 +547,7 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<UserDeleteRequest>,
     ) -> Result<tonic::Response<UserDeleteResponse>, tonic::Status> {
-        // R-SEC-04：管理操作二次校验
+        // 管理操作二次校验
         self.require_admin(request.metadata(), "admin:auth:user_delete")?;
         let caller_md = request.metadata().clone();
         let req = request.into_inner();
@@ -576,7 +576,7 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<UserChangePasswordRequest>,
     ) -> Result<tonic::Response<UserChangePasswordResponse>, tonic::Status> {
-        // R-SEC-04：管理操作二次校验
+        // 管理操作二次校验
         self.require_admin(request.metadata(), "admin:auth:user_add")?;
         let caller_md = request.metadata().clone();
         let req = request.into_inner();
@@ -639,7 +639,7 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<RoleAddRequest>,
     ) -> Result<tonic::Response<RoleAddResponse>, tonic::Status> {
-        // R-SEC-04：管理操作二次校验
+        // 管理操作二次校验
         self.require_admin(request.metadata(), "admin:auth:role_add")?;
         let caller_md = request.metadata().clone();
         let req = request.into_inner();
@@ -673,7 +673,7 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<RoleDeleteRequest>,
     ) -> Result<tonic::Response<RoleDeleteResponse>, tonic::Status> {
-        // R-SEC-04：管理操作二次校验
+        // 管理操作二次校验
         self.require_admin(request.metadata(), "admin:auth:role_delete")?;
         let caller_md = request.metadata().clone();
         let req = request.into_inner();
@@ -707,7 +707,7 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<RoleGrantPermissionRequest>,
     ) -> Result<tonic::Response<RoleGrantPermissionResponse>, tonic::Status> {
-        // R-SEC-04：管理操作二次校验
+        // 管理操作二次校验
         self.require_admin(request.metadata(), "admin:auth:role_grant")?;
         let caller_md = request.metadata().clone();
         let req = request.into_inner();
@@ -743,7 +743,7 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<RoleRevokePermissionRequest>,
     ) -> Result<tonic::Response<RoleRevokePermissionResponse>, tonic::Status> {
-        // R-SEC-04：管理操作二次校验
+        // 管理操作二次校验
         self.require_admin(request.metadata(), "admin:auth:role_revoke")?;
         let caller_md = request.metadata().clone();
         let req = request.into_inner();
@@ -816,7 +816,7 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<UserGrantRoleRequest>,
     ) -> Result<tonic::Response<UserGrantRoleResponse>, tonic::Status> {
-        // R-SEC-04：管理操作二次校验
+        // 管理操作二次校验
         self.require_admin(request.metadata(), "admin:auth:user_grant_role")?;
         let caller_md = request.metadata().clone();
         let req = request.into_inner();
@@ -857,7 +857,7 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<UserRevokeRoleRequest>,
     ) -> Result<tonic::Response<UserRevokeRoleResponse>, tonic::Status> {
-        // R-SEC-04：管理操作二次校验
+        // 管理操作二次校验
         self.require_admin(request.metadata(), "admin:auth:user_revoke_role")?;
         let caller_md = request.metadata().clone();
         let req = request.into_inner();
@@ -889,7 +889,7 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<AuthenticateRequest>,
     ) -> Result<tonic::Response<AuthenticateResponse>, tonic::Status> {
-        // R-SEC-05：登录限流判定前置到 argon2 之前——防爆破时消耗 CPU 进行哈希。
+        // 登录限流判定前置到 argon2 之前——防爆破时消耗 CPU 进行哈希。
         // （失败消费、成功清除用户计数；IP 桶随尝试消费，防单 IP 分布式爆破。）
         let peer_ip = request.remote_addr();
         let req = request.into_inner();
@@ -926,11 +926,11 @@ impl AuthTrait for AuthService {
         }
         self.login_limiter.clear_user(&req.name);
 
-        // Issue simple token (legacy) + refresh token（P2-07：单次使用、落盘）
+        // Issue simple token (legacy) + refresh token（单次使用、落盘）
         let auth_token = self.token_manager.issue_token(&req.name);
         let refresh_token = self.token_manager.issue_refresh_token(&req.name);
 
-        // P2-07：会话经 raft 持久化（重启不失效；proposer None 时本地视图）
+        // 会话经 raft 持久化（重启不失效；proposer None 时本地视图）
         self.persist_session(
             &auth_token.hash_hex,
             &req.name,
@@ -980,7 +980,7 @@ impl AuthTrait for AuthService {
         }))
     }
 
-    /// P2-07：refresh token 换新（单次使用，旧 refresh 消费后作废）。
+    /// refresh token 换新（单次使用，旧 refresh 消费后作废）。
     async fn refresh_token(
         &self,
         request: tonic::Request<RefreshTokenRequest>,
@@ -1105,7 +1105,7 @@ impl AuthTrait for AuthService {
         &self,
         request: tonic::Request<GetRevocationDeltaRequest>,
     ) -> Result<tonic::Response<GetRevocationDeltaResponse>, tonic::Status> {
-        // P0-C.5：从吊销登记存储取增量（agent 缓存按 delta 同步）
+        // 从吊销登记存储取增量（agent 缓存按 delta 同步）
         let since = request.into_inner().since_version.max(0) as u64;
         let (events, current_version) = match &self.revocation_store {
             Some(store) => (store.get_delta_since(since), store.current_version()),
@@ -1118,7 +1118,7 @@ impl AuthTrait for AuthService {
         }))
     }
 
-    // ──── CCT v3: Agent Bootstrap (Phase 2.6) ────
+    // ──── CCT v3: Agent Bootstrap ────
 
     async fn bootstrap(
         &self,
@@ -1141,7 +1141,7 @@ impl AuthTrait for AuthService {
 
         // Issue a short-lived CCT for the agent
         let (cct, expires_at) = if let Some(ref keyring) = self.signing_keyring {
-            // R-SEC-02：bootstrap CCT 同样 Ed25519 签发（agent 仅存公钥验证）
+            // bootstrap CCT 同样 Ed25519 签发（agent 仅存公钥验证）
             let signing_key = keyring.ed25519_signing_key().map_err(|e| {
                 tonic::Status::internal(format!("Ed25519 CCT key derivation failed: {e}"))
             })?;
@@ -1183,7 +1183,7 @@ impl AuthTrait for AuthService {
     }
 }
 
-// ──── Tests (Phase 2.3: CCT issuance) ────
+// ──── Tests (CCT issuance) ────
 
 #[cfg(test)]
 mod cct_tests {
@@ -1370,7 +1370,7 @@ mod cct_tests {
             let inner = resp.into_inner();
             let cct = inner.cct;
 
-            // Decode and verify the CCT（R-SEC-02：Ed25519 签发，双算法验证）
+            // Decode and verify the CCT（Ed25519 签发，双算法验证）
             let decoded = signing_keyring
                 .decode_any(&cct)
                 .expect("CCT should be decodable and verifiable");
@@ -1402,7 +1402,7 @@ mod cct_tests {
         });
     }
 
-    // ──── Phase 2.4: Role→Capability storage ────
+    // ──── Role→Capability storage ────
 
     #[test]
     fn test_role_grant_capability() {
@@ -1506,7 +1506,7 @@ mod cct_tests {
         });
     }
 
-    // ──── Phase 2.6: Bootstrap RPC ────
+    // ──── Bootstrap RPC ────
 
     #[test]
     fn test_bootstrap_with_valid_token() {
@@ -1595,7 +1595,7 @@ mod cct_tests {
             let resp = svc.bootstrap(req).await.unwrap();
             let inner = resp.into_inner();
 
-            // Verify the bootstrap CCT（R-SEC-02：Ed25519 签发）
+            // Verify the bootstrap CCT（Ed25519 签发）
             let decoded = signing_keyring
                 .decode_any(&inner.cct)
                 .expect("bootstrap CCT should be verifiable");
@@ -1633,7 +1633,7 @@ mod tests {
         let _service = AuthService::new(auth_mgr, token_mgr);
     }
 
-    // ──── R-SEC-04: 管理操作二次校验 ────
+    // ──── 管理操作二次校验 ────
 
     fn build_admin_service() -> (AuthService, Arc<TokenSigningKeyring>) {
         let auth_manager = Arc::new(crate::auth::manager::AuthManager::new());
@@ -1699,7 +1699,7 @@ mod tests {
         assert!(svc.require_admin(&md, "admin:auth:disable").is_err());
     }
 
-    // ──── R-SEC-17: 管理操作审计 ────
+    // ──── 管理操作审计 ────
 
     struct MemAuditStore {
         events: parking_lot::Mutex<Vec<crate::audit::AuditEvent>>,

@@ -1,12 +1,12 @@
 // PD Meta Store — Region 元数据持久化与内存索引
 //
 // PdMetaStore 负责：
-// - 持久化 Region 元数据（T3.1：redb 落盘，`/pd/region/{region_id:016x}` key 前缀；
+// - 持久化 Region 元数据（redb 落盘，`/pd/region/{region_id:016x}` key 前缀；
 //   重启时从磁盘完整恢复）
 // - 维护内存索引（start_key → RegionId 二分查找）
 // - 提供 Region 元数据的 CRUD 操作
 //
-// 设计要点（ADP §4.1，T3.1 持久化落地）：
+// 设计要点（持久化落地）：
 // - 持久化 Key: /pd/region/{region_id:016x}（coord_core::region::encode_pd_region_key，
 //   与共享存储前缀规范一致——#6 存储决策：key 前缀编码保留给 PD 元数据）
 // - 内存索引: BTreeMap<start_key, RegionId>（O(log N) 查找）
@@ -14,8 +14,8 @@
 // - 持久化模式：`PdMetaStore::open(data_dir)` 打开/创建 `<data_dir>/pd/pd-meta.db`
 //   （redb 独立文件，表 `pd_region`）；磁盘为真源——每次 create/update/delete 先
 //   同步落盘（redb commit 即 fsync）再更新内存缓存，启动时从磁盘全量恢复。
-//   `new()` 保持纯内存模式（测试 / 未启用持久化路径，行为与 Phase 2 前一致）。
-// - T3.2 例外：心跳统计更新走 `update_region_stats`（仅内存视图，不写穿落盘）。
+//   `new()` 保持纯内存模式（测试 / 未启用持久化路径时使用）。
+// - 例外：心跳统计更新走 `update_region_stats`（仅内存视图，不写穿落盘）。
 //   Region 心跳的 size/keys 是派生瞬态数据（下一拍重新上报），写穿会在
 //   control-plane 制造每拍 commit+fsync 写放大；磁盘为真源只约束**持久元数据**
 //   （成员/epoch/key range）变更。重启后统计回落，由首拍心跳重新填充。
@@ -35,7 +35,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 const TABLE_PD_REGION: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pd_region");
 
 // ============================================================================
-// PdMetaDurable（T3.1 redb 持久化后端）
+// PdMetaDurable（redb 持久化后端）
 // ============================================================================
 
 /// PD 元数据 redb 持久化句柄
@@ -167,18 +167,18 @@ impl PdMetaDurable {
 ///
 /// Region 元数据仓库，两种形态：
 /// - `new()`：纯内存（测试 / 未启用持久化的调用方）；
-/// - `open(data_dir)`：redb 持久化（T3.1），磁盘为真源，变更同步落盘，
+/// - `open(data_dir)`：redb 持久化，磁盘为真源，变更同步落盘，
 ///   启动时从磁盘全量恢复（重启后 region 表完整）。
 ///
 /// 多 Region 场景下 PD 元数据最终的一致性（raft 复制 / 由 region 0 system raft
-/// 承载 PD 命令）是 Phase 3 后续接线层（T3.2/T3.4）的职责；本层保证单节点
+/// 承载 PD 命令）是后续接线层的职责；本层保证单节点
 /// 重启后本地 region 元数据不丢失。
 pub struct PdMetaStore {
     /// Region 元数据：RegionId → RegionMeta
     regions: RwLock<BTreeMap<RegionId, RegionMeta>>,
     /// start_key → RegionId 有序索引（用于路由查找）
     key_index: RwLock<BTreeMap<Vec<u8>, RegionId>>,
-    /// T3.1 持久化后端：None = 纯内存模式；Some = redb 文件后端（变更即落盘）
+    /// 持久化后端：None = 纯内存模式；Some = redb 文件后端（变更即落盘）
     durable: Option<PdMetaDurable>,
 }
 
@@ -192,7 +192,7 @@ impl PdMetaStore {
         }
     }
 
-    /// 打开（或创建）持久化 PD 元数据存储（T3.1）
+    /// 打开（或创建）持久化 PD 元数据存储
     ///
     /// 物理布局：`<data_dir>/pd/pd-meta.db`；落盘 key =
     /// `/pd/region/{region_id:016x}`（coord_core::region 前缀规范）。
@@ -271,7 +271,7 @@ impl PdMetaStore {
             }
         }
 
-        // T3.1：先落盘再更新内存（磁盘为真源；持久化失败则整体失败，内存不变）
+        // 先落盘再更新内存（磁盘为真源；持久化失败则整体失败，内存不变）
         self.durable_put(&meta)?;
 
         {
@@ -329,7 +329,7 @@ impl PdMetaStore {
                 .ok_or(Error::RegionNotFound { region_id })?
         };
 
-        // T3.1：先落盘再更新内存（磁盘为真源；持久化失败则整体失败，内存不变）
+        // 先落盘再更新内存（磁盘为真源；持久化失败则整体失败，内存不变）
         self.durable_put(&meta)?;
 
         // 更新数据
@@ -348,7 +348,7 @@ impl PdMetaStore {
         Ok(())
     }
 
-    /// 仅更新 Region 统计字段的内存视图（T3.2）
+    /// 仅更新 Region 统计字段的内存视图
     ///
     /// Region 心跳携带的 `approximate_size` / `approximate_keys` 是**派生瞬态**
     /// 数据——下一拍心跳即重新上报，重启后由首拍心跳重新填充。因此心跳更新走
@@ -383,7 +383,7 @@ impl PdMetaStore {
 
         let start_key = region.start_key;
 
-        // T3.1：先删除落盘 key，成功后再更新内存
+        // 先删除落盘 key，成功后再更新内存
         self.durable_remove(region_id)?;
 
         {
@@ -446,8 +446,8 @@ impl PdMetaStore {
 
     /// 分配新的 Region ID（单调递增）
     ///
-    /// Phase 1：基于当前最大 Region ID + 1。
-    /// Phase 3+：通过 Raft 共识分配。
+    /// 当前实现：基于当前最大 Region ID + 1。
+    /// 后续可经 Raft 共识分配。
     pub fn allocate_region_id(&self) -> RegionId {
         let regions = self.regions.read();
         regions.last_key_value().map(|(&id, _)| id + 1).unwrap_or(1)
@@ -629,7 +629,7 @@ mod tests {
         assert_eq!(pairs[1].1.region_id, 3);
     }
 
-    // ──── T3.1 持久化测试（redb 落盘 + 重启恢复）────
+    // ──── 持久化测试（redb 落盘 + 重启恢复）────
 
     #[test]
     fn test_memory_mode_creates_no_durable_file() {
@@ -746,7 +746,7 @@ mod tests {
         assert_eq!(store.get_region_by_key(&[0x77]).unwrap().region_id, 2);
     }
 
-    // ──── T3.2 心跳统计：内存瞬态更新，不写穿落盘 ────
+    // ──── 心跳统计：内存瞬态更新，不写穿落盘 ────
 
     #[test]
     fn test_update_region_stats_memory_only_not_durable() {

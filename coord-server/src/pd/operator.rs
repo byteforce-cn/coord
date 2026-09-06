@@ -61,7 +61,7 @@ impl Operator {
 
 /// Operator 执行状态
 ///
-/// R-MR-08（D1-a）：入 raft 日志（`PdQueueEntry.status`）后需 serde。
+/// 入 raft 日志（`PdQueueEntry.status`）后需 serde。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperatorStatus {
     /// 待执行

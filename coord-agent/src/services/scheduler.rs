@@ -1,8 +1,8 @@
-// coord-agent: 分布式调度服务 (Scheduler Service) — Phase H
+// coord-agent: 分布式调度服务 (Scheduler Service)
 //
 // 实现分布式任务调度，支持多 worker 竞争认领、Exactly-Once 执行保证、惊群缓解。
 //
-// 核心机制（v8.2 §4.9）:
+// 核心机制:
 // - 任务认领: KV CAS + Lease 防止重复执行
 // - Exactly-Once: 任务状态跟踪（Pending → Running → Completed/Failed）
 // - 惊群缓解: 随机退避 + 未来可选分片通知

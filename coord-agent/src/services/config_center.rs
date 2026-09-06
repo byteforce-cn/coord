@@ -7,8 +7,6 @@
 // - 本地配置缓存，Watch 驱动热更新
 // - 断连时回退缓存配置
 // - 支持按应用/环境/标签维度隔离
-//
-// 参见 docs/client-agent-architecture-v3.md §5.2。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

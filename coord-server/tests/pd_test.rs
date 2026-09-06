@@ -1,4 +1,4 @@
-// pd_test.rs — Phase 2: Placement Driver 测试
+// pd_test.rs — Placement Driver 测试
 //
 // TDD: 测试 PD 核心调度逻辑
 

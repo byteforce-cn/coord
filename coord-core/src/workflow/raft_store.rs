@@ -6,8 +6,6 @@
 // coord-server 的 KV + Txn + Watch API 实现，无需 coord-server 改造，
 // 零侵入、代码更简单、模式已被 agent 其他服务充分验证。
 //
-// 详见 docs/kv-workflow-store-dev-plan.md。
-//
 // 原始设计：
 // - 包装 MemoryWorkflowStore 作为热数据缓存（读取无 Raft 开销）
 // - 所有写操作通过 RaftProposer trait 提交到 Raft 共识层
@@ -131,7 +129,6 @@ fn deserialize_response(bytes: &[u8]) -> Result<WorkflowResponse, StoreError> {
 /// RaftWorkflowStore —— 基于 Raft 复制日志的 WorkflowStore
 ///
 /// ⚠️ DEPRECATED: 请使用 `KvWorkflowStore` (coord-agent) 替代。
-/// 详见 docs/kv-workflow-store-dev-plan.md。
 ///
 /// # 架构
 ///
@@ -148,7 +145,7 @@ fn deserialize_response(bytes: &[u8]) -> Result<WorkflowResponse, StoreError> {
 /// 恢复时，从 Raft 日志重放所有 WorkflowCommand 重建缓存状态。
 #[deprecated(
     since = "0.2.0",
-    note = "Use KvWorkflowStore (coord-agent/src/services/workflow_store.rs) instead. See docs/kv-workflow-store-dev-plan.md."
+    note = "Use KvWorkflowStore (coord-agent/src/services/workflow_store.rs) instead."
 )]
 pub struct RaftWorkflowStore<P: RaftProposer> {
     /// 内存热缓存

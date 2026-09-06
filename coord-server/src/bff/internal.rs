@@ -32,7 +32,7 @@ pub struct InternalState {
     pub token_manager: Arc<TokenManager>,
     /// 服务端核心节点（提供 KV 读写能力）
     pub coord_node: Arc<CoordNode>,
-    /// AuthService（P0-C.5：token 吊销经 raft RevokeJti；None = 未接线）
+    /// AuthService（token 吊销经 raft RevokeJti；None = 未接线）
     pub auth_service: Option<Arc<AuthService>>,
 }
 
@@ -130,7 +130,7 @@ pub async fn token_lookup(
 
 /// POST /v1/auth/token/revoke-self
 ///
-/// 吊销请求头中的 token：CCT 经 raft `RevokeJti` 登记（P0-C.5），
+/// 吊销请求头中的 token：CCT 经 raft `RevokeJti` 登记，
 /// 遗留 token 走 token_manager。
 pub async fn token_revoke(
     State(state): State<Arc<InternalState>>,

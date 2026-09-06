@@ -23,7 +23,7 @@ data_dir = "/var/lib/coord"
 auth_enabled = true
 # 三节点一致（从 .env 的 AUTH_ROOT_KEY 填入，hex 64 字符）
 auth_root_key = "__FILL_AUTH_ROOT_KEY__"
-# R-SEC-03：三节点一致（从 .env 的 RAFT_SHARED_SECRET 填入，≥16 字符）
+# 三节点一致（从 .env 的 RAFT_SHARED_SECRET 填入，≥16 字符）
 raft_shared_secret = "__FILL_RAFT_SHARED_SECRET__"
 # 传输层 TLS/mTLS（gRPC + raft 同口径）：证书由 ./certs/gen-certs.sh 生成并挂载到
 # /etc/coord/tls；三节点共用同一 server 证书（SAN 覆盖 coord-1/2/3 + localhost + 127.0.0.1）。

@@ -10,13 +10,13 @@ import java.util.Map;
  * <p>
  * Supports String, Hash, List, and Set data types with optional TTL.
  * <p>
- * <b>Data-plane boundary (v2.1):</b> data is stored on the Agent's embedded redb
+ * <b>Data-plane boundary:</b> data is stored on the Agent's embedded redb
  * engine. By default (<code>services.replication=false</code>) this is
  * <b>single-agent semantics</b>. When cross-agent ISR replication is enabled
  * (<code>services.replication=true</code> + <code>replication_peers</code>),
  * writes are synchronously replicated to ISR followers (<code>min_isr</code>
  * configurable) — the data plane is then distributed / highly available.
- * See docs/cache-mq-isr-evaluation.md (v2.1: implemented).
+
  *
  * <pre>{@code
  * try (CoordClient client = CoordClient.create(config)) {

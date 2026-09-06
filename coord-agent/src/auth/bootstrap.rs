@@ -8,8 +8,6 @@
 //
 // Restart: reads the persisted agent_credential.json, uses the long-lived
 // service token to reconnect.
-//
-// See docs/capability-auth-implementation.md §6.1.
 
 use std::path::Path;
 

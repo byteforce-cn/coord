@@ -1,8 +1,8 @@
-// P0-D.5 验收套件：成员变更与 Join 协议（membership_change_test）
+// 验收套件：成员变更与 Join 协议（membership_change_test）
 //
-// 规格 D 验收标准：
+// 验收标准：
 // - Join 的新节点自动完成 learner→voter（`JoinRequest`，非 leader 重定向到 leader）；
-// - remove 目标是 leader 时拒绝并提示（transfer_leader 属 P1-07）；
+// - remove 目标是 leader 时拒绝并提示（transfer_leader 属）；
 // - 变更串行化：并发变更返回 UNAVAILABLE（互斥锁，本套件验证锁释放语义）。
 
 use std::collections::BTreeMap;
@@ -125,7 +125,7 @@ impl TestNode {
         let mut node = CoordNode::new(Arc::clone(&mvcc));
         node.node_id = node_id;
         node.raft = Some(Arc::clone(&raft));
-        // P0-D.1：注册已知节点 gRPC 地址（leader 重定向用）
+        // 注册已知节点 gRPC 地址（leader 重定向用）
         for (id, addr) in all_grpc_addrs {
             node.register_grpc_addr(*id, addr);
         }
@@ -361,7 +361,7 @@ async fn test_join_redirects_to_leader() {
     );
 }
 
-/// D.5-3（P1-07 更新）：单节点集群移除唯一 voter 失败（无剩余 quorum，openraft 拒绝）。
+/// D.5-3（更新）：单节点集群移除唯一 voter 失败（无剩余 quorum，openraft 拒绝）。
 #[tokio::test]
 async fn test_remove_leader_rejected() {
     let grpc1 = find_port();
@@ -394,7 +394,7 @@ async fn test_remove_leader_rejected() {
     );
 }
 
-/// P1-07-1：两节点集群移除 leader —— openraft 自移除（配置提交后旧 leader
+/// -1：两节点集群移除 leader —— openraft 自移除（配置提交后旧 leader
 /// 退位），剩余节点成为 leader 且可写。
 #[tokio::test]
 async fn test_remove_leader_self_removal_two_nodes() {
@@ -492,7 +492,7 @@ async fn test_remove_leader_self_removal_two_nodes() {
     assert!(put.into_inner().revision > 0);
 }
 
-/// P1-07-2：transfer_leadership 执行器 —— 移交后目标成为 leader。
+/// -2：transfer_leadership 执行器 —— 移交后目标成为 leader。
 #[tokio::test]
 async fn test_transfer_leadership_executor() {
     let grpc1 = find_port();

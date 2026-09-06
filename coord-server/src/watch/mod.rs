@@ -87,15 +87,15 @@ struct Subscriber {
     range_end: Vec<u8>,
     /// 事件发送通道（有界缓冲区）
     event_tx: mpsc::Sender<WatchEvent>,
-    /// 注册时的回放水位（P0-E.3）：回放 [start_revision, watermark]，
+    /// 注册时的回放水位：回放 [start_revision, watermark]，
     /// 实时事件从 watermark+1 续（订阅者循环按 revision 去重）
     watermark_rev: Revision,
-    /// 溢出标志（P0-E.1）：缓冲区满时置位；订阅者循环 recv 后检查并
+    /// 溢出标志：缓冲区满时置位；订阅者循环 recv 后检查并
     /// 合成 BufferOverflow 事件（保证溢出通知必达，不依赖竞态）
     overflow: Arc<AtomicBool>,
 }
 
-/// 默认 watcher 总数上限（P0-E.4：超限拒绝新建）
+/// 默认 watcher 总数上限（超限拒绝新建）
 const DEFAULT_MAX_SUBSCRIBERS: usize = 10_000;
 
 /// 全局 Watch 事件分发器
@@ -111,7 +111,7 @@ pub struct WatchDispatcher {
     event_tx: mpsc::UnboundedSender<ChangeEvent>,
     /// 订阅者列表
     subscribers: Arc<RwLock<HashMap<u64, Subscriber>>>,
-    /// watcher 总数上限（P0-E.4）
+    /// watcher 总数上限
     max_subscribers: usize,
     /// 指标注册表（R-OBS-10：订阅数/事件数/背压丢弃，可选）
     metrics: Option<Arc<Metrics>>,
@@ -142,13 +142,13 @@ impl WatchDispatcher {
         self.event_tx.clone()
     }
 
-    /// 创建新的 Watch 订阅（P0-E.3/E.4）
+    /// 创建新的 Watch 订阅
     ///
     /// - `watermark_rev`：注册时的回放水位（调用方在注册前读取
     ///   `MvccStorage::current_revision()`）；回放仅覆盖
     ///   `[start_revision, watermark_rev]`，实时事件从 `watermark_rev+1` 续，
     ///   订阅者循环按 revision 去重，杜绝回放/实时竞态重复。
-    /// - watcher 总数超限（P0-E.4）返回错误，调用方映射 `RESOURCE_EXHAUSTED`。
+    /// - watcher 总数超限返回错误，调用方映射 `RESOURCE_EXHAUSTED`。
     ///
     /// 返回 (watch_id, event_receiver)。
     pub fn subscribe(
@@ -188,7 +188,7 @@ impl WatchDispatcher {
         Ok((watch_id, rx))
     }
 
-    /// 取走并清除订阅者的溢出标志（P0-E.1）。
+    /// 取走并清除订阅者的溢出标志。
     ///
     /// 订阅者循环在每次 `recv` 后调用：置位过即返回 true，由调用方
     /// 合成 BufferOverflow 事件下发（保证溢出通知必达）。
@@ -200,7 +200,7 @@ impl WatchDispatcher {
         }
     }
 
-    /// 读取订阅者的回放水位（P0-E.3：实时事件按 revision 去重）
+    /// 读取订阅者的回放水位（实时事件按 revision 去重）
     pub fn watermark(&self, watch_id: u64) -> Option<Revision> {
         self.subscribers
             .read()
@@ -263,7 +263,7 @@ impl WatchDispatcher {
                 }],
             };
 
-            // 尝试发送；缓冲区满时置溢出标志（P0-E.1）：订阅者循环
+            // 尝试发送；缓冲区满时置溢出标志：订阅者循环
             // recv 后检查标志并合成 BufferOverflow，保证通知必达
             match sub.event_tx.try_send(watch_event) {
                 Ok(()) => {
@@ -288,8 +288,8 @@ impl WatchDispatcher {
 
     /// 从 [start_revision, ∞) 读取 [start_revision, end_revision] 的历史事件
     /// （含 start_revision）。`start_revision <= compacted_revision` 时历史已被
-    /// 压缩、不可达，必须返回 Err 由调用方下发 `HistoryUnavailable`（P1-01）。
-    /// 按 Revision 升序发送；损坏条目（严格读取）→ Err（P0-E.2）。
+    /// 压缩、不可达，必须返回 Err 由调用方下发 `HistoryUnavailable`。
+    /// 按 Revision 升序发送；损坏条目（严格读取）→ Err。
     #[allow(clippy::too_many_arguments)] // 回放参数即为协议全部要素，无聚合收益
     pub fn replay_history(
         &self,
@@ -301,7 +301,7 @@ impl WatchDispatcher {
         end_revision: Revision,
         changelog_reader: &dyn ChangelogReader,
     ) -> Result<(), String> {
-        // P1-01：压缩水位校验 —— 历史已被压缩时不可静默缺洞
+        // 压缩水位校验 —— 历史已被压缩时不可静默缺洞
         let compacted = changelog_reader
             .compacted_revision()
             .map_err(|e| format!("failed to read compacted revision: {e}"))?;
@@ -318,7 +318,7 @@ impl WatchDispatcher {
             .map_err(|e| format!("failed to read changelog: {e}"))?;
 
         for event in events {
-            // P0-E.3：回放止于水位（实时事件从 end+1 续）
+            // 回放止于水位（实时事件从 end+1 续）
             if event.revision > end_revision {
                 break;
             }
@@ -374,7 +374,7 @@ pub trait ChangelogReader: Send + Sync {
     /// 从指定 Revision 开始读取 Changelog 条目（含 start_revision）
     fn read_changelog_from(&self, start_revision: Revision) -> Result<Vec<ChangeEvent>, String>;
 
-    /// 已持久化的 compacted revision（P1-01）；默认 0（从未压缩）。
+    /// 已持久化的 compacted revision；默认 0（从未压缩）。
     ///
     /// 回放起始 revision <= 该值时代历史已不可达（被压缩删除），
     /// 订阅者应收到 `HistoryUnavailable` 而非静默缺洞。
@@ -544,7 +544,7 @@ mod tests {
         });
     }
 
-    // ──── P0-E 验收测试 ────
+    // ──── 验收测试 ────
 
     /// E.1：缓冲区满置溢出标志，`take_overflow` 返回 true（通知必达不依赖竞态）。
     #[test]

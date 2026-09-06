@@ -1,9 +1,9 @@
 // Scope Prefix Trie — O(len(scope)) scope matching
 //
 // Builds a prefix tree from scope patterns, enabling efficient scope matching
-// against request keys. See docs/capability-auth-implementation.md §4.4.
+// against request keys.
 //
-// Scope pattern rules (from §8):
+// Scope pattern rules:
 // - Only [a-zA-Z0-9/_\-*] characters allowed
 // - "*" at the end means "prefix wildcard" (e.g., "/app/*" matches "/app/anything")
 // - Empty scope means "no restriction" (matches everything)
@@ -160,7 +160,7 @@ fn split_scope(path: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    // ──── Phase 0: Scope Trie basic operations ────
+    // ──── Scope Trie basic operations ────
 
     #[test]
     fn test_empty_scope_matches_all() {

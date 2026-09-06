@@ -42,7 +42,7 @@ import static org.mockito.Mockito.when;
  * Tests the {@link PkiClient} gRPC client against an in-process netty server
  * with a stub {@link PkiGrpc.PkiImplBase}.
  * <p>
- * Covers ISSUE-000 Phase 2 SDK surface: rotateCert / listCerts / getCertByCN.
+ * Covers SDK surface: rotateCert / listCerts / getCertByCN.
  */
 class PkiClientTest {
 

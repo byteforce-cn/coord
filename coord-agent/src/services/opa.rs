@@ -3,13 +3,11 @@
 // 基于 Regorus（Rust 原生 OPA 引擎）的策略评估引擎。
 // 直接加载 Rego 策略进行本地评估，零 Wasm 依赖。
 //
-// 架构（v8.2 §4.11）:
+// 架构:
 // - Agent 内嵌 Regorus，直接加载 Rego 策略进行本地评估
 // - 策略包由 Server 通过 KV/Watch 下发至 Agent
 // - 评估结果缓存 30 秒，策略版本变更时立即失效
 // - Bundle 存储由 PolicyService 管理（Server KV），OpaEngine 仅负责本地求值
-//
-// 参见 docs/client-agent-architecture.v8.2.md §4.11。
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;

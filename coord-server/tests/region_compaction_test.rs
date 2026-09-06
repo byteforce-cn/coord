@@ -1,4 +1,4 @@
-// T5.9（R-MR-06）per-Region Compaction 验收测试
+// per-Region Compaction 验收测试
 //
 // 单节点装配 region 1 raft（目录隔离 MVCC）。验证：
 //   - RegionCompactProposer 只在本节点为 Region leader 时可提案；

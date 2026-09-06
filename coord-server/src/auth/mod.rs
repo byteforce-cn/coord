@@ -1,4 +1,4 @@
-// Auth module — Authentication & RBAC Authorization (ADP §14)
+// Auth module — Authentication & RBAC Authorization
 //
 // Security layers: TLS → Authentication → Authorization (RBAC)
 //

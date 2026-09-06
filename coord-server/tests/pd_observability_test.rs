@@ -1,6 +1,6 @@
-// T5.12（PD 可观测与安全：调度暂停开关 + operator 审计日志）验收测试
+// （PD 可观测与安全：调度暂停开关 + operator 审计日志）验收测试
 //
-// R-MR-08（D1-a，P4b 后）：operator 队列恒经 region 0 system raft 承载（全局
+// operator 队列恒经 region 0 system raft 承载（全局
 // 队列模式——本地队列路径已退役）。本文件经 public API
 // （PlacementDriver / OperatorExecutor / FakeSystemRaft / attach_observability）
 // 验证全局队列模式下的可观测语义：
@@ -61,7 +61,7 @@ impl FakeSystemRaft {
         id
     }
 
-    /// 预置一条 Running 条目（认领者/认领墙钟可指定；P3 超时重认领测试用）
+    /// 预置一条 Running 条目（认领者/认领墙钟可指定；超时重认领测试用）
     fn seed_running(
         &self,
         op_id: u64,
@@ -370,14 +370,14 @@ async fn test_scheduler_pause_freezes_and_resumes_production() {
 
     let handle = pd.start_scheduler_loop();
 
-    // Phase 1：未暂停 → 1s 内应产生并消费 ≥1 个 operator
+    // 未暂停 → 1s 内应产生并消费 ≥1 个 operator
     wait_produced(&system, 1, Duration::from_secs(8)).await;
 
     // 再跨一个 tick 并清空队列：确保暂停起点队列为空（无"暂停前遗留"噪音）
     tokio::time::sleep(Duration::from_millis(1100)).await;
     system.drain_pending();
 
-    // Phase 2：暂停 → 跨 ≥2 个 tick（2.5s）不应再产生任何新 operator
+    // 暂停 → 跨 ≥2 个 tick（2.5s）不应再产生任何新 operator
     pd.set_scheduler_paused(true);
     assert!(pd.is_scheduler_paused());
     tokio::time::sleep(Duration::from_millis(2500)).await;
@@ -387,7 +387,7 @@ async fn test_scheduler_pause_freezes_and_resumes_production() {
         "paused scheduler must not produce new operators (got {produced_while_paused})"
     );
 
-    // Phase 3：恢复 → 应继续产生（可追踪可暂停语义闭环）
+    // 恢复 → 应继续产生（可追踪可暂停语义闭环）
     pd.set_scheduler_paused(false);
     assert!(!pd.is_scheduler_paused());
     wait_produced(&system, 1, Duration::from_secs(8)).await;

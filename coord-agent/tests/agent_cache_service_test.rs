@@ -1,9 +1,7 @@
-// coord-agent: Cache 数据面服务测试（Phase F）
+// coord-agent: Cache 数据面服务测试
 //
 // TDD RED phase: 测试 CacheService（基于 redb 的持久化缓存引擎）。
 // 支持 String/Hash/List/Set 数据类型、TTL、分片元数据。
-//
-// 参见 docs/client-agent-architecture-v3.md §5.5。
 
 use std::sync::Arc;
 use tempfile::TempDir;

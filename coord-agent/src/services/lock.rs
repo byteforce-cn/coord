@@ -7,8 +7,6 @@
 // - 封装重试与自动续期
 // - 支持公平锁（队列）/ 非公平锁
 // - 适用场景：定时任务幂等、资源互斥
-//
-// 参见 docs/client-agent-architecture-v3.md §5.3。
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -1,8 +1,8 @@
-// R-MR-08（D1-a）：PD 命令经 region 0 system raft 承载——P1 端到端验收
+// PD 命令经 region 0 system raft 承载——端到端验收
 //
 // 单节点 region 0 raft（与 `CoordNode.node.raft` 同型：root MVCC +
 // StateMachineStore），直接经 raft `client_write(Command::Pd(...))` 提出命令，
-// 验证 D1-a 基座（docs/coord-multi-raft-production-plan-2026-09-05.md §4.5 P1）：
+// 验证 基座：
 //
 //   Test 1：Enqueue → region 0 MVCC `/_pd/ops/` 队列可见；`op_id` == 该命令的
 //           日志 index（raft 返回的 revision）；重复 Enqueue 同 operator →
@@ -36,7 +36,7 @@ struct Region0Host {
     _dir: tempfile::TempDir,
 }
 
-/// 装配单节点 region 0 raft（D1-a：PD 命令的全局承载 raft）
+/// 装配单节点 region 0 raft（PD 命令的全局承载 raft）
 async fn start_single_region0() -> Region0Host {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().to_path_buf();

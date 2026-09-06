@@ -1,9 +1,9 @@
-// Phase 3 T3.4 内嵌 PD 接线验收测试（TDD 迭代 #12）
+// 内嵌 PD 接线验收测试（TDD 迭代 #12）
 //
 // 3 节点 × 1 Region 真实 raft（gRPC 网络，成员 {1,2,3}），每节点经
 // `EmbeddedPd::start` 装配内嵌 PD（配置驱动的生产接线路径，main.rs 同款）。
 //
-// R-MR-08（D1-a，P4b 后）：operator 队列恒经 **region 0 system raft** 承载
+// operator 队列恒经 **region 0 system raft** 承载
 // （全局队列模式）。本测试装配**共享的单节点 region 0 raft**（node 1，进程内
 // 单例）注入全部 3 节点——region 0 leader 恒 = host 1，调度只在 host 1 生成
 // （生产同构：单一生成源），执行由「目标 Region 当前 leader」所在 host 从共享
@@ -89,7 +89,7 @@ struct NodeHost {
     _raft_handle: tokio::task::JoinHandle<()>,
 }
 
-/// 共享 region 0 system raft（单节点，node 1）：承载全局 PD 队列（D1-a P4b
+/// 共享 region 0 system raft（单节点，node 1）：承载全局 PD 队列（
 /// 后 EmbeddedPd 必填）。进程内单例注入全部节点——region 0 leader 恒 = host 1
 /// （node_id 1），调度只在 host 1 生成；执行器在各 host 从共享队列认领「本节点
 /// 是其目标 Region leader」的条目。真实跨节点 region 0 由真实进程套件覆盖。
@@ -227,7 +227,7 @@ async fn start_three_node_one_region_cluster() -> (Vec<NodeHost>, Arc<Region0Clu
 }
 
 /// 在全部节点装配内嵌 PD（配置驱动生产路径；注入共享 region 0 system raft
-/// ——P4b 后全局队列模式为唯一模式，EmbeddedPd 必填 system raft）
+/// ——后全局队列模式为唯一模式，EmbeddedPd 必填 system raft）
 async fn start_embedded_pds(hosts: &mut [NodeHost], region0: &Arc<Region0Cluster>) {
     let nodes_info: Vec<NodeInfo> = hosts
         .iter()
@@ -458,7 +458,7 @@ async fn test_embedded_pd_steady_state_heartbeat_data_plane() {
     }
 
     // ── 健康副本数（3 == target）：数个均衡周期后 region 0 全局队列恒空
-    //    （无 churn——P4b 后 operator 队列在 region 0 raft，不再有本地队列）──
+    //    （无 churn——后 operator 队列在 region 0 raft，不再有本地队列）──
     tokio::time::sleep(Duration::from_secs(4)).await;
     let queue = region0.mvcc.pd_queue_entries().expect("read region0 queue");
     assert!(
@@ -491,7 +491,7 @@ async fn test_embedded_pd_membership_change_meta_convergence_and_self_heal() {
         wait_meta_voters(host, Some(&full), Duration::from_secs(20)).await;
     }
 
-    // ── 经 region 0 raft Enqueue RemovePeer（P4b 后 operator 入队唯一通道；
+    // ── 经 region 0 raft Enqueue RemovePeer（后 operator 入队唯一通道；
     //    模拟运维/维护触发，由目标 Region leader 所在 host 的执行器认领执行）──
     region0
         .system

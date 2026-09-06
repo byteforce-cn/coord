@@ -7,9 +7,9 @@
 // - resume: 从挂起状态恢复
 // - drive: 异步驱动循环（spawn 后独立运行）
 //
-// Phase 2: 实现基本驱动循环，支持 call/do/switch/wait 任务
-// Phase 3: 补充 P2 任务类型（fork/for-each/listen 等）
-// Phase 4: 对接 coord-agent WorkflowService
+// 实现基本驱动循环，支持 call/do/switch/wait 任务
+// 补充 任务类型（fork/for-each/listen 等）
+// 对接 coord-agent WorkflowService
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -781,7 +781,7 @@ where
                 "name": name,
                 "payload": payload.clone().unwrap_or(Value::Null),
             });
-            // ISSUE-010 P1：手动 signal 同时注入 `_event`，使 switch+eventConditions /
+            // 手动 signal 同时注入 `_event`，使 switch+eventConditions /
             // 多 onEvents 路由对「事件总线自动恢复」与「手动 signal」双路径一致生效
             inst.context["_event"] = serde_json::json!({
                 "arrived": true,
@@ -791,7 +791,7 @@ where
 
         // 完成当前挂起任务帧并推进（与 resume_by_event 一致）：
         // 否则 drive 会重新执行已挂起的 listen/signal 任务，实例回到挂起态——
-        // 这是「signal 推进审批」端到端生效的必要一步（ISSUE-010 P1 端到端验证发现）
+        // 这是「signal 推进审批」端到端生效的必要一步（端到端验证发现）
         if let Some(last) = inst.task_stack.last_mut() {
             last.status = TaskStatus::Completed;
             last.ended_at = Some(self.clock.now_ms());
@@ -1285,7 +1285,7 @@ where
                         compete,
                         frame,
                     } => {
-                        // 并行执行分支（Phase 3: 使用 tokio::spawn 真正并行）
+                        // 并行执行分支（使用 tokio::spawn 真正并行）
                         let executor = Arc::clone(&self.executor);
                         let clock = Arc::clone(&self.clock);
                         let def = definition.clone();
@@ -1305,7 +1305,7 @@ where
                                 });
                             }
 
-                            // 等待首个完成的分支（P0-F：修复 clippy never_loop——
+                            // 等待首个完成的分支（修复 clippy never_loop——
                             // 原 while let 恒单次迭代）
                             let mut winner_result: Option<(String, serde_json::Value)> = None;
                             if let Some(result) = join_set.join_next().await {
@@ -2263,7 +2263,7 @@ mod tests {
         assert!(obj.is_empty(), "empty fork should produce empty results");
     }
 
-    // ═══ P0 全特性兼容测试（标准 §Data Flow / §Fault Tolerance / §Status Phases / §Lifecycle） ═══
+    // ═══ 全特性兼容测试（标准 §Data Flow / §Fault Tolerance / §Status / §Lifecycle） ═══
 
     use crate::workflow::model::{
         CallTask, CallType, InputConfig, OutputConfig, TaskMeta, TimeoutConfig,
@@ -2860,7 +2860,7 @@ mod tests {
         assert_eq!(resumed.status, InstanceStatus::Running);
     }
 
-    // ─── 多事件类型校验 + 手动 signal 注入 _event（ISSUE-010 P1/P2） ───
+    // ─── 多事件类型校验 + 手动 signal 注入 _event ───
 
     #[tokio::test]
     async fn test_signal_multi_event_type_validation_and_event_injection() {
@@ -2905,7 +2905,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, RuntimeError::InvalidSignal(_)));
 
-        // 期望集合内任一类型可恢复（多 onEvents 的 reject 分支），且同时注入 _signal 与 _event（P1）
+        // 期望集合内任一类型可恢复（多 onEvents 的 reject 分支），且同时注入 _signal 与 _event
         let resumed = runtime
             .resume(
                 &inst.id,
@@ -2924,7 +2924,7 @@ mod tests {
         assert_eq!(resumed.context["_event"]["arrived"], true);
     }
 
-    // ─── signal 推进过挂起任务（ISSUE-010 P1 端到端修复回归） ───
+    // ─── signal 推进过挂起任务（端到端修复回归） ───
 
     #[tokio::test]
     async fn test_signal_advances_past_listen_task() {

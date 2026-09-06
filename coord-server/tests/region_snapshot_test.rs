@@ -1,4 +1,4 @@
-// T5.8（R-MR-05）per-Region 快照导出/恢复验收测试
+// per-Region 快照导出/恢复验收测试
 //
 // 单节点装配 region 1 raft（目录隔离 MVCC）+ CoordNode（region_manager 装配）。
 // 验证：

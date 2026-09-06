@@ -1,4 +1,4 @@
-// region_manager_test.rs — Phase 1: RegionManager 测试
+// region_manager_test.rs — RegionManager 测试
 //
 // TDD: 测试 RegionManager 的核心功能（路由、注册、Epoch 校验）
 // 测试 coord_server::raft::region 模块的 RegionManager 和 RegionHandle

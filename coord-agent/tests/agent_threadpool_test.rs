@@ -1,6 +1,6 @@
-// TDD: 线程池资源隔离测试 (Phase A — 待实施)
+// TDD: 线程池资源隔离测试（待实施）
 //
-// v8.2 §3.2: 独立线程池隔离
+// 独立线程池隔离
 // - proxy-core: 核心代理路径（高优先级）
 // - dataplane: 数据面读写、复制流（中优先级）
 // - background: Watch 同步、淘汰、心跳（低优先级）
@@ -14,7 +14,7 @@ use coord_agent::AgentConfig;
 fn test_thread_pool_config_defaults() {
     let config = coord_agent::ThreadPoolConfig::default();
 
-    // 默认值与 v8.2 §3.2 一致
+    // 默认值与资源隔离配置一致
     assert_eq!(config.proxy_core_size, 8, "proxy-core 默认 8 线程");
     assert_eq!(config.dataplane_size, 4, "dataplane 默认 4 线程");
     assert_eq!(config.background_size, 2, "background 默认 2 线程");

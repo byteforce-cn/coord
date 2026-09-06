@@ -1,4 +1,4 @@
-// T5.6（R-MR-03）Watch per-Region 路由验收测试
+// Watch per-Region 路由验收测试
 //
 // 在 RegionManager 装配的 2 节点 × 2 Region 集群上（region 1 = ["", "m")、
 // region 2 = ["m", ∞)），每节点挂 CoordNode + region_manager，经真实 gRPC
@@ -216,7 +216,7 @@ async fn open_watch(
     resp.expect("watch open ok").into_inner()
 }
 
-/// T5.6 验收 1：region ≥1 订阅可收到本 Region 变更；各 Region 事件独立。
+/// 验收 1：region ≥1 订阅可收到本 Region 变更；各 Region 事件独立。
 #[tokio::test]
 async fn test_region_watch_receives_own_region_events_only() {
     let hosts = start_two_node_two_region_watch_cluster().await;
@@ -329,7 +329,7 @@ async fn test_region_watch_receives_own_region_events_only() {
     assert!(saw_peach, "region2 watch must receive its own region put");
 }
 
-/// T5.6 验收 2：跨 Region 区间/前缀 watch 显式拒绝（INVALID_ARGUMENT）。
+/// 验收 2：跨 Region 区间/前缀 watch 显式拒绝（INVALID_ARGUMENT）。
 #[tokio::test]
 async fn test_cross_region_watch_rejected() {
     let hosts = start_two_node_two_region_watch_cluster().await;

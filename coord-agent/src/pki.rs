@@ -1,8 +1,8 @@
-// coord-agent: PKI CA 自动签发/轮换服务 (Phase F / ISSUE-000)
+// coord-agent: PKI CA 自动签发/轮换服务
 //
-// v8.2 §4.12: PKI — CA 私钥受根密钥保护，为 mTLS 签发短期证书。
+// PKI — CA 私钥受根密钥保护，为 mTLS 签发短期证书。
 //
-// 核心能力（ISSUE-000 整改后）：
+// 核心能力：
 // - 初始化 CA（自签名根证书，**持久化到共享 KV**，重启/多 agent 共享同一 CA 根）
 // - **按 CN 幂等取回（get-or-create）**：同一 CN 未过期证书直接返回既有记录
 // - 证书轮换（rotate / renew，旧证书保留至 not_after 供验签）
@@ -274,7 +274,7 @@ impl PkiService {
 
     /// 续期证书：**按 serial 查回真实 CN**，再签发新证书（新密钥 + 新 serial）
     ///
-    /// 修复：不再把 serial 当 CN 使用（ISSUE-000 §2.2）。
+    /// 修复：不再把 serial 当 CN 使用。
     /// 旧证书保留至 not_after 仍可验签。
     pub async fn renew_cert(&self, serial: &str, ttl_seconds: u64) -> Result<CertInfo, PkiError> {
         let old = self
@@ -364,7 +364,7 @@ impl PkiService {
 
     /// 异步签发：CPU 密集的 rcgen 密钥生成/证书签名移到阻塞线程池。
     ///
-    /// Phase 1 T1.2（运行时隔离整改）：`issue_cert` / `rotate_locked` 等 async 路径
+    /// 运行时隔离整改：`issue_cert` / `rotate_locked` 等 async 路径
     /// 原先在 worker 上内联执行 ECDSA 密钥生成 + 签名；此处先短锁 clone CA 材料与
     /// TTL 配置（纯数据），再 `spawn_blocking` 执行纯函数，返回语义与同步版一致。
     async fn sign_new_cert_blocking(
@@ -642,7 +642,7 @@ impl Pki for PkiService {
         request: Request<PkiRenewCertRequest>,
     ) -> Result<Response<PkiRenewCertResponse>, Status> {
         let req = request.into_inner();
-        // 修复（ISSUE-000 §2.2）：按 serial 查回真实 CN 再续期，不再把 serial 当 CN
+        // 修复：按 serial 查回真实 CN 再续期，不再把 serial 当 CN
         let cert_info = PkiService::renew_cert(self, &req.serial_number, req.ttl_seconds as u64)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;

@@ -8,7 +8,7 @@
 // - Maintenance (Status)
 // - NotLeader 自动重试 + Leader 发现
 //
-// 对应 production-readiness-assessment.md §2.2 全部 8 个验证项。
+// 对应 production-readiness-assessment.md 全部 8 个验证项。
 
 #[cfg(test)]
 mod tests {
@@ -131,7 +131,7 @@ mod tests {
 
         let node = Arc::new(node);
 
-        // Compaction manager（P1-01：leader 经 raft 提案；此处单节点 raft，
+        // Compaction manager（leader 经 raft 提案；此处单节点 raft，
         // 由 CoordNode 作为提案器，与非 raft 场景同构）
         let compaction_config = coord_server::storage::compaction::CompactionConfig::default();
         let compaction_proposer: Arc<dyn coord_server::storage::compaction::CompactProposer> =

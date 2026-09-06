@@ -17,13 +17,13 @@ import java.util.List;
  *   <li>poison messages can be observed via {@link #pollDlq}</li>
  * </ul>
  * <p>
- * <b>Data-plane boundary (v2.1):</b> storage is local to a single agent by
+ * <b>Data-plane boundary:</b> storage is local to a single agent by
  * default (<code>services.replication=false</code>). When cross-agent ISR
  * replication is enabled (<code>services.replication=true</code> +
  * <code>replication_peers</code>), published messages are synchronously
  * replicated to ISR followers (<code>min_isr</code> configurable; the partition
  * leader exclusively allocates offsets) — the data plane is then distributed /
- * highly available. See docs/cache-mq-isr-evaluation.md (v2.1: implemented).
+ * highly available.
  * For multi-instance reliable decoupling, prefer the DB Outbox pattern for
  * business-side concerns.
  *
@@ -34,7 +34,7 @@ import java.util.List;
  *
  *     long offset = mq.publish("orders", 0, key, payload);
  *     List<MqMessage> batch = mq.poll("orders", 0, "icps-svc", 0, 100);
- *     for (MqMessage m : batch) {
+ *     for (MqMessage m: batch) {
  *         process(m);
  *         mq.ack("orders", "icps-svc", m.partition(), m.offset());
  *     }

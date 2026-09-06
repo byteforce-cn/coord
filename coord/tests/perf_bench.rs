@@ -286,7 +286,7 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════
     // Benchmark 6: 多 Region 写入吞吐量（Multi-Raft 场景模拟）
     //   - Region 数 = 1 行即**单 Region 基线**；
-    //   - 末段打印多 Region/单 Region 比值汇总（T5.21 口径：
+    //   - 末段打印多 Region/单 Region 比值汇总（口径：
     //     「多 Region 不低于单 Region 基线 80%」）。硬闸由
     //     scripts/bench-ci.sh（PERF_GATE=1，解析本表行）执行。
     // ═══════════════════════════════════════════════════════════════
@@ -324,7 +324,7 @@ mod tests {
             ops.insert(num_regions, rate);
         }
 
-        // T5.21：多 Region 与单 Region 基线比值汇总（80% 阈值口径）。
+        // 多 Region 与单 Region 基线比值汇总（80% 阈值口径）。
         println!("\n**Multi/Single Region 比值（T5.21 基线口径，≥0.80 达标）**\n");
         println!("| Region 数 | ops/s | ratio vs 单 Region(1) |");
         println!("|:---|:---|:---|");
@@ -397,7 +397,7 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Benchmark 8: Watch 扇出吞吐量（P2-06：N 订阅者 × M 事件投递）
+    // Benchmark 8: Watch 扇出吞吐量（N 订阅者 × M 事件投递）
     // ═══════════════════════════════════════════════════════════════
 
     #[tokio::test]

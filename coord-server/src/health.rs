@@ -3,7 +3,7 @@
 // 提供轻量级 HTTP 端点用于 K8s 探活和 Prometheus 指标采集。
 // 使用原生 tokio TcpListener，不引入额外 HTTP 框架依赖。
 //
-// ADP §16.4 要求：
+// 端点要求：
 // - Liveness:  /health 返回 200 OK（进程存活）
 // - Readiness: /health?ready=true 检查 Raft 就绪状态及 Per-Region 就绪
 // - Verbose:   /health?verbose=true 返回每个 Region 的详细状态

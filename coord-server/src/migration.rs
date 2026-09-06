@@ -1,12 +1,12 @@
-// Legacy 单 Raft → Multi-Raft 数据迁移（R-MR-07 / T5.15/T5.16）
+// Legacy 单 Raft → Multi-Raft 数据迁移
 //
 // 目标：存量单 Raft（multi_raft.enabled=false，用户 KV 全在 region 0 根目录
 // store）升级到 Multi-Raft（用户 KV 按 key range 落入各数据 Region）时，把
 // region 0 根 store 中的 **用户 KV** 无损搬入各 Region raft，并留下迁移标记，
-// 使 fail-closed 启动闸（T5.16）放行。
+// 使 fail-closed 启动闸放行。
 //
 // 一致性前提（本模块的架构约束，2026-09-05 设计决策）：
-// 本仓 revision ≡ raft log index（D-A2），MVCC 状态机是 raft 日志的确定性
+// 本仓 revision ≡ raft log index，MVCC 状态机是 raft 日志的确定性
 // apply 结果。**离线直接注入 store 会破坏 日志↔状态机 等价**（新 follower /
 // 快照 / 压缩 / per-Region watch 全部以日志为准，会与直写数据分叉）。
 // 因此迁移**必须经 raft 日志复制**：数据写入目标 Region raft 的
@@ -24,10 +24,10 @@
 //      迁移标记——标记经 region 0 raft 复制（各节点一致、持久），后续启动
 //      据此跳过迁移。任一 Region 数据未达 quorum → 标记永不被写 → 集群卡在
 //      迁移态（fail-safe，不会出现"假完成"）。
-//   4. 迁移**只读源、不删源数据**（T2.6 回滚 = 关闭 multi_raft 用 region 0
+//   4. 迁移**只读源、不删源数据**（回滚 = 关闭 multi_raft 用 region 0
 //      原数据字节级恢复）；迁移后的新写入只进 Region store（回滚丢增量，文档化）。
 //
-// 边界（v1，见 docs/multi-raft-limits.md）：迁移在停机窗口启动时执行（boot
+// 边界（v1）：迁移在停机窗口启动时执行（boot
 // 阻塞至标记写入）；加密启用 + multi_raft 的组合不在 v1 范围（Region store
 // 与 root store 共享 Barrier 密钥时本流程天然对称，未单独验证）。
 
@@ -57,7 +57,7 @@ fn is_system_key(key: &[u8]) -> bool {
     key.starts_with(b"/_sys/") || key.starts_with(b"/_lease/")
 }
 
-// ──── fail-closed 启动闸原语（T5.16）────
+// ──── fail-closed 启动闸原语 ────
 
 /// region 0 根 store 是否存在**待迁移的 legacy 用户 KV**（活 key；`/_sys/*`、
 /// `/_lease/*` 系统数据不计）。marker 自身属 `/_sys/`，不会误判。
@@ -71,7 +71,7 @@ pub fn has_migration_marker(mvcc: &MvccStorage<RedbBackend>) -> Result<bool> {
     Ok(mvcc.get(MIGRATION_MARKER_KEY)?.is_some())
 }
 
-/// T5.16：fail-closed 启动闸决策。
+/// fail-closed 启动闸决策。
 ///
 /// 返回 `Some(原因)` = 应**拒绝启动**（multi_raft 开启但根 store 尚有未迁移
 /// 的 legacy 用户 KV）；`None` = 放行。

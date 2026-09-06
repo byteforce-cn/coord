@@ -1,4 +1,4 @@
-// TDD: 分布式调度服务测试 (Phase H-DistScheduler — RED)
+// TDD: 分布式调度服务测试 (RED)
 //
 // 验证 SchedulerService 能够：
 // 1. 注册/注销定时任务
@@ -7,7 +7,7 @@
 // 4. 惊群缓解（随机退避）
 // 5. 任务状态查询
 //
-// v8.2 §4.9: 任务认领机制，Exactly-Once 内部状态，惊群缓解
+// 任务认领机制，Exactly-Once 内部状态，惊群缓解
 //
 // RED 阶段：SchedulerService 尚未实现，这些测试预期失败。
 

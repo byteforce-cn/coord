@@ -1,6 +1,6 @@
 // Coord Server 配置解析
 //
-// 支持三种配置源，优先级从高到低（ADP §15.1）：
+// 支持三种配置源，优先级从高到低：
 // 1. CLI 参数（--id, --addr 等）
 // 2. 配置文件（TOML 格式，coord.toml）
 // 3. 默认值
@@ -40,7 +40,7 @@ pub struct Config {
     #[serde(default)]
     pub limits: LimitsConfig,
 
-    /// Multi-Raft 配置（`[multi_raft]` 段；Phase 2 T2.6 兼容开关 + T3.4 初始 Region 表）
+    /// Multi-Raft 配置（`[multi_raft]` 段；兼容开关 + 初始 Region 表）
     #[serde(default)]
     pub multi_raft: MultiRaftConfig,
 }
@@ -118,10 +118,10 @@ impl Config {
         }
     }
 
-    /// P2-02：启动前配置校验（收集全部错误，一次报清）。
+    /// 启动前配置校验（收集全部错误，一次报清）。
     ///
     /// 校验项：节点 ID；gRPC/Raft/HTTP 地址可解析且端口合法、互不冲突；
-    /// TLS 证书/私钥成对配置且文件存在（缺配不再静默降级明文，规格 C.4.6 fail-closed）；
+    /// TLS 证书/私钥成对配置且文件存在（缺配不再静默降级明文，fail-closed）；
     /// 数据目录非空；watch_buffer/并发流上限合法；bootstrap 与 join 互斥；
     /// initial_nodes 成员合法；auth_root_key 为 64 位 hex；磁盘水位比例合法。
     pub fn validate(&self) -> Result<(), Vec<String>> {
@@ -261,21 +261,21 @@ impl Config {
             }
         }
 
-        // 9. auth_root_key 必须为 64 位 hex（32 字节，规格 C.4.2）
+        // 9. auth_root_key 必须为 64 位 hex（32 字节）
         if let Some(key) = &self.security.auth_root_key {
             if key.len() != 64 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
                 errs.push("security.auth_root_key must be 64 hex chars (32 bytes)".to_string());
             }
         }
 
-        // 9b. R-SEC-03：raft 共享密钥最短长度（HMAC 密钥强度下限）
+        // 9b. raft 共享密钥最短长度（HMAC 密钥强度下限）
         if let Some(secret) = &self.security.raft_shared_secret {
             if secret.len() < 16 {
                 errs.push("security.raft_shared_secret must be at least 16 characters".to_string());
             }
         }
 
-        // 9c. R-SEC-04：拒绝已知占位密钥/密码（示例配置默认值不得通过校验，
+        // 9c. 拒绝已知占位密钥/密码（示例配置默认值不得通过校验，
         //     防止照抄示例上线：全零 root key 等价于公开密钥）。
         for (label, key) in [
             (
@@ -356,7 +356,7 @@ impl Config {
             ));
         }
 
-        // 12. R-MR-01：multi_raft 段合法性（enabled=true 时 initial_regions 须
+        // 12. multi_raft 段合法性（enabled=true 时 initial_regions 须
         //    平铺整个 keyspace：首 region start_key 为空、相邻首尾相接无空洞/重叠、
         //    末 region end_key 为空无上界；region id 唯一且 > 0，0 保留给单
         //    Raft/system raft；v1 仅支持静态成员——本节点必须在 cluster.initial_nodes
@@ -433,7 +433,7 @@ impl Config {
             }
         }
 
-        // 12b. R-MR-02：multi_raft.pd 段合法性（Phase 3 T3.4；PD 内嵌模式 v1）。
+        // 12b. multi_raft.pd 段合法性（PD 内嵌模式 v1）。
         //     - pd.enabled=true 要求 multi_raft.enabled=true（PD 附着于多 Region 装配）；
         //     - 各间隔/超时 > 0；max_concurrent_operators > 0；
         //     - target_replicas ∈ [1, cluster 成员数]（v1 静态成员下不能多于可用节点）。
@@ -528,7 +528,7 @@ impl Config {
         }
     }
 
-    /// P2-02：SIGHUP 热更新安全子集快照（仅含运行时安全生效的字段）。
+    /// SIGHUP 热更新安全子集快照（仅含运行时安全生效的字段）。
     pub fn reloadable(&self) -> ReloadableConfig {
         ReloadableConfig {
             watch_buffer: self.network.watch_buffer,
@@ -538,7 +538,7 @@ impl Config {
     }
 }
 
-/// P2-02：SIGHUP 热更新安全子集。
+/// SIGHUP 热更新安全子集。
 ///
 /// 仅包含运行时安全生效的字段：磁盘水位阈值（下一监控周期生效）、
 /// watch 缓冲（新订阅生效）。监听地址/TLS/集群拓扑等需重启才生效。
@@ -551,7 +551,7 @@ pub struct ReloadableConfig {
 
 /// 校验 `host:port` 地址：可解析为 SocketAddr 且端口合法。
 /// 返回端口号（合法时）。
-/// R-SEC-04：是否为占位密钥（示例模板 change-me / __FILL__ 类默认值）。
+/// 是否为占位密钥（示例模板 change-me / __FILL__ 类默认值）。
 fn is_placeholder_secret(s: &str) -> bool {
     let s = s.trim().to_ascii_lowercase();
     s.contains("change-me") || s.contains("change_me") || s == "changeme" || s.contains("__fill")
@@ -629,11 +629,11 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub ui_enabled: bool,
 
-    /// 每 watcher 事件队列长度（P1-02：可配，默认 1024）
+    /// 每 watcher 事件队列长度（可配，默认 1024）
     #[serde(default = "default_watch_buffer")]
     pub watch_buffer: usize,
 
-    /// gRPC 单连接并发流上限（P1-02：默认 512）
+    /// gRPC 单连接并发流上限（默认 512）
     #[serde(default = "default_max_concurrent_streams")]
     pub max_concurrent_streams: u32,
 }
@@ -707,11 +707,11 @@ pub struct StorageConfig {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 
-    /// P2-02：磁盘水位告警阈值（可用比例 < 该值 WARN，默认 0.15）
+    /// 磁盘水位告警阈值（可用比例 < 该值 WARN，默认 0.15）
     #[serde(default = "default_disk_warn_ratio")]
     pub disk_warn_ratio: f64,
 
-    /// P2-02：磁盘水位只读阈值（可用比例 < 该值置只读闸，默认 0.05）
+    /// 磁盘水位只读阈值（可用比例 < 该值置只读闸，默认 0.05）
     #[serde(default = "default_disk_readonly_ratio")]
     pub disk_readonly_ratio: f64,
 }
@@ -753,40 +753,40 @@ pub struct SecurityConfig {
     pub tls_ca: Option<PathBuf>,
 
     /// Auth 是否启用（默认 **true**：生产默认鉴权开启；
-    /// `false` 仅限 `dev` 子命令或显式测试配置，P0-C.1 唯一开关）
+    /// `false` 仅限 `dev` 子命令或显式测试配置，唯一开关）
     #[serde(default = "default_auth_enabled")]
     pub auth_enabled: bool,
 
     /// root 密码（server 模式强制；缺省时从 `COORD_ROOT_PASSWORD` 环境变量
-    /// 或随机生成并仅打印一次，规格 C.4.8）
+    /// 或随机生成并仅打印一次）
     #[serde(default)]
     pub root_password: Option<String>,
 
     /// Auth 根密钥（hex 编码 32 字节）。缺省时从 `<data_dir>/auth-root-key.bin`
-    /// 加载或首次生成（HKDF 派生 CCT 签名密钥，规格 C.4.2）。
+    /// 加载或首次生成（HKDF 派生 CCT 签名密钥）。
     /// 多节点集群必须共享同一根密钥。
     #[serde(default)]
     pub auth_root_key: Option<String>,
 
-    /// gRPC reflection 开关（默认 **false**，生产关闭，规格 C.4.1）
+    /// gRPC reflection 开关（默认 **false**，生产关闭）
     #[serde(default)]
     pub reflection_enabled: bool,
 
-    /// 静态加密开关（R-SEC-01，默认 **false**）。开启后 `/kv/` 用户数据
+    /// 静态加密开关（默认 **false**）。开启后 `/kv/` 用户数据
     /// 经 AES-256-GCM Barrier 加密落盘，Seal/Unseal/DEK 自动轮换生效。
     /// 缺省 root 密钥首次启动时生成并写入 `<data_dir>/encryption-root-key.bin`
-    /// （0600）；升级窗口内旧明文数据需经一次性迁移工具（见 17 号文档 R-SEC-01）。
+    /// （0600）；升级窗口内旧明文数据需经一次性迁移工具。
     #[serde(default)]
     pub encryption_enabled: bool,
 
-    /// 静态加密 root 密钥（hex 编码 32 字节，R-SEC-01）。
+    /// 静态加密 root 密钥（hex 编码 32 字节）。
     /// 优先级：本配置 > `COORD_ENCRYPTION_ROOT_KEY` 环境变量 >
     /// `<data_dir>/encryption-root-key.bin`。多节点各存各的本地 DEK，
     /// 但每个节点启动都需同一 root 密钥以解密本地密文 DEK。
     #[serde(default)]
     pub encryption_root_key: Option<String>,
 
-    /// Raft 节点间共享密钥（R-SEC-03，默认 None）。
+    /// Raft 节点间共享密钥（默认 None）。
     ///
     /// raft 端口认证策略（三选一，fail-closed）：
     /// 1. `tls_cert/tls_key + tls_ca` 已配置 → 强制 mTLS（缺 CA 拒绝启动）；
@@ -926,17 +926,17 @@ pub struct RaftTuningConfig {
     pub snapshot_rate_limit_bytes_per_sec: u64,
 }
 
-/// Multi-Raft 配置（`[multi_raft]` 段；Phase 2 T2.6/T3.4）。
+/// Multi-Raft 配置（`[multi_raft]` 段）。
 ///
 /// - `enabled=false`（默认）：单 Raft 模式，本段其余字段被忽略——磁盘布局、
-///   备份、回滚均保持 legacy 字节级不变（T2.6 退化路径）。
+///   备份、回滚均保持 legacy 字节级不变（退化路径）。
 /// - `enabled=true`：启用多 Region 模式——节点在 `cluster.initial_nodes` 静态
 ///   成员上按 `initial_regions` 装配 per-region Raft 组（region ≥1，目录级存储
 ///   隔离于 `<data_dir>/regions/region-{id:016x}/`，见 raft/region_runtime.rs）；
 ///   region 0 仍作为 system raft（鉴权/会话等 `/_sys/*` 系统数据）保留在根目录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiRaftConfig {
-    /// 是否启用多 Region 模式（默认 false = 单 Raft legacy，T2.6 字节级退化）
+    /// 是否启用多 Region 模式（默认 false = 单 Raft legacy，字节级退化）
     #[serde(default)]
     pub enabled: bool,
 
@@ -947,7 +947,7 @@ pub struct MultiRaftConfig {
     #[serde(default)]
     pub initial_regions: Vec<InitialRegionConfig>,
 
-    /// PD 子配置（`[multi_raft.pd]` 段；Phase 3 T3.4 内嵌 PD）。
+    /// PD 子配置（`[multi_raft.pd]` 段；内嵌 PD）。
     ///
     /// 仅 `enabled=true`（多 Region 装配）时生效：节点内嵌运行 PlacementDriver
     /// （区域/节点心跳上报 + 调度循环 + operator 执行循环，元数据落盘
@@ -955,7 +955,7 @@ pub struct MultiRaftConfig {
     #[serde(default)]
     pub pd: MultiRaftPdConfig,
 
-    /// T5.15/R-MR-07：本次启动执行 Legacy → Multi-Raft 迁移
+    /// 本次启动执行 Legacy → Multi-Raft 迁移
     /// （`[multi_raft].legacy_migration = true`，一次性）。
     ///
     /// 存量单 Raft（用户 KV 在 region 0 根 store）升级到 multi_raft 时，boot 期
@@ -965,12 +965,12 @@ pub struct MultiRaftConfig {
     /// （回滚 = 关闭 multi_raft 用 region 0 原数据字节级恢复）。
     ///
     /// 语义/边界见 `coord-server/src/migration.rs` 模块文档与
-    /// `docs/multi-raft-limits.md`；fail-closed 闸（T5.16）：根 store 有未迁移
+    /// ``；fail-closed 闸：根 store 有未迁移
     /// 用户 KV 且未开本开关/`allow_unmigrated` 时拒绝启动。
     #[serde(default)]
     pub legacy_migration: bool,
 
-    /// T5.16：救援开关——根 store 有未迁移 legacy 用户 KV 时仍强制放行启动
+    /// 救援开关——根 store 有未迁移 legacy 用户 KV 时仍强制放行启动
     /// （跳过闸与迁移；数据 Region 为空，用户数据面由运维负责，通常仅用于
     /// 误开 multi_raft 后回滚排查）。正常升级路径请用 `legacy_migration`。
     #[serde(default)]
@@ -1004,10 +1004,10 @@ pub struct InitialRegionConfig {
     pub end_key: String,
 }
 
-/// PD 子配置（`[multi_raft.pd]` 段；Phase 3 T3.4）。
+/// PD 子配置（`[multi_raft.pd]` 段）。
 ///
 /// v1 仅支持**内嵌模式**（PD 作为每个 Coord 进程的一部分运行，直接调度本进程
-/// 装配的 Region raft；独立 PD 进程为 Phase 3+）。字段默认值与
+/// 装配的 Region raft；独立 PD 进程为）。字段默认值与
 /// `coord_server::pd::PdConfig::default()` 对齐；`enabled=false`（默认）时本段
 /// 全部字段被忽略（不装配 PD、不落盘 pd-meta.db、无调度/心跳循环）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1046,13 +1046,13 @@ pub struct MultiRaftPdConfig {
     /// 节点心跳超时（秒；超时标记离线，调度不基于离线节点）
     pub node_heartbeat_timeout: u64,
 
-    /// T5.11 P3：Running operator 认领超时（秒）——region 0 leader 周期扫描全局
+    /// Running operator 认领超时（秒）——region 0 leader 周期扫描全局
     /// 队列，认领超过该时长（认领者失联/Complete 丢失 → 卡死）的 operator 放回
     /// Pending 由存活 Region leader 重认领（failover）。须大于单次 operator 正常
     /// 执行时长（默认 300s）。
     pub operator_running_timeout: u64,
 
-    /// T5.12：调度暂停开关（初始值；true = 启动即不调度，仅 executor drain 已
+    /// 调度暂停开关（初始值；true = 启动即不调度，仅 executor drain 已
     /// 排队 operator）。用于维护窗口/演练冻结调度；运行时切换见
     /// `PlacementDriver::set_scheduler_paused`（未来管理面 RPC 接入点）。
     #[serde(default)]
@@ -1081,7 +1081,7 @@ impl Default for MultiRaftPdConfig {
 }
 
 impl MultiRaftPdConfig {
-    /// 转换为 PD 运行时配置（Embedded 模式；T3.4 main.rs 装配用）
+    /// 转换为 PD 运行时配置（Embedded 模式；main.rs 装配用）
     pub fn to_pd_config(&self) -> coord_server::pd::PdConfig {
         coord_server::pd::PdConfig {
             mode: coord_server::pd::PdMode::Embedded,
@@ -1133,7 +1133,7 @@ mod tests {
         assert_eq!(config.storage.data_dir, PathBuf::from("/var/lib/coord"));
         assert!(!config.cluster.bootstrap);
         assert!(config.security.tls_cert.is_none());
-        // P0-C.1：默认配置启动即鉴权开启
+        // 默认配置启动即鉴权开启
         assert!(config.security.auth_enabled);
         assert!(!config.security.reflection_enabled);
     }
@@ -1210,7 +1210,7 @@ auth_enabled = true
         assert_eq!(config.resolve_raft_addr(), "0.0.0.0:9999");
     }
 
-    // ──── P2-02 启动校验与热更新 ────
+    // ──── 启动校验与热更新 ────
 
     #[test]
     fn test_validate_default_config_ok() {
@@ -1289,7 +1289,7 @@ auth_enabled = true
         );
     }
 
-    // ──── R-SEC-04：占位密钥/密码拒绝 ────
+    // ──── 占位密钥/密码拒绝 ────
 
     #[test]
     fn test_validate_rejects_all_zero_auth_root_key() {
@@ -1357,7 +1357,7 @@ auth_enabled = true
         assert!(config.validate().is_ok());
     }
 
-    // ──── R-SEC-03：raft 共享密钥校验 ────
+    // ──── raft 共享密钥校验 ────
 
     #[test]
     fn test_validate_rejects_short_raft_shared_secret() {
@@ -1400,7 +1400,7 @@ auth_enabled = true
         assert_eq!(r.disk_readonly_ratio, 0.08);
     }
 
-    // ──── Multi-Raft（[multi_raft] / T2.6 / T3.4）────
+    // ──── Multi-Raft（[multi_raft] / /）────
 
     /// 构造 enabled=true + 3 region 平铺（["","b") / ["b","n") / ["n",""))
     /// 且本节点（node_id）在 initial_nodes 中的合法配置。
@@ -1448,11 +1448,11 @@ auth_enabled = true
 
     #[test]
     fn test_multi_raft_default_disabled() {
-        // T2.6：默认关闭 = 单 Raft 退化路径（initial_regions 不生效）
+        // 默认关闭 = 单 Raft 退化路径（initial_regions 不生效）
         let config = Config::default();
         assert!(!config.multi_raft.enabled);
         assert!(config.multi_raft.initial_regions.is_empty());
-        // T5.15/T5.16：迁移/救援开关默认关闭（不改变既有行为）
+        // 迁移/救援开关默认关闭（不改变既有行为）
         assert!(!config.multi_raft.legacy_migration);
         assert!(!config.multi_raft.allow_unmigrated);
         assert!(config.validate().is_ok());
@@ -1626,11 +1626,11 @@ end_key = ""
         );
     }
 
-    // ──── Multi-Raft PD（[multi_raft.pd] / Phase 3 T3.4）────
+    // ──── Multi-Raft PD（[multi_raft.pd] /）────
 
     #[test]
     fn test_multi_raft_pd_default_disabled() {
-        // T3.4：pd.enabled 默认 false = 多 Region 装配但不调度
+        // pd.enabled 默认 false = 多 Region 装配但不调度
         let config = Config::default();
         assert!(!config.multi_raft.pd.enabled);
         // 默认 pd 段与 PdConfig::default() 对齐（内嵌模式转换后）
@@ -1638,10 +1638,10 @@ end_key = ""
         assert!(matches!(pd.mode, coord_server::pd::PdMode::Embedded));
         assert_eq!(pd.balance_interval, 120);
         assert_eq!(pd.target_replicas, 3);
-        // P3：Running 超时重认领默认 300s（对齐 PdConfig::default()）
+        // Running 超时重认领默认 300s（对齐 PdConfig::default()）
         assert_eq!(pd.operator_running_timeout, 300);
         assert_eq!(config.multi_raft.pd.operator_running_timeout, 300);
-        // T5.12：调度暂停默认 false（启动即正常调度）
+        // 调度暂停默认 false（启动即正常调度）
         assert!(!config.multi_raft.pd.scheduler_paused);
         assert!(!pd.scheduler_paused);
         assert!(config.validate().is_ok());
@@ -1681,7 +1681,7 @@ scheduler_paused = true
         assert_eq!(pd_cfg.split_check_interval, 30);
         assert_eq!(pd_cfg.region_split_size_mb, 256);
         assert_eq!(pd_cfg.operator_running_timeout, 300);
-        // T5.12：调度暂停开关透传
+        // 调度暂停开关透传
         assert!(pd_cfg.scheduler_paused, "toml scheduler_paused=true 应被解析");
 
         // to_pd_config 映射

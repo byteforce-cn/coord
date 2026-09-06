@@ -1,22 +1,19 @@
-// coord-agent: 消息队列 (MQ Service) — 数据面（Phase F + ISR v2.1）
+// coord-agent: 消息队列 (MQ Service) — 数据面（支持 ISR 复制）
 //
 // 实现 BaseService trait，基于 redb 提供本地分段日志消息队列。
 // 支持 Topic/Partition/ConsumerGroup/DeadLetterQueue。
 //
-// 架构（v3.0 + v2.1 ISR）:
+// 架构（v3.0 + ISR）:
 // - Agent 本地持久化日志（redb 分段日志）；**默认单 agent 语义**
 // - Topic 配置 / 分区 / 消费组偏移 / DLQ 均为 per-agent 本地存储
 // - 消费模型：poll（按 offset 增量拉取）+ ack（提交消费组偏移）→ at-least-once
-// - subscribe 为基于消费组 offset 的长轮询推送（Phase 4）
+// - subscribe 为基于消费组 offset 的长轮询推送
 //
-// ✅ 状态声明（v2.1，2026-08-08）：ISR 复制**已实现并落地**——
-// - `produce_replicated`：分区 Leader 独占分配 offset（C1），单事务（NEXT_OFFSET_TABLE
+// ✅ 状态声明（2026-08-08）：ISR 复制**已实现并落地**——
+// - `produce_replicated`：分区 Leader 独占分配 offset，单事务（NEXT_OFFSET_TABLE
 //   + 消息 + 复制日志 + 幂等键 + 本地序列号）→ 同步推送到 ISR Followers → min_isr 校验
-// - Follower 幂等应用 + 自动建 topic；subscribe / ack 仅 Leader（C4/C3）
+// - Follower 幂等应用 + 自动建 topic；subscribe / ack 仅 Leader
 // - 默认关闭（services.replication=false）= 纯单 agent，零破坏；启用后可宣称分布式 / 高可用
-// - 落地记录见 docs/cache-mq-isr-evaluation.md（v2.1）
-//
-// 参见 docs/client-agent-architecture-v3.md §5.6。
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -94,7 +91,7 @@ const NEXT_OFFSET_TABLE: redb::TableDefinition<&[u8], u64> =
 // 复制条目日志: key = [shard_len:u32][shard_bytes][seq:u64 BE]
 const REPL_ENTRY_TABLE: redb::TableDefinition<&[u8], &[u8]> =
     redb::TableDefinition::new("mq:repl_entries");
-// 持久化幂等键（Q2）: key = idempotency_key bytes
+// 持久化幂等键: key = idempotency_key bytes
 const REPL_APPLIED_KEYS: redb::TableDefinition<&[u8], ()> =
     redb::TableDefinition::new("mq:repl_applied");
 // 各 shard 最后已应用序列号: key = shard bytes
@@ -265,9 +262,9 @@ pub struct MessageQueueService {
     max_size_bytes: u64,
     /// 订阅者注册表：topic → (consumer_group, 消息 channel [(partition, record)])
     subscriptions: RwLock<HashMap<String, Vec<SubscriberEntry>>>,
-    /// ISR 复制管理器（None = 单 agent 本地语义，零复制路径保留，C6）
+    /// ISR 复制管理器（None = 单 agent 本地语义，零复制路径保留）
     replication: RwLock<Option<Arc<crate::services::replication::ReplicationManager>>>,
-    /// 自身 Arc 弱引用（Phase 1 T1.2：spawn_blocking 升级用，见 bind_self_weak）
+    /// 自身 Arc 弱引用（spawn_blocking 升级用，见 bind_self_weak）
     self_arc: RwLock<Option<std::sync::Weak<MessageQueueService>>>,
 }
 
@@ -293,7 +290,7 @@ impl MessageQueueService {
         }
     }
 
-    /// 绑定自身 Arc 弱引用（Phase 1 T1.2：gRPC handler 升级为强引用后，
+    /// 绑定自身 Arc 弱引用（gRPC handler 升级为强引用后，
     /// 把同步 redb 事务放到 `spawn_blocking`，避免阻塞 agent 异步执行器）。
     ///
     /// 由服务装配方在 `Arc::new` 后调用一次（lib.rs run_agent 数据面初始化）。
@@ -306,7 +303,7 @@ impl MessageQueueService {
         self.self_arc.read().as_ref().and_then(|w| w.upgrade())
     }
 
-    /// 在阻塞线程池上执行同步 redb 操作（Phase 1 T1.2）。
+    /// 在阻塞线程池上执行同步 redb 操作。
     /// 服务装配时必须先 `bind_self_weak`。
     pub async fn run_blocking<F, R>(&self, f: F) -> ServiceResult<R>
     where
@@ -480,7 +477,7 @@ impl MessageQueueService {
 
         let _ = (msg_key_prefix, next_key); // silence unused warnings
 
-        // 推送通知订阅者（Phase 4 流式 subscribe：基于消费组偏移过滤）
+        // 推送通知订阅者（流式 subscribe：基于消费组偏移过滤）
         self.notify_subscribers(topic, partition, offset, payload.clone(), now_millis());
 
         Ok(offset)
@@ -536,7 +533,7 @@ impl MessageQueueService {
         Ok(records)
     }
 
-    // ──── 流式订阅（Phase 4）────
+    // ──── 流式订阅 ────
 
     /// 注册订阅者并回放已提交偏移之后的消息。
     ///
@@ -803,13 +800,11 @@ impl MessageQueueService {
     }
 }
 
-// ──── ISR 复制（v2.1 已落地）────
+// ──── ISR 复制（已落地）────
 //
 // 复制日志 / 持久化幂等键 / 本地序列号与本服务数据同 redb（mq.redb），
-// 与数据写同事务提交（Phase A 收敛决策：NEXT_OFFSET_TABLE 与复制条目同事务）。
-// 分区 Leader 独占分配 offset（C1）并广播；Follower 只应用不分配。
-//
-// 参见 docs/cache-mq-isr-evaluation.md §4。
+// 与数据写同事务提交（收敛决策：NEXT_OFFSET_TABLE 与复制条目同事务）。
+// 分区 Leader 独占分配 offset 并广播；Follower 只应用不分配。
 
 use crate::services::replication::{
     IdempotencyKey, ReplicatedStore, ReplicationEntry, ReplicationError, ReplicationOp,
@@ -977,8 +972,8 @@ impl MessageQueueService {
         }
     }
 
-    /// Leader 侧复制生产（Phase B）：单事务本地提交（含 offset 分配）→
-    /// 推送 ISR Followers（同步复制）→ min_isr 校验 → Leader 推送订阅者（C4）。
+    /// Leader 侧复制生产：单事务本地提交（含 offset 分配）→
+    /// 推送 ISR Followers（同步复制）→ min_isr 校验 → Leader 推送订阅者。
     pub async fn produce_replicated(
         &self,
         topic: &str,
@@ -1050,7 +1045,7 @@ impl MessageQueueService {
             .map_err(|e| e.to_string())?;
         rm.ensure_isr(acked + 1).map_err(|e| e.to_string())?;
 
-        // Leader 推送订阅者（C4：仅 Leader 推送）
+        // Leader 推送订阅者（仅 Leader 推送）
         self.notify_subscribers(topic, partition, offset, notify_payload, now_millis());
 
         Ok(offset)
@@ -1325,7 +1320,7 @@ mod tests {
         }
     }
 
-    /// Phase 4：流式订阅 —— 回放已提交偏移之后的消息 + produce 实时推送
+    /// 流式订阅 —— 回放已提交偏移之后的消息 + produce 实时推送
     #[test]
     fn test_subscribe_replay_and_push() {
         use tokio::sync::mpsc;

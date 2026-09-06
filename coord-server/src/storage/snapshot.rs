@@ -1,6 +1,6 @@
 // Snapshot 导出/导入
 //
-// 实现 ADP §19 的状态机快照能力：
+// 实现 的状态机快照能力：
 // - export_snapshot_data: 从 MvccStorage 导出全量数据
 // - import_snapshot_data: 将快照数据恢复到 MvccStorage
 //
@@ -48,13 +48,13 @@ pub struct SnapshotData {
     pub lease_entries: Vec<SnapshotRawEntry>,
     /// R-RFT-06：changelog 压缩水位（`META_COMPACT_REVISION`，0 = 未压缩）
     pub compacted_revision: u64,
-    /// R-MR-08（D1-a）P2：region 0 PD 全局队列域原始条目（`/_pd/*` → bytes）。
+    /// region 0 PD 全局队列域原始条目（`/_pd/*` → bytes）。
     ///
-    /// region 0 状态机含 `/_pd/ops/{op_id}` operator 治理记录（D1-a 全局去重
+    /// region 0 状态机含 `/_pd/ops/{op_id}` operator 治理记录（全局去重
     /// 队列）。快照必须携带该域——导入时 `TABLE_KV` 全表清空重灌，缺此域会让
     /// 快照追平/恢复把队列清空（op 丢失、调度停滞）。
     pub pd_entries: Vec<SnapshotRawEntry>,
-    /// P2：region 0 其余 system 域原始条目（`/_sys/*` 中不属于 `/_sys/auth/*`
+    /// region 0 其余 system 域原始条目（`/_sys/*` 中不属于 `/_sys/auth/*`
     /// 的行——迁移标记 `/_sys/migration/legacy-v1` 等）。恢复后启动闸/迁移
     /// 状态跨快照不丢。
     pub sys_entries: Vec<SnapshotRawEntry>,
@@ -91,9 +91,9 @@ pub struct SnapshotKvMeta {
 }
 
 impl SnapshotData {
-    /// 当前快照格式版本（P0-A：版本号 +1；0.1.x 数据不承诺兼容）
+    /// 当前快照格式版本（版本号 +1；0.1.x 数据不承诺兼容）
     /// v3（R-RFT-06）：新增 auth/lease 域 + compacted 水位，导入写完整 LogId。
-    /// v4（R-MR-08 D1-a P2）：新增 region 0 `/_pd/*`（PD 队列）与 `/_sys/*`
+    /// v4：新增 region 0 `/_pd/*`（PD 队列）与 `/_sys/*`
     ///   非 auth 域（迁移标记等）原始条目——region 0 状态机的内部记录不再丢失。
     const CURRENT_VERSION: u32 = 4;
 
@@ -131,7 +131,7 @@ impl SnapshotData {
     /// R-TST-21：反序列化 + 旧格式迁移（数据格式升级兼容）。
     ///
     /// 直接解析成功且版本匹配 → 原样返回；否则逐级回退 v3 → v2 迁移：
-    /// - v3 = R-MR-08 P2 之前：无 `/_pd/*` 与 `/_sys/*`（非 auth）域 → 迁移后
+    /// - v3 = 之前：无 `/_pd/*` 与 `/_sys/*`（非 auth）域 → 迁移后
     ///   补空域（region 0 内部记录本就丢失，运行时会重新经 raft 收敛）；
     /// - v2 = R-RFT-06 之前：无 auth/lease 域、无 compacted 水位、applied
     ///   term/node_id 不持久化 → 迁移结果域置空、水位 0、applied 回退 0。
@@ -223,7 +223,7 @@ impl SnapshotData {
     }
 }
 
-/// R-MR-08（D1-a）P2：v3 快照格式（PD/迁移内部域之前）。字段顺序与 v3 时点
+/// v3 快照格式（PD/迁移内部域之前）。字段顺序与 v3 时点
 /// 一致，仅用于旧数据升级迁移，不参与导出。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SnapshotDataV3 {
@@ -266,7 +266,7 @@ struct SnapshotDataV2 {
 ///   applied / kv / kv_meta 三次独立读事务的撕裂快照；
 /// - 补充 auth 域（`/_sys/auth/*`）、lease 域（`/_lease/*`）与 compacted 水位。
 ///
-/// R-MR-08（D1-a）P2：
+/// 
 /// - 补充 region 0 `/_pd/*`（PD 全局队列）与 `/_sys/*` 非 auth 域（迁移标记
 ///   等）——region 0 状态机内部记录随快照导出，导入/追平不丢。
 pub fn export_snapshot_data<B: StorageBackend>(
@@ -297,7 +297,7 @@ pub fn export_snapshot_data<B: StorageBackend>(
             // R-RFT-06：auth / lease 域随快照导出（恢复后用户/角色/会话/租约不丢）
             let auth_rows = tx.iter_prefix(TABLE_KV, b"/_sys/auth/")?;
             let lease_rows = tx.iter_prefix(TABLE_KV, b"/_lease/")?;
-            // R-MR-08（D1-a）P2：region 0 PD 队列 / 其余 system 域随快照导出
+            // region 0 PD 队列 / 其余 system 域随快照导出
             let pd_rows = tx.iter_prefix(TABLE_KV, b"/_pd/")?;
             let sys_rows = tx.iter_prefix(TABLE_KV, b"/_sys/")?;
             Ok((
@@ -369,7 +369,7 @@ pub fn export_snapshot_data<B: StorageBackend>(
         })
         .collect();
 
-    // R-MR-08（D1-a）P2：`/_pd/*` 全量；`/_sys/*` 中去掉已入 auth 域的行
+    // `/_pd/*` 全量；`/_sys/*` 中去掉已入 auth 域的行
     // （`/_sys/auth/*`），其余（迁移标记等）进 sys_entries。
     data.pd_entries = pd_rows
         .into_iter()
@@ -462,7 +462,7 @@ pub fn import_snapshot_data<B: StorageBackend>(
             tx.insert(TABLE_KV, &entry.internal_key, &entry.value)?;
         }
 
-        // R-MR-08（D1-a）P2：恢复 region 0 `/_pd/*`（PD 队列）与 `/_sys/*`
+        // 恢复 region 0 `/_pd/*`（PD 队列）与 `/_sys/*`
         // 非 auth 域（迁移标记等）原始条目——TABLE_KV 全表清空后一并回填。
         for entry in &data.pd_entries {
             tx.insert(TABLE_KV, &entry.internal_key, &entry.value)?;
@@ -500,7 +500,7 @@ pub fn import_snapshot_data<B: StorageBackend>(
     Ok(())
 }
 
-// ──── SnapshotTracker：purge 前置条件守卫（M0-5） ────
+// ──── SnapshotTracker：purge 前置条件守卫 ────
 
 /// 已持久化到磁盘的快照元数据（供 LogStore::purge 前置校验与启动检查）
 #[derive(Debug, Clone)]
@@ -752,7 +752,7 @@ mod tests {
         assert_eq!(applied.index, 9);
     }
 
-    // ──── R-MR-08（D1-a）P2：region 0 `/_pd/` 与 `/_sys/`（非 auth）域 ────
+    // ──── region 0 `/_pd/` 与 `/_sys/`（非 auth）域 ────
 
     #[test]
     fn test_snapshot_preserves_pd_queue_and_sys_domains() {
@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_v3_upgrade_migration() {
-        // 构造一条 v3 格式快照（R-MR-08 P2 之前：无 `/_pd/` 与 `/_sys/` 非 auth 域）
+        // 构造一条 v3 格式快照（之前：无 `/_pd/` 与 `/_sys/` 非 auth 域）
         let v3 = SnapshotDataV3 {
             version: 3,
             last_included_index: 11,

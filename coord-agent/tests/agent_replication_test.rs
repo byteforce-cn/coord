@@ -142,7 +142,7 @@ fn test_replication_entry_mq_publish() {
         "shard-mq-1".to_string(),
         "orders".to_string(),
         0,
-        7, // Leader 分配的全局一致 offset（C1）
+        7, // Leader 分配的全局一致 offset
         b"hello world".to_vec(),
         42,
     );

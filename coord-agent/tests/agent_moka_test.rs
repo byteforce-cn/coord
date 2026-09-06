@@ -1,6 +1,6 @@
-// TDD: Moka 缓存后端测试 (Phase D-moka — RED→GREEN)
+// TDD: Moka 缓存后端测试 (RED→GREEN)
 //
-// v8.2 §4.7: "moka（可选）纯内存缓存"
+// "moka（可选）纯内存缓存"
 
 use std::time::Duration;
 

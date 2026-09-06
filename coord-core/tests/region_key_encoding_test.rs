@@ -1,4 +1,4 @@
-// region_key_encoding_test.rs — Phase 0: Region Key 编码测试
+// region_key_encoding_test.rs — Region Key 编码测试
 //
 // TDD: 测试共享存储的 Key 前缀编码方案
 // 编码规范: /r/{region_id_hex}/kv/{user_key}

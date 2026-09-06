@@ -1,4 +1,4 @@
-// PD Operator 执行器（Phase 3 T3.3）
+// PD Operator 执行器
 //
 // 把调度器产生的 Operator 映射为对**真实 Region Raft** 的成员变更：
 //   - AddPeer       → `add_learner(node, raft_addr)`（blocking 追平复制）→
@@ -13,7 +13,7 @@
 // 不同步会导致同一 operator 被反复生成。
 //
 // 设计约束：
-// - pd 模块不直接依赖 raft/openraft 类型（P1-06：`openraft::`/`openraft_multi::`
+// - pd 模块不直接依赖 raft/openraft 类型（类型隔离：`openraft::`/`openraft_multi::`
 //   路径只允许出现在 `raft/` 模块内）。对 Region raft 的全部交互经
 //   `RegionRaftHandle` trait 抽象（定义于 `raft/region_runtime.rs`，由 raft 层
 //   自我描述能力），执行器只经 trait object 使用。
@@ -22,7 +22,7 @@
 // - 幂等：AddPeer 目标已是 Voter / RemovePeer 目标不在成员表 → 视为已达成
 //   成功（不重复触发 raft 成员变更，也不把重试当失败）。
 //
-// 队列来源（R-MR-08 D1-a；P4b 退役 legacy 本地队列路径后唯一模式）：
+// 队列来源（退役 legacy 本地队列路径后唯一模式）：
 // - **全局队列模式**（driver attach region 0 system raft，生产接线）：operator
 //   队列经 region 0 raft 承载（`/_pd/ops/*`）。执行器从全局队列只认领「目标
 //   Region 的当前 leader == 本节点」的 Pending 条目（本节点 raft 视角），
@@ -32,7 +32,7 @@
 //   调度器后续重新生成）。未装配 system raft 的装配（纯元数据类测试）无可
 //   认领条目，`execute_one` 返回 None。
 //
-// T3.4 接线增强：
+// 接线增强：
 // - AddPeer 的**成员真源 = raft 已提交成员**（`current_members`），不再依赖
 //   meta.peers 里的 learner 记录：目标已是 raft voter → 幂等成功；已是 raft
 //   learner（openraft remove_voter 会把被移除 voter 降为 learner）→ 跳过
@@ -55,18 +55,18 @@ use crate::raft::type_config::PdOp;
 
 /// Region raft 解析器：region_id → 本节点上该 Region 的 raft 句柄
 ///
-/// 由接线层提供（T3.4：main.rs 把 RegionManager 的 runtime 映射为 handle；
+/// 由接线层提供（main.rs 把 RegionManager 的 runtime 映射为 handle；
 /// 测试/本迭代集成测试直接构造）。
 pub type RegionRaftResolver = dyn Fn(RegionId) -> Option<Arc<dyn RegionRaftHandle>> + Send + Sync;
 
 /// AddPeer（node_id=0 占位）目标解析器：region_id → (目标 node_id, raft_addr)
 ///
-/// 由接线层注入（T3.4 EmbeddedPd：从已注册集群节点中选在线且非该 Region
+/// 由接线层注入（EmbeddedPd：从已注册集群节点中选在线且非该 Region
 /// voter 的节点）；返回 None = 当前无可用目标（执行器把 operator 放回队列
 /// 稍后重试）。
 pub type AddPeerTargetResolver = dyn Fn(RegionId) -> Option<(NodeID, String)> + Send + Sync;
 
-/// T3.3 Operator 执行器：消费 `PlacementDriver` 队列中的 operator 并应用到
+/// Operator 执行器：消费 `PlacementDriver` 队列中的 operator 并应用到
 /// 本节点可执行的 Region raft。
 pub struct OperatorExecutor {
     /// 所属 PD（持有 meta_store 与 operator 队列）
@@ -97,7 +97,7 @@ impl OperatorExecutor {
         self
     }
 
-    /// 注入 AddPeer 占位目标解析器（T3.4 接线层）
+    /// 注入 AddPeer 占位目标解析器（接线层）
     pub fn with_add_peer_resolver(mut self, resolver: Arc<AddPeerTargetResolver>) -> Self {
         self.add_peer_resolver = Some(resolver);
         self
@@ -216,7 +216,7 @@ impl OperatorExecutor {
                     continue;
                 }
             }
-            // T5.11 P3：认领成功审计（与 enqueue(pending)/complete(success|failed)
+            // 认领成功审计（与 enqueue(pending)/complete(success|failed)
             // 同口径，拼出 enqueue→claim→complete 全生命周期追踪）
             self.pd
                 .record_operator_event(&original, "claimed", &op_summary(&original));
@@ -300,7 +300,7 @@ impl OperatorExecutor {
     ) -> std::result::Result<(), String> {
         // Leader 守卫：只有 Region leader 能发起成员变更/转移。不是 leader /
         // 选举窗口（leader 未知）都不可执行——真实部署下该 operator 由
-        // Region leader 所在节点的 PD 执行（见模块文档 T3.4 边界）。
+        // Region leader 所在节点的 PD 执行。
         match raft.current_leader().await {
             Some(l) if l == self.node_id => {}
             Some(l) => {
@@ -365,7 +365,7 @@ impl OperatorExecutor {
             ));
         }
 
-        // T3.4：成员真源 = raft 已提交成员（current_members），不依赖
+        // 成员真源 = raft 已提交成员（current_members），不依赖
         // meta.peers 里的 learner 记录（remove_voter 后 meta 会移除该节点，
         // 但 raft 中它仍以 learner 存在——重加应走 promote-only 路径）。
         let raft_members = raft
@@ -932,7 +932,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_one_resolves_add_peer_placeholder_target() {
-        // T3.4：调度器以 node_id=0 占位的 AddPeer 经目标解析器落地为具体节点
+        // 调度器以 node_id=0 占位的 AddPeer 经目标解析器落地为具体节点
         let (pd, ex, fake) = leader_fake(vec![voter(1)]);
         let target: Arc<AddPeerTargetResolver> =
             Arc::new(|_rid| Some((2, "node2:50052".to_string())));
@@ -965,7 +965,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_one_unresolvable_add_peer_requeues() {
-        // T3.4：占位 AddPeer 无可选目标 → 保持 Pending 稍后重试，不记 Failed
+        // 占位 AddPeer 无可选目标 → 保持 Pending 稍后重试，不记 Failed
         let (pd, ex, _fake) = leader_fake(vec![voter(1)]);
         let none: Arc<AddPeerTargetResolver> = Arc::new(|_rid| None);
         let ex = ex.with_add_peer_resolver(none);
@@ -989,7 +989,7 @@ mod tests {
         );
     }
 
-    // ──── R-MR-08（D1-a P2）：全局队列模式（region 0 raft 承载）────
+    // ──── 全局队列模式（region 0 raft 承载）────
 
     /// 可编程 region 0 system raft 替身：与 `apply_pd_op` 同构的 CAS 模拟 +
     /// 记录 propose 命令（供断言 Claim/Complete 序列）。

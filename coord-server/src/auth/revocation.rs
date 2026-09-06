@@ -1,4 +1,4 @@
-// Token Revocation Store (Phase 2.5)
+// Token Revocation Store
 //
 // Maintains the set of revoked CCT tokens by their jti (JWT ID).
 // Uses a bloom filter for space-efficient membership testing with
@@ -9,8 +9,6 @@
 // - Exact HashSet for precise revocation checking
 // - Versioned delta sync for Agent incremental updates
 // - Fallback exact lookup on bloom positive
-//
-// See docs/capability-auth-implementation.md §3.4.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};

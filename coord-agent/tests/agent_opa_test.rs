@@ -1,6 +1,6 @@
-// TDD: Regorus OPA 引擎集成测试 (Phase E — 实施中)
+// TDD: Regorus OPA 引擎集成测试（实施中）
 //
-// v8.2 §4.11: Agent 内嵌 Regorus（Rust 原生 OPA 引擎），直接加载 Rego 策略进行本地评估。
+// Agent 内嵌 Regorus（Rust 原生 OPA 引擎），直接加载 Rego 策略进行本地评估。
 // - 无 Wasm 依赖
 // - 策略包由 Server 通过 KV/Watch 下发至 Agent
 // - 评估结果缓存 30 秒，策略版本变更时立即失效

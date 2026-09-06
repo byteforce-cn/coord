@@ -1,4 +1,4 @@
-// Region 运行时装配验收测试（Phase 2 T2.3：RegionManager 生产接线）
+// Region 运行时装配验收测试（RegionManager 生产接线）
 //
 // 验证：
 // - `RegionManager::spawn_region` 一步装配 Region 的存储（MvccStorage/LogStore/
@@ -184,7 +184,7 @@ async fn propose_put(rt: &RegionRuntime, key: &[u8], value: &[u8]) -> u64 {
     }
 }
 
-/// T2.3 核心验收：RegionManager 装配的两个 Region 独立选举 + 独立写入，
+/// 核心验收：RegionManager 装配的两个 Region 独立选举 + 独立写入，
 /// key range 路由（route / route_runtime）落到正确 Region。
 #[tokio::test]
 async fn test_spawn_regions_independent_election_and_routing() {

@@ -7,8 +7,6 @@
 // - /health             → 进程存活检查（200 OK）
 // - /health?ready=true  → 就绪检查（已连接 Server 集群则 200）
 // - /metrics            → Prometheus 文本格式指标
-//
-// 参见 docs/client-agent-architecture.md §4.6。
 
 use std::collections::HashMap;
 use std::sync::Arc;

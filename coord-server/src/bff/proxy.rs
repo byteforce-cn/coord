@@ -137,7 +137,7 @@ pub async fn revoke_token(
     State(core): State<Arc<dyn CoreClient>>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
-    // P0-C.5：将 token 转发内部 revoke-self 路由（CCT → raft RevokeJti）
+    // 将 token 转发内部 revoke-self 路由（CCT → raft RevokeJti）
     if let Some(token) = internal::extract_bearer_token(&headers) {
         let _ = core
             .forward("POST", "/v1/auth/token/revoke-self", &[], Some(&token))

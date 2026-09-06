@@ -1,7 +1,7 @@
-// coord-agent: TLS/mTLS 传输安全模块 (Phase A-mTLS)
+// coord-agent: TLS/mTLS 传输安全模块
 //
 // 提供 Agent ↔ Server 的 TLS/mTLS 配置与 Channel 构建。
-// v8.2 §2.2: Agent ↔ Server 强制 mTLS，证书由 PKI 服务自动签发轮换。
+// Agent ↔ Server 强制 mTLS，证书由 PKI 服务自动签发轮换。
 //
 // 职责：
 // - AgentTlsConfig: 证书路径配置，支持 TOML 反序列化

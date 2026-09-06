@@ -48,7 +48,7 @@ public interface PkiClient {
     /**
      * Issue a short-lived end-entity certificate signed by the CA.
      * <p>
-     * <b>Get-or-create (ISSUE-000)</b>: if an unexpired certificate already
+     * <b>Get-or-create</b>: if an unexpired certificate already
      * exists for the CN, the same certificate/key pair is returned. Idempotent.
      *
      * @param commonName the Common Name (CN) for the certificate
@@ -60,7 +60,7 @@ public interface PkiClient {
     /**
      * Issue a short-lived end-entity certificate with a custom TTL.
      * <p>
-     * <b>Get-or-create (ISSUE-000)</b>: idempotent per CN.
+     * <b>Get-or-create</b>: idempotent per CN.
      *
      * @param commonName the Common Name (CN) for the certificate
      * @param ttlSeconds TTL for the certificate in seconds (0 for default 24h)

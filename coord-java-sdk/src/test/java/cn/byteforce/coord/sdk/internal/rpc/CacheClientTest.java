@@ -35,7 +35,7 @@ import static org.mockito.Mockito.when;
 /**
  * Tests the {@link CacheClient} gRPC client against an in-process stub server.
  * <p>
- * Verifies Phase 2 SDK surface: rpop (atomic dequeue) / llen.
+ * Verifies SDK surface: rpop (atomic dequeue) / llen.
  */
 class CacheClientTest {
 

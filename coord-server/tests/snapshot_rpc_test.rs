@@ -1,10 +1,7 @@
-// P1-08 验收测试（L2 进程内）：Maintenance/Snapshot 流式导出 + 备份恢复
+// 验收测试（L2 进程内）：Maintenance/Snapshot 流式导出 + 备份恢复
 //
-// 覆盖决策文档 P1-08：
 // - `Maintenance/Snapshot` 流式实现（分块 1MiB，首块携带 last_included_index/term）
 // - 拉取后校验（版本 + bincode）→ 导入全新存储 → KV 完整恢复
-//
-// 对应文档：`docs/production/15-milestone-task-breakdown.md` P1-08。
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;
@@ -113,7 +110,7 @@ async fn start_node() -> (
     (grpc_addr, raft, mvcc, tmpdir, handle)
 }
 
-/// P1-08-1：流式拉取 → 解析校验 → 导入全新存储 → KV 完整恢复。
+/// -1：流式拉取 → 解析校验 → 导入全新存储 → KV 完整恢复。
 #[tokio::test]
 async fn test_snapshot_rpc_stream_and_restore() {
     use tokio_stream::StreamExt;
@@ -203,7 +200,7 @@ async fn test_snapshot_rpc_stream_and_restore() {
     assert_eq!(meta5.lease_id, 100);
 }
 
-/// P1-08-2：导出与在线拉取产物一致性（同源 export_snapshot_data 对照）。
+/// -2：导出与在线拉取产物一致性（同源 export_snapshot_data 对照）。
 #[tokio::test]
 async fn test_snapshot_rpc_matches_local_export() {
     use tokio_stream::StreamExt;

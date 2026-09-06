@@ -1,21 +1,18 @@
-// coord-agent: 跨 Agent 数据复制 (Push/Reconcile/ISR) — v2.1 已落地
+// coord-agent: 跨 Agent 数据复制 (Push/Reconcile/ISR)
 //
-// ✅ 状态声明（v2.1，2026-08-08）：ISR 复制**已实现并落地**。
+// ✅ 状态声明（2026-08-08）：ISR 复制**已实现并落地**。
 // - 复制日志与幂等键持久化位于各数据面服务（MQ/Cache）的 redb 内，与数据写同事务；
-// - 分区 Leader 静态分配（min-addr，Q1），Leader 独占分配 MQ offset 并广播（C1）；
+// - 分区 Leader 静态分配（min-addr），Leader 独占分配 MQ offset 并广播；
 // - 同步复制：写操作在 min_isr 副本 ack 后才对客户端成功；
-// - 幂等：重复复制条目不重复应用（持久化幂等键 + 内存 LRU，Q2）；
+// - 幂等：重复复制条目不重复应用（持久化幂等键 + 内存 LRU）；
 // - 顺序：按序列号单调应用；Reconcile 恢复落后 Follower；ISR 降级拒绝写（进入降级）。
-// - 单 agent 部署 min_isr 自动降级为 1（C6），现有部署零破坏。
+// - 单 agent 部署 min_isr 自动降级为 1，现有部署零破坏。
 //
-// 落地记录与决策见 docs/cache-mq-isr-evaluation.md（v2.1）。
-// 协议（v8.2 §4.7-4.8）:
+// 协议:
 // - Push 复制: Leader 写入后推送到 ISR Followers，等待确认
 // - Reconcile 恢复: Follower 重启/落后后从 Leader 拉取缺失数据
 // - ISR 管理: 跟踪同步副本集，检测降级（IsrHeartbeat 双向心跳）
 // - 幂等键: 防止重复写入（持久化 + LRU）
-//
-// 参见 docs/client-agent-architecture-v3.md §4.7-4.8。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -106,7 +103,7 @@ pub enum ReplicationOp {
     },
     /// 缓存删除
     CacheDelete { key: Vec<u8>, data_type: String },
-    /// 消息发布（offset 由分区 Leader 独占分配并广播，决策 C1）
+    /// 消息发布（offset 由分区 Leader 独占分配并广播）
     MqPublish {
         topic: String,
         partition: u32,
@@ -169,7 +166,7 @@ impl ReplicationEntry {
         }
     }
 
-    /// 创建消息发布复制条目（offset 由 Leader 分配，决策 C1）
+    /// 创建消息发布复制条目（offset 由 Leader 分配）
     pub fn new_mq_publish(
         idempotency_key: IdempotencyKey,
         shard_id: String,
@@ -321,7 +318,7 @@ impl IdempotencyGuard {
 ///
 /// 职责边界（v2.1 已落地）：
 /// - 复制日志与幂等键的持久化位于各数据面服务（MQ/Cache）的 redb 内，
-///   与数据写同事务提交（Phase A 收敛决策：NEXT_OFFSET_TABLE 与复制条目同事务持久化）；
+///   与数据写同事务提交（收敛决策：NEXT_OFFSET_TABLE 与复制条目同事务持久化）；
 /// - 本管理器负责 ISR 成员发现、静态分区 Leader 分配（min-addr）、
 ///   向 Followers 推送复制条目并等待确认（同步复制）、心跳维护与 Reconcile 追赶。
 #[derive(Debug)]
@@ -336,7 +333,7 @@ pub struct ReplicationManager {
     idempotency_guard: Arc<RwLock<IdempotencyGuard>>,
     /// 已知对端 agent（不含自身）：ISR 成员发现（Registry / 静态配置）
     peers: RwLock<HashSet<String>>,
-    /// 分区 Leader 显式分配覆盖（空 = 自动 min-addr 静态分配，Q1）
+    /// 分区 Leader 显式分配覆盖（空 = 自动 min-addr 静态分配）
     shard_leaders: RwLock<HashMap<String, String>>,
     /// 对端复制客户端缓存
     clients: RwLock<HashMap<String, ReplicaClient>>,
@@ -832,7 +829,7 @@ impl ReplicationManager {
         self.heartbeat_interval_ms = ms;
     }
 
-    // ──── 分区 Leader 静态分配（Q1 / C1）────
+    // ──── 分区 Leader 静态分配 ────
 
     /// 显式分配分区 Leader（空 = 自动 min-addr）
     pub fn set_shard_leader(&self, shard: &str, leader_addr: String) {
@@ -860,7 +857,7 @@ impl ReplicationManager {
         self.shard_leader(shard) == self.agent_addr
     }
 
-    /// 生效的 min_isr：单 agent（无对端）自动降级为 1，零破坏兼容（C6）。
+    /// 生效的 min_isr：单 agent（无对端）自动降级为 1，零破坏兼容。
     /// 即 min(config.min_isr, 1 + 对端数)。
     pub fn effective_min_isr(&self) -> usize {
         let peer_count = self.peers.read().len();

@@ -1,4 +1,4 @@
-// P0-H.2/H.3 真实故障注入套件（chaos_real）—— 基于真实 `coord` 二进制进程
+// 真实故障注入套件（chaos_real）—— 基于真实 `coord` 二进制进程
 //
 // 与 `sim_chaos_test`/`sim_jepsen_test`（算法级内存模拟，非系统验证证据）不同：
 // 本套件 spawn 真实 `coord server` 进程（3 节点），注入：
@@ -9,7 +9,7 @@
 //   - 并发写入 + 线性一致性检查器（register checker，H.3 合一）
 //   - chaos_soak_distributed：真实 3 进程分布式浸泡（无注入，SOAK_DURATION_SECS）
 //
-// 标记 `#[ignore]`：由 CI nightly 触发（P0-H.4），本地运行：
+// 标记 `#[ignore]`：由 CI nightly 触发，本地运行：
 //   CHAOS_REAL=1 cargo test -p coord --test chaos_real -- --ignored --nocapture
 //
 // 约束：真实 Jepsen（Clojure 客户端 + nemesis 时序）为外部依赖，未在本仓实现；
@@ -347,7 +347,7 @@ impl RegisterChecker {
     }
 }
 
-/// P0-H.2/H.3 + R-TST-16：3 节点真实集群 —— kill -9 / 重启 / SIGSTOP 暂停 /
+/// R-TST-16：3 节点真实集群 —— kill -9 / 重启 / SIGSTOP 暂停 /
 /// TCP 代理分区注入循环 + 线性一致检查。
 #[tokio::test]
 #[ignore = "real-process chaos suite; run in CI nightly (P0-H.4) or CHAOS_REAL=1 locally"]

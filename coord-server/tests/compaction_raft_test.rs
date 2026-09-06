@@ -1,13 +1,9 @@
-// P1-01 验收测试（L2 进程内多节点 raft）：Compaction 真实现
+// Compaction 验收测试（L2 进程内多节点 raft）：
 //
-// 覆盖决策文档 P1-01：
 // - raft 下发 compact revision（节点一致）：leader 提案后三节点 `META_COMPACT_REVISION`
 //   一致、changelog < revision 的条目被删除、KV 数据完好
-// - 非法 revision（> 当前 applied）在提案层被拒绝（RPC 层校验，规格 13 §三）
+// - 非法 revision（> 当前 applied）在提案层被拒绝（RPC 层校验）
 // - 幂等：重复 compact 同 revision 无副作用
-//
-// 对应文档：`docs/production/15-milestone-task-breakdown.md` P1-01；
-// `docs/production/11-architecture-redesign.md`（P0-A 快照生命周期延伸）。
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;
@@ -189,7 +185,7 @@ async fn wait_until<F: Fn() -> bool>(what: &str, f: F, timeout: Duration) {
     panic!("condition not met within timeout: {what}");
 }
 
-/// P1-01-1：raft 下发 compact revision —— 三节点一致删除、KV 完好。
+/// -1：raft 下发 compact revision —— 三节点一致删除、KV 完好。
 #[tokio::test]
 async fn test_compact_via_raft_three_nodes_consistent() {
     let nodes = TestNode::start_cluster(3).await;
@@ -252,7 +248,7 @@ async fn test_compact_via_raft_three_nodes_consistent() {
     }
 }
 
-/// P1-01-2：幂等 —— 重复/更低 revision 的 compact 不产生副作用。
+/// -2：幂等 —— 重复/更低 revision 的 compact 不产生副作用。
 #[tokio::test]
 async fn test_compact_repeated_is_idempotent_across_nodes() {
     let nodes = TestNode::start_cluster(3).await;
@@ -306,7 +302,7 @@ async fn test_compact_repeated_is_idempotent_across_nodes() {
     }
 }
 
-/// P1-01-3：单节点模式（无 raft）直接 apply（提案层前置校验由 RPC 承担）。
+/// -3：单节点模式（无 raft）直接 apply（提案层前置校验由 RPC 承担）。
 #[test]
 fn test_compact_standalone_apply() {
     let tmpdir = tempfile::tempdir().unwrap();
@@ -332,7 +328,7 @@ fn test_compact_standalone_apply() {
     assert!(mvcc.changelog_contains_revision(3).unwrap());
 }
 
-/// P1-01-4：RPC 层门控与校验 —— revision 0=压缩到当前；非 leader UNAVAILABLE；
+/// -4：RPC 层门控与校验 —— revision 0=压缩到当前；非 leader UNAVAILABLE；
 /// 未来 revision INVALID_ARGUMENT。
 #[tokio::test]
 async fn test_compact_rpc_leader_gate_and_validation() {

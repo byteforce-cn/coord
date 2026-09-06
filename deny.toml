@@ -1,6 +1,6 @@
-# cargo-deny 配置（P1-03 依赖治理，`.github/workflows/ci.yml` security-audit job）
+# cargo-deny 配置（依赖治理，`.github/workflows/ci.yml` security-audit job）
 #
-# 维护约定（docs/production/13-api-governance.md §六.3）：
+# 维护约定：
 # 新增依赖 PR 若触发 deny，必须：ADR/说明 → 更新本文件 allow 列表 → 合并。
 
 [advisories]

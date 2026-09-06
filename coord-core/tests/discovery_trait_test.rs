@@ -1,6 +1,6 @@
 // TDD: discovery trait 测试
 //
-// Phase A1 — RED stage: 在 MemberDiscovery trait 还不存在时此测试应编译失败。
+// RED stage: 在 MemberDiscovery trait 还不存在时此测试应编译失败。
 
 use std::net::SocketAddr;
 

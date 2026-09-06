@@ -1,6 +1,6 @@
-// DEK 自动轮换（P2-05）
+// DEK 自动轮换
 //
-// - 策略：`DekRotationPolicy`（默认 90 天，决策文档 §6.4 P2-05）；
+// - 策略：`DekRotationPolicy`（默认 90 天）；
 // - 判定：`should_rotate`（无上次轮换记录视为到期——启动即轮换一次并落盘记录）；
 // - 循环：`run_dek_rotation_loop` 周期检查，到期调用 `Keyring::rotate()`（原子切换，
 //   旧 DEK 入 LruCache 解密历史数据），`EncryptedDek` 经 `DekRotationStore::persist`

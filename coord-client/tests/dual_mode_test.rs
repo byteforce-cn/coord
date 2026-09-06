@@ -1,6 +1,6 @@
 // TDD: connect_via_agent / connect_direct 双模式构造器测试
 //
-// Phase A4 — 验证 Client 的双模式 API 签名和基本行为。
+// — 验证 Client 的双模式 API 签名和基本行为。
 
 use coord_client::{Client, Config};
 

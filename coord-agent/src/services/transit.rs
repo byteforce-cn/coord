@@ -2,15 +2,13 @@
 //
 // 实现信封加密模式：DEK 本地生成（AES-256-GCM），KEK 存 Server，DEK 用后即焚。
 //
-// 架构（v8.2 §4.12）:
+// 架构:
 // - DEK（Data Encryption Key）本地随机生成
 // - KEK（Key Encryption Key）存储在 Server，永不离开
 // - 加密数据：ciphertext = AES-256-GCM(plaintext, DEK) || AES-256-GCM(DEK, KEK)
 // - DEK 使用后立即从内存销毁（zeroize）
 // - 支持上下文绑定（context-dependent encryption，在数据层实现）
 // - 支持密钥轮换（rewrap：用 KEK 重新加密 DEK）
-//
-// 参见 docs/client-agent-architecture.v8.2.md §4.12。
 
 use std::collections::HashMap;
 
@@ -372,7 +370,7 @@ impl TransitService {
         Ok(new_dek_id)
     }
 
-    // ──── HMAC 签名与验签（Phase B.2 — 仅内存密钥，不落盘）───
+    // ──── HMAC 签名与验签（仅内存密钥，不落盘）───
 
     /// 使用 HMAC 对数据进行签名
     ///
@@ -515,7 +513,7 @@ mod tests {
         assert!(svc.decrypt(&ct, &old_id).is_err());
     }
 
-    // ──── Phase B.2: HMAC 签名与验签测试 ────
+    // ──── HMAC 签名与验签测试 ────
 
     #[test]
     fn test_hmac_sign_sha256_default() {

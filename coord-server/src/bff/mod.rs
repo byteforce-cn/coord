@@ -1,7 +1,7 @@
 // BFF (Backend For Frontend) 模块
 //
 // 为 Coord UI 控制台提供极简 HTTP 代理层。
-// 职责（ADP/UI 开发文档 §3.2）：
+// 职责：
 // 1. 端口监听 — 复用 Server 的 HTTP 端口（由 ui_enabled 开关控制）
 // 2. 静态资源服务 — 编译时通过 rust-embed 将前端 dist/ 嵌入二进制
 // 3. SPA Fallback — 对非 /api 路径返回 index.html

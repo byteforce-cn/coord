@@ -1,4 +1,4 @@
-// Server Auth Interceptor (Phase 3.7)
+// Server Auth Interceptor
 //
 // Server-side CCT validation with graded scope checking and mTLS identity binding.
 // The core logic is "identify first, then decide the strategy":
@@ -11,8 +11,6 @@
 //    - Everything else → full scope check required
 //
 // If mTLS is not enabled: fall back to full scope check for all requests.
-//
-// See docs/capability-auth-implementation.md §4.3.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -34,7 +32,7 @@ use crate::metrics::Metrics;
 
 // ──── Trusted Agent Identification ────
 
-/// Trusted agent CN prefixes as defined in §4.3.
+/// Trusted agent CN prefixes:
 const TRUSTED_AGENT_CN_PREFIXES: &[&str] = &["coord-agent-"];
 const TRUSTED_AGENT_CLUSTER_CN: &str = "coord-agent-cluster";
 
@@ -56,8 +54,6 @@ pub fn is_trusted_agent_cn(cn: Option<&str>) -> bool {
 // ──── High-Risk Operations ────
 
 /// Set of capability IDs that require full scope checking regardless of caller identity.
-///
-/// See docs/capability-auth-implementation.md §4.3 High-Risk Operations table.
 fn high_risk_operations() -> HashSet<&'static str> {
     let mut set = HashSet::new();
 
@@ -126,7 +122,7 @@ pub fn is_high_risk_operation(capability_id: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// 服务端鉴权结果
 // Box 化 CctToken 会改变全调用点匹配模式；Allow 载荷大但不频繁（每次请求
-// 一次），接受大小差异（P1-03 clippy 治理评估）。
+// 一次），接受大小差异。
 #[allow(clippy::large_enum_variant)]
 pub enum ServerAuthResult {
     /// Request is fully authorized
@@ -167,7 +163,7 @@ impl ServerAuthResult {
 /// Validates CCT tokens and applies differential scope verification based on
 /// caller identity (mTLS CN) and operation risk level.
 ///
-/// P0-C.4：能力判定已收紧 —— 无 scope_overrides 时按服务端角色授权
+/// 能力判定已收紧 —— 无 scope_overrides 时按服务端角色授权
 /// （`AuthManager::check_capability`）判定，无匹配即拒绝（fail-closed），
 /// 删除"有任意 role 即放行"的宽泛兜底。
 pub struct ServerAuthInterceptor {
@@ -181,9 +177,9 @@ pub struct ServerAuthInterceptor {
     mtls_enforced: bool,
     /// Whether auth is enabled
     enabled: bool,
-    /// Server-side role → capability grants（P0-C.4；None = fail-closed）
+    /// Server-side role → capability grants（None = fail-closed）
     role_provider: Option<Arc<AuthManager>>,
-    /// P2-08：审计日志（拒绝路径记录；可选）
+    /// 审计日志（拒绝路径记录；可选）
     audit: Option<Arc<crate::audit::AuditLogger>>,
     /// R-OBS-10：指标注册表（拒绝计数；可选）
     metrics: Option<Arc<Metrics>>,
@@ -214,7 +210,7 @@ impl ServerAuthInterceptor {
         self
     }
 
-    /// P2-08：挂载审计日志器（拒绝路径记录鉴权拒绝事件）。
+    /// 挂载审计日志器（拒绝路径记录鉴权拒绝事件）。
     pub fn with_audit_logger(mut self, logger: Arc<crate::audit::AuditLogger>) -> Self {
         self.audit = Some(logger);
         self
@@ -258,7 +254,7 @@ impl ServerAuthInterceptor {
         }
     }
 
-    /// 多 key 校验（R-SEC-04）：Txn/Range 等触碰多个 key 的请求，
+    /// 多 key 校验：Txn/Range 等触碰多个 key 的请求，
     /// 所有 key 都须通过 scope 判定（fail-closed）。
     ///
     /// `scope_keys` 为空表示"无 scope key 可提取"（与 `validate(..., None)` 语义一致，
@@ -354,7 +350,7 @@ impl ServerAuthInterceptor {
                 trusted_agent: true,
             },
 
-            // Case B: All other cases → full capability + scope check (P0-C.4 fail-closed)
+            // Case B: All other cases → full capability + scope check (fail-closed)
             (_, true) | (false, _) => {
                 let scope_ok = if scope_keys.is_empty() {
                     // 无 scope key：带 scope 的授权 fail-closed，无 scope 的授权放行
@@ -387,12 +383,12 @@ impl ServerAuthInterceptor {
 
     // ──── Internal ────
 
-    /// Decode and verify a CCT（R-SEC-02：双算法——HMAC 历史密钥 + Ed25519 公钥）。
+    /// Decode and verify a CCT（双算法——HMAC 历史密钥 + Ed25519 公钥）。
     fn decode_and_verify(&self, cct_str: &str) -> Result<CctToken, String> {
         self.keyring.decode_any(cct_str).map_err(|e| e.to_string())
     }
 
-    /// Authorize a capability request for a CCT payload (P0-C.4).
+    /// Authorize a capability request for a CCT payload.
     ///
     /// 1. scope_overrides（token 内嵌覆盖）优先：空 scope = 全放行；
     ///    非空 scope 须 `scope_key` 存在且 ScopeTrie 命中（否则拒绝）。
@@ -419,7 +415,7 @@ impl ServerAuthInterceptor {
             };
         }
 
-        // Server-side role grants (P0-C.4: no more "any role passes" fallback)
+        // Server-side role grants（无 "any role passes" 兜底）
         match &self.role_provider {
             Some(provider) => provider.check_capability(&payload.roles, capability_id, scope_key),
             None => false,
@@ -445,7 +441,7 @@ impl ServerAuthInterceptor {
         Ok(())
     }
 
-    /// P2-08：记录鉴权拒绝审计事件（异步 scope 校验路径调用）。
+    /// 记录鉴权拒绝审计事件（异步 scope 校验路径调用）。
     pub fn record_audit_deny(&self, rpc_method: &str, reason: &str) {
         // R-OBS-10：拒绝计数
         if let Some(ref metrics) = self.metrics {
@@ -463,7 +459,7 @@ impl ServerAuthInterceptor {
     }
 }
 
-// ──── RPC → Capability 映射（服务端，P0-C.1）────
+// ──── RPC → Capability 映射（服务端）────
 
 /// 服务端 gRPC 方法 → 能力 ID 映射（与 agent 侧映射表一致）。
 ///
@@ -487,7 +483,7 @@ pub fn infer_capability(rpc_method: &str) -> Option<String> {
         // Watch
         "/coord.watch.Watch/Watch" => Some("data:watch:subscribe".into()),
 
-        // Maintenance（集群管理，P0-D.5 归 cluster:admin 权限点）
+        // Maintenance（集群管理，归 cluster:admin 权限点）
         "/coord.maintenance.Maintenance/Status" => Some("admin:maintenance:status".into()),
         "/coord.maintenance.Maintenance/Seal" => Some("admin:maintenance:seal".into()),
         "/coord.maintenance.Maintenance/Unseal" => Some("admin:maintenance:unseal".into()),
@@ -537,7 +533,7 @@ pub fn infer_capability(rpc_method: &str) -> Option<String> {
     }
 }
 
-/// 匿名白名单（规格 C.4.1）：仅健康检查与登录端点匿名可访问。
+/// 匿名白名单：仅健康检查与登录端点匿名可访问。
 ///
 /// `GetRevocationDelta` 需要合法 CCT 但属于公开的角色同步端点，
 /// 由服务自身校验（agent 高频调用，不走角色授权）。
@@ -546,13 +542,13 @@ pub fn is_whitelisted(rpc_method: &str) -> bool {
         rpc_method,
         "/grpc.health.v1.Health/Check"
             | "/coord.auth.Auth/Authenticate"
-            // P2-07：refresh 与登录同为认证前置端点（凭 refresh token 自证，
+            // refresh 与登录同为认证前置端点（凭 refresh token 自证，
             // 服务端校验单次使用语义）
             | "/coord.auth.Auth/RefreshToken"
     )
 }
 
-// ──── R-SEC-04：scope key 提取（tower 层缓存 body 解析 key）────
+// ──── scope key 提取（tower 层缓存 body 解析 key）────
 
 /// 需要从请求 body 提取 scope key 的 RPC 方法集合。
 pub fn needs_scope_extraction(rpc_method: &str) -> bool {
@@ -562,7 +558,7 @@ pub fn needs_scope_extraction(rpc_method: &str) -> bool {
     )
 }
 
-/// 从请求 body 提取 scope key 列表（R-SEC-04）。
+/// 从请求 body 提取 scope key 列表。
 ///
 /// - Put/Range/Delete：提取 `key` 字段（proto field 1）；
 /// - Txn：提取全部 compare key 与 success/failure 操作触碰的 key；
@@ -644,7 +640,7 @@ async fn buffer_request_body(
     }
 }
 
-// ──── Tower Layer / Service（接入服务端 gRPC 生产路由，P0-C.1）────
+// ──── Tower Layer / Service（接入服务端 gRPC 生产路由）────
 //
 // tonic 0.14 的 `tonic::service::Interceptor` 拿不到方法路径（Request 不保留
 // URI），故与 agent 侧一致使用 tower 中间件：从 http::Request 的 URI path 提取
@@ -704,7 +700,7 @@ where
     fn call(&mut self, req: http::Request<tonic::body::Body>) -> Self::Future {
         let rpc_method = req.uri().path().to_string();
 
-        // 白名单：健康检查 + 登录端点匿名可访问（规格 C.4.1）
+        // 白名单：健康检查 + 登录端点匿名可访问
         if is_whitelisted(&rpc_method) {
             return ServerAuthFuture::Allow(self.inner.call(req));
         }
@@ -738,7 +734,7 @@ where
             return ServerAuthFuture::Deny(Some(Status::permission_denied(reason)));
         };
 
-        // R-SEC-04：scope 承载方法 → 缓存 body 提取 key，做多 key scope 校验
+        // scope 承载方法 → 缓存 body 提取 key，做多 key scope 校验
         if needs_scope_extraction(&rpc_method) {
             let interceptor = self.interceptor.clone();
             let mut inner = self.inner.clone();
@@ -798,7 +794,7 @@ where
 }
 
 impl<S> ServerAuthService<S> {
-    /// P2-08：记录鉴权拒绝审计事件（v1：tower 层无对端地址与主体身份，actor 记 anonymous）。
+    /// 记录鉴权拒绝审计事件（tower 层无对端地址与主体身份，actor 记 anonymous）。
     fn audit_deny(&self, rpc_method: &str, reason: &str) {
         // R-OBS-10：拒绝计数 + 审计
         if let Some(ref metrics) = self.interceptor.metrics {
@@ -832,7 +828,7 @@ pub fn classify_denial(reason: &str) -> Status {
 }
 
 /// 鉴权中间件 future：放行转发 inner；拒绝返回 gRPC 错误响应；
-/// `ScopeChecked` 承载"缓存 body → 提取 scope key → 多 key 校验"的异步路径（R-SEC-04）。
+/// `ScopeChecked` 承载"缓存 body → 提取 scope key → 多 key 校验"的异步路径。
 pub enum ServerAuthFuture<F, E> {
     Allow(F),
     Deny(Option<Status>),
@@ -929,7 +925,7 @@ mod tests {
         encode_cct(&header, &payload, &key.key_bytes).unwrap()
     }
 
-    // ──── Phase 3.7 TDD Tests ────
+    // ──── TDD Tests ────
 
     // ──── Diagnostic: CCT encode/decode roundtrip with keyring ────
 
@@ -1177,7 +1173,7 @@ mod tests {
         }
     }
 
-    // ──── P0-C.4：收紧后的 fail-closed 行为 ────
+    // ──── 收紧后的 fail-closed 行为 ────
 
     #[test]
     fn test_no_scope_override_no_role_grant_is_denied() {
@@ -1432,7 +1428,7 @@ mod tests {
     #[test]
     fn test_high_risk_set_completeness() {
         let ops = high_risk_operations();
-        // Verify key entries from the spec table §4.3
+        // Verify key entries
         assert!(ops.contains("admin:maintenance:seal"));
         assert!(ops.contains("data:kv:write"));
         assert!(ops.contains("data:txn:execute"));
@@ -1445,7 +1441,7 @@ mod tests {
         assert!(ops.contains("coord:pki:revoke"));
     }
 
-    // ──── R-SEC-04: scope key 提取（tower 层 body 解析） ────
+    // ──── scope key 提取（tower 层 body 解析） ────
 
     #[test]
     fn test_extract_scope_keys_put_range_delete() {

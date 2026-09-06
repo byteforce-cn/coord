@@ -1,10 +1,8 @@
-// DEK 持久化存储（R-SEC-01 接线：`/_meta/dek/` 布局）
-//
-// - 密文 DEK 存于 `/_meta/dek/encrypted/{key_id_be4}`（TABLE_META）；
+// DEK 持久化存储（`/_meta/dek/` 布局）
 // - 上次轮换时间存于 `/_meta/dek/last_rotation`（8B BE unix 秒）。
 // - 为节点本地数据（每个节点独立 Keyring 加密本地 store），不参与 raft 复制。
 //
-// 实现 `DekRotationStore` trait（P2-05），供 `spawn_dek_rotation_loop` 使用。
+// 实现 `DekRotationStore` trait，供 `spawn_dek_rotation_loop` 使用。
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

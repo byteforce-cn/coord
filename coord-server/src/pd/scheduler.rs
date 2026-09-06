@@ -8,7 +8,7 @@
 // - LeaderScheduler:  均衡各节点上的 Leader 数量
 // - HotSpotScheduler: 检测读写热点，通过 Split 或 Leader 转移分散负载
 //
-// 设计要点（ADP §4.2）：
+// 设计要点：
 // - 各 Scheduler 独立运行，通过 PdConfig 配置检查间隔
 // - 产生 Operator 交由 PD 执行引擎异步执行
 // - 每个调度周期限制输出数量，避免 Scheduling Storm
@@ -405,7 +405,7 @@ pub struct ScheduleContext {
     pub online_nodes: Vec<NodeID>,
     /// Region ID → 采样 Key 列表（Region Leader 上报，用于 Split Key 选择）
     pub region_sample_keys: HashMap<RegionId, Vec<Vec<u8>>>,
-    /// Region ID → 心跳上报的当前 Leader（T3.2）
+    /// Region ID → 心跳上报的当前 Leader
     ///
     /// 由 PD 从 Region 心跳聚合而来（`PlacementDriver.region_leaders`），是调度
     /// 决策的运行时输入。RegionMeta 为持久 schema（成员/range），leader 不入盘；
@@ -594,7 +594,7 @@ impl Scheduler for BalanceScheduler {
 ///   1. 计算每个在线节点的 Leader 数量
 ///   2. 从 Leader 最多的节点选一个 Region → 执行 TransferLeader
 ///
-/// Leader 判定（T3.2）：优先取 `ScheduleContext.leaders`（Region 心跳上报的
+/// Leader 判定：优先取 `ScheduleContext.leaders`（Region 心跳上报的
 /// 真实 leader）；无心跳数据（组件级构造/选举窗口）时回退到「第一个 Voter
 /// peer」猜测，保证未接心跳的路径行为不变。
 pub struct LeaderScheduler {
@@ -739,7 +739,7 @@ impl Scheduler for HotSpotScheduler {
         let ops = Vec::new();
 
         // 按 QPS 排序，优先处理最热的 Region
-        // 注意：RegionMeta 目前不包含 QPS 数据，Phase 4 中通过心跳上报
+        // 注意：RegionMeta 目前不包含 QPS 数据，后续通过心跳上报
         // 此调度器依赖 RegionHandle 中的 write_qps / read_qps 字段
         // 当前遍历所有 Region，对满足阈值条件的产生 Operator
 
@@ -756,7 +756,7 @@ impl Scheduler for HotSpotScheduler {
 
             // 写入热点 → Split
             // （实际触发条件由外部通过 approximate_size/keys 间接判断）
-            // Phase 4+ 需要 QPS 上报后启用实际热点检测
+            // QPS 上报后启用实际热点检测
         }
 
         ops

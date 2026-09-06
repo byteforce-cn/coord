@@ -1,6 +1,6 @@
 // coord CLI 入口
 //
-// 组合 Server/Client 模式启动。支持以下子命令（ADP §6、§10.1、§15.3、§19.1）：
+// 组合 Server/Client 模式启动。支持以下子命令：
 // - server:    启动 Server 节点（单节点或加入集群）
 // - agent:     启动 Agent 守护进程（本地代理，Java 应用入口）
 // - dev:       开发模式：同时启动 Server + Agent（对标 consul agent -dev）
@@ -56,7 +56,7 @@ use coord_server::timer::TimerWheel;
 use coord_server::tls::{self, TlsConfig};
 use coord_server::watch::WatchDispatcher;
 
-/// P1-02：慢 follower 告警阈值 —— follower 已确认日志落后 leader 超过该条目数时 WARN
+/// 慢 follower 告警阈值 —— follower 已确认日志落后 leader 超过该条目数时 WARN
 const SLOW_FOLLOWER_LAG_ENTRIES: u64 = 1000;
 
 #[derive(Parser)]
@@ -75,7 +75,7 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
-    /// 日志格式（P1-09：json | pretty，默认 pretty）
+    /// 日志格式（json | pretty，默认 pretty）
     #[arg(long, global = true, default_value = "pretty")]
     log_format: String,
 
@@ -170,7 +170,7 @@ enum Commands {
         cluster_name: String,
 
         /// 鉴权开关（默认取配置 security.auth_enabled=true；
-        /// false 仅限开发/测试环境，P0-C.1）
+        /// false 仅限开发/测试环境）
         #[arg(long)]
         auth_enabled: Option<bool>,
     },
@@ -213,8 +213,7 @@ enum Commands {
         #[arg(long, value_delimiter = ',')]
         static_peers: Vec<String>,
 
-        /// Agent TOML 配置文件（生产用：可含 [tls]/[services]/[replication]/[auth] 等段，
-        /// 见 docs/transport-security.md §4）
+        /// Agent TOML 配置文件（生产用：可含 [tls]/[services]/[replication]/[auth] 等段）
         #[arg(long)]
         agent_config: Option<PathBuf>,
     },
@@ -222,7 +221,7 @@ enum Commands {
     /// 开发模式：同时启动 Server + Agent（单节点集群）
     Dev {
         /// 监听地址（默认 127.0.0.1；容器化部署需设为 0.0.0.0，
-        /// 此时必须显式传 --allow-insecure，R-SEC-05）
+        /// 此时必须显式传 --allow-insecure）
         #[arg(long, default_value = "127.0.0.1")]
         bind_addr: String,
 
@@ -243,7 +242,7 @@ enum Commands {
         fresh: bool,
 
         /// 显式确认：允许鉴权关闭的 dev 模式绑定非 loopback 地址
-        /// （仅限容器化本地调试；Agent 仍会按自身策略拒绝非 loopback，R-SEC-05）
+        /// （仅限容器化本地调试；Agent 仍会按自身策略拒绝非 loopback）
         #[arg(long, default_value = "false")]
         allow_insecure: bool,
     },
@@ -396,7 +395,7 @@ enum SnapshotCmd {
         #[arg(long, default_value = "/var/lib/coord")]
         data_dir: PathBuf,
 
-        /// T5.8（R-MR-05）：目标 Region（0 = region 0 / 单 Raft；>0 = 该 Region 的
+        /// 目标 Region（0 = region 0 / 单 Raft；>0 = 该 Region 的
         /// <data_dir>/regions/region-{id:016x}/ 目录）
         #[arg(long, default_value_t = 0)]
         region: u64,
@@ -412,13 +411,13 @@ enum SnapshotCmd {
         #[arg(long, default_value = "/var/lib/coord")]
         data_dir: PathBuf,
 
-        /// T5.8（R-MR-05）：目标 Region（0 = region 0 / 单 Raft；>0 = 恢复到
+        /// 目标 Region（0 = region 0 / 单 Raft；>0 = 恢复到
         /// <data_dir>/regions/region-{id:016x}/ 目录）
         #[arg(long, default_value_t = 0)]
         region: u64,
     },
 
-    /// 在线拉取快照（P1-08：Maintenance/Snapshot 流式导出，备份用）
+    /// 在线拉取快照（Maintenance/Snapshot 流式导出，备份用）
     Pull {
         /// 源节点 gRPC 地址
         #[arg(long, default_value = "127.0.0.1:50051")]
@@ -428,7 +427,7 @@ enum SnapshotCmd {
         #[arg(long, default_value = "coord-snapshot-pull.snap")]
         output: PathBuf,
 
-        /// T5.8（R-MR-05）：目标 Region（0 = region 0 / 单 Raft；>0 = 该 Region）
+        /// 目标 Region（0 = region 0 / 单 Raft；>0 = 该 Region）
         #[arg(long, default_value_t = 0)]
         region: u64,
     },
@@ -692,14 +691,14 @@ enum CapabilityCmd {
 
 #[tokio::main]
 async fn main() {
-    // P0-F.3：panic hook —— 输出完整栈与关键状态（生产路径 panic 显式化）
+    // panic hook —— 输出完整栈与关键状态（生产路径 panic 显式化）
     std::panic::set_hook(Box::new(|info| {
         tracing::error!("PANIC: {info}");
         let backtrace = std::backtrace::Backtrace::force_capture();
         tracing::error!("backtrace:\n{backtrace}");
     }));
 
-    // P1-09：JSON 日志开关（`--log-format json`，采集环境用）
+    // JSON 日志开关（`--log-format json`，采集环境用）
     let cli = Cli::parse();
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(
@@ -751,7 +750,7 @@ async fn main() {
                 Some(&cluster_name),
                 join.as_deref(),
             );
-            // P0-C.1：鉴权唯一开关（CLI 覆盖仅限显式指定；默认 true）
+            // 鉴权唯一开关（CLI 覆盖仅限显式指定；默认 true）
             if let Some(auth_enabled) = auth_enabled {
                 cfg.security.auth_enabled = auth_enabled;
             }
@@ -772,7 +771,7 @@ async fn main() {
                 tracing::info!("Joining cluster via {}", join_addr);
             }
 
-            // 启动服务端（带优雅关闭；server 模式非 dev；P2-02 传入配置文件路径供 SIGHUP 热更新）
+            // 启动服务端（带优雅关闭；server 模式非 dev；传入配置文件路径供 SIGHUP 热更新）
             if let Err(e) = run_server(
                 &cfg,
                 &raft_addr,
@@ -1461,8 +1460,8 @@ async fn main() {
 
 // ──── Snapshot CLI 实现 ────
 
-/// 从本地数据目录导出快照（P0-A.3 过渡工具）。
-/// T5.8（R-MR-05）：region = 0 导出根目录（legacy / region 0 system raft）；
+/// 从本地数据目录导出快照（过渡工具）。
+/// region = 0 导出根目录（legacy / region 0 system raft）；
 /// region > 0 导出 `<data_dir>/regions/region-{id:016x}/`（Region 独立备份）。
 async fn snapshot_save(
     output: &std::path::Path,
@@ -1509,7 +1508,7 @@ async fn snapshot_save(
 }
 
 /// 从快照文件恢复到本地数据目录。
-/// T5.8（R-MR-05）：region = 0 恢复根目录；region > 0 恢复到
+/// region = 0 恢复根目录；region > 0 恢复到
 /// `<data_dir>/regions/region-{id:016x}/`（Region 独立恢复，目录不存在则创建）。
 async fn snapshot_restore(
     snapshot_path: &PathBuf,
@@ -1559,7 +1558,7 @@ async fn run_server(
     dev_mode: bool,
     config_path: Option<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // P2-02：启动配置校验（一次报清全部问题；TLS 缺配不再静默降级明文）
+    // 启动配置校验（一次报清全部问题；TLS 缺配不再静默降级明文）
     if let Err(errs) = cfg.validate() {
         return Err(format!("invalid configuration:\n  - {}", errs.join("\n  - ")).into());
     }
@@ -1579,11 +1578,11 @@ async fn run_server(
     let storage_config = coord_core::types::StorageConfig::default();
     let backend = RedbBackend::open(&data_dir, &storage_config)?;
 
-    // 3. 单一 MvccStorage 实例（D-A1）：CoordNode 读路径、StateMachine 写路径、
-    //    Compaction、Snapshot 全链路共享；revision ≡ log index（D-A2）。
+    // 3. 单一 MvccStorage 实例：CoordNode 读路径、StateMachine 写路径、
+    //    Compaction、Snapshot 全链路共享；revision ≡ log index。
     let mvcc = Arc::new(MvccStorage::new(backend)?);
 
-    // 3.5 M0-3 启动一致性校验：META_LAST_APPLIED 与 changelog 尾部一致
+    // 3.5 启动一致性校验：META_LAST_APPLIED 与 changelog 尾部一致
     {
         let (applied, changelog_tail) = mvcc.verify_consistency()?;
         match (applied, changelog_tail) {
@@ -1606,7 +1605,7 @@ async fn run_server(
         }
     }
 
-    // 3.55 T5.16（R-MR-07）：fail-closed 启动闸——multi_raft 开启但 region 0
+    // 3.55 fail-closed 启动闸——multi_raft 开启但 region 0
     // 根 store 尚有**未迁移**的 legacy 用户 KV（且无迁移标记）时拒绝启动，
     // 防止用户数据在 multi_raft 下静默不可见。放行条件：
     //   - 无待迁移数据 / 迁移标记已存在；或
@@ -1633,7 +1632,7 @@ async fn run_server(
         }
     }
 
-    // 3.6 M0-4/M0-5 快照目录与 purge 守卫（与 LogStore/StateMachine 共享）
+    // 3.6 快照目录与 purge 守卫（与 LogStore/StateMachine 共享）
     let snapshot_dir = data_dir.join("snapshots");
     std::fs::create_dir_all(&snapshot_dir)?;
     let snapshot_tracker = Arc::new(coord_server::storage::snapshot::SnapshotTracker::default());
@@ -1663,7 +1662,7 @@ async fn run_server(
     // R-OBS-10：状态机 apply/快照埋点
     sm_store.metrics = Some(Arc::clone(&metrics));
 
-    // T5.7（R-MR-04）：region 0 Lease Revoke 广播通道——multi_raft 启用时挂到
+    // region 0 Lease Revoke 广播通道——multi_raft 启用时挂到
     // region 0 状态机（`LeaseOp::Revoke` 过期/吊销 apply 后广播 lease_id），
     // 供 `CoordNode::start_region_lease_revoker` 驱动各 Region raft leader 经
     // `Command::DeleteKeysByLease` 清理各自 MVCC 的绑定 Key。
@@ -1672,7 +1671,7 @@ async fn run_server(
         sm_store.set_lease_revoke_tx(lease_revoke_tx);
     }
 
-    // 5b.5 M0-5 启动检查：日志已被 purge 但无覆盖快照。
+    // 5b.5 启动检查：日志已被 purge 但无覆盖快照。
     // 必须放在 StateMachineStore::new 之后：启动时把已落盘快照（META_SNAPSHOT）
     // 登记进 snapshot_tracker 的正是 StateMachineStore::new；若在此前检查，
     // tracker 为空，任何“重启前发生过 purge”的节点都会被误判为不可恢复。
@@ -1719,10 +1718,10 @@ async fn run_server(
         }
     }
 
-    // 6.5. 初始化 Auth 组件（P0-C.1：`security.auth_enabled` 唯一开关，默认 true）
+    // 6.5. 初始化 Auth 组件（`security.auth_enabled` 唯一开关，默认 true）
     let auth_enabled = cfg.security.auth_enabled;
     if !auth_enabled && !dev_mode {
-        // P0-G.1：无鉴权 + 非 loopback 绑定 → 拒绝启动（防止裸奔暴露）
+        // 无鉴权 + 非 loopback 绑定 → 拒绝启动（防止裸奔暴露）
         let non_loopback = |addr: &str| {
             !addr.starts_with("127.")
                 && !addr.starts_with("localhost")
@@ -1741,7 +1740,7 @@ async fn run_server(
     }
 
     let auth_manager: Arc<AuthManager> = if dev_mode {
-        // dev 模式：root/root 默认凭据（仅限 dev，规格 C.4.8）
+        // dev 模式：root/root 默认凭据（仅限 dev）
         Arc::new(AuthManager::new())
     } else {
         // server 模式：不创建 root/root；先装载持久化状态（用户/角色）
@@ -1753,7 +1752,7 @@ async fn run_server(
         manager
     };
 
-    // root 引导（P0-C.2/C.6）：server 模式且视图无 root 时——
+    // root 引导：server 模式且视图无 root 时——
     //   bootstrap 节点：创建内存视图 + 稍后经 raft 持久化（5i.5）；
     //   join 节点：等待 leader 复制（apply 钩子同步视图）。
     let mut root_to_persist: Option<String> = None;
@@ -1767,7 +1766,7 @@ async fn run_server(
                 },
             };
             let pw = root_password.unwrap_or_else(|| {
-                // R-SEC-05：随机 root 密码仅输出到控制台（不经过 tracing，避免落入结构化日志/日志文件）
+                // 随机 root 密码仅输出到控制台（不经过 tracing，避免落入结构化日志/日志文件）
                 let pw = generate_random_password(24);
                 eprintln!(
                     "[coord] Generated random root password (shown ONCE; store it securely): {}",
@@ -1799,7 +1798,7 @@ async fn run_server(
 
     let revocation_store = Arc::new(RevocationStore::new(10_000));
 
-    // 启动装载（P0-C.5）：吊销登记回填 RevocationStore
+    // 启动装载：吊销登记回填 RevocationStore
     {
         use coord_server::auth::manager::{AuthRevocationRecord, AUTH_REVOKED_PREFIX};
         let revoked_entries = mvcc
@@ -1818,14 +1817,14 @@ async fn run_server(
         );
     }
 
-    // P0-C.2/C.5：apply 后同步内存视图与吊销登记
+    // apply 后同步内存视图与吊销登记
     let token_manager = Arc::new(TokenManager::with_defaults());
-    // P2-08：审计日志（<data_dir>/audit/ 文件追加 + 最近 1024 条环形查询）
+    // 审计日志（<data_dir>/audit/ 文件追加 + 最近 1024 条环形查询）
     let audit_logger = Arc::new(
         coord_server::audit::AuditLogger::file_logger(&data_dir)
             .map_err(|e| format!("init audit logger: {e}"))?,
     );
-    // P2-07：启动装载持久化会话（重启不失效）
+    // 启动装载持久化会话（重启不失效）
     {
         let session_entries = mvcc
             .list_raw_prefix(b"/_sys/auth/sessions/")
@@ -1835,7 +1834,7 @@ async fn run_server(
 
     sm_store.set_auth_manager(Arc::clone(&auth_manager));
     sm_store.set_revocation_store(Arc::clone(&revocation_store));
-    // P2-07：会话表视图（apply IssueSession/ConsumeSession 后各节点同步）
+    // 会话表视图（apply IssueSession/ConsumeSession 后各节点同步）
     sm_store.set_session_manager(Arc::clone(&token_manager));
 
     // 5c. Raft Network Factory（支持 Raft 节点间 TLS）
@@ -1873,7 +1872,7 @@ async fn run_server(
         );
     }
 
-    // R-SEC-03：raft 端口认证策略（mTLS 或共享密钥，否则非 loopback 拒绝启动）
+    // raft 端口认证策略（mTLS 或共享密钥，否则非 loopback 拒绝启动）
     let raft_use_tls = cfg.security.tls_cert.is_some() && cfg.security.tls_key.is_some();
     if let Some(ref secret) = cfg.security.raft_shared_secret {
         network_factory.set_raft_shared_secret(secret);
@@ -1894,7 +1893,7 @@ async fn run_server(
         tracing::warn!("Raft RPC on loopback without mTLS/shared-secret — insecure; dev/test only");
     }
 
-    // 配置 Raft 节点间 TLS（若安全配置中指定了证书，ADP §14.1）
+    // 配置 Raft 节点间 TLS（若安全配置中指定了证书）
     let raft_tls_config = if let (Some(cert), Some(key)) =
         (cfg.security.tls_cert.clone(), cfg.security.tls_key.clone())
     {
@@ -1914,7 +1913,7 @@ async fn run_server(
         None
     };
 
-    // 5d. Raft 配置（P1-06：openraft 类型隔离，经 `coord_server::raft` 门面）
+    // 5d. Raft 配置（openraft 类型隔离，经 `coord_server::raft` 门面）
     //     R-RFT-19：心跳/选举/安装快照超时/快照策略可经 `[raft]` 段调优。
     let mut raft_config = coord_server::raft::RaftConfig::default();
     coord_server::raft::apply_tuning(
@@ -1929,7 +1928,7 @@ async fn run_server(
     );
     let raft_config = Arc::new(raft_config);
 
-    // 5e. Raft RPC 服务（R-SEC-03：共享密钥验签，配置后 fail-closed）
+    // 5e. Raft RPC 服务（共享密钥验签，配置后 fail-closed）
     let raft_rpc_service =
         RaftRpcService::new().with_shared_secret(cfg.security.raft_shared_secret.as_deref());
 
@@ -1942,10 +1941,10 @@ async fn run_server(
         false
     };
 
-    // 5g. 创建 Raft 实例（P1-06 门面：new_raft）
+    // 5g. 创建 Raft 实例（门面：new_raft）
     //     读路径一致性校验（防陈旧读）需要访问本地日志，克隆一份 LogStore 句柄。
     let node_raft_log = log_store.clone();
-    // T3.4：Multi-Raft Region 装配需要共享的工厂与调优后的 RaftConfig——
+    // Multi-Raft Region 装配需要共享的工厂与调优后的 RaftConfig——
     // 工厂的节点地址表/连接池/TLS 均为 Arc 共享，克隆后再把原工厂移入
     // 单 Raft（region 0）；装配发生在 bootstrap/join 之后、CoordNode 之前。
     let region_shared_factory = network_factory.clone();
@@ -1982,7 +1981,7 @@ async fn run_server(
                 .map_err(|e| format!("raft initialize: {e}"))?;
         }
     } else if let Some(join_addr) = cfg.cluster.join_addr.clone() {
-        // P0-D.1：JoinRequest 流程 —— 新节点向 join_addr 发送 JoinRequest，
+        // JoinRequest 流程 —— 新节点向 join_addr 发送 JoinRequest，
         // 非 leader 返回 forward_to 重试到 leader（不再自调 add_learner 吞错）。
         tracing::info!(
             "Joining cluster via {} (JoinRequest, leader redirect)",
@@ -2032,7 +2031,7 @@ async fn run_server(
         }
     }
 
-    // 5i.5 P0-C.2：root 引导用户经 raft 持久化（bootstrap 节点且 store 无 root）。
+    // 5i.5 root 引导用户经 raft 持久化（bootstrap 节点且 store 无 root）。
     //        单节点 bootstrap 立即可写；多节点等待领导权，限时重试。
     if let Some(root_hash) = root_to_persist {
         let root_op = coord_server::raft::type_config::Command::Auth(
@@ -2064,7 +2063,7 @@ async fn run_server(
 
     let raft = Arc::new(raft);
 
-    // T2.3/T2.6/T3.4：Multi-Raft Region 装配（`[multi_raft].enabled=true` 时）。
+    // Multi-Raft Region 装配（`[multi_raft].enabled=true` 时）。
     //
     // - 每个 Region 的 voter peers = `cluster.initial_nodes` 全部成员（v1 静态
     //   复制：每个 Region N 副本分布于集群成员，与 jepsen db.clj 生成一致）；
@@ -2072,7 +2071,7 @@ async fn run_server(
     // - 每个 Region 独立 raft 组、目录级存储隔离于 `<data_dir>/regions/region-{id}`
     //   （region 0 仍为本节点 system raft——鉴权/会话等 `/_sys/*` 系统数据——
     //   不在 region 表内）；
-    // - region 表合法性（平铺/成员）由 Config::validate（R-MR-01）先行校验，
+    // - region 表合法性（平铺/成员）由 Config::validate先行校验，
     //   装配函数再做防御性校验。
     let region_seeds: Vec<RegionSeed> = cfg
         .multi_raft
@@ -2116,14 +2115,14 @@ async fn run_server(
         );
         Some(manager)
     } else {
-        // T2.6：multi_raft.enabled=false（默认）→ 单 Raft 退化路径，磁盘布局/
+        // multi_raft.enabled=false（默认）→ 单 Raft 退化路径，磁盘布局/
         // 备份/快照/回滚字节级不变（region 0 根目录布局）。
         tracing::debug!("Multi-Raft disabled: single-raft (legacy) mode");
         None
     };
 
-    // T3.4：内嵌 PD 接线（`[multi_raft].enabled=true` + `[multi_raft.pd]
-    // .enabled=true` 时）。R-MR-02 已保证 pd.enabled ⇒ multi_raft.enabled，故
+    // 内嵌 PD 接线（`[multi_raft].enabled=true` + `[multi_raft.pd]
+    // .enabled=true` 时）。已保证 pd.enabled ⇒ multi_raft.enabled，故
     // region_manager 必为 Some。PD 独立持有 RegionManager 引用（start 内
     // Arc::clone），不影响其随后移入 CoordNode。
     let embedded_pd: Option<Arc<EmbeddedPd>> = if cfg.multi_raft.pd.enabled {
@@ -2143,16 +2142,15 @@ async fn run_server(
         let heartbeat_interval =
             std::time::Duration::from_millis(cfg.multi_raft.pd.heartbeat_interval_ms);
 
-        // R-MR-08（D1-a P2/P4b）：PD operator 队列经 region 0 system raft 承载
-        // （全局队列模式）——region 0 raft（本节点单 Raft）与其 MVCC 包装为
-        // `SystemRaftHandle` 注入 `EmbeddedPd`（必填；P4b 退役 legacy 本地队列
-        // 路径后无 None 模式）：调度收敛到 region 0 leader（唯一生成源），执行
-        // 器从全局队列认领「目标 Region leader == 本节点」的条目（docs §4.5）。
-        // `CoordRaft` Clone 为 Arc bump，廉价。
-        // P5（2026-09-06，T5.14 演练暴露）：执行器在「目标 Region leader」节点
-        // 认领 operator，该节点未必是 region 0 leader——openraft client_write 仅
-        // leader 可本地提出，故装配节点间 SubmitPdOp 转发（非 region 0 leader
-        // 节点的 propose 经 raft 节点间 RPC 转发到 region 0 leader 提出）。
+        // PD operator 队列经 region 0 system raft 承载（全局队列模式）——
+        // region 0 raft（本节点单 Raft）与其 MVCC 包装为 `SystemRaftHandle`
+        // 注入 `EmbeddedPd`（必填；退役 legacy 本地队列路径后无 None 模式）：
+        // 调度收敛到 region 0 leader（唯一生成源），执行器从全局队列认领
+        // 「目标 Region leader == 本节点」的条目；`CoordRaft` Clone 为 Arc bump。
+        // 执行器在「目标 Region leader」节点认领 operator，该节点未必是
+        // region 0 leader——openraft client_write 仅 leader 可本地提出，故装配
+        // 节点间 SubmitPdOp 转发（非 region 0 leader 节点的 propose 经 raft
+        // 节点间 RPC 转发到 region 0 leader 提出）。
         let system_raft: Arc<dyn SystemRaftHandle> = Arc::new(
             CoordSystemRaftHandle::new(raft.as_ref().clone(), Arc::clone(&mvcc))
                 .with_forwarder(node_id, region_shared_factory.clone()),
@@ -2170,7 +2168,7 @@ async fn run_server(
         .await
         .map_err(|e| format!("start embedded PD: {e}"))?;
 
-        // T5.12：PD operator 审计/指标接线（audit logger + Metrics 在此前已构造）
+        // PD operator 审计/指标接线（audit logger + Metrics 在此前已构造）
         pd.driver.attach_observability(coord_server::pd::PdObservability::new(
             Some(Arc::clone(&audit_logger)),
             Some(Arc::clone(&metrics)),
@@ -2181,7 +2179,7 @@ async fn run_server(
         None
     };
 
-    // 5.75 T5.15（R-MR-07）：Legacy → Multi-Raft boot 迁移。
+    // 5.75 Legacy → Multi-Raft boot 迁移。
     //
     // `[multi_raft].legacy_migration = true`（一次性，迁移前停写；fail-closed 闸
     // 已放行）时，在 serving 前把 region 0 根 store 的活用户 KV 经 raft 导入
@@ -2217,12 +2215,12 @@ async fn run_server(
     node.raft = Some(Arc::clone(&raft));
     // 读路径一致性校验（防陈旧读）用：本地 Raft Log 存储句柄
     node.raft_log_store = Some(node_raft_log);
-    // T2.4/T2.6：多 Region 模式挂载 RegionManager（KV 按 key 路由到 per-region
+    // 多 Region 模式挂载 RegionManager（KV 按 key 路由到 per-region
     // raft/mvcc）；None = 单 Raft 模式（legacy 路径，字节级不变）
     node.region_manager = region_manager;
     // R-SVC-18：per-RPC 超时/规模上限/幂等缓存参数（[limits] 配置段）
     node.set_limits(cfg.limits.to_runtime_limits());
-    // P0-D.1：注册已知节点的 gRPC 地址（leader 重定向用，best-effort）
+    // 注册已知节点的 gRPC 地址（leader 重定向用，best-effort）
     node.register_grpc_addr(node_id, &grpc_addr);
     for n in &cfg.cluster.initial_nodes {
         node.register_grpc_addr(n.id, &n.grpc);
@@ -2233,10 +2231,10 @@ async fn run_server(
     node.lease_manager = Some(Arc::new(
         LeaseManager::new(timer_handle).with_metrics(Arc::clone(&metrics)),
     ));
-    // P1-02：每 watcher 事件队列长度（配置可调，最小 16）
+    // 每 watcher 事件队列长度（配置可调，最小 16）
     node.set_watch_buffer(cfg.network.watch_buffer);
 
-    // 6.5b R-SEC-01：静态加密接线（Barrier/Seal/Unseal/DEK 自动轮换）
+    // 6.5b 静态加密接线（Barrier/Seal/Unseal/DEK 自动轮换）
     //     —— 此前 set_barrier 生产零调用、Seal/Unseal 为 unimplemented stub。
     let _encryption_deks: Vec<coord_server::security::key_management::EncryptedDek> =
         if cfg.security.encryption_enabled {
@@ -2303,7 +2301,7 @@ async fn run_server(
             mvcc.set_barrier(barrier);
             node.install_keyring(Arc::clone(&keyring), deks.clone());
 
-            // DEK 自动轮换循环（P2-05；随 shutdown 信号退出）
+            // DEK 自动轮换循环（随 shutdown 信号退出）
             let (rotation_shutdown_tx, rotation_shutdown_rx) = tokio::sync::watch::channel(false);
             {
                 let store = Arc::clone(&dek_store)
@@ -2335,9 +2333,9 @@ async fn run_server(
 
     // 启动 Lease 过期轮询后台任务（每 200ms 清理过期 Lease 绑定的 KV key；仅 leader 执行）
     node.start_lease_expiry_worker();
-    // 启动 Lease failover reconciler（P0-B B.4.4：成为 leader 时从状态机重建）
+    // 启动 Lease failover reconciler（B.4.4：成为 leader 时从状态机重建）
     node.start_lease_leader_reconciler();
-    // T5.7（R-MR-04）：per-Region Lease 清理 worker（仅 multi_raft；legacy 下通道
+    // per-Region Lease 清理 worker（仅 multi_raft；legacy 下通道
     // 未挂 tx——revoke 广播不会产生，worker 随通道关闭退出）
     if cfg.multi_raft.enabled {
         node.start_region_lease_revoker(lease_revoke_rx);
@@ -2345,9 +2343,9 @@ async fn run_server(
         drop(lease_revoke_rx);
     }
 
-    // 6.6 Auth 根密钥：HKDF 派生 CCT 签名密钥（规格 C.4.2）。
+    // 6.6 Auth 根密钥：HKDF 派生 CCT 签名密钥。
     //     配置/环境优先，否则 <data_dir>/auth-root-key.bin 首启生成（0600）并复用。
-    //     R-SEC-06：多节点集群无配置/无 key 文件时拒绝自动生成（防止各节点 key 分歧）。
+    //     多节点集群无配置/无 key 文件时拒绝自动生成（防止各节点 key 分歧）。
     let multi_node = cfg.cluster.initial_nodes.len() > 1 || cfg.cluster.join_addr.is_some();
     let root_key_material =
         load_or_create_root_key(&data_dir, cfg.security.auth_root_key.as_deref(), multi_node)?;
@@ -2363,7 +2361,7 @@ async fn run_server(
     );
 
     let token_manager = Arc::new(TokenManager::with_defaults());
-    // CCT 生产签发接线（P0-C.3）+ AuthOp 提案器（P0-C.2）+ 吊销登记（P0-C.5）
+    // CCT 生产签发接线+ AuthOp 提案器+ 吊销登记
     let auth_proposer: Arc<dyn coord_server::auth::service::AuthOpProposer> = node.clone();
     let auth_service: Arc<AuthService> = Arc::new(
         (if auth_enabled {
@@ -2392,7 +2390,7 @@ async fn run_server(
         registry: capability_registry,
     });
 
-    // 7. 构建客户端 gRPC 服务（P1-02：消息解码上限显式 4MiB，对齐 13 号文档 §二.2）
+    // 7. 构建客户端 gRPC 服务（消息解码上限显式 4MiB，对齐）
     const MAX_DECODING_MSG: usize = 4 * 1024 * 1024;
     let kv_svc = KvServer::from_arc(Arc::clone(&node)).max_decoding_message_size(MAX_DECODING_MSG);
     let txn_svc =
@@ -2404,7 +2402,7 @@ async fn run_server(
     let maintenance_svc =
         MaintenanceServer::from_arc(Arc::clone(&node)).max_decoding_message_size(MAX_DECODING_MSG);
 
-    // 8. 初始化 Raft 就绪状态（Metrics 已在 §4 提前创建）
+    // 8. 初始化 Raft 就绪状态（Metrics 已在 提前创建）
     let raft_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // 8a. 构建 BFF axum 路由器（统一 HTTP 入口：健康检查 + API 代理 + UI 静态资源）
@@ -2414,7 +2412,7 @@ async fn run_server(
         .and_then(|p| p.parse().ok())
         .unwrap_or(50051);
     let http_port = grpc_port + 10; // HTTP 端口 = gRPC 端口 + 10
-                                    // R-SEC-05：HTTP 绑定地址可配（`network.http_addr`）；默认 loopback——
+                                    // HTTP 绑定地址可配（`network.http_addr`）；默认 loopback——
                                     // 避免无鉴权的 /metrics 与 BFF 暴露到外部网络（生产建议配置内网地址）。
     let http_addr = if !cfg.network.http_addr.is_empty() {
         cfg.network.http_addr.clone()
@@ -2461,10 +2459,10 @@ async fn run_server(
         }
     });
 
-    // 后台任务：周期性更新 Raft 指标和就绪状态（P1-02 增加慢 follower 告警；
-    // P1-09 健康检查真实语义随就绪状态切换）
+    // 后台任务：周期性更新 Raft 指标和就绪状态（增加慢 follower 告警；
+    // 健康检查真实语义随就绪状态切换）
     // 10a'（提前）：gRPC Health Check 服务（标准 grpc.health.v1.Health）——
-    // 初始 NOT_SERVING，由本循环随就绪状态切换（P1-09）。
+    // 初始 NOT_SERVING，由本循环随就绪状态切换。
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
         .set_not_serving::<KvServer<Arc<CoordNode>>>()
@@ -2507,7 +2505,7 @@ async fn run_server(
             metrics_for_raft
                 .set_raft_applied_index(m.last_applied.as_ref().map(|id| id.index).unwrap_or(0));
             metrics_for_raft.set_raft_leader_id(leader.unwrap_or(0));
-            // R-SEC-01：seal_status 反映真实 Keyring 状态（此前硬编码 0=Unsealed）
+            // seal_status 反映真实 Keyring 状态（此前硬编码 0=Unsealed）
             let seal_state = match node_for_seal.keyring() {
                 Some(k) if k.is_sealed() => 1, // Sealed
                 Some(_) => 0,                  // Unsealed
@@ -2522,7 +2520,7 @@ async fn run_server(
                 metrics_for_raft.set_storage_keys_total(count);
             }
 
-            // P1-02：慢 follower 告警 —— leader 视角，follower matched 滞后
+            // 慢 follower 告警 —— leader 视角，follower matched 滞后
             // 超过阈值（1000 条目或 >30s 无确认）时 WARN
             if leader == Some(node_id) {
                 if let Some(ref replication) = m.replication {
@@ -2547,7 +2545,7 @@ async fn run_server(
             );
             ready_for_raft.store(ready, std::sync::atomic::Ordering::Relaxed);
 
-            // P1-09：健康检查真实语义 —— raft 就绪前 NOT_SERVING，随状态更新
+            // 健康检查真实语义 —— raft 就绪前 NOT_SERVING，随状态更新
             if ready {
                 health_reporter_for_task
                     .set_serving::<KvServer<Arc<CoordNode>>>()
@@ -2596,10 +2594,10 @@ async fn run_server(
         }
     });
 
-    // P2-02：SIGHUP 热更新安全子集通道（磁盘水位阈值 + watch 缓冲）
+    // SIGHUP 热更新安全子集通道（磁盘水位阈值 + watch 缓冲）
     let (reload_tx, reload_rx) = tokio::sync::watch::channel(cfg.reloadable());
 
-    // P1-02：磁盘水位监控（30s 周期）—— <warn 比例 WARN 告警，<readonly 比例置只读闸
+    // 磁盘水位监控（30s 周期）—— <warn 比例 WARN 告警，<readonly 比例置只读闸
     // （写请求 RESOURCE_EXHAUSTED，读仍可用）；阈值经 reload_rx 支持 SIGHUP 热更新
     {
         let node_for_disk = Arc::clone(&node);
@@ -2657,7 +2655,7 @@ async fn run_server(
         });
     }
 
-    // P2-02：SIGHUP 配置热更新（安全子集）。
+    // SIGHUP 配置热更新（安全子集）。
     // 仅磁盘水位阈值（下一监控周期生效）与 watch 缓冲（新订阅生效）；
     // 监听地址/TLS/集群拓扑等结构性配置不支持热更新，需重启。
     #[cfg(unix)]
@@ -2715,7 +2713,7 @@ async fn run_server(
         tracing::info!("SIGHUP config reload is not supported on this platform");
     }
 
-    // 8. 启动 Changelog Compaction 后台任务（P1-01：leader 经 raft 提案
+    // 8. 启动 Changelog Compaction 后台任务（leader 经 raft 提案
     //    compact revision（节点一致）+ 定时 redb 文件级 compact 空间回收）
     let compaction_config = CompactionConfig::default();
     let retention = compaction_config.changelog_retention_revisions;
@@ -2736,7 +2734,7 @@ async fn run_server(
         retention
     );
 
-    // T5.9（R-MR-06）：per-Region Compaction 后台任务（G7 收口）——每个 Region ≥1
+    // per-Region Compaction 后台任务（G7 收口）——每个 Region ≥1
     // 独立推进 compact 水位：leader 经该 Region raft 提案 Command::Compact（节点
     // 一致 apply），文件级 compact 独立回收各 Region redb 空间；提案成功后推进
     // RegionHandle::compaction_watermark。
@@ -2769,7 +2767,7 @@ async fn run_server(
         Vec::new()
     };
 
-    // 8.5. 启动自动快照调度器（ADP §19.2）。
+    // 8.5. 启动自动快照调度器。
     // S-RCV-01：scheduler 写入独立子目录 snapshots/auto/。其文件名
     // snapshot-{unix_ts}.snap 与 Raft 快照 snapshot-{idx}-{term}.snap 冲突，
     // 曾导致状态机清理逻辑把刚落盘的 Raft 快照误删（META_SNAPSHOT 悬空）。
@@ -2794,7 +2792,7 @@ async fn run_server(
     );
 
     // 9. 启动 Raft RPC gRPC Server（内部节点间通信，raft 端口，可选 TLS）
-    //    P0-C.7（F4）：raft 端口 mTLS fail-closed —— TLS 配置存在但构建失败/
+    //    （F4）：raft 端口 mTLS fail-closed —— TLS 配置存在但构建失败/
     //    缺 CA 时拒绝启动（删除明文降级分支）。
     //    R-TST-16：监听地址 = raft_bind_addr（非空时），对外通告仍为 raft_addr
     //    （bind/advertise 分离，支撑 TCP 代理分区注入等场景）。
@@ -2835,7 +2833,7 @@ async fn run_server(
         None => None,
     };
     let raft_handle = tokio::spawn(async move {
-        // P1-02：raft RPC 单连接并发流上限
+        // raft RPC 单连接并发流上限
         let mut builder = tonic::transport::Server::builder().max_concurrent_streams(256);
 
         let serve_result = match raft_server_tls {
@@ -2871,10 +2869,10 @@ async fn run_server(
 
     // 10. 启动客户端 gRPC Server（grpc_addr 端口，可选 TLS；端口已在步骤 1.5 预绑定）
 
-    // 10a. gRPC Health Check 服务已在指标循环前初始化（P1-09 真实语义）
+    // 10a. gRPC Health Check 服务已在指标循环前初始化（真实语义）
     let _ = &health_service;
 
-    // 10b. gRPC Server Reflection：生产默认关闭（规格 C.4.1，配置开关）
+    // 10b. gRPC Server Reflection：生产默认关闭（配置开关）
     let reflection_service = if cfg.security.reflection_enabled {
         Some(
             tonic_reflection::server::Builder::configure()
@@ -2888,11 +2886,11 @@ async fn run_server(
         None
     };
 
-    // 检查 TLS 配置（P2-02：validate() 已保证 cert/key 成对，此处不再隐式降级）
+    // 检查 TLS 配置（validate() 已保证 cert/key 成对，此处不再隐式降级）
     let use_tls = cfg.security.tls_cert.is_some() && cfg.security.tls_key.is_some();
 
-    // 10c. P0-C.1：服务端鉴权拦截器挂载（TLS/非 TLS 两分支统一）
-    // P1-09：MetricsLayer 挂最外层（覆盖全部服务，含鉴权拒绝路径）
+    // 10c. 服务端鉴权拦截器挂载（TLS/非 TLS 两分支统一）
+    // MetricsLayer 挂最外层（覆盖全部服务，含鉴权拒绝路径）
     let metrics_layer = coord_server::metrics::MetricsLayer::new(Arc::clone(&metrics));
     let mut auth_interceptor = ServerAuthInterceptor::new(
         Arc::clone(&signing_keyring),
@@ -2906,7 +2904,7 @@ async fn run_server(
     let auth_layer = ServerAuthLayer::new(Arc::new(auth_interceptor));
 
     // 取出预绑定的 listener 并转换为 tonic 可接受的 stream
-    // （P2-05：Option 包装——TLS 热加载滚动重启时首轮复用预绑定流，后续同端口重绑）
+    // （Option 包装——TLS 热加载滚动重启时首轮复用预绑定流，后续同端口重绑）
     let grpc_listener = grpc_listener
         .take()
         .ok_or("grpc_listener already consumed")?;
@@ -2914,7 +2912,7 @@ async fn run_server(
         grpc_listener,
     ));
 
-    // P1-07：优雅停机序列 —— 摘流（tonic 排空在飞请求）→ 领导权移交 → raft 关闭。
+    // 优雅停机序列 —— 摘流（tonic 排空在飞请求）→ 领导权移交 → raft 关闭。
     // 移交任务独立监听信号（与 serve 的 shutdown future 各注册一次信号监听）。
     let shutdown_signal_future = shutdown_signal();
     let node_for_transfer = Arc::clone(&node);
@@ -2953,7 +2951,7 @@ async fn run_server(
     if let (Some(tls_cert), Some(tls_key)) =
         (cfg.security.tls_cert.clone(), cfg.security.tls_key.clone())
     {
-        // P2-05：TLS 证书热加载——watcher 每 60s 检测 cert/key/ca 变化；
+        // TLS 证书热加载——watcher 每 60s 检测 cert/key/ca 变化；
         // 变化时优雅排空当前 accept 循环，重建 identity 后同端口重绑滚动重启。
         let mut tls_cfg = TlsConfig::new(
             tls_cert.clone(),
@@ -3028,7 +3026,7 @@ async fn run_server(
                 .add_service(capability_svc.clone())
                 .serve_with_incoming_shutdown(stream, serve_future);
 
-            // P1-07：信号后 tonic 优雅排空在飞请求，返回后才继续清理
+            // 信号后 tonic 优雅排空在飞请求，返回后才继续清理
             grpc_future.await?;
 
             // 判定退出原因：热加载 → 重建证书配置并继续；否则为真实停机
@@ -3080,14 +3078,14 @@ async fn run_server(
                 shutdown_signal_future,
             );
 
-        // P1-07：信号后 tonic 优雅排空在飞请求，返回后才继续清理
+        // 信号后 tonic 优雅排空在飞请求，返回后才继续清理
         grpc_future.await?;
     }
 
-    // 12. 清理（P1-07）：raft 排空关闭（openraft 等待 core task 退出）→
+    // 12. 清理：raft 排空关闭（openraft 等待 core task 退出）→
     //     等待移交任务结束 → 终止 raft RPC server。
     tracing::info!("gRPC drained; shutting down raft instance");
-    // T3.4：内嵌 PD 后台循环先于 raft 停机（executor 不再发起成员变更）
+    // 内嵌 PD 后台循环先于 raft 停机（executor 不再发起成员变更）
     if let Some(pd) = &embedded_pd {
         pd.shutdown().await;
     }
@@ -3101,7 +3099,7 @@ async fn run_server(
     Ok(())
 }
 
-/// 向指定节点发送 JoinRequest（P0-D.1）
+/// 向指定节点发送 JoinRequest
 ///
 /// `tls` 为 Some 时走 https + TLS 配置（mTLS 客户端身份由服务端自身证书提供）。
 async fn send_join_request(
@@ -3132,7 +3130,7 @@ async fn send_join_request(
     Ok(resp)
 }
 
-/// 生成随机密码（root 密码强制用，规格 C.4.8）：24 位无易混淆字符。
+/// 生成随机密码（root 密码强制用）：24 位无易混淆字符。
 fn generate_random_password(len: usize) -> String {
     use rand::Rng;
     const CHARS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#%+=_";
@@ -3142,7 +3140,7 @@ fn generate_random_password(len: usize) -> String {
         .collect()
 }
 
-/// 静态加密 root 密钥解析（R-SEC-01）。
+/// 静态加密 root 密钥解析。
 /// 优先级：`security.encryption_root_key`（hex）→ `COORD_ENCRYPTION_ROOT_KEY`
 /// 环境变量 → `<data_dir>/encryption-root-key.bin`（32 字节）。返回 None 表示未找到。
 fn resolve_encryption_root_key(
@@ -3172,7 +3170,7 @@ fn resolve_encryption_root_key(
     None
 }
 
-/// 以 0600 权限写入私密文件（R-SEC-01：root 密钥落盘）
+/// 以 0600 权限写入私密文件（root 密钥落盘）
 fn write_private_file(
     path: &std::path::Path,
     bytes: &[u8],
@@ -3190,7 +3188,7 @@ fn write_private_file(
     Ok(())
 }
 
-/// Auth 根密钥加载/生成（规格 C.4.2）。
+/// Auth 根密钥加载/生成。
 ///
 /// 优先级：`security.auth_root_key`（hex）→ `<data_dir>/auth-root-key.bin`
 /// → 首次生成 32 随机字节并以 0600 写入。
@@ -3229,7 +3227,7 @@ fn load_or_create_root_key(
         return Ok(key);
     }
 
-    // R-SEC-06：多节点集群必须共享同一根密钥。配置和既有 key 文件都不存在时
+    // 多节点集群必须共享同一根密钥。配置和既有 key 文件都不存在时
     // 拒绝自动生成——否则每节点各生成一把，CCT token 互相不认（此前仅 warning）。
     if multi_node {
         return Err(format!(
@@ -3308,7 +3306,7 @@ async fn shutdown_signal() {
 
 // ──── Dev 模式启动逻辑 ────
 
-/// R-SEC-05：是否为 loopback 主机名/IP（与 server 侧 P0-G.1 同口径）。
+/// 是否为 loopback 主机名/IP（与 server 侧 同口径）。
 fn is_loopback_host(host: &str) -> bool {
     let host = host.trim();
     host == "localhost" || host == "::1" || host.starts_with("[::1]") || host.starts_with("127.")
@@ -3330,7 +3328,7 @@ async fn run_dev(
     fresh: bool,
     allow_insecure: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // R-SEC-05：dev 模式强制关闭鉴权（root/root），绑非 loopback 必须显式确认。
+    // dev 模式强制关闭鉴权（root/root），绑非 loopback 必须显式确认。
     // 该检查在创建任何监听之前执行，拒绝即快速失败。
     if !allow_insecure && !is_loopback_host(bind_addr) {
         return Err(format!(
@@ -3374,7 +3372,7 @@ async fn run_dev(
     server_cfg.storage.data_dir = dev_data_dir.clone();
     server_cfg.cluster.cluster_name = cluster_name.to_string();
     server_cfg.cluster.bootstrap = true;
-    // P0-C.1：dev 模式强制关闭鉴权（root/root 默认凭据），反射开启便于调试
+    // dev 模式强制关闭鉴权（root/root 默认凭据），反射开启便于调试
     server_cfg.security.auth_enabled = false;
     server_cfg.security.reflection_enabled = true;
 

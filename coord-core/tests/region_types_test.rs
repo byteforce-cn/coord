@@ -1,4 +1,4 @@
-// region_types_test.rs — Phase 0: Region 核心类型测试
+// region_types_test.rs — Region 核心类型测试
 //
 // TDD: 先写测试，后实现。这些测试在类型实现之前会编译失败。
 

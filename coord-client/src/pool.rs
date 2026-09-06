@@ -1,4 +1,4 @@
-// Connection Pool — gRPC channel pool management (ADP §10.3)
+// Connection Pool — gRPC channel pool management 
 //
 // Features:
 // - Per-endpoint connection pool (default 2 connections per endpoint)
@@ -145,7 +145,7 @@ impl ConnectionPool {
         pools: &Arc<RwLock<HashMap<String, EndpointPool>>>,
         endpoint: &str,
     ) -> Result<Channel> {
-        // Phase 1: Try to get an existing channel from the pool (under lock)
+        // Try to get an existing channel from the pool (under lock)
         {
             let mut pools_guard = pools.write();
             if let Some(pool) = pools_guard.get_mut(endpoint) {
@@ -154,7 +154,7 @@ impl ConnectionPool {
                 }
             }
         }
-        // Phase 2: No existing channel, create a new connection (lock released)
+        // No existing channel, create a new connection (lock released)
         crate::tls::connect(endpoint, Some(self.connect_timeout), self.tls.as_deref())
             .await
             .map_err(|e| Error::ClusterUnavailable(format!("connect failed: {e}")))

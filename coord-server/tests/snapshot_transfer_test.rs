@@ -1,11 +1,8 @@
-// P0-A 验收测试（L3 进程内）：快照导出 → 删光数据 → 导入恢复
+// 验收测试（L3 进程内）：快照导出 → 删光数据 → 导入恢复
 //
-// 验收标准（规格 A.8 第 4 条）：`version/create_revision/mod_revision` 完整。
+// 验收标准：`version/create_revision/mod_revision` 完整。
 // 对应 `coord snapshot save/restore` 工具的数据路径（CLI 仅做文件读写，
 // 核心逻辑为 export_snapshot_data / import_snapshot_data）。
-//
-// 对应文档：`docs/production/11-architecture-redesign.md` 规格 A.8；
-// `docs/production/15-milestone-task-breakdown.md` P0-A.3。
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;
@@ -87,7 +84,7 @@ async fn put(
     let _ = raft.client_write(cmd).await.expect("client_write");
 }
 
-/// P0-A.3：导出 → 删光数据目录 → 导入恢复，元数据（version/create_revision/
+/// 导出 → 删光数据目录 → 导入恢复，元数据（version/create_revision/
 /// mod_revision/lease_id/deleted）完整，且恢复后 revision 从 applied+1 续写。
 #[tokio::test]
 async fn test_snapshot_export_wipe_import_roundtrip() {
@@ -176,7 +173,7 @@ async fn test_snapshot_export_wipe_import_roundtrip() {
     assert_eq!(mvcc2.get(b"/snap/k1").unwrap(), Some(b"v2".to_vec()));
     assert_eq!(mvcc2.get(b"/snap/k3").unwrap(), None);
 
-    // revision 从 applied+1 续写（D-A2/D-A4）
+    // revision 从 applied+1 续写
     assert_eq!(mvcc2.current_revision(), last_revision);
     let next_rev = mvcc2
         .put(b"/snap/after", b"x", None)

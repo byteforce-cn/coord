@@ -8,8 +8,6 @@
 //   旧类型保留为向后兼容别名，新代码请使用 services::registry::RegistryCache
 //
 // Watch 驱动的缓存失效通过 invalidate()/invalidate_prefix() 触发。
-//
-// 参见 docs/client-agent-architecture-v3.md §5.1。
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};

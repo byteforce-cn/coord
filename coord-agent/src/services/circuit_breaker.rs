@@ -1,7 +1,7 @@
-// coord-agent: 熔断器服务 (Circuit Breaker) — Phase H
+// coord-agent: 熔断器服务 (Circuit Breaker)
 //
 // 实现熔断器状态机：Closed → Open → HalfOpen → Closed。
-// v8.2 §4.13: 派生能力。
+// 派生能力。
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;

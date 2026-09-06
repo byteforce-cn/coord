@@ -1,9 +1,9 @@
-// Token Manager — Simple Token generation & validation (ADP §14.2)
+// Token Manager — Simple Token generation & validation
 //
 // Simple Token: `Authorization: Bearer coord_<random_hex>`
 // - 32-byte random token, hex-encoded with "coord_" prefix
 // - Stored as SHA256 hash in the token store
-// - Configurable expiry (default 15 minutes per ADP §14.5)
+// - Configurable expiry (default 15 minutes)
 // - Refresh token support (longer-lived, single-use)
 
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 
 use coord_core::error::{Error, Result};
 
-/// P2-07：当前墙钟 unix 秒（会话过期判定统一口径）
+/// 当前墙钟 unix 秒（会话过期判定统一口径）
 pub fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -31,11 +31,11 @@ pub fn now_unix() -> u64 {
 pub struct AuthToken {
     /// The token string (bearer token)
     pub token: String,
-    /// SHA256 hex of the token（持久化会话键，P2-07）
+    /// SHA256 hex of the token（持久化会话键）
     pub hash_hex: String,
     /// Username this token belongs to
     pub username: String,
-    /// When this token expires（墙钟 unix 秒，P2-07：重启后仍有效）
+    /// When this token expires（墙钟 unix 秒：重启后仍有效）
     pub expires_at_unix: u64,
     /// When this token expires（进程内单调钟，仅展示/测试用）
     pub expires_at: Instant,
@@ -59,7 +59,7 @@ struct TokenEntry {
 
 /// Manages authentication tokens: issue, validate, revoke
 ///
-/// P2-07：内部表以 token 的 SHA256 hex 为键（明文 token 不落内存表键），
+/// 内部表以 token 的 SHA256 hex 为键（明文 token 不落内存表键），
 /// 过期判定用墙钟时间——经 `register_session`/`load_sessions` 可从
 /// `/_sys/auth/sessions/` 持久化状态重建，重启不失效。
 pub struct TokenManager {
@@ -173,7 +173,7 @@ impl TokenManager {
         self.tokens.read().len()
     }
 
-    // ──── P2-07：会话持久化接口 ────
+    // ──── 会话持久化接口 ────
 
     /// 注册持久化会话（raft apply 钩子与启动装载共用）。
     pub fn register_session(
@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(tm.active_count(), 0);
     }
 
-    // ──── P2-07：会话持久化 ────
+    // ──── 会话持久化 ────
 
     #[test]
     fn test_session_rebuild_across_restart() {

@@ -1,4 +1,4 @@
-// TDD: Agent 配置热加载测试 (Phase C4 — RED)
+// TDD: Agent 配置热加载测试 (RED)
 //
 // 验证文件监听 + 原子替换功能。
 //
@@ -24,7 +24,7 @@ static_peers = ["10.0.1.1:50051"]
     std::fs::write(path, content).unwrap();
 }
 
-/// C4.1: ConfigWatcher 初始加载
+/// ConfigWatcher 初始加载
 #[tokio::test]
 async fn test_config_watcher_initial_load() {
     let dir = tempfile::tempdir().unwrap();
@@ -37,7 +37,7 @@ async fn test_config_watcher_initial_load() {
     assert_eq!(current.agent_addr, "127.0.0.1:19527");
 }
 
-/// C4.2: ConfigWatcher 检测文件变更并重新加载
+/// ConfigWatcher 检测文件变更并重新加载
 #[tokio::test]
 async fn test_config_watcher_reload_on_change() {
     let dir = tempfile::tempdir().unwrap();
@@ -58,14 +58,14 @@ async fn test_config_watcher_reload_on_change() {
     assert_eq!(config.agent_addr, "0.0.0.0:19527");
 }
 
-/// C4.3: ConfigWatcher 对不存在的文件返回错误
+/// ConfigWatcher 对不存在的文件返回错误
 #[test]
 fn test_config_watcher_missing_file() {
     let result = ConfigWatcher::new(&PathBuf::from("/nonexistent/path/config.toml"));
     assert!(result.is_err());
 }
 
-/// C4.4: ConfigWatcher 原子替换（读-修改-写期间读取者看到一致状态）
+/// ConfigWatcher 原子替换（读-修改-写期间读取者看到一致状态）
 #[tokio::test]
 async fn test_config_watcher_atomic_swap() {
     let dir = tempfile::tempdir().unwrap();

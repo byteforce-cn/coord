@@ -1,6 +1,6 @@
-// TDD: 熔断器与限流服务测试 (Phase H-Resilience — RED→GREEN)
+// TDD: 熔断器与限流服务测试 (RED→GREEN)
 //
-// v8.2 §4.13: 派生能力 — 特性开关、分布式限流、Saga 事务
+// 派生能力 — 特性开关、分布式限流、Saga 事务
 //
 // RED 阶段：CircuitBreakerService 和 RateLimiterService 尚未实现。
 

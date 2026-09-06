@@ -2,15 +2,13 @@
 //
 // 实现 BaseService trait，提供全局唯一 ID 生成能力。
 //
-// 架构（v4.0，ISSUE-011 决策）:
+// 架构（v4.0）:
 // - 默认实现：雪花（nodeid）——agent 作为 node 上 daemonset，按 10bit nodeid 生成
 //   64-bit long 雪花 ID（无状态、不依赖 KV、清库不重置、离线可用）
 // - 可选实现：KV 号段模式（opt-in，idgen.mode = "segment"）——本地缓存号段，
-//   Server 侧 Txn CAS 原子递增分配（修复 fresh 重复根因，见 ISSUE-011）
+//   Server 侧 Txn CAS 原子递增分配（修复 fresh 重复根因）
 // - 节点 ID 稳定唯一：显式 COORD_NODE_ID / idgen_node_id > 主机名稳定哈希；
 //   有 Server 时启动期在 /_idgen/nodes/{nodeid} CAS 注册（冲突顺延、重启保持）
-//
-// 参见 docs/client-agent-architecture-v3.md §5.4、docs/issue/ISSUE-011。
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -476,7 +474,7 @@ impl IdGenService {
 
     /// 从 Server 申请新号段（Txn CAS 原子读写改写，失败重试）
     ///
-    /// ISSUE-011 根因修复：旧实现为「range 读 + 普通 put 写」的非原子 RMW，且初始化
+    /// 根因修复：旧实现为「range 读 + 普通 put 写」的非原子 RMW，且初始化
     /// 无 CAS——fresh 状态（key 不存在）下并发调用方（单 agent 并发 / 多 agent 独立缓存）
     /// 会读到同一基线 0 并都返回 first_id=1 → 重复。改为 CAS 后，同一号段键在同一时刻
     /// 只有一个调用方能推进基线，其余重试。
@@ -909,7 +907,7 @@ mod tests {
         );
     }
 
-    // ──── 号段 CAS 请求构造（ISSUE-011 修复）────
+    // ──── 号段 CAS 请求构造 ────
 
     #[test]
     fn test_build_segment_cas_init() {
@@ -954,7 +952,7 @@ mod tests {
         assert!(build_segment_cas(&key, 1000, Some(b"not-json".as_slice()), "permission").is_err());
     }
 
-    // ──── 默认实现 = 雪花（ISSUE-011 决策）────
+    // ──── 默认实现 = 雪花 ────
 
     #[test]
     fn test_snowflake_mode_is_default_with_server() {

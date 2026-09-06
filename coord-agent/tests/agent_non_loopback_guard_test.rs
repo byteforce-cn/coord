@@ -1,9 +1,7 @@
-// P1-05 验收测试：agent 非 loopback 绑定强制 auth+TLS
+// agent 非 loopback 绑定强制 auth+TLS
 //
-// 决策文档 P1-05：agent 非 loopback 绑定强制 auth+TLS（与 server 侧
-// P0-G.1 "非 loopback 无鉴权拒绝启动" 同口径）。
-//
-// 对应文档：`docs/production/15-milestone-task-breakdown.md` P1-05。
+// agent 非 loopback 绑定强制 auth+TLS（与 server 侧
+// "非 loopback 无鉴权拒绝启动" 同口径）。
 
 use std::net::TcpListener;
 
@@ -49,7 +47,7 @@ async fn test_loopback_without_auth_allowed() {
     config.tls = None;
 
     let server = AgentServer::new(config);
-    // 等待监听就绪（冷启动），随后优雅退出；此处仅验证不因 P1-05 闸被拒
+    // 等待监听就绪（冷启动），随后优雅退出；此处仅验证不因守卫被拒
     let shutdown = async move {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
@@ -79,7 +77,7 @@ async fn test_loopback_without_auth_allowed() {
     }
 }
 
-/// 非 loopback 绑定且 auth+TLS 均配置 → 允许启动（P1-05 闸放行）。
+/// 非 loopback 绑定且 auth+TLS 均配置 → 允许启动。
 ///
 /// 生产收口后，TLS 是**真实挂载**而非仅配置校验：本测试同时验证
 /// 配置了 tls 的非 loopback agent 实际启动监听（由入站 TLS 集成测试

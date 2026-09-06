@@ -90,8 +90,8 @@ fn sanitized_internal<E: std::fmt::Display>(e: E) -> Status {
     Status::internal("internal error")
 }
 
-/// 数据面复制/存储错误映射：安全可回传的语义错误保留（not leader 为 Q4/C2
-/// 显式契约），其余脱敏。与 coord-server `map_err` 的字符串模式识别同口径。
+/// 数据面复制/存储错误映射：安全可回传的语义错误保留（not leader 为显式
+/// 契约），其余脱敏。与 coord-server `map_err` 的字符串模式识别同口径。
 fn map_service_error(e: impl std::fmt::Display) -> Status {
     let msg = e.to_string();
     if msg.to_ascii_lowercase().contains("not leader") {
@@ -380,7 +380,7 @@ impl EventSvc for EventNotificationService {
 #[tonic::async_trait]
 impl Cache for CacheService {
     /// 全部数据面操作（含 redb 读）经 `run_blocking` 在阻塞线程池执行，
-    /// 避免同步 redb 事务阻塞 agent 的 tokio worker（Phase 1 T1.2）。
+    /// 避免同步 redb 事务阻塞 agent 的 tokio worker。
     async fn get(
         &self,
         request: Request<CacheGetRequest>,
@@ -615,7 +615,7 @@ impl Mq for MessageQueueService {
             retention_secs: 86400,
             max_message_size: 1024 * 1024,
         };
-        // redb 写事务移到阻塞线程池（Phase 1 T1.2）
+        // redb 写事务移到阻塞线程池
         self.run_blocking(move |me| me.create_topic(&req.topic, config))
             .await
             .map_err(sanitized_internal)?;
@@ -664,7 +664,7 @@ impl Mq for MessageQueueService {
         request: Request<MqSubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
         let req = request.into_inner();
-        // C4：复制启用时仅分区 Leader 推送；Follower 返回明确「非 Leader」错误（Q4）
+        // 复制启用时仅分区 Leader 推送；Follower 返回明确「非 Leader」错误
         if let Some(rm) = self.replication_manager() {
             let shard = format!("mq:{}", req.topic);
             if !rm.is_leader(&shard) {
@@ -675,7 +675,7 @@ impl Mq for MessageQueueService {
             }
         }
         let (tx, out_rx) = tokio::sync::mpsc::channel(64);
-        // Phase 4: 基于消费组 offset 的长轮询推送。注册订阅者并回放已提交
+        // 基于消费组 offset 的长轮询推送。注册订阅者并回放已提交
         // 偏移之后的消息；此后 produce 直接向该 channel 推送（按偏移过滤）。
         self.subscribe(&req.topic, &req.consumer_group, tx)
             .await
@@ -697,7 +697,7 @@ impl Mq for MessageQueueService {
 
     async fn ack(&self, request: Request<MqAckRequest>) -> Result<Response<MqAckResponse>, Status> {
         let req = request.into_inner();
-        // C3：消费组偏移为 Leader 本地状态；复制启用时仅 Leader 提交偏移
+        // 消费组偏移为 Leader 本地状态；复制启用时仅 Leader 提交偏移
         if let Some(rm) = self.replication_manager() {
             let shard = format!("mq:{}", req.topic);
             if !rm.is_leader(&shard) {
@@ -714,7 +714,7 @@ impl Mq for MessageQueueService {
         };
         let topic = req.topic.clone();
         let group = req.consumer_group.clone();
-        // redb 写事务移到阻塞线程池（Phase 1 T1.2）
+        // redb 写事务移到阻塞线程池
         self.run_blocking(move |me| {
             me.commit_offset(&group, &topic, partition, req.offset as u64)
         })
@@ -723,7 +723,7 @@ impl Mq for MessageQueueService {
         Ok(Response::new(MqAckResponse {}))
     }
 
-    /// Phase 1: 按 offset 批量拉取（poll + ack 即得 at-least-once + 增量游标）。
+    /// 按 offset 批量拉取（poll + ack 即得 at-least-once + 增量游标）。
     /// 复用引擎 `consume()`（从 start_offset 读最多 max_count 条）。
     async fn poll(
         &self,
@@ -892,7 +892,7 @@ impl ReplicatedStore for ReplicaRouter {
 #[tonic::async_trait]
 impl Replica for ReplicaRouter {
     /// Leader → Follower：应用一条复制条目（幂等；重复条目 applied=true）。
-    /// redb 写事务移到阻塞线程池（Phase 1 T1.2）。
+    /// redb 写事务移到阻塞线程池。
     async fn apply(
         &self,
         request: Request<ReplicaApplyRequest>,
@@ -955,7 +955,7 @@ impl Replica for ReplicaRouter {
     >;
 
     /// Follower → Leader：拉取缺失序列号区间的复制条目（stream 回放）。
-    /// redb range 读移到阻塞线程池（Phase 1 T1.2）。
+    /// redb range 读移到阻塞线程池。
     async fn reconcile(
         &self,
         request: Request<ReplicaReconcileRequest>,
@@ -984,7 +984,7 @@ impl Replica for ReplicaRouter {
     }
 
     /// 双向心跳：维护 ISR 成员 + 交换各 shard 最后序列号（落后检测）。
-    /// 各 shard last_seq 的 redb 读移到阻塞线程池（Phase 1 T1.2）。
+    /// 各 shard last_seq 的 redb 读移到阻塞线程池。
     async fn isr_heartbeat(
         &self,
         request: Request<ReplicaHeartbeatRequest>,
@@ -1311,7 +1311,7 @@ fn map_deploy_error(e: DeployError) -> Status {
     }
 }
 
-// 引擎错误 typed 映射（ISSUE-010 §3）：
+// 引擎错误 typed 映射：
 // InvalidArgument → InvalidArgument；NotFound → NotFound；FailedPrecondition → FailedPrecondition；其余 → Internal（脱敏）
 fn map_engine_error(e: WorkflowEngineError) -> Status {
     match e {
@@ -1330,7 +1330,7 @@ impl Workflow for WorkflowEngineService {
     ) -> Result<Response<WorkflowStartResponse>, Status> {
         let req = request.into_inner();
 
-        // definition_id 与 definition_dsl 互斥（ISSUE-010 §1：startByDefinition 真契约）
+        // definition_id 与 definition_dsl 互斥（startByDefinition 真契约）
         if !req.definition_id.is_empty() && !req.definition_dsl.is_empty() {
             return Err(Status::invalid_argument(
                 "definition_id and definition_dsl are mutually exclusive",
@@ -2056,7 +2056,7 @@ mod tests {
         assert!(!status.message().contains("store.db"));
     }
 
-    /// 数据面错误映射：not leader 保留为显式契约（Q4/C2），其余脱敏
+    /// 数据面错误映射：not leader 保留为显式契约，其余脱敏
     #[test]
     fn test_map_service_error_preserves_not_leader() {
         let not_leader = map_service_error("not leader for shard 'mq:t' (leader is other-agent)");

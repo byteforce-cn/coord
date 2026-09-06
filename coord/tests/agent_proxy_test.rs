@@ -1,4 +1,4 @@
-// TDD: Agent 请求代理集成测试 (Phase B2 + B5)
+// TDD: Agent 请求代理集成测试 (+ B5)
 //
 // 验证 Agent 能将请求转发到真实 Server：
 // B2: KV Put / Range / Delete → Agent → Server → 数据持久化

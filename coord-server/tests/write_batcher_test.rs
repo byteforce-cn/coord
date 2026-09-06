@@ -1,4 +1,4 @@
-// write_batcher_test.rs — Phase 1: WriteBatcher 测试
+// write_batcher_test.rs — WriteBatcher 测试
 //
 // TDD: 测试共享写入批处理器（Group Commit）
 // 验证多 Region 批量 Raft Log append 的正确性

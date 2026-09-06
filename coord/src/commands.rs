@@ -1,4 +1,4 @@
-// CLI 命令处理器（ADP §6、§10.1、§15.3、§19.1）
+// CLI 命令处理器
 //
 // 从 main.rs 抽取，支持单元测试。每个命令对应一个异步函数，
 // 返回 Result<(), Box<dyn std::error::Error>>。
@@ -780,7 +780,7 @@ pub async fn cmd_auth_approle_show(
     Ok(())
 }
 
-// ──── Capability 命令 (Phase 1.5) ────
+// ──── Capability 命令 ────
 
 use coord_proto::capability::capability_registry_client::CapabilityRegistryClient;
 use coord_proto::capability::{CapabilityGetRequest, CapabilityListRequest};
@@ -975,7 +975,7 @@ mod capability_tests {
     }
 }
 
-// ──── Reset / IdGen 运维命令（ISSUE-011）────
+// ──── Reset / IdGen 运维命令 ────
 
 /// idgen 备份文件名（存放于数据目录）
 pub const IDGEN_BACKUP_FILE: &str = "idgen-backup.json";
@@ -1198,11 +1198,11 @@ mod idgen_reset_tests {
 
 // ──── 内部辅助 ────
 
-/// 在线拉取快照（P1-08：Maintenance/Snapshot 流式导出）。
+/// 在线拉取快照（Maintenance/Snapshot 流式导出）。
 ///
 /// 从源节点按块接收 SnapshotData（首块携带 last_included_index/term），
 /// 拼接后先解析校验（版本 + bincode）再落盘（tmp → 原子 rename）。
-/// T5.8（R-MR-05）：region = 0 拉 region 0 / 单 Raft；>0 拉对应 Region。
+/// region = 0 拉 region 0 / 单 Raft；>0 拉对应 Region。
 pub async fn snapshot_pull(
     conn: impl Into<CliConn>,
     output: &std::path::Path,
@@ -1350,7 +1350,7 @@ mod tests {
             }
             Err(e) => {
                 let msg = e.to_string();
-                // R-SEC-01 后：非加密节点返回 failed_precondition（此前 unimplemented）
+                // 非加密节点返回 failed_precondition（此前 unimplemented）
                 assert!(
                     msg.contains("seal")
                         || msg.contains("encryption")
@@ -1374,7 +1374,7 @@ mod tests {
             Ok(_resp) => {}
             Err(e) => {
                 let msg = e.to_string();
-                // R-SEC-01 后：非密封节点返回 failed_precondition（此前 unimplemented）
+                // 非密封节点返回 failed_precondition（此前 unimplemented）
                 assert!(
                     msg.contains("unseal")
                         || msg.contains("sealed")

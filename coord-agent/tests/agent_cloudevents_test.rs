@@ -1,6 +1,6 @@
-// TDD: CloudEvents 1.0 合规测试 (Phase E — 待实施)
+// TDD: CloudEvents 1.0 合规测试（待实施）
 //
-// v8.2 §5: 所有跨 Agent 边界事件强制遵循 CloudEvents 1.0。
+// 所有跨 Agent 边界事件强制遵循 CloudEvents 1.0。
 // - specversion: "1.0"
 // - type, source, id 必填
 // - data, datacontenttype, subject, time 可选

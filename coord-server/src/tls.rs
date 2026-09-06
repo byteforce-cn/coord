@@ -1,7 +1,7 @@
 // TLS/mTLS 传输安全模块
 //
 // 提供 gRPC Server 和 Raft Network 的 TLS 配置。
-// ADP §14.1 安全分层第一层：传输层安全（TLS），mTLS 双向证书验证。
+// 安全分层第一层：传输层安全（TLS），mTLS 双向证书验证。
 //
 // 使用 tonic 内置 TLS 集成，支持：
 // - 服务端 TLS（server.crt + server.key）
@@ -59,7 +59,7 @@ impl TlsConfig {
         }
     }
 
-    /// P2-05：证书文件指纹快照（mtime + 长度 + 内容 SHA-256，用于热加载变更检测）。
+    /// 证书文件指纹快照（mtime + 长度 + 内容 SHA-256，用于热加载变更检测）。
     pub fn fingerprint(&self) -> Vec<FileFingerprint> {
         let mut paths = vec![(&self.cert_path, true), (&self.key_path, true)];
         if let Some(ca) = &self.ca_path {
@@ -71,7 +71,7 @@ impl TlsConfig {
             .collect()
     }
 
-    /// P2-05：与上一快照对比，任一证书文件（内容/长度/存在性）变化返回 `true`。
+    /// 与上一快照对比，任一证书文件（内容/长度/存在性）变化返回 `true`。
     /// 首次调用（`previous == None`）返回 `false`（仅记录基线，不触发重载）。
     pub fn files_changed(&self, previous: &mut Option<Vec<FileFingerprint>>) -> bool {
         let current = self.fingerprint();
@@ -84,7 +84,7 @@ impl TlsConfig {
     }
 }
 
-/// P2-05：单个证书文件的指纹（路径 + 修改时间 + 长度 + 内容 SHA-256）。
+/// 单个证书文件的指纹（路径 + 修改时间 + 长度 + 内容 SHA-256）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileFingerprint {
     pub path: PathBuf,
@@ -193,7 +193,7 @@ mod tests {
         assert!(result.is_none());
     }
 
-    // ──── P2-05：证书热加载变更检测 ────
+    // ──── 证书热加载变更检测 ────
 
     #[test]
     fn test_files_changed_baseline_and_change() {

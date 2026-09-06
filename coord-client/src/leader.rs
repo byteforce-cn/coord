@@ -1,7 +1,7 @@
 // coord-client: Leader 发现
 //
 // 维护当前 Leader 地址缓存，支持初始发现和运行时更新。
-// ADP §10.3.1 定义三种策略：初始发现、运行时跟踪、全量刷新。
+// 定义三种策略：初始发现、运行时跟踪、全量刷新。
 
 use parking_lot::RwLock;
 use std::sync::Arc;

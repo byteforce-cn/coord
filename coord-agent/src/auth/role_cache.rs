@@ -3,8 +3,6 @@
 // Agent periodically syncs the full Role→Capability map from Server (every 5 min).
 // High-sensitivity roles (e.g., admin, security-manager, root) bypass the cache
 // and force a server lookup on every request.
-//
-// See docs/capability-auth-implementation.md §3.2, §6.3.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -207,7 +205,7 @@ mod tests {
         }
     }
 
-    // ──── Phase 3.1: Role cache CRUD ────
+    // ──── Role cache CRUD ────
 
     #[test]
     fn test_cache_empty_on_creation() {

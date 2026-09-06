@@ -1,8 +1,8 @@
-// TDD: Agent Watch Fan-out 集成测试 (Phase B4 + B5)
+// TDD: Agent Watch Fan-out 集成测试 (+ B5)
 //
 // 验证 Agent Watch 代理语义：
 // 1. 单订阅者：Watch 事件通过 Agent 正确传递（B5 修复集成测试）
-// 2. 多订阅者 Fan-out：同一 prefix 的多个订阅者都收到事件（Phase C）
+// 2. 多订阅者 Fan-out：同一 prefix 的多个订阅者都收到事件
 //
 // B5 修复要点：
 // - range_end 使用 prefix-end 语义（而非空 = 精确匹配）

@@ -11,7 +11,7 @@
 // - service: 可插拔服务框架（BaseService trait + ServiceManager）
 // - services: 高级基础服务（Registry、Workflow 等）
 //
-// 参见 docs/client-agent-architecture-v3.md。
+// 参见。
 
 pub mod auth;
 pub mod cache;
@@ -112,7 +112,7 @@ pub struct AgentConfig {
     #[serde(default = "default_proxy_request_timeout_secs")]
     pub proxy_request_timeout_secs: u64,
 
-    // Phase D+: 可插拔服务配置
+    // 可插拔服务配置
     /// 高级基础服务启用配置（v3.0 可插拔服务框架）
     #[serde(default)]
     pub services: ServiceConfig,
@@ -132,27 +132,27 @@ pub struct AgentConfig {
     pub tls: Option<AgentTlsConfig>,
 
     // 线程池资源隔离
-    /// 线程池配置（v8.2 §3.2）
+    /// 线程池配置
     #[serde(default)]
     pub thread_pools: ThreadPoolConfig,
 
-    // ISSUE-000 Phase 0: Agent 侧 CCT 鉴权
+    // Agent 侧 CCT 鉴权
     /// 鉴权配置（默认关闭；开启后所有 gRPC RPC 校验 CCT + capability）
     #[serde(default)]
     pub auth: AgentAuthConfig,
 }
 
-/// Agent 侧 CCT 鉴权配置（ISSUE-000 Phase 0：私钥集中存储前必须上鉴权）
+/// Agent 侧 CCT 鉴权配置（私钥集中存储前必须上鉴权）
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct AgentAuthConfig {
     /// 是否启用鉴权（默认 false；启用后所有 gRPC RPC 均校验 CCT）
     #[serde(default)]
     pub enabled: bool,
     /// CCT HMAC 签名密钥（hex 编码；历史对称方案，宽限期兼容验证用，
-    /// R-SEC-02 之后新签发全部为 Ed25519，此字段仅用于存量 token 验证）
+    /// 之后新签发全部为 Ed25519，此字段仅用于存量 token 验证）
     #[serde(default)]
     pub signing_key_hex: String,
-    /// R-SEC-02：CCT Ed25519 验证公钥（hex 编码 64 字符 = 32 字节）。
+    /// CCT Ed25519 验证公钥（hex 编码 64 字符 = 32 字节）。
     /// server 持私钥签发，agent 仅存公钥验证，任一 agent 被控无法伪造 token。
     #[serde(default)]
     pub verifying_key_hex: String,
@@ -464,7 +464,7 @@ impl AgentServer {
             .parse()
             .map_err(|e| format!("invalid agent_addr {}: {e}", self.config.agent_addr))?;
 
-        // P1-05：非 loopback 绑定强制 auth + TLS（与 server 侧 P0-G.1 同口径）。
+        // 非 loopback 绑定强制 auth + TLS（与 server 侧 同口径）。
         // 防止生产网络裸奔（默认 auth 关闭、TLS None，仅限本机开发）。
         // 生产收口：TLS 不再是“仅校验配置”——下方 serve 路径真实挂载 `.tls_config()`。
         {
@@ -579,10 +579,10 @@ impl AgentServer {
             None
         };
 
-        // Phase D: 初始化可插拔服务框架
+        // 初始化可插拔服务框架
         let service_manager = ServiceManager::new(self.config.services.clone());
 
-        // 按配置启用高级服务（Phase E）
+        // 按配置启用高级服务
         // 保存各服务的 Arc 句柄，用于后续注册 gRPC Server
         let mut registry_grpc_svc: Option<Arc<crate::services::registry::RegistryService>> = None;
         let mut config_grpc_svc: Option<Arc<crate::services::config_center::ConfigCenterService>> =
@@ -816,7 +816,7 @@ impl AgentServer {
             }
         }
 
-        // Phase F: 数据面服务（Cache + MQ，基于 redb 本地引擎，无需 Server 连接）
+        // 数据面服务（Cache + MQ，基于 redb 本地引擎，无需 Server 连接）
         if self.config.services.cache {
             let data_dir = std::path::PathBuf::from(&self.config.data_dir);
             let cache_svc = Arc::new(crate::services::cache::CacheService::new(
@@ -824,7 +824,7 @@ impl AgentServer {
                 1024 * 1024 * 1024, // 1GB max
                 3600,               // default TTL 1 hour
             ));
-            // Phase 1 T1.2：绑定自身弱引用，gRPC handler 才能升级 Arc 走 spawn_blocking
+            // 绑定自身弱引用，gRPC handler 才能升级 Arc 走 spawn_blocking
             cache_svc.bind_self_weak(&cache_svc);
             let cache_grpc = cache_svc.clone();
             if let Err(e) = service_manager.register(cache_svc).await {
@@ -841,7 +841,7 @@ impl AgentServer {
                 data_dir.clone(),
                 1024 * 1024 * 1024, // 1GB max
             ));
-            // Phase 1 T1.2：绑定自身弱引用，gRPC handler 才能升级 Arc 走 spawn_blocking
+            // 绑定自身弱引用，gRPC handler 才能升级 Arc 走 spawn_blocking
             mq_svc.bind_self_weak(&mq_svc);
             let mq_grpc = mq_svc.clone();
             if let Err(e) = service_manager.register(mq_svc).await {
@@ -915,7 +915,7 @@ impl AgentServer {
             replication_grpc_svc = Some(router);
         }
 
-        // Phase G: 安全策略引擎（本地 RBAC/ABAC，可扩展至 OPA）
+        // 安全策略引擎（本地 RBAC/ABAC，可扩展至 OPA）
         if self.config.services.policy {
             // 有 Server KV 连接时启用 bundle 通道（with_kv），否则仅 RBAC 引擎
             let policy_svc = Arc::new(match &inner {
@@ -985,7 +985,7 @@ impl AgentServer {
             tracing::info!("FeatureFlags service initialized (v3.0)");
         }
 
-        // PKI CA 证书签发服务（Phase F / ISSUE-000：get-or-create + 共享 KV 持久化）
+        // PKI CA 证书签发服务（/ get-or-create + 共享 KV 持久化）
         if self.config.services.pki {
             use crate::pki::PkiConfig;
             use crate::pki_store::{KvPkiStore, PkiStore};
@@ -1030,7 +1030,7 @@ impl AgentServer {
             self.config.agent_addr
         );
 
-        // ISSUE-000 Phase 0: agent gRPC 挂 AuthInterceptor（默认关闭，开启后全量 RPC 校验 CCT）
+        // agent gRPC 挂 AuthInterceptor（默认关闭，开启后全量 RPC 校验 CCT）
         let mut auth_interceptor = crate::auth::interceptor::AuthInterceptor::new(
             if self.config.auth.enabled {
                 hex::decode(&self.config.auth.signing_key_hex)
@@ -1041,7 +1041,7 @@ impl AgentServer {
             Arc::new(crate::auth::role_cache::RoleCache::new()),
             self.config.auth.clock_drift_secs,
         );
-        // R-SEC-02：配置 Ed25519 公钥 → 验证 server 非对称签发的 CCT（仅存公钥，不可伪造）
+        // 配置 Ed25519 公钥 → 验证 server 非对称签发的 CCT（仅存公钥，不可伪造）
         if self.config.auth.enabled && !self.config.auth.verifying_key_hex.is_empty() {
             let vk = hex::decode(&self.config.auth.verifying_key_hex)
                 .map_err(|e| format!("invalid auth.verifying_key_hex: {e}"))?;

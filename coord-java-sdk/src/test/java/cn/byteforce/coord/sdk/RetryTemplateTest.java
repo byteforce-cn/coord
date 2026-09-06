@@ -122,7 +122,7 @@ class RetryTemplateTest {
         assertThat(calls.get()).isEqualTo(3);
     }
 
-    // ──── P2-04：重试矩阵对齐（Rust 客户端：unavailable/deadline/timeout → 重试）────
+    // ──── 重试矩阵对齐（Rust 客户端：unavailable/deadline/timeout → 重试）────
 
     @Test
     void shouldRetryOnDeadlineExceeded() throws Exception {

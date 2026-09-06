@@ -2,8 +2,6 @@
 //
 // 实现 coord_core::discovery::MemberDiscovery trait。
 // 从配置文件读取 Server 列表，不自动发现新节点。
-//
-// 参见 docs/client-agent-architecture.md §5.2。
 
 use std::net::SocketAddr;
 use std::sync::RwLock;

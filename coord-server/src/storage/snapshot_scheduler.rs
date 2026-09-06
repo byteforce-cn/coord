@@ -1,13 +1,13 @@
-// Automatic Snapshot Scheduler — 定时自动快照调度（ADP §19.2）
+// Automatic Snapshot Scheduler — 定时自动快照调度
 //
 // 在后台定时创建状态机快照，并自动清理过期快照。
 //
-// 配置项（ADP §19.2）：
+// 配置项：
 // - snapshot_interval: 自动快照间隔（默认 1 小时）
 // - snapshot_retention: 快照保留时间（默认 7 天）
 // - snapshot_dir: 快照存储目录（默认 <data_dir>/snapshots/auto）
 //
-// S-RCV-01：目录必须与 Raft 快照目录隔离。scheduler 的文件名
+// 目录必须与 Raft 快照目录隔离。scheduler 的文件名
 // snapshot-{unix_ts}.snap 与 Raft 的 snapshot-{idx}-{term}.snap 冲突，
 // 混在同一目录会导致状态机清理逻辑误删刚落盘的 Raft 快照。
 

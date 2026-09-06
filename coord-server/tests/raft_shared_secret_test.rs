@@ -1,11 +1,8 @@
-// R-SEC-03 验收测试（L2 进程内）：raft 端口共享密钥 HMAC 认证
+// 验收测试（L2 进程内）：raft 端口共享密钥 HMAC 认证
 //
-// 覆盖 17 号文档 R-SEC-03：
 // - 未携带有效 auth_tag 的节点无法注入 Vote/AppendEntries/Snapshot（UNAUTHENTICATED）；
 // - 携带正确 tag 的消息通过认证层（后续由 raft 实例处理）；
 // - 篡改 payload 后 tag 失效。
-//
-// 对应文档：`docs/production/17-refactor-master-plan.md` R-SEC-03。
 
 use std::net::TcpListener;
 use std::time::Duration;

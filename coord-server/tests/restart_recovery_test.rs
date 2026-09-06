@@ -1,11 +1,8 @@
-// M0 验收测试（L2 进程内，规格 A.4/A.5/A.6）：
-// - applied 状态同事务持久化，重启从 `META_LAST_APPLIED` 恢复（D-A4）
-// - revision ≡ log index（D-A2），apply 幂等守卫（D-A3）
-// - 快照落盘（tmp → fsync → rename → 校验和）与启动加载（A.6.1–A.6.3）
-// - LogStore purge 前置守卫（M0-5）
-//
-// 对应文档：`docs/production/11-architecture-redesign.md` 规格 A；
-// `docs/production/15-milestone-task-breakdown.md` M0-3/M0-4/M0-5。
+// 验收测试（L2 进程内）：
+// - applied 状态同事务持久化，重启从 `META_LAST_APPLIED` 恢复
+// - revision ≡ log index，apply 幂等守卫
+// - 快照落盘（tmp → fsync → rename → 校验和）与启动加载
+// - LogStore purge 前置守卫
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;
@@ -100,7 +97,7 @@ async fn put_keys(raft: &coord_server::raft::CoordRaft, prefix: &str, n: u64) ->
     last_rev
 }
 
-/// M0-3：applied 持久化 —— 写入后"重启"（全句柄 drop + 重新打开），
+/// applied 持久化 —— 写入后"重启"（全句柄 drop + 重新打开），
 /// `applied_state` 从盘恢复、revision 不重复、changelog 无重复条目。
 #[tokio::test]
 async fn test_applied_persisted_across_restart() {
@@ -218,7 +215,7 @@ async fn test_applied_persisted_across_restart() {
     assert_eq!(mvcc2.current_revision(), last_rev + 1);
 }
 
-/// M0-2：apply 幂等守卫 —— 同 revision 重复 apply 无副作用
+/// apply 幂等守卫 —— 同 revision 重复 apply 无副作用
 #[tokio::test]
 async fn test_replay_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
@@ -251,7 +248,7 @@ async fn test_replay_is_idempotent() {
     drop(mvcc);
 }
 
-/// M0-4：快照落盘 + 启动加载（tmp → fsync → rename → SHA256 → META_SNAPSHOT）
+/// 快照落盘 + 启动加载（tmp → fsync → rename → SHA256 → META_SNAPSHOT）
 #[tokio::test]
 async fn test_snapshot_persisted_and_loaded() {
     let tmp = tempfile::tempdir().unwrap();
@@ -332,7 +329,7 @@ async fn test_snapshot_persisted_and_loaded() {
     assert_eq!(mvcc2.current_revision(), 5, "applied must be restored");
 }
 
-/// M0-5：purge 前置守卫 —— 无覆盖快照时拒绝删除日志
+/// purge 前置守卫 —— 无覆盖快照时拒绝删除日志
 #[tokio::test]
 async fn test_purge_guard_refuses_without_durable_snapshot() {
     let tmp = tempfile::tempdir().unwrap();

@@ -1,7 +1,7 @@
 // coord-client: 主客户端
 //
 // 封装 gRPC 连接管理、Leader 发现、重试逻辑，提供类型安全的 KV/Lease/Watch/Txn API。
-// ADP §10.2-10.3 定义完整的 Client SDK 行为。
+// 定义完整的 Client SDK 行为。
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -100,7 +100,7 @@ pub struct Client {
 struct ClientInner {
     config: Config,
     leader: LeaderDiscovery,
-    /// gRPC connection pool (ADP §10.3)
+    /// gRPC connection pool
     pool: ConnectionPool,
 }
 
@@ -213,7 +213,7 @@ impl Client {
     }
 
     /// 获取到当前 Leader 的 gRPC Channel 和端点地址。
-    /// 从连接池中获取复用的连接（ADP §10.3）。
+    /// 从连接池中获取复用的连接。
     async fn get_leader_channel(&self) -> Result<(String, Channel)> {
         let leader_addr = self.leader_addr().await?;
         let channel = self.inner.pool.get(&leader_addr).await?;
@@ -702,7 +702,7 @@ impl LeaseClient {
 
         let mut stream_out = response.into_inner();
 
-        // 发送初始续约请求（P2-04：有界队列 + try_send）
+        // 发送初始续约请求（有界队列 + try_send）
         tx.try_send(LeaseKeepAliveRequest { id: lease_id })
             .map_err(|e| Error::Internal(format!("keep-alive channel error: {e}")))?;
 
@@ -716,7 +716,7 @@ impl LeaseClient {
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(interval as u64)) => {
-                        // P2-04：try_send——队列满时跳过本拍（周期续约，下一拍补偿）；
+                        // try_send——队列满时跳过本拍（周期续约，下一拍补偿）；
                         // 通道关闭才退出，不再无限阻塞挂起续约循环
                         match tx.try_send(LeaseKeepAliveRequest { id: lease_id_copy }) {
                             Ok(()) => {}
@@ -842,8 +842,8 @@ impl WatchClient {
 
         let mut stream_out = response.into_inner();
 
-        // 后台任务：持续接收事件并转发（P2-04：有界队列 + try_send；
-        // 满时置溢出标记丢弃事件，队列有空间时优先补发 Backpressure 合成信号——对齐服务端 P0-E 语义）
+        // 后台任务：持续接收事件并转发（有界队列 + try_send；
+        // 满时置溢出标记丢弃事件，队列有空间时优先补发 Backpressure 合成信号——对齐服务端语义）
         let (event_tx, event_rx) = mpsc::channel::<Result<WatchEvent>>(256);
         tokio::spawn(async move {
             let mut overflow = false;
@@ -874,7 +874,7 @@ impl WatchClient {
     }
 }
 
-/// P2-04：Watch 事件转发（有界队列 + 溢出信号，对齐服务端 P0-E 语义）。
+/// Watch 事件转发（有界队列 + 溢出信号，对齐服务端语义）。
 ///
 /// - 队列满：置溢出标记并丢弃当前事件（内存有界，不无限阻塞）；
 /// - 溢出标记为真时：优先补发一条 `Error::Backpressure` 合成事件（必达溢出信号），再送正常事件；
@@ -888,7 +888,7 @@ async fn forward_watch_event(
         let marker = Err(Error::Backpressure(
             "watch event buffer full: some events were dropped".to_string(),
         ));
-        // P2-04 修复：marker 必须非阻塞补发——队列满时 `send().await` 会永久阻塞
+        // 修复：marker 必须非阻塞补发——队列满时 `send().await` 会永久阻塞
         // 生产者（消费者尚未排空）。保持溢出标记，等待后续调用在队列有空位时补发。
         match tx.try_send(marker) {
             Ok(()) => {
@@ -1236,7 +1236,7 @@ mod tests {
         }
     }
 
-    // ──── P2-04：客户端背压（有界队列 + try_send + 溢出信号）────
+    // ──── 客户端背压（有界队列 + try_send + 溢出信号）────
 
     fn dummy_event() -> WatchEvent {
         WatchEvent::default()

@@ -1,17 +1,15 @@
-// coord-agent: 缓存 (Cache Service) — 数据面（Phase F）
+// coord-agent: 缓存 (Cache Service) — 数据面
 //
 // 实现 BaseService trait，基于 redb 提供本地持久化缓存引擎。
 // 支持 String/Hash/List/Set 四种数据类型、TTL 过期。
 //
 // 架构（v3.0，源码核验版 + v2.1 ISR 落地）:
 // - 本地 redb 存储引擎；启用 ISR 复制后，写路径经复制管理器同步到 ISR Followers
-// - List pop 为单写事务原子出队（G2 已修复）；复制后 pop 仅 Leader 执行（C2）
-// - TTL 复制 Leader 计算的绝对到期时间戳（C5，encode_value 内嵌 expires_at）
+// - List pop 为单写事务原子出队；复制后 pop 仅 Leader 执行
+// - TTL 复制 Leader 计算的绝对到期时间戳（encode_value 内嵌 expires_at）
 //
-// ✅ 状态声明（v2.1，2026-08-08）：ISR 复制**已实现并落地**（docs/cache-mq-isr-evaluation.md）。
+// ✅ 状态声明（v2.1，2026-08-08）：ISR 复制**已实现并落地**。
 // 复制日志 / 持久化幂等键 / 本地序列号在 cache.redb 内与数据写同事务提交。
-//
-// 参见 docs/client-agent-architecture-v3.md §5.5。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -77,7 +75,7 @@ const SHARD_TABLE: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::n
 // 复制条目日志: key = [shard_len:u32][shard_bytes][seq:u64 BE]
 const CACHE_REPL_ENTRY_TABLE: redb::TableDefinition<&[u8], &[u8]> =
     redb::TableDefinition::new("cache:repl_entries");
-// 持久化幂等键（Q2）: key = idempotency_key bytes
+// 持久化幂等键: key = idempotency_key bytes
 const CACHE_REPL_APPLIED_KEYS: redb::TableDefinition<&[u8], ()> =
     redb::TableDefinition::new("cache:repl_applied");
 // 各 shard 最后已应用序列号: key = shard bytes
@@ -205,9 +203,9 @@ pub struct CacheService {
     db: RwLock<Option<redb::Database>>,
     started: RwLock<bool>,
     default_ttl_secs: u64,
-    /// ISR 复制管理器（None = 单 agent 本地语义，零复制路径保留，C6）
+    /// ISR 复制管理器（None = 单 agent 本地语义，零复制路径保留）
     replication: RwLock<Option<Arc<crate::services::replication::ReplicationManager>>>,
-    /// 自身 Arc 弱引用（Phase 1 T1.2：spawn_blocking 升级用，见 bind_self_weak）
+    /// 自身 Arc 弱引用（spawn_blocking 升级用，见 bind_self_weak）
     self_arc: RwLock<Option<std::sync::Weak<CacheService>>>,
 }
 
@@ -233,7 +231,7 @@ impl CacheService {
         }
     }
 
-    /// 绑定自身 Arc 弱引用（Phase 1 T1.2：gRPC handler 升级为强引用后，
+    /// 绑定自身 Arc 弱引用（gRPC handler 升级为强引用后，
     /// 把同步 redb 事务放到 `spawn_blocking`，避免阻塞 agent 异步执行器）。
     ///
     /// 由服务装配方在 `Arc::new` 后调用一次（lib.rs run_agent 数据面初始化）。
@@ -247,7 +245,7 @@ impl CacheService {
         self.self_arc.read().as_ref().and_then(|w| w.upgrade())
     }
 
-    /// 在阻塞线程池上执行同步 redb 操作（Phase 1 T1.2）。
+    /// 在阻塞线程池上执行同步 redb 操作。
     ///
     /// gRPC handler 持有 `&CacheService`，但 `spawn_blocking` 需要 `'static` 自有
     /// 数据——通过 `self_arc` 弱引用升级为 `Arc<Self>` 后移入闭包，再调用同步方法，
@@ -545,7 +543,7 @@ impl CacheService {
         Ok(())
     }
 
-    /// 原子出队（G2，单写事务）：
+    /// 原子出队（单写事务）：
     /// 同一写事务内迭代前缀 range 找极值（跳过已过期）→ 事务内删除 → commit。
     /// redb 单写者模型保证写事务串行化，消除并发重复出队 / 丢元素。
     /// 已知代价（R3）：大 list 下 O(n) 定位极值，首版接受。
@@ -966,14 +964,12 @@ impl CacheService {
     }
 }
 
-// ──── ISR 复制（v2.1 已落地）────
+// ──── ISR 复制（已落地）────
 //
 // 复制日志 / 持久化幂等键 / 本地序列号在本服务 redb 内与数据写同事务提交。
 // 复制条目携带 Leader 计算的**物理 key**（含 list index / hash field / set member）
-// 与 **绝对到期时间戳**（encode_value 内嵌 expires_at，C5），Follower 原样应用。
-// pop 仅 Leader 执行（C2）：Leader 单事务内原子出队 + 记录 CacheDelete 复制条目。
-//
-// 参见 docs/cache-mq-isr-evaluation.md §4。
+// 与 **绝对到期时间戳**（encode_value 内嵌 expires_at），Follower 原样应用。
+// pop 仅 Leader 执行：Leader 单事务内原子出队 + 记录 CacheDelete 复制条目。
 
 use crate::services::replication::{
     IdempotencyKey, ReplicatedStore, ReplicationEntry, ReplicationError, ReplicationOp,
@@ -1223,7 +1219,7 @@ impl CacheService {
         ttl_secs: Option<u64>,
     ) -> ServiceResult<()> {
         let ttl = ttl_secs.unwrap_or(self.default_ttl_secs);
-        let encoded = encode_value(&value, ttl); // 含绝对到期时间戳（C5）
+        let encoded = encode_value(&value, ttl); // 含绝对到期时间戳
         self.replicated_write(ReplicationOp::CachePut {
             key: key.as_bytes().to_vec(),
             value: encoded,
@@ -1296,7 +1292,7 @@ impl CacheService {
         .await
     }
 
-    /// 复制原子出队（C2：pop 仅 Leader 执行）。Leader 在单事务内
+    /// 复制原子出队（pop 仅 Leader 执行）。Leader 在单事务内
     /// 原子出队并记录 CacheDelete 复制条目；Follower 收到删除后本地移除。
     pub async fn list_pop_replicated(
         &self,
@@ -1631,7 +1627,7 @@ mod tests {
         assert_eq!(svc.list_length("l").unwrap(), 1);
     }
 
-    /// 并发 pop 原子性（G2，RED→GREEN）
+    /// 并发 pop 原子性（RED→GREEN）
     ///
     /// 不变量：无重复、无丢失、恰好 total 个、队列最终清空。
     /// 旧实现（读事务找极值 + 写事务删除，两次提交）在高竞争下会
@@ -1756,7 +1752,7 @@ mod tests {
     }
 }
 
-// ──── CacheBackend / CacheConfig / MokaCacheService (Phase D-moka) ────
+// ──── CacheBackend / CacheConfig / MokaCacheService ────
 
 use std::collections::HashSet;
 use std::sync::Arc;

@@ -2,8 +2,6 @@
 //
 // 每个高级基础服务为一个独立模块，实现 BaseService trait。
 // 通过 ServiceManager 按需加载和生命周期管理。
-//
-// 参见 docs/client-agent-architecture-v3.md §5。
 
 pub mod cache;
 pub mod circuit_breaker;

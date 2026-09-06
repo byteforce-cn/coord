@@ -1,9 +1,7 @@
-// coord-agent: 权限策略引擎测试（Phase G）
+// coord-agent: 权限策略引擎测试
 //
 // TDD RED phase: 测试 PolicyService（基于规则的授权决策引擎）。
 // 支持 RBAC/ABAC 策略评估、策略管理、条件匹配。
-//
-// 参见 docs/client-agent-architecture-v3.md §5.10。
 
 use std::sync::Arc;
 

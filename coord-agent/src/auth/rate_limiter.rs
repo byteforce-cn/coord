@@ -1,10 +1,8 @@
-// Auth Endpoint Rate Limiter (Phase 3.6)
+// Auth Endpoint Rate Limiter
 //
 // IP-based rate limiting for the Agent's Authenticate (login) endpoint.
 // Prevents brute-force attacks by limiting to 10 req/s per client IP.
 // Exceeded requests return HTTP 429 Too Many Requests (gRPC RESOURCE_EXHAUSTED).
-//
-// See docs/capability-auth-implementation.md §3.6, §8.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -224,7 +222,7 @@ mod tests {
     use super::*;
     use std::thread;
 
-    // ──── Phase 3.6 TDD Tests ────
+    // ──── TDD Tests ────
 
     #[test]
     fn test_rate_limiter_allows_requests_within_limit() {
@@ -375,7 +373,7 @@ mod tests {
     #[test]
     fn test_rate_limiter_default_config_matches_spec() {
         let limiter = LoginRateLimiter::new();
-        // 10 req/s per IP as specified in the design doc §3.6 & §8
+        // 10 req/s per IP
         let config = LoginRateLimitConfig::default();
         assert_eq!(config.max_requests_per_sec, 10);
         assert_eq!(config.burst_size, 10);

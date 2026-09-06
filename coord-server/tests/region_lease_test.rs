@@ -1,4 +1,4 @@
-// T5.7（R-MR-04）Lease per-Region 验收测试
+// Lease per-Region 验收测试
 //
 // 单节点装配：region 0（CoordNode.node.raft，全局租约表）+ region 1/2（独立 raft
 // 与 MVCC，目录隔离），region 0 状态机挂 lease_revoke_tx 广播，CoordNode 启动
@@ -86,7 +86,7 @@ async fn start_single_node_with_regions() -> Host {
         base.join("snapshots"),
         Arc::clone(&tracker0),
     );
-    // T5.7：region 0 状态机挂 Lease Revoke 广播
+    // region 0 状态机挂 Lease Revoke 广播
     let (lease_revoke_tx, lease_revoke_rx) = tokio::sync::mpsc::unbounded_channel::<i64>();
     sm_store0.set_lease_revoke_tx(lease_revoke_tx);
 
@@ -203,7 +203,7 @@ async fn grant_lease(host: &Host, ttl: i64) -> i64 {
     id
 }
 
-/// T5.7 验收 1：region 模式 Put 带 lease 绑定 + 显式 revoke 全链路清理。
+/// 验收 1：region 模式 Put 带 lease 绑定 + 显式 revoke 全链路清理。
 #[tokio::test]
 async fn test_region_mode_put_with_lease_and_revoke_cleans_keys() {
     let host = start_single_node_with_regions().await;
@@ -305,7 +305,7 @@ async fn test_region_mode_put_with_lease_and_revoke_cleans_keys() {
     }
 }
 
-/// T5.7 验收 2：租约过期（TTL 到期）→ 广播 → per-Region 删除绑定 Key。
+/// 验收 2：租约过期（TTL 到期）→ 广播 → per-Region 删除绑定 Key。
 #[tokio::test]
 async fn test_region_mode_lease_expiry_cleans_keys() {
     let host = start_single_node_with_regions().await;
@@ -345,7 +345,7 @@ async fn test_region_mode_lease_expiry_cleans_keys() {
     }
 }
 
-/// T5.7 验收 3：Watch 可见 per-Region Lease 删除事件（DeleteKeysByLease 走状态机
+/// 验收 3：Watch 可见 per-Region Lease 删除事件（DeleteKeysByLease 走状态机
 /// apply → per-Region dispatcher 分发）。
 #[tokio::test]
 async fn test_region_lease_cleanup_emits_watch_events() {

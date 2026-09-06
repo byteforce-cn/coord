@@ -1,12 +1,12 @@
 // CCT v3 — Capability Credential Token
 //
-// JWT-like structured token format (see docs/capability-auth-implementation.md §3):
+// JWT-like structured token format:
 //   CCT = base64url( header ) || "." || base64url( payload ) || "." || base64url( signature )
 //
 // Payload contains only role IDs (not full capability lists). Agent resolves
 // capabilities from locally cached Role→Capability map.
 //
-// R-SEC-02：签名算法双轨制——
+// 签名算法双轨制——
 // - `HMAC-SHA256`：历史对称方案（server/agent 同钥），保留用于兼容验证；
 // - `Ed25519`：非对称方案（server 持私钥签发，agent 仅持公钥验证），
 //   任一 agent 被控无法伪造 token。生产签发改用 Ed25519，验证双算法并行
@@ -48,7 +48,7 @@ impl Default for CctHeader {
 }
 
 impl CctHeader {
-    /// R-SEC-02：Ed25519 签发头（kid 标记非对称签名密钥）
+    /// Ed25519 签发头（kid 标记非对称签名密钥）
     pub fn ed25519() -> Self {
         Self {
             alg: CCT_ALG_ED25519.to_string(),
@@ -103,7 +103,7 @@ pub fn encode_cct(header: &CctHeader, payload: &CctPayload, signing_key: &[u8]) 
     Ok(format!("{header_b64}.{payload_b64}.{sig_b64}"))
 }
 
-/// R-SEC-02：用 Ed25519 私钥签发 CCT（header.alg 须为 `Ed25519`）。
+/// 用 Ed25519 私钥签发 CCT（header.alg 须为 `Ed25519`）。
 pub fn encode_cct_ed25519(
     header: &CctHeader,
     payload: &CctPayload,
@@ -126,7 +126,7 @@ pub fn decode_cct(token: &str, signing_key: &[u8]) -> Result<CctToken> {
     decode_cct_any(token, &[signing_key], None)
 }
 
-/// R-SEC-02：按 header.alg 分发的验证入口。
+/// 按 header.alg 分发的验证入口。
 ///
 /// - `HMAC-SHA256` → 依次尝试 `hmac_keys`（宽限期：多版本历史密钥）；
 /// - `Ed25519` → 用 `ed25519_pub`（32 字节公钥）验证；未配置公钥 → 拒绝。
@@ -149,7 +149,7 @@ pub fn decode_cct_any(
     let signature = base64_url_decode(parts[2])
         .map_err(|e| Error::InvalidToken(format!("signature decode: {e}")))?;
 
-    // 先解 header 以按 alg 分发验签（R-SEC-02）
+    // 先解 header 以按 alg 分发验签
     let header: CctHeader = serde_json::from_slice(&header_json)
         .map_err(|e| Error::InvalidToken(format!("header JSON: {e}")))?;
     let signing_input = format!("{}.{}", parts[0], parts[1]);
@@ -202,7 +202,7 @@ pub fn decode_cct_any(
     })
 }
 
-/// R-SEC-02：仅用 Ed25519 公钥验证（agent 侧无 HMAC 密钥时使用）。
+/// 仅用 Ed25519 公钥验证（agent 侧无 HMAC 密钥时使用）。
 pub fn decode_cct_ed25519(token: &str, ed25519_pub: &[u8]) -> Result<CctToken> {
     decode_cct_any(token, &[], Some(ed25519_pub))
 }
@@ -266,7 +266,7 @@ mod tests {
 
     const TEST_KEY: &[u8] = b"test-signing-key-32-bytes-long!!";
 
-    // ──── Phase 0.1: CCT encode/decode round-trip (RED) ────
+    // ──── CCT encode/decode round-trip (RED) ────
 
     #[test]
     fn test_cct_roundtrip_basic() {
@@ -461,7 +461,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ──── R-SEC-02：Ed25519 非对称签发/验证 ────
+    // ──── Ed25519 非对称签发/验证 ────
 
     fn ed_test_payload() -> CctPayload {
         CctPayload {

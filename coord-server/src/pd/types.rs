@@ -51,7 +51,7 @@ pub struct PdConfig {
     pub target_replicas: usize,
     /// 节点心跳超时（秒）
     pub node_heartbeat_timeout: u64,
-    /// T5.11 P3：Running operator 认领超时（秒）——region 0 leader 周期扫描
+    /// Running operator 认领超时（秒）——region 0 leader 周期扫描
     /// 全局队列，`Running` 超过该时长（认领者失联/Complete 丢失 → 卡死）的
     /// 条目经 raft `PdOp::Requeue` 放回 Pending，由当前存活 Region leader
     /// 重认领（failover 兜底）。须大于单次 operator 正常执行时长（成员变更/
@@ -63,7 +63,7 @@ pub struct PdConfig {
     /// 节点维护模式配置
     #[serde(default)]
     pub maintenance: MaintenanceConfig,
-    /// T5.12（调度暂停开关）：初始是否暂停调度（true = 启动即不产生新 operator；
+    /// 调度暂停开关：初始是否暂停调度（true = 启动即不产生新 operator；
     /// 运行时经 `PlacementDriver::set_scheduler_paused` 切换）。暂停只停
     /// **调度**（scheduler tick 不再入队新 operator），已排队的 operator 仍由
     /// executor 循环继续 drain——用于维护窗口/演练时冻结调度行为。
@@ -178,7 +178,7 @@ impl NodeState {
 /// 副本放置约束
 ///
 /// 控制 Region 副本在不同故障域级别的分布策略。
-/// 用于实现拓扑感知调度（ADP §14.2）。
+/// 用于实现拓扑感知调度。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlacementConstraint {
     /// 同一 Region 的副本不能在同一 host

@@ -5,8 +5,6 @@
 // - 本地 MemoryWorkflowStore 作为读缓存，Watch 订阅实现缓存失效
 // - 关键状态转换使用 Txn CAS 基于 mod_revision 保证并发安全
 // - 所有写操作经过 Raft 共识（由 coord-server 保证）
-//
-// 参见 docs/kv-workflow-store-dev-plan.md
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

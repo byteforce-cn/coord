@@ -1,9 +1,7 @@
-// coord-agent: 消息队列服务测试（Phase F）
+// coord-agent: 消息队列服务测试
 //
 // TDD RED phase: 测试 MessageQueueService（基于 redb 的分段日志 MQ）。
 // 支持 Topic/Partition/ConsumerGroup/DeadLetterQueue。
-//
-// 参见 docs/client-agent-architecture-v3.md §5.6。
 
 use std::sync::Arc;
 use tempfile::TempDir;

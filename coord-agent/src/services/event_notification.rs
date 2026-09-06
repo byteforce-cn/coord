@@ -5,12 +5,10 @@
 //
 // 架构（v3.0 蓝图）:
 // - Watch Fan-out 将事件推送给订阅的本地应用方法
-// - 所有对外事件封装为 CloudEvents 1.0 格式（Phase G 蓝图）
+// - 所有对外事件封装为 CloudEvents 1.0 格式
 // - 支持事件持久化与重放
 //
 // 约束（蓝图）: 所有对外事件必须封装为 CloudEvents 1.0 格式
-//
-// 参见 docs/client-agent-architecture-v3.md §5.7。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -25,7 +23,7 @@ use crate::service::{BaseService, ServiceResult};
 
 // ──── 类型定义 ────
 
-/// 事件（v3.0 简化版，完整 CloudEvents 封装为 Phase G 蓝图）
+/// 事件（v3.0 简化版；完整 CloudEvents 封装为后续扩展）
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     /// 事件唯一 ID

@@ -1,6 +1,6 @@
-// TDD: Transit 信封加密服务测试 (Phase F — 待实施)
+// TDD: Transit 信封加密服务测试（待实施）
 //
-// v8.2 §4.12: 信封加密
+// 信封加密
 // - DEK 本地生成（AES-256-GCM）
 // - KEK 存 Server
 // - DEK 用后即焚，仅存储加密后的 DEK

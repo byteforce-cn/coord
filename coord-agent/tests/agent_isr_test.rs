@@ -1,12 +1,12 @@
-// coord-agent: 跨 Agent ISR 复制集成测试（Phase D，v2.1 已落地）
+// coord-agent: 跨 Agent ISR 复制集成测试
 //
-// 覆盖（docs/cache-mq-isr-evaluation.md Phase A-D）:
+// 覆盖范围:
 // 1. ReplicationManager — peers / Leader 静态分配（min-addr）/ effective_min_isr / isr_satisfied
 // 2. ReplicationEntry — proto 往返
-// 3. MQ 数据面复制 — Follower apply 保留 offset（C1）/ 幂等 / 自动建 topic
-// 4. Cache 数据面复制 — Put/Delete 复制 / 绝对 TTL（C5）/ pop 仅 Leader（C2）
+// 3. MQ 数据面复制 — Follower apply 保留 offset / 幂等 / 自动建 topic
+// 4. Cache 数据面复制 — Put/Delete 复制 / 绝对 TTL / pop 仅 Leader
 // 5. 双 agent gRPC 集成 — MQ produce→follower poll；Cache set→follower get；
-//    降级（follower 宕机 → 写拒绝）；Follower 写被拒（Q4）
+//    降级（follower 宕机 → 写拒绝）；Follower 写被拒
 // 6. Reconcile — Follower 从 Leader 拉取缺失序列号区间重放
 
 use std::time::Duration;
@@ -94,7 +94,7 @@ fn test_leader_assignment_min_addr() {
 
 #[test]
 fn test_effective_min_isr_single_agent_zero_break() {
-    // C6：单 agent（无对端）min_isr 自动降级为 1，零破坏
+    // 单 agent（无对端）min_isr 自动降级为 1，零破坏
     let manager = ReplicationManager::new(ReplicationConfig::default(), "a:1".into());
     assert_eq!(manager.effective_min_isr(), 1);
     assert!(manager.isr_satisfied(1));
@@ -133,7 +133,7 @@ fn test_replication_entry_proto_roundtrip() {
         "mq:orders".to_string(),
         "orders".to_string(),
         0,
-        42, // C1: Leader 分配的 offset
+        42, // Leader 分配的 offset
         b"hello".to_vec(),
         7,
     );
@@ -223,7 +223,7 @@ async fn test_mq_follower_apply_preserves_offset() {
     );
     follower.apply_entry(&entry).unwrap();
 
-    // Follower 可按相同 offset 读到消息（C1：offset 全局一致）
+    // Follower 可按相同 offset 读到消息（offset 全局一致）
     let msgs = follower.consume("orders", 0, 0, 100).unwrap();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].offset, 0);
@@ -259,7 +259,7 @@ async fn test_mq_apply_auto_creates_topic() {
 
 #[tokio::test]
 async fn test_mq_idempotency_persists_across_restart() {
-    // Q2：幂等键持久化到 redb；服务重启后重复 apply 不重复写入
+    // 幂等键持久化到 redb；服务重启后重复 apply 不重复写入
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_path_buf();
 
@@ -332,7 +332,7 @@ async fn test_cache_replicated_put_and_delete() {
 
 #[tokio::test]
 async fn test_cache_replicated_ttl_absolute() {
-    // C5：复制 Leader 计算的绝对到期时间戳；Follower 原样应用，独立到期
+    // 复制 Leader 计算的绝对到期时间戳；Follower 原样应用，独立到期
     let leader = cache_svc(&tempfile::tempdir().unwrap().path().to_path_buf()).await;
     let leader_mgr = ReplicationManager::new(
         ReplicationConfig {
@@ -358,7 +358,7 @@ async fn test_cache_replicated_ttl_absolute() {
 
 #[tokio::test]
 async fn test_cache_pop_leader_only() {
-    // C2：pop 仅 Leader；非 Leader 拒绝
+    // pop 仅 Leader；非 Leader 拒绝
     let leader = cache_svc(&tempfile::tempdir().unwrap().path().to_path_buf()).await;
     let leader_mgr = ReplicationManager::new(
         ReplicationConfig {
@@ -513,7 +513,7 @@ async fn test_two_agent_cache_replication() {
 
 #[tokio::test]
 async fn test_follower_write_rejected_not_leader() {
-    // Q4：非 Leader 的写请求返回明确「非 Leader」错误
+    // 非 Leader 的写请求返回明确「非 Leader」错误
     let (ha, hb, leader, follower) = spawn_pair(2, "notleader").await;
 
     let mut lc = mq_client(&leader).await;

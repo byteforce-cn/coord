@@ -1,4 +1,4 @@
-// Key Management — 密钥生命周期管理（P2）
+// Key Management — 密钥生命周期管理
 //
 // 三层密钥架构（参考 NIST SP 800-57）：
 //   Root Key (256-bit, 仅内存) → HKDF-SHA256 → KEK (256-bit, 仅内存) → AES-256-GCM → DEK (256-bit, 密文落盘)
@@ -229,7 +229,7 @@ impl Keyring {
         Ok((keyring, encrypted_dek))
     }
 
-    /// R-SEC-01：用**指定** Root Key 引导（用于静态加密首启——root 密钥来自
+    /// 用**指定** Root Key 引导（用于静态加密首启——root 密钥来自
     /// 配置/环境变量/密钥文件，而非随机生成）。返回 (Keyring, EncryptedDek)。
     /// 调用方需将 `encrypted_dek` 持久化到 `/_meta/dek/{key_id}`。
     pub fn bootstrap_from_root_key(root_key_bytes: &[u8]) -> Result<(Self, EncryptedDek)> {
@@ -358,7 +358,7 @@ impl Keyring {
 
     /// 返回当前活跃 DEK（仅用于加密操作）。
     ///
-    /// Seal 后返回 `Error::Crypto`（P0-B.4/F9：不得返回全零密钥，
+    /// Seal 后返回 `Error::Crypto`（不得返回全零密钥，
     /// 调用方无从区分"合法全零"与"sealed 占位"，会导致明文被全零密钥加密）。
     pub fn active_dek(&self) -> Result<(u32, [u8; DEK_LEN])> {
         let inner = self.inner.read();
@@ -675,7 +675,7 @@ mod tests {
         assert!(keyring.get_dek(2).is_err());
     }
 
-    /// P0-B.4（F9）：Seal 后 `active_dek` 必须返回 Error，禁止全零密钥加密。
+    /// Seal 后 `active_dek` 必须返回 Error，禁止全零密钥加密。
     #[test]
     fn test_active_dek_errors_when_sealed() {
         let (keyring, _encrypted_dek, _shares) = Keyring::bootstrap_with_shares(5, 3).unwrap();

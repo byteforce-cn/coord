@@ -1,4 +1,4 @@
-// Phase 2 T2.4 服务端 KV 路由验收测试
+// 服务端 KV 路由验收测试
 //
 // 在 RegionManager 装配的 2 节点 × 2 Region 集群上，把每节点的 CoordNode 挂上
 // RegionManager（region 1 = ["", "m")、region 2 = ["m", ∞)），直接调用
@@ -219,7 +219,7 @@ fn range_value(resp: &tonic::Response<coord_proto::kv::RangeResponse>, key: &[u8
         .map(|kv| kv.value.clone())
 }
 
-/// T2.4 验收 1：Put/Range/Delete/Txn 按 key 路由到正确 Region；各 Region 独立且收敛。
+/// 验收 1：Put/Range/Delete/Txn 按 key 路由到正确 Region；各 Region 独立且收敛。
 #[tokio::test]
 async fn test_kv_ops_route_to_correct_region_and_converge() {
     let hosts = start_two_node_two_region_kv_cluster().await;
@@ -352,7 +352,7 @@ async fn test_kv_ops_route_to_correct_region_and_converge() {
     }
 }
 
-/// T2.4 验收 2：写非 leader 节点 → RegionNotLeader（UNAVAILABLE）+ leader hint。
+/// 验收 2：写非 leader 节点 → RegionNotLeader（UNAVAILABLE）+ leader hint。
 #[tokio::test]
 async fn test_write_via_non_leader_returns_region_not_leader_with_hint() {
     let hosts = start_two_node_two_region_kv_cluster().await;
@@ -396,7 +396,7 @@ async fn test_write_via_non_leader_returns_region_not_leader_with_hint() {
     }
 }
 
-/// T2.4 验收 3：跨 Region 的 Range / Delete-range / Txn 明确拒绝（INVALID_ARGUMENT）。
+/// 验收 3：跨 Region 的 Range / Delete-range / Txn 明确拒绝（INVALID_ARGUMENT）。
 #[tokio::test]
 async fn test_cross_region_operations_rejected() {
     let hosts = start_two_node_two_region_kv_cluster().await;

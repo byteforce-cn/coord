@@ -10,8 +10,6 @@
 // - agent_cache_misses_total: 缓存未命中总次数
 // - agent_grpc_requests_total: gRPC 请求总数（按方法分）
 // - agent_watch_subscribers_total: 当前 Watch 订阅者数量
-//
-// 参见 docs/client-agent-architecture.md §4.6。
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;

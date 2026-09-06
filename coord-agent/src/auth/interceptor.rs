@@ -6,8 +6,6 @@
 // 3. Check expiration (with clock drift tolerance)
 // 4. Check revocation (bloom filter + fallback lookup)
 // 5. Resolve roles → query local role cache → match capabilities + scope
-//
-// See docs/capability-auth-implementation.md §4.2.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -135,7 +133,7 @@ pub fn infer_capability(rpc_method: &str) -> Option<String> {
         // Authenticate is always allowed (login endpoint)
         "/coord.auth.Auth/Authenticate" => None, // whitelisted — no capability check
 
-        // PKI（ISSUE-000 Phase 0：私钥集中存储前必须上鉴权）
+        // PKI：私钥集中存储前必须上鉴权
         // 能力分级：签发（写）/ 轮换（写）/ 读取（读）/ CA 初始化（管理）
         "/coord.agent.Pki/InitCa" => Some("pki:ca:init".into()),
         "/coord.agent.Pki/IssueCert" => Some("pki:cert:issue".into()),
@@ -156,7 +154,7 @@ pub fn infer_capability(rpc_method: &str) -> Option<String> {
 pub struct AuthInterceptor {
     /// CCT HMAC 签名密钥（历史对称方案，宽限期验证存量 token；可为空）
     signing_key: Vec<u8>,
-    /// R-SEC-02：CCT Ed25519 验证公钥（32 字节；提供时验证非对称签发 token）
+    /// CCT Ed25519 验证公钥（32 字节；提供时验证非对称签发 token）
     verifying_key: Option<Vec<u8>>,
     /// Local role→capability cache
     role_cache: Arc<RoleCache>,
@@ -181,7 +179,7 @@ impl AuthInterceptor {
         }
     }
 
-    /// R-SEC-02：挂载 Ed25519 验证公钥（server 持私钥签发，agent 仅存公钥）。
+    /// 挂载 Ed25519 验证公钥（server 持私钥签发，agent 仅存公钥）。
     pub fn with_verifying_key(mut self, verifying_key: Vec<u8>) -> Self {
         self.verifying_key = Some(verifying_key);
         self
@@ -226,7 +224,7 @@ impl AuthInterceptor {
             None => return AuthResult::Deny("missing or invalid Authorization header".into()),
         };
 
-        // 2. Decode and verify CCT（R-SEC-02：HMAC 历史密钥 + Ed25519 公钥双算法）
+        // 2. Decode and verify CCT（HMAC 历史密钥 + Ed25519 公钥双算法）
         let cct = match decode_cct_any(cct_str, &[&self.signing_key], self.verifying_key.as_deref())
         {
             Ok(token) => token,
@@ -419,7 +417,7 @@ mod tests {
         encode_cct(&header, &payload, TEST_KEY).unwrap()
     }
 
-    // ──── Phase 3.1: Auth interceptor tests ────
+    // ──── Auth interceptor tests ────
 
     #[test]
     fn test_interceptor_allows_when_disabled() {
@@ -561,7 +559,7 @@ mod tests {
         assert_eq!(infer_capability("/unknown.Service/Method"), None);
     }
 
-    /// ISSUE-000 Phase 0: PKI RPC 必须映射到 capability（私钥集中存储前上鉴权）
+    /// PKI RPC 必须映射到 capability（私钥集中存储前上鉴权）
     #[test]
     fn test_infer_capability_pki_mappings() {
         assert_eq!(
@@ -640,7 +638,7 @@ mod tests {
         req
     }
 
-    /// ISSUE-000 Phase 0: 无凭据调用 PKI RPC → 拒绝（grpc-status=UNAUTHENTICATED=16）
+    /// 无凭据调用 PKI RPC → 拒绝（grpc-status=UNAUTHENTICATED=16）
     #[tokio::test]
     async fn test_auth_service_denies_pki_without_token() {
         let role_cache = Arc::new(RoleCache::new());
@@ -662,7 +660,7 @@ mod tests {
         );
     }
 
-    /// ISSUE-000 Phase 0: 有效 CCT + 具备 capability → 放行（透传到 inner）
+    /// 有效 CCT + 具备 capability → 放行（透传到 inner）
     #[tokio::test]
     async fn test_auth_service_allows_pki_with_capability() {
         let role_cache = Arc::new(RoleCache::new());
@@ -692,7 +690,7 @@ mod tests {
         );
     }
 
-    /// ISSUE-000 Phase 0: 只读角色调用签发 RPC → 拒绝（分级授权）
+    /// 只读角色调用签发 RPC → 拒绝（分级授权）
     #[tokio::test]
     async fn test_auth_service_denies_pki_write_with_read_only_role() {
         let role_cache = Arc::new(RoleCache::new());
@@ -740,7 +738,7 @@ mod tests {
         assert_eq!(extract_bearer_token(Some("coord_abc123")), None); // legacy — pass through
         assert_eq!(extract_bearer_token(None), None);
     }
-    // ──── R-SEC-02：Ed25519 非对称验证（agent 仅存公钥）───
+    // ──── Ed25519 非对称验证（agent 仅存公钥）───
 
     fn reader_role_cache() -> Arc<RoleCache> {
         let role_cache = Arc::new(RoleCache::new());

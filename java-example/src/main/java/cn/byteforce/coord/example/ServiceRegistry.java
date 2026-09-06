@@ -16,7 +16,7 @@ import java.util.stream.Collectors;
  * 2. 绑定 Lease 实现自动注销（心跳断开 → Lease 过期 → key 自动删除）
  * 3. 通过前缀扫描发现依赖服务的所有实例
  *
- * 与架构文档 §9.3 一致。
+ * 与架构文档 一致。
  *
  * 用法:
  * <pre>{@code

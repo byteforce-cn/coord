@@ -66,7 +66,7 @@ mod tests {
         (addr, handle)
     }
 
-    /// R-SEC-01：启用静态加密的测试服务器（Barrier + Keyring + root 密钥提供者）
+    /// 启用静态加密的测试服务器（Barrier + Keyring + root 密钥提供者）
     async fn start_encrypted_test_server(
         root_key: [u8; 32],
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -436,7 +436,7 @@ mod tests {
         assert_eq!(resp.kvs[0].key, b"b".to_vec());
     }
 
-    /// R-SEC-01：静态加密端到端——写入加密、Seal 拒绝写、Unseal 恢复读
+    /// 静态加密端到端——写入加密、Seal 拒绝写、Unseal 恢复读
     #[tokio::test]
     async fn test_e2e_encryption_seal_unseal() {
         let root_key = [0x99u8; 32];

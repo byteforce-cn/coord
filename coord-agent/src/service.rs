@@ -1,10 +1,10 @@
-// coord-agent: 可插拔服务框架（Phase D）
+// coord-agent: 可插拔服务框架
 //
 // 定义 BaseService trait 和 ServiceManager。
 // 每个高级服务（Registry、Workflow、Lock 等）实现 BaseService，
 // 通过 ServiceManager 统一管理生命周期。
 //
-// 参见 docs/client-agent-architecture-v3.md §4。
+// 参见。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -191,7 +191,7 @@ impl Default for ServiceConfig {
 
 // ──── ServiceConfig 辅助 ────
 
-/// ID 生成器默认实现模式（雪花，ISSUE-011 决策）
+/// ID 生成器默认实现模式（雪花，决策）
 fn default_idgen_mode() -> String {
     "snowflake".to_string()
 }
@@ -307,7 +307,7 @@ impl ServiceManager {
     /// 合并所有已注册服务的 gRPC 接口到 tonic Router
     ///
     /// 泛型于 layer 类型 L：兼容 `Server::builder().layer(...)` 自定义中间件后的
-    /// `Router<Stack<L, Identity>>`（ISSUE-000 Phase 0 鉴权层）。
+    /// `Router<Stack<L, Identity>>`（鉴权层）。
     ///
     /// 注：`BaseService::register_grpc` 需保持 object-safe（服务以 `Arc<dyn BaseService>`
     /// 存储），无法泛型化到 `Router<L>`；且当前所有实现均为 no-op（gRPC 服务在 serve()
@@ -462,7 +462,7 @@ mod tests {
             config.config_center,
             "config_center should be enabled by default"
         );
-        // Phase A: 默认启用 lock / transit / pki / workflow
+        // 默认启用 lock / transit / pki / workflow
         assert!(config.lock, "lock should be enabled by default (Phase A)");
         assert!(
             config.transit,

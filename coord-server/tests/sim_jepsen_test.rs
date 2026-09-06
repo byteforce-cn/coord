@@ -1,8 +1,8 @@
-// sim_jepsen_test.rs — 算法级模拟套件（P0-H：非系统验证证据）
+// sim_jepsen_test.rs — 算法级模拟套件（非系统验证证据）
 //
 // ⚠ 口径声明：本套件为文件内自建内存模型（SimpleKvStore/模拟多 Region），
 // 不引用 coord_server / coord_client 任何真实模块，不得作为线性一致性系统
-// 验证证据（决策文档 §1.3 #18）。真实故障注入/线性一致性系统验证为
+// 验证证据（#18）。真实故障注入/线性一致性系统验证为
 // `coord/tests/chaos_real.rs`（真实 3 进程 + kill -9/暂停/分区注入 + 线性
 // checker，CI nightly 触发）——此前此处悬空引用不存在的 `jepsen_real.rs`，
 // R-TST-21 修正。

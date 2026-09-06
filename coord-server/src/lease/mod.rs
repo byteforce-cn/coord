@@ -294,7 +294,7 @@ impl LeaseManager {
         self.leases.read().len()
     }
 
-    /// 从持久化 Lease 记录重建内存视图（P0-B B.4.4 failover）
+    /// 从持久化 Lease 记录重建内存视图（B.4.4 failover）
     ///
     /// 新 Leader 接管时调用：清空旧视图与定时器，按状态机 `/_lease/` 记录重建。
     /// - `deadline_wall_ms` 未到 → 以剩余时长插入时间轮（"at-least TTL" 语义，
@@ -356,7 +356,7 @@ impl LeaseManager {
     }
 }
 
-/// 当前墙钟毫秒（P0-B：deadline 由 leader 在 propose 前计算，保证 apply 确定性）
+/// 当前墙钟毫秒（deadline 由 leader 在 propose 前计算，保证 apply 确定性）
 pub fn wall_clock_now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -504,7 +504,7 @@ mod tests {
         });
     }
 
-    // ──── P0-B failover 重建 ────
+    // ──── failover 重建 ────
 
     fn persisted_record(ttl: i64, deadline_wall_ms: i64) -> crate::storage::mvcc::LeaseRecord {
         crate::storage::mvcc::LeaseRecord {
