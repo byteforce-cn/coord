@@ -23,7 +23,7 @@
 - **共识与存储基座**——基于 Raft 提供线性一致的 KV / Txn / Watch / Lease，能力与 etcd 类似，并内置鉴权、TLS/mTLS 与静态加密；
 - **每机 Agent 层**——每台宿主机的 `coord-agent` 以本地 gRPC 服务形式暴露注册发现、配置管理、分布式锁、ID 生成、Leader 选举、事件通知、缓存、消息队列、工作流、调度、限流、特性开关与 PKI 签发等能力，全部收敛在单一契约之下。业务代码只面对一个端点、一个 SDK，完全不需要感知集群拓扑。
 
-一致性核心由仓库内 [Jepsen](https://github.com/jepsen-io/jepsen) 测试工程独立验证（见「验证与质量」）。
+一致性核心配有仓库内 [Jepsen](https://github.com/jepsen-io/jepsen) 测试工程（knossos 线性一致性检查）；**尚未有 Jepsen / soak 产物入仓**，当前口径见「验证与质量」。
 
 ## 架构
 
@@ -56,7 +56,7 @@ Server 的 `50051` / `50052` 端口仅对 Agent 可达，**对业务应用永不
 
 | 领域 | 说明 |
 |:---|:---|
-| KV / Txn / Watch / Lease | 线性一致；kill / pause / partition 全矩阵通过 Jepsen 验证 |
+| KV / Txn / Watch / Lease | 单 Region 内线性一致；Jepsen 工程已就位，但**尚无产物入仓**（见「验证与质量」） |
 | Auth / RBAC | 用户 / 角色 / 权限，Ed25519 CCT 令牌，登录限流 |
 | TLS / mTLS | gRPC 与 Raft 通道加密；缺 CA 拒绝启动（fail-closed） |
 | 静态加密 | AES-256-GCM，外加 Shamir 分片的 Seal / Unseal |
@@ -65,7 +65,8 @@ Server 的 `50051` / `50052` 端口仅对 Agent 可达，**对业务应用永不
 
 **Agent —— 业务应用真正打交道的协调层**
 
-18 个可插拔 gRPC 服务，通过 `[services]` / `[plugins]` 配置逐项开关：
+17 个内建 gRPC 服务，通过 `[services]` / `[plugins]` 配置逐项开关
+（插件引擎自身的 `Plugin` 管理面——`Invoke` / `List`——不计在内：它是这些服务的对外入口）：
 
 - **发现与配置**：`Registry` · `ConfigCenter` · `Event`
 - **协调原语**：`Lock` · `IdGen` · `LeaderElection`
@@ -163,9 +164,10 @@ coord/
 
 ## 验证与质量
 
-- **Jepsen**——仓库内 Clojure 工程（[`jepsen/`](jepsen/README.md)）在真实 3 节点集群上运行 knossos 线性一致性检查器：`register` / `cas-register` / `multi-register` 负载 × kill / pause / partition 故障注入，外加 72 小时浸泡；
-- **快速本地收口**——`scripts/jepsen-check.sh` 无需 lab，约 2–3 分钟复现核心矩阵；
-- **CI**——fmt + clippy（`-D warnings`）、非测试代码 panic 卡口、workspace 测试、proto 契约检查（buf breaking）、`cargo audit` + `cargo deny`、真实进程 chaos 运行。
+- **Jepsen（工程已就位，未认证）**——仓库内 Clojure + knossos 工程（[`jepsen/`](jepsen/README.md)）覆盖 `register` / `cas-register` / `multi-register` 负载 × kill / pause / partition 故障注入，另有 [`jepsen/README.md`](jepsen/README.md) 中的长时浸泡方案。**尚未有 Jepsen / soak 产物入仓**（`docs/production/evidence/` 目前只有 Java 集成运行产物）；在产物落盘之前，线性一致相关表述属**设计意图**，不是已认证结论；
+- **快速本地收口**——`scripts/jepsen-check.sh` 无需 lab，约 2–3 分钟复现核心矩阵（Rust 层检查，**不是** Jepsen 运行）；
+- **CI**——fmt + clippy（`-D warnings`）、非测试代码 panic 卡口、workspace 测试、proto 契约检查（buf breaking）、`cargo audit` + `cargo deny`、真实进程 chaos 运行，以及 Java SDK / Java 示例对真实 server + agent 集群的集成套件；
+- **证据**——可复现的运行产物归档在 [`docs/production/evidence/`](docs/production/evidence/README.md)（`bash scripts/collect-evidence.sh <场景>`）。
 
 ## 部署
 
@@ -176,7 +178,7 @@ coord/
 
 ## 状态
 
-版本 `0.1.0`（pre-1.0），尚未发布任何 tag。Raft 引擎（`openraft`）为 alpha 依赖，Coord **暂不建议用于生产**；不过上述 Jepsen 矩阵已覆盖核心一致性与故障恢复语义。
+版本 `0.1.0`（pre-1.0），尚未发布任何 tag。Raft 引擎（`openraft`）为 alpha 依赖，Coord **暂不建议用于生产**；Jepsen 工程虽已就位，但在产物入仓并接入 CI 之前，不得据此声称已验证。
 
 ## 文档
 

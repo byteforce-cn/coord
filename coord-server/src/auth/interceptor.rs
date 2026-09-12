@@ -737,11 +737,22 @@ pub fn extract_scope_keys(rpc_method: &str, body: &[u8]) -> Result<Vec<Vec<u8>>,
         .collect())
 }
 
+/// gRPC 消息解码上限（对齐 `tonic` 的 `max_decoding_message_size` 默认口径）。
+///
+/// RPC 服务的解码上限由服务端显式设置为该值（见 `coord/src/main.rs`），鉴权层的
+/// body 上限**必须与之对齐**，否则会出现"合法请求在鉴权层被拒、而它本可以通过
+/// 解码"的回归。
+pub const MAX_GRPC_DECODING_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+
 /// scope 提取前请求体上限（A2）：超出即拒绝。
 ///
 /// 该路径在**鉴权前**缓存 body（auth 关闭时同样执行），若不加限则无凭据请求即可
 /// 触发无界 `collect()`。
-pub const MAX_SCOPE_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
+///
+/// A2 修正：原值 1 MiB < [`MAX_GRPC_DECODING_BYTES`]（4 MiB）→ 1–4 MiB 的合法
+/// `Put`/`Txn` 被拒。现取解码上限 + 64 KiB 余量（gRPC 帧头 5 字节 / protobuf 字段
+/// 头与长度前缀），既不误伤合法请求，又保持有界的 DoS 保护。
+pub const MAX_SCOPE_BODY_BYTES: usize = MAX_GRPC_DECODING_BYTES + 64 * 1024;
 
 /// 缓存请求 body 字节后重建请求（scope key 提取用）。
 ///
@@ -1788,10 +1799,126 @@ mod tests {
         // 通配符 scope
         assert!(scope_covers_interval("/app/*", b"/app/x", b"/app/z"));
         assert!(!scope_covers_interval("/app/*", b"/app/x", b"/other"));
-        // 无法安全归约的模式 → fail-closed
+        // 末段字面量、无尾随 '/'：补足 '/' 后才安全；区间越界必须拒
         assert!(!scope_covers_interval("/app", b"/app", b"/appz"));
+        assert!(scope_covers_interval("/app", b"/app/x", b"/app/z"));
+        assert!(!scope_covers_interval("/app", b"/app/x", b"/app0z")); // 跨出子树
 
         assert_eq!(prefix_successor(b"/app/a/"), Some(b"/app/a0".to_vec()));
         assert_eq!(prefix_successor(&[0xFF, 0xFF]), None);
+    }
+
+    /// A1 回归固化：仓库自有的前缀扫描惯用法（`prefix_end()` = 末字节 +1，
+    /// 见 `coord-agent/src/services/workflow_store.rs`）必须被放行。
+    ///
+    /// 旧实现用 `range_end.starts_with(prefix)`，而 `"/_wf/ns0"` 并不以
+    /// `"/_wf/ns/"` 开头 → 所有这类扫描都被 403（A1 的安全目标达成，但引入
+    /// 功能回归）。现在用字节区间包含判定，两条授权路径语义一致。
+    #[test]
+    fn test_scope_covers_interval_accepts_repo_prefix_scan_idiom() {
+        use coord_core::auth::trie::scope_covers_interval;
+
+        // workflow_store::prefix_end("/_workflow/v3/defs/ns/") == "/_workflow/v3/defs/ns0"
+        let prefix = b"/_workflow/v3/defs/ns/";
+        let mut end = prefix.to_vec();
+        *end.last_mut().unwrap() += 1; // 与 prefix_end() 同构（末字节 '/' → '0'）
+        assert!(scope_covers_interval(
+            "/_workflow/v3/defs/ns/",
+            prefix,
+            &end
+        ));
+        // 同 scope、越界区间仍然拒绝（安全性不退化）
+        assert!(!scope_covers_interval(
+            "/_workflow/v3/defs/ns/",
+            prefix,
+            b"/_workflow/v3/defs/o"
+        ));
+        // 起点越界（区间从子树外开始）拒绝
+        assert!(!scope_covers_interval(
+            "/_workflow/v3/defs/ns/",
+            b"/_workflow/v3/defs/ns",
+            &end
+        ));
+    }
+
+    /// A1 遗留权限路径（`Permission::allows_*_range`）必须与 scope 路径**同语义**：
+    /// 空前缀 = 覆盖全部 key（此前 `prefix_successor(&[])` 返回 `None` → 误拒）。
+    #[test]
+    fn test_legacy_permission_range_path_matches_scope_path() {
+        use crate::auth::manager::{Permission, PermissionType};
+
+        let all = Permission {
+            perm_type: PermissionType::ReadWrite,
+            key_prefix: Vec::new(),
+            range_end: Vec::new(),
+        };
+        assert!(all.allows_read_range(b"/a/x", b"/a/z"));
+        assert!(all.allows_read_range(b"/a/x", b"\0"));
+
+        let scoped = Permission {
+            perm_type: PermissionType::Read,
+            key_prefix: b"/_wf/ns/".to_vec(),
+            range_end: Vec::new(),
+        };
+        assert!(scoped.allows_read_range(b"/_wf/ns/", b"/_wf/ns0"));
+        assert!(scoped.allows_read_range(b"/_wf/ns/a", b"/_wf/ns/z"));
+        // 越出子树上界的区间必须拒绝
+        assert!(!scoped.allows_read_range(b"/_wf/ns/", b"/_wf/nsx"));
+        // 起点在权限前缀之外 → 拒绝
+        assert!(!scoped.allows_read_range(b"/other", b"/other0"));
+        assert!(!scoped.allows_read_range(b"/_wf/ns", b"/_wf/ns0"));
+    }
+
+    // ──── A2：body 上限必须与 gRPC 解码上限对齐（DoS 保护不得误伤合法请求） ────
+
+    /// A2 回归固化：1 MiB 的 scope-body 上限 < 4 MiB 解码上限 → 1–4 MiB 的合法
+    /// `Put`/`Txn` 在鉴权层被 `resource_exhausted` 拒绝。
+    #[test]
+    fn test_a2_scope_body_limit_covers_decoding_limit() {
+        assert!(
+            MAX_SCOPE_BODY_BYTES > MAX_GRPC_DECODING_BYTES,
+            "scope body limit ({MAX_SCOPE_BODY_BYTES}) must cover the gRPC decoding \
+             limit ({MAX_GRPC_DECODING_BYTES}) plus framing overhead"
+        );
+        // 余量足以容纳 gRPC 帧头（5B）+ protobuf 字段头/长度前缀
+        assert!(MAX_SCOPE_BODY_BYTES - MAX_GRPC_DECODING_BYTES >= 5);
+    }
+
+    /// 合法上限尺寸（4 MiB = 解码上限）的请求体必须能通过缓存路径，字节不变。
+    #[tokio::test]
+    async fn test_a2_legal_max_body_is_buffered_intact() {
+        let payload_len = MAX_GRPC_DECODING_BYTES; // 4 MiB：解码上限允许的最大消息
+        let payload = vec![0xABu8; payload_len];
+        let body = tonic::body::Body::new(http_body_util::Full::new(bytes::Bytes::from(
+            payload.clone(),
+        )));
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/coord.kv.KV/Put")
+            .body(body)
+            .expect("build request");
+
+        let (_, buffered) = buffer_request_body(req, MAX_SCOPE_BODY_BYTES)
+            .await
+            .expect("4 MiB body must not be rejected by the auth layer (A2)");
+        assert_eq!(buffered.len(), payload_len);
+        assert_eq!(buffered, payload);
+    }
+
+    /// 超限请求体仍必须被拒绝（有界 DoS 保护不被"放宽上限"取消）。
+    #[tokio::test]
+    async fn test_a2_oversize_body_is_rejected() {
+        let payload = vec![0u8; MAX_SCOPE_BODY_BYTES + 1];
+        let body = tonic::body::Body::new(http_body_util::Full::new(bytes::Bytes::from(payload)));
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/coord.kv.KV/Put")
+            .body(body)
+            .expect("build request");
+
+        let err = buffer_request_body(req, MAX_SCOPE_BODY_BYTES)
+            .await
+            .expect_err("oversize body must be refused");
+        assert!(err.contains("exceeds scope-extraction limit"), "err: {err}");
     }
 }

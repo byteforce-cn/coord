@@ -409,22 +409,32 @@ async fn spawn_pair(
 async fn mq_client(
     addr: &str,
 ) -> coord_proto::agent::mq_client::MqClient<tonic::transport::Channel> {
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-        .unwrap()
-        .connect()
-        .await
-        .unwrap();
+    let channel = connect_with_retry(&format!("http://{addr}")).await;
     coord_proto::agent::mq_client::MqClient::new(channel)
+}
+
+/// 等端点就绪（上限 15s）：代替「一次性 connect」，避免并发跑套件时的假红。
+async fn connect_with_retry(uri: &str) -> tonic::transport::Channel {
+    let endpoint = tonic::transport::Endpoint::from_shared(uri.to_string()).unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match endpoint.clone().connect().await {
+            Ok(channel) => return channel,
+            Err(e) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "endpoint {uri} never became ready: {e}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
 }
 
 async fn cache_client(
     addr: &str,
 ) -> coord_proto::agent::cache_client::CacheClient<tonic::transport::Channel> {
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-        .unwrap()
-        .connect()
-        .await
-        .unwrap();
+    let channel = connect_with_retry(&format!("http://{addr}")).await;
     coord_proto::agent::cache_client::CacheClient::new(channel)
 }
 

@@ -152,7 +152,50 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
+                <configuration>
+                    <!--
+                        D3 修正：这些测试是**真实进程集成测试**（连本机 coord-agent
+                        的 gRPC 端口）。默认 `mvn verify` 无 Agent → 必然红，门禁
+                        "加了但永远绿不了" 等于没有门禁。
+                        需要 Agent 的套件默认排除，改用显式 profile 跑：
+                            bash scripts/ci-java-it-cluster.sh   # 起 dev 集群
+                            mvn -B verify -Pit                   # 跑集成套件
+                        CI 见 `.github/workflows/ci.yml` 的 `java-example-it` job。
+                    -->
+                    <excludes>
+                        <exclude>**/*IntegrationTest.java</exclude>
+                        <exclude>**/*AdvancedTest.java</exclude>
+                    </excludes>
+                </configuration>
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!--
+            `-Pit`：只跑需要真实 coord-agent 的集成套件（此时**不**排除它们）。
+            此时若 Agent 不可达，测试会以明确原因失败——刻意不使用
+            `assumeTrue` 静默跳过，避免把"没跑"伪装成"通过"。
+        -->
+        <profile>
+            <id>it</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <excludes combine.self="override">
+                                <exclude>**/AgentEndpoint.java</exclude>
+                            </excludes>
+                            <includes>
+                                <include>**/*IntegrationTest.java</include>
+                                <include>**/*AdvancedTest.java</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

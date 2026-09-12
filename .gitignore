@@ -38,3 +38,9 @@ coord-dev-data/
 .github/copilot-instructions.md
 
 docs/*
+!docs/production/
+docs/production/*
+!docs/production/evidence/
+!docs/production/design/
+
+.coord-dev-cluster/

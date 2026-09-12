@@ -1,0 +1,193 @@
+==> building coord binaries (server + agent)
+   Compiling coord-agent v0.1.0 (/data/jepsen/coord/coord-agent)
+   Compiling coord-server v0.1.0 (/data/jepsen/coord/coord-server)
+   Compiling coord v0.1.0 (/data/jepsen/coord/coord)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 1m 41s
+==> starting dev cluster (real server + real agent)
+[dev-cluster] starting coord server (grpc=50051, raft=50061)
+[dev-cluster] coord server ready on 127.0.0.1:50051
+[dev-cluster] starting coord agent (grpc=19527)
+[dev-cluster] coord agent ready on 127.0.0.1:19527
+[dev-cluster] cluster ready: agent=127.0.0.1:19527 server=127.0.0.1:50051
+[dev-cluster] run Java ITs with: (cd java-example && COORD_AGENT_PORT=19527 mvn -B verify -Pit)
+==> running java-example integration suites (mvn verify -Pit)
+[INFO] Scanning for projects...
+[INFO] ------------------------------------------------------------------------
+[INFO] Detecting the operating system and CPU architecture
+[INFO] ------------------------------------------------------------------------
+[INFO] os.detected.name: linux
+[INFO] os.detected.arch: x86_64
+[INFO] os.detected.bitness: 64
+[INFO] os.detected.version: 6.8
+[INFO] os.detected.version.major: 6
+[INFO] os.detected.version.minor: 8
+[INFO] os.detected.release: ubuntu
+[INFO] os.detected.release.version: 24.04
+[INFO] os.detected.release.like.ubuntu: true
+[INFO] os.detected.release.like.debian: true
+[INFO] os.detected.classifier: linux-x86_64
+[INFO] 
+[INFO] ------------------< cn.byteforce:coord-java-example >-------------------
+[INFO] Building Coord Java Example 0.1.0
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- protobuf:0.6.1:compile (default) @ coord-java-example ---
+[INFO] Compiling 11 proto file(s) to /data/jepsen/coord/java-example/target/generated-sources/protobuf/java
+[INFO] 
+[INFO] --- protobuf:0.6.1:compile-custom (default) @ coord-java-example ---
+[INFO] Compiling 11 proto file(s) to /data/jepsen/coord/java-example/target/generated-sources/protobuf/java
+[INFO] 
+[INFO] --- build-helper:3.6.0:add-source (add-generated-sources) @ coord-java-example ---
+[INFO] Source directory: /data/jepsen/coord/java-example/target/generated-sources/protobuf/java added.
+[INFO] 
+[INFO] --- resources:3.4.0:resources (default-resources) @ coord-java-example ---
+[INFO] skip non existing resourceDirectory /data/jepsen/coord/java-example/src/main/resources
+[INFO] Copying 11 resources from ../coord-proto/src/proto to target/classes
+[INFO] Copying 11 resources from ../coord-proto/src/proto to target/classes
+[INFO] 
+[INFO] --- compiler:3.13.0:compile (default-compile) @ coord-java-example ---
+[INFO] Recompiling the module because of changed source code.
+[INFO] Compiling 420 source files with javac [debug target 21] to target/classes
+[WARNING] location of system modules is not set in conjunction with -source 21
+  not setting the location of system modules may lead to class files that cannot run on JDK 21
+    --release 21 is recommended instead of -source 21 -target 21 because it sets the location of system modules automatically
+[INFO] 
+[INFO] --- resources:3.4.0:testResources (default-testResources) @ coord-java-example ---
+[INFO] skip non existing resourceDirectory /data/jepsen/coord/java-example/src/test/resources
+[INFO] 
+[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ coord-java-example ---
+[INFO] Recompiling the module because of changed dependency.
+[INFO] Compiling 13 source files with javac [debug target 21] to target/test-classes
+[WARNING] location of system modules is not set in conjunction with -source 21
+  not setting the location of system modules may lead to class files that cannot run on JDK 21
+    --release 21 is recommended instead of -source 21 -target 21 because it sets the location of system modules automatically
+[INFO] 
+[INFO] --- surefire:3.5.2:test (default-test) @ coord-java-example ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO] 
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running cn.byteforce.coord.example.WatchAdvancedTest
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by io.grpc.netty.shaded.io.netty.util.internal.PlatformDependent0$4 (file:/root/.m2/repository/io/grpc/grpc-netty-shaded/1.68.0/grpc-netty-shaded-1.68.0.jar)
+WARNING: Please consider reporting this to the maintainers of class io.grpc.netty.shaded.io.netty.util.internal.PlatformDependent0$4
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::loadLibrary has been called by io.grpc.netty.shaded.io.netty.util.internal.NativeLibraryUtil in an unnamed module (file:/root/.m2/repository/io/grpc/grpc-netty-shaded/1.68.0/grpc-netty-shaded-1.68.0.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 9.527 s -- in cn.byteforce.coord.example.WatchAdvancedTest
+[INFO] Running cn.byteforce.coord.example.LeaseIntegrationTest
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.156 s -- in cn.byteforce.coord.example.LeaseIntegrationTest
+[INFO] Running cn.byteforce.coord.example.KvAdvancedTest
+[INFO] Tests run: 14, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 5.934 s -- in cn.byteforce.coord.example.KvAdvancedTest
+[INFO] Running cn.byteforce.coord.example.KvIntegrationTest
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.273 s -- in cn.byteforce.coord.example.KvIntegrationTest
+[INFO] Running cn.byteforce.coord.example.ServiceRegistryAdvancedTest
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.955 s -- in cn.byteforce.coord.example.ServiceRegistryAdvancedTest
+[INFO] Running cn.byteforce.coord.example.TxnIntegrationTest
+[INFO] Tests run: 9, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.576 s -- in cn.byteforce.coord.example.TxnIntegrationTest
+[INFO] Running cn.byteforce.coord.example.MaintenanceIntegrationTest
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.034 s -- in cn.byteforce.coord.example.MaintenanceIntegrationTest
+[INFO] Running cn.byteforce.coord.example.WatchIntegrationTest
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 5.118 s -- in cn.byteforce.coord.example.WatchIntegrationTest
+[INFO] Running cn.byteforce.coord.example.LeaseAdvancedTest
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 19.69 s -- in cn.byteforce.coord.example.LeaseAdvancedTest
+[INFO] 
+[INFO] Results:
+[INFO] 
+[INFO] Tests run: 48, Failures: 0, Errors: 0, Skipped: 0
+[INFO] 
+[INFO] 
+[INFO] --- jar:3.5.0:jar (default-jar) @ coord-java-example ---
+[INFO] Building jar: /data/jepsen/coord/java-example/target/coord-java-example-0.1.0.jar
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  51.920 s
+[INFO] Finished at: 2026-09-12T11:29:42Z
+[INFO] ------------------------------------------------------------------------
+==> java integration suites exit code: 0
+==> dev cluster log tails
+[2m2026-09-12T11:29:15.498656Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(51) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 51 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 51 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 51 }) read_log_id=T1-N1.51 read_served
+[2m2026-09-12T11:29:15.504417Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(51) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 51 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 51 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 51 }) read_log_id=T1-N1.51 read_served
+[2m2026-09-12T11:29:15.507580Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(51) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 51 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 51 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 51 }) read_log_id=T1-N1.51 read_served
+[2m2026-09-12T11:29:15.559645Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(53) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 53 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 53 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 53 }) read_log_id=T1-N1.53 read_served
+[2m2026-09-12T11:29:15.612773Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(54) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 54 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 54 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 54 }) read_log_id=T1-N1.54 read_served
+[2m2026-09-12T11:29:15.652152Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(56) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 56 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 56 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 56 }) read_log_id=T1-N1.56 read_served
+[2m2026-09-12T11:29:15.669711Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(57) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 57 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 57 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 57 }) read_log_id=T1-N1.57 read_served
+[2m2026-09-12T11:29:15.726744Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(60) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 60 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 60 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 60 }) read_log_id=T1-N1.60 read_served
+[2m2026-09-12T11:29:15.798685Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(61) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 61 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 61 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 61 }) read_log_id=T1-N1.61 read_served
+[2m2026-09-12T11:29:16.022719Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(69) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 69 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 69 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 69 }) read_log_id=T1-N1.69 read_served
+[2m2026-09-12T11:29:16.066564Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(69) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 69 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 69 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 69 }) read_log_id=T1-N1.69 read_served
+[2m2026-09-12T11:29:16.069217Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(69) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 69 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 69 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 69 }) read_log_id=T1-N1.69 read_served
+[2m2026-09-12T11:29:16.070946Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(69) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 69 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 69 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 69 }) read_log_id=T1-N1.69 read_served
+[2m2026-09-12T11:29:16.192282Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(71) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 71 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 71 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 71 }) read_log_id=T1-N1.71 read_served
+[2m2026-09-12T11:29:16.214891Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(72) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 72 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 72 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 72 }) read_log_id=T1-N1.72 read_served
+[2m2026-09-12T11:29:16.220548Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(72) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 72 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 72 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 72 }) read_log_id=T1-N1.72 read_served
+[2m2026-09-12T11:29:16.447090Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(80) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 80 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 80 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 80 }) read_log_id=T1-N1.80 read_served
+[2m2026-09-12T11:29:16.529533Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(82) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 82 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 82 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 82 }) read_log_id=T1-N1.82 read_served
+[2m2026-09-12T11:29:16.553263Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(83) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 83 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 83 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 83 }) read_log_id=T1-N1.83 read_served
+[2m2026-09-12T11:29:16.785925Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(93) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 93 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 93 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 93 }) read_log_id=T1-N1.93 read_served
+[2m2026-09-12T11:29:16.817062Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(94) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 94 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 94 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 94 }) read_log_id=T1-N1.94 read_served
+[2m2026-09-12T11:29:16.858979Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(96) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 96 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 96 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 96 }) read_log_id=T1-N1.96 read_served
+[2m2026-09-12T11:29:16.901631Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(98) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 98 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 98 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 98 }) read_log_id=T1-N1.98 read_served
+[2m2026-09-12T11:29:17.060343Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(100) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 100 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 100 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 100 }) read_log_id=T1-N1.100 read_served
+[2m2026-09-12T11:29:17.249707Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(106) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 106 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 106 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 106 }) read_log_id=T1-N1.106 read_served
+[2m2026-09-12T11:29:17.252183Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(106) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 106 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 106 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 106 }) read_log_id=T1-N1.106 read_served
+[2m2026-09-12T11:29:17.290095Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(108) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 108 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 108 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 108 }) read_log_id=T1-N1.108 read_served
+[2m2026-09-12T11:29:17.292823Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(108) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 108 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 108 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 108 }) read_log_id=T1-N1.108 read_served
+[2m2026-09-12T11:29:17.312439Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(109) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 109 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 109 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 109 }) read_log_id=T1-N1.109 read_served
+[2m2026-09-12T11:29:17.334974Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(110) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 110 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 110 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 110 }) read_log_id=T1-N1.110 read_served
+[2m2026-09-12T11:29:24.157589Z[0m [33m WARN[0m slow gRPC request: method=/coord.lease.Lease/LeaseGrant duration=1653ms
+[2m2026-09-12T11:29:26.280019Z[0m [33m WARN[0m slow gRPC request: method=/coord.lease.Lease/LeaseRevoke duration=2117ms
+[2m2026-09-12T11:29:41.540752Z[0m [33m WARN[0m slow gRPC request: method=/coord.lease.Lease/LeaseRevoke duration=4391ms
+[2m2026-09-12T11:29:42.112869Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(135) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 135 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 135 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 135 }) read_log_id=T1-N1.135 read_served
+[2m2026-09-12T11:29:42.187146Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(136) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 136 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 136 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 136 }) read_log_id=T1-N1.136 read_served
+[2m2026-09-12T11:29:43.226532Z[0m [32m INFO[0m Received SIGTERM, shutting down gracefully...
+[2m2026-09-12T11:29:43.226589Z[0m [32m INFO[0m Received SIGTERM, shutting down gracefully...
+[2m2026-09-12T11:29:43.226725Z[0m [32m INFO[0m gRPC drained; shutting down raft instance
+[2m2026-09-12T11:29:43.226921Z[0m [32m INFO[0m Coord server shutdown complete
+[2m2026-09-12T11:29:43.226986Z[0m [32m INFO[0m Compaction manager shutting down
+[2m2026-09-12T11:28:49.527347Z[0m [32m INFO[0m Starting coord-agent v0.1.0: agent=None, http=None, discovery=None
+[2m2026-09-12T11:28:49.527608Z[0m [32m INFO[0m coord-agent starting on 127.0.0.1:19527, http on 127.0.0.1:19528
+[2m2026-09-12T11:28:49.527665Z[0m [32m INFO[0m coord-agent: starting gRPC services (KV/Txn/Lease/Watch/Maintenance)
+[2m2026-09-12T11:28:49.527680Z[0m [32m INFO[0m coord-agent connecting to server cluster: ["127.0.0.1:50051"]
+[2m2026-09-12T11:28:49.527709Z[0m [32m INFO[0m Agent health/metrics HTTP server listening on http://127.0.0.1:19528
+[2m2026-09-12T11:28:49.954957Z[0m [32m INFO[0m coord-agent connected to server cluster (attempt 1)
+[2m2026-09-12T11:28:49.960299Z[0m [32m INFO[0m service 'registry' registered as builtin plugin
+[2m2026-09-12T11:28:49.960364Z[0m [32m INFO[0m service 'config_center' registered as builtin plugin
+[2m2026-09-12T11:28:49.960396Z[0m [32m INFO[0m service 'lock' registered as builtin plugin
+[2m2026-09-12T11:28:49.960436Z[0m [32m INFO[0m service 'idgen' registered as builtin plugin
+[2m2026-09-12T11:28:49.960448Z[0m [32m INFO[0m ID Generator service registered (snowflake nodeid mode)
+[2m2026-09-12T11:28:49.960489Z[0m [32m INFO[0m service 'leader_election' registered as builtin plugin
+[2m2026-09-12T11:28:49.960521Z[0m [32m INFO[0m ConfigCenterService: starting
+[2m2026-09-12T11:28:50.011696Z[0m [32m INFO[0m ConfigCenter: loaded 0 configs from server
+[2m2026-09-12T11:28:50.011759Z[0m [32m INFO[0m plugin 'config_center' started
+[2m2026-09-12T11:28:50.011776Z[0m [32m INFO[0m IdGenService: starting (mode=snowflake)
+[2m2026-09-12T11:28:50.011770Z[0m [32m INFO[0m ConfigCenterService: Watch background task started
+[2m2026-09-12T11:28:50.027268Z[0m [32m INFO[0m IdGenService: registered snowflake node_id=82 (owner=coord-agent:127.0.0.1:19527)
+[2m2026-09-12T11:28:50.027292Z[0m [32m INFO[0m plugin 'idgen' started
+[2m2026-09-12T11:28:50.027297Z[0m [32m INFO[0m LeaderElectionService: starting
+[2m2026-09-12T11:28:50.027307Z[0m [32m INFO[0m plugin 'leader_election' started
+[2m2026-09-12T11:28:50.027310Z[0m [32m INFO[0m LockService: starting
+[2m2026-09-12T11:28:50.027315Z[0m [32m INFO[0m plugin 'lock' started
+[2m2026-09-12T11:28:50.027321Z[0m [32m INFO[0m RegistryService: starting
+[2m2026-09-12T11:28:50.027716Z[0m [32m INFO[0m RegistryService: loaded 0 instances from server
+[2m2026-09-12T11:28:50.027733Z[0m [32m INFO[0m plugin 'registry' started
+[2m2026-09-12T11:28:50.027743Z[0m [32m INFO[0m RegistryService: Watch background task started
+[2m2026-09-12T11:28:50.027757Z[0m [32m INFO[0m coord-agent gRPC server listening on 127.0.0.1:19527
+[2m2026-09-12T11:28:50.027796Z[0m [33m WARN[0m coord-agent auth interceptor DISABLED (set agent.auth.enabled=true to enable)
+[2m2026-09-12T11:29:43.020840Z[0m [32m INFO[0m Received SIGTERM, shutting down agent...
+[2m2026-09-12T11:29:43.021234Z[0m [32m INFO[0m RegistryService: stopping
+[2m2026-09-12T11:29:43.021251Z[0m [32m INFO[0m LockService: stopping
+[2m2026-09-12T11:29:43.021255Z[0m [32m INFO[0m LeaderElectionService: stopping
+[2m2026-09-12T11:29:43.021259Z[0m [32m INFO[0m IdGenService: stopping
+[2m2026-09-12T11:29:43.021263Z[0m [32m INFO[0m ConfigCenterService: stopping
+[2m2026-09-12T11:29:43.021270Z[0m [32m INFO[0m RegistryService: Watch background task shutting down
+[2m2026-09-12T11:29:43.021301Z[0m [32m INFO[0m LockService: renew background task shutting down
+[2m2026-09-12T11:29:43.021308Z[0m [32m INFO[0m LeaderElectionService: renew background task shutting down
+[2m2026-09-12T11:29:43.021312Z[0m [32m INFO[0m ConfigCenterService: Watch background task shutting down

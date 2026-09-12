@@ -11,7 +11,6 @@
 //
 // 探针选用 `coord.agent.FeatureFlags/IsEnabled`（纯内存，无需 server 连接）。
 
-use std::time::Duration;
 
 use coord_agent::{AgentConfig, AgentServer, ServiceConfig};
 use coord_proto::agent::feature_flags_client::FeatureFlagsClient;
@@ -65,7 +64,23 @@ async fn spawn_agent(config: AgentConfig) -> String {
     tokio::spawn(async move {
         let _ = server.serve().await;
     });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // 阻塞到端口真正可连接（固定 sleep 在并发跑全量套件时不够 → 假红）
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match tokio::net::TcpStream::connect(&addr).await {
+            Ok(stream) => {
+                drop(stream);
+                break;
+            }
+            Err(e) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "agent gRPC endpoint {addr} never became ready: {e}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
     addr
 }
 

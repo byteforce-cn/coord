@@ -28,7 +28,7 @@ import java.util.concurrent.TimeUnit;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ServiceRegistryAdvancedTest {
 
-    private static final String REGISTRY_PREFIX = "/_registry/services/";
+    private static final String REGISTRY_PREFIX = Namespace.unique("/_registry/services/");
 
     private static ManagedChannel channel;
     private static KVGrpc.KVBlockingStub kvStub;
@@ -37,8 +37,9 @@ class ServiceRegistryAdvancedTest {
 
     @BeforeAll
     static void setUp() {
+        AgentEndpoint.requireReachable();
         channel = ManagedChannelBuilder
-                .forAddress("localhost", 19527)
+                .forAddress(AgentEndpoint.host(), AgentEndpoint.port())
                 .usePlaintext()
                 .keepAliveTime(30, TimeUnit.SECONDS)
                 .build();
@@ -101,28 +102,28 @@ class ServiceRegistryAdvancedTest {
         // 验证 order-service 有 2 个实例
         Kv.RangeResponse orderInstances = kvStub.range(Kv.RangeRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(servicePrefix("order-service")))
-                .setRangeEnd(ByteString.copyFromUtf8(servicePrefix("order-service") + "\0"))
+                .setRangeEnd(PrefixScan.end(servicePrefix("order-service")))
                 .build());
         assertThat(orderInstances.getKvsCount()).isEqualTo(2);
 
         // 验证 payment-service 有 1 个实例
         Kv.RangeResponse payInstances = kvStub.range(Kv.RangeRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(servicePrefix("payment-service")))
-                .setRangeEnd(ByteString.copyFromUtf8(servicePrefix("payment-service") + "\0"))
+                .setRangeEnd(PrefixScan.end(servicePrefix("payment-service")))
                 .build());
         assertThat(payInstances.getKvsCount()).isEqualTo(1);
 
         // 验证 inventory-service 有 1 个实例
         Kv.RangeResponse invInstances = kvStub.range(Kv.RangeRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(servicePrefix("inventory-service")))
-                .setRangeEnd(ByteString.copyFromUtf8(servicePrefix("inventory-service") + "\0"))
+                .setRangeEnd(PrefixScan.end(servicePrefix("inventory-service")))
                 .build());
         assertThat(invInstances.getKvsCount()).isEqualTo(1);
 
         // 验证跨服务隔离：列所有注册的服务
         Kv.RangeResponse allServices = kvStub.range(Kv.RangeRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(REGISTRY_PREFIX))
-                .setRangeEnd(ByteString.copyFromUtf8(REGISTRY_PREFIX + "\0"))
+                .setRangeEnd(PrefixScan.end(REGISTRY_PREFIX))
                 .build());
         assertThat(allServices.getKvsCount()).isEqualTo(4);
     }
@@ -173,7 +174,7 @@ class ServiceRegistryAdvancedTest {
         // 这里只验证当前能发现的服务数量
         int countBefore = kvStub.range(Kv.RangeRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(REGISTRY_PREFIX))
-                .setRangeEnd(ByteString.copyFromUtf8(REGISTRY_PREFIX + "\0"))
+                .setRangeEnd(PrefixScan.end(REGISTRY_PREFIX))
                 .build()).getKvsCount();
         // 注册多个不同服务
         registerInstance("svc-alpha", "a-1", "10.0.1.1", 8001, "UP");
@@ -184,7 +185,7 @@ class ServiceRegistryAdvancedTest {
         // 全量列出：应至少有刚刚注册的 4 个实例
         Kv.RangeResponse all = kvStub.range(Kv.RangeRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(REGISTRY_PREFIX))
-                .setRangeEnd(ByteString.copyFromUtf8(REGISTRY_PREFIX + "\0"))
+                .setRangeEnd(PrefixScan.end(REGISTRY_PREFIX))
                 .build());
         // 前面的测试可能已注册服务（跨测试共享状态），所以至少 ≥4
         assertThat(all.getKvsCount()).isGreaterThanOrEqualTo(4);

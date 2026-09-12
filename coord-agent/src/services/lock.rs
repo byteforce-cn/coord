@@ -77,11 +77,61 @@ impl LockInfo {
     }
 }
 
+/// C4：`keep_alive` 失败后对本地记录的处置决策。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenewAction {
+    /// 保留本地记录（Server 端仍持有锁，或回查本身失败无法断定）。
+    Keep,
+    /// 删除本地记录并唤醒等待者（Server 明确回查不到该锁 / 已换主）。
+    Drop,
+}
+
+/// C4：只有 Server **明确**回查不到锁（`Ok(None)`）才算丢锁。
+///
+/// 这是"后台自动续期不得假丢锁"的核心判据：
+/// - `Ok(Some(_))`：锁仍在且 holder 一致 → 只是一次瞬时 keep_alive 失败 → 保留；
+/// - `Err(_)`：连回查都失败（Server 不可达）→ 不能断定 → 保留（fail-safe）；
+/// - `Ok(None)`：Server 端锁不存在或已换主 → 真丢锁 → 删除并唤醒等待者。
+fn renew_action(verify: &ServiceResult<Option<LockInfo>>) -> RenewAction {
+    match verify {
+        Ok(None) => RenewAction::Drop,
+        Ok(Some(_)) | Err(_) => RenewAction::Keep,
+    }
+}
+
 fn unix_ts() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// C4：向 Server 回查锁 key（只读，不写本地缓存）。
+///
+/// 返回 `Some(info)` 仅当锁存在**且** holder 与 `holder_id` 一致。
+/// 供 `renew` 与后台续期任务共用 —— 后者的判据必须是 Server 端真相，
+/// 而不是"keep_alive 报错"本身（瞬时抖动不应被当成丢锁）。
+async fn lookup_lock_on_server(
+    inner: &AgentInner,
+    name: &str,
+    holder_id: &str,
+) -> ServiceResult<Option<LockInfo>> {
+    let key = LockInfo::storage_key(name);
+    let kvs = inner
+        .client
+        .kv()
+        .range(&key, &[], 1, 0)
+        .await
+        .map_err(|e| format!("failed to read lock key '{name}' from server: {e}"))?;
+    let Some((_k, value)) = kvs.into_iter().next() else {
+        return Ok(None);
+    };
+    let info: LockInfo = serde_json::from_slice(&value)
+        .map_err(|e| format!("lock key '{name}' has malformed value: {e}"))?;
+    if info.holder_id != holder_id {
+        return Ok(None);
+    }
+    Ok(Some(info))
 }
 
 // ──── LockCache ────
@@ -541,26 +591,12 @@ impl LockService {
         name: &str,
         holder_id: &str,
     ) -> ServiceResult<Option<LockInfo>> {
-        let key = LockInfo::storage_key(name);
-        let kvs = self
-            .inner
-            .client
-            .kv()
-            .range(&key, &[], 1, 0)
-            .await
-            .map_err(|e| format!("failed to read lock key '{name}' from server: {e}"))?;
-        let Some((_k, value)) = kvs.into_iter().next() else {
-            return Ok(None);
-        };
-        let info: LockInfo = serde_json::from_slice(&value)
-            .map_err(|e| format!("lock key '{name}' has malformed value: {e}"))?;
-        if info.holder_id != holder_id {
-            return Ok(None);
+        let info = lookup_lock_on_server(&self.inner, name, holder_id).await?;
+        if let Some(fresh) = &info {
+            self.cache.write().add(fresh.clone());
         }
-        self.cache.write().add(info.clone());
-        Ok(Some(info))
+        Ok(info)
     }
-
     /// 本地持有锁数量
     pub fn held_count(&self) -> usize {
         self.cache.read().len()
@@ -593,8 +629,7 @@ impl BaseService for LockService {
                     }
                     _ = tokio::time::sleep(Duration::from_secs(10)) => {
                         // C4：不再按本地 TTL 清理 `held`（本地时钟不是真相）。
-                        // 锁是否失效一律以 Server 端 lease 为准：下面的续期循环会
-                        // 发 keep_alive，Server 拒绝即代表锁已失效 → 移除并唤醒等待者。
+                        // 锁是否失效一律以 Server 端 lease 为准。
                         let held: Vec<LockInfo> = cache.read().all_held().into_iter().cloned().collect();
                         for info in &held {
                             if info.ttl_secs > 0 {
@@ -607,11 +642,61 @@ impl BaseService for LockService {
                                             tracing::debug!("LockService: auto-renewed lock '{}' (lease={})", info.name, info.lease_id);
                                         }
                                         Err(e) => {
-                                            // lease 已失效（服务端重启、TTL 到期等），从本地缓存移除
-                                            tracing::warn!("LockService: failed to auto-renew lock '{}' (lease={}): {} — removing from local cache", info.name, info.lease_id, e);
-                                            cache.write().remove(&info.name);
-                                            // R-AGT-12：锁失效唤醒等待者
-                                            waiters.write().notify_next(&info.name);
+                                            // C4（后台路径收敛）：keep_alive 失败**不等于**丢锁。
+                                            // 瞬时网络抖动 / leader 切换都会让 keep_alive 报错，
+                                            // 而 Server 端 lease 可能仍然有效。此前直接删本地记录
+                                            // 并唤醒等待者 → "假丢锁"（调用方以为丢了锁，Server 端
+                                            // 却仍被自己持有，别人也拿不到）。
+                                            // 判定收敛到 Server 端回查（见 `renew_action`）。
+                                            let verify = lookup_lock_on_server(
+                                                &inner,
+                                                &info.name,
+                                                &info.holder_id,
+                                            )
+                                            .await;
+                                            match renew_action(&verify) {
+                                                RenewAction::Drop => {
+                                                    tracing::warn!(
+                                                        "LockService: lock '{}' (lease={}) is gone server-side (keep_alive error: {}) — removing from local cache",
+                                                        info.name,
+                                                        info.lease_id,
+                                                        e
+                                                    );
+                                                    cache.write().remove(&info.name);
+                                                    // R-AGT-12：锁确已失效 → 唤醒等待者
+                                                    waiters.write().notify_next(&info.name);
+                                                }
+                                                RenewAction::Keep => match &verify {
+                                                    Ok(Some(fresh)) => {
+                                                        tracing::warn!(
+                                                            "LockService: auto-renew of lock '{}' (lease={}) failed: {} — server-side lock still held by '{}' (acquired_at={}, ttl={}s); keeping local record and retrying next cycle",
+                                                            info.name,
+                                                            info.lease_id,
+                                                            e,
+                                                            fresh.holder_id,
+                                                            fresh.acquired_at,
+                                                            fresh.ttl_secs,
+                                                        );
+                                                        cache.write().touch(&info.name, &info.holder_id);
+                                                    }
+                                                    _ => {
+                                                        // 连回查都失败（Server 不可达）：**不能**断定丢锁，
+                                                        // 保留记录，下一轮（10s）重试；真过期时 Server 端
+                                                        // 会自行清理，之后回查即可发现。
+                                                        tracing::warn!(
+                                                            "LockService: auto-renew of lock '{}' (lease={}) failed: {} and server-side verification also failed ({}); keeping local record (fail-safe, will retry)",
+                                                            info.name,
+                                                            info.lease_id,
+                                                            e,
+                                                            verify
+                                                                .as_ref()
+                                                                .err()
+                                                                .map(|e| e.to_string())
+                                                                .unwrap_or_else(|| "unknown".to_string()),
+                                                        );
+                                                    }
+                                                },
+                                            }
                                         }
                                     }
                                 }
@@ -894,5 +979,34 @@ mod tests {
         q.enqueue("l", 3, tx3);
         assert!(!q.notify_next("l"));
         assert_eq!(q.len("l"), 0);
+    }
+
+    // ──── C4：后台续期的"假丢锁"回归固化 ────
+
+    fn lock_info(name: &str) -> LockInfo {
+        LockInfo::new(name, "holder-1", 5001, 30)
+    }
+
+    /// 瞬时 keep_alive 失败但 Server 端锁仍在 → **必须**保留本地记录
+    /// （此前会直接删除并唤醒等待者 = 假丢锁）。
+    #[test]
+    fn test_renew_action_keeps_record_when_server_still_holds_lock() {
+        let verify: ServiceResult<Option<LockInfo>> = Ok(Some(lock_info("l")));
+        assert_eq!(renew_action(&verify), RenewAction::Keep);
+    }
+
+    /// 回查本身失败（Server 不可达）→ 不能断定丢锁，保留（fail-safe）。
+    #[test]
+    fn test_renew_action_keeps_record_when_verification_fails() {
+        let verify: ServiceResult<Option<LockInfo>> =
+            Err("server unreachable".to_string().into());
+        assert_eq!(renew_action(&verify), RenewAction::Keep);
+    }
+
+    /// 只有 Server 明确回查不到锁（不存在 / 已换主）才删除本地记录。
+    #[test]
+    fn test_renew_action_drops_record_only_when_server_denies() {
+        let verify: ServiceResult<Option<LockInfo>> = Ok(None);
+        assert_eq!(renew_action(&verify), RenewAction::Drop);
     }
 }

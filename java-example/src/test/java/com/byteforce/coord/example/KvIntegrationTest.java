@@ -27,8 +27,9 @@ class KvIntegrationTest {
 
     @BeforeAll
     static void setUp() {
+        AgentEndpoint.requireReachable();
         channel = ManagedChannelBuilder
-                .forAddress("localhost", 19527)
+                .forAddress(AgentEndpoint.host(), AgentEndpoint.port())
                 .usePlaintext()
                 .keepAliveTime(30, TimeUnit.SECONDS)
                 .keepAliveTimeout(10, TimeUnit.SECONDS)
@@ -48,7 +49,9 @@ class KvIntegrationTest {
     @Order(1)
     @DisplayName("Put a single key and verify via Range")
     void testPutAndRangeSingleKey() {
-        String key = "/test/kv/hello";
+        // 每次运行唯一 key：断言 version == 1 需要该 key 在本集群上从未出现过
+        // （dev 集群会被反复复用，写死 key 会让第二次运行就变红）。
+        String key = Namespace.unique("/test/kv/hello/");
         String value = "world";
 
         Kv.PutResponse putResp = kvStub.put(Kv.PutRequest.newBuilder()
@@ -129,7 +132,8 @@ class KvIntegrationTest {
         }
 
         ByteString keyBytes = ByteString.copyFromUtf8(prefix);
-        ByteString rangeEnd = ByteString.copyFromUtf8(prefix + "\0");
+        // 前缀扫描：range_end = 末字节 +1（`prefix + "\0"` 只匹配 prefix 本身）
+        ByteString rangeEnd = PrefixScan.end(prefix);
 
         Kv.RangeResponse resp = kvStub.range(Kv.RangeRequest.newBuilder()
                 .setKey(keyBytes)

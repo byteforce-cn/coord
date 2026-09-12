@@ -174,8 +174,20 @@ pub struct LeaderElectionService {
     /// 角色变更广播类型别名（C3：退位需主动广播，供业务回调停止以 leader 自居）。
 type RoleChangeTx = broadcast::Sender<(String, LeaderRole, Option<ElectionGroup>)>;
 
-/// C3：连续续期失败达到该次数即退位。
-const MAX_RENEW_FAILURES: u32 = 3;
+/// C3：连续续期失败达到该次数即退位（快速失败兜底）。
+const MAX_RENEW_FAILURES: u32 = 2;
+
+/// C3：距上次**成功**续期超过 TTL/2 即退位。
+///
+/// 这是双主窗口的硬上界：lease 的 TTL 尚未到，本节点就先退出 leader 角色，
+/// 因此"旧主仍自认 leader + 新主已选出"的重叠窗口 ≤ TTL/2（< TTL）。
+/// 此前是「3 次失败 × (10s 轮询 + TTL/2 超时)」≈ 45s（TTL=30s）——**超过 TTL**，
+/// 双主窗口无法收敛。
+const STEP_DOWN_AFTER_TTL_FRACTION: u64 = 2;
+
+/// C3：退位后自动重新参选的退避基数（TTL 的倍数）与最大尝试次数。
+const REELECT_BACKOFF_TTL_MULTIPLIER: u64 = 1;
+const MAX_REELECT_ATTEMPTS: u32 = 3;
 
 /// C3：退位核心逻辑（`step_down` 与后台续期任务共用）。
 ///
@@ -206,9 +218,67 @@ async fn perform_step_down(
     );
 }
 
+/// C3：竞选实现（`campaign` 与后台"退位后自动重新参选"共用）。
+///
+/// 语义：grant lease → put_lease 选举 key；成功即 leader，键已存在即 follower
+/// （并归还 lease），其他错误原样上报。
+async fn campaign_shared(
+    inner: &Arc<AgentInner>,
+    cache: &Arc<ParkingRwLock<ElectionCache>>,
+    role_change_tx: &RoleChangeTx,
+    group: &str,
+    candidate_id: &str,
+    ttl_secs: u64,
+) -> ServiceResult<LeaderRole> {
+    let storage_key = ElectionGroup::storage_key(group);
+
+    // 尝试获取 Leader：创建 Lease + 写入选举 key
+    let lease_id = inner
+        .client
+        .lease()
+        .grant(ttl_secs as i64)
+        .await
+        .map_err(|e| format!("failed to grant election lease: {e}"))?;
+
+    let group_info = ElectionGroup::new(group, candidate_id, lease_id, ttl_secs);
+    let value =
+        serde_json::to_vec(&group_info).map_err(|e| format!("serialize election group: {e}"))?;
+
+    match inner
+        .client
+        .kv()
+        .put_lease(&storage_key, &value, lease_id)
+        .await
+    {
+        Ok(_) => {
+            // 竞选成功，成为 Leader
+            cache
+                .write()
+                .set_role(group, LeaderRole::Leader, Some(group_info.clone()));
+            let _ = role_change_tx.send((group.to_string(), LeaderRole::Leader, Some(group_info)));
+            tracing::info!("LeaderElection: '{candidate_id}' won election for group '{group}'");
+            Ok(LeaderRole::Leader)
+        }
+        Err(e) => {
+            // 竞选失败，释放 Lease
+            let _ = inner.client.lease().revoke(lease_id).await;
+
+            let err_msg = e.to_string();
+            if err_msg.contains("already exists") || err_msg.contains("AlreadyExists") {
+                // 已有 Leader，作为 Follower
+                cache.write().set_role(group, LeaderRole::Follower, None);
+                let _ = role_change_tx.send((group.to_string(), LeaderRole::Follower, None));
+                tracing::info!("LeaderElection: '{candidate_id}' is follower for group '{group}'");
+                Ok(LeaderRole::Follower)
+            } else {
+                Err(format!("election failed for group '{group}': {e}").into())
+            }
+        }
+    }
+}
+
 impl LeaderElectionService {
     pub const NAME: &'static str = "leader_election";
-
     pub fn new(inner: Arc<AgentInner>, broadcast_capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(broadcast_capacity);
         Self {
@@ -230,63 +300,15 @@ impl LeaderElectionService {
         candidate_id: &str,
         ttl_secs: u64,
     ) -> ServiceResult<LeaderRole> {
-        let storage_key = ElectionGroup::storage_key(group);
-
-        // 尝试获取 Leader：创建 Lease + 写入选举 key
-        let lease_id = self
-            .inner
-            .client
-            .lease()
-            .grant(ttl_secs as i64)
-            .await
-            .map_err(|e| format!("failed to grant election lease: {e}"))?;
-
-        let group_info = ElectionGroup::new(group, candidate_id, lease_id, ttl_secs);
-        let value = serde_json::to_vec(&group_info)
-            .map_err(|e| format!("serialize election group: {e}"))?;
-
-        match self
-            .inner
-            .client
-            .kv()
-            .put_lease(&storage_key, &value, lease_id)
-            .await
-        {
-            Ok(_) => {
-                // 竞选成功，成为 Leader
-                self.cache
-                    .write()
-                    .set_role(group, LeaderRole::Leader, Some(group_info.clone()));
-                let _ = self.role_change_tx.send((
-                    group.to_string(),
-                    LeaderRole::Leader,
-                    Some(group_info),
-                ));
-                tracing::info!("LeaderElection: '{candidate_id}' won election for group '{group}'");
-                Ok(LeaderRole::Leader)
-            }
-            Err(e) => {
-                // 竞选失败，释放 Lease
-                let _ = self.inner.client.lease().revoke(lease_id).await;
-
-                let err_msg = e.to_string();
-                if err_msg.contains("already exists") || err_msg.contains("AlreadyExists") {
-                    // 已有 Leader，作为 Follower
-                    self.cache
-                        .write()
-                        .set_role(group, LeaderRole::Follower, None);
-                    let _ =
-                        self.role_change_tx
-                            .send((group.to_string(), LeaderRole::Follower, None));
-                    tracing::info!(
-                        "LeaderElection: '{candidate_id}' is follower for group '{group}'"
-                    );
-                    Ok(LeaderRole::Follower)
-                } else {
-                    Err(format!("election failed for group '{group}': {e}").into())
-                }
-            }
-        }
+        campaign_shared(
+            &self.inner,
+            &self.cache,
+            &self.role_change_tx,
+            group,
+            candidate_id,
+            ttl_secs,
+        )
+        .await
     }
 
     /// C3：主动退位（续期失败 / 超时）。
@@ -394,13 +416,30 @@ impl BaseService for LeaderElectionService {
         tokio::spawn(async move {
             // C3：每个选举组的连续续期失败计数（成功即清零）。
             let mut renew_failures: HashMap<String, u32> = HashMap::new();
+            // C3：每个选举组"最近一次确认 lease 有效"的时刻（用于 TTL/2 硬判据）。
+            let mut last_confirmed: HashMap<String, tokio::time::Instant> = HashMap::new();
+            // C3：退位后待重新参选：(group → (candidate, ttl, due_at, attempts))。
+            let mut reelection: HashMap<String, (String, u64, tokio::time::Instant, u32)> =
+                HashMap::new();
             loop {
+                // C3：轮询间隔自适应 TTL —— 固定 10s 在 TTL < 10s 时**保证租约先过期**，
+                // 每次续期都太晚。取最小 TTL 的 1/4（限制在 [1s, 10s]）。
+                let tick = {
+                    let guard = cache.read();
+                    guard
+                        .leader_groups()
+                        .iter()
+                        .filter_map(|g| guard.get_group(g).map(|i| i.ttl_secs))
+                        .min()
+                        .map(|ttl| Duration::from_secs((ttl / 4).clamp(1, 10)))
+                        .unwrap_or_else(|| Duration::from_secs(10))
+                };
                 tokio::select! {
                     _ = rx.changed() => {
                         tracing::info!("LeaderElectionService: renew background task shutting down");
                         break;
                     }
-                    _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                    _ = tokio::time::sleep(tick) => {
                         // 自动续期 Leader Lease
                         let leader_groups: Vec<String> = cache.read().leader_groups().into_iter().map(|s| s.to_string()).collect();
                         // 先收集需要续期的信息（在锁外进行）：group / lease / ttl / leader_id
@@ -413,12 +452,12 @@ impl BaseService for LeaderElectionService {
                                 .collect()
                         };
                         for (group, lease_id, ttl_secs, candidate_id) in renewals {
-                            // C3：单次续期超过 TTL/2 即视为失败（不能无限等）。
+                            // C3：单次续期超过 TTL/4 即视为失败（不能无限等）。
                             // server 侧 keep_alive 已有 lease_timeout（C2），这里再加一层
                             // 客户端硬上限，保证分区/掉 quorum 时能在 TTL 内响应。
-                            let half_ttl = Duration::from_secs((ttl_secs / 2).max(1));
+                            let attempt_timeout = Duration::from_secs((ttl_secs / 4).max(1));
                             let outcome = tokio::time::timeout(
-                                half_ttl,
+                                attempt_timeout,
                                 inner.client.lease().keep_alive(lease_id),
                             )
                             .await;
@@ -426,11 +465,12 @@ impl BaseService for LeaderElectionService {
                             let failure_reason = match outcome {
                                 Ok(Ok(_)) => {
                                     renew_failures.remove(&group);
+                                    last_confirmed.insert(group.clone(), tokio::time::Instant::now());
                                     None
                                 }
                                 Ok(Err(e)) => Some(format!("renew failed: {e}")),
                                 Err(_) => Some(format!(
-                                    "renew exceeded TTL/2 ({half_ttl:?}) — no quorum or partition?"
+                                    "renew exceeded TTL/4 ({attempt_timeout:?}) — no quorum or partition?"
                                 )),
                             };
 
@@ -438,23 +478,117 @@ impl BaseService for LeaderElectionService {
                                 let count = renew_failures.entry(group.clone()).or_insert(0);
                                 *count = count.saturating_add(1);
                                 let count = *count;
+                                // C3 硬判据：距上次成功确认已超过 TTL/2 → 无论失败次数
+                                // 多少都立即退位（把双主窗口压到 TTL/2 以内）。
+                                let since_confirmed = last_confirmed
+                                    .get(&group)
+                                    .map(|t| t.elapsed());
+                                let stale = since_confirmed
+                                    .map(|d| d >= Duration::from_secs((ttl_secs / STEP_DOWN_AFTER_TTL_FRACTION).max(1)))
+                                    .unwrap_or(count >= MAX_RENEW_FAILURES);
                                 tracing::warn!(
-                                    "LeaderElectionService: failed to renew leader lease for 
-                                     group '{group}' ({reason}); consecutive failures: {count}"
+                                    "LeaderElectionService: failed to renew leader lease for \
+                                     group '{group}' ({reason}); consecutive failures: {count}, \
+                                     since last confirmed: {since_confirmed:?}, stale: {stale}"
                                 );
-                                if count >= MAX_RENEW_FAILURES {
+                                if stale || count >= MAX_RENEW_FAILURES {
+                                    let reason = format!(
+                                        "{count} consecutive lease renewals failed ({reason}); \
+                                         last confirmed {since_confirmed:?} ago (TTL={ttl_secs}s)"
+                                    );
                                     perform_step_down(
                                         &inner,
                                         &cache,
                                         &role_change_tx,
                                         &group,
                                         &candidate_id,
-                                        &format!(
-                                            "{count} consecutive lease renewals failed ({reason})"
-                                        ),
+                                        &reason,
                                     )
                                     .await;
                                     renew_failures.remove(&group);
+                                    last_confirmed.remove(&group);
+                                    // C3：退位后安排一次自动重新参选（避免"误退即永久
+                                    // follower"，业务需要手工重新 campaign）。
+                                    let backoff = Duration::from_secs(
+                                        (ttl_secs * REELECT_BACKOFF_TTL_MULTIPLIER).max(1),
+                                    );
+                                    reelection.insert(
+                                        group.clone(),
+                                        (
+                                            candidate_id.clone(),
+                                            ttl_secs,
+                                            tokio::time::Instant::now() + backoff,
+                                            1,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+
+                        // C3：到点的重新参选（campaign 本身是安全的：要么当选，要么
+                        // 成为 follower；失败退避重试，达上限则明确告警后放弃）。
+                        let due: Vec<String> = reelection
+                            .iter()
+                            .filter(|(_, (_, _, due_at, _))| tokio::time::Instant::now() >= *due_at)
+                            .map(|(g, _)| g.clone())
+                            .collect();
+                        for group in due {
+                            let Some((candidate_id, ttl_secs, _, attempts)) =
+                                reelection.get(&group).cloned()
+                            else {
+                                continue;
+                            };
+                            match campaign_shared(
+                                &inner,
+                                &cache,
+                                &role_change_tx,
+                                &group,
+                                &candidate_id,
+                                ttl_secs,
+                            )
+                            .await
+                            {
+                                Ok(LeaderRole::Leader) => {
+                                    tracing::info!(
+                                        "LeaderElection: '{candidate_id}' re-won election for group \
+                                         '{group}' after step-down"
+                                    );
+                                    reelection.remove(&group);
+                                    last_confirmed
+                                        .insert(group.clone(), tokio::time::Instant::now());
+                                }
+                                Ok(other) => {
+                                    tracing::info!(
+                                        "LeaderElection: re-election for group '{group}' ended as \
+                                         {other:?} — another candidate holds it; standing by"
+                                    );
+                                    reelection.remove(&group);
+                                }
+                                Err(e) => {
+                                    if attempts >= MAX_REELECT_ATTEMPTS {
+                                        tracing::error!(
+                                            "LeaderElection: giving up automatic re-election for \
+                                             group '{group}' after {attempts} attempts: {e}"
+                                        );
+                                        reelection.remove(&group);
+                                    } else {
+                                        let backoff = Duration::from_secs(
+                                            (ttl_secs * REELECT_BACKOFF_TTL_MULTIPLIER).max(1),
+                                        );
+                                        tracing::warn!(
+                                            "LeaderElection: re-election attempt {attempts} for group \
+                                             '{group}' failed ({e}); retrying in {backoff:?}"
+                                        );
+                                        reelection.insert(
+                                            group,
+                                            (
+                                                candidate_id,
+                                                ttl_secs,
+                                                tokio::time::Instant::now() + backoff,
+                                                attempts + 1,
+                                            ),
+                                        );
+                                    }
                                 }
                             }
                         }

@@ -40,8 +40,9 @@ class LeaseAdvancedTest {
 
     @BeforeAll
     static void setUp() {
+        AgentEndpoint.requireReachable();
         channel = ManagedChannelBuilder
-                .forAddress("localhost", 19527)
+                .forAddress(AgentEndpoint.host(), AgentEndpoint.port())
                 .usePlaintext()
                 .keepAliveTime(30, TimeUnit.SECONDS)
                 .build();
@@ -78,13 +79,22 @@ class LeaseAdvancedTest {
 
     @Test
     @Order(2)
-    @DisplayName("Revoke non-existent lease should throw error")
+    @DisplayName("Revoke non-existent lease is idempotent (no error)")
     void testRevokeNonExistentLease() {
-        assertThatThrownBy(() ->
-                leaseStub.leaseRevoke(LeaseOuterClass.LeaseRevokeRequest.newBuilder()
-                        .setId(99999)
-                        .build())
-        ).isInstanceOf(StatusRuntimeException.class);
+        // 语义说明（与 etcd 有意不同，已实测确认）：
+        //   server 的 `LeaseRevoke` 走 raft 提交 `LeaseOp::Revoke`，apply 对不存在的
+        //   租约是**幂等**的（删不存在的行为 no-op），本地 TTL 缓存的
+        //   `LeaseNotFound` 被有意忽略 → 返回 OK。这是重试安全的：客户端可无条件
+        //   重发 revoke。etcd 会返回 "lease not found"，接入方若依赖该错误码需自行适配。
+        // 原测试断言「必抛 StatusRuntimeException」从未在 CI 中执行过（D3）。
+        LeaseOuterClass.LeaseRevokeResponse resp = leaseStub.leaseRevoke(
+                LeaseOuterClass.LeaseRevokeRequest.newBuilder().setId(99999).build());
+        assertThat(resp).isNotNull();
+
+        // 重复 revoke 同一不存在的 ID 仍然幂等
+        assertThat(leaseStub.leaseRevoke(
+                LeaseOuterClass.LeaseRevokeRequest.newBuilder().setId(99999).build()))
+                .isNotNull();
     }
 
     // ──── Multiple KeepAlive in one stream ────
@@ -159,7 +169,7 @@ class LeaseAdvancedTest {
         // 验证全部存在
         Kv.RangeResponse before = kvStub.range(Kv.RangeRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(prefix))
-                .setRangeEnd(ByteString.copyFromUtf8(prefix + "\0"))
+                .setRangeEnd(PrefixScan.end(prefix))
                 .build());
         assertThat(before.getKvsCount()).isEqualTo(keyCount);
 
@@ -169,7 +179,7 @@ class LeaseAdvancedTest {
         // 验证全部删除
         Kv.RangeResponse after = kvStub.range(Kv.RangeRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(prefix))
-                .setRangeEnd(ByteString.copyFromUtf8(prefix + "\0"))
+                .setRangeEnd(PrefixScan.end(prefix))
                 .build());
         assertThat(after.getKvsCount()).isEqualTo(0);
     }

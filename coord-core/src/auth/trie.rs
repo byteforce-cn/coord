@@ -177,9 +177,15 @@ pub fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
 /// 关键：不能只校验 `key`，否则持 `/app/a/` 的凭据发
 /// `Range(key=/app/a/x, range_end=/zzz)` 就能读全库（A1 越权）。
 ///
-/// 实现：把 scope 模式归约为一个**安全字面前缀** `P`（任何以 `P` 开头的字节串都
-/// 必然命中该 scope），于是 `[key, range_end) ⊆ [P, succ(P))` 只需 `key` 与
-/// `range_end` 都以 `P` 开头。无法安全归约时 fail-closed。
+/// 实现：把 scope 归约为一个**安全字面前缀** `P`（任何以 `P` 开头的字节串都必然
+/// 命中该 scope，且 `[P, succ(P))` 整体在命中集合内），然后做**字节区间包含**判定
+/// `key >= P && range_end <= succ(P)`。无法安全归约时 fail-closed。
+///
+/// 注意不要用 `range_end.starts_with(P)`：仓库自有的前缀扫描惯用法取「末字节 +1」
+/// （`coord-agent/src/services/workflow_store.rs` 的 `prefix_end()`：
+/// `/_workflow/v3/defs/ns/` → `/_workflow/v3/defs/ns0`），其 `range_end` **并不**
+/// 以 `P` 开头，但整个区间确实落在 `[P, succ(P))` 内——用 `starts_with` 会把
+/// 这类合法区间扫描全部 403（A1 修复引入的功能回归）。
 pub fn scope_covers_interval(scope: &str, key: &[u8], range_end: &[u8]) -> bool {
     // match-all：空 scope、"/"、"//"、"/*"
     if scope.is_empty() || scope.chars().all(|c| c == '/') || scope == "/*" {
@@ -192,45 +198,60 @@ pub fn scope_covers_interval(scope: &str, key: &[u8], range_end: &[u8]) -> bool 
             && trie.matches(std::str::from_utf8(key).unwrap_or("\u{FFFD}"));
     }
     // range_end == "\0" 表示"从 key 到无穷"（etcd 语义）：有界 scope 不可能覆盖
+    // （match-all scope 已在上方返回 true）
     if range_end == b"\0" {
         return false;
     }
-    let Some(prefix) = scope_literal_prefix(scope) else {
+    let Some(prefix) = scope_safe_byte_prefix(scope) else {
         return false;
     };
     if prefix.is_empty() {
-        return true; // 归一为空前缀 = match-all（如 "/*"）
+        return true; // 归一为空前缀 = match-all
     }
-    key.starts_with(&prefix) && range_end.starts_with(&prefix)
+    let Some(upper) = prefix_successor(&prefix) else {
+        return false; // 前缀全 0xFF → 无上界，fail-closed
+    };
+    // 字节区间包含：区间完全落在 [prefix, upper) 内 ⇒ 每个 key 都以 prefix 开头
+    // ⇒ 按分段语义必然命中该 scope。
+    key >= prefix.as_slice() && range_end <= upper.as_slice()
 }
 
 /// 将 scope 模式归约为一个**安全字面前缀**。
 ///
-/// 安全要求：任何以返回值开头的字节串，按 `ScopeTrie` 分段语义都必须命中该 scope。
-/// 无法安全归约时返回 `None`（调用方 fail-closed）。
-fn scope_literal_prefix(scope: &str) -> Option<Vec<u8>> {
+/// 安全要求（两条都要满足）：
+/// 1. 任何以返回值开头的字节串，按 [`ScopeTrie`] 分段语义都必须命中该 scope；
+/// 2. `[P, succ(P))` 必须整体落在命中集合内（否则区间判定会放行未授权 key）。
+///
+/// 因此末段为字面量（如 `/app`）时**必须补足尾随 `/`**：`[ "/app", succ("/app") )`
+/// 里的 `/app!` 并不命中分段前缀 `app`，而 `[ "/app/", succ("/app/") )` 内的每个串
+/// 分段后都以 `app` 开头 ⇒ 必命中。
+///
+/// 无法安全归约（中间/多处 `*`）时返回 `None`（调用方 fail-closed）。
+fn scope_safe_byte_prefix(scope: &str) -> Option<Vec<u8>> {
+    // "…/*"：末段通配 → P = base + "/"（base 为空 = match-all）
     if let Some(base) = scope.strip_suffix("/*") {
+        if base.contains('*') {
+            return None;
+        }
         if base.is_empty() {
-            return Some(Vec::new()); // "/*" = match-all
+            return Some(Vec::new());
         }
         let mut p = base.to_string();
         if !p.ends_with('/') {
             p.push('/');
         }
-        if p.contains('*') {
-            return None;
-        }
         return Some(p.into_bytes());
     }
-    // 中间/末尾内嵌的 `*`（非独立末段）无法安全归约
+    // 非末段的 `*`（如 "/a/*/b"）无法安全归约
     if scope.contains('*') {
         return None;
     }
-    // 只有以 '/' 结尾时，「字节前缀 ⊆ 分段前缀」才成立
-    if !scope.ends_with('/') {
-        return None;
+    // 字面量末段：补足尾随 '/' 才是安全字节前缀（见上文注释）
+    let mut p = scope.to_string();
+    if !p.ends_with('/') {
+        p.push('/');
     }
-    Some(scope.as_bytes().to_vec())
+    Some(p.into_bytes())
 }
 
 // ──── Tests ────

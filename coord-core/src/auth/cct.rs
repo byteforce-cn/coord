@@ -28,6 +28,13 @@ type HmacSha256 = Hmac<Sha256>;
 pub const CCT_ALG_HMAC_SHA256: &str = "HMAC-SHA256";
 pub const CCT_ALG_ED25519: &str = "Ed25519";
 
+/// HMAC 密钥最小长度（字节）。A3 fail-closed：
+///
+/// 空密钥是**真实漏洞**——`hex::decode("")` 得到 `Ok(vec![])`，而 `hmac` 对空 key
+/// 返回 `Ok`，于是"知道密钥为空"的任何人都能自签 `roles:["root"]` 的 CCT。
+/// 因此 HMAC 分支**拒绝**空密钥与弱于 256 bit 的密钥，而不是把它当作可用密钥。
+pub const MIN_HMAC_KEY_LEN: usize = 32;
+
 // ──── CCT Header ────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -157,11 +164,24 @@ pub fn decode_cct_any(
     match header.alg.as_str() {
         CCT_ALG_HMAC_SHA256 => {
             let mut verified = false;
+            let mut usable_key_seen = false;
             for key in hmac_keys {
+                // A3：空/过短密钥**不构成**可用密钥材料。若全部候选都不可用，
+                // 必须报错而不是"验签通过"（空 key 的 HMAC 是任何人都能算的）。
+                if !is_usable_hmac_key(key) {
+                    continue;
+                }
+                usable_key_seen = true;
                 if verify_hmac(signing_input.as_bytes(), &signature, key).is_ok() {
                     verified = true;
                     break;
                 }
+            }
+            if !usable_key_seen {
+                return Err(Error::InvalidToken(format!(
+                    "HMAC-SHA256 CCT presented but no usable HMAC key configured \
+                     (need >= {MIN_HMAC_KEY_LEN} bytes; empty/short keys are refused)"
+                )));
             }
             if !verified {
                 return Err(Error::InvalidToken(
@@ -244,6 +264,7 @@ fn base64_url_decode(encoded: &str) -> std::result::Result<Vec<u8>, String> {
 }
 
 fn sign_hmac(data: &[u8], key: &[u8]) -> Result<Vec<u8>> {
+    ensure_usable_hmac_key(key)?;
     let mut mac = HmacSha256::new_from_slice(key)
         .map_err(|e| Error::Crypto(format!("HMAC key invalid: {e}")))?;
     mac.update(data);
@@ -251,11 +272,29 @@ fn sign_hmac(data: &[u8], key: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn verify_hmac(data: &[u8], signature: &[u8], key: &[u8]) -> Result<()> {
+    ensure_usable_hmac_key(key)?;
     let mut mac = HmacSha256::new_from_slice(key)
         .map_err(|e| Error::Crypto(format!("HMAC key invalid: {e}")))?;
     mac.update(data);
     mac.verify_slice(signature)
         .map_err(|_| Error::InvalidToken("signature verification failed".to_string()))
+}
+
+/// A3：密钥材料是否可用于 HMAC（非空且 >= [`MIN_HMAC_KEY_LEN`] 字节）。
+pub fn is_usable_hmac_key(key: &[u8]) -> bool {
+    key.len() >= MIN_HMAC_KEY_LEN
+}
+
+/// A3：拒绝空/过短 HMAC 密钥（fail-closed，绝不"当作可用密钥"继续）。
+fn ensure_usable_hmac_key(key: &[u8]) -> Result<()> {
+    if is_usable_hmac_key(key) {
+        return Ok(());
+    }
+    Err(Error::Crypto(format!(
+        "HMAC signing/verification key must be >= {MIN_HMAC_KEY_LEN} bytes \
+         (got {} bytes); empty keys are refused (A3)",
+        key.len()
+    )))
 }
 
 // ──── Tests ────
@@ -316,7 +355,9 @@ mod tests {
         };
 
         let token = encode_cct(&header, &payload, TEST_KEY).unwrap();
-        let wrong_key = b"wrong-key-32-bytes-long-here!!!";
+        // 注意：必须是 >= MIN_HMAC_KEY_LEN 的"错误密钥"，否则会先撞上
+        // A3 的"密钥材料不可用"分支（见 test_cct_hmac_empty_key_is_refused_*）。
+        let wrong_key = b"wrong-key-32-bytes-long-here!!!!";
 
         let result = decode_cct(&token, wrong_key);
         assert!(result.is_err(), "decode with wrong key should fail");
@@ -544,5 +585,35 @@ mod tests {
         bad_header.alg = "RS256".to_string();
         let bad_token = encode_cct_ed25519(&bad_header, &ed_test_payload(), &signing_key);
         assert!(bad_token.is_err());
+    }
+
+    // ──── A3：空 / 过短 HMAC 密钥必须被拒（P0 回归固化） ────
+
+    #[test]
+    fn test_cct_hmac_empty_key_is_refused_not_accepted() {
+        // 攻击者视角：知道"密钥为空"即可自签 root token——历史上这**会成功**。
+        let header = CctHeader::default();
+        let forged = encode_cct(&header, &ed_test_payload(), TEST_KEY).unwrap();
+        // 空 key 验签必须失败（且原因必须是"无可用密钥材料"，不是签名不匹配）
+        let err = decode_cct_any(&forged, &[&[]], None).expect_err("empty key must not verify");
+        assert!(
+            format!("{err}").contains("no usable HMAC key"),
+            "expected no-usable-key error, got: {err}"
+        );
+        // 传空 key 切片（agent 只配公钥时的真实形态）同样拒绝
+        assert!(decode_cct_any(&forged, &[], None).is_err());
+        // 过短密钥（<32B）同样不构成可用材料
+        assert!(decode_cct_any(&forged, &[b"short"], None).is_err());
+        // 正确的 32B 密钥仍然可用（不误伤正常路径）
+        assert!(decode_cct_any(&forged, &[TEST_KEY], None).is_ok());
+    }
+
+    #[test]
+    fn test_cct_encode_with_empty_key_is_refused() {
+        let header = CctHeader::default();
+        let err = encode_cct(&header, &ed_test_payload(), &[]).expect_err("empty key must not sign");
+        assert!(format!("{err}").contains("A3"), "err: {err}");
+        assert!(encode_cct(&header, &ed_test_payload(), b"short").is_err());
+        assert!(encode_cct(&header, &ed_test_payload(), TEST_KEY).is_ok());
     }
 }

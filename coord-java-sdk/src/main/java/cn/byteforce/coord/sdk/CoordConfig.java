@@ -72,6 +72,7 @@ public final class CoordConfig {
         private boolean autoRestoreWatches = true;
         private int heartbeatThreads = 4;
         private boolean useTls = false;
+        private boolean allowInsecurePlaintext = false;
         private String tlsCaCertPath;
         private String tlsClientCertPath;
         private String tlsClientKeyPath;
@@ -107,6 +108,18 @@ public final class CoordConfig {
 
         public Builder useTls(boolean useTls) {
             this.useTls = useTls;
+            return this;
+        }
+
+        /**
+         * D1（残余项）显式逃生口：允许对**非 loopback** 地址使用明文通道。
+         *
+         * <p>默认 {@code false} = fail-closed：明文只允许连本机 agent（开发场景），
+         * 连远端主机必须显式打开 TLS，或者显式调用本方法声明"我知道自己在做什么"。
+         * 这样"默认不再明文"不靠日志警告，而是靠**拒绝建链**。
+         */
+        public Builder allowInsecurePlaintext(boolean allowInsecurePlaintext) {
+            this.allowInsecurePlaintext = allowInsecurePlaintext;
             return this;
         }
 
@@ -181,7 +194,42 @@ public final class CoordConfig {
                     throw new IllegalArgumentException(
                             "tlsClientCertPath and tlsClientKeyPath must be configured together (mTLS)");
                 }
+            } else if (!allowInsecurePlaintext && !isLoopbackHost(agentHost)) {
+                // D1（残余项）：明文 + 非 loopback = 跨网明文（凭据/CCT 全部裸奔）。
+                // 默认 fail-closed，而不是只打一条 WARN 让生产误用。
+                throw new IllegalArgumentException(
+                        "plaintext channel to non-loopback host '" + agentHost
+                                + "' is refused (fail-closed). Enable TLS "
+                                + "(useTls(true) + tlsCaCertPath), or call "
+                                + "allowInsecurePlaintext(true) to accept the risk explicitly "
+                                + "for a trusted network");
             }
+        }
+
+        /**
+         * loopback 判定（{@code localhost} / {@code 127.0.0.0/8} / {@code ::1}）。
+         *
+         * <p>未知主机名按非 loopback 处理（fail-closed）。
+         */
+        private static boolean isLoopbackHost(String host) {
+            String h = host.trim();
+            if (h.startsWith("[") && h.endsWith("]")) {
+                h = h.substring(1, h.length() - 1);
+            }
+            if (h.equalsIgnoreCase("localhost")) {
+                return true;
+            }
+            if (h.equals("::1")) {
+                return true;
+            }
+            // 127.0.0.0/8
+            if (h.startsWith("127.")) {
+                String[] parts = h.split("\\.");
+                if (parts.length == 4) {
+                    return true; // 前缀已保证第一段是 127
+                }
+            }
+            return false;
         }
     }
 }

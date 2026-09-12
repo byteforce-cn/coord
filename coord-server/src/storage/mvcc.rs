@@ -872,9 +872,13 @@ impl<B: StorageBackend> MvccStorage<B> {
 
     /// Range 历史读：返回 `[start, range_end)` 在目标 revision 时刻的视图（R-SVC-07-2）
     ///
-    /// 通过回放 `[1, target_revision]` 的 changelog 重建历史视图（与 `get_at_revision`
-    /// 同一模式）。changelog 中 value 为明文（put 时直接写入），故无需解密。
-    /// 注意：早于 `compacted_revision` 的历史不可达（与 `get_at_revision` 一致）。
+    /// 通过回放 Changelog 重建历史视图（与 `get_at_revision` 同一模式）。
+    /// changelog 中 value 为明文（put 时直接写入），故无需解密。
+    ///
+    /// **P0-7**：压缩之后必须补齐"保留窗口内未被写过"的 Key —— 它们的历史写入
+    /// 已被物理删除，但**状态与当前一致**（窗口内没变），此前会被漏掉（历史读少给
+    /// Key，实时读却有）。无法复原的 Key（T 之后被改、T 之前被压缩）不再静默返回
+    /// 残缺视图，而是报错。
     pub fn range_at_revision(
         &self,
         start: &[u8],
@@ -882,22 +886,29 @@ impl<B: StorageBackend> MvccStorage<B> {
         limit: usize,
         target_revision: Revision,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.ensure_history_reconstructable(target_revision)?;
         let end_key = encode_changelog_key(target_revision.saturating_add(1));
-        self.backend.read(|tx| {
+
+        let (mut view, changed_after) = self.backend.read(|tx| {
             let entries = tx.iter_prefix(TABLE_CHANGELOG, CHANGELOG_PREFIX)?;
             // BTreeMap 保持 Key 字典序
             let mut view: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
                 std::collections::BTreeMap::new();
+            // T 之后有写入的 Key（用于判断"窗口内未变"是否成立）
+            let mut changed_after: std::collections::HashSet<Vec<u8>> =
+                std::collections::HashSet::new();
             for (ch_key, ch_value) in entries {
-                if ch_key.as_slice() >= end_key.as_slice() {
-                    break;
-                }
+                let is_after = ch_key.as_slice() >= end_key.as_slice();
                 if let Ok(event) = ChangeEvent::from_bytes(&ch_value) {
                     for change in &event.changes {
                         if change.key.as_slice() < start {
                             continue;
                         }
                         if !range_end.is_empty() && change.key.as_slice() >= range_end {
+                            continue;
+                        }
+                        if is_after {
+                            changed_after.insert(change.key.clone());
                             continue;
                         }
                         match &change.value {
@@ -911,15 +922,45 @@ impl<B: StorageBackend> MvccStorage<B> {
                     }
                 }
             }
-            let mut results = Vec::new();
-            for (k, v) in view {
-                if results.len() >= limit && limit > 0 {
-                    break;
-                }
-                results.push((k, v));
+            Ok((view, changed_after))
+        })?;
+
+        // 补齐：在保留窗口内没有任何写入的 Key，其 T 时刻状态 = 当前状态。
+        let mut unreconstructable: Vec<Vec<u8>> = Vec::new();
+        for (key, value) in self.range_in(start, range_end, 0)? {
+            if view.contains_key(&key) || !changed_after.contains(&key) {
+                view.entry(key).or_insert(value);
+                continue;
             }
-            Ok(results)
-        })
+            // T 之后改过、且 T 之前的历史已被压缩：若无元数据可证它当时还不存在，
+            // 该 Key 在 T 时刻的值不可复原。
+            let created_after_target = self
+                .get_kv_metadata(&key)?
+                .map(|m| m.create_revision as u64 > target_revision)
+                .unwrap_or(false);
+            if !created_after_target {
+                unreconstructable.push(key);
+            }
+        }
+        if !unreconstructable.is_empty() {
+            return Err(Error::Internal(format!(
+                "historical range read at revision {target_revision} is not reconstructable: \
+                 {} key(s) were written after that revision but their earlier history was \
+                 compacted (first: {}); read a revision >= the compaction watermark, or read \
+                 the live data",
+                unreconstructable.len(),
+                String::from_utf8_lossy(&unreconstructable[0])
+            )));
+        }
+
+        let mut results = Vec::new();
+        for (k, v) in view {
+            if results.len() >= limit && limit > 0 {
+                break;
+            }
+            results.push((k, v));
+        }
+        Ok(results)
     }
 
     /// 范围删除（raft apply 路径，R-SVC-07-3）：单个写事务内原子标记
@@ -2107,35 +2148,91 @@ impl<B: StorageBackend> MvccStorage<B> {
     ///
     /// 通过扫描 Changelog 找到该 Key 在 <= target_revision 时的最后一次写入值。
     /// 如果 Key 在 target_revision 时不存在或已被删除，返回 None。
+    ///
+    /// **P0-7**：压缩（`apply_compact` 删除 `rev < compacted_revision` 的 changelog
+    /// 条目）之后，单纯"扫 changelog 取最后一条"会**静默返回错误值**：
+    ///
+    /// - `target_revision <= compacted_revision` → 需要的条目已被物理删除
+    ///   → 返回 `RevisionCompacted`（与 Watch 历史回放同口径，不再静默给错值）；
+    /// - `target_revision > compacted_revision` 但该 Key 在**保留窗口内无任何写入**
+    ///   → 它在 T 时刻的状态就等于当前状态（窗口内没变过）→ 返回实时值
+    ///   （此前会错误地返回 `None`：历史读说"不存在"，实时读却能读到）；
+    /// - 该 Key 在 T 之后有写入、且 T 之前的写入已被压缩（值不可复原）
+    ///   → 返回 `Error::Internal`，拒绝给出不可信的答案。
     pub fn get_at_revision(
         &self,
         key: &[u8],
         target_revision: Revision,
     ) -> Result<Option<Vec<u8>>> {
-        let start_key = encode_changelog_key(1); // 从 rev 1 开始扫描
+        self.ensure_history_reconstructable(target_revision)?;
         let end_key = encode_changelog_key(target_revision.saturating_add(1));
-        self.backend.read(|tx| {
-            let entries = tx.iter_prefix(TABLE_CHANGELOG, CHANGELOG_PREFIX)?;
-            let mut last_value: Option<Vec<u8>> = None;
-            for (ch_key, ch_value) in entries {
-                // 只读取 [1, target_revision] 范围内的条目
-                if ch_key.as_slice() < start_key.as_slice() {
-                    continue;
-                }
-                if ch_key.as_slice() >= end_key.as_slice() {
-                    break;
-                }
+
+        // 第一遍：定位 <= target_revision 的最后一次写入，并记录 (T, ∞) 是否有写入。
+        let (last_at_or_before, written_after) = self.backend.read(|tx| {
+            let mut last_value: Option<Option<Vec<u8>>> = None;
+            let mut written_after = false;
+            for (ch_key, ch_value) in tx.iter_prefix(TABLE_CHANGELOG, CHANGELOG_PREFIX)? {
+                let is_after = ch_key.as_slice() >= end_key.as_slice();
                 if let Ok(event) = ChangeEvent::from_bytes(&ch_value) {
                     for change in &event.changes {
-                        if change.key == key {
-                            // 该 Revision 修改了此 Key，更新 value
-                            last_value = change.value.clone();
+                        if change.key != key {
+                            continue;
+                        }
+                        if is_after {
+                            written_after = true;
+                        } else {
+                            last_value = Some(change.value.clone());
                         }
                     }
                 }
+                // 已过目标 revision 且已确认有更新写入 → 无需继续
+                if is_after && written_after {
+                    break;
+                }
             }
-            Ok(last_value)
-        })
+            Ok((last_value, written_after))
+        })?;
+
+        if let Some(value) = last_at_or_before {
+            return Ok(value);
+        }
+
+        // 保留窗口内没有该 Key 的写入：T 时刻的状态 = 当前状态（窗口内未变）。
+        if !written_after {
+            return self.get(key);
+        }
+
+        // T 之后被改过，而 T 之前的写入已被压缩 → 无法复原，拒绝静默给错值。
+        let created_after_target = self
+            .get_kv_metadata(key)?
+            .map(|m| m.create_revision as u64 > target_revision)
+            .unwrap_or(false);
+        if created_after_target {
+            return Ok(None); // T 时刻该 Key 尚不存在
+        }
+        Err(Error::Internal(format!(
+            "historical read of key {} at revision {target_revision} is not \
+             reconstructable: the key was written after that revision but its \
+             earlier history was compacted (read a revision >= the compaction \
+             watermark, or read the live value)",
+            String::from_utf8_lossy(key)
+        )))
+    }
+
+    /// P0-7：历史读的压缩水位守卫。
+    ///
+    /// `apply_compact` 删除 `rev < effective` 的 changelog 与过期 tombstone，因此
+    /// `target_revision <= compacted_revision` 时的历史**不可复原**——此前直接返回
+    /// 扫描结果（往往落入"早期无写入"分支）等于静默返回错误值。
+    fn ensure_history_reconstructable(&self, target_revision: Revision) -> Result<()> {
+        let compacted = self.compacted_revision()?;
+        if target_revision <= compacted {
+            return Err(Error::RevisionCompacted {
+                revision: target_revision,
+                oldest: compacted.saturating_add(1),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -2353,6 +2450,101 @@ mod tests {
         assert!(results.contains(&(b"b".to_vec(), b"v1".to_vec())));
         let results = storage.range_at_revision(b"a", b"c", 0, 4).unwrap();
         assert!(!results.iter().any(|(k, _)| k == b"b"));
+    }
+
+    // ──── P0-7：压缩后的历史读不得静默返回错误值 ────
+
+    /// 压缩水位之前的修订不可复原 → 必须报 `RevisionCompacted`（与 Watch 同口径），
+    /// 而不是"扫不到就返回 None"（历史读说"不存在"，实时读却能读到）。
+    #[test]
+    fn test_get_at_revision_rejects_compacted_revision() {
+        let (_dir, storage) = create_storage();
+        storage.put(b"k", b"v1", None).unwrap(); // rev 1
+        storage.put(b"k", b"v2", None).unwrap(); // rev 2
+        storage.put(b"k", b"v3", None).unwrap(); // rev 3
+        storage
+            .apply_compact(2, AppliedLogId::standalone(5))
+            .unwrap();
+
+        // target <= compacted → 明确报错
+        let err = storage.get_at_revision(b"k", 2).expect_err("must Err");
+        assert!(
+            matches!(err, Error::RevisionCompacted { revision: 2, oldest: 3 }),
+            "unexpected error: {err:?}"
+        );
+        // 范围历史读同口径
+        let err = storage
+            .range_at_revision(b"a", b"z", 0, 1)
+            .expect_err("must Err");
+        assert!(matches!(err, Error::RevisionCompacted { .. }));
+        // 水位之上的修订仍可读
+        assert_eq!(
+            storage.get_at_revision(b"k", 3).unwrap(),
+            Some(b"v3".to_vec())
+        );
+    }
+
+    /// 压缩后，**保留窗口内未被写过**的 Key 在历史视图中必须仍然可见
+    /// （其历史写入虽被删除，但状态与当前一致）。
+    #[test]
+    fn test_historical_read_keeps_keys_untouched_since_compaction() {
+        let (_dir, storage) = create_storage();
+        storage.put(b"a", b"a-old", None).unwrap(); // rev 1
+        storage.put(b"b", b"b-old", None).unwrap(); // rev 2
+        storage.put(b"b", b"b-new", None).unwrap(); // rev 3
+        storage
+            .apply_compact(2, AppliedLogId::standalone(5))
+            .unwrap();
+
+        // 单键：a 在窗口内没被写过 → T=3 时刻状态 = 当前状态
+        assert_eq!(
+            storage.get_at_revision(b"a", 3).unwrap(),
+            Some(b"a-old".to_vec())
+        );
+        // 范围：a 必须在历史视图里（此前被静默漏掉）
+        let results = storage.range_at_revision(b"a", b"c", 0, 3).unwrap();
+        assert!(
+            results.contains(&(b"a".to_vec(), b"a-old".to_vec())),
+            "keys untouched since compaction must stay visible: {results:?}"
+        );
+        assert!(results.contains(&(b"b".to_vec(), b"b-new".to_vec())));
+    }
+
+    /// T 之后有写入、且 T 之前的历史已被压缩 → 值不可复原：必须报错，
+    /// 不得返回 None 或别的猜测值。
+    #[test]
+    fn test_historical_read_rejects_unreconstructable_key() {
+        let (_dir, storage) = create_storage();
+        storage.put(b"k", b"v1", None).unwrap(); // rev 1（k 的写入）
+        storage.put(b"filler", b"x", None).unwrap(); // rev 2
+        // 水位 2：删除 rev < 2 的 changelog → k 的 rev1 条目被物理删除
+        storage
+            .apply_compact(2, AppliedLogId::standalone(5))
+            .unwrap();
+        storage.put(b"k", b"v2", None).unwrap(); // rev 6
+
+        // T=4：在水位之上（守卫放行），但 k 在 [2,4] 无写入、T 之后（rev6）有写入，
+        // 且 k 在 T 时刻已存在（create_revision=1）→ 值不可复原 → 拒绝猜测。
+        let err = storage
+            .get_at_revision(b"k", 4)
+            .expect_err("must not silently guess");
+        assert!(matches!(err, Error::Internal(_)), "err: {err:?}");
+
+        // 范围历史读同口径（不得给出残缺视图）
+        assert!(storage
+            .range_at_revision(b"k", b"l", 0, 4)
+            .expect_err("must not silently return a partial view")
+            .to_string()
+            .contains("not reconstructable"));
+
+        // 保留窗口内的修订仍可读
+        assert_eq!(
+            storage.get_at_revision(b"k", 6).unwrap(),
+            Some(b"v2".to_vec())
+        );
+        // 水位之下的修订明确报 RevisionCompacted
+        let err = storage.get_at_revision(b"k", 2).expect_err("must Err");
+        assert!(matches!(err, Error::RevisionCompacted { .. }), "err: {err:?}");
     }
 
     /// R-SVC-07-4：Txn 内 Range 必须过滤已软删除的 Key（与顶层 range() 对齐）

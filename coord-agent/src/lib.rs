@@ -214,23 +214,72 @@ fn default_cache_kv_ttl_secs() -> u64 {
 
 /// A3：鉴权密钥材料校验（启动期 fail-closed）。
 ///
-/// `auth.enabled = true` 时至少要有一种密钥材料：
-/// - `verifying_key_hex`：Ed25519 公钥（推荐；服务端持私钥签发，agent 只验签）；
-/// - `signing_key_hex`：历史 HMAC 对称密钥（**仅**存量 token 宽限期验证）。
+/// `auth.enabled = true` 时要求：
+/// 1. 至少一种**真实**密钥材料：`verifying_key_hex`（Ed25519 公钥，推荐；服务端持
+///    私钥签发，agent 只验签）或 `signing_key_hex`（历史 HMAC 对称密钥）；
+/// 2. `signing_key_hex` 非空时必须是合法 hex 且 **>= 32 字节**
+///    （[`MIN_HMAC_KEY_LEN`]）；
+/// 3. `verifying_key_hex` 非空时必须是 32 字节 Ed25519 公钥；
+/// 4. `bootstrap_token` 非空——否则本机 RoleCache **永远无法同步**，所有
+///    角色门控 RPC 都会被拒（"启动了但全 403" 是比拒绝启动更糟的故障形态）。
 ///
-/// 两者都为空时**拒绝启动**：否则 `hex::decode("")` 会得到 `Ok(vec![])`，即
-/// **空 HMAC 密钥** —— 任何知道"密钥为空"的调用方都能自签 `roles:["root"]`。
+/// 为什么第 2 条是 P0：`hex::decode("")` 得到 `Ok(vec![])`，而 `hmac` 对空 key 返回
+/// `Ok` —— 即**空 HMAC 密钥**；任何知道"密钥为空"的调用方都能自签
+/// `roles:["root"]` 的 CCT。旧实现只在"两者都为空"时拒绝，而推荐配置（只设公钥）
+/// 恰好留下 `signing_key_hex = ""`，漏洞仍然成立。
 fn validate_auth_key_material(auth: &AgentAuthConfig) -> Result<(), String> {
     if !auth.enabled {
         return Ok(());
     }
-    if auth.signing_key_hex.trim().is_empty() && auth.verifying_key_hex.trim().is_empty() {
+    let signing = auth.signing_key_hex.trim();
+    let verifying = auth.verifying_key_hex.trim();
+
+    if signing.is_empty() && verifying.is_empty() {
         return Err(
             "auth.enabled=true but neither auth.signing_key_hex nor auth.verifying_key_hex \
              is configured: refusing to start with empty key material (A3 fail-closed)"
                 .to_string(),
         );
     }
+
+    if !signing.is_empty() {
+        let raw = hex::decode(signing)
+            .map_err(|e| format!("auth.signing_key_hex is not valid hex: {e}"))?;
+        if raw.len() < coord_core::auth::cct::MIN_HMAC_KEY_LEN {
+            return Err(format!(
+                "auth.signing_key_hex decodes to {} bytes but needs >= {} bytes \
+                 ({} hex chars): an empty/short HMAC key lets anyone forge a \
+                 roles:[\"root\"] CCT (A3 fail-closed)",
+                raw.len(),
+                coord_core::auth::cct::MIN_HMAC_KEY_LEN,
+                coord_core::auth::cct::MIN_HMAC_KEY_LEN * 2
+            ));
+        }
+    }
+
+    if !verifying.is_empty() {
+        let raw = hex::decode(verifying)
+            .map_err(|e| format!("auth.verifying_key_hex is not valid hex: {e}"))?;
+        if raw.len() != 32 {
+            return Err(format!(
+                "auth.verifying_key_hex must be 64 hex chars (32-byte Ed25519 public key); \
+                 got {} bytes (A3 fail-closed)",
+                raw.len()
+            ));
+        }
+    }
+
+    // A3（连带项）：没有出站凭据 → RoleCache 同步永不成功 → 全部 RPC 被拒。
+    if auth.bootstrap_token.trim().is_empty() {
+        return Err(
+            "auth.enabled=true but auth.bootstrap_token is empty: the agent has no outbound \
+             credential to sync its RoleCache from the server, so every role-gated RPC would \
+             be denied. Configure [auth].bootstrap_token (server side: \
+             [security].agent_bootstrap_tokens) (A3 fail-closed)"
+                .to_string(),
+        );
+    }
+
     Ok(())
 }
 
@@ -260,6 +309,7 @@ mod auth_key_material_tests {
         let auth = AgentAuthConfig {
             enabled: true,
             verifying_key_hex: "ab".repeat(32),
+            bootstrap_token: "bootstrap-token-for-tests".to_string(),
             ..AgentAuthConfig::default()
         };
         assert!(validate_auth_key_material(&auth).is_ok());
@@ -270,6 +320,7 @@ mod auth_key_material_tests {
         let auth = AgentAuthConfig {
             enabled: true,
             signing_key_hex: "cd".repeat(32),
+            bootstrap_token: "bootstrap-token-for-tests".to_string(),
             ..AgentAuthConfig::default()
         };
         assert!(validate_auth_key_material(&auth).is_ok());
@@ -281,9 +332,64 @@ mod auth_key_material_tests {
             enabled: true,
             signing_key_hex: "   ".to_string(),
             verifying_key_hex: "\t".to_string(),
+            bootstrap_token: "bootstrap-token-for-tests".to_string(),
             ..AgentAuthConfig::default()
         };
         assert!(validate_auth_key_material(&auth).is_err());
+    }
+
+    /// A3 回归固化：只配公钥（推荐配置）+ `signing_key_hex = ""` 曾使空 HMAC
+    /// 密钥生效——现在必须被拒绝，且不得因为"公钥已配置"而放行。
+    #[test]
+    fn empty_signing_key_alongside_verifying_key_is_rejected() {
+        let auth = AgentAuthConfig {
+            enabled: true,
+            signing_key_hex: String::new(),
+            verifying_key_hex: "ab".repeat(32),
+            bootstrap_token: "bootstrap-token-for-tests".to_string(),
+            ..AgentAuthConfig::default()
+        };
+        // 密钥材料这一层允许（只配公钥是推荐配置）……
+        assert!(validate_auth_key_material(&auth).is_ok());
+        // ……但空 HMAC 密钥绝不能被当作可用密钥：由 cct 层拒绝
+        // （端到端行为见 coord-core cct 的单测与 agent 鉴权集成测试）。
+        assert!(!coord_core::auth::cct::is_usable_hmac_key(&[]));
+    }
+
+    #[test]
+    fn short_signing_key_is_rejected() {
+        let auth = AgentAuthConfig {
+            enabled: true,
+            signing_key_hex: "cd".repeat(8), // 8 字节
+            bootstrap_token: "bootstrap-token-for-tests".to_string(),
+            ..AgentAuthConfig::default()
+        };
+        let err = validate_auth_key_material(&auth).expect_err("short HMAC key must fail closed");
+        assert!(err.contains("A3 fail-closed"), "err: {err}");
+    }
+
+    #[test]
+    fn non_hex_signing_key_is_rejected() {
+        let auth = AgentAuthConfig {
+            enabled: true,
+            signing_key_hex: "zz".repeat(32),
+            bootstrap_token: "bootstrap-token-for-tests".to_string(),
+            ..AgentAuthConfig::default()
+        };
+        assert!(validate_auth_key_material(&auth).is_err());
+    }
+
+    #[test]
+    fn enabled_auth_without_bootstrap_token_is_rejected() {
+        // 无法同步 RoleCache 的"开鉴权"配置只会全量 403，属配置错误 → 启动即失败。
+        let auth = AgentAuthConfig {
+            enabled: true,
+            verifying_key_hex: "ab".repeat(32),
+            bootstrap_token: "   ".to_string(),
+            ..AgentAuthConfig::default()
+        };
+        let err = validate_auth_key_material(&auth).expect_err("missing bootstrap token must fail");
+        assert!(err.contains("bootstrap_token"), "err: {err}");
     }
 }
 fn default_cache_catalog_ttl_secs() -> u64 {
@@ -319,7 +425,11 @@ impl Default for AgentConfig {
             discovery_mode: DiscoveryMode::Static,
             static_peers: Vec::new(),
             cache_kv_max_entries: 10000,
-            cache_kv_ttl_secs: 30,
+            // B1：默认 **0 = 关闭本地 KV 读缓存**（与 `default_cache_kv_ttl_secs()`
+            // 保持一致）。此前这里写死 30，导致"不带 --agent-config 启动"时缓存
+            // 仍然是开的 —— 与同一次整改里把默认值改成 0 的口径自相矛盾，等于
+            // 「默认关闭」只在配置文件路径上成立。
+            cache_kv_ttl_secs: default_cache_kv_ttl_secs(),
             cache_catalog_ttl_secs: 10,
             cache_route_ttl_secs: 60,
             proxy_max_retries: 3,
@@ -617,14 +727,16 @@ async fn build_plugin_loader(
     }
 }
 
-/// 换取（或复用）agent 引导 CCT，返回用于插件账户开通的**带凭据客户端**。
+/// 换取（或复用）agent 引导 CCT，返回带凭据的**出站客户端**。
 ///
-/// - 已有缓存 CCT（`identity_provider` 已 set：重启 / SIGHUP 重建加载器）→ 直接复用，
-///   **不**再次兑换（一次性令牌只能消费一次，重复兑换必然失败）；
-/// - 首次 → `Auth.Bootstrap(token)` 换 10 分钟 `agent-bootstrap` CCT 写入句柄。
+/// - 已有缓存 CCT（`identity_provider` 已 set：重启 / SIGHUP 重建加载器 / 角色同步
+///   先于插件加载器兑换）→ 直接复用，**不**再次兑换（一次性令牌只能消费一次）；
+/// - 首次 → `Auth.Bootstrap(token)` 换取短期 `agent-bootstrap` CCT 写入句柄。
 ///
-/// 失败原因（无静态 peers / 令牌被拒）以 `Err` 返回，由调用方降级为只认已有账户。
-#[cfg(any(feature = "plugin-js", feature = "plugin-wasm"))]
+/// 失败原因（无静态 peers / 令牌被拒）以 `Err` 返回，由调用方降级。
+///
+/// 该函数**不再**受 `plugin-js/wasm` feature 门控：角色同步同样需要出站凭据，
+/// 否则没有插件 feature 的构建在 `auth.enabled=true` 时永远无法同步角色。
 async fn ensure_plugin_identity_token(
     auth: &AgentAuthConfig,
     static_peers: &[String],
@@ -658,8 +770,7 @@ async fn ensure_plugin_identity_token(
     Ok(Some(client))
 }
 
-/// 构造使用给定凭据句柄的客户端（插件账户开通专用；与共享客户端隔离）。
-#[cfg(any(feature = "plugin-js", feature = "plugin-wasm"))]
+/// 构造使用给定凭据句柄的客户端（与共享客户端隔离）。
 async fn build_identity_client(
     static_peers: &[String],
     tls: Option<coord_client::config::TlsConfig>,
@@ -1521,14 +1632,46 @@ impl AgentServer {
         if self.config.auth.enabled {
             // A3：接线 SyncScheduler → RoleCache（此前 `sync_full` 零生产调用方，
             // 开启鉴权后缓存恒空 → 全量 RPC 被拒且原因不可见）。
-            // 同步客户端复用插件身份出站凭据句柄（引导 CCT / 持久化会话）。
+            //
+            // A3 连带项修复：同步客户端复用**同一**出站凭据句柄（引导 CCT /
+            // 持久化会话）。此前该句柄只在「plugin-js/wasm feature **且**
+            // bootstrap_token 非空」时被填充——没有插件 feature 时角色同步永远
+            // 拿不到凭据 → 开鉴权后依然全量 403。这里显式做一次引导兑换
+            // （已兑换则复用缓存，不重复消费一次性令牌）。
+            let outbound_tls = self
+                .config
+                .tls
+                .as_ref()
+                .and_then(|t| t.to_coord_client_tls().ok());
+            if self.config.auth.bootstrap_token.trim().is_empty() {
+                tracing::error!(
+                    "auth.enabled=true but auth.bootstrap_token is empty: role sync has no \
+                     outbound credential (startup validation should have refused this)"
+                );
+            } else if !plugin_identity_provider.is_set() {
+                match ensure_plugin_identity_token(
+                    &self.config.auth,
+                    &self.config.static_peers,
+                    outbound_tls.clone(),
+                    &plugin_identity_provider,
+                )
+                .await
+                {
+                    Ok(Some(_)) => tracing::info!(
+                        "agent role sync credential acquired via Auth.Bootstrap \
+                         (shared with plugin identity)"
+                    ),
+                    Ok(None) => {}
+                    Err(e) => tracing::error!(
+                        "agent role sync could not bootstrap an outbound credential: {e}; \
+                         role sync will be denied by the server (fail-closed)"
+                    ),
+                }
+            }
             match crate::auth::sync::spawn_role_sync(
                 Arc::clone(&role_cache),
                 self.config.static_peers.clone(),
-                self.config
-                    .tls
-                    .as_ref()
-                    .and_then(|t| t.to_coord_client_tls().ok()),
+                outbound_tls,
                 Arc::clone(&plugin_identity_provider),
             )
             .await

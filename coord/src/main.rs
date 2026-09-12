@@ -2737,7 +2737,9 @@ async fn run_server(
     });
 
     // 7. 构建客户端 gRPC 服务（消息解码上限显式 4MiB，对齐）
-    const MAX_DECODING_MSG: usize = 4 * 1024 * 1024;
+    // A2：与鉴权层的 body 上限共用同一常量，避免"解码允许 4MiB、鉴权层只收 1MiB"
+    // 这类两侧口径漂移（曾导致 1–4 MiB 的合法 Put/Txn 被 403）。
+    const MAX_DECODING_MSG: usize = coord_server::auth::MAX_GRPC_DECODING_BYTES;
     let kv_svc = KvServer::from_arc(Arc::clone(&node)).max_decoding_message_size(MAX_DECODING_MSG);
     let txn_svc =
         TxnServer::from_arc(Arc::clone(&node)).max_decoding_message_size(MAX_DECODING_MSG);

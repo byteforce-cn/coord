@@ -57,6 +57,30 @@ fn test_config_mq(port: u16) -> AgentConfig {
     test_config_isolated(port, "mq")
 }
 
+/// 等本地 gRPC 端点就绪后建链。
+///
+/// 此前是「`sleep(200–300ms)` + 一次性 connect」：测试里的 `serve()` 是异步
+/// spawn 的，**并不保证** sleep 结束时已经 bind。`cargo test --workspace` 并发
+/// 跑多个进程级套件时几百毫秒根本不够 → 随机 `ConnectionRefused` 假红
+/// （实测：同一提交在三次全量运行中分别红在不同套件上）。
+/// 改为有界重试（上限 15s）：不依赖机器负载，也不会无限等。
+async fn connect_ready(addr: &str) -> tonic::transport::Channel {
+    let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+        .expect("endpoint");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        match endpoint.clone().connect().await {
+            Ok(channel) => return channel,
+            Err(e) => {
+                if tokio::time::Instant::now() >= deadline {
+                    panic!("agent gRPC endpoint {addr} never became ready: {e}");
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
+
 /// B1.1: Agent gRPC server 能启动并监听指定端口
 #[tokio::test]
 async fn test_agent_grpc_server_starts_and_listens() {
@@ -70,13 +94,23 @@ async fn test_agent_grpc_server_starts_and_listens() {
         server.serve().await.unwrap();
     });
 
-    // 等待 server 启动
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // 验证端口已监听
-    let stream = tokio::net::TcpStream::connect(&addr).await;
-    assert!(stream.is_ok(), "Agent gRPC server should listen on {addr}");
-    drop(stream);
+    // 等端口真正开始监听（固定 sleep 在并发跑全量套件时不够 → 假红，见 `connect_ready`）
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        match tokio::net::TcpStream::connect(&addr).await {
+            Ok(stream) => {
+                drop(stream);
+                break;
+            }
+            Err(e) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Agent gRPC server should listen on {addr}: {e}"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
 
     handle.abort();
 }
@@ -92,14 +126,8 @@ async fn test_agent_kv_service_registered() {
     let handle = tokio::spawn(async move {
         server.serve().await.unwrap();
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // 建立 gRPC 连接并调用 KV::Put
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-        .unwrap()
-        .connect()
-        .await
-        .expect("should connect to agent gRPC");
+    // 等就绪（替代固定 sleep，见 `connect_ready`）
+    let channel = connect_ready(&addr).await;
 
     let mut kv_client = KvClient::new(channel);
     let resp = kv_client
@@ -128,13 +156,7 @@ async fn test_agent_all_services_registered() {
     let handle = tokio::spawn(async move {
         server.serve().await.unwrap();
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-        .unwrap()
-        .connect()
-        .await
-        .expect("should connect");
+    let channel = connect_ready(&addr).await;
 
     // Txn service
     let mut txn_client = TxnClient::new(channel.clone());
@@ -183,13 +205,7 @@ async fn test_agent_custom_health_service_serving() {
     let handle = tokio::spawn(async move {
         server.serve().await.unwrap();
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-        .unwrap()
-        .connect()
-        .await
-        .expect("should connect to agent gRPC");
+    let channel = connect_ready(&addr).await;
 
     let mut health_client = coord_proto::agent::health_client::HealthClient::new(channel);
     let resp = health_client
@@ -222,13 +238,7 @@ async fn test_agent_mq_poll_end_to_end() {
     let handle = tokio::spawn(async move {
         server.serve().await.unwrap();
     });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-        .unwrap()
-        .connect()
-        .await
-        .expect("should connect to agent gRPC");
+    let channel = connect_ready(&addr).await;
 
     use coord_proto::agent::mq_client::MqClient;
     use coord_proto::agent::{MqAckRequest, MqCreateTopicRequest, MqPollRequest, MqPublishRequest};
@@ -318,13 +328,7 @@ async fn test_agent_cache_rpop_llen() {
     let handle = tokio::spawn(async move {
         server.serve().await.unwrap();
     });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-        .unwrap()
-        .connect()
-        .await
-        .expect("should connect to agent gRPC");
+    let channel = connect_ready(&addr).await;
 
     use coord_proto::agent::cache_client::CacheClient;
     use coord_proto::agent::{CacheLLenRequest, CacheLPushRequest, CacheRPopRequest};
@@ -393,13 +397,7 @@ async fn test_agent_mq_subscribe_stream() {
     let handle = tokio::spawn(async move {
         server.serve().await.unwrap();
     });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-        .unwrap()
-        .connect()
-        .await
-        .expect("should connect to agent gRPC");
+    let channel = connect_ready(&addr).await;
 
     use coord_proto::agent::mq_client::MqClient;
     use coord_proto::agent::{MqCreateTopicRequest, MqPublishRequest, MqSubscribeRequest};

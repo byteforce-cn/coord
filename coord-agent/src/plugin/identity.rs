@@ -46,13 +46,19 @@ pub const DEFAULT_PROVISIONER_USER: &str = "agent-provisioner";
 ///
 /// 与 server 侧 `coord_server::auth::AGENT_BOOTSTRAP_CAPABILITY_GRANTS`
 /// **逐字一致**（coord-agent 不依赖 coord-server，故此处复刻；`coord` 侧的进程测试
-/// `plugin_auth_process_test` 会断言两者相等，防止漂移）。
+/// `plugin_credentials_process_test::agent_provisioner_grants_match_server_bootstrap_grants`
+/// 会断言两者相等，防止漂移）。
 /// 刻意不含任何数据面能力。
-pub const PROVISIONER_CAPABILITY_GRANTS: [(&str, &str); 4] = [
+///
+/// A3：`admin:auth:role_list` 是**只读**元数据能力 —— agent 需要它把 CCT 里的
+/// `roles` 解析成能力/scope（本地 `RoleCache` 同步用）。此前 server 侧加了这一项、
+/// agent 侧未同步，导致上述漂移测试一直失败。
+pub const PROVISIONER_CAPABILITY_GRANTS: [(&str, &str); 5] = [
     ("admin:auth:user_add", ""),
     ("admin:auth:role_add", ""),
     ("admin:auth:role_grant", ""),
     ("admin:auth:user_grant_role", ""),
+    ("admin:auth:role_list", ""),
 ];
 
 // ──── Auth 门面 ────

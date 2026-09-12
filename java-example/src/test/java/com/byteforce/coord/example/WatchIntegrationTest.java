@@ -31,8 +31,9 @@ class WatchIntegrationTest {
 
     @BeforeAll
     static void setUp() {
+        AgentEndpoint.requireReachable();
         channel = ManagedChannelBuilder
-                .forAddress("localhost", 19527)
+                .forAddress(AgentEndpoint.host(), AgentEndpoint.port())
                 .usePlaintext()
                 .build();
         watchStub = WatchGrpc.newStub(channel);
@@ -129,7 +130,7 @@ class WatchIntegrationTest {
                 });
 
         ByteString prefixBytes = ByteString.copyFromUtf8(prefix);
-        ByteString rangeEnd = ByteString.copyFromUtf8(prefix + "\0");
+        ByteString rangeEnd = PrefixScan.end(prefix);
         requestObserver.onNext(WatchOuterClass.WatchRequest.newBuilder()
                 .setCreate(WatchOuterClass.WatchCreateRequest.newBuilder()
                         .setKey(prefixBytes)

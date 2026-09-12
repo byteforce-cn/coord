@@ -29,9 +29,11 @@ class CoordConfigTest {
 
     @Test
     void shouldApplyDefaults() {
+        // D1 残余项：非 loopback + 明文默认被拒 → 测试显式声明接受明文（本地/可信网段）
         CoordConfig config = CoordConfig.builder()
                 .agentHost("10.0.0.1")
                 .agentPort(19527)
+                .allowInsecurePlaintext(true)
                 .build();
 
         assertThat(config.getRequestTimeout()).isEqualTo(Duration.ofSeconds(5));
@@ -207,5 +209,48 @@ class CoordConfigTest {
                 .build())
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("heartbeatThreads");
+    }
+
+    // ──── D1（残余项）：默认不再明文 ────
+
+    @Test
+    void shouldAllowPlaintextToLoopbackByDefault() {
+        // 本机开发场景不受影响（localhost / 127.x / ::1）
+        CoordConfig.builder().agentHost("localhost").build();
+        CoordConfig.builder().agentHost("127.0.0.1").build();
+        CoordConfig.builder().agentHost("127.8.8.8").build();
+        CoordConfig.builder().agentHost("::1").build();
+        CoordConfig.builder().agentHost("[::1]").build();
+    }
+
+    @Test
+    void shouldRejectPlaintextToNonLoopbackHostByDefault() {
+        assertThatThrownBy(() -> CoordConfig.builder()
+                .agentHost("10.0.0.1")
+                .agentPort(19527)
+                .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("plaintext channel to non-loopback host")
+                .hasMessageContaining("fail-closed");
+    }
+
+    @Test
+    void shouldAllowNonLoopbackPlaintextWhenExplicitlyOptedIn() {
+        CoordConfig config = CoordConfig.builder()
+                .agentHost("10.0.0.1")
+                .allowInsecurePlaintext(true)
+                .build();
+        assertThat(config.isUseTls()).isFalse();
+        assertThat(config.getAgentHost()).isEqualTo("10.0.0.1");
+    }
+
+    @Test
+    void shouldAllowNonLoopbackWithTls() {
+        CoordConfig config = CoordConfig.builder()
+                .agentHost("10.0.0.1")
+                .useTls(true)
+                .tlsCaCertPath("/tmp/ca.pem")
+                .build();
+        assertThat(config.isUseTls()).isTrue();
     }
 }

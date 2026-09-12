@@ -41,6 +41,11 @@ case "$SCENARIO" in
         export OBJECT_STORAGE_REAL=1
         CMD=(cargo test -p coord --test object_storage_process_test -- --ignored --nocapture --test-threads=1)
         ;;
+    java-it)
+        # D3 证据：真实 coord server + coord agent + java-example 全部集成套件
+        # （脚本内部负责起停 dev 集群；失败时仍留下日志）
+        CMD=(bash scripts/evidence-java-it.sh)
+        ;;
     jepsen)
         CMD=(bash scripts/jepsen-lab.sh)
         ;;

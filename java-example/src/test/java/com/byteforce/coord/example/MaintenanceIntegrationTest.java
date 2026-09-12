@@ -29,8 +29,9 @@ class MaintenanceIntegrationTest {
 
     @BeforeAll
     static void setUp() {
+        AgentEndpoint.requireReachable();
         channel = ManagedChannelBuilder
-                .forAddress("localhost", 19527)
+                .forAddress(AgentEndpoint.host(), AgentEndpoint.port())
                 .usePlaintext()
                 .keepAliveTime(30, TimeUnit.SECONDS)
                 .build();

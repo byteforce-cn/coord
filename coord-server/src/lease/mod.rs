@@ -222,9 +222,27 @@ impl LeaseManager {
         let timeout = Duration::from_secs(ttl_seconds as u64);
         let timer_id = self.timer.insert(timeout).await;
 
-        self.leases
-            .write()
-            .insert(lease_id, LeaseRecord { lease, timer_id });
+        // C1（TOCTOU 收口）：上面的"ID 未被占用"检查与这里的插入之间隔着
+        // `timer.insert(..).await`，两个并发 grant 可能都通过检查 → 后者静默覆盖
+        // 前者 → 两个客户端共享同一 lease。插入前在**写锁内**再确认一次（检查与
+        // 插入在同一临界区，且临界区内无 await —— parking_lot guard 不跨 await）。
+        let conflict = {
+            let mut leases = self.leases.write();
+            if leases.contains_key(&lease_id) {
+                true
+            } else {
+                leases.insert(lease_id, LeaseRecord { lease, timer_id });
+                false
+            }
+        };
+        if conflict {
+            // 刚插入的定时器要归还（否则时间轮会留下一个悬空任务）
+            let _ = self.timer.cancel(timer_id).await;
+            return Err(Error::AlreadyExists {
+                resource: "lease",
+                key: format!("lease_id={lease_id}"),
+            });
+        }
 
         // R-OBS-10：活跃 Lease +1
         if let Some(metrics) = &self.metrics {
@@ -459,9 +477,47 @@ mod tests {
         });
     }
 
+    /// C1 回归固化：并发指定同一 lease ID 时**只能有一个**成功。
+    ///
+    /// 此前"ID 占用检查"与"写入 map"之间夹着 `timer.insert(..).await`，
+    /// 并发 grant 会双双通过检查 → 后者覆盖前者 → 两个客户端共享同一 lease
+    /// （到期后误删他人 key）。
     #[test]
-    fn test_lease_ttl_validation() {
+    fn test_concurrent_grant_with_same_id_grants_exactly_one() {
         let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let handle = TimerWheel::start();
+            let manager = Arc::new(LeaseManager::new(handle));
+
+            const LEASE_ID: LeaseID = 4242;
+            let mut tasks = Vec::new();
+            for _ in 0..16 {
+                let manager = Arc::clone(&manager);
+                tasks.push(tokio::spawn(async move {
+                    manager
+                        .grant_with_id_checked(60, LEASE_ID, |_| false)
+                        .await
+                        .is_ok()
+                }));
+            }
+            let mut succeeded = 0;
+            for t in tasks {
+                if t.await.unwrap() {
+                    succeeded += 1;
+                }
+            }
+            assert_eq!(
+                succeeded, 1,
+                "exactly one concurrent grant of lease_id={LEASE_ID} may succeed"
+            );
+            assert_eq!(manager.active_lease_count(), 1);
+            // 该 ID 仍然只有一个记录（后续 revoke 只影响这一个）
+            assert!(manager.get_lease(LEASE_ID).is_some());
+        });
+    }
+
+    #[test]
+    fn test_lease_ttl_validation() {        let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let handle = TimerWheel::start();
             let manager = LeaseManager::new(handle);

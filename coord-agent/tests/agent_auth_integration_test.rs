@@ -30,8 +30,10 @@ mod tests {
     use coord_server::auth::revocation::RevocationStore;
     use coord_server::auth::token_signing::TokenSigningKeyring;
 
-    const TEST_KEY: &[u8] = b"integration-test-key-32-bytes!!";
-    const ALT_KEY: &[u8] = b"alternate-test-key-32-bytes!!!!";
+    // A3：HMAC 密钥最小长度 = 32 字节（空/短密钥可被任意人伪造 root token）。
+    // 这两个夹具此前是 31 字节 —— 长度校验一旦落到实处就会立刻爆掉。
+    const TEST_KEY: &[u8] = b"integration-test-key-32-bytes!!!";
+    const ALT_KEY: &[u8] = b"alternate-test-key-32-bytes!!!!!";
 
     fn make_keyring() -> Arc<TokenSigningKeyring> {
         let root = vec![1u8; 32];

@@ -56,7 +56,7 @@ Server ports `50051` / `50052` are reachable only by agents — the Server is ne
 
 | Area | Notes |
 |:---|:---|
-| KV / Txn / Watch / Lease | Linearizable; Jepsen-verified across kill / pause / partition matrices |
+| KV / Txn / Watch / Lease | Linearizable reads/writes within a Region; `jepsen/` contains a real knossos-based project (see [Verification](#verification) for what is and is not yet certified) |
 | Auth / RBAC | Users, roles and permissions; Ed25519 CCT tokens; login rate limiting |
 | TLS / mTLS | gRPC + Raft channels; refuses to start without a CA (fail-closed) |
 | Encryption at rest | AES-256-GCM, plus Shamir secret-sharing Seal / Unseal |
@@ -65,7 +65,8 @@ Server ports `50051` / `50052` are reachable only by agents — the Server is ne
 
 **Agent — the coordination layer your application talks to**
 
-18 pluggable gRPC services, toggled per service via the `[services]` / `[plugins]` configuration sections:
+17 builtin gRPC services, toggled per service via the `[services]` / `[plugins]` configuration sections
+(the plugin engine's own `Plugin` management service — `Invoke` / `List` — is not a builtin plugin; it is the gateway those plugins are exposed through):
 
 - **Discovery & config:** `Registry` · `ConfigCenter` · `Event`
 - **Coordination:** `Lock` · `IdGen` · `LeaderElection`
@@ -165,9 +166,10 @@ coord/
 
 ## Verification
 
-- **Jepsen** — an in-repo Clojure project ([`jepsen/`](jepsen/README.md)) runs real 3-node clusters against a knossos linearizability checker: `register` / `cas-register` / `multi-register` workloads under kill / pause / partition nemeses, plus a 72-hour soak.
-- **Fast local check** — `scripts/jepsen-check.sh` reproduces the core matrix in ~2–3 minutes without a lab.
-- **CI** — fmt + clippy (`-D warnings`), a panic gate on non-test code, workspace tests, protobuf contract checks (buf breaking), `cargo audit` + `cargo deny`, and real-process chaos runs.
+- **Jepsen (in-repo, not yet certified)** — [`jepsen/`](jepsen/README.md) is a real Clojure + knossos project with `register` / `cas-register` / `multi-register` workloads under kill / pause / partition nemeses, plus a long-running soak profile documented in [`jepsen/README.md`](jepsen/README.md). **No Jepsen or soak artifact has been committed yet** — `docs/production/evidence/` currently holds only the Java integration run. Until those artifacts land, treat linearizability claims as *design intent*, not as certified results.
+- **Fast local check** — `scripts/jepsen-check.sh` reproduces the core matrix in ~2–3 minutes without a lab (Rust-level checks; it is **not** a Jepsen run).
+- **CI** — fmt + clippy (`-D warnings`), a panic gate on non-test code, workspace tests, protobuf contract checks (buf breaking), `cargo audit` + `cargo deny`, real-process chaos runs, and Java SDK + Java example integration suites against a real server/agent cluster.
+- **Evidence** — reproducible run artifacts live in [`docs/production/evidence/`](docs/production/evidence/README.md) (`bash scripts/collect-evidence.sh <scenario>`).
 
 ## Deploy
 

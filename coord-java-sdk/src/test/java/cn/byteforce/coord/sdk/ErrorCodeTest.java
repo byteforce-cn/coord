@@ -19,6 +19,8 @@ class ErrorCodeTest {
                 ErrorCode.WATCH_STREAM_ERROR,
                 ErrorCode.RESOURCE_EXHAUSTED,
                 ErrorCode.DEADLINE_EXCEEDED,
+                // D1：TLS/证书等配置错误（恶意/错误配置必须 fail-closed，不做明文降级）
+                ErrorCode.CONFIG_INVALID,
                 ErrorCode.INTERNAL
         );
     }

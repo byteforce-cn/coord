@@ -37,8 +37,9 @@ class KvAdvancedTest {
 
     @BeforeAll
     static void setUp() {
+        AgentEndpoint.requireReachable();
         channel = ManagedChannelBuilder
-                .forAddress("localhost", 19527)
+                .forAddress(AgentEndpoint.host(), AgentEndpoint.port())
                 .usePlaintext()
                 .keepAliveTime(30, TimeUnit.SECONDS)
                 .build();
@@ -130,7 +131,7 @@ class KvAdvancedTest {
 
         Kv.RangeResponse resp = kvStub.range(Kv.RangeRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(prefix))
-                .setRangeEnd(ByteString.copyFromUtf8(prefix + "\0"))
+                .setRangeEnd(PrefixScan.end(prefix))
                 .setCountOnly(true)
                 .build());
 
@@ -154,7 +155,7 @@ class KvAdvancedTest {
 
         Kv.RangeResponse resp = kvStub.range(Kv.RangeRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(prefix))
-                .setRangeEnd(ByteString.copyFromUtf8(prefix + "\0"))
+                .setRangeEnd(PrefixScan.end(prefix))
                 .setLimit(3)
                 .build());
 
@@ -250,21 +251,21 @@ class KvAdvancedTest {
         // 验证 5 个 key 存在
         Kv.RangeResponse before = kvStub.range(Kv.RangeRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(prefix))
-                .setRangeEnd(ByteString.copyFromUtf8(prefix + "\0"))
+                .setRangeEnd(PrefixScan.end(prefix))
                 .build());
         assertThat(before.getKvsCount()).isEqualTo(5);
 
         // 范围删除
         Kv.DeleteResponse del = kvStub.delete(Kv.DeleteRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(prefix))
-                .setRangeEnd(ByteString.copyFromUtf8(prefix + "\0"))
+                .setRangeEnd(PrefixScan.end(prefix))
                 .build());
         assertThat(del.getDeleted()).isEqualTo(5);
 
         // 验证全部删除
         Kv.RangeResponse after = kvStub.range(Kv.RangeRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(prefix))
-                .setRangeEnd(ByteString.copyFromUtf8(prefix + "\0"))
+                .setRangeEnd(PrefixScan.end(prefix))
                 .build());
         assertThat(after.getKvsCount()).isEqualTo(0);
     }

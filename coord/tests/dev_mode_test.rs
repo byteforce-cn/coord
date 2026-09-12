@@ -549,13 +549,30 @@ mod tests {
 
         let mut ids: Vec<i64> = Vec::new();
         for _ in 0..10 {
-            let resp = idgen_client
-                .next_id(IdGenNextIdRequest {
-                    name: "permission".to_string(),
-                    step: 0,
-                })
-                .await
-                .expect("NextId should succeed");
+            // 就绪竞态：Agent 的插件服务是**异步**挂载的，TCP 可连接 ≠ 服务已挂。
+            // 此处对 UNIMPLEMENTED / UNAVAILABLE 做有界重试 —— 固定 sleep 在高并发
+            // 跑全量套件时会不够（实测随机 `Unimplemented`）。
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+            let resp = loop {
+                match idgen_client
+                    .next_id(IdGenNextIdRequest {
+                        name: "permission".to_string(),
+                        step: 0,
+                    })
+                    .await
+                {
+                    Ok(r) => break r,
+                    Err(e)
+                        if matches!(
+                            e.code(),
+                            tonic::Code::Unimplemented | tonic::Code::Unavailable
+                        ) && tokio::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    Err(e) => panic!("NextId should succeed: {e}"),
+                }
+            };
             let id = resp.into_inner().id;
             assert!(id > 0, "snowflake id should be positive, got {id}");
             assert!(!ids.contains(&id), "duplicate id {id} in {ids:?}");

@@ -100,6 +100,9 @@ async fn test_non_loopback_with_auth_and_tls_allowed() {
     // A3：开启鉴权必须有密钥材料，否则拒绝启动（fail-closed）。这里提供一个
     // 32 字节 Ed25519 公钥（生产语义：agent 只持公钥验签）。
     config.auth.verifying_key_hex = "ab".repeat(32);
+    // A3 连带：还要有出站凭据（bootstrap token），否则 RoleCache 永远同步不到，
+    // 角色门控 RPC 会全量 403 —— 该配置错误现在在启动期就被拒绝。
+    config.auth.bootstrap_token = "bootstrap-token-for-tests".to_string();
     config.tls = Some(coord_agent::AgentTlsConfig {
         cert_path,
         key_path,

@@ -89,14 +89,22 @@ impl Permission {
     }
 
     /// 范围包含判定：整个 `[key, range_end)` 必须落在本权限允许的 key 区间内。
+    ///
+    /// 与 A1 的 scope 判定保持**同一套字节区间语义**（`key >= P && range_end <= U`），
+    /// 避免"遗留权限路径放行、scope 路径拒绝"这类两条授权路径行为不一致的陷阱。
     fn range_matches(&self, key: &[u8], range_end: &[u8]) -> bool {
         if range_end.is_empty() {
             return self.key_matches(key);
         }
-        if range_end == b"\0" {
-            return false; // 无上界，任何有界权限都不能覆盖
+        // 空前缀 + 空 range_end = 覆盖全部 key（与 key_matches 一致）→ 无上界，
+        // 任意区间（含 range_end = "\0"）都被覆盖。
+        if self.key_prefix.is_empty() && self.range_end.is_empty() {
+            return true;
         }
-        if !key.starts_with(&self.key_prefix) {
+        if range_end == b"\0" {
+            return false; // 无上界，有界权限不能覆盖
+        }
+        if key < self.key_prefix.as_slice() {
             return false;
         }
         let upper: Vec<u8> = if self.range_end.is_empty() {

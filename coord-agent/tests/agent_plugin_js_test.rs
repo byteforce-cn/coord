@@ -602,7 +602,8 @@ export async function handleInvoke(method, payload) {
         let handle = tokio::spawn(async move {
             server.serve().await.expect("agent serve");
         });
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // 等就绪（见 `connect_ready` 注释：固定 sleep 在并发跑全量套件时会不够）
+        connect_ready(&agent_addr).await;
         (agent_addr, handle, plugin_dir, agent_tmp)
     }
 
@@ -619,21 +620,34 @@ export async function handleInvoke(method, payload) {
     }
 
     async fn plugin_client(addr: &str) -> PluginClient<tonic::transport::Channel> {
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-            .expect("endpoint")
-            .connect()
-            .await
-            .expect("connect to agent");
-        PluginClient::new(channel)
+        PluginClient::new(connect_ready(addr).await)
     }
 
     async fn kv_client(addr: &str) -> KvClient<tonic::transport::Channel> {
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-            .expect("endpoint")
-            .connect()
-            .await
-            .expect("connect to server");
-        KvClient::new(channel)
+        KvClient::new(connect_ready(addr).await)
+    }
+
+    /// 等本地 gRPC 端点就绪后建链。
+    ///
+    /// 此前是「`sleep(500ms)` + 一次性 connect」：测试进程内的 `serve()` 是
+    /// 异步 spawn 的，**并不保证**在 sleep 结束时已经 bind。并发跑全量套件时
+    /// （8 核跑多个进程级套件）500ms 不够 → 随机 `ConnectionRefused` 假红。
+    /// 这里改为有界重试（上限 15s），既不再依赖机器负载，也不会无限等。
+    async fn connect_ready(addr: &str) -> tonic::transport::Channel {
+        let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .expect("endpoint");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match endpoint.clone().connect().await {
+                Ok(channel) => return channel,
+                Err(e) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        panic!("agent gRPC endpoint {addr} never became ready: {e}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

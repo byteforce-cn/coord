@@ -206,9 +206,23 @@ async fn wait_until<F: Fn() -> bool>(what: &str, f: F, timeout: Duration) {
     panic!("condition not met within timeout: {what}");
 }
 
+/// 串行闸：本文件的用例在同一进程内各跑一整套 **真实时钟** 的 3 节点 raft。
+///
+/// `cargo test --workspace` 并行度高时（多套件同时跑）它们会互相抢 CPU，
+/// 导致选举/复制超时，甚至触发 openraft 引擎内部断言
+/// （`assertion failed: self.leader.is_none()`）—— 实测同一提交在不同轮次
+/// 红在不同用例上，属**夹具竞态**而非产品缺陷。这里把本文件的 3 个用例串行化。
+static RAFT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 获取串行闸（忽略中毒：某个用例 panic 不应连坐其余用例）。
+fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
+    RAFT_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// B.7-1：revoke 走 raft，三节点 `/_lease/` 与 KV 状态一致。
 #[tokio::test]
 async fn test_lease_revoke_via_raft_three_nodes_consistent() {
+    let _serial = serial_guard();
     let nodes = TestNode::start_cluster(3).await;
     let leader_idx = wait_for_leader(&nodes, Duration::from_secs(5))
         .await
@@ -303,6 +317,7 @@ async fn test_lease_revoke_via_raft_three_nodes_consistent() {
 /// B.7-2：leader 挂掉后新 leader 从状态机重建 Lease 表，到期 lease 的绑定 key 被清理。
 #[tokio::test]
 async fn test_lease_failover_rebuild_and_expired_cleanup() {
+    let _serial = serial_guard();
     let nodes = TestNode::start_cluster(3).await;
     let leader_idx = wait_for_leader(&nodes, Duration::from_secs(5))
         .await
@@ -413,6 +428,7 @@ async fn test_lease_failover_rebuild_and_expired_cleanup() {
 /// B.7-3：follower 上 grant/revoke 被拒绝并返回 leader 提示。
 #[tokio::test]
 async fn test_follower_rejects_lease_operations() {
+    let _serial = serial_guard();
     let nodes = TestNode::start_cluster(3).await;
     let leader_idx = wait_for_leader(&nodes, Duration::from_secs(5))
         .await

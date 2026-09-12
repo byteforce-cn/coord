@@ -29,7 +29,12 @@ bash scripts/collect-evidence.sh jepsen          # 真实 Jepsen（需 lein + �
 
 | 目录 | 场景 | 状态 |
 |:--|:--|:--|
-| _（待首次生成）_ | — | 尚无真实产物入仓 |
+| `20260912T112707Z-java-it/` | 真实 server + agent + Java 集成套件（48/48 通过） | ✅ 已入库 |
+| _（待生成）_ | soak / chaos / multi-raft / jepsen | 仍未入仓 |
 
-> 「尚无产物入仓」是**诚实状态**。Gate 3 出口要求至少一次真实 jepsen + soak
-> 产物落盘；在产物出现前，README 中不得声明「已通过长期运行验证」。
+> 生成方式：`bash scripts/collect-evidence.sh java-it`（起真实集群 → `mvn verify -Pit`
+> → 落盘 run.log + MANIFEST + 校验和；退出码即 mvn 退出码）。
+>
+> soak / chaos / multi-raft / jepsen 的真实产物**仍未入仓** —— 这是**诚实状态**。
+> Gate 3 出口要求至少一次真实 jepsen + soak 产物落盘；在产物出现前，README 中
+> 不得声明「已通过长期运行验证」。

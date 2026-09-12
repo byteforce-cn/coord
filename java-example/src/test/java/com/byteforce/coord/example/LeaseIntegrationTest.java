@@ -32,8 +32,9 @@ class LeaseIntegrationTest {
 
     @BeforeAll
     static void setUp() {
+        AgentEndpoint.requireReachable();
         channel = ManagedChannelBuilder
-                .forAddress("localhost", 19527)
+                .forAddress(AgentEndpoint.host(), AgentEndpoint.port())
                 .usePlaintext()
                 .build();
         leaseStub = LeaseGrpc.newBlockingStub(channel);

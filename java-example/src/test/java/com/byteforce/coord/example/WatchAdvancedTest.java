@@ -39,8 +39,9 @@ class WatchAdvancedTest {
 
     @BeforeAll
     static void setUp() {
+        AgentEndpoint.requireReachable();
         channel = ManagedChannelBuilder
-                .forAddress("localhost", 19527)
+                .forAddress(AgentEndpoint.host(), AgentEndpoint.port())
                 .usePlaintext()
                 .keepAliveTime(30, TimeUnit.SECONDS)
                 .build();
@@ -190,7 +191,7 @@ class WatchAdvancedTest {
             obs.onNext(WatchOuterClass.WatchRequest.newBuilder()
                     .setCreate(WatchOuterClass.WatchCreateRequest.newBuilder()
                             .setKey(ByteString.copyFromUtf8(prefix))
-                            .setRangeEnd(ByteString.copyFromUtf8(prefix + "\0"))
+                            .setRangeEnd(PrefixScan.end(prefix))
                             .build())
                     .build());
             observers.add(obs);
