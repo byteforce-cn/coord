@@ -156,11 +156,7 @@ impl OperatorExecutor {
                     region_id,
                     node_id: 0,
                     ..
-                } => match self
-                    .add_peer_resolver
-                    .as_ref()
-                    .and_then(|r| r(*region_id))
-                {
+                } => match self.add_peer_resolver.as_ref().and_then(|r| r(*region_id)) {
                     Some((target, addr)) => Operator::AddPeer {
                         region_id: *region_id,
                         node_id: target,
@@ -643,7 +639,12 @@ mod tests {
         };
         meta_store.create_region(region).unwrap();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let pd = Arc::new(PlacementDriver::new(config, meta_store, shutdown_rx, node_id));
+        let pd = Arc::new(PlacementDriver::new(
+            config,
+            meta_store,
+            shutdown_rx,
+            node_id,
+        ));
         let ex = OperatorExecutor::new(Arc::clone(&pd), node_id);
         (pd, ex, shutdown_tx)
     }
@@ -919,8 +920,9 @@ mod tests {
         );
         pd.attach_system_raft(system.clone());
 
-        let resolve: Arc<RegionRaftResolver> =
-            Arc::new(|_rid| Some(Arc::new(FakeRaft::new(1, vec![voter(1)])) as Arc<dyn RegionRaftHandle>));
+        let resolve: Arc<RegionRaftResolver> = Arc::new(|_rid| {
+            Some(Arc::new(FakeRaft::new(1, vec![voter(1)])) as Arc<dyn RegionRaftHandle>)
+        });
         let op = ex.execute_one(&*resolve).await.expect("one operator");
         assert_eq!(op.name(), "transfer-leader");
         let e = system.queue_entry(6).expect("entry present");
@@ -1013,7 +1015,10 @@ mod tests {
         /// 预置一条 Pending 队列条目（op_id 由调用方指定）
         fn seed_pending(&self, op_id: u64, op: Operator, requester: NodeID) {
             self.queue.lock().unwrap().push(PdQueueEntry::new_pending(
-                op_id, op, requester, 1_700_000_000,
+                op_id,
+                op,
+                requester,
+                1_700_000_000,
             ));
         }
 
@@ -1115,7 +1120,10 @@ mod tests {
         let fake2: Arc<dyn RegionRaftHandle> = fake.clone();
         let resolve: Arc<RegionRaftResolver> = Arc::new(move |_rid| Some(fake2.clone()));
         let ran = ex.execute_one(&*resolve).await;
-        assert!(ran.is_some(), "raft-mode executor should process leader-owned op");
+        assert!(
+            ran.is_some(),
+            "raft-mode executor should process leader-owned op"
+        );
 
         // 执行落在真实 Region raft 替身
         assert_eq!(fake.add_learner_count(), 1);
@@ -1252,9 +1260,7 @@ mod tests {
         loop {
             let done = system
                 .queue_entry(1)
-                .map(|e| {
-                    matches!(e.status, super::super::operator::OperatorStatus::Success)
-                })
+                .map(|e| matches!(e.status, super::super::operator::OperatorStatus::Success))
                 .unwrap_or(false);
             if done {
                 break;

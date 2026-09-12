@@ -21,7 +21,7 @@ authors = ["Byteforce Team"]
 [workspace.dependencies]
 # 异步运行时
 tokio = { version = "1.49.0", features = ["full"] }
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # gRPC 框架
 tonic = { version = "0.14.6", features = ["tls-ring"] }
@@ -80,7 +80,7 @@ ed25519-dalek = "2"
 
 # 工具
 thiserror = "2"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 bytes = "1"
 uuid = { version = "1", features = ["v4"] }

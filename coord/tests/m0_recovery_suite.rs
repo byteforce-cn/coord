@@ -342,7 +342,13 @@ async fn m0_purged_log_restart_guard_allows_valid_snapshot() {
         log_store = log_store.with_snapshot_tracker(tracker);
         RaftLogStorage::<TypeConfig>::purge(
             &mut log_store,
-            LogIdOf::<TypeConfig>::new(LeaderId { term: 1, node_id: 1 }, target),
+            LogIdOf::<TypeConfig>::new(
+                LeaderId {
+                    term: 1,
+                    node_id: 1,
+                },
+                target,
+            ),
         )
         .await
         .expect("inject purge");

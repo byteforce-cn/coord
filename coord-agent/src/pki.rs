@@ -744,6 +744,57 @@ impl Pki for PkiService {
     }
 }
 
+// ──── BaseService：插件生命周期（把「CA get-or-create」变成启动动作）────
+//
+// 迁移前：CA 的 get-or-create 在 serve 装配期内联 await —— 与服务生命周期
+// 无关（服务没启动也会执行），失败只有一行 `warn!`，外界看不到。
+// 迁移后：它是本服务 `start()` 的动作：
+// - 成功 → `health_check()` 真（CA 已就绪）；
+// - 失败 → 记 warn 并保持服务可达（与历史行为一致），但 `health_check()` 为假，
+//   由统一健康面（`PluginManager::health_check_all` / `coord.plugin.Plugin/List`）
+//   暴露出去。
+
+impl PkiService {
+    /// 默认 CA Common Name（与历史 serve 装配期使用的值一致）。
+    pub const DEFAULT_CA_COMMON_NAME: &'static str = "coord-agent-ca";
+}
+
+#[async_trait::async_trait]
+impl crate::service::BaseService for PkiService {
+    fn name(&self) -> &'static str {
+        "pki"
+    }
+
+    async fn start(&self) -> crate::service::ServiceResult<()> {
+        match self.init_ca(Self::DEFAULT_CA_COMMON_NAME).await {
+            Ok(()) => {
+                tracing::info!(
+                    "PKI CA auto-initialized: CN={}",
+                    Self::DEFAULT_CA_COMMON_NAME
+                );
+                Ok(())
+            }
+            Err(e) => {
+                // 保持服务可达（历史行为：装配失败不阻塞 agent 启动），
+                // 但健康检查会如实反映「CA 未就绪」。
+                tracing::warn!(
+                    "PKI CA auto-init failed (service stays reachable but reports unhealthy): {e}"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    async fn stop(&self) -> crate::service::ServiceResult<()> {
+        // CA 材料只驻留内存，无外部资源需释放（共享 store 归调用方）。
+        Ok(())
+    }
+
+    fn health_check(&self) -> bool {
+        self.ca.read().is_some()
+    }
+}
+
 // ──── tests ────
 
 #[cfg(test)]

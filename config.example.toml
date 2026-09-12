@@ -165,4 +165,23 @@ auth_enabled = true                     # 生产默认开启（唯一开关）
 # encryption_enabled = true
 # encryption_root_key = "…hex 64 字符…"
 
+# Agent 注册引导令牌（一次性，≥16 随机字符；留空 = 不开放 agent 自助注册）
+# 用途：agent 用该令牌换取短期限 agent-bootstrap CCT，再代插件开通受限账户。
+# 服务端不预置该角色能力，需管理员一次性授予最小集（幂等；角色不存在会自动创建）：
+#   TOKEN=$(coord auth login root --token-only)          # 交互输入密码
+#   coord security bootstrap-role --token "$TOKEN"       # 可用 --addr 指定节点
+# 或非交互（脚本）：coord auth login root --password "$PW" --token-only
+# 注：鉴权开启时管理命令需携带管理员 CCT（全局 --token 或 COORD_TOKEN）；
+#     密码亦可经 COORD_PASSWORD 环境变量提供。
+# agent_bootstrap_tokens = ["<openssl rand -hex 24>"]
+
+# 动态引导令牌（TTL + 一次性 + raft 持久化）：配置静态令牌之外/替代方案，
+# 由管理员按需签发，明文仅在签发响应中出现一次（服务端只存 SHA256）：
+#   coord security bootstrap-token create --label site-a --ttl-secs 3600 --token-only \
+#     --token "$ADMIN_CCT"                                # 输出 cbt_… 明文令牌
+#   coord security bootstrap-token list  --token "$ADMIN_CCT"
+#   coord security bootstrap-token revoke --id <id> --token "$ADMIN_CCT"
+# 所需能力：admin:auth:bootstrap_token（root 角色隐含全部能力）。
+# 令牌经 raft 复制 + 重启重放；消费一次后记录标记为 consumed（保留供审计）。
+
 reflection_enabled = false              # 生产关闭 gRPC 反射

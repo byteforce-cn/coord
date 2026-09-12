@@ -297,6 +297,13 @@ pub struct KeyringKeyStore {
 }
 
 #[cfg(target_os = "linux")]
+impl Default for KeyringKeyStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl KeyringKeyStore {
     pub fn new() -> Self {
         Self {
@@ -316,7 +323,7 @@ impl KeyringKeyStore {
                 &format!("@{}", self.keyring_name),
             ])
             .output()
-            .map_err(|e| KeyStoreError::Io(e))?;
+            .map_err(KeyStoreError::Io)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -333,7 +340,7 @@ impl KeyringKeyStore {
         let output = std::process::Command::new("keyctl")
             .args(["read", &format!("coord:{}", key_id)])
             .output()
-            .map_err(|e| KeyStoreError::Io(e))?;
+            .map_err(KeyStoreError::Io)?;
 
         if !output.status.success() {
             return Err(KeyStoreError::NotFound(key_id.to_string()));
@@ -355,7 +362,7 @@ impl KeyringKeyStore {
                 &format!("coord:{}", key_id),
             ])
             .output()
-            .map_err(|e| KeyStoreError::Io(e))?;
+            .map_err(KeyStoreError::Io)?;
 
         if !output.status.success() {
             return Ok(()); // key 不存在，无需删除

@@ -146,6 +146,38 @@ impl LoginRateLimiter {
     }
 }
 
+/// 动态 bootstrap 令牌默认有效期（秒）。
+const BOOTSTRAP_TOKEN_DEFAULT_TTL_SECS: i64 = 3_600;
+/// 动态 bootstrap 令牌有效期上限（30 天）。
+const BOOTSTRAP_TOKEN_MAX_TTL_SECS: i64 = 30 * 24 * 3_600;
+/// bootstrap 令牌明文前缀（便于识别；非密文，仅用于人眼区分）。
+const BOOTSTRAP_TOKEN_PREFIX: &str = "cbt_";
+
+/// 当前 Unix 秒。
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// bootstrap 令牌的 SHA256 hex（**明文不落盘/不入日志**）。
+fn bootstrap_token_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// 生成明文 bootstrap 令牌（256 bit CSPRNG；仅在签发响应中返回一次）。
+fn generate_bootstrap_token() -> String {
+    format!(
+        "{BOOTSTRAP_TOKEN_PREFIX}{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    )
+}
+
 /// gRPC Auth service implementation
 #[derive(Clone)]
 pub struct AuthService {
@@ -763,6 +795,77 @@ impl AuthTrait for AuthService {
         Ok(tonic::Response::new(RoleRevokePermissionResponse {}))
     }
 
+    async fn role_grant_capability(
+        &self,
+        request: tonic::Request<RoleGrantCapabilityRequest>,
+    ) -> Result<tonic::Response<RoleGrantCapabilityResponse>, tonic::Status> {
+        // 管理操作二次校验（与 RoleGrantPermission 同能力门槛）
+        self.require_admin(request.metadata(), "admin:auth:role_grant")?;
+        let caller_md = request.metadata().clone();
+        let req = request.into_inner();
+        if req.capability_id.trim().is_empty() {
+            return Err(tonic::Status::invalid_argument(
+                "capability_id must not be empty",
+            ));
+        }
+
+        self.apply_auth_op(AuthOp::RoleGrantCapability {
+            role: req.role.clone(),
+            capability_id: req.capability_id.clone(),
+            scope: req.scope.clone(),
+        })
+        .await?;
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.role_grant_capability",
+            &req.role,
+            crate::audit::RESULT_SUCCESS,
+            &req.capability_id,
+        );
+        tracing::info!(
+            "Capability '{}' granted to role '{}' (scope='{}')",
+            req.capability_id,
+            req.role,
+            req.scope
+        );
+        Ok(tonic::Response::new(RoleGrantCapabilityResponse {}))
+    }
+
+    async fn role_revoke_capability(
+        &self,
+        request: tonic::Request<RoleRevokeCapabilityRequest>,
+    ) -> Result<tonic::Response<RoleRevokeCapabilityResponse>, tonic::Status> {
+        self.require_admin(request.metadata(), "admin:auth:role_revoke")?;
+        let caller_md = request.metadata().clone();
+        let req = request.into_inner();
+        if req.capability_id.trim().is_empty() {
+            return Err(tonic::Status::invalid_argument(
+                "capability_id must not be empty",
+            ));
+        }
+
+        self.apply_auth_op(AuthOp::RoleRevokeCapability {
+            role: req.role.clone(),
+            capability_id: req.capability_id.clone(),
+            scope: req.scope.clone(),
+        })
+        .await?;
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.role_revoke_capability",
+            &req.role,
+            crate::audit::RESULT_SUCCESS,
+            &req.capability_id,
+        );
+        tracing::info!(
+            "Capability '{}' revoked from role '{}' (scope='{}')",
+            req.capability_id,
+            req.role,
+            req.scope
+        );
+        Ok(tonic::Response::new(RoleRevokeCapabilityResponse {}))
+    }
+
     async fn role_list(
         &self,
         _request: tonic::Request<RoleListRequest>,
@@ -1133,10 +1236,42 @@ impl AuthTrait for AuthService {
         }
 
         // Validate bootstrap token against whitelist
-        if !self.consume_bootstrap_token(&req.bootstrap_token) {
-            return Err(tonic::Status::permission_denied(
-                "invalid or already consumed bootstrap token",
-            ));
+        //   1) 动态注册表（TTL + 一次性 + raft 持久化；跨节点一致）
+        //   2) 静态配置白名单（`[security].agent_bootstrap_tokens`，向后兼容）
+        let now_unix = unix_now_secs();
+        let hash_hex = bootstrap_token_hash(&req.bootstrap_token);
+        match self
+            .auth_manager
+            .consume_bootstrap_token_atomic(&hash_hex, now_unix)
+        {
+            Some(rec) => {
+                // 一次性语义**先持久化再签发**：提案失败则回滚本地消费，
+                // 保证「拿到 CCT 的令牌一定已被记录为已消费」（fail-closed）。
+                if let Err(e) = self
+                    .apply_auth_op(AuthOp::ConsumeBootstrapToken {
+                        id: rec.id.clone(),
+                        consumed_at_unix: now_unix,
+                    })
+                    .await
+                {
+                    self.auth_manager
+                        .revert_bootstrap_token_consumption(&rec.id, now_unix);
+                    tracing::warn!("bootstrap token consume proposal failed: {e}");
+                    return Err(e);
+                }
+                tracing::info!(
+                    "bootstrap token '{}' (label='{}') consumed",
+                    rec.id,
+                    rec.label
+                );
+            }
+            None => {
+                if !self.consume_bootstrap_token(&req.bootstrap_token) {
+                    return Err(tonic::Status::permission_denied(
+                        "invalid or already consumed bootstrap token",
+                    ));
+                }
+            }
         }
 
         // Issue a short-lived CCT for the agent
@@ -1180,6 +1315,124 @@ impl AuthTrait for AuthService {
         tracing::info!("Agent bootstrapped successfully");
 
         Ok(tonic::Response::new(BootstrapResponse { cct, expires_at }))
+    }
+
+    // ──── Bootstrap 令牌动态签发（TTL + 一次性；raft 持久化） ────
+
+    async fn bootstrap_token_issue(
+        &self,
+        request: tonic::Request<BootstrapTokenIssueRequest>,
+    ) -> Result<tonic::Response<BootstrapTokenIssueResponse>, tonic::Status> {
+        self.require_admin(request.metadata(), "admin:auth:bootstrap_token")?;
+        let caller_md = request.metadata().clone();
+        let req = request.into_inner();
+
+        let ttl = if req.ttl_secs <= 0 {
+            BOOTSTRAP_TOKEN_DEFAULT_TTL_SECS
+        } else {
+            req.ttl_secs
+        };
+        if ttl > BOOTSTRAP_TOKEN_MAX_TTL_SECS {
+            return Err(tonic::Status::invalid_argument(format!(
+                "ttl_secs too large (max {BOOTSTRAP_TOKEN_MAX_TTL_SECS})"
+            )));
+        }
+        let label = req.label.trim().to_string();
+        if label.len() > 128 {
+            return Err(tonic::Status::invalid_argument(
+                "label too long (max 128)".to_string(),
+            ));
+        }
+
+        let created_by = self
+            .admin_context(&caller_md)
+            .ok()
+            .flatten()
+            .map(|cct| cct.payload.sub)
+            .unwrap_or_else(|| "local".to_string());
+
+        let now = unix_now_secs();
+        let id = Uuid::new_v4().to_string();
+        let token = generate_bootstrap_token();
+        let expires_at = now + ttl as u64;
+
+        self.apply_auth_op(AuthOp::IssueBootstrapToken {
+            id: id.clone(),
+            hash_hex: bootstrap_token_hash(&token),
+            label: label.clone(),
+            created_by: created_by.clone(),
+            created_at_unix: now,
+            expires_at_unix: expires_at,
+        })
+        .await?;
+
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.bootstrap_token_issue",
+            &id,
+            crate::audit::RESULT_SUCCESS,
+            &format!("label={label} ttl={ttl}s"),
+        );
+        // 明文令牌**只在此响应中出现一次**（服务端仅存 SHA256）。
+        tracing::info!(
+            "bootstrap token '{id}' issued by '{created_by}' (label='{label}', ttl={ttl}s)"
+        );
+        Ok(tonic::Response::new(BootstrapTokenIssueResponse {
+            id,
+            token,
+            expires_at: expires_at as i64,
+        }))
+    }
+
+    async fn bootstrap_token_list(
+        &self,
+        request: tonic::Request<BootstrapTokenListRequest>,
+    ) -> Result<tonic::Response<BootstrapTokenListResponse>, tonic::Status> {
+        self.require_admin(request.metadata(), "admin:auth:bootstrap_token")?;
+        let tokens = self
+            .auth_manager
+            .bootstrap_tokens()
+            .into_iter()
+            .map(|r| {
+                let consumed = r.is_consumed();
+                BootstrapTokenInfo {
+                    id: r.id,
+                    label: r.label,
+                    created_by: r.created_by,
+                    created_at: r.created_at_unix as i64,
+                    expires_at: r.expires_at_unix as i64,
+                    consumed,
+                }
+            })
+            .collect();
+        Ok(tonic::Response::new(BootstrapTokenListResponse { tokens }))
+    }
+
+    async fn bootstrap_token_revoke(
+        &self,
+        request: tonic::Request<BootstrapTokenRevokeRequest>,
+    ) -> Result<tonic::Response<BootstrapTokenRevokeResponse>, tonic::Status> {
+        self.require_admin(request.metadata(), "admin:auth:bootstrap_token")?;
+        let caller_md = request.metadata().clone();
+        let req = request.into_inner();
+        if req.id.trim().is_empty() {
+            return Err(tonic::Status::invalid_argument("id must not be empty"));
+        }
+
+        // 幂等：不存在不算错误，`revoked=false` 告知调用方。
+        let existed = self.auth_manager.bootstrap_token(&req.id).is_some();
+        self.apply_auth_op(AuthOp::RevokeBootstrapToken { id: req.id.clone() })
+            .await?;
+        self.record_audit(
+            &caller_md,
+            "auth.mgmt.bootstrap_token_revoke",
+            &req.id,
+            crate::audit::RESULT_SUCCESS,
+            if existed { "revoked" } else { "not_found" },
+        );
+        Ok(tonic::Response::new(BootstrapTokenRevokeResponse {
+            revoked: existed,
+        }))
     }
 }
 
@@ -1607,6 +1860,149 @@ mod cct_tests {
                 .contains(&"agent-bootstrap".to_string()));
             // Bootstrap CCT should be short-lived (10 min)
             assert!(decoded.payload.exp - decoded.payload.iat <= 600);
+        });
+    }
+
+    // ──── 动态 Bootstrap 令牌（TTL + 一次性） ────
+
+    /// 签发 → 列表可见 → 仅能消费一次 → 列表标记已消费。
+    #[test]
+    fn test_dynamic_bootstrap_token_issue_and_single_use() {
+        let svc = build_service_with_cct();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let issued = svc
+                .bootstrap_token_issue(tonic::Request::new(BootstrapTokenIssueRequest {
+                    label: "cluster-a".into(),
+                    ttl_secs: 3600,
+                }))
+                .await
+                .expect("issue should succeed")
+                .into_inner();
+            assert!(issued.token.starts_with("cbt_"), "token must be prefixed");
+            assert!(!issued.id.is_empty());
+            assert!(issued.expires_at > 0);
+
+            // 列表：未消费
+            let list = svc
+                .bootstrap_token_list(tonic::Request::new(BootstrapTokenListRequest {}))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(list.tokens.len(), 1);
+            assert_eq!(list.tokens[0].label, "cluster-a");
+            assert!(!list.tokens[0].consumed);
+
+            // 首次引导成功
+            let resp = svc
+                .bootstrap(tonic::Request::new(BootstrapRequest {
+                    bootstrap_token: issued.token.clone(),
+                }))
+                .await
+                .expect("dynamic token should be accepted");
+            assert!(!resp.into_inner().cct.is_empty());
+
+            // 一次性：第二次被拒
+            let second = svc
+                .bootstrap(tonic::Request::new(BootstrapRequest {
+                    bootstrap_token: issued.token.clone(),
+                }))
+                .await;
+            assert!(second.is_err(), "dynamic token must be single-use");
+
+            // 列表：已消费（记录保留供审计）
+            let list = svc
+                .bootstrap_token_list(tonic::Request::new(BootstrapTokenListRequest {}))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(list.tokens[0].consumed);
+        });
+    }
+
+    /// TTL 上限校验 + 默认 TTL 生效。
+    #[test]
+    fn test_dynamic_bootstrap_token_ttl_bounds() {
+        let svc = build_service_with_cct();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let too_long = svc
+                .bootstrap_token_issue(tonic::Request::new(BootstrapTokenIssueRequest {
+                    label: String::new(),
+                    ttl_secs: BOOTSTRAP_TOKEN_MAX_TTL_SECS + 1,
+                }))
+                .await;
+            assert_eq!(
+                too_long.unwrap_err().code(),
+                tonic::Code::InvalidArgument,
+                "ttl above cap must be rejected"
+            );
+
+            let issued = svc
+                .bootstrap_token_issue(tonic::Request::new(BootstrapTokenIssueRequest {
+                    label: String::new(),
+                    ttl_secs: 0,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            let now = unix_now_secs() as i64;
+            let ttl = issued.expires_at - now;
+            assert!(
+                (BOOTSTRAP_TOKEN_DEFAULT_TTL_SECS - ttl).abs() <= 5,
+                "ttl_secs=0 must fall back to default ({ttl})"
+            );
+        });
+    }
+
+    /// 撤销后不可用；撤销不存在的 ID 幂等（revoked=false）。
+    #[test]
+    fn test_dynamic_bootstrap_token_revoke() {
+        let svc = build_service_with_cct();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let issued = svc
+                .bootstrap_token_issue(tonic::Request::new(BootstrapTokenIssueRequest {
+                    label: String::new(),
+                    ttl_secs: 600,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+
+            let revoked = svc
+                .bootstrap_token_revoke(tonic::Request::new(BootstrapTokenRevokeRequest {
+                    id: issued.id.clone(),
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(revoked.revoked);
+
+            let denied = svc
+                .bootstrap(tonic::Request::new(BootstrapRequest {
+                    bootstrap_token: issued.token.clone(),
+                }))
+                .await;
+            assert!(denied.is_err(), "revoked token must not be accepted");
+
+            // 幂等
+            let again = svc
+                .bootstrap_token_revoke(tonic::Request::new(BootstrapTokenRevokeRequest {
+                    id: issued.id,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(!again.revoked);
+
+            // 空 ID → invalid_argument
+            let empty = svc
+                .bootstrap_token_revoke(tonic::Request::new(BootstrapTokenRevokeRequest {
+                    id: "  ".into(),
+                }))
+                .await;
+            assert_eq!(empty.unwrap_err().code(), tonic::Code::InvalidArgument);
         });
     }
 }

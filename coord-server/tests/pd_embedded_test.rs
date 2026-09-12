@@ -129,7 +129,9 @@ async fn start_shared_region0() -> Arc<Region0Cluster> {
     .expect("create region0 raft");
     let mut members = BTreeMap::new();
     members.insert(1, new_basic_node(&raft_addr));
-    raft.initialize(members).await.expect("initialize region0 raft");
+    raft.initialize(members)
+        .await
+        .expect("initialize region0 raft");
     let raft = Arc::new(raft);
 
     // region 0 leader 就绪（单节点 quorum=1）
@@ -147,8 +149,10 @@ async fn start_shared_region0() -> Arc<Region0Cluster> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    let system =
-        Arc::new(CoordSystemRaftHandle::new(raft.as_ref().clone(), Arc::clone(&mvcc)));
+    let system = Arc::new(CoordSystemRaftHandle::new(
+        raft.as_ref().clone(),
+        Arc::clone(&mvcc),
+    ));
     Arc::new(Region0Cluster {
         system,
         mvcc,
@@ -569,13 +573,12 @@ async fn test_embedded_pd_membership_change_meta_convergence_and_self_heal() {
     let deadline_stats = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let entries = region0.mvcc.pd_queue_entries().expect("read region0 queue");
-        let remove_ok = entries.iter().any(|e| {
-            e.op.name() == "remove-peer"
-                && matches!(e.status, OperatorStatus::Success)
-        });
-        let add_ok = entries.iter().any(|e| {
-            e.op.name() == "add-peer" && matches!(e.status, OperatorStatus::Success)
-        });
+        let remove_ok = entries
+            .iter()
+            .any(|e| e.op.name() == "remove-peer" && matches!(e.status, OperatorStatus::Success));
+        let add_ok = entries
+            .iter()
+            .any(|e| e.op.name() == "add-peer" && matches!(e.status, OperatorStatus::Success));
         if remove_ok && add_ok {
             eprintln!("region0 queue terminal: {entries:#?}");
             break;

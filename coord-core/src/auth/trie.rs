@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 // ──── Trie Node ────
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct TrieNode {
     /// Child nodes keyed by the next path segment
     children: HashMap<String, TrieNode>,
@@ -28,7 +28,7 @@ struct TrieNode {
 ///
 /// Scope patterns like `/app/order-service/` or `/app/*` are inserted,
 /// then request keys like `/app/order-service/order-123` are matched.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ScopeTrie {
     root: TrieNode,
 }

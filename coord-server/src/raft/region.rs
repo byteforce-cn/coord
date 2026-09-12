@@ -437,15 +437,9 @@ impl RegionManager {
         let handle = self.register_region(spec.meta.clone())?;
 
         // 2) 存储 + Raft + 网络注册
-        let runtime = spawn_region_runtime(
-            self.node_id,
-            shared_factory,
-            rpc,
-            spec,
-            handle,
-            initialize,
-        )
-        .await?;
+        let runtime =
+            spawn_region_runtime(self.node_id, shared_factory, rpc, spec, handle, initialize)
+                .await?;
 
         // 3) 运行时注册
         self.runtimes
@@ -511,6 +505,9 @@ pub struct RegionSeed {
 /// - 本函数对 region 表做防御性平铺校验（首 region start_key 为空、相邻首尾相接、
 ///   末 region end_key 无上界），并拒绝非成员节点装配——不合法时在创建任何
 ///   存储之前返回 `Err`（配置层 `Config::validate` 已先行校验，此为双保险）。
+///
+/// 注：参数为装配期配置项，逐一命名比打包 struct 更可读（调用点单份）。
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn_configured_regions(
     node_id: NodeID,
     data_dir: &Path,
@@ -551,8 +548,7 @@ pub async fn spawn_configured_regions(
         }
     }
 
-    let member_ids: std::collections::HashSet<u64> =
-        peers.iter().map(|p| p.node_id).collect();
+    let member_ids: std::collections::HashSet<u64> = peers.iter().map(|p| p.node_id).collect();
     if !member_ids.contains(&node_id) {
         return Err(Error::InvalidArgument(format!(
             "node {node_id} is not a member of the region peers; cannot assemble regions"
@@ -581,7 +577,9 @@ pub async fn spawn_configured_regions(
             raft_config: Arc::clone(&raft_config),
             object_store: object_store.clone(),
         };
-        manager.spawn_region(shared_factory, rpc, spec, initialize).await?;
+        manager
+            .spawn_region(shared_factory, rpc, spec, initialize)
+            .await?;
         tracing::info!(
             "node {node_id}: configured region {} assembled (range {:?}..{:?})",
             seed.region_id,

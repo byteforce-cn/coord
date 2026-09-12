@@ -212,7 +212,10 @@ fn delete_req(key: &[u8], range_end: &[u8]) -> DeleteRequest {
     }
 }
 
-fn range_value(resp: &tonic::Response<coord_proto::kv::RangeResponse>, key: &[u8]) -> Option<Vec<u8>> {
+fn range_value(
+    resp: &tonic::Response<coord_proto::kv::RangeResponse>,
+    key: &[u8],
+) -> Option<Vec<u8>> {
     resp.get_ref()
         .kvs
         .iter()
@@ -231,7 +234,10 @@ async fn test_kv_ops_route_to_correct_region_and_converge() {
     let l2 = wait_leader_for_region(&hosts, 2, Duration::from_secs(25))
         .await
         .expect("region 2 leader");
-    eprintln!("region1 leader=node{}, region2 leader=node{}", hosts[l1].node_id, hosts[l2].node_id);
+    eprintln!(
+        "region1 leader=node{}, region2 leader=node{}",
+        hosts[l1].node_id, hosts[l2].node_id
+    );
 
     // ── Put 路由：apple(region1) 走 l1、peach(region2) 走 l2 ──
     let resp = hosts[l1]
@@ -254,7 +260,13 @@ async fn test_kv_ops_route_to_correct_region_and_converge() {
         for host in &hosts {
             for (rid, own, other) in [(1u64, b"apple", b"peach"), (2u64, b"peach", b"apple")] {
                 let rt = host.manager.runtime(rid).expect("runtime");
-                if rt.mvcc.get(own).unwrap() != Some(if rid == 1 { b"v1".to_vec() } else { b"v2".to_vec() }) {
+                if rt.mvcc.get(own).unwrap()
+                    != Some(if rid == 1 {
+                        b"v1".to_vec()
+                    } else {
+                        b"v2".to_vec()
+                    })
+                {
                     converged = false;
                     continue;
                 }
@@ -269,7 +281,10 @@ async fn test_kv_ops_route_to_correct_region_and_converge() {
         if converged {
             break;
         }
-        assert!(tokio::time::Instant::now() < deadline, "regions did not converge");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "regions did not converge"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -296,7 +311,11 @@ async fn test_kv_ops_route_to_correct_region_and_converge() {
         .await
         .expect("bounded range within region1");
     let keys: Vec<Vec<u8>> = r.get_ref().kvs.iter().map(|kv| kv.key.clone()).collect();
-    assert_eq!(keys, vec![b"apple".to_vec()], "bounded range only region1 keys");
+    assert_eq!(
+        keys,
+        vec![b"apple".to_vec()],
+        "bounded range only region1 keys"
+    );
 
     // ── 单键 Delete 路由（region1）──
     let d = hosts[l1]
@@ -310,14 +329,25 @@ async fn test_kv_ops_route_to_correct_region_and_converge() {
     loop {
         let mut ok = true;
         for host in &hosts {
-            if host.manager.runtime(1).unwrap().mvcc.get(b"apple").unwrap().is_some() {
+            if host
+                .manager
+                .runtime(1)
+                .unwrap()
+                .mvcc
+                .get(b"apple")
+                .unwrap()
+                .is_some()
+            {
                 ok = false;
             }
         }
         if ok {
             break;
         }
-        assert!(tokio::time::Instant::now() < deadline, "delete did not converge");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "delete did not converge"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -325,7 +355,9 @@ async fn test_kv_ops_route_to_correct_region_and_converge() {
     let txn_req = TxnRequest {
         compare: vec![],
         success: vec![coord_proto::txn::RequestOp {
-            op: Some(coord_proto::txn::request_op::Op::RequestPut(put_req(b"peach", b"v2b"))),
+            op: Some(coord_proto::txn::request_op::Op::RequestPut(put_req(
+                b"peach", b"v2b",
+            ))),
         }],
         failure: vec![],
         request_id: vec![],
@@ -341,14 +373,18 @@ async fn test_kv_ops_route_to_correct_region_and_converge() {
     loop {
         let mut ok = true;
         for host in &hosts {
-            if host.manager.runtime(2).unwrap().mvcc.get(b"peach").unwrap() != Some(b"v2b".to_vec()) {
+            if host.manager.runtime(2).unwrap().mvcc.get(b"peach").unwrap() != Some(b"v2b".to_vec())
+            {
                 ok = false;
             }
         }
         if ok {
             break;
         }
-        assert!(tokio::time::Instant::now() < deadline, "txn did not converge");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "txn did not converge"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -390,7 +426,10 @@ async fn test_write_via_non_leader_returns_region_not_leader_with_hint() {
                 if hint == hosts[l1].kv_grpc_addr {
                     return;
                 }
-                assert!(tokio::time::Instant::now() < deadline, "leader hint never matches");
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "leader hint never matches"
+                );
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }
@@ -427,10 +466,14 @@ async fn test_cross_region_operations_rejected() {
         compare: vec![],
         success: vec![
             coord_proto::txn::RequestOp {
-                op: Some(coord_proto::txn::request_op::Op::RequestPut(put_req(b"apple", b"a2"))),
+                op: Some(coord_proto::txn::request_op::Op::RequestPut(put_req(
+                    b"apple", b"a2",
+                ))),
             },
             coord_proto::txn::RequestOp {
-                op: Some(coord_proto::txn::request_op::Op::RequestPut(put_req(b"peach", b"p2"))),
+                op: Some(coord_proto::txn::request_op::Op::RequestPut(put_req(
+                    b"peach", b"p2",
+                ))),
             },
         ],
         failure: vec![],

@@ -10,10 +10,16 @@
 // - agent_cache_misses_total: 缓存未命中总次数
 // - agent_grpc_requests_total: gRPC 请求总数（按方法分）
 // - agent_watch_subscribers_total: 当前 Watch 订阅者数量
+// - agent_plugin_invocations_total: 插件调用总数（plugin/engine/outcome）
+// - agent_plugin_traps_total: 插件沙箱 trap 总数（plugin/reason：fuel/epoch/…）
+// - agent_plugin_load_failures_total: 插件加载/启动失败总数（plugin）
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+
+use parking_lot::RwLock;
 
 // ──── AgentMetrics ────
 
@@ -53,6 +59,12 @@ struct MetricsInner {
     pub grpc_requests: [AtomicU64; 5],
     /// Watch 订阅者数量
     pub watch_subscribers: AtomicI64,
+    /// 插件调用计数（键 = (plugin, engine, outcome)；outcome ∈ {ok, error}）
+    pub plugin_invocations: RwLock<BTreeMap<(String, String, String), u64>>,
+    /// 插件沙箱 trap 计数（键 = (plugin, reason)）
+    pub plugin_traps: RwLock<BTreeMap<(String, String), u64>>,
+    /// 插件加载/启动失败计数（键 = plugin）
+    pub plugin_load_failures: RwLock<BTreeMap<String, u64>>,
 }
 
 impl AgentMetrics {
@@ -66,6 +78,9 @@ impl AgentMetrics {
                 cache_misses: AtomicU64::new(0),
                 grpc_requests: Default::default(),
                 watch_subscribers: AtomicI64::new(0),
+                plugin_invocations: RwLock::new(BTreeMap::new()),
+                plugin_traps: RwLock::new(BTreeMap::new()),
+                plugin_load_failures: RwLock::new(BTreeMap::new()),
             }),
         }
     }
@@ -125,6 +140,36 @@ impl AgentMetrics {
         self.inner.watch_subscribers.fetch_sub(1, Ordering::Relaxed);
     }
 
+    // ──── 插件指标（Phase 5 观测面）────
+
+    /// 记录一次插件调用（`engine` ∈ {"js","wasm"}；`ok` = 未返回错误）。
+    pub fn record_plugin_invocation(&self, plugin: &str, engine: &str, ok: bool) {
+        let outcome = if ok { "ok" } else { "error" };
+        let key = (plugin.to_string(), engine.to_string(), outcome.to_string());
+        *self
+            .inner
+            .plugin_invocations
+            .write()
+            .entry(key)
+            .or_insert(0) += 1;
+    }
+
+    /// 记录一次插件沙箱 trap（`reason` ∈ {"fuel","epoch","memory","other"}）。
+    pub fn record_plugin_trap(&self, plugin: &str, reason: &str) {
+        let key = (plugin.to_string(), reason.to_string());
+        *self.inner.plugin_traps.write().entry(key).or_insert(0) += 1;
+    }
+
+    /// 记录一次插件加载/启动失败。
+    pub fn record_plugin_load_failure(&self, plugin: &str) {
+        *self
+            .inner
+            .plugin_load_failures
+            .write()
+            .entry(plugin.to_string())
+            .or_insert(0) += 1;
+    }
+
     /// 渲染 Prometheus 文本格式
     pub fn render_prometheus_text(&self) -> String {
         let uptime = self.inner.start_time.elapsed().as_secs_f64();
@@ -172,10 +217,67 @@ impl AgentMetrics {
         out.push_str("# TYPE coord_agent_watch_subscribers gauge\n");
         out.push_str(&format!("coord_agent_watch_subscribers {}\n", subscribers));
 
+        // ──── 插件指标（Phase 5）────
+        let invocations = self.inner.plugin_invocations.read();
+        out.push_str(
+            "# HELP coord_agent_plugin_invocations_total Total plugin invocations by outcome\n",
+        );
+        out.push_str("# TYPE coord_agent_plugin_invocations_total counter\n");
+        for ((plugin, engine, outcome), count) in invocations.iter() {
+            out.push_str(&format!(
+                "coord_agent_plugin_invocations_total{{plugin=\"{}\",engine=\"{}\",outcome=\"{}\"}} {}\n",
+                escape_label(plugin),
+                escape_label(engine),
+                escape_label(outcome),
+                count
+            ));
+        }
+
+        let traps = self.inner.plugin_traps.read();
+        out.push_str(
+            "# HELP coord_agent_plugin_traps_total Total plugin sandbox traps by reason\n",
+        );
+        out.push_str("# TYPE coord_agent_plugin_traps_total counter\n");
+        for ((plugin, reason), count) in traps.iter() {
+            out.push_str(&format!(
+                "coord_agent_plugin_traps_total{{plugin=\"{}\",reason=\"{}\"}} {}\n",
+                escape_label(plugin),
+                escape_label(reason),
+                count
+            ));
+        }
+
+        let failures = self.inner.plugin_load_failures.read();
+        out.push_str(
+            "# HELP coord_agent_plugin_load_failures_total Total plugin load/start failures\n",
+        );
+        out.push_str("# TYPE coord_agent_plugin_load_failures_total counter\n");
+        for (plugin, count) in failures.iter() {
+            out.push_str(&format!(
+                "coord_agent_plugin_load_failures_total{{plugin=\"{}\"}} {}\n",
+                escape_label(plugin),
+                count
+            ));
+        }
+
         // 末尾必须有换行
         out.push('\n');
         out
     }
+}
+
+/// 转义 Prometheus 标签值（`\` / `"` / 换行）。
+fn escape_label(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 impl Default for AgentMetrics {
@@ -303,5 +405,43 @@ mod tests {
         assert!(text.contains("coord_agent_cache_misses_total 0"));
         assert!(text.contains("coord_agent_grpc_requests_total"));
         assert!(text.contains("coord_agent_watch_subscribers"));
+    }
+
+    #[test]
+    fn test_plugin_metrics_render() {
+        let m = AgentMetrics::new();
+        m.record_plugin_invocation("echo", "js", true);
+        m.record_plugin_invocation("echo", "js", true);
+        m.record_plugin_invocation("checksum", "wasm", false);
+        m.record_plugin_trap("checksum", "fuel");
+        m.record_plugin_load_failure("broken");
+
+        let text = m.render_prometheus_text();
+        assert!(
+            text.contains(
+                "coord_agent_plugin_invocations_total{plugin=\"echo\",engine=\"js\",outcome=\"ok\"} 2"
+            ),
+            "{text}"
+        );
+        assert!(text.contains(
+            "coord_agent_plugin_invocations_total{plugin=\"checksum\",engine=\"wasm\",outcome=\"error\"} 1"
+        ));
+        assert!(
+            text.contains("coord_agent_plugin_traps_total{plugin=\"checksum\",reason=\"fuel\"} 1")
+        );
+        assert!(text.contains("coord_agent_plugin_load_failures_total{plugin=\"broken\"} 1"));
+
+        // 空注册表也应有 HELP/TYPE（Grafana 无数据时不断线）
+        let empty = AgentMetrics::new().render_prometheus_text();
+        assert!(empty.contains("# TYPE coord_agent_plugin_invocations_total counter"));
+        assert!(empty.contains("# TYPE coord_agent_plugin_traps_total counter"));
+    }
+
+    #[test]
+    fn test_escape_label() {
+        assert_eq!(escape_label("plain"), "plain");
+        assert_eq!(escape_label("a\"b"), "a\\\"b");
+        assert_eq!(escape_label("a\\b"), "a\\\\b");
+        assert_eq!(escape_label("a\nb"), "a\\nb");
     }
 }

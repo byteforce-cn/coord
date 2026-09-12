@@ -76,14 +76,125 @@ impl SignatureCache {
     }
 }
 
-// ──── RPC → Capability Mapping ────
+// ──── Capability Registry（动态能力表）────
 
-/// Maps gRPC method paths to capability IDs.
+/// scope key 提取器：从入站请求 header 派生用于 scope 校验的资源键。
+///
+/// 缺省（`None`）表示该 RPC 不做 scope 校验（与历史行为一致）。
+pub type ScopeExtractor = Arc<dyn Fn(&http::HeaderMap) -> Option<String> + Send + Sync>;
+
+/// 能力表条目：RPC → capability_id + 可选 scope 提取器。
+#[derive(Clone)]
+pub struct CapabilityEntry {
+    /// 需要的 capability ID（如 "data:kv:read"）
+    pub capability_id: String,
+    /// scope 资源键提取器（None = 不校验 scope）
+    pub scope_extractor: Option<ScopeExtractor>,
+}
+
+/// 能力表查询结果。
+pub enum CapabilityLookup {
+    /// 已注册：需要能力（+ 可选 scope）校验
+    Required(CapabilityEntry),
+    /// 白名单：直接放行（如登录端点）
+    Allowlisted,
+    /// 未注册：拒绝（fail-closed）
+    Unknown,
+}
+
+/// RPC → 能力映射注册表。
+///
+/// 内置表由 [`default_rpc_capability`] 提供（历史静态映射），
+/// 插件/扩展可通过 [`CapabilityTable::register`] 动态追加或覆盖条目；
+/// 未注册且非白名单的 RPC 一律拒绝，保持 fail-closed 语义。
+#[derive(Default)]
+pub struct CapabilityTable {
+    entries: RwLock<HashMap<String, CapabilityEntry>>,
+    allowlist: RwLock<std::collections::HashSet<String>>,
+}
+
+impl CapabilityTable {
+    /// 空表（仅内置默认映射 + 无白名单）。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 内置 agent 能力表：历史静态映射 + `Authenticate` 白名单。
+    pub fn default_agent() -> Self {
+        let table = Self::new();
+        table.allowlist("/coord.auth.Auth/Authenticate");
+        table
+    }
+
+    /// 注册/覆盖一个 RPC → capability 映射（无 scope 提取器）。
+    pub fn register(&self, rpc_method: impl Into<String>, capability_id: impl Into<String>) {
+        self.register_with_scope(rpc_method, capability_id, None);
+    }
+
+    /// 注册/覆盖一个 RPC → capability 映射 + scope 提取器。
+    pub fn register_with_scope(
+        &self,
+        rpc_method: impl Into<String>,
+        capability_id: impl Into<String>,
+        scope_extractor: Option<ScopeExtractor>,
+    ) {
+        self.entries.write().insert(
+            rpc_method.into(),
+            CapabilityEntry {
+                capability_id: capability_id.into(),
+                scope_extractor,
+            },
+        );
+    }
+
+    /// 将 RPC 加入白名单（不要求能力校验）。
+    pub fn allowlist(&self, rpc_method: impl Into<String>) {
+        self.allowlist.write().insert(rpc_method.into());
+    }
+
+    /// 查询某 RPC 的能力要求。
+    pub fn lookup(&self, rpc_method: &str) -> CapabilityLookup {
+        if let Some(entry) = self.entries.read().get(rpc_method) {
+            return CapabilityLookup::Required(entry.clone());
+        }
+        if self.allowlist.read().contains(rpc_method) {
+            return CapabilityLookup::Allowlisted;
+        }
+        match default_rpc_capability(rpc_method) {
+            Some(capability_id) => CapabilityLookup::Required(CapabilityEntry {
+                capability_id,
+                scope_extractor: None,
+            }),
+            None => CapabilityLookup::Unknown,
+        }
+    }
+
+    /// 已动态注册的条目数。
+    pub fn registered_len(&self) -> usize {
+        self.entries.read().len()
+    }
+}
+
+/// 进程级默认能力表（`infer_capability` 的委托目标）。
+fn default_capability_table() -> &'static CapabilityTable {
+    static TABLE: std::sync::OnceLock<CapabilityTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(CapabilityTable::default_agent)
+}
+
+/// Maps gRPC method paths to capability IDs（向后兼容入口）。
 ///
 /// Agent intercepts the gRPC method name (e.g., "/coord.kv.Kv/Range")
 /// and maps it to the corresponding capability ID.
+/// 返回 `None` 表示白名单或未知 RPC（调用方按 fail-closed 处理）。
 pub fn infer_capability(rpc_method: &str) -> Option<String> {
-    // Static mapping table for all supported RPCs
+    match default_capability_table().lookup(rpc_method) {
+        CapabilityLookup::Required(entry) => Some(entry.capability_id),
+        CapabilityLookup::Allowlisted | CapabilityLookup::Unknown => None,
+    }
+}
+
+/// 内置 RPC → capability 静态映射（历史行为基线）。
+fn default_rpc_capability(rpc_method: &str) -> Option<String> {
     match rpc_method {
         // KV
         "/coord.kv.Kv/Range" => Some("data:kv:read".into()),
@@ -132,12 +243,18 @@ pub fn infer_capability(rpc_method: &str) -> Option<String> {
         "/coord.auth.Auth/RoleDelete" => Some("admin:auth:role_delete".into()),
         "/coord.auth.Auth/RoleGrantPermission" => Some("admin:auth:role_grant".into()),
         "/coord.auth.Auth/RoleRevokePermission" => Some("admin:auth:role_revoke".into()),
+        "/coord.auth.Auth/RoleGrantCapability" => Some("admin:auth:role_grant".into()),
+        "/coord.auth.Auth/RoleRevokeCapability" => Some("admin:auth:role_revoke".into()),
         "/coord.auth.Auth/RoleList" => Some("admin:auth:role_list".into()),
         "/coord.auth.Auth/UserGrantRole" => Some("admin:auth:user_grant_role".into()),
         "/coord.auth.Auth/UserRevokeRole" => Some("admin:auth:user_revoke_role".into()),
 
         // Authenticate is always allowed (login endpoint)
         "/coord.auth.Auth/Authenticate" => None, // whitelisted — no capability check
+
+        // 通用插件调用面（coord.plugin.Plugin；agent 本地服务）
+        "/coord.plugin.Plugin/Invoke" => Some("coord:plugin:invoke".into()),
+        "/coord.plugin.Plugin/List" => Some("coord:plugin:list".into()),
 
         // PKI：私钥集中存储前必须上鉴权
         // 能力分级：签发（写）/ 轮换（写）/ 读取（读）/ CA 初始化（管理）
@@ -170,6 +287,8 @@ pub struct AuthInterceptor {
     clock_drift_secs: i64,
     /// Whether auth is enabled (if disabled, all requests pass through)
     enabled: bool,
+    /// RPC → capability 注册表（可动态扩展；默认内置表）
+    capability_table: Arc<CapabilityTable>,
 }
 
 impl AuthInterceptor {
@@ -182,6 +301,28 @@ impl AuthInterceptor {
             sig_cache: SignatureCache::new(10000, 60), // 10k entries, 60s TTL
             clock_drift_secs,
             enabled: true,
+            capability_table: Arc::new(CapabilityTable::default_agent()),
+        }
+    }
+
+    /// 挂载自定义能力表（插件/扩展动态注册入口）。
+    pub fn with_capability_table(mut self, table: Arc<CapabilityTable>) -> Self {
+        self.capability_table = table;
+        self
+    }
+
+    /// 返回能力表句柄（供运行时动态注册）。
+    pub fn capability_table(&self) -> Arc<CapabilityTable> {
+        Arc::clone(&self.capability_table)
+    }
+
+    /// 从请求 header 提取 scope 资源键（按能力表注册的提取器）。
+    pub fn scope_key(&self, rpc_method: &str, headers: &http::HeaderMap) -> Option<String> {
+        match self.capability_table.lookup(rpc_method) {
+            CapabilityLookup::Required(entry) => {
+                entry.scope_extractor.as_ref().and_then(|f| f(headers))
+            }
+            _ => None,
         }
     }
 
@@ -246,15 +387,12 @@ impl AuthInterceptor {
             return AuthResult::Deny("CCT expired".into());
         }
 
-        // 5. Determine required capability from RPC method
-        let capability_id = match infer_capability(rpc_method) {
-            Some(cap) => cap,
-            None => {
-                // Whitelisted endpoints (e.g., Authenticate) or unknown
-                if rpc_method == "/coord.auth.Auth/Authenticate" {
-                    return AuthResult::Allow(cct);
-                }
-                return AuthResult::Deny(format!("unknown RPC method: {rpc_method}"));
+        // 5. Determine required capability from RPC method（动态注册表，未注册即拒绝）
+        let capability_id = match self.capability_table.lookup(rpc_method) {
+            CapabilityLookup::Required(entry) => entry.capability_id,
+            CapabilityLookup::Allowlisted => return AuthResult::Allow(cct),
+            CapabilityLookup::Unknown => {
+                return AuthResult::Deny(format!("unknown RPC method: {rpc_method}"))
             }
         };
 
@@ -339,12 +477,24 @@ where
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
+        // 能力表注册的 scope 提取器（缺省 None = 不做 scope 校验）
+        let resource_key = self.interceptor.scope_key(&rpc_method, req.headers());
 
-        match self
-            .interceptor
-            .validate_request(&rpc_method, auth_header.as_deref(), None)
-        {
-            AuthResult::Allow(_) => AuthFuture::Allow(self.inner.call(req)),
+        match self.interceptor.validate_request(
+            &rpc_method,
+            auth_header.as_deref(),
+            resource_key.as_deref(),
+        ) {
+            AuthResult::Allow(cct) => {
+                // Phase 2.1：把身份发布到请求扩展，供内层（插件网关层）观察。
+                // 鉴权关闭时 validate_request 返回占位 CCT（roles 为空）。
+                let mut req = req;
+                req.extensions_mut().insert(crate::plugin::GatewayIdentity {
+                    subject: cct.payload.sub.clone(),
+                    roles: cct.payload.roles.clone(),
+                });
+                AuthFuture::Allow(self.inner.call(req))
+            }
             AuthResult::Deny(reason) => AuthFuture::Deny(Some(Status::unauthenticated(reason))),
         }
     }
@@ -563,6 +713,74 @@ mod tests {
         );
         assert_eq!(infer_capability("/coord.auth.Auth/Authenticate"), None);
         assert_eq!(infer_capability("/unknown.Service/Method"), None);
+    }
+
+    /// P0b：动态注册条目对 auth 决策即时生效；scope 提取器进入 scope 校验。
+    #[test]
+    fn test_dynamic_capability_registration() {
+        let role_cache = Arc::new(RoleCache::new());
+        role_cache.sync_full(vec![crate::auth::role_cache::RoleEntry {
+            name: "plugin".to_string(),
+            grants: vec![crate::auth::role_cache::CapabilityGrant {
+                capability_id: "plugin:echo".to_string(),
+                scope: "/app/plugin/".to_string(),
+            }],
+            high_sensitive: false,
+        }]);
+
+        let table = Arc::new(CapabilityTable::default_agent());
+        // 动态注册：RPC → capability + 从 header 提取 scope key
+        table.register_with_scope(
+            "/coord.plugin.Plugin/Invoke",
+            "plugin:echo",
+            Some(Arc::new(|headers: &http::HeaderMap| {
+                headers
+                    .get("x-coord-scope-key")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string())
+            })),
+        );
+        let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300)
+            .with_capability_table(Arc::clone(&table));
+
+        // 注册前未知 RPC：拒绝
+        let unknown = AuthInterceptor::new(TEST_KEY.to_vec(), Arc::new(RoleCache::new()), 300);
+        let cct = make_test_cct(vec!["plugin"], HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+        assert!(matches!(
+            unknown.validate_request("/coord.plugin.Plugin/Invoke", Some(&auth_header), None),
+            AuthResult::Deny(_)
+        ));
+
+        // 注册后：scope 命中放行
+        assert!(matches!(
+            interceptor.validate_request(
+                "/coord.plugin.Plugin/Invoke",
+                Some(&auth_header),
+                Some("/app/plugin/x")
+            ),
+            AuthResult::Allow(_)
+        ));
+        // scope 越界拒绝
+        assert!(matches!(
+            interceptor.validate_request(
+                "/coord.plugin.Plugin/Invoke",
+                Some(&auth_header),
+                Some("/other/x")
+            ),
+            AuthResult::Deny(_)
+        ));
+
+        // scope 提取器从 header 取值
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-coord-scope-key", "/app/plugin/k".parse().unwrap());
+        assert_eq!(
+            interceptor
+                .scope_key("/coord.plugin.Plugin/Invoke", &headers)
+                .as_deref(),
+            Some("/app/plugin/k")
+        );
+        assert_eq!(table.registered_len(), 1);
     }
 
     /// PKI RPC 必须映射到 capability（私钥集中存储前上鉴权）

@@ -92,6 +92,9 @@ impl EmbeddedPd {
     ///   raft 承载：调度收敛 region 0 leader + 执行器全局队列认领）。main.rs
     ///   传 `CoordSystemRaftHandle`（region 0 raft + MVCC）；测试装配需自行
     ///   提供真实单节点 region 0 raft 或替身。
+    ///
+    /// 注：参数为装配期配置项，逐一命名比打包 struct 更可读（调用点单份）。
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         pd_config: PdConfig,
         node_id: NodeID,
@@ -381,25 +384,24 @@ async fn heartbeat_loop(
             // 存储未启用则 0。移到阻塞池，避免阻塞 worker。
             let mvcc = Arc::clone(&rt.mvcc);
             let chunk_store = rt.chunk_store.clone();
-            let (size, keys, storage_bytes) =
-                match tokio::task::spawn_blocking(move || {
-                    let b = mvcc.backend();
-                    let size = b.disk_size_bytes();
-                    let keys = b.key_count();
-                    let storage = match &chunk_store {
-                        Some(store) => store.usage_bytes(),
-                        None => Ok(0),
-                    };
-                    (size, keys, storage)
-                })
-                .await
-                {
-                    Ok((Ok(size), Ok(keys), Ok(storage))) => (size, keys, storage),
-                    Ok(_) | Err(_) => {
-                        tracing::warn!("PD heartbeat: region {region_id} stats unavailable");
-                        (0, 0, 0)
-                    }
+            let (size, keys, storage_bytes) = match tokio::task::spawn_blocking(move || {
+                let b = mvcc.backend();
+                let size = b.disk_size_bytes();
+                let keys = b.key_count();
+                let storage = match &chunk_store {
+                    Some(store) => store.usage_bytes(),
+                    None => Ok(0),
                 };
+                (size, keys, storage)
+            })
+            .await
+            {
+                Ok((Ok(size), Ok(keys), Ok(storage))) => (size, keys, storage),
+                Ok(_) | Err(_) => {
+                    tracing::warn!("PD heartbeat: region {region_id} stats unavailable");
+                    (0, 0, 0)
+                }
+            };
 
             if let Err(e) = driver.handle_region_heartbeat(
                 *region_id,

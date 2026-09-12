@@ -173,6 +173,8 @@ pub struct AuthManager {
     users: Arc<RwLock<HashMap<String, UserEntry>>>,
     /// Roles: name → Role
     roles: Arc<RwLock<HashMap<String, Role>>>,
+    /// 动态 bootstrap 令牌：id → 记录（明文只存 SHA256；一次性语义）
+    bootstrap_tokens: Arc<RwLock<HashMap<String, AuthBootstrapTokenRecord>>>,
 }
 
 /// 引导管理员角色名：该角色在服务端能力判定中全能力放行。
@@ -188,6 +190,47 @@ pub const AUTH_ROLE_PREFIX: &[u8] = b"/_sys/auth/role/";
 pub const AUTH_REVOKED_PREFIX: &[u8] = b"/_sys/auth/revoked/";
 /// 会话落盘存储前缀 `/_sys/auth/sessions/{hash_hex}`
 pub const AUTH_SESSION_PREFIX: &[u8] = b"/_sys/auth/sessions/";
+/// 动态 bootstrap 令牌存储前缀 `/_sys/auth/bootstrap/{id}`
+pub const AUTH_BOOTSTRAP_PREFIX: &[u8] = b"/_sys/auth/bootstrap/";
+
+/// 动态 bootstrap 令牌的持久化记录（明文不落盘，仅 SHA256 hex）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AuthBootstrapTokenRecord {
+    pub id: String,
+    /// 令牌的 SHA256 hex
+    pub hash_hex: String,
+    pub label: String,
+    pub created_by: String,
+    pub created_at_unix: u64,
+    pub expires_at_unix: u64,
+    /// 一次性语义：Some = 已使用（保留记录供审计）
+    pub consumed_at_unix: Option<u64>,
+}
+
+impl AuthBootstrapTokenRecord {
+    /// 是否已被使用。
+    pub fn is_consumed(&self) -> bool {
+        self.consumed_at_unix.is_some()
+    }
+
+    /// 是否已过期（`now` 为 Unix 秒）。
+    pub fn is_expired(&self, now_unix: u64) -> bool {
+        now_unix >= self.expires_at_unix
+    }
+
+    /// 是否可用于换取 bootstrap CCT（未使用且未过期）。
+    pub fn is_usable(&self, now_unix: u64) -> bool {
+        !self.is_consumed() && !self.is_expired(now_unix)
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| Error::Internal(format!("serialize bootstrap: {e}")))
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        bincode::deserialize(bytes).ok()
+    }
+}
 
 /// 持久化的会话条目（token 明文不入盘，仅存 SHA256 hex 为键）
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -321,6 +364,7 @@ impl AuthManager {
             enabled: Arc::new(RwLock::new(false)),
             users: Arc::new(RwLock::new(HashMap::new())),
             roles: Arc::new(RwLock::new(HashMap::new())),
+            bootstrap_tokens: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // root role: ReadWrite on all keys, all capabilities, high_sensitive
@@ -603,7 +647,135 @@ impl AuthManager {
             AuthOp::IssueSession { .. } | AuthOp::ConsumeSession { .. } => {
                 // 会话表由 TokenManager 视图处理（state_machine apply 钩子）
             }
+            AuthOp::RoleGrantCapability {
+                role,
+                capability_id,
+                scope,
+            } => {
+                if let Some(r) = self.roles.write().get_mut(role) {
+                    let is_dup = r
+                        .capability_grants
+                        .iter()
+                        .any(|g| g.capability_id == *capability_id && g.scope == *scope);
+                    if !is_dup {
+                        r.capability_grants.push(CapabilityGrant {
+                            capability_id: capability_id.clone(),
+                            scope: scope.clone(),
+                        });
+                    }
+                }
+            }
+            AuthOp::RoleRevokeCapability {
+                role,
+                capability_id,
+                scope,
+            } => {
+                if let Some(r) = self.roles.write().get_mut(role) {
+                    r.capability_grants
+                        .retain(|g| !(g.capability_id == *capability_id && g.scope == *scope));
+                }
+            }
+            AuthOp::IssueBootstrapToken {
+                id,
+                hash_hex,
+                label,
+                created_by,
+                created_at_unix,
+                expires_at_unix,
+            } => {
+                self.bootstrap_tokens.write().insert(
+                    id.clone(),
+                    AuthBootstrapTokenRecord {
+                        id: id.clone(),
+                        hash_hex: hash_hex.clone(),
+                        label: label.clone(),
+                        created_by: created_by.clone(),
+                        created_at_unix: *created_at_unix,
+                        expires_at_unix: *expires_at_unix,
+                        consumed_at_unix: None,
+                    },
+                );
+            }
+            AuthOp::ConsumeBootstrapToken {
+                id,
+                consumed_at_unix,
+            } => {
+                if let Some(rec) = self.bootstrap_tokens.write().get_mut(id) {
+                    rec.consumed_at_unix = Some(*consumed_at_unix);
+                }
+            }
+            AuthOp::RevokeBootstrapToken { id } => {
+                self.bootstrap_tokens.write().remove(id);
+            }
         }
+    }
+
+    // ──── 动态 bootstrap 令牌 ────
+
+    /// 按明文令牌的 SHA256 hex 查找记录（明文不落盘，只能按哈希索引）。
+    pub fn bootstrap_token_by_hash(&self, hash_hex: &str) -> Option<AuthBootstrapTokenRecord> {
+        self.bootstrap_tokens
+            .read()
+            .values()
+            .find(|r| r.hash_hex == hash_hex)
+            .cloned()
+    }
+
+    /// 按 ID 查找记录。
+    pub fn bootstrap_token(&self, id: &str) -> Option<AuthBootstrapTokenRecord> {
+        self.bootstrap_tokens.read().get(id).cloned()
+    }
+
+    /// 全部记录（按创建时间/ID 排序，供 List）。
+    pub fn bootstrap_tokens(&self) -> Vec<AuthBootstrapTokenRecord> {
+        let mut out: Vec<_> = self.bootstrap_tokens.read().values().cloned().collect();
+        out.sort_by(|a, b| {
+            a.created_at_unix
+                .cmp(&b.created_at_unix)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        out
+    }
+
+    /// **原子**消费：在写锁内校验（未使用 + 未过期）并标记 `consumed_at_unix`。
+    ///
+    /// 返回 `Some(record)` 表示本次调用抢到了该令牌（可继续签发 CCT）；
+    /// `None` = 不存在 / 已消费 / 已过期。并发调用只有一个能拿到 `Some`。
+    pub fn consume_bootstrap_token_atomic(
+        &self,
+        hash_hex: &str,
+        now_unix: u64,
+    ) -> Option<AuthBootstrapTokenRecord> {
+        let mut tokens = self.bootstrap_tokens.write();
+        let id = tokens
+            .iter()
+            .find(|(_, r)| r.hash_hex == hash_hex && r.is_usable(now_unix))
+            .map(|(id, _)| id.clone())?;
+        let rec = tokens.get_mut(&id)?;
+        rec.consumed_at_unix = Some(now_unix);
+        Some(rec.clone())
+    }
+
+    /// 回滚一次消费（raft 提案失败等**持久化未达成**路径）。
+    ///
+    /// 只在 `consumed_at_unix == expected` 时清除，避免误回滚已被
+    /// 其他路径消费的记录。
+    pub fn revert_bootstrap_token_consumption(&self, id: &str, expected: u64) -> bool {
+        if let Some(rec) = self.bootstrap_tokens.write().get_mut(id) {
+            if rec.consumed_at_unix == Some(expected) {
+                rec.consumed_at_unix = None;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 移除过期且未被消费的令牌（启动/定期清理用）；返回清理数量。
+    pub fn prune_expired_bootstrap_tokens(&self, now_unix: u64) -> usize {
+        let mut tokens = self.bootstrap_tokens.write();
+        let before = tokens.len();
+        tokens.retain(|_, r| !(r.is_expired(now_unix) && !r.is_consumed()));
+        before - tokens.len()
     }
 
     /// 启动装载：从 `/_sys/auth/` 前缀的原始条目重建内存视图。
@@ -619,8 +791,10 @@ impl AuthManager {
         {
             let mut users = self.users.write();
             let mut roles = self.roles.write();
+            let mut bootstrap_tokens = self.bootstrap_tokens.write();
             users.clear();
             roles.clear();
+            bootstrap_tokens.clear();
             if let Some(root) = root_role {
                 roles.insert(ROOT_ROLE.to_string(), root);
             }
@@ -638,6 +812,10 @@ impl AuthManager {
                 } else if key.starts_with(AUTH_ROLE_PREFIX) {
                     if let Some(rec) = AuthRoleRecord::from_bytes(&value) {
                         roles.insert(rec.name.clone(), Role::from_record(rec));
+                    }
+                } else if key.starts_with(AUTH_BOOTSTRAP_PREFIX) {
+                    if let Some(rec) = AuthBootstrapTokenRecord::from_bytes(&value) {
+                        bootstrap_tokens.insert(rec.id.clone(), rec);
                     }
                 }
                 // 其它前缀（如 revoked）由调用方处理
@@ -967,6 +1145,237 @@ fn verify_password(stored: &[u8], password: &str) -> (bool, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raft::type_config::AuthOp;
+
+    /// 能力授予经 raft apply 派生视图：scope 命中放行、越界拒绝；撤销即失效。
+    #[test]
+    fn test_role_grant_capability_scope_via_apply() {
+        use crate::raft::type_config::AuthOp;
+
+        let manager = AuthManager::new_empty();
+        manager.role_add("plugin-role").unwrap();
+        manager.apply_auth_op_to_view(&AuthOp::RoleGrantCapability {
+            role: "plugin-role".into(),
+            capability_id: "data:kv:read".into(),
+            scope: "/app/counter/".into(),
+        });
+
+        let roles = vec!["plugin-role".to_string()];
+        assert!(manager.check_capability(&roles, "data:kv:read", Some("/app/counter/x")));
+        // scope 越界（fail-closed）
+        assert!(!manager.check_capability(&roles, "data:kv:read", Some("/other/x")));
+        // scope 非空但无 scope_key → 无法验证，拒绝
+        assert!(!manager.check_capability(&roles, "data:kv:read", None));
+        // 未授予的能力
+        assert!(!manager.check_capability(&roles, "data:kv:write", Some("/app/counter/x")));
+
+        // 重复授予幂等
+        manager.apply_auth_op_to_view(&AuthOp::RoleGrantCapability {
+            role: "plugin-role".into(),
+            capability_id: "data:kv:read".into(),
+            scope: "/app/counter/".into(),
+        });
+        assert_eq!(
+            manager
+                .role_get_capability_grants("plugin-role")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // 撤销后失效
+        manager.apply_auth_op_to_view(&AuthOp::RoleRevokeCapability {
+            role: "plugin-role".into(),
+            capability_id: "data:kv:read".into(),
+            scope: "/app/counter/".into(),
+        });
+        assert!(!manager.check_capability(&roles, "data:kv:read", Some("/app/counter/x")));
+    }
+
+    /// 空 scope = 能力级放行（不依赖 scope_key）。
+    #[test]
+    fn test_role_grant_capability_unscoped() {
+        use crate::raft::type_config::AuthOp;
+        let manager = AuthManager::new_empty();
+        manager.role_add("r").unwrap();
+        manager.apply_auth_op_to_view(&AuthOp::RoleGrantCapability {
+            role: "r".into(),
+            capability_id: "data:storage:read".into(),
+            scope: String::new(),
+        });
+        let roles = vec!["r".to_string()];
+        assert!(manager.check_capability(&roles, "data:storage:read", None));
+        assert!(manager.check_capability(&roles, "data:storage:read", Some("anything")));
+    }
+
+    /// AuthOp bincode 变体索引固定：能力授予两变体**末尾追加**，
+    /// 既有变体（含 ConsumeSession）索引不漂移（旧日志/快照升级兼容）。
+    #[test]
+    fn test_auth_op_bincode_variant_indices_appended() {
+        use crate::raft::type_config::AuthOp;
+        fn variant_index(op: &AuthOp) -> u32 {
+            let bytes = bincode::serialize(op).unwrap();
+            u32::from_le_bytes(bytes[0..4].try_into().unwrap())
+        }
+        assert_eq!(
+            variant_index(&AuthOp::UserAdd {
+                name: "u".into(),
+                hash: "h".into(),
+                roles: vec![]
+            }),
+            0
+        );
+        assert_eq!(
+            variant_index(&AuthOp::ConsumeSession {
+                hash_hex: "x".into()
+            }),
+            11
+        );
+        assert_eq!(
+            variant_index(&AuthOp::RoleGrantCapability {
+                role: "r".into(),
+                capability_id: "c".into(),
+                scope: "s".into(),
+            }),
+            12
+        );
+        assert_eq!(
+            variant_index(&AuthOp::RoleRevokeCapability {
+                role: "r".into(),
+                capability_id: "c".into(),
+                scope: "s".into(),
+            }),
+            13
+        );
+        // 批次 9：bootstrap 令牌三变体追加（14/15/16），既有索引不漂移
+        assert_eq!(
+            variant_index(&AuthOp::IssueBootstrapToken {
+                id: "i".into(),
+                hash_hex: "h".into(),
+                label: "l".into(),
+                created_by: "root".into(),
+                created_at_unix: 0,
+                expires_at_unix: 0,
+            }),
+            14
+        );
+        assert_eq!(
+            variant_index(&AuthOp::ConsumeBootstrapToken {
+                id: "i".into(),
+                consumed_at_unix: 0,
+            }),
+            15
+        );
+        assert_eq!(
+            variant_index(&AuthOp::RevokeBootstrapToken { id: "i".into() }),
+            16
+        );
+    }
+
+    // ──── 动态 bootstrap 令牌（TTL + 一次性） ────
+
+    fn bootstrap_record(id: &str, hash: &str, expires_at: u64) -> AuthBootstrapTokenRecord {
+        AuthBootstrapTokenRecord {
+            id: id.into(),
+            hash_hex: hash.into(),
+            label: "test".into(),
+            created_by: "root".into(),
+            created_at_unix: 0,
+            expires_at_unix: expires_at,
+            consumed_at_unix: None,
+        }
+    }
+
+    #[test]
+    fn bootstrap_token_atomic_consume_is_one_time() {
+        let mgr = AuthManager::new_empty();
+        mgr.apply_auth_op_to_view(&AuthOp::IssueBootstrapToken {
+            id: "t1".into(),
+            hash_hex: "abc".into(),
+            label: "l".into(),
+            created_by: "root".into(),
+            created_at_unix: 0,
+            expires_at_unix: 1_000,
+        });
+
+        // 首次消费成功；第二次拿不到（一次性）
+        let first = mgr.consume_bootstrap_token_atomic("abc", 100);
+        assert!(first.is_some());
+        assert_eq!(first.unwrap().id, "t1");
+        assert!(mgr.consume_bootstrap_token_atomic("abc", 100).is_none());
+
+        // 记录保留（审计）且标记为已消费
+        let rec = mgr.bootstrap_token("t1").unwrap();
+        assert!(rec.is_consumed());
+        assert_eq!(rec.consumed_at_unix, Some(100));
+    }
+
+    #[test]
+    fn bootstrap_token_expiry_blocks_consume() {
+        let mgr = AuthManager::new_empty();
+        mgr.apply_auth_op_to_view(&AuthOp::IssueBootstrapToken {
+            id: "t2".into(),
+            hash_hex: "def".into(),
+            label: String::new(),
+            created_by: "root".into(),
+            created_at_unix: 0,
+            expires_at_unix: 500,
+        });
+        assert!(mgr.consume_bootstrap_token_atomic("def", 499).is_some());
+        assert!(mgr.consume_bootstrap_token_atomic("def", 500).is_none());
+    }
+
+    #[test]
+    fn bootstrap_token_revert_allows_retry_after_proposal_failure() {
+        let mgr = AuthManager::new_empty();
+        mgr.apply_auth_op_to_view(&AuthOp::IssueBootstrapToken {
+            id: "t3".into(),
+            hash_hex: "ghi".into(),
+            label: String::new(),
+            created_by: "root".into(),
+            created_at_unix: 0,
+            expires_at_unix: 1_000,
+        });
+        assert!(mgr.consume_bootstrap_token_atomic("ghi", 10).is_some());
+        // 模拟 raft 提案失败 → 回滚
+        assert!(mgr.revert_bootstrap_token_consumption("t3", 10));
+        assert!(!mgr.bootstrap_token("t3").unwrap().is_consumed());
+        // 回滚后可再次消费
+        assert!(mgr.consume_bootstrap_token_atomic("ghi", 11).is_some());
+        // 回滚带错误 expected → 不生效（避免误回滚他人消费）
+        assert!(!mgr.revert_bootstrap_token_consumption("t3", 10));
+        assert!(mgr.bootstrap_token("t3").unwrap().is_consumed());
+    }
+
+    #[test]
+    fn bootstrap_token_revoke_and_prune() {
+        let mgr = AuthManager::new_empty();
+        for (id, hash, exp) in [("a", "h1", 100u64), ("b", "h2", 10_000u64)] {
+            mgr.apply_auth_op_to_view(&AuthOp::IssueBootstrapToken {
+                id: id.into(),
+                hash_hex: hash.into(),
+                label: String::new(),
+                created_by: "root".into(),
+                created_at_unix: 0,
+                expires_at_unix: exp,
+            });
+        }
+        assert_eq!(mgr.bootstrap_tokens().len(), 2);
+        // 清理过期未消费（a@100 过期；b 仍有效）
+        assert_eq!(mgr.prune_expired_bootstrap_tokens(200), 1);
+        assert!(mgr.bootstrap_token("a").is_none());
+        assert!(mgr.bootstrap_token("b").is_some());
+        // 撤销
+        mgr.apply_auth_op_to_view(&AuthOp::RevokeBootstrapToken { id: "b".into() });
+        assert!(mgr.bootstrap_tokens().is_empty());
+    }
+
+    #[test]
+    fn bootstrap_token_record_roundtrip() {
+        let rec = bootstrap_record("id1", "hash1", 1234);
+        let bytes = rec.to_bytes().unwrap();
+        assert_eq!(AuthBootstrapTokenRecord::from_bytes(&bytes), Some(rec));
+    }
 
     #[test]
     fn test_user_add_and_authenticate() {

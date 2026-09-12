@@ -830,11 +830,11 @@ impl Storage for StorageProxy {
             None => return Err(tonic::Status::invalid_argument("empty Put stream")),
         };
         if meta.bucket.is_empty() {
-            return Err(tonic::Status::invalid_argument(
-                "bucket must not be empty",
-            ));
+            return Err(tonic::Status::invalid_argument("bucket must not be empty"));
         }
-        // 收集数据（上限防护：声明 total_size 或 256MiB）
+        // 收集数据（上限防护：声明 total_size 或 256MiB）。
+        // `total_size = -1`（未知长度）→ cap 取 0；代理会按实际收到字节经
+        // `put_chunked` 重新声明长度，因此未知长度透传同样成立。
         let cap = (meta.total_size.max(0) as usize).min(STORAGE_PROXY_MAX_BUFFER);
         let mut data: Vec<u8> = Vec::with_capacity(cap);
         while let Some(m) = stream.message().await? {
@@ -935,7 +935,9 @@ impl Storage for StorageProxy {
                     String::from_utf8_lossy(&req.object_id)
                 ))
             })?;
-        Ok(tonic::Response::new(StorageStatResponse { stat: Some(stat) }))
+        Ok(tonic::Response::new(StorageStatResponse {
+            stat: Some(stat),
+        }))
     }
 
     async fn delete(

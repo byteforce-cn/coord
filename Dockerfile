@@ -15,11 +15,11 @@ COPY coord-ui/ ./
 RUN pnpm build
 
 # ──── Stage 2: Build coord Rust binary ────
-FROM rust:1.93.0-bookworm AS builder
+FROM rust:1.98.1-bookworm AS builder
 
 # 设置 Rust 工具链路径（跳过 rustup 网络同步）
-ENV RUSTUP_TOOLCHAIN=1.93.0 \
-    PATH=/usr/local/rustup/toolchains/1.93.0-x86_64-unknown-linux-gnu/bin:/usr/local/cargo/bin:$PATH
+ENV RUSTUP_TOOLCHAIN=1.98.1 \
+    PATH=/usr/local/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin:/usr/local/cargo/bin:$PATH
 
 # 使用阿里云 Debian 镜像加速 apt
 RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources

@@ -284,7 +284,11 @@ async fn test_config_assembly_routes_and_converges_across_regions() {
         .await
         .expect("range apple via region1 leader");
     assert_eq!(
-        r.get_ref().kvs.iter().find(|kv| kv.key == b"apple").map(|kv| kv.value.as_slice()),
+        r.get_ref()
+            .kvs
+            .iter()
+            .find(|kv| kv.key == b"apple")
+            .map(|kv| kv.value.as_slice()),
         Some(b"v1".as_slice())
     );
     let r = hosts[l2]
@@ -293,7 +297,11 @@ async fn test_config_assembly_routes_and_converges_across_regions() {
         .await
         .expect("range peach via region2 leader");
     assert_eq!(
-        r.get_ref().kvs.iter().find(|kv| kv.key == b"peach").map(|kv| kv.value.as_slice()),
+        r.get_ref()
+            .kvs
+            .iter()
+            .find(|kv| kv.key == b"peach")
+            .map(|kv| kv.value.as_slice()),
         Some(b"v2".as_slice())
     );
 }

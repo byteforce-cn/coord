@@ -3,7 +3,7 @@
 <div align="center">
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.93.0-orange.svg)](rust-toolchain.toml)
+[![Rust](https://img.shields.io/badge/rust-1.98.1-orange.svg)](rust-toolchain.toml)
 [![Java](https://img.shields.io/badge/java-21-red.svg)](coord-java-sdk/pom.xml)
 
 [**English**](README.md) · **简体中文**
@@ -65,19 +65,20 @@ Server 的 `50051` / `50052` 端口仅对 Agent 可达，**对业务应用永不
 
 **Agent —— 业务应用真正打交道的协调层**
 
-17 个可插拔 `coord.agent.*` gRPC 服务，通过 `[services]` 配置逐项开关：
+18 个可插拔 gRPC 服务，通过 `[services]` / `[plugins]` 配置逐项开关：
 
 - **发现与配置**：`Registry` · `ConfigCenter` · `Event`
 - **协调原语**：`Lock` · `IdGen` · `LeaderElection`
 - **数据与消息**：`Cache` · `Mq` · `Replica`（Cache/MQ 的 ISR 复制）
 - **流程自动化**：`Workflow` · `Scheduler` · `Policy` · `FeatureFlags`
 - **韧性与安全**：`CircuitBreaker` · `RateLimiter` · `Transit` · `Pki`
+- **可扩展**：上述服务全部由插件管理器作为**内建插件**承载 —— 一份注册表统一拥有各服务的生命周期、gRPC 面与健康；`Plugin`（`coord.plugin.Plugin`）暴露统一的服务/插件清单（含逐项健康），并在 `[plugins]` 开启时加载外部 wasm/JS 插件（默认关闭）
 
 Agent 附加能力：与 Server 同契约的核心代理服务（`coord.kv` / `coord.txn` / `coord.lease` / `coord.watch` / `coord.maintenance`）、KV 读缓存、Watch 扇出，以及 `127.0.0.1:19528` 上的健康检查与 Prometheus 指标。
 
 ## 快速开始
 
-**前置条件**：Rust 1.93.0（由 `rust-toolchain.toml` 固定）；Java 21 + Maven 3.9+ 与 Node 22 + pnpm 仅在需要使用 Java SDK 或 Web 界面时安装。
+**前置条件**：Rust 1.98.1（由 `rust-toolchain.toml` 固定）；Java 21 + Maven 3.9+ 与 Node 22 + pnpm 仅在需要使用 Java SDK 或 Web 界面时安装。
 
 ```bash
 cargo build                                # 构建全部 crate

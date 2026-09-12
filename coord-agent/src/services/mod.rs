@@ -1,7 +1,8 @@
 // coord-agent: 可插拔服务 — 模块声明
 //
-// 每个高级基础服务为一个独立模块，实现 BaseService trait。
-// 通过 ServiceManager 按需加载和生命周期管理。
+// 每个高级基础服务为一个独立模块，实现 `BaseService` trait（契约见 `service.rs`）。
+// 服务由 `PluginManager` 统一托管：注册进插件表（内建插件）、由其驱动生命周期、
+// 并由 `Plugin::grpc_service()` 暴露 gRPC 面。
 
 pub mod cache;
 pub mod circuit_breaker;

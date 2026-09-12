@@ -121,17 +121,13 @@ impl SystemRaftHandle for CoordSystemRaftHandle {
                 Some(l) if l == self.node_id => {
                     return self.propose_local(op.clone()).await;
                 }
-                Some(l) => {
-                    match factory.submit_pd_op(l, op.clone()).await {
-                        Ok(idx) => return Ok(idx),
-                        Err(e) => {
-                            tracing::warn!(
-                                "PD: forward pd op to region 0 leader node {l} failed: {e}"
-                            );
-                            last_err = format!("{e}");
-                        }
+                Some(l) => match factory.submit_pd_op(l, op.clone()).await {
+                    Ok(idx) => return Ok(idx),
+                    Err(e) => {
+                        tracing::warn!("PD: forward pd op to region 0 leader node {l} failed: {e}");
+                        last_err = e.to_string();
                     }
-                }
+                },
                 None => {
                     tracing::warn!("PD: region 0 leader unknown; pd propose forward deferred");
                 }

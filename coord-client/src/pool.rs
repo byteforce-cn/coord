@@ -1,4 +1,4 @@
-// Connection Pool — gRPC channel pool management 
+// Connection Pool — gRPC channel pool management
 //
 // Features:
 // - Per-endpoint connection pool (default 2 connections per endpoint)
@@ -11,18 +11,20 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 
 use coord_core::error::{Error, Result};
 
 use crate::config::{Config, TlsConfig};
+use crate::credential::{AuthedChannel, CredentialInterceptor, NoopTokenProvider, TokenProvider};
 
 // ──── Pool Entry ────
 
 /// A single channel in the pool with idle tracking
 #[derive(Clone)]
 struct PoolChannel {
-    channel: Channel,
+    channel: AuthedChannel,
     /// When this channel was last used
     last_used: Instant,
 }
@@ -44,7 +46,7 @@ impl EndpointPool {
     }
 
     /// Return a channel to the pool
-    fn put(&mut self, channel: Channel) {
+    fn put(&mut self, channel: AuthedChannel) {
         if self.channels.len() < self.max_connections {
             self.channels.push(PoolChannel {
                 channel,
@@ -81,6 +83,8 @@ pub struct ConnectionPool {
     idle_timeout: Duration,
     /// TLS/mTLS 通道配置（None = 明文 http）
     tls: Option<Arc<TlsConfig>>,
+    /// 出站凭据提供者（None = 不附加鉴权头）
+    token_provider: Arc<dyn TokenProvider>,
 }
 
 impl ConnectionPool {
@@ -93,21 +97,33 @@ impl ConnectionPool {
             connect_timeout: config.connect_timeout,
             idle_timeout: config.connection_idle_timeout,
             tls: config.tls.clone().map(Arc::new),
+            token_provider: config
+                .token_provider
+                .clone()
+                .unwrap_or_else(|| Arc::new(NoopTokenProvider)),
         }
     }
 
+    /// 把一个裸 Channel 包装为携带凭据的通道。
+    pub(crate) fn wrap(&self, channel: Channel) -> AuthedChannel {
+        InterceptedService::new(
+            channel,
+            CredentialInterceptor::new(Arc::clone(&self.token_provider)),
+        )
+    }
+
     /// Get a regular channel for the given endpoint
-    pub async fn get(&self, endpoint: &str) -> Result<Channel> {
+    pub async fn get(&self, endpoint: &str) -> Result<AuthedChannel> {
         self.get_from(&self.pools, endpoint).await
     }
 
     /// Get a watch-dedicated channel for the given endpoint
-    pub async fn get_watch(&self, endpoint: &str) -> Result<Channel> {
+    pub async fn get_watch(&self, endpoint: &str) -> Result<AuthedChannel> {
         self.get_from(&self.watch_pools, endpoint).await
     }
 
     /// Return a regular channel to the pool
-    pub fn put(&self, endpoint: &str, channel: Channel) {
+    pub fn put(&self, endpoint: &str, channel: AuthedChannel) {
         let mut pools = self.pools.write();
         let pool = pools
             .entry(endpoint.to_string())
@@ -116,7 +132,7 @@ impl ConnectionPool {
     }
 
     /// Return a watch channel to the pool
-    pub fn put_watch(&self, endpoint: &str, channel: Channel) {
+    pub fn put_watch(&self, endpoint: &str, channel: AuthedChannel) {
         let mut pools = self.watch_pools.write();
         let pool = pools
             .entry(endpoint.to_string())
@@ -144,7 +160,7 @@ impl ConnectionPool {
         &self,
         pools: &Arc<RwLock<HashMap<String, EndpointPool>>>,
         endpoint: &str,
-    ) -> Result<Channel> {
+    ) -> Result<AuthedChannel> {
         // Try to get an existing channel from the pool (under lock)
         {
             let mut pools_guard = pools.write();
@@ -155,9 +171,11 @@ impl ConnectionPool {
             }
         }
         // No existing channel, create a new connection (lock released)
-        crate::tls::connect(endpoint, Some(self.connect_timeout), self.tls.as_deref())
-            .await
-            .map_err(|e| Error::ClusterUnavailable(format!("connect failed: {e}")))
+        let channel =
+            crate::tls::connect(endpoint, Some(self.connect_timeout), self.tls.as_deref())
+                .await
+                .map_err(|e| Error::ClusterUnavailable(format!("connect failed: {e}")))?;
+        Ok(self.wrap(channel))
     }
 }
 
@@ -170,6 +188,7 @@ impl Clone for ConnectionPool {
             connect_timeout: self.connect_timeout,
             idle_timeout: self.idle_timeout,
             tls: self.tls.clone(),
+            token_provider: Arc::clone(&self.token_provider),
         }
     }
 }
@@ -191,7 +210,7 @@ mod tests {
 
     #[test]
     fn test_endpoint_pool_new() {
-        let mut pool = EndpointPool::new(2);
+        let pool = EndpointPool::new(2);
         assert!(pool.channels.is_empty());
     }
 }

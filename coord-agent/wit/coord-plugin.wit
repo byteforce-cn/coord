@@ -1,0 +1,341 @@
+// coord-agent 插件组件 ABI（计划 §6 D3 / §11 Phase 4.1）
+//
+// 这是 wasm 插件**组件模型**路径的接口定义（source of truth）：
+// - `host`：宿主 import —— 协调原语 + 对象存储。宿主侧以**异步**实现
+//   （`bindgen!({ imports: { default: async } })`，wasmtime fiber 桥），
+//   插件看到的仍是同步调用（WIT 无 async 关键字，guest 工具链面稳定）；
+// - `guest`：插件导出 —— `init` / `handle-invoke` / `stop`。
+//
+// 设计约束（与 core wasm ABI 路径一致，见 `plugin/wasm_engine.rs`）：
+// 1. **无 WASI**：本 world 不 import 任何 wasi 接口；能力面 = 本文件声明的
+//    函数集合（宿主 import 边界即白名单）；
+// 2. 能力边界（capability + scope）在宿主侧由 `PluginSdk` 门面强制，guest
+//    无法绕过（与 JS / core ABI 两条路径共用同一门面，语义逐字一致）；
+// 3. 字节一律 `list<u8>`（与 KV / storage 的原生字节面一致，不做字符串假设）。
+//
+// guest 侧生成绑定（任选其一，见 `tests/fixtures/plugin-guest/`）：
+//   wit-bindgen（Rust）/ 其它语言的 wit-bindgen 后端。
+
+package coord:plugin@0.1.0;
+
+/// 宿主 import 接口（协调原语 + 对象存储）。
+interface host {
+  /// SDK 错误（与 JS 路径的 `Err*` 名称、core ABI 的 `ERR_*` 码一一对应）。
+  variant sdk-error {
+    /// 能力或作用域被拒（agent 侧守卫 / server 侧 capability）
+    forbidden(string),
+    not-found(string),
+    invalid-argument(string),
+    /// 集群不可用（leader 切换等）；宿主 SDK 已做内部重试
+    unavailable(string),
+    /// 背压 / 配额（watch 溢出、对象过大等）
+    resource-exhausted(string),
+    /// CAS 未命中（`kv-create` 键已存在）
+    conflict(string),
+    internal(string),
+  }
+
+  /// KV 记录（`kv-range` 元素 / `prev-kv` 回传）。
+  record kv {
+    key: list<u8>,
+    value: list<u8>,
+    lease-id: s64,
+    version: s64,
+  }
+
+  record kv-put-out {
+    /// 写入所在 revision
+    revision: s64,
+    /// `prev-kv = true` 时的旧值
+    prev: option<kv>,
+  }
+
+  record kv-range-out {
+    kvs: list<kv>,
+    count: s64,
+    revision: s64,
+  }
+
+  record kv-delete-out {
+    deleted: s64,
+    revision: s64,
+  }
+
+  enum compare-target {
+    version,
+    value,
+    mod-revision,
+  }
+
+  enum compare-op {
+    equal,
+    not-equal,
+    greater,
+    less,
+  }
+
+  record compare {
+    op: compare-op,
+    target: compare-target,
+    key: list<u8>,
+    /// `target = version | mod-revision` 时的整型比较值
+    int-value: s64,
+    /// `target = value` 时的字节比较值
+    bytes-value: list<u8>,
+  }
+
+  record kv-put-op {
+    key: list<u8>,
+    value: list<u8>,
+    lease-id: s64,
+    prev-kv: bool,
+  }
+
+  record kv-delete-op {
+    key: list<u8>,
+    range-end: list<u8>,
+    prev-kv: bool,
+  }
+
+  record kv-range-op {
+    key: list<u8>,
+    range-end: list<u8>,
+    limit: s64,
+    revision: s64,
+    keys-only: bool,
+    count-only: bool,
+  }
+
+  variant txn-op {
+    put(kv-put-op),
+    delete(kv-delete-op),
+    range(kv-range-op),
+  }
+
+  record txn-request {
+    compares: list<compare>,
+    success: list<txn-op>,
+    failure: list<txn-op>,
+    request-id: option<string>,
+  }
+
+  variant txn-op-out {
+    put(kv-put-out),
+    delete(kv-delete-out),
+    range(kv-range-out),
+  }
+
+  record txn-response {
+    /// `false` = 条件未命中（**不是错误**）
+    succeeded: bool,
+    revision: s64,
+    responses: list<txn-op-out>,
+  }
+
+  enum watch-event-kind {
+    put,
+    delete,
+    /// 服务端缓冲溢出：事件已丢弃，应按 revision 重订阅并全量同步
+    buffer-overflow,
+    /// 历史 changelog 已清理：无法从指定 revision 回放
+    history-unavailable,
+  }
+
+  record watch-event {
+    kind: watch-event-kind,
+    kvs: list<kv>,
+    prev: option<kv>,
+    revision: s64,
+  }
+
+  record lease {
+    id: s64,
+    ttl: s64,
+  }
+
+  record object-stat {
+    bucket: string,
+    object-id: list<u8>,
+    size: s64,
+    chunks: s64,
+    revision: s64,
+    exists: bool,
+    committed: bool,
+  }
+
+  /// `kv.put`（`prev-kv = true` 走预读实现，额外要求 `data:kv:read`）。
+  kv-put: func(
+    key: list<u8>,
+    value: list<u8>,
+    lease-id: s64,
+    prev-kv: bool,
+    request-id: option<string>,
+  ) -> result<kv-put-out, sdk-error>;
+
+  /// `kv.get`（单键读取的专用入口；不存在 → `sdk-error.not-found`）。
+  ///
+  /// 语义与 core ABI 的 `coord.kv_get`（返回值字节 / `ERR_NOT_FOUND`）及
+  /// JS 的 `coord.kv.get`（返回 Uint8Array / 抛 `ErrNotFound`）逐字一致；
+  /// 需要元数据（version / lease）时用 `kv-range`。
+  kv-get: func(key: list<u8>) -> result<list<u8>, sdk-error>;
+
+  /// `kv.range`（`range-end` 空 = 单键精确查询）。
+  kv-range: func(
+    key: list<u8>,
+    range-end: list<u8>,
+    limit: s64,
+    revision: s64,
+    keys-only: bool,
+    count-only: bool,
+  ) -> result<kv-range-out, sdk-error>;
+
+  /// `kv.delete`。
+  kv-delete: func(
+    key: list<u8>,
+    range-end: list<u8>,
+    prev-kv: bool,
+  ) -> result<kv-delete-out, sdk-error>;
+
+  /// create-if-absent CAS（`version == 0` 才写入）；冲突 → `sdk-error.conflict`。
+  ///
+  /// 这是锁 / idgen 组合原语的原子基础（与 core ABI 的 `coord.kv_create` 同语义）。
+  kv-create: func(key: list<u8>, value: list<u8>, lease-id: s64) -> result<s64, sdk-error>;
+
+  /// `txn`（Compare-And-Swap 事务）。
+  txn: func(request: txn-request) -> result<txn-response, sdk-error>;
+
+  /// `lease.grant`（`ttl-secs <= 0` → `invalid-argument`）。
+  lease-grant: func(ttl-secs: s64) -> result<lease, sdk-error>;
+
+  /// `lease.revoke`（server 侧连带删除绑定该租约的键）。
+  lease-revoke: func(id: s64) -> result<_, sdk-error>;
+
+  /// `lease.keep-alive`（启动后台保活，插件停止时由宿主释放）。
+  lease-keep-alive: func(id: s64) -> result<_, sdk-error>;
+
+  /// Watch 订阅句柄（**RAII 资源**）。
+  ///
+  /// 生命周期归组件模型：guest 侧句柄被 drop（离开作用域 / 显式 `drop`）时，
+  /// 宿主 `drop` 立即释放底层订阅，**不需要**显式 `close`，也不会拖到插件停止
+  /// 才回收（批次 6 的显式 id 方案的遗留问题已消除）。
+  ///
+  /// 宿主侧该资源的 Rust 类型由 `bindgen!` 的
+  /// `with: { "coord:plugin/host.subscription": ... }` 映射到
+  /// `plugin/component_engine.rs::WatchSubscription`；状态存在 store 数据的
+  /// `ResourceTable` 里（wasmtime-wasi 的宿主资源模式）。
+  resource subscription {
+    /// 取下一条事件（`ok(none)` = 流结束）。
+    ///
+    /// 阻塞式：宿主侧 await，fiber 挂起 guest 栈。
+    /// 溢出 → `sdk-error.resource-exhausted`（插件应按返回 revision 重订阅）；
+    /// `history-unavailable` 作为事件类型透传；句柄已 `close` → `invalid-argument`。
+    next: func() -> result<option<watch-event>, sdk-error>;
+
+    /// 显式提前释放（幂等：已关闭再次调用仍是 `ok`）；`drop` 会兜底。
+    close: func() -> result<_, sdk-error>;
+  }
+
+  /// 建立 watch 订阅，返回 RAII 句柄。
+  watch-subscribe: func(
+    key: list<u8>,
+    range-end: list<u8>,
+    start-revision: s64,
+    prev-kv: bool,
+  ) -> result<subscription, sdk-error>;
+
+  /// `storage.put`（宿主按 4MiB 分块）。
+  storage-put: func(bucket: string, object-id: list<u8>, data: list<u8>) -> result<object-stat, sdk-error>;
+
+  /// `storage.get`（不存在 → `not-found`）。
+  storage-get: func(bucket: string, object-id: list<u8>) -> result<list<u8>, sdk-error>;
+
+  /// `storage.stat`（不存在 → `none`）。
+  storage-stat: func(bucket: string, object-id: list<u8>) -> result<option<object-stat>, sdk-error>;
+
+  /// `storage.delete`；返回 `false` = 对象本就不存在。
+  storage-delete: func(bucket: string, object-id: list<u8>) -> result<bool, sdk-error>;
+
+  /// 对象**分块上传会话**（RAII 资源）。
+  ///
+  /// 用途：大对象**不需要**整块驻留 guest 线性内存——逐块 `write` 即可；宿主侧
+  /// 随写随发（mpsc 背压有界），单次驻留 = 一个 chunk（+ 调用方缓冲）。
+  ///
+  /// 语义：
+  /// - `total-size > 0` = 声明长度：累计写入超过它 → `invalid-argument`，
+  ///   `commit` 要求写入总量**等于**它；
+  /// - `total-size == 0` = **未知长度**：累计写入以 server `max_object_size`
+  ///   封顶（超限 → `invalid-argument`），`commit` 时按实际字节定长；
+  /// - `commit` 之后会话即结束（再次 `write`/`commit` → `not-found`）；
+  /// - guest 侧句柄 drop 而**未** `commit` → 宿主中止上传（等价于放弃）。
+  resource uploader {
+    /// 追加一个 chunk；返回**累计**已写字节数。
+    write: func(chunk: list<u8>) -> result<u64, sdk-error>;
+    /// 提交上传（返回对象元数据）。
+    commit: func() -> result<object-stat, sdk-error>;
+    /// 放弃上传（幂等：已提交/已中止再次调用仍是 `ok`）；`drop` 会兜底。
+    abort: func() -> result<_, sdk-error>;
+  }
+
+  /// 对象**分块下载会话**（RAII 资源）。
+  ///
+  /// 与 `storage-get`（整块 `list<u8>`）的区别：不要求对象放进单次内存分配。
+  /// `read` 单次返回 ≤ `max-len` 字节（server 块 ≤ 4MiB；超出部分由宿主暂存到
+  /// 下一次读取，因此 `max-len` 是**硬上限**）；`ok(none)` = 已读完。
+  resource downloader {
+    /// 对象元数据（打开时已取得）。
+    stat: func() -> result<object-stat, sdk-error>;
+    /// 读取下一段（≤ `max-len` 字节；`max-len` 必须 > 0）。
+    read: func(max-len: u64) -> result<option<list<u8>>, sdk-error>;
+    /// 提前关闭（幂等：已关闭再次调用仍是 `ok`）；`drop` 会兜底。
+    close: func() -> result<_, sdk-error>;
+  }
+
+  /// 打开上传会话（`total-size`：`> 0` = 声明长度且须写满，`0` = 未知长度，
+  /// `commit` 时按实际字节定长）。
+  storage-open-write: func(
+    bucket: string,
+    object-id: list<u8>,
+    total-size: u64,
+  ) -> result<uploader, sdk-error>;
+
+  /// 打开下载会话（对象不存在 → `not-found`）。
+  storage-open-read: func(
+    bucket: string,
+    object-id: list<u8>,
+  ) -> result<downloader, sdk-error>;
+
+  /// 只读配置注入（`[plugins].env`）；缺失 → `not-found`。
+  env: func(key: string) -> result<string, sdk-error>;
+
+  /// 宿主日志（level: trace|debug|info|warn|error）。
+  log: func(level: string, message: string);
+
+  /// 只读资源预算（插件据此**提前失败**，而不是等被 fuel/epoch 打断）。
+  record resource-limits {
+    max-exec-ms: u64,
+    max-memory-mb: u64,
+    max-objects: u64,
+  }
+
+  limits: func() -> resource-limits;
+}
+
+/// 插件导出接口。
+interface guest {
+  /// 初始化（注入 SDK 之后、首次 `handle-invoke` 之前调用一次）。
+  /// `err` = 初始化失败（宿主标记插件 Failed，不影响其它插件）。
+  init: func() -> result<_, string>;
+
+  /// 处理一次 `coord.plugin.Invoke`。
+  ///
+  /// `method` 为插件自定义方法名（宿主不做语义解释），`payload` 为原始字节。
+  handle-invoke: func(method: string, payload: list<u8>) -> result<list<u8>, string>;
+
+  /// 停止（可选导出；卸载 / reload 时调用）。
+  stop: func();
+}
+
+world plugin {
+  import host;
+  export guest;
+}

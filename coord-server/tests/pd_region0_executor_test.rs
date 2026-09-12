@@ -163,7 +163,9 @@ async fn start_single_region0() -> Region0Host {
     .expect("create region0 raft");
     let mut members = BTreeMap::new();
     members.insert(1, new_basic_node(&raft_addr));
-    raft.initialize(members).await.expect("initialize region0 raft");
+    raft.initialize(members)
+        .await
+        .expect("initialize region0 raft");
     let raft = Arc::new(raft);
 
     // region 0 leader 就绪（单节点 quorum=1）
@@ -181,7 +183,10 @@ async fn start_single_region0() -> Region0Host {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    let system = Arc::new(CoordSystemRaftHandle::new(raft.as_ref().clone(), Arc::clone(&mvcc)));
+    let system = Arc::new(CoordSystemRaftHandle::new(
+        raft.as_ref().clone(),
+        Arc::clone(&mvcc),
+    ));
     Region0Host {
         mvcc,
         system,
@@ -191,7 +196,11 @@ async fn start_single_region0() -> Region0Host {
 
 /// 构造 driver（region 1 注册进 PD meta；节点 1 voter）+
 /// 执行器（node 1）+ region-1 raft handle 替身。
-fn make_driver_and_region_handle() -> (Arc<PlacementDriver>, watch::Sender<bool>, Arc<FakeRegionRaft>) {
+fn make_driver_and_region_handle() -> (
+    Arc<PlacementDriver>,
+    watch::Sender<bool>,
+    Arc<FakeRegionRaft>,
+) {
     let meta_store = Arc::new(PdMetaStore::new());
     meta_store
         .create_region(RegionMeta {
@@ -247,13 +256,7 @@ async fn test_global_queue_executor_claims_executes_completes_via_region0_raft()
     let ex = OperatorExecutor::new(Arc::clone(&driver), 1);
     let raft: Arc<dyn RegionRaftHandle> = region_raft.clone();
     let resolve: Arc<coord_server::pd::executor::RegionRaftResolver> =
-        Arc::new(move |rid| {
-            if rid == 1 {
-                Some(raft.clone())
-            } else {
-                None
-            }
-        });
+        Arc::new(move |rid| if rid == 1 { Some(raft.clone()) } else { None });
     let ran = ex.execute_one(&*resolve).await;
     assert!(ran.is_some(), "executor should process leader-owned op");
     assert_eq!(ran.unwrap().name(), "add-peer");
@@ -265,7 +268,9 @@ async fn test_global_queue_executor_claims_executes_completes_via_region0_raft()
     // PD meta 同步（executor 写穿）
     let meta = driver.meta_store().get_region(1).expect("region 1 meta");
     assert!(
-        meta.peers.iter().any(|p| p.node_id == 2 && p.role == PeerRole::Voter),
+        meta.peers
+            .iter()
+            .any(|p| p.node_id == 2 && p.role == PeerRole::Voter),
         "meta peers must include new voter: {:?}",
         meta.peers
     );
@@ -311,13 +316,7 @@ async fn test_global_queue_executor_leaves_op_for_other_region_leader() {
     let ex = OperatorExecutor::new(Arc::clone(&driver), 1);
     let raft: Arc<dyn RegionRaftHandle> = region_raft.clone();
     let resolve: Arc<coord_server::pd::executor::RegionRaftResolver> =
-        Arc::new(move |rid| {
-            if rid == 1 {
-                Some(raft.clone())
-            } else {
-                None
-            }
-        });
+        Arc::new(move |rid| if rid == 1 { Some(raft.clone()) } else { None });
 
     let ran = ex.execute_one(&*resolve).await;
     assert!(ran.is_none(), "op led by node2 must not run on node1");
@@ -325,7 +324,11 @@ async fn test_global_queue_executor_leaves_op_for_other_region_leader() {
     // 队列保持 Pending；无成员变更
     let entries = host.mvcc.pd_queue_entries().expect("read queue");
     assert_eq!(entries.len(), 1);
-    assert!(entries[0].is_pending(), "entry must stay pending: {:?}", entries[0]);
+    assert!(
+        entries[0].is_pending(),
+        "entry must stay pending: {:?}",
+        entries[0]
+    );
     assert_eq!(entries[0].claimed_by, 0);
     assert_eq!(region_raft.add_learner_calls.lock().unwrap().len(), 0);
     assert!(region_raft.promote_calls.lock().unwrap().is_empty());

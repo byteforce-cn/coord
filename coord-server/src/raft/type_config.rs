@@ -79,6 +79,38 @@ pub enum AuthOp {
     },
     /// 会话消费/删除（refresh 单次使用、登出、吊销同路径）
     ConsumeSession { hash_hex: String },
+    /// 角色授予能力（capability_id + scope；持久化到角色记录 `capability_grants`）
+    ///
+    /// 只允许末尾追加（bincode 变体索引 = 旧日志/快照升级兼容）。
+    RoleGrantCapability {
+        role: String,
+        capability_id: String,
+        scope: String,
+    },
+    /// 角色撤销能力（精确匹配 capability_id + scope）
+    RoleRevokeCapability {
+        role: String,
+        capability_id: String,
+        scope: String,
+    },
+    /// 动态签发 agent bootstrap 令牌（TTL + 一次性）
+    ///
+    /// 明文令牌**不入日志**：只落 SHA256 hex（`hash_hex`），
+    /// 与 `IssueSession` 同口径。持久化到 `/_sys/auth/bootstrap/{id}`。
+    IssueBootstrapToken {
+        /// 令牌 ID（revoke / 列表用；非密文）
+        id: String,
+        /// 令牌的 SHA256 hex（存储键，不落明文）
+        hash_hex: String,
+        label: String,
+        created_by: String,
+        created_at_unix: u64,
+        expires_at_unix: u64,
+    },
+    /// 消费 bootstrap 令牌（一次性；标记 consumed_at，保留记录供审计）
+    ConsumeBootstrapToken { id: String, consumed_at_unix: u64 },
+    /// 撤销（删除）bootstrap 令牌
+    RevokeBootstrapToken { id: String },
 }
 
 // ──── PD 全局调度命令（/ 见 docs）────
@@ -151,12 +183,7 @@ pub struct PdQueueEntry {
 
 impl PdQueueEntry {
     /// 新建 Pending 条目（op_id = Enqueue 日志 index）
-    pub fn new_pending(
-        op_id: u64,
-        op: Operator,
-        requester: NodeID,
-        proposed_at_unix: i64,
-    ) -> Self {
+    pub fn new_pending(op_id: u64, op: Operator, requester: NodeID, proposed_at_unix: i64) -> Self {
         Self {
             op_id,
             op,
@@ -183,9 +210,7 @@ impl PdQueueEntry {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.status,
-            OperatorStatus::Success
-                | OperatorStatus::Failed(_)
-                | OperatorStatus::Cancelled
+            OperatorStatus::Success | OperatorStatus::Failed(_) | OperatorStatus::Cancelled
         )
     }
 
@@ -246,8 +271,7 @@ impl PdQueueEntry {
 
     /// bincode 序列化（redb 原始行）
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self)
-            .map_err(|e| Error::Internal(format!("encode pd queue entry: {e}")))
+        bincode::serialize(self).map_err(|e| Error::Internal(format!("encode pd queue entry: {e}")))
     }
 
     /// bincode 反序列化（损坏行返回 None，调用方跳过）
@@ -265,15 +289,20 @@ impl PdQueueEntry {
 ///
 /// 语义（apply 内确定性执行，`storage::object_store::apply_object_store_op`）：
 /// - Begin：已存在（Committed/Creating）→ no-op 冲突；tombstone 后允许重建；
+///   `total_size == 0` = **未知长度**（Commit 时按实际字节定长）；
 /// - Chunk：按 seq 严格递增追加（并发/重试重叠 → no-op）；数据 ≤ chunk_size，
-///   累计 ≤ Begin 声明 total_size；文件先落盘、manifest 后提交（同 apply 串行）；
-/// - Commit：size==total_size 才置 committed（幂等）；不符 → no-op（GC 收尾）；
+///   累计 ≤ Begin 声明 total_size（未知长度时以 `max_object_size` 为上限）；
+///   文件先落盘、manifest 后提交（同 apply 串行）；
+/// - Commit：声明长度须 size==total_size，未知长度则**以 size 定长**，均置 committed
+///   （幂等）；不符/无数据 → no-op（GC 收尾）；
 /// - Delete：KV tombstone + 同步删除 chunk 文件（幂等；no-op 也消耗 revision）。
 ///
 /// **末尾追加**（bincode 变体索引兼容；勿插队）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ObjectStoreOp {
     /// 开始上传：创建 Creating manifest（声明期望总字节数）。
+    /// `total_size == 0` = **未知长度**（Commit 时按实际累计字节定长）；
+    /// `> 0` = 声明长度（Commit 要求严格相等）。
     /// `started_at_unix` 由提议侧填墙钟（apply 不读墙钟，先例同 PdQueueEntry）。
     Begin {
         bucket: Vec<u8>,
@@ -378,9 +407,14 @@ pub enum Response {
         revision: u64,
     },
     /// Delete 操作结果
-    Delete { revision: u64 },
+    Delete {
+        revision: u64,
+    },
     /// DeleteRange 操作结果（R-SVC-07）
-    DeleteRange { revision: u64, deleted: u64 },
+    DeleteRange {
+        revision: u64,
+        deleted: u64,
+    },
     /// Txn 操作结果
     Txn {
         /// 条件是否全部满足
@@ -391,14 +425,23 @@ pub enum Response {
         responses: Vec<TxnOpResponse>,
     },
     /// Lease 操作结果
-    Lease { revision: u64 },
+    Lease {
+        revision: u64,
+    },
     /// Auth 操作结果
-    Auth { revision: u64 },
+    Auth {
+        revision: u64,
+    },
     /// Compact 操作结果：实际生效的 compacted revision
     /// 对象存储数据面操作结果：op 是否达成语义期望
     /// （Begin 冲突/Chunk 顺序错乱/Commit 字节不符/Delete no-op → ok=false）
-    ObjectStore { revision: u64, ok: bool },
-    Compact { compacted_revision: u64 },
+    ObjectStore {
+        revision: u64,
+        ok: bool,
+    },
+    Compact {
+        compacted_revision: u64,
+    },
 }
 
 impl std::fmt::Display for Response {

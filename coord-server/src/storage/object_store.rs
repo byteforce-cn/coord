@@ -121,14 +121,10 @@ pub fn validate_ref(bucket: &[u8], object_id: &[u8]) -> Result<()> {
         return Err(Error::InvalidArgument("bucket must not be empty".into()));
     }
     if bucket.len() > 255 {
-        return Err(Error::InvalidArgument(
-            "bucket must be <= 255 bytes".into(),
-        ));
+        return Err(Error::InvalidArgument("bucket must be <= 255 bytes".into()));
     }
     if bucket.contains(&b'/') {
-        return Err(Error::InvalidArgument(
-            "bucket must not contain '/'".into(),
-        ));
+        return Err(Error::InvalidArgument("bucket must not contain '/'".into()));
     }
     if object_id.is_empty() {
         return Err(Error::InvalidArgument("object_id must not be empty".into()));
@@ -210,7 +206,8 @@ pub struct ChunkRec {
 /// 对象 manifest。删除态不在本结构中——删除 = KV tombstone（get 返回 None）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectManifest {
-    /// Begin 声明的期望总字节数
+    /// 对象总字节数。上传中：Begin 声明的期望值，或 `0` = 未知长度；
+    /// 已 Commit：实际总字节数（未知长度在上传完成时定长）。
     pub total_size: u64,
     /// 已收 chunk 字节合计
     pub size: u64,
@@ -297,9 +294,8 @@ impl ChunkCrypto {
     /// （active = 最大 key_id）；无密钥文件（首启/快照安装清空后）bootstrap
     /// 首个 DEK（key_id=1）并原子落盘。`root` = raft 数据目录。
     fn load(root: &Path, root_key_hex: &str) -> Result<Self> {
-        let root_bytes = decode_hex(root_key_hex).map_err(|_| {
-            Error::InvalidArgument("object storage root key must be hex64".into())
-        })?;
+        let root_bytes = decode_hex(root_key_hex)
+            .map_err(|_| Error::InvalidArgument("object storage root key must be hex64".into()))?;
         if root_bytes.len() != ROOT_KEY_LEN {
             return Err(Error::InvalidArgument(
                 "object storage root key must be 32 bytes (hex64)".into(),
@@ -330,17 +326,15 @@ impl ChunkCrypto {
             entries.sort_by_key(|e| e.file_name());
             for entry in entries {
                 let fname = entry.file_name().to_string_lossy().to_string();
-                if let Some(rest) =
-                    fname.strip_prefix("dek-").and_then(|r| r.strip_suffix(".bin"))
+                if let Some(rest) = fname
+                    .strip_prefix("dek-")
+                    .and_then(|r| r.strip_suffix(".bin"))
                 {
                     let Ok(key_id) = u32::from_str_radix(rest, 16) else {
                         continue;
                     };
                     let raw = std::fs::read(entry.path()).map_err(|e| {
-                        Error::Storage(format!(
-                            "read wrapped DEK {}: {e}",
-                            entry.path().display()
-                        ))
+                        Error::Storage(format!("read wrapped DEK {}: {e}", entry.path().display()))
                     })?;
                     let dek = unwrap_dek_file(&kek, &raw)?;
                     if key_id > active_key_id {
@@ -355,8 +349,8 @@ impl ChunkCrypto {
                     }
                 } else if fname == "last_rotation" {
                     if let Ok(raw) = std::fs::read(entry.path()) {
-                        if raw.len() == 8 {
-                            last_rotation_unix = i64::from_be_bytes(raw.try_into().unwrap());
+                        if let Ok(bytes) = <[u8; 8]>::try_from(raw.as_slice()) {
+                            last_rotation_unix = i64::from_be_bytes(bytes);
                         }
                     }
                 }
@@ -392,13 +386,22 @@ impl ChunkCrypto {
             }),
         })
     }
+    /// 取内部状态锁。
+    ///
+    /// **中毒不 panic**（P0-F.4）：密钥环状态在持锁期间只做内存运算与
+    /// `persist_*` 调用，中毒后数据仍然自洽；取回内部值继续，而不是让
+    /// 整个对象存储因一次 panic 永久不可用。
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, ChunkKeyringInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn active_key_id(&self) -> u32 {
-        self.inner.lock().unwrap().active_key_id
+        self.lock_inner().active_key_id
     }
 
     /// 加密单个 chunk → v2 文件载荷：magic(5) || key_id(4 BE) || nonce(12) || ct
     fn encrypt_chunk(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.lock_inner();
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let cipher = Aes256Gcm::new_from_slice(&inner.active_dek)
             .map_err(|e| Error::Internal(format!("init chunk DEK: {e}")))?;
@@ -421,16 +424,24 @@ impl ChunkCrypto {
             && &bytes[..CHUNK_MAGIC.len()] == CHUNK_MAGIC
         {
             let key_id = u32::from_be_bytes(
-                bytes[CHUNK_MAGIC.len()..CHUNK_MAGIC.len() + KEY_ID_LEN]
-                    .try_into()
-                    .unwrap(),
+                <[u8; KEY_ID_LEN]>::try_from(
+                    &bytes[CHUNK_MAGIC.len()..CHUNK_MAGIC.len() + KEY_ID_LEN],
+                )
+                .map_err(|_| {
+                    Error::Internal(format!(
+                        "malformed chunk header key id ({})",
+                        path.display()
+                    ))
+                })?,
             );
-            let nonce: [u8; NONCE_LEN] = bytes
-                [CHUNK_MAGIC.len() + KEY_ID_LEN..CHUNK_MAGIC.len() + KEY_ID_LEN + NONCE_LEN]
-                .try_into()
-                .unwrap();
+            let nonce = <[u8; NONCE_LEN]>::try_from(
+                &bytes[CHUNK_MAGIC.len() + KEY_ID_LEN..CHUNK_MAGIC.len() + KEY_ID_LEN + NONCE_LEN],
+            )
+            .map_err(|_| {
+                Error::Internal(format!("malformed chunk header nonce ({})", path.display()))
+            })?;
             let ct = &bytes[CHUNK_MAGIC.len() + KEY_ID_LEN + NONCE_LEN..];
-            let dek = self.inner.lock().unwrap().dek(key_id).ok_or_else(|| {
+            let dek = self.lock_inner().dek(key_id).ok_or_else(|| {
                 Error::Internal(format!(
                     "chunk DEK key_id={key_id} unavailable ({})",
                     path.display()
@@ -446,18 +457,17 @@ impl ChunkCrypto {
         if bytes.len() >= CHUNK_MAGIC_V1.len() + NONCE_LEN
             && &bytes[..CHUNK_MAGIC_V1.len()] == CHUNK_MAGIC_V1
         {
-            let nonce: [u8; NONCE_LEN] =
-                bytes[CHUNK_MAGIC_V1.len()..CHUNK_MAGIC_V1.len() + NONCE_LEN]
-                    .try_into()
-                    .unwrap();
+            let nonce = <[u8; NONCE_LEN]>::try_from(
+                &bytes[CHUNK_MAGIC_V1.len()..CHUNK_MAGIC_V1.len() + NONCE_LEN],
+            )
+            .map_err(|_| {
+                Error::Internal(format!("malformed legacy chunk nonce ({})", path.display()))
+            })?;
             let ct = &bytes[CHUNK_MAGIC_V1.len() + NONCE_LEN..];
             let cipher = Aes256Gcm::new_from_slice(&self.legacy_root_dek)
                 .map_err(|e| Error::Internal(format!("init legacy chunk cipher: {e}")))?;
             return cipher.decrypt(Nonce::from_slice(&nonce), ct).map_err(|_| {
-                Error::Internal(format!(
-                    "legacy chunk decrypt failed ({})",
-                    path.display()
-                ))
+                Error::Internal(format!("legacy chunk decrypt failed ({})", path.display()))
             });
         }
         Err(Error::Internal(format!(
@@ -469,7 +479,7 @@ impl ChunkCrypto {
     /// DEK 轮换：生成新 DEK（next key_id）、包裹落盘、原子切换 active；
     /// 旧 DEK 移入退役缓存。返回新 key_id。
     fn rotate(&self) -> Result<u32> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock_inner();
         let key_id = inner.next_key_id;
         let (dek, _) = gen_dek(key_id);
         persist_wrapped_dek(&self.kek, &self.keys_dir, key_id, &dek)?;
@@ -495,7 +505,7 @@ impl ChunkCrypto {
             return Ok(0);
         }
         let now = now_unix();
-        let last = self.inner.lock().unwrap().last_rotation_unix;
+        let last = self.lock_inner().last_rotation_unix;
         if now.saturating_sub(last) < rotation_secs as i64 {
             return Ok(0);
         }
@@ -580,9 +590,8 @@ fn atomic_write_file(path: &Path, data: &[u8]) -> Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| Error::Internal("key path has no parent".into()))?;
-    std::fs::create_dir_all(dir).map_err(|e| {
-        Error::Storage(format!("create key dir {}: {e}", dir.display()))
-    })?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| Error::Storage(format!("create key dir {}: {e}", dir.display())))?;
     let fname = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -654,9 +663,7 @@ impl ChunkStore {
 
     fn object_dir(&self, bucket: &[u8], object_id: &[u8]) -> PathBuf {
         let h = object_dir_hash(bucket, object_id);
-        self.objects_dir()
-            .join(&h[..2])
-            .join(&h)
+        self.objects_dir().join(&h[..2]).join(&h)
     }
 
     pub fn chunk_path(&self, bucket: &[u8], object_id: &[u8], seq: u32) -> PathBuf {
@@ -669,14 +676,19 @@ impl ChunkStore {
     }
 
     /// apply 路径写入（阻塞）：加密（若启用）+ 原子 rename。幂等（同 seq 同内容）。
-    pub fn write_chunk(&self, bucket: &[u8], object_id: &[u8], seq: u32, data: &[u8]) -> Result<()> {
+    pub fn write_chunk(
+        &self,
+        bucket: &[u8],
+        object_id: &[u8],
+        seq: u32,
+        data: &[u8],
+    ) -> Result<()> {
         let path = self.chunk_path(bucket, object_id, seq);
         let dir = path
             .parent()
             .ok_or_else(|| Error::Internal("chunk path has no parent".into()))?;
-        std::fs::create_dir_all(dir).map_err(|e| {
-            Error::Storage(format!("create chunk dir {}: {e}", dir.display()))
-        })?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| Error::Storage(format!("create chunk dir {}: {e}", dir.display())))?;
         let tmp = dir.join(format!(".chunk-{seq:08}.tmp"));
 
         let payload = match &self.crypto {
@@ -733,9 +745,8 @@ impl ChunkStore {
         let dir = self.object_dir(bucket, object_id);
         let fan = dir.parent().unwrap_or(&dir);
         if dir.is_dir() {
-            std::fs::remove_dir_all(&dir).map_err(|e| {
-                Error::Storage(format!("remove object dir {}: {e}", dir.display()))
-            })?;
+            std::fs::remove_dir_all(&dir)
+                .map_err(|e| Error::Storage(format!("remove object dir {}: {e}", dir.display())))?;
         }
         // 顺带清理空 fan-out 目录（尽力而为）
         if fan != self.objects_dir() && fan.is_dir() {
@@ -748,9 +759,8 @@ impl ChunkStore {
     pub fn clear_all(&self) -> Result<()> {
         let dir = self.objects_dir();
         if dir.is_dir() {
-            std::fs::remove_dir_all(&dir).map_err(|e| {
-                Error::Storage(format!("clear object dir {}: {e}", dir.display()))
-            })?;
+            std::fs::remove_dir_all(&dir)
+                .map_err(|e| Error::Storage(format!("clear object dir {}: {e}", dir.display())))?;
         }
         Ok(())
     }
@@ -777,7 +787,7 @@ impl ChunkStore {
     pub fn dek_version_count(&self) -> usize {
         match &self.crypto {
             Some(crypto) => {
-                let inner = crypto.inner.lock().unwrap();
+                let inner = crypto.lock_inner();
                 1 + inner.retired.len()
             }
             None => 0,
@@ -792,9 +802,9 @@ impl ChunkStore {
         if !dir.is_dir() {
             return Ok(0);
         }
-        for entry in std::fs::read_dir(&dir).map_err(|e| {
-            Error::Storage(format!("read object dir {}: {e}", dir.display()))
-        })? {
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| Error::Storage(format!("read object dir {}: {e}", dir.display())))?
+        {
             let entry = entry.map_err(|e| Error::Storage(format!("object dir entry: {e}")))?;
             if !entry.path().is_dir() {
                 continue;
@@ -804,9 +814,9 @@ impl ChunkStore {
                 continue;
             }
             let fan = entry.path();
-            for obj in std::fs::read_dir(&fan).map_err(|e| {
-                Error::Storage(format!("read fan dir {}: {e}", fan.display()))
-            })? {
+            for obj in std::fs::read_dir(&fan)
+                .map_err(|e| Error::Storage(format!("read fan dir {}: {e}", fan.display())))?
+            {
                 let obj = obj.map_err(|e| Error::Storage(format!("fan dir entry: {e}")))?;
                 if !obj.path().is_dir() {
                     continue;
@@ -832,17 +842,17 @@ impl ChunkStore {
             return Ok(0);
         }
         let mut removed = 0u64;
-        for entry in std::fs::read_dir(&dir).map_err(|e| {
-            Error::Storage(format!("read object dir {}: {e}", dir.display()))
-        })? {
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| Error::Storage(format!("read object dir {}: {e}", dir.display())))?
+        {
             let entry = entry.map_err(|e| Error::Storage(format!("object dir entry: {e}")))?;
             let fan = entry.path();
             if !fan.is_dir() {
                 continue;
             }
-            for sub in std::fs::read_dir(&fan).map_err(|e| {
-                Error::Storage(format!("read fan dir {}: {e}", fan.display()))
-            })? {
+            for sub in std::fs::read_dir(&fan)
+                .map_err(|e| Error::Storage(format!("read fan dir {}: {e}", fan.display())))?
+            {
                 let sub = sub.map_err(|e| Error::Storage(format!("fan dir entry: {e}")))?;
                 let name = sub.file_name();
                 let name = name.to_string_lossy().to_string();
@@ -869,7 +879,7 @@ fn file_size(path: &Path) -> Option<u64> {
 
 fn decode_hex(s: &str) -> std::result::Result<Vec<u8>, ()> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(());
     }
     (0..s.len())
@@ -902,7 +912,9 @@ pub fn apply_object_store_op(
     }
 
     let (bucket, object_id) = match op {
-        ObjectStoreOp::Begin { bucket, object_id, .. }
+        ObjectStoreOp::Begin {
+            bucket, object_id, ..
+        }
         | ObjectStoreOp::Chunk {
             bucket, object_id, ..
         }
@@ -913,7 +925,9 @@ pub fn apply_object_store_op(
 
     match op {
         ObjectStoreOp::Begin {
-            total_size, started_at_unix, ..
+            total_size,
+            started_at_unix,
+            ..
         } => {
             // 已存在（Committed 或 Creating）→ 冲突；已删除（tombstone，get=None）
             // 允许重建。
@@ -922,10 +936,8 @@ pub fn apply_object_store_op(
                 sm.persist_applied(revision, applied)?;
                 return Ok(false);
             }
-            if *total_size == 0 {
-                sm.persist_applied(revision, applied)?;
-                return Ok(false);
-            }
+            // `total_size == 0` = 未知长度（批次 11）：合法，仅在 Commit 时定长；
+            // 上限由 Chunk 分支按 `max_object_size` 兜底。
             let m = ObjectManifest::creating(*total_size, revision, *started_at_unix);
             let bytes = m.to_bytes()?;
             let _ = sm.put_at_revision(&key, &bytes, None, revision, applied)?;
@@ -961,9 +973,13 @@ pub fn apply_object_store_op(
                 sm.persist_applied(revision, applied)?;
                 return Ok(false);
             }
-            if m.size + data.len() as u64 > m.total_size
-                || m.total_size > store.limits.max_object_size
-            {
+            // 声明长度 = 硬上限；未知长度（0）→ 以 `max_object_size` 为上限。
+            let bound = if m.total_size == 0 {
+                store.limits.max_object_size
+            } else {
+                m.total_size
+            };
+            if m.size + data.len() as u64 > bound || m.total_size > store.limits.max_object_size {
                 sm.persist_applied(revision, applied)?;
                 return Ok(false);
             }
@@ -998,7 +1014,16 @@ pub fn apply_object_store_op(
                 sm.persist_applied(revision, applied)?;
                 return Ok(true);
             }
-            if m.size != m.total_size || m.chunks.is_empty() {
+            if m.chunks.is_empty() {
+                // 无数据（客户端中断）：拒绝，留待 GC
+                sm.persist_applied(revision, applied)?;
+                return Ok(false);
+            }
+            if m.total_size == 0 {
+                // 未知长度（批次 11）：以实际累计字节**定长**后提交。
+                // Chunk 分支已按 `max_object_size` 封顶，这里不再重复校验。
+                m.total_size = m.size;
+            } else if m.size != m.total_size {
                 // 字节数与 Begin 声明不符（客户端中断/撒谎）：拒绝，留待 GC
                 sm.persist_applied(revision, applied)?;
                 return Ok(false);
@@ -1044,10 +1069,11 @@ pub fn read_manifest(
     }
 }
 
+/// 对象 manifest 行：(bucket, object_id, manifest)
+pub type ManifestRow = (Vec<u8>, Vec<u8>, ObjectManifest);
+
 /// 列出全部对象 manifest（`/obj/m/` 前缀，跳过已删除），返回 (bucket, object_id, manifest)。
-pub fn list_manifests(
-    sm: &MvccStorage<RedbBackend>,
-) -> Result<Vec<(Vec<u8>, Vec<u8>, ObjectManifest)>> {
+pub fn list_manifests(sm: &MvccStorage<RedbBackend>) -> Result<Vec<ManifestRow>> {
     let rows = sm.range(MANIFEST_PREFIX, 0)?;
     let mut out = Vec::with_capacity(rows.len());
     for (key, value) in rows {
@@ -1062,9 +1088,7 @@ pub fn list_manifests(
 }
 
 /// live 对象目录哈希集（孤儿回收用）
-pub fn live_object_hashes(
-    manifests: &[(Vec<u8>, Vec<u8>, ObjectManifest)],
-) -> HashSet<String> {
+pub fn live_object_hashes(manifests: &[(Vec<u8>, Vec<u8>, ObjectManifest)]) -> HashSet<String> {
     manifests
         .iter()
         .map(|(b, id, _)| object_dir_hash(b, id))
@@ -1079,13 +1103,10 @@ pub fn read_manifest_chunk(
     object_id: &[u8],
     seq: u32,
 ) -> Result<Vec<u8>> {
-    let rec = m
-        .chunks
-        .get(seq as usize)
-        .ok_or_else(|| Error::NotFound {
-            resource: "object chunk",
-            key: seq.to_string(),
-        })?;
+    let rec = m.chunks.get(seq as usize).ok_or_else(|| Error::NotFound {
+        resource: "object chunk",
+        key: seq.to_string(),
+    })?;
     let data = store.read_chunk(bucket, object_id, seq)?;
     if data.len() as u64 != rec.len {
         return Err(Error::Internal(format!(
@@ -1196,7 +1217,9 @@ mod tests {
     #[test]
     fn test_chunk_store_bad_key() {
         let dir = tempfile::TempDir::new().unwrap();
-        assert!(ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), Some("zz")).is_err());
+        assert!(
+            ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), Some("zz")).is_err()
+        );
     }
 
     /// 测试辅助：递归收集 `<root>/objects/` 下 chunk-* 文件（不含 keys/）
@@ -1238,7 +1261,8 @@ mod tests {
 
         // 加密：usage = 落盘 chunk 文件字节合计（keys/ 目录 DEK 密文不计入）
         let key = "ab".repeat(32);
-        let enc = ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), Some(&key)).unwrap();
+        let enc =
+            ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), Some(&key)).unwrap();
         enc.write_chunk(b"b", b"o", 2, b"zz").unwrap();
         let mut on_disk = 0u64;
         for f in chunk_files_for_test(dir.path()) {
@@ -1259,7 +1283,8 @@ mod tests {
         assert!(!store.chunk_file_exists(b"dead", b"o2", 0));
         // keys 目录不被孤儿回收误删
         let key = "ab".repeat(32);
-        let enc = ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), Some(&key)).unwrap();
+        let enc =
+            ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), Some(&key)).unwrap();
         enc.write_chunk(b"live", b"o1", 1, b"c").unwrap();
         let live2: HashSet<String> = vec![object_dir_hash(b"live", b"o1")].into_iter().collect();
         assert_eq!(enc.sweep_orphans(&live2).unwrap(), 0);
@@ -1321,8 +1346,12 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let key_hex = "ab".repeat(32);
         let key_bytes = decode_hex(&key_hex).unwrap();
-        let store =
-            ChunkStore::new(dir.path(), Arc::new(ObjectLimits::default()), Some(&key_hex)).unwrap();
+        let store = ChunkStore::new(
+            dir.path(),
+            Arc::new(ObjectLimits::default()),
+            Some(&key_hex),
+        )
+        .unwrap();
         let path = store.chunk_path(b"b", b"legacy", 0);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);

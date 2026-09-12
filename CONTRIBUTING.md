@@ -4,7 +4,7 @@
 
 ## 开发环境
 
-- **Rust**: 1.93.0（见 `rust-toolchain.toml`）
+- **Rust**: 1.98.1（见 `rust-toolchain.toml`）
 - **Java**: 21+（仅 `coord-spring-boot-starter` 与 `java-example` 模块需要）
 - **Node.js**: 22.x（仅 `coord-ui` 模块需要）
 - **构建工具**: Cargo / Maven / pnpm

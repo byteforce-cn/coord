@@ -576,7 +576,7 @@ pub async fn list_versions(
     }
 
     // 按版本号降序排列（最新在前）
-    versions.sort_by(|a, b| b.version.cmp(&a.version));
+    versions.sort_by_key(|v| std::cmp::Reverse(v.version));
 
     ok_json(json!(versions)).into_response()
 }

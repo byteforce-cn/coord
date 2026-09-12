@@ -83,9 +83,7 @@ impl Scheduler for SplitChecker {
             let total_size = region
                 .approximate_size
                 .saturating_add(ctx.storage_bytes_of(region.region_id));
-            if total_size >= self.size_threshold
-                || region.approximate_keys >= self.keys_threshold
-            {
+            if total_size >= self.size_threshold || region.approximate_keys >= self.keys_threshold {
                 // 优先使用采样 Key 的中位数，无样本时回退到数学中点
                 let split_key = if let Some(samples) = ctx.region_sample_keys.get(&region.region_id)
                 {
@@ -1590,9 +1588,7 @@ mod tests {
         assert_eq!(ops.len(), 1, "storage-heavy region must not be moved");
         match &ops[0] {
             Operator::AddPeer {
-                region_id,
-                node_id,
-                ..
+                region_id, node_id, ..
             } => {
                 assert_eq!(*region_id, 2);
                 assert_eq!(*node_id, 2);
@@ -1638,10 +1634,7 @@ mod tests {
         let ops = sched.schedule(&ctx);
         assert_eq!(ops.len(), 1, "storage-heavy region leader must not move");
         match &ops[0] {
-            Operator::TransferLeader {
-                region_id,
-                to_node,
-            } => {
+            Operator::TransferLeader { region_id, to_node } => {
                 assert_eq!(*region_id, 2);
                 assert_eq!(*to_node, 2);
             }

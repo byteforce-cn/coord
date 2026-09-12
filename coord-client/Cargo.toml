@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 coord-proto = { workspace = true }
 coord-core = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }

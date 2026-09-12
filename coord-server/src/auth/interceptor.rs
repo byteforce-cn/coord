@@ -519,10 +519,16 @@ pub fn infer_capability(rpc_method: &str) -> Option<String> {
         "/coord.auth.Auth/RoleDelete" => Some("admin:auth:role_delete".into()),
         "/coord.auth.Auth/RoleGrantPermission" => Some("admin:auth:role_grant".into()),
         "/coord.auth.Auth/RoleRevokePermission" => Some("admin:auth:role_revoke".into()),
+        "/coord.auth.Auth/RoleGrantCapability" => Some("admin:auth:role_grant".into()),
+        "/coord.auth.Auth/RoleRevokeCapability" => Some("admin:auth:role_revoke".into()),
         "/coord.auth.Auth/RoleList" => Some("admin:auth:role_list".into()),
         "/coord.auth.Auth/ListRoles" => Some("admin:auth:role_list".into()),
         "/coord.auth.Auth/UserGrantRole" => Some("admin:auth:user_grant_role".into()),
         "/coord.auth.Auth/UserRevokeRole" => Some("admin:auth:user_revoke_role".into()),
+        // 动态 bootstrap 令牌管理（签发/列表/撤销同一能力）
+        "/coord.auth.Auth/BootstrapTokenIssue" => Some("admin:auth:bootstrap_token".into()),
+        "/coord.auth.Auth/BootstrapTokenList" => Some("admin:auth:bootstrap_token".into()),
+        "/coord.auth.Auth/BootstrapTokenRevoke" => Some("admin:auth:bootstrap_token".into()),
 
         // Capability 查询
         "/coord.capability.CapabilityRegistry/List" => Some("admin:capability:list".into()),
@@ -534,17 +540,20 @@ pub fn infer_capability(rpc_method: &str) -> Option<String> {
 
         // Authenticate 为登录端点，白名单放行（见 is_whitelisted）
         "/coord.auth.Auth/Authenticate" => None,
-        "/coord.auth.Auth/Bootstrap" => None, // bootstrap 需一次性 token，服务内自校验
         "/coord.auth.Auth/GetRevocationDelta" => None, // agent 角色同步，依赖 CCT（见 ServerAuthService 特判）
 
         _ => None, // 未知 RPC —— 默认拒绝（fail-closed）
     }
 }
 
-/// 匿名白名单：仅健康检查与登录端点匿名可访问。
+/// 匿名白名单：健康检查、登录端点，以及**自证凭据**的引导端点匿名可访问。
 ///
 /// `GetRevocationDelta` 需要合法 CCT 但属于公开的角色同步端点，
 /// 由服务自身校验（agent 高频调用，不走角色授权）。
+///
+/// `Bootstrap` 用**一次性引导令牌**自证（令牌在服务内校验并消费），
+/// 与 Authenticate / RefreshToken 同为认证前置端点——若不放行，
+/// 拦截器会在服务自校验前以 "unknown RPC" fail-closed 拒绝，引导链路不可用。
 pub fn is_whitelisted(rpc_method: &str) -> bool {
     matches!(
         rpc_method,
@@ -553,6 +562,8 @@ pub fn is_whitelisted(rpc_method: &str) -> bool {
             // refresh 与登录同为认证前置端点（凭 refresh token 自证，
             // 服务端校验单次使用语义）
             | "/coord.auth.Auth/RefreshToken"
+            // 引导令牌（一次性，服务内校验 + 消费）
+            | "/coord.auth.Auth/Bootstrap"
     )
 }
 
@@ -988,6 +999,26 @@ mod tests {
     #[test]
     fn test_is_trusted_agent_cn_handles_none() {
         assert!(!is_trusted_agent_cn(None));
+    }
+
+    // ──── 匿名白名单 ────
+
+    #[test]
+    fn test_is_whitelisted_pre_auth_endpoints() {
+        // 认证前置端点：健康检查 + 登录 + 引导（自证一次性令牌）
+        assert!(is_whitelisted("/grpc.health.v1.Health/Check"));
+        assert!(is_whitelisted("/coord.auth.Auth/Authenticate"));
+        assert!(is_whitelisted("/coord.auth.Auth/RefreshToken"));
+        assert!(
+            is_whitelisted("/coord.auth.Auth/Bootstrap"),
+            "Bootstrap 必须在服务自校验一次性令牌前放行（否则引导链路不可达）"
+        );
+
+        // 数据面 / 管理面不得匿名
+        assert!(!is_whitelisted("/coord.kv.KV/Put"));
+        assert!(!is_whitelisted("/coord.kv.KV/Range"));
+        assert!(!is_whitelisted("/coord.auth.Auth/UserAdd"));
+        assert!(!is_whitelisted("/coord.auth.Auth/RoleGrantCapability"));
     }
 
     // ──── High-Risk Operations ────

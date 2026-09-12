@@ -467,9 +467,15 @@ impl Metrics {
 
     /// P3：上报 region 0 PD 全局队列深度（gauge；leader 每 tick 设置）
     pub fn set_pd_queue_depth(&self, pending: u64, running: u64, terminal: u64) {
-        self.inner.pd_queue_pending.store(pending, Ordering::Relaxed);
-        self.inner.pd_queue_running.store(running, Ordering::Relaxed);
-        self.inner.pd_queue_terminal.store(terminal, Ordering::Relaxed);
+        self.inner
+            .pd_queue_pending
+            .store(pending, Ordering::Relaxed);
+        self.inner
+            .pd_queue_running
+            .store(running, Ordering::Relaxed);
+        self.inner
+            .pd_queue_terminal
+            .store(terminal, Ordering::Relaxed);
     }
 
     /// 设置本节点 Leader 数量
@@ -812,21 +818,27 @@ impl Metrics {
             inner.pd_operator_requeued_total.load(Ordering::Relaxed)
         ));
 
-        out.push_str("\n# HELP coord_pd_queue_pending Pending operators in the region-0 PD queue\n");
+        out.push_str(
+            "\n# HELP coord_pd_queue_pending Pending operators in the region-0 PD queue\n",
+        );
         out.push_str("# TYPE coord_pd_queue_pending gauge\n");
         out.push_str(&format!(
             "coord_pd_queue_pending {}\n",
             inner.pd_queue_pending.load(Ordering::Relaxed)
         ));
 
-        out.push_str("\n# HELP coord_pd_queue_running Running operators in the region-0 PD queue\n");
+        out.push_str(
+            "\n# HELP coord_pd_queue_running Running operators in the region-0 PD queue\n",
+        );
         out.push_str("# TYPE coord_pd_queue_running gauge\n");
         out.push_str(&format!(
             "coord_pd_queue_running {}\n",
             inner.pd_queue_running.load(Ordering::Relaxed)
         ));
 
-        out.push_str("\n# HELP coord_pd_queue_terminal Terminal operators in the region-0 PD queue\n");
+        out.push_str(
+            "\n# HELP coord_pd_queue_terminal Terminal operators in the region-0 PD queue\n",
+        );
         out.push_str("# TYPE coord_pd_queue_terminal gauge\n");
         out.push_str(&format!(
             "coord_pd_queue_terminal {}\n",

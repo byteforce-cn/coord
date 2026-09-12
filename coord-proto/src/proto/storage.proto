@@ -44,7 +44,7 @@ message PutRequest {
 message PutMeta {
   string bucket = 1;
   bytes object_id = 2;
-  int64 total_size = 3; // 期望总字节数（>0；配额预估与最终校验）
+  int64 total_size = 3; // 期望总字节数：>0 = 声明（Commit 须相等）；-1 = 未知（流末定长）
 }
 
 message PutResponse {

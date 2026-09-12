@@ -119,6 +119,29 @@ impl std::fmt::Display for RateLimitError {
 
 impl std::error::Error for RateLimitError {}
 
+// ──── BaseService：插件生命周期 ────
+//
+// 令牌桶全在内存（重构在构造期完成）：构造即就绪，`start`/`stop` 为登记性动作。
+
+#[async_trait::async_trait]
+impl crate::service::BaseService for RateLimiterService {
+    fn name(&self) -> &'static str {
+        "rate_limiter"
+    }
+
+    async fn start(&self) -> crate::service::ServiceResult<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> crate::service::ServiceResult<()> {
+        Ok(())
+    }
+
+    fn health_check(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -257,7 +257,12 @@ fn make_pd_on(hosts: &[NodeHost], leader_idx: usize) -> (Arc<PlacementDriver>, O
 
     let config = PdConfig::default();
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let pd = Arc::new(PlacementDriver::new(config, meta_store, shutdown_rx, hosts[leader_idx].node_id));
+    let pd = Arc::new(PlacementDriver::new(
+        config,
+        meta_store,
+        shutdown_rx,
+        hosts[leader_idx].node_id,
+    ));
     let ex = OperatorExecutor::new(Arc::clone(&pd), hosts[leader_idx].node_id);
     (pd, ex)
 }

@@ -715,11 +715,9 @@ impl Mq for MessageQueueService {
         let topic = req.topic.clone();
         let group = req.consumer_group.clone();
         // redb 写事务移到阻塞线程池
-        self.run_blocking(move |me| {
-            me.commit_offset(&group, &topic, partition, req.offset as u64)
-        })
-        .await
-        .map_err(sanitized_internal)?;
+        self.run_blocking(move |me| me.commit_offset(&group, &topic, partition, req.offset as u64))
+            .await
+            .map_err(sanitized_internal)?;
         Ok(Response::new(MqAckResponse {}))
     }
 
@@ -818,6 +816,10 @@ pub struct ReplicaRouter {
     manager: Arc<ReplicationManager>,
     mq: Option<Arc<MessageQueueService>>,
     cache: Option<Arc<CacheService>>,
+    /// 自身弱引用：心跳任务的签名是 `start_heartbeat(self: &Arc<Self>, ...)`，
+    /// 而 `BaseService::start(&self)` 只有 `&self` —— 与 Cache/MQ 数据面服务
+    /// 同一模式（装配后 `bind_self_weak` 一次）。
+    self_arc: parking_lot::RwLock<Option<std::sync::Weak<ReplicaRouter>>>,
 }
 
 impl ReplicaRouter {
@@ -826,11 +828,64 @@ impl ReplicaRouter {
         mq: Option<Arc<MessageQueueService>>,
         cache: Option<Arc<CacheService>>,
     ) -> Self {
-        Self { manager, mq, cache }
+        Self {
+            manager,
+            mq,
+            cache,
+            self_arc: parking_lot::RwLock::new(None),
+        }
+    }
+
+    /// 绑定自身弱引用（装配后调用一次），使插件生命周期能驱动 ISR 心跳。
+    pub fn bind_self_weak(&self, me: &Arc<Self>) {
+        *self.self_arc.write() = Some(Arc::downgrade(me));
+    }
+
+    /// 升级自身强引用（未绑定 / 已释放 → None）。
+    pub fn self_arc(&self) -> Option<Arc<Self>> {
+        self.self_arc.read().as_ref().and_then(|w| w.upgrade())
     }
 
     pub fn manager(&self) -> Arc<ReplicationManager> {
         self.manager.clone()
+    }
+}
+
+// ──── BaseService：插件生命周期（心跳任务归插件所有）────
+//
+// 迁移前：心跳在 serve 装配期直接 `manager.start_heartbeat(router.clone())`，
+// 与任何生命周期无关（服务停止后心跳仍在跑）。
+// 迁移后：`start()` 启动心跳、`stop()` 停止心跳，由 `PluginManager` 统一驱动。
+
+#[async_trait::async_trait]
+impl crate::service::BaseService for ReplicaRouter {
+    fn name(&self) -> &'static str {
+        "replication"
+    }
+
+    async fn start(&self) -> crate::service::ServiceResult<()> {
+        match self.self_arc() {
+            Some(me) => {
+                me.manager.start_heartbeat(me.clone());
+                tracing::info!("ISR replication heartbeat started (plugin lifecycle)");
+                Ok(())
+            }
+            None => Err("replication router: self reference not bound \
+                         (bind_self_weak was not called during assembly)"
+                .into()),
+        }
+    }
+
+    async fn stop(&self) -> crate::service::ServiceResult<()> {
+        self.manager.stop_heartbeat();
+        tracing::info!("ISR replication heartbeat stopped (plugin lifecycle)");
+        Ok(())
+    }
+
+    fn health_check(&self) -> bool {
+        // 复制管理器始终可用（对端可达性由心跳/Reconcile 自行收敛，属数据面
+        // 质量而非服务健康）；就绪与否由插件的启动状态表达。
+        true
     }
 }
 
@@ -933,7 +988,9 @@ impl Replica for ReplicaRouter {
             let shard_id = entry.shard_id.clone();
             tokio::task::spawn_blocking(move || {
                 if shard_id.starts_with("mq:") {
-                    mq.as_ref().map(|m| m.last_local_sequence(&shard_id)).unwrap_or(0)
+                    mq.as_ref()
+                        .map(|m| m.last_local_sequence(&shard_id))
+                        .unwrap_or(0)
                 } else {
                     cache
                         .as_ref()

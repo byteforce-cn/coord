@@ -7,7 +7,7 @@
 // - Rate limiter + interceptor integration
 // - Revocation + bloom filter integration
 //
-// See 
+// See
 
 #[cfg(test)]
 mod tests {

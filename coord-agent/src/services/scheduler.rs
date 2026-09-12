@@ -307,13 +307,6 @@ impl BaseService for SchedulerService {
         "scheduler"
     }
 
-    fn register_grpc(
-        &self,
-        _router: tonic::transport::server::Router,
-    ) -> tonic::transport::server::Router {
-        _router
-    }
-
     async fn start(&self) -> ServiceResult<()> {
         // 启动过期认领清理后台任务
         Ok(())

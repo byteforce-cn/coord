@@ -9,8 +9,7 @@
 // - Security::RotateKeys: 无 proto RPC → 返回明确错误
 // - Member::*: 通过 tonic 直连 gRPC 调用 Maintenance::MemberAdd/Remove/Promote/List
 
-use std::path::Path;
-
+use coord_client::credential::{AuthedChannel, CachedTokenProvider, CredentialInterceptor};
 use coord_proto::kv::kv_client::KvClient;
 use coord_proto::kv::{PutRequest, RangeRequest};
 use coord_proto::maintenance::maintenance_client::MaintenanceClient;
@@ -18,11 +17,65 @@ use coord_proto::maintenance::{
     MemberAddRequest, MemberListRequest, MemberPromoteRequest, MemberRemoveRequest, SealRequest,
     SnapshotRequest, UnsealRequest,
 };
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 
-// ──── 集群连接参数（地址 + 可选 TLS/mTLS）────
+// ──── CLI 凭据（进程级）────
 
-/// CLI 集群连接参数：目标节点地址 + 可选 TLS/mTLS。
+/// 进程级 CLI 凭据（CCT / Bearer Token）。
+///
+/// 由 main.rs 从全局 `--token`（或 `COORD_TOKEN` 环境变量）设置一次。
+/// 鉴权开启的集群上，所有 CLI 管理命令（auth / member / capability …）
+/// 都需要携带该凭据；未设置时为 `None` → 出站拦截器 no-op（明文开发模式零破坏）。
+static CLI_TOKEN: OnceLock<String> = OnceLock::new();
+
+/// 设置进程级 CLI 凭据（幂等：仅在首次调用时生效）。
+///
+/// `coord auth login --token-only` 的输出可直接经 `--token` 或
+/// `COORD_TOKEN` 回灌给后续管理命令。
+pub fn set_cli_token(token: Option<String>) {
+    if let Some(token) = token {
+        if token.trim().is_empty() {
+            return;
+        }
+        let _ = CLI_TOKEN.set(token);
+    }
+}
+
+/// 当前进程级 CLI 凭据。
+fn cli_token() -> Option<String> {
+    CLI_TOKEN.get().cloned()
+}
+
+// ──── CLI 凭据文件（持久化 + 自动续期；批次 12）────
+
+/// 进程级凭据文件路径（由 main.rs 从全局 `--credentials`（env `COORD_CREDENTIALS`）
+/// 设置一次；缺省 = [`crate::credentials::default_path`]）。
+static CLI_CREDENTIALS_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+/// 设置凭据文件路径（幂等：仅在首次调用时生效）。
+pub fn set_cli_credentials(path: Option<PathBuf>) {
+    if let Some(path) = path {
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        let _ = CLI_CREDENTIALS_PATH.set(path);
+    }
+}
+
+/// 当前凭据文件路径。
+pub fn cli_credentials_path() -> PathBuf {
+    CLI_CREDENTIALS_PATH
+        .get()
+        .cloned()
+        .unwrap_or_else(crate::credentials::default_path)
+}
+
+// ──── 集群连接参数（地址 + 可选 TLS/mTLS + 可选凭据）────
+
+/// CLI 集群连接参数：目标节点地址 + 可选 TLS/mTLS（+ 进程级凭据）。
 ///
 /// 提供 `--tls-ca/--tls-cert/--tls-key/--tls-server-name` 时以 https+TLS 直连
 /// 生产（mTLS）集群；缺省 None = 明文 http（开发/内网 loopback）。
@@ -57,6 +110,101 @@ impl CliConn {
             endpoint = endpoint.tls_config(tls.to_tonic())?;
         }
         Ok(endpoint.connect().await?)
+    }
+
+    /// 建立**携带凭据**的 tonic 通道（`authorization: Bearer <cct>`）。
+    ///
+    /// 凭据来源（优先级）：
+    /// 1. 进程级 `--token` / `COORD_TOKEN`（显式覆盖）；
+    /// 2. 凭据文件（`coord auth login` 落盘）—— 地址一致且**临近/已过期**时
+    ///    先用 refresh token 自动续期并回写文件（批次 12）。
+    ///
+    /// 两者都缺失时拦截器为 no-op，与 `connect()` 等价（明文开发模式零行为变更）。
+    pub async fn connect_authed(&self) -> Result<AuthedChannel, Box<dyn std::error::Error>> {
+        let channel = self.connect().await?;
+        let token = match cli_token() {
+            Some(token) => Some(token),
+            None => self.stored_credential().await?,
+        };
+        let provider = Arc::new(CachedTokenProvider::new(token));
+        Ok(InterceptedService::new(
+            channel,
+            CredentialInterceptor::new(provider),
+        ))
+    }
+
+    /// 凭据文件中的可用 CCT（无 / 地址不匹配 → `None`）。
+    ///
+    /// 临近或已过期时自动续期：refresh token 换新 → **回写文件**（服务端单次使用，
+    /// 不回写会让文件立刻失效）→ 返回新 CCT。续期失败返回 `Err`（fail-closed：
+    /// 不静默带着过期凭据出站，而是提示重新登录）。
+    async fn stored_credential(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let path = cli_credentials_path();
+        let Some(stored) = crate::credentials::load(&path) else {
+            return Ok(None);
+        };
+        if stored.addr != self.addr {
+            tracing::debug!(
+                "credentials file {} targets {} (not {}); ignoring",
+                path.display(),
+                stored.addr,
+                self.addr
+            );
+            return Ok(None);
+        }
+        if !crate::credentials::needs_refresh(stored.expires_at, crate::credentials::now_secs()) {
+            return Ok(Some(stored.cct));
+        }
+        if !stored.can_refresh() {
+            return Err(format!(
+                "stored credential for {} expired at {} and has no refresh token; \
+                 run `coord auth login <user>` again",
+                self.addr, stored.expires_at
+            )
+            .into());
+        }
+        let refreshed = self.refresh_stored(&path, &stored).await?;
+        Ok(Some(refreshed))
+    }
+
+    /// 用凭据文件里的 refresh token 换新会话并回写文件。
+    async fn refresh_stored(
+        &self,
+        path: &Path,
+        stored: &crate::credentials::StoredCredentials,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let channel = self.connect().await?;
+        let mut client = AuthClient::new(channel);
+        let resp = client
+            .refresh_token(RefreshTokenRequest {
+                refresh_token: stored.refresh_token.clone(),
+            })
+            .await
+            .map_err(|e| format!("RefreshToken failed: {e}"))?
+            .into_inner();
+        let cct = if resp.cct.is_empty() {
+            resp.token.clone()
+        } else {
+            resp.cct.clone()
+        };
+        if cct.is_empty() {
+            return Err("RefreshToken returned an empty credential".into());
+        }
+        let updated = crate::credentials::StoredCredentials {
+            addr: stored.addr.clone(),
+            user: stored.user.clone(),
+            cct: cct.clone(),
+            // 单次使用：服务端返回新的 refresh token（空 = 只认本次 CCT，之后需重新登录）
+            refresh_token: resp.refresh_token.clone(),
+            expires_at: resp.expires_at,
+        };
+        crate::credentials::save(path, &updated)
+            .map_err(|e| format!("failed to persist refreshed credential: {e}"))?;
+        eprintln!(
+            "Notice: refreshed stored credential for {} (expires_at={})",
+            self.addr, resp.expires_at
+        );
+        Ok(cct)
     }
 }
 
@@ -153,6 +301,174 @@ pub async fn cmd_rotate_keys(_addr: &str) -> Result<(), Box<dyn std::error::Erro
     Err("RotateKeys is not yet implemented: no gRPC RPC defined in maintenance.proto".into())
 }
 
+/// 一键授予 agent 注册引导角色所需**最小能力集**（幂等）。
+///
+/// 背景：`Auth.Bootstrap` 签发的短期 CCT 携带 [`AGENT_BOOTSTRAP_ROLE`]，
+/// 但该角色**不预置任何能力**（服务端只内置 `root`）。此前需 operator 手工
+/// 逐条执行 `coord auth role add` + `coord auth role grant-capability`
+/// （见 `config.example.toml`）——本命令把该序列收敛为一次调用：
+///   1. `RoleAdd`（角色已存在视为成功，保证幂等）；
+///   2. 逐条 `RoleGrantCapability`（`RoleGrantCapability` 的 apply 视图自带去重）。
+///
+/// 能力清单取自 `coord_server::auth::AGENT_BOOTSTRAP_CAPABILITY_GRANTS`
+/// （`admin:auth:{user_add,role_add,role_grant,user_grant_role}`，**刻意不含数据面**），
+/// 与进程测试 `plugin_auth_process_test.rs` 使用同一常量——单一事实来源。
+///
+/// 前置条件：调用方持有管理员 CCT（经全局 `--token` / `COORD_TOKEN` 注入）。
+pub async fn cmd_security_bootstrap_role(
+    conn: impl Into<CliConn>,
+    role: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use coord_server::auth::{AGENT_BOOTSTRAP_CAPABILITY_GRANTS, AGENT_BOOTSTRAP_ROLE};
+
+    let conn = conn.into();
+    let role = role.unwrap_or(AGENT_BOOTSTRAP_ROLE);
+    if role.trim().is_empty() {
+        return Err("role name must not be empty".into());
+    }
+
+    let mut client = build_auth_client(&conn).await?;
+
+    // 1. 确保角色存在（已存在 → 幂等成功，继续补授能力）
+    match client
+        .role_add(RoleAddRequest {
+            name: role.to_string(),
+        })
+        .await
+    {
+        Ok(_) => println!("Role \"{role}\" created."),
+        Err(status) if status.code() == tonic::Code::AlreadyExists => {
+            println!("Role \"{role}\" already exists; ensuring capabilities.");
+        }
+        Err(status) => {
+            return Err(format!("RoleAdd(\"{role}\") failed: {status}").into());
+        }
+    }
+
+    // 2. 逐条授予引导最小能力集
+    for (capability_id, scope) in AGENT_BOOTSTRAP_CAPABILITY_GRANTS {
+        client
+            .role_grant_capability(RoleGrantCapabilityRequest {
+                role: role.to_string(),
+                capability_id: (*capability_id).to_string(),
+                scope: (*scope).to_string(),
+            })
+            .await
+            .map_err(|status| format!("RoleGrantCapability({capability_id}) failed: {status}"))?;
+        println!("  granted {capability_id}");
+    }
+
+    println!(
+        "Bootstrap role \"{role}\" ready: {} capabilities granted (idempotent).",
+        AGENT_BOOTSTRAP_CAPABILITY_GRANTS.len()
+    );
+    println!(
+        "Next: set [security].agent_bootstrap_tokens in the server config, then let agents \
+         exchange a one-time token via Auth.Bootstrap."
+    );
+    Ok(())
+}
+
+// ──── 动态 bootstrap 令牌（TTL + 一次性） ────
+
+/// 签发动态 bootstrap 令牌：`Auth.BootstrapTokenIssue`。
+///
+/// **明文令牌只在此响应中出现一次**（服务端仅存 SHA256，入 raft 日志的也是哈希），
+/// 因此 `--token-only` 的输出必须由调用方立刻保存。
+pub async fn cmd_security_bootstrap_token_create(
+    conn: impl Into<CliConn>,
+    label: &str,
+    ttl_secs: i64,
+    token_only: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
+    let resp = client
+        .bootstrap_token_issue(BootstrapTokenIssueRequest {
+            label: label.to_string(),
+            ttl_secs,
+        })
+        .await
+        .map_err(|e| format!("BootstrapTokenIssue failed: {e}"))?
+        .into_inner();
+
+    if token_only {
+        println!("{}", resp.token);
+        return Ok(());
+    }
+    println!("Bootstrap token issued (single use).");
+    println!("  id         : {}", resp.id);
+    println!(
+        "  label      : {}",
+        if label.is_empty() { "(none)" } else { label }
+    );
+    println!("  expires_at : {} (unix)", resp.expires_at);
+    println!("  token      : {}", resp.token);
+    println!();
+    println!("Store the token now: it is not recoverable (server keeps only SHA256).");
+    println!(
+        "Revoke with: coord security bootstrap-token revoke --id {}",
+        resp.id
+    );
+    Ok(())
+}
+
+/// 列出动态 bootstrap 令牌：`Auth.BootstrapTokenList`（不含明文）。
+pub async fn cmd_security_bootstrap_token_list(
+    conn: impl Into<CliConn>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
+    let tokens = client
+        .bootstrap_token_list(BootstrapTokenListRequest {})
+        .await
+        .map_err(|e| format!("BootstrapTokenList failed: {e}"))?
+        .into_inner()
+        .tokens;
+
+    if tokens.is_empty() {
+        println!("No bootstrap tokens.");
+        return Ok(());
+    }
+    println!(
+        "{:<38} {:<20} {:<14} {:<12} STATE",
+        "ID", "LABEL", "CREATED_BY", "EXPIRES_AT"
+    );
+    for t in tokens {
+        let state = if t.consumed { "consumed" } else { "unused" };
+        println!(
+            "{:<38} {:<20} {:<14} {:<12} {}",
+            t.id,
+            if t.label.is_empty() { "-" } else { &t.label },
+            t.created_by,
+            t.expires_at,
+            state
+        );
+    }
+    Ok(())
+}
+
+/// 撤销动态 bootstrap 令牌：`Auth.BootstrapTokenRevoke`（幂等）。
+pub async fn cmd_security_bootstrap_token_revoke(
+    conn: impl Into<CliConn>,
+    id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
+    let revoked = client
+        .bootstrap_token_revoke(BootstrapTokenRevokeRequest { id: id.to_string() })
+        .await
+        .map_err(|e| format!("BootstrapTokenRevoke failed: {e}"))?
+        .into_inner()
+        .revoked;
+    if revoked {
+        println!("Revoked bootstrap token \"{id}\".");
+    } else {
+        println!("Bootstrap token \"{id}\" not found (already revoked or never existed).");
+    }
+    Ok(())
+}
+
 // ──── Member 命令 ────
 
 /// 添加节点到集群：先添加为 Learner，再晋升为 Voter
@@ -233,10 +549,13 @@ pub async fn cmd_member_list(conn: impl Into<CliConn>) -> Result<(), Box<dyn std
 
 use coord_proto::auth::auth_client::AuthClient;
 use coord_proto::auth::{
-    AuthDisableRequest, AuthEnableRequest, AuthStatusRequest, AuthenticateRequest, Permission,
-    PermissionType, RoleAddRequest, RoleDeleteRequest, RoleGrantPermissionRequest, RoleListRequest,
-    RoleRevokePermissionRequest, UserAddRequest, UserChangePasswordRequest, UserDeleteRequest,
-    UserGetRequest, UserGrantRoleRequest, UserListRequest, UserRevokeRoleRequest,
+    AuthDisableRequest, AuthEnableRequest, AuthStatusRequest, AuthenticateRequest,
+    BootstrapTokenIssueRequest, BootstrapTokenListRequest, BootstrapTokenRevokeRequest, Permission,
+    PermissionType, RefreshTokenRequest, RoleAddRequest, RoleDeleteRequest,
+    RoleGrantCapabilityRequest, RoleGrantPermissionRequest, RoleListRequest,
+    RoleRevokeCapabilityRequest, RoleRevokePermissionRequest, UserAddRequest,
+    UserChangePasswordRequest, UserDeleteRequest, UserGetRequest, UserGrantRoleRequest,
+    UserListRequest, UserRevokeRoleRequest,
 };
 
 /// AppRole 用户名前缀
@@ -521,6 +840,54 @@ pub async fn cmd_auth_role_revoke(
     Ok(())
 }
 
+/// 为角色授予**能力**（capability + scope）：调用 Auth::RoleGrantCapability。
+///
+/// 与 `RoleGrantPermission`（旧 Key 前缀模型）并列的新授权面：能力 id 取自
+/// 内置能力清单（`coord capability list`），`scope` 为空 = 无限制。
+pub async fn cmd_auth_role_grant_capability(
+    conn: impl Into<CliConn>,
+    name: &str,
+    capability_id: &str,
+    scope: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
+    client
+        .role_grant_capability(RoleGrantCapabilityRequest {
+            role: name.to_string(),
+            capability_id: capability_id.to_string(),
+            scope: scope.to_string(),
+        })
+        .await?;
+    let scope_display = if scope.is_empty() {
+        "(unrestricted)"
+    } else {
+        scope
+    };
+    println!("Granted capability \"{capability_id}\" (scope {scope_display}) to role \"{name}\".");
+    Ok(())
+}
+
+/// 撤销角色能力：调用 Auth::RoleRevokeCapability
+pub async fn cmd_auth_role_revoke_capability(
+    conn: impl Into<CliConn>,
+    name: &str,
+    capability_id: &str,
+    scope: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
+    client
+        .role_revoke_capability(RoleRevokeCapabilityRequest {
+            role: name.to_string(),
+            capability_id: capability_id.to_string(),
+            scope: scope.to_string(),
+        })
+        .await?;
+    println!("Revoked capability \"{capability_id}\" from role \"{name}\".");
+    Ok(())
+}
+
 /// 列出所有角色：调用 Auth::RoleList
 pub async fn cmd_auth_role_list(
     conn: impl Into<CliConn>,
@@ -605,11 +972,24 @@ pub async fn cmd_auth_revoke(
 // ──── 登录 ────
 
 /// 登录获取 Token：调用 Auth::Authenticate
+///
+/// 输出**优先 CCT v3**（`cct` 字段）：鉴权开启后服务端只认 CCT，
+/// 旧 `token` 字段仅为兼容保留（此前误打印 `token`，导致
+/// `coord auth login --token-only` 取到的凭据无法用于后续管理命令）。
+///
+/// `print_refresh = true` → 额外输出 refresh token（单次使用，供长时脚本调用
+/// `coord auth refresh` 续期；见 [`cmd_auth_refresh`]）。
+///
+/// `save = true`（默认）→ 把 CCT + refresh token + 到期时刻写入凭据文件
+/// （`--credentials` / `$XDG_CONFIG_HOME/coord/credentials.json`），后续 CLI 命令
+/// 自动携带并在到期前**自动续期**（批次 12）；`--no-save` 用于纯脚本模式。
 pub async fn cmd_auth_login(
     conn: impl Into<CliConn>,
     name: &str,
     password: &str,
     token_only: bool,
+    print_refresh: bool,
+    save: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let conn = conn.into();
     let mut client = build_auth_client(&conn).await?;
@@ -620,10 +1000,172 @@ pub async fn cmd_auth_login(
         })
         .await?
         .into_inner();
-    if token_only {
-        println!("{}", resp.token);
+    let credential = if resp.cct.is_empty() {
+        resp.token.clone()
     } else {
-        println!("Login successful. Token: {}", resp.token);
+        resp.cct.clone()
+    };
+    if credential.is_empty() {
+        return Err("server returned an empty credential".into());
+    }
+
+    // 批次 12：落盘凭据文件 → 后续命令自动携带、临近过期自动续期。
+    // 注意：提示走 stderr，stdout 仍只有凭据（保持 `--token-only` 的脚本契约）。
+    if !save {
+        eprintln!("Credentials not saved (--no-save).");
+    } else if resp.refresh_token.is_empty() {
+        eprintln!(
+            "Warning: server returned no refresh token; \
+             credentials file cannot be auto-renewed"
+        );
+    } else {
+        let path = cli_credentials_path();
+        let stored = crate::credentials::StoredCredentials {
+            addr: conn.addr().to_string(),
+            user: name.to_string(),
+            cct: credential.clone(),
+            refresh_token: resp.refresh_token.clone(),
+            expires_at: resp.expires_at,
+        };
+        match crate::credentials::save(&path, &stored) {
+            Ok(()) => eprintln!(
+                "Credentials saved to {} (auto-refreshed before expiry, expiry {})",
+                path.display(),
+                resp.expires_at
+            ),
+            Err(e) => eprintln!("Warning: failed to save credentials: {e}"),
+        }
+    }
+
+    if token_only {
+        println!("{credential}");
+    } else {
+        println!("Login successful. Token: {credential}");
+    }
+    if print_refresh {
+        if resp.refresh_token.is_empty() {
+            return Err("server did not return a refresh token".into());
+        }
+        // 纯刷新令牌行（供脚本 `$(coord auth login … --print-refresh | tail -n1)`）
+        println!("{}", resp.refresh_token);
+    }
+    Ok(())
+}
+
+/// 用 refresh token 换新会话：调用 Auth::RefreshToken（服务端保证单次使用）。
+///
+/// 默认输出新 CCT；`print_refresh` 额外输出**新的** refresh token
+///（旧 token 已消费，脚本需用新值替换）。
+pub async fn cmd_auth_refresh(
+    conn: impl Into<CliConn>,
+    refresh_token: &str,
+    token_only: bool,
+    print_refresh: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if refresh_token.trim().is_empty() {
+        return Err("refresh token must not be empty".into());
+    }
+    let conn = conn.into();
+    let mut client = build_auth_client(&conn).await?;
+    let resp = client
+        .refresh_token(RefreshTokenRequest {
+            refresh_token: refresh_token.to_string(),
+        })
+        .await
+        .map_err(|e| format!("RefreshToken failed: {e}"))?
+        .into_inner();
+
+    let credential = if resp.cct.is_empty() {
+        resp.token.clone()
+    } else {
+        resp.cct.clone()
+    };
+    if credential.is_empty() {
+        return Err("server returned an empty credential".into());
+    }
+
+    // 批次 12：续期后**回写凭据文件**（服务端单次使用：旧 refresh token 已消费，
+    // 不回写则文件里的 refresh token 立刻失效）。仅当文件存在且地址一致时回写。
+    let path = cli_credentials_path();
+    if let Some(stored) = crate::credentials::load(&path) {
+        if stored.addr == conn.addr() {
+            let updated = crate::credentials::StoredCredentials {
+                addr: stored.addr,
+                user: stored.user,
+                cct: credential.clone(),
+                refresh_token: resp.refresh_token.clone(),
+                expires_at: resp.expires_at,
+            };
+            if let Err(e) = crate::credentials::save(&path, &updated) {
+                eprintln!("Warning: failed to persist refreshed credential: {e}");
+            }
+        }
+    }
+
+    if token_only {
+        println!("{credential}");
+    } else {
+        println!("Session refreshed. Token: {credential}");
+        println!("  expires_at : {}", resp.expires_at);
+    }
+    if print_refresh {
+        if resp.refresh_token.is_empty() {
+            return Err("server did not return a refresh token".into());
+        }
+        println!("{}", resp.refresh_token);
+    }
+    Ok(())
+}
+
+/// 登出：删除凭据文件（`coord auth logout`）。
+///
+/// 幂等：文件不存在也算成功（可安全重复执行）。
+pub fn cmd_auth_logout() -> Result<(), Box<dyn std::error::Error>> {
+    let path = cli_credentials_path();
+    match crate::credentials::remove(&path) {
+        Ok(true) => println!("Logged out (removed {}).", path.display()),
+        Ok(false) => println!("No stored credentials at {}.", path.display()),
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+/// 本地凭据状态：`coord auth credential-status`（不访问集群，只读凭据文件）。
+///
+/// 与 [`cmd_auth_status`]（查询集群鉴权开关）区分开。
+pub fn cmd_auth_credential_status() -> Result<(), Box<dyn std::error::Error>> {
+    let path = cli_credentials_path();
+    println!("credentials : {}", path.display());
+    if let Some(token) = cli_token() {
+        println!(
+            "source      : --token / COORD_TOKEN ({} chars)",
+            token.len()
+        );
+    }
+    match crate::credentials::load(&path) {
+        Some(stored) => {
+            let now = crate::credentials::now_secs();
+            let remaining = stored.expires_at - now;
+            println!("addr        : {}", stored.addr);
+            println!("user        : {}", stored.user);
+            println!(
+                "expires_at  : {} ({remaining}s remaining)",
+                stored.expires_at
+            );
+            println!(
+                "renewable   : {}",
+                if stored.can_refresh() { "yes" } else { "no" }
+            );
+            println!(
+                "next action : {}",
+                if crate::credentials::needs_refresh(stored.expires_at, now) {
+                    "will refresh on next command"
+                } else {
+                    "valid until expiry"
+                }
+            );
+        }
+        None => println!("stored      : none (run `coord auth login <user>`)"),
     }
     Ok(())
 }
@@ -1135,9 +1677,11 @@ fn prefix_end(prefix: &[u8]) -> Vec<u8> {
     Vec::new()
 }
 
-/// 构建到指定地址的 KvClient（tonic 直连；CliConn 携带可选 TLS）
-async fn build_kv_client(conn: &CliConn) -> Result<KvClient<Channel>, Box<dyn std::error::Error>> {
-    Ok(KvClient::new(conn.connect().await?))
+/// 构建到指定地址的 KvClient（tonic 直连；CliConn 携带可选 TLS + 进程级凭据）
+async fn build_kv_client(
+    conn: &CliConn,
+) -> Result<KvClient<AuthedChannel>, Box<dyn std::error::Error>> {
+    Ok(KvClient::new(conn.connect_authed().await?))
 }
 
 // ──── Reset / IdGen 运维测试 ────
@@ -1258,25 +1802,25 @@ pub async fn snapshot_pull(
     Ok(())
 }
 
-/// 构建到指定地址的 AuthClient（tonic 直连；CliConn 携带可选 TLS）
+/// 构建到指定地址的 AuthClient（tonic 直连；CliConn 携带可选 TLS + 进程级凭据）
 async fn build_auth_client(
     conn: &CliConn,
-) -> Result<AuthClient<Channel>, Box<dyn std::error::Error>> {
-    Ok(AuthClient::new(conn.connect().await?))
+) -> Result<AuthClient<AuthedChannel>, Box<dyn std::error::Error>> {
+    Ok(AuthClient::new(conn.connect_authed().await?))
 }
 
 /// 构建到指定地址的 MaintenanceClient（tonic 直连，绕过 Client leader 发现）
 async fn build_maintenance_client(
     conn: &CliConn,
-) -> Result<MaintenanceClient<Channel>, Box<dyn std::error::Error>> {
-    Ok(MaintenanceClient::new(conn.connect().await?))
+) -> Result<MaintenanceClient<AuthedChannel>, Box<dyn std::error::Error>> {
+    Ok(MaintenanceClient::new(conn.connect_authed().await?))
 }
 
 /// 构建到指定地址的 CapabilityRegistryClient（tonic 直连）
 async fn build_capability_client(
     conn: &CliConn,
-) -> Result<CapabilityRegistryClient<Channel>, Box<dyn std::error::Error>> {
-    Ok(CapabilityRegistryClient::new(conn.connect().await?))
+) -> Result<CapabilityRegistryClient<AuthedChannel>, Box<dyn std::error::Error>> {
+    Ok(CapabilityRegistryClient::new(conn.connect_authed().await?))
 }
 
 // ──── 测试 ────
@@ -1613,13 +2157,17 @@ mod tests {
             .await
             .is_ok());
         // Login with old password should fail
-        assert!(cmd_auth_login(&addr_str, "dave", "oldpass", true)
-            .await
-            .is_err());
+        assert!(
+            cmd_auth_login(&addr_str, "dave", "oldpass", true, false, false)
+                .await
+                .is_err()
+        );
         // Login with new password should succeed
-        assert!(cmd_auth_login(&addr_str, "dave", "newpass", true)
-            .await
-            .is_ok());
+        assert!(
+            cmd_auth_login(&addr_str, "dave", "newpass", true, false, false)
+                .await
+                .is_ok()
+        );
     }
 
     // ──── Auth: 角色与权限管理 ────
@@ -1655,6 +2203,64 @@ mod tests {
         assert!(cmd_auth_role_delete(&addr_str, "temp-role", true)
             .await
             .is_ok());
+    }
+
+    // ──── Auth: 能力授予（capability + scope）────
+
+    #[tokio::test]
+    async fn test_cmd_auth_role_grant_and_revoke_capability() {
+        let (addr, _handle) = start_auth_test_server().await;
+        let addr_str = addr.to_string();
+        cmd_auth_role_add(&addr_str, "plugin-role").await.unwrap();
+        assert!(
+            cmd_auth_role_grant_capability(&addr_str, "plugin-role", "data:kv:read", "/app/")
+                .await
+                .is_ok(),
+            "grant capability should succeed"
+        );
+        assert!(
+            cmd_auth_role_revoke_capability(&addr_str, "plugin-role", "data:kv:read", "/app/")
+                .await
+                .is_ok(),
+            "revoke capability should succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cmd_auth_role_grant_capability_empty_id_fails() {
+        let (addr, _handle) = start_auth_test_server().await;
+        let addr_str = addr.to_string();
+        cmd_auth_role_add(&addr_str, "empty-cap-role")
+            .await
+            .unwrap();
+        assert!(
+            cmd_auth_role_grant_capability(&addr_str, "empty-cap-role", "", "")
+                .await
+                .is_err(),
+            "empty capability_id must be rejected server-side"
+        );
+    }
+
+    /// 一键引导：建角色 + 授予最小能力集；重复调用幂等（角色已存在仍成功）。
+    #[tokio::test]
+    async fn test_cmd_security_bootstrap_role_is_idempotent() {
+        let (addr, _handle) = start_auth_test_server().await;
+        let addr_str = addr.to_string();
+        assert!(
+            cmd_security_bootstrap_role(&addr_str, None).await.is_ok(),
+            "first bootstrap-role call must succeed"
+        );
+        assert!(
+            cmd_security_bootstrap_role(&addr_str, None).await.is_ok(),
+            "re-running bootstrap-role must be idempotent"
+        );
+        // 自定义角色名同样可用
+        assert!(
+            cmd_security_bootstrap_role(&addr_str, Some("custom-bootstrap"))
+                .await
+                .is_ok(),
+            "custom role name must be supported"
+        );
     }
 
     // ──── Auth: 用户-角色绑定 ────
@@ -1731,18 +2337,22 @@ mod tests {
     async fn test_cmd_auth_login_root_user() {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
-        assert!(cmd_auth_login(&addr_str, "root", "root", true)
-            .await
-            .is_ok());
+        assert!(
+            cmd_auth_login(&addr_str, "root", "root", true, false, false)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn test_cmd_auth_login_invalid_password_fails() {
         let (addr, _handle) = start_auth_test_server().await;
         let addr_str = addr.to_string();
-        assert!(cmd_auth_login(&addr_str, "root", "wrong", true)
-            .await
-            .is_err());
+        assert!(
+            cmd_auth_login(&addr_str, "root", "wrong", true, false, false)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1755,11 +2365,16 @@ mod tests {
             .unwrap();
         // Login using the internal approle- prefixed username
         let internal_name = format!("approle-login-test");
-        assert!(
-            cmd_auth_login(&addr_str, &internal_name, "my-secret-123", true)
-                .await
-                .is_ok()
-        );
+        assert!(cmd_auth_login(
+            &addr_str,
+            &internal_name,
+            "my-secret-123",
+            true,
+            false,
+            false
+        )
+        .await
+        .is_ok());
     }
 
     // ──── Auth: 集成流程 ────
@@ -1793,11 +2408,16 @@ mod tests {
 
         // Step 4: Login as the AppRole
         let internal_name = format!("approle-full-flow-svc");
-        assert!(
-            cmd_auth_login(&addr_str, &internal_name, "known-secret", true)
-                .await
-                .is_ok()
-        );
+        assert!(cmd_auth_login(
+            &addr_str,
+            &internal_name,
+            "known-secret",
+            true,
+            false,
+            false
+        )
+        .await
+        .is_ok());
     }
 
     // ──── Auth: 错误场景 ────

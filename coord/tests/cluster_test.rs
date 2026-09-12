@@ -78,7 +78,7 @@ mod tests {
             let storage_config = StorageConfig::default();
             let backend = RedbBackend::open(&data_dir, &storage_config).expect("open redb backend");
 
-            // 2. Single MvccStorage instance shared across all paths 
+            // 2. Single MvccStorage instance shared across all paths
             let mvcc = Arc::new(MvccStorage::new(backend).expect("create mvcc"));
             let snapshot_tracker =
                 Arc::new(coord_server::storage::snapshot::SnapshotTracker::default());
@@ -235,7 +235,7 @@ mod tests {
             let storage_config = StorageConfig::default();
             let backend = RedbBackend::open(&data_dir, &storage_config).expect("open redb backend");
 
-            // 2. Single MvccStorage instance shared across all paths 
+            // 2. Single MvccStorage instance shared across all paths
             let mvcc = Arc::new(MvccStorage::new(backend).expect("create mvcc"));
             let snapshot_tracker =
                 Arc::new(coord_server::storage::snapshot::SnapshotTracker::default());

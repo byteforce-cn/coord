@@ -21,7 +21,9 @@ pub mod state_machine;
 pub mod system_raft;
 pub mod type_config;
 
-pub use network::{RegionRaftNetworkFactory, RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
+pub use network::{
+    RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService, RegionRaftNetworkFactory,
+};
 pub use region_runtime::{
     region_data_dir, CoordRegionRaftHandle, RegionRaftHandle, RegionRuntime, RegionRuntimeSpec,
 };
@@ -130,10 +132,8 @@ where
     LS: openraft::storage::RaftLogStorage<type_config::TypeConfig> + 'static,
     SM: openraft::storage::RaftStateMachine<type_config::TypeConfig> + 'static,
     // alpha.34：`Raft::new` 要求网络与状态机的 SnapshotData 为同一类型
-    N::Network: openraft::network::NetSnapshot<
-        type_config::TypeConfig,
-        SnapshotData = SM::SnapshotData,
-    >,
+    N::Network:
+        openraft::network::NetSnapshot<type_config::TypeConfig, SnapshotData = SM::SnapshotData>,
 {
     openraft::Raft::new(node_id, config, network, log_store, state_machine)
         .await

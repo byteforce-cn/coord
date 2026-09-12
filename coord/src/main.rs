@@ -10,6 +10,7 @@
 
 pub mod commands;
 mod config;
+pub mod credentials;
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -43,18 +44,18 @@ use coord_server::bff::{
 use coord_server::health;
 use coord_server::lease::LeaseManager;
 use coord_server::metrics::Metrics;
+use coord_server::pd::{EmbeddedPd, NodeInfo};
 use coord_server::raft::log_store::LogStore;
 use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
 use coord_server::raft::region::{spawn_configured_regions, RegionManager, RegionSeed};
 use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::system_raft::{CoordSystemRaftHandle, SystemRaftHandle};
-use coord_server::pd::{EmbeddedPd, NodeInfo};
+use coord_server::server::object_storage::object_gc_loop;
 use coord_server::server::CoordNode;
 use coord_server::storage::compaction::{CompactionConfig, CompactionManager};
 use coord_server::storage::mvcc::MvccStorage;
 use coord_server::storage::object_store::{ChunkStore, ObjectLimits, ObjectStoreCtx};
 use coord_server::storage::redb_backend::RedbBackend;
-use coord_server::server::object_storage::object_gc_loop;
 use coord_server::timer::TimerWheel;
 use coord_server::tls::{self, TlsConfig};
 use coord_server::watch::WatchDispatcher;
@@ -97,6 +98,22 @@ struct Cli {
     /// TLS SNI/server name 覆盖（经 IP 连接而证书为 DNS SAN 时使用）
     #[arg(long, global = true)]
     tls_server_name: Option<String>,
+
+    /// 出站凭据 CCT（Bearer Token）。
+    ///
+    /// 鉴权开启的集群上，管理命令（auth/member/capability …）需要携带管理员
+    /// CCT：`coord auth login root --token-only` 的输出可直接回灌到本参数
+    /// （或环境变量 `COORD_TOKEN`）。缺省 = 使用凭据文件（`coord auth login`
+    /// 落盘，到期前自动续期，见 `--credentials`）。
+    #[arg(long, global = true, env = "COORD_TOKEN")]
+    token: Option<String>,
+
+    /// 凭据文件路径（默认 `$XDG_CONFIG_HOME/coord/credentials.json`）。
+    ///
+    /// `coord auth login` 写入该文件；后续命令自动携带并在到期前用
+    /// refresh token 自动续期（不需要手工 `auth refresh`）。
+    #[arg(long, global = true, env = "COORD_CREDENTIALS")]
+    credentials: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Commands,
@@ -325,6 +342,63 @@ enum SecurityCmd {
         #[arg(long, default_value = "127.0.0.1:50051")]
         addr: String,
     },
+
+    /// 一键授予 agent 引导角色的最小能力集（幂等；替代手工命令序列）
+    BootstrapRole {
+        /// 目标节点地址
+        #[arg(long, default_value = "127.0.0.1:50051")]
+        addr: String,
+
+        /// 角色名（缺省 = 内置 `agent-bootstrap`）
+        #[arg(long)]
+        role: Option<String>,
+    },
+
+    /// 动态 bootstrap 令牌管理（TTL + 一次性；raft 持久化）
+    #[command(subcommand)]
+    BootstrapToken(BootstrapTokenCmd),
+}
+
+// ──── BootstrapToken 子命令 ────
+
+#[derive(Subcommand)]
+enum BootstrapTokenCmd {
+    /// 签发令牌（明文仅本次输出；服务端只存 SHA256）
+    Create {
+        /// 目标节点地址
+        #[arg(long, default_value = "127.0.0.1:50051")]
+        addr: String,
+
+        /// 人类可读标签（审计/列表用；可空）
+        #[arg(long, default_value = "")]
+        label: String,
+
+        /// 有效期（秒；0 = 服务端默认 3600；上限 30 天）
+        #[arg(long, default_value_t = 3600)]
+        ttl_secs: i64,
+
+        /// 仅输出明文令牌（便于 `--token` 回灌 / 脚本消费）
+        #[arg(long)]
+        token_only: bool,
+    },
+
+    /// 列出令牌（不含明文；含是否已消费）
+    List {
+        /// 目标节点地址
+        #[arg(long, default_value = "127.0.0.1:50051")]
+        addr: String,
+    },
+
+    /// 撤销令牌（幂等）
+    Revoke {
+        /// 目标节点地址
+        #[arg(long, default_value = "127.0.0.1:50051")]
+        addr: String,
+
+        /// 令牌 ID（签发响应中的 `id`，非明文令牌）
+        #[arg(long)]
+        id: String,
+    },
 }
 
 // ──── Member 子命令 ────
@@ -494,12 +568,42 @@ enum AuthCmd {
     Login {
         /// 用户名
         name: String,
+        /// 密码（缺省 = 交互式输入；脚本集成可显式传入或经 `COORD_PASSWORD`）
+        #[arg(long, env = "COORD_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
         /// 仅输出 Token（便于脚本集成）
         #[arg(long, default_value = "false")]
         token_only: bool,
+        /// 额外输出 refresh token（单次使用；配合 `coord auth refresh` 续期）
+        #[arg(long, default_value = "false")]
+        print_refresh: bool,
+        /// 不落盘凭据文件（纯脚本模式：避免在宿主机留下凭据）
+        #[arg(long, default_value = "false")]
+        no_save: bool,
         #[arg(long, default_value = "127.0.0.1:50051")]
         addr: String,
     },
+
+    /// 用 refresh token 换新 CCT（服务端单次使用语义）
+    Refresh {
+        /// refresh token（`coord auth login --print-refresh` 的末行）
+        #[arg(long)]
+        refresh_token: String,
+        /// 仅输出新 CCT（便于脚本集成）
+        #[arg(long, default_value = "false")]
+        token_only: bool,
+        /// 额外输出**新的** refresh token（旧值已消费）
+        #[arg(long, default_value = "false")]
+        print_refresh: bool,
+        #[arg(long, default_value = "127.0.0.1:50051")]
+        addr: String,
+    },
+
+    /// 登出：删除凭据文件（幂等）
+    Logout,
+
+    /// 查看**本地凭据文件**状态（不访问集群；区别于 `auth status`）
+    CredentialStatus,
 }
 
 #[derive(Subcommand)]
@@ -667,6 +771,32 @@ enum AuthRoleCmd {
         #[arg(long, default_value = "127.0.0.1:50051")]
         addr: String,
     },
+
+    /// 为角色授予能力（capability + scope）
+    GrantCapability {
+        /// 角色名
+        name: String,
+        /// 能力 ID（如 data:kv:read、coord:plugin:invoke）
+        capability_id: String,
+        /// 作用域前缀（空 = 无限制）
+        #[arg(long, default_value = "")]
+        scope: String,
+        #[arg(long, default_value = "127.0.0.1:50051")]
+        addr: String,
+    },
+
+    /// 撤销角色能力
+    RevokeCapability {
+        /// 角色名
+        name: String,
+        /// 能力 ID
+        capability_id: String,
+        /// 作用域前缀（空 = 无限制）
+        #[arg(long, default_value = "")]
+        scope: String,
+        #[arg(long, default_value = "127.0.0.1:50051")]
+        addr: String,
+    },
 }
 
 // ──── Capability 子命令 ────
@@ -717,6 +847,9 @@ async fn main() {
 
     // 全局 TLS 连接参数（对 TLS/mTLS 集群执行管理命令；参数非法/文件缺失即退出）
     let cli_tls = build_cli_tls(&cli);
+    // 全局凭据（对鉴权开启的集群执行管理命令；缺省不影响明文开发模式）
+    commands::set_cli_token(cli.token.clone());
+    commands::set_cli_credentials(cli.credentials.clone());
 
     // 加载配置文件（如果指定）
     let mut file_config = None;
@@ -845,6 +978,64 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+            SecurityCmd::BootstrapRole { addr, role } => {
+                tracing::info!("Provisioning agent bootstrap role via {}", addr);
+                if let Err(e) = commands::cmd_security_bootstrap_role(
+                    commands::CliConn::new(&addr, cli_tls.clone()),
+                    role.as_deref(),
+                )
+                .await
+                {
+                    tracing::error!("BootstrapRole failed: {e}");
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            SecurityCmd::BootstrapToken(cmd) => match cmd {
+                BootstrapTokenCmd::Create {
+                    addr,
+                    label,
+                    ttl_secs,
+                    token_only,
+                } => {
+                    tracing::info!("Issuing dynamic bootstrap token via {}", addr);
+                    if let Err(e) = commands::cmd_security_bootstrap_token_create(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &label,
+                        ttl_secs,
+                        token_only,
+                    )
+                    .await
+                    {
+                        tracing::error!("BootstrapTokenCreate failed: {e}");
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                BootstrapTokenCmd::List { addr } => {
+                    if let Err(e) = commands::cmd_security_bootstrap_token_list(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                    )
+                    .await
+                    {
+                        tracing::error!("BootstrapTokenList failed: {e}");
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                BootstrapTokenCmd::Revoke { addr, id } => {
+                    if let Err(e) = commands::cmd_security_bootstrap_token_revoke(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &id,
+                    )
+                    .await
+                    {
+                        tracing::error!("BootstrapTokenRevoke failed: {e}");
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            },
         },
 
         Commands::Member(cmd) => match cmd {
@@ -910,7 +1101,8 @@ async fn main() {
 
         Commands::Snapshot(cmd) => match cmd {
             SnapshotCmd::Save {
-                addr,
+                // `--addr` 仅对 Pull 有意义；Save 读本地 data_dir。
+                addr: _,
                 output,
                 data_dir,
                 region,
@@ -1245,6 +1437,44 @@ async fn main() {
                         std::process::exit(1);
                     }
                 }
+                AuthRoleCmd::GrantCapability {
+                    name,
+                    capability_id,
+                    scope,
+                    addr,
+                } => {
+                    if let Err(e) = commands::cmd_auth_role_grant_capability(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &name,
+                        &capability_id,
+                        &scope,
+                    )
+                    .await
+                    {
+                        tracing::error!("RoleGrantCapability failed: {e}");
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                AuthRoleCmd::RevokeCapability {
+                    name,
+                    capability_id,
+                    scope,
+                    addr,
+                } => {
+                    if let Err(e) = commands::cmd_auth_role_revoke_capability(
+                        commands::CliConn::new(&addr, cli_tls.clone()),
+                        &name,
+                        &capability_id,
+                        &scope,
+                    )
+                    .await
+                    {
+                        tracing::error!("RoleRevokeCapability failed: {e}");
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                }
             },
             AuthCmd::Grant { user, role, addr } => {
                 if let Err(e) = commands::cmd_auth_grant(
@@ -1274,25 +1504,66 @@ async fn main() {
             }
             AuthCmd::Login {
                 name,
+                password,
                 token_only,
+                print_refresh,
+                no_save,
                 addr,
             } => {
-                let pass = match commands::prompt_password(&format!("Password for {name}: ")) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("Error: {e}");
-                        std::process::exit(1);
-                    }
+                let pass = match password {
+                    Some(p) => p,
+                    None => match commands::prompt_password(&format!("Password for {name}: ")) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            std::process::exit(1);
+                        }
+                    },
                 };
                 if let Err(e) = commands::cmd_auth_login(
                     commands::CliConn::new(&addr, cli_tls.clone()),
                     &name,
                     &pass,
                     token_only,
+                    print_refresh,
+                    !no_save,
                 )
                 .await
                 {
                     tracing::error!("Login failed: {e}");
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            AuthCmd::Refresh {
+                refresh_token,
+                token_only,
+                print_refresh,
+                addr,
+            } => {
+                if let Err(e) = commands::cmd_auth_refresh(
+                    commands::CliConn::new(&addr, cli_tls.clone()),
+                    &refresh_token,
+                    token_only,
+                    print_refresh,
+                )
+                .await
+                {
+                    tracing::error!("Refresh failed: {e}");
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            AuthCmd::Logout => {
+                if let Err(e) = commands::cmd_auth_logout() {
+                    tracing::error!("Logout failed: {e}");
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            AuthCmd::CredentialStatus => {
+                if let Err(e) = commands::cmd_auth_credential_status() {
+                    tracing::error!("Credential status failed: {e}");
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
@@ -1387,6 +1658,7 @@ async fn main() {
 
             // 生产收口：agent 配置源 = --agent-config（TOML，含 [tls]/[services]/[replication]）
             // > CLI 显式参数 > AgentConfig 默认值；加载失败 fail-closed。
+            let agent_config_path = agent_config.clone();
             let mut agent_config = match agent_config {
                 Some(path) => match coord_agent::AgentConfig::from_file(&path) {
                     Ok(cfg) => cfg,
@@ -1418,7 +1690,9 @@ async fn main() {
             }
             agent_config.data_dir = cli.data_dir.to_string_lossy().to_string();
 
-            if let Err(e) = coord_agent::run_agent(agent_config).await {
+            if let Err(e) =
+                coord_agent::run_agent_with_config_path(agent_config, agent_config_path).await
+            {
                 tracing::error!("Agent exited with error: {e}");
                 std::process::exit(1);
             }
@@ -1627,10 +1901,7 @@ async fn run_server(
                 cfg.multi_raft.legacy_migration,
                 cfg.multi_raft.allow_unmigrated,
             ) {
-                return Err(format!(
-                    "refusing to start with multi_raft enabled: {reason}"
-                )
-                .into());
+                return Err(format!("refusing to start with multi_raft enabled: {reason}").into());
             }
         }
     }
@@ -1647,8 +1918,8 @@ async fn run_server(
     let object_ctx: Option<Arc<ObjectStoreCtx>> = if cfg.object_storage.enabled {
         let mut root_key = cfg.object_storage.encryption_root_key.clone();
         if root_key.is_empty() {
-            root_key = std::env::var("COORD_OBJECT_STORAGE_ENCRYPTION_ROOT_KEY")
-                .unwrap_or_default();
+            root_key =
+                std::env::var("COORD_OBJECT_STORAGE_ENCRYPTION_ROOT_KEY").unwrap_or_default();
         }
         let encryption_key = if cfg.object_storage.encryption_enabled {
             Some(root_key)
@@ -1891,11 +2162,7 @@ async fn run_server(
     //     0.0.0.0 绑定地址通告给对端（对端按 0.0.0.0 连接会落到各自本机，
     //     形成自我应答的伪多数派——网络分区下的陈旧读根因）。
     let mut network_factory = RaftNetworkFactoryImpl::new(node_id);
-    let own_advertised = cfg
-        .cluster
-        .initial_nodes
-        .iter()
-        .find(|n| n.id == node_id);
+    let own_advertised = cfg.cluster.initial_nodes.iter().find(|n| n.id == node_id);
     let own_raft_addr = own_advertised.map(|n| n.raft.as_str()).unwrap_or(raft_addr);
     let own_grpc_addr = own_advertised
         .map(|n| n.grpc.as_str())
@@ -2176,9 +2443,12 @@ async fn run_server(
     // region_manager 必为 Some。PD 独立持有 RegionManager 引用（start 内
     // Arc::clone），不影响其随后移入 CoordNode。
     let embedded_pd: Option<Arc<EmbeddedPd>> = if cfg.multi_raft.pd.enabled {
-        let manager = region_manager
-            .as_ref()
-            .expect("multi_raft.pd.enabled requires assembled region_manager");
+        let manager = match region_manager.as_ref() {
+            Some(m) => m,
+            None => {
+                return Err("multi_raft.pd.enabled requires assembled region_manager".into());
+            }
+        };
         let pd_nodes: Vec<NodeInfo> = cfg
             .cluster
             .initial_nodes
@@ -2219,10 +2489,11 @@ async fn run_server(
         .map_err(|e| format!("start embedded PD: {e}"))?;
 
         // PD operator 审计/指标接线（audit logger + Metrics 在此前已构造）
-        pd.driver.attach_observability(coord_server::pd::PdObservability::new(
-            Some(Arc::clone(&audit_logger)),
-            Some(Arc::clone(&metrics)),
-        ));
+        pd.driver
+            .attach_observability(coord_server::pd::PdObservability::new(
+                Some(Arc::clone(&audit_logger)),
+                Some(Arc::clone(&metrics)),
+            ));
         Some(pd)
     } else {
         tracing::debug!("Multi-Raft PD disabled (multi_raft.pd.enabled=false)");
@@ -2243,9 +2514,12 @@ async fn run_server(
                  migration SKIPPED (rescue mode); user data in regions is empty"
             );
         } else {
-            let manager = region_manager
-                .as_ref()
-                .expect("multi_raft.enabled requires assembled region_manager");
+            let manager = match region_manager.as_ref() {
+                Some(m) => m,
+                None => {
+                    return Err("multi_raft.enabled requires assembled region_manager".into());
+                }
+            };
             coord_server::migration::migrate_legacy_to_regions(
                 node_id,
                 &mvcc,
@@ -2413,8 +2687,13 @@ async fn run_server(
             .map_err(|e| format!("init token signing keyring: {e}"))?,
     );
 
-    let token_manager = Arc::new(TokenManager::with_defaults());
     // CCT 生产签发接线+ AuthOp 提案器+ 吊销登记
+    //
+    // ⚠️ 必须复用上面**同一个** `TokenManager`（已 `load_sessions` 且挂在
+    // `sm_store` 上做 apply 视图同步）。此前此处另建了一个空实例 →
+    // ① refresh token 单次使用失效（raft apply 的 `ConsumeSession` 只清掉另一个表的条目，
+    //    AuthService 仍能从自己的表里查到旧 refresh token 并重复签发）；
+    // ② 重启后 `load_sessions` 装载的会话对 AuthService 不可见（refresh 直接失败）。
     let auth_proposer: Arc<dyn coord_server::auth::service::AuthOpProposer> = node.clone();
     let auth_service: Arc<AuthService> = Arc::new(
         (if auth_enabled {
@@ -2430,6 +2709,20 @@ async fn run_server(
         .with_revocation_store(Arc::clone(&revocation_store))
         .with_audit_logger(Arc::clone(&audit_logger)),
     );
+    // Agent 注册引导令牌（一次性）：配置即生效，换取短期限 `agent-bootstrap` CCT。
+    // 该角色不预置能力，需 operator 按 AGENT_BOOTSTRAP_CAPABILITY_GRANTS 显式授予。
+    for token in &cfg.security.agent_bootstrap_tokens {
+        auth_service.add_bootstrap_token(token);
+    }
+    if !cfg.security.agent_bootstrap_tokens.is_empty() {
+        tracing::warn!(
+            tokens = cfg.security.agent_bootstrap_tokens.len(),
+            "agent bootstrap enrollment enabled: {AGENT_BOOTSTRAP_ROLE} role holders can \
+             create plugin accounts; ensure the role is granted only the documented \
+             minimal capabilities and rotate tokens after enrollment",
+            AGENT_BOOTSTRAP_ROLE = coord_server::auth::AGENT_BOOTSTRAP_ROLE
+        );
+    }
     let auth_svc = AuthServer::new(auth_service.as_ref().clone());
 
     // 6a. Capability 注册中心（内置能力引导 + gRPC 服务）
@@ -2461,10 +2754,7 @@ async fn run_server(
     // 64KiB 余量（raft RPC 另有 16MiB 上限，见 RAFT_MAX_DECODING_MSG）。
     let storage_svc = if cfg.object_storage.enabled {
         let obj_decode_limit = cfg.object_storage.chunk_size_bytes + 64 * 1024;
-        Some(
-            StorageServer::from_arc(Arc::clone(&node))
-                .max_decoding_message_size(obj_decode_limit),
-        )
+        Some(StorageServer::from_arc(Arc::clone(&node)).max_decoding_message_size(obj_decode_limit))
     } else {
         None
     };
@@ -2831,10 +3121,12 @@ async fn run_server(
             let rid = handle.region_id();
             if let Some(rt) = manager.runtime(rid) {
                 let proposer: Arc<dyn coord_server::storage::compaction::CompactProposer> =
-                    Arc::new(coord_server::raft::region_runtime::RegionCompactProposer::from_runtime(
-                        cfg.node.id,
-                        &rt,
-                    ));
+                    Arc::new(
+                        coord_server::raft::region_runtime::RegionCompactProposer::from_runtime(
+                            cfg.node.id,
+                            &rt,
+                        ),
+                    );
                 let mgr = coord_server::storage::compaction::CompactionManager::start(
                     Arc::clone(&rt.mvcc),
                     coord_server::storage::compaction::CompactionConfig::default(),
@@ -2869,8 +3161,7 @@ async fn run_server(
             for handle in manager.list_regions() {
                 let rid = handle.region_id();
                 if let Some(rt) = manager.runtime(rid) {
-                    if let (Some(store), Some(limits)) = (&rt.chunk_store, &node.object_limits)
-                    {
+                    if let (Some(store), Some(limits)) = (&rt.chunk_store, &node.object_limits) {
                         tokio::spawn(object_gc_loop(
                             node_id,
                             Arc::new(rt.raft.clone()),
@@ -3684,6 +3975,90 @@ mod tests {
         assert!(is_loopback_host("::1"));
         assert!(!is_loopback_host("0.0.0.0"));
         assert!(!is_loopback_host("192.168.1.10"));
+    }
+
+    /// `security bootstrap-token create/list/revoke` 子命令解析（批次 9）。
+    #[test]
+    fn test_security_bootstrap_token_cli_parsing() {
+        use super::{BootstrapTokenCmd, Cli, Commands, SecurityCmd};
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from([
+            "coord",
+            "security",
+            "bootstrap-token",
+            "create",
+            "--addr",
+            "10.0.0.1:50051",
+            "--label",
+            "site-a",
+            "--ttl-secs",
+            "7200",
+            "--token-only",
+        ])
+        .expect("create must parse");
+        match cli.command {
+            Commands::Security(SecurityCmd::BootstrapToken(BootstrapTokenCmd::Create {
+                addr,
+                label,
+                ttl_secs,
+                token_only,
+            })) => {
+                assert_eq!(addr, "10.0.0.1:50051");
+                assert_eq!(label, "site-a");
+                assert_eq!(ttl_secs, 7200);
+                assert!(token_only);
+            }
+            _ => panic!("expected bootstrap-token create"),
+        }
+
+        // 默认值：addr 127.0.0.1:50051 / ttl 3600 / 非 token-only
+        let cli = Cli::try_parse_from(["coord", "security", "bootstrap-token", "create"])
+            .expect("create defaults must parse");
+        match cli.command {
+            Commands::Security(SecurityCmd::BootstrapToken(BootstrapTokenCmd::Create {
+                addr,
+                label,
+                ttl_secs,
+                token_only,
+            })) => {
+                assert_eq!(addr, "127.0.0.1:50051");
+                assert!(label.is_empty());
+                assert_eq!(ttl_secs, 3600);
+                assert!(!token_only);
+            }
+            _ => panic!("expected bootstrap-token create defaults"),
+        }
+
+        let cli = Cli::try_parse_from(["coord", "security", "bootstrap-token", "list"])
+            .expect("list must parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Security(SecurityCmd::BootstrapToken(BootstrapTokenCmd::List { .. }))
+        ));
+
+        let cli = Cli::try_parse_from([
+            "coord",
+            "security",
+            "bootstrap-token",
+            "revoke",
+            "--id",
+            "abc-123",
+        ])
+        .expect("revoke must parse");
+        match cli.command {
+            Commands::Security(SecurityCmd::BootstrapToken(BootstrapTokenCmd::Revoke {
+                id,
+                addr,
+            })) => {
+                assert_eq!(id, "abc-123");
+                assert_eq!(addr, "127.0.0.1:50051");
+            }
+            _ => panic!("expected bootstrap-token revoke"),
+        }
+
+        // revoke 缺 --id → 解析失败
+        assert!(Cli::try_parse_from(["coord", "security", "bootstrap-token", "revoke"]).is_err());
     }
 
     #[test]

@@ -10,9 +10,15 @@ ignore = []
 
 [licenses]
 # 默认拒绝未明确列出的许可证；coord 依赖栈常用许可白名单
+#
+# ADR（2026-09-11）：`Apache-2.0 WITH LLVM-exception` —— wasmtime（48.x）
+# 采用该 SPDX 表达式（Apache-2.0 附加 LLVM 例外，允许与 Apache-2.0 代码链接）。
+# 与既有 Apache-2.0 白名单语义兼容，仅放宽该组合表达式；引入 wasmtime 前
+# 需在 `coord-agent/Cargo.toml` 的 `plugin-wasm` feature 下显式声明依赖。
 allow = [
     "MIT",
     "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
     "BSD-3-Clause",
     "BSD-2-Clause",
     "ISC",

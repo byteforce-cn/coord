@@ -9,6 +9,8 @@
 //     Get（server-streaming：首条 stat + 逐 chunk），跨 4MiB chunk 边界；
 //   - 4MiB RPC 边界语义：超大 chunk / 空流 / 首条非 meta / 重复 meta /
 //     超声明 total_size / 字节不符 Commit → 对应 gRPC 错误码；
+//   - 流式会话（`CoordStorageClient::open_put/open_put_unknown/open_get`）：
+//     客户端自选块边界；**未知长度**（`total_size = -1`）在 Commit 时定长；
 //   - 无覆盖写（已提交对象 Put → ALREADY_EXISTS）+ tombstone Delete +
 //     NOT_FOUND 语义；
 //   - 配额闸（max_total_storage_bytes 超限 → RESOURCE_EXHAUSTED，删除释放后可
@@ -73,7 +75,13 @@ impl Drop for RealNode {
 }
 
 impl RealNode {
-    fn spawn_common(id: u64, grpc_port: u16, raft_port: u16, data_dir: &Path, cfg_path: &Path) -> Self {
+    fn spawn_common(
+        id: u64,
+        grpc_port: u16,
+        raft_port: u16,
+        data_dir: &Path,
+        cfg_path: &Path,
+    ) -> Self {
         let bin = env!("CARGO_BIN_EXE_coord");
         let mut cmd = Command::new(bin);
         cmd.arg("server")
@@ -89,8 +97,7 @@ impl RealNode {
             .arg(cfg_path);
         // 诊断支持：OBJ_DEBUG_LOG=1 时把子进程 stdout/stderr 落盘 coord.log
         let debug_log = std::env::var("OBJ_DEBUG_LOG").is_ok();
-        let rust_log =
-            std::env::var("OBJ_RUST_LOG").unwrap_or_else(|_| "coord=warn".to_string());
+        let rust_log = std::env::var("OBJ_RUST_LOG").unwrap_or_else(|_| "coord=warn".to_string());
         cmd.env("RUST_LOG", &rust_log);
         if debug_log {
             let log_file = std::fs::File::create(data_dir.join("coord.log")).unwrap();
@@ -110,12 +117,7 @@ impl RealNode {
     }
 
     /// 单节点 legacy（cluster.bootstrap=true + 自身为唯一成员）。
-    fn spawn(
-        data_dir: &Path,
-        grpc_port: u16,
-        raft_port: u16,
-        object_section: &str,
-    ) -> Self {
+    fn spawn(data_dir: &Path, grpc_port: u16, raft_port: u16, object_section: &str) -> Self {
         let cfg_dir = data_dir.join("conf");
         std::fs::create_dir_all(&cfg_dir).unwrap();
         let cfg_path = cfg_dir.join("node.toml");
@@ -211,13 +213,17 @@ impl RealNode {
     /// SIGSTOP 冻结（模拟停顿/时钟漂移窗口；等价于隔离一个少数派节点）
     fn pause(&mut self) {
         let pid = self.child.id();
-        let _ = Command::new("kill").args(["-STOP", &pid.to_string()]).status();
+        let _ = Command::new("kill")
+            .args(["-STOP", &pid.to_string()])
+            .status();
     }
 
     /// SIGCONT 恢复
     fn resume(&mut self) {
         let pid = self.child.id();
-        let _ = Command::new("kill").args(["-CONT", &pid.to_string()]).status();
+        let _ = Command::new("kill")
+            .args(["-CONT", &pid.to_string()])
+            .status();
     }
 
     /// 重启（同一数据目录/端口/配置，沿用已写入的 node.toml）
@@ -360,10 +366,7 @@ async fn put_full(
 }
 
 /// 原始 Put 调用（用于错误路径/部分上传构造）。
-async fn put_raw(
-    node: &RealNode,
-    msgs: Vec<PutRequest>,
-) -> Result<PutResponse, tonic::Status> {
+async fn put_raw(node: &RealNode, msgs: Vec<PutRequest>) -> Result<PutResponse, tonic::Status> {
     let mut stub = stub_of(node).await?;
     let resp = stub
         .put(tonic::Request::new(tokio_stream::iter(msgs)))
@@ -437,7 +440,9 @@ async fn delete_obj(
 
 /// 数据模式化填充（便于加密场景在磁盘上比对明文不可见）。
 fn pattern_data(len: usize, seed: u8) -> Vec<u8> {
-    (0..len).map(|i| (seed as u64 + i as u64 * 131) as u8).collect()
+    (0..len)
+        .map(|i| (seed as u64 + i as u64 * 131) as u8)
+        .collect()
 }
 
 /// 递归收集 `<data_dir>/objects/` 下全部 chunk 文件（跳过非 chunk- 前缀）。
@@ -534,9 +539,12 @@ async fn object_storage_real_roundtrip_boundary_and_gc() {
     let err = put_raw(&node, vec![]).await.expect_err("empty stream");
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
     // (b) 首条非 meta（直接 chunk）
-    let err = put_raw(&node, vec![PutRequest {
-        part: Some(put_request::Part::Chunk(vec![0u8; 1024])),
-    }])
+    let err = put_raw(
+        &node,
+        vec![PutRequest {
+            part: Some(put_request::Part::Chunk(vec![0u8; 1024])),
+        }],
+    )
     .await
     .expect_err("first message must be meta");
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -563,13 +571,16 @@ async fn object_storage_real_roundtrip_boundary_and_gc() {
         .expect_err("meta must appear once");
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
     // (e) total_size 非法（0）
-    let err = put_raw(&node, vec![PutRequest {
-        part: Some(put_request::Part::Meta(PutMeta {
-            bucket: bucket.to_string(),
-            object_id: b"zero".to_vec(),
-            total_size: 0,
-        })),
-    }])
+    let err = put_raw(
+        &node,
+        vec![PutRequest {
+            part: Some(put_request::Part::Meta(PutMeta {
+                bucket: bucket.to_string(),
+                object_id: b"zero".to_vec(),
+                total_size: 0,
+            })),
+        }],
+    )
     .await
     .expect_err("total_size=0");
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -626,7 +637,10 @@ async fn object_storage_real_roundtrip_boundary_and_gc() {
         .await
         .expect_err("get deleted");
     assert_eq!(err.code(), tonic::Code::NotFound);
-    assert!(stat_obj(&node, bucket, b"big").await.expect("stat").is_none());
+    assert!(stat_obj(&node, bucket, b"big")
+        .await
+        .expect("stat")
+        .is_none());
     // 对不存在对象 Delete → NOT_FOUND（v1 语义，见 proto 注释）
     let err = delete_obj(&node, bucket, b"big")
         .await
@@ -727,8 +741,12 @@ async fn object_storage_real_encryption_roundtrip() {
     let bucket = "enc";
     let d1 = pattern_data(1 * MIB, 21);
     let d2 = pattern_data(3 * MIB, 22);
-    put_full(&node, bucket, b"o1", &d1, MIB).await.expect("put o1");
-    put_full(&node, bucket, b"o2", &d2, MIB).await.expect("put o2");
+    put_full(&node, bucket, b"o1", &d1, MIB)
+        .await
+        .expect("put o1");
+    put_full(&node, bucket, b"o2", &d2, MIB)
+        .await
+        .expect("put o2");
 
     for (id, expect) in [
         (b"o1".as_slice(), d1.as_slice()),
@@ -759,7 +777,10 @@ async fn object_storage_real_encryption_roundtrip() {
             saw_header = true;
         }
         // 明文数据不得以原文形式出现在文件中
-        for pat in [&d1[..min(64 * 1024, d1.len())], &d2[..min(64 * 1024, d2.len())]] {
+        for pat in [
+            &d1[..min(64 * 1024, d1.len())],
+            &d2[..min(64 * 1024, d2.len())],
+        ] {
             assert!(
                 !find_subslice(&raw, pat),
                 "plaintext leaked into chunk file {}",
@@ -925,7 +946,8 @@ async fn object_storage_real_chaos_kill_pause_partition() {
         })
         .collect();
 
-    let object_section = "[object_storage]\nenabled = true\nupload_timeout_secs = 2\ngc_interval_secs = 1\n";
+    let object_section =
+        "[object_storage]\nenabled = true\nupload_timeout_secs = 2\ngc_interval_secs = 1\n";
     let mut nodes: Vec<RealNode> = (0..3)
         .map(|i| {
             RealNode::spawn_cluster(
@@ -955,12 +977,26 @@ async fn object_storage_real_chaos_kill_pause_partition() {
 
         // 1) 写入并确认（健康窗口——上一轮注入已恢复）
         assert!(
-            put_obj_any(&nodes.iter().collect::<Vec<_>>(), bucket, object_id.as_bytes(), &data, 4 * MIB, Instant::now() + Duration::from_secs(15)).await,
+            put_obj_any(
+                &nodes.iter().collect::<Vec<_>>(),
+                bucket,
+                object_id.as_bytes(),
+                &data,
+                4 * MIB,
+                Instant::now() + Duration::from_secs(15)
+            )
+            .await,
             "round {round}: object put failed"
         );
         // 2) 读回校验（写入确认后对象必须立即可读）
-        let got = get_obj_any(&nodes.iter().collect::<Vec<_>>(), bucket, object_id.as_bytes(), Instant::now() + Duration::from_secs(10)).await
-            .unwrap_or_else(|| panic!("round {round}: committed object unreadable"));
+        let got = get_obj_any(
+            &nodes.iter().collect::<Vec<_>>(),
+            bucket,
+            object_id.as_bytes(),
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .unwrap_or_else(|| panic!("round {round}: committed object unreadable"));
         assert_eq!(got, data, "round {round}: readback mismatch");
         committed.push((object_id.into_bytes(), data));
 
@@ -998,7 +1034,9 @@ async fn object_storage_real_chaos_kill_pause_partition() {
     }
     // 确保有 leader（kill/partition 恢复期可能短暂无 leader）
     let conv_deadline = Instant::now() + Duration::from_secs(30);
-    while current_leader(&nodes.iter().collect::<Vec<_>>()).await.is_none()
+    while current_leader(&nodes.iter().collect::<Vec<_>>())
+        .await
+        .is_none()
         && Instant::now() < conv_deadline
     {
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1011,15 +1049,33 @@ async fn object_storage_real_chaos_kill_pause_partition() {
             Instant::now() + Duration::from_secs(20),
         )
         .await
-        .unwrap_or_else(|| panic!("converged cluster cannot read {}", String::from_utf8_lossy(object_id)));
-        assert_eq!(&got, data, "convergence mismatch on {}", String::from_utf8_lossy(object_id));
+        .unwrap_or_else(|| {
+            panic!(
+                "converged cluster cannot read {}",
+                String::from_utf8_lossy(object_id)
+            )
+        });
+        assert_eq!(
+            &got,
+            data,
+            "convergence mismatch on {}",
+            String::from_utf8_lossy(object_id)
+        );
     }
 
     // 末尾再写一个跨 4MiB chunk 边界的大对象，作为数据面完整性最终校验
     let big_id = b"final-big";
     let big = pattern_data(4 * MIB + 64 * 1024, 77);
     assert!(
-        put_obj_any(&nodes.iter().collect::<Vec<_>>(), bucket, big_id, &big, 4 * MIB, Instant::now() + Duration::from_secs(20)).await,
+        put_obj_any(
+            &nodes.iter().collect::<Vec<_>>(),
+            bucket,
+            big_id,
+            &big,
+            4 * MIB,
+            Instant::now() + Duration::from_secs(20)
+        )
+        .await,
         "final multi-chunk put failed"
     );
 
@@ -1040,7 +1096,10 @@ async fn object_storage_real_chaos_kill_pause_partition() {
                 break;
             }
         }
-        assert!(Instant::now() < fail_deadline, "failover did not elect new leader");
+        assert!(
+            Instant::now() < fail_deadline,
+            "failover did not elect new leader"
+        );
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     eprintln!("chaos: new leader = node {new_leader}");
@@ -1054,8 +1113,18 @@ async fn object_storage_real_chaos_kill_pause_partition() {
             Instant::now() + Duration::from_secs(15),
         )
         .await
-        .unwrap_or_else(|| panic!("after failover cannot read {}", String::from_utf8_lossy(object_id)));
-        assert_eq!(&got, data, "after-failover mismatch on {}", String::from_utf8_lossy(object_id));
+        .unwrap_or_else(|| {
+            panic!(
+                "after failover cannot read {}",
+                String::from_utf8_lossy(object_id)
+            )
+        });
+        assert_eq!(
+            &got,
+            data,
+            "after-failover mismatch on {}",
+            String::from_utf8_lossy(object_id)
+        );
     }
     let got_big = get_obj_any(
         &nodes.iter().collect::<Vec<_>>(),
@@ -1138,13 +1207,148 @@ async fn object_storage_real_sdk_roundtrip() {
         .put("sdk", b"small", &pattern_data(10, 33))
         .await
         .expect_err("overwrite must fail via SDK");
-    assert!(matches!(err, coord_core::error::Error::AlreadyExists { .. }));
+    assert!(matches!(
+        err,
+        coord_core::error::Error::AlreadyExists { .. }
+    ));
 
     assert!(storage.delete("sdk", b"small").await.expect("sdk delete"));
-    assert!(storage.stat("sdk", b"small").await.expect("sdk stat").is_none());
+    assert!(storage
+        .stat("sdk", b"small")
+        .await
+        .expect("sdk stat")
+        .is_none());
     let err = storage
         .get("sdk", b"small")
         .await
         .expect_err("get deleted via SDK");
     assert!(matches!(err, coord_core::error::Error::NotFound { .. }));
+}
+
+// ──── 批次 10：coord-client 流式会话（ObjectWriter / ObjectReader）────
+
+/// `StorageClient::open_put` / `open_get` 走真实进程 server：客户端**自选块边界**
+/// 逐块发送（与服务端 4MiB 默认分帧不同）、服务端流逐块取回，跨 4MiB 边界往返一致；
+/// 并覆盖本地越界拒绝 / `abort` / 缺失对象 `open_get`。
+#[tokio::test]
+#[ignore = "real-process object storage suite; run explicitly: OBJECT_STORAGE_REAL=1"]
+async fn object_storage_real_streaming_sessions() {
+    if std::env::var("OBJECT_STORAGE_REAL").is_err() {
+        eprintln!("skipping object_storage streaming (set OBJECT_STORAGE_REAL=1 to run)");
+        return;
+    }
+    let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().to_path_buf();
+    let grpc_port = find_port();
+    let node = RealNode::spawn(
+        &data_dir,
+        grpc_port,
+        find_port(),
+        "[object_storage]\nenabled = true\n",
+    );
+    node.wait_ready(Duration::from_secs(60)).await;
+
+    let client = coord_client::Client::connect_direct(coord_client::Config::new(vec![format!(
+        "127.0.0.1:{grpc_port}"
+    )]))
+    .await
+    .expect("connect coord-client");
+    let storage = client.storage();
+
+    // 4MiB + 64KiB，按 **1MiB 客户端块**发送：块边界由调用方决定（5 个 chunk），
+    // 与 `put_chunked` 固定 4MiB 分帧不同 —— 这正是流式会话的意义。
+    let total = 4 * MIB + 64 * 1024;
+    let payload = pattern_data(total, 41);
+    let mut writer = storage
+        .open_put("stream", b"big", total as u64)
+        .await
+        .expect("open_put");
+    assert_eq!(writer.total_size(), Some(total as u64));
+    assert_eq!(writer.bytes_written(), 0);
+
+    let mut written = 0u64;
+    for chunk in payload.chunks(MIB) {
+        written = writer.write_chunk(chunk).await.expect("write_chunk");
+    }
+    assert_eq!(written, total as u64);
+    assert_eq!(writer.bytes_written(), total as u64);
+
+    let out = writer.finish().await.expect("finish");
+    assert_eq!(out.size as usize, total);
+    assert_eq!(out.chunks, 5, "client framing must be preserved 1:1");
+
+    // 分块下载：服务端按 chunk 记录逐条返回（5 条）
+    let mut reader = storage.open_get("stream", b"big").await.expect("open_get");
+    assert_eq!(reader.stat().size as usize, total);
+    assert!(reader.stat().committed);
+    let mut got = Vec::with_capacity(total);
+    let mut sizes = Vec::new();
+    while let Some(chunk) = reader.read_chunk().await.expect("read_chunk") {
+        sizes.push(chunk.len());
+        got.extend_from_slice(&chunk);
+    }
+    reader.close();
+    assert_eq!(got, payload);
+    assert_eq!(sizes, vec![MIB, MIB, MIB, MIB, 64 * 1024]);
+
+    // 本地越界：声明 total < 实际写入 → 立刻拒绝（不等服务端）
+    let mut w = storage
+        .open_put("stream", b"oops", 1024)
+        .await
+        .expect("open_put small");
+    w.write_chunk(&vec![7u8; 1024])
+        .await
+        .expect("first chunk fits");
+    let err = w.write_chunk(&vec![7u8; 1]).await.expect_err("overflow");
+    assert!(matches!(err, coord_core::error::Error::InvalidArgument(_)));
+    w.abort();
+
+    // 缺失对象：open_get 必须报 NotFound（而不是打开一个空会话）
+    let err = storage
+        .open_get("stream", b"nope")
+        .await
+        .expect_err("missing object");
+    assert!(matches!(err, coord_core::error::Error::NotFound { .. }));
+
+    // ── 未知长度流式上传（批次 11）：不预先声明 total_size ──
+    let mut w = storage
+        .open_put_unknown("stream", b"unknown")
+        .await
+        .expect("open_put_unknown");
+    assert_eq!(
+        w.total_size(),
+        None,
+        "unknown-length writer has no declared total"
+    );
+    let payload2 = pattern_data(3 * MIB + 7, 97);
+    let block = 700 * 1024;
+    for chunk in payload2.chunks(block) {
+        w.write_chunk(chunk).await.expect("write_chunk unknown");
+    }
+    let out = w.finish().await.expect("finish unknown");
+    assert_eq!(out.size as usize, payload2.len());
+    assert_eq!(out.chunks as usize, payload2.len().div_ceil(block));
+
+    // 读回逐块一致（stat.size 必须在 Commit 时定长）
+    let mut reader = storage
+        .open_get("stream", b"unknown")
+        .await
+        .expect("open_get unknown");
+    assert_eq!(reader.stat().size as usize, payload2.len());
+    assert!(reader.stat().committed);
+    let mut got = Vec::with_capacity(payload2.len());
+    while let Some(c) = reader.read_chunk().await.expect("read_chunk unknown") {
+        got.extend_from_slice(&c);
+    }
+    reader.close();
+    assert_eq!(got, payload2);
+
+    // 未知长度 + 零 chunk → 服务端拒绝（至少一个 chunk）
+    let w = storage
+        .open_put_unknown("stream", b"empty")
+        .await
+        .expect("open_put_unknown empty");
+    let err = w.finish().await.expect_err("empty unknown upload");
+    assert!(matches!(err, coord_core::error::Error::InvalidArgument(_)));
 }

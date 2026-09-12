@@ -116,8 +116,7 @@ async fn start_two_node_two_region_cluster() -> Vec<NodeHost> {
             let region_dir = base.join(format!("region-{region_id}"));
             std::fs::create_dir_all(&region_dir).unwrap();
             let storage_config = StorageConfig::default();
-            let backend =
-                RedbBackend::open(&region_dir, &storage_config).expect("open backend");
+            let backend = RedbBackend::open(&region_dir, &storage_config).expect("open backend");
             let mvcc = Arc::new(MvccStorage::new(backend).expect("create mvcc"));
             let tracker = Arc::new(SnapshotTracker::default());
             let log_store = LogStore::new(&region_dir)
@@ -211,8 +210,7 @@ async fn test_two_regions_independent_election_and_write() {
 
     // 两个 Region 都应各自选出 leader（可能是 1 或 2）
     for region_id in REGIONS {
-        let leader =
-            wait_leader_for_region(&hosts, region_id, Duration::from_secs(15)).await;
+        let leader = wait_leader_for_region(&hosts, region_id, Duration::from_secs(15)).await;
         assert!(
             leader.is_some(),
             "region {region_id} elected no leader within timeout"

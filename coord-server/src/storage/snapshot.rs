@@ -160,10 +160,9 @@ impl SnapshotData {
                     ))),
                     Err(_) => {
                         // 尝试 v2 迁移
-                        let v2: SnapshotDataV2 = bincode::deserialize(data)
-                            .map_err(|e| {
-                                Error::Internal(format!("snapshot deserialize (v4+v3+v2): {e}"))
-                            })?;
+                        let v2: SnapshotDataV2 = bincode::deserialize(data).map_err(|e| {
+                            Error::Internal(format!("snapshot deserialize (v4+v3+v2): {e}"))
+                        })?;
                         if v2.version != 2 {
                             return Err(Error::Internal(format!(
                                 "unsupported snapshot version: {} (expected 2, 3 or {})",
@@ -266,7 +265,7 @@ struct SnapshotDataV2 {
 ///   applied / kv / kv_meta 三次独立读事务的撕裂快照；
 /// - 补充 auth 域（`/_sys/auth/*`）、lease 域（`/_lease/*`）与 compacted 水位。
 ///
-/// 
+///
 /// - 补充 region 0 `/_pd/*`（PD 全局队列）与 `/_sys/*` 非 auth 域（迁移标记
 ///   等）——region 0 状态机内部记录随快照导出，导入/追平不丢。
 pub fn export_snapshot_data<B: StorageBackend>(
@@ -286,31 +285,23 @@ pub fn export_snapshot_data<B: StorageBackend>(
         lease_rows,
         pd_rows,
         sys_rows,
-    ) = backend
-        .read(|tx| {
-            let applied = tx.get(TABLE_META, META_LAST_APPLIED)?;
-            let compacted = tx.get(TABLE_META, META_COMPACT_REVISION)?;
-            let kv_prefix = encode_kv_key(b"");
-            let kv_rows = tx.iter_prefix(TABLE_KV, &kv_prefix)?;
-            let meta_prefix = encode_kv_meta_key(b"");
-            let meta_rows = tx.iter_prefix(TABLE_KV_META, &meta_prefix)?;
-            // R-RFT-06：auth / lease 域随快照导出（恢复后用户/角色/会话/租约不丢）
-            let auth_rows = tx.iter_prefix(TABLE_KV, b"/_sys/auth/")?;
-            let lease_rows = tx.iter_prefix(TABLE_KV, b"/_lease/")?;
-            // region 0 PD 队列 / 其余 system 域随快照导出
-            let pd_rows = tx.iter_prefix(TABLE_KV, b"/_pd/")?;
-            let sys_rows = tx.iter_prefix(TABLE_KV, b"/_sys/")?;
-            Ok((
-                applied,
-                compacted,
-                kv_rows,
-                meta_rows,
-                auth_rows,
-                lease_rows,
-                pd_rows,
-                sys_rows,
-            ))
-        })?;
+    ) = backend.read(|tx| {
+        let applied = tx.get(TABLE_META, META_LAST_APPLIED)?;
+        let compacted = tx.get(TABLE_META, META_COMPACT_REVISION)?;
+        let kv_prefix = encode_kv_key(b"");
+        let kv_rows = tx.iter_prefix(TABLE_KV, &kv_prefix)?;
+        let meta_prefix = encode_kv_meta_key(b"");
+        let meta_rows = tx.iter_prefix(TABLE_KV_META, &meta_prefix)?;
+        // R-RFT-06：auth / lease 域随快照导出（恢复后用户/角色/会话/租约不丢）
+        let auth_rows = tx.iter_prefix(TABLE_KV, b"/_sys/auth/")?;
+        let lease_rows = tx.iter_prefix(TABLE_KV, b"/_lease/")?;
+        // region 0 PD 队列 / 其余 system 域随快照导出
+        let pd_rows = tx.iter_prefix(TABLE_KV, b"/_pd/")?;
+        let sys_rows = tx.iter_prefix(TABLE_KV, b"/_sys/")?;
+        Ok((
+            applied, compacted, kv_rows, meta_rows, auth_rows, lease_rows, pd_rows, sys_rows,
+        ))
+    })?;
 
     let applied = applied_bytes.as_deref().and_then(AppliedLogId::from_bytes);
     data.applied_index = applied.map(|a| a.index).unwrap_or(last_included_index);
@@ -885,8 +876,7 @@ mod tests {
 
         // v4 结构直接解析失败 → v3 迁移路径成功（域补空；既有域保留）
         assert!(SnapshotData::from_bytes(&v3_bytes).is_err());
-        let migrated =
-            SnapshotData::from_bytes_migrating(&v3_bytes).expect("v3 快照应可迁移为 v4");
+        let migrated = SnapshotData::from_bytes_migrating(&v3_bytes).expect("v3 快照应可迁移为 v4");
         assert_eq!(migrated.version, 4);
         assert_eq!(migrated.last_included_index, 11);
         assert_eq!(migrated.applied_term, 7, "v3 applied term 保留");

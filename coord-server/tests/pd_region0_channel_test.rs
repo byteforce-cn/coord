@@ -65,7 +65,9 @@ async fn start_single_region0() -> Region0Host {
     .expect("create region0 raft");
     let mut members = BTreeMap::new();
     members.insert(1, new_basic_node(&raft_addr));
-    raft.initialize(members).await.expect("initialize region0 raft");
+    raft.initialize(members)
+        .await
+        .expect("initialize region0 raft");
     let raft = Arc::new(raft);
 
     // region 0 leader 就绪（单节点 quorum=1）
@@ -135,7 +137,11 @@ async fn test_pd_region0_channel_enqueue_dedup_and_lifecycle() {
     .await;
 
     let entries = host.mvcc.pd_queue_entries().expect("read queue");
-    assert_eq!(entries.len(), 1, "enqueue must produce exactly one queue entry");
+    assert_eq!(
+        entries.len(),
+        1,
+        "enqueue must produce exactly one queue entry"
+    );
     assert_eq!(entries[0].op_id, rev, "op_id must equal enqueue log index");
     assert!(entries[0].is_pending());
     assert_eq!(entries[0].op, add_peer_op(1, 3));
@@ -152,7 +158,11 @@ async fn test_pd_region0_channel_enqueue_dedup_and_lifecycle() {
     .await;
     assert!(rev2 > rev);
     let entries = host.mvcc.pd_queue_entries().expect("read queue");
-    assert_eq!(entries.len(), 1, "duplicate enqueue must be deduped (global)");
+    assert_eq!(
+        entries.len(),
+        1,
+        "duplicate enqueue must be deduped (global)"
+    );
     assert_eq!(entries[0].op_id, rev);
 
     // Claim 由 node 3（目标 leader）→ Running（认领墙钟随命令落定）

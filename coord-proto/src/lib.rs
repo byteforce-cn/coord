@@ -43,6 +43,10 @@ pub mod agent {
     tonic::include_proto!("coord.agent");
 }
 
+pub mod plugin {
+    tonic::include_proto!("coord.plugin");
+}
+
 /// Encoded file descriptor set for gRPC Server Reflection.
 /// Generated at compile time by `build.rs`.
 pub const FILE_DESCRIPTOR_SET: &[u8] =

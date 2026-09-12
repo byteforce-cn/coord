@@ -21,6 +21,7 @@ use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionMeta, StorageConfig};
 use coord_server::raft::log_store::LogStore;
 use coord_server::raft::network::RaftNetworkFactoryImpl;
 use coord_server::raft::region::RegionManager;
+use coord_server::raft::region_runtime::region_data_dir;
 use coord_server::raft::state_machine::StateMachineStore;
 use coord_server::raft::type_config::{Command, ObjectStoreOp, Response};
 use coord_server::raft::{new_basic_node, new_raft, RaftConfig, RegionRuntimeSpec};
@@ -32,7 +33,6 @@ use coord_server::storage::object_store::{
 };
 use coord_server::storage::redb_backend::RedbBackend;
 use coord_server::storage::snapshot::SnapshotTracker;
-use coord_server::raft::region_runtime::region_data_dir;
 
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
@@ -42,10 +42,7 @@ fn now_unix() -> i64 {
 }
 
 /// 经 raft 提交一个 ObjectStore 命令，返回 (revision, ok)
-async fn propose(
-    raft: &Arc<coord_server::raft::CoordRaft>,
-    op: ObjectStoreOp,
-) -> (u64, bool) {
+async fn propose(raft: &Arc<coord_server::raft::CoordRaft>, op: ObjectStoreOp) -> (u64, bool) {
     let resp = raft
         .client_write(Command::ObjectStore(op))
         .await
@@ -143,9 +140,15 @@ async fn object_store_legacy_root_apply_roundtrip() {
             .port()
     });
     factory.register_node(1, raft_addr.clone());
-    let raft = new_raft(1, Arc::new(RaftConfig::default()), factory, log_store, sm_store)
-        .await
-        .unwrap();
+    let raft = new_raft(
+        1,
+        Arc::new(RaftConfig::default()),
+        factory,
+        log_store,
+        sm_store,
+    )
+    .await
+    .unwrap();
     let mut members = BTreeMap::new();
     members.insert(1, new_basic_node(&raft_addr));
     raft.initialize(members).await.unwrap();
@@ -185,7 +188,10 @@ async fn object_store_legacy_root_apply_roundtrip() {
 
     // 用户 KV 读路径看不到 /obj/ 内部行（mvcc.get 直读会看到——那是内部行；
     // 用户层过滤在 gRPC Range 层，此处验证 manifest key 形态正确）
-    assert!(mvcc.get(&manifest_key(b"bucket-1", b"obj-1")).unwrap().is_some());
+    assert!(mvcc
+        .get(&manifest_key(b"bucket-1", b"obj-1"))
+        .unwrap()
+        .is_some());
 
     // chunk 文件落 <base>/objects/ 且可读
     assert!(store.chunk_file_exists(b"bucket-1", b"obj-1", 0));
@@ -217,7 +223,9 @@ async fn object_store_legacy_root_apply_roundtrip() {
     )
     .await;
     assert!(ok, "delete ok");
-    assert!(read_manifest(&mvcc, b"bucket-1", b"obj-1").unwrap().is_none());
+    assert!(read_manifest(&mvcc, b"bucket-1", b"obj-1")
+        .unwrap()
+        .is_none());
     assert!(!store.chunk_file_exists(b"bucket-1", b"obj-1", 0));
     // 目录已删（delete_object_files 删除对象目录）
     assert!(!store.chunk_path(b"bucket-1", b"obj-1", 0).exists());
@@ -226,15 +234,22 @@ async fn object_store_legacy_root_apply_roundtrip() {
     let data2 = b"second-life-object".repeat(1000);
     let (_, ok) = upload_object(&raft, "bucket-1", b"obj-1", &data2, chunk_size, None).await;
     assert!(ok);
-    let m2 = read_manifest(&mvcc, b"bucket-1", b"obj-1").unwrap().unwrap();
+    let m2 = read_manifest(&mvcc, b"bucket-1", b"obj-1")
+        .unwrap()
+        .unwrap();
     assert!(m2.committed);
     assert_eq!(m2.size, data2.len() as u64);
-    assert_eq!(store.read_chunk(b"bucket-1", b"obj-1", 0).unwrap(), &data2[..chunk_size.min(data2.len())]);
+    assert_eq!(
+        store.read_chunk(b"bucket-1", b"obj-1", 0).unwrap(),
+        &data2[..chunk_size.min(data2.len())]
+    );
 
     // GC 孤儿回收：无 manifest 的残留文件被清扫（制造孤儿 = 直接写文件再清扫）
     let orphans = {
         let store2 = ChunkStore::new(&base, build_limits(chunk_size), None).unwrap();
-        store2.write_chunk(b"orphan-bucket", b"dead", 0, b"junk").unwrap();
+        store2
+            .write_chunk(b"orphan-bucket", b"dead", 0, b"junk")
+            .unwrap();
         let mlist = coord_server::storage::object_store::list_manifests(&mvcc).unwrap();
         let live = live_object_hashes(&mlist);
         store2.sweep_orphans(&live).unwrap()
@@ -321,7 +336,15 @@ async fn object_store_region_apply_encrypted() {
     }
 
     let data: Vec<u8> = (0..100u8).cycle().take(2 * chunk_size + 123).collect();
-    let (_, ok) = upload_object(&rt_raft, "region-bucket", b"obj-enc", &data, chunk_size, None).await;
+    let (_, ok) = upload_object(
+        &rt_raft,
+        "region-bucket",
+        b"obj-enc",
+        &data,
+        chunk_size,
+        None,
+    )
+    .await;
     assert!(ok);
 
     // manifest 在 Region 1 MVCC；chunk 文件加密落盘（读回明文一致，raw 非明文）
@@ -332,13 +355,17 @@ async fn object_store_region_apply_encrypted() {
     assert_eq!(m.size, data.len() as u64);
     for (i, chunk) in data.chunks(chunk_size).enumerate() {
         assert_eq!(
-            store.read_chunk(b"region-bucket", b"obj-enc", i as u32).unwrap(),
+            store
+                .read_chunk(b"region-bucket", b"obj-enc", i as u32)
+                .unwrap(),
             chunk,
             "encrypted chunk {i} roundtrip"
         );
     }
     let raw0 = std::fs::read(store.chunk_path(b"region-bucket", b"obj-enc", 0)).unwrap();
-    assert!(!raw0.windows(data.len().min(11)).any(|w| w == &data[..w.len()]));
+    assert!(!raw0
+        .windows(data.len().min(11))
+        .any(|w| w == &data[..w.len()]));
 
     // 删除 → 文件清空
     let (_, ok) = propose(
@@ -350,6 +377,8 @@ async fn object_store_region_apply_encrypted() {
     )
     .await;
     assert!(ok);
-    assert!(read_manifest(&mvcc, b"region-bucket", b"obj-enc").unwrap().is_none());
+    assert!(read_manifest(&mvcc, b"region-bucket", b"obj-enc")
+        .unwrap()
+        .is_none());
     assert!(!store.chunk_file_exists(b"region-bucket", b"obj-enc", 0));
 }

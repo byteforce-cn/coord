@@ -1,16 +1,17 @@
-// coord-agent: 可插拔服务框架
+// coord-agent: 服务契约（`BaseService`）
 //
-// 定义 BaseService trait 和 ServiceManager。
-// 每个高级服务（Registry、Workflow、Lock 等）实现 BaseService，
-// 通过 ServiceManager 统一管理生命周期。
+// 原生服务（Registry、Workflow、Lock、Cache、MQ ...）实现 `BaseService`，由
+// **`PluginManager`** 统一托管：`PluginManager` 把它们包装成内建插件
+// （`NativePluginAdapter`），生命周期（init/start/stop）、gRPC 服务面
+// （`Plugin::grpc_service`）与健康检查三件事都走同一条路径。
 //
-// 参见。
-
-use std::collections::BTreeMap;
-use std::sync::Arc;
+// 历史（已删除）：曾有一个并行的 `ServiceManager` 注册表，加上 `lib.rs` 里硬编码的
+// `add_optional_service` 长链——同一批服务存在三份清单（ServiceManager 注册表 /
+// 路由链 / 插件注册表），且 `BaseService::register_grpc` 因 `Router<L>` 的泛型层类型
+// 无法 object-safe 而永远是 no-op。两者均已移除：注册表统一为 `PluginManager`，
+// gRPC 面由 `Plugin::grpc_service()` + `plugin/grpc.rs` 表达。
 
 use async_trait::async_trait;
-use tokio::sync::RwLock;
 
 /// 核心错误类型（简化版，用于服务框架）
 pub type ServiceError = Box<dyn std::error::Error + Send + Sync>;
@@ -38,8 +39,13 @@ pub enum ServiceStatus {
 /// 可插拔基础服务统一接口
 ///
 /// 每个高级服务（Registry、Config Center、Lock、ID Gen、Cache、MQ、
-/// Event Notification、Leader Election、Workflow、Policy）实现此 trait，
-/// 通过 ServiceManager 按需加载和生命周期管理。
+/// Event Notification、Leader Election、Workflow、Policy ...）实现此 trait，
+/// 由 `PluginManager` 包装为内建插件并按需加载、统一托管生命周期。
+///
+/// 本 trait **不**声明 gRPC 注册方法：`tonic::transport::server::Router<L>` 的层类型
+/// `L` 使这种签名无法 object-safe（这正是历史上 `register_grpc` 恒为 no-op 的原因）。
+/// 服务的 gRPC 面改由插件 SPI 表达——`Plugin::grpc_service()` 返回类型擦除的
+/// [`crate::plugin::AgentGrpcService`]，由 `PluginManager::build_grpc_router` 组装。
 ///
 /// # Object Safety
 ///
@@ -49,18 +55,6 @@ pub enum ServiceStatus {
 pub trait BaseService: Send + Sync {
     /// 服务唯一名称标识（如 "registry", "workflow", "lock"）
     fn name(&self) -> &'static str;
-
-    /// 向 tonic Router 注册本服务的 gRPC 接口
-    ///
-    /// 每个服务可注册 0-N 个 gRPC 服务到共享的 tonic Server。
-    /// 返回更新后的 Router（Builder 模式）。
-    /// 默认实现直接返回 builder（服务无独立 gRPC 接口）。
-    fn register_grpc(
-        &self,
-        builder: tonic::transport::server::Router,
-    ) -> tonic::transport::server::Router {
-        builder
-    }
 
     /// 启动服务：初始化内部资源、建立连接、启动后台任务
     ///
@@ -196,261 +190,45 @@ fn default_idgen_mode() -> String {
     "snowflake".to_string()
 }
 
-// ──── ServiceManager ────
-
-/// 服务管理器：统一管理所有已启用的 BaseService 实例的生命周期
-///
-/// # 使用方式
-///
-/// ```ignore
-/// let config = ServiceConfig { registry: true, workflow: true, ..Default::default() };
-/// let manager = ServiceManager::new(config, agent_inner);
-/// manager.init_services().await?;
-/// manager.start_all().await?;
-/// // ... 运行中 ...
-/// manager.stop_all().await?;
-/// ```
-pub struct ServiceManager {
-    /// 已注册的服务列表（按名称索引）
-    services: RwLock<BTreeMap<&'static str, Arc<dyn BaseService>>>,
-    /// 服务启用配置
-    config: ServiceConfig,
-}
-
-impl ServiceManager {
-    /// 创建空的 ServiceManager
-    pub fn new(config: ServiceConfig) -> Self {
-        Self {
-            services: RwLock::new(BTreeMap::new()),
-            config,
-        }
-    }
-
-    /// 注册一个服务实例
-    ///
-    /// 若同名服务已存在，返回 Err。
-    pub async fn register(&self, service: Arc<dyn BaseService>) -> ServiceResult<()> {
-        let name = service.name();
-        let mut services = self.services.write().await;
-        if services.contains_key(name) {
-            return Err(format!("service '{name}' is already registered").into());
-        }
-        services.insert(name, service);
-        Ok(())
-    }
-
-    /// 检查服务是否已启用
-    pub fn is_enabled(&self, name: &str) -> bool {
-        match name {
-            "registry" => self.config.registry,
-            "config_center" => self.config.config_center,
-            "lock" => self.config.lock,
-            "idgen" => self.config.idgen,
-            "leader_election" => self.config.leader_election,
-            "event_notification" => self.config.event_notification,
-            "cache" => self.config.cache,
-            "mq" => self.config.mq,
-            "workflow" => self.config.workflow,
-            "policy" => self.config.policy,
-            _ => false,
-        }
-    }
-
-    /// 启动所有已注册的服务
-    ///
-    /// 按注册顺序依次启动。若某个服务启动失败，已启动的服务会保持运行
-    /// （调用方应决定是否回滚）。
-    pub async fn start_all(&self) -> ServiceResult<()> {
-        let services = self.services.read().await;
-        for (name, service) in services.iter() {
-            tracing::info!("ServiceManager: starting service '{name}'");
-            service
-                .start()
-                .await
-                .map_err(|e| format!("failed to start service '{name}': {e}"))?;
-            tracing::info!("ServiceManager: service '{name}' started successfully");
-        }
-        Ok(())
-    }
-
-    /// 停止所有已注册的服务（逆序）
-    pub async fn stop_all(&self) -> ServiceResult<()> {
-        let services = self.services.read().await;
-        // 逆序停止：后启动的先停止
-        for (name, service) in services.iter().rev() {
-            tracing::info!("ServiceManager: stopping service '{name}'");
-            if let Err(e) = service.stop().await {
-                tracing::error!("ServiceManager: error stopping service '{name}': {e}");
-            }
-        }
-        Ok(())
-    }
-
-    /// 对所有已注册服务执行健康检查
-    ///
-    /// 返回 (healthy_count, total_count, unhealthy_names)。
-    pub async fn health_check_all(&self) -> (usize, usize, Vec<String>) {
-        let services = self.services.read().await;
-        let total = services.len();
-        let mut healthy = 0;
-        let mut unhealthy = Vec::new();
-        for (name, service) in services.iter() {
-            if service.health_check() {
-                healthy += 1;
-            } else {
-                unhealthy.push(name.to_string());
-            }
-        }
-        (healthy, total, unhealthy)
-    }
-
-    /// 合并所有已注册服务的 gRPC 接口到 tonic Router
-    ///
-    /// 泛型于 layer 类型 L：兼容 `Server::builder().layer(...)` 自定义中间件后的
-    /// `Router<Stack<L, Identity>>`（鉴权层）。
-    ///
-    /// 注：`BaseService::register_grpc` 需保持 object-safe（服务以 `Arc<dyn BaseService>`
-    /// 存储），无法泛型化到 `Router<L>`；且当前所有实现均为 no-op（gRPC 服务在 serve()
-    /// 中直接注册），故带自定义 layer 的 Router 直接透传。
-    pub fn build_grpc_router<L>(
-        &self,
-        builder: tonic::transport::server::Router<L>,
-    ) -> tonic::transport::server::Router<L> {
-        builder
-    }
-}
-
-impl std::fmt::Debug for ServiceManager {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ServiceManager")
-            .field("config", &self.config)
-            .finish_non_exhaustive()
-    }
-}
-
 // ──── tests ────
+//
+// 注册表/生命周期/健康检查的行为测试已随 `ServiceManager` 一起迁到
+// `plugin::PluginManager`（`plugin/mod.rs` 与 `plugin/native.rs` 的单测、
+// 以及 `tests/agent_plugin_grpc_test.rs` 的端到端断言）。
+// 本模块只保留服务契约自身（trait object 安全 + 配置解析）的断言。
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 测试桩服务：用于验证 ServiceManager 生命周期
-    struct StubService {
-        name: &'static str,
-        started: RwLock<bool>,
-        stopped: RwLock<bool>,
-        healthy: RwLock<bool>,
-    }
-
-    impl StubService {
-        fn new(name: &'static str) -> Self {
-            Self {
-                name,
-                started: RwLock::new(false),
-                stopped: RwLock::new(false),
-                healthy: RwLock::new(false),
-            }
-        }
-    }
+    struct StubService;
 
     #[async_trait]
     impl BaseService for StubService {
         fn name(&self) -> &'static str {
-            self.name
+            "stub"
         }
 
         async fn start(&self) -> ServiceResult<()> {
-            *self.started.write().await = true;
-            *self.healthy.write().await = true;
             Ok(())
         }
 
         async fn stop(&self) -> ServiceResult<()> {
-            *self.stopped.write().await = true;
-            *self.healthy.write().await = false;
             Ok(())
         }
 
         fn health_check(&self) -> bool {
-            self.healthy.try_read().map(|g| *g).unwrap_or(false)
+            true
         }
     }
 
-    #[tokio::test]
-    async fn test_service_manager_register_and_lifecycle() {
-        let config = ServiceConfig::default();
-        let manager = ServiceManager::new(config);
-
-        let svc = Arc::new(StubService::new("test-stub"));
-        manager.register(svc.clone()).await.unwrap();
-
-        manager.start_all().await.unwrap();
-        assert!(svc.health_check());
-
-        manager.stop_all().await.unwrap();
-        assert!(!svc.health_check());
-    }
-
-    #[tokio::test]
-    async fn test_service_manager_duplicate_register_error() {
-        let config = ServiceConfig::default();
-        let manager = ServiceManager::new(config);
-
-        let svc1 = Arc::new(StubService::new("dup"));
-        manager.register(svc1).await.unwrap();
-
-        let svc2 = Arc::new(StubService::new("dup"));
-        let err = manager.register(svc2).await.unwrap_err();
-        assert!(err.to_string().contains("already registered"));
-    }
-
-    #[tokio::test]
-    async fn test_service_manager_health_check_all() {
-        let config = ServiceConfig::default();
-        let manager = ServiceManager::new(config);
-
-        manager
-            .register(Arc::new(StubService::new("s1")))
-            .await
-            .unwrap();
-        manager
-            .register(Arc::new(StubService::new("s2")))
-            .await
-            .unwrap();
-
-        manager.start_all().await.unwrap();
-
-        let (healthy, total, unhealthy) = manager.health_check_all().await;
-        assert_eq!(healthy, 2);
-        assert_eq!(total, 2);
-        assert!(unhealthy.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_service_manager_is_enabled() {
-        let config = ServiceConfig {
-            registry: true,
-            workflow: true,
-            lock: false,
-            idgen: false,
-            leader_election: false,
-            event_notification: false,
-            cache: false,
-            mq: false,
-            policy: false,
-            scheduler: false,
-            circuit_breaker: false,
-            rate_limiter: false,
-            feature_flags: false,
-            transit: false,
-            pki: false,
-            ..Default::default()
-        };
-        let manager = ServiceManager::new(config);
-        assert!(manager.is_enabled("registry"));
-        assert!(manager.is_enabled("workflow"));
-        assert!(!manager.is_enabled("lock"));
-        assert!(!manager.is_enabled("mq"));
+    #[test]
+    fn test_base_service_trait_object_safety() {
+        // 验证 BaseService 可用作 trait object（`Arc<dyn BaseService>`）：
+        // 内建插件的 gRPC 面与生命周期都建立在这一点上。
+        fn _accept_trait_object(_svc: &dyn BaseService) {}
+        fn _accept_arc(_svc: std::sync::Arc<dyn BaseService>) {}
+        assert_eq!(StubService.name(), "stub");
     }
 
     #[test]
@@ -532,100 +310,5 @@ policy = false
         assert!(config.registry);
         assert!(!config.lock);
         assert!(!config.workflow);
-    }
-
-    /// 测试带 gRPC 注册的服务（验证 register_grpc trait 方法）
-    struct GrpcStubService {
-        name: &'static str,
-        started: RwLock<bool>,
-        stopped: RwLock<bool>,
-        healthy: RwLock<bool>,
-        grpc_called: std::sync::atomic::AtomicBool,
-    }
-
-    impl GrpcStubService {
-        #[allow(dead_code)]
-        fn new(name: &'static str) -> Self {
-            Self {
-                name,
-                started: RwLock::new(false),
-                stopped: RwLock::new(false),
-                healthy: RwLock::new(false),
-                grpc_called: std::sync::atomic::AtomicBool::new(false),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl BaseService for GrpcStubService {
-        fn name(&self) -> &'static str {
-            self.name
-        }
-
-        fn register_grpc(
-            &self,
-            builder: tonic::transport::server::Router,
-        ) -> tonic::transport::server::Router {
-            self.grpc_called
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            builder
-        }
-
-        async fn start(&self) -> ServiceResult<()> {
-            *self.started.write().await = true;
-            *self.healthy.write().await = true;
-            Ok(())
-        }
-
-        async fn stop(&self) -> ServiceResult<()> {
-            *self.stopped.write().await = true;
-            *self.healthy.write().await = false;
-            Ok(())
-        }
-
-        fn health_check(&self) -> bool {
-            self.healthy.try_read().map(|g| *g).unwrap_or(false)
-        }
-    }
-
-    #[test]
-    fn test_base_service_default_register_grpc_returns_builder() {
-        // 验证 BaseService 的 register_grpc 默认实现存在且不 panic
-        // 直接通过 trait object 调用验证
-        let svc = StubService::new("test");
-        // 对于无自定义 register_grpc 的服务，默认实现直接返回 builder
-        // 此测试验证 trait 的 object safety
-        assert_eq!(svc.name(), "test");
-    }
-
-    #[test]
-    fn test_base_service_trait_object_safety() {
-        // 验证 BaseService trait 可以用作 trait object (dyn BaseService)
-        fn _accept_trait_object(_svc: &dyn BaseService) {}
-        // 编译时验证：如果能编译通过，说明 trait 是 object-safe 的
-    }
-
-    #[tokio::test]
-    async fn test_service_manager_stop_reverse_order_tracking() {
-        // 验证 stop_all 逆序调用（后注册的先停止）
-        let config = ServiceConfig::default();
-        let manager = ServiceManager::new(config);
-
-        let s1 = Arc::new(StubService::new("first"));
-        let s2 = Arc::new(StubService::new("second"));
-
-        manager.register(s1.clone()).await.unwrap();
-        manager.register(s2.clone()).await.unwrap();
-        manager.start_all().await.unwrap();
-
-        // 两者都启动了
-        assert!(s1.health_check());
-        assert!(s2.health_check());
-
-        manager.stop_all().await.unwrap();
-
-        // 两者都停止了
-        assert!(!s1.health_check());
-        assert!(!s2.health_check());
     }
 }

@@ -26,6 +26,7 @@ fn test_public_api_exports() {
         tls: None,
         thread_pools: Default::default(),
         auth: Default::default(),
+        plugins: Default::default(),
     };
 
     assert_eq!(config.agent_addr, "127.0.0.1:19527");

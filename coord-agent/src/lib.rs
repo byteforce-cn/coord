@@ -23,6 +23,7 @@ pub mod key_util;
 pub mod metrics;
 pub mod pki;
 pub mod pki_store;
+pub mod plugin;
 mod proxy;
 pub mod service;
 pub mod services;
@@ -49,7 +50,7 @@ pub use pki::{CertInfo, PkiConfig, PkiError, PkiService};
 pub use pki_store::{
     CaRecord, CertRecord, CertStatus, KvPkiStore, MemoryPkiStore, PkiStore, PkiStoreError,
 };
-pub use service::{BaseService, ServiceConfig, ServiceManager, ServiceResult};
+pub use service::{BaseService, ServiceConfig, ServiceResult};
 pub use threadpool::{AgentThreadPools, ThreadPoolConfig};
 pub use tls::{build_agent_tls_channel, build_agent_tls_server_config, AgentTlsConfig};
 
@@ -141,6 +142,11 @@ pub struct AgentConfig {
     /// 鉴权配置（默认关闭；开启后所有 gRPC RPC 校验 CCT + capability）
     #[serde(default)]
     pub auth: AgentAuthConfig,
+
+    // 插件引擎（混合引擎：rquickjs + wasm；原生服务经适配器统一 SPI）
+    /// 插件引擎配置（默认关闭 = 零开销）
+    #[serde(default)]
+    pub plugins: crate::plugin::PluginEngineConfig,
 }
 
 /// Agent 侧 CCT 鉴权配置（私钥集中存储前必须上鉴权）
@@ -160,6 +166,24 @@ pub struct AgentAuthConfig {
     /// 时钟漂移容忍（秒，默认 300）
     #[serde(default = "default_auth_clock_drift_secs")]
     pub clock_drift_secs: i64,
+    /// 一次性 bootstrap token（首启开通 agent 自身与**插件服务账户**；空 = 跳过）。
+    /// 仅在 `enabled = true` 时生效；插件账户开通失败会降级为共享未鉴权客户端。
+    #[serde(default)]
+    pub bootstrap_token: String,
+    /// provisioner 服务账户用户名（批次 12）。
+    ///
+    /// 首启以一次性引导 CCT 自举该**持久**账户（密码落盘在 `data_dir`），
+    /// 之后 agent 用它（refresh token / 密码重认证**自动续期**）开通插件账户，
+    /// 因此运行中（SIGHUP）新增插件不再受「引导 CCT 10 分钟 + 令牌一次性」限制。
+    ///
+    /// 多个 agent 共用一个集群时必须各自取**唯一**名字：同名的第二个 agent
+    /// 无法用自己随机生成的密码通过认证，会退化为旧行为（仅窗口内可开通）。
+    #[serde(default = "default_provisioner_user")]
+    pub provisioner_user: String,
+}
+
+fn default_provisioner_user() -> String {
+    crate::plugin::identity::DEFAULT_PROVISIONER_USER.to_string()
 }
 
 fn default_auth_clock_drift_secs() -> i64 {
@@ -226,35 +250,63 @@ impl Default for AgentConfig {
             tls: None,
             thread_pools: ThreadPoolConfig::default(),
             auth: AgentAuthConfig::default(),
+            plugins: crate::plugin::PluginEngineConfig::default(),
         }
     }
 }
 
 // ──── gRPC 服务链组装（泛型于 Server<L>：明文 Identity / TLS TlsAcceptor 共用）────
 
-/// agent gRPC 服务句柄集合（服务链组装用，由 serve_with_shutdown 收集）
+/// agent gRPC 服务句柄集合（核心代理面 + 插件引擎自身的调用面）。
+///
+/// 原生服务（Registry / Config / Lock / IdGen / Workflow ...）**不在**这里：
+/// 它们已作为内建插件注册进 `PluginManager`，服务链由
+/// [`crate::plugin::PluginManager::build_grpc_router`] 依 `Plugin::grpc_service()`
+/// 动态组装——服务「存在与否」由插件注册表给出，「是否对外」由插件状态给出，
+/// 不再有第二份硬编码清单。
 struct AgentGrpcSvcs {
     inner: Option<Arc<crate::proxy::AgentInner>>,
-    registry: Option<Arc<crate::services::registry::RegistryService>>,
-    config: Option<Arc<crate::services::config_center::ConfigCenterService>>,
-    lock: Option<Arc<crate::services::lock::LockService>>,
-    idgen: Option<Arc<crate::services::idgen::IdGenService>>,
-    election: Option<Arc<crate::services::leader_election::LeaderElectionService>>,
-    event: Option<Arc<crate::services::event_notification::EventNotificationService>>,
-    cache: Option<Arc<crate::services::cache::CacheService>>,
-    mq: Option<Arc<crate::services::mq::MessageQueueService>>,
-    replica: Option<Arc<crate::services::grpc_handlers::ReplicaRouter>>,
-    scheduler: Option<Arc<crate::services::scheduler::SchedulerService>>,
-    workflow: Option<Arc<crate::services::workflow::phase4::WorkflowEngineService>>,
-    policy: Option<Arc<crate::services::policy::PolicyService>>,
-    transit: Option<Arc<crate::services::transit::TransitService>>,
-    cb: Option<Arc<crate::services::circuit_breaker::CircuitBreakerService>>,
-    rl: Option<Arc<crate::services::rate_limiter::RateLimiterService>>,
-    ff: Option<Arc<crate::feature_flags::FeatureFlagService>>,
-    pki: Option<Arc<crate::pki::PkiService>>,
+    /// 通用插件调用面（coord.plugin.Plugin；Invoke/List）
+    ///
+    /// 刻意**不**做成插件：它是插件引擎自身的管理面，做成插件会与
+    /// `PluginManager` 构成 Arc 环（manager → plugin → manager）。
+    plugin: Option<Arc<crate::plugin::PluginService>>,
 }
 
-/// 组装 agent gRPC 服务链（核心 5 服务 + 可插拔服务 + 自定义 Health）。
+/// 把一个原生服务登记为**内建插件**（插件拥有其生命周期与 gRPC 服务面）。
+///
+/// 返回服务句柄（注册失败 → `None`，与旧 `ServiceManager::register` 的
+/// 错误语义一致：装配期其他逻辑不应继续引用未注册的服务）。
+///
+/// 这是原生服务进入插件 SPI 的**唯一**入口：不再有「ServiceManager 一份 +
+/// 硬编码路由链一份」的双清单。
+async fn register_native_service<T>(
+    manager: &Arc<crate::plugin::PluginManager>,
+    service: Arc<T>,
+    grpc: crate::plugin::AgentGrpcService,
+) -> Option<Arc<T>>
+where
+    T: crate::service::BaseService + 'static,
+{
+    let name = service.name().to_string();
+    let handle = Arc::clone(&service);
+    let adapter = Arc::new(
+        crate::plugin::NativePluginAdapter::new(service as Arc<dyn crate::service::BaseService>)
+            .with_grpc(grpc),
+    );
+    match manager.register_builtin(adapter).await {
+        Ok(()) => {
+            tracing::info!("service '{name}' registered as builtin plugin");
+            Some(handle)
+        }
+        Err(e) => {
+            tracing::error!("failed to register service '{name}' as plugin: {e}");
+            None
+        }
+    }
+}
+
+/// 组装 agent gRPC 服务链（核心 6 代理服务 + 插件动态服务面 + 自定义 Health）。
 ///
 /// 泛型于 `Server<L>`（`L` = 明文 `Identity` 或 TLS `TlsAcceptor`）：调用方分别在
 /// `.tls_config()` 前后构造 builder，服务链单份组装，避免两条 serve 路径漂移。
@@ -262,7 +314,7 @@ fn build_agent_grpc_router<L>(
     mut server: tonic::transport::server::Server<L>,
     svcs: AgentGrpcSvcs,
     metrics: Option<crate::metrics::AgentMetrics>,
-    service_manager: &crate::service::ServiceManager,
+    plugin_manager: &Arc<crate::plugin::PluginManager>,
 ) -> Result<tonic::transport::server::Router<L>, Box<dyn std::error::Error + Send + Sync>>
 where
     L: Clone,
@@ -287,73 +339,13 @@ where
             svcs.inner,
         )))
         .add_optional_service(
-            svcs.registry
-                .map(coord_proto::agent::registry_server::RegistryServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.config
-                .map(coord_proto::agent::config_server::ConfigServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.lock
-                .map(coord_proto::agent::lock_server::LockServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.idgen
-                .map(coord_proto::agent::id_gen_server::IdGenServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.election
-                .map(coord_proto::agent::leader_election_server::LeaderElectionServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.event
-                .map(coord_proto::agent::event_server::EventServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.cache
-                .map(coord_proto::agent::cache_server::CacheServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.mq
-                .map(coord_proto::agent::mq_server::MqServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.replica
-                .map(coord_proto::agent::replica_server::ReplicaServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.scheduler
-                .map(coord_proto::agent::scheduler_server::SchedulerServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.workflow
-                .map(coord_proto::agent::workflow_server::WorkflowServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.policy
-                .map(coord_proto::agent::policy_server::PolicyServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.transit
-                .map(coord_proto::agent::transit_server::TransitServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.cb
-                .map(coord_proto::agent::circuit_breaker_server::CircuitBreakerServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.rl
-                .map(coord_proto::agent::rate_limiter_server::RateLimiterServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.ff
-                .map(coord_proto::agent::feature_flags_server::FeatureFlagsServer::from_arc),
-        )
-        .add_optional_service(
-            svcs.pki
-                .map(coord_proto::agent::pki_server::PkiServer::from_arc),
+            svcs.plugin
+                .map(coord_proto::plugin::plugin_server::PluginServer::from_arc),
         );
+
+    // 原生服务 + 脚本插件：服务面由插件注册表动态给出（仅**已启动**的插件会被挂载，
+    // 启动失败的插件不会暴露半死的 gRPC 接口）。
+    let router = plugin_manager.build_grpc_router(router);
 
     // 注册自定义 Health gRPC 服务（coord.agent.Health）
     // Java SDK healthCheck() 调用的是此自定义服务（而非标准 grpc.health.v1.Health）。
@@ -364,7 +356,243 @@ where
         crate::health::GrpcHealthService,
     ));
 
-    Ok(service_manager.build_grpc_router(router))
+    Ok(router)
+}
+
+/// `build_plugin_loader` 的入参集合（避免参数过多；均为借用/轻量克隆）。
+///
+/// 结构体本身不按 feature 门控（无插件 feature 时由调用方构造、函数返回 `None`），
+/// 因此字段在无 feature 构建下也需被读取以避免 dead_code。
+struct PluginLoaderArgs<'a> {
+    cfg: &'a crate::plugin::PluginEngineConfig,
+    auth: &'a AgentAuthConfig,
+    data_dir: &'a str,
+    tls: Option<coord_client::config::TlsConfig>,
+    static_peers: &'a [String],
+    /// 共享（未鉴权）回退客户端；`None` = skeleton 模式
+    fallback: Option<&'a coord_client::Client>,
+    /// 插件身份开通用的凭据句柄（进程级：一次性 bootstrap token 只兑换一次，
+    /// 由 `serve` 持有并在 SIGHUP 重建加载器时复用同一引导 CCT）
+    identity_provider: &'a Arc<coord_client::credential::CachedTokenProvider>,
+    metrics: Option<crate::metrics::AgentMetrics>,
+}
+
+/// 构建插件加载器（Phase 1：rquickjs JS 宿主；Phase 4：wasmtime wasm 宿主）。
+///
+/// - skeleton 模式（无 coord-client 后端）→ `None`（配置条目在 `reload` 中记入
+///   `deferred`，插件不会带缺失的 SDK 启动）；
+/// - 命中 `plugin-js` / `plugin-wasm` feature → `EnginePluginLoader` 按
+///   `manifest.runtime` 派发到对应引擎（后端为 `CoordSdkBackend`）；
+/// - 配置了 `auth.bootstrap_token` → 先用一次性令牌换短期引导 CCT，
+///   再挂载 `PluginIdentityManager`（每插件独立服务账户 + 受限 CCT 自动续期，
+///   D5/§10.1；JS / wasm 两个引擎一致）。
+/// - 传入 `metrics` → 插件调用结果与沙箱 trap（fuel/epoch）计数进入 `/metrics`。
+async fn build_plugin_loader(
+    args: PluginLoaderArgs<'_>,
+) -> Option<Arc<dyn crate::plugin::PluginLoader>> {
+    #[cfg(not(any(feature = "plugin-js", feature = "plugin-wasm")))]
+    {
+        // 无插件引擎 feature：读一遍字段（避免 dead_code）后返回 None。
+        let _ = (
+            args.cfg,
+            args.auth,
+            args.data_dir,
+            args.tls,
+            args.static_peers,
+            args.fallback,
+            args.identity_provider,
+            args.metrics,
+        );
+        None
+    }
+
+    #[cfg(any(feature = "plugin-js", feature = "plugin-wasm"))]
+    {
+        let PluginLoaderArgs {
+            cfg,
+            auth,
+            data_dir,
+            tls,
+            static_peers,
+            fallback,
+            identity_provider,
+            metrics,
+        } = args;
+        use crate::plugin::sdk::{CoordSdkBackend, PluginSdkBackend};
+        let fallback = fallback?;
+        let rc = tokio::runtime::Handle::current();
+
+        // 插件身份（可选）：配置了 `auth.bootstrap_token` 即视为运维显式开启
+        //（令牌来自 server 的 `[security].agent_bootstrap_tokens` 或动态签发）。
+        // **不**依赖 agent 自身的入站鉴权开关（`auth.enabled`）：两者正交——
+        // agent 是否校验入站 CCT，与插件是否用独立服务账户访问 server 无关。
+        //
+        // 引导 CCT 只注入**独立**的插件身份客户端，不污染共享 `inner.client`
+        //（代理数据面流量不应携带引导凭据）。
+        //
+        // 引导是 **best-effort**：一次性令牌可能已被上一次启动消费，此时无法再建新
+        // 账户，但插件账户密码已持久化在 agent data_dir，`PluginIdentityManager`
+        // 仍能直接 `Authenticate` 既有账户并续期 —— 因此这里**始终**挂载身份管理器
+        // （退化情形下用共享客户端作 gateway）。
+        if !auth.bootstrap_token.trim().is_empty() {
+            use crate::plugin::identity::{CoordAuthGateway, PluginClients, PluginIdentityManager};
+            let (identity_client, bootstrap_ready) = match ensure_plugin_identity_token(
+                auth,
+                static_peers,
+                tls.clone(),
+                identity_provider,
+            )
+            .await
+            {
+                Ok(Some(c)) => (c, true),
+                Ok(None) => (fallback.clone(), false),
+                Err(e) => {
+                    tracing::warn!(
+                        "plugin identity: bootstrap CCT unavailable ({e}); existing plugin \
+                             accounts will be authenticated with persisted passwords, but no new \
+                             account can be provisioned until a fresh bootstrap token is provided"
+                    );
+                    (fallback.clone(), false)
+                }
+            };
+            let clients = Arc::new(PluginClients::new(fallback.clone()));
+            let gateway: Arc<dyn crate::plugin::identity::PluginAuthGateway> =
+                Arc::new(CoordAuthGateway::new(identity_client.clone()));
+            match PluginIdentityManager::new(
+                gateway,
+                static_peers.to_vec(),
+                tls,
+                data_dir,
+                Arc::clone(&clients),
+            ) {
+                Ok(mgr) => {
+                    let mgr = Arc::new(mgr);
+                    // 批次 12：自举**持久** provisioner 服务账户 —— 开通能力不再受
+                    // 「引导 CCT 10 分钟 + 令牌一次性」限制（运行中新增插件可用）。
+                    // 引导 CCT 仅在**本次**成功兑换时可用于自举；令牌已消费 / 已过期时
+                    // 靠已落盘密码匿名认证 provisioner 账户（重启后仍成立）。
+                    let provisioner_user = {
+                        let configured = auth.provisioner_user.trim();
+                        if configured.is_empty() {
+                            crate::plugin::identity::DEFAULT_PROVISIONER_USER.to_string()
+                        } else {
+                            configured.to_string()
+                        }
+                    };
+                    if let Err(e) = mgr
+                        .bootstrap_provisioner(
+                            bootstrap_ready.then_some(&identity_client),
+                            &provisioner_user,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            "plugin identity: provisioner session unavailable ({e}); account \
+                             provisioning stays limited to the bootstrap CCT window"
+                        );
+                    }
+                    let backend: Arc<dyn PluginSdkBackend> =
+                        Arc::new(CoordSdkBackend::with_source(mgr.client_source()));
+                    return crate::plugin::EnginePluginLoader::new(
+                        std::path::PathBuf::from(&cfg.dir),
+                        backend,
+                        cfg.env.clone(),
+                        rc,
+                    )
+                    .map(|l| l.with_identity(mgr))
+                    .map(|l| match metrics.clone() {
+                        Some(m) => l.with_metrics(m),
+                        None => l,
+                    })
+                    .map(|l| Arc::new(l) as Arc<dyn crate::plugin::PluginLoader>)
+                    .map_err(|e| tracing::error!("plugin engine init failed: {e}"))
+                    .ok();
+                }
+                Err(e) => tracing::warn!(
+                    "plugin identity disabled (manager init failed: {e}); plugins use \
+                     the shared agent client"
+                ),
+            }
+        }
+
+        let backend: Arc<dyn PluginSdkBackend> = Arc::new(CoordSdkBackend::new(fallback.clone()));
+        match crate::plugin::EnginePluginLoader::new(
+            std::path::PathBuf::from(&cfg.dir),
+            backend,
+            cfg.env.clone(),
+            rc,
+        ) {
+            Ok(l) => {
+                let l = match metrics {
+                    Some(m) => l.with_metrics(m),
+                    None => l,
+                };
+                Some(Arc::new(l))
+            }
+            Err(e) => {
+                tracing::error!("plugin engine init failed: {e}; plugin entries deferred");
+                None
+            }
+        }
+    }
+}
+
+/// 换取（或复用）agent 引导 CCT，返回用于插件账户开通的**带凭据客户端**。
+///
+/// - 已有缓存 CCT（`identity_provider` 已 set：重启 / SIGHUP 重建加载器）→ 直接复用，
+///   **不**再次兑换（一次性令牌只能消费一次，重复兑换必然失败）；
+/// - 首次 → `Auth.Bootstrap(token)` 换 10 分钟 `agent-bootstrap` CCT 写入句柄。
+///
+/// 失败原因（无静态 peers / 令牌被拒）以 `Err` 返回，由调用方降级为只认已有账户。
+#[cfg(any(feature = "plugin-js", feature = "plugin-wasm"))]
+async fn ensure_plugin_identity_token(
+    auth: &AgentAuthConfig,
+    static_peers: &[String],
+    tls: Option<coord_client::config::TlsConfig>,
+    identity_provider: &Arc<coord_client::credential::CachedTokenProvider>,
+) -> Result<Option<coord_client::Client>, String> {
+    // 已缓存（前一次启动/SIGHUP 已兑换）→ 复用
+    if identity_provider.is_set() {
+        return build_identity_client(static_peers, tls, identity_provider)
+            .await
+            .map(Some);
+    }
+    if static_peers.is_empty() {
+        return Err("no static server endpoints configured".into());
+    }
+
+    let client = build_identity_client(static_peers, tls, identity_provider).await?;
+    let resp = client
+        .auth()
+        .bootstrap(&auth.bootstrap_token)
+        .await
+        .map_err(|e| format!("Auth.Bootstrap rejected the token: {e}"))?;
+    if resp.cct.is_empty() {
+        return Err("Auth.Bootstrap returned an empty CCT".into());
+    }
+    tracing::info!(
+        "agent bootstrap succeeded (plugin identity provisioning enabled; CCT expires at {})",
+        resp.expires_at
+    );
+    identity_provider.set(resp.cct);
+    Ok(Some(client))
+}
+
+/// 构造使用给定凭据句柄的客户端（插件账户开通专用；与共享客户端隔离）。
+#[cfg(any(feature = "plugin-js", feature = "plugin-wasm"))]
+async fn build_identity_client(
+    static_peers: &[String],
+    tls: Option<coord_client::config::TlsConfig>,
+    identity_provider: &Arc<coord_client::credential::CachedTokenProvider>,
+) -> Result<coord_client::Client, String> {
+    let mut config = coord_client::Config::new(static_peers.to_vec())
+        .with_token_provider(Arc::clone(identity_provider) as Arc<dyn coord_client::TokenProvider>);
+    if let Some(t) = tls {
+        config = config.with_tls(t);
+    }
+    coord_client::Client::connect_direct(config)
+        .await
+        .map_err(|e| format!("failed to build plugin identity client: {e}"))
 }
 
 /// 判断地址主机段是否 loopback（支持 `127.0.0.1:port` / `localhost:port` /
@@ -397,6 +625,8 @@ pub struct AgentServer {
     metrics: Option<crate::metrics::AgentMetrics>,
     /// R-AGT-20：就绪标志（连接探针实时回写，供 /health?ready=true）
     ready_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// 配置文件监视器（Some = 支持 SIGHUP 触发的插件集热重载）
+    config_watcher: Option<crate::config_watcher::ConfigWatcher>,
 }
 
 impl AgentServer {
@@ -407,6 +637,7 @@ impl AgentServer {
             thread_pools: None,
             metrics: None,
             ready_flag: None,
+            config_watcher: None,
         }
     }
 
@@ -425,6 +656,13 @@ impl AgentServer {
     /// R-AGT-20：挂载共享就绪标志（连接探针实时回写）。
     pub fn with_ready_flag(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
         self.ready_flag = Some(flag);
+        self
+    }
+
+    /// 挂载配置文件监视器：SIGHUP 时重载配置并应用**插件集 diff**
+    /// （新增/移除/版本替换；引擎参数与默认限制等结构性变更需重启）。
+    pub fn with_config_watcher(mut self, watcher: crate::config_watcher::ConfigWatcher) -> Self {
+        self.config_watcher = Some(watcher);
         self
     }
 
@@ -458,7 +696,6 @@ impl AgentServer {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         #[allow(deprecated)]
         use crate::cache::AgentCache;
-        use crate::service::ServiceManager;
         use proxy::{AgentInner, KvProxy, LeaseProxy, MaintenanceProxy, TxnProxy, WatchProxy};
         use std::sync::Arc;
 
@@ -583,38 +820,26 @@ impl AgentServer {
             None
         };
 
-        // 初始化可插拔服务框架
-        let service_manager = ServiceManager::new(self.config.services.clone());
+        // ──── 服务宿主：`PluginManager`（唯一注册表）────
+        //
+        // 原生服务与脚本插件共用同一宿主：生命周期（init/start/stop）、gRPC 服务面
+        // （`Plugin::grpc_service`）、健康（`Plugin::health_check`）三者都从这
+        // 一份注册表出去——不再有 ServiceManager + 硬编码路由链的双清单。
+        let plugin_metrics = self.metrics.clone().unwrap_or_default();
+        let plugin_manager = Arc::new(
+            crate::plugin::PluginManager::new(self.config.plugins.clone())
+                .with_metrics(plugin_metrics.clone()),
+        );
 
         // 按配置启用高级服务
         // 保存各服务的 Arc 句柄，用于后续注册 gRPC Server
-        let mut registry_grpc_svc: Option<Arc<crate::services::registry::RegistryService>> = None;
-        let mut config_grpc_svc: Option<Arc<crate::services::config_center::ConfigCenterService>> =
-            None;
-        let mut lock_grpc_svc: Option<Arc<crate::services::lock::LockService>> = None;
-        let mut idgen_grpc_svc: Option<Arc<crate::services::idgen::IdGenService>> = None;
-        let mut election_grpc_svc: Option<
-            Arc<crate::services::leader_election::LeaderElectionService>,
-        > = None;
+        // 装配期需要跨块复用的服务句柄；其余内建插件注册后句柄即不再保留
+        //（插件注册表持有它们，装配期无需多留一份）。
         let mut event_grpc_svc: Option<
             Arc<crate::services::event_notification::EventNotificationService>,
         > = None;
         let mut cache_grpc_svc: Option<Arc<crate::services::cache::CacheService>> = None;
         let mut mq_grpc_svc: Option<Arc<crate::services::mq::MessageQueueService>> = None;
-        let mut replication_grpc_svc: Option<Arc<crate::services::grpc_handlers::ReplicaRouter>> =
-            None;
-        let mut scheduler_grpc_svc: Option<Arc<crate::services::scheduler::SchedulerService>> =
-            None;
-        let mut workflow_grpc_svc: Option<
-            Arc<crate::services::workflow::phase4::WorkflowEngineService>,
-        > = None;
-        let mut policy_grpc_svc: Option<Arc<crate::services::policy::PolicyService>> = None;
-        let mut transit_grpc_svc: Option<Arc<crate::services::transit::TransitService>> = None;
-        let mut cb_grpc_svc: Option<Arc<crate::services::circuit_breaker::CircuitBreakerService>> =
-            None;
-        let mut rl_grpc_svc: Option<Arc<crate::services::rate_limiter::RateLimiterService>> = None;
-        let mut ff_grpc_svc: Option<Arc<crate::feature_flags::FeatureFlagService>> = None;
-        let mut pki_grpc_svc: Option<Arc<crate::pki::PkiService>> = None;
 
         if self.config.services.registry {
             if let Some(ref inner) = inner {
@@ -623,13 +848,12 @@ impl AgentServer {
                         // R-AGT-20：watch/探测后台任务经 background 池
                         .with_thread_pools(self.thread_pools.clone()),
                 );
-                registry_grpc_svc = Some(registry_svc.clone());
-                if let Err(e) = service_manager.register(registry_svc).await {
-                    tracing::error!("failed to register registry service: {e}");
-                    registry_grpc_svc = None;
-                } else {
-                    tracing::info!("Registry service registered (v3.0 pluggable architecture)");
-                }
+                let _ = register_native_service(
+                    &plugin_manager,
+                    registry_svc.clone(),
+                    crate::plugin::AgentGrpcService::Registry(registry_svc),
+                )
+                .await;
             } else {
                 tracing::warn!("Registry service enabled but no server connection; skipping");
             }
@@ -644,13 +868,12 @@ impl AgentServer {
                         // R-AGT-20：watch 后台任务经 background 池
                         .with_thread_pools(self.thread_pools.clone()),
                 );
-                config_grpc_svc = Some(config_svc.clone());
-                if let Err(e) = service_manager.register(config_svc).await {
-                    tracing::error!("failed to register config_center service: {e}");
-                    config_grpc_svc = None;
-                } else {
-                    tracing::info!("ConfigCenter service registered (v3.0 pluggable architecture)");
-                }
+                let _ = register_native_service(
+                    &plugin_manager,
+                    config_svc.clone(),
+                    crate::plugin::AgentGrpcService::ConfigCenter(config_svc),
+                )
+                .await;
             } else {
                 tracing::warn!("ConfigCenter service enabled but no server connection; skipping");
             }
@@ -659,13 +882,12 @@ impl AgentServer {
         if self.config.services.lock {
             if let Some(ref inner) = inner {
                 let lock_svc = Arc::new(crate::services::lock::LockService::new(inner.clone()));
-                let lock_grpc = lock_svc.clone();
-                if let Err(e) = service_manager.register(lock_svc).await {
-                    tracing::error!("failed to register lock service: {e}");
-                } else {
-                    lock_grpc_svc = Some(lock_grpc);
-                    tracing::info!("Lock service registered (v3.0 pluggable architecture)");
-                }
+                let _ = register_native_service(
+                    &plugin_manager,
+                    lock_svc.clone(),
+                    crate::plugin::AgentGrpcService::Lock(lock_svc),
+                )
+                .await;
             } else {
                 tracing::warn!("Lock service enabled but no server connection; skipping");
             }
@@ -682,11 +904,14 @@ impl AgentServer {
                 self.config.services.idgen_node_id,
                 &self.config.agent_addr,
             ));
-            let idgen_grpc = idgen_svc.clone();
-            if let Err(e) = service_manager.register(idgen_svc).await {
-                tracing::error!("failed to register idgen service: {e}");
-            } else {
-                idgen_grpc_svc = Some(idgen_grpc);
+            let registered = register_native_service(
+                &plugin_manager,
+                idgen_svc.clone(),
+                crate::plugin::AgentGrpcService::IdGen(idgen_svc),
+            )
+            .await
+            .is_some();
+            if registered {
                 if idgen_mode == crate::services::idgen::IdGenMode::Snowflake {
                     tracing::info!("ID Generator service registered (snowflake nodeid mode)");
                 } else if inner.is_some() {
@@ -708,15 +933,12 @@ impl AgentServer {
                         256,
                     ),
                 );
-                let event_grpc = event_svc.clone();
-                if let Err(e) = service_manager.register(event_svc).await {
-                    tracing::error!("failed to register event_notification service: {e}");
-                } else {
-                    event_grpc_svc = Some(event_grpc);
-                    tracing::info!(
-                        "EventNotification service registered (v3.0 pluggable architecture)"
-                    );
-                }
+                event_grpc_svc = register_native_service(
+                    &plugin_manager,
+                    event_svc.clone(),
+                    crate::plugin::AgentGrpcService::EventNotification(event_svc),
+                )
+                .await;
             } else {
                 tracing::warn!(
                     "EventNotification service enabled but no server connection; skipping"
@@ -732,15 +954,12 @@ impl AgentServer {
                         256,
                     ),
                 );
-                let election_grpc = election_svc.clone();
-                if let Err(e) = service_manager.register(election_svc).await {
-                    tracing::error!("failed to register leader_election service: {e}");
-                } else {
-                    election_grpc_svc = Some(election_grpc);
-                    tracing::info!(
-                        "LeaderElection service registered (v3.0 pluggable architecture)"
-                    );
-                }
+                let _ = register_native_service(
+                    &plugin_manager,
+                    election_svc.clone(),
+                    crate::plugin::AgentGrpcService::LeaderElection(election_svc),
+                )
+                .await;
             } else {
                 tracing::warn!("LeaderElection service enabled but no server connection; skipping");
             }
@@ -763,11 +982,13 @@ impl AgentServer {
                     Arc::new(crate::services::workflow::phase4::WorkflowEngineService::new())
                 }
             };
-            let workflow_grpc = workflow_svc.clone();
-            if let Err(e) = service_manager.register(workflow_svc).await {
-                tracing::error!("failed to register workflow engine service: {e}");
-            } else {
-                workflow_grpc_svc = Some(workflow_grpc);
+            let workflow_grpc_svc = register_native_service(
+                &plugin_manager,
+                workflow_svc.clone(),
+                crate::plugin::AgentGrpcService::Workflow(workflow_svc),
+            )
+            .await;
+            if workflow_grpc_svc.is_some() {
                 tracing::info!("Workflow engine service registered (v4.0 coord-core engine)");
             }
 
@@ -811,13 +1032,12 @@ impl AgentServer {
             let scheduler_svc = Arc::new(crate::services::scheduler::SchedulerService::new(
                 crate::services::scheduler::DefaultConfig,
             ));
-            let scheduler_grpc = scheduler_svc.clone();
-            if let Err(e) = service_manager.register(scheduler_svc).await {
-                tracing::error!("failed to register scheduler service: {e}");
-            } else {
-                scheduler_grpc_svc = Some(scheduler_grpc);
-                tracing::info!("Scheduler service registered (v3.0 pluggable architecture)");
-            }
+            let _ = register_native_service(
+                &plugin_manager,
+                scheduler_svc.clone(),
+                crate::plugin::AgentGrpcService::Scheduler(scheduler_svc),
+            )
+            .await;
         }
 
         // 数据面服务（Cache + MQ，基于 redb 本地引擎，无需 Server 连接）
@@ -830,13 +1050,12 @@ impl AgentServer {
             ));
             // 绑定自身弱引用，gRPC handler 才能升级 Arc 走 spawn_blocking
             cache_svc.bind_self_weak(&cache_svc);
-            let cache_grpc = cache_svc.clone();
-            if let Err(e) = service_manager.register(cache_svc).await {
-                tracing::error!("failed to register cache service: {e}");
-            } else {
-                cache_grpc_svc = Some(cache_grpc);
-                tracing::info!("Cache data-plane service registered (v3.0, redb backend)");
-            }
+            cache_grpc_svc = register_native_service(
+                &plugin_manager,
+                cache_svc.clone(),
+                crate::plugin::AgentGrpcService::Cache(cache_svc),
+            )
+            .await;
         }
 
         if self.config.services.mq {
@@ -847,13 +1066,12 @@ impl AgentServer {
             ));
             // 绑定自身弱引用，gRPC handler 才能升级 Arc 走 spawn_blocking
             mq_svc.bind_self_weak(&mq_svc);
-            let mq_grpc = mq_svc.clone();
-            if let Err(e) = service_manager.register(mq_svc).await {
-                tracing::error!("failed to register mq service: {e}");
-            } else {
-                mq_grpc_svc = Some(mq_grpc);
-                tracing::info!("MQ data-plane service registered (v3.0, redb backend)");
-            }
+            mq_grpc_svc = register_native_service(
+                &plugin_manager,
+                mq_svc.clone(),
+                crate::plugin::AgentGrpcService::Mq(mq_svc),
+            )
+            .await;
         }
 
         // ISR 跨 Agent 数据复制（v2.1 已落地）：Cache/MQ 写路径经复制管理器
@@ -913,10 +1131,16 @@ impl AgentServer {
                 mq_grpc_svc.clone(),
                 cache_grpc_svc.clone(),
             ));
-            // 心跳后台任务（ISR 成员维护 + 落后检测触发 Reconcile）
-            manager.start_heartbeat(router.clone());
+            // 心跳不再在此处启动：它是复制服务插件 `start()` 的动作
+            //（`ReplicaRouter` 的 `BaseService` 实现），由 PluginManager 统一驱动。
+            router.bind_self_weak(&router);
 
-            replication_grpc_svc = Some(router);
+            let _ = register_native_service(
+                &plugin_manager,
+                router.clone(),
+                crate::plugin::AgentGrpcService::Replication(router),
+            )
+            .await;
         }
 
         // 安全策略引擎（本地 RBAC/ABAC，可扩展至 OPA）
@@ -934,22 +1158,29 @@ impl AgentServer {
                     crate::services::policy::PolicyService::new(1024)
                 }
             });
-            let policy_grpc = policy_svc.clone();
-            if let Err(e) = service_manager.register(policy_svc).await {
-                tracing::error!("failed to register policy service: {e}");
-            } else {
-                policy_grpc_svc = Some(policy_grpc);
+            let registered = register_native_service(
+                &plugin_manager,
+                policy_svc.clone(),
+                crate::plugin::AgentGrpcService::Policy(policy_svc),
+            )
+            .await
+            .is_some();
+            if registered {
                 tracing::info!("Policy service registered (v3.0, RBAC/ABAC engine)");
             }
         }
 
         if self.config.services.transit {
             use crate::services::transit::TransitConfig;
-            let transit_config = TransitConfig::default();
-            match crate::services::transit::TransitService::new(transit_config) {
+            match crate::services::transit::TransitService::new(TransitConfig::default()) {
                 Ok(transit_svc) => {
-                    transit_grpc_svc = Some(Arc::new(transit_svc));
-                    tracing::info!("Transit service initialized (v3.0, envelope encryption)");
+                    let transit_svc = Arc::new(transit_svc);
+                    let _ = register_native_service(
+                        &plugin_manager,
+                        transit_svc.clone(),
+                        crate::plugin::AgentGrpcService::Transit(transit_svc),
+                    )
+                    .await;
                 }
                 Err(e) => {
                     tracing::error!("failed to create transit service: {e}");
@@ -959,13 +1190,18 @@ impl AgentServer {
 
         if self.config.services.circuit_breaker {
             use std::time::Duration;
-            cb_grpc_svc = Some(Arc::new(
+            let cb_svc = Arc::new(
                 crate::services::circuit_breaker::CircuitBreakerService::new(
                     5,
                     Duration::from_secs(30),
                 ),
-            ));
-            tracing::info!("CircuitBreaker service initialized (v3.0)");
+            );
+            let _ = register_native_service(
+                &plugin_manager,
+                cb_svc.clone(),
+                crate::plugin::AgentGrpcService::CircuitBreaker(cb_svc),
+            )
+            .await;
         }
 
         if self.config.services.rate_limiter {
@@ -974,19 +1210,28 @@ impl AgentServer {
                 max_tokens: 100,
                 refill_rate: 10.0,
             };
-            rl_grpc_svc = Some(Arc::new(
-                crate::services::rate_limiter::RateLimiterService::new(rl_config),
+            let rl_svc = Arc::new(crate::services::rate_limiter::RateLimiterService::new(
+                rl_config,
             ));
-            tracing::info!("RateLimiter service initialized (v3.0)");
+            let _ = register_native_service(
+                &plugin_manager,
+                rl_svc.clone(),
+                crate::plugin::AgentGrpcService::RateLimiter(rl_svc),
+            )
+            .await;
         }
 
         if self.config.services.feature_flags {
             use crate::feature_flags::FlagConfig;
-            let ff_config = FlagConfig::default();
-            ff_grpc_svc = Some(Arc::new(crate::feature_flags::FeatureFlagService::new(
-                ff_config,
-            )));
-            tracing::info!("FeatureFlags service initialized (v3.0)");
+            let ff_svc = Arc::new(crate::feature_flags::FeatureFlagService::new(
+                FlagConfig::default(),
+            ));
+            let _ = register_native_service(
+                &plugin_manager,
+                ff_svc.clone(),
+                crate::plugin::AgentGrpcService::FeatureFlags(ff_svc),
+            )
+            .await;
         }
 
         // PKI CA 证书签发服务（/ get-or-create + 共享 KV 持久化）
@@ -1006,27 +1251,153 @@ impl AgentServer {
             };
 
             if let Some(pki_svc) = pki_svc {
-                // 自动初始化/加载 CA（幂等 + 共享，多 agent 只产生一份 CA 根）
-                if let Err(e) = pki_svc.init_ca("coord-agent-ca").await {
-                    tracing::warn!(
-                        "PKI CA auto-init failed (may already be initialized): {}",
-                        e
-                    );
-                } else {
-                    tracing::info!("PKI CA auto-initialized: CN=coord-agent-ca");
-                }
-                pki_grpc_svc = Some(Arc::new(pki_svc));
-                tracing::info!(
-                    "PKI service initialized (ISSUE-000: get-or-create + shared KV store)"
-                );
+                // CA 的 get-or-create 是 `PkiService::start()` 的动作（插件生命周期），
+                // 不再在此处内联 await。
+                let pki_svc = Arc::new(pki_svc);
+                let _ = register_native_service(
+                    &plugin_manager,
+                    pki_svc.clone(),
+                    crate::plugin::AgentGrpcService::Pki(pki_svc),
+                )
+                .await;
             } else {
                 tracing::error!("failed to create PKI service");
             }
         }
 
-        // 启动所有已启用的可插拔服务
-        if let Err(e) = service_manager.start_all().await {
-            tracing::error!("failed to start pluggable services: {e}");
+        // 启动全部已注册的原生服务（生命周期由插件管理器统一驱动；
+        // 单个服务启动失败只隔离该服务，不阻塞其余）。
+        let native_start_failures = plugin_manager.start_all().await;
+        if !native_start_failures.is_empty() {
+            tracing::error!(
+                "{} builtin service(s) failed to start: {:?}",
+                native_start_failures.len(),
+                native_start_failures
+            );
+        }
+
+        // 插件身份开通用的出站凭据句柄（进程级）：一次性 bootstrap token 只能
+        // 兑换一次，SIGHUP 重建插件加载器时复用同一引导 CCT，避免二次兑换失败。
+        let plugin_identity_provider =
+            Arc::new(coord_client::credential::CachedTokenProvider::new(None));
+
+        // ──── 插件引擎：加载配置声明的脚本插件（js/wasm）────
+        //
+        // 原生服务已在上方作为**内建插件**注册并启动，不走这条路径（它们不参与
+        // 配置 diff）。此处只处理 `[plugins].entries` 声明的外部插件。
+        if plugin_manager.is_enabled() {
+            // JS 加载器：需要真实 coord-client（skeleton 模式下无后端 → deferred）
+            let loader = build_plugin_loader(PluginLoaderArgs {
+                cfg: &self.config.plugins,
+                auth: &self.config.auth,
+                data_dir: &self.config.data_dir,
+                tls: self
+                    .config
+                    .tls
+                    .as_ref()
+                    .and_then(|t| t.to_coord_client_tls().ok()),
+                static_peers: &self.config.static_peers,
+                fallback: inner.as_ref().map(|i| &i.client),
+                identity_provider: &plugin_identity_provider,
+                metrics: Some(plugin_metrics.clone()),
+            })
+            .await;
+            if loader.is_none() && !self.config.plugins.entries.is_empty() {
+                tracing::warn!(
+                    "plugin engine: {} configured entry(ies) deferred (no coord-client backend \
+                     available in skeleton mode)",
+                    self.config.plugins.entries.len()
+                );
+            }
+            let report = plugin_manager
+                .reload(&self.config.plugins.entries, loader.as_deref())
+                .await;
+            let (healthy, total, unhealthy) = plugin_manager.health_check_all();
+            tracing::info!(
+                "plugin engine ENABLED: {}/{} plugin(s) healthy (unhealthy: {:?}); configured \
+                 entries: added={:?} replaced={:?} deferred={:?} failed={:?}; builtin start \
+                 failures: {}",
+                healthy,
+                total,
+                unhealthy,
+                report.added,
+                report.replaced,
+                report.deferred,
+                report.failed,
+                native_start_failures.len()
+            );
+        } else {
+            let (healthy, total, unhealthy) = plugin_manager.health_check_all();
+            tracing::debug!(
+                "external plugin engine disabled (plugins.enabled=false); {}/{} builtin \
+                 service plugin(s) healthy (unhealthy: {:?})",
+                healthy,
+                total,
+                unhealthy
+            );
+        }
+
+        // SIGHUP：重载配置并应用插件集 diff（新增/移除/版本替换）。
+        // 引擎参数 / 默认限制 / 监听地址等结构性变更需重启。
+        if let Some(watcher) = self.config_watcher.clone() {
+            let pm = Arc::clone(&plugin_manager);
+            let sighup_loader = build_plugin_loader(PluginLoaderArgs {
+                cfg: &self.config.plugins,
+                auth: &self.config.auth,
+                data_dir: &self.config.data_dir,
+                tls: self
+                    .config
+                    .tls
+                    .as_ref()
+                    .and_then(|t| t.to_coord_client_tls().ok()),
+                static_peers: &self.config.static_peers,
+                fallback: inner.as_ref().map(|i| &i.client),
+                identity_provider: &plugin_identity_provider,
+                metrics: Some(plugin_metrics.clone()),
+            })
+            .await;
+            #[cfg(unix)]
+            tokio::spawn(async move {
+                let mut sig =
+                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!("SIGHUP handler unavailable: {e}");
+                            return;
+                        }
+                    };
+                loop {
+                    if sig.recv().await.is_none() {
+                        break;
+                    }
+                    match watcher.reload() {
+                        Ok(()) => {
+                            let cfg = watcher.current_config();
+                            let report = pm
+                                .reload(&cfg.plugins.entries, sighup_loader.as_deref())
+                                .await;
+                            tracing::info!(
+                                "SIGHUP: plugin set reloaded (added={:?} removed={:?} \
+                                 replaced={:?} deferred={:?} failed={:?})",
+                                report.added,
+                                report.removed,
+                                report.replaced,
+                                report.deferred,
+                                report.failed
+                            );
+                        }
+                        Err(e) => tracing::warn!(
+                            "SIGHUP: failed to reload config from {}: {e}; keeping current",
+                            watcher.path().display()
+                        ),
+                    }
+                }
+            });
+            #[cfg(not(unix))]
+            {
+                let _ = (watcher, pm, sighup_loader);
+                tracing::debug!("SIGHUP plugin reload not supported on this platform");
+            }
         }
 
         tracing::info!(
@@ -1076,24 +1447,34 @@ impl AgentServer {
         let metrics_layer_value = self.metrics.clone().unwrap_or_default();
         let svcs = AgentGrpcSvcs {
             inner,
-            registry: registry_grpc_svc,
-            config: config_grpc_svc,
-            lock: lock_grpc_svc,
-            idgen: idgen_grpc_svc,
-            election: election_grpc_svc,
-            event: event_grpc_svc,
-            cache: cache_grpc_svc,
-            mq: mq_grpc_svc,
-            replica: replication_grpc_svc,
-            scheduler: scheduler_grpc_svc,
-            workflow: workflow_grpc_svc,
-            policy: policy_grpc_svc,
-            transit: transit_grpc_svc,
-            cb: cb_grpc_svc,
-            rl: rl_grpc_svc,
-            ff: ff_grpc_svc,
-            pki: pki_grpc_svc,
+            plugin: Some(Arc::new(crate::plugin::PluginService::new(Arc::clone(
+                &plugin_manager,
+            )))),
         };
+
+        // Phase 2.1：插件网关层（观察默认开启；拒绝钩子由宿主 / 插件注册）。
+        // 网关位于 auth 之后、router 之前，故代理透传流量也经过它（仅观察）。
+        let plugin_gateway = Arc::new(crate::plugin::PluginGateway::new());
+        if self.config.plugins.hooks_enabled {
+            for path in [
+                "/coord.kv.KV/Put",
+                "/coord.kv.KV/Range",
+                "/coord.kv.KV/Delete",
+                "/coord.txn.Txn/Txn",
+                "/coord.lease.Lease/LeaseGrant",
+                "/coord.lease.Lease/LeaseRevoke",
+                "/coord.lease.Lease/LeaseKeepAlive",
+                "/coord.watch.Watch/Watch",
+                "/coord.storage.Storage/Put",
+                "/coord.storage.Storage/Get",
+                "/coord.storage.Storage/Stat",
+                "/coord.storage.Storage/Delete",
+                "/coord.plugin.Plugin/Invoke",
+            ] {
+                plugin_gateway.watch_path(path);
+            }
+            tracing::debug!("plugin gateway observe paths registered (hooks_enabled=true)");
+        }
 
         // 注册 gRPC Health Check 服务（标准 grpc.health.v1.Health）
         let (health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -1116,9 +1497,20 @@ impl AgentServer {
             .build_v1()
             .map_err(|e| format!("failed to build reflection service: {e}"))?;
 
+        // Phase 2.1：插件网关层（auth 之后、router 之前）。
+        // 无钩子且无观察路径时 `is_passthrough()` → 中间件完全直通（零开销）。
+        tracing::debug!(
+            "plugin gateway layer mounted (hooks={}, passthrough={})",
+            plugin_gateway.hook_count(),
+            plugin_gateway.is_passthrough()
+        );
+
         match inbound_tls {
             Some(server_tls) => {
                 let server = tonic::transport::Server::builder()
+                    .layer(crate::plugin::PluginGatewayLayer::new(Arc::clone(
+                        &plugin_gateway,
+                    )))
                     .layer(crate::auth::interceptor::AuthLayer::new(Arc::clone(
                         &auth_interceptor,
                     )))
@@ -1128,7 +1520,7 @@ impl AgentServer {
                     .tls_config(server_tls)
                     .map_err(|e| format!("agent inbound TLS server: {e}"))?;
                 let router =
-                    build_agent_grpc_router(server, svcs, self.metrics.clone(), &service_manager)?;
+                    build_agent_grpc_router(server, svcs, self.metrics.clone(), &plugin_manager)?;
                 tracing::info!("coord-agent gRPC server serving over TLS (mTLS per tls.ca_path)");
                 router
                     .add_service(health_service)
@@ -1138,6 +1530,9 @@ impl AgentServer {
             }
             None => {
                 let server = tonic::transport::Server::builder()
+                    .layer(crate::plugin::PluginGatewayLayer::new(Arc::clone(
+                        &plugin_gateway,
+                    )))
                     .layer(crate::auth::interceptor::AuthLayer::new(Arc::clone(
                         &auth_interceptor,
                     )))
@@ -1145,7 +1540,7 @@ impl AgentServer {
                         metrics_layer_value,
                     ));
                 let router =
-                    build_agent_grpc_router(server, svcs, self.metrics.clone(), &service_manager)?;
+                    build_agent_grpc_router(server, svcs, self.metrics.clone(), &plugin_manager)?;
                 router
                     .add_service(health_service)
                     .add_service(reflection_service)
@@ -1154,8 +1549,9 @@ impl AgentServer {
             }
         }
 
-        // 优雅停止可插拔服务
-        let _ = service_manager.stop_all().await;
+        // 优雅停止：内建插件（原生服务，含心跳/后台任务）与脚本插件一视同仁，
+        // 由插件管理器逆序停止（单个失败不阻塞其余）。
+        plugin_manager.stop_all().await;
 
         Ok(())
     }
@@ -1168,6 +1564,32 @@ impl AgentServer {
 /// 由 `coord agent` 子命令调用。此函数阻塞直到收到终止信号。
 pub async fn run_agent(
     config: AgentConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_agent_inner(config, None).await
+}
+
+/// 同 [`run_agent`]，但额外传入配置文件路径：启用 SIGHUP 触发的**插件集 diff**
+/// 热重载（配置文件读取失败仅告警，不影响启动）。
+pub async fn run_agent_with_config_path(
+    config: AgentConfig,
+    config_path: Option<std::path::PathBuf>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let watcher = config_path.and_then(|p| match crate::config_watcher::ConfigWatcher::new(&p) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            tracing::warn!(
+                "failed to init config watcher for {} (SIGHUP plugin reload disabled): {e}",
+                p.display()
+            );
+            None
+        }
+    });
+    run_agent_inner(config, watcher).await
+}
+
+async fn run_agent_inner(
+    config: AgentConfig,
+    config_watcher: Option<crate::config_watcher::ConfigWatcher>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::health::start_health_server;
     use crate::metrics::AgentMetrics;
@@ -1230,6 +1652,11 @@ pub async fn run_agent(
         .with_thread_pools(Arc::clone(&thread_pools))
         .with_metrics(metrics)
         .with_ready_flag(Arc::clone(&ready_flag));
+    // SIGHUP 插件集热重载（仅在提供配置文件路径时启用）
+    let server = match config_watcher {
+        Some(w) => server.with_config_watcher(w),
+        None => server,
+    };
 
     // 启动 gRPC server（带优雅关闭）
     tracing::info!("coord-agent: starting gRPC services (KV/Txn/Lease/Watch/Maintenance)");

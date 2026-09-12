@@ -5,7 +5,7 @@
 //
 // This module provides:
 // - In-memory capability store (backed by KV)
-// - Bootstrap of all 80 built-in capabilities (Appendix A)
+// - Bootstrap of all 81 built-in capabilities (Appendix A + bootstrap 令牌管理)
 // - Register/Deprecate/List/Get operations
 // - Barrier-encrypted persistence via CapabilityStore
 
@@ -182,7 +182,10 @@ impl CapabilityRegistry {
         }
     }
 
-    /// Bootstrap all 80 built-in capabilities from Appendix A.
+    /// Bootstrap all 81 built-in capabilities from Appendix A.
+    ///
+    /// （附录 A 的 80 项 + `admin:auth:bootstrap_token`——动态 bootstrap 令牌
+    /// 签发/列表/撤销的统一管理能力。）
     pub fn bootstrap_builtin(&self) {
         let builtins = builtin_capabilities();
         let mut caps = self.capabilities.write();
@@ -304,7 +307,7 @@ impl CapabilityStore {
     }
 }
 
-// ──── Built-in Capabilities (Appendix A — 80 capabilities) ────
+// ──── Built-in Capabilities (Appendix A — 80 + 1 bootstrap 令牌管理 = 81) ────
 
 fn builtin_capabilities() -> Vec<CapabilityDef> {
     let def = |id: &str,
@@ -940,6 +943,14 @@ fn builtin_capabilities() -> Vec<CapabilityDef> {
             "撤销用户角色",
         ),
         def(
+            "admin:auth:bootstrap_token",
+            "admin",
+            "auth",
+            "bootstrap_token",
+            CapabilityType::Admin,
+            "签发/列出/撤销 agent bootstrap 令牌（TTL + 一次性）",
+        ),
+        def(
             "admin:capability:register",
             "admin",
             "capability",
@@ -1099,8 +1110,8 @@ mod tests {
         registry.bootstrap_builtin();
         assert_eq!(
             registry.count(),
-            80,
-            "should have all 80 built-in capabilities (17 data + 37 coord + 26 admin)"
+            81,
+            "should have all 81 built-in capabilities (17 data + 37 coord + 27 admin)"
         );
     }
 
@@ -1197,19 +1208,19 @@ mod tests {
         let registry = CapabilityRegistry::new();
         registry.bootstrap_builtin();
         let all_caps = registry.list();
-        assert_eq!(all_caps.len(), 80);
+        assert_eq!(all_caps.len(), 81);
 
-        // Encrypt all 80 capabilities
+        // Encrypt all 81 capabilities
         let encrypted_all = store
             .encrypt_all(&all_caps)
             .expect("encrypt all should succeed");
-        assert_eq!(encrypted_all.len(), 80);
+        assert_eq!(encrypted_all.len(), 81);
 
         // Decrypt all
         let decrypted_all = store
             .decrypt_all(&encrypted_all)
             .expect("decrypt all should succeed");
-        assert_eq!(decrypted_all.len(), 80);
+        assert_eq!(decrypted_all.len(), 81);
 
         // Verify round-trip for each
         for (orig, dec) in all_caps.iter().zip(decrypted_all.iter()) {

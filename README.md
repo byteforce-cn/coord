@@ -3,7 +3,7 @@
 <div align="center">
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.93.0-orange.svg)](rust-toolchain.toml)
+[![Rust](https://img.shields.io/badge/rust-1.98.1-orange.svg)](rust-toolchain.toml)
 [![Java](https://img.shields.io/badge/java-21-red.svg)](coord-java-sdk/pom.xml)
 
 **English** · [**简体中文**](README.zh-CN.md)
@@ -65,19 +65,20 @@ Server ports `50051` / `50052` are reachable only by agents — the Server is ne
 
 **Agent — the coordination layer your application talks to**
 
-17 pluggable `coord.agent.*` gRPC services, toggled per service via the `[services]` configuration section:
+18 pluggable gRPC services, toggled per service via the `[services]` / `[plugins]` configuration sections:
 
 - **Discovery & config:** `Registry` · `ConfigCenter` · `Event`
 - **Coordination:** `Lock` · `IdGen` · `LeaderElection`
 - **Data & messaging:** `Cache` · `Mq` · `Replica` (ISR replication for Cache/MQ)
 - **Automation:** `Workflow` · `Scheduler` · `Policy` · `FeatureFlags`
 - **Resilience & security:** `CircuitBreaker` · `RateLimiter` · `Transit` · `Pki`
+- **Extensibility:** every service above is hosted as a **builtin plugin** by the plugin manager — one registry owns each service's lifecycle, gRPC surface and health. `Plugin` (`coord.plugin.Plugin`) exposes that unified service/plugin inventory (with per-service health), and loads external wasm/JS plugins when `[plugins]` is enabled (off by default)
 
 Agent extras: core-proxy services (`coord.kv` / `coord.txn` / `coord.lease` / `coord.watch` / `coord.maintenance`) with the same contract as the Server, KV read caching, watch fan-out, and health checks + Prometheus metrics on `127.0.0.1:19528`.
 
 ## Quick start
 
-**Prerequisites:** Rust 1.93.0 (pinned by `rust-toolchain.toml`); Java 21 + Maven 3.9+ and Node 22 + pnpm only if you use the Java SDK or the web UI.
+**Prerequisites:** Rust 1.98.1 (pinned by `rust-toolchain.toml`); Java 21 + Maven 3.9+ and Node 22 + pnpm only if you use the Java SDK or the web UI.
 
 ```bash
 cargo build                                # build all crates

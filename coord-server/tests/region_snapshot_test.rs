@@ -110,10 +110,7 @@ async fn start_single_node_single_region() -> Host {
 }
 
 /// 驱动 Maintenance snapshot handler，收集完整字节。
-async fn collect_snapshot(
-    node: &CoordNode,
-    region_id: u64,
-) -> Result<Vec<u8>, tonic::Status> {
+async fn collect_snapshot(node: &CoordNode, region_id: u64) -> Result<Vec<u8>, tonic::Status> {
     use tokio_stream::StreamExt as _;
     let resp = node
         .snapshot(tonic::Request::new(SnapshotRequest { region_id }))
@@ -121,9 +118,7 @@ async fn collect_snapshot(
     let mut stream = resp.into_inner();
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            tonic::Status::internal(format!("snapshot stream: {e}"))
-        })?;
+        let chunk = chunk.map_err(|e| tonic::Status::internal(format!("snapshot stream: {e}")))?;
         bytes.extend_from_slice(&chunk.data);
     }
     Ok(bytes)
@@ -153,19 +148,34 @@ async fn test_region_snapshot_export_roundtrip() {
         .expect("delete");
 
     // region_id=1：导出 Region MVCC 快照
-    let bytes = collect_snapshot(&host.node, 1).await.expect("region snapshot");
+    let bytes = collect_snapshot(&host.node, 1)
+        .await
+        .expect("region snapshot");
     let snap = SnapshotData::from_bytes(&bytes).expect("parse snapshot");
-    assert!(!snap.kv_pairs.is_empty(), "region snapshot must contain keys");
+    assert!(
+        !snap.kv_pairs.is_empty(),
+        "region snapshot must contain keys"
+    );
     // 首块 applied index 由 handler 内从 Region MVCC 读取（export_snapshot_data 传参）
-    assert!(snap.last_included_index > 0, "region snapshot applied index");
+    assert!(
+        snap.last_included_index > 0,
+        "region snapshot applied index"
+    );
 
     // region_id=0：legacy 节点级 storage（scratch，无 key）
-    let bytes0 = collect_snapshot(&host.node, 0).await.expect("region0 snapshot");
+    let bytes0 = collect_snapshot(&host.node, 0)
+        .await
+        .expect("region0 snapshot");
     let snap0 = SnapshotData::from_bytes(&bytes0).expect("parse region0 snapshot");
-    assert!(snap0.kv_pairs.is_empty(), "scratch node storage has no user kv");
+    assert!(
+        snap0.kv_pairs.is_empty(),
+        "scratch node storage has no user kv"
+    );
 
     // 未装配 Region → NOT_FOUND
-    let err = collect_snapshot(&host.node, 99).await.expect_err("region 99 absent");
+    let err = collect_snapshot(&host.node, 99)
+        .await
+        .expect_err("region 99 absent");
     assert_eq!(err.code(), tonic::Code::NotFound, "absent region: {err}");
 
     // 恢复路径：import 到新的 Region 数据目录 → 逐 key 校验一致

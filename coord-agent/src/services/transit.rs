@@ -449,6 +449,32 @@ fn compute_dek_id(encrypted_packet: &[u8]) -> String {
     hex::encode(&hasher.finalize()[..8])
 }
 
+// ──── BaseService：插件生命周期 ────
+//
+// 信封加密服务无后台任务：构造即就绪（算法白名单在构造期校验），
+// 因此 `start`/`stop` 是登记性的，`health_check` 恒真。
+// 声明在本文件而非用占位类型，是为了让「每个原生服务就是一个插件」成立：
+// 插件名与生命周期语义都由服务自身给出。
+
+#[async_trait::async_trait]
+impl crate::service::BaseService for TransitService {
+    fn name(&self) -> &'static str {
+        "transit"
+    }
+
+    async fn start(&self) -> crate::service::ServiceResult<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> crate::service::ServiceResult<()> {
+        Ok(())
+    }
+
+    fn health_check(&self) -> bool {
+        true
+    }
+}
+
 // ──── tests ────
 
 #[cfg(test)]

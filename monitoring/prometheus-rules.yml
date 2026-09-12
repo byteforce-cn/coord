@@ -88,3 +88,38 @@ groups:
           severity: critical
         annotations:
           summary: "coord 节点 {{ $labels.instance }} 处于 sealed 状态仍有写入流量"
+
+  - name: coord-agent-plugin
+    rules:
+      # 插件沙箱 trap：任一插件持续 trap（wasm fuel/epoch/memory 或 JS timeout）
+      - alert: CoordPluginTrap
+        expr: |
+          sum by (instance, plugin, reason) (rate(coord_agent_plugin_traps_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord-agent {{ $labels.instance }} 插件 {{ $labels.plugin }} 持续 trap（reason={{ $labels.reason }}）"
+
+      # 插件加载 / 启动失败：15 分钟内出现即告警（清单/实例化/资源上限配置错误）
+      - alert: CoordPluginLoadFailure
+        expr: |
+          sum by (instance, plugin) (increase(coord_agent_plugin_load_failures_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord-agent {{ $labels.instance }} 插件 {{ $labels.plugin }} 加载/启动失败 {{ $value }} 次"
+
+      # 插件调用错误率：错误占比 > 20% 且样本量足够（> 0.1 req/s）
+      - alert: CoordPluginInvocationErrorRate
+        expr: |
+          (sum by (instance) (rate(coord_agent_plugin_invocations_total{outcome!="ok"}[5m]))
+           / clamp_min(sum by (instance) (rate(coord_agent_plugin_invocations_total[5m])), 0.001)) > 0.2
+          and sum by (instance) (rate(coord_agent_plugin_invocations_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord-agent {{ $labels.instance }} 插件调用错误率 {{ $value | humanizePercentage }}"
+

@@ -319,6 +319,20 @@ impl Config {
             }
         }
 
+        // 9d. agent 引导令牌：不得为空串 / 占位值，且至少 16 字符
+        for (i, token) in self.security.agent_bootstrap_tokens.iter().enumerate() {
+            if token.trim().is_empty() {
+                errs.push(format!(
+                    "security.agent_bootstrap_tokens[{i}] must not be empty"
+                ));
+            } else if token.len() < 16 || is_placeholder_secret(token) {
+                errs.push(format!(
+                    "security.agent_bootstrap_tokens[{i}] is too weak or a placeholder; \
+                     use at least 16 random characters (e.g. `openssl rand -hex 24`)"
+                ));
+            }
+        }
+
         // 10. 磁盘水位比例（0 < readonly < warn < 1）
         let warn = self.storage.disk_warn_ratio;
         let readonly = self.storage.disk_readonly_ratio;
@@ -465,9 +479,7 @@ impl Config {
                 }
             }
             if pd.max_concurrent_operators == 0 {
-                errs.push(
-                    "multi_raft.pd.max_concurrent_operators must be > 0".to_string(),
-                );
+                errs.push("multi_raft.pd.max_concurrent_operators must be > 0".to_string());
             }
             if pd.region_split_size_mb == 0 {
                 errs.push("multi_raft.pd.region_split_size_mb must be > 0".to_string());
@@ -541,8 +553,7 @@ impl Config {
             }
             if os.encryption_enabled && os.encryption_root_key.trim().len() != 64 {
                 errs.push(
-                    "object_storage.encryption_root_key must be hex64 (32 bytes)"
-                        .to_string(),
+                    "object_storage.encryption_root_key must be hex64 (32 bytes)".to_string(),
                 );
             }
             if self.multi_raft.legacy_migration {
@@ -861,6 +872,19 @@ pub struct SecurityConfig {
     /// 3. 两者均无且 raft 绑定非 loopback → 拒绝启动。
     #[serde(default)]
     pub raft_shared_secret: Option<String>,
+
+    /// Agent 注册引导令牌（一次性；默认空 = 不开放 agent 自助注册）。
+    ///
+    /// agent 配置 `[auth].bootstrap_token` 后，用该令牌调 `Auth.Bootstrap`
+    /// 换取短期限的 `agent-bootstrap` CCT，再以该身份代插件开通受限账户
+    /// （`plugin/{id}` 用户 + 角色 + 逐能力授权，见 `coord-agent` 插件身份模块）。
+    ///
+    /// 服务端**不**为 `agent-bootstrap` 预置能力：需 operator 用管理员身份按
+    /// `coord_server::auth::AGENT_BOOTSTRAP_CAPABILITY_GRANTS` 显式授予
+    /// （`coord auth role add` + `coord auth role grant-capability`）。
+    /// 令牌一次性（换 CCT 后失效）且仅存内存：进程重启后重新生效。
+    #[serde(default)]
+    pub agent_bootstrap_tokens: Vec<String>,
 }
 
 fn default_auth_enabled() -> bool {
@@ -880,6 +904,7 @@ impl Default for SecurityConfig {
             encryption_enabled: false,
             encryption_root_key: None,
             raft_shared_secret: None,
+            agent_bootstrap_tokens: Vec::new(),
         }
     }
 }
@@ -1076,7 +1101,7 @@ pub struct RaftTuningConfig {
 ///   成员上按 `initial_regions` 装配 per-region Raft 组（region ≥1，目录级存储
 ///   隔离于 `<data_dir>/regions/region-{id:016x}/`，见 raft/region_runtime.rs）；
 ///   region 0 仍作为 system raft（鉴权/会话等 `/_sys/*` 系统数据）保留在根目录。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MultiRaftConfig {
     /// 是否启用多 Region 模式（默认 false = 单 Raft legacy，字节级退化）
     #[serde(default)]
@@ -1117,18 +1142,6 @@ pub struct MultiRaftConfig {
     /// 误开 multi_raft 后回滚排查）。正常升级路径请用 `legacy_migration`。
     #[serde(default)]
     pub allow_unmigrated: bool,
-}
-
-impl Default for MultiRaftConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            initial_regions: Vec::new(),
-            pd: MultiRaftPdConfig::default(),
-            legacy_migration: false,
-            allow_unmigrated: false,
-        }
-    }
 }
 
 /// 初始 Region 配置（`[[multi_raft.initial_regions]]`）。
@@ -1477,6 +1490,33 @@ auth_enabled = true
         );
     }
 
+    /// Agent 引导令牌：过短/占位值/空串必须在启动校验被拒绝。
+    #[test]
+    fn test_validate_rejects_weak_agent_bootstrap_tokens() {
+        let mut config = Config::default();
+        config.security.agent_bootstrap_tokens = vec!["short".to_string()];
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("agent_bootstrap_tokens")),
+            "weak bootstrap token must be rejected: {errs:?}"
+        );
+
+        config.security.agent_bootstrap_tokens = vec!["  ".to_string()];
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("agent_bootstrap_tokens")),
+            "blank bootstrap token must be rejected: {errs:?}"
+        );
+
+        // 合规令牌（≥16 随机字符）通过
+        config.security.agent_bootstrap_tokens = vec!["9f2c1b7ae4d05c38a1b6e7d2".to_string()];
+        assert!(
+            config.validate().is_ok(),
+            "strong bootstrap token must pass: {:?}",
+            config.validate()
+        );
+    }
+
     #[test]
     fn test_validate_rejects_fill_placeholders() {
         let mut config = Config::default();
@@ -1668,28 +1708,19 @@ end_key = ""
         let mut config = multi_raft_member_config(1);
         config.multi_raft.initial_regions[0].id = 0;
         let errs = config.validate().unwrap_err();
-        assert!(
-            errs.iter().any(|e| e.contains("must be > 0")),
-            "{errs:?}"
-        );
+        assert!(errs.iter().any(|e| e.contains("must be > 0")), "{errs:?}");
     }
 
     #[test]
     fn test_multi_raft_validate_duplicate_region_id() {
         let mut config = multi_raft_member_config(1);
-        config
-            .multi_raft
-            .initial_regions
-            .push(InitialRegionConfig {
-                id: 2,
-                start_key: "z".to_string(),
-                end_key: "".to_string(),
-            });
+        config.multi_raft.initial_regions.push(InitialRegionConfig {
+            id: 2,
+            start_key: "z".to_string(),
+            end_key: "".to_string(),
+        });
         let errs = config.validate().unwrap_err();
-        assert!(
-            errs.iter().any(|e| e.contains("duplicated")),
-            "{errs:?}"
-        );
+        assert!(errs.iter().any(|e| e.contains("duplicated")), "{errs:?}");
     }
 
     #[test]
@@ -1709,10 +1740,7 @@ end_key = ""
             },
         ];
         let errs = config.validate().unwrap_err();
-        assert!(
-            errs.iter().any(|e| e.contains("contiguous")),
-            "{errs:?}"
-        );
+        assert!(errs.iter().any(|e| e.contains("contiguous")), "{errs:?}");
     }
 
     #[test]
@@ -1724,10 +1752,7 @@ end_key = ""
             end_key: "".to_string(),
         }];
         let errs = config.validate().unwrap_err();
-        assert!(
-            errs.iter().any(|e| e.contains("start_key")),
-            "{errs:?}"
-        );
+        assert!(errs.iter().any(|e| e.contains("start_key")), "{errs:?}");
     }
 
     #[test]
@@ -1739,10 +1764,7 @@ end_key = ""
             end_key: "z".to_string(),
         }];
         let errs = config.validate().unwrap_err();
-        assert!(
-            errs.iter().any(|e| e.contains("end_key")),
-            "{errs:?}"
-        );
+        assert!(errs.iter().any(|e| e.contains("end_key")), "{errs:?}");
     }
 
     #[test]
@@ -1750,10 +1772,7 @@ end_key = ""
         // node 5 不在 initial_nodes 中（region 副本不会放在该节点上）
         let config = multi_raft_member_config(5);
         let errs = config.validate().unwrap_err();
-        assert!(
-            errs.iter().any(|e| e.contains("initial_nodes")),
-            "{errs:?}"
-        );
+        assert!(errs.iter().any(|e| e.contains("initial_nodes")), "{errs:?}");
     }
 
     #[test]
@@ -1762,10 +1781,7 @@ end_key = ""
         let mut config = multi_raft_member_config(1);
         config.cluster.join_addr = Some("127.0.0.1:50071".to_string());
         let errs = config.validate().unwrap_err();
-        assert!(
-            errs.iter().any(|e| e.contains("join")),
-            "{errs:?}"
-        );
+        assert!(errs.iter().any(|e| e.contains("join")), "{errs:?}");
     }
 
     // ──── Multi-Raft PD（[multi_raft.pd] /）────
@@ -1824,7 +1840,10 @@ scheduler_paused = true
         assert_eq!(pd_cfg.region_split_size_mb, 256);
         assert_eq!(pd_cfg.operator_running_timeout, 300);
         // 调度暂停开关透传
-        assert!(pd_cfg.scheduler_paused, "toml scheduler_paused=true 应被解析");
+        assert!(
+            pd_cfg.scheduler_paused,
+            "toml scheduler_paused=true 应被解析"
+        );
 
         // to_pd_config 映射
         let pd = pd_cfg.to_pd_config();
@@ -1851,7 +1870,8 @@ scheduler_paused = true
         config.multi_raft.pd.enabled = true;
         let errs = config.validate().unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("requires multi_raft.enabled")),
+            errs.iter()
+                .any(|e| e.contains("requires multi_raft.enabled")),
             "{errs:?}"
         );
     }

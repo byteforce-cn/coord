@@ -104,7 +104,10 @@ async fn start_single_node_with_regions() -> Host {
     .expect("create region0 raft");
     let mut members0 = BTreeMap::new();
     members0.insert(1, new_basic_node(&raft0_addr));
-    raft0.initialize(members0).await.expect("initialize region0 raft");
+    raft0
+        .initialize(members0)
+        .await
+        .expect("initialize region0 raft");
     let raft0 = Arc::new(raft0);
 
     // ── region 1/2：RegionManager 装配（共享网络 factory，与 region0 raft 独立）──

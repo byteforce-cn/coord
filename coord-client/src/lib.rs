@@ -12,18 +12,27 @@
 // - tls:         TLS/mTLS Channel 构建（Config.tls，供连接池与 Leader 发现共用）
 // （R-AGT-20：route_cache 死代码已移除——单连接直连模式无需 Leader 路由缓存）
 
+pub mod auth;
 pub mod client;
 pub mod config;
+pub mod credential;
 pub mod leader;
 pub mod pool;
+pub mod refresh;
 pub mod retry;
 mod tls;
 
 // 重新导出主要类型
+pub use auth::AuthClient;
 pub use client::{
-    Client, KvClient, LeaseClient, LeaseKeeper, Lock, MaintenanceClient, ObjectData,
-    PutObjectResult, StorageClient, TxnClient, WatchClient, DEFAULT_OBJECT_CHUNK_SIZE,
+    Client, KvClient, LeaseClient, LeaseKeeper, Lock, MaintenanceClient, ObjectData, ObjectReader,
+    ObjectWriter, PutObjectResult, StorageClient, TxnClient, WatchClient,
+    DEFAULT_OBJECT_CHUNK_SIZE,
 };
 pub use config::{Config, TlsConfig};
+pub use credential::{
+    AuthedChannel, CachedTokenProvider, CredentialInterceptor, NoopTokenProvider, TokenProvider,
+};
 pub use leader::LeaderDiscovery;
+pub use refresh::{spawn_session_refresher, SessionGateway, SessionTokens, REFRESH_LEAD_SECS};
 pub use retry::{classify_error, RetryDecision, RetryState};

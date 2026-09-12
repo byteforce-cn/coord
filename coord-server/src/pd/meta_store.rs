@@ -60,12 +60,8 @@ impl PdMetaDurable {
     /// 打开（或创建）PD 元数据 redb 数据库并确保表存在
     fn open(data_dir: &Path) -> Result<Self> {
         let pd_dir = data_dir.join("pd");
-        std::fs::create_dir_all(&pd_dir).map_err(|e| {
-            Error::Storage(format!(
-                "create pd meta dir {}: {e}",
-                pd_dir.display()
-            ))
-        })?;
+        std::fs::create_dir_all(&pd_dir)
+            .map_err(|e| Error::Storage(format!("create pd meta dir {}: {e}", pd_dir.display())))?;
         let db_path = pd_dir.join("pd-meta.db");
         let db = if db_path.exists() {
             Database::open(&db_path).map_err(|e| {
@@ -79,15 +75,15 @@ impl PdMetaDurable {
 
         // 确保表已创建
         {
-            let write_tx = db.begin_write().map_err(|e| {
-                Error::Storage(format!("begin pd meta init tx: {e}"))
-            })?;
+            let write_tx = db
+                .begin_write()
+                .map_err(|e| Error::Storage(format!("begin pd meta init tx: {e}")))?;
             {
                 let _ = write_tx.open_table(TABLE_PD_REGION);
             }
-            write_tx.commit().map_err(|e| {
-                Error::Storage(format!("commit pd meta init tx: {e}"))
-            })?;
+            write_tx
+                .commit()
+                .map_err(|e| Error::Storage(format!("commit pd meta init tx: {e}")))?;
         }
 
         Ok(Self { db, db_path })
@@ -99,9 +95,10 @@ impl PdMetaDurable {
         let value = bincode::serialize(meta)
             .map_err(|e| Error::Internal(format!("serialize pd region meta: {e}")))?;
 
-        let write_tx = self.db.begin_write().map_err(|e| {
-            Error::Storage(format!("begin pd region write tx: {e}"))
-        })?;
+        let write_tx = self
+            .db
+            .begin_write()
+            .map_err(|e| Error::Storage(format!("begin pd region write tx: {e}")))?;
         {
             let mut table = write_tx
                 .open_table(TABLE_PD_REGION)
@@ -110,9 +107,9 @@ impl PdMetaDurable {
                 .insert(key.as_slice(), value.as_slice())
                 .map_err(|e| Error::Storage(format!("insert pd region meta: {e}")))?;
         }
-        write_tx.commit().map_err(|e| {
-            Error::Storage(format!("commit pd region meta write: {e}"))
-        })?;
+        write_tx
+            .commit()
+            .map_err(|e| Error::Storage(format!("commit pd region meta write: {e}")))?;
         Ok(())
     }
 
@@ -120,9 +117,10 @@ impl PdMetaDurable {
     fn remove_region(&self, region_id: RegionId) -> Result<()> {
         let key = encode_pd_region_key(region_id);
 
-        let write_tx = self.db.begin_write().map_err(|e| {
-            Error::Storage(format!("begin pd region delete tx: {e}"))
-        })?;
+        let write_tx = self
+            .db
+            .begin_write()
+            .map_err(|e| Error::Storage(format!("begin pd region delete tx: {e}")))?;
         {
             let mut table = write_tx
                 .open_table(TABLE_PD_REGION)
@@ -131,17 +129,18 @@ impl PdMetaDurable {
                 .remove(key.as_slice())
                 .map_err(|e| Error::Storage(format!("remove pd region meta: {e}")))?;
         }
-        write_tx.commit().map_err(|e| {
-            Error::Storage(format!("commit pd region meta delete: {e}"))
-        })?;
+        write_tx
+            .commit()
+            .map_err(|e| Error::Storage(format!("commit pd region meta delete: {e}")))?;
         Ok(())
     }
 
     /// 启动恢复：读取磁盘上全部 Region 元数据
     fn load_all_regions(&self) -> Result<Vec<RegionMeta>> {
-        let read_tx = self.db.begin_read().map_err(|e| {
-            Error::Storage(format!("begin pd region read tx: {e}"))
-        })?;
+        let read_tx = self
+            .db
+            .begin_read()
+            .map_err(|e| Error::Storage(format!("begin pd region read tx: {e}")))?;
         let table = read_tx
             .open_table(TABLE_PD_REGION)
             .map_err(|e| Error::Storage(format!("open pd_region table: {e}")))?;
@@ -151,12 +150,10 @@ impl PdMetaDurable {
             .iter()
             .map_err(|e| Error::Storage(format!("scan pd_region table: {e}")))?;
         for entry in iter {
-            let (_key, value) = entry.map_err(|e| {
-                Error::Storage(format!("read pd region row: {e}"))
-            })?;
-            let meta: RegionMeta = bincode::deserialize(value.value()).map_err(|e| {
-                Error::DataCorruption(format!("deserialize pd region meta: {e}"))
-            })?;
+            let (_key, value) =
+                entry.map_err(|e| Error::Storage(format!("read pd region row: {e}")))?;
+            let meta: RegionMeta = bincode::deserialize(value.value())
+                .map_err(|e| Error::DataCorruption(format!("deserialize pd region meta: {e}")))?;
             out.push(meta);
         }
         Ok(out)
@@ -364,12 +361,7 @@ impl PdMetaStore {
     /// commit+fsync 写放大；`update_region`（成员/epoch/key range 等**持久元数据**
     /// 变更）保持写穿语义不变。统计字段含在持久化的 RegionMeta 中仅为
     /// create/update 时顺带快照，不作为心跳真源。
-    pub fn update_region_stats(
-        &self,
-        region_id: RegionId,
-        size: u64,
-        keys: u64,
-    ) -> Result<()> {
+    pub fn update_region_stats(&self, region_id: RegionId, size: u64, keys: u64) -> Result<()> {
         let mut regions = self.regions.write();
         let meta = regions
             .get_mut(&region_id)
@@ -385,11 +377,7 @@ impl PdMetaStore {
     /// coord.storage chunk 文件落该 Region 数据目录 `objects/`（不进 redb
     /// store.db），心跳单独承载该容量维度供 Split 阈值纳入与「存储重 Region
     /// 不参与自动均衡」决策使用。
-    pub fn update_region_storage_bytes(
-        &self,
-        region_id: RegionId,
-        bytes: u64,
-    ) -> Result<()> {
+    pub fn update_region_storage_bytes(&self, region_id: RegionId, bytes: u64) -> Result<()> {
         {
             let regions = self.regions.read();
             if !regions.contains_key(&region_id) {
@@ -680,9 +668,7 @@ mod tests {
         // 纯内存模式（new()）不产生任何磁盘文件
         let dir = tempfile::tempdir().unwrap();
         let store = PdMetaStore::new();
-        store
-            .create_region(make_meta(1, vec![], vec![]))
-            .unwrap();
+        store.create_region(make_meta(1, vec![], vec![])).unwrap();
         assert!(!dir.path().join("pd/pd-meta.db").exists());
     }
 
@@ -844,9 +830,6 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().0.value().to_vec())
             .collect();
-        assert_eq!(
-            keys,
-            vec![coord_core::region::encode_pd_region_key(0xABC)]
-        );
+        assert_eq!(keys, vec![coord_core::region::encode_pd_region_key(0xABC)]);
     }
 }

@@ -368,11 +368,7 @@ impl CoordNode {
     }
 
     /// 校验写区间 [start, end) 不侵入保留对象空间（防止经 KV 删 manifest）
-    pub fn guard_object_write_range(
-        &self,
-        start: &[u8],
-        end: &[u8],
-    ) -> Result<(), tonic::Status> {
+    pub fn guard_object_write_range(&self, start: &[u8], end: &[u8]) -> Result<(), tonic::Status> {
         if self.object_enabled()
             && crate::storage::object_store::range_touches_object_space(start, end)
         {
@@ -426,7 +422,9 @@ impl CoordNode {
             tonic::Status::unavailable("object storage requires raft mode (single-node dev off)")
         })?;
         let cmd = crate::raft::type_config::Command::ObjectStore(op);
-        let resp = self.client_write_with_timeout(raft, cmd, target.region_id).await?;
+        let resp = self
+            .client_write_with_timeout(raft, cmd, target.region_id)
+            .await?;
         match resp.response() {
             Response::ObjectStore { revision, ok } => Ok((*revision, *ok)),
             _ => Err(tonic::Status::internal(
@@ -536,13 +534,7 @@ impl CoordNode {
         &self,
         key: &[u8],
         range_end: &[u8],
-    ) -> Result<
-        (
-            Arc<WatchDispatcher>,
-            Arc<MvccStorage<RedbBackend>>,
-        ),
-        tonic::Status,
-    > {
+    ) -> Result<(Arc<WatchDispatcher>, Arc<MvccStorage<RedbBackend>>), tonic::Status> {
         let Some(manager) = &self.region_manager else {
             let dispatcher = self
                 .watch_dispatcher
@@ -588,10 +580,7 @@ impl CoordNode {
         }
         drop(meta);
 
-        Ok((
-            Arc::clone(&rt.watch_dispatcher),
-            Arc::clone(&rt.mvcc),
-        ))
+        Ok((Arc::clone(&rt.watch_dispatcher), Arc::clone(&rt.mvcc)))
     }
 
     /// R-SVC-08：将 raft `client_write` 错误映射为 gRPC Status（legacy 单 Raft）。
@@ -819,7 +808,9 @@ impl CoordNode {
                     };
                     match rt.raft.current_leader().await {
                         Some(leader) if leader == node.node_id => {
-                            let cmd = Command::DeleteKeysByLease { lease_id: *lease_id };
+                            let cmd = Command::DeleteKeysByLease {
+                                lease_id: *lease_id,
+                            };
                             let ok = match tokio::time::timeout(timeout, rt.raft.client_write(cmd))
                                 .await
                             {
@@ -999,13 +990,13 @@ impl CoordNode {
     ) -> Result<(), tonic::Status> {
         if let Some(raft) = raft {
             let timeout = self.limits.read().read_timeout;
-            let read_log_id = tokio::time::timeout(
-                timeout,
-                raft.ensure_linearizable(ReadPolicy::ReadIndex),
-            )
-            .await
-            .map_err(|_| tonic::Status::deadline_exceeded("linearizable read timed out"))?
-            .map_err(|e| tonic::Status::internal(format!("linearizable read failed: {e}")))?;
+            let read_log_id =
+                tokio::time::timeout(timeout, raft.ensure_linearizable(ReadPolicy::ReadIndex))
+                    .await
+                    .map_err(|_| tonic::Status::deadline_exceeded("linearizable read timed out"))?
+                    .map_err(|e| {
+                        tonic::Status::internal(format!("linearizable read failed: {e}"))
+                    })?;
 
             // R-SVC-18 补充：ReadIndex 之后的一致性 / 身份复核（防陈旧读）
             let m = raft.metrics().borrow_watched().clone();
@@ -1062,9 +1053,7 @@ impl CoordNode {
 
             // 幻影态终检：last_applied 必须与本地日志同 index 的实际条目一致。
             // 若该 index 已被 purge（快照覆盖），则视为合法（状态机来自快照）。
-            if let (Some(applied), Some(log_store)) =
-                (m.last_applied.as_ref(), raft_log_store)
-            {
+            if let (Some(applied), Some(log_store)) = (m.last_applied.as_ref(), raft_log_store) {
                 let covered_by_snapshot = log_store
                     .last_purged()
                     .ok()
@@ -1331,7 +1320,9 @@ impl AuthOpProposer for CoordNode {
                 })?;
             match resp.response() {
                 Response::Auth { revision } => Ok(*revision),
-                _ => Err(tonic::Status::internal("unexpected raft response for AuthOp")),
+                _ => Err(tonic::Status::internal(
+                    "unexpected raft response for AuthOp",
+                )),
             }
         } else {
             // 无 raft：直接本地 apply（与 Lease standalone 同口径，锁内分配 revision）
@@ -1964,18 +1955,16 @@ impl Txn for CoordNode {
         // 整个 Txn 是单 Region 原子单元——所有 compare/op 引用的 key 必须落在
         // 同一 Region。先取第一个引用的 key 路由出目标，再逐一校验同区（key 越界 /
         // 范围越界 → INVALID_ARGUMENT）。
-        let first_key: Option<&[u8]> = compares
-            .first()
-            .map(|c| c.key.as_slice())
-            .or_else(|| {
-                success_ops
-                    .iter()
-                    .chain(failure_ops.iter())
-                    .find_map(|op| match op {
-                        TxnOp::Put { key, .. } | TxnOp::Delete { key } => Some(key.as_slice()),
-                        TxnOp::Range { key, .. } => Some(key.as_slice()),
-                    })
-            });
+        let first_key: Option<&[u8]> = compares.first().map(|c| c.key.as_slice()).or_else(|| {
+            success_ops
+                .iter()
+                .chain(failure_ops.iter())
+                .map(|op| match op {
+                    TxnOp::Put { key, .. } | TxnOp::Delete { key } => key.as_slice(),
+                    TxnOp::Range { key, .. } => key.as_slice(),
+                })
+                .next()
+        });
         let target = match first_key {
             Some(k) => self.kv_target_for_key(k)?,
             // 无任何 key 引用的空 Txn：region 模式无法路由（每 Region 独立
@@ -3092,7 +3081,10 @@ mod tests {
             map_err(Error::RegionNotFound { region_id: 9 }).code(),
             tonic::Code::NotFound
         );
-        assert_eq!(map_err(Error::RouteNotReady).code(), tonic::Code::Unavailable);
+        assert_eq!(
+            map_err(Error::RouteNotReady).code(),
+            tonic::Code::Unavailable
+        );
     }
 
     // ──── convert_compare ────

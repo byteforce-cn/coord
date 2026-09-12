@@ -2,7 +2,10 @@
 //
 // 定义连接参数、重试策略、Leader 发现行为等配置项。
 
+use std::sync::Arc;
 use std::time::Duration;
+
+use crate::credential::TokenProvider;
 
 /// 客户端 TLS 配置（PEM 字节，与 coord-agent 的 AgentTlsConfig 对应）
 ///
@@ -75,6 +78,11 @@ pub struct Config {
 
     /// TLS/mTLS 通道配置（None = 明文 http，仅限开发环境）
     pub tls: Option<TlsConfig>,
+
+    /// 出站凭据提供者（None = 不附加 `authorization` 头，明文开发模式）。
+    ///
+    /// 提供时，所有出站 gRPC 请求都会自动盖上 `authorization: Bearer <token>`。
+    pub token_provider: Option<Arc<dyn TokenProvider>>,
 }
 
 impl Config {
@@ -97,6 +105,7 @@ impl Config {
             connections_per_endpoint: 2,
             connection_idle_timeout: Duration::from_secs(300),
             tls: None,
+            token_provider: None,
         }
     }
 
@@ -115,6 +124,12 @@ impl Config {
     /// 设置 TLS/mTLS 通道配置（PEM 字节；Server 集群启用 TLS 时必需）
     pub fn with_tls(mut self, tls: TlsConfig) -> Self {
         self.tls = Some(tls);
+        self
+    }
+
+    /// 设置出站凭据提供者（Server 启用鉴权时必需）。
+    pub fn with_token_provider(mut self, provider: Arc<dyn TokenProvider>) -> Self {
+        self.token_provider = Some(provider);
         self
     }
 }

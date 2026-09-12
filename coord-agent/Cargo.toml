@@ -3,6 +3,15 @@ name = "coord-agent"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# 插件引擎 feature 门控（体积/CI 时长隔离）：
+# - plugin-js（默认）：rquickjs 宿主（第一方 JS/TS 编排插件）
+# - plugin-wasm（非默认）：wasmtime 组件模型宿主（第三方强沙箱）
+# 骨架阶段不引入引擎依赖；Phase 1（JS）/ Phase 4（wasm）在此挂载 optional 依赖。
+default = ["plugin-js"]
+plugin-js = ["dep:rquickjs"]
+plugin-wasm = ["dep:wasmtime"]
+
 [dependencies]
 coord-proto = { workspace = true }
 coord-core = { workspace = true }
@@ -36,12 +45,57 @@ zeroize = { workspace = true }
 hex = { workspace = true }
 tower = { workspace = true }
 http = "1"
+http-body-util = { workspace = true }
+bytes = "1"
 rcgen = { version = "0.14", features = ["x509-parser"] }
 x509-parser = "0.17"
 time = "0.3"
 base64 = "0.22"
 regorus = "0.10.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# 插件引擎（Phase 1）：rquickjs 内嵌 JS/TS 编排插件宿主。
+# - 锁 0.12.x（计划 §6 D2）；升级须走 CVE/回归评审。
+# - `futures`：宿主 import 异步桥（JS Promise ↔ tokio Future）；
+# - `macro`：`#[rquickjs::function]` 绑定糖；
+# - `loader`：ESM 模块解析（插件多文件 / 相对 import）；
+# - `classes` + `properties`：SDK 命名空间对象。
+# - QuickJS 为 C 后端（cc 编译），aarch64 交叉编译无额外工具链依赖。
+rquickjs = { version = "0.12.2", optional = true, default-features = false, features = [
+    "std",
+    "futures",
+    "macro",
+    "loader",
+    "classes",
+    "properties",
+    "array-buffer",
+] }
+
+# 插件引擎（Phase 4）：wasmtime 组件模型宿主（第三方强沙箱）。
+# - 锁 48.0.1（计划 §6 D2；MSRV 1.95.0，工具链 1.98.1）；deny.toml 已加
+#   `Apache-2.0 WITH LLVM-exception` 例外；
+# - 特性裁剪：只要编译器 + 运行时 + WAT（测试夹具）+ 组件模型（D3）；
+#   不开 WASI（第三方插件无系统接口）、不开线程/GC/coredump/backtrace；
+# - `async`（Phase 4.1 组件模型宿主）：组件模型的宿主 import 走
+#   `LinkerInstance::func_wrap_async`（fiber 挂起）→ 宿主函数直接在 tokio 上
+#   await coord-client，不需要 core ABI 路径的 `Handle::block_on` 阻塞桥；
+#   `component-model-async`（真 async WIT / stream / future 类型）**不启用**：
+#   wasmtime 48.0.2 有这个 feature，但 guest 侧还不通（wit-bindgen 0.41 需要
+#   非默认 `async` feature、把 import 改名成 `async_*`、并引入 `async_support`
+#   运行时；且 `wasm-tools component new` 会拒绝它的 async 元数据：
+#   `[async]ping is not a valid extern name`）。可复跑探针见
+#   `scripts/probe-cm-async.sh`；本 ABI 用「同步签名 + RAII 资源句柄」已达同等效果
+#   （watch 的阻塞式 `next` 由宿主 await，见 `wit/coord-plugin.wit`）。
+# - 沙箱手段（D8）：fuel（指令预算）+ epoch（墙钟超时）+ 内存上限
+#   （`StoreLimits`）+ 宿主 import 边界 capability 白名单。
+wasmtime = { version = "48.0.1", optional = true, default-features = false, features = [
+    "std",
+    "runtime",
+    "cranelift",
+    "wat",
+    "component-model",
+    "async",
+] }
 
 [dev-dependencies]
 coord-server = { workspace = true }

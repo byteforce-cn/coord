@@ -1,0 +1,24 @@
+[package]
+name = "coord-plugin-guest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "参考 guest：coord-agent 组件模型 wasm 插件的 ABI 夹具（测试用）"
+
+# 独立于 workspace（夹具只在显式构建时编译，不参与 `cargo build --workspace`）。
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# guest 侧绑定生成器（宿主未使用；宿主用 wasmtime 内置的 bindgen）。
+# 版本跟随 `wasm-tools` 1.259 的 wit-parser（0.241 系列）兼容区间。
+wit-bindgen = "0.41"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 
 use coord_core::error::{Error, Result};
@@ -21,8 +22,8 @@ use coord_proto::maintenance::{
 use coord_proto::storage::storage_client::StorageClient as StorageStub;
 use coord_proto::storage::{
     get_response, put_request, DeleteRequest as StorageDeleteRequest,
-    GetRequest as StorageGetRequest, ObjectStat, PutMeta, PutRequest as StoragePutRequest,
-    StatRequest as StorageStatRequest,
+    GetRequest as StorageGetRequest, GetResponse as StorageGetResponse, ObjectStat, PutMeta,
+    PutRequest as StoragePutRequest, StatRequest as StorageStatRequest,
 };
 use coord_proto::txn::{
     txn_client::TxnClient as TxnStub, Compare, RequestOp, TxnRequest, TxnResponse,
@@ -32,6 +33,7 @@ use coord_proto::watch::{
 };
 
 use crate::config::Config;
+use crate::credential::AuthedChannel;
 use crate::leader::LeaderDiscovery;
 use crate::pool::ConnectionPool;
 use crate::retry::{classify_error, RetryDecision, RetryState};
@@ -43,7 +45,7 @@ pub const LEADER_HINT_METADATA_KEY: &str = "coord-leader-hint";
 // ──── Error conversion ────
 
 /// Convert tonic::Status to coord_core::Error
-fn from_status(status: tonic::Status) -> Error {
+pub(crate) fn from_status(status: tonic::Status) -> Error {
     let msg = status.message().to_string();
     match status.code() {
         tonic::Code::NotFound => Error::NotFound {
@@ -162,13 +164,13 @@ impl Client {
     fn new_with_channel(config: Config, channel: Channel) -> Result<Self> {
         // 在 Agent 模式下，将 Channel 注册到连接池中以保持一致性
         let pool = ConnectionPool::new(&config);
-        // 将 channel 放入池中以便后续使用
+        // 将 channel 放入池中以便后续使用（包装出站凭据拦截器）
         let endpoint = config
             .endpoints
             .first()
             .cloned()
             .unwrap_or_else(|| "unknown".into());
-        pool.put(&endpoint, channel);
+        pool.put(&endpoint, pool.wrap(channel));
 
         let leader = LeaderDiscovery::new(config.endpoints.clone());
         // Agent 模式下，将唯一端点设为 Leader
@@ -213,10 +215,15 @@ impl Client {
         StorageClient::new(self.clone())
     }
 
+    /// 返回 Auth 客户端（认证 / refresh / 用户角色能力管理）
+    pub fn auth(&self) -> crate::auth::AuthClient {
+        crate::auth::AuthClient::new(self.clone())
+    }
+
     // ──── 内部方法 ────
 
     /// 获取当前 Leader 地址
-    async fn leader_addr(&self) -> Result<String> {
+    pub(crate) async fn leader_addr(&self) -> Result<String> {
         match self.inner.leader.get_leader() {
             Some(addr) => Ok(addr),
             None => self.discover_leader().await,
@@ -225,19 +232,19 @@ impl Client {
 
     /// 获取到当前 Leader 的 gRPC Channel 和端点地址。
     /// 从连接池中获取复用的连接。
-    async fn get_leader_channel(&self) -> Result<(String, Channel)> {
+    pub(crate) async fn get_leader_channel(&self) -> Result<(String, AuthedChannel)> {
         let leader_addr = self.leader_addr().await?;
         let channel = self.inner.pool.get(&leader_addr).await?;
         Ok((leader_addr, channel))
     }
 
     /// 将 Channel 归还到连接池（供子客户端使用后调用）
-    fn return_channel(&self, endpoint: &str, channel: Channel) {
+    pub(crate) fn return_channel(&self, endpoint: &str, channel: AuthedChannel) {
         self.inner.pool.put(endpoint, channel);
     }
 
     /// 获取到当前 Leader 的 Watch 专用 Channel 和端点地址
-    async fn get_leader_watch_channel(&self) -> Result<(String, Channel)> {
+    pub(crate) async fn get_leader_watch_channel(&self) -> Result<(String, AuthedChannel)> {
         let leader_addr = self.leader_addr().await?;
         let channel = self.inner.pool.get_watch(&leader_addr).await?;
         Ok((leader_addr, channel))
@@ -264,8 +271,8 @@ impl Client {
                 Err(_) => continue,
             };
 
-            // 通过 Status RPC 检测 Leader
-            let mut stub = MaintenanceStub::new(channel);
+            // 通过 Status RPC 检测 Leader（同样携带出站凭据）
+            let mut stub = MaintenanceStub::new(self.inner.pool.wrap(channel));
             let request = tonic::Request::new(StatusRequest {});
             match stub.status(request).await {
                 Ok(resp) => {
@@ -277,6 +284,22 @@ impl Client {
                         self.inner.leader.set_leader(endpoint.clone());
                         return Ok(endpoint);
                     }
+                }
+                // 端点可达但**无权**调用 Status（受限 CCT / 未鉴权 / 未实现）：
+                // `Maintenance/Status` 属 admin 能力点，数据面客户端（插件账户、
+                // 普通用户、agent 共享客户端）不该为发现 leader 而持有它。
+                // 此时把该端点作为**候选**返回：若它其实是 follower，后续 RPC 会
+                // 拿到 `NotLeader` + `coord-leader-hint`，由重试路径纠正。
+                Err(status)
+                    if matches!(
+                        status.code(),
+                        tonic::Code::PermissionDenied
+                            | tonic::Code::Unauthenticated
+                            | tonic::Code::Unimplemented
+                    ) =>
+                {
+                    self.inner.leader.set_leader(endpoint.clone());
+                    return Ok(endpoint);
                 }
                 Err(_) => continue,
             }
@@ -300,9 +323,9 @@ impl Client {
     /// 2. 执行单次请求；
     /// 3. 失败时解析 `coord-leader-hint` metadata 更新 leader 缓存；
     /// 4. 按错误分类决定重试（`RetryState` 指数退避，上限 `config.max_retries`）。
-    async fn execute_write_with_retry<T, Fut, F>(&self, mut attempt: F) -> Result<T>
+    pub(crate) async fn execute_write_with_retry<T, Fut, F>(&self, mut attempt: F) -> Result<T>
     where
-        F: FnMut(Channel) -> Fut,
+        F: FnMut(AuthedChannel) -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
     {
         let mut retry = RetryState::new(&self.inner.config);
@@ -823,6 +846,23 @@ impl WatchClient {
         key: &[u8],
         start_revision: i64,
     ) -> Result<mpsc::Receiver<Result<WatchEvent>>> {
+        self.watch_full(key, &[], start_revision, false).await
+    }
+
+    /// 创建 Watch 订阅（完整选项：范围 + prev_kv），返回事件接收器。
+    ///
+    /// # 参数
+    /// - `key`: 起始键 / 前缀
+    /// - `range_end`: 范围结束（空 = 单键精确监听，`0x00` 等前缀语义由调用方构造）
+    /// - `start_revision`: 起始 Revision（0 = 从最新开始）
+    /// - `prev_kv`: 事件是否携带旧值
+    pub async fn watch_full(
+        &self,
+        key: &[u8],
+        range_end: &[u8],
+        start_revision: i64,
+        prev_kv: bool,
+    ) -> Result<mpsc::Receiver<Result<WatchEvent>>> {
         let (_endpoint, channel) = self.client.get_leader_watch_channel().await?;
         let mut stub = WatchStub::new(channel);
 
@@ -836,9 +876,9 @@ impl WatchClient {
             request: Some(coord_proto::watch::watch_request::Request::Create(
                 WatchCreateRequest {
                     key: key.to_vec(),
-                    range_end: Vec::new(),
+                    range_end: range_end.to_vec(),
                     start_revision,
-                    prev_kv: false,
+                    prev_kv,
                 },
             )),
         };
@@ -1146,7 +1186,12 @@ impl StorageClient {
     /// # Errors
     /// - `Error::AlreadyExists`：对象已存在（Committed 或上传中）；
     /// - `Error::InvalidArgument`：chunk 超服务端配置 / 字节与声明不符。
-    pub async fn put(&self, bucket: &str, object_id: &[u8], data: &[u8]) -> Result<PutObjectResult> {
+    pub async fn put(
+        &self,
+        bucket: &str,
+        object_id: &[u8],
+        data: &[u8],
+    ) -> Result<PutObjectResult> {
         self.put_chunked(bucket, object_id, data, DEFAULT_OBJECT_CHUNK_SIZE)
             .await
     }
@@ -1165,7 +1210,9 @@ impl StorageClient {
             ));
         }
         if data.is_empty() {
-            return Err(Error::InvalidArgument("object data must not be empty".into()));
+            return Err(Error::InvalidArgument(
+                "object data must not be empty".into(),
+            ));
         }
         let client = self.client.clone();
         let bucket = bucket.to_string();
@@ -1173,8 +1220,8 @@ impl StorageClient {
         let data = data.to_vec();
         client
             .execute_write_with_retry(move |channel| {
-                let mut stub = StorageStub::new(channel)
-                    .max_decoding_message_size(STORAGE_DECODE_LIMIT);
+                let mut stub =
+                    StorageStub::new(channel).max_decoding_message_size(STORAGE_DECODE_LIMIT);
                 // 消息流在 closure 体内（每次调用）重建——async 块只 move 成品
                 let mut msgs = Vec::with_capacity(data.len() / chunk_size + 2);
                 msgs.push(StoragePutRequest {
@@ -1211,8 +1258,8 @@ impl StorageClient {
     /// - `Error::FailedPrecondition` 等：上传进行中（服务端语义透传）。
     pub async fn get(&self, bucket: &str, object_id: &[u8]) -> Result<ObjectData> {
         let (endpoint, channel) = self.client.get_leader_channel().await?;
-        let mut stub = StorageStub::new(channel.clone())
-            .max_decoding_message_size(STORAGE_DECODE_LIMIT);
+        let mut stub =
+            StorageStub::new(channel.clone()).max_decoding_message_size(STORAGE_DECODE_LIMIT);
         let request = tonic::Request::new(StorageGetRequest {
             bucket: bucket.to_string(),
             object_id: object_id.to_vec(),
@@ -1249,8 +1296,8 @@ impl StorageClient {
     /// 查询对象元数据。不存在/已删除 → `Ok(None)`。
     pub async fn stat(&self, bucket: &str, object_id: &[u8]) -> Result<Option<ObjectStat>> {
         let (endpoint, channel) = self.client.get_leader_channel().await?;
-        let mut stub = StorageStub::new(channel.clone())
-            .max_decoding_message_size(STORAGE_DECODE_LIMIT);
+        let mut stub =
+            StorageStub::new(channel.clone()).max_decoding_message_size(STORAGE_DECODE_LIMIT);
         let request = tonic::Request::new(StorageStatRequest {
             bucket: bucket.to_string(),
             object_id: object_id.to_vec(),
@@ -1281,8 +1328,8 @@ impl StorageClient {
         let object_id = object_id.to_vec();
         client
             .execute_write_with_retry(move |channel| {
-                let mut stub = StorageStub::new(channel)
-                    .max_decoding_message_size(STORAGE_DECODE_LIMIT);
+                let mut stub =
+                    StorageStub::new(channel).max_decoding_message_size(STORAGE_DECODE_LIMIT);
                 let request = tonic::Request::new(StorageDeleteRequest {
                     bucket: bucket.clone(),
                     object_id: object_id.clone(),
@@ -1299,6 +1346,340 @@ impl StorageClient {
     /// 删除对象。`true` = 本次实际删除；对象不存在 → `Error::NotFound`。
     pub async fn delete(&self, bucket: &str, object_id: &[u8]) -> Result<bool> {
         Ok(self.delete_full(bucket, object_id).await?.0)
+    }
+
+    // ──── 流式会话（分块写 / 分块读；不整块驻留内存）────
+
+    /// 打开**客户端流式**上传会话。
+    ///
+    /// 与 [`put`](Self::put) 的区别：完整对象**不需要**先驻留调用方内存——
+    /// 逐块 [`ObjectWriter::write_chunk`]（宿主随写随发，mpsc 背压有界），
+    /// 最后由 [`ObjectWriter::finish`] 收 Commit 响应。
+    ///
+    /// `total_size` 必须与后续实际写入字节数**完全一致**：server 的
+    /// `PutMeta.total_size` 是提交前的强校验（不一致 → 上传作废，残留由服务端
+    /// GC 回收），这也是对象存储「无覆盖写」语义的一部分。
+    ///
+    /// **不做 leader 重试**：客户端流一旦开始就无法回放。`open_put` 只做一次
+    /// leader 发现；中途 `NotLeader` → `finish()` 返回 `ClusterUnavailable`，
+    /// 调用方需重新 `open_put` 并重传（残留上传由服务端 GC 兜底）。
+    pub async fn open_put(
+        &self,
+        bucket: &str,
+        object_id: &[u8],
+        total_size: u64,
+    ) -> Result<ObjectWriter> {
+        if total_size == 0 {
+            return Err(Error::InvalidArgument(
+                "total_size must be > 0; use open_put_unknown for a stream-determined size".into(),
+            ));
+        }
+        self.open_put_inner(bucket, object_id, total_size as i64, Some(total_size))
+            .await
+    }
+
+    /// 打开**未知长度**的客户端流式上传会话。
+    ///
+    /// 与 [`open_put`](Self::open_put) 相同，但**不需要**预先知道对象总长度：
+    /// 线上 `PutMeta.total_size = -1` 进入未知长度模式，server 侧按
+    /// `max_object_size` 封顶累计写入，`finish()` 时以实际字节数定长提交。
+    ///
+    /// 因此 [`ObjectWriter::total_size`] 返回 `None`，`write_chunk` 无本地上限
+    /// （仅受 server 的 `max_object_size` 约束；超限 → `finish()` 报错）。
+    pub async fn open_put_unknown(&self, bucket: &str, object_id: &[u8]) -> Result<ObjectWriter> {
+        self.open_put_inner(bucket, object_id, -1, None).await
+    }
+
+    /// 流式上传公共路径：`meta_total` = 线上 `PutMeta.total_size`（`-1` = 未知），
+    /// `bound` = 本地累计上限（`None` = 不限，由 server 兜底）。
+    async fn open_put_inner(
+        &self,
+        bucket: &str,
+        object_id: &[u8],
+        meta_total: i64,
+        bound: Option<u64>,
+    ) -> Result<ObjectWriter> {
+        if bucket.is_empty() || bucket.len() > 255 || bucket.contains('/') {
+            return Err(Error::InvalidArgument(
+                "bucket must be non-empty, <=255B and must not contain '/'".into(),
+            ));
+        }
+        if object_id.is_empty() || object_id.len() > 1024 {
+            return Err(Error::InvalidArgument(
+                "object_id must be non-empty and <=1024B".into(),
+            ));
+        }
+
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let (tx, rx) = mpsc::channel::<StoragePutRequest>(UPLOAD_CHANNEL_CAPACITY);
+        // 首条必须是 meta（server 语义）；mpsc 有容量 → 此时尚无接收者也可缓冲。
+        tx.send(StoragePutRequest {
+            part: Some(put_request::Part::Meta(PutMeta {
+                bucket: bucket.to_string(),
+                object_id: object_id.to_vec(),
+                total_size: meta_total,
+            })),
+        })
+        .await
+        .map_err(|_| Error::Internal("storage upload stream closed early".into()))?;
+
+        let client = self.client.clone();
+        let ep = endpoint.clone();
+        let task = tokio::spawn(async move {
+            let mut stub =
+                StorageStub::new(channel.clone()).max_decoding_message_size(STORAGE_DECODE_LIMIT);
+            let result = match stub.put(tonic::Request::new(ReceiverStream::new(rx))).await {
+                Ok(resp) => {
+                    let inner = resp.into_inner();
+                    Ok(PutObjectResult {
+                        revision: inner.revision as u64,
+                        size: inner.size as u64,
+                        chunks: inner.chunks as u64,
+                    })
+                }
+                Err(status) => Err(from_status(status)),
+            };
+            // 流结束后归还连接（连接池复用）
+            client.return_channel(&ep, channel);
+            result
+        });
+
+        Ok(ObjectWriter {
+            tx: Some(tx),
+            task: Some(task),
+            written: 0,
+            total: bound,
+        })
+    }
+
+    /// 打开**服务端流式**下载会话（首条 stat 已就绪）。
+    ///
+    /// 与 [`get`](Self::get) 的区别：完整对象**不需要**一次读进调用方内存——
+    /// 逐块 [`ObjectReader::read_chunk`]。
+    pub async fn open_get(&self, bucket: &str, object_id: &[u8]) -> Result<ObjectReader> {
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub =
+            StorageStub::new(channel.clone()).max_decoding_message_size(STORAGE_DECODE_LIMIT);
+        let request = tonic::Request::new(StorageGetRequest {
+            bucket: bucket.to_string(),
+            object_id: object_id.to_vec(),
+        });
+        let mut stream = match stub.get(request).await {
+            Ok(r) => r.into_inner(),
+            Err(status) => {
+                self.client.return_channel(&endpoint, channel);
+                return Err(from_status(status));
+            }
+        };
+        // 首条消息必须是 stat（server 语义）。
+        let stat = match stream.message().await {
+            Ok(Some(msg)) => match msg.part {
+                Some(get_response::Part::Stat(s)) => s,
+                _ => {
+                    self.client.return_channel(&endpoint, channel);
+                    return Err(Error::Internal(
+                        "Get stream first message is not stat".into(),
+                    ));
+                }
+            },
+            Ok(None) => {
+                self.client.return_channel(&endpoint, channel);
+                return Err(Error::Internal("Get stream missing stat".into()));
+            }
+            Err(status) => {
+                self.client.return_channel(&endpoint, channel);
+                return Err(from_status(status));
+            }
+        };
+        Ok(ObjectReader {
+            client: self.client.clone(),
+            endpoint,
+            channel: Some(channel),
+            stream: Some(stream),
+            stat,
+        })
+    }
+}
+
+// ──── 对象存储流式会话（不整块驻留内存）────
+
+/// 上传会话的 mpsc 背压容量（块数）：写满即 `write_chunk` 挂起，
+/// 把「调用方写多快」与「网络发多快」解耦且**有界**。
+const UPLOAD_CHANNEL_CAPACITY: usize = 4;
+
+/// **客户端流式**对象上传会话。
+///
+/// 生命周期：`open_put` → `write_chunk` × N → `finish`（提交）。
+/// 中途放弃用 [`abort`](Self::abort)；`Drop` 同样中止（未提交 = 服务端 GC 回收）。
+pub struct ObjectWriter {
+    tx: Option<mpsc::Sender<StoragePutRequest>>,
+    task: Option<tokio::task::JoinHandle<Result<PutObjectResult>>>,
+    written: u64,
+    total: Option<u64>,
+}
+
+impl ObjectWriter {
+    /// 已写入字节数。
+    pub fn bytes_written(&self) -> u64 {
+        self.written
+    }
+
+    /// 声明的总字节数；**未知长度**上传（[`open_put_unknown`](Self::open_put_unknown)）
+    /// 返回 `None`（长度在 `finish` 时由实际写入量决定）。
+    pub fn total_size(&self) -> Option<u64> {
+        self.total
+    }
+
+    /// 追加一个 chunk（随写随发；声明模式下超过声明总量 → `InvalidArgument`）。
+    ///
+    /// 返回**累计**已写字节数。空 chunk 非法（server 侧同样拒绝）。
+    pub async fn write_chunk(&mut self, data: &[u8]) -> Result<u64> {
+        let Some(tx) = self.tx.as_ref() else {
+            return Err(Error::InvalidArgument(
+                "upload session is already finished".into(),
+            ));
+        };
+        if data.is_empty() {
+            return Err(Error::InvalidArgument("chunk must not be empty".into()));
+        }
+        let len = data.len() as u64;
+        if let Some(total) = self.total {
+            if self.written.saturating_add(len) > total {
+                return Err(Error::InvalidArgument(format!(
+                    "chunk overflows declared total_size ({} + {len} > {total})",
+                    self.written
+                )));
+            }
+        }
+        tx.send(StoragePutRequest {
+            part: Some(put_request::Part::Chunk(data.to_vec())),
+        })
+        .await
+        .map_err(|_| Error::Internal("storage upload stream closed early".into()))?;
+        self.written += len;
+        Ok(self.written)
+    }
+
+    /// 结束上传并提交（返回 Commit 结果）。
+    ///
+    /// 写入字节数与 `total_size` 不符 → `InvalidArgument`（server 拒绝提交）。
+    pub async fn finish(mut self) -> Result<PutObjectResult> {
+        self.close_stream();
+        let Some(task) = self.task.take() else {
+            return Err(Error::InvalidArgument(
+                "upload session is already finished".into(),
+            ));
+        };
+        match task.await {
+            Ok(result) => result,
+            Err(e) => Err(Error::Internal(format!("upload task failed: {e}"))),
+        }
+    }
+
+    /// 放弃上传（幂等）：关闭流并中止任务；服务端按 upload_timeout 回收残留。
+    pub fn abort(mut self) {
+        self.close_stream();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+
+    /// 关闭客户端流（drop sender → 接收端读到 EOF）。
+    fn close_stream(&mut self) {
+        self.tx = None;
+    }
+}
+
+impl Drop for ObjectWriter {
+    fn drop(&mut self) {
+        // 未 finish 就析构：关闭流 + 中止任务（不在 Drop 里阻塞等 async 收尾）。
+        if self.tx.take().is_some() {
+            if let Some(task) = self.task.take() {
+                task.abort();
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for ObjectWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ObjectWriter")
+            .field("written", &self.written)
+            .field("total", &self.total)
+            .field("active", &self.tx.is_some())
+            .finish()
+    }
+}
+
+/// **服务端流式**对象下载会话。
+///
+/// 生命周期：`open_get`（首条 stat 就绪）→ `read_chunk` × N（`None` = 读完）。
+/// `Drop` 关闭流并归还连接。
+pub struct ObjectReader {
+    client: Client,
+    endpoint: String,
+    channel: Option<AuthedChannel>,
+    stream: Option<tonic::Streaming<StorageGetResponse>>,
+    stat: ObjectStat,
+}
+
+impl ObjectReader {
+    /// 对象元数据（`open_get` 时已随首条消息取得）。
+    pub fn stat(&self) -> &ObjectStat {
+        &self.stat
+    }
+
+    /// 读取下一个 chunk（服务端块大小 ≤ 4MiB）；`Ok(None)` = 已读完。
+    pub async fn read_chunk(&mut self) -> Result<Option<Vec<u8>>> {
+        loop {
+            let Some(stream) = self.stream.as_mut() else {
+                return Ok(None);
+            };
+            match stream.message().await {
+                Ok(Some(msg)) => match msg.part {
+                    Some(get_response::Part::Chunk(c)) => return Ok(Some(c)),
+                    // 重复 stat：更新元数据后继续（server 只在首条发 stat）
+                    Some(get_response::Part::Stat(s)) => self.stat = s,
+                    None => continue,
+                },
+                Ok(None) => {
+                    self.close_stream();
+                    return Ok(None);
+                }
+                Err(status) => {
+                    self.close_stream();
+                    return Err(from_status(status));
+                }
+            }
+        }
+    }
+
+    /// 提前关闭（幂等）：不再消费剩余 chunk。
+    pub fn close(&mut self) {
+        self.close_stream();
+    }
+
+    fn close_stream(&mut self) {
+        self.stream = None;
+        if let Some(channel) = self.channel.take() {
+            self.client.return_channel(&self.endpoint, channel);
+        }
+    }
+}
+
+impl Drop for ObjectReader {
+    fn drop(&mut self) {
+        self.close_stream();
+    }
+}
+
+impl std::fmt::Debug for ObjectReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ObjectReader")
+            .field("endpoint", &self.endpoint)
+            .field("stat", &self.stat)
+            .field("active", &self.stream.is_some())
+            .finish()
     }
 }
 

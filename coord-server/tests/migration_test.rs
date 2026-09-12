@@ -94,9 +94,7 @@ fn prepopulate_legacy_root(base: &std::path::Path) -> Arc<MvccStorage<RedbBacken
         let v = format!("w{i}").into_bytes();
         mvcc.put(k, &v, None).expect("put");
     }
-    mvcc
-        .put(b"/_sys/keep", b"sys-data", None)
-        .expect("put sys");
+    mvcc.put(b"/_sys/keep", b"sys-data", None).expect("put sys");
     mvcc.put(b"gone", b"x", None).expect("put gone");
     mvcc.delete(b"gone").expect("delete gone (tombstone)");
     mvcc
@@ -174,7 +172,10 @@ async fn wait_region_leader(host: &RegionHost, region_id: RegionId, timeout: Dur
                 return;
             }
         }
-        assert!(tokio::time::Instant::now() < deadline, "region leader timeout");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "region leader timeout"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -210,15 +211,31 @@ async fn test_migration_distributes_keys_to_regions_via_raft() {
 
     // region1：a/* 三 key、值正确；无 m/*、无系统 key、无 tombstone
     for (k, v) in [(b"a/1", b"v0"), (b"a/2", b"v1"), (b"a/3", b"v2")] {
-        assert_eq!(rt1.mvcc.get(k).expect("get"), Some(v.to_vec()), "region1 missing {k:?}");
+        assert_eq!(
+            rt1.mvcc.get(k).expect("get"),
+            Some(v.to_vec()),
+            "region1 missing {k:?}"
+        );
     }
-    for k in [b"m/1".as_slice(), b"/_sys/keep".as_slice(), b"gone".as_slice()] {
-        assert_eq!(rt1.mvcc.get(k).expect("get"), None, "region1 must NOT contain {k:?}");
+    for k in [
+        b"m/1".as_slice(),
+        b"/_sys/keep".as_slice(),
+        b"gone".as_slice(),
+    ] {
+        assert_eq!(
+            rt1.mvcc.get(k).expect("get"),
+            None,
+            "region1 must NOT contain {k:?}"
+        );
     }
 
     // region2：m/* 两 key；无 a/* 越界
     for (k, v) in [(b"m/1", b"w0"), (b"m/2", b"w1")] {
-        assert_eq!(rt2.mvcc.get(k).expect("get"), Some(v.to_vec()), "region2 missing {k:?}");
+        assert_eq!(
+            rt2.mvcc.get(k).expect("get"),
+            Some(v.to_vec()),
+            "region2 missing {k:?}"
+        );
     }
     assert_eq!(rt2.mvcc.get(b"a/1").expect("get"), None);
 
@@ -226,7 +243,10 @@ async fn test_migration_distributes_keys_to_regions_via_raft() {
     for rid in [1u64, 2] {
         let m = h.manager.runtime(rid).expect("rt").raft.metrics();
         let m = m.borrow_watched();
-        assert!(m.last_applied.is_some(), "region {rid} must have applied log");
+        assert!(
+            m.last_applied.is_some(),
+            "region {rid} must have applied log"
+        );
     }
 
     // 源数据保留（region 0 根 store 原样；回滚 = 关 multi_raft 用原数据）
@@ -235,7 +255,11 @@ async fn test_migration_distributes_keys_to_regions_via_raft() {
         h.root.get(b"/_sys/keep").expect("get"),
         Some(b"sys-data".to_vec())
     );
-    assert_eq!(h.root.get(b"gone").expect("get"), None, "tombstone stays deleted");
+    assert_eq!(
+        h.root.get(b"gone").expect("get"),
+        None,
+        "tombstone stays deleted"
+    );
 }
 
 // ──── 测试 2：fail-closed 启动闸决策 ────
@@ -265,7 +289,10 @@ fn test_legacy_user_data_detection() {
     // 空 store / 仅系统 key → 无待迁移数据
     assert!(!has_legacy_user_data(&mvcc).unwrap());
     mvcc.put(b"/_sys/auth/only", b"x", None).unwrap();
-    assert!(!has_legacy_user_data(&mvcc).unwrap(), "system keys excluded");
+    assert!(
+        !has_legacy_user_data(&mvcc).unwrap(),
+        "system keys excluded"
+    );
 
     // 用户 key → 有待迁移数据
     mvcc.put(b"data/1", b"v", None).unwrap();
@@ -319,14 +346,23 @@ async fn start_single_root_raft() -> RootHost {
     );
     // region 0 无 per-Region dispatcher 需求（marker Put 无需分发）
     let _ = &mut sm_store;
-    let root_raft = new_raft(node_id, raft_test_config(), factory.clone(), log_store, sm_store)
-        .await
-        .expect("root raft");
+    let root_raft = new_raft(
+        node_id,
+        raft_test_config(),
+        factory.clone(),
+        log_store,
+        sm_store,
+    )
+    .await
+    .expect("root raft");
 
     // 单节点 bootstrap：members = {self}
     let mut members: BTreeMap<u64, RaftNode> = BTreeMap::new();
     members.insert(node_id, new_basic_node(&raft_addr));
-    root_raft.initialize(members).await.expect("initialize root raft");
+    root_raft
+        .initialize(members)
+        .await
+        .expect("initialize root raft");
     rpc.set_raft(root_raft.clone());
 
     let raft_addr_sa: SocketAddr = raft_addr.parse().expect("parse");
@@ -379,15 +415,10 @@ async fn test_marker_write_confirm_and_idempotent_skip() {
 
     // 幂等：整体入口在 marker 存在时直接跳过（返回 false，不触碰 manager/seeds；
     // import 部分由测试 1 覆盖）
-    let skipped = migration::migrate_legacy_to_regions(
-        h.node_id,
-        &h.root,
-        &h.root_raft,
-        &manager,
-        &seeds,
-    )
-    .await
-    .expect("skip when migrated");
+    let skipped =
+        migration::migrate_legacy_to_regions(h.node_id, &h.root, &h.root_raft, &manager, &seeds)
+            .await
+            .expect("skip when migrated");
     assert!(!skipped, "already-migrated boot must skip");
     // marker 重复调用也幂等（确认已存在即返回）
     migration::write_migration_marker(h.node_id, &h.root, &h.root_raft)

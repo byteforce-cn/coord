@@ -12,7 +12,7 @@ name: CI
 # - 每周性能基准（perf_bench + 劣化 >20% 门禁，P2-06）
 # - 定时 cargo audit / cargo deny（安全依赖治理）
 #
-# 工具链版本由 rust-toolchain.toml 固定（Rust 1.93.0）。
+# 工具链版本由 rust-toolchain.toml 固定（Rust 1.98.1）。
 
 on:
   push:
@@ -112,6 +112,53 @@ jobs:
             cargo test --workspace --no-fail-fast
           }
 
+  feature-matrix:
+    name: plugin engine feature matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+      # 插件引擎 feature 门控：默认（plugin-js）、全开、全关三种组合必须构建通过
+      - name: Check default features (plugin-js)
+        run: cargo check -p coord-agent --all-targets
+      - name: Check all plugin engines (js + wasm)
+        run: cargo check -p coord-agent --all-targets --features plugin-js,plugin-wasm
+      - name: Check no plugin engines
+        run: cargo check -p coord-agent --all-targets --no-default-features
+      # wasm 宿主（Phase 4）单测只在 feature 开启时存在 → 必须真正跑一遍，
+      # 否则「构建通过」会掩盖沙箱行为回归（fuel/epoch/内存上限/能力边界）。
+      - name: Run plugin engine tests (js + wasm)
+        run: "cargo test -p coord-agent --lib --features plugin-js,plugin-wasm plugin::"
+      # 插件指标（调用/trap/加载失败；含 wasm fuel/epoch 分类）——同一 feature 组合下验证。
+      - name: Run plugin metrics tests
+        run: "cargo test -p coord-agent --lib --features plugin-js,plugin-wasm metrics::"
+      # 原生服务 = 真插件（内建插件）：gRPC 服务面由 PluginManager 动态组装，
+      # 未启用的服务不得挂载。用真实的 AgentServer + 真实 gRPC 调用验证，而不是
+      # 只断言注册表内容（「登记即算」正是本批次要消灭的东西）。
+      - name: Run native-service plugin host tests (dynamic gRPC assembly)
+        run: cargo test -p coord-agent --test agent_plugin_grpc_test
+      # 组件模型 ABI（Phase 4.1）：组件夹具已提交仓库（`tests/fixtures/`），
+      # 因此**不需要** wasm 工具链就能跑宿主侧的全部验收断言。
+      - name: Run component-model plugin tests (committed fixture)
+        run: |
+          cargo test -p coord-agent --test agent_plugin_component_test --features plugin-js,plugin-wasm
+      # 额外验证「从 guest 源码 + WIT 重建夹具」这条链路（rustc wasm 后端 + wasm-tools
+      # embed/new + 无 WASI import 断言），再跑一次组件测试（这次用的是新产物）。
+      - name: Install wasm guest toolchain
+        run: |
+          rustup target add wasm32-unknown-unknown
+          curl -fsSL --retry 3 -o /tmp/wasm-tools.tar.gz \
+            "https://github.com/bytecodealliance/wasm-tools/releases/download/v1.259.0/wasm-tools-1.259.0-x86_64-linux.tar.gz"
+          tar xzf /tmp/wasm-tools.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/wasm-tools-1.259.0-x86_64-linux/wasm-tools /usr/local/bin/wasm-tools
+          wasm-tools --version
+      - name: Rebuild component fixture from source and re-run tests
+        run: |
+          scripts/build-plugin-guest.sh
+          cargo test -p coord-agent --test agent_plugin_component_test --features plugin-js,plugin-wasm
+
   security-audit:
     name: cargo audit + deny
     # R-TST-21：audit/deny 从 schedule-only 改为 PR 门禁
@@ -158,6 +205,31 @@ jobs:
         env:
           MULTI_RAFT_REAL: "1"
         run: cargo test -p coord --test multi_raft_process_test -- --ignored --nocapture --test-threads=1
+      # 批次 4/5：鉴权 + 插件账户进程套件——单节点重启存续（P0c + Bootstrap 引导）
+      # + 双节点 raft 复制存续。同为 spawn 真实 `coord server` 的重型套件，与上述
+      # 步骤同 job 串行执行（真实进程互扰规避）。
+      # 批次 12：+ CLI 凭据文件套件（登录落盘 → 自动携带 → 到期自动续期 → 登出）。
+      - name: Run auth/plugin process suites (single + multi-node + CLI credentials)
+        run: |
+          cargo test -p coord --test plugin_auth_process_test -- --ignored --nocapture --test-threads=1
+          cargo test -p coord --test plugin_auth_multinode_process_test -- --ignored --nocapture --test-threads=1
+          cargo test -p coord --test plugin_credentials_process_test -- --ignored --nocapture --test-threads=1
+      # 批次 9：插件引擎**进程级**端到端（真实 server + 真实 agent 进程 + 磁盘 JS 插件）：
+      # 插件身份开通 → 服务端 capability/scope 强制 → SIGHUP 内容级热重载 →
+      # agent kill/重启（一次性引导令牌已消费，靠持久化账户续跑）。
+      # 批次 12：+ **运行中新增插件**（SIGHUP 加入第二个插件，此时已无可用引导 CCT，
+      # 靠自举的 provisioner 会话新建 `plugin/counter2` 账户并成功写 KV）。
+      - name: Run plugin engine real-process e2e (PLUGIN_REAL=1)
+        env:
+          PLUGIN_REAL: "1"
+        run: cargo test -p coord --test plugin_real_process_test -- --ignored --nocapture --test-threads=1
+      # 批次 10：coord-client **流式会话**（ObjectWriter / ObjectReader）真实进程验证
+      # ——客户端自选块边界逐块发送（与服务端 4MiB 默认分帧不同）+ 服务端流逐块取回，
+      # 跨 4MiB chunk 边界往返一致；含本地越界拒绝 / abort / 缺失对象。
+      - name: Run object-storage streaming sessions (OBJECT_STORAGE_REAL=1)
+        env:
+          OBJECT_STORAGE_REAL: "1"
+        run: cargo test -p coord --test object_storage_process_test object_storage_real_streaming_sessions -- --ignored --nocapture --test-threads=1
 
   perf-bench:
     name: weekly perf baseline (regression gate)

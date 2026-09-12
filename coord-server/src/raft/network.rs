@@ -145,6 +145,12 @@ fn inject_received_trace_context(msg: &RaftMessageProto) {
 
 // ──── RaftNetworkFactory ────
 
+/// 单个目标节点的共享 gRPC 客户端槽位（惰性连接；`Option` 为空即未连接）。
+type SharedRaftClient = Arc<tokio::sync::Mutex<Option<RaftClient<Channel>>>>;
+
+/// 连接池：目标节点 ID → 共享客户端槽位。
+type SharedClientCache = Arc<tokio::sync::Mutex<HashMap<u64, SharedRaftClient>>>;
+
 /// Raft 网络工厂
 ///
 /// 维护集群中所有节点的 Raft 地址映射，为每个目标节点创建 gRPC 客户端。
@@ -167,8 +173,7 @@ pub struct RaftNetworkFactoryImpl {
     /// 外层 `Arc<tokio::sync::Mutex<...>>` 使工厂可 Clone——Multi-Raft 各 Region
     /// 的 per-region 网络工厂共享同一底层连接池。
     /// 使用 tokio::sync::Mutex 因为临界区包含 async 连接操作。
-    client_cache:
-        Arc<tokio::sync::Mutex<HashMap<u64, Arc<tokio::sync::Mutex<Option<RaftClient<Channel>>>>>>>,
+    client_cache: SharedClientCache,
     /// 模拟网络分区的黑名单：此节点无法与黑名单中的节点通信
     /// 用于测试网络分区和对称分区场景
     blocked_nodes: Arc<RwLock<HashSet<u64>>>,
@@ -376,8 +381,8 @@ impl RaftNetworkFactoryImpl {
             .await
             .map_err(|e| format!("submit_pd_op to node {target}: {e}"))?
             .into_inner();
-        let reply: PdSubmitReply =
-            deserialize_payload(&resp.payload).map_err(|e| format!("decode pd submit reply: {e}"))?;
+        let reply: PdSubmitReply = deserialize_payload(&resp.payload)
+            .map_err(|e| format!("decode pd submit reply: {e}"))?;
         if !reply.error.is_empty() {
             return Err(format!("node {target} rejected pd submit: {}", reply.error));
         }
@@ -979,9 +984,7 @@ impl openraft_multi::GroupRouter<TypeConfig, u64> for RaftNetworkFactoryImpl {
         let mut net = self
             .build_network_impl(target, &node, group_id)
             .await
-            .map_err(|e| {
-                StreamingError::Unreachable(openraft::error::Unreachable::new(&e))
-            })?;
+            .map_err(|e| StreamingError::Unreachable(openraft::error::Unreachable::new(&e)))?;
         net.full_snapshot(vote, snapshot, cancel, option).await
     }
 }
@@ -1011,8 +1014,7 @@ impl RegionRaftNetworkFactory {
 }
 
 impl RaftNetworkFactory<TypeConfig> for RegionRaftNetworkFactory {
-    type Network =
-        openraft_multi::GroupNetworkAdapter<TypeConfig, u64, RaftNetworkFactoryImpl>;
+    type Network = openraft_multi::GroupNetworkAdapter<TypeConfig, u64, RaftNetworkFactoryImpl>;
 
     async fn new_client(
         &mut self,
@@ -1023,11 +1025,7 @@ impl RaftNetworkFactory<TypeConfig> for RegionRaftNetworkFactory {
         if !node.addr.is_empty() {
             self.router.register_node(target, node.addr.clone());
         }
-        openraft_multi::GroupNetworkAdapter::new(
-            self.router.clone(),
-            target,
-            self.region_id,
-        )
+        openraft_multi::GroupNetworkAdapter::new(self.router.clone(), target, self.region_id)
     }
 }
 
@@ -1123,15 +1121,15 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
         request: tonic::Request<RaftMessageProto>,
     ) -> Result<tonic::Response<RaftMessageProto>, tonic::Status> {
         let msg = request.into_inner();
-        let (raft, region_id, rpc) = dispatch_raft_rpc!(self, msg, AppendEntriesRequest<TypeConfig>);
+        let (raft, region_id, rpc) =
+            dispatch_raft_rpc!(self, msg, AppendEntriesRequest<TypeConfig>);
         let resp = raft
             .append_entries(rpc)
             .await
             .map_err(|e| tonic::Status::internal(format!("append_entries failed: {e}")))?;
         let payload = serialize_payload(&resp)?;
         Ok(tonic::Response::new(make_raft_message_for_region(
-            payload,
-            region_id,
+            payload, region_id,
         )))
     }
 
@@ -1147,8 +1145,7 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
             .map_err(|e| tonic::Status::internal(format!("vote failed: {e}")))?;
         let payload = serialize_payload(&resp)?;
         Ok(tonic::Response::new(make_raft_message_for_region(
-            payload,
-            region_id,
+            payload, region_id,
         )))
     }
 
@@ -1169,8 +1166,7 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
             .map_err(|e| tonic::Status::internal(format!("handle_transfer_leader failed: {e}")))?;
         let payload = serialize_payload(&resp)?;
         Ok(tonic::Response::new(make_raft_message_for_region(
-            payload,
-            region_id,
+            payload, region_id,
         )))
     }
 
@@ -1192,8 +1188,7 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
             .map_err(|e| tonic::Status::internal(format!("install_full_snapshot failed: {e}")))?;
         let payload = serialize_payload(&resp)?;
         Ok(tonic::Response::new(make_raft_message_for_region(
-            payload,
-            region_id,
+            payload, region_id,
         )))
     }
 
@@ -1265,8 +1260,7 @@ impl coord_proto::raft::raft_server::Raft for RaftRpcService {
             .map_err(|e| tonic::Status::internal(format!("install_full_snapshot failed: {e}")))?;
         let payload = serialize_payload(&resp)?;
         Ok(tonic::Response::new(make_raft_message_for_region(
-            payload,
-            region_id,
+            payload, region_id,
         )))
     }
 

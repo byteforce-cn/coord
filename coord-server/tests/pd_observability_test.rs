@@ -54,10 +54,12 @@ impl FakeSystemRaft {
     /// 预置一条 Pending 条目（返回分配 op_id）
     fn seed_pending(&self, op: Operator, requester: NodeID) -> u64 {
         let id = self.next_op_id.fetch_add(1, Ordering::SeqCst);
-        self.queue
-            .lock()
-            .unwrap()
-            .push(PdQueueEntry::new_pending(id, op, requester, 1_700_000_000));
+        self.queue.lock().unwrap().push(PdQueueEntry::new_pending(
+            id,
+            op,
+            requester,
+            1_700_000_000,
+        ));
         id
     }
 
@@ -198,11 +200,7 @@ impl RegionRaftHandle for FakeRegionRaft {
         Ok(self.members.lock().unwrap().clone())
     }
 
-    async fn add_learner(
-        &self,
-        node_id: NodeID,
-        raft_addr: &str,
-    ) -> coord_core::error::Result<()> {
+    async fn add_learner(&self, node_id: NodeID, raft_addr: &str) -> coord_core::error::Result<()> {
         self.add_learner_calls
             .lock()
             .unwrap()
@@ -249,7 +247,11 @@ impl RegionRaftHandle for FakeRegionRaft {
 fn make_pd(
     cfg: PdConfig,
     audit: Option<Arc<AuditLogger>>,
-) -> (Arc<PlacementDriver>, Arc<FakeSystemRaft>, watch::Sender<bool>) {
+) -> (
+    Arc<PlacementDriver>,
+    Arc<FakeSystemRaft>,
+    watch::Sender<bool>,
+) {
     let store = Arc::new(PdMetaStore::new());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let pd = Arc::new(PlacementDriver::new(cfg, store, shutdown_rx, 1));
@@ -275,7 +277,9 @@ fn make_pd(
         approximate_size: 0,
         approximate_keys: 0,
     };
-    pd.meta_store().create_region(region).expect("create region");
+    pd.meta_store()
+        .create_region(region)
+        .expect("create region");
 
     // 全局队列模式：region 0 leader = 本节点
     let system = Arc::new(FakeSystemRaft::new(Some(1)));
@@ -302,12 +306,7 @@ async fn wait_produced(system: &FakeSystemRaft, want: usize, timeout: Duration) 
 }
 
 /// 轮询 audit 日志直到出现指定 (actor=pd, action, result) 事件（或超时 panic）。
-async fn wait_audit(
-    audit: &AuditLogger,
-    action: &str,
-    result: &str,
-    timeout: Duration,
-) {
+async fn wait_audit(audit: &AuditLogger, action: &str, result: &str, timeout: Duration) {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let events = audit.recent(100);
@@ -416,12 +415,17 @@ fn test_operator_audit_events_recorded_global_queue_mode() {
 
         // 1) 调度 tick Enqueue AddPeer（region1 欠副本）→ audit: pending
         wait_pending_add_peer(&system, Duration::from_secs(8)).await;
-        wait_audit(&audit, "operator.add-peer", "pending", Duration::from_secs(8)).await;
+        wait_audit(
+            &audit,
+            "operator.add-peer",
+            "pending",
+            Duration::from_secs(8),
+        )
+        .await;
 
         // 执行器（node1 = region1 leader）认领执行 → audit: claimed + success
-        let ex = OperatorExecutor::new(Arc::clone(&pd), 1).with_add_peer_resolver(Arc::new(
-            |_rid| Some((2, "node2:50052".to_string())),
-        ));
+        let ex = OperatorExecutor::new(Arc::clone(&pd), 1)
+            .with_add_peer_resolver(Arc::new(|_rid| Some((2, "node2:50052".to_string()))));
         let region = Arc::new(FakeRegionRaft::new(1));
         let r2: Arc<dyn RegionRaftHandle> = region.clone();
         let resolve: Arc<coord_server::pd::executor::RegionRaftResolver> =
@@ -439,7 +443,10 @@ fn test_operator_audit_events_recorded_global_queue_mode() {
             1,
         );
         let ran = ex.execute_one(&*resolve).await;
-        assert!(ran.is_some(), "executor should attempt split-region (then fail)");
+        assert!(
+            ran.is_some(),
+            "executor should attempt split-region (then fail)"
+        );
 
         // 3) Running 超时重认领 → audit: requeued（stale Running 由 region0
         //    leader 每 tick 扫描 Requeue）
@@ -519,9 +526,8 @@ fn test_operator_audit_suppressed_without_hook() {
         // Enqueue（无 audit logger → no-op 不 panic）
         wait_pending_add_peer(&system, Duration::from_secs(8)).await;
 
-        let ex = OperatorExecutor::new(Arc::clone(&pd), 1).with_add_peer_resolver(Arc::new(
-            |_rid| Some((2, "node2:50052".to_string())),
-        ));
+        let ex = OperatorExecutor::new(Arc::clone(&pd), 1)
+            .with_add_peer_resolver(Arc::new(|_rid| Some((2, "node2:50052".to_string()))));
         let region = Arc::new(FakeRegionRaft::new(1));
         let r2: Arc<dyn RegionRaftHandle> = region.clone();
         let resolve: Arc<coord_server::pd::executor::RegionRaftResolver> =
@@ -550,14 +556,12 @@ fn test_operator_audit_suppressed_without_hook() {
     // 队列状态正确：add-peer 已 Success、stale running 已回 Pending
     let q = system.pd_queue().unwrap();
     assert!(
-        q.iter().any(|e| {
-            e.op.name() == "add-peer" && matches!(e.status, OperatorStatus::Success)
-        }),
+        q.iter()
+            .any(|e| { e.op.name() == "add-peer" && matches!(e.status, OperatorStatus::Success) }),
         "add-peer should have completed: {q:?}"
     );
     assert!(
-        q.iter()
-            .any(|e| e.op_id == 901 && e.is_pending()),
+        q.iter().any(|e| e.op_id == 901 && e.is_pending()),
         "stale running should have been requeued to pending: {q:?}"
     );
 }

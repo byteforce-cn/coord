@@ -21,7 +21,7 @@ use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpc
 use coord_server::raft::region::RegionManager;
 use coord_server::raft::region_runtime::region_data_dir;
 use coord_server::raft::type_config::{Command, Response};
-use coord_server::raft::{RegionRuntime, RegionRuntimeSpec, RaftConfig, WatchReceiver};
+use coord_server::raft::{RaftConfig, RegionRuntime, RegionRuntimeSpec, WatchReceiver};
 
 fn find_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
@@ -206,10 +206,7 @@ async fn test_spawn_regions_independent_election_and_routing() {
             region_id,
             "route(key) should hit region {region_id}"
         );
-        let rt = host
-            .manager
-            .route_runtime(key)
-            .expect("route_runtime key");
+        let rt = host.manager.route_runtime(key).expect("route_runtime key");
         assert_eq!(rt.region_id(), region_id, "route_runtime region");
 
         // 经该 Region 的 Raft 独立写入
@@ -233,14 +230,10 @@ async fn test_spawn_regions_isolated_and_converged() {
 
     // 在各自 leader 上写入
     for region_id in [1u64, 2] {
-        let (host_idx, _) =
-            wait_leader_for_region(&hosts, region_id, Duration::from_secs(25))
-                .await
-                .expect("leader");
-        let rt = hosts[host_idx]
-            .manager
-            .runtime(region_id)
-            .expect("runtime");
+        let (host_idx, _) = wait_leader_for_region(&hosts, region_id, Duration::from_secs(25))
+            .await
+            .expect("leader");
+        let rt = hosts[host_idx].manager.runtime(region_id).expect("runtime");
         let key: &[u8] = if region_id == 1 { b"apple" } else { b"peach" };
         propose_put(&rt, key, b"v").await;
     }

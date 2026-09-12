@@ -203,6 +203,30 @@ impl std::fmt::Display for FlagError {
 
 impl std::error::Error for FlagError {}
 
+// ──── BaseService：插件生命周期 ────
+//
+// 特性开关状态全在内存（可经 gRPC 导入/导出）：构造即就绪，
+// `start`/`stop` 为登记性动作。
+
+#[async_trait::async_trait]
+impl crate::service::BaseService for FeatureFlagService {
+    fn name(&self) -> &'static str {
+        "feature_flags"
+    }
+
+    async fn start(&self) -> crate::service::ServiceResult<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> crate::service::ServiceResult<()> {
+        Ok(())
+    }
+
+    fn health_check(&self) -> bool {
+        true
+    }
+}
+
 // ──── tests ────
 
 #[cfg(test)]

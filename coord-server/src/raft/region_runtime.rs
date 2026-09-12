@@ -157,12 +157,12 @@ pub async fn spawn_region_runtime(
 
     // 业务存储：store.db（KV/元数据/changelog）+ raft-log/log.db + snapshots/
     let storage_config = StorageConfig::default();
-    let backend = RedbBackend::open(&data_dir, &storage_config).map_err(|e| {
-        Error::Storage(format!("open region {region_id} store: {e}"))
-    })?;
-    let mvcc = Arc::new(MvccStorage::new(backend).map_err(|e| {
-        Error::Storage(format!("create region {region_id} mvcc: {e}"))
-    })?);
+    let backend = RedbBackend::open(&data_dir, &storage_config)
+        .map_err(|e| Error::Storage(format!("open region {region_id} store: {e}")))?;
+    let mvcc = Arc::new(
+        MvccStorage::new(backend)
+            .map_err(|e| Error::Storage(format!("create region {region_id} mvcc: {e}")))?,
+    );
     let tracker = Arc::new(SnapshotTracker::default());
     let log_store = LogStore::new(&data_dir)
         .await
@@ -191,9 +191,9 @@ pub async fn spawn_region_runtime(
     // 重启引导（与 main.rs 单 Raft 的 already_initialized 守卫同理）：bootstrap
     // 节点重启时 Region 日志已持久化，重复 initialize 会报错——仅在日志未初始化
     // 时才需要 initialize（首次启动）；非首次启动靠既有日志 + leader 复制收敛。
-    let already_initialized = log_store.is_initialized().map_err(|e| {
-        Error::Storage(format!("region {region_id}: read initialized state: {e}"))
-    })?;
+    let already_initialized = log_store
+        .is_initialized()
+        .map_err(|e| Error::Storage(format!("region {region_id}: read initialized state: {e}")))?;
 
     // per-region 网络门面（共享节点连接池 + 绑定 region_id）
     let region_factory = RegionRaftNetworkFactory::new(shared_factory.clone(), region_id);
@@ -212,9 +212,9 @@ pub async fn spawn_region_runtime(
                 "region {region_id} has no voter peers; cannot initialize"
             )));
         }
-        raft.initialize(members).await.map_err(|e| {
-            Error::Internal(format!("initialize region {region_id}: {e}"))
-        })?;
+        raft.initialize(members)
+            .await
+            .map_err(|e| Error::Internal(format!("initialize region {region_id}: {e}")))?;
     }
 
     // 网络注册（RaftRpcService 按 region_id 解复用）
@@ -325,16 +325,7 @@ impl RegionRaftHandle for CoordRegionRaftHandle {
             })
             .collect();
         // voter 优先、按 node_id 稳定排序（对账用确定性顺序）
-        peers.sort_by_key(|p| {
-            (
-                if p.role == PeerRole::Voter {
-                    0
-                } else {
-                    1
-                },
-                p.node_id,
-            )
-        });
+        peers.sort_by_key(|p| (if p.role == PeerRole::Voter { 0 } else { 1 }, p.node_id));
         Ok(peers)
     }
 
@@ -365,9 +356,7 @@ impl RegionRaftHandle for CoordRegionRaftHandle {
         self.raft
             .change_membership(crate::raft::remove_voter_ids(ids), true)
             .await
-            .map_err(|e| {
-                Error::Internal(format!("region raft remove voter {node_id}: {e}"))
-            })?;
+            .map_err(|e| Error::Internal(format!("region raft remove voter {node_id}: {e}")))?;
         Ok(())
     }
 
@@ -425,14 +414,11 @@ impl CompactProposer for RegionCompactProposer {
             .await
             .map_err(|e| format!("region raft compact propose failed: {e}"))?;
         match resp.response() {
-            Response::Compact {
-                compacted_revision,
-            } => {
+            Response::Compact { compacted_revision } => {
                 // 推进 per-Region compact 水位（此前预留，G7 收口）
-                self.handle.compaction_watermark.store(
-                    *compacted_revision,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
+                self.handle
+                    .compaction_watermark
+                    .store(*compacted_revision, std::sync::atomic::Ordering::Relaxed);
                 Ok(*compacted_revision)
             }
             other => Err(format!("unexpected compact response: {other:?}")),
@@ -449,10 +435,7 @@ mod tests {
         let base = Path::new("/data/coord");
 
         // region 0 = legacy 根目录（字节级不变）
-        assert_eq!(
-            region_data_dir(base, 0),
-            PathBuf::from("/data/coord")
-        );
+        assert_eq!(region_data_dir(base, 0), PathBuf::from("/data/coord"));
 
         // region ≥1 = <base>/regions/region-{region_id:016x}
         assert_eq!(

@@ -260,7 +260,7 @@ impl<B: StorageBackend + 'static> SnapshotScheduler<B> {
         }
 
         // 按时间降序排列
-        snapshots.sort_by(|a, b| b.created.cmp(&a.created));
+        snapshots.sort_by_key(|s| std::cmp::Reverse(s.created));
 
         Ok(snapshots)
     }

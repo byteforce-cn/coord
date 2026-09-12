@@ -110,14 +110,19 @@ fn key_in_range(key: &[u8], start: &[u8], end: &[u8]) -> bool {
 
 /// 扫描 region 0 根 store 的活用户 KV，按 seed key range 分组。
 ///
+/// Region 期望 key 集：region_id → (key → value)
+type RegionKeyMap = BTreeMap<u64, BTreeMap<Vec<u8>, Vec<u8>>>;
+
+/// 扫描 legacy 平铺 KV 并按 Region 分组（依据配置 Region 表的 key range）。
+///
 /// 返回 (region_id → 该 Region 期望的 key 集)；任何 key 不被 region 表覆盖
 /// 即返回 Err（配置校验已保证平铺，此处防御）。
 fn scan_legacy_by_region(
     root: &MvccStorage<RedbBackend>,
     seeds: &[RegionSeed],
-) -> Result<BTreeMap<u64, BTreeMap<Vec<u8>, Vec<u8>>>> {
+) -> Result<RegionKeyMap> {
     let live = root.range(b"", usize::MAX)?;
-    let mut by_region: BTreeMap<u64, BTreeMap<Vec<u8>, Vec<u8>>> = BTreeMap::new();
+    let mut by_region: RegionKeyMap = BTreeMap::new();
     for (key, value) in live {
         if is_system_key(&key) {
             continue; // 系统数据留在 region 0
@@ -142,6 +147,7 @@ fn scan_legacy_by_region(
 /// - 本节点不是该 Region leader → 跳过（leader 所在节点负责导入，本节点靠复制）；
 /// - 导入中途 leader 变更（client_write ForwardToLeader）→ 中止剩余（新 leader
 ///   幂等重导），由外层完备性闸兜底。
+///
 /// 返回实际写入条数（跳过/中止场景由完备性闸收敛，不报错）。
 async fn import_region_keys(
     rt: &RegionRuntime,
@@ -205,11 +211,15 @@ async fn wait_local_completeness(
             };
             let mut missing = 0usize;
             for key in want.keys() {
-                if rt.mvcc.get(key).map_err(|e| {
-                    coord_core::error::Error::Storage(format!(
-                        "migration completeness check region {rid}: {e}"
-                    ))
-                })? == None
+                if rt
+                    .mvcc
+                    .get(key)
+                    .map_err(|e| {
+                        coord_core::error::Error::Storage(format!(
+                            "migration completeness check region {rid}: {e}"
+                        ))
+                    })?
+                    .is_none()
                 {
                     missing += 1;
                 }
@@ -375,14 +385,11 @@ pub async fn write_migration_marker(
                         "migration: write marker via region-0 raft failed: {e}"
                     ))
                 })?;
-            tracing::info!(
-                "migration: node {node_id} wrote migration marker via region-0 raft"
-            );
+            tracing::info!("migration: node {node_id} wrote migration marker via region-0 raft");
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(coord_core::error::Error::Internal(
-                "migration: marker not confirmed within 60s (region-0 raft no leader?)"
-                    .to_string(),
+                "migration: marker not confirmed within 60s (region-0 raft no leader?)".to_string(),
             ));
         }
         tokio::time::sleep(Duration::from_millis(200)).await;

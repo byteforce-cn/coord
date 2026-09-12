@@ -268,7 +268,7 @@ mod tests {
     #[ignore = "performance benchmark, run with --ignored --nocapture"]
     fn bench_all() {
         println!("# Coord 性能基准测试报告\n");
-        println!("> 测试环境：macOS, Rust 1.93.0, Redb 4.1.0\n");
+        println!("> 测试环境：macOS, Rust 1.98.1, Redb 4.1.0\n");
 
         bench_raw_redb_write_throughput();
         bench_mvcc_write_throughput();
@@ -336,7 +336,11 @@ mod tests {
         }
         // PERF_GATE=1 时硬断言（scripts/bench-ci.sh 每周门禁使用）：
         // 5/10/25 Region 吞吐均不低于单 Region 基线的 80%。
-        if std::env::var("PERF_GATE").map(|v| v == "1").unwrap_or(false) && single > 0.0 {
+        if std::env::var("PERF_GATE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+            && single > 0.0
+        {
             for &n in &[5u64, 10, 25] {
                 let r = ops.get(&n).copied().unwrap_or(0.0);
                 let ratio = r / single;

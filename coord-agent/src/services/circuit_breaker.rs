@@ -154,6 +154,29 @@ impl CircuitBreakerService {
     }
 }
 
+// ──── BaseService：插件生命周期 ────
+//
+// 熔断器状态全在内存且无后台任务：构造即就绪，`start`/`stop` 为登记性动作。
+
+#[async_trait::async_trait]
+impl crate::service::BaseService for CircuitBreakerService {
+    fn name(&self) -> &'static str {
+        "circuit_breaker"
+    }
+
+    async fn start(&self) -> crate::service::ServiceResult<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> crate::service::ServiceResult<()> {
+        Ok(())
+    }
+
+    fn health_check(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

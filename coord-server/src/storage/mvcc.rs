@@ -1499,8 +1499,9 @@ impl<B: StorageBackend> MvccStorage<B> {
         applied: AppliedLogId,
     ) -> Result<ApplyOutcome> {
         use crate::auth::manager::{
-            AuthRevocationRecord, AuthRoleRecord, AuthSessionRecord, AuthUserRecord,
-            AUTH_REVOKED_PREFIX, AUTH_ROLE_PREFIX, AUTH_SESSION_PREFIX, AUTH_USER_PREFIX,
+            AuthBootstrapTokenRecord, AuthRevocationRecord, AuthRoleRecord, AuthSessionRecord,
+            AuthUserRecord, AUTH_BOOTSTRAP_PREFIX, AUTH_REVOKED_PREFIX, AUTH_ROLE_PREFIX,
+            AUTH_SESSION_PREFIX, AUTH_USER_PREFIX,
         };
         use crate::raft::type_config::AuthOp;
 
@@ -1670,6 +1671,89 @@ impl<B: StorageBackend> MvccStorage<B> {
                     let key = [AUTH_SESSION_PREFIX, hash_hex.as_bytes()].concat();
                     tx.remove(TABLE_KV, &key)?;
                 }
+                AuthOp::RoleGrantCapability {
+                    role,
+                    capability_id,
+                    scope,
+                } => {
+                    let role_key = [AUTH_ROLE_PREFIX, role.as_bytes()].concat();
+                    if let Some(rec) = tx
+                        .get(TABLE_KV, &role_key)?
+                        .and_then(|bytes| AuthRoleRecord::from_bytes(&bytes))
+                    {
+                        use crate::auth::manager::AuthGrantRecord;
+                        let is_dup = rec
+                            .capability_grants
+                            .iter()
+                            .any(|g| g.capability_id == *capability_id && g.scope == *scope);
+                        if !is_dup {
+                            let mut updated = rec;
+                            updated.capability_grants.push(AuthGrantRecord {
+                                capability_id: capability_id.clone(),
+                                scope: scope.clone(),
+                            });
+                            tx.insert(TABLE_KV, &role_key, &updated.to_bytes()?)?;
+                        }
+                    }
+                }
+                AuthOp::RoleRevokeCapability {
+                    role,
+                    capability_id,
+                    scope,
+                } => {
+                    let role_key = [AUTH_ROLE_PREFIX, role.as_bytes()].concat();
+                    if let Some(rec) = tx
+                        .get(TABLE_KV, &role_key)?
+                        .and_then(|bytes| AuthRoleRecord::from_bytes(&bytes))
+                    {
+                        let mut updated = rec;
+                        updated
+                            .capability_grants
+                            .retain(|g| !(g.capability_id == *capability_id && g.scope == *scope));
+                        tx.insert(TABLE_KV, &role_key, &updated.to_bytes()?)?;
+                    }
+                }
+                AuthOp::IssueBootstrapToken {
+                    id,
+                    hash_hex,
+                    label,
+                    created_by,
+                    created_at_unix,
+                    expires_at_unix,
+                } => {
+                    let key = [AUTH_BOOTSTRAP_PREFIX, id.as_bytes()].concat();
+                    if tx.get(TABLE_KV, &key)?.is_none() {
+                        let rec = AuthBootstrapTokenRecord {
+                            id: id.clone(),
+                            hash_hex: hash_hex.clone(),
+                            label: label.clone(),
+                            created_by: created_by.clone(),
+                            created_at_unix: *created_at_unix,
+                            expires_at_unix: *expires_at_unix,
+                            consumed_at_unix: None,
+                        };
+                        tx.insert(TABLE_KV, &key, &rec.to_bytes()?)?;
+                    }
+                }
+                AuthOp::ConsumeBootstrapToken {
+                    id,
+                    consumed_at_unix,
+                } => {
+                    let key = [AUTH_BOOTSTRAP_PREFIX, id.as_bytes()].concat();
+                    if let Some(mut rec) = tx
+                        .get(TABLE_KV, &key)?
+                        .and_then(|bytes| AuthBootstrapTokenRecord::from_bytes(&bytes))
+                    {
+                        if rec.consumed_at_unix.is_none() {
+                            rec.consumed_at_unix = Some(*consumed_at_unix);
+                            tx.insert(TABLE_KV, &key, &rec.to_bytes()?)?;
+                        }
+                    }
+                }
+                AuthOp::RevokeBootstrapToken { id } => {
+                    let key = [AUTH_BOOTSTRAP_PREFIX, id.as_bytes()].concat();
+                    tx.remove(TABLE_KV, &key)?;
+                }
             }
 
             // Changelog（Auth 事件：无 Key 变更，仅记录 revision 供 Watch 水位推进）
@@ -1736,11 +1820,7 @@ impl<B: StorageBackend> MvccStorage<B> {
                             *requester,
                             *proposed_at_unix,
                         );
-                        tx.insert(
-                            TABLE_KV,
-                            &encode_pd_op_key(revision),
-                            &entry.to_bytes()?,
-                        )?;
+                        tx.insert(TABLE_KV, &encode_pd_op_key(revision), &entry.to_bytes()?)?;
                     }
                 }
                 PdOp::Claim {
@@ -3382,7 +3462,11 @@ mod tests {
         enqueue_at(&storage, &op, 1);
         enqueue_at(&storage, &op, 5);
         let entries = storage.pd_queue_entries().unwrap();
-        assert_eq!(entries.len(), 1, "duplicate enqueue must be deduped globally");
+        assert_eq!(
+            entries.len(),
+            1,
+            "duplicate enqueue must be deduped globally"
+        );
         assert_eq!(entries[0].op_id, 1);
 
         // 不同目标 node 的 AddPeer = 不同 operator → 可入队
@@ -3497,11 +3581,7 @@ mod tests {
 
         // Requeue → Pending + 清认领者/认领墙钟（认领者失联/可重试路径）
         storage
-            .apply_pd_op(
-                &PdOp::Requeue { op_id: 1 },
-                3,
-                AppliedLogId::standalone(3),
-            )
+            .apply_pd_op(&PdOp::Requeue { op_id: 1 }, 3, AppliedLogId::standalone(3))
             .unwrap();
         let e = &storage.pd_queue_entries().unwrap()[0];
         assert!(e.is_pending());
@@ -3510,11 +3590,7 @@ mod tests {
 
         // Requeue 对 Pending 再执行 → no-op（仍 Pending）
         storage
-            .apply_pd_op(
-                &PdOp::Requeue { op_id: 1 },
-                4,
-                AppliedLogId::standalone(4),
-            )
+            .apply_pd_op(&PdOp::Requeue { op_id: 1 }, 4, AppliedLogId::standalone(4))
             .unwrap();
         assert!(storage.pd_queue_entries().unwrap()[0].is_pending());
     }

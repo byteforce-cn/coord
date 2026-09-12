@@ -587,17 +587,13 @@ fn op_summary(op: &Operator) -> String {
             region_id,
             node_id,
             raft_addr,
-        } => format!(
-            "add-peer region={region_id} node={node_id} raft_addr={raft_addr}"
-        ),
-        Operator::RemovePeer {
-            region_id,
-            node_id,
-        } => format!("remove-peer region={region_id} node={node_id}"),
-        Operator::TransferLeader {
-            region_id,
-            to_node,
-        } => format!("transfer-leader region={region_id} to={to_node}"),
+        } => format!("add-peer region={region_id} node={node_id} raft_addr={raft_addr}"),
+        Operator::RemovePeer { region_id, node_id } => {
+            format!("remove-peer region={region_id} node={node_id}")
+        }
+        Operator::TransferLeader { region_id, to_node } => {
+            format!("transfer-leader region={region_id} to={to_node}")
+        }
         Operator::SplitRegion {
             region_id,
             split_key,
@@ -743,7 +739,8 @@ mod tests {
         let region = make_region_meta(1, vec![0x00], vec![0xFF]);
         pd.meta_store().create_region(region).unwrap();
 
-        pd.handle_region_heartbeat(1, 1024 * 1024, 5000, 0, 1).unwrap();
+        pd.handle_region_heartbeat(1, 1024 * 1024, 5000, 0, 1)
+            .unwrap();
 
         let updated = pd.meta_store().get_region(1).unwrap();
         assert_eq!(updated.approximate_size, 1024 * 1024);
@@ -751,11 +748,9 @@ mod tests {
         assert_eq!(pd.meta_store().region_storage_bytes(1), 0);
 
         // 对象存储字节维度（内存视图，独立于 redb 文件大小）
-        pd.handle_region_heartbeat(1, 100, 10, 3 * 1024 * 1024, 1).unwrap();
-        assert_eq!(
-            pd.meta_store().region_storage_bytes(1),
-            3 * 1024 * 1024
-        );
+        pd.handle_region_heartbeat(1, 100, 10, 3 * 1024 * 1024, 1)
+            .unwrap();
+        assert_eq!(pd.meta_store().region_storage_bytes(1), 3 * 1024 * 1024);
     }
 
     #[test]
@@ -896,7 +891,10 @@ mod tests {
                 found = true;
             }
         }
-        assert!(found, "leader 均衡应产出 TransferLeader operator（全局队列）");
+        assert!(
+            found,
+            "leader 均衡应产出 TransferLeader operator（全局队列）"
+        );
     }
 
     #[test]
@@ -994,7 +992,9 @@ mod tests {
         // ReplicaChecker 应该生成 AddPeer Operator（经 raft Enqueue 入全局队列）
         let queue = system.pd_queue().unwrap();
         assert!(
-            queue.iter().any(|e| matches!(&e.op, Operator::AddPeer { .. })),
+            queue
+                .iter()
+                .any(|e| matches!(&e.op, Operator::AddPeer { .. })),
             "should have scheduled add-peer operator: {queue:?}"
         );
     }
@@ -1204,7 +1204,9 @@ mod tests {
             .count();
         assert!(enq1 >= 1, "leader 应把生成的 operator Enqueue 到全局队列");
         assert!(
-            proposed1.iter().all(|op| matches!(op, PdOp::Enqueue { .. })),
+            proposed1
+                .iter()
+                .all(|op| matches!(op, PdOp::Enqueue { .. })),
             "调度只应提出 Enqueue"
         );
 
@@ -1275,7 +1277,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(requeues, vec![1], "仅超时 Running 条目被 Requeue: {proposed:?}");
+        assert_eq!(
+            requeues,
+            vec![1],
+            "仅超时 Running 条目被 Requeue: {proposed:?}"
+        );
         assert!(
             system.queue_entry(1).unwrap().is_pending(),
             "stale running op 1 应回 Pending（claimed_by 清除）"

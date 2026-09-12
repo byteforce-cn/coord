@@ -17,8 +17,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use coord_proto::storage::storage_server::Storage;
 use coord_proto::storage::{
-    get_response, put_request, DeleteRequest, DeleteResponse, GetRequest, GetResponse,
-    ObjectStat, PutMeta, PutRequest, PutResponse, StatRequest, StatResponse,
+    get_response, put_request, DeleteRequest, DeleteResponse, GetRequest, GetResponse, ObjectStat,
+    PutMeta, PutRequest, PutResponse, StatRequest, StatResponse,
 };
 
 use super::{map_err, CoordNode, ObjectTarget};
@@ -26,8 +26,7 @@ use crate::raft::type_config::{Command, ObjectStoreOp, Response};
 use crate::raft::CoordRaft;
 use crate::storage::mvcc::MvccStorage;
 use crate::storage::object_store::{
-    self, list_manifests, live_object_hashes, read_manifest, validate_ref, ChunkStore,
-    ObjectLimits,
+    self, list_manifests, live_object_hashes, read_manifest, validate_ref, ChunkStore, ObjectLimits,
 };
 use crate::storage::redb_backend::RedbBackend;
 
@@ -83,22 +82,31 @@ impl Storage for CoordNode {
         let mut stream = request.into_inner();
 
         // ── 首条必须为 meta ──
-        let meta: PutMeta = match stream.message().await? {
-            Some(m) => match m.part {
-                Some(put_request::Part::Meta(meta)) => meta,
-                _ => {
-                    return Err(tonic::Status::invalid_argument(
+        let meta: PutMeta =
+            match stream.message().await? {
+                Some(m) => match m.part {
+                    Some(put_request::Part::Meta(meta)) => meta,
+                    _ => return Err(tonic::Status::invalid_argument(
                         "first PutRequest message must carry meta (bucket/object_id/total_size)",
-                    ))
-                }
-            },
-            None => return Err(tonic::Status::invalid_argument("empty Put stream")),
-        };
+                    )),
+                },
+                None => return Err(tonic::Status::invalid_argument("empty Put stream")),
+            };
         let bucket = meta.bucket;
         let object_id = meta.object_id;
-        validate_ref(bucket.as_bytes(), &object_id).map_err(|e| map_err(e))?;
-        let total_size = meta.total_size as u64;
-        if total_size == 0 || total_size > limits.max_object_size {
+        validate_ref(bucket.as_bytes(), &object_id).map_err(map_err)?;
+        // `total_size`：`> 0` = 声明长度（Commit 须严格相等）；`-1` = **未知长度**
+        // （流末按实际字节定长，累计上限 = `max_object_size`）；其余非法。
+        let declared: Option<u64> = match meta.total_size {
+            -1 => None,
+            n if n > 0 => Some(n as u64),
+            _ => {
+                return Err(tonic::Status::invalid_argument(
+                    "total_size must be > 0 (declared) or -1 (unknown)",
+                ))
+            }
+        };
+        if declared.is_some_and(|n| n > limits.max_object_size) {
             return Err(tonic::Status::invalid_argument(format!(
                 "total_size must be in (0, {}]",
                 limits.max_object_size
@@ -112,25 +120,26 @@ impl Storage for CoordNode {
             .clone()
             .ok_or_else(|| tonic::Status::failed_precondition("object storage disabled"))?;
 
-        // 配额 admission（尽力而为）：估算 = 已用 + 本次声明
+        // 配额 admission（尽力而为）：估算 = 已用 + 本次声明（未知长度按上限保守估）
+        let estimate = declared.unwrap_or(limits.max_object_size);
         if limits.quota_bytes > 0 {
             let used = store.usage_bytes().map_err(map_err)?;
-            if used.saturating_add(total_size) > limits.quota_bytes {
+            if used.saturating_add(estimate) > limits.quota_bytes {
                 return Err(tonic::Status::resource_exhausted(format!(
-                    "object storage quota exceeded: used {used} + {total_size} > {}",
+                    "object storage quota exceeded: used {used} + {estimate} > {}",
                     limits.quota_bytes
                 )));
             }
         }
 
-        // Begin（raft）：已存在 → ALREADY_EXISTS
+        // Begin（raft）：已存在 → ALREADY_EXISTS（未知长度以 0 表示）
         let (_, ok) = self
             .propose_object_op(
                 &target,
                 ObjectStoreOp::Begin {
                     bucket: bucket.as_bytes().to_vec(),
                     object_id: object_id.clone(),
-                    total_size,
+                    total_size: declared.unwrap_or(0),
                     started_at_unix: now_unix(),
                 },
             )
@@ -164,9 +173,7 @@ impl Storage for CoordNode {
                         "meta must only appear as the first message",
                     ))
                 }
-                None => {
-                    return Err(tonic::Status::invalid_argument("empty PutRequest message"))
-                }
+                None => return Err(tonic::Status::invalid_argument("empty PutRequest message")),
             };
             if data.is_empty() || data.len() > limits.chunk_size {
                 return Err(tonic::Status::invalid_argument(format!(
@@ -175,10 +182,14 @@ impl Storage for CoordNode {
                     limits.chunk_size
                 )));
             }
-            if sent_bytes.saturating_add(data.len() as u64) > total_size {
-                return Err(tonic::Status::invalid_argument(
-                    "uploaded bytes exceed declared total_size",
-                ));
+            let len = data.len() as u64;
+            let bound = declared.unwrap_or(limits.max_object_size);
+            if sent_bytes.saturating_add(len) > bound {
+                return Err(tonic::Status::invalid_argument(if declared.is_some() {
+                    "uploaded bytes exceed declared total_size"
+                } else {
+                    "uploaded bytes exceed max object size"
+                }));
             }
             let (_, ok) = self
                 .propose_object_op(
@@ -198,7 +209,7 @@ impl Storage for CoordNode {
                      (partial object left for GC)",
                 ));
             }
-            sent_bytes += 0; // data 已移入 raft 命令，仅以 seq 计数
+            sent_bytes += len;
             seq += 1;
         }
 
@@ -223,15 +234,17 @@ impl Storage for CoordNode {
                  for GC)",
             ));
         }
+        // 响应报实际落盘字节：声明模式 = 声明值；未知模式 = 流末累计值
+        let final_size = declared.unwrap_or(sent_bytes);
         tracing::info!(
             bucket = %bucket,
             chunks = seq,
-            size = total_size,
+            size = final_size,
             "object committed"
         );
         Ok(tonic::Response::new(PutResponse {
             revision: rev as i64,
-            size: total_size as i64,
+            size: final_size as i64,
             chunks: seq as i64,
         }))
     }
@@ -245,7 +258,7 @@ impl Storage for CoordNode {
         let req = request.into_inner();
         let bucket = req.bucket;
         let object_id = req.object_id;
-        validate_ref(bucket.as_bytes(), &object_id).map_err(|e| map_err(e))?;
+        validate_ref(bucket.as_bytes(), &object_id).map_err(map_err)?;
 
         let target = self.object_target_for(bucket.as_bytes(), &object_id)?;
         let store: Arc<ChunkStore> = target
@@ -289,8 +302,7 @@ impl Storage for CoordNode {
                 let object_id = object_id_c.clone();
                 let res = tokio::task::spawn_blocking(move || {
                     // 每次读前用最新 manifest（对象可能并发删除/重建）
-                    let m = read_manifest(&mvcc, bucket.as_bytes(), &object_id)
-                        .map_err(map_err)?;
+                    let m = read_manifest(&mvcc, bucket.as_bytes(), &object_id).map_err(map_err)?;
                     let m = match m {
                         Some(m) if m.committed => m,
                         _ => {
@@ -348,7 +360,7 @@ impl Storage for CoordNode {
         let req = request.into_inner();
         let bucket = req.bucket;
         let object_id = req.object_id;
-        validate_ref(bucket.as_bytes(), &object_id).map_err(|e| map_err(e))?;
+        validate_ref(bucket.as_bytes(), &object_id).map_err(map_err)?;
 
         let target = self.object_target_for(bucket.as_bytes(), &object_id)?;
         self.object_linearizable(&target).await?;
@@ -367,7 +379,7 @@ impl Storage for CoordNode {
         let req = request.into_inner();
         let bucket = req.bucket;
         let object_id = req.object_id;
-        validate_ref(bucket.as_bytes(), &object_id).map_err(|e| map_err(e))?;
+        validate_ref(bucket.as_bytes(), &object_id).map_err(map_err)?;
 
         let target = self.object_target_for(bucket.as_bytes(), &object_id)?;
         self.object_linearizable(&target).await?;
@@ -434,7 +446,9 @@ pub async fn object_gc_loop(
         let now = now_unix();
         // 1) stale Creating → Delete
         for (bucket, object_id, m) in &manifests {
-            if !m.committed && now.saturating_sub(m.last_write_at_unix) > limits.upload_timeout_secs as i64 {
+            if !m.committed
+                && now.saturating_sub(m.last_write_at_unix) > limits.upload_timeout_secs as i64
+            {
                 let cmd = Command::ObjectStore(ObjectStoreOp::Delete {
                     bucket: bucket.clone(),
                     object_id: object_id.clone(),

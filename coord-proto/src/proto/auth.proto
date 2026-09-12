@@ -23,6 +23,10 @@ service Auth {
   rpc RoleRevokePermission(RoleRevokePermissionRequest) returns (RoleRevokePermissionResponse);
   rpc RoleList(RoleListRequest) returns (RoleListResponse);
 
+  // 能力授予（CCT v3：capability_id + scope；raft 持久化）
+  rpc RoleGrantCapability(RoleGrantCapabilityRequest) returns (RoleGrantCapabilityResponse);
+  rpc RoleRevokeCapability(RoleRevokeCapabilityRequest) returns (RoleRevokeCapabilityResponse);
+
   // 用户-角色关联
   rpc UserGrantRole(UserGrantRoleRequest) returns (UserGrantRoleResponse);
   rpc UserRevokeRole(UserRevokeRoleRequest) returns (UserRevokeRoleResponse);
@@ -39,6 +43,11 @@ service Auth {
 
   // Bootstrap: Agent 首次启动认证
   rpc Bootstrap(BootstrapRequest) returns (BootstrapResponse);
+
+  // Bootstrap 令牌动态签发（TTL + 一次性；raft 持久化）
+  rpc BootstrapTokenIssue(BootstrapTokenIssueRequest) returns (BootstrapTokenIssueResponse);
+  rpc BootstrapTokenList(BootstrapTokenListRequest) returns (BootstrapTokenListResponse);
+  rpc BootstrapTokenRevoke(BootstrapTokenRevokeRequest) returns (BootstrapTokenRevokeResponse);
 }
 
 // ──── Auth 管理 ────
@@ -111,6 +120,22 @@ message RoleListRequest {}
 message RoleListResponse {
   repeated Role roles = 1;
 }
+
+// ──── 能力授予（capability + scope） ────
+
+message RoleGrantCapabilityRequest {
+  string role = 1;
+  string capability_id = 2; // 例如 "data:kv:read"
+  string scope = 3; // 例如 "/app/counter/"，空 = 无限制
+}
+message RoleGrantCapabilityResponse {}
+
+message RoleRevokeCapabilityRequest {
+  string role = 1;
+  string capability_id = 2;
+  string scope = 3;
+}
+message RoleRevokeCapabilityResponse {}
 
 // ──── 用户 ────
 
@@ -219,4 +244,34 @@ message BootstrapRequest {
 message BootstrapResponse {
   string cct = 1; // 短期 CCT（10 分钟，仅含 admin:auth:authenticate）
   int64 expires_at = 2; // Unix 秒级时间戳
+}
+
+// ──── Bootstrap 令牌动态签发（TTL + 一次性） ────
+
+message BootstrapTokenIssueRequest {
+  string label = 1; // 人类可读标签（审计/列表用；可空）
+  int64 ttl_secs = 2; // 有效期（秒）；0 = 服务端默认（1h）；上限 30 天
+}
+message BootstrapTokenIssueResponse {
+  string id = 1; // 令牌 ID（revoke 用；非密文）
+  string token = 2; // 明文令牌——**仅本次返回**，服务端只存 SHA256
+  int64 expires_at = 3; // Unix 秒级时间戳
+}
+message BootstrapTokenListRequest {}
+message BootstrapTokenListResponse {
+  repeated BootstrapTokenInfo tokens = 1;
+}
+message BootstrapTokenInfo {
+  string id = 1;
+  string label = 2;
+  string created_by = 3;
+  int64 created_at = 4;
+  int64 expires_at = 5;
+  bool consumed = 6; // 是否已被使用（一次性语义）
+}
+message BootstrapTokenRevokeRequest {
+  string id = 1;
+}
+message BootstrapTokenRevokeResponse {
+  bool revoked = 1; // false = 不存在（幂等：非错误）
 }

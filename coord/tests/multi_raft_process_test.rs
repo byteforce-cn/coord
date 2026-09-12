@@ -72,7 +72,15 @@ impl RealNode {
         data_dir: &std::path::Path,
         initial_nodes: &[(u64, String, String)], // (id, grpc, raft)
     ) -> Self {
-        Self::spawn_full(id, grpc_port, raft_port, data_dir, initial_nodes, DEFAULT_PD_TOML, id == 1)
+        Self::spawn_full(
+            id,
+            grpc_port,
+            raft_port,
+            data_dir,
+            initial_nodes,
+            DEFAULT_PD_TOML,
+            id == 1,
+        )
     }
 
     /// 与 `spawn` 相同，但 `[multi_raft.pd]` 段整体由调用方提供（覆盖默认配置——
@@ -86,7 +94,15 @@ impl RealNode {
         initial_nodes: &[(u64, String, String)], // (id, grpc, raft)
         pd_toml: &str,
     ) -> Self {
-        Self::spawn_full(id, grpc_port, raft_port, data_dir, initial_nodes, pd_toml, id == 1)
+        Self::spawn_full(
+            id,
+            grpc_port,
+            raft_port,
+            data_dir,
+            initial_nodes,
+            pd_toml,
+            id == 1,
+        )
     }
 
     /// 底层 spawn：可指定 bootstrap 节点（默认 id==1；PD failover 验收需让
@@ -114,8 +130,7 @@ impl RealNode {
         // 诊断支持：设 MR_RUST_LOG / MR_DEBUG_LOG=1 时把子进程 stdout/stderr 落盘
         // `<data_dir>/coord.log`（默认与历史行为一致：coord=warn + 丢弃）。
         let mr_log = std::env::var("MR_DEBUG_LOG").is_ok();
-        let mr_rust_log = std::env::var("MR_RUST_LOG")
-            .unwrap_or_else(|_| "coord=warn".to_string());
+        let mr_rust_log = std::env::var("MR_RUST_LOG").unwrap_or_else(|_| "coord=warn".to_string());
         cmd.env("RUST_LOG", &mr_rust_log);
         if mr_log {
             std::fs::create_dir_all(data_dir).unwrap();
@@ -380,10 +395,7 @@ async fn multi_raft_real_three_nodes_three_regions() {
         eprintln!("--- kill node {victim_id} ---");
         nodes[victim_idx].kill9();
         // 只保留存活节点
-        let remaining: Vec<&RealNode> = nodes
-            .iter()
-            .filter(|n| n.id != victim_id)
-            .collect();
+        let remaining: Vec<&RealNode> = nodes.iter().filter(|n| n.id != victim_id).collect();
 
         let round = victim_id + 1; // 值版本（每轮递增）
         for (region_id, key) in REGION_KEYS {
@@ -441,7 +453,7 @@ async fn multi_raft_real_three_nodes_three_regions() {
 //   3. 重启被 kill 节点后 region 0 重新收敛（/metrics 有效 leader）+ 全 Region
 //      KV 可写可读（严格）；
 //   4. 执行接管（观察）：kill 时仍在队列（Pending/Running）的 RemovePeer 由
-//      存活 Region leader 认领并 Complete（success 增长；Running-claim 经 
+//      存活 Region leader 认领并 Complete（success 增长；Running-claim 经
 //      Requeue 兜底重执行）——多数运行数秒内完成；偶发卡于 **openraft 成员变更
 //      与 leader 死亡竞态**（被杀节点原数据 Region leader 且 RemovePeer 正在改
 //      成员时，受影响 Region 可能直到该节点回来才解除——D2 alpha 依赖风险，
@@ -568,7 +580,10 @@ async fn pd_global_queue_failover_three_nodes() {
     nodes[leader_idx].kill9();
 
     let survivors: Vec<&RealNode> = nodes.iter().filter(|n| n.id != leader_id).collect();
-    eprintln!("survivors: {:?}", survivors.iter().map(|n| n.id).collect::<Vec<_>>());
+    eprintln!(
+        "survivors: {:?}",
+        survivors.iter().map(|n| n.id).collect::<Vec<_>>()
+    );
 
     // 2. region 0 leader 切换（核心）：存活节点重新选出 region 0 leader
     //    （/metrics raft_leader_id 自报），且 != 被 kill 节点。
@@ -812,7 +827,10 @@ fn dump_pd_events(nodes: &[&RealNode], label: &str) {
             count_pd(&evs, "requeued")
         );
         for e in evs.iter().rev().take(12) {
-            eprintln!("  [{label}] node {}: {} result={}", n.id, e.action, e.result);
+            eprintln!(
+                "  [{label}] node {}: {} result={}",
+                n.id, e.action, e.result
+            );
         }
     }
 }
@@ -822,9 +840,7 @@ async fn fetch_metrics(port: u16) -> Option<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let addr = format!("127.0.0.1:{port}");
     let mut stream = tokio::net::TcpStream::connect(&addr).await.ok()?;
-    let req = format!(
-        "GET /metrics HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
-    );
+    let req = format!("GET /metrics HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).await.ok()?;
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await.ok()?;
@@ -1083,9 +1099,7 @@ async fn pd_transfer_leader_balance_real_drill() {
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
     };
-    eprintln!(
-        "transfer-drill: {successes} transfer-leader successes to nodes {targets:?}"
-    );
+    eprintln!("transfer-drill: {successes} transfer-leader successes to nodes {targets:?}");
 
     let all2: Vec<&RealNode> = nodes.iter().collect();
     for (region_id, key) in REGION_KEYS {
@@ -1373,8 +1387,16 @@ async fn mr_off_on_off_upgrade_rollback_real_drill() {
             "rollback: /a/new1 (multi_raft 期间写入) must be absent from legacy data plane"
         );
         // legacy 可继续写（回滚后原数据面健康）
-        assert!(put_on(&[nr], b"/legacy/rollback-new", b"rb1").await.is_some());
-        read_until(&[nr], b"/legacy/rollback-new", b"rb1", Duration::from_secs(20)).await;
+        assert!(put_on(&[nr], b"/legacy/rollback-new", b"rb1")
+            .await
+            .is_some());
+        read_until(
+            &[nr],
+            b"/legacy/rollback-new",
+            b"rb1",
+            Duration::from_secs(20),
+        )
+        .await;
         eprintln!("off/on/off: rollback verified (legacy data intact, legacy writable)");
     }
     eprintln!("mr off/on/off upgrade/rollback real drill PASSED");
@@ -1483,7 +1505,10 @@ async fn perf_multi_region_vs_single_raft_probe() {
         "perf probe: single-raft {single_rate:.0} ops/s vs multi-region(3) {multi_rate:.0} \
          ops/s -> ratio {ratio:.3}"
     );
-    if std::env::var("PERF_GATE").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("PERF_GATE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         assert!(
             ratio >= 0.80,
             "PERF GATE (T5.21 real raft): multi-region {multi_rate:.0} ops/s < 80% of \
@@ -1667,7 +1692,13 @@ async fn chaos_real_region_mode_kill_partition() {
             raft_ports[i],
             real_raft_ports[i]
         );
-        let node = RealNode::spawn_custom(nid, grpc_ports[i], raft_ports[i], &base.join(format!("node{nid}")), &toml);
+        let node = RealNode::spawn_custom(
+            nid,
+            grpc_ports[i],
+            raft_ports[i],
+            &base.join(format!("node{nid}")),
+            &toml,
+        );
         nodes.push(node);
     }
     for n in &nodes {
@@ -1756,7 +1787,10 @@ async fn chaos_real_region_mode_kill_partition() {
         // 故障注入轮换：kill+重启 / 分区 4s（可变操作须在 all drop 之后）
         let victim = (iterations as usize) % nodes.len();
         if iterations % 2 == 1 {
-            tracing::info!("region-chaos: kill -9 node {} and restart", nodes[victim].id);
+            tracing::info!(
+                "region-chaos: kill -9 node {} and restart",
+                nodes[victim].id
+            );
             nodes[victim].kill9();
             tokio::time::sleep(Duration::from_millis(300)).await;
             nodes[victim].restart();
@@ -1824,7 +1858,10 @@ async fn chaos_real_region_mode_kill_partition() {
          (value={final_value})"
     );
     for n in &all {
-        eprintln!("region-chaos: node {} serving register key (post-chaos)", n.id);
+        eprintln!(
+            "region-chaos: node {} serving register key (post-chaos)",
+            n.id
+        );
     }
 
     // PD 健康：region 0 收敛出有效 leader

@@ -75,10 +75,7 @@ fn parse_raft_snapshot_name_free(name: &str) -> Option<(u64, u64)> {
 }
 
 /// 清理快照目录，仅保留最新 3 份 Raft 快照（A.6.3；纯函数，可在 spawn_blocking 内执行）
-fn cleanup_old_snapshots_free(
-    snapshot_dir: &PathBuf,
-    keep: &PathBuf,
-) -> Result<(), io::Error> {
+fn cleanup_old_snapshots_free(snapshot_dir: &PathBuf, keep: &PathBuf) -> Result<(), io::Error> {
     let mut snaps: Vec<(u64, u64, PathBuf)> = match std::fs::read_dir(snapshot_dir) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
@@ -708,7 +705,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                         index: revision,
                     };
                     let (resp, change_event) = self.execute_command(sm, cmd, revision, applied)?;
-                    last_normal_log_id = Some(entry.log_id.clone());
+                    last_normal_log_id = Some(entry.log_id);
 
                     // region 0 状态机在 LeaseOp::Revoke apply（含
                     // 过期清理与显式 revoke）后广播 lease_id——所有节点 apply region 0
@@ -780,7 +777,9 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
         // A.6：安装的快照同样落盘（tmp → fsync → rename → 校验和），保证重启可恢复。
         // fsync 落盘段在阻塞线程池执行。
-        let (path, checksum) = self.persist_snapshot_file_blocking(meta, data.clone()).await?;
+        let (path, checksum) = self
+            .persist_snapshot_file_blocking(meta, data.clone())
+            .await?;
 
         *self.current_snapshot.lock() = Some(StoredSnapshot {
             meta: meta.clone(),
@@ -881,7 +880,13 @@ impl StateMachineStore {
         let snapshot_tracker = Arc::clone(&self.snapshot_tracker);
         let meta = meta.clone();
         tokio::task::spawn_blocking(move || {
-            persist_snapshot_file_impl(&snapshot_dir, &state_machine, &snapshot_tracker, &meta, &data)
+            persist_snapshot_file_impl(
+                &snapshot_dir,
+                &state_machine,
+                &snapshot_tracker,
+                &meta,
+                &data,
+            )
         })
         .await
         .map_err(|e| io::Error::other(format!("snapshot persist task join: {e}")))?
@@ -926,7 +931,7 @@ impl StateMachineStore {
             });
 
         let meta = SnapshotMetaOf::<TypeConfig> {
-            last_log_id: Some(last_log_id.clone()),
+            last_log_id: Some(last_log_id),
             last_membership: last_membership.clone(),
         };
 
@@ -986,8 +991,9 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
             .map(|id| id.leader_id.term)
             .unwrap_or(0);
         let data_bytes = tokio::task::spawn_blocking(move || {
-            let snapshot_data = export_snapshot_data(sm.as_ref(), export_last_idx, export_last_term)
-                .map_err(|e| io::Error::other(e.to_string()))?;
+            let snapshot_data =
+                export_snapshot_data(sm.as_ref(), export_last_idx, export_last_term)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
             snapshot_data
                 .to_bytes()
                 .map_err(|e| io::Error::other(e.to_string()))
@@ -997,7 +1003,9 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
 
         // A.6：落盘（临时文件 → fsync → rename → 校验和 → META_SNAPSHOT → purge 守卫）。
         // fsync 落盘段在阻塞线程池执行。
-        let (_path, _checksum) = self.persist_snapshot_file_blocking(&meta, data_bytes.clone()).await?;
+        let (_path, _checksum) = self
+            .persist_snapshot_file_blocking(&meta, data_bytes.clone())
+            .await?;
 
         let snapshot = SnapshotOf::<TypeConfig, super::RaftSnapshotData> {
             meta: meta.clone(),

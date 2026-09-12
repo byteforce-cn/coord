@@ -18,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "src/proto/auth.proto",
                 "src/proto/capability.proto",
                 "src/proto/agent_api.proto",
+                "src/proto/plugin.proto",
             ],
             &["src/proto"],
         )?;
