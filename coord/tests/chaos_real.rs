@@ -354,7 +354,9 @@ impl RegisterChecker {
 async fn chaos_real_kill9_and_linearizability() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("CHAOS_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("CHAOS_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "CHAOS_REAL must be set to run this real-process suite (E1)"
     );
 
@@ -509,7 +511,9 @@ async fn chaos_real_kill9_and_linearizability() {
 async fn chaos_soak_distributed() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("CHAOS_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("CHAOS_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "CHAOS_REAL must be set to run this real-process suite (E1)"
     );
     let duration_secs: u64 = std::env::var("SOAK_DURATION_SECS")

@@ -22,10 +22,16 @@ import java.util.concurrent.TimeUnit;
  * 4. 注销 (Revoke Lease → 绑定 key 自动删除)
  *
  * 与架构文档 一致。
+ *
+ * 命名（第三轮复核 §3.3）：本类此前叫 `ServiceRegistryTest`，`**&#47;*IntegrationTest.java`
+ * 与 `**&#47;*AdvancedTest.java` 两个 pattern **都不匹配** —— 于是它既躲过默认 profile 的
+ * `<excludes>`（在无集群的 CI 里执行并 BUILD FAILURE），又不在 `-Pit` 的 `<includes>` 里
+ * （真实集群下反而不跑）。改名为 `ServiceRegistryIntegrationTest` 后归入约定：
+ * 默认排除、`-Pit` 执行。**任何需要真实 Agent 的测试都必须以 IntegrationTest/AdvancedTest 结尾。**
  */
 @DisplayName("Service Registry Integration Tests (Java → Agent gRPC)")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
-class ServiceRegistryTest {
+class ServiceRegistryIntegrationTest {
 
     private static final String REGISTRY_PREFIX = "/_registry/services/";
 

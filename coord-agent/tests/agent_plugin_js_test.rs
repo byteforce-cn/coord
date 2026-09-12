@@ -634,8 +634,8 @@ export async function handleInvoke(method, payload) {
     /// （8 核跑多个进程级套件）500ms 不够 → 随机 `ConnectionRefused` 假红。
     /// 这里改为有界重试（上限 15s），既不再依赖机器负载，也不会无限等。
     async fn connect_ready(addr: &str) -> tonic::transport::Channel {
-        let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-            .expect("endpoint");
+        let endpoint =
+            tonic::transport::Endpoint::from_shared(format!("http://{addr}")).expect("endpoint");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
             match endpoint.clone().connect().await {

@@ -195,6 +195,38 @@ async fn raft_put(
     }
 }
 
+/// 写入一条**辅助**记录（历史版本 / 索引）。
+///
+/// 第三轮 §4.2③：这些位置此前是 `let _ = raft_put(..)`——主写入有校验、辅助写没有，
+/// 于是「配置更新返回 `200 {"version":2}`」而 v2 历史条目从未落 raft，回滚与
+/// "版本列表"静默不完整。对调用方而言这是"API 报成功而数据不完整"。
+///
+/// 主写入此刻已经提交、无法回滚，因此唯一诚实的做法是**明确报告本次操作未完整完成**，
+/// 而不是假装成功。错误体里带上具体是哪一条辅助写失败，便于定位与补偿。
+async fn raft_put_aux(
+    node: &CoordNode,
+    key: Vec<u8>,
+    value: Vec<u8>,
+    what: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if let Err((status, Json(detail))) = raft_put(node, key, value).await {
+        tracing::error!(
+            auxiliary_write = what,
+            "auxiliary write FAILED after the primary write committed: operation is INCOMPLETE"
+        );
+        return Err((
+            status,
+            Json(json!({
+                "error": format!(
+                    "主写入已提交，但「{what}」写入失败，本次操作未完整完成；请重试或人工修复"
+                ),
+                "detail": detail,
+            })),
+        ));
+    }
+    Ok(())
+}
+
 async fn raft_delete(node: &CoordNode, key: Vec<u8>) -> Result<(), (StatusCode, Json<Value>)> {
     if let Some(ref raft) = node.raft {
         let cmd = Command::Delete { key };
@@ -279,10 +311,18 @@ pub async fn list_configs(
         config_data_prefix()
     };
 
-    let results = match node.storage.range(&scan_prefix, usize::MAX) {
+    // 第三轮 §4.2②：有界 + blocking 池扫描（此前 `range(.., usize::MAX)`
+    // 在 Tokio worker 上同步全量扫描，足以拖垮 raft 心跳）。
+    let (results, truncated) = match crate::bff::scan_prefix_bounded(node, &scan_prefix).await {
         Ok(r) => r,
         Err(e) => return err_json(500, &format!("存储读取失败: {e}")).into_response(),
     };
+    if truncated {
+        tracing::warn!(
+            limit = crate::bff::BFF_SCAN_LIMIT,
+            "config list truncated: response is NOT the complete set"
+        );
+    }
 
     let mut configs: Vec<ConfigListItem> = Vec::new();
 
@@ -425,8 +465,15 @@ pub async fn create_config(
     }
 
     // 同时写入历史版本 v1
+    //
+    // 第三轮 §4.2③：此前是 `let _ = raft_put(..)`——主写入有校验、辅助写没有，
+    // 于是接口返回 `200 {"version":1}` 而 v1 历史条目**从未落 raft**，回滚与
+    // "版本列表"静默不完整。对调用方而言这是"API 报成功而数据不完整"，
+    // 是爆炸半径最大的一类缺陷。
     let vk = config_version_key(&body.group, &body.key, 1);
-    let _ = raft_put(node, vk, value).await;
+    if let Err(e) = raft_put_aux(node, vk, value, "配置历史版本 v1").await {
+        return e.into_response();
+    }
 
     ok_json(json!({"version": 1})).into_response()
 }
@@ -473,10 +520,13 @@ pub async fn update_config(
     let now = current_time_iso();
     let new_version = current.version + 1;
 
-    // 备份当前版本到历史
+    // 备份当前版本到历史（§4.2③：辅助写失败必须上报）
     let vk_old = config_version_key(&group, &key, current.version);
     let old_value = serde_json::to_vec(&current).unwrap_or_default();
-    let _ = raft_put(node, vk_old, old_value).await;
+    if let Err(e) = raft_put_aux(node, vk_old, old_value, "配置历史版本（旧版本备份）").await
+    {
+        return e.into_response();
+    }
 
     // 写入新版本
     let new_envelope = ConfigEnvelope {
@@ -500,7 +550,10 @@ pub async fn update_config(
 
     // 写入历史版本
     let vk_new = config_version_key(&group, &key, new_version);
-    let _ = raft_put(node, vk_new, new_value).await;
+    if let Err(e) = raft_put_aux(node, vk_new, new_value, "配置历史版本（新版本）").await
+    {
+        return e.into_response();
+    }
 
     ok_json(json!({"version": new_version})).into_response()
 }
@@ -531,11 +584,22 @@ pub async fn delete_config(
         return e.into_response();
     }
 
-    // 删除所有历史版本
+    // 删除所有历史版本（§4.2②：有界 + blocking 池）
     let vp = config_version_prefix(&group, &key);
-    if let Ok(versions) = node.storage.range(&vp, usize::MAX) {
+    if let Ok((versions, truncated)) = crate::bff::scan_prefix_bounded(node, &vp).await {
+        if truncated {
+            tracing::warn!(
+                group = %group,
+                key = %key,
+                "config version purge truncated: some historical versions were NOT deleted"
+            );
+        }
         for (vk, _) in versions {
-            let _ = raft_delete(node, vk).await;
+            // §4.2③：删除失败不得静默丢弃
+            if let Err(e) = raft_delete(node, vk).await {
+                tracing::error!("history version delete FAILED: {}", e.1 .0);
+                return e.into_response();
+            }
         }
     }
 
@@ -558,10 +622,16 @@ pub async fn list_versions(
     let node = &state.coord_node;
     let vp = config_version_prefix(&group, &key);
 
-    let results = match node.storage.range(&vp, usize::MAX) {
+    let (results, truncated) = match crate::bff::scan_prefix_bounded(node, &vp).await {
         Ok(r) => r,
         Err(e) => return err_json(500, &format!("存储读取失败: {e}")).into_response(),
     };
+    if truncated {
+        tracing::warn!(
+            limit = crate::bff::BFF_SCAN_LIMIT,
+            "config version list truncated: response is NOT the complete history"
+        );
+    }
 
     let mut versions: Vec<VersionEntry> = Vec::new();
     for (_k, v) in &results {
@@ -658,10 +728,19 @@ pub async fn rollback(
     let now = current_time_iso();
     let new_version = current.version + 1;
 
-    // 备份当前版本到历史
+    // 备份当前版本到历史（§4.2③：回滚路径同样不得静默丢弃）
     let vk_current = config_version_key(&group, &key, current.version);
     let current_value = serde_json::to_vec(&current).unwrap_or_default();
-    let _ = raft_put(node, vk_current, current_value).await;
+    if let Err(e) = raft_put_aux(
+        node,
+        vk_current,
+        current_value,
+        "配置历史版本（回滚前备份）",
+    )
+    .await
+    {
+        return e.into_response();
+    }
 
     // 创建新版本（内容来自目标版本）
     let new_envelope = ConfigEnvelope {
@@ -685,7 +764,10 @@ pub async fn rollback(
 
     // 写入历史版本
     let vk_new = config_version_key(&group, &key, new_version);
-    let _ = raft_put(node, vk_new, new_value).await;
+    if let Err(e) = raft_put_aux(node, vk_new, new_value, "配置历史版本（回滚产生的新版本）").await
+    {
+        return e.into_response();
+    }
 
     ok_json(json!({"newVersion": new_version})).into_response()
 }

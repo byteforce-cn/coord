@@ -146,7 +146,47 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
+                <configuration>
+                    <!--
+                        第三轮复核 §3.3 / §7.2-9：需要**真实 coord-agent** 的套件按命名约定
+                        隔离，默认排除；由 `-Pit` profile 纳入并连接真实集群执行。
+
+                        此前本模块没有 excludes，`CoordClientIntegrationTest` 会在无集群的
+                        默认 `mvn verify` 中被执行，靠 `Assumptions.assumeThat` 静默跳过——
+                        "静默跳过"在 CI 里与"通过"无法区分，等于该套件**从未真正跑过**。
+
+                        约定：任何需要真实 Agent 的测试都必须以 `*IntegrationTest` 结尾。
+                    -->
+                    <excludes>
+                        <exclude>**/*IntegrationTest.java</exclude>
+                    </excludes>
+                </configuration>
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!--
+            `-Pit`：只跑需要真实 coord-agent 的集成套件（此时**不**排除它们）。
+            若 Agent 不可达，测试以明确原因**失败**——刻意不使用 `assumeTrue` 静默跳过。
+            CI 由 `.github/workflows/ci.yml` 的 `java-example-it` job 提供真实集群。
+        -->
+        <profile>
+            <id>it</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <excludes combine.self="override"/>
+                            <includes>
+                                <include>**/*IntegrationTest.java</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

@@ -320,7 +320,9 @@ async fn read_until(nodes: &[&RealNode], key: &[u8], expected: &[u8], timeout: D
 async fn multi_raft_real_three_nodes_three_regions() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("MULTI_RAFT_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("MULTI_RAFT_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "MULTI_RAFT_REAL must be set to run this real-process suite (E1)"
     );
     // 与同文件其余真实进程用例串行（见 PROCESS_SUITE_LOCK 注释）
@@ -473,7 +475,9 @@ async fn multi_raft_real_three_nodes_three_regions() {
 async fn pd_global_queue_failover_three_nodes() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("MULTI_RAFT_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("MULTI_RAFT_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "MULTI_RAFT_REAL must be set to run this real-process suite (E1)"
     );
     // 与同文件其余真实进程用例串行（见 PROCESS_SUITE_LOCK 注释）
@@ -1000,7 +1004,9 @@ async fn read_key_maybe(
 async fn pd_transfer_leader_balance_real_drill() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("MULTI_RAFT_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("MULTI_RAFT_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "MULTI_RAFT_REAL must be set to run this real-process suite (E1)"
     );
     // 与同文件其余真实进程用例串行
@@ -1135,7 +1141,9 @@ async fn pd_transfer_leader_balance_real_drill() {
 async fn pd_add_peer_target_increase_real_drill() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("MULTI_RAFT_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("MULTI_RAFT_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "MULTI_RAFT_REAL must be set to run this real-process suite (E1)"
     );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
@@ -1276,7 +1284,9 @@ async fn pd_add_peer_target_increase_real_drill() {
 async fn mr_off_on_off_upgrade_rollback_real_drill() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("MULTI_RAFT_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("MULTI_RAFT_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "MULTI_RAFT_REAL must be set to run this real-process suite (E1)"
     );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
@@ -1422,7 +1432,9 @@ async fn mr_off_on_off_upgrade_rollback_real_drill() {
 async fn perf_multi_region_vs_single_raft_probe() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("MULTI_RAFT_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("MULTI_RAFT_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "MULTI_RAFT_REAL must be set to run this real-process suite (E1)"
     );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
@@ -1653,7 +1665,9 @@ impl RegionRegisterChecker {
 async fn chaos_real_region_mode_kill_partition() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("MULTI_RAFT_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("MULTI_RAFT_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "MULTI_RAFT_REAL must be set to run this real-process suite (E1)"
     );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;

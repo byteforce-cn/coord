@@ -998,8 +998,7 @@ mod tests {
     /// 回查本身失败（Server 不可达）→ 不能断定丢锁，保留（fail-safe）。
     #[test]
     fn test_renew_action_keeps_record_when_verification_fails() {
-        let verify: ServiceResult<Option<LockInfo>> =
-            Err("server unreachable".to_string().into());
+        let verify: ServiceResult<Option<LockInfo>> = Err("server unreachable".to_string().into());
         assert_eq!(renew_action(&verify), RenewAction::Keep);
     }
 

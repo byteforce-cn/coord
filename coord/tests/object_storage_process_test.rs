@@ -477,7 +477,9 @@ fn chunk_files(data_dir: &Path) -> Vec<PathBuf> {
 async fn object_storage_real_roundtrip_boundary_and_gc() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("OBJECT_STORAGE_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("OBJECT_STORAGE_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "OBJECT_STORAGE_REAL must be set to run this real-process suite (E1)"
     );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
@@ -656,7 +658,9 @@ async fn object_storage_real_roundtrip_boundary_and_gc() {
 async fn object_storage_real_quota_resource_exhausted() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("OBJECT_STORAGE_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("OBJECT_STORAGE_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "OBJECT_STORAGE_REAL must be set to run this real-process suite (E1)"
     );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
@@ -722,7 +726,9 @@ async fn object_storage_real_quota_resource_exhausted() {
 async fn object_storage_real_encryption_roundtrip() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("OBJECT_STORAGE_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("OBJECT_STORAGE_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "OBJECT_STORAGE_REAL must be set to run this real-process suite (E1)"
     );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
@@ -927,7 +933,9 @@ async fn current_leader(nodes: &[&RealNode]) -> Option<u64> {
 async fn object_storage_real_chaos_kill_pause_partition() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("OBJECT_STORAGE_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("OBJECT_STORAGE_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "OBJECT_STORAGE_REAL must be set to run this real-process suite (E1)"
     );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
@@ -1162,7 +1170,9 @@ async fn object_storage_real_chaos_kill_pause_partition() {
 async fn object_storage_real_sdk_roundtrip() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("OBJECT_STORAGE_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("OBJECT_STORAGE_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "OBJECT_STORAGE_REAL must be set to run this real-process suite (E1)"
     );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
@@ -1240,7 +1250,9 @@ async fn object_storage_real_sdk_roundtrip() {
 async fn object_storage_real_streaming_sessions() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("OBJECT_STORAGE_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("OBJECT_STORAGE_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "OBJECT_STORAGE_REAL must be set to run this real-process suite (E1)"
     );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;

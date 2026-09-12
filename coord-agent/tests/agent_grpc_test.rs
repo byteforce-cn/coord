@@ -65,8 +65,8 @@ fn test_config_mq(port: u16) -> AgentConfig {
 /// （实测：同一提交在三次全量运行中分别红在不同套件上）。
 /// 改为有界重试（上限 15s）：不依赖机器负载，也不会无限等。
 async fn connect_ready(addr: &str) -> tonic::transport::Channel {
-    let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-        .expect("endpoint");
+    let endpoint =
+        tonic::transport::Endpoint::from_shared(format!("http://{addr}")).expect("endpoint");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         match endpoint.clone().connect().await {

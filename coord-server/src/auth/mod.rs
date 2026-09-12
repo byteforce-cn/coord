@@ -20,10 +20,10 @@ pub mod token_signing;
 
 pub use capability::CapabilityRegistry;
 pub use capability::CapabilityRegistryService;
-pub use interceptor::MAX_GRPC_DECODING_BYTES;
-pub use interceptor::MAX_SCOPE_BODY_BYTES;
 pub use interceptor::ServerAuthInterceptor;
 pub use interceptor::ServerAuthLayer;
+pub use interceptor::MAX_GRPC_DECODING_BYTES;
+pub use interceptor::MAX_SCOPE_BODY_BYTES;
 pub use manager::AuthManager;
 pub use manager::ROOT_ROLE;
 pub use service::AuthService;

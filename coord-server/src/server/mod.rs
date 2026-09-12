@@ -32,6 +32,7 @@ use coord_proto::maintenance::{
 use coord_proto::txn::{txn_server::Txn, Compare, RequestOp, ResponseOp, TxnRequest, TxnResponse};
 use coord_proto::watch::{watch_server::Watch, WatchEvent, WatchRequest, WatchResponse};
 
+use coord_core::kv_range::RangeSemantics;
 use coord_core::types::RegionId;
 
 use crate::auth::service::AuthOpProposer;
@@ -1540,9 +1541,11 @@ impl Kv for CoordNode {
         )
         .await?;
 
-        // R-SVC-07-1：range_end 为空 或 range_end == key → 单键精确查询（兼容现有客户端约定）；
-        // 否则为半开区间 [key, range_end) 范围查询
-        let single_key = req.range_end.is_empty() || req.range_end == req.key;
+        // R-SVC-07-1 / 第三轮 P0-1：`range_end` 为空 或 == key → 单键精确查询。
+        // 判定与 Txn 内层 `TxnOp::Range` 及鉴权层**共用同一份定义**
+        // （`coord_core::kv_range::RangeSemantics`）——此前两边各写一份，
+        // 产生了跨 scope 越权读的语义裂缝。
+        let single_key = RangeSemantics::of(&req.key, &req.range_end).is_single_key();
 
         let mut kvs = Vec::new();
 
@@ -1652,9 +1655,10 @@ impl Kv for CoordNode {
         let req = request.into_inner();
         let prev_kv_requested = req.prev_kv;
 
-        // R-SVC-07-3：range_end 非空且 != key → 原子范围删除 [key, range_end)；
-        // 否则为单键删除
-        let is_range = !req.range_end.is_empty() && req.range_end != req.key;
+        // R-SVC-07-3 / 第三轮 P0-1：range_end 非空且 != key → 原子范围删除 [key, range_end)；
+        // 否则为单键删除。与顶层 Range / Txn 内层 op / 鉴权层共用同一份语义定义
+        // （`coord_core::kv_range::RangeSemantics`）。
+        let is_range = RangeSemantics::of(&req.key, &req.range_end).is_interval();
 
         // 保留对象空间守卫（/obj/ 内部 manifest：禁止经 KV 范围删除）
         if is_range {
@@ -2089,6 +2093,18 @@ impl Lease for CoordNode {
             .as_ref()
             .ok_or_else(|| tonic::Status::unavailable("lease manager not available"))?;
 
+        // C1（跨节点收口，第三轮）：分配 ID **之前**做一次线性一致读屏障。
+        //
+        // 上一轮只把「检查 + 插入」收进同一写锁临界区（消除**进程内** TOCTOU），
+        // 但 `id_taken` 读的是**本地已 apply 视图**（`get_lease_record`）而没有任何
+        // 屏障：leader 切换后，新主若尚未 apply 到前任已提交的那条 Grant，
+        // 两个客户端就能用同一显式 ID 通过检查 → 状态机层被静默覆盖。
+        //
+        // ReadIndex 返回时本地状态机已追上集群提交位，因此下面的存在性检查看到的是
+        // **完整的已提交历史**。这是本路径唯一需要的线性化点。
+        self.ensure_linearizable_on(self.raft.as_deref(), self.raft_log_store.as_ref(), 0)
+            .await?;
+
         // LeaseManager 负责 TTL 校验与 ID 分配（内存 TTL 缓存）
         // C1：分配时**同时核对状态机**（`/_lease/{id}`）——新 leader 上任到
         // `rebuild()` 完成之间进程内计数器可能落后，仅查内存 map 会分配到与
@@ -2108,10 +2124,35 @@ impl Lease for CoordNode {
             ttl: req.ttl,
             deadline_wall_ms,
         };
-        if let Err(e) = self.submit_lease_op(op).await {
-            // 失败则回滚本地缓存，避免幽灵 Lease
-            let _ = lease_mgr.revoke(id).await;
-            return Err(e);
+        let applied_revision = match self.submit_lease_op(op).await {
+            Ok(rev) => rev,
+            Err(e) => {
+                // 失败则回滚本地缓存，避免幽灵 Lease
+                let _ = lease_mgr.revoke(id).await;
+                return Err(e);
+            }
+        };
+
+        // C1 终检（纵深防御）：状态机对已存在的 `/_lease/{id}` **拒绝覆盖**。
+        // 因此若本 ID 其实已被别人占用，本次 Grant 不会生效——读回的记录不是
+        // 本次写入的那一条。此时必须回滚本地缓存并**明确报错**，绝不假装成功：
+        // 共享 lease 会在到期时互相删除对方绑定的 Key。
+        match self.storage.get_lease_record(id) {
+            Ok(Some(record)) if record.keepalive_revision == applied_revision as i64 => {}
+            Ok(_) => {
+                let _ = lease_mgr.revoke(id).await;
+                return Err(tonic::Status::already_exists(format!(
+                    "lease id {id} is already in use; request a different id \
+                     (or omit id to let the server allocate one)"
+                )));
+            }
+            Err(e) => {
+                // 读失败不阻断成功路径，但必须留下可诊断的痕迹
+                tracing::warn!(
+                    lease_id = id,
+                    "lease grant post-apply verification read failed: {e}"
+                );
+            }
         }
 
         Ok(tonic::Response::new(LeaseGrantResponse {
@@ -2211,9 +2252,9 @@ impl Lease for CoordNode {
                     // lease_timeout 内返回错误，不得无限挂起（R-SVC-18 同口径）。
                     match tokio::time::timeout(lease_timeout, raft.client_write(cmd)).await {
                         Ok(Ok(_)) => Ok(()),
-                        Ok(Err(e)) => {
-                            Err(tonic::Status::internal(format!("raft lease write failed: {e}")))
-                        }
+                        Ok(Err(e)) => Err(tonic::Status::internal(format!(
+                            "raft lease write failed: {e}"
+                        ))),
                         Err(_) => Err(tonic::Status::deadline_exceeded(
                             "lease keep-alive timed out (no quorum?)",
                         )),

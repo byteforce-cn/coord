@@ -43,6 +43,11 @@ use coord_proto::watch::watch_server::WatchServer;
 
 // 重新导出公共类型
 pub use discovery::StaticDiscovery;
+// `AgentInner`（到 Server 集群的 Direct 模式客户端句柄）是各代理服务共享的构造入口，
+// 之前被 `mod proxy;`（私有模块）挡住，导致**任何集成测试都无法构造一个
+// LeaderElectionService / LockService 去验证真实语义**（第三轮复核：这两个服务
+// 分别"零功能测试"与"零故障注入测试"）。按其既有 `pub struct` + `pub fn new`
+// 的意图对外导出。
 pub use key_util::{
     FileKeyStore, KeyStore, KeyStoreBackend, KeyStoreError, KeyUtil, KeyUtilConfig,
 };
@@ -50,6 +55,7 @@ pub use pki::{CertInfo, PkiConfig, PkiError, PkiService};
 pub use pki_store::{
     CaRecord, CertRecord, CertStatus, KvPkiStore, MemoryPkiStore, PkiStore, PkiStoreError,
 };
+pub use proxy::AgentInner;
 pub use service::{BaseService, ServiceConfig, ServiceResult};
 pub use threadpool::{AgentThreadPools, ThreadPoolConfig};
 pub use tls::{build_agent_tls_channel, build_agent_tls_server_config, AgentTlsConfig};

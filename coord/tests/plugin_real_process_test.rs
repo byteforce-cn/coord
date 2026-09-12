@@ -357,7 +357,9 @@ async fn wait_for_mark(
 async fn plugin_real_agent_process_e2e() {
     // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
     assert!(
-        std::env::var("PLUGIN_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        std::env::var("PLUGIN_REAL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
         "PLUGIN_REAL must be set to run this real-process suite (E1)"
     );
 

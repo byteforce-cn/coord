@@ -10,6 +10,7 @@
 pub mod auth;
 pub mod discovery;
 pub mod error;
+pub mod kv_range;
 pub mod region;
 pub mod storage;
 pub mod types;

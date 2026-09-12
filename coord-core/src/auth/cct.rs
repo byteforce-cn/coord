@@ -280,19 +280,29 @@ fn verify_hmac(data: &[u8], signature: &[u8], key: &[u8]) -> Result<()> {
         .map_err(|_| Error::InvalidToken("signature verification failed".to_string()))
 }
 
-/// A3：密钥材料是否可用于 HMAC（非空且 >= [`MIN_HMAC_KEY_LEN`] 字节）。
+/// A3 / 第三轮 §3.6：密钥材料是否可用于 HMAC。
+///
+/// 要求：长度 >= [`MIN_HMAC_KEY_LEN`]，**且不是"单字节重复"的占位串**（全零 / 全 `0xFF` 等）。
+///
+/// 为何把熵要求放进原语层：此前"长度"检查只在 agent 侧、"全零"检查只在服务端配置层
+/// （见 `coord/src/config.rs`），**两侧不对称**——运维若照抄一个 32 字节全零占位串，
+/// agent 会接受，而服务端对同一模式是显式拒绝的。A3 的教训就是：安全下限必须设在
+/// 密码学原语层，而不是散落在调用点。
 pub fn is_usable_hmac_key(key: &[u8]) -> bool {
     key.len() >= MIN_HMAC_KEY_LEN
+        && key
+            .first()
+            .is_some_and(|first| key.iter().any(|b| b != first))
 }
 
-/// A3：拒绝空/过短 HMAC 密钥（fail-closed，绝不"当作可用密钥"继续）。
+/// A3：拒绝空/过短/**占位** HMAC 密钥（fail-closed，绝不"当作可用密钥"继续）。
 fn ensure_usable_hmac_key(key: &[u8]) -> Result<()> {
     if is_usable_hmac_key(key) {
         return Ok(());
     }
     Err(Error::Crypto(format!(
-        "HMAC signing/verification key must be >= {MIN_HMAC_KEY_LEN} bytes \
-         (got {} bytes); empty keys are refused (A3)",
+        "HMAC signing/verification key must be >= {MIN_HMAC_KEY_LEN} bytes and not a \
+         single-byte-repeated placeholder (got {} bytes); such keys are refused (A3)",
         key.len()
     )))
 }
@@ -304,6 +314,22 @@ mod tests {
     use super::*;
 
     const TEST_KEY: &[u8] = b"test-signing-key-32-bytes-long!!";
+
+    /// 第三轮 §3.6：占位密钥（全零 / 单字节重复）必须在**原语层**被拒。
+    ///
+    /// 此前长度检查只在 agent 侧、全零检查只在服务端配置层——两侧不对称，
+    /// 运维照抄 32 字节全零占位串时 agent 会接受。
+    #[test]
+    fn placeholder_hmac_keys_are_not_usable() {
+        assert!(!is_usable_hmac_key(&[]), "空密钥");
+        assert!(!is_usable_hmac_key(&[0u8; 31]), "过短");
+        assert!(!is_usable_hmac_key(&[0u8; 32]), "32B 全零占位");
+        assert!(!is_usable_hmac_key(&[0xABu8; 32]), "32B 单字节重复占位");
+        assert!(is_usable_hmac_key(TEST_KEY));
+        // sign/verify 同样 fail-closed
+        assert!(sign_hmac(b"x", &[0u8; 32]).is_err());
+        assert!(verify_hmac(b"x", &[0u8; 32], &[0u8; 32]).is_err());
+    }
 
     // ──── CCT encode/decode round-trip (RED) ────
 
@@ -611,7 +637,8 @@ mod tests {
     #[test]
     fn test_cct_encode_with_empty_key_is_refused() {
         let header = CctHeader::default();
-        let err = encode_cct(&header, &ed_test_payload(), &[]).expect_err("empty key must not sign");
+        let err =
+            encode_cct(&header, &ed_test_payload(), &[]).expect_err("empty key must not sign");
         assert!(format!("{err}").contains("A3"), "err: {err}");
         assert!(encode_cct(&header, &ed_test_payload(), b"short").is_err());
         assert!(encode_cct(&header, &ed_test_payload(), TEST_KEY).is_ok());

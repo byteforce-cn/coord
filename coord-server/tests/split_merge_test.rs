@@ -146,8 +146,12 @@ fn merge_requires_adjacency() {
 fn merge_small_adjacent_regions_restores_single_range() {
     let checker = MergeChecker::new(&pd_config());
     let (_dir, store) = open_store();
-    store.create_region(region(1, b"", b"m", MIB / 4, 10)).unwrap();
-    store.create_region(region(2, b"m", b"z", MIB / 4, 10)).unwrap();
+    store
+        .create_region(region(1, b"", b"m", MIB / 4, 10))
+        .unwrap();
+    store
+        .create_region(region(2, b"m", b"z", MIB / 4, 10))
+        .unwrap();
 
     let mut regions = store.list_regions();
     regions.sort_by(|a, b| a.start_key.cmp(&b.start_key));

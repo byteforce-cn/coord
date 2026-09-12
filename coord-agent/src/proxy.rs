@@ -598,11 +598,7 @@ impl Watch for WatchProxy {
                                 Some(Ok(event)) => {
                                     // 任何事件都失效该 watch 前缀下的读缓存（保守失效：
                                     // 宁可多清，不可残留陈旧值）。
-                                    cache_for_task
-                                        .cache
-                                        .kv
-                                        .lock()
-                                        .invalidate_prefix(&prefix);
+                                    cache_for_task.cache.kv.lock().invalidate_prefix(&prefix);
                                     let resp = WatchResponse {
                                         watch_id: 0,
                                         events: vec![event],

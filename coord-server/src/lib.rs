@@ -28,6 +28,7 @@ pub mod raft;
 pub mod security;
 pub mod server;
 pub mod storage;
+pub mod supervisor;
 pub mod timer;
 pub mod tls;
 pub mod txn;

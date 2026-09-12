@@ -187,8 +187,12 @@ pub fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
 /// 以 `P` 开头，但整个区间确实落在 `[P, succ(P))` 内——用 `starts_with` 会把
 /// 这类合法区间扫描全部 403（A1 修复引入的功能回归）。
 pub fn scope_covers_interval(scope: &str, key: &[u8], range_end: &[u8]) -> bool {
-    // match-all：空 scope、"/"、"//"、"/*"
-    if scope.is_empty() || scope.chars().all(|c| c == '/') || scope == "/*" {
+    // match-all：空 scope、"/"、"//"、"/*"、"*"
+    //
+    // 第三轮 §3.6：`"*"` 此前漏在白名单外，而 [`ScopeTrie`] 把它当通配段
+    // （`split_scope("*") == ["*"]` → wildcard）——于是 `scope="*"` 的角色在
+    // **区间**读上一律 403，点查却正常（fail-closed 的功能回归）。
+    if scope.is_empty() || scope.chars().all(|c| c == '/') || scope == "/*" || scope == "*" {
         return true;
     }
     // 单 key 请求：沿用逐点匹配语义
@@ -228,6 +232,15 @@ pub fn scope_covers_interval(scope: &str, key: &[u8], range_end: &[u8]) -> bool 
 ///
 /// 无法安全归约（中间/多处 `*`）时返回 `None`（调用方 fail-closed）。
 fn scope_safe_byte_prefix(scope: &str) -> Option<Vec<u8>> {
+    // 第三轮 §3.6：非法字符必须与**点查路径**同口径 fail-closed。
+    //
+    // 点查路径经 `ScopeTrie::insert()`（内部调用 `validate_scope_chars`），含非法字符的
+    // scope 会被拒；而区间路径此前**不校验**，同一个 scope 在区间读上放行、点查却拒绝。
+    // 这里先校验，保持两侧一致（需要 admin 才能造出这种授权，故为低危，但一致性是
+    // 安全边界的基本要求）。
+    if validate_scope_chars(scope).is_err() {
+        return None;
+    }
     // "…/*"：末段通配 → P = base + "/"（base 为空 = match-all）
     if let Some(base) = scope.strip_suffix("/*") {
         if base.contains('*') {
@@ -259,6 +272,29 @@ fn scope_safe_byte_prefix(scope: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 第三轮 §3.6：`scope="*"` 在 [`ScopeTrie`] 里是通配段，区间判定必须同口径。
+    /// 此前它漏在 match-all 白名单外 → 该角色**区间读一律 403**、点查却正常。
+    #[test]
+    fn star_scope_is_match_all_for_intervals() {
+        assert!(scope_covers_interval("*", b"/anything", b"/zzz"));
+        assert!(scope_covers_interval("*", b"/a", b"\0"));
+        // 且与点查路径一致（同一 scope 两个路径不得结论相反）
+        let mut trie = ScopeTrie::new();
+        assert!(trie.insert("*").is_ok());
+        assert!(trie.matches("/anything"));
+    }
+
+    /// 第三轮 §3.6：含非法字符的 scope 必须在**区间路径**也 fail-closed
+    /// （此前只有点查路径经 `ScopeTrie::insert` 校验）。
+    #[test]
+    fn invalid_scope_chars_are_denied_on_the_interval_path_too() {
+        // '!' 不在 [a-zA-Z0-9/_\-*] 内
+        assert!(!scope_covers_interval("/app!/", b"/app!/x", b"/app!/z"));
+        assert!(!scope_covers_interval("/app !/", b"/app !/x", b"/app !/z"));
+        // 合法 scope 不受影响
+        assert!(scope_covers_interval("/app/", b"/app/x", b"/app/z"));
+    }
 
     // ──── Scope Trie basic operations ────
 

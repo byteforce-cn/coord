@@ -17,6 +17,39 @@ use zeroize::Zeroizing;
 use coord_core::auth::cct::{decode_cct_any, CctToken};
 use coord_core::error::{Error, Result};
 
+/// HMAC CCT 验证宽限期的**截止时刻**（Unix 秒，UTC 2026-12-31T00:00:00Z）。
+///
+/// 第三轮 §3.6：HMAC 分支此前"无 deadline、无开关、无告警"——注释里写着
+/// "宽限期结束后应删除"，但没有任何机制让这件事发生或被发现。"临时兼容"
+/// 不设终点就会变成**永久攻击面**（对称密钥 = 任一 agent 可自签 root）。
+pub const HMAC_GRACE_DEADLINE_UNIX: u64 = 1_798_675_200;
+
+/// 判断当前是否已过 HMAC 宽限期。时钟异常（早于 UNIX_EPOCH）按"未过期"处理
+/// —— 宁可少报，也不要因时钟问题误报安全告警。
+pub fn hmac_grace_expired() -> bool {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() >= HMAC_GRACE_DEADLINE_UNIX)
+        .unwrap_or(false)
+}
+
+/// 进程内只告警一次（避免每次验签刷屏，同时保证**一定**会在日志里出现一次）。
+fn warn_if_hmac_grace_expired() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    if !hmac_grace_expired() {
+        return;
+    }
+    ONCE.call_once(|| {
+        tracing::error!(
+            deadline_unix = HMAC_GRACE_DEADLINE_UNIX,
+            "HMAC CCT verification is PAST its grace deadline (2026-12-31): delete the HMAC \
+             branch in TokenSigningKeyring::decode_any — a symmetric key means any agent \
+             holding it can self-sign roles:[\"root\"]"
+        );
+    });
+}
+
 // ──── Constants ────
 
 /// Token signing key length (256-bit for HMAC-SHA256)
@@ -179,13 +212,19 @@ impl TokenSigningKeyring {
     /// - `Ed25519` → 用派生的签名密钥对应公钥验证（**当前唯一签发算法**）；
     /// - `HMAC-SHA256` → 依次尝试 active + previous 密钥。
     ///
-    /// # ⚠️ 已弃用分支（A3 标注）
+    /// # ⚠️ 已弃用分支（A3 标注 / 第三轮 §3.6 加期限）
     ///
     /// HMAC 是对称方案：**任何持有密钥的 agent 都能自签任意 CCT**（含
     /// `roles:["root"]`）。因此 HMAC 仅作**存量 token 宽限期验证**保留，新签发
-    /// 一律 Ed25519（见 [`Self::ed25519_signing_key`]）。宽限期结束后应删除本函数
-    /// 中的 HMAC 路径，使 `decode_any` 只接受 Ed25519。
+    /// 一律 Ed25519（见 [`Self::ed25519_signing_key`]）。
+    ///
+    /// 宽限期**有明确终点**：[`HMAC_GRACE_DEADLINE_UNIX`]。到期后每次进入本函数
+    /// 都会以 ERROR 级别告警（进程内只报一次，避免刷屏），提示把 HMAC 分支删掉。
+    /// 之所以不自动失效：按墙钟日期静默改变认证行为本身就是一个可用性风险；
+    /// 删除该分支应当是一次**显式、可测试**的代码变更。
     pub fn decode_any(&self, token: &str) -> Result<CctToken> {
+        warn_if_hmac_grace_expired();
+
         let pub_key = self
             .ed25519_signing_key()
             .ok()

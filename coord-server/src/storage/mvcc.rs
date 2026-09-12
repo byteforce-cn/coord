@@ -14,6 +14,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use coord_core::error::{Error, Result};
+use coord_core::kv_range::RangeSemantics;
 use coord_core::storage::{StorageBackend, WriteTx};
 use coord_core::types::{LeaseID, Revision};
 
@@ -43,6 +44,9 @@ const AUTH_PREFIX: &[u8] = b"/_auth/";
 
 /// 已 Apply 的最大 Raft LogId（崩溃恢复检查点；与命令写入同一事务）
 pub(crate) const META_LAST_APPLIED: &[u8] = b"/_meta/last_applied";
+
+/// `AppliedLogId` 持久化编码的魔数（区分定长编码与旧 bincode 编码）。
+const APPLIED_LOG_ID_MAGIC: &[u8; 4] = b"ALI1";
 
 /// 已持久化快照元数据（last_log_id/checksum/path）
 pub(crate) const META_SNAPSHOT: &[u8] = b"/_meta/snapshot";
@@ -381,10 +385,37 @@ impl AppliedLogId {
     }
 
     pub(crate) fn to_bytes(self) -> Vec<u8> {
-        bincode::serialize(&self).unwrap_or_else(|_| Vec::new())
+        // 第三轮 §4.2③：**手写定长编码**（4B 魔数 + 3×8B 大端），无失败路径。
+        //
+        // 此前是 `bincode::serialize(&self).unwrap_or_else(|_| Vec::new())`：
+        // 序列化一旦失败就写入**空字节**，而这段字节会成为 `META_LAST_APPLIED`
+        // 的水位；`from_bytes` 对空字节返回 `None` → 重启时水位报 0 →
+        // **从 0 重放整个 raft 日志**。概率低、影响灾难性，并且是主动把可检测的
+        // 错误转成了静默的状态损坏。
+        //
+        // 手写编码既不需要 `unwrap/expect`（生产代码 panic 卡口禁止），
+        // 也不可能退化成空值。
+        let mut out = Vec::with_capacity(28);
+        out.extend_from_slice(APPLIED_LOG_ID_MAGIC);
+        out.extend_from_slice(&self.term.to_be_bytes());
+        out.extend_from_slice(&self.node_id.to_be_bytes());
+        out.extend_from_slice(&self.index.to_be_bytes());
+        out
     }
 
+    /// 解码。**向后兼容**：魔数不匹配时回落到旧的 bincode 编码，
+    /// 保证升级后既有 `META_LAST_APPLIED` 不会丢水位。
     pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if let Some(body) = bytes.strip_prefix(APPLIED_LOG_ID_MAGIC) {
+            let term = u64::from_be_bytes(body.get(0..8)?.try_into().ok()?);
+            let node_id = u64::from_be_bytes(body.get(8..16)?.try_into().ok()?);
+            let index = u64::from_be_bytes(body.get(16..24)?.try_into().ok()?);
+            return Some(Self {
+                term,
+                node_id,
+                index,
+            });
+        }
         bincode::deserialize(bytes).ok()
     }
 }
@@ -926,14 +957,40 @@ impl<B: StorageBackend> MvccStorage<B> {
         })?;
 
         // 补齐：在保留窗口内没有任何写入的 Key，其 T 时刻状态 = 当前状态。
+        //
+        // 第三轮 P0-7（范围路径收口）：候选集合必须是
+        //   **当前存活的 Key** ∪ **T 之后被写过的 Key**
+        // 而不只是前者。只遍历存活 Key 会漏掉这样一类 Key：
+        //   「T 时刻存在 → T 之后被删除 → T 之前的历史已被压缩」
+        // 它既不进 `view`（历史条目已物理删除）、也不在存活集合里（已被删除）、
+        // 更不会进 `unreconstructable` → **静默漏报**。而同一条 Key 走单键路径
+        // （`get_at_revision`）会明确报 `Internal(... not reconstructable ...)`——
+        // 同一数据两条路径结论相反，正是 P0-7 要消除的"静默返回残缺视图"。
         let mut unreconstructable: Vec<Vec<u8>> = Vec::new();
+
+        // key → 当前值（None = 当前不存在）
+        let mut candidates: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+            std::collections::BTreeMap::new();
+        for key in &changed_after {
+            candidates.insert(key.clone(), None);
+        }
         for (key, value) in self.range_in(start, range_end, 0)? {
-            if view.contains_key(&key) || !changed_after.contains(&key) {
-                view.entry(key).or_insert(value);
+            candidates.insert(key, Some(value));
+        }
+
+        for (key, live_value) in candidates {
+            if view.contains_key(&key) {
+                continue; // 已有 T 时刻的确切值
+            }
+            if !changed_after.contains(&key) {
+                // 保留窗口内从未写过（当前必存活）→ T 时刻状态 == 当前状态
+                if let Some(value) = live_value {
+                    view.entry(key).or_insert(value);
+                }
                 continue;
             }
-            // T 之后改过、且 T 之前的历史已被压缩：若无元数据可证它当时还不存在，
-            // 该 Key 在 T 时刻的值不可复原。
+            // T 之后改过（含"T 之后被删除"）、且 T 之前的历史已被压缩：
+            // 若无元数据可证它当时还不存在，该 Key 在 T 时刻的值不可复原。
             let created_after_target = self
                 .get_kv_metadata(&key)?
                 .map(|m| m.create_revision as u64 > target_revision)
@@ -1290,15 +1347,27 @@ impl<B: StorageBackend> MvccStorage<B> {
                 range_end,
                 limit,
             } => {
-                // R-SVC-07-4：与顶层 range()/range_in() 对齐——
-                // ① 区间扫描（range_end 为空时回退前缀扫描语义）；
-                // ② 必须检查 KV_META 的 deleted 标志（值非空的软删 key 不得复活）。
+                // R-SVC-07-4 / 第三轮 P0：语义判定必须与顶层 `KV/Range` **同一份**
+                // 定义（`coord_core::kv_range::RangeSemantics`），否则鉴权层建模的
+                // 区间与服务端实际扫描的区间不一致 → 跨 scope 越权读：
+                // ① `range_end` 为空（或 == key）→ **单键精确查询**（etcd 语义；
+                //    与顶层 `KV/Range`、插件 ABI 文档「range-end 空 = 单键精确查询」
+                //    一致）。此前这里回退「字节前缀扫描」，而鉴权层按点查放行，
+                //    于是 `Txn{Range(key="/app/a", range_end="")}` 能读到
+                //    `/app/abc/config` 等 scope 外的 Key；
+                // ② 非空且 != key → 半开区间 `[key, range_end)`；
+                // ③ 必须检查 KV_META 的 deleted 标志（值非空的软删 key 不得复活）。
                 let internal_start = encode_kv_key(key);
-                let all = if range_end.is_empty() {
-                    tx.iter_prefix(TABLE_KV, &internal_start)?
-                } else {
-                    let internal_end = encode_kv_key(range_end);
-                    tx.iter_range(TABLE_KV, &internal_start, &internal_end)?
+                let semantics = RangeSemantics::of(key, range_end);
+                let all = match semantics {
+                    RangeSemantics::SingleKey => match tx.get(TABLE_KV, &internal_start)? {
+                        Some(v) => vec![(internal_start.clone(), v)],
+                        None => Vec::new(),
+                    },
+                    RangeSemantics::Interval => {
+                        let internal_end = encode_kv_key(range_end);
+                        tx.iter_range(TABLE_KV, &internal_start, &internal_end)?
+                    }
                 };
 
                 let mut kvs = Vec::new();
@@ -1313,8 +1382,10 @@ impl<B: StorageBackend> MvccStorage<B> {
                         break;
                     }
                     if let Some(user_key) = decode_kv_key(&ik) {
-                        // 半开区间上界（iter_range 已保证，防御性复核）
-                        if !range_end.is_empty() && user_key >= range_end.as_slice() {
+                        // 半开区间上界（iter_range 已保证，防御性复核）。
+                        // 注意：仅在**区间**语义下成立——`range_end == key` 属单键语义，
+                        // 此处若照旧按 `!range_end.is_empty()` 判定会把唯一的命中提前 break 掉。
+                        if semantics.is_interval() && user_key >= range_end.as_slice() {
                             break;
                         }
                         // 检查元数据 deleted 标志（R-SVC-07-4）
@@ -1423,12 +1494,39 @@ impl<B: StorageBackend> MvccStorage<B> {
                     ttl,
                     deadline_wall_ms,
                 } => {
-                    let record = LeaseRecord {
-                        ttl: *ttl,
-                        deadline_wall_ms: *deadline_wall_ms,
-                        keepalive_revision: revision as i64,
-                    };
-                    tx.insert(TABLE_KV, &encode_lease_key(*id), &record.to_bytes())?;
+                    let lease_key = encode_lease_key(*id);
+                    // 第三轮 C1（跨节点收口）：**拒绝覆盖**已存在的租约记录。
+                    //
+                    // 原实现对 `/_lease/{id}` 是无条件 upsert，于是「leader 切换后、
+                    // 新主尚未 apply 到前任已提交的 Grant」这一窗口里，另一个客户端
+                    // 可以用同一显式 ID 通过 leader 侧的存在性检查，状态机再把原租约
+                    // **静默覆盖** → 两个客户端共享 lease → 到期时互相删除对方绑定的
+                    // Key（原 P0-6 症状）。
+                    //
+                    // 状态机是 ID 归属的最终权威：这里拒绝覆盖后，即使 leader 侧
+                    // 检查因任何原因漏判，也只会得到"本次 Grant 未生效"，而不会
+                    // 破坏已有租约；leader 侧通过 apply 后复核发现并回滚（见
+                    // `lease_grant`）。语义与 etcd `LeaseGrant` 指定已存在 ID 报
+                    // `LeaseExist` 一致。
+                    let existing = tx
+                        .get(TABLE_KV, &lease_key)?
+                        .and_then(|bytes| LeaseRecord::from_bytes(&bytes));
+                    if let Some(prev) = existing {
+                        tracing::error!(
+                            lease_id = *id,
+                            revision,
+                            existing_keepalive_revision = prev.keepalive_revision,
+                            "LeaseOp::Grant refused: lease id already exists \
+                             (refusing to silently overwrite an existing lease)"
+                        );
+                    } else {
+                        let record = LeaseRecord {
+                            ttl: *ttl,
+                            deadline_wall_ms: *deadline_wall_ms,
+                            keepalive_revision: revision as i64,
+                        };
+                        tx.insert(TABLE_KV, &lease_key, &record.to_bytes())?;
+                    }
                 }
                 LeaseOp::KeepAlive {
                     id,
@@ -2469,7 +2567,13 @@ mod tests {
         // target <= compacted → 明确报错
         let err = storage.get_at_revision(b"k", 2).expect_err("must Err");
         assert!(
-            matches!(err, Error::RevisionCompacted { revision: 2, oldest: 3 }),
+            matches!(
+                err,
+                Error::RevisionCompacted {
+                    revision: 2,
+                    oldest: 3
+                }
+            ),
             "unexpected error: {err:?}"
         );
         // 范围历史读同口径
@@ -2517,7 +2621,7 @@ mod tests {
         let (_dir, storage) = create_storage();
         storage.put(b"k", b"v1", None).unwrap(); // rev 1（k 的写入）
         storage.put(b"filler", b"x", None).unwrap(); // rev 2
-        // 水位 2：删除 rev < 2 的 changelog → k 的 rev1 条目被物理删除
+                                                     // 水位 2：删除 rev < 2 的 changelog → k 的 rev1 条目被物理删除
         storage
             .apply_compact(2, AppliedLogId::standalone(5))
             .unwrap();
@@ -2544,7 +2648,42 @@ mod tests {
         );
         // 水位之下的修订明确报 RevisionCompacted
         let err = storage.get_at_revision(b"k", 2).expect_err("must Err");
-        assert!(matches!(err, Error::RevisionCompacted { .. }), "err: {err:?}");
+        assert!(
+            matches!(err, Error::RevisionCompacted { .. }),
+            "err: {err:?}"
+        );
+    }
+
+    /// 第三轮 P0-7 回归（**范围路径**）：T 时刻存在、T 之后**被删除**、T 之前的历史
+    /// 已被压缩的 Key，此前既不进 `view`、也不在存活集合、更不进 `unreconstructable`
+    /// → 被**静默漏报**，范围读返回"残缺但看起来正常"的视图。
+    /// 现在必须与单键路径（`get_at_revision`）同口径报错。
+    #[test]
+    fn test_historical_range_read_rejects_key_deleted_after_target() {
+        let (_dir, storage) = create_storage();
+        storage.put(b"g", b"g1", None).unwrap(); // rev 1
+        storage.put(b"filler", b"x", None).unwrap(); // rev 2
+                                                     // 水位 2：物理删除 rev < 2 的 changelog → g 的 rev1 条目消失
+        storage
+            .apply_compact(2, AppliedLogId::standalone(5))
+            .unwrap();
+        storage.delete(b"g").unwrap(); // rev 6：T 之后被删除
+
+        // 单键：明确报错
+        let single = storage
+            .get_at_revision(b"g", 4)
+            .expect_err("single-key read must Err");
+        assert!(matches!(single, Error::Internal(_)), "err: {single:?}");
+
+        // 范围：必须同口径报错——不得静默返回"不含 g"的空视图
+        let range = storage
+            .range_at_revision(b"g", b"h", 0, 4)
+            .expect_err("range read must not silently drop a key that existed at T");
+        assert!(matches!(range, Error::Internal(_)), "err: {range:?}");
+        assert!(
+            range.to_string().contains("not reconstructable"),
+            "err: {range}"
+        );
     }
 
     /// R-SVC-07-4：Txn 内 Range 必须过滤已软删除的 Key（与顶层 range() 对齐）
@@ -2593,6 +2732,38 @@ mod tests {
             Some(AppliedLogId::standalone(42))
         );
         assert_eq!(storage.current_revision(), 42);
+    }
+
+    /// 第三轮 §4.2③：`AppliedLogId` 的持久化编码**不得有失败路径**。
+    ///
+    /// 此前 `to_bytes()` 是 `bincode::serialize(..).unwrap_or_else(|_| Vec::new())`：
+    /// 失败即写入空字节 → 重启时水位读回 `None` → **从 0 重放整个 raft 日志**。
+    #[test]
+    fn test_applied_log_id_encoding_is_total_and_backward_compatible() {
+        let id = AppliedLogId {
+            term: 7,
+            node_id: 3,
+            index: 1234567890123,
+        };
+        let bytes = id.to_bytes();
+        assert_eq!(bytes.len(), 28, "4B 魔数 + 3×8B 定长");
+        assert!(!bytes.is_empty(), "编码绝不允许为空");
+        assert_eq!(AppliedLogId::from_bytes(&bytes), Some(id));
+
+        // 旧格式（bincode 1.3 legacy：定长小端，24B）必须仍可解码——
+        // 升级不得让既有 META_LAST_APPLIED 丢水位。
+        let legacy = bincode::serialize(&AppliedLogId::standalone(42)).unwrap();
+        assert_eq!(legacy.len(), 24);
+        assert_eq!(
+            AppliedLogId::from_bytes(&legacy),
+            Some(AppliedLogId::standalone(42)),
+            "旧 bincode 编码必须向后兼容"
+        );
+
+        // 空字节 / 截断字节一律是 None（调用方据此判定水位缺失），
+        // 而**新编码永远不会产生空字节**。
+        assert_eq!(AppliedLogId::from_bytes(&[]), None);
+        assert_eq!(AppliedLogId::from_bytes(b"ALI1"), None);
     }
 
     // ──── 静态加密接线（Barrier/Seal/Unseal） ────
@@ -2904,6 +3075,122 @@ mod tests {
         assert_eq!(storage.get(b"k").unwrap(), None);
     }
 
+    /// 第三轮 C1 回归：状态机对已存在的 `/_lease/{id}` **拒绝覆盖**。
+    ///
+    /// 修复前 `LeaseOp::Grant` 是无条件 upsert：leader 切换窗口里的第二个 Grant
+    /// （同一显式 ID）会把前一个租约**静默覆盖** → 两个客户端共享 lease →
+    /// 到期互相删除对方绑定的 Key（原 P0-6 症状）。现在状态机是 ID 归属的
+    /// 最终权威：第二个 Grant 不产生任何变更，原租约完好。
+    #[test]
+    fn test_lease_grant_refuses_to_overwrite_existing_id() {
+        let (_dir, storage) = create_storage();
+        use crate::raft::type_config::LeaseOp;
+
+        // 客户端 A：Grant(id=42) 并绑定一个 Key
+        storage
+            .apply_lease_op(
+                &LeaseOp::Grant {
+                    id: 42,
+                    ttl: 60,
+                    deadline_wall_ms: 1000,
+                },
+                1,
+                AppliedLogId::standalone(1),
+            )
+            .unwrap();
+        storage
+            .put_at_revision(
+                b"/owner-a/key",
+                b"v",
+                Some(42),
+                2,
+                AppliedLogId::standalone(2),
+            )
+            .unwrap();
+
+        // 客户端 B 用**同一显式 ID** 再 Grant（模拟跨节点竞态下的重复分配）
+        let (outcome, _) = storage
+            .apply_lease_op(
+                &LeaseOp::Grant {
+                    id: 42,
+                    ttl: 9999,
+                    deadline_wall_ms: 9_999_999,
+                },
+                3,
+                AppliedLogId::standalone(3),
+            )
+            .unwrap();
+        assert!(!outcome.replayed);
+
+        let record = storage
+            .get_lease_record(42)
+            .unwrap()
+            .expect("原租约必须存活");
+        assert_eq!(record.ttl, 60, "第二个 Grant 不得覆盖已有租约");
+        assert_eq!(record.deadline_wall_ms, 1000);
+        assert_eq!(record.keepalive_revision, 1);
+
+        // 归属关系未被篡改：Revoke(id=42) 只删除原持有者绑定的 Key
+        let (_, changes) = storage
+            .apply_lease_op(
+                &LeaseOp::Revoke {
+                    id: 42,
+                    delete_keys: true,
+                },
+                4,
+                AppliedLogId::standalone(4),
+            )
+            .unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].key, b"/owner-a/key");
+    }
+
+    /// 第三轮 C1：拒绝覆盖 ≠ 永久占用——`Revoke` 之后同一 ID 必须可重新 Grant。
+    #[test]
+    fn test_lease_id_reusable_after_revoke() {
+        let (_dir, storage) = create_storage();
+        use crate::raft::type_config::LeaseOp;
+
+        storage
+            .apply_lease_op(
+                &LeaseOp::Grant {
+                    id: 7,
+                    ttl: 30,
+                    deadline_wall_ms: 100,
+                },
+                1,
+                AppliedLogId::standalone(1),
+            )
+            .unwrap();
+        storage
+            .apply_lease_op(
+                &LeaseOp::Revoke {
+                    id: 7,
+                    delete_keys: false,
+                },
+                2,
+                AppliedLogId::standalone(2),
+            )
+            .unwrap();
+        assert!(storage.get_lease_record(7).unwrap().is_none());
+
+        storage
+            .apply_lease_op(
+                &LeaseOp::Grant {
+                    id: 7,
+                    ttl: 45,
+                    deadline_wall_ms: 200,
+                },
+                3,
+                AppliedLogId::standalone(3),
+            )
+            .unwrap();
+        let record = storage.get_lease_record(7).unwrap().unwrap();
+        assert_eq!(record.ttl, 45, "撤销后同 ID 必须可复用");
+        assert_eq!(record.deadline_wall_ms, 200);
+        assert_eq!(record.keepalive_revision, 3);
+    }
+
     #[test]
     fn test_list_lease_records() {
         let (_dir, storage) = create_storage();
@@ -3213,11 +3500,11 @@ mod tests {
         storage.put(b"/svc/b", b"addr2", None).unwrap();
         storage.put(b"/svc/c", b"addr3", None).unwrap();
 
-        // 在 Txn 内执行 Range 读取
+        // 在 Txn 内执行 Range 读取（显式区间：range_end = prefix_successor("/svc/")）
         let compares = vec![cmp_value_eq(b"/svc/a", b"addr1")];
         let success_ops = vec![TxnOp::Range {
             key: b"/svc/".to_vec(),
-            range_end: vec![],
+            range_end: b"/svc0".to_vec(),
             limit: 10,
         }];
         let failure_ops = vec![];
@@ -3233,6 +3520,107 @@ mod tests {
             assert_eq!(kvs.len(), 3);
         } else {
             panic!("expected Range response");
+        }
+    }
+
+    /// 第三轮 P0-1 回归：Txn 内层 `Range` 的 `range_end` 为空必须是**单键精确查询**
+    /// （与顶层 `KV/Range`、插件 ABI 文档一致），不得回退为字节前缀扫描。
+    ///
+    /// 修复前：`key="/svc/"`、`range_end=""` 会前缀扫描返回 `/svc/a`、`/svc/b`、`/svc/c`，
+    /// 而鉴权层把同一请求建模为「对 `/svc/` 的单键访问」——持 `scope="/svc/"` 之外的
+    /// 凭据即可越权读到兄弟命名空间。
+    #[test]
+    fn test_txn_range_empty_end_is_single_key() {
+        let (_dir, storage) = create_storage();
+        storage.put(b"/app/a", b"mine", None).unwrap();
+        storage
+            .put(b"/app/abc/config", b"SECRET-abc", None)
+            .unwrap();
+        storage
+            .put(b"/app/admin/root-token", b"SECRET-root", None)
+            .unwrap();
+
+        let result = storage
+            .execute_txn(
+                &[],
+                &[TxnOp::Range {
+                    key: b"/app/a".to_vec(),
+                    range_end: Vec::new(),
+                    limit: 0,
+                }],
+                &[],
+            )
+            .unwrap();
+
+        match &result.responses[0] {
+            TxnOpResponse::Range { kvs, count, .. } => {
+                assert_eq!(*count, 1, "空 range_end 不得退化为前缀扫描");
+                assert_eq!(kvs.len(), 1);
+                assert_eq!(kvs[0].0, b"/app/a".to_vec());
+                assert_eq!(kvs[0].1, b"mine".to_vec());
+            }
+            other => panic!("expected Range response, got {other:?}"),
+        }
+    }
+
+    /// 第三轮 P0-1 回归：Txn 内层 `Range` 与顶层 `Range` 对**同一** `(key, range_end)`
+    /// 必须给出同一结果集——二者语义由 `coord_core::kv_range::RangeSemantics` 单点定义。
+    #[test]
+    fn test_txn_range_matches_top_level_range_semantics() {
+        use coord_core::kv_range::prefix_successor;
+
+        let (_dir, storage) = create_storage();
+        for k in [b"/ns/a".as_slice(), b"/ns/b", b"/nsx/c", b"/other"] {
+            storage.put(k, b"v", None).unwrap();
+        }
+
+        // 覆盖：空 range_end（单键）、range_end == key（单键）、显式前缀区间、无界区间
+        let cases: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (b"/ns/a".to_vec(), Vec::new()),
+            (b"/ns/a".to_vec(), b"/ns/a".to_vec()),
+            (b"/ns/".to_vec(), prefix_successor(b"/ns/").unwrap()),
+            (b"/ns/".to_vec(), b"\0".to_vec()),
+        ];
+
+        for (key, range_end) in cases {
+            let txn_out = storage
+                .execute_txn(
+                    &[],
+                    &[TxnOp::Range {
+                        key: key.clone(),
+                        range_end: range_end.clone(),
+                        limit: 0,
+                    }],
+                    &[],
+                )
+                .unwrap();
+            let txn_keys: Vec<Vec<u8>> = match &txn_out.responses[0] {
+                TxnOpResponse::Range { kvs, .. } => kvs.iter().map(|(k, _)| k.clone()).collect(),
+                other => panic!("expected Range response, got {other:?}"),
+            };
+
+            let top_level: Vec<Vec<u8>> = if RangeSemantics::of(&key, &range_end).is_single_key() {
+                storage
+                    .get(&key)
+                    .unwrap()
+                    .map(|_| vec![key.clone()])
+                    .unwrap_or_default()
+            } else {
+                storage
+                    .range_in(&key, &range_end, 0)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(k, _)| k)
+                    .collect()
+            };
+
+            assert_eq!(
+                txn_keys,
+                top_level,
+                "Txn 内层 Range 与顶层 Range 语义分叉: key={:?} range_end={:?}",
+                String::from_utf8_lossy(&key),
+                String::from_utf8_lossy(&range_end)
+            );
         }
     }
 

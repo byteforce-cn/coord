@@ -121,7 +121,11 @@ impl TimerWheel {
         let handle = TimerWheelHandle { cmd_tx, expire_rx };
 
         // 启动驱动任务
-        tokio::spawn(async move {
+        //
+        // 第三轮 §4.2①：时间轮**必须**受监督——它是租约到期的唯一触发源，
+        // 朴素 `tokio::spawn` 丢弃 handle 后，它 panic 掉没有任何人知道，
+        // 表现为"租约不再过期、绑定 Key 只增不减"。
+        crate::supervisor::spawn_supervised("timer_wheel", async move {
             wheel.run().await;
         });
 
@@ -308,24 +312,54 @@ impl TimerWheelHandle {
     pub(crate) fn command_sender(&self) -> mpsc::UnboundedSender<Command> {
         self.cmd_tx.clone()
     }
-    /// 插入定时任务，返回任务 ID
-    pub async fn insert(&self, timeout: Duration) -> u64 {
+    /// 插入定时任务，返回任务 ID。
+    ///
+    /// 第三轮 §4.2①：时间轮驱动任务死亡（panic / 通道关闭）时返回 `None`，
+    /// **不得**退化为 `0`。
+    ///
+    /// `0` 从来不是合法 ID（`next_id` 从 1 起），但它在旧实现里被当作"失败值"
+    /// 一路传播：`lease/mod.rs` 把 0 存进租约记录，而 `cancel(0)` 是空操作
+    /// （`id_index` 中无 0）→ **该租约永不触发到期** → 绑定 Key 静默无界泄漏。
+    /// 这是"后台任务静默死亡"最难诊断的形态：没有报错、没有日志、只是能力消失。
+    ///
+    /// 调用方必须显式处理 `None`（fail-closed：宁可分配失败，也不制造永不过期的租约）。
+    pub async fn insert(&self, timeout: Duration) -> Option<u64> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = self.cmd_tx.send(Command::Insert {
-            timeout,
-            respond_to: tx,
-        });
-        rx.await.unwrap_or(0)
+        if self
+            .cmd_tx
+            .send(Command::Insert {
+                timeout,
+                respond_to: tx,
+            })
+            .is_err()
+        {
+            tracing::error!("timer wheel is gone: refusing to allocate a timer id");
+            return None;
+        }
+        match rx.await {
+            Ok(id) => Some(id),
+            Err(_) => {
+                tracing::error!(
+                    "timer wheel dropped the insert request: refusing to fabricate a timer id"
+                );
+                None
+            }
+        }
     }
 
-    /// 取消定时任务
+    /// 取消定时任务。
+    ///
+    /// 通道关闭（时间轮已死）时返回 `false`——即"**未能**取消"，属 fail-closed
+    /// 方向：调用方不得把它误读成"已取消"。
     pub async fn cancel(&self, id: u64) -> bool {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let _ = self.cmd_tx.send(Command::Cancel { id, respond_to: tx });
         rx.await.unwrap_or(false)
     }
 
-    /// 重新调度（用于 KeepAlive）
+    /// 重新调度（用于 KeepAlive）。
+    ///
+    /// 通道关闭 / 目标 ID 不存在时返回 `false`（fail-closed：调用方按续期失败处理）。
     pub async fn reschedule(&self, id: u64, new_timeout: Duration) -> bool {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let _ = self.cmd_tx.send(Command::Reschedule {
@@ -359,7 +393,10 @@ mod tests {
         let mut handle = TimerWheel::start();
 
         // 插入一个 200ms 后到期的任务
-        let id = handle.insert(Duration::from_millis(200)).await;
+        let id = handle
+            .insert(Duration::from_millis(200))
+            .await
+            .expect("timer wheel alive");
         assert!(id > 0);
 
         // 等待到期通知（最多等 500ms）
@@ -376,7 +413,10 @@ mod tests {
     async fn test_cancel_before_expire() {
         let mut handle = TimerWheel::start();
 
-        let id = handle.insert(Duration::from_millis(300)).await;
+        let id = handle
+            .insert(Duration::from_millis(300))
+            .await
+            .expect("timer wheel alive");
         assert!(id > 0);
 
         // 立即取消
@@ -394,7 +434,10 @@ mod tests {
     async fn test_reschedule() {
         let mut handle = TimerWheel::start();
 
-        let id = handle.insert(Duration::from_millis(500)).await;
+        let id = handle
+            .insert(Duration::from_millis(500))
+            .await
+            .expect("timer wheel alive");
         assert!(id > 0);
 
         // 重新调度到 150ms
@@ -415,9 +458,18 @@ mod tests {
     async fn test_multiple_timers() {
         let mut handle = TimerWheel::start();
 
-        let id1 = handle.insert(Duration::from_millis(100)).await;
-        let id2 = handle.insert(Duration::from_millis(200)).await;
-        let id3 = handle.insert(Duration::from_millis(150)).await;
+        let id1 = handle
+            .insert(Duration::from_millis(100))
+            .await
+            .expect("alive");
+        let id2 = handle
+            .insert(Duration::from_millis(200))
+            .await
+            .expect("alive");
+        let id3 = handle
+            .insert(Duration::from_millis(150))
+            .await
+            .expect("alive");
 
         let mut received = Vec::new();
         let rx = handle.expire_receiver();
@@ -448,5 +500,18 @@ mod tests {
         let ok = handle.reschedule(999, Duration::from_millis(100)).await;
         assert!(!ok);
         handle.shutdown();
+    }
+
+    /// 第三轮 §4.2① 回归：时间轮死亡后 `insert` 必须返回 `None`，
+    /// **不得**退化为 `0`（0 不是合法 ID，会让租约永不触发到期）。
+    #[tokio::test]
+    async fn insert_fails_closed_when_wheel_is_dead() {
+        let handle = TimerWheel::start();
+        handle.shutdown();
+        // 等驱动任务退出并释放 cmd_rx
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let id = handle.insert(Duration::from_millis(100)).await;
+        assert_eq!(id, None, "时间轮已死时必须返回 None（绝不是 0）");
     }
 }

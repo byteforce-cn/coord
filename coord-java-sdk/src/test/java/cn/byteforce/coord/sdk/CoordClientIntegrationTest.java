@@ -28,7 +28,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assumptions.assumeThat;
 
 /**
  * 集成测试 — 连接本机正在运行的 Agent 验证全链路 gRPC 代理。
@@ -42,7 +41,9 @@ import static org.assertj.core.api.Assumptions.assumeThat;
  *   <li>{@code COORD_AGENT_PORT} — Agent gRPC 端口，默认 {@code 19527}</li>
  * </ul>
  * <p>
- * 若 Agent 不可达，测试自动跳过（通过 {@code Assumptions}）。
+ * 本类只在 {@code -Pit} profile 下执行（默认 profile 已 exclude {@code **&#47;*IntegrationTest.java}）。
+ * Agent 不可达时**直接失败**，不再用 {@code Assumptions} 静默跳过——第三轮复核 §7.2-9：
+ * “静默跳过”在 CI 报告里与“通过”无法区分，等于该套件从未产生证据。
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CoordClientIntegrationTest {
@@ -69,23 +70,27 @@ class CoordClientIntegrationTest {
         leaseStub = LeaseGrpc.newBlockingStub(channel);
         maintStub = MaintenanceGrpc.newBlockingStub(channel);
 
-        // Agent 可用性探测：尝试 Maintenance.Status 调用
-        boolean agentAvailable;
+        // Agent 可用性探测：**不可达即失败**（第三轮复核 §7.2-9）。
+        //
+        // 此前：assumeThat(agentAvailable) 静默跳过 —— CI 里无法与“通过”区分。
+        // 现在：本类仅在 `-Pit` 下执行（默认 profile 已排除 *IntegrationTest），
+        // 而 `-Pit` 由 CI 的 java-example-it job 在**真实集群**上运行，所以硬失败
+        // 不会误伤无集群的门禁，却能保证这个套件真的跑过。
         try {
             MaintenanceOuterClass.StatusResponse resp = maintStub
                     .withDeadlineAfter(5, TimeUnit.SECONDS)
                     .status(MaintenanceOuterClass.StatusRequest.getDefaultInstance());
-            agentAvailable = resp != null && !resp.getRaftLeader().isEmpty();
+            assertThat(resp.getRaftLeader())
+                    .as("Agent at %s:%d 未返回 raft leader（不是真实集群）", agentHost, agentPort)
+                    .isNotEmpty();
             log.info("Agent reachable: raftLeader={}, sealStatus={}, revision={}",
                     resp.getRaftLeader(), resp.getSealStatus(), resp.getRevision());
         } catch (Exception e) {
-            agentAvailable = false;
-            log.warn("Agent not reachable at {}:{} — {}", agentHost, agentPort, e.toString());
+            throw new IllegalStateException(String.format(
+                    "coord-agent 在 %s:%d 不可达 —— 本套件是集成门禁，必须在真实集群下运行"
+                            + "（见 scripts/ci-java-it-cluster.sh）；拒绝静默跳过",
+                    agentHost, agentPort), e);
         }
-
-        assumeThat(agentAvailable)
-                .as("Agent not reachable at %s:%d — skipping integration tests", agentHost, agentPort)
-                .isTrue();
 
         log.info("Integration tests connected to Agent at {}:{}", agentHost, agentPort);
     }

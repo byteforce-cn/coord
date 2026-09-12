@@ -171,7 +171,7 @@ pub struct LeaderElectionService {
     shutdown_tx: ParkingRwLock<Option<watch::Sender<()>>>,
 }
 
-    /// 角色变更广播类型别名（C3：退位需主动广播，供业务回调停止以 leader 自居）。
+/// 角色变更广播类型别名（C3：退位需主动广播，供业务回调停止以 leader 自居）。
 type RoleChangeTx = broadcast::Sender<(String, LeaderRole, Option<ElectionGroup>)>;
 
 /// C3：连续续期失败达到该次数即退位（快速失败兜底）。
@@ -213,15 +213,21 @@ async fn perform_step_down(
     }
     cache.write().remove_group(group);
     let _ = role_change_tx.send((group.to_string(), LeaderRole::Follower, None));
-    tracing::error!(
-        "LeaderElection: '{candidate_id}' STEPPED DOWN from group '{group}': {reason}"
-    );
+    tracing::error!("LeaderElection: '{candidate_id}' STEPPED DOWN from group '{group}': {reason}");
 }
 
 /// C3：竞选实现（`campaign` 与后台"退位后自动重新参选"共用）。
 ///
-/// 语义：grant lease → put_lease 选举 key；成功即 leader，键已存在即 follower
-/// （并归还 lease），其他错误原样上报。
+/// 语义：grant lease → **Txn CAS（Version == 0）**写选举 key；CAS 成功即 leader，
+/// CAS 失败（键已被占用）即 follower（并归还 lease），其他错误原样上报。
+///
+/// 第三轮 P0-2：原实现用无条件 `put_lease` 写选举 key。服务端 `Put` 是纯 upsert
+/// （无任何存在性前置校验），因此"键已存在 → 作为 Follower"的分支是**死代码**：
+/// 两个候选者各自 grant 租约、各自 Put（后者覆盖前者）→ **同时自认 Leader**，
+/// 且各自续租都成功 ⇒ C3 的退位机制永不触发 ⇒ **永久双主且不自愈**。
+///
+/// 修复照抄同仓 `lock.rs` 的锁获取模式（Txn `Compare(Version == 0)`）——
+/// 正确写法一直就在隔壁。
 async fn campaign_shared(
     inner: &Arc<AgentInner>,
     cache: &Arc<ParkingRwLock<ElectionCache>>,
@@ -230,9 +236,13 @@ async fn campaign_shared(
     candidate_id: &str,
     ttl_secs: u64,
 ) -> ServiceResult<LeaderRole> {
+    use coord_proto::kv::PutRequest;
+    use coord_proto::txn::compare::{CompareResult, Target, TargetValue};
+    use coord_proto::txn::{Compare, RequestOp};
+
     let storage_key = ElectionGroup::storage_key(group);
 
-    // 尝试获取 Leader：创建 Lease + 写入选举 key
+    // 尝试获取 Leader：创建 Lease + CAS 写入选举 key
     let lease_id = inner
         .client
         .lease()
@@ -244,14 +254,32 @@ async fn campaign_shared(
     let value =
         serde_json::to_vec(&group_info).map_err(|e| format!("serialize election group: {e}"))?;
 
+    // CAS：仅当选举键不存在（version == 0）时才写入并绑定本节点的租约。
+    // 这是「任一时刻不得超过一个节点自认 leader」的**唯一**保证点。
+    let compare = Compare {
+        result: CompareResult::Equal as i32,
+        target: Target::Version as i32,
+        key: storage_key.clone(),
+        target_value: Some(TargetValue::Version(0)),
+    };
+    let put_op = RequestOp {
+        op: Some(coord_proto::txn::request_op::Op::RequestPut(PutRequest {
+            key: storage_key.clone(),
+            value,
+            lease_id,
+            prev_kv: false,
+            request_id: Vec::new(),
+        })),
+    };
+
     match inner
         .client
-        .kv()
-        .put_lease(&storage_key, &value, lease_id)
+        .txn()
+        .txn(vec![compare], vec![put_op], vec![])
         .await
     {
-        Ok(_) => {
-            // 竞选成功，成为 Leader
+        Ok(resp) if resp.succeeded => {
+            // CAS 成功：键此前不存在 ⇒ 本节点**独占**当选。
             cache
                 .write()
                 .set_role(group, LeaderRole::Leader, Some(group_info.clone()));
@@ -259,20 +287,48 @@ async fn campaign_shared(
             tracing::info!("LeaderElection: '{candidate_id}' won election for group '{group}'");
             Ok(LeaderRole::Leader)
         }
-        Err(e) => {
-            // 竞选失败，释放 Lease
+        Ok(_) => {
+            // CAS 失败：选举键已被占用 ⇒ 已有在任 Leader。
+            //
+            // 例外：键上记录的**就是本候选人**（重复 campaign，或退位后重选但键尚未
+            // 随租约撤销而删除）。此时本节点在服务端仍是在任 Leader，若本地改判
+            // Follower，就会出现「本地自认非 Leader、服务端 key 仍指向自己」的分裂
+            // 状态——它阻塞其它节点当选（键存在）却不提供服务（本地不认），即无 Leader。
+            // 故保持 Leader 身份，只归还这次多申请的租约。
+            let mine = inner
+                .client
+                .kv()
+                .range(&storage_key, &[], 1, 0)
+                .await
+                .ok()
+                .and_then(|kvs| kvs.into_iter().next())
+                .and_then(|(_, v)| serde_json::from_slice::<ElectionGroup>(&v).ok())
+                .filter(|existing| existing.leader_id == candidate_id);
+
             let _ = inner.client.lease().revoke(lease_id).await;
 
-            let err_msg = e.to_string();
-            if err_msg.contains("already exists") || err_msg.contains("AlreadyExists") {
-                // 已有 Leader，作为 Follower
-                cache.write().set_role(group, LeaderRole::Follower, None);
-                let _ = role_change_tx.send((group.to_string(), LeaderRole::Follower, None));
-                tracing::info!("LeaderElection: '{candidate_id}' is follower for group '{group}'");
-                Ok(LeaderRole::Follower)
-            } else {
-                Err(format!("election failed for group '{group}': {e}").into())
+            if let Some(existing) = mine {
+                cache
+                    .write()
+                    .set_role(group, LeaderRole::Leader, Some(existing.clone()));
+                let _ =
+                    role_change_tx.send((group.to_string(), LeaderRole::Leader, Some(existing)));
+                tracing::info!(
+                    "LeaderElection: '{candidate_id}' re-confirmed as leader for group '{group}' \
+                     (election key already records this candidate)"
+                );
+                return Ok(LeaderRole::Leader);
             }
+
+            cache.write().set_role(group, LeaderRole::Follower, None);
+            let _ = role_change_tx.send((group.to_string(), LeaderRole::Follower, None));
+            tracing::info!("LeaderElection: '{candidate_id}' is follower for group '{group}'");
+            Ok(LeaderRole::Follower)
+        }
+        Err(e) => {
+            // 通信/服务端失败：释放 Lease，原样上报（不得静默当作 Follower）。
+            let _ = inner.client.lease().revoke(lease_id).await;
+            Err(format!("election failed for group '{group}': {e}").into())
         }
     }
 }

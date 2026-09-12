@@ -14,6 +14,7 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -122,7 +123,8 @@ impl AuditStore for FileAuditStore {
             .map_err(|e| Error::Storage(format!("open audit file {}: {e}", path.display())))?;
         file.write_all(line.as_bytes())
             .map_err(|e| Error::Storage(format!("write audit file: {e}")))?;
-        // 审计事件强制落盘（安全审计不丢事件，性能可接受——管理面低频）
+        // 审计事件强制落盘（写成功即不丢；写失败由 `AuditLogger::record` 以
+        // ERROR + 失败计数暴露——本函数**不**能保证"审计不丢事件"）
         file.sync_all()
             .map_err(|e| Error::Storage(format!("fsync audit file: {e}")))?;
 
@@ -143,12 +145,17 @@ impl AuditStore for FileAuditStore {
 #[derive(Clone)]
 pub struct AuditLogger {
     store: Arc<dyn AuditStore>,
+    /// 追加失败计数（第三轮 §4.2③：让"审计缺口"可观测，而不是只打一条 warn）
+    append_failures: Arc<AtomicU64>,
 }
 
 impl AuditLogger {
     /// 构建日志器（store 为持久化后端）。
     pub fn new(store: Arc<dyn AuditStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            append_failures: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     /// 生产构造：`<data_dir>/audit/` 文件后端 + 最近 1024 条环形缓冲。
@@ -157,11 +164,30 @@ impl AuditLogger {
         Ok(Self::new(Arc::new(store)))
     }
 
-    /// 记录一条审计事件（追加失败仅告警，不影响主路径）。
+    /// 记录一条审计事件。
+    ///
+    /// # 失败语义（第三轮 §4.2③明确化）
+    ///
+    /// 追加失败**不阻断主路径**（审计不得成为拒绝服务面），但绝不等于"审计不丢事件"：
+    /// 磁盘满 / 权限变更 / IO 错误都会让事件**永久丢失**。因此：
+    /// - 失败以 **ERROR** 级别记录（此前是 `warn!`，与"合规可查"的承诺不匹配）；
+    /// - 失败计入 [`Self::append_failures`]，供运维监控"审计缺口"；
+    /// - [`FileAuditStore::append`] 确实做了 `sync_all()`——但那只能保证"写成功时不丢"，
+    ///   不能把"写失败"变成"不丢"。门面与实现的表述必须一致。
     pub fn record(&self, event: AuditEvent) {
         if let Err(e) = self.store.append(&event) {
-            tracing::warn!("audit append failed: {e}");
+            self.append_failures.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(
+                "AUDIT APPEND FAILED (event lost): {e} — 审计链出现缺口，请立即检查磁盘/权限"
+            );
         }
+    }
+
+    /// 累计的审计追加失败次数（进程生命周期内）。
+    ///
+    /// 非零即表示审计链**存在缺口**，不应被当成健康状态。
+    pub fn append_failures(&self) -> u64 {
+        self.append_failures.load(Ordering::Relaxed)
     }
 
     /// 便捷记录：actor/action/resource/result/detail。

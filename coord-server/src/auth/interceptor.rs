@@ -20,6 +20,7 @@ use std::task::{Context, Poll};
 
 use coord_core::auth::cct::{is_expired, CctPayload, CctToken};
 use coord_core::auth::trie::{scope_covers_interval, ScopeTrie};
+use coord_core::kv_range::RangeSemantics;
 use http_body_util::BodyExt;
 use prost::Message;
 use tonic::Status;
@@ -447,9 +448,11 @@ impl ServerAuthInterceptor {
 
     /// 区间感知的授权判定（A1）。
     ///
-    /// - 单 key（`range_end` 空）→ 沿用 [`Self::authorize`] 逐点语义；
+    /// - 单 key（`range_end` 空，即 [`RangeSemantics::SingleKey`]）→ 沿用
+    ///   [`Self::authorize`] 逐点语义。之所以成立，是因为**服务端对同一请求
+    ///   也只返回该单键**（第三轮 P0-1：两端共用 `RangeSemantics`）；
     /// - 区间 → scope_overrides / 角色授权均要求**整体包含** `[key, range_end)`；
-    ///   无上界（`"\0"`）在非 match-all scope 下一律拒绍。
+    ///   无上界（`"\0"`）在非 match-all scope 下一律拒绝。
     fn authorize_access(
         &self,
         payload: &CctPayload,
@@ -638,7 +641,10 @@ pub fn needs_scope_extraction(rpc_method: &str) -> bool {
 
 /// 一次请求触碰的 key 区间。
 ///
-/// - `range_end` 为空 → 单 key（Put / Txn-put / Txn-compare）；
+/// 语义判定**不在此处定义**，而由 [`RangeSemantics::of`] 单点给出（与服务端实际
+/// 执行路径共用），详见 [`ScopeAccess::from_range`]：
+///
+/// - 单键（`range_end` 为空 或 == `key`）→ 点访问（`range_end` 留空）；
 /// - `range_end == "\0"` → 从 `key` 到无穷（etcd 语义）；
 /// - 否则 → 区间 `[key, range_end)`。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -659,6 +665,20 @@ impl ScopeAccess {
     /// 区间访问。
     pub fn range(key: Vec<u8>, range_end: Vec<u8>) -> Self {
         Self { key, range_end }
+    }
+
+    /// 由请求的 `(key, range_end)` 构造 —— 语义判定必须与服务端**实际执行**
+    /// 共用 [`RangeSemantics::of`]（第三轮 P0-1）。
+    ///
+    /// 此前本层硬编码「`range_end` 为空 = 点查」，而 Txn 内层 `TxnOp::Range`
+    /// 在服务端回退为「字节前缀扫描」——同一请求两种解读，持 `scope="/app/a/"`
+    /// 的凭据即可读到 `/app/abc/config`。现在服务端与鉴权层都从这一份定义派生，
+    /// 建模与执行不可能再分叉。
+    pub fn from_range(key: Vec<u8>, range_end: Vec<u8>) -> Self {
+        match RangeSemantics::of(&key, &range_end) {
+            RangeSemantics::SingleKey => Self::point(key),
+            RangeSemantics::Interval => Self { key, range_end },
+        }
     }
 }
 
@@ -695,12 +715,12 @@ pub fn extract_scope_access(rpc_method: &str, body: &[u8]) -> Result<Vec<ScopeAc
         "/coord.kv.KV/Range" => {
             let req = coord_proto::kv::RangeRequest::decode(payload)
                 .map_err(|e| format!("failed to parse RangeRequest body: {e}"))?;
-            Ok(vec![ScopeAccess::range(req.key, req.range_end)])
+            Ok(vec![ScopeAccess::from_range(req.key, req.range_end)])
         }
         "/coord.kv.KV/Delete" => {
             let req = coord_proto::kv::DeleteRequest::decode(payload)
                 .map_err(|e| format!("failed to parse DeleteRequest body: {e}"))?;
-            Ok(vec![ScopeAccess::range(req.key, req.range_end)])
+            Ok(vec![ScopeAccess::from_range(req.key, req.range_end)])
         }
         "/coord.txn.Txn/Txn" => {
             let txn = coord_proto::txn::TxnRequest::decode(payload)
@@ -715,10 +735,10 @@ pub fn extract_scope_access(rpc_method: &str, body: &[u8]) -> Result<Vec<ScopeAc
                 match &op.op {
                     Some(Op::RequestPut(p)) => accesses.push(ScopeAccess::point(p.key.clone())),
                     Some(Op::RequestDelete(d)) => {
-                        accesses.push(ScopeAccess::range(d.key.clone(), d.range_end.clone()))
+                        accesses.push(ScopeAccess::from_range(d.key.clone(), d.range_end.clone()))
                     }
                     Some(Op::RequestRange(r)) => {
-                        accesses.push(ScopeAccess::range(r.key.clone(), r.range_end.clone()))
+                        accesses.push(ScopeAccess::from_range(r.key.clone(), r.range_end.clone()))
                     }
                     None => {}
                 }
@@ -895,14 +915,13 @@ where
                 Pin<Box<dyn Future<Output = Result<http::Response<tonic::body::Body>, E>> + Send>>;
             let fut: BoxedResponseFuture<S::Error> = Box::pin(async move {
                 // A2：带硬上限读取（content-length 可能缺失/说谎，分帧 body 亦受限）
-                let (req, body) =
-                    match buffer_request_body(req, MAX_SCOPE_BODY_BYTES).await {
-                        Ok(v) => v,
-                        Err(reason) => {
-                            interceptor.record_audit_deny(&rpc_method, &reason);
-                            return Ok(deny_response(Some(Status::resource_exhausted(reason))));
-                        }
-                    };
+                let (req, body) = match buffer_request_body(req, MAX_SCOPE_BODY_BYTES).await {
+                    Ok(v) => v,
+                    Err(reason) => {
+                        interceptor.record_audit_deny(&rpc_method, &reason);
+                        return Ok(deny_response(Some(Status::resource_exhausted(reason))));
+                    }
+                };
                 let accesses = match extract_scope_access(&rpc_method, &body) {
                     Ok(accesses) => accesses,
                     Err(reason) => {
@@ -1660,6 +1679,59 @@ mod tests {
             extract_scope_keys("/coord.kv.KV/Range", &r2.encode_to_vec()).unwrap(),
             vec![b"/k".to_vec()]
         );
+    }
+
+    /// 第三轮 P0-1 缺失用例：Txn 内层 `Range` 的 `range_end` 为空。
+    ///
+    /// 该路径此前**没有任何测试**（A1 的用例全部构造带 `range_end` 的区间），
+    /// 于是「鉴权层点查 vs 服务端前缀扫描」的语义分叉得以存活。现在两端共用
+    /// `coord_core::kv_range::RangeSemantics`，空 `range_end` 一律单键语义。
+    #[test]
+    fn test_extract_scope_access_txn_empty_range_end_is_point() {
+        use coord_proto::txn::request_op::Op;
+        use coord_proto::txn::{RequestOp, TxnRequest};
+
+        let txn = TxnRequest {
+            compare: vec![],
+            success: vec![RequestOp {
+                op: Some(Op::RequestRange(coord_proto::kv::RangeRequest {
+                    key: b"/app/a".to_vec(),
+                    range_end: Vec::new(),
+                    ..Default::default()
+                })),
+            }],
+            failure: vec![],
+            request_id: Vec::new(),
+        };
+        assert_eq!(
+            extract_scope_access("/coord.txn.Txn/Txn", &txn.encode_to_vec()).unwrap(),
+            vec![ScopeAccess::point(b"/app/a".to_vec())],
+            "空 range_end 必须建模为单键访问（服务端同口径）"
+        );
+
+        // `range_end == key` 同样是单键（与顶层 KV/Range、KV/Delete 一致）
+        let txn_eq = TxnRequest {
+            compare: vec![],
+            success: vec![RequestOp {
+                op: Some(Op::RequestRange(coord_proto::kv::RangeRequest {
+                    key: b"/app/a".to_vec(),
+                    range_end: b"/app/a".to_vec(),
+                    ..Default::default()
+                })),
+            }],
+            failure: vec![],
+            request_id: Vec::new(),
+        };
+        assert_eq!(
+            extract_scope_access("/coord.txn.Txn/Txn", &txn_eq.encode_to_vec()).unwrap(),
+            vec![ScopeAccess::point(b"/app/a".to_vec())]
+        );
+
+        // `scope="/app/a/"` 下，单键 `/app/a` 被覆盖（所以请求会被放行）——
+        // 因此**执行层**必须保证只返回这一个 Key（见 txn_scope_isolation_test.rs）。
+        assert!(coord_core::auth::trie::scope_covers_interval(
+            "/app/a/", b"/app/a", b""
+        ));
     }
 
     #[test]

@@ -17,31 +17,58 @@ set -euo pipefail
 DRY_RUN=0
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
 
-PATTERN='target/(debug|release)/coord (server|agent).*--data-dir (/tmp|'"${TMPDIR:-/tmp}"')/\.tmp'
+# 第三轮复核 §5.5：此脚本此前在 macOS 上**直接失败**（`mapfile: command not found`，
+# bash 4+ 内置命令，而 macOS 自带 bash 3.2）——set -e 下第一行就退出，什么都没清理。
+# 实测其执行后仍残留 29 个测试孤儿进程（load average 5.79/12 核），正是厂商自述的
+# "随机 no quorum 假红"的成因。CI（ubuntu）不受影响，但在 macOS 上开发的人拿不到
+# 这层保护。现改为不使用 mapfile 的 POSIX 写法。
+command -v pgrep >/dev/null 2>&1 || {
+    echo "pgrep not found; cannot scan for stray coord processes" >&2
+    exit 0
+}
 
-mapfile -t PIDS < <(pgrep -f "$PATTERN" || true)
-if [[ ${#PIDS[@]} -eq 0 ]]; then
+# 临时目录根：Linux 为 /tmp，macOS 为 $TMPDIR（/var/folders/...）。两者都覆盖。
+TMP_ROOTS="/tmp"
+if [[ -n "${TMPDIR:-}" && "${TMPDIR%/}" != "/tmp" ]]; then
+    TMP_ROOTS="/tmp|${TMPDIR%/}"
+fi
+
+PATTERN="target/(debug|release)/coord (server|agent).*--data-dir (${TMP_ROOTS})/\.tmp"
+
+# 不带 mapfile 的 PID 收集（每行一个 PID）
+collect_pids() {
+    pgrep -f "$PATTERN" 2>/dev/null || true
+}
+
+PIDS="$(collect_pids)"
+if [[ -z "${PIDS//[[:space:]]/}" ]]; then
     echo "no stray coord test processes found"
     exit 0
 fi
+# shellcheck disable=SC2086  # 此处按空白切分 PID 列表是刻意的
+COUNT=$(printf '%s\n' $PIDS | wc -l | tr -d ' ')
 
-echo "found ${#PIDS[@]} stray coord test process(es):"
-ps -o pid,etimes,cmd -p "$(IFS=,; echo "${PIDS[*]}")" 2>/dev/null | head -40
+echo "found ${COUNT} stray coord test process(es):"
+# shellcheck disable=SC2086
+ps -o pid,etime,command -p "$(printf '%s' "$PIDS" | tr '\n' ',')" 2>/dev/null | head -40 || true
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "(dry-run: nothing killed)"
     exit 0
 fi
 
-kill "${PIDS[@]}" 2>/dev/null || true
+# shellcheck disable=SC2086
+kill $PIDS 2>/dev/null || true
 for _ in $(seq 1 10); do
     sleep 0.3
     pgrep -f "$PATTERN" >/dev/null 2>&1 || break
 done
 # 仍然存活（卡在 IO / 忽略 SIGTERM）→ SIGKILL
-mapfile -t REMAIN < <(pgrep -f "$PATTERN" || true)
-if [[ ${#REMAIN[@]} -gt 0 ]]; then
-    echo "escalating to SIGKILL for ${#REMAIN[@]} process(es)"
-    kill -9 "${REMAIN[@]}" 2>/dev/null || true
+REMAIN="$(collect_pids)"
+if [[ -n "${REMAIN//[[:space:]]/}" ]]; then
+    # shellcheck disable=SC2086
+    echo "escalating to SIGKILL for $(printf '%s\n' $REMAIN | wc -l | tr -d ' ') process(es)"
+    # shellcheck disable=SC2086
+    kill -9 $REMAIN 2>/dev/null || true
 fi
 echo "stray coord test processes cleaned"

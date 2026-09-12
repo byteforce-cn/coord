@@ -3,6 +3,24 @@ name = "coord-server"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# 第三轮 §4.4：确定性**模拟**套件（`sim_jepsen_test` / `sim_chaos_test`）是自建
+# 模型（只 import `coord_core::types` 的数据类型，用 HashMap/BTreeMap 做参考模型），
+# 不是系统级混沌证据。它们混在默认 `cargo test` 里会让"测试数量"虚高、并且让
+# 真正需要审视的"伪测试"更容易蒙混过关。现按 feature 隔离：
+# - 默认 `cargo test` 不跑；
+# - `cargo test -p coord-server --features sim-tests` 或 CI 显式运行。
+default = []
+sim-tests = []
+
+[[test]]
+name = "sim_jepsen_test"
+required-features = ["sim-tests"]
+
+[[test]]
+name = "sim_chaos_test"
+required-features = ["sim-tests"]
+
 [dependencies]
 coord-core = { workspace = true }
 coord-proto = { workspace = true }

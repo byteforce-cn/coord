@@ -219,8 +219,17 @@ impl LeaseManager {
         };
 
         // 插入到时间轮
+        //
+        // 第三轮 §4.2①：`insert` 在时间轮任务死亡时返回 `None`。**必须 fail-closed**：
+        // 旧实现把失败退化为 `timer_id = 0` 并存进租约记录，而 `cancel(0)` 是空操作 →
+        // 该租约永不触发到期 → 绑定 Key 静默无界泄漏（无报错、无日志）。
         let timeout = Duration::from_secs(ttl_seconds as u64);
-        let timer_id = self.timer.insert(timeout).await;
+        let Some(timer_id) = self.timer.insert(timeout).await else {
+            return Err(Error::Internal(
+                "timer wheel unavailable: refusing to grant a lease that could never expire"
+                    .to_string(),
+            ));
+        };
 
         // C1（TOCTOU 收口）：上面的"ID 未被占用"检查与这里的插入之间隔着
         // `timer.insert(..).await`，两个并发 grant 可能都通过检查 → 后者静默覆盖
@@ -228,11 +237,19 @@ impl LeaseManager {
         // 插入在同一临界区，且临界区内无 await —— parking_lot guard 不跨 await）。
         let conflict = {
             let mut leases = self.leases.write();
-            if leases.contains_key(&lease_id) {
-                true
-            } else {
-                leases.insert(lease_id, LeaseRecord { lease, timer_id });
-                false
+            // C1（TOCTOU 收口）：检查与插入在**同一**写锁临界区内，且临界区内无
+            // await（parking_lot guard 不跨 await）。
+            //
+            // 用 `entry()` 一次完成"查 + 插"：语义与之前的 `contains_key` + `insert`
+            // 完全一致，但不再触发 `clippy::map_entry`——**该 lint 在 `37b0161` 上
+            // 就已存在，会让 CI 的 `clippy -D warnings` 门禁必然为红**（第三轮复核
+            // 复核 CI 有效性时发现：fmt 与 clippy 两道门禁在基线提交上都不通过）。
+            match leases.entry(lease_id) {
+                std::collections::hash_map::Entry::Occupied(_) => true,
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(LeaseRecord { lease, timer_id });
+                    false
+                }
             }
         };
         if conflict {
@@ -385,7 +402,17 @@ impl LeaseManager {
                 // 已过期：立即到期，由过期 worker 经 raft 清理（不得直写本地存储）
                 (tokio::time::Instant::now(), Duration::from_millis(1))
             };
-            let timer_id = self.timer.insert(timeout).await;
+            // §4.2①：重建路径同样不得把 `None` 当成有效 timer id。
+            // 这里遇到时间轮不可用时**跳过该条记录**并告警（不写入伪造的 0）：
+            // 缺失的内存 TTL 视图会让该租约只能靠 KeepAlive/Revoke 收敛，
+            // 但至少不会把一个"永不取消的 timer"写进记录。
+            let Some(timer_id) = self.timer.insert(timeout).await else {
+                tracing::error!(
+                    lease_id = id,
+                    "timer wheel unavailable during lease rebuild: skipping lease record"
+                );
+                continue;
+            };
             self.leases.write().insert(
                 id,
                 LeaseRecord {
@@ -517,7 +544,8 @@ mod tests {
     }
 
     #[test]
-    fn test_lease_ttl_validation() {        let rt = tokio::runtime::Runtime::new().unwrap();
+    fn test_lease_ttl_validation() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let handle = TimerWheel::start();
             let manager = LeaseManager::new(handle);

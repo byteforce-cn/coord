@@ -145,53 +145,59 @@ impl WriteBatcher {
         let batcher = Arc::clone(self);
         let write_fn = Arc::new(write_fn);
 
-        tokio::spawn(async move {
-            let interval = tokio::time::Duration::from_millis(batch_interval_ms);
-            let notifier = batcher.notifier();
+        // 第三轮 §4.2①：受监督（带停机信号）——batcher 死亡后所有 `submit()`
+        // 会永久挂起，是最难诊断的一类静默失效。
+        crate::supervisor::spawn_supervised_with_shutdown(
+            "write_batcher",
+            shutdown_rx.clone(),
+            async move {
+                let interval = tokio::time::Duration::from_millis(batch_interval_ms);
+                let notifier = batcher.notifier();
 
-            loop {
-                // 等待新请求到达或超时
-                tokio::select! {
-                    _ = notifier.notified() => {}
-                    _ = tokio::time::sleep(interval) => {}
-                    _ = shutdown_rx.changed() => {
-                        // 收到关闭信号，处理最后一波 pending 后退出
-                        let final_batch = batcher.drain_pending();
-                        if !final_batch.is_empty() {
-                            if let Err(e) = write_fn(final_batch) {
-                                tracing::error!("WriteBatcher: final flush failed: {}", e);
+                loop {
+                    // 等待新请求到达或超时
+                    tokio::select! {
+                        _ = notifier.notified() => {}
+                        _ = tokio::time::sleep(interval) => {}
+                        _ = shutdown_rx.changed() => {
+                            // 收到关闭信号，处理最后一波 pending 后退出
+                            let final_batch = batcher.drain_pending();
+                            if !final_batch.is_empty() {
+                                if let Err(e) = write_fn(final_batch) {
+                                    tracing::error!("WriteBatcher: final flush failed: {}", e);
+                                }
                             }
+                            tracing::info!("WriteBatcher: shutdown complete");
+                            break;
                         }
-                        tracing::info!("WriteBatcher: shutdown complete");
-                        break;
+                    }
+
+                    // 排出所有待处理请求
+                    let batch = batcher.drain_pending();
+                    if batch.is_empty() {
+                        continue;
+                    }
+
+                    let batch_size: usize = batch.iter().map(|r| r.entries.len()).sum();
+                    tracing::trace!(
+                        "WriteBatcher: flushing {} requests ({} entries)",
+                        batch.len(),
+                        batch_size
+                    );
+
+                    // 批量写入
+                    match write_fn(batch) {
+                        Ok(()) => {
+                            // 成功：所有 oneshot sender 在 write_fn 内部已通知
+                        }
+                        Err(e) => {
+                            tracing::error!("WriteBatcher: batch write failed: {}", e);
+                            // 失败时不通知 sender（由上层重试）
+                        }
                     }
                 }
-
-                // 排出所有待处理请求
-                let batch = batcher.drain_pending();
-                if batch.is_empty() {
-                    continue;
-                }
-
-                let batch_size: usize = batch.iter().map(|r| r.entries.len()).sum();
-                tracing::trace!(
-                    "WriteBatcher: flushing {} requests ({} entries)",
-                    batch.len(),
-                    batch_size
-                );
-
-                // 批量写入
-                match write_fn(batch) {
-                    Ok(()) => {
-                        // 成功：所有 oneshot sender 在 write_fn 内部已通知
-                    }
-                    Err(e) => {
-                        tracing::error!("WriteBatcher: batch write failed: {}", e);
-                        // 失败时不通知 sender（由上层重试）
-                    }
-                }
-            }
-        })
+            },
+        )
     }
 
     /// 同步版本的 run（阻塞当前线程直到 shutdown）

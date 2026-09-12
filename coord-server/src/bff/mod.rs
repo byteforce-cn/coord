@@ -30,6 +30,44 @@ use crate::metrics::Metrics;
 
 pub use proxy::{forward, login, renew_token, revoke_token, userinfo};
 
+/// BFF 前缀扫描的**硬上限**（第三轮 §4.2②）。
+///
+/// 这些控制台读路径此前用 `storage.range(prefix, usize::MAX)`：条数无上限、
+/// 结果全量 materialize 成 `Vec`，而且是在 **Tokio worker 线程上同步执行**的
+/// redb 扫描（`bff/` 下 `spawn_blocking` 用量为 0，而 raft/快照路径已正确使用）。
+///
+/// `#[tokio::main]` 默认 worker 数 = CPU 核数，这些 worker 同时驱动 raft 心跳、
+/// 租约定时器与 watch 扇出。一个由客户端前缀驱动、条数无上限的扫描，足以把
+/// "不断增长的配置/注册命名空间"演变成 **尾延迟飙升 → 心跳超时 → 重新选主** 的级联。
+pub const BFF_SCAN_LIMIT: usize = 5_000;
+
+/// 在 blocking 线程池中执行**有界**前缀扫描，返回 `(rows, truncated)`。
+///
+/// - 移入 `spawn_blocking`：同步 redb 扫描不再占用 async worker，raft 心跳与
+///   定时器不会被读请求拖住；
+/// - 施加硬上限：内存与尾延迟不随数据量线性增长；
+/// - `truncated == true` 会被调用方如实回传（**不得**静默截断成"看起来是全部"）。
+pub async fn scan_prefix_bounded(
+    node: &crate::server::CoordNode,
+    prefix: &[u8],
+) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, bool), coord_core::error::Error> {
+    use coord_core::error::Error;
+
+    let storage = Arc::clone(&node.storage);
+    let prefix = prefix.to_vec();
+    tokio::task::spawn_blocking(move || {
+        // 多取 1 条以便区分"恰好等于上限"与"被截断"
+        let mut rows = storage.range(&prefix, BFF_SCAN_LIMIT.saturating_add(1))?;
+        let truncated = rows.len() > BFF_SCAN_LIMIT;
+        if truncated {
+            rows.truncate(BFF_SCAN_LIMIT);
+        }
+        Ok((rows, truncated))
+    })
+    .await
+    .map_err(|e| Error::Internal(format!("BFF prefix scan task failed: {e}")))?
+}
+
 /// BFF 配置
 #[derive(Debug, Clone)]
 pub struct BffConfig {

@@ -116,6 +116,11 @@ jobs:
       - name: Java example — integration suites
         working-directory: java-example
         run: mvn -B verify -Pit
+      - name: Java SDK — integration suite (real cluster, -Pit)
+        # 第三轮复核 §7.2-9：SDK 的 CoordClientIntegrationTest 此前靠 assumeThat 静默跳过，
+        # 从不产生证据。现在它只在 -Pit 下执行，并由本 job 提供真实集群（硬失败即真门禁）。
+        working-directory: coord-java-sdk
+        run: mvn -B verify -Pit
       - name: Dump cluster logs (always)
         if: always()
         run: |
@@ -174,6 +179,11 @@ jobs:
         # E6：撤销「首次失败降级为 warning 并重跑」的口径——测试失败即红，
         # 不再用重跑掩盖不稳定。真 flaky 必须被修，而不是被重跑盖住。
         run: cargo test --workspace --no-fail-fast
+      - name: Run deterministic simulation suites (gated)
+        # 第三轮 §4.4：sim_jepsen/sim_chaos 是**自建模型**而非系统级证据，已用
+        # `required-features = ["sim-tests"]` 移出默认套件（避免测试数量虚高）。
+        # 这里显式跑它们，保证"移出默认"不等于"永不运行"。
+        run: cargo test -p coord-server --features sim-tests --test sim_jepsen_test --test sim_chaos_test
 
   feature-matrix:
     name: plugin engine feature matrix

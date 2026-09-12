@@ -98,7 +98,10 @@ fn placement_rejects_existing_replica_node() {
         .into_iter()
         .collect();
     let target = nodes.get(&1).unwrap();
-    assert!(!c.can_place(target, &[1], &nodes), "peer node must be rejected");
+    assert!(
+        !c.can_place(target, &[1], &nodes),
+        "peer node must be rejected"
+    );
 }
 
 #[test]
@@ -295,8 +298,14 @@ fn meta_store_create_and_lookup_by_key() {
     store.create_region(region(2, b"m", b"", 0, 0)).unwrap();
 
     assert_eq!(store.region_count(), 2);
-    assert_eq!(store.get_region_by_key(b"apple").map(|r| r.region_id), Some(1));
-    assert_eq!(store.get_region_by_key(b"peach").map(|r| r.region_id), Some(2));
+    assert_eq!(
+        store.get_region_by_key(b"apple").map(|r| r.region_id),
+        Some(1)
+    );
+    assert_eq!(
+        store.get_region_by_key(b"peach").map(|r| r.region_id),
+        Some(2)
+    );
     assert!(store.get_region_by_key(b"zebra").is_some());
     assert_eq!(store.get_region(1).map(|r| r.end_key), Some(b"m".to_vec()));
 }

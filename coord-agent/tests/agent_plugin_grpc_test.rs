@@ -11,7 +11,6 @@
 //
 // 探针选用 `coord.agent.FeatureFlags/IsEnabled`（纯内存，无需 server 连接）。
 
-
 use coord_agent::{AgentConfig, AgentServer, ServiceConfig};
 use coord_proto::agent::feature_flags_client::FeatureFlagsClient;
 use coord_proto::agent::FeatureFlagIsEnabledRequest;

@@ -78,19 +78,23 @@ impl<B: StorageBackend + 'static> SnapshotScheduler<B> {
     ///
     /// 返回 JoinHandle，可 abort 以停止调度。
     pub fn start(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            if !self.config.auto_snapshot {
-                tracing::info!("Auto snapshot is disabled");
-                return;
-            }
+        // 第三轮 §4.2①：配置关闭时**不** spawn——否则监督会把它记成"任务死亡"，
+        // 把正常配置变成告警噪声。
+        if !self.config.auto_snapshot {
+            tracing::info!("Auto snapshot is disabled (scheduler not started)");
+            return tokio::spawn(async {});
+        }
 
+        // 启动后必须受监督：这个循环死亡后不再有任何自动快照，
+        // 而外部只能从"磁盘写满"察觉。
+        crate::supervisor::spawn_supervised("snapshot_scheduler", async move {
             // 确保快照目录存在
             if let Err(e) = std::fs::create_dir_all(&self.config.snapshot_dir) {
                 tracing::error!(
                     "Failed to create snapshot dir {}: {e}",
                     self.config.snapshot_dir.display()
                 );
-                return;
+                return; // 受监督：跳出去会被登记为能力死亡（确实如此）
             }
 
             tracing::info!(

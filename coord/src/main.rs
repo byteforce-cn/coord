@@ -3149,14 +3149,19 @@ async fn run_server(
     // 一个（RegionRuntime 自己的 raft + chunk store）。
     if cfg.object_storage.enabled {
         if let (Some(store), Some(limits)) = (&root_chunk_store, &node.object_limits) {
-            tokio::spawn(object_gc_loop(
-                node_id,
-                Arc::clone(&raft),
-                Arc::clone(&mvcc),
-                Arc::clone(store),
-                Arc::clone(limits),
-                cfg.object_storage.gc_interval_secs,
-            ));
+            // 第三轮 §4.2①：受监督——GC 循环死亡后孤儿 chunk 只增不减，
+            // 而朴素 spawn 丢弃 handle，谁都发现不了。
+            coord_server::supervisor::spawn_supervised(
+                "object_gc_loop(root)",
+                object_gc_loop(
+                    node_id,
+                    Arc::clone(&raft),
+                    Arc::clone(&mvcc),
+                    Arc::clone(store),
+                    Arc::clone(limits),
+                    cfg.object_storage.gc_interval_secs,
+                ),
+            );
             tracing::info!("Object gc loop started (legacy/root)");
         }
         if let Some(manager) = &node.region_manager {
@@ -3164,14 +3169,18 @@ async fn run_server(
                 let rid = handle.region_id();
                 if let Some(rt) = manager.runtime(rid) {
                     if let (Some(store), Some(limits)) = (&rt.chunk_store, &node.object_limits) {
-                        tokio::spawn(object_gc_loop(
-                            node_id,
-                            Arc::new(rt.raft.clone()),
-                            Arc::clone(&rt.mvcc),
-                            Arc::clone(store),
-                            Arc::clone(limits),
-                            cfg.object_storage.gc_interval_secs,
-                        ));
+                        // 第三轮 §4.2①：受监督（Region 级 GC 死亡同样静默）
+                        coord_server::supervisor::spawn_supervised(
+                            "object_gc_loop",
+                            object_gc_loop(
+                                node_id,
+                                Arc::new(rt.raft.clone()),
+                                Arc::clone(&rt.mvcc),
+                                Arc::clone(store),
+                                Arc::clone(limits),
+                                cfg.object_storage.gc_interval_secs,
+                            ),
+                        );
                         tracing::info!("Region {rid} object gc loop started");
                     }
                 }

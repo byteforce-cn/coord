@@ -180,9 +180,9 @@ pub async fn list_services(
 
     let node = &state.coord_node;
 
-    // 扫描所有服务
+    // 扫描所有服务（§4.2②：有界 + blocking 池）
     let prefix = REGISTRY_PREFIX.as_bytes().to_vec();
-    let results = match node.storage.range(&prefix, usize::MAX) {
+    let (results, _truncated) = match crate::bff::scan_prefix_bounded(node, &prefix).await {
         Ok(r) => r,
         Err(e) => return err_json(500, &format!("存储读取失败: {e}")).into_response(),
     };
@@ -210,11 +210,18 @@ pub async fn list_services(
         }
 
         // 收集该服务的实例并统计状态
+        // §4.2②：有界 + blocking 池；§4.2③：读取失败不再静默当作"没有实例"
         let inst_prefix = instance_prefix(&service.name);
-        let instances_data = node
-            .storage
-            .range(&inst_prefix, usize::MAX)
-            .unwrap_or_default();
+        let instances_data = match crate::bff::scan_prefix_bounded(node, &inst_prefix).await {
+            Ok((rows, _)) => rows,
+            Err(e) => {
+                tracing::error!(
+                    service = %service.name,
+                    "instance scan FAILED: {e} — reporting the service as unreadable"
+                );
+                return err_json(500, &format!("实例读取失败: {e}")).into_response();
+            }
+        };
 
         let mut total = 0usize;
         let mut healthy = 0usize;
@@ -318,10 +325,11 @@ pub async fn get_service(
 
     // 扫描实例
     let inst_prefix = instance_prefix(&name);
-    let instances_data = node
-        .storage
-        .range(&inst_prefix, usize::MAX)
-        .unwrap_or_default();
+    // §4.2②：有界 + blocking 池；§4.2③：读取失败不再静默当作"没有实例"
+    let instances_data = match crate::bff::scan_prefix_bounded(node, &inst_prefix).await {
+        Ok((rows, _)) => rows,
+        Err(e) => return err_json(500, &format!("实例读取失败: {e}")).into_response(),
+    };
 
     let mut instances: Vec<InstanceInfo> = Vec::new();
     let mut healthy_count = 0usize;
@@ -424,10 +432,10 @@ pub async fn health_check(
         return err_json(404, "服务未找到").into_response();
     }
 
-    // 扫描所有实例
+    // 扫描所有实例（§4.2②：有界 + blocking 池）
     let inst_prefix = instance_prefix(&name);
-    let instances_data = match node.storage.range(&inst_prefix, usize::MAX) {
-        Ok(d) => d,
+    let instances_data = match crate::bff::scan_prefix_bounded(node, &inst_prefix).await {
+        Ok((rows, _)) => rows,
         Err(e) => return err_json(500, &format!("存储读取失败: {e}")).into_response(),
     };
 
@@ -438,6 +446,7 @@ pub async fn health_check(
     // 现在逐个实例探测并将结果写回 status（passing/critical）。
     let mut checked = 0usize;
     let mut alive = 0usize;
+    let mut write_failures = 0usize;
     for (ik, iv) in &instances_data {
         if let Ok(mut inst) = serde_json::from_slice::<InstanceData>(iv) {
             let probe_addr = probe_addr_of(&inst.address, inst.port);
@@ -453,7 +462,17 @@ pub async fn health_check(
             };
             inst.last_check = now.clone();
             let new_value = serde_json::to_vec(&inst).unwrap_or_default();
-            let _ = raft_put(node, ik.clone(), new_value).await;
+            // 第三轮 §4.2③：状态写回此前是 `let _ = raft_put(..)`——探测结果看似
+            // 写回、实际可能从未落 raft，接口仍报 200，健康状态在存储里永远不更新。
+            // 现在显式计数并回传，调用方能分辨"真写回了"与"只是探到了"。
+            if let Err(e) = raft_put(node, ik.clone(), new_value).await {
+                write_failures += 1;
+                tracing::error!(
+                    instance = %String::from_utf8_lossy(ik),
+                    "instance health write-back FAILED: {}",
+                    e.1 .0
+                );
+            }
         }
     }
 
@@ -461,6 +480,7 @@ pub async fn health_check(
         "checked": checked,
         "alive": alive,
         "critical": checked - alive,
+        "writeFailures": write_failures,
     }))
     .into_response()
 }
