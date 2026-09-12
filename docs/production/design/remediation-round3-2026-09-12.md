@@ -316,7 +316,7 @@ test_range_at_revision_historical_view ... ok
 - 硬上限 `BFF_SCAN_LIMIT = 5000`（多取 1 条判定截断）；
 - `truncated` 由调用方**如实上报**，不静默截断成"看起来是全部"。
 
-7 处调用点全部替换，`bff/` 下已无 `usize::MAX`：
+7 处调用点全部替换，`bff/` 下已无 `usize::MAX` 作为扫描上限（仅注释中提及）：
 
 ```
 config_api.rs   3 处   registry_api.rs  4 处
@@ -446,7 +446,7 @@ test result: FAILED. 1 passed; 3 failed
 **8 个候选者全部自认 Leader**——这正是第三轮报告 §3.2 描述的"永久双主且不自愈"，
 在修复前**可被自动化复现**，修复后全部转绿（4 passed）。
 
-恢复后已确认工作树无任何临时标记（`grep -c "NEGATIVE-PROOF"` = 0），
+恢复后已确认**源码中无任何临时标记**（`git grep -c "NEGATIVE-PROOF" HEAD -- '*.rs'` 无输出），
 且上述两个套件重新全绿。
 
 ### 9.3 全量套件的一处**既有**时序脆性（非本轮引入）
