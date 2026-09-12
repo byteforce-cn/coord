@@ -352,10 +352,11 @@ impl RegisterChecker {
 #[tokio::test]
 #[ignore = "real-process chaos suite; run in CI nightly (P0-H.4) or CHAOS_REAL=1 locally"]
 async fn chaos_real_kill9_and_linearizability() {
-    if std::env::var("CHAOS_REAL").is_err() {
-        eprintln!("skipping chaos_real (set CHAOS_REAL=1 to run locally)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("CHAOS_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "CHAOS_REAL must be set to run this real-process suite (E1)"
+    );
 
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
@@ -506,10 +507,11 @@ async fn chaos_real_kill9_and_linearizability() {
 #[tokio::test]
 #[ignore = "distributed soak; SOAK_DURATION_SECS + CHAOS_REAL=1"]
 async fn chaos_soak_distributed() {
-    if std::env::var("CHAOS_REAL").is_err() {
-        eprintln!("skipping chaos soak (set CHAOS_REAL=1 to run locally)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("CHAOS_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "CHAOS_REAL must be set to run this real-process suite (E1)"
+    );
     let duration_secs: u64 = std::env::var("SOAK_DURATION_SECS")
         .ok()
         .and_then(|v| v.parse().ok())

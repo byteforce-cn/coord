@@ -115,10 +115,30 @@ cargo run -p coord -- agent --agent-config agent.toml   # services / tls / auth 
 **从业务应用接入**——连接本机 Agent（完整示例见 [`java-example/`](java-example/)）：
 
 ```java
-CoordClient client = CoordClient.connectToLocalAgent();   // localhost:19527
-client.put("/app/config", "value");
-String val = client.get("/app/config");
+import cn.byteforce.coord.sdk.CoordClient;
+import cn.byteforce.coord.sdk.CoordConfig;
+
+CoordConfig config = CoordConfig.builder()
+        .agentHost("127.0.0.1")
+        .agentPort(19527)
+        // 生产：TLS fail-closed（缺 CA 证书即拒绝连接，不静默降级明文）
+        // .useTls(true).tlsCaCertPath("/etc/coord/ca.pem")
+        // CCT 凭据：每次调用读取当前 token，刷新无需重建 channel
+        // .authTokenSupplier(() -> credentialStore.currentCct())
+        .build();
+
+try (CoordClient client = CoordClient.create(config)) {
+    client.configClient().put("/app/config", "value");
+    String val = client.configClient().getString("/app/config").orElse(null);
+
+    client.registry().register("order-service", "inst-1", "{}", 30);
+    var instances = client.registry().discover("order-service");
+}
 ```
+
+> 上面是**真 SDK**（`coord-java-sdk`，group `cn.byteforce.coord`）的用法——入口是
+> `CoordClient.create(CoordConfig)`。`java-example/` 是**独立的自包含** gRPC 示例；
+> 其中的 `cn.byteforce.coord.example.CoordClient` 是示例本地包装类，**不是** SDK 的类。
 
 运维子命令：`coord member | snapshot | security | auth | capability | idgen | reset`。
 

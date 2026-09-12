@@ -475,10 +475,11 @@ fn chunk_files(data_dir: &Path) -> Vec<PathBuf> {
 #[tokio::test]
 #[ignore = "real-process object storage suite; run explicitly: OBJECT_STORAGE_REAL=1"]
 async fn object_storage_real_roundtrip_boundary_and_gc() {
-    if std::env::var("OBJECT_STORAGE_REAL").is_err() {
-        eprintln!("skipping object_storage_process (set OBJECT_STORAGE_REAL=1 to run)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("OBJECT_STORAGE_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "OBJECT_STORAGE_REAL must be set to run this real-process suite (E1)"
+    );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_path_buf();
@@ -653,10 +654,11 @@ async fn object_storage_real_roundtrip_boundary_and_gc() {
 #[tokio::test]
 #[ignore = "real-process object storage suite; run explicitly: OBJECT_STORAGE_REAL=1"]
 async fn object_storage_real_quota_resource_exhausted() {
-    if std::env::var("OBJECT_STORAGE_REAL").is_err() {
-        eprintln!("skipping object_storage_process (set OBJECT_STORAGE_REAL=1 to run)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("OBJECT_STORAGE_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "OBJECT_STORAGE_REAL must be set to run this real-process suite (E1)"
+    );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_path_buf();
@@ -718,10 +720,11 @@ async fn object_storage_real_quota_resource_exhausted() {
 #[tokio::test]
 #[ignore = "real-process object storage suite; run explicitly: OBJECT_STORAGE_REAL=1"]
 async fn object_storage_real_encryption_roundtrip() {
-    if std::env::var("OBJECT_STORAGE_REAL").is_err() {
-        eprintln!("skipping object_storage_process (set OBJECT_STORAGE_REAL=1 to run)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("OBJECT_STORAGE_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "OBJECT_STORAGE_REAL must be set to run this real-process suite (E1)"
+    );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_path_buf();
@@ -922,10 +925,11 @@ async fn current_leader(nodes: &[&RealNode]) -> Option<u64> {
 #[tokio::test]
 #[ignore = "real-process object storage chaos; run explicitly: OBJECT_STORAGE_REAL=1"]
 async fn object_storage_real_chaos_kill_pause_partition() {
-    if std::env::var("OBJECT_STORAGE_REAL").is_err() {
-        eprintln!("skipping object_storage chaos (set OBJECT_STORAGE_REAL=1 to run)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("OBJECT_STORAGE_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "OBJECT_STORAGE_REAL must be set to run this real-process suite (E1)"
+    );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
@@ -1156,10 +1160,11 @@ async fn object_storage_real_chaos_kill_pause_partition() {
 #[tokio::test]
 #[ignore = "real-process object storage suite; run explicitly: OBJECT_STORAGE_REAL=1"]
 async fn object_storage_real_sdk_roundtrip() {
-    if std::env::var("OBJECT_STORAGE_REAL").is_err() {
-        eprintln!("skipping object_storage sdk (set OBJECT_STORAGE_REAL=1 to run)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("OBJECT_STORAGE_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "OBJECT_STORAGE_REAL must be set to run this real-process suite (E1)"
+    );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_path_buf();
@@ -1233,10 +1238,11 @@ async fn object_storage_real_sdk_roundtrip() {
 #[tokio::test]
 #[ignore = "real-process object storage suite; run explicitly: OBJECT_STORAGE_REAL=1"]
 async fn object_storage_real_streaming_sessions() {
-    if std::env::var("OBJECT_STORAGE_REAL").is_err() {
-        eprintln!("skipping object_storage streaming (set OBJECT_STORAGE_REAL=1 to run)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("OBJECT_STORAGE_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "OBJECT_STORAGE_REAL must be set to run this real-process suite (E1)"
+    );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_path_buf();

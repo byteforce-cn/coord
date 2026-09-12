@@ -6,10 +6,14 @@ import cn.byteforce.coord.sdk.ErrorCode;
 import cn.byteforce.coord.sdk.internal.thread.ThreadPoolManager;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import io.grpc.ManagedChannel;
+import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
+import io.grpc.netty.shaded.io.netty.handler.ssl.SslContextBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.net.ssl.SSLException;
+import java.io.File;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -17,8 +21,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Manages a single gRPC {@link ManagedChannel} connection to the Coord Agent.
  * <p>
- * Handles connection lifecycle, reconnection with exponential backoff,
- * and protocol handshake triggering.
+ * Transport security is driven by {@link CoordConfig#isUseTls()} (D1): TLS config that is
+ * incomplete or points at missing files is <b>rejected</b> rather than silently downgraded to
+ * plaintext. When a CCT supplier is configured, every call carries
+ * {@code authorization: Bearer <cct>} (D2).
+ * <p>
+ * Note: connectivity (including reconnection after the agent restarts) is handled by gRPC's
+ * own channel state machine plus the keep-alive settings below — this class does not run its
+ * own backoff loop.
  */
 public class AgentChannelManager {
 
@@ -32,11 +42,6 @@ public class AgentChannelManager {
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
     private final ProtocolNegotiator negotiator;
 
-    // Reconnection config
-    private static final long INITIAL_BACKOFF_MS = 1_000;
-    private static final long MAX_BACKOFF_MS = 30_000;
-    private static final double BACKOFF_MULTIPLIER = 2.0;
-
     public AgentChannelManager(CoordConfig config, ThreadPoolManager threadPoolManager,
                                 ObservabilityProvider observability) {
         this.config = config;
@@ -47,12 +52,59 @@ public class AgentChannelManager {
     }
 
     private ManagedChannel createChannel() {
-        return NettyChannelBuilder.forAddress(config.getAgentHost(), config.getAgentPort())
-                .usePlaintext() // TLS not supported in v1.0
+        NettyChannelBuilder builder = NettyChannelBuilder
+                .forAddress(config.getAgentHost(), config.getAgentPort())
                 .keepAliveTime(30, TimeUnit.SECONDS)
                 .keepAliveTimeout(10, TimeUnit.SECONDS)
-                .keepAliveWithoutCalls(true)
-                .build();
+                .keepAliveWithoutCalls(true);
+
+        if (config.isUseTls()) {
+            // D1：配了 TLS 就必须真正建 TLS 链路；证书缺失即拒绝连接（fail-closed）。
+            File caFile = requireFile(config.getTlsCaCertPath(), "tlsCaCertPath");
+            String clientCert = config.getTlsClientCertPath();
+            boolean mtls = clientCert != null && !clientCert.isBlank();
+
+            SslContextBuilder ssl = GrpcSslContexts.forClient().trustManager(caFile);
+            if (mtls) {
+                ssl.keyManager(
+                        requireFile(clientCert, "tlsClientCertPath"),
+                        requireFile(config.getTlsClientKeyPath(), "tlsClientKeyPath"));
+            }
+            try {
+                builder.sslContext(ssl.build());
+            } catch (SSLException e) {
+                throw new CoordException(ErrorCode.CONFIG_INVALID,
+                        "failed to build TLS context: " + e.getMessage(), e);
+            }
+            log.info("Coord Java SDK: TLS enabled (mTLS={})", mtls);
+        } else {
+            // 明文仅用于开发；生产必须 useTls(true)。
+            builder.usePlaintext();
+            log.warn("Coord Java SDK: PLAINTEXT channel (dev only; set useTls(true) for production)");
+        }
+
+        // D2：每次调用读取当前 CCT 并注入 Metadata（刷新无需重建 channel）。
+        if (config.getAuthTokenSupplier() != null) {
+            builder.intercept(new AuthTokenInterceptor(config.getAuthTokenSupplier()));
+        }
+
+        return builder.build();
+    }
+
+    /**
+     * D1：当 TLS 启用时，证书/私钥路径必须指向真实文件，否则拒绝建链。
+     */
+    private static File requireFile(String path, String field) {
+        if (path == null || path.isBlank()) {
+            throw new CoordException(ErrorCode.CONFIG_INVALID,
+                    field + " must be set when TLS is enabled");
+        }
+        File file = new File(path);
+        if (!file.isFile()) {
+            throw new CoordException(ErrorCode.CONFIG_INVALID,
+                    field + " does not exist or is not a regular file: " + path);
+        }
+        return file;
     }
 
     /**

@@ -540,6 +540,20 @@ impl RaftNetwork {
         ));
         StreamingError::Unreachable(openraft::error::Unreachable::new(&status))
     }
+
+    /// `Blocked` 状态下的 RPC 错误（与 `ensure_not_blocked` 同一语义，
+    /// 供 match 的兜底分支使用：返回错误而非 panic）。
+    fn blocked_rpc_error(&self) -> RPCError<TypeConfig> {
+        let target_id = match self {
+            RaftNetwork::Real { target_id, .. } => target_id,
+            RaftNetwork::Blocked { target_id } => target_id,
+        };
+        let status = tonic::Status::unavailable(format!(
+            "simulated network partition: node {} is unreachable",
+            target_id
+        ));
+        to_rpc_error(status)
+    }
 }
 
 impl RaftNetworkV2<TypeConfig> for RaftNetwork {
@@ -553,9 +567,7 @@ impl RaftNetworkV2<TypeConfig> for RaftNetwork {
         self.ensure_not_blocked()?;
         match self {
             RaftNetwork::Real { inner, .. } => inner.append_entries(rpc, option).await,
-            RaftNetwork::Blocked { .. } => {
-                unreachable!("Blocked should have been caught by ensure_not_blocked")
-            }
+            RaftNetwork::Blocked { .. } => Err(self.blocked_rpc_error()),
         }
     }
 
@@ -567,9 +579,7 @@ impl RaftNetworkV2<TypeConfig> for RaftNetwork {
         self.ensure_not_blocked()?;
         match self {
             RaftNetwork::Real { inner, .. } => inner.vote(rpc, option).await,
-            RaftNetwork::Blocked { .. } => {
-                unreachable!("Blocked should have been caught by ensure_not_blocked")
-            }
+            RaftNetwork::Blocked { .. } => Err(self.blocked_rpc_error()),
         }
     }
 
@@ -581,9 +591,7 @@ impl RaftNetworkV2<TypeConfig> for RaftNetwork {
         self.ensure_not_blocked()?;
         match self {
             RaftNetwork::Real { inner, .. } => inner.transfer_leader(rpc, option).await,
-            RaftNetwork::Blocked { .. } => {
-                unreachable!("Blocked should have been caught by ensure_not_blocked")
-            }
+            RaftNetwork::Blocked { .. } => Err(self.blocked_rpc_error()),
         }
     }
 
@@ -613,7 +621,7 @@ impl RaftNetworkV2<TypeConfig> for RaftNetwork {
             RaftNetwork::Real { inner, .. } => {
                 inner.full_snapshot(vote, snapshot, cancel, option).await
             }
-            RaftNetwork::Blocked { .. } => unreachable!("Blocked should have been caught above"),
+            RaftNetwork::Blocked { .. } => Err(self.to_streaming_error()),
         }
     }
 }

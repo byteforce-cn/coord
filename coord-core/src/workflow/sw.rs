@@ -895,7 +895,14 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                 }
                 tasks.push(transition_task(&s.name, &target));
             }
-            _ => unreachable!(),
+            // 类型已在 convert 步骤 2 校验过；此处再遇未知类型说明内部不变式被破坏，
+            // 返回错误而非 panic（E5：生产代码零 panic 逃逸）。
+            other => {
+                return Err(format!(
+                    "state '{}': unsupported type '{other}' reached compiler (internal invariant violated)",
+                    s.name
+                ))
+            }
         }
     }
 

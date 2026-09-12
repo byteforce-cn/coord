@@ -115,10 +115,32 @@ cargo run -p coord -- agent --agent-config agent.toml   # services / tls / auth 
 **From your application** — connect to the local agent (see [`java-example/`](java-example/) for full samples):
 
 ```java
-CoordClient client = CoordClient.connectToLocalAgent();   // localhost:19527
-client.put("/app/config", "value");
-String val = client.get("/app/config");
+import cn.byteforce.coord.sdk.CoordClient;
+import cn.byteforce.coord.sdk.CoordConfig;
+
+CoordConfig config = CoordConfig.builder()
+        .agentHost("127.0.0.1")
+        .agentPort(19527)
+        // Production: TLS is fail-closed (missing CA cert = refuse to connect)
+        // .useTls(true).tlsCaCertPath("/etc/coord/ca.pem")
+        // CCT credentials are read per call, so refresh needs no channel rebuild
+        // .authTokenSupplier(() -> credentialStore.currentCct())
+        .build();
+
+try (CoordClient client = CoordClient.create(config)) {
+    client.configClient().put("/app/config", "value");
+    String val = client.configClient().getString("/app/config").orElse(null);
+
+    client.registry().register("order-service", "inst-1", "{}", 30);
+    var instances = client.registry().discover("order-service");
+}
 ```
+
+> The snippet above is the **real** SDK (`coord-java-sdk`, artifact group
+> `cn.byteforce.coord`) — connect via `CoordClient.create(CoordConfig)`. The
+> `java-example/` module is a **separate, self-contained** gRPC demo; its
+> `cn.byteforce.coord.example.CoordClient` convenience wrapper is example-local
+> and is **not** the SDK class.
 
 Operations CLI: `coord member | snapshot | security | auth | capability | idgen | reset`.
 

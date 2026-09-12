@@ -8,7 +8,7 @@
 // - 支持单 Leader / 多 Leader 分组选举
 // - Leader 持有 Lease，Follower Watch 等待
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -171,6 +171,41 @@ pub struct LeaderElectionService {
     shutdown_tx: ParkingRwLock<Option<watch::Sender<()>>>,
 }
 
+    /// 角色变更广播类型别名（C3：退位需主动广播，供业务回调停止以 leader 自居）。
+type RoleChangeTx = broadcast::Sender<(String, LeaderRole, Option<ElectionGroup>)>;
+
+/// C3：连续续期失败达到该次数即退位。
+const MAX_RENEW_FAILURES: u32 = 3;
+
+/// C3：退位核心逻辑（`step_down` 与后台续期任务共用）。
+///
+/// 1. best-effort 撤销 leader lease（服务端立即清 leader key；失败也无妨，lease 会按 TTL 过期）；
+/// 2. 本地角色置为 Follower 并移除组信息；
+/// 3. 广播角色变更（业务回调据此停止以 leader 自居）。
+async fn perform_step_down(
+    inner: &Arc<AgentInner>,
+    cache: &Arc<ParkingRwLock<ElectionCache>>,
+    role_change_tx: &RoleChangeTx,
+    group: &str,
+    candidate_id: &str,
+    reason: &str,
+) {
+    let lease_id = cache.read().get_group(group).map(|info| info.lease_id);
+    if let Some(lease_id) = lease_id {
+        if let Err(e) = inner.client.lease().revoke(lease_id).await {
+            tracing::warn!(
+                "LeaderElection: step-down revoke for group '{group}' failed ({e}); 
+                 server-side lease will expire by TTL"
+            );
+        }
+    }
+    cache.write().remove_group(group);
+    let _ = role_change_tx.send((group.to_string(), LeaderRole::Follower, None));
+    tracing::error!(
+        "LeaderElection: '{candidate_id}' STEPPED DOWN from group '{group}': {reason}"
+    );
+}
+
 impl LeaderElectionService {
     pub const NAME: &'static str = "leader_election";
 
@@ -254,6 +289,28 @@ impl LeaderElectionService {
         }
     }
 
+    /// C3：主动退位（续期失败 / 超时）。
+    ///
+    /// 服务端 lease 一旦过期，另一节点即可 campaign 成功；若本节点仍自认
+    /// leader，业务层会出现**双主**。故续期失败必须退位，而不是只打一条 warn。
+    pub async fn step_down(
+        &self,
+        group: &str,
+        candidate_id: &str,
+        reason: &str,
+    ) -> ServiceResult<()> {
+        perform_step_down(
+            &self.inner,
+            &self.cache,
+            &self.role_change_tx,
+            group,
+            candidate_id,
+            reason,
+        )
+        .await;
+        Ok(())
+    }
+
     /// 放弃 Leader 地位
     pub async fn resign(&self, group: &str, candidate_id: &str) -> ServiceResult<()> {
         let _storage_key = ElectionGroup::storage_key(group);
@@ -333,7 +390,10 @@ impl BaseService for LeaderElectionService {
 
         let cache = self.cache.clone();
         let inner = self.inner.clone();
+        let role_change_tx = self.role_change_tx.clone();
         tokio::spawn(async move {
+            // C3：每个选举组的连续续期失败计数（成功即清零）。
+            let mut renew_failures: HashMap<String, u32> = HashMap::new();
             loop {
                 tokio::select! {
                     _ = rx.changed() => {
@@ -343,16 +403,59 @@ impl BaseService for LeaderElectionService {
                     _ = tokio::time::sleep(Duration::from_secs(10)) => {
                         // 自动续期 Leader Lease
                         let leader_groups: Vec<String> = cache.read().leader_groups().into_iter().map(|s| s.to_string()).collect();
-                        // 先收集需要续期的 lease_id（在锁外进行）
-                        let renewals: Vec<(String, i64)> = {
+                        // 先收集需要续期的信息（在锁外进行）：group / lease / ttl / leader_id
+                        let renewals: Vec<(String, i64, u64, String)> = {
                             let guard = cache.read();
                             leader_groups.iter()
-                                .filter_map(|g| guard.get_group(g).map(|info| (g.clone(), info.lease_id)))
+                                .filter_map(|g| guard.get_group(g).map(|info| {
+                                    (g.clone(), info.lease_id, info.ttl_secs, info.leader_id.clone())
+                                }))
                                 .collect()
                         };
-                        for (group, lease_id) in renewals {
-                            if let Err(e) = inner.client.lease().keep_alive(lease_id).await {
-                                tracing::warn!("LeaderElectionService: failed to renew leader lease for group '{group}': {e}");
+                        for (group, lease_id, ttl_secs, candidate_id) in renewals {
+                            // C3：单次续期超过 TTL/2 即视为失败（不能无限等）。
+                            // server 侧 keep_alive 已有 lease_timeout（C2），这里再加一层
+                            // 客户端硬上限，保证分区/掉 quorum 时能在 TTL 内响应。
+                            let half_ttl = Duration::from_secs((ttl_secs / 2).max(1));
+                            let outcome = tokio::time::timeout(
+                                half_ttl,
+                                inner.client.lease().keep_alive(lease_id),
+                            )
+                            .await;
+
+                            let failure_reason = match outcome {
+                                Ok(Ok(_)) => {
+                                    renew_failures.remove(&group);
+                                    None
+                                }
+                                Ok(Err(e)) => Some(format!("renew failed: {e}")),
+                                Err(_) => Some(format!(
+                                    "renew exceeded TTL/2 ({half_ttl:?}) — no quorum or partition?"
+                                )),
+                            };
+
+                            if let Some(reason) = failure_reason {
+                                let count = renew_failures.entry(group.clone()).or_insert(0);
+                                *count = count.saturating_add(1);
+                                let count = *count;
+                                tracing::warn!(
+                                    "LeaderElectionService: failed to renew leader lease for 
+                                     group '{group}' ({reason}); consecutive failures: {count}"
+                                );
+                                if count >= MAX_RENEW_FAILURES {
+                                    perform_step_down(
+                                        &inner,
+                                        &cache,
+                                        &role_change_tx,
+                                        &group,
+                                        &candidate_id,
+                                        &format!(
+                                            "{count} consecutive lease renewals failed ({reason})"
+                                        ),
+                                    )
+                                    .await;
+                                    renew_failures.remove(&group);
+                                }
                             }
                         }
                     }

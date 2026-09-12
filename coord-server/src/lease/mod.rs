@@ -149,6 +149,25 @@ impl LeaseManager {
     /// 若 `requested_id` 为 0，自动分配新 ID。
     /// 返回 LeaseID。
     pub async fn grant_with_id(&self, ttl_seconds: i64, requested_id: LeaseID) -> Result<LeaseID> {
+        self.grant_with_id_checked(ttl_seconds, requested_id, |_| false)
+            .await
+    }
+
+    /// C1：分配 Lease ID 时**同时核对状态机**（raft 复制视图），而不仅是进程内 map。
+    ///
+    /// `id_taken(id)` 由调用方提供（典型实现：查 `/_lease/{id}` 状态机记录）。
+    /// 为何必要：新 leader 上任到 `rebuild()` 完成之间存在窗口，此时进程内计数器
+    /// 可能落后于状态机已有 ID，仅查内存 map 会分配到与既有租约**相同**的 ID，
+    /// 造成状态机内 Lease 记录被静默覆盖。
+    pub async fn grant_with_id_checked<F>(
+        &self,
+        ttl_seconds: i64,
+        requested_id: LeaseID,
+        id_taken: F,
+    ) -> Result<LeaseID>
+    where
+        F: Fn(LeaseID) -> bool,
+    {
         if ttl_seconds <= 0 || ttl_seconds > 86400 {
             return Err(Error::LeaseTTLOutOfRange {
                 ttl: ttl_seconds,
@@ -158,8 +177,8 @@ impl LeaseManager {
         }
 
         let lease_id = if requested_id != 0 {
-            // 检查指定 ID 是否已被占用
-            if self.leases.read().contains_key(&requested_id) {
+            // 指定 ID：内存 map 与状态机**都**必须空闲
+            if self.leases.read().contains_key(&requested_id) || id_taken(requested_id) {
                 return Err(Error::AlreadyExists {
                     resource: "lease",
                     key: format!("lease_id={requested_id}"),
@@ -172,7 +191,23 @@ impl LeaseManager {
             }
             requested_id
         } else {
-            NEXT_LEASE_ID.fetch_add(1, Ordering::SeqCst)
+            // 自动分配：跳过内存 map / 状态机已占用的 ID（有界探测，避免病态循环）
+            const MAX_PROBES: usize = 65_536;
+            let mut candidate = 0i64;
+            for _ in 0..MAX_PROBES {
+                let probe = NEXT_LEASE_ID.fetch_add(1, Ordering::SeqCst);
+                if !self.leases.read().contains_key(&probe) && !id_taken(probe) {
+                    candidate = probe;
+                    break;
+                }
+            }
+            if candidate == 0 {
+                return Err(Error::Internal(
+                    "lease id allocation exhausted (state machine reports all probe IDs taken)"
+                        .to_string(),
+                ));
+            }
+            candidate
         };
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(ttl_seconds as u64);

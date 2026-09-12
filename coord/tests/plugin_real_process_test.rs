@@ -355,10 +355,11 @@ async fn wait_for_mark(
 #[ignore = "real-process plugin suite; run explicitly: PLUGIN_REAL=1"]
 #[tokio::test(flavor = "multi_thread")]
 async fn plugin_real_agent_process_e2e() {
-    if std::env::var("PLUGIN_REAL").is_err() {
-        eprintln!("skipping plugin_real_process (set PLUGIN_REAL=1 to run)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("PLUGIN_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "PLUGIN_REAL must be set to run this real-process suite (E1)"
+    );
 
     let (grpc_port, raft_port) = find_ports();
     let tmp = tempfile::tempdir().unwrap();

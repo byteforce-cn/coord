@@ -154,6 +154,85 @@ fn split_scope(path: &str) -> Vec<String> {
         .collect()
 }
 
+// ──── 区间（range）覆盖判定 ────
+
+/// 计算以 `prefix` 开头的所有字节串在字典序下的上确界（最小上界）。
+///
+/// 即大于所有 `prefix` 前缀串的最小字节串；`prefix` 全为 `0xFF` 时返回 `None`
+/// （不存在这样的上界，按无界处理 → 调用方需 fail-closed）。
+pub fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut out = prefix.to_vec();
+    while let Some(last) = out.pop() {
+        if last != 0xFF {
+            out.push(last.wrapping_add(1));
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// 判断 scope 模式是否**整体覆盖**区间 `[key, range_end)`。
+///
+/// scope 语义与 [`ScopeTrie`] 一致（按 `/` 分段的前缀匹配，末段可为 `*` 通配）。
+/// 关键：不能只校验 `key`，否则持 `/app/a/` 的凭据发
+/// `Range(key=/app/a/x, range_end=/zzz)` 就能读全库（A1 越权）。
+///
+/// 实现：把 scope 模式归约为一个**安全字面前缀** `P`（任何以 `P` 开头的字节串都
+/// 必然命中该 scope），于是 `[key, range_end) ⊆ [P, succ(P))` 只需 `key` 与
+/// `range_end` 都以 `P` 开头。无法安全归约时 fail-closed。
+pub fn scope_covers_interval(scope: &str, key: &[u8], range_end: &[u8]) -> bool {
+    // match-all：空 scope、"/"、"//"、"/*"
+    if scope.is_empty() || scope.chars().all(|c| c == '/') || scope == "/*" {
+        return true;
+    }
+    // 单 key 请求：沿用逐点匹配语义
+    if range_end.is_empty() {
+        let mut trie = ScopeTrie::new();
+        return trie.insert(scope).is_ok()
+            && trie.matches(std::str::from_utf8(key).unwrap_or("\u{FFFD}"));
+    }
+    // range_end == "\0" 表示"从 key 到无穷"（etcd 语义）：有界 scope 不可能覆盖
+    if range_end == b"\0" {
+        return false;
+    }
+    let Some(prefix) = scope_literal_prefix(scope) else {
+        return false;
+    };
+    if prefix.is_empty() {
+        return true; // 归一为空前缀 = match-all（如 "/*"）
+    }
+    key.starts_with(&prefix) && range_end.starts_with(&prefix)
+}
+
+/// 将 scope 模式归约为一个**安全字面前缀**。
+///
+/// 安全要求：任何以返回值开头的字节串，按 `ScopeTrie` 分段语义都必须命中该 scope。
+/// 无法安全归约时返回 `None`（调用方 fail-closed）。
+fn scope_literal_prefix(scope: &str) -> Option<Vec<u8>> {
+    if let Some(base) = scope.strip_suffix("/*") {
+        if base.is_empty() {
+            return Some(Vec::new()); // "/*" = match-all
+        }
+        let mut p = base.to_string();
+        if !p.ends_with('/') {
+            p.push('/');
+        }
+        if p.contains('*') {
+            return None;
+        }
+        return Some(p.into_bytes());
+    }
+    // 中间/末尾内嵌的 `*`（非独立末段）无法安全归约
+    if scope.contains('*') {
+        return None;
+    }
+    // 只有以 '/' 结尾时，「字节前缀 ⊆ 分段前缀」才成立
+    if !scope.ends_with('/') {
+        return None;
+    }
+    Some(scope.as_bytes().to_vec())
+}
+
 // ──── Tests ────
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ import cn.byteforce.coord.sdk.internal.observability.NoopObservabilityProvider;
 
 import java.time.Duration;
 import java.util.Objects;
+import java.util.function.Supplier;
 
 /**
  * Immutable configuration for {@link CoordClient}.
@@ -22,6 +23,7 @@ public final class CoordConfig {
     private final String tlsCaCertPath;
     private final String tlsClientCertPath;
     private final String tlsClientKeyPath;
+    private final Supplier<String> authTokenSupplier;
     private final ObservabilityProvider observabilityProvider;
 
     private CoordConfig(Builder builder) {
@@ -34,6 +36,7 @@ public final class CoordConfig {
         this.tlsCaCertPath = builder.tlsCaCertPath;
         this.tlsClientCertPath = builder.tlsClientCertPath;
         this.tlsClientKeyPath = builder.tlsClientKeyPath;
+        this.authTokenSupplier = builder.authTokenSupplier;
         this.observabilityProvider = builder.observabilityProvider;
     }
 
@@ -52,6 +55,11 @@ public final class CoordConfig {
     public String getTlsCaCertPath() { return tlsCaCertPath; }
     public String getTlsClientCertPath() { return tlsClientCertPath; }
     public String getTlsClientKeyPath() { return tlsClientKeyPath; }
+    /**
+     * CCT 凭据来源（D2）。每次 RPC 调用时读取**当前** token，因此刷新无需重建 channel。
+     * 为 {@code null} 表示不注入 Authorization（服务端将按 fail-closed 拒绝需要凭据的调用）。
+     */
+    public Supplier<String> getAuthTokenSupplier() { return authTokenSupplier; }
     public ObservabilityProvider getObservabilityProvider() { return observabilityProvider; }
 
     /**
@@ -67,6 +75,7 @@ public final class CoordConfig {
         private String tlsCaCertPath;
         private String tlsClientCertPath;
         private String tlsClientKeyPath;
+        private Supplier<String> authTokenSupplier;
         private ObservabilityProvider observabilityProvider = new NoopObservabilityProvider();
 
         private Builder() {}
@@ -116,6 +125,25 @@ public final class CoordConfig {
             return this;
         }
 
+        /**
+         * 设置 CCT 凭据来源（D2）。推荐传入一个读取"当前 token"的 supplier
+         * （例如从线程安全的凭据缓存中读），这样 token 刷新无需重建 channel。
+         */
+        public Builder authTokenSupplier(Supplier<String> authTokenSupplier) {
+            this.authTokenSupplier = authTokenSupplier;
+            return this;
+        }
+
+        /**
+         * 便捷方法：固定 token（测试 / 短期凭据场景）。
+         * 长期运行请用 {@link #authTokenSupplier(Supplier)} 以便刷新后生效。
+         */
+        public Builder authToken(String authToken) {
+            Objects.requireNonNull(authToken, "authToken");
+            this.authTokenSupplier = () -> authToken;
+            return this;
+        }
+
         public Builder observabilityProvider(ObservabilityProvider observabilityProvider) {
             this.observabilityProvider = Objects.requireNonNull(observabilityProvider, "observabilityProvider");
             return this;
@@ -140,7 +168,19 @@ public final class CoordConfig {
                 throw new IllegalArgumentException("heartbeatThreads must be positive, got: " + heartbeatThreads);
             }
             if (useTls) {
-                throw new UnsupportedOperationException("TLS is not supported in this version");
+                // D1：配了 TLS 就必须提供 CA 证书路径，否则拒绝构建（fail-closed，
+                // 不做"静默降级为明文"）；客户端证书/私钥必须成对提供。
+                if (tlsCaCertPath == null || tlsCaCertPath.isBlank()) {
+                    throw new IllegalArgumentException(
+                            "useTls(true) requires tlsCaCertPath "
+                                    + "(fail-closed: no silent plaintext fallback)");
+                }
+                boolean hasCert = tlsClientCertPath != null && !tlsClientCertPath.isBlank();
+                boolean hasKey = tlsClientKeyPath != null && !tlsClientKeyPath.isBlank();
+                if (hasCert != hasKey) {
+                    throw new IllegalArgumentException(
+                            "tlsClientCertPath and tlsClientKeyPath must be configured together (mTLS)");
+                }
             }
         }
     }

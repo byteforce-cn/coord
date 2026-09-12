@@ -211,8 +211,9 @@ impl PolicyService {
         let opa_engine = Arc::new(match OpaEngine::new(OpaConfig::default()) {
             Ok(engine) => engine,
             Err(e) => {
-                tracing::error!("create OpaEngine failed: {e}");
-                unreachable!("OpaEngine::new cannot fail")
+                // OpaEngine::new 当前无失败路径；若失败则退化为空引擎，绝不 panic（E5）。
+                tracing::error!("create OpaEngine failed: {e}; falling back to empty engine");
+                OpaEngine::default()
             }
         });
         Self {
@@ -230,8 +231,9 @@ impl PolicyService {
         let opa_engine = Arc::new(match OpaEngine::new(OpaConfig::default()) {
             Ok(engine) => engine,
             Err(e) => {
-                tracing::error!("create OpaEngine failed: {e}");
-                unreachable!("OpaEngine::new cannot fail")
+                // OpaEngine::new 当前无失败路径；若失败则退化为空引擎，绝不 panic（E5）。
+                tracing::error!("create OpaEngine failed: {e}; falling back to empty engine");
+                OpaEngine::default()
             }
         });
         Self {

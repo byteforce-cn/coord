@@ -14,10 +14,12 @@ cd "$(dirname "$0")/.."
 
 echo "::group::clippy panic-path scan"
 # 输出到临时文件（JSON），避免与进度输出混流
+# E5：去掉 `|| true` —— clippy 编译失败/未产出结果必须让卡口变红，而不是静默放过。
+rm -f /tmp/coord-clippy.json
 CARGO_TERM_COLOR=never cargo clippy --workspace --all-targets --message-format json \
     -- -W clippy::unwrap_used -W clippy::expect_used -W clippy::panic \
-       -W clippy::unimplemented -W clippy::todo \
-    > /tmp/coord-clippy.json 2>/tmp/coord-clippy.err || true
+       -W clippy::unimplemented -W clippy::todo -W clippy::unreachable \
+    > /tmp/coord-clippy.json 2>/tmp/coord-clippy.err
 echo "::endgroup::"
 
 python3 - /tmp/coord-clippy.json <<'PYEOF'
@@ -44,6 +46,7 @@ try:
                 "clippy::panic",
                 "clippy::unimplemented",
                 "clippy::todo",
+                "clippy::unreachable",
             ):
                 continue
             for span in m.get("spans", []):
@@ -52,8 +55,9 @@ try:
                 if f:
                     spans.append((f, int(ln), code))
 except FileNotFoundError:
-    print("clippy output missing; skipping (treat as pass)")
-    sys.exit(0)
+    # E5：clippy 未产出 JSON 说明卡口没有真正执行——必须失败，不得“treat as pass”。
+    print("FAIL: clippy JSON output missing; panic-path gate did not run")
+    sys.exit(1)
 
 # 测试目录 / build.rs 直接剔除
 non_test = [

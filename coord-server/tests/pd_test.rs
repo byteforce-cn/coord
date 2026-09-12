@@ -1,628 +1,366 @@
-// pd_test.rs — Placement Driver 测试
+// pd_test.rs — Placement Driver **真实实现**测试（E3 整改）
 //
-// TDD: 测试 PD 核心调度逻辑
+// 整改背景（2026-09-12 架构评审复核 E3）：
+// 本文件此前自带一份 `NodeState` 副本 + 自洽断言 —— 验证的是"测试文件自己的
+// 副本模型"，与 `coord_server::pd` 的真实实现完全无关。即使 PD 实现被删空，
+// 这些测试依然全绿（假验证）。
+//
+// 现在全部改为直连真实 PD 类型：
+//   - `coord_server::pd::types`（NodeState / PlacementConstraint / PdConfig）
+//   - `coord_server::pd::scheduler`（SplitChecker / MergeChecker / KeySampler）
+//   - `coord_server::pd::meta_store::PdMetaStore`（持久化 Region 元数据）
 
-use coord_core::types::{Peer, PeerRole, RegionEpoch, RegionId, RegionMeta};
+use std::collections::HashMap;
+use std::time::Duration;
 
-// ============================================================================
-// Node 状态管理测试
-// ============================================================================
+use coord_core::types::{RegionEpoch, RegionId, RegionMeta};
+use coord_server::pd::meta_store::PdMetaStore;
+use coord_server::pd::scheduler::{KeySampler, MergeChecker, SplitChecker};
+use coord_server::pd::types::{NodeState, PdConfig, PlacementConstraint};
 
-#[derive(Debug, Clone)]
-struct NodeState {
-    node_id: u64,
-    raft_addr: String,
-    grpc_addr: String,
-    online: bool,
-    capacity_bytes: u64,
-    used_bytes: u64,
-    leader_count: u32,
-    region_count: u32,
-    labels: std::collections::HashMap<String, String>,
+const MIB: u64 = 1024 * 1024;
+
+// ──── 夹具（构造**真实** PD 类型）────
+
+fn node(id: u64, host: &str, zone: &str) -> NodeState {
+    let mut n = NodeState::new(id, format!("{host}:50052"), format!("{host}:50051"));
+    n.labels.insert("host".to_string(), host.to_string());
+    n.labels.insert("zone".to_string(), zone.to_string());
+    n.capacity_bytes = 1 << 40; // 1 TiB
+    n
 }
 
-impl NodeState {
-    fn new(node_id: u64, addr: &str) -> Self {
-        Self {
-            node_id,
-            raft_addr: format!("{}:50052", addr),
-            grpc_addr: format!("{}:50051", addr),
-            online: true,
-            capacity_bytes: 1024 * 1024 * 1024 * 1024, // 1 TB
-            used_bytes: 0,
-            leader_count: 0,
-            region_count: 0,
-            labels: std::collections::HashMap::new(),
-        }
+fn region(id: RegionId, start: &[u8], end: &[u8], size: u64, keys: u64) -> RegionMeta {
+    RegionMeta {
+        region_id: id,
+        start_key: start.to_vec(),
+        end_key: end.to_vec(),
+        epoch: RegionEpoch::initial(),
+        peers: vec![],
+        approximate_size: size,
+        approximate_keys: keys,
     }
 }
 
-#[test]
-fn test_node_state_creation() {
-    let node = NodeState::new(1, "192.168.1.1");
-    assert_eq!(node.node_id, 1);
-    assert!(node.online);
-    assert_eq!(node.region_count, 0);
-}
-
-#[test]
-fn test_node_available_capacity() {
-    let node = NodeState {
-        node_id: 1,
-        raft_addr: "addr".to_string(),
-        grpc_addr: "addr".to_string(),
-        online: true,
-        capacity_bytes: 1000,
-        used_bytes: 300,
-        leader_count: 0,
-        region_count: 0,
-        labels: std::collections::HashMap::new(),
-    };
-    assert_eq!(node.capacity_bytes - node.used_bytes, 700);
-}
-
-// ============================================================================
-// Split Checker 测试
-// ============================================================================
-
-struct SplitChecker {
-    split_size_threshold: u64, // bytes
-    split_keys_threshold: u64, // key count
-}
-
-impl SplitChecker {
-    fn new() -> Self {
-        Self {
-            split_size_threshold: 256 * 1024 * 1024, // 256 MB
-            split_keys_threshold: 1_000_000,
-        }
-    }
-
-    fn should_split(&self, region: &RegionMeta) -> bool {
-        region.approximate_size >= self.split_size_threshold
-            || region.approximate_keys >= self.split_keys_threshold
+/// 阈值收紧后的 PD 配置：split 阈值 = 1 MiB，merge 候选阈值 = 1 MiB
+/// （`MergeChecker` 的 max_merge_size 取自 region_split_size_mb）。
+fn pd_config() -> PdConfig {
+    PdConfig {
+        region_split_size_mb: 1,
+        region_split_keys: 1_000,
+        region_merge_size_mb: 1,
+        ..PdConfig::default()
     }
 }
 
+// ──── NodeState（真实类型）────
+
 #[test]
-fn test_split_checker_not_exceeding() {
-    let checker = SplitChecker::new();
-    let region = RegionMeta {
-        region_id: 1,
-        start_key: vec![0x00],
-        end_key: vec![0x55],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 100 * 1024 * 1024, // 100 MB
-        approximate_keys: 500_000,
-    };
-    assert!(!checker.should_split(&region));
+fn node_state_available_capacity() {
+    let mut n = node(1, "h1", "z1");
+    assert_eq!(n.node_id, 1);
+    assert_eq!(n.available_bytes(), 1 << 40);
+
+    n.used_bytes = 300;
+    assert_eq!(n.available_bytes(), (1 << 40) - 300);
 }
 
 #[test]
-fn test_split_checker_size_exceeds() {
-    let checker = SplitChecker::new();
-    let region = RegionMeta {
-        region_id: 1,
-        start_key: vec![0x00],
-        end_key: vec![0x55],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 300 * 1024 * 1024, // 300 MB > 256 MB
-        approximate_keys: 500_000,
-    };
-    assert!(checker.should_split(&region));
+fn node_state_heartbeat_drives_online_check() {
+    let mut n = node(1, "h1", "z1");
+    // 从未收到心跳 → 不在线
+    assert!(!n.is_online(Duration::from_secs(30)));
+
+    n.record_heartbeat();
+    assert!(n.online, "record_heartbeat must set online=true");
+    assert!(n.is_online(Duration::from_secs(30)));
+
+    // 真实语义（由本测试固化）：`is_online(timeout)` 只看**心跳新鲜度**；
+    // `mark_offline()` 只置 `online` 标志位（供 operator 显式置离线），
+    // 不会让最近有过心跳的节点立即被判离线。两者语义不同，不可混用。
+    n.mark_offline();
+    assert!(!n.online);
+    assert!(
+        n.is_online(Duration::from_secs(30)),
+        "is_online is heartbeat-recency based, distinct from the online flag"
+    );
+
+    // 心跳超出容忍窗口 → 判离线
+    assert!(!n.is_online(Duration::from_nanos(0)));
 }
+
+// ──── PlacementConstraint（真实拓扑约束）────
 
 #[test]
-fn test_split_checker_keys_exceeds() {
-    let checker = SplitChecker::new();
-    let region = RegionMeta {
-        region_id: 1,
-        start_key: vec![0x00],
-        end_key: vec![0x55],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 100 * 1024 * 1024,
-        approximate_keys: 1_500_000, // > 1M
-    };
-    assert!(checker.should_split(&region));
-}
-
-#[test]
-fn test_split_checker_both_exceed() {
-    let checker = SplitChecker::new();
-    let region = RegionMeta {
-        region_id: 1,
-        start_key: vec![0x00],
-        end_key: vec![0x55],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 500 * 1024 * 1024,
-        approximate_keys: 2_000_000,
-    };
-    assert!(checker.should_split(&region));
-}
-
-// ============================================================================
-// Merge Checker 测试
-// ============================================================================
-
-struct MergeChecker {
-    merge_size_threshold: u64, // below this, candidate for merge
-    max_merge_size: u64,       // merged total must be below this
-}
-
-impl MergeChecker {
-    fn new() -> Self {
-        Self {
-            merge_size_threshold: 16 * 1024 * 1024, // 16 MB
-            max_merge_size: 256 * 1024 * 1024,      // 256 MB
-        }
-    }
-
-    fn should_merge(&self, left: &RegionMeta, right: &RegionMeta) -> bool {
-        // Both regions must be below merge threshold
-        let left_small = left.approximate_size < self.merge_size_threshold;
-        let right_small = right.approximate_size < self.merge_size_threshold;
-
-        // Merged total must be below max size
-        let total_size = left.approximate_size + right.approximate_size;
-        let total_ok = total_size < self.max_merge_size;
-
-        // Ranges must be adjacent
-        let adjacent = left.end_key == right.start_key;
-
-        left_small && right_small && total_ok && adjacent
-    }
-}
-
-#[test]
-fn test_merge_checker_both_small() {
-    let checker = MergeChecker::new();
-    let left = RegionMeta {
-        region_id: 1,
-        start_key: vec![0x00],
-        end_key: vec![0x55],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 10 * 1024 * 1024, // 10 MB < 16 MB
-        approximate_keys: 100_000,
-    };
-    let right = RegionMeta {
-        region_id: 2,
-        start_key: vec![0x55],
-        end_key: vec![0xFF],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 5 * 1024 * 1024, // 5 MB < 16 MB
-        approximate_keys: 50_000,
-    };
-
-    assert!(checker.should_merge(&left, &right));
-}
-
-#[test]
-fn test_merge_checker_one_too_large() {
-    let checker = MergeChecker::new();
-    let left = RegionMeta {
-        region_id: 1,
-        start_key: vec![0x00],
-        end_key: vec![0x55],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 100 * 1024 * 1024, // 100 MB > 16 MB
-        approximate_keys: 500_000,
-    };
-    let right = RegionMeta {
-        region_id: 2,
-        start_key: vec![0x55],
-        end_key: vec![0xFF],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 5 * 1024 * 1024,
-        approximate_keys: 50_000,
-    };
-
-    assert!(!checker.should_merge(&left, &right));
-}
-
-#[test]
-fn test_merge_checker_not_adjacent() {
-    let checker = MergeChecker::new();
-    let left = RegionMeta {
-        region_id: 1,
-        start_key: vec![0x00],
-        end_key: vec![0x55],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 10 * 1024 * 1024,
-        approximate_keys: 50_000,
-    };
-    let right = RegionMeta {
-        region_id: 2,
-        start_key: vec![0x60], // 不连续：0x55 ≠ 0x60
-        end_key: vec![0xFF],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 5 * 1024 * 1024,
-        approximate_keys: 50_000,
-    };
-
-    assert!(!checker.should_merge(&left, &right));
-}
-
-#[test]
-fn test_merge_checker_total_too_large() {
-    let checker = MergeChecker::new();
-    let left = RegionMeta {
-        region_id: 1,
-        start_key: vec![0x00],
-        end_key: vec![0x55],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 15 * 1024 * 1024, // just under threshold
-        approximate_keys: 50_000,
-    };
-    let right = RegionMeta {
-        region_id: 2,
-        start_key: vec![0x55],
-        end_key: vec![0xFF],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 14 * 1024 * 1024 * 1024, // 14 GB - 合并后远超 256 MB
-        approximate_keys: 50_000,
-    };
-
-    assert!(!checker.should_merge(&left, &right));
-}
-
-// ============================================================================
-// Replica Checker 测试
-// ============================================================================
-
-struct ReplicaChecker {
-    target_replicas: usize,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum ReplicaAction {
-    None,
-    AddReplica,
-    RemoveReplica(usize), // index of peer to remove
-}
-
-impl ReplicaChecker {
-    fn new(target_replicas: usize) -> Self {
-        Self { target_replicas }
-    }
-
-    fn check(&self, region: &RegionMeta) -> ReplicaAction {
-        let voter_count = region
-            .peers
-            .iter()
-            .filter(|p| p.role == PeerRole::Voter)
-            .count();
-
-        if voter_count < self.target_replicas {
-            ReplicaAction::AddReplica
-        } else if voter_count > self.target_replicas {
-            // 移除多余的 Follower（保留 Leader 所需的 Voter）
-            ReplicaAction::RemoveReplica(voter_count - 1) // 简化：移除最后一个
-        } else {
-            ReplicaAction::None
-        }
-    }
-}
-
-#[test]
-fn test_replica_checker_healthy() {
-    let checker = ReplicaChecker::new(3);
-    let region = RegionMeta {
-        region_id: 1,
-        start_key: vec![],
-        end_key: vec![],
-        epoch: RegionEpoch::initial(),
-        peers: vec![
-            Peer {
-                node_id: 1,
-                raft_addr: "a".to_string(),
-                role: PeerRole::Voter,
-            },
-            Peer {
-                node_id: 2,
-                raft_addr: "b".to_string(),
-                role: PeerRole::Voter,
-            },
-            Peer {
-                node_id: 3,
-                raft_addr: "c".to_string(),
-                role: PeerRole::Voter,
-            },
-        ],
-        approximate_size: 0,
-        approximate_keys: 0,
-    };
-
-    assert_eq!(checker.check(&region), ReplicaAction::None);
-}
-
-#[test]
-fn test_replica_checker_needs_replica() {
-    let checker = ReplicaChecker::new(3);
-    let region = RegionMeta {
-        region_id: 1,
-        start_key: vec![],
-        end_key: vec![],
-        epoch: RegionEpoch::initial(),
-        peers: vec![Peer {
-            node_id: 1,
-            raft_addr: "a".to_string(),
-            role: PeerRole::Voter,
-        }],
-        approximate_size: 0,
-        approximate_keys: 0,
-    };
-
-    assert_eq!(checker.check(&region), ReplicaAction::AddReplica);
-}
-
-#[test]
-fn test_replica_checker_too_many_replicas() {
-    let checker = ReplicaChecker::new(3);
-    let region = RegionMeta {
-        region_id: 1,
-        start_key: vec![],
-        end_key: vec![],
-        epoch: RegionEpoch::initial(),
-        peers: vec![
-            Peer {
-                node_id: 1,
-                raft_addr: "a".to_string(),
-                role: PeerRole::Voter,
-            },
-            Peer {
-                node_id: 2,
-                raft_addr: "b".to_string(),
-                role: PeerRole::Voter,
-            },
-            Peer {
-                node_id: 3,
-                raft_addr: "c".to_string(),
-                role: PeerRole::Voter,
-            },
-            Peer {
-                node_id: 4,
-                raft_addr: "d".to_string(),
-                role: PeerRole::Voter,
-            },
-            Peer {
-                node_id: 5,
-                raft_addr: "e".to_string(),
-                role: PeerRole::Voter,
-            },
-        ],
-        approximate_size: 0,
-        approximate_keys: 0,
-    };
-
-    assert!(matches!(
-        checker.check(&region),
-        ReplicaAction::RemoveReplica(_)
-    ));
-}
-
-#[test]
-fn test_replica_checker_learners_not_counted() {
-    let checker = ReplicaChecker::new(3);
-    let region = RegionMeta {
-        region_id: 1,
-        start_key: vec![],
-        end_key: vec![],
-        epoch: RegionEpoch::initial(),
-        peers: vec![
-            Peer {
-                node_id: 1,
-                raft_addr: "a".to_string(),
-                role: PeerRole::Voter,
-            },
-            Peer {
-                node_id: 2,
-                raft_addr: "b".to_string(),
-                role: PeerRole::Voter,
-            },
-            Peer {
-                node_id: 3,
-                raft_addr: "c".to_string(),
-                role: PeerRole::Learner,
-            },
-        ],
-        approximate_size: 0,
-        approximate_keys: 0,
-    };
-
-    // 只有 2 个 Voter，需要添加
-    assert_eq!(checker.check(&region), ReplicaAction::AddReplica);
-}
-
-// ============================================================================
-// Balance Scheduler 测试（副本均衡）
-// ============================================================================
-
-#[test]
-fn test_balance_finds_overloaded_node() {
-    // 模拟节点负载：Node1 有 10 个 Region，Node2 有 2 个，Node3 有 3 个
-    let node_loads = vec![(1u64, 10u32), (2u64, 2u32), (3u64, 3u32)];
-
-    // 平均负载 = (10 + 2 + 3) / 3 = 5
-    let avg: f64 = node_loads.iter().map(|(_, c)| *c as f64).sum::<f64>() / node_loads.len() as f64;
-
-    let overloaded: Vec<_> = node_loads
-        .iter()
-        .filter(|(_, c)| *c as f64 > avg * 1.2) // 超过均值 20%
+fn placement_rejects_existing_replica_node() {
+    let c = PlacementConstraint::default();
+    let nodes: HashMap<u64, NodeState> = [(1, node(1, "h1", "z1")), (2, node(2, "h2", "z2"))]
+        .into_iter()
         .collect();
+    let target = nodes.get(&1).unwrap();
+    assert!(!c.can_place(target, &[1], &nodes), "peer node must be rejected");
+}
 
-    assert_eq!(overloaded.len(), 1);
-    assert_eq!(overloaded[0].0, 1); // Node1 过载 (10 > 6.0)
+#[test]
+fn placement_forbids_same_host_by_default() {
+    let c = PlacementConstraint::default();
+    assert!(c.forbid_same_host);
 
-    let underloaded: Vec<_> = node_loads
-        .iter()
-        .filter(|(_, c)| (*c as f64) < (avg * 0.8)) // 低于均值 20%
+    let nodes: HashMap<u64, NodeState> = [(1, node(1, "h1", "z1")), (2, node(2, "h1", "z2"))]
+        .into_iter()
         .collect();
-
-    // Node2 (2 < 4.0) 和 Node3 (3 < 4.0) 都欠载
-    assert_eq!(underloaded.len(), 2);
-    assert_eq!(underloaded[0].0, 2); // Node2
-    assert_eq!(underloaded[1].0, 3); // Node3
+    let target = nodes.get(&2).unwrap();
+    assert!(
+        !c.can_place(target, &[1], &nodes),
+        "same host must be rejected when forbid_same_host=true"
+    );
 }
 
 #[test]
-fn test_balance_no_action_when_balanced() {
-    let node_loads = vec![(1u64, 5u32), (2u64, 5u32), (3u64, 5u32)];
-
-    let avg: f64 = node_loads.iter().map(|(_, c)| *c as f64).sum::<f64>() / node_loads.len() as f64;
-
-    let overloaded: Vec<_> = node_loads
-        .iter()
-        .filter(|(_, c)| *c as f64 > avg * 1.2)
+fn placement_allows_different_host() {
+    let c = PlacementConstraint::default();
+    let nodes: HashMap<u64, NodeState> = [(1, node(1, "h1", "z1")), (2, node(2, "h2", "z1"))]
+        .into_iter()
         .collect();
-
-    assert!(overloaded.is_empty());
-}
-
-// ============================================================================
-// Operator 调度操作测试
-// ============================================================================
-
-#[derive(Debug, PartialEq, Eq)]
-enum Operator {
-    AddPeer {
-        region_id: RegionId,
-        node_id: u64,
-    },
-    RemovePeer {
-        region_id: RegionId,
-        node_id: u64,
-    },
-    TransferLeader {
-        region_id: RegionId,
-        to_node: u64,
-    },
-    SplitRegion {
-        region_id: RegionId,
-        split_key: Vec<u8>,
-    },
-    MergeRegion {
-        left: RegionId,
-        right: RegionId,
-    },
+    let target = nodes.get(&2).unwrap();
+    assert!(c.can_place(target, &[1], &nodes));
 }
 
 #[test]
-fn test_operator_split_region() {
-    let op = Operator::SplitRegion {
-        region_id: 1,
-        split_key: vec![0x55],
+fn placement_forbids_same_zone_when_enabled() {
+    let c = PlacementConstraint {
+        forbid_same_host: false,
+        forbid_same_zone: true,
+        ..PlacementConstraint::default()
     };
-    assert!(matches!(op, Operator::SplitRegion { region_id: 1, .. }));
+    let nodes: HashMap<u64, NodeState> = [(1, node(1, "h1", "z1")), (2, node(2, "h2", "z1"))]
+        .into_iter()
+        .collect();
+    let target = nodes.get(&2).unwrap();
+    assert!(
+        !c.can_place(target, &[1], &nodes),
+        "same zone must be rejected when forbid_same_zone=true"
+    );
 }
 
 #[test]
-fn test_operator_add_peer() {
-    let op = Operator::AddPeer {
-        region_id: 1,
-        node_id: 2,
-    };
-    assert!(matches!(
-        op,
-        Operator::AddPeer {
-            region_id: 1,
-            node_id: 2
+fn select_best_node_prefers_diverse_zone() {
+    let c = PlacementConstraint::default();
+    let nodes: HashMap<u64, NodeState> = [
+        (1, node(1, "h1", "z1")),
+        (2, node(2, "h2", "z1")), // same zone as peer
+        (3, node(3, "h3", "z2")), // different zone
+    ]
+    .into_iter()
+    .collect();
+
+    let candidates: Vec<&NodeState> = nodes.values().collect();
+    let best = c
+        .select_best_node(&candidates, &[1], &nodes)
+        .expect("a placement candidate must exist");
+    assert_ne!(best.node_id, 1, "existing peer must not be selected");
+    assert_eq!(
+        best.node_id, 3,
+        "diverse-zone node must be preferred (got {})",
+        best.node_id
+    );
+}
+
+// ──── SplitChecker（真实阈值判定）────
+
+#[test]
+fn split_checker_below_threshold_no_op() {
+    let checker = SplitChecker::new(&pd_config());
+    let r = region(1, b"a", b"z", MIB - 1, 999);
+    assert!(checker.check(&r, b"m".to_vec()).is_none());
+}
+
+#[test]
+fn split_checker_size_threshold_triggers() {
+    let checker = SplitChecker::new(&pd_config());
+    let r = region(7, b"a", b"z", MIB, 0); // >= 阈值
+    let op = checker.check(&r, b"m".to_vec()).expect("must split");
+    match op {
+        coord_server::pd::Operator::SplitRegion {
+            region_id,
+            split_key,
+            ..
+        } => {
+            assert_eq!(region_id, 7);
+            assert_eq!(split_key, b"m".to_vec(), "must use the provided split key");
         }
-    ));
-}
-
-#[test]
-fn test_operator_merge_region() {
-    let op = Operator::MergeRegion { left: 1, right: 2 };
-    assert!(matches!(op, Operator::MergeRegion { left: 1, right: 2 }));
-}
-
-// ============================================================================
-// PD Region Meta Store 基本操作测试
-// ============================================================================
-
-#[test]
-fn test_pd_meta_store_basic_crud() {
-    // 模拟内存 PD Meta Store
-    let mut store: std::collections::HashMap<RegionId, RegionMeta> =
-        std::collections::HashMap::new();
-
-    // Create
-    let meta = RegionMeta {
-        region_id: 1,
-        start_key: vec![0x00],
-        end_key: vec![0x55],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 0,
-        approximate_keys: 0,
-    };
-    store.insert(1, meta.clone());
-
-    // Read
-    assert!(store.get(&1).is_some());
-    assert!(store.get(&999).is_none());
-
-    // Update
-    if let Some(m) = store.get_mut(&1) {
-        m.approximate_size = 1024;
+        other => panic!("expected SplitRegion, got {other:?}"),
     }
-    assert_eq!(store.get(&1).unwrap().approximate_size, 1024);
-
-    // Delete
-    store.remove(&1);
-    assert!(store.get(&1).is_none());
 }
 
 #[test]
-fn test_pd_route_by_key() {
-    // 模拟 PD 根据 key 查找 Region
-    let mut regions: Vec<RegionMeta> = Vec::new();
-    regions.push(RegionMeta {
-        region_id: 1,
-        start_key: vec![0x00],
-        end_key: vec![0x55],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 0,
-        approximate_keys: 0,
-    });
-    regions.push(RegionMeta {
-        region_id: 2,
-        start_key: vec![0x55],
-        end_key: vec![],
-        epoch: RegionEpoch::initial(),
-        peers: vec![],
-        approximate_size: 0,
-        approximate_keys: 0,
-    });
+fn split_checker_keys_threshold_triggers() {
+    let checker = SplitChecker::new(&pd_config());
+    let r = region(8, b"a", b"z", 1, 1_000); // >= keys 阈值
+    assert!(checker.check(&r, b"m".to_vec()).is_some());
+}
 
-    // 按 start_key 排序
-    regions.sort_by(|a, b| a.start_key.cmp(&b.start_key));
+// ──── MergeChecker（真实相邻/大小判定）────
 
-    // 二分查找
-    fn find_region(regions: &[RegionMeta], key: &[u8]) -> Option<RegionId> {
-        let pos = regions.binary_search_by(|r| r.start_key.as_slice().cmp(key));
-        match pos {
-            Ok(idx) => Some(regions[idx].region_id),
-            Err(0) => None,
-            Err(idx) => Some(regions[idx - 1].region_id),
+#[test]
+fn merge_checker_rejects_non_adjacent() {
+    let checker = MergeChecker::new(&pd_config());
+    let left = region(1, b"a", b"m", MIB / 4, 10);
+    let right = region(2, b"n", b"z", MIB / 4, 10); // 不连续（m != n）
+    assert!(checker.check(&left, &right).is_none());
+}
+
+#[test]
+fn merge_checker_merges_small_adjacent() {
+    let checker = MergeChecker::new(&pd_config());
+    let left = region(1, b"a", b"m", MIB / 4, 10);
+    let right = region(2, b"m", b"z", MIB / 4, 10);
+    let op = checker.check(&left, &right).expect("must merge");
+    match op {
+        coord_server::pd::Operator::MergeRegion { left, right } => {
+            assert_eq!((left, right), (1, 2));
         }
+        other => panic!("expected MergeRegion, got {other:?}"),
     }
+}
 
-    assert_eq!(find_region(&regions, &[0x00]), Some(1));
-    assert_eq!(find_region(&regions, &[0x54]), Some(1));
-    assert_eq!(find_region(&regions, &[0x55]), Some(2));
-    assert_eq!(find_region(&regions, &[0xFF]), Some(2));
+#[test]
+fn merge_checker_rejects_when_one_side_over_threshold() {
+    let checker = MergeChecker::new(&pd_config());
+    let left = region(1, b"a", b"m", MIB, 10); // >= merge 阈值
+    let right = region(2, b"m", b"z", MIB / 4, 10);
+    assert!(checker.check(&left, &right).is_none());
+}
+
+#[test]
+fn merge_checker_rejects_when_combined_too_large() {
+    let checker = MergeChecker::new(&pd_config());
+    // 各自 < 1 MiB，但合计 1.2 MiB >= max_merge_size（= region_split_size_mb）
+    let left = region(1, b"a", b"m", (MIB * 6) / 10, 10);
+    let right = region(2, b"m", b"z", (MIB * 6) / 10, 10);
+    assert!(checker.check(&left, &right).is_none());
+}
+
+// ──── KeySampler（真实采样/中位数）────
+
+#[test]
+fn key_sampler_selects_median() {
+    let sampler = KeySampler::new(100);
+    let samples = vec![b"c".to_vec(), b"a".to_vec(), b"b".to_vec()];
+    assert_eq!(sampler.select_split_key(&samples), Some(b"b".to_vec()));
+
+    assert_eq!(sampler.select_split_key(&[]), None);
+}
+
+#[test]
+fn key_sampler_or_fallback_stays_within_range() {
+    let sampler = KeySampler::new(100);
+    let start = b"a".to_vec();
+    let end = b"z".to_vec();
+
+    // 无样本 → 数学中点，必须落在 [start, end)
+    let mid = sampler.select_or_fallback(&[], &start, &end);
+    assert!(mid >= start && mid < end, "mid key must stay in range");
+
+    // 有样本 → 中位数（不得越过区间）
+    let samples = vec![b"b".to_vec(), b"m".to_vec(), b"y".to_vec()];
+    let picked = sampler.select_or_fallback(&samples, &start, &end);
+    assert!(picked >= start && picked < end);
+}
+
+#[test]
+fn key_sampler_reservoir_sample_bounded_and_from_input() {
+    let sampler = KeySampler::new(100);
+    let keys: Vec<Vec<u8>> = (0..10_000u32).map(|i| i.to_string().into_bytes()).collect();
+    let sampled = sampler.reservoir_sample(keys.clone());
+
+    assert_eq!(sampled.len(), 100, "must respect max_samples");
+    for s in &sampled {
+        assert!(keys.contains(s), "sample must come from the input keys");
+    }
+}
+
+// ──── PdMetaStore（真实持久化 Region 元数据）────
+
+fn open_store() -> (tempfile::TempDir, PdMetaStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PdMetaStore::open(dir.path()).expect("PdMetaStore::open");
+    (dir, store)
+}
+
+#[test]
+fn meta_store_create_and_lookup_by_key() {
+    let (_dir, store) = open_store();
+    store.create_region(region(1, b"", b"m", 0, 0)).unwrap();
+    store.create_region(region(2, b"m", b"", 0, 0)).unwrap();
+
+    assert_eq!(store.region_count(), 2);
+    assert_eq!(store.get_region_by_key(b"apple").map(|r| r.region_id), Some(1));
+    assert_eq!(store.get_region_by_key(b"peach").map(|r| r.region_id), Some(2));
+    assert!(store.get_region_by_key(b"zebra").is_some());
+    assert_eq!(store.get_region(1).map(|r| r.end_key), Some(b"m".to_vec()));
+}
+
+#[test]
+fn meta_store_rejects_duplicate_start_key() {
+    let (_dir, store) = open_store();
+    store.create_region(region(1, b"a", b"m", 0, 0)).unwrap();
+    assert!(
+        store.create_region(region(2, b"a", b"z", 0, 0)).is_err(),
+        "duplicate start_key must be rejected"
+    );
+}
+
+#[test]
+fn meta_store_scan_and_adjacent_pairs() {
+    let (_dir, store) = open_store();
+    store.create_region(region(1, b"", b"m", 0, 0)).unwrap();
+    store.create_region(region(2, b"m", b"t", 0, 0)).unwrap();
+    store.create_region(region(3, b"t", b"", 0, 0)).unwrap();
+
+    let scanned = store.scan_regions(b"m", 10);
+    assert_eq!(
+        scanned.iter().map(|r| r.region_id).collect::<Vec<_>>(),
+        vec![2, 3],
+        "scan must return regions at/after the start key, in order"
+    );
+
+    let pairs = store.get_adjacent_pairs();
+    assert_eq!(pairs.len(), 2, "3 regions → 2 adjacent pairs");
+    let ids: Vec<(RegionId, RegionId)> = pairs
+        .iter()
+        .map(|(l, r)| (l.region_id, r.region_id))
+        .collect();
+    assert_eq!(ids, vec![(1, 2), (2, 3)]);
+}
+
+#[test]
+fn meta_store_delete_removes_region_and_key_index() {
+    let (_dir, store) = open_store();
+    store.create_region(region(1, b"", b"z", 0, 0)).unwrap();
+    store.delete_region(1).unwrap();
+
+    assert_eq!(store.region_count(), 0);
+    assert!(store.get_region(1).is_none());
+    assert!(
+        store.get_region_by_key(b"anything").is_none(),
+        "key index must be cleaned up on delete"
+    );
+}
+
+#[test]
+fn meta_store_allocate_region_id_follows_max_region_id() {
+    let (_dir, store) = open_store();
+    // 空 store：当前实现（基于最大 Region ID + 1）返回 1
+    assert_eq!(store.allocate_region_id(), 1);
+
+    store.create_region(region(5, b"a", b"m", 0, 0)).unwrap();
+    assert_eq!(store.allocate_region_id(), 6);
+
+    store.create_region(region(7, b"m", b"z", 0, 0)).unwrap();
+    assert_eq!(store.allocate_region_id(), 8);
+
+    // 分配仅是**建议值**：尚未落库，由调用方 create/update（failover 场景需
+    // 走 raft 共识，见 PdMetaStore 文档注释）。
+    assert!(store.get_region(8).is_none());
 }

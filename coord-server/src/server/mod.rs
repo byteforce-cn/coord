@@ -2090,8 +2090,14 @@ impl Lease for CoordNode {
             .ok_or_else(|| tonic::Status::unavailable("lease manager not available"))?;
 
         // LeaseManager 负责 TTL 校验与 ID 分配（内存 TTL 缓存）
+        // C1：分配时**同时核对状态机**（`/_lease/{id}`）——新 leader 上任到
+        // `rebuild()` 完成之间进程内计数器可能落后，仅查内存 map 会分配到与
+        // 状态机既有租约相同的 ID。
+        let storage = Arc::clone(&self.storage);
         let id = lease_mgr
-            .grant_with_id(req.ttl, req.id)
+            .grant_with_id_checked(req.ttl, req.id, |candidate| {
+                matches!(storage.get_lease_record(candidate), Ok(Some(_)))
+            })
             .await
             .map_err(map_err)?;
 
@@ -2156,6 +2162,8 @@ impl Lease for CoordNode {
         let raft = self.raft.clone();
         let storage = Arc::clone(&self.storage);
         let node_id = self.node_id;
+        // C2：keep_alive 的 raft 提交必须带上超时（与 submit_lease_op 同口径）。
+        let lease_timeout = self.limits.read().lease_timeout;
 
         let mut stream = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<LeaseKeepAliveResponse, tonic::Status>>(16);
@@ -2199,9 +2207,17 @@ impl Lease for CoordNode {
                 // KeepAlive 入 raft 日志（推进 keepalive_revision）
                 let raft_result = if let Some(ref raft) = raft {
                     let cmd = Command::Lease(op);
-                    raft.client_write(cmd).await.map(|_| ()).map_err(|e| {
-                        tonic::Status::internal(format!("raft lease write failed: {e}"))
-                    })
+                    // C2：与 submit_lease_op 一致 —— quorum 丢失时必须在
+                    // lease_timeout 内返回错误，不得无限挂起（R-SVC-18 同口径）。
+                    match tokio::time::timeout(lease_timeout, raft.client_write(cmd)).await {
+                        Ok(Ok(_)) => Ok(()),
+                        Ok(Err(e)) => {
+                            Err(tonic::Status::internal(format!("raft lease write failed: {e}")))
+                        }
+                        Err(_) => Err(tonic::Status::deadline_exceeded(
+                            "lease keep-alive timed out (no quorum?)",
+                        )),
+                    }
                 } else {
                     storage
                         .apply_lease_op_standalone(&op)

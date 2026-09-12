@@ -82,6 +82,9 @@ struct KvEntry {
 pub struct KvCache {
     inner: LruCache<Vec<u8>, KvEntry>,
     ttl: Duration,
+    /// B1：`ttl_secs == 0` 表示**读缓存关闭**（`get` 恒 miss、`put` 空操作）。
+    /// 默认关闭：本地读缓存会引入跨 agent 陈旧读，适合显式开启并承担 TTL 窗口。
+    enabled: bool,
     hits: AtomicU64,
     misses: AtomicU64,
 }
@@ -90,21 +93,32 @@ impl KvCache {
     /// 创建 KV 读缓存
     ///
     /// - `max_entries`: 最大缓存条目数
-    /// - `ttl_secs`: 缓存 TTL（秒）
+    /// - `ttl_secs`: 缓存 TTL（秒）；**0 = 关闭读缓存**（B1）
     pub fn new(max_entries: usize, ttl_secs: u64) -> Self {
         let cap = NonZeroUsize::new(max_entries.max(1)).unwrap_or(NonZeroUsize::MIN);
         Self {
             inner: LruCache::new(cap),
             ttl: Duration::from_secs(ttl_secs),
+            enabled: ttl_secs > 0,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
     }
 
+    /// 读缓存是否启用（`cache_kv_ttl_secs > 0`）。
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// 读取缓存
     ///
     /// 返回 Some(value) 若命中且未过期，否则返回 None。
+    /// 关闭状态下恒为 miss（不读也不写）。
     pub fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+        if !self.enabled {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
         match self.inner.get(key) {
             Some(entry) if entry.expires_at > Instant::now() => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
@@ -124,7 +138,12 @@ impl KvCache {
     }
 
     /// 写入缓存
+    ///
+    /// 关闭状态下为空操作（B1：关闭后不再堆积无用条目）。
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        if !self.enabled {
+            return;
+        }
         let entry = KvEntry {
             value,
             expires_at: Instant::now() + self.ttl,

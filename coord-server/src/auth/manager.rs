@@ -19,7 +19,7 @@ use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 
-use coord_core::auth::trie::ScopeTrie;
+use coord_core::auth::trie::{prefix_successor, scope_covers_interval, ScopeTrie};
 use coord_core::error::{Error, Result};
 
 // ──── Permission ────
@@ -70,6 +70,44 @@ impl Permission {
         }
         // Range match: key_prefix <= key < range_end
         key >= &self.key_prefix[..] && key < &self.range_end[..]
+    }
+
+    /// 本权限是否覆盖整个区间 `[key, range_end)`（A1：区间必须整体包含）。
+    pub fn allows_read_range(&self, key: &[u8], range_end: &[u8]) -> bool {
+        if self.perm_type == PermissionType::Write {
+            return false;
+        }
+        self.range_matches(key, range_end)
+    }
+
+    /// 本权限是否覆盖整个区间 `[key, range_end)`（写语义）。
+    pub fn allows_write_range(&self, key: &[u8], range_end: &[u8]) -> bool {
+        if self.perm_type == PermissionType::Read {
+            return false;
+        }
+        self.range_matches(key, range_end)
+    }
+
+    /// 范围包含判定：整个 `[key, range_end)` 必须落在本权限允许的 key 区间内。
+    fn range_matches(&self, key: &[u8], range_end: &[u8]) -> bool {
+        if range_end.is_empty() {
+            return self.key_matches(key);
+        }
+        if range_end == b"\0" {
+            return false; // 无上界，任何有界权限都不能覆盖
+        }
+        if !key.starts_with(&self.key_prefix) {
+            return false;
+        }
+        let upper: Vec<u8> = if self.range_end.is_empty() {
+            match prefix_successor(&self.key_prefix) {
+                Some(u) => u,
+                None => return false, // 前缀全 0xFF → 无上界，fail-closed
+            }
+        } else {
+            self.range_end.clone()
+        };
+        range_end <= upper.as_slice()
     }
 }
 
@@ -547,6 +585,59 @@ impl AuthManager {
                     role.permissions.iter().any(|p| p.allows_write(key))
                 }
                 "data:txn:execute" => role.permissions.iter().any(|p| p.allows_write(key)),
+                _ => false,
+            };
+            if legacy_ok {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// 区间版能力判定（A1）：整个 `[key, range_end)` 必须被授权覆盖。
+    ///
+    /// 与 [`Self::check_capability`] 规则一致，但 scope 判定为**区间包含**而非
+    /// 单 key 命中：持 `/app/a/` 者不可用 `Range(key=/app/a/x, range_end=/zzz)` 读全库。
+    pub fn check_capability_range(
+        &self,
+        roles: &[String],
+        capability_id: &str,
+        key: &[u8],
+        range_end: &[u8],
+    ) -> bool {
+        let roles_map = self.roles.read();
+
+        for role_name in roles {
+            if role_name == ROOT_ROLE {
+                return true;
+            }
+
+            let Some(role) = roles_map.get(role_name) else {
+                continue;
+            };
+
+            for grant in &role.capability_grants {
+                if grant.capability_id != capability_id {
+                    continue;
+                }
+                if grant.scope.is_empty() {
+                    return true;
+                }
+                if scope_covers_interval(&grant.scope, key, range_end) {
+                    return true;
+                }
+            }
+
+            let legacy_ok = match capability_id {
+                "data:kv:read" => role
+                    .permissions
+                    .iter()
+                    .any(|p| p.allows_read_range(key, range_end)),
+                "data:kv:write" | "data:kv:delete" | "data:txn:execute" => role
+                    .permissions
+                    .iter()
+                    .any(|p| p.allows_write_range(key, range_end)),
                 _ => false,
             };
             if legacy_ok {

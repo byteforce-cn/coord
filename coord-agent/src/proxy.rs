@@ -161,15 +161,16 @@ impl Kv for KvProxy {
         };
 
         let revision = if let Some(ref inner) = self.inner {
-            // C1: 写操作前主动失效缓存（避免读到旧值）
-            inner.cache.kv.lock().invalidate(&req.key);
-            // B2: 转发到真实 Server（保留 lease_id 和 request_id）
-            inner
+            // B1：**先写 Server，再失效缓存**。此前是写前失效，存在竞态窗口：
+            // 失效与写入之间的并发读会把旧值重新回填进缓存。
+            let revision = inner
                 .client
                 .kv()
                 .put_full(&req.key, &req.value, req.lease_id, &request_id)
                 .await
-                .map_err(map_core_error)?
+                .map_err(map_core_error)?;
+            inner.cache.kv.lock().invalidate(&req.key);
+            revision
         } else {
             // B1 骨架：占位响应
             1
@@ -188,24 +189,30 @@ impl Kv for KvProxy {
         let keys_only = req.keys_only;
         let count_only = req.count_only;
 
-        // C1: 优先查本地缓存（仅在非 count_only、单键查询时）
-        if !count_only && req.range_end.is_empty() {
+        // B1：本地读缓存仅在已显式开启 + 单键 + **非历史读**（revision==0）时参与。
+        // 历史读（revision!=0）必须直连 Server，否则会命中最新缓存而返回错误版本。
+        if !count_only && req.range_end.is_empty() && req.revision == 0 {
             if let Some(ref inner) = self.inner {
                 let mut cache = inner.cache.kv.lock();
-                if let Some(cached_val) = cache.get(&req.key) {
-                    let kv = coord_proto::kv::KeyValue {
-                        key: req.key.clone(),
-                        value: if keys_only { Vec::new() } else { cached_val },
-                        create_revision: 0,
-                        mod_revision: 0,
-                        version: 1,
-                        lease_id: 0,
-                    };
-                    return Ok(tonic::Response::new(RangeResponse {
-                        kvs: vec![kv],
-                        count: 1,
-                        revision: 0,
-                    }));
+                if cache.is_enabled() {
+                    if let Some(cached_val) = cache.get(&req.key) {
+                        // 缓存只保存 value，不含任何 MVCC 元数据 → 全部置 0 表示
+                        // “未知”。**绝不伪造** create_revision/mod_revision/version/
+                        // lease_id/response.revision（B1）。
+                        let kv = coord_proto::kv::KeyValue {
+                            key: req.key.clone(),
+                            value: if keys_only { Vec::new() } else { cached_val },
+                            create_revision: 0,
+                            mod_revision: 0,
+                            version: 0,
+                            lease_id: 0,
+                        };
+                        return Ok(tonic::Response::new(RangeResponse {
+                            kvs: vec![kv],
+                            count: 1,
+                            revision: 0,
+                        }));
+                    }
                 }
             }
         }
@@ -578,6 +585,9 @@ impl Watch for WatchProxy {
 
                     // 后台任务：将 Server 事件转发给本地客户端
                     let metrics_for_task = self.metrics.clone();
+                    // B1：Watch 驱动缓存失效 —— 此前只在 put 侧失效，导致 A 写入后
+                    // B 端在本地 TTL 到期前仍读到旧值。
+                    let cache_for_task = Arc::clone(agent_inner);
                     tokio::spawn(async move {
                         // R-AGT-20：退订（任务结束/客户端断开时）
                         let _decrement = DecrementGuard {
@@ -586,6 +596,13 @@ impl Watch for WatchProxy {
                         loop {
                             match server_event_rx.recv().await {
                                 Some(Ok(event)) => {
+                                    // 任何事件都失效该 watch 前缀下的读缓存（保守失效：
+                                    // 宁可多清，不可残留陈旧值）。
+                                    cache_for_task
+                                        .cache
+                                        .kv
+                                        .lock()
+                                        .invalidate_prefix(&prefix);
                                     let resp = WatchResponse {
                                         watch_id: 0,
                                         events: vec![event],

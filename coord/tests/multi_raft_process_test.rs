@@ -318,10 +318,11 @@ async fn read_until(nodes: &[&RealNode], key: &[u8], expected: &[u8], timeout: D
 #[tokio::test]
 #[ignore = "real-process multi-raft suite; run explicitly: MULTI_RAFT_REAL=1"]
 async fn multi_raft_real_three_nodes_three_regions() {
-    if std::env::var("MULTI_RAFT_REAL").is_err() {
-        eprintln!("skipping multi_raft_process (set MULTI_RAFT_REAL=1 to run)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("MULTI_RAFT_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "MULTI_RAFT_REAL must be set to run this real-process suite (E1)"
+    );
     // 与同文件其余真实进程用例串行（见 PROCESS_SUITE_LOCK 注释）
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
 
@@ -470,10 +471,11 @@ async fn multi_raft_real_three_nodes_three_regions() {
 #[tokio::test]
 #[ignore = "real-process multi-raft suite; run explicitly: MULTI_RAFT_REAL=1"]
 async fn pd_global_queue_failover_three_nodes() {
-    if std::env::var("MULTI_RAFT_REAL").is_err() {
-        eprintln!("skipping pd failover process test (set MULTI_RAFT_REAL=1 to run)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("MULTI_RAFT_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "MULTI_RAFT_REAL must be set to run this real-process suite (E1)"
+    );
     // 与同文件其余真实进程用例串行（见 PROCESS_SUITE_LOCK 注释）
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
 
@@ -996,10 +998,11 @@ async fn read_key_maybe(
 #[tokio::test]
 #[ignore = "real-process multi-raft suite; run explicitly: MULTI_RAFT_REAL=1"]
 async fn pd_transfer_leader_balance_real_drill() {
-    if std::env::var("MULTI_RAFT_REAL").is_err() {
-        eprintln!("skipping transfer-leader drill (set MULTI_RAFT_REAL=1 to run)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("MULTI_RAFT_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "MULTI_RAFT_REAL must be set to run this real-process suite (E1)"
+    );
     // 与同文件其余真实进程用例串行
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
 
@@ -1130,10 +1133,11 @@ async fn pd_transfer_leader_balance_real_drill() {
 #[tokio::test]
 #[ignore = "real-process multi-raft suite; run explicitly: MULTI_RAFT_REAL=1"]
 async fn pd_add_peer_target_increase_real_drill() {
-    if std::env::var("MULTI_RAFT_REAL").is_err() {
-        eprintln!("skipping add-peer drill (set MULTI_RAFT_REAL=1 to run)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("MULTI_RAFT_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "MULTI_RAFT_REAL must be set to run this real-process suite (E1)"
+    );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
 
     const PD_TOML_T2: &str = "[multi_raft.pd]\nenabled = true\nheartbeat_interval_ms = 300\n\
@@ -1270,10 +1274,11 @@ async fn pd_add_peer_target_increase_real_drill() {
 #[tokio::test]
 #[ignore = "real-process multi-raft suite; run explicitly: MULTI_RAFT_REAL=1"]
 async fn mr_off_on_off_upgrade_rollback_real_drill() {
-    if std::env::var("MULTI_RAFT_REAL").is_err() {
-        eprintln!("skipping off/on/off drill (set MULTI_RAFT_REAL=1 to run)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("MULTI_RAFT_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "MULTI_RAFT_REAL must be set to run this real-process suite (E1)"
+    );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -1415,10 +1420,11 @@ async fn mr_off_on_off_upgrade_rollback_real_drill() {
 #[tokio::test]
 #[ignore = "real-process perf probe; MULTI_RAFT_REAL=1 (run explicitly)"]
 async fn perf_multi_region_vs_single_raft_probe() {
-    if std::env::var("MULTI_RAFT_REAL").is_err() {
-        eprintln!("skipping perf probe (set MULTI_RAFT_REAL=1 to run)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("MULTI_RAFT_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "MULTI_RAFT_REAL must be set to run this real-process suite (E1)"
+    );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
 
     const N_PUTS: u32 = 200;
@@ -1645,10 +1651,11 @@ impl RegionRegisterChecker {
 #[tokio::test]
 #[ignore = "real-process chaos suite; MULTI_RAFT_REAL=1 (run explicitly)"]
 async fn chaos_real_region_mode_kill_partition() {
-    if std::env::var("MULTI_RAFT_REAL").is_err() {
-        eprintln!("skipping region-mode chaos (set MULTI_RAFT_REAL=1 to run)");
-        return;
-    }
+    // E1：拒绝把「未跑」伪装成「通过」——门控变量缺失即失败。
+    assert!(
+        std::env::var("MULTI_RAFT_REAL").map(|v| !v.is_empty()).unwrap_or(false),
+        "MULTI_RAFT_REAL must be set to run this real-process suite (E1)"
+    );
     let _suite_guard = PROCESS_SUITE_LOCK.lock().await;
 
     const PD_TOML: &str = "[multi_raft.pd]\nenabled = true\nheartbeat_interval_ms = 300\n\

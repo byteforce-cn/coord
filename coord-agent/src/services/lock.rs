@@ -136,25 +136,15 @@ impl LockCache {
         self.held.is_empty()
     }
 
-    /// 清理已过期的锁记录
-    pub fn cleanup_expired(&mut self) -> usize {
-        let names = self.cleanup_expired_names();
-        names.len()
-    }
-
-    /// 清理已过期的锁记录并返回被清理的锁名（供调用方唤醒等待者）
-    pub fn cleanup_expired_names(&mut self) -> Vec<String> {
-        let expired: Vec<String> = self
-            .held
-            .values()
-            .filter(|info| info.is_expired())
-            .map(|info| info.name.clone())
-            .collect();
-        for name in &expired {
-            self.held.remove(name);
-        }
-        expired
-    }
+    // C4：已删除 `cleanup_expired` / `cleanup_expired_names`。
+    //
+    // 此前它们以**本地** `is_expired()`（`acquired_at + ttl`）为准清理 `held`，
+    // 与 Server 端 lease 真相无关：GC 停顿 / 时钟回拨会让本地先于 Server 判定
+    // 「过期」，导致 `renew` 直接返回 `Ok(false)`（假丢锁）而后重入临界区。
+    // 现在本地记录只能由两条路径移除：
+    //   1. `remove`（显式 release / 后台续期失败且 Server 拒绝）；
+    //   2. 后台续期任务收到 Server 的失败响应后移除并唤醒等待者。
+    // `acquired_at` 仅作为「何时该发起续期」的调度提示，不再作为真值。
 
     /// 刷新锁的续期时间戳（R-AGT-12：续期成功后调用）。
     ///
@@ -405,15 +395,40 @@ impl LockService {
     /// 续期分布式锁
     ///
     /// 延长 Lease 的 TTL，防止锁过期。
+    ///
+    /// C4：本地无记录**不等于**服务端锁已失效（GC 停顿 / 时钟回拨 / 记录未重建）。
+    /// 此时先向 Server 回查锁 key：仍由本 holder 持有则重建本地记录并继续续期；
+    /// 确实不存在或已被他人持有，才返回 `Ok(false)`。
     pub async fn renew(&self, name: &str, holder_id: &str) -> ServiceResult<bool> {
-        let lock_info = match self.cache.read().get(name) {
-            Some(info) if info.holder_id == holder_id => info.clone(),
-            _ => {
-                tracing::warn!(
-                    "LockService: cannot renew lock '{name}' — not held by '{holder_id}'"
-                );
-                return Ok(false);
+        // 注意：`parking_lot` 读锁 guard 不可跨 await 持有（future 必须 Send），
+        // 故先取出本地记录的快照，再决定是否回查 Server。
+        let cached = {
+            let guard = self.cache.read();
+            match guard.get(name) {
+                Some(info) if info.holder_id == holder_id => Some(info.clone()),
+                _ => None,
             }
+        };
+
+        let lock_info = match cached {
+            Some(info) => info,
+            None => match self.recover_lock_from_server(name, holder_id).await? {
+                Some(info) => {
+                    tracing::warn!(
+                        "LockService: rebuilt local record for lock '{name}' from server \
+                         (holder='{holder_id}', lease={}) — local TTL is not a truth source (C4)",
+                        info.lease_id
+                    );
+                    info
+                }
+                None => {
+                    tracing::warn!(
+                        "LockService: cannot renew lock '{name}' — server-side lock is absent \
+                         or owned by another holder (holder='{holder_id}')"
+                    );
+                    return Ok(false);
+                }
+            },
         };
 
         // 通过 KeepAlive 续期
@@ -517,6 +532,35 @@ impl LockService {
         self.cache.read().is_held(name)
     }
 
+    /// C4：本地无记录时向 Server 回查锁 key，确认锁是否仍由 `holder_id` 持有。
+    ///
+    /// 返回 `Some(LockInfo)` 表示 Server 端锁仍有效（本地记录已重建）；
+    /// `None` 表示锁不存在或已被他人持有。
+    async fn recover_lock_from_server(
+        &self,
+        name: &str,
+        holder_id: &str,
+    ) -> ServiceResult<Option<LockInfo>> {
+        let key = LockInfo::storage_key(name);
+        let kvs = self
+            .inner
+            .client
+            .kv()
+            .range(&key, &[], 1, 0)
+            .await
+            .map_err(|e| format!("failed to read lock key '{name}' from server: {e}"))?;
+        let Some((_k, value)) = kvs.into_iter().next() else {
+            return Ok(None);
+        };
+        let info: LockInfo = serde_json::from_slice(&value)
+            .map_err(|e| format!("lock key '{name}' has malformed value: {e}"))?;
+        if info.holder_id != holder_id {
+            return Ok(None);
+        }
+        self.cache.write().add(info.clone());
+        Ok(Some(info))
+    }
+
     /// 本地持有锁数量
     pub fn held_count(&self) -> usize {
         self.cache.read().len()
@@ -548,17 +592,9 @@ impl BaseService for LockService {
                         break;
                     }
                     _ = tokio::time::sleep(Duration::from_secs(10)) => {
-                        // 先清理本地已过期的锁记录（避免对已失效的 lease 发起无效续期）
-                        let expired_names = cache.write().cleanup_expired_names();
-                        if !expired_names.is_empty() {
-                            tracing::debug!("LockService: cleaned up {} expired lock(s) from local cache", expired_names.len());
-                            // R-AGT-12：锁失效同样唤醒等待者
-                            for name in &expired_names {
-                                waiters.write().notify_next(name);
-                            }
-                        }
-
-                        // 定期续期本地持有的锁（在 TTL 的 1/3 处续期）
+                        // C4：不再按本地 TTL 清理 `held`（本地时钟不是真相）。
+                        // 锁是否失效一律以 Server 端 lease 为准：下面的续期循环会
+                        // 发 keep_alive，Server 拒绝即代表锁已失效 → 移除并唤醒等待者。
                         let held: Vec<LockInfo> = cache.read().all_held().into_iter().cloned().collect();
                         for info in &held {
                             if info.ttl_secs > 0 {
@@ -712,29 +748,30 @@ mod tests {
         assert_eq!(all.len(), 2);
     }
 
+    /// C4：本地 TTL 到期**不得**移除本地记录 —— 服务端 lease 才是唯一真相。
+    ///
+    /// 修复前 `cleanup_expired()` 会按本地 `is_expired()` 删除记录，
+    /// 于是 GC 停顿 / 时钟回拨时 `renew` 直接返回 `Ok(false)`（假丢锁）。
     #[test]
-    fn test_lock_cache_cleanup_expired() {
+    fn test_lock_cache_keeps_record_past_local_ttl() {
         let mut cache = LockCache::new();
         let past = unix_ts() - 100;
 
-        // 过期锁
+        // 本地 TTL 早已到期（时钟回拨 / GC 停顿的等价状态）
         cache.add(LockInfo {
-            name: "expired-lock".into(),
+            name: "held-but-locally-stale".into(),
             holder_id: "h1".into(),
             lease_id: 1,
             acquired_at: past,
             ttl_secs: 30,
         });
-
-        // 有效锁
         cache.add(LockInfo::new("valid-lock", "h2", 2, 3600));
 
+        // 记录仍在：是否失效只能由 Server 回查 / keep_alive 失败决定
         assert_eq!(cache.len(), 2);
-        let cleaned = cache.cleanup_expired();
-        assert_eq!(cleaned, 1);
-        assert_eq!(cache.len(), 1);
+        assert!(cache.is_held("held-but-locally-stale"));
         assert!(cache.is_held("valid-lock"));
-        assert!(!cache.is_held("expired-lock"));
+        assert!(cache.get("held-but-locally-stale").unwrap().is_expired());
     }
 
     #[test]

@@ -40,11 +40,16 @@ pub const AGENT_BOOTSTRAP_ROLE: &str = "agent-bootstrap";
 ///
 /// **刻意不含任何数据面能力**（kv/txn/lease/watch/storage）：引导身份只能建账户与
 /// 授权，不能读写协调数据；插件数据面权限由 `plugin/{id}` 账户自己的角色承载。
+///
+/// A3 补充：`admin:auth:role_list` 是**只读**的元数据读取能力，用于 agent 侧
+/// 本地授权缓存（`RoleCache`）的角色映射同步。没有它，agent 无法把 CCT 里的
+/// `roles` 解析成能力/scope，本地授权只能全拒。它不授予任何数据面访问。
 pub const AGENT_BOOTSTRAP_CAPABILITY_GRANTS: &[(&str, &str)] = &[
     ("admin:auth:user_add", ""),
     ("admin:auth:role_add", ""),
     ("admin:auth:role_grant", ""),
     ("admin:auth:user_grant_role", ""),
+    ("admin:auth:role_list", ""),
 ];
 
 #[cfg(test)]

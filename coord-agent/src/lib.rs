@@ -204,7 +204,87 @@ fn default_cache_kv_max_entries() -> usize {
     10000
 }
 fn default_cache_kv_ttl_secs() -> u64 {
-    30
+    // B1：默认 **0 = 关闭本地 KV 读缓存**。
+    //
+    // 开启后本地缓存只能返回 value，无法提供真实的 MVCC 元数据，且跨 agent 写
+    // 之后、本地 TTL 到期之前会读到旧值（并伪造 revision）。默认关闭即默认正确，
+    // 需要串行化读性能的场景可由运维显式开启并承担该窗口。
+    0
+}
+
+/// A3：鉴权密钥材料校验（启动期 fail-closed）。
+///
+/// `auth.enabled = true` 时至少要有一种密钥材料：
+/// - `verifying_key_hex`：Ed25519 公钥（推荐；服务端持私钥签发，agent 只验签）；
+/// - `signing_key_hex`：历史 HMAC 对称密钥（**仅**存量 token 宽限期验证）。
+///
+/// 两者都为空时**拒绝启动**：否则 `hex::decode("")` 会得到 `Ok(vec![])`，即
+/// **空 HMAC 密钥** —— 任何知道"密钥为空"的调用方都能自签 `roles:["root"]`。
+fn validate_auth_key_material(auth: &AgentAuthConfig) -> Result<(), String> {
+    if !auth.enabled {
+        return Ok(());
+    }
+    if auth.signing_key_hex.trim().is_empty() && auth.verifying_key_hex.trim().is_empty() {
+        return Err(
+            "auth.enabled=true but neither auth.signing_key_hex nor auth.verifying_key_hex \
+             is configured: refusing to start with empty key material (A3 fail-closed)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod auth_key_material_tests {
+    use super::*;
+
+    #[test]
+    fn disabled_auth_needs_no_key_material() {
+        let auth = AgentAuthConfig::default();
+        assert!(!auth.enabled);
+        assert!(validate_auth_key_material(&auth).is_ok());
+    }
+
+    #[test]
+    fn enabled_auth_without_keys_is_rejected() {
+        let auth = AgentAuthConfig {
+            enabled: true,
+            ..AgentAuthConfig::default()
+        };
+        let err = validate_auth_key_material(&auth).expect_err("must fail-closed");
+        assert!(err.contains("A3 fail-closed"), "err: {err}");
+    }
+
+    #[test]
+    fn enabled_auth_with_verifying_key_is_ok() {
+        let auth = AgentAuthConfig {
+            enabled: true,
+            verifying_key_hex: "ab".repeat(32),
+            ..AgentAuthConfig::default()
+        };
+        assert!(validate_auth_key_material(&auth).is_ok());
+    }
+
+    #[test]
+    fn enabled_auth_with_legacy_signing_key_is_ok() {
+        let auth = AgentAuthConfig {
+            enabled: true,
+            signing_key_hex: "cd".repeat(32),
+            ..AgentAuthConfig::default()
+        };
+        assert!(validate_auth_key_material(&auth).is_ok());
+    }
+
+    #[test]
+    fn whitespace_only_key_material_is_rejected() {
+        let auth = AgentAuthConfig {
+            enabled: true,
+            signing_key_hex: "   ".to_string(),
+            verifying_key_hex: "\t".to_string(),
+            ..AgentAuthConfig::default()
+        };
+        assert!(validate_auth_key_material(&auth).is_err());
+    }
 }
 fn default_cache_catalog_ttl_secs() -> u64 {
     10
@@ -1405,6 +1485,15 @@ impl AgentServer {
             self.config.agent_addr
         );
 
+        // A3：鉴权开启时**必须有**可用密钥材料，否则拒绝启动。
+        // 此前 `signing_key_hex = ""` 会被 `hex::decode("")` 解成 `Ok(vec![])`
+        // —— 即**空 HMAC 密钥**；一旦角色同步补齐，可被自签 `roles:["root"]` 利用。
+        validate_auth_key_material(&self.config.auth)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+
+        // A3：RoleCache 只建一次，由鉴权中间件与后台角色同步**共享**同一实例。
+        let role_cache = Arc::new(crate::auth::role_cache::RoleCache::new());
+
         // agent gRPC 挂 AuthInterceptor（默认关闭，开启后全量 RPC 校验 CCT）
         let mut auth_interceptor = crate::auth::interceptor::AuthInterceptor::new(
             if self.config.auth.enabled {
@@ -1413,7 +1502,7 @@ impl AgentServer {
             } else {
                 Vec::new()
             },
-            Arc::new(crate::auth::role_cache::RoleCache::new()),
+            Arc::clone(&role_cache),
             self.config.auth.clock_drift_secs,
         );
         // 配置 Ed25519 公钥 → 验证 server 非对称签发的 CCT（仅存公钥，不可伪造）
@@ -1430,6 +1519,28 @@ impl AgentServer {
         }
         auth_interceptor.set_enabled(self.config.auth.enabled);
         if self.config.auth.enabled {
+            // A3：接线 SyncScheduler → RoleCache（此前 `sync_full` 零生产调用方，
+            // 开启鉴权后缓存恒空 → 全量 RPC 被拒且原因不可见）。
+            // 同步客户端复用插件身份出站凭据句柄（引导 CCT / 持久化会话）。
+            match crate::auth::sync::spawn_role_sync(
+                Arc::clone(&role_cache),
+                self.config.static_peers.clone(),
+                self.config
+                    .tls
+                    .as_ref()
+                    .and_then(|t| t.to_coord_client_tls().ok()),
+                Arc::clone(&plugin_identity_provider),
+            )
+            .await
+            {
+                Ok(()) => tracing::info!(
+                    "agent role sync scheduled (RoleCache shared with auth interceptor)"
+                ),
+                Err(e) => tracing::error!(
+                    "agent role sync could not start: {e}; local authorization will deny \
+                     every role-gated RPC (fail-closed)"
+                ),
+            }
             tracing::info!(
                 "coord-agent auth interceptor ENABLED (CCT + capability, unknown RPC deny)"
             );

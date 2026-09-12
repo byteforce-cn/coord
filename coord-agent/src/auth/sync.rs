@@ -206,6 +206,126 @@ pub enum SyncAction {
     Idle,
 }
 
+// ──── 生产接线（A3）：真正驱动 RoleCache ────
+
+use crate::auth::role_cache::{CapabilityGrant, RoleEntry};
+
+/// 把 Server 的 `Role` 映射为本地 `RoleEntry`（本地授权判定的依据）。
+pub fn role_entry_from_proto(role: coord_proto::auth::Role) -> RoleEntry {
+    RoleEntry {
+        name: role.name,
+        grants: role
+            .capability_grants
+            .into_iter()
+            .map(|g| CapabilityGrant {
+                capability_id: g.capability_id,
+                scope: g.scope,
+            })
+            .collect(),
+        high_sensitive: role.high_sensitive,
+    }
+}
+
+/// 角色同步任务：按 `SyncScheduler` 的节奏从 Server 拉取角色→能力映射并写入
+/// `RoleCache`。
+///
+/// 修复背景（A3）：此前 `RoleCache` 在启动路径上是 `Arc::new(RoleCache::new())`
+/// 的一次性空缓存，`sync_full` 只有测试调用方 —— 生产开启 agent 鉴权后缓存恒空，
+/// 全量 RPC 被拒（且失败原因不可见）。本任务把「同步」接到生产路径上，并在同步
+/// 失败时**保持缓存不变**（空缓存 = 全拒 = fail-closed），同时打出可观测日志。
+pub struct RoleSyncTask {
+    role_cache: Arc<RoleCache>,
+    client: coord_client::Client,
+    scheduler: SyncScheduler,
+}
+
+impl RoleSyncTask {
+    pub fn new(role_cache: Arc<RoleCache>, client: coord_client::Client) -> Self {
+        let scheduler = SyncScheduler::with_defaults(Arc::clone(&role_cache));
+        Self {
+            role_cache,
+            client,
+            scheduler,
+        }
+    }
+
+    /// 同步统计（供指标/健康检查读取）。
+    pub fn stats(&self) -> SyncStats {
+        self.scheduler.stats()
+    }
+
+    /// 执行一次全量角色同步；成功返回同步到的角色数。
+    ///
+    /// 只有**完整成功**才写入缓存 —— 部分/失败结果不得污染本地授权视图。
+    pub async fn sync_once(&self) -> Result<usize, String> {
+        let resp = self
+            .client
+            .auth()
+            .list_roles()
+            .await
+            .map_err(|e| format!("ListRoles failed: {e}"))?;
+        let entries: Vec<RoleEntry> = resp.roles.into_iter().map(role_entry_from_proto).collect();
+        let count = entries.len();
+        self.role_cache.sync_full(entries);
+        self.scheduler.record_role_sync_success();
+        Ok(count)
+    }
+
+    /// 后台循环：启动即同步一次，之后按 `role_sync_interval` 周期同步；
+    /// 连续失败时按指数退避重试（上限见 `SyncScheduler::retry_backoff`）。
+    pub async fn run(self) {
+        let mut failures: u32 = 0;
+        while self.scheduler.is_running() {
+            match self.sync_once().await {
+                Ok(n) => {
+                    failures = 0;
+                    tracing::info!("agent role sync complete: {n} role(s) cached");
+                }
+                Err(e) => {
+                    self.scheduler.record_role_sync_failure();
+                    failures = failures.saturating_add(1);
+                    tracing::error!(
+                        "agent role sync failed: {e} (attempt {failures}); local authorization \
+                         remains fail-closed until the role mapping is available"
+                    );
+                }
+            }
+            let delay = if failures == 0 {
+                self.scheduler.role_sync_interval()
+            } else {
+                self.scheduler.retry_backoff(failures.min(6))
+            };
+            tokio::time::sleep(delay).await;
+        }
+    }
+}
+
+/// 构造同步客户端并 spawn [`RoleSyncTask`]（A3：生产启动路径调用）。
+///
+/// `token_provider` 为 agent 出站凭据句柄（引导 CCT / 持久化账户会话）；角色映射
+/// 端点需要 `admin:auth:role_list`（已包含在 `agent-bootstrap` 最小能力集内）。
+pub async fn spawn_role_sync(
+    role_cache: Arc<RoleCache>,
+    static_peers: Vec<String>,
+    tls: Option<coord_client::config::TlsConfig>,
+    token_provider: Arc<coord_client::credential::CachedTokenProvider>,
+) -> Result<(), String> {
+    if static_peers.is_empty() {
+        return Err("no static server endpoints configured".to_string());
+    }
+    let mut config = coord_client::Config::new(static_peers)
+        .with_token_provider(token_provider as Arc<dyn coord_client::TokenProvider>);
+    if let Some(t) = tls {
+        config = config.with_tls(t);
+    }
+    let client = coord_client::Client::connect_direct(config)
+        .await
+        .map_err(|e| format!("failed to build role sync client: {e}"))?;
+    let task = RoleSyncTask::new(role_cache, client);
+    tokio::spawn(task.run());
+    Ok(())
+}
+
 // ──── Tests ────
 
 #[cfg(test)]

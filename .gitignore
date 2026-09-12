@@ -37,4 +37,11 @@ coord-dev-data/
 # VS Code Copilot instructions (local only)
 .github/copilot-instructions.md
 
-docs/
+# docs/ 默认不入库（内部计划/草稿）。但生产验证证据与**设计决策记录**必须入库
+# （E4：「声称验证过但拿不出证据」在尽调中直接失分）——
+# 放行 docs/production/evidence/ 与 docs/production/design/。
+docs/*
+!docs/production/
+docs/production/*
+!docs/production/evidence/
+!docs/production/design/

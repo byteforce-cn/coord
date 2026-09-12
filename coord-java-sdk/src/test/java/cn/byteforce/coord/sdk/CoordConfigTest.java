@@ -78,14 +78,58 @@ class CoordConfigTest {
     }
 
     @Test
-    void tlsShouldThrowUnsupportedOperationWhenSetTrue() {
+    void tlsRequiresCaCertPath() {
+        // D1：配了 TLS 但未提供 CA 证书路径 → 拒绝构建（fail-closed，不静默降级明文）
         assertThatThrownBy(() -> CoordConfig.builder()
                 .agentHost("localhost")
                 .agentPort(19527)
                 .useTls(true)
                 .build())
-                .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessageContaining("TLS");
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("tlsCaCertPath");
+    }
+
+    @Test
+    void tlsAcceptsCaCertPath() {
+        CoordConfig config = CoordConfig.builder()
+                .agentHost("localhost")
+                .agentPort(19527)
+                .useTls(true)
+                .tlsCaCertPath("/etc/coord/ca.pem")
+                .build();
+
+        assertThat(config.isUseTls()).isTrue();
+        assertThat(config.getTlsCaCertPath()).isEqualTo("/etc/coord/ca.pem");
+    }
+
+    @Test
+    void tlsRequiresClientCertAndKeyTogether() {
+        assertThatThrownBy(() -> CoordConfig.builder()
+                .agentHost("localhost")
+                .agentPort(19527)
+                .useTls(true)
+                .tlsCaCertPath("/etc/coord/ca.pem")
+                .tlsClientCertPath("/etc/coord/client.pem")
+                .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("tlsClientKeyPath");
+    }
+
+    @Test
+    void authTokenSupplierIsExposedAndReadAtCallTime() {
+        // D2：CCT 注入来源可配置；supplier 每次取值 → 刷新后无需重建 channel
+        java.util.concurrent.atomic.AtomicReference<String> token =
+                new java.util.concurrent.atomic.AtomicReference<>("cct-1");
+        CoordConfig config = CoordConfig.builder()
+                .agentHost("localhost")
+                .agentPort(19527)
+                .authTokenSupplier(token::get)
+                .build();
+
+        assertThat(config.getAuthTokenSupplier()).isNotNull();
+        assertThat(config.getAuthTokenSupplier().get()).isEqualTo("cct-1");
+        token.set("cct-2");
+        assertThat(config.getAuthTokenSupplier().get()).isEqualTo("cct-2");
     }
 
     @Test

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use coord_core::auth::cct::{is_expired, CctPayload, CctToken};
-use coord_core::auth::trie::ScopeTrie;
+use coord_core::auth::trie::{scope_covers_interval, ScopeTrie};
 use http_body_util::BodyExt;
 use prost::Message;
 use tonic::Status;
@@ -261,12 +261,34 @@ impl ServerAuthInterceptor {
     ///
     /// `scope_keys` 为空表示"无 scope key 可提取"（与 `validate(..., None)` 语义一致，
     /// 有 scope 限制的授权将被拒绝）；非空时要求每个 key 都命中授权。
+    /// 仅用于**无区间语义**的点位校验；带 `range_end` 的请求必须走
+    /// [`Self::validate_scope_access`]（A1：区间需整体包含判定）。
     pub fn validate_keys(
         &self,
         cct_str: Option<&str>,
         peer_cn: Option<&str>,
         capability_id: &str,
         scope_keys: &[&[u8]],
+    ) -> ServerAuthResult {
+        let accesses: Vec<ScopeAccess> = scope_keys
+            .iter()
+            .map(|k| ScopeAccess::point(k.to_vec()))
+            .collect();
+        self.validate_scope_access(cct_str, peer_cn, capability_id, &accesses)
+    }
+
+    /// 区间感知的多 key/区间校验（A1）。
+    ///
+    /// 对每个 [`ScopeAccess`] 要求被授权 scope **整体覆盖**：
+    /// - `range_end` 为空 → 逐点匹配（与原行为一致）；
+    /// - `range_end == "\0"` → 无上界，有界 scope 一律拒绝；
+    /// - 否则 → `[key, range_end)` 必须落在同一授权前缀内。
+    pub fn validate_scope_access(
+        &self,
+        cct_str: Option<&str>,
+        peer_cn: Option<&str>,
+        capability_id: &str,
+        accesses: &[ScopeAccess],
     ) -> ServerAuthResult {
         // If auth is disabled, allow everything
         if !self.enabled {
@@ -354,20 +376,19 @@ impl ServerAuthInterceptor {
 
             // Case B: All other cases → full capability + scope check (fail-closed)
             (_, true) | (false, _) => {
-                let scope_ok = if scope_keys.is_empty() {
+                let scope_ok = if accesses.is_empty() {
                     // 无 scope key：带 scope 的授权 fail-closed，无 scope 的授权放行
                     self.authorize(&cct.payload, capability_id, None)
                 } else {
-                    // 所有触碰的 key 都必须命中授权（非 UTF-8 key 视为无 scope key）
-                    scope_keys.iter().all(|key| {
-                        let sk = std::str::from_utf8(key).ok();
-                        self.authorize(&cct.payload, capability_id, sk)
-                    })
+                    // 所有触碰的 key/区间都必须被授权覆盖（A1：区间整体包含）
+                    accesses
+                        .iter()
+                        .all(|access| self.authorize_access(&cct.payload, capability_id, access))
                 };
                 if !scope_ok {
                     return ServerAuthResult::Deny {
                         reason: format!(
-                            "capability '{capability_id}' not granted to roles {:?} (scope keys: {scope_keys:?})",
+                            "capability '{capability_id}' not granted to roles {:?} (scope access: {accesses:?})",
                             cct.payload.roles
                         ),
                         trusted_agent: is_trusted,
@@ -420,6 +441,44 @@ impl ServerAuthInterceptor {
         // Server-side role grants（无 "any role passes" 兜底）
         match &self.role_provider {
             Some(provider) => provider.check_capability(&payload.roles, capability_id, scope_key),
+            None => false,
+        }
+    }
+
+    /// 区间感知的授权判定（A1）。
+    ///
+    /// - 单 key（`range_end` 空）→ 沿用 [`Self::authorize`] 逐点语义；
+    /// - 区间 → scope_overrides / 角色授权均要求**整体包含** `[key, range_end)`；
+    ///   无上界（`"\0"`）在非 match-all scope 下一律拒绍。
+    fn authorize_access(
+        &self,
+        payload: &CctPayload,
+        capability_id: &str,
+        access: &ScopeAccess,
+    ) -> bool {
+        if access.range_end.is_empty() {
+            return self.authorize(
+                payload,
+                capability_id,
+                std::str::from_utf8(&access.key).ok(),
+            );
+        }
+
+        // scope_overrides 优先（与 authorize 一致：空 scope = 全放行）
+        if let Some(allowed_scope) = payload.scope_overrides.get(capability_id) {
+            if allowed_scope.is_empty() {
+                return true;
+            }
+            return scope_covers_interval(allowed_scope, &access.key, &access.range_end);
+        }
+
+        match &self.role_provider {
+            Some(provider) => provider.check_capability_range(
+                &payload.roles,
+                capability_id,
+                &access.key,
+                &access.range_end,
+            ),
             None => false,
         }
     }
@@ -577,15 +636,42 @@ pub fn needs_scope_extraction(rpc_method: &str) -> bool {
     )
 }
 
-/// 从请求 body 提取 scope key 列表。
+/// 一次请求触碰的 key 区间。
 ///
-/// - Put/Range/Delete：提取 `key` 字段（proto field 1）；
-/// - Txn：提取全部 compare key 与 success/failure 操作触碰的 key；
+/// - `range_end` 为空 → 单 key（Put / Txn-put / Txn-compare）；
+/// - `range_end == "\0"` → 从 `key` 到无穷（etcd 语义）；
+/// - 否则 → 区间 `[key, range_end)`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeAccess {
+    pub key: Vec<u8>,
+    pub range_end: Vec<u8>,
+}
+
+impl ScopeAccess {
+    /// 单 key 访问。
+    pub fn point(key: Vec<u8>) -> Self {
+        Self {
+            key,
+            range_end: Vec::new(),
+        }
+    }
+
+    /// 区间访问。
+    pub fn range(key: Vec<u8>, range_end: Vec<u8>) -> Self {
+        Self { key, range_end }
+    }
+}
+
+/// 从请求 body 提取 scope **访问区间**列表（A1）。
+///
+/// - Put：单 key；
+/// - Range/Delete：`[key, range_end)`（`range_end` 为空 = 单 key）；
+/// - Txn：全部 compare key 与 success/failure 操作触碰的 key/区间；
 /// - 解析失败返回 `Err`（请求本身畸形，按失败关闭拒绝）。
 ///
 /// `body` 为 gRPC 帧流（5 字节前缀：1 字节压缩标志 + 4 字节大端长度），
 /// 解析前先剥离帧头；无帧头的裸 protobuf（测试路径）直接按消息解析。
-pub fn extract_scope_keys(rpc_method: &str, body: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+pub fn extract_scope_access(rpc_method: &str, body: &[u8]) -> Result<Vec<ScopeAccess>, String> {
     // 剥离 gRPC 帧头（压缩标志非 0 → 无法解析，按畸形请求拒绝）
     let payload = if body.len() >= 5 && body[0] == 0 {
         let msg_len = u32::from_be_bytes([body[1], body[2], body[3], body[4]]) as usize;
@@ -604,58 +690,79 @@ pub fn extract_scope_keys(rpc_method: &str, body: &[u8]) -> Result<Vec<Vec<u8>>,
         "/coord.kv.KV/Put" => {
             let req = coord_proto::kv::PutRequest::decode(payload)
                 .map_err(|e| format!("failed to parse PutRequest body: {e}"))?;
-            Ok(vec![req.key])
+            Ok(vec![ScopeAccess::point(req.key)])
         }
         "/coord.kv.KV/Range" => {
             let req = coord_proto::kv::RangeRequest::decode(payload)
                 .map_err(|e| format!("failed to parse RangeRequest body: {e}"))?;
-            Ok(vec![req.key])
+            Ok(vec![ScopeAccess::range(req.key, req.range_end)])
         }
         "/coord.kv.KV/Delete" => {
             let req = coord_proto::kv::DeleteRequest::decode(payload)
                 .map_err(|e| format!("failed to parse DeleteRequest body: {e}"))?;
-            Ok(vec![req.key])
+            Ok(vec![ScopeAccess::range(req.key, req.range_end)])
         }
         "/coord.txn.Txn/Txn" => {
             let txn = coord_proto::txn::TxnRequest::decode(payload)
                 .map_err(|e| format!("failed to parse TxnRequest body: {e}"))?;
-            let mut keys: Vec<Vec<u8>> = txn.compare.iter().map(|c| c.key.clone()).collect();
+            let mut accesses: Vec<ScopeAccess> = txn
+                .compare
+                .iter()
+                .map(|c| ScopeAccess::point(c.key.clone()))
+                .collect();
             for op in txn.success.iter().chain(txn.failure.iter()) {
                 use coord_proto::txn::request_op::Op;
                 match &op.op {
-                    Some(Op::RequestPut(p)) => keys.push(p.key.clone()),
-                    Some(Op::RequestDelete(d)) => keys.push(d.key.clone()),
-                    Some(Op::RequestRange(r)) => keys.push(r.key.clone()),
+                    Some(Op::RequestPut(p)) => accesses.push(ScopeAccess::point(p.key.clone())),
+                    Some(Op::RequestDelete(d)) => {
+                        accesses.push(ScopeAccess::range(d.key.clone(), d.range_end.clone()))
+                    }
+                    Some(Op::RequestRange(r)) => {
+                        accesses.push(ScopeAccess::range(r.key.clone(), r.range_end.clone()))
+                    }
                     None => {}
                 }
             }
-            Ok(keys)
+            Ok(accesses)
         }
         _ => Ok(Vec::new()),
     }
 }
 
+/// 向后兼容包装：只取 key（丢区间上界）。**不得**用于带 `range_end` 的鉴权路径。
+pub fn extract_scope_keys(rpc_method: &str, body: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    Ok(extract_scope_access(rpc_method, body)?
+        .into_iter()
+        .map(|a| a.key)
+        .collect())
+}
+
+/// scope 提取前请求体上限（A2）：超出即拒绝。
+///
+/// 该路径在**鉴权前**缓存 body（auth 关闭时同样执行），若不加限则无凭据请求即可
+/// 触发无界 `collect()`。
+pub const MAX_SCOPE_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
+
 /// 缓存请求 body 字节后重建请求（scope key 提取用）。
 ///
-/// body 为流式：先收集全部数据帧，解析 key 后以 `Full` 重建原始 body 转发。
+/// body 为流式：先收集全部数据帧（**受 `max_bytes` 硬上限保护**），解析 key 后以
+/// `Full` 重建原始 body 转发。超限返回 `Err`，调用方以 `resource_exhausted` 拒绝。
 async fn buffer_request_body(
     req: http::Request<tonic::body::Body>,
-) -> (http::Request<tonic::body::Body>, Option<Vec<u8>>) {
+    max_bytes: usize,
+) -> Result<(http::Request<tonic::body::Body>, Vec<u8>), String> {
     let (parts, body) = req.into_parts();
-    match body.collect().await {
+    let limited = http_body_util::Limited::new(body, max_bytes);
+    match limited.collect().await {
         Ok(collected) => {
             let bytes = collected.to_bytes();
             let body_bytes = bytes.to_vec();
             let rebuilt = tonic::body::Body::new(http_body_util::Full::new(bytes));
-            (http::Request::from_parts(parts, rebuilt), Some(body_bytes))
+            Ok((http::Request::from_parts(parts, rebuilt), body_bytes))
         }
-        Err(_) => {
-            // body 读取失败：以空 body 重建，请求将在服务层以解码错误被拒绝
-            (
-                http::Request::from_parts(parts, tonic::body::Body::empty()),
-                None,
-            )
-        }
+        Err(_) => Err(format!(
+            "request body exceeds scope-extraction limit of {max_bytes} bytes"
+        )),
     }
 }
 
@@ -755,33 +862,48 @@ where
 
         // scope 承载方法 → 缓存 body 提取 key，做多 key scope 校验
         if needs_scope_extraction(&rpc_method) {
+            // A2：content-length 预检——明显超限的请求在读 body 前直接拒绝。
+            if let Some(len) = req
+                .headers()
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                if len > MAX_SCOPE_BODY_BYTES as u64 {
+                    let reason = format!(
+                        "request body ({len} bytes) exceeds limit of {MAX_SCOPE_BODY_BYTES} bytes"
+                    );
+                    self.audit_deny(&rpc_method, &reason);
+                    return ServerAuthFuture::Deny(Some(Status::resource_exhausted(reason)));
+                }
+            }
             let interceptor = self.interceptor.clone();
             let mut inner = self.inner.clone();
             // 复杂类型别名（clippy type_complexity）
             type BoxedResponseFuture<E> =
                 Pin<Box<dyn Future<Output = Result<http::Response<tonic::body::Body>, E>> + Send>>;
             let fut: BoxedResponseFuture<S::Error> = Box::pin(async move {
-                let (req, body_bytes) = buffer_request_body(req).await;
-
-                // body 读取失败 → 请求无法解析，直接拒绝（服务层本也会解码失败）
-                let Some(body) = body_bytes else {
-                    let reason = "failed to read request body";
-                    interceptor.record_audit_deny(&rpc_method, reason);
-                    return Ok(deny_response(Some(Status::invalid_argument(reason))));
-                };
-                let keys = match extract_scope_keys(&rpc_method, &body) {
-                    Ok(keys) => keys,
+                // A2：带硬上限读取（content-length 可能缺失/说谎，分帧 body 亦受限）
+                let (req, body) =
+                    match buffer_request_body(req, MAX_SCOPE_BODY_BYTES).await {
+                        Ok(v) => v,
+                        Err(reason) => {
+                            interceptor.record_audit_deny(&rpc_method, &reason);
+                            return Ok(deny_response(Some(Status::resource_exhausted(reason))));
+                        }
+                    };
+                let accesses = match extract_scope_access(&rpc_method, &body) {
+                    Ok(accesses) => accesses,
                     Err(reason) => {
                         interceptor.record_audit_deny(&rpc_method, &reason);
                         return Ok(deny_response(Some(Status::invalid_argument(reason))));
                     }
                 };
-                let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
-                match interceptor.validate_keys(
+                match interceptor.validate_scope_access(
                     auth_header.as_deref(),
                     None, // tower 层无法读取 TLS 对端证书 → 全量校验
                     &capability_id,
-                    &key_refs,
+                    &accesses,
                 ) {
                     ServerAuthResult::Allow { .. } => match inner.ready().await {
                         Ok(svc) => svc.call(req).await,
@@ -1480,35 +1602,52 @@ mod tests {
         assert!(ops.contains("coord:pki:revoke"));
     }
 
-    // ──── scope key 提取（tower 层 body 解析） ────
+    // ──── scope 区间提取（tower 层 body 解析） ────
 
     #[test]
-    fn test_extract_scope_keys_put_range_delete() {
-        // Put
+    fn test_extract_scope_access_put_range_delete() {
+        // Put → 单 key
         let mut put = coord_proto::kv::PutRequest::default();
         put.key = b"/app/orders/1".to_vec();
         let body = put.encode_to_vec();
         assert_eq!(
-            extract_scope_keys("/coord.kv.KV/Put", &body).unwrap(),
-            vec![b"/app/orders/1".to_vec()]
+            extract_scope_access("/coord.kv.KV/Put", &body).unwrap(),
+            vec![ScopeAccess::point(b"/app/orders/1".to_vec())]
         );
 
-        // Range
+        // Range → [key, range_end)（A1：必须保留上界，否则区间越权）
         let mut range = coord_proto::kv::RangeRequest::default();
         range.key = b"/app/orders".to_vec();
+        range.range_end = b"/app/orders0".to_vec();
         let body = range.encode_to_vec();
         assert_eq!(
-            extract_scope_keys("/coord.kv.KV/Range", &body).unwrap(),
-            vec![b"/app/orders".to_vec()]
+            extract_scope_access("/coord.kv.KV/Range", &body).unwrap(),
+            vec![ScopeAccess::range(
+                b"/app/orders".to_vec(),
+                b"/app/orders0".to_vec()
+            )]
         );
 
-        // Delete
+        // Delete → [key, range_end)
         let mut del = coord_proto::kv::DeleteRequest::default();
         del.key = b"/app/orders/9".to_vec();
+        del.range_end = b"/zzz".to_vec();
         let body = del.encode_to_vec();
         assert_eq!(
-            extract_scope_keys("/coord.kv.KV/Delete", &body).unwrap(),
-            vec![b"/app/orders/9".to_vec()]
+            extract_scope_access("/coord.kv.KV/Delete", &body).unwrap(),
+            vec![ScopeAccess::range(
+                b"/app/orders/9".to_vec(),
+                b"/zzz".to_vec()
+            )]
+        );
+
+        // 兼容包装只保留 key（不得用于带 range_end 的鉴权路径）
+        let mut r2 = coord_proto::kv::RangeRequest::default();
+        r2.key = b"/k".to_vec();
+        r2.range_end = b"/z".to_vec();
+        assert_eq!(
+            extract_scope_keys("/coord.kv.KV/Range", &r2.encode_to_vec()).unwrap(),
+            vec![b"/k".to_vec()]
         );
     }
 
@@ -1582,5 +1721,77 @@ mod tests {
         // 空列表 → 语义等同 None（带 scope 的 override fail-closed）
         let result = interceptor.validate_keys(Some(&cct), None, "data:kv:write", &[]);
         assert!(matches!(result, ServerAuthResult::Deny { .. }));
+    }
+
+    // ──── A1：Range/Delete 区间越权证伪 ────
+
+    #[test]
+    fn test_validate_scope_access_rejects_out_of_scope_range() {
+        let keyring = make_keyring();
+        let rev = make_revocation_store();
+        let interceptor = ServerAuthInterceptor::new(keyring.clone(), rev, true);
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("data:kv:read".to_string(), "/app/a/".to_string());
+        overrides.insert("data:kv:delete".to_string(), "/app/a/".to_string());
+        let cct = make_test_cct(&keyring, vec![], overrides);
+
+        // 区间上界越出 scope → 必须 Deny（修复前只查 key，会 Allow）
+        for cap in ["data:kv:read", "data:kv:delete"] {
+            let result = interceptor.validate_scope_access(
+                Some(&cct),
+                None,
+                cap,
+                &[ScopeAccess::range(b"/app/a/x".to_vec(), b"/zzz".to_vec())],
+            );
+            assert!(
+                matches!(result, ServerAuthResult::Deny { .. }),
+                "cap {cap}: out-of-scope range_end must be denied"
+            );
+        }
+
+        // 无上界（"\0"）必须 Deny
+        let result = interceptor.validate_scope_access(
+            Some(&cct),
+            None,
+            "data:kv:read",
+            &[ScopeAccess::range(b"/app/a/x".to_vec(), b"\0".to_vec())],
+        );
+        assert!(matches!(result, ServerAuthResult::Deny { .. }));
+
+        // 区间完全落在 scope 内 → Allow（防误伤）；单 key 语义不变
+        for access in [
+            ScopeAccess::range(b"/app/a/1".to_vec(), b"/app/a/9".to_vec()),
+            ScopeAccess::point(b"/app/a/1".to_vec()),
+        ] {
+            let result = interceptor.validate_scope_access(
+                Some(&cct),
+                None,
+                "data:kv:read",
+                std::slice::from_ref(&access),
+            );
+            assert!(matches!(result, ServerAuthResult::Allow { .. }));
+        }
+    }
+
+    #[test]
+    fn test_scope_covers_interval_semantics() {
+        use coord_core::auth::trie::{prefix_successor, scope_covers_interval};
+
+        assert!(scope_covers_interval("/app/a/", b"/app/a/1", b"/app/a/9"));
+        assert!(!scope_covers_interval("/app/a/", b"/app/a/x", b"/zzz"));
+        assert!(!scope_covers_interval("/app/a/", b"/app/a/x", b"\0"));
+        assert!(!scope_covers_interval("/app/a/", b"/app/b/x", b"/app/b/y"));
+        // match-all scope 覆盖一切（含无上界）
+        assert!(scope_covers_interval("/", b"/x", b"\0"));
+        assert!(scope_covers_interval("", b"/x", b"\0"));
+        // 通配符 scope
+        assert!(scope_covers_interval("/app/*", b"/app/x", b"/app/z"));
+        assert!(!scope_covers_interval("/app/*", b"/app/x", b"/other"));
+        // 无法安全归约的模式 → fail-closed
+        assert!(!scope_covers_interval("/app", b"/app", b"/appz"));
+
+        assert_eq!(prefix_successor(b"/app/a/"), Some(b"/app/a0".to_vec()));
+        assert_eq!(prefix_successor(&[0xFF, 0xFF]), None);
     }
 }

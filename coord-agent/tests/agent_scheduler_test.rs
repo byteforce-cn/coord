@@ -273,10 +273,10 @@ fn test_thundering_herd_only_one_wins() {
 fn test_backoff_delay_range() {
     let svc = SchedulerService::new(Default::default());
 
-    // 验证退避延迟在 0..max_backoff_ms 范围内
+    // 验证退避延迟不超过上限（u64 天然非负，无需冗余的 `>= 0` 断言——
+    // 该断言会被 clippy::absurd_extreme_comparisons 判为恒真）。
     let backoff = svc.compute_backoff_ms(10); // 10 个竞争者
     assert!(backoff <= 5000, "backoff should not exceed max");
-    assert!(backoff >= 0, "backoff should be non-negative");
 
     // 竞争者越少，退避上限越小。
     // 注意：返回值为随机采样（0..=range），不能比较两次采样的大小（会偶发抖动），

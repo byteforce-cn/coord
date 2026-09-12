@@ -69,6 +69,27 @@ jobs:
       - name: Build
         run: pnpm build
 
+  java-sdk:
+    name: java sdk (maven verify)
+    # D3：Java SDK + example 此前**无任何 CI** —— 20+ 个 Java 测试文件从未被执行。
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # 与 pom 的 <release>21</release> 对齐。注意：Mockito 5.12 的 inline mock
+          # 尚不支持 JDK 25（ByteBuddy 无法 instrument），故不跟随最新 JDK。
+          java-version: '21'
+          cache: maven
+      - name: Java SDK — mvn verify (unit + contract tests)
+        working-directory: coord-java-sdk
+        run: mvn -B -q verify
+      - name: Java example — compile & test
+        working-directory: java-example
+        run: mvn -B -q verify
+
   proto-lint:
     name: proto contract (buf lint + breaking)
     # P2-03：proto 契约治理——lint + 格式 + 对 main 的 breaking 检查
@@ -104,13 +125,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build tests
         run: cargo build --workspace --tests
-      - name: Run workspace tests (one flaky retry)
-        # R-TST-21：失败重跑一次（单测偶发 flaky 不阻塞 PR；连续两次失败才红）
-        run: |
-          cargo test --workspace --no-fail-fast || {
-            echo "::warning::first run failed; retrying once"
-            cargo test --workspace --no-fail-fast
-          }
+      - name: Run workspace tests
+        # E6：撤销「首次失败降级为 warning 并重跑」的口径——测试失败即红，
+        # 不再用重跑掩盖不稳定。真 flaky 必须被修，而不是被重跑盖住。
+        run: cargo test --workspace --no-fail-fast
 
   feature-matrix:
     name: plugin engine feature matrix
@@ -176,11 +194,12 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
 
   chaos-nightly:
-    name: real-process chaos (nightly / manual)
-    # P0-H.4：真实故障注入套件仅在 schedule 或手动触发时运行
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: real-process chaos (nightly + PR gate)
+    # P0-H.4：真实故障注入套件。
+    # E2：此前仅 schedule/手动触发 → PR 不跑，「验证过」在 PR 层无证据。
+    # 现改为 PR + push + schedule/手动均执行。
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master

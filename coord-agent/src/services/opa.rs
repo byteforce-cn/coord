@@ -82,6 +82,17 @@ pub struct OpaEngine {
     config: OpaConfig,
 }
 
+impl Default for OpaEngine {
+    fn default() -> Self {
+        Self {
+            engine: RwLock::new(Engine::new()),
+            cache: RwLock::new(HashMap::new()),
+            policy_sources: RwLock::new(HashMap::new()),
+            config: OpaConfig::default(),
+        }
+    }
+}
+
 impl OpaEngine {
     pub fn new(config: OpaConfig) -> Result<Self, String> {
         let engine = Engine::new();

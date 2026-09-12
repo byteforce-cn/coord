@@ -97,6 +97,9 @@ async fn test_non_loopback_with_auth_and_tls_allowed() {
     config.agent_addr = format!("0.0.0.0:{port}");
     config.http_addr = format!("127.0.0.1:{}", find_port());
     config.auth.enabled = true;
+    // A3：开启鉴权必须有密钥材料，否则拒绝启动（fail-closed）。这里提供一个
+    // 32 字节 Ed25519 公钥（生产语义：agent 只持公钥验签）。
+    config.auth.verifying_key_hex = "ab".repeat(32);
     config.tls = Some(coord_agent::AgentTlsConfig {
         cert_path,
         key_path,

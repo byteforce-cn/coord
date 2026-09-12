@@ -176,8 +176,15 @@ impl TokenSigningKeyring {
 
     /// 验证任意算法签发的 CCT。
     ///
-    /// - `HMAC-SHA256` → 依次尝试 active + previous 密钥（历史 token 宽限期）；
-    /// - `Ed25519` → 用派生的签名密钥对应公钥验证。
+    /// - `Ed25519` → 用派生的签名密钥对应公钥验证（**当前唯一签发算法**）；
+    /// - `HMAC-SHA256` → 依次尝试 active + previous 密钥。
+    ///
+    /// # ⚠️ 已弃用分支（A3 标注）
+    ///
+    /// HMAC 是对称方案：**任何持有密钥的 agent 都能自签任意 CCT**（含
+    /// `roles:["root"]`）。因此 HMAC 仅作**存量 token 宽限期验证**保留，新签发
+    /// 一律 Ed25519（见 [`Self::ed25519_signing_key`]）。宽限期结束后应删除本函数
+    /// 中的 HMAC 路径，使 `decode_any` 只接受 Ed25519。
     pub fn decode_any(&self, token: &str) -> Result<CctToken> {
         let pub_key = self
             .ed25519_signing_key()
