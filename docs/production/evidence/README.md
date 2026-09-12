@@ -30,6 +30,7 @@ bash scripts/collect-evidence.sh jepsen          # 真实 Jepsen（需 lein + �
 | 目录 | 场景 | 状态 |
 |:--|:--|:--|
 | `20260912T112707Z-java-it/` | 真实 server + agent + Java 集成套件（48/48 通过） | ✅ 已入库 |
+| `20260912T164636Z-round3-workspace-tests/` | 第三轮整改后的工作区全量测试（`passed=1909 failed=0`，提交 `8e2cb37`） | ✅ 已入库 |
 | _（待生成）_ | soak / chaos / multi-raft / jepsen | 仍未入仓 |
 
 > 生成方式：`bash scripts/collect-evidence.sh java-it`（起真实集群 → `mvn verify -Pit`

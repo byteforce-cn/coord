@@ -398,7 +398,44 @@ config_api.rs   3 处   registry_api.rs  4 处
 
 ### 9.1 全量测试
 
-<!--FULLTEST-->
+```
+$ bash scripts/kill-stray-coord-procs.sh
+$ cargo test --workspace --no-fail-fast
+...
+EXIT=0
+passed=1909  failed=0  ignored=41
+（"error / test result: FAILED" 行数 = 0）
+```
+
+**0 个 target 失败。** 通过数较第二轮报告的 1914 略少，是**刻意**的构成变化，不是覆盖下降：
+
+| 变化 | 数量 |
+|:---|:---|
+| `sim_jepsen_test` / `sim_chaos_test` 移出默认套件（`required-features = ["sim-tests"]`，改由 CI 显式运行） | −26 |
+| `write_batcher_test.rs` 由"自建 mock"重写为真实实现测试（9 → 8） | −1 |
+| 本轮新增的针对性回归测试 | +21 |
+
+新增的 21 个测试全部对应本轮的具体修复（见下表），即**净增的是有证据价值的测试**，
+减少的是"让数量虚高"的那部分。
+
+| 新增测试 | 对应修复 |
+|:---|:---|
+| `txn_scope_isolation_test`（3） | §3.1 P0-1 |
+| `leader_election_test`（4） | §3.2 P0-2（含 8 候选并发 + 故障注入重选） |
+| `kv_range::tests`（3） | §3.1 语义单一来源 |
+| `mvcc::tests::test_txn_range_*`（2） | §3.1（Txn/顶层语义一致性矩阵） |
+| `placeholder_hmac_keys_are_not_usable` 等（3） | §3.6 |
+| `lease_grant_refuses_to_overwrite_existing_id` 等（2） | §3.4 C1 |
+| `test_historical_range_read_rejects_key_deleted_after_target`（1） | §3.5 P0-7 |
+| `insert_fails_closed_when_wheel_is_dead`（1） | §4.2① |
+| `test_applied_log_id_encoding_is_total_and_backward_compatible`（1） | §4.2③ |
+| `supervisor::tests::supervised_task_records_exit`（1） | §4.2① |
+
+**原始日志已作为可审计证据入库**（记录提交号与工具链，含压缩前后校验和）：
+`docs/production/evidence/20260912T164636Z-round3-workspace-tests/`
+（`MANIFEST.md` + `run.log.gz` + `sha256sums.txt`）。
+这直接回应第三轮 §4.4 第 2 项对"证据与提交位脱钩"的批评：上一份入库证据记录的是
+`e79f882` 且 `dirty files: 30`，本份记录的是明确的提交 `8e2cb37`。
 
 ### 9.2 反向证明：新测试**确实**能抓住修复前的缺陷
 
