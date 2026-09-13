@@ -1016,7 +1016,7 @@ impl WasmPlugin {
                 ));
             }
         };
-        if result.is_err() && self.trapped.load(Ordering::Relaxed) {
+        if result.is_err() && self.trapped.load(Ordering::Acquire) {
             // trap（fuel/epoch/越界/除零）→ store 已丢弃，插件不再可用
             self.fail(format!(
                 "wasm trap discarded the instance: {}",
@@ -1101,13 +1101,25 @@ impl Plugin for WasmPlugin {
                                     ),
                                     Err(e) => (Err(e.message), e.trap),
                                 };
-                                let _ = resp.send(mapped);
+                                // 关键顺序：`trapped` 必须在**回包之前**置位。
+                                //
+                                // 调用方（`invoke_inner`）收到错误响应后会立即读 `trapped`
+                                // 来决定是否把插件标记为 `Failed`。此前是先 `resp.send()`、
+                                // 再 `trapped.store(..)`，于是调用方几乎总是读到 `false`
+                                // ⇒ **trap 掉的插件仍被标记 `Started`**：继续被路由、
+                                // 健康检查也仍报好，而它对应的实例/存储已被丢弃。
+                                // （该竞态由 `component_plugin_spin_traps_and_is_isolated`
+                                // 在 CI 上暴露；两个引擎同构，一并修正。）
+                                // `Release`/`Acquire` 与下面的回包共同建立 happens-before。
                                 if fatal {
                                     if let (Some(metrics), Some(reason)) = (&metrics, trap) {
                                         metrics.record_plugin_trap(&name, reason);
                                     }
+                                    trapped.store(true, Ordering::Release);
+                                }
+                                let _ = resp.send(mapped);
+                                if fatal {
                                     // trap（fuel/epoch/OOB…）→ store 不可继续使用 → 丢弃实例
-                                    trapped.store(true, Ordering::Relaxed);
                                     tracing::error!(
                                         "wasm plugin '{name}' trapped (reason={}); discarding instance",
                                         trap.unwrap_or("other")

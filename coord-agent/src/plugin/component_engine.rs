@@ -1467,7 +1467,7 @@ impl ComponentPlugin {
                 ));
             }
         };
-        if result.is_err() && self.trapped.load(Ordering::Relaxed) {
+        if result.is_err() && self.trapped.load(Ordering::Acquire) {
             self.fail(format!(
                 "wasm trap discarded the instance: {}",
                 result.as_ref().err().cloned().unwrap_or_default()
@@ -1561,15 +1561,28 @@ impl Plugin for ComponentPlugin {
                                         ),
                                         Err(e) => (Err(e.message), e.trap),
                                     };
-                                    let _ = resp.send(mapped);
+                                    // 关键顺序：`trapped` 必须在**回包之前**置位。
+                                    //
+                                    // 调用方（`invoke_inner`）收到错误响应后会立即读
+                                    // `trapped` 来决定是否把插件标记为 `Failed`。此前是先
+                                    // `resp.send()`、再 `release_handles().await` +
+                                    // `trapped.store(..)`，于是调用方几乎总是读到 `false`
+                                    // ⇒ **trap 掉的插件仍被标记 `Started`**：继续被路由、
+                                    // 健康检查也仍报好，而它的实例已被丢弃。（该竞态由
+                                    // `component_plugin_spin_traps_and_is_isolated` 在 CI
+                                    // 上暴露；js/wasm 引擎同构，一并修正。）
+                                    // `Release`/`Acquire` 与下面的回包共同建立 happens-before。
                                     if fatal {
                                         if let (Some(metrics), Some(reason)) = (&metrics, trap) {
                                             metrics.record_plugin_trap(&name, reason);
                                         }
+                                        trapped.store(true, Ordering::Release);
+                                    }
+                                    let _ = resp.send(mapped);
+                                    if fatal {
                                         // trap → store 不可继续使用 → 丢弃实例；
                                         // 先把句柄表里仍存活的订阅释放掉（guest 已无法 drop）
                                         instance.release_handles().await;
-                                        trapped.store(true, Ordering::Relaxed);
                                         tracing::error!(
                                             "component plugin '{name}' trapped (reason={}); \
                                              discarding instance",

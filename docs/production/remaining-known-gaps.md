@@ -463,6 +463,55 @@ failure still fails the test.
 overlapping ports. A deterministic fix would hold the listener until the child binds, or retry the
 whole spawn when a bind fails. Not done here.
 
+#### 17. A trapped plugin could stay marked `Started` — **fixed** (found while chasing a `plugin engine feature matrix` red)
+
+`plugin engine feature matrix` — green on the previous commit — went red on
+`component_plugin_spin_traps_and_isolated`:
+
+```
+thread 'component_plugin_spin_traps_and_isolated' panicked at
+  coord-agent/tests/agent_plugin_component_test.rs:1079:5:
+trapped plugin must be marked Failed, got Started
+```
+
+The test is not flaky; the **product** is racy. In both engines the per-plugin worker thread did:
+
+```rust
+let _ = resp.send(mapped);          // ① the caller is unblocked HERE
+if fatal {
+    metrics.record_plugin_trap(&name, reason);
+    instance.release_handles().await;   // component engine only
+    trapped.store(true, Ordering::Relaxed);   // ② only now
+    break;
+}
+```
+
+while the caller (`invoke_inner`) decided whether to fail the plugin by reading that very flag
+immediately after the response arrived:
+
+```rust
+if result.is_err() && self.trapped.load(Ordering::Relaxed) { self.fail(..) }
+```
+
+The caller is unblocked at ①, so it can read `false` and skip `fail()` entirely ⇒ the plugin keeps
+`PluginStatus::Started` even though `resp.send` carried a trap error and its instance/store was
+discarded. Consequences: `health_check()` (`matches!(status, Started)`) still reports healthy, so
+the engine keeps routing to a dead instance. It only self-corrects on the *next* invoke, which
+fails with "plugin thread is gone" and calls `fail()` — i.e. one guaranteed failing request after
+a trap. (Note the watchdog path is *not* affected: it calls `fail()` directly.)
+
+Fixed in **both** engines (`wasm_engine.rs`, `component_engine.rs`): the trap bookkeeping
+(`record_plugin_trap`, `trapped.store(true, Ordering::Release)`) now happens **before**
+`resp.send(mapped)`, and the caller loads with `Acquire`, so the flag is visible whenever the
+response is.
+
+*Evidence, stated precisely:* CI produced the symptom. I could **not** reproduce it locally —
+40 runs unpinned and 60 runs pinned to two CPUs (`taskset -c 0,1`, to mimic a runner) all passed
+against the pre-fix ordering. So the justification here is that the code path produces exactly the
+observed symptom (a trap error reaching the caller while the status is still `Started`), *not* a
+local A/B. Post-fix, the component suite is 20/20 and the rest of the feature matrix job (steps
+6–11: three feature combinations, `plugin::` 95, `metrics::` 7, native-service 3) is green.
+
 ---
 
 ## CI
