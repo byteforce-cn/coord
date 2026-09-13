@@ -305,6 +305,25 @@ jobs:
     name: cargo audit + deny
     # R-TST-21：audit/deny 从 schedule-only 改为 PR 门禁
     # （此前仅定时/手动执行，PR 不拦截已知漏洞依赖）
+    #
+    # ⚠️ 该 job 必须显式要 `checks: write`。
+    #
+    # 事故形态（已实测，见下）：`rustsec/audit-check@v2.0.0` 在**有东西要报告**时
+    # （漏洞**或**信息性通告）会调 `checks/runs` 把结果写成 check run；若 token 没有
+    # `checks: write`，它就 `core.setFailed("Resource not accessible by integration")`
+    # —— **整个步骤变红**。
+    # 也就是说：cargo audit 的 exit code 完全不参与判定（它以
+    # `ignoreReturnCode: true` 调用），**权限才是**。
+    # 于是出现最坏的形态：安全检查因为"没权限上报"而失败，而依赖本身是干净的 ——
+    # 本次实测 `"vulnerabilities":{"found":false,"count":0}`，红的唯一原因是一条
+    # **信息性**通告（bincode unmaintained，非漏洞）。
+    #
+    # 只给这一个 job 加权限（而不是顶层），把影响面限制在需要它的地方：
+    # `contents: read` 供 checkout，`checks: write` 供审计结果上报。
+    # 结果：信息性通告作为 check run **可见但不阻断**，真正的漏洞仍会拦住。
+    permissions:
+      contents: read
+      checks: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

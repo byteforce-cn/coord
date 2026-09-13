@@ -213,10 +213,20 @@ This was the actual cause of the `cargo audit + deny` CI failure, reproduced loc
 exact version CI uses (the `EmbarkStudios/cargo-deny-action@v2` Docker image pins
 `deny_version=0.20.2`; the same 0.20.2 binary reproduces `error[unmaintained]` on bincode and
 then `advisories ok` once exempted). With informational advisories disabled the check reports
-`advisories ok` — i.e. **there are no vulnerabilities in the graph today**, and the
-`cargo audit` step (`rustsec/audit-check`) never fails a job for advisories anyway: it only
-annotates (it calls `cargo audit --json` with `ignoreReturnCode: true` and reports through a
-check run).
+`advisories ok` — i.e. **there are no vulnerabilities in the graph today**.
+
+The job had a **second, independent** failure — the `cargo audit` step, and it was not about
+dependencies at all. `rustsec/audit-check@v2.0.0` calls `cargo audit --json` with
+`ignoreReturnCode: true` (so the audit exit code is irrelevant), and when there is anything to
+report it POSTs a **check run**; with no `checks: write` permission it calls
+`core.setFailed("Resource not accessible by integration")` and the step goes red. Its own output
+in that run was `"vulnerabilities":{"found":false,"count":0}` — the only trigger was the
+informational bincode warning. `ci.yml` now declares `permissions: { contents: read,
+checks: write }` **on that job only**, so informational advisories are reported as a check run
+(visible, non-blocking) while real vulnerabilities still block.
+
+The general lesson is worth stating: a security gate that fails because it cannot *report* is
+worse than no gate, because it trains people to ignore it.
 
 bincode is not a convenience dependency here — it is the persistence format: snapshots
 (including V1/V2/V3 backward-compatible decoding), Raft log entries, `/_sys/auth/` records
