@@ -27,12 +27,35 @@ test), not an intention. An entry that cannot be verified does not belong here.
 > `coord-agent` `scope_bearing_rpcs_are_unary_only`). Verified: `java-example`
 > `WatchAdvancedTest` + `WatchIntegrationTest` **6/6 pass** against a real cluster.
 >
-> **Residual (deliberate):** Watch's *scope* is therefore no longer pre-checked in the agent's
-> auth layer. It must be enforced where the first `WatchCreateRequest` is decoded (the handler) —
-> `coord_core::grpc_auth::extract_scope_access` still models Watch requests for that purpose, but
-> the handler-side call is **not wired yet**. Until it is, a role with a non-empty scope
-> restriction can subscribe to a prefix outside that scope. This is a **known security gap**
-> (a bounded substitute for the previous "Watch unusable" state) and is the next item to close.
+> **Residual — corrected: it is a functional limitation, NOT a security hole.**
+>
+> (This entry originally claimed a "known security gap … a role with a non-empty scope
+> restriction can subscribe to a prefix outside that scope". That claim was **wrong** and was
+> caught by testing instead of reasoning. It is left visible here because an unverified
+> security claim in either direction is a defect.)
+>
+> What actually happens: the agent's capability table maps `/coord.watch.Watch/Watch` →
+> `data:watch:subscribe` **without a scope extractor** (`scope_extractor: Option<ScopeExtractor>`
+> takes `&http::HeaderMap`, and Watch's prefix lives in the *streaming body*). So the tower
+> layer takes the **synchronous** path and calls
+> `validate_request_accesses(rpc, header, &[])` — with **zero** extracted accesses. That path is
+> **fail-closed**: `scope_allows` requires an *unrestricted* (empty-scope) grant, otherwise it
+> denies. Verified by `coord-agent` test `watch_scope_is_fail_closed_not_bypassed`, which pins
+> both directions: a scoped `data:watch:subscribe` grant → **Deny**; an unrestricted one →
+> Allow. (The generic mechanism was already tested by
+> `test_interceptor_scope_restricted_capability_fails_closed_without_resource_key`.)
+>
+> So a scope-restricted role cannot subscribe outside its scope — it cannot subscribe **at
+> all**. The real cost is lost functionality for those roles, and the real fix is to evaluate
+> the **first decoded `WatchCreateRequest`** in the handler (`WatchProxy::watch` already decodes
+> it; what it lacks is the caller's per-capability grant scopes, which the interceptor resolves
+> and currently discards). `coord_core::grpc_auth::extract_scope_access` models Watch requests
+> for exactly that purpose, but the handler-side call is not wired.
+>
+> *Deliberately not done in this round:* it means re-touching the same auth path that just
+> produced the P0 above, and it **grants** access that is currently denied — i.e. it can only
+> widen, never narrow. Doing it immediately before a release would trade a known-safe
+> over-restriction for an unknown availability risk. It is the first post-`0.1.0` item.
 
 | # | Item | Status | Evidence |
 |:--|:---|:---|:---|
@@ -302,8 +325,9 @@ with `'toolchain' is a required input`, i.e. **the chaos suites had never execut
 
 `f3e33de` also fixed a **P0 availability regression introduced by round 4**: adding
 `/coord.watch.Watch/Watch` to the agent's body-buffering set made watch (a *streaming* RPC)
-hang forever with no error to the client. See §7 for the probe and the residual Watch-scope
-gap that the fix created.
+hang forever with no error to the client. See §7 for the probe, and the top banner for the
+follow-on finding that Watch's scope check is fail-closed (a functional limitation for
+scope-restricted roles, not a bypass).
 
 ---
 

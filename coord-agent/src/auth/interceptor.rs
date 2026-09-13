@@ -1078,6 +1078,69 @@ mod tests {
         }
     }
 
+    /// **Watch 的 scope 真实语义**（第四轮 P0 修复之后），必须机械验证而不是写在文档里。
+    ///
+    /// agent 层看不到 Watch 的 prefix —— 它在**流式 body** 里，而提取器只读 header
+    /// （这正是第四轮试图缓存 body 结果把 watch 弄死的那个位置）。因此 Watch 的 scope
+    /// 判定只能以"未提取到任何访问"（`accesses = []`）进入，而 `scope_allows` 对空
+    /// accesses 是 **fail-closed** 的：只有存在**无约束**（空 scope）授权才放行。
+    ///
+    /// 于是真实结论是：
+    /// * 带非空 scope 限制的角色**不能**借 Watch 越权订阅 —— 它被**直接拒绝**，
+    ///   不存在"预检查缺失 = 可以绕过"；
+    /// * 实际代价是**功能受限**：这类角色用不了 Watch。要放行合法订阅，必须到 handler
+    ///   侧解码首帧 `WatchCreateRequest`（prefix 在那里才可见）再判 scope。
+    ///
+    /// 本测试把这两条钉住：它既防止"scope 被悄悄放宽成放行"，也防止有人误以为
+    /// 这里存在漏洞而去加一个会再次挂起 watch 的 body 缓存。
+    #[test]
+    fn watch_scope_is_fail_closed_not_bypassed() {
+        use super::super::role_cache::{CapabilityGrant, RoleEntry};
+
+        let watch_rpc = "/coord.watch.Watch/Watch";
+
+        // ① 带非空 scope 的 watch 能力 → **拒绝**（不是放行）
+        let role_cache = Arc::new(RoleCache::new());
+        role_cache.sync_full(vec![RoleEntry {
+            name: "scoped-watcher".to_string(),
+            grants: vec![CapabilityGrant {
+                capability_id: "data:watch:subscribe".to_string(),
+                scope: "/app/counter/".to_string(),
+            }],
+            high_sensitive: false,
+        }]);
+        let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300);
+        let cct = make_test_cct(vec!["scoped-watcher"], HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+
+        let result = interceptor.validate_request_accesses(watch_rpc, Some(&auth_header), &[]);
+        assert!(
+            matches!(result, AuthResult::Deny(_)),
+            "带 scope 限制的角色订阅 Watch 必须 fail-closed 拒绝；\
+             若这里是 Allow，那就是**越权订阅**（可读 scope 之外的数据）"
+        );
+
+        // ② 无约束（空 scope）授权 → 放行（这是 watch 生产可用的前提，别误伤）
+        let role_cache = Arc::new(RoleCache::new());
+        role_cache.sync_full(vec![RoleEntry {
+            name: "unrestricted-watcher".to_string(),
+            grants: vec![CapabilityGrant {
+                capability_id: "data:watch:subscribe".to_string(),
+                scope: String::new(),
+            }],
+            high_sensitive: false,
+        }]);
+        let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300);
+        let cct = make_test_cct(vec!["unrestricted-watcher"], HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+
+        let result = interceptor.validate_request_accesses(watch_rpc, Some(&auth_header), &[]);
+        assert!(
+            matches!(result, AuthResult::Allow(_)),
+            "无 scope 约束的 data:watch:subscribe 必须能订阅（否则 watch 对普通角色不可用）"
+        );
+    }
+
     /// PKI RPC 必须映射到 capability（私钥集中存储前上鉴权）
     #[test]
     fn test_infer_capability_pki_mappings() {
