@@ -245,15 +245,25 @@ impl PluginLoader for JsPluginLoader {
                 .into()
             })?;
 
-        // Phase 1.3：开通插件服务账户（失败 → 警告并回退共享未鉴权客户端）
+        // Phase 1.3：开通插件服务账户（有界重试仍失败 → 回退共享未鉴权客户端）
+        //
+        // 为什么用 `ensure_with_retry`：启动期的一次瞬时失败若直接回退，会让该插件
+        // 之后的每次出站调用都被服务端 fail-closed 拒绝（`missing CCT token`）并**不再
+        // 自愈** —— 详见 `PluginIdentityManager::ensure_with_retry` 的文档。
         if let Some(identity) = &self.identity {
             if let Err(e) = identity
-                .ensure(&manifest.name, &manifest.capabilities)
+                .ensure_with_retry(
+                    &manifest.name,
+                    &manifest.capabilities,
+                    crate::plugin::identity::ENSURE_RETRY_POLICY,
+                )
                 .await
             {
-                tracing::warn!(
-                    "plugin '{}': identity provisioning failed ({e}); outbound calls fall back to \
-                     the shared agent client",
+                tracing::error!(
+                    "plugin '{}': identity provisioning failed after retries ({e}); outbound \
+                     calls fall back to the SHARED UNAUTHENTICATED client, so every constraint \
+                     check will be denied by the server until the plugin is reloaded (SIGHUP) \
+                     or the agent restarts",
                     manifest.name
                 );
             }

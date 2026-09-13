@@ -82,6 +82,29 @@ fn plugin_source(mark: &str) -> String {
 
 // ──── 端口 ────
 
+/// 读取 agent 进程日志的尾部（`spawn_agent` 把 stdout/stderr 写到
+/// `<cfg>.agent.log`）。
+///
+/// 存在的理由：这个套件里最贵的一类失败是“服务端 fail-closed 但客户端只看到
+/// `missing CCT token`”。根因几乎总在 **agent 侧日志**里（身份开通失败 → 回退共享
+/// 未鉴权客户端）。此前失败只输出客户端错误，CI 上只能靠猜；现在把 agent 日志
+/// 一并贴进断言消息。
+fn agent_log_tail(cfg_path: &Path, lines: usize) -> String {
+    let path = cfg_path.with_extension("agent.log");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            let all: Vec<&str> = text.lines().collect();
+            let start = all.len().saturating_sub(lines);
+            format!(
+                "{} (last {lines} lines)\n{}",
+                path.display(),
+                all[start..].join("\n")
+            )
+        }
+        Err(e) => format!("{} (unreadable: {e})", path.display()),
+    }
+}
+
 fn find_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
@@ -620,7 +643,14 @@ capabilities = [{{ id = "data:kv:read", scope = "/app/counter/" }}, {{ id = "dat
             payload: b"after-restart".to_vec(),
         })
         .await
-        .expect("plugin KV write must still succeed after agent restart (persisted account)")
+        .unwrap_or_else(|e| {
+            panic!(
+                "plugin KV write must still succeed after agent restart (persisted account): {e}\n\
+                 (a fail-closed denial here means the plugin's own account did not authenticate; \
+                 the agent log below says why)\n--- agent log ---\n{}",
+                agent_log_tail(&agent_cfg, 80)
+            )
+        })
         .into_inner();
     assert!(String::from_utf8_lossy(&put2.payload).starts_with("rev-"));
 

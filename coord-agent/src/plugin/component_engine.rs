@@ -1322,14 +1322,21 @@ impl ComponentLoader {
         }
 
         // 与 core ABI / JS 路径同一身份管理器（每插件受限 CCT，D5）
+        // 与 `js_engine` 一致：用有界重试，失败后在 ERROR 级别明确说出后果。
         if let Some(identity) = &self.identity {
             if let Err(e) = identity
-                .ensure(&manifest.name, &manifest.capabilities)
+                .ensure_with_retry(
+                    &manifest.name,
+                    &manifest.capabilities,
+                    crate::plugin::identity::ENSURE_RETRY_POLICY,
+                )
                 .await
             {
-                tracing::warn!(
-                    "component plugin '{}': identity provisioning failed ({e}); outbound calls \
-                     fall back to the shared agent client",
+                tracing::error!(
+                    "component plugin '{}': identity provisioning failed after retries ({e}); \
+                     outbound calls fall back to the SHARED UNAUTHENTICATED client, so every \
+                     constraint check will be denied by the server until the plugin is reloaded \
+                     (SIGHUP) or the agent restarts",
                     manifest.name
                 );
             }

@@ -161,6 +161,19 @@ class MqClientTest {
             latch.countDown();
         });
 
+        // `subscribe()` 是 server-streaming 调用：它的返回**只代表客户端已发出请求**，
+        // 服务端 handler 何时登记订阅者是未知的。若紧接着 publish，消息可能正好落在
+        // “客户端已 subscribe、服务端尚未注册”的窗口里 —— 那它既不会被实时推送，
+        // 也不会被回放（回放只发生在 subscribe 那一刻）→ 偶发红灯。
+        //
+        // 因此先等注册完成。这不是放宽断言（断言一条没少），而是把测试里原本
+        // 隐含的时序假设显式化：CI 上 `MqClientTest.shouldSubscribeReplayAndPush`
+        // 就曾以 “latch 只等到 1/2” 的形式翻红过一次。
+        // 该窗口属于协议本身的限制（`MqSubscribeRequest` 没有起点 offset，
+        // 客户端无法指定“从 offset N 开始”），已记入
+        // docs/production/remaining-known-gaps.md。
+        fake.awaitSubscribers(1, 5_000);
+
         // 回放已有 1 条；再发布 1 条实时推送
         mq.publish("orders", 0, null, "m2".getBytes());
         assertThat(latch.await(5, TimeUnit.SECONDS)).as("订阅应收到回放+实时共 2 条").isTrue();
@@ -187,6 +200,29 @@ class MqClientTest {
             Subscriber(String group, StreamObserver<MqMessage> observer) {
                 this.group = group;
                 this.observer = observer;
+            }
+        }
+
+        /**
+         * 等待服务端**真正登记**了 {@code count} 个订阅者。
+         * <p>
+         * 存在的意义：客户端 `subscribe()` 返回与服务端 `subscribe` handler 执行之间
+         * 没有任何顺序保证（客户端无法得知 handler 何时被调用）。测试若在
+         * `subscribe()` 之后立刻 `publish`，就是在这段窗口里赛跑。
+         *
+         * @return true 表示已登记够数；false 表示超时（调用方应据此失败，而不是继续赛跑）
+         */
+        boolean awaitSubscribers(int count, long timeoutMillis) throws InterruptedException {
+            long deadline = System.currentTimeMillis() + timeoutMillis;
+            synchronized (this) {
+                while (subscribers.size() < count) {
+                    long remaining = deadline - System.currentTimeMillis();
+                    if (remaining <= 0) {
+                        return false;
+                    }
+                    wait(remaining);
+                }
+                return true;
             }
         }
 
@@ -235,6 +271,8 @@ class MqClientTest {
                 }
                 committedOffsets.put(request.getConsumerGroup(), (long) messages.size());
                 subscribers.add(new Subscriber(request.getConsumerGroup(), responseObserver));
+                // 唤醒 awaitSubscribers：登记已完成（之前的 publish 不会看到这个订阅者）
+                notifyAll();
             }
         }
 

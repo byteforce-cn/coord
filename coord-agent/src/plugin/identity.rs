@@ -13,8 +13,10 @@
 // 3. `forget(plugin)`：插件卸载时停止续期任务并移除 authed client。
 //
 // **降级语义**：开通失败（server 未启用 Auth / bootstrap CCT 缺
-// `admin:auth:*` 能力 / 网络不可达）只在日志留痕并回退到共享未鉴权客户端——
+// `admin:auth:*` 能力 / 网络不可达）在**有界重试**仍失败后回退到共享未鉴权客户端——
 // 与插件引擎引入前行为一致，保证明文开发与既有回归零破坏。
+// 重试见 [`PluginIdentityManager::ensure_with_retry`]：**失败必须是有界重试之后的
+// 结论**，否则一个瞬时错误会变成进程生命周期内的永久故障。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,6 +40,34 @@ use crate::plugin::manifest::PluginCapability;
 const RENEW_LEAD_SECS: i64 = 120;
 /// 最小续期间隔（防呆：即使 server 返回异常到期时间也不会打爆）。
 const MIN_RENEW_INTERVAL_SECS: u64 = 30;
+
+/// 身份开通的默认重试参数。
+///
+/// 取值理由：要覆盖的是**启动期瞬时失败**（agent 刚起来、到 server 的连接尚未建立、
+/// 握手拖动），量级是秒；同时必须**有界** —— “账户真的不存在”这类确定性失败要尽快
+/// 把插件启动路径交回去，不能无限阻塞。
+pub const ENSURE_RETRY_POLICY: EnsureRetryPolicy = EnsureRetryPolicy {
+    attempts: 5,
+    initial_backoff: Duration::from_millis(200),
+};
+
+/// [`PluginIdentityManager::ensure_with_retry`] 的重试参数。
+///
+/// 默认值即 [`ENSURE_RETRY_POLICY`]：最多 5 次尝试（首试 + 4 次重试），
+/// 退避 200/400/800/1600ms ⇒ 最坏约 3 秒。
+#[derive(Debug, Clone, Copy)]
+pub struct EnsureRetryPolicy {
+    /// 总尝试次数（含首次）。
+    pub attempts: u32,
+    /// 首次退避；每次失败后翻倍。
+    pub initial_backoff: Duration,
+}
+
+impl Default for EnsureRetryPolicy {
+    fn default() -> Self {
+        ENSURE_RETRY_POLICY
+    }
+}
 
 /// provisioner 服务账户的默认用户名（`[auth].provisioner_user` 可覆盖）。
 pub const DEFAULT_PROVISIONER_USER: &str = "agent-provisioner";
@@ -526,6 +556,67 @@ impl PluginIdentityManager {
         Ok(())
     }
 
+    /// [`Self::ensure`] 的**有界重试**版本。
+    ///
+    /// ## 为什么必须有它
+    ///
+    /// `ensure` 失败时调用方（`js_engine` / `component_engine`）会回退到**共享未鉴权
+    /// 客户端**，而服务端对无凭据出站调用是 fail-closed 的 —— 此后该插件的每一次调用
+    /// 都会以 `unauthenticated: missing CCT token` 失败，而且**不会自己恢复**
+    /// （只靠下一次 SIGHUP / agent 重启）。于是在**启动期**发生的一次瞬时错误
+    /// （agent 刚重启、到 server 的连接尚未建立、握手拖动）会被放大成
+    /// **整个进程生命周期内的永久故障**。
+    ///
+    /// 真实进程用例 `coord/tests/plugin_real_process_test.rs::plugin_real_agent_process_e2e`
+    /// 在 CI 上就是这样翻红的：agent `kill` + 重启后用持久化账户写 KV 返回
+    /// `missing CCT token`（同一提交本地 8/8 通过）。有界重试正是针对这个形态：
+    /// **降级可以，但必须是在重试之后**。
+    ///
+    /// ## 边界
+    ///
+    /// 重试是有界的（默认最坏约 3 秒，见 [`ENSURE_RETRY_POLICY`]），因此对
+    /// “账户真的不存在 / 权限模型本就不允许”这类确定性失败只会多花几秒。
+    /// 仍未处理的是“持续失败之后没有按需重试”：那种情况下直到下一次 SIGHUP 或
+    /// agent 重启前插件仍不可用（已记入 docs/production/remaining-known-gaps.md）。
+    pub async fn ensure_with_retry(
+        &self,
+        plugin: &str,
+        capabilities: &[PluginCapability],
+        policy: EnsureRetryPolicy,
+    ) -> Result<(), String> {
+        let attempts = policy.attempts.max(1);
+        let mut backoff = policy.initial_backoff;
+        let mut last_err = String::from("identity ensure not attempted");
+        for attempt in 1..=attempts {
+            match self.ensure(plugin, capabilities).await {
+                Ok(()) => {
+                    if attempt > 1 {
+                        tracing::info!(
+                            "plugin '{plugin}': identity ensure succeeded on attempt {attempt}/\
+                             {attempts}"
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    last_err = e;
+                    if attempt == attempts {
+                        break;
+                    }
+                    tracing::warn!(
+                        "plugin '{plugin}': identity ensure attempt {attempt}/{attempts} failed \
+                         ({last_err}); retrying in {backoff:?}"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2);
+                }
+            }
+        }
+        Err(format!(
+            "identity ensure failed after {attempts} attempt(s): {last_err}"
+        ))
+    }
+
     /// 幂等开通序列。
     ///
     /// **凭据来源是 [`Self::active_gateway`]**：已自举 provisioner 会话时走它的
@@ -934,6 +1025,159 @@ mod tests {
         let second = mgr.password_for("counter");
         assert_eq!(first, second, "password must be reused across restarts");
         assert_eq!(first.len(), 64, "32 random bytes as hex");
+    }
+
+    /// `ensure` 首次成功 → 不发生重试（重试只用于失败恢复，不改变正常路径）。
+    #[tokio::test]
+    async fn ensure_with_retry_does_not_retry_on_success() {
+        let gateway = Arc::new(StubGateway::default());
+        let clients = Arc::new(PluginClients::new(offline_client().await));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mgr = PluginIdentityManager::new(
+            Arc::clone(&gateway) as Arc<dyn PluginAuthGateway>,
+            vec!["http://127.0.0.1:1".to_string()],
+            None,
+            dir.path(),
+            Arc::clone(&clients),
+        )
+        .expect("identity manager");
+
+        mgr.ensure_with_retry(
+            "counter",
+            &[cap("data:kv:read", "/app/counter/")],
+            fast_retry_policy(5),
+        )
+        .await
+        .expect("ensure must succeed on the first attempt");
+
+        assert_eq!(gateway.auth_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(clients.len(), 1);
+    }
+
+    /// **有界重试的吸收能力**：前两次 `Authenticate` 失败（模拟 agent 刚重启、
+    /// 到 server 的连接尚未建立）必须被重试吃掉，而不是把插件永久降级为共享
+    /// 未鉴权客户端（那会让之后每次出站调用都 `missing CCT token` 且不再自愈）。
+    #[tokio::test]
+    async fn ensure_with_retry_absorbs_transient_authenticate_failures() {
+        let gateway = Arc::new(FlakyGateway {
+            failures_left: AtomicUsize::new(2),
+            auth_calls: AtomicUsize::new(0),
+        });
+        let clients = Arc::new(PluginClients::new(offline_client().await));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mgr = PluginIdentityManager::new(
+            Arc::clone(&gateway) as Arc<dyn PluginAuthGateway>,
+            vec!["http://127.0.0.1:1".to_string()],
+            None,
+            dir.path(),
+            Arc::clone(&clients),
+        )
+        .expect("identity manager");
+
+        mgr.ensure_with_retry(
+            "counter",
+            &[cap("data:kv:read", "/app/counter/")],
+            fast_retry_policy(5),
+        )
+        .await
+        .expect("transient failures must be absorbed by the retry");
+
+        assert_eq!(
+            gateway.auth_calls.load(Ordering::SeqCst),
+            3,
+            "2 failures + 1 success"
+        );
+        assert_eq!(
+            clients.len(),
+            1,
+            "authed client must be registered after the retry succeeded"
+        );
+    }
+
+    /// **负向对照**：持续失败时重试必须是**有界**的 —— 恰好 `attempts` 次，
+    /// 返回 Err（调用方据此降级），不会无限重试也不会一次就放弃。
+    #[tokio::test]
+    async fn ensure_with_retry_is_bounded_on_persistent_failure() {
+        let gateway = Arc::new(FlakyGateway {
+            failures_left: AtomicUsize::new(usize::MAX),
+            auth_calls: AtomicUsize::new(0),
+        });
+        let clients = Arc::new(PluginClients::new(offline_client().await));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mgr = PluginIdentityManager::new(
+            Arc::clone(&gateway) as Arc<dyn PluginAuthGateway>,
+            vec!["http://127.0.0.1:1".to_string()],
+            None,
+            dir.path(),
+            Arc::clone(&clients),
+        )
+        .expect("identity manager");
+
+        let err = mgr
+            .ensure_with_retry("counter", &[], fast_retry_policy(3))
+            .await
+            .expect_err("persistent failure must surface after the bounded retries");
+
+        assert_eq!(
+            gateway.auth_calls.load(Ordering::SeqCst),
+            3,
+            "exactly `attempts` authenticate calls"
+        );
+        assert!(
+            err.contains("failed after 3 attempt(s)"),
+            "error must state it was retried: {err}"
+        );
+        assert_eq!(clients.len(), 0, "no authed client on failure");
+    }
+
+    /// 重试测试用的策略：次数与生产一致（5），退避降到 0 以免拖慢测试。
+    fn fast_retry_policy(attempts: u32) -> EnsureRetryPolicy {
+        EnsureRetryPolicy {
+            attempts,
+            initial_backoff: Duration::from_millis(0),
+        }
+    }
+
+    /// `Authenticate` 前 N 次失败的网关（模拟启动期瞬时错误）。
+    struct FlakyGateway {
+        failures_left: AtomicUsize,
+        auth_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl PluginAuthGateway for FlakyGateway {
+        async fn user_add(&self, _user: &str, _password: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn role_add(&self, _role: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn role_grant_capability(
+            &self,
+            _role: &str,
+            _capability_id: &str,
+            _scope: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn user_grant_role(&self, _user: &str, _role: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn authenticate(&self, _user: &str, _password: &str) -> Result<IssuedToken, String> {
+            self.auth_calls.fetch_add(1, Ordering::SeqCst);
+            if self.failures_left.load(Ordering::SeqCst) > 0 {
+                self.failures_left.fetch_sub(1, Ordering::SeqCst);
+                return Err("connect error: transport is not ready".into());
+            }
+            Ok(IssuedToken {
+                cct: "retry-cct".into(),
+                refresh_token: Some("retry-rt".into()),
+                expires_at: now_secs() + 900,
+            })
+        }
+        async fn refresh(&self, _refresh_token: &str) -> Result<IssuedToken, String> {
+            Err("not used".into())
+        }
     }
 
     #[tokio::test]
