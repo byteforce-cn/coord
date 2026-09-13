@@ -271,23 +271,30 @@ impl RoleSyncTask {
         Ok(count)
     }
 
-    /// 后台循环：启动即同步一次，之后按 `role_sync_interval` 周期同步；
-    /// 连续失败时按指数退避重试（上限见 `SyncScheduler::retry_backoff`）。
+    /// 后台循环：`spawn_role_sync` 已完成首次同步时**直接进入周期同步**（不重复拉取）；
+    /// 若那次失败/超时（缓存仍未初始化）则立即补一次，之后按 `role_sync_interval`
+    /// 周期同步；连续失败时按指数退避重试（上限见 `SyncScheduler::retry_backoff`）。
     pub async fn run(self) {
         let mut failures: u32 = 0;
+        // 启动路径已成功写入缓存 → 本轮不再拉取（否则启动瞬间会连发两次 ListRoles）。
+        let mut skip_initial_sync = self.role_cache.is_initialized();
         while self.scheduler.is_running() {
-            match self.sync_once().await {
-                Ok(n) => {
-                    failures = 0;
-                    tracing::info!("agent role sync complete: {n} role(s) cached");
-                }
-                Err(e) => {
-                    self.scheduler.record_role_sync_failure();
-                    failures = failures.saturating_add(1);
-                    tracing::error!(
-                        "agent role sync failed: {e} (attempt {failures}); local authorization \
-                         remains fail-closed until the role mapping is available"
-                    );
+            if skip_initial_sync {
+                skip_initial_sync = false;
+            } else {
+                match self.sync_once().await {
+                    Ok(n) => {
+                        failures = 0;
+                        tracing::info!("agent role sync complete: {n} role(s) cached");
+                    }
+                    Err(e) => {
+                        self.scheduler.record_role_sync_failure();
+                        failures = failures.saturating_add(1);
+                        tracing::error!(
+                            "agent role sync failed: {e} (attempt {failures}); local authorization \
+                             remains fail-closed until the role mapping is available"
+                        );
+                    }
                 }
             }
             let delay = if failures == 0 {
@@ -304,6 +311,8 @@ impl RoleSyncTask {
 ///
 /// `token_provider` 为 agent 出站凭据句柄（引导 CCT / 持久化账户会话）；角色映射
 /// 端点需要 `admin:auth:role_list`（已包含在 `agent-bootstrap` 最小能力集内）。
+///
+/// **返回前会先完成一次全量同步**（带上限），见 [`INITIAL_ROLE_SYNC_TIMEOUT`]。
 pub async fn spawn_role_sync(
     role_cache: Arc<RoleCache>,
     static_peers: Vec<String>,
@@ -322,9 +331,41 @@ pub async fn spawn_role_sync(
         .await
         .map_err(|e| format!("failed to build role sync client: {e}"))?;
     let task = RoleSyncTask::new(role_cache, client);
+
+    // 首次同步**必须在对外提供鉴权服务之前完成**（所以在这里 await，而不是只依赖
+    // 后台循环）。否则「已启动但 RoleCache 仍为空」的窗口内，中间件会把**合法**的
+    // scope 内请求 fail-closed 拒绝，症状是：
+    //   Unauthenticated: role(s) ["app-reader"] do not have capability 'data:kv:read'
+    // 即 agent 重启后有一段时间不可用（`RoleCache::is_initialized()` 此前在生产路径
+    // 上没有任何调用方，正是这个窗口存在的原因）。
+    //
+    // 超时/失败都**不阻塞启动**：保留「server 不可达时降级但不停机」的既有语义，
+    // 此时继续 fail-closed（拒绝一切角色相关 RPC），并由后台循环按退避重试。
+    match tokio::time::timeout(INITIAL_ROLE_SYNC_TIMEOUT, task.sync_once()).await {
+        Ok(Ok(n)) => {
+            tracing::info!("agent role sync (initial) complete: {n} role(s) cached before serving")
+        }
+        Ok(Err(e)) => tracing::error!(
+            "agent role sync (initial) failed: {e}; serving fail-closed until the role \
+             mapping is available (background retry with backoff)"
+        ),
+        Err(_) => tracing::error!(
+            "agent role sync (initial) timed out after {:?}; serving fail-closed until the \
+             role mapping is available (background retry with backoff)",
+            INITIAL_ROLE_SYNC_TIMEOUT
+        ),
+    }
+
     tokio::spawn(task.run());
     Ok(())
 }
+
+/// 启动路径上等待**首次**角色同步的上限。
+///
+/// 取值考量：正常情况（server 可达）首次同步是毫秒级；只有在 server 不可达/极慢时
+/// 才会接近该上限，此时早一点进入 fail-closed 降级比继续等更有价值。测试套件给
+/// agent 的就绪预算是 45s，故该上限必须明显小于它。
+pub const INITIAL_ROLE_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ──── Tests ────
 

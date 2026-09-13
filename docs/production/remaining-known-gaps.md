@@ -396,9 +396,72 @@ Evidence:
 `/var/lib/coord`, so cross-suite state leakage through the default data directory is gone.
 
 *Also:* chaos steps 12 (`OBJECT_STORAGE_REAL`) and 13 (`AGENT_AUTH_REAL`) had **never executed**
-in CI, because step 11's failure skipped them. Both were run locally as uid 1000 against the
-fixed binary and pass (3.40 s / 2.74 s), so the now-unblocked tail of that job is exercised
-rather than assumed.
+in CI, because step 11's failure skipped them. Both pass locally as uid 1000 against the fixed
+binary (3.40 s / 2.74 s) — but that local pass turned out **not** to be sufficient evidence: step
+13 failed the first time it actually ran in CI. See §15.
+
+#### 15. Agent served the auth path with an empty `RoleCache` — **fixed** (exposed by the never-run chaos step 13)
+
+With §14 fixed, step 11 turned green and the job continued past it for the first time. Step 12
+passed; step 13 failed:
+
+```
+in-scope read through agent must be allowed, got: Some(Status { code: Unauthenticated,
+  message: "role(s) [\"app-reader\"] do not have capability 'data:kv:read'" })
+```
+
+That message is emitted by the **agent** (`coord-agent/src/auth/interceptor.rs:438`), not by the
+server: the interceptor denied because `RoleCache::scopes_for_capability` returned an empty list.
+
+Root cause: `spawn_role_sync` (`coord-agent/src/auth/sync.rs`) `tokio::spawn`ed
+`RoleSyncTask::run()` **without awaiting the first full sync**, and `lib.rs` then enabled the
+interceptor and started serving. For that window the cache was empty ⇒ every role-gated RPC was
+fail-closed denied — including **legitimate, in-scope** ones. `RoleCache::is_initialized()`
+existed but had **no production caller**; that is precisely this ordering seam left unwired. The
+test was written on the assumption that "agent 启动时做一次全量同步" makes the role available
+before traffic — the implementation made that sync asynchronous, so the assumption only *usually*
+held (which is why it passed locally and failed on a loaded runner).
+
+Fixed: `spawn_role_sync` now performs one full sync **before returning**, bounded by
+`INITIAL_ROLE_SYNC_TIMEOUT` (10 s). Failure/timeout still does **not** block startup — the
+documented "server unreachable ⇒ degrade, don't stop" behaviour is preserved, and the agent stays
+fail-closed while the background loop retries with backoff. `run()` no longer issues a second
+sync immediately afterwards.
+
+*Test:* `agent_auth_process_test` (CI chaos step 13) is the pin — it is the test that caught it.
+No new test was written: a mock `ListRoles` service would be needed to unit-test the ordering,
+and the real-process test already exercises exactly this path.
+
+#### 16. `auth_enforcement_test` first-RPC readiness race — **hardened** (still open)
+
+`workspace tests` failed on `test_auth_users_survive_restart` at the first `Authenticate`,
+immediately after `wait_ready` returned:
+
+```
+called `Result::unwrap()` on an `Err` value: Status { code: Unknown, message: "transport error",
+  source: Some(tonic::transport::Error(Transport, hyper::Error(Io, Kind(ConnectionReset)))) }
+```
+
+`wait_ready` only probes the BFF's `/healthz` (port `grpc + 10`); the gRPC listener is a
+*different* listener, so "HTTP ready" is not "gRPC ready". This is a harness race, not a product
+defect, and it is unrelated to §14/§15 — these tests pass `--data-dir` explicitly, so
+`apply_cli_overrides` receives an identical `Some(tmpdir)` before and after that change.
+
+*Observed rate locally:* 1 failure in 30 consecutive runs — and that failure was a different
+symptom of the same readiness/liveness family, `DeadlineExceeded: raft auth write timed out (no
+quorum?)` under CPU contention (the "假红" class §13 already describes).
+
+Hardened: the readiness-sensitive first `Authenticate` in each of the three tests now goes
+through `authenticate_ready()`, which treats "the first RPC succeeds" as the real readiness
+condition. It retries only **transient** errors (transport / `UNAVAILABLE` / `DEADLINE_EXCEEDED`)
+within a 30 s budget, and on failure prints the **server log tail**, so the next occurrence can be
+told apart from "the server started and then exited". No assertion was weakened: a persistent
+failure still fails the test.
+
+*Still open:* `find_free_port()` is a TOCTOU helper (bind `:0` → read port → close) and
+`grpc + 10` is never checked for availability, so two concurrent tests can still be handed
+overlapping ports. A deterministic fix would hold the listener until the child binds, or retry the
+whole spawn when a bind fails. Not done here.
 
 ---
 
@@ -425,7 +488,7 @@ exposing real defects:
 | `frontend lint (coord-ui)` | red (never passed) | fixed: see §11 |
 | `cargo audit + deny` | red | fixed: see §10 |
 | `java sdk (maven verify)` | green | red once via a flaky test: see §12 |
-| `real-process chaos (nightly + PR gate)` | never ran (its first step failed on an empty `toolchain` input) | first real run at `5097072`; `plugin_real_agent_process_e2e` failed on the `--data-dir` defect — fixed, see §14; steps 12–13 (never reached before) verified locally as non-root |
+| `real-process chaos (nightly + PR gate)` | never ran (its first step failed on an empty `toolchain` input) | first real run at `5097072`; `plugin_real_agent_process_e2e` failed on the `--data-dir` defect (§14, fixed); once step 11 passed, steps 12–13 ran for the first time and step 13 exposed the empty-`RoleCache` window (§15, fixed) |
 | `weekly perf baseline` | skipped on PRs | skipped on PRs (by design) |
 
 Notable: the baseline's `real-process chaos` job failed at `dtolnay/rust-toolchain@master`

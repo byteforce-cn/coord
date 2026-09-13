@@ -108,6 +108,60 @@ fn with_token<T>(req: T, token: &str) -> Request<T> {
     req
 }
 
+/// 服务端日志尾部（失败诊断用；与本仓其它进程级套件的做法一致）。
+fn server_log_tail(data_dir: &std::path::Path, lines: usize) -> String {
+    let log = std::fs::read_to_string(data_dir.join("server.log")).unwrap_or_default();
+    let all: Vec<&str> = log.lines().collect();
+    let start = all.len().saturating_sub(lines);
+    all[start..].join("\n")
+}
+
+/// **就绪敏感**的首个 `Authenticate`：在窗口内重试瞬时传输错误，失败时附带服务端日志。
+///
+/// 为什么需要：`wait_ready` 探测的是 BFF 的 `/healthz`（端口 = `grpc + 10`），它与
+/// gRPC 监听器是**两个不同的监听器** —— "HTTP 就绪"并不等于"gRPC 可服务"。CI 上
+/// 观测到紧随 `/healthz` 成功之后的首个 `Authenticate` 返回
+/// `transport error ... Kind(ConnectionReset)`（成功探测后 <1s 内即失败）。
+///
+/// 断言没有被放宽：只有**瞬时**错误（传输层 / UNAVAILABLE / DEADLINE_EXCEEDED）
+/// 允许在窗口内重试，超时仍失败，并且失败信息里带服务端日志尾部 —— 这样下一次
+/// 出现时能直接区分"gRPC 未就绪"与"服务端启动后退出"。
+///
+/// `Authenticate` 是**匿名**端点，所以能在没有任何凭据的情况下用作就绪探针
+/// （这正是本套件第 2 条验收标准）。
+async fn authenticate_ready(
+    auth: &mut AuthClient<Channel>,
+    data_dir: &std::path::Path,
+    name: &str,
+    password: &str,
+) -> coord_proto::auth::AuthenticateResponse {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match auth
+            .authenticate(AuthenticateRequest {
+                name: name.to_string(),
+                password: password.to_string(),
+            })
+            .await
+        {
+            Ok(resp) => return resp.into_inner(),
+            Err(s) => {
+                let transient = matches!(
+                    s.code(),
+                    tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+                ) || s.message().contains("transport error");
+                assert!(
+                    transient && Instant::now() < deadline,
+                    "authenticate({name}) must succeed anonymously: {s:?}\n\
+                     --- server log tail ---\n{}",
+                    server_log_tail(data_dir, 40)
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+}
+
 /// 期待 UNAUTHENTICATED
 fn expect_unauthenticated(status: Status, rpc: &str) {
     assert_eq!(
@@ -202,14 +256,7 @@ async fn test_auth_enforcement_full_matrix() {
         .expect("health check must be anonymous");
 
     let mut auth = AuthClient::new(channel(&addr).await);
-    let login = auth
-        .authenticate(AuthenticateRequest {
-            name: "root".to_string(),
-            password: "test-root-password-123".to_string(),
-        })
-        .await
-        .expect("authenticate must be anonymous")
-        .into_inner();
+    let login = authenticate_ready(&mut auth, &data_dir, "root", "test-root-password-123").await;
     let root_cct = login.cct.clone();
     assert!(!root_cct.is_empty(), "root login must issue a CCT");
     assert_eq!(login.roles, vec!["root"]);
@@ -397,15 +444,9 @@ async fn test_auth_users_survive_restart() {
     wait_ready(grpc_port, Duration::from_secs(60)).await;
 
     let mut auth = AuthClient::new(channel(&addr).await);
-    let login = auth
-        .authenticate(AuthenticateRequest {
-            name: "root".to_string(),
-            password: "test-root-password-123".to_string(),
-        })
+    let root_cct = authenticate_ready(&mut auth, &data_dir, "root", "test-root-password-123")
         .await
-        .unwrap()
-        .into_inner();
-    let root_cct = login.cct;
+        .cct;
     auth.user_add(with_token(
         coord_proto::auth::UserAddRequest {
             name: "alice".to_string(),
@@ -425,23 +466,12 @@ async fn test_auth_users_survive_restart() {
     wait_ready(grpc_port, Duration::from_secs(60)).await;
 
     let mut auth2 = AuthClient::new(channel(&addr).await);
-    let alice_login = auth2
-        .authenticate(AuthenticateRequest {
-            name: "alice".to_string(),
-            password: "alice-pw".to_string(),
-        })
-        .await
-        .expect("alice must survive restart")
-        .into_inner();
-    assert!(!alice_login.cct.is_empty());
+    let alice_login = authenticate_ready(&mut auth2, &data_dir, "alice", "alice-pw").await;
+    assert!(!alice_login.cct.is_empty(), "alice must survive restart");
     // root 也仍在（经 raft 持久化）
-    auth2
-        .authenticate(AuthenticateRequest {
-            name: "root".to_string(),
-            password: "test-root-password-123".to_string(),
-        })
-        .await
-        .expect("root must survive restart");
+    let root_login =
+        authenticate_ready(&mut auth2, &data_dir, "root", "test-root-password-123").await;
+    assert!(!root_login.cct.is_empty(), "root must survive restart");
 
     child.kill().unwrap();
     let _ = child.wait();
@@ -461,14 +491,8 @@ async fn test_cct_revocation_via_bff() {
 
     // 创建用户 bob + 登录获取 CCT
     let mut auth = AuthClient::new(channel(&addr).await);
-    let root_cct = auth
-        .authenticate(AuthenticateRequest {
-            name: "root".to_string(),
-            password: "test-root-password-123".to_string(),
-        })
+    let root_cct = authenticate_ready(&mut auth, &data_dir, "root", "test-root-password-123")
         .await
-        .unwrap()
-        .into_inner()
         .cct;
     auth.user_add(with_token(
         coord_proto::auth::UserAddRequest {
