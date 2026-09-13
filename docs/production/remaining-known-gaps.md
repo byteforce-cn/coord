@@ -14,6 +14,26 @@ test), not an intention. An entry that cannot be verified does not belong here.
 
 ## A/B items — all closed
 
+> **⚠️ Read this first — a P0 regression was found while validating this round.**
+>
+> Adding `/coord.watch.Watch/Watch` to the body-buffering scope set (`needs_scope_extraction`)
+> **broke watch entirely**: the auth layer is mounted **regardless of `auth.enabled`**, and for
+> that method it ran `buffer_request_body` — but Watch is a **streaming** RPC whose body never
+> ends before the client half-closes, so the request was never forwarded. The client received
+> neither events nor an error (Rust `message().await` hung; the Java suites timed out).
+>
+> Fixed in this round: the buffering set is now **unary-only**, `is_streaming_rpc()` names the
+> invariant, and two regression tests pin it (`coord-core` `streaming_rpcs_must_not_be_body_buffered`,
+> `coord-agent` `scope_bearing_rpcs_are_unary_only`). Verified: `java-example`
+> `WatchAdvancedTest` + `WatchIntegrationTest` **6/6 pass** against a real cluster.
+>
+> **Residual (deliberate):** Watch's *scope* is therefore no longer pre-checked in the agent's
+> auth layer. It must be enforced where the first `WatchCreateRequest` is decoded (the handler) —
+> `coord_core::grpc_auth::extract_scope_access` still models Watch requests for that purpose, but
+> the handler-side call is **not wired yet**. Until it is, a role with a non-empty scope
+> restriction can subscribe to a prefix outside that scope. This is a **known security gap**
+> (a bounded substitute for the previous "Watch unusable" state) and is the next item to close.
+
 | # | Item | Status | Evidence |
 |:--|:---|:---|:---|
 | A1 | Agent forwards caller credential | closed | `coord-client/src/credential.rs` (`REQUEST_TOKEN` task-local), `coord-agent/src/proxy.rs` |
@@ -121,8 +141,22 @@ make the diff unreviewable. It is a **wire-contract migration**, and the first t
 release is the deadline for it — schedule it as the first post-0.1.0 work item, while there
 are still no external consumers.
 
-#### 7. Unbounded growth that was not touched
+#### 7. In-process agent watch probe (`coord/tests/agent_watch_test.rs`) — `#[ignore]`d
 
+`test_agent_watch_single_subscriber` **never actually verified delivery**: its
+timeout/error branches only logged a warning and returned, so "zero events delivered" also
+counted as a pass (the baseline run took 33s ≈ setup + an 8s empty wait). It was that
+tolerance — not a passing assertion — that let the streaming-body regression above slip
+through. The tolerance is removed (the test now asserts), and the test is explicitly
+`#[ignore]`d with the reason rather than being silently green or deleted.
+
+*Known state:* in the **in-process** agent setup the client receives no events. The
+`WatchProxy` is confirmed to subscribe upstream (`inner = Some`, correct prefix,
+`start_revision = 0`), so the gap is between `coord_client`'s upstream receiver and the
+in-process test wiring — not the Java path, which is covered with real assertions by
+`java-example`'s watch suites (6/6, in the `java-example-it` CI job).
+
+#### 8. Unbounded growth that was not touched
 Ranked by the review's §3.10; all of these are self-consistent with the "declared but not
 enforced" theme of C15:
 
@@ -131,7 +165,7 @@ enforced" theme of C15:
 * `snapshot_logs_since_last = 0` semantics (following the documentation breaks it).
 * Connection-count limits and concurrency protection.
 
-#### 8. Doc references that cannot be committed — **FIXED**
+#### 9. Doc references that cannot be committed — **FIXED**
 
 `config.example.toml` (in the `[object_storage]` block) and `apis/contracts/STATUS.md` used
 to point at `docs/volume-object-storage.md`, and `jepsen/README.md` at a `docs/coord.md` that

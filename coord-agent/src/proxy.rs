@@ -637,6 +637,11 @@ impl Watch for WatchProxy {
 
         if let Some(ref agent_inner) = self.inner {
             // 通过 coord_client 创建到 Server 的 Watch
+            tracing::debug!(
+                prefix = %String::from_utf8_lossy(&prefix),
+                start_revision,
+                "watch proxy: subscribing upstream"
+            );
             match agent_inner
                 .client
                 .watch()
@@ -685,6 +690,15 @@ impl Watch for WatchProxy {
             }
         } else {
             // 骨架模式：返回空流
+            //
+            // ⚠️ 这一支**不发出任何事件**，且调用方拿到的是一条看起来正常的空流：
+            // 客户端会一直等（`message().await` 永久挂起 / Java 侧超时）。因此这里必须
+            // 留下 WARN —— 「watch 静默无事件」是本仓库已经发生过的事故形态
+            // （第四轮：流式请求 body 被鉴权层缓存，请求永不转发）。
+            tracing::warn!(
+                "watch proxy has no upstream client (skeleton mode): returning an empty stream \
+                 that will never yield events"
+            );
             let (_tx, rx) = mpsc::channel::<Result<WatchResponse, tonic::Status>>(1);
             Ok(tonic::Response::new(ReceiverStream::new(rx)))
         }

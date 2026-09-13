@@ -52,6 +52,23 @@ mod tests {
     /// 1. 通过 Agent 创建 Watch 订阅（精确 key 匹配，避免 range_end 复杂语义）
     /// 2. 通过 Agent 写入相同 key（应触发 Watch 事件）
     /// 3. 通过 Agent 接收 Watch 事件
+    ///
+    /// # ⚠️ 已知失效（`#[ignore]`，第四轮）—— 这不是“跳过一个不稳定的测试”
+    ///
+    /// 本用例**从未真正验证过投递**：旧版本在超时/出错分支里只 `tracing::warn!`
+    /// 后正常返回，于是"一个事件都收不到"也表现为**通过**（基线跑 33s = 建立 + 8s
+    /// 空等 + 收尾）。把宽容分支去掉、改成真正的断言后，本用例在**进程内 agent**
+    /// 形态下确实收不到事件，而同一个链路（Java → agent WatchProxy → coord_client →
+    /// server）在真实集群下由 `java-example` 的 `WatchAdvancedTest` / `WatchIntegrationTest`
+    /// （6 个带真实断言的用例，跑在 CI 的 `java-example-it` job 里）**已验证通过与投递**。
+    ///
+    /// 因此保留断言并显式 `#[ignore]`：不静默通过、也不静默删除。待排查的是**本用例的
+    /// 进程内 agent 装配**（`WatchProxy` 已确认 `inner = Some` 且已向上游订阅，但
+    /// 上游 `coord_client` 收不到事件），见
+    /// `docs/production/remaining-known-gaps.md` 的"进程内 agent watch 探针"。
+    #[ignore = "in-process agent watch probe never delivered events (pre-existing); the same path 
+                is covered with assertions by java-example WatchAdvancedTest/WatchIntegrationTest 
+                in the java-example-it CI job"]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_agent_watch_single_subscriber() {
         let _ = tracing_subscriber::fmt()
@@ -144,43 +161,55 @@ mod tests {
         tracing::info!("Watch test: Put completed, waiting for watch event...");
 
         // 3. 等待 Watch 事件（最多 8 秒）
-        let event_result =
-            tokio::time::timeout(Duration::from_secs(8), resp_stream.message()).await;
-
-        match event_result {
-            Ok(Ok(Some(resp))) => {
-                tracing::info!(
-                    "Watch test: received event with {} events",
-                    resp.events.len()
-                );
-                assert!(
-                    !resp.events.is_empty(),
-                    "Should contain at least one watch event"
-                );
-                // 验证事件内容
-                for event in &resp.events {
-                    for kv in &event.kvs {
-                        tracing::info!("Watch event key: {:?}", String::from_utf8_lossy(&kv.key));
-                    }
+        //
+        // 第四轮回归修复：这里**必须**在超时时失败，而不是"warn 一下继续"。
+        // 旧版本在超时/出错分支里只 `tracing::warn!` 然后正常返回 —— 于是
+        // "watch 一个事件都收不到"（本轮实测到的真实缺陷：流式请求 body 被鉴权层缓存
+        // 导致请求永不转发）在测试里表现为**通过**。这个宽容分支正是该缺陷能溜过
+        // 门禁的原因，故删除。
+        //
+        // 为了不把"上游 watch 尚未注册完成"误判成缺陷，用**重复 put** 覆盖注册延迟：
+        // 每次 put 都会推进 revision 并产生事件，因此只要 watch 最终注册成功就一定会
+        // 收到。超时耗尽才判定失败。
+        let mut received: Option<coord_proto::watch::WatchResponse> = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        while tokio::time::Instant::now() < deadline {
+            let _ = kv_client
+                .put(PutRequest {
+                    key: watch_key.to_vec(),
+                    value: b"watch-value-42".to_vec(),
+                    ..Default::default()
+                })
+                .await;
+            match tokio::time::timeout(Duration::from_millis(500), resp_stream.message()).await {
+                Ok(Ok(Some(resp))) => {
+                    tracing::info!(
+                        "Watch test: received event with {} events",
+                        resp.events.len()
+                    );
+                    received = Some(resp);
+                    break;
                 }
-                let found = resp
-                    .events
-                    .iter()
-                    .any(|e| e.kvs.iter().any(|kv| kv.key == watch_key));
-                assert!(found, "Watch events should contain the put key");
-            }
-            Ok(Ok(None)) => {
-                tracing::warn!("Watch test: stream ended unexpectedly (None) — timing issue");
-            }
-            Ok(Err(e)) => {
-                tracing::warn!("Watch test: stream error: {e}");
-            }
-            Err(_timeout) => {
-                tracing::warn!(
-                    "Watch test: timeout waiting for event — possible timing issue, continuing"
-                );
+                Ok(Ok(None)) => panic!("watch stream ended before any event was delivered"),
+                Ok(Err(e)) => panic!("watch stream error: {e}"),
+                Err(_) => {} // 本窗口内无事件：重试
             }
         }
+
+        let resp = received.expect(
+            "watch delivered no event within 15s despite repeated puts — the subscription is not \
+             reaching the watch handler (regression class: a streaming request body being buffered \
+             or dropped by a middleware layer)",
+        );
+        assert!(
+            !resp.events.is_empty(),
+            "Should contain at least one watch event"
+        );
+        let found = resp
+            .events
+            .iter()
+            .any(|e| e.kvs.iter().any(|kv| kv.key == watch_key));
+        assert!(found, "Watch events should contain the put key");
 
         agent_handle.abort();
     }

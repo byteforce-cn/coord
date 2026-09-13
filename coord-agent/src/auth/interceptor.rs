@@ -97,12 +97,27 @@ pub type ScopeExtractor =
 ///
 /// 该列表**不是**第二份能力表：能力 ID 仍从
 /// [`coord_core::grpc_auth::rpc_capability`] 取，这里只声明「哪些方法要读 body」。
+///
+/// # ⚠️ 只允许**一元** RPC（第四轮回归事故的修复）
+///
+/// 本列表的每个方法都会被 [`AuthInterceptor::call`] 走
+/// [`buffer_request_body`] 路径：**先读完整个 body 再转发**。对**流式** RPC 这个
+/// 前提不成立——流的 body 在客户端 half-close 前永不结束，缓存整段 body 等于把
+/// 请求永久挡在 handler 之外。
+///
+/// 第四轮曾把 `/coord.watch.Watch/Watch` 加进来（目标是让 Watch 既可用又受
+/// scope 约束），实际后果是 **watch 彻底不通**：请求永不转发，客户端收不到事件也
+/// 不报错（Rust `message().await` 永久挂起；Java 5s 超时失败）。而且本层**无论
+/// `auth.enabled` 开不开都挂载**，所以与鉴权开关无关——纯属把可用性修没了。
+///
+/// 卡口：`scope_bearing_rpcs_are_unary_only`（本文件）+ `coord/tests/agent_watch_test.rs`。
+/// Watch 的 scope 约束应由 handler 拿到**首帧** `WatchCreateRequest` 后判定，
+/// 不得依赖 body 缓存。
 const SCOPE_BEARING_RPCS: &[&str] = &[
     "/coord.kv.KV/Put",
     "/coord.kv.KV/Range",
     "/coord.kv.KV/Delete",
     "/coord.txn.Txn/Txn",
-    "/coord.watch.Watch/Watch",
 ];
 
 /// 生产用 scope 提取器：委托给两侧共用的 [`coord_core::grpc_auth`]。
@@ -1015,8 +1030,52 @@ mod tests {
                 .expect("提取器已注册"),
             vec![ScopeAccess::point(b"/app/plugin/k".to_vec())]
         );
-        // 默认表已携带 5 个 scope 承载 RPC 的提取器（生产路径注册）+ 本用例注册的 1 个
+        // 默认表已携带全部 scope 承载 RPC 的提取器（生产路径注册）+ 本用例注册的 1 个
         assert_eq!(table.registered_len(), SCOPE_BEARING_RPCS.len() + 1);
+    }
+
+    /// 第四轮回归卡口：**流式 RPC 绝不能进入\"先读完 body 再转发\"的集合**。
+    ///
+    /// 事故形态：`/coord.watch.Watch/Watch` 被加进 `SCOPE_BEARING_RPCS` 后，鉴权层
+    /// 对它走 `buffer_request_body`；而流式 body 在客户端 half-close 前永不结束，
+    /// 请求于是永久挡在 handler 之外 —— watch 彻底不通，且客户端既不收事件也不报错
+    /// （Rust `message().await` 永久挂起，Java 5s 超时失败）。本层无论 auth 开关都挂载，
+    /// 因此这是个纯可用性回归。
+    ///
+    /// 该测试会在\"有人再次把流式方法加进集合\"时立刻变红。
+    #[test]
+    fn scope_bearing_rpcs_are_unary_only() {
+        for rpc in SCOPE_BEARING_RPCS {
+            assert!(
+                !coord_core::grpc_auth::is_streaming_rpc(rpc),
+                "{rpc} 是流式 RPC：其 body 在客户端 half-close 前不会结束，\
+                 不得进入需要缓存 body 的 scope 提取集合（会导致该 RPC 永久挂起）"
+            );
+            assert!(
+                coord_core::grpc_auth::needs_scope_extraction(rpc),
+                "{rpc} 在 core 的 needs_scope_extraction 中也应为 true（两侧同源）"
+            );
+        }
+
+        // 反向：这些流式方法必须被识别为流式，且不在缓存集合里
+        for rpc in [
+            "/coord.watch.Watch/Watch",
+            "/coord.lease.Lease/LeaseKeepAlive",
+            "/coord.mq.MQ/Subscribe",
+        ] {
+            assert!(
+                coord_core::grpc_auth::is_streaming_rpc(rpc),
+                "{rpc} 应被识别为流式 RPC"
+            );
+            assert!(
+                !SCOPE_BEARING_RPCS.contains(&rpc),
+                "{rpc} 不得出现在 SCOPE_BEARING_RPCS 中"
+            );
+            assert!(
+                !coord_core::grpc_auth::needs_scope_extraction(rpc),
+                "{rpc} 不得被判定为需要缓存 body"
+            );
+        }
     }
 
     /// PKI RPC 必须映射到 capability（私钥集中存储前上鉴权）

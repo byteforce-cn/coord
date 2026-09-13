@@ -250,17 +250,51 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
 /// 这些方法的资源键在 protobuf 消息里而非 header 中，因此鉴权层必须先缓存
 /// body（受 [`MAX_SCOPE_BODY_BYTES`] 硬上限保护）再解析。
 ///
-/// 第四轮 §3.8：`Watch` 此前**不在**此集合内 → 带 scope 的凭据订阅时
-/// `accesses` 为空 → 走"无 scope key"分支 → 对有 scope 限制的角色 fail-closed
-/// 拒绝，即"Watch 无法同时做到可用与受 scope 约束"。现在纳入。
+/// # ⚠️ 只允许**一元（unary）** RPC
+///
+/// 本集合的语义是"可以安全地把整个 body 先读完再转发"。对**流式** RPC 这个前提
+/// 不成立：流的 body 在客户端 half-close 之前永远不会结束，缓存整个 body 等于把
+/// 请求永久挡在 handler 之外。
+///
+/// 第四轮曾把 `/coord.watch.Watch/Watch` 加进来（§3.8：让 Watch 同时"可用"且
+/// "受 scope 约束"），结果：**watch 彻底不通** ——
+/// `WatchServer::watch` 是 `stream WatchRequest -> stream WatchResponse`，
+/// 鉴权层 `buffer_request_body` 等不到流结束，请求永不转发；客户端既不收到事件也
+/// 不会报错（Rust 侧 `message().await` 永久挂起，Java 侧 5s 超时失败）。
+/// 而且 agent 的鉴权层**无论 auth 开不开都挂载**，所以这个缺陷与鉴权开关无关。
+/// 已有回归卡口：`streaming_rpcs_must_not_be_body_buffered`（本文件）与
+/// `coord/tests/agent_watch_test.rs`。
+///
+/// **Watch 的 scope 约束不在这里做**：Watch 的资源键在**首条** `WatchCreateRequest`
+/// 里，只能在 handler 拿到已解码的首帧后判定（见
+/// [`extract_scope_access`] 对 Watch 分支的处理，供 handler 侧复用）。
 pub fn needs_scope_extraction(rpc_method: &str) -> bool {
     matches!(
         rpc_method,
-        "/coord.kv.KV/Put"
-            | "/coord.kv.KV/Range"
-            | "/coord.kv.KV/Delete"
-            | "/coord.txn.Txn/Txn"
-            | "/coord.watch.Watch/Watch"
+        "/coord.kv.KV/Put" | "/coord.kv.KV/Range" | "/coord.kv.KV/Delete" | "/coord.txn.Txn/Txn"
+    )
+}
+
+/// 该 RPC 是否为**流式**（其 body 不可整体缓存，因而不得进入
+/// [`needs_scope_extraction`]）。
+///
+/// 存在的意义是把"一元/流式"这一隐含前提变成**可断言**的事实：如果哪天有人把
+/// 一个流式方法加回缓存集合，测试 `streaming_rpcs_must_not_be_body_buffered`
+/// 会直接红。
+pub fn is_streaming_rpc(rpc_method: &str) -> bool {
+    matches!(
+        rpc_method,
+        // 服务端流
+        "/coord.watch.Watch/Watch"
+            | "/coord.registry.Registry/Watch"
+            | "/coord.config.ConfigCenter/Watch"
+            | "/coord.leader_election.LeaderElection/Watch"
+            | "/coord.event.Event/Subscribe"
+            | "/coord.mq.MQ/Subscribe"
+            | "/coord.object_storage.ObjectStorage/Put"
+            | "/coord.object_storage.ObjectStorage/Get"
+            // 客户端流
+            | "/coord.lease.Lease/LeaseKeepAlive"
     )
 }
 
@@ -498,7 +532,16 @@ mod tests {
 
     #[test]
     fn scope_extraction_detects_watch_requests() {
-        assert!(needs_scope_extraction("/coord.watch.Watch/Watch"));
+        // ⚠️ 第四轮回归修复：`/coord.watch.Watch/Watch` **不在** body 缓存集合里。
+        //
+        // 它是服务端流式 RPC，body 在客户端 half-close 之前不会结束；把它纳入
+        // `needs_scope_extraction` 会让鉴权层永久缓存 body，请求永不转发 —— watch
+        // 彻底不通（这正是本轮实测到的可用性回归）。Watch 的 scope 只能在 handler
+        // 拿到**首帧**后判定，因此 `extract_scope_access` 仍然认识 Watch 请求体
+        // （供 handler 侧复用），但"要不要先读完 body"的答案必须是 false。
+        assert!(!needs_scope_extraction("/coord.watch.Watch/Watch"));
+        assert!(is_streaming_rpc("/coord.watch.Watch/Watch"));
+
         let create = coord_proto::watch::WatchCreateRequest {
             key: b"/app/cfg".to_vec(),
             range_end: Vec::new(),
@@ -518,6 +561,37 @@ mod tests {
                 b"/app/cfh".to_vec()
             )]
         );
+    }
+
+    /// 第四轮回归卡口（core 侧）：**流式 RPC 不得要求缓存 body**。
+    ///
+    /// 这是本轮实测到的可用性事故的机器化守卫：把流式方法放进
+    /// `needs_scope_extraction` 会让鉴权层去 `buffer_request_body`，而流式 body
+    /// 永不结束 → 请求永久挡在 handler 之外。
+    #[test]
+    fn streaming_rpcs_must_not_be_body_buffered() {
+        for rpc in [
+            "/coord.watch.Watch/Watch",
+            "/coord.lease.Lease/LeaseKeepAlive",
+            "/coord.mq.MQ/Subscribe",
+            "/coord.event.Event/Subscribe",
+        ] {
+            assert!(is_streaming_rpc(rpc), "{rpc} 应被识别为流式");
+            assert!(
+                !needs_scope_extraction(rpc),
+                "{rpc} 是流式 RPC，不得要求缓存 body（会导致该 RPC 永久挂起）"
+            );
+        }
+        // 一元 scope 承载 RPC 保持不变
+        for rpc in [
+            "/coord.kv.KV/Put",
+            "/coord.kv.KV/Range",
+            "/coord.kv.KV/Delete",
+            "/coord.txn.Txn/Txn",
+        ] {
+            assert!(needs_scope_extraction(rpc), "{rpc} 应要求 scope 提取");
+            assert!(!is_streaming_rpc(rpc), "{rpc} 是一元 RPC");
+        }
     }
 
     #[test]
