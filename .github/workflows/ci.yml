@@ -353,30 +353,50 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Build tests
         run: cargo build --workspace --tests
+      # 每个进程级套件之前都要清一次孤儿进程（而不只是 job 开头清一次）。
+      #
+      # 事故（已在本地复现并 A/B 定位）：本 job 里各套件**串行但相互污染**。
+      # `chaos_real`（kill9）、soak、multi-raft、plugin_auth×3 都会在超时/中断时
+      # 留下常驻孤儿 `coord server`/`coord agent`，它们继续抢 CPU/端口，于是**后面的**
+      # 套件开始“看起来像产品 bug”的假红。本地实测：
+      #   · 连跑一遍后残留孤儿 → `plugin_real_process_test` 红
+      #     （`bootstrap-role ... raft auth write timed out (no quorum?)`）
+      #   · `kill-stray-coord-procs.sh` 清一次 → 同一条命令、同一提交 **绿（4.03s）**
+      # CI 上同一提交的不同表现（`missing CCT token`）是同一根因的另一种表现：
+      # 负载下 agent 自举插件的 `Authenticate` 失败 → 插件降级为无凭据客户端。
+      #
+      # 脚本只清理 `--data-dir /tmp/.tmp*`（测试临时目录），不会碰真实集群。
       - name: Run real-process chaos suites
         env:
           CHAOS_REAL: "1"
         # 串行：kill9 与 soak 两个套件各起 3 个真实进程 + 6 个代理，
         # 并行互扰会导致节点就绪超时（2026-08-25 本地复现）
-        run: cargo test -p coord --test chaos_real -- --ignored --nocapture --test-threads=1
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          cargo test -p coord --test chaos_real -- --ignored --nocapture --test-threads=1
       - name: Run distributed soak (smoke, 120s)
         env:
           CHAOS_REAL: "1"
           SOAK_DURATION_SECS: "120"
-        run: cargo test -p coord --test chaos_real chaos_soak_distributed -- --ignored --nocapture
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          cargo test -p coord --test chaos_real chaos_soak_distributed -- --ignored --nocapture
       # T5.18（R-MR-09）：Multi-Raft 进程级套件挂入 nightly——3 节点 × 3 Region
       # 真实进程 + kill/重启收敛（MULTI_RAFT_REAL=1）。与 chaos 套件同 job 串行
       # 执行（同 host 真实进程互扰规避：kill9 会误伤对端节点导致就绪超时）。
       - name: Run multi-raft real-process suite (T5.18)
         env:
           MULTI_RAFT_REAL: "1"
-        run: cargo test -p coord --test multi_raft_process_test -- --ignored --nocapture --test-threads=1
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          cargo test -p coord --test multi_raft_process_test -- --ignored --nocapture --test-threads=1
       # 批次 4/5：鉴权 + 插件账户进程套件——单节点重启存续（P0c + Bootstrap 引导）
       # + 双节点 raft 复制存续。同为 spawn 真实 `coord server` 的重型套件，与上述
       # 步骤同 job 串行执行（真实进程互扰规避）。
       # 批次 12：+ CLI 凭据文件套件（登录落盘 → 自动携带 → 到期自动续期 → 登出）。
       - name: Run auth/plugin process suites (single + multi-node + CLI credentials)
         run: |
+          bash scripts/kill-stray-coord-procs.sh
           cargo test -p coord --test plugin_auth_process_test -- --ignored --nocapture --test-threads=1
           cargo test -p coord --test plugin_auth_multinode_process_test -- --ignored --nocapture --test-threads=1
           cargo test -p coord --test plugin_credentials_process_test -- --ignored --nocapture --test-threads=1
@@ -388,14 +408,18 @@ jobs:
       - name: Run plugin engine real-process e2e (PLUGIN_REAL=1)
         env:
           PLUGIN_REAL: "1"
-        run: cargo test -p coord --test plugin_real_process_test -- --ignored --nocapture --test-threads=1
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          cargo test -p coord --test plugin_real_process_test -- --ignored --nocapture --test-threads=1
       # 批次 10：coord-client **流式会话**（ObjectWriter / ObjectReader）真实进程验证
       # ——客户端自选块边界逐块发送（与服务端 4MiB 默认分帧不同）+ 服务端流逐块取回，
       # 跨 4MiB chunk 边界往返一致；含本地越界拒绝 / abort / 缺失对象。
       - name: Run object-storage streaming sessions (OBJECT_STORAGE_REAL=1)
         env:
           OBJECT_STORAGE_REAL: "1"
-        run: cargo test -p coord --test object_storage_process_test object_storage_real_streaming_sessions -- --ignored --nocapture --test-threads=1
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          cargo test -p coord --test object_storage_process_test object_storage_real_streaming_sessions -- --ignored --nocapture --test-threads=1
       # 第四轮 A4：**「应用 → agent → server」在 auth_enabled=true 下的全链路**。
       # 本仓此前不存在这个组合（经 agent 的进程测试一律关闭鉴权、开鉴权的测试
       # 一律直连 server），这正是 A1–A3 能长期存在的原因。本套件是它们唯一的
@@ -404,7 +428,9 @@ jobs:
       - name: Run agent+auth real-process suite (AGENT_AUTH_REAL=1)
         env:
           AGENT_AUTH_REAL: "1"
-        run: cargo test -p coord --test agent_auth_process_test -- --ignored --nocapture --test-threads=1
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          cargo test -p coord --test agent_auth_process_test -- --ignored --nocapture --test-threads=1
 
   perf-bench:
     name: weekly perf baseline (regression gate)

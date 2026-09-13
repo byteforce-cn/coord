@@ -156,6 +156,21 @@ try (CoordClient client = CoordClient.create(config)) {
 > `cn.byteforce.coord.example.CoordClient` convenience wrapper is example-local
 > and is **not** the SDK class.
 
+> **Spring Boot adopters: there is no `coord-spring-boot-starter`, and that is a decision.**
+> The auto-configuration module was removed and will not be restored — `coord-java-sdk` is the
+> supported integration surface. You wire it yourself, which is two things:
+>
+> ```java
+> @Bean(destroyMethod = "close")   // CoordClient is Closeable; this is the lifecycle hook
+> CoordClient coordClient(CoordConfig config) { return CoordClient.create(config); }
+> ```
+>
+> `close()` matters: it cancels pending watches and MQ subscriptions and shuts the client's
+> pools down. If you never call it, they are only cancelled when the process exits (there is
+> no shutdown hook). The SDK is what we test — 149 unit/contract tests plus
+> `CoordClientIntegrationTest` against a real server + agent in CI (`mvn -Pit`) — so if the
+> SDK does not work for you, that is a bug we want, not something you should work around.
+
 Operations CLI: `coord member | snapshot | security | auth | capability | idgen | reset`.
 
 ## Project layout

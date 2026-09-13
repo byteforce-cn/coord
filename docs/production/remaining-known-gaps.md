@@ -279,27 +279,40 @@ weakened — it still requires both messages.
 *Closing path:* add an explicit `start_offset` to `MqSubscribeRequest` (a wire change) and let
 the client resume deterministically.
 
-#### 13. Plugin identity: bounded retry added, on-demand retry still missing
+#### 13. Plugin identity: bounded retry added; the chaos red was **inter-suite contamination**
 
 `PluginIdentityManager::ensure_with_retry` (max 5 attempts, ~3 s worst case) now wraps
 `ensure`, and both engines (`js_engine`, `component_engine`) use it and log the degradation at
 **ERROR** with its consequence. Before this, a single transient failure during startup
 permanently degraded the plugin to the shared **unauthenticated** client, after which every
 outbound call is fail-closed by the server (`unauthenticated: missing CCT token`) and
-**never recovers** until a SIGHUP or agent restart.
+**never recovers** until a SIGHUP or agent restart. That is a real defect regardless of cause:
+disable-then-never-retry is the wrong answer to a transient error on an auth path.
 
-This matches the first real observation of the failure: the chaos job's
-`plugin_real_agent_process_e2e` failed on `5097072` with
-`plugin 'counter' invoke 'put' failed: ErrForbidden: ... missing CCT token` at the step that
-runs *after* the agent is killed and restarted ("persisted account, no bootstrap token"), while
-the same test passes locally (4–5 s, repeated). A transient failure being amplified into a
-permanent one is the only mechanism that explains that asymmetry.
+**Root cause of the CI red (confirmed by local A/B, not by reasoning):** the chaos job's suites
+run serially but **contaminate each other**. `chaos_real` (kill9), the soak, multi-raft and the
+three plugin_auth suites leave orphan `coord server`/`coord agent` processes behind, which keep
+competing for CPU and ports — so *later* suites fail in ways that look like product bugs. The
+job only ran `scripts/kill-stray-coord-procs.sh` **once at the start**, not between steps.
+
+Local reproduction, same commit, same command:
+
+| condition | `plugin_real_process_test` |
+| --- | --- |
+| run the preceding suites, then this one (orphans present) | **red** — `bootstrap-role must succeed: RoleAdd("agent-bootstrap") failed: … raft auth write timed out (no quorum?)` |
+| `scripts/kill-stray-coord-procs.sh`, then the identical sequence | **green** (4.03 s) |
+
+CI's own manifestation was the `missing CCT token` variant: under contention the agent's
+`Authenticate` for the plugin account fails, `ensure` fails, and the plugin degrades to the
+unauthenticated client. `ci.yml` now pre-cleans before **every** process-heavy step in that job
+(7 steps), and `scripts/kill-stray-coord-procs.sh` only touches `--data-dir /tmp/.tmp*`, so real
+clusters are untouched.
 
 *Still open:* after the bounded retries fail there is **no on-demand retry** — the plugin stays
 degraded until it is reloaded. Closing this means resolving the client lazily per call (or
-re-running `ensure` when an outbound call is denied). The real-process test now dumps the
-agent log tail into the assertion message, because the client-side error alone
-(`missing CCT token`) cannot distinguish "identity never authenticated" from "token expired".
+re-running `ensure` when an outbound call is denied). The real-process test now dumps the agent
+log tail into the assertion message, because the client-side error alone (`missing CCT token`)
+cannot distinguish "identity never authenticated" from "token expired".
 
 ---
 
