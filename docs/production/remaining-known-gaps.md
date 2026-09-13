@@ -279,6 +279,18 @@ weakened — it still requires both messages.
 *Closing path:* add an explicit `start_offset` to `MqSubscribeRequest` (a wire change) and let
 the client resume deterministically.
 
+**The same window exists for Watch — and there the protocol *does* offer an anchor.**
+`WatchCreateRequest.start_revision` replays history, while `start_revision = 0` means "from
+latest" and therefore replays nothing. `java-example`'s `WatchIntegrationTest` was written as
+"watch, then put" with `start_revision = 0` — i.e. it raced the window and had **no** way to
+notice. It failed once on `78a92b9` with
+`WatchIntegrationTest.testWatchSingleKey:92 [Watch event received]` (1 of 51) on a commit that
+changed no Java code, one run after being 51/51. It now anchors on the protocol's own signal:
+`put` → watch **from that revision** → await the replay (which simultaneously proves the
+subscription is registered) → `put` again → await the live event. Both replay and live-push
+coverage are retained; locally the class passes 6/6 repeated runs and the full suite 51/51.
+MQ cannot do the equivalent yet — that is why §12 remains open.
+
 #### 13. Plugin identity: bounded retry added; the chaos red was **inter-suite contamination**
 
 `PluginIdentityManager::ensure_with_retry` (max 5 attempts, ~3 s worst case) now wraps

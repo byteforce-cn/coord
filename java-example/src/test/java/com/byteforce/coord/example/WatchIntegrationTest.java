@@ -12,9 +12,9 @@ import org.junit.jupiter.api.*;
 import static org.assertj.core.api.Assertions.*;
 
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Watch 集成测试 — TDD RED 阶段
@@ -53,45 +53,72 @@ class WatchIntegrationTest {
     void testWatchSingleKey() throws Exception {
         String watchKey = "/test/watch/hello";
         String watchValue = "watched-value";
+
+        // 先写一条并记下 revision，用于**确定性地**证明订阅已在 agent 侧登记。
+        //
+        // 为什么不能"watch 之后立刻 put"：`start_revision = 0` 的语义是**从最新开始**
+        // （不是回放全部历史，见 `WatchAdvancedTest.testWatchWithStartRevision` 的说明）。
+        // 因此若 create 在 agent 侧登记完成之前就发生了写入，该写入**既不会被回放、也不会
+        // 以实时事件送达** —— 测试就退化成一场竞态。协议里没有"订阅已建立"的 ack，
+        // 客户端唯一能依靠的锚点就是"先回放、后实时"。
+        //
+        // 这不是理论：CI 上 `WatchIntegrationTest` 曾以
+        // `[Watch event received] expecting value to be true but was false` 失败过一次
+        // （51 个用例中的 1 个），而同一提交此前是 51/51。
+        long startRev = kvStub
+                .put(Kv.PutRequest.newBuilder()
+                        .setKey(ByteString.copyFromUtf8(watchKey))
+                        .setValue(ByteString.copyFromUtf8("before"))
+                        .build())
+                .getRevision();
+
         BlockingQueue<WatchOuterClass.WatchResponse> eventQueue = new LinkedBlockingQueue<>();
-        CountDownLatch firstEventLatch = new CountDownLatch(1);
+        AtomicReference<Throwable> streamError = new AtomicReference<>();
 
         StreamObserver<WatchOuterClass.WatchRequest> requestObserver =
                 watchStub.watch(new StreamObserver<>() {
                     @Override
                     public void onNext(WatchOuterClass.WatchResponse resp) {
                         eventQueue.add(resp);
-                        firstEventLatch.countDown();
                     }
 
                     @Override
                     public void onError(Throwable t) {
-                        firstEventLatch.countDown();
+                        streamError.set(t);
                     }
 
                     @Override
                     public void onCompleted() {
-                        firstEventLatch.countDown();
+                        // 正常收尾，无需处理
                     }
                 });
 
         requestObserver.onNext(WatchOuterClass.WatchRequest.newBuilder()
                 .setCreate(WatchOuterClass.WatchCreateRequest.newBuilder()
                         .setKey(ByteString.copyFromUtf8(watchKey))
+                        .setStartRevision(startRev)
                         .build())
                 .build());
 
+        // ① 回放：既验证历史事件、又证明订阅已经建立（此后不再有登记竞态）
+        WatchOuterClass.WatchResponse replayed = eventQueue.poll(5, TimeUnit.SECONDS);
+        assertThat(replayed)
+                .as("Watch replay received (proves the subscription is registered); streamError=%s",
+                        streamError.get())
+                .isNotNull();
+
+        // ② 实时推送：登记已完成，事件必然会到
         kvStub.put(Kv.PutRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(watchKey))
                 .setValue(ByteString.copyFromUtf8(watchValue))
                 .build());
 
-        boolean received = firstEventLatch.await(5, TimeUnit.SECONDS);
+        WatchOuterClass.WatchResponse event = eventQueue.poll(5, TimeUnit.SECONDS);
         requestObserver.onCompleted();
 
-        assertThat(received).as("Watch event received").isTrue();
-        WatchOuterClass.WatchResponse event = eventQueue.poll();
-        assertThat(event).isNotNull();
+        assertThat(event)
+                .as("Live watch event received; streamError=%s", streamError.get())
+                .isNotNull();
         assertThat(event.getEventsCount()).isGreaterThan(0);
 
         WatchOuterClass.WatchEvent watchEvent = event.getEvents(0);
@@ -108,24 +135,33 @@ class WatchIntegrationTest {
     void testWatchPrefix() throws Exception {
         String prefix = "/test/watch/prefix/";
         BlockingQueue<WatchOuterClass.WatchResponse> eventQueue = new LinkedBlockingQueue<>();
-        CountDownLatch latch = new CountDownLatch(2);
+        AtomicReference<Throwable> streamError = new AtomicReference<>();
+
+        // 同 `testWatchSingleKey`：先用一次写入锚定"订阅已登记"（回放），再做实时写入。
+        // 直接"watch 后连写两条"同样是在跟登记窗口赛跑 —— 两条都可能丢。
+        String first = prefix + "a";
+        long startRev = kvStub
+                .put(Kv.PutRequest.newBuilder()
+                        .setKey(ByteString.copyFromUtf8(first))
+                        .setValue(ByteString.copyFromUtf8("val-a"))
+                        .build())
+                .getRevision();
 
         StreamObserver<WatchOuterClass.WatchRequest> requestObserver =
                 watchStub.watch(new StreamObserver<>() {
                     @Override
                     public void onNext(WatchOuterClass.WatchResponse resp) {
                         eventQueue.add(resp);
-                        latch.countDown();
                     }
 
                     @Override
                     public void onError(Throwable t) {
-                        while (latch.getCount() > 0) latch.countDown();
+                        streamError.set(t);
                     }
 
                     @Override
                     public void onCompleted() {
-                        while (latch.getCount() > 0) latch.countDown();
+                        // 正常收尾，无需处理
                     }
                 });
 
@@ -135,22 +171,29 @@ class WatchIntegrationTest {
                 .setCreate(WatchOuterClass.WatchCreateRequest.newBuilder()
                         .setKey(prefixBytes)
                         .setRangeEnd(rangeEnd)
+                        .setStartRevision(startRev)
                         .build())
                 .build());
 
-        kvStub.put(Kv.PutRequest.newBuilder()
-                .setKey(ByteString.copyFromUtf8(prefix + "a"))
-                .setValue(ByteString.copyFromUtf8("val-a"))
-                .build());
+        // ① 回放 `prefix + "a"`（证明订阅已登记）
+        assertThat(eventQueue.poll(5, TimeUnit.SECONDS))
+                .as("Prefix replay received (proves the subscription is registered); streamError=%s",
+                        streamError.get())
+                .isNotNull();
+
+        // ② 实时推送第二条
         kvStub.put(Kv.PutRequest.newBuilder()
                 .setKey(ByteString.copyFromUtf8(prefix + "b"))
                 .setValue(ByteString.copyFromUtf8("val-b"))
                 .build());
 
-        boolean received = latch.await(5, TimeUnit.SECONDS);
+        WatchOuterClass.WatchResponse live = eventQueue.poll(5, TimeUnit.SECONDS);
         requestObserver.onCompleted();
 
-        assertThat(received).as("Two watch events received for prefix").isTrue();
-        assertThat(eventQueue.size()).isGreaterThanOrEqualTo(2);
+        assertThat(live)
+                .as("Second (live) prefix event received; streamError=%s", streamError.get())
+                .isNotNull();
+        assertThat(live.getEvents(0).getKvs(0).getKey().toStringUtf8())
+                .isEqualTo(prefix + "b");
     }
 }
