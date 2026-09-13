@@ -2,6 +2,7 @@
 name = "coord-agent"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [features]
 # 插件引擎 feature 门控（体积/CI 时长隔离）：

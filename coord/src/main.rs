@@ -2725,6 +2725,12 @@ async fn run_server(
     }
     let auth_svc = AuthServer::new(auth_service.as_ref().clone());
 
+    // 第四轮 §3.6 a/b：登录限流桶 + 过期会话的定期回收。
+    // 两个清理函数此前都"写好了但调用者为 0"（`_prune` / `cleanup_expired`），
+    // 使未认证请求（随机用户名）与**正常业务流量**（token 刷新）都能让内存无界增长。
+    // 该任务受 supervisor 监督：静默死亡会留下 ERROR 日志并进入 dead_tasks()。
+    let _auth_maintenance = Arc::clone(&auth_service).start_maintenance_worker();
+
     // 6a. Capability 注册中心（内置能力引导 + gRPC 服务）
     let capability_registry = Arc::new(CapabilityRegistry::new());
     capability_registry.bootstrap_builtin();

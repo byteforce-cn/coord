@@ -389,18 +389,22 @@ pub trait ChangelogReader: Send + Sync {
 ///
 /// - 如果 range_end 为空：前缀匹配（Key 以 prefix 开头）
 /// - 如果 range_end 非空：范围匹配 [prefix, range_end)
+///
+/// # 第四轮 §3.8：语义**刻意**与 KV 不同——但定义只有一处
+///
+/// `RangeSemantics::of(key, "")` 在 KV/Txn 上是 **`SingleKey`**（点查），而 Watch
+/// 的 `range_end` 为空是**字节前缀订阅**——`PrefixScan`、配置中心订阅依赖它。
+/// 把它改成 KV 的点查语义是一次**破坏性协议变更**，需同时改 Rust/Java 客户端与
+/// 全部订阅方，故本轮的取舍是：**保留 Wire 语义，但把它收进单点定义**。
+///
+/// 匹配区间由 [`coord_core::kv_range::watch_match_interval`] 计算，鉴权层
+/// （`coord_core::grpc_auth::extract_scope_access`）的 Watch 分支使用**同一个**
+/// 函数，因此"投递判定"与"鉴权判定"不可能漂移（此前是各自实现的第三套语义）。
 fn key_matches(key: &[u8], prefix: &[u8], range_end: &[u8]) -> bool {
-    if !key.starts_with(prefix) {
-        return false;
-    }
+    use coord_core::kv_range::{interval_contains, watch_match_interval};
 
-    if range_end.is_empty() {
-        // 前缀匹配：所有以 prefix 开头的 Key
-        true
-    } else {
-        // 范围匹配 [prefix, range_end)
-        key < range_end
-    }
+    let (lo, hi) = watch_match_interval(prefix, range_end);
+    interval_contains(&lo, hi.as_deref(), key)
 }
 
 // ──── 测试 ────

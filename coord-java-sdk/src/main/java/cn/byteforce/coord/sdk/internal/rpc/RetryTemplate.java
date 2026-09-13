@@ -13,10 +13,13 @@ import java.util.function.Function;
  * Retry policy:
  * <ul>
  *   <li>Max 3 attempts total (1 initial + 2 retries).</li>
- *   <li>Retries on {@link ErrorCode#AGENT_UNAVAILABLE},
- *       {@link ErrorCode#RESOURCE_EXHAUSTED} and {@link ErrorCode#DEADLINE_EXCEEDED}
- *       (与 Rust 客户端矩阵对齐——unavailable/deadline/timeout 均重试；
- *       leader 切换窗口内的 NotLeader→UNAVAILABLE 也经 AGENT_UNAVAILABLE 覆盖)。</li>
+ *   <li>Retries on {@link ErrorCode#NOT_LEADER}, {@link ErrorCode#UNAVAILABLE},
+ *       {@link ErrorCode#AGENT_UNAVAILABLE}, {@link ErrorCode#RESOURCE_EXHAUSTED}
+ *       and {@link ErrorCode#DEADLINE_EXCEEDED}——与 Rust 客户端矩阵对齐
+ *       （unavailable/deadline/timeout 均重试）。</li>
+ *   <li>{@code NOT_LEADER} 现由服务端显式标注（第四轮 §3.14.2）；此前它被压成
+ *       {@code AGENT_UNAVAILABLE}，语义上是"等 agent 恢复"而非"换 leader 重试"。
+ *       本模板仍然重试两者——但调用方与日志现在能区分它们。</li>
  *   <li>Backoff: 100ms, 200ms, 500ms for retry attempts 2, 3.</li>
  * </ul>
  */
@@ -71,7 +74,9 @@ public final class RetryTemplate {
     }
 
     private boolean isRetryable(ErrorCode code) {
-        return code == ErrorCode.AGENT_UNAVAILABLE
+        return code == ErrorCode.NOT_LEADER
+                || code == ErrorCode.UNAVAILABLE
+                || code == ErrorCode.AGENT_UNAVAILABLE
                 || code == ErrorCode.RESOURCE_EXHAUSTED
                 || code == ErrorCode.DEADLINE_EXCEEDED;
     }

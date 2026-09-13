@@ -23,6 +23,16 @@ use tower::util::ServiceExt;
 /// 慢请求阈值（微秒）：超过则计入 slow 并 WARN
 pub const SLOW_REQUEST_US: u64 = 1_000_000;
 
+/// `method_metrics` 的条目上限（第四轮 §3.5）。
+///
+/// key 来自**客户端可控的 URL path**，且 `MetricsLayer` 挂在鉴权层之外 →
+/// 未认证请求即可让它无界增长（~150–250 B/条；1000 unique path/s ≈ 17 GB/天）。
+/// 上限把"无界"变成"有界"，同时保证 `/metrics` 的渲染代价可控。
+pub const MAX_METHOD_METRICS: usize = 1024;
+
+/// 超出 [`MAX_METHOD_METRICS`] 的**新**方法归并到该桶（计数不丢失，只是不再细分）。
+pub const METHOD_METRICS_OVERFLOW: &str = "(other)";
+
 // ──── 指标注册表 ────
 
 /// 全局指标注册表
@@ -282,11 +292,26 @@ impl Metrics {
     ///
     /// `code` 为 HTTP 状态码（gRPC 错误响应非 2xx）；慢请求（> SLOW_REQUEST_US）
     /// 额外 WARN 日志。
+    ///
+    /// # 为什么要有上限
+    ///
+    /// `method` 来自**客户端可控的 URL path**，且 `MetricsLayer` 挂在鉴权层
+    /// **之外**（其自身注释写明"覆盖全部服务，含鉴权拒绝路径"）→ **未认证请求**
+    /// 即可让每个 unique path 成为一条**永久** HashMap 条目（~150–250 B），
+    /// 且 `/metrics` 抓取退化为 O(N log N)。第四轮 §3.5。
+    ///
+    /// 因此这里把表大小封顶：已登记的方法照常计数；超出上限的**新**方法归并到
+    /// [`METHOD_METRICS_OVERFLOW`] 桶——计数不丢失，但内存与抓取代价有界。
     pub fn record_grpc_request_by_method(&self, method: &str, duration_us: u64, code: u16) {
         let mm = {
             let mut map = self.inner.method_metrics.write();
+            let key: &str = if map.contains_key(method) || map.len() < MAX_METHOD_METRICS {
+                method
+            } else {
+                METHOD_METRICS_OVERFLOW
+            };
             Arc::clone(
-                map.entry(method.to_string())
+                map.entry(key.to_string())
                     .or_insert_with(|| Arc::new(MethodMetrics::default())),
             )
         };
@@ -772,6 +797,27 @@ impl Metrics {
             "seal_status {}\n",
             inner.seal_status.load(Ordering::Relaxed)
         ));
+
+        // 第四轮 §3.13：受监督后台任务的死亡数（**唯一的监督出口**）。
+        //
+        // `supervisor::spawn_supervised` 会把意外结束的任务记进 `dead_tasks()`，
+        // 但此前**没有任何消费者**——即"某个后台能力静默死亡"这件事在监控面上不可见。
+        // 这里把它接上 Prometheus：`coord_dead_background_tasks > 0` 即"某项能力已死"，
+        // 告警规则见 monitoring/prometheus-rules.yml。
+        let dead = crate::supervisor::dead_tasks();
+        out.push_str(
+            "\n# HELP coord_dead_background_tasks Number of supervised background tasks that \n",
+        );
+        out.push_str("# exited unexpectedly (0 = all alive; see /health?verbose=true for names)\n");
+        out.push_str("# TYPE coord_dead_background_tasks gauge\n");
+        out.push_str(&format!("coord_dead_background_tasks {}\n", dead.len()));
+        out.push_str("\n# HELP coord_dead_background_task_info Identity of each dead background task (always 1)\n");
+        out.push_str("# TYPE coord_dead_background_task_info gauge\n");
+        for name in &dead {
+            out.push_str(&format!(
+                "coord_dead_background_task_info{{task=\"{name}\"}} 1\n"
+            ));
+        }
 
         // Multi-Raft 全局指标（v6.0）
         out.push_str("\n# HELP coord_regions_total Total number of regions in cluster\n");

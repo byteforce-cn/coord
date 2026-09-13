@@ -2,8 +2,15 @@
 name = "coord-core"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [dependencies]
+coord-proto = { workspace = true }
+prost = { workspace = true }
+# `error_code`（第四轮 §3.14.2 的 wire 契约）需要 `tonic::{Code, Status}` 来附
+# trailer。tonic 早已在 coord-core 的构建图中（经 coord-proto），本行不引入任何
+# 新包；分层上 core 位于 proto 之上，使用其 gRPC 类型是既有方向。
+tonic = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9"

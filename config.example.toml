@@ -116,7 +116,7 @@ idempotency_max_entries = 4096  # 幂等缓存容量（FIFO 淘汰）
 
 # 对象存储（experimental 数据面；默认关闭，与 [multi_raft] 正交）
 #
-# 设计（docs/volume-object-storage.md 决策记录）：
+# 设计（docs/production/volume-object-storage.md 决策记录）：
 #   - 对象 = (bucket, object_id)，manifest 走 raft 强一致（保留前缀 /obj/ 对
 #     用户 KV/Txn/Watch 不可见），chunk 数据随 raft 日志复制后落各节点本地
 #     append-only 文件（不进 MVCC、不入快照，快照仅携带 manifest）；

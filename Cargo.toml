@@ -15,7 +15,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/byteforce/coord"
+repository = "https://github.com/byteforce-cn/coord"
 authors = ["Byteforce Team"]
 
 [workspace.dependencies]
@@ -84,7 +84,10 @@ clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 bytes = "1"
 uuid = { version = "1", features = ["v4"] }
-lru = "0.14"
+# 第四轮 §3.9⑤：0.14.0 命中两条 `lru` unsound 通告（IterMut Stacked Borrows /
+# `LruCache::pop` 非 panic 安全）。升到 0.18 与 regorus 已用的版本一致，
+# 同时消除 lockfile 里 lru 的双版本。
+lru = "0.18"
 moka = { version = "0.12", features = ["sync"] }
 chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
@@ -100,13 +103,16 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 rust-embed = "8"
 
 # 内部 Crate
-coord-proto = { path = "coord-proto" }
-coord-core = { path = "coord-core" }
-coord-macros = { path = "coord-macros" }
-coord-server = { path = "coord-server" }
-coord-agent = { path = "coord-agent" }
-coord-client = { path = "coord-client" }
-coord-test = { path = "coord-test" }
+# 第四轮 §3.9⑤：`deny.toml` 设 `wildcards = "deny"`，而内部依赖此前只写 `path`
+# 不写 `version` → 27 条 `error[wildcard]`。补上 workspace 版本即可（同 crate 版本
+# 由 `[workspace.package] version` 单一维护）。
+coord-proto = { path = "coord-proto", version = "0.1.0" }
+coord-core = { path = "coord-core", version = "0.1.0" }
+coord-macros = { path = "coord-macros", version = "0.1.0" }
+coord-server = { path = "coord-server", version = "0.1.0" }
+coord-agent = { path = "coord-agent", version = "0.1.0" }
+coord-client = { path = "coord-client", version = "0.1.0" }
+coord-test = { path = "coord-test", version = "0.1.0" }
 
 [profile.release]
 opt-level = 3

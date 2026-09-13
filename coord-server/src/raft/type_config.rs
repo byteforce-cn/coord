@@ -111,6 +111,15 @@ pub enum AuthOp {
     ConsumeBootstrapToken { id: String, consumed_at_unix: u64 },
     /// 撤销（删除）bootstrap 令牌
     RevokeBootstrapToken { id: String },
+    /// **批量**删除已过期会话（定期清理任务；键前缀 `/_sys/auth/sessions/`）
+    ///
+    /// 与逐条 `ConsumeSession` 语义等价（删内存视图 + 删持久化行），但一次扫描
+    /// 只产生**一条** raft 条目。会话表随正常 refresh 流量持续增长（第四轮 §3.6 b：
+    /// 10k 客户端 ≈ 96 万条/天，内存 150–200 MB/天且每条约一行 KV），而"过期只报错
+    /// 不回收"——逐条提案会把清理本身变成 raft 日志洪泛，故用批量变体。
+    ///
+    /// 变体索引 17（**末尾追加**，旧日志/快照的既有索引不漂移）。
+    ConsumeSessions { hash_hexes: Vec<String> },
 }
 
 // ──── PD 全局调度命令（/ 见 docs）────

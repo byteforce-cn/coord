@@ -82,6 +82,15 @@ pub const HOST_MODULE: &str = "coord";
 /// guest 内存中单次读写上限（对齐 gRPC 4MiB 解码上限）。
 const MAX_IO_BYTES: usize = 4 * 1024 * 1024;
 
+/// 插件命令队列深度上限（第四轮 §3.10 i）。
+///
+/// 队列此前是**无界**的，而每条命令持有整个 payload（上限 [`MAX_IO_BYTES`]）。
+/// 取 16：最坏驻留 ≈ 16 × 4 MiB = 64 MiB/插件，同时远大于正常并发（插件线程串行
+/// 执行，且调用方在 `max_exec_ms + 1s` 的 watchdog 内就会放弃）。
+///
+/// 队列满不是故障而是**背压**：返回显式错误让调用方退避，而不是继续吞内存。
+const MAX_PLUGIN_QUEUE_DEPTH: usize = 16;
+
 /// epoch 滴答间隔（毫秒）：`max_exec_ms` 换算成 epoch 数。
 ///
 /// 组件模型路径（`component_engine.rs`）复用同一节奏，保证两条 ABI 的
@@ -894,7 +903,9 @@ impl PluginLoader for WasmPluginLoader {
 
 struct WasmState {
     status: PluginStatus,
-    tx: Option<std::sync::mpsc::Sender<WasmCommand>>,
+    /// 有界命令队列的发送端（见 [`MAX_PLUGIN_QUEUE_DEPTH`]）：`SyncSender` 才能
+    /// 表达"满了就背压"，`Sender` 是无界的。
+    tx: Option<std::sync::mpsc::SyncSender<WasmCommand>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -974,9 +985,20 @@ impl WasmPlugin {
             payload: payload.to_vec(),
             resp: resp_tx,
         };
-        if tx.send(cmd).is_err() {
-            self.fail("plugin thread is gone");
-            return Err(format!("plugin '{}' thread is gone", self.manifest.name));
+        // 有界队列：满 = 背压（fail-closed），不得阻塞 async 执行器。
+        match tx.try_send(cmd) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                return Err(format!(
+                    "plugin '{}' invocation queue is full ({MAX_PLUGIN_QUEUE_DEPTH} pending) — 
+                     backpressure, retry after the in-flight calls drain",
+                    self.manifest.name
+                ));
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                self.fail("plugin thread is gone");
+                return Err(format!("plugin '{}' thread is gone", self.manifest.name));
+            }
         }
         // 外层看门狗：epoch 预算 + 1s 余量（wasm 内部应先 trap）
         let wait = Duration::from_millis(self.limits.max_exec_ms.saturating_add(1_000));
@@ -1021,7 +1043,16 @@ impl Plugin for WasmPlugin {
     }
 
     async fn init(&self) -> ServiceResult<()> {
-        let (tx, rx) = std::sync::mpsc::channel::<WasmCommand>();
+        // 第四轮 §3.10 i：**有界**命令队列。
+        //
+        // 此前是 `std::sync::mpsc::channel()`（无界）：调用方每次 `invoke` 都把
+        // 方法名 + 整个 payload（上限 `MAX_IO_BYTES` = 4 MiB）推进队列，而插件线程
+        // 单条串行执行。并发调用一多，队列就能无界增长（调用方在 watchdog 超时前
+        // 不会退，但每一条已经排进队列的命令都占着内存）。
+        //
+        // 现在改为有界 + `try_send` 背压：满了直接返回错误（fail-closed），
+        // **不**用阻塞式 `send` —— 在 async 上下文里阻塞发送会挂死执行器。
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WasmCommand>(MAX_PLUGIN_QUEUE_DEPTH);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
         let thread = {
@@ -1147,11 +1178,21 @@ impl Plugin for WasmPlugin {
         self.sdk.release().await;
         if let Some(tx) = tx {
             let (resp_tx, resp_rx) = std::sync::mpsc::channel::<()>();
-            if tx.send(WasmCommand::Stop { resp: resp_tx }).is_ok() {
-                let _ = tokio::time::timeout(Duration::from_secs(5), async move {
-                    let _ = resp_rx.recv();
-                })
-                .await;
+            // 队列可能已被在途 Invoke 占满：`try_send` 失败**不**致命——
+            // `tx` 出作用域后通道关闭，插件线程的 `rx.recv()` 会返回 Err 并退出
+            // （下面的 `thread.join()` 保持正确）。
+            match tx.try_send(WasmCommand::Stop { resp: resp_tx }) {
+                Ok(()) => {
+                    let _ = tokio::time::timeout(Duration::from_secs(5), async move {
+                        let _ = resp_rx.recv();
+                    })
+                    .await;
+                }
+                Err(std::sync::mpsc::TrySendError::Full(_)) => tracing::warn!(
+                    plugin = %self.manifest.name,
+                    "plugin queue full; relying on channel close to stop the plugin thread"
+                ),
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
             }
         }
         if let Some(thread) = thread {

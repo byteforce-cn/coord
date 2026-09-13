@@ -596,8 +596,15 @@ impl CoordNode {
         match e {
             openraft::error::ClientWriteError::ForwardToLeader(ftl) => {
                 let hint = ftl.leader_id.and_then(|id| self.grpc_addr_of(id));
-                let mut status =
-                    tonic::Status::unavailable("not leader: forward to current leader");
+                // 第四轮 §3.14.2：not-leader 必须与"集群不可用"区分开。
+                // 修复前两者都是裸 `UNAVAILABLE`，Java SDK 因此把 not-leader 报成
+                // `AGENT_UNAVAILABLE`——而 SDK 的重试矩阵正是按这个码决策的：
+                // not-leader 应当**重定向到 leader 后立即重试**，
+                // 不是"等待 agent 恢复"。
+                let mut status = coord_core::error_code::attach(
+                    tonic::Status::unavailable("not leader: forward to current leader"),
+                    coord_core::error_code::CoordErrorCode::NotLeader,
+                );
                 if let Some(addr) = hint {
                     if let Ok(v) = tonic::metadata::MetadataValue::from_str(&addr) {
                         status.metadata_mut().insert(LEADER_HINT_METADATA_KEY, v);
@@ -605,7 +612,10 @@ impl CoordNode {
                 }
                 status
             }
-            other => tonic::Status::internal(format!("raft write failed: {other}")),
+            other => coord_core::error_code::attach(
+                tonic::Status::internal(format!("raft write failed: {other}")),
+                coord_core::error_code::CoordErrorCode::Internal,
+            ),
         }
     }
 
@@ -1281,21 +1291,13 @@ fn map_err<E: std::fmt::Display + 'static>(e: E) -> tonic::Status {
     tonic::Status::internal("internal error")
 }
 
-/// 计算「以 `prefix` 开头的全部 key」集合的最小上界字符串
-/// （字节字典序）。
+/// 计算「以 `prefix` 开头的全部 key」集合的最小上界字符串（字节字典序）。
 ///
-/// - `Some(upper)`：任一以 `prefix` 开头的 key K 都满足 `K < upper`，且不存在更小的
-///   这样的上界（取 prefix 最后一个非 0xFF 字节 +1）；
-/// - `None`：无有限上界——`prefix` 为空（匹配全 keyspace）或全 0xFF（可任意加长）。
+/// 第四轮 §3.8：本函数此前是 `coord_core::kv_range::prefix_successor` 的**第二份
+/// 实现**（同样的算法、同样的边界，各自维护）。同一算法存在两份实现本身就是下一个
+/// 语义裂缝（参见 `RangeSemantics` 的注释），故改为转调 core 的单点定义。
 pub fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
-    for i in (0..prefix.len()).rev() {
-        if prefix[i] != 0xFF {
-            let mut v = prefix[..i].to_vec();
-            v.push(prefix[i] + 1);
-            return Some(v);
-        }
-    }
-    None
+    coord_core::kv_range::prefix_successor(prefix)
 }
 
 // ──── AuthOp 提案器（管理操作入 raft 日志）────
@@ -2463,7 +2465,21 @@ impl Watch for CoordNode {
                     }
                 }
 
-                match event_rx.recv().await {
+                // 第四轮 §3.6 c：**客户端断开即回收**。
+                //
+                // 旧实现的 per-stream 循环只能通过 `tx.send(..).is_err()` 或
+                // `event_rx.recv()` 返回 None 退出。而对一个**空闲**订阅，
+                // `event_rx.recv()` 在 `Subscriber`（持有 `event_tx`）仍在 map 中时
+                // **永不返回 None**，`tx.send` 也**永不被调用**——于是客户端断开后
+                // 该任务永久 parked，`unsubscribe(watch_id)` 永不可达：
+                // 每轮泄漏 1 个任务 + 1 个 Subscriber + 1 个 mpsc block；
+                // 达 10000 上限后 `subscribe` 返回 Err → **watch 对所有客户端永久
+                // 不可用，且不自愈**。`tx.closed()` 在接收端 drop 后立即就绪。
+                let event = tokio::select! {
+                    _ = tx.closed() => break,
+                    event = event_rx.recv() => event,
+                };
+                match event {
                     Some(event) => {
                         // 去重——仅投递水位之后的实时事件（回放已覆盖 ≤ 水位）
                         if event

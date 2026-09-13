@@ -23,7 +23,7 @@ If you already know etcd, Consul or ZooKeeper, think of Coord as two layers:
 - **A consensus & storage substrate** — linearizable KV / Txn / Watch / Lease over Raft, similar in spirit to etcd, with auth, TLS/mTLS and encryption at rest.
 - **A per-machine agent layer** — one `coord-agent` per host exposes service discovery, configuration, distributed locking, ID generation, leader election, events, caching, MQ, workflow, scheduling, rate limiting, feature flags and PKI issuance as local gRPC services under a single contract. Business code talks to one endpoint with one SDK and never deals with cluster topology.
 
-The consistency core is independently exercised by an in-repo [Jepsen](https://github.com/jepsen-io/jepsen) suite (see [Verification](#verification)).
+The consistency core is exercised by an in-repo [Jepsen](https://github.com/jepsen-io/jepsen) suite, **whose artifacts are not yet committed** — see [Verification](#verification) for what that does and does not certify.
 
 ## Architecture
 
@@ -58,7 +58,7 @@ Server ports `50051` / `50052` are reachable only by agents — the Server is ne
 |:---|:---|
 | KV / Txn / Watch / Lease | Linearizable reads/writes within a Region; `jepsen/` contains a real knossos-based project (see [Verification](#verification) for what is and is not yet certified) |
 | Auth / RBAC | Users, roles and permissions; Ed25519 CCT tokens; login rate limiting |
-| TLS / mTLS | gRPC + Raft channels; refuses to start without a CA (fail-closed) |
+| TLS / mTLS | gRPC + Raft channels. **Not fail-closed**: `cargo run -p coord -- dev` / an auth-enabled cluster with a `raft_shared_secret` still starts over plaintext. Startup is refused only when (a) auth is disabled **and** the bind address is non-loopback, or (b) the Raft port is non-loopback with neither Raft mTLS nor `raft_shared_secret`. Configure `[tls]` explicitly for production |
 | Encryption at rest | AES-256-GCM, plus Shamir secret-sharing Seal / Unseal |
 | Operations | Snapshots, MVCC compaction, dynamic membership, Prometheus metrics |
 | Multi-Raft (opt-in) | Region sharding across multiple Raft groups with an embedded placement driver; enable via `[multi_raft]` (see [`config.example.toml`](config.example.toml)) |
@@ -74,6 +74,14 @@ Server ports `50051` / `50052` are reachable only by agents — the Server is ne
 - **Automation:** `Workflow` · `Scheduler` · `Policy` · `FeatureFlags`
 - **Resilience & security:** `CircuitBreaker` · `RateLimiter` · `Transit` · `Pki`
 - **Extensibility:** every service above is hosted as a **builtin plugin** by the plugin manager — one registry owns each service's lifecycle, gRPC surface and health. `Plugin` (`coord.plugin.Plugin`) exposes that unified service/plugin inventory (with per-service health), and loads external wasm/JS plugins when `[plugins]` is enabled (off by default)
+
+> **Stability labels.** The services above are **not** equally mature. Per
+> [`apis/contracts/STATUS.md`](apis/contracts/STATUS.md): `Registry`, `Lock`,
+> `LeaderElection` are `COMMITTED` (GA dates 2026-10-31 / 2026-11-30 not yet reached);
+> `Cache`, `Mq`, `Workflow`, `Scheduler` are **`EXPERIMENTAL` — not to be consumed as a
+> stable surface** (Workflow is documented there as an in-memory placeholder). Object
+> storage (`coord.storage`, also `EXPERIMENTAL`) is not exposed through the agent.
+> Treat this list as an inventory, not as a support matrix.
 
 Agent extras: core-proxy services (`coord.kv` / `coord.txn` / `coord.lease` / `coord.watch` / `coord.maintenance`) with the same contract as the Server, KV read caching, watch fan-out, and health checks + Prometheus metrics on `127.0.0.1:19528`.
 
@@ -113,7 +121,9 @@ cargo run -p coord -- agent --static-peers <server1>:50051,<server2>:50051
 cargo run -p coord -- agent --agent-config agent.toml   # services / tls / auth / replication
 ```
 
-**From your application** — connect to the local agent (see [`java-example/`](java-example/) for full samples):
+**From your application** — connect to the local agent. `java-example/` is a separate,
+self-contained gRPC demo (it does **not** use this SDK and has no README of its own); the
+snippet below is the SDK's own API:
 
 ```java
 import cn.byteforce.coord.sdk.CoordClient;
@@ -122,7 +132,8 @@ import cn.byteforce.coord.sdk.CoordConfig;
 CoordConfig config = CoordConfig.builder()
         .agentHost("127.0.0.1")
         .agentPort(19527)
-        // Production: TLS is fail-closed (missing CA cert = refuse to connect)
+        // Production: configure TLS explicitly — it is NOT fail-closed (see the
+        // capability table above). Without the lines below the channel is plaintext.
         // .useTls(true).tlsCaCertPath("/etc/coord/ca.pem")
         // CCT credentials are read per call, so refresh needs no channel rebuild
         // .authTokenSupplier(() -> credentialStore.currentCct())
@@ -137,9 +148,11 @@ try (CoordClient client = CoordClient.create(config)) {
 }
 ```
 
-> The snippet above is the **real** SDK (`coord-java-sdk`, artifact group
-> `cn.byteforce.coord`) — connect via `CoordClient.create(CoordConfig)`. The
-> `java-example/` module is a **separate, self-contained** gRPC demo; its
+> The snippet above is the **real** SDK (`coord-java-sdk`, Maven group `cn.byteforce`,
+> artifact `coord-java-sdk`) — connect via `CoordClient.create(CoordConfig)`. The SDK is
+> versioned `1.0.0-SNAPSHOT` and is **not published to any repository**: run
+> `mvn -pl coord-java-sdk install` in this repo first. The `java-example/` module is a
+> **separate, self-contained** gRPC demo; its
 > `cn.byteforce.coord.example.CoordClient` convenience wrapper is example-local
 > and is **not** the SDK class.
 
@@ -167,9 +180,9 @@ coord/
 ## Verification
 
 - **Jepsen (in-repo, not yet certified)** — [`jepsen/`](jepsen/README.md) is a real Clojure + knossos project with `register` / `cas-register` / `multi-register` workloads under kill / pause / partition nemeses, plus a long-running soak profile documented in [`jepsen/README.md`](jepsen/README.md). **No Jepsen or soak artifact has been committed yet** — `docs/production/evidence/` currently holds only the Java integration run. Until those artifacts land, treat linearizability claims as *design intent*, not as certified results.
-- **Fast local check** — `scripts/jepsen-check.sh` reproduces the core matrix in ~2–3 minutes without a lab (Rust-level checks; it is **not** a Jepsen run).
-- **CI** — fmt + clippy (`-D warnings`), a panic gate on non-test code, workspace tests, protobuf contract checks (buf breaking), `cargo audit` + `cargo deny`, real-process chaos runs, and Java SDK + Java example integration suites against a real server/agent cluster.
-- **Evidence** — reproducible run artifacts live in [`docs/production/evidence/`](docs/production/evidence/README.md) (`bash scripts/collect-evidence.sh <scenario>`).
+- **Fast local check** — `scripts/jepsen-check.sh` runs **one** linearizability smoke test (`chaos_real_kill9_and_linearizability`) in ~2–3 minutes on a warm build; it is **not** a Jepsen run and does **not** reproduce the workload × nemesis matrix.
+- **CI** — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the authoritative list: fmt + clippy (`-D warnings`), a panic gate on non-test code, workspace tests, protobuf contract checks (buf lint + format + breaking), `cargo audit` + `cargo deny`, real-process chaos runs, a cross-language error-code contract check, and Java SDK + Java example integration suites.
+- **Evidence** — reproducible run artifacts live in [`docs/production/evidence/`](docs/production/evidence/README.md) (`bash scripts/collect-evidence.sh <scenario>`). Each `MANIFEST.md` states the commit, the exact command and whether the tree was dirty; treat artifacts whose `commit`/`command` fields are not reproducible as unverified.
 
 ## Deploy
 
@@ -180,11 +193,15 @@ coord/
 
 ## Status
 
-Version `0.1.0` (pre-1.0); no tagged release has been published yet. The Raft engine (`openraft`) is an alpha dependency and Coord is **not yet recommended for production** — however, the core consistency and failure-recovery semantics are covered by the in-repo Jepsen matrix described above.
+Version `0.1.0` (pre-1.0). The Raft engine (`openraft`) is an alpha dependency and Coord is **not yet recommended for production**. The in-repo Jepsen project exists but **no Jepsen or soak artifact has been committed**, so the core consistency and failure-recovery semantics are **not** certified by it — treat them as design intent until those artifacts land in [`docs/production/evidence/`](docs/production/evidence/README.md).
+
+Known gaps that are deliberately left open in this round are enumerated, with evidence and
+impact, in [`docs/production/remaining-known-gaps.md`](docs/production/remaining-known-gaps.md).
 
 ## Documentation
 
 - Protocol contracts & capability commitments: [`apis/contracts/`](apis/contracts/README.md)
+- **Remaining known gaps (read this before adopting):** [`docs/production/remaining-known-gaps.md`](docs/production/remaining-known-gaps.md)
 - Server configuration reference: [`config.example.toml`](config.example.toml)
 - Vulnerability reporting: [`SECURITY.md`](SECURITY.md)
 

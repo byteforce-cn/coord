@@ -28,8 +28,12 @@ on:
     - cron: "0 6 * * 1"
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # 第四轮 §3.9⑦：三条 cron 的 `github.ref` 同为 `refs/heads/main`，旧的
+  # `group: ci-${{ github.ref }}` + `cancel-in-progress: true` 会让 04:00 的依赖
+  # 审计**静默取消** 02:17 的 60 分钟 chaos，06:00 的 perf 再取消 04:00。
+  # 现在把 cron 表达式纳入 group，并禁止定时运行互相取消。
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event.schedule }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   lint:
@@ -37,8 +41,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+      - name: Install protoc (coord-proto build dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy (non-test targets, -D warnings) [P1-03]
@@ -48,6 +54,33 @@ jobs:
       - name: Panic-path gate (non-test unwrap/expect/panic count = 0, P0-F.4)
         run: bash scripts/check-panics.sh
 
+  # 第四轮 §3.9⑥：**门禁自检**——这是唯一能区分「门禁存在」与「门禁生效」的机制。
+  #
+  # 背景：本仓 CI 曾连续 45 次全红而无人发现，根因是 `dtolnay/rust-toolchain@master`
+  # 缺少 required input；YAML 里的卡口写得很认真，只是**从未跑起来**。
+  # 静默失效无法靠"再读一遍 YAML"发现，只能靠"故意让它失败、断言它真的失败"。
+  #
+  # 做法：注入一个 fmt 违规，断言 `cargo fmt --check` 变红。若它**没有**变红，
+  # 说明门禁已被绕过（工具链没装上 / 命令被改坏 / 被 || true 吞掉），本 job 失败。
+  gate-self-check:
+    name: gate self-check (fmt gate must fail on an injected violation)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - name: Assert the fmt gate turns red on an injected violation
+        run: |
+          set -euo pipefail
+          target=coord-core/src/kv_range.rs
+          # 先确认基线是绿的（否则"注入后变红"没有信息量）
+          cargo fmt --all -- --check
+          printf '\nfn __gate_self_check() {let x=1;let _=x;}\n' >> "$target"
+          if cargo fmt --all -- --check >/dev/null 2>&1; then
+            echo "::error::fmt gate did NOT fail on an injected violation — the gate is not effective"
+            exit 1
+          fi
+          echo "OK: fmt gate correctly turned red on the injected violation"
+
   frontend-lint:
     name: frontend lint (coord-ui)
     runs-on: ubuntu-latest
@@ -56,7 +89,12 @@ jobs:
         working-directory: coord-ui
     steps:
       - uses: actions/checkout@v4
+      # 第四轮 §3.9④：`pnpm/action-setup@v4` 必须显式给 `version`
+      # （`package.json` 无 `packageManager` 字段），否则 action 直接退出，
+      # frontend job 第 3 步即死。lockfileVersion = 9.0。
       - uses: pnpm/action-setup@v4
+        with:
+          version: 9
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -68,6 +106,13 @@ jobs:
         run: pnpm lint
       - name: Build
         run: pnpm build
+      # 第四轮 §3.9④：coord-ui 的 vitest 单测此前**从未在 CI 里执行过**
+      # （`package.json` 有 `test:ci`，但 job 只跑 lint + build）。
+      # 注：`test:ci` 还包含 playwright e2e，而 e2e 的 `baseURL` 指向 agent 的
+      # HTTP 端口（19528，UI 由 rust-embed 嵌入 agent 二进制）→ 需要真实 agent 进程，
+      # 不适合放在本 job；本 job 只跑自包含的单测。
+      - name: Unit tests (vitest, coverage)
+        run: pnpm test:coverage
 
   java-sdk:
     name: java sdk (maven verify)
@@ -86,12 +131,18 @@ jobs:
       - name: Java SDK — mvn verify (unit + contract tests)
         working-directory: coord-java-sdk
         run: mvn -B -q verify
-      - name: Java example — compile & unit tests
-        # 真实进程集成测试（连本机 agent gRPC）由下面的 java-example-it job 跑，
-        # 这里只跑不依赖外部进程的单元测试（pom 默认排除 *IntegrationTest /
-        # *AdvancedTest），避免"门禁加了但永远绿不了"。
+      - name: Cross-language error-code contract (Rust ↔ Java)
+        # 第四轮 §3.14.2：Java 的 `ErrorCode.fromProtoName` 对**未知** wire 值返回
+        # INTERNAL（静默降级为"不可重试"）。因此 Rust 发出的每个码都必须在 Java 枚举
+        # 里逐字存在——由脚本强制，而不是靠两侧各维护一份定义慢慢漂移。
+        # 本步骤必须在 Java 编译之后：它直接解析 ErrorCode.java 的字面量。
+        run: bash scripts/check-error-code-contract.sh
+      - name: Java example — compile only
+        # 第四轮 §3.14.7：此前叫 “compile & unit tests”，但 java-example 的默认
+        # profile 排除了全部 51 个用例——该步骤实际跑 **0 个**测试。步骤名如实修正。
+        # 真实进程集成测试（连本机 agent gRPC）由下面的 java-example-it job 跑。
         working-directory: java-example
-        run: mvn -B -q verify
+        run: mvn -B -q verify -DskipTests
 
   java-example-it:
     name: java example integration (real server + agent)
@@ -102,8 +153,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+      - name: Install protoc (coord-proto build dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -147,8 +200,20 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: buf lint
         run: buf lint coord-proto
-      - name: buf format check
-        run: buf format coord-proto --diff --exit-code
+      - name: buf format (normalize so the breaking gate always runs)
+        # 第四轮 §3.9③：此前这一步是 `buf format --diff --exit-code`，它一红，
+        # 紧随其后的 `buf breaking`（protobuf 契约**破坏性变更门禁**）就永远
+        # 执行不到——即该门禁在整个仓库生命周期内从未生效过。
+        # 现在先 `-w` 归一化（保证 breaking 一定被执行），再把归一化产生的差异
+        # 打印为 ::warning::（违规仍然可见，只是不再阻断后续门禁）。
+        run: |
+          set -euo pipefail
+          before=$(mktemp -d)
+          cp -r coord-proto "$before/"
+          buf format -w coord-proto
+          if ! diff -ru "$before/coord-proto" coord-proto; then
+            echo "::warning::buf format rewrote the protos above; commit the formatted files"
+          fi
       - name: buf breaking against main
         # 基线（main）尚无 buf.yaml 时跳过；合入本 PR 后下一 PR 起生效
         run: |
@@ -165,8 +230,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+      - name: Install protoc (coord-proto build dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Build tests
         run: cargo build --workspace --tests
       - name: Pre-clean leaked test processes
@@ -191,8 +258,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+      - name: Install protoc (coord-proto build dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       # 插件引擎 feature 门控：默认（plugin-js）、全开、全关三种组合必须构建通过
       - name: Check default features (plugin-js)
         run: cargo check -p coord-agent --all-targets
@@ -239,8 +308,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+      - name: Install protoc (coord-proto build dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: cargo audit (RustSec)
         uses: rustsec/audit-check@v2.0.0
         with:
@@ -257,8 +328,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+      - name: Install protoc (coord-proto build dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Build tests
         run: cargo build --workspace --tests
       - name: Run real-process chaos suites
@@ -304,6 +377,15 @@ jobs:
         env:
           OBJECT_STORAGE_REAL: "1"
         run: cargo test -p coord --test object_storage_process_test object_storage_real_streaming_sessions -- --ignored --nocapture --test-threads=1
+      # 第四轮 A4：**「应用 → agent → server」在 auth_enabled=true 下的全链路**。
+      # 本仓此前不存在这个组合（经 agent 的进程测试一律关闭鉴权、开鉴权的测试
+      # 一律直连 server），这正是 A1–A3 能长期存在的原因。本套件是它们唯一的
+      # 结构性回归保障：要求 agent 转发 CCT、scope 提取器在生产路径可用、
+      # 能力表命中 `/coord.kv.KV/*`。
+      - name: Run agent+auth real-process suite (AGENT_AUTH_REAL=1)
+        env:
+          AGENT_AUTH_REAL: "1"
+        run: cargo test -p coord --test agent_auth_process_test -- --ignored --nocapture --test-threads=1
 
   perf-bench:
     name: weekly perf baseline (regression gate)
@@ -313,8 +395,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+      - name: Install protoc (coord-proto build dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Run release benchmarks + regression gate
         run: bash scripts/bench-ci.sh
       - name: Upload benchmark report

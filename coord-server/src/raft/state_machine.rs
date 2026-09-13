@@ -600,6 +600,11 @@ impl StateMachineStore {
                             crate::raft::type_config::AuthOp::ConsumeSession { hash_hex } => {
                                 tm.remove_session(hash_hex)
                             }
+                            crate::raft::type_config::AuthOp::ConsumeSessions { hash_hexes } => {
+                                for hash_hex in hash_hexes {
+                                    tm.remove_session(hash_hex);
+                                }
+                            }
                             _ => {}
                         }
                     }

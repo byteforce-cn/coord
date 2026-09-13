@@ -258,7 +258,9 @@ pub struct MessageQueueService {
     db_path: PathBuf,
     db: RwLock<Option<redb::Database>>,
     started: RwLock<bool>,
-    #[allow(dead_code)]
+    /// 声明的容量上限（字节）。**当前未被强制执行**，与
+    /// [`crate::services::cache::CacheService`] 同一取舍（第四轮 §3.10 h/i）：
+    /// 保留值以便如实报出，而不是用一个 `#[allow(dead_code)]` 字段假装遵守。
     max_size_bytes: u64,
     /// 订阅者注册表：topic → (consumer_group, 消息 channel [(partition, record)])
     subscriptions: RwLock<HashMap<String, Vec<SubscriberEntry>>>,
@@ -273,12 +275,23 @@ impl std::fmt::Debug for MessageQueueService {
         f.debug_struct("MessageQueueService")
             .field("db_path", &self.db_path)
             .field("started", &self.started)
+            // 如实报出"配了多少、有没有生效"：该上限**未被执行**（与
+            // `CacheService::max_size_bytes` 同一取舍，第四轮 §3.10 h/i）。
+            .field("max_size_bytes", &self.max_size_bytes)
+            .field("max_size_enforced", &false)
             .finish()
     }
 }
 
 impl MessageQueueService {
     pub fn new(db_path: PathBuf, max_size_bytes: u64) -> Self {
+        if max_size_bytes > 0 {
+            tracing::warn!(
+                max_size_bytes,
+                "MessageQueueService: configured size limit is NOT enforced (no eviction \
+                 implemented); growth is bounded only by message consumption and disk space"
+            );
+        }
         Self {
             db_path,
             db: RwLock::new(None),

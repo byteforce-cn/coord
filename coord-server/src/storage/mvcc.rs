@@ -1810,6 +1810,13 @@ impl<B: StorageBackend> MvccStorage<B> {
                     let key = [AUTH_SESSION_PREFIX, hash_hex.as_bytes()].concat();
                     tx.remove(TABLE_KV, &key)?;
                 }
+                AuthOp::ConsumeSessions { hash_hexes } => {
+                    // 定期清理：批量删除已过期会话（与逐条 ConsumeSession 同路径）
+                    for hash_hex in hash_hexes {
+                        let key = [AUTH_SESSION_PREFIX, hash_hex.as_bytes()].concat();
+                        tx.remove(TABLE_KV, &key)?;
+                    }
+                }
                 AuthOp::RoleGrantCapability {
                     role,
                     capability_id,

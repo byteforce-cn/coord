@@ -28,7 +28,7 @@ package coord.storage;
 // ────────────────────────────────────────────────────────────
 
 message ObjectRef {
-  string bucket = 1;   // 命名空间（utf8，≤255 字节，非空）
+  string bucket = 1; // 命名空间（utf8，≤255 字节，非空）
   bytes object_id = 2; // 对象标识（≤1024 字节，非空）
 }
 
@@ -37,7 +37,7 @@ message ObjectRef {
 message PutRequest {
   oneof part {
     PutMeta meta = 1; // 首条：对象元数据
-    bytes chunk = 2;  // 后续：数据分片（≤ chunk_size，默认 4MiB）
+    bytes chunk = 2; // 后续：数据分片（≤ chunk_size，默认 4MiB）
   }
 }
 
@@ -49,8 +49,8 @@ message PutMeta {
 
 message PutResponse {
   int64 revision = 1; // 对象 Commit 所在 raft revision
-  int64 size = 2;     // 实际落盘字节数
-  int64 chunks = 3;   // 实际 chunk 数
+  int64 size = 2; // 实际落盘字节数
+  int64 chunks = 3; // 实际 chunk 数
 }
 
 // ──── Get（服务端流式下载；首条为对象元数据）────
@@ -63,7 +63,7 @@ message GetRequest {
 message GetResponse {
   oneof part {
     ObjectStat stat = 1; // 首条：对象元数据
-    bytes chunk = 2;     // 后续：数据分片（≤ chunk_size）
+    bytes chunk = 2; // 后续：数据分片（≤ chunk_size）
   }
 }
 
@@ -84,17 +84,17 @@ message DeleteRequest {
 }
 
 message DeleteResponse {
-  bool deleted = 1;   // 本次实际执行删除（此前存在且未删除）
+  bool deleted = 1; // 本次实际执行删除（此前存在且未删除）
   int64 revision = 2; // tombstone 所在 raft revision
 }
 
 message ObjectStat {
   string bucket = 1;
   bytes object_id = 2;
-  int64 size = 3;     // Committed 对象字节数
-  int64 chunks = 4;   // chunk 数
+  int64 size = 3; // Committed 对象字节数
+  int64 chunks = 4; // chunk 数
   int64 revision = 5; // 最近一次状态机写入所在 raft revision
-  bool exists = 6;    // false = 不存在或已删除（tombstone）
+  bool exists = 6; // false = 不存在或已删除（tombstone）
   bool committed = 7; // 是否存在且已完成上传（否则为进行中/已删除）
 }
 

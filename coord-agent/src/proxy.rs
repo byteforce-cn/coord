@@ -80,6 +80,16 @@ impl AgentInner {
         if let Some(t) = tls {
             config = config.with_tls(t);
         }
+        // 第四轮 §3.2：agent 出站必须能携带**调用方凭据**。此前 `token_provider`
+        // 为 `None` → 生产默认配置（auth_enabled = true）下经 agent 的每一个数据面
+        // 请求都被服务端以 `missing CCT token` 拒绝。
+        //
+        // 这里装的是**按请求**提供者：凭据由 agent 鉴权中间件在放行入站请求时
+        // 写入任务局部量（`coord_client::credential::scoped_request_token`）。
+        // agent 自身的后台任务不在该作用域内 → 行为与之前一致（不带凭据）。
+        config = config.with_token_provider(std::sync::Arc::new(
+            coord_client::credential::RequestScopedTokenProvider,
+        ));
         let client = coord_client::Client::connect_direct(config).await?;
         Ok(Self { client, cache })
     }
@@ -88,23 +98,76 @@ impl AgentInner {
 // ──── Error mapping ────
 
 /// 将 coord_core::Error 映射为 tonic::Status
+///
+/// 第四轮 §3.14.2：**每个** `Status` 都附上结构化错误码 trailer
+/// （`x-coord-error-code`）。此前 Rust 侧零处写入该 trailer，Java `ErrorMapper` 的
+/// 首选分支因而是死代码，只有一张 6→12 的有损状态码映射生效：`NOT_FOUND` 被报成
+/// "注册中心服务不存在"、not-leader 被报成"agent 挂了"——而 **SDK 的重试矩阵正是
+/// 按这些码决策的**（not-leader 应重定向重试；agent 挂了应等待）。
+///
+/// 映射以 `coord_core::error_code::CoordErrorCode` 为唯一定义；本函数是 agent
+/// 数据面（Java 经 agent 接入的主路径）上所有 `CoreError` 的**唯一**出口。
 fn map_core_error(e: CoreError) -> tonic::Status {
-    match &e {
-        CoreError::NotFound { key, .. } => tonic::Status::not_found(key.clone()),
+    use coord_core::error_code::{attach, CoordErrorCode as EC};
+
+    let (status, code) = match &e {
+        CoreError::NotFound { key, .. } => (tonic::Status::not_found(key.clone()), EC::NotFound),
+        // not-leader 与"集群不可用"必须区分：前者 SDK 应重定向到 leader 后重试，
+        // 后者 SDK 应退避等待。修复前两者都是裸 `unavailable`。
         CoreError::NotLeader { .. } | CoreError::NotLeaderNoHint => {
-            tonic::Status::unavailable("not leader")
+            (tonic::Status::unavailable("not leader"), EC::NotLeader)
         }
-        CoreError::ClusterUnavailable(msg) => tonic::Status::unavailable(msg.clone()),
-        CoreError::RequestTimeout => tonic::Status::deadline_exceeded("request timeout"),
-        CoreError::PermissionDenied(msg) => tonic::Status::permission_denied(msg.clone()),
-        CoreError::Unauthenticated(msg) => tonic::Status::unauthenticated(msg.clone()),
-        CoreError::InvalidArgument(msg) => tonic::Status::invalid_argument(msg.clone()),
-        CoreError::AlreadyExists { key, .. } => tonic::Status::already_exists(key.clone()),
-        CoreError::LeaseNotFound { lease_id } => {
-            tonic::Status::not_found(format!("lease {lease_id} not found"))
+        CoreError::ClusterUnavailable(msg) => {
+            (tonic::Status::unavailable(msg.clone()), EC::Unavailable)
         }
-        _ => tonic::Status::internal(e.to_string()),
-    }
+        CoreError::RequestTimeout => (
+            tonic::Status::deadline_exceeded("request timeout"),
+            EC::DeadlineExceeded,
+        ),
+        CoreError::PermissionDenied(msg) => (
+            tonic::Status::permission_denied(msg.clone()),
+            EC::PermissionDenied,
+        ),
+        CoreError::Unauthenticated(msg) => (
+            tonic::Status::unauthenticated(msg.clone()),
+            EC::Unauthenticated,
+        ),
+        CoreError::InvalidArgument(msg) => (
+            tonic::Status::invalid_argument(msg.clone()),
+            EC::InvalidArgument,
+        ),
+        CoreError::AlreadyExists { key, .. } => (
+            tonic::Status::already_exists(key.clone()),
+            EC::AlreadyExists,
+        ),
+        CoreError::LeaseNotFound { lease_id } => (
+            tonic::Status::not_found(format!("lease {lease_id} not found")),
+            EC::NotFound,
+        ),
+        // Txn CAS 失败是**业务判定**（不是故障、更不是 INTERNAL）：
+        // 调用方应读 compare 结果分支，而不是当成不可重试的内部错误。
+        CoreError::TxnCompareFailed => (
+            tonic::Status::aborted("txn compare failed"),
+            EC::TxnCasFailed,
+        ),
+        CoreError::RevisionCompacted { .. } => (
+            tonic::Status::failed_precondition(e.to_string()),
+            EC::FailedPrecondition,
+        ),
+        CoreError::ClusterSealed | CoreError::ClusterUnsealing => (
+            tonic::Status::failed_precondition(e.to_string()),
+            EC::FailedPrecondition,
+        ),
+        CoreError::LeaseTTLOutOfRange { .. } => {
+            (tonic::Status::out_of_range(e.to_string()), EC::OutOfRange)
+        }
+        CoreError::WatchTooManyConnections { .. } | CoreError::Backpressure(_) => (
+            tonic::Status::resource_exhausted(e.to_string()),
+            EC::ResourceExhausted,
+        ),
+        _ => (tonic::Status::internal(e.to_string()), EC::Internal),
+    };
+    attach(status, code)
 }
 
 // ──── KvProxy ────

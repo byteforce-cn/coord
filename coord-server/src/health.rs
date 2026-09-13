@@ -327,10 +327,22 @@ fn handle_health_ready(
     }
 }
 
-/// 详细状态：列出每个 Region 的健康信息
+/// 详细状态：列出每个 Region 的健康信息 + **已死的受监督后台任务**
+///
+/// 第四轮 §3.13：`supervisor::dead_tasks()` 此前是"唯一的监督出口且无消费者"——
+/// 某个后台能力（快照调度、对象 GC、PD 执行器、时间轮……）静默死亡后，除了
+/// 一条 ERROR 日志之外**没有任何既有路径会告诉你**。这里把它接进运维面。
+///
+/// 注意：死亡的后台任务**不**使 `/health?ready` 返回 503——本仓库的取舍是
+/// "静默死亡 → 显式可观测死亡"，而不是自动摘流量：任务与进程/Region 就绪度不是
+/// 同一件事，把非关键任务的死亡升级为摘流量会造成比它本身更大的故障。
+/// 需要告警请用 `coord_dead_background_tasks`（Prometheus）。
 fn handle_health_verbose(
     registry: &Option<Arc<RegionHealthRegistry>>,
 ) -> (&'static str, &'static str, String) {
+    let dead_tasks: Vec<&'static str> = crate::supervisor::dead_tasks();
+    let dead_json: Vec<&str> = dead_tasks.to_vec();
+
     match registry {
         Some(reg) => {
             let regions = reg.verbose_status();
@@ -339,6 +351,7 @@ fn handle_health_verbose(
                 "status": if summary.ready { "READY" } else { "NOT_READY" },
                 "regions_ready": summary.regions_ready,
                 "regions_total": summary.regions_total,
+                "dead_background_tasks": dead_json,
                 "regions": regions.iter().map(|h| serde_json::json!({
                     "region_id": h.region_id,
                     "raft_ready": h.raft_ready,
@@ -351,11 +364,15 @@ fn handle_health_verbose(
             .to_string();
             ("200 OK", "application/json", body)
         }
-        None => (
-            "200 OK",
-            "application/json",
-            r#"{"status":"NO_REGIONS","regions":[]}"#.to_string(),
-        ),
+        None => {
+            let body = serde_json::json!({
+                "status": "NO_REGIONS",
+                "dead_background_tasks": dead_json,
+                "regions": []
+            })
+            .to_string();
+            ("200 OK", "application/json", body)
+        }
     }
 }
 

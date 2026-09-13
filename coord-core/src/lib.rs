@@ -10,6 +10,8 @@
 pub mod auth;
 pub mod discovery;
 pub mod error;
+pub mod error_code;
+pub mod grpc_auth;
 pub mod kv_range;
 pub mod region;
 pub mod storage;

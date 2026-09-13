@@ -20,9 +20,7 @@ use std::task::{Context, Poll};
 
 use coord_core::auth::cct::{is_expired, CctPayload, CctToken};
 use coord_core::auth::trie::{scope_covers_interval, ScopeTrie};
-use coord_core::kv_range::RangeSemantics;
 use http_body_util::BodyExt;
-use prost::Message;
 use tonic::Status;
 use tower::{Layer, Service, ServiceExt};
 
@@ -448,7 +446,7 @@ impl ServerAuthInterceptor {
 
     /// 区间感知的授权判定（A1）。
     ///
-    /// - 单 key（`range_end` 空，即 [`RangeSemantics::SingleKey`]）→ 沿用
+    /// - 单 key（`range_end` 空，即 [`coord_core::kv_range::RangeSemantics::SingleKey`]）→ 沿用
     ///   [`Self::authorize`] 逐点语义。之所以成立，是因为**服务端对同一请求
     ///   也只返回该单键**（第三轮 P0-1：两端共用 `RangeSemantics`）；
     /// - 区间 → scope_overrides / 角色授权均要求**整体包含** `[key, range_end)`；
@@ -525,87 +523,16 @@ impl ServerAuthInterceptor {
 
 // ──── RPC → Capability 映射（服务端）────
 
-/// 服务端 gRPC 方法 → 能力 ID 映射（与 agent 侧映射表一致）。
+/// 服务端 gRPC 方法 → 能力 ID 映射。
 ///
-/// 返回 `None` 的路径属于白名单（health check / Authenticate）或未知 RPC；
-/// 白名单判定见 [`is_whitelisted`]。
+/// 第四轮 §3.4：本表**不再在 crate 内维护**——映射收敛到
+/// [`coord_core::grpc_auth::rpc_capability`]，与 agent 侧共用同一份定义
+/// （修法与第三轮 P0-1 的 `RangeSemantics` 同构）。
+///
+/// 返回 `None` 的路径属于白名单（health check / Authenticate / 凭据自证端点）
+/// 或未知 RPC；白名单判定见 [`is_whitelisted`]。
 pub fn infer_capability(rpc_method: &str) -> Option<String> {
-    match rpc_method {
-        // KV
-        "/coord.kv.KV/Range" => Some("data:kv:read".into()),
-        "/coord.kv.KV/Put" => Some("data:kv:write".into()),
-        "/coord.kv.KV/Delete" => Some("data:kv:delete".into()),
-
-        // Txn
-        "/coord.txn.Txn/Txn" => Some("data:txn:execute".into()),
-
-        // Lease
-        "/coord.lease.Lease/LeaseGrant" => Some("data:lease:grant".into()),
-        "/coord.lease.Lease/LeaseRevoke" => Some("data:lease:revoke".into()),
-        "/coord.lease.Lease/LeaseKeepAlive" => Some("data:lease:keepalive".into()),
-
-        // Watch
-        "/coord.watch.Watch/Watch" => Some("data:watch:subscribe".into()),
-
-        // 对象存储（coord.storage，EXPERIMENTAL 数据面）
-        "/coord.storage.Storage/Get" => Some("data:storage:read".into()),
-        "/coord.storage.Storage/Stat" => Some("data:storage:read".into()),
-        "/coord.storage.Storage/Put" => Some("data:storage:write".into()),
-        "/coord.storage.Storage/Delete" => Some("data:storage:write".into()),
-
-        // Maintenance（集群管理，归 cluster:admin 权限点）
-        "/coord.maintenance.Maintenance/Status" => Some("admin:maintenance:status".into()),
-        "/coord.maintenance.Maintenance/Seal" => Some("admin:maintenance:seal".into()),
-        "/coord.maintenance.Maintenance/Unseal" => Some("admin:maintenance:unseal".into()),
-        "/coord.maintenance.Maintenance/Snapshot" => Some("admin:maintenance:snapshot".into()),
-        "/coord.maintenance.Maintenance/Compact" => Some("admin:maintenance:compact".into()),
-        "/coord.maintenance.Maintenance/MemberAdd" => Some("admin:maintenance:member_add".into()),
-        "/coord.maintenance.Maintenance/MemberRemove" => {
-            Some("admin:maintenance:member_remove".into())
-        }
-        "/coord.maintenance.Maintenance/MemberPromote" => {
-            Some("admin:maintenance:member_promote".into())
-        }
-        "/coord.maintenance.Maintenance/MemberList" => Some("admin:maintenance:member_list".into()),
-
-        // Auth 管理
-        "/coord.auth.Auth/AuthEnable" => Some("admin:auth:enable".into()),
-        "/coord.auth.Auth/AuthDisable" => Some("admin:auth:disable".into()),
-        "/coord.auth.Auth/AuthStatus" => Some("admin:auth:status".into()),
-        "/coord.auth.Auth/UserAdd" => Some("admin:auth:user_add".into()),
-        "/coord.auth.Auth/UserDelete" => Some("admin:auth:user_delete".into()),
-        "/coord.auth.Auth/UserList" => Some("admin:auth:user_list".into()),
-        "/coord.auth.Auth/UserGet" => Some("admin:auth:user_list".into()),
-        "/coord.auth.Auth/UserChangePassword" => Some("admin:auth:user_add".into()),
-        "/coord.auth.Auth/RoleAdd" => Some("admin:auth:role_add".into()),
-        "/coord.auth.Auth/RoleDelete" => Some("admin:auth:role_delete".into()),
-        "/coord.auth.Auth/RoleGrantPermission" => Some("admin:auth:role_grant".into()),
-        "/coord.auth.Auth/RoleRevokePermission" => Some("admin:auth:role_revoke".into()),
-        "/coord.auth.Auth/RoleGrantCapability" => Some("admin:auth:role_grant".into()),
-        "/coord.auth.Auth/RoleRevokeCapability" => Some("admin:auth:role_revoke".into()),
-        "/coord.auth.Auth/RoleList" => Some("admin:auth:role_list".into()),
-        "/coord.auth.Auth/ListRoles" => Some("admin:auth:role_list".into()),
-        "/coord.auth.Auth/UserGrantRole" => Some("admin:auth:user_grant_role".into()),
-        "/coord.auth.Auth/UserRevokeRole" => Some("admin:auth:user_revoke_role".into()),
-        // 动态 bootstrap 令牌管理（签发/列表/撤销同一能力）
-        "/coord.auth.Auth/BootstrapTokenIssue" => Some("admin:auth:bootstrap_token".into()),
-        "/coord.auth.Auth/BootstrapTokenList" => Some("admin:auth:bootstrap_token".into()),
-        "/coord.auth.Auth/BootstrapTokenRevoke" => Some("admin:auth:bootstrap_token".into()),
-
-        // Capability 查询
-        "/coord.capability.CapabilityRegistry/List" => Some("admin:capability:list".into()),
-        "/coord.capability.CapabilityRegistry/Get" => Some("admin:capability:list".into()),
-        "/coord.capability.CapabilityRegistry/Register" => Some("admin:capability:register".into()),
-        "/coord.capability.CapabilityRegistry/Deprecate" => {
-            Some("admin:capability:deprecate".into())
-        }
-
-        // Authenticate 为登录端点，白名单放行（见 is_whitelisted）
-        "/coord.auth.Auth/Authenticate" => None,
-        "/coord.auth.Auth/GetRevocationDelta" => None, // agent 角色同步，依赖 CCT（见 ServerAuthService 特判）
-
-        _ => None, // 未知 RPC —— 默认拒绝（fail-closed）
-    }
+    coord_core::grpc_auth::rpc_capability(rpc_method).map(str::to_string)
 }
 
 /// 匿名白名单：健康检查、登录端点，以及**自证凭据**的引导端点匿名可访问。
@@ -632,121 +559,27 @@ pub fn is_whitelisted(rpc_method: &str) -> bool {
 // ──── scope key 提取（tower 层缓存 body 解析 key）────
 
 /// 需要从请求 body 提取 scope key 的 RPC 方法集合。
+///
+/// 第四轮 §3.8：定义收敛到 [`coord_core::grpc_auth::needs_scope_extraction`]，
+/// 并**新增 Watch**（此前 Watch 不在集合内 → 带 scope 的凭据订阅被 fail-closed 拒绝，
+/// 即"Watch 无法同时做到可用与受 scope 约束"）。
 pub fn needs_scope_extraction(rpc_method: &str) -> bool {
-    matches!(
-        rpc_method,
-        "/coord.kv.KV/Put" | "/coord.kv.KV/Range" | "/coord.kv.KV/Delete" | "/coord.txn.Txn/Txn"
-    )
+    coord_core::grpc_auth::needs_scope_extraction(rpc_method)
 }
 
 /// 一次请求触碰的 key 区间。
 ///
-/// 语义判定**不在此处定义**，而由 [`RangeSemantics::of`] 单点给出（与服务端实际
-/// 执行路径共用），详见 [`ScopeAccess::from_range`]：
+/// 第四轮 §3.4：类型定义收敛到 [`coord_core::grpc_auth::ScopeAccess`]，服务端与
+/// agent **共用**一份（语义判定仍由 [`coord_core::kv_range::RangeSemantics::of`] 单点给出）。
+pub use coord_core::grpc_auth::ScopeAccess;
+
+/// 从请求 body 提取 scope **访问区间**列表。
 ///
-/// - 单键（`range_end` 为空 或 == `key`）→ 点访问（`range_end` 留空）；
-/// - `range_end == "\0"` → 从 `key` 到无穷（etcd 语义）；
-/// - 否则 → 区间 `[key, range_end)`。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScopeAccess {
-    pub key: Vec<u8>,
-    pub range_end: Vec<u8>,
-}
-
-impl ScopeAccess {
-    /// 单 key 访问。
-    pub fn point(key: Vec<u8>) -> Self {
-        Self {
-            key,
-            range_end: Vec::new(),
-        }
-    }
-
-    /// 区间访问。
-    pub fn range(key: Vec<u8>, range_end: Vec<u8>) -> Self {
-        Self { key, range_end }
-    }
-
-    /// 由请求的 `(key, range_end)` 构造 —— 语义判定必须与服务端**实际执行**
-    /// 共用 [`RangeSemantics::of`]（第三轮 P0-1）。
-    ///
-    /// 此前本层硬编码「`range_end` 为空 = 点查」，而 Txn 内层 `TxnOp::Range`
-    /// 在服务端回退为「字节前缀扫描」——同一请求两种解读，持 `scope="/app/a/"`
-    /// 的凭据即可读到 `/app/abc/config`。现在服务端与鉴权层都从这一份定义派生，
-    /// 建模与执行不可能再分叉。
-    pub fn from_range(key: Vec<u8>, range_end: Vec<u8>) -> Self {
-        match RangeSemantics::of(&key, &range_end) {
-            RangeSemantics::SingleKey => Self::point(key),
-            RangeSemantics::Interval => Self { key, range_end },
-        }
-    }
-}
-
-/// 从请求 body 提取 scope **访问区间**列表（A1）。
-///
-/// - Put：单 key；
-/// - Range/Delete：`[key, range_end)`（`range_end` 为空 = 单 key）；
-/// - Txn：全部 compare key 与 success/failure 操作触碰的 key/区间；
-/// - 解析失败返回 `Err`（请求本身畸形，按失败关闭拒绝）。
-///
-/// `body` 为 gRPC 帧流（5 字节前缀：1 字节压缩标志 + 4 字节大端长度），
-/// 解析前先剥离帧头；无帧头的裸 protobuf（测试路径）直接按消息解析。
+/// 第四轮 §3.8：实现收敛到 [`coord_core::grpc_auth::extract_scope_access`]，
+/// 服务端与 agent 共用；并**新增 Watch** 的提取——此前 Watch 不提取 scope，
+/// 导致带 scope 的凭据无法订阅（"要么不可用、要么不受约束"）。
 pub fn extract_scope_access(rpc_method: &str, body: &[u8]) -> Result<Vec<ScopeAccess>, String> {
-    // 剥离 gRPC 帧头（压缩标志非 0 → 无法解析，按畸形请求拒绝）
-    let payload = if body.len() >= 5 && body[0] == 0 {
-        let msg_len = u32::from_be_bytes([body[1], body[2], body[3], body[4]]) as usize;
-        if body.len() >= 5 + msg_len {
-            &body[5..5 + msg_len]
-        } else {
-            return Err("truncated gRPC frame".to_string());
-        }
-    } else if body.len() >= 5 && body[0] == 1 {
-        return Err("compressed request body is not supported for scope extraction".to_string());
-    } else {
-        body
-    };
-
-    match rpc_method {
-        "/coord.kv.KV/Put" => {
-            let req = coord_proto::kv::PutRequest::decode(payload)
-                .map_err(|e| format!("failed to parse PutRequest body: {e}"))?;
-            Ok(vec![ScopeAccess::point(req.key)])
-        }
-        "/coord.kv.KV/Range" => {
-            let req = coord_proto::kv::RangeRequest::decode(payload)
-                .map_err(|e| format!("failed to parse RangeRequest body: {e}"))?;
-            Ok(vec![ScopeAccess::from_range(req.key, req.range_end)])
-        }
-        "/coord.kv.KV/Delete" => {
-            let req = coord_proto::kv::DeleteRequest::decode(payload)
-                .map_err(|e| format!("failed to parse DeleteRequest body: {e}"))?;
-            Ok(vec![ScopeAccess::from_range(req.key, req.range_end)])
-        }
-        "/coord.txn.Txn/Txn" => {
-            let txn = coord_proto::txn::TxnRequest::decode(payload)
-                .map_err(|e| format!("failed to parse TxnRequest body: {e}"))?;
-            let mut accesses: Vec<ScopeAccess> = txn
-                .compare
-                .iter()
-                .map(|c| ScopeAccess::point(c.key.clone()))
-                .collect();
-            for op in txn.success.iter().chain(txn.failure.iter()) {
-                use coord_proto::txn::request_op::Op;
-                match &op.op {
-                    Some(Op::RequestPut(p)) => accesses.push(ScopeAccess::point(p.key.clone())),
-                    Some(Op::RequestDelete(d)) => {
-                        accesses.push(ScopeAccess::from_range(d.key.clone(), d.range_end.clone()))
-                    }
-                    Some(Op::RequestRange(r)) => {
-                        accesses.push(ScopeAccess::from_range(r.key.clone(), r.range_end.clone()))
-                    }
-                    None => {}
-                }
-            }
-            Ok(accesses)
-        }
-        _ => Ok(Vec::new()),
-    }
+    coord_core::grpc_auth::extract_scope_access(rpc_method, body)
 }
 
 /// 向后兼容包装：只取 key（丢区间上界）。**不得**用于带 `range_end` 的鉴权路径。
@@ -757,22 +590,10 @@ pub fn extract_scope_keys(rpc_method: &str, body: &[u8]) -> Result<Vec<Vec<u8>>,
         .collect())
 }
 
-/// gRPC 消息解码上限（对齐 `tonic` 的 `max_decoding_message_size` 默认口径）。
-///
-/// RPC 服务的解码上限由服务端显式设置为该值（见 `coord/src/main.rs`），鉴权层的
-/// body 上限**必须与之对齐**，否则会出现"合法请求在鉴权层被拒、而它本可以通过
-/// 解码"的回归。
-pub const MAX_GRPC_DECODING_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
-
-/// scope 提取前请求体上限（A2）：超出即拒绝。
-///
-/// 该路径在**鉴权前**缓存 body（auth 关闭时同样执行），若不加限则无凭据请求即可
-/// 触发无界 `collect()`。
-///
-/// A2 修正：原值 1 MiB < [`MAX_GRPC_DECODING_BYTES`]（4 MiB）→ 1–4 MiB 的合法
-/// `Put`/`Txn` 被拒。现取解码上限 + 64 KiB 余量（gRPC 帧头 5 字节 / protobuf 字段
-/// 头与长度前缀），既不误伤合法请求，又保持有界的 DoS 保护。
-pub const MAX_SCOPE_BODY_BYTES: usize = MAX_GRPC_DECODING_BYTES + 64 * 1024;
+// gRPC 消息解码上限 / scope 提取前请求体上限：定义收敛到 `coord-core`
+// （服务端与 agent 必须使用**同一**上限，否则两侧会出现"一侧拒、另一侧放行"）。
+pub use coord_core::grpc_auth::MAX_GRPC_DECODING_BYTES;
+pub use coord_core::grpc_auth::MAX_SCOPE_BODY_BYTES;
 
 /// 缓存请求 body 字节后重建请求（scope key 提取用）。
 ///
@@ -986,16 +807,28 @@ impl<S> ServerAuthService<S> {
 /// 将拒绝原因映射为 gRPC 状态码：
 /// 认证类问题（缺 token/签名/过期/吊销）→ `UNAUTHENTICATED`；
 /// 授权类问题（能力/scope 不足）→ `PERMISSION_DENIED`。
+///
+/// 两者都附上结构化错误码 trailer（第四轮 §3.14.2）：Java SDK 据此区分
+/// "该重新取凭据"与"该找管理员配权限"，而不再把两者都当成 `INTERNAL`（不可重试）。
 pub fn classify_denial(reason: &str) -> Status {
-    if reason.contains("missing")
+    use coord_core::error_code::{attach, CoordErrorCode};
+
+    let (status, code) = if reason.contains("missing")
         || reason.contains("validation")
         || reason.contains("expired")
         || reason.contains("revoked")
     {
-        Status::unauthenticated(reason.to_string())
+        (
+            Status::unauthenticated(reason.to_string()),
+            CoordErrorCode::Unauthenticated,
+        )
     } else {
-        Status::permission_denied(reason.to_string())
-    }
+        (
+            Status::permission_denied(reason.to_string()),
+            CoordErrorCode::PermissionDenied,
+        )
+    };
+    attach(status, code)
 }
 
 /// 鉴权中间件 future：放行转发 inner；拒绝返回 gRPC 错误响应；
@@ -1063,9 +896,12 @@ pub fn extract_bearer_token(header: Option<&str>) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 生产代码的 `extract_scope_access` 已收敛到 coord-core（不再直接解码），
+    // 但测试仍需要 `Message::encode_to_vec` 构造请求体。
     use crate::auth::revocation::RevocationStore;
     use crate::auth::token_signing::TokenSigningKeyring;
     use coord_core::auth::cct::{decode_cct, encode_cct, CctHeader, CctPayload};
+    use prost::Message;
 
     fn make_keyring() -> Arc<TokenSigningKeyring> {
         let root_key = vec![0u8; 32];
@@ -1992,5 +1828,72 @@ mod tests {
             .await
             .expect_err("oversize body must be refused");
         assert!(err.contains("exceeds scope-extraction limit"), "err: {err}");
+    }
+
+    // ──── 第四轮 §3.14.2：结构化错误码 trailer ────
+    //
+    // Java SDK 的 `ErrorMapper` 以 gRPC trailer `x-coord-error-code` 为**首选**判据。
+    // 修复前 Rust 侧全仓 0 处写入该 trailer → 首选分支是死代码，只有一张 6→12 的
+    // 有损状态码映射生效：`NOT_FOUND` 一律报成"注册中心服务不存在"、`UNAVAILABLE`
+    // （含 not-leader）一律报成"agent 挂了"——而 SDK 的重试矩阵正是按这些码决策的。
+
+    /// 鉴权拒绝必须**同时**带对的状态码与结构化错误码。
+    #[test]
+    fn denial_carries_structured_error_code() {
+        use coord_core::error_code::{error_code_of, CoordErrorCode};
+
+        let unauthenticated = classify_denial("missing CCT token");
+        assert_eq!(unauthenticated.code(), tonic::Code::Unauthenticated);
+        assert_eq!(
+            error_code_of(&unauthenticated).as_deref(),
+            Some(CoordErrorCode::Unauthenticated.as_str()),
+            "认证类拒绝必须带 UNAUTHENTICATED trailer"
+        );
+
+        let denied = classify_denial("capability not granted");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            error_code_of(&denied).as_deref(),
+            Some(CoordErrorCode::PermissionDenied.as_str()),
+            "授权类拒绝必须带 PERMISSION_DENIED trailer"
+        );
+    }
+
+    /// 拒绝响应**经 HTTP 编码后**仍必须保留 trailer——否则"发了码"只存在于
+    /// 进程内的 `Status` 里，客户端一个字节也收不到（这正是之前的状态）。
+    #[test]
+    fn denial_trailer_survives_http_encoding() {
+        use coord_core::error_code::ERROR_CODE_TRAILER;
+
+        let response = deny_response(Some(classify_denial("missing CCT token")));
+        let header = response
+            .headers()
+            .get(ERROR_CODE_TRAILER)
+            .expect("denial response must carry the error-code trailer");
+        assert_eq!(header.to_str().expect("ascii"), "UNAUTHENTICATED");
+
+        // gRPC 状态码本身也必须在（客户端两条路径都能用）
+        assert_eq!(
+            response
+                .headers()
+                .get("grpc-status")
+                .and_then(|v| v.to_str().ok()),
+            Some("16"),
+            "grpc-status 16 = UNAUTHENTICATED"
+        );
+    }
+
+    /// 兜底拒绝（未给出具体 `Status`）也必须带码——否则 Java 侧对这条路径只能落到
+    /// 有损的状态码表上。
+    #[test]
+    fn fallback_denial_also_carries_error_code() {
+        use coord_core::error_code::{error_code_of, CoordErrorCode};
+
+        let status = Status::permission_denied("denied");
+        let attached = coord_core::error_code::attach(status, CoordErrorCode::PermissionDenied);
+        assert_eq!(
+            error_code_of(&attached).as_deref(),
+            Some("PERMISSION_DENIED")
+        );
     }
 }

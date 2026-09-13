@@ -96,7 +96,7 @@ mod tests {
 
         // --- Step 2: Agent validates ---
         let agent_result = agent.validate_request(
-            "/coord.kv.Kv/Range",
+            "/coord.kv.KV/Range",
             Some(&format!("Bearer {cct}")),
             Some("/app/order-123"),
         );
@@ -166,7 +166,7 @@ mod tests {
 
         // Agent allows (valid token)
         let agent_result = agent.validate_request(
-            "/coord.kv.Kv/Range",
+            "/coord.kv.KV/Range",
             Some(&format!("Bearer {cct}")),
             Some("/any/key"),
         );
@@ -234,7 +234,7 @@ mod tests {
 
         // Agent should reject: reader can't do data:kv:write
         let agent_result = agent.validate_request(
-            "/coord.kv.Kv/Put",
+            "/coord.kv.KV/Put",
             Some(&format!("Bearer {cct}")),
             Some("/app/order-123"),
         );
@@ -409,7 +409,7 @@ mod tests {
 
         // But if they got a token before rate limiting, the interceptor should still work
         let result = agent.validate_request(
-            "/coord.kv.Kv/Range",
+            "/coord.kv.KV/Range",
             Some(&format!("Bearer {cct}")),
             Some("/any/key"),
         );

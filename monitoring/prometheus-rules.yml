@@ -123,3 +123,27 @@ groups:
         annotations:
           summary: "coord-agent {{ $labels.instance }} 插件调用错误率 {{ $value | humanizePercentage }}"
 
+  - name: coord-supervision
+    rules:
+      # 第四轮 §3.13：**唯一的监督出口**。受监督的后台任务（时间轮、快照调度、
+      # 对象 GC、PD 执行器、auth 维护……）意外结束 = 对应能力静默死亡。
+      #
+      # 机制长期存在但**没有消费者**：`dead_tasks()` 只在测试里被读过，所以
+      # "某项后台能力已经死了"在监控面上完全不可见，只能靠翻 ERROR 日志。
+      # 现在由 coord-server 的 /metrics 暴露（见 metrics.rs 的 render_prometheus_text）。
+      #
+      # 任何一项 > 0 都值得看：severity=critical 是因为本仓库的取舍是"不自动重启"
+      # （任务持有不可重建的本地状态），所以死亡是**终态**，必须人工介入。
+      - alert: CoordBackgroundTaskDead
+        expr: |
+          coord_dead_background_tasks{job=~"coord.*"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "coord {{ $labels.instance }} 有 {{ $value }} 个受监督后台任务已死亡（对应能力已失效，不会自愈）"
+          description: |
+            任务名见 coord_dead_background_task_info{task=...}，或 GET /health?verbose=true
+            的 dead_background_tasks 字段。本仓库不做自动重启（任务持有不可重建的本地
+            状态），需人工判断后重启进程。
+

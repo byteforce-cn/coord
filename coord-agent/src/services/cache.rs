@@ -203,6 +203,9 @@ pub struct CacheService {
     db: RwLock<Option<redb::Database>>,
     started: RwLock<bool>,
     default_ttl_secs: u64,
+    /// 声明的容量上限（字节）。**当前未被强制执行**——见 [`CacheService::new`]。
+    /// 保存下来以便日志/可观测面如实报出"配了多少、有没有生效"。
+    max_size_bytes: u64,
     /// ISR 复制管理器（None = 单 agent 本地语义，零复制路径保留）
     replication: RwLock<Option<Arc<crate::services::replication::ReplicationManager>>>,
     /// 自身 Arc 弱引用（spawn_blocking 升级用，见 bind_self_weak）
@@ -215,16 +218,39 @@ impl std::fmt::Debug for CacheService {
             .field("db_path", &self.db_path)
             .field("started", &self.started)
             .field("default_ttl_secs", &self.default_ttl_secs)
+            .field("max_size_bytes", &self.max_size_bytes)
+            .field("max_size_enforced", &false)
             .finish()
     }
 }
 
 impl CacheService {
-    pub fn new(db_path: PathBuf, _max_size_bytes: u64, default_ttl_secs: u64) -> Self {
+    /// 创建缓存服务。
+    ///
+    /// # 第四轮 §3.10 h：`max_size_bytes` **不被执行**
+    ///
+    /// 此前参数名是 `_max_size_bytes`（下划线前缀 = 编译期确认"用不到"），而唯一
+    /// 调用点注释写着 `1024 * 1024 * 1024, // 1GB max`——**这个上限从未生效**：本服务
+    /// 没有字节记账，也没有淘汰逻辑，各表受 TTL 懒过期和底层 redb 文件增长支配。
+    ///
+    /// 本轮**不实现**淘汰（需要一套跨 4 张表的活跃字节记账 + 淘汰索引，且本仓已因
+    /// "全表扫描"被点过一次名，不能顺手再加一个），而是把它变成**可观测的事实**：
+    /// 值被保存下来并在启动时告警，接入方不会被一个不存在的限额误导。语义与
+    /// `autoRestoreWatches`（§3.14.3）同类：不向调用方承诺不存在的能力。
+    pub fn new(db_path: PathBuf, max_size_bytes: u64, default_ttl_secs: u64) -> Self {
+        if max_size_bytes > 0 {
+            tracing::warn!(
+                max_size_bytes,
+                "CacheService: configured size limit is NOT enforced (no eviction implemented); \
+                 cache growth is bounded only by TTL expiry and disk space. See \
+                 docs/production/remaining-known-gaps.md"
+            );
+        }
         Self {
             db_path,
             db: RwLock::new(None),
             started: RwLock::new(false),
+            max_size_bytes,
             default_ttl_secs,
             replication: RwLock::new(None),
             self_arc: RwLock::new(None),

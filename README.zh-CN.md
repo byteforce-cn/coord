@@ -58,7 +58,7 @@ Server 的 `50051` / `50052` 端口仅对 Agent 可达，**对业务应用永不
 |:---|:---|
 | KV / Txn / Watch / Lease | 单 Region 内线性一致；Jepsen 工程已就位，但**尚无产物入仓**（见「验证与质量」） |
 | Auth / RBAC | 用户 / 角色 / 权限，Ed25519 CCT 令牌，登录限流 |
-| TLS / mTLS | gRPC 与 Raft 通道加密；缺 CA 拒绝启动（fail-closed） |
+| TLS / mTLS | gRPC 与 Raft 通道加密。**并非 fail-closed**：`dev` 模式、以及“开启鉴权 + 配了 `raft_shared_secret`”的集群仍会以明文启动。只有在（a）鉴权关闭**且**绑定非 loopback，或（b）Raft 端口非 loopback 且既无 Raft mTLS 又无 `raft_shared_secret` 时才拒绝启动。生产请显式配置 `[tls]` |
 | 静态加密 | AES-256-GCM，外加 Shamir 分片的 Seal / Unseal |
 | 运维 | 快照、MVCC 压缩、动态成员管理、Prometheus 指标 |
 | Multi-Raft（opt-in） | 多 Raft 组 Region 分片 + 内嵌 PD 调度；`[multi_raft]` 显式开启（见 [`config.example.toml`](config.example.toml)） |
@@ -165,9 +165,9 @@ coord/
 ## 验证与质量
 
 - **Jepsen（工程已就位，未认证）**——仓库内 Clojure + knossos 工程（[`jepsen/`](jepsen/README.md)）覆盖 `register` / `cas-register` / `multi-register` 负载 × kill / pause / partition 故障注入，另有 [`jepsen/README.md`](jepsen/README.md) 中的长时浸泡方案。**尚未有 Jepsen / soak 产物入仓**（`docs/production/evidence/` 目前只有 Java 集成运行产物）；在产物落盘之前，线性一致相关表述属**设计意图**，不是已认证结论；
-- **快速本地收口**——`scripts/jepsen-check.sh` 无需 lab，约 2–3 分钟复现核心矩阵（Rust 层检查，**不是** Jepsen 运行）；
-- **CI**——fmt + clippy（`-D warnings`）、非测试代码 panic 卡口、workspace 测试、proto 契约检查（buf breaking）、`cargo audit` + `cargo deny`、真实进程 chaos 运行，以及 Java SDK / Java 示例对真实 server + agent 集群的集成套件；
-- **证据**——可复现的运行产物归档在 [`docs/production/evidence/`](docs/production/evidence/README.md)（`bash scripts/collect-evidence.sh <场景>`）。
+- **快速本地收口**——`scripts/jepsen-check.sh` 只跑**一个**线性一致冒烟用例（`chaos_real_kill9_and_linearizability`），热构建下约 2–3 分钟；**不是** Jepsen 运行，也不复现 负载 × 故障注入 矩阵；
+- **CI**——权威清单见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：fmt + clippy（`-D warnings`）、非测试代码 panic 卡口、workspace 测试、proto 契约检查（buf lint + format + breaking）、`cargo audit` + `cargo deny`、真实进程 chaos 运行、跨语言错误码契约检查，以及 Java SDK / Java 示例集成套件；
+- **证据**——可复现的运行产物归档在 [`docs/production/evidence/`](docs/production/evidence/README.md)（`bash scripts/collect-evidence.sh <场景>`）。每个 `MANIFEST.md` 记录 commit、精确命令与工作区是否 dirty；`commit`/`command` 字段无法复现的产物应视为未验证。
 
 ## 部署
 
@@ -178,11 +178,16 @@ coord/
 
 ## 状态
 
-版本 `0.1.0`（pre-1.0），尚未发布任何 tag。Raft 引擎（`openraft`）为 alpha 依赖，Coord **暂不建议用于生产**；Jepsen 工程虽已就位，但在产物入仓并接入 CI 之前，不得据此声称已验证。
+版本 `0.1.0`（pre-1.0）。Raft 引擎（`openraft`）为 alpha 依赖，Coord **暂不建议用于生产**。Jepsen 工程虽已就位，但**尚无产物入仓**，因此核心一致性与故障恢复语义**未经其认证**——在产物落盘之前只能是设计意图。
+
+本轮**有意保留**的已知缺口（含证据与影响）逐条列在
+[`docs/production/remaining-known-gaps.md`](docs/production/remaining-known-gaps.md)（英文）；
+引入前请先读。
 
 ## 文档
 
 - 协议契约与能力承诺：[`apis/contracts/`](apis/contracts/README.md)
+- **尚未关闭的已知缺口（引入前必读）：** [`docs/production/remaining-known-gaps.md`](docs/production/remaining-known-gaps.md)
 - Server 配置参考：[`config.example.toml`](config.example.toml)
 - 漏洞报告：[`SECURITY.md`](SECURITY.md)
 

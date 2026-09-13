@@ -44,6 +44,15 @@ pub trait AuthOpProposer: Send + Sync {
 const BUCKET_CAPACITY: f64 = 5.0;
 const BUCKET_REFILL_PER_SEC: f64 = 0.5;
 
+/// 后台维护任务周期（§3.6 a/b：限流桶 + 过期会话）。
+const MAINTENANCE_INTERVAL_SECS: u64 = 60;
+
+/// 单次会话清理提案的会话数上限（一条 raft 条目的大小上界）。
+const MAX_SESSION_CLEANUP_BATCH: usize = 4096;
+
+/// 每轮维护最多连排的批数（用于追赶积压；4096 × 8 ≈ 3.3 万/min）。
+const MAX_SESSION_CLEANUP_BATCHES_PER_TICK: usize = 8;
+
 struct TokenBucket {
     tokens: f64,
     last_refill: Instant,
@@ -140,9 +149,38 @@ impl LoginRateLimiter {
     }
 
     /// 定期清理过期桶（防止内存无限增长）。
-    fn _prune(&self) {
-        let cutoff = Instant::now() - Duration::from_secs(600);
-        self.buckets.write().retain(|_, b| b.last_refill > cutoff);
+    ///
+    /// 第四轮 §3.6 a：本函数此前名为 `_prune()` 且**生产零调用**——key 是**攻击者
+    /// 提供的用户名**（`u:{username}`），随机用户名登录尝试（检查在口令校验之前）
+    /// 每次写入一个新桶，~120 B/个，百万用户名 ≈ 120 MB；而只有成功登录才
+    /// `clear_user`，攻击者永不触发。现由 `AuthService::start_maintenance_worker`
+    /// 定期调用（不再用下划线前缀掩盖"无人调用"的事实）。
+    fn prune(&self) {
+        // `Instant - Duration` 在少数平台上可能下溢 panic（`checked_sub` 返回 None
+        // 的时机 = 机器启动不足 600s 时）——取消清理，而不是 panic。
+        let Some(cutoff) = Instant::now().checked_sub(Duration::from_secs(600)) else {
+            return;
+        };
+        self.prune_before(cutoff);
+    }
+
+    /// 清理 `last_refill <= cutoff` 的桶（`prune` 的可测试内核）。
+    ///
+    /// 已获取可用令牌的桶在 600s 无失败后即失去意义（容量 5、每 2s 补 1 个 →
+    /// 600s 足够回满并继续），删除不会放宽限流：下一次尝试会重新建一个满桶。
+    fn prune_before(&self, cutoff: Instant) -> usize {
+        let mut buckets = self.buckets.write();
+        let before = buckets.len();
+        buckets.retain(|_, b| b.last_refill > cutoff);
+        let pruned = before - buckets.len();
+        if pruned > 0 {
+            tracing::debug!(
+                pruned,
+                remaining = buckets.len(),
+                "login rate-limit buckets pruned"
+            );
+        }
+        pruned
     }
 }
 
@@ -442,6 +480,97 @@ impl AuthService {
                 Ok(())
             }
         }
+    }
+
+    /// 清理已过期会话（内存视图 + 磁盘 KV 行，**同一条路径**）。
+    ///
+    /// 第四轮 §3.6 b：`TokenManager::cleanup_expired()` 此前**生产零调用**，而过期
+    /// 只是在 `validate`/`session_of_refresh` 里报错、不回收。正常业务流量即可让会话表
+    /// 无界增长：10k 客户端 × 最短 5s 刷新 ≈ 96 万条/天，内存 150–200 MB/天，且每条在
+    /// 磁盘上留一行 `/_sys/auth/sessions/<hash>`（只有 `ConsumeSession` 会删）。
+    ///
+    /// 因此本方法**不**直接改本地表：有 proposer 时走 `AuthOp::ConsumeSessions` 批量提案，
+    /// 由 raft apply 钩子（`state_machine.rs`）删内存视图、由存储层（`mvcc.rs`）删 KV 行
+    /// ——所有节点收敛到同一状态。无 proposer（未接 raft 的部署）时退化为本地删除。
+    ///
+    /// 失败方向是 fail-closed：提案失败（如 follower 上的 `UNAVAILABLE`）时**不**删本地
+    /// 表，整个批次下一轮重试；绝不让"某个节点删了、别的节点还留着"。
+    ///
+    /// 返回本次请求删除的会话数。单批上限 [`MAX_SESSION_CLEANUP_BATCH`]——避免一条 raft
+    /// 条目过大（也是为什么用批量变体而不是逐条 `ConsumeSession`）。
+    pub async fn cleanup_expired_sessions(&self) -> Result<usize, tonic::Status> {
+        let expired = self.token_manager.expired_hashes(MAX_SESSION_CLEANUP_BATCH);
+        if expired.is_empty() {
+            return Ok(0);
+        }
+        let count = expired.len();
+        match &self.auth_proposer {
+            Some(p) => {
+                p.propose_auth_op(AuthOp::ConsumeSessions {
+                    hash_hexes: expired,
+                })
+                .await?;
+                Ok(count)
+            }
+            None => {
+                for hash_hex in &expired {
+                    self.token_manager.remove_session(hash_hex);
+                }
+                Ok(count)
+            }
+        }
+    }
+
+    /// 启动后台维护任务：登录限流桶清理 + 过期会话回收。
+    ///
+    /// 受 [`crate::supervisor::spawn_supervised`] 监督——该任务死亡时留下 ERROR 日志
+    /// 并进入 `dead_tasks()`，而不是"内存曲线悄悄又涨回去了"（§3.6 的两个 P0 都是
+    /// "清理函数写好了、调用者为 0" 的形状；静默死亡是同一形状的延续）。
+    ///
+    /// 首次 tick 不立即执行，避免启动期与 auth 初始化争用。
+    pub fn start_maintenance_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        crate::supervisor::spawn_supervised("auth_maintenance", async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(MAINTENANCE_INTERVAL_SECS));
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+
+                // (a) 登录限流表：key 是攻击者可控的用户名（未认证路径）
+                self.login_limiter.prune();
+
+                // (b) 过期会话：正常业务流量即可无界增长。
+                // 每轮允许连排多批，以便在积压后能追上（上限见常量），
+                // 但任一批失败即停止本轮到下一轮，避免在 follower 上空转。
+                let mut total = 0usize;
+                for _ in 0..MAX_SESSION_CLEANUP_BATCHES_PER_TICK {
+                    match self.cleanup_expired_sessions().await {
+                        Ok(0) => break,
+                        Ok(n) => total += n,
+                        Err(e) => {
+                            // follower 上的 `UNAVAILABLE` 是**预期**状态（只有 leader 能
+                            // 提案），降到 debug 以免每个 follower 每分钟刷一条 warn。
+                            if e.code() == tonic::Code::Unavailable {
+                                tracing::debug!(
+                                    "session cleanup deferred to leader (this node is not leader)"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "session cleanup batch failed (will retry next tick): {e}"
+                                );
+                            }
+                            break;
+                        }
+                    }
+                }
+                if total > 0 {
+                    tracing::info!(
+                        removed = total,
+                        remaining = self.token_manager.active_count(),
+                        "expired sessions reclaimed"
+                    );
+                }
+            }
+        })
     }
 
     /// 签发 CCT（signing keyring 可用时），返回 (cct, expires_at)。
@@ -2027,6 +2156,164 @@ mod tests {
         // 0-second TTL for testing immediate expiry
         let token_mgr = Arc::new(crate::auth::token::TokenManager::new(0, 0));
         let _service = AuthService::new(auth_mgr, token_mgr);
+    }
+
+    // ──── 第四轮 §3.6 a/b：后台维护（限流桶 + 过期会话）────
+
+    /// 记录型 proposer：捕获提案内容，可按需注入失败。
+    struct RecordingProposer {
+        ops: std::sync::Mutex<Vec<AuthOp>>,
+        fail_with: Option<tonic::Code>,
+    }
+
+    #[async_trait::async_trait]
+    impl AuthOpProposer for RecordingProposer {
+        async fn propose_auth_op(&self, op: AuthOp) -> Result<u64, tonic::Status> {
+            if let Some(code) = self.fail_with {
+                return Err(tonic::Status::new(code, "injected"));
+            }
+            self.ops.lock().unwrap().push(op);
+            Ok(1)
+        }
+    }
+
+    /// §3.6 a 回归：`prune` 必须真的移除陈旧限流桶（此前名为 `_prune`，零调用）。
+    ///
+    /// 用可注入的 cutoff 绕过"需要等 600s"的时间依赖：`last_refill` 均为"现在"，
+    /// 因此把 cutoff 放到未来即可命中全部桶。
+    #[test]
+    fn login_limiter_prune_removes_stale_buckets() {
+        let limiter = LoginRateLimiter::new();
+        let ip: Option<std::net::SocketAddr> = None;
+        for i in 0..1000 {
+            limiter.allow_attempt(&format!("attacker-{i}"), ip);
+        }
+        assert_eq!(
+            limiter.buckets.read().len(),
+            1000,
+            "无 IP 时每个用户名一个 u: 桶（带 IP 时再各加一个 ip: 桶）"
+        );
+
+        // 未来 cutoff → 全部视为陈旧
+        let removed = limiter.prune_before(Instant::now() + Duration::from_secs(1));
+        assert_eq!(removed, 1000, "1M 随机用户名可达 ~120 MB，必须可回收");
+        assert!(limiter.buckets.read().is_empty());
+
+        // 正常 cutoff（600s 前）不得误删刚用过的桶
+        limiter.allow_attempt("legit", ip);
+        let removed = limiter.prune_before(
+            Instant::now()
+                .checked_sub(Duration::from_secs(600))
+                .expect("monotonic clock"),
+        );
+        assert_eq!(removed, 0, "新鲜桶不得被清理（否则限流被绕过）");
+    }
+
+    /// §3.6 b 回归：过期会话必须经 raft 批量回收（内存 + 磁盘同路径），
+    /// 且**一条**提案而不是逐条。
+    #[tokio::test]
+    async fn expired_sessions_are_reclaimed_in_one_batch_op() {
+        let auth_manager = Arc::new(crate::auth::manager::AuthManager::new());
+        // TTL = 0 → 签发的会话立即过期
+        let token_manager = Arc::new(TokenManager::new(0, 0));
+        let proposer = Arc::new(RecordingProposer {
+            ops: std::sync::Mutex::new(Vec::new()),
+            fail_with: None,
+        });
+        let svc = AuthService::new(auth_manager, Arc::clone(&token_manager))
+            .with_proposer(Arc::clone(&proposer) as Arc<dyn AuthOpProposer>);
+
+        for _ in 0..250 {
+            token_manager.issue_token("alice");
+        }
+        assert_eq!(token_manager.active_count(), 250);
+
+        let removed = svc.cleanup_expired_sessions().await.expect("propose ok");
+        assert_eq!(removed, 250, "全部已过期会话都应在本次清理中被回收");
+
+        let ops = proposer.ops.lock().unwrap();
+        assert_eq!(ops.len(), 1, "必须是**批量**变体：一次扫描一条 raft 条目");
+        match &ops[0] {
+            AuthOp::ConsumeSessions { hash_hexes } => {
+                assert_eq!(hash_hexes.len(), 250, "批次必须携带全部过期 hash");
+            }
+            other => panic!("expected ConsumeSessions, got {other:?}"),
+        }
+    }
+
+    /// §3.6 b 的失败方向：提案失败时**不得**删本地表（否则本节点已删、别的节点还留着）。
+    #[tokio::test]
+    async fn expired_session_cleanup_is_fail_closed_on_propose_error() {
+        let auth_manager = Arc::new(crate::auth::manager::AuthManager::new());
+        let token_manager = Arc::new(TokenManager::new(0, 0));
+        let proposer = Arc::new(RecordingProposer {
+            ops: std::sync::Mutex::new(Vec::new()),
+            fail_with: Some(tonic::Code::Unavailable),
+        });
+        let svc = AuthService::new(auth_manager, Arc::clone(&token_manager))
+            .with_proposer(Arc::clone(&proposer) as Arc<dyn AuthOpProposer>);
+
+        for _ in 0..10 {
+            token_manager.issue_token("bob");
+        }
+
+        let err = svc
+            .cleanup_expired_sessions()
+            .await
+            .expect_err("follower 上的提案必须报错");
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert_eq!(
+            token_manager.active_count(),
+            10,
+            "提案失败时本地表不得被删（下一次 tick 重试）"
+        );
+    }
+
+    /// 无 proposer（未接 raft 的部署）时退化为本地删除，且计数正确。
+    #[tokio::test]
+    async fn expired_session_cleanup_without_proposer_removes_locally() {
+        let auth_manager = Arc::new(crate::auth::manager::AuthManager::new());
+        let token_manager = Arc::new(TokenManager::new(0, 0));
+        let svc = AuthService::new(auth_manager, Arc::clone(&token_manager));
+
+        for _ in 0..7 {
+            token_manager.issue_token("carol");
+        }
+        assert_eq!(svc.cleanup_expired_sessions().await.expect("ok"), 7);
+        assert_eq!(token_manager.active_count(), 0);
+        // 空表时不得重复计数
+        assert_eq!(svc.cleanup_expired_sessions().await.expect("ok"), 0);
+    }
+
+    /// 未过期会话不得被清理（否则正常用户会被登出）。
+    #[tokio::test]
+    async fn unexpired_sessions_are_not_reclaimed() {
+        let auth_manager = Arc::new(crate::auth::manager::AuthManager::new());
+        let token_manager = Arc::new(TokenManager::with_defaults());
+        let svc = AuthService::new(auth_manager, Arc::clone(&token_manager));
+
+        for _ in 0..5 {
+            token_manager.issue_token("dave");
+        }
+        assert_eq!(svc.cleanup_expired_sessions().await.expect("ok"), 0);
+        assert_eq!(token_manager.active_count(), 5);
+    }
+
+    /// 单批上限：过期条目多于 `MAX_SESSION_CLEANUP_BATCH` 时不得一次全塞进一条提案
+    /// （避免超大的 raft 条目），且 `expired_hashes` 的 limit 生效。
+    #[test]
+    fn expired_hashes_respects_batch_limit() {
+        let token_manager = TokenManager::new(0, 0);
+        for _ in 0..10 {
+            token_manager.issue_token("eve");
+        }
+        assert_eq!(token_manager.expired_hashes(3).len(), 3);
+        assert_eq!(token_manager.expired_hashes(0).len(), 0);
+        assert_eq!(token_manager.expired_hashes(1000).len(), 10);
+        assert!(
+            MAX_SESSION_CLEANUP_BATCH >= 1024,
+            "批上限过小会让积压永远追不平（正常流量 ≈ 11 条/s）"
+        );
     }
 
     // ──── 管理操作二次校验 ────

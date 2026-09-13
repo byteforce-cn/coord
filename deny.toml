@@ -26,10 +26,19 @@ allow = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "MPL-2.0",
+    # 第四轮 §3.9⑤：以下两个此前未列入白名单，导致 `cargo deny` 的 licenses
+    # 检查在**任何**提交上都失败（`borrow-or-share` 为 MIT-0、`webpki-roots`
+    # 为 CDLA-Permissive-2.0）。两者都是宽松许可，与 MIT/Apache-2.0 兼容。
+    "MIT-0",
+    "CDLA-Permissive-2.0",
 ]
 exceptions = []
 
 [bans]
+# 第四轮 §3.9⑤：内部依赖此前只写 `path`、不写 `version`，而这里设的是
+# `wildcards = "deny"` → 27 条 `error[wildcard]`。已给全部内部依赖补上
+# `version`（见根 `Cargo.toml` 的 `[workspace.dependencies]`），因此这里保持
+# `deny`：新增无版本内部依赖应当被拦截，而不是降级为警告。
 multiple-versions = "warn"
 wildcards = "deny"
 deny = []

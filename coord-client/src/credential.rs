@@ -10,13 +10,28 @@
 // 凭据缺失（`current_token() == None`）时拦截器为 no-op，保持明文开发模式零破坏。
 
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use tokio::task::futures::TaskLocalFuture;
 use tonic::metadata::MetadataValue;
 use tonic::service::interceptor::InterceptedService;
 use tonic::service::Interceptor;
 use tonic::transport::Channel;
+
+tokio::task_local! {
+    /// 当前**请求作用域**内要附加的凭据（"按请求凭据"）。
+    ///
+    /// 由 [`scoped_request_token`] 建立作用域；未建立作用域时读取返回 `None`
+    /// （等价于 [`NoopTokenProvider`]，即不附加 `authorization` 头）。
+    ///
+    /// 动机（第四轮 §3.2）：agent 作为代理必须把**调用方自己的凭据**转发给服务端，
+    /// 而此前 `coord-client` 只支持构造期 `with_token_provider`，结构上做不到
+    /// "按请求补票"，导致生产默认配置（`auth_enabled = true`）下经 agent 的调用
+    /// 一律被服务端以 `missing CCT token` 拒绝。
+    static REQUEST_TOKEN: Option<String>;
+}
 
 /// 出站凭据提供者。
 ///
@@ -71,6 +86,45 @@ impl TokenProvider for CachedTokenProvider {
     fn current_token(&self) -> Option<String> {
         self.token.read().clone()
     }
+}
+
+/// **按请求**凭据提供者：凭据来自任务局部量（见 [`scoped_request_token`]）。
+///
+/// 用途：作为"代理转发调用方凭据"的机制。agent 在放行一个入站请求后，把该请求的
+/// CCT 放进任务作用域，于是**该请求触发的全部出站调用**都会带上调用方凭据。
+///
+/// 反过来说：不在作用域内发起的调用（agent 自身的后台任务）不会带任何凭据，
+/// 与传入 `None` 的 [`NoopTokenProvider`] 行为一致。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RequestScopedTokenProvider;
+
+impl TokenProvider for RequestScopedTokenProvider {
+    fn current_token(&self) -> Option<String> {
+        current_request_token()
+    }
+}
+
+/// 当前请求作用域内的凭据（未建立作用域时为 `None`）。
+pub fn current_request_token() -> Option<String> {
+    REQUEST_TOKEN.try_with(|t| t.clone()).ok().flatten()
+}
+
+/// 在 `fut` 执行期间，为**所有**出站请求附加 `token`（按请求凭据）。
+///
+/// 典型用法（agent 代理层）：
+///
+/// ```ignore
+/// let token = inbound_authorization_header();
+/// scoped_request_token(token, inner_service.call(req)).await
+/// ```
+///
+/// 作用域是**任务局部**的：`fut` 内部 `await` 的任意深度都会观察到它，
+/// 不受 future 在线程间迁移的影响。
+pub fn scoped_request_token<F>(token: Option<String>, fut: F) -> TaskLocalFuture<Option<String>, F>
+where
+    F: Future,
+{
+    REQUEST_TOKEN.scope(token, fut)
 }
 
 /// tonic 出站拦截器：为每个请求盖上 `authorization: Bearer <token>`。

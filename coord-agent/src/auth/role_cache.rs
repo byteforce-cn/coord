@@ -101,6 +101,30 @@ impl RoleCache {
             .unwrap_or_default()
     }
 
+    /// 指定能力的**授权 scope 列表**（去重前的原始字符串）。
+    ///
+    /// 第四轮 §3.3：scope 判定需要区分「无约束授权（空 scope）」与「有约束授权」，
+    /// 而 [`Self::check_capability`] 把两者合并成一个 trie 后就无法区分了。
+    /// 返回列表的语义：
+    /// - 空列表 → **未授予**该能力；
+    /// - 含空字符串 → 存在**无约束**授权（放行一切）；
+    /// - 其它 → 仅这些 scope 被授权（逐条判定，见 `interceptor::scope_allows`）。
+    pub fn scopes_for_capability(&self, roles: &[String], capability_id: &str) -> Vec<String> {
+        let map = self.map.read();
+        let mut scopes: Vec<String> = Vec::new();
+        for role_name in roles {
+            let Some(entry) = map.get(role_name) else {
+                continue;
+            };
+            for grant in &entry.grants {
+                if grant.capability_id == capability_id && !scopes.contains(&grant.scope) {
+                    scopes.push(grant.scope.clone());
+                }
+            }
+        }
+        scopes
+    }
+
     /// Check if any of the given roles grant a specific capability, returning
     /// the union of ScopeTries for that capability.
     pub fn check_capability(

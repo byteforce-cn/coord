@@ -34,6 +34,6 @@
 |:---|:---|:---:|:---|:---|
 | 缓存 | coord.experimental.cache.v1 | EXPERIMENTAL | 2026-12-31 | ISR 原子提交 + 分区 Leader 故障转移 |
 | 消息队列 | coord.experimental.mq.v1 | EXPERIMENTAL | 2026-12-31 | 背压不丢消息 + 单 Agent at-least-once（poll+ack）文档化 |
-| 对象存储（Server） | coord.storage | EXPERIMENTAL | 2026-12-31 | 数据面闭环 v1（docs/volume-object-storage.md）：manifest raft 强一致 + chunk 文件旁路 MVCC/快照 + 流式 Put/Get 绕 4MiB + 配额/磁盘水位/GC；2026-09-06 批次收口：chunk 加密 DEK 化（HKDF KEK 包裹随机 DEK + key_id 版本 + encryption_rotation_days 轮换，v1 兼容读）+ PD Region 心跳「存储字节」维度/split 阈值纳入/存储重 Region 均衡门控 + Rust/Java SDK 对象方法 + Agent 存储代理 + 进程级 e2e 与 kill/pause/partition 混沌矩阵；2026-09-12 增量：流式上传支持**未知长度**（`PutMeta.total_size = -1`，以 max_object_size 封顶、Commit 时定长；`>0` 声明长度语义不变）；已知边界：快照恢复落后节点本地 chunk 清空 rebuild（Get UNAVAILABLE）、全集群配置须一致、创建对象在保留前缀 /obj/ |
+| 对象存储（Server） | coord.storage | EXPERIMENTAL | 2026-12-31 | 数据面闭环 v1（docs/production/volume-object-storage.md）：manifest raft 强一致 + chunk 文件旁路 MVCC/快照 + 流式 Put/Get 绕 4MiB + 配额/磁盘水位/GC；2026-09-06 批次收口：chunk 加密 DEK 化（HKDF KEK 包裹随机 DEK + key_id 版本 + encryption_rotation_days 轮换，v1 兼容读）+ PD Region 心跳「存储字节」维度/split 阈值纳入/存储重 Region 均衡门控 + Rust/Java SDK 对象方法 + Agent 存储代理 + 进程级 e2e 与 kill/pause/partition 混沌矩阵；2026-09-12 增量：流式上传支持**未知长度**（`PutMeta.total_size = -1`，以 max_object_size 封顶、Commit 时定长；`>0` 声明长度语义不变）；已知边界：快照恢复落后节点本地 chunk 清空 rebuild（Get UNAVAILABLE）、全集群配置须一致、创建对象在保留前缀 /obj/ |
 | 工作流（Saga） | coord.experimental.workflow.v1 | EXPERIMENTAL | 2027-03-31 | 持久化 + 补偿语义落地后方可对外 |
 | 调度 | coord.experimental.scheduler.v1 | EXPERIMENTAL | 2027-03-31 | KV 真实现（替代内存 HashMap） |

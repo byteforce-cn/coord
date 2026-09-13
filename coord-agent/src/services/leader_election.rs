@@ -45,7 +45,19 @@ pub struct ElectionGroup {
     /// 选举组名称（如 "scheduler", "job-runner"）
     pub name: String,
     /// 当前 Leader 的候选人 ID
+    ///
+    /// **这是调用方提供的字符串，不构成身份**：两个进程完全可以配置同一个
+    /// `candidate_id`（同机多实例、容器同镜像、配置模板复制…）。任何以它作为
+    /// "是否是我自己"判据的逻辑都不成立，见 `election_key_is_mine`。
     pub leader_id: String,
+    /// 本实例的身份（`LeaderElectionService` 构造时生成的随机 UUID）。
+    ///
+    /// 与 `leader_id` 的区别：`leader_id` 是**业务名**（可重复），`instance_id` 是
+    /// **进程实例身份**（本进程内存中生成、不落配置、不可猜测复用）。
+    /// `#[serde(default)]` 兼容旧版本写入的选举 key：旧 key 反序列化后为空串，
+    /// 而空串**不匹配任何实例**（fail-closed），只会被当成"别人的 key"。
+    #[serde(default)]
+    pub instance_id: String,
     /// 绑定的 Lease ID
     pub lease_id: i64,
     /// 选举时间（Unix 时间戳，秒）
@@ -58,12 +70,14 @@ impl ElectionGroup {
     pub fn new(
         name: impl Into<String>,
         leader_id: impl Into<String>,
+        instance_id: impl Into<String>,
         lease_id: i64,
         ttl_secs: u64,
     ) -> Self {
         Self {
             name: name.into(),
             leader_id: leader_id.into(),
+            instance_id: instance_id.into(),
             lease_id,
             elected_at: unix_ts(),
             ttl_secs,
@@ -81,6 +95,39 @@ fn unix_ts() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// 生成本实例身份：16 字节 CSPRNG 随机数的十六进制串。
+///
+/// 用 `rand`（已是本 crate 直接依赖）而不是 `uuid`（仅在 dev-dependencies），
+/// 避免为生产二进制引入一条新依赖边。要求只有两条：**每进程唯一**且**不可猜测**。
+fn new_instance_id() -> String {
+    use rand::RngCore;
+    let mut raw = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut raw);
+    hex::encode(raw)
+}
+
+/// 第四轮 P0（§3.1）：CAS 失败时，服务端选举 key 是否**可证明属于本实例**。
+///
+/// 这是「重复 campaign 保持 Leader」例外分支的**唯一**判据。第三轮的实现以调用方
+/// 传入的 `candidate_id` 为判据（`existing.leader_id == candidate_id`），而该字符串
+/// **调用方可以自证为自己**——两个进程写成同一个 `candidate_id` 即可同时通过此判据：
+/// 前者 CAS 成功持有 lease，后者 CAS 失败却读到"leader_id 就是我"，于是双方同时自认
+/// Leader，且后者在服务端**连租约都没有**（它把自己刚申请的 lease 撤销了）——
+/// 这正是"修了但没修对"的那一条。
+///
+/// 判据换成 `instance_id`（本进程生成的随机 UUID，只存在于本进程内存与本进程写下的
+/// 选举 key 中）：另一个进程即使 `candidate_id` 完全相同，也无法持有**不同的**随机
+/// UUID，故一律判为 Follower。
+///
+/// fail-closed：`instance_id` 为空（旧版本写入的 key，或伪造值）时不匹配任何实例，
+/// 一律视为"别人的 key"。此时本节点按 Follower 处理；服务端 key 仍由旧 lease 持有并
+/// 按 TTL 过期，不存在"永久无主"（见 `new_leader_elected_after_leader_lease_revoked`）。
+fn election_key_is_mine(existing: &ElectionGroup, candidate_id: &str, instance_id: &str) -> bool {
+    !instance_id.is_empty()
+        && existing.instance_id == instance_id
+        && existing.leader_id == candidate_id
 }
 
 // ──── ElectionCache ────
@@ -161,6 +208,8 @@ impl Default for ElectionCache {
 pub struct LeaderElectionService {
     /// 到 Server 集群的内部客户端（共享）
     inner: Arc<AgentInner>,
+    /// 本实例身份（随机 UUID，仅存于内存与选举 key）。见 `election_key_is_mine`。
+    instance_id: Arc<str>,
     /// 本地选举状态缓存
     cache: Arc<ParkingRwLock<ElectionCache>>,
     /// 角色变更广播
@@ -228,10 +277,14 @@ async fn perform_step_down(
 ///
 /// 修复照抄同仓 `lock.rs` 的锁获取模式（Txn `Compare(Version == 0)`）——
 /// 正确写法一直就在隔壁。
+///
+/// 第四轮 P0（§3.1）：CAS 失败分支的判据由调用方提供的 `candidate_id` 改为
+/// **本实例自证**的 `instance_id`，见 `election_key_is_mine`。
 async fn campaign_shared(
     inner: &Arc<AgentInner>,
     cache: &Arc<ParkingRwLock<ElectionCache>>,
     role_change_tx: &RoleChangeTx,
+    instance_id: &str,
     group: &str,
     candidate_id: &str,
     ttl_secs: u64,
@@ -250,7 +303,7 @@ async fn campaign_shared(
         .await
         .map_err(|e| format!("failed to grant election lease: {e}"))?;
 
-    let group_info = ElectionGroup::new(group, candidate_id, lease_id, ttl_secs);
+    let group_info = ElectionGroup::new(group, candidate_id, instance_id, lease_id, ttl_secs);
     let value =
         serde_json::to_vec(&group_info).map_err(|e| format!("serialize election group: {e}"))?;
 
@@ -290,11 +343,14 @@ async fn campaign_shared(
         Ok(_) => {
             // CAS 失败：选举键已被占用 ⇒ 已有在任 Leader。
             //
-            // 例外：键上记录的**就是本候选人**（重复 campaign，或退位后重选但键尚未
+            // 例外：键上记录的**确实就是本实例**（重复 campaign，或退位后重选但键尚未
             // 随租约撤销而删除）。此时本节点在服务端仍是在任 Leader，若本地改判
             // Follower，就会出现「本地自认非 Leader、服务端 key 仍指向自己」的分裂
             // 状态——它阻塞其它节点当选（键存在）却不提供服务（本地不认），即无 Leader。
             // 故保持 Leader 身份，只归还这次多申请的租约。
+            //
+            // 判据必须是**本实例可自证**的（`instance_id`），不得使用调用方提供的
+            // `candidate_id`——详见 `election_key_is_mine`。
             let mine = inner
                 .client
                 .kv()
@@ -303,7 +359,7 @@ async fn campaign_shared(
                 .ok()
                 .and_then(|kvs| kvs.into_iter().next())
                 .and_then(|(_, v)| serde_json::from_slice::<ElectionGroup>(&v).ok())
-                .filter(|existing| existing.leader_id == candidate_id);
+                .filter(|existing| election_key_is_mine(existing, candidate_id, instance_id));
 
             let _ = inner.client.lease().revoke(lease_id).await;
 
@@ -315,7 +371,7 @@ async fn campaign_shared(
                     role_change_tx.send((group.to_string(), LeaderRole::Leader, Some(existing)));
                 tracing::info!(
                     "LeaderElection: '{candidate_id}' re-confirmed as leader for group '{group}' \
-                     (election key already records this candidate)"
+                     (election key records this instance)"
                 );
                 return Ok(LeaderRole::Leader);
             }
@@ -339,11 +395,17 @@ impl LeaderElectionService {
         let (tx, _) = broadcast::channel(broadcast_capacity);
         Self {
             inner,
+            instance_id: Arc::from(new_instance_id().as_str()),
             cache: Arc::new(ParkingRwLock::new(ElectionCache::new())),
             role_change_tx: tx,
             healthy: ParkingRwLock::new(false),
             shutdown_tx: ParkingRwLock::new(None),
         }
+    }
+
+    /// 本实例身份（仅用于可观测与测试，不对外提供任何信任语义）。
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     /// 参与选举（竞选 Leader）
@@ -360,6 +422,7 @@ impl LeaderElectionService {
             &self.inner,
             &self.cache,
             &self.role_change_tx,
+            &self.instance_id,
             group,
             candidate_id,
             ttl_secs,
@@ -468,6 +531,7 @@ impl BaseService for LeaderElectionService {
 
         let cache = self.cache.clone();
         let inner = self.inner.clone();
+        let instance_id = self.instance_id.clone();
         let role_change_tx = self.role_change_tx.clone();
         tokio::spawn(async move {
             // C3：每个选举组的连续续期失败计数（成功即清零）。
@@ -598,6 +662,7 @@ impl BaseService for LeaderElectionService {
                                 &inner,
                                 &cache,
                                 &role_change_tx,
+                                &instance_id,
                                 &group,
                                 &candidate_id,
                                 ttl_secs,
@@ -708,9 +773,10 @@ mod tests {
 
     #[test]
     fn test_election_group_creation() {
-        let group = ElectionGroup::new("scheduler", "node1", 5001, 30);
+        let group = ElectionGroup::new("scheduler", "node1", "inst-a", 5001, 30);
         assert_eq!(group.name, "scheduler");
         assert_eq!(group.leader_id, "node1");
+        assert_eq!(group.instance_id, "inst-a");
         assert_eq!(group.lease_id, 5001);
         assert_eq!(group.ttl_secs, 30);
         assert!(group.elected_at > 0);
@@ -727,6 +793,7 @@ mod tests {
         let group = ElectionGroup {
             name: "test".into(),
             leader_id: "n1".into(),
+            instance_id: "inst-a".into(),
             lease_id: 42,
             elected_at: 1700000000,
             ttl_secs: 30,
@@ -734,6 +801,48 @@ mod tests {
         let json = serde_json::to_vec(&group).unwrap();
         let restored: ElectionGroup = serde_json::from_slice(&json).unwrap();
         assert_eq!(restored, group);
+    }
+
+    // ──── 第四轮 P0：选举 key 归属判据 ────
+
+    /// **同名 `candidate_id` 的两个实例不得互相认成自己**。
+    ///
+    /// 这是第四轮 §3.1 的直接回归卡口：修复前判据是
+    /// `existing.leader_id == candidate_id`，两个进程配成同一个 `candidate_id`
+    /// 即可同时通过判据、同时自认 Leader（其中一方在服务端连租约都没有）。
+    #[test]
+    fn election_key_is_mine_requires_instance_identity() {
+        let mine = ElectionGroup::new("g", "same-id", "inst-a", 1, 30);
+
+        assert!(election_key_is_mine(&mine, "same-id", "inst-a"));
+
+        // 同一 candidate_id、不同实例 → 不是我的（修复前此处为 true）
+        assert!(!election_key_is_mine(&mine, "same-id", "inst-b"));
+
+        // 同一实例、不同 candidate_id → 也不是我的
+        assert!(!election_key_is_mine(&mine, "other-id", "inst-a"));
+
+        // fail-closed：本实例身份为空时不得匹配任何 key
+        assert!(!election_key_is_mine(&mine, "same-id", ""));
+
+        // fail-closed：旧版本写入的 key（instance_id 为空）不得被认领
+        let legacy = ElectionGroup {
+            instance_id: String::new(),
+            ..mine.clone()
+        };
+        assert!(!election_key_is_mine(&legacy, "same-id", "inst-a"));
+    }
+
+    /// 旧版本（无 `instance_id` 字段）写入的选举 key 必须仍能反序列化，
+    /// 且 `instance_id` 落为空串（即 fail-closed）。
+    #[test]
+    fn legacy_election_key_deserializes_with_empty_instance_id() {
+        let legacy_json = br#"{"name":"g","leader_id":"n1","lease_id":7,
+            "elected_at":1700000000,"ttl_secs":30}"#;
+        let parsed: ElectionGroup = serde_json::from_slice(legacy_json).unwrap();
+        assert_eq!(parsed.leader_id, "n1");
+        assert_eq!(parsed.instance_id, "");
+        assert!(!election_key_is_mine(&parsed, "n1", "inst-a"));
     }
 
     // ──── ElectionCache 测试 ────

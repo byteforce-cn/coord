@@ -205,6 +205,78 @@ async fn new_leader_elected_after_leader_lease_revoked() {
     );
 }
 
+/// 第四轮 P0（§3.1）：**两个实例配成同一个 `candidate_id`** 时，必须有且仅有一个
+/// 自认 Leader。
+///
+/// 修复前判据是调用方提供的 `candidate_id`（`existing.leader_id == candidate_id`）：
+/// 第二个实例 CAS 失败后读到"leader_id 就是我"，于是把**自己刚申请的**租约撤销、
+/// 保留 Leader 身份 —— 它在服务端连租约都没有，却与第一个实例同时自认 Leader。
+/// 这是"修了但没修对"的那一条：CAS 是真的，例外分支的判据是假的。
+///
+/// 判据换成实例自证的随机 `instance_id` 后，第二个实例必须落到 Follower。
+#[tokio::test(flavor = "multi_thread")]
+async fn two_instances_with_same_candidate_id_cannot_both_be_leader() {
+    let (addr, _sd, _g, _r, _tmp) = common::start_test_server().await;
+
+    let first = LeaderElectionService::new(inner_for(&addr).await, 16);
+    let second = LeaderElectionService::new(inner_for(&addr).await, 16);
+    assert_ne!(
+        first.instance_id(),
+        second.instance_id(),
+        "两个实例身份必须互不相同（这是判据可自证的前提）"
+    );
+
+    // 同名候选者，避免泄露的实例身份被意外复用。
+    const SAME_ID: &str = "shared-candidate-id";
+
+    assert_eq!(
+        first.campaign(GROUP, SAME_ID, 60).await.unwrap(),
+        LeaderRole::Leader
+    );
+
+    assert_eq!(
+        second.campaign(GROUP, SAME_ID, 60).await.unwrap(),
+        LeaderRole::Follower,
+        "同名候选者的第二个实例必须判为 Follower（否则双主）"
+    );
+    assert!(!second.is_leader(GROUP));
+    assert_eq!(second.get_role(GROUP), Some(LeaderRole::Follower));
+    assert!(
+        second.get_group_info(GROUP).is_none(),
+        "Follower 不得持有组信息（否则业务可按 leader 自居）"
+    );
+
+    // 在位者不得被误降级，且服务端 key 仍指向它。
+    assert!(first.is_leader(GROUP));
+    assert_eq!(
+        read_election_key(&addr, GROUP).await.as_deref(),
+        Some(SAME_ID)
+    );
+
+    // 服务端 key 必须绑定**第一实例的租约**：证据是撤销该租约后 key 立即消失，
+    // 而第二实例的租约（已在 CAS 失败时归还）与 key 无关。
+    //
+    // 诚实边界：这是故障注入（外部撤销在位者租约）。`first` 的本地缓存此时期望仍是
+    // Leader —— 本套件不起 `start()`（无续期循环），所以它不会自动退位；
+    // 续期失败→退位→自动重选这条路径由 C3 后台任务覆盖，不在本断言范围。
+    let lease_id = first.get_group_info(GROUP).unwrap().lease_id;
+    let raw = inner_for(&addr).await;
+    raw.client.lease().revoke(lease_id).await.expect("revoke");
+    common::wait_until(
+        || async { read_election_key(&addr, GROUP).await.is_none() },
+        Duration::from_secs(10),
+        "election key must be bound to the winner's lease",
+    )
+    .await;
+
+    // key 消失 ⇒ 同名第二实例必须能当选，不得退化为"永久无主"。
+    assert_eq!(
+        second.campaign(GROUP, SAME_ID, 60).await.unwrap(),
+        LeaderRole::Leader,
+        "在位者租约消失后，同名第二实例必须能当选（不得永久无主）"
+    );
+}
+
 /// 读取选举 key 上记录的 leader_id（原始 KV 读，绕过本地缓存）。
 async fn read_election_key(addr: &str, group: &str) -> Option<String> {
     let inner = inner_for(addr).await;

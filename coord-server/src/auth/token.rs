@@ -168,6 +168,24 @@ impl TokenManager {
         before - tokens.len()
     }
 
+    /// 列出已过期会话的 hash_hex（**不修改**表）。
+    ///
+    /// 供定期清理任务使用：先枚举，再经 raft 批量删除（`AuthOp::ConsumeSessions`），
+    /// 使内存视图与磁盘 KV 行**同一条路径**回收（第四轮 §3.6 b）。
+    ///
+    /// 与 `cleanup_expired()` 的区别：后者只改本节点内存表，磁盘行仍在，且不经 raft
+    /// ——因此**不应**用于生产路径；由 `cleanup_expired_sessions` 统一入口取代。
+    pub fn expired_hashes(&self, limit: usize) -> Vec<String> {
+        let now = now_unix();
+        self.tokens
+            .read()
+            .iter()
+            .filter(|(_, entry)| now >= entry.expires_at_unix)
+            .map(|(hash_hex, _)| hash_hex.clone())
+            .take(limit)
+            .collect()
+    }
+
     /// Get the number of active tokens
     pub fn active_count(&self) -> usize {
         self.tokens.read().len()

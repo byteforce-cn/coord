@@ -20,6 +20,10 @@ use tonic::Status;
 use tower::{Layer, Service};
 
 use coord_core::auth::cct::{decode_cct_any, is_expired, CctHeader, CctPayload, CctToken};
+use coord_core::auth::trie::ScopeTrie;
+use coord_core::grpc_auth::{ScopeAccess, MAX_SCOPE_BODY_BYTES};
+use http_body_util::BodyExt;
+use tower::ServiceExt;
 
 use super::role_cache::RoleCache;
 
@@ -78,10 +82,37 @@ impl SignatureCache {
 
 // ──── Capability Registry（动态能力表）────
 
-/// scope key 提取器：从入站请求 header 派生用于 scope 校验的资源键。
+/// scope 提取器：从入站请求（方法 + header + **body**）派生本次请求触碰的资源键/区间。
 ///
-/// 缺省（`None`）表示该 RPC 不做 scope 校验（与历史行为一致）。
-pub type ScopeExtractor = Arc<dyn Fn(&http::HeaderMap) -> Option<String> + Send + Sync>;
+/// 第四轮 §3.3：原签名只接收 `&http::HeaderMap`，而 KV/Txn/Watch 的资源键在
+/// **protobuf body** 里——所以它结构上无法产出真实资源键，生产路径于是从不注册它，
+/// scope 检查从不执行（fail-open）。现改为可读 body，生产路径注册真实提取器。
+///
+/// 返回 `Err` 表示 body 畸形/超限（调用方按失败关闭拒绝）。
+/// 缺省（`None`）表示该 RPC 不做 scope 校验。
+pub type ScopeExtractor =
+    Arc<dyn Fn(&str, &http::HeaderMap, &[u8]) -> Result<Vec<ScopeAccess>, String> + Send + Sync>;
+
+/// 需要从 body 提取 scope 的 RPC（与 `coord_core::grpc_auth` 的定义一致）。
+///
+/// 该列表**不是**第二份能力表：能力 ID 仍从
+/// [`coord_core::grpc_auth::rpc_capability`] 取，这里只声明「哪些方法要读 body」。
+const SCOPE_BEARING_RPCS: &[&str] = &[
+    "/coord.kv.KV/Put",
+    "/coord.kv.KV/Range",
+    "/coord.kv.KV/Delete",
+    "/coord.txn.Txn/Txn",
+    "/coord.watch.Watch/Watch",
+];
+
+/// 生产用 scope 提取器：委托给两侧共用的 [`coord_core::grpc_auth`]。
+fn body_scope_extractor(
+    rpc_method: &str,
+    _headers: &http::HeaderMap,
+    body: &[u8],
+) -> Result<Vec<ScopeAccess>, String> {
+    coord_core::grpc_auth::extract_scope_access(rpc_method, body)
+}
 
 /// 能力表条目：RPC → capability_id + 可选 scope 提取器。
 #[derive(Clone)]
@@ -119,10 +150,28 @@ impl CapabilityTable {
         Self::default()
     }
 
-    /// 内置 agent 能力表：历史静态映射 + `Authenticate` 白名单。
+    /// 内置 agent 能力表：**与 server 共用**的静态映射（`coord_core::grpc_auth`）
+    /// + `Authenticate` 白名单 + **生产路径注册的 scope 提取器**。
+    ///
+    /// 第四轮 §3.3：此前 `register_with_scope` 全仓只有一个调用点、且在一个
+    /// 测试里，生产装配下 `resource_key` 恒为 `None` → scope 检查从不执行。
+    /// 现在默认表自身携带提取器（能力 ID 仍取自共享表，不会漂移）。
     pub fn default_agent() -> Self {
         let table = Self::new();
         table.allowlist("/coord.auth.Auth/Authenticate");
+        for rpc in SCOPE_BEARING_RPCS {
+            match coord_core::grpc_auth::rpc_capability(rpc) {
+                Some(capability_id) => table.register_with_scope(
+                    *rpc,
+                    capability_id,
+                    Some(Arc::new(body_scope_extractor)),
+                ),
+                None => tracing::error!(
+                    rpc,
+                    "scope-bearing RPC is missing from the shared capability table"
+                ),
+            }
+        }
         table
     }
 
@@ -193,82 +242,16 @@ pub fn infer_capability(rpc_method: &str) -> Option<String> {
     }
 }
 
-/// 内置 RPC → capability 静态映射（历史行为基线）。
+/// 内置 RPC → capability 静态映射。
+///
+/// 第四轮 §3.4：本表**不再在 crate 内维护**——它此前写的是 `/coord.kv.Kv/*`
+/// （proto 的真实路径是 `/coord.kv.KV/*`，服务名全大写），且只登记了 9 个服务，
+/// `Registry`/`Config`/`Lock`/`LeaderElection`/`IdGen`/`Event` 等**全部缺失**
+/// → 开启 agent 鉴权时目标场景 ①②③ 的服务调用全部被 `_ => None` 拒绝。
+///
+/// 现在收敛到 [`coord_core::grpc_auth::rpc_capability`]，与 server **共用同一份表**。
 fn default_rpc_capability(rpc_method: &str) -> Option<String> {
-    match rpc_method {
-        // KV
-        "/coord.kv.Kv/Range" => Some("data:kv:read".into()),
-        "/coord.kv.Kv/Put" => Some("data:kv:write".into()),
-        "/coord.kv.Kv/Delete" => Some("data:kv:delete".into()),
-
-        // Txn
-        "/coord.txn.Txn/Txn" => Some("data:txn:execute".into()),
-
-        // Lease
-        "/coord.lease.Lease/LeaseGrant" => Some("data:lease:grant".into()),
-        "/coord.lease.Lease/LeaseRevoke" => Some("data:lease:revoke".into()),
-        "/coord.lease.Lease/LeaseKeepAlive" => Some("data:lease:keepalive".into()),
-
-        // Watch
-        "/coord.watch.Watch/Watch" => Some("data:watch:subscribe".into()),
-
-        // 对象存储（coord.storage，EXPERIMENTAL；agent 侧代理预留）
-        "/coord.storage.Storage/Get" => Some("data:storage:read".into()),
-        "/coord.storage.Storage/Stat" => Some("data:storage:read".into()),
-        "/coord.storage.Storage/Put" => Some("data:storage:write".into()),
-        "/coord.storage.Storage/Delete" => Some("data:storage:write".into()),
-
-        // Maintenance (admin)
-        "/coord.maintenance.Maintenance/Status" => Some("admin:maintenance:status".into()),
-        "/coord.maintenance.Maintenance/Seal" => Some("admin:maintenance:seal".into()),
-        "/coord.maintenance.Maintenance/Unseal" => Some("admin:maintenance:unseal".into()),
-        "/coord.maintenance.Maintenance/Snapshot" => Some("admin:maintenance:snapshot".into()),
-        "/coord.maintenance.Maintenance/MemberAdd" => Some("admin:maintenance:member_add".into()),
-        "/coord.maintenance.Maintenance/MemberRemove" => {
-            Some("admin:maintenance:member_remove".into())
-        }
-        "/coord.maintenance.Maintenance/MemberPromote" => {
-            Some("admin:maintenance:member_promote".into())
-        }
-        "/coord.maintenance.Maintenance/MemberList" => Some("admin:maintenance:member_list".into()),
-
-        // Auth
-        "/coord.auth.Auth/AuthEnable" => Some("admin:auth:enable".into()),
-        "/coord.auth.Auth/AuthDisable" => Some("admin:auth:disable".into()),
-        "/coord.auth.Auth/AuthStatus" => Some("admin:auth:status".into()),
-        "/coord.auth.Auth/UserAdd" => Some("admin:auth:user_add".into()),
-        "/coord.auth.Auth/UserDelete" => Some("admin:auth:user_delete".into()),
-        "/coord.auth.Auth/UserList" => Some("admin:auth:user_list".into()),
-        "/coord.auth.Auth/RoleAdd" => Some("admin:auth:role_add".into()),
-        "/coord.auth.Auth/RoleDelete" => Some("admin:auth:role_delete".into()),
-        "/coord.auth.Auth/RoleGrantPermission" => Some("admin:auth:role_grant".into()),
-        "/coord.auth.Auth/RoleRevokePermission" => Some("admin:auth:role_revoke".into()),
-        "/coord.auth.Auth/RoleGrantCapability" => Some("admin:auth:role_grant".into()),
-        "/coord.auth.Auth/RoleRevokeCapability" => Some("admin:auth:role_revoke".into()),
-        "/coord.auth.Auth/RoleList" => Some("admin:auth:role_list".into()),
-        "/coord.auth.Auth/UserGrantRole" => Some("admin:auth:user_grant_role".into()),
-        "/coord.auth.Auth/UserRevokeRole" => Some("admin:auth:user_revoke_role".into()),
-
-        // Authenticate is always allowed (login endpoint)
-        "/coord.auth.Auth/Authenticate" => None, // whitelisted — no capability check
-
-        // 通用插件调用面（coord.plugin.Plugin；agent 本地服务）
-        "/coord.plugin.Plugin/Invoke" => Some("coord:plugin:invoke".into()),
-        "/coord.plugin.Plugin/List" => Some("coord:plugin:list".into()),
-
-        // PKI：私钥集中存储前必须上鉴权
-        // 能力分级：签发（写）/ 轮换（写）/ 读取（读）/ CA 初始化（管理）
-        "/coord.agent.Pki/InitCa" => Some("pki:ca:init".into()),
-        "/coord.agent.Pki/IssueCert" => Some("pki:cert:issue".into()),
-        "/coord.agent.Pki/RenewCert" => Some("pki:cert:issue".into()),
-        "/coord.agent.Pki/RotateCert" => Some("pki:cert:rotate".into()),
-        "/coord.agent.Pki/ListCerts" => Some("pki:cert:read".into()),
-        "/coord.agent.Pki/GetCertByCN" => Some("pki:cert:read".into()),
-        "/coord.agent.Pki/GetCaCert" => Some("pki:cert:read".into()),
-        "/coord.agent.Pki/VerifyCert" => Some("pki:cert:read".into()),
-
-        _ => None, // Unknown RPC — deny by default
-    }
+    coord_core::grpc_auth::rpc_capability(rpc_method).map(str::to_string)
 }
 
 // ──── Auth Interceptor ────
@@ -316,14 +299,31 @@ impl AuthInterceptor {
         Arc::clone(&self.capability_table)
     }
 
-    /// 从请求 header 提取 scope 资源键（按能力表注册的提取器）。
-    pub fn scope_key(&self, rpc_method: &str, headers: &http::HeaderMap) -> Option<String> {
+    /// 从入站请求提取本次触碰的 scope 访问（按能力表注册的提取器）。
+    ///
+    /// 返回 `Ok(None)` = 该 RPC 未注册提取器（不做 scope 校验）；
+    /// 返回 `Ok(Some(accesses))` = 提取成功；`Err` = body 畸形/超限。
+    pub fn scope_accesses(
+        &self,
+        rpc_method: &str,
+        headers: &http::HeaderMap,
+        body: &[u8],
+    ) -> Result<Option<Vec<ScopeAccess>>, String> {
         match self.capability_table.lookup(rpc_method) {
-            CapabilityLookup::Required(entry) => {
-                entry.scope_extractor.as_ref().and_then(|f| f(headers))
-            }
-            _ => None,
+            CapabilityLookup::Required(entry) => match entry.scope_extractor.as_ref() {
+                Some(f) => f(rpc_method, headers, body).map(Some),
+                None => Ok(None),
+            },
+            _ => Ok(None),
         }
+    }
+
+    /// 该 RPC 是否需要读 body 才能做 scope 校验。
+    pub fn has_scope_extractor(&self, rpc_method: &str) -> bool {
+        matches!(
+            self.capability_table.lookup(rpc_method),
+            CapabilityLookup::Required(entry) if entry.scope_extractor.is_some()
+        )
     }
 
     /// 挂载 Ed25519 验证公钥（server 持私钥签发，agent 仅存公钥）。
@@ -337,7 +337,7 @@ impl AuthInterceptor {
         self.enabled = enabled;
     }
 
-    /// Validate an incoming request.
+    /// Validate an incoming request（点查兼容入口：单一资源键）。
     ///
     /// Returns `AuthResult::Allow(token)` if the request passes all checks,
     /// or `AuthResult::Deny(reason)` if any check fails.
@@ -346,6 +346,23 @@ impl AuthInterceptor {
         rpc_method: &str,
         auth_header: Option<&str>,
         resource_key: Option<&str>,
+    ) -> AuthResult {
+        let accesses: Vec<ScopeAccess> = resource_key
+            .map(|k| vec![ScopeAccess::point(k.as_bytes().to_vec())])
+            .unwrap_or_default();
+        self.validate_request_accesses(rpc_method, auth_header, &accesses)
+    }
+
+    /// Validate an incoming request（区间感知入口）。
+    ///
+    /// `accesses` 为本次请求触碰的全部 key/区间（由能力表注册的 scope 提取器从
+    /// body 解析）；为空表示**无法提取资源键**——此时带 scope 的授权一律拒绝
+    /// （fail-closed，与服务端 `authorize(.., None)` 同口径）。
+    pub fn validate_request_accesses(
+        &self,
+        rpc_method: &str,
+        auth_header: Option<&str>,
+        accesses: &[ScopeAccess],
     ) -> AuthResult {
         // If auth is disabled, allow everything
         if !self.enabled {
@@ -396,30 +413,67 @@ impl AuthInterceptor {
             }
         };
 
-        // 6. Check role→capability mapping
-        let (granted, scope_trie) = self
+        // 6. Check role→capability mapping（授权 scope 列表；空 = 未授予）
+        let grant_scopes = self
             .role_cache
-            .check_capability(&cct.payload.roles, &capability_id);
+            .scopes_for_capability(&cct.payload.roles, &capability_id);
 
-        if !granted {
+        if grant_scopes.is_empty() {
             return AuthResult::Deny(format!(
                 "role(s) {:?} do not have capability '{capability_id}'",
                 cct.payload.roles
             ));
         }
 
-        // 7. Check scope (if resource key is provided and scope trie exists)
-        if let (Some(key), Some(trie)) = (resource_key, scope_trie) {
-            if !trie.matches(key) {
-                return AuthResult::Deny(format!(
-                    "scope restriction: key '{}' not allowed by capability '{}'",
-                    key, capability_id
-                ));
-            }
+        // 7. Scope 判定 —— **fail-closed**。
+        //
+        // 第四轮 §3.3：此前是 `if let (Some(key), Some(trie)) = (resource_key, ...)`，
+        // 即两个 Option 任一为 `None` 就**直接放行**。而生产路径从不注册
+        // scope 提取器（唯一注册点在一个测试里）→ `resource_key` 恒为 None
+        // → scope 检查从不执行。现在改为：无法提取资源键 + 授权带非空 scope
+        // → 拒绝（与服务端 `authorize(.., None)` 完全同口径）。
+        if !scope_allows(&grant_scopes, accesses) {
+            return AuthResult::Deny(format!(
+                "scope restriction: capability '{capability_id}' not granted for the \
+                 requested resource(s); roles {:?}, accesses {:?} (fail-closed)",
+                cct.payload.roles, accesses
+            ));
         }
 
         AuthResult::Allow(cct)
     }
+}
+
+/// scope 判定（fail-closed）：本次请求触碰的**全部**访问都必须被授权覆盖。
+///
+/// - `accesses` 为空（未能提取资源键）→ 只有**无约束**授权（存在空 scope）放行；
+///   存在非空 scope 限制时拒绝。
+/// - 否则逐条判定：单键走 `ScopeTrie::matches`；区间走
+///   [`coord_core::auth::trie::scope_covers_interval`]（要求**整体包含**，
+///   与服务端 A1 的区间语义一致）。
+fn scope_allows(grant_scopes: &[String], accesses: &[ScopeAccess]) -> bool {
+    if accesses.is_empty() {
+        return grant_scopes.iter().any(|s| s.is_empty());
+    }
+    accesses.iter().all(|access| {
+        grant_scopes.iter().any(|scope| {
+            if scope.is_empty() {
+                return true; // 无约束授权覆盖一切
+            }
+            if access.range_end.is_empty() {
+                match std::str::from_utf8(&access.key) {
+                    Ok(key) => {
+                        let mut trie = ScopeTrie::new();
+                        trie.insert(scope).is_ok() && trie.matches(key)
+                    }
+                    // 非 UTF-8 key 无法与字符串 scope 比对 → 拒绝（fail-closed）
+                    Err(_) => false,
+                }
+            } else {
+                coord_core::auth::trie::scope_covers_interval(scope, &access.key, &access.range_end)
+            }
+        })
+    })
 }
 
 // ──── Tower Layer / Service（接入 agent gRPC 生产路由）────
@@ -460,11 +514,16 @@ pub struct AuthService<S> {
 
 impl<S> Service<http::Request<tonic::body::Body>> for AuthService<S>
 where
-    S: Service<http::Request<tonic::body::Body>, Response = http::Response<tonic::body::Body>>,
+    S: Service<http::Request<tonic::body::Body>, Response = http::Response<tonic::body::Body>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    S::Error: Send + 'static,
 {
     type Response = http::Response<tonic::body::Body>;
     type Error = S::Error;
-    type Future = AuthFuture<S::Future>;
+    type Future = AuthFuture<S::Error>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
@@ -477,14 +536,64 @@ where
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        // 能力表注册的 scope 提取器（缺省 None = 不做 scope 校验）
-        let resource_key = self.interceptor.scope_key(&rpc_method, req.headers());
+        // 第四轮 §3.2：把**调用方自己的凭据**转发给服务端。agent 是最后一跳代理，
+        // 服务端才是权威授权点；此前 agent 出站客户端 `token_provider = None`，
+        // 生产默认配置（auth_enabled=true）下经 agent 的调用一律 `missing CCT token`。
+        // 凭据放进任务局部量，由出站 `CredentialInterceptor` 在**每个**出站请求上读取。
+        let forward_token = extract_bearer_token(auth_header.as_deref()).map(str::to_string);
 
-        match self.interceptor.validate_request(
-            &rpc_method,
-            auth_header.as_deref(),
-            resource_key.as_deref(),
-        ) {
+        // 第四轮 §3.3：scope 提取器需要读 body（资源键在 protobuf 里）→ 异步路径。
+        if self.interceptor.has_scope_extractor(&rpc_method) {
+            let interceptor = Arc::clone(&self.interceptor);
+            let mut inner = self.inner.clone();
+            let fut: BoxedAuthFuture<S::Error> = Box::pin(async move {
+                let (req, body) = match buffer_request_body(req, MAX_SCOPE_BODY_BYTES).await {
+                    Ok(v) => v,
+                    Err(reason) => {
+                        return Ok(deny_response(Some(Status::resource_exhausted(reason))))
+                    }
+                };
+                let accesses = match interceptor.scope_accesses(&rpc_method, req.headers(), &body) {
+                    Ok(Some(accesses)) => accesses,
+                    Ok(None) => Vec::new(),
+                    Err(reason) => {
+                        return Ok(deny_response(Some(Status::invalid_argument(reason))))
+                    }
+                };
+                match interceptor.validate_request_accesses(
+                    &rpc_method,
+                    auth_header.as_deref(),
+                    &accesses,
+                ) {
+                    AuthResult::Allow(cct) => {
+                        let mut req = req;
+                        req.extensions_mut().insert(crate::plugin::GatewayIdentity {
+                            subject: cct.payload.sub.clone(),
+                            roles: cct.payload.roles.clone(),
+                        });
+                        match inner.ready().await {
+                            Ok(svc) => {
+                                coord_client::credential::scoped_request_token(
+                                    forward_token,
+                                    svc.call(req),
+                                )
+                                .await
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                    AuthResult::Deny(reason) => {
+                        Ok(deny_response(Some(Status::unauthenticated(reason))))
+                    }
+                }
+            });
+            return AuthFuture::Allow(fut);
+        }
+
+        match self
+            .interceptor
+            .validate_request_accesses(&rpc_method, auth_header.as_deref(), &[])
+        {
             AuthResult::Allow(cct) => {
                 // Phase 2.1：把身份发布到请求扩展，供内层（插件网关层）观察。
                 // 鉴权关闭时 validate_request 返回占位 CCT（roles 为空）。
@@ -493,30 +602,41 @@ where
                     subject: cct.payload.sub.clone(),
                     roles: cct.payload.roles.clone(),
                 });
-                AuthFuture::Allow(self.inner.call(req))
+                // 转发调用方凭据（见上）——出站 CredentialInterceptor 读任务局部量。
+                let fut = coord_client::credential::scoped_request_token(
+                    forward_token,
+                    self.inner.call(req),
+                );
+                AuthFuture::Allow(Box::pin(fut))
             }
-            AuthResult::Deny(reason) => AuthFuture::Deny(Some(Status::unauthenticated(reason))),
+            AuthResult::Deny(reason) => AuthFuture::Deny(Some(coord_core::error_code::attach(
+                Status::unauthenticated(reason),
+                coord_core::error_code::CoordErrorCode::Unauthenticated,
+            ))),
         }
     }
 }
 
+/// 装箱的鉴权后置 future（需要读 body 时用）。
+type BoxedAuthFuture<E> =
+    Pin<Box<dyn Future<Output = Result<http::Response<tonic::body::Body>, E>> + Send>>;
+
 /// 鉴权中间件 future：放行转发给 inner，拒绝立即返回 gRPC 错误响应
-pub enum AuthFuture<F> {
-    Allow(F),
+pub enum AuthFuture<E> {
+    /// 判定已完成/将异步完成，最终把 inner 的响应透传。
+    Allow(BoxedAuthFuture<E>),
     Deny(Option<Status>),
 }
 
-impl<F, E> Future for AuthFuture<F>
-where
-    F: Future<Output = Result<http::Response<tonic::body::Body>, E>>,
-{
+impl<E> Future for AuthFuture<E> {
     type Output = Result<http::Response<tonic::body::Body>, E>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: 不移动任何字段；AuthFuture 无 pin 投影约定，字段级 pin 由我们手动保证
+        // SAFETY: 不移动任何字段；`Allow` 内的 future 由 `Box::pin` 固定，
+        // 因此手动投影是安全的（与 ServerAuthFuture 采用同一约定）。
         let this = unsafe { self.get_unchecked_mut() };
         match this {
-            AuthFuture::Allow(fut) => unsafe { Pin::new_unchecked(fut) }.poll(cx),
+            AuthFuture::Allow(fut) => fut.as_mut().poll(cx),
             AuthFuture::Deny(status) => match status.take() {
                 Some(status) => {
                     let (parts, ()) = status.into_http::<()>().into_parts();
@@ -527,6 +647,44 @@ where
                 None => Poll::Pending,
             },
         }
+    }
+}
+
+/// 将 gRPC 状态码转换为 HTTP 拒绝响应。
+///
+/// 兜底拒绝路径也必须带错误码（第四轮 §3.14.2）：否则 Java 侧对这类失败只能
+/// 落到有损的状态码表上。
+fn deny_response(status: Option<Status>) -> http::Response<tonic::body::Body> {
+    let status = status.unwrap_or_else(|| {
+        coord_core::error_code::attach(
+            Status::permission_denied("denied"),
+            coord_core::error_code::CoordErrorCode::PermissionDenied,
+        )
+    });
+    let (parts, ()) = status.into_http::<()>().into_parts();
+    http::Response::from_parts(parts, tonic::body::Body::empty())
+}
+
+/// 缓存请求 body 字节后重建请求（scope 提取用）。
+///
+/// 与 server 侧同一取舍：body 是流式的，提取资源键前必须先收集（**受硬上限保护**），
+/// 解析后再以 `Full` 重建，保证 inner 看到的请求与原始请求等价。
+async fn buffer_request_body(
+    req: http::Request<tonic::body::Body>,
+    max_bytes: usize,
+) -> Result<(http::Request<tonic::body::Body>, Vec<u8>), String> {
+    let (parts, body) = req.into_parts();
+    let limited = http_body_util::Limited::new(body, max_bytes);
+    match limited.collect().await {
+        Ok(collected) => {
+            let bytes = collected.to_bytes();
+            let body_bytes = bytes.to_vec();
+            let rebuilt = tonic::body::Body::new(http_body_util::Full::new(bytes));
+            Ok((http::Request::from_parts(parts, rebuilt), body_bytes))
+        }
+        Err(_) => Err(format!(
+            "request body exceeds scope-extraction limit of {max_bytes} bytes"
+        )),
     }
 }
 
@@ -581,7 +739,7 @@ mod tests {
         let mut interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300);
         interceptor.set_enabled(false);
 
-        let result = interceptor.validate_request("/coord.kv.Kv/Range", None, None);
+        let result = interceptor.validate_request("/coord.kv.KV/Range", None, None);
         assert!(matches!(result, AuthResult::Allow(_)));
     }
 
@@ -590,7 +748,7 @@ mod tests {
         let role_cache = Arc::new(RoleCache::new());
         let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300);
 
-        let result = interceptor.validate_request("/coord.kv.Kv/Range", None, None);
+        let result = interceptor.validate_request("/coord.kv.KV/Range", None, None);
         assert!(matches!(result, AuthResult::Deny(_)));
     }
 
@@ -625,7 +783,7 @@ mod tests {
 
         // KV Range (data:kv:read) should be allowed within scope
         let result = interceptor.validate_request(
-            "/coord.kv.Kv/Range",
+            "/coord.kv.KV/Range",
             Some(&auth_header),
             Some("/app/order-123"),
         );
@@ -633,11 +791,64 @@ mod tests {
 
         // KV Range outside scope should be denied
         let result = interceptor.validate_request(
-            "/coord.kv.Kv/Range",
+            "/coord.kv.KV/Range",
             Some(&auth_header),
             Some("/admin/secret"),
         );
         assert!(matches!(result, AuthResult::Deny(_)));
+    }
+
+    /// 第四轮 §3.3（A2）：授权带**非空 scope** 但请求未提供资源键时，必须
+    /// **fail-closed 拒绝**。这是此前 fail-open 的具体形状：
+    /// `if let (Some(key), Some(trie)) = ...` 在两个 Option 任一为 None 时直接放行。
+    #[test]
+    fn test_interceptor_scope_restricted_capability_fails_closed_without_resource_key() {
+        let role_cache = Arc::new(RoleCache::new());
+        role_cache.sync_full(vec![super::super::role_cache::RoleEntry {
+            name: "reader".to_string(),
+            grants: vec![super::super::role_cache::CapabilityGrant {
+                capability_id: "data:kv:read".to_string(),
+                scope: "/app/".to_string(),
+            }],
+            high_sensitive: false,
+        }]);
+        let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300);
+        let cct = make_test_cct(vec!["reader"], HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+
+        // 无资源键 → 拒绝（fail-closed）
+        let result = interceptor.validate_request("/coord.kv.KV/Range", Some(&auth_header), None);
+        assert!(
+            matches!(result, AuthResult::Deny(_)),
+            "带非空 scope 的授权在无资源键时必须拒绝，实际: {result:?}"
+        );
+
+        // 显式传入提取到的资源键 → 命中 scope，放行
+        let result = interceptor.validate_request(
+            "/coord.kv.KV/Range",
+            Some(&auth_header),
+            Some("/app/order-1"),
+        );
+        assert!(matches!(result, AuthResult::Allow(_)));
+    }
+
+    /// A2：**无约束**授权（空 scope）在无资源键时仍应放行。
+    #[test]
+    fn test_interceptor_unrestricted_capability_allows_without_resource_key() {
+        let role_cache = Arc::new(RoleCache::new());
+        role_cache.sync_full(vec![super::super::role_cache::RoleEntry {
+            name: "reader".to_string(),
+            grants: vec![super::super::role_cache::CapabilityGrant {
+                capability_id: "data:kv:read".to_string(),
+                scope: String::new(),
+            }],
+            high_sensitive: false,
+        }]);
+        let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300);
+        let cct = make_test_cct(vec!["reader"], HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+        let result = interceptor.validate_request("/coord.kv.KV/Range", Some(&auth_header), None);
+        assert!(matches!(result, AuthResult::Allow(_)));
     }
 
     #[test]
@@ -658,7 +869,7 @@ mod tests {
 
         // KV Put (data:kv:write) should be denied — reader doesn't have it
         let result =
-            interceptor.validate_request("/coord.kv.Kv/Put", Some(&auth_header), Some("/app/data"));
+            interceptor.validate_request("/coord.kv.KV/Put", Some(&auth_header), Some("/app/data"));
         assert!(matches!(result, AuthResult::Deny(_)));
     }
 
@@ -681,23 +892,43 @@ mod tests {
         let cct = encode_cct(&header, &payload, TEST_KEY).unwrap();
         let auth_header = format!("Bearer {cct}");
 
-        let result = interceptor.validate_request("/coord.kv.Kv/Range", Some(&auth_header), None);
+        let result = interceptor.validate_request("/coord.kv.KV/Range", Some(&auth_header), None);
         assert!(matches!(result, AuthResult::Deny(_)));
     }
 
     #[test]
     fn test_infer_capability_mappings() {
         assert_eq!(
-            infer_capability("/coord.kv.Kv/Range"),
+            infer_capability("/coord.kv.KV/Range"),
             Some("data:kv:read".into())
         );
         assert_eq!(
-            infer_capability("/coord.kv.Kv/Put"),
+            infer_capability("/coord.kv.KV/Put"),
             Some("data:kv:write".into())
         );
         assert_eq!(
-            infer_capability("/coord.kv.Kv/Delete"),
+            infer_capability("/coord.kv.KV/Delete"),
             Some("data:kv:delete".into())
+        );
+        // 旧拼写（`Kv`）必须**不再**被识别：它正是「开启 agent 鉴权即拒绝全部 KV」
+        // 的根因（真实路径由 `package coord.kv; service KV` 决定，服务名全大写）。
+        assert_eq!(infer_capability("/coord.kv.Kv/Range"), None);
+        // 目标场景 ①② 的服务面必须在表内（否则开启鉴权即被拒）。
+        assert_eq!(
+            infer_capability("/coord.agent.Registry/Register"),
+            Some("coord:registry:register".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.agent.Config/Get"),
+            Some("coord:config:read".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.agent.Lock/Acquire"),
+            Some("coord:lock:acquire".into())
+        );
+        assert_eq!(
+            infer_capability("/coord.agent.LeaderElection/Campaign"),
+            Some("coord:election:campaign".into())
         );
         assert_eq!(
             infer_capability("/coord.txn.Txn/Txn"),
@@ -729,16 +960,19 @@ mod tests {
         }]);
 
         let table = Arc::new(CapabilityTable::default_agent());
-        // 动态注册：RPC → capability + 从 header 提取 scope key
+        // 动态注册：RPC → capability + 从 header 提取 scope 访问（新签名为 3 参）
         table.register_with_scope(
             "/coord.plugin.Plugin/Invoke",
             "plugin:echo",
-            Some(Arc::new(|headers: &http::HeaderMap| {
-                headers
-                    .get("x-coord-scope-key")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string())
-            })),
+            Some(Arc::new(
+                |_rpc: &str, headers: &http::HeaderMap, _body: &[u8]| {
+                    Ok(headers
+                        .get("x-coord-scope-key")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| vec![ScopeAccess::point(s.as_bytes().to_vec())])
+                        .unwrap_or_default())
+                },
+            )),
         );
         let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300)
             .with_capability_table(Arc::clone(&table));
@@ -776,11 +1010,13 @@ mod tests {
         headers.insert("x-coord-scope-key", "/app/plugin/k".parse().unwrap());
         assert_eq!(
             interceptor
-                .scope_key("/coord.plugin.Plugin/Invoke", &headers)
-                .as_deref(),
-            Some("/app/plugin/k")
+                .scope_accesses("/coord.plugin.Plugin/Invoke", &headers, &[])
+                .expect("提取器不应失败")
+                .expect("提取器已注册"),
+            vec![ScopeAccess::point(b"/app/plugin/k".to_vec())]
         );
-        assert_eq!(table.registered_len(), 1);
+        // 默认表已携带 5 个 scope 承载 RPC 的提取器（生产路径注册）+ 本用例注册的 1 个
+        assert_eq!(table.registered_len(), SCOPE_BEARING_RPCS.len() + 1);
     }
 
     /// PKI RPC 必须映射到 capability（私钥集中存储前上鉴权）
@@ -825,6 +1061,7 @@ mod tests {
     // ──── tower 中间件测试 ────
 
     /// 测试用透传 inner 服务
+    #[derive(Clone)]
     struct Passthrough;
     impl Service<http::Request<tonic::body::Body>> for Passthrough {
         type Response = http::Response<tonic::body::Body>;
@@ -1001,7 +1238,7 @@ mod tests {
 
         let cct = ed_test_cct(&signing_key, vec!["reader"]);
         let auth_header = format!("Bearer {cct}");
-        let result = interceptor.validate_request("/coord.kv.Kv/Range", Some(&auth_header), None);
+        let result = interceptor.validate_request("/coord.kv.KV/Range", Some(&auth_header), None);
         assert!(matches!(result, AuthResult::Allow(_)));
     }
 
@@ -1016,7 +1253,7 @@ mod tests {
 
         let forged = ed_test_cct(&attacker_key, vec!["root"]);
         let auth_header = format!("Bearer {forged}");
-        let result = interceptor.validate_request("/coord.kv.Kv/Range", Some(&auth_header), None);
+        let result = interceptor.validate_request("/coord.kv.KV/Range", Some(&auth_header), None);
         assert!(matches!(result, AuthResult::Deny(_)));
     }
 
@@ -1028,7 +1265,7 @@ mod tests {
 
         let cct = ed_test_cct(&signing_key, vec!["reader"]);
         let auth_header = format!("Bearer {cct}");
-        let result = interceptor.validate_request("/coord.kv.Kv/Range", Some(&auth_header), None);
+        let result = interceptor.validate_request("/coord.kv.KV/Range", Some(&auth_header), None);
         assert!(matches!(result, AuthResult::Deny(_)));
     }
 
@@ -1038,7 +1275,7 @@ mod tests {
         let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), reader_role_cache(), 300);
         let cct = make_test_cct(vec!["reader"], HashMap::new());
         let auth_header = format!("Bearer {cct}");
-        let result = interceptor.validate_request("/coord.kv.Kv/Range", Some(&auth_header), None);
+        let result = interceptor.validate_request("/coord.kv.KV/Range", Some(&auth_header), None);
         assert!(matches!(result, AuthResult::Allow(_)));
     }
 }

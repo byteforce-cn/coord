@@ -31,7 +31,8 @@ pub use client::{
 };
 pub use config::{Config, TlsConfig};
 pub use credential::{
-    AuthedChannel, CachedTokenProvider, CredentialInterceptor, NoopTokenProvider, TokenProvider,
+    current_request_token, scoped_request_token, AuthedChannel, CachedTokenProvider,
+    CredentialInterceptor, NoopTokenProvider, RequestScopedTokenProvider, TokenProvider,
 };
 pub use leader::LeaderDiscovery;
 pub use refresh::{spawn_session_refresher, SessionGateway, SessionTokens, REFRESH_LEAD_SECS};

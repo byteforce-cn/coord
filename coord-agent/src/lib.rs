@@ -101,7 +101,10 @@ pub struct AgentConfig {
     /// KV 读缓存最大条目数（默认 10000）
     #[serde(default = "default_cache_kv_max_entries")]
     pub cache_kv_max_entries: usize,
-    /// KV 读缓存 TTL（秒，默认 30）
+    /// KV 读缓存 TTL（秒，默认 0 = **关闭**本地 KV 读缓存）
+    ///
+    /// 第四轮 §3.15(7)：此处此前写"默认 30"，而 `default_cache_kv_ttl_secs()`
+    /// 返回 0（其自身注释也写明"0 = 关闭"）。doc 与实现不一致会让读者以为缓存默认开着。
     #[serde(default = "default_cache_kv_ttl_secs")]
     pub cache_kv_ttl_secs: u64,
     /// [已废弃] Service Catalog 缓存 TTL（秒，默认 10）
@@ -1242,7 +1245,10 @@ impl AgentServer {
             let data_dir = std::path::PathBuf::from(&self.config.data_dir);
             let cache_svc = Arc::new(crate::services::cache::CacheService::new(
                 data_dir.clone(),
-                1024 * 1024 * 1024, // 1GB max
+                // ⚠️ 第四轮 §3.10 h：这个值**只是声明**，CacheService 尚未实现淘汰
+                // （见 `CacheService::new` 的注释与启动告警）。构造参数保留是为了把"配了
+                // 多少"如实报出来，而不是继续用一个下划线参数假装遵守了它。
+                1024 * 1024 * 1024, // 声明的上限：1GB（未强制执行）
                 3600,               // default TTL 1 hour
             ));
             // 绑定自身弱引用，gRPC handler 才能升级 Arc 走 spawn_blocking

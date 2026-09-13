@@ -2,6 +2,7 @@
 name = "coord-server"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [features]
 # 第三轮 §4.4：确定性**模拟**套件（`sim_jepsen_test` / `sim_chaos_test`）是自建

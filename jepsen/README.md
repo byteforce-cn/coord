@@ -9,7 +9,10 @@ KV store with gRPC KV + Txn (CAS) + Maintenance APIs.
 > 随上传部署到控制机（见下文 Run）。旧位置 `jepsen-custom/examples/coord-test/`
 > 已于 2026-09-05 废弃迁移，请勿继续引用。
 
-Implements the full design from `docs/coord.md`:
+Implements the design recorded in the (not-committed) local design note
+`docs/coord-agent-plugin-engine-plan-2026-09-09.md` and `docs/production/`; a
+standalone `docs/coord.md` never existed — the earlier reference to it was a
+dangling link (fourth review §3.15(6)).
 
 * **DB** (`jepsen.coord.db`) — uploads the `coord` binary, writes a 3-node
   TOML config (auth enabled, shared `auth_root_key` / `raft_shared_secret`),

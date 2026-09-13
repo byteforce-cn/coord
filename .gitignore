@@ -3,7 +3,8 @@ target/
 **/*.rs.bk
 
 # Java
-coord-spring-boot-starter/target/
+# 注意：coord-spring-boot-starter 已于 2b55809 被整体删除（见 CONTRIBUTING.md），
+# 此处不再为它保留 ignore 规则——保留会让“模块还存在”看起来像是真的。
 java-example/target/
 *.class
 *.jar
@@ -42,5 +43,9 @@ docs/*
 docs/production/*
 !docs/production/evidence/
 !docs/production/design/
+# 第四轮 §3.15：`docs/production/` 顶层的文档必须可入库——否则像
+# `docs/volume-object-storage.md` 这种"被 tracked 文档引用的设计记录"只能存在于
+# 本机磁盘上，对任何 clone 仓库的人都是死链。
+!docs/production/*.md
 
 .coord-dev-cluster/

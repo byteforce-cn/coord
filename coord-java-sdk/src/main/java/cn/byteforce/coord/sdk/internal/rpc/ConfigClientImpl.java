@@ -52,7 +52,10 @@ public final class ConfigClientImpl extends AgentRpcClient implements ConfigClie
             }
             return Optional.empty();
         } catch (CoordException e) {
+            // NOT_FOUND 是服务端现在发出的通用"资源不存在"码（第四轮 §3.14.2）；
+            // 两个 SDK 本地码保留以兼容既有调用路径。
             if (e.getErrorCode() == ErrorCode.CONFIG_KEY_NOT_FOUND
+                    || e.getErrorCode() == ErrorCode.NOT_FOUND
                     || e.getErrorCode() == ErrorCode.REGISTRY_SERVICE_NOT_FOUND) {
                 return Optional.empty();
             }

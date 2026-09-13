@@ -5,9 +5,15 @@
 ## 开发环境
 
 - **Rust**: 1.98.1（见 `rust-toolchain.toml`）
-- **Java**: 21+（仅 `coord-spring-boot-starter` 与 `java-example` 模块需要）
+- **Java**: 21+（仅 `coord-java-sdk` 与 `java-example` 模块需要）
 - **Node.js**: 22.x（仅 `coord-ui` 模块需要）
 - **构建工具**: Cargo / Maven / pnpm
+
+> **没有 Spring Boot starter。** 仓库曾经有一个完整的 `coord-spring-boot-starter`
+> （自动配置 + 四个注解 + `AutoConfiguration.imports`），在提交 `2b55809` 被**连测试
+> 一起删除、零替代**。当前仓库**不提供任何 Spring 接入路径**：请自行 `@Bean`
+> （参见 `java-example` 的手写装配），生命周期（`close()`、watch 订阅）需自行管理。
+> 本行改为如实描述，是因为旧文案会让接入方以为存在一个并不存在的模块。
 
 ## 构建与测试
 

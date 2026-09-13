@@ -743,7 +743,9 @@ impl AuthManager {
             AuthOp::RevokeJti { .. } => {
                 // 吊销登记由 RevocationStore 处理（state_machine apply 钩子）
             }
-            AuthOp::IssueSession { .. } | AuthOp::ConsumeSession { .. } => {
+            AuthOp::IssueSession { .. }
+            | AuthOp::ConsumeSession { .. }
+            | AuthOp::ConsumeSessions { .. } => {
                 // 会话表由 TokenManager 视图处理（state_machine apply 钩子）
             }
             AuthOp::RoleGrantCapability {
@@ -1368,6 +1370,13 @@ mod tests {
         assert_eq!(
             variant_index(&AuthOp::RevokeBootstrapToken { id: "i".into() }),
             16
+        );
+        // 第四轮 §3.6 b：批量会话清理末尾追加（17），既有索引不漂移
+        assert_eq!(
+            variant_index(&AuthOp::ConsumeSessions {
+                hash_hexes: vec!["x".into()]
+            }),
+            17
         );
     }
 

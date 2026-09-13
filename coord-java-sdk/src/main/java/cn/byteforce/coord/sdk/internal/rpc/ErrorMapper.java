@@ -40,11 +40,23 @@ public final class ErrorMapper {
 
     private ErrorCode mapGrpcStatus(Status status) {
         return switch (status.getCode()) {
-            case NOT_FOUND -> ErrorCode.REGISTRY_SERVICE_NOT_FOUND;
-            case ALREADY_EXISTS -> ErrorCode.REGISTRY_INSTANCE_ALREADY_EXISTS;
-            case UNAVAILABLE -> ErrorCode.AGENT_UNAVAILABLE;
+            // 第四轮 §3.14.2：此前 NOT_FOUND 一律映射为 REGISTRY_SERVICE_NOT_FOUND
+            // （KV 查不到 key、证书不存在、租约不存在全被报成"注册中心服务不存在"），
+            // UNAVAILABLE（含 not-leader）一律映射为 AGENT_UNAVAILABLE。
+            // 现在服务端会附上精确的 trailer（上面的首选分支），本表只是**兜底**：
+            // 它不再猜测业务语义，只做传输层到结构化码的忠实映射。
+            case NOT_FOUND -> ErrorCode.NOT_FOUND;
+            case ALREADY_EXISTS -> ErrorCode.ALREADY_EXISTS;
+            case INVALID_ARGUMENT -> ErrorCode.INVALID_ARGUMENT;
+            case UNAUTHENTICATED -> ErrorCode.UNAUTHENTICATED;
+            case PERMISSION_DENIED -> ErrorCode.PERMISSION_DENIED;
+            case FAILED_PRECONDITION -> ErrorCode.FAILED_PRECONDITION;
+            case OUT_OF_RANGE -> ErrorCode.OUT_OF_RANGE;
+            // 对齐 Rust 客户端重试矩阵（unavailable/deadline/timeout → 重试）。
+            // 注意：not-leader 与 agent 不可达 **都**落到这里，只有在缺 trailer 的
+            // 情况下才会发生；正常情况下二者分别带 NOT_LEADER / UNAVAILABLE。
+            case UNAVAILABLE -> ErrorCode.UNAVAILABLE;
             case RESOURCE_EXHAUSTED -> ErrorCode.RESOURCE_EXHAUSTED;
-            // 对齐 Rust 客户端重试矩阵（unavailable/deadline/timeout → 重试）
             case DEADLINE_EXCEEDED -> ErrorCode.DEADLINE_EXCEEDED;
             default -> ErrorCode.INTERNAL;
         };
