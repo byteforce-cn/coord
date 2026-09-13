@@ -96,6 +96,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      # `gh release create --generate-notes` 需要 git 仓库上下文与**历史 tag**：
+      # 此前本 job 只下载产物、没有 checkout，`gh` 直接失败于
+      # `failed to run git: fatal: not a git repository`（v0.1.0 首发即撞上），
+      # 结果三条二进制腿 + 镜像都成功、唯独 Release 没建出来。
+      # `fetch-depth: 0` 是必须的：浅克隆里 `--generate-notes` 找不到上一个 tag。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: dist
