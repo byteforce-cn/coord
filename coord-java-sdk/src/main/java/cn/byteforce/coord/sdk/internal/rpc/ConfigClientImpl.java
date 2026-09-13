@@ -12,6 +12,7 @@ import cn.byteforce.coord.sdk.internal.proto.ConfigListRequest;
 import cn.byteforce.coord.sdk.internal.proto.ConfigListResponse;
 import cn.byteforce.coord.sdk.internal.proto.ConfigWatchEvent;
 import cn.byteforce.coord.sdk.internal.proto.ConfigWatchRequest;
+import cn.byteforce.coord.sdk.internal.watch.GrpcWatchStream;
 import cn.byteforce.coord.sdk.internal.watch.WatchManager;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import org.slf4j.Logger;
@@ -119,19 +120,29 @@ public final class ConfigClientImpl extends AgentRpcClient implements ConfigClie
     @Override
     @SuppressWarnings("unchecked")
     public <T> Optional<T> getObject(String key, Class<T> type) {
-        // Simple JSON deserialization — uses basic string parsing
-        // Full JSON support would require jackson/gson as optional dependency
+        // 第四轮 §3.14.5：不支持的**类型**必须报错，而不是返回 Optional.empty()。
+        // 修复前：对 String/Integer/Long/Boolean 以外的类型只打一条 warn 然后返回空
+        // ——调用方无法区分"键不存在"与"这个类型我们不支持"，是**静默数据丢失**。
+        if (type != String.class && type != Integer.class && type != Long.class
+                && type != Boolean.class) {
+            throw new CoordException(ErrorCode.INVALID_ARGUMENT,
+                    "getObject does not support type " + type.getName()
+                            + " (supported: String, Integer, Long, Boolean). "
+                            + "Add a JSON library and deserialize getString(key) yourself.");
+        }
         return getString(key).flatMap(v -> {
             try {
                 if (type == String.class) return Optional.of((T) v);
                 if (type == Integer.class) return (Optional<T>) getInt(key);
                 if (type == Long.class) return (Optional<T>) getLong(key);
                 if (type == Boolean.class) return (Optional<T>) getBoolean(key);
-                log.warn("getObject for type {} not supported without JSON library", type.getName());
+                // 不可达（上面已穷举）；保留以满足编译器的"可能无返回值"分析
                 return Optional.empty();
             } catch (Exception e) {
-                log.warn("Failed to deserialize config key '{}' to type {}", key, type.getName(), e);
-                return Optional.empty();
+                // 值存在但解析失败：这是**数据问题**，不得当成"不存在"。
+                throw new CoordException(ErrorCode.CONFIG_INVALID,
+                        "config key '" + key + "' exists but cannot be parsed as "
+                                + type.getName() + ": " + e.getMessage(), e);
             }
         });
     }
@@ -147,8 +158,14 @@ public final class ConfigClientImpl extends AgentRpcClient implements ConfigClie
                     request, "config.list");
             return new HashMap<>(response.getEntriesMap());
         } catch (CoordException e) {
-            log.warn("Config list failed for prefix '{}': {}", prefix, e.getMessage());
-            return Map.of();
+            // 第四轮 §3.14.5：不能把"查询失败"变成"没有配置"——调用方会据此认为
+            // 前缀下确实为空，从而做出错误的接管/清空决策。除了明确的 NOT_FOUND，
+            // 其余错误一律向上抛。
+            if (e.getErrorCode() == ErrorCode.NOT_FOUND
+                    || e.getErrorCode() == ErrorCode.CONFIG_KEY_NOT_FOUND) {
+                return Map.of();
+            }
+            throw e;
         }
     }
 
@@ -156,29 +173,31 @@ public final class ConfigClientImpl extends AgentRpcClient implements ConfigClie
     public ConfigWatchSubscription watch(String prefix, ConfigListener listener) {
         String watchId = "cfg-" + prefix + "-" + UUID.randomUUID().toString().substring(0, 8);
 
-        WatchManager.ActiveWatch[] holder = new WatchManager.ActiveWatch[1];
-
-        holder[0] = new WatchManager.ActiveWatch(
+        // 第四轮 §3.14.3：流改为**可取消**的 GrpcWatchStream（原先用阻塞式 stub iterator，
+        // 取消要等到下一条事件才生效），并支持断线重连 + 从 lastRevision+1 续订。
+        // 重连所需的 start revision 由 WatchManager 传入（首次为 0 = 从最新开始）。
+        WatchManager.ActiveWatch watch = new WatchManager.ActiveWatch(
                 watchId,
-                () -> {
-                    ConfigWatchRequest request = ConfigWatchRequest.newBuilder()
-                            .setPrefix(prefix)
-                            .setStartRevision(0)
-                            .build();
-                    return ConfigGrpc.newBlockingStub(channelManager.getChannel())
-                            .watch(request);
-                },
+                (startRevision) -> new GrpcWatchStream(
+                        channelManager.getChannel(),
+                        ConfigGrpc.getWatchMethod(),
+                        ConfigWatchRequest.newBuilder()
+                                .setPrefix(prefix)
+                                .setStartRevision(startRevision)
+                                .build()),
                 (ConfigWatchEvent protoEvent) -> {
                     Optional<String> newValue = protoEvent.hasNewValue()
                             ? Optional.of(protoEvent.getNewValue())
                             : Optional.empty();
-                    holder[0].setLastRevision(protoEvent.getRevision());
                     listener.onEvent(new ConfigEvent(protoEvent.getKey(), newValue, protoEvent.getRevision()));
                 },
-                0
+                // revision 水位在消费线程上同步推进（见 WatchManager），不再由异步回调维护
+                (Object e) -> ((ConfigWatchEvent) e).getRevision(),
+                0,
+                listener::onTerminated
         );
 
-        watchManager.startWatch(holder[0]);
+        watchManager.startWatch(watch);
         return () -> watchManager.cancelWatch(watchId);
     }
 }

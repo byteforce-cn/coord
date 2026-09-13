@@ -21,6 +21,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.Executors;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -59,7 +61,9 @@ class WorkflowClientContractTest {
                 new RetryTemplate(),
                 new ObservabilityProvider() {
                 },
-                CoordConfig.builder().agentHost("localhost").build());
+                CoordConfig.builder().agentHost("localhost").build(),
+                // 第四轮 §3.14.4：轮询跑在受管理的执行器上（生产由 ThreadPoolManager 提供）
+                Executors.newVirtualThreadPerTaskExecutor());
     }
 
     @AfterEach

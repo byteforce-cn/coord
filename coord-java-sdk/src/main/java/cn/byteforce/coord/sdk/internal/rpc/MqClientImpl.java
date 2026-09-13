@@ -26,7 +26,9 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 /**
@@ -36,6 +38,18 @@ import java.util.function.Consumer;
 public final class MqClientImpl extends AgentRpcClient implements MqClient {
 
     private static final Logger log = LoggerFactory.getLogger(MqClientImpl.class);
+
+    /**
+     * 存活订阅表（第四轮 §3.14.4）：{@code close()} 需要能取消它们。
+     *
+     * <p>修复前 MQ 订阅**不被 close() 追踪**：调用方忘记手动关闭时，客户端关闭后
+     * 仍有一条流与一个回调活着。
+     */
+    private static final ConcurrentHashMap<String, AutoCloseable> SUBSCRIPTIONS =
+            new ConcurrentHashMap<>();
+
+    private static final AtomicLong SUBSCRIPTION_SEQ = new AtomicLong();
+
     private final CoordConfig config;
 
     public MqClientImpl(AgentChannelManager channelManager, ErrorMapper errorMapper,
@@ -136,10 +150,11 @@ public final class MqClientImpl extends AgentRpcClient implements MqClient {
                         .setTopic(request.topic())
                         .setConsumerGroup(request.consumerGroup())
                         .build();
-
         ManagedChannel channel = channelManager.getChannel();
         ClientCall<cn.byteforce.coord.sdk.internal.proto.MqSubscribeRequest, MqMessage> call =
                 channel.newCall(MQGrpc.getSubscribeMethod(), CallOptions.DEFAULT);
+        final String callKey = request.topic() + "#" + request.consumerGroup()
+                + "#" + SUBSCRIPTION_SEQ.incrementAndGet();
 
         ClientCall.Listener<MqMessage> callListener = new ClientCall.Listener<>() {
             @Override
@@ -167,10 +182,34 @@ public final class MqClientImpl extends AgentRpcClient implements MqClient {
         call.halfClose();
         log.debug("MQ subscribe started: topic={}, group={}", request.topic(), request.consumerGroup());
 
-        return () -> {
+        // 第四轮 §3.14.4：登记订阅，以便 close() 能取消它（此前 MQ 订阅不被 close() 追踪，
+        // 忘记手动 close 的订阅会在客户端关闭后继续占着一条流）。
+        AutoCloseable handle = () -> {
+            SUBSCRIPTIONS.remove(callKey);
             call.cancel("unsubscribe", null);
             log.debug("MQ subscribe cancelled: topic={}, group={}", request.topic(), request.consumerGroup());
         };
+        SUBSCRIPTIONS.put(callKey, handle);
+        return handle;
+    }
+
+    /**
+     * 取消全部未关闭的订阅（{@code CoordClient.close()} 调用）。
+     *
+     * @return 被取消的订阅数
+     */
+    public int cancelAllSubscriptions() {
+        int n = 0;
+        for (AutoCloseable handle : SUBSCRIPTIONS.values()) {
+            try {
+                handle.close();
+                n++;
+            } catch (Exception e) {
+                log.debug("closing MQ subscription failed: {}", e.toString());
+            }
+        }
+        SUBSCRIPTIONS.clear();
+        return n;
     }
 
     private static cn.byteforce.coord.sdk.mq.MqMessage toSdk(MqMessage m) {

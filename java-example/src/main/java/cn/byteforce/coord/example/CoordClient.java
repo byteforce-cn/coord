@@ -33,11 +33,21 @@ import java.util.concurrent.TimeUnit;
  */
 public class CoordClient implements AutoCloseable {
 
+    /** 默认 KeepAlive 心跳间隔（秒）。租约 TTL 的 1/3 是仓库惯例。 */
+    public static final long DEFAULT_KEEPALIVE_INTERVAL_SECS = 10;
+
     private final ManagedChannel channel;
     private final KVGrpc.KVBlockingStub kvStub;
     private final LeaseGrpc.LeaseBlockingStub leaseStub;
     private final LeaseGrpc.LeaseStub leaseAsyncStub;
     private final MaintenanceGrpc.MaintenanceBlockingStub maintenanceStub;
+    /**
+     * KeepAlive 心跳调度器（daemon）。
+     *
+     * <p>daemon = true 是必须的：非 daemon 平台线程会让忘记调用 {@link #close()}
+     * 的进程**永远退不出**（这正是第四轮 §3.14.4 指出的 `ThreadPoolManager` 问题）。
+     */
+    private final java.util.concurrent.ScheduledExecutorService keepAliveScheduler;
 
     private CoordClient(String host, int port) {
         this.channel = ManagedChannelBuilder
@@ -50,6 +60,11 @@ public class CoordClient implements AutoCloseable {
         this.leaseStub = LeaseGrpc.newBlockingStub(channel);
         this.leaseAsyncStub = LeaseGrpc.newStub(channel);
         this.maintenanceStub = MaintenanceGrpc.newBlockingStub(channel);
+        this.keepAliveScheduler = java.util.concurrent.Executors.newScheduledThreadPool(1, r -> {
+            Thread t = new Thread(r, "coord-example-keepalive");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     /**
@@ -131,12 +146,23 @@ public class CoordClient implements AutoCloseable {
     /**
      * 前缀扫描。
      *
+     * <p><b>第四轮 §3.14.6 修复</b>：此前这里写
+     * {@code ByteString.copyFromUtf8(prefix + "\0")}——{@code prefix + "\0"} 是
+     * {@code prefix} 的**最小后继**（0x00 是最小字节），区间
+     * {@code [prefix, prefix + "\0")} 只包含 {@code prefix} 这一个 key，
+     * 因此**匹配 0 条**。受害者是它上面的两个调用方：
+     * {@code ConfigClient.getAll()} 永远返回空 map，
+     * {@code ServiceRegistry.discover()} 永远返回空列表。
+     *
+     * <p>正确做法是把**最后一个字节 +1**（与 `PrefixScan` / Rust 侧
+     * {@code prefix_end()} 同一口径），见 {@link PrefixScan#end(String)}。
+     *
      * @param prefix Key 前缀
      * @return 匹配的键值对列表
      */
     public List<Kv.KeyValue> scan(String prefix) {
         ByteString prefixBytes = ByteString.copyFromUtf8(prefix);
-        ByteString rangeEnd = ByteString.copyFromUtf8(prefix + "\0");
+        ByteString rangeEnd = PrefixScan.end(prefixBytes);
 
         Kv.RangeResponse resp = kvStub.range(Kv.RangeRequest.newBuilder()
                 .setKey(prefixBytes)
@@ -177,13 +203,38 @@ public class CoordClient implements AutoCloseable {
     }
 
     /**
-     * 创建 KeepAlive 流并异步维持 Lease 心跳。
+     * 创建 KeepAlive 流并按间隔**持续**发送心跳（默认 10s）。
+     *
+     * <p><b>第四轮 §3.14.6 修复</b>：此前本方法只发**一帧**就返回，而 javadoc
+     * 声称"异步维持 Lease 心跳"——名字与行为不符（心跳停在第一帧，租约照常过期）。
+     *
+     * <p>现在：立即发一帧（缩短"授予后首帧"窗口），再以固定间隔续发；
+     * 返回的句柄可停止心跳并优雅关闭流。
      *
      * @param leaseId  要维持的 Lease ID
-     * @param onExpire Lease 过期回调（可选）
+     * @param onExpire Lease 过期回调（流异常/意外关闭时触发一次；
+     *                 调用 {@link KeepAliveHandle#cancel()} 不再触发）
      * @return 可取消的 KeepAlive 句柄
      */
     public KeepAliveHandle keepAlive(long leaseId, Runnable onExpire) {
+        return keepAlive(leaseId, DEFAULT_KEEPALIVE_INTERVAL_SECS, onExpire);
+    }
+
+    /**
+     * 同上，心跳间隔可指定。
+     *
+     * @param intervalSeconds 心跳间隔（秒）；应显著小于 Lease TTL
+     *                        （仓库惯例：TTL/3）
+     */
+    public KeepAliveHandle keepAlive(long leaseId, long intervalSeconds, Runnable onExpire) {
+        if (intervalSeconds <= 0) {
+            throw new IllegalArgumentException("keep-alive interval must be > 0");
+        }
+        // 已取消/已结束：用于区分"我们主动关"与"服务端断了"，
+        // 后者才应触发 onExpire（否则 cancel() 会被误报为租约过期）。
+        final java.util.concurrent.atomic.AtomicBoolean stopped =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+
         StreamObserver<LeaseOuterClass.LeaseKeepAliveRequest> reqObserver =
                 leaseAsyncStub.leaseKeepAlive(new StreamObserver<>() {
                     @Override
@@ -193,20 +244,47 @@ public class CoordClient implements AutoCloseable {
 
                     @Override
                     public void onError(Throwable t) {
-                        if (onExpire != null) onExpire.run();
+                        if (stopped.compareAndSet(false, true) && onExpire != null) {
+                            onExpire.run();
+                        }
                     }
 
                     @Override
                     public void onCompleted() {
-                        if (onExpire != null) onExpire.run();
+                        if (stopped.compareAndSet(false, true) && onExpire != null) {
+                            onExpire.run();
+                        }
                     }
                 });
 
-        // 发送初始 KeepAlive
+        // 立即发一帧，随后按间隔续发。
         reqObserver.onNext(LeaseOuterClass.LeaseKeepAliveRequest.newBuilder()
                 .setId(leaseId).build());
+        java.util.concurrent.ScheduledFuture<?> task = keepAliveScheduler.scheduleAtFixedRate(() -> {
+            if (stopped.get()) {
+                return;
+            }
+            try {
+                reqObserver.onNext(LeaseOuterClass.LeaseKeepAliveRequest.newBuilder()
+                        .setId(leaseId).build());
+            } catch (RuntimeException e) {
+                // 流已死：停止调度并通知（若尚未通知过）
+                if (stopped.compareAndSet(false, true) && onExpire != null) {
+                    onExpire.run();
+                }
+            }
+        }, intervalSeconds, intervalSeconds, TimeUnit.SECONDS);
 
-        return () -> reqObserver.onCompleted();
+        return () -> {
+            task.cancel(false);
+            // 先置 stopped 再关流：正常的 cancel() 不应触发 onExpire。
+            stopped.set(true);
+            try {
+                reqObserver.onCompleted();
+            } catch (RuntimeException ignored) {
+                // 流已关闭：幂等取消
+            }
+        };
     }
 
     // ──── Watch API ────
@@ -239,12 +317,17 @@ public class CoordClient implements AutoCloseable {
 
     @Override
     public void close() {
+        // 先停心跳调度器：否则它会持续向正在关闭的 channel 发帧。
+        keepAliveScheduler.shutdownNow();
         if (channel != null && !channel.isShutdown()) {
             try {
                 channel.shutdown();
-                channel.awaitTermination(5, TimeUnit.SECONDS);
+                if (!channel.awaitTermination(5, TimeUnit.SECONDS)) {
+                    channel.shutdownNow();
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                channel.shutdownNow();
             }
         }
     }

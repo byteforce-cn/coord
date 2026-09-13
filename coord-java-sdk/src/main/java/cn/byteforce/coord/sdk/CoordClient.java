@@ -84,7 +84,10 @@ public final class CoordClient implements Closeable {
         this.threadPoolManager = new ThreadPoolManager(config.getHeartbeatThreads());
         this.channelManager = new AgentChannelManager(config, threadPoolManager,
                 config.getObservabilityProvider());
-        this.watchManager = new WatchManager(threadPoolManager);
+        // 第四轮 §3.14.3：autoRestoreWatches 终于被读到了。此前它被声明、有 getter、
+        // 默认 true、有 setter，但**主代码零处读取**（死配置）——而它承诺的能力
+        // （断线自动恢复订阅）根本不存在。现在由 WatchManager 真正执行。
+        this.watchManager = new WatchManager(threadPoolManager, config.isAutoRestoreWatches());
         this.errorMapper = new ErrorMapper();
         this.retryTemplate = new RetryTemplate();
 
@@ -104,7 +107,9 @@ public final class CoordClient implements Closeable {
         this.transitClient = new TransitClientImpl(channelManager, errorMapper, retryTemplate,
                 config.getObservabilityProvider(), config);
         this.workflowClient = new WorkflowClientImpl(channelManager, errorMapper, retryTemplate,
-                config.getObservabilityProvider(), config);
+                config.getObservabilityProvider(), config,
+                // 第四轮 §3.14.4：轮询必须跑在受管理的执行器上，close() 才能中断它。
+                threadPoolManager.getVirtualThreadExecutor());
         this.policyClient = new PolicyClientImpl(channelManager, errorMapper, retryTemplate,
                 config.getObservabilityProvider(), config);
         this.pkiClient = new PkiClientImpl(channelManager, errorMapper, retryTemplate,
@@ -254,13 +259,26 @@ public final class CoordClient implements Closeable {
         // 1. Deregister all active registrations
         registry.deregisterAll(gracePeriod);
 
-        // 2. Shutdown watch manager
+        // 2. Complete pending workflow watches exceptionally.
+        //    第四轮 §3.14.4：不这样做，watchInstance()/startAsync() 的调用方会**永久挂起**
+        //    （轮询线程不属于任何受管理线程池，close() 之后还在无限重试）。
+        //    必须排在关闭线程池**之前**，否则这里会先撞上已经拒绝任务的执行器。
+        workflowClient.shutdownWatches(new IllegalStateException(
+                "CoordClient was closed while watching this workflow instance"));
+
+        // 3. Cancel MQ subscriptions (此前不被 close() 追踪)
+        int cancelledSubs = mqClient.cancelAllSubscriptions();
+        if (cancelledSubs > 0) {
+            log.debug("Cancelled {} MQ subscription(s)", cancelledSubs);
+        }
+
+        // 4. Shutdown watch manager (cancel all watch streams)
         watchManager.shutdown();
 
-        // 3. Shutdown channel
+        // 5. Shutdown channel
         channelManager.shutdown();
 
-        // 4. Shutdown thread pools
+        // 6. Shutdown thread pools (interrupts any in-flight polling)
         threadPoolManager.close();
 
         log.info("CoordClient shutdown complete");

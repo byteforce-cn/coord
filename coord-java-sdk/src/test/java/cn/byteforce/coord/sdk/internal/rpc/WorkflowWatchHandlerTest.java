@@ -19,6 +19,23 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class WorkflowWatchHandlerTest {
 
+    /**
+     * 轮询执行器。生产代码由 {@code ThreadPoolManager} 提供（这样 {@code close()}
+     * 才能中断轮询）；测试里用同样的构造，避免测试与生产走两条不同的路径。
+     */
+    private final java.util.concurrent.ExecutorService executor =
+            java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
+
+    @org.junit.jupiter.api.AfterEach
+    void tearDown() {
+        executor.shutdownNow();
+    }
+
+    private CompletableFuture<WorkflowStatus> start(
+            String instanceId, java.util.function.Function<String, WorkflowStatus> fetcher) {
+        return WorkflowWatchHandler.startWatching(instanceId, fetcher, executor);
+    }
+
     private static WorkflowStatus runningStatus(String instanceId) {
         return new WorkflowStatus(instanceId, WorkflowState.RUNNING,
                 1, null, null, "test-def", null);
@@ -47,7 +64,7 @@ class WorkflowWatchHandlerTest {
         String instanceId = "wf-completed-001";
         byte[] output = "{\"result\":\"ok\"}".getBytes();
 
-        CompletableFuture<WorkflowStatus> future = WorkflowWatchHandler.startWatching(
+        CompletableFuture<WorkflowStatus> future = start(
                 instanceId, id -> completedStatus(id, output));
 
         assertThat(future).isDone();
@@ -62,7 +79,7 @@ class WorkflowWatchHandlerTest {
         String instanceId = "wf-failed-001";
         String errorMsg = "Task 'callHttp' failed: connection refused";
 
-        CompletableFuture<WorkflowStatus> future = WorkflowWatchHandler.startWatching(
+        CompletableFuture<WorkflowStatus> future = start(
                 instanceId, id -> failedStatus(id, errorMsg));
 
         assertThat(future).isDone();
@@ -75,7 +92,7 @@ class WorkflowWatchHandlerTest {
     void shouldCompleteImmediatelyWhenAlreadyCancelled() throws Exception {
         String instanceId = "wf-cancelled-001";
 
-        CompletableFuture<WorkflowStatus> future = WorkflowWatchHandler.startWatching(
+        CompletableFuture<WorkflowStatus> future = start(
                 instanceId,
                 id -> new WorkflowStatus(id, WorkflowState.CANCELLED,
                         0, null, null, "test-def", null));
@@ -94,7 +111,7 @@ class WorkflowWatchHandlerTest {
 
         AtomicInteger callCount = new AtomicInteger(0);
 
-        CompletableFuture<WorkflowStatus> future = WorkflowWatchHandler.startWatching(
+        CompletableFuture<WorkflowStatus> future = start(
                 instanceId, id -> {
                     int count = callCount.incrementAndGet();
                     if (count >= 3) {
@@ -122,7 +139,7 @@ class WorkflowWatchHandlerTest {
 
         AtomicInteger callCount = new AtomicInteger(0);
 
-        CompletableFuture<WorkflowStatus> future = WorkflowWatchHandler.startWatching(
+        CompletableFuture<WorkflowStatus> future = start(
                 instanceId, id -> {
                     int count = callCount.incrementAndGet();
                     if (count <= 2) {
@@ -147,7 +164,7 @@ class WorkflowWatchHandlerTest {
 
         AtomicInteger callCount = new AtomicInteger(0);
 
-        CompletableFuture<WorkflowStatus> future = WorkflowWatchHandler.startWatching(
+        CompletableFuture<WorkflowStatus> future = start(
                 instanceId, id -> {
                     callCount.incrementAndGet();
                     return runningStatus(id);
@@ -174,7 +191,7 @@ class WorkflowWatchHandlerTest {
     void shouldNotCompleteWhenStillRunning() throws Exception {
         String instanceId = "wf-still-running-001";
 
-        CompletableFuture<WorkflowStatus> future = WorkflowWatchHandler.startWatching(
+        CompletableFuture<WorkflowStatus> future = start(
                 instanceId, id -> runningStatus(id));
 
         assertThat(future).isNotDone();
@@ -186,7 +203,7 @@ class WorkflowWatchHandlerTest {
     void shouldNotCompleteWhenSuspended() throws Exception {
         String instanceId = "wf-suspended-001";
 
-        CompletableFuture<WorkflowStatus> future = WorkflowWatchHandler.startWatching(
+        CompletableFuture<WorkflowStatus> future = start(
                 instanceId,
                 id -> new WorkflowStatus(id, WorkflowState.SUSPENDED,
                         2, null, null, "test-def", null));
@@ -206,7 +223,7 @@ class WorkflowWatchHandlerTest {
 
         for (WorkflowState state : terminalStates) {
             String instanceId = "wf-term-" + state.getProtoName();
-            CompletableFuture<WorkflowStatus> future = WorkflowWatchHandler.startWatching(
+            CompletableFuture<WorkflowStatus> future = start(
                     instanceId,
                     id -> new WorkflowStatus(id, state, 0, null, null, "def", null));
 
@@ -214,5 +231,55 @@ class WorkflowWatchHandlerTest {
                     .as("State %s should be terminal", state);
             assertThat(future.get().state()).isEqualTo(state);
         }
+    }
+
+    // ──── 第四轮 §3.14.4：close() 之后不得留下永久挂起的 future ────
+
+    /**
+     * 回归卡口：客户端关闭时，所有仍在轮询的观察必须以**异常**完成。
+     *
+     * <p>修复前：轮询线程用裸 {@code Thread.ofVirtual()} 建立、不属于任何受管理线程池，
+     * {@code close()} 既中断不到它，也没有任何注册表可以了结它；状态查询每次都抛异常，
+     * 循环按 30s 上限**无限重试**，而 {@code cancelled} 只在 future 完成时才置位 ——
+     * 于是 future **永不完成**，{@code watchInstance()} / {@code startAsync()} 的调用方
+     * 永久挂起。
+     */
+    @Test
+    void clientShutdownMustNotLeaveTheFutureHanging() throws Exception {
+        String instanceId = "wf-shutdown-001";
+
+        // 始终 RUNNING ⇒ 会一直轮询下去
+        CompletableFuture<WorkflowStatus> future = start(instanceId, id -> runningStatus(id));
+        assertThat(future).isNotDone();
+
+        // 模拟 CoordClient.close()
+        WorkflowWatchHandler.cancelAll(new IllegalStateException("client closed"));
+
+        assertThat(future)
+                .as("close() 必须了结观察，否则调用方永久挂起")
+                .isCompletedExceptionally();
+    }
+
+    /**
+     * 状态查询持续失败时不得无限重试：达到上限即以异常完成，让调用方自己决定退避。
+     *
+     * <p>用毫秒级策略（包内可见入口）验证，而不是真等 1s+2s+…+30s 累积到数分钟。
+     */
+    @Test
+    void shouldGiveUpAfterTooManyConsecutivePollFailures() {
+        String instanceId = "wf-always-failing";
+
+        CompletableFuture<WorkflowStatus> future = WorkflowWatchHandler.startWatching(
+                instanceId,
+                id -> {
+                    throw new RuntimeException("agent unreachable");
+                },
+                executor,
+                new WorkflowWatchHandler.PollPolicy(1L, 2L, 3));
+
+        org.assertj.core.api.Assertions.assertThatCode(() ->
+                        future.get(15, TimeUnit.SECONDS))
+                .isInstanceOf(java.util.concurrent.ExecutionException.class)
+                .hasMessageContaining("gave up polling workflow instance");
     }
 }

@@ -48,64 +48,53 @@ repository, not by a commit. **Until it is applied, the 45-all-red-CI history ca
 | C16 | `wasm_engine` command queue bounded | `coord-agent/src/plugin/wasm_engine.rs` — `sync_channel(MAX_PLUGIN_QUEUE_DEPTH)`, `try_send` backpressure (never blocks the async executor) |
 | C21 | `dead_tasks()` has a consumer + an alert | `coord_dead_background_tasks` / `coord_dead_background_task_info` in `coord-server/src/metrics.rs`; `/health?verbose=true` returns `dead_background_tasks`; alert `CoordBackgroundTaskDead` in `monitoring/prometheus-rules.yml` |
 | C22(part) | Enum-rename hazard documented | `coord-proto/buf.yaml` (see below) |
+| C12③ | **Java SDK watch reconnects and resumes** | `internal/watch/GrpcWatchStream.java` (cancellable stream), `WatchManager` (bounded exponential backoff, resume from `lastRevision + 1`, terminal notification, unregister on termination); `autoRestoreWatches` is now read. Regressions: `WatchManagerTest` (6 tests, incl. reconnect-from-revision + cancel-wakes-a-silent-stream) |
+| C12④ | **`close()` can no longer leave a hung future** | `WorkflowWatchHandler` runs on the managed executor, registers in a live set, and is completed exceptionally by `CoordClient.close()`; bounded poll failures. Regressions: `WorkflowWatchHandlerTest.clientShutdownMustNotLeaveTheFutureHanging` |
+| C12④(part) | MQ subscriptions are tracked and cancelled by `close()`; heartbeat threads are daemon | `MqClientImpl` (`cancelAllSubscriptions`), `ThreadPoolManager` |
+| C13 | **`java-example`'s three real bugs are fixed** | `CoordClient.scan()` now uses the shared `PrefixScan.end` (was `prefix + "\0"` ⇒ matched **zero** keys, so `getAll()`/`discover()` always returned empty); `keepAlive()` really keeps sending (was one frame); `ServiceRegistry.register()` renews via keep-alive instead of re-`put` (which never extended the TTL). `PrefixScan` moved to `src/main` so main and tests share **one** implementation |
+| §3.14.5(part) | `ConfigClient.getObject` no longer loses data silently; `list()` no longer turns failures into "no config" | `getObject` throws `INVALID_ARGUMENT`/`CONFIG_INVALID`; `list` only maps explicit NOT_FOUND to an empty map |
+| **Spring** | **Product decision: no Spring Boot starter will be restored.** The SDK is the supported integration surface; adopters wire `@Bean`s and own the lifecycle | recorded in `CONTRIBUTING.md`; `README` capability table |
 | §3.14.8 / §3.15 | README (EN + zh-CN) no longer overstates TLS, Jepsen, CI, `jepsen-check.sh`, the SDK coordinates or the experimental capabilities | see the diff; `docs/*` at the repo root is git-ignored, so all new docs live under `docs/production/` |
 
 ### NOT closed — with impact
 
-#### 1. Spring Boot starter does not exist (C12①, §3.14.1) — **accept or fund**
+#### 1. Spring Boot starter — **an explicit product decision, not a gap**
 
 16 files / −993 lines were deleted in `2b55809` **together with their tests and with no
-replacement**. The repository therefore offers **no Spring integration path**: an adopter
-must hand-write `@Bean` wiring and own the lifecycle (`close()`, watch subscriptions).
+replacement**. The decision taken in this round is **not to restore it**: `coord-java-sdk` is
+the supported integration surface and is verified (149 unit tests + a real-cluster
+integration suite); adopters hand-write `@Bean` wiring and own the lifecycle.
 
-*Why not fixed here:* restoring it properly means a new Maven module, auto-configuration,
-`AutoConfiguration.imports`, and tests that boot a real Spring context. Half of it would be
-worse than none. The dangling references were cleaned instead.
-*Decision needed:* the fourth review's §6.3 accepts this **only if the adopting
-organisation explicitly accepts "hand-written `@Bean` + self-managed lifecycle"**.
+*Consequence to state plainly:* the review's §6.3 condition is satisfied only through its
+"…or the organisation explicitly accepts hand-written `@Bean` + self-managed lifecycle"
+branch. There is **no** auto-configuration, no `@Bean` beans for `CoordClient`/clients, and
+no Spring lifecycle (`destroyMethod`) integration.
 
-#### 2. Java SDK watch does not reconnect (C12③, §3.14.3)
+#### 2. Java SDK watch: **fixed in this round** (was §3.14.3) — retained here for audit
 
-`WatchManager.runWatchLoop` iterates the stream **once**; on normal end or any error it logs
-and sets `active = false`. It does not restart, does not back off, does not resume from
-`lastRevision`, and does not surface the failure to the caller. Class comments claiming
-recovery "from the last known revision" are false; the `autoRestoreWatches` config key was
-declared, documented as defaulting to `true`, and **never read by any production code path**
-(the same shape as `_prune`).
+Reconnects with bounded exponential backoff and resumes from `lastRevision + 1`; a terminal
+subscription notifies the listener via `ConfigListener#onTerminated` / `RegistryListener#onTerminated`
+and is removed from the registry. `autoRestoreWatches` (previously declared, documented as
+default `true`, and **never read**) now genuinely controls reconnection.
 
-*Why not fixed here:* correct reconnect needs resume-from-revision semantics agreed on both
-sides of the wire, plus idempotency tests against a real agent. That is a feature, not a
-remediation, and shipping it untested into the first tag would repeat the round-3 mistake.
-*Impact:* any long-lived watch dies silently. **Do not use watch for correctness-critical
-state without an independent periodic re-read.**
+*Residual:* each watch consumes one virtual thread while blocked, and the stream queue is
+bounded at 1024 — overflow ends the stream and triggers a replay from the last revision,
+which requires the server to still hold that history (compaction can legitimately make it
+unavailable; the server reports `HISTORY_UNAVAILABLE` in that case).
 
-#### 3. `CoordClient.close()` is not a complete shutdown guarantee (C12④, §3.14.4)
+#### 3. `CoordClient.close()` — **fixed in this round** (was §3.14.4)
 
-`WorkflowWatchHandler` builds its thread with a bare `Thread.ofVirtual()`, outside
-`ThreadPoolManager` and unregistered with `WatchManager`; after `close()` its status fetcher
-retries every 30s forever, so the returned future never completes and callers of
-`watchInstance()` / `startAsync()` hang. MQ subscriptions are not tracked by `close()`, and
-`ThreadPoolManager`'s threads are non-daemon platform threads.
+Pending workflow watches are completed exceptionally, MQ subscriptions are cancelled, and
+heartbeat threads are daemon. *Residual:* there is still no `addShutdownHook`, so a process
+that never calls `close()` leaks rather than exits cleanly — but it can now exit.
 
-*Impact:* a process that forgets to `close()` may not exit; a closed client can still hold a
-hung future. *Workaround:* always bound callers with `orTimeout`.
+#### 4. `java-example` — **bugs fixed in this round** (was §3.14.6)
 
-#### 4. `java-example` is a self-contained demo with three real bugs (C13, §3.14.6)
-
-It has **zero dependency on the SDK** (`grep -rn "cn.byteforce.coord.sdk" java-example/src`
-→ 0 hits), so its wrapper is unused and its bugs are invisible to CI:
-
-| Location | Defect |
-|:---|:---|
-| `java-example/.../example/CoordClient.java:139` | `scan()` uses `range_end = prefix + "\0"`, which matches **zero** keys (see `PrefixScan.java`). `getAll()` always returns an empty map; `discover()` always returns an empty list |
-| `java-example/.../example/ServiceRegistry.java:60-74` | re-`put`s the same key every 10s instead of `LeaseKeepAlive` → the instance disappears after the 30s TTL. `CoordClient.keepAlive(...)` exists but is never called |
-| `java-example/.../example/CoordClient.java:186-210` | `keepAlive()` sends **one** heartbeat although its javadoc claims continuous renewal |
-
-*Why not fixed here:* the honest fix is to make `java-example` depend on the SDK, which
-inverts the current "example proves the raw gRPC contract" role and changes what the
-`java-example-it` CI job proves. That decision belongs to the maintainers, not to a
-release-prep commit.
-*Impact:* `java-example` must not be used as a usage reference.
+The three defects are fixed (`range_end`, keep-alive renewal, single-frame keep-alive).
+*Residual:* `java-example` still does **not** depend on the SDK (`grep -rn
+"cn.byteforce.coord.sdk" java-example/src` → 0 hits), so it remains a raw-gRPC demonstration
+and its 51 integration tests still do not exercise the SDK. Making the CI job prove SDK
+usability requires that migration; it is not done here.
 
 #### 5. CI step name and evidence artifacts (C14, §3.16)
 

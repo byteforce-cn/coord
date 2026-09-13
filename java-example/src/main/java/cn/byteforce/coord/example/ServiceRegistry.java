@@ -3,9 +3,7 @@ package cn.byteforce.coord.example;
 import coord.kv.Kv;
 
 import java.util.List;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 /**
@@ -33,45 +31,54 @@ import java.util.stream.Collectors;
  */
 public class ServiceRegistry {
 
+    private static final Logger log = Logger.getLogger(ServiceRegistry.class.getName());
+
     private static final String REGISTRY_PREFIX = "/_registry/services/";
 
+    /**
+     * 注册 TTL（秒）。心跳间隔取 TTL/3（见 {@link CoordClient#DEFAULT_KEEPALIVE_INTERVAL_SECS}）。
+     */
+    private static final long REGISTRY_TTL_SECS = 30;
+
     private final CoordClient client;
-    private final ScheduledExecutorService scheduler;
-    private long leaseId;
+    private volatile long leaseId;
+    private volatile CoordClient.KeepAliveHandle keepAliveHandle;
 
     public ServiceRegistry(CoordClient client) {
         this.client = client;
-        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "coord-registry-keepalive");
-            t.setDaemon(true);
-            return t;
-        });
     }
 
     /**
-     * 注册服务实例并启动心跳维持。
+     * 注册服务实例并维持租约。
+     *
+     * <p><b>第四轮 §3.14.6 修复</b>：此前这里每 10s 重复 `put` 同一个 key，注释
+     * 自称"续约方式之一"——**这是错的**：重复 put 只会覆盖值并刷新 revision，
+     * **不会延长 lease TTL**（服务端只把 key 绑定到租约；延长 TTL 只有
+     * `LeaseKeepAlive` 会做）。于是实例在 30s TTL 到期后被自动删除，而
+     * `CoordClient.keepAlive(...)` 存在却从未被调用。
+     *
+     * <p>现在：一次 `put`（绑定租约）+ 一条持续心跳流，租约不再过期。
      *
      * @param serviceName 服务名（如 "order-service"）
      * @param instanceId  实例标识（如 "node1" 或 UUID）
      * @param info        服务实例信息（host, port, metadata）
      */
     public void register(String serviceName, String instanceId, ServiceInfo info) {
-        // 1. Grant Lease (TTL 30s)
-        leaseId = client.grantLease(30);
+        // 1. Grant Lease
+        long granted = client.grantLease(REGISTRY_TTL_SECS);
 
         // 2. 写入注册信息（绑定 Lease）
         String key = instanceKey(serviceName, instanceId);
-        client.put(key, info.toJson(), leaseId);
+        client.put(key, info.toJson(), granted);
 
-        // 3. 启动心跳（每 10 秒 KeepAlive）
-        scheduler.scheduleAtFixedRate(() -> {
-            try {
-                // Put 刷新 key（续约方式之一）
-                client.put(key, info.toJson(), leaseId);
-            } catch (Exception e) {
-                // 连接断开时 Lease 自然过期，key 自动删除
-            }
-        }, 10, 10, TimeUnit.SECONDS);
+        // 3. 真正续约：心跳间隔 = TTL/3
+        CoordClient.KeepAliveHandle handle = client.keepAlive(
+                granted,
+                Math.max(1, REGISTRY_TTL_SECS / 3),
+                () -> log.warning(() -> "registry lease for " + serviceName + "/" + instanceId
+                        + " was lost (keep-alive stream closed)"));
+        this.leaseId = granted;
+        this.keepAliveHandle = handle;
     }
 
     /**
@@ -89,14 +96,19 @@ public class ServiceRegistry {
     }
 
     /**
-     * 注销自身（Revoke Lease → 所有绑定 key 自动删除）。
+     * 注销自身（停心跳 → Revoke Lease → 所有绑定 key 自动删除）。
      */
     public void deregister() {
-        if (leaseId > 0) {
-            client.revokeLease(leaseId);
-            leaseId = 0;
+        CoordClient.KeepAliveHandle handle = this.keepAliveHandle;
+        if (handle != null) {
+            handle.cancel();
+            this.keepAliveHandle = null;
         }
-        scheduler.shutdown();
+        long id = this.leaseId;
+        if (id > 0) {
+            client.revokeLease(id);
+            this.leaseId = 0;
+        }
     }
 
     static String instanceKey(String serviceName, String instanceId) {

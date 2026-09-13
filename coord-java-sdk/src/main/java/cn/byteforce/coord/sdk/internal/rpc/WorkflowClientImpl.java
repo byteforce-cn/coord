@@ -53,12 +53,16 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
     private static final Logger log = LoggerFactory.getLogger(WorkflowClientImpl.class);
     private final CoordConfig config;
+    /** 轮询工作流状态用的虚拟线程执行器（由 ThreadPoolManager 提供，close() 可中断）。 */
+    private final java.util.concurrent.ExecutorService watchExecutor;
 
     public WorkflowClientImpl(AgentChannelManager channelManager, ErrorMapper errorMapper,
                               RetryTemplate retryTemplate, ObservabilityProvider observability,
-                              CoordConfig config) {
+                              CoordConfig config,
+                              java.util.concurrent.ExecutorService watchExecutor) {
         super(channelManager, errorMapper, retryTemplate, observability);
         this.config = config;
+        this.watchExecutor = watchExecutor;
     }
 
     // ──── 实例生命周期 ────
@@ -360,6 +364,18 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
 
     @Override
     public CompletableFuture<WorkflowStatus> watchInstance(String instanceId) {
-        return WorkflowWatchHandler.startWatching(instanceId, this::getStatus);
+        return WorkflowWatchHandler.startWatching(instanceId, this::getStatus, watchExecutor);
+    }
+
+    /**
+     * 结束全部未完成的实例观察（{@code CoordClient.close()} 调用）。
+     *
+     * <p>第四轮 §3.14.4：不这样做就会留下**永久挂起**的 future——调用方
+     * （{@code watchInstance()} / {@code startAsync()}）再也收不到任何结果。
+     *
+     * @param cause 用于以异常完成各 future 的原因
+     */
+    public void shutdownWatches(Throwable cause) {
+        WorkflowWatchHandler.cancelAll(cause);
     }
 }

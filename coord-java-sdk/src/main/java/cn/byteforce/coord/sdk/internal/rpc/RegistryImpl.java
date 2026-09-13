@@ -12,6 +12,7 @@ import cn.byteforce.coord.sdk.internal.proto.RegisterResponse;
 import cn.byteforce.coord.sdk.internal.proto.RegistryGrpc;
 import cn.byteforce.coord.sdk.internal.proto.WatchEvent;
 import cn.byteforce.coord.sdk.internal.proto.WatchRequest;
+import cn.byteforce.coord.sdk.internal.watch.GrpcWatchStream;
 import cn.byteforce.coord.sdk.internal.watch.WatchManager;
 import cn.byteforce.coord.sdk.registry.*;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
@@ -149,19 +150,17 @@ public final class RegistryImpl extends AgentRpcClient implements Registry {
                                         RegistryListener listener) throws CoordException {
         String watchId = "reg-" + serviceName + "-" + UUID.randomUUID().toString().substring(0, 8);
 
-        // Use holder array to capture reference before constructor completes
-        WatchManager.ActiveWatch[] holder = new WatchManager.ActiveWatch[1];
-
-        holder[0] = new WatchManager.ActiveWatch(
+        // 第四轮 §3.14.3：可取消的流 + 断线重连 + 从 lastRevision+1 续订
+        // （原先用阻塞式 stub iterator：取消要等下一条事件，断线则静默死亡）。
+        WatchManager.ActiveWatch watch = new WatchManager.ActiveWatch(
                 watchId,
-                () -> {
-                    WatchRequest request = WatchRequest.newBuilder()
-                            .setServiceName(serviceName)
-                            .setStartRevision(startRevision)
-                            .build();
-                    return RegistryGrpc.newBlockingStub(channelManager.getChannel())
-                            .watch(request);
-                },
+                (rev) -> new GrpcWatchStream(
+                        channelManager.getChannel(),
+                        RegistryGrpc.getWatchMethod(),
+                        WatchRequest.newBuilder()
+                                .setServiceName(serviceName)
+                                .setStartRevision(rev)
+                                .build()),
                 (WatchEvent protoEvent) -> {
                     RegistryEvent.EventType eventType = switch (protoEvent.getType()) {
                         case INSTANCES_ADDED -> RegistryEvent.EventType.INSTANCES_ADDED;
@@ -173,13 +172,15 @@ public final class RegistryImpl extends AgentRpcClient implements Registry {
                     for (cn.byteforce.coord.sdk.internal.proto.ServiceInstance si : protoEvent.getInstancesList()) {
                         instances.add(new ServiceInstance(si.getInstanceId(), si.getServiceName(), si.getMetadata()));
                     }
-                    holder[0].setLastRevision(protoEvent.getRevision());
                     listener.onEvent(new RegistryEvent(eventType, instances, protoEvent.getRevision()));
                 },
-                startRevision
+                // revision 水位在消费线程上同步推进（见 WatchManager）
+                (Object e) -> ((WatchEvent) e).getRevision(),
+                startRevision,
+                listener::onTerminated
         );
 
-        watchManager.startWatch(holder[0]);
+        watchManager.startWatch(watch);
         return () -> watchManager.cancelWatch(watchId);
     }
 
