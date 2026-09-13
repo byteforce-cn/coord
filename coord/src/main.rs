@@ -71,9 +71,16 @@ const SLOW_FOLLOWER_LAG_ENTRIES: u64 = 1000;
     long_about = "Coord 是一个分布式协调服务，提供类 etcd 的强一致性键值存储与协调原语。"
 )]
 struct Cli {
-    /// 数据目录路径（默认 /var/lib/coord）
-    #[arg(long, global = true, default_value = "/var/lib/coord")]
-    data_dir: PathBuf,
+    /// 数据目录路径
+    ///
+    /// 未显式指定时按子命令取各自默认值：`server` 用配置文件或 `/var/lib/coord`，
+    /// `agent` 用配置文件或 `/var/lib/coord-agent`，`dev` 用 `./coord-dev-data`。
+    ///
+    /// 这里**不能**设 clap `default_value`：那会让「未指定」与「显式指定
+    /// `/var/lib/coord`」不可区分，于是永远覆盖配置文件里的 `data_dir`
+    /// （agent 因此把插件账户写到 /var/lib/coord，非 root 环境直接 EACCES）。
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
 
     /// 配置文件路径（TOML 格式）
     #[arg(long, global = true)]
@@ -882,7 +889,7 @@ async fn main() {
                 Some(id),
                 Some(&addr),
                 raft_addr.as_deref(),
-                Some(&cli.data_dir),
+                cli.data_dir.as_ref(),
                 Some(&cluster_name),
                 join.as_deref(),
             );
@@ -1601,14 +1608,19 @@ async fn main() {
         },
 
         Commands::Reset { addr, keep_idgen } => {
+            // 未显式给出 --data-dir 时按 server 的规则解析（配置文件 > 默认值）。
+            let data_dir = cli
+                .data_dir
+                .clone()
+                .unwrap_or_else(|| file_config.clone().unwrap_or_default().resolve_data_dir());
             tracing::info!(
                 "Resetting local data dir {} (keep_idgen={}) via {}",
-                cli.data_dir.display(),
+                data_dir.display(),
                 keep_idgen,
                 addr
             );
             if let Err(e) = commands::cmd_reset(
-                &cli.data_dir,
+                &data_dir,
                 commands::CliConn::new(&addr, cli_tls.clone()),
                 keep_idgen,
             )
@@ -1688,7 +1700,12 @@ async fn main() {
             if !static_peers.is_empty() {
                 agent_config.static_peers = static_peers;
             }
-            agent_config.data_dir = cli.data_dir.to_string_lossy().to_string();
+            // 仅在显式给出 `--data-dir` 时覆盖：否则沿用配置文件里的 `data_dir`
+            // （其 serde 默认值为 `/var/lib/coord-agent`）。无条件覆盖会让配置文件
+            // 里的 `data_dir` 永远失效，并把插件账户密码写到 `/var/lib/coord`。
+            if let Some(dir) = &cli.data_dir {
+                agent_config.data_dir = dir.to_string_lossy().to_string();
+            }
 
             if let Err(e) =
                 coord_agent::run_agent_with_config_path(agent_config, agent_config_path).await
@@ -1721,7 +1738,7 @@ async fn main() {
                 &bind_addr,
                 grpc_port,
                 agent_port,
-                &cli.data_dir,
+                cli.data_dir.as_deref(),
                 &cluster_name,
                 fresh,
                 allow_insecure,
@@ -3752,7 +3769,7 @@ async fn run_dev(
     bind_addr: &str,
     grpc_port: u16,
     agent_port: u16,
-    data_dir: &std::path::Path,
+    data_dir: Option<&std::path::Path>,
     cluster_name: &str,
     fresh: bool,
     allow_insecure: bool,
@@ -3773,13 +3790,15 @@ async fn run_dev(
     let agent_addr = format!("{}:{}", bind_addr, agent_port);
     let http_port = agent_port + 1;
 
-    // 1. 确定数据目录（开发模式使用项目本地目录，避免权限问题）
-    let dev_data_dir = if data_dir.to_string_lossy() == "/var/lib/coord" {
-        // 使用默认全局 --data-dir 值时，dev 模式改用本地目录
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        cwd.join("coord-dev-data")
-    } else {
-        data_dir.to_path_buf()
+    // 1. 确定数据目录：显式 `--data-dir` 优先；未指定时用项目本地目录（避免在 CI /
+    //    非 root 环境下写 /var/lib 的权限问题）。此前靠字符串哨兵
+    //    `== "/var/lib/coord"` 猜测"是否走了默认值"，代价是显式指定该路径时会被
+    //    静默改写成 ./coord-dev-data。
+    let dev_data_dir = match data_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("coord-dev-data"),
     };
 
     // 1.5. --fresh: 启动前清空数据目录

@@ -10,8 +10,11 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(name = "coord", about = "test")]
 struct TestCli {
-    #[arg(long, global = true, default_value = "/var/lib/coord")]
-    data_dir: String,
+    // 与 coord/src/main.rs 保持一致：**不能**设 clap `default_value`。带上默认值会让
+    // 「用户没传」与「用户传了 /var/lib/coord」不可区分，从而永远覆盖配置文件里的
+    // `data_dir`（agent 因此把插件账户写到 /var/lib/coord）。
+    #[arg(long, global = true)]
+    data_dir: Option<String>,
 
     #[arg(long, global = true)]
     config: Option<String>,
@@ -61,6 +64,10 @@ enum TestCommands {
 fn test_agent_subcommand_defaults() {
     let args = vec!["coord", "agent"];
     let cli = TestCli::try_parse_from(args).expect("should parse agent subcommand");
+
+    // 未给出 `--data-dir` 时必须为 None（即真实 CLI 不再带 default_value），
+    // 否则子命令无法把「用户没传」与「用户传了默认路径」区分开。
+    assert_eq!(cli.data_dir, None);
 
     match cli.command {
         TestCommands::Agent {
@@ -285,4 +292,115 @@ ca_path = "{ca}"
 
     let _ = child.kill();
     let _ = child.wait();
+}
+
+// ──── 回归：`--data-dir` 未显式给出时必须沿用配置文件的 `data_dir` ────
+
+fn log_tail(path: &std::path::Path, lines: usize) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| format!("<读不到日志: {e}>"));
+    let all: Vec<&str> = text.lines().collect();
+    let start = all.len().saturating_sub(lines);
+    all[start..].join("\n")
+}
+
+/// 启动 `coord agent`，等待 `expected` 数据目录出现；失败时把 agent 日志尾部带进断言。
+async fn spawn_agent_and_expect_data_dir(
+    cfg_path: &std::path::Path,
+    explicit_data_dir: Option<&std::path::Path>,
+    expected: &std::path::Path,
+) {
+    let bin = env!("CARGO_BIN_EXE_coord");
+    let log_path = cfg_path.with_extension("agent.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+
+    let mut cmd = Command::new(bin);
+    cmd.arg("agent").arg("--agent-config").arg(cfg_path);
+    if let Some(dir) = explicit_data_dir {
+        cmd.arg("--data-dir").arg(dir);
+    }
+    let mut child = cmd
+        .env("RUST_LOG", "coord=info")
+        .stdout(Stdio::from(log.try_clone().unwrap()))
+        .stderr(Stdio::from(log))
+        .spawn()
+        .expect("spawn coord agent");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !expected.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let created = expected.exists();
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        created,
+        "agent 必须在 {} 下创建数据目录（显式 --data-dir: {}）\n\
+         --- agent.log 尾部 ---\n{}",
+        expected.display(),
+        explicit_data_dir.is_some(),
+        log_tail(&log_path, 25)
+    );
+}
+
+/// 回归用例（两个方向都铉住）：
+///
+/// 1. **只给配置、不给 `--data-dir`** → 必须用配置文件里的 `data_dir`；
+/// 2. **显式给 `--data-dir`** → 必须优先于配置文件（`CLI > 配置` 的优先级不得被破坏）。
+///
+/// 背景（为什么需要这个用例）：全局 `--data-dir` 曾经带 clap
+/// `default_value = "/var/lib/coord"` 且类型是 `PathBuf`，因此「用户没传」与
+/// 「用户传了 /var/lib/coord」不可区分；`coord/src/main.rs` 用它**无条件**覆盖
+/// `agent_config.data_dir`，于是配置文件里的 `data_dir` 永远失效，agent 把插件账户
+/// 密码与缓存写到 `/var/lib/coord`。
+///
+/// 在 CI 上（runner 非 root，`/var/lib` 不可写）这表现为
+/// `Permission denied (os error 13)`：插件身份无法持久化 → agent 重启后
+/// `unauthenticated: invalid credentials` → 回退共享未鉴权客户端 → 服务端 fail-closed
+/// 拒绝（`plugin_real_agent_process_e2e` 就是这么红的）。
+///
+/// 关键属性：该用例在 **root 与非 root 下都会失败**（旧行为下配置里指定的目录根本
+/// 不会被创建）—— 这正是此前「本地全绿、CI 全红」的原因，所以本地用 root 跑测试
+/// 也不会漏掉它。
+#[tokio::test]
+async fn test_agent_uses_config_data_dir_unless_flag_is_explicit() {
+    let tmpdir = tempfile::tempdir().unwrap();
+
+    // 只写配置；`--data-dir` 是否传由调用方决定。
+    let write_cfg = |name: &str, data_dir: &std::path::Path| {
+        let port = find_free_port();
+        let http_port = find_free_port();
+        let peer = find_free_port();
+        let cfg = tmpdir.path().join(name);
+        std::fs::write(
+            &cfg,
+            format!(
+                "agent_addr = \"127.0.0.1:{port}\"\n\
+                 http_addr = \"127.0.0.1:{http_port}\"\n\
+                 data_dir = \"{dir}\"\n\
+                 discovery_mode = \"static\"\n\
+                 static_peers = [\"127.0.0.1:{peer}\"]\n",
+                dir = data_dir.display()
+            ),
+        )
+        .unwrap();
+        cfg
+    };
+
+    // (1) 只给配置：agent 必须自己创建配置里指定的那个数据目录。
+    let from_config = tmpdir.path().join("data-from-config");
+    let cfg1 = write_cfg("agent-config-only.toml", &from_config);
+    spawn_agent_and_expect_data_dir(&cfg1, None, &from_config).await;
+
+    // (2) 显式 --data-dir：必须优先于配置文件里的 data_dir。
+    let in_config = tmpdir.path().join("data-in-config");
+    let explicit = tmpdir.path().join("data-explicit");
+    let cfg2 = write_cfg("agent-explicit.toml", &in_config);
+    spawn_agent_and_expect_data_dir(&cfg2, Some(&explicit), &explicit).await;
+    assert!(
+        !in_config.exists(),
+        "显式 --data-dir 存在时不得再使用配置文件里的 data_dir {}",
+        in_config.display()
+    );
 }

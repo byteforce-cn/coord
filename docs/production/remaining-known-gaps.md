@@ -317,14 +317,88 @@ Local reproduction, same commit, same command:
 CI's own manifestation was the `missing CCT token` variant: under contention the agent's
 `Authenticate` for the plugin account fails, `ensure` fails, and the plugin degrades to the
 unauthenticated client. `ci.yml` now pre-cleans before **every** process-heavy step in that job
-(7 steps), and `scripts/kill-stray-coord-procs.sh` only touches `--data-dir /tmp/.tmp*`, so real
-clusters are untouched.
+(7 steps). `scripts/kill-stray-coord-procs.sh` only touches processes whose data directory — or,
+for the suites that configure the agent through `--agent-config` alone, whose *config path* — is
+under `/tmp/.tmp*`, so real clusters are untouched (verified: a `--agent-config /tmp/.tmpFAKE/…`
+agent is killed while the local dev cluster on `.coord-dev-cluster` keeps running).
 
 *Still open:* after the bounded retries fail there is **no on-demand retry** — the plugin stays
 degraded until it is reloaded. Closing this means resolving the client lazily per call (or
 re-running `ensure` when an outbound call is denied). The real-process test now dumps the agent
 log tail into the assertion message, because the client-side error alone (`missing CCT token`)
 cannot distinguish "identity never authenticated" from "token expired".
+
+#### 14. `--data-dir` silently overrode the configured `data_dir` — **fixed** (this was the last chaos red)
+
+This is the defect behind the `plugin_real_agent_process_e2e` red that §13 first attributed to
+inter-suite contamination. Contamination was real, but it was not the whole story.
+
+`coord/src/main.rs` declared the global flag as `data_dir: PathBuf` with clap
+`default_value = "/var/lib/coord"`. A clap default is **indistinguishable from an explicitly
+passed argument**, so the flag was always populated:
+
+* `Commands::Agent` did `agent_config.data_dir = cli.data_dir…` **unconditionally** — the
+  `data_dir` in `agent.toml` never took effect. The agent used `/var/lib/coord`, i.e. the
+  *server's* default, not the agent's documented `/var/lib/coord-agent`.
+* `Commands::Server` passed `Some(&cli.data_dir)` to `apply_cli_overrides`, with the same effect
+  on `coord.toml` (`apply_cli_overrides` only skips a field when it receives `None`).
+* `run_dev` compensated with a string sentinel: `if data_dir.to_string_lossy() == "/var/lib/coord"`,
+  which silently rewrote an explicitly-passed `/var/lib/coord` to `./coord-dev-data`.
+
+**Reproduced exactly, in CI's condition** (uid 1000, `/var/lib/coord` absent — as on a fresh
+runner), running CI's step-11 command:
+
+```
+thread 'plugin_real_agent_process_e2e' panicked at coord/tests/plugin_real_process_test.rs:647:13:
+plugin KV write must still succeed after agent restart (persisted account):
+  code: 'Internal error', message: "plugin 'counter' invoke 'put' failed: … unauthenticated: missing CCT token"
+ERROR plugin 'cache' start failed: Permission denied (os error 13); isolating
+ERROR 2 builtin service(s) failed to start: [("cache", "start failed: Permission denied (os error 13)"), …]
+```
+
+That is the same failure, on the same assertion, as the CI log. Mechanism: the agent could not
+create `/var/lib/coord/cache.redb` nor persist `plugin-accounts/`, so the plugin account password
+was never durable; after the test's `agent.restart()` step the agent generated a *new* random
+password, `Authenticate` failed (`unauthenticated: invalid credentials`), the plugin fell back to
+the shared unauthenticated client, and every server-side check was fail-closed
+(`missing CCT token`).
+
+**Why it stayed hidden locally — two independent reasons:**
+
+1. The suites were run as **root**, for whom `/var/lib/coord` is writable; the configured
+   temp directory was silently ignored and nothing complained.
+2. Once `/var/lib/coord/plugin-accounts/*.enc` exists (written by any earlier root run), it is
+   world-readable, so a non-root run can still `load` the secret even though it cannot `store`
+   it — which is enough to make the restart step pass. This is why the failure only appears when
+   the directory does **not** pre-exist, as on CI.
+
+Fixed: `--data-dir` is now `Option<PathBuf>` with no clap default, so "not passed" is
+representable; the agent overrides `data_dir` only when the flag is explicit; the server passes
+`as_ref()`; `run_dev` takes `Option<&Path>` and uses `./coord-dev-data` on `None`, with the
+sentinel removed.
+
+Evidence:
+
+* `coord/tests/cli_agent_test.rs::test_agent_uses_config_data_dir_unless_flag_is_explicit` pins
+  **both** directions (config alone ⇒ the configured directory is used; explicit flag ⇒ the flag
+  wins and the configured directory is not created).
+* Negative-controlled: against the pre-fix `main.rs` the new test **fails** (it waits out its
+  30 s deadline because the configured directory is never created). It fails **as root too**, so
+  this class of bug can no longer hide behind "local is green, CI is red".
+* A/B on CI's own step-11 command, uid 1000, `/var/lib/coord` absent:
+  pre-fix **red** with the log above; post-fix **green** (3.37 s) and `/var/lib/coord` is
+  **never created**.
+* A direct probe of `coord agent --agent-config …` as uid 1000 confirms the unit-level change:
+  pre-fix the configured directory is not created and `Permission denied` appears twice;
+  post-fix it is created (`cache.redb`) with zero `Permission denied`.
+
+*Side effect worth knowing:* this also fixes real-process isolation — the suites no longer share
+`/var/lib/coord`, so cross-suite state leakage through the default data directory is gone.
+
+*Also:* chaos steps 12 (`OBJECT_STORAGE_REAL`) and 13 (`AGENT_AUTH_REAL`) had **never executed**
+in CI, because step 11's failure skipped them. Both were run locally as uid 1000 against the
+fixed binary and pass (3.40 s / 2.74 s), so the now-unblocked tail of that job is exercised
+rather than assumed.
 
 ---
 
@@ -351,7 +425,7 @@ exposing real defects:
 | `frontend lint (coord-ui)` | red (never passed) | fixed: see §11 |
 | `cargo audit + deny` | red | fixed: see §10 |
 | `java sdk (maven verify)` | green | red once via a flaky test: see §12 |
-| `real-process chaos (nightly + PR gate)` | never ran (its first step failed on an empty `toolchain` input) | first real run at `5097072`; `plugin_real_agent_process_e2e` fails: see §13 |
+| `real-process chaos (nightly + PR gate)` | never ran (its first step failed on an empty `toolchain` input) | first real run at `5097072`; `plugin_real_agent_process_e2e` failed on the `--data-dir` defect — fixed, see §14; steps 12–13 (never reached before) verified locally as non-root |
 | `weekly perf baseline` | skipped on PRs | skipped on PRs (by design) |
 
 Notable: the baseline's `real-process chaos` job failed at `dtolnay/rust-toolchain@master`

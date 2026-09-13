@@ -365,7 +365,8 @@ jobs:
       # CI 上同一提交的不同表现（`missing CCT token`）是同一根因的另一种表现：
       # 负载下 agent 自举插件的 `Authenticate` 失败 → 插件降级为无凭据客户端。
       #
-      # 脚本只清理 `--data-dir /tmp/.tmp*`（测试临时目录），不会碰真实集群。
+      # 脚本只清理数据目录（或 `--agent-config` 配置路径）位于 `/tmp/.tmp*` 的进程
+      # ——即测试临时目录；不会碰真实集群。
       - name: Run real-process chaos suites
         env:
           CHAOS_REAL: "1"

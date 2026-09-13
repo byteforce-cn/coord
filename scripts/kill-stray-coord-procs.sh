@@ -6,8 +6,9 @@
 # 最久 11 小时），它们持续占用 CPU / 端口 / 临时目录，导致后续进程级套件出现
 # "raft write timed out (no quorum?)" 这类**看起来像产品 bug 的假红**。
 #
-# 安全性：**只**清理数据目录位于临时目录下（`/tmp/.tmp*`、`$TMPDIR/.tmp*`）
-# 的进程 —— 即测试用临时数据目录；人工启动的集群（真实 data-dir）不会被碰。
+# 安全性：**只**清理数据目录（或进程级测试的 `--agent-config` 配置路径）位于临时
+# 目录下（`/tmp/.tmp*`、`$TMPDIR/.tmp*`）的进程 —— 即测试用临时数据目录；人工启动
+# 的集群（真实 data-dir / 真实配置路径）不会被碰。
 #
 # 用法：
 #   scripts/kill-stray-coord-procs.sh          # 清理
@@ -33,7 +34,12 @@ if [[ -n "${TMPDIR:-}" && "${TMPDIR%/}" != "/tmp" ]]; then
     TMP_ROOTS="/tmp|${TMPDIR%/}"
 fi
 
-PATTERN="target/(debug|release)/coord (server|agent).*--data-dir (${TMP_ROOTS})/\.tmp"
+# 匹配两类测试进程：
+#   1. `coord server|agent ... --data-dir <tmp>/.tmp*` —— 多数套件显式传 `--data-dir`；
+#   2. `coord agent --agent-config <tmp>/.tmp*/agent.toml` —— 进程级插件套件（如
+#      `plugin_real_process_test`）只给配置文件，data_dir 写在配置里，命令行上**没有**
+#      `--data-dir`，旧 pattern 因此漏掉这类孤儿 agent。
+PATTERN="target/(debug|release)/coord (server|agent).*(--data-dir|--agent-config) (${TMP_ROOTS})/\.tmp"
 
 # 不带 mapfile 的 PID 收集（每行一个 PID）
 collect_pids() {
