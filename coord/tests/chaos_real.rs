@@ -563,10 +563,14 @@ async fn chaos_soak_distributed() {
             put_any(&nodes, key, value.as_bytes()).await.is_some(),
             "soak put failed at iteration {counter}"
         );
-        // 每 50 次写校验全节点收敛（无泄漏/漂移的粗检）
+        // 每 50 次写校验全节点收敛（无泄漏/漂移的粗检）。
+        // 收敛读必须用独立的短截止时间，不能复用全局 `deadline`：浸泡临近
+        // 结束时全局 deadline 已过，`range_any` 会立即返回 None，把「浸泡正常
+        // 跑完」误判成「节点发散」而让整轮 72h 浸泡假红。
         if counter % 50 == 0 {
+            let check_deadline = Instant::now() + Duration::from_secs(30);
             for n in &nodes {
-                let v = range_any(&nodes, key, deadline).await;
+                let v = range_any(&nodes, key, check_deadline).await;
                 assert_eq!(
                     v,
                     Some(value.clone().into_bytes()),
