@@ -1,0 +1,330 @@
+0	:invoke	:read	nil
+0	:ok	:read	nil
+2	:invoke	:write	464000
+3	:invoke	:read	nil
+4	:invoke	:read	nil
+3	:ok	:read	nil
+2	:ok	:write	464000
+4	:ok	:read	nil
+0	:invoke	:read	nil
+0	:ok	:read	nil
+0	:invoke	:read	nil
+0	:ok	:read	464000
+1	:invoke	:write	439690
+1	:ok	:write	439690
+2	:invoke	:read	nil
+2	:ok	:read	nil
+3	:invoke	:write	920858
+3	:ok	:write	920858
+4	:invoke	:write	259262
+4	:ok	:write	259262
+0	:invoke	:read	nil
+0	:ok	:read	nil
+0	:invoke	:write	476279
+1	:invoke	:read	nil
+1	:ok	:read	439690
+0	:ok	:write	476279
+2	:invoke	:write	957066
+2	:ok	:write	957066
+3	:invoke	:read	nil
+3	:ok	:read	476279
+4	:invoke	:read	nil
+4	:ok	:read	957066
+0	:invoke	:write	311470
+1	:invoke	:read	nil
+1	:ok	:read	957066
+1	:invoke	:write	26296
+0	:ok	:write	311470
+1	:ok	:write	26296
+2	:invoke	:read	nil
+2	:ok	:read	26296
+3	:invoke	:read	nil
+3	:ok	:read	311470
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	[:isolated {"n3" #{"n1"}, "n1" #{"n2"}, "n2" #{"n3"}}]
+0	:invoke	:write	53649
+1	:invoke	:read	nil
+1	:info	:read	nil	:unavailable-maybe-applied
+2	:invoke	:read	nil
+3	:invoke	:write	887545
+3	:fail	:write	887545	:not-leader
+2	:info	:read	nil	:unavailable-maybe-applied
+4	:invoke	:write	281194
+4	:fail	:write	281194	:not-leader
+6	:invoke	:read	nil
+7	:invoke	:read	nil
+3	:invoke	:read	nil
+3	:info	:read	nil	:unavailable-maybe-applied
+8	:invoke	:read	nil
+4	:invoke	:read	nil
+4	:info	:read	nil	:unavailable-maybe-applied
+9	:invoke	:write	327189
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	:network-healed
+0	:info	:write	53649	:timeout
+5	:invoke	:read	nil
+6	:fail	:read	nil	:not-leader
+9	:ok	:write	327189
+7	:ok	:read	327189
+8	:ok	:read	53649
+5	:ok	:read	53649
+7	:invoke	:read	nil
+7	:ok	:read	53649
+8	:invoke	:write	652541
+8	:ok	:write	652541
+9	:invoke	:read	nil
+5	:invoke	:read	nil
+9	:ok	:read	26296
+5	:ok	:read	26296
+5	:invoke	:write	564889
+6	:invoke	:read	nil
+6	:ok	:read	26296
+5	:ok	:write	564889
+7	:invoke	:write	188139
+7	:ok	:write	188139
+8	:invoke	:write	862004
+8	:ok	:write	862004
+9	:invoke	:read	nil
+9	:ok	:read	188139
+5	:invoke	:write	364271
+5	:ok	:write	364271
+5	:invoke	:read	nil
+5	:ok	:read	364271
+6	:invoke	:read	nil
+6	:ok	:read	564889
+7	:invoke	:read	nil
+7	:ok	:read	188139
+8	:invoke	:write	230689
+8	:ok	:write	230689
+9	:invoke	:read	nil
+9	:ok	:read	364271
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	[:isolated {"n3" #{"n2"}, "n2" #{"n1"}, "n1" #{"n3"}}]
+6	:invoke	:write	151383
+7	:invoke	:write	762235
+7	:fail	:write	762235	:not-leader
+8	:invoke	:read	nil
+9	:invoke	:write	509649
+9	:fail	:write	509649	:not-leader
+8	:info	:read	nil	:unavailable-maybe-applied
+5	:invoke	:read	nil
+5	:info	:read	nil	:unavailable-maybe-applied
+10	:invoke	:write	38793
+7	:invoke	:read	nil
+7	:info	:read	nil	:unavailable-maybe-applied
+12	:invoke	:read	nil
+13	:invoke	:write	256350
+9	:invoke	:write	7420
+9	:fail	:write	7420	:not-leader
+9	:invoke	:read	nil
+9	:info	:read	nil	:unavailable-maybe-applied
+14	:invoke	:write	637098
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	:network-healed
+6	:info	:write	151383	:timeout
+11	:invoke	:read	nil
+12	:ok	:read	364271
+12	:invoke	:read	nil
+12	:info	:read	nil	:unavailable-maybe-applied
+10	:fail	:write	38793	:not-leader
+14	:ok	:write	637098
+11	:ok	:read	637098
+13	:ok	:write	256350
+10	:invoke	:write	447975
+10	:ok	:write	447975
+10	:invoke	:read	nil
+10	:ok	:read	447975
+11	:invoke	:write	579891
+11	:ok	:write	579891
+17	:invoke	:write	509535
+17	:ok	:write	509535
+13	:invoke	:write	475979
+13	:ok	:write	475979
+14	:invoke	:write	29400
+14	:ok	:write	29400
+10	:invoke	:read	nil
+10	:ok	:read	447975
+10	:invoke	:write	753389
+10	:ok	:write	753389
+11	:invoke	:write	978512
+17	:invoke	:read	nil
+17	:ok	:read	447975
+11	:ok	:write	978512
+13	:invoke	:write	645316
+13	:ok	:write	645316
+14	:invoke	:write	892222
+14	:ok	:write	892222
+10	:invoke	:write	860771
+10	:ok	:write	860771
+10	:invoke	:read	nil
+10	:ok	:read	447975
+:nemesis	:info	:start	nil
+17	:invoke	:write	690290
+:nemesis	:info	:start	[:isolated {"n3" #{"n2"}, "n2" #{"n1"}, "n1" #{"n3"}}]
+14	:invoke	:read	nil
+10	:invoke	:read	nil
+14	:info	:read	nil	:unavailable-maybe-applied
+10	:info	:read	nil	:unavailable-maybe-applied
+15	:invoke	:write	563376
+11	:invoke	:write	360323
+13	:invoke	:read	nil
+13	:info	:read	nil	:unavailable-maybe-applied
+18	:invoke	:read	nil
+19	:invoke	:write	863852
+17	:info	:write	690290	:timeout
+22	:invoke	:read	nil
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	:network-healed
+11	:info	:write	360323	:timeout
+16	:invoke	:read	nil
+16	:ok	:read	690290
+16	:invoke	:write	161413
+15	:ok	:write	563376
+16	:ok	:write	161413
+22	:ok	:read	161413
+18	:ok	:read	161413
+19	:ok	:write	863852
+19	:invoke	:read	nil
+19	:ok	:read	563376
+15	:invoke	:write	919986
+15	:ok	:write	919986
+15	:invoke	:write	662108
+15	:ok	:write	662108
+16	:invoke	:read	nil
+16	:ok	:read	919986
+22	:invoke	:write	695347
+22	:ok	:write	695347
+18	:invoke	:read	nil
+18	:ok	:read	695347
+19	:invoke	:write	287902
+19	:ok	:write	287902
+15	:invoke	:write	948948
+15	:ok	:write	948948
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	[:isolated {"n1" #{"n2"}, "n2" #{"n3"}, "n3" #{"n1"}}]
+22	:invoke	:write	500699
+18	:invoke	:write	551133
+19	:invoke	:read	nil
+15	:invoke	:read	nil
+19	:info	:read	nil	:unavailable-maybe-applied
+15	:info	:read	nil	:unavailable-maybe-applied
+20	:invoke	:read	nil
+16	:invoke	:write	25226
+16	:fail	:write	25226	:not-leader
+24	:invoke	:read	nil
+16	:invoke	:write	790400
+16	:fail	:write	790400	:not-leader
+16	:invoke	:write	500822
+16	:fail	:write	500822	:not-leader
+16	:invoke	:read	nil
+16	:info	:read	nil	:unavailable-maybe-applied
+21	:invoke	:write	673407
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	:network-healed
+22	:info	:write	500699	:timeout
+27	:invoke	:write	955583
+18	:info	:write	551133	:timeout
+23	:invoke	:read	nil
+27	:ok	:write	955583
+27	:invoke	:write	170788
+24	:ok	:read	955583
+27	:ok	:write	170788
+20	:ok	:read	500699
+23	:ok	:read	170788
+21	:ok	:write	673407
+20	:invoke	:write	292307
+20	:ok	:write	292307
+21	:invoke	:read	nil
+21	:ok	:read	292307
+27	:invoke	:write	238913
+23	:invoke	:read	nil
+27	:ok	:write	238913
+23	:ok	:read	238913
+24	:invoke	:read	nil
+24	:ok	:read	238913
+20	:invoke	:read	nil
+20	:ok	:read	673407
+20	:invoke	:read	nil
+20	:ok	:read	673407
+21	:invoke	:read	nil
+21	:ok	:read	238913
+27	:invoke	:read	nil
+27	:ok	:read	673407
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	[:isolated {"n3" #{"n1"}, "n1" #{"n2"}, "n2" #{"n3"}}]
+20	:invoke	:read	nil
+20	:info	:read	nil	:unavailable-maybe-applied
+25	:invoke	:write	101847
+21	:invoke	:read	nil
+21	:info	:read	nil	:unavailable-maybe-applied
+27	:invoke	:read	nil
+23	:invoke	:read	nil
+27	:info	:read	nil	:unavailable-maybe-applied
+23	:info	:read	nil	:unavailable-maybe-applied
+24	:invoke	:write	509719
+26	:invoke	:read	nil
+24	:fail	:write	509719	:not-leader
+32	:invoke	:write	54818
+28	:invoke	:write	24085
+24	:invoke	:read	nil
+24	:info	:read	nil	:unavailable-maybe-applied
+29	:invoke	:read	nil
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	:network-healed
+28	:ok	:write	24085
+28	:invoke	:read	nil
+28	:ok	:read	292307
+26	:ok	:read	673407
+29	:ok	:read	292307
+32	:ok	:write	54818
+25	:ok	:write	101847
+26	:invoke	:read	nil
+26	:ok	:read	54818
+32	:invoke	:read	nil
+32	:ok	:read	54818
+28	:invoke	:read	nil
+28	:ok	:read	54818
+29	:invoke	:write	871639
+29	:ok	:write	871639
+25	:invoke	:write	664896
+25	:ok	:write	664896
+25	:invoke	:read	nil
+25	:ok	:read	871639
+26	:invoke	:write	600911
+26	:ok	:write	600911
+32	:invoke	:write	897750
+32	:ok	:write	897750
+28	:invoke	:read	nil
+28	:ok	:read	664896
+29	:invoke	:read	nil
+29	:ok	:read	600911
+25	:invoke	:read	nil
+25	:ok	:read	897750
+25	:invoke	:read	nil
+25	:ok	:read	664896
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	[:isolated {"n3" #{"n1"}, "n1" #{"n2"}, "n2" #{"n3"}}]
+28	:invoke	:read	nil
+28	:info	:read	nil	:unavailable-maybe-applied
+29	:invoke	:read	nil
+25	:invoke	:write	786065
+25	:fail	:write	786065	:not-leader
+29	:info	:read	nil	:unavailable-maybe-applied
+25	:invoke	:read	nil
+25	:info	:read	nil	:unavailable-maybe-applied
+26	:invoke	:read	nil
+32	:invoke	:write	723717
+32	:fail	:write	723717	:not-leader
+26	:info	:read	nil	:unavailable-maybe-applied
+33	:invoke	:read	nil
+34	:invoke	:write	666119
+30	:invoke	:write	208592
+31	:invoke	:write	462885
+32	:invoke	:read	nil
+32	:info	:read	nil	:unavailable-maybe-applied
+33	:fail	:read	nil	[:no-client Failed to authenticate to coord]
+34	:fail	:write	666119	[:no-client Failed to authenticate to coord]
+30	:fail	:write	208592	[:no-client Failed to authenticate to coord]
+31	:fail	:write	462885	[:no-client Failed to authenticate to coord]
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	:network-healed

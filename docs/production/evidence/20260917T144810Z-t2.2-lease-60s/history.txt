@@ -1,0 +1,414 @@
+0	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/1", :ttl 2, :grace-ms 4000}
+1	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/3", :ttl 2, :grace-ms 4000}
+2	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/5", :ttl 30, :grace-ms 4000}
+3	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/7", :ttl 2, :grace-ms 4000}
+4	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/9", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/5", :ttl 30, :grace-ms 4000}
+5	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/12", :ttl 30, :grace-ms 4000}
+6	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/14", :ttl 30, :grace-ms 4000}
+7	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/16", :ttl 30, :grace-ms 4000}
+8	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/18", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/20", :ttl 30, :grace-ms 4000}
+2	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/22", :ttl 2, :grace-ms 4000}
+6	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/14", :ttl 30, :grace-ms 4000}
+5	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/12", :ttl 30, :grace-ms 4000}
+5	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/24", :ttl 30, :grace-ms 4000}
+9	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/20", :ttl 30, :grace-ms 4000}
+7	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/16", :ttl 30, :grace-ms 4000}
+6	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/25", :ttl 2, :grace-ms 4000}
+0	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/1", :ttl 2, :grace-ms 4000}
+7	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/26", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/24", :ttl 30, :grace-ms 4000}
+1	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/3", :ttl 2, :grace-ms 4000}
+5	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/30", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+3	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/7", :ttl 2, :grace-ms 4000}
+4	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/9", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+4	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/23", :ttl 2, :grace-ms 4000}
+2	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/22", :ttl 2, :grace-ms 4000}
+9	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/33", :ttl 2, :grace-ms 4000}
+0	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/35", :ttl 30, :grace-ms 4000}
+1	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/37", :ttl 30, :grace-ms 4000}
+2	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/39", :ttl 2, :grace-ms 4000}
+3	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/41", :ttl 30, :grace-ms 4000}
+0	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/35", :ttl 30, :grace-ms 4000}
+1	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/37", :ttl 30, :grace-ms 4000}
+3	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/41", :ttl 30, :grace-ms 4000}
+6	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/25", :ttl 2, :grace-ms 4000}
+8	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/18", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+0	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/45", :ttl 2, :grace-ms 4000}
+7	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/26", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/30", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+1	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/43", :ttl 30, :grace-ms 4000}
+3	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/42", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+1	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/43", :ttl 30, :grace-ms 4000}
+5	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/48", :ttl 30, :grace-ms 4000}
+6	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/50", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+7	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/52", :ttl 2, :grace-ms 4000}
+8	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/44", :ttl 2, :grace-ms 4000}
+1	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/54", :ttl 30, :grace-ms 4000}
+5	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/48", :ttl 30, :grace-ms 4000}
+4	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/23", :ttl 2, :grace-ms 4000}
+4	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/55", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/33", :ttl 2, :grace-ms 4000}
+9	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/57", :ttl 2, :grace-ms 4000}
+5	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/60", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/39", :ttl 2, :grace-ms 4000}
+2	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/56", :ttl 2, :grace-ms 4000}
+1	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/54", :ttl 30, :grace-ms 4000}
+1	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/62", :ttl 2, :grace-ms 4000}
+0	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/45", :ttl 2, :grace-ms 4000}
+0	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/63", :ttl 2, :grace-ms 4000}
+8	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/44", :ttl 2, :grace-ms 4000}
+8	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/58", :ttl 30, :grace-ms 4000}
+7	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/52", :ttl 2, :grace-ms 4000}
+3	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/42", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+8	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/58", :ttl 30, :grace-ms 4000}
+3	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/64", :ttl 2, :grace-ms 4000}
+7	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/61", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+8	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/67", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/57", :ttl 2, :grace-ms 4000}
+9	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/65", :ttl 2, :grace-ms 4000}
+2	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/56", :ttl 2, :grace-ms 4000}
+2	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/69", :ttl 30, :grace-ms 4000}
+1	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/62", :ttl 2, :grace-ms 4000}
+1	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/72", :ttl 30, :grace-ms 4000}
+6	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/50", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+4	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/55", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+4	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/73", :ttl 30, :grace-ms 4000}
+2	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/69", :ttl 30, :grace-ms 4000}
+1	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/72", :ttl 30, :grace-ms 4000}
+0	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/63", :ttl 2, :grace-ms 4000}
+4	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/73", :ttl 30, :grace-ms 4000}
+0	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/70", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/60", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+1	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/76", :ttl 30, :grace-ms 4000}
+2	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/78", :ttl 30, :grace-ms 4000}
+3	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/64", :ttl 2, :grace-ms 4000}
+1	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/76", :ttl 30, :grace-ms 4000}
+9	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/65", :ttl 2, :grace-ms 4000}
+2	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/78", :ttl 30, :grace-ms 4000}
+8	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/67", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+7	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/61", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/68", :ttl 2, :grace-ms 4000}
+3	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/80", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+0	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/70", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+4	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/71", :ttl 2, :grace-ms 4000}
+5	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/82", :ttl 30, :grace-ms 4000}
+6	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/84", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/82", :ttl 30, :grace-ms 4000}
+7	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/87", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+8	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/89", :ttl 2, :grace-ms 4000}
+2	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/68", :ttl 2, :grace-ms 4000}
+9	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/92", :ttl 2, :grace-ms 4000}
+0	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/94", :ttl 2, :grace-ms 4000}
+1	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/96", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+3	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/80", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/99", :ttl 2, :grace-ms 4000}
+3	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/101", :ttl 30, :grace-ms 4000}
+4	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/71", :ttl 2, :grace-ms 4000}
+4	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/104", :ttl 2, :grace-ms 4000}
+3	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/101", :ttl 30, :grace-ms 4000}
+5	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/107", :ttl 2, :grace-ms 4000}
+6	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/84", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+6	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/110", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+3	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/112", :ttl 2, :grace-ms 4000}
+8	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/89", :ttl 2, :grace-ms 4000}
+8	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/115", :ttl 2, :grace-ms 4000}
+7	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/87", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/92", :ttl 2, :grace-ms 4000}
+0	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/94", :ttl 2, :grace-ms 4000}
+9	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/116", :ttl 30, :grace-ms 4000}
+0	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/114", :ttl 2, :grace-ms 4000}
+9	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/116", :ttl 30, :grace-ms 4000}
+7	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/119", :ttl 2, :grace-ms 4000}
+2	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/99", :ttl 2, :grace-ms 4000}
+4	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/104", :ttl 2, :grace-ms 4000}
+1	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/96", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/107", :ttl 2, :grace-ms 4000}
+1	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/113", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/121", :ttl 2, :grace-ms 4000}
+4	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/123", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/125", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+3	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/112", :ttl 2, :grace-ms 4000}
+6	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/110", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+6	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/129", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+8	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/115", :ttl 2, :grace-ms 4000}
+0	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/114", :ttl 2, :grace-ms 4000}
+7	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/119", :ttl 2, :grace-ms 4000}
+7	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/134", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+8	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/136", :ttl 2, :grace-ms 4000}
+2	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/121", :ttl 2, :grace-ms 4000}
+9	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/139", :ttl 2, :grace-ms 4000}
+0	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/141", :ttl 2, :grace-ms 4000}
+2	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/143", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+1	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/113", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+1	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/146", :ttl 2, :grace-ms 4000}
+5	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/125", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+4	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/123", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+6	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/129", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+3	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/150", :ttl 2, :grace-ms 4000}
+7	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/134", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+4	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/153", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/155", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+8	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/136", :ttl 2, :grace-ms 4000}
+9	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/139", :ttl 2, :grace-ms 4000}
+6	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/159", :ttl 2, :grace-ms 4000}
+7	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/161", :ttl 2, :grace-ms 4000}
+0	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/141", :ttl 2, :grace-ms 4000}
+8	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/164", :ttl 30, :grace-ms 4000}
+8	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/164", :ttl 30, :grace-ms 4000}
+8	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/167", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/169", :ttl 30, :grace-ms 4000}
+1	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/146", :ttl 2, :grace-ms 4000}
+9	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/169", :ttl 30, :grace-ms 4000}
+9	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/173", :ttl 2, :grace-ms 4000}
+0	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/175", :ttl 2, :grace-ms 4000}
+2	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/143", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+3	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/150", :ttl 2, :grace-ms 4000}
+1	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/179", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/181", :ttl 30, :grace-ms 4000}
+3	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/183", :ttl 2, :grace-ms 4000}
+2	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/181", :ttl 30, :grace-ms 4000}
+2	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/185", :ttl 30, :grace-ms 4000}
+2	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/185", :ttl 30, :grace-ms 4000}
+2	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/186", :ttl 2, :grace-ms 4000}
+5	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/155", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+6	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/159", :ttl 2, :grace-ms 4000}
+4	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/153", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+4	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/187", :ttl 2, :grace-ms 4000}
+7	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/161", :ttl 2, :grace-ms 4000}
+5	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/184", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+6	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/188", :ttl 30, :grace-ms 4000}
+6	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/188", :ttl 30, :grace-ms 4000}
+7	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/192", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+8	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/167", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/173", :ttl 2, :grace-ms 4000}
+8	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/196", :ttl 30, :grace-ms 4000}
+0	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/175", :ttl 2, :grace-ms 4000}
+9	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/189", :ttl 2, :grace-ms 4000}
+8	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/196", :ttl 30, :grace-ms 4000}
+0	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/199", :ttl 2, :grace-ms 4000}
+6	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/201", :ttl 2, :grace-ms 4000}
+1	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/179", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+3	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/183", :ttl 2, :grace-ms 4000}
+1	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/205", :ttl 30, :grace-ms 4000}
+2	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/186", :ttl 2, :grace-ms 4000}
+1	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/205", :ttl 30, :grace-ms 4000}
+4	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/187", :ttl 2, :grace-ms 4000}
+5	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/184", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/211", :ttl 30, :grace-ms 4000}
+3	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/213", :ttl 30, :grace-ms 4000}
+2	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/211", :ttl 30, :grace-ms 4000}
+3	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/213", :ttl 30, :grace-ms 4000}
+4	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/217", :ttl 30, :grace-ms 4000}
+4	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/217", :ttl 30, :grace-ms 4000}
+9	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/189", :ttl 2, :grace-ms 4000}
+7	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/192", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+0	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/199", :ttl 2, :grace-ms 4000}
+5	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/223", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+6	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/201", :ttl 2, :grace-ms 4000}
+6	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/226", :ttl 2, :grace-ms 4000}
+7	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/228", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+8	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/230", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/232", :ttl 2, :grace-ms 4000}
+5	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/223", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+6	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/226", :ttl 2, :grace-ms 4000}
+0	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/236", :ttl 2, :grace-ms 4000}
+1	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/238", :ttl 2, :grace-ms 4000}
+9	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/232", :ttl 2, :grace-ms 4000}
+7	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/228", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+8	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/230", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/242", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+0	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/236", :ttl 2, :grace-ms 4000}
+1	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/238", :ttl 2, :grace-ms 4000}
+3	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/246", :ttl 2, :grace-ms 4000}
+4	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/248", :ttl 30, :grace-ms 4000}
+4	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/248", :ttl 30, :grace-ms 4000}
+4	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/251", :ttl 30, :grace-ms 4000}
+4	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/251", :ttl 30, :grace-ms 4000}
+5	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/254", :ttl 2, :grace-ms 4000}
+6	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/256", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+7	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/258", :ttl 30, :grace-ms 4000}
+7	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/258", :ttl 30, :grace-ms 4000}
+2	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/242", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+3	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/246", :ttl 2, :grace-ms 4000}
+8	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/263", :ttl 30, :grace-ms 4000}
+8	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/263", :ttl 30, :grace-ms 4000}
+9	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/266", :ttl 30, :grace-ms 4000}
+9	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/266", :ttl 30, :grace-ms 4000}
+0	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/269", :ttl 30, :grace-ms 4000}
+1	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/271", :ttl 2, :grace-ms 4000}
+2	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/273", :ttl 2, :grace-ms 4000}
+0	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/269", :ttl 30, :grace-ms 4000}
+3	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/276", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/254", :ttl 2, :grace-ms 4000}
+4	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/279", :ttl 2, :grace-ms 4000}
+6	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/256", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/282", :ttl 2, :grace-ms 4000}
+6	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/284", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+7	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/286", :ttl 2, :grace-ms 4000}
+1	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/271", :ttl 2, :grace-ms 4000}
+2	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/273", :ttl 2, :grace-ms 4000}
+8	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/290", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+4	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/279", :ttl 2, :grace-ms 4000}
+3	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/276", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/293", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/282", :ttl 2, :grace-ms 4000}
+0	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/296", :ttl 30, :grace-ms 4000}
+0	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/296", :ttl 30, :grace-ms 4000}
+7	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/286", :ttl 2, :grace-ms 4000}
+6	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/284", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+0	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/301", :ttl 2, :grace-ms 4000}
+1	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/303", :ttl 2, :grace-ms 4000}
+2	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/305", :ttl 2, :grace-ms 4000}
+3	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/307", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+4	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/309", :ttl 2, :grace-ms 4000}
+8	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/290", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/312", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+6	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/314", :ttl 2, :grace-ms 4000}
+7	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/316", :ttl 2, :grace-ms 4000}
+8	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/318", :ttl 30, :grace-ms 4000}
+8	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/318", :ttl 30, :grace-ms 4000}
+8	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/322", :ttl 2, :grace-ms 4000}
+9	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/293", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/323", :ttl 2, :grace-ms 4000}
+2	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/305", :ttl 2, :grace-ms 4000}
+2	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/319", :ttl 30, :grace-ms 4000}
+0	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/301", :ttl 2, :grace-ms 4000}
+0	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/326", :ttl 30, :grace-ms 4000}
+2	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/319", :ttl 30, :grace-ms 4000}
+1	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/303", :ttl 2, :grace-ms 4000}
+0	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/326", :ttl 30, :grace-ms 4000}
+1	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/321", :ttl 2, :grace-ms 4000}
+3	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/307", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/320", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+3	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/328", :ttl 30, :grace-ms 4000}
+0	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/330", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+4	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/309", :ttl 2, :grace-ms 4000}
+3	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/328", :ttl 30, :grace-ms 4000}
+3	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/332", :ttl 30, :grace-ms 4000}
+4	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/324", :ttl 2, :grace-ms 4000}
+3	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/332", :ttl 30, :grace-ms 4000}
+3	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/331", :ttl 2, :grace-ms 4000}
+5	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/312", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/335", :ttl 30, :grace-ms 4000}
+6	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/314", :ttl 2, :grace-ms 4000}
+5	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/335", :ttl 30, :grace-ms 4000}
+7	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/316", :ttl 2, :grace-ms 4000}
+5	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/334", :ttl 2, :grace-ms 4000}
+8	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/322", :ttl 2, :grace-ms 4000}
+9	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/323", :ttl 2, :grace-ms 4000}
+6	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/336", :ttl 2, :grace-ms 4000}
+7	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/339", :ttl 2, :grace-ms 4000}
+8	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/337", :ttl 30, :grace-ms 4000}
+8	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/337", :ttl 30, :grace-ms 4000}
+8	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/342", :ttl 2, :grace-ms 4000}
+1	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/321", :ttl 2, :grace-ms 4000}
+9	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/333", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+1	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/344", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+4	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/324", :ttl 2, :grace-ms 4000}
+2	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/320", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+3	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/331", :ttl 2, :grace-ms 4000}
+0	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/330", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+0	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/345", :ttl 2, :grace-ms 4000}
+5	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/334", :ttl 2, :grace-ms 4000}
+2	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/346", :ttl 2, :grace-ms 4000}
+3	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/350", :ttl 2, :grace-ms 4000}
+4	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/352", :ttl 2, :grace-ms 4000}
+6	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/336", :ttl 2, :grace-ms 4000}
+5	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/355", :ttl 2, :grace-ms 4000}
+6	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/348", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+7	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/339", :ttl 2, :grace-ms 4000}
+8	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/342", :ttl 2, :grace-ms 4000}
+7	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/356", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+8	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/360", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/333", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+1	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/344", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/358", :ttl 2, :grace-ms 4000}
+1	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/357", :ttl 2, :grace-ms 4000}
+0	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/345", :ttl 2, :grace-ms 4000}
+0	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/364", :ttl 2, :grace-ms 4000}
+2	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/346", :ttl 2, :grace-ms 4000}
+2	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/361", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+3	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/350", :ttl 2, :grace-ms 4000}
+3	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/366", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+4	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/352", :ttl 2, :grace-ms 4000}
+5	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/355", :ttl 2, :grace-ms 4000}
+4	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/367", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/369", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+6	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/348", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+6	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/370", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+7	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/356", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/358", :ttl 2, :grace-ms 4000}
+7	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/365", :ttl 2, :grace-ms 4000}
+8	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/360", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+1	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/357", :ttl 2, :grace-ms 4000}
+1	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/371", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+0	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/364", :ttl 2, :grace-ms 4000}
+8	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/374", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/361", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+3	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/366", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/347", :ttl 30, :grace-ms 4000}
+4	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/367", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/347", :ttl 30, :grace-ms 4000}
+3	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/377", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/369", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+4	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/362", :ttl 2, :grace-ms 4000}
+6	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/370", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+7	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/365", :ttl 2, :grace-ms 4000}
+5	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/381", :ttl 2, :grace-ms 4000}
+1	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/371", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+6	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/384", :ttl 30, :grace-ms 4000}
+7	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/386", :ttl 2, :grace-ms 4000}
+9	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/388", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+6	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/384", :ttl 30, :grace-ms 4000}
+8	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/374", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+0	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/391", :ttl 2, :grace-ms 4000}
+1	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/393", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/395", :ttl 30, :grace-ms 4000}
+6	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/397", :ttl 2, :grace-ms 4000}
+2	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/395", :ttl 30, :grace-ms 4000}
+4	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/362", :ttl 2, :grace-ms 4000}
+2	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/401", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+3	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/377", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+3	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/404", :ttl 30, :grace-ms 4000}
+4	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/406", :ttl 2, :grace-ms 4000}
+8	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/408", :ttl 2, :grace-ms 4000}
+5	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/381", :ttl 2, :grace-ms 4000}
+3	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/404", :ttl 30, :grace-ms 4000}
+7	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/386", :ttl 2, :grace-ms 4000}
+7	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/412", :ttl 2, :grace-ms 4000}
+3	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/410", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/388", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/409", :ttl 30, :grace-ms 4000}
+0	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/391", :ttl 2, :grace-ms 4000}
+9	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/409", :ttl 30, :grace-ms 4000}
+9	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/411", :ttl 2, :grace-ms 4000}
+6	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/397", :ttl 2, :grace-ms 4000}
+0	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/415", :ttl 30, :grace-ms 4000}
+1	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/393", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+0	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/415", :ttl 30, :grace-ms 4000}
+4	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/406", :ttl 2, :grace-ms 4000}
+8	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/408", :ttl 2, :grace-ms 4000}
+2	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/401", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+0	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/422", :ttl 2, :grace-ms 4000}
+1	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/424", :ttl 30, :grace-ms 4000}
+1	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/424", :ttl 30, :grace-ms 4000}
+7	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/412", :ttl 2, :grace-ms 4000}
+2	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/428", :ttl 2, :grace-ms 4000}
+4	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/430", :ttl 2, :grace-ms 4000}
+5	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/432", :ttl 30, :grace-ms 4000}
+3	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/410", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/432", :ttl 30, :grace-ms 4000}
+9	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/411", :ttl 2, :grace-ms 4000}
+5	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/437", :ttl 2, :grace-ms 4000}
+6	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/439", :ttl 2, :grace-ms 4000}
+0	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/422", :ttl 2, :grace-ms 4000}
+7	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/442", :ttl 2, :grace-ms 4000}
+8	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/444", :ttl 30, :grace-ms 4000}
+8	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/444", :ttl 30, :grace-ms 4000}
+2	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/428", :ttl 2, :grace-ms 4000}
+4	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/430", :ttl 2, :grace-ms 4000}
+5	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/437", :ttl 2, :grace-ms 4000}
+6	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/439", :ttl 2, :grace-ms 4000}
+7	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/442", :ttl 2, :grace-ms 4000}

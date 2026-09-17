@@ -1,0 +1,727 @@
+2026-09-16 13:06:49,052{GMT}	INFO	[jepsen test runner] jepsen.core: Test version ad22337b09f7aae407b39e9d639de867e52bccc7 (plus uncommitted changes)
+2026-09-16 13:06:49,053{GMT}	INFO	[jepsen test runner] jepsen.core: Command line:
+lein run test --nodes-file /root/nodes --username root --ssh-private-key /root/.ssh/id_ed25519 --workload idempotency --nemesis none --time-limit 45 --concurrency 1n
+2026-09-16 13:06:49,108{GMT}	INFO	[jepsen test runner] jepsen.core: Running test:
+{:remote
+ #jepsen.control.retry.Remote{:remote #jepsen.control.scp.Remote{:cmd-remote #jepsen.control.sshj.SSHJRemote{:concurrency-limit 6,
+                                                                                                             :conn-spec nil,
+                                                                                                             :client nil,
+                                                                                                             :semaphore nil},
+                                                                 :conn-spec nil},
+                              :conn nil}
+ :idem-replay-delay-ms 0
+ :ssh-private-key "/root/.ssh/id_ed25519"
+ :idem-min-replay-attempts nil
+ :concurrency 5
+ :soak-disrupt 600
+ :db
+ #jepsen.coord.db.CoordDB{:cluster-name "jepsen-coord",
+                          :pidfile-prefix "/var/run/coord-",
+                          :root-password "66c57bb56bce306f484344e4a8650836",
+                          :coord-dir "/opt/coord",
+                          :config-dir "/etc/coord",
+                          :logfile "/var/log/coord.log",
+                          :regions nil,
+                          :data-dir "/var/lib/coord",
+                          :nodes ("n1" "n2" "n3"),
+                          :auth-root-key "820662a9f85924333d6d466714bc51734b251e73b827a394e1978e36d2429bfc",
+                          :raft-secret "93edf94d2860fec54bc59278a804cb1bbd2d0a7243e4f39d667d66966d9844d1",
+                          :coord-bin "/root/coord-test/coord"}
+ :leave-db-running? false
+ :name "coord"
+ :logging-json? false
+ :start-time
+ #object[java.time.OffsetDateTime "0x37a0c3c6" "2026-09-16T13:06:49.010928736Z"]
+ :regions nil
+ :net
+ #object[jepsen.net$iptables_with_dev$reify__15623
+         "0x5de32e00"
+         "jepsen.net$iptables_with_dev$reify__15623@5de32e00"]
+ :client
+ #jepsen.coord.client.CoordClient{:nodes ["n1" "n2" "n3"],
+                                  :root-password "66c57bb56bce306f484344e4a8650836",
+                                  :cct nil,
+                                  :channels nil,
+                                  :raw-channels nil,
+                                  :leader-idx #object[clojure.lang.Atom
+                                                      "0x751526a7"
+                                                      {:status :ready, :val {}}]}
+ :barrier
+ #object[java.util.concurrent.CyclicBarrier
+         "0x2279e7c7"
+         "java.util.concurrent.CyclicBarrier@2279e7c7"]
+ :ssh
+ {:dummy? false,
+  :username "root",
+  :password "root",
+  :strict-host-key-checking false,
+  :private-key-path "/root/.ssh/id_ed25519"}
+ :rate nil
+ :seed 1727727433
+ :checker
+ #jepsen.checker.Compose{:checkers {:linear #object[jepsen.coord.idem$checker$reify__827
+                                                    "0x4c5e123d"
+                                                    "jepsen.coord.idem$checker$reify__827@4c5e123d"],
+                                    :gates #object[jepsen.coord.gates$checker$reify__749
+                                                   "0x69542112"
+                                                   "jepsen.coord.gates$checker$reify__749@69542112"],
+                                    :perf #jepsen.checker.Compose{:checkers {:latency-graph #jepsen.checker.LatencyGraph{:opts {}},
+                                                                             :rate-graph #jepsen.checker.RateGraph{:opts {}}}}}}
+ :argv
+ ("test"
+  "--nodes-file"
+  "/root/nodes"
+  "--username"
+  "root"
+  "--ssh-private-key"
+  "/root/.ssh/id_ed25519"
+  "--workload"
+  "idempotency"
+  "--nemesis"
+  "none"
+  "--time-limit"
+  "45"
+  "--concurrency"
+  "1n")
+ :nemesis #unprintable "jepsen.nemesis$reify__15746@35a81281"
+ :nodes ("n1" "n2" "n3")
+ :test-count 1
+ :no-jitter false
+ :generator
+ #object[jepsen.util.Forgettable
+         "0x7af17d31"
+         ((jepsen.generator.Synchronize
+           {:gen (jepsen.generator.TimeLimit
+                  {:limit 45000000000,
+                   :cutoff nil,
+                   :gen (jepsen.generator.Stagger
+                         {:dt-fn #object[jepsen.generator$stagger_exp$dt_fn__6799
+                                         "0x4a15d5f5"
+                                         "jepsen.generator$stagger_exp$dt_fn__6799@4a15d5f5"],
+                          :next-time nil,
+                          :gen (jepsen.generator.OnThreads
+                                {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                 :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                         "0x5319efc0"
+                                                         "jepsen.generator.context$make_thread_filter$lazy_filter__5865@5319efc0"],
+                                 :gen (jepsen.generator.Mix
+                                       {:i 0,
+                                        :gens [(jepsen.generator.Mix
+                                                {:i 0,
+                                                 :gens [#object[jepsen.coord$idem_gen$put_op__1067
+                                                                "0x549fe529"
+                                                                "jepsen.coord$idem_gen$put_op__1067@549fe529"]
+                                                        #object[jepsen.coord$idem_gen$del_op__1069
+                                                                "0x3618486e"
+                                                                "jepsen.coord$idem_gen$del_op__1069@3618486e"]
+                                                        #object[jepsen.coord$idem_gen$rd_op__1071
+                                                                "0x52c68925"
+                                                                "jepsen.coord$idem_gen$rd_op__1071@52c68925"]]})]})})})})})
+          (jepsen.generator.Synchronize
+           {:gen {:type :log, :value "recovery: letting cluster converge"}})
+          (jepsen.generator.Synchronize {:gen {:type :sleep, :value 30}}))]
+ :soak-max-rto-seconds nil
+ :os
+ #object[jepsen.os$reify__16045 "0x4ebd0b52" "jepsen.os$reify__16045@4ebd0b52"]
+ :time-limit 45
+ :quiet-availability-min nil
+ :soak-quiet 1800
+ :quiet-min-sample nil
+ :workload :idempotency}
+
+2026-09-16 13:06:50,511{GMT}	INFO	[jepsen test runner] jepsen.db: Tearing down DB
+2026-09-16 13:06:50,513{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-16 13:06:50,514{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-16 13:06:50,514{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-16 13:06:52,230{GMT}	INFO	[jepsen test runner] jepsen.db: Setting up DB
+2026-09-16 13:06:52,232{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Setting up coord on n3
+2026-09-16 13:06:52,232{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Setting up coord on n1
+2026-09-16 13:06:52,232{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Setting up coord on n2
+2026-09-16 13:06:54,918{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-16 13:06:54,972{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-16 13:06:55,037{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-16 13:06:55,039{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-16 13:06:55,087{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-16 13:06:55,138{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-16 13:06:55,292{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-16 13:06:55,292{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-16 13:06:55,799{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-16 13:06:55,800{GMT}	INFO	[jepsen test runner] jepsen.core: Relative time begins now
+2026-09-16 13:06:55,801{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-16 13:06:55,801{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-16 13:06:55,801{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-16 13:06:55,971{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-16 13:06:55,971{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-16 13:06:55,971{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-16 13:06:55,977{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord cluster is ready
+2026-09-16 13:06:56,018{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord cluster is ready
+2026-09-16 13:06:56,018{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord cluster is ready
+2026-09-16 13:06:56,046{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-put	{:rid "idem-put-1", :key "/jepsen/idem/put/1", :val "1", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:06:56,047{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-16 13:06:56,172{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-put	{:rid "idem-put-1", :key "/jepsen/idem/put/1", :val "1", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:06:56,704{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-range-delete	{:rid "idem-rdel-4", :range-start "/jepsen/idem/rd/4/a", :range-end "/jepsen/idem/rd/4/z", :post-write-key "/jepsen/idem/rd/4/m", :post-write-val 4}
+2026-09-16 13:06:56,704{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-16 13:06:56,968{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-range-delete	{:rid "idem-rdel-4", :range-start "/jepsen/idem/rd/4/a", :range-end "/jepsen/idem/rd/4/z", :post-write-key "/jepsen/idem/rd/4/m", :post-write-val 4}
+2026-09-16 13:06:57,192{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-range-delete	{:rid "idem-rdel-7", :range-start "/jepsen/idem/rd/7/a", :range-end "/jepsen/idem/rd/7/z", :post-write-key "/jepsen/idem/rd/7/m", :post-write-val 7}
+2026-09-16 13:06:57,193{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-16 13:06:57,451{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-range-delete	{:rid "idem-rdel-7", :range-start "/jepsen/idem/rd/7/a", :range-end "/jepsen/idem/rd/7/z", :post-write-key "/jepsen/idem/rd/7/m", :post-write-val 7}
+2026-09-16 13:06:57,692{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-delete	{:rid "idem-del-10", :key "/jepsen/idem/del/10", :val "10", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:06:57,692{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-16 13:06:57,903{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-delete	{:rid "idem-del-10", :key "/jepsen/idem/del/10", :val "10", :replays 3, :replay-delay-ms 0, :setup {:revision 30, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:06:58,669{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-delete	{:rid "idem-del-13", :key "/jepsen/idem/del/13", :val "13", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:06:58,670{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-16 13:06:58,944{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-delete	{:rid "idem-del-13", :key "/jepsen/idem/del/13", :val "13", :replays 2, :replay-delay-ms 0, :setup {:revision 36, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:06:58,980{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-range-delete	{:rid "idem-rdel-16", :range-start "/jepsen/idem/rd/16/a", :range-end "/jepsen/idem/rd/16/z", :post-write-key "/jepsen/idem/rd/16/m", :post-write-val 16}
+2026-09-16 13:06:59,191{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-range-delete	{:rid "idem-rdel-16", :range-start "/jepsen/idem/rd/16/a", :range-end "/jepsen/idem/rd/16/z", :post-write-key "/jepsen/idem/rd/16/m", :post-write-val 16}
+2026-09-16 13:07:00,476{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-put	{:rid "idem-put-19", :key "/jepsen/idem/put/19", :val "19", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:00,511{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-put	{:rid "idem-put-19", :key "/jepsen/idem/put/19", :val "19", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:00,515{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-delete	{:rid "idem-del-22", :key "/jepsen/idem/del/22", :val "22", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:00,655{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-delete	{:rid "idem-del-22", :key "/jepsen/idem/del/22", :val "22", :replays 3, :replay-delay-ms 0, :setup {:revision 46, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:00,720{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-delete	{:rid "idem-del-25", :key "/jepsen/idem/del/25", :val "25", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:00,832{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-delete	{:rid "idem-del-25", :key "/jepsen/idem/del/25", :val "25", :replays 2, :replay-delay-ms 0, :setup {:revision 50, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:01,941{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-delete	{:rid "idem-del-28", :key "/jepsen/idem/del/28", :val "28", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:01,982{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-put	{:rid "idem-put-30", :key "/jepsen/idem/put/30", :val "30", :replays 3, :setup-val "OLD-30", :replay-delay-ms 0}
+2026-09-16 13:07:02,116{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-put	{:rid "idem-put-30", :key "/jepsen/idem/put/30", :val "30", :replays 3, :setup-val "OLD-30", :replay-delay-ms 0, :setup {:revision 55, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:02,146{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-delete	{:rid "idem-del-28", :key "/jepsen/idem/del/28", :val "28", :replays 3, :replay-delay-ms 0, :setup {:revision 53, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:02,253{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-delete	{:rid "idem-del-34", :key "/jepsen/idem/del/34", :val "34", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:02,395{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-range-delete	{:rid "idem-rdel-36", :range-start "/jepsen/idem/rd/36/a", :range-end "/jepsen/idem/rd/36/z", :post-write-key "/jepsen/idem/rd/36/m", :post-write-val 36}
+2026-09-16 13:07:02,458{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-delete	{:rid "idem-del-34", :key "/jepsen/idem/del/34", :val "34", :replays 3, :replay-delay-ms 0, :setup {:revision 59, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:02,617{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-range-delete	{:rid "idem-rdel-36", :range-start "/jepsen/idem/rd/36/a", :range-end "/jepsen/idem/rd/36/z", :post-write-key "/jepsen/idem/rd/36/m", :post-write-val 36}
+2026-09-16 13:07:02,650{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-put	{:rid "idem-put-40", :key "/jepsen/idem/put/40", :val "40", :replays 3, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:02,686{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-put	{:rid "idem-put-40", :key "/jepsen/idem/put/40", :val "40", :replays 3, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:03,193{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-put	{:rid "idem-put-43", :key "/jepsen/idem/put/43", :val "43", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:03,231{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-put	{:rid "idem-put-43", :key "/jepsen/idem/put/43", :val "43", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:03,787{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-put	{:rid "idem-put-46", :key "/jepsen/idem/put/46", :val "46", :replays 3, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:03,838{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-put	{:rid "idem-put-46", :key "/jepsen/idem/put/46", :val "46", :replays 3, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:04,790{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-put	{:rid "idem-put-49", :key "/jepsen/idem/put/49", :val "49", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:04,829{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-put	{:rid "idem-put-49", :key "/jepsen/idem/put/49", :val "49", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:04,885{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-put	{:rid "idem-put-52", :key "/jepsen/idem/put/52", :val "52", :replays 3, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:04,918{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-put	{:rid "idem-put-52", :key "/jepsen/idem/put/52", :val "52", :replays 3, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:05,118{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-range-delete	{:rid "idem-rdel-55", :range-start "/jepsen/idem/rd/55/a", :range-end "/jepsen/idem/rd/55/z", :post-write-key "/jepsen/idem/rd/55/m", :post-write-val 55}
+2026-09-16 13:07:05,328{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-range-delete	{:rid "idem-rdel-55", :range-start "/jepsen/idem/rd/55/a", :range-end "/jepsen/idem/rd/55/z", :post-write-key "/jepsen/idem/rd/55/m", :post-write-val 55}
+2026-09-16 13:07:05,400{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-delete	{:rid "idem-del-58", :key "/jepsen/idem/del/58", :val "58", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:05,542{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-delete	{:rid "idem-del-58", :key "/jepsen/idem/del/58", :val "58", :replays 3, :replay-delay-ms 0, :setup {:revision 80, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:06,109{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-delete	{:rid "idem-del-61", :key "/jepsen/idem/del/61", :val "61", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:06,216{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-delete	{:rid "idem-del-61", :key "/jepsen/idem/del/61", :val "61", :replays 2, :replay-delay-ms 0, :setup {:revision 84, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:06,413{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-put	{:rid "idem-put-64", :key "/jepsen/idem/put/64", :val "64", :replays 3, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:06,456{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-put	{:rid "idem-put-64", :key "/jepsen/idem/put/64", :val "64", :replays 3, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:06,563{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-delete	{:rid "idem-del-67", :key "/jepsen/idem/del/67", :val "67", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:06,671{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-delete	{:rid "idem-del-67", :key "/jepsen/idem/del/67", :val "67", :replays 2, :replay-delay-ms 0, :setup {:revision 88, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:06,718{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-delete	{:rid "idem-del-70", :key "/jepsen/idem/del/70", :val "70", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:06,781{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-put	{:rid "idem-put-72", :key "/jepsen/idem/put/72", :val "72", :replays 3, :setup-val "OLD-72", :replay-delay-ms 0}
+2026-09-16 13:07:06,837{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-put	{:rid "idem-put-74", :key "/jepsen/idem/put/74", :val "74", :replays 3, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:06,892{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-put	{:rid "idem-put-72", :key "/jepsen/idem/put/72", :val "72", :replays 3, :setup-val "OLD-72", :replay-delay-ms 0, :setup {:revision 93, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:06,919{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-put	{:rid "idem-put-77", :key "/jepsen/idem/put/77", :val "77", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:06,938{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-delete	{:rid "idem-del-70", :key "/jepsen/idem/del/70", :val "70", :replays 3, :replay-delay-ms 0, :setup {:revision 91, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:06,951{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-put	{:rid "idem-put-74", :key "/jepsen/idem/put/74", :val "74", :replays 3, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:06,981{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-put	{:rid "idem-put-77", :key "/jepsen/idem/put/77", :val "77", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:07,192{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-delete	{:rid "idem-del-82", :key "/jepsen/idem/del/82", :val "82", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:07,329{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-delete	{:rid "idem-del-82", :key "/jepsen/idem/del/82", :val "82", :replays 3, :replay-delay-ms 0, :setup {:revision 99, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:07,345{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-put	{:rid "idem-put-85", :key "/jepsen/idem/put/85", :val "85", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:07,352{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-delete	{:rid "idem-del-87", :key "/jepsen/idem/del/87", :val "87", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:07,406{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-put	{:rid "idem-put-85", :key "/jepsen/idem/put/85", :val "85", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:07,473{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-delete	{:rid "idem-del-87", :key "/jepsen/idem/del/87", :val "87", :replays 2, :replay-delay-ms 0, :setup {:revision 104, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:07,628{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-put	{:rid "idem-put-91", :key "/jepsen/idem/put/91", :val "91", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:07,670{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-put	{:rid "idem-put-91", :key "/jepsen/idem/put/91", :val "91", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:07,794{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-put	{:rid "idem-put-94", :key "/jepsen/idem/put/94", :val "94", :replays 3, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:07,832{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-put	{:rid "idem-put-94", :key "/jepsen/idem/put/94", :val "94", :replays 3, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:08,174{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-put	{:rid "idem-put-97", :key "/jepsen/idem/put/97", :val "97", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:08,208{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-put	{:rid "idem-put-97", :key "/jepsen/idem/put/97", :val "97", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:08,221{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-range-delete	{:rid "idem-rdel-100", :range-start "/jepsen/idem/rd/100/a", :range-end "/jepsen/idem/rd/100/z", :post-write-key "/jepsen/idem/rd/100/m", :post-write-val 100}
+2026-09-16 13:07:08,417{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-range-delete	{:rid "idem-rdel-100", :range-start "/jepsen/idem/rd/100/a", :range-end "/jepsen/idem/rd/100/z", :post-write-key "/jepsen/idem/rd/100/m", :post-write-val 100}
+2026-09-16 13:07:09,353{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-put	{:rid "idem-put-103", :key "/jepsen/idem/put/103", :val "103", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:09,391{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-put	{:rid "idem-put-103", :key "/jepsen/idem/put/103", :val "103", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:09,402{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-range-delete	{:rid "idem-rdel-106", :range-start "/jepsen/idem/rd/106/a", :range-end "/jepsen/idem/rd/106/z", :post-write-key "/jepsen/idem/rd/106/m", :post-write-val 106}
+2026-09-16 13:07:09,596{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-range-delete	{:rid "idem-rdel-106", :range-start "/jepsen/idem/rd/106/a", :range-end "/jepsen/idem/rd/106/z", :post-write-key "/jepsen/idem/rd/106/m", :post-write-val 106}
+2026-09-16 13:07:10,163{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-delete	{:rid "idem-del-109", :key "/jepsen/idem/del/109", :val "109", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:10,196{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-put	{:rid "idem-put-111", :key "/jepsen/idem/put/111", :val "111", :replays 2, :setup-val "OLD-111", :replay-delay-ms 0}
+2026-09-16 13:07:10,262{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-put	{:rid "idem-put-113", :key "/jepsen/idem/put/113", :val "113", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:10,285{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-put	{:rid "idem-put-111", :key "/jepsen/idem/put/111", :val "111", :replays 2, :setup-val "OLD-111", :replay-delay-ms 0, :setup {:revision 124, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:10,315{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-delete	{:rid "idem-del-109", :key "/jepsen/idem/del/109", :val "109", :replays 2, :replay-delay-ms 0, :setup {:revision 123, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:10,316{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-put	{:rid "idem-put-113", :key "/jepsen/idem/put/113", :val "113", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:10,709{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-delete	{:rid "idem-del-118", :key "/jepsen/idem/del/118", :val "118", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:10,854{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-delete	{:rid "idem-del-118", :key "/jepsen/idem/del/118", :val "118", :replays 3, :replay-delay-ms 0, :setup {:revision 129, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:10,910{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-put	{:rid "idem-put-121", :key "/jepsen/idem/put/121", :val "121", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:10,950{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-put	{:rid "idem-put-121", :key "/jepsen/idem/put/121", :val "121", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:11,252{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-range-delete	{:rid "idem-rdel-124", :range-start "/jepsen/idem/rd/124/a", :range-end "/jepsen/idem/rd/124/z", :post-write-key "/jepsen/idem/rd/124/m", :post-write-val 124}
+2026-09-16 13:07:11,319{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-delete	{:rid "idem-del-126", :key "/jepsen/idem/del/126", :val "126", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:11,570{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-range-delete	{:rid "idem-rdel-124", :range-start "/jepsen/idem/rd/124/a", :range-end "/jepsen/idem/rd/124/z", :post-write-key "/jepsen/idem/rd/124/m", :post-write-val 124}
+2026-09-16 13:07:11,597{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-delete	{:rid "idem-del-126", :key "/jepsen/idem/del/126", :val "126", :replays 3, :replay-delay-ms 0, :setup {:revision 137, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:11,706{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-range-delete	{:rid "idem-rdel-130", :range-start "/jepsen/idem/rd/130/a", :range-end "/jepsen/idem/rd/130/z", :post-write-key "/jepsen/idem/rd/130/m", :post-write-val 130}
+2026-09-16 13:07:11,725{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-put	{:rid "idem-put-132", :key "/jepsen/idem/put/132", :val "132", :replays 3, :setup-val "OLD-132", :replay-delay-ms 0}
+2026-09-16 13:07:11,845{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-put	{:rid "idem-put-132", :key "/jepsen/idem/put/132", :val "132", :replays 3, :setup-val "OLD-132", :replay-delay-ms 0, :setup {:revision 145, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:11,940{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-range-delete	{:rid "idem-rdel-130", :range-start "/jepsen/idem/rd/130/a", :range-end "/jepsen/idem/rd/130/z", :post-write-key "/jepsen/idem/rd/130/m", :post-write-val 130}
+2026-09-16 13:07:11,983{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-put	{:rid "idem-put-136", :key "/jepsen/idem/put/136", :val "136", :replays 3, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:12,023{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-put	{:rid "idem-put-136", :key "/jepsen/idem/put/136", :val "136", :replays 3, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:12,770{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-range-delete	{:rid "idem-rdel-139", :range-start "/jepsen/idem/rd/139/a", :range-end "/jepsen/idem/rd/139/z", :post-write-key "/jepsen/idem/rd/139/m", :post-write-val 139}
+2026-09-16 13:07:12,790{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-delete	{:rid "idem-del-141", :key "/jepsen/idem/del/141", :val "141", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:13,029{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-delete	{:rid "idem-del-141", :key "/jepsen/idem/del/141", :val "141", :replays 2, :replay-delay-ms 0, :setup {:revision 154, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:13,036{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-put	{:rid "idem-put-144", :key "/jepsen/idem/put/144", :val "144", :replays 3, :setup-val "OLD-144", :replay-delay-ms 0}
+2026-09-16 13:07:13,137{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-range-delete	{:rid "idem-rdel-139", :range-start "/jepsen/idem/rd/139/a", :range-end "/jepsen/idem/rd/139/z", :post-write-key "/jepsen/idem/rd/139/m", :post-write-val 139}
+2026-09-16 13:07:13,138{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-put	{:rid "idem-put-144", :key "/jepsen/idem/put/144", :val "144", :replays 3, :setup-val "OLD-144", :replay-delay-ms 0, :setup {:revision 161, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:13,326{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-range-delete	{:rid "idem-rdel-148", :range-start "/jepsen/idem/rd/148/a", :range-end "/jepsen/idem/rd/148/z", :post-write-key "/jepsen/idem/rd/148/m", :post-write-val 148}
+2026-09-16 13:07:13,530{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-range-delete	{:rid "idem-rdel-148", :range-start "/jepsen/idem/rd/148/a", :range-end "/jepsen/idem/rd/148/z", :post-write-key "/jepsen/idem/rd/148/m", :post-write-val 148}
+2026-09-16 13:07:13,806{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-range-delete	{:rid "idem-rdel-151", :range-start "/jepsen/idem/rd/151/a", :range-end "/jepsen/idem/rd/151/z", :post-write-key "/jepsen/idem/rd/151/m", :post-write-val 151}
+2026-09-16 13:07:14,040{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-range-delete	{:rid "idem-rdel-151", :range-start "/jepsen/idem/rd/151/a", :range-end "/jepsen/idem/rd/151/z", :post-write-key "/jepsen/idem/rd/151/m", :post-write-val 151}
+2026-09-16 13:07:14,163{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-range-delete	{:rid "idem-rdel-154", :range-start "/jepsen/idem/rd/154/a", :range-end "/jepsen/idem/rd/154/z", :post-write-key "/jepsen/idem/rd/154/m", :post-write-val 154}
+2026-09-16 13:07:14,189{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-delete	{:rid "idem-del-156", :key "/jepsen/idem/del/156", :val "156", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:14,442{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-range-delete	{:rid "idem-rdel-154", :range-start "/jepsen/idem/rd/154/a", :range-end "/jepsen/idem/rd/154/z", :post-write-key "/jepsen/idem/rd/154/m", :post-write-val 154}
+2026-09-16 13:07:14,442{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-delete	{:rid "idem-del-156", :key "/jepsen/idem/del/156", :val "156", :replays 3, :replay-delay-ms 0, :setup {:revision 177, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:14,595{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-range-delete	{:rid "idem-rdel-160", :range-start "/jepsen/idem/rd/160/a", :range-end "/jepsen/idem/rd/160/z", :post-write-key "/jepsen/idem/rd/160/m", :post-write-val 160}
+2026-09-16 13:07:14,683{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-delete	{:rid "idem-del-162", :key "/jepsen/idem/del/162", :val "162", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:14,888{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-range-delete	{:rid "idem-rdel-160", :range-start "/jepsen/idem/rd/160/a", :range-end "/jepsen/idem/rd/160/z", :post-write-key "/jepsen/idem/rd/160/m", :post-write-val 160}
+2026-09-16 13:07:14,912{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-delete	{:rid "idem-del-162", :key "/jepsen/idem/del/162", :val "162", :replays 3, :replay-delay-ms 0, :setup {:revision 189, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:15,021{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-put	{:rid "idem-put-166", :key "/jepsen/idem/put/166", :val "166", :replays 3, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:15,063{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-put	{:rid "idem-put-166", :key "/jepsen/idem/put/166", :val "166", :replays 3, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:15,107{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-delete	{:rid "idem-del-169", :key "/jepsen/idem/del/169", :val "169", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:15,175{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-put	{:rid "idem-put-171", :key "/jepsen/idem/put/171", :val "171", :replays 2, :setup-val "OLD-171", :replay-delay-ms 0}
+2026-09-16 13:07:15,210{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-delete	{:rid "idem-del-173", :key "/jepsen/idem/del/173", :val "173", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:15,278{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-delete	{:rid "idem-del-169", :key "/jepsen/idem/del/169", :val "169", :replays 2, :replay-delay-ms 0, :setup {:revision 197, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:15,295{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-put	{:rid "idem-put-171", :key "/jepsen/idem/put/171", :val "171", :replays 2, :setup-val "OLD-171", :replay-delay-ms 0, :setup {:revision 200, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:15,350{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-delete	{:rid "idem-del-173", :key "/jepsen/idem/del/173", :val "173", :replays 2, :replay-delay-ms 0, :setup {:revision 201, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:15,620{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-range-delete	{:rid "idem-rdel-178", :range-start "/jepsen/idem/rd/178/a", :range-end "/jepsen/idem/rd/178/z", :post-write-key "/jepsen/idem/rd/178/m", :post-write-val 178}
+2026-09-16 13:07:15,834{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-range-delete	{:rid "idem-rdel-178", :range-start "/jepsen/idem/rd/178/a", :range-end "/jepsen/idem/rd/178/z", :post-write-key "/jepsen/idem/rd/178/m", :post-write-val 178}
+2026-09-16 13:07:15,879{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-range-delete	{:rid "idem-rdel-181", :range-start "/jepsen/idem/rd/181/a", :range-end "/jepsen/idem/rd/181/z", :post-write-key "/jepsen/idem/rd/181/m", :post-write-val 181}
+2026-09-16 13:07:16,086{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-range-delete	{:rid "idem-rdel-181", :range-start "/jepsen/idem/rd/181/a", :range-end "/jepsen/idem/rd/181/z", :post-write-key "/jepsen/idem/rd/181/m", :post-write-val 181}
+2026-09-16 13:07:16,805{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-range-delete	{:rid "idem-rdel-184", :range-start "/jepsen/idem/rd/184/a", :range-end "/jepsen/idem/rd/184/z", :post-write-key "/jepsen/idem/rd/184/m", :post-write-val 184}
+2026-09-16 13:07:16,898{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-put	{:rid "idem-put-186", :key "/jepsen/idem/put/186", :val "186", :replays 3, :setup-val "OLD-186", :replay-delay-ms 0}
+2026-09-16 13:07:16,954{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-delete	{:rid "idem-del-188", :key "/jepsen/idem/del/188", :val "188", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:17,015{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-put	{:rid "idem-put-186", :key "/jepsen/idem/put/186", :val "186", :replays 3, :setup-val "OLD-186", :replay-delay-ms 0, :setup {:revision 220, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:17,140{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-range-delete	{:rid "idem-rdel-184", :range-start "/jepsen/idem/rd/184/a", :range-end "/jepsen/idem/rd/184/z", :post-write-key "/jepsen/idem/rd/184/m", :post-write-val 184}
+2026-09-16 13:07:17,194{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-delete	{:rid "idem-del-188", :key "/jepsen/idem/del/188", :val "188", :replays 3, :replay-delay-ms 0, :setup {:revision 223, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:17,647{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-put	{:rid "idem-put-193", :key "/jepsen/idem/put/193", :val "193", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:17,680{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-put	{:rid "idem-put-193", :key "/jepsen/idem/put/193", :val "193", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:17,796{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-delete	{:rid "idem-del-196", :key "/jepsen/idem/del/196", :val "196", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:17,937{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-delete	{:rid "idem-del-196", :key "/jepsen/idem/del/196", :val "196", :replays 3, :replay-delay-ms 0, :setup {:revision 230, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:18,102{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-delete	{:rid "idem-del-199", :key "/jepsen/idem/del/199", :val "199", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:18,136{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-delete	{:rid "idem-del-201", :key "/jepsen/idem/del/201", :val "201", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:18,230{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-delete	{:rid "idem-del-199", :key "/jepsen/idem/del/199", :val "199", :replays 2, :replay-delay-ms 0, :setup {:revision 234, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:18,260{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-delete	{:rid "idem-del-201", :key "/jepsen/idem/del/201", :val "201", :replays 2, :replay-delay-ms 0, :setup {:revision 235, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:18,961{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-put	{:rid "idem-put-205", :key "/jepsen/idem/put/205", :val "205", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:18,999{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-put	{:rid "idem-put-205", :key "/jepsen/idem/put/205", :val "205", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:19,163{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-delete	{:rid "idem-del-208", :key "/jepsen/idem/del/208", :val "208", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:19,295{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-delete	{:rid "idem-del-208", :key "/jepsen/idem/del/208", :val "208", :replays 3, :replay-delay-ms 0, :setup {:revision 241, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:19,328{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-put	{:rid "idem-put-211", :key "/jepsen/idem/put/211", :val "211", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:19,364{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-put	{:rid "idem-put-211", :key "/jepsen/idem/put/211", :val "211", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:19,506{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-put	{:rid "idem-put-214", :key "/jepsen/idem/put/214", :val "214", :replays 3, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:19,552{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-put	{:rid "idem-put-214", :key "/jepsen/idem/put/214", :val "214", :replays 3, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:19,835{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-delete	{:rid "idem-del-217", :key "/jepsen/idem/del/217", :val "217", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:19,852{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-range-delete	{:rid "idem-rdel-219", :range-start "/jepsen/idem/rd/219/a", :range-end "/jepsen/idem/rd/219/z", :post-write-key "/jepsen/idem/rd/219/m", :post-write-val 219}
+2026-09-16 13:07:20,013{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-delete	{:rid "idem-del-217", :key "/jepsen/idem/del/217", :val "217", :replays 2, :replay-delay-ms 0, :setup {:revision 247, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:20,027{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-range-delete	{:rid "idem-rdel-222", :range-start "/jepsen/idem/rd/222/a", :range-end "/jepsen/idem/rd/222/z", :post-write-key "/jepsen/idem/rd/222/m", :post-write-val 222}
+2026-09-16 13:07:20,129{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-range-delete	{:rid "idem-rdel-224", :range-start "/jepsen/idem/rd/224/a", :range-end "/jepsen/idem/rd/224/z", :post-write-key "/jepsen/idem/rd/224/m", :post-write-val 224}
+2026-09-16 13:07:20,175{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-range-delete	{:rid "idem-rdel-219", :range-start "/jepsen/idem/rd/219/a", :range-end "/jepsen/idem/rd/219/z", :post-write-key "/jepsen/idem/rd/219/m", :post-write-val 219}
+2026-09-16 13:07:20,184{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-delete	{:rid "idem-del-227", :key "/jepsen/idem/del/227", :val "227", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:20,391{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-range-delete	{:rid "idem-rdel-229", :range-start "/jepsen/idem/rd/229/a", :range-end "/jepsen/idem/rd/229/z", :post-write-key "/jepsen/idem/rd/229/m", :post-write-val 229}
+2026-09-16 13:07:20,491{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-range-delete	{:rid "idem-rdel-222", :range-start "/jepsen/idem/rd/222/a", :range-end "/jepsen/idem/rd/222/z", :post-write-key "/jepsen/idem/rd/222/m", :post-write-val 222}
+2026-09-16 13:07:20,491{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-delete	{:rid "idem-del-227", :key "/jepsen/idem/del/227", :val "227", :replays 2, :replay-delay-ms 0, :setup {:revision 261, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:20,583{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-range-delete	{:rid "idem-rdel-224", :range-start "/jepsen/idem/rd/224/a", :range-end "/jepsen/idem/rd/224/z", :post-write-key "/jepsen/idem/rd/224/m", :post-write-val 224}
+2026-09-16 13:07:20,637{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-delete	{:rid "idem-del-233", :key "/jepsen/idem/del/233", :val "233", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:20,716{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-range-delete	{:rid "idem-rdel-229", :range-start "/jepsen/idem/rd/229/a", :range-end "/jepsen/idem/rd/229/z", :post-write-key "/jepsen/idem/rd/229/m", :post-write-val 229}
+2026-09-16 13:07:20,758{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-delete	{:rid "idem-del-236", :key "/jepsen/idem/del/236", :val "236", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:20,818{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-delete	{:rid "idem-del-233", :key "/jepsen/idem/del/233", :val "233", :replays 2, :replay-delay-ms 0, :setup {:revision 276, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:20,947{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-delete	{:rid "idem-del-236", :key "/jepsen/idem/del/236", :val "236", :replays 3, :replay-delay-ms 0, :setup {:revision 280, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:21,180{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-delete	{:rid "idem-del-240", :key "/jepsen/idem/del/240", :val "240", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:21,241{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-range-delete	{:rid "idem-rdel-242", :range-start "/jepsen/idem/rd/242/a", :range-end "/jepsen/idem/rd/242/z", :post-write-key "/jepsen/idem/rd/242/m", :post-write-val 242}
+2026-09-16 13:07:21,389{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-delete	{:rid "idem-del-240", :key "/jepsen/idem/del/240", :val "240", :replays 3, :replay-delay-ms 0, :setup {:revision 284, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:21,492{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-range-delete	{:rid "idem-rdel-242", :range-start "/jepsen/idem/rd/242/a", :range-end "/jepsen/idem/rd/242/z", :post-write-key "/jepsen/idem/rd/242/m", :post-write-val 242}
+2026-09-16 13:07:21,495{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-range-delete	{:rid "idem-rdel-246", :range-start "/jepsen/idem/rd/246/a", :range-end "/jepsen/idem/rd/246/z", :post-write-key "/jepsen/idem/rd/246/m", :post-write-val 246}
+2026-09-16 13:07:21,630{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-range-delete	{:rid "idem-rdel-248", :range-start "/jepsen/idem/rd/248/a", :range-end "/jepsen/idem/rd/248/z", :post-write-key "/jepsen/idem/rd/248/m", :post-write-val 248}
+2026-09-16 13:07:21,768{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-range-delete	{:rid "idem-rdel-246", :range-start "/jepsen/idem/rd/246/a", :range-end "/jepsen/idem/rd/246/z", :post-write-key "/jepsen/idem/rd/246/m", :post-write-val 246}
+2026-09-16 13:07:21,899{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-range-delete	{:rid "idem-rdel-248", :range-start "/jepsen/idem/rd/248/a", :range-end "/jepsen/idem/rd/248/z", :post-write-key "/jepsen/idem/rd/248/m", :post-write-val 248}
+2026-09-16 13:07:22,787{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-put	{:rid "idem-put-252", :key "/jepsen/idem/put/252", :val "252", :replays 3, :setup-val "OLD-252", :replay-delay-ms 0}
+2026-09-16 13:07:22,858{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-put	{:rid "idem-put-252", :key "/jepsen/idem/put/252", :val "252", :replays 3, :setup-val "OLD-252", :replay-delay-ms 0, :setup {:revision 306, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:22,909{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-range-delete	{:rid "idem-rdel-255", :range-start "/jepsen/idem/rd/255/a", :range-end "/jepsen/idem/rd/255/z", :post-write-key "/jepsen/idem/rd/255/m", :post-write-val 255}
+2026-09-16 13:07:23,110{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-range-delete	{:rid "idem-rdel-255", :range-start "/jepsen/idem/rd/255/a", :range-end "/jepsen/idem/rd/255/z", :post-write-key "/jepsen/idem/rd/255/m", :post-write-val 255}
+2026-09-16 13:07:23,191{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-put	{:rid "idem-put-258", :key "/jepsen/idem/put/258", :val "258", :replays 3, :setup-val "OLD-258", :replay-delay-ms 0}
+2026-09-16 13:07:23,257{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-put	{:rid "idem-put-258", :key "/jepsen/idem/put/258", :val "258", :replays 3, :setup-val "OLD-258", :replay-delay-ms 0, :setup {:revision 314, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:24,601{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-delete	{:rid "idem-del-261", :key "/jepsen/idem/del/261", :val "261", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:24,710{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-delete	{:rid "idem-del-261", :key "/jepsen/idem/del/261", :val "261", :replays 2, :replay-delay-ms 0, :setup {:revision 316, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:24,919{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-range-delete	{:rid "idem-rdel-264", :range-start "/jepsen/idem/rd/264/a", :range-end "/jepsen/idem/rd/264/z", :post-write-key "/jepsen/idem/rd/264/m", :post-write-val 264}
+2026-09-16 13:07:24,967{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-delete	{:rid "idem-del-266", :key "/jepsen/idem/del/266", :val "266", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:25,190{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-range-delete	{:rid "idem-rdel-264", :range-start "/jepsen/idem/rd/264/a", :range-end "/jepsen/idem/rd/264/z", :post-write-key "/jepsen/idem/rd/264/m", :post-write-val 264}
+2026-09-16 13:07:25,223{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-delete	{:rid "idem-del-266", :key "/jepsen/idem/del/266", :val "266", :replays 3, :replay-delay-ms 0, :setup {:revision 321, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:25,554{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-put	{:rid "idem-put-270", :key "/jepsen/idem/put/270", :val "270", :replays 3, :setup-val "OLD-270", :replay-delay-ms 0}
+2026-09-16 13:07:25,621{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-put	{:rid "idem-put-270", :key "/jepsen/idem/put/270", :val "270", :replays 3, :setup-val "OLD-270", :replay-delay-ms 0, :setup {:revision 329, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:25,762{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-range-delete	{:rid "idem-rdel-273", :range-start "/jepsen/idem/rd/273/a", :range-end "/jepsen/idem/rd/273/z", :post-write-key "/jepsen/idem/rd/273/m", :post-write-val 273}
+2026-09-16 13:07:25,968{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-range-delete	{:rid "idem-rdel-273", :range-start "/jepsen/idem/rd/273/a", :range-end "/jepsen/idem/rd/273/z", :post-write-key "/jepsen/idem/rd/273/m", :post-write-val 273}
+2026-09-16 13:07:26,386{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-range-delete	{:rid "idem-rdel-276", :range-start "/jepsen/idem/rd/276/a", :range-end "/jepsen/idem/rd/276/z", :post-write-key "/jepsen/idem/rd/276/m", :post-write-val 276}
+2026-09-16 13:07:26,604{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-range-delete	{:rid "idem-rdel-276", :range-start "/jepsen/idem/rd/276/a", :range-end "/jepsen/idem/rd/276/z", :post-write-key "/jepsen/idem/rd/276/m", :post-write-val 276}
+2026-09-16 13:07:27,215{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-delete	{:rid "idem-del-279", :key "/jepsen/idem/del/279", :val "279", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:27,319{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-delete	{:rid "idem-del-279", :key "/jepsen/idem/del/279", :val "279", :replays 2, :replay-delay-ms 0, :setup {:revision 343, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:27,682{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-put	{:rid "idem-put-282", :key "/jepsen/idem/put/282", :val "282", :replays 3, :setup-val "OLD-282", :replay-delay-ms 0}
+2026-09-16 13:07:27,751{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-put	{:rid "idem-put-282", :key "/jepsen/idem/put/282", :val "282", :replays 3, :setup-val "OLD-282", :replay-delay-ms 0, :setup {:revision 346, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:27,878{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-delete	{:rid "idem-del-285", :key "/jepsen/idem/del/285", :val "285", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:27,988{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-delete	{:rid "idem-del-285", :key "/jepsen/idem/del/285", :val "285", :replays 2, :replay-delay-ms 0, :setup {:revision 348, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:28,327{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-range-delete	{:rid "idem-rdel-288", :range-start "/jepsen/idem/rd/288/a", :range-end "/jepsen/idem/rd/288/z", :post-write-key "/jepsen/idem/rd/288/m", :post-write-val 288}
+2026-09-16 13:07:28,435{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-range-delete	{:rid "idem-rdel-290", :range-start "/jepsen/idem/rd/290/a", :range-end "/jepsen/idem/rd/290/z", :post-write-key "/jepsen/idem/rd/290/m", :post-write-val 290}
+2026-09-16 13:07:28,604{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-range-delete	{:rid "idem-rdel-288", :range-start "/jepsen/idem/rd/288/a", :range-end "/jepsen/idem/rd/288/z", :post-write-key "/jepsen/idem/rd/288/m", :post-write-val 288}
+2026-09-16 13:07:28,702{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-range-delete	{:rid "idem-rdel-290", :range-start "/jepsen/idem/rd/290/a", :range-end "/jepsen/idem/rd/290/z", :post-write-key "/jepsen/idem/rd/290/m", :post-write-val 290}
+2026-09-16 13:07:28,771{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-put	{:rid "idem-put-294", :key "/jepsen/idem/put/294", :val "294", :replays 3, :setup-val "OLD-294", :replay-delay-ms 0}
+2026-09-16 13:07:28,846{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-put	{:rid "idem-put-294", :key "/jepsen/idem/put/294", :val "294", :replays 3, :setup-val "OLD-294", :replay-delay-ms 0, :setup {:revision 363, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:28,870{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-put	{:rid "idem-put-297", :key "/jepsen/idem/put/297", :val "297", :replays 2, :setup-val "OLD-297", :replay-delay-ms 0}
+2026-09-16 13:07:28,944{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-put	{:rid "idem-put-297", :key "/jepsen/idem/put/297", :val "297", :replays 2, :setup-val "OLD-297", :replay-delay-ms 0, :setup {:revision 365, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:28,968{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-delete	{:rid "idem-del-300", :key "/jepsen/idem/del/300", :val "300", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:29,102{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-delete	{:rid "idem-del-300", :key "/jepsen/idem/del/300", :val "300", :replays 3, :replay-delay-ms 0, :setup {:revision 367, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:29,590{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-delete	{:rid "idem-del-303", :key "/jepsen/idem/del/303", :val "303", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:29,691{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-delete	{:rid "idem-del-303", :key "/jepsen/idem/del/303", :val "303", :replays 2, :replay-delay-ms 0, :setup {:revision 371, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:29,863{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-put	{:rid "idem-put-306", :key "/jepsen/idem/put/306", :val "306", :replays 3, :setup-val "OLD-306", :replay-delay-ms 0}
+2026-09-16 13:07:29,919{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-delete	{:rid "idem-del-308", :key "/jepsen/idem/del/308", :val "308", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:29,937{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-put	{:rid "idem-put-306", :key "/jepsen/idem/put/306", :val "306", :replays 3, :setup-val "OLD-306", :replay-delay-ms 0, :setup {:revision 374, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:30,052{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-range-delete	{:rid "idem-rdel-311", :range-start "/jepsen/idem/rd/311/a", :range-end "/jepsen/idem/rd/311/z", :post-write-key "/jepsen/idem/rd/311/m", :post-write-val 311}
+2026-09-16 13:07:30,063{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-delete	{:rid "idem-del-308", :key "/jepsen/idem/del/308", :val "308", :replays 3, :replay-delay-ms 0, :setup {:revision 376, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:30,255{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-range-delete	{:rid "idem-rdel-311", :range-start "/jepsen/idem/rd/311/a", :range-end "/jepsen/idem/rd/311/z", :post-write-key "/jepsen/idem/rd/311/m", :post-write-val 311}
+2026-09-16 13:07:30,365{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-put	{:rid "idem-put-315", :key "/jepsen/idem/put/315", :val "315", :replays 2, :setup-val "OLD-315", :replay-delay-ms 0}
+2026-09-16 13:07:30,405{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-delete	{:rid "idem-del-317", :key "/jepsen/idem/del/317", :val "317", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:30,454{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-put	{:rid "idem-put-315", :key "/jepsen/idem/put/315", :val "315", :replays 2, :setup-val "OLD-315", :replay-delay-ms 0, :setup {:revision 386, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:30,506{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-range-delete	{:rid "idem-rdel-320", :range-start "/jepsen/idem/rd/320/a", :range-end "/jepsen/idem/rd/320/z", :post-write-key "/jepsen/idem/rd/320/m", :post-write-val 320}
+2026-09-16 13:07:30,537{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-delete	{:rid "idem-del-317", :key "/jepsen/idem/del/317", :val "317", :replays 2, :replay-delay-ms 0, :setup {:revision 388, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:30,735{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-range-delete	{:rid "idem-rdel-320", :range-start "/jepsen/idem/rd/320/a", :range-end "/jepsen/idem/rd/320/z", :post-write-key "/jepsen/idem/rd/320/m", :post-write-val 320}
+2026-09-16 13:07:31,106{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-delete	{:rid "idem-del-324", :key "/jepsen/idem/del/324", :val "324", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:31,272{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-delete	{:rid "idem-del-324", :key "/jepsen/idem/del/324", :val "324", :replays 3, :replay-delay-ms 0, :setup {:revision 397, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:31,290{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-delete	{:rid "idem-del-327", :key "/jepsen/idem/del/327", :val "327", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:31,395{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-delete	{:rid "idem-del-327", :key "/jepsen/idem/del/327", :val "327", :replays 2, :replay-delay-ms 0, :setup {:revision 401, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:31,552{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-put	{:rid "idem-put-330", :key "/jepsen/idem/put/330", :val "330", :replays 3, :setup-val "OLD-330", :replay-delay-ms 0}
+2026-09-16 13:07:31,624{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-put	{:rid "idem-put-330", :key "/jepsen/idem/put/330", :val "330", :replays 3, :setup-val "OLD-330", :replay-delay-ms 0, :setup {:revision 404, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:31,706{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-range-delete	{:rid "idem-rdel-333", :range-start "/jepsen/idem/rd/333/a", :range-end "/jepsen/idem/rd/333/z", :post-write-key "/jepsen/idem/rd/333/m", :post-write-val 333}
+2026-09-16 13:07:31,913{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-range-delete	{:rid "idem-rdel-333", :range-start "/jepsen/idem/rd/333/a", :range-end "/jepsen/idem/rd/333/z", :post-write-key "/jepsen/idem/rd/333/m", :post-write-val 333}
+2026-09-16 13:07:32,011{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-range-delete	{:rid "idem-rdel-336", :range-start "/jepsen/idem/rd/336/a", :range-end "/jepsen/idem/rd/336/z", :post-write-key "/jepsen/idem/rd/336/m", :post-write-val 336}
+2026-09-16 13:07:32,217{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-range-delete	{:rid "idem-rdel-336", :range-start "/jepsen/idem/rd/336/a", :range-end "/jepsen/idem/rd/336/z", :post-write-key "/jepsen/idem/rd/336/m", :post-write-val 336}
+2026-09-16 13:07:32,274{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-range-delete	{:rid "idem-rdel-339", :range-start "/jepsen/idem/rd/339/a", :range-end "/jepsen/idem/rd/339/z", :post-write-key "/jepsen/idem/rd/339/m", :post-write-val 339}
+2026-09-16 13:07:32,483{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-range-delete	{:rid "idem-rdel-339", :range-start "/jepsen/idem/rd/339/a", :range-end "/jepsen/idem/rd/339/z", :post-write-key "/jepsen/idem/rd/339/m", :post-write-val 339}
+2026-09-16 13:07:32,925{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-put	{:rid "idem-put-342", :key "/jepsen/idem/put/342", :val "342", :replays 3, :setup-val "OLD-342", :replay-delay-ms 0}
+2026-09-16 13:07:32,994{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-put	{:rid "idem-put-342", :key "/jepsen/idem/put/342", :val "342", :replays 3, :setup-val "OLD-342", :replay-delay-ms 0, :setup {:revision 424, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:33,078{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-range-delete	{:rid "idem-rdel-345", :range-start "/jepsen/idem/rd/345/a", :range-end "/jepsen/idem/rd/345/z", :post-write-key "/jepsen/idem/rd/345/m", :post-write-val 345}
+2026-09-16 13:07:33,287{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-range-delete	{:rid "idem-rdel-345", :range-start "/jepsen/idem/rd/345/a", :range-end "/jepsen/idem/rd/345/z", :post-write-key "/jepsen/idem/rd/345/m", :post-write-val 345}
+2026-09-16 13:07:33,489{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-delete	{:rid "idem-del-348", :key "/jepsen/idem/del/348", :val "348", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:33,629{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-delete	{:rid "idem-del-348", :key "/jepsen/idem/del/348", :val "348", :replays 3, :replay-delay-ms 0, :setup {:revision 432, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:33,710{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-put	{:rid "idem-put-351", :key "/jepsen/idem/put/351", :val "351", :replays 2, :setup-val "OLD-351", :replay-delay-ms 0}
+2026-09-16 13:07:33,779{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-put	{:rid "idem-put-351", :key "/jepsen/idem/put/351", :val "351", :replays 2, :setup-val "OLD-351", :replay-delay-ms 0, :setup {:revision 436, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:34,088{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-delete	{:rid "idem-del-354", :key "/jepsen/idem/del/354", :val "354", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:34,227{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-delete	{:rid "idem-del-354", :key "/jepsen/idem/del/354", :val "354", :replays 3, :replay-delay-ms 0, :setup {:revision 438, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:34,286{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-put	{:rid "idem-put-357", :key "/jepsen/idem/put/357", :val "357", :replays 2, :setup-val "OLD-357", :replay-delay-ms 0}
+2026-09-16 13:07:34,353{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-put	{:rid "idem-put-357", :key "/jepsen/idem/put/357", :val "357", :replays 2, :setup-val "OLD-357", :replay-delay-ms 0, :setup {:revision 442, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:34,588{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-range-delete	{:rid "idem-rdel-360", :range-start "/jepsen/idem/rd/360/a", :range-end "/jepsen/idem/rd/360/z", :post-write-key "/jepsen/idem/rd/360/m", :post-write-val 360}
+2026-09-16 13:07:34,796{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-range-delete	{:rid "idem-rdel-360", :range-start "/jepsen/idem/rd/360/a", :range-end "/jepsen/idem/rd/360/z", :post-write-key "/jepsen/idem/rd/360/m", :post-write-val 360}
+2026-09-16 13:07:35,256{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-delete	{:rid "idem-del-363", :key "/jepsen/idem/del/363", :val "363", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:35,358{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-delete	{:rid "idem-del-363", :key "/jepsen/idem/del/363", :val "363", :replays 2, :replay-delay-ms 0, :setup {:revision 450, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:35,669{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-range-delete	{:rid "idem-rdel-366", :range-start "/jepsen/idem/rd/366/a", :range-end "/jepsen/idem/rd/366/z", :post-write-key "/jepsen/idem/rd/366/m", :post-write-val 366}
+2026-09-16 13:07:35,882{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-range-delete	{:rid "idem-rdel-366", :range-start "/jepsen/idem/rd/366/a", :range-end "/jepsen/idem/rd/366/z", :post-write-key "/jepsen/idem/rd/366/m", :post-write-val 366}
+2026-09-16 13:07:36,671{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-delete	{:rid "idem-del-369", :key "/jepsen/idem/del/369", :val "369", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:36,775{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-delete	{:rid "idem-del-369", :key "/jepsen/idem/del/369", :val "369", :replays 2, :replay-delay-ms 0, :setup {:revision 459, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:37,163{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-delete	{:rid "idem-del-372", :key "/jepsen/idem/del/372", :val "372", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:37,298{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-delete	{:rid "idem-del-372", :key "/jepsen/idem/del/372", :val "372", :replays 3, :replay-delay-ms 0, :setup {:revision 462, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:37,525{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-put	{:rid "idem-put-375", :key "/jepsen/idem/put/375", :val "375", :replays 2, :setup-val "OLD-375", :replay-delay-ms 0}
+2026-09-16 13:07:37,590{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-put	{:rid "idem-put-375", :key "/jepsen/idem/put/375", :val "375", :replays 2, :setup-val "OLD-375", :replay-delay-ms 0, :setup {:revision 466, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:38,453{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-put	{:rid "idem-put-378", :key "/jepsen/idem/put/378", :val "378", :replays 3, :setup-val "OLD-378", :replay-delay-ms 0}
+2026-09-16 13:07:38,516{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-put	{:rid "idem-put-378", :key "/jepsen/idem/put/378", :val "378", :replays 3, :setup-val "OLD-378", :replay-delay-ms 0, :setup {:revision 468, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:39,194{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-put	{:rid "idem-put-381", :key "/jepsen/idem/put/381", :val "381", :replays 2, :setup-val "OLD-381", :replay-delay-ms 0}
+2026-09-16 13:07:39,261{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-put	{:rid "idem-put-381", :key "/jepsen/idem/put/381", :val "381", :replays 2, :setup-val "OLD-381", :replay-delay-ms 0, :setup {:revision 470, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:39,313{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-put	{:rid "idem-put-384", :key "/jepsen/idem/put/384", :val "384", :replays 3, :setup-val "OLD-384", :replay-delay-ms 0}
+2026-09-16 13:07:39,383{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-put	{:rid "idem-put-384", :key "/jepsen/idem/put/384", :val "384", :replays 3, :setup-val "OLD-384", :replay-delay-ms 0, :setup {:revision 472, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:39,403{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-delete	{:rid "idem-del-387", :key "/jepsen/idem/del/387", :val "387", :replays 2, :replay-delay-ms 0}
+2026-09-16 13:07:39,500{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-delete	{:rid "idem-del-387", :key "/jepsen/idem/del/387", :val "387", :replays 2, :replay-delay-ms 0, :setup {:revision 474, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:39,518{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idem-delete	{:rid "idem-del-390", :key "/jepsen/idem/del/390", :val "390", :replays 3, :replay-delay-ms 0}
+2026-09-16 13:07:39,646{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idem-delete	{:rid "idem-del-390", :key "/jepsen/idem/del/390", :val "390", :replays 3, :replay-delay-ms 0, :setup {:revision 477, :ok? true, :node "n1"}, :expected-version 0}
+2026-09-16 13:07:39,703{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idem-range-delete	{:rid "idem-rdel-393", :range-start "/jepsen/idem/rd/393/a", :range-end "/jepsen/idem/rd/393/z", :post-write-key "/jepsen/idem/rd/393/m", :post-write-val 393}
+2026-09-16 13:07:39,860{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-put	{:rid "idem-put-395", :key "/jepsen/idem/put/395", :val "395", :replays 2, :setup-val nil, :replay-delay-ms 0}
+2026-09-16 13:07:39,939{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-put	{:rid "idem-put-395", :key "/jepsen/idem/put/395", :val "395", :replays 2, :setup-val nil, :replay-delay-ms 0, :setup nil, :expected-version 1}
+2026-09-16 13:07:39,942{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idem-range-delete	{:rid "idem-rdel-393", :range-start "/jepsen/idem/rd/393/a", :range-end "/jepsen/idem/rd/393/z", :post-write-key "/jepsen/idem/rd/393/m", :post-write-val 393}
+2026-09-16 13:07:40,005{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idem-put	{:rid "idem-put-399", :key "/jepsen/idem/put/399", :val "399", :replays 2, :setup-val "OLD-399", :replay-delay-ms 0}
+2026-09-16 13:07:40,088{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idem-put	{:rid "idem-put-399", :key "/jepsen/idem/put/399", :val "399", :replays 2, :setup-val "OLD-399", :replay-delay-ms 0, :setup {:revision 488, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:40,391{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idem-put	{:rid "idem-put-402", :key "/jepsen/idem/put/402", :val "402", :replays 3, :setup-val "OLD-402", :replay-delay-ms 0}
+2026-09-16 13:07:40,465{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idem-put	{:rid "idem-put-402", :key "/jepsen/idem/put/402", :val "402", :replays 3, :setup-val "OLD-402", :replay-delay-ms 0, :setup {:revision 490, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:40,909{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idem-put	{:rid "idem-put-405", :key "/jepsen/idem/put/405", :val "405", :replays 2, :setup-val "OLD-405", :replay-delay-ms 0}
+2026-09-16 13:07:40,970{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idem-put	{:rid "idem-put-405", :key "/jepsen/idem/put/405", :val "405", :replays 2, :setup-val "OLD-405", :replay-delay-ms 0, :setup {:revision 492, :ok? true, :node "n1"}, :expected-version 2}
+2026-09-16 13:07:40,971{GMT}	INFO	[jepsen worker 4] jepsen.generator.interpreter: recovery: letting cluster converge
+2026-09-16 13:08:10,998{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-16 13:08:10,998{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-16 13:08:10,998{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-16 13:08:11,207{GMT}	INFO	[jepsen test runner] jepsen.core: Run complete, writing
+2026-09-16 13:08:11,280{GMT}	INFO	[jepsen test runner] jepsen.core: Snarfing log files
+2026-09-16 13:08:11,282{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Killing coord on n2
+2026-09-16 13:08:11,282{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Killing coord on n1
+2026-09-16 13:08:11,282{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Killing coord on n3
+2026-09-16 13:08:11,340{GMT}	INFO	[jepsen node n3] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-16 13:08:11,342{GMT}	INFO	[jepsen node n2] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-16 13:08:11,343{GMT}	INFO	[jepsen node n1] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-16 13:08:11,487{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-16 13:08:11,487{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-16 13:08:11,487{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-16 13:08:13,092{GMT}	INFO	[jepsen test runner] jepsen.core: Analyzing...
+2026-09-16 13:08:13,108{GMT}	INFO	[clojure-agent-send-off-pool-4] jepsen.coord.idem: idem checker: {:min-replay-attempts 50, :judged-groups 136, :attempt-ok 321, :attempt-errors {}, :replay-attempts 321, :put-groups 50, :violations-by-class {:prev-kv-mismatch 26, :delete-count-mismatch 47, :delete-prev-kvs-mismatch 47, :replay-deleted-new-write 39, :range-delete-count-mismatch 39}, :delete-groups 47, :groups 136, :failures ({:type :prev-kv-mismatch, :rid "idem-put-30", :key "/jepsen/idem/put/30", :prev-kvs [{:key "/jepsen/idem/put/30", :value "OLD-30", :version 1, :create-revision 55, :mod-revision 55} nil], :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"} {:type :prev-kv-mismatch, :rid "idem-put-72", :key "/jepsen/idem/put/72", :prev-kvs [{:key "/jepsen/idem/put/72", :value "OLD-72", :version 1, :create-revision 93, :mod-revision 93} nil], :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"} {:type :prev-kv-mismatch, :rid "idem-put-111", :key "/jepsen/idem/put/111", :prev-kvs [{:key "/jepsen/idem/put/111", :value "OLD-111", :version 1, :create-revision 124, :mod-revision 124} nil], :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"} {:type :prev-kv-mismatch, :rid "idem-put-132", :key "/jepsen/idem/put/132", :prev-kvs [{:key "/jepsen/idem/put/132", :value "OLD-132", :version 1, :create-revision 145, :mod-revision 145} nil], :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"} {:type :prev-kv-mismatch, :rid "idem-put-144", :key "/jepsen/idem/put/144", :prev-kvs [{:key "/jepsen/idem/put/144", :value "OLD-144", :version 1, :create-revision 161, :mod-revision 161} nil], :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"} {:type :prev-kv-mismatch, :rid "idem-put-171", :key "/jepsen/idem/put/171", :prev-kvs [{:key "/jepsen/idem/put/171", :value "OLD-171", :version 1, :create-revision 200, :mod-revision 200} nil], :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"} {:type :prev-kv-mismatch, :rid "idem-put-186", :key "/jepsen/idem/put/186", :prev-kvs [{:key "/jepsen/idem/put/186", :value "OLD-186", :version 1, :create-revision 220, :mod-revision 220} nil], :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"} {:type :prev-kv-mismatch, :rid "idem-put-252", :key "/jepsen/idem/put/252", :prev-kvs [{:key "/jepsen/idem/put/252", :value "OLD-252", :version 1, :create-revision 306, :mod-revision 306} nil], :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"} {:type :prev-kv-mismatch, :rid "idem-put-258", :key "/jepsen/idem/put/258", :prev-kvs [{:key "/jepsen/idem/put/258", :value "OLD-258", :version 1, :create-revision 314, :mod-revision 314} nil], :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"} {:type :prev-kv-mismatch, :rid "idem-put-270", :key "/jepsen/idem/put/270", :prev-kvs [{:key "/jepsen/idem/put/270", :value "OLD-270", :version 1, :create-revision 329, :mod-revision 329} nil], :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}), :range-delete-groups 39, :completion-ops 136}
+2026-09-16 13:08:13,239{GMT}	INFO	[jepsen test runner] jepsen.core: Analysis complete
+2026-09-16 13:08:13,253{GMT}	INFO	[jepsen results] jepsen.store: Wrote /opt/coord/jepsen/store/coord/2026-09-16T13:06:49.010928736Z/results.edn
+2026-09-16 13:08:13,310{GMT}	INFO	[jepsen test runner] jepsen.core: {:linear {:valid? false,
+          :idem {:min-replay-attempts 50,
+                 :judged-groups 136,
+                 :attempt-ok 321,
+                 :attempt-errors {},
+                 :replay-attempts 321,
+                 :put-groups 50,
+                 :violations-by-class {:prev-kv-mismatch 26,
+                                       :delete-count-mismatch 47,
+                                       :delete-prev-kvs-mismatch 47,
+                                       :replay-deleted-new-write 39,
+                                       :range-delete-count-mismatch 39},
+                 :delete-groups 47,
+                 :groups 136,
+                 :range-delete-groups 39,
+                 :completion-ops 136},
+          :failures [{:type :idempotency-violations,
+                      :count 198,
+                      :sample [{:type :prev-kv-mismatch,
+                                :rid "idem-put-30",
+                                :key "/jepsen/idem/put/30",
+                                :prev-kvs [{:key "/jepsen/idem/put/30",
+                                            :value "OLD-30",
+                                            :version 1,
+                                            :create-revision 55,
+                                            :mod-revision 55}
+                                           nil],
+                                :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                               {:type :prev-kv-mismatch,
+                                :rid "idem-put-72",
+                                :key "/jepsen/idem/put/72",
+                                :prev-kvs [{:key "/jepsen/idem/put/72",
+                                            :value "OLD-72",
+                                            :version 1,
+                                            :create-revision 93,
+                                            :mod-revision 93}
+                                           nil],
+                                :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                               {:type :prev-kv-mismatch,
+                                :rid "idem-put-111",
+                                :key "/jepsen/idem/put/111",
+                                :prev-kvs [{:key "/jepsen/idem/put/111",
+                                            :value "OLD-111",
+                                            :version 1,
+                                            :create-revision 124,
+                                            :mod-revision 124}
+                                           nil],
+                                :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}]}],
+          :violations [{:type :prev-kv-mismatch,
+                        :rid "idem-put-30",
+                        :key "/jepsen/idem/put/30",
+                        :prev-kvs [{:key "/jepsen/idem/put/30",
+                                    :value "OLD-30",
+                                    :version 1,
+                                    :create-revision 55,
+                                    :mod-revision 55}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-72",
+                        :key "/jepsen/idem/put/72",
+                        :prev-kvs [{:key "/jepsen/idem/put/72",
+                                    :value "OLD-72",
+                                    :version 1,
+                                    :create-revision 93,
+                                    :mod-revision 93}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-111",
+                        :key "/jepsen/idem/put/111",
+                        :prev-kvs [{:key "/jepsen/idem/put/111",
+                                    :value "OLD-111",
+                                    :version 1,
+                                    :create-revision 124,
+                                    :mod-revision 124}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-132",
+                        :key "/jepsen/idem/put/132",
+                        :prev-kvs [{:key "/jepsen/idem/put/132",
+                                    :value "OLD-132",
+                                    :version 1,
+                                    :create-revision 145,
+                                    :mod-revision 145}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-144",
+                        :key "/jepsen/idem/put/144",
+                        :prev-kvs [{:key "/jepsen/idem/put/144",
+                                    :value "OLD-144",
+                                    :version 1,
+                                    :create-revision 161,
+                                    :mod-revision 161}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-171",
+                        :key "/jepsen/idem/put/171",
+                        :prev-kvs [{:key "/jepsen/idem/put/171",
+                                    :value "OLD-171",
+                                    :version 1,
+                                    :create-revision 200,
+                                    :mod-revision 200}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-186",
+                        :key "/jepsen/idem/put/186",
+                        :prev-kvs [{:key "/jepsen/idem/put/186",
+                                    :value "OLD-186",
+                                    :version 1,
+                                    :create-revision 220,
+                                    :mod-revision 220}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-252",
+                        :key "/jepsen/idem/put/252",
+                        :prev-kvs [{:key "/jepsen/idem/put/252",
+                                    :value "OLD-252",
+                                    :version 1,
+                                    :create-revision 306,
+                                    :mod-revision 306}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-258",
+                        :key "/jepsen/idem/put/258",
+                        :prev-kvs [{:key "/jepsen/idem/put/258",
+                                    :value "OLD-258",
+                                    :version 1,
+                                    :create-revision 314,
+                                    :mod-revision 314}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-270",
+                        :key "/jepsen/idem/put/270",
+                        :prev-kvs [{:key "/jepsen/idem/put/270",
+                                    :value "OLD-270",
+                                    :version 1,
+                                    :create-revision 329,
+                                    :mod-revision 329}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-282",
+                        :key "/jepsen/idem/put/282",
+                        :prev-kvs [{:key "/jepsen/idem/put/282",
+                                    :value "OLD-282",
+                                    :version 1,
+                                    :create-revision 346,
+                                    :mod-revision 346}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-294",
+                        :key "/jepsen/idem/put/294",
+                        :prev-kvs [{:key "/jepsen/idem/put/294",
+                                    :value "OLD-294",
+                                    :version 1,
+                                    :create-revision 363,
+                                    :mod-revision 363}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-297",
+                        :key "/jepsen/idem/put/297",
+                        :prev-kvs [{:key "/jepsen/idem/put/297",
+                                    :value "OLD-297",
+                                    :version 1,
+                                    :create-revision 365,
+                                    :mod-revision 365}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-306",
+                        :key "/jepsen/idem/put/306",
+                        :prev-kvs [{:key "/jepsen/idem/put/306",
+                                    :value "OLD-306",
+                                    :version 1,
+                                    :create-revision 374,
+                                    :mod-revision 374}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-315",
+                        :key "/jepsen/idem/put/315",
+                        :prev-kvs [{:key "/jepsen/idem/put/315",
+                                    :value "OLD-315",
+                                    :version 1,
+                                    :create-revision 386,
+                                    :mod-revision 386}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-330",
+                        :key "/jepsen/idem/put/330",
+                        :prev-kvs [{:key "/jepsen/idem/put/330",
+                                    :value "OLD-330",
+                                    :version 1,
+                                    :create-revision 404,
+                                    :mod-revision 404}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-342",
+                        :key "/jepsen/idem/put/342",
+                        :prev-kvs [{:key "/jepsen/idem/put/342",
+                                    :value "OLD-342",
+                                    :version 1,
+                                    :create-revision 424,
+                                    :mod-revision 424}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-351",
+                        :key "/jepsen/idem/put/351",
+                        :prev-kvs [{:key "/jepsen/idem/put/351",
+                                    :value "OLD-351",
+                                    :version 1,
+                                    :create-revision 436,
+                                    :mod-revision 436}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-357",
+                        :key "/jepsen/idem/put/357",
+                        :prev-kvs [{:key "/jepsen/idem/put/357",
+                                    :value "OLD-357",
+                                    :version 1,
+                                    :create-revision 442,
+                                    :mod-revision 442}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}
+                       {:type :prev-kv-mismatch,
+                        :rid "idem-put-375",
+                        :key "/jepsen/idem/put/375",
+                        :prev-kvs [{:key "/jepsen/idem/put/375",
+                                    :value "OLD-375",
+                                    :version 1,
+                                    :create-revision 466,
+                                    :mod-revision 466}
+                                   nil],
+                        :note "幂等命中必须返回首次执行的结果；prev_kv 不一致（含 F-02 的 nil 退化）"}]},
+ :gates {:valid? true,
+         :gates {:premise {:valid? true, :disabled? true},
+                 :availability {:min-ratio 0.95,
+                                :min-sample 100,
+                                :windows 0,
+                                :judged 0,
+                                :skipped-small-sample 0,
+                                :worst-window nil,
+                                :violations []},
+                 :rto {:budget-seconds 0,
+                       :n 0,
+                       :p95 nil,
+                       :max nil,
+                       :samples [],
+                       :unrecovered 0,
+                       :not-measured 0,
+                       :details []}},
+         :failures []},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? false}
+
+
+Analysis invalid! (ﾉಥ益ಥ）ﾉ ┻━┻

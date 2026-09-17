@@ -1,0 +1,632 @@
+0	:invoke	:write	"vs618073226-1-xx"
+2	:invoke	:write	"vs618073226-4-xx"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+0	:ok	:write	"vs618073226-1-xx"
+3	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+2	:ok	:write	"vs618073226-4-xx"
+4	:invoke	:write	"vs618073226-9-xx"
+4	:ok	:write	"vs618073226-9-xx"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+0	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+5	:invoke	:write	"vs618073226-12-x"
+5	:ok	:write	"vs618073226-12-x"
+1	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+1	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+2	:invoke	:write	"vs618073226-15-x"
+2	:ok	:write	"vs618073226-15-x"
+8	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+8	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+4	:invoke	:write	"vs618073226-18-x"
+4	:ok	:write	"vs618073226-18-x"
+5	:invoke	:write	"vs618073226-21-x"
+5	:ok	:write	"vs618073226-21-x"
+5	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+5	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+6	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+2	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+6	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+13	:invoke	:write	"vs618073226-25-x"
+13	:ok	:write	"vs618073226-25-x"
+4	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+4	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+10	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+10	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n1" [:killed "n1"]}
+7	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+13	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+13	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+9	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+15	:invoke	:write	"vs618073226-27-x"
+11	:invoke	:write	"vs618073226-29-x"
+18	:invoke	:write	"vs618073226-31-x"
+7	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+12	:invoke	:write	"vs618073226-32-x"
+9	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+11	:ok	:write	"vs618073226-29-x"
+15	:ok	:write	"vs618073226-27-x"
+18	:ok	:write	"vs618073226-31-x"
+12	:ok	:write	"vs618073226-32-x"
+18	:invoke	:write	"vs618073226-34-x"
+18	:ok	:write	"vs618073226-34-x"
+14	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+15	:invoke	:write	"vs618073226-33-x"
+14	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+15	:ok	:write	"vs618073226-33-x"
+15	:invoke	:write	"vs618073226-38-x"
+15	:ok	:write	"vs618073226-38-x"
+11	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+11	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+12	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+12	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+18	:invoke	:write	"vs618073226-41-x"
+18	:ok	:write	"vs618073226-41-x"
+19	:invoke	:write	"vs618073226-44-x"
+:nemesis	:info	:stop	nil
+19	:ok	:write	"vs618073226-44-x"
+15	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+15	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+:nemesis	:info	:stop	{"n1" [:restarted "n1"]}
+17	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+17	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+18	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+18	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+19	:invoke	:write	"vs618073226-47-x"
+19	:ok	:write	"vs618073226-47-x"
+20	:invoke	:write	"vs618073226-50-x"
+20	:ok	:write	"vs618073226-50-x"
+20	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+20	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+16	:invoke	:write	"vs618073226-53-x"
+16	:ok	:write	"vs618073226-53-x"
+22	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+22	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+23	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+23	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+19	:invoke	:write	"vs618073226-56-x"
+19	:ok	:write	"vs618073226-56-x"
+25	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+25	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+30	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+30	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+16	:invoke	:write	"vs618073226-59-x"
+16	:ok	:write	"vs618073226-59-x"
+27	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+28	:invoke	:write	"vs618073226-61-x"
+27	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+28	:ok	:write	"vs618073226-61-x"
+19	:invoke	:write	"vs618073226-65-x"
+19	:ok	:write	"vs618073226-65-x"
+35	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+32	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+28	:invoke	:write	"vs618073226-67-x"
+28	:info	:write	"vs618073226-67-x"	:unavailable-maybe-applied
+35	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+32	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+19	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+19	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+40	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+16	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+16	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+21	:invoke	:write	"vs618073226-70-x"
+40	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+21	:ok	:write	"vs618073226-70-x"
+37	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+37	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+33	:invoke	:write	"vs618073226-73-x"
+24	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+24	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+33	:ok	:write	"vs618073226-73-x"
+45	:invoke	:write	"vs618073226-77-x"
+45	:ok	:write	"vs618073226-77-x"
+45	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+45	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+21	:invoke	:write	"vs618073226-80-x"
+21	:ok	:write	"vs618073226-80-x"
+42	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+42	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+33	:invoke	:write	"vs618073226-83-x"
+33	:ok	:write	"vs618073226-83-x"
+29	:invoke	:write	"vs618073226-86-x"
+50	:invoke	:write	"vs618073226-88-x"
+29	:ok	:write	"vs618073226-86-x"
+50	:ok	:write	"vs618073226-88-x"
+50	:invoke	:write	"vs618073226-92-x"
+50	:ok	:write	"vs618073226-92-x"
+21	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+21	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+47	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+47	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+50	:invoke	:write	"vs618073226-99-x"
+26	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+50	:ok	:write	"vs618073226-99-x"
+26	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+31	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+52	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+31	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+52	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+33	:invoke	:write	"vs618073226-103-"
+29	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+29	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+33	:ok	:write	"vs618073226-103-"
+50	:invoke	:write	"vs618073226-107-"
+50	:ok	:write	"vs618073226-107-"
+50	:invoke	:write	"vs618073226-110-"
+50	:ok	:write	"vs618073226-110-"
+36	:invoke	:write	"vs618073226-113-"
+36	:ok	:write	"vs618073226-113-"
+57	:invoke	:write	"vs618073226-116-"
+33	:invoke	:write	"vs618073226-118-"
+34	:invoke	:write	"vs618073226-120-"
+33	:ok	:write	"vs618073226-118-"
+57	:ok	:write	"vs618073226-116-"
+34	:ok	:write	"vs618073226-120-"
+50	:invoke	:write	"vs618073226-125-"
+50	:ok	:write	"vs618073226-125-"
+50	:invoke	:write	"vs618073226-128-"
+50	:ok	:write	"vs618073226-128-"
+36	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+36	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+57	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+57	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+33	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+33	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+34	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+34	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+50	:invoke	:write	"vs618073226-131-"
+50	:ok	:write	"vs618073226-131-"
+50	:invoke	:write	"vs618073226-134-"
+50	:ok	:write	"vs618073226-134-"
+41	:invoke	:write	"vs618073226-137-"
+41	:ok	:write	"vs618073226-137-"
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+39	:invoke	:write	"vs618073226-144-"
+50	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+50	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+39	:ok	:write	"vs618073226-144-"
+55	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+55	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+41	:invoke	:write	"vs618073226-147-"
+41	:ok	:write	"vs618073226-147-"
+62	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+62	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+38	:invoke	:write	"vs618073226-150-"
+38	:ok	:write	"vs618073226-150-"
+39	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+39	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+60	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+60	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+65	:invoke	:write	"vs618073226-153-"
+:nemesis	:info	:stop	nil
+65	:ok	:write	"vs618073226-153-"
+67	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+67	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+38	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+38	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+65	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+65	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+70	:invoke	:write	"vs618073226-156-"
+41	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+41	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+70	:ok	:write	"vs618073226-156-"
+72	:invoke	:write	"vs618073226-160-"
+72	:ok	:write	"vs618073226-160-"
+43	:invoke	:write	"vs618073226-163-"
+43	:ok	:write	"vs618073226-163-"
+44	:invoke	:write	"vs618073226-166-"
+44	:ok	:write	"vs618073226-166-"
+70	:invoke	:write	"vs618073226-169-"
+70	:ok	:write	"vs618073226-169-"
+70	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+70	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+46	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+46	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+72	:invoke	:write	"vs618073226-172-"
+72	:ok	:write	"vs618073226-172-"
+43	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+43	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+44	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+44	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+75	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+51	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+75	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+51	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+56	:invoke	:write	"vs618073226-176-"
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n1" [:killed "n1"]}
+56	:info	:write	"vs618073226-176-"	:unavailable-maybe-applied
+49	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+49	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+80	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+80	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+85	:invoke	:write	"vs618073226-179-"
+61	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+72	:invoke	:write	"vs618073226-181-"
+61	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+85	:ok	:write	"vs618073226-179-"
+72	:ok	:write	"vs618073226-181-"
+48	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+48	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+54	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+54	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+85	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+85	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+90	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+90	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+66	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+66	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+72	:invoke	:write	"vs618073226-184-"
+72	:ok	:write	"vs618073226-184-"
+53	:invoke	:write	"vs618073226-187-"
+59	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+59	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+53	:ok	:write	"vs618073226-187-"
+95	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+95	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+100	:invoke	:write	"vs618073226-190-"
+100	:ok	:write	"vs618073226-190-"
+71	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+71	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+72	:invoke	:write	"vs618073226-193-"
+72	:ok	:write	"vs618073226-193-"
+:nemesis	:info	:stop	nil
+64	:invoke	:write	"vs618073226-198-"
+100	:invoke	:write	"vs618073226-200-"
+76	:invoke	:write	"vs618073226-202-"
+72	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+72	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+100	:ok	:write	"vs618073226-200-"
+77	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+53	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+53	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+64	:ok	:write	"vs618073226-198-"
+76	:ok	:write	"vs618073226-202-"
+77	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+64	:invoke	:write	"vs618073226-208-"
+64	:ok	:write	"vs618073226-208-"
+100	:invoke	:write	"vs618073226-211-"
+100	:ok	:write	"vs618073226-211-"
+:nemesis	:info	:stop	{"n1" [:restarted "n1"]}
+76	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+76	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+82	:invoke	:write	"vs618073226-214-"
+82	:ok	:write	"vs618073226-214-"
+58	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+58	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+64	:invoke	:write	"vs618073226-217-"
+64	:ok	:write	"vs618073226-217-"
+100	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+100	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+105	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+81	:invoke	:write	"vs618073226-219-"
+82	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+82	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+105	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+63	:invoke	:write	"vs618073226-223-"
+81	:ok	:write	"vs618073226-219-"
+64	:invoke	:write	"vs618073226-226-"
+110	:invoke	:write	"vs618073226-228-"
+64	:ok	:write	"vs618073226-226-"
+63	:ok	:write	"vs618073226-223-"
+110	:ok	:write	"vs618073226-228-"
+110	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+110	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+81	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+81	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+87	:invoke	:write	"vs618073226-231-"
+87	:ok	:write	"vs618073226-231-"
+63	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+63	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+64	:invoke	:write	"vs618073226-234-"
+115	:invoke	:write	"vs618073226-236-"
+64	:ok	:write	"vs618073226-234-"
+115	:ok	:write	"vs618073226-236-"
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n2" [:killed "n2"]}
+87	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+87	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+68	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+68	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+64	:invoke	:write	"vs618073226-239-"
+64	:ok	:write	"vs618073226-239-"
+115	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+115	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+120	:invoke	:write	"vs618073226-242-"
+120	:ok	:write	"vs618073226-242-"
+86	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+86	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+92	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+73	:invoke	:write	"vs618073226-244-"
+92	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+64	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+64	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+73	:ok	:write	"vs618073226-244-"
+120	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+120	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+125	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+125	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+91	:invoke	:write	"vs618073226-247-"
+97	:invoke	:write	"vs618073226-249-"
+91	:ok	:write	"vs618073226-247-"
+97	:ok	:write	"vs618073226-249-"
+73	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+73	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+69	:invoke	:write	"vs618073226-252-"
+69	:ok	:write	"vs618073226-252-"
+130	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+130	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+135	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+135	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+91	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+91	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+97	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+97	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+:nemesis	:info	:stop	nil
+69	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+69	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+140	:invoke	:write	"vs618073226-255-"
+140	:ok	:write	"vs618073226-255-"
+140	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+140	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+96	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+:nemesis	:info	:stop	{"n2" [:restarted "n2"]}
+96	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+78	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+74	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+78	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+74	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+145	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+101	:invoke	:write	"vs618073226-257-"
+145	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+101	:ok	:write	"vs618073226-257-"
+101	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+101	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+102	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+102	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+83	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+79	:invoke	:write	"vs618073226-259-"
+83	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+79	:ok	:write	"vs618073226-259-"
+150	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+106	:invoke	:write	"vs618073226-261-"
+107	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+88	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}
+79	:invoke	:write	"vs618073226-263-"
+150	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+79	:ok	:write	"vs618073226-263-"
+79	:invoke	:write	"vs618073226-265-"
+106	:ok	:write	"vs618073226-261-"
+79	:ok	:write	"vs618073226-265-"
+88	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? false, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+107	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision :last, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+155	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+155	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+160	:invoke	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}
+160	:info	:watch-session	{:key "/jepsen/watch/s618073226", :start-revision 0, :prev-kv? true, :window-ms nil, :max-events nil, :resumes nil}	indeterminate: Wrong object type used with protocol message reflection.
+Field number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap
+
+106	:invoke	:write	"vs618073226-268-"
+106	:ok	:write	"vs618073226-268-"
+112	:invoke	:write	"vs618073226-271-"
+112	:ok	:write	"vs618073226-271-"
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	:not-started

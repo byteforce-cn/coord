@@ -1,0 +1,444 @@
+1	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-2/", :vals ["2-a" "2-b" "2-c"], :range-start "/jepsen/txn/s42-set-2/", :range-end "/jepsen/txn/s42-set-2/z"}
+2	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-4/", :vals ["4-a" "4-b" "4-c"], :range-start "/jepsen/txn/s42-set-4/", :range-end "/jepsen/txn/s42-set-4/z"}
+3	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-6", :old "old-6", :val "new-6", :stale? true}
+4	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-8/", :vals ["8-a" "8-b" "8-c"], :range-start "/jepsen/txn/s42-set-8/", :range-end "/jepsen/txn/s42-set-8/z"}
+1	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-2/", :vals ["2-a" "2-b" "2-c"], :range-start "/jepsen/txn/s42-set-2/", :range-end "/jepsen/txn/s42-set-2/z"}
+2	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-4/", :vals ["4-a" "4-b" "4-c"], :range-start "/jepsen/txn/s42-set-4/", :range-end "/jepsen/txn/s42-set-4/z"}
+4	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-8/", :vals ["8-a" "8-b" "8-c"], :range-start "/jepsen/txn/s42-set-8/", :range-end "/jepsen/txn/s42-set-8/z"}
+3	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-6", :old "old-6", :val "new-6", :stale? true}
+5	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-13/", :vals ["13-a" "13-b" "13-c"], :range-start "/jepsen/txn/s42-set-13/", :range-end "/jepsen/txn/s42-set-13/z"}
+5	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-13/", :vals ["13-a" "13-b" "13-c"], :range-start "/jepsen/txn/s42-set-13/", :range-end "/jepsen/txn/s42-set-13/z"}
+6	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-16", :val "16"}
+7	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-18/", :vals ["18-a" "18-b" "18-c"], :range-start "/jepsen/txn/s42-set-18/", :range-end "/jepsen/txn/s42-set-18/z"}
+8	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-20", :old "old-20", :val "new-20", :stale? false}
+6	:ok	:txn-create	{:key "/jepsen/txn/s42-create-16", :val "16"}
+9	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-23", :val "23"}
+7	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-18/", :vals ["18-a" "18-b" "18-c"], :range-start "/jepsen/txn/s42-set-18/", :range-end "/jepsen/txn/s42-set-18/z"}
+8	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-20", :old "old-20", :val "new-20", :stale? false}
+0	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-27", :old "old-27", :val "new-27", :stale? true}
+9	:ok	:txn-create	{:key "/jepsen/txn/s42-create-23", :val "23"}
+0	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-27", :old "old-27", :val "new-27", :stale? true}
+0	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-31", :old "old-31", :val "new-31", :stale? false}
+1	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-33", :val "33"}
+1	:ok	:txn-create	{:key "/jepsen/txn/s42-create-33", :val "33"}
+0	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-31", :old "old-31", :val "new-31", :stale? false}
+2	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-36", :val "36"}
+2	:ok	:txn-create	{:key "/jepsen/txn/s42-create-36", :val "36"}
+3	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-39"}
+4	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-41"}
+3	:ok	:txn-read	nil
+5	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-44", :old "old-44", :val "new-44", :stale? false}
+4	:ok	:txn-read	nil
+5	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-44", :old "old-44", :val "new-44", :stale? false}
+6	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-48", :old "old-48", :val "new-48", :stale? true}
+6	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-48", :old "old-48", :val "new-48", :stale? true}
+7	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-51", :val "51"}
+7	:ok	:txn-create	{:key "/jepsen/txn/s42-create-51", :val "51"}
+8	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-54"}
+8	:ok	:txn-read	nil
+9	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-57"}
+9	:ok	:txn-read	nil
+0	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-60/", :vals ["60-a" "60-b" "60-c"], :range-start "/jepsen/txn/s42-set-60/", :range-end "/jepsen/txn/s42-set-60/z"}
+0	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-60/", :vals ["60-a" "60-b" "60-c"], :range-start "/jepsen/txn/s42-set-60/", :range-end "/jepsen/txn/s42-set-60/z"}
+0	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-63", :old "old-63", :val "new-63", :stale? true}
+0	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-63", :old "old-63", :val "new-63", :stale? true}
+1	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-66"}
+1	:ok	:txn-read	nil
+2	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-69", :val "69"}
+2	:ok	:txn-create	{:key "/jepsen/txn/s42-create-69", :val "69"}
+3	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-72", :old "old-72", :val "new-72", :stale? true}
+3	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-72", :old "old-72", :val "new-72", :stale? true}
+4	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-75", :old "old-75", :val "new-75", :stale? true}
+4	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-75", :old "old-75", :val "new-75", :stale? true}
+5	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-78", :old "old-78", :val "new-78", :stale? true}
+5	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-78", :old "old-78", :val "new-78", :stale? true}
+6	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-81"}
+6	:ok	:txn-read	nil
+7	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-84", :val "84"}
+7	:ok	:txn-create	{:key "/jepsen/txn/s42-create-84", :val "84"}
+8	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-87", :val "87"}
+8	:ok	:txn-create	{:key "/jepsen/txn/s42-create-87", :val "87"}
+9	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-90"}
+9	:ok	:txn-read	nil
+0	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-93"}
+0	:ok	:txn-read	nil
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n1" [:killed "n1"]}
+2	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-100", :old "old-100", :val "new-100", :stale? false}
+2	:info	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-100", :old "old-100", :val "new-100", :stale? false}	:unavailable-maybe-applied
+3	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-103"}
+3	:ok	:txn-read	nil
+4	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-106", :old "old-106", :val "new-106", :stale? false}
+5	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-108", :old "old-108", :val "new-108", :stale? true}
+4	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-106", :old "old-106", :val "new-106", :stale? false}
+5	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-108", :old "old-108", :val "new-108", :stale? true}
+6	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-112/", :vals ["112-a" "112-b" "112-c"], :range-start "/jepsen/txn/s42-set-112/", :range-end "/jepsen/txn/s42-set-112/z"}
+6	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-112/", :vals ["112-a" "112-b" "112-c"], :range-start "/jepsen/txn/s42-set-112/", :range-end "/jepsen/txn/s42-set-112/z"}
+7	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-115", :old "old-115", :val "new-115", :stale? false}
+7	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-115", :old "old-115", :val "new-115", :stale? false}
+8	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-118"}
+8	:ok	:txn-read	nil
+9	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-121", :val "121"}
+9	:ok	:txn-create	{:key "/jepsen/txn/s42-create-121", :val "121"}
+0	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-124", :old "old-124", :val "new-124", :stale? false}
+0	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-124", :old "old-124", :val "new-124", :stale? false}
+0	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-127", :old "old-127", :val "new-127", :stale? false}
+1	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-129"}
+0	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-127", :old "old-127", :val "new-127", :stale? false}
+1	:ok	:txn-read	nil
+12	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-133/", :vals ["133-a" "133-b" "133-c"], :range-start "/jepsen/txn/s42-set-133/", :range-end "/jepsen/txn/s42-set-133/z"}
+3	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-135", :old "old-135", :val "new-135", :stale? true}
+12	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-133/", :vals ["133-a" "133-b" "133-c"], :range-start "/jepsen/txn/s42-set-133/", :range-end "/jepsen/txn/s42-set-133/z"}
+3	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-135", :old "old-135", :val "new-135", :stale? true}
+4	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-139", :val "139"}
+4	:ok	:txn-create	{:key "/jepsen/txn/s42-create-139", :val "139"}
+5	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-142", :old "old-142", :val "new-142", :stale? false}
+5	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-142", :old "old-142", :val "new-142", :stale? false}
+6	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-145", :val "145"}
+6	:ok	:txn-create	{:key "/jepsen/txn/s42-create-145", :val "145"}
+7	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-148", :old "old-148", :val "new-148", :stale? false}
+7	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-148", :old "old-148", :val "new-148", :stale? false}
+8	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-151", :old "old-151", :val "new-151", :stale? false}
+8	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-151", :old "old-151", :val "new-151", :stale? false}
+9	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-154/", :vals ["154-a" "154-b" "154-c"], :range-start "/jepsen/txn/s42-set-154/", :range-end "/jepsen/txn/s42-set-154/z"}
+9	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-154/", :vals ["154-a" "154-b" "154-c"], :range-start "/jepsen/txn/s42-set-154/", :range-end "/jepsen/txn/s42-set-154/z"}
+:nemesis	:info	:stop	nil
+0	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-159", :val "159"}
+0	:ok	:txn-create	{:key "/jepsen/txn/s42-create-159", :val "159"}
+1	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-162", :old "old-162", :val "new-162", :stale? true}
+1	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-162", :old "old-162", :val "new-162", :stale? true}
+12	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-165", :old "old-165", :val "new-165", :stale? true}
+12	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-165", :old "old-165", :val "new-165", :stale? true}
+:nemesis	:info	:stop	{"n1" [:restarted "n1"]}
+4	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-170"}
+4	:ok	:txn-read	nil
+5	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-173/", :vals ["173-a" "173-b" "173-c"], :range-start "/jepsen/txn/s42-set-173/", :range-end "/jepsen/txn/s42-set-173/z"}
+6	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-175", :old "old-175", :val "new-175", :stale? false}
+5	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-173/", :vals ["173-a" "173-b" "173-c"], :range-start "/jepsen/txn/s42-set-173/", :range-end "/jepsen/txn/s42-set-173/z"}
+6	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-175", :old "old-175", :val "new-175", :stale? false}
+7	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-179", :val "179"}
+8	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-181/", :vals ["181-a" "181-b" "181-c"], :range-start "/jepsen/txn/s42-set-181/", :range-end "/jepsen/txn/s42-set-181/z"}
+7	:ok	:txn-create	{:key "/jepsen/txn/s42-create-179", :val "179"}
+8	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-181/", :vals ["181-a" "181-b" "181-c"], :range-start "/jepsen/txn/s42-set-181/", :range-end "/jepsen/txn/s42-set-181/z"}
+9	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-185/", :vals ["185-a" "185-b" "185-c"], :range-start "/jepsen/txn/s42-set-185/", :range-end "/jepsen/txn/s42-set-185/z"}
+9	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-185/", :vals ["185-a" "185-b" "185-c"], :range-start "/jepsen/txn/s42-set-185/", :range-end "/jepsen/txn/s42-set-185/z"}
+0	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-188", :old "old-188", :val "new-188", :stale? false}
+0	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-188", :old "old-188", :val "new-188", :stale? false}
+0	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-191"}
+0	:ok	:txn-read	nil
+1	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-194", :old "old-194", :val "new-194", :stale? false}
+1	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-194", :old "old-194", :val "new-194", :stale? false}
+12	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-197", :old "old-197", :val "new-197", :stale? false}
+12	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-197", :old "old-197", :val "new-197", :stale? false}
+3	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-200", :val "200"}
+3	:ok	:txn-create	{:key "/jepsen/txn/s42-create-200", :val "200"}
+4	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-203", :old "old-203", :val "new-203", :stale? false}
+5	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-205", :old "old-205", :val "new-205", :stale? false}
+4	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-203", :old "old-203", :val "new-203", :stale? false}
+5	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-205", :old "old-205", :val "new-205", :stale? false}
+6	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-209", :old "old-209", :val "new-209", :stale? false}
+6	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-209", :old "old-209", :val "new-209", :stale? false}
+7	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-212", :old "old-212", :val "new-212", :stale? false}
+7	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-212", :old "old-212", :val "new-212", :stale? false}
+8	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-215"}
+8	:ok	:txn-read	nil
+9	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-218", :old "old-218", :val "new-218", :stale? false}
+9	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-218", :old "old-218", :val "new-218", :stale? false}
+0	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-221", :old "old-221", :val "new-221", :stale? false}
+0	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-221", :old "old-221", :val "new-221", :stale? false}
+0	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-224", :old "old-224", :val "new-224", :stale? false}
+1	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-226", :old "old-226", :val "new-226", :stale? false}
+0	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-224", :old "old-224", :val "new-224", :stale? false}
+1	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-226", :old "old-226", :val "new-226", :stale? false}
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+4	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-234", :old "old-234", :val "new-234", :stale? true}
+4	:info	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-234", :old "old-234", :val "new-234", :stale? true}	:unavailable-maybe-applied
+5	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-237", :old "old-237", :val "new-237", :stale? true}
+5	:info	:txn-cas	{:key "/jepsen/txn/s42-cas-237", :old "old-237", :val "new-237", :stale? true}	:unavailable-maybe-applied
+6	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-240/", :vals ["240-a" "240-b" "240-c"], :range-start "/jepsen/txn/s42-set-240/", :range-end "/jepsen/txn/s42-set-240/z"}
+6	:info	:txn-write-set	{:prefix "/jepsen/txn/s42-set-240/", :vals ["240-a" "240-b" "240-c"], :range-start "/jepsen/txn/s42-set-240/", :range-end "/jepsen/txn/s42-set-240/z"}	:unavailable-maybe-applied
+7	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-243", :val "243"}
+7	:ok	:txn-create	{:key "/jepsen/txn/s42-create-243", :val "243"}
+8	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-246/", :vals ["246-a" "246-b" "246-c"], :range-start "/jepsen/txn/s42-set-246/", :range-end "/jepsen/txn/s42-set-246/z"}
+8	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-246/", :vals ["246-a" "246-b" "246-c"], :range-start "/jepsen/txn/s42-set-246/", :range-end "/jepsen/txn/s42-set-246/z"}
+9	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-249"}
+9	:ok	:txn-read	nil
+0	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-252", :old "old-252", :val "new-252", :stale? true}
+0	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-252", :old "old-252", :val "new-252", :stale? true}
+0	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-255/", :vals ["255-a" "255-b" "255-c"], :range-start "/jepsen/txn/s42-set-255/", :range-end "/jepsen/txn/s42-set-255/z"}
+0	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-255/", :vals ["255-a" "255-b" "255-c"], :range-start "/jepsen/txn/s42-set-255/", :range-end "/jepsen/txn/s42-set-255/z"}
+1	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-258/", :vals ["258-a" "258-b" "258-c"], :range-start "/jepsen/txn/s42-set-258/", :range-end "/jepsen/txn/s42-set-258/z"}
+1	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-258/", :vals ["258-a" "258-b" "258-c"], :range-start "/jepsen/txn/s42-set-258/", :range-end "/jepsen/txn/s42-set-258/z"}
+12	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-261", :old "old-261", :val "new-261", :stale? true}
+12	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-261", :old "old-261", :val "new-261", :stale? true}
+3	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-264", :val "264"}
+3	:ok	:txn-create	{:key "/jepsen/txn/s42-create-264", :val "264"}
+14	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-267", :old "old-267", :val "new-267", :stale? true}
+14	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-267", :old "old-267", :val "new-267", :stale? true}
+:nemesis	:info	:stop	nil
+16	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-272/", :vals ["272-a" "272-b" "272-c"], :range-start "/jepsen/txn/s42-set-272/", :range-end "/jepsen/txn/s42-set-272/z"}
+16	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-272/", :vals ["272-a" "272-b" "272-c"], :range-start "/jepsen/txn/s42-set-272/", :range-end "/jepsen/txn/s42-set-272/z"}
+7	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-275", :val "275"}
+8	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-277/", :vals ["277-a" "277-b" "277-c"], :range-start "/jepsen/txn/s42-set-277/", :range-end "/jepsen/txn/s42-set-277/z"}
+7	:ok	:txn-create	{:key "/jepsen/txn/s42-create-275", :val "275"}
+8	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-277/", :vals ["277-a" "277-b" "277-c"], :range-start "/jepsen/txn/s42-set-277/", :range-end "/jepsen/txn/s42-set-277/z"}
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+0	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-283", :val "283"}
+0	:ok	:txn-create	{:key "/jepsen/txn/s42-create-283", :val "283"}
+0	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-286", :val "286"}
+1	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-288"}
+0	:ok	:txn-create	{:key "/jepsen/txn/s42-create-286", :val "286"}
+12	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-291", :old "old-291", :val "new-291", :stale? true}
+1	:ok	:txn-read	nil
+12	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-291", :old "old-291", :val "new-291", :stale? true}
+3	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-295"}
+3	:ok	:txn-read	nil
+14	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-298/", :vals ["298-a" "298-b" "298-c"], :range-start "/jepsen/txn/s42-set-298/", :range-end "/jepsen/txn/s42-set-298/z"}
+14	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-298/", :vals ["298-a" "298-b" "298-c"], :range-start "/jepsen/txn/s42-set-298/", :range-end "/jepsen/txn/s42-set-298/z"}
+15	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-301"}
+15	:ok	:txn-read	nil
+16	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-304", :old "old-304", :val "new-304", :stale? false}
+16	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-304", :old "old-304", :val "new-304", :stale? false}
+7	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-307", :val "307"}
+7	:ok	:txn-create	{:key "/jepsen/txn/s42-create-307", :val "307"}
+8	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-310", :old "old-310", :val "new-310", :stale? false}
+8	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-310", :old "old-310", :val "new-310", :stale? false}
+9	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-313", :old "old-313", :val "new-313", :stale? false}
+9	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-313", :old "old-313", :val "new-313", :stale? false}
+0	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-316", :old "old-316", :val "new-316", :stale? false}
+1	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-318", :val "318"}
+1	:ok	:txn-create	{:key "/jepsen/txn/s42-create-318", :val "318"}
+0	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-316", :old "old-316", :val "new-316", :stale? false}
+1	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-322", :old "old-322", :val "new-322", :stale? false}
+1	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-322", :old "old-322", :val "new-322", :stale? false}
+12	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-325", :old "old-325", :val "new-325", :stale? false}
+12	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-325", :old "old-325", :val "new-325", :stale? false}
+3	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-328", :old "old-328", :val "new-328", :stale? false}
+3	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-328", :old "old-328", :val "new-328", :stale? false}
+14	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-331", :old "old-331", :val "new-331", :stale? false}
+14	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-331", :old "old-331", :val "new-331", :stale? false}
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+7	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-338", :val "338"}
+7	:ok	:txn-create	{:key "/jepsen/txn/s42-create-338", :val "338"}
+8	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-341", :val "341"}
+8	:ok	:txn-create	{:key "/jepsen/txn/s42-create-341", :val "341"}
+9	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-344", :old "old-344", :val "new-344", :stale? false}
+9	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-344", :old "old-344", :val "new-344", :stale? false}
+0	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-347"}
+0	:ok	:txn-read	nil
+0	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-350"}
+0	:ok	:txn-read	nil
+1	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-353"}
+1	:ok	:txn-read	nil
+12	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-356/", :vals ["356-a" "356-b" "356-c"], :range-start "/jepsen/txn/s42-set-356/", :range-end "/jepsen/txn/s42-set-356/z"}
+3	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-358", :old "old-358", :val "new-358", :stale? false}
+12	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-356/", :vals ["356-a" "356-b" "356-c"], :range-start "/jepsen/txn/s42-set-356/", :range-end "/jepsen/txn/s42-set-356/z"}
+3	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-358", :old "old-358", :val "new-358", :stale? false}
+14	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-362"}
+14	:ok	:txn-read	nil
+15	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-365", :val "365"}
+15	:ok	:txn-create	{:key "/jepsen/txn/s42-create-365", :val "365"}
+16	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-368", :old "old-368", :val "new-368", :stale? false}
+16	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-368", :old "old-368", :val "new-368", :stale? false}
+7	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-371", :old "old-371", :val "new-371", :stale? false}
+7	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-371", :old "old-371", :val "new-371", :stale? false}
+8	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-374", :old "old-374", :val "new-374", :stale? false}
+8	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-374", :old "old-374", :val "new-374", :stale? false}
+9	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-377", :old "old-377", :val "new-377", :stale? false}
+9	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-377", :old "old-377", :val "new-377", :stale? false}
+0	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-380", :val "380"}
+0	:ok	:txn-create	{:key "/jepsen/txn/s42-create-380", :val "380"}
+0	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-383", :old "old-383", :val "new-383", :stale? false}
+0	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-383", :old "old-383", :val "new-383", :stale? false}
+1	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-386", :old "old-386", :val "new-386", :stale? false}
+1	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-386", :old "old-386", :val "new-386", :stale? false}
+12	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-389", :val "389"}
+12	:ok	:txn-create	{:key "/jepsen/txn/s42-create-389", :val "389"}
+:nemesis	:info	:stop	nil
+14	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-394", :old "old-394", :val "new-394", :stale? false}
+14	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-394", :old "old-394", :val "new-394", :stale? false}
+15	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-397", :old "old-397", :val "new-397", :stale? false}
+16	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-399", :val "399"}
+16	:ok	:txn-create	{:key "/jepsen/txn/s42-create-399", :val "399"}
+15	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-397", :old "old-397", :val "new-397", :stale? false}
+7	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-403"}
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+7	:ok	:txn-read	nil
+9	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-408"}
+9	:ok	:txn-read	nil
+0	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-411", :old "old-411", :val "new-411", :stale? true}
+0	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-411", :old "old-411", :val "new-411", :stale? true}
+0	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-414", :old "old-414", :val "new-414", :stale? true}
+0	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-414", :old "old-414", :val "new-414", :stale? true}
+1	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-417", :val "417"}
+1	:ok	:txn-create	{:key "/jepsen/txn/s42-create-417", :val "417"}
+12	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-420", :old "old-420", :val "new-420", :stale? true}
+12	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-420", :old "old-420", :val "new-420", :stale? true}
+3	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-423", :val "423"}
+3	:ok	:txn-create	{:key "/jepsen/txn/s42-create-423", :val "423"}
+14	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-426", :old "old-426", :val "new-426", :stale? true}
+14	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-426", :old "old-426", :val "new-426", :stale? true}
+15	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-429", :old "old-429", :val "new-429", :stale? true}
+15	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-429", :old "old-429", :val "new-429", :stale? true}
+16	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-432"}
+16	:ok	:txn-read	nil
+7	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-435", :old "old-435", :val "new-435", :stale? true}
+8	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-437", :old "old-437", :val "new-437", :stale? false}
+7	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-435", :old "old-435", :val "new-435", :stale? true}
+8	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-437", :old "old-437", :val "new-437", :stale? false}
+9	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-441/", :vals ["441-a" "441-b" "441-c"], :range-start "/jepsen/txn/s42-set-441/", :range-end "/jepsen/txn/s42-set-441/z"}
+9	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-441/", :vals ["441-a" "441-b" "441-c"], :range-start "/jepsen/txn/s42-set-441/", :range-end "/jepsen/txn/s42-set-441/z"}
+0	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-444", :val "444"}
+0	:ok	:txn-create	{:key "/jepsen/txn/s42-create-444", :val "444"}
+0	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-447"}
+0	:ok	:txn-read	nil
+:nemesis	:info	:start	nil
+12	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-452", :old "old-452", :val "new-452", :stale? false}
+3	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-454", :old "old-454", :val "new-454", :stale? false}
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+12	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-452", :old "old-452", :val "new-452", :stale? false}
+15	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-459", :old "old-459", :val "new-459", :stale? true}
+3	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-454", :old "old-454", :val "new-454", :stale? false}
+15	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-459", :old "old-459", :val "new-459", :stale? true}
+16	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-463", :old "old-463", :val "new-463", :stale? false}
+16	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-463", :old "old-463", :val "new-463", :stale? false}
+7	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-466"}
+7	:ok	:txn-read	nil
+8	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-469", :old "old-469", :val "new-469", :stale? false}
+8	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-469", :old "old-469", :val "new-469", :stale? false}
+9	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-472", :old "old-472", :val "new-472", :stale? false}
+9	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-472", :old "old-472", :val "new-472", :stale? false}
+0	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-475", :old "old-475", :val "new-475", :stale? false}
+0	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-475", :old "old-475", :val "new-475", :stale? false}
+0	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-478", :old "old-478", :val "new-478", :stale? false}
+0	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-478", :old "old-478", :val "new-478", :stale? false}
+1	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-481", :old "old-481", :val "new-481", :stale? false}
+12	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-483", :val "483"}
+1	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-481", :old "old-481", :val "new-481", :stale? false}
+12	:ok	:txn-create	{:key "/jepsen/txn/s42-create-483", :val "483"}
+3	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-487", :old "old-487", :val "new-487", :stale? false}
+3	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-487", :old "old-487", :val "new-487", :stale? false}
+14	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-490", :old "old-490", :val "new-490", :stale? false}
+14	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-490", :old "old-490", :val "new-490", :stale? false}
+15	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-493", :val "493"}
+15	:ok	:txn-create	{:key "/jepsen/txn/s42-create-493", :val "493"}
+16	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-496", :val "496"}
+16	:ok	:txn-create	{:key "/jepsen/txn/s42-create-496", :val "496"}
+7	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-499", :old "old-499", :val "new-499", :stale? false}
+8	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-501", :old "old-501", :val "new-501", :stale? true}
+7	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-499", :old "old-499", :val "new-499", :stale? false}
+9	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-504", :old "old-504", :val "new-504", :stale? true}
+8	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-501", :old "old-501", :val "new-501", :stale? true}
+9	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-504", :old "old-504", :val "new-504", :stale? true}
+0	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-508"}
+0	:ok	:txn-read	nil
+0	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-511", :old "old-511", :val "new-511", :stale? false}
+0	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-511", :old "old-511", :val "new-511", :stale? false}
+1	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-514/", :vals ["514-a" "514-b" "514-c"], :range-start "/jepsen/txn/s42-set-514/", :range-end "/jepsen/txn/s42-set-514/z"}
+1	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-514/", :vals ["514-a" "514-b" "514-c"], :range-start "/jepsen/txn/s42-set-514/", :range-end "/jepsen/txn/s42-set-514/z"}
+12	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-517", :old "old-517", :val "new-517", :stale? false}
+12	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-517", :old "old-517", :val "new-517", :stale? false}
+3	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-520", :old "old-520", :val "new-520", :stale? false}
+3	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-520", :old "old-520", :val "new-520", :stale? false}
+:nemesis	:info	:stop	nil
+15	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-525"}
+15	:ok	:txn-read	nil
+16	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-528"}
+16	:ok	:txn-read	nil
+7	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-531/", :vals ["531-a" "531-b" "531-c"], :range-start "/jepsen/txn/s42-set-531/", :range-end "/jepsen/txn/s42-set-531/z"}
+7	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-531/", :vals ["531-a" "531-b" "531-c"], :range-start "/jepsen/txn/s42-set-531/", :range-end "/jepsen/txn/s42-set-531/z"}
+8	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-534", :old "old-534", :val "new-534", :stale? true}
+8	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-534", :old "old-534", :val "new-534", :stale? true}
+9	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-537", :val "537"}
+9	:ok	:txn-create	{:key "/jepsen/txn/s42-create-537", :val "537"}
+0	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-540", :val "540"}
+0	:ok	:txn-create	{:key "/jepsen/txn/s42-create-540", :val "540"}
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+1	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-545/", :vals ["545-a" "545-b" "545-c"], :range-start "/jepsen/txn/s42-set-545/", :range-end "/jepsen/txn/s42-set-545/z"}
+1	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-545/", :vals ["545-a" "545-b" "545-c"], :range-start "/jepsen/txn/s42-set-545/", :range-end "/jepsen/txn/s42-set-545/z"}
+12	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-548", :old "old-548", :val "new-548", :stale? false}
+12	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-548", :old "old-548", :val "new-548", :stale? false}
+3	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-551/", :vals ["551-a" "551-b" "551-c"], :range-start "/jepsen/txn/s42-set-551/", :range-end "/jepsen/txn/s42-set-551/z"}
+3	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-551/", :vals ["551-a" "551-b" "551-c"], :range-start "/jepsen/txn/s42-set-551/", :range-end "/jepsen/txn/s42-set-551/z"}
+14	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-554", :old "old-554", :val "new-554", :stale? false}
+14	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-554", :old "old-554", :val "new-554", :stale? false}
+15	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-557"}
+15	:ok	:txn-read	nil
+16	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-560", :old "old-560", :val "new-560", :stale? false}
+16	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-560", :old "old-560", :val "new-560", :stale? false}
+7	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-563", :val "563"}
+7	:ok	:txn-create	{:key "/jepsen/txn/s42-create-563", :val "563"}
+8	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-566", :val "566"}
+8	:ok	:txn-create	{:key "/jepsen/txn/s42-create-566", :val "566"}
+9	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-569"}
+9	:ok	:txn-read	nil
+0	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-572"}
+0	:ok	:txn-read	nil
+0	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-575", :old "old-575", :val "new-575", :stale? false}
+1	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-577/", :vals ["577-a" "577-b" "577-c"], :range-start "/jepsen/txn/s42-set-577/", :range-end "/jepsen/txn/s42-set-577/z"}
+0	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-575", :old "old-575", :val "new-575", :stale? false}
+1	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-577/", :vals ["577-a" "577-b" "577-c"], :range-start "/jepsen/txn/s42-set-577/", :range-end "/jepsen/txn/s42-set-577/z"}
+12	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-581", :old "old-581", :val "new-581", :stale? false}
+12	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-581", :old "old-581", :val "new-581", :stale? false}
+3	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-584", :old "old-584", :val "new-584", :stale? false}
+3	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-584", :old "old-584", :val "new-584", :stale? false}
+14	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-587", :old "old-587", :val "new-587", :stale? false}
+14	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-587", :old "old-587", :val "new-587", :stale? false}
+15	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-590", :old "old-590", :val "new-590", :stale? false}
+15	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-590", :old "old-590", :val "new-590", :stale? false}
+16	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-593", :val "593"}
+16	:ok	:txn-create	{:key "/jepsen/txn/s42-create-593", :val "593"}
+7	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-596/", :vals ["596-a" "596-b" "596-c"], :range-start "/jepsen/txn/s42-set-596/", :range-end "/jepsen/txn/s42-set-596/z"}
+7	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-596/", :vals ["596-a" "596-b" "596-c"], :range-start "/jepsen/txn/s42-set-596/", :range-end "/jepsen/txn/s42-set-596/z"}
+8	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-599", :val "599"}
+8	:ok	:txn-create	{:key "/jepsen/txn/s42-create-599", :val "599"}
+9	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-602", :old "old-602", :val "new-602", :stale? false}
+0	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-604", :val "604"}
+0	:ok	:txn-create	{:key "/jepsen/txn/s42-create-604", :val "604"}
+9	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-602", :old "old-602", :val "new-602", :stale? false}
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+12	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-612", :old "old-612", :val "new-612", :stale? true}
+12	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-612", :old "old-612", :val "new-612", :stale? true}
+3	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-615/", :vals ["615-a" "615-b" "615-c"], :range-start "/jepsen/txn/s42-set-615/", :range-end "/jepsen/txn/s42-set-615/z"}
+3	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-615/", :vals ["615-a" "615-b" "615-c"], :range-start "/jepsen/txn/s42-set-615/", :range-end "/jepsen/txn/s42-set-615/z"}
+14	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-618", :old "old-618", :val "new-618", :stale? true}
+15	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-620", :old "old-620", :val "new-620", :stale? false}
+14	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-618", :old "old-618", :val "new-618", :stale? true}
+15	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-620", :old "old-620", :val "new-620", :stale? false}
+16	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-624", :old "old-624", :val "new-624", :stale? true}
+16	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-624", :old "old-624", :val "new-624", :stale? true}
+7	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-627"}
+7	:ok	:txn-read	nil
+8	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-630", :val "630"}
+8	:ok	:txn-create	{:key "/jepsen/txn/s42-create-630", :val "630"}
+9	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-633", :val "633"}
+9	:ok	:txn-create	{:key "/jepsen/txn/s42-create-633", :val "633"}
+0	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-636/", :vals ["636-a" "636-b" "636-c"], :range-start "/jepsen/txn/s42-set-636/", :range-end "/jepsen/txn/s42-set-636/z"}
+0	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-636/", :vals ["636-a" "636-b" "636-c"], :range-start "/jepsen/txn/s42-set-636/", :range-end "/jepsen/txn/s42-set-636/z"}
+0	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-639/", :vals ["639-a" "639-b" "639-c"], :range-start "/jepsen/txn/s42-set-639/", :range-end "/jepsen/txn/s42-set-639/z"}
+0	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-639/", :vals ["639-a" "639-b" "639-c"], :range-start "/jepsen/txn/s42-set-639/", :range-end "/jepsen/txn/s42-set-639/z"}
+1	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-642"}
+1	:ok	:txn-read	nil
+12	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-645"}
+12	:ok	:txn-read	nil
+3	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-648", :val "648"}
+3	:ok	:txn-create	{:key "/jepsen/txn/s42-create-648", :val "648"}
+14	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-651/", :vals ["651-a" "651-b" "651-c"], :range-start "/jepsen/txn/s42-set-651/", :range-end "/jepsen/txn/s42-set-651/z"}
+14	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-651/", :vals ["651-a" "651-b" "651-c"], :range-start "/jepsen/txn/s42-set-651/", :range-end "/jepsen/txn/s42-set-651/z"}
+15	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-654", :old "old-654", :val "new-654", :stale? true}
+15	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-654", :old "old-654", :val "new-654", :stale? true}
+16	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-657", :old "old-657", :val "new-657", :stale? true}
+16	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-657", :old "old-657", :val "new-657", :stale? true}
+7	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-660", :val "660"}
+7	:ok	:txn-create	{:key "/jepsen/txn/s42-create-660", :val "660"}
+8	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-663/", :vals ["663-a" "663-b" "663-c"], :range-start "/jepsen/txn/s42-set-663/", :range-end "/jepsen/txn/s42-set-663/z"}
+8	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-663/", :vals ["663-a" "663-b" "663-c"], :range-start "/jepsen/txn/s42-set-663/", :range-end "/jepsen/txn/s42-set-663/z"}
+9	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-666", :val "666"}
+9	:ok	:txn-create	{:key "/jepsen/txn/s42-create-666", :val "666"}
+0	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-669", :old "old-669", :val "new-669", :stale? true}
+0	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-669", :old "old-669", :val "new-669", :stale? true}
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}

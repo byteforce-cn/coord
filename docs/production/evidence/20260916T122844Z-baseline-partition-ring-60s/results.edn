@@ -1,0 +1,9 @@
+{:linear {:valid? true,
+          "key-/jepsen/register-001" {:valid? true},
+          "key-/jepsen/register-003" {:valid? true},
+          "key-/jepsen/register-002" {:valid? true},
+          "key-:register" {:valid? true}},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true}

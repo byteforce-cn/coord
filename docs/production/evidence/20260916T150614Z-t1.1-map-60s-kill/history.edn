@@ -1,0 +1,438 @@
+{:index 0, :time 248946634, :type :invoke, :process 1, :f :write, :value "vs42-2-xxxxxxxxx", :key "/jepsen/map/ks42-2"}
+{:index 1, :time 274389512, :type :invoke, :process 2, :f :write, :value "vs42-4-xxxxxxxxx", :key "/jepsen/map/ks42-3"}
+{:index 2, :time 340197907, :type :invoke, :process 3, :f :write, :value "vs42-6-xxxxxxxxx", :key "/jepsen/map/ks42-3"}
+{:index 3, :time 392718448, :type :invoke, :process 4, :f :write, :value "vs42-8-xxxxxxxxx", :key "/jepsen/map/ks42-4"}
+{:index 4, :time 413885419, :type :ok, :process 1, :f :write, :value "vs42-2-xxxxxxxxx", :key "/jepsen/map/ks42-2", :revision 13}
+{:index 5, :time 438401046, :type :ok, :process 2, :f :write, :value "vs42-4-xxxxxxxxx", :key "/jepsen/map/ks42-3", :revision 15}
+{:index 6, :time 514072658, :type :ok, :process 3, :f :write, :value "vs42-6-xxxxxxxxx", :key "/jepsen/map/ks42-3", :revision 19}
+{:index 7, :time 544083343, :type :ok, :process 4, :f :write, :value "vs42-8-xxxxxxxxx", :key "/jepsen/map/ks42-4", :revision 20}
+{:index 8, :time 600460005, :type :invoke, :process 5, :f :write, :value "vs42-14-xxxxxxxx", :key "/jepsen/map/ks42-4"}
+{:index 9, :time 651658866, :type :invoke, :process 6, :f :delete, :value nil, :key "/jepsen/map/ks42-7"}
+{:index 10, :time 655594220, :type :invoke, :process 7, :f :write, :value "vs42-16-xxxxxxxx", :key "/jepsen/map/ks42-0"}
+{:index 11, :time 760248844, :type :invoke, :process 8, :f :read, :value nil, :key "/jepsen/map/ks42-3"}
+{:index 12, :time 764091915, :type :ok, :process 5, :f :write, :value "vs42-14-xxxxxxxx", :key "/jepsen/map/ks42-4", :revision 25}
+{:index 13, :time 831318441, :type :ok, :process 7, :f :write, :value "vs42-16-xxxxxxxx", :key "/jepsen/map/ks42-0", :revision 28}
+{:index 14, :time 862312264, :type :invoke, :process 9, :f :read, :value nil, :key "/jepsen/map/ks42-2"}
+{:deleted 0, :key "/jepsen/map/ks42-7", :index 15, :revision 30, :value nil, :time 878675589, :process 6, :type :ok, :node "n1", :prev-kvs [], :f :delete, :prev-kv-requested? true}
+{:index 16, :time 932889229, :type :invoke, :process 0, :f :write, :value "vs42-19-xxxxxxxx", :key "/jepsen/map/ks42-5"}
+{:key "/jepsen/map/ks42-3", :index 17, :value "vs42-6-xxxxxxxxx", :time 970735916, :process 8, :type :ok, :raw-value "vs42-6-xxxxxxxxx", :node "n1", :f :read}
+{:key "/jepsen/map/ks42-2", :index 18, :value "vs42-2-xxxxxxxxx", :time 1024927379, :process 9, :type :ok, :raw-value "vs42-2-xxxxxxxxx", :node "n1", :f :read}
+{:index 19, :time 1089809958, :type :ok, :process 0, :f :write, :value "vs42-19-xxxxxxxx", :key "/jepsen/map/ks42-5", :revision 36}
+{:index 20, :time 1700899540, :type :invoke, :process 0, :f :read, :value nil, :key "/jepsen/map/ks42-2"}
+{:key "/jepsen/map/ks42-2", :index 21, :value "vs42-2-xxxxxxxxx", :time 1703701628, :process 0, :type :ok, :raw-value "vs42-2-xxxxxxxxx", :node "n1", :f :read}
+{:index 22, :time 2104172956, :type :invoke, :process 1, :f :read, :value nil, :key "/jepsen/map/ks42-4"}
+{:key "/jepsen/map/ks42-4", :index 23, :value "vs42-14-xxxxxxxx", :time 2108177727, :process 1, :type :ok, :raw-value "vs42-14-xxxxxxxx", :node "n1", :f :read}
+{:index 24, :time 2500317870, :type :invoke, :process 2, :f :write, :value "vs42-22-xxxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 25, :time 2526023828, :type :ok, :process 2, :f :write, :value "vs42-22-xxxxxxxx", :key "/jepsen/map/ks42-6", :revision 37}
+{:index 26, :time 2716328202, :type :invoke, :process 3, :f :read, :value nil, :key "/jepsen/map/ks42-6"}
+{:key "/jepsen/map/ks42-6", :index 27, :value "vs42-22-xxxxxxxx", :time 2722605556, :process 3, :type :ok, :raw-value "vs42-22-xxxxxxxx", :node "n1", :f :read}
+{:index 28, :time 2749785035, :type :invoke, :process 4, :f :write, :value "vs42-25-xxxxxxxx", :key "/jepsen/map/ks42-2"}
+{:index 29, :time 2775171153, :type :ok, :process 4, :f :write, :value "vs42-25-xxxxxxxx", :key "/jepsen/map/ks42-2", :revision 38}
+{:index 30, :time 3000374393, :type :invoke, :process 5, :f :read, :value nil, :key "/jepsen/map/ks42-4"}
+{:key "/jepsen/map/ks42-4", :index 31, :value "vs42-14-xxxxxxxx", :time 3007045697, :process 5, :type :ok, :raw-value "vs42-14-xxxxxxxx", :node "n1", :f :read}
+{:index 32, :time 3241132986, :type :invoke, :process 6, :f :read, :value nil, :key "/jepsen/map/ks42-4"}
+{:key "/jepsen/map/ks42-4", :index 33, :value "vs42-14-xxxxxxxx", :time 3247206159, :process 6, :type :ok, :raw-value "vs42-14-xxxxxxxx", :node "n1", :f :read}
+{:index 34, :time 3327398282, :type :invoke, :process 7, :f :read, :value nil, :key "/jepsen/map/ks42-3"}
+{:key "/jepsen/map/ks42-3", :index 35, :value "vs42-6-xxxxxxxxx", :time 3333438759, :process 7, :type :ok, :raw-value "vs42-6-xxxxxxxxx", :node "n1", :f :read}
+{:index 36, :time 3433418182, :type :invoke, :process 8, :f :exists, :value nil, :key "/jepsen/map/ks42-1"}
+{:key "/jepsen/map/ks42-1", :index 37, :revision 39, :value nil, :time 3461481416, :process 8, :type :ok, :node "n1", :exists? false, :f :exists}
+{:index 38, :time 3467468174, :type :invoke, :process 9, :f :write, :value "vs42-28-xxxxxxxx", :key "/jepsen/map/ks42-7"}
+{:index 39, :time 3468782242, :type :invoke, :process 0, :f :write, :value "vs42-30-xxxxxxxx", :key "/jepsen/map/ks42-2"}
+{:index 40, :time 3488973382, :type :invoke, :process 1, :f :read, :value nil, :key "/jepsen/map/ks42-7"}
+{:index 41, :time 3494155729, :type :ok, :process 9, :f :write, :value "vs42-28-xxxxxxxx", :key "/jepsen/map/ks42-7", :revision 40}
+{:key "/jepsen/map/ks42-7", :index 42, :value "vs42-28-xxxxxxxx", :time 3499604256, :process 1, :type :ok, :raw-value "vs42-28-xxxxxxxx", :node "n1", :f :read}
+{:index 43, :time 3523262596, :type :ok, :process 0, :f :write, :value "vs42-30-xxxxxxxx", :key "/jepsen/map/ks42-2", :revision 41}
+{:index 44, :time 3631861372, :type :invoke, :process 1, :f :write, :value "vs42-35-xxxxxxxx", :key "/jepsen/map/ks42-4"}
+{:index 45, :time 3661080469, :type :ok, :process 1, :f :write, :value "vs42-35-xxxxxxxx", :key "/jepsen/map/ks42-4", :revision 42}
+{:index 46, :time 3745477595, :type :invoke, :process 2, :f :read, :value nil, :key "/jepsen/map/ks42-6"}
+{:key "/jepsen/map/ks42-6", :index 47, :value "vs42-22-xxxxxxxx", :time 3750613691, :process 2, :type :ok, :raw-value "vs42-22-xxxxxxxx", :node "n1", :f :read}
+{:index 48, :time 3757218040, :type :invoke, :process 3, :f :read, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 49, :value "vs42-28-xxxxxxxx", :time 3762479411, :process 3, :type :ok, :raw-value "vs42-28-xxxxxxxx", :node "n1", :f :read}
+{:index 50, :time 3862337934, :type :invoke, :process 4, :f :write, :value "vs42-38-xxxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 51, :time 3891642474, :type :ok, :process 4, :f :write, :value "vs42-38-xxxxxxxx", :key "/jepsen/map/ks42-6", :revision 43}
+{:index 52, :time 3926120874, :type :invoke, :process 5, :f :read, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 53, :value "vs42-28-xxxxxxxx", :time 3932120555, :process 5, :type :ok, :raw-value "vs42-28-xxxxxxxx", :node "n1", :f :read}
+{:index 54, :time 3998921195, :type :invoke, :process 6, :f :delete, :value nil, :key "/jepsen/map/ks42-4"}
+{:deleted 1, :key "/jepsen/map/ks42-4", :index 55, :revision 44, :value nil, :time 4036208579, :process 6, :type :ok, :node "n1", :prev-kvs [{:key "/jepsen/map/ks42-4", :value "vs42-35-xxxxxxxx", :version 3, :create-revision 20, :mod-revision 42}], :f :delete, :prev-kv-requested? true}
+{:index 56, :time 4745158919, :type :invoke, :process 7, :f :read, :value nil, :key "/jepsen/map/ks42-5"}
+{:key "/jepsen/map/ks42-5", :index 57, :value "vs42-19-xxxxxxxx", :time 4750626122, :process 7, :type :ok, :raw-value "vs42-19-xxxxxxxx", :node "n1", :f :read}
+{:index 58, :time 4808395371, :type :invoke, :process 8, :f :write, :value "vs42-41-xxxxxxxx", :key "/jepsen/map/ks42-2"}
+{:index 59, :time 4836965430, :type :ok, :process 8, :f :write, :value "vs42-41-xxxxxxxx", :key "/jepsen/map/ks42-2", :revision 45}
+{:index 60, :time 4837301723, :type :invoke, :process 9, :f :write, :value "vs42-44-xxxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 61, :time 4863103198, :type :ok, :process 9, :f :write, :value "vs42-44-xxxxxxxx", :key "/jepsen/map/ks42-6", :revision 46}
+{:index 62, :time 5016729651, :type :invoke, :process 0, :f :exists, :value nil, :key "/jepsen/map/ks42-1"}
+{:key "/jepsen/map/ks42-1", :index 63, :revision 47, :value nil, :time 5044089050, :process 0, :type :ok, :node "n1", :exists? false, :f :exists}
+{:index 64, :time 5089673952, :type :invoke, :process 0, :f :read, :value nil, :key "/jepsen/map/ks42-0"}
+{:key "/jepsen/map/ks42-0", :index 65, :value "vs42-16-xxxxxxxx", :time 5095353282, :process 0, :type :ok, :raw-value "vs42-16-xxxxxxxx", :node "n1", :f :read}
+{:index 66, :time 5807851916, :type :invoke, :process 1, :f :read, :value nil, :key "/jepsen/map/ks42-7"}
+{:index 67, :time 5808672024, :type :invoke, :process 2, :f :read, :value nil, :key "/jepsen/map/ks42-0"}
+{:key "/jepsen/map/ks42-0", :index 68, :value "vs42-16-xxxxxxxx", :time 5813073052, :process 2, :type :ok, :raw-value "vs42-16-xxxxxxxx", :node "n1", :f :read}
+{:key "/jepsen/map/ks42-7", :index 69, :value "vs42-28-xxxxxxxx", :time 5813253794, :process 1, :type :ok, :raw-value "vs42-28-xxxxxxxx", :node "n1", :f :read}
+{:index 70, :time 6218316351, :type :invoke, :process 3, :f :write, :value "vs42-47-xxxxxxxx", :key "/jepsen/map/ks42-0"}
+{:index 71, :time 6226408784, :type :invoke, :process 4, :f :read, :value nil, :key "/jepsen/map/ks42-6"}
+{:index 72, :time 6247518514, :type :ok, :process 3, :f :write, :value "vs42-47-xxxxxxxx", :key "/jepsen/map/ks42-0", :revision 48}
+{:key "/jepsen/map/ks42-6", :index 73, :value "vs42-44-xxxxxxxx", :time 6247609381, :process 4, :type :ok, :raw-value "vs42-44-xxxxxxxx", :node "n1", :f :read}
+{:index 74, :time 6371363326, :type :invoke, :process 5, :f :read, :value nil, :key "/jepsen/map/ks42-2"}
+{:key "/jepsen/map/ks42-2", :index 75, :value "vs42-41-xxxxxxxx", :time 6376947758, :process 5, :type :ok, :raw-value "vs42-41-xxxxxxxx", :node "n1", :f :read}
+{:index 76, :time 6765607000, :type :invoke, :process 6, :f :write, :value "vs42-50-xxxxxxxx", :key "/jepsen/map/ks42-4"}
+{:index 77, :time 6800112895, :type :ok, :process 6, :f :write, :value "vs42-50-xxxxxxxx", :key "/jepsen/map/ks42-4", :revision 49}
+{:index 78, :time 6851979501, :type :invoke, :process 7, :f :read, :value nil, :key "/jepsen/map/ks42-2"}
+{:key "/jepsen/map/ks42-2", :index 79, :value "vs42-41-xxxxxxxx", :time 6857660052, :process 7, :type :ok, :raw-value "vs42-41-xxxxxxxx", :node "n1", :f :read}
+{:index 80, :time 6886852529, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 81, :time 6907611353, :type :info, :process :nemesis, :f :start, :value {"n1" [:killed "n1"]}}
+{:index 82, :time 7041989324, :type :invoke, :process 0, :f :read, :value nil, :key "/jepsen/map/ks42-4"}
+{:index 83, :time 7062748642, :type :info, :process 0, :f :read, :value nil, :key "/jepsen/map/ks42-4", :error :unavailable-maybe-applied}
+{:index 84, :time 7632095479, :type :invoke, :process 10, :f :write, :value "vs42-53-xxxxxxxx", :key "/jepsen/map/ks42-0"}
+{:index 85, :time 7666177144, :type :invoke, :process 1, :f :read, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 86, :value "vs42-28-xxxxxxxx", :time 7702926940, :process 1, :type :ok, :raw-value "vs42-28-xxxxxxxx", :node "n3", :f :read}
+{:index 87, :time 7726310108, :type :invoke, :process 2, :f :exists, :value nil, :key "/jepsen/map/ks42-2"}
+{:key "/jepsen/map/ks42-2", :index 88, :revision 53, :value nil, :time 7756359032, :process 2, :type :ok, :node "n3", :exists? true, :f :exists}
+{:index 89, :time 7787622606, :type :ok, :process 10, :f :write, :value "vs42-53-xxxxxxxx", :key "/jepsen/map/ks42-0", :revision 54}
+{:index 90, :time 7899606019, :type :invoke, :process 3, :f :write, :value "vs42-57-xxxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 91, :time 7923015242, :type :ok, :process 3, :f :write, :value "vs42-57-xxxxxxxx", :key "/jepsen/map/ks42-6", :revision 55}
+{:index 92, :time 8082503480, :type :invoke, :process 4, :f :exists, :value nil, :key "/jepsen/map/ks42-4"}
+{:key "/jepsen/map/ks42-4", :index 93, :revision 56, :value nil, :time 8114588171, :process 4, :type :ok, :node "n3", :exists? true, :f :exists}
+{:index 94, :time 8222598101, :type :invoke, :process 5, :f :delete, :value nil, :key "/jepsen/map/ks42-7"}
+{:deleted 1, :key "/jepsen/map/ks42-7", :index 95, :revision 57, :value nil, :time 8255531487, :process 5, :type :ok, :node "n3", :prev-kvs [{:key "/jepsen/map/ks42-7", :value "vs42-28-xxxxxxxx", :version 1, :create-revision 40, :mod-revision 40}], :f :delete, :prev-kv-requested? true}
+{:index 96, :time 9345408300, :type :invoke, :process 6, :f :read, :value nil, :key "/jepsen/map/ks42-5"}
+{:key "/jepsen/map/ks42-5", :index 97, :value "vs42-19-xxxxxxxx", :time 9362346851, :process 6, :type :ok, :raw-value "vs42-19-xxxxxxxx", :node "n3", :f :read}
+{:index 98, :time 9478012952, :type :invoke, :process 7, :f :write, :value "vs42-60-xxxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 99, :time 9510344793, :type :ok, :process 7, :f :write, :value "vs42-60-xxxxxxxx", :key "/jepsen/map/ks42-6", :revision 58}
+{:index 100, :time 10307636846, :type :invoke, :process 8, :f :exists, :value nil, :key "/jepsen/map/ks42-3"}
+{:key "/jepsen/map/ks42-3", :index 101, :revision 59, :value nil, :time 10338709276, :process 8, :type :ok, :node "n3", :exists? true, :f :exists}
+{:index 102, :time 10506418322, :type :invoke, :process 9, :f :delete, :value nil, :key "/jepsen/map/ks42-6"}
+{:deleted 1, :key "/jepsen/map/ks42-6", :index 103, :revision 60, :value nil, :time 10528561184, :process 9, :type :ok, :node "n3", :prev-kvs [{:key "/jepsen/map/ks42-6", :value "vs42-60-xxxxxxxx", :version 5, :create-revision 37, :mod-revision 58}], :f :delete, :prev-kv-requested? true}
+{:index 104, :time 10916126084, :type :invoke, :process 10, :f :exists, :value nil, :key "/jepsen/map/ks42-5"}
+{:key "/jepsen/map/ks42-5", :index 105, :revision 61, :value nil, :time 10941889059, :process 10, :type :ok, :node "n3", :exists? true, :f :exists}
+{:index 106, :time 11132956086, :type :invoke, :process 10, :f :read, :value nil, :key "/jepsen/map/ks42-4"}
+{:key "/jepsen/map/ks42-4", :index 107, :value "vs42-50-xxxxxxxx", :time 11141989149, :process 10, :type :ok, :raw-value "vs42-50-xxxxxxxx", :node "n3", :f :read}
+{:index 108, :time 11170927654, :type :invoke, :process 1, :f :exists, :value nil, :key "/jepsen/map/ks42-3"}
+{:index 109, :time 11172341088, :type :invoke, :process 2, :f :write, :value "vs42-62-xxxxxxxx", :key "/jepsen/map/ks42-1"}
+{:key "/jepsen/map/ks42-3", :index 110, :revision 62, :value nil, :time 11196009808, :process 1, :type :ok, :node "n3", :exists? true, :f :exists}
+{:index 111, :time 11215775157, :type :ok, :process 2, :f :write, :value "vs42-62-xxxxxxxx", :key "/jepsen/map/ks42-1", :revision 63}
+{:index 112, :time 11600193454, :type :invoke, :process 3, :f :exists, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 113, :revision 64, :value nil, :time 11623783434, :process 3, :type :ok, :node "n3", :exists? false, :f :exists}
+{:index 114, :time 11685425407, :type :invoke, :process 4, :f :delete, :value nil, :key "/jepsen/map/ks42-3"}
+{:deleted 1, :key "/jepsen/map/ks42-3", :index 115, :revision 65, :value nil, :time 11710667343, :process 4, :type :ok, :node "n3", :prev-kvs [{:key "/jepsen/map/ks42-3", :value "vs42-6-xxxxxxxxx", :version 2, :create-revision 15, :mod-revision 19}], :f :delete, :prev-kv-requested? true}
+{:index 116, :time 11770691357, :type :invoke, :process 5, :f :write, :value "vs42-65-xxxxxxxx", :key "/jepsen/map/ks42-7"}
+{:index 117, :time 11791635763, :type :ok, :process 5, :f :write, :value "vs42-65-xxxxxxxx", :key "/jepsen/map/ks42-7", :revision 66}
+{:index 118, :time 12159764422, :type :invoke, :process 6, :f :read, :value nil, :key "/jepsen/map/ks42-3"}
+{:key "/jepsen/map/ks42-3", :index 119, :value nil, :time 12168032528, :process 6, :type :ok, :raw-value nil, :node "n3", :f :read}
+{:index 120, :time 12411880657, :type :invoke, :process 7, :f :write, :value "vs42-68-xxxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 121, :time 12432227382, :type :ok, :process 7, :f :write, :value "vs42-68-xxxxxxxx", :key "/jepsen/map/ks42-6", :revision 67}
+{:index 122, :time 12897902323, :type :invoke, :process 8, :f :read, :value nil, :key "/jepsen/map/ks42-4"}
+{:key "/jepsen/map/ks42-4", :index 123, :value "vs42-50-xxxxxxxx", :time 12905905856, :process 8, :type :ok, :raw-value "vs42-50-xxxxxxxx", :node "n3", :f :read}
+{:index 124, :time 12958480859, :type :invoke, :process 9, :f :write, :value "vs42-71-xxxxxxxx", :key "/jepsen/map/ks42-3"}
+{:index 125, :time 12984268490, :type :ok, :process 9, :f :write, :value "vs42-71-xxxxxxxx", :key "/jepsen/map/ks42-3", :revision 68}
+{:index 126, :time 13325772668, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 127, :time 13564951181, :type :info, :process :nemesis, :f :stop, :value {"n1" [:restarted "n1"]}}
+{:index 128, :time 14264110830, :type :invoke, :process 1, :f :exists, :value nil, :key "/jepsen/map/ks42-3"}
+{:key "/jepsen/map/ks42-3", :index 129, :revision 69, :value nil, :time 14291690745, :process 1, :type :ok, :node "n3", :exists? true, :f :exists}
+{:index 130, :time 14365348103, :type :invoke, :process 2, :f :write, :value "vs42-74-xxxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 131, :time 14393994983, :type :ok, :process 2, :f :write, :value "vs42-74-xxxxxxxx", :key "/jepsen/map/ks42-6", :revision 70}
+{:index 132, :time 15254511157, :type :invoke, :process 3, :f :write, :value "vs42-77-xxxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 133, :time 15283227416, :type :ok, :process 3, :f :write, :value "vs42-77-xxxxxxxx", :key "/jepsen/map/ks42-6", :revision 71}
+{:index 134, :time 15357551344, :type :invoke, :process 4, :f :read, :value nil, :key "/jepsen/map/ks42-1"}
+{:key "/jepsen/map/ks42-1", :index 135, :value "vs42-62-xxxxxxxx", :time 15361638645, :process 4, :type :ok, :raw-value "vs42-62-xxxxxxxx", :node "n3", :f :read}
+{:index 136, :time 15414625127, :type :invoke, :process 5, :f :write, :value "vs42-80-xxxxxxxx", :key "/jepsen/map/ks42-5"}
+{:index 137, :time 15441971408, :type :ok, :process 5, :f :write, :value "vs42-80-xxxxxxxx", :key "/jepsen/map/ks42-5", :revision 72}
+{:index 138, :time 16025093004, :type :invoke, :process 6, :f :exists, :value nil, :key "/jepsen/map/ks42-2"}
+{:key "/jepsen/map/ks42-2", :index 139, :revision 73, :value nil, :time 16057722337, :process 6, :type :ok, :node "n3", :exists? true, :f :exists}
+{:index 140, :time 16147430063, :type :invoke, :process 7, :f :read, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 141, :value "vs42-65-xxxxxxxx", :time 16158328701, :process 7, :type :ok, :raw-value "vs42-65-xxxxxxxx", :node "n3", :f :read}
+{:index 142, :time 16327885141, :type :invoke, :process 8, :f :exists, :value nil, :key "/jepsen/map/ks42-6"}
+{:key "/jepsen/map/ks42-6", :index 143, :revision 74, :value nil, :time 16359837970, :process 8, :type :ok, :node "n3", :exists? true, :f :exists}
+{:index 144, :time 16535830180, :type :invoke, :process 9, :f :write, :value "vs42-83-xxxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 145, :time 16560143926, :type :ok, :process 9, :f :write, :value "vs42-83-xxxxxxxx", :key "/jepsen/map/ks42-6", :revision 75}
+{:index 146, :time 16783841923, :type :invoke, :process 10, :f :exists, :value nil, :key "/jepsen/map/ks42-5"}
+{:key "/jepsen/map/ks42-5", :index 147, :revision 76, :value nil, :time 16808752965, :process 10, :type :ok, :node "n3", :exists? true, :f :exists}
+{:index 148, :time 17077535763, :type :invoke, :process 10, :f :write, :value "vs42-86-xxxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 149, :time 17108532833, :type :ok, :process 10, :f :write, :value "vs42-86-xxxxxxxx", :key "/jepsen/map/ks42-6", :revision 77}
+{:index 150, :time 17131757009, :type :invoke, :process 1, :f :write, :value "vs42-89-xxxxxxxx", :key "/jepsen/map/ks42-4"}
+{:index 151, :time 17148418857, :type :invoke, :process 2, :f :write, :value "vs42-91-xxxxxxxx", :key "/jepsen/map/ks42-1"}
+{:index 152, :time 17169411648, :type :ok, :process 1, :f :write, :value "vs42-89-xxxxxxxx", :key "/jepsen/map/ks42-4", :revision 78}
+{:index 153, :time 17185172347, :type :ok, :process 2, :f :write, :value "vs42-91-xxxxxxxx", :key "/jepsen/map/ks42-1", :revision 79}
+{:index 154, :time 17704364227, :type :invoke, :process 3, :f :delete, :value nil, :key "/jepsen/map/ks42-1"}
+{:deleted 1, :key "/jepsen/map/ks42-1", :index 155, :revision 80, :value nil, :time 17732487631, :process 3, :type :ok, :node "n3", :prev-kvs [{:key "/jepsen/map/ks42-1", :value "vs42-91-xxxxxxxx", :version 2, :create-revision 63, :mod-revision 79}], :f :delete, :prev-kv-requested? true}
+{:index 156, :time 18108439270, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 157, :time 18132651630, :type :info, :process :nemesis, :f :start, :value {"n3" [:killed "n3"]}}
+{:index 158, :time 18345551876, :type :invoke, :process 6, :f :exists, :value nil, :key "/jepsen/map/ks42-0"}
+{:index 159, :time 18355007325, :type :info, :process 6, :f :exists, :value nil, :key "/jepsen/map/ks42-0", :error :unavailable-maybe-applied}
+{:index 160, :time 18736693245, :type :invoke, :process 7, :f :read, :value nil, :key "/jepsen/map/ks42-0"}
+{:key "/jepsen/map/ks42-0", :index 161, :value "vs42-53-xxxxxxxx", :time 18741112532, :process 7, :type :ok, :raw-value "vs42-53-xxxxxxxx", :node "n1", :f :read}
+{:index 162, :time 19393540544, :type :invoke, :process 8, :f :delete, :value nil, :key "/jepsen/map/ks42-1"}
+{:deleted 0, :key "/jepsen/map/ks42-1", :index 163, :revision 82, :value nil, :time 19415687018, :process 8, :type :ok, :node "n1", :prev-kvs [], :f :delete, :prev-kv-requested? true}
+{:index 164, :time 19566600333, :type :invoke, :process 9, :f :read, :value nil, :key "/jepsen/map/ks42-4"}
+{:key "/jepsen/map/ks42-4", :index 165, :value "vs42-89-xxxxxxxx", :time 19571449383, :process 9, :type :ok, :raw-value "vs42-89-xxxxxxxx", :node "n1", :f :read}
+{:index 166, :time 20187184022, :type :invoke, :process 10, :f :write, :value "vs42-94-xxxxxxxx", :key "/jepsen/map/ks42-0"}
+{:index 167, :time 20209746655, :type :ok, :process 10, :f :write, :value "vs42-94-xxxxxxxx", :key "/jepsen/map/ks42-0", :revision 83}
+{:index 168, :time 20261831653, :type :invoke, :process 10, :f :read, :value nil, :key "/jepsen/map/ks42-2"}
+{:key "/jepsen/map/ks42-2", :index 169, :value "vs42-41-xxxxxxxx", :time 20266831915, :process 10, :type :ok, :raw-value "vs42-41-xxxxxxxx", :node "n1", :f :read}
+{:index 170, :time 20547679918, :type :invoke, :process 1, :f :delete, :value nil, :key "/jepsen/map/ks42-5"}
+{:deleted 1, :key "/jepsen/map/ks42-5", :index 171, :revision 84, :value nil, :time 20576397628, :process 1, :type :ok, :node "n1", :prev-kvs [{:key "/jepsen/map/ks42-5", :value "vs42-80-xxxxxxxx", :version 2, :create-revision 36, :mod-revision 72}], :f :delete, :prev-kv-requested? true}
+{:index 172, :time 21003035621, :type :invoke, :process 2, :f :delete, :value nil, :key "/jepsen/map/ks42-3"}
+{:deleted 1, :key "/jepsen/map/ks42-3", :index 173, :revision 85, :value nil, :time 21025084524, :process 2, :type :ok, :node "n1", :prev-kvs [{:key "/jepsen/map/ks42-3", :value "vs42-71-xxxxxxxx", :version 4, :create-revision 15, :mod-revision 68}], :f :delete, :prev-kv-requested? true}
+{:index 174, :time 21122440474, :type :invoke, :process 3, :f :read, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 175, :value "vs42-65-xxxxxxxx", :time 21128844076, :process 3, :type :ok, :raw-value "vs42-65-xxxxxxxx", :node "n1", :f :read}
+{:index 176, :time 22148065649, :type :invoke, :process 4, :f :read, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 177, :value "vs42-65-xxxxxxxx", :time 22153036149, :process 4, :type :ok, :raw-value "vs42-65-xxxxxxxx", :node "n1", :f :read}
+{:index 178, :time 22418824787, :type :invoke, :process 5, :f :write, :value "vs42-97-xxxxxxxx", :key "/jepsen/map/ks42-7"}
+{:index 179, :time 22441011998, :type :ok, :process 5, :f :write, :value "vs42-97-xxxxxxxx", :key "/jepsen/map/ks42-7", :revision 86}
+{:index 180, :time 22518412193, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 181, :time 22564931224, :type :invoke, :process 7, :f :write, :value "vs42-102-xxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 182, :time 22566481287, :type :invoke, :process 8, :f :read, :value nil, :key "/jepsen/map/ks42-5"}
+{:key "/jepsen/map/ks42-5", :index 183, :value nil, :time 22570926493, :process 8, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 184, :time 22586105597, :type :ok, :process 7, :f :write, :value "vs42-102-xxxxxxx", :key "/jepsen/map/ks42-6", :revision 87}
+{:index 185, :time 23194254128, :type :invoke, :process 9, :f :write, :value "vs42-106-xxxxxxx", :key "/jepsen/map/ks42-1"}
+{:index 186, :time 23217449508, :type :ok, :process 9, :f :write, :value "vs42-106-xxxxxxx", :key "/jepsen/map/ks42-1", :revision 88}
+{:index 187, :time 23708081331, :type :info, :process :nemesis, :f :stop, :value {"n3" [:restarted "n3"]}}
+{:index 188, :time 24001526583, :type :invoke, :process 10, :f :read, :value nil, :key "/jepsen/map/ks42-5"}
+{:key "/jepsen/map/ks42-5", :index 189, :value nil, :time 24005099223, :process 10, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 190, :time 24026244664, :type :invoke, :process 1, :f :read, :value nil, :key "/jepsen/map/ks42-3"}
+{:key "/jepsen/map/ks42-3", :index 191, :value nil, :time 24036196766, :process 1, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 192, :time 24046866009, :type :invoke, :process 2, :f :read, :value nil, :key "/jepsen/map/ks42-5"}
+{:key "/jepsen/map/ks42-5", :index 193, :value nil, :time 24049098104, :process 2, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 194, :time 24116390083, :type :invoke, :process 3, :f :exists, :value nil, :key "/jepsen/map/ks42-3"}
+{:key "/jepsen/map/ks42-3", :index 195, :revision 89, :value nil, :time 24141136319, :process 3, :type :ok, :node "n1", :exists? false, :f :exists}
+{:index 196, :time 24859376303, :type :invoke, :process 4, :f :exists, :value nil, :key "/jepsen/map/ks42-1"}
+{:key "/jepsen/map/ks42-1", :index 197, :revision 90, :value nil, :time 24888566217, :process 4, :type :ok, :node "n1", :exists? true, :f :exists}
+{:index 198, :time 25621767642, :type :invoke, :process 5, :f :read, :value nil, :key "/jepsen/map/ks42-3"}
+{:key "/jepsen/map/ks42-3", :index 199, :value nil, :time 25626330763, :process 5, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 200, :time 25794197471, :type :invoke, :process 16, :f :read, :value nil, :key "/jepsen/map/ks42-5"}
+{:index 201, :time 25930204697, :type :invoke, :process 7, :f :write, :value "vs42-108-xxxxxxx", :key "/jepsen/map/ks42-6"}
+{:key "/jepsen/map/ks42-5", :index 202, :value nil, :time 25934200649, :process 16, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 203, :time 25955745985, :type :ok, :process 7, :f :write, :value "vs42-108-xxxxxxx", :key "/jepsen/map/ks42-6", :revision 93}
+{:index 204, :time 26065121369, :type :invoke, :process 8, :f :read, :value nil, :key "/jepsen/map/ks42-5"}
+{:key "/jepsen/map/ks42-5", :index 205, :value nil, :time 26070484264, :process 8, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 206, :time 26381350823, :type :invoke, :process 9, :f :write, :value "vs42-111-xxxxxxx", :key "/jepsen/map/ks42-5"}
+{:index 207, :time 26405469129, :type :ok, :process 9, :f :write, :value "vs42-111-xxxxxxx", :key "/jepsen/map/ks42-5", :revision 94}
+{:index 208, :time 26956849230, :type :invoke, :process 10, :f :read, :value nil, :key "/jepsen/map/ks42-6"}
+{:index 209, :time 26967486023, :type :invoke, :process 1, :f :exists, :value nil, :key "/jepsen/map/ks42-0"}
+{:key "/jepsen/map/ks42-6", :index 210, :value "vs42-108-xxxxxxx", :time 26968802353, :process 10, :type :ok, :raw-value "vs42-108-xxxxxxx", :node "n1", :f :read}
+{:key "/jepsen/map/ks42-0", :index 211, :revision 95, :value nil, :time 27000346112, :process 1, :type :ok, :node "n1", :exists? true, :f :exists}
+{:index 212, :time 27146972647, :type :invoke, :process 1, :f :exists, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 213, :revision 96, :value nil, :time 27172255558, :process 1, :type :ok, :node "n1", :exists? true, :f :exists}
+{:index 214, :time 28274029180, :type :invoke, :process 2, :f :read, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 215, :value "vs42-97-xxxxxxxx", :time 28278592206, :process 2, :type :ok, :raw-value "vs42-97-xxxxxxxx", :node "n1", :f :read}
+{:index 216, :time 28635750501, :type :invoke, :process 3, :f :write, :value "vs42-114-xxxxxxx", :key "/jepsen/map/ks42-7"}
+{:index 217, :time 28658708932, :type :ok, :process 3, :f :write, :value "vs42-114-xxxxxxx", :key "/jepsen/map/ks42-7", :revision 97}
+{:index 218, :time 29040545993, :type :invoke, :process 4, :f :read, :value nil, :key "/jepsen/map/ks42-3"}
+{:key "/jepsen/map/ks42-3", :index 219, :value nil, :time 29044172330, :process 4, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 220, :time 29917478511, :type :invoke, :process 5, :f :read, :value nil, :key "/jepsen/map/ks42-4"}
+{:key "/jepsen/map/ks42-4", :index 221, :value "vs42-89-xxxxxxxx", :time 29921779858, :process 5, :type :ok, :raw-value "vs42-89-xxxxxxxx", :node "n1", :f :read}
+{:index 222, :time 30035973612, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 223, :time 30050578421, :type :info, :process :nemesis, :f :start, :value {"n3" [:killed "n3"]}}
+{:index 224, :time 30781966872, :type :invoke, :process 8, :f :write, :value "vs42-121-xxxxxxx", :key "/jepsen/map/ks42-2"}
+{:index 225, :time 30803263250, :type :ok, :process 8, :f :write, :value "vs42-121-xxxxxxx", :key "/jepsen/map/ks42-2", :revision 98}
+{:index 226, :time 30908560522, :type :invoke, :process 9, :f :write, :value "vs42-124-xxxxxxx", :key "/jepsen/map/ks42-7"}
+{:index 227, :time 30928025648, :type :ok, :process 9, :f :write, :value "vs42-124-xxxxxxx", :key "/jepsen/map/ks42-7", :revision 99}
+{:index 228, :time 31218998917, :type :invoke, :process 10, :f :write, :value "vs42-127-xxxxxxx", :key "/jepsen/map/ks42-5"}
+{:index 229, :time 31240137564, :type :ok, :process 10, :f :write, :value "vs42-127-xxxxxxx", :key "/jepsen/map/ks42-5", :revision 100}
+{:index 230, :time 31297889923, :type :invoke, :process 10, :f :write, :value "vs42-130-xxxxxxx", :key "/jepsen/map/ks42-0"}
+{:index 231, :time 31317712507, :type :ok, :process 10, :f :write, :value "vs42-130-xxxxxxx", :key "/jepsen/map/ks42-0", :revision 101}
+{:index 232, :time 31965024460, :type :invoke, :process 1, :f :delete, :value nil, :key "/jepsen/map/ks42-3"}
+{:deleted 0, :key "/jepsen/map/ks42-3", :index 233, :revision 102, :value nil, :time 31987249521, :process 1, :type :ok, :node "n1", :prev-kvs [], :f :delete, :prev-kv-requested? true}
+{:index 234, :time 32247628390, :type :invoke, :process 2, :f :read, :value nil, :key "/jepsen/map/ks42-0"}
+{:key "/jepsen/map/ks42-0", :index 235, :value "vs42-130-xxxxxxx", :time 32252162976, :process 2, :type :ok, :raw-value "vs42-130-xxxxxxx", :node "n1", :f :read}
+{:index 236, :time 32265135927, :type :invoke, :process 3, :f :read, :value nil, :key "/jepsen/map/ks42-4"}
+{:key "/jepsen/map/ks42-4", :index 237, :value "vs42-89-xxxxxxxx", :time 32269414420, :process 3, :type :ok, :raw-value "vs42-89-xxxxxxxx", :node "n1", :f :read}
+{:index 238, :time 32457374734, :type :invoke, :process 4, :f :delete, :value nil, :key "/jepsen/map/ks42-5"}
+{:deleted 1, :key "/jepsen/map/ks42-5", :index 239, :revision 103, :value nil, :time 32477238883, :process 4, :type :ok, :node "n1", :prev-kvs [{:key "/jepsen/map/ks42-5", :value "vs42-127-xxxxxxx", :version 5, :create-revision 36, :mod-revision 100}], :f :delete, :prev-kv-requested? true}
+{:index 240, :time 32785168509, :type :invoke, :process 5, :f :read, :value nil, :key "/jepsen/map/ks42-3"}
+{:key "/jepsen/map/ks42-3", :index 241, :value nil, :time 32789082723, :process 5, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 242, :time 33382122318, :type :invoke, :process 16, :f :write, :value "vs42-133-xxxxxxx", :key "/jepsen/map/ks42-1"}
+{:index 243, :time 33400945631, :type :ok, :process 16, :f :write, :value "vs42-133-xxxxxxx", :key "/jepsen/map/ks42-1", :revision 104}
+{:index 244, :time 33474251260, :type :invoke, :process 7, :f :read, :value nil, :key "/jepsen/map/ks42-6"}
+{:key "/jepsen/map/ks42-6", :index 245, :value "vs42-108-xxxxxxx", :time 33478710049, :process 7, :type :ok, :raw-value "vs42-108-xxxxxxx", :node "n1", :f :read}
+{:index 246, :time 33655260299, :type :invoke, :process 8, :f :read, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 247, :value "vs42-124-xxxxxxx", :time 33657603946, :process 8, :type :ok, :raw-value "vs42-124-xxxxxxx", :node "n1", :f :read}
+{:index 248, :time 33746930486, :type :invoke, :process 9, :f :write, :value "vs42-136-xxxxxxx", :key "/jepsen/map/ks42-5"}
+{:index 249, :time 33770508147, :type :ok, :process 9, :f :write, :value "vs42-136-xxxxxxx", :key "/jepsen/map/ks42-5", :revision 105}
+{:index 250, :time 34846957028, :type :invoke, :process 10, :f :write, :value "vs42-139-xxxxxxx", :key "/jepsen/map/ks42-4"}
+{:index 251, :time 34868796360, :type :ok, :process 10, :f :write, :value "vs42-139-xxxxxxx", :key "/jepsen/map/ks42-4", :revision 106}
+{:index 252, :time 35078801660, :type :invoke, :process 10, :f :write, :value "vs42-142-xxxxxxx", :key "/jepsen/map/ks42-0"}
+{:index 253, :time 35096955498, :type :ok, :process 10, :f :write, :value "vs42-142-xxxxxxx", :key "/jepsen/map/ks42-0", :revision 107}
+{:index 254, :time 36435517822, :type :invoke, :process 1, :f :delete, :value nil, :key "/jepsen/map/ks42-4"}
+{:deleted 1, :key "/jepsen/map/ks42-4", :index 255, :revision 108, :value nil, :time 36457201098, :process 1, :type :ok, :node "n1", :prev-kvs [{:key "/jepsen/map/ks42-4", :value "vs42-139-xxxxxxx", :version 7, :create-revision 20, :mod-revision 106}], :f :delete, :prev-kv-requested? true}
+{:index 256, :time 36504195143, :type :invoke, :process 2, :f :write, :value "vs42-145-xxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 257, :time 36527996554, :type :ok, :process 2, :f :write, :value "vs42-145-xxxxxxx", :key "/jepsen/map/ks42-6", :revision 109}
+{:index 258, :time 36610202059, :type :invoke, :process 3, :f :delete, :value nil, :key "/jepsen/map/ks42-1"}
+{:deleted 1, :key "/jepsen/map/ks42-1", :index 259, :revision 110, :value nil, :time 36634227377, :process 3, :type :ok, :node "n1", :prev-kvs [{:key "/jepsen/map/ks42-1", :value "vs42-133-xxxxxxx", :version 5, :create-revision 63, :mod-revision 104}], :f :delete, :prev-kv-requested? true}
+{:index 260, :time 36998031423, :type :invoke, :process 4, :f :delete, :value nil, :key "/jepsen/map/ks42-6"}
+{:deleted 1, :key "/jepsen/map/ks42-6", :index 261, :revision 111, :value nil, :time 37016207715, :process 4, :type :ok, :node "n1", :prev-kvs [{:key "/jepsen/map/ks42-6", :value "vs42-145-xxxxxxx", :version 14, :create-revision 37, :mod-revision 109}], :f :delete, :prev-kv-requested? true}
+{:index 262, :time 37030539006, :type :invoke, :process 5, :f :delete, :value nil, :key "/jepsen/map/ks42-7"}
+{:deleted 1, :key "/jepsen/map/ks42-7", :index 263, :revision 112, :value nil, :time 37050049693, :process 5, :type :ok, :node "n1", :prev-kvs [{:key "/jepsen/map/ks42-7", :value "vs42-124-xxxxxxx", :version 6, :create-revision 40, :mod-revision 99}], :f :delete, :prev-kv-requested? true}
+{:index 264, :time 37494624970, :type :invoke, :process 16, :f :write, :value "vs42-148-xxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 265, :time 37514917275, :type :ok, :process 16, :f :write, :value "vs42-148-xxxxxxx", :key "/jepsen/map/ks42-6", :revision 113}
+{:index 266, :time 37567228884, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 267, :time 38060433307, :type :invoke, :process 8, :f :write, :value "vs42-153-xxxxxxx", :key "/jepsen/map/ks42-2"}
+{:index 268, :time 38082086343, :type :ok, :process 8, :f :write, :value "vs42-153-xxxxxxx", :key "/jepsen/map/ks42-2", :revision 114}
+{:index 269, :time 38540589255, :type :invoke, :process 9, :f :write, :value "vs42-156-xxxxxxx", :key "/jepsen/map/ks42-5"}
+{:index 270, :time 38563816829, :type :ok, :process 9, :f :write, :value "vs42-156-xxxxxxx", :key "/jepsen/map/ks42-5", :revision 115}
+{:index 271, :time 38695011677, :type :invoke, :process 10, :f :exists, :value nil, :key "/jepsen/map/ks42-4"}
+{:key "/jepsen/map/ks42-4", :index 272, :revision 116, :value nil, :time 38721419805, :process 10, :type :ok, :node "n1", :exists? false, :f :exists}
+{:index 273, :time 38742585574, :type :info, :process :nemesis, :f :stop, :value {"n3" [:restarted "n3"]}}
+{:index 274, :time 38872501694, :type :invoke, :process 1, :f :read, :value nil, :key "/jepsen/map/ks42-0"}
+{:key "/jepsen/map/ks42-0", :index 275, :value "vs42-142-xxxxxxx", :time 38876675537, :process 1, :type :ok, :raw-value "vs42-142-xxxxxxx", :node "n1", :f :read}
+{:index 276, :time 39091408296, :type :invoke, :process 2, :f :write, :value "vs42-159-xxxxxxx", :key "/jepsen/map/ks42-0"}
+{:index 277, :time 39115057130, :type :ok, :process 2, :f :write, :value "vs42-159-xxxxxxx", :key "/jepsen/map/ks42-0", :revision 117}
+{:index 278, :time 39236153321, :type :invoke, :process 3, :f :write, :value "vs42-162-xxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 279, :time 39263988821, :type :ok, :process 3, :f :write, :value "vs42-162-xxxxxxx", :key "/jepsen/map/ks42-6", :revision 118}
+{:index 280, :time 39783407716, :type :invoke, :process 4, :f :read, :value nil, :key "/jepsen/map/ks42-5"}
+{:key "/jepsen/map/ks42-5", :index 281, :value "vs42-156-xxxxxxx", :time 39786799978, :process 4, :type :ok, :raw-value "vs42-156-xxxxxxx", :node "n1", :f :read}
+{:index 282, :time 40601165007, :type :invoke, :process 5, :f :read, :value nil, :key "/jepsen/map/ks42-1"}
+{:key "/jepsen/map/ks42-1", :index 283, :value nil, :time 40605286436, :process 5, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 284, :time 40686926388, :type :invoke, :process 16, :f :write, :value "vs42-165-xxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 285, :time 40714701953, :type :ok, :process 16, :f :write, :value "vs42-165-xxxxxxx", :key "/jepsen/map/ks42-6", :revision 119}
+{:index 286, :time 40890462469, :type :invoke, :process 7, :f :delete, :value nil, :key "/jepsen/map/ks42-1"}
+{:index 287, :time 40917029283, :type :invoke, :process 8, :f :write, :value "vs42-167-xxxxxxx", :key "/jepsen/map/ks42-2"}
+{:deleted 0, :key "/jepsen/map/ks42-1", :index 288, :revision 120, :value nil, :time 40921508137, :process 7, :type :ok, :node "n1", :prev-kvs [], :f :delete, :prev-kv-requested? true}
+{:index 289, :time 40959443732, :type :ok, :process 8, :f :write, :value "vs42-167-xxxxxxx", :key "/jepsen/map/ks42-2", :revision 121}
+{:index 290, :time 41399280844, :type :invoke, :process 9, :f :read, :value nil, :key "/jepsen/map/ks42-3"}
+{:key "/jepsen/map/ks42-3", :index 291, :value nil, :time 41404012210, :process 9, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 292, :time 41932359027, :type :invoke, :process 10, :f :delete, :value nil, :key "/jepsen/map/ks42-5"}
+{:deleted 1, :key "/jepsen/map/ks42-5", :index 293, :revision 122, :value nil, :time 41961402168, :process 10, :type :ok, :node "n1", :prev-kvs [{:key "/jepsen/map/ks42-5", :value "vs42-156-xxxxxxx", :version 8, :create-revision 36, :mod-revision 115}], :f :delete, :prev-kv-requested? true}
+{:index 294, :time 42164345611, :type :invoke, :process 10, :f :delete, :value nil, :key "/jepsen/map/ks42-3"}
+{:deleted 0, :key "/jepsen/map/ks42-3", :index 295, :revision 123, :value nil, :time 42198821707, :process 10, :type :ok, :node "n1", :prev-kvs [], :f :delete, :prev-kv-requested? true}
+{:index 296, :time 42238040476, :type :invoke, :process 1, :f :read, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 297, :value nil, :time 42241809075, :process 1, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 298, :time 42358492466, :type :invoke, :process 2, :f :write, :value "vs42-170-xxxxxxx", :key "/jepsen/map/ks42-7"}
+{:index 299, :time 42388148575, :type :ok, :process 2, :f :write, :value "vs42-170-xxxxxxx", :key "/jepsen/map/ks42-7", :revision 124}
+{:index 300, :time 42614067096, :type :invoke, :process 3, :f :read, :value nil, :key "/jepsen/map/ks42-3"}
+{:key "/jepsen/map/ks42-3", :index 301, :value nil, :time 42618168581, :process 3, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 302, :time 42987757587, :type :invoke, :process 4, :f :write, :value "vs42-173-xxxxxxx", :key "/jepsen/map/ks42-3"}
+{:index 303, :time 43021569737, :type :ok, :process 4, :f :write, :value "vs42-173-xxxxxxx", :key "/jepsen/map/ks42-3", :revision 125}
+{:index 304, :time 43274687636, :type :invoke, :process 5, :f :exists, :value nil, :key "/jepsen/map/ks42-4"}
+{:key "/jepsen/map/ks42-4", :index 305, :revision 126, :value nil, :time 43338389546, :process 5, :type :ok, :node "n1", :exists? false, :f :exists}
+{:index 306, :time 43586044600, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 307, :time 43604288440, :type :info, :process :nemesis, :f :start, :value {"n3" [:killed "n3"]}}
+{:index 308, :time 44591125927, :type :invoke, :process 8, :f :read, :value nil, :key "/jepsen/map/ks42-1"}
+{:key "/jepsen/map/ks42-1", :index 309, :value nil, :time 44593095649, :process 8, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 310, :time 44671131981, :type :invoke, :process 9, :f :read, :value nil, :key "/jepsen/map/ks42-1"}
+{:key "/jepsen/map/ks42-1", :index 311, :value nil, :time 44675090344, :process 9, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 312, :time 44855916225, :type :invoke, :process 10, :f :exists, :value nil, :key "/jepsen/map/ks42-1"}
+{:key "/jepsen/map/ks42-1", :index 313, :revision 127, :value nil, :time 44878314583, :process 10, :type :ok, :node "n1", :exists? false, :f :exists}
+{:index 314, :time 44994447137, :type :invoke, :process 10, :f :read, :value nil, :key "/jepsen/map/ks42-2"}
+{:key "/jepsen/map/ks42-2", :index 315, :value "vs42-167-xxxxxxx", :time 44999165350, :process 10, :type :ok, :raw-value "vs42-167-xxxxxxx", :node "n1", :f :read}
+{:index 316, :time 45068467607, :type :invoke, :process 1, :f :exists, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 317, :revision 128, :value nil, :time 45087833893, :process 1, :type :ok, :node "n1", :exists? true, :f :exists}
+{:index 318, :time 45093737759, :type :invoke, :process 2, :f :write, :value "vs42-176-xxxxxxx", :key "/jepsen/map/ks42-3"}
+{:index 319, :time 45113727022, :type :ok, :process 2, :f :write, :value "vs42-176-xxxxxxx", :key "/jepsen/map/ks42-3", :revision 129}
+{:index 320, :time 45134266667, :type :invoke, :process 3, :f :write, :value "vs42-179-xxxxxxx", :key "/jepsen/map/ks42-0"}
+{:index 321, :time 45153985101, :type :ok, :process 3, :f :write, :value "vs42-179-xxxxxxx", :key "/jepsen/map/ks42-0", :revision 130}
+{:index 322, :time 45252976544, :type :invoke, :process 4, :f :write, :value "vs42-182-xxxxxxx", :key "/jepsen/map/ks42-1"}
+{:index 323, :time 45274699471, :type :ok, :process 4, :f :write, :value "vs42-182-xxxxxxx", :key "/jepsen/map/ks42-1", :revision 131}
+{:index 324, :time 45412963092, :type :invoke, :process 5, :f :write, :value "vs42-185-xxxxxxx", :key "/jepsen/map/ks42-5"}
+{:index 325, :time 45440174802, :type :ok, :process 5, :f :write, :value "vs42-185-xxxxxxx", :key "/jepsen/map/ks42-5", :revision 132}
+{:index 326, :time 46382984177, :type :invoke, :process 16, :f :delete, :value nil, :key "/jepsen/map/ks42-5"}
+{:deleted 1, :key "/jepsen/map/ks42-5", :index 327, :revision 133, :value nil, :time 46406103247, :process 16, :type :ok, :node "n1", :prev-kvs [{:key "/jepsen/map/ks42-5", :value "vs42-185-xxxxxxx", :version 10, :create-revision 36, :mod-revision 132}], :f :delete, :prev-kv-requested? true}
+{:index 328, :time 46622776861, :type :invoke, :process 7, :f :delete, :value nil, :key "/jepsen/map/ks42-1"}
+{:deleted 1, :key "/jepsen/map/ks42-1", :index 329, :revision 134, :value nil, :time 46648131387, :process 7, :type :ok, :node "n1", :prev-kvs [{:key "/jepsen/map/ks42-1", :value "vs42-182-xxxxxxx", :version 7, :create-revision 63, :mod-revision 131}], :f :delete, :prev-kv-requested? true}
+{:index 330, :time 46648258105, :type :invoke, :process 8, :f :read, :value nil, :key "/jepsen/map/ks42-0"}
+{:key "/jepsen/map/ks42-0", :index 331, :value "vs42-179-xxxxxxx", :time 46653118300, :process 8, :type :ok, :raw-value "vs42-179-xxxxxxx", :node "n1", :f :read}
+{:index 332, :time 46693521561, :type :invoke, :process 9, :f :read, :value nil, :key "/jepsen/map/ks42-1"}
+{:key "/jepsen/map/ks42-1", :index 333, :value nil, :time 46695916704, :process 9, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 334, :time 46800828393, :type :invoke, :process 10, :f :read, :value nil, :key "/jepsen/map/ks42-1"}
+{:key "/jepsen/map/ks42-1", :index 335, :value nil, :time 46803805762, :process 10, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 336, :time 46832696413, :type :invoke, :process 10, :f :exists, :value nil, :key "/jepsen/map/ks42-2"}
+{:key "/jepsen/map/ks42-2", :index 337, :revision 135, :value nil, :time 46852555055, :process 10, :type :ok, :node "n1", :exists? true, :f :exists}
+{:index 338, :time 46898359517, :type :invoke, :process 1, :f :exists, :value nil, :key "/jepsen/map/ks42-2"}
+{:key "/jepsen/map/ks42-2", :index 339, :revision 136, :value nil, :time 46923781033, :process 1, :type :ok, :node "n1", :exists? true, :f :exists}
+{:index 340, :time 47721895411, :type :invoke, :process 2, :f :read, :value nil, :key "/jepsen/map/ks42-5"}
+{:key "/jepsen/map/ks42-5", :index 341, :value nil, :time 47723836374, :process 2, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 342, :time 47979476294, :type :invoke, :process 3, :f :write, :value "vs42-188-xxxxxxx", :key "/jepsen/map/ks42-1"}
+{:index 343, :time 47982823616, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 344, :time 48000254149, :type :ok, :process 3, :f :write, :value "vs42-188-xxxxxxx", :key "/jepsen/map/ks42-1", :revision 137}
+{:index 345, :time 48731027135, :type :invoke, :process 5, :f :exists, :value nil, :key "/jepsen/map/ks42-2"}
+{:key "/jepsen/map/ks42-2", :index 346, :revision 138, :value nil, :time 48759943071, :process 5, :type :ok, :node "n1", :exists? true, :f :exists}
+{:index 347, :time 48802510345, :type :invoke, :process 16, :f :write, :value "vs42-191-xxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 348, :time 48828614796, :type :ok, :process 16, :f :write, :value "vs42-191-xxxxxxx", :key "/jepsen/map/ks42-6", :revision 139}
+{:index 349, :time 48898500824, :type :invoke, :process 7, :f :read, :value nil, :key "/jepsen/map/ks42-1"}
+{:key "/jepsen/map/ks42-1", :index 350, :value "vs42-188-xxxxxxx", :time 48902660615, :process 7, :type :ok, :raw-value "vs42-188-xxxxxxx", :node "n1", :f :read}
+{:index 351, :time 49146230678, :type :info, :process :nemesis, :f :stop, :value {"n3" [:restarted "n3"]}}
+{:index 352, :time 49236289526, :type :invoke, :process 9, :f :read, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 353, :value "vs42-170-xxxxxxx", :time 49240534015, :process 9, :type :ok, :raw-value "vs42-170-xxxxxxx", :node "n1", :f :read}
+{:index 354, :time 49733445010, :type :invoke, :process 10, :f :read, :value nil, :key "/jepsen/map/ks42-6"}
+{:key "/jepsen/map/ks42-6", :index 355, :value "vs42-191-xxxxxxx", :time 49736303060, :process 10, :type :ok, :raw-value "vs42-191-xxxxxxx", :node "n1", :f :read}
+{:index 356, :time 49941811349, :type :invoke, :process 10, :f :write, :value "vs42-194-xxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 357, :time 49967931993, :type :ok, :process 10, :f :write, :value "vs42-194-xxxxxxx", :key "/jepsen/map/ks42-6", :revision 140}
+{:index 358, :time 49970727261, :type :invoke, :process 1, :f :delete, :value nil, :key "/jepsen/map/ks42-2"}
+{:deleted 1, :key "/jepsen/map/ks42-2", :index 359, :revision 141, :value nil, :time 49993644115, :process 1, :type :ok, :node "n1", :prev-kvs [{:key "/jepsen/map/ks42-2", :value "vs42-167-xxxxxxx", :version 7, :create-revision 13, :mod-revision 121}], :f :delete, :prev-kv-requested? true}
+{:index 360, :time 49996033345, :type :invoke, :process 2, :f :write, :value "vs42-197-xxxxxxx", :key "/jepsen/map/ks42-2"}
+{:index 361, :time 50023985661, :type :ok, :process 2, :f :write, :value "vs42-197-xxxxxxx", :key "/jepsen/map/ks42-2", :revision 142}
+{:index 362, :time 50762258725, :type :invoke, :process 3, :f :write, :value "vs42-200-xxxxxxx", :key "/jepsen/map/ks42-0"}
+{:index 363, :time 50787601951, :type :ok, :process 3, :f :write, :value "vs42-200-xxxxxxx", :key "/jepsen/map/ks42-0", :revision 143}
+{:index 364, :time 50821433252, :type :invoke, :process 4, :f :write, :value "vs42-203-xxxxxxx", :key "/jepsen/map/ks42-1"}
+{:index 365, :time 50847725326, :type :ok, :process 4, :f :write, :value "vs42-203-xxxxxxx", :key "/jepsen/map/ks42-1", :revision 144}
+{:index 366, :time 52289628385, :type :invoke, :process 5, :f :write, :value "vs42-206-xxxxxxx", :key "/jepsen/map/ks42-5"}
+{:index 367, :time 52312610459, :type :ok, :process 5, :f :write, :value "vs42-206-xxxxxxx", :key "/jepsen/map/ks42-5", :revision 145}
+{:index 368, :time 52648948824, :type :invoke, :process 16, :f :write, :value "vs42-209-xxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 369, :time 52654070608, :type :invoke, :process 7, :f :write, :value "vs42-211-xxxxxxx", :key "/jepsen/map/ks42-4"}
+{:index 370, :time 52686570617, :type :ok, :process 16, :f :write, :value "vs42-209-xxxxxxx", :key "/jepsen/map/ks42-6", :revision 146}
+{:index 371, :time 52697464861, :type :ok, :process 7, :f :write, :value "vs42-211-xxxxxxx", :key "/jepsen/map/ks42-4", :revision 147}
+{:index 372, :time 53140055850, :type :invoke, :process 8, :f :write, :value "vs42-215-xxxxxxx", :key "/jepsen/map/ks42-4"}
+{:index 373, :time 53171602588, :type :ok, :process 8, :f :write, :value "vs42-215-xxxxxxx", :key "/jepsen/map/ks42-4", :revision 148}
+{:index 374, :time 53579690230, :type :invoke, :process 9, :f :exists, :value nil, :key "/jepsen/map/ks42-0"}
+{:key "/jepsen/map/ks42-0", :index 375, :revision 149, :value nil, :time 53603991016, :process 9, :type :ok, :node "n1", :exists? true, :f :exists}
+{:index 376, :time 53991350547, :type :invoke, :process 10, :f :write, :value "vs42-218-xxxxxxx", :key "/jepsen/map/ks42-7"}
+{:index 377, :time 54018158859, :type :ok, :process 10, :f :write, :value "vs42-218-xxxxxxx", :key "/jepsen/map/ks42-7", :revision 150}
+{:index 378, :time 54365903260, :type :invoke, :process 10, :f :write, :value "vs42-221-xxxxxxx", :key "/jepsen/map/ks42-7"}
+{:index 379, :time 54388449653, :type :ok, :process 10, :f :write, :value "vs42-221-xxxxxxx", :key "/jepsen/map/ks42-7", :revision 151}
+{:index 380, :time 54464686931, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 381, :time 54487630063, :type :invoke, :process 2, :f :write, :value "vs42-226-xxxxxxx", :key "/jepsen/map/ks42-2"}
+{:index 382, :time 54490785614, :type :info, :process :nemesis, :f :start, :value {"n3" [:killed "n3"]}}
+{:index 383, :time 54508397878, :type :ok, :process 2, :f :write, :value "vs42-226-xxxxxxx", :key "/jepsen/map/ks42-2", :revision 152}
+{:index 384, :time 54690992106, :type :invoke, :process 4, :f :write, :value "vs42-231-xxxxxxx", :key "/jepsen/map/ks42-4"}
+{:index 385, :time 54713098349, :type :ok, :process 4, :f :write, :value "vs42-231-xxxxxxx", :key "/jepsen/map/ks42-4", :revision 153}
+{:index 386, :time 54876700814, :type :invoke, :process 5, :f :read, :value nil, :key "/jepsen/map/ks42-2"}
+{:key "/jepsen/map/ks42-2", :index 387, :value "vs42-226-xxxxxxx", :time 54881226532, :process 5, :type :ok, :raw-value "vs42-226-xxxxxxx", :node "n1", :f :read}
+{:index 388, :time 54966477982, :type :invoke, :process 16, :f :exists, :value nil, :key "/jepsen/map/ks42-2"}
+{:key "/jepsen/map/ks42-2", :index 389, :revision 154, :value nil, :time 54988145772, :process 16, :type :ok, :node "n1", :exists? true, :f :exists}
+{:index 390, :time 55151903142, :type :invoke, :process 7, :f :exists, :value nil, :key "/jepsen/map/ks42-6"}
+{:key "/jepsen/map/ks42-6", :index 391, :revision 155, :value nil, :time 55172911860, :process 7, :type :ok, :node "n1", :exists? true, :f :exists}
+{:index 392, :time 55276847511, :type :invoke, :process 8, :f :read, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 393, :value "vs42-221-xxxxxxx", :time 55281156830, :process 8, :type :ok, :raw-value "vs42-221-xxxxxxx", :node "n1", :f :read}
+{:index 394, :time 55385402046, :type :invoke, :process 9, :f :read, :value nil, :key "/jepsen/map/ks42-6"}
+{:key "/jepsen/map/ks42-6", :index 395, :value "vs42-209-xxxxxxx", :time 55391199538, :process 9, :type :ok, :raw-value "vs42-209-xxxxxxx", :node "n1", :f :read}
+{:index 396, :time 55860008318, :type :invoke, :process 10, :f :read, :value nil, :key "/jepsen/map/ks42-0"}
+{:key "/jepsen/map/ks42-0", :index 397, :value "vs42-200-xxxxxxx", :time 55863853764, :process 10, :type :ok, :raw-value "vs42-200-xxxxxxx", :node "n1", :f :read}
+{:index 398, :time 55863942626, :type :invoke, :process 10, :f :write, :value "vs42-233-xxxxxxx", :key "/jepsen/map/ks42-0"}
+{:index 399, :time 55883749605, :type :ok, :process 10, :f :write, :value "vs42-233-xxxxxxx", :key "/jepsen/map/ks42-0", :revision 156}
+{:index 400, :time 56793864796, :type :invoke, :process 1, :f :delete, :value nil, :key "/jepsen/map/ks42-4"}
+{:deleted 1, :key "/jepsen/map/ks42-4", :index 401, :revision 157, :value nil, :time 56814093719, :process 1, :type :ok, :node "n1", :prev-kvs [{:key "/jepsen/map/ks42-4", :value "vs42-231-xxxxxxx", :version 11, :create-revision 20, :mod-revision 153}], :f :delete, :prev-kv-requested? true}
+{:index 402, :time 56870358641, :type :invoke, :process 2, :f :read, :value nil, :key "/jepsen/map/ks42-4"}
+{:key "/jepsen/map/ks42-4", :index 403, :value nil, :time 56873966578, :process 2, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 404, :time 56900495060, :type :invoke, :process 3, :f :read, :value nil, :key "/jepsen/map/ks42-1"}
+{:key "/jepsen/map/ks42-1", :index 405, :value "vs42-203-xxxxxxx", :time 56904725268, :process 3, :type :ok, :raw-value "vs42-203-xxxxxxx", :node "n1", :f :read}
+{:index 406, :time 56908117832, :type :invoke, :process 4, :f :read, :value nil, :key "/jepsen/map/ks42-1"}
+{:key "/jepsen/map/ks42-1", :index 407, :value "vs42-203-xxxxxxx", :time 56911991815, :process 4, :type :ok, :raw-value "vs42-203-xxxxxxx", :node "n1", :f :read}
+{:index 408, :time 57021992264, :type :invoke, :process 5, :f :read, :value nil, :key "/jepsen/map/ks42-4"}
+{:key "/jepsen/map/ks42-4", :index 409, :value nil, :time 57029793758, :process 5, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 410, :time 57092329566, :type :invoke, :process 16, :f :write, :value "vs42-236-xxxxxxx", :key "/jepsen/map/ks42-4"}
+{:index 411, :time 57114162089, :type :ok, :process 16, :f :write, :value "vs42-236-xxxxxxx", :key "/jepsen/map/ks42-4", :revision 158}
+{:index 412, :time 57268923262, :type :invoke, :process 7, :f :write, :value "vs42-239-xxxxxxx", :key "/jepsen/map/ks42-4"}
+{:index 413, :time 57290439705, :type :ok, :process 7, :f :write, :value "vs42-239-xxxxxxx", :key "/jepsen/map/ks42-4", :revision 159}
+{:index 414, :time 57624162968, :type :invoke, :process 8, :f :write, :value "vs42-242-xxxxxxx", :key "/jepsen/map/ks42-1"}
+{:index 415, :time 57644845463, :type :ok, :process 8, :f :write, :value "vs42-242-xxxxxxx", :key "/jepsen/map/ks42-1", :revision 160}
+{:index 416, :time 58350411168, :type :invoke, :process 9, :f :exists, :value nil, :key "/jepsen/map/ks42-2"}
+{:key "/jepsen/map/ks42-2", :index 417, :revision 161, :value nil, :time 58370904987, :process 9, :type :ok, :node "n1", :exists? true, :f :exists}
+{:index 418, :time 58497361372, :type :invoke, :process 10, :f :write, :value "vs42-245-xxxxxxx", :key "/jepsen/map/ks42-6"}
+{:index 419, :time 58517756070, :type :ok, :process 10, :f :write, :value "vs42-245-xxxxxxx", :key "/jepsen/map/ks42-6", :revision 162}
+{:index 420, :time 58674544687, :type :invoke, :process 10, :f :read, :value nil, :key "/jepsen/map/ks42-0"}
+{:key "/jepsen/map/ks42-0", :index 421, :value "vs42-233-xxxxxxx", :time 58678398556, :process 10, :type :ok, :raw-value "vs42-233-xxxxxxx", :node "n1", :f :read}
+{:index 422, :time 58678480691, :type :invoke, :process 1, :f :exists, :value nil, :key "/jepsen/map/ks42-5"}
+{:key "/jepsen/map/ks42-5", :index 423, :revision 163, :value nil, :time 58698968410, :process 1, :type :ok, :node "n1", :exists? true, :f :exists}
+{:index 424, :time 58828925955, :type :invoke, :process 2, :f :write, :value "vs42-248-xxxxxxx", :key "/jepsen/map/ks42-4"}
+{:index 425, :time 58847904960, :type :ok, :process 2, :f :write, :value "vs42-248-xxxxxxx", :key "/jepsen/map/ks42-4", :revision 164}
+{:index 426, :time 58875795404, :type :invoke, :process 3, :f :delete, :value nil, :key "/jepsen/map/ks42-7"}
+{:deleted 1, :key "/jepsen/map/ks42-7", :index 427, :revision 165, :value nil, :time 58897289841, :process 3, :type :ok, :node "n1", :prev-kvs [{:key "/jepsen/map/ks42-7", :value "vs42-221-xxxxxxx", :version 10, :create-revision 40, :mod-revision 151}], :f :delete, :prev-kv-requested? true}
+{:index 428, :time 59406344098, :type :invoke, :process 4, :f :read, :value nil, :key "/jepsen/map/ks42-7"}
+{:key "/jepsen/map/ks42-7", :index 429, :value nil, :time 59409212347, :process 4, :type :ok, :raw-value nil, :node "n1", :f :read}
+{:index 430, :time 59432552406, :type :invoke, :process 5, :f :read, :value nil, :key "/jepsen/map/ks42-0"}
+{:key "/jepsen/map/ks42-0", :index 431, :value "vs42-233-xxxxxxx", :time 59436590738, :process 5, :type :ok, :raw-value "vs42-233-xxxxxxx", :node "n1", :f :read}
+{:index 432, :time 59511711016, :type :invoke, :process 16, :f :write, :value "vs42-251-xxxxxxx", :key "/jepsen/map/ks42-5"}
+{:index 433, :time 59533709916, :type :ok, :process 16, :f :write, :value "vs42-251-xxxxxxx", :key "/jepsen/map/ks42-5", :revision 166}
+{:index 434, :time 60114233586, :type :invoke, :process 7, :f :read, :value nil, :key "/jepsen/map/ks42-0"}
+{:key "/jepsen/map/ks42-0", :index 435, :value "vs42-233-xxxxxxx", :time 60117017408, :process 7, :type :ok, :raw-value "vs42-233-xxxxxxx", :node "n1", :f :read}
+{:index 436, :time 61405957226, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 437, :time 62557423903, :type :info, :process :nemesis, :f :stop, :value {"n3" [:restarted "n3"]}}

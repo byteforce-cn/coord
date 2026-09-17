@@ -1,0 +1,638 @@
+2026-09-17 11:20:01,134{GMT}	INFO	[jepsen test runner] jepsen.core: Test version ad22337b09f7aae407b39e9d639de867e52bccc7 (plus uncommitted changes)
+2026-09-17 11:20:01,135{GMT}	INFO	[jepsen test runner] jepsen.core: Command line:
+lein run test --nodes-file /root/nodes --username root --ssh-private-key /root/.ssh/id_ed25519 --workload watch --nemesis none --time-limit 45 --concurrency 1n --rate 5 --watch-min-events 50
+2026-09-17 11:20:01,191{GMT}	INFO	[jepsen test runner] jepsen.core: Running test:
+{:remote
+ #jepsen.control.retry.Remote{:remote #jepsen.control.scp.Remote{:cmd-remote #jepsen.control.sshj.SSHJRemote{:concurrency-limit 6,
+                                                                                                             :conn-spec nil,
+                                                                                                             :client nil,
+                                                                                                             :semaphore nil},
+                                                                 :conn-spec nil},
+                              :conn nil}
+ :idem-replay-delay-ms 0
+ :ssh-private-key "/root/.ssh/id_ed25519"
+ :idem-min-replay-attempts nil
+ :watch-min-events 50
+ :concurrency 5
+ :soak-disrupt 600
+ :db
+ #jepsen.coord.db.CoordDB{:cluster-name "jepsen-coord",
+                          :pidfile-prefix "/var/run/coord-",
+                          :root-password "66c57bb56bce306f484344e4a8650836",
+                          :coord-dir "/opt/coord",
+                          :config-dir "/etc/coord",
+                          :logfile "/var/log/coord.log",
+                          :regions nil,
+                          :data-dir "/var/lib/coord",
+                          :nodes ("n1" "n2" "n3"),
+                          :auth-root-key "820662a9f85924333d6d466714bc51734b251e73b827a394e1978e36d2429bfc",
+                          :raft-secret "93edf94d2860fec54bc59278a804cb1bbd2d0a7243e4f39d667d66966d9844d1",
+                          :coord-bin "/root/coord-test/coord"}
+ :leave-db-running? false
+ :name "coord"
+ :logging-json? false
+ :mixture-ratio nil
+ :start-time
+ #object[java.time.OffsetDateTime "0x38c7ad43" "2026-09-17T11:20:01.094476497Z"]
+ :regions nil
+ :map-keys nil
+ :net
+ #object[jepsen.net$iptables_with_dev$reify__15623
+         "0x1ee04ff6"
+         "jepsen.net$iptables_with_dev$reify__15623@1ee04ff6"]
+ :client
+ #jepsen.coord.client.CoordClient{:root-password "66c57bb56bce306f484344e4a8650836",
+                                  :channels nil,
+                                  :cct nil,
+                                  :raw-channels nil,
+                                  :parse-values? false,
+                                  :nodes ["n1" "n2" "n3"],
+                                  :leader-idx #object[clojure.lang.Atom
+                                                      "0x27b9d5b7"
+                                                      {:status :ready, :val {}}],
+                                  :last-rev #object[clojure.lang.Atom
+                                                    "0x625d2b6d"
+                                                    {:status :ready, :val {}}],
+                                  :last-watch-rev #object[clojure.lang.Atom
+                                                          "0x490b8f1e"
+                                                          {:status :ready,
+                                                           :val {}}]}
+ :barrier
+ #object[java.util.concurrent.CyclicBarrier
+         "0x27c9500c"
+         "java.util.concurrent.CyclicBarrier@27c9500c"]
+ :ssh
+ {:dummy? false,
+  :username "root",
+  :password "root",
+  :strict-host-key-checking false,
+  :private-key-path "/root/.ssh/id_ed25519"}
+ :rate 5.0
+ :map-min-deletes nil
+ :seed 1664696234
+ :checker
+ #jepsen.checker.Compose{:checkers {:linear #object[jepsen.coord.watchck$checker$reify__2277
+                                                    "0x4eb43d2f"
+                                                    "jepsen.coord.watchck$checker$reify__2277@4eb43d2f"],
+                                    :gates #object[jepsen.coord.gates$checker$reify__955
+                                                   "0x453961d7"
+                                                   "jepsen.coord.gates$checker$reify__955@453961d7"],
+                                    :perf #jepsen.checker.Compose{:checkers {:latency-graph #jepsen.checker.LatencyGraph{:opts {}},
+                                                                             :rate-graph #jepsen.checker.RateGraph{:opts {}}}}}}
+ :argv
+ ("test"
+  "--nodes-file"
+  "/root/nodes"
+  "--username"
+  "root"
+  "--ssh-private-key"
+  "/root/.ssh/id_ed25519"
+  "--workload"
+  "watch"
+  "--nemesis"
+  "none"
+  "--time-limit"
+  "45"
+  "--concurrency"
+  "1n"
+  "--rate"
+  "5"
+  "--watch-min-events"
+  "50")
+ :nemesis #unprintable "jepsen.nemesis$reify__15746@505f6511"
+ :watch-resumes nil
+ :nodes ("n1" "n2" "n3")
+ :test-count 1
+ :no-jitter false
+ :generator
+ #object[jepsen.util.Forgettable
+         "0x53d94a6b"
+         ((jepsen.generator.Synchronize
+           {:gen (jepsen.generator.TimeLimit
+                  {:limit 45000000000,
+                   :cutoff nil,
+                   :gen (jepsen.generator.Delay
+                         {:dt 200000000,
+                          :next-time nil,
+                          :gen (jepsen.generator.OnThreads
+                                {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                 :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                         "0x3725242e"
+                                                         "jepsen.generator.context$make_thread_filter$lazy_filter__5865@3725242e"],
+                                 :gen (jepsen.generator.Mix
+                                       {:i 0,
+                                        :gens [(jepsen.generator.Mix
+                                                {:i 3,
+                                                 :gens [#object[jepsen.coord$watch_gen$w__2400
+                                                                "0x6860c000"
+                                                                "jepsen.coord$watch_gen$w__2400@6860c000"]
+                                                        #object[jepsen.coord$watch_gen$w__2400
+                                                                "0x6860c000"
+                                                                "jepsen.coord$watch_gen$w__2400@6860c000"]
+                                                        #object[jepsen.coord$watch_gen$sess__2402$fn__2403
+                                                                "0x3f4fd0dc"
+                                                                "jepsen.coord$watch_gen$sess__2402$fn__2403@3f4fd0dc"]
+                                                        #object[jepsen.coord$watch_gen$sess__2402$fn__2403
+                                                                "0x3723de42"
+                                                                "jepsen.coord$watch_gen$sess__2402$fn__2403@3723de42"]]})]})})})})})
+          (jepsen.generator.Synchronize
+           {:gen {:type :log, :value "recovery: letting cluster converge"}})
+          (jepsen.generator.Synchronize {:gen {:type :sleep, :value 30}}))]
+ :min-op-ok-ratio nil
+ :soak-max-rto-seconds nil
+ :idem-replay-node-offset 0
+ :min-op-sample nil
+ :os
+ #object[jepsen.os$reify__16045 "0x293988dc" "jepsen.os$reify__16045@293988dc"]
+ :time-limit 45
+ :quiet-availability-min nil
+ :soak-quiet 1800
+ :value-size nil
+ :quiet-min-sample nil
+ :watch-window-ms nil
+ :workload :watch
+ :watch-max-events nil
+ :watch-semantics nil}
+
+2026-09-17 11:20:02,770{GMT}	INFO	[jepsen test runner] jepsen.db: Tearing down DB
+2026-09-17 11:20:02,771{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-17 11:20:02,772{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-17 11:20:02,772{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-17 11:20:04,489{GMT}	INFO	[jepsen test runner] jepsen.db: Setting up DB
+2026-09-17 11:20:04,490{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Setting up coord on n1
+2026-09-17 11:20:04,490{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Setting up coord on n3
+2026-09-17 11:20:04,490{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Setting up coord on n2
+2026-09-17 11:20:12,165{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-17 11:20:12,165{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-17 11:20:12,298{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-17 11:20:12,298{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-17 11:20:12,530{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-17 11:20:12,634{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-17 11:20:13,454{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-17 11:20:13,454{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-17 11:20:14,207{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-17 11:20:14,209{GMT}	INFO	[jepsen test runner] jepsen.core: Relative time begins now
+2026-09-17 11:20:14,211{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-17 11:20:14,211{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-17 11:20:14,211{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-17 11:20:14,514{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-17 11:20:14,514{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-17 11:20:14,514{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-17 11:20:14,565{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord cluster is ready
+2026-09-17 11:20:14,566{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord cluster is ready
+2026-09-17 11:20:14,566{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord cluster is ready
+2026-09-17 11:20:14,592{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:14,592{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-17 11:20:14,789{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-2-x"
+2026-09-17 11:20:14,789{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-17 11:20:14,990{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:14,991{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-17 11:20:15,015{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-2-x"
+2026-09-17 11:20:15,190{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:15,191{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-17 11:20:15,390{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-4-x"
+2026-09-17 11:20:15,391{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-17 11:20:15,591{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-6-x"
+2026-09-17 11:20:15,632{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-4-x"
+2026-09-17 11:20:15,661{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-6-x"
+2026-09-17 11:20:15,791{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:15,991{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:16,786{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:16,786{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:17,105{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:17,106{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs1664696234-8-x"
+2026-09-17 11:20:17,223{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs1664696234-8-x"
+2026-09-17 11:20:17,306{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:17,384{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:17,506{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:17,792{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:17,792{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:17,993{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:17,993{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:18,787{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:18,788{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-9-x"
+2026-09-17 11:20:18,904{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-9-x"
+2026-09-17 11:20:18,988{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-7-x"
+2026-09-17 11:20:19,026{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-7-x"
+2026-09-17 11:20:19,188{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-11-"
+2026-09-17 11:20:19,212{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-11-"
+2026-09-17 11:20:19,308{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:19,388{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-10-"
+2026-09-17 11:20:19,423{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-10-"
+2026-09-17 11:20:19,508{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:19,589{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-12-"
+2026-09-17 11:20:19,719{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-12-"
+2026-09-17 11:20:19,789{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs1664696234-15-"
+2026-09-17 11:20:19,793{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:19,822{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs1664696234-15-"
+2026-09-17 11:20:19,989{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:19,994{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:20,190{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs1664696234-18-"
+2026-09-17 11:20:20,309{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs1664696234-18-"
+2026-09-17 11:20:20,390{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:20,590{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-20-"
+2026-09-17 11:20:20,621{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-20-"
+2026-09-17 11:20:20,791{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-23-"
+2026-09-17 11:20:20,926{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-23-"
+2026-09-17 11:20:20,991{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-26-"
+2026-09-17 11:20:21,018{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-26-"
+2026-09-17 11:20:21,191{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:21,392{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-28-"
+2026-09-17 11:20:21,523{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-28-"
+2026-09-17 11:20:21,592{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:21,792{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:21,991{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:21,993{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:22,391{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:22,392{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-30-"
+2026-09-17 11:20:22,422{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-30-"
+2026-09-17 11:20:22,592{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-29-"
+2026-09-17 11:20:22,624{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-29-"
+2026-09-17 11:20:22,792{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:23,192{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:23,193{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs1664696234-32-"
+2026-09-17 11:20:23,315{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs1664696234-32-"
+2026-09-17 11:20:23,393{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs1664696234-31-"
+2026-09-17 11:20:23,522{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs1664696234-31-"
+2026-09-17 11:20:23,593{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:23,594{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:23,793{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:23,794{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:23,993{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:23,994{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:24,194{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:24,794{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:24,794{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:25,594{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:25,595{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:25,795{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:25,795{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-34-"
+2026-09-17 11:20:25,831{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-34-"
+2026-09-17 11:20:25,995{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:25,995{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-33-"
+2026-09-17 11:20:26,106{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-33-"
+2026-09-17 11:20:26,195{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-38-"
+2026-09-17 11:20:26,196{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:26,218{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-38-"
+2026-09-17 11:20:26,395{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:26,596{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:26,795{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:26,796{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:26,996{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-35-"
+2026-09-17 11:20:27,024{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-35-"
+2026-09-17 11:20:27,196{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-40-"
+2026-09-17 11:20:27,315{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-40-"
+2026-09-17 11:20:27,396{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:27,596{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:27,596{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:28,396{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:28,396{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:28,597{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:28,597{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:28,797{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:28,797{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs1664696234-39-"
+2026-09-17 11:20:28,826{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs1664696234-39-"
+2026-09-17 11:20:28,998{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs1664696234-42-"
+2026-09-17 11:20:29,023{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs1664696234-42-"
+2026-09-17 11:20:29,198{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:29,397{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:29,398{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-43-"
+2026-09-17 11:20:29,529{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-43-"
+2026-09-17 11:20:29,598{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:29,598{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:29,798{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:30,397{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:30,397{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:30,599{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:30,599{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:31,199{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:31,199{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:31,599{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:31,600{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-44-"
+2026-09-17 11:20:31,623{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-44-"
+2026-09-17 11:20:31,800{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:31,800{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-45-"
+2026-09-17 11:20:31,826{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-45-"
+2026-09-17 11:20:32,000{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs1664696234-41-"
+2026-09-17 11:20:32,110{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs1664696234-41-"
+2026-09-17 11:20:32,200{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs1664696234-48-"
+2026-09-17 11:20:32,226{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs1664696234-48-"
+2026-09-17 11:20:32,398{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:32,400{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs1664696234-52-"
+2026-09-17 11:20:32,424{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs1664696234-52-"
+2026-09-17 11:20:32,600{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:32,600{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:32,801{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:33,001{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-54-"
+2026-09-17 11:20:33,114{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-54-"
+2026-09-17 11:20:33,200{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:33,201{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-58-"
+2026-09-17 11:20:33,219{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-58-"
+2026-09-17 11:20:33,401{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-61-"
+2026-09-17 11:20:33,514{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-61-"
+2026-09-17 11:20:33,601{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-64-"
+2026-09-17 11:20:33,623{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-64-"
+2026-09-17 11:20:33,802{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:34,002{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:34,202{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-66-"
+2026-09-17 11:20:34,227{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-66-"
+2026-09-17 11:20:34,402{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:34,601{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:34,602{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:34,802{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:34,803{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-67-"
+2026-09-17 11:20:34,922{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-67-"
+2026-09-17 11:20:35,003{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-68-"
+2026-09-17 11:20:35,029{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-68-"
+2026-09-17 11:20:35,203{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:35,802{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:35,803{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:36,003{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:36,004{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:36,404{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:36,404{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-69-"
+2026-09-17 11:20:36,426{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-69-"
+2026-09-17 11:20:36,604{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:36,604{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:36,804{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:37,204{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:37,205{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:37,803{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:37,804{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs1664696234-70-"
+2026-09-17 11:20:37,910{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs1664696234-70-"
+2026-09-17 11:20:38,004{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs1664696234-71-"
+2026-09-17 11:20:38,005{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:38,036{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs1664696234-71-"
+2026-09-17 11:20:38,204{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:38,404{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:38,605{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:38,605{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-72-"
+2026-09-17 11:20:38,639{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-72-"
+2026-09-17 11:20:38,805{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:38,806{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:39,006{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:39,205{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:39,206{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-73-"
+2026-09-17 11:20:39,238{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-73-"
+2026-09-17 11:20:39,406{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-75-"
+2026-09-17 11:20:39,441{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-75-"
+2026-09-17 11:20:39,606{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-76-"
+2026-09-17 11:20:39,724{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-76-"
+2026-09-17 11:20:39,806{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-74-"
+2026-09-17 11:20:39,842{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-74-"
+2026-09-17 11:20:40,007{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-77-"
+2026-09-17 11:20:40,039{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-77-"
+2026-09-17 11:20:40,206{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:40,207{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-78-"
+2026-09-17 11:20:40,238{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-78-"
+2026-09-17 11:20:40,406{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:40,407{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:40,607{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:40,807{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:40,807{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-79-"
+2026-09-17 11:20:40,836{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-79-"
+2026-09-17 11:20:41,007{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:41,007{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:41,208{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-81-"
+2026-09-17 11:20:41,317{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-81-"
+2026-09-17 11:20:41,408{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:41,608{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-83-"
+2026-09-17 11:20:41,652{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-83-"
+2026-09-17 11:20:41,808{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-85-"
+2026-09-17 11:20:41,834{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-85-"
+2026-09-17 11:20:42,008{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-84-"
+2026-09-17 11:20:42,038{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-84-"
+2026-09-17 11:20:42,208{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-86-"
+2026-09-17 11:20:42,372{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-86-"
+2026-09-17 11:20:42,408{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-88-"
+2026-09-17 11:20:42,409{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:42,442{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-88-"
+2026-09-17 11:20:42,609{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-87-"
+2026-09-17 11:20:42,609{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:42,638{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-87-"
+2026-09-17 11:20:42,809{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:43,008{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:43,009{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-92-"
+2026-09-17 11:20:43,037{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-92-"
+2026-09-17 11:20:43,209{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-89-"
+2026-09-17 11:20:43,382{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-89-"
+2026-09-17 11:20:43,409{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:43,409{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs1664696234-95-"
+2026-09-17 11:20:43,459{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs1664696234-95-"
+2026-09-17 11:20:43,609{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:43,810{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-97-"
+2026-09-17 11:20:43,834{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-97-"
+2026-09-17 11:20:44,010{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:44,210{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:44,410{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-99-"
+2026-09-17 11:20:44,437{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-99-"
+2026-09-17 11:20:44,610{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-101-"
+2026-09-17 11:20:44,675{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-101-"
+2026-09-17 11:20:44,809{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:44,810{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-102-"
+2026-09-17 11:20:44,838{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-102-"
+2026-09-17 11:20:45,011{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-105-"
+2026-09-17 11:20:45,037{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-105-"
+2026-09-17 11:20:45,211{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-100-"
+2026-09-17 11:20:45,236{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-100-"
+2026-09-17 11:20:45,411{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-108-"
+2026-09-17 11:20:45,462{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-108-"
+2026-09-17 11:20:45,611{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:45,611{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:45,811{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:46,011{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:46,011{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:46,211{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:46,212{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-111-"
+2026-09-17 11:20:46,235{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-111-"
+2026-09-17 11:20:46,412{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:46,612{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:47,612{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:47,612{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs1664696234-113-"
+2026-09-17 11:20:47,636{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs1664696234-113-"
+2026-09-17 11:20:47,812{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs1664696234-114-"
+2026-09-17 11:20:47,812{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:47,868{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs1664696234-114-"
+2026-09-17 11:20:48,012{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:48,012{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:48,212{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:48,413{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:48,413{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:48,613{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-116-"
+2026-09-17 11:20:48,613{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:48,644{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-116-"
+2026-09-17 11:20:48,813{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-119-"
+2026-09-17 11:20:48,843{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-119-"
+2026-09-17 11:20:49,013{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:49,213{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-112-"
+2026-09-17 11:20:49,241{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-112-"
+2026-09-17 11:20:49,414{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:50,013{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:50,013{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:50,213{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:50,213{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:50,413{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:50,413{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-120-"
+2026-09-17 11:20:50,442{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-120-"
+2026-09-17 11:20:50,614{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-122-"
+2026-09-17 11:20:50,646{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-122-"
+2026-09-17 11:20:50,814{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-121-"
+2026-09-17 11:20:50,844{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-121-"
+2026-09-17 11:20:51,014{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-124-"
+2026-09-17 11:20:51,014{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:51,049{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-124-"
+2026-09-17 11:20:51,214{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:51,414{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:51,415{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:51,615{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-123-"
+2026-09-17 11:20:51,784{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-123-"
+2026-09-17 11:20:51,815{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-126-"
+2026-09-17 11:20:51,842{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-126-"
+2026-09-17 11:20:52,014{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:52,015{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs1664696234-125-"
+2026-09-17 11:20:52,039{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs1664696234-125-"
+2026-09-17 11:20:52,215{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:52,215{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:52,415{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-129-"
+2026-09-17 11:20:52,443{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-129-"
+2026-09-17 11:20:52,615{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:52,815{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:53,215{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:53,215{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:53,415{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:53,416{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs1664696234-127-"
+2026-09-17 11:20:53,443{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs1664696234-127-"
+2026-09-17 11:20:53,616{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs1664696234-130-"
+2026-09-17 11:20:53,644{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs1664696234-130-"
+2026-09-17 11:20:53,816{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs1664696234-131-"
+2026-09-17 11:20:53,961{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs1664696234-131-"
+2026-09-17 11:20:54,016{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs1664696234-132-"
+2026-09-17 11:20:54,042{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs1664696234-132-"
+2026-09-17 11:20:54,215{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:54,216{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:54,417{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs1664696234-133-"
+2026-09-17 11:20:54,442{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs1664696234-133-"
+2026-09-17 11:20:54,616{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:54,617{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:54,817{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:54,817{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:55,017{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:55,217{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:55,217{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:56,217{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:56,218{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs1664696234-135-"
+2026-09-17 11:20:56,259{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs1664696234-135-"
+2026-09-17 11:20:56,418{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs1664696234-134-"
+2026-09-17 11:20:56,450{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs1664696234-134-"
+2026-09-17 11:20:56,618{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:56,618{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:56,818{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:56,818{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-136-"
+2026-09-17 11:20:56,983{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-136-"
+2026-09-17 11:20:57,018{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:57,018{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:57,218{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:57,218{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:57,418{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs1664696234-137-"
+2026-09-17 11:20:57,448{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs1664696234-137-"
+2026-09-17 11:20:57,619{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:57,819{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-139-"
+2026-09-17 11:20:57,853{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-139-"
+2026-09-17 11:20:58,019{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-141-"
+2026-09-17 11:20:58,048{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-141-"
+2026-09-17 11:20:58,219{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs1664696234-140-"
+2026-09-17 11:20:58,368{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs1664696234-140-"
+2026-09-17 11:20:58,419{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:58,619{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:58,619{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:59,019{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:59,020{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs1664696234-143-"
+2026-09-17 11:20:59,049{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs1664696234-143-"
+2026-09-17 11:20:59,219{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:59,220{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:59,420{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:20:59,621{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:21:00,420{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:21:00,620{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:21:01,221{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:21:01,421{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:watch-session	{:key "/jepsen/watch/s1664696234", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 11:21:01,421{GMT}	INFO	[jepsen worker nemesis] jepsen.generator.interpreter: recovery: letting cluster converge
+2026-09-17 11:21:31,436{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-17 11:21:31,436{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-17 11:21:31,436{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-17 11:21:31,612{GMT}	INFO	[jepsen test runner] jepsen.core: Run complete, writing
+2026-09-17 11:21:31,692{GMT}	INFO	[jepsen test runner] jepsen.core: Snarfing log files
+2026-09-17 11:21:31,693{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Killing coord on n1
+2026-09-17 11:21:31,693{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Killing coord on n3
+2026-09-17 11:21:31,693{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Killing coord on n2
+2026-09-17 11:21:31,751{GMT}	INFO	[jepsen node n3] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-17 11:21:31,753{GMT}	INFO	[jepsen node n1] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-17 11:21:31,754{GMT}	INFO	[jepsen node n2] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-17 11:21:31,895{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-17 11:21:31,895{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-17 11:21:31,895{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-17 11:21:33,503{GMT}	INFO	[jepsen test runner] jepsen.core: Analyzing...
+2026-09-17 11:21:33,520{GMT}	INFO	[clojure-agent-send-off-pool-4] jepsen.coord.watchck: watch checker: {:semantics :overflow-marker, :events 380, :resumes 0, :violations-by-class {}, :min-events 50, :markers 0, :sessions-with-events 89, :sessions 91, :failures (), :writes-ok 94, :stream-errors 0}
+2026-09-17 11:21:33,644{GMT}	INFO	[jepsen test runner] jepsen.core: Analysis complete
+2026-09-17 11:21:33,648{GMT}	INFO	[jepsen results] jepsen.store: Wrote /opt/coord/jepsen/store/coord/2026-09-17T11:20:01.094476497Z/results.edn
+2026-09-17 11:21:33,680{GMT}	INFO	[jepsen test runner] jepsen.core: {:linear {:valid? true,
+          :watch {:semantics :overflow-marker,
+                  :events 380,
+                  :resumes 0,
+                  :violations-by-class {},
+                  :min-events 50,
+                  :markers 0,
+                  :sessions-with-events 89,
+                  :sessions 91,
+                  :writes-ok 94,
+                  :stream-errors 0},
+          :failures []},
+ :gates {:valid? true,
+         :gates {:premise {:valid? true,
+                           :writes 94,
+                           :duplicate-value-count 0,
+                           :duplicate-values {}},
+                 :availability {:min-ratio 0.95,
+                                :min-sample 100,
+                                :windows 1,
+                                :judged 0,
+                                :skipped-small-sample 1,
+                                :worst-window nil,
+                                :violations []},
+                 :rto {:budget-seconds 0,
+                       :n 0,
+                       :p95 nil,
+                       :max nil,
+                       :samples [],
+                       :unrecovered 0,
+                       :not-measured 0,
+                       :details []},
+                 :liveness {:min-ok-ratio 0.1,
+                            :min-sample 10,
+                            :ops 2,
+                            :judged 2,
+                            :skipped-small-sample 0,
+                            :ok-ratio 1.0,
+                            :by-op {:write {:total 94,
+                                            :ok 94,
+                                            :info 0,
+                                            :fail 0,
+                                            :legit-fail 0,
+                                            :judged 94,
+                                            :errors {}},
+                                    :watch-session {:total 91,
+                                                    :ok 91,
+                                                    :info 0,
+                                                    :fail 0,
+                                                    :legit-fail 0,
+                                                    :judged 91,
+                                                    :errors {}}},
+                            :violations []}},
+         :failures []},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true}
+
+
+Everything looks good! ヽ(‘ー`)ノ

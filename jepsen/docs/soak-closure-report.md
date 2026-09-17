@@ -4,8 +4,44 @@
 > 什么**。数据全部来自同目录的 [`coord-findings.md`](coord-findings.md)（缺陷单）
 > 与 [`PROGRESS.md`](PROGRESS.md)（逐步证据），每条都可点回源文件核对。
 >
-> 生成日期：2026-09-17（第四轮收尾）。范围：M0/M1 完成、M2 主体完成（T2.0/T2.1
+> 生成日期：2026-09-17（第五轮收尾）。范围：M0/M1 完成、M2 主体完成（T2.0/T2.1
 > 已 lab 验证，T2.2 本轮落地）；M3–M6 未执行（见 §5「未兑现部分」）。
+
+---
+
+## 0. 交付状态（先读这一节）
+
+本报告有两个层次，**不要混读**：
+
+| 层次 | 状态 | 依据 |
+|:--|:--|:--|
+| **A. 已执行范围内的缺陷账 + 假绿机制** | ✅ **可交付**：coord 修复、契约注释、判据体系、fixture、证据产物、本报告均已提交入仓 | `395cbb8`（coord 幂等 F-01/F-02/F-03）· `5fd85df`（chaos 浸泡假红）· `3a22f44`（jepsen 体系，125 文件）；§1–§4 每条可点回 `coord-findings.md` / `PROGRESS.md` / `docs/production/evidence/<ts>/` |
+| **B. 引入验收结论（「soak 通过」）** | ❌ **未达成 —— 本报告不声明** | 下方三条硬缺口 |
+
+**三条硬缺口（缺一不可，均非“再跑一次”能解决）**：
+
+1. **证据效力未到验收档**：`dev.md` §5.4 规定「所有进 evidence 的 run 必须使用
+   coord 团队**书面确认**的参数取值，并把链接填进 MANIFEST」，否则「只能作内部
+   参考，不得用于引入决策」。现 26 份归档里，**24 份该项为「待填」**（另 2 份为
+   2026-09-12 的旧归档，MANIFEST 由另一套采集器生成、无该字段）。
+   补法：`docs/production/evidence/PARAM-CONFIRMATION.md` 签回后，执行
+   `jepsen/scripts/backfill-param-confirmation.sh <存档链接>` 回填（脚本会同时
+   重算 `sha256sums.txt`）。
+2. **覆盖面仍是局部**：M2 收口（T2.3）与 M3–M6 未执行（§5）。其中
+   **T6.1 的 72h 全比例 soak 在当前代码上跑不起来**：声明比例含 lock 10 /
+   election 3 / registry 2，这三个面属 M5（agent 插件面），`--soak-mix` 里一
+   出现即**构造期硬失败** —— 这是设计上的阻塞，不是排期问题。
+3. **F-05 未闭环**（唯一 P1）：登录限流 × 「刚重启」窗口仍会产出
+   `:no-client Failed to authenticate`（`store/coord/latest/history.txt:31`），
+   是「短矩阵干净绿」的阻塞点。
+
+**另两条必须随证据一起读的限定**：
+
+* **run 全部发生在提交之前**：因此 26 份 MANIFEST 的「工作树」字段一律是
+  `DIRTY`，`commit` 字段只说明「归档时 HEAD 在哪」，不表示 run 跑在那个 commit 上。
+  以后跑正式 run 前先提交，MANIFEST 才能记录 clean 树 —— 这是「可复现」的最低要求。
+* **`make checkers` / `matrix-m1` / `matrix-m2` 的全绿是 lab 结论**，本次并未
+  重跑（需 docker lab）；可在 lab 用 §6 的命令自行复核。
 
 ---
 
@@ -102,8 +138,8 @@
 | `make matrix-m1` | map/txn/scan/mixture × none\|kill + idempotency:none（45s/组合） | 9 组合全绿 |
 | `make matrix-m2` | watch/lease × none\|kill\|pause\|partition-halves（45s/组合） | 8 组合（lease 四档本轮新增） |
 | `make nightly` | checkers → matrix-m1 → matrix-m2 → soakfull（默认 2h）+ 等待 + 结果 | 本轮新增（`scripts/nightly-soak-gates.sh`） |
-| 功能面实跑（本轮） | `--workload lease` 60s（`grants 207 / expiries 95 / 六类违反 0`）；`--workload soakfull` 90s kill（五面全跑到、`:unrouted 0`） | 两份证据已入库（见下） |
-| 证据入库 | `collect-evidence.sh` → `docs/production/evidence/<ts>-<label>/`（MANIFEST 带真实门槛值 / 种子 / commit / 镜像 ID） | 已有 21 份归档 |
+| 功能面实跑（本轮） | `--workload lease` 60s（`grants 207 / expiries 95 / 六类违反 0`）；`--workload soakfull` 90s kill（五面全跑到、`:unrouted 0`）；`--workload watch` 120s kill（`events 1070 / resumes 78`、0 违反） | 三份证据已入库（见 §6 末表） |
+| 证据入库 | `collect-evidence.sh` → `docs/production/evidence/<ts>-<label>/`（MANIFEST 带真实门槛值 / 种子 / commit / 镜像 ID） | 已有 **26** 份归档（本轮新增 3：lease 60s / soakfull 90s / watch 修后重跑） |
 | 可回放 | `--seed` 落 `results.edn`；`scripts/replay.clj` 由种子重建故障排期 | 已用真实 store 验证 |
 
 三条「不能让 soak 白跑」的硬约束（已落地）：
@@ -154,12 +190,13 @@ make soak-wait && make soak-results
 jepsen/scripts/nightly-soak-gates.sh          # SKIP_LONG=1 只跑 1–3
 ```
 
-本轮已入库的两份功能面证据（均可直接点开核对）：
+本轮已入库的三份功能面证据（均可直接点开核对）：
 
 | 证据 | 内容 | 判决 |
 |:--|:--|:--|
 | `docs/production/evidence/20260917T144810Z-t2.2-lease-60s/` | `--workload lease --nemesis none --time-limit 60 --concurrency 2n`（seed 42） | `overall-valid true / gates-valid true`；`grants 207 / expiries 95 / keepalive 58 / revoke 54`、`keepalive-responses 348`、六类违反 0 |
 | `docs/production/evidence/20260917T144816Z-t6.1-soakfull-90s-kill/` | `--workload soakfull --nemesis kill --time-limit 90 --concurrency 2n`（seed 42） | `overall-valid true / gates-valid true`；`:routing {:by-sub {:map 134 :txn 57 :watch 54 :lease 30 :scan 12}, :unrouted 0, :insufficient []}` |
+| `docs/production/evidence/20260917T153058Z-t2.1-watch-120s-kill/` | `--workload watch --nemesis kill --time-limit 120 --concurrency 1n --rate 5`（seed 960196454；F-19/F-20/F-21 修后重跑） | `overall-valid true / gates-valid true`；`events 1070 / resumes 78 / sessions-with-events 207`、`:violations-by-class {}` |
 
 每条证据的定位：`jepsen/docs/coord-findings.md` 的 `F-xx` 小节里都有
 `store/coord/<时间戳>/` 或 `docs/production/evidence/<时间戳>-<label>/`。

@@ -1,0 +1,394 @@
+0	:invoke	:txn-cas	{:key "/jepsen/txn/s798182699-cas-1", :old "old-1", :val "new-1", :stale? false}
+0	:ok	:txn-cas	{:key "/jepsen/txn/s798182699-cas-1", :old "old-1", :val "new-1", :stale? false}
+1	:invoke	:read	nil
+1	:ok	:read	nil
+2	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-4", :old "old-4", :val "new-4", :stale? false}
+3	:invoke	:write	"vs798182699-6-xx"
+2	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-4", :old "old-4", :val "new-4", :stale? false}
+3	:ok	:write	"vs798182699-6-xx"
+4	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 2}
+4	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 2}
+0	:invoke	:write	"vs798182699-9-xx"
+0	:ok	:write	"vs798182699-9-xx"
+0	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 2, :keys-only true}
+0	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 2, :keys-only true}
+1	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-12/", :vals ["12-a" "12-b" "12-c"], :range-start "/jepsen/txn/s798182699-set-12/", :range-end "/jepsen/txn/s798182699-set-12/z"}
+2	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-14", :old "old-14", :val "new-14", :stale? false}
+1	:ok	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-12/", :vals ["12-a" "12-b" "12-c"], :range-start "/jepsen/txn/s798182699-set-12/", :range-end "/jepsen/txn/s798182699-set-12/z"}
+2	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-14", :old "old-14", :val "new-14", :stale? false}
+3	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-18/", :vals ["18-a" "18-b" "18-c"], :range-start "/jepsen/txn/s798182699-set-18/", :range-end "/jepsen/txn/s798182699-set-18/z"}
+3	:ok	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-18/", :vals ["18-a" "18-b" "18-c"], :range-start "/jepsen/txn/s798182699-set-18/", :range-end "/jepsen/txn/s798182699-set-18/z"}
+4	:invoke	:txn-cas	{:key "/jepsen/txn/s798182699-cas-21", :old "old-21", :val "new-21", :stale? true}
+4	:ok	:txn-cas	{:key "/jepsen/txn/s798182699-cas-21", :old "old-21", :val "new-21", :stale? true}
+0	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-24", :old "old-24", :val "new-24", :stale? true}
+0	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-24", :old "old-24", :val "new-24", :stale? true}
+0	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-27", :old "old-27", :val "new-27", :stale? true}
+0	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-27", :old "old-27", :val "new-27", :stale? true}
+1	:invoke	:txn-read	{:key "/jepsen/txn/s798182699-create-30"}
+1	:ok	:txn-read	nil
+2	:invoke	:read	nil
+2	:ok	:read	nil
+3	:invoke	:write	"vs798182699-33-x"
+3	:ok	:write	"vs798182699-33-x"
+4	:invoke	:delete	nil
+4	:ok	:delete	nil
+0	:invoke	:write	"vs798182699-36-x"
+0	:ok	:write	"vs798182699-36-x"
+0	:invoke	:write	"vs798182699-39-x"
+0	:ok	:write	"vs798182699-39-x"
+1	:invoke	:exists	nil
+1	:ok	:exists	nil
+2	:invoke	:delete	nil
+2	:ok	:delete	nil
+3	:invoke	:read	nil
+3	:ok	:read	nil
+4	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-42", :old "old-42", :val "new-42", :stale? true}
+0	:invoke	:read-at	{:key "/jepsen/scan/s798182699-12", :revision :last}
+0	:info	:read-at	{:key "/jepsen/scan/s798182699-12", :revision :last}	:no-value
+4	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-42", :old "old-42", :val "new-42", :stale? true}
+5	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 2}
+5	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 2}
+1	:invoke	:write	"vs798182699-47-x"
+2	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-49/", :vals ["49-a" "49-b" "49-c"], :range-start "/jepsen/txn/s798182699-set-49/", :range-end "/jepsen/txn/s798182699-set-49/z"}
+1	:ok	:write	"vs798182699-47-x"
+2	:ok	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-49/", :vals ["49-a" "49-b" "49-c"], :range-start "/jepsen/txn/s798182699-set-49/", :range-end "/jepsen/txn/s798182699-set-49/z"}
+3	:invoke	:read	nil
+3	:ok	:read	nil
+4	:invoke	:exists	nil
+4	:ok	:exists	nil
+5	:invoke	:read	nil
+5	:ok	:read	nil
+5	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :count-only true}
+5	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :count-only true}
+1	:invoke	:read	nil
+1	:ok	:read	nil
+2	:invoke	:read	nil
+2	:ok	:read	nil
+3	:invoke	:delete	nil
+3	:ok	:delete	nil
+4	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 2, :count-only true}
+4	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 2, :count-only true}
+5	:invoke	:txn-create	{:key "/jepsen/txn/s798182699-create-52", :val "52"}
+5	:ok	:txn-create	{:key "/jepsen/txn/s798182699-create-52", :val "52"}
+5	:invoke	:txn-create	{:key "/jepsen/txn/s798182699-create-55", :val "55"}
+5	:ok	:txn-create	{:key "/jepsen/txn/s798182699-create-55", :val "55"}
+1	:invoke	:read	nil
+1	:ok	:read	nil
+2	:invoke	:write	"vs798182699-58-x"
+2	:ok	:write	"vs798182699-58-x"
+3	:invoke	:write	"vs798182699-61-x"
+4	:invoke	:write	"vs798182699-63-x"
+3	:ok	:write	"vs798182699-61-x"
+4	:ok	:write	"vs798182699-63-x"
+5	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699."}
+5	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699."}
+5	:invoke	:write	"vs798182699-66-x"
+5	:ok	:write	"vs798182699-66-x"
+1	:invoke	:write	"vs798182699-69-x"
+1	:ok	:write	"vs798182699-69-x"
+2	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 100, :keys-only true}
+2	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 100, :keys-only true}
+3	:invoke	:write	"vs798182699-72-x"
+3	:ok	:write	"vs798182699-72-x"
+4	:invoke	:write	"vs798182699-75-x"
+4	:ok	:write	"vs798182699-75-x"
+5	:invoke	:write	"vs798182699-78-x"
+5	:ok	:write	"vs798182699-78-x"
+5	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-81/", :vals ["81-a" "81-b" "81-c"], :range-start "/jepsen/txn/s798182699-set-81/", :range-end "/jepsen/txn/s798182699-set-81/z"}
+5	:ok	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-81/", :vals ["81-a" "81-b" "81-c"], :range-start "/jepsen/txn/s798182699-set-81/", :range-end "/jepsen/txn/s798182699-set-81/z"}
+1	:invoke	:txn-read	{:key "/jepsen/txn/s798182699-create-84"}
+1	:ok	:txn-read	nil
+2	:invoke	:write	"vs798182699-87-x"
+3	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 5, :keys-only true}
+2	:ok	:write	"vs798182699-87-x"
+3	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 5, :keys-only true}
+4	:invoke	:delete	nil
+4	:ok	:delete	nil
+5	:invoke	:write	"vs798182699-90-x"
+5	:ok	:write	"vs798182699-90-x"
+5	:invoke	:exists	nil
+5	:ok	:exists	nil
+1	:invoke	:txn-read	{:key "/jepsen/txn/s798182699-create-93"}
+1	:ok	:txn-read	nil
+2	:invoke	:write	"vs798182699-96-x"
+2	:ok	:write	"vs798182699-96-x"
+3	:invoke	:txn-create	{:key "/jepsen/txn/s798182699-create-99", :val "99"}
+3	:ok	:txn-create	{:key "/jepsen/txn/s798182699-create-99", :val "99"}
+4	:invoke	:write	"vs798182699-102-"
+5	:invoke	:read	nil
+5	:ok	:read	nil
+4	:ok	:write	"vs798182699-102-"
+5	:invoke	:read	nil
+5	:ok	:read	nil
+1	:invoke	:write	"vs798182699-105-"
+1	:ok	:write	"vs798182699-105-"
+2	:invoke	:write	"vs798182699-108-"
+2	:ok	:write	"vs798182699-108-"
+3	:invoke	:txn-cas	{:key "/jepsen/txn/s798182699-cas-111", :old "old-111", :val "new-111", :stale? true}
+3	:ok	:txn-cas	{:key "/jepsen/txn/s798182699-cas-111", :old "old-111", :val "new-111", :stale? true}
+4	:invoke	:write	"vs798182699-114-"
+4	:ok	:write	"vs798182699-114-"
+5	:invoke	:read	nil
+5	:ok	:read	nil
+5	:invoke	:write	"vs798182699-117-"
+5	:ok	:write	"vs798182699-117-"
+1	:invoke	:exists	nil
+2	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-119", :old "old-119", :val "new-119", :stale? false}
+1	:ok	:exists	nil
+2	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-119", :old "old-119", :val "new-119", :stale? false}
+3	:invoke	:write	"vs798182699-123-"
+4	:invoke	:read	nil
+3	:ok	:write	"vs798182699-123-"
+4	:ok	:read	nil
+5	:invoke	:write	"vs798182699-127-"
+5	:ok	:write	"vs798182699-127-"
+5	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 2, :keys-only true}
+5	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 2, :keys-only true}
+1	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 5, :keys-only true, :count-only true}
+2	:invoke	:write	"vs798182699-129-"
+1	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 5, :keys-only true, :count-only true}
+2	:ok	:write	"vs798182699-129-"
+3	:invoke	:write	"vs798182699-132-"
+3	:ok	:write	"vs798182699-132-"
+4	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699."}
+4	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699."}
+5	:invoke	:txn-cas	{:key "/jepsen/txn/s798182699-cas-135", :old "old-135", :val "new-135", :stale? true}
+5	:ok	:txn-cas	{:key "/jepsen/txn/s798182699-cas-135", :old "old-135", :val "new-135", :stale? true}
+5	:invoke	:write	"vs798182699-138-"
+5	:ok	:write	"vs798182699-138-"
+1	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-141", :old "old-141", :val "new-141", :stale? true}
+2	:invoke	:txn-create	{:key "/jepsen/txn/s798182699-create-143", :val "143"}
+2	:ok	:txn-create	{:key "/jepsen/txn/s798182699-create-143", :val "143"}
+1	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-141", :old "old-141", :val "new-141", :stale? true}
+3	:invoke	:write	"vs798182699-147-"
+3	:ok	:write	"vs798182699-147-"
+4	:invoke	:read-at	{:key "/jepsen/scan/s798182699-6", :revision :last}
+4	:ok	:read-at	{:key "/jepsen/scan/s798182699-6", :revision :last}
+5	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-153", :old "old-153", :val "new-153", :stale? true}
+1	:invoke	:read	nil
+5	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-153", :old "old-153", :val "new-153", :stale? true}
+1	:ok	:read	nil
+1	:invoke	:write	"vs798182699-157-"
+1	:ok	:write	"vs798182699-157-"
+2	:invoke	:write	"vs798182699-160-"
+2	:ok	:write	"vs798182699-160-"
+3	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 2}
+3	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 2}
+4	:invoke	:txn-read	{:key "/jepsen/txn/s798182699-create-163"}
+4	:ok	:txn-read	nil
+5	:invoke	:read-at	{:key "/jepsen/scan/s798182699-6", :revision :last}
+5	:ok	:read-at	{:key "/jepsen/scan/s798182699-6", :revision :last}
+5	:invoke	:write	"vs798182699-169-"
+1	:invoke	:write	"vs798182699-171-"
+5	:ok	:write	"vs798182699-169-"
+1	:ok	:write	"vs798182699-171-"
+2	:invoke	:delete	nil
+2	:ok	:delete	nil
+3	:invoke	:write	"vs798182699-174-"
+3	:ok	:write	"vs798182699-174-"
+4	:invoke	:write	"vs798182699-177-"
+5	:invoke	:write	"vs798182699-179-"
+4	:ok	:write	"vs798182699-177-"
+5	:ok	:write	"vs798182699-179-"
+5	:invoke	:write	"vs798182699-183-"
+5	:ok	:write	"vs798182699-183-"
+1	:invoke	:delete	nil
+1	:ok	:delete	nil
+2	:invoke	:read	nil
+3	:invoke	:txn-read	{:key "/jepsen/txn/s798182699-create-185"}
+2	:ok	:read	nil
+3	:ok	:txn-read	nil
+4	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :count-only true}
+4	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :count-only true}
+5	:invoke	:exists	nil
+5	:ok	:exists	nil
+5	:invoke	:read-at	{:key "/jepsen/scan/s798182699-12", :revision :last}
+5	:info	:read-at	{:key "/jepsen/scan/s798182699-12", :revision :last}	:no-value
+1	:invoke	:write	"vs798182699-191-"
+1	:ok	:write	"vs798182699-191-"
+2	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 100}
+2	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 100}
+3	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-194", :old "old-194", :val "new-194", :stale? false}
+3	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-194", :old "old-194", :val "new-194", :stale? false}
+4	:invoke	:read-at	{:key "/jepsen/scan/s798182699-5", :revision :last}
+4	:info	:read-at	{:key "/jepsen/scan/s798182699-5", :revision :last}	:no-value
+10	:invoke	:write	"vs798182699-200-"
+10	:ok	:write	"vs798182699-200-"
+10	:invoke	:write	"vs798182699-203-"
+10	:ok	:write	"vs798182699-203-"
+1	:invoke	:exists	nil
+1	:ok	:exists	nil
+2	:invoke	:write	"vs798182699-206-"
+2	:ok	:write	"vs798182699-206-"
+3	:invoke	:write	"vs798182699-209-"
+3	:ok	:write	"vs798182699-209-"
+9	:invoke	:write	"vs798182699-212-"
+9	:ok	:write	"vs798182699-212-"
+10	:invoke	:read	nil
+10	:ok	:read	nil
+10	:invoke	:read-at	{:key "/jepsen/scan/s798182699-7", :revision :last}
+10	:ok	:read-at	{:key "/jepsen/scan/s798182699-7", :revision :last}
+1	:invoke	:write	"vs798182699-218-"
+1	:ok	:write	"vs798182699-218-"
+2	:invoke	:write	"vs798182699-221-"
+2	:ok	:write	"vs798182699-221-"
+3	:invoke	:txn-cas	{:key "/jepsen/txn/s798182699-cas-224", :old "old-224", :val "new-224", :stale? false}
+3	:ok	:txn-cas	{:key "/jepsen/txn/s798182699-cas-224", :old "old-224", :val "new-224", :stale? false}
+9	:invoke	:read-at	{:key "/jepsen/scan/s798182699-3", :revision :last}
+9	:ok	:read-at	{:key "/jepsen/scan/s798182699-3", :revision :last}
+10	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 5}
+10	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 5}
+10	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-230/", :vals ["230-a" "230-b" "230-c"], :range-start "/jepsen/txn/s798182699-set-230/", :range-end "/jepsen/txn/s798182699-set-230/z"}
+10	:ok	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-230/", :vals ["230-a" "230-b" "230-c"], :range-start "/jepsen/txn/s798182699-set-230/", :range-end "/jepsen/txn/s798182699-set-230/z"}
+1	:invoke	:read	nil
+1	:ok	:read	nil
+2	:invoke	:read	nil
+2	:ok	:read	nil
+3	:invoke	:read-at	{:key "/jepsen/scan/s798182699-9", :revision :last}
+3	:ok	:read-at	{:key "/jepsen/scan/s798182699-9", :revision :last}
+9	:invoke	:delete	nil
+9	:ok	:delete	nil
+10	:invoke	:read	nil
+10	:ok	:read	nil
+10	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 100, :keys-only true}
+10	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 100, :keys-only true}
+1	:invoke	:write	"vs798182699-236-"
+1	:ok	:write	"vs798182699-236-"
+2	:invoke	:read	nil
+2	:ok	:read	nil
+3	:invoke	:txn-read	{:key "/jepsen/txn/s798182699-create-239"}
+9	:invoke	:write	"vs798182699-241-"
+3	:ok	:txn-read	nil
+9	:ok	:write	"vs798182699-241-"
+10	:invoke	:read	nil
+10	:ok	:read	nil
+10	:invoke	:read	nil
+10	:ok	:read	nil
+1	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-244", :old "old-244", :val "new-244", :stale? false}
+1	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-244", :old "old-244", :val "new-244", :stale? false}
+2	:invoke	:read-at	{:key "/jepsen/scan/s798182699-7", :revision :last}
+2	:ok	:read-at	{:key "/jepsen/scan/s798182699-7", :revision :last}
+3	:invoke	:read	nil
+3	:ok	:read	nil
+9	:invoke	:write	"vs798182699-250-"
+10	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-252", :old "old-252", :val "new-252", :stale? true}
+9	:ok	:write	"vs798182699-250-"
+10	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-252", :old "old-252", :val "new-252", :stale? true}
+10	:invoke	:write	"vs798182699-256-"
+10	:ok	:write	"vs798182699-256-"
+1	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-259/", :vals ["259-a" "259-b" "259-c"], :range-start "/jepsen/txn/s798182699-set-259/", :range-end "/jepsen/txn/s798182699-set-259/z"}
+1	:ok	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-259/", :vals ["259-a" "259-b" "259-c"], :range-start "/jepsen/txn/s798182699-set-259/", :range-end "/jepsen/txn/s798182699-set-259/z"}
+2	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 100}
+2	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 100}
+3	:invoke	:txn-read	{:key "/jepsen/txn/s798182699-create-262"}
+3	:ok	:txn-read	nil
+9	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 2}
+9	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 2}
+10	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699."}
+10	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699."}
+10	:invoke	:txn-create	{:key "/jepsen/txn/s798182699-create-265", :val "265"}
+10	:ok	:txn-create	{:key "/jepsen/txn/s798182699-create-265", :val "265"}
+1	:invoke	:write	"vs798182699-268-"
+1	:ok	:write	"vs798182699-268-"
+2	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-271", :old "old-271", :val "new-271", :stale? false}
+2	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-271", :old "old-271", :val "new-271", :stale? false}
+3	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-274", :old "old-274", :val "new-274", :stale? false}
+3	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-274", :old "old-274", :val "new-274", :stale? false}
+9	:invoke	:write	"vs798182699-277-"
+9	:ok	:write	"vs798182699-277-"
+10	:invoke	:txn-create	{:key "/jepsen/txn/s798182699-create-280", :val "280"}
+10	:ok	:txn-create	{:key "/jepsen/txn/s798182699-create-280", :val "280"}
+10	:invoke	:read	nil
+10	:ok	:read	nil
+1	:invoke	:read	nil
+1	:ok	:read	nil
+2	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-283", :old "old-283", :val "new-283", :stale? false}
+2	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-283", :old "old-283", :val "new-283", :stale? false}
+3	:invoke	:write	"vs798182699-286-"
+3	:ok	:write	"vs798182699-286-"
+9	:invoke	:read	nil
+9	:ok	:read	nil
+10	:invoke	:exists	nil
+10	:ok	:exists	nil
+10	:invoke	:txn-cas	{:key "/jepsen/txn/s798182699-cas-289", :old "old-289", :val "new-289", :stale? false}
+10	:ok	:txn-cas	{:key "/jepsen/txn/s798182699-cas-289", :old "old-289", :val "new-289", :stale? false}
+1	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 100}
+1	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 100}
+2	:invoke	:exists	nil
+3	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-291", :old "old-291", :val "new-291", :stale? true}
+9	:invoke	:txn-cas	{:key "/jepsen/txn/s798182699-cas-293", :old "old-293", :val "new-293", :stale? false}
+2	:ok	:exists	nil
+9	:ok	:txn-cas	{:key "/jepsen/txn/s798182699-cas-293", :old "old-293", :val "new-293", :stale? false}
+3	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-291", :old "old-291", :val "new-291", :stale? true}
+10	:invoke	:write	"vs798182699-297-"
+10	:ok	:write	"vs798182699-297-"
+10	:invoke	:write	"vs798182699-300-"
+10	:ok	:write	"vs798182699-300-"
+1	:invoke	:read	nil
+1	:ok	:read	nil
+2	:invoke	:write	"vs798182699-303-"
+2	:ok	:write	"vs798182699-303-"
+3	:invoke	:read	nil
+3	:ok	:read	nil
+9	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-306", :old "old-306", :val "new-306", :stale? true}
+9	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-306", :old "old-306", :val "new-306", :stale? true}
+10	:invoke	:read	nil
+10	:ok	:read	nil
+10	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-309/", :vals ["309-a" "309-b" "309-c"], :range-start "/jepsen/txn/s798182699-set-309/", :range-end "/jepsen/txn/s798182699-set-309/z"}
+10	:ok	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-309/", :vals ["309-a" "309-b" "309-c"], :range-start "/jepsen/txn/s798182699-set-309/", :range-end "/jepsen/txn/s798182699-set-309/z"}
+1	:invoke	:write	"vs798182699-312-"
+1	:ok	:write	"vs798182699-312-"
+2	:invoke	:txn-create	{:key "/jepsen/txn/s798182699-create-315", :val "315"}
+3	:invoke	:read	nil
+3	:ok	:read	nil
+2	:ok	:txn-create	{:key "/jepsen/txn/s798182699-create-315", :val "315"}
+9	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-319", :old "old-319", :val "new-319", :stale? false}
+9	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-319", :old "old-319", :val "new-319", :stale? false}
+10	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :count-only true}
+10	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :count-only true}
+10	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-322", :old "old-322", :val "new-322", :stale? false}
+10	:ok	:txn-cas-delete	{:key "/jepsen/txn/s798182699-casd-322", :old "old-322", :val "new-322", :stale? false}
+1	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-325/", :vals ["325-a" "325-b" "325-c"], :range-start "/jepsen/txn/s798182699-set-325/", :range-end "/jepsen/txn/s798182699-set-325/z"}
+1	:ok	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-325/", :vals ["325-a" "325-b" "325-c"], :range-start "/jepsen/txn/s798182699-set-325/", :range-end "/jepsen/txn/s798182699-set-325/z"}
+2	:invoke	:write	"vs798182699-328-"
+2	:ok	:write	"vs798182699-328-"
+3	:invoke	:write	"vs798182699-331-"
+3	:ok	:write	"vs798182699-331-"
+9	:invoke	:write	"vs798182699-334-"
+10	:invoke	:write	"vs798182699-336-"
+1	:invoke	:txn-create	{:key "/jepsen/txn/s798182699-create-338", :val "338"}
+9	:ok	:write	"vs798182699-334-"
+10	:ok	:write	"vs798182699-336-"
+1	:ok	:txn-create	{:key "/jepsen/txn/s798182699-create-338", :val "338"}
+1	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-343/", :vals ["343-a" "343-b" "343-c"], :range-start "/jepsen/txn/s798182699-set-343/", :range-end "/jepsen/txn/s798182699-set-343/z"}
+1	:ok	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-343/", :vals ["343-a" "343-b" "343-c"], :range-start "/jepsen/txn/s798182699-set-343/", :range-end "/jepsen/txn/s798182699-set-343/z"}
+2	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 5, :keys-only true}
+2	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 5, :keys-only true}
+3	:invoke	:write	"vs798182699-346-"
+3	:ok	:write	"vs798182699-346-"
+9	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 100, :count-only true}
+9	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 100, :count-only true}
+10	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-349/", :vals ["349-a" "349-b" "349-c"], :range-start "/jepsen/txn/s798182699-set-349/", :range-end "/jepsen/txn/s798182699-set-349/z"}
+10	:ok	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-349/", :vals ["349-a" "349-b" "349-c"], :range-start "/jepsen/txn/s798182699-set-349/", :range-end "/jepsen/txn/s798182699-set-349/z"}
+10	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-352/", :vals ["352-a" "352-b" "352-c"], :range-start "/jepsen/txn/s798182699-set-352/", :range-end "/jepsen/txn/s798182699-set-352/z"}
+10	:ok	:txn-write-set	{:prefix "/jepsen/txn/s798182699-set-352/", :vals ["352-a" "352-b" "352-c"], :range-start "/jepsen/txn/s798182699-set-352/", :range-end "/jepsen/txn/s798182699-set-352/z"}
+1	:invoke	:write	"vs798182699-355-"
+1	:ok	:write	"vs798182699-355-"
+2	:invoke	:read	nil
+2	:ok	:read	nil
+3	:invoke	:write	"vs798182699-358-"
+9	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 100, :count-only true}
+9	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 100, :count-only true}
+3	:ok	:write	"vs798182699-358-"
+10	:invoke	:exists	nil
+10	:ok	:exists	nil
+10	:invoke	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 5}
+10	:ok	:scan	{:key "/jepsen/scan/s798182699-", :range-end "/jepsen/scan/s798182699.", :limit 5}
+1	:invoke	:exists	nil
+1	:ok	:exists	nil
+2	:invoke	:write	"vs798182699-361-"
+2	:ok	:write	"vs798182699-361-"
+3	:invoke	:write	"vs798182699-364-"
+3	:ok	:write	"vs798182699-364-"
+9	:invoke	:read-at	{:key "/jepsen/scan/s798182699-15", :revision :last}
+9	:ok	:read-at	{:key "/jepsen/scan/s798182699-15", :revision :last}

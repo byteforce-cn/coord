@@ -1,0 +1,20 @@
+results-file: /data/jepsen/coord/jepsen/store/coord/2026-09-17T11:29:46.926064013Z/results.edn
+overall-valid: true
+linear-valid: true
+gates-valid: true
+gates-failures: -
+rto-budget-seconds: 120
+rto-p95-seconds: 1.0868881832
+rto-max-seconds: 1.12234692
+rto-samples: [0.179739869 0.375082478 0.489069328 1.12234692 0.083010389 1.033700078 0.10302282 0.954059302 0.070511594]
+rto-unrecovered: 0
+rto-not-measured: 1
+quiet-windows: 10
+quiet-judged: 0
+quiet-skipped-small-sample: 10
+quiet-worst-ratio: -
+quiet-violations: 0
+premise-valid: true
+premise-duplicate-values: 0
+soak-converged: -
+soak-regions: -

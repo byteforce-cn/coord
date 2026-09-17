@@ -1,0 +1,446 @@
+1	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2	:invoke	:write	"vs42-2-xxxxxxxxx"
+3	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+4	:invoke	:write	"vs42-4-xxxxxxxxx"
+1	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+5	:invoke	:write	"vs42-7-xxxxxxxxx"
+2	:ok	:write	"vs42-2-xxxxxxxxx"
+3	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+4	:ok	:write	"vs42-4-xxxxxxxxx"
+5	:ok	:write	"vs42-7-xxxxxxxxx"
+6	:invoke	:write	"vs42-13-xxxxxxxx"
+7	:invoke	:read-at	{:key "/jepsen/scan/s42-15", :revision :last}
+6	:ok	:write	"vs42-13-xxxxxxxx"
+7	:info	:read-at	{:key "/jepsen/scan/s42-15", :revision :last}	:no-value
+8	:invoke	:read-at	{:key "/jepsen/scan/s42-3", :revision :last}
+9	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+8	:info	:read-at	{:key "/jepsen/scan/s42-3", :revision :last}	:no-value
+0	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+9	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+0	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+0	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+0	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+1	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+1	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+3	:invoke	:read-at	{:key "/jepsen/scan/s42-6", :revision :last}
+3	:info	:read-at	{:key "/jepsen/scan/s42-6", :revision :last}	:no-value
+4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+5	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+5	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+6	:invoke	:write	"vs42-25-xxxxxxxx"
+6	:ok	:write	"vs42-25-xxxxxxxx"
+17	:invoke	:write	"vs42-28-xxxxxxxx"
+18	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+17	:ok	:write	"vs42-28-xxxxxxxx"
+18	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+9	:invoke	:write	"vs42-32-xxxxxxxx"
+0	:invoke	:read-at	{:key "/jepsen/scan/s42-2", :revision :last}
+1	:invoke	:write	"vs42-36-xxxxxxxx"
+9	:ok	:write	"vs42-32-xxxxxxxx"
+0	:ok	:read-at	{:key "/jepsen/scan/s42-2", :revision :last}
+1	:ok	:write	"vs42-36-xxxxxxxx"
+1	:invoke	:read-at	{:key "/jepsen/scan/s42-8", :revision :last}
+1	:info	:read-at	{:key "/jepsen/scan/s42-8", :revision :last}	:no-value
+2	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :count-only true}
+2	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :count-only true}
+13	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+13	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+5	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+5	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+6	:invoke	:write	"vs42-43-xxxxxxxx"
+6	:ok	:write	"vs42-43-xxxxxxxx"
+17	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+17	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+18	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :count-only true}
+18	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :count-only true}
+9	:invoke	:write	"vs42-46-xxxxxxxx"
+9	:ok	:write	"vs42-46-xxxxxxxx"
+0	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+0	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+0	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+0	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2	:invoke	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}
+2	:info	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}	:no-value
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n1" [:killed "n1"]}
+5	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true, :count-only true}
+5	:info	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true, :count-only true}	:unavailable-maybe-applied
+6	:invoke	:write	"vs42-52-xxxxxxxx"
+6	:info	:write	"vs42-52-xxxxxxxx"	:unavailable-maybe-applied
+17	:invoke	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+18	:invoke	:write	"vs42-57-xxxxxxxx"
+17	:ok	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+18	:ok	:write	"vs42-57-xxxxxxxx"
+9	:invoke	:write	"vs42-61-xxxxxxxx"
+9	:ok	:write	"vs42-61-xxxxxxxx"
+0	:invoke	:read-at	{:key "/jepsen/scan/s42-0", :revision :last}
+0	:ok	:read-at	{:key "/jepsen/scan/s42-0", :revision :last}
+0	:invoke	:read-at	{:key "/jepsen/scan/s42-3", :revision :last}
+0	:info	:read-at	{:key "/jepsen/scan/s42-3", :revision :last}	:no-value
+11	:invoke	:write	"vs42-70-xxxxxxxx"
+11	:ok	:write	"vs42-70-xxxxxxxx"
+12	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+12	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+13	:invoke	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+13	:ok	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+15	:invoke	:write	"vs42-76-xxxxxxxx"
+15	:ok	:write	"vs42-76-xxxxxxxx"
+16	:invoke	:read-at	{:key "/jepsen/scan/s42-15", :revision :last}
+17	:invoke	:write	"vs42-81-xxxxxxxx"
+17	:ok	:write	"vs42-81-xxxxxxxx"
+16	:info	:read-at	{:key "/jepsen/scan/s42-15", :revision :last}	:no-value
+18	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+18	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+9	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+9	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+10	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+11	:invoke	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+12	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+12	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+11	:ok	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+10	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+13	:invoke	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+13	:ok	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+4	:invoke	:write	"vs42-92-xxxxxxxx"
+4	:ok	:write	"vs42-92-xxxxxxxx"
+15	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+15	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+:nemesis	:info	:stop	nil
+17	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+17	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+18	:invoke	:write	"vs42-95-xxxxxxxx"
+18	:ok	:write	"vs42-95-xxxxxxxx"
+9	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+9	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+:nemesis	:info	:stop	{"n1" [:restarted "n1"]}
+10	:invoke	:write	"vs42-100-xxxxxxx"
+10	:ok	:write	"vs42-100-xxxxxxx"
+11	:invoke	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+11	:ok	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+12	:invoke	:write	"vs42-106-xxxxxxx"
+13	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+13	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+12	:ok	:write	"vs42-106-xxxxxxx"
+4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :count-only true}
+4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :count-only true}
+15	:invoke	:read-at	{:key "/jepsen/scan/s42-13", :revision :last}
+15	:ok	:read-at	{:key "/jepsen/scan/s42-13", :revision :last}
+26	:invoke	:read-at	{:key "/jepsen/scan/s42-0", :revision :last}
+17	:invoke	:write	"vs42-114-xxxxxxx"
+17	:ok	:write	"vs42-114-xxxxxxx"
+18	:invoke	:read-at	{:key "/jepsen/scan/s42-5", :revision :last}
+18	:info	:read-at	{:key "/jepsen/scan/s42-5", :revision :last}	:no-value
+26	:ok	:read-at	{:key "/jepsen/scan/s42-0", :revision :last}
+9	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+9	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+10	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+10	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+10	:invoke	:write	"vs42-120-xxxxxxx"
+10	:ok	:write	"vs42-120-xxxxxxx"
+11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+12	:invoke	:read-at	{:key "/jepsen/scan/s42-11", :revision :last}
+12	:ok	:read-at	{:key "/jepsen/scan/s42-11", :revision :last}
+13	:invoke	:read-at	{:key "/jepsen/scan/s42-14", :revision :last}
+13	:ok	:read-at	{:key "/jepsen/scan/s42-14", :revision :last}
+4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+15	:invoke	:write	"vs42-129-xxxxxxx"
+15	:ok	:write	"vs42-129-xxxxxxx"
+26	:invoke	:write	"vs42-132-xxxxxxx"
+26	:ok	:write	"vs42-132-xxxxxxx"
+17	:invoke	:write	"vs42-135-xxxxxxx"
+17	:ok	:write	"vs42-135-xxxxxxx"
+28	:invoke	:read-at	{:key "/jepsen/scan/s42-10", :revision :last}
+28	:ok	:read-at	{:key "/jepsen/scan/s42-10", :revision :last}
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+10	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+10	:info	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}	:unavailable-maybe-applied
+11	:invoke	:read-at	{:key "/jepsen/scan/s42-13", :revision :last}
+11	:ok	:read-at	{:key "/jepsen/scan/s42-13", :revision :last}
+12	:invoke	:write	"vs42-144-xxxxxxx"
+13	:invoke	:write	"vs42-146-xxxxxxx"
+12	:ok	:write	"vs42-144-xxxxxxx"
+13	:ok	:write	"vs42-146-xxxxxxx"
+4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+15	:invoke	:read-at	{:key "/jepsen/scan/s42-5", :revision :last}
+15	:info	:read-at	{:key "/jepsen/scan/s42-5", :revision :last}	:no-value
+26	:invoke	:write	"vs42-152-xxxxxxx"
+26	:ok	:write	"vs42-152-xxxxxxx"
+17	:invoke	:write	"vs42-155-xxxxxxx"
+17	:ok	:write	"vs42-155-xxxxxxx"
+28	:invoke	:write	"vs42-158-xxxxxxx"
+28	:ok	:write	"vs42-158-xxxxxxx"
+9	:invoke	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}
+9	:ok	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}
+20	:invoke	:write	"vs42-164-xxxxxxx"
+11	:invoke	:read-at	{:key "/jepsen/scan/s42-6", :revision :last}
+11	:ok	:read-at	{:key "/jepsen/scan/s42-6", :revision :last}
+11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+20	:ok	:write	"vs42-164-xxxxxxx"
+:nemesis	:info	:stop	nil
+13	:invoke	:read-at	{:key "/jepsen/scan/s42-12", :revision :last}
+13	:ok	:read-at	{:key "/jepsen/scan/s42-12", :revision :last}
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+25	:invoke	:write	"vs42-177-xxxxxxx"
+25	:ok	:write	"vs42-177-xxxxxxx"
+26	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :count-only true}
+26	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :count-only true}
+17	:invoke	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+17	:ok	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+28	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+28	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+9	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+9	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+20	:invoke	:write	"vs42-183-xxxxxxx"
+20	:ok	:write	"vs42-183-xxxxxxx"
+20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+11	:invoke	:write	"vs42-186-xxxxxxx"
+11	:ok	:write	"vs42-186-xxxxxxx"
+12	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+12	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+13	:invoke	:write	"vs42-189-xxxxxxx"
+13	:ok	:write	"vs42-189-xxxxxxx"
+4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+25	:invoke	:read-at	{:key "/jepsen/scan/s42-0", :revision :last}
+25	:ok	:read-at	{:key "/jepsen/scan/s42-0", :revision :last}
+26	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+26	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+17	:invoke	:write	"vs42-195-xxxxxxx"
+17	:ok	:write	"vs42-195-xxxxxxx"
+28	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+28	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+9	:invoke	:read-at	{:key "/jepsen/scan/s42-6", :revision :last}
+9	:ok	:read-at	{:key "/jepsen/scan/s42-6", :revision :last}
+20	:invoke	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+20	:ok	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+20	:invoke	:read-at	{:key "/jepsen/scan/s42-12", :revision :last}
+20	:ok	:read-at	{:key "/jepsen/scan/s42-12", :revision :last}
+11	:invoke	:write	"vs42-207-xxxxxxx"
+12	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+12	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+11	:ok	:write	"vs42-207-xxxxxxx"
+:nemesis	:info	:start	nil
+4	:invoke	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+4	:ok	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+26	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+26	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+17	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+17	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+28	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+28	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+9	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+9	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+20	:invoke	:write	"vs42-215-xxxxxxx"
+20	:ok	:write	"vs42-215-xxxxxxx"
+20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+12	:invoke	:write	"vs42-218-xxxxxxx"
+12	:ok	:write	"vs42-218-xxxxxxx"
+13	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+13	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+25	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+25	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+26	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+26	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+17	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+17	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+28	:invoke	:read-at	{:key "/jepsen/scan/s42-13", :revision :last}
+28	:ok	:read-at	{:key "/jepsen/scan/s42-13", :revision :last}
+9	:invoke	:write	"vs42-224-xxxxxxx"
+9	:ok	:write	"vs42-224-xxxxxxx"
+20	:invoke	:write	"vs42-227-xxxxxxx"
+20	:ok	:write	"vs42-227-xxxxxxx"
+20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+:nemesis	:info	:stop	nil
+12	:invoke	:write	"vs42-232-xxxxxxx"
+12	:ok	:write	"vs42-232-xxxxxxx"
+13	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+13	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+4	:invoke	:write	"vs42-235-xxxxxxx"
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+4	:ok	:write	"vs42-235-xxxxxxx"
+26	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+26	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+17	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+17	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+28	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+28	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+9	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true, :count-only true}
+9	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true, :count-only true}
+20	:invoke	:write	"vs42-238-xxxxxxx"
+20	:ok	:write	"vs42-238-xxxxxxx"
+20	:invoke	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}
+20	:ok	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}
+11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+12	:invoke	:write	"vs42-244-xxxxxxx"
+12	:ok	:write	"vs42-244-xxxxxxx"
+13	:invoke	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+13	:ok	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+4	:invoke	:write	"vs42-250-xxxxxxx"
+4	:ok	:write	"vs42-250-xxxxxxx"
+25	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+25	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+26	:invoke	:write	"vs42-253-xxxxxxx"
+26	:ok	:write	"vs42-253-xxxxxxx"
+17	:invoke	:write	"vs42-256-xxxxxxx"
+17	:ok	:write	"vs42-256-xxxxxxx"
+28	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+28	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+20	:invoke	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+20	:ok	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+12	:invoke	:write	"vs42-266-xxxxxxx"
+12	:ok	:write	"vs42-266-xxxxxxx"
+13	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+13	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+25	:invoke	:write	"vs42-269-xxxxxxx"
+25	:ok	:write	"vs42-269-xxxxxxx"
+26	:invoke	:write	"vs42-272-xxxxxxx"
+26	:ok	:write	"vs42-272-xxxxxxx"
+17	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+17	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+28	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+28	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+9	:invoke	:write	"vs42-275-xxxxxxx"
+9	:ok	:write	"vs42-275-xxxxxxx"
+20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+11	:invoke	:write	"vs42-278-xxxxxxx"
+11	:ok	:write	"vs42-278-xxxxxxx"
+12	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+12	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+13	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+13	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+4	:invoke	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+4	:ok	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+25	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+25	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+26	:invoke	:write	"vs42-284-xxxxxxx"
+26	:ok	:write	"vs42-284-xxxxxxx"
+17	:invoke	:write	"vs42-287-xxxxxxx"
+17	:ok	:write	"vs42-287-xxxxxxx"
+28	:invoke	:write	"vs42-290-xxxxxxx"
+:nemesis	:info	:stop	nil
+28	:ok	:write	"vs42-290-xxxxxxx"
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+11	:invoke	:write	"vs42-293-xxxxxxx"
+11	:ok	:write	"vs42-293-xxxxxxx"
+12	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+12	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+13	:invoke	:write	"vs42-296-xxxxxxx"
+13	:ok	:write	"vs42-296-xxxxxxx"
+4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+25	:invoke	:read-at	{:key "/jepsen/scan/s42-11", :revision :last}
+25	:ok	:read-at	{:key "/jepsen/scan/s42-11", :revision :last}
+26	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+26	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+17	:invoke	:write	"vs42-302-xxxxxxx"
+17	:ok	:write	"vs42-302-xxxxxxx"
+28	:invoke	:write	"vs42-305-xxxxxxx"
+28	:ok	:write	"vs42-305-xxxxxxx"
+9	:invoke	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+9	:ok	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+20	:invoke	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+20	:ok	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+11	:invoke	:write	"vs42-314-xxxxxxx"
+11	:ok	:write	"vs42-314-xxxxxxx"
+12	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+12	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+13	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+13	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+25	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+25	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+26	:invoke	:write	"vs42-317-xxxxxxx"
+26	:ok	:write	"vs42-317-xxxxxxx"
+17	:invoke	:write	"vs42-320-xxxxxxx"
+17	:ok	:write	"vs42-320-xxxxxxx"
+28	:invoke	:write	"vs42-323-xxxxxxx"
+28	:ok	:write	"vs42-323-xxxxxxx"
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+12	:invoke	:write	"vs42-326-xxxxxxx"
+12	:ok	:write	"vs42-326-xxxxxxx"
+13	:invoke	:write	"vs42-329-xxxxxxx"
+13	:ok	:write	"vs42-329-xxxxxxx"
+4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+25	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+25	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+26	:invoke	:write	"vs42-332-xxxxxxx"
+26	:ok	:write	"vs42-332-xxxxxxx"
+17	:invoke	:read-at	{:key "/jepsen/scan/s42-15", :revision :last}
+17	:ok	:read-at	{:key "/jepsen/scan/s42-15", :revision :last}
+28	:invoke	:write	"vs42-338-xxxxxxx"
+9	:invoke	:write	"vs42-340-xxxxxxx"
+28	:ok	:write	"vs42-338-xxxxxxx"
+9	:ok	:write	"vs42-340-xxxxxxx"
+20	:invoke	:read-at	{:key "/jepsen/scan/s42-8", :revision :last}
+20	:ok	:read-at	{:key "/jepsen/scan/s42-8", :revision :last}
+20	:invoke	:write	"vs42-347-xxxxxxx"
+20	:ok	:write	"vs42-347-xxxxxxx"
+11	:invoke	:read-at	{:key "/jepsen/scan/s42-14", :revision :last}
+11	:ok	:read-at	{:key "/jepsen/scan/s42-14", :revision :last}
+12	:invoke	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}
+12	:ok	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}
+13	:invoke	:write	"vs42-356-xxxxxxx"
+4	:invoke	:write	"vs42-358-xxxxxxx"
+13	:ok	:write	"vs42-356-xxxxxxx"
+4	:ok	:write	"vs42-358-xxxxxxx"
+25	:invoke	:read-at	{:key "/jepsen/scan/s42-10", :revision :last}
+25	:ok	:read-at	{:key "/jepsen/scan/s42-10", :revision :last}
+26	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+26	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+17	:invoke	:write	"vs42-365-xxxxxxx"
+17	:ok	:write	"vs42-365-xxxxxxx"
+28	:invoke	:write	"vs42-368-xxxxxxx"
+28	:ok	:write	"vs42-368-xxxxxxx"
+9	:invoke	:write	"vs42-371-xxxxxxx"
+9	:ok	:write	"vs42-371-xxxxxxx"
+20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :count-only true}
+20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :count-only true}
+20	:invoke	:write	"vs42-374-xxxxxxx"
+20	:ok	:write	"vs42-374-xxxxxxx"
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}

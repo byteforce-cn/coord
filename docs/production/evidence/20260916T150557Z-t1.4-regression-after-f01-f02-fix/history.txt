@@ -1,0 +1,308 @@
+0	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-1", :range-start "/jepsen/idem/rd/s42/1/a", :range-end "/jepsen/idem/rd/s42/1/z", :post-write-key "/jepsen/idem/rd/s42/1/m", :post-write-val 1}
+1	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-3", :range-start "/jepsen/idem/rd/s42/3/a", :range-end "/jepsen/idem/rd/s42/3/z", :post-write-key "/jepsen/idem/rd/s42/3/m", :post-write-val 3}
+2	:invoke	:idem-put	{:rid "idem-put-s42-5", :key "/jepsen/idem/put/s42/5", :val "5", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+3	:invoke	:idem-put	{:rid "idem-put-s42-7", :key "/jepsen/idem/put/s42/7", :val "7", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-range-delete	{:rid "idem-rdel-s42-1", :range-start "/jepsen/idem/rd/s42/1/a", :range-end "/jepsen/idem/rd/s42/1/z", :post-write-key "/jepsen/idem/rd/s42/1/m", :post-write-val 1}
+4	:invoke	:idem-delete	{:rid "idem-del-s42-10", :key "/jepsen/idem/del/s42/10", :val "10", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+1	:ok	:idem-range-delete	{:rid "idem-rdel-s42-3", :range-start "/jepsen/idem/rd/s42/3/a", :range-end "/jepsen/idem/rd/s42/3/z", :post-write-key "/jepsen/idem/rd/s42/3/m", :post-write-val 3}
+3	:ok	:idem-put	{:key "/jepsen/idem/put/s42/7", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "7", :setup nil, :rid "idem-put-s42-7"}
+2	:ok	:idem-put	{:key "/jepsen/idem/put/s42/5", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "5", :setup nil, :rid "idem-put-s42-5"}
+4	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/10", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "10", :setup {:revision 31, :ok? true, :node "n1"}, :rid "idem-del-s42-10"}
+0	:invoke	:idem-put	{:rid "idem-put-s42-15", :key "/jepsen/idem/put/s42/15", :val "15", :replays 2, :setup-val "OLD-15", :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-put	{:key "/jepsen/idem/put/s42/15", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-15", :replay-node-offset 0, :val "15", :setup {:revision 33, :ok? true, :node "n1"}, :rid "idem-put-s42-15"}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-18", :key "/jepsen/idem/del/s42/18", :val "18", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+1	:invoke	:idem-delete	{:rid "idem-del-s42-20", :key "/jepsen/idem/del/s42/20", :val "20", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/18", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "18", :setup {:revision 35, :ok? true, :node "n1"}, :rid "idem-del-s42-18"}
+2	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-23", :range-start "/jepsen/idem/rd/s42/23/a", :range-end "/jepsen/idem/rd/s42/23/z", :post-write-key "/jepsen/idem/rd/s42/23/m", :post-write-val 23}
+1	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/20", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "20", :setup {:revision 36, :ok? true, :node "n1"}, :rid "idem-del-s42-20"}
+2	:ok	:idem-range-delete	{:rid "idem-rdel-s42-23", :range-start "/jepsen/idem/rd/s42/23/a", :range-end "/jepsen/idem/rd/s42/23/z", :post-write-key "/jepsen/idem/rd/s42/23/m", :post-write-val 23}
+3	:invoke	:idem-put	{:rid "idem-put-s42-27", :key "/jepsen/idem/put/s42/27", :val "27", :replays 2, :setup-val "OLD-27", :replay-delay-ms 0, :replay-node-offset 0}
+3	:ok	:idem-put	{:key "/jepsen/idem/put/s42/27", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-27", :replay-node-offset 0, :val "27", :setup {:revision 44, :ok? true, :node "n1"}, :rid "idem-put-s42-27"}
+4	:invoke	:idem-put	{:rid "idem-put-s42-30", :key "/jepsen/idem/put/s42/30", :val "30", :replays 3, :setup-val "OLD-30", :replay-delay-ms 0, :replay-node-offset 0}
+4	:ok	:idem-put	{:key "/jepsen/idem/put/s42/30", :expected-version 2, :replays 3, :replay-delay-ms 0, :setup-val "OLD-30", :replay-node-offset 0, :val "30", :setup {:revision 46, :ok? true, :node "n1"}, :rid "idem-put-s42-30"}
+0	:invoke	:idem-put	{:rid "idem-put-s42-33", :key "/jepsen/idem/put/s42/33", :val "33", :replays 2, :setup-val "OLD-33", :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-put	{:key "/jepsen/idem/put/s42/33", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-33", :replay-node-offset 0, :val "33", :setup {:revision 48, :ok? true, :node "n1"}, :rid "idem-put-s42-33"}
+0	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-36", :range-start "/jepsen/idem/rd/s42/36/a", :range-end "/jepsen/idem/rd/s42/36/z", :post-write-key "/jepsen/idem/rd/s42/36/m", :post-write-val 36}
+1	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-38", :range-start "/jepsen/idem/rd/s42/38/a", :range-end "/jepsen/idem/rd/s42/38/z", :post-write-key "/jepsen/idem/rd/s42/38/m", :post-write-val 38}
+0	:ok	:idem-range-delete	{:rid "idem-rdel-s42-36", :range-start "/jepsen/idem/rd/s42/36/a", :range-end "/jepsen/idem/rd/s42/36/z", :post-write-key "/jepsen/idem/rd/s42/36/m", :post-write-val 36}
+2	:invoke	:idem-put	{:rid "idem-put-s42-41", :key "/jepsen/idem/put/s42/41", :val "41", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+1	:ok	:idem-range-delete	{:rid "idem-rdel-s42-38", :range-start "/jepsen/idem/rd/s42/38/a", :range-end "/jepsen/idem/rd/s42/38/z", :post-write-key "/jepsen/idem/rd/s42/38/m", :post-write-val 38}
+2	:ok	:idem-put	{:key "/jepsen/idem/put/s42/41", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "41", :setup nil, :rid "idem-put-s42-41"}
+3	:invoke	:idem-delete	{:rid "idem-del-s42-45", :key "/jepsen/idem/del/s42/45", :val "45", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+3	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/45", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "45", :setup {:revision 61, :ok? true, :node "n1"}, :rid "idem-del-s42-45"}
+4	:invoke	:idem-put	{:rid "idem-put-s42-48", :key "/jepsen/idem/put/s42/48", :val "48", :replays 3, :setup-val "OLD-48", :replay-delay-ms 0, :replay-node-offset 0}
+0	:invoke	:idem-put	{:rid "idem-put-s42-50", :key "/jepsen/idem/put/s42/50", :val "50", :replays 3, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+1	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-52", :range-start "/jepsen/idem/rd/s42/52/a", :range-end "/jepsen/idem/rd/s42/52/z", :post-write-key "/jepsen/idem/rd/s42/52/m", :post-write-val 52}
+2	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-54", :range-start "/jepsen/idem/rd/s42/54/a", :range-end "/jepsen/idem/rd/s42/54/z", :post-write-key "/jepsen/idem/rd/s42/54/m", :post-write-val 54}
+0	:ok	:idem-put	{:key "/jepsen/idem/put/s42/50", :expected-version 1, :replays 3, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "50", :setup nil, :rid "idem-put-s42-50"}
+4	:ok	:idem-put	{:key "/jepsen/idem/put/s42/48", :expected-version 2, :replays 3, :replay-delay-ms 0, :setup-val "OLD-48", :replay-node-offset 0, :val "48", :setup {:revision 63, :ok? true, :node "n1"}, :rid "idem-put-s42-48"}
+2	:ok	:idem-range-delete	{:rid "idem-rdel-s42-54", :range-start "/jepsen/idem/rd/s42/54/a", :range-end "/jepsen/idem/rd/s42/54/z", :post-write-key "/jepsen/idem/rd/s42/54/m", :post-write-val 54}
+1	:ok	:idem-range-delete	{:rid "idem-rdel-s42-52", :range-start "/jepsen/idem/rd/s42/52/a", :range-end "/jepsen/idem/rd/s42/52/z", :post-write-key "/jepsen/idem/rd/s42/52/m", :post-write-val 52}
+2	:invoke	:idem-put	{:rid "idem-put-s42-59", :key "/jepsen/idem/put/s42/59", :val "59", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+3	:invoke	:idem-put	{:rid "idem-put-s42-60", :key "/jepsen/idem/put/s42/60", :val "60", :replays 3, :setup-val "OLD-60", :replay-delay-ms 0, :replay-node-offset 0}
+2	:ok	:idem-put	{:key "/jepsen/idem/put/s42/59", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "59", :setup nil, :rid "idem-put-s42-59"}
+3	:ok	:idem-put	{:key "/jepsen/idem/put/s42/60", :expected-version 2, :replays 3, :replay-delay-ms 0, :setup-val "OLD-60", :replay-node-offset 0, :val "60", :setup {:revision 77, :ok? true, :node "n1"}, :rid "idem-put-s42-60"}
+4	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-64", :range-start "/jepsen/idem/rd/s42/64/a", :range-end "/jepsen/idem/rd/s42/64/z", :post-write-key "/jepsen/idem/rd/s42/64/m", :post-write-val 64}
+0	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-66", :range-start "/jepsen/idem/rd/s42/66/a", :range-end "/jepsen/idem/rd/s42/66/z", :post-write-key "/jepsen/idem/rd/s42/66/m", :post-write-val 66}
+1	:invoke	:idem-put	{:rid "idem-put-s42-68", :key "/jepsen/idem/put/s42/68", :val "68", :replays 3, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+2	:invoke	:idem-delete	{:rid "idem-del-s42-70", :key "/jepsen/idem/del/s42/70", :val "70", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+3	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-72", :range-start "/jepsen/idem/rd/s42/72/a", :range-end "/jepsen/idem/rd/s42/72/z", :post-write-key "/jepsen/idem/rd/s42/72/m", :post-write-val 72}
+4	:ok	:idem-range-delete	{:rid "idem-rdel-s42-64", :range-start "/jepsen/idem/rd/s42/64/a", :range-end "/jepsen/idem/rd/s42/64/z", :post-write-key "/jepsen/idem/rd/s42/64/m", :post-write-val 64}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/68", :expected-version 1, :replays 3, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "68", :setup nil, :rid "idem-put-s42-68"}
+2	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/70", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "70", :setup {:revision 87, :ok? true, :node "n1"}, :rid "idem-del-s42-70"}
+4	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-74", :range-start "/jepsen/idem/rd/s42/74/a", :range-end "/jepsen/idem/rd/s42/74/z", :post-write-key "/jepsen/idem/rd/s42/74/m", :post-write-val 74}
+0	:ok	:idem-range-delete	{:rid "idem-rdel-s42-66", :range-start "/jepsen/idem/rd/s42/66/a", :range-end "/jepsen/idem/rd/s42/66/z", :post-write-key "/jepsen/idem/rd/s42/66/m", :post-write-val 66}
+0	:invoke	:idem-put	{:rid "idem-put-s42-73", :key "/jepsen/idem/put/s42/73", :val "73", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-put	{:key "/jepsen/idem/put/s42/73", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "73", :setup nil, :rid "idem-put-s42-73"}
+3	:ok	:idem-range-delete	{:rid "idem-rdel-s42-72", :range-start "/jepsen/idem/rd/s42/72/a", :range-end "/jepsen/idem/rd/s42/72/z", :post-write-key "/jepsen/idem/rd/s42/72/m", :post-write-val 72}
+0	:invoke	:idem-put	{:rid "idem-put-s42-79", :key "/jepsen/idem/put/s42/79", :val "79", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+1	:invoke	:idem-delete	{:rid "idem-del-s42-75", :key "/jepsen/idem/del/s42/75", :val "75", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-put	{:key "/jepsen/idem/put/s42/79", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "79", :setup nil, :rid "idem-put-s42-79"}
+4	:ok	:idem-range-delete	{:rid "idem-rdel-s42-74", :range-start "/jepsen/idem/rd/s42/74/a", :range-end "/jepsen/idem/rd/s42/74/z", :post-write-key "/jepsen/idem/rd/s42/74/m", :post-write-val 74}
+1	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/75", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "75", :setup {:revision 103, :ok? true, :node "n1"}, :rid "idem-del-s42-75"}
+1	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-84", :range-start "/jepsen/idem/rd/s42/84/a", :range-end "/jepsen/idem/rd/s42/84/z", :post-write-key "/jepsen/idem/rd/s42/84/m", :post-write-val 84}
+1	:ok	:idem-range-delete	{:rid "idem-rdel-s42-84", :range-start "/jepsen/idem/rd/s42/84/a", :range-end "/jepsen/idem/rd/s42/84/z", :post-write-key "/jepsen/idem/rd/s42/84/m", :post-write-val 84}
+2	:invoke	:idem-delete	{:rid "idem-del-s42-87", :key "/jepsen/idem/del/s42/87", :val "87", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+3	:invoke	:idem-put	{:rid "idem-put-s42-89", :key "/jepsen/idem/put/s42/89", :val "89", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+3	:ok	:idem-put	{:key "/jepsen/idem/put/s42/89", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "89", :setup nil, :rid "idem-put-s42-89"}
+2	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/87", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "87", :setup {:revision 111, :ok? true, :node "n1"}, :rid "idem-del-s42-87"}
+4	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-93", :range-start "/jepsen/idem/rd/s42/93/a", :range-end "/jepsen/idem/rd/s42/93/z", :post-write-key "/jepsen/idem/rd/s42/93/m", :post-write-val 93}
+0	:invoke	:idem-put	{:rid "idem-put-s42-95", :key "/jepsen/idem/put/s42/95", :val "95", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+1	:invoke	:idem-delete	{:rid "idem-del-s42-97", :key "/jepsen/idem/del/s42/97", :val "97", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+2	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-99", :range-start "/jepsen/idem/rd/s42/99/a", :range-end "/jepsen/idem/rd/s42/99/z", :post-write-key "/jepsen/idem/rd/s42/99/m", :post-write-val 99}
+0	:ok	:idem-put	{:key "/jepsen/idem/put/s42/95", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "95", :setup nil, :rid "idem-put-s42-95"}
+1	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/97", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "97", :setup {:revision 119, :ok? true, :node "n1"}, :rid "idem-del-s42-97"}
+4	:ok	:idem-range-delete	{:rid "idem-rdel-s42-93", :range-start "/jepsen/idem/rd/s42/93/a", :range-end "/jepsen/idem/rd/s42/93/z", :post-write-key "/jepsen/idem/rd/s42/93/m", :post-write-val 93}
+2	:ok	:idem-range-delete	{:rid "idem-rdel-s42-99", :range-start "/jepsen/idem/rd/s42/99/a", :range-end "/jepsen/idem/rd/s42/99/z", :post-write-key "/jepsen/idem/rd/s42/99/m", :post-write-val 99}
+2	:invoke	:idem-put	{:rid "idem-put-s42-105", :key "/jepsen/idem/put/s42/105", :val "105", :replays 2, :setup-val "OLD-105", :replay-delay-ms 0, :replay-node-offset 0}
+2	:ok	:idem-put	{:key "/jepsen/idem/put/s42/105", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-105", :replay-node-offset 0, :val "105", :setup {:revision 127, :ok? true, :node "n1"}, :rid "idem-put-s42-105"}
+3	:invoke	:idem-put	{:rid "idem-put-s42-108", :key "/jepsen/idem/put/s42/108", :val "108", :replays 3, :setup-val "OLD-108", :replay-delay-ms 0, :replay-node-offset 0}
+4	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-110", :range-start "/jepsen/idem/rd/s42/110/a", :range-end "/jepsen/idem/rd/s42/110/z", :post-write-key "/jepsen/idem/rd/s42/110/m", :post-write-val 110}
+0	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-112", :range-start "/jepsen/idem/rd/s42/112/a", :range-end "/jepsen/idem/rd/s42/112/z", :post-write-key "/jepsen/idem/rd/s42/112/m", :post-write-val 112}
+3	:ok	:idem-put	{:key "/jepsen/idem/put/s42/108", :expected-version 2, :replays 3, :replay-delay-ms 0, :setup-val "OLD-108", :replay-node-offset 0, :val "108", :setup {:revision 129, :ok? true, :node "n1"}, :rid "idem-put-s42-108"}
+4	:ok	:idem-range-delete	{:rid "idem-rdel-s42-110", :range-start "/jepsen/idem/rd/s42/110/a", :range-end "/jepsen/idem/rd/s42/110/z", :post-write-key "/jepsen/idem/rd/s42/110/m", :post-write-val 110}
+0	:ok	:idem-range-delete	{:rid "idem-rdel-s42-112", :range-start "/jepsen/idem/rd/s42/112/a", :range-end "/jepsen/idem/rd/s42/112/z", :post-write-key "/jepsen/idem/rd/s42/112/m", :post-write-val 112}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-117", :key "/jepsen/idem/del/s42/117", :val "117", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/117", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "117", :setup {:revision 141, :ok? true, :node "n1"}, :rid "idem-del-s42-117"}
+1	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-120", :range-start "/jepsen/idem/rd/s42/120/a", :range-end "/jepsen/idem/rd/s42/120/z", :post-write-key "/jepsen/idem/rd/s42/120/m", :post-write-val 120}
+2	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-122", :range-start "/jepsen/idem/rd/s42/122/a", :range-end "/jepsen/idem/rd/s42/122/z", :post-write-key "/jepsen/idem/rd/s42/122/m", :post-write-val 122}
+1	:ok	:idem-range-delete	{:rid "idem-rdel-s42-120", :range-start "/jepsen/idem/rd/s42/120/a", :range-end "/jepsen/idem/rd/s42/120/z", :post-write-key "/jepsen/idem/rd/s42/120/m", :post-write-val 120}
+2	:ok	:idem-range-delete	{:rid "idem-rdel-s42-122", :range-start "/jepsen/idem/rd/s42/122/a", :range-end "/jepsen/idem/rd/s42/122/z", :post-write-key "/jepsen/idem/rd/s42/122/m", :post-write-val 122}
+3	:invoke	:idem-put	{:rid "idem-put-s42-126", :key "/jepsen/idem/put/s42/126", :val "126", :replays 3, :setup-val "OLD-126", :replay-delay-ms 0, :replay-node-offset 0}
+3	:ok	:idem-put	{:key "/jepsen/idem/put/s42/126", :expected-version 2, :replays 3, :replay-delay-ms 0, :setup-val "OLD-126", :replay-node-offset 0, :val "126", :setup {:revision 153, :ok? true, :node "n1"}, :rid "idem-put-s42-126"}
+4	:invoke	:idem-delete	{:rid "idem-del-s42-129", :key "/jepsen/idem/del/s42/129", :val "129", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+4	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/129", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "129", :setup {:revision 155, :ok? true, :node "n1"}, :rid "idem-del-s42-129"}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-132", :key "/jepsen/idem/del/s42/132", :val "132", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/132", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "132", :setup {:revision 157, :ok? true, :node "n1"}, :rid "idem-del-s42-132"}
+0	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-135", :range-start "/jepsen/idem/rd/s42/135/a", :range-end "/jepsen/idem/rd/s42/135/z", :post-write-key "/jepsen/idem/rd/s42/135/m", :post-write-val 135}
+0	:ok	:idem-range-delete	{:rid "idem-rdel-s42-135", :range-start "/jepsen/idem/rd/s42/135/a", :range-end "/jepsen/idem/rd/s42/135/z", :post-write-key "/jepsen/idem/rd/s42/135/m", :post-write-val 135}
+1	:invoke	:idem-put	{:rid "idem-put-s42-138", :key "/jepsen/idem/put/s42/138", :val "138", :replays 3, :setup-val "OLD-138", :replay-delay-ms 0, :replay-node-offset 0}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/138", :expected-version 2, :replays 3, :replay-delay-ms 0, :setup-val "OLD-138", :replay-node-offset 0, :val "138", :setup {:revision 164, :ok? true, :node "n1"}, :rid "idem-put-s42-138"}
+2	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-141", :range-start "/jepsen/idem/rd/s42/141/a", :range-end "/jepsen/idem/rd/s42/141/z", :post-write-key "/jepsen/idem/rd/s42/141/m", :post-write-val 141}
+3	:invoke	:idem-put	{:rid "idem-put-s42-143", :key "/jepsen/idem/put/s42/143", :val "143", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+3	:ok	:idem-put	{:key "/jepsen/idem/put/s42/143", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "143", :setup nil, :rid "idem-put-s42-143"}
+2	:ok	:idem-range-delete	{:rid "idem-rdel-s42-141", :range-start "/jepsen/idem/rd/s42/141/a", :range-end "/jepsen/idem/rd/s42/141/z", :post-write-key "/jepsen/idem/rd/s42/141/m", :post-write-val 141}
+4	:invoke	:idem-delete	{:rid "idem-del-s42-147", :key "/jepsen/idem/del/s42/147", :val "147", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+4	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/147", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "147", :setup {:revision 172, :ok? true, :node "n1"}, :rid "idem-del-s42-147"}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-150", :key "/jepsen/idem/del/s42/150", :val "150", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/150", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "150", :setup {:revision 174, :ok? true, :node "n1"}, :rid "idem-del-s42-150"}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-153", :key "/jepsen/idem/del/s42/153", :val "153", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+1	:invoke	:idem-delete	{:rid "idem-del-s42-155", :key "/jepsen/idem/del/s42/155", :val "155", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/153", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "153", :setup {:revision 176, :ok? true, :node "n1"}, :rid "idem-del-s42-153"}
+2	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-158", :range-start "/jepsen/idem/rd/s42/158/a", :range-end "/jepsen/idem/rd/s42/158/z", :post-write-key "/jepsen/idem/rd/s42/158/m", :post-write-val 158}
+3	:invoke	:idem-delete	{:rid "idem-del-s42-160", :key "/jepsen/idem/del/s42/160", :val "160", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+4	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-162", :range-start "/jepsen/idem/rd/s42/162/a", :range-end "/jepsen/idem/rd/s42/162/z", :post-write-key "/jepsen/idem/rd/s42/162/m", :post-write-val 162}
+1	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/155", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "155", :setup {:revision 178, :ok? true, :node "n1"}, :rid "idem-del-s42-155"}
+3	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/160", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "160", :setup {:revision 181, :ok? true, :node "n1"}, :rid "idem-del-s42-160"}
+2	:ok	:idem-range-delete	{:rid "idem-rdel-s42-158", :range-start "/jepsen/idem/rd/s42/158/a", :range-end "/jepsen/idem/rd/s42/158/z", :post-write-key "/jepsen/idem/rd/s42/158/m", :post-write-val 158}
+4	:ok	:idem-range-delete	{:rid "idem-rdel-s42-162", :range-start "/jepsen/idem/rd/s42/162/a", :range-end "/jepsen/idem/rd/s42/162/z", :post-write-key "/jepsen/idem/rd/s42/162/m", :post-write-val 162}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-168", :key "/jepsen/idem/del/s42/168", :val "168", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/168", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "168", :setup {:revision 192, :ok? true, :node "n1"}, :rid "idem-del-s42-168"}
+0	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-171", :range-start "/jepsen/idem/rd/s42/171/a", :range-end "/jepsen/idem/rd/s42/171/z", :post-write-key "/jepsen/idem/rd/s42/171/m", :post-write-val 171}
+0	:ok	:idem-range-delete	{:rid "idem-rdel-s42-171", :range-start "/jepsen/idem/rd/s42/171/a", :range-end "/jepsen/idem/rd/s42/171/z", :post-write-key "/jepsen/idem/rd/s42/171/m", :post-write-val 171}
+1	:invoke	:idem-put	{:rid "idem-put-s42-174", :key "/jepsen/idem/put/s42/174", :val "174", :replays 3, :setup-val "OLD-174", :replay-delay-ms 0, :replay-node-offset 0}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/174", :expected-version 2, :replays 3, :replay-delay-ms 0, :setup-val "OLD-174", :replay-node-offset 0, :val "174", :setup {:revision 199, :ok? true, :node "n1"}, :rid "idem-put-s42-174"}
+2	:invoke	:idem-delete	{:rid "idem-del-s42-177", :key "/jepsen/idem/del/s42/177", :val "177", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+2	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/177", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "177", :setup {:revision 201, :ok? true, :node "n1"}, :rid "idem-del-s42-177"}
+3	:invoke	:idem-delete	{:rid "idem-del-s42-180", :key "/jepsen/idem/del/s42/180", :val "180", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+3	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/180", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "180", :setup {:revision 203, :ok? true, :node "n1"}, :rid "idem-del-s42-180"}
+4	:invoke	:idem-put	{:rid "idem-put-s42-183", :key "/jepsen/idem/put/s42/183", :val "183", :replays 2, :setup-val "OLD-183", :replay-delay-ms 0, :replay-node-offset 0}
+4	:ok	:idem-put	{:key "/jepsen/idem/put/s42/183", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-183", :replay-node-offset 0, :val "183", :setup {:revision 205, :ok? true, :node "n1"}, :rid "idem-put-s42-183"}
+0	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-186", :range-start "/jepsen/idem/rd/s42/186/a", :range-end "/jepsen/idem/rd/s42/186/z", :post-write-key "/jepsen/idem/rd/s42/186/m", :post-write-val 186}
+0	:ok	:idem-range-delete	{:rid "idem-rdel-s42-186", :range-start "/jepsen/idem/rd/s42/186/a", :range-end "/jepsen/idem/rd/s42/186/z", :post-write-key "/jepsen/idem/rd/s42/186/m", :post-write-val 186}
+0	:invoke	:idem-put	{:rid "idem-put-s42-189", :key "/jepsen/idem/put/s42/189", :val "189", :replays 2, :setup-val "OLD-189", :replay-delay-ms 0, :replay-node-offset 0}
+1	:invoke	:idem-delete	{:rid "idem-del-s42-191", :key "/jepsen/idem/del/s42/191", :val "191", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-put	{:key "/jepsen/idem/put/s42/189", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-189", :replay-node-offset 0, :val "189", :setup {:revision 212, :ok? true, :node "n1"}, :rid "idem-put-s42-189"}
+2	:invoke	:idem-delete	{:rid "idem-del-s42-194", :key "/jepsen/idem/del/s42/194", :val "194", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+1	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/191", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "191", :setup {:revision 214, :ok? true, :node "n1"}, :rid "idem-del-s42-191"}
+2	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/194", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "194", :setup {:revision 215, :ok? true, :node "n1"}, :rid "idem-del-s42-194"}
+3	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-198", :range-start "/jepsen/idem/rd/s42/198/a", :range-end "/jepsen/idem/rd/s42/198/z", :post-write-key "/jepsen/idem/rd/s42/198/m", :post-write-val 198}
+3	:ok	:idem-range-delete	{:rid "idem-rdel-s42-198", :range-start "/jepsen/idem/rd/s42/198/a", :range-end "/jepsen/idem/rd/s42/198/z", :post-write-key "/jepsen/idem/rd/s42/198/m", :post-write-val 198}
+4	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-201", :range-start "/jepsen/idem/rd/s42/201/a", :range-end "/jepsen/idem/rd/s42/201/z", :post-write-key "/jepsen/idem/rd/s42/201/m", :post-write-val 201}
+4	:ok	:idem-range-delete	{:rid "idem-rdel-s42-201", :range-start "/jepsen/idem/rd/s42/201/a", :range-end "/jepsen/idem/rd/s42/201/z", :post-write-key "/jepsen/idem/rd/s42/201/m", :post-write-val 201}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-204", :key "/jepsen/idem/del/s42/204", :val "204", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/204", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "204", :setup {:revision 228, :ok? true, :node "n1"}, :rid "idem-del-s42-204"}
+0	:invoke	:idem-put	{:rid "idem-put-s42-207", :key "/jepsen/idem/put/s42/207", :val "207", :replays 2, :setup-val "OLD-207", :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-put	{:key "/jepsen/idem/put/s42/207", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-207", :replay-node-offset 0, :val "207", :setup {:revision 230, :ok? true, :node "n1"}, :rid "idem-put-s42-207"}
+1	:invoke	:idem-delete	{:rid "idem-del-s42-210", :key "/jepsen/idem/del/s42/210", :val "210", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+1	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/210", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "210", :setup {:revision 232, :ok? true, :node "n1"}, :rid "idem-del-s42-210"}
+2	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-213", :range-start "/jepsen/idem/rd/s42/213/a", :range-end "/jepsen/idem/rd/s42/213/z", :post-write-key "/jepsen/idem/rd/s42/213/m", :post-write-val 213}
+3	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-215", :range-start "/jepsen/idem/rd/s42/215/a", :range-end "/jepsen/idem/rd/s42/215/z", :post-write-key "/jepsen/idem/rd/s42/215/m", :post-write-val 215}
+4	:invoke	:idem-delete	{:rid "idem-del-s42-217", :key "/jepsen/idem/del/s42/217", :val "217", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+0	:invoke	:idem-put	{:rid "idem-put-s42-219", :key "/jepsen/idem/put/s42/219", :val "219", :replays 2, :setup-val "OLD-219", :replay-delay-ms 0, :replay-node-offset 0}
+1	:invoke	:idem-put	{:rid "idem-put-s42-221", :key "/jepsen/idem/put/s42/221", :val "221", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+2	:ok	:idem-range-delete	{:rid "idem-rdel-s42-213", :range-start "/jepsen/idem/rd/s42/213/a", :range-end "/jepsen/idem/rd/s42/213/z", :post-write-key "/jepsen/idem/rd/s42/213/m", :post-write-val 213}
+3	:ok	:idem-range-delete	{:rid "idem-rdel-s42-215", :range-start "/jepsen/idem/rd/s42/215/a", :range-end "/jepsen/idem/rd/s42/215/z", :post-write-key "/jepsen/idem/rd/s42/215/m", :post-write-val 215}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/221", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "221", :setup nil, :rid "idem-put-s42-221"}
+4	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/217", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "217", :setup {:revision 244, :ok? true, :node "n1"}, :rid "idem-del-s42-217"}
+0	:ok	:idem-put	{:key "/jepsen/idem/put/s42/219", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-219", :replay-node-offset 0, :val "219", :setup {:revision 245, :ok? true, :node "n1"}, :rid "idem-put-s42-219"}
+1	:invoke	:idem-put	{:rid "idem-put-s42-224", :key "/jepsen/idem/put/s42/224", :val "224", :replays 3, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/224", :expected-version 1, :replays 3, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "224", :setup nil, :rid "idem-put-s42-224"}
+2	:invoke	:idem-put	{:rid "idem-put-s42-227", :key "/jepsen/idem/put/s42/227", :val "227", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+2	:ok	:idem-put	{:key "/jepsen/idem/put/s42/227", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "227", :setup nil, :rid "idem-put-s42-227"}
+3	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-223", :range-start "/jepsen/idem/rd/s42/223/a", :range-end "/jepsen/idem/rd/s42/223/z", :post-write-key "/jepsen/idem/rd/s42/223/m", :post-write-val 223}
+4	:invoke	:idem-delete	{:rid "idem-del-s42-222", :key "/jepsen/idem/del/s42/222", :val "222", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+0	:invoke	:idem-put	{:rid "idem-put-s42-229", :key "/jepsen/idem/put/s42/229", :val "229", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+3	:ok	:idem-range-delete	{:rid "idem-rdel-s42-223", :range-start "/jepsen/idem/rd/s42/223/a", :range-end "/jepsen/idem/rd/s42/223/z", :post-write-key "/jepsen/idem/rd/s42/223/m", :post-write-val 223}
+0	:ok	:idem-put	{:key "/jepsen/idem/put/s42/229", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "229", :setup nil, :rid "idem-put-s42-229"}
+4	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/222", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "222", :setup {:revision 255, :ok? true, :node "n1"}, :rid "idem-del-s42-222"}
+0	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-234", :range-start "/jepsen/idem/rd/s42/234/a", :range-end "/jepsen/idem/rd/s42/234/z", :post-write-key "/jepsen/idem/rd/s42/234/m", :post-write-val 234}
+1	:invoke	:idem-put	{:rid "idem-put-s42-236", :key "/jepsen/idem/put/s42/236", :val "236", :replays 3, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/236", :expected-version 1, :replays 3, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "236", :setup nil, :rid "idem-put-s42-236"}
+0	:ok	:idem-range-delete	{:rid "idem-rdel-s42-234", :range-start "/jepsen/idem/rd/s42/234/a", :range-end "/jepsen/idem/rd/s42/234/z", :post-write-key "/jepsen/idem/rd/s42/234/m", :post-write-val 234}
+2	:invoke	:idem-put	{:rid "idem-put-s42-240", :key "/jepsen/idem/put/s42/240", :val "240", :replays 3, :setup-val "OLD-240", :replay-delay-ms 0, :replay-node-offset 0}
+2	:ok	:idem-put	{:key "/jepsen/idem/put/s42/240", :expected-version 2, :replays 3, :replay-delay-ms 0, :setup-val "OLD-240", :replay-node-offset 0, :val "240", :setup {:revision 265, :ok? true, :node "n1"}, :rid "idem-put-s42-240"}
+3	:invoke	:idem-put	{:rid "idem-put-s42-243", :key "/jepsen/idem/put/s42/243", :val "243", :replays 2, :setup-val "OLD-243", :replay-delay-ms 0, :replay-node-offset 0}
+3	:ok	:idem-put	{:key "/jepsen/idem/put/s42/243", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-243", :replay-node-offset 0, :val "243", :setup {:revision 267, :ok? true, :node "n1"}, :rid "idem-put-s42-243"}
+4	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-246", :range-start "/jepsen/idem/rd/s42/246/a", :range-end "/jepsen/idem/rd/s42/246/z", :post-write-key "/jepsen/idem/rd/s42/246/m", :post-write-val 246}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-248", :key "/jepsen/idem/del/s42/248", :val "248", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+1	:invoke	:idem-put	{:rid "idem-put-s42-250", :key "/jepsen/idem/put/s42/250", :val "250", :replays 3, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+2	:invoke	:idem-delete	{:rid "idem-del-s42-252", :key "/jepsen/idem/del/s42/252", :val "252", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/248", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "248", :setup {:revision 271, :ok? true, :node "n1"}, :rid "idem-del-s42-248"}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/250", :expected-version 1, :replays 3, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "250", :setup nil, :rid "idem-put-s42-250"}
+4	:ok	:idem-range-delete	{:rid "idem-rdel-s42-246", :range-start "/jepsen/idem/rd/s42/246/a", :range-end "/jepsen/idem/rd/s42/246/z", :post-write-key "/jepsen/idem/rd/s42/246/m", :post-write-val 246}
+2	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/252", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "252", :setup {:revision 277, :ok? true, :node "n1"}, :rid "idem-del-s42-252"}
+2	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-258", :range-start "/jepsen/idem/rd/s42/258/a", :range-end "/jepsen/idem/rd/s42/258/z", :post-write-key "/jepsen/idem/rd/s42/258/m", :post-write-val 258}
+3	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-260", :range-start "/jepsen/idem/rd/s42/260/a", :range-end "/jepsen/idem/rd/s42/260/z", :post-write-key "/jepsen/idem/rd/s42/260/m", :post-write-val 260}
+4	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-262", :range-start "/jepsen/idem/rd/s42/262/a", :range-end "/jepsen/idem/rd/s42/262/z", :post-write-key "/jepsen/idem/rd/s42/262/m", :post-write-val 262}
+0	:invoke	:idem-put	{:rid "idem-put-s42-264", :key "/jepsen/idem/put/s42/264", :val "264", :replays 3, :setup-val "OLD-264", :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-put	{:key "/jepsen/idem/put/s42/264", :expected-version 2, :replays 3, :replay-delay-ms 0, :setup-val "OLD-264", :replay-node-offset 0, :val "264", :setup {:revision 283, :ok? true, :node "n1"}, :rid "idem-put-s42-264"}
+2	:ok	:idem-range-delete	{:rid "idem-rdel-s42-258", :range-start "/jepsen/idem/rd/s42/258/a", :range-end "/jepsen/idem/rd/s42/258/z", :post-write-key "/jepsen/idem/rd/s42/258/m", :post-write-val 258}
+3	:ok	:idem-range-delete	{:rid "idem-rdel-s42-260", :range-start "/jepsen/idem/rd/s42/260/a", :range-end "/jepsen/idem/rd/s42/260/z", :post-write-key "/jepsen/idem/rd/s42/260/m", :post-write-val 260}
+4	:ok	:idem-range-delete	{:rid "idem-rdel-s42-262", :range-start "/jepsen/idem/rd/s42/262/a", :range-end "/jepsen/idem/rd/s42/262/z", :post-write-key "/jepsen/idem/rd/s42/262/m", :post-write-val 262}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-270", :key "/jepsen/idem/del/s42/270", :val "270", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/270", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "270", :setup {:revision 296, :ok? true, :node "n1"}, :rid "idem-del-s42-270"}
+1	:invoke	:idem-put	{:rid "idem-put-s42-273", :key "/jepsen/idem/put/s42/273", :val "273", :replays 2, :setup-val "OLD-273", :replay-delay-ms 0, :replay-node-offset 0}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/273", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-273", :replay-node-offset 0, :val "273", :setup {:revision 298, :ok? true, :node "n1"}, :rid "idem-put-s42-273"}
+2	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-276", :range-start "/jepsen/idem/rd/s42/276/a", :range-end "/jepsen/idem/rd/s42/276/z", :post-write-key "/jepsen/idem/rd/s42/276/m", :post-write-val 276}
+2	:ok	:idem-range-delete	{:rid "idem-rdel-s42-276", :range-start "/jepsen/idem/rd/s42/276/a", :range-end "/jepsen/idem/rd/s42/276/z", :post-write-key "/jepsen/idem/rd/s42/276/m", :post-write-val 276}
+3	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-279", :range-start "/jepsen/idem/rd/s42/279/a", :range-end "/jepsen/idem/rd/s42/279/z", :post-write-key "/jepsen/idem/rd/s42/279/m", :post-write-val 279}
+4	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-281", :range-start "/jepsen/idem/rd/s42/281/a", :range-end "/jepsen/idem/rd/s42/281/z", :post-write-key "/jepsen/idem/rd/s42/281/m", :post-write-val 281}
+0	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-283", :range-start "/jepsen/idem/rd/s42/283/a", :range-end "/jepsen/idem/rd/s42/283/z", :post-write-key "/jepsen/idem/rd/s42/283/m", :post-write-val 283}
+1	:invoke	:idem-put	{:rid "idem-put-s42-285", :key "/jepsen/idem/put/s42/285", :val "285", :replays 2, :setup-val "OLD-285", :replay-delay-ms 0, :replay-node-offset 0}
+3	:ok	:idem-range-delete	{:rid "idem-rdel-s42-279", :range-start "/jepsen/idem/rd/s42/279/a", :range-end "/jepsen/idem/rd/s42/279/z", :post-write-key "/jepsen/idem/rd/s42/279/m", :post-write-val 279}
+4	:ok	:idem-range-delete	{:rid "idem-rdel-s42-281", :range-start "/jepsen/idem/rd/s42/281/a", :range-end "/jepsen/idem/rd/s42/281/z", :post-write-key "/jepsen/idem/rd/s42/281/m", :post-write-val 281}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/285", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-285", :replay-node-offset 0, :val "285", :setup {:revision 317, :ok? true, :node "n1"}, :rid "idem-put-s42-285"}
+1	:invoke	:idem-delete	{:rid "idem-del-s42-290", :key "/jepsen/idem/del/s42/290", :val "290", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-range-delete	{:rid "idem-rdel-s42-283", :range-start "/jepsen/idem/rd/s42/283/a", :range-end "/jepsen/idem/rd/s42/283/z", :post-write-key "/jepsen/idem/rd/s42/283/m", :post-write-val 283}
+1	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/290", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "290", :setup {:revision 322, :ok? true, :node "n1"}, :rid "idem-del-s42-290"}
+2	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-294", :range-start "/jepsen/idem/rd/s42/294/a", :range-end "/jepsen/idem/rd/s42/294/z", :post-write-key "/jepsen/idem/rd/s42/294/m", :post-write-val 294}
+3	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-296", :range-start "/jepsen/idem/rd/s42/296/a", :range-end "/jepsen/idem/rd/s42/296/z", :post-write-key "/jepsen/idem/rd/s42/296/m", :post-write-val 296}
+4	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-298", :range-start "/jepsen/idem/rd/s42/298/a", :range-end "/jepsen/idem/rd/s42/298/z", :post-write-key "/jepsen/idem/rd/s42/298/m", :post-write-val 298}
+2	:ok	:idem-range-delete	{:rid "idem-rdel-s42-294", :range-start "/jepsen/idem/rd/s42/294/a", :range-end "/jepsen/idem/rd/s42/294/z", :post-write-key "/jepsen/idem/rd/s42/294/m", :post-write-val 294}
+0	:invoke	:idem-put	{:rid "idem-put-s42-301", :key "/jepsen/idem/put/s42/301", :val "301", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+1	:invoke	:idem-delete	{:rid "idem-del-s42-303", :key "/jepsen/idem/del/s42/303", :val "303", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-put	{:key "/jepsen/idem/put/s42/301", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "301", :setup nil, :rid "idem-put-s42-301"}
+1	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/303", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "303", :setup {:revision 333, :ok? true, :node "n1"}, :rid "idem-del-s42-303"}
+3	:ok	:idem-range-delete	{:rid "idem-rdel-s42-296", :range-start "/jepsen/idem/rd/s42/296/a", :range-end "/jepsen/idem/rd/s42/296/z", :post-write-key "/jepsen/idem/rd/s42/296/m", :post-write-val 296}
+4	:ok	:idem-range-delete	{:rid "idem-rdel-s42-298", :range-start "/jepsen/idem/rd/s42/298/a", :range-end "/jepsen/idem/rd/s42/298/z", :post-write-key "/jepsen/idem/rd/s42/298/m", :post-write-val 298}
+1	:invoke	:idem-put	{:rid "idem-put-s42-309", :key "/jepsen/idem/put/s42/309", :val "309", :replays 2, :setup-val "OLD-309", :replay-delay-ms 0, :replay-node-offset 0}
+2	:invoke	:idem-delete	{:rid "idem-del-s42-311", :key "/jepsen/idem/del/s42/311", :val "311", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/309", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-309", :replay-node-offset 0, :val "309", :setup {:revision 342, :ok? true, :node "n1"}, :rid "idem-put-s42-309"}
+2	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/311", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "311", :setup {:revision 344, :ok? true, :node "n1"}, :rid "idem-del-s42-311"}
+3	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-315", :range-start "/jepsen/idem/rd/s42/315/a", :range-end "/jepsen/idem/rd/s42/315/z", :post-write-key "/jepsen/idem/rd/s42/315/m", :post-write-val 315}
+3	:ok	:idem-range-delete	{:rid "idem-rdel-s42-315", :range-start "/jepsen/idem/rd/s42/315/a", :range-end "/jepsen/idem/rd/s42/315/z", :post-write-key "/jepsen/idem/rd/s42/315/m", :post-write-val 315}
+4	:invoke	:idem-delete	{:rid "idem-del-s42-318", :key "/jepsen/idem/del/s42/318", :val "318", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+4	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/318", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "318", :setup {:revision 351, :ok? true, :node "n1"}, :rid "idem-del-s42-318"}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-321", :key "/jepsen/idem/del/s42/321", :val "321", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/321", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "321", :setup {:revision 353, :ok? true, :node "n1"}, :rid "idem-del-s42-321"}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-324", :key "/jepsen/idem/del/s42/324", :val "324", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+1	:invoke	:idem-put	{:rid "idem-put-s42-326", :key "/jepsen/idem/put/s42/326", :val "326", :replays 3, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+2	:invoke	:idem-put	{:rid "idem-put-s42-328", :key "/jepsen/idem/put/s42/328", :val "328", :replays 3, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+3	:invoke	:idem-delete	{:rid "idem-del-s42-330", :key "/jepsen/idem/del/s42/330", :val "330", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/324", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "324", :setup {:revision 355, :ok? true, :node "n1"}, :rid "idem-del-s42-324"}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/326", :expected-version 1, :replays 3, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "326", :setup nil, :rid "idem-put-s42-326"}
+2	:ok	:idem-put	{:key "/jepsen/idem/put/s42/328", :expected-version 1, :replays 3, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "328", :setup nil, :rid "idem-put-s42-328"}
+4	:invoke	:idem-put	{:rid "idem-put-s42-333", :key "/jepsen/idem/put/s42/333", :val "333", :replays 2, :setup-val "OLD-333", :replay-delay-ms 0, :replay-node-offset 0}
+3	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/330", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "330", :setup {:revision 359, :ok? true, :node "n1"}, :rid "idem-del-s42-330"}
+4	:ok	:idem-put	{:key "/jepsen/idem/put/s42/333", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-333", :replay-node-offset 0, :val "333", :setup {:revision 361, :ok? true, :node "n1"}, :rid "idem-put-s42-333"}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-337", :key "/jepsen/idem/del/s42/337", :val "337", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+1	:invoke	:idem-put	{:rid "idem-put-s42-339", :key "/jepsen/idem/put/s42/339", :val "339", :replays 2, :setup-val "OLD-339", :replay-delay-ms 0, :replay-node-offset 0}
+2	:invoke	:idem-delete	{:rid "idem-del-s42-341", :key "/jepsen/idem/del/s42/341", :val "341", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/337", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "337", :setup {:revision 363, :ok? true, :node "n1"}, :rid "idem-del-s42-337"}
+3	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-344", :range-start "/jepsen/idem/rd/s42/344/a", :range-end "/jepsen/idem/rd/s42/344/z", :post-write-key "/jepsen/idem/rd/s42/344/m", :post-write-val 344}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/339", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-339", :replay-node-offset 0, :val "339", :setup {:revision 365, :ok? true, :node "n1"}, :rid "idem-put-s42-339"}
+2	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/341", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "341", :setup {:revision 366, :ok? true, :node "n1"}, :rid "idem-del-s42-341"}
+3	:ok	:idem-range-delete	{:rid "idem-rdel-s42-344", :range-start "/jepsen/idem/rd/s42/344/a", :range-end "/jepsen/idem/rd/s42/344/z", :post-write-key "/jepsen/idem/rd/s42/344/m", :post-write-val 344}
+3	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-349", :range-start "/jepsen/idem/rd/s42/349/a", :range-end "/jepsen/idem/rd/s42/349/z", :post-write-key "/jepsen/idem/rd/s42/349/m", :post-write-val 349}
+3	:ok	:idem-range-delete	{:rid "idem-rdel-s42-349", :range-start "/jepsen/idem/rd/s42/349/a", :range-end "/jepsen/idem/rd/s42/349/z", :post-write-key "/jepsen/idem/rd/s42/349/m", :post-write-val 349}
+4	:invoke	:idem-delete	{:rid "idem-del-s42-352", :key "/jepsen/idem/del/s42/352", :val "352", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+4	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/352", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "352", :setup {:revision 379, :ok? true, :node "n1"}, :rid "idem-del-s42-352"}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-355", :key "/jepsen/idem/del/s42/355", :val "355", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/355", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "355", :setup {:revision 381, :ok? true, :node "n1"}, :rid "idem-del-s42-355"}
+0	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-358", :range-start "/jepsen/idem/rd/s42/358/a", :range-end "/jepsen/idem/rd/s42/358/z", :post-write-key "/jepsen/idem/rd/s42/358/m", :post-write-val 358}
+0	:ok	:idem-range-delete	{:rid "idem-rdel-s42-358", :range-start "/jepsen/idem/rd/s42/358/a", :range-end "/jepsen/idem/rd/s42/358/z", :post-write-key "/jepsen/idem/rd/s42/358/m", :post-write-val 358}
+1	:invoke	:idem-delete	{:rid "idem-del-s42-361", :key "/jepsen/idem/del/s42/361", :val "361", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+1	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/361", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "361", :setup {:revision 388, :ok? true, :node "n1"}, :rid "idem-del-s42-361"}
+2	:invoke	:idem-put	{:rid "idem-put-s42-364", :key "/jepsen/idem/put/s42/364", :val "364", :replays 3, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+2	:ok	:idem-put	{:key "/jepsen/idem/put/s42/364", :expected-version 1, :replays 3, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "364", :setup nil, :rid "idem-put-s42-364"}
+3	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-367", :range-start "/jepsen/idem/rd/s42/367/a", :range-end "/jepsen/idem/rd/s42/367/z", :post-write-key "/jepsen/idem/rd/s42/367/m", :post-write-val 367}
+4	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-369", :range-start "/jepsen/idem/rd/s42/369/a", :range-end "/jepsen/idem/rd/s42/369/z", :post-write-key "/jepsen/idem/rd/s42/369/m", :post-write-val 369}
+3	:ok	:idem-range-delete	{:rid "idem-rdel-s42-367", :range-start "/jepsen/idem/rd/s42/367/a", :range-end "/jepsen/idem/rd/s42/367/z", :post-write-key "/jepsen/idem/rd/s42/367/m", :post-write-val 367}
+4	:ok	:idem-range-delete	{:rid "idem-rdel-s42-369", :range-start "/jepsen/idem/rd/s42/369/a", :range-end "/jepsen/idem/rd/s42/369/z", :post-write-key "/jepsen/idem/rd/s42/369/m", :post-write-val 369}
+0	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-373", :range-start "/jepsen/idem/rd/s42/373/a", :range-end "/jepsen/idem/rd/s42/373/z", :post-write-key "/jepsen/idem/rd/s42/373/m", :post-write-val 373}
+0	:ok	:idem-range-delete	{:rid "idem-rdel-s42-373", :range-start "/jepsen/idem/rd/s42/373/a", :range-end "/jepsen/idem/rd/s42/373/z", :post-write-key "/jepsen/idem/rd/s42/373/m", :post-write-val 373}
+0	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-376", :range-start "/jepsen/idem/rd/s42/376/a", :range-end "/jepsen/idem/rd/s42/376/z", :post-write-key "/jepsen/idem/rd/s42/376/m", :post-write-val 376}
+0	:ok	:idem-range-delete	{:rid "idem-rdel-s42-376", :range-start "/jepsen/idem/rd/s42/376/a", :range-end "/jepsen/idem/rd/s42/376/z", :post-write-key "/jepsen/idem/rd/s42/376/m", :post-write-val 376}
+1	:invoke	:idem-put	{:rid "idem-put-s42-379", :key "/jepsen/idem/put/s42/379", :val "379", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/379", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "379", :setup nil, :rid "idem-put-s42-379"}
+2	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-382", :range-start "/jepsen/idem/rd/s42/382/a", :range-end "/jepsen/idem/rd/s42/382/z", :post-write-key "/jepsen/idem/rd/s42/382/m", :post-write-val 382}
+2	:ok	:idem-range-delete	{:rid "idem-rdel-s42-382", :range-start "/jepsen/idem/rd/s42/382/a", :range-end "/jepsen/idem/rd/s42/382/z", :post-write-key "/jepsen/idem/rd/s42/382/m", :post-write-val 382}
+3	:invoke	:idem-delete	{:rid "idem-del-s42-385", :key "/jepsen/idem/del/s42/385", :val "385", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+3	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/385", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "385", :setup {:revision 417, :ok? true, :node "n1"}, :rid "idem-del-s42-385"}
+4	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-388", :range-start "/jepsen/idem/rd/s42/388/a", :range-end "/jepsen/idem/rd/s42/388/z", :post-write-key "/jepsen/idem/rd/s42/388/m", :post-write-val 388}
+4	:ok	:idem-range-delete	{:rid "idem-rdel-s42-388", :range-start "/jepsen/idem/rd/s42/388/a", :range-end "/jepsen/idem/rd/s42/388/z", :post-write-key "/jepsen/idem/rd/s42/388/m", :post-write-val 388}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-391", :key "/jepsen/idem/del/s42/391", :val "391", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/391", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "391", :setup {:revision 424, :ok? true, :node "n1"}, :rid "idem-del-s42-391"}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-394", :key "/jepsen/idem/del/s42/394", :val "394", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+1	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-396", :range-start "/jepsen/idem/rd/s42/396/a", :range-end "/jepsen/idem/rd/s42/396/z", :post-write-key "/jepsen/idem/rd/s42/396/m", :post-write-val 396}
+2	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-398", :range-start "/jepsen/idem/rd/s42/398/a", :range-end "/jepsen/idem/rd/s42/398/z", :post-write-key "/jepsen/idem/rd/s42/398/m", :post-write-val 398}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/394", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "394", :setup {:revision 426, :ok? true, :node "n1"}, :rid "idem-del-s42-394"}
+1	:ok	:idem-range-delete	{:rid "idem-rdel-s42-396", :range-start "/jepsen/idem/rd/s42/396/a", :range-end "/jepsen/idem/rd/s42/396/z", :post-write-key "/jepsen/idem/rd/s42/396/m", :post-write-val 396}
+3	:invoke	:idem-delete	{:rid "idem-del-s42-402", :key "/jepsen/idem/del/s42/402", :val "402", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+2	:ok	:idem-range-delete	{:rid "idem-rdel-s42-398", :range-start "/jepsen/idem/rd/s42/398/a", :range-end "/jepsen/idem/rd/s42/398/z", :post-write-key "/jepsen/idem/rd/s42/398/m", :post-write-val 398}
+3	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/402", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "402", :setup {:revision 438, :ok? true, :node "n1"}, :rid "idem-del-s42-402"}
+4	:invoke	:idem-put	{:rid "idem-put-s42-406", :key "/jepsen/idem/put/s42/406", :val "406", :replays 3, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+4	:ok	:idem-put	{:key "/jepsen/idem/put/s42/406", :expected-version 1, :replays 3, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "406", :setup nil, :rid "idem-put-s42-406"}
+0	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-409", :range-start "/jepsen/idem/rd/s42/409/a", :range-end "/jepsen/idem/rd/s42/409/z", :post-write-key "/jepsen/idem/rd/s42/409/m", :post-write-val 409}
+0	:ok	:idem-range-delete	{:rid "idem-rdel-s42-409", :range-start "/jepsen/idem/rd/s42/409/a", :range-end "/jepsen/idem/rd/s42/409/z", :post-write-key "/jepsen/idem/rd/s42/409/m", :post-write-val 409}
+0	:invoke	:idem-put	{:rid "idem-put-s42-412", :key "/jepsen/idem/put/s42/412", :val "412", :replays 3, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+0	:ok	:idem-put	{:key "/jepsen/idem/put/s42/412", :expected-version 1, :replays 3, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "412", :setup nil, :rid "idem-put-s42-412"}
+1	:invoke	:idem-put	{:rid "idem-put-s42-415", :key "/jepsen/idem/put/s42/415", :val "415", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/415", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "415", :setup nil, :rid "idem-put-s42-415"}
+2	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-418", :range-start "/jepsen/idem/rd/s42/418/a", :range-end "/jepsen/idem/rd/s42/418/z", :post-write-key "/jepsen/idem/rd/s42/418/m", :post-write-val 418}
+2	:ok	:idem-range-delete	{:rid "idem-rdel-s42-418", :range-start "/jepsen/idem/rd/s42/418/a", :range-end "/jepsen/idem/rd/s42/418/z", :post-write-key "/jepsen/idem/rd/s42/418/m", :post-write-val 418}
+3	:invoke	:idem-put	{:rid "idem-put-s42-421", :key "/jepsen/idem/put/s42/421", :val "421", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+4	:invoke	:idem-put	{:rid "idem-put-s42-423", :key "/jepsen/idem/put/s42/423", :val "423", :replays 2, :setup-val "OLD-423", :replay-delay-ms 0, :replay-node-offset 0}
+3	:ok	:idem-put	{:key "/jepsen/idem/put/s42/421", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "421", :setup nil, :rid "idem-put-s42-421"}
+0	:invoke	:idem-delete	{:rid "idem-del-s42-426", :key "/jepsen/idem/del/s42/426", :val "426", :replays 3, :replay-delay-ms 0, :replay-node-offset 0}
+1	:invoke	:idem-put	{:rid "idem-put-s42-428", :key "/jepsen/idem/put/s42/428", :val "428", :replays 3, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+2	:invoke	:idem-range-delete	{:rid "idem-rdel-s42-430", :range-start "/jepsen/idem/rd/s42/430/a", :range-end "/jepsen/idem/rd/s42/430/z", :post-write-key "/jepsen/idem/rd/s42/430/m", :post-write-val 430}
+4	:info	:idem-put	{:key "/jepsen/idem/put/s42/423", :expected-version 2, :replays 2, :replay-delay-ms 0, :setup-val "OLD-423", :replay-node-offset 0, :val "423", :setup {:revision 454, :ok? true, :node "n1"}, :rid "idem-put-s42-423"}
+1	:ok	:idem-put	{:key "/jepsen/idem/put/s42/428", :expected-version 1, :replays 3, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "428", :setup nil, :rid "idem-put-s42-428"}
+0	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/426", :expected-version 0, :replays 3, :replay-delay-ms 0, :replay-node-offset 0, :val "426", :setup {:revision 455, :ok? true, :node "n1"}, :rid "idem-del-s42-426"}
+3	:invoke	:idem-delete	{:rid "idem-del-s42-435", :key "/jepsen/idem/del/s42/435", :val "435", :replays 2, :replay-delay-ms 0, :replay-node-offset 0}
+3	:ok	:idem-delete	{:key "/jepsen/idem/del/s42/435", :expected-version 0, :replays 2, :replay-delay-ms 0, :replay-node-offset 0, :val "435", :setup {:revision 461, :ok? true, :node "n1"}, :rid "idem-del-s42-435"}
+2	:ok	:idem-range-delete	{:rid "idem-rdel-s42-430", :range-start "/jepsen/idem/rd/s42/430/a", :range-end "/jepsen/idem/rd/s42/430/z", :post-write-key "/jepsen/idem/rd/s42/430/m", :post-write-val 430}
+3	:invoke	:idem-put	{:rid "idem-put-s42-439", :key "/jepsen/idem/put/s42/439", :val "439", :replays 2, :setup-val nil, :replay-delay-ms 0, :replay-node-offset 0}
+3	:ok	:idem-put	{:key "/jepsen/idem/put/s42/439", :expected-version 1, :replays 2, :replay-delay-ms 0, :setup-val nil, :replay-node-offset 0, :val "439", :setup nil, :rid "idem-put-s42-439"}

@@ -1,0 +1,20 @@
+results-file: store/coord/2026-09-17T11:06:13.923555841Z/results.edn
+overall-valid: true
+linear-valid: true
+gates-valid: true
+gates-failures: -
+rto-budget-seconds: 120
+rto-p95-seconds: 1.4257309857499998
+rto-max-seconds: 1.621111442
+rto-samples: [0.839589617 1.621111442 0.593712648 0.205829217 0.3225385 0.491632369]
+rto-unrecovered: 0
+rto-not-measured: 0
+quiet-windows: 6
+quiet-judged: 0
+quiet-skipped-small-sample: 6
+quiet-worst-ratio: -
+quiet-violations: 0
+premise-valid: true
+premise-duplicate-values: 0
+soak-converged: -
+soak-regions: -

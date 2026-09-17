@@ -1,0 +1,1389 @@
+2026-09-17 14:44:48,164{GMT}	INFO	[jepsen test runner] jepsen.core: Test version ad22337b09f7aae407b39e9d639de867e52bccc7 (plus uncommitted changes)
+2026-09-17 14:44:48,164{GMT}	INFO	[jepsen test runner] jepsen.core: Command line:
+lein run test --nodes-file /root/nodes --username root --ssh-private-key /root/.ssh/id_ed25519 --workload soakfull --nemesis kill --time-limit 90 --concurrency 2n --seed 42 --min-op-sample 10 --watch-min-events 50 --lease-min-grants 10 --lease-min-expiries 3
+2026-09-17 14:44:48,261{GMT}	INFO	[jepsen test runner] jepsen.core: Running test:
+{:remote
+ #jepsen.control.retry.Remote{:remote #jepsen.control.scp.Remote{:cmd-remote #jepsen.control.sshj.SSHJRemote{:concurrency-limit 6,
+                                                                                                             :conn-spec nil,
+                                                                                                             :client nil,
+                                                                                                             :semaphore nil},
+                                                                 :conn-spec nil},
+                              :conn nil}
+ :idem-replay-delay-ms 0
+ :ssh-private-key "/root/.ssh/id_ed25519"
+ :idem-min-replay-attempts nil
+ :watch-min-events 50
+ :concurrency 10
+ :lease-ttl-seconds nil
+ :soak-disrupt 600
+ :db
+ #jepsen.coord.db.CoordDB{:cluster-name "jepsen-coord",
+                          :pidfile-prefix "/var/run/coord-",
+                          :root-password "66c57bb56bce306f484344e4a8650836",
+                          :coord-dir "/opt/coord",
+                          :config-dir "/etc/coord",
+                          :logfile "/var/log/coord.log",
+                          :regions nil,
+                          :data-dir "/var/lib/coord",
+                          :nodes ("n1" "n2" "n3"),
+                          :auth-root-key "820662a9f85924333d6d466714bc51734b251e73b827a394e1978e36d2429bfc",
+                          :raft-secret "93edf94d2860fec54bc59278a804cb1bbd2d0a7243e4f39d667d66966d9844d1",
+                          :coord-bin "/root/coord-test/coord"}
+ :leave-db-running? false
+ :name "coord"
+ :logging-json? false
+ :mixture-ratio nil
+ :start-time
+ #object[java.time.OffsetDateTime "0x3fc92211" "2026-09-17T14:44:48.141132581Z"]
+ :regions nil
+ :lease-min-grants 10
+ :map-keys nil
+ :net
+ #object[jepsen.net$iptables_with_dev$reify__15623
+         "0x63d8590c"
+         "jepsen.net$iptables_with_dev$reify__15623@63d8590c"]
+ :client
+ #jepsen.coord.client.CoordClient{:root-password "66c57bb56bce306f484344e4a8650836",
+                                  :channels nil,
+                                  :cct nil,
+                                  :raw-channels nil,
+                                  :parse-values? true,
+                                  :nodes ["n1" "n2" "n3"],
+                                  :leader-idx #object[clojure.lang.Atom
+                                                      "0x109fff4a"
+                                                      {:status :ready, :val {}}],
+                                  :last-rev #object[clojure.lang.Atom
+                                                    "0x5e5f5ddf"
+                                                    {:status :ready, :val {}}],
+                                  :last-watch-rev #object[clojure.lang.Atom
+                                                          "0x144caca6"
+                                                          {:status :ready,
+                                                           :val {}}]}
+ :lease-revoke-ttl-seconds nil
+ :barrier
+ #object[java.util.concurrent.CyclicBarrier
+         "0x532782f5"
+         "java.util.concurrent.CyclicBarrier@532782f5"]
+ :ssh
+ {:dummy? false,
+  :username "root",
+  :password "root",
+  :strict-host-key-checking false,
+  :private-key-path "/root/.ssh/id_ed25519"}
+ :lease-tolerance-ms nil
+ :rate nil
+ :map-min-deletes nil
+ :seed 42
+ :checker
+ #jepsen.checker.Compose{:checkers {:linear #jepsen.checker.Compose{:checkers {:routing #object[jepsen.coord.mixck$routing_checker$reify__2286
+                                                                                                "0x3c2d4274"
+                                                                                                "jepsen.coord.mixck$routing_checker$reify__2286@3c2d4274"],
+                                                                               :lease #object[jepsen.coord.mixck$restrict$reify__2277
+                                                                                              "0x6960e7a6"
+                                                                                              "jepsen.coord.mixck$restrict$reify__2277@6960e7a6"],
+                                                                               :map #object[jepsen.coord.mixck$restrict$reify__2277
+                                                                                            "0x63fe055"
+                                                                                            "jepsen.coord.mixck$restrict$reify__2277@63fe055"],
+                                                                               :scan #object[jepsen.coord.mixck$restrict$reify__2277
+                                                                                             "0x50572c04"
+                                                                                             "jepsen.coord.mixck$restrict$reify__2277@50572c04"],
+                                                                               :txn #object[jepsen.coord.mixck$restrict$reify__2277
+                                                                                            "0xab90b8c"
+                                                                                            "jepsen.coord.mixck$restrict$reify__2277@ab90b8c"],
+                                                                               :watch #object[jepsen.coord.mixck$restrict$reify__2277
+                                                                                              "0x640a80aa"
+                                                                                              "jepsen.coord.mixck$restrict$reify__2277@640a80aa"]}},
+                                    :gates #object[jepsen.coord.gates$checker$reify__1053
+                                                   "0x18b8518b"
+                                                   "jepsen.coord.gates$checker$reify__1053@18b8518b"],
+                                    :perf #jepsen.checker.Compose{:checkers {:latency-graph #jepsen.checker.LatencyGraph{:opts {}},
+                                                                             :rate-graph #jepsen.checker.RateGraph{:opts {}}}}}}
+ :lease-min-expiries 3
+ :argv
+ ("test"
+  "--nodes-file"
+  "/root/nodes"
+  "--username"
+  "root"
+  "--ssh-private-key"
+  "/root/.ssh/id_ed25519"
+  "--workload"
+  "soakfull"
+  "--nemesis"
+  "kill"
+  "--time-limit"
+  "90"
+  "--concurrency"
+  "2n"
+  "--seed"
+  "42"
+  "--min-op-sample"
+  "10"
+  "--watch-min-events"
+  "50"
+  "--lease-min-grants"
+  "10"
+  "--lease-min-expiries"
+  "3")
+ :nemesis #unprintable "jepsen.nemesis$node_start_stopper$reify__15946@1d4ee936"
+ :watch-resumes nil
+ :lease-grace-ms nil
+ :soak-mix nil
+ :nodes ("n1" "n2" "n3")
+ :test-count 1
+ :no-jitter false
+ :generator
+ #object[jepsen.util.Forgettable
+         "0x5037f491"
+         ((jepsen.generator.Synchronize
+           {:gen (jepsen.generator.TimeLimit
+                  {:limit 90000000000,
+                   :cutoff nil,
+                   :gen (jepsen.generator.Any
+                         {:gens [(jepsen.generator.OnThreads
+                                  {:f #{:nemesis},
+                                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                           "0x11c68269"
+                                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@11c68269"],
+                                   :gen ({:type :sleep, :value 6.63781840016434}
+                                         {:type :info, :f :start}
+                                         {:type :sleep,
+                                          :value 6.416117358799227}
+                                         {:type :info, :f :stop}
+                                         {:type :sleep,
+                                          :value 4.543597276663299}
+                                         {:type :info, :f :start}
+                                         {:type :sleep,
+                                          :value 4.385392450370683}
+                                         {:type :info, :f :stop}
+                                         ...)})
+                                 (jepsen.generator.OnThreads
+                                  {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                           "0x6018a6a2"
+                                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@6018a6a2"],
+                                   :gen (jepsen.generator.Stagger
+                                         {:dt-fn #object[jepsen.generator$stagger_exp$dt_fn__6799
+                                                         "0x3ae5cbb9"
+                                                         "jepsen.generator$stagger_exp$dt_fn__6799@3ae5cbb9"],
+                                          :next-time nil,
+                                          :gen (jepsen.generator.OnThreads
+                                                {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                                 :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                                         "0x1f15d346"
+                                                                         "jepsen.generator.context$make_thread_filter$lazy_filter__5865@1f15d346"],
+                                                 :gen (jepsen.generator.Mix
+                                                       {:i 0,
+                                                        :gens [(jepsen.generator.Mix
+                                                                {:i 9,
+                                                                 :gens [(jepsen.generator.Map
+                                                                         {:f #object[jepsen.coord$tag_sub$fn__2636
+                                                                                     "0x7fb70e94"
+                                                                                     "jepsen.coord$tag_sub$fn__2636@7fb70e94"],
+                                                                          :arity 1,
+                                                                          :gen (jepsen.generator.Mix
+                                                                                {:i 2,
+                                                                                 :gens [#object[jepsen.coord$lease_gen$ttl_op__2622
+                                                                                                "0x5abf9a76"
+                                                                                                "jepsen.coord$lease_gen$ttl_op__2622@5abf9a76"]
+                                                                                        #object[jepsen.coord$lease_gen$ttl_op__2622
+                                                                                                "0x5abf9a76"
+                                                                                                "jepsen.coord$lease_gen$ttl_op__2622@5abf9a76"]
+                                                                                        #object[jepsen.coord$lease_gen$ka_op__2624
+                                                                                                "0x4e132a9b"
+                                                                                                "jepsen.coord$lease_gen$ka_op__2624@4e132a9b"]
+                                                                                        #object[jepsen.coord$lease_gen$rev_op__2626
+                                                                                                "0x7f2d4ffc"
+                                                                                                "jepsen.coord$lease_gen$rev_op__2626@7f2d4ffc"]]})})
+                                                                        (jepsen.generator.Map
+                                                                         {:f #object[jepsen.coord$tag_sub$fn__2636
+                                                                                     "0x38293d23"
+                                                                                     "jepsen.coord$tag_sub$fn__2636@38293d23"],
+                                                                          :arity 1,
+                                                                          :gen (jepsen.generator.Mix
+                                                                                {:i 1,
+                                                                                 :gens [#object[jepsen.coord$lease_gen$ttl_op__2622
+                                                                                                "0x1ee37c7a"
+                                                                                                "jepsen.coord$lease_gen$ttl_op__2622@1ee37c7a"]
+                                                                                        #object[jepsen.coord$lease_gen$ttl_op__2622
+                                                                                                "0x1ee37c7a"
+                                                                                                "jepsen.coord$lease_gen$ttl_op__2622@1ee37c7a"]
+                                                                                        #object[jepsen.coord$lease_gen$ka_op__2624
+                                                                                                "0x4973dacf"
+                                                                                                "jepsen.coord$lease_gen$ka_op__2624@4973dacf"]
+                                                                                        #object[jepsen.coord$lease_gen$rev_op__2626
+                                                                                                "0x5cb42eb2"
+                                                                                                "jepsen.coord$lease_gen$rev_op__2626@5cb42eb2"]]})})
+                                                                        (jepsen.generator.Map
+                                                                         {:f #object[jepsen.coord$tag_sub$fn__2636
+                                                                                     "0x2d05d022"
+                                                                                     "jepsen.coord$tag_sub$fn__2636@2d05d022"],
+                                                                          :arity 1,
+                                                                          :gen (jepsen.generator.Mix
+                                                                                {:i 5,
+                                                                                 :gens [#object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x28806954"
+                                                                                                "jepsen.coord$map_gen$r__2570@28806954"]
+                                                                                        #object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x28806954"
+                                                                                                "jepsen.coord$map_gen$r__2570@28806954"]
+                                                                                        #object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x28806954"
+                                                                                                "jepsen.coord$map_gen$r__2570@28806954"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x7ff26b29"
+                                                                                                "jepsen.coord$map_gen$w__2572@7ff26b29"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x7ff26b29"
+                                                                                                "jepsen.coord$map_gen$w__2572@7ff26b29"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x7ff26b29"
+                                                                                                "jepsen.coord$map_gen$w__2572@7ff26b29"]
+                                                                                        #object[jepsen.coord$map_gen$d__2574
+                                                                                                "0x24e0bdb"
+                                                                                                "jepsen.coord$map_gen$d__2574@24e0bdb"]
+                                                                                        #object[jepsen.coord$map_gen$e__2576
+                                                                                                "0x1495f70"
+                                                                                                "jepsen.coord$map_gen$e__2576@1495f70"]]})})
+                                                                        (jepsen.generator.Map
+                                                                         {:f #object[jepsen.coord$tag_sub$fn__2636
+                                                                                     "0x2aa85cc4"
+                                                                                     "jepsen.coord$tag_sub$fn__2636@2aa85cc4"],
+                                                                          :arity 1,
+                                                                          :gen (jepsen.generator.Mix
+                                                                                {:i 1,
+                                                                                 :gens [#object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x466fd19b"
+                                                                                                "jepsen.coord$map_gen$r__2570@466fd19b"]
+                                                                                        #object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x466fd19b"
+                                                                                                "jepsen.coord$map_gen$r__2570@466fd19b"]
+                                                                                        #object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x466fd19b"
+                                                                                                "jepsen.coord$map_gen$r__2570@466fd19b"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x348d1a5e"
+                                                                                                "jepsen.coord$map_gen$w__2572@348d1a5e"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x348d1a5e"
+                                                                                                "jepsen.coord$map_gen$w__2572@348d1a5e"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x348d1a5e"
+                                                                                                "jepsen.coord$map_gen$w__2572@348d1a5e"]
+                                                                                        #object[jepsen.coord$map_gen$d__2574
+                                                                                                "0x7f746160"
+                                                                                                "jepsen.coord$map_gen$d__2574@7f746160"]
+                                                                                        #object[jepsen.coord$map_gen$e__2576
+                                                                                                "0x17524c36"
+                                                                                                "jepsen.coord$map_gen$e__2576@17524c36"]]})})
+                                                                        (jepsen.generator.Map
+                                                                         {:f #object[jepsen.coord$tag_sub$fn__2636
+                                                                                     "0x2f89b44e"
+                                                                                     "jepsen.coord$tag_sub$fn__2636@2f89b44e"],
+                                                                          :arity 1,
+                                                                          :gen (jepsen.generator.Mix
+                                                                                {:i 3,
+                                                                                 :gens [#object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x730a140b"
+                                                                                                "jepsen.coord$map_gen$r__2570@730a140b"]
+                                                                                        #object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x730a140b"
+                                                                                                "jepsen.coord$map_gen$r__2570@730a140b"]
+                                                                                        #object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x730a140b"
+                                                                                                "jepsen.coord$map_gen$r__2570@730a140b"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x2f29046b"
+                                                                                                "jepsen.coord$map_gen$w__2572@2f29046b"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x2f29046b"
+                                                                                                "jepsen.coord$map_gen$w__2572@2f29046b"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x2f29046b"
+                                                                                                "jepsen.coord$map_gen$w__2572@2f29046b"]
+                                                                                        #object[jepsen.coord$map_gen$d__2574
+                                                                                                "0x2a1fce44"
+                                                                                                "jepsen.coord$map_gen$d__2574@2a1fce44"]
+                                                                                        #object[jepsen.coord$map_gen$e__2576
+                                                                                                "0x48d6248d"
+                                                                                                "jepsen.coord$map_gen$e__2576@48d6248d"]]})})
+                                                                        (jepsen.generator.Map
+                                                                         {:f #object[jepsen.coord$tag_sub$fn__2636
+                                                                                     "0x6b5fdbd0"
+                                                                                     "jepsen.coord$tag_sub$fn__2636@6b5fdbd0"],
+                                                                          :arity 1,
+                                                                          :gen (jepsen.generator.Mix
+                                                                                {:i 0,
+                                                                                 :gens [#object[jepsen.coord$map_gen$r__2570
+                                                                                                "0xc32908c"
+                                                                                                "jepsen.coord$map_gen$r__2570@c32908c"]
+                                                                                        #object[jepsen.coord$map_gen$r__2570
+                                                                                                "0xc32908c"
+                                                                                                "jepsen.coord$map_gen$r__2570@c32908c"]
+                                                                                        #object[jepsen.coord$map_gen$r__2570
+                                                                                                "0xc32908c"
+                                                                                                "jepsen.coord$map_gen$r__2570@c32908c"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x588b02a0"
+                                                                                                "jepsen.coord$map_gen$w__2572@588b02a0"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x588b02a0"
+                                                                                                "jepsen.coord$map_gen$w__2572@588b02a0"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x588b02a0"
+                                                                                                "jepsen.coord$map_gen$w__2572@588b02a0"]
+                                                                                        #object[jepsen.coord$map_gen$d__2574
+                                                                                                "0x2100b770"
+                                                                                                "jepsen.coord$map_gen$d__2574@2100b770"]
+                                                                                        #object[jepsen.coord$map_gen$e__2576
+                                                                                                "0x349469db"
+                                                                                                "jepsen.coord$map_gen$e__2576@349469db"]]})})
+                                                                        (jepsen.generator.Map
+                                                                         {:f #object[jepsen.coord$tag_sub$fn__2636
+                                                                                     "0x2c3a2935"
+                                                                                     "jepsen.coord$tag_sub$fn__2636@2c3a2935"],
+                                                                          :arity 1,
+                                                                          :gen (jepsen.generator.Mix
+                                                                                {:i 3,
+                                                                                 :gens [#object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x2ca4b010"
+                                                                                                "jepsen.coord$map_gen$r__2570@2ca4b010"]
+                                                                                        #object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x2ca4b010"
+                                                                                                "jepsen.coord$map_gen$r__2570@2ca4b010"]
+                                                                                        #object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x2ca4b010"
+                                                                                                "jepsen.coord$map_gen$r__2570@2ca4b010"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x83b39c3"
+                                                                                                "jepsen.coord$map_gen$w__2572@83b39c3"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x83b39c3"
+                                                                                                "jepsen.coord$map_gen$w__2572@83b39c3"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x83b39c3"
+                                                                                                "jepsen.coord$map_gen$w__2572@83b39c3"]
+                                                                                        #object[jepsen.coord$map_gen$d__2574
+                                                                                                "0x1f7653ae"
+                                                                                                "jepsen.coord$map_gen$d__2574@1f7653ae"]
+                                                                                        #object[jepsen.coord$map_gen$e__2576
+                                                                                                "0x62f8b2f4"
+                                                                                                "jepsen.coord$map_gen$e__2576@62f8b2f4"]]})})
+                                                                        (jepsen.generator.Map
+                                                                         {:f #object[jepsen.coord$tag_sub$fn__2636
+                                                                                     "0x6bd5aa8b"
+                                                                                     "jepsen.coord$tag_sub$fn__2636@6bd5aa8b"],
+                                                                          :arity 1,
+                                                                          :gen (jepsen.generator.Mix
+                                                                                {:i 4,
+                                                                                 :gens [#object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x3af17313"
+                                                                                                "jepsen.coord$map_gen$r__2570@3af17313"]
+                                                                                        #object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x3af17313"
+                                                                                                "jepsen.coord$map_gen$r__2570@3af17313"]
+                                                                                        #object[jepsen.coord$map_gen$r__2570
+                                                                                                "0x3af17313"
+                                                                                                "jepsen.coord$map_gen$r__2570@3af17313"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x1737acc0"
+                                                                                                "jepsen.coord$map_gen$w__2572@1737acc0"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x1737acc0"
+                                                                                                "jepsen.coord$map_gen$w__2572@1737acc0"]
+                                                                                        #object[jepsen.coord$map_gen$w__2572
+                                                                                                "0x1737acc0"
+                                                                                                "jepsen.coord$map_gen$w__2572@1737acc0"]
+                                                                                        #object[jepsen.coord$map_gen$d__2574
+                                                                                                "0x30ffc3c0"
+                                                                                                "jepsen.coord$map_gen$d__2574@30ffc3c0"]
+                                                                                        #object[jepsen.coord$map_gen$e__2576
+                                                                                                "0x76b8b6a6"
+                                                                                                "jepsen.coord$map_gen$e__2576@76b8b6a6"]]})})
+                                                                        ...]})]})})})})]})})})
+          (jepsen.generator.Synchronize
+           {:gen (jepsen.generator.OnThreads
+                  {:f #{:nemesis},
+                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                           "0x47e02a89"
+                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@47e02a89"],
+                   :gen {:type :info, :f :stop}})})
+          (jepsen.generator.Synchronize
+           {:gen {:type :log, :value "recovery: letting cluster converge"}})
+          (jepsen.generator.Synchronize {:gen {:type :sleep, :value 30}}))]
+ :min-op-ok-ratio nil
+ :soak-max-rto-seconds nil
+ :idem-replay-node-offset 0
+ :lease-keepalive-ms nil
+ :min-op-sample 10
+ :os
+ #object[jepsen.os$reify__16045 "0x6d9bcf19" "jepsen.os$reify__16045@6d9bcf19"]
+ :time-limit 90
+ :quiet-availability-min nil
+ :soak-quiet 1800
+ :value-size nil
+ :quiet-min-sample nil
+ :watch-window-ms nil
+ :workload :soakfull
+ :watch-max-events nil
+ :watch-semantics nil}
+
+2026-09-17 14:44:49,674{GMT}	INFO	[jepsen test runner] jepsen.db: Tearing down DB
+2026-09-17 14:44:49,674{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-17 14:44:49,674{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-17 14:44:49,675{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-17 14:44:51,402{GMT}	INFO	[jepsen test runner] jepsen.db: Setting up DB
+2026-09-17 14:44:51,404{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Setting up coord on n1
+2026-09-17 14:44:51,404{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Setting up coord on n3
+2026-09-17 14:44:51,404{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Setting up coord on n2
+2026-09-17 14:44:54,033{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-17 14:44:54,086{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-17 14:44:54,134{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-17 14:44:54,141{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-17 14:44:54,194{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-17 14:44:54,236{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-17 14:44:54,404{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-17 14:44:54,404{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-17 14:44:54,881{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-17 14:44:54,884{GMT}	INFO	[jepsen test runner] jepsen.core: Relative time begins now
+2026-09-17 14:44:54,886{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-17 14:44:54,886{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-17 14:44:54,886{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-17 14:44:55,100{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-17 14:44:55,100{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-17 14:44:55,100{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-17 14:44:55,106{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord cluster is ready
+2026-09-17 14:44:55,146{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord cluster is ready
+2026-09-17 14:44:55,146{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord cluster is ready
+2026-09-17 14:44:55,160{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs42-2-xxxxxxxxx"
+2026-09-17 14:44:55,161{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-17 14:44:55,309{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs42-2-xxxxxxxxx"
+2026-09-17 14:44:55,430{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:read	nil
+2026-09-17 14:44:55,430{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-17 14:44:55,556{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-4"}
+2026-09-17 14:44:55,556{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-17 14:44:55,583{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:read	nil
+2026-09-17 14:44:55,601{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-7-xxxxxxxxx"
+2026-09-17 14:44:55,601{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-17 14:44:55,736{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:txn-read	nil
+2026-09-17 14:44:55,784{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-7-xxxxxxxxx"
+2026-09-17 14:44:55,823{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-11", :old "old-11", :val "new-11", :stale? false}
+2026-09-17 14:44:55,823{GMT}	INFO	[jepsen worker 5] jepsen.coord.client: Opening coord client on n3
+2026-09-17 14:44:56,015{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-11", :old "old-11", :val "new-11", :stale? false}
+2026-09-17 14:44:56,872{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-14", :old "old-14", :val "new-14", :stale? false}
+2026-09-17 14:44:56,873{GMT}	INFO	[jepsen worker 6] jepsen.coord.client: Opening coord client on n1
+2026-09-17 14:44:57,048{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-14", :old "old-14", :val "new-14", :stale? false}
+2026-09-17 14:44:57,474{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:44:57,475{GMT}	INFO	[jepsen worker 7] jepsen.coord.client: Opening coord client on n2
+2026-09-17 14:44:57,661{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:write	"vs42-16-xxxxxxxx"
+2026-09-17 14:44:57,661{GMT}	INFO	[jepsen worker 8] jepsen.coord.client: Opening coord client on n3
+2026-09-17 14:44:57,805{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:write	"vs42-16-xxxxxxxx"
+2026-09-17 14:44:57,842{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:read	nil
+2026-09-17 14:44:57,842{GMT}	INFO	[jepsen worker 9] jepsen.coord.client: Opening coord client on n1
+2026-09-17 14:44:57,988{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:read	nil
+2026-09-17 14:44:58,163{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs42-19-xxxxxxxx"
+2026-09-17 14:44:58,163{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-17 14:44:58,301{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs42-19-xxxxxxxx"
+2026-09-17 14:44:58,389{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs42-22-xxxxxxxx"
+2026-09-17 14:44:58,419{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	"vs42-22-xxxxxxxx"
+2026-09-17 14:44:58,472{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:44:58,481{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs42-24-xxxxxxxx"
+2026-09-17 14:44:58,515{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs42-24-xxxxxxxx"
+2026-09-17 14:44:58,802{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs42-27-xxxxxxxx"
+2026-09-17 14:44:58,839{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs42-27-xxxxxxxx"
+2026-09-17 14:44:59,582{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:44:59,604{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:read	nil
+2026-09-17 14:44:59,606{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:read	nil
+2026-09-17 14:44:59,913{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/30", :ttl 2, :grace-ms 4000}
+2026-09-17 14:44:59,931{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:00,307{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-32", :val "32"}
+2026-09-17 14:45:00,344{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:txn-create	{:key "/jepsen/txn/s42-create-32", :val "32"}
+2026-09-17 14:45:00,357{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:write	"vs42-35-xxxxxxxx"
+2026-09-17 14:45:00,389{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:write	"vs42-35-xxxxxxxx"
+2026-09-17 14:45:00,474{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:00,538{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/39", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:45:01,050{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:01,120{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs42-41-xxxxxxxx"
+2026-09-17 14:45:01,150{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs42-41-xxxxxxxx"
+2026-09-17 14:45:01,193{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs42-44-xxxxxxxx"
+2026-09-17 14:45:01,223{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs42-44-xxxxxxxx"
+2026-09-17 14:45:01,240{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-47", :old "old-47", :val "new-47", :stale? false}
+2026-09-17 14:45:01,302{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-47", :old "old-47", :val "new-47", :stale? false}
+2026-09-17 14:45:01,500{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:01,798{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-17 14:45:01,811{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:write	"vs42-51-xxxxxxxx"
+2026-09-17 14:45:01,825{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n1" [:killed "n1"]}
+2026-09-17 14:45:01,826{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:write	"vs42-55-xxxxxxxx"
+2026-09-17 14:45:01,837{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:01,837{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:01,837{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:01,839{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:info	:write	"vs42-51-xxxxxxxx"	:unavailable-maybe-applied
+2026-09-17 14:45:01,839{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:info	:write	"vs42-55-xxxxxxxx"	:unavailable-maybe-applied
+2026-09-17 14:45:01,864{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:write	"vs42-59-xxxxxxxx"
+2026-09-17 14:45:01,865{GMT}	INFO	[jepsen worker 8] jepsen.coord.client: Opening coord client on n3
+2026-09-17 14:45:01,935{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	"vs42-61-xxxxxxxx"
+2026-09-17 14:45:01,955{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:info	:write	"vs42-61-xxxxxxxx"	:unavailable-maybe-applied
+2026-09-17 14:45:01,992{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/64", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:45:01,993{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-17 14:45:02,007{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:read	nil
+2026-09-17 14:45:02,039{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:info	:read	nil	:unavailable-maybe-applied
+2026-09-17 14:45:02,151{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-67", :old "old-67", :val "new-67", :stale? false}
+2026-09-17 14:45:02,152{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-17 14:45:02,357{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs42-69-xxxxxxxx"
+2026-09-17 14:45:02,376{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:info	:write	"vs42-69-xxxxxxxx"	:unavailable-maybe-applied
+2026-09-17 14:45:02,546{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:write	"vs42-59-xxxxxxxx"
+2026-09-17 14:45:02,644{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-67", :old "old-67", :val "new-67", :stale? false}
+2026-09-17 14:45:02,753{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-74/", :vals ["74-a" "74-b" "74-c"], :range-start "/jepsen/txn/s42-set-74/", :range-end "/jepsen/txn/s42-set-74/z"}
+2026-09-17 14:45:02,830{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-74/", :vals ["74-a" "74-b" "74-c"], :range-start "/jepsen/txn/s42-set-74/", :range-end "/jepsen/txn/s42-set-74/z"}
+2026-09-17 14:45:02,926{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:read	nil
+2026-09-17 14:45:02,939{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:read	nil
+2026-09-17 14:45:03,007{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/30", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:03,048{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/39", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:45:03,109{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:03,110{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:03,577{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/77", :ttl 30, :grace-ms 4000}
+2026-09-17 14:45:03,696{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/77", :ttl 30, :grace-ms 4000}
+2026-09-17 14:45:04,097{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-80-xxxxxxxx"
+2026-09-17 14:45:04,098{GMT}	INFO	[jepsen worker 7] jepsen.coord.client: Opening coord client on n2
+2026-09-17 14:45:04,234{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-80-xxxxxxxx"
+2026-09-17 14:45:05,010{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/64", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:45:05,028{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/84", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:05,346{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-86/", :vals ["86-a" "86-b" "86-c"], :range-start "/jepsen/txn/s42-set-86/", :range-end "/jepsen/txn/s42-set-86/z"}
+2026-09-17 14:45:05,352{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:delete	nil
+2026-09-17 14:45:05,386{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-86/", :vals ["86-a" "86-b" "86-c"], :range-start "/jepsen/txn/s42-set-86/", :range-end "/jepsen/txn/s42-set-86/z"}
+2026-09-17 14:45:05,394{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:delete	nil
+2026-09-17 14:45:05,429{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-90", :val "90"}
+2026-09-17 14:45:05,457{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:txn-create	{:key "/jepsen/txn/s42-create-90", :val "90"}
+2026-09-17 14:45:06,029{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/93", :ttl 30, :grace-ms 4000}
+2026-09-17 14:45:06,143{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/93", :ttl 30, :grace-ms 4000}
+2026-09-17 14:45:06,247{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:delete	nil
+2026-09-17 14:45:06,248{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-17 14:45:06,331{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-95"}
+2026-09-17 14:45:06,360{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:txn-read	nil
+2026-09-17 14:45:06,394{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:delete	nil
+2026-09-17 14:45:06,438{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-99-xxxxxxxx"
+2026-09-17 14:45:06,459{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-99-xxxxxxxx"
+2026-09-17 14:45:06,725{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:write	"vs42-102-xxxxxxx"
+2026-09-17 14:45:06,748{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:write	"vs42-102-xxxxxxx"
+2026-09-17 14:45:06,843{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-105-xxxxxxx"
+2026-09-17 14:45:06,867{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:write	"vs42-105-xxxxxxx"
+2026-09-17 14:45:07,233{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/84", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:07,269{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-109/", :vals ["109-a" "109-b" "109-c"], :range-start "/jepsen/txn/s42-set-109/", :range-end "/jepsen/txn/s42-set-109/z"}
+2026-09-17 14:45:07,294{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-109/", :vals ["109-a" "109-b" "109-c"], :range-start "/jepsen/txn/s42-set-109/", :range-end "/jepsen/txn/s42-set-109/z"}
+2026-09-17 14:45:07,741{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:read	nil
+2026-09-17 14:45:07,749{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:read	nil
+2026-09-17 14:45:07,845{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-112", :old "old-112", :val "new-112", :stale? false}
+2026-09-17 14:45:07,892{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-112", :old "old-112", :val "new-112", :stale? false}
+2026-09-17 14:45:07,901{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:write	"vs42-115-xxxxxxx"
+2026-09-17 14:45:07,924{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:write	"vs42-115-xxxxxxx"
+2026-09-17 14:45:07,975{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:write	"vs42-118-xxxxxxx"
+2026-09-17 14:45:07,996{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:write	"vs42-118-xxxxxxx"
+2026-09-17 14:45:08,156{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:delete	nil
+2026-09-17 14:45:08,177{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:delete	nil
+2026-09-17 14:45:08,242{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-17 14:45:08,301{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Restarting coord on n1
+2026-09-17 14:45:08,302{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-17 14:45:08,398{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs42-123-xxxxxxx"
+2026-09-17 14:45:08,419{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-17 14:45:08,429{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs42-123-xxxxxxx"
+2026-09-17 14:45:08,507{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-17 14:45:08,507{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n1" [:restarted "n1"]}
+2026-09-17 14:45:08,749{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:exists	nil
+2026-09-17 14:45:08,771{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:exists	nil
+2026-09-17 14:45:09,220{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-126/", :vals ["126-a" "126-b" "126-c"], :range-start "/jepsen/txn/s42-set-126/", :range-end "/jepsen/txn/s42-set-126/z"}
+2026-09-17 14:45:09,251{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-126/", :vals ["126-a" "126-b" "126-c"], :range-start "/jepsen/txn/s42-set-126/", :range-end "/jepsen/txn/s42-set-126/z"}
+2026-09-17 14:45:09,539{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:read	nil
+2026-09-17 14:45:09,549{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:read	nil
+2026-09-17 14:45:09,716{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/129", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:09,788{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:read	nil
+2026-09-17 14:45:09,790{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:read	nil
+2026-09-17 14:45:09,851{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:write	"vs42-132-xxxxxxx"
+2026-09-17 14:45:09,875{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:write	"vs42-132-xxxxxxx"
+2026-09-17 14:45:10,135{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-135/", :vals ["135-a" "135-b" "135-c"], :range-start "/jepsen/txn/s42-set-135/", :range-end "/jepsen/txn/s42-set-135/z"}
+2026-09-17 14:45:10,169{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-135/", :vals ["135-a" "135-b" "135-c"], :range-start "/jepsen/txn/s42-set-135/", :range-end "/jepsen/txn/s42-set-135/z"}
+2026-09-17 14:45:10,210{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	"vs42-138-xxxxxxx"
+2026-09-17 14:45:10,241{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	"vs42-138-xxxxxxx"
+2026-09-17 14:45:10,556{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:11,017{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs42-140-xxxxxxx"
+2026-09-17 14:45:11,041{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs42-140-xxxxxxx"
+2026-09-17 14:45:11,106{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-143", :old "old-143", :val "new-143", :stale? false}
+2026-09-17 14:45:11,124{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:write	"vs42-145-xxxxxxx"
+2026-09-17 14:45:11,136{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-147", :val "147"}
+2026-09-17 14:45:11,175{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:write	"vs42-145-xxxxxxx"
+2026-09-17 14:45:11,184{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-143", :old "old-143", :val "new-143", :stale? false}
+2026-09-17 14:45:11,184{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:txn-create	{:key "/jepsen/txn/s42-create-147", :val "147"}
+2026-09-17 14:45:11,678{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-151", :val "151"}
+2026-09-17 14:45:11,713{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:txn-create	{:key "/jepsen/txn/s42-create-151", :val "151"}
+2026-09-17 14:45:11,795{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/129", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:11,804{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/155", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:45:11,810{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-157", :val "157"}
+2026-09-17 14:45:11,878{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:txn-create	{:key "/jepsen/txn/s42-create-157", :val "157"}
+2026-09-17 14:45:12,173{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:delete	nil
+2026-09-17 14:45:12,201{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:delete	nil
+2026-09-17 14:45:12,230{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-160"}
+2026-09-17 14:45:12,258{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:txn-read	nil
+2026-09-17 14:45:12,557{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:12,596{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	"vs42-164-xxxxxxx"
+2026-09-17 14:45:12,619{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	"vs42-164-xxxxxxx"
+2026-09-17 14:45:13,017{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-167", :old "old-167", :val "new-167", :stale? false}
+2026-09-17 14:45:13,050{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-17 14:45:13,061{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n3" [:killed "n3"]}
+2026-09-17 14:45:13,075{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:info	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-167", :old "old-167", :val "new-167", :stale? false}	:unavailable-maybe-applied
+2026-09-17 14:45:13,658{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:read	nil
+2026-09-17 14:45:13,667{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:read	nil
+2026-09-17 14:45:13,934{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-170/", :vals ["170-a" "170-b" "170-c"], :range-start "/jepsen/txn/s42-set-170/", :range-end "/jepsen/txn/s42-set-170/z"}
+2026-09-17 14:45:13,944{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:13,955{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-170/", :vals ["170-a" "170-b" "170-c"], :range-start "/jepsen/txn/s42-set-170/", :range-end "/jepsen/txn/s42-set-170/z"}
+2026-09-17 14:45:14,014{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/173", :ttl 30, :grace-ms 4000}
+2026-09-17 14:45:14,124{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/173", :ttl 30, :grace-ms 4000}
+2026-09-17 14:45:14,218{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/155", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:45:15,022{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-177", :old "old-177", :val "new-177", :stale? true}
+2026-09-17 14:45:15,072{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-177", :old "old-177", :val "new-177", :stale? true}
+2026-09-17 14:45:15,427{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:delete	nil
+2026-09-17 14:45:15,447{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:delete	nil
+2026-09-17 14:45:15,945{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:15,981{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/181", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:45:16,047{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read	nil
+2026-09-17 14:45:16,049{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read	nil
+2026-09-17 14:45:16,572{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:write	"vs42-184-xxxxxxx"
+2026-09-17 14:45:16,573{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-17 14:45:16,695{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:write	"vs42-184-xxxxxxx"
+2026-09-17 14:45:16,883{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs42-187-xxxxxxx"
+2026-09-17 14:45:16,901{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs42-187-xxxxxxx"
+2026-09-17 14:45:17,136{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:delete	nil
+2026-09-17 14:45:17,156{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:delete	nil
+2026-09-17 14:45:17,385{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:read	nil
+2026-09-17 14:45:17,389{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:read	nil
+2026-09-17 14:45:17,403{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/190", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:17,447{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-17 14:45:17,493{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Restarting coord on n3
+2026-09-17 14:45:17,494{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-17 14:45:17,506{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:17,617{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-17 14:45:17,639{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:write	"vs42-192-xxxxxxx"
+2026-09-17 14:45:17,669{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:write	"vs42-192-xxxxxxx"
+2026-09-17 14:45:17,730{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	"vs42-195-xxxxxxx"
+2026-09-17 14:45:17,754{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	"vs42-195-xxxxxxx"
+2026-09-17 14:45:18,350{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:delete	nil
+2026-09-17 14:45:18,374{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:delete	nil
+2026-09-17 14:45:18,452{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/181", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:45:18,629{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-17 14:45:18,629{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+2026-09-17 14:45:18,702{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:read	nil
+2026-09-17 14:45:18,705{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:read	nil
+2026-09-17 14:45:18,745{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:delete	nil
+2026-09-17 14:45:18,769{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:delete	nil
+2026-09-17 14:45:18,815{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-198-xxxxxxx"
+2026-09-17 14:45:18,843{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-198-xxxxxxx"
+2026-09-17 14:45:19,202{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:write	"vs42-201-xxxxxxx"
+2026-09-17 14:45:19,227{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:write	"vs42-201-xxxxxxx"
+2026-09-17 14:45:19,507{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:19,608{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/190", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:19,858{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-206-xxxxxxx"
+2026-09-17 14:45:19,883{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-208-xxxxxxx"
+2026-09-17 14:45:19,893{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:write	"vs42-206-xxxxxxx"
+2026-09-17 14:45:19,924{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-208-xxxxxxx"
+2026-09-17 14:45:20,175{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:write	"vs42-212-xxxxxxx"
+2026-09-17 14:45:20,202{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:write	"vs42-212-xxxxxxx"
+2026-09-17 14:45:20,355{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-215"}
+2026-09-17 14:45:20,385{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:txn-read	nil
+2026-09-17 14:45:20,486{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:write	"vs42-218-xxxxxxx"
+2026-09-17 14:45:20,519{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:write	"vs42-218-xxxxxxx"
+2026-09-17 14:45:20,532{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/221", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:20,887{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:delete	nil
+2026-09-17 14:45:20,912{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:delete	nil
+2026-09-17 14:45:21,005{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:write	"vs42-224-xxxxxxx"
+2026-09-17 14:45:21,061{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:write	"vs42-224-xxxxxxx"
+2026-09-17 14:45:21,288{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:read	nil
+2026-09-17 14:45:21,294{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:read	nil
+2026-09-17 14:45:21,427{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/227", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:21,458{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:exists	nil
+2026-09-17 14:45:21,503{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:exists	nil
+2026-09-17 14:45:21,925{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-230", :val "230"}
+2026-09-17 14:45:21,953{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:txn-create	{:key "/jepsen/txn/s42-create-230", :val "230"}
+2026-09-17 14:45:22,157{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:exists	nil
+2026-09-17 14:45:22,163{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/232", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:22,186{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:exists	nil
+2026-09-17 14:45:22,232{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:write	"vs42-235-xxxxxxx"
+2026-09-17 14:45:22,255{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:write	"vs42-235-xxxxxxx"
+2026-09-17 14:45:22,727{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/221", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:23,413{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/239", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:45:23,646{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/227", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:23,863{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:24,329{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-241", :old "old-241", :val "new-241", :stale? false}
+2026-09-17 14:45:24,385{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/232", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:24,386{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-241", :old "old-241", :val "new-241", :stale? false}
+2026-09-17 14:45:24,916{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:write	"vs42-245-xxxxxxx"
+2026-09-17 14:45:24,939{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:write	"vs42-245-xxxxxxx"
+2026-09-17 14:45:24,957{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-17 14:45:24,982{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n3" [:killed "n3"]}
+2026-09-17 14:45:25,101{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:25,789{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/239", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:45:25,864{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:25,877{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:exists	nil
+2026-09-17 14:45:25,897{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:exists	nil
+2026-09-17 14:45:26,378{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:delete	nil
+2026-09-17 14:45:26,398{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:delete	nil
+2026-09-17 14:45:27,102{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:27,378{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/249", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:27,617{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:write	"vs42-251-xxxxxxx"
+2026-09-17 14:45:27,640{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:write	"vs42-251-xxxxxxx"
+2026-09-17 14:45:27,653{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:27,656{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:27,730{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/254", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:45:28,053{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:28,066{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/256", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:28,575{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:read	nil
+2026-09-17 14:45:28,577{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:read	nil
+2026-09-17 14:45:28,853{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2026-09-17 14:45:28,857{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2026-09-17 14:45:28,997{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:write	"vs42-259-xxxxxxx"
+2026-09-17 14:45:29,017{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:write	"vs42-259-xxxxxxx"
+2026-09-17 14:45:29,469{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-262-xxxxxxx"
+2026-09-17 14:45:29,489{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:write	"vs42-262-xxxxxxx"
+2026-09-17 14:45:29,561{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/249", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:29,882{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:delete	nil
+2026-09-17 14:45:29,901{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:delete	nil
+2026-09-17 14:45:29,932{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:write	"vs42-265-xxxxxxx"
+2026-09-17 14:45:29,953{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:write	"vs42-265-xxxxxxx"
+2026-09-17 14:45:30,054{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:30,095{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:read	nil
+2026-09-17 14:45:30,098{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:read	nil
+2026-09-17 14:45:30,114{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/256", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:30,182{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:30,229{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/254", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:45:30,277{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-268", :val "268"}
+2026-09-17 14:45:30,300{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:txn-create	{:key "/jepsen/txn/s42-create-268", :val "268"}
+2026-09-17 14:45:30,362{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-271", :val "271"}
+2026-09-17 14:45:30,382{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:txn-create	{:key "/jepsen/txn/s42-create-271", :val "271"}
+2026-09-17 14:45:30,402{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-274"}
+2026-09-17 14:45:30,421{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:txn-read	nil
+2026-09-17 14:45:30,572{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:delete	nil
+2026-09-17 14:45:30,593{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:delete	nil
+2026-09-17 14:45:31,404{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-277", :old "old-277", :val "new-277", :stale? false}
+2026-09-17 14:45:31,447{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-277", :old "old-277", :val "new-277", :stale? false}
+2026-09-17 14:45:31,541{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-280"}
+2026-09-17 14:45:31,562{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:txn-read	nil
+2026-09-17 14:45:31,735{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-283-xxxxxxx"
+2026-09-17 14:45:31,755{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:write	"vs42-283-xxxxxxx"
+2026-09-17 14:45:31,865{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:delete	nil
+2026-09-17 14:45:31,885{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:delete	nil
+2026-09-17 14:45:32,183{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:32,374{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-287", :old "old-287", :val "new-287", :stale? false}
+2026-09-17 14:45:32,415{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-287", :old "old-287", :val "new-287", :stale? false}
+2026-09-17 14:45:32,499{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-17 14:45:32,552{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Restarting coord on n3
+2026-09-17 14:45:32,552{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-17 14:45:32,559{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-292", :val "292"}
+2026-09-17 14:45:32,581{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:txn-create	{:key "/jepsen/txn/s42-create-292", :val "292"}
+2026-09-17 14:45:32,657{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-17 14:45:33,412{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:33,455{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-294/", :vals ["294-a" "294-b" "294-c"], :range-start "/jepsen/txn/s42-set-294/", :range-end "/jepsen/txn/s42-set-294/z"}
+2026-09-17 14:45:33,485{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-294/", :vals ["294-a" "294-b" "294-c"], :range-start "/jepsen/txn/s42-set-294/", :range-end "/jepsen/txn/s42-set-294/z"}
+2026-09-17 14:45:33,669{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-17 14:45:33,670{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+2026-09-17 14:45:33,773{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:read	nil
+2026-09-17 14:45:33,776{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:read	nil
+2026-09-17 14:45:34,703{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:delete	nil
+2026-09-17 14:45:34,727{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:delete	nil
+2026-09-17 14:45:34,749{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:34,965{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-296-xxxxxxx"
+2026-09-17 14:45:34,989{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:write	"vs42-296-xxxxxxx"
+2026-09-17 14:45:35,171{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-299-xxxxxxx"
+2026-09-17 14:45:35,192{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-299-xxxxxxx"
+2026-09-17 14:45:35,413{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:35,557{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:write	"vs42-303-xxxxxxx"
+2026-09-17 14:45:35,578{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:write	"vs42-303-xxxxxxx"
+2026-09-17 14:45:36,750{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:36,895{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:36,982{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:37,560{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/305", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:37,772{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:read	nil
+2026-09-17 14:45:37,775{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:read	nil
+2026-09-17 14:45:38,248{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:write	"vs42-308-xxxxxxx"
+2026-09-17 14:45:38,268{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:write	"vs42-308-xxxxxxx"
+2026-09-17 14:45:38,513{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-17 14:45:38,528{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n3" [:killed "n3"]}
+2026-09-17 14:45:38,536{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:38,810{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:read	nil
+2026-09-17 14:45:38,813{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:read	nil
+2026-09-17 14:45:38,896{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:39,740{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/305", :ttl 2, :grace-ms 4000}
+2026-09-17 14:45:40,077{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/313", :ttl 30, :grace-ms 4000}
+2026-09-17 14:45:40,180{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/313", :ttl 30, :grace-ms 4000}
+2026-09-17 14:45:40,512{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:40,796{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-315", :val "315"}
+2026-09-17 14:45:40,817{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:txn-create	{:key "/jepsen/txn/s42-create-315", :val "315"}
+2026-09-17 14:45:41,291{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:read	nil
+2026-09-17 14:45:41,294{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:read	nil
+2026-09-17 14:45:41,294{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:write	"vs42-317-xxxxxxx"
+2026-09-17 14:45:41,315{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:write	"vs42-317-xxxxxxx"
+2026-09-17 14:45:41,574{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:write	"vs42-320-xxxxxxx"
+2026-09-17 14:45:41,593{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:write	"vs42-320-xxxxxxx"
+2026-09-17 14:45:41,800{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/323", :ttl 30, :grace-ms 4000}
+2026-09-17 14:45:41,899{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/323", :ttl 30, :grace-ms 4000}
+2026-09-17 14:45:42,190{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:read	nil
+2026-09-17 14:45:42,193{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:read	nil
+2026-09-17 14:45:42,513{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:42,908{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-17 14:45:42,968{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Restarting coord on n3
+2026-09-17 14:45:42,969{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-17 14:45:43,092{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-17 14:45:43,523{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:exists	nil
+2026-09-17 14:45:43,541{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:exists	nil
+2026-09-17 14:45:43,622{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:exists	nil
+2026-09-17 14:45:43,640{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:exists	nil
+2026-09-17 14:45:43,910{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:read	nil
+2026-09-17 14:45:43,912{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:read	nil
+2026-09-17 14:45:43,986{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:exists	nil
+2026-09-17 14:45:44,004{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:exists	nil
+2026-09-17 14:45:44,102{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-17 14:45:44,103{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+2026-09-17 14:45:44,167{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-328", :val "328"}
+2026-09-17 14:45:44,191{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:txn-create	{:key "/jepsen/txn/s42-create-328", :val "328"}
+2026-09-17 14:45:44,580{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:44,592{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read	nil
+2026-09-17 14:45:44,594{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read	nil
+2026-09-17 14:45:44,961{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read	nil
+2026-09-17 14:45:44,966{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read	nil
+2026-09-17 14:45:45,652{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:write	"vs42-331-xxxxxxx"
+2026-09-17 14:45:45,672{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:write	"vs42-331-xxxxxxx"
+2026-09-17 14:45:45,841{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:delete	nil
+2026-09-17 14:45:45,863{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:delete	nil
+2026-09-17 14:45:45,922{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:delete	nil
+2026-09-17 14:45:45,946{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:delete	nil
+2026-09-17 14:45:46,580{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:46,740{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:write	"vs42-335-xxxxxxx"
+2026-09-17 14:45:46,753{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true, :count-only true}
+2026-09-17 14:45:46,766{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:write	"vs42-335-xxxxxxx"
+2026-09-17 14:45:46,766{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true, :count-only true}
+2026-09-17 14:45:47,194{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:read	nil
+2026-09-17 14:45:47,201{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:read	nil
+2026-09-17 14:45:48,337{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-338/", :vals ["338-a" "338-b" "338-c"], :range-start "/jepsen/txn/s42-set-338/", :range-end "/jepsen/txn/s42-set-338/z"}
+2026-09-17 14:45:48,362{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-338/", :vals ["338-a" "338-b" "338-c"], :range-start "/jepsen/txn/s42-set-338/", :range-end "/jepsen/txn/s42-set-338/z"}
+2026-09-17 14:45:48,807{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:write	"vs42-341-xxxxxxx"
+2026-09-17 14:45:48,829{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:write	"vs42-341-xxxxxxx"
+2026-09-17 14:45:49,193{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:write	"vs42-344-xxxxxxx"
+2026-09-17 14:45:49,219{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:write	"vs42-344-xxxxxxx"
+2026-09-17 14:45:49,421{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-17 14:45:49,445{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n3" [:killed "n3"]}
+2026-09-17 14:45:49,752{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:50,103{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs42-346-xxxxxxx"
+2026-09-17 14:45:50,122{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs42-346-xxxxxxx"
+2026-09-17 14:45:50,189{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-349/", :vals ["349-a" "349-b" "349-c"], :range-start "/jepsen/txn/s42-set-349/", :range-end "/jepsen/txn/s42-set-349/z"}
+2026-09-17 14:45:50,212{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-349/", :vals ["349-a" "349-b" "349-c"], :range-start "/jepsen/txn/s42-set-349/", :range-end "/jepsen/txn/s42-set-349/z"}
+2026-09-17 14:45:50,267{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-352", :val "352"}
+2026-09-17 14:45:50,289{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:txn-create	{:key "/jepsen/txn/s42-create-352", :val "352"}
+2026-09-17 14:45:50,565{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-355", :old "old-355", :val "new-355", :stale? false}
+2026-09-17 14:45:50,606{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-355", :old "old-355", :val "new-355", :stale? false}
+2026-09-17 14:45:51,168{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-358-xxxxxxx"
+2026-09-17 14:45:51,187{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-358-xxxxxxx"
+2026-09-17 14:45:51,708{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:write	"vs42-361-xxxxxxx"
+2026-09-17 14:45:51,728{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:write	"vs42-361-xxxxxxx"
+2026-09-17 14:45:51,753{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:45:52,202{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-365"}
+2026-09-17 14:45:52,221{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:txn-read	nil
+2026-09-17 14:45:52,823{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:read	nil
+2026-09-17 14:45:52,828{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:read	nil
+2026-09-17 14:45:54,197{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:write	"vs42-368-xxxxxxx"
+2026-09-17 14:45:54,216{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:write	"vs42-368-xxxxxxx"
+2026-09-17 14:45:54,541{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	"vs42-371-xxxxxxx"
+2026-09-17 14:45:54,560{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	"vs42-371-xxxxxxx"
+2026-09-17 14:45:54,628{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-374"}
+2026-09-17 14:45:54,649{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:txn-read	nil
+2026-09-17 14:45:54,765{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:read	nil
+2026-09-17 14:45:54,767{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:read	nil
+2026-09-17 14:45:54,917{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-377-xxxxxxx"
+2026-09-17 14:45:54,938{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-377-xxxxxxx"
+2026-09-17 14:45:54,988{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:read	nil
+2026-09-17 14:45:54,990{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:read	nil
+2026-09-17 14:45:55,929{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-380-xxxxxxx"
+2026-09-17 14:45:55,946{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-382", :old "old-382", :val "new-382", :stale? false}
+2026-09-17 14:45:55,948{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:write	"vs42-380-xxxxxxx"
+2026-09-17 14:45:55,989{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-382", :old "old-382", :val "new-382", :stale? false}
+2026-09-17 14:45:55,990{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:write	"vs42-386-xxxxxxx"
+2026-09-17 14:45:56,008{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:write	"vs42-386-xxxxxxx"
+2026-09-17 14:45:56,360{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-17 14:45:56,427{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Restarting coord on n3
+2026-09-17 14:45:56,428{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-17 14:45:56,511{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/391", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:45:56,553{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-17 14:45:57,011{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read	nil
+2026-09-17 14:45:57,014{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read	nil
+2026-09-17 14:45:57,564{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-17 14:45:57,564{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+2026-09-17 14:45:57,582{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:write	"vs42-396-xxxxxxx"
+2026-09-17 14:45:57,615{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:write	"vs42-396-xxxxxxx"
+2026-09-17 14:45:57,901{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-399/", :vals ["399-a" "399-b" "399-c"], :range-start "/jepsen/txn/s42-set-399/", :range-end "/jepsen/txn/s42-set-399/z"}
+2026-09-17 14:45:57,928{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-399/", :vals ["399-a" "399-b" "399-c"], :range-start "/jepsen/txn/s42-set-399/", :range-end "/jepsen/txn/s42-set-399/z"}
+2026-09-17 14:45:58,248{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-402-xxxxxxx"
+2026-09-17 14:45:58,271{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-402-xxxxxxx"
+2026-09-17 14:45:58,521{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-405", :old "old-405", :val "new-405", :stale? true}
+2026-09-17 14:45:58,569{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-405", :old "old-405", :val "new-405", :stale? true}
+2026-09-17 14:45:58,799{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-408-xxxxxxx"
+2026-09-17 14:45:58,820{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:write	"vs42-408-xxxxxxx"
+2026-09-17 14:45:58,896{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:exists	nil
+2026-09-17 14:45:58,936{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:exists	nil
+2026-09-17 14:45:59,049{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/391", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:45:59,285{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/412", :ttl 30, :grace-ms 4000}
+2026-09-17 14:45:59,412{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/412", :ttl 30, :grace-ms 4000}
+2026-09-17 14:45:59,463{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-415", :old "old-415", :val "new-415", :stale? false}
+2026-09-17 14:45:59,467{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:read	nil
+2026-09-17 14:45:59,472{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:read	nil
+2026-09-17 14:45:59,526{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-415", :old "old-415", :val "new-415", :stale? false}
+2026-09-17 14:46:00,068{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:read	nil
+2026-09-17 14:46:00,071{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:read	nil
+2026-09-17 14:46:00,095{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	"vs42-418-xxxxxxx"
+2026-09-17 14:46:00,124{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	"vs42-418-xxxxxxx"
+2026-09-17 14:46:00,446{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:write	"vs42-421-xxxxxxx"
+2026-09-17 14:46:00,469{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:write	"vs42-421-xxxxxxx"
+2026-09-17 14:46:00,754{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-424", :val "424"}
+2026-09-17 14:46:00,778{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:txn-create	{:key "/jepsen/txn/s42-create-424", :val "424"}
+2026-09-17 14:46:01,069{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-427-xxxxxxx"
+2026-09-17 14:46:01,095{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-427-xxxxxxx"
+2026-09-17 14:46:01,113{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:read	nil
+2026-09-17 14:46:01,115{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:read	nil
+2026-09-17 14:46:01,285{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-430-xxxxxxx"
+2026-09-17 14:46:01,313{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:write	"vs42-430-xxxxxxx"
+2026-09-17 14:46:03,029{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/433", :ttl 2, :grace-ms 4000}
+2026-09-17 14:46:03,095{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/435", :ttl 2, :grace-ms 4000}
+2026-09-17 14:46:03,200{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:delete	nil
+2026-09-17 14:46:03,222{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:delete	nil
+2026-09-17 14:46:03,401{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/438", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:46:04,481{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	"vs42-440-xxxxxxx"
+2026-09-17 14:46:04,505{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	"vs42-440-xxxxxxx"
+2026-09-17 14:46:04,751{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read	nil
+2026-09-17 14:46:04,754{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read	nil
+2026-09-17 14:46:04,960{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:read	nil
+2026-09-17 14:46:04,963{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:read	nil
+2026-09-17 14:46:05,105{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:read	nil
+2026-09-17 14:46:05,112{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:read	nil
+2026-09-17 14:46:05,161{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-17 14:46:05,187{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n2" [:killed "n2"]}
+2026-09-17 14:46:05,221{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/433", :ttl 2, :grace-ms 4000}
+2026-09-17 14:46:05,226{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-448-xxxxxxx"
+2026-09-17 14:46:05,245{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:write	"vs42-448-xxxxxxx"
+2026-09-17 14:46:05,428{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/435", :ttl 2, :grace-ms 4000}
+2026-09-17 14:46:05,466{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-452", :old "old-452", :val "new-452", :stale? false}
+2026-09-17 14:46:05,505{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-452", :old "old-452", :val "new-452", :stale? false}
+2026-09-17 14:46:05,634{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:write	"vs42-455-xxxxxxx"
+2026-09-17 14:46:05,653{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:write	"vs42-455-xxxxxxx"
+2026-09-17 14:46:05,768{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/438", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:46:06,043{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:delete	nil
+2026-09-17 14:46:06,062{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:delete	nil
+2026-09-17 14:46:06,352{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:write	"vs42-458-xxxxxxx"
+2026-09-17 14:46:06,372{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:write	"vs42-458-xxxxxxx"
+2026-09-17 14:46:06,931{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:46:07,045{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	"vs42-460-xxxxxxx"
+2026-09-17 14:46:07,065{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	"vs42-460-xxxxxxx"
+2026-09-17 14:46:07,468{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:write	"vs42-463-xxxxxxx"
+2026-09-17 14:46:07,490{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:write	"vs42-463-xxxxxxx"
+2026-09-17 14:46:07,627{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs42-466-xxxxxxx"
+2026-09-17 14:46:07,650{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs42-466-xxxxxxx"
+2026-09-17 14:46:08,736{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:46:08,812{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:write	"vs42-468-xxxxxxx"
+2026-09-17 14:46:08,831{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:write	"vs42-468-xxxxxxx"
+2026-09-17 14:46:08,932{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:46:09,414{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:read	nil
+2026-09-17 14:46:09,417{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:read	nil
+2026-09-17 14:46:09,535{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-471/", :vals ["471-a" "471-b" "471-c"], :range-start "/jepsen/txn/s42-set-471/", :range-end "/jepsen/txn/s42-set-471/z"}
+2026-09-17 14:46:09,555{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-471/", :vals ["471-a" "471-b" "471-c"], :range-start "/jepsen/txn/s42-set-471/", :range-end "/jepsen/txn/s42-set-471/z"}
+2026-09-17 14:46:09,625{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-474"}
+2026-09-17 14:46:09,643{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:txn-read	nil
+2026-09-17 14:46:10,369{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-17 14:46:10,420{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Restarting coord on n2
+2026-09-17 14:46:10,420{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-17 14:46:10,545{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-17 14:46:10,737{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:46:10,751{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:write	"vs42-480-xxxxxxx"
+2026-09-17 14:46:10,783{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:write	"vs42-480-xxxxxxx"
+2026-09-17 14:46:10,879{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:read	nil
+2026-09-17 14:46:10,882{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:read	nil
+2026-09-17 14:46:11,092{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+2026-09-17 14:46:11,094{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+2026-09-17 14:46:11,557{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-17 14:46:11,558{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n2" [:restarted "n2"]}
+2026-09-17 14:46:11,724{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs42-485-xxxxxxx"
+2026-09-17 14:46:11,726{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-487-xxxxxxx"
+2026-09-17 14:46:11,756{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs42-485-xxxxxxx"
+2026-09-17 14:46:11,772{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-487-xxxxxxx"
+2026-09-17 14:46:11,851{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:delete	nil
+2026-09-17 14:46:11,875{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:delete	nil
+2026-09-17 14:46:12,030{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-490-xxxxxxx"
+2026-09-17 14:46:12,054{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:write	"vs42-490-xxxxxxx"
+2026-09-17 14:46:12,084{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:read	nil
+2026-09-17 14:46:12,089{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:read	nil
+2026-09-17 14:46:12,174{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:46:13,410{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:delete	nil
+2026-09-17 14:46:13,439{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:delete	nil
+2026-09-17 14:46:13,609{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-493", :old "old-493", :val "new-493", :stale? false}
+2026-09-17 14:46:13,665{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-493", :old "old-493", :val "new-493", :stale? false}
+2026-09-17 14:46:14,176{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:46:14,671{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:46:14,912{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	"vs42-495-xxxxxxx"
+2026-09-17 14:46:14,934{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	"vs42-495-xxxxxxx"
+2026-09-17 14:46:15,208{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-498/", :vals ["498-a" "498-b" "498-c"], :range-start "/jepsen/txn/s42-set-498/", :range-end "/jepsen/txn/s42-set-498/z"}
+2026-09-17 14:46:15,229{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-498/", :vals ["498-a" "498-b" "498-c"], :range-start "/jepsen/txn/s42-set-498/", :range-end "/jepsen/txn/s42-set-498/z"}
+2026-09-17 14:46:15,592{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:46:16,582{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:read	nil
+2026-09-17 14:46:16,585{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:read	nil
+2026-09-17 14:46:16,672{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:46:16,785{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:exists	nil
+2026-09-17 14:46:16,809{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:exists	nil
+2026-09-17 14:46:17,594{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2026-09-17 14:46:17,853{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-502-xxxxxxx"
+2026-09-17 14:46:17,873{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:write	"vs42-502-xxxxxxx"
+2026-09-17 14:46:17,881{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-505-xxxxxxx"
+2026-09-17 14:46:17,902{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-505-xxxxxxx"
+2026-09-17 14:46:18,081{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/508", :ttl 2, :grace-ms 4000}
+2026-09-17 14:46:18,308{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-17 14:46:18,332{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n3" [:killed "n3"]}
+2026-09-17 14:46:18,522{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/514", :ttl 2, :grace-ms 4000}
+2026-09-17 14:46:18,917{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/516", :ttl 30, :grace-ms 4000}
+2026-09-17 14:46:18,948{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-518", :old "old-518", :val "new-518", :stale? false}
+2026-09-17 14:46:19,003{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-518", :old "old-518", :val "new-518", :stale? false}
+2026-09-17 14:46:19,035{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/516", :ttl 30, :grace-ms 4000}
+2026-09-17 14:46:19,112{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:delete	nil
+2026-09-17 14:46:19,117{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-520-xxxxxxx"
+2026-09-17 14:46:19,142{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:delete	nil
+2026-09-17 14:46:19,147{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-520-xxxxxxx"
+2026-09-17 14:46:19,563{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:read	nil
+2026-09-17 14:46:19,566{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:read	nil
+2026-09-17 14:46:19,736{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:read	nil
+2026-09-17 14:46:19,738{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:read	nil
+2026-09-17 14:46:20,024{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:read	nil
+2026-09-17 14:46:20,027{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:read	nil
+2026-09-17 14:46:20,107{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/508", :ttl 2, :grace-ms 4000}
+2026-09-17 14:46:20,396{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:delete	nil
+2026-09-17 14:46:20,404{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-522/", :vals ["522-a" "522-b" "522-c"], :range-start "/jepsen/txn/s42-set-522/", :range-end "/jepsen/txn/s42-set-522/z"}
+2026-09-17 14:46:20,414{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:delete	nil
+2026-09-17 14:46:20,431{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-522/", :vals ["522-a" "522-b" "522-c"], :range-start "/jepsen/txn/s42-set-522/", :range-end "/jepsen/txn/s42-set-522/z"}
+2026-09-17 14:46:20,491{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read	nil
+2026-09-17 14:46:20,493{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read	nil
+2026-09-17 14:46:20,631{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read	nil
+2026-09-17 14:46:20,633{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read	nil
+2026-09-17 14:46:20,703{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/525", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:46:20,717{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/514", :ttl 2, :grace-ms 4000}
+2026-09-17 14:46:20,753{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:read	nil
+2026-09-17 14:46:20,759{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:read	nil
+2026-09-17 14:46:20,807{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-528/", :vals ["528-a" "528-b" "528-c"], :range-start "/jepsen/txn/s42-set-528/", :range-end "/jepsen/txn/s42-set-528/z"}
+2026-09-17 14:46:20,845{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-528/", :vals ["528-a" "528-b" "528-c"], :range-start "/jepsen/txn/s42-set-528/", :range-end "/jepsen/txn/s42-set-528/z"}
+2026-09-17 14:46:21,171{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-531-xxxxxxx"
+2026-09-17 14:46:21,189{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-531-xxxxxxx"
+2026-09-17 14:46:21,453{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-534", :val "534"}
+2026-09-17 14:46:21,474{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:txn-create	{:key "/jepsen/txn/s42-create-534", :val "534"}
+2026-09-17 14:46:22,029{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-537/", :vals ["537-a" "537-b" "537-c"], :range-start "/jepsen/txn/s42-set-537/", :range-end "/jepsen/txn/s42-set-537/z"}
+2026-09-17 14:46:22,048{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-537/", :vals ["537-a" "537-b" "537-c"], :range-start "/jepsen/txn/s42-set-537/", :range-end "/jepsen/txn/s42-set-537/z"}
+2026-09-17 14:46:22,197{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:read	nil
+2026-09-17 14:46:22,200{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:read	nil
+2026-09-17 14:46:22,627{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:read	nil
+2026-09-17 14:46:22,630{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:read	nil
+2026-09-17 14:46:23,011{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:write	"vs42-540-xxxxxxx"
+2026-09-17 14:46:23,031{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:write	"vs42-540-xxxxxxx"
+2026-09-17 14:46:23,190{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/525", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-17 14:46:23,238{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-544", :old "old-544", :val "new-544", :stale? false}
+2026-09-17 14:46:23,265{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-17 14:46:23,276{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-544", :old "old-544", :val "new-544", :stale? false}
+2026-09-17 14:46:23,310{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Restarting coord on n3
+2026-09-17 14:46:23,310{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-17 14:46:23,423{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read	nil
+2026-09-17 14:46:23,426{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read	nil
+2026-09-17 14:46:23,434{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-17 14:46:23,540{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:write	"vs42-547-xxxxxxx"
+2026-09-17 14:46:23,571{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:write	"vs42-547-xxxxxxx"
+2026-09-17 14:46:23,997{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	"vs42-550-xxxxxxx"
+2026-09-17 14:46:24,038{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	"vs42-550-xxxxxxx"
+2026-09-17 14:46:24,323{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-553-xxxxxxx"
+2026-09-17 14:46:24,353{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-553-xxxxxxx"
+2026-09-17 14:46:24,385{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:delete	nil
+2026-09-17 14:46:24,416{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:delete	nil
+2026-09-17 14:46:24,447{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-17 14:46:24,447{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+2026-09-17 14:46:24,454{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-558-xxxxxxx"
+2026-09-17 14:46:24,483{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-558-xxxxxxx"
+2026-09-17 14:46:28,334{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-17 14:46:28,334{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	:not-started
+2026-09-17 14:46:28,335{GMT}	INFO	[jepsen worker 9] jepsen.generator.interpreter: recovery: letting cluster converge
+2026-09-17 14:46:58,350{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-17 14:46:58,350{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-17 14:46:58,350{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-17 14:46:58,499{GMT}	INFO	[jepsen test runner] jepsen.core: Run complete, writing
+2026-09-17 14:46:58,556{GMT}	INFO	[jepsen test runner] jepsen.core: Snarfing log files
+2026-09-17 14:46:58,557{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Killing coord on n1
+2026-09-17 14:46:58,557{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Killing coord on n2
+2026-09-17 14:46:58,557{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Killing coord on n3
+2026-09-17 14:46:58,615{GMT}	INFO	[jepsen node n1] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-17 14:46:58,615{GMT}	INFO	[jepsen node n2] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-17 14:46:58,615{GMT}	INFO	[jepsen node n3] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-17 14:46:58,737{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-17 14:46:58,737{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-17 14:46:58,737{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-17 14:47:00,321{GMT}	INFO	[jepsen test runner] jepsen.core: Analyzing...
+2026-09-17 14:47:00,325{GMT}	INFO	[clojure-agent-send-off-pool-9] jepsen.coord.mixck: mixture routing: {:valid? true, :by-sub {:lease 30, :map 134, :scan 12, :txn 57, :watch 54}, :share {:lease 0.105, :map 0.467, :scan 0.042, :txn 0.199, :watch 0.188}, :min-sample 10, :client-ops 287, :unrouted 0, :unrouted-sample [], :insufficient []}
+2026-09-17 14:47:00,336{GMT}	INFO	[clojure-agent-send-off-pool-5] jepsen.coord.leaseck: lease checker: {:expiries 14, :grants 30, :liveness-unjudged 0, :violations-by-class {}, :keepalive-stream-errors 1, :min-expiries 3, :by-scenario {:ttl 14, :keepalive 9, :revoke 7}, :failures (), :keepalive-responses 53, :min-grants 10}
+2026-09-17 14:47:00,337{GMT}	INFO	[clojure-agent-send-off-pool-7] jepsen.coord.scanck: scan checker: {:scan-ok 3, :scan-ops 3, :violations-by-class {}, :unjudged-items 0, :keys-only 1, :count-only 3, :read-at-ok 0, :scan-items 0, :failures (), :read-at-ops 0, :compacted-reads 0, :writes-ok 9}
+2026-09-17 14:47:00,340{GMT}	INFO	[clojure-agent-send-off-pool-10] jepsen.coord.watchck: watch checker: {:semantics :overflow-marker, :events 59, :resumes 12, :violations-by-class {}, :min-events 50, :markers 0, :sessions-with-events 16, :sessions 26, :failures (), :writes-ok 28, :stream-errors 18}
+2026-09-17 14:47:00,347{GMT}	INFO	[clojure-agent-send-off-pool-3] jepsen.coord.txnck: txn checker: {:txn-reads 9, :observations 86, :txn-ops 48, :txn-reads-ok 9, :branch-taken {:success 45, :failure 2}, :response-counts {1 31, 3 15, 0 1}, :violations-by-class {}, :by-form {:txn-cas 7, :txn-cas-delete 12, :txn-create 14, :txn-write-set 15}, :fail 0, :ok 47, :info 1, :read-writes {:ok 15, :cas 7, :cas-delete 11, :create 14, :read 0}, :failures (), :write-entries 95, :succeeded 45}
+2026-09-17 14:47:00,495{GMT}	INFO	[jepsen test runner] jepsen.core: Analysis complete
+2026-09-17 14:47:00,515{GMT}	INFO	[jepsen results] jepsen.store: Wrote /opt/coord/jepsen/store/coord/2026-09-17T14:44:48.141132581Z/results.edn
+2026-09-17 14:47:00,540{GMT}	INFO	[jepsen test runner] jepsen.core: {:linear {:routing {:valid? true,
+                    :by-sub {:lease 30,
+                             :map 134,
+                             :scan 12,
+                             :txn 57,
+                             :watch 54},
+                    :share {:lease 0.105,
+                            :map 0.467,
+                            :scan 0.042,
+                            :txn 0.199,
+                            :watch 0.188},
+                    :min-sample 10,
+                    :client-ops 287,
+                    :unrouted 0,
+                    :unrouted-sample [],
+                    :insufficient []},
+          :lease {:valid? true,
+                  :lease {:expiries 14,
+                          :grants 30,
+                          :liveness-unjudged 0,
+                          :violations-by-class {},
+                          :keepalive-stream-errors 1,
+                          :min-expiries 3,
+                          :by-scenario {:ttl 14,
+                                        :keepalive 9,
+                                        :revoke 7},
+                          :keepalive-responses 53,
+                          :min-grants 10},
+                  :failures []},
+          :map {:valid? true,
+                "key-/jepsen/map/ks42-5" {:valid? true},
+                "key-/jepsen/map/ks42-2" {:valid? true},
+                "key-/jepsen/map/ks42-3" {:valid? true},
+                "key-/jepsen/map/ks42-0" {:valid? true},
+                "key-/jepsen/map/ks42-4" {:valid? true},
+                :map {:keys 8, :ops 125, :deletes 23},
+                "key-/jepsen/map/ks42-7" {:valid? true},
+                "key-/jepsen/map/ks42-6" {:valid? true},
+                "key-/jepsen/map/ks42-1" {:valid? true}},
+          :scan {:valid? true,
+                 :scan {:scan-ok 3,
+                        :scan-ops 3,
+                        :violations-by-class {},
+                        :unjudged-items 0,
+                        :keys-only 1,
+                        :count-only 3,
+                        :read-at-ok 0,
+                        :scan-items 0,
+                        :read-at-ops 0,
+                        :compacted-reads 0,
+                        :writes-ok 9},
+                 :failures []},
+          :txn {:valid? true,
+                :txn {:txn-reads 9,
+                      :observations 86,
+                      :txn-ops 48,
+                      :txn-reads-ok 9,
+                      :branch-taken {:success 45, :failure 2},
+                      :response-counts {1 31, 3 15, 0 1},
+                      :violations-by-class {},
+                      :by-form {:txn-cas 7,
+                                :txn-cas-delete 12,
+                                :txn-create 14,
+                                :txn-write-set 15},
+                      :fail 0,
+                      :ok 47,
+                      :info 1,
+                      :read-writes {:ok 15,
+                                    :cas 7,
+                                    :cas-delete 11,
+                                    :create 14,
+                                    :read 0},
+                      :write-entries 95,
+                      :succeeded 45},
+                :failures []},
+          :watch {:valid? true,
+                  :watch {:semantics :overflow-marker,
+                          :events 59,
+                          :resumes 12,
+                          :violations-by-class {},
+                          :min-events 50,
+                          :markers 0,
+                          :sessions-with-events 16,
+                          :sessions 26,
+                          :writes-ok 28,
+                          :stream-errors 18},
+                  :failures []},
+          :valid? true},
+ :gates {:valid? true,
+         :gates {:premise {:valid? true,
+                           :writes 92,
+                           :duplicate-value-count 0,
+                           :duplicate-values {}},
+                 :availability {:min-ratio 0.95,
+                                :min-sample 100,
+                                :windows 7,
+                                :judged 0,
+                                :skipped-small-sample 7,
+                                :worst-window nil,
+                                :violations []},
+                 :rto {:budget-seconds 120,
+                       :n 7,
+                       :p95 2.6826820617999996,
+                       :max 2.764902109,
+                       :samples [0.187140261
+                                 0.22266584
+                                 2.490835285
+                                 2.764902109
+                                 1.254796262
+                                 0.414313974
+                                 0.306554775],
+                       :unrecovered 0,
+                       :not-measured 0,
+                       :details [{:disruption {:start 6940189428,
+                                               :end 13359081643},
+                                  :measurable? true,
+                                  :first-ok-after 13546221904,
+                                  :seconds 0.187140261}
+                                 {:disruption {:start 18178592269,
+                                               :end 22564150058},
+                                  :measurable? true,
+                                  :first-ok-after 22786815898,
+                                  :seconds 0.22266584}
+                                 {:disruption {:start 30099253055,
+                                               :end 37615880966},
+                                  :measurable? true,
+                                  :first-ok-after 40106716251,
+                                  :seconds 2.490835285}
+                                 {:disruption {:start 43646086928,
+                                               :end 48024941757},
+                                  :measurable? true,
+                                  :first-ok-after 50789843866,
+                                  :seconds 2.764902109}
+                                 {:disruption {:start 54562820926,
+                                               :end 61477429538},
+                                  :measurable? true,
+                                  :first-ok-after 62732225800,
+                                  :seconds 1.254796262}
+                                 {:disruption {:start 70304034358,
+                                               :end 75486690879},
+                                  :measurable? true,
+                                  :first-ok-after 75901004853,
+                                  :seconds 0.414313974}
+                                 {:disruption {:start 83449650912,
+                                               :end 88382236347},
+                                  :measurable? true,
+                                  :first-ok-after 88688791122,
+                                  :seconds 0.306554775}]},
+                 :liveness {:min-ok-ratio 0.1,
+                            :min-sample 10,
+                            :ops 14,
+                            :judged 8,
+                            :skipped-small-sample 6,
+                            :ok-ratio 0.9790940766550523,
+                            :by-op {:exists {:total 9,
+                                             :ok 9,
+                                             :info 0,
+                                             :fail 0,
+                                             :legit-fail 0,
+                                             :judged 9,
+                                             :errors {}},
+                                    :txn-read {:total 9,
+                                               :ok 9,
+                                               :info 0,
+                                               :fail 0,
+                                               :legit-fail 0,
+                                               :judged 9,
+                                               :errors {}},
+                                    :txn-cas {:total 7,
+                                              :ok 7,
+                                              :info 0,
+                                              :fail 0,
+                                              :legit-fail 0,
+                                              :judged 7,
+                                              :errors {}},
+                                    :read {:total 47,
+                                           :ok 46,
+                                           :info 1,
+                                           :fail 0,
+                                           :legit-fail 0,
+                                           :judged 47,
+                                           :errors {:unavailable-maybe-applied 1}},
+                                    :txn-cas-delete {:total 12,
+                                                     :ok 11,
+                                                     :info 1,
+                                                     :fail 0,
+                                                     :legit-fail 0,
+                                                     :judged 12,
+                                                     :errors {:unavailable-maybe-applied 1}},
+                                    :txn-create {:total 14,
+                                                 :ok 14,
+                                                 :info 0,
+                                                 :fail 0,
+                                                 :legit-fail 0,
+                                                 :judged 14,
+                                                 :errors {}},
+                                    :delete {:total 23,
+                                             :ok 23,
+                                             :info 0,
+                                             :fail 0,
+                                             :legit-fail 0,
+                                             :judged 23,
+                                             :errors {}},
+                                    :write {:total 92,
+                                            :ok 88,
+                                            :info 4,
+                                            :fail 0,
+                                            :legit-fail 0,
+                                            :judged 92,
+                                            :errors {:unavailable-maybe-applied 4}},
+                                    :lease-revoke {:total 7,
+                                                   :ok 7,
+                                                   :info 0,
+                                                   :fail 0,
+                                                   :legit-fail 0,
+                                                   :judged 7,
+                                                   :errors {}},
+                                    :lease-ttl {:total 14,
+                                                :ok 14,
+                                                :info 0,
+                                                :fail 0,
+                                                :legit-fail 0,
+                                                :judged 14,
+                                                :errors {}},
+                                    :scan {:total 3,
+                                           :ok 3,
+                                           :info 0,
+                                           :fail 0,
+                                           :legit-fail 0,
+                                           :judged 3,
+                                           :errors {}},
+                                    :watch-session {:total 26,
+                                                    :ok 26,
+                                                    :info 0,
+                                                    :fail 0,
+                                                    :legit-fail 0,
+                                                    :judged 26,
+                                                    :errors {}},
+                                    :txn-write-set {:total 15,
+                                                    :ok 15,
+                                                    :info 0,
+                                                    :fail 0,
+                                                    :legit-fail 0,
+                                                    :judged 15,
+                                                    :errors {}},
+                                    :lease-keepalive {:total 9,
+                                                      :ok 9,
+                                                      :info 0,
+                                                      :fail 0,
+                                                      :legit-fail 0,
+                                                      :judged 9,
+                                                      :errors {}}},
+                            :violations []}},
+         :failures []},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true}
+
+
+Everything looks good! ヽ(‘ー`)ノ

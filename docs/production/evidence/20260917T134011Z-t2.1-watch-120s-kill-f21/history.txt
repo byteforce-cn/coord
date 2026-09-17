@@ -1,0 +1,1042 @@
+0	:invoke	:write	"vs1783726406-1-x"
+0	:ok	:write	"vs1783726406-1-x"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-3-x"
+3	:ok	:write	"vs1783726406-3-x"
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-4-x"
+2	:ok	:write	"vs1783726406-4-x"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-5-x"
+0	:ok	:write	"vs1783726406-5-x"
+:nemesis	:info	:start	nil
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:start	{"n2" [:killed "n2"]}
+0	:invoke	:write	"vs1783726406-6-x"
+0	:ok	:write	"vs1783726406-6-x"
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-7-x"
+0	:ok	:write	"vs1783726406-7-x"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-9-x"
+2	:ok	:write	"vs1783726406-9-x"
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-10-"
+2	:ok	:write	"vs1783726406-10-"
+4	:invoke	:write	"vs1783726406-13-"
+4	:ok	:write	"vs1783726406-13-"
+4	:invoke	:write	"vs1783726406-8-x"
+4	:ok	:write	"vs1783726406-8-x"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-15-"
+3	:ok	:write	"vs1783726406-15-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-18-"
+3	:ok	:write	"vs1783726406-18-"
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:write	"vs1783726406-20-"
+1	:ok	:write	"vs1783726406-20-"
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	{"n2" [:restarted "n2"]}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-22-"
+2	:ok	:write	"vs1783726406-22-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-21-"
+4	:ok	:write	"vs1783726406-21-"
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:write	"vs1783726406-23-"
+1	:ok	:write	"vs1783726406-23-"
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-24-"
+3	:ok	:write	"vs1783726406-24-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-26-"
+4	:ok	:write	"vs1783726406-26-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:write	"vs1783726406-27-"
+1	:ok	:write	"vs1783726406-27-"
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-25-"
+2	:ok	:write	"vs1783726406-25-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-28-"
+:nemesis	:info	:start	nil
+3	:ok	:write	"vs1783726406-28-"
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-29-"
+4	:ok	:write	"vs1783726406-29-"
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-30-"
+0	:ok	:write	"vs1783726406-30-"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-31-"
+3	:ok	:write	"vs1783726406-31-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-33-"
+0	:ok	:write	"vs1783726406-33-"
+0	:invoke	:write	"vs1783726406-34-"
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:write	"vs1783726406-34-"
+0	:invoke	:write	"vs1783726406-32-"
+0	:ok	:write	"vs1783726406-32-"
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:write	"vs1783726406-38-"
+1	:ok	:write	"vs1783726406-38-"
+2	:invoke	:write	"vs1783726406-41-"
+2	:ok	:write	"vs1783726406-41-"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:write	"vs1783726406-43-"
+1	:ok	:write	"vs1783726406-43-"
+1	:invoke	:write	"vs1783726406-46-"
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:ok	:write	"vs1783726406-46-"
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-49-"
+2	:ok	:write	"vs1783726406-49-"
+2	:invoke	:write	"vs1783726406-52-"
+2	:ok	:write	"vs1783726406-52-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-54-"
+4	:ok	:write	"vs1783726406-54-"
+2	:invoke	:write	"vs1783726406-57-"
+2	:ok	:write	"vs1783726406-57-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-59-"
+4	:ok	:write	"vs1783726406-59-"
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-61-"
+0	:ok	:write	"vs1783726406-61-"
+0	:invoke	:write	"vs1783726406-62-"
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:write	"vs1783726406-62-"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-64-"
+2	:ok	:write	"vs1783726406-64-"
+2	:invoke	:write	"vs1783726406-65-"
+2	:ok	:write	"vs1783726406-65-"
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-63-"
+4	:ok	:write	"vs1783726406-63-"
+4	:invoke	:write	"vs1783726406-66-"
+4	:ok	:write	"vs1783726406-66-"
+4	:invoke	:write	"vs1783726406-67-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:write	"vs1783726406-67-"
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-70-"
+3	:ok	:write	"vs1783726406-70-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-68-"
+2	:ok	:write	"vs1783726406-68-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-71-"
+4	:ok	:write	"vs1783726406-71-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:write	"vs1783726406-72-"
+1	:ok	:write	"vs1783726406-72-"
+4	:invoke	:write	"vs1783726406-76-"
+4	:ok	:write	"vs1783726406-76-"
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:write	"vs1783726406-73-"
+1	:ok	:write	"vs1783726406-73-"
+1	:invoke	:write	"vs1783726406-79-"
+1	:ok	:write	"vs1783726406-79-"
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-81-"
+2	:ok	:write	"vs1783726406-81-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-83-"
+3	:ok	:write	"vs1783726406-83-"
+3	:invoke	:write	"vs1783726406-85-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:write	"vs1783726406-85-"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-84-"
+3	:ok	:write	"vs1783726406-84-"
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-86-"
+4	:ok	:write	"vs1783726406-86-"
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-88-"
+2	:ok	:write	"vs1783726406-88-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-87-"
+0	:ok	:write	"vs1783726406-87-"
+:nemesis	:info	:stop	nil
+0	:invoke	:write	"vs1783726406-90-"
+0	:ok	:write	"vs1783726406-90-"
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-91-"
+4	:ok	:write	"vs1783726406-91-"
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:write	"vs1783726406-89-"
+1	:ok	:write	"vs1783726406-89-"
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-93-"
+3	:ok	:write	"vs1783726406-93-"
+3	:invoke	:write	"vs1783726406-94-"
+3	:ok	:write	"vs1783726406-94-"
+3	:invoke	:write	"vs1783726406-92-"
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:write	"vs1783726406-92-"
+4	:invoke	:write	"vs1783726406-98-"
+4	:ok	:write	"vs1783726406-98-"
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-95-"
+3	:ok	:write	"vs1783726406-95-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-100-"
+4	:ok	:write	"vs1783726406-100-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n2" [:killed "n2"]}
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-101-"
+2	:ok	:write	"vs1783726406-101-"
+2	:invoke	:write	"vs1783726406-103-"
+2	:ok	:write	"vs1783726406-103-"
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-102-"
+2	:ok	:write	"vs1783726406-102-"
+2	:invoke	:write	"vs1783726406-107-"
+2	:ok	:write	"vs1783726406-107-"
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-104-"
+2	:ok	:write	"vs1783726406-104-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-109-"
+4	:ok	:write	"vs1783726406-109-"
+0	:invoke	:write	"vs1783726406-112-"
+0	:ok	:write	"vs1783726406-112-"
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-114-"
+2	:ok	:write	"vs1783726406-114-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-115-"
+3	:ok	:write	"vs1783726406-115-"
+3	:invoke	:write	"vs1783726406-116-"
+3	:ok	:write	"vs1783726406-116-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-117-"
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:write	"vs1783726406-117-"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-113-"
+4	:ok	:write	"vs1783726406-113-"
+1	:invoke	:write	"vs1783726406-121-"
+:nemesis	:info	:stop	nil
+1	:ok	:write	"vs1783726406-121-"
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-118-"
+4	:ok	:write	"vs1783726406-118-"
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-123-"
+:nemesis	:info	:stop	{"n2" [:restarted "n2"]}
+3	:ok	:write	"vs1783726406-123-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:write	"vs1783726406-124-"
+1	:ok	:write	"vs1783726406-124-"
+1	:invoke	:write	"vs1783726406-125-"
+1	:ok	:write	"vs1783726406-125-"
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:write	"vs1783726406-126-"
+1	:ok	:write	"vs1783726406-126-"
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-129-"
+2	:ok	:write	"vs1783726406-129-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-131-"
+0	:ok	:write	"vs1783726406-131-"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:write	"vs1783726406-122-"
+1	:ok	:write	"vs1783726406-122-"
+1	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-132-"
+2	:ok	:write	"vs1783726406-132-"
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-133-"
+2	:ok	:write	"vs1783726406-133-"
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-136-"
+3	:ok	:write	"vs1783726406-136-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-134-"
+3	:ok	:write	"vs1783726406-134-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-138-"
+0	:ok	:write	"vs1783726406-138-"
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n1" [:killed "n1"]}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:write	"vs1783726406-140-"
+1	:info	:write	"vs1783726406-140-"	:unavailable-maybe-applied
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-143-"
+4	:ok	:write	"vs1783726406-143-"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-146-"
+4	:ok	:write	"vs1783726406-146-"
+0	:invoke	:write	"vs1783726406-139-"
+0	:ok	:write	"vs1783726406-139-"
+0	:invoke	:write	"vs1783726406-149-"
+0	:ok	:write	"vs1783726406-149-"
+6	:invoke	:write	"vs1783726406-152-"
+6	:ok	:write	"vs1783726406-152-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-155-"
+3	:ok	:write	"vs1783726406-155-"
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs1783726406-157-"
+6	:ok	:write	"vs1783726406-157-"
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-159-"
+2	:ok	:write	"vs1783726406-159-"
+3	:invoke	:write	"vs1783726406-162-"
+3	:ok	:write	"vs1783726406-162-"
+2	:invoke	:write	"vs1783726406-165-"
+2	:ok	:write	"vs1783726406-165-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-167-"
+3	:ok	:write	"vs1783726406-167-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-169-"
+4	:ok	:write	"vs1783726406-169-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-170-"
+4	:ok	:write	"vs1783726406-170-"
+4	:invoke	:write	"vs1783726406-168-"
+4	:ok	:write	"vs1783726406-168-"
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-174-"
+0	:ok	:write	"vs1783726406-174-"
+0	:invoke	:write	"vs1783726406-177-"
+0	:ok	:write	"vs1783726406-177-"
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-179-"
+4	:ok	:write	"vs1783726406-179-"
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-181-"
+0	:ok	:write	"vs1783726406-181-"
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:stop	nil
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs1783726406-183-"
+6	:ok	:write	"vs1783726406-183-"
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:stop	{"n1" [:restarted "n1"]}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-184-"
+0	:ok	:write	"vs1783726406-184-"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-185-"
+3	:ok	:write	"vs1783726406-185-"
+3	:invoke	:write	"vs1783726406-186-"
+3	:ok	:write	"vs1783726406-186-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs1783726406-182-"
+6	:ok	:write	"vs1783726406-182-"
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-187-"
+4	:ok	:write	"vs1783726406-187-"
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs1783726406-188-"
+6	:ok	:write	"vs1783726406-188-"
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-189-"
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:write	"vs1783726406-189-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-190-"
+0	:ok	:write	"vs1783726406-190-"
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-191-"
+3	:ok	:write	"vs1783726406-191-"
+0	:invoke	:write	"vs1783726406-195-"
+0	:ok	:write	"vs1783726406-195-"
+0	:invoke	:write	"vs1783726406-198-"
+0	:ok	:write	"vs1783726406-198-"
+0	:invoke	:write	"vs1783726406-192-"
+0	:ok	:write	"vs1783726406-192-"
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-202-"
+3	:ok	:write	"vs1783726406-202-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-204-"
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:write	"vs1783726406-204-"
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs1783726406-206-"
+6	:ok	:write	"vs1783726406-206-"
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-208-"
+2	:ok	:write	"vs1783726406-208-"
+2	:invoke	:write	"vs1783726406-209-"
+2	:ok	:write	"vs1783726406-209-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-210-"
+0	:ok	:write	"vs1783726406-210-"
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:write	"vs1783726406-212-"
+4	:info	:write	"vs1783726406-212-"	:unavailable-maybe-applied
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-211-"
+0	:ok	:write	"vs1783726406-211-"
+6	:invoke	:write	"vs1783726406-215-"
+6	:ok	:write	"vs1783726406-215-"
+2	:invoke	:write	"vs1783726406-218-"
+2	:ok	:write	"vs1783726406-218-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-220-"
+0	:ok	:write	"vs1783726406-220-"
+0	:invoke	:write	"vs1783726406-223-"
+0	:ok	:write	"vs1783726406-223-"
+6	:invoke	:write	"vs1783726406-226-"
+6	:ok	:write	"vs1783726406-226-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-228-"
+3	:ok	:write	"vs1783726406-228-"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs1783726406-230-"
+6	:ok	:write	"vs1783726406-230-"
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:stop	nil
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-232-"
+3	:ok	:write	"vs1783726406-232-"
+3	:invoke	:write	"vs1783726406-231-"
+3	:ok	:write	"vs1783726406-231-"
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-233-"
+3	:ok	:write	"vs1783726406-233-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-234-"
+0	:ok	:write	"vs1783726406-234-"
+0	:invoke	:write	"vs1783726406-236-"
+0	:ok	:write	"vs1783726406-236-"
+0	:invoke	:write	"vs1783726406-237-"
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:write	"vs1783726406-237-"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs1783726406-235-"
+6	:ok	:write	"vs1783726406-235-"
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-238-"
+3	:ok	:write	"vs1783726406-238-"
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-240-"
+3	:ok	:write	"vs1783726406-240-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs1783726406-239-"
+6	:ok	:write	"vs1783726406-239-"
+:nemesis	:info	:start	nil
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+9	:invoke	:write	"vs1783726406-241-"
+9	:ok	:write	"vs1783726406-241-"
+9	:invoke	:write	"vs1783726406-243-"
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:write	"vs1783726406-243-"
+2	:invoke	:write	"vs1783726406-242-"
+2	:ok	:write	"vs1783726406-242-"
+9	:invoke	:write	"vs1783726406-246-"
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:write	"vs1783726406-246-"
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-248-"
+2	:ok	:write	"vs1783726406-248-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-252-"
+0	:ok	:write	"vs1783726406-252-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-254-"
+3	:ok	:write	"vs1783726406-254-"
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs1783726406-256-"
+6	:ok	:write	"vs1783726406-256-"
+6	:invoke	:write	"vs1783726406-258-"
+6	:ok	:write	"vs1783726406-258-"
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:write	"vs1783726406-259-"
+9	:ok	:write	"vs1783726406-259-"
+9	:invoke	:write	"vs1783726406-260-"
+9	:ok	:write	"vs1783726406-260-"
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-257-"
+3	:ok	:write	"vs1783726406-257-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-262-"
+3	:ok	:write	"vs1783726406-262-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-264-"
+0	:ok	:write	"vs1783726406-264-"
+0	:invoke	:write	"vs1783726406-265-"
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:write	"vs1783726406-265-"
+0	:invoke	:write	"vs1783726406-261-"
+0	:ok	:write	"vs1783726406-261-"
+0	:invoke	:write	"vs1783726406-268-"
+0	:ok	:write	"vs1783726406-268-"
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-270-"
+2	:ok	:write	"vs1783726406-270-"
+2	:invoke	:write	"vs1783726406-272-"
+2	:ok	:write	"vs1783726406-272-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:stop	nil
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:write	"vs1783726406-271-"
+9	:ok	:write	"vs1783726406-271-"
+9	:invoke	:write	"vs1783726406-274-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:write	"vs1783726406-274-"
+0	:invoke	:write	"vs1783726406-275-"
+0	:ok	:write	"vs1783726406-275-"
+9	:invoke	:write	"vs1783726406-273-"
+9	:ok	:write	"vs1783726406-273-"
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-278-"
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:write	"vs1783726406-278-"
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+0	:invoke	:write	"vs1783726406-283-"
+0	:ok	:write	"vs1783726406-283-"
+0	:invoke	:write	"vs1783726406-286-"
+0	:ok	:write	"vs1783726406-286-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-289-"
+3	:ok	:write	"vs1783726406-289-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:write	"vs1783726406-291-"
+9	:ok	:write	"vs1783726406-291-"
+9	:invoke	:write	"vs1783726406-290-"
+9	:ok	:write	"vs1783726406-290-"
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-292-"
+2	:ok	:write	"vs1783726406-292-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-293-"
+3	:ok	:write	"vs1783726406-293-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-295-"
+0	:ok	:write	"vs1783726406-295-"
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-297-"
+0	:ok	:write	"vs1783726406-297-"
+0	:invoke	:write	"vs1783726406-298-"
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+0	:ok	:write	"vs1783726406-298-"
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-299-"
+2	:ok	:write	"vs1783726406-299-"
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs1783726406-294-"
+6	:ok	:write	"vs1783726406-294-"
+6	:invoke	:write	"vs1783726406-300-"
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:ok	:write	"vs1783726406-300-"
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:write	"vs1783726406-301-"
+9	:ok	:write	"vs1783726406-301-"
+9	:invoke	:write	"vs1783726406-302-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:write	"vs1783726406-302-"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:write	"vs1783726406-303-"
+9	:ok	:write	"vs1783726406-303-"
+9	:invoke	:write	"vs1783726406-305-"
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:write	"vs1783726406-305-"
+2	:invoke	:write	"vs1783726406-308-"
+2	:ok	:write	"vs1783726406-308-"
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-309-"
+3	:ok	:write	"vs1783726406-309-"
+3	:invoke	:write	"vs1783726406-310-"
+3	:ok	:write	"vs1783726406-310-"
+3	:invoke	:write	"vs1783726406-304-"
+3	:ok	:write	"vs1783726406-304-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-312-"
+0	:ok	:write	"vs1783726406-312-"
+0	:invoke	:write	"vs1783726406-311-"
+0	:ok	:write	"vs1783726406-311-"
+0	:invoke	:write	"vs1783726406-314-"
+0	:ok	:write	"vs1783726406-314-"
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:stop	nil
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-315-"
+0	:ok	:write	"vs1783726406-315-"
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs1783726406-313-"
+6	:ok	:write	"vs1783726406-313-"
+6	:invoke	:write	"vs1783726406-318-"
+6	:ok	:write	"vs1783726406-318-"
+6	:invoke	:write	"vs1783726406-321-"
+6	:ok	:write	"vs1783726406-321-"
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-325-"
+2	:ok	:write	"vs1783726406-325-"
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+6	:invoke	:write	"vs1783726406-330-"
+6	:ok	:write	"vs1783726406-330-"
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-333-"
+3	:ok	:write	"vs1783726406-333-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:write	"vs1783726406-336-"
+9	:ok	:write	"vs1783726406-336-"
+9	:invoke	:write	"vs1783726406-339-"
+9	:ok	:write	"vs1783726406-339-"
+0	:invoke	:write	"vs1783726406-342-"
+0	:ok	:write	"vs1783726406-342-"
+0	:invoke	:write	"vs1783726406-345-"
+0	:ok	:write	"vs1783726406-345-"
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-347-"
+0	:ok	:write	"vs1783726406-347-"
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-348-"
+3	:ok	:write	"vs1783726406-348-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:write	"vs1783726406-350-"
+9	:ok	:write	"vs1783726406-350-"
+9	:invoke	:write	"vs1783726406-351-"
+9	:ok	:write	"vs1783726406-351-"
+9	:invoke	:write	"vs1783726406-352-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:write	"vs1783726406-352-"
+0	:invoke	:write	"vs1783726406-349-"
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:write	"vs1783726406-349-"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs1783726406-355-"
+6	:ok	:write	"vs1783726406-355-"
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs1783726406-359-"
+2	:ok	:write	"vs1783726406-359-"
+3	:invoke	:write	"vs1783726406-362-"
+3	:ok	:write	"vs1783726406-362-"
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs1783726406-364-"
+6	:ok	:write	"vs1783726406-364-"
+6	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs1783726406-366-"
+3	:ok	:write	"vs1783726406-366-"
+3	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n2" [:killed "n2"]}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs1783726406-367-"
+6	:info	:write	"vs1783726406-367-"	:unavailable-maybe-applied
+2	:invoke	:write	"vs1783726406-368-"
+2	:info	:write	"vs1783726406-368-"	:unavailable-maybe-applied
+3	:invoke	:write	"vs1783726406-371-"
+3	:info	:write	"vs1783726406-371-"	:unavailable-maybe-applied
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+8	:invoke	:write	"vs1783726406-373-"
+8	:ok	:write	"vs1783726406-373-"
+9	:invoke	:write	"vs1783726406-376-"
+9	:ok	:write	"vs1783726406-376-"
+0	:invoke	:write	"vs1783726406-379-"
+0	:ok	:write	"vs1783726406-379-"
+0	:invoke	:write	"vs1783726406-382-"
+0	:ok	:write	"vs1783726406-382-"
+8	:invoke	:write	"vs1783726406-385-"
+8	:ok	:write	"vs1783726406-385-"
+8	:invoke	:write	"vs1783726406-388-"
+8	:ok	:write	"vs1783726406-388-"
+8	:invoke	:write	"vs1783726406-391-"
+8	:ok	:write	"vs1783726406-391-"
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-393-"
+0	:ok	:write	"vs1783726406-393-"
+11	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-397-"
+0	:ok	:write	"vs1783726406-397-"
+7	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:invoke	:write	"vs1783726406-399-"
+7	:ok	:write	"vs1783726406-399-"
+8	:invoke	:write	"vs1783726406-402-"
+8	:ok	:write	"vs1783726406-402-"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+8	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:stop	nil
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-403-"
+0	:ok	:write	"vs1783726406-403-"
+:nemesis	:info	:stop	{"n2" [:restarted "n2"]}
+7	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-404-"
+0	:ok	:write	"vs1783726406-404-"
+7	:invoke	:write	"vs1783726406-405-"
+8	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:ok	:write	"vs1783726406-405-"
+7	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+8	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-407-"
+0	:ok	:write	"vs1783726406-407-"
+11	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:write	"vs1783726406-408-"
+11	:ok	:write	"vs1783726406-408-"
+11	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:invoke	:write	"vs1783726406-410-"
+7	:ok	:write	"vs1783726406-410-"
+8	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+8	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-409-"
+0	:ok	:write	"vs1783726406-409-"
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:write	"vs1783726406-412-"
+11	:ok	:write	"vs1783726406-412-"
+11	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+8	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+8	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:write	"vs1783726406-411-"
+9	:ok	:write	"vs1783726406-411-"
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:invoke	:write	"vs1783726406-414-"
+7	:ok	:write	"vs1783726406-414-"
+8	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:invoke	:write	"vs1783726406-415-"
+7	:ok	:write	"vs1783726406-415-"
+7	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+8	:invoke	:write	"vs1783726406-413-"
+8	:ok	:write	"vs1783726406-413-"
+0	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:start	nil
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+11	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:invoke	:write	"vs1783726406-421-"
+0	:info	:write	"vs1783726406-421-"	:unavailable-maybe-applied
+11	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:invoke	:write	"vs1783726406-424-"
+7	:ok	:write	"vs1783726406-424-"
+8	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+8	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:write	"vs1783726406-427-"
+9	:ok	:write	"vs1783726406-427-"
+5	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+8	:invoke	:write	"vs1783726406-429-"
+8	:ok	:write	"vs1783726406-429-"
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:write	"vs1783726406-431-"
+11	:ok	:write	"vs1783726406-431-"
+11	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+8	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+5	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+5	:invoke	:write	"vs1783726406-433-"
+5	:ok	:write	"vs1783726406-433-"
+5	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+8	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+8	:invoke	:write	"vs1783726406-434-"
+8	:ok	:write	"vs1783726406-434-"
+8	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+5	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+5	:invoke	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:invoke	:write	"vs1783726406-435-"
+7	:ok	:write	"vs1783726406-435-"
+7	:invoke	:write	"vs1783726406-432-"
+7	:ok	:write	"vs1783726406-432-"
+9	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+8	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+5	:ok	:watch-session	{:key "/jepsen/watch/s1783726406", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}

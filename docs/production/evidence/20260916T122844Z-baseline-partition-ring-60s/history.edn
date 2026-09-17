@@ -1,0 +1,330 @@
+{:index 0, :time 489938198, :type :invoke, :process 0, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 1, :time 647459564, :type :ok, :process 0, :f :read, :value nil, :key "/jepsen/register-001", :node "n1"}
+{:index 2, :time 1287196566, :type :invoke, :process 2, :f :write, :value 464000, :key "/jepsen/register-003"}
+{:index 3, :time 1319083703, :type :invoke, :process 3, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 4, :time 1378330784, :type :invoke, :process 4, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 5, :time 1530077357, :type :ok, :process 3, :f :read, :value nil, :key "/jepsen/register-002", :node "n1"}
+{:index 6, :time 1538221343, :type :ok, :process 2, :f :write, :value 464000, :key "/jepsen/register-003"}
+{:index 7, :time 1565154206, :type :ok, :process 4, :f :read, :value nil, :key "/jepsen/register-002", :node "n1"}
+{:index 8, :time 1829239487, :type :invoke, :process 0, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 9, :time 1833183300, :type :ok, :process 0, :f :read, :value nil, :key "/jepsen/register-001", :node "n1"}
+{:index 10, :time 1884008391, :type :invoke, :process 0, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 11, :time 1887436731, :type :ok, :process 0, :f :read, :value 464000, :key "/jepsen/register-003", :node "n1"}
+{:index 12, :time 2181849592, :type :invoke, :process 1, :f :write, :value 439690, :key "/jepsen/register-001"}
+{:index 13, :time 2327235081, :type :ok, :process 1, :f :write, :value 439690, :key "/jepsen/register-001"}
+{:index 14, :time 2522998979, :type :invoke, :process 2, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 15, :time 2529091169, :type :ok, :process 2, :f :read, :value nil, :key "/jepsen/register-002", :node "n1"}
+{:index 16, :time 2776152736, :type :invoke, :process 3, :f :write, :value 920858, :key "/jepsen/register-003"}
+{:index 17, :time 2812786446, :type :ok, :process 3, :f :write, :value 920858, :key "/jepsen/register-003"}
+{:index 18, :time 3005764385, :type :invoke, :process 4, :f :write, :value 259262, :key "/jepsen/register-003"}
+{:index 19, :time 3040805039, :type :ok, :process 4, :f :write, :value 259262, :key "/jepsen/register-003"}
+{:index 20, :time 3340626377, :type :invoke, :process 0, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 21, :time 3346363062, :type :ok, :process 0, :f :read, :value nil, :key "/jepsen/register-002", :node "n1"}
+{:index 22, :time 3392309742, :type :invoke, :process 0, :f :write, :value 476279, :key "/jepsen/register-002"}
+{:index 23, :time 3417357725, :type :invoke, :process 1, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 24, :time 3420064378, :type :ok, :process 1, :f :read, :value 439690, :key "/jepsen/register-001", :node "n1"}
+{:index 25, :time 3424396236, :type :ok, :process 0, :f :write, :value 476279, :key "/jepsen/register-002"}
+{:index 26, :time 3523674120, :type :invoke, :process 2, :f :write, :value 957066, :key "/jepsen/register-003"}
+{:index 27, :time 3554334313, :type :ok, :process 2, :f :write, :value 957066, :key "/jepsen/register-003"}
+{:index 28, :time 4114623769, :type :invoke, :process 3, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 29, :time 4120569880, :type :ok, :process 3, :f :read, :value 476279, :key "/jepsen/register-002", :node "n1"}
+{:index 30, :time 4298138150, :type :invoke, :process 4, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 31, :time 4307278246, :type :ok, :process 4, :f :read, :value 957066, :key "/jepsen/register-003", :node "n1"}
+{:index 32, :time 5254194416, :type :invoke, :process 0, :f :write, :value 311470, :key "/jepsen/register-002"}
+{:index 33, :time 5257577811, :type :invoke, :process 1, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 34, :time 5263633892, :type :ok, :process 1, :f :read, :value 957066, :key "/jepsen/register-003", :node "n1"}
+{:index 35, :time 5269545175, :type :invoke, :process 1, :f :write, :value 26296, :key "/jepsen/register-003"}
+{:index 36, :time 5294054672, :type :ok, :process 0, :f :write, :value 311470, :key "/jepsen/register-002"}
+{:index 37, :time 5310320876, :type :ok, :process 1, :f :write, :value 26296, :key "/jepsen/register-003"}
+{:index 38, :time 5338463638, :type :invoke, :process 2, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 39, :time 5341187483, :type :ok, :process 2, :f :read, :value 26296, :key "/jepsen/register-003", :node "n1"}
+{:index 40, :time 5366390361, :type :invoke, :process 3, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 41, :time 5369130641, :type :ok, :process 3, :f :read, :value 311470, :key "/jepsen/register-002", :node "n1"}
+{:index 42, :time 5494323856, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 43, :time 5510260515, :type :info, :process :nemesis, :f :start, :value [:isolated {"n3" #{"n1"}, "n1" #{"n2"}, "n2" #{"n3"}}]}
+{:index 44, :time 5589294890, :type :invoke, :process 0, :f :write, :value 53649, :key "/jepsen/register-002"}
+{:index 45, :time 5615497900, :type :invoke, :process 1, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 46, :time 5671655788, :type :info, :process 1, :f :read, :value nil, :key "/jepsen/register-002", :error :unavailable-maybe-applied}
+{:index 47, :time 5765346536, :type :invoke, :process 2, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 48, :time 5773398003, :type :invoke, :process 3, :f :write, :value 887545, :key "/jepsen/register-001"}
+{:index 49, :time 5779506863, :type :fail, :process 3, :f :write, :value 887545, :key "/jepsen/register-001", :error :not-leader}
+{:index 50, :time 5821279113, :type :info, :process 2, :f :read, :value nil, :key "/jepsen/register-003", :error :unavailable-maybe-applied}
+{:index 51, :time 5943918313, :type :invoke, :process 4, :f :write, :value 281194, :key "/jepsen/register-001"}
+{:index 52, :time 5953035675, :type :fail, :process 4, :f :write, :value 281194, :key "/jepsen/register-001", :error :not-leader}
+{:index 53, :time 6036097045, :type :invoke, :process 6, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 54, :time 6395080872, :type :invoke, :process 7, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 55, :time 7912600852, :type :invoke, :process 3, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 56, :time 7972107990, :type :info, :process 3, :f :read, :value nil, :key "/jepsen/register-001", :error :unavailable-maybe-applied}
+{:index 57, :time 7987875299, :type :invoke, :process 8, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 58, :time 8206943762, :type :invoke, :process 4, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 59, :time 8264295015, :type :info, :process 4, :f :read, :value nil, :key "/jepsen/register-003", :error :unavailable-maybe-applied}
+{:index 60, :time 8348671415, :type :invoke, :process 9, :f :write, :value 327189, :key "/jepsen/register-001"}
+{:index 61, :time 10512312912, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 62, :time 10548116707, :type :info, :process :nemesis, :f :stop, :value :network-healed}
+{:index 63, :time 10592318403, :type :info, :process 0, :f :write, :value 53649, :key "/jepsen/register-002", :error :timeout}
+{:index 64, :time 10592470281, :type :invoke, :process 5, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 65, :time 10834263805, :type :fail, :process 6, :f :read, :value nil, :key "/jepsen/register-002", :error :not-leader}
+{:index 66, :time 10896037436, :type :ok, :process 9, :f :write, :value 327189, :key "/jepsen/register-001"}
+{:index 67, :time 10909899756, :type :ok, :process 7, :f :read, :value 327189, :key "/jepsen/register-001", :node "n2"}
+{:index 68, :time 10975717186, :type :ok, :process 8, :f :read, :value 53649, :key "/jepsen/register-002", :node "n2"}
+{:index 69, :time 10975782274, :type :ok, :process 5, :f :read, :value 53649, :key "/jepsen/register-002", :node "n2"}
+{:index 70, :time 11111187119, :type :invoke, :process 7, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 71, :time 11114351371, :type :ok, :process 7, :f :read, :value 53649, :key "/jepsen/register-002", :node "n2"}
+{:index 72, :time 11905314094, :type :invoke, :process 8, :f :write, :value 652541, :key "/jepsen/register-001"}
+{:index 73, :time 11946573920, :type :ok, :process 8, :f :write, :value 652541, :key "/jepsen/register-001"}
+{:index 74, :time 12420645919, :type :invoke, :process 9, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 75, :time 12428345321, :type :invoke, :process 5, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 76, :time 12429005387, :type :ok, :process 9, :f :read, :value 26296, :key "/jepsen/register-003", :node "n3"}
+{:index 77, :time 12436927596, :type :ok, :process 5, :f :read, :value 26296, :key "/jepsen/register-003", :node "n3"}
+{:index 78, :time 12536464313, :type :invoke, :process 5, :f :write, :value 564889, :key "/jepsen/register-001"}
+{:index 79, :time 12552023001, :type :invoke, :process 6, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 80, :time 12562351306, :type :ok, :process 6, :f :read, :value 26296, :key "/jepsen/register-003", :node "n3"}
+{:index 81, :time 12577081457, :type :ok, :process 5, :f :write, :value 564889, :key "/jepsen/register-001"}
+{:index 82, :time 12797993323, :type :invoke, :process 7, :f :write, :value 188139, :key "/jepsen/register-003"}
+{:index 83, :time 12830794736, :type :ok, :process 7, :f :write, :value 188139, :key "/jepsen/register-003"}
+{:index 84, :time 13270696850, :type :invoke, :process 8, :f :write, :value 862004, :key "/jepsen/register-002"}
+{:index 85, :time 13304651849, :type :ok, :process 8, :f :write, :value 862004, :key "/jepsen/register-002"}
+{:index 86, :time 13434777064, :type :invoke, :process 9, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 87, :time 13439160726, :type :ok, :process 9, :f :read, :value 188139, :key "/jepsen/register-003", :node "n3"}
+{:index 88, :time 13497663023, :type :invoke, :process 5, :f :write, :value 364271, :key "/jepsen/register-002"}
+{:index 89, :time 13531956193, :type :ok, :process 5, :f :write, :value 364271, :key "/jepsen/register-002"}
+{:index 90, :time 13565273411, :type :invoke, :process 5, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 91, :time 13567339561, :type :ok, :process 5, :f :read, :value 364271, :key "/jepsen/register-002", :node "n2"}
+{:index 92, :time 14167822474, :type :invoke, :process 6, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 93, :time 14174235071, :type :ok, :process 6, :f :read, :value 564889, :key "/jepsen/register-001", :node "n2"}
+{:index 94, :time 14404837554, :type :invoke, :process 7, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 95, :time 14406958373, :type :ok, :process 7, :f :read, :value 188139, :key "/jepsen/register-003", :node "n3"}
+{:index 96, :time 15007997429, :type :invoke, :process 8, :f :write, :value 230689, :key "/jepsen/register-003"}
+{:index 97, :time 15036499471, :type :ok, :process 8, :f :write, :value 230689, :key "/jepsen/register-003"}
+{:index 98, :time 15464168849, :type :invoke, :process 9, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 99, :time 15467169772, :type :ok, :process 9, :f :read, :value 364271, :key "/jepsen/register-002", :node "n2"}
+{:index 100, :time 15548752084, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 101, :time 15565583928, :type :info, :process :nemesis, :f :start, :value [:isolated {"n3" #{"n2"}, "n2" #{"n1"}, "n1" #{"n3"}}]}
+{:index 102, :time 15612022468, :type :invoke, :process 6, :f :write, :value 151383, :key "/jepsen/register-003"}
+{:index 103, :time 16012793291, :type :invoke, :process 7, :f :write, :value 762235, :key "/jepsen/register-001"}
+{:index 104, :time 16015515746, :type :fail, :process 7, :f :write, :value 762235, :key "/jepsen/register-001", :error :not-leader}
+{:index 105, :time 16104964880, :type :invoke, :process 8, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 106, :time 16139980274, :type :invoke, :process 9, :f :write, :value 509649, :key "/jepsen/register-003"}
+{:index 107, :time 16143470882, :type :fail, :process 9, :f :write, :value 509649, :key "/jepsen/register-003", :error :not-leader}
+{:index 108, :time 16159636533, :type :info, :process 8, :f :read, :value nil, :key "/jepsen/register-002", :error :unavailable-maybe-applied}
+{:index 109, :time 16751675127, :type :invoke, :process 5, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 110, :time 16804817452, :type :info, :process 5, :f :read, :value nil, :key "/jepsen/register-003", :error :unavailable-maybe-applied}
+{:index 111, :time 17064339794, :type :invoke, :process 10, :f :write, :value 38793, :key "/jepsen/register-003"}
+{:index 112, :time 17091200094, :type :invoke, :process 7, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 113, :time 17144462031, :type :info, :process 7, :f :read, :value nil, :key "/jepsen/register-001", :error :unavailable-maybe-applied}
+{:index 114, :time 17226842405, :type :invoke, :process 12, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 115, :time 17400837969, :type :invoke, :process 13, :f :write, :value 256350, :key "/jepsen/register-002"}
+{:index 116, :time 18060926673, :type :invoke, :process 9, :f :write, :value 7420, :key "/jepsen/register-001"}
+{:index 117, :time 18087883914, :type :fail, :process 9, :f :write, :value 7420, :key "/jepsen/register-001", :error :not-leader}
+{:index 118, :time 18225046740, :type :invoke, :process 9, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 119, :time 18278943148, :type :info, :process 9, :f :read, :value nil, :key "/jepsen/register-003", :error :unavailable-maybe-applied}
+{:index 120, :time 18765328966, :type :invoke, :process 14, :f :write, :value 637098, :key "/jepsen/register-002"}
+{:index 121, :time 20566092793, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 122, :time 20598561178, :type :info, :process :nemesis, :f :stop, :value :network-healed}
+{:index 123, :time 20615378082, :type :info, :process 6, :f :write, :value 151383, :key "/jepsen/register-003", :error :timeout}
+{:index 124, :time 20615505855, :type :invoke, :process 11, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 125, :time 21349270553, :type :ok, :process 12, :f :read, :value 364271, :key "/jepsen/register-002", :node "n1"}
+{:index 126, :time 21349321614, :type :invoke, :process 12, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 127, :time 21401796067, :type :info, :process 12, :f :read, :value nil, :key "/jepsen/register-003", :error :unavailable-maybe-applied}
+{:index 128, :time 21424540740, :type :fail, :process 10, :f :write, :value 38793, :key "/jepsen/register-003", :error :not-leader}
+{:index 129, :time 21435801588, :type :ok, :process 14, :f :write, :value 637098, :key "/jepsen/register-002"}
+{:index 130, :time 21454816841, :type :ok, :process 11, :f :read, :value 637098, :key "/jepsen/register-002", :node "n1"}
+{:index 131, :time 21495878486, :type :ok, :process 13, :f :write, :value 256350, :key "/jepsen/register-002"}
+{:index 132, :time 21595090065, :type :invoke, :process 10, :f :write, :value 447975, :key "/jepsen/register-002"}
+{:index 133, :time 21618048357, :type :ok, :process 10, :f :write, :value 447975, :key "/jepsen/register-002"}
+{:index 134, :time 21836267237, :type :invoke, :process 10, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 135, :time 21839638956, :type :ok, :process 10, :f :read, :value 447975, :key "/jepsen/register-002", :node "n1"}
+{:index 136, :time 22188292027, :type :invoke, :process 11, :f :write, :value 579891, :key "/jepsen/register-001"}
+{:index 137, :time 22215299030, :type :ok, :process 11, :f :write, :value 579891, :key "/jepsen/register-001"}
+{:index 138, :time 22379240634, :type :invoke, :process 17, :f :write, :value 509535, :key "/jepsen/register-003"}
+{:index 139, :time 22536487523, :type :ok, :process 17, :f :write, :value 509535, :key "/jepsen/register-003"}
+{:index 140, :time 23157595237, :type :invoke, :process 13, :f :write, :value 475979, :key "/jepsen/register-003"}
+{:index 141, :time 23182761856, :type :ok, :process 13, :f :write, :value 475979, :key "/jepsen/register-003"}
+{:index 142, :time 23268305292, :type :invoke, :process 14, :f :write, :value 29400, :key "/jepsen/register-001"}
+{:index 143, :time 23291018194, :type :ok, :process 14, :f :write, :value 29400, :key "/jepsen/register-001"}
+{:index 144, :time 23630918002, :type :invoke, :process 10, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 145, :time 23632922005, :type :ok, :process 10, :f :read, :value 447975, :key "/jepsen/register-002", :node "n1"}
+{:index 146, :time 23652354540, :type :invoke, :process 10, :f :write, :value 753389, :key "/jepsen/register-001"}
+{:index 147, :time 23675877686, :type :ok, :process 10, :f :write, :value 753389, :key "/jepsen/register-001"}
+{:index 148, :time 24239670232, :type :invoke, :process 11, :f :write, :value 978512, :key "/jepsen/register-003"}
+{:index 149, :time 24265091013, :type :invoke, :process 17, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 150, :time 24266837432, :type :ok, :process 17, :f :read, :value 447975, :key "/jepsen/register-002", :node "n1"}
+{:index 151, :time 24267844748, :type :ok, :process 11, :f :write, :value 978512, :key "/jepsen/register-003"}
+{:index 152, :time 24347146399, :type :invoke, :process 13, :f :write, :value 645316, :key "/jepsen/register-001"}
+{:index 153, :time 24374833364, :type :ok, :process 13, :f :write, :value 645316, :key "/jepsen/register-001"}
+{:index 154, :time 24384463435, :type :invoke, :process 14, :f :write, :value 892222, :key "/jepsen/register-003"}
+{:index 155, :time 24405099433, :type :ok, :process 14, :f :write, :value 892222, :key "/jepsen/register-003"}
+{:index 156, :time 24598033142, :type :invoke, :process 10, :f :write, :value 860771, :key "/jepsen/register-001"}
+{:index 157, :time 24620057095, :type :ok, :process 10, :f :write, :value 860771, :key "/jepsen/register-001"}
+{:index 158, :time 24985121617, :type :invoke, :process 10, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 159, :time 24986990710, :type :ok, :process 10, :f :read, :value 447975, :key "/jepsen/register-002", :node "n1"}
+{:index 160, :time 25599092198, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 161, :time 25612677291, :type :invoke, :process 17, :f :write, :value 690290, :key "/jepsen/register-002"}
+{:index 162, :time 25625551067, :type :info, :process :nemesis, :f :start, :value [:isolated {"n3" #{"n2"}, "n2" #{"n1"}, "n1" #{"n3"}}]}
+{:index 163, :time 25637375834, :type :invoke, :process 14, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 164, :time 25655022163, :type :invoke, :process 10, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 165, :time 25690449350, :type :info, :process 14, :f :read, :value nil, :key "/jepsen/register-001", :error :unavailable-maybe-applied}
+{:index 166, :time 25708559348, :type :info, :process 10, :f :read, :value nil, :key "/jepsen/register-002", :error :unavailable-maybe-applied}
+{:index 167, :time 25800597885, :type :invoke, :process 15, :f :write, :value 563376, :key "/jepsen/register-001"}
+{:index 168, :time 25817384230, :type :invoke, :process 11, :f :write, :value 360323, :key "/jepsen/register-002"}
+{:index 169, :time 25874445576, :type :invoke, :process 13, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 170, :time 25928392288, :type :info, :process 13, :f :read, :value nil, :key "/jepsen/register-002", :error :unavailable-maybe-applied}
+{:index 171, :time 26462145154, :type :invoke, :process 18, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 172, :time 28028558151, :type :invoke, :process 19, :f :write, :value 863852, :key "/jepsen/register-002"}
+{:index 173, :time 30613826280, :type :info, :process 17, :f :write, :value 690290, :key "/jepsen/register-002", :error :timeout}
+{:index 174, :time 30613928711, :type :invoke, :process 22, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 175, :time 30626084987, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 176, :time 30652906442, :type :info, :process :nemesis, :f :stop, :value :network-healed}
+{:index 177, :time 30819111966, :type :info, :process 11, :f :write, :value 360323, :key "/jepsen/register-002", :error :timeout}
+{:index 178, :time 30944314115, :type :invoke, :process 16, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 179, :time 32417783894, :type :ok, :process 16, :f :read, :value 690290, :key "/jepsen/register-002", :node "n3"}
+{:index 180, :time 32417836015, :type :invoke, :process 16, :f :write, :value 161413, :key "/jepsen/register-002"}
+{:index 181, :time 32427905986, :type :ok, :process 15, :f :write, :value 563376, :key "/jepsen/register-001"}
+{:index 182, :time 32484057825, :type :ok, :process 16, :f :write, :value 161413, :key "/jepsen/register-002"}
+{:index 183, :time 32487795041, :type :ok, :process 22, :f :read, :value 161413, :key "/jepsen/register-002", :node "n3"}
+{:index 184, :time 32487846444, :type :ok, :process 18, :f :read, :value 161413, :key "/jepsen/register-002", :node "n3"}
+{:index 185, :time 32506905449, :type :ok, :process 19, :f :write, :value 863852, :key "/jepsen/register-002"}
+{:index 186, :time 32611480724, :type :invoke, :process 19, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 187, :time 32613435631, :type :ok, :process 19, :f :read, :value 563376, :key "/jepsen/register-001", :node "n1"}
+{:index 188, :time 32758705579, :type :invoke, :process 15, :f :write, :value 919986, :key "/jepsen/register-001"}
+{:index 189, :time 32779905982, :type :ok, :process 15, :f :write, :value 919986, :key "/jepsen/register-001"}
+{:index 190, :time 32833795920, :type :invoke, :process 15, :f :write, :value 662108, :key "/jepsen/register-002"}
+{:index 191, :time 32858364335, :type :ok, :process 15, :f :write, :value 662108, :key "/jepsen/register-002"}
+{:index 192, :time 33854594951, :type :invoke, :process 16, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 193, :time 33856363825, :type :ok, :process 16, :f :read, :value 919986, :key "/jepsen/register-001", :node "n1"}
+{:index 194, :time 34242544751, :type :invoke, :process 22, :f :write, :value 695347, :key "/jepsen/register-002"}
+{:index 195, :time 34268505893, :type :ok, :process 22, :f :write, :value 695347, :key "/jepsen/register-002"}
+{:index 196, :time 34576627855, :type :invoke, :process 18, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 197, :time 34578394622, :type :ok, :process 18, :f :read, :value 695347, :key "/jepsen/register-002", :node "n3"}
+{:index 198, :time 34839258017, :type :invoke, :process 19, :f :write, :value 287902, :key "/jepsen/register-001"}
+{:index 199, :time 34860732505, :type :ok, :process 19, :f :write, :value 287902, :key "/jepsen/register-001"}
+{:index 200, :time 35398209378, :type :invoke, :process 15, :f :write, :value 948948, :key "/jepsen/register-003"}
+{:index 201, :time 35420580905, :type :ok, :process 15, :f :write, :value 948948, :key "/jepsen/register-003"}
+{:index 202, :time 35653687237, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 203, :time 35675056926, :type :info, :process :nemesis, :f :start, :value [:isolated {"n1" #{"n2"}, "n2" #{"n3"}, "n3" #{"n1"}}]}
+{:index 204, :time 35696180577, :type :invoke, :process 22, :f :write, :value 500699, :key "/jepsen/register-002"}
+{:index 205, :time 35865209230, :type :invoke, :process 18, :f :write, :value 551133, :key "/jepsen/register-002"}
+{:index 206, :time 36350729795, :type :invoke, :process 19, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 207, :time 36351902450, :type :invoke, :process 15, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 208, :time 36404313603, :type :info, :process 19, :f :read, :value nil, :key "/jepsen/register-001", :error :unavailable-maybe-applied}
+{:index 209, :time 36405137237, :type :info, :process 15, :f :read, :value nil, :key "/jepsen/register-001", :error :unavailable-maybe-applied}
+{:index 210, :time 36670756631, :type :invoke, :process 20, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 211, :time 36913015441, :type :invoke, :process 16, :f :write, :value 25226, :key "/jepsen/register-002"}
+{:index 212, :time 36916114586, :type :fail, :process 16, :f :write, :value 25226, :key "/jepsen/register-002", :error :not-leader}
+{:index 213, :time 38165009275, :type :invoke, :process 24, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 214, :time 38166551057, :type :invoke, :process 16, :f :write, :value 790400, :key "/jepsen/register-001"}
+{:index 215, :time 38169460510, :type :fail, :process 16, :f :write, :value 790400, :key "/jepsen/register-001", :error :not-leader}
+{:index 216, :time 38273403084, :type :invoke, :process 16, :f :write, :value 500822, :key "/jepsen/register-003"}
+{:index 217, :time 38328364722, :type :fail, :process 16, :f :write, :value 500822, :key "/jepsen/register-003", :error :not-leader}
+{:index 218, :time 38328449767, :type :invoke, :process 16, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 219, :time 38406287763, :type :info, :process 16, :f :read, :value nil, :key "/jepsen/register-001", :error :unavailable-maybe-applied}
+{:index 220, :time 39095472782, :type :invoke, :process 21, :f :write, :value 673407, :key "/jepsen/register-002"}
+{:index 221, :time 40675489178, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 222, :time 40697520686, :type :info, :process :nemesis, :f :stop, :value :network-healed}
+{:index 223, :time 40699855242, :type :info, :process 22, :f :write, :value 500699, :key "/jepsen/register-002", :error :timeout}
+{:index 224, :time 40699930887, :type :invoke, :process 27, :f :write, :value 955583, :key "/jepsen/register-001"}
+{:index 225, :time 40866597342, :type :info, :process 18, :f :write, :value 551133, :key "/jepsen/register-002", :error :timeout}
+{:index 226, :time 41049350889, :type :invoke, :process 23, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 227, :time 42495375543, :type :ok, :process 27, :f :write, :value 955583, :key "/jepsen/register-001"}
+{:index 228, :time 42495419122, :type :invoke, :process 27, :f :write, :value 170788, :key "/jepsen/register-003"}
+{:index 229, :time 42535482997, :type :ok, :process 24, :f :read, :value 955583, :key "/jepsen/register-001", :node "n3"}
+{:index 230, :time 42558841303, :type :ok, :process 27, :f :write, :value 170788, :key "/jepsen/register-003"}
+{:index 231, :time 42591683692, :type :ok, :process 20, :f :read, :value 500699, :key "/jepsen/register-002", :node "n1"}
+{:index 232, :time 42611434182, :type :ok, :process 23, :f :read, :value 170788, :key "/jepsen/register-003", :node "n3"}
+{:index 233, :time 42616978891, :type :ok, :process 21, :f :write, :value 673407, :key "/jepsen/register-002"}
+{:index 234, :time 42651306789, :type :invoke, :process 20, :f :write, :value 292307, :key "/jepsen/register-003"}
+{:index 235, :time 42676414933, :type :ok, :process 20, :f :write, :value 292307, :key "/jepsen/register-003"}
+{:index 236, :time 43871794815, :type :invoke, :process 21, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 237, :time 43875359625, :type :ok, :process 21, :f :read, :value 292307, :key "/jepsen/register-003", :node "n3"}
+{:index 238, :time 44111806521, :type :invoke, :process 27, :f :write, :value 238913, :key "/jepsen/register-001"}
+{:index 239, :time 44129553673, :type :invoke, :process 23, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 240, :time 44135987956, :type :ok, :process 27, :f :write, :value 238913, :key "/jepsen/register-001"}
+{:index 241, :time 44136036628, :type :ok, :process 23, :f :read, :value 238913, :key "/jepsen/register-001", :node "n3"}
+{:index 242, :time 44993441213, :type :invoke, :process 24, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 243, :time 44995184607, :type :ok, :process 24, :f :read, :value 238913, :key "/jepsen/register-001", :node "n3"}
+{:index 244, :time 45074086540, :type :invoke, :process 20, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 245, :time 45075867427, :type :ok, :process 20, :f :read, :value 673407, :key "/jepsen/register-002", :node "n1"}
+{:index 246, :time 45173732399, :type :invoke, :process 20, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 247, :time 45176898599, :type :ok, :process 20, :f :read, :value 673407, :key "/jepsen/register-002", :node "n1"}
+{:index 248, :time 45413663155, :type :invoke, :process 21, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 249, :time 45416547305, :type :ok, :process 21, :f :read, :value 238913, :key "/jepsen/register-001", :node "n3"}
+{:index 250, :time 45430351705, :type :invoke, :process 27, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 251, :time 45431951113, :type :ok, :process 27, :f :read, :value 673407, :key "/jepsen/register-002", :node "n1"}
+{:index 252, :time 45697873694, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 253, :time 45708498545, :type :info, :process :nemesis, :f :start, :value [:isolated {"n3" #{"n1"}, "n1" #{"n2"}, "n2" #{"n3"}}]}
+{:index 254, :time 45833666737, :type :invoke, :process 20, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 255, :time 45886871747, :type :info, :process 20, :f :read, :value nil, :key "/jepsen/register-001", :error :unavailable-maybe-applied}
+{:index 256, :time 46015591184, :type :invoke, :process 25, :f :write, :value 101847, :key "/jepsen/register-001"}
+{:index 257, :time 46085321474, :type :invoke, :process 21, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 258, :time 46137703648, :type :info, :process 21, :f :read, :value nil, :key "/jepsen/register-003", :error :unavailable-maybe-applied}
+{:index 259, :time 46299062522, :type :invoke, :process 27, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 260, :time 46357372615, :type :invoke, :process 23, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 261, :time 46375464786, :type :info, :process 27, :f :read, :value nil, :key "/jepsen/register-002", :error :unavailable-maybe-applied}
+{:index 262, :time 46409756572, :type :info, :process 23, :f :read, :value nil, :key "/jepsen/register-003", :error :unavailable-maybe-applied}
+{:index 263, :time 46946660241, :type :invoke, :process 24, :f :write, :value 509719, :key "/jepsen/register-003"}
+{:index 264, :time 46949148896, :type :invoke, :process 26, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 265, :time 46954339641, :type :fail, :process 24, :f :write, :value 509719, :key "/jepsen/register-003", :error :not-leader}
+{:index 266, :time 47220265127, :type :invoke, :process 32, :f :write, :value 54818, :key "/jepsen/register-002"}
+{:index 267, :time 47360475081, :type :invoke, :process 28, :f :write, :value 24085, :key "/jepsen/register-001"}
+{:index 268, :time 47366976635, :type :invoke, :process 24, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 269, :time 47449429379, :type :info, :process 24, :f :read, :value nil, :key "/jepsen/register-003", :error :unavailable-maybe-applied}
+{:index 270, :time 47449537653, :type :invoke, :process 29, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 271, :time 50708821899, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 272, :time 50742482383, :type :info, :process :nemesis, :f :stop, :value :network-healed}
+{:index 273, :time 51734595348, :type :ok, :process 28, :f :write, :value 24085, :key "/jepsen/register-001"}
+{:index 274, :time 51734645661, :type :invoke, :process 28, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 275, :time 51736461349, :type :ok, :process 28, :f :read, :value 292307, :key "/jepsen/register-003", :node "n2"}
+{:index 276, :time 51741858391, :type :ok, :process 26, :f :read, :value 673407, :key "/jepsen/register-002", :node "n2"}
+{:index 277, :time 51794367647, :type :ok, :process 29, :f :read, :value 292307, :key "/jepsen/register-003", :node "n2"}
+{:index 278, :time 51809155839, :type :ok, :process 32, :f :write, :value 54818, :key "/jepsen/register-002"}
+{:index 279, :time 51829804664, :type :ok, :process 25, :f :write, :value 101847, :key "/jepsen/register-001"}
+{:index 280, :time 52046597357, :type :invoke, :process 26, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 281, :time 52048333946, :type :ok, :process 26, :f :read, :value 54818, :key "/jepsen/register-002", :node "n2"}
+{:index 282, :time 52854883962, :type :invoke, :process 32, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 283, :time 52857561089, :type :ok, :process 32, :f :read, :value 54818, :key "/jepsen/register-002", :node "n2"}
+{:index 284, :time 53179633534, :type :invoke, :process 28, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 285, :time 53184162537, :type :ok, :process 28, :f :read, :value 54818, :key "/jepsen/register-002", :node "n2"}
+{:index 286, :time 53366705839, :type :invoke, :process 29, :f :write, :value 871639, :key "/jepsen/register-002"}
+{:index 287, :time 53387112877, :type :ok, :process 29, :f :write, :value 871639, :key "/jepsen/register-002"}
+{:index 288, :time 53410514958, :type :invoke, :process 25, :f :write, :value 664896, :key "/jepsen/register-003"}
+{:index 289, :time 53434471595, :type :ok, :process 25, :f :write, :value 664896, :key "/jepsen/register-003"}
+{:index 290, :time 53886470300, :type :invoke, :process 25, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 291, :time 53888758355, :type :ok, :process 25, :f :read, :value 871639, :key "/jepsen/register-002", :node "n2"}
+{:index 292, :time 54013686697, :type :invoke, :process 26, :f :write, :value 600911, :key "/jepsen/register-001"}
+{:index 293, :time 54034541680, :type :ok, :process 26, :f :write, :value 600911, :key "/jepsen/register-001"}
+{:index 294, :time 54036255251, :type :invoke, :process 32, :f :write, :value 897750, :key "/jepsen/register-002"}
+{:index 295, :time 54058394308, :type :ok, :process 32, :f :write, :value 897750, :key "/jepsen/register-002"}
+{:index 296, :time 54812091844, :type :invoke, :process 28, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 297, :time 54814819100, :type :ok, :process 28, :f :read, :value 664896, :key "/jepsen/register-003", :node "n2"}
+{:index 298, :time 55498383652, :type :invoke, :process 29, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 299, :time 55500389326, :type :ok, :process 29, :f :read, :value 600911, :key "/jepsen/register-001", :node "n2"}
+{:index 300, :time 55585972885, :type :invoke, :process 25, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 301, :time 55589150265, :type :ok, :process 25, :f :read, :value 897750, :key "/jepsen/register-002", :node "n2"}
+{:index 302, :time 55611118485, :type :invoke, :process 25, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 303, :time 55612898981, :type :ok, :process 25, :f :read, :value 664896, :key "/jepsen/register-003", :node "n2"}
+{:index 304, :time 55742794018, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 305, :time 55759938509, :type :info, :process :nemesis, :f :start, :value [:isolated {"n3" #{"n1"}, "n1" #{"n2"}, "n2" #{"n3"}}]}
+{:index 306, :time 56071779756, :type :invoke, :process 28, :f :read, :value nil, :key "/jepsen/register-001"}
+{:index 307, :time 56125165876, :type :info, :process 28, :f :read, :value nil, :key "/jepsen/register-001", :error :unavailable-maybe-applied}
+{:index 308, :time 56250950889, :type :invoke, :process 29, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 309, :time 56254523361, :type :invoke, :process 25, :f :write, :value 786065, :key "/jepsen/register-002"}
+{:index 310, :time 56258628638, :type :fail, :process 25, :f :write, :value 786065, :key "/jepsen/register-002", :error :not-leader}
+{:index 311, :time 56304481219, :type :info, :process 29, :f :read, :value nil, :key "/jepsen/register-002", :error :unavailable-maybe-applied}
+{:index 312, :time 56565387984, :type :invoke, :process 25, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 313, :time 56618906506, :type :info, :process 25, :f :read, :value nil, :key "/jepsen/register-003", :error :unavailable-maybe-applied}
+{:index 314, :time 57402516535, :type :invoke, :process 26, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 315, :time 57411362569, :type :invoke, :process 32, :f :write, :value 723717, :key "/jepsen/register-001"}
+{:index 316, :time 57415281134, :type :fail, :process 32, :f :write, :value 723717, :key "/jepsen/register-001", :error :not-leader}
+{:index 317, :time 57456284118, :type :info, :process 26, :f :read, :value nil, :key "/jepsen/register-002", :error :unavailable-maybe-applied}
+{:index 318, :time 58698502964, :type :invoke, :process 33, :f :read, :value nil, :key "/jepsen/register-003"}
+{:index 319, :time 59257004007, :type :invoke, :process 34, :f :write, :value 666119, :key "/jepsen/register-002"}
+{:index 320, :time 59506834247, :type :invoke, :process 30, :f :write, :value 208592, :key "/jepsen/register-001"}
+{:index 321, :time 59990083867, :type :invoke, :process 31, :f :write, :value 462885, :key "/jepsen/register-001"}
+{:index 322, :time 60193566180, :type :invoke, :process 32, :f :read, :value nil, :key "/jepsen/register-002"}
+{:index 323, :time 60246299323, :type :info, :process 32, :f :read, :value nil, :key "/jepsen/register-002", :error :unavailable-maybe-applied}
+{:index 324, :time 118737381659, :type :fail, :process 33, :f :read, :value nil, :key "/jepsen/register-003", :error [:no-client "Failed to authenticate to coord"]}
+{:index 325, :time 119278139459, :type :fail, :process 34, :f :write, :value 666119, :key "/jepsen/register-002", :error [:no-client "Failed to authenticate to coord"]}
+{:index 326, :time 119515920068, :type :fail, :process 30, :f :write, :value 208592, :key "/jepsen/register-001", :error [:no-client "Failed to authenticate to coord"]}
+{:index 327, :time 119998977520, :type :fail, :process 31, :f :write, :value 462885, :key "/jepsen/register-001", :error [:no-client "Failed to authenticate to coord"]}
+{:index 328, :time 119999016186, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 329, :time 120021454004, :type :info, :process :nemesis, :f :stop, :value :network-healed}

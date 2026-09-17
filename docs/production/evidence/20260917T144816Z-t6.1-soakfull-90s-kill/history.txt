@@ -1,0 +1,604 @@
+1	:invoke	:write	"vs42-2-xxxxxxxxx"
+1	:ok	:write	"vs42-2-xxxxxxxxx"
+2	:invoke	:read	nil
+3	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-4"}
+2	:ok	:read	nil
+4	:invoke	:write	"vs42-7-xxxxxxxxx"
+3	:ok	:txn-read	nil
+4	:ok	:write	"vs42-7-xxxxxxxxx"
+5	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-11", :old "old-11", :val "new-11", :stale? false}
+5	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-11", :old "old-11", :val "new-11", :stale? false}
+6	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-14", :old "old-14", :val "new-14", :stale? false}
+6	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-14", :old "old-14", :val "new-14", :stale? false}
+7	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+8	:invoke	:write	"vs42-16-xxxxxxxx"
+8	:ok	:write	"vs42-16-xxxxxxxx"
+9	:invoke	:read	nil
+9	:ok	:read	nil
+0	:invoke	:write	"vs42-19-xxxxxxxx"
+0	:ok	:write	"vs42-19-xxxxxxxx"
+0	:invoke	:write	"vs42-22-xxxxxxxx"
+0	:ok	:write	"vs42-22-xxxxxxxx"
+1	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+2	:invoke	:write	"vs42-24-xxxxxxxx"
+2	:ok	:write	"vs42-24-xxxxxxxx"
+3	:invoke	:write	"vs42-27-xxxxxxxx"
+3	:ok	:write	"vs42-27-xxxxxxxx"
+7	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:read	nil
+4	:ok	:read	nil
+5	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/30", :ttl 2, :grace-ms 4000}
+6	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-32", :val "32"}
+7	:ok	:txn-create	{:key "/jepsen/txn/s42-create-32", :val "32"}
+8	:invoke	:write	"vs42-35-xxxxxxxx"
+8	:ok	:write	"vs42-35-xxxxxxxx"
+1	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/39", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+0	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+1	:invoke	:write	"vs42-41-xxxxxxxx"
+1	:ok	:write	"vs42-41-xxxxxxxx"
+1	:invoke	:write	"vs42-44-xxxxxxxx"
+1	:ok	:write	"vs42-44-xxxxxxxx"
+2	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-47", :old "old-47", :val "new-47", :stale? false}
+2	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-47", :old "old-47", :val "new-47", :stale? false}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:start	nil
+7	:invoke	:write	"vs42-51-xxxxxxxx"
+:nemesis	:info	:start	{"n1" [:killed "n1"]}
+8	:invoke	:write	"vs42-55-xxxxxxxx"
+6	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+0	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+7	:info	:write	"vs42-51-xxxxxxxx"	:unavailable-maybe-applied
+8	:info	:write	"vs42-55-xxxxxxxx"	:unavailable-maybe-applied
+18	:invoke	:write	"vs42-59-xxxxxxxx"
+0	:invoke	:write	"vs42-61-xxxxxxxx"
+0	:info	:write	"vs42-61-xxxxxxxx"	:unavailable-maybe-applied
+10	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/64", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+1	:invoke	:read	nil
+1	:info	:read	nil	:unavailable-maybe-applied
+11	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-67", :old "old-67", :val "new-67", :stale? false}
+2	:invoke	:write	"vs42-69-xxxxxxxx"
+2	:info	:write	"vs42-69-xxxxxxxx"	:unavailable-maybe-applied
+18	:ok	:write	"vs42-59-xxxxxxxx"
+11	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-67", :old "old-67", :val "new-67", :stale? false}
+3	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-74/", :vals ["74-a" "74-b" "74-c"], :range-start "/jepsen/txn/s42-set-74/", :range-end "/jepsen/txn/s42-set-74/z"}
+3	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-74/", :vals ["74-a" "74-b" "74-c"], :range-start "/jepsen/txn/s42-set-74/", :range-end "/jepsen/txn/s42-set-74/z"}
+4	:invoke	:read	nil
+4	:ok	:read	nil
+5	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/30", :ttl 2, :grace-ms 4000}
+9	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/39", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+5	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+5	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/77", :ttl 30, :grace-ms 4000}
+6	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/77", :ttl 30, :grace-ms 4000}
+17	:invoke	:write	"vs42-80-xxxxxxxx"
+17	:ok	:write	"vs42-80-xxxxxxxx"
+10	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/64", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+18	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/84", :ttl 2, :grace-ms 4000}
+9	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-86/", :vals ["86-a" "86-b" "86-c"], :range-start "/jepsen/txn/s42-set-86/", :range-end "/jepsen/txn/s42-set-86/z"}
+10	:invoke	:delete	nil
+9	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-86/", :vals ["86-a" "86-b" "86-c"], :range-start "/jepsen/txn/s42-set-86/", :range-end "/jepsen/txn/s42-set-86/z"}
+10	:ok	:delete	nil
+10	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-90", :val "90"}
+10	:ok	:txn-create	{:key "/jepsen/txn/s42-create-90", :val "90"}
+11	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/93", :ttl 30, :grace-ms 4000}
+11	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/93", :ttl 30, :grace-ms 4000}
+12	:invoke	:delete	nil
+3	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-95"}
+3	:ok	:txn-read	nil
+12	:ok	:delete	nil
+4	:invoke	:write	"vs42-99-xxxxxxxx"
+4	:ok	:write	"vs42-99-xxxxxxxx"
+5	:invoke	:write	"vs42-102-xxxxxxx"
+5	:ok	:write	"vs42-102-xxxxxxx"
+6	:invoke	:write	"vs42-105-xxxxxxx"
+6	:ok	:write	"vs42-105-xxxxxxx"
+18	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/84", :ttl 2, :grace-ms 4000}
+17	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-109/", :vals ["109-a" "109-b" "109-c"], :range-start "/jepsen/txn/s42-set-109/", :range-end "/jepsen/txn/s42-set-109/z"}
+17	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-109/", :vals ["109-a" "109-b" "109-c"], :range-start "/jepsen/txn/s42-set-109/", :range-end "/jepsen/txn/s42-set-109/z"}
+18	:invoke	:read	nil
+18	:ok	:read	nil
+9	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-112", :old "old-112", :val "new-112", :stale? false}
+9	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-112", :old "old-112", :val "new-112", :stale? false}
+10	:invoke	:write	"vs42-115-xxxxxxx"
+10	:ok	:write	"vs42-115-xxxxxxx"
+10	:invoke	:write	"vs42-118-xxxxxxx"
+10	:ok	:write	"vs42-118-xxxxxxx"
+11	:invoke	:delete	nil
+11	:ok	:delete	nil
+:nemesis	:info	:stop	nil
+3	:invoke	:write	"vs42-123-xxxxxxx"
+3	:ok	:write	"vs42-123-xxxxxxx"
+:nemesis	:info	:stop	{"n1" [:restarted "n1"]}
+5	:invoke	:exists	nil
+5	:ok	:exists	nil
+6	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-126/", :vals ["126-a" "126-b" "126-c"], :range-start "/jepsen/txn/s42-set-126/", :range-end "/jepsen/txn/s42-set-126/z"}
+6	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-126/", :vals ["126-a" "126-b" "126-c"], :range-start "/jepsen/txn/s42-set-126/", :range-end "/jepsen/txn/s42-set-126/z"}
+17	:invoke	:read	nil
+17	:ok	:read	nil
+18	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/129", :ttl 2, :grace-ms 4000}
+9	:invoke	:read	nil
+9	:ok	:read	nil
+10	:invoke	:write	"vs42-132-xxxxxxx"
+10	:ok	:write	"vs42-132-xxxxxxx"
+10	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-135/", :vals ["135-a" "135-b" "135-c"], :range-start "/jepsen/txn/s42-set-135/", :range-end "/jepsen/txn/s42-set-135/z"}
+10	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-135/", :vals ["135-a" "135-b" "135-c"], :range-start "/jepsen/txn/s42-set-135/", :range-end "/jepsen/txn/s42-set-135/z"}
+11	:invoke	:write	"vs42-138-xxxxxxx"
+11	:ok	:write	"vs42-138-xxxxxxx"
+12	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs42-140-xxxxxxx"
+3	:ok	:write	"vs42-140-xxxxxxx"
+4	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-143", :old "old-143", :val "new-143", :stale? false}
+5	:invoke	:write	"vs42-145-xxxxxxx"
+6	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-147", :val "147"}
+5	:ok	:write	"vs42-145-xxxxxxx"
+4	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-143", :old "old-143", :val "new-143", :stale? false}
+6	:ok	:txn-create	{:key "/jepsen/txn/s42-create-147", :val "147"}
+17	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-151", :val "151"}
+17	:ok	:txn-create	{:key "/jepsen/txn/s42-create-151", :val "151"}
+18	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/129", :ttl 2, :grace-ms 4000}
+18	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/155", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-157", :val "157"}
+9	:ok	:txn-create	{:key "/jepsen/txn/s42-create-157", :val "157"}
+10	:invoke	:delete	nil
+10	:ok	:delete	nil
+10	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-160"}
+10	:ok	:txn-read	nil
+12	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:write	"vs42-164-xxxxxxx"
+11	:ok	:write	"vs42-164-xxxxxxx"
+12	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-167", :old "old-167", :val "new-167", :stale? false}
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+12	:info	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-167", :old "old-167", :val "new-167", :stale? false}	:unavailable-maybe-applied
+5	:invoke	:read	nil
+5	:ok	:read	nil
+6	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-170/", :vals ["170-a" "170-b" "170-c"], :range-start "/jepsen/txn/s42-set-170/", :range-end "/jepsen/txn/s42-set-170/z"}
+17	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-170/", :vals ["170-a" "170-b" "170-c"], :range-start "/jepsen/txn/s42-set-170/", :range-end "/jepsen/txn/s42-set-170/z"}
+9	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/173", :ttl 30, :grace-ms 4000}
+9	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/173", :ttl 30, :grace-ms 4000}
+18	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/155", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-177", :old "old-177", :val "new-177", :stale? true}
+9	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-177", :old "old-177", :val "new-177", :stale? true}
+10	:invoke	:delete	nil
+10	:ok	:delete	nil
+17	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+10	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/181", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+11	:invoke	:read	nil
+11	:ok	:read	nil
+22	:invoke	:write	"vs42-184-xxxxxxx"
+22	:ok	:write	"vs42-184-xxxxxxx"
+3	:invoke	:write	"vs42-187-xxxxxxx"
+3	:ok	:write	"vs42-187-xxxxxxx"
+4	:invoke	:delete	nil
+4	:ok	:delete	nil
+5	:invoke	:read	nil
+5	:ok	:read	nil
+6	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/190", :ttl 2, :grace-ms 4000}
+:nemesis	:info	:stop	nil
+18	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:write	"vs42-192-xxxxxxx"
+9	:ok	:write	"vs42-192-xxxxxxx"
+11	:invoke	:write	"vs42-195-xxxxxxx"
+11	:ok	:write	"vs42-195-xxxxxxx"
+11	:invoke	:delete	nil
+11	:ok	:delete	nil
+10	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/181", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+22	:invoke	:read	nil
+22	:ok	:read	nil
+3	:invoke	:delete	nil
+3	:ok	:delete	nil
+4	:invoke	:write	"vs42-198-xxxxxxx"
+4	:ok	:write	"vs42-198-xxxxxxx"
+5	:invoke	:write	"vs42-201-xxxxxxx"
+5	:ok	:write	"vs42-201-xxxxxxx"
+18	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/190", :ttl 2, :grace-ms 4000}
+6	:invoke	:write	"vs42-206-xxxxxxx"
+17	:invoke	:write	"vs42-208-xxxxxxx"
+6	:ok	:write	"vs42-206-xxxxxxx"
+17	:ok	:write	"vs42-208-xxxxxxx"
+18	:invoke	:write	"vs42-212-xxxxxxx"
+18	:ok	:write	"vs42-212-xxxxxxx"
+9	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-215"}
+9	:ok	:txn-read	nil
+10	:invoke	:write	"vs42-218-xxxxxxx"
+10	:ok	:write	"vs42-218-xxxxxxx"
+10	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/221", :ttl 2, :grace-ms 4000}
+11	:invoke	:delete	nil
+11	:ok	:delete	nil
+22	:invoke	:write	"vs42-224-xxxxxxx"
+22	:ok	:write	"vs42-224-xxxxxxx"
+3	:invoke	:read	nil
+3	:ok	:read	nil
+4	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/227", :ttl 2, :grace-ms 4000}
+5	:invoke	:exists	nil
+5	:ok	:exists	nil
+6	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-230", :val "230"}
+6	:ok	:txn-create	{:key "/jepsen/txn/s42-create-230", :val "230"}
+17	:invoke	:exists	nil
+18	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/232", :ttl 2, :grace-ms 4000}
+17	:ok	:exists	nil
+9	:invoke	:write	"vs42-235-xxxxxxx"
+9	:ok	:write	"vs42-235-xxxxxxx"
+10	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/221", :ttl 2, :grace-ms 4000}
+10	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/239", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+4	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/227", :ttl 2, :grace-ms 4000}
+11	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+22	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-241", :old "old-241", :val "new-241", :stale? false}
+18	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/232", :ttl 2, :grace-ms 4000}
+22	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-241", :old "old-241", :val "new-241", :stale? false}
+22	:invoke	:write	"vs42-245-xxxxxxx"
+22	:ok	:write	"vs42-245-xxxxxxx"
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+5	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+10	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/239", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+11	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:exists	nil
+6	:ok	:exists	nil
+17	:invoke	:delete	nil
+17	:ok	:delete	nil
+5	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+18	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/249", :ttl 2, :grace-ms 4000}
+9	:invoke	:write	"vs42-251-xxxxxxx"
+9	:ok	:write	"vs42-251-xxxxxxx"
+10	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+10	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+10	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/254", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+11	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+22	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/256", :ttl 2, :grace-ms 4000}
+3	:invoke	:read	nil
+3	:ok	:read	nil
+4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+5	:invoke	:write	"vs42-259-xxxxxxx"
+5	:ok	:write	"vs42-259-xxxxxxx"
+6	:invoke	:write	"vs42-262-xxxxxxx"
+6	:ok	:write	"vs42-262-xxxxxxx"
+18	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/249", :ttl 2, :grace-ms 4000}
+17	:invoke	:delete	nil
+17	:ok	:delete	nil
+18	:invoke	:write	"vs42-265-xxxxxxx"
+18	:ok	:write	"vs42-265-xxxxxxx"
+11	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:read	nil
+9	:ok	:read	nil
+22	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/256", :ttl 2, :grace-ms 4000}
+11	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+10	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/254", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+10	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-268", :val "268"}
+10	:ok	:txn-create	{:key "/jepsen/txn/s42-create-268", :val "268"}
+22	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-271", :val "271"}
+22	:ok	:txn-create	{:key "/jepsen/txn/s42-create-271", :val "271"}
+22	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-274"}
+22	:ok	:txn-read	nil
+3	:invoke	:delete	nil
+3	:ok	:delete	nil
+4	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-277", :old "old-277", :val "new-277", :stale? false}
+4	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-277", :old "old-277", :val "new-277", :stale? false}
+5	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-280"}
+5	:ok	:txn-read	nil
+6	:invoke	:write	"vs42-283-xxxxxxx"
+6	:ok	:write	"vs42-283-xxxxxxx"
+17	:invoke	:delete	nil
+17	:ok	:delete	nil
+11	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+18	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-287", :old "old-287", :val "new-287", :stale? false}
+18	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-287", :old "old-287", :val "new-287", :stale? false}
+:nemesis	:info	:stop	nil
+10	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-292", :val "292"}
+10	:ok	:txn-create	{:key "/jepsen/txn/s42-create-292", :val "292"}
+10	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-294/", :vals ["294-a" "294-b" "294-c"], :range-start "/jepsen/txn/s42-set-294/", :range-end "/jepsen/txn/s42-set-294/z"}
+11	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-294/", :vals ["294-a" "294-b" "294-c"], :range-start "/jepsen/txn/s42-set-294/", :range-end "/jepsen/txn/s42-set-294/z"}
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+3	:invoke	:read	nil
+3	:ok	:read	nil
+4	:invoke	:delete	nil
+4	:ok	:delete	nil
+5	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs42-296-xxxxxxx"
+6	:ok	:write	"vs42-296-xxxxxxx"
+17	:invoke	:write	"vs42-299-xxxxxxx"
+17	:ok	:write	"vs42-299-xxxxxxx"
+10	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+18	:invoke	:write	"vs42-303-xxxxxxx"
+18	:ok	:write	"vs42-303-xxxxxxx"
+5	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+10	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/305", :ttl 2, :grace-ms 4000}
+22	:invoke	:read	nil
+22	:ok	:read	nil
+22	:invoke	:write	"vs42-308-xxxxxxx"
+22	:ok	:write	"vs42-308-xxxxxxx"
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+10	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+5	:invoke	:read	nil
+5	:ok	:read	nil
+9	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/305", :ttl 2, :grace-ms 4000}
+6	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/313", :ttl 30, :grace-ms 4000}
+6	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/313", :ttl 30, :grace-ms 4000}
+17	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+18	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-315", :val "315"}
+18	:ok	:txn-create	{:key "/jepsen/txn/s42-create-315", :val "315"}
+9	:invoke	:read	nil
+10	:invoke	:write	"vs42-317-xxxxxxx"
+9	:ok	:read	nil
+10	:ok	:write	"vs42-317-xxxxxxx"
+10	:invoke	:write	"vs42-320-xxxxxxx"
+10	:ok	:write	"vs42-320-xxxxxxx"
+11	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/323", :ttl 30, :grace-ms 4000}
+11	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/323", :ttl 30, :grace-ms 4000}
+22	:invoke	:read	nil
+22	:ok	:read	nil
+17	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+:nemesis	:info	:stop	nil
+4	:invoke	:exists	nil
+4	:ok	:exists	nil
+5	:invoke	:exists	nil
+5	:ok	:exists	nil
+6	:invoke	:read	nil
+6	:ok	:read	nil
+17	:invoke	:exists	nil
+17	:ok	:exists	nil
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+9	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-328", :val "328"}
+9	:ok	:txn-create	{:key "/jepsen/txn/s42-create-328", :val "328"}
+10	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:read	nil
+11	:ok	:read	nil
+11	:invoke	:read	nil
+11	:ok	:read	nil
+22	:invoke	:write	"vs42-331-xxxxxxx"
+22	:ok	:write	"vs42-331-xxxxxxx"
+3	:invoke	:delete	nil
+3	:ok	:delete	nil
+4	:invoke	:delete	nil
+4	:ok	:delete	nil
+10	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+5	:invoke	:write	"vs42-335-xxxxxxx"
+6	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true, :count-only true}
+5	:ok	:write	"vs42-335-xxxxxxx"
+6	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true, :count-only true}
+17	:invoke	:read	nil
+17	:ok	:read	nil
+18	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-338/", :vals ["338-a" "338-b" "338-c"], :range-start "/jepsen/txn/s42-set-338/", :range-end "/jepsen/txn/s42-set-338/z"}
+18	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-338/", :vals ["338-a" "338-b" "338-c"], :range-start "/jepsen/txn/s42-set-338/", :range-end "/jepsen/txn/s42-set-338/z"}
+9	:invoke	:write	"vs42-341-xxxxxxx"
+9	:ok	:write	"vs42-341-xxxxxxx"
+10	:invoke	:write	"vs42-344-xxxxxxx"
+10	:ok	:write	"vs42-344-xxxxxxx"
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+22	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+3	:invoke	:write	"vs42-346-xxxxxxx"
+3	:ok	:write	"vs42-346-xxxxxxx"
+4	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-349/", :vals ["349-a" "349-b" "349-c"], :range-start "/jepsen/txn/s42-set-349/", :range-end "/jepsen/txn/s42-set-349/z"}
+4	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-349/", :vals ["349-a" "349-b" "349-c"], :range-start "/jepsen/txn/s42-set-349/", :range-end "/jepsen/txn/s42-set-349/z"}
+5	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-352", :val "352"}
+5	:ok	:txn-create	{:key "/jepsen/txn/s42-create-352", :val "352"}
+6	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-355", :old "old-355", :val "new-355", :stale? false}
+6	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-355", :old "old-355", :val "new-355", :stale? false}
+17	:invoke	:write	"vs42-358-xxxxxxx"
+17	:ok	:write	"vs42-358-xxxxxxx"
+18	:invoke	:write	"vs42-361-xxxxxxx"
+18	:ok	:write	"vs42-361-xxxxxxx"
+22	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-365"}
+9	:ok	:txn-read	nil
+10	:invoke	:read	nil
+10	:ok	:read	nil
+10	:invoke	:write	"vs42-368-xxxxxxx"
+10	:ok	:write	"vs42-368-xxxxxxx"
+11	:invoke	:write	"vs42-371-xxxxxxx"
+11	:ok	:write	"vs42-371-xxxxxxx"
+22	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-374"}
+22	:ok	:txn-read	nil
+3	:invoke	:read	nil
+3	:ok	:read	nil
+4	:invoke	:write	"vs42-377-xxxxxxx"
+4	:ok	:write	"vs42-377-xxxxxxx"
+5	:invoke	:read	nil
+5	:ok	:read	nil
+6	:invoke	:write	"vs42-380-xxxxxxx"
+17	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-382", :old "old-382", :val "new-382", :stale? false}
+6	:ok	:write	"vs42-380-xxxxxxx"
+17	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-382", :old "old-382", :val "new-382", :stale? false}
+18	:invoke	:write	"vs42-386-xxxxxxx"
+18	:ok	:write	"vs42-386-xxxxxxx"
+:nemesis	:info	:stop	nil
+10	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/391", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+11	:invoke	:read	nil
+11	:ok	:read	nil
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+22	:invoke	:write	"vs42-396-xxxxxxx"
+22	:ok	:write	"vs42-396-xxxxxxx"
+3	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-399/", :vals ["399-a" "399-b" "399-c"], :range-start "/jepsen/txn/s42-set-399/", :range-end "/jepsen/txn/s42-set-399/z"}
+3	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-399/", :vals ["399-a" "399-b" "399-c"], :range-start "/jepsen/txn/s42-set-399/", :range-end "/jepsen/txn/s42-set-399/z"}
+4	:invoke	:write	"vs42-402-xxxxxxx"
+4	:ok	:write	"vs42-402-xxxxxxx"
+5	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-405", :old "old-405", :val "new-405", :stale? true}
+5	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-405", :old "old-405", :val "new-405", :stale? true}
+6	:invoke	:write	"vs42-408-xxxxxxx"
+6	:ok	:write	"vs42-408-xxxxxxx"
+17	:invoke	:exists	nil
+17	:ok	:exists	nil
+10	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/391", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+18	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/412", :ttl 30, :grace-ms 4000}
+18	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/412", :ttl 30, :grace-ms 4000}
+9	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-415", :old "old-415", :val "new-415", :stale? false}
+10	:invoke	:read	nil
+10	:ok	:read	nil
+9	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-415", :old "old-415", :val "new-415", :stale? false}
+10	:invoke	:read	nil
+10	:ok	:read	nil
+11	:invoke	:write	"vs42-418-xxxxxxx"
+11	:ok	:write	"vs42-418-xxxxxxx"
+22	:invoke	:write	"vs42-421-xxxxxxx"
+22	:ok	:write	"vs42-421-xxxxxxx"
+3	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-424", :val "424"}
+3	:ok	:txn-create	{:key "/jepsen/txn/s42-create-424", :val "424"}
+4	:invoke	:write	"vs42-427-xxxxxxx"
+4	:ok	:write	"vs42-427-xxxxxxx"
+5	:invoke	:read	nil
+5	:ok	:read	nil
+6	:invoke	:write	"vs42-430-xxxxxxx"
+6	:ok	:write	"vs42-430-xxxxxxx"
+17	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/433", :ttl 2, :grace-ms 4000}
+18	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/435", :ttl 2, :grace-ms 4000}
+9	:invoke	:delete	nil
+9	:ok	:delete	nil
+10	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/438", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+11	:invoke	:write	"vs42-440-xxxxxxx"
+11	:ok	:write	"vs42-440-xxxxxxx"
+11	:invoke	:read	nil
+11	:ok	:read	nil
+22	:invoke	:read	nil
+22	:ok	:read	nil
+3	:invoke	:read	nil
+3	:ok	:read	nil
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n2" [:killed "n2"]}
+17	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/433", :ttl 2, :grace-ms 4000}
+6	:invoke	:write	"vs42-448-xxxxxxx"
+6	:ok	:write	"vs42-448-xxxxxxx"
+18	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/435", :ttl 2, :grace-ms 4000}
+17	:invoke	:txn-cas	{:key "/jepsen/txn/s42-cas-452", :old "old-452", :val "new-452", :stale? false}
+17	:ok	:txn-cas	{:key "/jepsen/txn/s42-cas-452", :old "old-452", :val "new-452", :stale? false}
+18	:invoke	:write	"vs42-455-xxxxxxx"
+18	:ok	:write	"vs42-455-xxxxxxx"
+10	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/438", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+9	:invoke	:delete	nil
+9	:ok	:delete	nil
+10	:invoke	:write	"vs42-458-xxxxxxx"
+10	:ok	:write	"vs42-458-xxxxxxx"
+10	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:write	"vs42-460-xxxxxxx"
+11	:ok	:write	"vs42-460-xxxxxxx"
+22	:invoke	:write	"vs42-463-xxxxxxx"
+22	:ok	:write	"vs42-463-xxxxxxx"
+3	:invoke	:write	"vs42-466-xxxxxxx"
+3	:ok	:write	"vs42-466-xxxxxxx"
+4	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+5	:invoke	:write	"vs42-468-xxxxxxx"
+5	:ok	:write	"vs42-468-xxxxxxx"
+10	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:read	nil
+6	:ok	:read	nil
+17	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-471/", :vals ["471-a" "471-b" "471-c"], :range-start "/jepsen/txn/s42-set-471/", :range-end "/jepsen/txn/s42-set-471/z"}
+17	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-471/", :vals ["471-a" "471-b" "471-c"], :range-start "/jepsen/txn/s42-set-471/", :range-end "/jepsen/txn/s42-set-471/z"}
+18	:invoke	:txn-read	{:key "/jepsen/txn/s42-create-474"}
+18	:ok	:txn-read	nil
+:nemesis	:info	:stop	nil
+4	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+10	:invoke	:write	"vs42-480-xxxxxxx"
+10	:ok	:write	"vs42-480-xxxxxxx"
+10	:invoke	:read	nil
+10	:ok	:read	nil
+11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+:nemesis	:info	:stop	{"n2" [:restarted "n2"]}
+3	:invoke	:write	"vs42-485-xxxxxxx"
+4	:invoke	:write	"vs42-487-xxxxxxx"
+3	:ok	:write	"vs42-485-xxxxxxx"
+4	:ok	:write	"vs42-487-xxxxxxx"
+5	:invoke	:delete	nil
+5	:ok	:delete	nil
+6	:invoke	:write	"vs42-490-xxxxxxx"
+6	:ok	:write	"vs42-490-xxxxxxx"
+17	:invoke	:read	nil
+17	:ok	:read	nil
+18	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+9	:invoke	:delete	nil
+9	:ok	:delete	nil
+10	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-493", :old "old-493", :val "new-493", :stale? false}
+10	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-493", :old "old-493", :val "new-493", :stale? false}
+18	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+10	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+11	:invoke	:write	"vs42-495-xxxxxxx"
+11	:ok	:write	"vs42-495-xxxxxxx"
+22	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-498/", :vals ["498-a" "498-b" "498-c"], :range-start "/jepsen/txn/s42-set-498/", :range-end "/jepsen/txn/s42-set-498/z"}
+22	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-498/", :vals ["498-a" "498-b" "498-c"], :range-start "/jepsen/txn/s42-set-498/", :range-end "/jepsen/txn/s42-set-498/z"}
+3	:invoke	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+4	:invoke	:read	nil
+4	:ok	:read	nil
+10	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision :last, :prev-kv? true, :window-ms 2000, :max-events 10000, :resumes 2}
+5	:invoke	:exists	nil
+5	:ok	:exists	nil
+3	:ok	:watch-session	{:key "/jepsen/watch/s42", :start-revision 0, :prev-kv? false, :window-ms 2000, :max-events 10000, :resumes 2}
+6	:invoke	:write	"vs42-502-xxxxxxx"
+6	:ok	:write	"vs42-502-xxxxxxx"
+17	:invoke	:write	"vs42-505-xxxxxxx"
+17	:ok	:write	"vs42-505-xxxxxxx"
+18	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/508", :ttl 2, :grace-ms 4000}
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n3" [:killed "n3"]}
+10	:invoke	:lease-ttl	{:key "/jepsen/lease/s42/ttl/514", :ttl 2, :grace-ms 4000}
+11	:invoke	:lease-revoke	{:key "/jepsen/lease/s42/rev/516", :ttl 30, :grace-ms 4000}
+22	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-518", :old "old-518", :val "new-518", :stale? false}
+22	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-518", :old "old-518", :val "new-518", :stale? false}
+11	:ok	:lease-revoke	{:key "/jepsen/lease/s42/rev/516", :ttl 30, :grace-ms 4000}
+3	:invoke	:delete	nil
+4	:invoke	:write	"vs42-520-xxxxxxx"
+3	:ok	:delete	nil
+4	:ok	:write	"vs42-520-xxxxxxx"
+5	:invoke	:read	nil
+5	:ok	:read	nil
+6	:invoke	:read	nil
+6	:ok	:read	nil
+17	:invoke	:read	nil
+17	:ok	:read	nil
+18	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/508", :ttl 2, :grace-ms 4000}
+18	:invoke	:delete	nil
+9	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-522/", :vals ["522-a" "522-b" "522-c"], :range-start "/jepsen/txn/s42-set-522/", :range-end "/jepsen/txn/s42-set-522/z"}
+18	:ok	:delete	nil
+9	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-522/", :vals ["522-a" "522-b" "522-c"], :range-start "/jepsen/txn/s42-set-522/", :range-end "/jepsen/txn/s42-set-522/z"}
+11	:invoke	:read	nil
+11	:ok	:read	nil
+11	:invoke	:read	nil
+11	:ok	:read	nil
+11	:invoke	:lease-keepalive	{:key "/jepsen/lease/s42/ka/525", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+10	:ok	:lease-ttl	{:key "/jepsen/lease/s42/ttl/514", :ttl 2, :grace-ms 4000}
+22	:invoke	:read	nil
+22	:ok	:read	nil
+3	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-528/", :vals ["528-a" "528-b" "528-c"], :range-start "/jepsen/txn/s42-set-528/", :range-end "/jepsen/txn/s42-set-528/z"}
+3	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-528/", :vals ["528-a" "528-b" "528-c"], :range-start "/jepsen/txn/s42-set-528/", :range-end "/jepsen/txn/s42-set-528/z"}
+4	:invoke	:write	"vs42-531-xxxxxxx"
+4	:ok	:write	"vs42-531-xxxxxxx"
+5	:invoke	:txn-create	{:key "/jepsen/txn/s42-create-534", :val "534"}
+5	:ok	:txn-create	{:key "/jepsen/txn/s42-create-534", :val "534"}
+6	:invoke	:txn-write-set	{:prefix "/jepsen/txn/s42-set-537/", :vals ["537-a" "537-b" "537-c"], :range-start "/jepsen/txn/s42-set-537/", :range-end "/jepsen/txn/s42-set-537/z"}
+6	:ok	:txn-write-set	{:prefix "/jepsen/txn/s42-set-537/", :vals ["537-a" "537-b" "537-c"], :range-start "/jepsen/txn/s42-set-537/", :range-end "/jepsen/txn/s42-set-537/z"}
+17	:invoke	:read	nil
+17	:ok	:read	nil
+18	:invoke	:read	nil
+18	:ok	:read	nil
+9	:invoke	:write	"vs42-540-xxxxxxx"
+9	:ok	:write	"vs42-540-xxxxxxx"
+11	:ok	:lease-keepalive	{:key "/jepsen/lease/s42/ka/525", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+10	:invoke	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-544", :old "old-544", :val "new-544", :stale? false}
+:nemesis	:info	:stop	nil
+10	:ok	:txn-cas-delete	{:key "/jepsen/txn/s42-casd-544", :old "old-544", :val "new-544", :stale? false}
+11	:invoke	:read	nil
+11	:ok	:read	nil
+22	:invoke	:write	"vs42-547-xxxxxxx"
+22	:ok	:write	"vs42-547-xxxxxxx"
+3	:invoke	:write	"vs42-550-xxxxxxx"
+3	:ok	:write	"vs42-550-xxxxxxx"
+4	:invoke	:write	"vs42-553-xxxxxxx"
+4	:ok	:write	"vs42-553-xxxxxxx"
+5	:invoke	:delete	nil
+5	:ok	:delete	nil
+:nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+17	:invoke	:write	"vs42-558-xxxxxxx"
+17	:ok	:write	"vs42-558-xxxxxxx"
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	:not-started

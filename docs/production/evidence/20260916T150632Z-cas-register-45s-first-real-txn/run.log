@@ -1,0 +1,569 @@
+2026-09-16 14:54:12,864{GMT}	INFO	[jepsen test runner] jepsen.core: Test version ad22337b09f7aae407b39e9d639de867e52bccc7 (plus uncommitted changes)
+2026-09-16 14:54:12,865{GMT}	INFO	[jepsen test runner] jepsen.core: Command line:
+lein run test --nodes-file /root/nodes --username root --ssh-private-key /root/.ssh/id_ed25519 --workload cas-register --nemesis none --time-limit 45 --concurrency 2n --seed 42
+2026-09-16 14:54:12,929{GMT}	INFO	[jepsen test runner] jepsen.core: Running test:
+{:remote
+ #jepsen.control.retry.Remote{:remote #jepsen.control.scp.Remote{:cmd-remote #jepsen.control.sshj.SSHJRemote{:concurrency-limit 6,
+                                                                                                             :conn-spec nil,
+                                                                                                             :client nil,
+                                                                                                             :semaphore nil},
+                                                                 :conn-spec nil},
+                              :conn nil}
+ :idem-replay-delay-ms 0
+ :ssh-private-key "/root/.ssh/id_ed25519"
+ :idem-min-replay-attempts nil
+ :concurrency 10
+ :soak-disrupt 600
+ :db
+ #jepsen.coord.db.CoordDB{:cluster-name "jepsen-coord",
+                          :pidfile-prefix "/var/run/coord-",
+                          :root-password "66c57bb56bce306f484344e4a8650836",
+                          :coord-dir "/opt/coord",
+                          :config-dir "/etc/coord",
+                          :logfile "/var/log/coord.log",
+                          :regions nil,
+                          :data-dir "/var/lib/coord",
+                          :nodes ("n1" "n2" "n3"),
+                          :auth-root-key "820662a9f85924333d6d466714bc51734b251e73b827a394e1978e36d2429bfc",
+                          :raft-secret "93edf94d2860fec54bc59278a804cb1bbd2d0a7243e4f39d667d66966d9844d1",
+                          :coord-bin "/root/coord-test/coord"}
+ :leave-db-running? false
+ :name "coord"
+ :logging-json? false
+ :start-time
+ #object[java.time.OffsetDateTime "0x23657729" "2026-09-16T14:54:12.830658752Z"]
+ :regions nil
+ :map-keys nil
+ :net
+ #object[jepsen.net$iptables_with_dev$reify__15623
+         "0x365291bd"
+         "jepsen.net$iptables_with_dev$reify__15623@365291bd"]
+ :client
+ #jepsen.coord.client.CoordClient{:nodes ["n1" "n2" "n3"],
+                                  :root-password "66c57bb56bce306f484344e4a8650836",
+                                  :cct nil,
+                                  :channels nil,
+                                  :raw-channels nil,
+                                  :leader-idx #object[clojure.lang.Atom
+                                                      "0x31773d5b"
+                                                      {:status :ready, :val {}}],
+                                  :last-rev #object[clojure.lang.Atom
+                                                    "0x5bbf8daa"
+                                                    {:status :ready, :val {}}],
+                                  :parse-values? true}
+ :barrier
+ #object[java.util.concurrent.CyclicBarrier
+         "0x33c5e52f"
+         "java.util.concurrent.CyclicBarrier@33c5e52f"]
+ :ssh
+ {:dummy? false,
+  :username "root",
+  :password "root",
+  :strict-host-key-checking false,
+  :private-key-path "/root/.ssh/id_ed25519"}
+ :rate nil
+ :map-min-deletes nil
+ :seed 42
+ :checker
+ #jepsen.checker.Compose{:checkers {:linear #jepsen.checker.Linearizable{:algorithm :wgl,
+                                                                         :model #knossos.model.CASRegister{:value nil}},
+                                    :gates #object[jepsen.coord.gates$checker$reify__912
+                                                   "0x74474fc0"
+                                                   "jepsen.coord.gates$checker$reify__912@74474fc0"],
+                                    :perf #jepsen.checker.Compose{:checkers {:latency-graph #jepsen.checker.LatencyGraph{:opts {}},
+                                                                             :rate-graph #jepsen.checker.RateGraph{:opts {}}}}}}
+ :argv
+ ("test"
+  "--nodes-file"
+  "/root/nodes"
+  "--username"
+  "root"
+  "--ssh-private-key"
+  "/root/.ssh/id_ed25519"
+  "--workload"
+  "cas-register"
+  "--nemesis"
+  "none"
+  "--time-limit"
+  "45"
+  "--concurrency"
+  "2n"
+  "--seed"
+  "42")
+ :nemesis #unprintable "jepsen.nemesis$reify__15746@7cd239f6"
+ :nodes ("n1" "n2" "n3")
+ :test-count 1
+ :no-jitter false
+ :generator
+ #object[jepsen.util.Forgettable
+         "0x73ac7716"
+         ((jepsen.generator.Synchronize
+           {:gen (jepsen.generator.TimeLimit
+                  {:limit 45000000000,
+                   :cutoff nil,
+                   :gen (jepsen.generator.Stagger
+                         {:dt-fn #object[jepsen.generator$stagger_exp$dt_fn__6799
+                                         "0x6153aca1"
+                                         "jepsen.generator$stagger_exp$dt_fn__6799@6153aca1"],
+                          :next-time nil,
+                          :gen (jepsen.generator.OnThreads
+                                {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                 :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                         "0x30b2d267"
+                                                         "jepsen.generator.context$make_thread_filter$lazy_filter__5865@30b2d267"],
+                                 :gen (jepsen.generator.Mix
+                                       {:i 0,
+                                        :gens [#object[jepsen.coord$r
+                                                       "0x5a740449"
+                                                       "jepsen.coord$r@5a740449"]
+                                               #object[jepsen.coord$cas
+                                                       "0x4f66f2dd"
+                                                       "jepsen.coord$cas@4f66f2dd"]
+                                               #object[jepsen.coord$cas
+                                                       "0x4f66f2dd"
+                                                       "jepsen.coord$cas@4f66f2dd"]]})})})})})
+          (jepsen.generator.Synchronize
+           {:gen {:type :log, :value "recovery: letting cluster converge"}})
+          (jepsen.generator.Synchronize {:gen {:type :sleep, :value 30}}))]
+ :min-op-ok-ratio nil
+ :soak-max-rto-seconds nil
+ :idem-replay-node-offset 0
+ :min-op-sample nil
+ :os
+ #object[jepsen.os$reify__16045 "0x33ac7934" "jepsen.os$reify__16045@33ac7934"]
+ :time-limit 45
+ :quiet-availability-min nil
+ :soak-quiet 1800
+ :value-size nil
+ :quiet-min-sample nil
+ :workload :cas-register}
+
+2026-09-16 14:54:14,552{GMT}	INFO	[jepsen test runner] jepsen.db: Tearing down DB
+2026-09-16 14:54:14,553{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-16 14:54:14,553{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-16 14:54:14,553{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-16 14:54:16,287{GMT}	INFO	[jepsen test runner] jepsen.db: Setting up DB
+2026-09-16 14:54:16,288{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Setting up coord on n2
+2026-09-16 14:54:16,288{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Setting up coord on n3
+2026-09-16 14:54:16,288{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Setting up coord on n1
+2026-09-16 14:54:18,728{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-16 14:54:18,772{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-16 14:54:18,809{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-16 14:54:18,832{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-16 14:54:18,881{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-16 14:54:18,920{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-16 14:54:19,153{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-16 14:54:19,154{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-16 14:54:19,565{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-16 14:54:19,566{GMT}	INFO	[jepsen test runner] jepsen.core: Relative time begins now
+2026-09-16 14:54:19,567{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-16 14:54:19,567{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:54:19,567{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:54:19,773{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-16 14:54:19,773{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-16 14:54:19,773{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-16 14:54:19,819{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord cluster is ready
+2026-09-16 14:54:19,819{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord cluster is ready
+2026-09-16 14:54:19,819{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord cluster is ready
+2026-09-16 14:54:19,839{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-16 14:54:19,840{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:54:19,881{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:cas	[nil 922479]
+2026-09-16 14:54:19,882{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-16 14:54:19,999{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	nil
+2026-09-16 14:54:20,048{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:cas	[nil 922479]
+2026-09-16 14:54:20,560{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:cas	[922479 832956]
+2026-09-16 14:54:20,560{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:54:20,674{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:read	nil
+2026-09-16 14:54:20,674{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:54:20,694{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:cas	[922479 832956]
+2026-09-16 14:54:20,811{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:read	832956
+2026-09-16 14:54:20,890{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:cas	[922479 10676]
+2026-09-16 14:54:20,890{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-16 14:54:21,024{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:fail	:cas	[922479 10676]	:cas-miss
+2026-09-16 14:54:22,495{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:cas	[832956 293224]
+2026-09-16 14:54:22,495{GMT}	INFO	[jepsen worker 5] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:54:22,650{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:cas	[832956 293224]
+2026-09-16 14:54:22,834{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:cas	[293224 16373]
+2026-09-16 14:54:22,834{GMT}	INFO	[jepsen worker 6] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:54:22,979{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:cas	[293224 16373]
+2026-09-16 14:54:23,062{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:read	nil
+2026-09-16 14:54:23,062{GMT}	INFO	[jepsen worker 7] jepsen.coord.client: Opening coord client on n2
+2026-09-16 14:54:23,205{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:read	16373
+2026-09-16 14:54:23,511{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:cas	[16373 481843]
+2026-09-16 14:54:23,511{GMT}	INFO	[jepsen worker 8] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:54:23,514{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:cas	[922479 401786]
+2026-09-16 14:54:23,515{GMT}	INFO	[jepsen worker 9] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:54:23,540{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-16 14:54:23,549{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	16373
+2026-09-16 14:54:23,678{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:cas	[16373 481843]
+2026-09-16 14:54:23,720{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:fail	:cas	[922479 401786]	:cas-miss
+2026-09-16 14:54:23,777{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-16 14:54:23,780{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	481843
+2026-09-16 14:54:23,785{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:read	nil
+2026-09-16 14:54:23,788{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:read	481843
+2026-09-16 14:54:24,491{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:cas	[481843 127837]
+2026-09-16 14:54:24,536{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:cas	[481843 127837]
+2026-09-16 14:54:24,545{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:read	nil
+2026-09-16 14:54:24,548{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:read	127837
+2026-09-16 14:54:24,913{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:cas	[nil 218634]
+2026-09-16 14:54:24,948{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:fail	:cas	[nil 218634]	:cas-miss
+2026-09-16 14:54:25,447{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:cas	[nil 629318]
+2026-09-16 14:54:25,479{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:fail	:cas	[nil 629318]	:cas-miss
+2026-09-16 14:54:25,992{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:cas	[127837 483813]
+2026-09-16 14:54:26,024{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:cas	[127837 483813]
+2026-09-16 14:54:26,176{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:cas	[293224 227412]
+2026-09-16 14:54:26,217{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:fail	:cas	[293224 227412]	:cas-miss
+2026-09-16 14:54:26,507{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:read	nil
+2026-09-16 14:54:26,510{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:read	483813
+2026-09-16 14:54:26,785{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:read	nil
+2026-09-16 14:54:26,788{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:read	483813
+2026-09-16 14:54:26,964{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[483813 432170]
+2026-09-16 14:54:26,988{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:cas	[127837 438685]
+2026-09-16 14:54:26,994{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:cas	[483813 432170]
+2026-09-16 14:54:27,033{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:fail	:cas	[127837 438685]	:cas-miss
+2026-09-16 14:54:27,037{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:cas	[832956 188046]
+2026-09-16 14:54:27,067{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:fail	:cas	[832956 188046]	:cas-miss
+2026-09-16 14:54:27,967{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:cas	[16373 551361]
+2026-09-16 14:54:28,001{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:fail	:cas	[16373 551361]	:cas-miss
+2026-09-16 14:54:28,826{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:cas	[832956 341956]
+2026-09-16 14:54:28,858{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:fail	:cas	[832956 341956]	:cas-miss
+2026-09-16 14:54:28,955{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:read	nil
+2026-09-16 14:54:28,958{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:read	432170
+2026-09-16 14:54:29,044{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:read	nil
+2026-09-16 14:54:29,046{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:read	432170
+2026-09-16 14:54:29,055{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:cas	[127837 484395]
+2026-09-16 14:54:29,067{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:cas	[432170 995765]
+2026-09-16 14:54:29,146{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:fail	:cas	[127837 484395]	:cas-miss
+2026-09-16 14:54:29,164{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:cas	[432170 995765]
+2026-09-16 14:54:29,923{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:cas	[483813 828771]
+2026-09-16 14:54:29,948{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:fail	:cas	[483813 828771]	:cas-miss
+2026-09-16 14:54:30,498{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:read	nil
+2026-09-16 14:54:30,500{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:read	995765
+2026-09-16 14:54:30,835{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-16 14:54:30,837{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	995765
+2026-09-16 14:54:30,876{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-16 14:54:30,878{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	995765
+2026-09-16 14:54:30,982{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:cas	[483813 991279]
+2026-09-16 14:54:31,010{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:cas	[127837 963379]
+2026-09-16 14:54:31,012{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:fail	:cas	[483813 991279]	:cas-miss
+2026-09-16 14:54:31,037{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:fail	:cas	[127837 963379]	:cas-miss
+2026-09-16 14:54:31,062{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:read	nil
+2026-09-16 14:54:31,065{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:read	995765
+2026-09-16 14:54:31,584{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:cas	[483813 703599]
+2026-09-16 14:54:31,607{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:fail	:cas	[483813 703599]	:cas-miss
+2026-09-16 14:54:32,137{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:cas	[nil 338012]
+2026-09-16 14:54:32,160{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:fail	:cas	[nil 338012]	:cas-miss
+2026-09-16 14:54:32,194{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:read	nil
+2026-09-16 14:54:32,197{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:read	995765
+2026-09-16 14:54:32,276{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:cas	[432170 14624]
+2026-09-16 14:54:32,310{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:fail	:cas	[432170 14624]	:cas-miss
+2026-09-16 14:54:32,582{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:read	nil
+2026-09-16 14:54:32,585{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:read	995765
+2026-09-16 14:54:32,984{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:cas	[nil 565833]
+2026-09-16 14:54:33,005{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:fail	:cas	[nil 565833]	:cas-miss
+2026-09-16 14:54:33,284{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[481843 620432]
+2026-09-16 14:54:33,307{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:fail	:cas	[481843 620432]	:cas-miss
+2026-09-16 14:54:33,575{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[481843 966599]
+2026-09-16 14:54:33,597{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:fail	:cas	[481843 966599]	:cas-miss
+2026-09-16 14:54:33,706{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:read	nil
+2026-09-16 14:54:33,709{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:read	995765
+2026-09-16 14:54:33,813{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:cas	[922479 747188]
+2026-09-16 14:54:33,835{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:cas	[432170 587608]
+2026-09-16 14:54:33,858{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:fail	:cas	[922479 747188]	:cas-miss
+2026-09-16 14:54:33,881{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:fail	:cas	[432170 587608]	:cas-miss
+2026-09-16 14:54:34,705{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:cas	[995765 831184]
+2026-09-16 14:54:34,730{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:cas	[995765 831184]
+2026-09-16 14:54:34,809{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:cas	[432170 699045]
+2026-09-16 14:54:34,833{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:fail	:cas	[432170 699045]	:cas-miss
+2026-09-16 14:54:34,949{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:cas	[483813 420325]
+2026-09-16 14:54:34,992{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:fail	:cas	[483813 420325]	:cas-miss
+2026-09-16 14:54:35,031{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:cas	[127837 184638]
+2026-09-16 14:54:35,053{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:fail	:cas	[127837 184638]	:cas-miss
+2026-09-16 14:54:35,071{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:read	nil
+2026-09-16 14:54:35,073{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:read	831184
+2026-09-16 14:54:35,101{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:cas	[483813 839272]
+2026-09-16 14:54:35,124{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:fail	:cas	[483813 839272]	:cas-miss
+2026-09-16 14:54:35,468{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[481843 629371]
+2026-09-16 14:54:35,493{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:fail	:cas	[481843 629371]	:cas-miss
+2026-09-16 14:54:35,523{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-16 14:54:35,525{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	831184
+2026-09-16 14:54:35,649{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:cas	[831184 430441]
+2026-09-16 14:54:35,697{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:cas	[831184 430441]
+2026-09-16 14:54:35,744{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:cas	[481843 851075]
+2026-09-16 14:54:35,764{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:fail	:cas	[481843 851075]	:cas-miss
+2026-09-16 14:54:36,067{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:cas	[nil 441171]
+2026-09-16 14:54:36,085{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:fail	:cas	[nil 441171]	:cas-miss
+2026-09-16 14:54:36,150{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:cas	[293224 16946]
+2026-09-16 14:54:36,183{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:fail	:cas	[293224 16946]	:cas-miss
+2026-09-16 14:54:36,259{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:cas	[16373 949400]
+2026-09-16 14:54:36,265{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:cas	[481843 890344]
+2026-09-16 14:54:36,288{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:fail	:cas	[16373 949400]	:cas-miss
+2026-09-16 14:54:36,306{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:fail	:cas	[481843 890344]	:cas-miss
+2026-09-16 14:54:36,591{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:cas	[127837 44611]
+2026-09-16 14:54:36,615{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:fail	:cas	[127837 44611]	:cas-miss
+2026-09-16 14:54:37,308{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:read	nil
+2026-09-16 14:54:37,311{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:read	430441
+2026-09-16 14:54:37,629{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:cas	[293224 115117]
+2026-09-16 14:54:37,652{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:fail	:cas	[293224 115117]	:cas-miss
+2026-09-16 14:54:37,720{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-16 14:54:37,722{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	430441
+2026-09-16 14:54:37,806{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[995765 855430]
+2026-09-16 14:54:37,831{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:fail	:cas	[995765 855430]	:cas-miss
+2026-09-16 14:54:37,947{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:cas	[832956 945555]
+2026-09-16 14:54:37,950{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:read	nil
+2026-09-16 14:54:37,957{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:read	430441
+2026-09-16 14:54:37,970{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:fail	:cas	[832956 945555]	:cas-miss
+2026-09-16 14:54:38,288{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:cas	[995765 580666]
+2026-09-16 14:54:38,311{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:fail	:cas	[995765 580666]	:cas-miss
+2026-09-16 14:54:38,626{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:read	nil
+2026-09-16 14:54:38,628{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:read	430441
+2026-09-16 14:54:38,634{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:read	nil
+2026-09-16 14:54:38,637{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:read	430441
+2026-09-16 14:54:38,901{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:read	nil
+2026-09-16 14:54:38,904{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:read	430441
+2026-09-16 14:54:39,076{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:cas	[831184 794013]
+2026-09-16 14:54:39,101{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:fail	:cas	[831184 794013]	:cas-miss
+2026-09-16 14:54:39,444{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:read	nil
+2026-09-16 14:54:39,446{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:read	430441
+2026-09-16 14:54:39,602{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:cas	[995765 705367]
+2026-09-16 14:54:39,625{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:fail	:cas	[995765 705367]	:cas-miss
+2026-09-16 14:54:39,628{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-16 14:54:39,630{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	430441
+2026-09-16 14:54:39,653{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[995765 589880]
+2026-09-16 14:54:39,660{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:read	nil
+2026-09-16 14:54:39,663{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:read	430441
+2026-09-16 14:54:39,679{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:fail	:cas	[995765 589880]	:cas-miss
+2026-09-16 14:54:39,855{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:cas	[922479 425803]
+2026-09-16 14:54:39,877{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:fail	:cas	[922479 425803]	:cas-miss
+2026-09-16 14:54:40,365{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:cas	[831184 774498]
+2026-09-16 14:54:40,402{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:fail	:cas	[831184 774498]	:cas-miss
+2026-09-16 14:54:40,555{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:cas	[832956 77247]
+2026-09-16 14:54:40,578{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:fail	:cas	[832956 77247]	:cas-miss
+2026-09-16 14:54:40,681{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:cas	[483813 610441]
+2026-09-16 14:54:40,703{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:fail	:cas	[483813 610441]	:cas-miss
+2026-09-16 14:54:40,813{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:read	nil
+2026-09-16 14:54:40,815{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:read	430441
+2026-09-16 14:54:41,280{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:read	nil
+2026-09-16 14:54:41,283{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:read	430441
+2026-09-16 14:54:41,943{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:cas	[922479 169643]
+2026-09-16 14:54:41,970{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:fail	:cas	[922479 169643]	:cas-miss
+2026-09-16 14:54:42,089{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:cas	[127837 236759]
+2026-09-16 14:54:42,099{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[995765 738384]
+2026-09-16 14:54:42,116{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:fail	:cas	[127837 236759]	:cas-miss
+2026-09-16 14:54:42,138{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:fail	:cas	[995765 738384]	:cas-miss
+2026-09-16 14:54:42,656{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[832956 499859]
+2026-09-16 14:54:42,681{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:fail	:cas	[832956 499859]	:cas-miss
+2026-09-16 14:54:42,782{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:cas	[995765 289273]
+2026-09-16 14:54:42,815{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:fail	:cas	[995765 289273]	:cas-miss
+2026-09-16 14:54:43,652{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:read	nil
+2026-09-16 14:54:43,654{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:read	430441
+2026-09-16 14:54:44,028{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:cas	[432170 344968]
+2026-09-16 14:54:44,051{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:fail	:cas	[432170 344968]	:cas-miss
+2026-09-16 14:54:44,465{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:read	nil
+2026-09-16 14:54:44,467{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:read	430441
+2026-09-16 14:54:44,933{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:cas	[922479 982439]
+2026-09-16 14:54:44,966{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:fail	:cas	[922479 982439]	:cas-miss
+2026-09-16 14:54:45,512{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:cas	[16373 479592]
+2026-09-16 14:54:45,536{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:fail	:cas	[16373 479592]	:cas-miss
+2026-09-16 14:54:45,572{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:cas	[432170 765424]
+2026-09-16 14:54:45,597{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:fail	:cas	[432170 765424]	:cas-miss
+2026-09-16 14:54:45,827{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:cas	[nil 466780]
+2026-09-16 14:54:45,853{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:fail	:cas	[nil 466780]	:cas-miss
+2026-09-16 14:54:45,997{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:read	nil
+2026-09-16 14:54:45,999{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:read	430441
+2026-09-16 14:54:46,388{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-16 14:54:46,391{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	430441
+2026-09-16 14:54:46,577{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[832956 413448]
+2026-09-16 14:54:46,599{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:fail	:cas	[832956 413448]	:cas-miss
+2026-09-16 14:54:46,790{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:cas	[nil 523169]
+2026-09-16 14:54:46,812{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:cas	[nil 674610]
+2026-09-16 14:54:46,814{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:fail	:cas	[nil 523169]	:cas-miss
+2026-09-16 14:54:46,838{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:fail	:cas	[nil 674610]	:cas-miss
+2026-09-16 14:54:47,068{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:cas	[nil 468839]
+2026-09-16 14:54:47,094{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:fail	:cas	[nil 468839]	:cas-miss
+2026-09-16 14:54:47,411{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:cas	[922479 547917]
+2026-09-16 14:54:47,434{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:fail	:cas	[922479 547917]	:cas-miss
+2026-09-16 14:54:49,086{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:read	nil
+2026-09-16 14:54:49,088{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:read	430441
+2026-09-16 14:54:49,173{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:read	nil
+2026-09-16 14:54:49,175{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:read	430441
+2026-09-16 14:54:49,211{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:cas	[995765 447980]
+2026-09-16 14:54:49,237{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:fail	:cas	[995765 447980]	:cas-miss
+2026-09-16 14:54:49,482{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:read	nil
+2026-09-16 14:54:49,484{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:read	430441
+2026-09-16 14:54:50,197{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:cas	[432170 361359]
+2026-09-16 14:54:50,223{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:fail	:cas	[432170 361359]	:cas-miss
+2026-09-16 14:54:50,321{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[995765 235662]
+2026-09-16 14:54:50,328{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:cas	[922479 880187]
+2026-09-16 14:54:50,356{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:fail	:cas	[995765 235662]	:cas-miss
+2026-09-16 14:54:50,373{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:fail	:cas	[922479 880187]	:cas-miss
+2026-09-16 14:54:50,506{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:cas	[127837 425512]
+2026-09-16 14:54:50,528{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:fail	:cas	[127837 425512]	:cas-miss
+2026-09-16 14:54:50,550{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:cas	[481843 607800]
+2026-09-16 14:54:50,574{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:fail	:cas	[481843 607800]	:cas-miss
+2026-09-16 14:54:50,733{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:read	nil
+2026-09-16 14:54:50,735{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:read	430441
+2026-09-16 14:54:50,925{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:read	nil
+2026-09-16 14:54:50,927{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:read	430441
+2026-09-16 14:54:50,956{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:read	nil
+2026-09-16 14:54:50,958{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:read	430441
+2026-09-16 14:54:50,981{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:cas	[995765 298837]
+2026-09-16 14:54:51,010{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:fail	:cas	[995765 298837]	:cas-miss
+2026-09-16 14:54:51,177{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:cas	[nil 601869]
+2026-09-16 14:54:51,199{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:fail	:cas	[nil 601869]	:cas-miss
+2026-09-16 14:54:51,216{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:read	nil
+2026-09-16 14:54:51,218{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:read	430441
+2026-09-16 14:54:51,571{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:cas	[127837 185361]
+2026-09-16 14:54:51,598{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:fail	:cas	[127837 185361]	:cas-miss
+2026-09-16 14:54:52,513{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-16 14:54:52,515{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	430441
+2026-09-16 14:54:52,981{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[127837 192843]
+2026-09-16 14:54:53,005{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:fail	:cas	[127837 192843]	:cas-miss
+2026-09-16 14:54:53,089{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:cas	[16373 101137]
+2026-09-16 14:54:53,111{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:fail	:cas	[16373 101137]	:cas-miss
+2026-09-16 14:54:53,343{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:read	nil
+2026-09-16 14:54:53,345{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:read	430441
+2026-09-16 14:54:53,369{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:cas	[483813 247883]
+2026-09-16 14:54:53,393{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:fail	:cas	[483813 247883]	:cas-miss
+2026-09-16 14:54:53,489{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:read	nil
+2026-09-16 14:54:53,492{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:read	430441
+2026-09-16 14:54:53,799{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:read	nil
+2026-09-16 14:54:53,801{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:read	430441
+2026-09-16 14:54:53,845{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:cas	[127837 86577]
+2026-09-16 14:54:53,875{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:fail	:cas	[127837 86577]	:cas-miss
+2026-09-16 14:54:54,109{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:cas	[922479 828539]
+2026-09-16 14:54:54,131{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:fail	:cas	[922479 828539]	:cas-miss
+2026-09-16 14:54:54,238{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:cas	[432170 147736]
+2026-09-16 14:54:54,262{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:fail	:cas	[432170 147736]	:cas-miss
+2026-09-16 14:54:55,154{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:cas	[127837 347771]
+2026-09-16 14:54:55,177{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:fail	:cas	[127837 347771]	:cas-miss
+2026-09-16 14:54:55,269{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[922479 941816]
+2026-09-16 14:54:55,290{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:fail	:cas	[922479 941816]	:cas-miss
+2026-09-16 14:54:55,378{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[430441 146050]
+2026-09-16 14:54:55,402{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:cas	[430441 146050]
+2026-09-16 14:54:55,599{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:cas	[nil 242967]
+2026-09-16 14:54:55,620{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:fail	:cas	[nil 242967]	:cas-miss
+2026-09-16 14:54:56,231{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:cas	[293224 472843]
+2026-09-16 14:54:56,251{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:fail	:cas	[293224 472843]	:cas-miss
+2026-09-16 14:54:56,449{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:read	nil
+2026-09-16 14:54:56,453{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:read	146050
+2026-09-16 14:54:56,528{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:cas	[293224 910417]
+2026-09-16 14:54:56,556{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:fail	:cas	[293224 910417]	:cas-miss
+2026-09-16 14:54:56,592{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:read	nil
+2026-09-16 14:54:56,594{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:read	146050
+2026-09-16 14:54:57,027{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:cas	[146050 976777]
+2026-09-16 14:54:57,059{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:cas	[146050 976777]
+2026-09-16 14:54:57,279{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:cas	[127837 176130]
+2026-09-16 14:54:57,307{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:fail	:cas	[127837 176130]	:cas-miss
+2026-09-16 14:54:57,946{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:cas	[430441 434032]
+2026-09-16 14:54:57,978{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:fail	:cas	[430441 434032]	:cas-miss
+2026-09-16 14:54:58,002{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:read	nil
+2026-09-16 14:54:58,004{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:read	976777
+2026-09-16 14:54:58,135{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-16 14:54:58,137{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	976777
+2026-09-16 14:54:58,244{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[483813 925961]
+2026-09-16 14:54:58,264{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:fail	:cas	[483813 925961]	:cas-miss
+2026-09-16 14:54:58,648{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:cas	[nil 893392]
+2026-09-16 14:54:58,670{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:fail	:cas	[nil 893392]	:cas-miss
+2026-09-16 14:54:58,687{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:cas	[16373 603622]
+2026-09-16 14:54:58,711{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:fail	:cas	[16373 603622]	:cas-miss
+2026-09-16 14:54:58,838{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:read	nil
+2026-09-16 14:54:58,840{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:read	976777
+2026-09-16 14:54:59,149{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:cas	[127837 610886]
+2026-09-16 14:54:59,180{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:fail	:cas	[127837 610886]	:cas-miss
+2026-09-16 14:54:59,197{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:cas	[146050 992020]
+2026-09-16 14:54:59,200{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:cas	[nil 968029]
+2026-09-16 14:54:59,220{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:fail	:cas	[146050 992020]	:cas-miss
+2026-09-16 14:54:59,233{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:fail	:cas	[nil 968029]	:cas-miss
+2026-09-16 14:54:59,285{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:read	nil
+2026-09-16 14:54:59,287{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:read	976777
+2026-09-16 14:55:00,123{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:read	nil
+2026-09-16 14:55:00,125{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:read	976777
+2026-09-16 14:55:00,903{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:cas	[430441 472704]
+2026-09-16 14:55:00,927{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:cas	[831184 530261]
+2026-09-16 14:55:00,929{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:fail	:cas	[430441 472704]	:cas-miss
+2026-09-16 14:55:00,994{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:fail	:cas	[831184 530261]	:cas-miss
+2026-09-16 14:55:01,960{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-16 14:55:01,962{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	976777
+2026-09-16 14:55:02,141{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:cas	[nil 761091]
+2026-09-16 14:55:02,159{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:cas	[127837 609689]
+2026-09-16 14:55:02,162{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:fail	:cas	[nil 761091]	:cas-miss
+2026-09-16 14:55:02,194{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:fail	:cas	[127837 609689]	:cas-miss
+2026-09-16 14:55:02,763{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:cas	[831184 859601]
+2026-09-16 14:55:02,784{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:fail	:cas	[831184 859601]	:cas-miss
+2026-09-16 14:55:03,671{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:cas	[432170 680856]
+2026-09-16 14:55:03,690{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:cas	[16373 976225]
+2026-09-16 14:55:03,695{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:fail	:cas	[432170 680856]	:cas-miss
+2026-09-16 14:55:03,723{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:fail	:cas	[16373 976225]	:cas-miss
+2026-09-16 14:55:03,964{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:cas	[430441 532398]
+2026-09-16 14:55:03,989{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:fail	:cas	[430441 532398]	:cas-miss
+2026-09-16 14:55:04,347{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:cas	[293224 779426]
+2026-09-16 14:55:04,367{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:fail	:cas	[293224 779426]	:cas-miss
+2026-09-16 14:55:04,368{GMT}	INFO	[jepsen worker 8] jepsen.generator.interpreter: recovery: letting cluster converge
+2026-09-16 14:55:34,390{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:55:34,390{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-16 14:55:34,390{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:55:34,546{GMT}	INFO	[jepsen test runner] jepsen.core: Run complete, writing
+2026-09-16 14:55:34,598{GMT}	INFO	[jepsen test runner] jepsen.core: Snarfing log files
+2026-09-16 14:55:34,600{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Killing coord on n3
+2026-09-16 14:55:34,600{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Killing coord on n2
+2026-09-16 14:55:34,600{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Killing coord on n1
+2026-09-16 14:55:34,661{GMT}	INFO	[jepsen node n1] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-16 14:55:34,661{GMT}	INFO	[jepsen node n3] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-16 14:55:34,661{GMT}	INFO	[jepsen node n2] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-16 14:55:34,772{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-16 14:55:34,772{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-16 14:55:34,772{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-16 14:55:36,347{GMT}	INFO	[jepsen test runner] jepsen.core: Analyzing...
+2026-09-16 14:55:36,505{GMT}	INFO	[jepsen test runner] jepsen.core: Analysis complete
+2026-09-16 14:55:36,514{GMT}	INFO	[jepsen results] jepsen.store: Wrote /opt/coord/jepsen/store/coord/2026-09-16T14:54:12.830658752Z/results.edn
+2026-09-16 14:55:36,545{GMT}	INFO	[jepsen test runner] jepsen.core: {:linear {:valid? true,
+          :model #knossos.model.CASRegister{:value 976777},
+          :analyzer :wgl,
+          :final-paths (),
+          :configs ()},
+ :gates {:valid? true,
+         :gates {:premise {:valid? true,
+                           :writes 0,
+                           :duplicate-value-count 0,
+                           :duplicate-values {}},
+                 :availability {:min-ratio 0.95,
+                                :min-sample 100,
+                                :windows 1,
+                                :judged 0,
+                                :skipped-small-sample 1,
+                                :worst-window nil,
+                                :violations []},
+                 :rto {:budget-seconds 0,
+                       :n 0,
+                       :p95 nil,
+                       :max nil,
+                       :samples [],
+                       :unrecovered 0,
+                       :not-measured 0,
+                       :details []},
+                 :liveness {:min-ok-ratio 0.1,
+                            :min-sample 10,
+                            :ops 2,
+                            :judged 2,
+                            :skipped-small-sample 0,
+                            :ok-ratio 0.4135802469135802,
+                            :by-op {:read {:total 54,
+                                           :ok 54,
+                                           :info 0,
+                                           :fail 0,
+                                           :errors {}},
+                                    :cas {:total 108,
+                                          :ok 13,
+                                          :info 0,
+                                          :fail 95,
+                                          :errors {:cas-miss 95}}},
+                            :violations []}},
+         :failures []},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true}
+
+
+Everything looks good! ヽ(‘ー`)ノ

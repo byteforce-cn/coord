@@ -1,0 +1,20 @@
+results-file: store/coord/2026-09-17T11:13:50.028055821Z/results.edn
+overall-valid: false
+linear-valid: false
+gates-valid: false
+gates-failures: [{:type :op-liveness, :min-ok-ratio 0.1, :violations [{:errors {"indeterminate: Wrong object type used with protocol message reflection.\nField number: 1, field java type: MESSAGE, value type: clojure.lang.PersistentArrayMap\n" 107}, :legit-fail 0, :total 107, :fail 0, :judged 107, :ratio 0.0, :ok 0, :info 107, :f :watch-session}], :note "? op ????????????????F-13 ????"}]
+rto-budget-seconds: 120
+rto-p95-seconds: 0.3971474496
+rto-max-seconds: 0.407983121
+rto-samples: [0.094659227 0.346283706 0.132347383 0.353804764 0.407983121]
+rto-unrecovered: 0
+rto-not-measured: 0
+quiet-windows: 5
+quiet-judged: 0
+quiet-skipped-small-sample: 5
+quiet-worst-ratio: -
+quiet-violations: 0
+premise-valid: true
+premise-duplicate-values: 0
+soak-converged: -
+soak-regions: -

@@ -1,0 +1,802 @@
+2026-09-16 14:47:46,296{GMT}	INFO	[jepsen test runner] jepsen.core: Test version ad22337b09f7aae407b39e9d639de867e52bccc7 (plus uncommitted changes)
+2026-09-16 14:47:46,297{GMT}	INFO	[jepsen test runner] jepsen.core: Command line:
+lein run test --nodes-file /root/nodes --username root --ssh-private-key /root/.ssh/id_ed25519 --workload scan --nemesis kill --time-limit 60 --concurrency 2n --seed 42
+2026-09-16 14:47:46,367{GMT}	INFO	[jepsen test runner] jepsen.core: Running test:
+{:remote
+ #jepsen.control.retry.Remote{:remote #jepsen.control.scp.Remote{:cmd-remote #jepsen.control.sshj.SSHJRemote{:concurrency-limit 6,
+                                                                                                             :conn-spec nil,
+                                                                                                             :client nil,
+                                                                                                             :semaphore nil},
+                                                                 :conn-spec nil},
+                              :conn nil}
+ :idem-replay-delay-ms 0
+ :ssh-private-key "/root/.ssh/id_ed25519"
+ :idem-min-replay-attempts nil
+ :concurrency 10
+ :soak-disrupt 600
+ :db
+ #jepsen.coord.db.CoordDB{:cluster-name "jepsen-coord",
+                          :pidfile-prefix "/var/run/coord-",
+                          :root-password "66c57bb56bce306f484344e4a8650836",
+                          :coord-dir "/opt/coord",
+                          :config-dir "/etc/coord",
+                          :logfile "/var/log/coord.log",
+                          :regions nil,
+                          :data-dir "/var/lib/coord",
+                          :nodes ("n1" "n2" "n3"),
+                          :auth-root-key "820662a9f85924333d6d466714bc51734b251e73b827a394e1978e36d2429bfc",
+                          :raft-secret "93edf94d2860fec54bc59278a804cb1bbd2d0a7243e4f39d667d66966d9844d1",
+                          :coord-bin "/root/coord-test/coord"}
+ :leave-db-running? false
+ :name "coord"
+ :logging-json? false
+ :start-time
+ #object[java.time.OffsetDateTime "0x61c98f5" "2026-09-16T14:47:46.271122719Z"]
+ :regions nil
+ :map-keys nil
+ :net
+ #object[jepsen.net$iptables_with_dev$reify__15623
+         "0x1784d711"
+         "jepsen.net$iptables_with_dev$reify__15623@1784d711"]
+ :client
+ #jepsen.coord.client.CoordClient{:nodes ["n1" "n2" "n3"],
+                                  :root-password "66c57bb56bce306f484344e4a8650836",
+                                  :cct nil,
+                                  :channels nil,
+                                  :raw-channels nil,
+                                  :leader-idx #object[clojure.lang.Atom
+                                                      "0xc8e99"
+                                                      {:status :ready, :val {}}],
+                                  :last-rev #object[clojure.lang.Atom
+                                                    "0x61d7df22"
+                                                    {:status :ready, :val {}}],
+                                  :parse-values? false}
+ :barrier
+ #object[java.util.concurrent.CyclicBarrier
+         "0x722e1bff"
+         "java.util.concurrent.CyclicBarrier@722e1bff"]
+ :ssh
+ {:dummy? false,
+  :username "root",
+  :password "root",
+  :strict-host-key-checking false,
+  :private-key-path "/root/.ssh/id_ed25519"}
+ :rate nil
+ :map-min-deletes nil
+ :seed 42
+ :checker
+ #jepsen.checker.Compose{:checkers {:linear #object[jepsen.coord.scanck$checker$reify__1463
+                                                    "0x4cce889e"
+                                                    "jepsen.coord.scanck$checker$reify__1463@4cce889e"],
+                                    :gates #object[jepsen.coord.gates$checker$reify__910
+                                                   "0x28d2afd8"
+                                                   "jepsen.coord.gates$checker$reify__910@28d2afd8"],
+                                    :perf #jepsen.checker.Compose{:checkers {:latency-graph #jepsen.checker.LatencyGraph{:opts {}},
+                                                                             :rate-graph #jepsen.checker.RateGraph{:opts {}}}}}}
+ :argv
+ ("test"
+  "--nodes-file"
+  "/root/nodes"
+  "--username"
+  "root"
+  "--ssh-private-key"
+  "/root/.ssh/id_ed25519"
+  "--workload"
+  "scan"
+  "--nemesis"
+  "kill"
+  "--time-limit"
+  "60"
+  "--concurrency"
+  "2n"
+  "--seed"
+  "42")
+ :nemesis #unprintable "jepsen.nemesis$node_start_stopper$reify__15946@77a35b2f"
+ :nodes ("n1" "n2" "n3")
+ :test-count 1
+ :no-jitter false
+ :generator
+ #object[jepsen.util.Forgettable
+         "0x598f6c93"
+         ((jepsen.generator.Synchronize
+           {:gen (jepsen.generator.TimeLimit
+                  {:limit 60000000000,
+                   :cutoff nil,
+                   :gen (jepsen.generator.Any
+                         {:gens [(jepsen.generator.OnThreads
+                                  {:f #{:nemesis},
+                                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                           "0x23657729"
+                                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@23657729"],
+                                   :gen ({:type :sleep, :value 6.63781840016434}
+                                         {:type :info, :f :start}
+                                         {:type :sleep,
+                                          :value 6.416117358799227}
+                                         {:type :info, :f :stop}
+                                         {:type :sleep,
+                                          :value 4.543597276663299}
+                                         {:type :info, :f :start}
+                                         {:type :sleep,
+                                          :value 4.385392450370683}
+                                         {:type :info, :f :stop}
+                                         ...)})
+                                 (jepsen.generator.OnThreads
+                                  {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                           "0x68c05c5b"
+                                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@68c05c5b"],
+                                   :gen (jepsen.generator.Stagger
+                                         {:dt-fn #object[jepsen.generator$stagger_exp$dt_fn__6799
+                                                         "0x1b5e6983"
+                                                         "jepsen.generator$stagger_exp$dt_fn__6799@1b5e6983"],
+                                          :next-time nil,
+                                          :gen (jepsen.generator.OnThreads
+                                                {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                                 :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                                         "0x130a99fe"
+                                                                         "jepsen.generator.context$make_thread_filter$lazy_filter__5865@130a99fe"],
+                                                 :gen (jepsen.generator.Mix
+                                                       {:i 0,
+                                                        :gens [(jepsen.generator.Mix
+                                                                {:i 2,
+                                                                 :gens [#object[jepsen.coord$scan_gen$w__2147
+                                                                                "0x31773d5b"
+                                                                                "jepsen.coord$scan_gen$w__2147@31773d5b"]
+                                                                        #object[jepsen.coord$scan_gen$w__2147
+                                                                                "0x31773d5b"
+                                                                                "jepsen.coord$scan_gen$w__2147@31773d5b"]
+                                                                        #object[jepsen.coord$scan_gen$scan__2149
+                                                                                "0x5bbf8daa"
+                                                                                "jepsen.coord$scan_gen$scan__2149@5bbf8daa"]
+                                                                        #object[jepsen.coord$scan_gen$scan__2149
+                                                                                "0x5bbf8daa"
+                                                                                "jepsen.coord$scan_gen$scan__2149@5bbf8daa"]
+                                                                        #object[jepsen.coord$scan_gen$rat__2152
+                                                                                "0x33c5e52f"
+                                                                                "jepsen.coord$scan_gen$rat__2152@33c5e52f"]]})]})})})})]})})})
+          (jepsen.generator.Synchronize
+           {:gen (jepsen.generator.OnThreads
+                  {:f #{:nemesis},
+                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                           "0x74474fc0"
+                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@74474fc0"],
+                   :gen {:type :info, :f :stop}})})
+          (jepsen.generator.Synchronize
+           {:gen {:type :log, :value "recovery: letting cluster converge"}})
+          (jepsen.generator.Synchronize {:gen {:type :sleep, :value 30}}))]
+ :min-op-ok-ratio nil
+ :soak-max-rto-seconds nil
+ :min-op-sample nil
+ :os
+ #object[jepsen.os$reify__16045 "0x7cd239f6" "jepsen.os$reify__16045@7cd239f6"]
+ :time-limit 60
+ :quiet-availability-min nil
+ :soak-quiet 1800
+ :value-size nil
+ :quiet-min-sample nil
+ :workload :scan}
+
+2026-09-16 14:47:47,765{GMT}	INFO	[jepsen test runner] jepsen.db: Tearing down DB
+2026-09-16 14:47:47,766{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-16 14:47:47,766{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-16 14:47:47,766{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-16 14:47:49,482{GMT}	INFO	[jepsen test runner] jepsen.db: Setting up DB
+2026-09-16 14:47:49,484{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Setting up coord on n3
+2026-09-16 14:47:49,484{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Setting up coord on n2
+2026-09-16 14:47:49,484{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Setting up coord on n1
+2026-09-16 14:47:52,673{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-16 14:47:52,786{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-16 14:47:52,892{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-16 14:47:52,896{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-16 14:47:53,006{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-16 14:47:53,106{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-16 14:47:53,186{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-16 14:47:53,250{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-16 14:47:54,073{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-16 14:47:54,077{GMT}	INFO	[jepsen test runner] jepsen.core: Relative time begins now
+2026-09-16 14:47:54,080{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-16 14:47:54,081{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:47:54,080{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:47:54,360{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-16 14:47:54,360{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-16 14:47:54,360{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-16 14:47:54,365{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord cluster is ready
+2026-09-16 14:47:54,405{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord cluster is ready
+2026-09-16 14:47:54,405{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord cluster is ready
+2026-09-16 14:47:54,421{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:47:54,422{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-16 14:47:54,444{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	"vs42-2-xxxxxxxxx"
+2026-09-16 14:47:54,445{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:47:54,510{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+2026-09-16 14:47:54,510{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:47:54,563{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-4-xxxxxxxxx"
+2026-09-16 14:47:54,594{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-16 14:47:54,740{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:47:54,770{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:write	"vs42-7-xxxxxxxxx"
+2026-09-16 14:47:54,771{GMT}	INFO	[jepsen worker 5] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:47:54,814{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	"vs42-2-xxxxxxxxx"
+2026-09-16 14:47:54,836{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+2026-09-16 14:47:54,855{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-4-xxxxxxxxx"
+2026-09-16 14:47:54,978{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:write	"vs42-7-xxxxxxxxx"
+2026-09-16 14:47:55,116{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-13-xxxxxxxx"
+2026-09-16 14:47:55,117{GMT}	INFO	[jepsen worker 6] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:47:55,190{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:read-at	{:key "/jepsen/scan/s42-15", :revision :last}
+2026-09-16 14:47:55,191{GMT}	INFO	[jepsen worker 7] jepsen.coord.client: Opening coord client on n2
+2026-09-16 14:47:55,274{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:write	"vs42-13-xxxxxxxx"
+2026-09-16 14:47:55,394{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:info	:read-at	{:key "/jepsen/scan/s42-15", :revision :last}	:no-value
+2026-09-16 14:47:55,427{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:read-at	{:key "/jepsen/scan/s42-3", :revision :last}
+2026-09-16 14:47:55,427{GMT}	INFO	[jepsen worker 8] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:47:55,565{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+2026-09-16 14:47:55,565{GMT}	INFO	[jepsen worker 9] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:47:55,566{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:info	:read-at	{:key "/jepsen/scan/s42-3", :revision :last}	:no-value
+2026-09-16 14:47:55,689{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+2026-09-16 14:47:55,689{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:47:55,737{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+2026-09-16 14:47:55,874{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+2026-09-16 14:47:56,107{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:47:56,113{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:47:56,511{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2026-09-16 14:47:56,516{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2026-09-16 14:47:56,907{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:47:56,913{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:47:57,122{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:read-at	{:key "/jepsen/scan/s42-6", :revision :last}
+2026-09-16 14:47:57,126{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:info	:read-at	{:key "/jepsen/scan/s42-6", :revision :last}	:no-value
+2026-09-16 14:47:57,156{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:47:57,158{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:47:57,406{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2026-09-16 14:47:57,412{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2026-09-16 14:47:57,647{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-25-xxxxxxxx"
+2026-09-16 14:47:57,729{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:write	"vs42-25-xxxxxxxx"
+2026-09-16 14:47:57,733{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-28-xxxxxxxx"
+2026-09-16 14:47:57,734{GMT}	INFO	[jepsen worker 7] jepsen.coord.client: Opening coord client on n2
+2026-09-16 14:47:57,839{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+2026-09-16 14:47:57,839{GMT}	INFO	[jepsen worker 8] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:47:57,940{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-28-xxxxxxxx"
+2026-09-16 14:47:58,031{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+2026-09-16 14:47:58,051{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:write	"vs42-32-xxxxxxxx"
+2026-09-16 14:47:58,054{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read-at	{:key "/jepsen/scan/s42-2", :revision :last}
+2026-09-16 14:47:58,074{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	"vs42-36-xxxxxxxx"
+2026-09-16 14:47:58,138{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:write	"vs42-32-xxxxxxxx"
+2026-09-16 14:47:58,138{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read-at	{:key "/jepsen/scan/s42-2", :revision :last}
+2026-09-16 14:47:58,172{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	"vs42-36-xxxxxxxx"
+2026-09-16 14:47:58,217{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:read-at	{:key "/jepsen/scan/s42-8", :revision :last}
+2026-09-16 14:47:58,222{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:info	:read-at	{:key "/jepsen/scan/s42-8", :revision :last}	:no-value
+2026-09-16 14:47:58,324{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :count-only true}
+2026-09-16 14:47:58,329{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :count-only true}
+2026-09-16 14:47:58,639{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+2026-09-16 14:47:58,640{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:47:58,748{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+2026-09-16 14:47:58,757{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+2026-09-16 14:47:58,816{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+2026-09-16 14:47:58,962{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2026-09-16 14:47:58,967{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2026-09-16 14:47:59,352{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-43-xxxxxxxx"
+2026-09-16 14:47:59,386{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:write	"vs42-43-xxxxxxxx"
+2026-09-16 14:47:59,469{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:47:59,475{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:00,036{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :count-only true}
+2026-09-16 14:48:00,041{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :count-only true}
+2026-09-16 14:48:00,123{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:write	"vs42-46-xxxxxxxx"
+2026-09-16 14:48:00,157{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:write	"vs42-46-xxxxxxxx"
+2026-09-16 14:48:00,283{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+2026-09-16 14:48:00,287{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+2026-09-16 14:48:00,399{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:00,404{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:00,697{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:00,697{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-16 14:48:00,867{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:00,980{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}
+2026-09-16 14:48:00,985{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:info	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}	:no-value
+2026-09-16 14:48:01,057{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-16 14:48:01,081{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n1" [:killed "n1"]}
+2026-09-16 14:48:01,389{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true, :count-only true}
+2026-09-16 14:48:01,397{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:info	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true, :count-only true}	:unavailable-maybe-applied
+2026-09-16 14:48:01,416{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:write	"vs42-52-xxxxxxxx"
+2026-09-16 14:48:01,429{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:info	:write	"vs42-52-xxxxxxxx"	:unavailable-maybe-applied
+2026-09-16 14:48:01,864{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+2026-09-16 14:48:01,878{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:write	"vs42-57-xxxxxxxx"
+2026-09-16 14:48:01,879{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+2026-09-16 14:48:01,958{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:write	"vs42-57-xxxxxxxx"
+2026-09-16 14:48:02,253{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:write	"vs42-61-xxxxxxxx"
+2026-09-16 14:48:02,280{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:write	"vs42-61-xxxxxxxx"
+2026-09-16 14:48:02,314{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read-at	{:key "/jepsen/scan/s42-0", :revision :last}
+2026-09-16 14:48:02,331{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read-at	{:key "/jepsen/scan/s42-0", :revision :last}
+2026-09-16 14:48:03,505{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read-at	{:key "/jepsen/scan/s42-3", :revision :last}
+2026-09-16 14:48:03,514{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:info	:read-at	{:key "/jepsen/scan/s42-3", :revision :last}	:no-value
+2026-09-16 14:48:03,834{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	"vs42-70-xxxxxxxx"
+2026-09-16 14:48:03,903{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	"vs42-70-xxxxxxxx"
+2026-09-16 14:48:04,900{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:04,901{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:48:05,100{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:05,137{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+2026-09-16 14:48:05,152{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+2026-09-16 14:48:05,180{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:05,193{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:05,350{GMT}	INFO	[jepsen worker 5] jepsen.print: 15	:invoke	:write	"vs42-76-xxxxxxxx"
+2026-09-16 14:48:05,351{GMT}	INFO	[jepsen worker 5] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:48:05,511{GMT}	INFO	[jepsen worker 5] jepsen.print: 15	:ok	:write	"vs42-76-xxxxxxxx"
+2026-09-16 14:48:05,800{GMT}	INFO	[jepsen worker 6] jepsen.print: 16	:invoke	:read-at	{:key "/jepsen/scan/s42-15", :revision :last}
+2026-09-16 14:48:05,801{GMT}	INFO	[jepsen worker 6] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:48:05,937{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-81-xxxxxxxx"
+2026-09-16 14:48:05,972{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-81-xxxxxxxx"
+2026-09-16 14:48:06,009{GMT}	INFO	[jepsen worker 6] jepsen.print: 16	:info	:read-at	{:key "/jepsen/scan/s42-15", :revision :last}	:no-value
+2026-09-16 14:48:06,767{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+2026-09-16 14:48:06,775{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+2026-09-16 14:48:06,836{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+2026-09-16 14:48:06,844{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+2026-09-16 14:48:06,873{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:06,873{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:48:06,936{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:06,951{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:06,974{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+2026-09-16 14:48:06,975{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:06,977{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:06,984{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+2026-09-16 14:48:07,076{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:07,403{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+2026-09-16 14:48:07,411{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+2026-09-16 14:48:07,442{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-92-xxxxxxxx"
+2026-09-16 14:48:07,472{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-92-xxxxxxxx"
+2026-09-16 14:48:07,478{GMT}	INFO	[jepsen worker 5] jepsen.print: 15	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+2026-09-16 14:48:07,485{GMT}	INFO	[jepsen worker 5] jepsen.print: 15	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+2026-09-16 14:48:07,499{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-16 14:48:07,502{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:07,510{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:07,530{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Restarting coord on n1
+2026-09-16 14:48:07,530{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-16 14:48:07,655{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-16 14:48:07,988{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:write	"vs42-95-xxxxxxxx"
+2026-09-16 14:48:08,016{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:write	"vs42-95-xxxxxxxx"
+2026-09-16 14:48:08,049{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:08,053{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:08,669{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-16 14:48:08,669{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n1" [:restarted "n1"]}
+2026-09-16 14:48:09,355{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:write	"vs42-100-xxxxxxx"
+2026-09-16 14:48:09,419{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:write	"vs42-100-xxxxxxx"
+2026-09-16 14:48:09,748{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+2026-09-16 14:48:09,761{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+2026-09-16 14:48:09,879{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:write	"vs42-106-xxxxxxx"
+2026-09-16 14:48:09,968{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:09,980{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:09,998{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:write	"vs42-106-xxxxxxx"
+2026-09-16 14:48:10,071{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :count-only true}
+2026-09-16 14:48:10,075{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :count-only true}
+2026-09-16 14:48:10,127{GMT}	INFO	[jepsen worker 5] jepsen.print: 15	:invoke	:read-at	{:key "/jepsen/scan/s42-13", :revision :last}
+2026-09-16 14:48:10,132{GMT}	INFO	[jepsen worker 5] jepsen.print: 15	:ok	:read-at	{:key "/jepsen/scan/s42-13", :revision :last}
+2026-09-16 14:48:10,168{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:read-at	{:key "/jepsen/scan/s42-0", :revision :last}
+2026-09-16 14:48:10,168{GMT}	INFO	[jepsen worker 6] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:48:10,207{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-114-xxxxxxx"
+2026-09-16 14:48:10,292{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-114-xxxxxxx"
+2026-09-16 14:48:10,388{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:read-at	{:key "/jepsen/scan/s42-5", :revision :last}
+2026-09-16 14:48:10,393{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:info	:read-at	{:key "/jepsen/scan/s42-5", :revision :last}	:no-value
+2026-09-16 14:48:10,425{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:read-at	{:key "/jepsen/scan/s42-0", :revision :last}
+2026-09-16 14:48:10,596{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+2026-09-16 14:48:10,601{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+2026-09-16 14:48:10,777{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:10,779{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:10,974{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:write	"vs42-120-xxxxxxx"
+2026-09-16 14:48:11,046{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:write	"vs42-120-xxxxxxx"
+2026-09-16 14:48:11,141{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+2026-09-16 14:48:11,146{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+2026-09-16 14:48:11,420{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:read-at	{:key "/jepsen/scan/s42-11", :revision :last}
+2026-09-16 14:48:11,432{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:read-at	{:key "/jepsen/scan/s42-11", :revision :last}
+2026-09-16 14:48:11,444{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:read-at	{:key "/jepsen/scan/s42-14", :revision :last}
+2026-09-16 14:48:11,450{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:read-at	{:key "/jepsen/scan/s42-14", :revision :last}
+2026-09-16 14:48:11,702{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:11,707{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:11,730{GMT}	INFO	[jepsen worker 5] jepsen.print: 15	:invoke	:write	"vs42-129-xxxxxxx"
+2026-09-16 14:48:11,769{GMT}	INFO	[jepsen worker 5] jepsen.print: 15	:ok	:write	"vs42-129-xxxxxxx"
+2026-09-16 14:48:12,121{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:write	"vs42-132-xxxxxxx"
+2026-09-16 14:48:12,154{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:write	"vs42-132-xxxxxxx"
+2026-09-16 14:48:12,778{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-135-xxxxxxx"
+2026-09-16 14:48:12,809{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-135-xxxxxxx"
+2026-09-16 14:48:12,951{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:read-at	{:key "/jepsen/scan/s42-10", :revision :last}
+2026-09-16 14:48:12,952{GMT}	INFO	[jepsen worker 8] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:48:13,189{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:read-at	{:key "/jepsen/scan/s42-10", :revision :last}
+2026-09-16 14:48:13,213{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-16 14:48:13,236{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n3" [:killed "n3"]}
+2026-09-16 14:48:13,571{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:13,574{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:info	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}	:unavailable-maybe-applied
+2026-09-16 14:48:13,915{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read-at	{:key "/jepsen/scan/s42-13", :revision :last}
+2026-09-16 14:48:13,924{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read-at	{:key "/jepsen/scan/s42-13", :revision :last}
+2026-09-16 14:48:14,055{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:write	"vs42-144-xxxxxxx"
+2026-09-16 14:48:14,082{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:write	"vs42-146-xxxxxxx"
+2026-09-16 14:48:14,127{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:write	"vs42-144-xxxxxxx"
+2026-09-16 14:48:14,153{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:write	"vs42-146-xxxxxxx"
+2026-09-16 14:48:15,107{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:15,115{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:15,383{GMT}	INFO	[jepsen worker 5] jepsen.print: 15	:invoke	:read-at	{:key "/jepsen/scan/s42-5", :revision :last}
+2026-09-16 14:48:15,390{GMT}	INFO	[jepsen worker 5] jepsen.print: 15	:info	:read-at	{:key "/jepsen/scan/s42-5", :revision :last}	:no-value
+2026-09-16 14:48:15,975{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:write	"vs42-152-xxxxxxx"
+2026-09-16 14:48:16,058{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:write	"vs42-152-xxxxxxx"
+2026-09-16 14:48:16,312{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-155-xxxxxxx"
+2026-09-16 14:48:16,348{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-155-xxxxxxx"
+2026-09-16 14:48:16,940{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:write	"vs42-158-xxxxxxx"
+2026-09-16 14:48:16,968{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:write	"vs42-158-xxxxxxx"
+2026-09-16 14:48:17,249{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}
+2026-09-16 14:48:17,257{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}
+2026-09-16 14:48:17,372{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:write	"vs42-164-xxxxxxx"
+2026-09-16 14:48:17,373{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:48:17,397{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read-at	{:key "/jepsen/scan/s42-6", :revision :last}
+2026-09-16 14:48:17,406{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read-at	{:key "/jepsen/scan/s42-6", :revision :last}
+2026-09-16 14:48:17,432{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2026-09-16 14:48:17,482{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2026-09-16 14:48:17,567{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:write	"vs42-164-xxxxxxx"
+2026-09-16 14:48:17,622{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-16 14:48:17,644{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Restarting coord on n3
+2026-09-16 14:48:17,644{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-16 14:48:17,677{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:read-at	{:key "/jepsen/scan/s42-12", :revision :last}
+2026-09-16 14:48:17,686{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:read-at	{:key "/jepsen/scan/s42-12", :revision :last}
+2026-09-16 14:48:17,750{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-16 14:48:17,889{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-16 14:48:17,890{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+2026-09-16 14:48:18,079{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:invoke	:write	"vs42-177-xxxxxxx"
+2026-09-16 14:48:18,080{GMT}	INFO	[jepsen worker 5] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:48:18,292{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:ok	:write	"vs42-177-xxxxxxx"
+2026-09-16 14:48:18,359{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :count-only true}
+2026-09-16 14:48:18,365{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :count-only true}
+2026-09-16 14:48:18,754{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+2026-09-16 14:48:18,764{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+2026-09-16 14:48:18,823{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:18,829{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:19,279{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2026-09-16 14:48:19,288{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2026-09-16 14:48:19,466{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:write	"vs42-183-xxxxxxx"
+2026-09-16 14:48:19,502{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:write	"vs42-183-xxxxxxx"
+2026-09-16 14:48:20,039{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+2026-09-16 14:48:20,042{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+2026-09-16 14:48:20,043{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	"vs42-186-xxxxxxx"
+2026-09-16 14:48:20,075{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	"vs42-186-xxxxxxx"
+2026-09-16 14:48:20,136{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:20,142{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:20,505{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:write	"vs42-189-xxxxxxx"
+2026-09-16 14:48:20,542{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:write	"vs42-189-xxxxxxx"
+2026-09-16 14:48:20,833{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:20,837{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:21,387{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:invoke	:read-at	{:key "/jepsen/scan/s42-0", :revision :last}
+2026-09-16 14:48:21,391{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:ok	:read-at	{:key "/jepsen/scan/s42-0", :revision :last}
+2026-09-16 14:48:21,543{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:21,547{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:22,049{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-195-xxxxxxx"
+2026-09-16 14:48:22,115{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-195-xxxxxxx"
+2026-09-16 14:48:22,176{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:22,181{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:22,486{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:read-at	{:key "/jepsen/scan/s42-6", :revision :last}
+2026-09-16 14:48:22,494{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:read-at	{:key "/jepsen/scan/s42-6", :revision :last}
+2026-09-16 14:48:22,565{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+2026-09-16 14:48:22,575{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+2026-09-16 14:48:23,232{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:read-at	{:key "/jepsen/scan/s42-12", :revision :last}
+2026-09-16 14:48:23,243{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:read-at	{:key "/jepsen/scan/s42-12", :revision :last}
+2026-09-16 14:48:23,515{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	"vs42-207-xxxxxxx"
+2026-09-16 14:48:23,533{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:23,552{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	"vs42-207-xxxxxxx"
+2026-09-16 14:48:23,552{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:24,218{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-16 14:48:24,220{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+2026-09-16 14:48:24,226{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+2026-09-16 14:48:24,240{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n3" [:killed "n3"]}
+2026-09-16 14:48:25,003{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+2026-09-16 14:48:25,007{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+2026-09-16 14:48:25,095{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:25,104{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:25,276{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:25,280{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:25,368{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+2026-09-16 14:48:25,372{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+2026-09-16 14:48:26,468{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:write	"vs42-215-xxxxxxx"
+2026-09-16 14:48:26,532{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:write	"vs42-215-xxxxxxx"
+2026-09-16 14:48:26,700{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+2026-09-16 14:48:26,701{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+2026-09-16 14:48:28,057{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+2026-09-16 14:48:28,060{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+2026-09-16 14:48:28,125{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:write	"vs42-218-xxxxxxx"
+2026-09-16 14:48:28,152{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:write	"vs42-218-xxxxxxx"
+2026-09-16 14:48:28,231{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+2026-09-16 14:48:28,234{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true}
+2026-09-16 14:48:28,620{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2026-09-16 14:48:28,624{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :count-only true}
+2026-09-16 14:48:28,653{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+2026-09-16 14:48:28,655{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+2026-09-16 14:48:29,117{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:29,120{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:29,683{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:29,687{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:29,929{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:read-at	{:key "/jepsen/scan/s42-13", :revision :last}
+2026-09-16 14:48:29,935{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:read-at	{:key "/jepsen/scan/s42-13", :revision :last}
+2026-09-16 14:48:31,141{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:write	"vs42-224-xxxxxxx"
+2026-09-16 14:48:31,207{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:write	"vs42-224-xxxxxxx"
+2026-09-16 14:48:31,252{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:write	"vs42-227-xxxxxxx"
+2026-09-16 14:48:31,279{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:write	"vs42-227-xxxxxxx"
+2026-09-16 14:48:31,724{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+2026-09-16 14:48:31,730{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true}
+2026-09-16 14:48:31,757{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-16 14:48:31,777{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Restarting coord on n3
+2026-09-16 14:48:31,777{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-16 14:48:31,901{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-16 14:48:32,136{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:write	"vs42-232-xxxxxxx"
+2026-09-16 14:48:32,164{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:write	"vs42-232-xxxxxxx"
+2026-09-16 14:48:32,281{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:32,285{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:32,906{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-235-xxxxxxx"
+2026-09-16 14:48:32,917{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-16 14:48:32,917{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+2026-09-16 14:48:32,996{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-235-xxxxxxx"
+2026-09-16 14:48:33,489{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+2026-09-16 14:48:33,492{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+2026-09-16 14:48:33,692{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+2026-09-16 14:48:33,694{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+2026-09-16 14:48:33,719{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+2026-09-16 14:48:33,722{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+2026-09-16 14:48:34,257{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true, :count-only true}
+2026-09-16 14:48:34,261{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :keys-only true, :count-only true}
+2026-09-16 14:48:34,790{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:write	"vs42-238-xxxxxxx"
+2026-09-16 14:48:34,824{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:write	"vs42-238-xxxxxxx"
+2026-09-16 14:48:35,022{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}
+2026-09-16 14:48:35,031{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}
+2026-09-16 14:48:35,096{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:35,100{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:35,217{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:write	"vs42-244-xxxxxxx"
+2026-09-16 14:48:35,249{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:write	"vs42-244-xxxxxxx"
+2026-09-16 14:48:35,472{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+2026-09-16 14:48:35,481{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+2026-09-16 14:48:35,846{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-250-xxxxxxx"
+2026-09-16 14:48:35,877{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-250-xxxxxxx"
+2026-09-16 14:48:36,133{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:36,137{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:37,449{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:write	"vs42-253-xxxxxxx"
+2026-09-16 14:48:37,517{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:write	"vs42-253-xxxxxxx"
+2026-09-16 14:48:37,583{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-256-xxxxxxx"
+2026-09-16 14:48:37,618{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-256-xxxxxxx"
+2026-09-16 14:48:37,644{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:37,648{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:37,761{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-16 14:48:37,777{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n3" [:killed "n3"]}
+2026-09-16 14:48:37,950{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+2026-09-16 14:48:37,952{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+2026-09-16 14:48:38,024{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:38,028{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:38,050{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:write	"vs42-266-xxxxxxx"
+2026-09-16 14:48:38,075{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:write	"vs42-266-xxxxxxx"
+2026-09-16 14:48:38,090{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:38,092{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:38,209{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:38,213{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:38,369{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:invoke	:write	"vs42-269-xxxxxxx"
+2026-09-16 14:48:38,399{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:ok	:write	"vs42-269-xxxxxxx"
+2026-09-16 14:48:39,339{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:write	"vs42-272-xxxxxxx"
+2026-09-16 14:48:39,409{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:write	"vs42-272-xxxxxxx"
+2026-09-16 14:48:39,579{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:39,581{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:39,603{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+2026-09-16 14:48:39,607{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+2026-09-16 14:48:39,746{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:write	"vs42-275-xxxxxxx"
+2026-09-16 14:48:39,775{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:write	"vs42-275-xxxxxxx"
+2026-09-16 14:48:40,256{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+2026-09-16 14:48:40,259{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :count-only true}
+2026-09-16 14:48:40,510{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:40,514{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:40,779{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	"vs42-278-xxxxxxx"
+2026-09-16 14:48:40,804{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	"vs42-278-xxxxxxx"
+2026-09-16 14:48:40,888{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+2026-09-16 14:48:40,892{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+2026-09-16 14:48:40,960{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:40,963{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:41,389{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+2026-09-16 14:48:41,393{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:read-at	{:key "/jepsen/scan/s42-9", :revision :last}
+2026-09-16 14:48:41,800{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:41,803{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:41,980{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:write	"vs42-284-xxxxxxx"
+2026-09-16 14:48:42,008{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:write	"vs42-284-xxxxxxx"
+2026-09-16 14:48:42,079{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-287-xxxxxxx"
+2026-09-16 14:48:42,105{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-287-xxxxxxx"
+2026-09-16 14:48:42,129{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:write	"vs42-290-xxxxxxx"
+2026-09-16 14:48:42,156{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-16 14:48:42,189{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Restarting coord on n3
+2026-09-16 14:48:42,189{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-16 14:48:42,191{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:write	"vs42-290-xxxxxxx"
+2026-09-16 14:48:42,312{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-16 14:48:42,393{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-16 14:48:42,393{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+2026-09-16 14:48:42,626{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:42,629{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:43,631{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	"vs42-293-xxxxxxx"
+2026-09-16 14:48:43,656{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	"vs42-293-xxxxxxx"
+2026-09-16 14:48:44,245{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:44,249{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:44,380{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:write	"vs42-296-xxxxxxx"
+2026-09-16 14:48:44,448{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:write	"vs42-296-xxxxxxx"
+2026-09-16 14:48:44,870{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+2026-09-16 14:48:44,874{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5, :keys-only true}
+2026-09-16 14:48:45,087{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:invoke	:read-at	{:key "/jepsen/scan/s42-11", :revision :last}
+2026-09-16 14:48:45,096{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:ok	:read-at	{:key "/jepsen/scan/s42-11", :revision :last}
+2026-09-16 14:48:45,289{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:45,293{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:45,469{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-302-xxxxxxx"
+2026-09-16 14:48:45,504{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-302-xxxxxxx"
+2026-09-16 14:48:45,758{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:write	"vs42-305-xxxxxxx"
+2026-09-16 14:48:45,789{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:write	"vs42-305-xxxxxxx"
+2026-09-16 14:48:45,923{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+2026-09-16 14:48:45,927{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:read-at	{:key "/jepsen/scan/s42-4", :revision :last}
+2026-09-16 14:48:45,962{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+2026-09-16 14:48:45,965{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:read-at	{:key "/jepsen/scan/s42-7", :revision :last}
+2026-09-16 14:48:46,175{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:46,178{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:46,201{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	"vs42-314-xxxxxxx"
+2026-09-16 14:48:46,229{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	"vs42-314-xxxxxxx"
+2026-09-16 14:48:46,446{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:46,449{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:46,687{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+2026-09-16 14:48:46,691{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :keys-only true}
+2026-09-16 14:48:46,873{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:46,876{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100}
+2026-09-16 14:48:46,963{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+2026-09-16 14:48:46,965{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 100, :keys-only true, :count-only true}
+2026-09-16 14:48:47,148{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:write	"vs42-317-xxxxxxx"
+2026-09-16 14:48:47,215{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:write	"vs42-317-xxxxxxx"
+2026-09-16 14:48:47,273{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-320-xxxxxxx"
+2026-09-16 14:48:47,301{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-320-xxxxxxx"
+2026-09-16 14:48:47,382{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:write	"vs42-323-xxxxxxx"
+2026-09-16 14:48:47,413{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:write	"vs42-323-xxxxxxx"
+2026-09-16 14:48:47,712{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-16 14:48:47,737{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n3" [:killed "n3"]}
+2026-09-16 14:48:47,856{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:47,860{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:47,975{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:47,979{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:48,227{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:write	"vs42-326-xxxxxxx"
+2026-09-16 14:48:48,288{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:write	"vs42-326-xxxxxxx"
+2026-09-16 14:48:48,443{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:write	"vs42-329-xxxxxxx"
+2026-09-16 14:48:48,472{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:write	"vs42-329-xxxxxxx"
+2026-09-16 14:48:48,559{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:48,563{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42."}
+2026-09-16 14:48:48,600{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:48,604{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 5}
+2026-09-16 14:48:48,861{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:write	"vs42-332-xxxxxxx"
+2026-09-16 14:48:48,885{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:write	"vs42-332-xxxxxxx"
+2026-09-16 14:48:50,199{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:read-at	{:key "/jepsen/scan/s42-15", :revision :last}
+2026-09-16 14:48:50,201{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:read-at	{:key "/jepsen/scan/s42-15", :revision :last}
+2026-09-16 14:48:50,448{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:write	"vs42-338-xxxxxxx"
+2026-09-16 14:48:50,487{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:write	"vs42-340-xxxxxxx"
+2026-09-16 14:48:50,507{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:write	"vs42-338-xxxxxxx"
+2026-09-16 14:48:50,532{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:write	"vs42-340-xxxxxxx"
+2026-09-16 14:48:51,065{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:read-at	{:key "/jepsen/scan/s42-8", :revision :last}
+2026-09-16 14:48:51,074{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:read-at	{:key "/jepsen/scan/s42-8", :revision :last}
+2026-09-16 14:48:51,890{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:write	"vs42-347-xxxxxxx"
+2026-09-16 14:48:51,916{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:write	"vs42-347-xxxxxxx"
+2026-09-16 14:48:52,041{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read-at	{:key "/jepsen/scan/s42-14", :revision :last}
+2026-09-16 14:48:52,049{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read-at	{:key "/jepsen/scan/s42-14", :revision :last}
+2026-09-16 14:48:52,088{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}
+2026-09-16 14:48:52,092{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:read-at	{:key "/jepsen/scan/s42-1", :revision :last}
+2026-09-16 14:48:52,618{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:write	"vs42-356-xxxxxxx"
+2026-09-16 14:48:52,645{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	"vs42-358-xxxxxxx"
+2026-09-16 14:48:52,702{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:write	"vs42-356-xxxxxxx"
+2026-09-16 14:48:52,719{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	"vs42-358-xxxxxxx"
+2026-09-16 14:48:52,860{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:invoke	:read-at	{:key "/jepsen/scan/s42-10", :revision :last}
+2026-09-16 14:48:52,865{GMT}	INFO	[jepsen worker 5] jepsen.print: 25	:ok	:read-at	{:key "/jepsen/scan/s42-10", :revision :last}
+2026-09-16 14:48:53,463{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:53,464{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2}
+2026-09-16 14:48:53,596{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:write	"vs42-365-xxxxxxx"
+2026-09-16 14:48:53,624{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:write	"vs42-365-xxxxxxx"
+2026-09-16 14:48:53,701{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:write	"vs42-368-xxxxxxx"
+2026-09-16 14:48:53,729{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:write	"vs42-368-xxxxxxx"
+2026-09-16 14:48:53,823{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:write	"vs42-371-xxxxxxx"
+2026-09-16 14:48:53,845{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:write	"vs42-371-xxxxxxx"
+2026-09-16 14:48:53,909{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :count-only true}
+2026-09-16 14:48:53,910{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:scan	{:key "/jepsen/scan/s42-", :range-end "/jepsen/scan/s42.", :limit 2, :count-only true}
+2026-09-16 14:48:54,235{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:write	"vs42-374-xxxxxxx"
+2026-09-16 14:48:54,263{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:write	"vs42-374-xxxxxxx"
+2026-09-16 14:48:54,652{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-16 14:48:54,705{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Restarting coord on n3
+2026-09-16 14:48:54,706{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-16 14:48:54,833{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-16 14:48:55,847{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-16 14:48:55,848{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n3" [:restarted "n3"]}
+2026-09-16 14:48:55,848{GMT}	INFO	[jepsen worker 2] jepsen.generator.interpreter: recovery: letting cluster converge
+2026-09-16 14:49:25,870{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-16 14:49:25,870{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-16 14:49:25,870{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-16 14:49:26,200{GMT}	INFO	[jepsen test runner] jepsen.core: Run complete, writing
+2026-09-16 14:49:26,264{GMT}	INFO	[jepsen test runner] jepsen.core: Snarfing log files
+2026-09-16 14:49:26,265{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Killing coord on n2
+2026-09-16 14:49:26,265{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Killing coord on n3
+2026-09-16 14:49:26,265{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Killing coord on n1
+2026-09-16 14:49:26,324{GMT}	INFO	[jepsen node n1] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-16 14:49:26,324{GMT}	INFO	[jepsen node n2] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-16 14:49:26,324{GMT}	INFO	[jepsen node n3] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-16 14:49:26,462{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-16 14:49:26,462{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-16 14:49:26,462{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-16 14:49:28,071{GMT}	INFO	[jepsen test runner] jepsen.core: Analyzing...
+2026-09-16 14:49:28,089{GMT}	INFO	[clojure-agent-send-off-pool-7] jepsen.coord.scanck: scan checker: {:scan-ok 91, :scan-ops 93, :violations-by-class {}, :unjudged-items 135, :keys-only 26, :count-only 23, :read-at-ok 35, :scan-items 404, :failures (), :read-at-ops 44, :compacted-reads 0, :writes-ok 75}
+2026-09-16 14:49:28,207{GMT}	INFO	[jepsen test runner] jepsen.core: Analysis complete
+2026-09-16 14:49:28,217{GMT}	INFO	[jepsen results] jepsen.store: Wrote /opt/coord/jepsen/store/coord/2026-09-16T14:47:46.271122719Z/results.edn
+2026-09-16 14:49:28,263{GMT}	INFO	[jepsen test runner] jepsen.core: {:linear {:valid? true,
+          :scan {:scan-ok 91,
+                 :scan-ops 93,
+                 :violations-by-class {},
+                 :unjudged-items 135,
+                 :keys-only 26,
+                 :count-only 23,
+                 :read-at-ok 35,
+                 :scan-items 404,
+                 :read-at-ops 44,
+                 :compacted-reads 0,
+                 :writes-ok 75},
+          :failures []},
+ :gates {:valid? true,
+         :gates {:premise {:valid? true,
+                           :writes 76,
+                           :duplicate-value-count 0,
+                           :duplicate-values {}},
+                 :availability {:min-ratio 0.95,
+                                :min-sample 100,
+                                :windows 5,
+                                :judged 0,
+                                :skipped-small-sample 5,
+                                :worst-window nil,
+                                :violations []},
+                 :rto {:budget-seconds 120,
+                       :n 4,
+                       :p95 0.6475052445499999,
+                       :max 0.670308128,
+                       :samples [0.518288905
+                                 0.670308128
+                                 0.407392789
+                                 0.03490442],
+                       :unrecovered 0,
+                       :not-measured 1,
+                       :details [{:disruption {:start 7004101322,
+                                               :end 13422741281},
+                                  :measurable? true,
+                                  :first-ok-after 13941030186,
+                                  :seconds 0.518288905}
+                                 {:disruption {:start 19160412138,
+                                               :end 23546129995},
+                                  :measurable? true,
+                                  :first-ok-after 24216438123,
+                                  :seconds 0.670308128}
+                                 {:disruption {:start 30164559657,
+                                               :end 37681039694},
+                                  :measurable? true,
+                                  :first-ok-after 38088432483,
+                                  :seconds 0.407392789}
+                                 {:disruption {:start 43701670554,
+                                               :end 48080167132},
+                                  :measurable? true,
+                                  :first-ok-after 48115071552,
+                                  :seconds 0.03490442}
+                                 {:disruption {:start 53661155313,
+                                               :end 60576277226},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}]},
+                 :liveness {:min-ok-ratio 0.1,
+                            :min-sample 10,
+                            :ops 3,
+                            :judged 3,
+                            :skipped-small-sample 0,
+                            :ok-ratio 0.9436619718309859,
+                            :by-op {:scan {:total 93,
+                                           :ok 91,
+                                           :info 2,
+                                           :fail 0,
+                                           :errors {:unavailable-maybe-applied 2}},
+                                    :write {:total 76,
+                                            :ok 75,
+                                            :info 1,
+                                            :fail 0,
+                                            :errors {:unavailable-maybe-applied 1}},
+                                    :read-at {:total 44,
+                                              :ok 35,
+                                              :info 9,
+                                              :fail 0,
+                                              :errors {:no-value 9}}},
+                            :violations []}},
+         :failures []},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true}
+
+
+Everything looks good! ヽ(‘ー`)ノ

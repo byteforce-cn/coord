@@ -1,0 +1,324 @@
+0	:invoke	:read	nil
+1	:invoke	:cas	[nil 922479]
+0	:ok	:read	nil
+1	:ok	:cas	[nil 922479]
+2	:invoke	:cas	[922479 832956]
+3	:invoke	:read	nil
+2	:ok	:cas	[922479 832956]
+3	:ok	:read	832956
+4	:invoke	:cas	[922479 10676]
+4	:fail	:cas	[922479 10676]	:cas-miss
+5	:invoke	:cas	[832956 293224]
+5	:ok	:cas	[832956 293224]
+6	:invoke	:cas	[293224 16373]
+6	:ok	:cas	[293224 16373]
+7	:invoke	:read	nil
+7	:ok	:read	16373
+8	:invoke	:cas	[16373 481843]
+9	:invoke	:cas	[922479 401786]
+0	:invoke	:read	nil
+0	:ok	:read	16373
+8	:ok	:cas	[16373 481843]
+9	:fail	:cas	[922479 401786]	:cas-miss
+0	:invoke	:read	nil
+0	:ok	:read	481843
+1	:invoke	:read	nil
+1	:ok	:read	481843
+2	:invoke	:cas	[481843 127837]
+2	:ok	:cas	[481843 127837]
+3	:invoke	:read	nil
+3	:ok	:read	127837
+4	:invoke	:cas	[nil 218634]
+4	:fail	:cas	[nil 218634]	:cas-miss
+5	:invoke	:cas	[nil 629318]
+5	:fail	:cas	[nil 629318]	:cas-miss
+6	:invoke	:cas	[127837 483813]
+6	:ok	:cas	[127837 483813]
+7	:invoke	:cas	[293224 227412]
+7	:fail	:cas	[293224 227412]	:cas-miss
+8	:invoke	:read	nil
+8	:ok	:read	483813
+9	:invoke	:read	nil
+9	:ok	:read	483813
+0	:invoke	:cas	[483813 432170]
+1	:invoke	:cas	[127837 438685]
+0	:ok	:cas	[483813 432170]
+1	:fail	:cas	[127837 438685]	:cas-miss
+1	:invoke	:cas	[832956 188046]
+1	:fail	:cas	[832956 188046]	:cas-miss
+2	:invoke	:cas	[16373 551361]
+2	:fail	:cas	[16373 551361]	:cas-miss
+3	:invoke	:cas	[832956 341956]
+3	:fail	:cas	[832956 341956]	:cas-miss
+4	:invoke	:read	nil
+4	:ok	:read	432170
+5	:invoke	:read	nil
+5	:ok	:read	432170
+6	:invoke	:cas	[127837 484395]
+7	:invoke	:cas	[432170 995765]
+6	:fail	:cas	[127837 484395]	:cas-miss
+7	:ok	:cas	[432170 995765]
+8	:invoke	:cas	[483813 828771]
+8	:fail	:cas	[483813 828771]	:cas-miss
+9	:invoke	:read	nil
+9	:ok	:read	995765
+0	:invoke	:read	nil
+0	:ok	:read	995765
+0	:invoke	:read	nil
+0	:ok	:read	995765
+1	:invoke	:cas	[483813 991279]
+2	:invoke	:cas	[127837 963379]
+1	:fail	:cas	[483813 991279]	:cas-miss
+2	:fail	:cas	[127837 963379]	:cas-miss
+3	:invoke	:read	nil
+3	:ok	:read	995765
+4	:invoke	:cas	[483813 703599]
+4	:fail	:cas	[483813 703599]	:cas-miss
+5	:invoke	:cas	[nil 338012]
+5	:fail	:cas	[nil 338012]	:cas-miss
+6	:invoke	:read	nil
+6	:ok	:read	995765
+7	:invoke	:cas	[432170 14624]
+7	:fail	:cas	[432170 14624]	:cas-miss
+8	:invoke	:read	nil
+8	:ok	:read	995765
+9	:invoke	:cas	[nil 565833]
+9	:fail	:cas	[nil 565833]	:cas-miss
+0	:invoke	:cas	[481843 620432]
+0	:fail	:cas	[481843 620432]	:cas-miss
+0	:invoke	:cas	[481843 966599]
+0	:fail	:cas	[481843 966599]	:cas-miss
+1	:invoke	:read	nil
+1	:ok	:read	995765
+2	:invoke	:cas	[922479 747188]
+3	:invoke	:cas	[432170 587608]
+2	:fail	:cas	[922479 747188]	:cas-miss
+3	:fail	:cas	[432170 587608]	:cas-miss
+4	:invoke	:cas	[995765 831184]
+4	:ok	:cas	[995765 831184]
+5	:invoke	:cas	[432170 699045]
+5	:fail	:cas	[432170 699045]	:cas-miss
+6	:invoke	:cas	[483813 420325]
+6	:fail	:cas	[483813 420325]	:cas-miss
+7	:invoke	:cas	[127837 184638]
+7	:fail	:cas	[127837 184638]	:cas-miss
+8	:invoke	:read	nil
+8	:ok	:read	831184
+9	:invoke	:cas	[483813 839272]
+9	:fail	:cas	[483813 839272]	:cas-miss
+0	:invoke	:cas	[481843 629371]
+0	:fail	:cas	[481843 629371]	:cas-miss
+0	:invoke	:read	nil
+0	:ok	:read	831184
+1	:invoke	:cas	[831184 430441]
+1	:ok	:cas	[831184 430441]
+2	:invoke	:cas	[481843 851075]
+2	:fail	:cas	[481843 851075]	:cas-miss
+3	:invoke	:cas	[nil 441171]
+3	:fail	:cas	[nil 441171]	:cas-miss
+4	:invoke	:cas	[293224 16946]
+4	:fail	:cas	[293224 16946]	:cas-miss
+5	:invoke	:cas	[16373 949400]
+6	:invoke	:cas	[481843 890344]
+5	:fail	:cas	[16373 949400]	:cas-miss
+6	:fail	:cas	[481843 890344]	:cas-miss
+7	:invoke	:cas	[127837 44611]
+7	:fail	:cas	[127837 44611]	:cas-miss
+8	:invoke	:read	nil
+8	:ok	:read	430441
+9	:invoke	:cas	[293224 115117]
+9	:fail	:cas	[293224 115117]	:cas-miss
+0	:invoke	:read	nil
+0	:ok	:read	430441
+0	:invoke	:cas	[995765 855430]
+0	:fail	:cas	[995765 855430]	:cas-miss
+1	:invoke	:cas	[832956 945555]
+2	:invoke	:read	nil
+2	:ok	:read	430441
+1	:fail	:cas	[832956 945555]	:cas-miss
+3	:invoke	:cas	[995765 580666]
+3	:fail	:cas	[995765 580666]	:cas-miss
+4	:invoke	:read	nil
+4	:ok	:read	430441
+5	:invoke	:read	nil
+5	:ok	:read	430441
+6	:invoke	:read	nil
+6	:ok	:read	430441
+7	:invoke	:cas	[831184 794013]
+7	:fail	:cas	[831184 794013]	:cas-miss
+8	:invoke	:read	nil
+8	:ok	:read	430441
+9	:invoke	:cas	[995765 705367]
+9	:fail	:cas	[995765 705367]	:cas-miss
+0	:invoke	:read	nil
+0	:ok	:read	430441
+0	:invoke	:cas	[995765 589880]
+1	:invoke	:read	nil
+1	:ok	:read	430441
+0	:fail	:cas	[995765 589880]	:cas-miss
+2	:invoke	:cas	[922479 425803]
+2	:fail	:cas	[922479 425803]	:cas-miss
+3	:invoke	:cas	[831184 774498]
+3	:fail	:cas	[831184 774498]	:cas-miss
+4	:invoke	:cas	[832956 77247]
+4	:fail	:cas	[832956 77247]	:cas-miss
+5	:invoke	:cas	[483813 610441]
+5	:fail	:cas	[483813 610441]	:cas-miss
+6	:invoke	:read	nil
+6	:ok	:read	430441
+7	:invoke	:read	nil
+7	:ok	:read	430441
+8	:invoke	:cas	[922479 169643]
+8	:fail	:cas	[922479 169643]	:cas-miss
+9	:invoke	:cas	[127837 236759]
+0	:invoke	:cas	[995765 738384]
+9	:fail	:cas	[127837 236759]	:cas-miss
+0	:fail	:cas	[995765 738384]	:cas-miss
+0	:invoke	:cas	[832956 499859]
+0	:fail	:cas	[832956 499859]	:cas-miss
+1	:invoke	:cas	[995765 289273]
+1	:fail	:cas	[995765 289273]	:cas-miss
+2	:invoke	:read	nil
+2	:ok	:read	430441
+3	:invoke	:cas	[432170 344968]
+3	:fail	:cas	[432170 344968]	:cas-miss
+4	:invoke	:read	nil
+4	:ok	:read	430441
+5	:invoke	:cas	[922479 982439]
+5	:fail	:cas	[922479 982439]	:cas-miss
+6	:invoke	:cas	[16373 479592]
+6	:fail	:cas	[16373 479592]	:cas-miss
+7	:invoke	:cas	[432170 765424]
+7	:fail	:cas	[432170 765424]	:cas-miss
+8	:invoke	:cas	[nil 466780]
+8	:fail	:cas	[nil 466780]	:cas-miss
+9	:invoke	:read	nil
+9	:ok	:read	430441
+0	:invoke	:read	nil
+0	:ok	:read	430441
+0	:invoke	:cas	[832956 413448]
+0	:fail	:cas	[832956 413448]	:cas-miss
+1	:invoke	:cas	[nil 523169]
+2	:invoke	:cas	[nil 674610]
+1	:fail	:cas	[nil 523169]	:cas-miss
+2	:fail	:cas	[nil 674610]	:cas-miss
+3	:invoke	:cas	[nil 468839]
+3	:fail	:cas	[nil 468839]	:cas-miss
+4	:invoke	:cas	[922479 547917]
+4	:fail	:cas	[922479 547917]	:cas-miss
+5	:invoke	:read	nil
+5	:ok	:read	430441
+6	:invoke	:read	nil
+6	:ok	:read	430441
+7	:invoke	:cas	[995765 447980]
+7	:fail	:cas	[995765 447980]	:cas-miss
+8	:invoke	:read	nil
+8	:ok	:read	430441
+9	:invoke	:cas	[432170 361359]
+9	:fail	:cas	[432170 361359]	:cas-miss
+0	:invoke	:cas	[995765 235662]
+1	:invoke	:cas	[922479 880187]
+0	:fail	:cas	[995765 235662]	:cas-miss
+1	:fail	:cas	[922479 880187]	:cas-miss
+1	:invoke	:cas	[127837 425512]
+1	:fail	:cas	[127837 425512]	:cas-miss
+2	:invoke	:cas	[481843 607800]
+2	:fail	:cas	[481843 607800]	:cas-miss
+3	:invoke	:read	nil
+3	:ok	:read	430441
+4	:invoke	:read	nil
+4	:ok	:read	430441
+5	:invoke	:read	nil
+5	:ok	:read	430441
+6	:invoke	:cas	[995765 298837]
+6	:fail	:cas	[995765 298837]	:cas-miss
+7	:invoke	:cas	[nil 601869]
+7	:fail	:cas	[nil 601869]	:cas-miss
+8	:invoke	:read	nil
+8	:ok	:read	430441
+9	:invoke	:cas	[127837 185361]
+9	:fail	:cas	[127837 185361]	:cas-miss
+0	:invoke	:read	nil
+0	:ok	:read	430441
+0	:invoke	:cas	[127837 192843]
+0	:fail	:cas	[127837 192843]	:cas-miss
+1	:invoke	:cas	[16373 101137]
+1	:fail	:cas	[16373 101137]	:cas-miss
+2	:invoke	:read	nil
+2	:ok	:read	430441
+3	:invoke	:cas	[483813 247883]
+3	:fail	:cas	[483813 247883]	:cas-miss
+4	:invoke	:read	nil
+4	:ok	:read	430441
+5	:invoke	:read	nil
+5	:ok	:read	430441
+6	:invoke	:cas	[127837 86577]
+6	:fail	:cas	[127837 86577]	:cas-miss
+7	:invoke	:cas	[922479 828539]
+7	:fail	:cas	[922479 828539]	:cas-miss
+8	:invoke	:cas	[432170 147736]
+8	:fail	:cas	[432170 147736]	:cas-miss
+9	:invoke	:cas	[127837 347771]
+9	:fail	:cas	[127837 347771]	:cas-miss
+0	:invoke	:cas	[922479 941816]
+0	:fail	:cas	[922479 941816]	:cas-miss
+0	:invoke	:cas	[430441 146050]
+0	:ok	:cas	[430441 146050]
+1	:invoke	:cas	[nil 242967]
+1	:fail	:cas	[nil 242967]	:cas-miss
+2	:invoke	:cas	[293224 472843]
+2	:fail	:cas	[293224 472843]	:cas-miss
+3	:invoke	:read	nil
+3	:ok	:read	146050
+4	:invoke	:cas	[293224 910417]
+4	:fail	:cas	[293224 910417]	:cas-miss
+5	:invoke	:read	nil
+5	:ok	:read	146050
+6	:invoke	:cas	[146050 976777]
+6	:ok	:cas	[146050 976777]
+7	:invoke	:cas	[127837 176130]
+7	:fail	:cas	[127837 176130]	:cas-miss
+8	:invoke	:cas	[430441 434032]
+8	:fail	:cas	[430441 434032]	:cas-miss
+9	:invoke	:read	nil
+9	:ok	:read	976777
+0	:invoke	:read	nil
+0	:ok	:read	976777
+0	:invoke	:cas	[483813 925961]
+0	:fail	:cas	[483813 925961]	:cas-miss
+1	:invoke	:cas	[nil 893392]
+1	:fail	:cas	[nil 893392]	:cas-miss
+2	:invoke	:cas	[16373 603622]
+2	:fail	:cas	[16373 603622]	:cas-miss
+3	:invoke	:read	nil
+3	:ok	:read	976777
+4	:invoke	:cas	[127837 610886]
+4	:fail	:cas	[127837 610886]	:cas-miss
+5	:invoke	:cas	[146050 992020]
+6	:invoke	:cas	[nil 968029]
+5	:fail	:cas	[146050 992020]	:cas-miss
+6	:fail	:cas	[nil 968029]	:cas-miss
+7	:invoke	:read	nil
+7	:ok	:read	976777
+8	:invoke	:read	nil
+8	:ok	:read	976777
+9	:invoke	:cas	[430441 472704]
+0	:invoke	:cas	[831184 530261]
+9	:fail	:cas	[430441 472704]	:cas-miss
+0	:fail	:cas	[831184 530261]	:cas-miss
+0	:invoke	:read	nil
+0	:ok	:read	976777
+1	:invoke	:cas	[nil 761091]
+2	:invoke	:cas	[127837 609689]
+1	:fail	:cas	[nil 761091]	:cas-miss
+2	:fail	:cas	[127837 609689]	:cas-miss
+3	:invoke	:cas	[831184 859601]
+3	:fail	:cas	[831184 859601]	:cas-miss
+4	:invoke	:cas	[432170 680856]
+5	:invoke	:cas	[16373 976225]
+4	:fail	:cas	[432170 680856]	:cas-miss
+5	:fail	:cas	[16373 976225]	:cas-miss
+6	:invoke	:cas	[430441 532398]
+6	:fail	:cas	[430441 532398]	:cas-miss
+7	:invoke	:cas	[293224 779426]
+7	:fail	:cas	[293224 779426]	:cas-miss
