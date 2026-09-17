@@ -44,6 +44,16 @@ message PutRequest {
   bytes request_id = 5; // 可选：幂等去重键。同一客户端身份下，重复提交相同
                         // request_id 的请求不会重复生效，返回首次执行的结果。
                         // 网络重试 / 超时重发场景【建议始终携带】。
+                        //
+                        // **去重作用域（jepsen T1.4 / F-03 实测确认，不要当精确一次）**：
+                        //   - 单节点、**进程内内存**缓存，**不随 Raft 复制、不持久化**；
+                        //   - TTL 60s、容量 4096 条，满时按插入序 FIFO 淘汰最旧的条目；
+                        //   - 键 = 客户端身份（authorization 哈希）+ request_id，跨客户端不互相命中。
+                        // 因此：换节点重发（leader 切换、进程重启、客户端重试到另一个节点）
+                        // **会重复生效**（实测：同一 request_id 换 leader 后重发，revision
+                        // 会前进、version 会超过预期）。需要「恰好一次」语义的上层必须
+                        // 自己用业务幂等语义（版本号 / CAS / 唯一键）承担，或保证重试
+                        // 不跨节点、且在 60s 内。
 }
 
 message PutResponse {
@@ -78,7 +88,11 @@ message DeleteRequest {
   bytes key = 1;
   bytes range_end = 2;  // 同 RangeRequest：空 = 单 Key，非空 = 左闭右开范围删
   bool prev_kv = 3;     // 为 true 时响应携带被删除的旧值列表
-  bytes request_id = 4; // 可选：幂等去重键（语义同 PutRequest.request_id）
+  bytes request_id = 4; // 可选：幂等去重键（语义与作用域同 PutRequest.request_id，
+                        // 见该字段的注释：单节点 / 60s / 4096 FIFO / 不复制不持久）。
+                        // 范围删（range_end 非空）同样去重，命中时回放**首次执行**的
+                        // deleted 与 prev_kvs —— 否则重放会把首次执行之后新写入的
+                        // Key 再删一遍（jepsen T1.4 / F-01 实测 39/39 复现）。
 }
 
 message DeleteResponse {

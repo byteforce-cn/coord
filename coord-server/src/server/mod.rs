@@ -104,6 +104,32 @@ struct IdempotentEntry {
     succeeded: bool,
     /// R-SVC-18：Txn 缓存的完整响应（命中时回放，此前返回空 responses）
     responses: Vec<ResponseOp>,
+    /// F-02（jepsen T1.4）：Put 缓存的完整响应 —— `prev_kv` 必须与首次执行
+    /// 一致。此前命中路径硬编码 `prev_kv: None`，依赖 prev_kv 做 CAS 后置校验
+    /// / 审计的上层会把 None 读成「该 key 此前不存在」（静默的错误结论）。
+    prev_kv: Option<KeyValue>,
+    /// F-01（jepsen T1.4）：Delete 缓存的完整响应。
+    /// `deleted` 为首次执行实际删除的 Key 数；`prev_kvs` 为首次执行返回的被删
+    /// 旧值。范围删重放时必须回放这两项，否则「返回首次执行的结果」不成立，
+    /// 且重放会删掉首次执行之后新写入的数据（重试放大破坏面）。
+    deleted: i64,
+    prev_kvs: Vec<KeyValue>,
+}
+
+impl IdempotentEntry {
+    /// 只带 revision 的基础条目（其余载荷取默认值）。Put / Delete / Txn 各自
+    /// 用 `..IdempotentEntry::with_revision(rev)` 补上自己的载荷字段。
+    fn with_revision(revision: i64) -> Self {
+        Self {
+            inserted_at: std::time::Instant::now(),
+            revision,
+            succeeded: true,
+            responses: Vec::new(),
+            prev_kv: None,
+            deleted: 0,
+            prev_kvs: Vec::new(),
+        }
+    }
 }
 
 /// R-SVC-18：幂等去重缓存（request 维度 + 客户端身份 + TTL + 容量上限）。
@@ -915,28 +941,49 @@ impl CoordNode {
         }
     }
 
-    /// 检查幂等 request：命中且未过期返回缓存的 revision
-    fn check_idempotent(&self, key: &[u8]) -> Option<i64> {
+    /// F-01/F-02：命中时取出**完整条目**（而不只是 revision），让 Put 能回放
+    /// `prev_kv`、Delete 能回放 `deleted`/`prev_kvs`。
+    fn check_idempotent_entry(&self, key: &[u8]) -> Option<IdempotentEntry> {
         let ttl = self.limits.read().idempotency_ttl;
-        self.idempotent_cache
-            .write()
-            .check(key, ttl)
-            .map(|e| e.revision)
+        self.idempotent_cache.write().check(key, ttl)
     }
 
-    /// 缓存幂等请求结果
-    fn cache_idempotent(&self, key: Vec<u8>, revision: i64) {
-        let max_entries = self.limits.read().idempotency_max_entries;
+    /// F-02：缓存 Put 的完整响应（含 `prev_kv`），命中时整体回放。
+    fn cache_idempotent_put(&self, key: Vec<u8>, revision: i64, prev_kv: Option<KeyValue>) {
         self.idempotent_cache.write().insert(
             key,
             IdempotentEntry {
-                inserted_at: std::time::Instant::now(),
-                revision,
-                succeeded: true,
-                responses: Vec::new(),
+                prev_kv,
+                ..IdempotentEntry::with_revision(revision)
             },
-            max_entries,
+            self.idempotency_max_entries(),
         );
+    }
+
+    /// F-01：缓存 Delete 的完整响应（含 `deleted` / `prev_kvs`），命中时整体回放。
+    ///
+    /// 范围删必须缓存 `prev_kvs` 与 `deleted`：否则「返回首次执行的结果」无法
+    /// 满足，而且重放会在区间内新写入补齐之后再次删一遍（重试放大破坏面）。
+    fn cache_idempotent_delete(
+        &self,
+        key: Vec<u8>,
+        deleted: i64,
+        prev_kvs: Vec<KeyValue>,
+        revision: i64,
+    ) {
+        self.idempotent_cache.write().insert(
+            key,
+            IdempotentEntry {
+                deleted,
+                prev_kvs,
+                ..IdempotentEntry::with_revision(revision)
+            },
+            self.idempotency_max_entries(),
+        );
+    }
+
+    fn idempotency_max_entries(&self) -> usize {
+        self.limits.read().idempotency_max_entries
     }
 
     /// 检查 Txn 幂等请求：命中且未过期返回 (succeeded, revision, responses)
@@ -960,10 +1007,9 @@ impl CoordNode {
         self.idempotent_cache.write().insert(
             key,
             IdempotentEntry {
-                inserted_at: std::time::Instant::now(),
-                revision,
                 succeeded,
                 responses,
+                ..IdempotentEntry::with_revision(revision)
             },
             max_entries,
         );
@@ -1417,14 +1463,15 @@ impl Kv for CoordNode {
         // 保留对象空间守卫（/obj/ 为对象存储内部 manifest，禁止经 KV 写入）
         self.guard_object_write_key(&req.key)?;
 
-        // 幂等检查：相同（客户端身份 + request_id）返回缓存的 revision
+        // 幂等检查：相同（客户端身份 + request_id）返回缓存的**完整响应**
+        // （F-02：此前这里硬编码 `prev_kv: None`，与「返回首次执行的结果」矛盾）
         if !request_id.is_empty() {
-            if let Some(cached_rev) =
-                self.check_idempotent(&idempotency_key(&request_metadata, &request_id))
+            if let Some(entry) =
+                self.check_idempotent_entry(&idempotency_key(&request_metadata, &request_id))
             {
                 return Ok(tonic::Response::new(PutResponse {
-                    prev_kv: None,
-                    revision: cached_rev,
+                    prev_kv: entry.prev_kv,
+                    revision: entry.revision,
                 }));
             }
         }
@@ -1487,11 +1534,13 @@ impl Kv for CoordNode {
             }
         }
 
-        // 缓存幂等结果（键含客户端身份，防止不同客户端同 request_id 互相命中）
+        // 缓存幂等结果（键含客户端身份，防止不同客户端同 request_id 互相命中）。
+        // F-02：连同 `prev_kv` 一并缓存 —— 命中时必须返回**首次执行的完整响应**。
         if !request_id.is_empty() {
-            self.cache_idempotent(
+            self.cache_idempotent_put(
                 idempotency_key(&request_metadata, &request_id),
                 revision as i64,
+                prev_kv.clone(),
             );
         }
 
@@ -1654,8 +1703,32 @@ impl Kv for CoordNode {
         // 磁盘水位只读闸
         self.ensure_writable()?;
 
+        let request_metadata = request.metadata().clone();
         let req = request.into_inner();
         let prev_kv_requested = req.prev_kv;
+        let request_id = req.request_id.clone();
+
+        // F-01（jepsen T1.4）：Delete 必须参与 `request_id` 去重。
+        //
+        // 契约（kv.proto:81）明确写了「幂等去重键（语义同 PutRequest.request_id）」
+        // ——「重复提交相同 request_id 的请求不会重复生效，返回首次执行的结果」。
+        // 修复前 delete 处理器里没有任何 `*_idempotent*` 调用，后果分三档：
+        //   1. 计数/审计语义重复（删一次记两次）；
+        //   2. `prev_kv=true` 的响应不可幂等：首次返回旧值、重试返回空
+        //      `prev_kvs` —— 同一个 request_id 两次得到不同结果；
+        //   3. **范围删重放会删掉首次执行之后新写入的数据**（重试放大破坏面，
+        //      实测 39/39 复现）—— 这是数据破坏，不是计数问题。
+        if !request_id.is_empty() {
+            if let Some(entry) =
+                self.check_idempotent_entry(&idempotency_key(&request_metadata, &request_id))
+            {
+                return Ok(tonic::Response::new(DeleteResponse {
+                    deleted: entry.deleted,
+                    prev_kvs: entry.prev_kvs,
+                    revision: entry.revision,
+                }));
+            }
+        }
 
         // R-SVC-07-3 / 第三轮 P0-1：range_end 非空且 != key → 原子范围删除 [key, range_end)；
         // 否则为单键删除。与顶层 Range / Txn 内层 op / 鉴权层共用同一份语义定义
@@ -1765,6 +1838,15 @@ impl Kv for CoordNode {
         };
 
         tracing::debug!(deleted, revision, "KV delete applied");
+        // F-01：缓存完整 DeleteResponse，命中时整体回放（见上面的入口检查）
+        if !request_id.is_empty() {
+            self.cache_idempotent_delete(
+                idempotency_key(&request_metadata, &request_id),
+                deleted,
+                prev_kvs.clone(),
+                revision,
+            );
+        }
         Ok(tonic::Response::new(DeleteResponse {
             deleted,
             prev_kvs,
@@ -3452,10 +3534,8 @@ mod tests {
         cache.insert(
             key.clone(),
             IdempotentEntry {
-                inserted_at: std::time::Instant::now(),
                 revision: 42,
-                succeeded: true,
-                responses: Vec::new(),
+                ..IdempotentEntry::with_revision(0)
             },
             16,
         );
@@ -3484,10 +3564,8 @@ mod tests {
             cache.insert(
                 key,
                 IdempotentEntry {
-                    inserted_at: std::time::Instant::now(),
                     revision: i as i64,
-                    succeeded: true,
-                    responses: Vec::new(),
+                    ..IdempotentEntry::with_revision(0)
                 },
                 4,
             );
@@ -3544,8 +3622,7 @@ mod tests {
     }
 
     #[test]
-    fn test_idempotency_txn_cache_replays_responses() {
-        let mut cache = IdempotencyCache::new();
+    fn test_idempotency_txn_cache_replays_responses() {        let mut cache = IdempotencyCache::new();
         let key = cache_key(9, b"txn-1");
         let responses = vec![ResponseOp {
             op: Some(coord_proto::txn::response_op::Op::ResponsePut(
@@ -3558,10 +3635,9 @@ mod tests {
         cache.insert(
             key.clone(),
             IdempotentEntry {
-                inserted_at: std::time::Instant::now(),
                 revision: 5,
-                succeeded: true,
                 responses: responses.clone(),
+                ..IdempotentEntry::with_revision(0)
             },
             16,
         );
@@ -3574,5 +3650,71 @@ mod tests {
             1,
             "Txn 命中回放完整 responses（R-SVC-18）"
         );
+    }
+
+    /// F-02（jepsen T1.4）：Put 命中必须回放**首次执行**的 `prev_kv`。
+    /// 修复前命中路径硬编码 `prev_kv: None`，依赖 prev_kv 做 CAS 后置校验 /
+    /// 审计的上层会把 `None` 读成「该 key 此前不存在」——静默的错误结论。
+    #[test]
+    fn test_idempotency_put_replays_prev_kv() {
+        let mut cache = IdempotencyCache::new();
+        let key = cache_key(3, b"put-1");
+        let old = KeyValue {
+            key: b"/k".to_vec(),
+            value: b"OLD".to_vec(),
+            create_revision: 7,
+            mod_revision: 7,
+            version: 1,
+            lease_id: 0,
+        };
+        cache.insert(
+            key.clone(),
+            IdempotentEntry {
+                prev_kv: Some(old.clone()),
+                ..IdempotentEntry::with_revision(9)
+            },
+            16,
+        );
+        let hit = cache
+            .check(&key, std::time::Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(hit.revision, 9);
+        assert_eq!(
+            hit.prev_kv.as_ref().map(|kv| kv.value.clone()),
+            Some(b"OLD".to_vec()),
+            "F-02：命中必须回放首次响应的 prev_kv（而不是 None）"
+        );
+    }
+
+    /// F-01（jepsen T1.4）：Delete 命中必须回放**首次执行**的 `deleted` 与
+    /// `prev_kvs`。范围删尤其重要：重放若重新执行，会把首次执行之后新写入的
+    /// Key 再删一遍（重试放大破坏面）。
+    #[test]
+    fn test_idempotency_delete_replays_deleted_and_prev_kvs() {
+        let mut cache = IdempotencyCache::new();
+        let key = cache_key(4, b"del-1");
+        let kv = KeyValue {
+            key: b"/k".to_vec(),
+            value: b"V".to_vec(),
+            create_revision: 1,
+            mod_revision: 2,
+            version: 1,
+            lease_id: 0,
+        };
+        cache.insert(
+            key.clone(),
+            IdempotentEntry {
+                deleted: 1,
+                prev_kvs: vec![kv.clone()],
+                ..IdempotentEntry::with_revision(11)
+            },
+            16,
+        );
+        let hit = cache
+            .check(&key, std::time::Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(hit.deleted, 1, "F-01：命中回放首次执行的 deleted");
+        assert_eq!(hit.prev_kvs.len(), 1, "F-01：命中回放首次执行的 prev_kvs");
+        assert_eq!(hit.prev_kvs[0].value, b"V".to_vec());
     }
 }

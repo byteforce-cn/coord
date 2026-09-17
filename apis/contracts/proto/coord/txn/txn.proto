@@ -73,7 +73,9 @@ message TxnRequest {
   repeated Compare compare = 1;   // 条件列表（AND 语义）；空 = 无条件执行 success
   repeated RequestOp success = 2; // 条件全部满足时执行
   repeated RequestOp failure = 3; // 任一条件不满足时执行
-  bytes request_id = 4;           // 可选：幂等去重键（语义同 coord.kv.PutRequest）
+  bytes request_id = 4;           // 可选：幂等去重键（语义与作用域同
+                                  // coord.kv.PutRequest.request_id，见该字段注释：
+                                  // 单节点 / 60s / 4096 FIFO / 不复制不持久）
 }
 
 message TxnResponse {
