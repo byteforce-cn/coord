@@ -13,11 +13,26 @@
     * no future value     -- a read must not return a value whose write had
       not even been *invoked* before the read completed (an :info write whose
       response was slow is a legal concurrent write),
-    * no stale value      -- a read must not return a value older than the
-      newest :ok write that completed before the read began.
+    * no stale value      -- no confirmed (:ok) write may be *forced* to sit
+      between the write that produced the read's value and the read itself:
+      a write W'' invoked only after that write completed (every linearization
+      orders W'' after it, since that write's response came first) and wrapped
+      up before the read began (every linearization orders W'' before the
+      read). A read returning a value that a later-committing confirmed write
+      has already replaced is stale.
 
-  The third property is exactly the one that caught coord's stale-read bug: once
-  a write is confirmed (:ok), no later read may observe an older value. The
+  The third property is the one that caught coord's stale-read bug (a lagging
+  node serving a value older than an already-confirmed write). It deliberately
+  does NOT use the stronger, unsound `newest :ok write that completed before
+  the read began` rule: soak writes carry unique values assigned in
+  *invocation* order, but their *commit* order need not follow it -- a client
+  that rotates / re-issues after UNAVAILABLE can re-append a lower-valued write
+  later, so the confirmed sequence is not monotonic in value. A read that
+  begins between those two completions may legally observe the later, lower
+  commit (2026-09-05 72h soak: that flag was a false positive -- the region-3
+  leader's own `raft_wm ... read_served` watermark showed the read was served
+  from its applied state at the index carrying the lower value).
+
   The checker also reports a soak summary (op counts, max committed value,
   final value, verification-phase read availability). The run is only valid
   when (a) no read violates the three properties, (b) the last completed read
@@ -50,7 +65,9 @@
 
   Returns {:values    {value {:time t, :invoke ti, :ok? bool}}
                        ; all writes (ok + info)
-           :confirmed [[t value] ...]}               ; only :ok writes"
+           :confirmed [[t value ti] ...]}            ; only :ok writes, with
+                                                     ; the write's invoke time
+                                                     ; (falls back to t)"
   [history]
   (let [pending (atom {})]  ; process -> stack of write invoke times
     (reduce
@@ -73,34 +90,46 @@
                              :invoke invoke
                              :ok?    ok?})
                   (cond-> ok?
-                    (update :confirmed conj [(:time op) (:value op)])))))
+                    (update :confirmed
+                            conj [(:time op) (:value op) (or invoke (:time op))])))))
 
           :else acc))
       {:values {} :confirmed []}
       history)))
 
 (defn- confirmed-prefix
-  "Given the :confirmed writes (completion-ordered, possibly unsorted),
-  returns {:times long-array of completion times (sorted)
-           :vals  long-array where vals[i] is the value of the write that
-                  completed at times[i] — i.e. the value of the *latest*
-                  write completed as of times[i]}."
+  "Given the :confirmed writes ([completion-time value invoke-time], possibly
+  unsorted), returns
+    {:times      long-array of completion times (sorted)
+     :vals       long-array where vals[i] is the value of the write that
+                 completed at times[i] — i.e. the value of the *latest* write
+                 completed as of times[i]
+     :invoke-max long-array where invoke-max[i] is the greatest write *invoke*
+                 time among writes 0..i (0 when none); feeds the forced-order
+                 staleness check below}."
   [confirmed]
   (let [sorted (sort-by first confirmed)
-        [ts vals]
-        (reduce (fn [[ts vals] [t v]]
+        [ts vals imax]
+        (reduce (fn [[ts vals imax] [t v i]]
                   [(conj ts t)
-                   (conj vals v)])
-                [[] []]
+                   (conj vals v)
+                   (conj imax (max (long (or (peek imax) 0)) (long i)))])
+                [[] [] []]
                 sorted)]
-    {:times (long-array ts)
-     :vals  (long-array vals)}))
+    {:times      (long-array ts)
+     :vals       (long-array vals)
+     :invoke-max (long-array imax)}))
 
 (defn- latest-before
   "Value of the latest :ok write completed at or before time t (0 if none).
 
-  NOTE (P0-4): the staleness floor is the *latest-completed* write's value,
-  NOT the max value among completed writes. coord writes normally commit in
+  NOT the staleness *floor* any more (the value predicate is the forced-order
+  check, see `max-invoke-before`): this is used for the empty-register case (a
+  read that returns nil although a write was already confirmed) and to report
+  the newest value confirmed when the read began.
+
+  NOTE (P0-4): the reported value is the *latest-completed* write's value, NOT
+  the max value among completed writes. coord writes normally commit in
   completion order, but a write whose RPC stalls on a paused/partitioned node
   (the leader the client was pinned to) can complete — and commit — *after*
   later-issued higher-value writes once the node heals and the client rotates
@@ -108,9 +137,7 @@
   legitimately be the last committed value, so reads of it are correct.
   Comparing a read against the max completed value falsely flags such legal
   histories as stale (observed in the 2026-09-04 150s smoke and the
-  2026-08-31 72h soak, both bursts right after a pause heal); comparing
-  against the latest completed value still catches the genuine stale-read
-  class (a lagging node serves values below the latest confirmed write)."
+  2026-08-31 72h soak, both bursts right after a pause heal)."
   [{:keys [times vals]} t]
   (if (zero? (alength times))
     0
@@ -120,10 +147,28 @@
           (if (zero? ins) 0 (aget vals (dec ins))))
         (aget vals i)))))
 
+(defn- max-invoke-before
+  "Greatest write *invoke* time among the confirmed (:ok) writes that completed
+  at or before time t (0 when none).
+
+  This is the forced-order staleness probe: if it exceeds the completion time of
+  the write a read observed, then some confirmed write was invoked only *after*
+  that write had already completed (so every linearization places it after that
+  write) and had completed before the read began (so every linearization places
+  it before the read) — the read cannot legally still return the older value."
+  [{:keys [times invoke-max]} t]
+  (if (zero? (alength times))
+    0
+    (let [i (Arrays/binarySearch times (long t))]
+      (if (neg? i)
+        (let [ins (- -1 i)]       ; insertion point = -i - 1
+          (if (zero? ins) 0 (aget invoke-max (dec ins))))
+        (aget invoke-max i)))))
+
 (defn- check-reads
   "Walks the history, pairing each read completion with its invocation, and
-  verifies the fabricated / future / stale properties above. Returns a vector
-  of failure maps (empty when the history is linearizable)."
+  verifies the fabricated / future / stale properties in the ns docstring.
+  Returns a vector of failure maps (empty when the history is linearizable)."
   [history {:keys [values] :as idx} prefix]
   (let [pending   (atom {})      ; process -> stack of read invoke times
         failures  (atom [])]
@@ -140,10 +185,11 @@
             (when (seq stack)
               (swap! pending update (:process op) pop))
             (when (and (= :ok (:type op)) (some? invoke))
-              (let [v    (:value op)
-                    done (:time op)
-                    m    (latest-before prefix invoke)
-                    w    (get values v)]
+              (let [v      (:value op)
+                    done   (:time op)
+                    m      (latest-before prefix invoke)
+                    forced (max-invoke-before prefix invoke)
+                    w      (get values v)]
                 (cond
                   ;; Initial (empty) register -- nil is only legal while no
                   ;; write has completed.
@@ -168,11 +214,19 @@
                           :write-invoke   (or (:invoke w) (:time w))
                           :write-complete (:time w)})
 
-                  ;; A read returned a value older than a confirmed write that
-                  ;; completed before the read began -- the stale-read bug.
-                  (< v m)
+                  ;; A confirmed write is forced between this read's value and
+                  ;; the read itself (`forced` is the newest write invoke among
+                  ;; the writes that had completed when the read began; if that
+                  ;; exceeds this value's completion, that write was invoked
+                  ;; after this value committed and committed before the read
+                  ;; began). The read observed a value the linearization had
+                  ;; already overwritten -- the stale-read bug. `:expected`
+                  ;; reports the newest value confirmed when the read began.
+                  (> forced (:time w))
                   (swap! failures conj
-                         {:type :stale, :op op, :expected m, :got v}))))))
+                         {:type :stale, :op op, :expected m, :got v
+                          :write-complete      (:time w)
+                          :forced-write-invoke forced}))))))
         nil))
     @failures))
 

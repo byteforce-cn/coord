@@ -1,0 +1,23 @@
+;; expect-invalid-txn-leak —— **只有 txn 面**被违反：`succeeded=false` 的 CAS 的
+;; **成功分支**写值 "new-1" 被后续 txn 内读观察到了（P0：失败分支泄漏）。
+;; 证明 txn 面的判据被路由到了。
+[{:type :ok :f :write :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 1 :time 2 :value "m1"}
+ {:type :ok :f :read :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 3 :time 4 :value "m1"}
+ {:type :ok :f :txn-cas :sub :txn :process 1 :invoke 5 :time 6
+  :value {:key "/jepsen/txn/s42-cas-1" :old "old-1" :val "new-1"}
+  :succeeded false
+  :wrote {}
+  :success-wrote {"/jepsen/txn/s42-cas-1" "new-1"}
+  :failure-wrote {}
+  :setup {:key "/jepsen/txn/s42-cas-1" :value "old-1"}
+  :setup-ok? true}
+ {:type :ok :f :txn-read :sub :txn :process 1 :invoke 7 :time 8
+  :key "/jepsen/txn/s42-cas-1" :value "new-1"}
+ {:type :ok :f :write :sub :scan :process 2 :key "/jepsen/scan/s42-0"
+  :invoke 9 :time 10 :value "s1" :revision 10}
+ {:type :ok :f :scan :sub :scan :process 2 :invoke 11 :time 12
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42."}
+  :count 1
+  :kvs [{:key "/jepsen/scan/s42-0" :value "s1"}]}]

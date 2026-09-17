@@ -1,0 +1,12 @@
+;; expect-invalid-create-absent-failed —— `Compare{VERSION, EQUAL, 0}` 在**全新**
+;; key 上返回 false（succeeded=false）：要么「不存在 ⇒ version = 0」的语义被破坏
+;; （§9-⑨），要么别的东西抢先写了这个 key（失败分支泄漏 / 跨组 key 复用）。
+[{:type :ok, :f :txn-create, :process 0, :invoke 10, :time 20
+  :value {:key "/jepsen/txn/s42-create-9" :val "9"}
+  :succeeded false
+  :wrote {}
+  :success-wrote {"/jepsen/txn/s42-create-9" "9"}
+  :failure-wrote {}
+  :setup-ok? true
+  :post-read {:kv nil}
+  :post-read-ok? true}]

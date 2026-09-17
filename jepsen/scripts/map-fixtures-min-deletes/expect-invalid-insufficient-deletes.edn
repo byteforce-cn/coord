@@ -1,0 +1,12 @@
+;; expect-invalid-insufficient-deletes —— §5.1 的样本门槛负控制：
+;; 只有 1 次 delete 完成 < 门槛 5，历史本身干净，但样本不足 ⇒ 判 invalid
+;; （「不计绿」，避免「跑了 3 次就说 delete 没问题」）。
+;; 这条 fixture 同时证明门槛真的被读到了（用 `:or` 之外的写法会让门槛变 nil
+;; 或静默失效 —— 见 F-09）。
+[{:type :ok, :f :write,  :process 0, :key "/jepsen/map/k0", :invoke 1, :time 2
+  :value "v1"}
+ {:type :ok, :f :delete, :process 0, :key "/jepsen/map/k0", :invoke 3, :time 4
+  :value nil, :deleted 1, :prev-kv-requested? true
+  :prev-kvs [{:key "/jepsen/map/k0", :value "v1"}]}
+ {:type :ok, :f :write,  :process 0, :key "/jepsen/map/k1", :invoke 5, :time 6
+  :value "v2"}]

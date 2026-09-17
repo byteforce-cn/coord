@@ -1,0 +1,31 @@
+;; expect-valid-enough-deletes —— 6 次 delete 完成 ≥ 门槛 5，且历史干净。
+[{:type :ok, :f :write,  :process 0, :key "/jepsen/map/k0", :invoke 1,  :time 2
+  :value "v1"}
+ {:type :ok, :f :delete, :process 0, :key "/jepsen/map/k0", :invoke 3,  :time 4
+  :value nil, :deleted 1, :prev-kv-requested? true
+  :prev-kvs [{:key "/jepsen/map/k0", :value "v1"}]}
+ {:type :ok, :f :write,  :process 0, :key "/jepsen/map/k1", :invoke 5,  :time 6
+  :value "v2"}
+ {:type :ok, :f :delete, :process 0, :key "/jepsen/map/k1", :invoke 7,  :time 8
+  :value nil, :deleted 1, :prev-kv-requested? true
+  :prev-kvs [{:key "/jepsen/map/k1", :value "v2"}]}
+ {:type :ok, :f :write,  :process 0, :key "/jepsen/map/k2", :invoke 9,  :time 10
+  :value "v3"}
+ {:type :ok, :f :delete, :process 0, :key "/jepsen/map/k2", :invoke 11, :time 12
+  :value nil, :deleted 1, :prev-kv-requested? true
+  :prev-kvs [{:key "/jepsen/map/k2", :value "v3"}]}
+ {:type :ok, :f :write,  :process 0, :key "/jepsen/map/k3", :invoke 13, :time 14
+  :value "v4"}
+ {:type :ok, :f :delete, :process 0, :key "/jepsen/map/k3", :invoke 15, :time 16
+  :value nil, :deleted 1, :prev-kv-requested? true
+  :prev-kvs [{:key "/jepsen/map/k3", :value "v4"}]}
+ {:type :ok, :f :write,  :process 0, :key "/jepsen/map/k4", :invoke 17, :time 18
+  :value "v5"}
+ {:type :ok, :f :delete, :process 0, :key "/jepsen/map/k4", :invoke 19, :time 20
+  :value nil, :deleted 1, :prev-kv-requested? true
+  :prev-kvs [{:key "/jepsen/map/k4", :value "v5"}]}
+ {:type :ok, :f :write,  :process 0, :key "/jepsen/map/k5", :invoke 21, :time 22
+  :value "v6"}
+ {:type :ok, :f :delete, :process 0, :key "/jepsen/map/k5", :invoke 23, :time 24
+  :value nil, :deleted 1, :prev-kv-requested? true
+  :prev-kvs [{:key "/jepsen/map/k5", :value "v6"}]}]

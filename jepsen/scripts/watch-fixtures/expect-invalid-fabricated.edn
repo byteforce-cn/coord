@@ -1,0 +1,11 @@
+;; expect-invalid-fabricated —— 事件里的值从来没有被任何写写过（含 `:info` 写）。
+;; watch 事件是「某次写生效」的证据，凭空出现一个值意味着事件流的来源不可信。
+[{:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 1 :time 2
+  :value "w1" :revision 10}
+ {:type :ok :f :watch-session :process 0 :invoke 5 :time 30
+  :key "/jepsen/watch/s42"
+  :value {:key "/jepsen/watch/s42" :start-revision 0}
+  :start-revision 0
+  :end-revision 10
+  :events [{:type :put :revision 10
+            :kvs [{:key "/jepsen/watch/s42" :value "NEVER-WRITTEN"}]}]}]

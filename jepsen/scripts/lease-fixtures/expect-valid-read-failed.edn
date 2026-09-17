@@ -1,0 +1,15 @@
+;; expect-valid-read-failed —— 读失败 ≠ Key 消失。
+;;
+;; 中间那条探针 `:read-ok? false :present? false` 看着像「Key 不存在」，但它是
+;; 一次**读失败**（连接抖动 / 该节点不可用）。如果 checker 把读失败当成「消失」，
+;; 就会在 800ms（ttl 内）判出一条 `:lease-safety-early-absence` —— 一条看起来
+;; 像被测系统违约的**假红**。正确做法是只采信 `:read-ok? true` 的观测。
+[{:type :ok :f :lease-ttl :process 0 :invoke 1 :time 10
+  :lease {:id 2001 :ttl 2} :key "/jepsen/lease/s42/ttl/2"
+  :scenario :ttl :grace-ms 4000
+  :observations [{:phase :after-write :at-ms 20 :read-ok? true :present? true}
+                 ;; 读失败：不得当成「消失」
+                 {:phase :probe :at-ms 800 :read-ok? false :present? false}
+                 ;; 真实消失（2600ms：ttl 之后，且在 ttl+grace 内）
+                 {:phase :first-absent :at-ms 2600 :read-ok? true :present? false}]
+  :absent-ms 2600}]

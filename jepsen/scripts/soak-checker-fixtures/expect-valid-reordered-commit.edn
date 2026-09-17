@@ -1,0 +1,19 @@
+;; REAL ops from the 2026-09-05 72h soak (history index 83516-83525, region-3
+;; key /jepsen/register-003), the run whose single :stale flag was a FALSE
+;; POSITIVE.
+;;
+;; The write of 20727 was invoked first but the write of 20728 committed first
+;; (the 20727 client rotated / re-issued after UNAVAILABLE, so its entry landed
+;; later in the raft log). The read began between the two completions and
+;; returned 20727 -- the value the register actually held (the leader's own
+;; `raft_wm ... read_served` watermark shows it was served from its applied
+;; state at the index carrying 20727). Linearizable: the read can be ordered
+;; after the later, lower-valued commit.
+{:index 0  :time 83963229252958 :type :invoke :f :write :value 20727 :process 918}
+{:index 1  :time 83965240677536 :type :invoke :f :write :value 20728 :process 904}
+{:index 2  :time 83965248258337 :type :ok     :f :write :value 20728 :process 904}
+{:index 3  :time 83967246996710 :type :invoke :f :read  :value nil   :process 985}
+{:index 4  :time 83968312443772 :type :ok     :f :write :value 20727 :process 918}
+{:index 5  :time 83972322405521 :type :ok     :f :read  :value 20727 :process 985 :node "n1"}
+{:index 6  :time 83975273463561 :type :invoke :f :read  :value nil   :process 904}
+{:index 7  :time 83975277148987 :type :ok     :f :read  :value 20727 :process 904 :node "n1"}

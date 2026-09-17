@@ -1,0 +1,44 @@
+;; T0.2 negative control — RTO (G4).
+;;
+;; t=1.1s..2.2s  12 writes complete :ok -> quiet window #1 [1.1s, 3.0s) judged,
+;;               ratio 1.00 -> availability passes
+;; t=3.0s        :pause      — disruption starts
+;; t=4.0s        :pause-stop — quiet window #2 opens: [4.0s, t-end]
+;; t=304.0s..   12 writes complete :ok -> availability passes again
+;;
+;; RTO for the t=4.0s stop = (304.0 - 4.0) = 300s > the :kill/:pause budget of
+;; 120s (jepsen/docs/1.md s5.4-2) -> :valid? false with {:type :rto-exceeded}.
+;; The trailing write *invoke* at t=303s is what makes the disruption
+;; measurable: `gates/rto` only judges a disruption whose stop precedes the
+;; last write invoke (the write phase must still have been live, otherwise
+;; "no :ok write after the stop" is structural, not a failure).
+;; Values are all distinct, so the premise gate passes; the fixture isolates
+;; the RTO gate.
+[;; ns: history.edn `:time` is a monotonic nanosecond clock on the control node
+ {:type :ok,   :f :write, :value 1,  :process :c0,      :time 1100000000}
+ {:type :ok,   :f :write, :value 2,  :process :c1,      :time 1200000000}
+ {:type :ok,   :f :write, :value 3,  :process :c2,      :time 1300000000}
+ {:type :ok,   :f :write, :value 4,  :process :c3,      :time 1400000000}
+ {:type :ok,   :f :write, :value 5,  :process :c4,      :time 1500000000}
+ {:type :ok,   :f :write, :value 6,  :process :c5,      :time 1600000000}
+ {:type :ok,   :f :write, :value 7,  :process :c6,      :time 1700000000}
+ {:type :ok,   :f :write, :value 8,  :process :c7,      :time 1800000000}
+ {:type :ok,   :f :write, :value 9,  :process :c8,      :time 1900000000}
+ {:type :ok,   :f :write, :value 10, :process :c9,      :time 2000000000}
+ {:type :ok,   :f :write, :value 11, :process :c10,     :time 2100000000}
+ {:type :ok,   :f :write, :value 12, :process :c11,     :time 2200000000}
+ {:type :info, :f :pause,                               :process :nemesis, :time 3000000000}
+ {:type :info, :f :pause-stop,                          :process :nemesis, :time 4000000000}
+ {:type :invoke, :f :write, :value 13, :process :c0,    :time 303000000000}
+ {:type :ok,   :f :write, :value 13, :process :c0,      :time 304000000000}
+ {:type :ok,   :f :write, :value 14, :process :c1,      :time 304100000000}
+ {:type :ok,   :f :write, :value 15, :process :c2,      :time 304200000000}
+ {:type :ok,   :f :write, :value 16, :process :c3,      :time 304300000000}
+ {:type :ok,   :f :write, :value 17, :process :c4,      :time 304400000000}
+ {:type :ok,   :f :write, :value 18, :process :c5,      :time 304500000000}
+ {:type :ok,   :f :write, :value 19, :process :c6,      :time 304600000000}
+ {:type :ok,   :f :write, :value 20, :process :c7,      :time 304700000000}
+ {:type :ok,   :f :write, :value 21, :process :c8,      :time 304800000000}
+ {:type :ok,   :f :write, :value 22, :process :c9,      :time 304900000000}
+ {:type :ok,   :f :write, :value 23, :process :c10,     :time 305000000000}
+ {:type :ok,   :f :write, :value 24, :process :c11,     :time 305100000000}]

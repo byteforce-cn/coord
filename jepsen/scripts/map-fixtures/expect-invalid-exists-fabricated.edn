@@ -1,0 +1,5 @@
+;; expect-invalid-exists-fabricated —— `:exists`（Txn Compare{VERSION, EQUAL, 0}）
+;; 报告「key 存在」，但该 key **从来没有**任何非 nil 写被 invoke 过：
+;; 不可能存在（§9-⑨ 的存在性语义被破坏，或写路径凭空造值）。
+[{:type :ok, :f :exists, :process 0, :key "/jepsen/map/k1", :invoke 5, :time 10
+  :exists? true}]

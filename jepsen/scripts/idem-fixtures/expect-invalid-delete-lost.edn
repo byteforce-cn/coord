@@ -1,0 +1,13 @@
+;; expect-invalid-delete-lost —— 删除复活（P0）：k 次 delete 全部返回 :ok，
+;; 但收尾点读仍然读到该 key。
+;; 这不是幂等语义本身的问题，但它与幂等判定共用同一组数据（同一 request 的
+;; 全部响应 + 收尾读），而一旦出现就是数据错误——必须在 `:valid?` 上暴露，
+;; 否则「删除被吞掉」只能靠人工看 history。
+{:type :ok, :f :idem-delete, :process 0, :time 1000
+ :request {:rid "del-9000-1", :key "/jepsen/idem/del/9", :val "9"
+           :replays 2, :expected-version 0}
+ :attempts [{:ok? true, :node "n1", :deleted 1, :revision 100, :prev-kvs []}
+            {:ok? true, :node "n1", :deleted 1, :revision 100, :prev-kvs []}]
+ :final {:ok? true, :node "n1", :kv
+         {:key "/jepsen/idem/del/9", :value "9"
+          :version 1, :create-revision 99, :mod-revision 99}}}

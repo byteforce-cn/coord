@@ -1,0 +1,9 @@
+;; expect-valid-info-first-attempt —— 首次重放是 :info（响应丢失，可能已生效）。
+;; 此时重放再次生效是**合法**历史，checker 不得判 version 超前（否则是假红）。
+{:type :info, :f :idem-put, :process 0, :time 1000
+ :request {:rid "put-2000-1", :key "/jepsen/idem/put/9", :val "9", :replays 2}
+ :attempts [{:ok? false, :kind :info, :error :timeout}
+            {:ok? true, :node "n1", :revision 31, :prev-kv nil}]
+ :final {:ok? true, :node "n1", :kv
+         {:key "/jepsen/idem/put/9", :value "9"
+          :version 2, :create-revision 30, :mod-revision 31}}}

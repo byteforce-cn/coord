@@ -1,0 +1,19 @@
+;; expect-invalid-untagged —— 路由门槛（F-13 类的组合层形态）：历史里有一个
+;; 客户端 op **没有** `:sub` 标记，于是三个面的 checker 都不会看它（各自的
+;; filter 都按 `:sub` 切片）—— 组合结果是绿的，而这条 op 从来没被检查过。
+;; `routing-checker` 必须把它判红。
+[{:type :ok :f :write :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 1 :time 2 :value "m1"}
+ {:type :ok :f :read :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 3 :time 4 :value "m1"}
+ {:type :ok :f :txn-create :sub :txn :process 1 :invoke 5 :time 6
+  :value {:key "/jepsen/txn/s42-create-1" :val "1"}
+  :succeeded true
+  :wrote {"/jepsen/txn/s42-create-1" "1"}
+  :post-read {:kv {:key "/jepsen/txn/s42-create-1" :value "1"}}
+  :post-read-ok? true}
+ {:type :ok :f :write :sub :scan :process 2 :key "/jepsen/scan/s42-0"
+  :invoke 7 :time 8 :value "s1" :revision 10}
+ ;; ↓ 忘了打 :sub —— 谁都不会检查它
+ {:type :ok :f :read :process 3 :invoke 9 :time 10
+  :key "/jepsen/map/s42-0" :value "m1"}]

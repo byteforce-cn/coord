@@ -1,0 +1,33 @@
+;; T0.2 negative control — value-uniqueness premise (G1).
+;;
+;; The soak/staleness judgement treats a write's value as its global sequence
+;; number, so the checker must refuse to conclude anything when that premise is
+;; broken: here two write *invocations* carry value 3. Everything else passes —
+;; the single quiet window [1.0s, 1.111s] has 12 all-:ok write completions
+;; (ratio 1.00, judged), and there is no disruption at all, so the RTO gate is
+;; vacuous. Only the premise gate fires:
+;;   {:type :duplicate-values, :count 1, :sample {3 2}}
+[{:type :invoke, :f :write, :value 1,  :process :c0,  :time 1000000000}
+ {:type :invoke, :f :write, :value 2,  :process :c1,  :time 1001000000}
+ {:type :invoke, :f :write, :value 3,  :process :c2,  :time 1002000000}
+ {:type :invoke, :f :write, :value 3,  :process :c3,  :time 1003000000}
+ {:type :invoke, :f :write, :value 5,  :process :c4,  :time 1004000000}
+ {:type :invoke, :f :write, :value 6,  :process :c5,  :time 1005000000}
+ {:type :invoke, :f :write, :value 7,  :process :c6,  :time 1006000000}
+ {:type :invoke, :f :write, :value 8,  :process :c7,  :time 1007000000}
+ {:type :invoke, :f :write, :value 9,  :process :c8,  :time 1008000000}
+ {:type :invoke, :f :write, :value 10, :process :c9,  :time 1009000000}
+ {:type :invoke, :f :write, :value 11, :process :c10, :time 1010000000}
+ {:type :invoke, :f :write, :value 12, :process :c11, :time 1011000000}
+ {:type :ok,     :f :write, :value 1,  :process :c0,  :time 1100000000}
+ {:type :ok,     :f :write, :value 2,  :process :c1,  :time 1101000000}
+ {:type :ok,     :f :write, :value 3,  :process :c2,  :time 1102000000}
+ {:type :ok,     :f :write, :value 3,  :process :c3,  :time 1103000000}
+ {:type :ok,     :f :write, :value 5,  :process :c4,  :time 1104000000}
+ {:type :ok,     :f :write, :value 6,  :process :c5,  :time 1105000000}
+ {:type :ok,     :f :write, :value 7,  :process :c6,  :time 1106000000}
+ {:type :ok,     :f :write, :value 8,  :process :c7,  :time 1107000000}
+ {:type :ok,     :f :write, :value 9,  :process :c8,  :time 1108000000}
+ {:type :ok,     :f :write, :value 10, :process :c9,  :time 1109000000}
+ {:type :ok,     :f :write, :value 11, :process :c10, :time 1110000000}
+ {:type :ok,     :f :write, :value 12, :process :c11, :time 1111000000}]

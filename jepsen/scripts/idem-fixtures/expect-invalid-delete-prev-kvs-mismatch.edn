@@ -1,0 +1,14 @@
+;; expect-invalid-delete-prev-kvs-mismatch —— F-01 的响应形态：
+;; 首次执行返回被删的旧值，重放返回空列表。同一个 request_id 两次得到不同
+;; 结果，与「返回首次执行的结果」直接矛盾；`prev_kv=true` 的响应不可幂等。
+;; 注意：这里 deleted 两次都是 1（比如范围删里别的 key 补齐了计数），
+;; 所以只有 prev_kvs 断言能抓到——两条断言都必要。
+{:type :ok, :f :idem-delete, :process 0, :time 1000
+ :request {:rid "del-8000-1", :key "/jepsen/idem/del/8", :val "8"
+           :replays 2, :expected-version 0}
+ :attempts [{:ok? true, :node "n1", :deleted 1, :revision 90
+             :prev-kvs [{:key "/jepsen/idem/del/8", :value "8", :version 1
+                         :create-revision 89, :mod-revision 89}]}
+            {:ok? true, :node "n1", :deleted 1, :revision 91
+             :prev-kvs []}]
+ :final {:ok? true, :node "n1", :kv nil}}

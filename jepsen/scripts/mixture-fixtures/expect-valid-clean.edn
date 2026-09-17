@@ -1,0 +1,30 @@
+;; expect-valid-clean —— 三面都干净的最小混合物（map / txn / scan 各 2–3 个 op）。
+;;
+;; 这是「组合 checker 不该误报」的基线：三个面的判据各不相同（map = 寄存器 +
+;; tombstone 存在性；txn = 分支/原子可见；scan = 结构 + 历史 revision），拼在
+;; 一条历史里必须先证明没有互相干扰。
+[{:type :ok :f :write :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 1 :time 2 :value "m1"}
+ {:type :ok :f :read :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 3 :time 4 :value "m1"}
+ ;; 从未写过的 key 上 `exists?=false` = 一次合法的 nil 读
+ {:type :ok :f :exists :sub :map :process 0 :key "/jepsen/map/s42-1"
+  :invoke 5 :time 6 :exists? false}
+ {:type :ok :f :txn-create :sub :txn :process 1 :invoke 7 :time 8
+  :value {:key "/jepsen/txn/s42-create-1" :val "1"}
+  :succeeded true
+  :wrote {"/jepsen/txn/s42-create-1" "1"}
+  :success-wrote {"/jepsen/txn/s42-create-1" "1"}
+  :failure-wrote {}
+  :post-read {:kv {:key "/jepsen/txn/s42-create-1" :value "1"}}
+  :post-read-ok? true
+  :setup-ok? true}
+ {:type :ok :f :write :sub :scan :process 2 :key "/jepsen/scan/s42-0"
+  :invoke 9 :time 10 :value "s1" :revision 10}
+ {:type :ok :f :scan :sub :scan :process 2 :invoke 11 :time 12
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42."}
+  :count 1
+  :kvs [{:key "/jepsen/scan/s42-0" :value "s1"}]}
+ {:type :ok :f :read-at :sub :scan :process 2 :invoke 13 :time 14
+  :value {:key "/jepsen/scan/s42-0" :revision 10}
+  :kvs [{:key "/jepsen/scan/s42-0" :value "s1"}]}]

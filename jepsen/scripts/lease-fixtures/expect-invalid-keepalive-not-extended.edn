@@ -1,0 +1,16 @@
+;; expect-invalid-keepalive-not-extended —— 判据 6：
+;; 续期场景里**一次 ttl>0 的回应都没有**（KeepAlive 流根本没在续期），
+;; 却观察到「续期期内 Key 仍在」。
+;;
+;; 为什么这是缺陷而不是无害：这条 run 的结论是「续期保住了 Key」，而证据链
+;; 恰恰缺失 —— Key 还在可能是别的原因（TTL 没被真的设上 / 过期回收没跑）。
+;; 没有这条判据，一个「租约从未按 TTL 生效」的实现会在这里显示为绿。
+[{:type :ok :f :lease-keepalive :process 0 :invoke 1 :time 10
+  :lease {:id 8001 :ttl 2} :key "/jepsen/lease/s42/ka/8" :node "n1"
+  :scenario :keepalive :grace-ms 4000
+  ;; 三次续期都回 ttl=0（读作「Lease 已不存在」），却没有任何错误
+  :keepalives [{:id 8001 :ttl 0} {:id 8001 :ttl 0} {:id 8001 :ttl 0}]
+  :observations [{:phase :after-write :at-ms 25 :read-ok? true :present? true}
+                 {:phase :during-keepalive :at-ms 4050 :read-ok? true :present? true}
+                 {:phase :first-absent :at-ms 6100 :read-ok? true :present? false}]
+  :absent-ms 6100}]

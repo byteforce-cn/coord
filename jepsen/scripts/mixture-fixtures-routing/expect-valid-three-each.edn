@@ -1,0 +1,35 @@
+;; expect-valid-three-each —— 每个面 3 个完成 op，正好够 `:min-sample 3`
+;; （本目录用 `{:map-mode :index :min-sample 3}` 驱动，见 lab/Makefile）。
+[{:type :ok :f :write :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 1 :time 2 :value "m1"}
+ {:type :ok :f :read :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 3 :time 4 :value "m1"}
+ {:type :ok :f :delete :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 5 :time 6 :deleted 1 :prev-kvs [{:key "/jepsen/map/s42-0" :value "m1"}]
+  :prev-kv-requested? true}
+ {:type :ok :f :write :sub :scan :process 2 :key "/jepsen/scan/s42-0"
+  :invoke 7 :time 8 :value "s1" :revision 10}
+ {:type :ok :f :scan :sub :scan :process 2 :invoke 9 :time 10
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42."}
+  :count 1 :kvs [{:key "/jepsen/scan/s42-0" :value "s1"}]}
+ {:type :ok :f :read-at :sub :scan :process 2 :invoke 11 :time 12
+  :value {:key "/jepsen/scan/s42-0" :revision 10}
+  :kvs [{:key "/jepsen/scan/s42-0" :value "s1"}]}
+ {:type :ok :f :txn-create :sub :txn :process 1 :invoke 13 :time 14
+  :value {:key "/jepsen/txn/s42-create-1" :val "1"}
+  :succeeded true
+  :wrote {"/jepsen/txn/s42-create-1" "1"}
+  :post-read {:kv {:key "/jepsen/txn/s42-create-1" :value "1"}}
+  :post-read-ok? true}
+ {:type :ok :f :txn-write-set :sub :txn :process 1 :invoke 15 :time 16
+  :value {:prefix "/jepsen/txn/s42-set-2/"}
+  :succeeded true
+  :wrote {"/jepsen/txn/s42-set-2/0" "2-a"
+          "/jepsen/txn/s42-set-2/1" "2-b"
+          "/jepsen/txn/s42-set-2/2" "2-c"}
+  :post-read {:kvs [{:key "/jepsen/txn/s42-set-2/0" :value "2-a"}
+                    {:key "/jepsen/txn/s42-set-2/1" :value "2-b"}
+                    {:key "/jepsen/txn/s42-set-2/2" :value "2-c"}]}
+  :post-read-ok? true}
+ {:type :ok :f :txn-read :sub :txn :process 1 :invoke 17 :time 18
+  :key "/jepsen/txn/s42-create-1" :value "1"}]

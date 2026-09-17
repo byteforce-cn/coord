@@ -1,0 +1,12 @@
+;; expect-invalid-write-not-visible —— 判据 2：
+;; `Put{lease_id}` 返回 `:ok` 之后立刻点读看不到该 Key。
+;;
+;; 这条与判据 1 分开：`:after-write` 的观测故意取在 **ttl 之后**（2500ms >
+;; 2000ms + 容差），所以它不触发「提前消失」，只触发「写入未被观察到」。
+;; 两者分开的意义：一个说「写丢了 / 绑定没生效」，另一个说「清得过早」。
+[{:type :ok :f :lease-ttl :process 0 :invoke 1 :time 10
+  :lease {:id 7001 :ttl 2} :key "/jepsen/lease/s42/ttl/7"
+  :scenario :ttl :grace-ms 4000
+  :observations [{:phase :after-write :at-ms 2500 :read-ok? true :present? false}
+                 {:phase :first-absent :at-ms 2600 :read-ok? true :present? false}]
+  :absent-ms 2600}]

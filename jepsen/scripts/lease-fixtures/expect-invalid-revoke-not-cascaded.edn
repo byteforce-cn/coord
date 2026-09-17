@@ -1,0 +1,13 @@
+;; expect-invalid-revoke-not-cascaded —— 判据 4（P0）：
+;; `LeaseRevoke` 之后绑定 Key 没有在 grace 内被**级联删除**。
+;;
+;; 契约（lease.proto 的语义承诺第一条）：Lease 过期或被 Revoke 时，所有绑定该
+;; Lease 的 Key 被级联删除。这里 revoke 之后 3000ms 仍然读得到 Key，且
+;; `:absent-ms` 为 nil ⇒ 级联删除没有发生。
+[{:type :ok :f :lease-revoke :process 0 :invoke 1 :time 10
+  :lease {:id 5001 :ttl 30} :key "/jepsen/lease/s42/rev/5"
+  :scenario :revoke :grace-ms 4000 :revoked? true :revoke-at-ms 60
+  :post-revoke-keepalive {:id 5001 :ttl 0}
+  :observations [{:phase :after-write :at-ms 30 :read-ok? true :present? true}
+                 {:phase :after-revoke :at-ms 3000 :read-ok? true :present? true}]
+  :absent-ms nil}]

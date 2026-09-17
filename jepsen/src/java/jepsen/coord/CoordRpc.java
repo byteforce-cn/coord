@@ -356,6 +356,136 @@ public class CoordRpc {
   }
 
   // ------------------------------------------------------------------
+  // coord/watch/watch.proto
+  // ------------------------------------------------------------------
+
+  private static DescriptorProto watchCreateRequest() {
+    return DescriptorProto.newBuilder().setName("WatchCreateRequest")
+        .addField(bytes("key", 1).build())
+        .addField(bytes("range_end", 2).build())
+        .addField(i64("start_revision", 3).build())
+        .addField(bool("prev_kv", 4).build())
+        .build();
+  }
+
+  private static DescriptorProto watchEvent() {
+    return DescriptorProto.newBuilder().setName("WatchEvent")
+        .addField(enumF("type", 1, ".coord.watch.WatchEvent.EventType").build())
+        .addField(repMsg("kvs", 2, ".coord.kv.KeyValue").build())
+        .addField(msg("prev_kv", 3, ".coord.kv.KeyValue").build())
+        .addField(i64("revision", 4).build())
+        .addEnumType(EnumDescriptorProto.newBuilder().setName("EventType")
+            .addValue(EnumValueDescriptorProto.newBuilder().setName("PUT").setNumber(0))
+            .addValue(EnumValueDescriptorProto.newBuilder().setName("DELETE").setNumber(1))
+            .addValue(EnumValueDescriptorProto.newBuilder()
+                .setName("BUFFER_OVERFLOW").setNumber(2))
+            .addValue(EnumValueDescriptorProto.newBuilder()
+                .setName("HISTORY_UNAVAILABLE").setNumber(3)))
+        .build();
+  }
+
+  private static DescriptorProto watchRequest() {
+    return DescriptorProto.newBuilder().setName("WatchRequest")
+        .addField(oneofMsg("create", 1, ".coord.watch.WatchCreateRequest", 0))
+        .addOneofDecl(oneof("request"))
+        .build();
+  }
+
+  private static DescriptorProto watchResponse() {
+    return DescriptorProto.newBuilder().setName("WatchResponse")
+        .addField(i64("watch_id", 1).build())
+        .addField(repMsg("events", 2, ".coord.watch.WatchEvent").build())
+        .build();
+  }
+
+  private static FileDescriptorProto watchFileProto() {
+    return FileDescriptorProto.newBuilder()
+        .setName("coord/watch/watch.proto")
+        .setPackage("coord.watch")
+        .setSyntax("proto3")
+        .addDependency("coord/kv/kv.proto")
+        .addMessageType(watchCreateRequest())
+        .addMessageType(watchEvent())
+        .addMessageType(watchRequest())
+        .addMessageType(watchResponse())
+        .addService(ServiceDescriptorProto.newBuilder().setName("Watch")
+            .addMethod(MethodDescriptorProto.newBuilder().setName("Watch")
+                .setInputType(".coord.watch.WatchRequest")
+                .setOutputType(".coord.watch.WatchResponse")
+                .setClientStreaming(true)
+                .setServerStreaming(true)))
+        .build();
+  }
+
+  // ------------------------------------------------------------------
+  // coord/lease/lease.proto
+  // ------------------------------------------------------------------
+
+  private static DescriptorProto leaseGrantRequest() {
+    return DescriptorProto.newBuilder().setName("LeaseGrantRequest")
+        .addField(i64("ttl", 1).build())
+        .addField(i64("id", 2).build())
+        .build();
+  }
+
+  private static DescriptorProto leaseGrantResponse() {
+    return DescriptorProto.newBuilder().setName("LeaseGrantResponse")
+        .addField(i64("id", 1).build())
+        .addField(i64("ttl", 2).build())
+        .addField(str("error", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto leaseRevokeRequest() {
+    return DescriptorProto.newBuilder().setName("LeaseRevokeRequest")
+        .addField(i64("id", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto leaseRevokeResponse() {
+    return DescriptorProto.newBuilder().setName("LeaseRevokeResponse").build();
+  }
+
+  private static DescriptorProto leaseKeepAliveRequest() {
+    return DescriptorProto.newBuilder().setName("LeaseKeepAliveRequest")
+        .addField(i64("id", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto leaseKeepAliveResponse() {
+    return DescriptorProto.newBuilder().setName("LeaseKeepAliveResponse")
+        .addField(i64("id", 1).build())
+        .addField(i64("ttl", 2).build())
+        .build();
+  }
+
+  private static FileDescriptorProto leaseFileProto() {
+    return FileDescriptorProto.newBuilder()
+        .setName("coord/lease/lease.proto")
+        .setPackage("coord.lease")
+        .setSyntax("proto3")
+        .addMessageType(leaseGrantRequest())
+        .addMessageType(leaseGrantResponse())
+        .addMessageType(leaseRevokeRequest())
+        .addMessageType(leaseRevokeResponse())
+        .addMessageType(leaseKeepAliveRequest())
+        .addMessageType(leaseKeepAliveResponse())
+        .addService(ServiceDescriptorProto.newBuilder().setName("Lease")
+            .addMethod(MethodDescriptorProto.newBuilder().setName("LeaseGrant")
+                .setInputType(".coord.lease.LeaseGrantRequest")
+                .setOutputType(".coord.lease.LeaseGrantResponse"))
+            .addMethod(MethodDescriptorProto.newBuilder().setName("LeaseRevoke")
+                .setInputType(".coord.lease.LeaseRevokeRequest")
+                .setOutputType(".coord.lease.LeaseRevokeResponse"))
+            .addMethod(MethodDescriptorProto.newBuilder().setName("LeaseKeepAlive")
+                .setInputType(".coord.lease.LeaseKeepAliveRequest")
+                .setOutputType(".coord.lease.LeaseKeepAliveResponse")
+                .setClientStreaming(true)
+                .setServerStreaming(true)))
+        .build();
+  }
+
+  // ------------------------------------------------------------------
   // Build FileDescriptors
   // ------------------------------------------------------------------
 
@@ -371,6 +501,9 @@ public class CoordRpc {
   public static final FileDescriptor TXN_FILE = build(txnFileProto(), new FileDescriptor[]{KV_FILE});
   public static final FileDescriptor MAINT_FILE = build(maintenanceFileProto(), new FileDescriptor[0]);
   public static final FileDescriptor AUTH_FILE = build(authFileProto(), new FileDescriptor[0]);
+  public static final FileDescriptor WATCH_FILE = build(watchFileProto(),
+      new FileDescriptor[]{KV_FILE});
+  public static final FileDescriptor LEASE_FILE = build(leaseFileProto(), new FileDescriptor[0]);
 
   public static final Descriptor KV_KEY_VALUE = KV_FILE.findMessageTypeByName("KeyValue");
   public static final Descriptor KV_PUT_REQUEST = KV_FILE.findMessageTypeByName("PutRequest");
@@ -392,6 +525,25 @@ public class CoordRpc {
   public static final Descriptor AUTH_AUTHENTICATE_REQUEST = AUTH_FILE.findMessageTypeByName("AuthenticateRequest");
   public static final Descriptor AUTH_AUTHENTICATE_RESPONSE = AUTH_FILE.findMessageTypeByName("AuthenticateResponse");
   public static final Descriptor AUTH_REFRESH_TOKEN_REQUEST = AUTH_FILE.findMessageTypeByName("RefreshTokenRequest");
+
+  public static final Descriptor WATCH_CREATE_REQUEST =
+      WATCH_FILE.findMessageTypeByName("WatchCreateRequest");
+  public static final Descriptor WATCH_EVENT = WATCH_FILE.findMessageTypeByName("WatchEvent");
+  public static final Descriptor WATCH_REQUEST = WATCH_FILE.findMessageTypeByName("WatchRequest");
+  public static final Descriptor WATCH_RESPONSE = WATCH_FILE.findMessageTypeByName("WatchResponse");
+
+  public static final Descriptor LEASE_GRANT_REQUEST =
+      LEASE_FILE.findMessageTypeByName("LeaseGrantRequest");
+  public static final Descriptor LEASE_GRANT_RESPONSE =
+      LEASE_FILE.findMessageTypeByName("LeaseGrantResponse");
+  public static final Descriptor LEASE_REVOKE_REQUEST =
+      LEASE_FILE.findMessageTypeByName("LeaseRevokeRequest");
+  public static final Descriptor LEASE_REVOKE_RESPONSE =
+      LEASE_FILE.findMessageTypeByName("LeaseRevokeResponse");
+  public static final Descriptor LEASE_KEEPALIVE_REQUEST =
+      LEASE_FILE.findMessageTypeByName("LeaseKeepAliveRequest");
+  public static final Descriptor LEASE_KEEPALIVE_RESPONSE =
+      LEASE_FILE.findMessageTypeByName("LeaseKeepAliveResponse");
 
   // ------------------------------------------------------------------
   // gRPC method descriptors over DynamicMessage
@@ -445,6 +597,11 @@ public class CoordRpc {
   public static final MethodDescriptor<DynamicMessage, DynamicMessage> REFRESH_TOKEN =
       unary("coord.auth.Auth/RefreshToken", AUTH_REFRESH_TOKEN_REQUEST, AUTH_AUTHENTICATE_RESPONSE);
 
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> LEASE_GRANT =
+      unary("coord.lease.Lease/LeaseGrant", LEASE_GRANT_REQUEST, LEASE_GRANT_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> LEASE_REVOKE =
+      unary("coord.lease.Lease/LeaseRevoke", LEASE_REVOKE_REQUEST, LEASE_REVOKE_RESPONSE);
+
   // ------------------------------------------------------------------
   // Channels / calls
   // ------------------------------------------------------------------
@@ -472,5 +629,258 @@ public class CoordRpc {
   /** Convenience: new empty DynamicMessage for a descriptor. */
   public static DynamicMessage message(Descriptor desc) {
     return DynamicMessage.newBuilder(desc).build();
+  }
+
+  // ------------------------------------------------------------------
+  // Watch (bidi streaming)
+  // ------------------------------------------------------------------
+
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> WATCH =
+      MethodDescriptor.<DynamicMessage, DynamicMessage>newBuilder()
+          .setType(MethodDescriptor.MethodType.BIDI_STREAMING)
+          .setFullMethodName("coord.watch.Watch/Watch")
+          .setRequestMarshaller(new DynMarshaller(WATCH_REQUEST))
+          .setResponseMarshaller(new DynMarshaller(WATCH_RESPONSE))
+          .build();
+
+  /** One message received from a watch stream: either a response or a stream
+   *  termination (error). */
+  public static final class WatchMsg {
+    /** The WatchResponse, or null when this is a termination marker. */
+    public final DynamicMessage response;
+    /** Non-null on termination: the gRPC error message (or "closed"). */
+    public final String error;
+    /** Client-side receive timestamp (System.nanoTime), for latency accounting. */
+    public final long nanoTime;
+
+    WatchMsg(DynamicMessage response, String error, long nanoTime) {
+      this.response = response;
+      this.error = error;
+      this.nanoTime = nanoTime;
+    }
+
+    public boolean isError() { return response == null; }
+    public String toString() {
+      return isError() ? ("WatchMsg(error " + error + ")")
+                       : ("WatchMsg(" + response + ")");
+    }
+  }
+
+  /**
+   * A bidirectional Watch stream driven from Clojure.
+   *
+   * The contract (coord/watch/watch.proto) says a client cancels a watch by
+   * closing the stream, so {@link #close()} cancels the call; that is the
+   * primitive every resume/preemption test needs.
+   *
+   * Responses are read on a daemon thread and pushed onto a bounded queue, so a
+   * caller can (a) poll with a timeout, (b) let the stream run while doing other
+   * work, and (c) observe stream termination as a {@link WatchMsg} marker
+   * instead of an exception on some other thread. If the queue is full the
+   * reader blocks — that is deliberate backpressure, and it is the situation
+   * that makes coord's own server-side buffer overflow (BUFFER_OVERFLOW event)
+   * observable.
+   */
+  public static final class Watcher implements java.io.Closeable {
+    private final ClientCall<DynamicMessage, DynamicMessage> call;
+    private final java.util.concurrent.BlockingQueue<WatchMsg> queue;
+    private volatile boolean closed = false;
+
+    public Watcher(Channel channel, DynamicMessage createRequest, int queueSize) {
+      this.call = channel.newCall(WATCH, CallOptions.DEFAULT);
+      this.queue = new java.util.concurrent.ArrayBlockingQueue<>(queueSize);
+      final Watcher self = this;
+      call.start(new ClientCall.Listener<DynamicMessage>() {
+        @Override
+        public void onMessage(DynamicMessage msg) {
+          put(new WatchMsg(msg, null, System.nanoTime()));
+          // ask for the next one: without this we would receive exactly one
+          // message and the stream would stall.
+          call.request(1);
+        }
+
+        @Override
+        public void onClose(io.grpc.Status status, Metadata trailers) {
+          String err = status.isOk() ? "closed"
+                                     : (status.getCode() + ": " + status.getDescription());
+          put(new WatchMsg(null, err, System.nanoTime()));
+        }
+
+        @Override
+        public void onHeaders(Metadata headers) { }
+
+        private void put(WatchMsg m) {
+          try {
+            // Bounded wait: if the consumer vanished, drop rather than hang the
+            // reader thread forever.
+            if (!queue.offer(m, 30, TimeUnit.SECONDS)) {
+              queue.clear();
+              queue.offer(m);
+            }
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+          }
+        }
+      }, new Metadata());
+
+      // half-close semantics are fine here: we send exactly one create request
+      // and then keep the stream open for responses until close().
+      call.sendMessage(createRequest);
+      call.request(1);
+    }
+
+    /** Blocking poll; returns null on timeout. */
+    public WatchMsg poll(long timeoutMs) throws InterruptedException {
+      return queue.poll(timeoutMs, TimeUnit.MILLISECONDS);
+    }
+
+    /** Non-blocking poll. */
+    public WatchMsg tryPoll() { return queue.poll(); }
+
+    /** Number of messages buffered (never delivered to the caller yet). */
+    public int buffered() { return queue.size(); }
+
+    public boolean isClosed() { return closed; }
+
+    @Override
+    public void close() {
+      if (!closed) {
+        closed = true;
+        try {
+          call.cancel("jepsen: watcher closed", null);
+        } catch (RuntimeException ignore) {
+          // already cancelled / channel gone
+        }
+      }
+    }
+  }
+
+  /** Opens a watch stream. `queueSize` bounds the client-side receive buffer. */
+  public static Watcher watch(Channel channel, DynamicMessage createRequest, int queueSize) {
+    return new Watcher(channel, createRequest, queueSize);
+  }
+
+  // ------------------------------------------------------------------
+  // Lease keep-alive (bidi streaming)
+  // ------------------------------------------------------------------
+
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> LEASE_KEEPALIVE =
+      MethodDescriptor.<DynamicMessage, DynamicMessage>newBuilder()
+          .setType(MethodDescriptor.MethodType.BIDI_STREAMING)
+          .setFullMethodName("coord.lease.Lease/LeaseKeepAlive")
+          .setRequestMarshaller(new DynMarshaller(LEASE_KEEPALIVE_REQUEST))
+          .setResponseMarshaller(new DynMarshaller(LEASE_KEEPALIVE_RESPONSE))
+          .build();
+
+  /** One message received from a keep-alive stream: a response or a
+   *  termination marker (same shape as {@link WatchMsg}). */
+  public static final class KeepAliveMsg {
+    public final DynamicMessage response;
+    public final String error;
+    public final long nanoTime;
+
+    KeepAliveMsg(DynamicMessage response, String error, long nanoTime) {
+      this.response = response;
+      this.error = error;
+      this.nanoTime = nanoTime;
+    }
+
+    public boolean isError() { return response == null; }
+    public String toString() {
+      return isError() ? ("KeepAliveMsg(error " + error + ")")
+                       : ("KeepAliveMsg(" + response + ")");
+    }
+  }
+
+  /**
+   * A bidirectional LeaseKeepAlive stream driven from Clojure.
+   *
+   * Unlike {@link Watcher} (one create request, then receive-only), the
+   * contract's keep-alive stream is a genuine request/response dialogue: the
+   * client sends LeaseKeepAliveRequest on a cadence and the server answers each
+   * one with the remaining TTL (ttl=0 meaning "lease is gone, re-grant").
+   *
+   * Responses are read on a daemon thread into a bounded queue so the caller
+   * can send on its own schedule and poll for answers, while stream
+   * termination (kill / partition / server restart) shows up as an
+   * {@link KeepAliveMsg} error marker instead of an exception on another
+   * thread.
+   */
+  public static final class KeepAliver implements java.io.Closeable {
+    private final ClientCall<DynamicMessage, DynamicMessage> call;
+    private final java.util.concurrent.BlockingQueue<KeepAliveMsg> queue;
+    private volatile boolean closed = false;
+
+    public KeepAliver(Channel channel, int queueSize) {
+      this.call = channel.newCall(LEASE_KEEPALIVE, CallOptions.DEFAULT);
+      this.queue = new java.util.concurrent.ArrayBlockingQueue<>(queueSize);
+      call.start(new ClientCall.Listener<DynamicMessage>() {
+        @Override
+        public void onMessage(DynamicMessage msg) {
+          put(new KeepAliveMsg(msg, null, System.nanoTime()));
+          // ask for the next one, otherwise the stream stalls after one answer
+          call.request(1);
+        }
+
+        @Override
+        public void onClose(io.grpc.Status status, Metadata trailers) {
+          String err = status.isOk() ? "closed"
+                                     : (status.getCode() + ": " + status.getDescription());
+          put(new KeepAliveMsg(null, err, System.nanoTime()));
+        }
+
+        @Override
+        public void onHeaders(Metadata headers) { }
+
+        private void put(KeepAliveMsg m) {
+          try {
+            if (!queue.offer(m, 30, TimeUnit.SECONDS)) {
+              queue.clear();
+              queue.offer(m);
+            }
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+          }
+        }
+      }, new Metadata());
+      call.request(1);
+    }
+
+    /** Sends one keep-alive request for `leaseId`. */
+    public void send(long leaseId) {
+      DynamicMessage req = DynamicMessage.newBuilder(LEASE_KEEPALIVE_REQUEST)
+          .setField(LEASE_KEEPALIVE_REQUEST.findFieldByName("id"), leaseId)
+          .build();
+      call.sendMessage(req);
+    }
+
+    /** Blocking poll; returns null on timeout. */
+    public KeepAliveMsg poll(long timeoutMs) throws InterruptedException {
+      return queue.poll(timeoutMs, TimeUnit.MILLISECONDS);
+    }
+
+    /** Non-blocking poll. */
+    public KeepAliveMsg tryPoll() { return queue.poll(); }
+
+    public int buffered() { return queue.size(); }
+
+    public boolean isClosed() { return closed; }
+
+    @Override
+    public void close() {
+      if (!closed) {
+        closed = true;
+        try {
+          call.cancel("jepsen: keep-aliver closed", null);
+        } catch (RuntimeException ignore) {
+          // already cancelled / channel gone
+        }
+      }
+    }
+  }
+
+  /** Opens a LeaseKeepAlive stream. */
+  public static KeepAliver keepAlive(Channel channel, int queueSize) {
+    return new KeepAliver(channel, queueSize);
   }
 }

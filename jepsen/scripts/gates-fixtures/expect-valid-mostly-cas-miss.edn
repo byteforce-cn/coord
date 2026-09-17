@@ -1,0 +1,30 @@
+;; expect-valid-mostly-cas-miss —— G6 的第二个**假红守门员**：
+;; CAS 类 workload 的量本形态就是「大多数 cas-miss」（比较失败是业务结果，
+;; 不是「路没通」）。实测 `--workload cas-register` 45s run：108 个 cas 里
+;; 95 个 cas-miss、13 个 :ok。
+;; G6 的分母扣除 §5.1 白名单里的合法失败 ⇒ 本 fixture 必须 valid
+;; （若把 cas-miss 计入分母，13/108 = 0.12 已经贴着 0.1 的下界了）。
+[{:type :invoke, :process 1, :f :cas, :value [nil 1], :time 1}
+ {:type :ok, :process 1, :f :cas, :value [nil 1], :time 2}
+ {:type :invoke, :process 1, :f :cas, :value [1 2], :time 3}
+ {:type :fail, :process 1, :f :cas, :value [1 2], :error :cas-miss, :time 4}
+ {:type :invoke, :process 1, :f :cas, :value [1 3], :time 5}
+ {:type :fail, :process 1, :f :cas, :value [1 3], :error :cas-miss, :time 6}
+ {:type :invoke, :process 1, :f :cas, :value [1 4], :time 7}
+ {:type :fail, :process 1, :f :cas, :value [1 4], :error :cas-miss, :time 8}
+ {:type :invoke, :process 1, :f :cas, :value [1 5], :time 9}
+ {:type :fail, :process 1, :f :cas, :value [1 5], :error :cas-miss, :time 10}
+ {:type :invoke, :process 1, :f :cas, :value [1 6], :time 11}
+ {:type :fail, :process 1, :f :cas, :value [1 6], :error :cas-miss, :time 12}
+ {:type :invoke, :process 1, :f :cas, :value [1 7], :time 13}
+ {:type :fail, :process 1, :f :cas, :value [1 7], :error :cas-miss, :time 14}
+ {:type :invoke, :process 1, :f :cas, :value [1 8], :time 15}
+ {:type :fail, :process 1, :f :cas, :value [1 8], :error :cas-miss, :time 16}
+ {:type :invoke, :process 1, :f :cas, :value [1 9], :time 17}
+ {:type :fail, :process 1, :f :cas, :value [1 9], :error :cas-miss, :time 18}
+ {:type :invoke, :process 1, :f :cas, :value [1 10], :time 19}
+ {:type :fail, :process 1, :f :cas, :value [1 10], :error :cas-miss, :time 20}
+ {:type :invoke, :process 1, :f :cas, :value [1 11], :time 21}
+ {:type :fail, :process 1, :f :cas, :value [1 11], :error :cas-miss, :time 22}
+ {:type :invoke, :process 1, :f :cas, :value [1 12], :time 23}
+ {:type :fail, :process 1, :f :cas, :value [1 12], :error :cas-miss, :time 24}]

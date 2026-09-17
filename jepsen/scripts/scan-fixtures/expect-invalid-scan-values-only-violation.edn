@@ -1,0 +1,6 @@
+;; expect-invalid-scan-values-only-violation —— `count_only=true` 却返回了 kvs。
+;; count_only 的语义是「只要计数」（客户端用它做区间计数，不拉数据）。
+[{:type :ok, :f :scan, :process 0, :invoke 10, :time 20
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42." :count-only true}
+  :count 1
+  :kvs [{:key "/jepsen/scan/s42-0" :value "v1"}]}]

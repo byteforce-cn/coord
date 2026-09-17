@@ -1,0 +1,14 @@
+;; expect-invalid-order-violation —— 同一流内事件 revision 必须**严格递增**
+;; （契约：客户端据此去重）。这里 11 → 10 回退，既破坏了单调性，也无法用去重
+;; 规则解释（重复必须是同一个 revision）。
+[{:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 1 :time 2
+  :value "w1" :revision 10}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 3 :time 4
+  :value "w2" :revision 11}
+ {:type :ok :f :watch-session :process 0 :invoke 5 :time 30
+  :key "/jepsen/watch/s42"
+  :value {:key "/jepsen/watch/s42" :start-revision 0}
+  :start-revision 0
+  :end-revision 10
+  :events [{:type :put :revision 11 :kvs [{:key "/jepsen/watch/s42" :value "w2"}]}
+           {:type :put :revision 10 :kvs [{:key "/jepsen/watch/s42" :value "w1"}]}]}]

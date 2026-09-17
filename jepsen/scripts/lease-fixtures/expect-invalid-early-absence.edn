@@ -1,0 +1,12 @@
+;; expect-invalid-early-absence —— 判据 1（安全，P0）：
+;; 绑定 Key 在 Lease **仍然存活**的时候被观察到不存在。
+;;
+;; 这里 ttl=2s ⇒ 存活到 2000ms，容差 500ms ⇒ 1500ms 之前消失就是违约。
+;; 900ms 就没了 ⇒ 要么绑定丢了、要么 Lease 被提前回收、要么级联删除过早。
+[{:type :ok :f :lease-ttl :process 0 :invoke 1 :time 10
+  :lease {:id 3001 :ttl 2} :key "/jepsen/lease/s42/ttl/3"
+  :scenario :ttl :grace-ms 4000
+  :observations [{:phase :after-write :at-ms 20 :read-ok? true :present? true}
+                 {:phase :first-absent :at-ms 900 :read-ok? true :present? false
+                  :absent? true :reads 6 :failed 0}]
+  :absent-ms 900}]

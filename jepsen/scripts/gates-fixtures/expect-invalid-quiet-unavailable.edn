@@ -1,0 +1,30 @@
+;; T0.2 negative control — quiet-window availability (G2).
+;;
+;; t=1.0s  one write completes :ok (falls in quiet window #1)
+;; t=2.0s  :kill      — disruption starts, closing quiet window #1
+;; t=3.0s  :kill-stop — quiet window #2 opens: [3.0s, t-end]
+;; t=3.1s..4.2s  12 writes complete in quiet window #2, only 6 of them :ok
+;;               -> ratio 0.50 < 0.95 with 12 >= :quiet-min-sample
+;;               -> judged -> :valid? false
+;;
+;; The other two gates must pass, so this fixture isolates the availability
+;; gate: all values are distinct (premise OK) and no disruption is judged for
+;; RTO (the fixture has no write *invokes*, so `gates/rto` treats the write
+;; phase as not-known-live and records 1 not-measured rather than a false red).
+;; Quiet window #1 has a single sample and is therefore recorded, not judged.
+[{:type :invoke,  :f :write, :value 1,  :process :c0,      :time 990000000}
+ {:type :ok,      :f :write, :value 1,  :process :c0,      :time 1000000000}
+ {:type :info,    :f :kill,                                :process :nemesis, :time 2000000000}
+ {:type :info,    :f :kill-stop,                           :process :nemesis, :time 3000000000}
+ {:type :ok,      :f :write, :value 2,  :process :c0,      :time 3100000000}
+ {:type :ok,      :f :write, :value 3,  :process :c1,      :time 3200000000}
+ {:type :ok,      :f :write, :value 4,  :process :c2,      :time 3300000000}
+ {:type :ok,      :f :write, :value 5,  :process :c3,      :time 3400000000}
+ {:type :ok,      :f :write, :value 6,  :process :c4,      :time 3500000000}
+ {:type :ok,      :f :write, :value 7,  :process :c5,      :time 3600000000}
+ {:type :info,    :f :write, :value 8,  :process :c6,      :time 3700000000}
+ {:type :info,    :f :write, :value 9,  :process :c7,      :time 3800000000}
+ {:type :info,    :f :write, :value 10, :process :c8,      :time 3900000000}
+ {:type :info,    :f :write, :value 11, :process :c9,      :time 4000000000}
+ {:type :info,    :f :write, :value 12, :process :c10,     :time 4100000000}
+ {:type :info,    :f :write, :value 13, :process :c11,     :time 4200000000}]

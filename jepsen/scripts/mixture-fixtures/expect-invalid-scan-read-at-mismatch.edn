@@ -1,0 +1,18 @@
+;; expect-invalid-scan-read-at-mismatch —— **只有 scan 面**被违反：按 revision 10
+;; 读，却拿回了该 revision 之外的另一个值（历史读错答 / 读到更新的值）。
+[{:type :ok :f :write :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 1 :time 2 :value "m1"}
+ {:type :ok :f :read :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 3 :time 4 :value "m1"}
+ {:type :ok :f :txn-create :sub :txn :process 1 :invoke 5 :time 6
+  :value {:key "/jepsen/txn/s42-create-1" :val "1"}
+  :succeeded true
+  :wrote {"/jepsen/txn/s42-create-1" "1"}
+  :post-read {:kv {:key "/jepsen/txn/s42-create-1" :value "1"}}
+  :post-read-ok? true}
+ {:type :ok :f :write :sub :scan :process 2 :key "/jepsen/scan/s42-0"
+  :invoke 7 :time 8 :value "s1" :revision 10}
+ {:type :ok :f :read-at :sub :scan :process 2 :invoke 9 :time 10
+  :value {:key "/jepsen/scan/s42-0" :revision 10}
+  :read-revision 10
+  :kvs [{:key "/jepsen/scan/s42-0" :value "s2"}]}]

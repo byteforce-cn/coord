@@ -1,0 +1,12 @@
+;; expect-invalid-below-sample —— §5.1 的样本门槛**接线**证明（不足侧）。
+;;
+;; 同样的 checker 选项 `{:min-grants 3 :min-expiries 2}`：这份 fixture 只有 1 个
+;; 授予、1 个到期场景 ⇒ 样本不足 ⇒ **invalid**（`§5.1 样本不足的 cell 视为未执行，
+;; 不计绿也不计红，必须补跑`）。若门槛没接上（例如被 destructuring `:or` 吃掉，
+;; 见 F-09），这份 fixture 会静默判 valid —— 这正是它要固定住的东西。
+[{:type :ok :f :lease-ttl :process 0 :invoke 1 :time 10
+  :lease {:id 9101 :ttl 2} :key "/jepsen/lease/s42/ttl/d"
+  :scenario :ttl :grace-ms 4000
+  :observations [{:phase :after-write :at-ms 20 :read-ok? true :present? true}
+                 {:phase :first-absent :at-ms 2400 :read-ok? true :present? false}]
+  :absent-ms 2400}]

@@ -1,0 +1,35 @@
+;; T0.2 positive control — insufficient sample must NOT be judged (§5.4-③).
+;;
+;; Quiet window #1 [1.0s, 3.0s) holds 6 write completions, only 3 of them :ok
+;; (ratio 0.50) — but 6 < :quiet-min-sample (10 here), so the window is
+;; *recorded* in the summary and excluded from the verdict. Judging it would be
+;; a false red: six ops is not evidence about availability.
+;;
+;; t=3.0s  :kill      — disruption starts
+;; t=4.0s  :kill-stop — quiet window #2 opens: [4.0s, t-end]
+;; t=4.1s..5.2s  12 all-:ok writes -> judged, ratio 1.00 -> passes
+;;
+;; RTO is not judged here (no write *invokes* in the fixture, so the write
+;; phase is not known to be live) — the point of this fixture is the
+;; small-sample rule alone.
+;; Values are distinct, so the fixture must be :valid? true.
+[{:type :ok,   :f :write, :value 1,  :process :c0,      :time 1000000000}
+ {:type :info, :f :write, :value 2,  :process :c1,      :time 1100000000}
+ {:type :ok,   :f :write, :value 3,  :process :c2,      :time 1200000000}
+ {:type :info, :f :write, :value 4,  :process :c3,      :time 1300000000}
+ {:type :ok,   :f :write, :value 5,  :process :c4,      :time 1400000000}
+ {:type :info, :f :write, :value 6,  :process :c5,      :time 1500000000}
+ {:type :info, :f :kill,                                :process :nemesis, :time 3000000000}
+ {:type :info, :f :kill-stop,                           :process :nemesis, :time 4000000000}
+ {:type :ok,   :f :write, :value 7,  :process :c0,      :time 4100000000}
+ {:type :ok,   :f :write, :value 8,  :process :c1,      :time 4200000000}
+ {:type :ok,   :f :write, :value 9,  :process :c2,      :time 4300000000}
+ {:type :ok,   :f :write, :value 10, :process :c3,      :time 4400000000}
+ {:type :ok,   :f :write, :value 11, :process :c4,      :time 4500000000}
+ {:type :ok,   :f :write, :value 12, :process :c5,      :time 4600000000}
+ {:type :ok,   :f :write, :value 13, :process :c6,      :time 4700000000}
+ {:type :ok,   :f :write, :value 14, :process :c7,      :time 4800000000}
+ {:type :ok,   :f :write, :value 15, :process :c8,      :time 4900000000}
+ {:type :ok,   :f :write, :value 16, :process :c9,      :time 5000000000}
+ {:type :ok,   :f :write, :value 17, :process :c10,     :time 5100000000}
+ {:type :ok,   :f :write, :value 18, :process :c11,     :time 5200000000}]

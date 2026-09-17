@@ -1,0 +1,18 @@
+;; expect-valid-missing-anchor —— F-26 的守门员：**活性锚点缺失时 checker 不得崩**。
+;;
+;; 续期场景的活性锚点是「停续期那一刻」（关流之后那次 `:during-keepalive` 点读）。
+;; 如果那次点读失败（`:read-ok? false`），锚点就不存在 —— 第一版 checker 直接
+;; `(long rel-absent)` ⇒ NPE ⇒ jepsen 把整个 checker 判成 `:unknown`（**既不是红
+;; 也不是绿，退出码 2**）。这是比假绿更隐蔽的一类：报告里只有一句 `:valid? :unknown`。
+;;
+;; 正确行为：**不判**该 op 的活性（不能凭猜测判红），但把它计入 summary 的
+;; `:liveness-unjudged`（不判 ≠ 通过，可核对）。
+[{:type :ok :f :lease-keepalive :process 0 :invoke 1 :time 10
+  :lease {:id 2201 :ttl 2} :key "/jepsen/lease/s42/ka/22" :node "n1"
+  :scenario :keepalive :grace-ms 4000
+  :keepalives [{:id 2201 :ttl 2} {:id 2201 :ttl 2}]
+  :observations [{:phase :after-write :at-ms 25 :read-ok? true :present? true}
+                 ;; 停续期那一刻的点读**失败了**（锚点缺失）
+                 {:phase :during-keepalive :at-ms 4050 :read-ok? false :present? false}
+                 {:phase :first-absent :at-ms 6120 :read-ok? true :present? false}]
+  :absent-ms 6120}]

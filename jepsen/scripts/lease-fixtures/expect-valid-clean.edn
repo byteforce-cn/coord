@@ -1,0 +1,37 @@
+;; expect-valid-clean —— T2.2 三种场景**全部符合契约**的基线。
+;;
+;; 判定口径（jepsen.coord.leaseck）：
+;;   * 安全：绑定 Key 在 Lease 存活期内不得消失（容差 tolerance-ms，默认 500）；
+;;   * 活性：停续期/到期后 Key 必须在 ttl+grace 内消失；
+;;   * Revoke：级联删除必须在 grace 内发生，且对已失效 Lease 续期必须回 ttl=0；
+;;   * 时间基准一律是**客户端单调量**（:at-ms = 相对 op 起点的毫秒），
+;;     不跨机比较时钟，所以 TTL 判定不受节点时钟差影响。
+[{:type :ok :f :lease-ttl :process 0 :invoke 1 :time 10
+  :lease {:id 1001 :ttl 2} :key "/jepsen/lease/s42/ttl/1"
+  :scenario :ttl :grace-ms 4000
+  ;; ttl = 2s ⇒ 存活到 2000ms（-500 容差 = 1500ms 起才允许失踪）；
+  ;; 2450ms 才消失 ⇒ 安全通过；且 2450 ≤ ttl+grace = 6000 ⇒ 活性通过
+  :observations [{:phase :after-write :at-ms 30 :read-ok? true :present? true}
+                 {:phase :first-absent :at-ms 2450 :read-ok? true :present? false
+                  :absent? true :reads 16 :failed 0}]
+  :absent-ms 2450}
+
+ ;; 续期场景：续期窗口跨过一个 ttl（4050ms > 2000ms），期内 Key 仍在
+ ;; ⇒ 「还在」可归因于续期；停续期后 2070ms 内消失 ⇒ 活性通过
+ {:type :ok :f :lease-keepalive :process 0 :invoke 3 :time 20
+  :lease {:id 1002 :ttl 2} :key "/jepsen/lease/s42/ka/2" :node "n1"
+  :scenario :keepalive :grace-ms 4000
+  :keepalives [{:id 1002 :ttl 2} {:id 1002 :ttl 2} {:id 1002 :ttl 2}]
+  :observations [{:phase :after-write :at-ms 25 :read-ok? true :present? true}
+                 {:phase :during-keepalive :at-ms 4050 :read-ok? true :present? true}
+                 {:phase :first-absent :at-ms 6120 :read-ok? true :present? false}]
+  :absent-ms 6120}
+
+ ;; Revoke 场景：revoke 后 440ms 就级联删掉了；对已失效 Lease 续期回 ttl=0
+ {:type :ok :f :lease-revoke :process 0 :invoke 5 :time 30
+  :lease {:id 1003 :ttl 30} :key "/jepsen/lease/s42/rev/3"
+  :scenario :revoke :grace-ms 4000 :revoked? true :revoke-at-ms 60
+  :post-revoke-keepalive {:id 1003 :ttl 0}
+  :observations [{:phase :after-write :at-ms 30 :read-ok? true :present? true}
+                 {:phase :after-revoke :at-ms 500 :read-ok? true :present? false}]
+  :absent-ms 500}]

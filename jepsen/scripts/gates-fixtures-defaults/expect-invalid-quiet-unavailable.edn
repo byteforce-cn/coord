@@ -1,0 +1,178 @@
+;; T0.2/F-09 回归 —— quiet-window 可用率，**用生产默认门槛**判定。
+;;
+;; 为什么单独一个目录：`make checkers` 对 scripts/gates-fixtures 传的是
+;; `{:quiet-min-sample 10 :nemesis :kill}`（fixture 规模小，门槛必须跟着调小）。
+;; 于是那套运行**测不出**下面这个缺陷：
+;;
+;;   F-09 —— 门槛参数曾经用 destructuring 的 `:or` 解析。`:or` 只在键**缺失**
+;;   时生效，而 coord.clj 的 checker 组合总是显式传入
+;;   `{:quiet-min-sample (:quiet-min-sample opts) ...}`（未给 CLI 选项时值是
+;;   nil），于是 `:or` 不接管、门槛变成 nil，quiet 可用率门禁静默失效
+;;   （窗口为空时报告里只有 `:min-ratio nil`，`:valid?` 仍是 true）。
+;;
+;; 本 fixture 用**默认** min-sample=100 / min-ratio=0.95 判定：
+;;   t=0.99s  write invoke，t=1.0s 完成 :ok（quiet 窗口 #1，1 个样本 → 不判定）
+;;   t=2.0s   :kill        扰动开始，关闭 quiet 窗口 #1
+;;   t=3.0s   :kill-stop   quiet 窗口 #2 = [3.0s, t-end]
+;;   quiet 窗口 #2 有 150 个 write 完成，135 个 :ok（0.90 < 0.95）
+;;     -> 150 >= 100 判定 -> :valid? false
+;; 若门槛被解析成 nil，`(>= 150 nil)` 直接抛 NPE（历史上也确实如此）。
+;;
+;; 另外两个门禁必须通过，以隔离出可用率门禁：value 全唯一（前提通过）；
+;; 唯一的 write invoke 早于扰动结束，RTO 记为 not-measured 而非假红。
+[
+{:type :invoke,  :f :write, :value 1, :process :c0, :time 990000000}
+{:type :ok,      :f :write, :value 1, :process :c0, :time 1000000000}
+{:type :info,    :f :kill,                          :process :nemesis, :time 2000000000}
+{:type :info,    :f :kill-stop,                     :process :nemesis, :time 3000000000}
+ {:type :ok     :f :write, :value 2    :process :c0   :time 3100000000}
+ {:type :ok     :f :write, :value 3    :process :c1   :time 3110000000}
+ {:type :ok     :f :write, :value 4    :process :c2   :time 3120000000}
+ {:type :ok     :f :write, :value 5    :process :c3   :time 3130000000}
+ {:type :ok     :f :write, :value 6    :process :c4   :time 3140000000}
+ {:type :ok     :f :write, :value 7    :process :c5   :time 3150000000}
+ {:type :ok     :f :write, :value 8    :process :c6   :time 3160000000}
+ {:type :ok     :f :write, :value 9    :process :c7   :time 3170000000}
+ {:type :ok     :f :write, :value 10   :process :c8   :time 3180000000}
+ {:type :ok     :f :write, :value 11   :process :c9   :time 3190000000}
+ {:type :ok     :f :write, :value 12   :process :c10  :time 3200000000}
+ {:type :ok     :f :write, :value 13   :process :c11  :time 3210000000}
+ {:type :ok     :f :write, :value 14   :process :c12  :time 3220000000}
+ {:type :ok     :f :write, :value 15   :process :c13  :time 3230000000}
+ {:type :ok     :f :write, :value 16   :process :c14  :time 3240000000}
+ {:type :ok     :f :write, :value 17   :process :c15  :time 3250000000}
+ {:type :ok     :f :write, :value 18   :process :c16  :time 3260000000}
+ {:type :ok     :f :write, :value 19   :process :c17  :time 3270000000}
+ {:type :ok     :f :write, :value 20   :process :c18  :time 3280000000}
+ {:type :ok     :f :write, :value 21   :process :c19  :time 3290000000}
+ {:type :ok     :f :write, :value 22   :process :c20  :time 3300000000}
+ {:type :ok     :f :write, :value 23   :process :c21  :time 3310000000}
+ {:type :ok     :f :write, :value 24   :process :c22  :time 3320000000}
+ {:type :ok     :f :write, :value 25   :process :c23  :time 3330000000}
+ {:type :ok     :f :write, :value 26   :process :c24  :time 3340000000}
+ {:type :ok     :f :write, :value 27   :process :c25  :time 3350000000}
+ {:type :ok     :f :write, :value 28   :process :c26  :time 3360000000}
+ {:type :ok     :f :write, :value 29   :process :c27  :time 3370000000}
+ {:type :ok     :f :write, :value 30   :process :c28  :time 3380000000}
+ {:type :ok     :f :write, :value 31   :process :c29  :time 3390000000}
+ {:type :ok     :f :write, :value 32   :process :c30  :time 3400000000}
+ {:type :ok     :f :write, :value 33   :process :c31  :time 3410000000}
+ {:type :ok     :f :write, :value 34   :process :c32  :time 3420000000}
+ {:type :ok     :f :write, :value 35   :process :c33  :time 3430000000}
+ {:type :ok     :f :write, :value 36   :process :c34  :time 3440000000}
+ {:type :ok     :f :write, :value 37   :process :c35  :time 3450000000}
+ {:type :ok     :f :write, :value 38   :process :c36  :time 3460000000}
+ {:type :ok     :f :write, :value 39   :process :c37  :time 3470000000}
+ {:type :ok     :f :write, :value 40   :process :c38  :time 3480000000}
+ {:type :ok     :f :write, :value 41   :process :c39  :time 3490000000}
+ {:type :ok     :f :write, :value 42   :process :c40  :time 3500000000}
+ {:type :ok     :f :write, :value 43   :process :c41  :time 3510000000}
+ {:type :ok     :f :write, :value 44   :process :c42  :time 3520000000}
+ {:type :ok     :f :write, :value 45   :process :c43  :time 3530000000}
+ {:type :ok     :f :write, :value 46   :process :c44  :time 3540000000}
+ {:type :ok     :f :write, :value 47   :process :c45  :time 3550000000}
+ {:type :ok     :f :write, :value 48   :process :c46  :time 3560000000}
+ {:type :ok     :f :write, :value 49   :process :c47  :time 3570000000}
+ {:type :ok     :f :write, :value 50   :process :c48  :time 3580000000}
+ {:type :ok     :f :write, :value 51   :process :c49  :time 3590000000}
+ {:type :ok     :f :write, :value 52   :process :c50  :time 3600000000}
+ {:type :ok     :f :write, :value 53   :process :c51  :time 3610000000}
+ {:type :ok     :f :write, :value 54   :process :c52  :time 3620000000}
+ {:type :ok     :f :write, :value 55   :process :c53  :time 3630000000}
+ {:type :ok     :f :write, :value 56   :process :c54  :time 3640000000}
+ {:type :ok     :f :write, :value 57   :process :c55  :time 3650000000}
+ {:type :ok     :f :write, :value 58   :process :c56  :time 3660000000}
+ {:type :ok     :f :write, :value 59   :process :c57  :time 3670000000}
+ {:type :ok     :f :write, :value 60   :process :c58  :time 3680000000}
+ {:type :ok     :f :write, :value 61   :process :c59  :time 3690000000}
+ {:type :ok     :f :write, :value 62   :process :c60  :time 3700000000}
+ {:type :ok     :f :write, :value 63   :process :c61  :time 3710000000}
+ {:type :ok     :f :write, :value 64   :process :c62  :time 3720000000}
+ {:type :ok     :f :write, :value 65   :process :c63  :time 3730000000}
+ {:type :ok     :f :write, :value 66   :process :c64  :time 3740000000}
+ {:type :ok     :f :write, :value 67   :process :c65  :time 3750000000}
+ {:type :ok     :f :write, :value 68   :process :c66  :time 3760000000}
+ {:type :ok     :f :write, :value 69   :process :c67  :time 3770000000}
+ {:type :ok     :f :write, :value 70   :process :c68  :time 3780000000}
+ {:type :ok     :f :write, :value 71   :process :c69  :time 3790000000}
+ {:type :ok     :f :write, :value 72   :process :c70  :time 3800000000}
+ {:type :ok     :f :write, :value 73   :process :c71  :time 3810000000}
+ {:type :ok     :f :write, :value 74   :process :c72  :time 3820000000}
+ {:type :ok     :f :write, :value 75   :process :c73  :time 3830000000}
+ {:type :ok     :f :write, :value 76   :process :c74  :time 3840000000}
+ {:type :ok     :f :write, :value 77   :process :c75  :time 3850000000}
+ {:type :ok     :f :write, :value 78   :process :c76  :time 3860000000}
+ {:type :ok     :f :write, :value 79   :process :c77  :time 3870000000}
+ {:type :ok     :f :write, :value 80   :process :c78  :time 3880000000}
+ {:type :ok     :f :write, :value 81   :process :c79  :time 3890000000}
+ {:type :ok     :f :write, :value 82   :process :c80  :time 3900000000}
+ {:type :ok     :f :write, :value 83   :process :c81  :time 3910000000}
+ {:type :ok     :f :write, :value 84   :process :c82  :time 3920000000}
+ {:type :ok     :f :write, :value 85   :process :c83  :time 3930000000}
+ {:type :ok     :f :write, :value 86   :process :c84  :time 3940000000}
+ {:type :ok     :f :write, :value 87   :process :c85  :time 3950000000}
+ {:type :ok     :f :write, :value 88   :process :c86  :time 3960000000}
+ {:type :ok     :f :write, :value 89   :process :c87  :time 3970000000}
+ {:type :ok     :f :write, :value 90   :process :c88  :time 3980000000}
+ {:type :ok     :f :write, :value 91   :process :c89  :time 3990000000}
+ {:type :ok     :f :write, :value 92   :process :c90  :time 4000000000}
+ {:type :ok     :f :write, :value 93   :process :c91  :time 4010000000}
+ {:type :ok     :f :write, :value 94   :process :c92  :time 4020000000}
+ {:type :ok     :f :write, :value 95   :process :c93  :time 4030000000}
+ {:type :ok     :f :write, :value 96   :process :c94  :time 4040000000}
+ {:type :ok     :f :write, :value 97   :process :c95  :time 4050000000}
+ {:type :ok     :f :write, :value 98   :process :c96  :time 4060000000}
+ {:type :ok     :f :write, :value 99   :process :c97  :time 4070000000}
+ {:type :ok     :f :write, :value 100  :process :c98  :time 4080000000}
+ {:type :ok     :f :write, :value 101  :process :c99  :time 4090000000}
+ {:type :ok     :f :write, :value 102  :process :c100 :time 4100000000}
+ {:type :ok     :f :write, :value 103  :process :c101 :time 4110000000}
+ {:type :ok     :f :write, :value 104  :process :c102 :time 4120000000}
+ {:type :ok     :f :write, :value 105  :process :c103 :time 4130000000}
+ {:type :ok     :f :write, :value 106  :process :c104 :time 4140000000}
+ {:type :ok     :f :write, :value 107  :process :c105 :time 4150000000}
+ {:type :ok     :f :write, :value 108  :process :c106 :time 4160000000}
+ {:type :ok     :f :write, :value 109  :process :c107 :time 4170000000}
+ {:type :ok     :f :write, :value 110  :process :c108 :time 4180000000}
+ {:type :ok     :f :write, :value 111  :process :c109 :time 4190000000}
+ {:type :ok     :f :write, :value 112  :process :c110 :time 4200000000}
+ {:type :ok     :f :write, :value 113  :process :c111 :time 4210000000}
+ {:type :ok     :f :write, :value 114  :process :c112 :time 4220000000}
+ {:type :ok     :f :write, :value 115  :process :c113 :time 4230000000}
+ {:type :ok     :f :write, :value 116  :process :c114 :time 4240000000}
+ {:type :ok     :f :write, :value 117  :process :c115 :time 4250000000}
+ {:type :ok     :f :write, :value 118  :process :c116 :time 4260000000}
+ {:type :ok     :f :write, :value 119  :process :c117 :time 4270000000}
+ {:type :ok     :f :write, :value 120  :process :c118 :time 4280000000}
+ {:type :ok     :f :write, :value 121  :process :c119 :time 4290000000}
+ {:type :ok     :f :write, :value 122  :process :c120 :time 4300000000}
+ {:type :ok     :f :write, :value 123  :process :c121 :time 4310000000}
+ {:type :ok     :f :write, :value 124  :process :c122 :time 4320000000}
+ {:type :ok     :f :write, :value 125  :process :c123 :time 4330000000}
+ {:type :ok     :f :write, :value 126  :process :c124 :time 4340000000}
+ {:type :ok     :f :write, :value 127  :process :c125 :time 4350000000}
+ {:type :ok     :f :write, :value 128  :process :c126 :time 4360000000}
+ {:type :ok     :f :write, :value 129  :process :c127 :time 4370000000}
+ {:type :ok     :f :write, :value 130  :process :c128 :time 4380000000}
+ {:type :ok     :f :write, :value 131  :process :c129 :time 4390000000}
+ {:type :ok     :f :write, :value 132  :process :c130 :time 4400000000}
+ {:type :ok     :f :write, :value 133  :process :c131 :time 4410000000}
+ {:type :ok     :f :write, :value 134  :process :c132 :time 4420000000}
+ {:type :ok     :f :write, :value 135  :process :c133 :time 4430000000}
+ {:type :ok     :f :write, :value 136  :process :c134 :time 4440000000}
+ {:type :info   :f :write, :value 137  :process :c135 :time 4450000000}
+ {:type :info   :f :write, :value 138  :process :c136 :time 4460000000}
+ {:type :info   :f :write, :value 139  :process :c137 :time 4470000000}
+ {:type :info   :f :write, :value 140  :process :c138 :time 4480000000}
+ {:type :info   :f :write, :value 141  :process :c139 :time 4490000000}
+ {:type :info   :f :write, :value 142  :process :c140 :time 4500000000}
+ {:type :info   :f :write, :value 143  :process :c141 :time 4510000000}
+ {:type :info   :f :write, :value 144  :process :c142 :time 4520000000}
+ {:type :info   :f :write, :value 145  :process :c143 :time 4530000000}
+ {:type :info   :f :write, :value 146  :process :c144 :time 4540000000}
+ {:type :info   :f :write, :value 147  :process :c145 :time 4550000000}
+ {:type :info   :f :write, :value 148  :process :c146 :time 4560000000}
+ {:type :info   :f :write, :value 149  :process :c147 :time 4570000000}
+ {:type :info   :f :write, :value 150  :process :c148 :time 4580000000}
+ {:type :info   :f :write, :value 151  :process :c149 :time 4590000000}
+]

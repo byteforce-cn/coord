@@ -1,0 +1,10 @@
+;; expect-invalid-scan-range-violation —— scan 返回了区间外的 key
+;; （`/jepsen/scan/s43-9` 属于**另一个 run** 的 key 空间，不在
+;; `[…/s42-, …/s42.)` 里）。这类「越界返回」在多 Region / split 后尤其危险。
+[{:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-0", :invoke 1, :time 2
+  :value "v1" :revision 10}
+ {:type :ok, :f :scan, :process 0, :invoke 10, :time 20
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42."}
+  :count 2
+  :kvs [{:key "/jepsen/scan/s42-0" :value "v1"}
+        {:key "/jepsen/scan/s43-9" :value "v1"}]}]

@@ -198,6 +198,15 @@
       (pkill-coord! :-9)
       (c/exec :rm :-rf (:data-dir db))
       (c/exec :mkdir :-p (:data-dir db) (:coord-dir db) (:config-dir db))
+      ;; T0.4: 节点侧没有 coord-test（jepsen/ 只传到控制机），把环境清理脚本
+      ;; 传到节点，nemesis 的 :stop 路径依赖它。缺脚本只告警不中断——一次缺
+      ;; helper 不应让整个套件跑不起来，但会在这里留痕方便归因。
+      (try
+        (c/upload "scripts/env-reset.sh" (str (:coord-dir db) "/env-reset.sh"))
+        (c/exec :chmod :+x (str (:coord-dir db) "/env-reset.sh"))
+        (catch Exception e
+          (warn e "T0.4: could not deploy env-reset.sh to" node
+                "— nemesis :stop network cleanup will be a no-op")))
       ;; Upload the binary (idempotent)
       (c/upload (:coord-bin db) (str (:coord-dir db) "/coord"))
       (c/exec :chmod :+x (str (:coord-dir db) "/coord"))

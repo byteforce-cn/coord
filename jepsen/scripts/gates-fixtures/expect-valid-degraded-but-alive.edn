@@ -1,0 +1,24 @@
+;; expect-valid-degraded-but-alive —— G6 的**假红守门员**：`:ok` 率 25%、
+;; `:info` 75%（重扰动下的真实形态），远高于门槛 0.1 ⇒ 必须判 valid。
+;; 没有这条 fixture，G6 很容易被调成「一有 :info 就红」。
+;; 注意：`:process` 为数字，G6 才会判它；quiet/RTO 无 nemesis 史 ⇒ 不判定。
+[{:type :invoke, :process 1, :f :write, :value 1, :time 1}
+ {:type :ok, :process 1, :f :write, :value 1, :time 2}
+ {:type :invoke, :process 1, :f :write, :value 2, :time 3}
+ {:type :info, :process 1, :f :write, :value 2, :time 4, :error :timeout}
+ {:type :invoke, :process 1, :f :write, :value 3, :time 5}
+ {:type :ok, :process 1, :f :write, :value 3, :time 6}
+ {:type :invoke, :process 1, :f :write, :value 4, :time 7}
+ {:type :info, :process 1, :f :write, :value 4, :time 8, :error :timeout}
+ {:type :invoke, :process 1, :f :write, :value 5, :time 9}
+ {:type :ok, :process 1, :f :write, :value 5, :time 10}
+ {:type :invoke, :process 1, :f :write, :value 6, :time 11}
+ {:type :info, :process 1, :f :write, :value 6, :time 12, :error :timeout}
+ {:type :invoke, :process 1, :f :write, :value 7, :time 13}
+ {:type :info, :process 1, :f :write, :value 7, :time 14, :error :timeout}
+ {:type :invoke, :process 1, :f :write, :value 8, :time 15}
+ {:type :info, :process 1, :f :write, :value 8, :time 16, :error :timeout}
+ {:type :invoke, :process 1, :f :write, :value 9, :time 17}
+ {:type :info, :process 1, :f :write, :value 9, :time 18, :error :timeout}
+ {:type :invoke, :process 1, :f :write, :value 10, :time 19}
+ {:type :ok, :process 1, :f :write, :value 10, :time 20}]

@@ -1,0 +1,8 @@
+;; expect-invalid-delete-prev-kv-fabricated —— delete 汇报的 prev_kv 本身是一次
+;; 读（被删时刻的值），必须满足读的判据。这里它汇报了一个从没被写过的值：
+;; 上层拿它做审计/后置校验会得到错误结论。
+[{:type :ok, :f :write,  :process 0, :key "/jepsen/map/k0", :invoke 5,  :time 10
+  :value "v1"}
+ {:type :ok, :f :delete, :process 0, :key "/jepsen/map/k0", :invoke 15, :time 20
+  :value nil, :deleted 1, :prev-kv-requested? true
+  :prev-kvs [{:key "/jepsen/map/k0", :value "v-ghost"}]}]

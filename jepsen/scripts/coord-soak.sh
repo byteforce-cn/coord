@@ -8,17 +8,23 @@
 # Usage:
 #   ./coord-soak.sh start  [--hours N] [--time-limit S] [--rate R] [--workload W]
 #                         [--checker C] [--quiet S] [--disrupt S] [--regions N]
+#                         [--seed S] [--concurrency C] [--mixture-ratio W,W,W]
+#                         [--map-min-deletes N] [--extra "..."]
+#                         [--map-min-deletes N]
 #   ./coord-soak.sh status
+#   ./coord-soak.sh wait   [interval-seconds]
 #   ./coord-soak.sh stop
 #   ./coord-soak.sh tail   [--lines N]
 #   ./coord-soak.sh results
 #   ./coord-soak.sh log    [--lines N]
 #
 # Defaults: hours=72, rate=0.5 ops/s, workload=register, checker=soak,
-# quiet=1800s (30min), disrupt=600s (10min). --time-limit overrides --hours
-# (e.g. --time-limit 120 for a short smoke run). Everything maps to the
-# corresponding coord-test CLI options. --regions N (multi-raft mode, T4.5)
-# splits the keyspace into N regions; use with --workload multi-register.
+# quiet=1800s (30min), disrupt=600s (10min), concurrency=1n. --time-limit
+# overrides --hours (e.g. --time-limit 120 for a short smoke run). Everything
+# maps to the corresponding coord-test CLI options. --regions N (multi-raft
+# mode, T4.5) splits the keyspace into N regions; use with --workload
+# multi-register. --seed (T0.5) makes the jittered schedule replayable;
+# --mixture-ratio / --map-min-deletes apply to --workload mixture (T1.5).
 set -euo pipefail
 
 PROJECT=/root/coord-test
@@ -29,7 +35,12 @@ STORE="$PROJECT/store/coord"
 
 mkdir -p "$SOAK_DIR"
 
-LEIN_BASE=(LEIN_ROOT=true lein run test
+# 离线运行（F-10/F-22）：控制机/容器**没有出网**，plain `lein` 会先去解析
+# SNAPSHOT 依赖、卡在网络上几分钟才继续（`make quick`/`make checkers` 早已按这条
+# 改成默认 `-o`，本脚本此前漏了）。`ONLINE=1` 覆盖（确实需要联网时）。
+LEIN_OFFLINE="${LEIN_OFFLINE:--o}"
+
+LEIN_BASE=(LEIN_ROOT=true lein $LEIN_OFFLINE run test
            --nodes-file /root/nodes
            --username root
            --ssh-private-key /root/.ssh/id_ed25519)
@@ -63,6 +74,12 @@ cmd_check() {
 
 cmd_start() {
   local hours=72 time_limit="" rate=0.5 workload=register checker=soak quiet=1800 disrupt=600 regions=""
+  # T0.5/T1.5：种子（回放）、并发度、mixture 混合比、map 面的 §5.1 delete 样本门槛
+  # T6.1：--extra 是**通用透传**（原样拼进 lein 命令），用于新加的选项（例如
+  # `--extra "--soak-mix map=40,txn=20,scan=5,watch=15,lease=10 --watch-min-events 200 --lease-min-grants 100 --lease-min-expiries 30"`）。
+  # 为什么不一个一个加：每加一个选项就要改三处（usage / 解析 / 命令），漏一处
+  # 就会「传了但没生效」——那正是 T2.2 长跑最怕的假绿（门槛没接上）。
+  local seed="" concurrency=1n mixture_ratio="" map_min_deletes="" extra=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --hours)      hours=$2; shift 2 ;;
@@ -73,6 +90,11 @@ cmd_start() {
       --quiet)      quiet=$2; shift 2 ;;
       --disrupt)    disrupt=$2; shift 2 ;;
       --regions)    regions=$2; shift 2 ;;
+      --seed)       seed=$2; shift 2 ;;
+      --concurrency) concurrency=$2; shift 2 ;;
+      --mixture-ratio) mixture_ratio=$2; shift 2 ;;
+      --map-min-deletes) map_min_deletes=$2; shift 2 ;;
+      --extra)      extra="$2"; shift 2 ;;
       *) echo "unknown option: $1" >&2; usage ;;
     esac
   done
@@ -85,7 +107,8 @@ cmd_start() {
   local time_limit=${time_limit:-$((hours * 3600))}
   echo "== starting coord soak =="
   echo "   time-limit=${time_limit}s (${hours}h) rate=$rate workload=$workload checker=$checker regions=${regions:-(single-Raft)}"
-  echo "   quiet=${quiet}s disrupt=${disrupt}s"
+  echo "   quiet=${quiet}s disrupt=${disrupt}s concurrency=$concurrency seed=${seed:-(random)}"
+  echo "   extra: mixture-ratio=${mixture_ratio:-(default 4,2,2)} map-min-deletes=${map_min_deletes:-(off)} extra=${extra:-(none)}"
   echo "   log: $LOG"
 
   # Detach into its own session/process group so neither SSH nor SIGHUP can
@@ -94,7 +117,7 @@ cmd_start() {
   # with `cd && lein ...` bash cannot exec-replace itself, so a redirect
   # inside the string would leave the wrapper holding the SSH channel open
   # and `vagrant ssh` would hang until lein exits.
-  setsid bash -c "cd '$PROJECT' && ${LEIN_BASE[*]} --workload $workload --nemesis soak --checker $checker --rate $rate --soak-quiet $quiet --soak-disrupt $disrupt ${regions:+--regions $regions} --time-limit $time_limit --concurrency 1n" > "$LOG" 2>&1 < /dev/null &
+  setsid bash -c "cd '$PROJECT' && ${LEIN_BASE[*]} --workload $workload --nemesis soak --checker $checker --rate $rate --soak-quiet $quiet --soak-disrupt $disrupt ${regions:+--regions $regions} ${seed:+--seed $seed} ${mixture_ratio:+--mixture-ratio $mixture_ratio} ${map_min_deletes:+--map-min-deletes $map_min_deletes} $extra --time-limit $time_limit --concurrency $concurrency" > "$LOG" 2>&1 < /dev/null &
   local pid=$!
   echo "$pid" > "$PIDFILE"
   sleep 5
@@ -195,9 +218,22 @@ cmd_log() {
 
 # ---------------------------------------------------------------------------
 
+# wait — block until the running soak finishes (exit 0 once idle). 夜间门禁
+# （make nightly）靠它把「起跑」与「取结果」串起来，而不用在外层主机上猜 pid。
+cmd_wait() {
+  local interval=${1:-300}
+  while is_running; do
+    echo "soak running (pid $(cat "$PIDFILE")) — waiting ${interval}s..."
+    sleep "$interval"
+  done
+  echo "soak finished (no running process)"
+  exit 0
+}
+
 case "${1:-}" in
   start)   shift; cmd_start "$@" ;;
   check)   cmd_check ;;
+  wait)    shift; cmd_wait "$@" ;;
   status)  cmd_status ;;
   stop)    cmd_stop ;;
   tail)    shift; cmd_tail "$@" ;;
