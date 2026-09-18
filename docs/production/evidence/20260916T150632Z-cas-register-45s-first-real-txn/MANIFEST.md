@@ -18,7 +18,7 @@
 | 命令行（jepsen.log 记录） | `lein run test --nodes-file /root/nodes --username root --ssh-private-key /root/.ssh/id_ed25519 --workload cas-register --nemesis none --time-limit 45 --concurrency 2n --seed 42` |
 | 选项 | `--nodes-file --username --ssh-private-key --workload --nemesis --time-limit --concurrency --seed ` |
 | history.edn | history.edn（未压缩） |
-| §5.4 参数确认记录链接 | _(待填：issue/邮件存档链接)_ |
+| §5.4 参数确认记录链接 | https://github.com/byteforce-cn/coord/blob/soak-params-2026-09-18/docs/production/evidence/PARAM-CONFIRMATION.md |
 
 ## 门槛结论
 

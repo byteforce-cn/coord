@@ -72,9 +72,14 @@ bash scripts/collect-evidence.sh jepsen          # 真实 Jepsen（需 lein + �
 | `…-t2.2-lease-60s/` | `--workload lease --nemesis none --time-limit 60 --concurrency 2n`（seed 42） | 绿：`grants 207 / expiries 95 / keepalive 58 / revoke 54`（`keepalive-responses 348`），六类违反 0 |
 | `…-t6.1-soakfull-90s-kill/` | `--workload soakfull --nemesis kill --time-limit 90 --concurrency 2n`（seed 42） | 绿：五面全跑到（map 134 / txn 57 / watch 54 / lease 30 / scan 12），`:unrouted 0`、`:insufficient []` |
 
-> **证据效力提醒**：本目录绝大多数 Jepsen 归档（含上表全部）的 MANIFEST
-> `§5.4 参数确认记录链接` 仍为「待填」⇒ 按 `dev.md` §5.4 属于**内部参考等级，
-> 不得用于引入评审**。确认单与回填脚本：`PARAM-CONFIRMATION.md`、
+> **证据效力（2026-09-18 更新）**：24 份带该字段的 Jepsen 归档已回填 §5.4 参数确认
+> 存档链接（不可移动的 tag permalink → `PARAM-CONFIRMATION.md`），台账
+> `共 26 份归档：待填 0 / 已回填 24 / 无该字段 2`。
+> **但回填 ≠ 满签**：签回单里 **③（quiet 可用率 0.95 / 100 ops）未确认**
+> （按 §5.4 需**引入方团队**签），因此**依赖 ③ 的门禁结论仍属内部参考等级、
+> 不得用于引入评审**；另 2 份 2026-09-12 的旧归档（java-it /
+> round3-workspace-tests）由另一套采集器生成、无该字段。
+> 确认单与回填脚本：`PARAM-CONFIRMATION.md`（逐条结论 / 确认人 / 日期）、
 > `jepsen/scripts/backfill-param-confirmation.sh`（`--check` 可查台账）。
 > 另：这些 run 都发生在提交之前，MANIFEST 的「工作树」字段为 `DIRTY`。
 

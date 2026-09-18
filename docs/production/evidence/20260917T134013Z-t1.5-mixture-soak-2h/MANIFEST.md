@@ -18,7 +18,7 @@
 | 命令行（jepsen.log 记录） | `lein run test --nodes-file /root/nodes --username root --ssh-private-key /root/.ssh/id_ed25519 --workload mixture --nemesis soak --checker soak --rate 2 --soak-quiet 1800 --soak-disrupt 600 --seed 42 --map-min-deletes 200 --time-limit 7200 --concurrency 2n` |
 | 选项 | `--nodes-file --username --ssh-private-key --workload --nemesis --checker --rate --soak-quiet --soak-disrupt --seed --map-min-deletes --time-limit --concurrency ` |
 | history.edn | history.edn.gz — yes (source 7517366 bytes) |
-| §5.4 参数确认记录链接 | _(待填：issue/邮件存档链接)_ |
+| §5.4 参数确认记录链接 | https://github.com/byteforce-cn/coord/blob/soak-params-2026-09-18/docs/production/evidence/PARAM-CONFIRMATION.md |
 
 ## 门槛结论
 
