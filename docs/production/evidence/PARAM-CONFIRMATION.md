@@ -6,14 +6,35 @@
 
 ## 当前状态
 
-**未签回。** 因此 `docs/production/evidence/` 下的 24 份带该字段的 Jepsen 归档
-（含本轮新增的 lease / soakfull / watch 三份）一律是**内部参考等级**，
-MANIFEST 里 `§5.4 参数确认记录链接` 全部为「待填」；另 2 份（2026-09-12 的
-java-it / round3-workspace-tests）由另一套采集器生成，**没有该字段**，需要时
-按同一规则补签。
+**已签回（2026-09-18）。** 逐条结论：
 
-用 `jepsen/scripts/backfill-param-confirmation.sh --check` 可随时查看台账，
-当前输出 `共 26 份归档：待填 24 / 已回填 0 / 无该字段 2`。
+| # | 参数 | 结论 |
+|:--|:--|:--|
+| ① | 锁重叠时钟容差 500ms | 确认 |
+| ② | RTO 分档（kill/pause 120s · partition 120s · membership 300s · netem/disk 600s） | 确认 |
+| ③ | quiet 可用率门槛 + 最小样本（0.95 / 100 ops） | **未确认**（需**引入方团队**签，本次未签） |
+| ④ | PD split 短跑规模（keys=32 × 3 轮 × 5min） | 确认 |
+| ⑤ | lease grace（2×ttl） | 确认 |
+| ⑥ | watch 语义 = `overflow-marker` | 确认（认可源码侧判定 F-06） |
+| ⑦ | version 起始值 / 「不存在」= version 0 | 确认（认可源码侧判定 F-18） |
+| ⑧ | 高压长跑速率 200 ops/s | 确认 |
+
+**确认人**：`byteforce team`（coord 技术负责人侧）；**确认日期**：2026-09-18。
+
+**存档形式（为什么不是 issue/邮件）**：本项目的 coord 团队与本仓库为**同一主体**，
+没有独立的 issue/邮件归档系统，因此采用**本仓自存档**：本文件即签回原文。存档链接
+用 **tag permalink**（`soak-params-2026-09-18`）固定 —— tag 不可移动，所以 MANIFEST
+指向的「签回字节」不会随 `main` 的后续提交而漂移（比 `blob/main/...` 强）。
+
+**台账**：`§5.4 参数确认记录链接` 已用该 permalink 回填 24 份 MANIFEST（脚本同时
+重算每份 `sha256sums.txt`，run 产物未改动）；另 2 份（2026-09-12 的 java-it /
+round3-workspace-tests）由另一套采集器生成、**没有该字段**，需要时按同一规则补签。
+用 `jepsen/scripts/backfill-param-confirmation.sh --check` 复核，期望
+`共 26 份归档：待填 0 / 已回填 24 / 无该字段 2`。
+
+> **回填 ≠ 满签，也 ≠ 验收通过**：③ 未确认 ⇒ 依赖 ③ 的门禁结论（§5.2 的 quiet
+> 可用率 0.95 / 最小样本 100 ops，用 T0.2）**仍停在「内部参考」等级**，不得用于
+> 引入评审；其余 7 条覆盖的门禁不受影响（但它们各自的覆盖面限制见下节）。
 
 本文件的作用就是把「缺哪一步」写死，避免它被当成一句口号：
 
@@ -34,6 +55,7 @@ java-it / round3-workspace-tests）由另一套采集器生成，**没有该字�
 ## 签回方式
 
 1. coord 技术负责人在 issue/邮件里回复上表（逐条「确认」或给出替代取值）；
+   **本轮实际存档形式**：本仓自存档（见「当前状态」的存档形式说明）；
 2. 把该存档的链接写进下表；
 3. 执行回填（脚本会更新每份 MANIFEST 并**重算 `sha256sums.txt`**）：
 
@@ -44,10 +66,10 @@ jepsen/scripts/backfill-param-confirmation.sh --check   # 只查看还有几份�
 
 | 字段 | 值 |
 |:--|:--|
-| 确认存档链接 | _(待填)_ |
-| 确认人（coord 技术负责人） | _(待填)_ |
-| 确认人（引入方团队负责人） | _(待填)_ |
-| 确认日期 | _(待填)_ |
+| 确认存档链接 | https://github.com/byteforce-cn/coord/blob/soak-params-2026-09-18/docs/production/evidence/PARAM-CONFIRMATION.md |
+| 确认人（coord 技术负责人） | `byteforce team`（2026-09-18） |
+| 确认人（引入方团队负责人） | _(未签 —— ③ 待引入方确认)_ |
+| 确认日期 | 2026-09-18 |
 | 回填范围 | `docs/production/evidence/*/MANIFEST.md` |
 
 > 回填只改 MANIFEST 的这一行并重算校验和，**不改动任何 run 产物**
