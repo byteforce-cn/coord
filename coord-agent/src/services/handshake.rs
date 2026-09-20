@@ -131,7 +131,10 @@ mod tests {
             .await
             .expect("negotiate must succeed")
             .into_inner();
-        assert_eq!(resp.supported_versions, vec!["coord-agent-api-v2".to_string()]);
+        assert_eq!(
+            resp.supported_versions,
+            vec!["coord-agent-api-v2".to_string()]
+        );
     }
 
     /// 不支持的版本**也要**返回支持列表（而不是错误）：客户端据此产出可诊断错误。
@@ -152,7 +155,10 @@ mod tests {
                 .any(|v| v == "coord-agent-api-v1"),
             "v1 must not be advertised: the rename is a one-shot switch (D2)"
         );
-        assert_eq!(resp.supported_versions, vec!["coord-agent-api-v2".to_string()]);
+        assert_eq!(
+            resp.supported_versions,
+            vec!["coord-agent-api-v2".to_string()]
+        );
     }
 
     /// 空版本（老客户端 / 探测工具）不得导致失败。
@@ -166,6 +172,9 @@ mod tests {
             .await
             .expect("negotiate must tolerate an empty client version")
             .into_inner();
-        assert_eq!(resp.supported_versions.len(), SUPPORTED_PROTOCOL_VERSIONS.len());
+        assert_eq!(
+            resp.supported_versions.len(),
+            SUPPORTED_PROTOCOL_VERSIONS.len()
+        );
     }
 }

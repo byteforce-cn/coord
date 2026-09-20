@@ -494,9 +494,7 @@ impl MessageQueueService {
         };
         let bytes: Option<Vec<u8>> = table.get(ik)?.map(|v| v.value().to_vec());
         match bytes {
-            Some(b) => Ok(Some(
-                serde_json::from_slice::<IdempotencyEntry>(&b)?.offset,
-            )),
+            Some(b) => Ok(Some(serde_json::from_slice::<IdempotencyEntry>(&b)?.offset)),
             None => Ok(None),
         }
     }
@@ -595,10 +593,7 @@ impl MessageQueueService {
 
         // 幂等索引（与消息同事务 ⇒ 无"消息已写索引未写"窗口）
         if let Some(ik) = idem_key.as_ref() {
-            let entry = IdempotencyEntry {
-                offset,
-                ts_ms: now,
-            };
+            let entry = IdempotencyEntry { offset, ts_ms: now };
             let bytes = serde_json::to_vec(&entry)?;
             let mut table = wtx.open_table(IDEMPOTENCY_TABLE)?;
             table.insert(ik.as_slice(), bytes.as_slice())?;

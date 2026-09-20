@@ -27,8 +27,8 @@
 // - 因此本持久化解决的是「重启丢密钥 / 单次使用跨进程不成立」，**不是**密钥托管。
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -38,7 +38,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-use super::transit_store::{DekRecord, MemoryTransitDekStore, TransitDekStore, now_unix};
+use super::transit_store::{now_unix, DekRecord, MemoryTransitDekStore, TransitDekStore};
 
 // ──── 公共类型 ────
 
@@ -323,12 +323,15 @@ impl TransitService {
                 // 都不存在，用头部的 dek_id 报错（保持原有错误信息）
                 &dek_id
             };
-            let packet = store.get(id_to_try).map(|e| e.packet.clone()).ok_or_else(|| {
-                format!(
-                    "DEK '{}' not found (already used or not created)",
-                    id_to_try
-                )
-            })?;
+            let packet = store
+                .get(id_to_try)
+                .map(|e| e.packet.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "DEK '{}' not found (already used or not created)",
+                        id_to_try
+                    )
+                })?;
             (packet, id_to_try.to_string())
         };
         if dek_packet_data.len() < DEK_PACKET_LEN {
@@ -480,7 +483,8 @@ impl TransitService {
 
     /// 持久化加密：DEK 落 KV，重启后仍可解密
     pub async fn encrypt_persisted(&self, plaintext: &[u8]) -> Result<(Vec<u8>, String), String> {
-        self.encrypt_persisted_inner(plaintext, &HashMap::new()).await
+        self.encrypt_persisted_inner(plaintext, &HashMap::new())
+            .await
     }
 
     /// 持久化加密（带上下文绑定）
@@ -965,10 +969,7 @@ mod tests {
         assert_eq!(header_dek_id(b"too short"), None);
     }
 
-    fn svc_with_store(
-        config: TransitConfig,
-        store: Arc<dyn TransitDekStore>,
-    ) -> TransitService {
+    fn svc_with_store(config: TransitConfig, store: Arc<dyn TransitDekStore>) -> TransitService {
         TransitService::with_store(config, store).expect("create")
     }
 
@@ -1016,7 +1017,10 @@ mod tests {
             "旧 DEK 已从持久化后端删除"
         );
         assert_eq!(
-            after.decrypt_persisted(&ct, &new_id).await.expect("new dek"),
+            after
+                .decrypt_persisted(&ct, &new_id)
+                .await
+                .expect("new dek"),
             b"rotate me"
         );
         assert!(

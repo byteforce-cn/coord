@@ -116,9 +116,9 @@ impl AgentGrpcService {
                 router.add_service(proto::feature_flags_server::FeatureFlagsServer::from_arc(s))
             }
             Self::Pki(s) => router.add_service(proto::pki_server::PkiServer::from_arc(s)),
-            Self::Handshake(s) => router.add_service(
-                proto::handshake_server::HandshakeServer::from_arc(s),
-            ),
+            Self::Handshake(s) => {
+                router.add_service(proto::handshake_server::HandshakeServer::from_arc(s))
+            }
             Self::PluginApi(s) => router.add_service(
                 coord_proto::plugin::plugin_server::PluginServer::from_arc(s),
             ),

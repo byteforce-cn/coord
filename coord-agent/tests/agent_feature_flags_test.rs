@@ -29,7 +29,9 @@ async fn test_feature_flag_basic_toggle() {
     assert!(svc.is_enabled("feature-x").await.expect("检查失败"));
 
     // 关闭开关
-    svc.set_flag("feature-x", false).await.expect("设置开关失败");
+    svc.set_flag("feature-x", false)
+        .await
+        .expect("设置开关失败");
     assert!(!svc.is_enabled("feature-x").await.expect("检查失败"));
 }
 

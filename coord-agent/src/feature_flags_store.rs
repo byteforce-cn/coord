@@ -227,15 +227,15 @@ mod tests {
     use super::*;
 
     fn state(enabled: bool, percentage: Option<u8>) -> FlagState {
-        FlagState { enabled, percentage }
+        FlagState {
+            enabled,
+            percentage,
+        }
     }
 
     #[test]
     fn test_flag_key_layout_and_roundtrip() {
-        assert_eq!(
-            flag_key("beta"),
-            b"/_featureflags/v1/flag/beta".to_vec()
-        );
+        assert_eq!(flag_key("beta"), b"/_featureflags/v1/flag/beta".to_vec());
         assert!(flag_key("beta").starts_with(FEATURE_FLAG_PREFIX));
         assert_eq!(strip_prefix(&flag_key("beta")), "beta");
     }
@@ -290,7 +290,10 @@ mod tests {
 
         let s1: Arc<dyn FeatureFlagStore> = store.clone();
         let s2: Arc<dyn FeatureFlagStore> = store;
-        assert_eq!(s1.get("persisted").await.unwrap(), s2.get("persisted").await.unwrap());
+        assert_eq!(
+            s1.get("persisted").await.unwrap(),
+            s2.get("persisted").await.unwrap()
+        );
         assert!(s2.get("persisted").await.unwrap().is_some());
     }
 }

@@ -620,8 +620,14 @@ impl PluginIdentityManager {
         key_id: &str,
         capability_grants: &[(String, String)],
         label: &str,
-    ) -> Result<(Client, Arc<CachedTokenProvider>, coord_proto::auth::AuthenticateResponse), String>
-    {
+    ) -> Result<
+        (
+            Client,
+            Arc<CachedTokenProvider>,
+            coord_proto::auth::AuthenticateResponse,
+        ),
+        String,
+    > {
         let password = self.stored_secret(key_id);
 
         // 1) 尽力用引导 CCT 开通（幂等；无引导 CCT 时跳过，靠已存账户认证）

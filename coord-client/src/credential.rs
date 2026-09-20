@@ -327,10 +327,8 @@ mod tests {
 
         // 作用域内：转发调用方凭据 → 调用方身份
         let inner = StdArc::clone(&p);
-        let observed = scoped_request_token(Some("caller".into()), async move {
-            inner.current_token()
-        })
-        .await;
+        let observed =
+            scoped_request_token(Some("caller".into()), async move { inner.current_token() }).await;
         assert_eq!(observed.as_deref(), Some("caller"));
 
         // 作用域退出后回到 agent 身份

@@ -155,7 +155,9 @@ impl MemoryTransitDekStore {
 #[async_trait]
 impl TransitDekStore for MemoryTransitDekStore {
     async fn put_dek(&self, dek_id: &str, record: &DekRecord) -> Result<(), DekStoreError> {
-        self.entries.write().insert(dek_id.to_string(), record.clone());
+        self.entries
+            .write()
+            .insert(dek_id.to_string(), record.clone());
         Ok(())
     }
 
@@ -308,7 +310,10 @@ mod tests {
         let store = MemoryTransitDekStore::new();
         assert!(store.get_dek("missing").await.unwrap().is_none());
 
-        store.put_dek("a", &rec(b"packet", now_unix(), 3600)).await.unwrap();
+        store
+            .put_dek("a", &rec(b"packet", now_unix(), 3600))
+            .await
+            .unwrap();
         assert_eq!(store.len(), 1);
         let got = store.get_dek("a").await.unwrap().expect("record");
         assert_eq!(got.dek_packet, b"packet");

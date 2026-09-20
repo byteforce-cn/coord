@@ -264,7 +264,9 @@ fn collect_keyspaces(dir: &std::path::Path, out: &mut std::collections::BTreeSet
         };
         for (idx, _) in text.match_indices("\"/_") {
             let rest = &text[idx + 3..];
-            let Some(slash) = rest.find('/') else { continue };
+            let Some(slash) = rest.find('/') else {
+                continue;
+            };
             let ns = &rest[..slash];
             if !ns.is_empty()
                 && ns.chars().all(|c| c.is_ascii_lowercase() || c == '_')

@@ -631,10 +631,9 @@ mod tests {
     fn streaming_set_matches_the_proto_descriptors() {
         use prost::Message;
 
-        let fds = <prost_types::FileDescriptorSet as Message>::decode(
-            coord_proto::FILE_DESCRIPTOR_SET,
-        )
-        .expect("coord_descriptor.bin 应能反解为 FileDescriptorSet");
+        let fds =
+            <prost_types::FileDescriptorSet as Message>::decode(coord_proto::FILE_DESCRIPTOR_SET)
+                .expect("coord_descriptor.bin 应能反解为 FileDescriptorSet");
 
         let mut streaming = std::collections::BTreeSet::new();
         let mut unary = std::collections::BTreeSet::new();

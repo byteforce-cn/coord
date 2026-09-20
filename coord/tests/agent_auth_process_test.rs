@@ -33,13 +33,13 @@ use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tonic::Request;
 
+use coord_proto::agent::handshake_client::HandshakeClient;
+use coord_proto::agent::HandshakeRequest;
 use coord_proto::auth::auth_client::AuthClient;
 use coord_proto::auth::{
     AuthenticateRequest, RoleAddRequest, RoleGrantCapabilityRequest, UserAddRequest,
     UserGrantRoleRequest,
 };
-use coord_proto::agent::handshake_client::HandshakeClient;
-use coord_proto::agent::HandshakeRequest;
 use coord_proto::kv::kv_client::KvClient;
 use coord_proto::kv::RangeRequest;
 

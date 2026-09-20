@@ -29,8 +29,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn read(path: &Path) -> String {
-    std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
 /// Java 侧 SDK 协议版本常量（从源码解析，而不是在测试里再写一份 —— 再写一份
@@ -114,9 +113,9 @@ fn java_channel_manager_actually_negotiates() {
         "AgentChannelManager never calls Handshake.Negotiate — the Java side would be \
          an empty promise again"
     );
-    let client = read(&repo_root().join(
-        "coord-java-sdk/src/main/java/cn/byteforce/coord/sdk/CoordClient.java",
-    ));
+    let client = read(
+        &repo_root().join("coord-java-sdk/src/main/java/cn/byteforce/coord/sdk/CoordClient.java"),
+    );
     assert!(
         client.contains("connectAndNegotiate"),
         "CoordClient never triggers negotiation; nothing in the production path would \
