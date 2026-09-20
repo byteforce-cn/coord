@@ -692,6 +692,7 @@ dependencies = [
  "ed25519-dalek",
  "hmac",
  "prost",
+ "prost-types",
  "rand 0.8.6",
  "serde",
  "serde_json",

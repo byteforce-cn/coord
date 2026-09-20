@@ -28,3 +28,8 @@ async-trait = "0.1"
 bincode = "1.3"
 
 [dev-dependencies]
+# 仅测试用：把 `coord_proto::FILE_DESCRIPTOR_SET` 反解成 FileDescriptorSet，
+# 以便把 `is_streaming_rpc` 的手写清单与 descriptor 真值**双向**比对
+# （见 grpc_auth.rs 的 `streaming_set_matches_the_proto_descriptors`）。
+# 该 crate 已在 Cargo.lock 的依赖图里（经 tonic-reflection 链），不引入新依赖面。
+prost-types = "0.14.4"

@@ -281,20 +281,35 @@ pub fn needs_scope_extraction(rpc_method: &str) -> bool {
 /// 存在的意义是把"一元/流式"这一隐含前提变成**可断言**的事实：如果哪天有人把
 /// 一个流式方法加回缓存集合，测试 `streaming_rpcs_must_not_be_body_buffered`
 /// 会直接红。
+///
+/// **⚠️ 本清单曾整体失效过（2026-09-19 修）**：名单里写的是
+/// `/coord.registry.Registry/Watch`、`/coord.mq.MQ/Subscribe`、
+/// `/coord.object_storage.ObjectStorage/*` 这类**迁移前/从未存在过**的路径，
+/// 而真实 RPC 全名早已是 `coord.<domain>.v1.*`（迁移前则是 `coord.agent.*`）。
+/// 于是这份"机器守卫"实际上**从不匹配任何真实请求**，却一直显示为绿。
+///
+/// 现在它由 `streaming_set_matches_the_proto_descriptors` 测试**与 descriptor
+/// 逐条对齐**：该测试从 `coord_proto::FILE_DESCRIPTOR_SET` 反解出所有
+/// `stream` 方法，断言本函数与那份集合**完全相等**（双向）。也就是说，
+/// 手写清单仍然保留（鉴权热路径要的是廉价纯函数，不要反射），
+/// 但它的**正确性不再依赖人记得改**。
 pub fn is_streaming_rpc(rpc_method: &str) -> bool {
     matches!(
         rpc_method,
         // 服务端流
         "/coord.watch.Watch/Watch"
-            | "/coord.registry.Registry/Watch"
-            | "/coord.config.ConfigCenter/Watch"
-            | "/coord.leader_election.LeaderElection/Watch"
-            | "/coord.event.Event/Subscribe"
-            | "/coord.mq.MQ/Subscribe"
-            | "/coord.object_storage.ObjectStorage/Put"
-            | "/coord.object_storage.ObjectStorage/Get"
-            // 客户端流
+            | "/coord.registry.v1.Registry/Watch"
+            | "/coord.config.v1.Config/Watch"
+            | "/coord.election.v1.LeaderElection/Watch"
+            | "/coord.event.v1.Event/Subscribe"
+            | "/coord.mq.v1.MQ/Subscribe"
+            | "/coord.storage.Storage/Put"
+            | "/coord.storage.Storage/Get"
+            | "/coord.maintenance.Maintenance/Snapshot"
+            | "/coord.agent.Replica/Reconcile"
+            // 双向流
             | "/coord.lease.Lease/LeaseKeepAlive"
+            | "/coord.raft.Raft/InstallSnapshotStreaming"
     )
 }
 
@@ -579,8 +594,8 @@ mod tests {
         for rpc in [
             "/coord.watch.Watch/Watch",
             "/coord.lease.Lease/LeaseKeepAlive",
-            "/coord.mq.MQ/Subscribe",
-            "/coord.event.Event/Subscribe",
+            "/coord.mq.v1.MQ/Subscribe",
+            "/coord.event.v1.Event/Subscribe",
         ] {
             assert!(is_streaming_rpc(rpc), "{rpc} 应被识别为流式");
             assert!(
@@ -598,6 +613,81 @@ mod tests {
             assert!(needs_scope_extraction(rpc), "{rpc} 应要求 scope 提取");
             assert!(!is_streaming_rpc(rpc), "{rpc} 是一元 RPC");
         }
+    }
+
+    /// [`is_streaming_rpc`] 的**全量**判据：与 proto descriptor 逐条相等（双向）。
+    ///
+    /// 为什么必须有这条：该函数原先的名单里写着
+    /// `/coord.registry.Registry/Watch`、`/coord.mq.MQ/Subscribe`、
+    /// `/coord.object_storage.ObjectStorage/Put` 这类**从未存在过/已迁移掉**的路径，
+    /// 于是它**从不匹配任何真实请求**，却一直显示为绿 —— 一份"机器守卫"名不副实。
+    /// 只有从 descriptor 反解出真实流式集合并**双向**比对，才能让这份清单
+    /// 不再依赖"人记得同步改"。
+    ///
+    /// 判据：
+    ///   - 每个 `stream` 方法的 `/pkg.Service/Method` 都必须为 true（不缺）；
+    ///   - 每个一元方法的路径都必须为 false（不误报）。
+    #[test]
+    fn streaming_set_matches_the_proto_descriptors() {
+        use prost::Message;
+
+        let fds = <prost_types::FileDescriptorSet as Message>::decode(
+            coord_proto::FILE_DESCRIPTOR_SET,
+        )
+        .expect("coord_descriptor.bin 应能反解为 FileDescriptorSet");
+
+        let mut streaming = std::collections::BTreeSet::new();
+        let mut unary = std::collections::BTreeSet::new();
+        for file in &fds.file {
+            let Some(pkg) = file.package.as_deref() else {
+                continue;
+            };
+            for svc in &file.service {
+                let Some(svc_name) = svc.name.as_deref() else {
+                    continue;
+                };
+                for m in &svc.method {
+                    let Some(m_name) = m.name.as_deref() else {
+                        continue;
+                    };
+                    let path = format!("/{pkg}.{svc_name}/{m_name}");
+                    // prost-types 里这两个是 `Option<bool>`（proto3 省略即未设置）
+                    if m.client_streaming.unwrap_or(false) || m.server_streaming.unwrap_or(false) {
+                        streaming.insert(path);
+                    } else {
+                        unary.insert(path);
+                    }
+                }
+            }
+        }
+
+        assert!(
+            streaming.len() > 5,
+            "descriptor 里流式方法太少（{}），判据本身可能失效",
+            streaming.len()
+        );
+
+        let missing: Vec<&String> = streaming
+            .iter()
+            .filter(|p| !is_streaming_rpc(p))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "以下流式 RPC 未被 is_streaming_rpc 识别（鉴权层会去缓存其 body ⇒ 请求永久挂起）：{missing:?}"
+        );
+
+        let overclaimed: Vec<&String> = unary
+            .iter()
+            .filter(|p| is_streaming_rpc(p))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect();
+        assert!(
+            overclaimed.is_empty(),
+            "以下一元 RPC 被误判为流式（会跳过 body 缓存与 scope 判定）：{overclaimed:?}"
+        );
     }
 
     #[test]
