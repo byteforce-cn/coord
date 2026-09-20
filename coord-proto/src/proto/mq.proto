@@ -27,11 +27,17 @@ service MQ {
   // 发布消息。
   //
   // 语义承诺：
-  //   - 返回的 offset 是该 (topic, partition) 上本条消息的位置；
-  //   - `idempotency_key` 非空时按 (topic, partition, key) 去重：
-  //     同一 key 重复发布**不产生第二条消息**，且返回**首次**的 offset；
-  //     key 为空/未设置 ⇒ 不做去重（每次发布都是新消息）。
-  //     幂等索引与消息在**同一个写事务**内落盘 ⇒ 重启后去重依然成立。
+  //
+  // ① 返回的 offset 是该 (topic, partition) 上本条消息的位置；
+  // ② `idempotency_key` 非空时按 (topic, partition, key) 去重：同一 key 重复发布
+  //    **不产生第二条消息**，且返回**首次**的 offset；key 为空/未设置 ⇒ 不做去重
+  //    （每次发布都是新消息）。幂等索引与消息在**同一个写事务**内落盘 ⇒ 重启后
+  //    去重依然成立。
+  //
+  // 注：这里刻意用 ①② 而不用 markdown 列表标记（`- `/`* `/`1.`）。proto 注释会被
+  // prost **原样**写进生成代码的 doc comment，而 rustdoc 对“列表项续行缩进不足”
+  // 会报 `doc list item without indentation`；本仓 CI 以 `-D warnings` 跑 clippy，
+  // 于是契约里一个无害的排版选择会让整个 lint 卡口变红。
   //
   // 边界（显式声明，不承诺的部分不写在这里就不算承诺）：本 RPC 只承诺
   // "消息已持久化到该 agent 的本地日志"；跨 agent 复制由 ISR 通道负责，

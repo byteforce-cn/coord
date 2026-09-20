@@ -50,8 +50,18 @@ message CloudEventMessage {
   string time = 8;             // 服务端生成时间（RFC3339）
 }
 
-// 取消订阅。subscription_id 当前由 event_type 派生；迁移时须由
-// Subscribe 显式下发（见 STATUS.md 整改项）。
+// 取消订阅。
+//
+// ⚠️ 边界声明（WHITEPAPER §9.1.1 规则 5/6）：本 RPC **不携带状态**。
+//   - 订阅的生存期就是那条 gRPC 流本身：服务端侧没有按 subscription_id 索引的
+//     注册表，因此本调用**被接受并返回成功，但不会停止任何投递**；
+//   - **真正取消订阅的方式是关闭 Subscribe 流**（SDK 的
+//     EventSubscription.close() 就是做这个）；
+//   - subscription_id 当前**不是服务端分配**（Subscribe 是流，不回传 id）；
+//     由 event_type 派生。显式下发 subscription_id 是待整改项（见 STATUS.md）。
+//
+// 保留本 RPC 而不是删除：契约里对外承诺过它，删除会让已按契约生成的客户端
+// 直接编译不过；声明边界则让消费方看见它到底做了什么（与 Cache/MQ 同口径）。
 message EventUnsubscribeRequest {
   string subscription_id = 1;
 }

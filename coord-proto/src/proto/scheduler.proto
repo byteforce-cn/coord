@@ -35,6 +35,15 @@ message SchedulerRegisterJobResponse {
   string job_id = 1;
 }
 
+// 尝试认领任务。认领是**跨节点原子 CAS**：任何时刻至多一个调用方拿到某个任务。
+//
+// 三种“拿不到”的情形（未注册 / 已被他人持有 / 尚未到期）**统一**用
+// `found = false` 表达（而不是错误码）—— 区分它们会把正常竞态误报成故障。
+//
+// 语义承诺：
+//   - `found = true` ⇒ `job_id` 即**认领句柄**，也是 Heartbeat / CompleteJob 的凭据；
+//   - `payload` 回传**注册时携带的 payload 原字节**（服务端不再丢弃它）；
+//   - 认领带租约：既不续期也不完成 ⇒ 租约到期后任务可被重新认领（至少一次）。
 message SchedulerClaimJobRequest {
   string name = 1;
 }
@@ -45,12 +54,24 @@ message SchedulerClaimJobResponse {
   bool found = 3;
 }
 
+// 续期认领租约。
+//
+// 边界声明：wire 无 worker 身份字段 ⇒ `job_id` 本身就是凭据。
+// **句柄不再算数时本 RPC 返回 FAILED_PRECONDITION**（未注册 / 无认领 / 已释放或
+// 已过期），而不是回一个空的 OK —— 后者会让调用方以为自己仍持有任务。
 message SchedulerHeartbeatRequest {
   string job_id = 1;
 }
 
 message SchedulerHeartbeatResponse {}
 
+// 标记任务完成，释放认领。`job_id` 即凭据（同 Heartbeat）。
+//
+// 边界声明（WHITEPAPER §9.1.1）：
+//   - 无有效认领且任务尚未 Completed ⇒ `FAILED_PRECONDITION`；
+//   - 已 Completed 的任务**幂等**：重复完成仍返回成功；
+//   - `result` **被接受但不留档** —— 契约里没有“读取任务结果”的 RPC，
+//     写了也没有任何面能读回来。不要依赖它传递业务结果。
 message SchedulerCompleteJobRequest {
   string job_id = 1;
   bytes result = 2;

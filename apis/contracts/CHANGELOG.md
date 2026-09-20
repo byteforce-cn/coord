@@ -44,6 +44,26 @@
   `KvWorkflowStore` + 补偿语义，改为验收项）。修订稿见
   `docs/production/agent-ga-remediation-baseline.md`。
 
+**边界声明（同上批，2026-09-20 补齐；`WHITEPAPER.md` §10 规则 4/5/6 落点）**
+
+- `coord.event.v1` 的 `Unsubscribe`：实测服务端**忽略请求、恒回成功** —— 订阅的生存期
+  就是那条 gRPC 流，服务端没有按 `subscription_id` 索引的注册表。**保留该 RPC 不删**
+  （删除会让按契约生成的客户端编译不过），改为在 proto 里显式声明「不携带状态」，
+  并指明真正的取消方式是关闭 `Subscribe` 流。`subscription_id` 当前亦非服务端分配。
+- `coord.scheduler.v1` 的 `ClaimJob` / `Heartbeat` / `CompleteJob`：`job_id` 即**认领
+  句柄与凭据**；`payload` 回传注册时携带的**原字节**（二进制安全）；句柄失效时
+  `Heartbeat` / `CompleteJob` 返回 `FAILED_PRECONDITION`（不再是空 OK）；已 `Completed`
+  的任务重复完成仍**幂等**；`result` **被接受但不留档**（契约里没有读取结果的 RPC）。
+- 以上均为**注释/语义声明级**变更：`buf breaking` 与 descriptor 级 wire 比对全绿
+  （`check-wire-descriptor.sh` exit 0），两份 proto 副本逐字相同。
+
+**SDK 面（同批补齐，2026-09-20）**
+
+- `coord-java-sdk` 新增 `event` 与 `scheduler` 两个客户端面（`EventClient` /
+  `SchedulerClient` + `CoordClient.events()` / `.scheduler()`）。此前这两个 **COMMITTED**
+  包在 SDK 里连接口都不存在 —— 属「契约已承诺、客户端面缺失」，由新增的
+  `check-sdk-sync.sh` **反向覆盖**卡口抓出（现 `17/17` GA 契约包均有 SDK impl）。
+
 **不迁移（保持内部，不建对外契约）**
 
 `coord.agent.Handshake` / `coord.agent.Health` / `coord.agent.Replica` —— 前者为协议协商、
