@@ -220,7 +220,8 @@ sed -n '160,182p' coord-agent/src/service.rs
 | ~~**B-13 / B-14**~~ | ✅ **2026-09-20 已闭合**（`WHITEPAPER` §9.1.1 + §10 规则 4/5/6，走 §11 流程） |
 | ~~E10（Workflow 补偿端到端验收）~~ | ✅ **已闭环，并查出 B-15 / B-16 两个新 P0**（均已修） |
 | ~~E11（Cache 分区故障转移定论）~~ | ✅ 已定论（B-08：判定为设计边界并写入契约） |
-| **jepsen lab 侧复核**（B-04 修好后的 V8 复跑 / V11 故障注入） | 未执行（需 lab：`make test WORKLOAD=mq NEMESIS=none`）—— 测试侧缺陷已修且卡口已全量化，但"改后转绿"仍需一次真实 lab 跑 |
+| ~~**jepsen lab 侧复核 —— V8 复跑**~~（B-04 修好后的 MQ `poll + ack`） | ✅ **2026-09-20 已执行且绿**：`Everything looks good!` / `overall-valid: true`；`publishes 108 / polls 82 / delivered 105 / acked 105`、**`:poll-ack-failures 0`**、`:violations-by-class {}` ⇒ V8 判据（`Ack` 成功率 > 0 且**无丢失**）成立。证据：`docs/production/evidence/20260920T133256Z-m5b-mq-poll-ack-single-client/` |
+| **jepsen lab 侧复核 —— V11 故障注入** | 未执行（需在 lab 里真注入故障：`make test WORKLOAD=mq NEMESIS=<非 none>`）。**V8 复跑已完成**（上一行），V11 仍待一跑 |
 | 72h 浸泡、M3/M4 验收、代码冻结与 `v0.2.0` tag | 未执行 |
 | **未决项裁定** | U1 / U3 / U4 / U5 / U6 / U8 / U9（均非代码阻断） |
 
@@ -238,10 +239,19 @@ sed -n '160,182p' coord-agent/src/service.rs
 > ② **lab 侧复核**（B-04 修好后的 V8 复跑、V11 故障注入、E10 端到端验收）——
 >   这些是"把结论再证一次的代价"，不是"还不知道能不能成立"。
 >
-> **诚实提醒（不可省略）**：`Ack` 根因在测试侧这一结论，目前由"字段号 + **wire type**
-> 的静态比对 + 负向对照"支撑（见上表 B-04 行）。**一次真实 lab 复跑仍然是它的最终证据**：
-> 改后 `:poll-ack-failures` 应为 0。在那一跑出来之前，本项只能记作
-> **"分诊完成、待 lab 确认"** —— 不允许写成"已证实修复"。
+> **诚实提醒（不可省略）**：`Ack` 根因在测试侧这一结论，先由"字段号 + **wire type**
+> 的静态比对 + 负向对照"支撑（见上表 B-04 行），**后由 2026-09-20 的一次真实 lab 复跑
+> 收口**：`AGENTS=1 CONCURRENCY=1` 单客户端跑 ⇒ `:poll-ack-failures **0**`、
+> `delivered 105 = acked 105`、`:violations-by-class {}`，`Everything looks good!`
+> （证据 `docs/production/evidence/20260920T133256Z-m5b-mq-poll-ack-single-client/`）。
+> ⇒ 本项由**"分诊完成、待 lab 确认"**改记为**"lab 复跑确认"**。
+>
+> ⚠️ 同批归档的第二份（`CONCURRENCY=1n`，**每节点一个客户端**）是**红**的：唯一违反类
+> `:mq-redelivered-after-ack 461`，而 `:poll-ack-failures` 仍为 **0**、`delivered = acked`
+> （**无丢失**）⇒ 结论是 **checker 判据没把 Poll 请求的 `start_offset` 纳入**（每个客户端
+> 各自从 0 起重放，被判成"ack 未记住"），记为 **F-68（jepsen checker 侧）**，
+> **不得**据此记成"MQ at-least-once 不成立"。**两份证据必须一起引用** —— 只引绿的那份，
+> 会让下一个跑 `1n` 的人重新花一天定位同一个误判。
 
 > **发布判据（更新于 2026-09-19 本轮后）**：`contracts/v1.2.0` 的**契约面**已可发布
 > （Minor，无 Breaking，卡口绿）。
@@ -255,3 +265,17 @@ sed -n '160,182p' coord-agent/src/service.rs
 > 另有 B-02/B-03。在这些闭环前打 tag，仍等于发布一份未兑现的承诺台账。
 > **B-04 的下一步应是「分诊」而不是「修复」** —— F-67 原文即标「[待分诊]」，
 > 在定位（能力点 / Leader 判定 / 拓扑）之前无法给出修复判据。
+
+> **发布判据（更新于 2026-09-20 第四轮后；本节口径覆盖上面两个同名区块）**：
+> - `contracts/v1.2.0` 的**契约面**可发布（Minor / 无 Breaking；三道契约卡口 +
+>   `check-sdk-sync.sh` 全绿）。
+> - `v0.2.0` **代码 tag 仍不成立**，但阻塞面已收窄为**非代码 / 待验证项**：
+>   **V11 故障注入**、72h 浸泡、M3 / M4 验收、代码冻结与 tag、未决项
+>   U1 / U3 / U4 / U5 / U6 / U8 / U9 的裁定。逐条状态以本文上两张表
+>   （「本轮（2026-09-20 第四轮）新闭合」/「未落地」）为准。
+> - **`B-04` 的状态以上表「未落地」为准**：**V8 复跑已由真实 lab run 确认转绿**。
+>   本区块上方那处 "**B-04（MQ at-least-once 不成立）**" 与 "**B-04 的下一步应是「分诊」**"
+>   属 **2026-09-19 第三轮之前**的旧口径，**已过时** —— 此处显式更正；不删旧行，
+>   保持台账可追溯。
+> - **卡口侧待修 `F-68`**（jepsen checker 未把 Poll 的 `start_offset` 纳入判据）
+>   **不影响**发布判据（不在被测系统一侧），但应在 F-67 一并收口。
