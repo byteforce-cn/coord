@@ -4,6 +4,7 @@ import cn.byteforce.coord.sdk.cache.CacheClient;
 import cn.byteforce.coord.sdk.circuitbreaker.CircuitBreakerClient;
 import cn.byteforce.coord.sdk.config.ConfigClient;
 import cn.byteforce.coord.sdk.election.LeaderElectionClient;
+import cn.byteforce.coord.sdk.event.EventClient;
 import cn.byteforce.coord.sdk.featureflags.FeatureFlagClient;
 import cn.byteforce.coord.sdk.health.HealthStatus;
 import cn.byteforce.coord.sdk.idgen.IdGenClient;
@@ -21,6 +22,7 @@ import cn.byteforce.coord.sdk.pki.PkiClient;
 import cn.byteforce.coord.sdk.policy.PolicyClient;
 import cn.byteforce.coord.sdk.ratelimiter.RateLimiterClient;
 import cn.byteforce.coord.sdk.registry.Registry;
+import cn.byteforce.coord.sdk.scheduler.SchedulerClient;
 import cn.byteforce.coord.sdk.transit.TransitClient;
 import cn.byteforce.coord.sdk.workflow.WorkflowClient;
 import org.slf4j.Logger;
@@ -47,6 +49,8 @@ import java.util.concurrent.TimeUnit;
  *   <li>{@link #policy()} — RBAC/ABAC policy evaluation</li>
  *   <li>{@link #pki()} — Local PKI CA certificate operations</li>
  *   <li>{@link #election()} — Lease-based leader election</li>
+ *   <li>{@link #events()} — Publish/subscribe event notification</li>
+ *   <li>{@link #scheduler()} — Distributed job scheduling (register/claim/complete)</li>
  *   <li>{@link #circuitBreaker()} — Agent-local circuit breaker state</li>
  *   <li>{@link #rateLimiter()} — Agent-local token-bucket rate limiting</li>
  *   <li>{@link #featureFlags()} — Feature flag evaluation (read-only wire)</li>
@@ -88,6 +92,8 @@ public final class CoordClient implements Closeable {
     private final PkiClientImpl pkiClient;
     private final ObjectStoreClientImpl objectStoreClient;
     private final LeaderElectionClientImpl electionClient;
+    private final EventClientImpl eventClient;
+    private final SchedulerClientImpl schedulerClient;
     private final CircuitBreakerClientImpl circuitBreakerClient;
     private final RateLimiterClientImpl rateLimiterClient;
     private final FeatureFlagClientImpl featureFlagClient;
@@ -138,6 +144,13 @@ public final class CoordClient implements Closeable {
                 retryTemplate, config.getObservabilityProvider(), config);
         this.electionClient = new LeaderElectionClientImpl(channelManager, errorMapper,
                 retryTemplate, config.getObservabilityProvider(), config);
+        // 事件订阅的取流循环跑在受管理的虚拟线程执行器上（与 Watch / Workflow 同纪律）：
+        // 这样 close() 才能真的中断它。
+        this.eventClient = new EventClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config,
+                threadPoolManager.getVirtualThreadExecutor());
+        this.schedulerClient = new SchedulerClientImpl(channelManager, errorMapper, retryTemplate,
+                config.getObservabilityProvider(), config);
         this.circuitBreakerClient = new CircuitBreakerClientImpl(channelManager, errorMapper,
                 retryTemplate, config.getObservabilityProvider(), config);
         this.rateLimiterClient = new RateLimiterClientImpl(channelManager, errorMapper,
@@ -247,6 +260,26 @@ public final class CoordClient implements Closeable {
      */
     public LeaderElectionClient election() {
         return electionClient;
+    }
+
+    /**
+     * Returns the {@link EventClient} API for publish/subscribe event notification.
+     * <p>
+     * <b>Boundary:</b> delivery is at-least-once only while the subscription stream is
+     * alive — the disconnect window is <b>not</b> replayed (no persisted cursor).
+     */
+    public EventClient events() {
+        return eventClient;
+    }
+
+    /**
+     * Returns the {@link SchedulerClient} API for distributed job scheduling.
+     * <p>
+     * Claiming is a cross-node atomic CAS, and the returned job id is the claim
+     * credential (the wire carries no worker identity) — treat it as a secret.
+     */
+    public SchedulerClient scheduler() {
+        return schedulerClient;
     }
 
     /**

@@ -79,6 +79,8 @@ GA_IMPLS=(
   "cn/byteforce/coord/sdk/internal/rpc/WorkflowClientImpl.java|contracts.workflow.v1"
   "cn/byteforce/coord/sdk/internal/rpc/ObjectStoreClientImpl.java|contracts.storage"
   "cn/byteforce/coord/sdk/internal/rpc/LeaderElectionClientImpl.java|contracts.election.v1"
+  "cn/byteforce/coord/sdk/internal/rpc/EventClientImpl.java|contracts.event.v1"
+  "cn/byteforce/coord/sdk/internal/rpc/SchedulerClientImpl.java|contracts.scheduler.v1"
   "cn/byteforce/coord/sdk/internal/rpc/CircuitBreakerClientImpl.java|contracts.circuitbreaker.v1"
   "cn/byteforce/coord/sdk/internal/rpc/RateLimiterClientImpl.java|contracts.ratelimiter.v1"
   "cn/byteforce/coord/sdk/internal/rpc/FeatureFlagClientImpl.java|contracts.featureflags.v1"
@@ -130,8 +132,53 @@ for entry in "${GA_IMPLS[@]}"; do
 done
 echo "OK: ${used}/${#GA_IMPLS[@]} 个 GA impl 使用契约命名空间"
 
+# ── 4) 反向覆盖：GA 契约包**逐个**必须有对应的 SDK impl（G4）────────────────
+#    为什么需要它：上面那张 GA_IMPLS 是**人写的**。P1-3（"Java SDK 缺 6 个客户端面"）
+#    正是它漂移的结果 —— 契约已 COMMITTED，SDK 面却少了一个，而当时没有任何机器
+#    守卫会发现。这与 `is_streaming_rpc` 的教训同源：**清单是人记得改的，卡口不是。**
+#    判据来源：契约目录本身（不是另一张人写的清单）。
+#      层 1 `coord/<domain>/v1/*.proto` → 包 `coord.<domain>.v1`（GA 层，必须有个 impl）
+#      层 2 无 `.v1` 后缀（STABLE 底座原语 + `coord.storage`）→ 仅 `coord.storage`
+#            要求 impl（底座原语由 SDK 内部原语面消费，不是独立客户端能力）
+echo "── 4) 反向覆盖：每个 GA 契约包都必须有 SDK impl ──"
+CONTRACT_PROTO_DIR="$REPO_ROOT/apis/contracts/proto"
+expected_pkgs=()
+while IFS= read -r f; do
+  pkg="$(sed -n 's/^[[:space:]]*package[[:space:]]\+\([^;]*\);.*/\1/p' "$f" | head -1)"
+  rel="${f#"$CONTRACT_PROTO_DIR"/}"
+  case "$rel" in
+    grpc/health/*) continue ;;                       # 第三方标准 proto，随附
+    coord/kv/*|coord/txn/*|coord/lease/*|coord/watch/*|coord/maintenance/*) continue ;;
+  esac
+  [[ -z "$pkg" ]] && continue
+  expected_pkgs+=("$pkg")
+done < <(find "$CONTRACT_PROTO_DIR" -name '*.proto' | sort)
+
+for pkg in "${expected_pkgs[@]}"; do
+  # 归一化：契约 proto 的包名是 `coord.<domain>...`，GA_IMPLS 里写的是
+  # Java 命名空间后缀 `contracts.<domain>...`。两边都剥掉前缀后逐字比较，
+  # 这样清单与契约目录的**唯一**约定就是 domain 段本身。
+  norm="${pkg#coord.}"
+  found=0
+  for entry in "${GA_IMPLS[@]}"; do
+    want="${entry##*|}"
+    [[ "${want#contracts.}" == "$norm" ]] && found=1 && break
+  done
+  if (( found == 0 )); then
+    echo "FAIL: 契约包 '$pkg' 已进契约面，但 GA_IMPLS 里没有对应的 SDK impl" >&2
+    echo "      ⇒ 该能力对 Java 消费者**没有客户端面**（P1-3 同型）。" >&2
+    echo "      修法：补 SDK 客户端并加到本脚本的 GA_IMPLS，或在契约里降级该能力。" >&2
+    fail=1
+  else
+    echo "OK: $pkg"
+  fi
+done
+if (( fail == 0 )); then
+  echo "OK: ${#expected_pkgs[@]} 个 GA 契约包全部有 SDK impl"
+fi
+
 if (( fail != 0 )); then
   echo "SDK ↔ 契约命名空间不一致：见上方 FAIL" >&2
   exit 1
 fi
-echo "sdk-sync OK：GA 服务的 SDK impl 全部落在契约命名空间，内部面使用面已被登记。"
+echo "sdk-sync OK：GA 服务的 SDK impl 全部落在契约命名空间，内部面使用面已被登记，且契约包无 SDK 覆盖缺口。"
