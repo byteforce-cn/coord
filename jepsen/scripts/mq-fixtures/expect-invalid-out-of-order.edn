@@ -1,0 +1,9 @@
+;; expect-invalid-out-of-order —— **P1**：单个 Poll 响应内 offset 非严格递增。
+;;
+;; 投递顺序是消费方的唯一排序依据（时间戳可能同毫秒），乱序会让「按 offset
+;; 去重/续传」的客户端算出错误的游标。
+[{:type :ok :f :mq-poll :process 0 :t0-ns 10000000 :time 11000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 3 :payload "m3"}
+             {:topic "jepsen-mq" :partition 0 :offset 1 :payload "m1"}]
+  :acked-offsets [3 1]}]

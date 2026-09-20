@@ -1,0 +1,11 @@
+;; expect-invalid-fencing —— **P0**：非匹配 lease_id 的 Release 竟然成功。
+;;
+;; 契约只认 (holder_id, lease_id) 匹配者。若实现按 name（或只按 holder_id）删，
+;; 任何知道锁名的调用方都能把别人的锁删掉 —— 互斥承诺被第三方破坏。
+[{:type :ok :f :lock-contend :process 0 :time 10
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  :acquired-at-ms 10 :released-at-ms 400 :released? true
+  :holder-ttl-seconds 10 :grace-ms 4000
+  ;; 探针发的是 lease_id = 12（真值是 11），却回了 released=true
+  :foreign-release {:ok? true :released? true}
+  :lock-info-after-release {:name "lock-a" :exists false}}]

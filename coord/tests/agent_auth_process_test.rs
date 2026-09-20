@@ -38,6 +38,8 @@ use coord_proto::auth::{
     AuthenticateRequest, RoleAddRequest, RoleGrantCapabilityRequest, UserAddRequest,
     UserGrantRoleRequest,
 };
+use coord_proto::agent::handshake_client::HandshakeClient;
+use coord_proto::agent::HandshakeRequest;
 use coord_proto::kv::kv_client::KvClient;
 use coord_proto::kv::RangeRequest;
 
@@ -472,4 +474,137 @@ bootstrap_token = "{BOOTSTRAP_TOKEN}"
         ),
         "missing credential must be denied, got: {status:?}"
     );
+
+    // ──── 8. F-50：agent **自发**流量在鉴权下必须成功 ────
+    //
+    // 上面 5–7 覆盖的是"**替调用方**发请求"的路径；这一节覆盖"**agent 为自己**
+    // 发请求"的路径 —— 它此前在结构上没有任何凭据通道，于是锁自动续期 / registry
+    // 目录加载与订阅 / idgen nodeid 注册**全线** `missing CCT token`
+    // （`jepsen/docs/coord-findings.md` F-50，`confirmed-by-run`）。
+    //
+    // 判据**两半缺一不可**：
+    //   ① **正面证据**：idgen 雪花 nodeid 的注册键 `/_idgen/nodes/{id}` 真的落到了
+    //      server KV —— 这条键只能由 agent 的后台任务写入，调用方路径不会碰它；
+    //   ② **反面证据**：只断言①会漏掉"恰好注册成功但订阅仍失败"，
+    //      故同时要求 agent 日志里**不再出现** `missing CCT token`。
+    let mut kv_as_root = KvClient::new(channel(&server_addr).await);
+    let nodes_prefix = b"/_idgen/nodes/".to_vec();
+    let range_end = prefix_successor(&nodes_prefix);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut registered = false;
+    while Instant::now() < deadline {
+        let resp = kv_as_root
+            .range(with_token(
+                RangeRequest {
+                    key: nodes_prefix.clone(),
+                    range_end: range_end.clone(),
+                    limit: 0,
+                    revision: 0,
+                    keys_only: false,
+                    count_only: false,
+                },
+                &root_cct,
+            ))
+            .await
+            .expect("root may range the idgen node registry");
+        if !resp.into_inner().kvs.is_empty() {
+            registered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        registered,
+        "idgen nodeid registration is agent-initiated (no caller) and must land in the \
+         server KV under /_idgen/nodes/ — F-50 regression. Agent log tail:\n{}",
+        tail(&agent.proc.log, 40)
+    );
+
+    // ② 反面证据：agent 日志**不得**出现任何"自发流量被拒"的痕迹。
+    //
+    // 三类一起查，缺一不可：
+    // - `missing CCT token`：**服务端**拒绝无凭据出站调用时的措辞（F-50 的原症状）；
+    // - `scope restriction` / `do not have capability`：凭据在但**能力不足**时的措辞。
+    //   只查第一类会漏掉"凭据装上了、但能力集不全"的半修复态（症状更隐蔽：
+    //   错误从"未认证"变成"无权"，仍然静默失效）；
+    // - 下面 4–9 是**逐表面**命名，只为可诊断性（负向对照实测到的表面清单）。
+    //
+    // 措辞说明：第 7 步的匿名调用在 agent 本地就被拒（agent 自己的措辞是
+    // `missing or invalid Authorization header`），不会产生上述任何字符串。
+    let agent_log = std::fs::read_to_string(&agent.proc.log).unwrap_or_default();
+    for marker in [
+        "missing CCT token",
+        "scope restriction",
+        "do not have capability",
+        "PKI CA auto-init failed",
+        "KvWorkflowStore init failed",
+        "failed to subscribe Watch",
+        "failed to load initial catalog",
+        "failed to register node_id",
+        "sweep persisted DEKs failed",
+    ] {
+        let offending: Vec<&str> = agent_log.lines().filter(|l| l.contains(marker)).collect();
+        assert!(
+            offending.is_empty(),
+            "agent-initiated traffic must fully succeed after F-50; {marker:?} still \
+             appears {} time(s):\n{}",
+            offending.len(),
+            offending.join("\n")
+        );
+    }
+
+    // ──── 9. P0-4 / D6：协议协商**真的可达**且**真的给出可诊断答复** ────
+    //
+    // 三条一起断言（缺一就会回到"空头承诺"）：
+    //   ① `Handshake.Negotiate` 在**生产装配路径**注册成功（否则 UNIMPLEMENTED）；
+    //   ② 用**低权限** CCT（`app-reader`，只有 `data:kv:read@/app/`）也能问到结果
+    //      —— 这是"协商必须白名单化"的机器判据：它不能要求调用方先持有新协议
+    //      的能力（那是死循环），也不能要求调用方先"已经是新客户端"；
+    //   ③ 返回值**不含** v1 —— 一次性改名（D2）没有双服务期，老客户端必须能据此
+    //      产出 `PROTOCOL_MISMATCH`，而不是被静默当作可用。
+    let mut handshake = HandshakeClient::new(channel(&agent_addr).await);
+    let resp = handshake
+        .negotiate(with_token(
+            HandshakeRequest {
+                client_version: "coord-agent-api-v1".into(),
+            },
+            &app_cct,
+        ))
+        .await
+        .expect(
+            "Handshake.Negotiate must be reachable through the agent's production wiring \
+             (and allowlisted: a low-privilege CCT with no handshake capability must still \
+             be able to ask)",
+        )
+        .into_inner();
+    assert!(
+        !resp
+            .supported_versions
+            .iter()
+            .any(|v| v == "coord-agent-api-v1"),
+        "the agent must not advertise the retired v1 protocol (one-shot rename, D2); \
+         got {:?}",
+        resp.supported_versions
+    );
+    assert!(
+        resp.supported_versions
+            .iter()
+            .any(|v| v == "coord-agent-api-v2"),
+        "the agent must advertise the version the SDK speaks (v2); got {:?}",
+        resp.supported_versions
+    );
+}
+
+/// 前缀区间上界（末字节 +1）；全 `0xFF` 时返回空（= 到无穷）。
+///
+/// 与仓库既有的 `prefix_end()` 惯例一致（见 `services/workflow_store.rs`）。
+fn prefix_successor(prefix: &[u8]) -> Vec<u8> {
+    let mut out = prefix.to_vec();
+    while let Some(last) = out.pop() {
+        if last < 0xFF {
+            out.push(last + 1);
+            return out;
+        }
+    }
+    Vec::new()
 }

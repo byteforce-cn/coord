@@ -3,29 +3,29 @@ package cn.byteforce.coord.sdk.internal.rpc;
 import cn.byteforce.coord.sdk.CoordConfig;
 import cn.byteforce.coord.sdk.CoordException;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowCancelRequest;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowCancelResponse;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowDeployRequest;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowDeployResponse;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowGetDefinitionRequest;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowGetDefinitionResponse;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowGetStatusRequest;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowGetStatusResponse;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowGrpc;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowListDefinitionVersionsRequest;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowListDefinitionVersionsResponse;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowListDefinitionsRequest;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowListDefinitionsResponse;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowListInstancesRequest;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowListInstancesResponse;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowRollbackDefinitionRequest;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowRollbackDefinitionResponse;
-import cn.byteforce.coord.sdk.internal.proto.SuspensionMeta;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowSignalRequest;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowSignalResponse;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowStartRequest;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowStartResponse;
-import cn.byteforce.coord.sdk.internal.proto.TaskFrame;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowCancelRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowCancelResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowDeployRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowDeployResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetDefinitionRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetDefinitionResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetStatusRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetStatusResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowGrpc;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListDefinitionVersionsRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListDefinitionVersionsResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListDefinitionsRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListDefinitionsResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListInstancesRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListInstancesResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowRollbackDefinitionRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowRollbackDefinitionResponse;
+import cn.byteforce.coord.contracts.workflow.v1.SuspensionMeta;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowSignalRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowSignalResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowStartRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowStartResponse;
+import cn.byteforce.coord.contracts.workflow.v1.TaskFrame;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import cn.byteforce.coord.sdk.workflow.Suspension;
 import cn.byteforce.coord.sdk.workflow.WorkflowClient;
@@ -233,7 +233,7 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                 request, "workflow.listDefinitions");
 
         List<WorkflowDefinitionSummary> result = new ArrayList<>();
-        for (cn.byteforce.coord.sdk.internal.proto.WorkflowDefinitionSummary s : response.getDefinitionsList()) {
+        for (cn.byteforce.coord.contracts.workflow.v1.WorkflowDefinitionSummary s : response.getDefinitionsList()) {
             result.add(new WorkflowDefinitionSummary(
                     s.getWorkflowId(), s.getName(), s.getVersion(),
                     s.getStatus(), s.getCreatedAt()));
@@ -276,7 +276,7 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                 request, "workflow.listDefinitionVersions");
 
         List<WorkflowDefinitionVersion> result = new ArrayList<>();
-        for (cn.byteforce.coord.sdk.internal.proto.WorkflowDefinitionVersion v : response.getVersionsList()) {
+        for (cn.byteforce.coord.contracts.workflow.v1.WorkflowDefinitionVersion v : response.getVersionsList()) {
             result.add(new WorkflowDefinitionVersion(
                     v.getVersion(), v.getWorkflowId(), v.getStatus(), v.getCreatedAt()));
         }
@@ -339,7 +339,7 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
                 req.build(), "workflow.listInstances");
 
         List<WorkflowInstanceSummary> result = new ArrayList<>();
-        for (cn.byteforce.coord.sdk.internal.proto.WorkflowInstanceSummary s : response.getInstancesList()) {
+        for (cn.byteforce.coord.contracts.workflow.v1.WorkflowInstanceSummary s : response.getInstancesList()) {
             byte[] outputJson = s.getOutputJson().toByteArray();
             byte[] contextJson = s.getContextJson().toByteArray();
             result.add(new WorkflowInstanceSummary(

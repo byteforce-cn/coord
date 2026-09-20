@@ -164,7 +164,7 @@ coord/
 
 ## 验证与质量
 
-- **Jepsen（工程已就位，未认证）**——仓库内 Clojure + knossos 工程（[`jepsen/`](jepsen/README.md)）覆盖 `register` / `cas-register` / `multi-register` 负载 × kill / pause / partition 故障注入，另有 [`jepsen/README.md`](jepsen/README.md) 中的长时浸泡方案。**尚未有 Jepsen / soak 产物入仓**（`docs/production/evidence/` 目前只有 Java 集成运行产物）；在产物落盘之前，线性一致相关表述属**设计意图**，不是已认证结论；
+- **Jepsen（工程已就位）**——仓库内 Clojure + knossos 工程（[`jepsen/`](jepsen/README.md)）覆盖 `register` / `cas-register` / `multi-register` 负载 × kill / pause / partition 故障注入，另有 [`jepsen/README.md`](jepsen/README.md) 中的长时浸泡方案。**运行产物已入仓**：[`docs/production/evidence/`](docs/production/evidence/README.md) 现有 26 份 Jepsen/soak 运行归档 + Java 集成运行产物，每份 `MANIFEST.md` 记录 commit、精确命令与工作区是否 dirty。逐条结论的认证状态以 [`jepsen/docs/coord-findings.md`](jepsen/docs/coord-findings.md) 为准——请勿据此推断「线性一致已整体认证」；
 - **快速本地收口**——`scripts/jepsen-check.sh` 只跑**一个**线性一致冒烟用例（`chaos_real_kill9_and_linearizability`），热构建下约 2–3 分钟；**不是** Jepsen 运行，也不复现 负载 × 故障注入 矩阵；
 - **CI**——权威清单见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：fmt + clippy（`-D warnings`）、非测试代码 panic 卡口、workspace 测试、proto 契约检查（buf lint + format + breaking）、`cargo audit` + `cargo deny`、真实进程 chaos 运行、跨语言错误码契约检查，以及 Java SDK / Java 示例集成套件；
 - **证据**——可复现的运行产物归档在 [`docs/production/evidence/`](docs/production/evidence/README.md)（`bash scripts/collect-evidence.sh <场景>`）。每个 `MANIFEST.md` 记录 commit、精确命令与工作区是否 dirty；`commit`/`command` 字段无法复现的产物应视为未验证。
@@ -178,7 +178,7 @@ coord/
 
 ## 状态
 
-版本 `0.1.0`（pre-1.0）。Raft 引擎（`openraft`）为 alpha 依赖，Coord **暂不建议用于生产**。Jepsen 工程虽已就位，但**尚无产物入仓**，因此核心一致性与故障恢复语义**未经其认证**——在产物落盘之前只能是设计意图。
+版本 `0.2.0`（pre-1.0）。Raft 引擎（`openraft`）为 alpha 依赖，Coord **暂不建议用于生产**。Jepsen 运行产物**已**入仓（[`docs/production/evidence/`](docs/production/evidence/README.md)），但那是逐次运行的记录，不构成整体认证——核心一致性与故障恢复语义仍带有未闭环发现，见 [`jepsen/docs/coord-findings.md`](jepsen/docs/coord-findings.md)。
 
 本轮**有意保留**的已知缺口（含证据与影响）逐条列在
 [`docs/production/remaining-known-gaps.md`](docs/production/remaining-known-gaps.md)（英文）；

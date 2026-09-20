@@ -3622,7 +3622,8 @@ mod tests {
     }
 
     #[test]
-    fn test_idempotency_txn_cache_replays_responses() {        let mut cache = IdempotencyCache::new();
+    fn test_idempotency_txn_cache_replays_responses() {
+        let mut cache = IdempotencyCache::new();
         let key = cache_key(9, b"txn-1");
         let responses = vec![ResponseOp {
             op: Some(coord_proto::txn::response_op::Op::ResponsePut(

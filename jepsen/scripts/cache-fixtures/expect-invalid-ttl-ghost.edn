@@ -1,0 +1,9 @@
+;; expect-invalid-ttl-ghost —— **P1**：TTL 到期后仍然存在。
+;;
+;; set(ttl=5s) 在 0–100ms 完成；get 在 20s（远超 ttl + grace 3s）仍 found=true
+;; 且值就是那次写的值。生产表现：过期条目被永久返回 → 陈旧数据、下线的实例
+;; 仍被发现、已撤销的授权仍生效。
+[{:type :ok :f :cache-set :process 0 :t0-ns 0 :time 100000000
+  :key "cache-str-1" :value "v-1" :ttl-seconds 5}
+ {:type :ok :f :cache-get :process 1 :t0-ns 20000000000 :time 20001000000
+  :key "cache-str-1" :found true :value "v-1"}]

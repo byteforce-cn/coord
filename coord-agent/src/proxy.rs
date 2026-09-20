@@ -71,10 +71,14 @@ impl AgentInner {
     ///
     /// `tls` 为 Some 时经 TLS/mTLS 通道连接（PEM 字节，来自 `AgentTlsConfig`）；
     /// Server 集群启用 TLS 时必需，否则连接会失败并退化为 skeleton 模式。
+    ///
+    /// `self_identity` 为 **agent 自身身份**的凭据句柄（F-50，2026-09-19）：
+    /// 它只作为**回退**使用 —— 调用方凭据在场时逐字不变地优先调用方。
     pub async fn new(
         server_endpoints: Vec<String>,
         cache: AgentCache,
         tls: Option<coord_client::config::TlsConfig>,
+        self_identity: std::sync::Arc<coord_client::credential::CachedTokenProvider>,
     ) -> Result<Self, CoreError> {
         let mut config = coord_client::Config::new(server_endpoints);
         if let Some(t) = tls {
@@ -86,9 +90,22 @@ impl AgentInner {
         //
         // 这里装的是**按请求**提供者：凭据由 agent 鉴权中间件在放行入站请求时
         // 写入任务局部量（`coord_client::credential::scoped_request_token`）。
-        // agent 自身的后台任务不在该作用域内 → 行为与之前一致（不带凭据）。
+        //
+        // F-50（2026-09-19）：仅装按请求提供者会让 agent **自己发起**的后台流量
+        // 永远无凭据（锁自动续期 / registry 目录加载与订阅 / idgen nodeid 注册
+        // 全部 `missing CCT token`）。故改为两级：**调用方凭据优先**
+        // （`RequestScopedTokenProvider`），缺失时回退 **agent 自身身份**
+        // （`self_identity`，由 `PluginIdentityManager::bootstrap_self_identity`
+        // 开通，能力集限定在内部键空间 `/_<domain>/*`）。
+        //
+        // 顺序本身是安全属性：回退凭据**不可能**顶替调用方身份执行请求；
+        // 而入站请求在 agent 鉴权中间件里已被 fail-closed 校验过
+        //（无凭据/无能力一律拒绝，不会走到这里）。
         config = config.with_token_provider(std::sync::Arc::new(
-            coord_client::credential::RequestScopedTokenProvider,
+            coord_client::credential::FallbackTokenProvider::new(
+                std::sync::Arc::new(coord_client::credential::RequestScopedTokenProvider),
+                self_identity as std::sync::Arc<dyn coord_client::TokenProvider>,
+            ),
         ));
         let client = coord_client::Client::connect_direct(config).await?;
         Ok(Self { client, cache })

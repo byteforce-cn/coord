@@ -38,6 +38,8 @@ pub enum AgentGrpcService {
     RateLimiter(Arc<crate::services::rate_limiter::RateLimiterService>),
     FeatureFlags(Arc<crate::feature_flags::FeatureFlagService>),
     Pki(Arc<crate::pki::PkiService>),
+    /// 协议版本协商（`coord.agent.Handshake`）—— P0-4 / D6：此前两端皆空头
+    Handshake(Arc<crate::services::handshake::HandshakeService>),
     /// 插件引擎自身的通用调用面（`coord.plugin.Plugin`）
     PluginApi(Arc<crate::plugin::PluginService>),
 }
@@ -63,6 +65,7 @@ impl AgentGrpcService {
             Self::RateLimiter(_) => "rate_limiter",
             Self::FeatureFlags(_) => "feature_flags",
             Self::Pki(_) => "pki",
+            Self::Handshake(_) => "handshake",
             Self::PluginApi(_) => "plugin_api",
         }
     }
@@ -113,6 +116,9 @@ impl AgentGrpcService {
                 router.add_service(proto::feature_flags_server::FeatureFlagsServer::from_arc(s))
             }
             Self::Pki(s) => router.add_service(proto::pki_server::PkiServer::from_arc(s)),
+            Self::Handshake(s) => router.add_service(
+                proto::handshake_server::HandshakeServer::from_arc(s),
+            ),
             Self::PluginApi(s) => router.add_service(
                 coord_proto::plugin::plugin_server::PluginServer::from_arc(s),
             ),

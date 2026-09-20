@@ -823,3 +823,958 @@ Syntax error reading source at (jepsen/coord.clj:1071:76). Unmatched delimiter: 
 抓到的）；② 「Unmatched delimiter 指向文件末尾」时不要从末尾找：用 `read`
 （**不是** `read-string`）逐 form 读，定位**第一个**失败的 form；③ 长 options 向量
 编辑后，比对首项括号形状（`[[nil` vs `[nil`）是最快的自查。
+
+---
+
+## 13. 复跑（2026-09-17，docker lab：`make checkers` / `matrix-m1` / `matrix-m2`）
+
+> 结项报告 §0 此前把三个门禁的「全绿」写成 **lab 结论、本轮未重跑**。本轮按
+> `soak-closure-report.md` §6 的命令在 docker lab 完整复跑（coord `ddafb9d`；复跑
+> 前后 `target/release/coord` 的 sha256 一致（`55ba6a54…`）⇒ 无 code-change 混杂）。
+> 结论需要修正：**`matrix-m2` 不是全绿**，红档暴露了本轮唯一一条新的 coord 侧缺陷。
+
+| # | 一句话 | 分级 | 状态 |
+|:--|:--|:--|:--|
+| F-27 | Lease **过期时的 revoke 提案可被静默丢弃**（`check_expired()` 已把过期 Lease 移出本地管理器，随后的 `raft.client_write` 失败只 `warn!`、**不重试不回插**）⇒ 绑定 Key 在 `ttl+grace` 内 0 消失；领导权不再变化即**永久泄漏** | P1（coord 侧） | `confirmed-by-run`（**未闭环**） |
+
+复跑结果：
+
+| 门禁 | 结果 | 备注 |
+|:--|:--|:--|
+| `make checkers` | **17 套 / 99 个全绿**（99 PASS / 0 FAIL） | 与报告 §4 的数字一致，首次被真实重跑钉住 |
+| `make matrix-m1` | **9/9**（`ALL M1 MATRIX PASSED`） | map/txn/scan/mixture × none\|kill + idempotency:none |
+| `make matrix-m2` | **7/8** | watch 四档 + `lease:none/kill/pause` 绿；**`lease:partition-halves` 红（F-27）** |
+
+台账纠错：`store/coord` 全量只有 **6 个 lease run，全部发生在 2026-09-17**
+（14:42 / 14:44 / 16:15 / 16:16 / 16:18 / 16:20），即 `lease × pause` 与
+`lease × partition-halves` 是**本轮第一次**被跑 —— 此前「matrix-m2 8 组合全绿」
+没有任何 run 支撑（见 `soak-closure-report.md` §0/§4 的修正）。
+
+### F-27 [P1] Lease 过期 revoke 丢失 → 绑定 Key 不被级联删除
+
+**契约锚点**：`apis/contracts/proto/coord/lease/lease.proto` ——「Lease 过期或被
+Revoke 时，所有绑定该 Lease 的 Key 被删除（级联删除）」；§5.2 的
+「停止续租的 Key 在 `ttl+grace` 内消失率 **100%**」。
+
+**判决 run**：`jepsen/store/coord/2026-09-17T16:20:01.926257732Z/`
+（`make matrix-m2` 最后一档 `lease:partition-halves`，45s，concurrency 1n；
+make 退出码 2 = jepsen 判 invalid）。
+
+**现象**：`:grants 81 / :expiries 36`（§5.1 门槛 5/2 通过），
+`{:violations-by-class {:lease-not-expired 8}}`，8 条全部 `:absent-ms nil`：
+
+| 场景 | key（`/jepsen/lease/s591962667/…`） | lease |
+|:--|:--|:--|
+| `:ttl` | `ttl/33` · `ttl/27` · `ttl/38` | 25 · 27 · 28 |
+| `:keepalive` | `ka/32` · `ka/35` · `ka/108` · `ka/112` · `ka/113` | 26 · 29 · 61 · 62 · 63 |
+
+`:ttl` 档的判据是「op 起点 + `ttl+grace`（2s+4s）内必须观察到消失」；`:keepalive`
+档是「停续期时刻 + `ttl+grace`」。8 条都是**整整 6s 窗口内一次都没观察到消失**
+（`lease-wait-gone` 返回 `:absent? false`），不是「消失得略晚」。
+
+**为什么这不是假红（观测可信）**：
+
+1. 每个 op 在窗口内轮询 31–34 次，其中 18–29 次读失败（partition 期的 transient
+   不可用）；但**成功**的读一律 `:present? true` —— 没有任何一次成功的「读不到」。
+2. 读路径是 **leader-only 线性读**：`range` 处理器先调
+   `ensure_linearizable_on`（`coord-server/src/server/mod.rs:1590`，ReadIndex +
+   Leader 身份复核 + `applied ≤ committed` 复核），非 leader 直接
+   `UNAVAILABLE read_refused=not_leader` ⇒ **排除了陈旧读**。
+3. `point-read` 用 `range_req(key)`（`range_end` 为空）→
+   `RangeSemantics::is_single_key()`（`server/mod.rs:1599`）= **单键精确查** ⇒
+   排除「删掉目标键后读到同前缀邻键」这类假 `:present?`。
+
+⇒ 「Key 仍在」是 leader 提交态的真实观测：**级联删除没有发生**。
+
+**根因（代码）**：`start_lease_expiry_worker`（每 200ms tick，
+`coord-server/src/server/mod.rs:737-790`）：
+
+```rust
+if !node.is_raft_leader().await { continue; }        // ① 先查身份
+let actions = lm.check_expired();                    // ② 本地状态已被消耗
+for action in actions {
+    if let Err(e) = raft.client_write(cmd).await {   // ③ 再 propose
+        tracing::warn!("Lease {} expiry: failed to revoke via raft: {}", lease_id, e);
+    }                                                  // ④ 只告警，不重试
+}
+```
+
+- ① 与 ③ 之间有 **TOCTOU**：partition 期间领导权恰好在这两步之间丢失，
+  `client_write` 返回 `ForwardToLeader` 错误。
+- ② `LeaseManager::check_expired()`（`coord-server/src/lease/mod.rs:115-141`）在返回
+  action 之前就用 `leases.retain(…, false)` **把过期 Lease 从本地管理器移除了**
+  —— 所以 ④ 之后 `check_expired()` 永远不会再返回这个 Lease。
+- 结果：这次过期 revoke **永久丢失**。唯一的恢复路径是下一次领导权变更触发
+  `rebuild()`（records 仍在状态机里，因为 revoke 没提交；deadline 已过 ⇒ 立刻
+  再触发一次）。**领导权此后不再变化 = 绑定 Key 永久泄漏**（违反级联删除契约）。
+
+**日志证据**（同一 run，`:warn` 级，与 violation 一一对应）：
+
+```
+n1/coord.log:408  16:20:28.393Z WARN Lease 26 expiry: failed to revoke via raft:
+           has to forward request to: Some(2), Some(BasicNode { addr: "172.19.0.4:50052" })
+n2/coord.log:395  16:20:42.910Z WARN Lease 61 expiry: failed to revoke via raft: has to forward request to: None, None
+n2/coord.log:396  16:20:43.110Z WARN Lease 62 expiry: failed to revoke via raft: has to forward request to: None, None
+n2/coord.log:397  16:20:44.111Z WARN Lease 63 expiry: failed to revoke via raft: has to forward request to: None, None
+```
+
+`None, None` = 此刻连 leader 都不知道（partition 刚发生）—— 正是 ①③ 之间丢失
+领导权的形态。
+
+**待分诊（8 条里仍有 4 条未解释）**：`lease 25 / 27 / 28 / 29`（= `ttl/33`、
+`ttl/27`、`ttl/38`、`ka/35`）**没有**对应的 `failed to revoke` 告警。两种可能：
+(a) revoke 提交成功但级联删除没删掉绑定 Key（第二条独立缺陷）；(b) 过期根本没
+触发（例如 rebuild 后 deadline 被重算推迟）。**在分诊清楚之前不要把 F-27 当作
+已完整解释 8 条 violation 的结论。**
+
+**复现**：
+
+```bash
+make -C jepsen/lab test WORKLOAD=lease NEMESIS=partition-halves TIME_LIMIT=45 \
+     CONCURRENCY=1n SKIP_CHECKERS=1 JEPSEN_PROVIDER=docker
+# 随后看 store/coord/<新目录>/n*/coord.log 里的 "expiry: failed to revoke via raft"
+```
+
+**建议修法方向（待 coord 侧确认）**：
+
+1. 过期动作要**幂等且可重试**：`client_write` 失败时把 `(lease_id, deadline)` 放回
+   待处理集合，按退避重试，直到 revoke 提交成功；
+2. 或者不在 `check_expired()` 里移除记录：由「revoke 已提交」这一事实驱动移除
+   （apply 侧确认），使本地状态与状态机一致；
+3. TOCTOU 的通用修法：不预先查 `is_raft_leader()`，直接 propose 并**按错误类型**
+   处理（`ForwardToLeader` → 转投 / 重试，而不是丢弃）。
+
+**同类风险点（同一 PR 里一起看）**：`start_region_lease_revoker`
+（`server/mod.rs:795+`）的注释写着「若 Region leader 是其他节点，则该条目由对端
+处理……本端**丢弃**以限制内存」—— 一旦对端没收到 region 0 的广播，这条待清理
+条目同样会静默丢失。region 模式（Multi-Raft）目前未被矩阵覆盖。
+
+## 14. 第六轮（2026-09-18）：M5a 落地 —— coord-agent 首次被 Jepsen 真跑
+
+> 本轮把 `jepsen/docs/coord-agent-coverage-plan.md` 的建议**落成代码**并在 docker lab
+> 真跑：agent 部署（多实例 + SSH 隧道 + 路由证明）、wire 层（13 个 `coord.agent.*`
+> 方法）、4 个 agent 本地面 workload 与 checker、agent 侧 nemesis、门禁矩阵。
+> 首次实跑即产出**两条 coord 侧实质发现**（F-28/F-32），另有 4 条**测试自身缺陷**
+> （F-29/F-30/F-31/F-34）与 1 条**契约字段缺陷**（F-33）。
+>
+> **同日第二轮（F-34 闭环）**：给 lock 面加了**服务端地面真值探针**（绕开 agent 直接
+> 读 `/_lock/{name}`）并修掉三层区间**度量**缺陷，互斥重叠 99 → **0**、探针硬违约
+> **0**，而 F-28 依旧 104/104 命中（真红没被修掉）。
+
+| # | 一句话 | 分级 | 状态 | 判决任务 |
+|:--|:--|:--|:--|:--|
+| F-28 | `LockService::release` **不校验 `lease_id`** → 任意调用方用错误 lease 即可删除他人的锁（fencing 缺失） | **P0** | **`confirmed-by-run`**（首轮 162/162，第二轮 104/104） | M5a / `--workload lock` |
+| F-29 | 测试自身：lock 的持有区间用**相对毫秒跨 op 比较** → 2817 条假重叠 | P1（测试自身） | `closed`（改为以绝对时刻为锚 + 守门员 fixture） | M5a |
+| F-30 | 测试自身：区间闭合依据 Release 的布尔（会撒谎）→ 一次真实 fencing 缺陷被放大成数千条假红 | P1（测试自身） | `closed`（改看可观测锁状态 + fixture） | M5a |
+| F-31 | 测试自身：agent 就绪探测用 `ss -ltn`（control 镜像里**没有 ss**）→ 「隧道明明通了却判失败」 | P2（测试自身） | `closed`（改为**功能验证**：经隧道 GET /metrics） | M5a |
+| F-32 | agent 侧**没有** server 那种 `root` 全能力旁路 → auth 开启时 **root CCT 经 agent 调用任何 RPC 都被拒**（via-agent 全路径不可用） | **P0** | **`confirmed-by-run`**（实测卡住首轮） | M5a / T5.2 |
+| F-33 | `LockRenewResponse.new_ttl` 在 handler 里**硬编码为 0**（`grpc_handlers.rs:146`）→ 字段形同虚设；按 lease 的「ttl=0 = 已不存在」口径解读会误判 | P2 | **`confirmed-by-source`** | M5a |
+| F-34 | lock 的「互斥重叠 99/162」：**测试自身**的区间度量缺陷（锚点噪声 + `exists=false` 闭合判据 + 闭合时刻记在观测循环之后）三层叠加 | **测试自身（P1）** | **`closed-by-run`**（99 → 0，服务端探针 0 违约；见下文） | M5a |
+
+---
+
+### F-28 [P0] `LockService::release` 不校验 `lease_id` → 非持有者可删锁（fencing 缺失）
+
+**契约锚点**：`apis/contracts/proto/coord/lock/v1/lock.proto`：「仅 (holder_id, lease_id)
+匹配者可 Release / Renew」；台账整改要点亦把 fencing 列为待验证项。
+
+**实测证据**（`docker lab`，`--workload lock --agents 2`，2026-09-18）：
+
+```clojure
+;; history.edn 里一条 lock-contend 完成 op（节选）
+{:f :lock-contend :holder-id "h-666792" :lease-id 1
+ :acquired-at-ms 67 :released-at-ms 433
+ ;; 探针：故意用 **错误的 lease_id**（真值 +1）调 Release
+ :foreign-release {:ok? true, :released? true}      ;; ← 竟然成功了
+ :released? false                                    ;; 紧随其后的「正确」Release 反被拒
+ :lock-info-after-release {:exists false}}           ;; 锁已被探针删掉
+```
+
+`lockck` 汇总：`:acquires 162`、`:violations-by-class {:lock-fencing-missing 162}` —— **162/162
+全部命中**。
+
+**源码定位**（`coord-agent/src/services/lock.rs:412+`）：`release` 只按
+`(name, holder_id)` 命中本地缓存，**不比较请求里的 `lease_id`**，命中的落点也不看它。
+
+**影响**：任何知道锁名的调用方（或任何一个持过期 lease 的旧持有者）都能把当前持有者
+的锁删掉 —— 互斥承诺被第三方破坏。生产上是「进程重启后带着旧 lease 回来把新持有者
+踢掉」这一类最难查的形态。
+
+**建议修法方向**：`release`/`renew` 在命中本地缓存后**必须**比对 `lease_id`
+（不匹配 → `PERMISSION_DENIED`），并把该断言写进 `lockck` 的负控制 fixture（已有：
+`expect-invalid-fencing.edn`）。
+
+---
+
+### F-32 [P0] agent 侧没有 root 全能力旁路 → 经 agent 的 root 调用全部被拒
+
+**证据**（首轮 via-agent 卡住时的真实报错）：
+
+```
+UNAUTHENTICATED: role(s) ["root"] do not have capability 'data:kv:read'
+```
+
+同一进程内、同一 root 凭据：**直连 server 成功，经 agent 必然被拒**。
+
+**源码对照**：
+
+* server：`coord-server/src/auth/manager.rs:563` 起 `check_capability` 对
+  `role_name == ROOT_ROLE` **直接放行**（"root 角色为引导管理员，全能力放行"）；
+* agent：`coord-agent/src/auth/interceptor.rs` 只按 **RoleCache 里的显式能力集**判定
+  （`scopes_for_capability(roles, capability_id)`），**没有**任何 root 旁路。
+
+于是 root 的 CCT 在 agent 侧是一张「没有任何 capability」的令牌 —— 而 root 角色记录
+里本来就没有逐项列出能力（全靠 server 的旁路兜着）。
+
+**影响面比看起来大**：Java SDK 客户端、运维脚本、以及任何用 root/管理员凭据接入的
+集成，走的都是「本机 agent」这条路（daemonset 形态）；也就是说 **auth 开启时 agent
+作为应用入口的整条路径不可用**，而这一点在任何进程内测试里都看不到（进程内测试直接
+调 server 或直接构造 CCT）。
+
+**lab 的处置**（已落地，`jepsen/src/jepsen/coord/agent.clj` 的
+`grant-client-capabilities!`）：把 21 个需要的 capability **显式**授给 root（幂等）。
+这**不**改变任何 server 行为（server 本来放行 root），只是让同一张 CCT 在 agent 侧
+也通过 —— 也就是说**没有被测系统为测试让步**。
+
+**三种修法（由 coord 团队选）**：
+1. agent 侧补 root 旁路（语义对齐 server，但要把「谁能签发 root CCT」这件事想清楚）；
+2. server 侧把 root 的「全能力」**物化**进角色记录，使 RoleCache 同步即完整
+   （一劳永逸，且对其它消费 RoleCache 的组件同样有效）；
+3. 明确要求部署时逐项授权（那就要有默认能力集与文档，且不能让「默认不可用」成为
+   运行期才发现的事实）。
+
+---
+
+### F-34 [测试自身，已闭环] 「互斥重叠 99/162」= 区间**度量**缺陷（三层叠加）
+
+> **结论（2026-09-18 第二轮，已用服务端地面真值探针闭环）**：这不是 coord-agent 的
+> 互斥缺陷，而是**本仓 lock 判据自身的三层区间度量缺陷**叠加出来的假红。修完后同一
+> workload 的互斥重叠 = **0**，服务端探针硬违约 = **0**，而 F-28（fencing）依旧 104/104
+> 命中 —— 也就是说「真红没被修掉、假红被消掉了」两件事同时成立。
+>
+> 分诊过程与判据纪律见 `dev.md` §5.5 第 13–15 条；工具是
+> `scripts/lock-diag.clj`（同一份历史跑四种区间口径）。
+
+**原始观测**（M5a 首轮，`2026-09-18T15:41:38Z`）：`:acquires 162`，
+`:violations-by-class {:lock-mutual-exclusion 99}`，重叠样本最长 ~388ms，两侧都
+`closed?=true`。
+
+**三层根因**（每一层都单独量化过；`:f34 → :legacy → :new` 是逐层修掉一层后的计数）：
+
+| 层 | 根因 | 证据（同一条历史的四种口径） |
+|:--|:--|:--|
+| ① 锚点 | 区间以 jepsen 记录的 invoke 时刻为锚 —— 那是 worker **派发** op 时的点，中间隔着队列与线程调度。同一个 JVM 里实测 `completion.time - (t0 + 最后一个 :at-ms)` 在 40ms ↔ 290ms 之间抖 | 改用 op 自己读的 `System/nanoTime`（`:t0-ns`）后，`:legacy` 从 5 → 3 |
+| ② 闭合判据 | 「锁空出来了」判成 GetLockInfo 的 `exists=false`。观测窗口里**另一个持有者合法接管**时 `exists=true`，区间于是被 fail-safe 延长整整 `ttl+grace`（=9s） | 老历史里 99 条重叠中 85 条涉及这种「9s 延长」的区间 |
+| ③ 闭合时刻 | `:released-at-ms` 记在**观测循环之后**（循环里最多 5×200ms 的 sleep）⇒ 区间尾部被拉长（实测中位数 +196ms、最长 +1368ms） | 区间膨胀分位：老历史 `{p50 196, p90 517, max 1368}` → 修后 `{p50 117, p90 164, max 213}`（剩下的 ~100ms 是 hold 结束后 renew 循环那次 sleep，属于真实持有） |
+
+**闭环证据**（两条独立的证据链，缺一不可）：
+
+1. **客户端侧**：`scripts/lock-diag.clj` 在修后的历史
+   （`2026-09-18T16:18:33Z`）上给出
+   `:f34 43 → :legacy 3 → :new 0`，而独立估计 `:true-end`（以「最后一次 renew +
+   一次 sleep」为持有结束，**不使用任何客户端自述字段**）也是 **0**。
+   在老历史（没有 `:gone-at-ms` 字段）上 `:f34 = :new = 99`、`:true-end = 0` ——
+   也就是「同一批自述区间，只要换掉度量口径，重叠就消失」。
+2. **服务端侧**：新增 `:f lock-probe` op —— 绕开 agent 直接从 server 用 `KV Range`
+   读 `/_lock/{name}`，把「服务端 key 挂在谁名下」按时间采样（本轮 28 样本、
+   0 读失败、6 个不同 holder）。判据 5 要求「服务端说 H 持有，而某条**其它** holder
+   的自述区间把该时刻含在内部」⇒ 硬违约。实测 **0 硬违约 / 0 边界样本**。
+   这条判据是 F-34 原始设计里的「决定性实验」，现在**常驻**为 checker 判据（探针
+   缺失时判未执行，见 `expect-invalid-probe-missing.edn`）。
+
+**顺带确认的（不是新缺陷，但值得记）**：
+
+* 老历史里 6 条 `gone?=false` 的 op，其 `lock-info-after-release` 显示
+  `exists=true` 但 **holder 已经是别人** —— 这正是根因②的现场：锁被别人合法接管，
+  而旧判据（`exists=false`）把它读成「没有释放」。修后这 6 条全部正常闭合。
+* `:lock-release-did-not-free` 这一条判据在 F-28 存在时**永远不会触发**
+  （因为 fencing 探针先把锁删了，真 Release 必然回 false；`released?` 恒为 false）。
+
+**为什么第一轮没能分诊**：当时只有「99 次重叠、样本可核对」这个观测，而同一批样本
+在三种解释（真互斥破坏 / agent 汇报层不一致 / 区间度量错误）下长得一模一样 —— 把
+未分诊的观测写成结论会误导修复方向。本轮加了探针 + 四种口径对照之后，三种解释才被
+分开；这也说明「区间类判据必须自带口径对照与独立估计」是必要的工程纪律。
+
+---
+
+### F-29 / F-30 / F-31 [测试自身] 三条「报告很红、其实是测试的错」
+
+见 §12 的同类纪律。三条都已修，且都补了**守门员 fixture**（去掉修复必然变红）：
+
+* **F-29**：`lockck` 的区间锚。相对毫秒是「相对**本 op** 起点」的，跨 op 比较等于把
+  每个 op 的零点当成同一个 —— 修法是把 invoke 的绝对时刻加上去
+  （`lockck.clj` 的 `abs-ms`）。守门员：
+  `lock-fixtures/expect-valid-relative-times-must-not-overlap.edn`。
+* **F-30**：区间**闭合**的依据必须是可观测状态（GetLockInfo 的 `exists`），不是
+  Release 的布尔返回值 —— 后者在 F-28 那条缺陷下会**撒谎**（探针删掉锁 ⇒ 正确
+  Release 回 false ⇒ 区间被 fail-safe 延长 ⇒ 与后面所有人重叠）。守门员：
+  `lock-fixtures/expect-invalid-release-said-false-but-gone.edn`（它在固定「假重叠
+  消失」的同时，**仍然**命中 `:lock-fencing-missing`，防止修假红时把真红一起修掉）。
+* **F-31**：agent 就绪探测原用 `ss -ltn` 判监听 —— jepsen-control 镜像里**没有 ss**，
+  于是「端口明明在监听」被判成失败（假红）。改为**功能验证**：经隧道
+  `GET /metrics` 拿到 `coord_agent_*` 才算通（`agent.clj` 的 `wait-tunnel-up!`）。
+
+---
+
+## 15. 第六轮 · 第二轮（2026-09-18）：把 coord-agent 做实 —— 四个面首次全在 lab 跑
+
+> 本轮的目标是把 §14 留下的三件「未闭环」做完（探针 + 四个面 + 差分），但**把矩阵
+> 真的跑起来**这件事本身又交出了三条**测试自身**缺陷（F-35/F-36/F-37）——每一条都
+> 会让某个 cell 以上下文完全不同的方式变红。三条都已修并补了守门员 fixture。
+>
+> 一句话结论：**coord-agent 的四个本地面（lock / election / idgen / registry）现在
+> 都能在 lab 里被判决**；其中 lock 的红**只剩 F-28（fencing 真缺陷）**，election /
+> idgen / registry 的判据本身不再产出假红。
+
+| # | 一句话 | 分级 | 状态 | 判决任务 |
+|:--|:--|:--|:--|:--|
+| F-35 | 测试自身：`electck` 的 leader 区间**完全没有锚点**（直接跨 op 比相对毫秒）→ 45s run 报 124 条假 `:election-two-leaders`；同一份历史加上锚点是 **0** | P1（测试自身） | `closed`（`abs-ms` + `:t0-ns` + 闭合证据 + 2 个守门员 fixture） | M5a / `--workload election` |
+| F-36 | 测试自身：四个 agent nemesis 的 `invoke!` 返回**向量**（`[:killed-agent "n4"]`）而不是 op map → 每次扰动抛一条 `:jepsen.nemesis/invalid-completion`（一轮 9 cell 共 86 条） | P1（测试自身） | `closed`（`completion` 包一层，事件信息进 `:value`） | M5a / 所有 agent nemesis |
+| F-37 | 测试自身：本地面 workload 的**路由证明**要求「check 时每个 agent 都抓得到」→ kill 类 nemesis 下必然假红（idgen/kill-agent 实测）；数据面还有第二个同形问题：agent 重启后代理计数归零 | P1（测试自身） | `closed`（run 期间多次采样：`:up?` = 曾经抓到过、`:total` = 各次最大值） | M5a / `:agent-route-not-proven` |
+
+---
+
+### F-35 [测试自身] election 的「双 leader」：区间锚点缺失（F-29 的同型复发）
+
+**实测**（`--workload election --agents 2`，45s，`2026-09-18T16:26:49Z`）：
+
+```
+election checker: {:campaigns 110, :won 49, :not-won 61, :resign-failures 14,
+                   :unclosed-intervals 14,
+                   :violations-by-class {:election-two-leaders 124}}
+```
+
+重叠样本（第一版打印的就是**相对毫秒**）：
+
+```
+left  {:group "group-b" :candidate "c-924698" :start 51  :end 340}
+right {:group "group-b" :candidate "c-975223" :start 289 :end 613}
+```
+
+**分诊**：`campaign-at-ms` / `resigned-at-ms` 都是「相对**本 op** 起点」的量，而
+`leader-interval` 直接把它们当绝对量跨 op 比较 —— 每个 op 的零点不同，这个比较没有
+意义。同一份历史（16:28:34 那轮的 9 个 won op）用两种口径重算：
+
+```
+:rel     双 leader 重叠: 8      ← 第一版（相对值直接比）
+:invoke  双 leader 重叠: 0      ← 只把锚点补上（jepsen invoke 时刻）
+```
+
+⇒ 124 条全部是**度量**产物。**修法**（与 lock 面完全同口径，`dev.md` §5.5 第 13/16
+条）：
+
+* `client.clj` 的 elect op 记 `:t0-ns`（op 自读的 `System/nanoTime`）；
+* `electck.clj` 加 `abs-ms`，锚点优先 `:t0-ns`；
+* 闭合用**证据**而不是「Resign 的布尔」：`gone-at-ms` = Resign 成功 ⇒ resign 返回
+  时刻；否则 GetLeader 明确不再是自己 ⇒ 探针时刻。没有任何证据 ⇒ 区间不闭合、
+  不参与双 leader 判定（TTL 被动过期不是违约，用 fail-safe 延长的区间判会假红）。
+
+**守门员 fixture**：`expect-valid-anchor-must-be-absolute.edn`（去掉锚点必红）与
+`expect-valid-nanotime-anchor-wins-over-jepsen-time.edn`（锚点退回 jepsen 时刻必红）。
+
+**残留（明示）**：election 目前**没有**服务端地面真值探针（lock 有 `:lock-probe`）。
+`/_election/{group}` 是同类 key（`leader_election.rs:88`），所以探针可复用同一套
+机制；在那之前，判据 1 只有客户端自述这一半证据 —— 按 `dev.md` §5.5 第 15 条，
+这一条要显式声明为待补，不得当成「已交叉验证」。
+
+---
+
+### F-36 [测试自身] agent nemesis 的返回值不是 completion op
+
+**实测**（同一轮矩阵日志，9 个 cell 共 **86** 条）：
+
+```
+INFO ... jepsen worker nemesis - jepsen.coord.agent coord-agent: a 1 on n4 is ready
+ :op' [:restarted-agent "n4"],
+clojure.lang.ExceptionInfo: throw+: {:type :jepsen.nemesis/invalid-completion,
+ :op {:index 82, :time 22251134287, :type :info, :process :nemesis, :f :stop, :value nil},
+ :problems ["should be a map" ":type should be :info" ":process should be the same"
+            ":f should be the same"]}
+```
+
+**源码定位**：`kill-agent` / `kill-agent-all` / `pause-agent` /
+`partition-agent-server` / `compose-agent-all` 的 `invoke!` 直接把
+`agent/kill-one!` 之类的返回值（`[:killed-agent "n4"]` 这样的**向量**）作为
+completion 交给 jepsen。jepsen 的 nemesis worker 对返回值有硬契约：必须是 op map，
+且 `:type/:process/:f` 与 invoke 对得上。
+
+**影响**：每个扰动都抛一条异常（被 worker 吞掉并记日志），扰动状态机拿不到动作
+结果；更麻烦的是它把**真实失败**淹在噪声里（86 条 ExceptionInfo 里找真正的信号）。
+`compose-agent-all` 还有第二处：它把内层 `:f` 改写成 `:start`/`:stop` 后直接返回，
+`:f` 与外部 op 不一致 —— 同样违约。
+
+**修法**：加 `completion` 助手（`(assoc op :type :info :value v)`），四个 nemesis
+与 compose 全走它；事件语义放 `:value`，不丢信息。
+
+---
+
+### F-37 [测试自身] 「路由证明」把 nemesis 生效读成了「请求没经过 agent」
+
+**实测**（`--workload idgen --nemesis kill-agent`，`2026-09-18T16:32:05Z`）：
+idgen 判据本身全绿（`:ids 35 ≥ 10`、`:violations-by-class {}`），但整个 cell 判
+**invalid**：
+
+```
+:agent {:proof {:total 0
+                :agents [{:host "n4" :up? false :total nil}
+                         {:host "n5" :up? true  :total 0}]}
+        :local-surface? true}
+:failures [{:type :agent-route-not-proven ...}]
+```
+
+**根因两条（同一条判据的两个口径问题）**：
+
+1. **本地面分支要求「check 时每个 agent 都能抓到」**。而 `:kill-agent` 的意义就是
+   让 agent 消失（杀完在 `:stop` 才重启）—— 被杀的 agent 在 check 时还没起回来，
+   于是「路由证不出来」。而 `idgen` / `lock` / `election` / `registry` 的调用**只
+   可能**落在 agent 上（server 没有 `coord.agent.*`），所以「一个 agent 曾经存在过」
+   就已经足够当证据。
+2. **代理计数是进程内的**：agent 重启 ⇒ 计数从 0 重新开始。数据面 workload
+   （`--via-agent`）在 kill 之后仍然真的走了请求，但那一波被算在新进程头上 ⇒
+   run 结束时的单次抓取会看到 0。
+
+**修法**（`agent.clj` + `gates.clj` + `coord.clj`）：
+
+* run 期间**多次采样**（`with-agent` 的 `setup!` 与 `teardown!` 各一次），
+  累积进 `scrape-log`；
+* `:up?` = **曾经**抓到过（判据用它），`:up-now?` = check 时能不能抓到（只作报告）；
+* `:total` = 各次采样的**最大值**（防「重启归零」抹掉已经发生过的代理流量）；
+* 本地面门槛从「每个 agent 都在」改成「**至少一个** agent 曾经在」。
+
+**守门员 fixture**：`gates-agent-local-fixtures{,-ok}/`（同一条历史、只换证明值：
+`{:up? true, :up-now? false}` 必须绿；两个都不曾 up 必须红）。
+
+**这一条为什么要单独记**：它是「判据把**被测系统之外的时序**当成被测系统的失败」
+的典型 —— 与 F-13/F-19 同类（假绿的反面）。矩阵每次都跑 kill 类 nemesis，所以这
+类假红一旦漏过，M5b/M6 的长跑报告会长期带一条噪声红。
+
+---
+
+### F-38 [测试自身] agent 就绪探测只等 HTTP ⇒ 整个矩阵撞在「看起来就绪、实际连不上」的窗口里
+
+**实测**（第二轮矩阵的**第二次**跑，9 个 cell 全部失败，且都是同一个形态）：
+
+```
+{:agent 2, :node "n5", :port 24577}
+clojure.lang.ExceptionInfo: coord-agent: tunnel a2 to n5 did not come up
+ (pid=1334474 alive=true); log tail:
+   channel 1: open failed: connect failed: Connection refused   ×5
+```
+
+**根因**（agent 节点上的日志给出了确切时序）：
+
+```
+17:04:00.298  INFO Agent health/metrics HTTP server listening on http://127.0.0.1:19528
+17:04:09.301  INFO coord-agent connected to server cluster (attempt 1)
+17:04:09.30x  INFO service 'lock'/'idgen'/... registered ...   ← gRPC 到这时才起
+```
+
+agent 的启动顺序是「**HTTP 先起** → 连 server 集群 → **连上之后才起 gRPC
+listener**」，实测两者相差 **~9s**。而我的就绪探测只看 HTTP `/metrics`（`wait-for-agent!`），
+隧道与客户端要的却都是 **gRPC 端口** ⇒ 中间有一段「看起来就绪、实际连不上」的窗口。
+隧道验证有 12s 预算，第一次矩阵跑时勉强过得去；集群变慢之后必然超时，而**失败点
+被推到了隧道层**，异常文本里只有 `Connection refused`，看不出真正原因。
+
+**修法**（三层，全部落在测试侧）：
+
+1. `wait-for-agent!` 的判据改成**两条都要**：HTTP `/metrics` 抓得到 **且** gRPC 端口
+   TCP 连得上（新脚本 `scripts/agent-port-open.sh`，它的退出码就是「TCP 连上了吗」）。
+2. 就绪超时从「返回 false 被忽略」改成**抛异常并带上 http/grpc 两个探针的当前值**
+   —— 以前失败点被推到后面一层，日志上根本看不出是哪一侧没起来。
+3. `start-tunnel!` 加 5 次重试（失败模式几乎都是瞬时的：gRPC 刚起、上一次 run 的
+   ssh 孤儿、端口 TIME_WAIT）。**不重试的代价不只是这一格红**：`open!` 崩掉意味着
+   `teardown!` 也不跑 ⇒ 残留 agent 影响下一个 cell（这就是「9 个 cell 全灭」的放大机制）。
+
+**教训（一般化）**：探「组件是否就绪」时必须探**判据真正依赖的那个端口/接口**，不能
+退而求其次探一个「同进程的、更早起来的」面。这一类错误的形状很固定：**探测面与
+使用面不是同一个东西**（这里是 HTTP vs gRPC），而失败信息落在使用面上，于是看起来
+像被测系统的缺陷。
+
+---
+
+### F-39 [测试自身] 被中断的 run 把 iptables 分区规则留在 agent 节点上 ⇒ 后续 run 全部「no leader found」
+
+**实测**（F-38 修好之后仍然全红的那一轮，`agent.clj` 的就绪超时信息）：
+
+```
+coord-agent a2 on n5 did not become ready within 60000ms (http=true grpc-19527=false)
+```
+
+agent 节点上的日志揭示了真正的原因 —— **每一步都在等超时**：
+
+```
+17:23:58  connecting to server cluster: [172.19.0.2:50051, ...]
+17:24:07  connected to server cluster (attempt 1)
+17:24:25  WARN IdGenService: failed to register node_id: cluster unavailable:
+          no leader found; all endpoints unreachable
+17:24:34  WARN RegistryService: failed to load initial catalog: ... no leader found
+17:24:43  WARN RegistryService: failed to subscribe Watch: ... no leader found
+17:25:01  WARN plugin identity: bootstrap CCT unavailable: ... no leader found
+17:25:28  WARN plugin identity: provisioner session unavailable: ... no leader found
+17:25:28  INFO coord-agent gRPC server listening on 127.0.0.1:19527     ← t+90s
+```
+
+而 `n5` 上一条被中断的 `:partition-agent-server` cell 留下的规则还在：
+
+```
+-A INPUT  -s 172.19.0.2/32 -j DROP      ← 集群三个节点的 IP，双向 6 条
+-A OUTPUT -d 172.19.0.2/32 -j DROP
+...
+```
+
+**根因链**：`:partition-agent-server` 的收尾（`:stop` → `iptables -D`）只在 run 正常
+走到 teardown 时才执行；我为了改代码**中断了正在跑的矩阵**，于是规则留在节点上。
+而 `scripts/env-reset.sh` 只覆盖**集群节点**（agent 节点从没跑过 coord server，不在
+那个脚本的节点集合里）—— 于是后续每一次 run 的 agent 都连不上集群，每个启动步骤
+都要等一次超时，gRPC listener 被推到 90s 之后。
+
+**误诊成本**：我先把方向落在「就绪探测」上（F-38 确实是真问题，也确实是同一症状的
+另一半），修完仍然全红才去查节点状态 —— 一个 `iptables -S | grep DROP` 就能定位的
+问题，花了三轮矩阵的时间。
+
+**修法**：把「清残留」做全 —— 进程（`stop!`）、data_dir（`teardown!`）、**网络规则**
+（新增 `clear-leftover-partitions!`，在 `agent/setup!` 里幂等地删除 agent↔集群的
+DROP 规则）。放在 `setup!` 而不是只放在 teardown，是因为**被中断的 run 根本没有
+teardown**：清理动作必须在**下一次 run 的开头**也做一遍（幂等）。
+
+**一般化**：任何「故障注入的收尾」都必须假设「收尾可能没跑」。所以判据侧的
+`setup!` 要把**所有**可变状态（进程 / 文件 / 网络 / 时钟）都恢复到已知基线，
+而不是只在正常路径的 teardown 里回滚。
+
+---
+
+### F-40 [测试自身] 重叠判据的最小可分辨量：1ms 的「重叠」不是重叠
+
+**实测**（`lock/none`，F-34 三层根因都修好之后）：
+
+```
+lock checker: {:acquires 98, :violations-by-class {:lock-mutual-exclusion 1,
+                                                   :lock-fencing-missing 98}}
+:probe {:samples 35, :read-failures 0, :with-key 7, :contradictions 0, :near-boundary 0}
+```
+
+唯一那条重叠（同一份历史的四种口径对照）：
+
+```
+:legacy 1  :new 1  :true-end 0
+A holder=h-197014 [711400455, 711400823)   ← gone-at = fencing 探针 RPC **返回**时刻
+B holder=h-274749 [711400822, 711401206)   ← B 的 acquire 只早 1ms
+```
+
+**归因**：区间闭合时刻是「客户端**观察到**锁已不在我名下」，它永远是真实闭合时刻的
+**上界**（差一个 RPC 往返）。上一任的 key 是在那次 RPC **内部**被删掉的，所以后继者
+在 RPC 返回前 1ms 成功 CAS 完全合法 —— 而服务端探针在那段时间里**一次矛盾都没看到**
+（`:contradictions 0`），独立估计 `:true-end` 也是 0。
+
+**修法**：给重叠判据一个**明示的**测量容差（`default-overlap-tolerance-ms` = 50ms），
+口径与探针的 `probe-margin-ms` 一致：
+* 重叠 ≤ 容差 ⇒ `:lock-mutual-exclusion-near-boundary`（**出现在报告里**，不进 `valid?`）；
+* 重叠 > 容差 ⇒ 硬违约。
+
+**不静默丢弃**是这个取向成立的前提：报告里永远能同时看到「硬违约」与「边界争议」
+两栏（`:lock.mutual-exclusion {:hard n :near-boundary m :max-overlap-ms x}`），
+所以「把容差调大来刷绿」这件事在报告里是可见的。守门员：
+`lock-fixtures/expect-valid-overlap-within-measurement-resolution.edn`
+（容差改回 0 必红）；同时 `expect-invalid-overlap.edn`（4490ms）仍是硬违约。
+
+---
+
+### F-41 [测试自身] `(count ids)` 被 destructuring 遮蔽 ⇒ **NextBatch 分支从未成功执行过**
+
+**实测**（`idgen/kill-agent` 的 op-liveness 明细）：
+
+```
+:violations [{:f :idgen, :total 166, :ok 7, :fail 143, :info 16, :ratio 0.042
+              :errors {"indeterminate: class java.lang.Long cannot be cast to
+                        class clojure.lang.IFn ..." 1
+                       :unauthenticated 143}}]
+```
+
+**根因**（一行）：
+
+```clojure
+(let [{:keys [name batch? count]} (:value op)]     ; ← count 被绑定成「请求个数」
+  ...
+  (assoc op :type :ok :ids (mapv str ids) :n (count ids)))   ; ← 把 Long 当函数调
+```
+
+`count` 在 `let` 里被遮蔽成 op 的请求个数（一个 `Long`），于是 `(count ids)` 抛
+`ClassCastException: Long cannot be cast to IFn`。jepsen 把它记成 indeterminate，
+而它混在 `:unauthenticated` 风暴里，看报告只会以为「agent 重启窗口里全失败」。
+
+**影响比看起来大**：`NextBatch` 是**唯一**承载「batch 内部 ID 互异」判据的分支 ——
+也就是说 `idgenck` 的这条判据**一次都没真正判过**（checker 的 `:batches 0` 是唯一的
+线索）。这正是 `dev.md` §5.5 第 9 条（「新接一个面的第一跑：先看计数，再看
+`:valid?`」）要防的那类静默覆盖缺失：`:valid? true` 而某个子面从未执行。
+
+**修法**：`(clojure.core/count ids)`，并把「为什么不能写 `(count ids)`」写进注释
+（它是同一个 `let` 里的名字遮蔽，review 时很难一眼看出）。**顺带**：这条也说明
+op 级错误串必须原样进报告（`:errors` 里那条 `indeterminate:` 是唯一把它暴露出来的
+东西）。
+
+---
+
+### F-42 [测试自身] `try-nodes` 不在 UNAUTHENTICATED 上轮换 ⇒ 一个坏 agent 钉死整个 run
+
+**实测**（同一 cell）：166 个 op 里 **143 个 `:unauthenticated`**，而另一个 agent
+全程是好的（`:agent {:proof {... :agents [{:host "n4" :up? true} {:host "n5" :up? true}]}}`）。
+
+**根因**：`try-nodes` 只在 `UNAVAILABLE` / `forward-request` 时轮换下一个端点。
+`:kill-agent` 把 agent 杀掉并重启之后，新 agent 有一段时间 **RoleCache 是空的** ——
+那时它对**所有** CCT 都 fail-closed 拒绝（UNAUTHENTICATED）。而客户端把 op 的端点
+起点钉在「上一次成功的那个 agent」上（per-key leader 缓存）⇒ 所有 op 都打在坏
+agent 上，另一个完好的 agent 一次都没被用到。
+
+**修法**：轮换条件加上 `unauthenticated?`（`client.clj` 的 `try-nodes`）。
+**不**把 `PERMISSION_DENIED` 之类**业务性**拒绝纳入轮换 —— 那些换节点也不会变，
+而且「换个节点就好了」反而会掩盖真实的鉴权结论。
+
+---
+
+### F-43 [测试自身] 路由证明挂到了**对照组**上 ⇒ diff 矩阵的基线建不起来
+
+**实测**（`matrix-m5-diff` 的 4 个 direct cell 全部红）：
+
+```
+map / none :: direct (对照)      M5 CELL ... :failures [{:type :agent-route-not-proven,
+                                  :proof {:total 0 ...}}]
+```
+
+**根因**：`:agent-scrape`（AG-01 的路由证明门禁）原来只要 run 带了 agent 就挂上，
+包括 **direct 对照组**。而对照组的定义就是「客户端直连 server」—— 它**本来就不该**
+有 agent 流量，`:total 0` 是正确行为却被判红。于是 T5.2 的归因规则（direct 红 ⇒ 先修
+server 面；direct 绿 + via-agent 红 ⇒ 红必属 agent 层）**永远走不到第二步**。
+
+**修法**：只有 `--via-agent` 或 agent 本地面 workload 才挂这条门禁（`coord.clj` 的
+`:agent-scrape` 加 `(or (:via-agent opts) local-surface)` 条件）。
+
+---
+
+### F-44 [测试自身] `--via-agent` 这个**布尔旗标**写错了 ⇒ 差分矩阵的 via-agent 侧从未起跑过
+
+**实测**（`map / none :: --via-agent`，就在 F-43 修好、diff 基线第一次可用之后）：
+
+```
+Error while parsing option "--via-agent ": java.lang.ClassCastException:
+class java.lang.Boolean cannot be cast to class java.lang.String
+```
+
+**根因**：选项定义里同时写了 `:default false` 与 `:parse-fn #(Boolean/parseBoolean %)`。
+tools.cli 只要看到 `:parse-fn` 就把该选项当成「吃一个值」的选项，于是裸写
+`--via-agent` 会把**默认值 `false`**（一个 Boolean）喂给 parse-fn ⇒ 抛异常。
+（实测对照：`[[nil "--x" "d" :default false]]` 对 `["--x"]` 解出 `{:x true}`；
+加上 `:parse-fn` 就抛上面那条。）
+
+**影响**：`--via-agent` 是 T5.2 差分基线的一半，也就是说**「经 agent」这条路径在
+CLI 层根本没跑起来过** —— 而失败发生在参数解析阶段，日志里最后一句是
+`make: *** [Makefile:411: test] Error 1`，看起来跟 agent 无关。同一文件里的
+`--no-jitter` 有同样的写法（同属一个坑，一并修了）。
+
+**修法**：布尔旗标**只**写 `:default false`（不要 `:parse-fn`）——出现即 `true`。
+
+---
+
+### F-45 [测试自身] capability 授予清单漏了 `data:kv:delete` ⇒ 经 agent 的 Delete 全被拒
+
+**实测**（F-43/F-44 修好后，`map / none :: --via-agent` 第一次真正跑起来）：
+
+```
+map / none :: --via-agent        :violations [{:f :delete, :total 13, :fail 13,
+                                               :ok 0, :errors {:unauthenticated 13}}]
+:agent {:proof {:total 143, :by-method {:put 67, :range 55, :delete 0}}}
+```
+
+**形状极其精确**：Put 67 次、Range 55 次全部成功，**Delete 一次都没成功**
+（13/13 `:unauthenticated`，而且 agent 的代理计数里 `:delete 0` —— 请求根本没过鉴权）。
+**而 direct 对照组是绿的**：server 侧对 root 有全能力旁路（F-32），Agent 侧只按显式
+能力集判定 —— 所以「直连绿 + 经 agent 红」这个形态**只有差分跑能抓到**（AG-01 的
+全部意义）。
+
+**根因**：`agent.clj` 的 `client-capabilities` 漏了 `data:kv:delete`。权威表在
+`coord-core/src/grpc_auth.rs` 的 `rpc_capability`：
+
+```
+"/coord.kv.KV/Range"  => "data:kv:read"
+"/coord.kv.KV/Put"    => "data:kv:write"
+"/coord.kv.KV/Delete" => "data:kv:delete"     ← lab 的清单里没有这一条
+```
+
+修法：补上 `data:kv:delete`（map / idempotency 两个 workload 都会走 Delete）。
+
+**为什么这次没有靠新 gates 抓到**：抓它的是**已有的** op-liveness 门禁（第 1 轮
+F-13 那条）—— 但只有差分跑才会把「经 agent 的 Delete」这一路真正跑起来，所以
+**护栏是「差分矩阵」本身**，而不是又一条新判据。这也说明差分跑不是「锦上添花」，
+它是**唯一**能覆盖「同一 RPC 两侧能力模型不一致」的形态。
+
+---
+
+### F-46 [coord-agent，P2 候选] nodeid 注册在 agent 拿到凭据**之前**执行 ⇒ 永远是「best-effort 用派生值」
+
+**实测**（`--workload idgen --agents 2 --agent-idgen-node-ids 7,7`，即**刻意**让两个
+agent 用同一个 nodeid；run 判定 **valid**，671 个 ID 互异）：
+
+```
+WARN IdGenService: failed to register node_id (best-effort, using derived):
+     unauthenticated: missing CCT token
+```
+
+**观察**：`idgen.rs` 的启动期 nodeid 注册（`/_idgen/nodes/{nodeid}` 的 CAS + 冲突顺延）
+在 agent **还没有 CCT** 的时候就发起了（`missing CCT token`），所以它**每次都失败**、
+每次都退回「配置里写的 nodeid」。也就是说：
+
+* 「显式撞车 ⇒ 顺延」这条路径在正常情况下**根本没有被执行过**（我这次跑的是
+  `7,7`，如果 CAS 能成，第二个 agent 应该顺延到别的 nodeid 并在日志里体现）；
+* 唯一性在这次 45s / 671 个 ID 的样本里成立 —— 但这只能说明**没撞上**，不能说明
+  「同 nodeid 不会重复」：snowflake 是 `(ms << 22) | (nodeid << 12) | seq`，两个进程
+  各自持 seq，同毫秒同 nodeid 就是**同一串 ID**。
+
+**为什么只记 P2 候选**：要把它升级成 P1 需要构造「两个 agent 同 nodeid + 同毫秒发号」
+并**观测到重复 ID**（或者在日志里看到 CAS 成功时确实顺延）。当前证据只够说
+「注册路径实际上是死的」+「理论上存在重复窗口」。判据侧下一步：把 `7,7` 的 run
+时长/速率拉高（比如 10 分钟、concurrency 4n）看能否抓到重复；同时这也是
+`apis/contracts/STATUS.md` 里 idgen GA（2026-10-31）要求的「时钟回拨防护落地或
+明确不承诺边界」的同一类问题。
+
+---
+
+### 本轮矩阵的实测结论（9 个 cell）
+
+> 下面两栏分别是**第一次**（F-35/36/37 修复前）与**最终**（F-35…F-45 全部修复后）
+> 的结论。最终一栏的 run 路径在 `jepsen/store/coord/`（见 `PROGRESS.md` 的记录）。
+
+| cell | 第一次 | 最终 | 判据侧结论 |
+|:--|:--|:--|:--|
+| `lock / none` | 红 | 红 | **只剩 F-28**（fencing 110/110）。互斥：`:mutual-exclusion {:hard 0 :near-boundary 0}`；探针 45 样本 / 0 读失败 / **0 矛盾** / 0 边界 |
+| `lock / kill-agent` | 红（建于 F-37 之上） | 红 | 同上（只有 F-28） |
+| `lock / partition-agent-server` | 红 | 红 | 同上（只有 F-28） |
+| `election / none` | 红（124 条假双 leader） | **绿** | F-35 修复后双 leader = 0 |
+| `election / kill-agent` | 红（8 条） | **绿** | 同上 |
+| `idgen / none` | 绿 | **绿** | — |
+| `idgen / kill-agent` | 红（F-37 路由证明） | **绿** | F-41（`:batches 0 → 27`）+ F-42 修复后 |
+| `registry / none` | 绿 | **绿** | 幽灵实例判据在 45s 里都有样本 |
+| `registry / kill-agent` | 红（F-37） | **绿** | F-42 修复后 |
+| `map / none`（差分对，`matrix-m5-diff`） | direct 红（F-43） | **direct 绿 / via-agent 绿** | F-43/44/45 修完后第一次拿到可用的差分基线（via-agent 的路由证明 `:total 161`） |
+| `soakfull`（`--soak-mix` 默认含四个 agent 面） | — | **起得来** | soak 日志里能直接看到 `:lock-contend` / `:elect-campaign` 的 invoke/completion（§14 待办 4 的证据） |
+
+**一句话总结**：coord-agent 的四个本地面现在都能在 lab 里被判决；`lock` 的红
+**只剩 F-28（fencing 真缺陷）**，其余三面（election / idgen / registry）在本轮修复后
+**全绿**；差分基线（direct vs `--via-agent`）第一次可用。
+
+---
+
+## 16. 第七轮（2026-09-19）：AG-06（崩溃持有者的服务端回收）+ election 服务端探针 —— 并挖出**凭据面**的 P0
+
+> 本轮的目标是「把 coord-agent 再做实一层」：给四个本地面补上**只有多进程 + 真故障
+> 才能判**的三类判据 —— ①崩溃持有者的资源回收（AG-06）；②「自述 vs 服务端真相」的
+> 第二个面（election 的服务端探针，F-35 的残留）；③弃锁在故障前后**期望值相反**的
+> 成对判据。为此新增了一个时间窗工具（`jepsen.coord.faultwin`）。
+>
+> 结果：三类判据全部落地并在 lab 真跑；**第一跑就交出一条 coord-agent 的 P0 候选
+> （F-50）** —— 而且它是**整个 agent 面此前所有绿灯的共同盲区**。
+
+| # | 一句话 | 分级 | 状态 | 判决任务 |
+|:--|:--|:--|:--|:--|
+| F-50 | **coord-agent**：服务端开启鉴权时，agent **自发**的后台流量不带凭据（`missing CCT token`）⇒ 锁自动续期 / registry 目录加载 / registry watch 订阅 / idgen nodeid 注册 **全部失效** | **P0 候选**（锁会「静默丢失」，调用方/SDK 以为仍持有） | `confirmed-by-run`（agent 日志 4 处 + 锁面服务端探针 9/13） | M5a / AG-06 |
+| F-46 | （根因修正）原记「nodeid 注册发生在拿到 CCT 之前」，实测证明不是时序：**共享客户端根本没有凭据通道** | P2 → 归并进 F-50 | `superseded-by F-50` | M5a |
+| F-51 | **coord-agent**：auth 下 registry「以空缓存启动 + 订阅失败」⇒ 多 agent 拓扑里**跨 agent 发现**结构性不可用（当前 checker 未覆盖「缺失」，只覆盖「陈旧/幽灵」） | P1 候选 | `open`（判据待补，下一轮） | M5b / registry 面 |
+| F-52 | **coord-agent（边界待确认）**：锁的后台续期节拍硬编码 10s ⇒ `ttl <= 10s` 时续期跑不赢到期（已登记 dev.md §5.4-⑨ 待书面确认） | 待确认 | `open` | M5a / lock 面 |
+| F-47 | 测试自身：Makefile 里传给 checker 的 EDN 选项，双引号被 `docker exec … bash -c "…"` 这一层吃掉 ⇒ 字符串常量**静默变成 symbol** | P2（测试自身） | `closed`（4 处 EDN 参数改成 `\"` + 写进 dev.md §5.5 第 25 条） | T0.3 / `make checkers` |
+| F-48 | 测试自身：`phantom-loss-violations` 多一个 `)` ⇒ 函数**返回 `vec` 函数本身**；`lein check` 全绿，只有真跑才炸（`Don't know how to create ISeq from: clojure.core$vec`） | P1（测试自身） | `closed`（+ dev.md §5.5 第 26/27 条） | M5a / AG-06 |
+| F-49 | 测试自身：AG-06 第一版把「判过」实现成「出现在违反列表里」⇒ **合法历史被判成未判定**，正例 fixture 第一次跑就红 | P1（测试自身） | `closed`（判定与覆盖分开算 + dev.md §5.5 第 23 条） | M5a / AG-06 |
+| F-53 | 测试自身：run 边界用 jepsen `:time`（测试起点相对量），样本时刻用 `:t0-ns`（ms-since-boot）⇒ 两个时间轴混用，每条弃锁都「窗口内没有样本」（F-34 那类问题的**同型复发**） | P1（测试自身） | `closed`（run 边界也走 `abs-ms`；被 `:lock-abandon-unjudged` 门槛当场抓到） | M5a / AG-06 |
+| F-56 | 测试自身（**open**）：idgen 的撞车实验（`--agent-idgen-node-ids 7,7`）零重复 —— 但解码 167709 个 ID 的 nodeid 字段**全是 7** 却也零重复，原因是 `--nemesis none` 下 `try-nodes` 的 per-key leader 缓存**不回退** ⇒ 同一把发号器名永远打**同一个** agent，「两个进程同毫秒同 seq」这个条件根本没被制造出来 | P1（测试自身） | `open`（下一轮：配 `kill-agent`/`pause-agent` 强制轮换，或让两个 agent 同时持续服务） | M5a / idgen 面 |
+| F-55 | 测试自身：`:partition-agent-server` 的清理**不验证**（逐条 `meh -D`，重复规则删不掉）⇒ 正常结束的 partition cell 也在 n5 留下 6 条 DROP，后续 3 个 cell 全部以「agent 就绪超时」失败（症状与 F-38/F-39 同形） | P1（测试自身） | `closed`（删多次 + **读回验证**，非 0 直接抛异常） | M5a / 所有 partition cell |
+| F-54 | 测试自身：把「TTL ≤ 续期节拍」做成**豁免**的第一版，连带赦免了「agent 归因失败」⇒ `expect-invalid-abandon-unjudged` 从 invalid 变 valid | P1（测试自身） | `closed`（豁免只对可归因的 op 生效；最终取消豁免、改成诊断字段） | M5a / AG-06 |
+
+---
+
+### F-50 [coord-agent，P0 候选] 鉴权开启时 agent 自发流量无凭据 ⇒ 保活/订阅/注册全线失效
+
+**怎么撞上的**：AG-06 的服务端探针在**零故障**的 `lock:none` cell 里看到「持有者还
+活着，服务端 key 却不见了」。第一反应是测量问题（F-34 的教训），于是去 agent 节点
+上看日志 —— 结论完全不是测量：
+
+```
+$ grep -hoE "…" /var/log/coord-agent-a*.log | sort | uniq -c
+ 89  failed to register node_id (best-effort, using derived): unauthenticated: missing CCT token
+ 89  RegistryService: failed to subscribe Watch: unauthenticated: missing CCT token; entering self-protection
+ 89  RegistryService: failed to load initial catalog: … unauthenticated: missing CCT token; starting with empty cache
+ 65  auto-renew of lock 'lock-*-abandon' (lease=N) failed: unauthenticated: missing CCT token
+     and server-side verification also failed (failed to read lock key … from server:
+     unauthenticated: missing CCT token); keeping local record (fail-safe, will retry)
+```
+
+四个**互相独立**的服务（lock / registry 目录 / registry 订阅 / idgen 注册）给出同一句
+错误。而这四处的共同点是：**它们是 agent 自己发起的调用，没有调用方**。
+
+**根因（源码锚点）**：agent 的出站凭据是**任务局部量**，只装「调用方转发进来的
+CCT」：
+
+* `coord-agent/src/auth/interceptor.rs:556`：
+  「第四轮 §3.2：把**调用方自己的凭据**转发给服务端 … 此前 agent 出站客户端
+  `token_provider = None`，生产默认配置（auth_enabled=true）下经 agent 的调用一律
+  `missing CCT token`」；
+* `coord-agent/src/lib.rs:629`：
+  「引导 CCT 只注入**独立**的插件身份客户端，**不污染**共享 `inner.client`（代理数据面
+  流量不应携带引导凭据）」；
+* 而四个服务的后台路径用的**正是**共享 `inner.client`
+  （`lock.rs:638` 的 `keep_alive`、`lock.rs:113` 的回查、`registry.rs:530/586` 的
+  `watch`、`registry.rs:143` 的目录加载、`idgen.rs:565` 的 CAS 注册）。
+
+⇒ **有调用方转发凭据的路径全通（所以此前所有 run 都是绿的），agent 为自己做的事全死。**
+
+**影响面（按契约条款排）**：
+
+1. **lock 的「自动续期」承诺失效**（`lock.rs` 文件头明写「封装重试与**自动续期**」）：
+   调用方拿到的锁在 `ttl` 后从服务端消失，而 agent 的本地缓存**仍然认为自己持有**
+   （`RenewAction::Keep` 的 fail-safe 分支，连回查都因为同一原因失败）⇒ 调用方可能
+   在**没有锁**的情况下跑完临界区。这正是 `lock.rs:187-215` 记录过的历史 P0 的形态
+   （那次的成因是本地墙钟判过期，这次的成因是凭据）。
+2. **registry 以空目录启动、且永不订阅**：`starting with empty cache` +
+   `entering self-protection` ⇒ 多 agent 下**跨 agent 发现**结构性不可用（F-51）。
+3. **idgen nodeid 注册永远失败** ⇒ 「显式撞车 ⇒ CAS 顺延」这条路径从未被执行过
+   （F-46 的真实根因；原判断「时序问题」不成立）。
+4. 附带：`config_center` / `workflow` 等同样走共享客户端的服务，只要有订阅/回查也会
+   一起失效。
+
+**为什么此前 20+ 个 cell 全绿也没抓到**（这一条比缺陷本身更值得记）：
+
+* 所有 workload 的**前台**操作都会转发调用方 CCT ⇒ 代理路径一切正常；
+* 「agent 自发的流量」只有**后台保活/订阅/注册**，而这四件事在**短跑**里几乎不可见
+  —— 5s TTL 的锁在 200ms 的持有窗口里根本走不到续期；registry 的跨客户端判据只看
+  「陈旧」（别人看得到），不看「缺失」（别人看不到）；
+* ⇒ 这正是 `dev.md` §5.5 第 22 条（「每一个**子面**都要单独问一句它真的跑了吗」）
+  的又一次翻版：**agent 的自发流量此前没有任何一条判据**。
+  本轮 AG-06 的「弃锁 + 服务端探针」是第一条专门打这条路径的判据，第一次跑就红。
+
+**复现配方**（docker lab，`--time-limit 120`，`--agents 2`，服务端 auth 开启）：
+
+```bash
+make test WORKLOAD=lock NEMESIS=none TIME_LIMIT=120 CONCURRENCY=2n AGENTS=2 \
+          LOCK_TTL_SECONDS=30 SKIP_CHECKERS=1
+# 判据侧：lock checker 的 :abandon {:ops 13 :judged 12 :phantom-loss 9}
+# 直接证据：agent 节点 /var/log/coord-agent-a*.log 的 auto-renew 失败（4 处同因）
+```
+
+**建议的修复方向（待 coord 团队确认）**：给 agent 一个**独立的服务账户凭据**（与插件
+服务账户同一机制、但能力集按服务需要最小化），并且**只在没有调用方转发的 CCT 时**
+使用它（否则会把 agent 自己的权限借给调用方，反而放大权限）。判据侧不再需要新增
+判据即可验证：AG-06 的两条（弃锁在 ttl+grace 内被回收 / 活着时不得消失）已经把这两侧
+都钉住了。
+---
+
+### 本轮 lab cell 一览（docker lab，全部 `--agents 2`）
+
+| cell | 判定 | 关键数字 | 归因 |
+|:--|:--|:--|:--|
+| `lock / none`（`LOCK_TTL_SECONDS=30`，120s） | 红 | `:abandon {:ops 13 :judged 12 :phantom-loss 9}`；`:fencing-missing 184`；`:mutual-exclusion {:hard 0 :near-boundary 2}`；探针 127 样本 / 0 矛盾 | **F-50**（假丢锁）+ **F-28**（fencing） |
+| `lock / none`（ttl=5 默认，120s） | 红 | `:abandon {:ops 52 :judged 50 :phantom-loss 50}`（`phantom-loss-below-cadence 50`） | 同上（TTL 小只是**第二个**成因，见 F-52） |
+| `lock / kill-agent`（180s） | 红 | `:abandon {:ops 1 :orphans 0}`；`:acquires 7`（故障期吞吐极低） | 回收侧没红；样本太少，需要更长/更狠的配置（记在下一轮） |
+| `lock / partition-agent-server`（150s） | 红 | `:abandon {:ops 47 :orphans 0 :phantom-loss 42}`；`:acquires 174` | **回收侧 `:orphans 0` = 服务器确实会回收**；红全部来自 F-50 |
+| `election / none`（90s） | **绿** | `:campaigns 175 :won 56`；探针 74 样本 / `with-key 64` / 0 矛盾 / 0 边界 | 服务端真值判据第一次在线（F-35 残余闭环） |
+| `election / kill-agent`（120s） | **绿** | `:campaigns 208`；探针 113 样本 / 0 矛盾 | 同上；`:resign-failures 2`（leader 续期失败 → 退位，与 F-50 同源但不违反所判契约） |
+| `idgen`（nodeid 7,7 / rate 200 / 8n，180s） | **绿** | `:ids 167709 :distinct-ids 167709 :batches 17704`；解码后 nodeid 字段**全部 = 7** | **但结论是「未制造出条件」**：见 F-56 |
+
+**一句话总结**：AG-06 的两半在 lab 上分开验证了 —— **回收侧是好的**（`:orphans 0`），
+**「不得假丢锁」侧是红的**，而红的原因不是测试（F-34/F-53 的教训已在判据里处理掉），
+是 **F-50：agent 自发的保活流量没有凭据**。
+
+
+---
+
+## 17. 第八轮（2026-09-19）：M5b 起步 —— agent 本地数据面（cache / mq）落地
+
+本轮把 `coord-agent-coverage-plan.md` 里 **M5b 的两个不需要插件引擎的面**做成了
+可跑的 workload + checker + fixture：`--workload cache`（AG-09）与 `--workload mq`
+（AG-11）。两条判据线都是**先写负控制 fixture、再进 lab**（§0-1），因此过程中
+抓到的四条缺陷全部是**测试自身**的（F-59…F-62），且都被 fixture 当场拦下 ——
+这正是「没有负控制的 checker 不算完成」的价值。
+
+### F-57 [coord-agent，P1] `MqPublishRequest.idempotency_key` 被声明但没有被使用
+
+* **形态**：proto 里有 `idempotency_key` 字段（`agent_api.proto` 的
+  `MqPublishRequest`），但 gRPC 发布路径**从不读它** ——
+  `coord-agent/src/services/grpc_handlers.rs:626-655` 的两条分支
+  （`produce_replicated(...)` 与 `produce(...)`）都把 `None` 当作 header 传下去，
+  `req.idempotency_key` 与 `req.key` 都被丢弃。
+* **后果**：调用方在「响应丢失后重试」时会给下游**多一条消息**。对 at-least-once
+  的消费侧这是「幂等键形同虚设」；对需要精确一次的账务/发号场景是重复副作用。
+* **判据侧**：`mqck` 有判据 7（`mq-idem-not-deduped`），但**默认只记录不判红**
+  （`:expect-idem-dedupe?` 默认 false，报告里是 `:idem-dups`）。理由是契约措辞
+  未书面确认：proto 声明了字段，但没有任何文档承诺 broker 侧去重。两条 fixture
+  把这个开关的两个方向都钉住了（`mq-fixtures/` 只记录 / `mq-fixtures-idem/` 硬判）。
+* **复现**：`make test WORKLOAD=mq NEMESIS=none AGENTS=1 TIME_LIMIT=60
+  SKIP_CHECKERS=1`（checker 报告里的 `:idem-dups` > 0 即为本条）。
+* **状态**：`open`（等 §7 的书面确认；确认后把默认值改成 true，MQ cell 会按预期变红
+  并把这条升级为硬判据）。
+
+### F-58 [lab/拓扑，P1] cache/mq 的数据在 **agent 进程本地** ⇒ 跨 agent 面结构性不可测
+
+* **事实**：`cache.rs`（redb）与 `mq.rs`（本地日志 + 可选 ISR 复制）都把数据放在
+  **agent 进程本地**；ISR 复制默认关闭，且需要 `replication_peers` 里给出**可达的
+  peer 地址**。
+* **本 lab 的硬约束**：agent 刻意只绑 loopback（`agent.clj` 的 `config-str`）并由
+  控制机用 SSH 隧道接入 ⇒ agent 之间**不可达** ⇒ `replication_peers` 无法建立。
+* **因此未覆盖**：AG-09 的 ISR 复制承诺（复制日志 / 持久化幂等键 / 本地序列号）、
+  AG-11 的跨 agent 投递、以及「分区期间的复制降级语义」。已写进两个 checker 的
+  「漏检边界」段。
+* **已在测试侧做的处置**（不是权宜之计，而是**拒绝假红**）：`coord.clj` 新增
+  `local-consistency-workloads = #{:cache :mq}`，在 `--agents > 1` 时**构造期抛异常**
+  —— 多 agent 下「读不到刚写的值」是合法的（数据在另一个 agent 上），放行只会
+  产出假红或假绿。
+* **待 coord/引入方决定**（§7）：是否给出一个 agent 间可达的拓扑（daemonset 形态，
+  或同机多端口 + host 网络）来覆盖复制面；若不覆盖，需要在契约里明确
+  「cache/mq 是进程本地、不承诺跨 agent 一致」。
+* **状态**：`open`（覆盖边界已声明；拓扑决定待书面确认）。
+
+### 本轮测试自身缺陷（F-59…F-62）—— 全部由 fixture 拦下
+
+| 编号 | 形态 | 危害 | 处置 |
+|:--|:--|:--|:--|
+| F-59 | `intervened?`（区间干扰闸门）把**被审的那个写自己**也算成干扰（它的完成时刻就是窗口左端点，永远与自己相交） | 「丢写 / TTL 提前到期 / TTL 幽灵」三条判据被**静默关闭**：三条负控制 fixture 全部假绿 | 加 `op-id` 排除自身；三条 fixture 转红 |
+| F-60 | TTL 判据把**毫秒**的 ttl 与**纳秒**的时间戳直接相减 | 两个方向同时错：`ttl-early` 的门槛塌成 0ns（永不触发），而 `ttl-ghost` 对**一切正常读**都成立（3s 读一个 ttl=5s 的值被判幽灵）。lab 里会红成一片，看起来像被测系统崩了 | 统一换成 ns 再比；正例 fixture（同一份历史里 TTL 两侧都合法）把它钉住 |
+| F-61 | `ack-events` 用 `{[topic partition offset] → ack 时刻}` 且**后写覆盖前写** | 「已确认的消息又被投递」判据用「最后一次确认」当时刻 ⇒ 第一次确认之后的重投被漏掉（`expect-invalid-ack-not-honoured` 假绿） | 保留**最早**一次确认；该 fixture 转红 |
+| F-62 | `list-violations` 少一个 `)`（F-48 的同型）：`(vec (mapcat <fn>) <coll>)` 被解析成 `vec` 的两个参数 | 编译通过、`lein check` 通过，`vec` 在运行期抛 ArityException（整条 cache 套件不可判） | 括弧修正；**先跑 fixture 套件再进 lab** 这条纪律再次生效（§5.5 第 26/27 条） |
+
+> 顺带一条：`default-cache-keys` 的 `#(str "cache-list-" %-占位)` 少写了 `%`，
+> 被 `lein check` 以「Wrong number of args (1) passed to ...」当场挡下（这类
+> 加载期错误比运行期好得多）。
+
+### 本轮交付（代码 + fixture）
+
+| 项 | 内容 | 状态 |
+|:--|:--|:--|
+| wire 层 | `CoordRpc.java`：Cache（Get/Set/Delete/LPush/LRange/LLen/SAdd/SMembers）+ MQ（CreateTopic/Publish/Poll/Ack）共 12 个方法的 descriptor；`proto.clj` 的请求构造/响应读取（含 bytes ↔ String 的统一口径） | ✅ `scripts/check-agent-wire.clj` 自检通过 |
+| cache 面 | `--workload cache`（三类键空间互不相交：string/list/set；一半 Set 带 TTL）、`jepsen.coord.cacheck`（7 条判据 + 4 项样本门槛）、`scripts/cache-fixtures/`（10）+ `scripts/cache-fixtures-sample/`（1） | ✅ **10/10 全绿**（含 3 条 TTL/丢写负控制与 3 条守门员） |
+| mq 面 | `--workload mq`（发布 + poll 内联 ack；1/4 发布是刻意重发）、`jepsen.coord.mqck`（6 条判据 + idempotency 观察 + 2 项门槛）、`scripts/mq-fixtures/`（10）+ `scripts/mq-fixtures-idem/`（1） | ✅ **10/10 全绿** |
+| 能力引导 | `agent.clj` 的 `client-capabilities` 补 `coord:cache:read/write`、`coord:mq:manage/publish/consume`（取自 `coord-core/src/auth` 的权威表；F-45 的教训） | ✅ |
+| 门禁 | `make checkers` 由 28 套 / 143 个扩到 **32 套 / 152 个**；新增 `matrix-m5b`（cache/mq × none\|kill-agent\|partition-agent-server，`--agents 1`） | ✅ 离线全绿；lab 见 PROGRESS §1.8 |
+
+### 本轮 lab 首跑暴露的**测试自身**缺陷（F-63/F-64/F-65）—— 全部是被「先跑 fixture 再进 lab」之外的当场信号抓到的
+
+| 编号 | 形态 | 症状（看起来像什么） | 处置 |
+|:--|:--|:--|:--|
+| F-63 | cache/mq 的判据**混用两个时间轴**：起点用 op 自读的 `:t0-ns`（boot 相对量），完成用 jepsen 的 `:time`（**测试起点**相对量）⇒ 「写完成 < 读开始」恒真 | 一次 `cache/none` 跑出 **37 条违反**（丢写 10 / list 丢推入 18 / set 丢成员 9），看起来像「cache 写入后读不回来」的 P0 | 每个 cache/mq completion 增加 `:done-ns`（`System/nanoTime`，与 `:t0-ns` 同域），`end-ns` 优先用它；**同一 cell 从 37 条违反变为 0**（F-53 的同型复发） |
+| F-64 | clojure `case` 里放 Java 枚举常量（`Descriptors$FieldDescriptor$Type/STRING`）——**编译能过、运行期永不匹配** | 每个 cache 请求都抛 `cache-request: unsupported field type STRING for :key` ⇒ 六个 cell 全部「0 条 op 完成」，报告看起来像**被测系统一条 op 都没成功** | 改 `cond` + `=`（探针实测 `=` 为 true、`case` 不匹配）；顺带说明为什么它比语法错更危险：它把「测试侧编码失败」伪装成「被测系统全灭」 |
+| F-65 | `defrecord CoordClient` 新增字段后，位置构造器少传一个参数（16 个字段传 15 个） | 每个 cell 起跑即 `Wrong number of args (15) passed to ->CoordClient`（`lein check` 查不出，记录构造是运行期的） | 补参数；纪律：`defrecord` 字段数变化后必须至少真起一个 cell（§5.5 第 26 条的同族） |
+| F-66 | cache/mq 的**键空间与主题名没有带 run 标签**（值带了） | 上一个 cell 留在 agent 本地 redb / MQ 日志里的数据被本 cell 读回：一条历史里出现**两个 run 标签**，并产出 `:fabricated` 假红 | 键与主题名都拼 run 标签（与 map/scan/txn 的 `run-tag` 纪律一致）；同一条 fixture 纪律：`cache-fixtures/expect-valid-clean.edn` |
+
+> **口径说明（重要）**：F-63/F-64/F-66 都曾**看起来像 coord-agent 的缺陷**（「cache 写完读不回」、
+> 「agent 一条 op 都不成功」、「读到别的 run 的值」），实际是测试侧的度量/编码/隔离问题。
+> 三条都已修复，修复后 `cache/none` 的 checker 报告为 `:violations-by-class {}`。
+> 这正是「负控制 + 先跑 fixture + 单变量分诊」三件事同时存在的价值：**没有任何一条被写进
+> 缺陷账当成 coord 的问题**。
+
+### F-67 [待分诊，P1] mq 的 `Ack` 一次都没成功（`:poll-ack-failures 59/59`）
+
+* **证据**：`make test WORKLOAD=mq NEMESIS=none TIME_AGENT=45 AGENTS=1`（修好主题接线后）——
+  checker 报告 `:polls 59 :poll-ack-failures 59 :acked-offsets 0`，而 59 个 Poll 全部拿到消息、
+  `:violations-by-class {}`。也就是说：**消费侧从未提交过偏移**。
+* **影响**：at-least-once 的「不丢」判据依赖「确认过的游标才前进」（本仓 checker 的锚），
+  而游标因 Ack 全失败**停在 0** ⇒ 判据只能验证「重复投递」（合法），**验证不到「静默丢失」**。
+  另外生产上消费者永远提交不了偏移 ⇒ 重启后整队列重放。
+* **待分诊**：①能力点（`coord:mq:consume` 已按权威表授权）；②Ack 处理器是否要求分区 Leader
+  （`grpc_handlers.rs` 的 Ack 注释提到「复制启用时仅 Leader 提交偏移」，而本 lab 关闭复制）；
+  ③拓扑（1 agent 下 shard leader 判定）。
+  **在分诊前，`mq` 的 cell 只能算「部分判据可用」**（已把 `:poll-ack-failures` 打进 summary 作为可见信号）。
+* **状态**：`open`（下一轮的第一件事）。

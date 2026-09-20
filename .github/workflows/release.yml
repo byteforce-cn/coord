@@ -69,6 +69,23 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }} -p coord
 
+      # 产物面澄清（v0.2.0）：**不存在独立的 coord-agent 产物**。
+      # agent 是 `coord` 的子命令（`coord agent …`），jepsen lab 也只是把
+      # `/opt/coord/coord` 复制成 `/opt/coord-agent/coord`（见
+      # jepsen/src/jepsen/coord/agent.clj:8）。因此本 workflow 的产物
+      # 同时服务于 server 与 agent 两种角色，无需新增 build target。
+      # 但“产物真的带 agent 面”必须被断言，否则用例会静默丢失。
+      # （交叉编译腿无法在本机 runner 执行，故只冒烟原生腿。）
+      - name: Smoke the artifact (native leg only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/coord"
+          # 版本头：`coord --version` 取自 CARGO_PKG_VERSION，应与 tag 同名
+          "$BIN" --version | grep -q "${GITHUB_REF_NAME#v}"
+          # agent 面必须可用（子命令存在且能打印帮助）
+          "$BIN" agent --help > /dev/null
+
       - name: Package binary + checksum
         shell: bash
         run: |

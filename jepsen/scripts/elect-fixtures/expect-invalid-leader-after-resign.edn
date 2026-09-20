@@ -1,0 +1,13 @@
+;; expect-invalid-leader-after-resign —— P1：Resign 之后旧 leader 仍被读出。
+;;
+;; 台账把「续约（重新 Campaign）语义验证」列为 election 的整改要点：
+;; Resign 成功却仍能被 GetLeader 读到自己，会让别的 candidate 认为「有人在位」
+;; 而不敢竞选，或反过来让调用方把请求发给一个已经退位的实例。
+[{:type :ok :f :elect-campaign :process 0 :time 10
+  :elected? true :group-name "g1" :candidate-id "c1" :lease-id 21
+  :campaign-at-ms 10 :resigned-at-ms 800 :resigned? true
+  ;; Resign 回了 true，但 GetLeader 仍返回自己 ⇒ 「已不在 leader 位」没有证据
+  ;; （区间因此不闭合：这是故意的，见 :election-leader-after-resign 的取向）
+  :gone? false :gone-at-ms nil :still-leader-after-resign true
+  :holder-ttl-seconds 10
+  :leader-after-resign {:leader-id "c1" :lease-id 21 :exists true}}]

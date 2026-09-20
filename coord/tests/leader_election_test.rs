@@ -31,6 +31,8 @@ async fn inner_for(addr: &str) -> Arc<AgentInner> {
             vec![addr.to_string()],
             AgentCache::new(128, 0, 128, 0),
             None,
+            // 测试环境不开服务端鉴权：回退凭据（agent 自身身份）留空。
+            Arc::new(coord_client::credential::CachedTokenProvider::new(None)),
         )
         .await
         .expect("connect agent inner to test server"),

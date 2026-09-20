@@ -41,6 +41,7 @@ public class CoordRpc {
 
   private static final Type T_STRING = Type.TYPE_STRING;
   private static final Type T_BYTES  = Type.TYPE_BYTES;
+  private static final Type T_INT32  = Type.TYPE_INT32;
   private static final Type T_INT64  = Type.TYPE_INT64;
   private static final Type T_BOOL   = Type.TYPE_BOOL;
   private static final Type T_MSG    = Type.TYPE_MESSAGE;
@@ -69,6 +70,14 @@ public class CoordRpc {
     return f(name, num, T_INT64, L_OPT);
   }
 
+  private static FieldDescriptorProto.Builder i32(String name, int num) {
+    return f(name, num, T_INT32, L_OPT);
+  }
+
+  private static FieldDescriptorProto.Builder repI64(String name, int num) {
+    return f(name, num, T_INT64, L_REP);
+  }
+
   private static FieldDescriptorProto.Builder bool(String name, int num) {
     return f(name, num, T_BOOL, L_OPT);
   }
@@ -87,6 +96,10 @@ public class CoordRpc {
 
   private static FieldDescriptorProto.Builder repStr(String name, int num) {
     return f(name, num, T_STRING, L_REP);
+  }
+
+  private static FieldDescriptorProto.Builder repBytes(String name, int num) {
+    return f(name, num, T_BYTES, L_REP);
   }
 
   private static FieldDescriptorProto.Builder oneofMsg(String name, int num, String typeName,
@@ -486,6 +499,640 @@ public class CoordRpc {
   }
 
   // ------------------------------------------------------------------
+  // coord/agent/agent_api.proto -- M5 agent-local surfaces
+  //
+  // Field numbers / service names are copied from coord-proto's
+  // src/proto/agent_api.proto (package coord.agent). Only the four surfaces
+  // the M5 suite drives are modelled here; the rest of that file
+  // (Handshake/Config/Health/Event/Cache/MQ/Workflow/...) is deliberately not
+  // modelled -- an unmodelled surface cannot be called, which is what we want
+  // (a typo'd descriptor would surface as UNIMPLEMENTED instead of silently
+  // inventing a contract).
+  //
+  // These services exist ONLY on the agent: the server's router has no
+  // coord.agent.* service, so a successful call is itself proof that the
+  // request really went through an agent (see jepsen.coord.agent).
+  // ------------------------------------------------------------------
+
+  private static DescriptorProto lockAcquireRequest() {
+    return DescriptorProto.newBuilder().setName("LockAcquireRequest")
+        .addField(str("name", 1).build())
+        .addField(str("holder_id", 2).build())
+        .addField(i64("ttl_seconds", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto lockAcquireResponse() {
+    return DescriptorProto.newBuilder().setName("LockAcquireResponse")
+        .addField(bool("acquired", 1).build())
+        .addField(i64("lease_id", 2).build())
+        .addField(str("holder_id", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto lockReleaseRequest() {
+    return DescriptorProto.newBuilder().setName("LockReleaseRequest")
+        .addField(str("name", 1).build())
+        .addField(str("holder_id", 2).build())
+        .addField(i64("lease_id", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto lockReleaseResponse() {
+    return DescriptorProto.newBuilder().setName("LockReleaseResponse")
+        .addField(bool("released", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto lockRenewRequest() {
+    return DescriptorProto.newBuilder().setName("LockRenewRequest")
+        .addField(str("name", 1).build())
+        .addField(str("holder_id", 2).build())
+        .addField(i64("lease_id", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto lockRenewResponse() {
+    return DescriptorProto.newBuilder().setName("LockRenewResponse")
+        .addField(i64("new_ttl", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto lockGetInfoRequest() {
+    return DescriptorProto.newBuilder().setName("LockGetInfoRequest")
+        .addField(str("name", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto lockGetInfoResponse() {
+    return DescriptorProto.newBuilder().setName("LockGetInfoResponse")
+        .addField(str("name", 1).build())
+        .addField(str("holder_id", 2).build())
+        .addField(i64("lease_id", 3).build())
+        .addField(i64("acquired_at", 4).build())
+        .addField(i64("ttl_seconds", 5).build())
+        .addField(bool("exists", 6).build())
+        .build();
+  }
+
+  private static DescriptorProto idGenNextIdRequest() {
+    return DescriptorProto.newBuilder().setName("IdGenNextIdRequest")
+        .addField(str("name", 1).build())
+        .addField(i64("step", 2).build())
+        .build();
+  }
+
+  private static DescriptorProto idGenNextIdResponse() {
+    return DescriptorProto.newBuilder().setName("IdGenNextIdResponse")
+        .addField(i64("id", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto idGenNextBatchRequest() {
+    return DescriptorProto.newBuilder().setName("IdGenNextBatchRequest")
+        .addField(str("name", 1).build())
+        .addField(i32("count", 2).build())
+        .addField(i64("step", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto idGenNextBatchResponse() {
+    return DescriptorProto.newBuilder().setName("IdGenNextBatchResponse")
+        .addField(repI64("ids", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto leaderCampaignRequest() {
+    return DescriptorProto.newBuilder().setName("LeaderCampaignRequest")
+        .addField(str("group_name", 1).build())
+        .addField(str("candidate_id", 2).build())
+        .addField(i64("ttl_seconds", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto leaderCampaignResponse() {
+    return DescriptorProto.newBuilder().setName("LeaderCampaignResponse")
+        .addField(bool("elected", 1).build())
+        .addField(i64("lease_id", 2).build())
+        .addField(str("leader_id", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto leaderResignRequest() {
+    return DescriptorProto.newBuilder().setName("LeaderResignRequest")
+        .addField(str("group_name", 1).build())
+        .addField(str("candidate_id", 2).build())
+        .addField(i64("lease_id", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto leaderResignResponse() {
+    return DescriptorProto.newBuilder().setName("LeaderResignResponse")
+        .addField(bool("resigned", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto leaderGetLeaderRequest() {
+    return DescriptorProto.newBuilder().setName("LeaderGetLeaderRequest")
+        .addField(str("group_name", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto leaderGetLeaderResponse() {
+    return DescriptorProto.newBuilder().setName("LeaderGetLeaderResponse")
+        .addField(str("leader_id", 1).build())
+        .addField(i64("lease_id", 2).build())
+        .addField(i64("elected_at", 3).build())
+        .addField(bool("exists", 4).build())
+        .build();
+  }
+
+  private static DescriptorProto registryRegisterRequest() {
+    return DescriptorProto.newBuilder().setName("RegisterRequest")
+        .addField(str("service_name", 1).build())
+        .addField(str("instance_id", 2).build())
+        .addField(str("metadata", 3).build())
+        .addField(i32("ttl_seconds", 4).build())
+        .build();
+  }
+
+  private static DescriptorProto registryRegisterResponse() {
+    return DescriptorProto.newBuilder().setName("RegisterResponse")
+        .addField(i64("lease_id", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto registryDeregisterRequest() {
+    return DescriptorProto.newBuilder().setName("DeregisterRequest")
+        .addField(str("service_name", 1).build())
+        .addField(str("instance_id", 2).build())
+        .addField(i64("lease_id", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto registryDeregisterResponse() {
+    return DescriptorProto.newBuilder().setName("DeregisterResponse").build();
+  }
+
+  private static DescriptorProto registryHeartbeatRequest() {
+    return DescriptorProto.newBuilder().setName("HeartbeatRequest")
+        .addField(str("service_name", 1).build())
+        .addField(str("instance_id", 2).build())
+        .addField(i64("lease_id", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto registryHeartbeatResponse() {
+    return DescriptorProto.newBuilder().setName("HeartbeatResponse")
+        .addField(i64("ttl", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto registryServiceInstance() {
+    return DescriptorProto.newBuilder().setName("ServiceInstance")
+        .addField(str("instance_id", 1).build())
+        .addField(str("service_name", 2).build())
+        .addField(str("metadata", 3).build())
+        .build();
+  }
+
+  private static EnumDescriptorProto registryFilterMode() {
+    return EnumDescriptorProto.newBuilder().setName("FilterMode")
+        .addValue(EnumValueDescriptorProto.newBuilder()
+            .setName("FILTER_MODE_UNSPECIFIED").setNumber(0).build())
+        .addValue(EnumValueDescriptorProto.newBuilder()
+            .setName("FILTER_MODE_EXACT").setNumber(1).build())
+        .addValue(EnumValueDescriptorProto.newBuilder()
+            .setName("FILTER_MODE_PREFIX").setNumber(2).build())
+        .addValue(EnumValueDescriptorProto.newBuilder()
+            .setName("FILTER_MODE_ALL").setNumber(3).build())
+        .build();
+  }
+
+  private static DescriptorProto registryDiscoverRequest() {
+    return DescriptorProto.newBuilder().setName("DiscoverRequest")
+        .addField(str("service_name", 1).build())
+        .addField(enumF("filter_mode", 2, ".coord.registry.v1.FilterMode").build())
+        .build();
+  }
+
+  private static DescriptorProto registryDiscoverResponse() {
+    return DescriptorProto.newBuilder().setName("DiscoverResponse")
+        .addField(repMsg("instances", 1, ".coord.registry.v1.ServiceInstance").build())
+        .addField(i64("revision", 2).build())
+        .build();
+  }
+
+  // ------------------------------------------------------------------
+  // M5b -- coord.cache.v1.Cache (agent-local data plane, redb-backed)
+  //
+  // Only the string / list / set operations are modelled here. The hash
+  // operations (HGet/HSet/HGetAll) need a `map<string, bytes>` entry message;
+  // leaving them out is recorded as a checker blind spot instead of shipping a
+  // descriptor nobody verified. Field numbers are copied from
+  // coord-proto/src/proto/agent_api.proto.
+  // ------------------------------------------------------------------
+
+  private static DescriptorProto cacheGetRequest() {
+    return DescriptorProto.newBuilder().setName("CacheGetRequest")
+        .addField(str("key", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto cacheGetResponse() {
+    return DescriptorProto.newBuilder().setName("CacheGetResponse")
+        .addField(bytes("value", 1).build())
+        .addField(bool("found", 2).build())
+        .build();
+  }
+
+  private static DescriptorProto cacheSetRequest() {
+    return DescriptorProto.newBuilder().setName("CacheSetRequest")
+        .addField(str("key", 1).build())
+        .addField(bytes("value", 2).build())
+        .addField(i64("ttl_seconds", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto cacheSetResponse() {
+    return DescriptorProto.newBuilder().setName("CacheSetResponse").build();
+  }
+
+  private static DescriptorProto cacheDeleteRequest() {
+    return DescriptorProto.newBuilder().setName("CacheDeleteRequest")
+        .addField(str("key", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto cacheDeleteResponse() {
+    return DescriptorProto.newBuilder().setName("CacheDeleteResponse")
+        .addField(bool("deleted", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto cacheLPushRequest() {
+    return DescriptorProto.newBuilder().setName("CacheLPushRequest")
+        .addField(str("key", 1).build())
+        .addField(bytes("value", 2).build())
+        .build();
+  }
+
+  private static DescriptorProto cacheLPushResponse() {
+    return DescriptorProto.newBuilder().setName("CacheLPushResponse")
+        .addField(i64("length", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto cacheLRangeRequest() {
+    return DescriptorProto.newBuilder().setName("CacheLRangeRequest")
+        .addField(str("key", 1).build())
+        .addField(i64("start", 2).build())
+        .addField(i64("stop", 3).build())
+        .build();
+  }
+
+  private static DescriptorProto cacheLRangeResponse() {
+    return DescriptorProto.newBuilder().setName("CacheLRangeResponse")
+        .addField(repBytes("values", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto cacheLLenRequest() {
+    return DescriptorProto.newBuilder().setName("CacheLLenRequest")
+        .addField(str("key", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto cacheLLenResponse() {
+    return DescriptorProto.newBuilder().setName("CacheLLenResponse")
+        .addField(i64("length", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto cacheSAddRequest() {
+    return DescriptorProto.newBuilder().setName("CacheSAddRequest")
+        .addField(str("key", 1).build())
+        .addField(bytes("member", 2).build())
+        .build();
+  }
+
+  private static DescriptorProto cacheSAddResponse() {
+    return DescriptorProto.newBuilder().setName("CacheSAddResponse").build();
+  }
+
+  private static DescriptorProto cacheSMembersRequest() {
+    return DescriptorProto.newBuilder().setName("CacheSMembersRequest")
+        .addField(str("key", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto cacheSMembersResponse() {
+    return DescriptorProto.newBuilder().setName("CacheSMembersResponse")
+        .addField(repBytes("members", 1).build())
+        .build();
+  }
+
+  private static ServiceDescriptorProto agentCacheService() {
+    return ServiceDescriptorProto.newBuilder().setName("Cache")
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Get")
+            .setInputType(".coord.cache.v1.CacheGetRequest")
+            .setOutputType(".coord.cache.v1.CacheGetResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Set")
+            .setInputType(".coord.cache.v1.CacheSetRequest")
+            .setOutputType(".coord.cache.v1.CacheSetResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Delete")
+            .setInputType(".coord.cache.v1.CacheDeleteRequest")
+            .setOutputType(".coord.cache.v1.CacheDeleteResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("LPush")
+            .setInputType(".coord.cache.v1.CacheLPushRequest")
+            .setOutputType(".coord.cache.v1.CacheLPushResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("LRange")
+            .setInputType(".coord.cache.v1.CacheLRangeRequest")
+            .setOutputType(".coord.cache.v1.CacheLRangeResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("LLen")
+            .setInputType(".coord.cache.v1.CacheLLenRequest")
+            .setOutputType(".coord.cache.v1.CacheLLenResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("SAdd")
+            .setInputType(".coord.cache.v1.CacheSAddRequest")
+            .setOutputType(".coord.cache.v1.CacheSAddResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("SMembers")
+            .setInputType(".coord.cache.v1.CacheSMembersRequest")
+            .setOutputType(".coord.cache.v1.CacheSMembersResponse"))
+        .build();
+  }
+
+  // ------------------------------------------------------------------
+  // M5b -- coord.mq.v1.MQ (agent-local, ISR-replicated data plane)
+  //
+  // Poll/Ack are used instead of the streaming Subscribe: the contract says
+  // "poll + ack gives at-least-once", so the unary surface is enough to test
+  // the loss/duplicate promises, and it avoids adding a server-streaming
+  // reader that no other face would exercise.
+  // ------------------------------------------------------------------
+
+  private static DescriptorProto mqCreateTopicRequest() {
+    return DescriptorProto.newBuilder().setName("MqCreateTopicRequest")
+        .addField(str("topic", 1).build())
+        .addField(i32("partitions", 2).build())
+        .build();
+  }
+
+  private static DescriptorProto mqCreateTopicResponse() {
+    return DescriptorProto.newBuilder().setName("MqCreateTopicResponse").build();
+  }
+
+  private static DescriptorProto mqPublishRequest() {
+    return DescriptorProto.newBuilder().setName("MqPublishRequest")
+        .addField(str("topic", 1).build())
+        .addField(i32("partition", 2).build())
+        .addField(bytes("key", 3).build())
+        .addField(bytes("payload", 4).build())
+        .addField(str("idempotency_key", 5).build())
+        .build();
+  }
+
+  private static DescriptorProto mqPublishResponse() {
+    return DescriptorProto.newBuilder().setName("MqPublishResponse")
+        .addField(i64("offset", 1).build())
+        .build();
+  }
+
+  private static DescriptorProto mqMessage() {
+    return DescriptorProto.newBuilder().setName("MqMessage")
+        .addField(str("topic", 1).build())
+        .addField(i32("partition", 2).build())
+        .addField(i64("offset", 3).build())
+        .addField(bytes("key", 4).build())
+        .addField(bytes("payload", 5).build())
+        .addField(i64("timestamp", 6).build())
+        .build();
+  }
+
+  private static DescriptorProto mqPollRequest() {
+    return DescriptorProto.newBuilder().setName("MqPollRequest")
+        .addField(str("topic", 1).build())
+        .addField(i32("partition", 2).build())
+        .addField(str("consumer_group", 3).build())
+        .addField(i64("start_offset", 4).build())
+        .addField(i32("max_count", 5).build())
+        .build();
+  }
+
+  private static DescriptorProto mqPollResponse() {
+    return DescriptorProto.newBuilder().setName("MqPollResponse")
+        .addField(repMsg("messages", 1, ".coord.mq.v1.MqMessage").build())
+        .build();
+  }
+
+  private static DescriptorProto mqAckRequest() {
+    // 字段号必须与 `coord-proto/src/proto/mq.proto` 的 `MqAckRequest` 逐字一致：
+    //   topic = 1; consumer_group = 2; partition = 3; offset = 4;
+    // 曾把 2/3 写反（partition=2 / consumer_group=3）⇒ 客户端把 int32 发在服务端
+    // 的 string 字段上，**wire type 不匹配**、protobuf 解码直接失败 ⇒ MQ `Ack`
+    // 100% 失败（jepsen F-67：`:poll-ack-failures 59/59`）。这是**测试侧**编码
+    // 缺陷，不是 coord 缺陷；现由 `scripts/check-agent-wire.clj` 的
+    // **全量**字段名/字段号/wire type 比对卡口守住（不再只查手工挑选的子集）。
+    return DescriptorProto.newBuilder().setName("MqAckRequest")
+        .addField(str("topic", 1).build())
+        .addField(str("consumer_group", 2).build())
+        .addField(i32("partition", 3).build())
+        .addField(i64("offset", 4).build())
+        .build();
+  }
+
+  private static DescriptorProto mqAckResponse() {
+    return DescriptorProto.newBuilder().setName("MqAckResponse").build();
+  }
+
+  private static ServiceDescriptorProto agentMqService() {
+    return ServiceDescriptorProto.newBuilder().setName("MQ")
+        .addMethod(MethodDescriptorProto.newBuilder().setName("CreateTopic")
+            .setInputType(".coord.mq.v1.MqCreateTopicRequest")
+            .setOutputType(".coord.mq.v1.MqCreateTopicResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Publish")
+            .setInputType(".coord.mq.v1.MqPublishRequest")
+            .setOutputType(".coord.mq.v1.MqPublishResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Poll")
+            .setInputType(".coord.mq.v1.MqPollRequest")
+            .setOutputType(".coord.mq.v1.MqPollResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Ack")
+            .setInputType(".coord.mq.v1.MqAckRequest")
+            .setOutputType(".coord.mq.v1.MqAckResponse"))
+        .build();
+  }
+
+  private static ServiceDescriptorProto agentLockService() {
+    return ServiceDescriptorProto.newBuilder().setName("Lock")
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Acquire")
+            .setInputType(".coord.lock.v1.LockAcquireRequest")
+            .setOutputType(".coord.lock.v1.LockAcquireResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Release")
+            .setInputType(".coord.lock.v1.LockReleaseRequest")
+            .setOutputType(".coord.lock.v1.LockReleaseResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Renew")
+            .setInputType(".coord.lock.v1.LockRenewRequest")
+            .setOutputType(".coord.lock.v1.LockRenewResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("GetLockInfo")
+            .setInputType(".coord.lock.v1.LockGetInfoRequest")
+            .setOutputType(".coord.lock.v1.LockGetInfoResponse"))
+        .build();
+  }
+
+  private static ServiceDescriptorProto agentIdGenService() {
+    return ServiceDescriptorProto.newBuilder().setName("IdGen")
+        .addMethod(MethodDescriptorProto.newBuilder().setName("NextId")
+            .setInputType(".coord.idgen.v1.IdGenNextIdRequest")
+            .setOutputType(".coord.idgen.v1.IdGenNextIdResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("NextBatch")
+            .setInputType(".coord.idgen.v1.IdGenNextBatchRequest")
+            .setOutputType(".coord.idgen.v1.IdGenNextBatchResponse"))
+        .build();
+  }
+
+  private static ServiceDescriptorProto agentLeaderElectionService() {
+    return ServiceDescriptorProto.newBuilder().setName("LeaderElection")
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Campaign")
+            .setInputType(".coord.election.v1.LeaderCampaignRequest")
+            .setOutputType(".coord.election.v1.LeaderCampaignResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Resign")
+            .setInputType(".coord.election.v1.LeaderResignRequest")
+            .setOutputType(".coord.election.v1.LeaderResignResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("GetLeader")
+            .setInputType(".coord.election.v1.LeaderGetLeaderRequest")
+            .setOutputType(".coord.election.v1.LeaderGetLeaderResponse"))
+        .build();
+  }
+
+  private static ServiceDescriptorProto agentRegistryService() {
+    return ServiceDescriptorProto.newBuilder().setName("Registry")
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Register")
+            .setInputType(".coord.registry.v1.RegisterRequest")
+            .setOutputType(".coord.registry.v1.RegisterResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Deregister")
+            .setInputType(".coord.registry.v1.DeregisterRequest")
+            .setOutputType(".coord.registry.v1.DeregisterResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Heartbeat")
+            .setInputType(".coord.registry.v1.HeartbeatRequest")
+            .setOutputType(".coord.registry.v1.HeartbeatResponse"))
+        .addMethod(MethodDescriptorProto.newBuilder().setName("Discover")
+            .setInputType(".coord.registry.v1.DiscoverRequest")
+            .setOutputType(".coord.registry.v1.DiscoverResponse"))
+        .build();
+  }
+
+  // contracts/v1.2.0：agent 本地面按 domain 拆成独立契约包，手写 descriptor 必须
+  // 跟着拆 —— protobuf 的 FileDescriptorProto 里**所有类型必须同属文件自己的
+  // package**，把不同 package 的类型塞进一个文件会在 buildFrom 时报
+  // "…is not an enum type" / "not a message type"。故此处每个 domain 一个文
+  // 件，package 与 coord-proto/src/proto/<domain>.proto 逐字一致。
+  private static FileDescriptorProto agentLockFileProto() {
+    return FileDescriptorProto.newBuilder()
+        .setName("coord/lock/v1/lock.proto")
+        .setPackage("coord.lock.v1")
+        .setSyntax("proto3")
+        .addMessageType(lockAcquireRequest())
+        .addMessageType(lockAcquireResponse())
+        .addMessageType(lockReleaseRequest())
+        .addMessageType(lockReleaseResponse())
+        .addMessageType(lockRenewRequest())
+        .addMessageType(lockRenewResponse())
+        .addMessageType(lockGetInfoRequest())
+        .addMessageType(lockGetInfoResponse())
+        .addService(agentLockService())
+        .build();
+  }
+
+  private static FileDescriptorProto agentIdGenFileProto() {
+    return FileDescriptorProto.newBuilder()
+        .setName("coord/idgen/v1/idgen.proto")
+        .setPackage("coord.idgen.v1")
+        .setSyntax("proto3")
+        .addMessageType(idGenNextIdRequest())
+        .addMessageType(idGenNextIdResponse())
+        .addMessageType(idGenNextBatchRequest())
+        .addMessageType(idGenNextBatchResponse())
+        .addService(agentIdGenService())
+        .build();
+  }
+
+  private static FileDescriptorProto agentElectionFileProto() {
+    return FileDescriptorProto.newBuilder()
+        .setName("coord/election/v1/election.proto")
+        .setPackage("coord.election.v1")
+        .setSyntax("proto3")
+        .addMessageType(leaderCampaignRequest())
+        .addMessageType(leaderCampaignResponse())
+        .addMessageType(leaderResignRequest())
+        .addMessageType(leaderResignResponse())
+        .addMessageType(leaderGetLeaderRequest())
+        .addMessageType(leaderGetLeaderResponse())
+        .addService(agentLeaderElectionService())
+        .build();
+  }
+
+  private static FileDescriptorProto agentRegistryFileProto() {
+    return FileDescriptorProto.newBuilder()
+        .setName("coord/registry/v1/registry.proto")
+        .setPackage("coord.registry.v1")
+        .setSyntax("proto3")
+        .addEnumType(registryFilterMode())
+        .addMessageType(registryServiceInstance())
+        .addMessageType(registryRegisterRequest())
+        .addMessageType(registryRegisterResponse())
+        .addMessageType(registryDeregisterRequest())
+        .addMessageType(registryDeregisterResponse())
+        .addMessageType(registryHeartbeatRequest())
+        .addMessageType(registryHeartbeatResponse())
+        .addMessageType(registryDiscoverRequest())
+        .addMessageType(registryDiscoverResponse())
+        .addService(agentRegistryService())
+        .build();
+  }
+
+  private static FileDescriptorProto agentCacheFileProto() {
+    return FileDescriptorProto.newBuilder()
+        .setName("coord/cache/v1/cache.proto")
+        .setPackage("coord.cache.v1")
+        .setSyntax("proto3")
+        .addMessageType(cacheGetRequest())
+        .addMessageType(cacheGetResponse())
+        .addMessageType(cacheSetRequest())
+        .addMessageType(cacheSetResponse())
+        .addMessageType(cacheDeleteRequest())
+        .addMessageType(cacheDeleteResponse())
+        .addMessageType(cacheLPushRequest())
+        .addMessageType(cacheLPushResponse())
+        .addMessageType(cacheLRangeRequest())
+        .addMessageType(cacheLRangeResponse())
+        .addMessageType(cacheLLenRequest())
+        .addMessageType(cacheLLenResponse())
+        .addMessageType(cacheSAddRequest())
+        .addMessageType(cacheSAddResponse())
+        .addMessageType(cacheSMembersRequest())
+        .addMessageType(cacheSMembersResponse())
+        .addService(agentCacheService())
+        .build();
+  }
+
+  private static FileDescriptorProto agentMqFileProto() {
+    return FileDescriptorProto.newBuilder()
+        .setName("coord/mq/v1/mq.proto")
+        .setPackage("coord.mq.v1")
+        .setSyntax("proto3")
+        .addMessageType(mqCreateTopicRequest())
+        .addMessageType(mqCreateTopicResponse())
+        .addMessageType(mqPublishRequest())
+        .addMessageType(mqPublishResponse())
+        .addMessageType(mqMessage())
+        .addMessageType(mqPollRequest())
+        .addMessageType(mqPollResponse())
+        .addMessageType(mqAckRequest())
+        .addMessageType(mqAckResponse())
+        .addService(agentMqService())
+        .build();
+  }
+
+  // ------------------------------------------------------------------
   // Build FileDescriptors
   // ------------------------------------------------------------------
 
@@ -504,6 +1151,27 @@ public class CoordRpc {
   public static final FileDescriptor WATCH_FILE = build(watchFileProto(),
       new FileDescriptor[]{KV_FILE});
   public static final FileDescriptor LEASE_FILE = build(leaseFileProto(), new FileDescriptor[0]);
+  public static final FileDescriptor AGENT_LOCK_FILE = build(agentLockFileProto(), new FileDescriptor[0]);
+  public static final FileDescriptor AGENT_IDGEN_FILE = build(agentIdGenFileProto(), new FileDescriptor[0]);
+  public static final FileDescriptor AGENT_ELECTION_FILE = build(agentElectionFileProto(), new FileDescriptor[0]);
+  public static final FileDescriptor AGENT_REGISTRY_FILE = build(agentRegistryFileProto(), new FileDescriptor[0]);
+  public static final FileDescriptor AGENT_CACHE_FILE = build(agentCacheFileProto(), new FileDescriptor[0]);
+  public static final FileDescriptor AGENT_MQ_FILE = build(agentMqFileProto(), new FileDescriptor[0]);
+
+  /// agent 本地面全部契约文件（contracts/v1.2.0 起按 domain 拆分）。
+  public static final FileDescriptor[] AGENT_FILES = {
+      AGENT_LOCK_FILE, AGENT_IDGEN_FILE, AGENT_ELECTION_FILE,
+      AGENT_REGISTRY_FILE, AGENT_CACHE_FILE, AGENT_MQ_FILE,
+  };
+
+  /// 跨域按 message 名查找（message 现已分散在各自的 domain 文件里）。
+  public static Descriptor agentMessage(String name) {
+    for (FileDescriptor f : AGENT_FILES) {
+      Descriptor d = f.findMessageTypeByName(name);
+      if (d != null) return d;
+    }
+    throw new IllegalArgumentException("unknown agent message: " + name);
+  }
 
   public static final Descriptor KV_KEY_VALUE = KV_FILE.findMessageTypeByName("KeyValue");
   public static final Descriptor KV_PUT_REQUEST = KV_FILE.findMessageTypeByName("PutRequest");
@@ -544,6 +1212,119 @@ public class CoordRpc {
       LEASE_FILE.findMessageTypeByName("LeaseKeepAliveRequest");
   public static final Descriptor LEASE_KEEPALIVE_RESPONSE =
       LEASE_FILE.findMessageTypeByName("LeaseKeepAliveResponse");
+
+  // M5: agent-local surfaces (coord.agent.*)
+  public static final Descriptor LOCK_ACQUIRE_REQUEST =
+      agentMessage("LockAcquireRequest");
+  public static final Descriptor LOCK_ACQUIRE_RESPONSE =
+      agentMessage("LockAcquireResponse");
+  public static final Descriptor LOCK_RELEASE_REQUEST =
+      agentMessage("LockReleaseRequest");
+  public static final Descriptor LOCK_RELEASE_RESPONSE =
+      agentMessage("LockReleaseResponse");
+  public static final Descriptor LOCK_RENEW_REQUEST =
+      agentMessage("LockRenewRequest");
+  public static final Descriptor LOCK_RENEW_RESPONSE =
+      agentMessage("LockRenewResponse");
+  public static final Descriptor LOCK_GET_INFO_REQUEST =
+      agentMessage("LockGetInfoRequest");
+  public static final Descriptor LOCK_GET_INFO_RESPONSE =
+      agentMessage("LockGetInfoResponse");
+
+  public static final Descriptor IDGEN_NEXT_ID_REQUEST =
+      agentMessage("IdGenNextIdRequest");
+  public static final Descriptor IDGEN_NEXT_ID_RESPONSE =
+      agentMessage("IdGenNextIdResponse");
+  public static final Descriptor IDGEN_NEXT_BATCH_REQUEST =
+      agentMessage("IdGenNextBatchRequest");
+  public static final Descriptor IDGEN_NEXT_BATCH_RESPONSE =
+      agentMessage("IdGenNextBatchResponse");
+
+  public static final Descriptor ELECTION_CAMPAIGN_REQUEST =
+      agentMessage("LeaderCampaignRequest");
+  public static final Descriptor ELECTION_CAMPAIGN_RESPONSE =
+      agentMessage("LeaderCampaignResponse");
+  public static final Descriptor ELECTION_RESIGN_REQUEST =
+      agentMessage("LeaderResignRequest");
+  public static final Descriptor ELECTION_RESIGN_RESPONSE =
+      agentMessage("LeaderResignResponse");
+  public static final Descriptor ELECTION_GET_LEADER_REQUEST =
+      agentMessage("LeaderGetLeaderRequest");
+  public static final Descriptor ELECTION_GET_LEADER_RESPONSE =
+      agentMessage("LeaderGetLeaderResponse");
+
+  public static final Descriptor REGISTRY_REGISTER_REQUEST =
+      agentMessage("RegisterRequest");
+  public static final Descriptor REGISTRY_REGISTER_RESPONSE =
+      agentMessage("RegisterResponse");
+  public static final Descriptor REGISTRY_DEREGISTER_REQUEST =
+      agentMessage("DeregisterRequest");
+  public static final Descriptor REGISTRY_DEREGISTER_RESPONSE =
+      agentMessage("DeregisterResponse");
+  public static final Descriptor REGISTRY_HEARTBEAT_REQUEST =
+      agentMessage("HeartbeatRequest");
+  public static final Descriptor REGISTRY_HEARTBEAT_RESPONSE =
+      agentMessage("HeartbeatResponse");
+  public static final Descriptor REGISTRY_DISCOVER_REQUEST =
+      agentMessage("DiscoverRequest");
+  public static final Descriptor REGISTRY_DISCOVER_RESPONSE =
+      agentMessage("DiscoverResponse");
+  public static final Descriptor REGISTRY_SERVICE_INSTANCE =
+      agentMessage("ServiceInstance");
+
+  // M5b: agent-local cache (redb) and MQ. Same rule as above: the message and
+  // service names must match coord-proto/src/proto/agent_api.proto exactly.
+  public static final Descriptor CACHE_GET_REQUEST =
+      agentMessage("CacheGetRequest");
+  public static final Descriptor CACHE_GET_RESPONSE =
+      agentMessage("CacheGetResponse");
+  public static final Descriptor CACHE_SET_REQUEST =
+      agentMessage("CacheSetRequest");
+  public static final Descriptor CACHE_SET_RESPONSE =
+      agentMessage("CacheSetResponse");
+  public static final Descriptor CACHE_DELETE_REQUEST =
+      agentMessage("CacheDeleteRequest");
+  public static final Descriptor CACHE_DELETE_RESPONSE =
+      agentMessage("CacheDeleteResponse");
+  public static final Descriptor CACHE_LPUSH_REQUEST =
+      agentMessage("CacheLPushRequest");
+  public static final Descriptor CACHE_LPUSH_RESPONSE =
+      agentMessage("CacheLPushResponse");
+  public static final Descriptor CACHE_LRANGE_REQUEST =
+      agentMessage("CacheLRangeRequest");
+  public static final Descriptor CACHE_LRANGE_RESPONSE =
+      agentMessage("CacheLRangeResponse");
+  public static final Descriptor CACHE_LLEN_REQUEST =
+      agentMessage("CacheLLenRequest");
+  public static final Descriptor CACHE_LLEN_RESPONSE =
+      agentMessage("CacheLLenResponse");
+  public static final Descriptor CACHE_SADD_REQUEST =
+      agentMessage("CacheSAddRequest");
+  public static final Descriptor CACHE_SADD_RESPONSE =
+      agentMessage("CacheSAddResponse");
+  public static final Descriptor CACHE_SMEMBERS_REQUEST =
+      agentMessage("CacheSMembersRequest");
+  public static final Descriptor CACHE_SMEMBERS_RESPONSE =
+      agentMessage("CacheSMembersResponse");
+
+  public static final Descriptor MQ_CREATE_TOPIC_REQUEST =
+      agentMessage("MqCreateTopicRequest");
+  public static final Descriptor MQ_CREATE_TOPIC_RESPONSE =
+      agentMessage("MqCreateTopicResponse");
+  public static final Descriptor MQ_PUBLISH_REQUEST =
+      agentMessage("MqPublishRequest");
+  public static final Descriptor MQ_PUBLISH_RESPONSE =
+      agentMessage("MqPublishResponse");
+  public static final Descriptor MQ_MESSAGE =
+      agentMessage("MqMessage");
+  public static final Descriptor MQ_POLL_REQUEST =
+      agentMessage("MqPollRequest");
+  public static final Descriptor MQ_POLL_RESPONSE =
+      agentMessage("MqPollResponse");
+  public static final Descriptor MQ_ACK_REQUEST =
+      agentMessage("MqAckRequest");
+  public static final Descriptor MQ_ACK_RESPONSE =
+      agentMessage("MqAckResponse");
 
   // ------------------------------------------------------------------
   // gRPC method descriptors over DynamicMessage
@@ -601,6 +1382,74 @@ public class CoordRpc {
       unary("coord.lease.Lease/LeaseGrant", LEASE_GRANT_REQUEST, LEASE_GRANT_RESPONSE);
   public static final MethodDescriptor<DynamicMessage, DynamicMessage> LEASE_REVOKE =
       unary("coord.lease.Lease/LeaseRevoke", LEASE_REVOKE_REQUEST, LEASE_REVOKE_RESPONSE);
+
+  // M5: agent-local surfaces. Full method names must match the server-side
+  // router paths exactly (coord-core/src/grpc_auth.rs rpc_capability is the
+  // authority; a mismatch shows up as UNIMPLEMENTED, and -- worse -- a
+  // mismatched *name* would silently bypass that table's audit).
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> LOCK_ACQUIRE =
+      unary("coord.lock.v1.Lock/Acquire", LOCK_ACQUIRE_REQUEST, LOCK_ACQUIRE_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> LOCK_RELEASE =
+      unary("coord.lock.v1.Lock/Release", LOCK_RELEASE_REQUEST, LOCK_RELEASE_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> LOCK_RENEW =
+      unary("coord.lock.v1.Lock/Renew", LOCK_RENEW_REQUEST, LOCK_RENEW_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> LOCK_GET_INFO =
+      unary("coord.lock.v1.Lock/GetLockInfo", LOCK_GET_INFO_REQUEST, LOCK_GET_INFO_RESPONSE);
+
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> IDGEN_NEXT_ID =
+      unary("coord.idgen.v1.IdGen/NextId", IDGEN_NEXT_ID_REQUEST, IDGEN_NEXT_ID_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> IDGEN_NEXT_BATCH =
+      unary("coord.idgen.v1.IdGen/NextBatch", IDGEN_NEXT_BATCH_REQUEST, IDGEN_NEXT_BATCH_RESPONSE);
+
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> ELECTION_CAMPAIGN =
+      unary("coord.election.v1.LeaderElection/Campaign", ELECTION_CAMPAIGN_REQUEST,
+            ELECTION_CAMPAIGN_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> ELECTION_RESIGN =
+      unary("coord.election.v1.LeaderElection/Resign", ELECTION_RESIGN_REQUEST,
+            ELECTION_RESIGN_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> ELECTION_GET_LEADER =
+      unary("coord.election.v1.LeaderElection/GetLeader", ELECTION_GET_LEADER_REQUEST,
+            ELECTION_GET_LEADER_RESPONSE);
+
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> REGISTRY_REGISTER =
+      unary("coord.registry.v1.Registry/Register", REGISTRY_REGISTER_REQUEST,
+            REGISTRY_REGISTER_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> REGISTRY_DEREGISTER =
+      unary("coord.registry.v1.Registry/Deregister", REGISTRY_DEREGISTER_REQUEST,
+            REGISTRY_DEREGISTER_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> REGISTRY_HEARTBEAT =
+      unary("coord.registry.v1.Registry/Heartbeat", REGISTRY_HEARTBEAT_REQUEST,
+            REGISTRY_HEARTBEAT_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> REGISTRY_DISCOVER =
+      unary("coord.registry.v1.Registry/Discover", REGISTRY_DISCOVER_REQUEST,
+            REGISTRY_DISCOVER_RESPONSE);
+
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> CACHE_GET =
+      unary("coord.cache.v1.Cache/Get", CACHE_GET_REQUEST, CACHE_GET_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> CACHE_SET =
+      unary("coord.cache.v1.Cache/Set", CACHE_SET_REQUEST, CACHE_SET_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> CACHE_DELETE =
+      unary("coord.cache.v1.Cache/Delete", CACHE_DELETE_REQUEST, CACHE_DELETE_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> CACHE_LPUSH =
+      unary("coord.cache.v1.Cache/LPush", CACHE_LPUSH_REQUEST, CACHE_LPUSH_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> CACHE_LRANGE =
+      unary("coord.cache.v1.Cache/LRange", CACHE_LRANGE_REQUEST, CACHE_LRANGE_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> CACHE_LLEN =
+      unary("coord.cache.v1.Cache/LLen", CACHE_LLEN_REQUEST, CACHE_LLEN_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> CACHE_SADD =
+      unary("coord.cache.v1.Cache/SAdd", CACHE_SADD_REQUEST, CACHE_SADD_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> CACHE_SMEMBERS =
+      unary("coord.cache.v1.Cache/SMembers", CACHE_SMEMBERS_REQUEST, CACHE_SMEMBERS_RESPONSE);
+
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> MQ_CREATE_TOPIC =
+      unary("coord.mq.v1.MQ/CreateTopic", MQ_CREATE_TOPIC_REQUEST,
+            MQ_CREATE_TOPIC_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> MQ_PUBLISH =
+      unary("coord.mq.v1.MQ/Publish", MQ_PUBLISH_REQUEST, MQ_PUBLISH_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> MQ_POLL =
+      unary("coord.mq.v1.MQ/Poll", MQ_POLL_REQUEST, MQ_POLL_RESPONSE);
+  public static final MethodDescriptor<DynamicMessage, DynamicMessage> MQ_ACK =
+      unary("coord.mq.v1.MQ/Ack", MQ_ACK_REQUEST, MQ_ACK_RESPONSE);
 
   // ------------------------------------------------------------------
   // Channels / calls

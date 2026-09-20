@@ -2,6 +2,7 @@
   "Clojure-friendly helpers over the CoordRpc gRPC layer: request builders,
   response readers, and call helpers. All gRPC errors surface as
   io.grpc.StatusRuntimeException."
+  (:require [clojure.string :as str])
   (:import [com.google.protobuf ByteString DynamicMessage]
            [io.grpc ManagedChannel Channel MethodDescriptor Status Status$Code StatusRuntimeException]
            [jepsen.coord CoordRpc]))
@@ -22,9 +23,20 @@
 ;; Channels ----------------------------------------------------------------
 
 (defn channel
-  "Opens a plaintext gRPC channel to host:grpc-port."
+  "Opens a plaintext gRPC channel.
+
+  `host` 可以是裸主机名（补默认 grpc-port），也可以是显式 `host:port` ——
+  `--via-agent` 的客户端连的是**控制机上的隧道端口**（见 jepsen.coord.agent），
+  而不是节点的 50051。IPv6 的 `[::1]:port` 也按最后一个冒号切分（括号内的
+  冒号不会误切，因为只切最后一个）。"
   [host]
-  (CoordRpc/channel host grpc-port))
+  (let [s (str host)
+        i (str/last-index-of s ":")
+        port? (and i (not (str/includes? (subs s (inc i)) ":"))
+                   (re-matches #"[0-9]+" (subs s (inc i))))]
+    (if port?
+      (CoordRpc/channel (subs s 0 i) (int (Long/parseLong (subs s (inc i)))))
+      (CoordRpc/channel s grpc-port))))
 
 (defn auth-channel
   "Wraps a channel so every request carries authorization: Bearer <cct>."
@@ -578,3 +590,421 @@
       false)
     (catch Exception _
       false)))
+
+;; --------------------------------------------------------------------------
+;; M5 —— agent 本地面（coord.agent.*）
+;;
+;; 这三段（lock / election / idgen / registry）是 coord-agent **独有**的服务：
+;; server 的 router 里没有 coord.agent.* —— 也就是说，一次成功的调用本身
+;; 就证明请求真的落到了某个 agent 上（见 jepsen.coord.agent 的「路由证明」）。
+;;
+;; 字段号/服务名与 `coord-proto/src/proto/agent_api.proto`（package
+;; coord.agent）逐字一致；差异由 `scripts/check-agent-proto-sync.clj` 兜住
+;; （手写 descriptor 会漂移，而漂移的表现是 UNIMPLEMENTED 或**静默少读一个
+;; 字段**，后者比前者危险得多）。
+;; --------------------------------------------------------------------------
+
+;; Lock ---------------------------------------------------------------------
+
+(def lock-acquire CoordRpc/LOCK_ACQUIRE)
+(def lock-release CoordRpc/LOCK_RELEASE)
+(def lock-renew CoordRpc/LOCK_RENEW)
+(def lock-get-info CoordRpc/LOCK_GET_INFO)
+
+(defn lock-acquire-req
+  "LockAcquireRequest{name, holder_id, ttl_seconds}。
+
+  `ttl_seconds` 是**请求**值；服务端可调整，判定一律用
+  `lock-info->edn` 里 `acquired_at + ttl_seconds` 的实际值。"
+  [{:keys [name holder-id ttl-seconds]}]
+  (let [d CoordRpc/LOCK_ACQUIRE_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (.setField (.findFieldByName d "name") (str name))
+        (.setField (.findFieldByName d "holder_id") (str holder-id))
+        (.setField (.findFieldByName d "ttl_seconds") (long (or ttl-seconds 30)))
+        (.build))))
+
+(defn lock-release-req
+  "LockReleaseRequest{name, holder_id, lease_id}。契约：仅 (holder_id, lease_id)
+  匹配者可释放/续期，否则 PERMISSION_DENIED（§9-⑥ 的倒逼点）。"
+  [{:keys [name holder-id lease-id]}]
+  (let [d CoordRpc/LOCK_RELEASE_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (.setField (.findFieldByName d "name") (str name))
+        (.setField (.findFieldByName d "holder_id") (str holder-id))
+        (.setField (.findFieldByName d "lease_id") (long (or lease-id 0)))
+        (.build))))
+
+(defn lock-renew-req
+  "LockRenewRequest{name, holder_id, lease_id}。"
+  [{:keys [name holder-id lease-id]}]
+  (let [d CoordRpc/LOCK_RENEW_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (.setField (.findFieldByName d "name") (str name))
+        (.setField (.findFieldByName d "holder_id") (str holder-id))
+        (.setField (.findFieldByName d "lease_id") (long (or lease-id 0)))
+        (.build))))
+
+(defn lock-get-info-req
+  "LockGetInfoRequest{name}。"
+  [name]
+  (let [d CoordRpc/LOCK_GET_INFO_REQUEST]
+    (-> (DynamicMessage/newBuilder d)
+        (.setField (.findFieldByName d "name") (str name))
+        (.build))))
+
+(defn lock-acquired?
+  "LockAcquireResponse.acquired。`false` 是**业务结果**（别人持有），不是错误。"
+  [^DynamicMessage msg]
+  (field msg "acquired"))
+
+(defn lock-lease-id
+  "LockAcquireResponse.lease_id（= 该锁绑定的 Lease）。字段名/号与
+  LockGetInfoResponse.lease_id 相同，所以同一个 reader 两个响应都能用。"
+  [^DynamicMessage msg]
+  (field msg "lease_id"))
+
+(defn lock-holder-id [^DynamicMessage msg] (field msg "holder_id"))
+(defn lock-released? [^DynamicMessage msg] (field msg "released"))
+(defn lock-new-ttl [^DynamicMessage msg] (field msg "new_ttl"))
+
+(defn lock-info->edn
+  "LockGetInfoResponse → 纯 EDN（`exists = false` 时其余字段无意义）。
+
+  `acquired_at` 是**服务端墙钟秒**（LockInfo::new 用 unix_ts），所以发布测的
+  时间差一律取客户端自己的单调量（与 T2.2 lease 同一取向，见 F-08）。"
+  [^DynamicMessage msg]
+  (when msg
+    {:name         (field msg "name")
+     :holder-id    (field msg "holder_id")
+     :lease-id     (field msg "lease_id")
+     :acquired-at  (field msg "acquired_at")
+     :ttl-seconds  (field msg "ttl_seconds")
+     :exists       (field msg "exists")}))
+
+;; IdGen --------------------------------------------------------------------
+
+(def idgen-next-id CoordRpc/IDGEN_NEXT_ID)
+(def idgen-next-batch CoordRpc/IDGEN_NEXT_BATCH)
+
+(defn idgen-next-id-req
+  "IdGenNextIdRequest{name, step}。step 只对 segment 模式有意义（号段步长）。"
+  [{:keys [name step]}]
+  (let [d CoordRpc/IDGEN_NEXT_ID_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (.setField (.findFieldByName d "name") (str name))
+        (cond-> step (.setField (.findFieldByName d "step") (long step)))
+        (.build))))
+
+(defn idgen-next-batch-req
+  "IdGenNextBatchRequest{name, count, step}。契约：返回 count 个**互异** ID。"
+  [{:keys [name count step]}]
+  (let [d CoordRpc/IDGEN_NEXT_BATCH_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (.setField (.findFieldByName d "name") (str name))
+        (.setField (.findFieldByName d "count") (int (or count 10)))
+        (cond-> step (.setField (.findFieldByName d "step") (long step)))
+        (.build))))
+
+(defn idgen-id [^DynamicMessage msg] (field msg "id"))
+(defn idgen-ids [^DynamicMessage msg] (vec (field msg "ids")))
+
+;; LeaderElection -----------------------------------------------------------
+
+(def election-campaign CoordRpc/ELECTION_CAMPAIGN)
+(def election-resign CoordRpc/ELECTION_RESIGN)
+(def election-get-leader CoordRpc/ELECTION_GET_LEADER)
+
+(defn election-campaign-req
+  "LeaderCampaignRequest{group_name, candidate_id, ttl_seconds}。
+
+  契约：同一 group 同一时刻至多一个 leader；`elected=false` 是业务结果
+  （别组已在位），不是错误。"
+  [{:keys [group-name candidate-id ttl-seconds]}]
+  (let [d CoordRpc/ELECTION_CAMPAIGN_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (.setField (.findFieldByName d "group_name") (str group-name))
+        (.setField (.findFieldByName d "candidate_id") (str candidate-id))
+        (.setField (.findFieldByName d "ttl_seconds") (long (or ttl-seconds 30)))
+        (.build))))
+
+(defn election-resign-req
+  "LeaderResignRequest{group_name, candidate_id, lease_id}。"
+  [{:keys [group-name candidate-id lease-id]}]
+  (let [d CoordRpc/ELECTION_RESIGN_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (.setField (.findFieldByName d "group_name") (str group-name))
+        (.setField (.findFieldByName d "candidate_id") (str candidate-id))
+        (.setField (.findFieldByName d "lease_id") (long (or lease-id 0)))
+        (.build))))
+
+(defn election-get-leader-req
+  "LeaderGetLeaderRequest{group_name}。"
+  [group-name]
+  (let [d CoordRpc/ELECTION_GET_LEADER_REQUEST]
+    (-> (DynamicMessage/newBuilder d)
+        (.setField (.findFieldByName d "group_name") (str group-name))
+        (.build))))
+
+(defn election-elected? [^DynamicMessage msg] (field msg "elected"))
+(defn election-resigned? [^DynamicMessage msg] (field msg "resigned"))
+(defn election-lease-id [^DynamicMessage msg] (field msg "lease_id"))
+
+(defn leader->edn
+  "LeaderGetLeaderResponse → EDN（`exists=false` = 该 group 当前无 leader，
+  这在「Resign 之后」「TTL 过期之后」都是**期望**结果，不是错误）。"
+  [^DynamicMessage msg]
+  (when msg
+    {:leader-id (field msg "leader_id")
+     :lease-id  (field msg "lease_id")
+     :elected-at (field msg "elected_at")
+     :exists    (field msg "exists")}))
+
+;; Registry -----------------------------------------------------------------
+
+(def registry-register CoordRpc/REGISTRY_REGISTER)
+(def registry-deregister CoordRpc/REGISTRY_DEREGISTER)
+(def registry-heartbeat CoordRpc/REGISTRY_HEARTBEAT)
+(def registry-discover CoordRpc/REGISTRY_DISCOVER)
+
+(def ^:private filter-modes
+  "Registry FilterMode（agent_api.proto）。默认 0 与 EXACT 等价。"
+  {:unspecified "FILTER_MODE_UNSPECIFIED"
+   :exact       "FILTER_MODE_EXACT"
+   :prefix      "FILTER_MODE_PREFIX"
+   :all         "FILTER_MODE_ALL"})
+
+(defn registry-register-req
+  "RegisterRequest{service_name, instance_id, metadata, ttl_seconds}。
+
+  契约要点：`ttl_seconds` 绑定 Lease，实例随之自动过期；重复注册**幂等**
+  （台账整改要点），所以 checker 会把「同 (service, instance) 连续注册两次」
+  当作合法且必须只有一个实例来判。"
+  [{:keys [service-name instance-id metadata ttl-seconds]}]
+  (let [d CoordRpc/REGISTRY_REGISTER_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (.setField (.findFieldByName d "service_name") (str service-name))
+        (.setField (.findFieldByName d "instance_id") (str instance-id))
+        (.setField (.findFieldByName d "metadata") (str (or metadata "")))
+        (.setField (.findFieldByName d "ttl_seconds") (int (or ttl-seconds 30)))
+        (.build))))
+
+(defn registry-deregister-req
+  "DeregisterRequest{service_name, instance_id, lease_id}。"
+  [{:keys [service-name instance-id lease-id]}]
+  (let [d CoordRpc/REGISTRY_DEREGISTER_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (.setField (.findFieldByName d "service_name") (str service-name))
+        (.setField (.findFieldByName d "instance_id") (str instance-id))
+        (.setField (.findFieldByName d "lease_id") (long (or lease-id 0)))
+        (.build))))
+
+(defn registry-heartbeat-req
+  "HeartbeatRequest{service_name, instance_id, lease_id} → HeartbeatResponse.ttl。"
+  [{:keys [service-name instance-id lease-id]}]
+  (let [d CoordRpc/REGISTRY_HEARTBEAT_REQUEST
+        b (DynamicMessage/newBuilder d)]
+    (-> b
+        (.setField (.findFieldByName d "service_name") (str service-name))
+        (.setField (.findFieldByName d "instance_id") (str instance-id))
+        (.setField (.findFieldByName d "lease_id") (long (or lease-id 0)))
+        (.build))))
+
+(defn registry-discover-req
+  "DiscoverRequest{service_name, filter_mode}。"
+  [{:keys [service-name filter-mode]}]
+  (let [d CoordRpc/REGISTRY_DISCOVER_REQUEST
+        b (DynamicMessage/newBuilder d)
+        mode-field (.findFieldByName d "filter_mode")]
+    (-> b
+        (.setField (.findFieldByName d "service_name") (str service-name))
+        (.setField mode-field
+                   (enum-value mode-field
+                               (or (get filter-modes filter-mode)
+                                   "FILTER_MODE_UNSPECIFIED")))
+        (.build))))
+
+(defn registry-lease-id [^DynamicMessage msg] (field msg "lease_id"))
+(defn registry-ttl [^DynamicMessage msg] (field msg "ttl"))
+(defn registry-revision [^DynamicMessage msg] (field msg "revision"))
+
+(defn registry-instances
+  "DiscoverResponse.instances → 纯 EDN 的 vector（按 :instance-id 排序）。
+
+  刻意**不**返回 DynamicMessage：history 里放 Java 对象既不可读，也会让
+  `checker`/`replay` 在反序列化时炸（T1.1 起就守住的纪律）。"
+  [^DynamicMessage msg]
+  (->> (field msg "instances")
+       (mapv (fn [^DynamicMessage inst]
+               {:instance-id  (field inst "instance_id")
+                :service-name (field inst "service_name")
+                :metadata     (field inst "metadata")}))
+       (sort-by :instance-id)
+       vec))
+
+;; --------------------------------------------------------------------------
+;; M5b —— agent 本地数据面（coord.cache.v1.Cache / coord.mq.v1.MQ）
+;;
+;; 与上面四个面同一条纪律：字段号/服务名与 `agent_api.proto` 逐字一致，
+;; 由 `scripts/check-agent-wire.clj` 自检（手写 descriptor 的漂移表现是
+;; UNIMPLEMENTED 或**静默少读一个字段**）。
+;;
+;; 两者的数据都在 **agent 本地**（cache 是 redb；MQ 是 agent 本地日志 +
+;; 可选 ISR 复制），不是 server 上的共享状态 —— 所以判定「读到自己刚写的值」
+;; 只在 `--agents 1`（或没有跨 agent 路由）时成立。checker 的文档里写明了
+;; 这条前提，`coord.clj` 的 workload 校验会在 --agents > 1 时**拒绝**
+;; `--workload cache`/`mq`（见 `local-consistency-workloads`）。
+;; --------------------------------------------------------------------------
+
+(defn- utf8
+  "proto bytes → String（空 ByteString 也返回 \"\"，不返回 nil：缓存里的空值
+  与「没读到」是两件事，checker 靠 `:found` 区分）。"
+  [^ByteString bs]
+  (if (nil? bs) nil (String. (.toByteArray bs) "UTF-8")))
+
+(defn- field-name
+  "Clojure 关键字 → proto 字段名（`-` ⇒ `_`）。请求构造里一律用关键字，避免
+  手写字符串时把 `idempotency_key` 拼成 `idempotencyKey` 而**静默少传一个
+  字段**（proto3 标量没有 presence，少传字段不报错，只是值为默认值 —— 这类
+  错误只有靠行为判据才抓得到）。"
+  [k]
+  (str/replace (name k) "-" "_"))
+
+;; Cache --------------------------------------------------------------------
+
+(def cache-get CoordRpc/CACHE_GET)
+(def cache-set CoordRpc/CACHE_SET)
+(def cache-delete CoordRpc/CACHE_DELETE)
+(def cache-lpush CoordRpc/CACHE_LPUSH)
+(def cache-lrange CoordRpc/CACHE_LRANGE)
+(def cache-llen CoordRpc/CACHE_LLEN)
+(def cache-sadd CoordRpc/CACHE_SADD)
+(def cache-smembers CoordRpc/CACHE_SMEMBERS)
+
+(defn- cache-request
+  "Cache 请求的通用构造：`fields` 是 {字段名 值}，字符串字段走 UTF-8 bytes。
+
+  `ttl-seconds` 的语义（`cache.rs`）：0 = **不过期**（持久条目），>0 = 绝对
+  到期时间戳随数据一起持久化/复制。
+
+  字段类型分派用 `cond` + `=`（**不要**用 `case`）：`case` 的测试常量必须是
+  编译期字面量，Java 枚举常量放进去**编译能过、运行期匹配不上**，于是每个请求
+  都落到「unsupported field type」分支 —— 实测（M5b 第八轮）六个 lab cell 全部
+  以 `cache-request: unsupported field type STRING for :key` 记成 `:info`，
+  而 checker 只看到「0 条完成」，看起来像「被测系统一条 op 都没成功」。"
+  [^com.google.protobuf.Descriptors$Descriptor desc fields]
+  (let [b (DynamicMessage/newBuilder desc)]
+    (doseq [[k v] fields]
+      (let [fd (.findFieldByName desc (field-name k))
+            t  (.getType fd)]
+        (.setField b fd
+                   (cond
+                     (= t com.google.protobuf.Descriptors$FieldDescriptor$Type/STRING)
+                     (str v)
+                     (= t com.google.protobuf.Descriptors$FieldDescriptor$Type/BYTES)
+                     (ByteString/copyFromUtf8 (str v))
+                     (= t com.google.protobuf.Descriptors$FieldDescriptor$Type/INT64)
+                     (long v)
+                     (= t com.google.protobuf.Descriptors$FieldDescriptor$Type/INT32)
+                     (int v)
+                     (= t com.google.protobuf.Descriptors$FieldDescriptor$Type/BOOL)
+                     (boolean v)
+                     :else (throw (ex-info (str "cache-request: unsupported field type "
+                                                t " for " k)
+                                           {:field k :type (str t)}))))))
+    (.build b)))
+
+(defn cache-get-req [k]
+  (cache-request CoordRpc/CACHE_GET_REQUEST {:key k}))
+(defn cache-set-req
+  "CacheSetRequest{key, value, ttl_seconds}。"
+  [{:keys [key value ttl-seconds]}]
+  (cache-request CoordRpc/CACHE_SET_REQUEST
+                 {:key (str key) :value (str value)
+                  :ttl_seconds (long (or ttl-seconds 0))}))
+(defn cache-delete-req [k]
+  (cache-request CoordRpc/CACHE_DELETE_REQUEST {:key (str k)}))
+(defn cache-lpush-req [{:keys [key value]}]
+  (cache-request CoordRpc/CACHE_LPUSH_REQUEST {:key (str key) :value (str value)}))
+(defn cache-lrange-req [{:keys [key start stop]}]
+  (cache-request CoordRpc/CACHE_LRANGE_REQUEST
+                 {:key (str key) :start (long (or start 0)) :stop (long (or stop -1))}))
+(defn cache-llen-req [k]
+  (cache-request CoordRpc/CACHE_LLEN_REQUEST {:key (str k)}))
+(defn cache-sadd-req [{:keys [key member]}]
+  (cache-request CoordRpc/CACHE_SADD_REQUEST {:key (str key) :member (str member)}))
+(defn cache-smembers-req [k]
+  (cache-request CoordRpc/CACHE_SMEMBERS_REQUEST {:key (str k)}))
+
+(defn cache-value-found? [^DynamicMessage msg] (boolean (field msg "found")))
+(defn cache-value
+  "CacheGetResponse.value：**空串也是一个值**（与 found=false 区分）。
+  `found=false` 时返回 nil。"
+  [^DynamicMessage msg]
+  (when (cache-value-found? msg)
+    (str (utf8 (field msg "value")))))
+(defn cache-deleted? [^DynamicMessage msg] (field msg "deleted"))
+(defn cache-length [^DynamicMessage msg] (field msg "length"))
+(defn cache-values
+  "LRangeResponse.values / SMembersResponse.members（同一形状的 repeated bytes）。"
+  [^DynamicMessage msg]
+  (mapv utf8 (field msg (if (.findFieldByName (.getDescriptorForType msg) "values")
+                          "values" "members"))))
+
+;; MQ -----------------------------------------------------------------------
+
+(def mq-create-topic CoordRpc/MQ_CREATE_TOPIC)
+(def mq-publish CoordRpc/MQ_PUBLISH)
+(def mq-poll CoordRpc/MQ_POLL)
+(def mq-ack CoordRpc/MQ_ACK)
+
+(defn- mq-request [^com.google.protobuf.Descriptors$Descriptor desc fields]
+  (cache-request desc fields))
+
+(defn mq-create-topic-req [{:keys [topic partitions]}]
+  (mq-request CoordRpc/MQ_CREATE_TOPIC_REQUEST
+              {:topic (str topic) :partitions (int (or partitions 1))}))
+(defn mq-publish-req
+  "MqPublishRequest{topic, partition, key, payload, idempotency_key}。
+
+  `idempotency_key` 是 broker 侧的**去重键**（m5b 的登台判据之一）：同一 key
+  重复发布必须只落一条。"
+  [{:keys [topic partition key payload idempotency-key]}]
+  (mq-request CoordRpc/MQ_PUBLISH_REQUEST
+              (cond-> {:topic (str topic) :partition (int (or partition 0))
+                       :payload (str payload)}
+                key (assoc :key (str key))
+                idempotency-key (assoc :idempotency-key (str idempotency-key)))))
+(defn mq-poll-req [{:keys [topic partition consumer-group start-offset max-count]}]
+  (mq-request CoordRpc/MQ_POLL_REQUEST
+              {:topic (str topic) :partition (int (or partition 0))
+               :consumer_group (str (or consumer-group "g1"))
+               :start_offset (long (or start-offset 0))
+               :max_count (int (or max-count 100))}))
+(defn mq-ack-req [{:keys [topic partition consumer-group offset]}]
+  (mq-request CoordRpc/MQ_ACK_REQUEST
+              {:topic (str topic) :partition (int (or partition 0))
+               :consumer_group (str (or consumer-group "g1"))
+               :offset (long offset)}))
+
+(defn mq-offset [^DynamicMessage msg] (field msg "offset"))
+(defn mq-messages
+  "MqPollResponse.messages → 纯 EDN（:topic/:partition/:offset/:key/:payload）。"
+  [^DynamicMessage msg]
+  (mapv (fn [^DynamicMessage m]
+          {:topic     (field m "topic")
+           :partition (field m "partition")
+           :offset    (field m "offset")
+           :key       (utf8 (field m "key"))
+           :payload   (utf8 (field m "payload"))
+           :timestamp (field m "timestamp")})
+        (field msg "messages")))

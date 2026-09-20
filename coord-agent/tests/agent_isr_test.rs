@@ -205,7 +205,7 @@ async fn test_mq_follower_apply_preserves_offset() {
     );
     leader.set_replication(Some(std::sync::Arc::new(leader_mgr)));
     let offset = leader
-        .produce_replicated("orders", 0, b"msg-1".to_vec(), None)
+        .produce_replicated("orders", 0, b"msg-1".to_vec(), None, None)
         .await
         .unwrap();
     assert_eq!(offset, 0);

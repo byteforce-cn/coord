@@ -4,8 +4,12 @@ import cn.byteforce.coord.sdk.CoordConfig;
 import cn.byteforce.coord.sdk.CoordException;
 import cn.byteforce.coord.sdk.ErrorCode;
 import cn.byteforce.coord.sdk.internal.thread.ThreadPoolManager;
+import cn.byteforce.coord.sdk.internal.proto.HandshakeGrpc;
+import cn.byteforce.coord.sdk.internal.proto.HandshakeRequest;
+import cn.byteforce.coord.sdk.internal.proto.HandshakeResponse;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import io.grpc.ManagedChannel;
+import io.grpc.StatusRuntimeException;
 import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.shaded.io.netty.handler.ssl.SslContextBuilder;
@@ -15,6 +19,7 @@ import org.slf4j.LoggerFactory;
 import javax.net.ssl.SSLException;
 import java.io.File;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -144,6 +149,61 @@ public class AgentChannelManager {
             Thread.currentThread().interrupt();
             return false;
         }
+    }
+
+    /**
+     * Perform a real protocol version negotiation against the agent
+     * ({@code /coord.agent.Handshake/Negotiate}).
+     *
+     * <p><b>P0-4 / D6.</b> Before this, the SDK never called the endpoint and the agent never
+     * implemented it: an SDK/agent version mismatch surfaced as a bare gRPC
+     * {@code UNIMPLEMENTED} ("unknown service") when the first real RPC was issued, with no
+     * hint that a version mismatch was the cause. Since the agent's services were renamed in
+     * {@code contracts/v1.2.0} in a one-shot switch (no dual-serving period), that
+     * un-diagnosable failure mode is precisely what this closes.
+     *
+     * @param deadline maximum time to wait for the negotiation RPC
+     * @return the versions advertised by the agent (never null; possibly empty)
+     * @throws CoordException {@link ErrorCode#PROTOCOL_MISMATCH} if the agent does not
+     *         advertise this SDK's version, {@link ErrorCode#AGENT_UNAVAILABLE} if unreachable
+     */
+    public List<String> negotiate(Duration deadline) {
+        var stub = HandshakeGrpc.newBlockingStub(getChannel())
+                .withDeadlineAfter(Math.max(1, deadline.toMillis()), TimeUnit.MILLISECONDS);
+        HandshakeResponse resp;
+        try {
+            resp = stub.negotiate(HandshakeRequest.newBuilder()
+                    .setClientVersion(negotiator.getSdkVersion())
+                    .build());
+        } catch (StatusRuntimeException e) {
+            throw new CoordException(ErrorCode.AGENT_UNAVAILABLE,
+                    "Handshake.Negotiate failed against the agent: " + e.getStatus(), e);
+        }
+        List<String> agentVersions = resp.getSupportedVersionsList();
+        // 版本不匹配 -> 可诊断异常（而不是等第一个业务 RPC 报 UNIMPLEMENTED）。
+        negotiator.requireSupported(agentVersions);
+        log.info("Coord Java SDK: protocol negotiation OK (sdk={}, agent={})",
+                negotiator.getSdkVersion(), agentVersions);
+        return agentVersions;
+    }
+
+    /**
+     * Wait for readiness and then negotiate the protocol version.
+     *
+     * @param timeout budget shared by the connect wait and the negotiation RPC
+     * @return the versions advertised by the agent (never null)
+     * @throws CoordException {@link ErrorCode#AGENT_UNAVAILABLE} on connect timeout,
+     *         {@link ErrorCode#PROTOCOL_MISMATCH} on version mismatch
+     */
+    public List<String> connectAndNegotiate(Duration timeout) {
+        long startNanos = System.nanoTime();
+        if (!awaitReady(timeout)) {
+            throw new CoordException(ErrorCode.AGENT_UNAVAILABLE,
+                    "agent channel did not become ready within " + timeout);
+        }
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+        long remainingMs = Math.max(1, timeout.toMillis() - elapsedMs);
+        return negotiate(Duration.ofMillis(remainingMs));
     }
 
     /**

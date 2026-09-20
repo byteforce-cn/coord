@@ -1,0 +1,26 @@
+;; expect-valid-probe-agrees —— 判据 5（服务端地面真值）的**正**控制。
+;;
+;; `:f :lock-probe` 是绕开 agent、直接从 server 读 `/_lock/{name}` 的探针 op
+;; （见 client.clj 的 invoke-lock-probe）。这条 fixture 里所有落在自述区间内部的
+;; 探针样本都指向同一个 holder ⇒ 服务端与自述一致，valid。
+;;
+;; 注意 `:exists? false` 的样本（锁空着）不参与判据：那一刻没有任何持有者，
+;; 与自述区间无关。
+[{:type :ok :f :lock-contend :process 0 :time 10
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  :acquired-at-ms 10 :released-at-ms 600 :released? true
+  :gone? true :gone-at-ms 600 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}
+
+ {:type :ok :f :lock-probe :process 2 :time 100
+  :name "lock-a" :server-at-ms 100 :exists? true
+  :server {:holder-id "h1" :lease-id 11 :ttl-secs 5}}
+
+ {:type :ok :f :lock-probe :process 2 :time 300
+  :name "lock-a" :server-at-ms 300 :exists? true
+  :server {:holder-id "h1" :lease-id 11 :ttl-secs 5}}
+
+ {:type :ok :f :lock-probe :process 2 :time 700
+  :name "lock-a" :server-at-ms 700 :exists? false :server nil}]

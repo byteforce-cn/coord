@@ -3,10 +3,15 @@ name: contract-check
 # ============================================================
 # 对外协议契约质量门禁（apis/contracts）
 #
-# 三道卡口：
-#   1. buf lint      — 契约文件自身规范；
-#   2. buf breaking  — 与 main 基线比对，任何 Breaking Change 置红；
-#   3. wire-sync     — 契约承诺必须与 coord-proto 线端实现一致。
+# 五道卡口：
+#   1. buf lint           — 契约文件自身规范；
+#   2. buf breaking       — 与 main 基线比对，任何 Breaking Change 置红；
+#   3. wire-sync          — 契约承诺（含期限台账 STATUS.md）与 coord-proto 落地 一致；
+#   4. wire-descriptor    — **descriptor 级**逐包比对 service/method/message/field/
+#                           enum 的 wire 签名（取代第 3 道的"按字段名全文匹配"作为
+#                            结构性判据；两者互补，都要跑）。
+#   5. sdk-sync           — 契约命名空间 ↔ Java SDK 生成类型（防 SDK 面漂回内部
+#                           proto；GA 服务的 impl 必须引用 `contracts.<domain>.v1`）。
 #
 # 合并策略要求：本检查为 required status check，失败时禁止合并
 # （在分支保护规则中配置，见 WHITEPAPER.md §10）。
@@ -17,11 +22,14 @@ on:
     paths:
       - "apis/contracts/**"
       - "coord-proto/src/proto/**"
+      # sdk-sync（第 5 道）会读 SDK 源码：不监听它就会出现"改了 SDK 但门禁没跑"
+      - "coord-java-sdk/src/main/java/**"
   push:
     branches: [main]
     paths:
       - "apis/contracts/**"
       - "coord-proto/src/proto/**"
+      - "coord-java-sdk/src/main/java/**"
 
 permissions:
   contents: read
@@ -35,6 +43,10 @@ jobs:
           fetch-depth: 0 # buf breaking 需要完整 git 历史
 
       - uses: bufbuild/buf-setup-action@v1
+
+      # 第 5 道卡口（G3）不需要 buf/protoc，先跑：纯文本断言，最快给出反馈。
+      - name: sdk-sync（契约命名空间 ↔ Java SDK）
+        run: bash apis/contracts/scripts/check-sdk-sync.sh
 
       - name: buf lint
         run: buf lint
@@ -54,3 +66,21 @@ jobs:
 
       - name: wire-sync（契约 ↔ coord-proto 一致性）
         run: bash apis/contracts/scripts/check-wire-sync.sh
+
+      - name: Install protoc（descriptor 级比对需要）
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: wire-descriptor（**descriptor 级**契约 ↔ 实现一致性）
+        # 评审 D-e / V7 / G1：`check-wire-sync.sh` 按**字段名全文匹配**，不精确到
+        # message 作用域（该脚本头部自己写明了这个限制）。它今天是绿的，但那是
+        # "字段名恰好一致"，等于一张空头支票：同名不同 message、字段号互换、
+        # 类型改宽窄、rpc/服务改名都可能不被发现。本步骤用 protoc 从两侧
+        # .proto 生成 FileDescriptorSet，反解后逐包比对 service / method /
+        # message / field / enum 的 wire 签名。
+        #
+        # 判据分层（脚本内置，见 apis/contracts/scripts/descriptor_signature.py）：
+        #   - `coord.<domain>.v1`（GA 层）: **相等** —— 迁移口径是两份副本逐字相同；
+        #   - 无 `.v1` 后缀（STABLE 底座原语）: **契约 ⊆ 实现** —— 契约允许是承诺的
+        #     下界（例：coord.maintenance 只承诺 Status，实现另有运维接口）；
+        #   - `grpc.health.v1`: 随附的第三方标准 proto，由 lib 实现，跳过。
+        run: bash apis/contracts/scripts/check-wire-descriptor.sh

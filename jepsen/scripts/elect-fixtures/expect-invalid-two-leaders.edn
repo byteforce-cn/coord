@@ -1,0 +1,19 @@
+;; expect-invalid-two-leaders —— **P0**：同一 group 同时有两个 leader。
+;;
+;; c1 持有 [10, 3000)、c2 在 500 就当选 ⇒ 重叠。分区愈合后旧 leader 未退位、
+;; 或 agent 各按本地缓存认定自己在位时，都会长成这个样子。
+;; 仓内史：`leader_election.rs:111` 记录的第四轮 P0 就是这个家族的
+;; 「重复 campaign 保持 Leader」例外分支。
+[{:type :ok :f :elect-campaign :process 0 :time 10
+  :elected? true :group-name "g1" :candidate-id "c1" :lease-id 21
+  :campaign-at-ms 10 :resigned-at-ms 3000 :resigned? true
+  :gone? true :gone-at-ms 3000 :still-leader-after-resign false
+  :holder-ttl-seconds 10
+  :leader-after-resign {:leader-id "" :exists false}}
+
+ {:type :ok :f :elect-campaign :process 1 :time 20
+  :elected? true :group-name "g1" :candidate-id "c2" :lease-id 22
+  :campaign-at-ms 500 :resigned-at-ms 900 :resigned? true
+  :gone? true :gone-at-ms 900 :still-leader-after-resign false
+  :holder-ttl-seconds 10
+  :leader-after-resign {:leader-id "" :exists false}}]

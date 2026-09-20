@@ -1,0 +1,159 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — 权限策略引擎（OPA）（能力承诺面，v1.2）
+//
+// 状态：COMMITTED（承诺中）｜ GA 期限：2026-12-31 ｜ 台账：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/policy.proto 的 coord.policy.v1.Policy
+//            （字段编号/类型逐项一致；迁移 = 机械式重挂载，禁止趁机改 wire）
+//
+// 边界声明：OPA bundle 存于 coord-server KV（跨 Agent 共享）；
+// RBAC 策略为 **Agent 本地内存**，不承诺跨 Agent 共享（WHITEPAPER §10 规则 4）。
+
+// GA 验收定义与倒逼机制见 WHITEPAPER.md §13。
+// ============================================================
+
+package coord.policy.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.policy.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/policy/v1;policyv1";
+
+// ============================================================
+
+service Policy {
+  // 策略评估
+  rpc CheckPermission(PolicyCheckPermissionRequest) returns (PolicyCheckPermissionResponse);
+  rpc Evaluate(PolicyEvaluateRequest) returns (PolicyEvaluateResponse);
+
+  // 策略解释 — 返回决策 trace，说明为什么允许/拒绝
+  rpc Explain(PolicyExplainRequest) returns (PolicyExplainResponse);
+
+  // 策略包管理 — Rego bundle CRUD（写入前 OPA 编译校验 + 版本化 + 原子覆盖）
+  rpc PutBundle(PolicyPutBundleRequest) returns (PolicyPutBundleResponse);
+  rpc DeleteBundle(PolicyDeleteBundleRequest) returns (PolicyDeleteBundleResponse);
+  rpc ListBundles(PolicyListBundlesRequest) returns (PolicyListBundlesResponse);
+  rpc SetBundleEnabled(PolicySetBundleEnabledRequest) returns (PolicySetBundleEnabledResponse);
+  // 按历史版本回滚（恢复快照内容并生成新版本）
+  rpc RollbackBundle(PolicyRollbackBundleRequest) returns (PolicyRollbackBundleResponse);
+  // 列出 bundle 全部历史版本（用于回滚目标发现）
+  rpc ListBundleVersions(PolicyListBundleVersionsRequest) returns (PolicyListBundleVersionsResponse);
+}
+
+message PolicyCheckPermissionRequest {
+  string principal = 1;
+  string resource = 2;
+  string action = 3;
+  bytes context = 4; // JSON
+}
+
+message PolicyCheckPermissionResponse {
+  bool allowed = 1;
+  string reason = 2;
+}
+
+message PolicyEvaluateRequest {
+  string query = 1; // Rego query
+  bytes input = 2; // JSON input document
+}
+
+message PolicyEvaluateResponse {
+  bytes result = 1; // JSON result
+}
+
+// ——— Explain ———
+
+message PolicyExplainRequest {
+  string query = 1; // Rego query（如 "data.rbac.allow"）
+  bytes input = 2; // JSON input document
+}
+
+message PolicyExplainResponse {
+  bytes trace = 1; // JSON trace: 匹配的规则、求值路径、决策原因
+}
+
+// ——— Bundle CRUD ———
+
+message PolicyPutBundleRequest {
+  string tenant_id = 1; // 租户 ID
+  string namespace = 2; // 命名空间（默认 "default"）
+  string name = 3; // 策略包名称
+  string rego_content = 4; // Rego 源码内容
+}
+
+message PolicyPutBundleResponse {
+  string bundle_id = 1; // 策略包 ID
+  string name = 2;
+  string namespace = 3;
+  int64 created_at = 4; // UNIX epoch seconds
+  int64 updated_at = 5;
+  bool enabled = 6;
+  int64 version = 7; // 当前版本号（每次成功上传 +1）
+}
+
+message PolicyDeleteBundleRequest {
+  string bundle_id = 1;
+}
+
+message PolicyDeleteBundleResponse {
+  bool deleted = 1;
+}
+
+message PolicyListBundlesRequest {
+  string tenant_id = 1; // 租户 ID，为空则列出全部
+}
+
+message PolicyListBundlesResponse {
+  repeated PolicyBundleInfo bundles = 1;
+}
+
+message PolicyBundleInfo {
+  string bundle_id = 1;
+  string name = 2;
+  string namespace = 3;
+  string tenant_id = 4;
+  bool enabled = 5;
+  int64 created_at = 6;
+  int64 updated_at = 7;
+  int64 version = 8; // 当前版本号
+}
+
+message PolicySetBundleEnabledRequest {
+  string bundle_id = 1;
+  bool enabled = 2;
+}
+
+message PolicySetBundleEnabledResponse {
+  bool success = 1;
+}
+
+// ——— Bundle 版本回滚 ———
+
+message PolicyRollbackBundleRequest {
+  string bundle_id = 1; // 策略包 ID（tenant/namespace/name）
+  int64 version = 2; // 要回滚到的历史版本号（>=1）
+}
+
+message PolicyRollbackBundleResponse {
+  bool success = 1;
+  int64 version = 2; // 回滚后的当前版本号（原当前版本 +1）
+  int64 restored_version = 3; // 恢复到的历史版本号
+  PolicyBundleInfo bundle = 4; // 回滚后的完整 bundle 信息
+}
+
+message PolicyListBundleVersionsRequest {
+  string bundle_id = 1;
+}
+
+message PolicyListBundleVersionsResponse {
+  repeated PolicyBundleVersionInfo versions = 1;
+}
+
+message PolicyBundleVersionInfo {
+  int64 version = 1;
+  int64 created_at = 2; // 该版本写入时间（UNIX epoch seconds）
+  bool is_current = 3; // 是否为当前生效版本
+}
+
+// ============================================================
+// Transit — Envelope Encryption

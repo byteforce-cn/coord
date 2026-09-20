@@ -1,0 +1,26 @@
+;; expect-invalid-orphan-not-reclaimed —— AG-06 的**硬违约**：崩溃的持有者留下死锁。
+;;
+;; 与正例唯一的差别：kill + ttl + grace（11000）之后的探针仍然看到服务端 key
+;; 挂在 a1 名下。持锁的 agent 已经被 kill -9，它的后台续期任务不可能再跑，而
+;; lease 也没有被回收 ⇒ 后来者永远抢不到这把锁。
+;;
+;; 锚点刻意取「故障事件**完成**的时刻 + ttl + grace」：续期最晚可能发生在故障
+;; 生效前一刻，用事件时刻当锚是保守的（只会漏报、不会误报）。
+[{:type :ok :f :lock-abandon :process 0 :time 1000000
+  :t0-ns 1000000000
+  :name "lock-a-abandon" :holder-id "a1" :lease-id 7
+  :abandoned? true :acquired-at-ms 5
+  :acquire-node "127.0.0.1:24577"
+  :holder-ttl-seconds 5 :grace-ms 4000 :at-ms 10}
+
+ {:type :info :process :nemesis :f :kill-agent :time 2000000000
+  :value [:killed-agent "n4"]}
+ {:type :info :process :nemesis :f :kill-agent :time 12000000000
+  :value [:restarted-agent "n4"]}
+
+ ;; kill 之后 ttl+grace 早已过去（deadline = 11000），key 还在 a1 名下
+ {:type :ok :f :lock-probe :process 1 :time 12000000000
+  :t0-ns 12000000000 :server-at-ms 0
+  :name "lock-a-abandon" :server-key "/_lock/lock-a-abandon"
+  :exists? true :raw-value "{\"holder_id\":\"a1\",\"lease_id\":7}"
+  :server {:holder-id "a1" :lease-id 7 :ttl-secs 5} :node "n1"}]

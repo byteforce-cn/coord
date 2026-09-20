@@ -1,0 +1,15 @@
+;; expect-invalid-agent-route-not-proven —— **AG-01 的负控制**。
+;;
+;; 形态：这是一个 `--via-agent` 的 run（:agent-scrape 给了），但 agent 的
+;; 代理面计数为 0 —— 说明客户端**根本没有请求落到 agent 上**。
+;;
+;; 这正是「端点写错 = 直连假绿」：工作负载会完美通过（因为直连 server 本来就
+;; 是绿的），只有这条门槛能把它抓住。agent 每 run 都是新进程 + 新 data_dir，
+;; 计数从 0 起，所以 run 结束后抓到 0 就是「没经过 agent」的确证。
+;;
+;; fixture 的 opts 由运行器第三个参数给出：
+;;   {:agent-scrape {:total 0 :by-method {}} :min-agent-requests 1 :nemesis :none}
+[{:type :invoke  :f :write :value 1 :process 0 :time 100000000 :key "/jepsen/register"}
+ {:type :ok      :f :write :value 1 :process 0 :time 100100000 :key "/jepsen/register"}
+ {:type :invoke  :f :read  :process 0 :time 100200000 :key "/jepsen/register"}
+ {:type :ok      :f :read  :value 1 :process 0 :time 100300000 :key "/jepsen/register"}]

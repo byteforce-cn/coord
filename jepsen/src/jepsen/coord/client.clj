@@ -126,13 +126,22 @@
 
 (defn- reauthenticate!
   "Fetches a fresh CCT (coord tokens expire after ~1h) and swaps in new auth
-  channels for every node. Returns the new CCT."
+  channels for every node. Returns the new CCT.
+
+  用 `:auth-raw-channels`（**server** 端点）而不是 ops 端点：agent 不代理 Auth
+  （它只代理 KV/Txn/Lease/Watch/Maintenance/Storage 六个数据面服务），所以
+  CCT 只能从集群直接取 —— 这也解释了为什么生产上应用的登录路径不经过 agent。"
   [this]
-  (let [raw-channels @(:raw-channels this)
+  (let [raw-channels (or @(:auth-raw-channels this) @(:raw-channels this))
         cct          (authenticate! raw-channels (:root-password this))
-        channels     (mapv #(p/auth-channel % cct) raw-channels)]
+        channels     (mapv #(p/auth-channel % cct) @(:raw-channels this))]
     (reset! (:cct this) cct)
     (reset! (:channels this) channels)
+    ;; 地面真值探针的端点（**server**）也要跟着换新 CCT：探针用的是同一份鉴权，
+    ;; 忘了这一句的表现是「刷新之后探针全部 UNAUTHENTICATED」——而那会被记成
+    ;; :info（探针读失败），看起来像「没有矛盾」，是假绿。
+    (when-let [praw @(:probe-raw-channels this)]
+      (reset! (:probe-channels this) (mapv #(p/auth-channel % cct) praw)))
     cct))
 
 (defn- not-leader?
@@ -194,13 +203,56 @@
                        {:err e}))]
            (if-let [resp (:ok res)]
              res
-             (if (or (unavailable? (:err res)) (forward-request? (:err res)))
+             ;; 轮换的触发条件：**不该把这个节点判成最终结论**的那些错误。
+             ;;
+             ;; UNAVAILABLE / "forward to leader" 自不必说；**UNAUTHENTICATED 也要
+             ;; 轮换** —— 多 agent 拓扑下一个 agent 可能正处于「刚重启、RoleCache
+             ;; 还是空的」状态：它对所有 CCT 都 fail-closed 拒绝，而另一个 agent
+             ;; 完好。不轮换的话客户端会**钉在**这个坏 agent 上，把整个 run 打红。
+             ;; 实测（M5a 第二轮，idgen/kill-agent）：166 个 op 里 143 个
+             ;; `:unauthenticated`，而另一个 agent 一直是好的。
+             ;;
+             ;; 不轮换的是**业务性**拒绝（PERMISSION_DENIED / NOT_FOUND 之类）：
+             ;; 那些换节点也不会变，而且"换了就好了"反而会掩盖真实的鉴权结论。
+             (if (or (unavailable? (:err res)) (forward-request? (:err res))
+                     (unauthenticated? (:err res)))
                (recur (inc i) (:err res)
                       (and all-not-leader?
                            (or (not-leader? (:err res))
                                (forward-request? (:err res)))))
                res)))
          {:err last-err, :all-not-leader? all-not-leader?})))))
+
+(defn- try-probe
+  "在 **server** 端点上做一次 RPC，返回 `{:ok resp :node n}` 或 `{:err e}`。
+
+  与 `try-nodes` 的区别（探针专用，刻意不共用代码路径）：
+
+    * 走 `:probe-channels`（server），**不**走 `:channels`（可能是 agent 隧道）
+      —— 探针的全部意义就是绕开 agent；
+    * 不写 per-key 的 leader 缓存（探针的失败不应该影响 ops 路径的选路）；
+    * 不做 `forward-request?` 之外的语义判断，读失败如实交给调用方记 :info。"
+  [this f]
+  (let [chs (vec @(:probe-channels this))
+        nds (vec (or (seq (:probe-nodes this))
+                     (seq (:auth-nodes this))
+                     (:nodes this)))]
+    (loop [i 0 last-err nil]
+      (if (< i (count chs))
+        ;; 注意：`recur` 不能跨 `try` 边界（"Can only recur from tail position"），
+        ;; 所以先在一个 let 里执行调用并分类，再在 try **之外**决定是否轮换 ——
+        ;; 与 try-nodes 同一写法。
+        (let [res (try
+                    {:ok (f (nth chs i))
+                     :node (nth nds (min i (dec (count nds))))}
+                    (catch StatusRuntimeException e
+                      {:err e}))]
+          (if-let [e (:err res)]
+            (if (or (unavailable? e) (forward-request? e))
+              (recur (inc i) e)
+              res)
+            res))
+        {:err last-err}))))
 
 (defn- result-op
   "Maps an invocation op + either {:ok resp :node n} or {:err e} to the
@@ -1196,6 +1248,819 @@
                    :observations [o1 (assoc gone :phase :after-revoke)]
                    :absent-ms (when (:absent? gone) (:at-ms gone)))))))))
 
+;; --------------------------------------------------------------------------
+;; M5a —— agent 本地面（coord.agent.Lock / LeaderElection / IdGen / Registry）
+;;
+;; 这些服务只存在于 **agent** 上（server 的 router 里没有 coord.agent.*），
+;; 所以一次成功的调用本身就是「请求真的落到了 agent」的证明。
+;;
+;; 时间基准：所有 jepsen 客户端都跑在控制机的**同一个 JVM** 里，因此
+;; `:at-ms`（相对 op 起点的单调毫秒）是**同一个时钟**——互斥类的区间重叠判定
+;; 因此是精确的，不需要 §5.4-① 的跨机时钟容差。（跨 agent 的时钟差只影响
+;; agent 自己那侧的判定，不影响本判定。）
+;;
+;; **锚点必须是 op 自己读的 `System/nanoTime`（`:t0-ns`），不能是 jepsen 记录的
+;; invoke 时刻**：后者是 worker 线程在派发 op 时打的点，中间隔着队列与线程调度。
+;; 实测（2026-09-18 的 lock run）同一 JVM 里 `completion.time - (t0 + 最后一个
+;; :at-ms)` 在不同 op 之间从 40ms 抖到 290ms —— 也就是**锚点自身有几百毫秒的
+;; 噪声**，而它会被算成「两个持有者的区间重叠」（实测 3/126）。`nanoTime` 是同一
+;; 进程内的单调时钟，两边都在同一个 JVM ⇒ 用它做锚点是精确的。
+;; --------------------------------------------------------------------------
+
+(defn- op-clock
+  "Returns `(fn [] ms)` measuring monotonic milliseconds since `t0`.
+
+  与 T2.2 的 lease 判定同一取向：一律用客户端单调量，不跨机比时钟。"
+  [t0]
+  (fn [] (quot (- (System/nanoTime) (long t0)) 1000000)))
+
+(defn- invoke-lock-contend
+  "M5a —— 跨 agent 互斥专项（AG-02）。
+
+  一次 op = 一次完整的「抢 → 持有 → 释放」：
+    1. 在 `deadline-ms` 内轮询 Acquire（已持有者不重试）；
+    2. 拿到后在 `hold-ms` 期间用 Renew 保活（每个 `renew-ms` 一次）；
+    3. Release。
+
+  completion 记录 `:acquired-at-ms`（拿到锁的时刻）与 `:gone-at-ms`（**可举证的
+  「锁已不在我名下」的最早时刻**）。**抢不到**在契约里是合法业务结果（别人持有），
+  记为 `:fail :error :lock-held`（§5.1 白名单），这样 G6 的 op 级活性门槛不会把
+  它当成「这条路没通」。
+
+  ## 区间语义（F-34 的根因，两处都在这里）
+
+  第一版把区间结束记成「**观测循环结束之后**的 el()」，并把「锁空了」判定为
+  `exists=false`。两条都会把持有区间**放大**：
+
+    1. `:released-at-ms` 记在观测循环之后 ⇒ 区间尾部被循环的 sleep 拉长
+       （实测中位数 ~196ms、最长 ~1.37s）；
+    2. `exists=false` 当作「空出来」⇒ 观测窗口里**另一个持有者合法接管**时
+       `exists=true`，于是区间被 fail-safe 延长整整 `ttl + grace`（=9s）。
+
+  实测后果：F-34 的 99 次「互斥重叠」在这两条修正后全部归零（真实持有区间
+  两两不相交）。现在的口径：
+
+    * `:released-at-ms` = Release RPC 返回的时刻（**观测循环之前**）；
+    * `:gone?` = 「有证据表明锁已不在我名下」（release 成功 / 探针删除成功 /
+      观测到 holder 不是我）；
+    * `:gone-at-ms` = 上述证据里**最早**的时刻（区间最紧，不膨胀）；
+    * 都没有 ⇒ `gone?` = false，checker 才走 fail-safe 延长。"
+  [this op]
+  (let [{:keys [name holder-id ttl-seconds deadline-ms hold-ms grace-ms]} (:value op)
+        t0 (System/nanoTime)
+        el (op-clock t0)
+        skey (str "lock/" name)
+        acquire (fn []
+                  (try-nodes this skey
+                             #(p/call % p/lock-acquire
+                                      (p/lock-acquire-req {:name name
+                                                           :holder-id holder-id
+                                                           :ttl-seconds ttl-seconds}))))
+        got (loop []
+              (if (> (el) (long deadline-ms))
+                nil
+                (let [r (acquire)]
+                  (cond
+                    (and (:ok r) (p/lock-acquired? (:ok r)))
+                    {:lease-id (p/lock-lease-id (:ok r))
+                     :at-ms (el)
+                     :node (:node r)}
+
+                    (:ok r)   ;; 别人持有：等一会儿再抢
+                    (do (lease-sleep 100) (recur))
+
+                    :else     ;; agent 不可用/超时：也重试（扰动期的正常形态）
+                    (do (lease-sleep 200) (recur))))))]
+    (if-not got
+      (assoc op :type :fail :error :lock-held
+             :name name :holder-id holder-id
+             :deadline-ms (long deadline-ms) :at-ms (el))
+      (let [lid        (:lease-id got)
+            acquired-at (:at-ms got)
+            renew      (fn []
+                         (try-nodes this skey
+                                    #(p/call % p/lock-renew
+                                             (p/lock-renew-req {:name name
+                                                                :holder-id holder-id
+                                                                :lease-id lid}))))
+            renews     (loop [acc []]
+                         (if (>= (el) (+ (long acquired-at) (long hold-ms)))
+                           acc
+                           (let [r (renew)
+                                 entry (cond
+                                         (:ok r) {:at-ms (el)
+                                                  :new-ttl (p/lock-new-ttl (:ok r))}
+                                         :else   {:at-ms (el)
+                                                  :error (str (:err r))})]
+                             (lease-sleep 100)
+                             (recur (conj acc entry)))))
+            ;; Fencing 探针（**在仍持有锁时**打）：用一个错误的 lease_id 尝试
+            ;; Release。契约要求只认 (holder_id, lease_id) 匹配者，所以这里必须
+            ;; 被拒；若返回 released=true，说明实现是按 name（或只按 holder_id）
+            ;; 删的 —— 那么任何知道锁名的调用方都能把别人的锁删掉，
+            ;; 互斥承诺直接被第三方破坏（lockck 判 :lock-fencing-missing）。
+            ;;
+            ;; 顺序很重要：必须在**真释放之前**打，否则锁已经空了，
+            ;; 「released=false」就是平凡的（测不到 fencing）。
+            foreign (try-nodes this skey
+                               #(p/call % p/lock-release
+                                        (p/lock-release-req
+                                         {:name name :holder-id holder-id
+                                          ;; 不存在的 lease：真 lease 是 lid
+                                          :lease-id (inc (long lid))})))
+            foreign-at (el)
+            rel        (try-nodes this skey
+                                  #(p/call % p/lock-release
+                                           (p/lock-release-req {:name name
+                                                                :holder-id holder-id
+                                                                :lease-id lid})))
+            ;; F-34 根因 ①：这个时刻**必须在观测循环之前**取 —— 记在循环之后
+            ;; 等于把区间尾部按循环的 sleep 拉长（实测中位数 +196ms、最长 +1.37s），
+            ;; 而下一个持有者在窗口内合法接管后就会与这条膨胀区间「重叠」。
+            released-at (el)
+            released?  (boolean (and (:ok rel) (p/lock-released? (:ok rel))))
+            foreign-released? (boolean (and (:ok foreign)
+                                            (p/lock-released? (:ok foreign))))
+            ;; **可观测真相**：锁还在不在我名下，只能问 GetLockInfo。
+            ;;
+            ;; 为什么不直接拿 Release 的返回值当结论：实测（M5a 首轮）release
+            ;; 的布尔会撒谎 —— 当前实现不校验 lease_id，我的 fencing 探针
+            ;;（错误 lease_id）就能把锁真删掉，于是紧随其后的「正确」Release
+            ;; 必然回 false。若拿它当「仍然持有」，区间会被 fail-safe 延长，
+            ;; 进而和后面所有持有者重叠 —— 一次真实的 fencing 缺陷会被放大成
+            ;; 几千条假重叠（实测 3354 条）。
+            ;;
+            ;; 轮询几次：lease revoke → 级联删除可能不是瞬时的，只读一次会把
+            ;; 正常延迟误判成「没释放」。
+            ;;
+            ;; F-34 根因 ②：「空了」的判据**不是** `exists=false`，而是
+            ;; 「不再挂在我名下」（`exists=false` **或** holder 已换人）。观测
+            ;; 窗口里另一个持有者合法接管时 `exists=true`，用第一条判据就会
+            ;; 把区间延长整整 ttl+grace（9s），制造出大片假重叠。
+            obs        (loop [i 0 last-info nil]
+                         (let [r (try-nodes this skey
+                                            #(p/call % p/lock-get-info
+                                                     (p/lock-get-info-req name)))
+                               info (when (:ok r) (p/lock-info->edn (:ok r)))
+                               mine? (boolean (and (map? info) (true? (:exists info))
+                                                   (= holder-id (:holder-id info))))]
+                           (if (or (not mine?) (>= i 4))
+                             {:at-ms (el) :info (or info last-info) :mine? mine?}
+                             (do (lease-sleep 200)
+                                 (recur (inc i) (or info last-info))))))
+            fresh      (:info obs)
+            still-mine? (:mine? obs)
+            ;; 「已不在我名下」的**最早**可举证时刻：三个证据都是上界，取最早
+            ;; ⇒ 区间最紧。都没有 ⇒ gone? = false（checker 走 fail-safe）。
+            gone-at    (cond
+                         foreign-released? foreign-at
+                         released?         released-at
+                         (not still-mine?) (:at-ms obs)
+                         :else             nil)
+            gone?      (boolean gone-at)]
+        (assoc op :type :ok
+               :name name :holder-id holder-id :lease-id lid
+               :t0-ns t0
+               :acquired-at-ms acquired-at
+               :released-at-ms released-at
+               :released? released?
+               ;; 锁**真的**不在我名下了（判据用这个，不是上面那个布尔）
+               :gone? gone?
+               :gone-at-ms gone-at
+               :still-mine-after-release still-mine?
+               :foreign-release {:ok? (boolean (:ok foreign))
+                                 :released? foreign-released?
+                                 :at-ms foreign-at
+                                 :error (some-> (:err foreign) str)}
+               :lock-info-after-release fresh
+               :acquire-node (:node got)
+               :holder-ttl-seconds (long ttl-seconds)
+               :grace-ms (long (or grace-ms 0))
+               :renews renews
+               :at-ms (el))))))
+
+(defn- lock-value->edn
+  "从服务端 `/_lock/{name}` 的 JSON 值里取出口径字段。
+
+  **故意**用正则而不是 JSON 解析器：探针只需要「谁的名字挂在 key 上」，不需要
+  完整 JSON 语义；正则碰到字段缺失/格式变化的表现是 nil（如实记为未知），不会
+  抛异常把整条 op 变成 :info。字段名的权威定义在
+  `coord-agent/src/services/lock.rs` 的 `LockInfo`（serde 默认就是这几个名字）。"
+  [s]
+  (when (string? s)
+    {:holder-id (second (re-find #"\"holder_id\"\s*:\s*\"([^\"]*)\"" s))
+     :lease-id  (some-> (re-find #"\"lease_id\"\s*:\s*(-?\d+)" s) second Long/parseLong)
+     :ttl-secs  (some-> (re-find #"\"ttl_secs\"\s*:\s*(\d+)" s) second Long/parseLong)}))
+
+(defn- invoke-lock-abandon
+  "M5a 第二轮（AG-06）—— **弃锁**：拿到锁之后**故意不释放**。
+
+  这是「持有者进程被杀之后，服务端必须回收它持有的锁」这条契约唯一能被判定的
+  形态（多进程 + 真 kill 才可判：进程内测试杀不掉自己的宿主）。两条判据都用
+  **绕开 agent** 的服务端探针（`:f :lock-probe` 读 `/_lock/{name}`）取样：
+
+    * H2（不得假丢锁）—— 持锁的 agent 活着时，它的后台自动续期任务会一直给
+      lease 续命（`lock.rs` 的 `tokio::spawn` 续期循环，每 `ttl/3` 一次）⇒
+      服务端 key **必须一直挂在同一个 holder 名下**。历史上这里出过 P0：用本地
+      墙钟判 `is_expired()` 清理 held ⇒ 假丢锁 ⇒ **临界区重入**（该路径已删）。
+    * H1（不得留下死锁）—— 持锁的 agent 被 `kill -9`（或与集群分区）之后续期
+      停止 ⇒ lease 到期 ⇒ 服务端 key 必须在 `ttl + grace` 内不再挂在原 holder
+      名下。
+
+  op 本身只负责「拿到就不放」，并把识别信息（holder / lease / 拿锁的 endpoint）
+  留在 completion 里；判定在 `lockck`。**故意不**做 renew：续期是 agent 自己的
+  后台任务，客户端一声不吭正好模拟「插件进程内的句柄没被 drop」。"
+  [this op]
+  (let [{:keys [name holder-id ttl-seconds deadline-ms grace-ms]} (:value op)
+        t0 (System/nanoTime)
+        el (op-clock t0)
+        skey (str "lock/" name)
+        acquire (fn []
+                  (try-nodes this skey
+                             #(p/call % p/lock-acquire
+                                      (p/lock-acquire-req {:name name
+                                                           :holder-id holder-id
+                                                           :ttl-seconds ttl-seconds}))))
+        got (loop []
+              (if (> (el) (long deadline-ms))
+                nil
+                (let [r (acquire)]
+                  (cond
+                    (and (:ok r) (p/lock-acquired? (:ok r)))
+                    {:lease-id (p/lock-lease-id (:ok r)) :at-ms (el) :node (:node r)}
+
+                    (:ok r) (do (lease-sleep 100) (recur))
+                    :else   (do (lease-sleep 200) (recur))))))]
+    (if-not got
+      (assoc op :type :fail :error :lock-held
+             :name name :holder-id holder-id
+             :deadline-ms (long deadline-ms) :at-ms (el))
+      (assoc op :type :ok
+             :name name :holder-id holder-id
+             :lease-id (:lease-id got)
+             :t0-ns t0
+             :abandoned? true
+             :acquired-at-ms (:at-ms got)
+             ;; 拿锁的 endpoint（agent 隧道地址）—— checker 靠它把「我持有了」
+             ;; 归因到具体 agent，再用 nemesis 的 kill/partition 时间窗判
+             ;; 「这个 holder 还有没有可能在续期」。
+             :acquire-node (:node got)
+             :holder-ttl-seconds (long ttl-seconds)
+             :grace-ms (long (or grace-ms 0))
+             :at-ms (el)))))
+
+(defn- invoke-lock-probe
+  "M5a（F-34 的决定性实验）—— **服务端地面真值探针**。
+
+  绕开 agent，直接从 server 用 KV Range 读 `/_lock/{name}`：`lock-contend` 汇报
+  的持有区间是**客户端自述**，这条 op 记录的是**服务端 key 到底挂在谁名下**。
+
+  为什么必须绕开 agent：经 agent 读到的仍是 agent 的本地视图（加上代理层），
+  那样就无法把「agent 自述」与「服务端真相」分开 —— 而 F-34 要回答的正是这个
+  问题（见 `coord-findings.md` §14）。
+
+  记录：`:exists?`、`:server`（`{:holder-id :lease-id :ttl-secs}`）、
+  `:server-at-ms`（相对本 op 起点的单调毫秒，与其它 op 同一时钟）。读失败记
+  `:info`（**不是** `:fail`）—— 探针不可用不等于「没有矛盾」，checker 会把
+  读失败数单独报出来。"
+  [this op]
+  (let [{:keys [name]} (:value op)
+        t0 (System/nanoTime)
+        el (op-clock t0)
+        key (str "/_lock/" name)
+        res (try-probe this #(p/call % p/kv-range (p/range-req key)))]
+    (if (:ok res)
+      (let [kv  (first (p/range-kvs (:ok res)))
+            raw (:value (kv-edn kv))]
+        (assoc op :type :ok
+               :name name
+               :t0-ns t0
+               :server-key key
+               :server-at-ms (el)
+               :exists? (some? kv)
+               :raw-value raw
+               :server (lock-value->edn raw)
+               :node (:node res)))
+      (assoc op :type :info
+             :name name
+             :t0-ns t0
+             :server-key key
+             :server-at-ms (el)
+             :error (if (timeout? (:err res)) :timeout :probe-unavailable)
+             :err (some-> (:err res) str)))))
+
+(defn- invoke-elect-campaign
+  "M5a —— 选举唯一 leader 专项（AG-02/AG-10）。
+
+  一次 op = campaign → 持有（可选续约）→ resign → 再读一次 GetLeader。
+
+  `:elected?` 为 false 是合法业务结果（别人在位）。`:leader-after-resign`
+  记录 resign 之后 GetLeader 看到的东西：契约要求**不再是自己**（旧 leader
+  不得因本地缓存而永久在位）。
+
+  区间度量与 lock 面同一套口径（见 `invoke-lock-contend` 的长注释与
+  findings 的 F-34/F-35）：
+
+    * `:t0-ns` —— op 自己读的 `System/nanoTime`，作为跨 op 比较的**精确锚点**
+      （jepsen 记录的 invoke 时刻会带上派发/调度噪声）；
+    * `:gone?` / `:gone-at-ms` —— 「已不在 leader 位」的**最早可举证时刻**
+      （Resign 成功 ⇒ resign 返回时刻；或 GetLeader 显示不再是自己 ⇒ 探针时刻）；
+    * `:still-leader-after-resign` —— 轮询后仍是自己（判据 `:election-leader-after-resign`）。
+
+  第一版只记了 `campaign-at-ms` / `resigned-at-ms` 两个**相对**毫秒且没带锚点，
+  而 checker 直接跨 op 比它们 —— 实测 45s run 里报出 124 次「双 leader」，而同
+  一份历史加上锚点后是 **0**（见 findings F-35）。"
+  [this op]
+  (let [{:keys [group-name candidate-id ttl-seconds deadline-ms hold-ms]} (:value op)
+        t0 (System/nanoTime)
+        el (op-clock t0)
+        skey (str "election/" group-name)
+        campaign (fn []
+                   (try-nodes this skey
+                              #(p/call % p/election-campaign
+                                       (p/election-campaign-req
+                                        {:group-name group-name
+                                         :candidate-id candidate-id
+                                         :ttl-seconds ttl-seconds}))))
+        won (loop []
+              (if (> (el) (long deadline-ms))
+                nil
+                (let [r (campaign)]
+                  (cond
+                    (and (:ok r) (p/election-elected? (:ok r)))
+                    {:lease-id (p/election-lease-id (:ok r)) :at-ms (el) :node (:node r)}
+
+                    (:ok r) (do (lease-sleep 100) (recur))
+                    :else   (do (lease-sleep 200) (recur))))))]
+    (if-not won
+      (assoc op :type :ok :elected? false
+             :group-name group-name :candidate-id candidate-id
+             :t0-ns t0 :at-ms (el))
+      (let [lid (:lease-id won)
+            campaign-at (:at-ms won)]
+        (lease-sleep (max 0 (- (long hold-ms) 0)))
+        (let [resign (try-nodes this skey
+                                #(p/call % p/election-resign
+                                         (p/election-resign-req
+                                          {:group-name group-name
+                                           :candidate-id candidate-id
+                                           :lease-id lid})))
+              resigned-at (el)
+              resigned? (boolean (and (:ok resign) (p/election-resigned? (:ok resign))))
+              after (try-nodes this skey
+                               #(p/call % p/election-get-leader
+                                        (p/election-get-leader-req group-name)))
+              after-at (el)
+              leader-after (when (:ok after) (p/leader->edn (:ok after)))
+              still-leader? (boolean (and (map? leader-after) (:exists leader-after)
+                                          (= candidate-id (:leader-id leader-after))))
+              ;; 「已不在 leader 位」的最早可举证时刻（同 lock 的 :gone-at-ms 口径）：
+              ;;   * Resign 成功 → resign RPC 返回的时刻（上界）；
+              ;;   * 不然：GetLeader 明确显示「不再是我」（换人 / 不存在）→ 探针时刻。
+              ;; 注意**不能**用「leader 不存在」单条作依据（TTL 被动过期也会那样），
+              ;; 但两者都是「不再是我」的证据，对区间闭合足够。
+              gone-at (cond
+                        resigned? resigned-at
+                        (and (map? leader-after) (not still-leader?)) after-at
+                        :else nil)]
+          (assoc op :type :ok
+                 :elected? true
+                 :t0-ns t0
+                 :group-name group-name :candidate-id candidate-id :lease-id lid
+                 :campaign-at-ms campaign-at
+                 :resigned-at-ms resigned-at
+                 :resigned? resigned?
+                 :gone? (boolean gone-at)
+                 :gone-at-ms gone-at
+                 :still-leader-after-resign still-leader?
+                 :holder-ttl-seconds (long ttl-seconds)
+                 :leader-after-resign leader-after
+                 :at-ms (el)))))))
+
+(defn- election-value->edn
+  "从服务端 `/_election/{group}` 的 JSON 值里取出口径字段。
+
+  与 `lock-value->edn` 同一取向（正则而非 JSON 解析器：字段缺失/格式变化的表现是
+  nil，如实记为未知，不会抛异常把整条 op 变成 :info）。字段名的权威定义在
+  `coord-agent/src/services/leader_election.rs` 的 `ElectionGroup`（serde 默认就是
+  这几个名字）；`leader_id` 就是调用方传的 `candidate_id`。"
+  [s]
+  (when (string? s)
+    {:leader-id   (second (re-find #"\"leader_id\"\s*:\s*\"([^\"]*)\"" s))
+     :instance-id (second (re-find #"\"instance_id\"\s*:\s*\"([^\"]*)\"" s))
+     :lease-id    (some-> (re-find #"\"lease_id\"\s*:\s*(-?\d+)" s) second Long/parseLong)
+     :ttl-secs    (some-> (re-find #"\"ttl_secs\"\s*:\s*(\d+)" s) second Long/parseLong)}))
+
+(defn- invoke-election-probe
+  "M5a 第二轮（F-35 的残留）—— election 的 **服务端地面真值探针**。
+
+  与 `:lock-probe` 完全同构：绕开 agent，从 **server** 端点用 KV Range 读
+  `/_election/{group}`，回答「服务端认为这个 group 的 leader 是谁」。
+
+  为什么必须有它：`electck` 的第一版判据全部基于**客户端自述**（campaign 成功 /
+  resign 成功 / GetLeader 的返回）。F-34 的教训是这种自述分诊不了三种解释 ——
+  真违约 / agent 的汇报层与 server 不一致 / 度量本身有偏差。lock 面靠
+  `:lock-probe` 解决了，election 面此前是**明示的待补**（findings F-35 的
+  『残留』段）；这条 op 就是那个补丁。
+
+  读失败记 `:info`（不是 `:fail`）：探针不可用不等于「没有矛盾」，checker 会把
+  读失败数单独报出来，并要求至少有一条样本（缺了判未执行）。"
+  [this op]
+  (let [{:keys [group-name]} (:value op)
+        t0 (System/nanoTime)
+        el (op-clock t0)
+        key (str "/_election/" group-name)
+        res (try-probe this #(p/call % p/kv-range (p/range-req key)))]
+    (if (:ok res)
+      (let [kv  (first (p/range-kvs (:ok res)))
+            raw (:value (kv-edn kv))]
+        (assoc op :type :ok
+               :group-name group-name
+               :t0-ns t0
+               :server-key key
+               :server-at-ms (el)
+               :exists? (some? kv)
+               :raw-value raw
+               :server (election-value->edn raw)
+               :node (:node res)))
+      (assoc op :type :info
+             :group-name group-name
+             :t0-ns t0
+             :server-key key
+             :server-at-ms (el)
+             :error (if (timeout? (:err res)) :timeout :probe-unavailable)
+             :err (some-> (:err res) str)))))
+
+(defn- invoke-idgen
+  "M5a —— IdGen（AG-08）。
+
+  `:batch` = 一次 NextBatch 拿 `:count` 个 ID：契约要求**返回 count 个互异 ID**
+  （这条在单个响应内部就可判，不依赖任何跨节点比较）。`:single` = NextId。
+
+  ID 存成字符串（EDN 的 long 在 JSON/EDN 之间来回没有问题，但 snowflake 是
+  64-bit 有符号量，保持十进制字符串更不容易在多语言链路里出错）。
+  `-` 前缀会出现在极端值上，保留原样。"
+  [this op]
+  (let [{:keys [name batch? count]} (:value op)
+        skey (str "idgen/" name)]
+    (if batch?
+      (result-op op
+                 (try-nodes this skey
+                            #(p/call % p/idgen-next-batch
+                                     (p/idgen-next-batch-req {:name name
+                                                              :count (or count 8)})))
+                 (fn [resp]
+                   (let [ids (p/idgen-ids resp)]
+                     (assoc op :type :ok :name name
+                            :batch? true
+                            ;; `:requested-count` 供 checker 判「返回个数 = 请求个数」
+                            :requested-count (long (or count 8))
+                            :ids (mapv str ids)
+                            ;; **不要**写成 `(count ids)`：`count` 在这里被上面的
+                            ;; destructuring 绑定成了请求个数（一个 Long），
+                            ;; 于是 `(count ids)` = 「把 Long 当函数调」⇒
+                            ;; ClassCastException: Long cannot be cast to IFn。
+                            ;; 实测（M5a 第二轮）：整个 **NextBatch 分支从未执行成功过**
+                            ;; （`:batches 0`），而它正是「batch 内部 ID 互异」那条
+                            ;; 判据的唯一载体 —— 一类很难被区间/阈值判据抓到的静默
+                            ;; 覆盖缺失（jepsen 把它记成 indeterminate，混在
+                            ;; `:unauthenticated` 风暴里）。
+                            :n (clojure.core/count ids)))))
+      (result-op op
+                 (try-nodes this skey
+                            #(p/call % p/idgen-next-id
+                                     (p/idgen-next-id-req {:name name})))
+                 (fn [resp]
+                   (assoc op :type :ok :name name :batch? false
+                          :ids [(str (p/idgen-id resp))]))))))
+
+(defn- registry-discover-once
+  "点读一次 Discover（用于观测，不改变状态）。"
+  [this name]
+  (try-nodes this (str "registry/" name)
+             #(p/call % p/registry-discover
+                      (p/registry-discover-req {:service-name name
+                                                :filter-mode :exact}))))
+
+(defn- invoke-registry-cycle
+  "M5a —— registry 生命周期（AG-07 / AG-09 的实例面）。
+
+  一次 op = register(ttl) → discover（必须能看到自己）→ **停止心跳** →
+  等到自己消失（ttl+grace 内）→ 尽可能 deregister。
+
+  观测序列带 `:at-ms`，checker 同时得到两个方向的判据：
+    * **活性**：注册后立即可见（否则服务发现不可用）；
+    * **安全**：停止续约后必须在 ttl+grace 内消失（否则是**幽灵实例**）。
+
+  契约里「重复注册幂等」由一个独立分支覆盖（`:dup?` = 连登两次）。"
+  [this op]
+  (let [{:keys [name instance-id ttl-seconds grace-ms dup?]} (:value op)
+        t0 (System/nanoTime)
+        el (op-clock t0)
+        skey (str "registry/" name)
+        reg (fn []
+              (try-nodes this skey
+                         #(p/call % p/registry-register
+                                  (p/registry-register-req
+                                   {:service-name name
+                                    :instance-id instance-id
+                                    :ttl-seconds ttl-seconds}))))
+        r1 (reg)]
+    (if-not (:ok r1)
+      ;; 失败路径走统一的 result-op 映射（timeout → :info、全部 not-leader →
+      ;; :fail not-leader…）；ok-fn 在这条路径上不会被调用。
+      (let [mapped (result-op op r1 (fn [resp] (assoc op :type :ok
+                                                      :lease-id (p/registry-lease-id resp))))]
+        (assoc mapped :name name :instance-id instance-id))
+      (let [lid (p/registry-lease-id (:ok r1))
+            ;; 幂等分支：同 (service, instance) 再登一次
+            r2  (when dup? (reg))
+            seen-after-register
+            (let [d (registry-discover-once this name)]
+              {:phase :after-register :at-ms (el)
+               :read-ok? (boolean (:ok d))
+               :present? (boolean (some #(= instance-id (:instance-id %))
+                                        (when (:ok d) (p/registry-instances (:ok d)))))
+               :instances (when (:ok d) (mapv :instance-id (p/registry-instances (:ok d))))})
+            ;; 停心跳 → 等自己消失
+            dl (+ t0 (* 1000000 (+ (* (long ttl-seconds) 1000) (long (or grace-ms 0)))))
+            gone (loop [reads 0 failed 0]
+                   (let [d (registry-discover-once this name)
+                         ok? (:ok d)
+                         present? (boolean (and ok?
+                                                (some #(= instance-id (:instance-id %))
+                                                      (p/registry-instances (:ok d)))))]
+                     (cond
+                       (and ok? (not present?))
+                       {:absent? true :at-ms (el) :reads (inc reads) :failed failed
+                        :read-ok? true :last-present? false}
+
+                       (>= (System/nanoTime) (long dl))
+                       ;; 到期仍未消失：带上「最后一个成功读看到了什么」——
+                       ;; checker 只在这条证据存在时才判幽灵实例（否则记 unjudged，
+                       ;; 不能把「读不到」当成「不存在」）。
+                       {:absent? false :at-ms (el) :reads (inc reads) :failed failed
+                        :read-ok? (boolean ok?) :last-present? present?}
+
+                       :else (do (lease-sleep lease-poll-ms)
+                                 (recur (inc reads) (if ok? failed (inc failed)))))))
+            dereg (try-nodes this skey
+                             #(p/call % p/registry-deregister
+                                      (p/registry-deregister-req
+                                       {:service-name name
+                                        :instance-id instance-id
+                                        :lease-id lid})))]
+        (assoc op :type :ok
+               :name name :instance-id instance-id :lease-id lid
+               :holder-ttl-seconds (long ttl-seconds)
+               :grace-ms (long (or grace-ms 0))
+               :dup? (boolean dup?)
+               :dup-lease-id (when (:ok r2) (p/registry-lease-id (:ok r2)))
+               :observations [seen-after-register
+                              (assoc gone :phase :after-ttl)]
+               :absent-ms (when (:absent? gone) (:at-ms gone))
+               :deregistered? (boolean (:ok dereg))
+               :at-ms (el))))))
+
+(defn- invoke-registry-discover
+  "M5a —— 纯观测：一次 Discover。用于与 `:registry-cycle` 并发跑，
+  让「幽灵实例」在**别的客户端**眼里也能被抓到（自我保护快照最容易在这里露）。"
+  [this op]
+  (let [{:keys [name]} (:value op)]
+    (result-op op (registry-discover-once this name)
+               (fn [resp]
+                 (assoc op :type :ok :name name
+                        :instances (mapv :instance-id (p/registry-instances resp))
+                        :revision (p/registry-revision resp))))))
+
+;; --------------------------------------------------------------------------
+;; M5b —— agent 本地数据面：Cache（AG-09）与 MQ（AG-11）
+;;
+;; 两者的数据都在 **agent 本地**（cache = redb；MQ = agent 本地日志）⇒ 「读到
+;; 自己刚写的值」只在单 agent / 无跨 agent 路由时成立。checker 文档里写明这条
+;; 前提，`coord.clj` 会在 `--workload cache|mq` 且 `--agents > 1` 时**拒绝起跑**
+;; （见 local-consistency-workloads）。
+;;
+;; 每个 op 都记 `:t0-ns`（op 入口的 `System/nanoTime`）：跨 op 的区间判据一律
+;; 用这个锚点（F-34 根因①：jepsen 记录的 invoke 时刻有 40–290ms 派发噪声）。
+;; --------------------------------------------------------------------------
+
+(defn- cache-tag [key] (str "cache/" key))
+
+(defn- invoke-cache-set
+  "Cache Set（字符串面）。`ttl-seconds = 0` = **不过期**（持久条目）——
+  AG-09 的「TTL 不得提前消失」与「重启后仍在」两条判据都靠它区分。"
+  [this op]
+  (let [{:keys [key value ttl-seconds]} (:value op)
+        t0 (System/nanoTime)
+        res (try-nodes this (cache-tag key)
+                       #(p/call % p/cache-set
+                                (p/cache-set-req {:key key :value value
+                                                  :ttl-seconds ttl-seconds})))]
+    (result-op op res
+               (fn [_]
+                 (assoc op :type :ok :key key :value value
+                        :ttl-seconds (long (or ttl-seconds 0))
+                        :t0-ns t0 :done-ns (System/nanoTime))))))
+
+(defn- invoke-cache-get
+  "Cache Get。completion 同时带 `:found` 与 `:value`（**空串也是值**）。"
+  [this op]
+  (let [{:keys [key]} (:value op)
+        t0 (System/nanoTime)
+        res (try-nodes this (cache-tag key)
+                       #(p/call % p/cache-get (p/cache-get-req key)))]
+    (result-op op res
+               (fn [resp]
+                 (assoc op :type :ok :key key
+                        :found (p/cache-value-found? resp)
+                        :value (p/cache-value resp) :t0-ns t0 :done-ns (System/nanoTime))))))
+
+(defn- invoke-cache-delete [this op]
+  (let [{:keys [key]} (:value op)
+        t0 (System/nanoTime)
+        res (try-nodes this (cache-tag key)
+                       #(p/call % p/cache-delete (p/cache-delete-req key)))]
+    (result-op op res
+               (fn [resp]
+                 (assoc op :type :ok :key key
+                        :deleted (boolean (p/cache-deleted? resp)) :t0-ns t0 :done-ns (System/nanoTime))))))
+
+(defn- invoke-cache-lpush
+  "List 左推。返回值是**推入后的长度**（契约）——checker 用它做单调性判据。"
+  [this op]
+  (let [{:keys [key value]} (:value op)
+        t0 (System/nanoTime)
+        res (try-nodes this (cache-tag key)
+                       #(p/call % p/cache-lpush
+                                (p/cache-lpush-req {:key key :value value})))]
+    (result-op op res
+               (fn [resp]
+                 (assoc op :type :ok :key key :value value
+                        :length (p/cache-length resp) :t0-ns t0 :done-ns (System/nanoTime))))))
+
+(defn- invoke-cache-lrange [this op]
+  (let [{:keys [key start stop]} (:value op)
+        t0 (System/nanoTime)
+        res (try-nodes this (cache-tag key)
+                       #(p/call % p/cache-lrange
+                                (p/cache-lrange-req {:key key :start start :stop stop})))]
+    (result-op op res
+               (fn [resp]
+                 (assoc op :type :ok :key key
+                        :values (p/cache-values resp) :t0-ns t0 :done-ns (System/nanoTime))))))
+
+(defn- invoke-cache-llen [this op]
+  (let [{:keys [key]} (:value op)
+        t0 (System/nanoTime)
+        res (try-nodes this (cache-tag key)
+                       #(p/call % p/cache-llen (p/cache-llen-req key)))]
+    (result-op op res
+               (fn [resp]
+                 (assoc op :type :ok :key key
+                        :length (p/cache-length resp) :t0-ns t0 :done-ns (System/nanoTime))))))
+
+(defn- invoke-cache-sadd [this op]
+  (let [{:keys [key member]} (:value op)
+        t0 (System/nanoTime)
+        res (try-nodes this (cache-tag key)
+                       #(p/call % p/cache-sadd
+                                (p/cache-sadd-req {:key key :member member})))]
+    (result-op op res
+               (fn [_]
+                 (assoc op :type :ok :key key :member member :t0-ns t0 :done-ns (System/nanoTime))))))
+
+(defn- invoke-cache-smembers [this op]
+  (let [{:keys [key]} (:value op)
+        t0 (System/nanoTime)
+        res (try-nodes this (cache-tag key)
+                       #(p/call % p/cache-smembers (p/cache-smembers-req key)))]
+    (result-op op res
+               (fn [resp]
+                 (assoc op :type :ok :key key
+                        :members (p/cache-values resp) :t0-ns t0 :done-ns (System/nanoTime))))))
+
+;; --- MQ ------------------------------------------------------------------
+
+(defn- mq-tag [topic] (str "mq/" topic))
+
+(defn- invoke-mq-create-topic
+  "CreateTopic 是**幂等意图但非幂等契约**：已存在时服务端返回 ALREADY_EXISTS，
+  这里一律记 :ok/:info（不判分），只作为「主题真的建过」的证据。"
+  [this op]
+  (let [{:keys [topic partitions]} (:value op)
+        res (try-nodes this (mq-tag topic)
+                       #(p/call % p/mq-create-topic
+                                (p/mq-create-topic-req {:topic topic
+                                                        :partitions partitions})))]
+    (result-op op res
+               (fn [_] (assoc op :type :ok :topic topic
+                              :partitions (long (or partitions 1)))))))
+
+(defn- invoke-mq-publish
+  "Publish → `:offset`（broker 分配的**分区内**序号）。
+
+  `:dup?` = **刻意重发**：用同一个 (payload, idempotency-key) 连发两次，把两次
+  返回的 offset 都记下来（`:offset` / `:dup-offset`）。这是 `idempotency_key`
+  字段的证伪点 —— 同一个键重复发布应当只落一条（去重），否则调用方在「响应
+  丢失后重试」时会给下游多一条消息。
+
+  注意：`mq.rs` 的 publish 路径**不使用** `idempotency_key`（gRPC 层把 `None`
+  当作 header 传下去），所以这条判据在实现修好之前必然是红的 —— checker 默认
+  只**记录**不判红（`:expect-idem-dedupe?` 默认 false），并把它记成缺陷单
+  （见 coord-findings.md）；契约一旦书面确认为「必须去重」，把这个开关打开即可。"
+  [this op]
+  (let [{:keys [topic partition payload idempotency-key dup?]} (:value op)
+        t0 (System/nanoTime)
+        pub (fn []
+              (try-nodes this (mq-tag topic)
+                         #(p/call % p/mq-publish
+                                  (p/mq-publish-req {:topic topic
+                                                     :partition partition
+                                                     :payload payload
+                                                     :idempotency-key idempotency-key}))))
+        res (pub)]
+    (result-op op res
+               (fn [resp]
+                 (assoc op :type :ok :topic topic
+                        :partition (long (or partition 0))
+                        :payload payload
+                        :idempotency-key idempotency-key
+                        :offset (p/mq-offset resp)
+                        :dup? (boolean dup?)
+                        ;; 重发的那一次（只在 dup? 时发）——它的 offset 与首次
+                        ;; 相同（去重生效）还是不同（没去重），就是判据的全部。
+                        :done-ns (System/nanoTime)
+                        :dup-offset (when dup?
+                                      (let [r2 (pub)]
+                                        (when (:ok r2) (p/mq-offset (:ok r2)))))
+                        :t0-ns t0)))))
+
+(defn- invoke-mq-ack
+  "Ack 一批 offset。**poll op 内部调用**（见 `invoke-mq-poll`）：契约里
+  「poll + ack」是一对动作，把它们拆成两个独立 op 会让「ack 的到底是哪批
+  offset」变成生成器的猜测（生成器不知道服务端分配了什么），从而把一条本该
+  精确的 at-least-once 判据变成概率判据。
+
+  全部 Ack 成功才推进游标（`mq-cursor`）：只确认过的消息才不会被再次投递，
+  这是「静默丢失」判据的锚 —— 游标越过某 offset 而它从未被投递，就是丢消息。"
+  [this {:keys [topic partition consumer-group offsets]}]
+  (let [rs (mapv (fn [o]
+                   (try-nodes this (mq-tag topic)
+                              #(p/call % p/mq-ack
+                                       (p/mq-ack-req {:topic topic
+                                                      :partition partition
+                                                      :consumer-group consumer-group
+                                                      :offset o}))))
+                 offsets)
+        ok? (and (seq offsets) (every? :ok rs))]
+    (when ok?
+      (swap! (:mq-cursor this)
+             (fn [m] (assoc m [topic (long (or partition 0))]
+                            (inc (long (apply max offsets)))))))
+    ok?))
+
+(defn- invoke-mq-poll
+  "Poll（unary）→ 立刻 Ack 返回的这批消息（契约：poll + ack = at-least-once）。
+
+  start_offset 取本客户端在该 topic/partition 上的游标：游标**只在 Ack 全成
+  功后推进**。checker 因此可以精确判「静默丢失」——某 offset 已确认发布、而
+  某次 Poll 的起点已经越过它、它却从没被投递过。
+
+  completion 里的 `:acked-offsets` 是本次 op 确认掉的 offset 列表；`:poll-ok?`
+  与 `:ack-ok?` 分开记（**读成功但 Ack 失败**是一种独立形态：消费者会重复收到
+  同一批消息，正是 at-least-once 的合法重复）。"
+  [this op]
+  (let [{:keys [topic partition consumer-group max-count]} (:value op)
+        cur @(:mq-cursor this)
+        start (long (get cur [topic partition] 0))
+        t0 (System/nanoTime)
+        res (try-nodes this (mq-tag topic)
+                       #(p/call % p/mq-poll
+                                (p/mq-poll-req {:topic topic :partition partition
+                                                :consumer-group consumer-group
+                                                :start-offset start
+                                                :max-count max-count})))]
+    (result-op op res
+               (fn [resp]
+                 (let [msgs   (p/mq-messages resp)
+                       offs   (mapv (fn [m] (long (:offset m))) msgs)
+                       ack-ok? (if (seq offs)
+                                 (invoke-mq-ack this {:topic topic
+                                                      :partition (long (or partition 0))
+                                                      :consumer-group consumer-group
+                                                      :offsets offs})
+                                 ;; 空响应：什么都不用确认（但游标也不动）
+                                 true)]
+                   (assoc op :type :ok :topic topic
+                          :partition (long (or partition 0))
+                          :start-offset start
+                          :messages msgs
+                          :acked-offsets (if ack-ok? offs [])
+                          :poll-ok? true
+                          :ack-ok? ack-ok?
+                          :t0-ns t0 :done-ns (System/nanoTime)))))))
+
 (defn- invoke-coord!
   "Runs op, transparently re-authenticating and retrying when the cluster
   rejects our CCT as UNAUTHENTICATED (coord CCTs expire after ~1h; a rejected
@@ -1222,6 +2087,27 @@
                     :idem-put         (invoke-idem-put this op)
                     :idem-delete      (invoke-idem-delete this op)
                     :idem-range-delete (invoke-idem-range-delete this op)
+                    ;; M5a agent 本地面
+                    :lock-contend     (invoke-lock-contend this op)
+                    :lock-abandon     (invoke-lock-abandon this op)
+                    :lock-probe       (invoke-lock-probe this op)
+                    :elect-campaign   (invoke-elect-campaign this op)
+                    :election-probe   (invoke-election-probe this op)
+                    :idgen            (invoke-idgen this op)
+                    :registry-cycle   (invoke-registry-cycle this op)
+                    :registry-discover (invoke-registry-discover this op)
+                    ;; M5b agent 本地数据面
+                    :cache-set        (invoke-cache-set this op)
+                    :cache-get        (invoke-cache-get this op)
+                    :cache-del        (invoke-cache-delete this op)
+                    :cache-lpush      (invoke-cache-lpush this op)
+                    :cache-lrange     (invoke-cache-lrange this op)
+                    :cache-llen       (invoke-cache-llen this op)
+                    :cache-sadd       (invoke-cache-sadd this op)
+                    :cache-smembers   (invoke-cache-smembers this op)
+                    :mq-create-topic  (invoke-mq-create-topic this op)
+                    :mq-publish       (invoke-mq-publish this op)
+                    :mq-poll          (invoke-mq-poll this op)
                     (assoc op :type :fail :error (str "unknown op " (:f op)))))]
     (loop [re-auths-left 2]
       (let [op' (attempt)]
@@ -1241,26 +2127,54 @@
           op')))))
 
 (defrecord CoordClient [nodes root-password cct channels raw-channels leader-idx
-                        last-rev last-watch-rev parse-values?]
+                        last-rev last-watch-rev parse-values?
+                        ;; M5a：鉴权用的端点（server）可以与 ops 端点（agent 隧道）
+                        ;; 不同 —— agent 不代理 Auth，见 reauthenticate! 的注释。
+                        auth-nodes auth-raw-channels
+                        ;; M5a / F-34：地面真值探针的端点（必须是 **server**）。
+                        probe-nodes probe-raw-channels probe-channels
+                        ;; M5b：MQ 消费者游标 {[topic partition] next-offset}。
+                        ;; 只在 **Ack 成功** 后推进 —— 这是 at-least-once 判据的
+                        ;; 锚（未确认的消息不得被跳过）。
+                        mq-cursor
+                        ;; M5b：需要在 setup! 里引导创建的主题（--workload mq）。
+                        mq-topic]
   client/Client
   (open! [this test node]
     (info "Opening coord client on" node)
-    (let [raw-channels (mapv p/channel nodes)]
+    (let [raw-channels (mapv p/channel nodes)
+          anodes       (vec (or (seq auth-nodes) nodes))
+          ;; 端点相同（直连 run）时共用同一批 channel，不多建连接。
+          auth-raw     (if (= anodes (vec nodes))
+                         raw-channels
+                         (mapv p/channel anodes))
+          ;; 探针端点的缺省 = 鉴权端点 = **server**（不是 ops 端点）：
+          ;; --via-agent 时这两者不同，而探针必须走后者之外的这一条。
+          pnodes       (vec (or (seq probe-nodes) anodes))
+          probe-raw    (cond
+                         (= pnodes anodes) auth-raw
+                         (= pnodes (vec nodes)) raw-channels
+                         :else (mapv p/channel pnodes))]
       (try
-        (let [cct      (authenticate! raw-channels root-password)
+        (let [cct      (authenticate! auth-raw root-password)
               channels (mapv #(p/auth-channel % cct) raw-channels)]
           (assoc this :cct (atom cct)
                       :channels (atom channels)
                       :raw-channels (atom raw-channels)
+                      :auth-raw-channels (atom auth-raw)
+                      :probe-raw-channels (atom probe-raw)
+                      :probe-channels (atom (mapv #(p/auth-channel % cct) probe-raw))
                       :leader-idx (atom {})
                       :last-rev (atom {})
                       ;; T2.1：本客户端每个 key 上**已观察到的最大 watch
                       ;; revision**（跨会话），`start-revision :last` 用它
                       ;; = 契约的续传起点。
-                      :last-watch-rev (atom {})))
+                      :last-watch-rev (atom {})
+                      ;; M5b：MQ 游标（见 invoke-mq-poll / invoke-mq-ack）
+                      :mq-cursor (atom {})))
         (catch Exception e
           ;; Don't leak gRPC channels if auth fails partway through.
-          (doseq [^ManagedChannel ch raw-channels]
+          (doseq [^ManagedChannel ch (distinct (concat raw-channels auth-raw probe-raw))]
             (.shutdownNow ch))
           (throw e)))))
 
@@ -1278,15 +2192,47 @@
                           (recur (inc i)))))
                   nil))]
       (when-not res
-        (throw (ex-info "coord cluster did not become ready (no successful read)" {})))
-      (info "coord cluster is ready"))
+        ;; 把**最后一次失败原因**带进异常：没有它的话，「cluster did not become
+        ;; ready」既可能是集群没起来、也可能是鉴权被拒 / 端点写错 / agent 没代理
+        ;; 该 RPC —— 实测（M5a 接入时）为这一句话多花了一轮排查，因为真正的错
+        ;; 误（agent 侧 UNAUTHENTICATED）被这条消息盖住了。
+        (let [last-err (try
+                         (try-nodes this register-key
+                                    #(p/call % p/kv-range (p/range-req register-key)))
+                         (catch Exception e {:err e}))]
+          (throw (ex-info (str "coord cluster did not become ready (no successful read); "
+                               "last error: " (:err last-err)
+                               "; ops endpoints: " (pr-str (:nodes this))
+                               "; auth endpoints: "
+                               (pr-str (or (:auth-nodes this) (:nodes this))))
+                          {:nodes (:nodes this)
+                           :auth-nodes (:auth-nodes this)
+                           :err (str (:err last-err))}))))
+      (info "coord cluster is ready")
+      ;; M5b：--workload mq 的主题引导。放在 setup! 而不是生成器里：CreateTopic
+      ;; 不是幂等契约（已存在时返回 ALREADY_EXISTS），做成随机混进来的 op 会让
+      ;; 「主题到底建没建」变成概率事件；这里建一次，失败也只在**真正的连接/
+      ;; 鉴权问题**上（此时后面的 publish 会以显式错误暴露，而不是静默空跑）。
+      (when-let [t (:mq-topic this)]
+        (let [res (try
+                    (try-nodes this (mq-tag t)
+                               #(p/call % p/mq-create-topic
+                                        (p/mq-create-topic-req {:topic t
+                                                                :partitions 1})))
+                    (catch Exception e {:err e}))]
+          (info "coord client: mq topic" t
+                (if (:ok res) "ready" (str "create failed: " (:err res)))))))
     this)
 
   (invoke! [this test op]
     (invoke-coord! this test op))
 
   (close! [this test]
-    (doseq [^ManagedChannel ch @(:raw-channels this)]
+    (doseq [^ManagedChannel ch (distinct (concat @(:raw-channels this)
+                                                (when-let [a @(:auth-raw-channels this)]
+                                                  a)
+                                                (when-let [a @(:probe-raw-channels this)]
+                                                  a)))]
       (.shutdownNow ch)))
 
   (teardown! [this test] this))
@@ -1305,4 +2251,16 @@
                  (or (:root-password opts) "66c57bb56bce306f484344e4a8650836")
                  nil nil nil (atom {}) (atom {}) (atom {})
                  (not (contains? #{:map :txn :scan :watch :lease}
-                                 (:workload opts)))))
+                                 (:workload opts)))
+                 ;; M5a：:auth-nodes 缺省 = ops 端点（直连 run 行为不变）。
+                 ;; --via-agent / agent 本地面时，coord.clj 传集群端点过来。
+                 (:auth-nodes opts)
+                 nil
+                 ;; F-34 探针端点：缺省 = :auth-nodes = **server**。
+                 (:probe-nodes opts)
+                 nil
+                 nil
+                 ;; M5b：MQ 游标（运行时状态，open! 里初始化）
+                 nil
+                 ;; M5b：需要 setup! 引导创建的主题（--workload mq）
+                 (:mq-topic opts)))

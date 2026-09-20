@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — 特性开关（能力承诺面，v1.2）
+//
+// 状态：COMMITTED（承诺中）｜ GA 期限：2026-12-31 ｜ 台账：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/featureflags.proto 的 coord.featureflags.v1.FeatureFlags
+//            （字段编号/类型逐项一致；迁移 = 机械式重挂载，禁止趁机改 wire）
+//
+// GA 验收定义与倒逼机制见 WHITEPAPER.md §13。
+// ============================================================
+
+package coord.featureflags.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.featureflags.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/featureflags/v1;featureflagsv1";
+
+// ============================================================
+
+service FeatureFlags {
+  rpc IsEnabled(FeatureFlagIsEnabledRequest) returns (FeatureFlagIsEnabledResponse);
+  rpc Evaluate(FeatureFlagEvaluateRequest) returns (FeatureFlagEvaluateResponse);
+}
+
+message FeatureFlagIsEnabledRequest {
+  string flag_name = 1;
+  bytes context = 2; // JSON evaluation context
+}
+
+message FeatureFlagIsEnabledResponse {
+  bool enabled = 1;
+  string variant = 2;
+}
+
+message FeatureFlagEvaluateRequest {
+  string flag_name = 1;
+  bytes context = 2;
+}
+
+message FeatureFlagEvaluateResponse {
+  bytes result = 1; // JSON evaluation result
+}
+
+// ============================================================
+// PKI — Certificate Authority (CA Management)

@@ -2,16 +2,16 @@ package cn.byteforce.coord.sdk.internal.rpc;
 
 import cn.byteforce.coord.sdk.CoordConfig;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
-import cn.byteforce.coord.sdk.internal.proto.MQGrpc;
-import cn.byteforce.coord.sdk.internal.proto.MqAckRequest;
-import cn.byteforce.coord.sdk.internal.proto.MqCreateTopicRequest;
-import cn.byteforce.coord.sdk.internal.proto.MqMessage;
-import cn.byteforce.coord.sdk.internal.proto.MqPollDlqRequest;
-import cn.byteforce.coord.sdk.internal.proto.MqPollDlqResponse;
-import cn.byteforce.coord.sdk.internal.proto.MqPollRequest;
-import cn.byteforce.coord.sdk.internal.proto.MqPollResponse;
-import cn.byteforce.coord.sdk.internal.proto.MqPublishRequest;
-import cn.byteforce.coord.sdk.internal.proto.MqPublishResponse;
+import cn.byteforce.coord.contracts.mq.v1.MQGrpc;
+import cn.byteforce.coord.contracts.mq.v1.MqAckRequest;
+import cn.byteforce.coord.contracts.mq.v1.MqCreateTopicRequest;
+import cn.byteforce.coord.contracts.mq.v1.MqMessage;
+import cn.byteforce.coord.contracts.mq.v1.MqPollDlqRequest;
+import cn.byteforce.coord.contracts.mq.v1.MqPollDlqResponse;
+import cn.byteforce.coord.contracts.mq.v1.MqPollRequest;
+import cn.byteforce.coord.contracts.mq.v1.MqPollResponse;
+import cn.byteforce.coord.contracts.mq.v1.MqPublishRequest;
+import cn.byteforce.coord.contracts.mq.v1.MqPublishResponse;
 import cn.byteforce.coord.sdk.mq.MqClient;
 import cn.byteforce.coord.sdk.mq.MqSubscribeRequest;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
@@ -145,13 +145,13 @@ public final class MqClientImpl extends AgentRpcClient implements MqClient {
     @Override
     public AutoCloseable subscribe(MqSubscribeRequest request,
                                    Consumer<cn.byteforce.coord.sdk.mq.MqMessage> listener) {
-        cn.byteforce.coord.sdk.internal.proto.MqSubscribeRequest proto =
-                cn.byteforce.coord.sdk.internal.proto.MqSubscribeRequest.newBuilder()
+        cn.byteforce.coord.contracts.mq.v1.MqSubscribeRequest proto =
+                cn.byteforce.coord.contracts.mq.v1.MqSubscribeRequest.newBuilder()
                         .setTopic(request.topic())
                         .setConsumerGroup(request.consumerGroup())
                         .build();
         ManagedChannel channel = channelManager.getChannel();
-        ClientCall<cn.byteforce.coord.sdk.internal.proto.MqSubscribeRequest, MqMessage> call =
+        ClientCall<cn.byteforce.coord.contracts.mq.v1.MqSubscribeRequest, MqMessage> call =
                 channel.newCall(MQGrpc.getSubscribeMethod(), CallOptions.DEFAULT);
         final String callKey = request.topic() + "#" + request.consumerGroup()
                 + "#" + SUBSCRIPTION_SEQ.incrementAndGet();

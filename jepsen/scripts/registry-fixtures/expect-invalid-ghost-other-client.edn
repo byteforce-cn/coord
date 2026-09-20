@@ -1,0 +1,21 @@
+;; expect-invalid-ghost-other-client —— **P0**：跟客户端可见的幽灵实例。
+;;
+;; 时刻单位是 jepsen 历史的纳秒（`pair-invokes` 原样传 `:time`），所以这里有
+;; 两个刻度要分清：
+;;   * 属主 op 的 `:time` = 1e9 ns = 1000ms，加 :absent-ms 6200 ⇒ 7200ms 确认消失；
+;;   * 探针 op 的 `:time` = 2e10 ns = **20000ms** ⇒ 晚于 7200+200(tolerance) ⇒ 违约。
+;;
+;; 属主已经判它没了，别的客户端还能看见 —— 这正是「自我保护快照」最可能露出来
+;; 的形态（分区愈合后未收敛）。
+[{:type :ok :f :registry-cycle :process 0 :time 1000000000
+  :name "svc-a" :instance-id "inst-1" :lease-id 31
+  :holder-ttl-seconds 5 :grace-ms 2000 :dup? false
+  :absent-ms 6200 :deregistered? true
+  :observations [{:phase :after-register :at-ms 20 :read-ok? true :present? true
+                  :instances ["inst-1"]}
+                 {:phase :after-ttl :at-ms 6200 :read-ok? true :present? false
+                  :instances []}]}
+
+ ;; 另一个客户端的纯观测：20s 时仍看得见 inst-1
+ {:type :ok :f :registry-discover :process 1 :time 20000000000
+  :name "svc-a" :instances ["inst-1"] :revision 42}]

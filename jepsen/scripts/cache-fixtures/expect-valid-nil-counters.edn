@@ -1,0 +1,11 @@
+;; expect-valid-nil-counters —— 守门员：`:t0-ns` 缺失时退化为 `:invoke`/`:time`，
+;; 不能因此抛异常（F-26 那一类：checker 抛异常会被 jepsen 降成 `:unknown`，
+;; 看起来像「没有结论」而不是「判据坏了」）。
+;;
+;; 这份历史只有**持久**写 + 一次成功后读，且不带 `:t0-ns` ⇒ 必须判 valid。
+[{:type :invoke :f :cache-set :process 0 :time 0
+  :key "cache-str-1" :value "v-1" :ttl-seconds 0}
+ {:type :ok :f :cache-set :process 0 :time 100000000
+  :key "cache-str-1" :value "v-1" :ttl-seconds 0}
+ {:type :ok :f :cache-get :process 0 :t0-ns 700000000 :time 701000000
+  :key "cache-str-1" :found true :value "v-1"}]

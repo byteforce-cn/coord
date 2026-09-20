@@ -143,6 +143,23 @@ LEASE_REVOKE_TTL_SECONDS :=
 LEASE_MIN_GRANTS       :=
 LEASE_MIN_EXPIRIES     :=
 LEASE_TOLERANCE_MS     :=
+# M5b（agent 本地数据面）：cache / mq 的参数与样本门槛
+#
+# `CACHE_TTL_SECONDS` 默认空 = 不传 ⇒ coord.clj 的默认 0 = 全部 Set 持久
+# （「写可见 + 重启后仍在」两条判据的载体）；要跑 TTL 两侧时显式给它一个值，
+# 那时 coordinator 会把**一半**的 Set 加上 TTL（见 cache-gen 的注释）。
+CACHE_TTL_SECONDS      :=
+CACHE_TTL_GRACE_MS     :=
+CACHE_MIN_SETS         :=
+CACHE_MIN_GETS         :=
+CACHE_MIN_LIST_OPS     :=
+CACHE_MIN_SET_OPS      :=
+MQ_TOPIC               :=
+MQ_MIN_PUBLISHES       :=
+MQ_MIN_POLLS           :=
+# 默认**关**：契约措辞待确认（proto 声明了 idempotency_key，实现不读它）。
+# 打开即把「同一 key 必须去重」当硬判据（那时 MQ cell 会按预期变红）。
+MQ_EXPECT_IDEM_DEDUPE  :=
 # T1.4 幂等专项：重放前延迟（推到 kill/重启之后，F-03 跨节点分支用）
 IDEM_REPLAY_DELAY_MS :=
 # T1.4：重放首次尝试的节点偏移（仅影响起点，单独用它复现不了跨节点重放）
@@ -152,6 +169,9 @@ VIA_AGENT        :=
 AGENT_PORT       :=
 # 跳过 fixture 门槛（只用于调试 fixture 本身 —— 正式 run 不要设）
 SKIP_CHECKERS    :=
+# 矩阵的「跑完所有 cell 再汇总失败」（**只用于给已知缺陷做分面归因**，不得用于
+# 验收：它会把红 cell 留在报告里而不是拦住流水线）。退出码仍然是 1。
+KEEP_GOING       :=
 # T6.1：--extra 是 soak 启动器的通用透传（原样拼进 lein 命令），用于新选项
 SOAK_EXTRA       :=
 # T6.1：soakfull 的面比例（`make soakfull SOAK_MIX=map=40,...`）
@@ -183,7 +203,31 @@ CTRL_FLAGS := $(if $(SEED),--seed $(SEED)) $(if $(NO_JITTER),--no-jitter) \
               $(if $(LEASE_MIN_EXPIRIES),--lease-min-expiries $(LEASE_MIN_EXPIRIES)) \
               $(if $(LEASE_TOLERANCE_MS),--lease-tolerance-ms $(LEASE_TOLERANCE_MS)) \
               $(if $(VIA_AGENT),--via-agent) \
-              $(if $(AGENT_PORT),--agent-port $(AGENT_PORT))
+              $(if $(AGENTS),--agents $(AGENTS)) \
+              $(if $(AGENT_IDGEN_NODE_IDS),--agent-idgen-node-ids $(AGENT_IDGEN_NODE_IDS)) \
+              $(if $(LOCK_TTL_SECONDS),--lock-ttl-seconds $(LOCK_TTL_SECONDS)) \
+              $(if $(LOCK_HOLD_MS),--lock-hold-ms $(LOCK_HOLD_MS)) \
+              $(if $(LOCK_DEADLINE_MS),--lock-deadline-ms $(LOCK_DEADLINE_MS)) \
+              $(if $(LOCK_GRACE_MS),--lock-grace-ms $(LOCK_GRACE_MS)) \
+              $(if $(LOCK_MIN_ACQUIRES),--lock-min-acquires $(LOCK_MIN_ACQUIRES)) \
+              $(if $(ELECTION_HOLD_MS),--election-hold-ms $(ELECTION_HOLD_MS)) \
+              $(if $(ELECTION_TTL_SECONDS),--election-ttl-seconds $(ELECTION_TTL_SECONDS)) \
+              $(if $(ELECTION_MIN_CAMPAIGNS),--election-min-campaigns $(ELECTION_MIN_CAMPAIGNS)) \
+              $(if $(IDGEN_MIN_IDS),--idgen-min-ids $(IDGEN_MIN_IDS)) \
+              $(if $(IDGEN_MIN_REGRESSIONS),--idgen-min-regressions $(IDGEN_MIN_REGRESSIONS)) \
+              $(if $(REGISTRY_TTL_SECONDS),--registry-ttl-seconds $(REGISTRY_TTL_SECONDS)) \
+              $(if $(REGISTRY_GRACE_MS),--registry-grace-ms $(REGISTRY_GRACE_MS)) \
+              $(if $(REGISTRY_MIN_CYCLES),--registry-min-cycles $(REGISTRY_MIN_CYCLES)) \
+              $(if $(CACHE_TTL_SECONDS),--cache-ttl-seconds $(CACHE_TTL_SECONDS)) \
+              $(if $(CACHE_TTL_GRACE_MS),--cache-ttl-grace-ms $(CACHE_TTL_GRACE_MS)) \
+              $(if $(CACHE_MIN_SETS),--cache-min-sets $(CACHE_MIN_SETS)) \
+              $(if $(CACHE_MIN_GETS),--cache-min-gets $(CACHE_MIN_GETS)) \
+              $(if $(CACHE_MIN_LIST_OPS),--cache-min-list-ops $(CACHE_MIN_LIST_OPS)) \
+              $(if $(CACHE_MIN_SET_OPS),--cache-min-set-ops $(CACHE_MIN_SET_OPS)) \
+              $(if $(MQ_TOPIC),--mq-topic $(MQ_TOPIC)) \
+              $(if $(MQ_MIN_PUBLISHES),--mq-min-publishes $(MQ_MIN_PUBLISHES)) \
+              $(if $(MQ_MIN_POLLS),--mq-min-polls $(MQ_MIN_POLLS)) \
+              $(if $(MQ_EXPECT_IDEM_DEDUPE),--mq-expect-idem-dedupe)
 # fixture 门槛（T0.3）：fixture 红就拒绝起跑（§0-1：没有负控制的 checker 不算完成）
 CHECKER_GATE := $(if $(SKIP_CHECKERS),,checkers)
 MULTI_MATRIX    := multi-register:none      multi-register:kill \
@@ -212,11 +256,54 @@ MATRIX_M2       := watch:none watch:kill watch:pause watch:partition-halves \
 M2_LEASE_MIN_GRANTS   := 5
 M2_LEASE_MIN_EXPIRIES := 2
 
+# M5a agent 矩阵（T5.1/T5.2 的可跑化落地）。
+#
+# 两个值得注意的取值：
+#   * AGENTS=2 —— 互斥/唯一性语义在**单 agent 下结构性不可判**（只有一份本地
+#     缓存），所以 M5a 的矩阵一律两个 agent；
+#   * 短跑门槛取保守值（45s 内 concurrency 2n 只能拿到几十个样本），门槛的
+#     意义是「不能一条 op 都没跑完还判绿」，不是性能指标（同 M2 的口径）。
+AGENTS          ?= 2
+MATRIX_M5       := lock:none   lock:kill-agent \
+                   election:none election:kill-agent \
+                   idgen:none   idgen:kill-agent \
+                   registry:none registry:kill-agent \
+                   lock:partition-agent-server
+
+M5_LOCK_MIN_ACQUIRES       := 2
+M5_ELECTION_MIN_CAMPAIGNS  := 1
+M5_IDGEN_MIN_IDS           := 10
+M5_REGISTRY_MIN_CYCLES     := 1
+
+# M5b agent 本地数据面（cache / mq）。
+#
+# **AGENTS=1**（与 M5a 相反）：cache/mq 的数据在 agent 进程本地，多 agent 下
+# 「读不到刚写的值」是合法的（数据在另一个 agent 上）⇒ coord.clj 会拒绝
+# --agents > 1。ISR 复制面需要 agent 之间可达的独立拓扑（见覆盖方案 §11）。
+#
+# cache 的三档 nemesis 各自对应一条判据：none = 基准；kill-agent = 重启后的
+# redb 持久化（判据 7）；partition-agent-server = 与 server 断连时的本地可用性
+# （判据本身不判分，但它是「降级语义」那条链路的观察窗口）。
+AGENTS_M5B                 ?= 1
+MATRIX_M5B                 := cache:none cache:kill-agent cache:partition-agent-server \
+                              mq:none   mq:kill-agent   mq:partition-agent-server
+M5B_CACHE_MIN_SETS         := 5
+M5B_CACHE_MIN_GETS         := 5
+M5B_CACHE_MIN_LIST_OPS     := 3
+M5B_CACHE_MIN_SET_OPS      := 3
+M5B_MQ_MIN_PUBLISHES       := 5
+M5B_MQ_MIN_POLLS           := 3
+
+# M5a 的**差分对**（T5.2 差分基线）：同一 workload 跑 --via-agent 与直连，
+# 用同一组门槛。direct 红 ⇒ 先修 server 面，不得给 agent 定罪；direct 绿 +
+# via-agent 红 ⇒ 红必属 agent 合成层（见 dev.md 的归因规则）。
+MATRIX_M5_DIFF  := map:none txn:none watch:kill-agent lease:none
+
 .PHONY: help info keys binary up halt destroy status provision reload \
         ssh-control ssh-node ping \
         setup stage upload smoke quick test matrix matrix-multi matrix-m1 \
-        matrix-m2 soak soakfull soak-status soak-tail soak-results soak-stop \
-        soak-wait nightly \
+        matrix-m2 matrix-m5 matrix-m5b matrix-m5-diff soak soakfull soak-status soak-tail \
+        soak-results soak-stop soak-wait nightly \
         checkers env-reset \
         soak soak-status soak-tail soak-stop soak-results soak-diag logs \
         docker-%
@@ -435,6 +522,68 @@ checkers: ## T0.3: run every checker fixture suite on control (red refuses to st
 	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
 	    scripts/run-checker-tests.clj jepsen.coord.mixck scripts/soakfull-fixtures \
 	    '{:surfaces [:map :txn :scan :watch :lease] :min-sample 1 :watch-min-events 1 :min-grants 1 :min-expiries 1}')
+	# M5a（agent 本地面）：lock / election / idgen / registry 四套判据 + 各自的
+	# 负控制（互斥重叠、fencing、双 leader、ID 重复、幽灵实例…）
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.lockck scripts/lock-fixtures)
+	# M5a / F-34：**服务端地面真值探针**的判据（绕开 agent 读 /_lock/{name}）：
+	# 矛盾样本必红、边界样本只记录、**探针缺失必红**（缺了只有客户端自述一半证据）
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.lockck scripts/lock-probe-fixtures \
+	    '{:probe? true}')
+	# M5a / AG-06：**弃锁**的两条成对判据（持有 agent 被 kill 后必须在 ttl+grace
+	# 内被服务端回收；持有 agent 活着时不得假丢锁）。判定依赖「agent 什么时候不
+	# 可能再续期」的时间窗（从 nemesis 历史还原）与隧道 endpoint → 主机名的归因表。
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.lockck scripts/lock-agent-fixtures \
+	    '{:probe? true :abandon? true :agent-nodes {\"127.0.0.1:24577\" \"n4\" \"127.0.0.1:24578\" \"n5\"}}')
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.electck scripts/elect-fixtures)
+	# M5a / F-35 残留：election 的**服务端地面真值**判据（绕开 agent 读
+	# /_election/{group}）：矛盾必红、边界争议只记录、**探针缺失判未执行**。
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.electck scripts/elect-probe-fixtures \
+	    '{:probe? true}')
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.idgenck scripts/idgen-fixtures)
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.regck scripts/registry-fixtures)
+	# M5a：手写 descriptor 与 agent_api.proto 的一致性（方法名/字段号/可构造）。
+	# 手写就会漂移；漂移的表现是 UNIMPLEMENTED（还算好）或**静默少读一个字段**。
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/check-agent-wire.clj)
+	# AG-01：路由证明门槛的两个方向——计数为 0 必须红（端点写错 = 直连假绿），
+	# 计数达标必须绿。两向用**同一条历史**，只换证明值。
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.gates scripts/gates-agent-fixtures \
+	    '{:nemesis :none :agent-scrape {:total 0 :by-method {}} :min-agent-requests 1}')
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.gates scripts/gates-agent-fixtures-ok \
+	    '{:nemesis :none :agent-scrape {:total 500 :by-method {:put 300 :range 200} :agents [{:host \"n4\" :up? true :total 500}]} :min-agent-requests 1}')
+	# AG-01 / 本地面：路由证明不得把「nemesis 把 agent 杀了」读成「请求没经过 agent」
+	# （`:up?` = run 期间**曾经**抓到过，`:up-now?` 只作报告用）
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.gates scripts/gates-agent-local-fixtures \
+	    '{:nemesis :none :agent-local-surface? true :min-agent-requests 1 :agent-scrape {:total 0 :by-method {} :agents [{:host \"n4\" :up? false :up-now? false :total 0} {:host \"n5\" :up? false :up-now? false :total 0}]}}')
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.gates scripts/gates-agent-local-fixtures-ok \
+	    '{:nemesis :none :agent-local-surface? true :min-agent-requests 1 :agent-scrape {:total 0 :by-method {} :agents [{:host \"n4\" :up? true :up-now? false :total 0} {:host \"n5\" :up? true :up-now? true :total 0}]}}')
+	# M5b（agent 本地数据面）：cache 的三类面（string/list/set）+ TTL 两侧 +
+	# 重启持久化；mq 的 at-least-once（静默丢失 / payload 串 / offset 重复 /
+	# ack 未生效）。每套都含正例与负控制（§0-1：没有负控制的 checker 不算完成）。
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.cacheck scripts/cache-fixtures)
+	# M5b 的 §5.1 样本门槛档（逻辑干净但样本不足 ⇒ invalid，不是绿）
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.cacheck scripts/cache-fixtures-sample \
+	    '{:min-sets 5}')
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.mqck scripts/mq-fixtures)
+	# M5b / idempotency_key 的两个方向：**同一条历史**，只换期望值 ——
+	# 默认只记录（契约措辞待确认），`:expect-idem-dedupe? true` 时必须判红。
+	$(call runctl, cd $(CTRL_PROJECT) && LEIN_ROOT=true lein $(LEIN_OFFLINE)run -m clojure.main \
+	    scripts/run-checker-tests.clj jepsen.coord.mqck scripts/mq-fixtures-idem \
+	    '{:expect-idem-dedupe? true}')
 
 env-reset: ## T0.4: idempotent environment preflight on every node (wipes node data dirs)
 	$(call runctl, cd $(CTRL_PROJECT) && bash scripts/env-reset-all.sh \
@@ -480,6 +629,97 @@ matrix-m2: checkers ## M2 Watch+Lease 矩阵（T2.1 watch / T2.2 lease × none|k
 	    || { echo "M2 MATRIX FAILED at $$w/$$n"; exit 1; }; \
 	done; echo; echo "===== ALL M2 MATRIX PASSED ====="
 
+matrix-m5: checkers ## M5a agent 矩阵（lock/election/idgen/registry × none|kill-agent + partition-agent-server，--agents 2，45s）
+	@set -e; failed=""; for combo in $(MATRIX_M5); do \
+	  w=$${combo%%:*}; n=$${combo##*:}; \
+	  echo; echo "===== $$w / $$n (agents=$(AGENTS)) ====="; \
+	  if $(MAKE) test WORKLOAD=$$w NEMESIS=$$n TIME_LIMIT=$(MATRIX_TIME) \
+	           CONCURRENCY=2n SKIP_CHECKERS=1 AGENTS=$(AGENTS) \
+	           LOCK_MIN_ACQUIRES=$(M5_LOCK_MIN_ACQUIRES) \
+	           ELECTION_MIN_CAMPAIGNS=$(M5_ELECTION_MIN_CAMPAIGNS) \
+	           IDGEN_MIN_IDS=$(M5_IDGEN_MIN_IDS) \
+	           REGISTRY_MIN_CYCLES=$(M5_REGISTRY_MIN_CYCLES) \
+	           JEPSEN_PROVIDER=$(JEPSEN_PROVIDER) --no-print-directory ; then \
+	    echo "M5 CELL OK: $$w/$$n"; \
+	  else \
+	    echo "M5 CELL FAILED: $$w/$$n"; failed="$$failed $$w/$$n"; \
+	    if [ -z "$(KEEP_GOING)" ]; then echo "M5 MATRIX FAILED at $$w/$$n"; exit 1; fi; \
+	  fi; \
+	done; \
+	if [ -n "$$failed" ]; then \
+	  echo; echo "M5 MATRIX: 失败 cell:$$failed"; \
+	  echo "(KEEP_GOING=1 只用于给**已知缺陷**做分面归因，不得用于验收：它会把红 cell 留在报告里而不是拦住流水线)"; \
+	  exit 1; \
+	fi; \
+	echo; echo "===== ALL M5 MATRIX PASSED ====="
+
+matrix-m5-diff: checkers ## M5a 差分矩阵（--via-agent vs 直连，同 workload 同门槛；T5.2 的归因基线）
+	@set -e; failed=""; for combo in $(MATRIX_M5_DIFF); do \
+	  w=$${combo%%:*}; n=$${combo##*:}; \
+	  direct_ok=0; \
+	  echo; echo "===== $$w / $$n :: direct (对照) ====="; \
+	  if $(MAKE) test WORKLOAD=$$w NEMESIS=$$n TIME_LIMIT=$(MATRIX_TIME) \
+	           CONCURRENCY=2n SKIP_CHECKERS=1 AGENTS=$(AGENTS) \
+	           JEPSEN_PROVIDER=$(JEPSEN_PROVIDER) --no-print-directory ; then \
+	    direct_ok=1; \
+	    echo "DIFF: direct OK $$w/$$n"; \
+	  else \
+	    echo "DIFF MATRIX: DIRECT FAILED at $$w/$$n -- 先修 server 面，不得给 agent 定罪"; \
+	    failed="$$failed $$w/$$n(direct)"; \
+	    if [ -z "$(KEEP_GOING)" ]; then exit 1; fi; \
+	  fi; \
+	  echo; echo "===== $$w / $$n :: --via-agent ====="; \
+	  if $(MAKE) test WORKLOAD=$$w NEMESIS=$$n TIME_LIMIT=$(MATRIX_TIME) \
+	           CONCURRENCY=2n SKIP_CHECKERS=1 AGENTS=$(AGENTS) VIA_AGENT=1 \
+	           JEPSEN_PROVIDER=$(JEPSEN_PROVIDER) --no-print-directory ; then \
+	    echo "DIFF: via-agent OK $$w/$$n"; \
+	  else \
+	    if [ "$$direct_ok" = "1" ]; then \
+	      echo "DIFF MATRIX: VIA-AGENT FAILED at $$w/$$n —— 归因：**本格 direct 已绿**，所以红只可能来自 agent 合成层（AG-01 的判据成立）"; \
+	    else \
+	      echo "DIFF MATRIX: VIA-AGENT FAILED at $$w/$$n —— 归因：**本格 direct 也红**，先修 server 面；这一格不得用于给 agent 定罪"; \
+	    fi; \
+	    failed="$$failed $$w/$$n(via-agent)"; \
+	    if [ -z "$(KEEP_GOING)" ]; then exit 1; fi; \
+	  fi; \
+	done; \
+	if [ -n "$$failed" ]; then \
+	  echo; echo "M5 DIFF MATRIX: 失败 cell:$$failed"; \
+	  echo "(KEEP_GOING=1 只用于给**已知缺陷**做分面归因，不得用于验收)"; \
+	  exit 1; \
+	fi; \
+	echo; echo "===== ALL M5 DIFF MATRIX PASSED ====="
+
+# ---------------------------------------------------------------------------
+# M5b：agent 本地数据面
+# ---------------------------------------------------------------------------
+
+matrix-m5b: checkers ## M5b agent 本地数据面矩阵（cache/mq × none|kill-agent|partition-agent-server，--agents 1，45s）
+	@set -e; failed=""; for combo in $(MATRIX_M5B); do \
+	  w=$${combo%%:*}; n=$${combo##*:}; \
+	  echo; echo "===== $$w / $$n (agents=$(AGENTS_M5B)) ====="; \
+	  if $(MAKE) test WORKLOAD=$$w NEMESIS=$$n TIME_LIMIT=$(MATRIX_TIME) \
+	           CONCURRENCY=2n SKIP_CHECKERS=1 AGENTS=$(AGENTS_M5B) \
+	           CACHE_MIN_SETS=$(M5B_CACHE_MIN_SETS) \
+	           CACHE_MIN_GETS=$(M5B_CACHE_MIN_GETS) \
+	           CACHE_MIN_LIST_OPS=$(M5B_CACHE_MIN_LIST_OPS) \
+	           CACHE_MIN_SET_OPS=$(M5B_CACHE_MIN_SET_OPS) \
+	           MQ_MIN_PUBLISHES=$(M5B_MQ_MIN_PUBLISHES) \
+	           MQ_MIN_POLLS=$(M5B_MQ_MIN_POLLS) \
+	           JEPSEN_PROVIDER=$(JEPSEN_PROVIDER) --no-print-directory ; then \
+	    echo "M5B CELL OK: $$w/$$n"; \
+	  else \
+	    echo "M5B CELL FAILED: $$w/$$n"; failed="$$failed $$w/$$n"; \
+	    if [ -z "$(KEEP_GOING)" ]; then echo "M5B MATRIX FAILED at $$w/$$n"; exit 1; fi; \
+	  fi; \
+	done; \
+	if [ -n "$$failed" ]; then \
+	  echo; echo "M5B MATRIX: 失败 cell:$$failed"; \
+	  echo "(KEEP_GOING=1 只用于给**已知缺陷**做分面归因，不得用于验收)"; \
+	  exit 1; \
+	fi; \
+	echo; echo "===== ALL M5B MATRIX PASSED ====="
+
 # ---------------------------------------------------------------------------
 # Soak (72h)
 # ---------------------------------------------------------------------------
@@ -502,6 +742,10 @@ soakfull: ## T6.1: 组合浸泡（默认 --workload soakfull，面比例由 SOAK
 	    SOAK_MIX='$(SOAK_MIX)' \
 	    SOAK_EXTRA="$(SOAK_EXTRA) $(if $(SOAK_MIX),--soak-mix $(SOAK_MIX),)" \
 	    --no-print-directory
+	# 注：不跑 72h 时要**同时**设 SOAK_TIME_LIMIT 与 SOAK_QUIET —— 前者只覆盖
+	# workload 的 --time-limit，后者（默认 1800s）才是真正决定 run 长度的那一个。
+	# 只设前者会把 lab 占住半小时（实测踩过）。例：
+	#   make soakfull SOAK_TIME_LIMIT=120 SOAK_QUIET=60
 
 soak-status: ## Soak progress + latest log lines
 	$(call runctl, cd $(CTRL_PROJECT) && ./scripts/coord-soak.sh status)

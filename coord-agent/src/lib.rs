@@ -18,6 +18,7 @@ pub mod cache;
 pub mod config_watcher;
 mod discovery;
 pub mod feature_flags;
+pub mod feature_flags_store;
 pub mod health;
 pub mod key_util;
 pub mod metrics;
@@ -54,6 +55,9 @@ pub use key_util::{
 pub use pki::{CertInfo, PkiConfig, PkiError, PkiService};
 pub use pki_store::{
     CaRecord, CertRecord, CertStatus, KvPkiStore, MemoryPkiStore, PkiStore, PkiStoreError,
+};
+pub use services::transit_store::{
+    DekRecord, DekStoreError, KvTransitDekStore, MemoryTransitDekStore, TransitDekStore,
 };
 pub use proxy::AgentInner;
 pub use service::{BaseService, ServiceConfig, ServiceResult};
@@ -943,6 +947,14 @@ impl AgentServer {
 
         // 若配置了 Server 端点，创建内部 Client 用于请求转发
         // 带指数退避重试（最多 30 秒），避免 Server 尚未就绪时立即降级
+        //
+        // F-50（2026-09-19）：**agent 自身身份**的凭据句柄在这里就建好 —— `AgentInner`
+        // 的共享出站客户端要装它作回退凭据，而开通（`Auth.Authenticate`）要等
+        // 出站通道与插件身份管理器就绪后才做（见下方 `bootstrap_self_identity`）。
+        // 句柄是 `Arc<CachedTokenProvider>`（内部可变），因此"先装句柄、后填凭据"
+        // 的顺序是安全的：填充前读取得到 `None`（等价旧行为），填充后立即生效。
+        let agent_self_identity =
+            Arc::new(coord_client::credential::CachedTokenProvider::new(None));
         let inner = if !self.config.static_peers.is_empty() {
             tracing::info!(
                 "coord-agent connecting to server cluster: {:?}",
@@ -971,6 +983,7 @@ impl AgentServer {
                     self.config.static_peers.clone(),
                     retry_cache,
                     client_tls.clone(),
+                    Arc::clone(&agent_self_identity),
                 )
                 .await
                 {
@@ -1019,6 +1032,119 @@ impl AgentServer {
             tracing::warn!("coord-agent: no static_peers configured, running in skeleton mode");
             None
         };
+
+        // 插件身份开通用的出站凭据句柄（进程级）：一次性 bootstrap token 只能
+        // 兑换一次，SIGHUP 重建插件加载器时复用同一引导 CCT，避免二次兑换失败。
+        //
+        // 位置说明（F-50，2026-09-19）：句柄与下面的 **agent 自身身份**自举都放在
+        // 「启动原生服务」**之前** —— 服务的后台任务（registry 订阅 / idgen nodeid
+        // 注册 / 锁保活）一启动就会发请求，凭据必须先就位，否则启动窗口内必然
+        // 重现 F-50 的 `missing CCT token`（即使随后自愈，日志与首轮请求也已失败）。
+        let plugin_identity_provider =
+            Arc::new(coord_client::credential::CachedTokenProvider::new(None));
+
+        // ──── agent 自身身份（F-50，2026-09-19）────
+        //
+        // 代理路径解决的是"**替调用方**发请求时的凭据"（按请求转发，见
+        // `auth/interceptor.rs`）。这里解决的是"**agent 为自己**发请求时的凭据"
+        // —— 后者此前在结构上没有任何通道，于是服务端开启鉴权时，锁自动续期 /
+        // registry 目录加载与订阅 / idgen nodeid 注册**全线** `missing CCT token`
+        // （F-50：锁会"静默丢失"，调用方以为仍持有）。
+        //
+        // 触发条件（任一满足即尝试）：
+        // - `auth.enabled`：agent 校验入站 CCT ⇒ 服务端几乎必然也开着鉴权；
+        // - 配了 `auth.bootstrap_token`：运维显式给了开通凭据。
+        // 两者都不满足（本地 dev 明文模式）时**不**尝试 —— 明文模式下凭据本就多余，
+        // 尝试只会制造无意义噪声。
+        if inner.is_some()
+            && !self.config.static_peers.is_empty()
+            && (self.config.auth.enabled || !self.config.auth.bootstrap_token.trim().is_empty())
+        {
+            use crate::plugin::identity::{
+                CoordAuthGateway, PluginAuthGateway, PluginClients, PluginIdentityManager,
+            };
+            let self_tls = self
+                .config
+                .tls
+                .as_ref()
+                .and_then(|t| t.to_coord_client_tls().ok());
+            // ① 开通账户需要"能调 admin:auth:* 的凭据" —— 复用插件身份的引导 CCT。
+            //    一次性令牌在这里**首次**兑换并缓存到 `plugin_identity_provider`，
+            //    后续（插件加载器 / 角色同步）复用缓存，不会二次消费令牌。
+            let bootstrap_client = match ensure_plugin_identity_token(
+                &self.config.auth,
+                &self.config.static_peers,
+                self_tls.clone(),
+                &plugin_identity_provider,
+            )
+            .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(
+                        "agent self identity: bootstrap credential unavailable ({e}); \
+                         retrying with the persisted account only"
+                    );
+                    None
+                }
+            };
+            // ② 复用插件身份管理器：**同一套**开通序列（user_add → role_add →
+            //    逐能力授权 → 角色绑定）与**同一套**续期循环，避免两套实现漂移。
+            //    `gateway` 只用于续期失败后的密码重认证 / refresh，二者都是匿名白名单
+            //    端点，故用一个无凭据客户端即可。
+            let anonymous = Arc::new(coord_client::credential::CachedTokenProvider::new(None));
+            match build_identity_client(&self.config.static_peers, self_tls, &anonymous).await {
+                Ok(gw_client) => {
+                    let gateway: Arc<dyn PluginAuthGateway> =
+                        Arc::new(CoordAuthGateway::new(gw_client));
+                    let clients = Arc::new(PluginClients::new(
+                        inner
+                            .as_ref()
+                            .map(|i| i.client.clone())
+                            .expect("inner.is_some() checked above"),
+                    ));
+                    match PluginIdentityManager::new(
+                        gateway,
+                        self.config.static_peers.clone(),
+                        self.config
+                            .tls
+                            .as_ref()
+                            .and_then(|t| t.to_coord_client_tls().ok()),
+                        &self.config.data_dir,
+                        clients,
+                    ) {
+                        Ok(mgr) => {
+                            let user = crate::plugin::identity::DEFAULT_SELF_USER;
+                            match mgr
+                                .bootstrap_self_identity(
+                                    bootstrap_client.as_ref(),
+                                    user,
+                                    &agent_self_identity,
+                                )
+                                .await
+                            {
+                                Ok(()) => {}
+                                Err(e) => tracing::error!(
+                                    "agent self identity UNAVAILABLE ({e}); agent-initiated \
+                                     traffic (lock renew / registry catalog+watch / idgen \
+                                     nodeid) will be rejected by the server with \
+                                     `missing CCT token` (F-50) — provide a bootstrap token or \
+                                     pre-create the '{user}' account"
+                                ),
+                            }
+                        }
+                        Err(e) => tracing::error!(
+                            "agent self identity: identity manager unavailable ({e}); \
+                             agent-initiated traffic will be rejected by the server (F-50)"
+                        ),
+                    }
+                }
+                Err(e) => tracing::error!(
+                    "agent self identity: gateway client build failed ({e}); agent-initiated \
+                     traffic will be rejected by the server (F-50)"
+                ),
+            }
+        }
 
         // ──── 服务宿主：`PluginManager`（唯一注册表）────
         //
@@ -1229,9 +1355,28 @@ impl AgentServer {
         }
 
         if self.config.services.scheduler {
-            let scheduler_svc = Arc::new(crate::services::scheduler::SchedulerService::new(
-                crate::services::scheduler::DefaultConfig,
-            ));
+            // 调度状态持久化（P0-10 / E9）：有 server 连接 ⇒ 共享 KV（重启不丢、
+            // 跨 Agent 唯一认领）；无 ⇒ 内存降级 **+ 明确告警**（不静默）。
+            use crate::services::scheduler::{DefaultConfig, SchedulerService};
+            use crate::services::scheduler_store::{KvSchedulerStore, SchedulerStore};
+
+            let claim_ttl = std::time::Duration::from_secs(60);
+            let scheduler_svc = match inner.as_ref() {
+                Some(inner) => {
+                    let store: Arc<dyn SchedulerStore> =
+                        Arc::new(KvSchedulerStore::new(Arc::clone(inner)));
+                    SchedulerService::with_store(store, claim_ttl)
+                }
+                None => {
+                    tracing::warn!(
+                        "Scheduler service running without Server KV: task/claim state is \
+                         process-local and will be lost on restart, and multi-agent \
+                         unique claiming is NOT guaranteed"
+                    );
+                    SchedulerService::new(DefaultConfig)
+                }
+            };
+            let scheduler_svc = Arc::new(scheduler_svc);
             let _ = register_native_service(
                 &plugin_manager,
                 scheduler_svc.clone(),
@@ -1373,9 +1518,30 @@ impl AgentServer {
             }
         }
 
+        // Transit 信封加密（/ DEK 持久化：生产走 coord-server 共享 KV，B-06 / E1）
         if self.config.services.transit {
-            use crate::services::transit::TransitConfig;
-            match crate::services::transit::TransitService::new(TransitConfig::default()) {
+            use crate::services::transit::{TransitConfig, TransitService};
+            use crate::services::transit_store::{KvTransitDekStore, TransitDekStore};
+
+            let transit_config = TransitConfig::default();
+            // 生产（已连接 server 集群）：加密态 DEK 落共享 KV —— 重启不丢密钥、
+            // 单次使用跨 Agent 成立；骨架模式（无 server）：降级内存 store（dev/单测）。
+            let transit_svc = match &inner {
+                Some(inner) => {
+                    let store: Arc<dyn TransitDekStore> =
+                        Arc::new(KvTransitDekStore::new(inner.clone()));
+                    TransitService::with_store(transit_config, store)
+                }
+                None => {
+                    tracing::warn!(
+                        "Transit service running without Server KV: DEK persistence disabled \
+                         (keys are lost on restart)"
+                    );
+                    TransitService::new(transit_config)
+                }
+            };
+
+            match transit_svc {
                 Ok(transit_svc) => {
                     let transit_svc = Arc::new(transit_svc);
                     let _ = register_native_service(
@@ -1425,10 +1591,26 @@ impl AgentServer {
         }
 
         if self.config.services.feature_flags {
-            use crate::feature_flags::FlagConfig;
-            let ff_svc = Arc::new(crate::feature_flags::FeatureFlagService::new(
-                FlagConfig::default(),
-            ));
+            // 开关持久化（P0-5 / E2）：有 server 连接 ⇒ 共享 KV（重启不丢、
+            // 跨 Agent 一致）；无 ⇒ 内存降级 **+ 明确告警**（不静默）。
+            use crate::feature_flags::{FeatureFlagService, FlagConfig};
+            use crate::feature_flags_store::{FeatureFlagStore, KvFeatureFlagStore};
+
+            let ff_svc = match inner.as_ref() {
+                Some(inner) => {
+                    let store: Arc<dyn FeatureFlagStore> =
+                        Arc::new(KvFeatureFlagStore::new(Arc::clone(inner)));
+                    FeatureFlagService::with_store(FlagConfig::default(), store)
+                }
+                None => {
+                    tracing::warn!(
+                        "Feature flags service running without Server KV: flag state is \
+                         process-local, will be lost on restart, and is NOT shared across agents"
+                    );
+                    FeatureFlagService::new(FlagConfig::default())
+                }
+            };
+            let ff_svc = Arc::new(ff_svc);
             let _ = register_native_service(
                 &plugin_manager,
                 ff_svc.clone(),
@@ -1468,6 +1650,19 @@ impl AgentServer {
             }
         }
 
+        // 协议版本协商（P0-4 / D6）：**无条件**注册，且必须先于其余服务就绪 ——
+        // 它的存在意义就是让"协议不匹配"变得**可诊断**（而不是裸的 `UNIMPLEMENTED`），
+        // 因此在任何改名切换之前就必须可达。
+        {
+            let handshake = Arc::new(crate::services::handshake::HandshakeService::new());
+            let _ = register_native_service(
+                &plugin_manager,
+                handshake.clone(),
+                crate::plugin::AgentGrpcService::Handshake(handshake),
+            )
+            .await;
+        }
+
         // 启动全部已注册的原生服务（生命周期由插件管理器统一驱动；
         // 单个服务启动失败只隔离该服务，不阻塞其余）。
         let native_start_failures = plugin_manager.start_all().await;
@@ -1479,10 +1674,8 @@ impl AgentServer {
             );
         }
 
-        // 插件身份开通用的出站凭据句柄（进程级）：一次性 bootstrap token 只能
-        // 兑换一次，SIGHUP 重建插件加载器时复用同一引导 CCT，避免二次兑换失败。
-        let plugin_identity_provider =
-            Arc::new(coord_client::credential::CachedTokenProvider::new(None));
+        // 插件身份开通用的出站凭据句柄已在**服务启动之前**创建（见上方 F-50 段），
+        // 此处不再重复声明。
 
         // ──── 插件引擎：加载配置声明的脚本插件（js/wasm）────
         //

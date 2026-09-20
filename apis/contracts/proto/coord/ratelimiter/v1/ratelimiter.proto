@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — 限流器（能力承诺面，v1.2）
+//
+// 状态：COMMITTED（承诺中）｜ GA 期限：2026-12-31 ｜ 台账：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/ratelimiter.proto 的 coord.ratelimiter.v1.RateLimiter
+//            （字段编号/类型逐项一致；迁移 = 机械式重挂载，禁止趁机改 wire）
+//
+// 边界声明：令牌桶为 **Agent 本地内存**，不承诺跨 Agent 共享
+// （WHITEPAPER §10 规则 4）；重启即重置。
+
+// GA 验收定义与倒逼机制见 WHITEPAPER.md §13。
+// ============================================================
+
+package coord.ratelimiter.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.ratelimiter.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/ratelimiter/v1;ratelimiterv1";
+
+// ============================================================
+
+service RateLimiter {
+  rpc Allow(RateLimiterAllowRequest) returns (RateLimiterAllowResponse);
+}
+
+message RateLimiterAllowRequest {
+  string key = 1;
+  int32 permits = 2;
+}
+
+message RateLimiterAllowResponse {
+  bool allowed = 1;
+  int64 remaining = 2;
+  int64 reset_time = 3;
+}
+
+// ============================================================
+// FeatureFlags — Feature Flag Evaluation

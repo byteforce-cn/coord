@@ -1,0 +1,15 @@
+;; expect-valid-empty-polls —— 守门员：空 Poll 不能判红。
+;;
+;; 消费者先于生产者（poll 时什么都没有），之后才发布。没有「游标越过未投递
+;; 消息」的证据 ⇒ 不判（判红会把「刚启动时队列是空的」变成假红）。
+;; 顺带覆盖一个常见形态：**长轮询返回空**是合法结果，不是错误。
+[{:type :ok :f :mq-poll :process 0 :t0-ns 10000000 :time 11000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0 :messages [] :acked-offsets []}
+ {:type :ok :f :mq-poll :process 0 :t0-ns 20000000 :time 21000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0 :messages [] :acked-offsets []}
+ {:type :ok :f :mq-publish :process 1 :t0-ns 30000000 :time 31000000
+  :topic "jepsen-mq" :partition 0 :payload "m0" :idempotency-key "idem-0" :offset 0}
+ {:type :ok :f :mq-poll :process 0 :t0-ns 40000000 :time 41000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 0 :payload "m0"}]
+  :acked-offsets [0]}]

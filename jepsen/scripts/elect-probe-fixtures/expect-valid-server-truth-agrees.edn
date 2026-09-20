@@ -1,0 +1,18 @@
+;; expect-valid-server-truth-agrees —— 判据 4 的正例：服务端与自述一致。
+;;
+;; c1 的自述在任区间是 [1005, 1600)（绝对毫秒）；t=1300 的服务端探针读到的
+;; `leader_id` **就是 c1** ⇒ 没有矛盾。
+[{:type :ok :f :elect-campaign :process 0 :time 2000000000
+  :t0-ns 1000000000
+  :group-name "group-a" :candidate-id "c1" :lease-id 3
+  :elected? true :campaign-at-ms 5
+  :resigned-at-ms 600 :resigned? true :gone? true :gone-at-ms 600
+  :holder-ttl-seconds 5 :at-ms 700}
+
+ {:type :ok :f :election-probe :process 1 :time 1300000000
+  :t0-ns 1300000000 :server-at-ms 0
+  :group-name "group-a" :server-key "/_election/group-a"
+  :exists? true
+  :raw-value "{\"leader_id\":\"c1\",\"instance_id\":\"ab\",\"lease_id\":3,\"ttl_secs\":5}"
+  :server {:leader-id "c1" :instance-id "ab" :lease-id 3 :ttl-secs 5}
+  :node "n1"}]

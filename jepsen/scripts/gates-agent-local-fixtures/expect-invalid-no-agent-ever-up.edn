@@ -1,0 +1,12 @@
+;; expect-invalid-no-agent-ever-up —— 与上面那条**同一条历史**的反向控制。
+;;
+;; fixture 的 opts 相同（`{:agent-local-surface? true …}`），只改证明值：两个 agent
+;; 在整个 run 期间**一次都没被抓到过**（`:up? false`）。
+;;
+;; 这时「请求真的经过 agent」这一句没有任何证据：本地面 workload 的调用只可能落在
+;; agent 上（server 根本没有 coord.agent.* 服务），所以「一个 agent 都没见过」就
+;; 只能是部署/接线出了问题 ⇒ 必须判**未执行**，不得判绿。
+[{:type :invoke  :f :write :value 1 :process 0 :time 100000000 :key "/jepsen/register"}
+ {:type :ok      :f :write :value 1 :process 0 :time 100100000 :key "/jepsen/register"}
+ {:type :invoke  :f :read  :process 0 :time 100200000 :key "/jepsen/register"}
+ {:type :ok      :f :read  :value 1 :process 0 :time 100300000 :key "/jepsen/register"}]

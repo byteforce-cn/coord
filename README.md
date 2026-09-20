@@ -150,7 +150,7 @@ try (CoordClient client = CoordClient.create(config)) {
 
 > The snippet above is the **real** SDK (`coord-java-sdk`, Maven group `cn.byteforce`,
 > artifact `coord-java-sdk`) — connect via `CoordClient.create(CoordConfig)`. The SDK is
-> versioned `1.0.0-SNAPSHOT` and is **not published to any repository**: run
+> versioned `0.2.0` and is **not published to any repository**: run
 > `mvn -pl coord-java-sdk install` in this repo first. The `java-example/` module is a
 > **separate, self-contained** gRPC demo; its
 > `cn.byteforce.coord.example.CoordClient` convenience wrapper is example-local
@@ -194,7 +194,7 @@ coord/
 
 ## Verification
 
-- **Jepsen (in-repo, not yet certified)** — [`jepsen/`](jepsen/README.md) is a real Clojure + knossos project with `register` / `cas-register` / `multi-register` workloads under kill / pause / partition nemeses, plus a long-running soak profile documented in [`jepsen/README.md`](jepsen/README.md). **No Jepsen or soak artifact has been committed yet** — `docs/production/evidence/` currently holds only the Java integration run. Until those artifacts land, treat linearizability claims as *design intent*, not as certified results.
+- **Jepsen (in-repo)** — [`jepsen/`](jepsen/README.md) is a real Clojure + knossos project with `register` / `cas-register` / `multi-register` workloads under kill / pause / partition nemeses, plus a long-running soak profile documented in [`jepsen/README.md`](jepsen/README.md). **Run artifacts are committed**: [`docs/production/evidence/`](docs/production/evidence/README.md) holds 26 archived Jepsen/soak runs plus the Java integration run, each with a `MANIFEST.md` recording the commit, the exact command and whether the tree was dirty. Certification status of each finding is tracked per-finding in [`jepsen/docs/coord-findings.md`](jepsen/docs/coord-findings.md) — read the findings there rather than inferring a blanket linearizability guarantee.
 - **Fast local check** — `scripts/jepsen-check.sh` runs **one** linearizability smoke test (`chaos_real_kill9_and_linearizability`) in ~2–3 minutes on a warm build; it is **not** a Jepsen run and does **not** reproduce the workload × nemesis matrix.
 - **CI** — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the authoritative list: fmt + clippy (`-D warnings`), a panic gate on non-test code, workspace tests, protobuf contract checks (buf lint + format + breaking), `cargo audit` + `cargo deny`, real-process chaos runs, a cross-language error-code contract check, and Java SDK + Java example integration suites.
 - **Evidence** — reproducible run artifacts live in [`docs/production/evidence/`](docs/production/evidence/README.md) (`bash scripts/collect-evidence.sh <scenario>`). Each `MANIFEST.md` states the commit, the exact command and whether the tree was dirty; treat artifacts whose `commit`/`command` fields are not reproducible as unverified.
@@ -208,7 +208,7 @@ coord/
 
 ## Status
 
-Version `0.1.0` (pre-1.0). The Raft engine (`openraft`) is an alpha dependency and Coord is **not yet recommended for production**. The in-repo Jepsen project exists but **no Jepsen or soak artifact has been committed**, so the core consistency and failure-recovery semantics are **not** certified by it — treat them as design intent until those artifacts land in [`docs/production/evidence/`](docs/production/evidence/README.md).
+Version `0.2.0` (pre-1.0). The Raft engine (`openraft`) is an alpha dependency and Coord is **not yet recommended for production**. The in-repo Jepsen project's run artifacts **are** committed ([`docs/production/evidence/`](docs/production/evidence/README.md)), but that is a per-run record, not a blanket certification — the core consistency and failure-recovery semantics still carry open findings enumerated in [`jepsen/docs/coord-findings.md`](jepsen/docs/coord-findings.md).
 
 Known gaps that are deliberately left open in this round are enumerated, with evidence and
 impact, in [`docs/production/remaining-known-gaps.md`](docs/production/remaining-known-gaps.md).

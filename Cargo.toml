@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/byteforce-cn/coord"
@@ -106,13 +106,13 @@ rust-embed = "8"
 # 第四轮 §3.9⑤：`deny.toml` 设 `wildcards = "deny"`，而内部依赖此前只写 `path`
 # 不写 `version` → 27 条 `error[wildcard]`。补上 workspace 版本即可（同 crate 版本
 # 由 `[workspace.package] version` 单一维护）。
-coord-proto = { path = "coord-proto", version = "0.1.0" }
-coord-core = { path = "coord-core", version = "0.1.0" }
-coord-macros = { path = "coord-macros", version = "0.1.0" }
-coord-server = { path = "coord-server", version = "0.1.0" }
-coord-agent = { path = "coord-agent", version = "0.1.0" }
-coord-client = { path = "coord-client", version = "0.1.0" }
-coord-test = { path = "coord-test", version = "0.1.0" }
+coord-proto = { path = "coord-proto", version = "0.2.0" }
+coord-core = { path = "coord-core", version = "0.2.0" }
+coord-macros = { path = "coord-macros", version = "0.2.0" }
+coord-server = { path = "coord-server", version = "0.2.0" }
+coord-agent = { path = "coord-agent", version = "0.2.0" }
+coord-client = { path = "coord-client", version = "0.2.0" }
+coord-test = { path = "coord-test", version = "0.2.0" }
 
 [profile.release]
 opt-level = 3

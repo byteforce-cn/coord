@@ -3,15 +3,15 @@ package cn.byteforce.coord.sdk.internal.rpc;
 import cn.byteforce.coord.sdk.CoordConfig;
 import cn.byteforce.coord.sdk.CoordException;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
-import cn.byteforce.coord.sdk.internal.proto.DeregisterRequest;
-import cn.byteforce.coord.sdk.internal.proto.DiscoverRequest;
-import cn.byteforce.coord.sdk.internal.proto.DiscoverResponse;
-import cn.byteforce.coord.sdk.internal.proto.HeartbeatRequest;
-import cn.byteforce.coord.sdk.internal.proto.RegisterRequest;
-import cn.byteforce.coord.sdk.internal.proto.RegisterResponse;
-import cn.byteforce.coord.sdk.internal.proto.RegistryGrpc;
-import cn.byteforce.coord.sdk.internal.proto.WatchEvent;
-import cn.byteforce.coord.sdk.internal.proto.WatchRequest;
+import cn.byteforce.coord.contracts.registry.v1.DeregisterRequest;
+import cn.byteforce.coord.contracts.registry.v1.DiscoverRequest;
+import cn.byteforce.coord.contracts.registry.v1.DiscoverResponse;
+import cn.byteforce.coord.contracts.registry.v1.HeartbeatRequest;
+import cn.byteforce.coord.contracts.registry.v1.RegisterRequest;
+import cn.byteforce.coord.contracts.registry.v1.RegisterResponse;
+import cn.byteforce.coord.contracts.registry.v1.RegistryGrpc;
+import cn.byteforce.coord.contracts.registry.v1.WatchEvent;
+import cn.byteforce.coord.contracts.registry.v1.WatchRequest;
 import cn.byteforce.coord.sdk.internal.watch.GrpcWatchStream;
 import cn.byteforce.coord.sdk.internal.watch.WatchManager;
 import cn.byteforce.coord.sdk.registry.*;
@@ -109,7 +109,7 @@ public final class RegistryImpl extends AgentRpcClient implements Registry {
                 request, "registry.discover");
 
         List<ServiceInstance> instances = new ArrayList<>();
-        for (cn.byteforce.coord.sdk.internal.proto.ServiceInstance si : response.getInstancesList()) {
+        for (cn.byteforce.coord.contracts.registry.v1.ServiceInstance si : response.getInstancesList()) {
             instances.add(new ServiceInstance(si.getInstanceId(), si.getServiceName(), si.getMetadata()));
         }
         return new DiscoverResult(instances, response.getRevision());
@@ -134,7 +134,7 @@ public final class RegistryImpl extends AgentRpcClient implements Registry {
                 request, "registry.discoverAll");
 
         List<ServiceInstance> instances = new ArrayList<>();
-        for (cn.byteforce.coord.sdk.internal.proto.ServiceInstance si : response.getInstancesList()) {
+        for (cn.byteforce.coord.contracts.registry.v1.ServiceInstance si : response.getInstancesList()) {
             instances.add(new ServiceInstance(si.getInstanceId(), si.getServiceName(), si.getMetadata()));
         }
         return new DiscoverResult(instances, response.getRevision());
@@ -169,7 +169,7 @@ public final class RegistryImpl extends AgentRpcClient implements Registry {
                         default -> RegistryEvent.EventType.INSTANCES_UPDATED;
                     };
                     List<ServiceInstance> instances = new ArrayList<>();
-                    for (cn.byteforce.coord.sdk.internal.proto.ServiceInstance si : protoEvent.getInstancesList()) {
+                    for (cn.byteforce.coord.contracts.registry.v1.ServiceInstance si : protoEvent.getInstancesList()) {
                         instances.add(new ServiceInstance(si.getInstanceId(), si.getServiceName(), si.getMetadata()));
                     }
                     listener.onEvent(new RegistryEvent(eventType, instances, protoEvent.getRevision()));

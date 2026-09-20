@@ -3,7 +3,7 @@ package cn.byteforce.coord.sdk.internal.rpc;
 import cn.byteforce.coord.sdk.CoordConfig;
 import cn.byteforce.coord.sdk.CoordException;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
-import cn.byteforce.coord.sdk.internal.proto.*;
+import cn.byteforce.coord.contracts.lock.v1.*;
 import cn.byteforce.coord.sdk.lock.LockClient;
 import cn.byteforce.coord.sdk.lock.LockInfo;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
@@ -73,11 +73,20 @@ public final class LockClientImpl extends AgentRpcClient implements LockClient {
                 .build();
 
         try {
-            callWithRetry(
+            LockRenewResponse response = callWithRetry(
                     (ch, req) -> LockGrpc.newBlockingStub(ch)
                             .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
                             .renew((LockRenewRequest) req),
                     request, "lock.renew");
+            // 契约（`coord/lock/v1/lock.proto` 的 `LockRenewResponse`）：
+            //   new_ttl = 续约后的 TTL（秒）；**0 = 租约已失效，锁已释放**。
+            // 因此判据是 new_ttl > 0，**不是**"RPC 没抛异常"。恢复后服务端会把
+            // 这个信号如实回成 0（而不是让调用方去猜错误码），客户端必须按契约读。
+            if (response.getNewTtl() <= 0) {
+                log.debug("Lock renew not honoured (lease not ours): name={}, holder={}, lease={}",
+                        name, holderId, leaseId);
+                return false;
+            }
             return true;
         } catch (CoordException e) {
             log.debug("Lock renew failed: name={}, error={}", name, e.getMessage());

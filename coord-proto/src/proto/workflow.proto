@@ -1,0 +1,207 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — 工作流（Saga）（能力承诺面，v1.2）
+//
+// 状态：COMMITTED（承诺中）｜ GA 期限：2027-03-31 ｜ 台账：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/workflow.proto 的 coord.workflow.v1.Workflow
+//            （字段编号/类型逐项一致；迁移 = 机械式重挂载，禁止趁机改 wire）
+//
+// GA 验收定义与倒逼机制见 WHITEPAPER.md §13。
+// ============================================================
+
+package coord.workflow.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.workflow.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/workflow/v1;workflowv1";
+
+// ============================================================
+
+service Workflow {
+  rpc Start(WorkflowStartRequest) returns (WorkflowStartResponse);
+  rpc GetStatus(WorkflowGetStatusRequest) returns (WorkflowGetStatusResponse);
+  rpc Signal(WorkflowSignalRequest) returns (WorkflowSignalResponse);
+  rpc Cancel(WorkflowCancelRequest) returns (WorkflowCancelResponse);
+
+  // 新增 — 工作流定义管理
+  rpc Deploy(WorkflowDeployRequest) returns (WorkflowDeployResponse);
+  rpc ListDefinitions(WorkflowListDefinitionsRequest) returns (WorkflowListDefinitionsResponse);
+  rpc GetDefinition(WorkflowGetDefinitionRequest) returns (WorkflowGetDefinitionResponse);
+
+  // 新增 — 工作流定义版本化 / 回滚（对齐 policy PutBundle 语义）
+  rpc ListDefinitionVersions(WorkflowListDefinitionVersionsRequest) returns (WorkflowListDefinitionVersionsResponse);
+  rpc RollbackDefinition(WorkflowRollbackDefinitionRequest) returns (WorkflowRollbackDefinitionResponse);
+
+  // 新增 — 工作流实例管理
+  rpc ListInstances(WorkflowListInstancesRequest) returns (WorkflowListInstancesResponse);
+}
+
+message WorkflowStartRequest {
+  string definition_dsl = 1; // CNCF Workflow DSL JSON
+  bytes input = 2;
+  string definition_id = 3; // 可选：按已部署定义启动（与 definition_dsl 互斥）
+}
+
+message WorkflowStartResponse {
+  string workflow_id = 1;
+}
+
+message WorkflowGetStatusRequest {
+  string workflow_id = 1;
+}
+
+message WorkflowGetStatusResponse {
+  string workflow_id = 1;
+  string status = 2; // PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
+  bytes output = 3;
+  string error_message = 4;
+  string definition_name = 5; // 工作流定义名称
+  bytes input = 6; // 启动时传入的输入参数
+  int64 created_at = 7; // 实例创建时间（Unix ms）
+  int64 updated_at = 8; // 实例最后更新时间（Unix ms）
+  repeated TaskFrame task_stack = 9; // 当前任务执行栈（可选）
+  string current_state_name = 10; // 当前状态名（SW 状态名 = 当前任务名）
+  SuspensionMeta suspension = 11; // 挂起元信息（SUSPENDED/WAITING 时返回）
+}
+
+// 挂起元信息（对应 WorkflowInstance.suspension_meta）
+message SuspensionMeta {
+  string reason = 1; // "wait" | "call" | "listen" | "signal" | "run" | "retry"
+  int64 until_ms = 2; // wait/retry 到期时间（Unix ms，可选）
+  string expected_signal = 3; // 期望的 signal 名（人工审批挂起，可选）
+  string event_type = 4; // listen 事件类型（可选）
+  string service = 5; // call 目标服务（可选）
+}
+
+// 任务栈帧（对应 WorkflowInstance.task_stack）
+message TaskFrame {
+  string task_name = 1;
+  string task_type = 2;
+  string status = 3;
+  bytes input = 4;
+  bytes output = 5;
+  int64 started_at = 6;
+  int64 ended_at = 7;
+  int32 retry_count = 8;
+}
+
+message WorkflowSignalRequest {
+  string workflow_id = 1;
+  string signal_name = 2;
+  bytes payload = 3;
+  string idempotency_key = 4; // 幂等键，重复 signal 不会重复执行
+}
+
+message WorkflowSignalResponse {}
+
+message WorkflowCancelRequest {
+  string workflow_id = 1;
+}
+
+message WorkflowCancelResponse {}
+
+// 工作流定义管理（Phase B.1 新增）
+
+message WorkflowDeployRequest {
+  string namespace = 1;
+  string definition_yaml = 2;
+}
+
+message WorkflowDeployResponse {
+  string workflow_id = 1;
+  string version = 2;
+  string namespace = 3;
+  string name = 4; // YAML 中定义的 workflow name
+}
+
+message WorkflowListDefinitionsRequest {
+  string namespace = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message WorkflowListDefinitionsResponse {
+  repeated WorkflowDefinitionSummary definitions = 1;
+  string next_page_token = 2;
+}
+
+message WorkflowDefinitionSummary {
+  string workflow_id = 1;
+  string name = 2;
+  string version = 3;
+  string status = 4;
+  int64 created_at = 5;
+}
+
+message WorkflowGetDefinitionRequest {
+  string workflow_id = 1;
+}
+
+message WorkflowGetDefinitionResponse {
+  string workflow_id = 1;
+  string name = 2;
+  string definition_yaml = 3;
+  string version = 4;
+  string status = 5;
+  int64 created_at = 6;
+}
+
+// 工作流定义版本化 / 回滚（对齐 policy PutBundle：原子覆盖 + 版本化 + 回滚）
+
+message WorkflowListDefinitionVersionsRequest {
+  string namespace = 1;
+  string name = 2;
+}
+
+message WorkflowListDefinitionVersionsResponse {
+  repeated WorkflowDefinitionVersion versions = 1;
+}
+
+message WorkflowDefinitionVersion {
+  string version = 1; // 语义化版本字符串
+  string workflow_id = 2; // 该版本的 definition ID
+  string status = 3;
+  int64 created_at = 4;
+}
+
+message WorkflowRollbackDefinitionRequest {
+  string namespace = 1;
+  string name = 2;
+  string version = 3; // 要恢复的版本（回滚后以新版本落地）
+}
+
+message WorkflowRollbackDefinitionResponse {
+  string workflow_id = 1;
+  string version = 2; // 回滚后生成的新版本
+  string namespace = 3;
+  string name = 4;
+}
+
+message WorkflowListInstancesRequest {
+  string workflow_id = 1; // 可选，为空则列出全部
+  string namespace = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+  string status_filter = 5; // 可选，按状态过滤（RUNNING/SUSPENDED/COMPLETED/FAILED/CANCELLED）
+}
+
+message WorkflowListInstancesResponse {
+  repeated WorkflowInstanceSummary instances = 1;
+  string next_page_token = 2;
+}
+
+message WorkflowInstanceSummary {
+  string instance_id = 1;
+  string workflow_id = 2;
+  string state = 3;
+  int64 started_at = 4;
+  int64 updated_at = 5;
+  string definition_name = 6; // 工作流定义名称（用于列表展示）
+  string namespace = 7; // 命名空间
+  bytes output_json = 8; // 输出数据（JSON）
+  bytes context_json = 9; // 运行时上下文（JSON）
+}
+
+// ============================================================
+// Policy — OPA Policy Engine (Regorus)

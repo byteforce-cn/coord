@@ -1,0 +1,20 @@
+;; expect-invalid-abandon-unjudged —— 「未判定 ≠ 通过」的守门员（§5.5 第 9 条）。
+;;
+;; 探针在场（所以 `:lock-probe-missing` 不会触发），弃锁 op 也在场，但它的
+;; `:acquire-node` 是一个**不在 agent 映射里**的地址 ⇒ 判据 6/7 都无法归因到
+;; 具体 agent ⇒ 一条都没判过。这种「报告里有 op、有条目、却没有判定」的形态
+;; 正是 F-41 那一类静默覆盖缺失，必须判 invalid。
+[{:type :ok :f :lock-abandon :process 0 :time 1000000
+  :t0-ns 1000000000
+  :name "lock-a-abandon" :holder-id "a1" :lease-id 7
+  :abandoned? true :acquired-at-ms 5
+  ;; 与控制机的 agent 隧道端口表对不上（例如 run 的隧道基址变了、或 op 被
+  ;; 错误地打到 server 端点）：归因不了 agent ⇒ 不能判 6/7。
+  :acquire-node "127.0.0.1:1"
+  :holder-ttl-seconds 5 :grace-ms 4000 :at-ms 10}
+
+ {:type :ok :f :lock-probe :process 1 :time 2000000000
+  :t0-ns 2000000000 :server-at-ms 0
+  :name "lock-a-abandon" :server-key "/_lock/lock-a-abandon"
+  :exists? true :raw-value "{\"holder_id\":\"a1\",\"lease_id\":7}"
+  :server {:holder-id "a1" :lease-id 7 :ttl-secs 5} :node "n1"}]

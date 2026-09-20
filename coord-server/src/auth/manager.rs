@@ -223,8 +223,13 @@ pub struct AuthManager {
     bootstrap_tokens: Arc<RwLock<HashMap<String, AuthBootstrapTokenRecord>>>,
 }
 
-/// 引导管理员角色名：该角色在服务端能力判定中全能力放行。
-pub const ROOT_ROLE: &str = "root";
+/// 引导管理员角色名：该角色在**服务端与 agent 两侧**能力判定中全能力放行。
+///
+/// 定义已上移到 [`coord_core::auth::ROOT_ROLE`]（F-32：agent 侧此前没有同口径旁路，
+/// 导致 auth 开启后 root 经 agent 的调用被全部拒绝）。这里保留同名再导出，
+/// 既保证两侧用的是**同一个字符串常量**，又不破坏 `coord_server::auth::ROOT_ROLE`
+/// 既有引用方。
+pub use coord_core::auth::ROOT_ROLE;
 
 // ──── 持久化记录（`/_sys/auth/` 前缀，bincode 序列化）────
 
@@ -559,11 +564,14 @@ impl AuthManager {
     ) -> bool {
         let roles_map = self.roles.read();
 
-        for role_name in roles {
-            if role_name == ROOT_ROLE {
-                return true;
-            }
+        // 引导管理员全能力放行（F-32 之前这只存在于服务端）。
+        // 提到循环外："root ⇒ 放行一切"是整条判定的前置条件，
+        // 不该表现为"恰好第一个 role 是 root"的循环副作用。
+        if coord_core::auth::is_root(roles) {
+            return true;
+        }
 
+        for role_name in roles {
             let Some(role) = roles_map.get(role_name) else {
                 continue;
             };
@@ -616,11 +624,12 @@ impl AuthManager {
     ) -> bool {
         let roles_map = self.roles.read();
 
-        for role_name in roles {
-            if role_name == ROOT_ROLE {
-                return true;
-            }
+        // 引导管理员全能力放行（与 `check_capability` 同口径）。
+        if coord_core::auth::is_root(roles) {
+            return true;
+        }
 
+        for role_name in roles {
             let Some(role) = roles_map.get(role_name) else {
                 continue;
             };

@@ -1,0 +1,43 @@
+;; expect-valid-nanotime-anchor-wins-over-jepsen-time —— **守门员**（M5a 第二轮实测）。
+;;
+;; 形态：jepsen 记录的 invoke 时刻（`:time` / `:invoke`）是 worker 线程**派发** op
+;; 时打的点，中间隔着队列与线程调度，因此它相对「客户端自己读到的时间」有几毫秒
+;; 到几百毫秒的抖动。实测（2026-09-18 的 lock run，同一个 JVM）：
+;;
+;;   completion.time - (t0 + 最后一个 :at-ms)  ∈ {40ms, 290ms, …}
+;;
+;; 而区间重叠判定要求**跨 op** 比较，锚点的噪声会直接变成「两个持有者重叠」：
+;; 那一轮 126 次持有里有 3 条这样的假红（1ms / 13ms / 241ms），量级正好是噪声本身。
+;;
+;; 正解：锚点用 op 自己读的 `:t0-ns`（同一个 JVM 的 `System/nanoTime`，精确）。
+;; 下例刻意让两种锚点给出相反结论：
+;;
+;;   * `:t0-ns` 锚点：A = [1_000_010, 1_000_400)，B = [1_000_450, 1_000_650) —— 不重叠；
+;;   * jepsen `:time` 锚点（B 的 invoke = 1_000_100ms）：B = [1_000_150, 1_000_350)
+;;     —— 与 A 重叠 200ms。
+;;
+;; 去掉 `:t0-ns` 优先（改回只看 `:invoke`）这条必然变红，所以它是回归守卫。
+[{:type :invoke :f :lock-contend :process 0 :time 1000000000000
+  :value {:name "lock-a" :holder-id "h1" :ttl-seconds 5}}
+ {:type :ok :f :lock-contend :process 0 :time 1000400000000
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  ;; 客户端自己读的单调时钟（精确锚点）
+  :t0-ns 1000000000000
+  :acquired-at-ms 10 :released-at-ms 400 :released? true
+  :gone? true :gone-at-ms 400 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}
+
+ ;; B 的 jepsen invoke 时刻（1_000_100ms）比它自己的 t0（1_000_400ms）**早 300ms**
+ ;; —— 这正是实测里那种派发/调度噪声。
+ {:type :invoke :f :lock-contend :process 1 :time 1000100000000
+  :value {:name "lock-a" :holder-id "h2" :ttl-seconds 5}}
+ {:type :ok :f :lock-contend :process 1 :time 1000700000000
+  :name "lock-a" :holder-id "h2" :lease-id 12
+  :t0-ns 1000400000000
+  :acquired-at-ms 50 :released-at-ms 250 :released? true
+  :gone? true :gone-at-ms 250 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}]

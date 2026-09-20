@@ -2,6 +2,56 @@
 
 版本规则见 WHITEPAPER.md §5。契约版本独立于代码版本。
 
+## [contracts/v1.2.0] — 2026-09-19（Minor：coord-agent 全量 GA 契约面补齐 + EXPERIMENTAL 区清空）
+
+**发布口径**：本条目为 **Minor**（新增包 + 状态位提升），**不改动任何既有包的字段编号与类型**
+（`buf breaking` 基线 = `contracts/v1.1.2`，CI `.github/workflows/contract-check.yml` 强制）。
+
+**新增契约包（11 个，全部直接建为稳定包 `coord.<domain>.v1`）**
+
+`coord.config.v1` / `coord.pki.v1` / `coord.policy.v1` / `coord.circuitbreaker.v1` /
+`coord.ratelimiter.v1` / `coord.transit.v1` / `coord.cache.v1` / `coord.mq.v1` /
+`coord.workflow.v1` / `coord.scheduler.v1` / `coord.featureflags.v1`。
+
+- 每个包的 wire（service 名 / rpc 名 / 字段编号与类型）**逐字取自**迁移前的实现
+  `coord-proto/src/proto/agent_api.proto` 对应 service 块，**未趁机改动任何 wire**。
+- **不以 `coord.experimental.*` 形态开放**：`STATUS.md:35-39` 曾声明的 4 个
+  `coord.experimental.*` 包**从未有 proto 文件、从未有任何消费者**（本仓零引用），
+  故直接建为稳定包**不构成 Breaking**，亦不违反 WHITEPAPER §9.2 实验包规则
+  （该规则约束"以实验包形态对外开放"，本版不以实验包形态开放任何东西）。
+
+**状态位变更（对已公示承诺的变更 —— 须按 WHITEPAPER §11 重新公示，含消费者告知）**
+
+| 契约包 | 原状态 | 新状态 | 原期限 | 说明 |
+|:---|:---|:---|:---|:---|
+| `coord.experimental.cache.v1` | EXPERIMENTAL | → `coord.cache.v1` **COMMITTED** | 2026-12-31 | 提前提升；整改项见 STATUS.md |
+| `coord.experimental.mq.v1` | EXPERIMENTAL | → `coord.mq.v1` **COMMITTED** | 2026-12-31 | 提前提升 |
+| `coord.experimental.workflow.v1` | EXPERIMENTAL | → `coord.workflow.v1` **COMMITTED** | 2027-03-31 | 提前提升 |
+| `coord.experimental.scheduler.v1` | EXPERIMENTAL | → `coord.scheduler.v1` **COMMITTED** | 2027-03-31 | 提前提升 |
+| `coord.storage` | EXPERIMENTAL | **COMMITTED** | 2026-12-31 | 状态位提升；**包名不迁**（无 `.v1` 后缀），改名即 Breaking，本版不改 |
+
+> **这不是"到期自然转正"，而是对已公示承诺的提前变更**，属 WHITEPAPER §11 变更流程的适用情形，
+> 故在本条目中显式公示（含上表逐包对照），不得静默提前。
+
+**台账/上位文本对齐**
+
+- `STATUS.md` 的 EXPERIMENTAL 区**清空**：上述 5 项全部转入 COMMITTED 段。
+- `WHITEPAPER.md` §9.1 的 4 项实验能力清单与 `STATUS.md` 的 5 行口径分歧（多出 `coord.storage`）
+  以 **`STATUS.md` 为准**（它已含 `coord.storage`，且该包 proto 已存在、Java SDK 已有
+  `objectStore()` 访问器）。
+- `WHITEPAPER.md` §9.1 的两条缺陷描述经代码实测**已过期**，按 §11 流程同步修订
+  （Cache「ISR 提交非原子」→ 跨节点提交非原子；Workflow「无持久化/补偿」→ 已有
+  `KvWorkflowStore` + 补偿语义，改为验收项）。修订稿见
+  `docs/production/agent-ga-remediation-baseline.md`。
+
+**不迁移（保持内部，不建对外契约）**
+
+`coord.agent.Handshake` / `coord.agent.Health` / `coord.agent.Replica` —— 前者为协议协商、
+中者为探活、后者为 ISR 复制通道（WHITEPAPER §9.3 红线 R3「永不对外」）。
+Replication 的 GA 口径为**内部能力**（受支持、有测试、有文档），**不产生对外契约包**。
+
+---
+
 ## [contracts/v1.1.2] — 2026-09-06（内部口径修正：Multi-Raft PD 治理闭环 + 演练收口）
 
 **不改变任何对外承诺**：Multi-Raft/PD 维持红线 §9.3（永不对外承诺，除非另立版本公告）；

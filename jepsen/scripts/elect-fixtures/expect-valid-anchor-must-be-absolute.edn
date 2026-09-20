@@ -1,0 +1,29 @@
+;; expect-valid-anchor-must-be-absolute —— **守门员**（F-35：election 面的区间锚点）。
+;;
+;; 形态：两个 op 的 `:campaign-at-ms` / `:gone-at-ms` 都是「相对**本 op** 起点」的
+;; 毫秒（每个 op 的零点不同），直接跨 op 相减就会看到重叠：
+;;
+;;   c1: 相对 [10, 400)      c2: 相对 [50, 250)   ⇒ 看起来重叠 200ms
+;;
+;; 但带上各自的锚点（这里是 jepsen `:time`；生产路径上是 op 自读的 `:t0-ns`）：
+;;
+;;   c1: 1_000_000 + [10, 400) = [1_000_010, 1_000_400)
+;;   c2: 2_000_000 + [50, 250) = [2_000_050, 2_000_250)   ⇒ **不重叠**
+;;
+;; 实测（M5a 第二轮，45s run）：第一版 electck **完全没有锚点**，把这类完全合法的
+;; 先后关系报成了 **124** 条 `:election-two-leaders`；同一份历史加上锚点后是 **0**。
+;;
+;; 去掉 `abs-ms`（改回直接比相对值）⇒ 本 fixture 必红。
+[{:type :ok :f :elect-campaign :process 0 :time 1000000000
+  :elected? true :group-name "g1" :candidate-id "c1" :lease-id 21
+  :campaign-at-ms 10 :resigned-at-ms 400 :resigned? true
+  :gone? true :gone-at-ms 400 :still-leader-after-resign false
+  :holder-ttl-seconds 5
+  :leader-after-resign {:leader-id "" :exists false}}
+
+ {:type :ok :f :elect-campaign :process 1 :time 2000000000
+  :elected? true :group-name "g1" :candidate-id "c2" :lease-id 22
+  :campaign-at-ms 50 :resigned-at-ms 250 :resigned? true
+  :gone? true :gone-at-ms 250 :still-leader-after-resign false
+  :holder-ttl-seconds 5
+  :leader-after-resign {:leader-id "" :exists false}}]

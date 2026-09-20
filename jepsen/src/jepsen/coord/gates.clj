@@ -91,6 +91,22 @@
   "G6：单类 op 参与判定的最小完成数（不足只记录，不判定）。"
   10)
 
+(def default-min-agent-requests
+  "AG-01（M5a）—— `--via-agent` 的 run 里，agent **代理面**请求计数的下界。
+
+  为什么必须是门禁而不是报告：`--via-agent` 只是把客户端 endpoint 换到隧道端口，
+  如果端点写错（打到 server 上），工作负载照样全绿，而 agent 一行代码都没执行 ——
+  这正是 F-13 那一类「报告很绿、覆盖面为零」的假绿在 agent 层的形态。
+
+  agent 每个 run 都是**新进程 + 新 data_dir**，所以计数器从 0 起：run 结束后
+  抓到 > 0 就等于「确有请求落到 agent」。默认 1 只回答「有没有」；验收级 run
+  可调大（短矩阵中它自然远大于 1）。
+
+  注：agent **本地面**（lock/election/idgen/registry）不在该指标里
+  （`record_grpc_method` 只认 Put/Range/Delete/Txn/… 这几个核心路径），
+  那几个面由 `:agent-local-surface?` 走另一条判据 —— 见 checker 里的注释。"
+  1)
+
 (def ^:private nanos-per-second
   "history 的 `:time` 单位：纳秒（见 ns docstring）。"
   1.0e9)
@@ -362,10 +378,25 @@
     :check-premise?          值唯一性前提自检开关（默认 true；仅 T1.4 幂等
                              workload 这种「故意重放同 value」的场景才关掉）
     :min-op-ok-ratio         G6 单类 op 的 `:ok` 率下界（默认 0.1）
-    :min-op-sample           G6 单类 op 参与判定的最小完成数（默认 10）"
+    :min-op-sample           G6 单类 op 参与判定的最小完成数（默认 10）
+    :agent-scrape            AG-01（可为 nil = 非 --via-agent 的 run）：路由证明的来源。
+                             两种形式都支持：
+                               * **函数**（生产用）：0 参，在 check 时抓一次 agent 指标
+                                 并返回 `{:total n :by-method {...} :agents [...]}`
+                                 —— 必须在 check 时抓：agent 每 run 新进程，
+                                 计数从 0 起，提前算出来就永远是 0；
+                               * **map**（fixture/离线用）：直接给定证明值，
+                                 这样这条门槛也能用 fixture 的负控制钉住。
+    :min-agent-requests      代理面请求数下界（默认 1）
+    :agent-local-surface?    true = 本次 workload 全部跑在 agent **本地面**上
+                             （lock/election/idgen/registry）：那些 RPC 不进
+                             `coord_agent_grpc_requests_total`，所以不能拿计数
+                             当判据（会把「真的跑过了」误判成「没经过 agent」）；
+                             改为要求每个 agent 的指标端点都能抓到（:up?）。"
   ([] (checker {}))
   ([{:keys [quiet-availability-min quiet-min-sample max-rto-seconds
-            nemesis check-premise? min-op-ok-ratio min-op-sample]}]
+            nemesis check-premise? min-op-ok-ratio min-op-sample
+            agent-scrape min-agent-requests agent-local-surface?]}]
    ;; F-09：门槛必须用 `or` 解析，**不能**用 destructuring 的 `:or`。
    ;; `:or` 只在键缺失时生效；而调用方（coord.clj 的 checker 组合）总是显式
    ;; 传入 `{:quiet-availability-min (:quiet-availability-min opts) ...}`，
@@ -378,6 +409,7 @@
          quiet-min-sample       (or quiet-min-sample default-quiet-min-sample)
          min-op-ok-ratio        (or min-op-ok-ratio default-min-op-ok-ratio)
          min-op-sample          (or min-op-sample default-min-op-sample)
+         min-agent-requests     (or min-agent-requests default-min-agent-requests)
          check-premise?         (if (nil? check-premise?) true check-premise?)]
      (reify checker/Checker
        (check [_ _test history _opts]
@@ -404,6 +436,28 @@
                                   quiet-availability-min)
              rto-r  (rto writes last-write-invoke disruptions budget)
              liveness (op-liveness ops min-op-sample min-op-ok-ratio)
+             ;; AG-01：路由证明。**在 check 时**抓（见 docstring）——
+             ;; 抓失败（nil）也算「证不出来」，不能当通过。
+             agent-scrape? (or (fn? agent-scrape) (map? agent-scrape))
+             agent-proof (when agent-scrape?
+                           (if (map? agent-scrape)
+                             agent-scrape
+                             (try (agent-scrape)
+                                  (catch Exception e {:error (str e)}))))
+             agent-fail? (when agent-scrape?
+                           (if agent-local-surface?
+                             ;; 本地面：代理计数不覆盖它们，退而求其次——**至少
+                             ;; 一个** agent 在 run 期间被抓到过（进程真的存在过）。
+                             ;;
+                             ;; 为什么不是「每个 agent 都必须抓得到」：那是 run
+                             ;; **结束时**的一次抓取，而 kill 类 nemesis 会故意
+                             ;; 杀 agent（被杀的那个在 check 时可能还没起回来）。
+                             ;; 实测（M5a 第二轮）：idgen/kill-agent 就是因为这条
+                             ;; 被判红，而它其实只是时序问题 —— 路由证明不该把
+                             ;; 「nemesis 生效了」当成「请求没经过 agent」。
+                             (not (some :up? (:agents agent-proof)))
+                             (< (long (or (:total agent-proof) 0))
+                                min-agent-requests)))
              rto-fail? (or (pos? (:unrecovered rto-r))
                            (and (:p95 rto-r) (> (:p95 rto-r) budget)))
              failures (cond-> []
@@ -431,10 +485,23 @@
                         (and (:p95 rto-r) (> (:p95 rto-r) budget))
                         (conj {:type :rto-exceeded
                                :p95 (:p95 rto-r)
-                               :budget-seconds budget}))]
+                               :budget-seconds budget})
+
+                        agent-fail?
+                        (conj {:type :agent-route-not-proven
+                               :local-surface? (boolean agent-local-surface?)
+                               :min-agent-requests min-agent-requests
+                               :proof agent-proof
+                               :note (if agent-local-surface?
+                                       "抓不到某个 agent 的指标端点：无法证明请求真的经过 agent（本地面不做计数判据，见 gates.clj docstring）"
+                                       "agent 代理面计数没过门槛：本次 run 可能根本没经过 agent（端点写错 = 直连假绿，AG-01）")}))]
          {:valid? (empty? failures)
           :gates  {:premise premise
                    :availability avail
                    :rto rto-r
-                   :liveness liveness}
+                   :liveness liveness
+                   :agent  (when agent-scrape?
+                             {:proof agent-proof
+                              :min-requests min-agent-requests
+                              :local-surface? (boolean agent-local-surface?)})}
           :failures failures}))))))

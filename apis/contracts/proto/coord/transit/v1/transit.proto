@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — 安全传输（信封加密）（能力承诺面，v1.2）
+//
+// 状态：COMMITTED（承诺中）｜ GA 期限：2026-12-31 ｜ 台账：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/transit.proto 的 coord.transit.v1.Transit
+//            （字段编号/类型逐项一致；迁移 = 机械式重挂载，禁止趁机改 wire）
+//
+// GA 验收定义与倒逼机制见 WHITEPAPER.md §13。
+// ============================================================
+
+package coord.transit.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.transit.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/transit/v1;transitv1";
+
+// ============================================================
+
+service Transit {
+  rpc Encrypt(TransitEncryptRequest) returns (TransitEncryptResponse);
+  rpc Decrypt(TransitDecryptRequest) returns (TransitDecryptResponse);
+
+  // 新增 — HMAC 签名与验签 (Phase B.2)
+  rpc HmacSign(TransitHmacSignRequest) returns (TransitHmacSignResponse);
+  rpc HmacVerify(TransitHmacVerifyRequest) returns (TransitHmacVerifyResponse);
+}
+
+message TransitEncryptRequest {
+  bytes plaintext = 1;
+  bytes context = 2;
+}
+
+message TransitEncryptResponse {
+  bytes ciphertext = 1;
+}
+
+message TransitDecryptRequest {
+  bytes ciphertext = 1;
+  bytes context = 2;
+}
+
+message TransitDecryptResponse {
+  bytes plaintext = 1;
+}
+
+// Transit HMAC 签名与验签 (Phase B.2 新增)
+
+message TransitHmacSignRequest {
+  bytes data = 1;
+  string algorithm = 2; // 默认 "HMAC-SHA256"
+}
+
+message TransitHmacSignResponse {
+  bytes signature = 1;
+  string algorithm = 2;
+}
+
+message TransitHmacVerifyRequest {
+  bytes data = 1;
+  bytes signature = 2;
+  string algorithm = 3;
+}
+
+message TransitHmacVerifyResponse {
+  bool valid = 1;
+}
+
+// ============================================================
+// CircuitBreaker — Resilience

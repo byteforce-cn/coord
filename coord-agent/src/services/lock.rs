@@ -111,6 +111,66 @@ fn unix_ts() -> u64 {
 /// 返回 `Some(info)` 仅当锁存在**且** holder 与 `holder_id` 一致。
 /// 供 `renew` 与后台续期任务共用 —— 后者的判据必须是 Server 端真相，
 /// 而不是"keep_alive 报错"本身（瞬时抖动不应被当成丢锁）。
+/// fence 判据：`(holder_id, lease_id)` 是否与**当前持有者**匹配。
+///
+/// 提取成纯函数是为了让这条契约能被单测直接钉住 —— 它是 F-28 的正面判据
+/// （`lock.proto`：「持有者校验：仅 (holder_id, lease_id) 匹配者可 Release/Renew」）。
+/// **两个字段都必须匹配**：只看 `holder_id` 就是修复前那个"知道锁名就能删别人的锁"
+/// 的形态（jepsen 客户端的 fencing 探针正是用 `lease_id + 1` 打的）。
+fn credential_matches(current: &LockInfo, holder_id: &str, lease_id: i64) -> bool {
+    current.holder_id == holder_id && current.lease_id == lease_id
+}
+
+/// `release` 的结果。
+///
+/// 契约 `LockReleaseRequest` 的语义承诺把三种情况**分开**，实现也必须分开 ——
+/// 把「你的凭据不对」和「锁本来就不在」压成同一个 `false` 会让调用方无从判别
+/// （前者是配置/编程错误，后者是正常的幂等重试）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseOutcome {
+    /// 释放成功（撤销了 Lease）。
+    Released,
+    /// 服务端已无此锁（不存在或已过期被级联回收）—— 契约要求幂等返回 `released=true`。
+    Gone,
+    /// `(holder_id, lease_id)` 与当前持有者不匹配 —— 契约要求 `PERMISSION_DENIED`。
+    Forbidden,
+}
+
+impl ReleaseOutcome {
+    /// 契约口径的 `LockReleaseResponse.released`。
+    pub fn released(self) -> bool {
+        match self {
+            Self::Released | Self::Gone => true,
+            Self::Forbidden => false,
+        }
+    }
+}
+
+/// 读服务端 `/_lock/{name}` 的**原始**值（**不按 holder 过滤**）。
+///
+/// 与 [`lookup_lock_on_server`] 的区别是刻意保留的：那个函数回答「是不是我持有」，
+/// 拿不到就返回 `None`，于是「不存在」与「别人持有」两种截然不同的状态被压成同一个
+/// 值。`release` 必须区分它们（前者幂等成功、后者 PERMISSION_DENIED），所以这里
+/// 返回原始记录，由调用方判定。
+async fn lookup_lock_any_on_server(
+    inner: &AgentInner,
+    name: &str,
+) -> ServiceResult<Option<LockInfo>> {
+    let key = LockInfo::storage_key(name);
+    let kvs = inner
+        .client
+        .kv()
+        .range(&key, &[], 1, 0)
+        .await
+        .map_err(|e| format!("failed to read lock key '{name}' from server: {e}"))?;
+    let Some((_k, value)) = kvs.into_iter().next() else {
+        return Ok(None);
+    };
+    let info: LockInfo = serde_json::from_slice(&value)
+        .map_err(|e| format!("lock key '{name}' has malformed value: {e}"))?;
+    Ok(Some(info))
+}
+
 async fn lookup_lock_on_server(
     inner: &AgentInner,
     name: &str,
@@ -406,26 +466,69 @@ impl LockService {
         }
     }
 
-    /// 释放分布式锁
+    /// 释放分布式锁（撤销 Lease，使锁 key 级联删除）。
     ///
-    /// 撤销 Lease（使锁 key 自动过期删除）。
-    pub async fn release(&self, name: &str, holder_id: &str) -> ServiceResult<bool> {
-        let _storage_key = LockInfo::storage_key(name);
+    /// **契约（`apis/contracts/proto/coord/lock/v1/lock.proto` 的
+    /// `LockReleaseRequest` 语义承诺，逐字）**：
+    ///   - `(holder_id, lease_id)` 与当前持有者不匹配 → `PERMISSION_DENIED`；
+    ///   - 锁不存在或已过期 → **幂等**返回 `released=true`。
+    ///
+    /// **修复前这里完全没有看 `lease_id`**（jepsen F-28：错误 lease_id 的
+    /// Release **104/104 全部成功**）。后果不是"少一层校验"而已：任何持有者只要
+    /// 名字对上（或本地有陈旧记录），就能把**别的**持有者正在持有的锁删掉 ——
+    /// 互斥承诺被第三方直接打破，且表现为"锁静默丢失"。
+    /// （jepsen 客户端的 fencing 探针就是按这个形态打的：
+    /// `client.clj` 的 `foreign-release` 用 `lease-id = 真 lease + 1`。）
+    ///
+    /// **为什么本地没有记录时要去 Server 回查**：与 `renew` 同因（C4）—— 本地
+    /// 记录会因重启 / GC 停顿 / 记录未重建而缺失，本地缺失**不等于**锁没了。
+    /// 若直接按"没有记录"返回，则重启后的 agent 会谎报"已释放"，而锁其实还挂在
+    /// 自己名下（那才是真正的丢锁）。
+    pub async fn release(
+        &self,
+        name: &str,
+        holder_id: &str,
+        lease_id: i64,
+    ) -> ServiceResult<ReleaseOutcome> {
+        // 本地快照（parking_lot 的 guard 不可跨 await）
+        let cached = { self.cache.read().get(name).cloned() };
 
-        // 从本地缓存获取锁信息
-        let lock_info = match self.cache.read().get(name) {
-            Some(info) if info.holder_id == holder_id => info.clone(),
-            _ => {
-                tracing::warn!("LockService: lock '{name}' not held by '{holder_id}'");
-                return Ok(false);
-            }
+        // 本地有记录且凭据完全匹配 ⇒ 直接用本地记录（常见路径，零额外 RTT）。
+        // 其余情况一律回查 Server 拿**当前真相**再判：本地记录可能陈旧
+        // （锁已被他人接管），按陈旧记录放行等于凭 name 删锁。
+        let authoritative = match cached {
+            Some(info) if credential_matches(&info, holder_id, lease_id) => info,
+            _ => match lookup_lock_any_on_server(&self.inner, name).await? {
+                Some(info) => info,
+                None => {
+                    // 服务端也没有这个 key ⇒ 锁不存在（或已过期被级联回收）。
+                    // 契约要求这种情况幂等成功。
+                    self.cache.write().remove(name);
+                    tracing::debug!(
+                        "LockService: release('{name}') — 服务端无锁，按契约幂等返回 released=true"
+                    );
+                    return Ok(ReleaseOutcome::Gone);
+                }
+            },
         };
+
+        // fence：契约只认 (holder_id, lease_id) 这一对。
+        if !credential_matches(&authoritative, holder_id, lease_id) {
+            tracing::warn!(
+                "LockService: 拒绝释放锁 '{name}' —— 凭据不匹配（契约：PERMISSION_DENIED）。\
+                 调用方 (holder='{holder_id}', lease={lease_id})；\
+                 当前持有者 (holder='{}', lease={})",
+                authoritative.holder_id,
+                authoritative.lease_id
+            );
+            return Ok(ReleaseOutcome::Forbidden);
+        }
 
         // 撤销 Lease（Server 会自动清理关联的 key）
         self.inner
             .client
             .lease()
-            .revoke(lock_info.lease_id)
+            .revoke(authoritative.lease_id)
             .await
             .map_err(|e| format!("failed to revoke lease for lock '{name}': {e}"))?;
 
@@ -437,9 +540,9 @@ impl LockService {
 
         tracing::info!(
             "LockService: released lock '{name}' (holder='{holder_id}', lease={})",
-            lock_info.lease_id
+            authoritative.lease_id
         );
-        Ok(true)
+        Ok(ReleaseOutcome::Released)
     }
 
     /// 续期分布式锁
@@ -448,17 +551,25 @@ impl LockService {
     ///
     /// C4：本地无记录**不等于**服务端锁已失效（GC 停顿 / 时钟回拨 / 记录未重建）。
     /// 此时先向 Server 回查锁 key：仍由本 holder 持有则重建本地记录并继续续期；
-    /// 确实不存在或已被他人持有，才返回 `Ok(false)`。
-    pub async fn renew(&self, name: &str, holder_id: &str) -> ServiceResult<bool> {
+    /// 确实不存在或已被他人持有，才返回 `Ok(None)`。
+    ///
+    /// **返回值即契约的 `LockRenewResponse.new_ttl`**：`Some(ttl)` = 续约成功，
+    /// 新的 TTL 为 `ttl` 秒；`None` = 租约已失效/不归本调用方（契约规定此时
+    /// `new_ttl = 0`）。
+    ///
+    /// **修复前**：入参没有 `lease_id`（契约明说「仅 (holder_id, lease_id) 匹配者
+    /// 可 Renew」），且 handler 把成功也回成 `new_ttl: 0` —— 那是契约里
+    /// 「租约已失效，锁已释放」的信号。按契约读返回值的客户端**恰好在续期成功的
+    /// 那一刻**会认为锁丢了。
+    pub async fn renew(
+        &self,
+        name: &str,
+        holder_id: &str,
+        lease_id: i64,
+    ) -> ServiceResult<Option<u64>> {
         // 注意：`parking_lot` 读锁 guard 不可跨 await 持有（future 必须 Send），
         // 故先取出本地记录的快照，再决定是否回查 Server。
-        let cached = {
-            let guard = self.cache.read();
-            match guard.get(name) {
-                Some(info) if info.holder_id == holder_id => Some(info.clone()),
-                _ => None,
-            }
-        };
+        let cached = { self.cache.read().get(name).cloned() };
 
         let lock_info = match cached {
             Some(info) => info,
@@ -476,10 +587,24 @@ impl LockService {
                         "LockService: cannot renew lock '{name}' — server-side lock is absent \
                          or owned by another holder (holder='{holder_id}')"
                     );
-                    return Ok(false);
+                    return Ok(None);
                 }
             },
         };
+
+        // fence：契约「仅 (holder_id, lease_id) 匹配者可 Renew」。不匹配时按
+        // 契约回 `new_ttl = 0`（而不是抛错）：对调用方要给出的唯一可行动信号就是
+        // 「这个租约不再是你的」，而错误码无法表达它、还会被误读成传输故障。
+        if !credential_matches(&lock_info, holder_id, lease_id) {
+            tracing::warn!(
+                "LockService: 拒绝续期锁 '{name}' —— 凭据不匹配。调用方 \
+                 (holder='{holder_id}', lease={lease_id})；当前记录 \
+                 (holder='{}', lease={})",
+                lock_info.holder_id,
+                lock_info.lease_id
+            );
+            return Ok(None);
+        }
 
         // 通过 KeepAlive 续期
         self.inner
@@ -493,10 +618,11 @@ impl LockService {
         self.cache.write().touch(name, holder_id);
 
         tracing::debug!(
-            "LockService: renewed lock '{name}' (lease={})",
-            lock_info.lease_id
+            "LockService: renewed lock '{name}' (lease={}, ttl={}s)",
+            lock_info.lease_id,
+            lock_info.ttl_secs
         );
-        Ok(true)
+        Ok(Some(lock_info.ttl_secs))
     }
 
     /// 阻塞获取锁（R-AGT-12：FIFO 公平等待，可选超时）。
@@ -791,6 +917,40 @@ mod tests {
         let json = serde_json::to_vec(&info).unwrap();
         let restored: LockInfo = serde_json::from_slice(&json).unwrap();
         assert_eq!(restored, info);
+    }
+
+    // ──── F-28 / B-02：fencing（契约只认 (holder_id, lease_id)）────────
+
+    /// jepsen F-28 的形态：`holder_id` 对、`lease_id` 差 1 —— 必须**不**匹配。
+    ///
+    /// 修复前 `release` 完全不看 `lease_id`，于是这个探针能把别人的锁真删掉
+    /// （`:poll-ack-failures` 同族的 "104/104 全成功"）。
+    #[test]
+    fn test_credential_matches_rejects_wrong_lease_id() {
+        let current = LockInfo::new("l", "holder-A", 41, 30);
+
+        assert!(credential_matches(&current, "holder-A", 41));
+        // 客户端 fencing 探针用的就是 `lease_id + 1`
+        assert!(!credential_matches(&current, "holder-A", 42));
+        // 更早的租约（持有者重启前的旧 lease）同样不得放行
+        assert!(!credential_matches(&current, "holder-A", 40));
+    }
+
+    #[test]
+    fn test_credential_matches_rejects_wrong_holder() {
+        let current = LockInfo::new("l", "holder-A", 41, 30);
+
+        assert!(!credential_matches(&current, "holder-B", 41));
+        assert!(!credential_matches(&current, "", 41));
+    }
+
+    /// 契约口径：成功与"锁已不存在（幂等）"都回 `released=true`；
+    /// 凭据不匹配回 `released=false`（handler 进一步映射为 PERMISSION_DENIED）。
+    #[test]
+    fn test_release_outcome_contract_semantics() {
+        assert!(ReleaseOutcome::Released.released());
+        assert!(ReleaseOutcome::Gone.released());
+        assert!(!ReleaseOutcome::Forbidden.released());
     }
 
     // ──── LockCache 测试 ────

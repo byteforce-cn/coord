@@ -5,13 +5,13 @@ import cn.byteforce.coord.sdk.CoordException;
 import cn.byteforce.coord.sdk.ErrorCode;
 import cn.byteforce.coord.sdk.config.*;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
-import cn.byteforce.coord.sdk.internal.proto.ConfigGetRequest;
-import cn.byteforce.coord.sdk.internal.proto.ConfigGetResponse;
-import cn.byteforce.coord.sdk.internal.proto.ConfigGrpc;
-import cn.byteforce.coord.sdk.internal.proto.ConfigListRequest;
-import cn.byteforce.coord.sdk.internal.proto.ConfigListResponse;
-import cn.byteforce.coord.sdk.internal.proto.ConfigWatchEvent;
-import cn.byteforce.coord.sdk.internal.proto.ConfigWatchRequest;
+import cn.byteforce.coord.contracts.config.v1.ConfigGetRequest;
+import cn.byteforce.coord.contracts.config.v1.ConfigGetResponse;
+import cn.byteforce.coord.contracts.config.v1.ConfigGrpc;
+import cn.byteforce.coord.contracts.config.v1.ConfigListRequest;
+import cn.byteforce.coord.contracts.config.v1.ConfigListResponse;
+import cn.byteforce.coord.contracts.config.v1.ConfigWatchEvent;
+import cn.byteforce.coord.contracts.config.v1.ConfigWatchRequest;
 import cn.byteforce.coord.sdk.internal.watch.GrpcWatchStream;
 import cn.byteforce.coord.sdk.internal.watch.WatchManager;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
@@ -66,15 +66,15 @@ public final class ConfigClientImpl extends AgentRpcClient implements ConfigClie
 
     @Override
     public void put(String key, String value) {
-        cn.byteforce.coord.sdk.internal.proto.ConfigPutRequest request =
-                cn.byteforce.coord.sdk.internal.proto.ConfigPutRequest.newBuilder()
+        cn.byteforce.coord.contracts.config.v1.ConfigPutRequest request =
+                cn.byteforce.coord.contracts.config.v1.ConfigPutRequest.newBuilder()
                         .setKey(key)
                         .setValue(value)
                         .build();
         callWithRetry(
-                (ch, req) -> cn.byteforce.coord.sdk.internal.proto.ConfigGrpc.newBlockingStub(ch)
+                (ch, req) -> cn.byteforce.coord.contracts.config.v1.ConfigGrpc.newBlockingStub(ch)
                         .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
-                        .put((cn.byteforce.coord.sdk.internal.proto.ConfigPutRequest) req),
+                        .put((cn.byteforce.coord.contracts.config.v1.ConfigPutRequest) req),
                 request, "config.put");
         log.debug("Config put: key={}", key);
     }

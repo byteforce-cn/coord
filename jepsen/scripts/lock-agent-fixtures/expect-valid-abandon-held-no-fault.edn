@@ -1,0 +1,25 @@
+;; expect-valid-abandon-held-no-fault —— 判据 7 的**守门员**（反方向的假红防线）。
+;;
+;; 弃锁 + 无任何故障 + 探针始终看到服务端 key 挂在 holder 名下 ⇒ 必须 **valid**。
+;; 这条 fixture 存在的意义：把「活着就必须一直持有」这条判据钉在「不过是绿的」
+;; 那一边 —— 否则判据 7 只要写成「看到 key 不等于 holder 就红」，任何一次探针
+;; 抖动都会变成假红。
+[{:type :ok :f :lock-abandon :process 0 :time 1000000
+  :t0-ns 1000000000
+  :name "lock-c-abandon" :holder-id "a3" :lease-id 11
+  :abandoned? true :acquired-at-ms 5
+  :acquire-node "127.0.0.1:24577"
+  ;; TTL 30s > 续期节拍 10s ⇒ 「活着就必须一直持有」这一半可判
+  :holder-ttl-seconds 30 :grace-ms 4000 :at-ms 10}
+
+ {:type :ok :f :lock-probe :process 1 :time 2000000000
+  :t0-ns 2000000000 :server-at-ms 0
+  :name "lock-c-abandon" :server-key "/_lock/lock-c-abandon"
+  :exists? true :raw-value "{\"holder_id\":\"a3\",\"lease_id\":11}"
+  :server {:holder-id "a3" :lease-id 11 :ttl-secs 30} :node "n1"}
+
+ {:type :ok :f :lock-probe :process 1 :time 4000000000
+  :t0-ns 4000000000 :server-at-ms 0
+  :name "lock-c-abandon" :server-key "/_lock/lock-c-abandon"
+  :exists? true :raw-value "{\"holder_id\":\"a3\",\"lease_id\":11}"
+  :server {:holder-id "a3" :lease-id 11 :ttl-secs 30} :node "n1"}]

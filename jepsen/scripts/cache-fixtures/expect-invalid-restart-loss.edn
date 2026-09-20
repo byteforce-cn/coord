@@ -1,0 +1,14 @@
+;; expect-invalid-restart-loss —— **P0**：重启（保留 data_dir）后持久写消失。
+;;
+;; `kill-agent` 的 `:stop` 半场 = 保留 data_dir 重启（`agent/restart-one!`），
+;; completion 的 `:value` 是 `[:restarted-agent "n4"]`。判据：重启前已确认的
+;; **持久**（ttl=0）写，在重启后该 key 的第一次成功读里必须还在。
+;;
+;; redb 的持久化承诺在这里被证伪 ⇒ 生产表现是「agent 滚动重启后缓存大面积
+;; 回源」（可用性问题）或更糟：被当成「这个 key 从来没有过」。
+[{:type :ok :f :cache-set :process 0 :t0-ns 0 :time 100000000
+  :key "cache-str-1" :value "v-durable" :ttl-seconds 0}
+ {:type :info :process :nemesis :f :start :time 200000000
+  :value [:restarted-agent "n4"]}
+ {:type :ok :f :cache-get :process 1 :t0-ns 5000000000 :time 5001000000
+  :key "cache-str-1" :found false :value nil}]

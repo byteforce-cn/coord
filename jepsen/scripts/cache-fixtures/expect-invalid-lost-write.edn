@@ -1,0 +1,9 @@
+;; expect-invalid-lost-write —— **P0**：持久（ttl=0）写已确认完成，之后第一次读
+;; 却 found=false，而且中间**没有任何**写/删能解释它。
+;;
+;; 这是缓存面最直接的「写丢了」形态（redb 提交了但读路径看不到 / 写到另一个
+;; 分片 / TTL 被误当成 0 以外的东西）。
+[{:type :ok :f :cache-set :process 0 :t0-ns 0 :time 100000000
+  :key "cache-str-1" :value "v-1" :ttl-seconds 0}
+ {:type :ok :f :cache-get :process 0 :t0-ns 700000000 :time 701000000
+  :key "cache-str-1" :found false :value nil}]

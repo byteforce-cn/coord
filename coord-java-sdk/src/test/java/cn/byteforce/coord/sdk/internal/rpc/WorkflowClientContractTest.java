@@ -2,12 +2,12 @@ package cn.byteforce.coord.sdk.internal.rpc;
 
 import cn.byteforce.coord.sdk.CoordConfig;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
-import cn.byteforce.coord.sdk.internal.proto.SuspensionMeta;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowGetStatusRequest;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowGetStatusResponse;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowGrpc;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowStartRequest;
-import cn.byteforce.coord.sdk.internal.proto.WorkflowStartResponse;
+import cn.byteforce.coord.contracts.workflow.v1.SuspensionMeta;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetStatusRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetStatusResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowGrpc;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowStartRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowStartResponse;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import cn.byteforce.coord.sdk.workflow.WorkflowClient;
 import cn.byteforce.coord.sdk.workflow.WorkflowStatus;

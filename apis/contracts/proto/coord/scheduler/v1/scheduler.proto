@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — 分布式调度（能力承诺面，v1.2）
+//
+// 状态：COMMITTED（承诺中）｜ GA 期限：2027-03-31 ｜ 台账：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/scheduler.proto 的 coord.scheduler.v1.Scheduler
+//            （字段编号/类型逐项一致；迁移 = 机械式重挂载，禁止趁机改 wire）
+//
+// GA 验收定义与倒逼机制见 WHITEPAPER.md §13。
+// ============================================================
+
+package coord.scheduler.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.scheduler.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/scheduler/v1;schedulerv1";
+
+// ============================================================
+
+service Scheduler {
+  rpc RegisterJob(SchedulerRegisterJobRequest) returns (SchedulerRegisterJobResponse);
+  rpc ClaimJob(SchedulerClaimJobRequest) returns (SchedulerClaimJobResponse);
+  rpc Heartbeat(SchedulerHeartbeatRequest) returns (SchedulerHeartbeatResponse);
+  rpc CompleteJob(SchedulerCompleteJobRequest) returns (SchedulerCompleteJobResponse);
+}
+
+message SchedulerRegisterJobRequest {
+  string name = 1;
+  string cron_expression = 2;
+  bytes payload = 3;
+}
+
+message SchedulerRegisterJobResponse {
+  string job_id = 1;
+}
+
+message SchedulerClaimJobRequest {
+  string name = 1;
+}
+
+message SchedulerClaimJobResponse {
+  string job_id = 1;
+  bytes payload = 2;
+  bool found = 3;
+}
+
+message SchedulerHeartbeatRequest {
+  string job_id = 1;
+}
+
+message SchedulerHeartbeatResponse {}
+
+message SchedulerCompleteJobRequest {
+  string job_id = 1;
+  bytes result = 2;
+}
+
+message SchedulerCompleteJobResponse {}
+
+// ============================================================
+// Workflow — Serverless Workflow

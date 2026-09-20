@@ -1,0 +1,18 @@
+;; expect-valid-read-failed-unjudged —— **守门员**：读失败不得判成幽灵实例。
+;;
+;; 分区 / agent 不可用期间 Discover 会失败（:read-ok? false）。把「读不到」当成
+;; 「实例不存在」或「实例还活着」都会产出假判：
+;;   * 当「不存在」⇒ 误报 not-visible（假红）；
+;;   * 当「还活着」⇒ 误报 ghost（假红）。
+;; 所以本 checker 在**缺成功读证据**时记 `:gone-unjudged` 并**不判**（不判 ≠ 通过）。
+;;
+;; 本 fixture 三条读全部失败 ⇒ 必须 valid，且 summary 里 :gone-unjudged = 1。
+;; 这是 F-26 的同类守门员（那一次 lease 侧缺锚点导致整个 checker 变 :unknown）。
+[{:type :ok :f :registry-cycle :process 0 :time 1000000000
+  :name "svc-a" :instance-id "inst-1" :lease-id 31
+  :holder-ttl-seconds 5 :grace-ms 2000 :dup? false
+  :absent-ms nil :deregistered? false
+  :observations [{:phase :after-register :at-ms 20 :read-ok? false :present? false
+                  :instances []}
+                 {:phase :after-ttl :at-ms 7000 :read-ok? false :present? false
+                  :instances []}]}]

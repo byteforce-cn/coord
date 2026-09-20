@@ -17,6 +17,9 @@ KV store with gRPC KV + Txn (CAS) + Maintenance APIs.
 * `soak-closure-report.md` —— **soak 结项报告**：量化这套测试体系到底逼出了
   什么（coord 侧缺陷账 / 测试自身假绿自查 / 未兑现部分），引入评审的入口。
 * `coverage-gaps-and-implementation-plan.md` —— 缺口基线与 checker 设计。
+* `coord-agent-coverage-plan.md` —— **coord-agent（第二被测系统）覆盖方案（建议稿）**：
+  差分运行、多 agent 拓扑、idgen/event、安全面（断连降级 / CCT 回退 / 网关拒绝）、
+  待 coord-agent 团队书面确认的 10 条语义。
 
 Implements the design recorded in the (not-committed) local design note
 `docs/coord-agent-plugin-engine-plan-2026-09-09.md` and `docs/production/`; a

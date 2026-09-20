@@ -1,0 +1,28 @@
+;; expect-invalid-phantom-loss-any-ttl —— 「TTL 小」**不是**豁免理由。
+;;
+;; 与 expect-invalid-phantom-loss.edn 同一条历史（持有 agent 活着、没有任何故障
+;; 事件、探针看到服务端 key 已经不在），唯一差别是 `:holder-ttl-seconds`：这里是
+;; 5s（lab 默认档），那条是 30s。**期望值相同**（都 invalid），理由：
+;;
+;;   * 实测（2026-09-19）证明主因是 agent **自发**的保活流量不带凭据
+;;     （`missing CCT token`，见 coord-findings.md 的 F-50）—— 任何 TTL 下续期都
+;;     不会成功；
+;;   * agent 后台续期循环的节拍是硬编码 10s，`ttl <= 10s` 是**第二个**成因。把它
+;;     当豁免会让一个小 TTL 顺便把真缺陷也赦免掉（这正是 dev.md §5.5 第 23 条
+;;     「判过与违反要分开算」的反面用法）。
+;;
+;; 第二个成因没有被丢掉：它作为违反里的诊断字段 `:ttl-below-renew-cadence?` 出现，
+;; 于是分诊时能一眼分开「TTL 太小」与「续期根本没跑」两种解释。
+[{:type :ok :f :lock-abandon :process 0 :time 3000000000
+  :t0-ns 1000000000
+  :name "lock-d-abandon" :holder-id "a9" :lease-id 21
+  :abandoned? true :acquired-at-ms 5
+  :acquire-node "127.0.0.1:24577"
+  :holder-ttl-seconds 5 :grace-ms 4000 :at-ms 10}
+
+ ;; 探针在 1400ms 就看不到 key 了：即使把 TTL 归因推到「节拍」上，这一条也必须是红 ——
+ ;; 报告里会用 :ttl-below-renew-cadence? true 标出第二种成因的存在。
+ {:type :ok :f :lock-probe :process 1 :time 1400000000
+  :t0-ns 1400000000 :server-at-ms 0
+  :name "lock-d-abandon" :server-key "/_lock/lock-d-abandon"
+  :exists? false :server nil :node "n1"}]

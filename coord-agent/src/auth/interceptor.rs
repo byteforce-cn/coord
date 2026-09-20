@@ -174,6 +174,11 @@ impl CapabilityTable {
     pub fn default_agent() -> Self {
         let table = Self::new();
         table.allowlist("/coord.auth.Auth/Authenticate");
+        // 协议版本协商（P0-4 / D6）：**必须**白名单化 —— 否则会形成死循环：
+        // "要问服务端支持哪个协议版本，先得持有该版本的能力"。而协商端点存在的
+        // 全部意义就是让版本不匹配**可诊断**，所以它不能要求调用方先证明自己已经
+        // 匹配。返回内容仅为支持版本列表，无敏感信息。
+        table.allowlist("/coord.agent.Handshake/Negotiate");
         for rpc in SCOPE_BEARING_RPCS {
             match coord_core::grpc_auth::rpc_capability(rpc) {
                 Some(capability_id) => table.register_with_scope(
@@ -428,6 +433,25 @@ impl AuthInterceptor {
             }
         };
 
+        // 5b. 引导管理员（root）旁路 —— 放在**路由登记之后**、能力/scope 判定之前。
+        //
+        // 契约语义：root 是"全能力"，而不是"恰好被授了这些能力"。因此它必须跳过
+        // 第 6 步（能力）与第 7 步（scope）；但**不跳过**第 5 步的"未登记 RPC 即
+        // 拒绝"—— 那条是**路由层面**的 fail-closed 防线（防"新增路由忘了登记能力"
+        // 时悄悄放行），与"root 有没有这项能力"是两件事。服务端同构：请求先要命中
+        // 真实路由，才轮到 `check_capability` 里的 root 放行。
+        //
+        // jepsen F-32：修复前 agent 侧**没有任何** root 旁路，而 server 侧
+        // `check_capability` 对 root 直接放行 ⇒ 同一张 root CCT 直连 server 成功、
+        // 经 agent 必然被拒：`role(s) ["root"] do not have capability 'data:kv:read'`
+        // ——因为 root 的角色记录里本来就不逐项列举能力（全靠 server 的旁路兜着）。
+        // 影响面：Java SDK / 运维脚本 / 一切以本机 agent 为入口的管理员调用，
+        // 即 **auth 开启时 agent 作为应用入口的整条路径对 root 不可用**，
+        // 而进程内测试看不到（它们直接调 server）。
+        if coord_core::auth::is_root(&cct.payload.roles) {
+            return AuthResult::Allow(cct);
+        }
+
         // 6. Check role→capability mapping（授权 scope 列表；空 = 未授予）
         let grant_scopes = self
             .role_cache
@@ -588,7 +612,10 @@ where
                         });
                         match inner.ready().await {
                             Ok(svc) => {
-                                coord_client::credential::scoped_request_token(
+                                // 代理上下文（`scoped_proxied_request`）：既转发调用方凭据，
+                                // 又标记"这是替入站请求发的"⇒ 出站回退凭据（agent 自身身份）
+                                // 在本上下文内**不生效**（调用方没带凭据就必须以无凭据上报）。
+                                coord_client::credential::scoped_proxied_request(
                                     forward_token,
                                     svc.call(req),
                                 )
@@ -617,8 +644,9 @@ where
                     subject: cct.payload.sub.clone(),
                     roles: cct.payload.roles.clone(),
                 });
-                // 转发调用方凭据（见上）——出站 CredentialInterceptor 读任务局部量。
-                let fut = coord_client::credential::scoped_request_token(
+                // 转发调用方凭据（见上）——出站 CredentialInterceptor 读任务局部量；
+                // 同时置位代理上下文标记（禁止回退到 agent 自身身份）。
+                let fut = coord_client::credential::scoped_proxied_request(
                     forward_token,
                     self.inner.call(req),
                 );
@@ -813,6 +841,66 @@ mod tests {
         assert!(matches!(result, AuthResult::Deny(_)));
     }
 
+    /// F-32 [P0]：**root 必须能经 agent 走通全路径**。
+    ///
+    /// 修复前 agent 侧没有任何 root 旁路，而 root 的角色记录里不逐项列能力
+    /// （全靠 server 的旁路兜着）⇒ 同一张 root CCT 直连 server 成功、
+    /// 经 agent 必然被拒：`role(s) ["root"] do not have capability 'data:kv:read'`。
+    /// 也就是 auth 开启时 **agent 作为应用入口的整条路径对 root 不可用**。
+    ///
+    /// 这个用例刻意**不**给 root 同步任何 RoleEntry —— 正是"角色记录里没有逐项能力"
+    /// 的真实形态；若修复回退成"按显式能力集判定"，这里会立刻红。
+    #[test]
+    fn test_interceptor_root_bypasses_capability_without_explicit_grants() {
+        let role_cache = Arc::new(RoleCache::new());
+        // 刻意不同步任何角色：root 的能力不来自缓存里的逐项授权
+        let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300);
+        let cct = make_test_cct(vec!["root"], HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+
+        // 数据面（能力 + scope 两道关都该被 root 跳过），且不带资源键
+        for rpc in [
+            "/coord.kv.KV/Range",
+            "/coord.kv.KV/Put",
+            "/coord.lock.v1.Lock/Release",
+            "/coord.registry.v1.Registry/Discover",
+        ] {
+            let result = interceptor.validate_request(rpc, Some(&auth_header), None);
+            assert!(
+                matches!(result, AuthResult::Allow(_)),
+                "root 经 agent 调用 {rpc} 必须放行，实际: {result:?}"
+            );
+        }
+
+        // 但**路由层**的 fail-closed 防线不因 root 而失效：
+        // 未登记能力的 RPC 仍然拒绝（root 是"全能力"，不是"绕过路由登记"）
+        let result = interceptor.validate_request(
+            "/coord.agent.NotRegistered/Whatever",
+            Some(&auth_header),
+            None,
+        );
+        assert!(
+            matches!(result, AuthResult::Deny(_)),
+            "未登记能力的 RPC 对 root 也应拒绝（fail-closed），实际: {result:?}"
+        );
+    }
+
+    /// 反向对照：F-32 的修法是"root 旁路"，**不是**"放宽能力判定"。
+    /// 非 root 角色在没有对应授权时仍必须被拒。
+    #[test]
+    fn test_interceptor_non_root_still_denied_without_grant() {
+        let role_cache = Arc::new(RoleCache::new());
+        let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300);
+        let cct = make_test_cct(vec!["reader"], HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+
+        let result = interceptor.validate_request("/coord.kv.KV/Range", Some(&auth_header), None);
+        assert!(
+            matches!(result, AuthResult::Deny(_)),
+            "非 root 且未授权时必须拒绝，实际: {result:?}"
+        );
+    }
+
     /// 第四轮 §3.3（A2）：授权带**非空 scope** 但请求未提供资源键时，必须
     /// **fail-closed 拒绝**。这是此前 fail-open 的具体形状：
     /// `if let (Some(key), Some(trie)) = ...` 在两个 Option 任一为 None 时直接放行。
@@ -930,19 +1018,19 @@ mod tests {
         assert_eq!(infer_capability("/coord.kv.Kv/Range"), None);
         // 目标场景 ①② 的服务面必须在表内（否则开启鉴权即被拒）。
         assert_eq!(
-            infer_capability("/coord.agent.Registry/Register"),
+            infer_capability("/coord.registry.v1.Registry/Register"),
             Some("coord:registry:register".into())
         );
         assert_eq!(
-            infer_capability("/coord.agent.Config/Get"),
+            infer_capability("/coord.config.v1.Config/Get"),
             Some("coord:config:read".into())
         );
         assert_eq!(
-            infer_capability("/coord.agent.Lock/Acquire"),
+            infer_capability("/coord.lock.v1.Lock/Acquire"),
             Some("coord:lock:acquire".into())
         );
         assert_eq!(
-            infer_capability("/coord.agent.LeaderElection/Campaign"),
+            infer_capability("/coord.election.v1.LeaderElection/Campaign"),
             Some("coord:election:campaign".into())
         );
         assert_eq!(
@@ -1145,39 +1233,39 @@ mod tests {
     #[test]
     fn test_infer_capability_pki_mappings() {
         assert_eq!(
-            infer_capability("/coord.agent.Pki/InitCa"),
+            infer_capability("/coord.pki.v1.Pki/InitCa"),
             Some("pki:ca:init".into())
         );
         assert_eq!(
-            infer_capability("/coord.agent.Pki/IssueCert"),
+            infer_capability("/coord.pki.v1.Pki/IssueCert"),
             Some("pki:cert:issue".into())
         );
         assert_eq!(
-            infer_capability("/coord.agent.Pki/RenewCert"),
+            infer_capability("/coord.pki.v1.Pki/RenewCert"),
             Some("pki:cert:issue".into())
         );
         assert_eq!(
-            infer_capability("/coord.agent.Pki/RotateCert"),
+            infer_capability("/coord.pki.v1.Pki/RotateCert"),
             Some("pki:cert:rotate".into())
         );
         assert_eq!(
-            infer_capability("/coord.agent.Pki/ListCerts"),
+            infer_capability("/coord.pki.v1.Pki/ListCerts"),
             Some("pki:cert:read".into())
         );
         assert_eq!(
-            infer_capability("/coord.agent.Pki/GetCertByCN"),
+            infer_capability("/coord.pki.v1.Pki/GetCertByCN"),
             Some("pki:cert:read".into())
         );
         assert_eq!(
-            infer_capability("/coord.agent.Pki/GetCaCert"),
+            infer_capability("/coord.pki.v1.Pki/GetCaCert"),
             Some("pki:cert:read".into())
         );
         assert_eq!(
-            infer_capability("/coord.agent.Pki/VerifyCert"),
+            infer_capability("/coord.pki.v1.Pki/VerifyCert"),
             Some("pki:cert:read".into())
         );
         // 未知 PKI RPC 默认 deny（fail-closed）
-        assert_eq!(infer_capability("/coord.agent.Pki/UnknownRpc"), None);
+        assert_eq!(infer_capability("/coord.pki.v1.Pki/UnknownRpc"), None);
     }
 
     // ──── tower 中间件测试 ────
@@ -1228,7 +1316,7 @@ mod tests {
         let mut svc = make_auth_service(AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300));
 
         let resp = svc
-            .call(make_http_request("/coord.agent.Pki/IssueCert", None))
+            .call(make_http_request("/coord.pki.v1.Pki/IssueCert", None))
             .await
             .expect("service 不应报传输错误");
         let grpc_status = resp
@@ -1261,7 +1349,7 @@ mod tests {
         let header = format!("Bearer {cct}");
         let resp = svc
             .call(make_http_request(
-                "/coord.agent.Pki/IssueCert",
+                "/coord.pki.v1.Pki/IssueCert",
                 Some(&header),
             ))
             .await
@@ -1291,7 +1379,7 @@ mod tests {
         let header = format!("Bearer {cct}");
         let resp = svc
             .call(make_http_request(
-                "/coord.agent.Pki/IssueCert",
+                "/coord.pki.v1.Pki/IssueCert",
                 Some(&header),
             ))
             .await

@@ -91,6 +91,98 @@ pub const PROVISIONER_CAPABILITY_GRANTS: [(&str, &str); 5] = [
     ("admin:auth:role_list", ""),
 ];
 
+/// **agent 自身身份**的默认用户名（F-50 修复，2026-09-19）。
+///
+/// 与 provisioner 账户（`agent-provisioner`）**分工不同**：
+/// provisioner 代**插件**开通账户（`admin:auth:*`，无数据面）；
+/// 本账户代表 **agent 自己**访问服务端（后台流量，只有内部键空间的数据面能力）。
+pub const DEFAULT_SELF_USER: &str = "agent-self";
+
+/// **agent 自身身份**的角色名。
+///
+/// 与 server 侧 `coord_server::auth::AGENT_SELF_ROLE` **逐字一致**（coord-agent 不
+/// 依赖 coord-server，故此处复刻；`coord/tests/plugin_credentials_process_test.rs`
+/// 断言两者相等，防止漂移）。
+pub const SELF_ROLE: &str = "agent-self-role";
+
+/// **agent 自身维护的内部键空间**（`/_<domain>/…`）。
+///
+/// 与 server 侧 `coord_server::auth::AGENT_SELF_KEYSPACES` **逐字一致**
+/// （漂移由 `coord/tests/plugin_credentials_process_test.rs` 断言）。
+/// 语义与边界见 server 侧文档；一句话：这些是 agent 自己的协调簿记，
+/// **不是**用户数据键。
+///
+/// **2026-09-19**：`featureflags` / `scheduler` 由漂移卡口补入 —— 前两轮给这两个
+/// 服务加了 KV 持久化（`feature_flags_store.rs`、`scheduler_store.rs`）却漏了登记，
+/// 于是 auth 开启时 agent 自身身份在这两个键空间上会 `permission denied`
+/// **静默失效**（F-50 同型）。卡口正是为这一类"加了键空间忘了登记"而存在。
+///
+/// 注：本清单与技术上的 server 侧清单是**两份手写副本**（coord-agent 不依赖
+/// coord-server），靠测试锁定相等。若要彻底消除这处重复，应把它与
+/// [`SELF_ROLE`] 一并从 `coord-core` 导出（同 `ROOT_ROLE` 的做法）—— 记为待办，
+/// 不在本轮范围内。
+pub const SELF_KEYSPACES: [&str; 12] = [
+    "lock",
+    "registry",
+    "config",
+    "idgen",
+    "election",
+    "workflow",
+    "pki",
+    "policy",
+    "transit",
+    "events",
+    "featureflags",
+    "scheduler",
+];
+
+/// 每个内部键空间上需要的数据面操作（与 server 侧同一规则）。
+const SELF_KEYSPACE_OPERATIONS: [&str; 4] = [
+    "data:kv:read",
+    "data:kv:write",
+    "data:kv:delete",
+    "data:txn:execute",
+];
+
+/// 不按 key 约束的自身身份能力（与 server 侧同一清单）。
+const SELF_UNSCOPED_GRANTS: [&str; 3] = [
+    "data:lease:keepalive",
+    "data:lease:revoke",
+    "data:watch:subscribe",
+];
+
+/// **agent 自身身份**所需的最小能力集（**派生**，与 server 侧同规则）。
+///
+/// 与 server 侧 `coord_server::auth::agent_self_capability_grants()` **逐字一致**
+/// （同上由漂移测试锁定）。
+pub fn self_capability_grants() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> =
+        Vec::with_capacity(SELF_KEYSPACES.len() * SELF_KEYSPACE_OPERATIONS.len() + 3);
+    for ns in SELF_KEYSPACES {
+        for cap in SELF_KEYSPACE_OPERATIONS {
+            out.push((cap.to_string(), format!("/_{ns}/*")));
+        }
+    }
+    for cap in SELF_UNSCOPED_GRANTS {
+        out.push((cap.to_string(), String::new()));
+    }
+    out
+}
+
+/// `(&str, &str)` 能力清单 → [`PluginCapability`] 列表。
+///
+/// 存在意义：让「引导最小能力集」「agent 自身身份能力集」与「插件能力集」走
+/// **同一套**开通序列（[`provision_with`]），避免多套实现漂移。
+fn as_plugin_capabilities(grants: &[(String, String)]) -> Vec<PluginCapability> {
+    grants
+        .iter()
+        .map(|(id, scope)| PluginCapability {
+            id: id.clone(),
+            scope: scope.clone(),
+        })
+        .collect()
+}
+
 // ──── Auth 门面 ────
 
 /// 一次认证 / 续期签发结果。
@@ -407,61 +499,22 @@ impl PluginIdentityManager {
             return Err("provisioner user name must not be empty".into());
         }
         let role = format!("{user}-role");
-        let password = self.stored_secret(&format!("provisioner-{user}"));
-
-        // 1) 尽力用引导 CCT 开通（幂等；无引导 CCT 时跳过，靠已存账户认证）
-        if let Some(bootstrap) = bootstrap {
-            let seeder: Arc<dyn PluginAuthGateway> =
-                Arc::new(CoordAuthGateway::new(bootstrap.clone()));
-            match provision_with(
-                seeder.as_ref(),
+        let provisioner_grants: Vec<(String, String)> = PROVISIONER_CAPABILITY_GRANTS
+            .iter()
+            .map(|(id, scope)| ((*id).to_string(), (*scope).to_string()))
+            .collect();
+        let (client, auth_provider, issued) = self
+            .authenticate_service_account(
+                bootstrap,
                 user,
                 &role,
-                &password,
-                &PROVISIONER_CAPABILITY_GRANTS
-                    .iter()
-                    .map(|(id, scope)| PluginCapability {
-                        id: (*id).to_string(),
-                        scope: (*scope).to_string(),
-                    })
-                    .collect::<Vec<_>>(),
+                &format!("provisioner-{user}"),
+                &provisioner_grants,
+                "provisioner",
             )
-            .await
-            {
-                Ok(()) => tracing::info!(
-                    "plugin identity: provisioner account '{user}' provisioned (role '{role}')"
-                ),
-                Err(e) => tracing::debug!(
-                    "plugin identity: provisioner provisioning skipped ({e}); \
-                     relying on the persisted provisioner account"
-                ),
-            }
-        }
-
-        // 2) 匿名认证（账户/密码已持久化 → 不依赖引导 CCT 是否仍有效）
-        let auth_provider = Arc::new(CachedTokenProvider::new(None));
-        let mut config =
-            coord_client::Config::new(self.endpoints.clone())
-                .with_token_provider(
-                    Arc::clone(&auth_provider) as Arc<dyn coord_client::TokenProvider>
-                );
-        if let Some(tls) = self.tls.clone() {
-            config = config.with_tls(tls);
-        }
-        let client = Client::connect_direct(config)
-            .await
-            .map_err(|e| format!("provisioner client build failed: {e}"))?;
-        let issued = client
-            .auth()
-            .authenticate(user, &password)
-            .await
-            .map_err(|e| format!("provisioner authenticate failed: {e}"))?;
-        if issued.cct.is_empty() {
-            return Err("provisioner authenticate returned an empty CCT".into());
-        }
+            .await?;
 
         // 3) 续期循环 + 采纳（开通序列改走该会话）
-        auth_provider.set(issued.cct.clone());
         let renewal = spawn_session_refresher(
             Arc::new(AuthSessionGateway {
                 client: client.clone(),
@@ -480,6 +533,143 @@ impl PluginIdentityManager {
              provisioning no longer bounded by the bootstrap CCT window"
         );
         Ok(())
+    }
+
+    /// **自举 agent 自身身份**：让 agent 的后台流量（锁自动续期 / registry 目录加载
+    /// 与订阅 / idgen nodeid 注册 / 工作流与配置订阅）在 `auth.enabled=true` 下不再
+    /// 收到 `missing CCT token`（F-50）。
+    ///
+    /// 步骤与 [`Self::bootstrap_provisioner`] **完全同构**（同一份开通序列 + 同一份
+    /// 匿名密码认证 + 同一套续期循环），差别只在**能力集**与**返回值**：
+    /// - 能力集取 [`SELF_CAPABILITY_GRANTS`]（内部键空间，无 `admin:*`）；
+    /// - 返回**凭据句柄**而非登记为 provisioner：调用方（`proxy::AgentInner`）把它
+    ///   作为**回退凭据**装到共享出站客户端上（有调用方 CCT 时仍以调用方为准）。
+    ///
+    /// 返回 `Err` 表示**未配置引导令牌**且账户不可认证 —— 调用方保持旧行为
+    /// （回退凭据保持为空），**不**因此拒绝启动；但会把结果如实回报，由调用方决定
+    /// 告警级别（`auth.enabled=true` 且无凭据 ⇒ 自发流量必然失败，属必须可见的降级）。
+    ///
+    /// 提示：本方法**不**要求 bootstrap 一定在场 —— 账户与密码已持久化时，重启后
+    /// 仅凭 `Authenticate` 即可恢复（这是"重启不依赖一次性令牌"的关键），
+    /// 此时 `bootstrap` 传 `None` 即可。
+    ///
+    /// `target` 必须与共享出站客户端上装的回退凭据句柄是**同一个** `Arc`
+    /// （`Arc<CachedTokenProvider>` 内部可变，因此"先装句柄、后填凭据"成立）。
+    pub async fn bootstrap_self_identity(
+        &self,
+        bootstrap: Option<&Client>,
+        user: &str,
+        target: &Arc<CachedTokenProvider>,
+    ) -> Result<(), String> {
+        if user.trim().is_empty() {
+            return Err("agent self user name must not be empty".into());
+        }
+        let (client, _auth_provider, issued) = self
+            .authenticate_service_account(
+                bootstrap,
+                user,
+                SELF_ROLE,
+                &format!("self-{user}"),
+                &self_capability_grants(),
+                "agent-self",
+            )
+            .await?;
+
+        // 凭据写入**调用方持有的那个句柄**（共享出站客户端读的就是它）。
+        target.set(issued.cct.clone());
+
+        // 续期循环：与插件账户同机制（refresh token 单次使用 → 失败回退密码重认证），
+        // 因此 agent 的自身身份**不会**在 CCT 到期后静默失效（那正是 F-50 的形态）。
+        let renewal = spawn_session_refresher(
+            Arc::new(AuthSessionGateway {
+                client: client.clone(),
+            }),
+            Arc::clone(target),
+            SessionTokens {
+                cct: issued.cct,
+                refresh_token: Some(issued.refresh_token),
+                expires_at: issued.expires_at,
+            },
+            RefreshOptions::default(),
+        );
+        // 续期任务与 agent 进程同生命周期：句柄故意不保存（无停止需求，
+        // 与 `spawn_role_sync` 的处置一致）。
+        drop(renewal);
+        tracing::info!(
+            "agent self identity active (user '{user}', role '{SELF_ROLE}'): self-initiated \
+             traffic (lock renew / registry catalog+watch / idgen nodeid) now carries a CCT"
+        );
+        Ok(())
+    }
+
+    /// 自举一个**持久服务账户**并返回其认证通道：幂等开通（需引导 CCT）→
+    /// 匿名密码认证（不依赖引导 CCT 是否仍有效）。
+    ///
+    /// 开通序列与 [`provision_with`] 共用（同一份 `user_add` → `role_add` →
+    /// 逐能力授权 → 角色绑定），因此「引导最小能力集」「agent 自身身份能力集」
+    /// 与「插件能力集」不会漂移。
+    ///
+    /// 密码由 `key_id` 决定，落盘在 `data_dir`；`bootstrap` 为 `None` 时跳过开通、
+    /// 只用已存账户认证。
+    #[allow(clippy::too_many_arguments)]
+    async fn authenticate_service_account(
+        &self,
+        bootstrap: Option<&Client>,
+        user: &str,
+        role: &str,
+        key_id: &str,
+        capability_grants: &[(String, String)],
+        label: &str,
+    ) -> Result<(Client, Arc<CachedTokenProvider>, coord_proto::auth::AuthenticateResponse), String>
+    {
+        let password = self.stored_secret(key_id);
+
+        // 1) 尽力用引导 CCT 开通（幂等；无引导 CCT 时跳过，靠已存账户认证）
+        if let Some(bootstrap) = bootstrap {
+            let seeder: Arc<dyn PluginAuthGateway> =
+                Arc::new(CoordAuthGateway::new(bootstrap.clone()));
+            match provision_with(
+                seeder.as_ref(),
+                user,
+                role,
+                &password,
+                &as_plugin_capabilities(capability_grants),
+            )
+            .await
+            {
+                Ok(()) => tracing::info!(
+                    "{label}: account '{user}' provisioned (role '{role}', {} capability grant(s))",
+                    capability_grants.len()
+                ),
+                Err(e) => tracing::debug!(
+                    "{label}: provisioning skipped ({e}); relying on the persisted account"
+                ),
+            }
+        }
+
+        // 2) 匿名认证（账户/密码已持久化 → 不依赖引导 CCT 是否仍有效）
+        let auth_provider = Arc::new(CachedTokenProvider::new(None));
+        let mut config =
+            coord_client::Config::new(self.endpoints.clone())
+                .with_token_provider(
+                    Arc::clone(&auth_provider) as Arc<dyn coord_client::TokenProvider>
+                );
+        if let Some(tls) = self.tls.clone() {
+            config = config.with_tls(tls);
+        }
+        let client = Client::connect_direct(config)
+            .await
+            .map_err(|e| format!("{label} client build failed: {e}"))?;
+        let issued = client
+            .auth()
+            .authenticate(user, &password)
+            .await
+            .map_err(|e| format!("{label} authenticate failed: {e}"))?;
+        if issued.cct.is_empty() {
+            return Err(format!("{label} authenticate returned an empty CCT"));
+        }
+        auth_provider.set(issued.cct.clone());
+        Ok((client, auth_provider, issued))
     }
 
     /// 停止 provisioner 续期任务（测试 / 关闭）。

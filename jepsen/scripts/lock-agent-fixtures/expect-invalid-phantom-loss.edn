@@ -1,0 +1,26 @@
+;; expect-invalid-phantom-loss —— AG-06 的另一半（判据 7）：**假丢锁**。
+;;
+;; 持有 agent 全程活着（历史里没有任何 kill / pause / 分区事件），但服务端 key
+;; 在锁还应该被续期的时候就消失了。`lock.rs:187-215` 记录的历史 P0 就是这一类：
+;; 曾用**本地墙钟** `is_expired()` 清理本地的 held 记录 ⇒ agent 自己以为没锁了，
+;; 而服务端还挂着（或反过来）⇒ 临界区重入。
+;;
+;; TTL 取 30s（> agent 后台续期节拍 10s，见 `renew-cadence-ms`）：只有这个档位下
+;; 「续期跑得赢到期」，「活着就必须一直持有」才成立。TTL ≤ 10s 的那一档是**结构性
+;; 不可判**，见 expect-valid-ttl-below-renew-cadence.edn。
+;;
+;; 注意这条 fixture **没有**故障事件：判据 7 的全部意义就是「没有外部故障时，
+;; 自述与服务端真相必须一致」。
+[{:type :ok :f :lock-abandon :process 0 :time 3000000000
+  :t0-ns 1000000000
+  :name "lock-b-abandon" :holder-id "a2" :lease-id 9
+  :abandoned? true :acquired-at-ms 5
+  :acquire-node "127.0.0.1:24578"
+  :holder-ttl-seconds 30 :grace-ms 4000 :at-ms 10}
+
+ ;; 续期节拍 10s、TTL 30s，探针在 1400ms 就看不到 key 了 ⇒ 服务端提前回收了
+ ;; 一个健康的持有者（或把它换主了）—— 自述与服务端真相不一致。
+ {:type :ok :f :lock-probe :process 1 :time 1400000000
+  :t0-ns 1400000000 :server-at-ms 0
+  :name "lock-b-abandon" :server-key "/_lock/lock-b-abandon"
+  :exists? false :server nil :node "n1"}]

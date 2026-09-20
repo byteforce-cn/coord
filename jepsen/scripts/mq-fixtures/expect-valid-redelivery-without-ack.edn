@@ -1,0 +1,16 @@
+;; expect-valid-redelivery-without-ack —— 守门员：Ack **失败**时的重投是合法的。
+;;
+;; 第一次 Poll 返回 offset 0 但 Ack 全部失败（`:acked-offsets []`）⇒ 游标不
+;; 推进 ⇒ 第二次 Poll 从同一个 offset 开始、又拿到 offset 0。这正是
+;; at-least-once 的语义，不能判红（判红会把「Ack 失败」这一条独立的可用性
+;; 问题伪装成「重复投递」的语义违反）。
+[{:type :ok :f :mq-publish :process 1 :t0-ns 0 :time 1000000
+  :topic "jepsen-mq" :partition 0 :payload "m0" :idempotency-key "idem-0" :offset 0}
+ {:type :ok :f :mq-poll :process 0 :t0-ns 10000000 :time 11000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 0 :payload "m0"}]
+  :acked-offsets [] :poll-ok? true :ack-ok? false}
+ {:type :ok :f :mq-poll :process 0 :t0-ns 90000000 :time 91000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 0 :payload "m0"}]
+  :acked-offsets [] :poll-ok? true :ack-ok? false}]

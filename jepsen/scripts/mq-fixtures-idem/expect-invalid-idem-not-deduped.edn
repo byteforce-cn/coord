@@ -1,0 +1,15 @@
+;; expect-invalid-idem-not-deduped —— 同一份历史，但本套用
+;; `{:expect-idem-dedupe? true}` 跑：把「同一 idempotency_key 必须去重」当成
+;; **硬判据**时必须判红（两次发布落到 offset 0 与 1）。
+;;
+;; 两套 fixture（`mq-fixtures` 默认只记录 / 本套硬判）钉住的是同一个事实：
+;; 参数真的接上了。契约书面确认「必须去重」后，把 checker 的默认值改成 true、
+;; 并把这条历史从「记录」档升级为验收判据即可。
+[{:type :ok :f :mq-publish :process 0 :t0-ns 0 :time 1000000
+  :topic "jepsen-mq" :partition 0 :payload "m0" :idempotency-key "idem-0"
+  :offset 0 :dup? true :dup-offset 1}
+ {:type :ok :f :mq-poll :process 1 :t0-ns 10000000 :time 11000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 0 :payload "m0"}
+             {:topic "jepsen-mq" :partition 0 :offset 1 :payload "m0"}]
+  :acked-offsets [0 1]}]

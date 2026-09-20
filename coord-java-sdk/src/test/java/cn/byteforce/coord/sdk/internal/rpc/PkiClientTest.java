@@ -2,23 +2,23 @@ package cn.byteforce.coord.sdk.internal.rpc;
 
 import cn.byteforce.coord.sdk.CoordConfig;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
-import cn.byteforce.coord.sdk.internal.proto.PkiGetCaCertRequest;
-import cn.byteforce.coord.sdk.internal.proto.PkiGetCaCertResponse;
-import cn.byteforce.coord.sdk.internal.proto.PkiGetCertByCNRequest;
-import cn.byteforce.coord.sdk.internal.proto.PkiGetCertByCNResponse;
-import cn.byteforce.coord.sdk.internal.proto.PkiGrpc;
-import cn.byteforce.coord.sdk.internal.proto.PkiInitCaRequest;
-import cn.byteforce.coord.sdk.internal.proto.PkiInitCaResponse;
-import cn.byteforce.coord.sdk.internal.proto.PkiIssueCertRequest;
-import cn.byteforce.coord.sdk.internal.proto.PkiIssueCertResponse;
-import cn.byteforce.coord.sdk.internal.proto.PkiListCertsRequest;
-import cn.byteforce.coord.sdk.internal.proto.PkiListCertsResponse;
-import cn.byteforce.coord.sdk.internal.proto.PkiRenewCertRequest;
-import cn.byteforce.coord.sdk.internal.proto.PkiRenewCertResponse;
-import cn.byteforce.coord.sdk.internal.proto.PkiRotateCertRequest;
-import cn.byteforce.coord.sdk.internal.proto.PkiRotateCertResponse;
-import cn.byteforce.coord.sdk.internal.proto.PkiVerifyCertRequest;
-import cn.byteforce.coord.sdk.internal.proto.PkiVerifyCertResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiGetCaCertRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiGetCaCertResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiGetCertByCNRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiGetCertByCNResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiGrpc;
+import cn.byteforce.coord.contracts.pki.v1.PkiInitCaRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiInitCaResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiIssueCertRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiIssueCertResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiListCertsRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiListCertsResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiRenewCertRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiRenewCertResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiRotateCertRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiRotateCertResponse;
+import cn.byteforce.coord.contracts.pki.v1.PkiVerifyCertRequest;
+import cn.byteforce.coord.contracts.pki.v1.PkiVerifyCertResponse;
 import cn.byteforce.coord.sdk.pki.PkiCertInfo;
 import cn.byteforce.coord.sdk.pki.PkiCertSummary;
 import cn.byteforce.coord.sdk.pki.PkiClient;
@@ -176,13 +176,13 @@ class PkiClientTest {
         @Override
         public void listCerts(PkiListCertsRequest request, StreamObserver<PkiListCertsResponse> observer) {
             observer.onNext(PkiListCertsResponse.newBuilder()
-                    .addCerts(cn.byteforce.coord.sdk.internal.proto.PkiCertSummary.newBuilder()
+                    .addCerts(cn.byteforce.coord.contracts.pki.v1.PkiCertSummary.newBuilder()
                             .setCommonName(request.getCommonName())
                             .setCertPem("-----BEGIN CERTIFICATE-----\nnew\n-----END CERTIFICATE-----")
                             .setSerial("0x2")
                             .setStatus("active")
                             .setParentSerial("0x1"))
-                    .addCerts(cn.byteforce.coord.sdk.internal.proto.PkiCertSummary.newBuilder()
+                    .addCerts(cn.byteforce.coord.contracts.pki.v1.PkiCertSummary.newBuilder()
                             .setCommonName(request.getCommonName())
                             .setCertPem("-----BEGIN CERTIFICATE-----\nold\n-----END CERTIFICATE-----")
                             .setSerial("0x1")

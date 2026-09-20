@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — 消息队列（能力承诺面，v1.2）
+//
+// 状态：COMMITTED（承诺中）｜ GA 期限：2026-12-31 ｜ 台账：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/mq.proto 的 coord.mq.v1.MQ
+//            （字段编号/类型逐项一致；迁移 = 机械式重挂载，禁止趁机改 wire）
+//
+// 说明：wire 服务名保留实现原样 `MQ`（迁移只改 package，不改 service 名；
+// 计划书 §4.2 表中写的 `Mq` 系笔误，实际实现为 `MQ`）。
+
+// GA 验收定义与倒逼机制见 WHITEPAPER.md §13。
+// ============================================================
+
+package coord.mq.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.mq.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/mq/v1;mqv1";
+
+// ============================================================
+
+service MQ {
+  rpc CreateTopic(MqCreateTopicRequest) returns (MqCreateTopicResponse);
+
+  // 发布消息。
+  //
+  // 语义承诺：
+  //   - 返回的 offset 是该 (topic, partition) 上本条消息的位置；
+  //   - `idempotency_key` 非空时按 (topic, partition, key) 去重：
+  //     同一 key 重复发布**不产生第二条消息**，且返回**首次**的 offset；
+  //     key 为空/未设置 ⇒ 不做去重（每次发布都是新消息）。
+  //     幂等索引与消息在**同一个写事务**内落盘 ⇒ 重启后去重依然成立。
+  //
+  // 边界（显式声明，不承诺的部分不写在这里就不算承诺）：本 RPC 只承诺
+  // "消息已持久化到该 agent 的本地日志"；跨 agent 复制由 ISR 通道负责，
+  // 其进度**不**在本 RPC 的返回值里体现。
+  rpc Publish(MqPublishRequest) returns (MqPublishResponse);
+
+  // 流式推送订阅。
+  //
+  // **边界（重要，按 WHITEPAPER §10 规则 4 显式声明）**：这是**推送**路径，
+  // 为**best-effort**——订阅者 channel 打满（背压）时消息会被**丢弃**，
+  // 丢弃不报错、不重投。**它不是 at-least-once 通道。**
+  //
+  // 需要 at-least-once 语义必须用 `Poll` + `Ack`（那是本服务唯一的承诺路径）。
+  rpc Subscribe(MqSubscribeRequest) returns (stream MqMessage);
+
+  // 提交消费组偏移（at-least-once 的游标）。
+  //
+  // 语义承诺：Ack 成功后，该 (topic, consumer_group, partition) 的已提交偏移
+  // 前进到 `offset`，重启后从该偏移继续投递 ⇒ 不丢（可能重复投递）。
+  // 复制启用时偏移为分区 Leader 本地状态，非 Leader 返回 FAILED_PRECONDITION。
+  rpc Ack(MqAckRequest) returns (MqAckResponse);
+
+  // 按 offset 增量拉取。
+  //
+  // 这是本服务的 **at-least-once 承诺路径**：`Poll` 拿到消息 → `Ack` 提交偏移。
+  // 游标只在 Ack 成功后前进，因此"已确认的偏移越过某条消息而它从未被投递"即为
+  // 静默丢失（违诺）。start_offset 取上次已 Ack 的位置即可获得最少重复的投递。
+  rpc Poll(MqPollRequest) returns (MqPollResponse);
+
+  // 读取死信队列（可选扩展：毒消息可观测）
+  rpc PollDlq(MqPollDlqRequest) returns (MqPollDlqResponse);
+}
+
+message MqCreateTopicRequest {
+  string topic = 1;
+  int32 partitions = 2;
+}
+
+message MqCreateTopicResponse {}
+
+message MqPublishRequest {
+  string topic = 1;
+  int32 partition = 2;
+  bytes key = 3;
+  bytes payload = 4;
+  string idempotency_key = 5;
+}
+
+message MqPublishResponse {
+  int64 offset = 1;
+}
+
+message MqSubscribeRequest {
+  string topic = 1;
+  string consumer_group = 2;
+}
+
+message MqMessage {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  bytes key = 4;
+  bytes payload = 5;
+  int64 timestamp = 6;
+}
+
+message MqAckRequest {
+  string topic = 1;
+  string consumer_group = 2;
+  int32 partition = 3;
+  int64 offset = 4;
+}
+
+message MqAckResponse {}
+
+message MqPollRequest {
+  string topic = 1;
+  int32 partition = 2;
+  string consumer_group = 3;
+  int64 start_offset = 4;
+  int32 max_count = 5;
+}
+
+message MqPollResponse {
+  repeated MqMessage messages = 1;
+}
+
+message MqPollDlqRequest {
+  string topic = 1;
+  int32 partition = 2;
+  int32 max_count = 3;
+}
+
+message MqPollDlqResponse {
+  repeated MqMessage messages = 1;
+}
+
+// ============================================================
+// Replica — Agent↔Agent 数据复制 (ISR)

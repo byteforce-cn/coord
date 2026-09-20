@@ -1,0 +1,12 @@
+;; expect-invalid-probe-missing —— 探针缺失 ⇒ 判**未执行**（不是绿）。
+;;
+;; `--workload election` 的生成器**必然**混入 `:election-probe`（1/3 槽位），
+;; 所以「一条探针样本都没有」只可能是接线断了（端点写错、op 名拼错、被过滤器
+;; 吞掉）。少了这一半证据，绿没有意义 —— 这正是 F-34 教的那条：agent 自述必须
+;; 有绕开 agent 的地面真值通道。
+[{:type :ok :f :elect-campaign :process 0 :time 2000000000
+  :t0-ns 1000000000
+  :group-name "group-a" :candidate-id "c1" :lease-id 3
+  :elected? true :campaign-at-ms 5
+  :resigned-at-ms 600 :resigned? true :gone? true :gone-at-ms 600
+  :holder-ttl-seconds 5 :at-ms 700}]

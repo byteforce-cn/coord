@@ -3,6 +3,39 @@
 > 更新规则：**每个任务收尾当天更新本文件的"状态"与"证据"两列**；状态只有
 > `未开始 / 进行中 / 已验证 / 阻塞`。`已验证` 必须给出可核对的证据（脚本名 +
 > 产物路径 / run 的 store 路径），口头"跑过了"不算。
+> 本轮更新：2026-09-18（**第六轮 · 第二轮：coord-agent 做实 —— 四个面全绿（除 F-28）+ 差分基线可用**）：
+> 把 §14 的三件「未闭环」做完，并在过程中用矩阵交出**十条测试自身缺陷**（F-35…F-44）
+> 与**一条 coord-agent 侧观察**（F-46）。最终结论：
+> * **F-34 闭环**：lock 的「互斥重叠 99/162」是**测试自身的三层区间度量缺陷**
+>   （锚点噪声 / `exists=false` 闭合判据 / 闭合时刻记在观测循环之后）；修后
+>   `:mutual-exclusion {:hard 0 :near-boundary 0}`，服务端地面真值探针
+>   （`:f :lock-probe`，绕开 agent 直读 `/_lock/{name}`）**0 矛盾 / 0 边界**。
+> * **四个本地面全部可判决**：`election:none|kill-agent`、`idgen:none|kill-agent`、
+>   `registry:none|kill-agent` 全绿；`lock` 的三个 cell **只剩 F-28**（fencing
+>   110/110，coord 侧真缺陷）。
+> * **差分基线第一次可用**：`map` 的 direct / `--via-agent` 双绿（路由证明
+>   `:total 161`），并已用它抓到一条真形态（F-45：能力清单漏 `data:kv:delete`
+>   ⇒ 经 agent 的 Delete 全被拒，而 direct 因为 root 旁路一直绿）。
+> * **soakfull 起得来**：`--soak-mix` 默认含四个 agent 面，soak 日志里能直接看到
+>   `:lock-contend` / `:elect-campaign` 的 invoke/completion。
+> * 新增工具：`scripts/lock-diag.clj`（同一历史四种区间口径）、
+>   `scripts/agent-port-open.sh`（gRPC 就绪探针）；fixture 从 21 套 120 个涨到
+>   **26 套 133 个**（`make checkers` 退出码 0，0 个 FAIL）；矩阵新增
+>   `KEEP_GOING=1`（分面归因档，退出码仍 1）。
+> * 详见 `coord-findings.md` §15（F-35…F-46）与 `dev.md` §5.5 第 13–22 条。
+>
+> 本轮更新：2026-09-18（**第六轮：M5a 落地 —— coord-agent 首次被 Jepsen 真跑**）：
+> 把 `coord-agent-coverage-plan.md` 的建议落成代码：**agent 部署**（多实例、SSH
+> 隧道、路由证明、Ed25519 验签、能力引导）、**wire 层**（13 个 `coord.agent.*`
+> 方法 + 与 `agent_api.proto` 的一致性自检）、**4 个 agent 本地面 workload 与
+> checker**（lock / election / idgen / registry，共 20 个 fixture）、**agent 侧
+> nemesis**（kill / kill-all / pause / partition-agent-server / agent-all）、
+> **门禁**（`make checkers` 扩到 21 套 120 个 fixture；新增 `matrix-m5` /
+> `matrix-m5-diff`）。首次真跑即产出 **2 条 P0**（F-28 锁 fencing 缺失 162/162、
+> F-32 agent 无 root 能力旁路 ⇒ 经 agent 的 root 调用全被拒）、1 条未闭环 P0 候选
+> （F-34 互斥重叠 99/162）、3 条测试自身缺陷（F-29/F-30/F-31，均已修 + 补守门
+> 员 fixture）与 1 条契约字段缺陷（F-33 `new_ttl` 恒 0）。详见 `coord-findings.md` §14。
+>
 > 本轮更新：2026-09-17（第五轮）：**T2.2 lease 落地**（`--workload lease` 三场景 +
 > `jepsen.coord.leaseck` 6 条判据 + 12 个 fixture）、**T6.1 组合浸泡入口落地**
 > （`--workload soakfull` + `--soak-mix`，未实现的面构造期硬失败）、**soak 常态化**
@@ -10,6 +43,10 @@
 > **soak 结项报告**（`soak-closure-report.md`）。fixture 从 14 套 86 个涨到
 > **17 套 99 个**；`matrix-m2` 从 4 组合扩到 8 组合（加入 lease 四档）。
 > 本轮离线编译抓到 3 条我方缺陷（F-23/F-24/F-25，全在「改完先加载一次」这条线上）。
+> **复跑更新（2026-09-17，docker lab）**：`make checkers`（17 套/99 个）与
+> `make matrix-m1`（9/9）复跑**全绿**；`make matrix-m2` 复跑 **7/8** ——
+> `lease × partition-halves` 红，已登记为新缺陷 **F-27（coord 侧 P1，未闭环）**，
+> 详见 `coord-findings.md` §13。
 > 本轮更新：2026-09-17（第四轮）：**M1 收口**——**T1.5 `mixture` workload 落地**
 > （map+txn+scan 混合 + 组合 checker `jepsen.coord.mixck` + 11 个新 fixture），
 > **CAS 命中率质量改进**（read-then-CAS），**F3 值大小扫描**（4KB/64KB），
@@ -24,7 +61,7 @@
 |:--|:--|:--|:--|
 | M0 基座（T0.1–T0.6） | 4 | **已验证** | 6/6（T0.4/T0.6 的 lab 实跑已完成，见 §1；实跑暴露的 F-09…F-12 已修并补 fixture） |
 | M1 数据面（T1.1–T1.5） | 6.5 | **已验证** | 5/5（T1.1/T1.2/T1.3/T1.4/T1.5）；checker fixture 从 4 套 29 个涨到 **10 套 75 个** |
-| M2 Watch+Lease（T2.0–T2.3） | 5 | 进行中 | **T2.0 + T2.1 + T2.2 已 lab 验证绿**（BIDI 流式接线 + `--workload watch` + `--workload lease`（T2.2：TTL 到期 / KeepAlive 续期 / Revoke 级联，6 条判据 + 12 个 fixture）；`make checkers` 扩到 **17 套 99 个**；`matrix-m2` = watch/lease × none\|kill\|pause\|partition-halves 共 **8 组合**）。T2.3 收口（2h 混合浸泡）待做 |
+| M2 Watch+Lease（T2.0–T2.3） | 5 | 进行中 | **T2.0 + T2.1 已 lab 验证绿；T2.2 复跑只剩一档红**（BIDI 流式接线 + `--workload watch` + `--workload lease`（T2.2：TTL 到期 / KeepAlive 续期 / Revoke 级联，6 条判据 + 12 个 fixture）；`make checkers` 扩到 **17 套 99 个**；`matrix-m2` = watch/lease × none\|kill\|pause\|partition-halves 共 8 组合，**2026-09-17 复跑 7/8：`lease:partition-halves` 红 → F-27（coord 侧 P1，未闭环）**）。T2.3 收口（2h 混合浸泡）待做 |
 | M3 运维面（T3.1–T3.6） | 5 | 未开始 | 0（T3.5 行为已由 F-07 判定、T3.4 设计已由 F-08 修正） |
 | M4 Multi-Raft（T4.1–T4.3） | 2.5 | 未开始 | 0（`multi-register` 静态多 region 已可跑） |
 | M5 Agent 层（T5.1–T5.7） | 6.5 | 未开始 | 0（T5.2 硬前置已兜现；**T5.3/T5.4/T5.5 是 T6.1 组合浸泡里 lock/election/registry 三个面的前提**） |
@@ -37,12 +74,12 @@
 
 | 门禁 | 命令 | 结果 |
 |:--|:--|:--|
-| checker fixture | `make checkers` | **17 套 99 个全绿**（本轮新增 `lease-fixtures` 9 + `lease-fixtures-sample` 2 + `soakfull-fixtures` 2；离线与 docker lab 两边都跑过） |
-| M2 矩阵 | `make matrix-m2` | **8 组合**（watch/lease × none\|kill\|pause\|partition-halves，45s/组合）；lease 档带 45s 口径的 §5.1 样本门槛（5/2） |
+| checker fixture | `make checkers` | **17 套 99 个全绿**（本轮新增 `lease-fixtures` 9 + `lease-fixtures-sample` 2 + `soakfull-fixtures` 2；离线与 docker lab 两边都跑过；**2026-09-17 lab 复跑 99 PASS / 0 FAIL**） |
+| M2 矩阵 | `make matrix-m2` | **2026-09-17 复跑 7/8**：watch 四档 + `lease:none/kill/pause` 绿；**`lease:partition-halves` 红 = F-27**（矩阵共 8 组合；lease 档带 45s 口径的 §5.1 样本门槛 5/2）。台账：`store/coord` 全量只有 6 个 lease run、全部在 2026-09-17 ⇒ 此前「8 组合全绿」无 run 支撑 |
 | T6.1 组合浸泡 | `make soakfull SOAK_TIME_LIMIT=...` | 入口已就绪（`--soak-mix` 默认 = T6.1 比例里已实现的部分）；长跑待做 |
 | 夜间门禁 | `make nightly` / `SKIP_LONG=1 jepsen/scripts/nightly-soak-gates.sh` | 本轮新增（checkers → matrix-m1 → matrix-m2 → soakfull + wait + results） |
 | 本轮离线回归 | 17 套 fixture（离线 harness） | **全绿**（99/99） |
-| M1 数据面矩阵 | `make matrix-m1`（map/txn/scan/mixture × none\|kill 45s + idempotency:none） | **9 组合全绿**（见 §1.4；首轮的 `txn/kill` 失败系我方在 run 中间改源码所致，与 coord 无关，已重跑） |
+| M1 数据面矩阵 | `make matrix-m1`（map/txn/scan/mixture × none\|kill 45s + idempotency:none） | **9 组合全绿**，**2026-09-17 复跑 9/9（`ALL M1 MATRIX PASSED`）**（见 §1.4；首轮的 `txn/kill` 失败系我方在 run 中间改源码所致，与 coord 无关，已重跑） |
 | T1.5 2h 浸泡 | `make soak WORKLOAD=mixture`（rate 2、seed 固定、`--checker soak`） | 见 §1.4 |
 | F3 值大小扫描 | `map` + `--value-size 4096` / `65536`，各 60s kill | **两档都绿**（4KB：156 ops / 20 delete / 值长 4096；64KB：169 ops / 28 delete / 值长 65536） |
 | T2.0/T2.1 watch | `make checkers`（+4 套）+ watch/none 45s + watch/kill 120s | 见 §1.5：**全绿**（kill 档 1070 事件 / 78 次流重开） |
@@ -169,6 +206,23 @@ F-01（Delete 无幂等，含范围删重放删掉新写入）、F-02（Put 命�
 | soak 常态化 | `make nightly` / `jepsen/scripts/nightly-soak-gates.sh`（`checkers` → `matrix-m1` → `matrix-m2` → `soakfull` + `soak-wait` + `soak-results`；`SKIP_LONG=1` 只跑前三步）；`coord-soak.sh` 新增 `--extra` 通用透传与 `wait` 子命令；`make soakfull SOAK_MIX=...` |
 | soak 结项 | [`soak-closure-report.md`](soak-closure-report.md)：量化「逼出了什么」（coord 侧 8 条 / 测试自身 15 条）+ 诚实列出未兑现部分 |
 
+### 1.7 第七轮（2026-09-19）：AG-06 + election 服务端探针 —— 并挖出**凭据面**的 P0
+
+| 项 | 内容 |
+|:--|:--|
+| 新增工具 | `src/jepsen/coord/faultwin.clj`：把 nemesis 历史还原成「**每个 agent 什么时候不可能再续期**」的时间窗（递归展开 `:value`，兼容 `:kill-agent-all` 与 compose 的嵌套 op map）。弃锁/遗弃类判据的期望值在故障前后**相反**，没有这个窗口就只能猜（猜错方向的代价是假红或假绿各一半） |
+| AG-06 workload | `--workload lock` 新增**弃锁** op（`:f :lock-abandon`，1/6 槽位，**独立锁名池** `<name>-abandon`，避免污染争抢样本）：拿到锁之后**故意不释放**，模拟「插件进程里的句柄没被 drop」。同步把地面真值探针提到 1/3 槽位 |
+| AG-06 checker | `lockck` 判据 6 `:lock-orphan-not-reclaimed`（持有 agent 被 kill/pause/分区之后，服务端必须在 `ttl+grace` 内回收；锚点 = 故障事件**完成**时刻，保守）+ 判据 7 `:lock-phantom-loss`（持有 agent **活着**时 key 不得消失）+ 门槛 `:lock-abandon-unjudged`（判过 ≠ 违反，见 §5.5-23） |
+| election 探针 | `:f :election-probe`（绕开 agent 读 `/_election/{group}`）+ `electck` 判据 4 `:election-server-truth-contradiction`（边界 100ms 只记录）+ 门槛 `:election-probe-missing` —— 补上 F-35 明示的「残留」 |
+| 组合面接线 | `mixck` 的 lock/election 分支同步开 `:probe?/:abandon?/:agent-nodes`：否则 soak 里的 lock 面会**静默少判**（生成器产出弃锁 op，而没有判据看它） |
+| **首跑即抓到 F-50（coord-agent，P0 候选）** | 零故障的 `lock:none` cell 里，服务端探针看到「持有者还活着，key 却不见了」。根因不是测量：agent 节点日志四路同因 —— `failed to register node_id / failed to load initial catalog / failed to subscribe Watch / auto-renew of lock … : unauthenticated: missing CCT token`。**agent 自发**的流量（锁续期、registry 目录加载与订阅、idgen 节点注册）**没有凭据通道**（共享 `inner.client` 的 token 只装「调用方转发进来的 CCT」）⇒ 服务端一开鉴权，这四件事全死 |
+| F-50 的实测数字 | `LOCK_TTL_SECONDS=30 / --nemesis none / 120s`：`:abandon {:ops 13 :judged 12 :phantom-loss 9}`（9/13 个「还活着的持有者」丢了自己的锁）；`lock:partition` 150s：`:orphans 0`（**回收这一半是好的**）+ `:phantom-loss 42`。⇒ AG-06 的两半一正一反，把 F-50 钉在「假丢锁」这一侧 |
+| 本轮新增的测试自身缺陷 | **F-47**（Makefile EDN 的双引号被两层 shell 吃掉 → 字符串静默变 symbol）、**F-48**（多一个 `)` 让函数返回 `vec` 本身；`lein check` 全绿）、**F-49**（把「判过」实现成「在违反列表里」→ 正例 fixture 第一次跑就红）、**F-53**（run 边界用 jepsen `:time`、样本用 `:t0-ns` ⇒ 两个时间轴混用，F-34 同型复发，被 `:lock-abandon-unjudged` 当场抓到）、**F-54**（把「TTL ≤ 节拍」做成豁免的第一版连带赦免了「归因失败」）、**F-55**（partition 清残留不验证 ⇒ 正常结束的 cell 也留下 6 条 DROP，后续 3 个 cell 全以「agent 就绪超时」失败） |
+| 判据纪律新增 | `dev.md` §5.5 第 23–27 条（判过≠违反 / 故障窗口必须还原 / Makefile EDN 引号 / `lein check` 不保证真跑 / 括弧写错会「返回一个函数」） |
+| fixture | 新增 `lock-agent-fixtures/`（6）+ `elect-probe-fixtures/`（4），`make checkers` 从 26 套 133 个涨到 **28 套 143 个** |
+| 结论 | **`lock` 的红现在有两条**：F-28（fencing，旧）+ **F-50**（假丢锁，新）。其余三个本地面在修复后仍绿。差分矩阵的归因提示已按「本格 direct 结果」分叉（F-43 的遗留提醒） |
+
+
 ## 2. 下一步（按依赖顺序，可直接认领）
 
 1. ~~**T1.4 回归跑（验证 F-01/F-02 修复，0.5d，最高优先）**~~ —— **已完成**：
@@ -212,3 +266,19 @@ F-01（Delete 无幂等，含范围删重放删掉新写入）、F-02（Put 命�
 | 2026-09-16（第三轮） | **M1 主体落地**：T1.1 `--workload map`、T1.2 `--workload txn`、T1.3 `--workload scan` 三个 workload + 三个专用 checker + 30 个新 fixture，均在 docker lab 上 `--nemesis kill` 60s 实跑绿；新增 **G6 op 级活性门槛**（F-13 类假绿）；**coord 侧首轮倒逼落地**：F-01（Delete 幂等）+ F-02（Put 命中回放 `prev_kv`）已修；真跑暴露 **F-13…F-17** 五条测试自身缺陷并全部修完；§9-⑨ 已答（F-18） |
 | 2026-09-16（第二轮） | **M0 收口**（lab 实跑：checkers 29 fixture 全绿 / env-reset STRICT_CLOCK 全节点 clean / quick SEED=42 绿 / jitter 实测 13 个不同取值）；**T1.4 落地并跑出红证据**（F-01/F-02 `confirmed-by-run`）；修掉 4 条测试自身缺陷 **F-09…F-12**；`proto.clj` 补齐 T1.1/T1.2/T1.3 所需的全部 builder/reader；新增 5 份 evidence 归档 |
 | 2026-09-16（第一轮） | M0 六个任务的代码全部落地（其中 T0.1/0.2/0.3/0.5 本地已验证，T0.4/0.6 待 lab）；静态审计产出 F-01…F-08；计划修正 3 处（§5.4-⑥ / T3.4 / T2.1 默认语义） |
+
+### 1.8 第八轮（2026-09-19）：M5b cache / mq 首次 lab 真跑
+
+全部 docker lab、`--agents 1`、45s、`CONCURRENCY=2n`、checker 门槛按 `matrix-m5b` 的取值。
+（首跑的三轮失败全部是**测试自身**缺陷，逐步排除过程见 `coord-findings.md` §17 的 F-63…F-66。）
+
+| cell | 判定 | 关键数字 | 备注 |
+|:--|:--|:--|:--|
+| `cache / none` | **绿**（判据 0 违反） | `:sets 14 :gets 20 :list-ops 38`；`:violations-by-class {}` | 修掉时间轴混用后，同一 cell 由 37 条违反 → 0 |
+| `cache / kill-agent` | **未执行**（样本门槛） | `:sets 2 :gets 1`；`:violations-by-class {}`；`:restarts 4` | agent 被杀期间吞吐塌陷 ⇒ §5.1 口径判「未执行」，需更长的 run；判据本身 0 违反（含 `:cache-restart-loss`） |
+| `cache / partition-agent-server` | **绿** | `:sets 28 :gets 25 :list-ops 50`；`:violations-by-class {}` | 与 `none` 同判据：与 server 断连不影响本地 cache（符合实现：Cache 全在 agent 本地 redb，`grpc_handlers.rs:381+` 走 `run_blocking`） |
+| `mq / none` | **绿**（`Everything looks good`） | `:publishes 81 :published-offsets 81 :delivered-offsets 64`；59 个 Poll 全部非空；0 违反 | **`idem-dups 23`** = F-57 的 lab 证据（同一 `idempotency_key` 连发两次拿到两个 offset）；**`poll-ack-failures 59 / acked-offsets 0`** ⇒ 见 F-67 |
+| `mq / kill-agent` | 待复跑 | 首跑：`:publishes 0`、77 个 Poll 全空 | 原因是主题名接线缺陷（生成器拼 run 标签、客户端拿 `nil` ⇒ 主题从未创建），已修（F-66 同族）；修后 `mq/none` 绿 |
+| `mq / partition-agent-server` | 待复跑 | 同上 | 同上 |
+
+> 本轮机器时间：docker lab 约 14 次短跑（45–150s）≈ 0.5h，仍在 §7.2 的「短矩阵不计入主表」额度内。

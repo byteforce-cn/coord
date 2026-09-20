@@ -1,0 +1,20 @@
+;; expect-invalid-probe-contradiction —— **P0**：服务端真相当场证伪自述区间。
+;;
+;; h1 自述持有 [10, 900)。探针在 500ms 从 **server** 读到 key 挂在 "h-other"
+;; 名下（距两侧边界 490ms / 400ms，远超 100ms 的测量容差）⇒ 那一刻有两个持有者。
+;;
+;; 这是 F-34 分支 2 的形态：agent 的汇报层（`acquired` 字段 / 本地缓存）与
+;; server 真相不一致 —— 客户端以为自己拿到了锁，而服务端 key 在别人名下。
+;; 判据 1（纯客户端自述的区间比较）**看不见**这一类：如果这个 h-other 的持有
+;; 区间没被记录（或记错了），区间比较就无从下手。
+[{:type :ok :f :lock-contend :process 0 :time 10
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  :acquired-at-ms 10 :released-at-ms 900 :released? true
+  :gone? true :gone-at-ms 900 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}
+
+ {:type :ok :f :lock-probe :process 2 :time 500
+  :name "lock-a" :server-at-ms 500 :exists? true
+  :server {:holder-id "h-other" :lease-id 99 :ttl-secs 5}}]

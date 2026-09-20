@@ -4,7 +4,7 @@ import cn.byteforce.coord.sdk.CoordConfig;
 import cn.byteforce.coord.sdk.CoordException;
 import cn.byteforce.coord.sdk.cache.CacheClient;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
-import cn.byteforce.coord.sdk.internal.proto.*;
+import cn.byteforce.coord.contracts.cache.v1.*;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

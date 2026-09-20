@@ -18,30 +18,44 @@
 | **A. 已执行范围内的缺陷账 + 假绿机制** | ✅ **可交付**：coord 修复、契约注释、判据体系、fixture、证据产物、本报告均已提交入仓 | `395cbb8`（coord 幂等 F-01/F-02/F-03）· `5fd85df`（chaos 浸泡假红）· `3a22f44`（jepsen 体系，125 文件）；§1–§4 每条可点回 `coord-findings.md` / `PROGRESS.md` / `docs/production/evidence/<ts>/` |
 | **B. 引入验收结论（「soak 通过」）** | ❌ **未达成 —— 本报告不声明** | 下方三条硬缺口 |
 
-**三条硬缺口（缺一不可，均非“再跑一次”能解决）**：
+**四条硬缺口（缺一不可，均非“再跑一次”能解决）**：
 
-1. **证据效力未到验收档**：`dev.md` §5.4 规定「所有进 evidence 的 run 必须使用
-   coord 团队**书面确认**的参数取值，并把链接填进 MANIFEST」，否则「只能作内部
-   参考，不得用于引入决策」。现 26 份归档里，**24 份该项为「待填」**（另 2 份为
-   2026-09-12 的旧归档，MANIFEST 由另一套采集器生成、无该字段）。
-   补法：`docs/production/evidence/PARAM-CONFIRMATION.md` 签回后，执行
-   `jepsen/scripts/backfill-param-confirmation.sh <存档链接>` 回填（脚本会同时
-   重算 `sha256sums.txt`）。
+1. **证据效力只到「部分签回」档**：`dev.md` §5.4 规定「所有进 evidence 的 run 必须
+   使用 coord 团队**书面确认**的参数取值，并把链接填进 MANIFEST」，否则「只能作内部
+   参考，不得用于引入决策」。**2026-09-18 更新**：coord 团队已签回 ①②④⑤⑥⑦⑧
+   （存档 = 本仓不可移动的 tag permalink，见
+   `docs/production/evidence/PARAM-CONFIRMATION.md`），24 份 MANIFEST 已回填该链接
+   （台账 `待填 0 / 已回填 24 / 无该字段 2`；脚本重算了 `sha256sums.txt`，
+   **run 产物零改动**、26 份归档 `sha256sum -c` 全过）。
+   **但 ③（quiet 可用率 0.95 / 100 ops）未确认** —— 按 §5.4 该条需**引入方团队**签，
+   所以**依赖 ③ 的门禁结论（§5.2 可用率门槛、T0.2）仍属内部参考等级**；另 2 份
+   2026-09-12 的旧归档由另一套采集器生成、无该字段。
 2. **覆盖面仍是局部**：M2 收口（T2.3）与 M3–M6 未执行（§5）。其中
    **T6.1 的 72h 全比例 soak 在当前代码上跑不起来**：声明比例含 lock 10 /
    election 3 / registry 2，这三个面属 M5（agent 插件面），`--soak-mix` 里一
    出现即**构造期硬失败** —— 这是设计上的阻塞，不是排期问题。
-3. **F-05 未闭环**（唯一 P1）：登录限流 × 「刚重启」窗口仍会产出
+3. **F-05 未闭环**（P1）：登录限流 × 「刚重启」窗口仍会产出
    `:no-client Failed to authenticate`（`store/coord/latest/history.txt:31`），
    是「短矩阵干净绿」的阻塞点。
+4. **门禁复跑不是全绿**（**F-27**，P1，2026-09-17 复跑新发现）：`make matrix-m2`
+   的 `lease × partition-halves` 档判 invalid —— 8 个绑定 Key 在 `ttl+grace` 内
+   **0 消失**；根因是**过期 revoke 提案被静默丢弃**（`check_expired()` 已把记录
+   移出本地管理器，随后的 `client_write` 失败只告警、不重试）⇒ 领导权不再变化
+   即**永久泄漏**，违反「Lease 过期 ⇒ 绑定 Key 级联删除」契约。详见
+   [`coord-findings.md`](coord-findings.md) F-27 与
+   `jepsen/store/coord/2026-09-17T16:20:01.926257732Z/`。
 
 **另两条必须随证据一起读的限定**：
 
 * **run 全部发生在提交之前**：因此 26 份 MANIFEST 的「工作树」字段一律是
   `DIRTY`，`commit` 字段只说明「归档时 HEAD 在哪」，不表示 run 跑在那个 commit 上。
   以后跑正式 run 前先提交，MANIFEST 才能记录 clean 树 —— 这是「可复现」的最低要求。
-* **`make checkers` / `matrix-m1` / `matrix-m2` 的全绿是 lab 结论**，本次并未
-  重跑（需 docker lab）；可在 lab 用 §6 的命令自行复核。
+* **三个门禁已在 docker lab 复跑（2026-09-17，coord `ddafb9d`）**：`make checkers`
+  **17 套 / 99 个全绿**、`make matrix-m1` **9/9 全绿**、**`make matrix-m2` 7/8**
+  —— `lease × partition-halves` 红（F-27）。此前本报告把三个门禁的「全绿」写成
+  lab 结论而未复跑，该口径现已修正；台账也显示 `lease × pause` 与
+  `lease × partition-halves` 两档是**复跑当天第一次**被执行（`store/coord` 全量
+  只有 6 个 lease run，全部在 2026-09-17）。复跑命令与日志见 `coord-findings.md` §13。
 
 ---
 
@@ -49,13 +63,13 @@
 
 | 指标 | 数值 |
 |:--|:--|
-| 缺陷单条目总数（F 编号） | **26**（F-01…F-26） |
-| 其中 **coord 侧**（被测系统） | **8** |
+| 缺陷单条目总数（F 编号） | **27**（F-01…F-27） |
+| 其中 **coord 侧**（被测系统） | **9** |
 | 其中 **测试自身**（我方流程/代码） | **18** |
 | coord 侧已修复并有回归证据 | **2**（F-01、F-02） |
 | coord 侧已确认行为并**限缩契约文字** | **2**（F-03、F-06） |
 | coord 侧行为已判定、可闭环（§9 问答） | **3**（F-07、F-08、F-18） |
-| 仍未闭环的 coord 侧条目 | **1**（F-05 登录限流，P1，待 E4 参数确认） |
+| 仍未闭环的 coord 侧条目 | **2**（F-05 登录限流 P1；**F-27 lease 过期 revoke 丢失 P1**，复跑新发现） |
 | checker 负控制 fixture | **17 套 / 99 个**（全部进 `make checkers` 前置门） |
 | lab 实跑次数（docker，短跑为主 + 1 次 2h 浸泡） | **81** 次 run（`jepsen/store/coord/` 台账逐目录可数） |
 | 其中「离线看着是绿的、真跑才暴露」的测试缺陷 | **11**（F-09…F-13、F-17、F-19…F-21、F-24、F-26 中的假绿/无结论类） |
@@ -134,9 +148,9 @@
 
 | 门禁 | 内容 | 现状 |
 |:--|:--|:--|
-| `make checkers` | **17 套 / 99 个** checker fixture（每个 checker ≥1 个负控制 + 门槛档） | lab 全绿（含 lease 9+2、soakfull 2） |
-| `make matrix-m1` | map/txn/scan/mixture × none\|kill + idempotency:none（45s/组合） | 9 组合全绿 |
-| `make matrix-m2` | watch/lease × none\|kill\|pause\|partition-halves（45s/组合） | 8 组合（lease 四档本轮新增） |
+| `make checkers` | **17 套 / 99 个** checker fixture（每个 checker ≥1 个负控制 + 门槛档） | ✅ **2026-09-17 复跑全绿**（99 PASS / 0 FAIL，含 lease 9+2、soakfull 2） |
+| `make matrix-m1` | map/txn/scan/mixture × none\|kill + idempotency:none（45s/组合） | ✅ **复跑 9/9 全绿**（`ALL M1 MATRIX PASSED`） |
+| `make matrix-m2` | watch/lease × none\|kill\|pause\|partition-halves（45s/组合） | ⚠️ **复跑 7/8**：watch 四档 + `lease:none/kill/pause` 绿；**`lease:partition-halves` 红 → F-27** |
 | `make nightly` | checkers → matrix-m1 → matrix-m2 → soakfull（默认 2h）+ 等待 + 结果 | 本轮新增（`scripts/nightly-soak-gates.sh`） |
 | 功能面实跑（本轮） | `--workload lease` 60s（`grants 207 / expiries 95 / 六类违反 0`）；`--workload soakfull` 90s kill（五面全跑到、`:unrouted 0`）；`--workload watch` 120s kill（`events 1070 / resumes 78`、0 违反） | 三份证据已入库（见 §6 末表） |
 | 证据入库 | `collect-evidence.sh` → `docs/production/evidence/<ts>-<label>/`（MANIFEST 带真实门槛值 / 种子 / commit / 镜像 ID） | 已有 **26** 份归档（本轮新增 3：lease 60s / soakfull 90s / watch 修后重跑） |
@@ -189,6 +203,12 @@ make soak-wait && make soak-results
 # 5) 夜间门禁（= 上面 1–4 + 归档，供定时任务调用）
 jepsen/scripts/nightly-soak-gates.sh          # SKIP_LONG=1 只跑 1–3
 ```
+
+> **复跑记录（2026-09-17，coord `ddafb9d`）**：上面 1)–3) 已在 docker lab 实跑
+> （复跑前后 `target/release/coord` 的 sha256 一致，无 code-change 混杂）：
+> `checkers` **17 套 / 99 个全绿** · `matrix-m1` **9/9** ·
+> **`matrix-m2` 7/8 —— `lease × partition-halves` 红（F-27）**。
+> 失败详情、根因与日志证据见 [`coord-findings.md`](coord-findings.md) §13 / F-27。
 
 本轮已入库的三份功能面证据（均可直接点开核对）：
 

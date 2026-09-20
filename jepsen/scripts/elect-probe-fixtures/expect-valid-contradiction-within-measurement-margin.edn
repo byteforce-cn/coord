@@ -1,0 +1,24 @@
+;; expect-valid-contradiction-within-measurement-margin —— 边界争议只记录，不判红。
+;;
+;; 同一份历史、同一对参与者，只把探针时刻从区间内部挪到**紧贴区间起点**的位置
+;; （t=1050，距起点 45ms < 100ms 的测量容差）。自述区间的闭合时刻永远是真实
+;; 退位时刻的**上界**（差一个 RPC 往返 + 观测抖动），所以紧贴边界的矛盾可能只是
+;; 测量误差 —— 判红就是假红。
+;;
+;; 与 expect-invalid-server-truth-contradiction.edn 构成一对：两条 fixture 的差别
+;; 只有探针时刻，期望值却相反 ⇒ 把「容差真的接在自己的判据上」钉住。
+;; 边界样本仍然会出现在报告的 `:near-boundary` 里（不静默丢弃）。
+[{:type :ok :f :elect-campaign :process 0 :time 2000000000
+  :t0-ns 1000000000
+  :group-name "group-a" :candidate-id "c1" :lease-id 3
+  :elected? true :campaign-at-ms 5
+  :resigned-at-ms 600 :resigned? true :gone? true :gone-at-ms 600
+  :holder-ttl-seconds 5 :at-ms 700}
+
+ {:type :ok :f :election-probe :process 1 :time 1050000000
+  :t0-ns 1050000000 :server-at-ms 0
+  :group-name "group-a" :server-key "/_election/group-a"
+  :exists? true
+  :raw-value "{\"leader_id\":\"cX\",\"instance_id\":\"cd\",\"lease_id\":4,\"ttl_secs\":5}"
+  :server {:leader-id "cX" :instance-id "cd" :lease-id 4 :ttl-secs 5}
+  :node "n1"}]

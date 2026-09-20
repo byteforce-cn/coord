@@ -28,6 +28,14 @@
                     weight (--mixture-ratio), checked by the composed
                     jepsen.coord.mixck checker (routing + the three
                     surface checkers).
+    :lock,          M5a agent-local control plane (mutual exclusion /
+    :election,      unique leader / global ids / service discovery). They
+    :idgen,         need --agents N > 0 and >= 2 agents for the mutual
+    :registry       exclusion surfaces.
+    :cache, :mq     M5b agent-local **data plane** (redb cache / message
+                    queue; AG-09 / AG-11). Their data lives in the agent
+                    process, so read-your-write judgements require
+                    --agents 1 (enforced at build time).
 
   Nemeses (one per run for clean attribution, or :all):
     :none, :kill, :kill-all, :pause, :partition, :partition-halves,
@@ -42,6 +50,7 @@
   (per-region soak checker grouping; T4.3)."
   (:require [clojure.tools.logging :refer [info warn]]
             [jepsen [cli :as cli]
+                    [client :as jclient]
                     [checker :as checker]
                     [generator :as gen]
                     [nemesis :as nemesis]
@@ -49,14 +58,21 @@
                     [random :as rand]
                     [tests :as tests]]
             [clojure.string :as str]
-            [jepsen.coord [client :as client]
+            [jepsen.coord [agent :as agent]
+                          [cacheck :as cacheck]
+                          [client :as client]
                           [db :as db]
+                          [electck :as electck]
                           [gates :as gates]
                           [idem :as idem]
+                          [idgenck :as idgenck]
                           [leaseck :as leaseck]
+                          [lockck :as lockck]
                           [mapck :as mapck]
                           [mixck :as mixck]
+                          [mqck :as mqck]
                           [nemesis :as n]
+                          [regck :as regck]
                           [regions :as regions]
                           [scanck :as scanck]
                           [soak :as soak]
@@ -437,6 +453,243 @@
     (gen/mix [ttl-op ttl-op ka-op rev-op])))
 
 ;; --------------------------------------------------------------------------
+;; M5a —— agent 本地面（lock / election / idgen / registry）
+;;
+;; 这四个面只在 **agent** 上存在（server 的 router 里没有 coord.agent.*），
+;; 所以它们的「多实例」语义天然要求 ≥ 2 个 agent：单 agent 下 lock/election 的
+;; 互斥判定只看得到一份本地缓存，结构性不可判（见 jepsen.coord.agent 的 ns 注释 3）。
+;;
+;; 生成器参数一律在**生成器里**解析默认值（不用 CLI 的 :default = nil 直接算），
+;; 与 watch/lease 的同一约定：`(long (or nil 0))` 会把一个参数静默变成 0。
+;; --------------------------------------------------------------------------
+
+(def ^:private default-lock-names ["lock-a" "lock-b" "lock-c"])
+(def ^:private default-elect-groups ["group-a" "group-b"])
+(def ^:private default-idgen-names ["orders" "events"])
+(def ^:private default-registry-services ["svc-a" "svc-b"])
+
+(defn- lock-gen
+  "`--workload lock`：多个客户端抢同一把锁 → 持有 → 释放。
+
+  holder-id 每 op 随机：每次获取都是**独立的持有者身份**，于是任何跨持有者的
+  重叠都是硬违约（真实系统里多数互斥缺陷都长这样）。
+
+  **混入服务端地面真值探针**（`:f :lock-probe`）：它绕开 agent 直接读
+  `/_lock/{name}`，把「服务端 key 挂在谁名下」按时间采样下来。这是 F-34 的决定
+  性实验，也是 AG-02 里唯一**不依赖客户端自述**的互斥证据 —— 探针是**必然**混进
+  来的，所以 checker 开了 `:probe?` 之后「一条探针都没有」会判未执行（见
+  lockck 判据 5 与 expect-invalid-probe-missing.edn）。
+
+  **混入弃锁 op**（`:f :lock-abandon`，AG-06）：拿到锁之后故意不释放，由
+  `lockck` 用探针判「持锁 agent 活着时不得假丢锁 / 被 kill 后必须在 ttl+grace 内
+  被服务端回收」。弃锁用**独立的锁名池**（`--lock-*` 的名字加 `-abandon` 后缀）：
+  与 contend 的锁名分开，否则一把弃锁会永久占住争抢池里的一个名字，把
+  `:acquires` 样本压到门槛以下（那是判据自身制造的假红）。"
+  [opts]
+  (let [names (vec (or (:lock-names opts) default-lock-names))
+        anames (mapv #(str % "-abandon") names)
+        ttl   (long (or (:lock-ttl-seconds opts) 5))
+        hold  (long (or (:lock-hold-ms opts) 200))
+        dl    (long (or (:lock-deadline-ms opts) 5000))
+        grace (long (or (:lock-grace-ms opts) 4000))
+        op    (fn [_ _]
+                {:type :invoke, :f :lock-contend
+                 :value {:name (rand-nth names)
+                         :holder-id (str "h-" (rand-int 1000000))
+                         :ttl-seconds ttl
+                         :hold-ms hold
+                         :deadline-ms dl
+                         :grace-ms grace}})
+        aband (fn [_ _]
+                {:type :invoke, :f :lock-abandon
+                 :value {:name (rand-nth anames)
+                         :holder-id (str "a-" (rand-int 1000000))
+                         :ttl-seconds ttl
+                         :deadline-ms dl
+                         :grace-ms grace}})
+        probe (fn [_ _]
+                {:type :invoke, :f :lock-probe
+                 :value {:name (rand-nth (into names anames))}})]
+    ;; 三个 contend + 一个 abandon + 两个 probe 实例：争抢密度高一些（否则
+    ;; 「重叠」要等很久才碰得上）；探针份额 1/3（≈ 每个锁名每 40ms 一次采样，
+    ;; AG-06 的两条判据都要靠它，短跑也够覆盖）。
+    (gen/mix [op op op aband probe probe])))
+
+(defn- elect-gen
+  "`--workload election`：多个 candidate 竞选同一 group → 持有 → Resign。
+
+  **混入服务端地面真值探针**（`:f :election-probe`）：绕开 agent 读
+  `/_election/{group}`，把「服务端认为谁是 leader」按时间采样下来。此前 election
+  的判据**全部**基于客户端自述，而 F-34 证明这种单一来源分诊不了「真违约 /
+  agent 汇报层不一致 / 度量偏差」三种解释（F-35 的『残留』段把它列为明示待补）。
+  探针是**必然**混进来的 ⇒ checker 开了 `:probe?` 之后「一条都没有」判未执行。"
+  [opts]
+  (let [groups (vec (or (:election-groups opts) default-elect-groups))
+        ttl    (long (or (:election-ttl-seconds opts) 5))
+        hold   (long (or (:election-hold-ms opts) 200))
+        dl     (long (or (:election-deadline-ms opts) 5000))
+        op     (fn [_ _]
+                 {:type :invoke, :f :elect-campaign
+                  :value {:group-name (rand-nth groups)
+                          :candidate-id (str "c-" (rand-int 1000000))
+                          :ttl-seconds ttl
+                          :hold-ms hold
+                          :deadline-ms dl}})
+        probe  (fn [_ _]
+                 {:type :invoke, :f :election-probe
+                  :value {:group-name (rand-nth groups)}})]
+    (gen/mix [op op probe])))
+
+(defn- idgen-gen
+  "`--workload idgen`：NextId / NextBatch 混跑。
+
+  唯一性判定**不需要**跨节点比较：同一份 run 里所有 ID 放一起看重复即可
+  （batch 内部重复更是单响应就能判）。"
+  [opts]
+  (let [names (vec (or (:idgen-names opts) default-idgen-names))
+        op    (fn [_ _]
+                {:type :invoke, :f :idgen
+                 :value {:name (rand-nth names)
+                         :batch? (zero? (rand-int 2))
+                         :count (inc (rand-int 16))}})]
+    (gen/mix [op op])))
+
+(defn- registry-gen
+  "`--workload registry`：注册 → 停心跳 → 等消失（+ 跨客户端 Discover 探针）。
+
+  instance-id 带 run tag 且 run 内唯一：lab 的数据不保证每 run 清空，复用
+  instance-id 会把上一个 run 的残留当成「本 run 注册的」（假红）—— 与 lease
+  的 key 纪律一致。探针 op（:registry-discover）在**别的**客户端眼里观察，
+  是「自我保护快照未收敛」唯一能被抓住的窗口。"
+  [opts]
+  (let [svcs  (vec (or (:registry-services opts) default-registry-services))
+        ttl   (long (or (:registry-ttl-seconds opts) 5))
+        grace (long (or (:registry-grace-ms opts) 4000))
+        tag   (run-tag opts)
+        op    (fn [_ _]
+                {:type :invoke, :f :registry-cycle
+                 :value {:name (rand-nth svcs)
+                         :instance-id (str tag "-" (next-n))
+                         :ttl-seconds ttl
+                         :grace-ms grace
+                         :dup? (zero? (rand-int 3))}})
+        probe (fn [_ _]
+                {:type :invoke, :f :registry-discover
+                 :value {:name (rand-nth svcs)}})]
+    (gen/mix [op op probe])))
+
+;; --------------------------------------------------------------------------
+;; M5b —— agent 本地**数据面**（cache / mq）
+;;
+;; 与 M5a 四个本地面（lock/election/idgen/registry）的区别：这四个是**控制面**
+;; （互斥/唯一性/生命周期），cache/mq 是**数据面**（读写/交付）。共同点是数据都在
+;; agent 进程本地（cache = redb；mq = agent 本地日志）⇒ 「读到自己刚写的值」
+;; 只在**单 agent**（或无跨 agent 路由）时成立，所以这两个 workload 由
+;; `local-consistency-workloads` 强制要求 `--agents 1`。
+;; --------------------------------------------------------------------------
+
+(def ^:private default-cache-keys
+  "三类键空间互不相交（string / list / set）：每类 op 只碰自己那一组 key，于是
+  一个面的丢失/幽灵不会把另一个面的判据带脏（与 M1 三个面的 key 空间纪律一致）。"
+  {:str  (mapv #(str "cache-str-" %) (range 8))
+   :list (mapv #(str "cache-list-" %) (range 4))
+   :set  (mapv #(str "cache-set-" %) (range 4))})
+
+(defn- cache-gen
+  "`--workload cache`：string（Set/Get/Delete）+ list（LPush/LRange/LLen）+
+  set（SAdd/SMembers）三类操作混跑。
+
+  * **key 与值都带 run 标签**：cache 的数据在 agent 本地 redb 里，而 lab 不保证
+    每次 run 前清空（`agent/setup!` 的清理只在真的需要重启时做）—— 不带标签时
+    上一个 run 留下的值会被本 run 读回来，于是「读到的值本 run 从没写过」被
+    判 `:fabricated`、而且**一次 run 的历史里会出现两个 run 标签**（实测：
+    2026-09-19 的 `cache/partition-agent-server` cell）。与 map/scan/txn 同一
+    纪律（`run-tag` 的 docstring）。
+  * 每个值/成员全局唯一（run tag + 计数器）：fabricated 判据靠「这个值从没被
+    写过」成立，复用值会让它失效；
+  * string 的 Set 一半用 `ttl=0`（**持久**，判「写可见」与「重启后仍在」），
+    一半用 `--cache-ttl-seconds`（判 TTL 两侧）—— `--cache-ttl-seconds 0`
+    时全部持久；
+  * list/set 不加 TTL（它们的判据是包含关系，不需要时间轴）。"
+  [opts]
+  (let [ttl  (long (or (:cache-ttl-seconds opts) 0))
+        tag  (run-tag opts)
+        ks   (merge-with (fn [a b] a) default-cache-keys
+                         (select-keys opts [:cache-str-keys :cache-list-keys :cache-set-keys]))
+        kstr (mapv #(str tag "-" %) (vec (:str ks)))
+        klist (mapv #(str tag "-" %) (vec (:list ks)))
+        kset (mapv #(str tag "-" %) (vec (:set ks)))
+        v    (fn [p] (str tag "-" p "-" (next-n)))
+        w-ttl (fn [] (if (pos? ttl)
+                       (if (zero? (rand-int 2)) 0 ttl)
+                       0))
+        set-op (fn [_ _]
+                 {:type :invoke, :f :cache-set
+                  :value {:key (rand-nth kstr) :value (v "s") :ttl-seconds (w-ttl)}})
+        get-op (fn [_ _]
+                 {:type :invoke, :f :cache-get :value {:key (rand-nth kstr)}})
+        del-op (fn [_ _]
+                 {:type :invoke, :f :cache-del :value {:key (rand-nth kstr)}})
+        lpush-op (fn [_ _]
+                   {:type :invoke, :f :cache-lpush
+                    :value {:key (rand-nth klist) :value (v "l")}})
+        lrange-op (fn [_ _]
+                    {:type :invoke, :f :cache-lrange
+                     :value {:key (rand-nth klist) :start 0 :stop -1}})
+        llen-op (fn [_ _]
+                  {:type :invoke, :f :cache-llen :value {:key (rand-nth klist)}})
+        sadd-op (fn [_ _]
+                  {:type :invoke, :f :cache-sadd
+                   :value {:key (rand-nth kset) :member (v "m")}})
+        smem-op (fn [_ _]
+                  {:type :invoke, :f :cache-smembers :value {:key (rand-nth kset)}})]
+    (gen/mix [set-op set-op get-op get-op del-op
+              lpush-op lpush-op lrange-op llen-op
+              sadd-op sadd-op smem-op])))
+
+(def ^:private default-mq-topic "jepsen-mq")
+
+(defn- mq-topic-name
+  "本 run 的 MQ 主题名。
+
+  **必须只有一个来源**：生成器用它发布/拉取，客户端的 `setup!` 用它引导创建
+  （`CreateTopic` 不是幂等契约，所以只能在启动期建一次）。实测（第八轮）：两边
+  各算各的 ⇒ 生成器拼了 run 标签而客户端拿的是 `nil` ⇒ **主题从未被创建**，
+  表现为「发布一条都不成功、每轮 Poll 都是空」（看起来像 MQ 坏了）。"
+  [opts]
+  (or (:mq-topic opts) (str default-mq-topic "-" (run-tag opts))))
+
+(defn- mq-gen
+  "`--workload mq`：Publish / Poll（poll 内部顺带 Ack）混跑。
+
+  * payload 全局唯一（run tag + 计数器）⇒ 「投递内容与发布不一致」可精确判定；
+  * 1/4 的发布是**刻意重发**（同一 payload + 同一 idempotency-key 连发两次）：
+    这是 `idempotency_key` 去重承诺的证伪点；
+  * 主题在客户端 `setup!` 里引导创建（CreateTopic 不是幂等契约，做成随机 op 会
+    让「主题到底建没建」变成概率事件）。"
+  [opts]
+  (let [tag   (run-tag opts)
+        ;; 主题名与客户端的 `setup!` **共用同一个来源**（见 mq-topic-name）
+        topic (mq-topic-name opts)
+        pub (fn [_ _]
+              (let [m (next-n)]
+                {:type :invoke, :f :mq-publish
+                 :value {:topic topic :partition 0
+                         :payload (str tag "-m" m)
+                         :idempotency-key (str tag "-idem-" m)
+                         :dup? (zero? (rand-int 4))}}))
+        poll (fn [_ _]
+               {:type :invoke, :f :mq-poll
+                :value {:topic topic :partition 0
+                        ;; 消费组名默认 **run 级**：agent 的消费组偏移是**本地
+                        ;; 持久**状态，跨 run 复用同一个组名会让上一个 run 的已
+                        ;; 提交偏移混进来（判据再干净也会被历史噪声污染）。
+                        :consumer-group (or (:mq-consumer-group opts)
+                                            (str "cg-" tag))
+                        :max-count 64}})]
+    (gen/mix [pub pub pub poll poll])))
+
+;; --------------------------------------------------------------------------
 ;; T1.5 mixture workload（M1 收口）
 ;;
 ;; 三个面（map / txn / scan）混在同一条历史里跑。每一份 op 都打上 `:sub`
@@ -503,14 +756,20 @@
 ;; --------------------------------------------------------------------------
 
 (def ^:private soakfull-implemented
-  "T6.1 组合浸泡里**已经实现**的面。lock / election / registry 属 M5（agent
-  插件面），实现后加进来即可。"
-  #{:map :txn :scan :watch :lease})
+  "T6.1 组合浸泡里**已经实现**的面。
+
+  M5a 落地后 lock / election / registry / idgen 四个 **agent 本地面**也进来了
+  —— 这是 T6.1 的关键解锁项：它们的契约判据本来就是跨 agent 的（互斥、唯一
+  leader、全局唯一 ID），与数据面共用同一条历史正合适。"
+  #{:map :txn :scan :watch :lease :lock :election :registry :idgen})
 
 (def ^:private soakfull-default-mix
-  "默认面权重。取 T6.1 比例中已实现的那部分（40/20/15/10，另含 scan 5 作
-  区间读面的代表）；weight 只用于**相对份额**，不要求总和为 100。"
-  {:map 40 :txn 20 :scan 5 :watch 15 :lease 10})
+  "默认面权重。取 T6.1 比例中「数据面 + M5a agent 面」的一个可用组合；
+  weight 只用于**相对份额**，不要求总和为 100。
+
+  验收级 T6.1 长跑请显式传完整的 T6.1 比例：
+  `--soak-mix map=40,txn=20,scan=5,watch=15,lease=10,lock=10,election=3,registry=2,idgen=5`"
+  {:map 40 :txn 20 :scan 5 :watch 15 :lease 10 :lock 10 :election 3 :registry 2})
 
 (defn- parse-mix
   "解析 `--soak-mix 「map=40,txn=20,watch=15」` → `{:map 40 :txn 20 :watch 15}`。
@@ -529,6 +788,20 @@
     (when (some #(not (pos? (long %))) (vals m))
       (throw (ex-info "--soak-mix 的权重必须都是正整数" {:input s :parsed m})))
     m))
+
+(defn- agent-node-map
+  "agent 隧道 endpoint → agent 主机名。
+
+  客户端 op 的 `:acquire-node` 是**隧道地址**（`127.0.0.1:<port>`），而 agent
+  nemesis 的事件（`:killed-agent` / `:partitioned-agent` …）用**主机名**。lock 的
+  AG-06 判据要把「我持有了」归因到具体 agent，再和 nemesis 的时间窗对上，所以
+  需要在两边之间搭一座桥（端口分配是 run 级确定的，见 agent/local-port）。"
+  [aplan]
+  (when aplan
+    (into {}
+          (map (fn [i]
+                 [(agent/endpoint aplan i) (agent/agent-host aplan i)]))
+          (range 1 (inc (long (:count aplan)))))))
 
 (defn- soakfull-mix
   "解析并校验面集合：未实现的面**硬失败**（拒绝静默丢弃）。"
@@ -565,6 +838,11 @@
                     :scan  (scan-gen opts)
                     :watch (watch-gen opts)
                     :lease (lease-gen opts)
+                    ;; M5a agent 本地面
+                    :lock      (lock-gen opts)
+                    :election  (elect-gen opts)
+                    :registry  (registry-gen opts)
+                    :idgen     (idgen-gen opts)
                     (throw (ex-info (str "soakfull: no generator for " k) {:surface k}))))]
     (info "soakfull: surface mix" (pr-str mix) "-> instances" (pr-str inst))
     (gen/mix
@@ -587,7 +865,17 @@
        :watch-min-events (:watch-min-events opts)
        :min-grants      (:lease-min-grants opts)
        :min-expiries    (:lease-min-expiries opts)
-       :tolerance-ms    (:lease-tolerance-ms opts)})))
+       :tolerance-ms    (:lease-tolerance-ms opts)
+       ;; M5a agent 本地面
+       :lock-min-acquires      (:lock-min-acquires opts)
+       :lock-grace-ms          (:lock-grace-ms opts)
+       ;; AG-06：弃锁判据的 agent 归因表（与 `:abandon?` 必须成对出现）
+       :agent-nodes            (agent-node-map (:agent-plan opts))
+       :election-min-campaigns (:election-min-campaigns opts)
+       :registry-min-cycles    (:registry-min-cycles opts)
+       :registry-grace-ms      (:registry-grace-ms opts)
+       :idgen-min-ids          (:idgen-min-ids opts)
+       :idgen-min-regressions  (:idgen-min-regressions opts)})))
 
 (defn- client-gen
   "Client generator for the given opts. For :multi-register, ops target one
@@ -606,6 +894,14 @@
         :mixture      [(mixture-gen opts)]
         :watch        [(watch-gen opts)]
         :lease        [(lease-gen opts)]
+        ;; M5a：agent 本地面（需要 --agents N 才有地方跑）
+        :lock         [(lock-gen opts)]
+        :election     [(elect-gen opts)]
+        :idgen        [(idgen-gen opts)]
+        :registry     [(registry-gen opts)]
+        ;; M5b：agent 本地数据面（需要 --agents 1：见 local-consistency-workloads）
+        :cache        [(cache-gen opts)]
+        :mq           [(mq-gen opts)]
         :soakfull     [(soakfull-gen opts)]
         :multi-register
         (let [keys (vec (regions/region-keys (or (:regions opts) 1)))
@@ -793,6 +1089,25 @@
 ;; Checker
 ;; --------------------------------------------------------------------------
 
+(def ^:private local-surface-workloads
+  "只存在于 agent 上的面（server 的 router 里没有 coord.agent.*）。
+
+  对这几个 workload，客户端**必须**连 agent（否则是 UNIMPLEMENTED），所以
+  `--via-agent` 是**隐含**的：不需要用户再写一遍。数据面的差分（direct vs
+  --via-agent）才需要显式开关。"
+  #{:lock :election :idgen :registry :cache :mq})
+
+(def ^:private local-consistency-workloads
+  "数据**只在 agent 进程本地**、却要求「读到自己刚写的值」的面。
+
+  cache 是 agent 本地 redb；mq 是 agent 本地日志（ISR 复制默认关，且本 lab 的
+  agent 绑 loopback + SSH 隧道，彼此不可达）。这些 workload 跑在 ≥2 个 agent 上
+  时，「读不到」是**合法**的（数据在另一个 agent 上），于是任何「写后读」判据
+  都会变成假红或假绿 —— 所以我们**在起跑前拒绝** `--agents > 1`，而不是让
+  checker 去猜。跨 agent 的复制面是独立的一轮 lab 工作（见
+  coord-agent-coverage-plan.md §11 的漏检边界）。"
+  #{:cache :mq})
+
 (defn- per-key-linear
   "Independent linearizable register check per key for :multi-register: ops
   carry :key, and each key is its own register (region). Valid iff every
@@ -862,6 +1177,47 @@
                                      :min-expiries (:lease-min-expiries opts)
                                      :tolerance-ms (:lease-tolerance-ms opts)})
 
+                   ;; M5a：agent 本地面（lock / election / idgen / registry）。
+                   ;; 四个面的判据都是跨 agent 的（互斥 / 唯一 leader / 全局唯一
+                   ;; ID / 幽灵实例），需要 ≥2 个 agent 拓扑才有意义。
+                   ;; lock 的生成器**必然**混地面真值探针 ⇒ checker 要求探针在场
+                   ;; （缺了判未执行；见 lockck 判据 5 / F-34）。
+                   (= :lock workload)
+                   (lockck/checker {:min-acquires (:lock-min-acquires opts)
+                                    :probe?       true
+                                    :abandon?     true
+                                    :grace-ms     (:lock-grace-ms opts)
+                                    ;; AG-06：弃锁 op 的 kill/分区窗口归因
+                                    :agent-nodes  (agent-node-map (:agent-plan opts))})
+
+                   (= :election workload)
+                   (electck/checker {:min-campaigns (:election-min-campaigns opts)
+                                     ;; F-35 残留：服务端地面真值探针（与 lock 同构）
+                                     :probe?       true})
+
+                   (= :idgen workload)
+                   (idgenck/checker {:min-ids (:idgen-min-ids opts)
+                                     :min-regressions (:idgen-min-regressions opts)})
+
+                   (= :registry workload)
+                   (regck/checker {:min-cycles (:registry-min-cycles opts)
+                                   :grace-ms   (:registry-grace-ms opts)})
+
+                   ;; M5b：agent 本地数据面（cache = AG-09 / mq = AG-11）。
+                   ;; 两者的数据都在 agent 本地 ⇒ 一致性判据只在单 agent 下成立
+                   ;; （coord-test 已强制 --agents 1，见 local-consistency-workloads）。
+                   (= :cache workload)
+                   (cacheck/checker {:min-sets       (:cache-min-sets opts)
+                                     :min-gets       (:cache-min-gets opts)
+                                     :min-list-ops   (:cache-min-list-ops opts)
+                                     :min-set-ops    (:cache-min-set-ops opts)
+                                     :ttl-grace-ms   (:cache-ttl-grace-ms opts)})
+
+                   (= :mq workload)
+                   (mqck/checker {:min-publishes (:mq-min-publishes opts)
+                                  :min-polls     (:mq-min-polls opts)
+                                  :expect-idem-dedupe? (:mq-expect-idem-dedupe? opts)})
+
                    ;; Soak mode: O(n) checker groups by :key (per region).
                    (= :soak ck)
                    (if (= :register workload)
@@ -900,7 +1256,26 @@
                   :min-op-sample          (:min-op-sample opts)
                   ;; A dedicated idempotency workload deliberately replays the
                   ;; same value, so the uniqueness premise does not hold there.
-                  :check-premise?         (not= :idempotency (:workload opts))})
+                  :check-premise?         (not= :idempotency (:workload opts))
+                  ;; AG-01：--via-agent 的 run 必须能回答「这次真的经过 agent 了吗」
+                  ;; （否则端点写错 = 直连假绿）。抓取在 check 时做：agent 每 run
+                  ;; 新进程，计数从 0 起，run 后抓到 > 0 才算证明。
+                  ;;
+                  ;; **只有 `via?` 的 run 才挂这条门禁**：`matrix-m5-diff` 的 direct
+                  ;; 跑是**对照组**（客户端直连 server），它本来就不该有 agent 流量
+                  ;; —— 给它挂「代理计数 > 0」等于把对照组判红，于是 T5.2 的归因
+                  ;; 基线根本建不起来。实测（M5a 第二轮）：diff 矩阵 4 个 direct cell
+                  ;; 全部红在 `:agent-route-not-proven`（`:total 0`），而它们只是在
+                  ;; 正确地直连。
+                  :agent-scrape           (when (and (:agent-plan opts)
+                                                     (or (:via-agent opts)
+                                                         (contains? local-surface-workloads
+                                                                    (:workload opts))))
+                                            (let [p (:agent-plan opts)]
+                                              (fn [] (agent/routing-proof! p))))
+                  :min-agent-requests     (:min-agent-requests opts)
+                  :agent-local-surface?   (contains? local-surface-workloads
+                                                     (:workload opts))})
        :perf   (checker/perf)})))
 
 ;; --------------------------------------------------------------------------
@@ -908,7 +1283,7 @@
 ;; --------------------------------------------------------------------------
 
 (defn- build-nemesis
-  [nemesis-key db]
+  [nemesis-key db aplan]
   (case nemesis-key
     :none             nemesis/noop
     :kill            (n/kill-one db)
@@ -919,7 +1294,67 @@
     :partition-ring  (nemesis/partition-majorities-ring)
     :all             (n/compose-all db)
     :soak            (n/compose-all db)
+    ;; M5a：agent 侧故障注入（需要 --agents N>0；否则构造期抛，不静默变成 :none）
+    :kill-agent      (n/kill-agent db aplan)
+    :kill-agent-all  (n/kill-agent-all db aplan)
+    :pause-agent     (n/pause-agent db aplan)
+    :partition-agent-server (n/partition-agent-server db aplan)
+    :agent-all       (n/compose-agent-all db aplan)
     nemesis/noop))
+
+(defn- with-agent
+  "包装 client：把 agent 的启停挂到客户端的生命周期上。
+
+  **为什么挂在 open! 上（而不是 setup!）**：jepsen 的顺序是
+  `db/setup!`（所有节点）→ `client/open!`（每个节点一次）→ `client/setup!`
+  （只对第一个 client）—— 见 `jepsen/core.clj:196-224`。`open!` 里就会
+  连隧道并认证，所以 agent 必须在**第一次 open!** 之前就起来。用原子量保证
+  只起一次（顺序不依赖 jepsen 版本的细节：两个钩子都调 bring-up!，谁先来谁做）。
+
+  另：db/setup! 已经把整个集群起好（agent 的 static_peers 要连的就是它），
+  所以这里做「集群级」的 agent 启动是安全的，包括幂等的
+  `coord security bootstrap-role`。"
+  [client agent-plan]
+  (if-not agent-plan
+    client
+    (let [up?       (atom false)
+          bring-up! (fn []
+                      (when (compare-and-set! up? false true)
+                        (agent/bootstrap-role! agent-plan)
+                        ;; agent 侧没有 server 那种「root 全能力放行」旁路，
+                        ;; 所以客户端用到的能力必须显式授给 root（幂等；见
+                        ;; agent.clj 的 grant-client-capabilities! 与 F-28）。
+                        (agent/grant-client-capabilities! agent-plan)
+                        (agent/setup! agent-plan)))]
+      (reify jclient/Client
+        (open! [this test node]
+          (bring-up!)
+          (jclient/open! client test node))
+        (setup! [this test]
+          (bring-up!)
+          (jclient/setup! client test)
+          ;; AG-01：run **期间**的第一次路由采样（此时 agent 刚起、计数为 0）。
+          ;; 只在 setup! 采一次 + teardown! 采一次，是因为 nemesis 会故意 kill
+          ;; agent —— 只抓 run 结束那一次会把「刚才被杀、还没起回来」误判成
+          ;; 「路由证不出来」（见 agent.clj 的 scrape-log 注释）。
+          (agent/sample-routing! agent-plan)
+          this)
+        (invoke! [this test op] (jclient/invoke! client test op))
+        (close! [this test] (jclient/close! client test))
+        (teardown! [this test]
+          (jclient/teardown! client test)
+          (agent/sample-routing! agent-plan)
+          (agent/teardown! agent-plan))))))
+
+(defn- agent-plan
+  "解析 agent 计划（`--agents N`）；未启用时 nil。
+
+  `all-nodes` 是 **CLI 给的完整节点列表**（可能比集群大）—— agent 默认跑在
+  集群之外的那几个节点上，这样 `:partition-agent-server` 才能把 agent 与整个
+  集群隔开（见 jepsen.coord.agent 的 ns 注释 3）。"
+  [opts all-nodes]
+  (when (agent/enabled? opts)
+    (agent/plan opts {:nodes all-nodes})))
 
 ;; --------------------------------------------------------------------------
 ;; Test assembly
@@ -945,10 +1380,56 @@
                  (and (= :multi-register (:workload opts))
                       (nil? (:regions opts)))
                  (assoc :regions 1))
-        nodes  (take 3 (:nodes opts))
-        opts   (assoc opts :nodes nodes)
+        ;; M5a：agent 的计划必须在 :nodes 被截断**之前**算出来 ——
+        ;; agent 默认跑在「集群之外的节点」（第 4 个起），所以需要 CLI 给的
+        ;; 完整节点列表（all-nodes），而 :nodes 本身要截断成 3 节点集群。
+        all-nodes (vec (:nodes opts))
+        nodes  (vec (take db/server-count all-nodes))
+        peers  (db/agent-peers all-nodes)
+        opts   (cond-> (assoc opts :nodes nodes)
+                 (agent/enabled? opts) (assoc :agent-peers peers))
+        ;; M5b：cache/mq 两个数据面需要在 agent 配置里**显式开启**（agent 的
+        ;; default-services 只有 M5a 的四个控制面）。按 workload 开，避免所有 run
+        ;; 都多起两个服务、也多两个未判定的面。
+        opts   (cond-> opts
+                 (contains? #{:cache :mq} (:workload opts))
+                 (assoc :agent-services (conj agent/default-services (:workload opts)))
+                 ;; M5b：主题名必须在**构造客户端之前**定下来 —— 客户端的
+                 ;; `setup!` 要用它建主题，而生成器要用同一个名字发布。
+                 (= :mq (:workload opts))
+                 (assoc :mq-topic (mq-topic-name opts)))
         db     (db/coord opts)
-        nemesis (build-nemesis (:nemesis opts) db)]
+        aplan  (agent-plan opts all-nodes)
+        opts   (cond-> opts aplan (assoc :agent-plan aplan))
+        ;; --via-agent：客户端连控制机上的**隧道端口**（每个 agent 一个），
+        ;; 而不是节点的 50051。其余一切不变：agent 只是传输路径。
+        ;; agent 本地面（lock/election/idgen/registry）**必须**经 agent，
+        ;; 所以对它们而言 via-agent 是隐含的。
+        via?   (or (:via-agent opts)
+                   (contains? local-surface-workloads (:workload opts)))
+        client-nodes (if (and aplan via?)
+                       (agent/endpoints aplan)
+                       nodes)
+        nemesis (build-nemesis (:nemesis opts) db aplan)]
+    (when (and aplan via?)
+      (info "M5a: client endpoints" (pr-str client-nodes)
+            "-> agents on" (pr-str (:hosts aplan))
+            (if (:via-agent opts) "(--via-agent)" "(implied: agent-local workload)")))
+    (when (and (not aplan) (contains? local-surface-workloads (:workload opts)))
+      (throw (ex-info (str "workload " (:workload opts) " 需要 agent："
+                           "请加 --agents N（lock/election/idgen/registry/cache/mq 是 "
+                           "agent 本地面，server 上不存在这些服务）")
+                      {:workload (:workload opts)})))
+    ;; M5b：cache/mq 的数据在 agent 进程本地 ⇒ 「写后读」判据只在单 agent 下成立。
+    ;; 与其让 checker 在「另一份本地存储上读不到」时产出假红（或把真丢数据当噪声），
+    ;; 不如在**起跑前**拒绝：多 agent 的 cache/mq 需要 ISR 复制拓扑，那是另一轮 lab
+    ;; 工作（见 coord-agent-coverage-plan.md §11 的漏检边界）。
+    (when (and aplan (contains? local-consistency-workloads (:workload opts))
+               (not= 1 (long (:count aplan))))
+      (throw (ex-info (str "workload " (:workload opts) " 的数据只在 agent 本地，"
+                           "读-己-写判据要求 --agents 1（当前 " (:count aplan) " 个 agent）。"
+                           "多 agent 同跑会把「数据在另一个 agent 上」误判成丢数据")
+                      {:workload (:workload opts) :agents (:count aplan)})))
     (when soak?
       (reset! soak-write-counter 0)
       (reset! multi-write-counter {}))
@@ -962,7 +1443,15 @@
            {:name      "coord"
             :os        os/noop
             :db        db
-            :client    (client/coord-client opts)
+            :client    (with-agent (client/coord-client
+                                     ;; ops 走 client-nodes（可能是 agent 隧道）；
+                                     ;; 鉴权必须走集群端点 —— agent 不代理 Auth
+                                     ;; （它只代理 6 个数据面服务），见
+                                     ;; client.clj 的 reauthenticate!。
+                                     (assoc opts
+                                            :nodes client-nodes
+                                            :auth-nodes nodes))
+                                   aplan)
             :nemesis   nemesis
             :generator (workload-gen opts)
             :checker   (checker opts)})))
@@ -972,11 +1461,12 @@
 ;; --------------------------------------------------------------------------
 
 (def cli-opts
-  [[nil "--workload WORKLOAD" "Workload: register, cas-register, idempotency (request_id 幂等专项, T1.4), map (delete/tombstone + 存在性, T1.1), txn (txn 全形态, T1.2), scan (range/revision 读, T1.3), mixture (map+txn+scan 混合, T1.5), watch (watch 事件流/续传, T2.1), lease (TTL/续期/Revoke, T2.2), soakfull (组合浸泡, T6.1), or multi-register (N independent region registers, --regions N)"
+  [[nil "--workload WORKLOAD" "Workload: register, cas-register, idempotency (request_id 幂等专项, T1.4), map (delete/tombstone + 存在性, T1.1), txn (txn 全形态, T1.2), scan (range/revision 读, T1.3), mixture (map+txn+scan 混合, T1.5), watch (watch 事件流/续传, T2.1), lease (TTL/续期/Revoke, T2.2), lock (跨 agent 互斥, M5a), election (唯一 leader, M5a), idgen (全局唯一 ID, M5a), registry (注册/发现/幽灵实例, M5a), cache (agent 本地缓存: TTL/重启持久化, M5b/AG-09), mq (agent 本地队列: at-least-once, M5b/AG-11), soakfull (组合浸泡, T6.1), or multi-register (N independent region registers, --regions N). cache/mq 的数据在 agent 进程本地，所以要求恰好 1 个 agent（--agents 1）"
     :default  :register
     :parse-fn keyword
-    :validate [#{:register :cas-register :idempotency :map :txn :scan :mixture :watch :lease :soakfull :multi-register}
-               "Must be one of register, cas-register, idempotency, map, txn, scan, mixture, watch, lease, soakfull, multi-register"]]
+    :validate [#{:register :cas-register :idempotency :map :txn :scan :mixture :watch :lease
+                 :lock :election :idgen :registry :cache :mq :soakfull :multi-register}
+               "Must be one of register, cas-register, idempotency, map, txn, scan, mixture, watch, lease, lock, election, idgen, registry, cache, mq, soakfull, multi-register"]]
    [nil "--soak-mix MIX"
     "T6.1 (--workload soakfull): the surfaces to interleave and their relative
     weights, e.g. 'map=40,txn=20,scan=5,watch=15,lease=10'. A surface that is
@@ -1095,12 +1585,13 @@
     :parse-fn (fn [s] (Long/parseLong s))
     :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
    [nil "--nemesis NEMESIS"
-    "Nemesis: none, kill, kill-all, pause, partition, partition-halves, partition-ring, all, soak"
+    "Nemesis: none, kill, kill-all, pause, partition, partition-halves, partition-ring, all, soak; M5a (needs --agents N): kill-agent, kill-agent-all, pause-agent, partition-agent-server, agent-all"
     :default  :none
     :parse-fn keyword
     :validate [#{:none :kill :kill-all :pause :partition :partition-halves
-                 :partition-ring :all :soak}
-               "Must be one of none, kill, kill-all, pause, partition, partition-halves, partition-ring, all, soak"]]
+                 :partition-ring :all :soak
+                 :kill-agent :kill-agent-all :pause-agent :partition-agent-server :agent-all}
+               "Must be one of none, kill, kill-all, pause, partition, partition-halves, partition-ring, all, soak, kill-agent, kill-agent-all, pause-agent, partition-agent-server, agent-all"]]
    [nil "--rate RATE"
     "Client ops/sec at a fixed global rate (soak default 0.5); otherwise exponential stagger"
     :default  nil
@@ -1140,8 +1631,9 @@
    [nil "--no-jitter"
     "Disable nemesis jitter (T0.6/G3): fixed 5s beat (short runs) and exact
     soak quiet/disrupt windows, matching pre-T0.6 behaviour"
+    ;; 布尔旗标**不能**写 `:parse-fn`（见 --via-agent 的注释：tools.cli 会把默认值
+    ;; `false` 喂给 parse-fn，抛 Boolean cannot be cast to String）。
     :default  false
-    :parse-fn #(Boolean/parseBoolean %)
     :assoc-fn (fn [m _ _] (assoc m :jitter false))]
    [nil "--soak-max-rto-seconds SECONDS"
     "T0.2: override the per-nemesis RTO budget with a single global bound
@@ -1198,7 +1690,194 @@
     invalid (:reason :insufficient-sample) rather than green"
     :default  nil
     :parse-fn (fn [s] (Long/parseLong s))
-    :validate [#(and (integer? %) (pos? %)) "must be a positive integer"]]])
+    :validate [#(and (integer? %) (pos? %)) "must be a positive integer"]]
+
+   ;; ---- M5a：agent 层（jepsen.coord.agent）--------------------------------
+   [nil "--agents N"
+    "M5a: number of coord-agent instances (default 0 = no agent, behaviour is
+    byte-identical to before). Agents run the *same* coord binary
+    (coord agent --agent-config ...) on the nodes **outside** the 3-node
+    cluster, bind loopback only, and are reached through an SSH tunnel from
+    the control node. N >= 2 is required for the mutual-exclusion surfaces:
+    with a single agent there is only one local cache to look at"
+    :default  0
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 % 5)) "must be 0..5"]]
+
+   [nil "--via-agent"
+    "M5a: point the client at the agent tunnels instead of the coord nodes.
+    The workload/checker code is unchanged (an agent is a transport path), and
+    every such run is gated on a **routing proof**: the agent's
+    coord_agent_grpc_requests_total must have advanced (a mistyped endpoint
+    would otherwise be a green run that never touched an agent)"
+    ;; 布尔旗标**不能**写 `:parse-fn`：tools.cli 一看到 `:parse-fn` 就把该选项
+    ;; 当成「吃一个值」的选项，于是裸写 `--via-agent` 会把**默认值 `false`**
+    ;; 喂给 parse-fn，抛 `Boolean cannot be cast to String` —— 而报错发生在
+    ;; CLI 解析阶段，看起来跟 agent 毫无关系。
+    ;; 实测（M5a 第二轮）：`make matrix-m5-diff` 的 4 个 via-agent cell 全部
+    ;; 死在这一行上，而 T5.2 的差分基线因此从未真正建立。
+    ;; 正确写法：`(没有 :parse-fn)` + `:default false` ⇒ 出现即 true。
+    :default  false]
+
+   [nil "--agent-verifying-key HEX"
+    "M5a: Ed25519 public key (hex, 64 chars) the agents use to verify the server's\n    CCTs. Defaults to the value derived from the lab's auth_root_key (see\n    db.clj's default-agent-verifying-key and scripts/derive-cct-pubkey.py).\n    Without a matching key the agent rejects every CCT-bearing request with\n    'Ed25519 CCT presented but no public key configured' — there is no\n    automatic way to fetch it from the server today"
+    :default  nil]
+
+   [nil "--agent-idgen-node-ids IDS"
+    "AG-08: force the snowflake node ids of the agents, comma-separated
+    (e.g. '7,7' to make two agents collide on purpose -- the uniqueness
+    checker must then catch duplicate ids; the agent's own /_idgen/nodes CAS
+    registration may roll the second one over, which is a legitimate
+    resolution and is what the run documents)"
+    :default  nil
+    :parse-fn (fn [s] (mapv (fn [x] (Long/parseLong (str/trim x)))
+                            (str/split (str s) #",")))]
+
+   [nil "--lock-ttl-seconds N"
+    "M5a (--workload lock): requested lock TTL in seconds (default 5)"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (pos? %)) "must be a positive integer"]]
+   [nil "--lock-hold-ms MS"
+    "M5a: how long one contender holds the lock before releasing (default 200).
+    Longer holds make overlap much easier to reach"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (pos? %)) "must be a positive integer"]]
+   [nil "--lock-deadline-ms MS"
+    "M5a: how long a contender keeps retrying Acquire before giving up
+    (:fail :lock-held -- a legitimate business outcome, whitelisted in s5.1)
+    (default 5000)"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (pos? %)) "must be a positive integer"]]
+   [nil "--lock-grace-ms MS"
+    "M5a: window after (an attempted) release within which GetLockInfo must
+    show the lock gone (default 4000)"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (pos? %)) "must be a positive integer"]]
+   [nil "--lock-min-acquires N"
+    "M5a: s5.1 sample gate -- locks acquired (default 0; the plan asks for
+    >= 200). Below it the lock checker is invalid, not green"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+
+   [nil "--election-hold-ms MS"
+    "M5a (--workload election): how long a winner stays leader before resigning
+    (default 200)"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (pos? %)) "must be a positive integer"]]
+   [nil "--election-ttl-seconds N"
+    "M5a: requested leader TTL in seconds (default 5)"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (pos? %)) "must be a positive integer"]]
+   [nil "--election-min-campaigns N"
+    "M5a: s5.1 sample gate -- successful campaigns (default 0; the plan asks
+    for >= 50 rounds). Below it the election checker is invalid, not green"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+
+   [nil "--idgen-min-ids N"
+    "M5a (--workload idgen): sample gate -- ids observed (default 0). Below it
+    the idgen checker is invalid, not green"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+   [nil "--idgen-min-regressions N"
+    "M5a: how many id regressions (decreasing ids within one client process)
+    are tolerated (default 0 = assume the clock-rollback guard is implemented,
+    which is what STATUS.md's remediation item asks for). Loosening this is a
+    *policy* decision: record the written confirmation and link it in the
+    MANIFEST -- never adjust it to make a red run green"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+
+   [nil "--registry-ttl-seconds N"
+    "M5a (--workload registry): registration TTL in seconds (default 5)"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (pos? %)) "must be a positive integer"]]
+   [nil "--registry-grace-ms MS"
+    "M5a: grace beyond the ttl within which a deregistered instance must
+    disappear from discovery (default 4000)"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (pos? %)) "must be a positive integer"]]
+   [nil "--registry-min-cycles N"
+    "M5a: s5.1 sample gate -- register/expire cycles (default 0; the plan asks
+    for >= 30). Below it the registry checker is invalid, not green"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+
+   ;; ---- M5b：agent 本地数据面（cache / mq）--------------------------------
+   [nil "--cache-ttl-seconds SECONDS"
+    "M5b (--workload cache): TTL for **half** of the string Sets (default 0 =
+    all Sets are durable, which is what the 'write visible' and
+    'survives restart' judgements need). With T>0 the TTL judgements become
+    live too: a value must not disappear before T and must not survive T+grace"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+   [nil "--cache-ttl-grace-ms MS"
+    "M5b: grace after TTL expiry before a still-present value counts as a
+    ghost (default 3000; covers the server-side cleanup beat)"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (pos? %)) "must be a positive integer"]]
+   [nil "--cache-min-sets N"
+    "M5b: s5.1 sample gate -- confirmed Sets (default 0). Below it the cache
+    checker is invalid, not green"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+   [nil "--cache-min-gets N"
+    "M5b: s5.1 sample gate -- completed Gets (default 0)"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+   [nil "--cache-min-list-ops N"
+    "M5b: sample gate for the list surface (LPush/LRange/LLen completions,
+    default 0)"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+   [nil "--cache-min-set-ops N"
+    "M5b: sample gate for the set surface (SAdd/SMembers completions,
+    default 0)"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+   [nil "--mq-topic NAME"
+    "M5b (--workload mq): topic name (default jepsen-mq). The client creates
+    it in setup! (CreateTopic is not an idempotent contract)"
+    :default  nil]
+   [nil "--mq-consumer-group NAME"
+    "M5b: consumer group (default is run-scoped, so a previous run's committed
+    offsets cannot be mistaken for this run's)"
+    :default  nil]
+   [nil "--mq-min-publishes N"
+    "M5b: s5.1 sample gate -- confirmed publishes (default 0)"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+   [nil "--mq-min-polls N"
+    "M5b: s5.1 sample gate -- completed Polls (default 0)"
+    :default  nil
+    :parse-fn (fn [s] (Long/parseLong s))
+    :validate [#(and (integer? %) (<= 0 %)) "must be >= 0"]]
+   [nil "--mq-expect-idem-dedupe"
+    "M5b: turn the idempotency_key dedupe observation into a hard judgement.
+    The proto declares the field but the publish path ignores it (measured
+    2026-09-19), so the default is **record only** until the contract wording
+    is confirmed (dev.md s5.4). Boolean flag: no :parse-fn"
+    :default  false]])
 
 (defn -main
   [& args]

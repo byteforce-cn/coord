@@ -87,6 +87,17 @@ const DLQ_TABLE: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::ne
 const NEXT_OFFSET_TABLE: redb::TableDefinition<&[u8], u64> =
     redb::TableDefinition::new("mq:next_offset");
 
+// ──── 生产幂等表（F-57）────
+// 幂等键 → 已分配 offset：key = [topic_len:u32][topic_bytes][partition:u32][ikey_len:u32][ikey_bytes]
+// value = JSON `{"offset":u64,"ts_ms":u64}`。
+// 存在意义：调用方在"响应丢失后重试"时不得为下游多出一条消息。
+// 条目按 topic 的 `retention_secs` 窗口保留，由 `produce_idempotent` 低频机会式清扫。
+const IDEMPOTENCY_TABLE: redb::TableDefinition<&[u8], &[u8]> =
+    redb::TableDefinition::new("mq:idempotency");
+
+/// 幂等条目清扫频率（每 N 次带幂等键的生产触发一次机会式清扫）
+const IDEM_PRUNE_EVERY: u64 = 256;
+
 // ──── 复制日志表（ISR，v2.1）────
 // 复制条目日志: key = [shard_len:u32][shard_bytes][seq:u64 BE]
 const REPL_ENTRY_TABLE: redb::TableDefinition<&[u8], &[u8]> =
@@ -137,6 +148,35 @@ fn encode_next_offset_key(topic: &str, partition: u32) -> Vec<u8> {
     v.extend_from_slice(&(topic.len() as u32).to_be_bytes());
     v.extend_from_slice(topic.as_bytes());
     v.extend_from_slice(&partition.to_be_bytes());
+    v
+}
+
+/// 幂等索引条目
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct IdempotencyEntry {
+    /// 首次为该幂等键分配的 offset
+    offset: u64,
+    /// 写入墙钟（毫秒，清扫用）
+    ts_ms: u64,
+}
+
+/// topic 下全部幂等键的前缀（用于清扫时按 topic 过滤）
+fn idempotency_prefix(topic: &str) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4 + topic.len() + 4);
+    v.extend_from_slice(&(topic.len() as u32).to_be_bytes());
+    v.extend_from_slice(topic.as_bytes());
+    v.extend_from_slice(&u32::MAX.to_be_bytes()); // partition 占位：前缀只到 topic
+    v
+}
+
+/// 幂等索引键：[topic_len:u32][topic][partition:u32][ikey_len:u32][ikey]
+fn encode_idempotency_key(topic: &str, partition: u32, ikey: &str) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4 + topic.len() + 4 + 4 + ikey.len());
+    v.extend_from_slice(&(topic.len() as u32).to_be_bytes());
+    v.extend_from_slice(topic.as_bytes());
+    v.extend_from_slice(&partition.to_be_bytes());
+    v.extend_from_slice(&(ikey.len() as u32).to_be_bytes());
+    v.extend_from_slice(ikey.as_bytes());
     v
 }
 
@@ -268,6 +308,9 @@ pub struct MessageQueueService {
     replication: RwLock<Option<Arc<crate::services::replication::ReplicationManager>>>,
     /// 自身 Arc 弱引用（spawn_blocking 升级用，见 bind_self_weak）
     self_arc: RwLock<Option<std::sync::Weak<MessageQueueService>>>,
+    /// 幂等条目机会式清扫计数器（每 `IDEM_PRUNE_EVERY` 次触发一次，
+    /// 避免每次生产都 O(n) 扫全表）
+    idem_prune_tick: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for MessageQueueService {
@@ -300,6 +343,7 @@ impl MessageQueueService {
             subscriptions: RwLock::new(HashMap::new()),
             replication: RwLock::new(None),
             self_arc: RwLock::new(None),
+            idem_prune_tick: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -429,12 +473,62 @@ impl MessageQueueService {
 
     // ──── 消息生产 ────
 
+    /// 幂等索引查询（在给定写事务内；命中返回首次分配的 offset）
+    ///
+    /// 抽成独立函数而非内联：redb 的 `AccessGuard` 借用表、表借用事务，
+    /// 内联时 `?` 的解糖临时量会活到语句末，触发 ``table` does not live long enough``。
+    /// 幂等索引查询：命中返回首次分配的 offset
+    ///
+    /// 形态刻意对齐已知可编译的 `get_consumer_offset`：`table` 与 `match`
+    /// 同处**函数体**（无内层块），scrutinee 临时量在语句末即析构。
+    /// 注意：调用方须**先持有写事务**再查（redb 同一时刻只允许一个写事务
+    /// ⇒ 查与写在写锁内构成原子的 read-modify-write）。
+    fn lookup_idempotency(&self, ik: &[u8]) -> ServiceResult<Option<u64>> {
+        let rtx = self.read_tx()?;
+        // 表尚未创建（该库上从未带幂等键生产过）⇒ 等价于"无条目"。
+        // redb 的读事务不能像写事务那样隐式建表，必须显式处理。
+        let table = match rtx.open_table(IDEMPOTENCY_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let bytes: Option<Vec<u8>> = table.get(ik)?.map(|v| v.value().to_vec());
+        match bytes {
+            Some(b) => Ok(Some(
+                serde_json::from_slice::<IdempotencyEntry>(&b)?.offset,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// 生产一条消息（无幂等键）。
+    ///
+    /// ⚠️ 若调用方可能重试，请用 [`Self::produce_idempotent`] —— 否则"响应丢失后
+    /// 重试"会给下游多一条消息（F-57）。
     pub fn produce(
         &self,
         topic: &str,
         partition: u32,
         payload: Vec<u8>,
         headers: Option<BTreeMap<String, String>>,
+    ) -> ServiceResult<u64> {
+        self.produce_idempotent(topic, partition, payload, headers, None)
+    }
+
+    /// 生产一条消息，可按 `idempotency_key` 去重（F-57 / V9）。
+    ///
+    /// 语义：同一 `(topic, partition, idempotency_key)` 重复生产**不产生第二个
+    /// offset**，而是返回首次分配的 offset。去重索引与消息写入在**同一 redb
+    /// 写事务**中提交，因此不存在"消息已写但索引未写"的窗口。
+    ///
+    /// `idempotency_key = None`（或空串）⇒ 无去重（等价于旧 [`Self::produce`]）。
+    pub fn produce_idempotent(
+        &self,
+        topic: &str,
+        partition: u32,
+        payload: Vec<u8>,
+        headers: Option<BTreeMap<String, String>>,
+        idempotency_key: Option<&str>,
     ) -> ServiceResult<u64> {
         let config = self
             .get_topic_config(topic)?
@@ -462,8 +556,20 @@ impl MessageQueueService {
 
         let next_key = encode_next_offset_key(topic, partition);
         let msg_key_prefix = msg_key_prefix(topic, partition);
+        let idem_key = idempotency_key
+            .filter(|k| !k.is_empty())
+            .map(|k| encode_idempotency_key(topic, partition, k));
 
+        let now = now_millis();
         let wtx = self.write_tx()?;
+
+        // 去重命中：直接返回首次分配的 offset，不追加消息、不推进计数器
+        if let Some(ik) = idem_key.as_ref() {
+            if let Some(offset) = self.lookup_idempotency(ik.as_slice())? {
+                return Ok(offset);
+            }
+        }
+
         // Get and increment next offset
         let offset = {
             let current = {
@@ -486,14 +592,93 @@ impl MessageQueueService {
             let mut table = wtx.open_table(MESSAGE_TABLE)?;
             table.insert(mk.as_slice(), encoded.as_slice())?;
         }
+
+        // 幂等索引（与消息同事务 ⇒ 无"消息已写索引未写"窗口）
+        if let Some(ik) = idem_key.as_ref() {
+            let entry = IdempotencyEntry {
+                offset,
+                ts_ms: now,
+            };
+            let bytes = serde_json::to_vec(&entry)?;
+            let mut table = wtx.open_table(IDEMPOTENCY_TABLE)?;
+            table.insert(ik.as_slice(), bytes.as_slice())?;
+        }
+
         wtx.commit()?;
 
         let _ = (msg_key_prefix, next_key); // silence unused warnings
 
+        // 机会式清扫（低频）：防幂等索引无界增长
+        if idem_key.is_some() {
+            self.maybe_prune_idempotency(topic, config.retention_secs, now);
+        }
+
         // 推送通知订阅者（流式 subscribe：基于消费组偏移过滤）
-        self.notify_subscribers(topic, partition, offset, payload.clone(), now_millis());
+        self.notify_subscribers(topic, partition, offset, payload.clone(), now);
 
         Ok(offset)
+    }
+
+    /// 机会式清扫：每 `IDEM_PRUNE_EVERY` 次触发一次，删除超过保留窗口的幂等条目。
+    ///
+    /// 保留窗口取 topic 的 `retention_secs`（与消息保留一致 —— 消息已过期后，
+    /// 对它的去重已无意义）。清扫失败**不阻断生产**（best-effort），仅记日志。
+    fn maybe_prune_idempotency(&self, topic: &str, retention_secs: u64, now_ms: u64) {
+        use std::sync::atomic::Ordering;
+        let tick = self.idem_prune_tick.fetch_add(1, Ordering::Relaxed);
+        if !tick.is_multiple_of(IDEM_PRUNE_EVERY) {
+            return;
+        }
+        let Ok(wtx) = self.write_tx() else {
+            return;
+        };
+        let cutoff = now_ms.saturating_sub(retention_secs.saturating_mul(1000));
+        let result = (|| -> ServiceResult<usize> {
+            let prefix = idempotency_prefix(topic);
+            let mut stale: Vec<Vec<u8>> = Vec::new();
+            {
+                let table = wtx.open_table(IDEMPOTENCY_TABLE)?;
+                for item in table.iter()? {
+                    let (k, v) = item?;
+                    let kb = k.value();
+                    if !kb.starts_with(&prefix) {
+                        continue;
+                    }
+                    let Ok(entry) = serde_json::from_slice::<IdempotencyEntry>(v.value()) else {
+                        continue; // 解析失败不动（可能是更新版本的记录）
+                    };
+                    if entry.ts_ms < cutoff {
+                        stale.push(kb.to_vec());
+                    }
+                }
+            }
+            if stale.is_empty() {
+                return Ok(0);
+            }
+            let mut table = wtx.open_table(IDEMPOTENCY_TABLE)?;
+            for k in &stale {
+                table.remove(k.as_slice())?;
+            }
+            Ok(stale.len())
+        })();
+
+        match result {
+            Ok(n) if n > 0 => {
+                if let Err(e) = wtx.commit() {
+                    tracing::warn!("mq: idempotency prune commit failed: {e}");
+                    return;
+                }
+                tracing::debug!(topic, removed = n, "mq: pruned stale idempotency entries");
+            }
+            Ok(_) => {
+                // 无过期待删：释放写事务（redb 只允许一个写事务，不 commit 会一直占着）
+                drop(wtx);
+            }
+            Err(e) => {
+                drop(wtx);
+                tracing::warn!("mq: idempotency prune failed: {e}");
+            }
+        }
     }
 
     /// 消费消息：从指定 offset 开始读取最多 max_count 条
@@ -873,7 +1058,12 @@ impl MessageQueueService {
     }
 
     /// Leader 侧单事务提交：NEXT_OFFSET_TABLE + 消息 + 复制日志 + 幂等键 + 本地序列号。
-    fn replicated_publish_local(&self, entry: &ReplicationEntry) -> ServiceResult<()> {
+    fn replicated_publish_local(
+        &self,
+        entry: &ReplicationEntry,
+        idem_key: Option<&[u8]>,
+        now_ms: u64,
+    ) -> ServiceResult<()> {
         let (topic, partition, offset, payload) = match &entry.operation {
             ReplicationOp::MqPublish {
                 topic,
@@ -883,6 +1073,9 @@ impl MessageQueueService {
             } => (topic.as_str(), *partition, *offset, payload),
             _ => return Err("replicated_publish_local: not an MqPublish op".into()),
         };
+        // ⚠️ headers 不进复制条目：`ReplicationEntry` 未建模 headers，
+        // Leader 写进去而 Follower 写不进去会造成副本分叉 ⇒ 调用方若给了
+        // headers（如消息 key），`produce_replicated` 已经 fail-loud 拒绝。
         let encoded = encode_message(payload, &BTreeMap::new());
         let nk = encode_next_offset_key(topic, partition);
         let mk = encode_msg_key(topic, partition, offset);
@@ -902,6 +1095,16 @@ impl MessageQueueService {
 
             let mut t = wtx.open_table(MESSAGE_TABLE)?;
             t.insert(mk.as_slice(), encoded.as_slice())?;
+
+            // 生产者级幂等索引：与 offset 分配 / 消息写入**同事务**（F-57）
+            if let Some(ik) = idem_key {
+                let bytes = serde_json::to_vec(&IdempotencyEntry {
+                    offset,
+                    ts_ms: now_ms,
+                })?;
+                let mut t = wtx.open_table(IDEMPOTENCY_TABLE)?;
+                t.insert(ik, bytes.as_slice())?;
+            }
 
             Self::write_repl_bookkeeping_tx(&wtx, entry)?;
         }
@@ -992,7 +1195,8 @@ impl MessageQueueService {
         topic: &str,
         partition: u32,
         payload: Vec<u8>,
-        _headers: Option<BTreeMap<String, String>>,
+        headers: Option<BTreeMap<String, String>>,
+        idempotency_key: Option<&str>,
     ) -> ServiceResult<u64> {
         let rm = self
             .replication
@@ -1027,6 +1231,30 @@ impl MessageQueueService {
             .into());
         }
 
+        // ⚠️ 诚实边界（fail-loud，不静默丢）：`ReplicationEntry` 未建模 headers，
+        // 因此消息 key / headers 在复制路径上**无法传播**。此前 `_headers`
+        // 被直接丢弃（调用方以为写入成功）—— 现改为明确报错。
+        if headers.as_ref().is_some_and(|h| !h.is_empty()) {
+            return Err("mq: message headers (e.g. key) are not carried by the ISR \
+                        replication entry; refusing to drop them silently — use \
+                        services.replication=false, or omit the key"
+                .into());
+        }
+
+        // 生产者级幂等（F-57 / V9）：与本地路径共用同一张表、同一语义。
+        // 命中则直接返回首次分配的 offset，不追加消息、不推进计数器。
+        let idem_key = idempotency_key
+            .filter(|k| !k.is_empty())
+            .map(|k| encode_idempotency_key(topic, partition, k));
+        if let Some(ik) = idem_key.as_ref() {
+            let rtx = self.read_tx()?;
+            let t = rtx.open_table(IDEMPOTENCY_TABLE)?;
+            if let Some(v) = t.get(ik.as_slice())? {
+                let e: IdempotencyEntry = serde_json::from_slice(v.value())?;
+                return Ok(e.offset);
+            }
+        }
+
         let seq = self.next_sequence(&shard)?;
         let offset = {
             let rtx = self.read_tx()?;
@@ -1049,7 +1277,7 @@ impl MessageQueueService {
         );
 
         // 单事务本地提交（NEXT_OFFSET_TABLE + 消息 + 复制日志 + 幂等键 + 本地序列号）
-        self.replicated_publish_local(&entry)?;
+        self.replicated_publish_local(&entry, idem_key.as_deref(), now_millis())?;
 
         // 同步复制：推送到 ISR Followers，min_isr 校验（自身 + 确认 follower 数）
         let acked = rm

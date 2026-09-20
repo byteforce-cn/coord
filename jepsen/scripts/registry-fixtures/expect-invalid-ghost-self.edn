@@ -1,0 +1,12 @@
+;; expect-invalid-ghost-self —— **P0**：属主自己停心跳后，实例在 ttl+grace 外仍可见。
+;;
+;; ttl 5s ⇒ 存活到 5000ms，加 grace 2000ms = 7000ms；但 12000ms 才消失
+;; ⇒ 幽灵实例。生产表现：上层一直把请求发给已经下线的实例。
+[{:type :ok :f :registry-cycle :process 0 :time 1000000000
+  :name "svc-a" :instance-id "inst-1" :lease-id 31
+  :holder-ttl-seconds 5 :grace-ms 2000 :dup? false
+  :absent-ms 12000 :deregistered? true
+  :observations [{:phase :after-register :at-ms 20 :read-ok? true :present? true
+                  :instances ["inst-1"]}
+                 {:phase :after-ttl :at-ms 12000 :read-ok? true :present? false
+                  :instances []}]}]

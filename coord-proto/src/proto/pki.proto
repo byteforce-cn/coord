@@ -1,0 +1,136 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — PKI 证书签发（能力承诺面，v1.2）
+//
+// 状态：COMMITTED（承诺中）｜ GA 期限：2026-12-31 ｜ 台账：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/pki.proto 的 coord.pki.v1.Pki
+//            （字段编号/类型逐项一致；迁移 = 机械式重挂载，禁止趁机改 wire）
+//
+// GA 验收定义与倒逼机制见 WHITEPAPER.md §13。
+// ============================================================
+
+package coord.pki.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.pki.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/pki/v1;pkiv1";
+
+// ============================================================
+
+service Pki {
+  rpc InitCa(PkiInitCaRequest) returns (PkiInitCaResponse);
+  rpc IssueCert(PkiIssueCertRequest) returns (PkiIssueCertResponse);
+  rpc RenewCert(PkiRenewCertRequest) returns (PkiRenewCertResponse);
+  rpc VerifyCert(PkiVerifyCertRequest) returns (PkiVerifyCertResponse);
+  rpc GetCaCert(PkiGetCaCertRequest) returns (PkiGetCaCertResponse);
+  // ISSUE-000 Phase 2: 平滑轮换（按 CN 轮换 + 列表 + 幂等取回）
+  rpc RotateCert(PkiRotateCertRequest) returns (PkiRotateCertResponse);
+  rpc ListCerts(PkiListCertsRequest) returns (PkiListCertsResponse);
+  rpc GetCertByCN(PkiGetCertByCNRequest) returns (PkiGetCertByCNResponse);
+}
+
+message PkiInitCaRequest {
+  string ca_common_name = 1;
+}
+
+message PkiInitCaResponse {}
+
+message PkiIssueCertRequest {
+  string common_name = 1;
+  int64 ttl_seconds = 2; // 证书 TTL（秒），0 使用默认 24h
+}
+
+message PkiIssueCertResponse {
+  string common_name = 1;
+  string cert_pem = 2;
+  string key_pem = 3;
+  int64 not_before = 4; // UNIX epoch seconds
+  int64 not_after = 5; // UNIX epoch seconds
+  string serial = 6; // hex-encoded
+  string status = 7; // active / retired
+  string parent_serial = 8; // 轮换链（首次签发为空）
+}
+
+message PkiRenewCertRequest {
+  string serial_number = 1; // 要续期的证书序列号（hex-encoded）
+  int64 ttl_seconds = 2; // 新证书的 TTL（秒），0 使用默认 24h
+}
+
+message PkiRenewCertResponse {
+  string common_name = 1;
+  string cert_pem = 2;
+  string key_pem = 3;
+  int64 not_before = 4;
+  int64 not_after = 5;
+  string serial = 6;
+  string status = 7;
+  string parent_serial = 8;
+}
+
+// 按 CN 显式轮换：签发新 active，旧证书标记 retired 保留至 not_after
+message PkiRotateCertRequest {
+  string common_name = 1;
+  int64 ttl_seconds = 2;
+}
+
+message PkiRotateCertResponse {
+  string common_name = 1;
+  string cert_pem = 2;
+  string key_pem = 3;
+  int64 not_before = 4;
+  int64 not_after = 5;
+  string serial = 6;
+  string status = 7;
+  string parent_serial = 8;
+}
+
+// 按 CN 取当前 + 历史证书列表（验签方按 serial/kid 构建多密钥 JWKS）
+message PkiListCertsRequest {
+  string common_name = 1;
+}
+
+message PkiListCertsResponse {
+  repeated PkiCertSummary certs = 1;
+}
+
+// 证书摘要：不含私钥（ListCerts 仅用于验签方构建公钥 JWKS）
+message PkiCertSummary {
+  string common_name = 1;
+  string cert_pem = 2;
+  int64 not_before = 3; // UNIX epoch seconds
+  int64 not_after = 4; // UNIX epoch seconds
+  string serial = 5; // hex-encoded
+  string status = 6; // active / retired
+  string parent_serial = 7;
+}
+
+// 按 CN 幂等取回当前有效证书（含私钥，供持有方恢复签名能力）
+message PkiGetCertByCNRequest {
+  string common_name = 1;
+}
+
+message PkiGetCertByCNResponse {
+  string common_name = 1;
+  string cert_pem = 2;
+  string key_pem = 3;
+  int64 not_before = 4;
+  int64 not_after = 5;
+  string serial = 6;
+  string status = 7;
+  string parent_serial = 8;
+}
+
+message PkiVerifyCertRequest {
+  string cert_pem = 1;
+}
+
+message PkiVerifyCertResponse {
+  bool valid = 1;
+}
+
+message PkiGetCaCertRequest {}
+
+message PkiGetCaCertResponse {
+  string ca_cert_pem = 1;
+}

@@ -1,0 +1,33 @@
+;; expect-valid-observation-loop-must-not-extend-the-interval —— **守门员**（F-34 根因 ①）。
+;;
+;; 形态：一个持有者释放后，客户端还要**观测**锁是否真的不在自己名下（轮询
+;; GetLockInfo，最多 5 × 200ms + RPC）。`:released-at-ms` 如果记在这个观测循环
+;; **之后**，区间尾部就会被循环的 sleep 拉长 —— 实测中位数 +196ms、最长 +1.37s
+;; （F-34 那一轮的原始数据）。而下一个持有者在这段时间里是**合法**接管的。
+;;
+;; 这条 fixture 把口径钉死：区间用 `:gone-at-ms`（最早的可举证时刻）闭合。
+;; 下例中 h1 的 `:released-at-ms` 是 1300ms（观测循环之后取的值，也是修前的
+;; 口径），而 `:gone-at-ms` 是 300ms；后来者在 600ms 拿到锁。
+;;
+;;   * 用 `:gone-at-ms` 闭合 ⇒ h1 = [10, 300)，h2 = [600, 900) —— **不重叠**；
+;;   * 退回 `:released-at-ms` ⇒ h1 = [10, 1300) 与 h2 重叠 700ms ⇒ 变红。
+;;
+;; 去掉这个口径（= 把 bug 放回去）必然变红，所以它是回归守卫而不是装饰。
+[{:type :ok :f :lock-contend :process 0 :time 10
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  :acquired-at-ms 10
+  ;; 观测循环之后才取到的值（修前口径）：1300
+  :released-at-ms 1300 :released? true
+  ;; 真正的闭合证据：300ms 时锁已不在 h1 名下
+  :gone? true :gone-at-ms 300 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}
+
+ {:type :ok :f :lock-contend :process 1 :time 20
+  :name "lock-a" :holder-id "h2" :lease-id 12
+  :acquired-at-ms 600 :released-at-ms 900 :released? true
+  :gone? true :gone-at-ms 900 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}]

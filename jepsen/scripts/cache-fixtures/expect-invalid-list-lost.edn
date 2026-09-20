@@ -1,0 +1,8 @@
+;; expect-invalid-list-lost —— **P0**：LPush 丢了。
+;;
+;; 两次 LPush 都已确认完成（读起点 `:t0-ns` 1s 之前），但 LLen 只返回 1。
+;; 下界取「读起点之前已确认的推入数」，所以这与并发无关。
+[{:type :ok :f :cache-lpush :process 0 :t0-ns 0 :time 400000 :key "cache-list-1" :value "l-1" :length 1}
+ {:type :ok :f :cache-lpush :process 0 :t0-ns 1000000 :time 1400000 :key "cache-list-1" :value "l-2" :length 2}
+ {:type :ok :f :cache-llen :process 1 :t0-ns 1000000000 :time 1001000000
+  :key "cache-list-1" :length 1}]

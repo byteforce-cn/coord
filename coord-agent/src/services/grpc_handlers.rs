@@ -22,7 +22,7 @@ use crate::services::{
     event_notification::{CloudEvent, Event, EventNotificationService},
     idgen::IdGenService,
     leader_election::{LeaderElectionService, LeaderRole},
-    lock::LockService,
+    lock::{LockService, ReleaseOutcome},
     mq::{MessageQueueService, TopicConfig},
     policy::{AccessRequest, PolicyService},
     rate_limiter::RateLimiterService,
@@ -82,7 +82,6 @@ use coord_proto::agent::{
 };
 
 use tonic::{Request, Response, Status};
-
 /// 内部错误脱敏（与 coord-server 同口径）：详情只进 agent 日志，
 /// gRPC 客户端仅收到通用 `internal error`，不泄露存储/引擎内部细节。
 fn sanitized_internal<E: std::fmt::Display>(e: E) -> Status {
@@ -131,8 +130,19 @@ impl Lock for LockService {
         request: Request<LockReleaseRequest>,
     ) -> Result<Response<LockReleaseResponse>, Status> {
         let req = request.into_inner();
-        match LockService::release(self, &req.name, &req.holder_id).await {
-            Ok(released) => Ok(Response::new(LockReleaseResponse { released })),
+        match LockService::release(self, &req.name, &req.holder_id, req.lease_id).await {
+            // 契约：成功 / 幂等（锁不存在或已过期）都是 released=true
+            Ok(ReleaseOutcome::Released | ReleaseOutcome::Gone) => {
+                Ok(Response::new(LockReleaseResponse { released: true }))
+            }
+            // 契约（`lock.proto` 的 `LockReleaseRequest` 语义承诺逐字）：
+            // 「(holder_id, lease_id) 与当前持有者不匹配 → PERMISSION_DENIED」。
+            //
+            // 不回 `released=false`（那会被读成"锁本来就不在"）也不静默成功：
+            // 这是 fencing 缺陷 F-28 的正面判据，必须让调用方看见"你的凭据不对"。
+            Ok(ReleaseOutcome::Forbidden) => Err(Status::permission_denied(
+                "lock is held by another (holder_id, lease_id)",
+            )),
             Err(e) => Err(sanitized_internal(e)),
         }
     }
@@ -142,9 +152,17 @@ impl Lock for LockService {
         request: Request<LockRenewRequest>,
     ) -> Result<Response<LockRenewResponse>, Status> {
         let req = request.into_inner();
-        match LockService::renew(self, &req.name, &req.holder_id).await {
-            Ok(true) => Ok(Response::new(LockRenewResponse { new_ttl: 0 })),
-            Ok(false) => Err(Status::not_found("lock not held or expired")),
+        match LockService::renew(self, &req.name, &req.holder_id, req.lease_id).await {
+            // 契约：`new_ttl` = 续约后的 TTL（秒）；**0 = 租约已失效、锁已释放**。
+            // 修复前成功也回 0 —— 那个值在契约里恰是"锁已经没了"，按契约读返回值
+            // 的客户端会在**续期成功的那一刻**认为锁丢了。
+            Ok(Some(new_ttl)) => Ok(Response::new(LockRenewResponse {
+                new_ttl: new_ttl as i64,
+            })),
+            // 租约不是本调用方的 / 已失效 ⇒ 契约规定的信号就是 `new_ttl = 0`，
+            // 而不是错误码：调用方要的是"这个租约不再是你的"这一可行动事实，
+            // 用 NOT_FOUND 表达它反而会被误读成传输故障。
+            Ok(None) => Ok(Response::new(LockRenewResponse { new_ttl: 0 })),
             Err(e) => Err(sanitized_internal(e)),
         }
     }
@@ -632,9 +650,30 @@ impl Mq for MessageQueueService {
         } else {
             0
         };
+
+        // F-57：`key` 与 `idempotency_key` 此前被**静默丢弃**（两条分支都传 `None`）。
+        // - `key`：引擎未建模独立列 ⇒ 随消息 headers 持久化（hex 编码，键可为任意二进制）；
+        // - `idempotency_key`：走引擎的生产者级去重索引
+        //   （同键重复 publish 不产生第二个 offset —— V9 的判据）。
+        let mut headers = std::collections::BTreeMap::new();
+        if !req.key.is_empty() {
+            headers.insert("key".to_string(), hex::encode(&req.key));
+        }
+        let idempotency_key = if req.idempotency_key.is_empty() {
+            None
+        } else {
+            Some(req.idempotency_key.clone())
+        };
+
         if self.replication_enabled() {
             match self
-                .produce_replicated(&req.topic, partition, req.payload, None)
+                .produce_replicated(
+                    &req.topic,
+                    partition,
+                    req.payload,
+                    Some(headers),
+                    idempotency_key.as_deref(),
+                )
                 .await
             {
                 Ok(offset) => Ok(Response::new(MqPublishResponse {
@@ -645,7 +684,15 @@ impl Mq for MessageQueueService {
         } else {
             let topic = req.topic.clone();
             match self
-                .run_blocking(move |me| me.produce(&topic, partition, req.payload, None))
+                .run_blocking(move |me| {
+                    me.produce_idempotent(
+                        &topic,
+                        partition,
+                        req.payload,
+                        Some(headers),
+                        idempotency_key.as_deref(),
+                    )
+                })
                 .await
             {
                 Ok(offset) => Ok(Response::new(MqPublishResponse {
@@ -1101,7 +1148,10 @@ impl Scheduler for SchedulerService {
     ) -> Result<Response<SchedulerRegisterJobResponse>, Status> {
         let req = request.into_inner();
         let task = crate::services::scheduler::ScheduleTask {
-            task_id: helper_uuid(),
+            // task_id 必须与 ClaimJob 查询的键一致（wire 上只有 `name`）。
+            // 历史实现用 `helper_uuid()` 作 task_id 注册、却按 `req.name` 认领
+            // ⇒ ClaimJob 永远找不到任务（"注册成功但永远领不到"）。
+            task_id: req.name.clone(),
             task_type: crate::services::scheduler::TaskType::Cron {
                 expression: req.cron_expression,
             },
@@ -1113,7 +1163,7 @@ impl Scheduler for SchedulerService {
             .into_iter()
             .collect(),
         };
-        self.register_task(task).map_err(sanitized_internal)?;
+        self.register_task(task).await.map_err(sanitized_internal)?;
         Ok(Response::new(SchedulerRegisterJobResponse {
             job_id: req.name,
         }))
@@ -1125,7 +1175,7 @@ impl Scheduler for SchedulerService {
     ) -> Result<Response<SchedulerClaimJobResponse>, Status> {
         let req = request.into_inner();
         let worker_id = helper_uuid();
-        match self.try_claim(&req.name, &worker_id) {
+        match self.try_claim(&req.name, &worker_id).await {
             Ok(Some(claim)) => Ok(Response::new(SchedulerClaimJobResponse {
                 job_id: claim.task_id,
                 payload: vec![],
@@ -1141,7 +1191,11 @@ impl Scheduler for SchedulerService {
         request: Request<SchedulerHeartbeatRequest>,
     ) -> Result<Response<SchedulerHeartbeatResponse>, Status> {
         let req = request.into_inner();
-        self.renew_claim(&req.job_id, "worker")
+        // wire 无 worker 身份（`SchedulerHeartbeatRequest` 只有 `job_id`）⇒ 以
+        // `job_id` 作 claim 句柄。历史实现硬编码传 `"worker"`，与认领时的随机
+        // uuid 永不相等 ⇒ 续期静默失效。
+        self.renew_claim_any(&req.job_id)
+            .await
             .map_err(sanitized_internal)?;
         Ok(Response::new(SchedulerHeartbeatResponse {}))
     }
@@ -1151,7 +1205,9 @@ impl Scheduler for SchedulerService {
         request: Request<SchedulerCompleteJobRequest>,
     ) -> Result<Response<SchedulerCompleteJobResponse>, Status> {
         let req = request.into_inner();
-        self.mark_completed(&req.job_id, "worker")
+        // 同上：`job_id` 即凭据。历史实现传 `"worker"` ⇒ CompleteJob 必报错。
+        self.mark_completed_any(&req.job_id)
+            .await
             .map_err(sanitized_internal)?;
         Ok(Response::new(SchedulerCompleteJobResponse {}))
     }
@@ -1944,7 +2000,9 @@ impl Transit for TransitService {
         request: Request<TransitEncryptRequest>,
     ) -> Result<Response<TransitEncryptResponse>, Status> {
         let req = request.into_inner();
-        match self.encrypt(&req.plaintext) {
+        // 持久化路径：DEK 落 coord-server KV ⇒ 重启后仍可解密（B-06 / E1）；
+        // KV 写失败即报错（fail-closed），不回退到"只在本进程有效"的密文。
+        match self.encrypt_persisted(&req.plaintext).await {
             Ok((ciphertext, _dek_id)) => Ok(Response::new(TransitEncryptResponse { ciphertext })),
             Err(e) => Err(sanitized_internal(e)),
         }
@@ -1955,8 +2013,9 @@ impl Transit for TransitService {
         request: Request<TransitDecryptRequest>,
     ) -> Result<Response<TransitDecryptResponse>, Status> {
         let req = request.into_inner();
-        // DEK ID 现在嵌入在 ciphertext 包头中（自描述格式），不再需要外部传入
-        match self.decrypt(&req.ciphertext, "") {
+        // DEK ID 现在嵌入在 ciphertext 包头中（自描述格式），不再需要外部传入；
+        // 内存未命中时从共享 KV 回取（重启恢复），消费后删除 KV 记录（用后即焚）。
+        match self.decrypt_persisted(&req.ciphertext, "").await {
             Ok(plaintext) => Ok(Response::new(TransitDecryptResponse { plaintext })),
             Err(e) => Err(sanitized_internal(e)),
         }
@@ -2070,7 +2129,7 @@ impl FeatureFlags for FeatureFlagService {
         request: Request<FeatureFlagIsEnabledRequest>,
     ) -> Result<Response<FeatureFlagIsEnabledResponse>, Status> {
         let req = request.into_inner();
-        match self.is_enabled(&req.flag_name) {
+        match self.is_enabled(&req.flag_name).await {
             Ok(enabled) => Ok(Response::new(FeatureFlagIsEnabledResponse {
                 enabled,
                 variant: String::new(),
@@ -2085,7 +2144,7 @@ impl FeatureFlags for FeatureFlagService {
     ) -> Result<Response<FeatureFlagEvaluateResponse>, Status> {
         let req = request.into_inner();
         let ctx = FlagEvalContext::default();
-        match FeatureFlagService::evaluate(self, &req.flag_name, &ctx) {
+        match FeatureFlagService::evaluate(self, &req.flag_name, &ctx).await {
             Ok(result) => {
                 let json = serde_json::to_vec(&result).unwrap_or_default();
                 Ok(Response::new(FeatureFlagEvaluateResponse { result: json }))

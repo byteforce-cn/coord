@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — 熔断器（能力承诺面，v1.2）
+//
+// 状态：COMMITTED（承诺中）｜ GA 期限：2026-12-31 ｜ 台账：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/circuitbreaker.proto 的 coord.circuitbreaker.v1.CircuitBreaker
+//            （字段编号/类型逐项一致；迁移 = 机械式重挂载，禁止趁机改 wire）
+//
+// 边界声明：熔断器状态为 **Agent 本地内存**，不承诺跨 Agent 共享
+// （WHITEPAPER §10 规则 4）；重启即重置。
+
+// GA 验收定义与倒逼机制见 WHITEPAPER.md §13。
+// ============================================================
+
+package coord.circuitbreaker.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.circuitbreaker.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/circuitbreaker/v1;circuitbreakerv1";
+
+// ============================================================
+
+service CircuitBreaker {
+  rpc GetState(CircuitBreakerGetStateRequest) returns (CircuitBreakerGetStateResponse);
+  rpc ReportSuccess(CircuitBreakerReportSuccessRequest) returns (CircuitBreakerReportSuccessResponse);
+  rpc ReportFailure(CircuitBreakerReportFailureRequest) returns (CircuitBreakerReportFailureResponse);
+  rpc Reset(CircuitBreakerResetRequest) returns (CircuitBreakerResetResponse);
+}
+
+message CircuitBreakerGetStateRequest {
+  string name = 1;
+}
+
+message CircuitBreakerGetStateResponse {
+  string state = 1; // CLOSED, OPEN, HALF_OPEN
+  int64 last_failure_time = 2;
+}
+
+message CircuitBreakerReportSuccessRequest {
+  string name = 1;
+}
+
+message CircuitBreakerReportSuccessResponse {}
+
+message CircuitBreakerReportFailureRequest {
+  string name = 1;
+}
+
+message CircuitBreakerReportFailureResponse {}
+
+message CircuitBreakerResetRequest {
+  string name = 1;
+}
+
+message CircuitBreakerResetResponse {}
+
+// ============================================================
+// RateLimiter — Rate Limiting

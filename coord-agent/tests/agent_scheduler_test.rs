@@ -1,15 +1,19 @@
-// TDD: 分布式调度服务测试 (RED)
+// 分布式调度服务测试
 //
 // 验证 SchedulerService 能够：
 // 1. 注册/注销定时任务
-// 2. 任务认领（基于 KV CAS + Lease 防止重复执行）
+// 2. 任务认领（基于 KV CAS 防止重复执行）
 // 3. Exactly-Once 执行保证
 // 4. 惊群缓解（随机退避）
 // 5. 任务状态查询
 //
-// 任务认领机制，Exactly-Once 内部状态，惊群缓解
-//
-// RED 阶段：SchedulerService 尚未实现，这些测试预期失败。
+// ⚠️ 本文件原为 RED 阶段的 TDD 草稿（注释称"SchedulerService 尚未实现"），
+// 且断言的是**同步内存实现**的 API。计划书 P0-10 / E9 整改后：
+// - 状态迁至 `SchedulerStore`（生产 = coord-server 共享 KV），全部方法**异步**；
+// - `list_tasks` / `get_task_state` / `list_task_states` / `get_task_detail`
+//   返回 `ServiceResult<_>`（KV 可能失败，不能再假装"必然成功"）；
+// - 新增 claim 句柄路径（`*_any`）与"共享 store 重启存续"用例。
+// 语义断言**逐条保留**，不放宽。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,8 +21,16 @@ use std::time::Duration;
 
 use coord_agent::service::{BaseService, ServiceConfig};
 use coord_agent::services::scheduler::{
-    ScheduleTask, SchedulerService, TaskClaim, TaskState, TaskType,
+    ScheduleTask, SchedulerService, TaskState, TaskType,
 };
+use coord_agent::services::scheduler_store::{MemorySchedulerStore, SchedulerStore};
+
+/// 共享 store 的测试装配（用于"重启存续"类用例）
+fn svc_with_ttl(ttl: Duration) -> (SchedulerService, Arc<dyn SchedulerStore>) {
+    let store: Arc<dyn SchedulerStore> = Arc::new(MemorySchedulerStore::new());
+    let svc = SchedulerService::with_store(Arc::clone(&store), ttl);
+    (svc, store)
+}
 
 // ──── T1: 服务注册 ────
 
@@ -33,16 +45,18 @@ fn test_scheduler_service_implements_base_service() {
 /// H-Sched.2: SchedulerService 可通过 ServiceConfig 配置启用
 #[test]
 fn test_scheduler_service_config() {
-    let mut config = ServiceConfig::default();
-    config.scheduler = true;
+    let config = ServiceConfig {
+        scheduler: true,
+        ..Default::default()
+    };
     assert!(config.scheduler);
 }
 
 // ──── T2: 任务注册管理 ────
 
 /// H-Sched.3: 注册定时任务
-#[test]
-fn test_register_scheduled_task() {
+#[tokio::test]
+async fn test_register_scheduled_task() {
     let svc = SchedulerService::new(Default::default());
 
     let task = ScheduleTask {
@@ -54,21 +68,21 @@ fn test_register_scheduled_task() {
         metadata: HashMap::new(),
     };
 
-    let result = svc.register_task(task.clone());
+    let result = svc.register_task(task.clone()).await;
     assert!(
         result.is_ok(),
         "register_task should succeed: {:?}",
         result.err()
     );
 
-    let tasks = svc.list_tasks();
+    let tasks = svc.list_tasks().await.unwrap();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].task_id, "cleanup-job");
 }
 
 /// H-Sched.4: 注册重复任务 ID 应失败
-#[test]
-fn test_register_duplicate_task_fails() {
+#[tokio::test]
+async fn test_register_duplicate_task_fails() {
     let svc = SchedulerService::new(Default::default());
 
     let task = ScheduleTask {
@@ -78,13 +92,13 @@ fn test_register_duplicate_task_fails() {
         metadata: HashMap::new(),
     };
 
-    assert!(svc.register_task(task.clone()).is_ok());
-    assert!(svc.register_task(task).is_err());
+    assert!(svc.register_task(task.clone()).await.is_ok());
+    assert!(svc.register_task(task).await.is_err());
 }
 
 /// H-Sched.5: 注销任务
-#[test]
-fn test_deregister_task() {
+#[tokio::test]
+async fn test_deregister_task() {
     let svc = SchedulerService::new(Default::default());
 
     let task = ScheduleTask {
@@ -94,18 +108,18 @@ fn test_deregister_task() {
         metadata: HashMap::new(),
     };
 
-    svc.register_task(task).unwrap();
-    assert_eq!(svc.list_tasks().len(), 1);
+    svc.register_task(task).await.unwrap();
+    assert_eq!(svc.list_tasks().await.unwrap().len(), 1);
 
-    svc.deregister_task("temp-job").unwrap();
-    assert_eq!(svc.list_tasks().len(), 0);
+    svc.deregister_task("temp-job").await.unwrap();
+    assert_eq!(svc.list_tasks().await.unwrap().len(), 0);
 }
 
 // ──── T3: 任务认领（Claim）───
 
 /// H-Sched.6: 未认领的任务可被认领
-#[test]
-fn test_claim_unclaimed_task() {
+#[tokio::test]
+async fn test_claim_unclaimed_task() {
     let svc = SchedulerService::new(Default::default());
 
     let task = ScheduleTask {
@@ -116,9 +130,9 @@ fn test_claim_unclaimed_task() {
         description: "Claimable".into(),
         metadata: HashMap::new(),
     };
-    svc.register_task(task).unwrap();
+    svc.register_task(task).await.unwrap();
 
-    let claim = svc.try_claim("claimable-job", "worker-1").unwrap();
+    let claim = svc.try_claim("claimable-job", "worker-1").await.unwrap();
     assert!(claim.is_some(), "unclaimed task should be claimable");
     let claim = claim.unwrap();
     assert_eq!(claim.task_id, "claimable-job");
@@ -127,8 +141,8 @@ fn test_claim_unclaimed_task() {
 }
 
 /// H-Sched.7: 已认领的任务不可被其他 worker 重复认领
-#[test]
-fn test_claim_already_claimed_task_fails() {
+#[tokio::test]
+async fn test_claim_already_claimed_task_fails() {
     let svc = SchedulerService::new(Default::default());
 
     let task = ScheduleTask {
@@ -137,14 +151,14 @@ fn test_claim_already_claimed_task_fails() {
         description: "Exclusive".into(),
         metadata: HashMap::new(),
     };
-    svc.register_task(task).unwrap();
+    svc.register_task(task).await.unwrap();
 
     // worker-1 认领成功
-    let claim1 = svc.try_claim("exclusive-job", "worker-1").unwrap();
+    let claim1 = svc.try_claim("exclusive-job", "worker-1").await.unwrap();
     assert!(claim1.is_some());
 
     // worker-2 认领同一任务应失败
-    let claim2 = svc.try_claim("exclusive-job", "worker-2").unwrap();
+    let claim2 = svc.try_claim("exclusive-job", "worker-2").await.unwrap();
     assert!(
         claim2.is_none(),
         "already claimed task should not be re-claimed"
@@ -152,8 +166,8 @@ fn test_claim_already_claimed_task_fails() {
 }
 
 /// H-Sched.8: worker 可以释放已认领的任务
-#[test]
-fn test_release_claim() {
+#[tokio::test]
+async fn test_release_claim() {
     let svc = SchedulerService::new(Default::default());
 
     let task = ScheduleTask {
@@ -164,26 +178,27 @@ fn test_release_claim() {
         description: "Releasable".into(),
         metadata: HashMap::new(),
     };
-    svc.register_task(task).unwrap();
+    svc.register_task(task).await.unwrap();
 
     let claim = svc
         .try_claim("releasable-job", "worker-1")
+        .await
         .unwrap()
         .unwrap();
     assert_eq!(claim.state, TaskState::Running);
 
-    svc.release_claim("releasable-job", "worker-1").unwrap();
+    svc.release_claim("releasable-job", "worker-1").await.unwrap();
 
     // 释放后应可被其他 worker 认领
-    let claim2 = svc.try_claim("releasable-job", "worker-2").unwrap();
+    let claim2 = svc.try_claim("releasable-job", "worker-2").await.unwrap();
     assert!(claim2.is_some(), "released task should be re-claimable");
 }
 
 // ──── T4: Exactly-Once 执行 ────
 
 /// H-Sched.9: 任务完成状态变更
-#[test]
-fn test_mark_task_completed() {
+#[tokio::test]
+async fn test_mark_task_completed() {
     let svc = SchedulerService::new(Default::default());
 
     let task = ScheduleTask {
@@ -192,18 +207,22 @@ fn test_mark_task_completed() {
         description: "One-shot".into(),
         metadata: HashMap::new(),
     };
-    svc.register_task(task).unwrap();
+    svc.register_task(task).await.unwrap();
 
-    let claim = svc.try_claim("complete-me", "worker-1").unwrap().unwrap();
+    let claim = svc
+        .try_claim("complete-me", "worker-1")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(claim.state, TaskState::Running);
 
-    svc.mark_completed("complete-me", "worker-1").unwrap();
+    svc.mark_completed("complete-me", "worker-1").await.unwrap();
 
-    let state = svc.get_task_state("complete-me").unwrap();
+    let state = svc.get_task_state("complete-me").await.unwrap().unwrap();
     assert_eq!(state, TaskState::Completed);
 
     // 已完成任务不可再被认领
-    let re_claim = svc.try_claim("complete-me", "worker-2").unwrap();
+    let re_claim = svc.try_claim("complete-me", "worker-2").await.unwrap();
     assert!(
         re_claim.is_none(),
         "completed task should not be re-claimable"
@@ -211,8 +230,8 @@ fn test_mark_task_completed() {
 }
 
 /// H-Sched.10: 任务失败状态变更
-#[test]
-fn test_mark_task_failed() {
+#[tokio::test]
+async fn test_mark_task_failed() {
     let svc = SchedulerService::new(Default::default());
 
     let task = ScheduleTask {
@@ -221,17 +240,18 @@ fn test_mark_task_failed() {
         description: "Will fail".into(),
         metadata: HashMap::new(),
     };
-    svc.register_task(task).unwrap();
+    svc.register_task(task).await.unwrap();
 
-    svc.try_claim("fail-me", "worker-1").unwrap();
+    svc.try_claim("fail-me", "worker-1").await.unwrap();
     svc.mark_failed("fail-me", "worker-1", "simulated error")
+        .await
         .unwrap();
 
-    let state = svc.get_task_state("fail-me").unwrap();
+    let state = svc.get_task_state("fail-me").await.unwrap().unwrap();
     assert_eq!(state, TaskState::Pending); // FixedRate 失败后回到 Pending 等待重试
 
     // 固定频率任务失败后应可重试（下次调度时重新认领）
-    let re_claim = svc.try_claim("fail-me", "worker-1").unwrap();
+    let re_claim = svc.try_claim("fail-me", "worker-1").await.unwrap();
     assert!(
         re_claim.is_some(),
         "failed FixedRate task should be re-claimable"
@@ -241,8 +261,8 @@ fn test_mark_task_failed() {
 // ──── T5: 惊群缓解 ────
 
 /// H-Sched.11: 多个 worker 竞争同一任务时仅一个获胜
-#[test]
-fn test_thundering_herd_only_one_wins() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_thundering_herd_only_one_wins() {
     let svc = Arc::new(SchedulerService::new(Default::default()));
 
     let task = ScheduleTask {
@@ -253,14 +273,20 @@ fn test_thundering_herd_only_one_wins() {
         description: "Hot task".into(),
         metadata: HashMap::new(),
     };
-    svc.register_task(task).unwrap();
+    svc.register_task(task).await.unwrap();
 
-    // 模拟 10 个 worker 同时竞争
-    let svc_ref = svc.clone();
-    let mut success_count = 0;
+    // 模拟 10 个 worker **并发**竞争（CAS 路径必须保证只有一个成功）
+    let mut handles = Vec::new();
     for i in 0..10 {
-        let worker_id = format!("worker-{}", i);
-        if svc_ref.try_claim("hot-job", &worker_id).unwrap().is_some() {
+        let svc = Arc::clone(&svc);
+        handles.push(tokio::spawn(async move {
+            svc.try_claim("hot-job", &format!("worker-{i}")).await
+        }));
+    }
+    let mut success_count = 0;
+    for h in handles {
+        let r = h.await.expect("join").expect("no store error");
+        if r.is_some() {
             success_count += 1;
         }
     }
@@ -300,8 +326,8 @@ fn test_backoff_delay_range() {
 // ──── T6: 任务状态查询 ────
 
 /// H-Sched.13: 查询所有任务状态
-#[test]
-fn test_query_all_task_states() {
+#[tokio::test]
+async fn test_query_all_task_states() {
     let svc = SchedulerService::new(Default::default());
 
     for i in 0..5 {
@@ -311,19 +337,20 @@ fn test_query_all_task_states() {
             description: format!("Job {}", i),
             metadata: HashMap::new(),
         })
+        .await
         .unwrap();
     }
 
-    let states = svc.list_task_states();
+    let states = svc.list_task_states().await.unwrap();
     assert_eq!(states.len(), 5);
-    for (_, state) in &states {
+    for state in states.values() {
         assert_eq!(*state, TaskState::Pending);
     }
 }
 
 /// H-Sched.14: 查询单个任务详情
-#[test]
-fn test_query_task_detail() {
+#[tokio::test]
+async fn test_query_task_detail() {
     let svc = SchedulerService::new(Default::default());
 
     let task = ScheduleTask {
@@ -338,9 +365,9 @@ fn test_query_task_detail() {
             m
         },
     };
-    svc.register_task(task).unwrap();
+    svc.register_task(task).await.unwrap();
 
-    let detail = svc.get_task_detail("detailed-job").unwrap();
+    let detail = svc.get_task_detail("detailed-job").await.unwrap().unwrap();
     assert_eq!(detail.task_id, "detailed-job");
     assert_eq!(
         detail.task_type,
@@ -355,8 +382,8 @@ fn test_query_task_detail() {
 // ──── T7: Lease 续期（心跳）───
 
 /// H-Sched.15: 任务认领后应自动续期
-#[test]
-fn test_claim_heartbeat_renewal() {
+#[tokio::test]
+async fn test_claim_heartbeat_renewal() {
     let svc = SchedulerService::new(Default::default());
 
     let task = ScheduleTask {
@@ -365,24 +392,62 @@ fn test_claim_heartbeat_renewal() {
         description: "Needs heartbeat".into(),
         metadata: HashMap::new(),
     };
-    svc.register_task(task).unwrap();
+    svc.register_task(task).await.unwrap();
 
-    let claim = svc.try_claim("heartbeat-job", "worker-1").unwrap().unwrap();
+    let claim = svc
+        .try_claim("heartbeat-job", "worker-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.state, TaskState::Running);
 
     // 心跳续期
-    let renewed = svc.renew_claim("heartbeat-job", "worker-1").unwrap();
+    let renewed = svc.renew_claim("heartbeat-job", "worker-1").await.unwrap();
     assert!(renewed, "heartbeat should succeed for active claim");
 
     // 其他 worker 不能为他人续期
-    let wrong_renew = svc.renew_claim("heartbeat-job", "worker-2").unwrap();
+    let wrong_renew = svc.renew_claim("heartbeat-job", "worker-2").await.unwrap();
     assert!(!wrong_renew, "wrong worker should not renew");
+}
+
+// ──── T7b: claim 句柄路径（gRPC 面的真实语义）───
+
+/// H-Sched.15b: wire 无 worker 身份 ⇒ 续期 / 完成走 `job_id` 句柄
+///
+/// 这条用例锁住的是**两处已修缺陷**：此前 gRPC handler 硬编码 `"worker"`，
+/// 与认领时的随机 uuid 永不相等 ⇒ 续期静默失效、CompleteJob 必然报错。
+#[tokio::test]
+async fn test_claim_handle_renew_and_complete() {
+    let svc = SchedulerService::new(Default::default());
+
+    let task = ScheduleTask {
+        task_id: "handle-job".into(),
+        task_type: TaskType::Once,
+        description: "Claim handle".into(),
+        metadata: HashMap::new(),
+    };
+    svc.register_task(task).await.unwrap();
+
+    // 模拟 gRPC ClaimJob：worker 标识由服务端生成，调用方只拿到 job_id
+    let server_generated = uuid_like();
+    svc.try_claim("handle-job", &server_generated).await.unwrap();
+
+    assert!(
+        svc.renew_claim_any("handle-job").await.unwrap(),
+        "按 claim 句柄续期必须成功"
+    );
+    svc.mark_completed_any("handle-job").await.unwrap();
+    assert_eq!(
+        svc.get_task_state("handle-job").await.unwrap(),
+        Some(TaskState::Completed)
+    );
 }
 
 // ──── T8: 过期认领自动释放 ────
 
 /// H-Sched.16: 过期认领应可被其他 worker 重新认领
-#[test]
-fn test_expired_claim_reclaimable() {
+#[tokio::test]
+async fn test_expired_claim_reclaimable() {
     let svc = SchedulerService::new_with_ttl(Duration::from_millis(1)); // 1ms TTL
 
     let task = ScheduleTask {
@@ -391,15 +456,71 @@ fn test_expired_claim_reclaimable() {
         description: "Will expire".into(),
         metadata: HashMap::new(),
     };
-    svc.register_task(task).unwrap();
+    svc.register_task(task).await.unwrap();
 
-    svc.try_claim("expire-job", "worker-1").unwrap();
+    svc.try_claim("expire-job", "worker-1").await.unwrap();
 
-    // 等待认领过期
-    std::thread::sleep(Duration::from_millis(10));
+    // 等待认领过期（异步等待，勿用 thread::sleep 阻塞 runtime）
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // 过期后其他 worker 可认领
-    let claim2 = svc.try_claim("expire-job", "worker-2").unwrap();
+    let claim2 = svc.try_claim("expire-job", "worker-2").await.unwrap();
     assert!(claim2.is_some(), "expired claim should be re-claimable");
     assert_eq!(claim2.unwrap().worker_id, "worker-2");
+}
+
+// ──── T9: 状态存续（P0-10 的验收核心）───
+
+/// H-Sched.17: 服务实例重建后，任务定义 / 状态 / 认领必须全部存续
+///
+/// 这是"重启即丢全部调度状态"的直接回归守卫：旧实现用三个进程内 `HashMap`，
+/// 换一个实例即全空。现在状态在 `SchedulerStore` 中，生产后端为 coord-server KV
+/// （跨进程），本用例用共享 store 表达同一性质。
+#[tokio::test]
+async fn test_state_survives_across_service_instances() {
+    let (svc1, store) = svc_with_ttl(Duration::from_secs(300));
+
+    let task = ScheduleTask {
+        task_id: "persist-job".into(),
+        task_type: TaskType::FixedRate { interval_ms: 1000 },
+        description: "Must survive".into(),
+        metadata: HashMap::new(),
+    };
+    svc1.register_task(task).await.unwrap();
+    svc1.try_claim("persist-job", "worker-1").await.unwrap();
+
+    // "重启"：新实例 + 同一 store
+    let svc2 = SchedulerService::with_store(store, Duration::from_secs(300));
+
+    assert_eq!(
+        svc2.list_tasks().await.unwrap().len(),
+        1,
+        "任务定义必须存续"
+    );
+    assert_eq!(
+        svc2.get_task_state("persist-job").await.unwrap(),
+        Some(TaskState::Running),
+        "任务状态必须存续"
+    );
+    let detail = svc2.get_task_detail("persist-job").await.unwrap().unwrap();
+    assert_eq!(
+        detail.claimed_by.as_deref(),
+        Some("worker-1"),
+        "认领记录必须存续"
+    );
+    // 且存续的认领仍排斥第二个 worker（多节点唯一性）
+    assert!(
+        svc2.try_claim("persist-job", "worker-2").await.unwrap().is_none(),
+        "存续的认领必须继续排斥其他 worker"
+    );
+}
+
+/// 生成一个 uuid 形态的字符串（不引入 uuid 依赖，行为对齐 `helper_uuid()`）
+fn uuid_like() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("sched-{nanos:x}")
 }

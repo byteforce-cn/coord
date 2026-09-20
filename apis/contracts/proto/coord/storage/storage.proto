@@ -1,6 +1,15 @@
 syntax = "proto3";
 package coord.storage;
 
+// ── 生成选项 ───────────────────────────────────────────────────────────
+// 与其余 COMMITTED 契约保持一致：生成的 Java 类型必须落在
+// `cn.byteforce.coord.contracts.*` 下。此前本文件**没有** java_package，
+// 于是生成到裸包 `coord.storage` —— 它是全部契约里唯一一个"生成命名空间不在
+// 契约前缀下"的面（由 `apis/contracts/scripts/check-sdk-sync.sh` 机器卡口抓出）。
+// 只补 java_package（**不改** wire、不改 proto 包名、不改 service/message 名）。
+option java_package = "cn.byteforce.coord.contracts.storage";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/storage;storage";
+
 // ────────────────────────────────────────────────────────────
 // 对象存储（Server 侧 EXPERIMENTAL 数据面；治理口径见 apis/contracts/STATUS.md，
 // 设计决策见 docs/volume-object-storage.md）

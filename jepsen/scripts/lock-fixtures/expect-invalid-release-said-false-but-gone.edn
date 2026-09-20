@@ -1,0 +1,45 @@
+;; expect-valid-release-said-false-but-gone —— **守门员**（M5a 首轮实跑训出来的）。
+;;
+;; 形态：Release 调用返回 released=false，但锁**确实**已经不在我名下（fencing
+;; 探针把它删掉了），`:gone-at-ms` 因此落在 400ms。而 `:released-at-ms`（= Release
+;; RPC 返回的时刻）在客户端的**观测循环之后**才取到，是 1400ms。
+;;
+;; 为什么会有这种形态：当前实现不校验 lease_id，所以 fencing 探针（错误 lease_id）
+;; 就能把锁删掉，紧随其后的「正确」Release 必然回 false。
+;;
+;; 判据的取向因此被钉死两条：
+;;   * 区间是否闭合**只看有没有「已不在我名下」的证据**（`:gone-at-ms`），
+;;     不看调用方的自我报告（`:released?`）；
+;;   * 闭合时刻取**最早**的那个证据时刻，不是观测循环之后的时刻。
+;;
+;; 这条 fixture 是第 ② 条的回归守卫：后来者在 500ms 拿到锁，用 `:gone-at-ms`
+;; 闭合 ⇒ 无重叠（valid）；一旦退回「用 `:released-at-ms` 闭合」，区间会拖到
+;; 1400ms 与后来者重叠 ⇒ 变红。
+;;
+;; 注：本条会**同时**命中 `:lock-fencing-missing`（第一份 op 的 `:foreign-release`
+;; 里 released?=true）——那是有意的：它把「假重叠已消失」与「fencing 缺陷仍被
+;; 抓到」两件事钉在同一条历史上，避免修假红时顺手把真红也修掉。
+;; 因此文件名是 expect-invalid-*：判定必然是 invalid（fencing 确实坏了）。
+[{:type :ok :f :lock-contend :process 0 :time 10
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  ;; release 调用失败（false），但锁在 400ms 就真的不在我名下了
+  :acquired-at-ms 10 :released-at-ms 1400 :released? false
+  :gone? true :gone-at-ms 400 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? true}
+  :lock-info-after-release {:name "lock-a" :exists false}}
+
+ ;; 后来者：500ms 拿到锁 —— 用 :gone-at-ms 闭合就无重叠
+ {:type :ok :f :lock-contend :process 1 :time 20
+  :name "lock-a" :holder-id "h2" :lease-id 12
+  :acquired-at-ms 500 :released-at-ms 900 :released? true
+  :gone? true :gone-at-ms 900 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}]
+
+;; 注：本条 fixture 会**同时**命中 :lock-fencing-missing（第一份 op 的
+;; :foreign-release 里 released?=true）——那是有意的：它把「假重叠已消失」与
+;; 「fencing 缺陷仍被抓到」两件事钉在同一条历史上，避免修假红时顺手把真红也修掉。
+;; 因此它在 expect-invalid-* 之外单独存在：文件名说的是「区间不得假红」，
+;; 而实际判定必然是 invalid（因为 fencing 确实坏了）。

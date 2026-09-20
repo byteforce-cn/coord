@@ -1,7 +1,10 @@
 package cn.byteforce.coord.sdk;
 
 import cn.byteforce.coord.sdk.cache.CacheClient;
+import cn.byteforce.coord.sdk.circuitbreaker.CircuitBreakerClient;
 import cn.byteforce.coord.sdk.config.ConfigClient;
+import cn.byteforce.coord.sdk.election.LeaderElectionClient;
+import cn.byteforce.coord.sdk.featureflags.FeatureFlagClient;
 import cn.byteforce.coord.sdk.health.HealthStatus;
 import cn.byteforce.coord.sdk.idgen.IdGenClient;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
@@ -16,6 +19,7 @@ import cn.byteforce.coord.sdk.mq.MqClient;
 import cn.byteforce.coord.sdk.objectstore.ObjectStoreClient;
 import cn.byteforce.coord.sdk.pki.PkiClient;
 import cn.byteforce.coord.sdk.policy.PolicyClient;
+import cn.byteforce.coord.sdk.ratelimiter.RateLimiterClient;
 import cn.byteforce.coord.sdk.registry.Registry;
 import cn.byteforce.coord.sdk.transit.TransitClient;
 import cn.byteforce.coord.sdk.workflow.WorkflowClient;
@@ -24,6 +28,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -41,6 +46,10 @@ import java.util.concurrent.TimeUnit;
  *   <li>{@link #workflow()} — Workflow definition and instance management</li>
  *   <li>{@link #policy()} — RBAC/ABAC policy evaluation</li>
  *   <li>{@link #pki()} — Local PKI CA certificate operations</li>
+ *   <li>{@link #election()} — Lease-based leader election</li>
+ *   <li>{@link #circuitBreaker()} — Agent-local circuit breaker state</li>
+ *   <li>{@link #rateLimiter()} — Agent-local token-bucket rate limiting</li>
+ *   <li>{@link #featureFlags()} — Feature flag evaluation (read-only wire)</li>
  * </ul>
  * Must be closed via {@link #close()} to release resources gracefully.
  *
@@ -78,6 +87,17 @@ public final class CoordClient implements Closeable {
     private final PolicyClientImpl policyClient;
     private final PkiClientImpl pkiClient;
     private final ObjectStoreClientImpl objectStoreClient;
+    private final LeaderElectionClientImpl electionClient;
+    private final CircuitBreakerClientImpl circuitBreakerClient;
+    private final RateLimiterClientImpl rateLimiterClient;
+    private final FeatureFlagClientImpl featureFlagClient;
+
+    /** P0-4 / D6：协议协商是否已成功完成（只做一次；失败会回滚以便重试）。 */
+    private final java.util.concurrent.atomic.AtomicBoolean protocolNegotiated =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    /** 最近一次协商得到的 agent 版本列表（供诊断 / 运维可见性）。 */
+    private final List<String> agentProtocolVersions =
+            java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
     private CoordClient(CoordConfig config) {
         this.config = config;
@@ -115,6 +135,14 @@ public final class CoordClient implements Closeable {
         this.pkiClient = new PkiClientImpl(channelManager, errorMapper, retryTemplate,
                 config.getObservabilityProvider(), config);
         this.objectStoreClient = new ObjectStoreClientImpl(channelManager, errorMapper,
+                retryTemplate, config.getObservabilityProvider(), config);
+        this.electionClient = new LeaderElectionClientImpl(channelManager, errorMapper,
+                retryTemplate, config.getObservabilityProvider(), config);
+        this.circuitBreakerClient = new CircuitBreakerClientImpl(channelManager, errorMapper,
+                retryTemplate, config.getObservabilityProvider(), config);
+        this.rateLimiterClient = new RateLimiterClientImpl(channelManager, errorMapper,
+                retryTemplate, config.getObservabilityProvider(), config);
+        this.featureFlagClient = new FeatureFlagClientImpl(channelManager, errorMapper,
                 retryTemplate, config.getObservabilityProvider(), config);
     }
 
@@ -215,12 +243,69 @@ public final class CoordClient implements Closeable {
     }
 
     /**
+     * Returns the {@link LeaderElectionClient} API for lease-based leader election.
+     */
+    public LeaderElectionClient election() {
+        return electionClient;
+    }
+
+    /**
+     * Returns the {@link CircuitBreakerClient} API.
+     * <p>
+     * <b>Boundary:</b> breaker state lives in <b>one agent's memory</b> — it is not
+     * shared across agents and is lost on agent restart.
+     */
+    public CircuitBreakerClient circuitBreaker() {
+        return circuitBreakerClient;
+    }
+
+    /**
+     * Returns the {@link RateLimiterClient} API.
+     * <p>
+     * <b>Boundary:</b> the token bucket is <b>per-agent</b> — the effective
+     * cluster-wide rate is (limit × number of agents) unless callers are pinned to one
+     * agent.
+     */
+    public RateLimiterClient rateLimiter() {
+        return rateLimiterClient;
+    }
+
+    /**
+     * Returns the {@link FeatureFlagClient} API.
+     * <p>
+     * The wire surface is read-only and uncached by design: flags are updated out of
+     * band, so a local cache without invalidation would serve stale values silently.
+     */
+    public FeatureFlagClient featureFlags() {
+        return featureFlagClient;
+    }
+
+    /**
      * Check the health of the Agent connection.
      *
      * @return {@link HealthStatus#SERVING} if the Agent responds healthy,
      *         {@link HealthStatus#NOT_SERVING} otherwise (including timeout/error).
      */
     public HealthStatus healthCheck() {
+        // P0-4 / D6：健康探测是"我能否与 agent 对话"的自然入口，因此顺带做一次
+        // 协议协商（幂等、只做一次）。这样任何调用 healthCheck 的应用（含
+        // java-example）都会在启动期接触到版本协商。
+        try {
+            awaitConnected(config.getRequestTimeout());
+        } catch (CoordException e) {
+            // 版本不匹配是**可诊断**故障，不是"暂时不可用"：必须打到 WARN 并带上
+            // 三要素（SDK 版本 / agent 广告的版本 / 该怎么办），否则 D6 修复的意义
+            // ——"让失败可诊断"—— 会被一个 NOT_SERVING 布尔值吞掉。
+            if (e.getErrorCode() == ErrorCode.PROTOCOL_MISMATCH) {
+                log.warn("Protocol negotiation failed; agent NOT usable: {}", e.getMessage());
+            } else {
+                log.debug("Protocol negotiation during health check failed: {}", e.getMessage());
+            }
+            return HealthStatus.NOT_SERVING;
+        } catch (RuntimeException e) {
+            log.debug("Protocol negotiation during health check failed: {}", e.getMessage());
+            return HealthStatus.NOT_SERVING;
+        }
         try {
             HealthCheckRequest request = HealthCheckRequest.getDefaultInstance();
             HealthCheckResponse response = HealthGrpc.newBlockingStub(channelManager.getChannel())
@@ -232,6 +317,46 @@ public final class CoordClient implements Closeable {
             log.debug("Health check failed: {}", e.getMessage());
             return HealthStatus.NOT_SERVING;
         }
+    }
+
+    /**
+     * Wait for the agent to become reachable and complete protocol version negotiation.
+     *
+     * <p><b>P0-4 / D6.</b> Before this existed, the SDK never called
+     * {@code /coord.agent.Handshake/Negotiate} — and the agent never implemented it. The SDK
+     * could therefore connect successfully to a version-incompatible agent and only fail
+     * later with a bare gRPC {@code UNIMPLEMENTED} ("unknown service"), which says nothing
+     * about a version mismatch. That matters because the agent's services were renamed in
+     * {@code contracts/v1.2.0} in a <b>one-shot switch</b> (no dual-serving period): old
+     * clients must fail with a version error, not with an unexplained unknown-service error.
+     *
+     * <p>Idempotent and cached: after a successful negotiation this returns immediately, so it
+     * is safe (and recommended) to call once at application startup.
+     *
+     * @param timeout budget covering connect + negotiation
+     * @throws CoordException {@link ErrorCode#AGENT_UNAVAILABLE} if the agent is unreachable,
+     *         {@link ErrorCode#PROTOCOL_MISMATCH} if it does not speak this SDK's version
+     */
+    public void awaitConnected(Duration timeout) {
+        if (protocolNegotiated.compareAndSet(false, true)) {
+            try {
+                List<String> versions = channelManager.connectAndNegotiate(timeout);
+                agentProtocolVersions.clear();
+                agentProtocolVersions.addAll(versions);
+            } catch (RuntimeException e) {
+                // 协商失败 ⇒ 允许下一次重试（不得把"一次网络抖动"固化成永久失败）。
+                protocolNegotiated.set(false);
+                throw e;
+            }
+        }
+    }
+
+    /**
+     * The protocol versions advertised by the agent, or an empty list if negotiation has not
+     * succeeded yet. Populated by {@link #awaitConnected(Duration)} / {@link #healthCheck()}.
+     */
+    public List<String> agentProtocolVersions() {
+        return List.copyOf(agentProtocolVersions);
     }
 
     /**

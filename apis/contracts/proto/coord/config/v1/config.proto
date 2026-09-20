@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — 配置中心（能力承诺面，v1.2）
+//
+// 状态：COMMITTED（承诺中）｜ GA 期限：2026-12-31 ｜ 台账：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/config.proto 的 coord.config.v1.Config
+//            （字段编号/类型逐项一致；迁移 = 机械式重挂载，禁止趁机改 wire）
+//
+// GA 验收定义与倒逼机制见 WHITEPAPER.md §13。
+// ============================================================
+
+package coord.config.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.config.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/config/v1;configv1";
+
+// ============================================================
+
+service Config {
+  rpc Get(ConfigGetRequest) returns (ConfigGetResponse);
+  rpc Put(ConfigPutRequest) returns (ConfigPutResponse);
+  rpc List(ConfigListRequest) returns (ConfigListResponse);
+  rpc Watch(ConfigWatchRequest) returns (stream ConfigWatchEvent);
+}
+
+message ConfigGetRequest {
+  string key = 1;
+}
+
+message ConfigGetResponse {
+  string value = 1; // empty means key not found OR empty value stored
+  bool found = 2; // true if key exists, false otherwise
+}
+
+message ConfigPutRequest {
+  string key = 1;
+  string value = 2;
+}
+
+message ConfigPutResponse {
+  int64 revision = 1;
+}
+
+message ConfigListRequest {
+  string prefix = 1;
+}
+
+message ConfigListResponse {
+  map<string, string> entries = 1;
+}
+
+message ConfigWatchRequest {
+  string prefix = 1;
+  int64 start_revision = 2;
+}
+
+message ConfigWatchEvent {
+  string key = 1;
+  optional string new_value = 2;
+  int64 revision = 3;
+}
+
+// ============================================================
+// Health

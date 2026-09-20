@@ -29,8 +29,12 @@
   生效」两类（见 `scripts/mixture-fixtures/`）。"
   (:require [clojure.tools.logging :refer [info]]
             [jepsen.checker :as checker]
+            [jepsen.coord.electck :as electck]
+            [jepsen.coord.idgenck :as idgenck]
             [jepsen.coord.leaseck :as leaseck]
+            [jepsen.coord.lockck :as lockck]
             [jepsen.coord.mapck :as mapck]
+            [jepsen.coord.regck :as regck]
             [jepsen.coord.scanck :as scanck]
             [jepsen.coord.txnck :as txnck]
             [jepsen.coord.watchck :as watchck]))
@@ -46,8 +50,12 @@
 
 (def known-surfaces
   "`surface-checker` 认识的面（缺一个就不可能在组合里用它 —— 显式 `:checkers`
-  可绕过，但那样测试侧要自己提供 checker，不会静默）。"
-  #{:map :txn :scan :watch :lease})
+  可绕过，但那样测试侧要自己提供 checker，不会静默）。
+
+  M5a 把 agent 本地面（lock / election / idgen / registry）也纳进来：它们的
+  契约判据本来就是**跨 agent 的**（互斥、唯一 leader、全局唯一 ID），在组合
+  浸泡里与数据面共用同一条历史正合适。"
+  #{:map :txn :scan :watch :lease :lock :election :idgen :registry})
 
 (def default-min-sample
   "每个面的完成数下界（默认与 G6 的 `--min-op-sample` 一致）。
@@ -137,6 +145,25 @@
     :lease (leaseck/checker {:min-grants   (:min-grants opts)
                              :min-expiries (:min-expiries opts)
                              :tolerance-ms (:tolerance-ms opts)})
+    ;; M5a agent 本地面
+    ;; lock：生成器必然混地面真值探针 + 弃锁 op ⇒ **两条门禁都要开**（缺了判
+    ;; 未执行，见 F-34 / AG-06）。
+    ;;
+    ;; 注意 `:agent-nodes` 必须与 `:abandon?` 同时传：弃锁判据要把 op 归因到具体
+    ;; agent 才能对上 nemesis 的时间窗；只开 `:abandon?` 会把每一条弃锁都记成
+    ;; `:no-agent-attribution` ⇒ 整个 soak 判 invalid（宁可红，不可假绿）。
+    :lock      (lockck/checker {:min-acquires (:lock-min-acquires opts)
+                                :probe?       true
+                                :abandon?     true
+                                :agent-nodes  (:agent-nodes opts)
+                                :grace-ms     (:lock-grace-ms opts)})
+    :election  (electck/checker {:min-campaigns (:election-min-campaigns opts)
+                                 ;; 探针同样必然混入（1/3 槽位）
+                                 :probe?       true})
+    :idgen     (idgenck/checker {:min-ids (:idgen-min-ids opts)
+                                 :min-regressions (:idgen-min-regressions opts)})
+    :registry  (regck/checker {:min-cycles (:registry-min-cycles opts)
+                               :grace-ms   (:registry-grace-ms opts)})
     (throw (ex-info (str "mixck: unknown surface " surface)
                     {:surface surface
                      :known (vec (sort known-surfaces))}))))

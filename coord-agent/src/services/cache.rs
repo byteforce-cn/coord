@@ -10,6 +10,28 @@
 //
 // ✅ 状态声明（v2.1，2026-08-08）：ISR 复制**已实现并落地**。
 // 复制日志 / 持久化幂等键 / 本地序列号在 cache.redb 内与数据写同事务提交。
+//
+// ⚠️ 复制语义的**准确边界**（B-07 / B-08，2026-09-19 按源码核验后写明）。
+//    `WHITEPAPER.md` §9.1 原文写的是「ISR 提交非原子」与「分区 Leader 静态无故障
+//    转移」。逐行核验后的准确表述是：
+//
+//    1. **本地**提交是原子的（幂等键 + 数据 + 序列号同事务，见
+//       `replicated_apply_local`）；**跨节点**提交不是原子的。`replicated_write`
+//       的顺序固定为「本地提交 → 推送 ISR → `ensure_isr` 校验」。
+//    2. 由此产生一个**对调用方可见**的后果：若推送或 `min_isr` 校验失败，本函数
+//       返回错误，但**本地写入已经生效**。调用方无法从返回值区分「没写进去」与
+//       「写进去了但副本不足」—— 幂等键使重试安全，但**不能**据此宣称"失败即未写入"。
+//    3. 落后副本**不是永久**的：心跳（`start_heartbeat` → `heartbeat_once`）检测到
+//       对端序列号高于本地即触发 `pull_and_catch_up` → Reconcile 拉取缺失区间；
+//       复制日志在 cache.redb 内**无上限保留**，故只要 Leader 可达就能补齐。
+//       真正的窗口是"Leader 在本地提交后、Follower 补齐前崩溃"这段**暂时**不一致，
+//       而不是计划书 P0-8 原稿写的"Follower 永久落后"。
+//    4. **分区 Leader 是静态分配的**（`replication.rs` 的 `shard_leader`：显式覆盖
+//       优先，否则取 ISR 成员中地址最小者）—— 没有自动故障转移。这是**设计边界**，
+//       不是缺陷：所有 agent 基于同一成员集合算出同一结果，代价是 Leader 失联时
+//       该分区**不可写**（不产生脑裂），恢复靠运维介入而非选举。
+//
+//    以上 1/2/4 已同步写入对外契约 `cache.proto` 的边界声明（WHITEPAPER §10 规则 4）。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -1158,6 +1180,12 @@ impl CacheService {
 
     /// 通用 Leader 复制写：构建 entry → 单事务本地应用 → 推送 ISR Followers →
     /// min_isr 校验（同步复制）。返回 None 表示成功。
+    ///
+    /// **顺序是契约的一部分**（B-07）：本地提交 → 推送 ISR → `ensure_isr` 校验。
+    /// 因此本函数返回 `Err` 时，**本地写入可能已经生效** —— 调用方不得把错误读作
+    /// "未写入"。改成"先复制再本地提交"会把读己之写（read-your-write）与幂等回放
+    /// 一起打破，且跨节点原子提交本身不在 v0.2.0 的承诺面内（见模块头与
+    /// `cache.proto` 的边界声明）。
     async fn replicated_write(&self, op: ReplicationOp) -> ServiceResult<()> {
         let rm = self
             .replication

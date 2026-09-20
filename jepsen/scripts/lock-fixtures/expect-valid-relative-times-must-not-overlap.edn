@@ -1,0 +1,36 @@
+;; expect-valid-relative-times-must-not-overlap —— **守门员**：相对时间不得跨 op 比较。
+;;
+;; 这条 fixture 固定 M5a 首轮实跑暴露的**测试自身缺陷**：
+;;
+;; 两个 op 的 `:acquired-at-ms` / `:released-at-ms` 是「相对**本 op** 起点」的
+;; 毫秒（每个 op 的 t0 不同），直接跨 op 比区间是错的。上例中：
+;;
+;;   A: :invoke 1.000000e12 ns（= 1_000_000 ms）+ acquired 10 → 绝对 [1_000_010, 1_000_400)
+;;   B: :invoke 1.000400e12 ns（= 1_000_400 ms）+ acquired 50 → 绝对 [1_000_450, 1_000_650)
+;;
+;; **绝对不重叠**（B 在 A 释放 50ms 后才拿到），但如果拿相对值比，就会看到
+;; [10, 400) 与 [50, 250) 重叠 ⇒ 假红。实测里这类假红有 2817 条。
+;;
+;; 所以 lockck 的区间一律以 `(:invoke op)`（jepsen 记录的绝对 invoke 时刻）为锚。
+;; 本 fixture 就是那个锚的回归守卫：去掉 `abs-ms` 它必然变红。
+[{:type :invoke :f :lock-contend :process 0 :time 1000000000000
+  :value {:name "lock-a" :holder-id "h1" :ttl-seconds 5}}
+ {:type :ok :f :lock-contend :process 0 :time 1000400000000
+  :invoke 1000000000000
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  :acquired-at-ms 10 :released-at-ms 400 :released? true
+  :gone? true :gone-at-ms 400 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}
+
+ {:type :invoke :f :lock-contend :process 1 :time 1000400000000
+  :value {:name "lock-a" :holder-id "h2" :ttl-seconds 5}}
+ {:type :ok :f :lock-contend :process 1 :time 1000700000000
+  :invoke 1000400000000
+  :name "lock-a" :holder-id "h2" :lease-id 12
+  :acquired-at-ms 50 :released-at-ms 250 :released? true
+  :gone? true :gone-at-ms 250 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}]

@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — 服务注册与发现（能力承诺面，v1.1）
+//
+// 状态：COMMITTED（承诺中）｜ GA 期限：2026-10-31 ｜ 台账：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/agent_api.proto 的 coord.agent.Registry
+//            （字段编号/类型逐项一致；迁移 = 机械式重挂载，禁止趁机改 wire）
+//
+// 本文件是对【业务消费者】的协调能力承诺：注册 / 心跳 / 发现 / 订阅变更。
+// 底座原语（KV/Lease/Watch）是实现细节，不向消费者暴露编排义务。
+// GA 验收定义与倒逼机制见 WHITEPAPER.md §13。
+// ============================================================
+
+package coord.registry.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.registry.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/registry/v1;registryv1";
+
+// 发现过滤模式。零值 UNSPECIFIED 等同 EXACT（向后兼容）。
+enum FilterMode {
+  FILTER_MODE_UNSPECIFIED = 0;
+  FILTER_MODE_EXACT = 1;   // 精确匹配 service_name
+  FILTER_MODE_PREFIX = 2;  // 匹配 service_name 为前缀的所有服务
+  FILTER_MODE_ALL = 3;     // 返回全部已注册实例
+}
+
+// 注册请求。
+//
+// 语义承诺：
+//   - (service_name, instance_id) 唯一标识一个实例；
+//   - 同键重复 Register = 覆盖续约（幂等），返回新的 lease_id；
+//   - 注册即绑定租约：ttl_seconds 内无 Heartbeat，实例自动过期并从
+//     Discover 与 Watch 中移除（移除事件至少一次投递）；
+//   - metadata 为不透明字节（建议 JSON），承载 address 等实例信息，
+//     服务端不解析、不校验。
+message RegisterRequest {
+  string service_name = 1;  // 服务名（如 "order-service"）
+  string instance_id = 2;   // 实例唯一标识（如 "node1:8080"），同服务名内唯一
+  string metadata = 3;      // 不透明元数据（建议 JSON；实例地址放这里）
+  int32 ttl_seconds = 4;    // 租约 TTL（秒）；实际生效 TTL 以 Heartbeat 响应为准
+}
+
+// 注册响应。
+message RegisterResponse {
+  int64 lease_id = 1; // 服务端分配的租约 ID（Heartbeat / Deregister 需回传）
+}
+
+// 注销请求。语义承诺：幂等——实例不存在时同样返回成功（OK）。
+message DeregisterRequest {
+  string service_name = 1;
+  string instance_id = 2;
+  int64 lease_id = 3;
+}
+
+message DeregisterResponse {}
+
+// 心跳续约请求。
+message HeartbeatRequest {
+  string service_name = 1;
+  string instance_id = 2;
+  int64 lease_id = 3;
+}
+
+message HeartbeatResponse {
+  int64 ttl = 1; // 续约后的生效 TTL（秒）；0 = 租约已失效，须重新 Register
+}
+
+// 实例视图。metadata 语义同 RegisterRequest.metadata。
+message ServiceInstance {
+  string instance_id = 1;
+  string service_name = 2;
+  string metadata = 3;
+}
+
+// 发现请求。语义承诺：线性一致读；按 filter_mode 过滤。
+message DiscoverRequest {
+  string service_name = 1;
+  FilterMode filter_mode = 2;
+}
+
+message DiscoverResponse {
+  repeated ServiceInstance instances = 1;
+  int64 revision = 2; // 全局单调递增的版本号；只允许相等/大小比较（WHITEPAPER §8.1）
+}
+
+// 变更订阅请求（服务端流）。
+//
+// 语义承诺：
+//   - 事件按 revision 有序、至少一次投递（可能重复，按键幂等应用）；
+//   - 断线重连：start_revision = 已确认 revision + 1 重建流；
+//   - start_revision 早于保留窗口 → OUT_OF_RANGE，须 Discover 全量重建。
+message WatchRequest {
+  string service_name = 1;
+  int64 start_revision = 2; // 从该 revision 起投递；0 = 仅投递新事件
+}
+
+message WatchEvent {
+  enum EventType {
+    UNKNOWN = 0;
+    INSTANCES_ADDED = 1;   // 新增实例（含 metadata/地址信息）
+    INSTANCES_REMOVED = 2; // 移除（注销或租约过期）
+    INSTANCES_UPDATED = 3; // 更新（重复 Register 覆盖）
+  }
+  EventType type = 1;
+  repeated ServiceInstance instances = 2; // 本事件涉及的实例快照，可直接应用
+  int64 revision = 3;
+}
+
+// 服务注册与发现。
+service Registry {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc Discover(DiscoverRequest) returns (DiscoverResponse);
+  rpc Watch(WatchRequest) returns (stream WatchEvent);
+}

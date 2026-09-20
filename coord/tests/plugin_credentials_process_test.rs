@@ -156,6 +156,126 @@ fn agent_provisioner_grants_match_server_bootstrap_grants() {
     );
 }
 
+/// **漂移守卫（F-50）**：agent 自身身份的能力清单、键空间清单与角色名必须与
+/// server 侧**逐字一致** —— 否则会出现"agent 申请了 A、服务端按 B 授权"的静默失效
+/// （F-50 的形态：唯一症状是 `missing CCT token` / 能力不足）。
+#[test]
+fn agent_self_grants_match_server_self_grants() {
+    let agent: Vec<(String, String)> = coord_agent::plugin::identity::self_capability_grants();
+    let server: Vec<(String, String)> = coord_server::auth::agent_self_capability_grants();
+    assert_eq!(
+        agent, server,
+        "coord-agent 的 self_capability_grants() 与 server 侧 agent-self 能力清单漂移"
+    );
+    assert_eq!(
+        coord_agent::plugin::identity::SELF_KEYSPACES.to_vec(),
+        coord_server::auth::AGENT_SELF_KEYSPACES.to_vec(),
+        "内部键空间清单漂移"
+    );
+    assert_eq!(
+        coord_agent::plugin::identity::SELF_ROLE,
+        coord_server::auth::AGENT_SELF_ROLE,
+        "agent 自身身份的角色名与 server 侧常量漂移"
+    );
+}
+
+/// **边界守卫（F-50）**：自身身份**只**覆盖内部键空间，且**不含**任何 `admin:*`。
+///
+/// 这是"agent 不得用自身身份读写调用方数据 / 改账户"这一安全边界的机器判据。
+#[test]
+fn agent_self_grants_stay_internal_and_non_admin() {
+    for (id, scope) in coord_server::auth::agent_self_capability_grants() {
+        assert!(
+            !id.starts_with("admin:"),
+            "{id} must not grant administrative access to the agent's own identity"
+        );
+        if id.starts_with("data:kv:") || id.starts_with("data:txn:") {
+            assert!(
+                scope.starts_with("/_") && scope.ends_with("/*"),
+                "{id} must be scoped to the internal keyspace (/_<domain>/*), got {scope:?}"
+            );
+        }
+    }
+}
+
+/// **覆盖守卫（F-50 的真正卡口）**：源码里出现的**每一个** `/_<domain>/` 键空间
+/// 都必须被 `AGENT_SELF_KEYSPACES` 覆盖。
+///
+/// 为什么需要它：F-50 的失败形态是"漏授一处 ⇒ 静默失效"，而手写枚举**必然**会漏。
+/// 负向对照（关掉本修复后重跑 `agent_auth_process_test`）实测到的自发流量面就比
+/// 结论文档原先列出的四处更宽 —— 还有 pki CA 自举 / transit DEK 清扫 / config 订阅 /
+/// workflow 存储初始化。本测试把"新增内部键空间"与"补授权"绑成一步：
+/// 只做前者，这里就红。
+///
+/// 与仓库既有的源码扫描型卡口（`scripts/check-error-code-contract.sh`、
+/// `scripts/check-panics.sh`）同族：把"人记得做"变成"机器拦得住"。
+#[test]
+fn every_internal_keyspace_in_source_is_granted() {
+    use std::collections::BTreeSet;
+
+    // `CARGO_MANIFEST_DIR` = <repo>/coord
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("coord crate has a parent directory")
+        .to_path_buf();
+
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    for dir in ["coord-agent/src", "coord-core/src", "coord-proto/src"] {
+        collect_keyspaces(&repo_root.join(dir), &mut found);
+    }
+
+    assert!(
+        !found.is_empty(),
+        "source scan found no internal keyspace at all — the scan itself is broken"
+    );
+
+    let granted: BTreeSet<&str> = coord_server::auth::AGENT_SELF_KEYSPACES
+        .iter()
+        .copied()
+        .collect();
+    let missing: Vec<&String> = found
+        .iter()
+        .filter(|ns| !granted.contains(ns.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "源码使用了未被 AGENT_SELF_KEYSPACES 覆盖的内部键空间 {missing:?}；\
+         agent 自身身份会在运行期以 `permission denied` 静默失效（F-50 同型）。\
+         请把它们加入 `AGENT_SELF_KEYSPACES`（server 与 agent 两侧同名常量）。"
+    );
+}
+
+/// 递归扫描 `*.rs`，抽取形如 `/_<domain>/` 的键空间前缀。
+fn collect_keyspaces(dir: &std::path::Path, out: &mut std::collections::BTreeSet<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_keyspaces(&path, out);
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for (idx, _) in text.match_indices("\"/_") {
+            let rest = &text[idx + 3..];
+            let Some(slash) = rest.find('/') else { continue };
+            let ns = &rest[..slash];
+            if !ns.is_empty()
+                && ns.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                && !ns.starts_with('_')
+            {
+                out.insert(ns.to_string());
+            }
+        }
+    }
+}
+
 /// CLI 凭据文件全链路（批次 12）：
 /// ① `auth login` 落盘（权限 0600）；
 /// ② 仅凭据文件（无 `--token`）→ 管理命令成功；

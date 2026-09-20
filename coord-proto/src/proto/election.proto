@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — Leader 选举（能力承诺面，v1.1）
+//
+// 状态：COMMITTED（承诺中）｜ GA 期限：2026-11-30 ｜ 台账：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/agent_api.proto 的 coord.agent.LeaderElection
+//
+// 语义契约（WHITEPAPER.md §3.3）：
+//   - 竞选原子：同一 group 同一时刻至多一个 leader；
+//   - 续约 = 定期重新 Campaign（同 candidate_id）；
+//   - TTL 内无续约 → leader 自动过期并广播 LEADER_EXPIRED。
+// ============================================================
+
+package coord.election.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.election.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/election/v1;electionv1";
+
+// 竞选/续约请求。
+//
+// 语义承诺：
+//   - 无 leader：首个 Campaign 原子获胜（线性一致 CAS）；
+//   - 已有 leader 且为本人（candidate_id 匹配）：视为续约，elected=true；
+//   - 已有 leader 且为他人：elected=false（正常返回，非错误），
+//     可通过 Watch 等待 LEADER_EXPIRED / LEADER_RESIGNED 后重试。
+message LeaderCampaignRequest {
+  string group_name = 1;   // 选举组名（资源标识）
+  string candidate_id = 2; // 候选者唯一标识
+  int64 ttl_seconds = 3;   // 任期租约 TTL（秒）；期内须重新 Campaign 续约
+}
+
+message LeaderCampaignResponse {
+  bool elected = 1;      // 是否当选/续约成功
+  int64 lease_id = 2;    // 任期租约 ID（Resign 需回传）
+  string leader_id = 3;  // 当选者 = candidate_id
+}
+
+// 辞任请求。语义承诺：仅当前 leader 本人有效；他人 → resigned=false。
+message LeaderResignRequest {
+  string group_name = 1;
+  string candidate_id = 2;
+  int64 lease_id = 3;
+}
+
+message LeaderResignResponse {
+  bool resigned = 1;
+}
+
+// 查询当前 leader。语义承诺：线性一致读；无 leader 时 exists=false。
+message LeaderGetLeaderRequest {
+  string group_name = 1;
+}
+
+message LeaderGetLeaderResponse {
+  string leader_id = 1;
+  int64 lease_id = 2;
+  int64 elected_at = 3; // 当选时间（Unix 秒）
+  bool exists = 4;      // 当前是否存在 leader
+}
+
+// 订阅 leader 变更（服务端流）。语义承诺：至少一次投递；
+// 重连后先 GetLeader 重建状态再续订。
+message LeaderWatchRequest {
+  string group_name = 1;
+}
+
+message LeaderWatchEvent {
+  enum EventType {
+    UNKNOWN = 0;
+    LEADER_ELECTED = 1;  // 当选（含续约后的连任确认）
+    LEADER_RESIGNED = 2; // 辞任
+    LEADER_EXPIRED = 3;  // 租约过期
+  }
+  EventType type = 1;
+  string group_name = 2;
+  string leader_id = 3; // EXPIRED 时 = 已失效的前 leader
+}
+
+// Leader 选举服务。
+service LeaderElection {
+  rpc Campaign(LeaderCampaignRequest) returns (LeaderCampaignResponse);
+  rpc Resign(LeaderResignRequest) returns (LeaderResignResponse);
+  rpc GetLeader(LeaderGetLeaderRequest) returns (LeaderGetLeaderResponse);
+  rpc Watch(LeaderWatchRequest) returns (stream LeaderWatchEvent);
+}

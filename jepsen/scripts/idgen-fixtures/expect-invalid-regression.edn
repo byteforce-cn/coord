@@ -1,0 +1,10 @@
+;; expect-invalid-regression —— P1：同一进程观察到的 ID 下降（时钟回拨未防护）。
+;;
+;; snowflake 依赖墙钟；台账明确要求「时钟回拨防护**落地或明确不承诺边界**」。
+;; 默认 min-regressions = 0（= 认为已落地）；若双方书面确认「不承诺」，用
+;; `--idgen-min-regressions N` 显式放宽，并把确认记录链接进 MANIFEST。
+[{:type :ok :f :idgen :process 0 :time 10 :name "orders"
+  :batch? false :ids ["9000000000000000000"]}
+
+ {:type :ok :f :idgen :process 0 :time 20 :name "orders"
+  :batch? false :ids ["8000000000000000000"]}]

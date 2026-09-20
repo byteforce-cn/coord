@@ -1,0 +1,18 @@
+;; expect-valid-clean —— M5a idgen 基线：互异、递增、batch 个数相符。
+;;
+;; 判定口径（jepsen.coord.idgenck）：
+;;   * 同名发号器下 ID 全局唯一（P0）；
+;;   * 单个 batch 内互异（P0，契约原文「返回 count 个互异 ID」）；
+;;   * 返回个数 = 请求个数；
+;;   * 同一客户端进程内观察到的序列不得下降（回拨防护，可配置边界）。
+[{:type :ok :f :idgen :process 0 :time 10 :name "orders"
+  :batch? true :requested-count 3 :ids ["100" "101" "102"] :n 3}
+
+ {:type :ok :f :idgen :process 0 :time 20 :name "orders"
+  :batch? true :requested-count 3 :ids ["103" "104" "105"] :n 3}
+
+ {:type :ok :f :idgen :process 1 :time 30 :name "orders"
+  :batch? false :ids ["200"]}
+
+ {:type :ok :f :idgen :process 1 :time 40 :name "orders"
+  :batch? false :ids ["201"]}]

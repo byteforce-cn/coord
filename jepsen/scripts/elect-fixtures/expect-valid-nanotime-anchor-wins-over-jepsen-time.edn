@@ -1,0 +1,33 @@
+;; expect-valid-nanotime-anchor-wins-over-jepsen-time —— **守门员**（F-35 第二层）。
+;;
+;; 与 lock 面同一课（findings F-34 根因①）：jepsen 记录的 invoke 时刻是 worker
+;; **派发** op 时打的点，中间隔着队列与线程调度，相对客户端自读的 `System/nanoTime`
+;; 有几十到几百毫秒的抖动。区间重叠是**跨 op** 比较，锚点的抖动会直接变成重叠。
+;;
+;; 下例刻意让两种锚点给出相反结论（同一个 group）：
+;;
+;;   * `:t0-ns` 锚点：c1 = [1_000_010, 1_000_400)，c2 = [1_000_450, 1_000_650) —— 不重叠；
+;;   * `:time`（jepsen）锚点：c2 的 invoke 是 1_000_100ms ⇒ c2 = [1_000_150, 1_000_350)
+;;     —— 与 c1 重叠 200ms。
+;;
+;; 去掉 `:t0-ns` 优先（改回只看 `:time`/`:invoke`）⇒ 本 fixture 必红。
+[{:type :invoke :f :elect-campaign :process 0 :time 1000000000000
+  :value {:group-name "g1" :candidate-id "c1" :ttl-seconds 5}}
+ {:type :ok :f :elect-campaign :process 0 :time 1000400000000
+  :elected? true :group-name "g1" :candidate-id "c1" :lease-id 21
+  :t0-ns 1000000000000
+  :campaign-at-ms 10 :resigned-at-ms 400 :resigned? true
+  :gone? true :gone-at-ms 400 :still-leader-after-resign false
+  :holder-ttl-seconds 5
+  :leader-after-resign {:leader-id "" :exists false}}
+
+ ;; c2 的 jepsen invoke 时刻（1_000_100ms）比它自己的 t0（1_000_400ms）早 300ms
+ {:type :invoke :f :elect-campaign :process 1 :time 1000100000000
+  :value {:group-name "g1" :candidate-id "c2" :ttl-seconds 5}}
+ {:type :ok :f :elect-campaign :process 1 :time 1000700000000
+  :elected? true :group-name "g1" :candidate-id "c2" :lease-id 22
+  :t0-ns 1000400000000
+  :campaign-at-ms 50 :resigned-at-ms 250 :resigned? true
+  :gone? true :gone-at-ms 250 :still-leader-after-resign false
+  :holder-ttl-seconds 5
+  :leader-after-resign {:leader-id "" :exists false}}]
