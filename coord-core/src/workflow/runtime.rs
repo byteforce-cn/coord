@@ -1499,6 +1499,17 @@ where
                         let mut try_ctx = inst.context.clone();
 
                         // 执行 try 块
+                        //
+                        // ⚠️ `Suspend` **必须**在这里处理（2026-09-19 修）。
+                        // `call` 任务的执行器是不做同步 I/O 的：它返回
+                        // `Suspend { ExternalCall }`，由 Runtime 去 `dispatch`。
+                        // 此前这个 match 只有 `NextTask | Completed | Failed | _`，
+                        // 于是 `Suspend` 落进 `_ => {}` **被静默丢弃**：
+                        //   ⇒ 被 `compensatedBy` / `onErrors` 包裹的状态，其动作
+                        //     **一次都不会发出去**（既不成功也不失败），
+                        //     而工作流继续沿正常路径前进 —— 调用方以为副作用执行了。
+                        // 这是"最坏的一类"：静默丢副作用。故此处与主循环
+                        // （见 `SuspendReason::ExternalCall` 分支）同口径派发。
                         for task in &try_tasks {
                             let step_result = self.executor.execute_step(
                                 &WorkflowInstance {
@@ -1522,6 +1533,43 @@ where
                                     try_fault = Some(fault);
                                     break;
                                 }
+                                // `call` 任务：派发 I/O，把结果折叠成"成功"或"失败"
+                                StepResult::Suspend {
+                                    reason:
+                                        SuspendReason::ExternalCall {
+                                            service,
+                                            with,
+                                            input,
+                                        },
+                                    frame: call_frame,
+                                } => {
+                                    let result =
+                                        self.dispatcher.dispatch(&service, with.as_ref(), &input).await;
+                                    match result {
+                                        DispatchResult::Success { data } => {
+                                            let mut done = call_frame;
+                                            done.status = TaskStatus::Completed;
+                                            done.output = Some(data);
+                                            done.ended_at = Some(self.clock.now_ms());
+                                            try_ctx = apply_frame_output(try_ctx, &done);
+                                        }
+                                        DispatchResult::Failure { error, .. } => {
+                                            // 可重试与否由 catch 子句的 `errors` 匹配决定：
+                                            // 这里统一建模为 communication fault，交给
+                                            // catch 路由（catch-all 会接住它）。
+                                            try_failed = true;
+                                            try_fault = Some(
+                                                crate::workflow::errors::WorkflowFault::communication(
+                                                    format!("call to '{service}' failed: {error}"),
+                                                    error,
+                                                ),
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                                // 其它挂起形态（等待事件 / 延时 / 信号）在 try 块内
+                                // 不做特殊处理：乐观推进，语义与修前一致。
                                 _ => {}
                             }
                         }

@@ -2870,6 +2870,136 @@ events:
         );
     }
 
+    // ═══ E10：补偿语义的**端到端**验收（不再只验编译产物）═══
+    //
+    // 为什么必须有这一条：`sw.rs` 有编译期用例
+    // （`test_compensated_by_wraps_in_catch_all`）证明 `compensatedBy` 会被编译成
+    // TryCatch 的 catch-all 转场，但**从来没有一条用例让补偿真的跑起来**。
+    // 「编译出了转场」与「失败时确实转过去并执行了补偿动作」是两件事 ——
+    // 引擎侧 TryCatch 的错误路由、以及补偿状态的 dispatch，都可能静默不生效。
+    //
+    // 判据（三条都要满足才算证据）：
+    //   ① 被补偿状态的动作**确实失败**（对端是关闭端口）；
+    //   ② 补偿**动作真的发出去了**（由服务端记录到请求，而不是"状态名出现在栈上"）；
+    //   ③ 正常路径（`done`）**不得**执行。
+
+    /// 回显 + **记录请求**的本地 HTTP 服务器。
+    ///
+    /// 与 `spawn_echo_server()` 的区别：它把收到的请求首行留档，供断言
+    /// "补偿动作真的发出去了" —— 只看实例的 task_stack 只能证明"状态跑了"，
+    /// 证明不了"动作跑了"。
+    async fn spawn_recording_server() -> (String, std::sync::Arc<parking_lot::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let log: std::sync::Arc<parking_lot::Mutex<Vec<String>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let log_for_task = log.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let log = log_for_task.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    let req = String::from_utf8_lossy(&buf).to_string();
+                    let first_line = req.lines().next().unwrap_or("").to_string();
+                    log.lock().push(first_line.clone());
+                    let body = serde_json::json!({"echo": first_line}).to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (addr, log)
+    }
+
+    /// 带补偿的 SW 文档：`reserve` 失败 ⇒ 必须转去 `undo` 并执行 `refund`。
+    fn sample_compensation_sw(charge_url: &str, refund_url: &str) -> String {
+        format!(
+            r#"{{
+          "id": "comp-wf",
+          "version": "1.0",
+          "start": "reserve",
+          "functions": [
+            {{ "name": "chargeCard", "operation": "{charge_url}" }},
+            {{ "name": "refundCard", "operation": "{refund_url}" }}
+          ],
+          "states": [
+            {{ "name": "reserve", "type": "operation",
+              "actions": [ {{ "name": "charge",
+                              "functionRef": {{ "refName": "chargeCard" }} }} ],
+              "compensatedBy": "undo",
+              "transition": "done" }},
+            {{ "name": "undo", "type": "compensate",
+              "actions": [ {{ "name": "refund",
+                              "functionRef": {{ "refName": "refundCard" }} }} ],
+              "end": true }},
+            {{ "name": "done", "type": "inject",
+              "data": {{ "ok": true }}, "end": true }}
+          ]
+        }}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn test_sw_compensated_by_runs_compensation_end_to_end() {
+        let (ok_addr, log) = spawn_recording_server().await;
+        // 关闭端口：连接必然被拒 ⇒ 被补偿状态的动作**真的失败**
+        let dead_url = "http://127.0.0.1:1/charge".to_string();
+        let refund_url = format!("http://{ok_addr}/refund");
+        let doc = sample_compensation_sw(&dead_url, &refund_url);
+
+        let svc = WorkflowEngineService::new(); // 真 HttpTaskDispatcher（不是 Noop）
+        let def_id = svc.deploy_definition("test", &doc).await.unwrap();
+        let inst = svc
+            .start_instance(&def_id, serde_json::json!({"orderId": "o-1"}))
+            .await
+            .unwrap();
+
+        // 等补偿链路跑完（dispatch 失败 + 转场 + 补偿 dispatch）
+        for _ in 0..40 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let cur = svc.get_instance(&inst.id).await.unwrap().unwrap();
+            if cur.status == InstanceStatus::Completed || cur.status == InstanceStatus::Failed {
+                break;
+            }
+        }
+
+        let loaded = svc.get_instance(&inst.id).await.unwrap().unwrap();
+        let ran: Vec<&str> = loaded
+            .task_stack
+            .iter()
+            .map(|f| f.task_name.as_str())
+            .collect();
+
+        // ② 补偿状态跑到了
+        assert!(
+            ran.iter().any(|n| n.starts_with("undo")),
+            "补偿状态未执行，task_stack={ran:?}，status={:?}，fault={:?}",
+            loaded.status,
+            loaded.fault
+        );
+        // ③ 正常路径不得执行
+        assert!(
+            !ran.iter().any(|n| n.starts_with("done")),
+            "被补偿状态失败后不得继续走正常路径，task_stack={ran:?}"
+        );
+        // ② 补偿**动作真的发出去了**（服务端有记录），而不仅是"状态名在栈上"
+        let requests = log.lock().clone();
+        assert!(
+            requests.iter().any(|r| r.contains("/refund")),
+            "补偿动作未真正 dispatch（服务端未收到 /refund 请求）：{requests:?}"
+        );
+    }
+
     // ═══ P2：HTTP 完整契约 + secrets/constants 注入 + 认证 ═══
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

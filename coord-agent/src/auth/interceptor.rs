@@ -1146,10 +1146,16 @@ mod tests {
         }
 
         // 反向：这些流式方法必须被识别为流式，且不在缓存集合里
+        //
+        // 名字必须用**真实全名**：这里曾写着 `/coord.mq.MQ/Subscribe` ——
+        // 那是迁移前/从未存在过的路径，于是断言看着在跑、其实与真实请求无关
+        // （core 侧同一处缺陷已修，见 `is_streaming_rpc` 的文档与
+        //  `streaming_set_matches_the_proto_descriptors` 的 descriptor 判据）。
         for rpc in [
             "/coord.watch.Watch/Watch",
             "/coord.lease.Lease/LeaseKeepAlive",
-            "/coord.mq.MQ/Subscribe",
+            "/coord.mq.v1.MQ/Subscribe",
+            "/coord.registry.v1.Registry/Watch",
         ] {
             assert!(
                 coord_core::grpc_auth::is_streaming_rpc(rpc),

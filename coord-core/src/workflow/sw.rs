@@ -418,6 +418,80 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
         return Err(format!("start state '{start}' not found in states"));
     }
 
+/// 把 `functionRef` 解析成**可派发**的 `CallTask`。
+///
+/// **为什么必须在编译期做**：dispatcher 的签名是
+/// `dispatch(service, with, input)` —— 它**看不到**文档的 `functions[]`，
+/// 所以 `函数名 → operation URI` 只能在这里解析。
+///
+/// 修复前的形态（2026-09-19 发现）：一律发 `CallType::Function(名字)` ⇒ dispatcher
+/// 收到 `service = 函数名` ⇒ 落到 `_ =>` 分支返回
+/// `Failure("unknown service type: <名字>")`（非重试）⇒ **任何 CNCF `operation`
+/// 状态在真 dispatcher 下都必然失败**。而单测普遍用 `NoopTaskDispatcher`
+/// （对一切返回成功），于是这条缺陷在测试里**完全不可见** —— 又一例
+/// "守卫看起来在跑，其实什么都没验证"。
+///
+/// 解析规则（保守：宁可发出最可能的那一个请求，也不静默成功）：
+///   - `operation` 是 `http(s)://` URI ⇒ 发 `CallType::Http`，URI 进 `endpoint`；
+///     方法取动作参数里的 `method`，缺省 **POST**（`operation` 在 Saga 里的定位是
+///     "产生副作用的一步"，缺省成 POST 才不会把"我要写"读成"我要读"）；
+///   - 其它（文档里没有该函数 / 非 HTTP URI）⇒ 保持函数名，交由宿主 dispatcher
+///     自行解释（并以 "unknown service type" **显式失败**，而不是静默成功）。
+fn resolve_function_call(
+    fn_ref: &SwFunctionRef,
+    explicit_with: Option<Value>,
+    fn_uris: &HashMap<String, String>,
+) -> CallTask {
+    let args = explicit_with.or_else(|| fn_ref.arguments.clone());
+    let http_uri = fn_uris
+        .get(&fn_ref.ref_name)
+        .filter(|op| op.starts_with("http://") || op.starts_with("https://"));
+    let Some(op) = http_uri else {
+        return CallTask {
+            call: CallType::Function(fn_ref.ref_name.clone()),
+            with: args,
+        };
+    };
+
+    let method = args
+        .as_ref()
+        .and_then(|a| a.get("method"))
+        .and_then(|m| m.as_str())
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| "POST".to_string());
+
+    let mut with = serde_json::Map::new();
+    with.insert("method".into(), Value::String(method.clone()));
+    with.insert(
+        "endpoint".into(),
+        serde_json::json!({ "uri": op, "method": method }),
+    );
+
+    if let Some(a) = args {
+        // 控制键不得混进请求体
+        let mut body = a.clone();
+        if let Some(obj) = body.as_object_mut() {
+            for k in ["method", "body", "query", "headers", "auth"] {
+                obj.remove(k);
+            }
+        }
+        let body = a.get("body").cloned().unwrap_or(body);
+        if !body.is_null() {
+            with.insert("body".into(), body);
+        }
+        for k in ["query", "headers", "auth"] {
+            if let Some(v) = a.get(k) {
+                with.insert(k.into(), v.clone());
+            }
+        }
+    }
+
+    CallTask {
+        call: CallType::Http,
+        with: Some(Value::Object(with)),
+    }
+}
+
     // ── 2. 状态类型 + 结构校验 ──
     for s in &doc.states {
         match s.state_type.as_str() {
@@ -506,6 +580,15 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
     validate_graph(&doc, &state_map, start)?;
 
     // ── 4. 构建 do 任务列表（start 首位，其余按文档顺序） ──
+    //
+    // 函数名 → operation URI 的解析表：dispatcher **看不到**文档，因此
+    // `functionRef` 的解析只能在编译期做（见 `resolve_function_call`）。
+    let fn_uris: HashMap<String, String> = doc
+        .functions
+        .iter()
+        .filter_map(|f| f.operation.clone().map(|op| (f.name.clone(), op)))
+        .collect();
+
     let mut tasks: Vec<NamedTask> = Vec::new();
     let mut needs_end = false;
 
@@ -565,10 +648,7 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                     };
                     action_tasks.push(NamedTask {
                         name,
-                        task: Task::Call(CallTask {
-                            call: CallType::Function(fn_ref.ref_name.clone()),
-                            with,
-                        }),
+                        task: Task::Call(resolve_function_call(fn_ref, with, &fn_uris)),
                     });
                 }
 
@@ -698,10 +778,7 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                         let with = fn_ref.arguments.clone();
                         tasks.push(NamedTask {
                             name: format!("{}__call", s.name),
-                            task: Task::Call(CallTask {
-                                call: CallType::Function(fn_ref.ref_name.clone()),
-                                with,
-                            }),
+                            task: Task::Call(resolve_function_call(fn_ref, with, &fn_uris)),
                         });
                     }
                 }
@@ -816,10 +893,11 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                     })?;
                     sub_tasks.push(NamedTask {
                         name: format!("{}__item_{}", s.name, i),
-                        task: Task::Call(CallTask {
-                            call: CallType::Function(fn_ref.ref_name.clone()),
-                            with: a.arguments.clone().or_else(|| fn_ref.arguments.clone()),
-                        }),
+                        task: Task::Call(resolve_function_call(
+                            fn_ref,
+                            a.arguments.clone().or_else(|| fn_ref.arguments.clone()),
+                            &fn_uris,
+                        )),
                     });
                 }
                 tasks.push(NamedTask {
@@ -846,10 +924,11 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                         })?;
                         branch_tasks.push(NamedTask {
                             name: format!("{}__{}", b.name, a.name.clone().unwrap_or_default()),
-                            task: Task::Call(CallTask {
-                                call: CallType::Function(fn_ref.ref_name.clone()),
-                                with: a.arguments.clone().or_else(|| fn_ref.arguments.clone()),
-                            }),
+                            task: Task::Call(resolve_function_call(
+                                fn_ref,
+                                a.arguments.clone().or_else(|| fn_ref.arguments.clone()),
+                                &fn_uris,
+                            )),
                         });
                     }
                     branches.push(ForkBranch {
@@ -883,10 +962,11 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                     };
                     tasks.push(NamedTask {
                         name,
-                        task: Task::Call(CallTask {
-                            call: CallType::Function(fn_ref.ref_name.clone()),
-                            with: a.arguments.clone().or_else(|| fn_ref.arguments.clone()),
-                        }),
+                        task: Task::Call(resolve_function_call(
+                            fn_ref,
+                            a.arguments.clone().or_else(|| fn_ref.arguments.clone()),
+                            &fn_uris,
+                        )),
                     });
                 }
                 let target = linear_transition_target(s)?;
@@ -1512,8 +1592,19 @@ mod tests {
             .unwrap();
         match &call.task {
             Task::Call(c) => {
-                assert!(matches!(&c.call, CallType::Function(f) if f == "approveOrder"));
-                assert!(c.with.is_some());
+                // 修复前这里断言的是 `CallType::Function("approveOrder")` —— 那正是
+                // **缺陷本身的形状**：函数名被当成 dispatcher 的 service，
+                // 而 dispatcher 只认 "http"/"grpc" ⇒ 真派发时必然
+                // `Failure("unknown service type: approveOrder")`。
+                // `functions[]` 里的 operation URI 才是要被调用的东西
+                // ⇒ 编译期解析后应为 `CallType::Http` + endpoint.uri = 该 URI。
+                assert_eq!(c.call, CallType::Http);
+                let with = c.with.as_ref().expect("resolved call must carry `with`");
+                assert_eq!(
+                    with.get("endpoint").and_then(|e| e.get("uri")).and_then(|u| u.as_str()),
+                    Some("http://icps/approve"),
+                    "endpoint.uri 必须是 functions[].operation，实际: {with}"
+                );
             }
             other => panic!("expected call task, got {other:?}"),
         }
