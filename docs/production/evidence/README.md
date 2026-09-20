@@ -97,3 +97,20 @@ bash scripts/collect-evidence.sh jepsen          # 真实 Jepsen（需 lein + �
 > registry 属 M5 未实现而构造期硬失败），且归档证据尚未取得 §5.4 的书面参数
 > 确认。因此本目录**不得**被引用为「已通过长期运行验证」；完整口径见
 > `jepsen/docs/soak-closure-report.md` §0。
+
+### GA 前哨（2026-09-20：M5b MQ `poll + ack` 复核 —— B-04 / V8 的最终证据）
+
+> 背景：F-67（`:poll-ack-failures 59/59` 全失败）第三轮分诊为**测试侧**缺陷
+> （jepsen 手写 descriptor 的 `MqAckRequest` 把 `partition` / `consumer_group`
+> 字段号写反 ⇒ int32 发在 string 字段上 ⇒ protobuf 解码恒失败）。修好后
+> 「改后真的转绿」仍需一次真实 lab 跑 —— 就是下面第一份。
+
+| 目录 | 场景 | 结论 |
+|:--|:--|:--|
+| `20260920T133256Z-m5b-mq-poll-ack-single-client/` | `make test JEPSEN_PROVIDER=docker WORKLOAD=mq NEMESIS=none TIME_LIMIT=60 AGENTS=1 CONCURRENCY=1` | **绿（`Everything looks good!`，`overall-valid: true`）**：`publishes 108 / polls 82 / delivered 105 / acked 105`，**`:poll-ack-failures 0`**、**`:violations-by-class {}`**、`:empty-polls 35`。四条 at-least-once 判据（静默丢失 / payload 不一致 / 重复 offset / 已确认重投）**全为 0** |
+| `20260920T133301Z-m5b-mq-multi-client-checker-artifact/` | 同上，但 `CONCURRENCY=1n`（**每节点一个客户端**） | **红，但结论是「检查器口径问题」而非被测系统缺陷**：`:poll-ack-failures **0**`、`delivered 118 = acked 118`（**无丢失**）、唯一违反类 `:mq-redelivered-after-ack 461`。对照单客户端跑法（左行）为零违反 ⇒ 461 条来自**多消费者拓扑**：每个客户端各自维护 `mq-cursor`（都从 0 起），而 checker 的该条判据**只看时间戳、不看 Poll 请求的 `start_offset`**，于是把「另一个客户端按契约从 0 重放」误判为「Ack 没被记住」。**这份归档的价值就是把这个误判钉住**（负向对照） |
+
+> **这两份合起来才是完整判据**：单客户端证明**系统侧正确**（Ack 生效、无丢失、无重复），
+> 多客户端证明**卡口侧需要收紧**（判据必须把 `start_offset` 纳入，否则一个合法的
+> 多消费者拓扑会永远红）。⇒ 已记为待修项 **F-68（jepsen checker 口径）**，
+> **不影响 v0.2.0 的发布判据**（它不在被测系统一侧）。

@@ -1,0 +1,719 @@
+2026-09-20 13:30:52,141{GMT}	INFO	[jepsen test runner] jepsen.core: Test version fdbeef3949648806b54e3a703f0bdbda373f5dcc (plus uncommitted changes)
+2026-09-20 13:30:52,141{GMT}	INFO	[jepsen test runner] jepsen.core: Command line:
+lein run test --nodes-file /root/nodes --username root --ssh-private-key /root/.ssh/id_ed25519 --workload mq --nemesis none --time-limit 60 --concurrency 1 --agents 1
+2026-09-20 13:30:52,191{GMT}	INFO	[jepsen test runner] jepsen.core: Running test:
+{:cache-ttl-seconds nil
+ :remote
+ #jepsen.control.retry.Remote{:remote #jepsen.control.scp.Remote{:cmd-remote #jepsen.control.sshj.SSHJRemote{:concurrency-limit 6,
+                                                                                                             :conn-spec nil,
+                                                                                                             :client nil,
+                                                                                                             :semaphore nil},
+                                                                 :conn-spec nil},
+                              :conn nil}
+ :idem-replay-delay-ms 0
+ :agent-plan
+ {:tunnel-base 38967,
+  :root-password "66c57bb56bce306f484344e4a8650836",
+  :coord-dir "/opt/coord",
+  :hosts ["n4"],
+  :peers ["172.19.0.2:50051" "172.19.0.4:50051" "172.19.0.6:50051"],
+  :idgen-node-ids [],
+  :provisioner-prefix "coord-agent-jepsen",
+  :bootstrap-token "jepsen-agent-bootstrap-token-0123456789abcdef",
+  :auth-root-key "820662a9f85924333d6d466714bc51734b251e73b827a394e1978e36d2429bfc",
+  :count 1,
+  :agent-verifying-key "d0c6d1ff5fd200db97c05ffeb873340adb89a7a6de7f421f6d27db58050eedd4",
+  :coord-bin "/root/coord-test/coord",
+  :services #{:idgen :registry :mq :leader-election :lock}}
+ :ssh-private-key "/root/.ssh/id_ed25519"
+ :idem-min-replay-attempts nil
+ :lock-grace-ms nil
+ :election-ttl-seconds nil
+ :watch-min-events nil
+ :concurrency 1
+ :lease-ttl-seconds nil
+ :soak-disrupt 600
+ :idgen-min-regressions nil
+ :db
+ #jepsen.coord.db.CoordDB{:cluster-name "jepsen-coord",
+                          :pidfile-prefix "/var/run/coord-",
+                          :root-password "66c57bb56bce306f484344e4a8650836",
+                          :coord-dir "/opt/coord",
+                          :config-dir "/etc/coord",
+                          :logfile "/var/log/coord.log",
+                          :agent-bootstrap-token "jepsen-agent-bootstrap-token-0123456789abcdef",
+                          :regions nil,
+                          :agent-peers ["172.19.0.2:50051"
+                                        "172.19.0.4:50051"
+                                        "172.19.0.6:50051"],
+                          :data-dir "/var/lib/coord",
+                          :nodes ["n1" "n2" "n3"],
+                          :auth-root-key "820662a9f85924333d6d466714bc51734b251e73b827a394e1978e36d2429bfc",
+                          :raft-secret "93edf94d2860fec54bc59278a804cb1bbd2d0a7243e4f39d667d66966d9844d1",
+                          :agents 1,
+                          :coord-bin "/root/coord-test/coord"}
+ :leave-db-running? false
+ :agent-idgen-node-ids nil
+ :via-agent false
+ :cache-min-list-ops nil
+ :name "coord"
+ :registry-ttl-seconds nil
+ :logging-json? false
+ :mixture-ratio nil
+ :start-time
+ #object[java.time.OffsetDateTime "0x22aaa811" "2026-09-20T13:30:52.111810727Z"]
+ :regions nil
+ :lease-min-grants nil
+ :map-keys nil
+ :net
+ #object[jepsen.net$iptables_with_dev$reify__15623
+         "0x1df6f57d"
+         "jepsen.net$iptables_with_dev$reify__15623@1df6f57d"]
+ :election-hold-ms nil
+ :client
+ #object[jepsen.coord$with_agent$reify__4809
+         "0x578036a2"
+         "jepsen.coord$with_agent$reify__4809@578036a2"]
+ :lease-revoke-ttl-seconds nil
+ :barrier
+ #object[java.util.concurrent.CyclicBarrier
+         "0x36cc6055"
+         "java.util.concurrent.CyclicBarrier@36cc6055"]
+ :agent-peers ["172.19.0.2:50051" "172.19.0.4:50051" "172.19.0.6:50051"]
+ :agent-services #{:idgen :registry :mq :leader-election :lock}
+ :ssh
+ {:dummy? false,
+  :username "root",
+  :password "root",
+  :strict-host-key-checking false,
+  :private-key-path "/root/.ssh/id_ed25519"}
+ :lease-tolerance-ms nil
+ :rate nil
+ :map-min-deletes nil
+ :seed 564221858
+ :mq-topic "jepsen-mq-s564221858"
+ :cache-min-set-ops nil
+ :lock-ttl-seconds nil
+ :checker
+ #jepsen.checker.Compose{:checkers {:linear #object[jepsen.coord.mqck$checker$reify__4096
+                                                    "0x41d1bcbd"
+                                                    "jepsen.coord.mqck$checker$reify__4096@41d1bcbd"],
+                                    :gates #object[jepsen.coord.gates$checker$reify__2287
+                                                   "0x6ba6f4e7"
+                                                   "jepsen.coord.gates$checker$reify__2287@6ba6f4e7"],
+                                    :perf #jepsen.checker.Compose{:checkers {:latency-graph #jepsen.checker.LatencyGraph{:opts {}},
+                                                                             :rate-graph #jepsen.checker.RateGraph{:opts {}}}}}}
+ :lease-min-expiries nil
+ :cache-min-sets nil
+ :mq-min-polls nil
+ :argv
+ ("test"
+  "--nodes-file"
+  "/root/nodes"
+  "--username"
+  "root"
+  "--ssh-private-key"
+  "/root/.ssh/id_ed25519"
+  "--workload"
+  "mq"
+  "--nemesis"
+  "none"
+  "--time-limit"
+  "60"
+  "--concurrency"
+  "1"
+  "--agents"
+  "1")
+ :nemesis #unprintable "jepsen.nemesis$reify__15746@3d45ea17"
+ :watch-resumes nil
+ :mq-consumer-group nil
+ :lease-grace-ms nil
+ :soak-mix nil
+ :mq-expect-idem-dedupe false
+ :nodes ["n1" "n2" "n3"]
+ :test-count 1
+ :no-jitter false
+ :election-min-campaigns nil
+ :registry-min-cycles nil
+ :lock-min-acquires nil
+ :idgen-min-ids nil
+ :cache-min-gets nil
+ :generator
+ #object[jepsen.util.Forgettable
+         "0x4746d52d"
+         ((jepsen.generator.Synchronize
+           {:gen (jepsen.generator.TimeLimit
+                  {:limit 60000000000,
+                   :cutoff nil,
+                   :gen (jepsen.generator.Stagger
+                         {:dt-fn #object[jepsen.generator$stagger_exp$dt_fn__6799
+                                         "0x4b5c84be"
+                                         "jepsen.generator$stagger_exp$dt_fn__6799@4b5c84be"],
+                          :next-time nil,
+                          :gen (jepsen.generator.OnThreads
+                                {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                 :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                         "0x404bca88"
+                                                         "jepsen.generator.context$make_thread_filter$lazy_filter__5865@404bca88"],
+                                 :gen (jepsen.generator.Mix
+                                       {:i 0,
+                                        :gens [(jepsen.generator.Mix
+                                                {:i 3,
+                                                 :gens [#object[jepsen.coord$mq_gen$pub__4558
+                                                                "0x509cf379"
+                                                                "jepsen.coord$mq_gen$pub__4558@509cf379"]
+                                                        #object[jepsen.coord$mq_gen$pub__4558
+                                                                "0x509cf379"
+                                                                "jepsen.coord$mq_gen$pub__4558@509cf379"]
+                                                        #object[jepsen.coord$mq_gen$pub__4558
+                                                                "0x509cf379"
+                                                                "jepsen.coord$mq_gen$pub__4558@509cf379"]
+                                                        #object[jepsen.coord$mq_gen$poll__4560
+                                                                "0x4f517209"
+                                                                "jepsen.coord$mq_gen$poll__4560@4f517209"]
+                                                        #object[jepsen.coord$mq_gen$poll__4560
+                                                                "0x4f517209"
+                                                                "jepsen.coord$mq_gen$poll__4560@4f517209"]]})]})})})})})
+          (jepsen.generator.Synchronize
+           {:gen {:type :log, :value "recovery: letting cluster converge"}})
+          (jepsen.generator.Synchronize {:gen {:type :sleep, :value 30}}))]
+ :lock-deadline-ms nil
+ :min-op-ok-ratio nil
+ :soak-max-rto-seconds nil
+ :idem-replay-node-offset 0
+ :lease-keepalive-ms nil
+ :min-op-sample nil
+ :os
+ #object[jepsen.os$reify__16045 "0x60877629" "jepsen.os$reify__16045@60877629"]
+ :time-limit 60
+ :quiet-availability-min nil
+ :soak-quiet 1800
+ :value-size nil
+ :cache-ttl-grace-ms nil
+ :agent-verifying-key nil
+ :quiet-min-sample nil
+ :watch-window-ms nil
+ :workload :mq
+ :registry-grace-ms nil
+ :agents 1
+ :watch-max-events nil
+ :mq-min-publishes nil
+ :watch-semantics nil
+ :lock-hold-ms nil}
+
+2026-09-20 13:30:53,594{GMT}	INFO	[jepsen test runner] jepsen.db: Tearing down DB
+2026-09-20 13:30:53,595{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-20 13:30:53,595{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-20 13:30:53,595{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-20 13:30:55,387{GMT}	INFO	[jepsen test runner] jepsen.db: Setting up DB
+2026-09-20 13:30:55,388{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Setting up coord on n2
+2026-09-20 13:30:55,389{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Setting up coord on n3
+2026-09-20 13:30:55,388{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Setting up coord on n1
+2026-09-20 13:30:58,314{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-20 13:30:58,371{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-20 13:30:58,430{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-20 13:30:58,484{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-20 13:30:58,654{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-20 13:30:58,716{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-20 13:30:58,716{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-20 13:30:58,756{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-20 13:30:59,648{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-20 13:30:59,650{GMT}	INFO	[jepsen test runner] jepsen.core: Relative time begins now
+2026-09-20 13:30:59,653{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-20 13:30:59,653{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-20 13:31:00,122{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: agent-bootstrap role granted against 172.19.0.2:50051
+2026-09-20 13:31:01,683{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: granted 27 capabilities to role root against 172.19.0.2:50051
+2026-09-20 13:31:01,683{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: starting 1 agent(s) on [n4]
+2026-09-20 13:31:08,488{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-20 13:31:11,904{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: a 1 on n4 is ready (http + grpc 19527 )
+2026-09-20 13:31:12,943{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: tunnel a 1 127.0.0.1: 38968 -> n4 : 19527 (pid 2475161 ) verified end-to-end 
+2026-09-20 13:31:12,944{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: all 1 tunnel(s) verified end-to-end
+2026-09-20 13:31:12,944{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-20 13:31:13,057{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-20 13:31:13,057{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-20 13:31:13,057{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-20 13:31:13,071{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord cluster is ready
+2026-09-20 13:31:13,072{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord cluster is ready
+2026-09-20 13:31:13,078{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord client: mq topic jepsen-mq-s564221858 create failed: io.grpc.StatusRuntimeException: INTERNAL: internal error
+2026-09-20 13:31:13,078{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord client: mq topic jepsen-mq-s564221858 ready
+2026-09-20 13:31:13,112{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord cluster is ready
+2026-09-20 13:31:13,115{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord client: mq topic jepsen-mq-s564221858 create failed: io.grpc.StatusRuntimeException: INTERNAL: internal error
+2026-09-20 13:31:13,128{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:13,129{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-20 13:31:13,242{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:13,348{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:13,354{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:13,354{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m1", :idempotency-key "s564221858-idem-1", :dup? false}
+2026-09-20 13:31:13,362{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m1", :idempotency-key "s564221858-idem-1", :dup? false}
+2026-09-20 13:31:13,786{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m3", :idempotency-key "s564221858-idem-3", :dup? false}
+2026-09-20 13:31:13,793{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m3", :idempotency-key "s564221858-idem-3", :dup? false}
+2026-09-20 13:31:13,972{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m2", :idempotency-key "s564221858-idem-2", :dup? true}
+2026-09-20 13:31:13,980{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m2", :idempotency-key "s564221858-idem-2", :dup? true}
+2026-09-20 13:31:14,309{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:14,340{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:14,390{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m5", :idempotency-key "s564221858-idem-5", :dup? true}
+2026-09-20 13:31:14,403{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m5", :idempotency-key "s564221858-idem-5", :dup? true}
+2026-09-20 13:31:14,835{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m7", :idempotency-key "s564221858-idem-7", :dup? false}
+2026-09-20 13:31:14,843{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m7", :idempotency-key "s564221858-idem-7", :dup? false}
+2026-09-20 13:31:14,963{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m4", :idempotency-key "s564221858-idem-4", :dup? false}
+2026-09-20 13:31:14,971{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m4", :idempotency-key "s564221858-idem-4", :dup? false}
+2026-09-20 13:31:15,222{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:15,249{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:15,676{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:15,681{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:15,896{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m9", :idempotency-key "s564221858-idem-9", :dup? false}
+2026-09-20 13:31:15,904{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m9", :idempotency-key "s564221858-idem-9", :dup? false}
+2026-09-20 13:31:16,099{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:16,111{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:16,271{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m10", :idempotency-key "s564221858-idem-10", :dup? false}
+2026-09-20 13:31:16,278{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m10", :idempotency-key "s564221858-idem-10", :dup? false}
+2026-09-20 13:31:16,584{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:16,596{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:17,125{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:17,129{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:17,507{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m6", :idempotency-key "s564221858-idem-6", :dup? false}
+2026-09-20 13:31:17,515{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m6", :idempotency-key "s564221858-idem-6", :dup? false}
+2026-09-20 13:31:17,515{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m8", :idempotency-key "s564221858-idem-8", :dup? true}
+2026-09-20 13:31:17,525{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m8", :idempotency-key "s564221858-idem-8", :dup? true}
+2026-09-20 13:31:17,668{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:17,685{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:17,698{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m11", :idempotency-key "s564221858-idem-11", :dup? true}
+2026-09-20 13:31:17,708{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m11", :idempotency-key "s564221858-idem-11", :dup? true}
+2026-09-20 13:31:17,725{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:17,735{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:17,922{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m13", :idempotency-key "s564221858-idem-13", :dup? true}
+2026-09-20 13:31:17,933{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m13", :idempotency-key "s564221858-idem-13", :dup? true}
+2026-09-20 13:31:18,133{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:18,143{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:18,532{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:18,536{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:18,597{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m15", :idempotency-key "s564221858-idem-15", :dup? false}
+2026-09-20 13:31:18,608{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m15", :idempotency-key "s564221858-idem-15", :dup? false}
+2026-09-20 13:31:18,715{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:18,726{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:18,859{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:18,863{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:19,311{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m16", :idempotency-key "s564221858-idem-16", :dup? false}
+2026-09-20 13:31:19,318{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m16", :idempotency-key "s564221858-idem-16", :dup? false}
+2026-09-20 13:31:19,501{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m14", :idempotency-key "s564221858-idem-14", :dup? false}
+2026-09-20 13:31:19,508{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m14", :idempotency-key "s564221858-idem-14", :dup? false}
+2026-09-20 13:31:19,683{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:19,700{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:19,755{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m18", :idempotency-key "s564221858-idem-18", :dup? false}
+2026-09-20 13:31:19,762{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m18", :idempotency-key "s564221858-idem-18", :dup? false}
+2026-09-20 13:31:19,800{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m17", :idempotency-key "s564221858-idem-17", :dup? false}
+2026-09-20 13:31:19,806{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m17", :idempotency-key "s564221858-idem-17", :dup? false}
+2026-09-20 13:31:19,882{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m12", :idempotency-key "s564221858-idem-12", :dup? false}
+2026-09-20 13:31:19,890{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m12", :idempotency-key "s564221858-idem-12", :dup? false}
+2026-09-20 13:31:20,075{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m20", :idempotency-key "s564221858-idem-20", :dup? true}
+2026-09-20 13:31:20,085{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m20", :idempotency-key "s564221858-idem-20", :dup? true}
+2026-09-20 13:31:20,184{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m21", :idempotency-key "s564221858-idem-21", :dup? false}
+2026-09-20 13:31:20,191{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m21", :idempotency-key "s564221858-idem-21", :dup? false}
+2026-09-20 13:31:20,552{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m19", :idempotency-key "s564221858-idem-19", :dup? false}
+2026-09-20 13:31:20,564{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m19", :idempotency-key "s564221858-idem-19", :dup? false}
+2026-09-20 13:31:20,564{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m23", :idempotency-key "s564221858-idem-23", :dup? false}
+2026-09-20 13:31:20,575{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m23", :idempotency-key "s564221858-idem-23", :dup? false}
+2026-09-20 13:31:20,909{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m22", :idempotency-key "s564221858-idem-22", :dup? false}
+2026-09-20 13:31:20,917{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m22", :idempotency-key "s564221858-idem-22", :dup? false}
+2026-09-20 13:31:21,362{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m25", :idempotency-key "s564221858-idem-25", :dup? true}
+2026-09-20 13:31:21,377{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m25", :idempotency-key "s564221858-idem-25", :dup? true}
+2026-09-20 13:31:21,595{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:21,657{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:21,679{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m24", :idempotency-key "s564221858-idem-24", :dup? false}
+2026-09-20 13:31:21,686{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m24", :idempotency-key "s564221858-idem-24", :dup? false}
+2026-09-20 13:31:22,111{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:22,122{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:22,294{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:22,298{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:22,483{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:22,487{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:22,522{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:22,524{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:22,555{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m28", :idempotency-key "s564221858-idem-28", :dup? false}
+2026-09-20 13:31:22,561{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m28", :idempotency-key "s564221858-idem-28", :dup? false}
+2026-09-20 13:31:22,908{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:22,920{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:23,206{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:23,211{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:23,316{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:23,320{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:24,199{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m26", :idempotency-key "s564221858-idem-26", :dup? false}
+2026-09-20 13:31:24,207{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m26", :idempotency-key "s564221858-idem-26", :dup? false}
+2026-09-20 13:31:24,941{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m29", :idempotency-key "s564221858-idem-29", :dup? false}
+2026-09-20 13:31:24,948{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m29", :idempotency-key "s564221858-idem-29", :dup? false}
+2026-09-20 13:31:25,696{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m31", :idempotency-key "s564221858-idem-31", :dup? false}
+2026-09-20 13:31:25,701{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m31", :idempotency-key "s564221858-idem-31", :dup? false}
+2026-09-20 13:31:25,887{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:25,908{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:26,642{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m30", :idempotency-key "s564221858-idem-30", :dup? false}
+2026-09-20 13:31:26,650{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m30", :idempotency-key "s564221858-idem-30", :dup? false}
+2026-09-20 13:31:27,219{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m33", :idempotency-key "s564221858-idem-33", :dup? false}
+2026-09-20 13:31:27,227{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m33", :idempotency-key "s564221858-idem-33", :dup? false}
+2026-09-20 13:31:28,180{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m34", :idempotency-key "s564221858-idem-34", :dup? false}
+2026-09-20 13:31:28,187{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m34", :idempotency-key "s564221858-idem-34", :dup? false}
+2026-09-20 13:31:28,629{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:28,650{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:30,363{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m32", :idempotency-key "s564221858-idem-32", :dup? false}
+2026-09-20 13:31:30,371{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m32", :idempotency-key "s564221858-idem-32", :dup? false}
+2026-09-20 13:31:30,596{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:30,607{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:31,807{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:31,811{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:31,935{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:31,939{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:32,050{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:32,054{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:32,725{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:32,728{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:33,624{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:33,628{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:33,636{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:33,640{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:34,305{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m36", :idempotency-key "s564221858-idem-36", :dup? true}
+2026-09-20 13:31:34,315{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m36", :idempotency-key "s564221858-idem-36", :dup? true}
+2026-09-20 13:31:34,383{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:34,393{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:34,666{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m35", :idempotency-key "s564221858-idem-35", :dup? false}
+2026-09-20 13:31:34,673{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m35", :idempotency-key "s564221858-idem-35", :dup? false}
+2026-09-20 13:31:35,760{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m39", :idempotency-key "s564221858-idem-39", :dup? false}
+2026-09-20 13:31:35,768{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m39", :idempotency-key "s564221858-idem-39", :dup? false}
+2026-09-20 13:31:36,000{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m37", :idempotency-key "s564221858-idem-37", :dup? false}
+2026-09-20 13:31:36,008{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m37", :idempotency-key "s564221858-idem-37", :dup? false}
+2026-09-20 13:31:36,295{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:36,318{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:36,337{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m40", :idempotency-key "s564221858-idem-40", :dup? false}
+2026-09-20 13:31:36,344{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m40", :idempotency-key "s564221858-idem-40", :dup? false}
+2026-09-20 13:31:36,676{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m41", :idempotency-key "s564221858-idem-41", :dup? true}
+2026-09-20 13:31:36,687{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m41", :idempotency-key "s564221858-idem-41", :dup? true}
+2026-09-20 13:31:36,820{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:36,838{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:36,943{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:36,948{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:37,223{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m27", :idempotency-key "s564221858-idem-27", :dup? false}
+2026-09-20 13:31:37,230{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m27", :idempotency-key "s564221858-idem-27", :dup? false}
+2026-09-20 13:31:37,454{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m44", :idempotency-key "s564221858-idem-44", :dup? true}
+2026-09-20 13:31:37,464{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m44", :idempotency-key "s564221858-idem-44", :dup? true}
+2026-09-20 13:31:37,558{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:37,575{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:37,643{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:37,647{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:37,887{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m42", :idempotency-key "s564221858-idem-42", :dup? false}
+2026-09-20 13:31:37,894{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m42", :idempotency-key "s564221858-idem-42", :dup? false}
+2026-09-20 13:31:37,950{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m43", :idempotency-key "s564221858-idem-43", :dup? true}
+2026-09-20 13:31:37,962{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m43", :idempotency-key "s564221858-idem-43", :dup? true}
+2026-09-20 13:31:38,543{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:38,558{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:38,923{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:38,926{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:39,035{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m45", :idempotency-key "s564221858-idem-45", :dup? false}
+2026-09-20 13:31:39,040{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m45", :idempotency-key "s564221858-idem-45", :dup? false}
+2026-09-20 13:31:39,204{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:39,213{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:39,239{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:39,243{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:39,312{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:39,316{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:39,538{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m47", :idempotency-key "s564221858-idem-47", :dup? false}
+2026-09-20 13:31:39,546{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m47", :idempotency-key "s564221858-idem-47", :dup? false}
+2026-09-20 13:31:40,809{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m46", :idempotency-key "s564221858-idem-46", :dup? true}
+2026-09-20 13:31:40,815{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m46", :idempotency-key "s564221858-idem-46", :dup? true}
+2026-09-20 13:31:41,029{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:41,045{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:41,125{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m50", :idempotency-key "s564221858-idem-50", :dup? false}
+2026-09-20 13:31:41,132{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m50", :idempotency-key "s564221858-idem-50", :dup? false}
+2026-09-20 13:31:41,350{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:41,360{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:41,805{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:41,809{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:42,512{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m49", :idempotency-key "s564221858-idem-49", :dup? false}
+2026-09-20 13:31:42,518{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m49", :idempotency-key "s564221858-idem-49", :dup? false}
+2026-09-20 13:31:42,586{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m48", :idempotency-key "s564221858-idem-48", :dup? false}
+2026-09-20 13:31:42,591{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m48", :idempotency-key "s564221858-idem-48", :dup? false}
+2026-09-20 13:31:42,644{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m52", :idempotency-key "s564221858-idem-52", :dup? true}
+2026-09-20 13:31:42,657{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m52", :idempotency-key "s564221858-idem-52", :dup? true}
+2026-09-20 13:31:43,287{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:43,315{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:43,317{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:43,319{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:43,343{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:43,346{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:43,441{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:43,444{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:43,914{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m54", :idempotency-key "s564221858-idem-54", :dup? false}
+2026-09-20 13:31:43,920{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m54", :idempotency-key "s564221858-idem-54", :dup? false}
+2026-09-20 13:31:43,938{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:43,946{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:44,280{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m55", :idempotency-key "s564221858-idem-55", :dup? false}
+2026-09-20 13:31:44,286{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m55", :idempotency-key "s564221858-idem-55", :dup? false}
+2026-09-20 13:31:44,349{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:44,358{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:44,391{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m51", :idempotency-key "s564221858-idem-51", :dup? false}
+2026-09-20 13:31:44,397{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m51", :idempotency-key "s564221858-idem-51", :dup? false}
+2026-09-20 13:31:44,614{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m56", :idempotency-key "s564221858-idem-56", :dup? true}
+2026-09-20 13:31:44,624{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m56", :idempotency-key "s564221858-idem-56", :dup? true}
+2026-09-20 13:31:44,706{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m53", :idempotency-key "s564221858-idem-53", :dup? false}
+2026-09-20 13:31:44,713{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m53", :idempotency-key "s564221858-idem-53", :dup? false}
+2026-09-20 13:31:44,810{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m57", :idempotency-key "s564221858-idem-57", :dup? true}
+2026-09-20 13:31:44,821{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m57", :idempotency-key "s564221858-idem-57", :dup? true}
+2026-09-20 13:31:44,996{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m61", :idempotency-key "s564221858-idem-61", :dup? true}
+2026-09-20 13:31:45,006{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m61", :idempotency-key "s564221858-idem-61", :dup? true}
+2026-09-20 13:31:45,092{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m58", :idempotency-key "s564221858-idem-58", :dup? false}
+2026-09-20 13:31:45,100{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m58", :idempotency-key "s564221858-idem-58", :dup? false}
+2026-09-20 13:31:45,587{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:45,630{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:45,918{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:45,922{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:46,063{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:46,066{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:46,212{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m59", :idempotency-key "s564221858-idem-59", :dup? true}
+2026-09-20 13:31:46,221{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m59", :idempotency-key "s564221858-idem-59", :dup? true}
+2026-09-20 13:31:46,714{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:46,722{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:47,011{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m63", :idempotency-key "s564221858-idem-63", :dup? false}
+2026-09-20 13:31:47,018{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m63", :idempotency-key "s564221858-idem-63", :dup? false}
+2026-09-20 13:31:47,974{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m65", :idempotency-key "s564221858-idem-65", :dup? false}
+2026-09-20 13:31:47,982{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m65", :idempotency-key "s564221858-idem-65", :dup? false}
+2026-09-20 13:31:48,132{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m66", :idempotency-key "s564221858-idem-66", :dup? false}
+2026-09-20 13:31:48,139{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m66", :idempotency-key "s564221858-idem-66", :dup? false}
+2026-09-20 13:31:49,258{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:49,278{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:49,699{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:49,703{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:49,995{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m64", :idempotency-key "s564221858-idem-64", :dup? false}
+2026-09-20 13:31:50,002{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m64", :idempotency-key "s564221858-idem-64", :dup? false}
+2026-09-20 13:31:50,136{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m62", :idempotency-key "s564221858-idem-62", :dup? true}
+2026-09-20 13:31:50,146{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m62", :idempotency-key "s564221858-idem-62", :dup? true}
+2026-09-20 13:31:50,771{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:50,783{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:51,492{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:51,493{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:51,566{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m67", :idempotency-key "s564221858-idem-67", :dup? false}
+2026-09-20 13:31:51,573{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m67", :idempotency-key "s564221858-idem-67", :dup? false}
+2026-09-20 13:31:51,657{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m69", :idempotency-key "s564221858-idem-69", :dup? false}
+2026-09-20 13:31:51,667{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m69", :idempotency-key "s564221858-idem-69", :dup? false}
+2026-09-20 13:31:51,786{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m68", :idempotency-key "s564221858-idem-68", :dup? true}
+2026-09-20 13:31:51,794{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m68", :idempotency-key "s564221858-idem-68", :dup? true}
+2026-09-20 13:31:51,928{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:51,948{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:52,554{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m71", :idempotency-key "s564221858-idem-71", :dup? false}
+2026-09-20 13:31:52,562{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m71", :idempotency-key "s564221858-idem-71", :dup? false}
+2026-09-20 13:31:52,795{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:52,805{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:52,811{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m73", :idempotency-key "s564221858-idem-73", :dup? true}
+2026-09-20 13:31:52,821{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m73", :idempotency-key "s564221858-idem-73", :dup? true}
+2026-09-20 13:31:53,283{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m72", :idempotency-key "s564221858-idem-72", :dup? true}
+2026-09-20 13:31:53,293{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m72", :idempotency-key "s564221858-idem-72", :dup? true}
+2026-09-20 13:31:53,410{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m74", :idempotency-key "s564221858-idem-74", :dup? false}
+2026-09-20 13:31:53,417{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m74", :idempotency-key "s564221858-idem-74", :dup? false}
+2026-09-20 13:31:53,439{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:53,461{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:53,601{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:53,604{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:53,938{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:53,941{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:54,270{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m70", :idempotency-key "s564221858-idem-70", :dup? false}
+2026-09-20 13:31:54,276{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m70", :idempotency-key "s564221858-idem-70", :dup? false}
+2026-09-20 13:31:54,723{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:54,731{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:54,876{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m75", :idempotency-key "s564221858-idem-75", :dup? false}
+2026-09-20 13:31:54,883{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m75", :idempotency-key "s564221858-idem-75", :dup? false}
+2026-09-20 13:31:55,307{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m76", :idempotency-key "s564221858-idem-76", :dup? false}
+2026-09-20 13:31:55,312{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m76", :idempotency-key "s564221858-idem-76", :dup? false}
+2026-09-20 13:31:55,327{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m79", :idempotency-key "s564221858-idem-79", :dup? false}
+2026-09-20 13:31:55,335{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m79", :idempotency-key "s564221858-idem-79", :dup? false}
+2026-09-20 13:31:55,863{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:55,883{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:56,443{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m80", :idempotency-key "s564221858-idem-80", :dup? false}
+2026-09-20 13:31:56,451{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m80", :idempotency-key "s564221858-idem-80", :dup? false}
+2026-09-20 13:31:56,854{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m81", :idempotency-key "s564221858-idem-81", :dup? false}
+2026-09-20 13:31:56,861{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m81", :idempotency-key "s564221858-idem-81", :dup? false}
+2026-09-20 13:31:57,087{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m82", :idempotency-key "s564221858-idem-82", :dup? false}
+2026-09-20 13:31:57,093{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m82", :idempotency-key "s564221858-idem-82", :dup? false}
+2026-09-20 13:31:57,576{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m83", :idempotency-key "s564221858-idem-83", :dup? false}
+2026-09-20 13:31:57,582{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m83", :idempotency-key "s564221858-idem-83", :dup? false}
+2026-09-20 13:31:57,583{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:57,611{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:57,611{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m78", :idempotency-key "s564221858-idem-78", :dup? false}
+2026-09-20 13:31:57,617{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m78", :idempotency-key "s564221858-idem-78", :dup? false}
+2026-09-20 13:31:57,722{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m84", :idempotency-key "s564221858-idem-84", :dup? false}
+2026-09-20 13:31:57,729{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m84", :idempotency-key "s564221858-idem-84", :dup? false}
+2026-09-20 13:31:57,758{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m77", :idempotency-key "s564221858-idem-77", :dup? true}
+2026-09-20 13:31:57,767{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m77", :idempotency-key "s564221858-idem-77", :dup? true}
+2026-09-20 13:31:57,803{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:57,821{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:57,821{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:57,822{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:58,115{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m85", :idempotency-key "s564221858-idem-85", :dup? false}
+2026-09-20 13:31:58,122{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m85", :idempotency-key "s564221858-idem-85", :dup? false}
+2026-09-20 13:31:58,464{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m87", :idempotency-key "s564221858-idem-87", :dup? false}
+2026-09-20 13:31:58,471{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m87", :idempotency-key "s564221858-idem-87", :dup? false}
+2026-09-20 13:31:58,640{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:58,654{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:31:59,185{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m89", :idempotency-key "s564221858-idem-89", :dup? true}
+2026-09-20 13:31:59,194{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m89", :idempotency-key "s564221858-idem-89", :dup? true}
+2026-09-20 13:31:59,222{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m90", :idempotency-key "s564221858-idem-90", :dup? false}
+2026-09-20 13:31:59,228{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m90", :idempotency-key "s564221858-idem-90", :dup? false}
+2026-09-20 13:31:59,968{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m86", :idempotency-key "s564221858-idem-86", :dup? true}
+2026-09-20 13:31:59,977{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m86", :idempotency-key "s564221858-idem-86", :dup? true}
+2026-09-20 13:32:00,134{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m91", :idempotency-key "s564221858-idem-91", :dup? false}
+2026-09-20 13:32:00,141{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m91", :idempotency-key "s564221858-idem-91", :dup? false}
+2026-09-20 13:32:00,680{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:00,703{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:00,773{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m93", :idempotency-key "s564221858-idem-93", :dup? false}
+2026-09-20 13:32:00,778{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m93", :idempotency-key "s564221858-idem-93", :dup? false}
+2026-09-20 13:32:01,088{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m92", :idempotency-key "s564221858-idem-92", :dup? false}
+2026-09-20 13:32:01,098{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m92", :idempotency-key "s564221858-idem-92", :dup? false}
+2026-09-20 13:32:01,117{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:01,131{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:02,517{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m95", :idempotency-key "s564221858-idem-95", :dup? false}
+2026-09-20 13:32:02,527{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m95", :idempotency-key "s564221858-idem-95", :dup? false}
+2026-09-20 13:32:02,575{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m94", :idempotency-key "s564221858-idem-94", :dup? false}
+2026-09-20 13:32:02,580{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m94", :idempotency-key "s564221858-idem-94", :dup? false}
+2026-09-20 13:32:02,875{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m97", :idempotency-key "s564221858-idem-97", :dup? false}
+2026-09-20 13:32:02,886{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m97", :idempotency-key "s564221858-idem-97", :dup? false}
+2026-09-20 13:32:03,018{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m98", :idempotency-key "s564221858-idem-98", :dup? false}
+2026-09-20 13:32:03,025{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m98", :idempotency-key "s564221858-idem-98", :dup? false}
+2026-09-20 13:32:03,977{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:03,999{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:06,567{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m88", :idempotency-key "s564221858-idem-88", :dup? false}
+2026-09-20 13:32:06,573{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m88", :idempotency-key "s564221858-idem-88", :dup? false}
+2026-09-20 13:32:06,819{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:06,828{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:07,140{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m99", :idempotency-key "s564221858-idem-99", :dup? false}
+2026-09-20 13:32:07,147{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m99", :idempotency-key "s564221858-idem-99", :dup? false}
+2026-09-20 13:32:07,278{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m101", :idempotency-key "s564221858-idem-101", :dup? true}
+2026-09-20 13:32:07,288{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m101", :idempotency-key "s564221858-idem-101", :dup? true}
+2026-09-20 13:32:07,383{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m96", :idempotency-key "s564221858-idem-96", :dup? false}
+2026-09-20 13:32:07,389{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m96", :idempotency-key "s564221858-idem-96", :dup? false}
+2026-09-20 13:32:07,864{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m100", :idempotency-key "s564221858-idem-100", :dup? false}
+2026-09-20 13:32:07,870{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m100", :idempotency-key "s564221858-idem-100", :dup? false}
+2026-09-20 13:32:07,870{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:07,894{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:08,230{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m104", :idempotency-key "s564221858-idem-104", :dup? false}
+2026-09-20 13:32:08,237{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m104", :idempotency-key "s564221858-idem-104", :dup? false}
+2026-09-20 13:32:08,462{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:08,470{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:08,600{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:08,603{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:09,076{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m105", :idempotency-key "s564221858-idem-105", :dup? true}
+2026-09-20 13:32:09,086{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m105", :idempotency-key "s564221858-idem-105", :dup? true}
+2026-09-20 13:32:09,261{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:09,271{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:09,271{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m103", :idempotency-key "s564221858-idem-103", :dup? false}
+2026-09-20 13:32:09,278{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m103", :idempotency-key "s564221858-idem-103", :dup? false}
+2026-09-20 13:32:09,868{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m106", :idempotency-key "s564221858-idem-106", :dup? false}
+2026-09-20 13:32:09,874{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m106", :idempotency-key "s564221858-idem-106", :dup? false}
+2026-09-20 13:32:09,919{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m102", :idempotency-key "s564221858-idem-102", :dup? false}
+2026-09-20 13:32:09,926{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m102", :idempotency-key "s564221858-idem-102", :dup? false}
+2026-09-20 13:32:10,612{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:10,631{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:10,821{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m108", :idempotency-key "s564221858-idem-108", :dup? false}
+2026-09-20 13:32:10,825{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m108", :idempotency-key "s564221858-idem-108", :dup? false}
+2026-09-20 13:32:11,357{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:11,365{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:11,517{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:11,520{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-poll	{:topic "jepsen-mq-s564221858", :partition 0, :consumer-group "cg-s564221858", :max-count 64}
+2026-09-20 13:32:11,697{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m110", :idempotency-key "s564221858-idem-110", :dup? false}
+2026-09-20 13:32:11,702{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m110", :idempotency-key "s564221858-idem-110", :dup? false}
+2026-09-20 13:32:11,874{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m107", :idempotency-key "s564221858-idem-107", :dup? true}
+2026-09-20 13:32:11,882{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m107", :idempotency-key "s564221858-idem-107", :dup? true}
+2026-09-20 13:32:13,007{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m109", :idempotency-key "s564221858-idem-109", :dup? false}
+2026-09-20 13:32:13,014{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:mq-publish	{:topic "jepsen-mq-s564221858", :partition 0, :payload "s564221858-m109", :idempotency-key "s564221858-idem-109", :dup? false}
+2026-09-20 13:32:13,014{GMT}	INFO	[jepsen worker 0] jepsen.generator.interpreter: recovery: letting cluster converge
+2026-09-20 13:32:43,039{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-20 13:32:43,039{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-20 13:32:43,039{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-20 13:32:43,265{GMT}	INFO	[jepsen test runner] jepsen.core: Run complete, writing
+2026-09-20 13:32:43,337{GMT}	INFO	[jepsen test runner] jepsen.core: Snarfing log files
+2026-09-20 13:32:43,339{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Killing coord on n1
+2026-09-20 13:32:43,339{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Killing coord on n2
+2026-09-20 13:32:43,340{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Killing coord on n3
+2026-09-20 13:32:43,399{GMT}	INFO	[jepsen node n1] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-20 13:32:43,405{GMT}	INFO	[jepsen node n3] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-20 13:32:43,407{GMT}	INFO	[jepsen node n2] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-20 13:32:43,505{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-20 13:32:43,505{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-20 13:32:43,505{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-20 13:32:45,154{GMT}	INFO	[jepsen test runner] jepsen.core: Analyzing...
+2026-09-20 13:32:45,165{GMT}	INFO	[clojure-agent-send-off-pool-7] jepsen.coord.mqck: mq checker: {:polls-with-messages 47, :polls 82, :idem-dups 0, :by-op {:mq-poll 82, :mq-publish 108}, :violations-by-class {}, :published-offsets 108, :publishes 108, :acked-offsets 105, :poll-ack-failures 0, :empty-polls 35, :failures (), :delivered-offsets 105}
+2026-09-20 13:32:45,286{GMT}	INFO	[jepsen test runner] jepsen.core: Analysis complete
+2026-09-20 13:32:45,293{GMT}	INFO	[jepsen results] jepsen.store: Wrote /opt/coord/jepsen/store/coord/2026-09-20T13:30:52.111810727Z/results.edn
+2026-09-20 13:32:45,332{GMT}	INFO	[jepsen test runner] jepsen.core: {:linear {:valid? true,
+          :mq {:polls-with-messages 47,
+               :polls 82,
+               :idem-dups 0,
+               :by-op {:mq-poll 82, :mq-publish 108},
+               :violations-by-class {},
+               :published-offsets 108,
+               :publishes 108,
+               :acked-offsets 105,
+               :poll-ack-failures 0,
+               :empty-polls 35,
+               :delivered-offsets 105},
+          :failures []},
+ :gates {:valid? true,
+         :gates {:premise {:valid? true,
+                           :writes 0,
+                           :duplicate-value-count 0,
+                           :duplicate-values {}},
+                 :availability {:min-ratio 0.95,
+                                :min-sample 100,
+                                :windows 0,
+                                :judged 0,
+                                :skipped-small-sample 0,
+                                :worst-window nil,
+                                :violations []},
+                 :rto {:budget-seconds 0,
+                       :n 0,
+                       :p95 nil,
+                       :max nil,
+                       :samples [],
+                       :unrecovered 0,
+                       :not-measured 0,
+                       :details []},
+                 :liveness {:min-ok-ratio 0.1,
+                            :min-sample 10,
+                            :ops 2,
+                            :judged 2,
+                            :skipped-small-sample 0,
+                            :ok-ratio 1.0,
+                            :by-op {:mq-poll {:total 82,
+                                              :ok 82,
+                                              :info 0,
+                                              :fail 0,
+                                              :legit-fail 0,
+                                              :judged 82,
+                                              :errors {}},
+                                    :mq-publish {:total 108,
+                                                 :ok 108,
+                                                 :info 0,
+                                                 :fail 0,
+                                                 :legit-fail 0,
+                                                 :judged 108,
+                                                 :errors {}}},
+                            :violations []},
+                 :agent {:proof {:total 3,
+                                 :by-method {:put 0,
+                                             :range 3,
+                                             :delete 0,
+                                             :txn 0,
+                                             :status 0},
+                                 :agents [{:host "n4",
+                                           :up? true,
+                                           :up-now? true,
+                                           :total 3,
+                                           :by-method {:put 0,
+                                                       :range 3,
+                                                       :delete 0,
+                                                       :txn 0,
+                                                       :status 0}}]},
+                         :min-requests 1,
+                         :local-surface? true}},
+         :failures []},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true}
+
+
+Everything looks good! ヽ(‘ー`)ノ

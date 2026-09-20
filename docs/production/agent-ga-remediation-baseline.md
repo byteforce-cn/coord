@@ -198,15 +198,31 @@ sed -n '160,182p' coord-agent/src/service.rs
 > 2. `AgentChannelManager` 使用内部面 `sdk.internal.proto`（Handshake 协商）—— 属**刻意保留**
 >    （§4.2 表尾 / 红线 R3），已带理由进 allowlist（**无理由的"暂时留着"就是漂移**）。
 
+### 本轮（2026-09-20 第四轮）新闭合
+
+| 项 | 结果 | 判据 |
+|:--|:--|:--|
+| **B-13 / B-14**（policy RBAC 边界 / cb+rl 边界） | ✅ **§10 规则 4 的正式确认已完成**：`WHITEPAPER.md` 新增 **§9.1.1 能力边界声明**（5 项逐条给出边界 + 落点）与 **§10 规则 5/6**（局部性能力必须声明作用域；被移出承诺面的能力不得删除） | 三面卡口全绿；§11.2.1 消费者告知留档 |
+| **W0-3 / A9 / P1-8 / P1-9**（白皮书与台账对齐） | ✅ §1.3 从 5 项扩为 **17 项 + `coord.storage`**；§9.1 改为**历史台账**（不删行）；§12 / §13 同步；EXPERIMENTAL 区清空已在 §1.2 说明 | `check-wire-sync.sh` ⇒ **exit 0**（17 个期限全 PENDING） |
+| **P0-13**（**新发现**）：`coord.event.v1` / `coord.scheduler.v1` **没有 Java 客户端面** | ✅ 补 `EventClient` + `SchedulerClient`（含 impl、`CoordClient` accessor）。**修前**：这两个包在 SDK 里连接口都不存在（P1-3 同型） | `check-sdk-sync.sh` 第 4 道卡口**首跑即红并指名两包** ⇒ 修后 `17/17` 全绿；`EventSchedulerContractTest` **10 ✓** |
+| **P0-14**（**新发现**）：Scheduler `Heartbeat` **丢弃续期结果** | ✅ 失效句柄改回 `FAILED_PRECONDITION`（与 `MqAck` 同口径）。修前「续期成功」与「句柄已失效」在 wire 上同形（都回空 OK） | `agent_scheduler_test` **22 ✓**（+4）；**负向对照**：还原 ⇒ 3 failed |
+| **P0-15**（**新发现**）：Scheduler `ClaimJob.payload` 恒为空 + 存储有损 | ✅ 认领回传注册 payload（base64，**二进制安全**；保留旧文本键兼容既有记录）。修前 handler 硬编码 `vec![]`、写入用 `from_utf8_lossy`（非 UTF-8 静默变 U+FFFD） | 同上（含非 UTF-8 字节的逐字节断言） |
+| **P0-15 附带**：`CompleteJob` 对未知任务**静默成功** | ✅ 无有效认领且未 Completed ⇒ `FAILED_PRECONDITION`；已 Completed 仍**幂等** | 同上 |
+| **`Event.Unsubscribe` 边界** | ✅ 写入 `event.proto`（两份副本逐字相同）：实测服务端**忽略请求、恒回成功**（订阅生存期即 gRPC 流）；按 §10 规则 6 声明而非删除 | `check-wire-descriptor.sh` ⇒ **exit 0**（注释级变更不动 wire） |
+| **G4**（SDK 契约面卡口进 `java-sdk` job） | ✅ `check-sdk-sync.sh` 扩为四道判据，新增第 4 道**反向覆盖**（期望清单从契约 proto 目录**反解**，不再依赖人肉清单） | 卡口首跑即抓出 **P0-13** |
+| **CI 卡口「存在但从未生效」**（第三类缺陷，**发布级**） | ✅ 修闭。`origin/main` 停在 `4a5e3ee`，其后 3 个提交从未推送 ⇒ CI 从未跑过它们。实跑 `ci.yml` 的 `lint` job：① `cargo fmt --all -- --check` **54 处 diff / 20 文件**；② `clippy -D warnings` **3 errors**（根因：`mq.proto` 的 `Publish` 注释用 markdown 列表标记，prost 把注释**原样**写进生成代码的 doc comment ⇒ rustdoc `doc list item without indentation`）；③ `check-panics.sh` **2 violations**（`coord-agent/src/lib.rs` 的 `.expect("inner.is_some() checked above")`）。三条现已全部转绿：`fmt=0` / `clippy=0` / `panics=0`（`Panic-path check passed: 0 violations`） | 契约注释改用 `①②`（并在 proto 里写明为何不能用列表标记）；panic 点改为**把条件与取值绑成同一个绑定**（`inner.as_ref().map(\|i\| i.client.clone()).filter(\|_\| wanted)`） |
+| **全量回归（最终树）** | ✅ `cargo test --workspace --all-targets` ⇒ **95 个 test 二进制 / 2041 passed / 0 failed**；`mvn -o -B test`（SDK）⇒ **174 passed / 0 failures** | 另：三道契约卡口 + fmt + clippy + panic 卡口全 exit 0 |
+
 ### 未落地（**v0.2.0 尚不可发布**）
 
 | 项 | 状态 |
 |:--|:--|
-| **B-13 / B-14**（policy RBAC 边界 / cb+rl 边界） | 契约注释已写；仍待 `WHITEPAPER` §10 规则 4 的**正式确认**（走 §11 流程） |
-| ~~E10（Workflow 补偿端到端验收）~~ | ✅ **本轮闭环，并查出 B-15 / B-16 两个新 P0**（均已修）；判据见上表两行的验收栏 |
-| ~~E11（Cache 分区故障转移定论）~~ | ✅ 本轮已定论（B-08：判定为设计边界并写入契约） |
-| **jepsen lab 侧复核**（B-04 修好后的 V8 复跑 / V11 故障注入） | 未执行（需 lab：`make test WORKLOAD=mq NEMESIS=none`）—— 本轮修好了使 V8 自动红的**测试侧**缺陷，但"改后转绿"仍需一次真实 lab 跑 |
+| ~~**B-13 / B-14**~~ | ✅ **2026-09-20 已闭合**（`WHITEPAPER` §9.1.1 + §10 规则 4/5/6，走 §11 流程） |
+| ~~E10（Workflow 补偿端到端验收）~~ | ✅ **已闭环，并查出 B-15 / B-16 两个新 P0**（均已修） |
+| ~~E11（Cache 分区故障转移定论）~~ | ✅ 已定论（B-08：判定为设计边界并写入契约） |
+| **jepsen lab 侧复核**（B-04 修好后的 V8 复跑 / V11 故障注入） | 未执行（需 lab：`make test WORKLOAD=mq NEMESIS=none`）—— 测试侧缺陷已修且卡口已全量化，但"改后转绿"仍需一次真实 lab 跑 |
 | 72h 浸泡、M3/M4 验收、代码冻结与 `v0.2.0` tag | 未执行 |
+| **未决项裁定** | U1 / U3 / U4 / U5 / U6 / U8 / U9（均非代码阻断） |
 
 > **发布判据（更新于 2026-09-19 第三轮后）**：`contracts/v1.2.0` 的**契约面**可发布
 > （Minor，无 Breaking；三道卡口全绿 + 新增第 4 道 sdk-sync）。

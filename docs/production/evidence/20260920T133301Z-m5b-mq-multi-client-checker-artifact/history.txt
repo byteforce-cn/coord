@@ -1,0 +1,400 @@
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m3", :idempotency-key "s1490379652-idem-3", :dup? false}
+2	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m3", :idempotency-key "s1490379652-idem-3", :dup? false}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m7", :idempotency-key "s1490379652-idem-7", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m7", :idempotency-key "s1490379652-idem-7", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m10", :idempotency-key "s1490379652-idem-10", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m10", :idempotency-key "s1490379652-idem-10", :dup? false}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m13", :idempotency-key "s1490379652-idem-13", :dup? true}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m13", :idempotency-key "s1490379652-idem-13", :dup? true}
+2	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m15", :idempotency-key "s1490379652-idem-15", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m15", :idempotency-key "s1490379652-idem-15", :dup? false}
+3	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m18", :idempotency-key "s1490379652-idem-18", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m18", :idempotency-key "s1490379652-idem-18", :dup? false}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m21", :idempotency-key "s1490379652-idem-21", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m21", :idempotency-key "s1490379652-idem-21", :dup? false}
+3	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m24", :idempotency-key "s1490379652-idem-24", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m24", :idempotency-key "s1490379652-idem-24", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m27", :idempotency-key "s1490379652-idem-27", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m27", :idempotency-key "s1490379652-idem-27", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m30", :idempotency-key "s1490379652-idem-30", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m30", :idempotency-key "s1490379652-idem-30", :dup? false}
+1	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m33", :idempotency-key "s1490379652-idem-33", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m33", :idempotency-key "s1490379652-idem-33", :dup? false}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m36", :idempotency-key "s1490379652-idem-36", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m36", :idempotency-key "s1490379652-idem-36", :dup? false}
+4	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m38", :idempotency-key "s1490379652-idem-38", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m38", :idempotency-key "s1490379652-idem-38", :dup? false}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m42", :idempotency-key "s1490379652-idem-42", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m42", :idempotency-key "s1490379652-idem-42", :dup? false}
+2	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m45", :idempotency-key "s1490379652-idem-45", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m45", :idempotency-key "s1490379652-idem-45", :dup? false}
+4	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m48", :idempotency-key "s1490379652-idem-48", :dup? true}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m48", :idempotency-key "s1490379652-idem-48", :dup? true}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m51", :idempotency-key "s1490379652-idem-51", :dup? true}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m51", :idempotency-key "s1490379652-idem-51", :dup? true}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m54", :idempotency-key "s1490379652-idem-54", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m54", :idempotency-key "s1490379652-idem-54", :dup? false}
+2	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m57", :idempotency-key "s1490379652-idem-57", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m57", :idempotency-key "s1490379652-idem-57", :dup? false}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m60", :idempotency-key "s1490379652-idem-60", :dup? true}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m60", :idempotency-key "s1490379652-idem-60", :dup? true}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m63", :idempotency-key "s1490379652-idem-63", :dup? true}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m63", :idempotency-key "s1490379652-idem-63", :dup? true}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m66", :idempotency-key "s1490379652-idem-66", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m66", :idempotency-key "s1490379652-idem-66", :dup? false}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m69", :idempotency-key "s1490379652-idem-69", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m69", :idempotency-key "s1490379652-idem-69", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m72", :idempotency-key "s1490379652-idem-72", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m72", :idempotency-key "s1490379652-idem-72", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m75", :idempotency-key "s1490379652-idem-75", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m75", :idempotency-key "s1490379652-idem-75", :dup? false}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m78", :idempotency-key "s1490379652-idem-78", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m78", :idempotency-key "s1490379652-idem-78", :dup? false}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m81", :idempotency-key "s1490379652-idem-81", :dup? true}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m81", :idempotency-key "s1490379652-idem-81", :dup? true}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m84", :idempotency-key "s1490379652-idem-84", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m84", :idempotency-key "s1490379652-idem-84", :dup? false}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m87", :idempotency-key "s1490379652-idem-87", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m87", :idempotency-key "s1490379652-idem-87", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m90", :idempotency-key "s1490379652-idem-90", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m90", :idempotency-key "s1490379652-idem-90", :dup? false}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m92", :idempotency-key "s1490379652-idem-92", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m92", :idempotency-key "s1490379652-idem-92", :dup? false}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m96", :idempotency-key "s1490379652-idem-96", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m96", :idempotency-key "s1490379652-idem-96", :dup? false}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m99", :idempotency-key "s1490379652-idem-99", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m99", :idempotency-key "s1490379652-idem-99", :dup? false}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m102", :idempotency-key "s1490379652-idem-102", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m102", :idempotency-key "s1490379652-idem-102", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m105", :idempotency-key "s1490379652-idem-105", :dup? true}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m105", :idempotency-key "s1490379652-idem-105", :dup? true}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m108", :idempotency-key "s1490379652-idem-108", :dup? true}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m108", :idempotency-key "s1490379652-idem-108", :dup? true}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m111", :idempotency-key "s1490379652-idem-111", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m111", :idempotency-key "s1490379652-idem-111", :dup? false}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m114", :idempotency-key "s1490379652-idem-114", :dup? true}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m114", :idempotency-key "s1490379652-idem-114", :dup? true}
+3	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m117", :idempotency-key "s1490379652-idem-117", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m117", :idempotency-key "s1490379652-idem-117", :dup? false}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m120", :idempotency-key "s1490379652-idem-120", :dup? true}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m120", :idempotency-key "s1490379652-idem-120", :dup? true}
+2	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m122", :idempotency-key "s1490379652-idem-122", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m122", :idempotency-key "s1490379652-idem-122", :dup? false}
+2	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m125", :idempotency-key "s1490379652-idem-125", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m125", :idempotency-key "s1490379652-idem-125", :dup? false}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m128", :idempotency-key "s1490379652-idem-128", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m128", :idempotency-key "s1490379652-idem-128", :dup? false}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m131", :idempotency-key "s1490379652-idem-131", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m131", :idempotency-key "s1490379652-idem-131", :dup? false}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m134", :idempotency-key "s1490379652-idem-134", :dup? true}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m134", :idempotency-key "s1490379652-idem-134", :dup? true}
+4	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m137", :idempotency-key "s1490379652-idem-137", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m137", :idempotency-key "s1490379652-idem-137", :dup? false}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m140", :idempotency-key "s1490379652-idem-140", :dup? true}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m140", :idempotency-key "s1490379652-idem-140", :dup? true}
+2	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m142", :idempotency-key "s1490379652-idem-142", :dup? true}
+2	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m142", :idempotency-key "s1490379652-idem-142", :dup? true}
+4	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m145", :idempotency-key "s1490379652-idem-145", :dup? true}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m145", :idempotency-key "s1490379652-idem-145", :dup? true}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m148", :idempotency-key "s1490379652-idem-148", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m148", :idempotency-key "s1490379652-idem-148", :dup? false}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m151", :idempotency-key "s1490379652-idem-151", :dup? true}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m151", :idempotency-key "s1490379652-idem-151", :dup? true}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m154", :idempotency-key "s1490379652-idem-154", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m154", :idempotency-key "s1490379652-idem-154", :dup? false}
+3	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m157", :idempotency-key "s1490379652-idem-157", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m157", :idempotency-key "s1490379652-idem-157", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m160", :idempotency-key "s1490379652-idem-160", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m160", :idempotency-key "s1490379652-idem-160", :dup? false}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m162", :idempotency-key "s1490379652-idem-162", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m162", :idempotency-key "s1490379652-idem-162", :dup? false}
+1	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m166", :idempotency-key "s1490379652-idem-166", :dup? true}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m166", :idempotency-key "s1490379652-idem-166", :dup? true}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m169", :idempotency-key "s1490379652-idem-169", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m169", :idempotency-key "s1490379652-idem-169", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m172", :idempotency-key "s1490379652-idem-172", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m172", :idempotency-key "s1490379652-idem-172", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m175", :idempotency-key "s1490379652-idem-175", :dup? true}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m175", :idempotency-key "s1490379652-idem-175", :dup? true}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m178", :idempotency-key "s1490379652-idem-178", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m178", :idempotency-key "s1490379652-idem-178", :dup? false}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m181", :idempotency-key "s1490379652-idem-181", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m181", :idempotency-key "s1490379652-idem-181", :dup? false}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m184", :idempotency-key "s1490379652-idem-184", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m184", :idempotency-key "s1490379652-idem-184", :dup? false}
+4	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m187", :idempotency-key "s1490379652-idem-187", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m187", :idempotency-key "s1490379652-idem-187", :dup? false}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m190", :idempotency-key "s1490379652-idem-190", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m190", :idempotency-key "s1490379652-idem-190", :dup? false}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m193", :idempotency-key "s1490379652-idem-193", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m193", :idempotency-key "s1490379652-idem-193", :dup? false}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m196", :idempotency-key "s1490379652-idem-196", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m196", :idempotency-key "s1490379652-idem-196", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m199", :idempotency-key "s1490379652-idem-199", :dup? true}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m199", :idempotency-key "s1490379652-idem-199", :dup? true}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m202", :idempotency-key "s1490379652-idem-202", :dup? true}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m202", :idempotency-key "s1490379652-idem-202", :dup? true}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m205", :idempotency-key "s1490379652-idem-205", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m205", :idempotency-key "s1490379652-idem-205", :dup? false}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m208", :idempotency-key "s1490379652-idem-208", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m208", :idempotency-key "s1490379652-idem-208", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m211", :idempotency-key "s1490379652-idem-211", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m211", :idempotency-key "s1490379652-idem-211", :dup? false}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m214", :idempotency-key "s1490379652-idem-214", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m214", :idempotency-key "s1490379652-idem-214", :dup? false}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m217", :idempotency-key "s1490379652-idem-217", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m217", :idempotency-key "s1490379652-idem-217", :dup? false}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m220", :idempotency-key "s1490379652-idem-220", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m220", :idempotency-key "s1490379652-idem-220", :dup? false}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m223", :idempotency-key "s1490379652-idem-223", :dup? true}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m223", :idempotency-key "s1490379652-idem-223", :dup? true}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m225", :idempotency-key "s1490379652-idem-225", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m225", :idempotency-key "s1490379652-idem-225", :dup? false}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m229", :idempotency-key "s1490379652-idem-229", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m229", :idempotency-key "s1490379652-idem-229", :dup? false}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m232", :idempotency-key "s1490379652-idem-232", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m232", :idempotency-key "s1490379652-idem-232", :dup? false}
+3	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m234", :idempotency-key "s1490379652-idem-234", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m234", :idempotency-key "s1490379652-idem-234", :dup? false}
+3	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m238", :idempotency-key "s1490379652-idem-238", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m238", :idempotency-key "s1490379652-idem-238", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m241", :idempotency-key "s1490379652-idem-241", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m241", :idempotency-key "s1490379652-idem-241", :dup? false}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m244", :idempotency-key "s1490379652-idem-244", :dup? true}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m244", :idempotency-key "s1490379652-idem-244", :dup? true}
+2	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m247", :idempotency-key "s1490379652-idem-247", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m247", :idempotency-key "s1490379652-idem-247", :dup? false}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m250", :idempotency-key "s1490379652-idem-250", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m250", :idempotency-key "s1490379652-idem-250", :dup? false}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m253", :idempotency-key "s1490379652-idem-253", :dup? true}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m253", :idempotency-key "s1490379652-idem-253", :dup? true}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m256", :idempotency-key "s1490379652-idem-256", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m256", :idempotency-key "s1490379652-idem-256", :dup? false}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m259", :idempotency-key "s1490379652-idem-259", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m259", :idempotency-key "s1490379652-idem-259", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m262", :idempotency-key "s1490379652-idem-262", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m262", :idempotency-key "s1490379652-idem-262", :dup? false}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m264", :idempotency-key "s1490379652-idem-264", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m264", :idempotency-key "s1490379652-idem-264", :dup? false}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m268", :idempotency-key "s1490379652-idem-268", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m268", :idempotency-key "s1490379652-idem-268", :dup? false}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m271", :idempotency-key "s1490379652-idem-271", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m271", :idempotency-key "s1490379652-idem-271", :dup? false}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m274", :idempotency-key "s1490379652-idem-274", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m274", :idempotency-key "s1490379652-idem-274", :dup? false}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m277", :idempotency-key "s1490379652-idem-277", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m277", :idempotency-key "s1490379652-idem-277", :dup? false}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m280", :idempotency-key "s1490379652-idem-280", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m280", :idempotency-key "s1490379652-idem-280", :dup? false}
+2	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m283", :idempotency-key "s1490379652-idem-283", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m283", :idempotency-key "s1490379652-idem-283", :dup? false}
+3	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m286", :idempotency-key "s1490379652-idem-286", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m286", :idempotency-key "s1490379652-idem-286", :dup? false}
+3	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m289", :idempotency-key "s1490379652-idem-289", :dup? true}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m289", :idempotency-key "s1490379652-idem-289", :dup? true}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m292", :idempotency-key "s1490379652-idem-292", :dup? true}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m292", :idempotency-key "s1490379652-idem-292", :dup? true}
+1	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m295", :idempotency-key "s1490379652-idem-295", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m295", :idempotency-key "s1490379652-idem-295", :dup? false}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m298", :idempotency-key "s1490379652-idem-298", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m298", :idempotency-key "s1490379652-idem-298", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m301", :idempotency-key "s1490379652-idem-301", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m301", :idempotency-key "s1490379652-idem-301", :dup? false}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m304", :idempotency-key "s1490379652-idem-304", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m304", :idempotency-key "s1490379652-idem-304", :dup? false}
+3	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m307", :idempotency-key "s1490379652-idem-307", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m307", :idempotency-key "s1490379652-idem-307", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m310", :idempotency-key "s1490379652-idem-310", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m310", :idempotency-key "s1490379652-idem-310", :dup? false}
+1	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m313", :idempotency-key "s1490379652-idem-313", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m313", :idempotency-key "s1490379652-idem-313", :dup? false}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m316", :idempotency-key "s1490379652-idem-316", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m316", :idempotency-key "s1490379652-idem-316", :dup? false}
+4	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m319", :idempotency-key "s1490379652-idem-319", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m319", :idempotency-key "s1490379652-idem-319", :dup? false}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m322", :idempotency-key "s1490379652-idem-322", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m322", :idempotency-key "s1490379652-idem-322", :dup? false}
+2	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m325", :idempotency-key "s1490379652-idem-325", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m325", :idempotency-key "s1490379652-idem-325", :dup? false}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m328", :idempotency-key "s1490379652-idem-328", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m328", :idempotency-key "s1490379652-idem-328", :dup? false}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m331", :idempotency-key "s1490379652-idem-331", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m331", :idempotency-key "s1490379652-idem-331", :dup? false}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m334", :idempotency-key "s1490379652-idem-334", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m334", :idempotency-key "s1490379652-idem-334", :dup? false}
+4	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m337", :idempotency-key "s1490379652-idem-337", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m337", :idempotency-key "s1490379652-idem-337", :dup? false}
+1	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m339", :idempotency-key "s1490379652-idem-339", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m339", :idempotency-key "s1490379652-idem-339", :dup? false}
+1	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m343", :idempotency-key "s1490379652-idem-343", :dup? true}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m343", :idempotency-key "s1490379652-idem-343", :dup? true}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m346", :idempotency-key "s1490379652-idem-346", :dup? false}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m346", :idempotency-key "s1490379652-idem-346", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m349", :idempotency-key "s1490379652-idem-349", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m349", :idempotency-key "s1490379652-idem-349", :dup? false}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+1	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+2	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+3	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m352", :idempotency-key "s1490379652-idem-352", :dup? true}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m352", :idempotency-key "s1490379652-idem-352", :dup? true}
+0	:invoke	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:ok	:mq-poll	{:topic "jepsen-mq-s1490379652", :partition 0, :consumer-group "cg-s1490379652", :max-count 64}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m355", :idempotency-key "s1490379652-idem-355", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m355", :idempotency-key "s1490379652-idem-355", :dup? false}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m358", :idempotency-key "s1490379652-idem-358", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m358", :idempotency-key "s1490379652-idem-358", :dup? false}
+2	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m361", :idempotency-key "s1490379652-idem-361", :dup? false}
+2	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m361", :idempotency-key "s1490379652-idem-361", :dup? false}
+3	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m364", :idempotency-key "s1490379652-idem-364", :dup? false}
+3	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m364", :idempotency-key "s1490379652-idem-364", :dup? false}
+4	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m367", :idempotency-key "s1490379652-idem-367", :dup? true}
+4	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m367", :idempotency-key "s1490379652-idem-367", :dup? true}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m370", :idempotency-key "s1490379652-idem-370", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m370", :idempotency-key "s1490379652-idem-370", :dup? false}
+0	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m373", :idempotency-key "s1490379652-idem-373", :dup? false}
+0	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m373", :idempotency-key "s1490379652-idem-373", :dup? false}
+1	:invoke	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m376", :idempotency-key "s1490379652-idem-376", :dup? false}
+1	:ok	:mq-publish	{:topic "jepsen-mq-s1490379652", :partition 0, :payload "s1490379652-m376", :idempotency-key "s1490379652-idem-376", :dup? false}
