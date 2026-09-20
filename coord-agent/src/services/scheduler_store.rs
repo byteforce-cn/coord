@@ -199,7 +199,8 @@ pub trait SchedulerStore: Send + Sync {
     async fn list(&self) -> Result<Vec<TaskRecord>, SchedulerStoreError>;
 
     /// **仅当不存在时**创建；返回 `false` 表示已存在（未写入）
-    async fn create(&self, task_id: &str, record: &TaskRecord) -> Result<bool, SchedulerStoreError>;
+    async fn create(&self, task_id: &str, record: &TaskRecord)
+        -> Result<bool, SchedulerStoreError>;
 
     /// 删除（不存在不算错误）
     async fn delete(&self, task_id: &str) -> Result<(), SchedulerStoreError>;
@@ -384,7 +385,11 @@ impl SchedulerStore for KvSchedulerStore {
             .inner
             .client
             .txn()
-            .txn(vec![compare_key_absent(&key)], vec![put_op(&key, value)], vec![])
+            .txn(
+                vec![compare_key_absent(&key)],
+                vec![put_op(&key, value)],
+                vec![],
+            )
             .await
             .map_err(|e| SchedulerStoreError::Kv(e.to_string()))?;
         Ok(resp.succeeded)
@@ -490,7 +495,10 @@ mod tests {
             serialize_task(&rec_b).unwrap(),
             "同一逻辑记录必须序列化逐字节相同（CAS 前提）"
         );
-        assert_eq!(deserialize_task(&serialize_task(&rec_a).unwrap()).unwrap(), rec_a);
+        assert_eq!(
+            deserialize_task(&serialize_task(&rec_a).unwrap()).unwrap(),
+            rec_a
+        );
     }
 
     #[test]
@@ -506,10 +514,16 @@ mod tests {
             claimed_at_ms: 1000,
         };
         assert!(!c.is_expired(1099, 100));
-        assert!(c.is_expired(1100, 100), "边界含等号：now >= claimed_at + ttl");
+        assert!(
+            c.is_expired(1100, 100),
+            "边界含等号：now >= claimed_at + ttl"
+        );
         // 极端输入：饱和加法封顶 u64::MAX（不 panic），故 now 达到封顶即判过期。
         // 这是**安全方向**：宁可让认领被释放，也不因整数回绕而永久卡死。
-        assert!(c.is_expired(u64::MAX, u64::MAX), "饱和封顶后应判过期而非回绕");
+        assert!(
+            c.is_expired(u64::MAX, u64::MAX),
+            "饱和封顶后应判过期而非回绕"
+        );
     }
 
     #[test]
@@ -552,7 +566,10 @@ mod tests {
         let rec = TaskRecord::new(task("j"));
 
         assert!(store.create("j", &rec).await.unwrap());
-        assert!(!store.create("j", &rec).await.unwrap(), "重复创建必须返回 false");
+        assert!(
+            !store.create("j", &rec).await.unwrap(),
+            "重复创建必须返回 false"
+        );
         assert_eq!(store.len(), 1);
     }
 
@@ -561,8 +578,14 @@ mod tests {
         let store = MemorySchedulerStore::new();
         assert!(store.get("missing").await.unwrap().is_none());
 
-        store.create("a", &TaskRecord::new(task("a"))).await.unwrap();
-        store.create("b", &TaskRecord::new(task("b"))).await.unwrap();
+        store
+            .create("a", &TaskRecord::new(task("a")))
+            .await
+            .unwrap();
+        store
+            .create("b", &TaskRecord::new(task("b")))
+            .await
+            .unwrap();
         assert_eq!(store.list().await.unwrap().len(), 2);
 
         let got = store.get("a").await.unwrap().expect("record");
@@ -592,7 +615,10 @@ mod tests {
         v2.state = TaskState::Failed;
         assert!(!store.cas("j", Some(&v0), &v2).await.unwrap());
         // 且未被写入
-        assert_eq!(store.get("j").await.unwrap().unwrap().state, TaskState::Running);
+        assert_eq!(
+            store.get("j").await.unwrap().unwrap().state,
+            TaskState::Running
+        );
     }
 
     #[tokio::test]

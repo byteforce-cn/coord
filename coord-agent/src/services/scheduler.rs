@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +89,30 @@ pub struct TaskClaim {
     pub worker_id: String,
     pub state: TaskState,
     pub claimed_at: Instant,
+    /// 注册时携带的 payload（**认领者唯一的输入**）。
+    ///
+    /// 历史缺陷（本次整改）：gRPC handler 的 `claim_job` 把这个字段
+    /// **硬编码为 `vec![]`** —— 调用方注册了 payload、认领后却拿到空字节，
+    /// 而协议里 `SchedulerClaimJobResponse.payload` 是承诺字段。属“声明但未实施”，
+    /// 与 B-05 同族（模块头声称 —— 实现没有）。
+    pub payload: Vec<u8>,
+}
+
+/// 从任务 metadata 还原注册时携带的 payload。
+///
+/// 优先 `payload_b64`（二进制安全，新写入形式）；回退 `payload`（历史文本形式：
+/// 旧记录、以及由 Rust 侧直接构造 `ScheduleTask` 的调用方只写这个键）。
+/// 两者都缺 ⇒ 空 payload（"没有负载"，与"负载为空"同义）。
+fn decode_registered_payload(metadata: &HashMap<String, String>) -> Vec<u8> {
+    if let Some(b64) = metadata.get("payload_b64") {
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+            return bytes;
+        }
+    }
+    metadata
+        .get("payload")
+        .map(|s| s.as_bytes().to_vec())
+        .unwrap_or_default()
 }
 
 /// 任务详情（含完整信息）
@@ -214,11 +239,16 @@ impl SchedulerService {
             });
 
             if self.cas(task_id, &current, &next).await? {
+                // payload 自注册起就存在 `metadata` 里（见 gRPC 的 `register_job`）。
+                // 优先取 base64 形式（二进制安全，新增）；旧记录只有文本形式，
+                // 回退到它（行为与历史一致）。两者都没有 ⇒ 空 payload。
+                let payload = self::decode_registered_payload(&current.task.metadata);
                 return Ok(Some(TaskClaim {
                     task_id: task_id.to_string(),
                     worker_id: worker_id.to_string(),
                     state: TaskState::Running,
                     claimed_at: Instant::now(),
+                    payload,
                 }));
             }
             // CAS 失败 = 有人抢先或状态已变 ⇒ 重读后按新状态判定
@@ -293,11 +323,9 @@ impl SchedulerService {
             };
             if let (Some(w), Some(c)) = (worker_id, current.claim.as_ref()) {
                 if c.worker_id != w {
-                    return Err(format!(
-                        "task {task_id} claimed by {}, not {w}",
-                        c.worker_id
-                    )
-                    .into());
+                    return Err(
+                        format!("task {task_id} claimed by {}, not {w}", c.worker_id).into(),
+                    );
                 }
             }
 
@@ -327,22 +355,16 @@ impl SchedulerService {
         self.mark_failed_impl(task_id, None).await
     }
 
-    async fn mark_failed_impl(
-        &self,
-        task_id: &str,
-        worker_id: Option<&str>,
-    ) -> ServiceResult<()> {
+    async fn mark_failed_impl(&self, task_id: &str, worker_id: Option<&str>) -> ServiceResult<()> {
         for _ in 0..MAX_CAS_RETRIES {
             let Some(current) = self.load(task_id).await? else {
                 return Ok(());
             };
             if let (Some(w), Some(c)) = (worker_id, current.claim.as_ref()) {
                 if c.worker_id != w {
-                    return Err(format!(
-                        "task {task_id} claimed by {}, not {w}",
-                        c.worker_id
-                    )
-                    .into());
+                    return Err(
+                        format!("task {task_id} claimed by {}, not {w}", c.worker_id).into(),
+                    );
                 }
             }
 
@@ -398,6 +420,18 @@ impl SchedulerService {
     /// 按 claim 句柄续期（wire 无 worker 身份；`job_id` 即凭据）
     pub async fn renew_claim_any(&self, task_id: &str) -> ServiceResult<bool> {
         self.renew_claim_impl(task_id, None).await
+    }
+
+    /// 该任务当前是否**确实被持有**（有认领记录，且认领未过期）。    ///
+    /// 给 gRPC 面用：wire 无 worker 身份 ⇒ `job_id` 即凭据，因此“这个句柄还算数吗”
+    /// 必须在服务端回答，而不能靠调用方自证。
+    pub async fn has_live_claim(&self, task_id: &str) -> ServiceResult<bool> {
+        let ttl_ms = self.ttl_ms();
+        Ok(self
+            .load(task_id)
+            .await?
+            .and_then(|r| r.claim)
+            .is_some_and(|c| !c.is_expired(now_ms(), ttl_ms)))
     }
 
     async fn renew_claim_impl(
@@ -579,7 +613,10 @@ mod tests {
         s.register_task(task("j", TaskType::Once)).await.unwrap();
         s.try_claim("j", "w1").await.unwrap();
         s.mark_failed("j", "w1", "boom").await.unwrap();
-        assert_eq!(s.get_task_state("j").await.unwrap(), Some(TaskState::Failed));
+        assert_eq!(
+            s.get_task_state("j").await.unwrap(),
+            Some(TaskState::Failed)
+        );
     }
 
     #[tokio::test]
@@ -634,9 +671,9 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..10 {
             let s = Arc::clone(&s);
-            handles.push(tokio::spawn(
-                async move { s.try_claim("hot", &format!("worker-{i}")).await },
-            ));
+            handles.push(tokio::spawn(async move {
+                s.try_claim("hot", &format!("worker-{i}")).await
+            }));
         }
         let mut wins = 0;
         for h in handles {
@@ -651,7 +688,11 @@ mod tests {
     #[tokio::test]
     async fn test_claim_unknown_task_returns_none() {
         let s = svc();
-        assert!(s.try_claim("never-registered", "w1").await.unwrap().is_none());
+        assert!(s
+            .try_claim("never-registered", "w1")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

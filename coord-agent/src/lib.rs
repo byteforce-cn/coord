@@ -56,11 +56,11 @@ pub use pki::{CertInfo, PkiConfig, PkiError, PkiService};
 pub use pki_store::{
     CaRecord, CertRecord, CertStatus, KvPkiStore, MemoryPkiStore, PkiStore, PkiStoreError,
 };
+pub use proxy::AgentInner;
+pub use service::{BaseService, ServiceConfig, ServiceResult};
 pub use services::transit_store::{
     DekRecord, DekStoreError, KvTransitDekStore, MemoryTransitDekStore, TransitDekStore,
 };
-pub use proxy::AgentInner;
-pub use service::{BaseService, ServiceConfig, ServiceResult};
 pub use threadpool::{AgentThreadPools, ThreadPoolConfig};
 pub use tls::{build_agent_tls_channel, build_agent_tls_server_config, AgentTlsConfig};
 
@@ -1056,10 +1056,17 @@ impl AgentServer {
         // - 配了 `auth.bootstrap_token`：运维显式给了开通凭据。
         // 两者都不满足（本地 dev 明文模式）时**不**尝试 —— 明文模式下凭据本就多余，
         // 尝试只会制造无意义噪声。
-        if inner.is_some()
-            && !self.config.static_peers.is_empty()
-            && (self.config.auth.enabled || !self.config.auth.bootstrap_token.trim().is_empty())
-        {
+        // 取 agent 自身身份要用的出站客户端（与 `inner` 同一个连接）。
+        //
+        // 这里返回 `Option` 而**不是** `expect("inner.is_some() checked above")`：
+        // 生产代码零 panic 路径是本仓硬卡口（`scripts/check-panics.sh`，P0-F.4）。
+        // 更进一步：把“取值”与“条件”做成同一个绑定的两半，就不存在
+        // “一处判定 Some、另一处再 assume Some”这种可能漂移的写法。
+        let self_identity_client = inner.as_ref().map(|i| i.client.clone());
+        let self_identity_wanted = !self.config.static_peers.is_empty()
+            && (self.config.auth.enabled || !self.config.auth.bootstrap_token.trim().is_empty());
+
+        if let Some(self_client) = self_identity_client.filter(|_| self_identity_wanted) {
             use crate::plugin::identity::{
                 CoordAuthGateway, PluginAuthGateway, PluginClients, PluginIdentityManager,
             };
@@ -1097,12 +1104,7 @@ impl AgentServer {
                 Ok(gw_client) => {
                     let gateway: Arc<dyn PluginAuthGateway> =
                         Arc::new(CoordAuthGateway::new(gw_client));
-                    let clients = Arc::new(PluginClients::new(
-                        inner
-                            .as_ref()
-                            .map(|i| i.client.clone())
-                            .expect("inner.is_some() checked above"),
-                    ));
+                    let clients = Arc::new(PluginClients::new(self_client));
                     match PluginIdentityManager::new(
                         gateway,
                         self.config.static_peers.clone(),

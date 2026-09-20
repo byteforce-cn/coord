@@ -1543,8 +1543,10 @@ where
                                         },
                                     frame: call_frame,
                                 } => {
-                                    let result =
-                                        self.dispatcher.dispatch(&service, with.as_ref(), &input).await;
+                                    let result = self
+                                        .dispatcher
+                                        .dispatch(&service, with.as_ref(), &input)
+                                        .await;
                                     match result {
                                         DispatchResult::Success { data } => {
                                             let mut done = call_frame;

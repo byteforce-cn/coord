@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use base64::Engine as _;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
@@ -1156,10 +1157,20 @@ impl Scheduler for SchedulerService {
                 expression: req.cron_expression,
             },
             description: req.name.clone(),
-            metadata: [(
-                "payload".to_string(),
-                String::from_utf8_lossy(&req.payload).to_string(),
-            )]
+            // payload 必须以**二进制安全**的形式存起来：契约里它是 `bytes`，
+            // 而 metadata 是 `String` 表。历史实现用 `from_utf8_lossy` 直接塞进去
+            // ⇒ 非 UTF-8 负载被**静默替换**成 U+FFFD。现改存 base64（原始字节），
+            // 同时保留旧的 `payload` 文本键以兼容既有记录（读侧两者都认）。
+            metadata: [
+                (
+                    "payload".to_string(),
+                    String::from_utf8_lossy(&req.payload).to_string(),
+                ),
+                (
+                    "payload_b64".to_string(),
+                    base64::engine::general_purpose::STANDARD.encode(&req.payload),
+                ),
+            ]
             .into_iter()
             .collect(),
         };
@@ -1178,7 +1189,9 @@ impl Scheduler for SchedulerService {
         match self.try_claim(&req.name, &worker_id).await {
             Ok(Some(claim)) => Ok(Response::new(SchedulerClaimJobResponse {
                 job_id: claim.task_id,
-                payload: vec![],
+                // 历史实现这里硬编码 `vec![]` —— 注册时携带的 payload 永远拿不回来，
+                // 而契约里这个字段是承诺字段。
+                payload: claim.payload,
                 found: true,
             })),
             Ok(None) => Ok(Response::new(SchedulerClaimJobResponse::default())),
@@ -1194,9 +1207,23 @@ impl Scheduler for SchedulerService {
         // wire 无 worker 身份（`SchedulerHeartbeatRequest` 只有 `job_id`）⇒ 以
         // `job_id` 作 claim 句柄。历史实现硬编码传 `"worker"`，与认领时的随机
         // uuid 永不相等 ⇒ 续期静默失效。
-        self.renew_claim_any(&req.job_id)
+        //
+        // 已修的第二个静默失效：`renew_claim_any` 返回 `bool`，而 handler 把结果
+        // **直接丢掉**（`let _ = ...?`）—— 于是“句柄已失效”与“续期成功”在 wire 上
+        // 完全同形（都回空 OK），调用方会一直以为自己还持有任务。现改为 fail-loud：
+        // 不成立即 `FAILED_PRECONDITION`（与 `MqAck` 的“非 Leader 回
+        // FAILED_PRECONDITION”同口径：用错误码表达“前置条件不成立”，不新增字段）。
+        let renewed = self
+            .renew_claim_any(&req.job_id)
             .await
             .map_err(sanitized_internal)?;
+        if !renewed {
+            return Err(Status::failed_precondition(format!(
+                "scheduler: claim for '{}' is no longer valid \
+                 (unknown job, not claimed, or worker mismatch)",
+                req.job_id
+            )));
+        }
         Ok(Response::new(SchedulerHeartbeatResponse {}))
     }
 
@@ -1206,6 +1233,31 @@ impl Scheduler for SchedulerService {
     ) -> Result<Response<SchedulerCompleteJobResponse>, Status> {
         let req = request.into_inner();
         // 同上：`job_id` 即凭据。历史实现传 `"worker"` ⇒ CompleteJob 必报错。
+        //
+        // 第三个静默失效：`mark_completed_impl` 对**不存在的任务**直接 `Ok(())`
+        // （它对 `release` 是合理的 no-op，但对 `complete` 不是）—— 句柄写错的
+        // worker 会得到“完成成功”，从而不再重试、也不再上报失败。现按
+        // “凭据必须先算数”fail-loud；已完成的任务仍幂等（多次 complete 均 OK），
+        // 由`is_completed` 分支保持不变。
+        if !self
+            .has_live_claim(&req.job_id)
+            .await
+            .map_err(sanitized_internal)?
+        {
+            let already_done = matches!(
+                self.get_task_state(&req.job_id)
+                    .await
+                    .map_err(sanitized_internal)?,
+                Some(crate::services::scheduler::TaskState::Completed)
+            );
+            if !already_done {
+                return Err(Status::failed_precondition(format!(
+                    "scheduler: no live claim for '{}' \
+                     (unknown job, already released/expired, or never claimed)",
+                    req.job_id
+                )));
+            }
+        }
         self.mark_completed_any(&req.job_id)
             .await
             .map_err(sanitized_internal)?;

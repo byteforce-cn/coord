@@ -20,9 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use coord_agent::service::{BaseService, ServiceConfig};
-use coord_agent::services::scheduler::{
-    ScheduleTask, SchedulerService, TaskState, TaskType,
-};
+use coord_agent::services::scheduler::{ScheduleTask, SchedulerService, TaskState, TaskType};
 use coord_agent::services::scheduler_store::{MemorySchedulerStore, SchedulerStore};
 
 /// 共享 store 的测试装配（用于"重启存续"类用例）
@@ -187,7 +185,9 @@ async fn test_release_claim() {
         .unwrap();
     assert_eq!(claim.state, TaskState::Running);
 
-    svc.release_claim("releasable-job", "worker-1").await.unwrap();
+    svc.release_claim("releasable-job", "worker-1")
+        .await
+        .unwrap();
 
     // 释放后应可被其他 worker 认领
     let claim2 = svc.try_claim("releasable-job", "worker-2").await.unwrap();
@@ -430,7 +430,9 @@ async fn test_claim_handle_renew_and_complete() {
 
     // 模拟 gRPC ClaimJob：worker 标识由服务端生成，调用方只拿到 job_id
     let server_generated = uuid_like();
-    svc.try_claim("handle-job", &server_generated).await.unwrap();
+    svc.try_claim("handle-job", &server_generated)
+        .await
+        .unwrap();
 
     assert!(
         svc.renew_claim_any("handle-job").await.unwrap(),
@@ -510,7 +512,10 @@ async fn test_state_survives_across_service_instances() {
     );
     // 且存续的认领仍排斥第二个 worker（多节点唯一性）
     assert!(
-        svc2.try_claim("persist-job", "worker-2").await.unwrap().is_none(),
+        svc2.try_claim("persist-job", "worker-2")
+            .await
+            .unwrap()
+            .is_none(),
         "存续的认领必须继续排斥其他 worker"
     );
 }
@@ -523,4 +528,205 @@ fn uuid_like() -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("sched-{nanos:x}")
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// gRPC 面的三处「静默失效」—— 2026-09-20 整改的负向对照
+//
+// 这三处都满足「静态检查全绿、单元测试全绿」，因为缺陷只在 **handler** 层，
+// 而此前的用例全部直接调 service 层。判据因此必须打在 handler 上。
+// ════════════════════════════════════════════════════════════════════════════
+
+use coord_proto::agent::scheduler_server::Scheduler;
+use coord_proto::agent::{
+    SchedulerClaimJobRequest, SchedulerCompleteJobRequest, SchedulerHeartbeatRequest,
+    SchedulerRegisterJobRequest,
+};
+use tonic::{Code, Request};
+
+/// ① 注册时携带的 payload 必须**随认领返回**（含非 UTF-8 字节）。
+///
+/// 修复前：`claim_job` 把它硬编码为 `vec![]` ⇒ 调用方注册了 payload、认领后拿到空。
+/// 修复前：`register_job` 用 `from_utf8_lossy` 存 ⇒ 非 UTF-8 被静默替换。
+#[tokio::test]
+async fn test_grpc_claim_returns_registered_payload_byte_exact() {
+    let svc = SchedulerService::new(Default::default());
+    // 刻意含非 UTF-8 字节：证明 payload 是二进制安全的，而不是"文本恰好能过"
+    let payload: Vec<u8> = vec![0x00, 0xff, 0xfe, b'{', b'}', 0x80];
+
+    let registered = svc
+        .register_job(Request::new(SchedulerRegisterJobRequest {
+            name: "payload-job".into(),
+            cron_expression: "0 0 3 * * ?".into(),
+            payload: payload.clone(),
+        }))
+        .await
+        .expect("register 必须成功")
+        .into_inner();
+    assert_eq!(
+        registered.job_id, "payload-job",
+        "job_id 必须等于 name（认领键一致）"
+    );
+
+    let claimed = svc
+        .claim_job(Request::new(SchedulerClaimJobRequest {
+            name: "payload-job".into(),
+        }))
+        .await
+        .expect("claim 必须成功")
+        .into_inner();
+
+    assert!(claimed.found, "首次认领必须成功");
+    assert_eq!(claimed.job_id, "payload-job");
+    assert_eq!(
+        claimed.payload, payload,
+        "payload 必须逐字节一致（不是 lossy 文本）"
+    );
+}
+
+/// ② 句柄失效时 Heartbeat **必须报错**，不能回空的 OK。
+///
+/// 修复前：handler 把 `renew_claim_any` 的 `bool` **直接丢掉** ⇒ "句柄已失效"与
+/// "续期成功"在 wire 上完全同形，调用方会一直以为自己还持有任务。
+#[tokio::test]
+async fn test_grpc_heartbeat_fails_loud_when_handle_is_invalid() {
+    let svc = SchedulerService::new(Default::default());
+
+    // 未注册的任务：句柄不可能有效
+    let err = svc
+        .heartbeat(Request::new(SchedulerHeartbeatRequest {
+            job_id: "never-registered".into(),
+        }))
+        .await
+        .expect_err("无效句柄必须报错");
+    assert_eq!(err.code(), Code::FailedPrecondition);
+
+    // 已注册但尚未认领：同样无效（没有 claim 可续）
+    svc.register_job(Request::new(SchedulerRegisterJobRequest {
+        name: "renew-job".into(),
+        cron_expression: "0 0 3 * * ?".into(),
+        payload: vec![],
+    }))
+    .await
+    .expect("register 必须成功");
+    let err = svc
+        .heartbeat(Request::new(SchedulerHeartbeatRequest {
+            job_id: "renew-job".into(),
+        }))
+        .await
+        .expect_err("未认领的任务不能续期");
+    assert_eq!(err.code(), Code::FailedPrecondition);
+
+    // 认领之后必须成功（正面对照 —— 否则上面的断言只是在测"永远报错"）
+    svc.claim_job(Request::new(SchedulerClaimJobRequest {
+        name: "renew-job".into(),
+    }))
+    .await
+    .expect("claim 必须成功");
+    svc.heartbeat(Request::new(SchedulerHeartbeatRequest {
+        job_id: "renew-job".into(),
+    }))
+    .await
+    .expect("持有认领时续期必须成功");
+}
+
+/// ③ 无有效认领时 CompleteJob **必须报错**；已完成的任务保持幂等。
+///
+/// 修复前：`mark_completed_impl` 对不存在的任务直接 `Ok(())` ⇒ 句柄写错的 worker
+/// 会得到"完成成功"，于是既不重试也不上报失败。
+#[tokio::test]
+async fn test_grpc_complete_job_fails_loud_but_stays_idempotent() {
+    let svc = SchedulerService::new(Default::default());
+
+    let err = svc
+        .complete_job(Request::new(SchedulerCompleteJobRequest {
+            job_id: "never-registered".into(),
+            result: vec![],
+        }))
+        .await
+        .expect_err("无认领的任务不能标记完成");
+    assert_eq!(err.code(), Code::FailedPrecondition);
+
+    svc.register_job(Request::new(SchedulerRegisterJobRequest {
+        name: "done-job".into(),
+        cron_expression: "0 0 3 * * ?".into(),
+        payload: vec![],
+    }))
+    .await
+    .expect("register 必须成功");
+    let err = svc
+        .complete_job(Request::new(SchedulerCompleteJobRequest {
+            job_id: "done-job".into(),
+            result: vec![],
+        }))
+        .await
+        .expect_err("未认领的任务不能标记完成");
+    assert_eq!(err.code(), Code::FailedPrecondition);
+
+    svc.claim_job(Request::new(SchedulerClaimJobRequest {
+        name: "done-job".into(),
+    }))
+    .await
+    .expect("claim 必须成功");
+    svc.complete_job(Request::new(SchedulerCompleteJobRequest {
+        job_id: "done-job".into(),
+        result: b"ignored".to_vec(),
+    }))
+    .await
+    .expect("持有认领时完成必须成功");
+    assert_eq!(
+        svc.get_task_state("done-job").await.unwrap(),
+        Some(TaskState::Completed)
+    );
+
+    // 幂等：重复完成不再报错（消费者重试 / 至少一次投递下的正常形态）
+    svc.complete_job(Request::new(SchedulerCompleteJobRequest {
+        job_id: "done-job".into(),
+        result: vec![],
+    }))
+    .await
+    .expect("已 Completed 的任务重复完成必须幂等");
+}
+
+/// ④ `has_live_claim` 必须跟随句柄有效性（complete / 未知任务都必须为 false）
+#[tokio::test]
+async fn test_has_live_claim_tracks_handle_validity() {
+    let svc = SchedulerService::new(Default::default());
+    svc.register_job(Request::new(SchedulerRegisterJobRequest {
+        name: "live-job".into(),
+        cron_expression: "0 0 3 * * ?".into(),
+        payload: vec![],
+    }))
+    .await
+    .unwrap();
+
+    assert!(
+        !svc.has_live_claim("live-job").await.unwrap(),
+        "未认领 = 无有效句柄"
+    );
+    assert!(
+        !svc.has_live_claim("nope").await.unwrap(),
+        "未知任务 = 无有效句柄"
+    );
+
+    svc.claim_job(Request::new(SchedulerClaimJobRequest {
+        name: "live-job".into(),
+    }))
+    .await
+    .unwrap();
+    assert!(
+        svc.has_live_claim("live-job").await.unwrap(),
+        "认领后句柄必须有效"
+    );
+
+    svc.complete_job(Request::new(SchedulerCompleteJobRequest {
+        job_id: "live-job".into(),
+        result: vec![],
+    }))
+    .await
+    .unwrap();
+    assert!(
+        !svc.has_live_claim("live-job").await.unwrap(),
+        "完成后句柄必须失效"
+    );
 }
