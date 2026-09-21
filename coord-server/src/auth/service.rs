@@ -1784,6 +1784,112 @@ mod cct_tests {
         });
     }
 
+    // ──── W1-2 / F-05：登录的两类失败**必须可区分** ────
+    //
+    // F-05（`jepsen/docs/coord-findings.md`）的形态是：60s 短跑里出现
+    // `:fail :write [:no-client Failed to authenticate to coord]`。经定位，它**不是**
+    // 登录限流的锅（限流只在密码校验失败时消费令牌，见 `authenticate` 的 `record_failure`），
+    // 而是：`Authenticate` 要把会话经 raft **提交两次**（access + refresh，见
+    // `persist_session` 的两个调用点），无 quorum 时提交不了 ⇒ 登录失败。
+    //
+    // 于是"这个失败能不能重试"完全取决于**客户端看到的错误码**：
+    // * 密码错 ⇒ `UNAUTHENTICATED`（不可重试，重试只会把自己锁在限流里）；
+    // * 无 quorum ⇒ `UNAVAILABLE` / `DEADLINE_EXCEEDED`（**必须**可退避重试）。
+    //
+    // 这两条判据此前**没有任何测试**盯住 —— 而它们正是"客户端该不该退避"的唯一依据。
+    // 若某次重构把 proposer 的错误吃掉成 `INTERNAL`/`UNAUTHENTICATED`，
+    // 客户端就会从"等集群恢复"退化成"认为凭据不对"，F-05 的 `:no-client` 风暴会重演。
+
+    /// 反：密码错 ⇒ `UNAUTHENTICATED`，且**不是**可重试码。
+    #[test]
+    fn wrong_password_yields_unauthenticated_not_retryable() {
+        let svc = build_service_with_cct();
+        svc.auth_manager.user_add("f05-wrongpw", "correct").unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let status = rt.block_on(async {
+            svc.authenticate(tonic::Request::new(AuthenticateRequest {
+                name: "f05-wrongpw".to_string(),
+                password: "wrong".to_string(),
+            }))
+            .await
+            .expect_err("密码错必须失败")
+        });
+
+        assert_eq!(
+            status.code(),
+            tonic::Code::Unauthenticated,
+            "密码错必须是 UNAUTHENTICATED（客户端据此**不**重试）"
+        );
+    }
+
+    /// 正：会话落盘（raft 提案）失败 ⇒ **原样透传**可重试码，不得被吃掉
+    /// 成 `UNAUTHENTICATED`（那会让客户端把"集群没有 quorum"当成"凭据不对"）。
+    #[test]
+    fn session_persist_failure_propagates_retryable_code() {
+        /// 只做"提案必失败"这一件事的 proposer（本模块局部；勿与 `mod tests` 的
+        /// `RecordingProposer` 混用 —— 那是另一个测试模块的私有类型）。
+        struct FailingProposer(tonic::Code);
+
+        #[async_trait::async_trait]
+        impl AuthOpProposer for FailingProposer {
+            async fn propose_auth_op(&self, _op: AuthOp) -> Result<u64, tonic::Status> {
+                Err(tonic::Status::new(self.0, "injected (no quorum)"))
+            }
+        }
+
+        /// 提案必成功（对照组）。
+        struct AlwaysOkProposer;
+
+        #[async_trait::async_trait]
+        impl AuthOpProposer for AlwaysOkProposer {
+            async fn propose_auth_op(&self, _op: AuthOp) -> Result<u64, tonic::Status> {
+                Ok(1)
+            }
+        }
+
+        for injected in [tonic::Code::Unavailable, tonic::Code::DeadlineExceeded] {
+            let svc = build_service_with_cct().with_proposer(Arc::new(FailingProposer(injected)));
+            svc.auth_manager.user_add("f05-quorum", "pw").unwrap();
+
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let status = rt.block_on(async {
+                svc.authenticate(tonic::Request::new(AuthenticateRequest {
+                    name: "f05-quorum".to_string(),
+                    password: "pw".to_string(),
+                }))
+                .await
+                .expect_err("提案失败时登录必须失败（fail-closed：不能签发无法持久化的会话）")
+            });
+
+            assert_eq!(
+                status.code(),
+                injected,
+                "提案失败的码必须原样透传给客户端（这是它唯一的重试依据）"
+            );
+            assert_ne!(
+                status.code(),
+                tonic::Code::Unauthenticated,
+                "无 quorum **不是**凭据错误：混同会让客户端放弃重试并把自己锁在限流里"
+            );
+        }
+
+        // 判别性对照：proposer 成功时登录**必须**成功（证明上面的失败不是"环境问题"）
+        let ok = build_service_with_cct().with_proposer(Arc::new(AlwaysOkProposer));
+        ok.auth_manager.user_add("f05-ok", "pw").unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let resp = rt
+            .block_on(async {
+                ok.authenticate(tonic::Request::new(AuthenticateRequest {
+                    name: "f05-ok".to_string(),
+                    password: "pw".to_string(),
+                }))
+                .await
+            })
+            .expect("提案成功时登录必须成功");
+        assert!(!resp.into_inner().token.is_empty());
+    }
+
     // ──── Role→Capability storage ────
 
     #[test]

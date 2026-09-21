@@ -266,7 +266,7 @@
 | # | 任务 | 做法 | 判据 / 产物 | 人日 |
 |:--|:--|:--|:--|--:|
 | W1-1 | **F-27**：lease 过期 revoke 失败可重试 | 把 `start_lease_expiry_worker` 改为「**提交成功才从本地管理器移除**」，失败项进 `pending` 集合按 tick 重试（`start_region_lease_revoker` 已有 `BTreeSet` 待办模式可参照，`coord-server/src/server/mod.rs:812+`） | 新增单测：注入 `client_write` 失败 ⇒ 下一 tick 必须重试；lab 复跑 `make -C jepsen/lab test WORKLOAD=lease NEMESIS=partition-halves TIME_LIMIT=45 CONCURRENCY=1n` **由红转绿**（当前 `matrix-m2` 7/8） | 2 |
-| W1-2 | **F-05**：登录限流 × 重启窗口 | 定位 `coord-findings.md:216` 的形态 | 60s 短跑 0 条 `:no-client Failed to authenticate` | 3 |
+| W1-2 | **F-05**：登录限流 × 重启窗口 | 定位 `coord-findings.md:216` 的形态 | ~~60s 短跑 0 条 `:no-client Failed to authenticate`~~ → **判据已修正（2026-09-21）**：「**quorum 丢失**期间的登录失败是**固有**的（`Authenticate` 要两次 raft 提案），不能靠改断言消除」⇒ 可执行判据改为两条：①**客户端可见的两类失败必须可区分**（密码错=`UNAUTHENTICATED`；无 quorum=`UNAVAILABLE`/`DEADLINE_EXCEEDED`）②lab 复跑统计出现率并**归因**（不得计入一致性违反） | 3 |
 | W1-3 | **F-68**：checker 纳入 `start_offset` | 判据必须读 Poll 请求的 `start_offset` | `CONCURRENCY=1n` 复跑转绿，且单客户端仍绿（**两份证据一起引用**，`evidence/README.md:113-116`） | 1 |
 | W1-4 | 无界增长四项（第四轮 §6.2 第 17–20 项） | `MemoryWorkflowStore` + 5s 全量扫描（agent 侧最重增长）、动态 region 清理（或**显式声明不支持**）、`snapshot_logs_since_last = 0` 语义、连接数上限与并发保护 | 每项二选一：修 + 测试，或写进契约/文档的"不承诺"清单（§10 规则 6 口径） | 4 |
 | W1-5 | 未接线机制逐条接上或删除（第四轮 §6.2 第 21 项） | `dead_tasks()` 已有消费者与告警（`remaining-known-gaps.md:92`），复核其余；监督覆盖率 81 处 `tokio::spawn` vs 5 处 `spawn_supervised` | 逐条交代表 + `grep -c tokio::spawn` 对比 | 2 |
@@ -562,9 +562,20 @@
 | **W6-3** | 滚动升级 / N-1 兼容 | ✅ 完成（**裁定为"不支持"+ 给出可执行的停机升级路径**） | `docs/production/ops/upgrade.md` | 结论：**不支持滚动升级、不声明 N-1 兼容、不声明跨版本快照恢复**，升级 = 停机且整集群同版本。三条依据全部可核验：①agent↔server **无**协议协商（`grep -rn protocol_version coord-server/src` 无输出）②**诚实的坏消息**：`sim_chaos_test.rs:530` 那个名为"快照格式兼容"的测试其实是在测试里**重新定义**了一个影子 `SnapshotHeader` 做 bincode roundtrip，**不覆盖真实快照路径** ③agent↔SDK 协商是**真的**（`handshake.rs:29` + 对表测试）。含 5 条"不支持"清单（U-1…U-5）与 3 条待办 |
 | **W8-1/W8-2/W8-3** | 业务落地准备 | ✅ 完成（文档面） | `docs/production/adopter-playbook.md` | 接入面=SDK（**不恢复 starter**，附 `@Bean(destroyMethod="close")` 配方与"为什么必须"）；SDK **不发布**（U-06）的构建方式；§3 边界清单 11 行（逐条对应 `boundaries.md`）；§4 **如实列出 7 道门的红灯**；§5 试点准入 6 条 + 回退/数据可逆性 + 8 条接入方验收清单（其中 G8/72h **明确标未做**）；§6 「可以说 / 不可以说」口径 |
 | **U-04…U-10** | 未决项裁定 | ✅ 完成（**U-04 只裁定、未实施，已单列 W4-2a**） | 本文 §8.4（含理由与落地物） | U-04 KEK=启动注入+边界声明、U-05 无外部消费者、U-06 SDK 不发布、U-07 replication 不建契约、U-08 policy RBAC 不持久化、U-09 cb/rl 边界确认+`STATUS.md` 单一事实来源、U-10 承诺对象=内部业务团队 |
-| **W6-4** | 备份恢复演练 | ✅ 进程内演练完成 + 归档（**多节点/对象存储仍 ⏳**） | `cargo test -p coord-server --test snapshot_rpc_test`⇒2 ✓、`--test snapshot_transfer_test`⇒1 ✓、`--test restart_recovery_test`⇒4 ✓、`-p coord --test m0_recovery_suite`⇒3 ✓（**10/10**） | `docs/production/evidence/20260921T161653Z-w6-4-backup-restore-drill/`（MANIFEST + run.log + sha256sums，**工作树 CLEAN**）。覆盖：在线快照流 → 恢复、在线快照≡本地导出、导出→清空→导入 roundtrip、快照落盘后重启加载、purge 守卫（无持久快照拒绝回收）、applied 水位持久化、重放幂等、purge→重启、kill -9 后 revision 不回退。<br>**边界（与证据同引）**：不含**对象存储**（chunk rebuild → `UNAVAILABLE` 边界见 runbook §3.3）、不含**多节点**、未启用 `sim-tests`、**未人工复核** ⇒ `upgrade.md` §2 的停机升级四条判据仍标 ⏳ |
+| **P1 卡口复核（三轮）** | 本次改动后的门禁自查 | ✅ 完成 | `cargo fmt --all -- --check`；`cargo clippy --workspace -- -D warnings`；**六道脚本**；`cargo test --lib -p coord-core -p coord-agent` | fmt ✓；clippy ✓（非测试目标）；六道全 `exit 0`；**coord-core 300 ✓ / coord-agent 479 ✓**（含本轮新增 15 条判据） |
 | **P1 卡口复核（三轮）** | 本次改动后的门禁自查 | ✅ 完成 | `cargo fmt --all -- --check`；`cargo clippy --workspace -- -D warnings`；**六道脚本**；`cargo test --lib -p coord-core -p coord-agent` | fmt ✓；clippy ✓（非测试目标）；六道全 `exit 0`；**coord-core 300 ✓ / coord-agent 479 ✓**（含本轮新增 15 条判据） |
 | **顺手清理** | `coord-agent/src/auth/sync.rs` 的未使用 `use std::thread;` | ✅ 完成 | 全仓 `grep -n 'thread::' coord-agent/src/auth/sync.rs` ⇒ 无输出 | 每条 `cargo test` 都留一条 warning 会让"新引入的 warning"这个信号被淹没 |
+
+### 第四轮追加（2026-09-21，同一会话续）
+
+| # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
+|:--|:--|:--|:--|:--|
+| **W1-2** | **F-05**：登录路径 × 无 quorum | 🟡 **判据已修正 + 关键性质已钉住；lab 复跑仍待做** | `cargo test -p coord-server --lib auth::service` ⇒ **146 ✓**（含 2 条新判据）；**负控制**：把 `persist_session` 的错误改成 `unauthenticated` ⇒ `session_persist_failure_propagates_retryable_code` **必红**（`left: Unauthenticated / right: Unavailable`） | **修正了一条判据**：原 W1-2 的"60s 短跑 0 条 `:no-client`"在 **quorum 整体丢失**时**不可能成立** —— `Authenticate` 要提交两次 `persist_session`（access + refresh，`auth/service.rs:1149/1168`），没有 quorum 就签不出会话。把它当"缺陷"去修只能改断言（§7 规范第 4 条禁止），所以改为两条**可执行**判据：①无 quorum 的登录失败必须是**可重试**码（客户端唯一的重试依据；混同成 `UNAUTHENTICATED` 会让客户端放弃重试并把自己锁在限流里）②密码错必须是 `UNAUTHENTICATED`（对照，防止"一律可重试"的过度放宽）。产出：两条新测试 + `boundaries.md` B-SE-4（含"**CCT 过期 + 无 quorum ⇒ 客户端完全不可用**"这条必须告知接入方的推论）+ §5 W1-2 判据改写。<br>**仍未做**：lab 复跑统计出现率（需要重建 release 二进制 + 起 lab run）。 |
+| **W6-4** | 备份恢复演练 | ✅ 进程内完成（10/10，**首份 CLEAN 树归档**） | `snapshot_rpc_test` 2 ✓ / `snapshot_transfer_test` 1 ✓ / `restart_recovery_test` 4 ✓ / `m0_recovery_suite` 3 ✓ | `docs/production/evidence/20260921T161653Z-w6-4-backup-restore-drill/`（MANIFEST + run.log + sha256sums）。覆盖在线快照→恢复、导出→清空→导入 roundtrip、落盘重启加载、**purge 守卫**、applied 水位持久化、重放幂等、**kill -9 后 revision 不回退**。<br>**边界与证据同引**：不含对象存储 / 不含多节点 / 未人工复核 ⇒ 不得当作"备份恢复已验收"。 |
+| **提交纪律** | 本轮起证据跑在**已提交的 CLEAN 树**上 | ✅ 完成 | `git log --oneline`：`19cb350`（代码+文档）、`d1b0273`（证据+台账）；`git status --porcelain` 在证据 run 时只剩证据目录自身 | 消掉 D-10 的一半（"全部归档的 worktree 字段为 DIRTY"）：**新归档从此可以是 CLEAN**；旧的 28 份仍为 DIRTY（重跑才能覆盖，归 W3-9） |
+
+**第四轮未触碰**：同第三轮 —— W2-1/W2-2/W2-3（CI 日志不可得）、W2-4（仓库设置项）、
+W3 全部（要长跑）、W4-1/W4-2a/W4-3/W4-5、W5-5、W6-2 实机演练、W7。
 
 **第三轮未触碰**：W1-2 的 lab 复跑、W2-1/W2-2/W2-3（**需要 CI job 日志，本环境无 `gh` 且仓库私有 ⇒ 无 token 时无法取**）、W2-4（仓库设置项）、W3 全部、W4-1/W4-2**a**/W4-3/W4-5、W5-5、W6-2 实机演练、W7-1/W7-2/W7-3。
 

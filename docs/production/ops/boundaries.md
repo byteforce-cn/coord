@@ -46,9 +46,9 @@
 | # | 不承诺 | 事实锚点 | 若要变成承诺 |
 |:--|:--|:--|:--|
 | B-SE-1 | **TLS 不是 fail-closed**（0.2.0 现状）：`dev` 模式、以及「鉴权开启 + 有 `raft_shared_secret`」的集群仍可**明文启动**。只有 (a) 鉴权关闭且 bind 非 loopback、(b) raft 端口非 loopback 且既无 raft mTLS 又无共享密钥，这两种情况才拒绝启动 | `README.md:61` 自述；`coord/tests/dev_insecure_bind_test.rs` | 见 `docs/production/ops/security.md`（W4-1 方案，**未实施**） |
-| B-SE-2 | **KEK 由配置串确定性派生**：拿到配置即可推导 KEK（非外部 KMS） | `apis/contracts/WHITEPAPER.md` §12.7 | 见 `security.md`（W4-2 / U-04，**待裁定**） |
+| B-SE-2 | **KEK 由配置串确定性派生**：拿到配置即可推导 KEK（非外部 KMS） | `apis/contracts/WHITEPAPER.md` §12.7 | **U-04 已裁定（2026-09-21）取「启动注入 + 显式边界」，但**实施未做（W4-2a）** ⇒ 现状不变。实施后本行才可改写为"KEK 由启动注入，缺失即拒绝启动（仍非外部 KMS）** |
 | B-SE-3 | 操作员**手工写** `@Bean(destroyMethod="close")` 生命周期；**不提供** Spring Boot starter（产品决策，见 `remaining-known-gaps.md:99/:104-114`） | 同上 | 恢复 starter（已被明确否决）或继续文档化 recipe |
-| B-SE-4 | 登录路径需要 raft quorum：`Authenticate` 要两次 `persist_session` 提案，**follower / 分区期间登录会失败**（客户端 60s 内轮换重试） | `coord-server/src/auth/service.rs:456`（`persist_session`）、`jepsen/docs/coord-findings.md` §F-05 | W1-2：给 `persist_session` 加有界重试以覆盖选举窗口；quorum 整体丢失 > 60s 属固有可用性属性，需 §5.4-④ 裁定 |
+| B-SE-4 | 登录路径需要 raft quorum：`Authenticate` 要两次 `persist_session` 提案，**follower / 分区期间登录会失败**（客户端 60s 内轮换重试）。**推论（必须告诉接入方）**：客户端 CCT 过期 + 集群无 quorum ⇒ 它**完全不可用**（即使不需要 quorum 的本地读也拿不到新凭据） | `coord-server/src/auth/service.rs:456`（`persist_session`）、`jepsen/docs/coord-findings.md` §F-05 | **已钉住的关键性质**（2026-09-21）：无 quorum 的登录失败必须携带**可重试**码（`UNAVAILABLE` / `DEADLINE_EXCEEDED`），**不得**与"密码错"混同为 `UNAUTHENTICATED` —— 判据 `auth::service::cct_tests::session_persist_failure_propagates_retryable_code`（含负控制：把它改成 `unauthenticated` ⇒ 必红）+ 对照 `wrong_password_yields_unauthenticated_not_retryable`。<br>仍待办：给 `persist_session` 加**有界重试**以覆盖选举窗口；quorum 整体丢失 > 60s 属固有可用性属性，需 §5.4-④ 裁定（**不能靠改断言消除**） |
 
 ## §6 插件 / Agent
 
