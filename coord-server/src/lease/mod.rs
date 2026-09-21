@@ -76,6 +76,16 @@ struct LeaseRecord {
     lease: Lease,
     /// 对应的时间轮任务 ID
     timer_id: u64,
+    /// **F-27**：已判定过期、其 revoke 尚未**确认提交**（"待提交"态）。
+    ///
+    /// 处于该态的记录**保留在本地管理器内**，直到 revoke 经 raft 提交成功
+    /// （`finish_expired`）。旧实现在 `check_expired()` 返回 action 前就把记录移除，
+    /// 于是随后的 `client_write` 失败时记录已丢 ⇒ revoke **永久丢失**、
+    /// 绑定 Key 泄漏至下一次 leader rebuild（不再换主则永久泄漏）。
+    ///
+    /// 对外语义与旧行为一致：调用方（KeepAlive / Attach / Get / 计数）
+    /// 将该记录视为**不存在**（过期 Lease 对调用方即不存在）。
+    expired_pending_revoke: bool,
 }
 
 /// Lease 管理器
@@ -108,38 +118,63 @@ impl LeaseManager {
         self
     }
 
-    /// 检测并清理已过期的 Lease
+    /// 检测已过期的 Lease 并返回需要下发 revoke 的动作。
     ///
-    /// 遍历所有活跃 Lease，将已过期的移出并返回操作列表。
     /// 应在事件循环中周期性调用（例如每 100ms）。
+    ///
+    /// **F-27 语义（幂等重试）**：过期记录**不再在返回前移除**，而是标记为
+    /// `expired_pending_revoke` 并继续保留：
+    /// - 本轮新过期的：标记 + 结算指标（active−1 / expired+1，**只在跃迁时一次**）
+    ///   + 返回 action；
+    /// - 此前已标记、revoke 仍无确认提交的：**继续返回 action**（即重试），不重复计指标。
+    ///
+    /// 调用方在 revoke **确认提交后**必须调用 [`LeaseManager::finish_expired`] 移除记录。
+    /// 这样：提交失败 = 记录仍在 ⇒ 下个 tick 自然重试；提交成功 = 记录移除。
     pub fn check_expired(&self) -> Vec<LeaseAction> {
         let mut expired = Vec::new();
         let mut leases = self.leases.write();
 
-        leases.retain(|lease_id, record| {
-            if record.lease.is_expired() {
+        for (lease_id, record) in leases.iter_mut() {
+            if record.expired_pending_revoke {
+                // 已判定过期但 revoke 尚未确认提交 —— 继续上报以重试（下发幂等）
                 expired.push(LeaseAction::Expired {
                     lease_id: *lease_id,
                     attached_keys: record.lease.attached_keys.clone(),
                 });
-                false // 移除过期 Lease
-            } else {
-                true // 保留
+                continue;
             }
-        });
-
-        // R-OBS-10：过期计数（active 减、expired 加）
-        if let Some(metrics) = &self.metrics {
-            let n = expired.len();
-            if n > 0 {
-                for _ in 0..n {
+            if record.lease.is_expired() {
+                record.expired_pending_revoke = true;
+                // R-OBS-10：active → expired，**仅在状态跃迁时结算一次**
+                // （重试轮次不得重复递减 active，否则 gauge 会被多计）
+                if let Some(metrics) = &self.metrics {
                     metrics.dec_lease_active();
                     metrics.inc_lease_expired();
                 }
+                expired.push(LeaseAction::Expired {
+                    lease_id: *lease_id,
+                    attached_keys: record.lease.attached_keys.clone(),
+                });
             }
         }
 
         expired
+    }
+
+    /// **F-27**：过期 revoke **已确认提交**（raft apply 成功 / 单节点 apply 成功）后，
+    /// 移除本地记录并取消时间轮任务。
+    ///
+    /// 幂等（记录不存在时返回 `false`）。指标已在 `check_expired()` 判定过期时结算
+    /// （active−1 / expired+1），故此处**不再**动 `lease_active_total`。
+    pub async fn finish_expired(&self, lease_id: LeaseID) -> bool {
+        let removed = self.leases.write().remove(&lease_id);
+        match removed {
+            Some(record) => {
+                let _ = self.timer.cancel(record.timer_id).await;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Grant 一个 Lease，支持指定 ID 或自动分配
@@ -247,7 +282,11 @@ impl LeaseManager {
             match leases.entry(lease_id) {
                 std::collections::hash_map::Entry::Occupied(_) => true,
                 std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(LeaseRecord { lease, timer_id });
+                    slot.insert(LeaseRecord {
+                        lease,
+                        timer_id,
+                        expired_pending_revoke: false,
+                    });
                     false
                 }
             }
@@ -289,8 +328,13 @@ impl LeaseManager {
         let _ = self.timer.cancel(record.timer_id).await;
 
         // R-OBS-10：活跃 Lease -1
-        if let Some(metrics) = &self.metrics {
-            metrics.dec_lease_active();
+        //
+        // F-27：若该记录已被 `check_expired()` 判定为过期（active 已在跃迁时减过），
+        // 则**不得重复递减** —— 否则显式 revoke 与过期清理竞争时 gauge 会被多计。
+        if !record.expired_pending_revoke {
+            if let Some(metrics) = &self.metrics {
+                metrics.dec_lease_active();
+            }
         }
 
         Ok(())
@@ -299,12 +343,20 @@ impl LeaseManager {
     /// KeepAlive 续约
     ///
     /// 重置 Lease TTL 倒计时。
+    ///
+    /// **F-27 fail-closed**：已判定过期（revoke 待提交）的 Lease **不得被复活** ——
+    /// 否则"客户端以为续期成功"与"服务端即将删除绑定 Key"会同时成立。
+    /// 返回 `LeaseNotFound`，与旧行为（过期记录已被移出管理器）一致。
     pub async fn keep_alive(&self, lease_id: LeaseID) -> Result<(LeaseID, i64)> {
         let (timer_id, ttl) = {
             let mut leases = self.leases.write();
             let record = leases
                 .get_mut(&lease_id)
                 .ok_or(Error::LeaseNotFound { lease_id })?;
+
+            if record.expired_pending_revoke {
+                return Err(Error::LeaseNotFound { lease_id });
+            }
 
             record.lease.deadline =
                 tokio::time::Instant::now() + Duration::from_secs(record.lease.ttl_seconds as u64);
@@ -323,45 +375,72 @@ impl LeaseManager {
     }
 
     /// 将 Key 绑定到 Lease
+    ///
+    /// F-27：已判定过期的 Lease 视为不存在（不得再挂新 Key）。
     pub fn attach_key(&self, lease_id: LeaseID, key: &[u8]) -> Result<()> {
         let mut leases = self.leases.write();
         let record = leases
             .get_mut(&lease_id)
             .ok_or(Error::LeaseNotFound { lease_id })?;
 
+        if record.expired_pending_revoke {
+            return Err(Error::LeaseNotFound { lease_id });
+        }
+
         record.lease.attached_keys.push(key.to_vec());
         Ok(())
     }
 
     /// 将 Key 从 Lease 解绑
+    ///
+    /// F-27：已判定过期的 Lease 视为不存在。
     pub fn detach_key(&self, lease_id: LeaseID, key: &[u8]) -> Result<()> {
         let mut leases = self.leases.write();
         let record = leases
             .get_mut(&lease_id)
             .ok_or(Error::LeaseNotFound { lease_id })?;
 
+        if record.expired_pending_revoke {
+            return Err(Error::LeaseNotFound { lease_id });
+        }
+
         record.lease.attached_keys.retain(|k| k != key);
         Ok(())
     }
 
     /// 获取并清空 Lease 关联的所有 Key（用于 Revoke 时批量删除）
+    ///
+    /// F-27：已判定过期的 Lease 视为不存在（返回空列表）。
     pub fn take_attached_keys(&self, lease_id: LeaseID) -> Vec<Vec<u8>> {
         let mut leases = self.leases.write();
-        if let Some(record) = leases.get_mut(&lease_id) {
-            std::mem::take(&mut record.lease.attached_keys)
-        } else {
-            Vec::new()
+        match leases.get_mut(&lease_id) {
+            Some(record) if !record.expired_pending_revoke => {
+                std::mem::take(&mut record.lease.attached_keys)
+            }
+            _ => Vec::new(),
         }
     }
 
     /// 获取 Lease 信息
+    ///
+    /// F-27：已判定过期的 Lease 返回 `None`（对调用方即不存在）。
     pub fn get_lease(&self, lease_id: LeaseID) -> Option<Lease> {
-        self.leases.read().get(&lease_id).map(|r| r.lease.clone())
+        self.leases
+            .read()
+            .get(&lease_id)
+            .filter(|r| !r.expired_pending_revoke)
+            .map(|r| r.lease.clone())
     }
 
     /// 获取活跃 Lease 数量
+    ///
+    /// F-27：**不含**已判定过期、revoke 尚待确认的记录（与旧行为一致）。
     pub fn active_lease_count(&self) -> usize {
-        self.leases.read().len()
+        self.leases
+            .read()
+            .values()
+            .filter(|r| !r.expired_pending_revoke)
+            .count()
     }
 
     /// 从持久化 Lease 记录重建内存视图（B.4.4 failover）
@@ -423,6 +502,9 @@ impl LeaseManager {
                         attached_keys: Vec::new(),
                     },
                     timer_id,
+                    // F-27：rebuild 后由 check_expired() 重新判定（deadline 已过期者
+                    // 立即过期）⇒ revoke 未提交前记录保留、可重试。
+                    expired_pending_revoke: false,
                 },
             );
             rebuilt += 1;
@@ -540,6 +622,139 @@ mod tests {
             assert_eq!(manager.active_lease_count(), 1);
             // 该 ID 仍然只有一个记录（后续 revoke 只影响这一个）
             assert!(manager.get_lease(LEASE_ID).is_some());
+        });
+    }
+
+    /// **F-27 回归**：过期记录在 revoke **确认提交前必须保留**，且下一轮
+    /// `check_expired()` 必须**继续上报**（= 重试）；`finish_expired()` 之后才消失。
+    ///
+    /// 旧实现：`check_expired()` 返回前就 `retain(.., false)` 把过期 Lease 移出本地管理器
+    /// ⇒ 随后的 `client_write` 失败只 `warn!`，记录已丢 ⇒ revoke **永久丢失**。
+    /// （`jepsen/docs/coord-findings.md` F-27。）
+    #[test]
+    fn test_f27_expired_lease_retained_until_revoke_confirmed() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let handle = TimerWheel::start();
+            let manager = LeaseManager::new(handle);
+
+            let lease_id = manager.grant(60).await.unwrap();
+            manager.attach_key(lease_id, b"/k1").unwrap();
+
+            // 把 deadline 拨到过去（子模块可访问父模块私有字段），免去真实等待
+            {
+                let mut leases = manager.leases.write();
+                let rec = leases.get_mut(&lease_id).expect("record exists");
+                rec.lease.deadline = tokio::time::Instant::now() - Duration::from_secs(1);
+            }
+
+            // 第一轮：判定过期并上报，但**记录仍在**（revoke 尚未确认提交）
+            let first = manager.check_expired();
+            assert_eq!(first.len(), 1, "expiry must be reported exactly once");
+            match &first[0] {
+                LeaseAction::Expired {
+                    lease_id: id,
+                    attached_keys,
+                } => {
+                    assert_eq!(*id, lease_id);
+                    assert_eq!(attached_keys, &[b"/k1".to_vec()]);
+                }
+            }
+            assert!(
+                manager.leases.read().contains_key(&lease_id),
+                "F-27: the record must be retained while the revoke is unconfirmed"
+            );
+
+            // 对外语义不变：过期即"不存在"
+            assert_eq!(manager.active_lease_count(), 0);
+            assert!(manager.get_lease(lease_id).is_none());
+            assert!(manager.take_attached_keys(lease_id).is_empty());
+
+            // 第二轮（= 提交仍然失败的下一个 tick）：必须继续上报，否则 revoke 会丢
+            let second = manager.check_expired();
+            assert_eq!(
+                second.len(),
+                1,
+                "F-27: an unconfirmed expiry must be retried on the next tick"
+            );
+
+            // revoke 确认提交 ⇒ 移除，且不再上报
+            assert!(manager.finish_expired(lease_id).await);
+            assert!(!manager.leases.read().contains_key(&lease_id));
+            assert!(manager.check_expired().is_empty());
+            // 幂等
+            assert!(!manager.finish_expired(lease_id).await);
+        });
+    }
+
+    /// **F-27 fail-closed**：已判定过期（revoke 待提交）的 Lease 不得被 KeepAlive 复活，
+    /// 也不得再挂新 Key、不得被显式 Revoke 二次结算指标。
+    ///
+    /// 否则"客户端以为续期成功"与"服务端正在删除绑定 Key"会同时成立 —— 那是把
+    /// 「过期」换成了「假活」，比丢 revoke 更糟。
+    #[test]
+    fn test_f27_expired_pending_lease_is_absent_for_callers() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let handle = TimerWheel::start();
+            let manager = LeaseManager::new(handle);
+
+            let lease_id = manager.grant(60).await.unwrap();
+            {
+                let mut leases = manager.leases.write();
+                let rec = leases.get_mut(&lease_id).unwrap();
+                rec.lease.deadline = tokio::time::Instant::now() - Duration::from_secs(1);
+            }
+            assert_eq!(manager.check_expired().len(), 1);
+
+            assert!(
+                manager.keep_alive(lease_id).await.is_err(),
+                "an expired (revoke-pending) lease must not be revived by KeepAlive"
+            );
+            assert!(
+                manager.attach_key(lease_id, b"/k2").is_err(),
+                "no new key may be attached to an expired (revoke-pending) lease"
+            );
+            assert!(manager.detach_key(lease_id, b"/k2").is_err());
+
+            // 显式 revoke 仍然可用（幂等收口），且不得把 active 再减一次
+            manager.revoke(lease_id).await.unwrap();
+            assert!(!manager.leases.read().contains_key(&lease_id));
+            assert!(!manager.finish_expired(lease_id).await);
+        });
+    }
+
+    /// **F-27 指标口径**：`active → expired` 的结算**只在跃迁时发生一次**；
+    /// 重试轮次不得重复递减 `lease_active_total`。
+    #[test]
+    fn test_f27_expiry_metrics_settled_once_across_retries() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let handle = TimerWheel::start();
+            let metrics = Arc::new(Metrics::default());
+            let manager = LeaseManager::new(handle).with_metrics(Arc::clone(&metrics));
+
+            let lease_id = manager.grant(60).await.unwrap();
+            assert_eq!(metrics.lease_counters(), (1, 0));
+            {
+                let mut leases = manager.leases.write();
+                let rec = leases.get_mut(&lease_id).unwrap();
+                rec.lease.deadline = tokio::time::Instant::now() - Duration::from_secs(1);
+            }
+
+            assert_eq!(manager.check_expired().len(), 1);
+            assert_eq!(metrics.lease_counters(), (0, 1));
+
+            // 重试轮次：仍然上报，但指标不动
+            assert_eq!(manager.check_expired().len(), 1);
+            assert_eq!(
+                metrics.lease_counters(),
+                (0, 1),
+                "retries must not decrement lease_active_total again"
+            );
+
+            manager.finish_expired(lease_id).await;
+            assert_eq!(manager.check_expired().len(), 0);
         });
     }
 

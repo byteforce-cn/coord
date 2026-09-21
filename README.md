@@ -14,7 +14,16 @@
 
 > **Agent-first architecture.** Applications never connect to the Coord Server cluster directly. Each machine runs a `coord-agent`; applications connect to it over localhost gRPC (`127.0.0.1:19527`). The agent proxies the core server primitives under the same contract and hosts all higher-level coordination services locally — caching reads, fanning out watches, and keeping local capabilities available even when the cluster link is temporarily lost.
 
-> **This project uses Deepseek V4 as an auxiliary development tool for learning and validation purposes, and is not intended for production use.**
+> **Development disclosure & commitment level.** This project uses Deepseek V4 as an
+> auxiliary development tool for learning and validation purposes. **The interface commitment
+> (L0) is usable**: the protocol contracts under [`apis/contracts/`](apis/contracts/README.md)
+> are frozen, versioned and validated by CI gates. **Production readiness is not claimed** —
+> the production surface and its acceptance gates live in
+> [`apis/contracts/WHITEPAPER.md`](apis/contracts/WHITEPAPER.md) §12 and
+> [`docs/production/production-readiness-plan-2026-09-21.md`](docs/production/production-readiness-plan-2026-09-21.md) §4.
+>
+> *(Adjudicated 2026-09-21: this replaces the former blanket "not intended for production use",
+> which was mutually exclusive with the contractual commitments below — see the plan's §8 U-01.)*
 
 ## Why Coord?
 
@@ -23,7 +32,7 @@ If you already know etcd, Consul or ZooKeeper, think of Coord as two layers:
 - **A consensus & storage substrate** — linearizable KV / Txn / Watch / Lease over Raft, similar in spirit to etcd, with auth, TLS/mTLS and encryption at rest.
 - **A per-machine agent layer** — one `coord-agent` per host exposes service discovery, configuration, distributed locking, ID generation, leader election, events, caching, MQ, workflow, scheduling, rate limiting, feature flags and PKI issuance as local gRPC services under a single contract. Business code talks to one endpoint with one SDK and never deals with cluster topology.
 
-The consistency core is exercised by an in-repo [Jepsen](https://github.com/jepsen-io/jepsen) suite, **whose artifacts are not yet committed** — see [Verification](#verification) for what that does and does not certify.
+The consistency core is exercised by an in-repo [Jepsen](https://github.com/jepsen-io/jepsen) suite, **whose run artifacts are committed** under [`docs/production/evidence/`](docs/production/evidence/README.md) — see [Verification](#verification) for what that does and does not certify.
 
 ## Architecture
 
@@ -75,12 +84,19 @@ Server ports `50051` / `50052` are reachable only by agents — the Server is ne
 - **Resilience & security:** `CircuitBreaker` · `RateLimiter` · `Transit` · `Pki`
 - **Extensibility:** every service above is hosted as a **builtin plugin** by the plugin manager — one registry owns each service's lifecycle, gRPC surface and health. `Plugin` (`coord.plugin.Plugin`) exposes that unified service/plugin inventory (with per-service health), and loads external wasm/JS plugins when `[plugins]` is enabled (off by default)
 
-> **Stability labels.** The services above are **not** equally mature. Per
-> [`apis/contracts/STATUS.md`](apis/contracts/STATUS.md): `Registry`, `Lock`,
-> `LeaderElection` are `COMMITTED` (GA dates 2026-10-31 / 2026-11-30 not yet reached);
-> `Cache`, `Mq`, `Workflow`, `Scheduler` are **`EXPERIMENTAL` — not to be consumed as a
-> stable surface** (Workflow is documented there as an in-memory placeholder). Object
-> storage (`coord.storage`, also `EXPERIMENTAL`) is not exposed through the agent.
+> **Stability labels.** Per [`apis/contracts/STATUS.md`](apis/contracts/STATUS.md) — the single
+> source of truth, parsed by CI — **all these services are `COMMITTED`**, i.e. the 16
+> `coord.<domain>.v1` packages plus object storage (`coord.storage`), 17 ledger rows in total.
+> The `EXPERIMENTAL` ledger zone was **emptied** in `contracts/v1.2.0` (2026-09-19): the four
+> `coord.experimental.*` packages never had proto files or consumers, so no experimental
+> package is open in any form. Object storage (`coord.storage`, also `COMMITTED`) is a
+> Server-side data plane reached through the agent's storage proxy.
+>
+> **`COMMITTED` is an interface commitment, not a production-readiness claim.** The deadlines
+> (2026-10-31 / 2026-11-30 / 2026-12-31, plus 2027-03-31 for `Workflow` and `Scheduler`) are
+> interface-freeze deadlines; production readiness is a separate, stricter bar tracked as gates
+> P1–P9 in [`docs/production/production-readiness-plan-2026-09-21.md`](docs/production/production-readiness-plan-2026-09-21.md) §4.
+>
 > Treat this list as an inventory, not as a support matrix.
 
 Agent extras: core-proxy services (`coord.kv` / `coord.txn` / `coord.lease` / `coord.watch` / `coord.maintenance`) with the same contract as the Server, KV read caching, watch fan-out, and health checks + Prometheus metrics on `127.0.0.1:19528`.
@@ -194,7 +210,7 @@ coord/
 
 ## Verification
 
-- **Jepsen (in-repo)** — [`jepsen/`](jepsen/README.md) is a real Clojure + knossos project with `register` / `cas-register` / `multi-register` workloads under kill / pause / partition nemeses, plus a long-running soak profile documented in [`jepsen/README.md`](jepsen/README.md). **Run artifacts are committed**: [`docs/production/evidence/`](docs/production/evidence/README.md) holds 26 archived Jepsen/soak runs plus the Java integration run, each with a `MANIFEST.md` recording the commit, the exact command and whether the tree was dirty. Certification status of each finding is tracked per-finding in [`jepsen/docs/coord-findings.md`](jepsen/docs/coord-findings.md) — read the findings there rather than inferring a blanket linearizability guarantee.
+- **Jepsen (in-repo)** — [`jepsen/`](jepsen/README.md) is a real Clojure + knossos project with `register` / `cas-register` / `multi-register` workloads under kill / pause / partition nemeses, plus a long-running soak profile documented in [`jepsen/README.md`](jepsen/README.md). **Run artifacts are committed**: [`docs/production/evidence/`](docs/production/evidence/README.md) holds 28 archived Jepsen/soak runs (each with `MANIFEST.md` + `sha256sums.txt`) plus the Java integration run, each with a `MANIFEST.md` recording the commit, the exact command and whether the tree was dirty. Note that every archived manifest records a **dirty** worktree and the parameter confirmation is not fully signed, so these runs document behaviour on pre-commit trees and are **not acceptance-grade evidence** — see [`docs/production/production-readiness-plan-2026-09-21.md`](docs/production/production-readiness-plan-2026-09-21.md) §2.3. Certification status of each finding is tracked per-finding in [`jepsen/docs/coord-findings.md`](jepsen/docs/coord-findings.md) — read the findings there rather than inferring a blanket linearizability guarantee.
 - **Fast local check** — `scripts/jepsen-check.sh` runs **one** linearizability smoke test (`chaos_real_kill9_and_linearizability`) in ~2–3 minutes on a warm build; it is **not** a Jepsen run and does **not** reproduce the workload × nemesis matrix.
 - **CI** — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the authoritative list: fmt + clippy (`-D warnings`), a panic gate on non-test code, workspace tests, protobuf contract checks (buf lint + format + breaking), `cargo audit` + `cargo deny`, real-process chaos runs, a cross-language error-code contract check, and Java SDK + Java example integration suites.
 - **Evidence** — reproducible run artifacts live in [`docs/production/evidence/`](docs/production/evidence/README.md) (`bash scripts/collect-evidence.sh <scenario>`). Each `MANIFEST.md` states the commit, the exact command and whether the tree was dirty; treat artifacts whose `commit`/`command` fields are not reproducible as unverified.

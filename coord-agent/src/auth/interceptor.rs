@@ -20,8 +20,7 @@ use tonic::Status;
 use tower::{Layer, Service};
 
 use coord_core::auth::cct::{decode_cct_any, is_expired, CctHeader, CctPayload, CctToken};
-use coord_core::auth::trie::ScopeTrie;
-use coord_core::grpc_auth::{ScopeAccess, MAX_SCOPE_BODY_BYTES};
+use coord_core::grpc_auth::{self, DeferredScopeGrants, ScopeAccess, MAX_SCOPE_BODY_BYTES};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -346,6 +345,48 @@ impl AuthInterceptor {
         )
     }
 
+    /// **延后判定** RPC（客户端流式：资源键在流 body 里）的授权快照。
+    ///
+    /// 语义见 [`coord_core::grpc_auth::DeferredScopeGrants`]：`None` = 本层不施加
+    /// scope 约束（三种既有语义：鉴权关闭 / root 旁路 / 该 RPC 不在延后清单或
+    /// 无能力要求）；`Some` = handler 必须用首帧调
+    /// [`coord_core::grpc_auth::check_deferred_scope`] 判定。
+    ///
+    /// 为什么不是「鉴权层顺手判一下」：Watch 的首帧在**流** body 里，鉴权层要拿到它
+    /// 就得缓存整个 body，而流的 body 在客户端 half-close 前不结束 ⇒ 请求永久挂起
+    /// （第四轮 P0）。所以判定只能延后，而延后的前提是**有人真的判** ——
+    /// 本函数 + handler 里的 `check_deferred_scope` 就是那一个人。
+    pub fn deferred_scope_grants(
+        &self,
+        rpc_method: &str,
+        roles: &[String],
+    ) -> Option<DeferredScopeGrants> {
+        if !self.enabled || !grpc_auth::is_deferred_scope_rpc(rpc_method) {
+            return None;
+        }
+        // root = 全能力旁路（与 `validate_request_accesses` 第 5b 步同口径）。
+        if coord_core::auth::is_root(roles) {
+            return None;
+        }
+        match self.capability_table.lookup(rpc_method) {
+            CapabilityLookup::Required(entry) => {
+                let grant_scopes = self
+                    .role_cache
+                    .scopes_for_capability(roles, &entry.capability_id);
+                if grant_scopes.is_empty() {
+                    // 未授予该能力：第 6 步已经拒绝，这里不产生快照（快照缺失
+                    // 恒等于"不施加约束"，绝不能让它承担"未授权"的语义）。
+                    return None;
+                }
+                Some(DeferredScopeGrants {
+                    capability_id: entry.capability_id,
+                    grant_scopes,
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// 挂载 Ed25519 验证公钥（server 持私钥签发，agent 仅存公钥）。
     pub fn with_verifying_key(mut self, verifying_key: Vec<u8>) -> Self {
         self.verifying_key = Some(verifying_key);
@@ -471,7 +512,14 @@ impl AuthInterceptor {
         // scope 提取器（唯一注册点在一个测试里）→ `resource_key` 恒为 None
         // → scope 检查从不执行。现在改为：无法提取资源键 + 授权带非空 scope
         // → 拒绝（与服务端 `authorize(.., None)` 完全同口径）。
-        if !scope_allows(&grant_scopes, accesses) {
+        //
+        // W1-6 的例外：**客户端流式** RPC（Watch）的资源键在流 body 里，本层看不到，
+        // 判定被延后到 handler（见 `grpc_auth::is_deferred_scope_rpc`）。这里跳过**不是**
+        // 放宽 —— 前提是 `call` 已经把授权快照放进请求扩展，handler 必须用它判定；
+        // 两条路径共用 `grpc_auth::scope_allows` 这一个实现。
+        if !grpc_auth::is_deferred_scope_rpc(rpc_method)
+            && !grpc_auth::scope_allows(&grant_scopes, accesses)
+        {
             return AuthResult::Deny(format!(
                 "scope restriction: capability '{capability_id}' not granted for the \
                  requested resource(s); roles {:?}, accesses {:?} (fail-closed)",
@@ -481,38 +529,6 @@ impl AuthInterceptor {
 
         AuthResult::Allow(cct)
     }
-}
-
-/// scope 判定（fail-closed）：本次请求触碰的**全部**访问都必须被授权覆盖。
-///
-/// - `accesses` 为空（未能提取资源键）→ 只有**无约束**授权（存在空 scope）放行；
-///   存在非空 scope 限制时拒绝。
-/// - 否则逐条判定：单键走 `ScopeTrie::matches`；区间走
-///   [`coord_core::auth::trie::scope_covers_interval`]（要求**整体包含**，
-///   与服务端 A1 的区间语义一致）。
-fn scope_allows(grant_scopes: &[String], accesses: &[ScopeAccess]) -> bool {
-    if accesses.is_empty() {
-        return grant_scopes.iter().any(|s| s.is_empty());
-    }
-    accesses.iter().all(|access| {
-        grant_scopes.iter().any(|scope| {
-            if scope.is_empty() {
-                return true; // 无约束授权覆盖一切
-            }
-            if access.range_end.is_empty() {
-                match std::str::from_utf8(&access.key) {
-                    Ok(key) => {
-                        let mut trie = ScopeTrie::new();
-                        trie.insert(scope).is_ok() && trie.matches(key)
-                    }
-                    // 非 UTF-8 key 无法与字符串 scope 比对 → 拒绝（fail-closed）
-                    Err(_) => false,
-                }
-            } else {
-                coord_core::auth::trie::scope_covers_interval(scope, &access.key, &access.range_end)
-            }
-        })
-    })
 }
 
 // ──── Tower Layer / Service（接入 agent gRPC 生产路由）────
@@ -640,6 +656,15 @@ where
                 // Phase 2.1：把身份发布到请求扩展，供内层（插件网关层）观察。
                 // 鉴权关闭时 validate_request 返回占位 CCT（roles 为空）。
                 let mut req = req;
+                // W1-6：延后判定 RPC（客户端流式）的授权快照。**必须在放行时插入** ——
+                // 它是 handler 唯一的判定依据；缺失即等于"本层不施加 scope 约束"，
+                // 所以只有明确无约束（鉴权关 / root）时才可以不插。
+                if let Some(grants) = self
+                    .interceptor
+                    .deferred_scope_grants(&rpc_method, &cct.payload.roles)
+                {
+                    req.extensions_mut().insert(grants);
+                }
                 req.extensions_mut().insert(crate::plugin::GatewayIdentity {
                     subject: cct.payload.sub.clone(),
                     roles: cct.payload.roles.clone(),
@@ -1172,28 +1197,31 @@ mod tests {
         }
     }
 
-    /// **Watch 的 scope 真实语义**（第四轮 P0 修复之后），必须机械验证而不是写在文档里。
+    /// **Watch 的 scope 真实语义**（W1-6 之后）：判定的**位置**变了，判定**没有消失**。
     ///
-    /// agent 层看不到 Watch 的 prefix —— 它在**流式 body** 里，而提取器只读 header
-    /// （这正是第四轮试图缓存 body 结果把 watch 弄死的那个位置）。因此 Watch 的 scope
-    /// 判定只能以"未提取到任何访问"（`accesses = []`）进入，而 `scope_allows` 对空
-    /// accesses 是 **fail-closed** 的：只有存在**无约束**（空 scope）授权才放行。
+    /// agent 鉴权层看不到 Watch 的 prefix —— 它在**流式 body** 里，而提取器需要 body
+    /// （缓存流 body = 请求永久挂起，这是第四轮 P0 的形态）。因此 Watch 的 scope 判定
+    /// **被延后到 handler**：鉴权层放行时把授权快照（[`DeferredScopeGrants`]）放进请求
+    /// 扩展，由 `WatchProxy::watch` 用首帧解码出的区间调
+    /// [`coord_core::grpc_auth::check_deferred_scope`] 判定（两条路径共用同一个
+    /// `scope_allows`）。
     ///
-    /// 于是真实结论是：
-    /// * 带非空 scope 限制的角色**不能**借 Watch 越权订阅 —— 它被**直接拒绝**，
-    ///   不存在"预检查缺失 = 可以绕过"；
-    /// * 实际代价是**功能受限**：这类角色用不了 Watch。要放行合法订阅，必须到 handler
-    ///   侧解码首帧 `WatchCreateRequest`（prefix 在那里才可见）再判 scope。
+    /// 本测试把四件事同时钉住（任何一条单独看都可能被骗过）：
     ///
-    /// 本测试把这两条钉住：它既防止"scope 被悄悄放宽成放行"，也防止有人误以为
-    /// 这里存在漏洞而去加一个会再次挂起 watch 的 body 缓存。
+    /// 1. 有约束的角色**不再被整块拒绝**（这正是 W1-6 要修的功能损失）；
+    /// 2. 但**必须**拿到携带该约束的快照 —— 否则就是"放行了却没人判"（fail-open）；
+    /// 3. 越界前缀仍然被拒（用快照 + 首帧区间跑一遍判定）；
+    /// 4. 无约束授权 / root / 鉴权关闭三种情形**不得**产生快照
+    ///    （快照缺失的语义是"本层不施加约束"，不能被拿去表达别的意思）。
     #[test]
-    fn watch_scope_is_fail_closed_not_bypassed() {
+    fn watch_scope_is_deferred_to_handler_not_bypassed() {
         use super::super::role_cache::{CapabilityGrant, RoleEntry};
 
         let watch_rpc = "/coord.watch.Watch/Watch";
+        let scoped_prefix = b"/app/counter/";
+        let out_of_scope_prefix = b"/other/";
 
-        // ① 带非空 scope 的 watch 能力 → **拒绝**（不是放行）
+        // ① 带非空 scope 的 data:watch:subscribe
         let role_cache = Arc::new(RoleCache::new());
         role_cache.sync_full(vec![RoleEntry {
             name: "scoped-watcher".to_string(),
@@ -1206,15 +1234,37 @@ mod tests {
         let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300);
         let cct = make_test_cct(vec!["scoped-watcher"], HashMap::new());
         let auth_header = format!("Bearer {cct}");
+        let roles = vec!["scoped-watcher".to_string()];
 
-        let result = interceptor.validate_request_accesses(watch_rpc, Some(&auth_header), &[]);
+        // 1. 鉴权层放行（判定延后，而不是"直接拒绝整个 Watch"）
         assert!(
-            matches!(result, AuthResult::Deny(_)),
-            "带 scope 限制的角色订阅 Watch 必须 fail-closed 拒绝；\
-             若这里是 Allow，那就是**越权订阅**（可读 scope 之外的数据）"
+            matches!(
+                interceptor.validate_request_accesses(watch_rpc, Some(&auth_header), &[]),
+                AuthResult::Allow(_)
+            ),
+            "有约束角色的 Watch 应被**放行并延后判定**（此前的整块拒绝是功能损失）"
         );
 
-        // ② 无约束（空 scope）授权 → 放行（这是 watch 生产可用的前提，别误伤）
+        // 2. 放行的同时必须交出授权快照 —— 否则没有任何人会做 scope 判定
+        let grants = interceptor
+            .deferred_scope_grants(watch_rpc, &roles)
+            .expect("有约束的 Watch 必须产生授权快照，否则 scope 判定形同不存在");
+        assert_eq!(grants.capability_id, "data:watch:subscribe");
+        assert_eq!(grants.grant_scopes, vec!["/app/counter/".to_string()]);
+
+        // 3. 用快照 + 首帧区间跑真实判定：越界拒绝、范围内放行
+        let in_scope = coord_core::grpc_auth::watch_create_access(scoped_prefix, b"");
+        assert!(
+            coord_core::grpc_auth::check_deferred_scope(Some(&grants), &[in_scope]).is_ok(),
+            "范围**内**的订阅必须可用（否则 W1-6 没有修任何东西）"
+        );
+        let outside = coord_core::grpc_auth::watch_create_access(out_of_scope_prefix, b"");
+        assert!(
+            coord_core::grpc_auth::check_deferred_scope(Some(&grants), &[outside]).is_err(),
+            "范围**外**的订阅必须被拒绝（否则就是把越权订阅放开了）"
+        );
+
+        // ② 无约束（空 scope）授权 → 仍然放行，且快照为"无约束"而不是"缺失"
         let role_cache = Arc::new(RoleCache::new());
         role_cache.sync_full(vec![RoleEntry {
             name: "unrestricted-watcher".to_string(),
@@ -1227,11 +1277,60 @@ mod tests {
         let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300);
         let cct = make_test_cct(vec!["unrestricted-watcher"], HashMap::new());
         let auth_header = format!("Bearer {cct}");
-
-        let result = interceptor.validate_request_accesses(watch_rpc, Some(&auth_header), &[]);
+        let roles = vec!["unrestricted-watcher".to_string()];
+        assert!(matches!(
+            interceptor.validate_request_accesses(watch_rpc, Some(&auth_header), &[]),
+            AuthResult::Allow(_)
+        ));
+        let grants = interceptor
+            .deferred_scope_grants(watch_rpc, &roles)
+            .expect("无约束授权同样需要快照（handler 靠它区分\"无约束\"与\"未经鉴权层\"）");
+        assert_eq!(grants.grant_scopes, vec![String::new()]);
+        let outside = coord_core::grpc_auth::watch_create_access(out_of_scope_prefix, b"");
         assert!(
-            matches!(result, AuthResult::Allow(_)),
-            "无 scope 约束的 data:watch:subscribe 必须能订阅（否则 watch 对普通角色不可用）"
+            coord_core::grpc_auth::check_deferred_scope(Some(&grants), &[outside]).is_ok(),
+            "无约束授权必须能订阅任意前缀（watch 对普通角色的可用性前提）"
+        );
+
+        // ③ root：全能力旁路 ⇒ 不产生快照（快照缺失 = 不施加约束）
+        let role_cache = Arc::new(RoleCache::new());
+        role_cache.sync_full(vec![RoleEntry {
+            name: "root".to_string(),
+            grants: vec![],
+            high_sensitive: false,
+        }]);
+        let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300);
+        assert_eq!(
+            interceptor.deferred_scope_grants(watch_rpc, &["root".to_string()]),
+            None,
+            "root 是全能力旁路（与第 5b 步同口径），不得被 scope 约束"
+        );
+
+        // ④ 鉴权关闭：与 `validate_request_accesses` 的早退同口径 ⇒ 不产生快照
+        let mut interceptor =
+            AuthInterceptor::new(TEST_KEY.to_vec(), Arc::new(RoleCache::new()), 300);
+        interceptor.set_enabled(false);
+        assert_eq!(
+            interceptor.deferred_scope_grants(watch_rpc, &["anything".to_string()]),
+            None,
+            "鉴权关闭时不得施加 scope 约束（与\"关鉴权即放行\"同口径）"
+        );
+
+        // ⑤ 非延后 RPC 绝不产生快照（延后集合的边界）
+        let role_cache = Arc::new(RoleCache::new());
+        role_cache.sync_full(vec![RoleEntry {
+            name: "scoped-watcher".to_string(),
+            grants: vec![CapabilityGrant {
+                capability_id: "data:watch:subscribe".to_string(),
+                scope: "/app/counter/".to_string(),
+            }],
+            high_sensitive: false,
+        }]);
+        let interceptor = AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300);
+        assert_eq!(
+            interceptor.deferred_scope_grants("/coord.kv.KV/Put", &roles),
+            None,
+            "一元 RPC 的 scope 判定在鉴权层完成，不得产生延后快照"
         );
     }
 
@@ -1399,6 +1498,160 @@ mod tests {
             grpc_status.as_deref(),
             Some("16"),
             "只读角色调用签发必须拒绝（grpc-status=UNAUTHENTICATED(16)）"
+        );
+    }
+
+    // ──── 延后判定（W1-6）的 tower 接线测试 ────
+
+    /// 记录被透传请求里携带的授权快照（断言鉴权层真的把判定材料交给了 handler）。
+    #[derive(Clone)]
+    struct Capturing {
+        seen: Arc<parking_lot::Mutex<Vec<Option<DeferredScopeGrants>>>>,
+    }
+
+    impl Service<http::Request<tonic::body::Body>> for Capturing {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = tonic::Status;
+        type Future = std::future::Ready<Result<http::Response<tonic::body::Body>, tonic::Status>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: http::Request<tonic::body::Body>) -> Self::Future {
+            self.seen
+                .lock()
+                .push(req.extensions().get::<DeferredScopeGrants>().cloned());
+            std::future::ready(Ok(http::Response::new(tonic::body::Body::empty())))
+        }
+    }
+
+    fn watch_role_cache(scope: &str) -> Arc<RoleCache> {
+        let role_cache = Arc::new(RoleCache::new());
+        role_cache.sync_full(vec![super::super::role_cache::RoleEntry {
+            name: "watcher".to_string(),
+            grants: vec![super::super::role_cache::CapabilityGrant {
+                capability_id: "data:watch:subscribe".to_string(),
+                scope: scope.to_string(),
+            }],
+            high_sensitive: false,
+        }]);
+        role_cache
+    }
+
+    fn make_capturing_service(
+        interceptor: AuthInterceptor,
+        seen: Arc<parking_lot::Mutex<Vec<Option<DeferredScopeGrants>>>>,
+    ) -> AuthService<Capturing> {
+        AuthService {
+            inner: Capturing { seen },
+            interceptor: Arc::new(interceptor),
+        }
+    }
+
+    /// **W1-6 的核心接线**：有约束角色的 Watch 请求被放行，且请求扩展里带着它的授权快照。
+    ///
+    /// 这一条是"延期判定"能否成立的唯一证据 —— 只测 `deferred_scope_grants()` 只证明了
+    /// "快照算得对"，不证明"快照真的到了 handler 手里"。中间少一行 `extensions_mut()
+    /// .insert(...)` 就会变成 fail-open（放行了，但没人判），而那种缺陷在只看单测
+    /// 代码时是看不出来的。
+    #[tokio::test]
+    async fn test_auth_service_hands_watch_grant_snapshot_to_handler() {
+        let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let mut svc = make_capturing_service(
+            AuthInterceptor::new(TEST_KEY.to_vec(), watch_role_cache("/app/counter/"), 300),
+            Arc::clone(&seen),
+        );
+
+        let cct = make_test_cct(vec!["watcher"], HashMap::new());
+        let resp = svc
+            .call(make_http_request(
+                "/coord.watch.Watch/Watch",
+                Some(&format!("Bearer {cct}")),
+            ))
+            .await
+            .expect("service 不应报传输错误");
+
+        assert_eq!(
+            resp.status(),
+            http::StatusCode::OK,
+            "有约束角色的 Watch 不得再被整块拒绝（W1-6）"
+        );
+        let captured = seen.lock().clone();
+        assert_eq!(captured.len(), 1, "inner 应恰好收到一次请求");
+        assert_eq!(
+            captured[0],
+            Some(DeferredScopeGrants {
+                capability_id: "data:watch:subscribe".to_string(),
+                grant_scopes: vec!["/app/counter/".to_string()],
+            }),
+            "请求必须带着授权快照到达 handler；缺失即等于\"放行了却没有人判 scope\""
+        );
+    }
+
+    /// 一元 RPC 不产生快照：它们的 scope 判定在鉴权层完成（body 提取 + 立即判定），
+    /// 越界请求必须在**到达 handler 之前**就被拒。
+    #[tokio::test]
+    async fn test_auth_service_does_not_defer_unary_scope_rpcs() {
+        let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let role_cache = Arc::new(RoleCache::new());
+        role_cache.sync_full(vec![super::super::role_cache::RoleEntry {
+            name: "kv-writer".to_string(),
+            grants: vec![super::super::role_cache::CapabilityGrant {
+                capability_id: "data:kv:write".to_string(),
+                scope: "/app/counter/".to_string(),
+            }],
+            high_sensitive: false,
+        }]);
+        let mut svc = make_capturing_service(
+            AuthInterceptor::new(TEST_KEY.to_vec(), role_cache, 300),
+            Arc::clone(&seen),
+        );
+
+        let cct = make_test_cct(vec!["kv-writer"], HashMap::new());
+        // 空 body ⇒ PutRequest 解码为 key="" ⇒ 与 scope "/app/counter/" 不符 ⇒ 拒绝
+        let resp = svc
+            .call(make_http_request(
+                "/coord.kv.KV/Put",
+                Some(&format!("Bearer {cct}")),
+            ))
+            .await
+            .expect("service 不应报传输错误");
+
+        let grpc_status = resp
+            .headers()
+            .get("grpc-status")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        assert_eq!(
+            grpc_status.as_deref(),
+            Some("16"),
+            "一元 RPC 的 scope 越界必须在鉴权层就被拒（不得延后、不得透传）"
+        );
+        assert!(
+            seen.lock().is_empty(),
+            "被拒的请求不得到达 inner（更不得携带快照）"
+        );
+    }
+
+    /// 鉴权关闭时 Watch 照常透传且**不带**快照（"关鉴权即放行"口径不变）。
+    #[tokio::test]
+    async fn test_auth_service_does_not_defer_when_auth_disabled() {
+        let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let mut interceptor =
+            AuthInterceptor::new(TEST_KEY.to_vec(), watch_role_cache("/app/counter/"), 300);
+        interceptor.set_enabled(false);
+        let mut svc = make_capturing_service(interceptor, Arc::clone(&seen));
+
+        let resp = svc
+            .call(make_http_request("/coord.watch.Watch/Watch", None))
+            .await
+            .expect("service 不应报传输错误");
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        assert_eq!(
+            seen.lock().clone(),
+            vec![None],
+            "鉴权关闭 ⇒ 不施加 scope 约束（无快照），且请求照常透传"
         );
     }
 

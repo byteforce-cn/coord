@@ -21,9 +21,15 @@ Coord 包含以下安全机制：
 
 ## 支持的版本
 
-| 版本 | 安全更新 |
-|:---|:---|
-| 0.1.x | ✅ 当前开发版本 |
+| 版本 | 状态 | 安全更新 |
+|:---|:---|:---|
+| 0.2.x | 当前版本（`Cargo.toml` workspace `version = "0.2.0"`） | ✅ |
+| 0.1.x | 已结束支持（请升级到 0.2.x） | ❌ |
+
+> 口径：本表必须与 `Cargo.toml` 的 `workspace.package.version` 一致
+> （W4-6；此前本表只列 `0.1.x`，而代码已是 0.2.0）。
+> 兼容性与承诺分级见 `apis/contracts/WHITEPAPER.md` 与
+> `docs/production/production-readiness-plan-2026-09-21.md` §4.3。
 
 ## 依赖安全
 

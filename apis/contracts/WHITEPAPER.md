@@ -22,9 +22,11 @@
 > **原语定位**：KV/Txn/Lease/Watch 是平台实现底座，保留稳定承诺供 SDK 与数据面对齐，
 > **不构成对业务消费者的编排建议**——业务方不需要也不应该用原语自行拼装协调逻辑。
 >
-> **重要声明**：本白皮书是协议承诺，不是生产就绪声明。生产就绪验收以
-> `docs/production-readiness-remediation-2026-08-27.md` §6 的 9 道验收门为准
-> （当前未全部通过，见 §12 已知限制）。
+> **重要声明**：本白皮书是协议承诺，不是生产就绪声明。生产就绪的验收判据以
+> [`docs/production/production-readiness-plan-2026-09-21.md`](../production/production-readiness-plan-2026-09-21.md)
+> §4 的 9 道生产门（P-Gate 1–9）为准（当前未全部通过，见 §12 已知限制）。
+> 该文件取代了此前引用的 `docs/production-readiness-remediation-2026-08-27.md`
+> （该文件在磁盘与 git 历史中均不存在）。
 
 ---
 
@@ -305,8 +307,9 @@ MAJOR：破坏性变更（非必要不使用；须提前 ≥ 3 个月发布废�
 
 - **禁止解析错误消息文本**做任何分支判断。消息文本是给人看的，可随时调整
   （不视为 Breaking）。
-- **已知债**：当前实现存在 28 处内部错误串直出（整改项 R5，
-  `production-readiness-remediation-2026-08-27.md` P1-01）。这正是"只依赖 Status Code"
+- **已知债**：当前实现存在 28 处内部错误串直出（整改项 R5；在
+  [`docs/production/production-readiness-plan-2026-09-21.md`](../production/production-readiness-plan-2026-09-21.md)
+  §4 的 P-Gate P1 下跟踪）。这正是"只依赖 Status Code"
   纪律必须强制执行的原因——R5 整改完成后消息文本将进一步收敛。
 - 响应消息中遗留的错误文本字段（如 `LeaseGrantResponse.error`）同样禁止解析。
 

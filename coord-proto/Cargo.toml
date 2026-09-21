@@ -12,3 +12,8 @@ serde = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = "0.14.6"
+
+[dev-dependencies]
+# W1-7 枚举 wire 冻结卡口（`tests/enum_wire_freeze.rs`）需要反解
+# `FILE_DESCRIPTOR_SET` 以枚举全部枚举值 —— 与 coord-core 用同一版本。
+prost-types = "0.14.4"

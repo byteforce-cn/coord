@@ -113,6 +113,9 @@ pub struct ServiceConfig {
     pub event_notification: bool,
 
     /// 数据面缓存（本地存储引擎）
+    ///
+    /// **默认关闭**（2026-09-21 裁定，见 `Default for ServiceConfig` 注释）：
+    /// 跨节点提交原子性仍是「显式声明的边界」（B-07），故不默认对外。
     #[serde(default)]
     pub cache: bool,
 
@@ -121,6 +124,9 @@ pub struct ServiceConfig {
     pub mq: bool,
 
     /// Serverless Workflow 流程引擎
+    ///
+    /// **默认关闭**（2026-09-21 裁定）：持久化/补偿语义的端到端验收未闭合，
+    /// 故不默认开启未整改面（G9）。
     #[serde(default)]
     pub workflow: bool,
 
@@ -158,6 +164,16 @@ pub struct ServiceConfig {
 }
 
 impl Default for ServiceConfig {
+    /// 默认开关口径（2026-09-21 裁定，`production-readiness-plan-2026-09-21.md` §8 U-03 / W0-5）：
+    ///
+    /// **默认关，显式启用即可用**（承诺面与未整改面一致）——不得"默认开启未整改面"（G9）。
+    /// 因此 `cache` / `workflow` 由 `true` 改为 `false`：两者的整改项未闭合
+    /// （cache 跨节点提交非原子 = 已声明边界 B-07；workflow 持久化 + 补偿语义尚无端到端验收）。
+    /// `transit` 保持 `true` —— 其整改项（DEK 持久化）已在 2026-09-19 闭合，取"启用即可用"。
+    ///
+    /// 与 TOML 路径的一致性：各字段为 `#[serde(default)]`（缺省 = `bool::default()` = `false`），
+    /// 即配置文件未列出的服务本就是关的；本次改动让 `ServiceConfig::default()`（代码默认，
+    /// 如 `dev` 模式与不带 `--agent-config` 启动）与之一致，不再有"只写代码就默认开着"的口子。
     fn default() -> Self {
         Self {
             registry: true,
@@ -168,9 +184,9 @@ impl Default for ServiceConfig {
             idgen_node_id: None,
             leader_election: false,
             event_notification: false,
-            cache: true,
+            cache: false,
             mq: false,
-            workflow: true,
+            workflow: false,
             policy: true,
             scheduler: false,
             circuit_breaker: false,
@@ -240,30 +256,32 @@ mod tests {
             config.config_center,
             "config_center should be enabled by default"
         );
-        // 默认启用 lock / transit / pki / workflow
+        // 默认启用 lock / transit / pki
         assert!(config.lock, "lock should be enabled by default (Phase A)");
         assert!(
             config.transit,
-            "transit should be enabled by default (Phase A)"
+            "transit should be enabled by default (Phase A; remediation closed 2026-09-19)"
         );
         assert!(config.pki, "pki should be enabled by default (Phase A)");
-        assert!(
-            config.workflow,
-            "workflow should be enabled by default (Phase A)"
-        );
         // IdGen 为数据面服务 — 默认启用（无 Server 时本地雪花降级）
         assert!(
             config.idgen,
             "idgen should be enabled by default (data-plane)"
         );
-        // 数据面服务 — 默认启用（无需 Server 连接）
-        assert!(
-            config.cache,
-            "cache should be enabled by default (data-plane)"
-        );
+        // policy 为数据面服务（RBAC 本地内存 + OPA bundle 走 KV）
         assert!(
             config.policy,
             "policy should be enabled by default (data-plane)"
+        );
+        // 2026-09-21 裁定（W0-5 / U-03）：未整改面**不得默认开启** ⇒
+        // cache / workflow 由默认 `true` 改为默认 `false`，显式启用即可用。
+        assert!(
+            !config.cache,
+            "cache must NOT be on by default: cross-node commit atomicity is a declared boundary (B-07)"
+        );
+        assert!(
+            !config.workflow,
+            "workflow must NOT be on by default: persistence/compensation e2e acceptance is open (G9)"
         );
         // 其他服务保持默认关闭
         assert!(!config.leader_election);
@@ -273,6 +291,32 @@ mod tests {
         assert!(!config.circuit_breaker);
         assert!(!config.rate_limiter);
         assert!(!config.feature_flags);
+    }
+
+    /// 逐字段 `#[serde(default)]` 的缺省与 `Default` impl 必须一致：
+    /// 否则「配置文件未列出」与「代码默认」两条路径会给出不同的服务集合。
+    #[test]
+    fn test_service_config_toml_missing_fields_match_code_defaults() {
+        let from_empty_toml: ServiceConfig = toml::from_str("idgen = true\n").unwrap();
+        let code_default = ServiceConfig::default();
+        assert_eq!(from_empty_toml.cache, code_default.cache);
+        assert_eq!(from_empty_toml.workflow, code_default.workflow);
+        assert_eq!(from_empty_toml.mq, code_default.mq);
+        assert_eq!(from_empty_toml.scheduler, code_default.scheduler);
+        assert_eq!(
+            from_empty_toml.leader_election,
+            code_default.leader_election
+        );
+        assert_eq!(
+            from_empty_toml.event_notification,
+            code_default.event_notification
+        );
+        assert_eq!(
+            from_empty_toml.circuit_breaker,
+            code_default.circuit_breaker
+        );
+        assert_eq!(from_empty_toml.rate_limiter, code_default.rate_limiter);
+        assert_eq!(from_empty_toml.feature_flags, code_default.feature_flags);
     }
 
     #[test]

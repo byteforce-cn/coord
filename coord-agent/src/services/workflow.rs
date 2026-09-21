@@ -1924,6 +1924,13 @@ pub mod phase4 {
                 .ok_or_else(|| WorkflowEngineError::Internal("runtime not initialized".to_string()))
         }
 
+        /// W5-4：工作流后台 worker 的存活快照（供 agent 层指标/告警拉取）。
+        ///
+        /// `None` = 运行时未初始化（此前不会启动任何后台任务 ⇒ 无故障可言）。
+        pub fn worker_liveness(&self) -> Option<coord_core::workflow::runtime::WorkerLiveness> {
+            self.runtime.as_ref().map(|rt| rt.worker_liveness())
+        }
+
         // ─── 定义管理 ───
         // (async API — callers use .await)
 

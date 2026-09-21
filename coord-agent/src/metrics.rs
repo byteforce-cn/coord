@@ -65,6 +65,12 @@ struct MetricsInner {
     pub plugin_traps: RwLock<BTreeMap<(String, String), u64>>,
     /// 插件加载/启动失败计数（键 = plugin）
     pub plugin_load_failures: RwLock<BTreeMap<String, u64>>,
+    /// W5-4：工作流后台 worker 的在飞数（`WorkerLiveness::live_oneshot`）
+    pub workflow_workers_live: AtomicI64,
+    /// W5-4：工作流后台 worker 未正常收尾的**累计**次数（单调 ⇒ counter 语义）
+    pub workflow_worker_faults: AtomicU64,
+    /// W5-4：已结束的**循环型** worker 数（>0 = 本该永不结束的循环死了）
+    pub workflow_loops_finished: AtomicI64,
 }
 
 impl AgentMetrics {
@@ -81,6 +87,9 @@ impl AgentMetrics {
                 plugin_invocations: RwLock::new(BTreeMap::new()),
                 plugin_traps: RwLock::new(BTreeMap::new()),
                 plugin_load_failures: RwLock::new(BTreeMap::new()),
+                workflow_workers_live: AtomicI64::new(0),
+                workflow_worker_faults: AtomicU64::new(0),
+                workflow_loops_finished: AtomicI64::new(0),
             }),
         }
     }
@@ -138,6 +147,27 @@ impl AgentMetrics {
     /// R-AGT-20：Watch 订阅 -1。
     pub fn dec_watch_subscribers(&self) {
         self.inner.watch_subscribers.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// W5-4：写入工作流后台 worker 的存活事实（由采样任务周期性调用）。
+    ///
+    /// 三个值语义不同，**不要**合成一个：
+    /// * `live` —— 在飞的一次性任务数（正常波动）；
+    /// * `faults_total` —— 未正常收尾的**累计**次数（单调，counter）；
+    /// * `finished_loops` —— 已结束的**循环型** worker 数（本该恒为 0，c>0 即缺陷）。
+    ///
+    /// 为什么要分：把"正常结束"也计进故障会让指标长期噪声化，最终没人看
+    /// （见 `coord_core::workflow::runtime::WorkerLiveness` 的讨论）。
+    pub fn set_workflow_worker_liveness(&self, live: i64, faults_total: u64, finished_loops: i64) {
+        self.inner
+            .workflow_workers_live
+            .store(live, Ordering::Relaxed);
+        self.inner
+            .workflow_worker_faults
+            .store(faults_total, Ordering::Relaxed);
+        self.inner
+            .workflow_loops_finished
+            .store(finished_loops, Ordering::Relaxed);
     }
 
     // ──── 插件指标（Phase 5 观测面）────
@@ -216,6 +246,34 @@ impl AgentMetrics {
         out.push_str("# HELP coord_agent_watch_subscribers Current watch subscriber count\n");
         out.push_str("# TYPE coord_agent_watch_subscribers gauge\n");
         out.push_str(&format!("coord_agent_watch_subscribers {}\n", subscribers));
+
+        // ──── W5-4：工作流后台 worker 存活（能力死亡必须可观测）────
+        out.push_str(
+            "# HELP coord_agent_workflow_workers_live In-flight workflow background tasks (drive)\n",
+        );
+        out.push_str("# TYPE coord_agent_workflow_workers_live gauge\n");
+        out.push_str(&format!(
+            "coord_agent_workflow_workers_live {}\n",
+            self.inner.workflow_workers_live.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP coord_agent_workflow_worker_faults_total Workflow background tasks that ended \
+             without completing (panic/abort); monotonic\n",
+        );
+        out.push_str("# TYPE coord_agent_workflow_worker_faults_total counter\n");
+        out.push_str(&format!(
+            "coord_agent_workflow_worker_faults_total {}\n",
+            self.inner.workflow_worker_faults.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP coord_agent_workflow_loops_finished Long-lived workflow loops that ended \
+             (should always be 0)\n",
+        );
+        out.push_str("# TYPE coord_agent_workflow_loops_finished gauge\n");
+        out.push_str(&format!(
+            "coord_agent_workflow_loops_finished {}\n",
+            self.inner.workflow_loops_finished.load(Ordering::Relaxed)
+        ));
 
         // ──── 插件指标（Phase 5）────
         let invocations = self.inner.plugin_invocations.read();
@@ -405,6 +463,38 @@ mod tests {
         assert!(text.contains("coord_agent_cache_misses_total 0"));
         assert!(text.contains("coord_agent_grpc_requests_total"));
         assert!(text.contains("coord_agent_watch_subscribers"));
+    }
+
+    /// W5-4：工作流后台 worker 的三个指标必须真的出现在抓取面上。
+    ///
+    /// 只测 `set_*` 的存储、不测渲染，是"指标存在但 Prometheus 看不到"的经典漏检
+    /// —— 而本条判据的全部意义就是"**能力死亡时有人看得见**"。
+    #[test]
+    fn test_workflow_worker_liveness_metrics_render() {
+        let m = AgentMetrics::new();
+        m.set_workflow_worker_liveness(3, 2, 1);
+        let text = m.render_prometheus_text();
+
+        assert!(
+            text.contains("# TYPE coord_agent_workflow_workers_live gauge"),
+            "在飞数必须是 gauge（正常波动，不是累计）：{text}"
+        );
+        assert!(text.contains("coord_agent_workflow_workers_live 3"));
+        assert!(
+            text.contains("# TYPE coord_agent_workflow_worker_faults_total counter"),
+            "未正常收尾的次数是**单调累计** ⇒ counter（用 increase() 做告警）：{text}"
+        );
+        assert!(text.contains("coord_agent_workflow_worker_faults_total 2"));
+        assert!(
+            text.contains("coord_agent_workflow_loops_finished 1"),
+            "循环型死亡必须是独立 gauge（与一次性任务口径不同）：{text}"
+        );
+
+        // 健康态：全部为 0，且 HELP/TYPE 仍在（Grafana 无数据时不断线）
+        let healthy = AgentMetrics::new().render_prometheus_text();
+        assert!(healthy.contains("coord_agent_workflow_worker_faults_total 0"));
+        assert!(healthy.contains("coord_agent_workflow_loops_finished 0"));
+        assert!(healthy.contains("# TYPE coord_agent_workflow_loops_finished gauge"));
     }
 
     #[test]

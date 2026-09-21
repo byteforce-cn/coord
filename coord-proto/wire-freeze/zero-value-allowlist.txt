@@ -1,0 +1,44 @@
+# 枚举零值口径白名单（W1-7 / C22）
+#
+# 规则（见 `tests/enum_wire_freeze.rs::zero_value_names_are_unspecified_or_justified`）：
+# proto3 的枚举零值是「未设置」的占位。若某个枚举的零值不是 `*_UNSPECIFIED` /
+# `*_UNKNOWN`，它就把「字段没写」与「字段取了这个真实值」合并成同一个 wire 表示 ——
+# 这必须在**这里**写明理由，否则测试变红。
+#
+# 为什么是白名单而不是「统一改名」：这些都是**已冻结的 wire 值**
+# （`apis/contracts/buf.yaml` 明确写着「重命名即 Breaking」）。统一改名会打断
+# 存量客户端，且对 grpc-java 是**静默**破坏（数值映射不变、编译不报错）。
+# 所以本文件的作用是：把「已知的零值歧义」变成清单 + 阻止**新增**歧义，
+# 而不去改已经上线的语义。
+#
+# 每条格式：<enum 全名>.<值名>=<理由（≥10 字符）>
+# 反向判据：条目不再是该枚举的零值 ⇒ 测试红（防止白名单退化成摆设）。
+
+# ── line端沿用 etcd 的既有取值 ──
+# etcd v3 的 auth 权限类型就是 READ=0/WRITE=1/READWRITE=2；coord 的 auth 面与它线端一致。
+# 零值歧义的实际后果：`Permission.type` 若被客户端漏写，服务端按 proto3 默认读到 READ
+# （即"给了读权限"）——这是**与 etcd 完全一致**的行为，改它等于让存量客户端语义漂移。
+coord.auth.PermissionType.READ=线端沿用 etcd AuthPermissionType 取值；漏写字段按 proto3 默认即 READ
+
+# etcd 的 capability 类型同样 READ=0/WRITE=1/ADMIN=2（coord.capability 与 etcd 对齐）。
+# 该字段只出现在**注册表响应/请求体**里（能力定义由服务端生成），漏写即 READ 的路径不存在于
+# 生产读写路径；但 wire 表示确实与"未设置"重叠，故登记。
+coord.capability.CapabilityType.READ=线端沿用 etcd capability 类型取值；注册表字段由服务端填充
+
+# ── 只在**响应**里出现的枚举：不存在"未设置"的入参语义 ──
+# `CompareResult` 是服务端对 CAS 比较结果的回答（响应字段），入参里不出现；
+# 服务端每次都会显式赋值，因此"未设置"不会真的出现在 wire 上。取值与 etcd 一致。
+coord.txn.Compare.CompareResult.EQUAL=仅出现在响应侧（服务端必赋值），沿用 etcd CompareResult
+
+# `Target.version`（比较目标）在 etcd 里就是 VERSION=0/VALUE=1/MOD=2；coord 与 it 对齐，
+# 且该字段是 TxnRequest 的必填语义字段（服务端把缺省解释为"按 version 比较"）。
+coord.txn.Compare.Target.VERSION=沿用 etcd CompareTarget；缺省按 VERSION 比较是线端既定语义
+
+# ── 已披露的零值歧义（C22 的核心条目）──
+# `WatchEvent.EventType.PUT = 0`：客户端的 `WatchEvent::default()` 与"一次真实写入"在 wire 上
+# 不可区分。第四轮 §C22 已把它记录为**已知歧义**；修法是新增
+# `EVENT_TYPE_UNSPECIFIED = 0` 并把 PUT 顺延为 1 —— 那是 Breaking（存量客户端会把
+# "PUT" 解成 "UNSPECIFIED"），必须走契约 Major 流程，不在 v1.x 内做。
+# 实际风险有限：客户端只在**解码服务端事件**时看到该枚举（服务端不接收它作为入参），
+# 而服务端从不下发"未设置"的事件。
+coord.watch.WatchEvent.EventType.PUT=已披露歧义（C22）；服务端只下发已赋值事件，改名/顺延为 Breaking

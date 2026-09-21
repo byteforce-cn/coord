@@ -1,0 +1,28 @@
+;; expect-valid-multi-consumer-replay —— **F-68 的守门员**：多消费者拓扑下，
+;; 「另一个消费者按自己的游标从 0 重放」是合法语义，不得判红。
+;;
+;; 背景（实测，2026-09-20）：`CONCURRENCY=1n`（每节点一个客户端）的 MQ run 报
+;; `:mq-redelivered-after-ack 461`，但同一 run `:poll-ack-failures 0`、
+;; `delivered 118 = acked 118`（系统侧无丢失、Ack 生效），且单客户端跑法该判据为 0。
+;; 根因在 checker 侧：它按 `[topic partition offset]` 记 Ack，**不带消费者身份**，
+;; 于是把「客户端 B 从未确认过 offset 0、按契约从 0 重放」误算成「A 的 Ack 没被记住」。
+;; 归档：`docs/production/evidence/20260920T133301Z-m5b-mq-multi-client-checker-artifact/`。
+;;
+;; 本 fixture 就是那个被判红的历史的最小形态：两个 process 各自一条游标，
+;; 都在 `start_offset = 0` 读到 offset 0（B 从未 Ack 过它）⇒ 必须 valid。
+[{:type :ok :f :mq-publish :process 1 :t0-ns 0 :time 1000000
+  :topic "jepsen-mq" :partition 0 :payload "m0" :idempotency-key "idem-0" :offset 0}
+ ;; 消费者 A（process 0）：从 0 读、Ack 成功 ⇒ A 自己的游标推进到 1
+ {:type :ok :f :mq-poll :process 0 :t0-ns 10000000 :time 11000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 0 :payload "m0"}]
+  :acked-offsets [0] :poll-ok? true :ack-ok? true}
+ ;; 消费者 B（process 2）：**自己的**游标也是从 0 起，按契约重放同一批消息
+ {:type :ok :f :mq-poll :process 2 :t0-ns 50000000 :time 51000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 0 :payload "m0"}]
+  :acked-offsets [0] :poll-ok? true :ack-ok? true}
+ ;; B 继续推进：从 1 读（该批为空，Ack 无事可做）
+ {:type :ok :f :mq-poll :process 2 :t0-ns 60000000 :time 61000000
+  :topic "jepsen-mq" :partition 0 :start-offset 1
+  :messages [] :acked-offsets [] :poll-ok? true :ack-ok? true}]

@@ -77,6 +77,14 @@ pub struct ConnectionPool {
     pools: Arc<RwLock<HashMap<String, EndpointPool>>>,
     /// Watch-specific connection pools per endpoint
     watch_pools: Arc<RwLock<HashMap<String, EndpointPool>>>,
+    /// 上次空闲连接清理的时间戳。
+    ///
+    /// W1-5：`cleanup_idle()` 此前**全仓零生产调用** —— 文件头注释承诺的
+    /// “闲置连接 5 分钟后关闭”从未发生，端点 key 与最多 2 条 HTTP/2 连接
+    /// 永不回收。这里做成「访问时机会式清理」（见 [`Self::maybe_sweep`]），
+    /// 而不是新增一个后台任务：`coord-client` 可能在**没有 tokio runtime**
+    /// 的上下文里构造（例如同步的单测与 CLI 路径），`tokio::spawn` 会 panic。
+    last_sweep: Arc<parking_lot::Mutex<Instant>>,
     /// Pool configuration
     max_connections_per_endpoint: usize,
     connect_timeout: Duration,
@@ -93,6 +101,7 @@ impl ConnectionPool {
         Self {
             pools: Arc::new(RwLock::new(HashMap::new())),
             watch_pools: Arc::new(RwLock::new(HashMap::new())),
+            last_sweep: Arc::new(parking_lot::Mutex::new(Instant::now())),
             max_connections_per_endpoint: config.connections_per_endpoint,
             connect_timeout: config.connect_timeout,
             idle_timeout: config.connection_idle_timeout,
@@ -151,7 +160,43 @@ impl ConnectionPool {
                 !pool.channels.is_empty()
             });
         }
+        if cleaned > 0 {
+            tracing::debug!(
+                cleaned,
+                idle_timeout_secs = self.idle_timeout.as_secs(),
+                "connection pool: reclaimed idle channels"
+            );
+        }
         cleaned
+    }
+
+    /// 机会式空闲连接清理（W1-5）：距上次清理超过 `idle_timeout` 时顺带清一遍。
+    ///
+    /// 放在取连接的热路径上，但**至多每 `idle_timeout` 触发一次**，代价是
+    /// O(端点数 × 每端点连接数)；不新增后台任务（见 `last_sweep` 字段注释）。
+    /// `idle_timeout` 为 0（配置成“不回收”）时用 60s 作为最小节流窗口，
+    /// 避免每次取连接都做一次全表扫描。
+    fn maybe_sweep(&self) {
+        let min_interval = if self.idle_timeout.is_zero() {
+            Duration::from_secs(60)
+        } else {
+            self.idle_timeout
+        };
+        {
+            let last = self.last_sweep.lock();
+            if last.elapsed() < min_interval {
+                return;
+            }
+        }
+        // 双检（持锁）：并发取连接时只有一个线程真正执行清理。
+        {
+            let mut last = self.last_sweep.lock();
+            if last.elapsed() < min_interval {
+                return;
+            }
+            *last = Instant::now();
+        }
+        self.cleanup_idle();
     }
 
     // ──── Internal ────
@@ -175,6 +220,9 @@ impl ConnectionPool {
             crate::tls::connect(endpoint, Some(self.connect_timeout), self.tls.as_deref())
                 .await
                 .map_err(|e| Error::ClusterUnavailable(format!("connect failed: {e}")))?;
+        // W1-5：借用这次取连接的时机回收其它端点上已闲置的连接
+        // （含 `watch_pools`）。清理不会影响刚建立的这条连接。
+        self.maybe_sweep();
         Ok(self.wrap(channel))
     }
 }
@@ -184,6 +232,7 @@ impl Clone for ConnectionPool {
         Self {
             pools: Arc::clone(&self.pools),
             watch_pools: Arc::clone(&self.watch_pools),
+            last_sweep: Arc::clone(&self.last_sweep),
             max_connections_per_endpoint: self.max_connections_per_endpoint,
             connect_timeout: self.connect_timeout,
             idle_timeout: self.idle_timeout,
@@ -212,5 +261,40 @@ mod tests {
     fn test_endpoint_pool_new() {
         let pool = EndpointPool::new(2);
         assert!(pool.channels.is_empty());
+    }
+
+    /// W1-5 的负控制：`maybe_sweep` 必须**节流**（窗口内不清理、不推进时间戳），
+    /// 且窗口外必须触发一次清理并推进时间戳。没有这条，把 `cleanup_idle()` 接上
+    /// 也可能退化成「每次取连接都全表扫描」。
+    #[test]
+    fn test_maybe_sweep_throttles_then_fires_when_due() {
+        let config = Config::new(vec!["127.0.0.1:50051".to_string()]);
+        let pool = ConnectionPool::new(&config);
+
+        let t0 = *pool.last_sweep.lock();
+        pool.maybe_sweep();
+        let t1 = *pool.last_sweep.lock();
+        assert_eq!(t0, t1, "清理窗口内不应触发（也不应推进时间戳）");
+
+        // 把「上次清理」拨到远超窗口之前 → 这一次必须触发并推进。
+        *pool.last_sweep.lock() = Instant::now()
+            .checked_sub(Duration::from_secs(600))
+            .expect("600s 在 Instant 范围内");
+        pool.maybe_sweep();
+        let t2 = *pool.last_sweep.lock();
+        assert!(t2 > t1, "超出窗口后应触发清理并推进时间戳");
+    }
+
+    /// `idle_timeout = 0`（配置成“不回收”）时用 60s 作为最小节流窗口，
+    /// 不能退化成每次取连接都扫一遍。
+    #[test]
+    fn test_maybe_sweep_zero_idle_timeout_uses_min_interval() {
+        let mut config = Config::new(vec!["127.0.0.1:50051".to_string()]);
+        config.connection_idle_timeout = Duration::ZERO;
+        let pool = ConnectionPool::new(&config);
+
+        let t0 = *pool.last_sweep.lock();
+        pool.maybe_sweep();
+        assert_eq!(*pool.last_sweep.lock(), t0, "0 超时仍应节流，不应每取必扫");
     }
 }

@@ -111,6 +111,39 @@ bash scripts/collect-evidence.sh jepsen          # 真实 Jepsen（需 lein + �
 | `20260920T133301Z-m5b-mq-multi-client-checker-artifact/` | 同上，但 `CONCURRENCY=1n`（**每节点一个客户端**） | **红，但结论是「检查器口径问题」而非被测系统缺陷**：`:poll-ack-failures **0**`、`delivered 118 = acked 118`（**无丢失**）、唯一违反类 `:mq-redelivered-after-ack 461`。对照单客户端跑法（左行）为零违反 ⇒ 461 条来自**多消费者拓扑**：每个客户端各自维护 `mq-cursor`（都从 0 起），而 checker 的该条判据**只看时间戳、不看 Poll 请求的 `start_offset`**，于是把「另一个客户端按契约从 0 重放」误判为「Ack 没被记住」。**这份归档的价值就是把这个误判钉住**（负向对照） |
 
 > **这两份合起来才是完整判据**：单客户端证明**系统侧正确**（Ack 生效、无丢失、无重复），
-> 多客户端证明**卡口侧需要收紧**（判据必须把 `start_offset` 纳入，否则一个合法的
-> 多消费者拓扑会永远红）。⇒ 已记为待修项 **F-68（jepsen checker 口径）**，
+> 多客户端证明**卡口侧需要收紧**（判据必须把**消费者身份**与 Poll 的 `start_offset` 纳入，
+> 否则一个合法的多消费者拓扑会永远红）。⇒ 记为 **F-68（jepsen checker 口径）**，
 > **不影响 v0.2.0 的发布判据**（它不在被测系统一侧）。
+
+### F-68 已闭环（2026-09-21）
+
+判据 5（`:mq-redelivered-after-ack`）改为**两个条件同时成立**才判红：
+① **同一 process** 确认过该 offset（Ack 是消费者私有状态，另一个消费者从未确认过它）；
+② 该次 Poll 的 `start_offset > offset`（客户端游标只在 Ack **全部成功**后推进，
+起点越过 o 只能是「服务端记住了 Ack」推出来的）。
+落地：`jepsen/src/jepsen/coord/mqck.clj`（`ack-events` 的键加上 `process`）。
+
+**验证（checker fixture 级；控制机内可重跑）**：
+
+```
+docker exec jepsen-control bash -lc 'cd /root/coord-test && LEIN_ROOT=true lein -o run \
+  -m clojure.main scripts/run-checker-tests.clj jepsen.coord.mqck scripts/mq-fixtures'
+```
+
+- **修前**（`git checkout -- jepsen/src/jepsen/coord/mqck.clj` 回到 HEAD）：`10 / 12 fixtures passed`，
+  且**恰好**两份新守卫 fixture 判红 —— `expect-valid-multi-consumer-replay`
+  （= 上表第二份归档的最小形态：两个客户端各自从 0 重放）与
+  `expect-valid-same-consumer-explicit-rewind`（同一客户端**显式**从 ≤ o 重读）；
+- **修后**：`12 / 12 fixtures passed`（`EXIT=0`）；负控制
+  `expect-invalid-ack-not-honoured.edn`（同 process 且 `start_offset 1 > 0`）**两轮都判红**。
+
+**✅ lab 复跑（2026-09-21，修后；两份成对归档）**：
+
+| 目录 | 场景 | 结论 |
+|:--|:--|:--|
+| `20260921T150133Z-m5b-mq-poll-ack-multi-client-f68-fixed/` | `WORKLOAD=mq NEMESIS=none TIME_LIMIT=60 AGENTS=1 CONCURRENCY=1n` | **绿**（`Everything looks good!`，`overall-valid: true`）：`:publishes 137 / :polls 81 / :delivered-offsets 137 / :acked-offsets 624`、**`:violations-by-class {}`**、`:poll-ack-failures 0`、`:idem-dups 0`。对照 2026-09-20 修前**同一档**的 `:mq-redelivered-after-ack 461` ⇒ 该判据**归零** |
+| `20260921T150135Z-m5b-mq-poll-ack-single-client-f68-fixed/` | 同上但 `CONCURRENCY=1` | **绿**（`overall-valid: true`）——“收紧判据不得把单客户端跑法弄红”的那一半 |
+
+> ⚠️ 两份 MANIFEST 的工作树字段均为 **`DIRTY`**（修复当时尚未提交）⇒ 按 §7 规则 2
+> 它们**不得**用作引入评审级证据；clean-tree 复跑随 W3-9 一起做。
+> binary `sha256` 前 8 位 `7c4b3222`（含本次 lease 修复的同一份 release 构建）。

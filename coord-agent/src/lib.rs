@@ -26,6 +26,10 @@ pub mod pki;
 pub mod pki_store;
 pub mod plugin;
 mod proxy;
+// W1-6：Watch 的 scope 判定在 handler 侧（`proxy::WatchProxy::watch`），
+// 因此它的正反双测必须在 handler 级跑 —— 只测判定函数证明不了 handler 调了它。
+#[cfg(test)]
+mod proxy_watch_scope_tests;
 pub mod service;
 pub mod services;
 pub mod threadpool;
@@ -1322,6 +1326,51 @@ impl AgentServer {
 
             // 启动工作流调度器（标准 §Scheduling：schedule.every/cron/after/on）
             if let Some(engine) = workflow_grpc_svc.as_ref() {
+                // W5-4「能力死亡必须可观测」：工作流后台 worker（子流程扫描器 / 各实例的
+                // `drive`）此前**没有任何出口** —— `coord-core` 无 supervisor、无 tracing，
+                // 任务死了谁都不知道（第四轮 §6.3.6 的"能力静默死亡"）。
+                //
+                // 这里做出口：周期性把存活事实拉成指标，并在**首次**观察到故障时打 ERROR
+                // 日志（日志是真正会被人看到的路径，指标是留档与告警路径）。
+                // 指标语义见 `AgentMetrics::set_workflow_worker_liveness`：一次性任务的
+                // 正常结束**不算**故障（否则指标长期噪声化 ⇒ 没人看 ⇒ 等于没有）。
+                if let Some(metrics) = self.metrics.clone() {
+                    let svc = Arc::clone(engine);
+                    tokio::spawn(async move {
+                        // 采样任务自身是**只读**的（不做任何写/状态变更），且它一旦意外
+                        // 结束，指标会停止更新 —— 该"停滞"本身就是可观测的（`_live` 不再
+                        // 变化）。因此这里不额外引入监督机制（coord-agent 无 supervisor）。
+                        let mut last_fault_total = 0u64;
+                        let mut last_loops_finished = 0i64;
+                        let tick = std::time::Duration::from_secs(15);
+                        loop {
+                            tokio::time::sleep(tick).await;
+                            let Some(l) = svc.worker_liveness() else {
+                                continue;
+                            };
+                            let faults = l.panic_total();
+                            let loops_finished = l.finished_loops.len() as i64;
+                            metrics.set_workflow_worker_liveness(
+                                l.live_oneshot as i64,
+                                faults,
+                                loops_finished,
+                            );
+                            if faults > last_fault_total || loops_finished > last_loops_finished {
+                                tracing::error!(
+                                    fault_total = faults,
+                                    finished_loops = ?l.finished_loops,
+                                    recent_faults = ?l.recent_faults,
+                                    "workflow background worker died without completing: instances \
+                                     may stay in a non-terminal state with no driver \
+                                     (metric: coord_agent_workflow_worker_faults_total)"
+                                );
+                            }
+                            last_fault_total = faults;
+                            last_loops_finished = loops_finished;
+                        }
+                    });
+                }
+
                 let scheduler = Arc::new(
                     crate::services::workflow_scheduler::WorkflowScheduler::new(Arc::clone(engine)),
                 );

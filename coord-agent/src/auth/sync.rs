@@ -373,7 +373,9 @@ pub const INITIAL_ROLE_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
 mod tests {
     use super::*;
     use crate::auth::role_cache::RoleEntry;
-    use std::thread;
+    // 注意：本模块**不得**无条件 `use std::thread;` —— 该 import 在只跑
+    // `--lib`（test target）时是未使用的，会给每次 `cargo test` 留一条 warning，
+    // 让"新引入的 warning"这种信号被淹没。需要 thread 的用例自行在函数内 import。
 
     // ──── TDD Tests ────
 

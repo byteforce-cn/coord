@@ -277,5 +277,10 @@ sed -n '160,182p' coord-agent/src/service.rs
 >   本区块上方那处 "**B-04（MQ at-least-once 不成立）**" 与 "**B-04 的下一步应是「分诊」**"
 >   属 **2026-09-19 第三轮之前**的旧口径，**已过时** —— 此处显式更正；不删旧行，
 >   保持台账可追溯。
-> - **卡口侧待修 `F-68`**（jepsen checker 未把 Poll 的 `start_offset` 纳入判据）
->   **不影响**发布判据（不在被测系统一侧），但应在 F-67 一并收口。
+> - **卡口侧 `F-68` 已闭环（2026-09-21）**（jepsen checker 未把**消费者身份**与 Poll 的
+>   `start_offset` 纳入判据）：判据 5 改为「**同一 process** 已 Ack **且** 本次 Poll 的
+>   `start_offset > offset`」；新增两份守卫 fixture（多消费者重放 / 同消费者显式重放，
+>   均须 valid），checker fixture 级 **修前 10/12 → 修后 12/12**（负控制
+>   `expect-invalid-ack-not-honoured` 两轮都红）。**不影响**发布判据（不在被测系统一侧）；
+>   真实 lab 复跑（`CONCURRENCY=1n`）仍待做，口径见
+>   `docs/production/evidence/README.md` 的「F-68 已闭环」小节。

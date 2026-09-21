@@ -1,0 +1,22 @@
+;; expect-valid-same-consumer-explicit-rewind —— **F-68 的另一半守门员**：
+;; 同一个消费者**显式**从 ≤ o 处重读（Poll 的 `start_offset` 没有越过 o），
+;; 拿到 o 是它自己要的，不是「Ack 被丢」。
+;;
+;; 判据 5 修正后要求两个条件同时成立：① 同一 process 确认过该 offset；
+;; ② 该次 Poll 的 `start_offset > offset`（客户端游标只在 Ack **全部成功**后推进，
+;; 起点越过 o 只能由「服务端记住了 Ack」推出来）。本 fixture 满足 ① 但不满足 ②。
+;;
+;; 与 `expect-invalid-ack-not-honoured.edn` 是**成对**的：那条只差一个
+;; `start-offset`（0 → 1），就必须判红 —— 两份一起才说明判据既不漏也不误。
+[{:type :ok :f :mq-publish :process 1 :t0-ns 0 :time 1000000
+  :topic "jepsen-mq" :partition 0 :payload "m0" :idempotency-key "idem-0" :offset 0}
+ ;; 第一次：从 0 读，Ack 成功（游标→1）
+ {:type :ok :f :mq-poll :process 0 :t0-ns 10000000 :time 11000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 0 :payload "m0"}]
+  :acked-offsets [0] :poll-ok? true :ack-ok? true}
+ ;; 第二次：**同一个消费者显式**从 0 重读（start_offset 未越过 o=0）⇒ 合法
+ {:type :ok :f :mq-poll :process 0 :t0-ns 90000000 :time 91000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 0 :payload "m0"}]
+  :acked-offsets [0] :poll-ok? true :ack-ok? true}]

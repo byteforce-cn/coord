@@ -622,6 +622,17 @@ impl Watch for WatchProxy {
         &self,
         request: tonic::Request<tonic::Streaming<WatchRequest>>,
     ) -> Result<tonic::Response<Self::WatchStream>, tonic::Status> {
+        // W1-6：Watch 的 scope 判定在**这里**做，不在鉴权层 —— 订阅的 key/前缀在首帧
+        // `WatchCreateRequest` 里，而首帧在**流式 body** 中；鉴权层要拿到它就得缓存整个
+        // body，而流的 body 在客户端 half-close 前不结束（缓存 ⇒ 请求永久挂起，第四轮
+        // P0 的形态）。所以鉴权层在放行时把授权快照塞进请求扩展，handler 拿到首帧后判定。
+        //
+        // `None` 的语义见 `DeferredScopeGrants`：鉴权关闭 / root / 该请求未经鉴权层。
+        // **必须在 `into_inner()` 之前取** —— 扩展随请求一起被消费。
+        let grants = request
+            .extensions()
+            .get::<coord_core::grpc_auth::DeferredScopeGrants>()
+            .cloned();
         let mut stream_in = request.into_inner();
 
         // 读取 Watch Create 请求
@@ -646,6 +657,27 @@ impl Watch for WatchProxy {
 
         let prefix = create_req.key.clone();
         let start_revision = create_req.start_revision;
+
+        // scope 判定（fail-closed）：订阅区间必须被授权 scope **整体覆盖**。
+        //
+        // 区间由 `watch_create_access` 计算 —— 与投递侧 `key_matches` 同源、与鉴权层的
+        // body 提取**同一实现**（`extract_scope_access` 的 Watch 分支调的就是它），
+        // 所以"handler 判定的区间"与"实际会投递的 key 集合"不可能漂移。
+        let access =
+            coord_core::grpc_auth::watch_create_access(&create_req.key, &create_req.range_end);
+        if let Err(reason) = coord_core::grpc_auth::check_deferred_scope(grants.as_ref(), &[access])
+        {
+            // 身份有效但权限不足 ⇒ PERMISSION_DENIED（不是 UNAUTHENTICATED）
+            tracing::warn!(
+                prefix = %String::from_utf8_lossy(&prefix),
+                reason = %reason,
+                "watch proxy: subscription denied by deferred scope check"
+            );
+            return Err(coord_core::error_code::attach(
+                tonic::Status::permission_denied(reason),
+                coord_core::error_code::CoordErrorCode::PermissionDenied,
+            ));
+        }
 
         // R-AGT-20：订阅 +1（退订在转发任务结束时 -1）
         if let Some(ref metrics) = self.metrics {

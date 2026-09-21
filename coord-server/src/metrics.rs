@@ -375,6 +375,17 @@ impl Metrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// 读取 Lease 指标快照 `(lease_active_total, lease_expired_total)`。
+    ///
+    /// 供测试与运维核对使用（F-27 要求：`active → expired` 的结算只在过期跃迁时
+    /// 发生一次，重试轮次不得重复递减 active）。
+    pub fn lease_counters(&self) -> (i64, u64) {
+        (
+            self.inner.lease_active_total.load(Ordering::Relaxed),
+            self.inner.lease_expired_total.load(Ordering::Relaxed),
+        )
+    }
+
     // ── Watch 指标更新（R-OBS-10）──
 
     pub fn inc_watch_active(&self) {

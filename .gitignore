@@ -47,6 +47,11 @@ docs/production/*
 # `docs/volume-object-storage.md` 这种"被 tracked 文档引用的设计记录"只能存在于
 # 本机磁盘上，对任何 clone 仓库的人都是死链。
 !docs/production/*.md
+# W6-1/W5-2/W9：运维面（runbook / SLO / 边界 / 治理 / 演练记录）必须可入库。
+# 不写这一行的后果与第 41 行注释里描述的同型：`docs/production/*` 会把
+# `docs/production/ops/` 整个目录排除掉，于是 P-Gate 7 要求的 runbook 只存在于
+# 本机磁盘上——**看起来交付了，实际对任何 clone 都是 404**。
+!docs/production/ops/
 
 .coord-dev-cluster/
 # 运行期产物（jepsen lab 的 nohup 日志等）

@@ -57,6 +57,17 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
+      # W6-2：软反亲和：尽量把 3 个副本分散到不同节点（单节点 kind 集群上
+      # `preferred` 不会阻塞调度，多节点集群上则优先分散）。
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: coord
       initContainers:
         # 由共享 Secret 渲染 per-Pod 配置（bootstrap 仅 coord-0）
         - name: render-config
@@ -113,8 +124,9 @@ spec:
               mountPath: /etc/coord
       containers:
         - name: coord
-          # 发布时替换为实际镜像 tag（避免 :latest 漂移）
-          image: byteforce/coord:0.1.0
+          # 发布时替换为实际镜像 tag（避免 :latest 漂移）。
+          # W6-2：与 `Cargo.toml` 的 `workspace.package.version` 对齐（0.2.0）。
+          image: byteforce/coord:0.2.0
           imagePullPolicy: IfNotPresent
           command:
             - coord
@@ -147,12 +159,18 @@ spec:
               cpu: "2"
               memory: 2Gi
           readinessProbe:
+            # W6-2：**必须是 `/ready`**，不能用 `/healthz`。
+            # `/healthz` 是存活探针语义（永远 HTTP 200，body 里才写 SERVING /
+            # NOT_SERVING）；用它做就绪探针 ⇒ 未选出 leader 的节点也会被标为
+            # Ready 并接流量。`/ready` 在 raft 未就绪时返回 **503**。
             httpGet:
-              path: /healthz
+              path: /ready
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
+            # 存活 = 进程还在（不检查 raft 就绪：否则选举期间的短暂未就绪
+            # 会被 kubelet 当成“进程死了”而重启，反而制造更多选举）
             httpGet:
               path: /healthz
               port: http

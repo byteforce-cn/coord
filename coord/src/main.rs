@@ -2261,6 +2261,20 @@ async fn run_server(
     );
     let raft_config = Arc::new(raft_config);
 
+    // W1-4（第四轮 §3.10 p）：`snapshot_logs_since_last = 0` 的**真实**语义是
+    // `SnapshotPolicy::Never`。它不只是“禁用自动快照”：没有持久快照之后，
+    // `LogStore::purge` 的判据（“tracker 必须持有覆盖该 index 的持久快照”）
+    // 永远不成立 ⇒ **raft 日志永不回收**，磁盘随写入单调增长。
+    // config.example.toml 以前只写“0 = 禁用自动快照”，会让运维按文档配出一个
+    // 只涨不落的盘。这里在启动时把这个后果明写出来（不拒绝启动：单节点/短命
+    // 部署可能确实不需要回收）。
+    if cfg.raft.snapshot_logs_since_last == Some(0) {
+        tracing::warn!(
+            "raft.snapshot_logs_since_last = 0 ⇒ 自动快照禁用 ⇒ raft 日志**永不回收** \
+             （LogStore::purge 依赖持久快照）。仅当你能接受磁盘随写入单调增长时才这样配"
+        );
+    }
+
     // 5e. Raft RPC 服务（共享密钥验签，配置后 fail-closed）
     let raft_rpc_service =
         RaftRpcService::new().with_shared_secret(cfg.security.raft_shared_secret.as_deref());

@@ -26,7 +26,7 @@
 | F-02 | `Put` 幂等**命中**时 `prev_kv` 恒为 `None`，与"返回首次执行的结果"不符 | P2 | **`closed`**（已修 + 同上回归） | T1.4 / T1.1 |
 | F-03 | 幂等缓存是**单节点进程内**（TTL 60s / 4096 FIFO），不随 raft 复制、不持久化 → 换节点/换 leader/重启后重放会重复生效 | P1 | **`confirmed-by-run`**（换 leader 重放：13 组 revision-advanced / 13 组 version-over-advance）+ 契约已限缩 | T1.4 ⇒ T5.2 |
 | F-04 | `scripts/nemesis-timeline.clj` 把 `history.edn` 的纳秒当 epoch 毫秒输出 | P2（测试自身） | `closed` | 上一轮已修 |
-| F-05 | 60s 短跑即可见 `:fail :write [:no-client Failed to authenticate to coord]`（鉴权/登录限流） | P1 | `confirmed-by-run` | §5.4-④ / E4 |
+| F-05 | 60s 短跑即可见 `:fail :write [:no-client Failed to authenticate to coord]`（鉴权/登录限流） | P1 | `confirmed-by-run`（**形态已定位：非限流，是登录路径需 raft quorum**，见本节末） | §5.4-④ / E4 |
 | F-06 | Watch 语义既不是 coalescing 也不是 lossless：**缓冲区满时丢弃最旧事件 + 合成 `BufferOverflow`** | — | `open`（**改计划**） | T2.1 前置 |
 | F-07 | 磁盘写满行为**已定义**：可用 <5% → 写 `RESOURCE_EXHAUSTED`、读仍可用 | — | `closed`（§9-② 已答） | T3.5 |
 | F-08 | Lease 到期判定用**单调时钟**（`tokio::time::Instant`），契约成立 | — | `closed`（§9-⑤ 已答） | T2.2 / T3.4 |
@@ -236,6 +236,33 @@ leader 变更后重放同 rid），断言 version 前进 >1 即为复现。
 T5.2（经 agent）会放大这个问题（agent 也要登录）。
 
 **分级** —— P1（不损坏数据；阻塞"短矩阵干净绿"的目标）。
+
+### 本轮定位（2026-09-21，静态复核 + 证据普查）——**纠正原"限流"假设**
+
+**证据普查**：全量 `jepsen/store/coord/*/history.txt` 里出现 `Failed to authenticate to coord`
+的 run 共 **7 个**（`2026-09-06`、`09-16` ×2、`09-19` ×3，以及归档的
+`docs/production/evidence/20260916T122844Z-baseline-partition-ring-60s/` 4 条）。其中
+最新的 3 个（`09-19T04:25/04:32/04:35`）**全部是 M5b 的经 agent MQ workload**
+（失败 op 一律是 `:mq-publish` / `:mq-poll`）。
+
+**形态（否定"登录限流"这条假设）**：登录限流**不会**挡住合法客户端 ——
+`allow_attempt` 只**查看**令牌不消耗（`coord-server/src/auth/service.rs`），只有
+**密码校验失败**才 `record_failure` 消耗令牌。因此 `Failed to authenticate` 与限流无关。
+
+**真正形态**：`AuthService::authenticate` 在签发前要**两次 raft 提案**
+（`persist_session` ×2：auth token + refresh token，`auth/service.rs:456`）。
+follower 上 `propose_auth_op` 返回 `UNAVAILABLE`（带 leader hint）；**分区/无 quorum 期间无法提交**。
+客户端在 `auth-timeout-ms = 60000`（`client.clj:18`）内轮换全部 channel 仍失败 ⇒ 抛
+`Failed to authenticate to coord`，被 `result-op` 记成 `:fail`。
+
+⇒ 结论：`:fail` 的根因是「**登录路径的可用性 = raft quorum**」，属 §5.4-④/⑤ 的**参数裁定项**
+（分区时长 vs 客户端登录超时）＋一个**可选加固**（给 `persist_session` 加有界重试以覆盖选举窗口），
+而**不是**一个限流缺陷。可达加固见
+`docs/production/ops/boundaries.md` §5 B-SE-4。
+
+**待办（W1-2）**：lab 复跑统计出现率，并对「0 条」这一判据做裁定 ——
+quorum 整体丢失超过客户端登录超时时，登录**必然**失败，属固有可用性属性，
+不能靠改断言消除（§7 证据规范第 4 条：不得弱化断言）。
 
 ---
 
@@ -835,7 +862,7 @@ Syntax error reading source at (jepsen/coord.clj:1071:76). Unmatched delimiter: 
 
 | # | 一句话 | 分级 | 状态 |
 |:--|:--|:--|:--|
-| F-27 | Lease **过期时的 revoke 提案可被静默丢弃**（`check_expired()` 已把过期 Lease 移出本地管理器，随后的 `raft.client_write` 失败只 `warn!`、**不重试不回插**）⇒ 绑定 Key 在 `ttl+grace` 内 0 消失；领导权不再变化即**永久泄漏** | P1（coord 侧） | `confirmed-by-run`（**未闭环**） |
+| F-27 | Lease **过期时的 revoke 提案可被静默丢弃**（`check_expired()` 已把过期 Lease 移出本地管理器，随后的 `raft.client_write` 失败只 `warn!`、**不重试不回插**）⇒ 绑定 Key 在 `ttl+grace` 内 0 消失；领导权不再变化即**永久泄漏** | P1（coord 侧） | `confirmed-by-run` → **机制已闭环 2026-09-21**（见下「修复与复跑」）；`matrix-m2` 该档**仍红**，剩余 4 条归因为**活性窗口**问题（非泄漏） |
 
 复跑结果：
 
@@ -851,6 +878,55 @@ Syntax error reading source at (jepsen/coord.clj:1071:76). Unmatched delimiter: 
 没有任何 run 支撑（见 `soak-closure-report.md` §0/§4 的修正）。
 
 ### F-27 [P1] Lease 过期 revoke 丢失 → 绑定 Key 不被级联删除
+
+#### 修复与复跑（2026-09-21）
+
+**修法**（worktree **DIRTY**，未提交）：`LeaseManager` 的过期记录**保留**至 revoke
+**确认提交**（`finish_expired`）；`check_expired()` 对已标记录**继续上报**（= 幂等重试），
+指标只在跃迁时结算一次；`keep_alive`/`attach_key`/`detach_key`/`get_lease`/计数把
+「待提交」记录视为**不存在**（fail-closed，否则会用「假活」换掉「丢 revoke」）。
+worker 用 `pending` 集合 + `advance_pending_revokes` 逐轮重试，提交成功才删除本地记录。
+
+**复跑**：`make -C jepsen/lab test WORKLOAD=lease NEMESIS=partition-halves TIME_LIMIT=45
+CONCURRENCY=1n SKIP_CHECKERS=1 JEPSEN_PROVIDER=docker`（binary sha256 前 8 位
+`7c4b3222`），store = `store/coord/2026-09-21T14:53:38.329176044Z/`。
+
+| 项 | 值 |
+|:--|:--|
+| checker | `:grants 94 / :expiries 40 / :liveness-unjudged 0 / :violations-by-class {:lease-not-expired 4}` |
+| 判决 | **仍红**（`Analysis invalid`，make 退出码 2）—— 但**失效形态已变**（下两点） |
+
+**① 静默丢失通道已闭环（本轮新增的可观测证据）**：修后 worker 对「提交未确认」的条目
+保留待办并重试，日志形态：
+
+```
+n1/coord.log:210 14:53:54.782137Z WARN lease expiry revoke not committed; entries retained
+  for retry (F-27) failed=1 pending=1 first_lease_id=10
+  error=client_write failed: has to forward request to: Some(2), Some(BasicNode{addr:"172.19.0.4:50052"})
+n2/coord.log:238 14:54:01.867070Z WARN ... failed=2 pending=2 first_lease_id=29 error=... None, None
+n2/coord.log:240 14:54:06.867091Z WARN ... failed=5 pending=5 first_lease_id=29 error=... None, None
+```
+
+n1 在失败后**持续输出日志到 14:55:04**（run 14:55:07 结束）而**再无重复告警**
+（告警 5s 节流；若仍失败必然每 5s 一条）⇒ 该条 revoke 在后续 tick 提交成功。
+旧实现在同一时刻只会打一条 `Lease 10 expiry: failed to revoke via raft: …`，
+且记录已被移出本地管理器 ⇒ 该 revoke **永久丢失**。
+
+**② 剩余 4 条 `:lease-not-expired` 是「活性窗口」问题，不是泄漏**：nemesis 为
+`partition-halves`，周期 14:53:51→54（3s）、**14:54:01.33→14:54:06.57（5.24s）**、
+14:54:12.7→14:54:20.3（7.6s）…；而活性判据的窗口是 `ttl + grace = 2s + 4s = 6s`
+且**锚在 op 起点**（`src/jepsen/coord/leaseck.clj:158-164`）。分区期间无 quorum ⇒
+`LeaseOp::Revoke` **不可能提交**（共识语义，不是实现缺陷）⇒ 分区内到期的 Lease
+必然在窗口内不消失。4 条的 `:absent-ms` 全为 `nil`。
+⇒ 需要**口径裁定**（`dev.md` §5.4-⑤ `lease grace` 仍是「待确认」参数）：要么把活性
+窗口定义为「quorum 恢复后 + grace」，要么把 grace 提到 > 最大分区时长。
+**裁定前**：不得把该档当作产品缺陷引用，也**不得改判据迁就实现**（§7 规则 4）。
+
+**③ 未覆盖的旧疑问**：2026-09-17 的 8 条里另有 4 条**无 WARN**，当时记为「需单独
+分诊」。本轮 4 条与那 4 条是否同族**尚未证明**（两次 run 的 lease id 集合不同）⇒
+待办：对同一 run 做「violating lease 是否**最终**被删除」的终态复核（建议在 `leaseck`
+增加一条独立的「最终态必须消失」判据，与 §5.2 的 `ttl+grace` 时效判据**并存**：
+前者判**泄漏**、后者判**时效**）。
 
 **契约锚点**：`apis/contracts/proto/coord/lease/lease.proto` ——「Lease 过期或被
 Revoke 时，所有绑定该 Lease 的 Key 被删除（级联删除）」；§5.2 的

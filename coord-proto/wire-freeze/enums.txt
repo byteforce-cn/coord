@@ -1,0 +1,40 @@
+# coord 枚举 wire 冻结快照（W1-7 / D-17）。
+# 每行：<enum 全名>.<值名>=<编号>（按全名排序）。
+#
+# 更新方式：UPDATE_ENUM_WIRE_FREEZE=1 cargo test -p coord-proto --test enum_wire_freeze
+# 更新后必须人工复核 diff：
+#   * 新增值 ⇒ 允许（Minor），CHANGELOG 记录；
+#   * 删除/改名/改号 ⇒ Breaking：数值映射不变时为**静默**破坏（grpc-java 编译不报错），
+#     必须走契约 Major 流程（apis/contracts/WHITEPAPER.md §3.5）。
+coord.agent.HealthCheckResponse.ServingStatus.NOT_SERVING=2
+coord.agent.HealthCheckResponse.ServingStatus.SERVING=1
+coord.agent.HealthCheckResponse.ServingStatus.UNKNOWN=0
+coord.auth.PermissionType.READ=0
+coord.auth.PermissionType.READWRITE=2
+coord.auth.PermissionType.WRITE=1
+coord.capability.CapabilityType.ADMIN=2
+coord.capability.CapabilityType.READ=0
+coord.capability.CapabilityType.WRITE=1
+coord.election.v1.LeaderWatchEvent.EventType.LEADER_ELECTED=1
+coord.election.v1.LeaderWatchEvent.EventType.LEADER_EXPIRED=3
+coord.election.v1.LeaderWatchEvent.EventType.LEADER_RESIGNED=2
+coord.election.v1.LeaderWatchEvent.EventType.UNKNOWN=0
+coord.registry.v1.FilterMode.FILTER_MODE_ALL=3
+coord.registry.v1.FilterMode.FILTER_MODE_EXACT=1
+coord.registry.v1.FilterMode.FILTER_MODE_PREFIX=2
+coord.registry.v1.FilterMode.FILTER_MODE_UNSPECIFIED=0
+coord.registry.v1.WatchEvent.EventType.INSTANCES_ADDED=1
+coord.registry.v1.WatchEvent.EventType.INSTANCES_REMOVED=2
+coord.registry.v1.WatchEvent.EventType.INSTANCES_UPDATED=3
+coord.registry.v1.WatchEvent.EventType.UNKNOWN=0
+coord.txn.Compare.CompareResult.EQUAL=0
+coord.txn.Compare.CompareResult.GREATER=1
+coord.txn.Compare.CompareResult.LESS=2
+coord.txn.Compare.CompareResult.NOT_EQUAL=3
+coord.txn.Compare.Target.MOD_REV=2
+coord.txn.Compare.Target.VALUE=1
+coord.txn.Compare.Target.VERSION=0
+coord.watch.WatchEvent.EventType.BUFFER_OVERFLOW=2
+coord.watch.WatchEvent.EventType.DELETE=1
+coord.watch.WatchEvent.EventType.HISTORY_UNAVAILABLE=3
+coord.watch.WatchEvent.EventType.PUT=0

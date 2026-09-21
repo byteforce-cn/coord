@@ -26,6 +26,184 @@ use super::ports::{
 };
 use super::retry::{RetryConfig, RetryScheduler};
 
+/// 子流程恢复扫描器的 tick 间隔（秒）。
+///
+/// W1-4：tick 本身不再做全量列举（见 `pending_subflows` 字段注释），
+/// 所以固定 5s 不再有实例规模相关的代价。
+const SUBFLOW_SCAN_INTERVAL_SECS: u64 = 5;
+
+// ─── 后台任务存活登记（W5-4「能力死亡必须可观测」） ───
+
+/// 长活后台任务的**存活事实**（只读快照，供出口/指标拉取）。
+///
+/// 为什么需要它：`coord-core` 没有 supervisor，也没有 `tracing`，所以一个 `tokio::spawn`
+/// 出去的后台循环一旦结束（或 panic），**没有任何路径会告诉任何人** —— 第四轮 §6.3.6
+/// 把这种形态叫「能力静默死亡」。本结构把"死亡"变成可拉取的事实。
+///
+/// 两类判据（**不能混为一谈**）：
+///
+/// * [`Self::finished_loops`] —— **循环型** worker（如子流程扫描器）：它们的正常行为是
+///   永不结束，所以"已结束"**本身**就是缺陷（`JoinHandle::is_finished()` 即可判定，
+///   且它同时覆盖"返回了"与"panic 了"两种死法）。
+/// * [`Self::panicked`] —— **一次性** worker（如某实例的 `drive`）：正常结束是它的**预期**
+///   行为（挂起 / 终态即返回），所以"结束"不是证据。判据是"结束了 **但没跑到最后一行**"
+///   —— 任务的末尾会置一个 `completed` 标志，没置位就说明中途死了。
+///   把两者合成一个数字会让指标长期噪声化，反而没人看（"红色的门禁是教人忽略的门禁"）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkerLiveness {
+    /// 当前在跑的一次性 worker 数（`drive` 等）。
+    pub live_oneshot: usize,
+    /// 循环型 worker 中**已结束**的名字（非空 = 缺陷：该循环本该永不结束）。
+    pub finished_loops: Vec<String>,
+    /// 因中途死亡未正常收尾的一次性 worker：类别 → 累计次数。
+    pub panicked: Vec<(String, u64)>,
+    /// 最近死亡的具体 worker 标签（**有界**，仅用于定位是哪个实例）。
+    pub recent_faults: Vec<String>,
+}
+
+impl WorkerLiveness {
+    /// 是否存在**确定**的缺陷形态（循环已结束 或 有 worker 未正常收尾）。
+    ///
+    /// 出口方（agent 指标/告警）应该用这个而不是自己拼条件。
+    pub fn has_fault(&self) -> bool {
+        !self.finished_loops.is_empty() || !self.panicked.is_empty()
+    }
+
+    /// 未正常收尾的累计次数（指标用）。
+    pub fn panic_total(&self) -> u64 {
+        self.panicked.iter().map(|(_, n)| *n).sum()
+    }
+}
+
+/// 最近死亡 worker 标签的保留上限（内存有界：登记表不得成为新的无界增长点）。
+const MAX_RECENT_FAULTS: usize = 8;
+
+/// 后台任务存活登记表（[`WorkflowRuntime`] 内部持有；`Arc` 共享给各 worker）。
+#[derive(Debug, Default)]
+struct WorkerRegistry {
+    inner: std::sync::Mutex<WorkerRegistryInner>,
+}
+
+/// 一次性 worker 的登记项。
+struct OneshotEntry {
+    /// 形如 `workflow_drive[<instance_id>]`（类别用于聚合计数，后缀用于定位）。
+    label: String,
+    handle: tokio::task::JoinHandle<()>,
+    /// 任务跑到最后一行时置位；未置位而任务已结束 ⇒ 中途死亡。
+    completed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl std::fmt::Debug for OneshotEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OneshotEntry")
+            .field("label", &self.label)
+            .field("finished", &self.handle.is_finished())
+            .field(
+                "completed",
+                &self.completed.load(std::sync::atomic::Ordering::SeqCst),
+            )
+            .finish()
+    }
+}
+
+#[derive(Debug, Default)]
+struct WorkerRegistryInner {
+    /// 循环型 worker：名字 → 判定句柄。
+    loops: Vec<(String, tokio::task::JoinHandle<()>)>,
+    /// 一次性 worker（在飞 + 尚未结算的已结束项）。
+    oneshots: Vec<OneshotEntry>,
+    /// 中途死亡计数：**类别** → 次数（按类别聚合，避免按实例 id 无界增长）。
+    panicked: std::collections::BTreeMap<String, u64>,
+    /// 最近死亡的具体标签（有界环形缓冲）。
+    recent_faults: std::collections::VecDeque<String>,
+}
+
+impl WorkerRegistry {
+    fn snapshot(&self) -> WorkerLiveness {
+        let mut g = match self.inner.lock() {
+            Ok(g) => g,
+            // 登记表被 poison（持锁线程 panic）：**不能**静默返回"一切正常" ——
+            // 那会把一次真实故障伪装成健康。返回一个"有故障"的快照并点名。
+            Err(_) => {
+                return WorkerLiveness {
+                    live_oneshot: 0,
+                    finished_loops: vec!["<worker registry poisoned>".to_string()],
+                    panicked: Vec::new(),
+                    recent_faults: Vec::new(),
+                }
+            }
+        };
+
+        // 结算：把已结束的一次性 worker 分成"正常收尾"（丢弃登记）与"中途死亡"
+        //（计数 + 保留标签）。**这一步同时是内存回收点** —— 否则登记表会随实例数增长。
+        let mut live = 0usize;
+        let mut still_running: Vec<OneshotEntry> = Vec::with_capacity(g.oneshots.len());
+        for entry in std::mem::take(&mut g.oneshots) {
+            if !entry.handle.is_finished() {
+                live += 1;
+                still_running.push(entry);
+                continue;
+            }
+            if entry.completed.load(std::sync::atomic::Ordering::SeqCst) {
+                continue; // 正常收尾：不留痕、不占内存
+            }
+            let category = entry
+                .label
+                .split('[')
+                .next()
+                .unwrap_or(&entry.label)
+                .to_string();
+            *g.panicked.entry(category).or_insert(0) += 1;
+            if g.recent_faults.len() == MAX_RECENT_FAULTS {
+                g.recent_faults.pop_front();
+            }
+            g.recent_faults.push_back(entry.label);
+        }
+        g.oneshots = still_running;
+
+        WorkerLiveness {
+            live_oneshot: live,
+            finished_loops: g
+                .loops
+                .iter()
+                .filter(|(_, h)| h.is_finished())
+                .map(|(n, _)| n.clone())
+                .collect(),
+            panicked: g.panicked.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            recent_faults: g.recent_faults.iter().cloned().collect(),
+        }
+    }
+
+    fn register_loop(&self, name: impl Into<String>, handle: tokio::task::JoinHandle<()>) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.loops.push((name.into(), handle));
+        }
+    }
+
+    /// 登记一个一次性 worker；`completed` 由调用方创建并交给任务闭包，任务**正常收尾**时置位。
+    fn register_oneshot(
+        &self,
+        label: String,
+        handle: tokio::task::JoinHandle<()>,
+        completed: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.oneshots.push(OneshotEntry {
+                label,
+                handle,
+                completed,
+            });
+        }
+    }
+
+    /// W5-4 负控制入口：注入一个"已死"的循环 worker，从而不必真的把生产任务弄死
+    /// 就能验证"死亡可观测"这条判据本身有效。
+    #[cfg(test)]
+    fn register_loop_for_test(&self, name: &str, handle: tokio::task::JoinHandle<()>) {
+        self.register_loop(name, handle);
+    }
+}
+
 // ─── 生命周期事件（标准 §Lifecycle Events） ───
 
 /// 生命周期 CloudEvent 类型（`io.serverlessworkflow.*`）
@@ -44,7 +222,6 @@ pub mod lifecycle {
 }
 
 // ─── 运行时错误 ───
-
 /// 运行时错误
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeError {
@@ -99,6 +276,21 @@ where
     store: Arc<S>,
     dispatcher: Arc<D>,
     event_provider: Arc<B>,
+    /// W1-4（第四轮 §3.10 j）：待恢复的父实例登记表（`parent_id → subflow_id`）。
+    ///
+    /// 此前子流程恢复靠**每 5 秒** `list_instances(None, None, usize::MAX, None)`
+    /// —— 稳态下每次 tick 都把**全部**工作流实例（包括与子流程完全无关的）
+    /// 列出并反序列化/克隆一遍，代价随实例总数**线性增长**，且 `WorkflowStore`
+    /// 的 `list_instances` 签名不返回翻页 token，无法安全分页（截断会让超出一页的
+    /// 挂起实例**永不恢复**）。现改为：父流程因 `RunSubflow` 挂起时**登记**，
+    /// 每 tick 只检查登记表里的父子对（登记表为空 ⇒ O(1)）。启动时仍做**一次**
+    /// 全量对账，用于恢复上个进程遗留的挂起实例。
+    pending_subflows: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    /// W5-4：长活后台任务的存活登记（见 [`WorkerLiveness`]）。
+    ///
+    /// 没有它，`spawn` 出去的后台任务死亡时**没有任何出口**：`coord-core` 无 supervisor、
+    /// 无 `tracing`，调用方也拿不到 join handle。出口由上层（`coord-agent`）周期性拉取。
+    workers: Arc<WorkerRegistry>,
 }
 
 impl<E, C, S, D, B> WorkflowRuntime<E, C, S, D, B>
@@ -123,120 +315,227 @@ where
             store: Arc::new(store),
             dispatcher: Arc::new(dispatcher),
             event_provider: Arc::new(event_provider),
+            pending_subflows: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            workers: Arc::new(WorkerRegistry::default()),
         };
         // 启动后台扫描器，定期检查 RunSubflow 挂起的父流程并恢复
         rt.start_subflow_scanner();
         rt
     }
 
+    /// 长活后台任务的存活快照（W5-4「能力死亡必须可观测」）。
+    ///
+    /// 语义见 [`WorkerLiveness`]：循环型 worker 的"已结束"、一次性 worker 的 panic
+    /// 才是缺陷；一次性 worker 的正常结束**不是**。
+    ///
+    /// 出口归上层调用方（`coord-agent` 的指标/告警）——`coord-core` 不持有任何
+    /// 遥测依赖，也不该持有。
+    pub fn worker_liveness(&self) -> WorkerLiveness {
+        self.workers.snapshot()
+    }
+
     /// 启动后台子流程扫描器
     ///
-    /// 定期扫描所有挂起的父流程（Suspended + RunSubflow 原因），
-    /// 检查子流程是否完成，完成后恢复父流程继续执行。
+    /// 启动时先做一次**全量对账**（恢复上个进程遗留的挂起实例），之后每 tick 只
+    /// 检查 [`Self::pending_subflows`] 登记表 —— 稳态代价与实例总数无关。
     fn start_subflow_scanner(&self) {
         let rt = self.clone_runtime();
         let store = Arc::clone(&self.store);
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
+            rt.reconcile_suspended_subflows(Arc::clone(&store)).await;
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                rt.scan_subflows(Arc::clone(&store)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(SUBFLOW_SCAN_INTERVAL_SECS))
+                    .await;
+                rt.scan_pending_subflows(Arc::clone(&store)).await;
             }
         });
+        // 循环型 worker：它的正常行为是**永不结束** ⇒ "已结束"本身就是缺陷。
+        // 不需要捕获 panic：任务 panic 时 `is_finished()` 也变成 true，同一判据覆盖两种死法。
+        self.workers
+            .register_loop("workflow_subflow_scanner", handle);
     }
 
-    /// 扫描并恢复已完成子流程的父实例
-    async fn scan_subflows(&self, store: Arc<S>) {
-        // 查找所有挂起的实例
+    /// spawn 一个**一次性** drive 任务，并把它"是否正常收尾"变成可拉取的事实。
+    ///
+    /// 为什么不用 `is_finished()` 直接判定故障：drive 的**正常**结束（实例挂起 / 终态）
+    /// 是预期行为，只有"结束了但没跑到最后一行"才是缺陷。所以在任务最后一行置一个
+    /// `completed` 标志，由 [`WorkerLiveness`] 在结算时区分两者。
+    ///
+    /// 不用 `catch_unwind`：那需要 `futures::FutureExt`，而 `coord-core` 的依赖面要过
+    /// `deny.toml`（为一个可观测性需求引入新依赖面不划算）；标志位是零依赖的等价判据。
+    ///
+    /// `instance_id` 进标签，是为了让出口能回答"**哪个**实例的驱动死了"而不只是报总数。
+    fn spawn_drive(&self, instance_id: String, definition: WorkflowDefinition, store: Arc<S>) {
+        let rt = self.clone_runtime();
+        let label = format!("workflow_drive[{instance_id}]");
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&completed);
+        let handle = tokio::spawn(async move {
+            rt.drive(instance_id, definition, store).await;
+            // ⚠️ 这一行是判据的一部分：`drive` 中途死亡时它不会被执行，
+            // 结算时该 worker 即被判为"未正常收尾"。不要把它移出 async 块。
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        self.workers.register_oneshot(label, handle, completed);
+    }
+
+    /// 登记一个待恢复的父子对（父因 `RunSubflow` 挂起时调用）。
+    fn register_pending_subflow(&self, parent_id: String, subflow_id: String) {
+        if let Ok(mut map) = self.pending_subflows.lock() {
+            map.insert(parent_id, subflow_id);
+        }
+    }
+
+    /// 注销一个父子对（已恢复或已不再挂起）。
+    fn unregister_pending_subflow(&self, parent_id: &str) {
+        if let Ok(mut map) = self.pending_subflows.lock() {
+            map.remove(parent_id);
+        }
+    }
+
+    /// 启动期全量对账：列出所有挂起实例，登记其中的 `RunSubflow` 父子对，
+    /// 然后立刻检查一轮。**只在启动时跑一次**（稳态不再全量列举）。
+    async fn reconcile_suspended_subflows(&self, store: Arc<S>) {
         let instances = match store.list_instances(None, None, usize::MAX, None).await {
             Ok(list) => list,
             Err(_) => return,
         };
-
         for inst in instances {
-            // RunSubflow 挂起现为标准相位 Waiting（Suspended 兼容保留）
             if !matches!(
                 inst.status,
                 InstanceStatus::Suspended | InstanceStatus::Waiting
             ) {
                 continue;
             }
-            // 检查是否因 RunSubflow 挂起
-            let subflow_id = match inst
+            if let Some(subflow_id) = inst
                 .context
                 .get("_subflow_instance_id")
                 .and_then(|v| v.as_str())
             {
-                Some(id) => id.to_string(),
-                None => continue,
-            };
+                self.register_pending_subflow(inst.id.clone(), subflow_id.to_string());
+            }
+        }
+        self.scan_pending_subflows(store).await;
+    }
 
-            // 检查子流程是否完成
+    /// 检查登记表里的父子对：子流程已完成 ⇒ 恢复父流程并注销。
+    ///
+    /// 登记表为空时是 O(1)（不再每 5 秒克隆全部实例）。
+    async fn scan_pending_subflows(&self, store: Arc<S>) {
+        // 快照登记表（不持锁跨 await）。
+        let pairs: Vec<(String, String)> = match self.pending_subflows.lock() {
+            Ok(map) => map.iter().map(|(p, c)| (p.clone(), c.clone())).collect(),
+            Err(_) => return,
+        };
+        if pairs.is_empty() {
+            return;
+        }
+        for (parent_id, subflow_id) in pairs {
+            // 子流程是否完成
             let sub_inst = match store.load_instance(&subflow_id).await {
                 Ok(Some(si)) => si,
+                // 读失败/不存在：保留登记，下一 tick 再看
                 _ => continue,
             };
-
             if !sub_inst.status.is_terminal() {
                 continue;
             }
 
-            // 子流程已完成，恢复父流程
-            let mut parent = inst.clone();
-
-            let signal_payload = match sub_inst.status {
-                InstanceStatus::Completed => sub_inst.output.clone().unwrap_or(Value::Null),
-                InstanceStatus::Failed => {
-                    serde_json::json!({
-                        "_subflow_error": sub_inst.fault.map(|f| f.title).unwrap_or_default(),
-                    })
+            // 父实例是否仍挂在这条子流程上（已恢复/已取消 ⇒ 注销）
+            let parent = match store.load_instance(&parent_id).await {
+                Ok(Some(p)) => p,
+                _ => {
+                    self.unregister_pending_subflow(&parent_id);
+                    continue;
                 }
-                _ => Value::Null,
             };
-
-            // 标记 run 任务帧为已完成并推进索引
-            if let Some(last_frame) = parent.task_stack.last_mut() {
-                last_frame.status = TaskStatus::Completed;
-                last_frame.output = Some(signal_payload.clone());
-                last_frame.ended_at = Some(self.clock.now_ms());
-            }
-            parent.current_task_index += 1;
-
-            parent.status = InstanceStatus::Running;
-            parent.suspension_meta = None;
-            parent.context["_signal"] = serde_json::json!({
-                "name": "_subflow_completed",
-                "payload": signal_payload,
-            });
-            parent.updated_at = self.clock.now_ms();
-
-            if store.save_instance(&parent).await.is_err() {
+            let still_waiting = matches!(
+                parent.status,
+                InstanceStatus::Suspended | InstanceStatus::Waiting
+            ) && parent
+                .context
+                .get("_subflow_instance_id")
+                .and_then(|v| v.as_str())
+                == Some(subflow_id.as_str());
+            if !still_waiting {
+                self.unregister_pending_subflow(&parent_id);
                 continue;
             }
-            self.emit_lifecycle(lifecycle::TASK_COMPLETED, &parent)
-                .await;
-            self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &parent)
-                .await;
 
-            // 加载父流程定义并重新驱动
-            let parent_def = match store
-                .load_definition(
-                    &parent.definition_ns,
-                    &parent.definition_name,
-                    &parent.definition_version,
-                )
+            if self
+                .resume_parent_after_subflow(parent, &sub_inst, &store)
                 .await
             {
-                Ok(Some(def)) => def,
-                _ => continue,
-            };
-
-            let drive_rt = self.clone_runtime();
-            let drive_store = Arc::clone(&store);
-            let pid = parent.id.clone();
-            tokio::spawn(async move {
-                drive_rt.drive(pid, parent_def, drive_store).await;
-            });
+                self.unregister_pending_subflow(&parent_id);
+            }
         }
+    }
+
+    /// 子流程已终结：把父流程从挂起恢复并重新驱动。
+    ///
+    /// 返回 `true` 表示本次已处理（可从登记表注销）；`false` 表示持久化失败，
+    /// 应保留登记、下一 tick 重试。
+    async fn resume_parent_after_subflow(
+        &self,
+        mut parent: WorkflowInstance,
+        sub_inst: &WorkflowInstance,
+        store: &Arc<S>,
+    ) -> bool {
+        let signal_payload = match sub_inst.status {
+            InstanceStatus::Completed => sub_inst.output.clone().unwrap_or(Value::Null),
+            InstanceStatus::Failed => {
+                serde_json::json!({
+                    "_subflow_error": sub_inst.fault.clone().map(|f| f.title).unwrap_or_default(),
+                })
+            }
+            _ => Value::Null,
+        };
+
+        // 标记 run 任务帧为已完成并推进索引
+        if let Some(last_frame) = parent.task_stack.last_mut() {
+            last_frame.status = TaskStatus::Completed;
+            last_frame.output = Some(signal_payload.clone());
+            last_frame.ended_at = Some(self.clock.now_ms());
+        }
+        parent.current_task_index += 1;
+
+        parent.status = InstanceStatus::Running;
+        parent.suspension_meta = None;
+        parent.context["_signal"] = serde_json::json!({
+            "name": "_subflow_completed",
+            "payload": signal_payload,
+        });
+        parent.updated_at = self.clock.now_ms();
+
+        if store.save_instance(&parent).await.is_err() {
+            return false;
+        }
+        self.emit_lifecycle(lifecycle::TASK_COMPLETED, &parent)
+            .await;
+        self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &parent)
+            .await;
+
+        // 加载父流程定义并重新驱动
+        let parent_def = match store
+            .load_definition(
+                &parent.definition_ns,
+                &parent.definition_name,
+                &parent.definition_version,
+            )
+            .await
+        {
+            Ok(Some(def)) => def,
+            _ => {
+                // 定义暂时读不到：保留登记，下一 tick 重试（与旧实现的 `continue` 同向，
+                // 但不再依赖全量扫描）
+                return false;
+            }
+        };
+
+        // 复用受监督的一次性 drive（见 [`Self::spawn_drive`]）：panic 会被记成可拉取的
+        // 事实，而正常结束（该父实例再次挂起/终态）**不计**为故障。
+        self.spawn_drive(parent.id.clone(), parent_def, Arc::clone(store));
+        true
     }
 
     /// 启动工作流实例
@@ -277,15 +576,8 @@ where
             .await
             .map_err(|e| RuntimeError::StoreError(e.to_string()))?;
 
-        // 克隆 Arc 用于 spawn
-        let runtime = self.clone_runtime();
-        let instance_id = inst.id.clone();
-        let store = Arc::clone(&self.store);
-        let def = definition.clone();
-
-        tokio::spawn(async move {
-            runtime.drive(instance_id, def, store).await;
-        });
+        // 后台 drive（受监督：见 [`Self::spawn_drive`]）
+        self.spawn_drive(inst.id.clone(), definition.clone(), Arc::clone(&self.store));
 
         // 工作流级超时接线（标准 §Fault Tolerance）：超时 → timeout 错误（408）→ faulted
         if let Some(t) = &definition.timeout {
@@ -625,11 +917,9 @@ where
         self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &inst)
             .await;
 
-        // 后台 drive（与子流程扫描器同模式，避免在事件等待任务内嵌套 drive）
-        let rt = self.clone_runtime();
-        tokio::spawn(async move {
-            rt.drive(instance_id, definition, store).await;
-        });
+        // 后台 drive（与子流程扫描器同模式，避免在事件等待任务内嵌套 drive；
+        // 受监督：见 [`Self::spawn_drive`]）
+        self.spawn_drive(instance_id, definition, store);
     }
 
     /// 调度超时：after_ms 后若实例仍非终端 → faulted（timeout 错误 408）
@@ -830,13 +1120,8 @@ where
                 ))
             })?;
 
-        let runtime = self.clone_runtime();
-        let id = inst.id.clone();
-        let store = Arc::clone(&self.store);
-
-        tokio::spawn(async move {
-            runtime.drive(id, def, store).await;
-        });
+        // 后台 drive（受监督：见 [`Self::spawn_drive`]）
+        self.spawn_drive(inst.id.clone(), def, Arc::clone(&self.store));
 
         Ok(inst)
     }
@@ -1147,6 +1432,9 @@ where
                                     Value::String(sub_id.clone());
                                 inst.updated_at = self.clock.now_ms();
                                 let _ = store.save_instance(&inst).await;
+                                // W1-4：登记父子对，交给 per-tick 的登记表扫描
+                                // （不再依赖每 5 秒的全量列举）。
+                                self.register_pending_subflow(inst.id.clone(), sub_id.clone());
                                 self.emit_lifecycle(lifecycle::WORKFLOW_WAITING, &inst)
                                     .await;
 
@@ -1684,6 +1972,8 @@ where
             store: Arc::clone(&self.store),
             dispatcher: Arc::clone(&self.dispatcher),
             event_provider: Arc::clone(&self.event_provider),
+            pending_subflows: Arc::clone(&self.pending_subflows),
+            workers: Arc::clone(&self.workers),
         }
     }
 }
@@ -1788,6 +2078,139 @@ mod tests {
         let dispatcher = NoopTaskDispatcher;
         let event_provider = NoopEventProvider;
         WorkflowRuntime::new(executor, clock, store, dispatcher, event_provider)
+    }
+
+    // ── W5-4：后台任务存活登记（正 / 反双测） ──
+
+    /// 正：刚建好的运行时健康 —— 扫描器在跑、没有故障。
+    ///
+    /// 这条同时是"判据不是恒真"的对照：如果 `finished_loops` 恒非空，下面的负控制
+    /// 就没有意义了。
+    #[tokio::test]
+    async fn worker_liveness_is_healthy_on_a_fresh_runtime() {
+        let rt = make_runtime();
+        // 让扫描器任务真正开始执行（`tokio::spawn` 后需要一次让出）
+        tokio::task::yield_now().await;
+        let l = rt.worker_liveness();
+        assert!(
+            l.finished_loops.is_empty(),
+            "刚启动的运行时不得报告已死的循环 worker：{l:?}"
+        );
+        assert!(!l.has_fault(), "刚启动的运行时不应有故障：{l:?}");
+        assert_eq!(l.panic_total(), 0);
+        assert!(l.recent_faults.is_empty());
+    }
+
+    /// 反（负控制）：把"已死的循环 worker"注入登记表 ⇒ **必须**被报出来。
+    ///
+    /// 不用真的弄死生产任务：判据是"`is_finished()` 为真即故障"，所以注入一个已经
+    /// 结束的句柄就等价于"那个循环死了"。这条测试防的是"登记了但没人看"——
+    /// 即第四轮 §6.3.6 的"能力静默死亡"。
+    #[tokio::test]
+    async fn worker_liveness_reports_a_dead_loop_worker() {
+        let rt = make_runtime();
+        let finished = tokio::spawn(async {});
+        // 等它真的结束
+        for _ in 0..100 {
+            if finished.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(finished.is_finished(), "注入用的句柄必须已结束");
+        rt.workers
+            .register_loop_for_test("injected_dead_loop", finished);
+
+        let l = rt.worker_liveness();
+        assert!(
+            l.finished_loops.iter().any(|n| n == "injected_dead_loop"),
+            "已结束的循环 worker 必须出现在 finished_loops 里：{l:?}"
+        );
+        assert!(l.has_fault(), "有已死循环 worker 时 has_fault 必须为真");
+    }
+
+    /// 反（负控制）：一次性 worker "结束但没跑到最后一行" ⇒ 计入故障并保留标签；
+    /// 而"正常收尾"的那一个**不得**被计入。
+    ///
+    /// 两个方向都在同一条测试里，因为这条判据的全部难点就是**区分**这两者。
+    #[tokio::test]
+    async fn worker_liveness_distinguishes_normal_completion_from_midway_death() {
+        let rt = make_runtime();
+
+        // ① 正常收尾：置位 completed
+        let ok_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let f = Arc::clone(&ok_flag);
+        let ok_handle = tokio::spawn(async move {
+            f.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        rt.workers
+            .register_oneshot("workflow_drive[ok]".to_string(), ok_handle, ok_flag);
+
+        // ② 中途死亡：句柄结束但 completed 未置位（等价于 panic / abort）
+        let dead_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dead_handle = tokio::spawn(async {});
+        rt.workers
+            .register_oneshot("workflow_drive[dead]".to_string(), dead_handle, dead_flag);
+
+        for _ in 0..100 {
+            if rt.worker_liveness().live_oneshot == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let l = rt.worker_liveness();
+        assert_eq!(
+            l.panic_total(),
+            1,
+            "只应把\"未正常收尾\"的那一个计为故障（正常收尾的不得计入）：{l:?}"
+        );
+        assert!(
+            l.recent_faults.iter().any(|t| t == "workflow_drive[dead]"),
+            "故障标签必须能定位到具体实例：{l:?}"
+        );
+        assert!(
+            !l.recent_faults.iter().any(|t| t == "workflow_drive[ok]"),
+            "正常收尾的 worker 不得出现在故障标签里：{l:?}"
+        );
+        assert_eq!(l.live_oneshot, 0, "两个一次性 worker 都已结束：{l:?}");
+
+        // 内存有界：结算后登记表里不应残留任何一次性 worker
+        assert!(
+            rt.workers.inner.lock().expect("lock").oneshots.is_empty(),
+            "已结束的一次性 worker 必须被结算掉（否则登记表会随实例数无界增长）"
+        );
+    }
+
+    /// 内存有界：故障标签保留量有上限（登记表不得成为新的无界增长点）。
+    #[tokio::test]
+    async fn worker_liveness_bounds_recent_faults() {
+        let rt = make_runtime();
+        let n = MAX_RECENT_FAULTS + 5;
+        for i in 0..n {
+            let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let handle = tokio::spawn(async {});
+            rt.workers
+                .register_oneshot(format!("workflow_drive[f{i}]"), handle, flag);
+            // 逐个结算，确保每次都进入故障分支
+            for _ in 0..50 {
+                if rt.worker_liveness().live_oneshot == 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+        let l = rt.worker_liveness();
+        assert_eq!(
+            l.panic_total(),
+            n as u64,
+            "计数必须完整（计数是有界的聚合，不随实例 id 增长）"
+        );
+        assert!(
+            l.recent_faults.len() <= MAX_RECENT_FAULTS,
+            "故障标签列表必须有界：{}",
+            l.recent_faults.len()
+        );
     }
 
     fn make_simple_definition() -> WorkflowDefinition {
@@ -2853,6 +3276,59 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.status, InstanceStatus::Completed);
         assert_eq!(loaded.context["done"], "after-wait");
+    }
+
+    // ─── 子流程恢复的登记表路径（W1-4） ───
+
+    /// 负控制（双向）：
+    /// 1. **登记表为空**时 `scan_pending_subflows` 不得改变任何实例状态
+    ///    —— 这保证稳态 tick 只做登记表检查，不再全量列举/克隆实例；
+    /// 2. **登记父子对**后，子流程已终结 ⇒ 父流程被恢复，并且该对被**注销**
+    ///    —— 防止「恢复成功后每 5 秒重复恢复同一个父实例」。
+    #[tokio::test]
+    async fn test_subflow_recovery_uses_pending_registry_not_full_scan() {
+        let runtime = make_runtime();
+        let store = Arc::clone(store_of(&runtime));
+
+        let parent_def =
+            make_definition_ext("parent-wf", vec![], None, None, None, Default::default());
+        let child_def =
+            make_definition_ext("child-wf", vec![], None, None, None, Default::default());
+        store.save_definition(&parent_def).await.unwrap();
+
+        let mut parent = WorkflowInstance::new(&parent_def, serde_json::json!({}), 1000);
+        parent.status = InstanceStatus::Waiting;
+        parent.context["_subflow_instance_id"] = Value::String("child-1".into());
+        let mut child = WorkflowInstance::new(&child_def, serde_json::json!({}), 1000);
+        child.id = "child-1".into();
+        child.status = InstanceStatus::Completed;
+        child.output = Some(serde_json::json!({ "ok": true }));
+        store.save_instance(&parent).await.unwrap();
+        store.save_instance(&child).await.unwrap();
+
+        // ① 空登记表：不触碰实例（稳态 O(1)）
+        runtime.scan_pending_subflows(Arc::clone(&store)).await;
+        let untouched = store.load_instance(&parent.id).await.unwrap().unwrap();
+        assert_eq!(
+            untouched.status,
+            InstanceStatus::Waiting,
+            "登记表为空时不得恢复任何实例（否则等于又回到全量扫描）"
+        );
+
+        // ② 登记父子对：子流程已终结 ⇒ 父流程恢复 + 注销
+        runtime.register_pending_subflow(parent.id.clone(), child.id.clone());
+        runtime.scan_pending_subflows(Arc::clone(&store)).await;
+
+        let after = store.load_instance(&parent.id).await.unwrap().unwrap();
+        assert_ne!(
+            after.status,
+            InstanceStatus::Waiting,
+            "子流程已终结，父流程必须被恢复"
+        );
+        assert!(
+            runtime.pending_subflows.lock().unwrap().is_empty(),
+            "恢复成功后必须注销登记（否则会每 tick 重复恢复）"
+        );
     }
 
     // ─── signal 校验 ───

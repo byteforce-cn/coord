@@ -24,9 +24,11 @@
   3. `:mq-dup-offset`（**P0**）—— 两次已确认的发布拿到**同一个 offset**
      （broker 分配失败 ⇒ 一条消息被覆盖）。
   4. `:mq-dup-in-response`（**P1**）—— 同一个 Poll 响应里同一 offset 出现多次。
-  5. `:mq-redelivered-after-ack`（**P1**）—— 已 Ack 的 offset 又被投递。
-     at-least-once 允许**未确认**消息重投（这是合法语义），但已确认的重投说明
-     Ack 没被记住（消费者会把业务重放一次）。
+  5. `:mq-redelivered-after-ack`（**P1**）—— **同一消费者**已 Ack 的 offset 又被
+     投递给它，且该次 Poll 的 `start_offset` 已经**越过**该 offset（游标只由 Ack
+     推进，起点越过它就说明 Ack 没被记住）。
+     at-least-once 允许**未确认**消息重投（这是合法语义），也允许**另一个消费者**
+     按自己的游标从 0 重放同一批 offset（F-68：多消费者拓扑里后者曾被误判为前者）。
   6. `:mq-out-of-order`（**P1**）—— 单个 Poll 响应内 offset 不是严格递增。
   7. 样本门槛 —— 已确认发布数 < `:min-publishes` 即 **invalid**（未执行，不是绿）。
 
@@ -34,7 +36,8 @@
 
   * **流式 Subscribe 未覆盖**（订阅端「不丢」的判据在 Poll 面上是等价的，但
     push 侧的背压行为没有观测）；
-  * **消费者组再平衡 / 多消费者**未覆盖（本 checker 只跑单消费者）；
+  * **消费者组再平衡**未覆盖（`CONCURRENCY=1n` 起的每个客户端各自一条游标，
+    这是 F-68 修好后的形态：**跨客户端重放不再误判**，但组内再平衡/抢占仍未观测）；
   * **DLQ（PollDlq）与毒消息**未覆盖；
   * **ISR 复制的跨 agent 面**未覆盖（同 cache：需要 agent 间可达）。"
   (:require [clojure.tools.logging :refer [info]]
@@ -52,7 +55,16 @@
 (defn- polls [ops] (filterv #(= :mq-poll (:f %)) ops))
 
 (defn- ack-events
-  "把 poll op 内部 Confirm 的 offset 展开成 `{[topic partition offset] ack-毫秒}`。
+  "把 poll op 内部 Confirm 的 offset 展开成
+  `{[process topic partition offset] ack-毫秒}`。
+
+  **F-68（键里必须带 process）**：Ack 只对**同一个消费者**有意义。旧实现按
+  `[topic partition offset]` 记账 ⇒ 多消费者拓扑里「客户端 B 按契约从 0 重放
+  客户端 A 已确认过的 offset」被当成「Ack 没被记住」。实测证据：
+  `docs/production/evidence/20260920T133301Z-m5b-mq-multi-client-checker-artifact/`
+  （`CONCURRENCY=1n`）报 `:mq-redelivered-after-ack 461`，而同一 run
+  `:poll-ack-failures 0`、`delivered 118 = acked 118`（系统侧无丢失、Ack 生效），
+  且单客户端跑法同判据为 0 ⇒ 461 条来自「客户端各自一条游标」的合法形态。
 
   Ack 发生在 poll 响应之后、op completion 之前，所以用 completion 时刻当上界是
   **保守**的：判「已确认的又被重投」时只会漏报、不会误报。
@@ -63,8 +75,10 @@
   fixture 就是因为这个 false negative 判成了 valid）。"
   [ops]
   (reduce (fn [m p]
-            (let [t (quot (end-ns p) 1000000)]              (reduce (fn [m o]
-                        (let [k (conj [( :topic p) (long (or (:partition p) 0))]
+            (let [t (quot (end-ns p) 1000000)]
+              (reduce (fn [m o]
+                        (let [k (conj [(:process p) (:topic p)
+                                      (long (or (:partition p) 0))]
                                       (long o))
                               cur (get m k)]
                           (if (and cur (<= (long cur) t)) m (assoc m k t))))
@@ -181,24 +195,41 @@
        vec))
 
 (defn- redelivered-after-ack
-  "判据 5：已 Ack 的 offset 之后又被投递。
+  "判据 5：**同一消费者**已 Ack 的 offset 又被投递给它，且该次 Poll 的
+  `start_offset` 已越过该 offset。
+
+  两个必须同时成立的条件（缺一即误报）：
+    a) **同一 process** 确认过该 offset —— Ack 是消费者私有状态，另一个消费者
+       从未确认过它（F-68；见 `ack-events` 的实测证据）；
+    b) 该次 Poll 的 `start_offset > offset` —— 客户端游标只在 Ack **全部成功**后
+       推进，所以起点越过 o 只能是「Ack 已被服务端记住」推出来的；若客户端
+       显式从 ≤ o 处重读（自己要求重放），那不是 ack 被丢。
+
+  缺 `:start-offset` 字段时保守取 0（= 不判红）。
 
   只在「Ack 完成于该次 Poll 起点之前」时判（P1：ack 语义被破坏）。"
   [ops]
   (let [acked (ack-events ops)]
     (->> (filterv #(= :ok (:type %)) (polls ops))
          (mapcat (fn [p]
-                   (for [msg (:messages p)
-                         :let [k (conj [( :topic msg) (long (:partition msg))]
-                                       (long (:offset msg)))
-                               at (get acked k)]
-                         :when (and at (< (long at) (quot (start-ns p) 1000000)))]
-                     {:type :mq-redelivered-after-ack
-                      :topic (:topic msg) :partition (:partition msg)
-                      :offset (long (:offset msg))
-                      :acked-at-ms (long at)
-                      :poll-start-ms (quot (start-ns p) 1000000)
-                      :note "已确认（Ack）的消息被再次投递"})))
+                   (let [start (long (or (:start-offset p) 0))]
+                     (for [msg (:messages p)
+                           :let [o (long (:offset msg))
+                                 k (conj [(:process p) (:topic msg)
+                                         (long (or (:partition msg) 0))]
+                                         o)
+                                 at (get acked k)]
+                           :when (and at
+                                      (> start o)
+                                      (< (long at) (quot (start-ns p) 1000000)))]
+                       {:type :mq-redelivered-after-ack
+                        :topic (:topic msg) :partition (:partition msg)
+                        :offset o
+                        :process (:process p)
+                        :start-offset start
+                        :acked-at-ms (long at)
+                        :poll-start-ms (quot (start-ns p) 1000000)
+                        :note "同一消费者已确认（Ack）的消息被再次投递，且其 Poll 起点已越过该 offset"}))))
          vec)))
 
 (defn- idem-not-deduped

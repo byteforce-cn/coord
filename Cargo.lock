@@ -720,6 +720,7 @@ name = "coord-proto"
 version = "0.2.0"
 dependencies = [
  "prost",
+ "prost-types",
  "serde",
  "tonic",
  "tonic-prost",

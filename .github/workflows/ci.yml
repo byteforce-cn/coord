@@ -53,6 +53,10 @@ jobs:
         run: cargo clippy --workspace --all-targets
       - name: Panic-path gate (non-test unwrap/expect/panic count = 0, P0-F.4)
         run: bash scripts/check-panics.sh
+      - name: Alert ↔ runbook gate (W5-3 / P-Gate 7)
+        # 每条告警必须有 runbook_url，且锚点必须在 runbook 文档里真实存在，
+        # 且告警处置段里没有孤儿小节。纯文本 + python3，不需要 Rust/protoc。
+        run: bash scripts/check-gate-drills.sh
 
   # 第四轮 §3.9⑥：**门禁自检**——这是唯一能区分「门禁存在」与「门禁生效」的机制。
   #
@@ -80,6 +84,28 @@ jobs:
             exit 1
           fi
           echo "OK: fmt gate correctly turned red on the injected violation"
+      - name: Assert the alert↔runbook gate turns red on an injected violation
+        # W2-5：同一个自检思路用在**新加的**运维面卡口上。注入一条锚点失配
+        # （把 runbook 的小节标题改名）⇒ 断言 `check-gate-drills.sh` 必须变红。
+        # 没有这一步，新门禁可能与 fmt 门禁当初一样「写了但从未生效」。
+        run: |
+          set -euo pipefail
+          runbook=docs/production/ops/runbook.md
+          # 先确认基线是绿的（否则“注入后变红”没有信息量）
+          bash scripts/check-gate-drills.sh
+          python3 - "$runbook" <<'PY'
+          import pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          t = p.read_text(encoding="utf-8")
+          old = "### `CoordNoLeader` — 集群 60s 无 leader"
+          assert old in t, "self-check anchor missing: runbook 结构变了，请更新本步骤"
+          p.write_text(t.replace(old, "### `CoordNoLeader` 集群无主", 1), encoding="utf-8")
+          PY
+          if bash scripts/check-gate-drills.sh >/dev/null 2>&1; then
+            echo "::error::alert↔runbook gate did NOT fail on an injected anchor mismatch — the gate is not effective"
+            exit 1
+          fi
+          echo "OK: alert↔runbook gate correctly turned red on the injected violation"
 
   frontend-lint:
     name: frontend lint (coord-ui)

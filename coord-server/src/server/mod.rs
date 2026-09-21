@@ -33,7 +33,7 @@ use coord_proto::txn::{txn_server::Txn, Compare, RequestOp, ResponseOp, TxnReque
 use coord_proto::watch::{watch_server::Watch, WatchEvent, WatchRequest, WatchResponse};
 
 use coord_core::kv_range::RangeSemantics;
-use coord_core::types::RegionId;
+use coord_core::types::{LeaseID, RegionId};
 
 use crate::auth::service::AuthOpProposer;
 use crate::lease::LeaseManager;
@@ -743,15 +743,61 @@ impl CoordNode {
         Ok(())
     }
 
+    /// 下发一次 Lease 过期 revoke（**F-27** 的"提交"步骤）。
+    ///
+    /// 返回 `Ok(())` **仅当** revoke 已在状态机提交：
+    /// - 集群模式：`raft.client_write` 返回成功（含超时上限，避免失去 quorum 时
+    ///   写路径无限期挂住整个过期轮询）；
+    /// - 单节点模式：`apply_lease_op_standalone` 成功。
+    ///
+    /// 任何失败/超时返回 `Err`，调用方**必须**保留待办并重试 —— 不得把失败当完成。
+    /// 重试是安全的：状态机侧 `LeaseOp::Revoke` 对不存在的租约**幂等**（no-op 删除），
+    /// 且 delete_keys 路径同样幂等。
+    pub async fn propose_lease_revoke(&self, lease_id: LeaseID) -> Result<(), String> {
+        let op = LeaseOp::Revoke {
+            id: lease_id,
+            delete_keys: true,
+        };
+        match self.raft {
+            Some(ref raft) => {
+                let cmd = Command::Lease(op);
+                let timeout = self.limits.read().write_timeout;
+                match tokio::time::timeout(timeout, raft.client_write(cmd)).await {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(e)) => Err(format!("client_write failed: {e}")),
+                    Err(_) => Err(format!("client_write timed out after {timeout:?}")),
+                }
+            }
+            None => self
+                .storage
+                .apply_lease_op_standalone(&op)
+                .map(|_| ())
+                .map_err(|e| format!("standalone apply failed: {e}")),
+        }
+    }
+
     /// 启动 Lease 过期轮询循环（后台任务）。
     ///
     /// 每 200ms 调用 `LeaseManager::check_expired()`，对已过期的 Lease
     /// 经 raft 下发 `LeaseOp::Revoke{delete_keys:true}`（任何路径不得直写本地存储）。
     ///
+    /// **F-27（合同级，`coord-findings.md` F-27）**：revoke **提交成功才算完成**。
+    /// 失败/超时的条目进 `pending` 集合，下个 tick 重试；本地 `LeaseManager` 中的记录
+    /// 只在 `finish_expired()`（提交确认）之后才移除。
+    ///
+    /// 旧实现是「先移除本地记录、`client_write` 失败只 `warn!`」⇒ 该次 revoke **永久丢失**，
+    /// 绑定 Key 只在下一次 leader rebuild 时才会被清（不再换主即永久泄漏），
+    /// 而契约承诺的是「Lease 过期 ⇒ 绑定 Key 级联删除」。
+    /// 待办集合的模式与 `start_region_lease_revoker` 一致。
+    ///
     /// 应在 server 启动后调用（Leader 独占；Follower 无 LeaseManager 则跳过）。
     pub fn start_lease_expiry_worker(self: &Arc<Self>) {
         let node = Arc::clone(self);
         tokio::spawn(async move {
+            // F-27：待重试的 revoke。提交确认后才从集合与本地管理器中移除。
+            let mut pending: std::collections::BTreeSet<LeaseID> = Default::default();
+            // 失败告警节流（每 5s 最多一条），避免失去 quorum 时刷爆日志
+            let mut last_warn: Option<tokio::time::Instant> = None;
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
             loop {
                 interval.tick().await;
@@ -763,33 +809,56 @@ impl CoordNode {
                 let Some(ref lm) = node.lease_manager else {
                     continue;
                 };
-                let actions = lm.check_expired();
-                for action in actions {
+
+                // 本轮：新过期的 + 此前未确认提交的（`check_expired` 对已标记项会继续上报）
+                for action in lm.check_expired() {
                     match action {
                         crate::lease::LeaseAction::Expired { lease_id, .. } => {
-                            let op = LeaseOp::Revoke {
-                                id: lease_id,
-                                delete_keys: true,
-                            };
-                            // 通过 Raft（集群模式）或直接 apply（单节点模式）
-                            if let Some(ref raft) = node.raft {
-                                let cmd = Command::Lease(op);
-                                if let Err(e) = raft.client_write(cmd).await {
-                                    tracing::warn!(
-                                        "Lease {} expiry: failed to revoke via raft: {}",
-                                        lease_id,
-                                        e
-                                    );
-                                }
-                            } else if let Err(e) = node.storage.apply_lease_op_standalone(&op) {
-                                tracing::warn!(
-                                    "Lease {} expiry: failed to apply revoke: {}",
-                                    lease_id,
-                                    e
-                                );
-                            }
+                            pending.insert(lease_id);
                         }
                     }
+                }
+                if pending.is_empty() {
+                    continue;
+                }
+
+                let round = advance_pending_revokes(&pending, |lease_id| {
+                    let node = Arc::clone(&node);
+                    async move { node.propose_lease_revoke(lease_id).await }
+                })
+                .await;
+
+                for lease_id in &round.done {
+                    pending.remove(lease_id);
+                    // 提交已确认 ⇒ 此刻才移除本地记录（此后 revoke 不会再丢）
+                    lm.finish_expired(*lease_id).await;
+                }
+                if round.failed > 0 {
+                    let should_log = last_warn
+                        .map(|t| t.elapsed() >= std::time::Duration::from_secs(5))
+                        .unwrap_or(true);
+                    if should_log {
+                        last_warn = Some(tokio::time::Instant::now());
+                        // 无 `expect`：panic 卡口（P0-F）禁止生产代码里的 unwrap/expect。
+                        // `failed > 0` 与 `first_error.is_some()` 由 `advance_pending_revokes`
+                        // 同时置位，这里仍按"取不到就退化为不带明细的告警"处理（fail-safe 日志）。
+                        match round.first_error.as_ref() {
+                            Some((first_id, first_err)) => tracing::warn!(
+                                failed = round.failed,
+                                pending = pending.len(),
+                                first_lease_id = first_id,
+                                error = %first_err,
+                                "lease expiry revoke not committed; entries retained for retry (F-27)"
+                            ),
+                            None => tracing::warn!(
+                                failed = round.failed,
+                                pending = pending.len(),
+                                "lease expiry revoke not committed; entries retained for retry (F-27)"
+                            ),
+                        }
+                    }
+                } else {
+                    last_warn = None;
                 }
             }
         });
@@ -3085,9 +3154,118 @@ impl Maintenance for CoordNode {
 
 // ──── 测试 ────
 
+/// 一轮待办 lease 过期 revoke 的推进结果（**F-27**）。
+#[derive(Debug, Default)]
+struct RevokeRound {
+    /// 本轮**确认提交**的 lease_id（调用方可安全地从待办集合与本地管理器中移除）
+    done: Vec<LeaseID>,
+    /// 本轮提交失败的数量 —— 这些条目必须保留待重试
+    failed: usize,
+    /// 第一条失败（lease_id, 错误串），供聚合告警使用
+    first_error: Option<(LeaseID, String)>,
+}
+
+/// 推进一轮待办 lease 过期 revoke（**F-27**）。
+///
+/// 对 `pending` 中每个 lease_id 调用 `commit`；**只有提交成功**的条目进入
+/// `RevokeRound::done`。失败项不进入 `done` ⇒ 调用方保留它们，下个 tick 重试。
+///
+/// 抽成自由函数 + 注入式 `commit` 是为了让「提交失败 ⇒ 必须重试、且不得被记为完成」
+/// 这条判据可被单测直接驱动（无需真集群 / 真分区）。
+async fn advance_pending_revokes<F, Fut>(
+    pending: &std::collections::BTreeSet<LeaseID>,
+    mut commit: F,
+) -> RevokeRound
+where
+    F: FnMut(LeaseID) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let mut round = RevokeRound::default();
+    for &lease_id in pending.iter() {
+        match commit(lease_id).await {
+            Ok(()) => round.done.push(lease_id),
+            Err(e) => {
+                round.failed += 1;
+                if round.first_error.is_none() {
+                    round.first_error = Some((lease_id, e));
+                }
+            }
+        }
+    }
+    round
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ──── F-27：lease 过期 revoke 不得静默丢失（重试语义） ────
+
+    /// 提交失败 ⇒ 该条目**不得**被记为完成；调用方保留它，下个 tick 必须重试。
+    ///
+    /// 旧实现：`check_expired()` 已把过期 Lease 移出本地管理器，`client_write` 失败只
+    /// `warn!` ⇒ revoke 永久丢失、绑定 Key 泄漏（`coord-findings.md` F-27）。
+    #[test]
+    fn test_f27_failed_revoke_commit_is_not_marked_done() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut pending: std::collections::BTreeSet<LeaseID> = Default::default();
+            pending.insert(11);
+
+            // 第一轮：模拟 partition 期间 client_write 无法提交
+            // （真实形态：`has to forward request to: None, None`）
+            let round = advance_pending_revokes(&pending, |_id| async {
+                Err::<(), String>("has to forward request to: None, None".to_string())
+            })
+            .await;
+            assert!(round.done.is_empty(), "a failed commit must not be 'done'");
+            assert_eq!(round.failed, 1);
+            assert_eq!(round.first_error.as_ref().unwrap().0, 11);
+            assert_eq!(
+                pending.len(),
+                1,
+                "F-27: the entry must stay pending for the next tick"
+            );
+
+            // 第二轮：提交成功 ⇒ 记为完成，调用方移除
+            let round =
+                advance_pending_revokes(&pending, |_id| async { Ok::<(), String>(()) }).await;
+            assert_eq!(round.done, vec![11]);
+            assert_eq!(round.failed, 0);
+            for id in &round.done {
+                pending.remove(id);
+            }
+            assert!(pending.is_empty());
+        });
+    }
+
+    /// 部分失败：**成功的不丢、失败的保留**（不得一刀切清空待办）。
+    #[test]
+    fn test_f27_partial_failure_keeps_only_failed_entries_pending() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut pending: std::collections::BTreeSet<LeaseID> = Default::default();
+            for id in [21, 22, 23] {
+                pending.insert(id);
+            }
+
+            let round = advance_pending_revokes(&pending, |id| async move {
+                if id == 22 {
+                    Err::<(), String>("apply failed".to_string())
+                } else {
+                    Ok(())
+                }
+            })
+            .await;
+
+            assert_eq!(round.done, vec![21, 23]);
+            assert_eq!(round.failed, 1);
+            for id in &round.done {
+                pending.remove(id);
+            }
+            assert_eq!(pending.iter().copied().collect::<Vec<_>>(), vec![22]);
+        });
+    }
 
     // ──── to_kv_proto ────
 

@@ -21,6 +21,7 @@
 //! 语义判定（`(key, range_end)` 到底是点查还是区间）不在本模块定义，而由
 //! [`crate::kv_range::RangeSemantics::of`] 单点给出。
 
+use crate::auth::trie::ScopeTrie;
 use crate::kv_range::RangeSemantics;
 use prost::Message;
 
@@ -366,6 +367,133 @@ impl ScopeAccess {
     }
 }
 
+/// Watch 首帧（**已解码**的 `WatchCreateRequest`）→ 该订阅触碰的 scope 区间。
+///
+/// # 为什么这个函数必须存在
+///
+/// Watch 是**客户端流式** RPC：订阅的前缀/区间在**首帧** `WatchCreateRequest` 里，
+/// 而鉴权层拿不到它 —— 要拿到就得把整个流 body 缓存下来，而流的 body 在客户端
+/// half-close 前永不结束，缓存 = 请求永久挂起（第四轮的 P0 事故，见
+/// [`is_streaming_rpc`]）。所以 Watch 的 scope 判定只能**在 handler 里、拿到首帧之后**做。
+///
+/// 本函数是该判定的输入侧，与 [`extract_scope_access`] 的 Watch 分支**同一实现**
+/// （不是拷贝）：Watch 的 `range_end` 为空 = **字节前缀订阅**（与 KV 的"单键"语义
+/// 不同），区间由 [`crate::kv_range::watch_match_interval`] 给出 —— 与投递侧
+/// `coord-server/src/watch/mod.rs::key_matches` 是同一个函数，故不可能漂移。
+///
+/// `hi = None`（空前缀 / 全 0xFF）表示无有限上界：用 etcd 的无界上界符号表示，
+/// 有界 scope 一律拒绝（fail-closed）。
+pub fn watch_create_access(key: &[u8], range_end: &[u8]) -> ScopeAccess {
+    let (lo, hi) = crate::kv_range::watch_match_interval(key, range_end);
+    let upper = hi.unwrap_or_else(|| crate::kv_range::UNBOUNDED_RANGE_END.to_vec());
+    ScopeAccess::range(lo, upper)
+}
+
+/// scope 判定（fail-closed）：本次访问的**全部**区间都必须被授权覆盖。
+///
+/// - `accesses` 为空（未能提取资源键）→ 只有**无约束**授权（存在空 scope）放行，
+///   存在非空 scope 限制时拒绝；
+/// - 否则逐条判定：单键走 [`ScopeTrie::matches`]；区间走
+///   [`crate::auth::trie::scope_covers_interval`]（要求**整体包含**，与服务端 A1
+///   的区间语义一致）。
+///
+/// # 单一实现
+///
+/// 鉴权层（一元 RPC：先缓存 body、再提取）与流式 handler（Watch：解码首帧后提取）
+/// **必须**用同一个判定；两份实现就等于"同一条 scope 在两条路径上语义不同"。
+/// 因此本函数是本仓库**唯一**的 scope 覆盖判定实现，`coord_agent::auth::interceptor`
+/// 只做委托，不得再写一份。
+pub fn scope_allows(grant_scopes: &[String], accesses: &[ScopeAccess]) -> bool {
+    if accesses.is_empty() {
+        return grant_scopes.iter().any(|s| s.is_empty());
+    }
+    accesses.iter().all(|access| {
+        grant_scopes.iter().any(|scope| {
+            if scope.is_empty() {
+                return true; // 无约束授权覆盖一切
+            }
+            if access.range_end.is_empty() {
+                match std::str::from_utf8(&access.key) {
+                    Ok(key) => {
+                        let mut trie = ScopeTrie::new();
+                        trie.insert(scope).is_ok() && trie.matches(key)
+                    }
+                    // 非 UTF-8 key 无法与字符串 scope 比对 → 拒绝（fail-closed）
+                    Err(_) => false,
+                }
+            } else {
+                crate::auth::trie::scope_covers_interval(scope, &access.key, &access.range_end)
+            }
+        })
+    })
+}
+
+/// 该 RPC 的 scope 判定是否**被延后到 handler**（客户端流式 RPC）。
+///
+/// 判据是结构性的，不是偏好：这类 RPC 的资源键在**流 body** 里，鉴权层看不到、
+/// 又不能缓存（缓存 ⇒ 永久挂起）。所以判定必须由 handler 解码首帧后执行，
+/// 鉴权层则把授权快照（[`DeferredScopeGrants`]）放进请求扩展交给它。
+///
+/// # 与 [`needs_scope_extraction`] 的关系
+///
+/// 两者**互斥且必须覆盖每一个 scope 承载的 RPC**：
+/// - `needs_scope_extraction(x)` ⇒ 鉴权层缓存 body 后判定（`body_scope_extractor`）；
+/// - `is_deferred_scope_rpc(x)` ⇒ handler 判定（本仓库目前只有 Watch）；
+/// - 两者皆 false 而该 RPC 在 [`rpc_capability`] 里**有**能力 ⇒ **无人判定 scope**
+///   （fail-open 的形态之一）。
+///
+/// 卡口：`coord-agent` 侧 `deferred_scope_rpcs_are_client_streaming_and_scope_bearing`
+/// 钉住「延后集合 ⊆ 流式集合 ∩ 有能力的集合」「延后集合 ∩ 缓存集合 = ∅」；
+/// `coord-core` 侧 `deferred_and_buffered_scope_sets_are_disjoint` 钉住互斥。
+pub fn is_deferred_scope_rpc(rpc_method: &str) -> bool {
+    matches!(rpc_method, "/coord.watch.Watch/Watch")
+}
+
+/// 鉴权层交给**流式 handler** 的授权快照（见 [`is_deferred_scope_rpc`]）。
+///
+/// 语义：`grant_scopes` 是调用方在该能力上的授权 scope 列表（`""` = 无约束）。
+/// 鉴权层已完成认证与能力判定，只剩 scope 判定；它把授权列表交给 handler，
+/// 由 handler 用首帧解码出的访问区间调 [`scope_allows`]。
+///
+/// # 缺省语义（fail-closed 的落点写在注释里，不写在文档里是不够的）
+///
+/// 请求扩展里**没有**本类型 ⇒ handler 不做 scope 判定。该缺省只对应三种"本层不施加
+/// scope 约束"的既有语义：① 鉴权关闭（`AuthInterceptor::enabled == false`，与
+/// `validate_request_accesses` 的早退同口径）；② root（全能力旁路，与第 5b 步同口径）；
+/// ③ 请求根本没经过鉴权层（单元测试直调 handler / 未挂载该 layer）。
+///
+/// 反过来：**有约束**的授权一定伴随本类型 —— 鉴权层在放行时插入它，且
+/// `grant_scopes` 必非空（空授权在第 6 步已被拒）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredScopeGrants {
+    /// 被判定为需要 scope 的能力 ID（[`rpc_capability`] 的输出）。
+    pub capability_id: String,
+    /// 授权 scope 列表；含空串 = 存在无约束授权。
+    pub grant_scopes: Vec<String>,
+}
+
+/// 流式 handler 的 scope 判定入口（唯一实现，见 [`scope_allows`]）。
+///
+/// `grants = None` ⇒ 放行（无约束，语义见 [`DeferredScopeGrants`] 的缺省段落）。
+/// 返回 `Err` 的字符串是拒绝原因，handler 必须把它变成
+/// `PERMISSION_DENIED`（而不是 `UNAUTHENTICATED`：身份是有效的，缺的是权限）。
+pub fn check_deferred_scope(
+    grants: Option<&DeferredScopeGrants>,
+    accesses: &[ScopeAccess],
+) -> Result<(), String> {
+    let Some(grants) = grants else {
+        return Ok(());
+    };
+    if scope_allows(&grants.grant_scopes, accesses) {
+        return Ok(());
+    }
+    Err(format!(
+        "scope restriction: capability '{}' not granted for the requested resource(s); \
+         grant scopes {:?}, accesses {:?} (deferred/fail-closed)",
+        grants.capability_id, grants.grant_scopes, accesses
+    ))
+}
+
 /// 从请求 body 提取 scope **访问区间**列表。
 ///
 /// - Put：单 key；
@@ -475,14 +603,10 @@ pub fn extract_scope_access(rpc_method: &str, body: &[u8]) -> Result<Vec<ScopeAc
                     // 语义建模，否则 `key="/app"`（无尾斜杠）+ scope `/app/`
                     // 会放行 `/application/...` 的订阅。
                     //
-                    // 区间由 `watch_match_interval` 计算——与投递侧 `key_matches`
-                    // 是**同一个**函数，故两者不可能漂移。
-                    let (lo, hi) =
-                        crate::kv_range::watch_match_interval(&create.key, &create.range_end);
-                    // `hi = None`（空前缀 / 全 0xFF）⇒ 无有限上界：用 etcd 的无界上界
-                    // 符号表示，有界 scope 一律拒绝（fail-closed）。
-                    let upper = hi.unwrap_or_else(|| crate::kv_range::UNBOUNDED_RANGE_END.to_vec());
-                    accesses.push(ScopeAccess::range(lo, upper));
+                    // 区间由 [`watch_create_access`] 计算 —— 与投递侧 `key_matches`
+                    // 是**同一个**函数，且与 handler 侧延迟判定**同一实现**，
+                    // 故两条路径不可能漂移。
+                    accesses.push(watch_create_access(&create.key, &create.range_end));
                 }
             }
             Ok(accesses)
@@ -726,5 +850,158 @@ mod tests {
         let accesses =
             extract_scope_access("/coord.txn.Txn/Txn", &txn.encode_to_vec()).expect("parse");
         assert_eq!(accesses, vec![ScopeAccess::point(b"/app/a".to_vec())]);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // W1-6：流式 RPC（Watch）的 scope 判定改在 handler 侧执行
+    //
+    // 「延后判定」的前提是**恰好有一个人判定**：鉴权层（缓存 body 提取）或
+    // handler（解码首帧）。两份名单若相交，watch 会因为 body 缓存而挂起
+    // （第四轮 P0）；若都不覆盖一个 scope 承载的 RPC，则该 RPC 的 scope
+    // 判定**不存在**（fail-open）。下面两条把这两个方向都钉住。
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// 延后集合的结构性判据：**客户端流式** ∩ **有能力的 RPC**，且与 body 缓存集合互斥。
+    #[test]
+    fn deferred_scope_rpcs_are_streaming_scope_bearing_and_disjoint() {
+        let watch = "/coord.watch.Watch/Watch";
+        assert!(
+            is_deferred_scope_rpc(watch),
+            "Watch 是客户端流式 RPC，其 scope 判定必须延后到 handler"
+        );
+        assert!(
+            is_streaming_rpc(watch),
+            "延后的前提是它确实是流式 RPC（否则应走鉴权层 body 提取）"
+        );
+        assert!(
+            !needs_scope_extraction(watch),
+            "延后集合与 body 缓存集合必须互斥：同时为真 ⇒ 鉴权层会缓存流 body ⇒ \
+             请求永久挂起（第四轮 P0 事故形态）"
+        );
+        assert_eq!(
+            rpc_capability(watch),
+            Some("data:watch:subscribe"),
+            "延后判定只对**有能力的** RPC 有意义：没有能力的 RPC 无需判定 scope"
+        );
+
+        // 反向：body 缓存集合里的每一个都不得同时是流式/延后
+        for rpc in [
+            "/coord.kv.KV/Put",
+            "/coord.kv.KV/Range",
+            "/coord.kv.KV/Delete",
+            "/coord.txn.Txn/Txn",
+        ] {
+            assert!(needs_scope_extraction(rpc));
+            assert!(!is_streaming_rpc(rpc), "{rpc} 不得被判为流式");
+            assert!(!is_deferred_scope_rpc(rpc), "{rpc} 不得被判为延后");
+        }
+    }
+
+    /// handler 侧的 `watch_create_access` 与鉴权层 body 提取**必须同结果**。
+    ///
+    /// 这不是"两个实现碰巧一致"的抽查，而是"两条路径共用同一语义"的判据：
+    /// 若有人给其中一条换了区间算法（例如把前缀订阅当成单键），本测试立刻红。
+    #[test]
+    fn watch_create_access_is_identical_to_body_extraction() {
+        let cases: Vec<(&[u8], &[u8])> = vec![
+            (b"/app/", b""),      // 前缀订阅
+            (b"/app", b""),       // 无尾斜杠前缀：不得被当成单键
+            (b"", b""),           // 空前缀 = 全 keyspace（上界无界）
+            (b"/app/", b"/app0"), // 显式区间
+            (b"/app", b"/apz"),   // 区间被前缀收窄（不是裸 [key, range_end)）
+            (b"/app/\xff", b""),  // 全 0xFF 尾 → 无有限上界
+        ];
+        for (key, range_end) in cases {
+            let from_handler = watch_create_access(key, range_end);
+            let create = coord_proto::watch::WatchCreateRequest {
+                key: key.to_vec(),
+                range_end: range_end.to_vec(),
+                ..Default::default()
+            };
+            let req = coord_proto::watch::WatchRequest {
+                request: Some(coord_proto::watch::watch_request::Request::Create(create)),
+            };
+            let from_body = extract_scope_access("/coord.watch.Watch/Watch", &req.encode_to_vec())
+                .expect("watch body 应可解析");
+            assert_eq!(
+                from_body,
+                vec![from_handler.clone()],
+                "key={:?} range_end={:?}：handler 侧区间与鉴权层 body 提取不一致",
+                String::from_utf8_lossy(key),
+                String::from_utf8_lossy(range_end)
+            );
+        }
+    }
+
+    /// `scope_allows` 的四个方向：无约束授权 / 越界 / 区间半覆盖 / 空 accesses。
+    #[test]
+    fn scope_allows_is_fail_closed_and_interval_aware() {
+        // ① 空 accesses（未能提取资源键）+ 有约束授权 ⇒ 拒绝（fail-closed）
+        assert!(!scope_allows(&["/app/".to_string()], &[]));
+        // ② 空 accesses + 存在无约束授权 ⇒ 放行
+        assert!(scope_allows(&[String::new()], &[]));
+        assert!(scope_allows(&["/app/".to_string(), String::new()], &[]));
+        // ③ 点访问：命中 / 越界
+        assert!(scope_allows(
+            &["/app/".to_string()],
+            &[ScopeAccess::point(b"/app/a".to_vec())]
+        ));
+        assert!(!scope_allows(
+            &["/app/".to_string()],
+            &[ScopeAccess::point(b"/other/a".to_vec())]
+        ));
+        // ④ 区间：必须**整体包含**（半覆盖 = 拒绝）
+        //
+        // scope "/app/" 的安全字节前缀是 ["/app/", "/app0")：上界 "/app1" 越出 ⇒ 拒绝。
+        let half = ScopeAccess::range(b"/app/".to_vec(), b"/app1".to_vec());
+        assert!(
+            !scope_allows(&["/app/".to_string()], &[half.clone()]),
+            "区间上界越出 scope 覆盖面 ⇒ 必须拒绝（否则可读到未授权 key）"
+        );
+        // 区间整体落在 scope 内 ⇒ 放行（证明上一条不是"区间一律拒绝"）
+        let contained = ScopeAccess::range(b"/app/a".to_vec(), b"/app/b".to_vec());
+        assert!(scope_allows(&["/app/".to_string()], &[contained]));
+        // 无界上界（etcd 的 "\0" = 到 keyspace 末尾）：有界 scope 不可能覆盖
+        let unbounded = ScopeAccess::range(b"/app/".to_vec(), b"\0".to_vec());
+        assert!(!scope_allows(&["/app/".to_string()], &[unbounded.clone()]));
+        assert!(scope_allows(&["/".to_string()], &[unbounded]));
+        // ⑤ 多个访问：任一越界即拒绝
+        assert!(!scope_allows(
+            &["/app/".to_string()],
+            &[
+                ScopeAccess::point(b"/app/a".to_vec()),
+                ScopeAccess::point(b"/other/a".to_vec()),
+            ]
+        ));
+    }
+
+    /// `check_deferred_scope`：快照缺失 = 无约束（三种既有语义）；快照存在 = 强制判定。
+    #[test]
+    fn check_deferred_scope_enforces_only_when_snapshot_present() {
+        let out_of_scope = vec![ScopeAccess::point(b"/other/a".to_vec())];
+        let in_scope = vec![ScopeAccess::point(b"/app/a".to_vec())];
+
+        // 无快照 ⇒ 放行（鉴权关闭 / root / 未经鉴权层）
+        assert!(check_deferred_scope(None, &out_of_scope).is_ok());
+
+        // 有约束快照 ⇒ 越界拒绝、范围内放行
+        let scoped = DeferredScopeGrants {
+            capability_id: "data:watch:subscribe".to_string(),
+            grant_scopes: vec!["/app/".to_string()],
+        };
+        let err =
+            check_deferred_scope(Some(&scoped), &out_of_scope).expect_err("越界访问必须被拒绝");
+        assert!(
+            err.contains("data:watch:subscribe") && err.contains("deferred/fail-closed"),
+            "拒绝原因必须可归因（能力 + fail-closed 标注），实际：{err}"
+        );
+        assert!(check_deferred_scope(Some(&scoped), &in_scope).is_ok());
+
+        // 无约束快照（`""`）⇒ 放行一切（评审：这是"有授权但无 scope 限制"，不是漏洞）
+        let unrestricted = DeferredScopeGrants {
+            capability_id: "data:watch:subscribe".to_string(),
+            grant_scopes: vec![String::new()],
+        };
+        assert!(check_deferred_scope(Some(&unrestricted), &out_of_scope).is_ok());
     }
 }

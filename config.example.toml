@@ -100,7 +100,9 @@ enabled = false
 # election_timeout_min_ms = 150
 # election_timeout_max_ms = 300
 # install_snapshot_timeout_ms = 200
-# snapshot_logs_since_last = 5000      # 0 = 禁用自动快照
+# snapshot_logs_since_last = 5000      # 0 = 禁用自动快照；**注意**：没有持久快照
+#                                      # 时 raft 日志**永不回收**（purge 依赖快照），
+#                                      # 磁盘会随写入单调增长。除非明确接受这点，别设 0
 # snapshot_rate_limit_bytes_per_sec = 52428800   # 50 MiB/s；0 = 不限速
 
 # R-SVC-18：运行时资源限制（per-RPC 超时、规模上限、幂等缓存；以下为默认值）

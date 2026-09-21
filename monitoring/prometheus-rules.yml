@@ -2,6 +2,11 @@
 #
 # 覆盖：leader 切换、磁盘水位、慢 follower（apply 落后）、watch 背压、
 # 鉴权拒绝风暴、Seal 状态异常。指标命名见 coord-server/src/metrics.rs。
+#
+# W5-3（P-Gate 7）：**每条告警都必须有 `runbook_url`** —— 告警不带处置入口等于
+# 把「知道出事了」和「知道怎么办」之间的那一段留给人。锚点与
+# `docs/production/ops/runbook.md` §6 的小节标题一一对应；
+# `bash scripts/check-gate-drills.sh` 会校验 URL 里的锚点在 runbook 中真实存在。
 groups:
   - name: coord-consensus
     rules:
@@ -14,6 +19,7 @@ groups:
           severity: warning
         annotations:
           summary: "coord 节点 {{ $labels.instance }} 3 分钟内 leader 变化 {{ $value }} 次"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordleaderchurn--3-分钟内-leader-变化--2-次"
 
       # 慢 follower：apply 落后 commit 超过 1000 条且持续 5 分钟
       - alert: CoordFollowerApplyLag
@@ -24,6 +30,7 @@ groups:
           severity: warning
         annotations:
           summary: "coord 节点 {{ $labels.instance }} apply 落后 commit {{ $value }} 条"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordfollowerapplylag--follower-apply-落后-commit--1000-且持续-5m"
 
       # 无 leader 时间过长：整个集群 60s 无任何 leader
       - alert: CoordNoLeader
@@ -34,6 +41,7 @@ groups:
           severity: critical
         annotations:
           summary: "coord 集群 60 秒无 leader（可能网络分区或选举故障）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordnoleader--集群-60s-无-leader"
 
   - name: coord-storage
     rules:
@@ -46,6 +54,7 @@ groups:
           severity: warning
         annotations:
           summary: "coord 节点 {{ $labels.instance }} 磁盘可用率仅 {{ $value | humanizePercentage }}"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coorddiskwatermarkhigh--coorddiskwatermarkcritical"
 
       # 磁盘水位临界：可用率低于 5%（逼近 readonly 闸）
       - alert: CoordDiskWatermarkCritical
@@ -56,6 +65,7 @@ groups:
           severity: critical
         annotations:
           summary: "coord 节点 {{ $labels.instance }} 磁盘可用率仅 {{ $value | humanizePercentage }}，即将触发只读闸"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coorddiskwatermarkhigh--coorddiskwatermarkcritical"
 
   - name: coord-service
     rules:
@@ -68,6 +78,7 @@ groups:
           severity: warning
         annotations:
           summary: "coord 节点 {{ $labels.instance }} watch 事件丢弃率异常（背压）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordwatchbackpressure--watch-丢弃率--10"
 
       # 鉴权拒绝风暴：5 分钟内拒绝数 > 100
       - alert: CoordAuthDeniedStorm
@@ -78,6 +89,7 @@ groups:
           severity: warning
         annotations:
           summary: "coord 节点 {{ $labels.instance }} 鉴权拒绝率异常（可能被扫描/爆破）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordauthdeniedstorm--鉴权拒绝率异常"
 
       # Seal 状态：节点处于 sealed 但仍在提供读写（配置错误信号）
       - alert: CoordSealedNodeServing
@@ -88,6 +100,7 @@ groups:
           severity: critical
         annotations:
           summary: "coord 节点 {{ $labels.instance }} 处于 sealed 状态仍有写入流量"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordsealednodeserving--sealed-仍在写"
 
   - name: coord-agent-plugin
     rules:
@@ -100,6 +113,7 @@ groups:
           severity: warning
         annotations:
           summary: "coord-agent {{ $labels.instance }} 插件 {{ $labels.plugin }} 持续 trap（reason={{ $labels.reason }}）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordplugintrap--coordpluginloadfailure--coordplugininvocationerrorrate"
 
       # 插件加载 / 启动失败：15 分钟内出现即告警（清单/实例化/资源上限配置错误）
       - alert: CoordPluginLoadFailure
@@ -110,6 +124,7 @@ groups:
           severity: warning
         annotations:
           summary: "coord-agent {{ $labels.instance }} 插件 {{ $labels.plugin }} 加载/启动失败 {{ $value }} 次"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordplugintrap--coordpluginloadfailure--coordplugininvocationerrorrate"
 
       # 插件调用错误率：错误占比 > 20% 且样本量足够（> 0.1 req/s）
       - alert: CoordPluginInvocationErrorRate
@@ -122,6 +137,7 @@ groups:
           severity: warning
         annotations:
           summary: "coord-agent {{ $labels.instance }} 插件调用错误率 {{ $value | humanizePercentage }}"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordplugintrap--coordpluginloadfailure--coordplugininvocationerrorrate"
 
   - name: coord-supervision
     rules:
@@ -142,8 +158,40 @@ groups:
           severity: critical
         annotations:
           summary: "coord {{ $labels.instance }} 有 {{ $value }} 个受监督后台任务已死亡（对应能力已失效，不会自愈）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordbackgroundtaskdead--受监督后台任务死亡"
           description: |
             任务名见 coord_dead_background_task_info{task=...}，或 GET /health?verbose=true
             的 dead_background_tasks 字段。本仓库不做自动重启（任务持有不可重建的本地
             状态），需人工判断后重启进程。
+
+      # W5-4：「能力死亡必须可观测」的 agent 面。
+      #
+      # coord-core 的工作流运行时**没有 supervisor、没有 tracing**，所以它的两个长活
+      # 形态此前死亡时没有任何出口：
+      #   * 循环型 worker（子流程扫描器）：正常行为是永不结束 ⇒ "已结束"本身就是缺陷；
+      #   * 一次性 worker（每个实例的 `drive`）：正常结束是**预期**行为，只有
+      #     "结束了但没跑到最后一行"（panic/abort）才是缺陷。
+      #
+      # 两者在 agent 侧分别暴露为
+      #   coord_agent_workflow_loops_finished（>0 = 循环死了）
+      #   coord_agent_workflow_worker_faults_total（counter：未正常收尾的累计次数）
+      #
+      # 后果：`drive` 死亡 ⇒ 该实例**永久停在非终态且没有驱动者**（与 F-27 同类的
+      # "静默泄漏"形态：没有路径会告诉你）。
+      - alert: CoordAgentWorkflowWorkerFault
+        expr: |
+          increase(coord_agent_workflow_worker_faults_total{job=~"coord.*"}[10m]) > 0
+          or coord_agent_workflow_loops_finished{job=~"coord.*"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "coord-agent {{ $labels.instance }} 有工作流后台 worker 死亡（实例可能永久停在非终态）"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordagentworkflowworkerfault--工作流后台-worker-死亡"
+          description: |
+            具体实例/任务名见 agent 的 ERROR 日志（同一指标首次变化时会打一条
+            workflow background worker died without completing）与
+            coord_agent_workflow_workers_live 的变化。
+            处置：先确认受影响的实例清单（workflow ListInstances 里长期 Running 的项），
+            再按 runbook 重启 agent 进程并用 `Workflow/Start` 之外的 resume 路径恢复。
 
