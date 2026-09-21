@@ -33,11 +33,12 @@ bash scripts/collect-evidence.sh jepsen          # 真实 Jepsen（需 lein + �
 | `20260912T164636Z-round3-workspace-tests/` | 第三轮整改后的工作区全量测试（`passed=1909 failed=0`，提交 `8e2cb37`） | ✅ 已入库 |
 | **Jepsen（`jepsen/` 测试套件，见下）** | 真实 3 节点 coord + 真实 nemesis | ✅ 已入库 |
 
-### 运维演练（W6-4，2026-09-21）
+### 运维演练（W6-4）与 F-05 复跑（W1-2）—— 2026-09-21
 
 | 目录 | 场景 | 结论 |
 |:--|:--|:--|
-| `20260921T161653Z-w6-4-backup-restore-drill/` | **进程内**备份/恢复演练（快照流→恢复、导出→清空→导入 roundtrip、快照落盘重启加载、purge 守卫、重放幂等、kill -9 后 revision 不回退；共 10/10） | 绿。**工作树 CLEAN**（首份非 DIRTY 的归档）—— 跑在提交 `19cb350` 上。<br>**边界**：不含对象存储 / 多节点；未人工复核 ⇒ 不得当作"备份恢复已验收"，只证明该代码路径可用。
+| `20260921T161653Z-w6-4-backup-restore-drill/` | **进程内**备份/恢复演练（快照流→恢复、导出→清空→导入 roundtrip、快照落盘重启加载、purge 守卫、重放幂等、kill -9 后 revision 不回退；共 10/10） | 绿。**工作树 CLEAN**（首份非 DIRTY 的归档）—— 跑在提交 `19cb350` 上。<br>**边界**：不含对象存储 / 多节点；未人工复核 ⇒ 不得当作"备份恢复已验收"，只证明该代码路径可用。 |
+| `20260921T163732Z-w1-2-f05-kill-all-60s/` | **jepsen lab**：`register + kill-all 60s`（5 轮同时 kill n1/n2/n3），用于 W1-2 的 F-05 复跑 | 绿（`:valid? true`、退出码 0）。`:fail 0` / `:no-client 0` ⇒ **本 run 未复现** F-05；RTO p95 2.31s。**边界**：1 次 run（原路径要求 ×3）、形态与 09-19 的经 agent M5b run 不完全同源、**可用率门槛未判定**（`quiet-judged 0`）⇒ 不构成对 0.95 可用率的证据。**工作树 CLEAN**。 |
 
 ### Jepsen 证据（`jepsen/docs/dev.md` 计划 m0–m1）
 

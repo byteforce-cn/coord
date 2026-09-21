@@ -1,0 +1,729 @@
+2026-09-21 16:35:32,241{GMT}	INFO	[jepsen test runner] jepsen.core: Test version d8da8a5ab84d1bbf3085d7e112fed12330fb94da
+2026-09-21 16:35:32,241{GMT}	INFO	[jepsen test runner] jepsen.core: Command line:
+lein run test --nodes-file /root/nodes --username root --ssh-private-key /root/.ssh/id_ed25519 --workload register --nemesis kill-all --time-limit 60 --concurrency 1n
+2026-09-21 16:35:32,287{GMT}	INFO	[jepsen test runner] jepsen.core: Running test:
+{:cache-ttl-seconds nil
+ :remote
+ #jepsen.control.retry.Remote{:remote #jepsen.control.scp.Remote{:cmd-remote #jepsen.control.sshj.SSHJRemote{:concurrency-limit 6,
+                                                                                                             :conn-spec nil,
+                                                                                                             :client nil,
+                                                                                                             :semaphore nil},
+                                                                 :conn-spec nil},
+                              :conn nil}
+ :idem-replay-delay-ms 0
+ :ssh-private-key "/root/.ssh/id_ed25519"
+ :idem-min-replay-attempts nil
+ :lock-grace-ms nil
+ :election-ttl-seconds nil
+ :watch-min-events nil
+ :concurrency 5
+ :lease-ttl-seconds nil
+ :soak-disrupt 600
+ :idgen-min-regressions nil
+ :db
+ #jepsen.coord.db.CoordDB{:cluster-name "jepsen-coord",
+                          :pidfile-prefix "/var/run/coord-",
+                          :root-password "66c57bb56bce306f484344e4a8650836",
+                          :coord-dir "/opt/coord",
+                          :config-dir "/etc/coord",
+                          :logfile "/var/log/coord.log",
+                          :agent-bootstrap-token nil,
+                          :regions nil,
+                          :agent-peers nil,
+                          :data-dir "/var/lib/coord",
+                          :nodes ["n1" "n2" "n3"],
+                          :auth-root-key "820662a9f85924333d6d466714bc51734b251e73b827a394e1978e36d2429bfc",
+                          :raft-secret "93edf94d2860fec54bc59278a804cb1bbd2d0a7243e4f39d667d66966d9844d1",
+                          :agents 0,
+                          :coord-bin "/root/coord-test/coord"}
+ :leave-db-running? false
+ :agent-idgen-node-ids nil
+ :via-agent false
+ :cache-min-list-ops nil
+ :name "coord"
+ :registry-ttl-seconds nil
+ :logging-json? false
+ :mixture-ratio nil
+ :start-time
+ #object[java.time.OffsetDateTime "0x439b893a" "2026-09-21T16:35:32.215037076Z"]
+ :regions nil
+ :lease-min-grants nil
+ :map-keys nil
+ :net
+ #object[jepsen.net$iptables_with_dev$reify__15623
+         "0x4b5c84be"
+         "jepsen.net$iptables_with_dev$reify__15623@4b5c84be"]
+ :election-hold-ms nil
+ :client
+ #jepsen.coord.client.CoordClient{:probe-raw-channels nil,
+                                  :auth-nodes ["n1" "n2" "n3"],
+                                  :root-password "66c57bb56bce306f484344e4a8650836",
+                                  :mq-cursor nil,
+                                  :channels nil,
+                                  :cct nil,
+                                  :raw-channels nil,
+                                  :probe-nodes nil,
+                                  :mq-topic nil,
+                                  :parse-values? true,
+                                  :nodes ["n1" "n2" "n3"],
+                                  :leader-idx #object[clojure.lang.Atom
+                                                      "0x60877629"
+                                                      {:status :ready, :val {}}],
+                                  :last-rev #object[clojure.lang.Atom
+                                                    "0x7e86ff3b"
+                                                    {:status :ready, :val {}}],
+                                  :last-watch-rev #object[clojure.lang.Atom
+                                                          "0x4936dca9"
+                                                          {:status :ready,
+                                                           :val {}}],
+                                  :auth-raw-channels nil,
+                                  :probe-channels nil}
+ :lease-revoke-ttl-seconds nil
+ :barrier
+ #object[java.util.concurrent.CyclicBarrier
+         "0xd332ebc"
+         "java.util.concurrent.CyclicBarrier@d332ebc"]
+ :ssh
+ {:dummy? false,
+  :username "root",
+  :password "root",
+  :strict-host-key-checking false,
+  :private-key-path "/root/.ssh/id_ed25519"}
+ :lease-tolerance-ms nil
+ :rate nil
+ :map-min-deletes nil
+ :seed 992196396
+ :mq-topic nil
+ :cache-min-set-ops nil
+ :lock-ttl-seconds nil
+ :checker
+ #jepsen.checker.Compose{:checkers {:linear #jepsen.checker.Linearizable{:algorithm :wgl,
+                                                                         :model #knossos.model.Register{:value nil}},
+                                    :gates #object[jepsen.coord.gates$checker$reify__2287
+                                                   "0x56de370d"
+                                                   "jepsen.coord.gates$checker$reify__2287@56de370d"],
+                                    :perf #jepsen.checker.Compose{:checkers {:latency-graph #jepsen.checker.LatencyGraph{:opts {}},
+                                                                             :rate-graph #jepsen.checker.RateGraph{:opts {}}}}}}
+ :lease-min-expiries nil
+ :cache-min-sets nil
+ :mq-min-polls nil
+ :argv
+ ("test"
+  "--nodes-file"
+  "/root/nodes"
+  "--username"
+  "root"
+  "--ssh-private-key"
+  "/root/.ssh/id_ed25519"
+  "--workload"
+  "register"
+  "--nemesis"
+  "kill-all"
+  "--time-limit"
+  "60"
+  "--concurrency"
+  "1n")
+ :nemesis #unprintable "jepsen.nemesis$node_start_stopper$reify__15946@1f6865ca"
+ :watch-resumes nil
+ :mq-consumer-group nil
+ :lease-grace-ms nil
+ :soak-mix nil
+ :mq-expect-idem-dedupe false
+ :nodes ["n1" "n2" "n3"]
+ :test-count 1
+ :no-jitter false
+ :election-min-campaigns nil
+ :registry-min-cycles nil
+ :lock-min-acquires nil
+ :idgen-min-ids nil
+ :cache-min-gets nil
+ :generator
+ #object[jepsen.util.Forgettable
+         "0x6011176f"
+         ((jepsen.generator.Synchronize
+           {:gen (jepsen.generator.TimeLimit
+                  {:limit 60000000000,
+                   :cutoff nil,
+                   :gen (jepsen.generator.Any
+                         {:gens [(jepsen.generator.OnThreads
+                                  {:f #{:nemesis},
+                                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                           "0x2a654f27"
+                                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@2a654f27"],
+                                   :gen ({:type :sleep,
+                                          :value 5.672529878225428}
+                                         {:type :info, :f :start}
+                                         {:type :sleep,
+                                          :value 6.407341131522602}
+                                         {:type :info, :f :stop}
+                                         {:type :sleep,
+                                          :value 4.635424553881359}
+                                         {:type :info, :f :start}
+                                         {:type :sleep,
+                                          :value 6.2128702619033565}
+                                         {:type :info, :f :stop}
+                                         ...)})
+                                 (jepsen.generator.OnThreads
+                                  {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                           "0x785dbe3a"
+                                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@785dbe3a"],
+                                   :gen (jepsen.generator.Stagger
+                                         {:dt-fn #object[jepsen.generator$stagger_exp$dt_fn__6799
+                                                         "0x58230224"
+                                                         "jepsen.generator$stagger_exp$dt_fn__6799@58230224"],
+                                          :next-time nil,
+                                          :gen (jepsen.generator.OnThreads
+                                                {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                                 :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                                         "0x583f6270"
+                                                                         "jepsen.generator.context$make_thread_filter$lazy_filter__5865@583f6270"],
+                                                 :gen (jepsen.generator.Mix
+                                                       {:i 0,
+                                                        :gens [#object[jepsen.coord$r
+                                                                       "0x2bd24c09"
+                                                                       "jepsen.coord$r@2bd24c09"]
+                                                               #object[jepsen.coord$w
+                                                                       "0x3e6b8b27"
+                                                                       "jepsen.coord$w@3e6b8b27"]]})})})})]})})})
+          (jepsen.generator.Synchronize
+           {:gen (jepsen.generator.OnThreads
+                  {:f #{:nemesis},
+                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                           "0x7e199cec"
+                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@7e199cec"],
+                   :gen {:type :info, :f :stop}})})
+          (jepsen.generator.Synchronize
+           {:gen {:type :log, :value "recovery: letting cluster converge"}})
+          (jepsen.generator.Synchronize {:gen {:type :sleep, :value 30}}))]
+ :lock-deadline-ms nil
+ :min-op-ok-ratio nil
+ :soak-max-rto-seconds nil
+ :idem-replay-node-offset 0
+ :lease-keepalive-ms nil
+ :min-op-sample nil
+ :os
+ #object[jepsen.os$reify__16045 "0x5d965dbd" "jepsen.os$reify__16045@5d965dbd"]
+ :time-limit 60
+ :quiet-availability-min nil
+ :soak-quiet 1800
+ :value-size nil
+ :cache-ttl-grace-ms nil
+ :agent-verifying-key nil
+ :quiet-min-sample nil
+ :watch-window-ms nil
+ :workload :register
+ :registry-grace-ms nil
+ :agents 0
+ :watch-max-events nil
+ :mq-min-publishes nil
+ :watch-semantics nil
+ :lock-hold-ms nil}
+
+2026-09-21 16:35:33,759{GMT}	INFO	[jepsen test runner] jepsen.db: Tearing down DB
+2026-09-21 16:35:33,760{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-21 16:35:33,760{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-21 16:35:33,760{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-21 16:35:35,556{GMT}	INFO	[jepsen test runner] jepsen.db: Setting up DB
+2026-09-21 16:35:35,557{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Setting up coord on n2
+2026-09-21 16:35:35,557{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Setting up coord on n1
+2026-09-21 16:35:35,557{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Setting up coord on n3
+2026-09-21 16:35:38,208{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-21 16:35:38,260{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-21 16:35:38,305{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-21 16:35:38,310{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-21 16:35:38,361{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-21 16:35:38,406{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-21 16:35:38,904{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-21 16:35:38,904{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-21 16:35:39,003{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-21 16:35:39,006{GMT}	INFO	[jepsen test runner] jepsen.core: Relative time begins now
+2026-09-21 16:35:39,008{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-21 16:35:39,008{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-21 16:35:39,008{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-21 16:35:39,217{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-21 16:35:39,217{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-21 16:35:39,217{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-21 16:35:39,262{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord cluster is ready
+2026-09-21 16:35:39,262{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord cluster is ready
+2026-09-21 16:35:39,262{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord cluster is ready
+2026-09-21 16:35:39,282{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:read	nil
+2026-09-21 16:35:39,283{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-21 16:35:39,414{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:read	nil
+2026-09-21 16:35:39,502{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	105774
+2026-09-21 16:35:39,503{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-21 16:35:39,634{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	105774
+2026-09-21 16:35:39,643{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	98617
+2026-09-21 16:35:39,643{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-21 16:35:39,774{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	98617
+2026-09-21 16:35:39,790{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	506701
+2026-09-21 16:35:39,790{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-21 16:35:39,805{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-21 16:35:39,805{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-21 16:35:39,843{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	159490
+2026-09-21 16:35:39,896{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	159490
+2026-09-21 16:35:39,976{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	506701
+2026-09-21 16:35:39,978{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	159490
+2026-09-21 16:35:40,281{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	564342
+2026-09-21 16:35:40,309{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	564342
+2026-09-21 16:35:40,648{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	175709
+2026-09-21 16:35:40,673{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	175709
+2026-09-21 16:35:40,870{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:read	nil
+2026-09-21 16:35:40,873{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:read	175709
+2026-09-21 16:35:40,898{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	115921
+2026-09-21 16:35:40,906{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-21 16:35:40,922{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	115921
+2026-09-21 16:35:40,922{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	115921
+2026-09-21 16:35:41,652{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:write	51658
+2026-09-21 16:35:41,678{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:write	51658
+2026-09-21 16:35:42,205{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	779818
+2026-09-21 16:35:42,231{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	779818
+2026-09-21 16:35:42,307{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	813936
+2026-09-21 16:35:42,333{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:write	813936
+2026-09-21 16:35:42,447{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:read	nil
+2026-09-21 16:35:42,452{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:read	813936
+2026-09-21 16:35:42,507{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:write	5662
+2026-09-21 16:35:42,533{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:write	5662
+2026-09-21 16:35:43,044{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-21 16:35:43,049{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	5662
+2026-09-21 16:35:43,223{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-21 16:35:43,228{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:read	5662
+2026-09-21 16:35:44,200{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	921160
+2026-09-21 16:35:44,225{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:write	921160
+2026-09-21 16:35:44,576{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:read	nil
+2026-09-21 16:35:44,581{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:read	921160
+2026-09-21 16:35:44,616{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	689381
+2026-09-21 16:35:44,640{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:write	689381
+2026-09-21 16:35:44,911{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:read	nil
+2026-09-21 16:35:44,916{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:read	689381
+2026-09-21 16:35:44,954{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-21 16:35:44,982{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n1" [:killed "n1"], "n2" [:killed "n2"], "n3" [:killed "n3"]}
+2026-09-21 16:35:45,336{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:write	778254
+2026-09-21 16:35:45,349{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:info	:write	778254	:unavailable-maybe-applied
+2026-09-21 16:35:45,365{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:write	640116
+2026-09-21 16:35:45,372{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:info	:write	640116	:unavailable-maybe-applied
+2026-09-21 16:35:45,458{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:write	632603
+2026-09-21 16:35:45,466{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:info	:write	632603	:unavailable-maybe-applied
+2026-09-21 16:35:45,508{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:read	nil
+2026-09-21 16:35:45,517{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:info	:read	nil	:unavailable-maybe-applied
+2026-09-21 16:35:45,527{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:read	nil
+2026-09-21 16:35:45,532{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:info	:read	nil	:unavailable-maybe-applied
+2026-09-21 16:35:45,985{GMT}	INFO	[jepsen worker 0] jepsen.print: 5	:invoke	:read	nil
+2026-09-21 16:35:45,986{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-21 16:35:46,080{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:read	nil
+2026-09-21 16:35:46,081{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-21 16:35:47,459{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:read	nil
+2026-09-21 16:35:47,460{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-21 16:35:47,631{GMT}	INFO	[jepsen worker 3] jepsen.print: 8	:invoke	:write	354670
+2026-09-21 16:35:47,631{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-21 16:35:47,881{GMT}	INFO	[jepsen worker 4] jepsen.print: 9	:invoke	:read	nil
+2026-09-21 16:35:47,882{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-21 16:35:51,390{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-21 16:35:51,438{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Restarting coord on n3
+2026-09-21 16:35:51,438{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Restarting coord on n1
+2026-09-21 16:35:51,439{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-21 16:35:51,439{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-21 16:35:51,439{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Restarting coord on n2
+2026-09-21 16:35:51,440{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-21 16:35:51,546{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-21 16:35:51,546{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-21 16:35:51,552{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-21 16:35:51,662{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-21 16:35:51,662{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-21 16:35:51,680{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-21 16:35:51,681{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n1" [:restarted "n1"], "n2" [:restarted "n2"], "n3" [:restarted "n3"]}
+2026-09-21 16:35:52,773{GMT}	INFO	[jepsen worker 3] jepsen.print: 8	:ok	:write	354670
+2026-09-21 16:35:52,777{GMT}	INFO	[jepsen worker 3] jepsen.print: 8	:invoke	:read	nil
+2026-09-21 16:35:52,782{GMT}	INFO	[jepsen worker 3] jepsen.print: 8	:ok	:read	354670
+2026-09-21 16:35:53,083{GMT}	INFO	[jepsen worker 3] jepsen.print: 8	:invoke	:write	568187
+2026-09-21 16:35:53,113{GMT}	INFO	[jepsen worker 3] jepsen.print: 8	:ok	:write	568187
+2026-09-21 16:35:53,166{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:read	568187
+2026-09-21 16:35:53,249{GMT}	INFO	[jepsen worker 3] jepsen.print: 8	:invoke	:read	nil
+2026-09-21 16:35:53,268{GMT}	INFO	[jepsen worker 3] jepsen.print: 8	:ok	:read	568187
+2026-09-21 16:35:53,800{GMT}	INFO	[jepsen worker 4] jepsen.print: 9	:ok	:read	568187
+2026-09-21 16:35:53,849{GMT}	INFO	[jepsen worker 4] jepsen.print: 9	:invoke	:write	450553
+2026-09-21 16:35:53,867{GMT}	INFO	[jepsen worker 4] jepsen.print: 9	:ok	:write	450553
+2026-09-21 16:35:53,881{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:write	466437
+2026-09-21 16:35:53,900{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:write	466437
+2026-09-21 16:35:54,485{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:read	nil
+2026-09-21 16:35:54,488{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:read	466437
+2026-09-21 16:35:54,598{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:read	nil
+2026-09-21 16:35:54,601{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:read	466437
+2026-09-21 16:35:54,671{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:read	nil
+2026-09-21 16:35:54,676{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:read	466437
+2026-09-21 16:35:55,141{GMT}	INFO	[jepsen worker 3] jepsen.print: 8	:invoke	:write	326110
+2026-09-21 16:35:55,182{GMT}	INFO	[jepsen worker 3] jepsen.print: 8	:ok	:write	326110
+2026-09-21 16:35:55,316{GMT}	INFO	[jepsen worker 4] jepsen.print: 9	:invoke	:write	744480
+2026-09-21 16:35:55,323{GMT}	INFO	[jepsen worker 0] jepsen.print: 5	:ok	:read	326110
+2026-09-21 16:35:55,337{GMT}	INFO	[jepsen worker 4] jepsen.print: 9	:ok	:write	744480
+2026-09-21 16:35:55,514{GMT}	INFO	[jepsen worker 0] jepsen.print: 5	:invoke	:write	572557
+2026-09-21 16:35:55,532{GMT}	INFO	[jepsen worker 0] jepsen.print: 5	:ok	:write	572557
+2026-09-21 16:35:55,662{GMT}	INFO	[jepsen worker 0] jepsen.print: 5	:invoke	:write	895713
+2026-09-21 16:35:55,683{GMT}	INFO	[jepsen worker 0] jepsen.print: 5	:ok	:write	895713
+2026-09-21 16:35:55,811{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:write	275659
+2026-09-21 16:35:55,832{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:write	275659
+2026-09-21 16:35:56,017{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:read	nil
+2026-09-21 16:35:56,019{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:read	275659
+2026-09-21 16:35:56,317{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-21 16:35:56,337{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n1" [:killed "n1"], "n2" [:killed "n2"], "n3" [:killed "n3"]}
+2026-09-21 16:35:56,338{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:read	275659
+2026-09-21 16:35:56,831{GMT}	INFO	[jepsen worker 0] jepsen.print: 5	:invoke	:write	202676
+2026-09-21 16:35:56,836{GMT}	INFO	[jepsen worker 0] jepsen.print: 5	:info	:write	202676	:unavailable-maybe-applied
+2026-09-21 16:35:57,047{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:write	977710
+2026-09-21 16:35:57,048{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-21 16:35:57,790{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:read	nil
+2026-09-21 16:35:57,799{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:info	:read	nil	:unavailable-maybe-applied
+2026-09-21 16:35:58,347{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:read	nil
+2026-09-21 16:35:58,352{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:info	:read	nil	:unavailable-maybe-applied
+2026-09-21 16:35:58,672{GMT}	INFO	[jepsen worker 3] jepsen.print: 8	:invoke	:write	794603
+2026-09-21 16:35:58,676{GMT}	INFO	[jepsen worker 3] jepsen.print: 8	:info	:write	794603	:unavailable-maybe-applied
+2026-09-21 16:35:58,718{GMT}	INFO	[jepsen worker 4] jepsen.print: 9	:invoke	:write	547748
+2026-09-21 16:35:58,720{GMT}	INFO	[jepsen worker 4] jepsen.print: 9	:info	:write	547748	:unavailable-maybe-applied
+2026-09-21 16:35:59,054{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	9006
+2026-09-21 16:35:59,055{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-21 16:35:59,266{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:read	nil
+2026-09-21 16:35:59,267{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-21 16:35:59,343{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:write	289208
+2026-09-21 16:35:59,343{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-21 16:36:00,372{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:invoke	:write	896046
+2026-09-21 16:36:00,372{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-21 16:36:02,551{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-21 16:36:02,587{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Restarting coord on n1
+2026-09-21 16:36:02,588{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-21 16:36:02,588{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Restarting coord on n3
+2026-09-21 16:36:02,589{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-21 16:36:02,593{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Restarting coord on n2
+2026-09-21 16:36:02,593{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-21 16:36:02,696{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-21 16:36:02,696{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-21 16:36:02,701{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-21 16:36:02,854{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-21 16:36:02,865{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-21 16:36:02,866{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-21 16:36:02,867{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n1" [:restarted "n1"], "n2" [:restarted "n2"], "n3" [:restarted "n3"]}
+2026-09-21 16:36:03,146{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:ok	:write	896046
+2026-09-21 16:36:03,146{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:invoke	:read	nil
+2026-09-21 16:36:03,148{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:ok	:read	896046
+2026-09-21 16:36:03,267{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:invoke	:write	257991
+2026-09-21 16:36:03,296{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:ok	:write	257991
+2026-09-21 16:36:03,320{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:invoke	:write	328077
+2026-09-21 16:36:03,348{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:ok	:write	328077
+2026-09-21 16:36:03,516{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:invoke	:write	595603
+2026-09-21 16:36:03,544{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:ok	:write	595603
+2026-09-21 16:36:03,941{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:invoke	:write	973709
+2026-09-21 16:36:03,965{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:ok	:write	973709
+2026-09-21 16:36:04,148{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:read	973709
+2026-09-21 16:36:04,367{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:write	289208
+2026-09-21 16:36:04,396{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:invoke	:write	922637
+2026-09-21 16:36:04,448{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:ok	:write	922637
+2026-09-21 16:36:04,533{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	9006
+2026-09-21 16:36:04,567{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read	nil
+2026-09-21 16:36:04,568{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read	9006
+2026-09-21 16:36:05,051{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	302609
+2026-09-21 16:36:05,074{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	302609
+2026-09-21 16:36:05,775{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read	nil
+2026-09-21 16:36:05,778{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read	302609
+2026-09-21 16:36:05,830{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:read	nil
+2026-09-21 16:36:05,833{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:read	302609
+2026-09-21 16:36:06,352{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:read	nil
+2026-09-21 16:36:06,356{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:read	302609
+2026-09-21 16:36:06,513{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:invoke	:write	46646
+2026-09-21 16:36:06,592{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:ok	:write	46646
+2026-09-21 16:36:06,630{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read	nil
+2026-09-21 16:36:06,636{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read	977710
+2026-09-21 16:36:06,653{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:write	977710
+2026-09-21 16:36:07,039{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:read	nil
+2026-09-21 16:36:07,043{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:read	977710
+2026-09-21 16:36:07,105{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read	nil
+2026-09-21 16:36:07,109{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:read	977710
+2026-09-21 16:36:07,265{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:read	nil
+2026-09-21 16:36:07,271{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:read	977710
+2026-09-21 16:36:07,719{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:read	nil
+2026-09-21 16:36:07,722{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:read	977710
+2026-09-21 16:36:08,282{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:invoke	:write	311971
+2026-09-21 16:36:08,291{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:write	861165
+2026-09-21 16:36:08,313{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:ok	:write	311971
+2026-09-21 16:36:08,314{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	465960
+2026-09-21 16:36:08,334{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:write	861165
+2026-09-21 16:36:08,351{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	465960
+2026-09-21 16:36:08,493{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:write	859345
+2026-09-21 16:36:08,518{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:write	859345
+2026-09-21 16:36:08,731{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:read	nil
+2026-09-21 16:36:08,735{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:read	859345
+2026-09-21 16:36:09,040{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-21 16:36:09,062{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n1" [:killed "n1"], "n2" [:killed "n2"], "n3" [:killed "n3"]}
+2026-09-21 16:36:09,227{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:read	nil
+2026-09-21 16:36:09,236{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:info	:read	nil	:unavailable-maybe-applied
+2026-09-21 16:36:09,691{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:invoke	:write	703112
+2026-09-21 16:36:09,692{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-21 16:36:09,904{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:read	nil
+2026-09-21 16:36:09,908{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:info	:read	nil	:unavailable-maybe-applied
+2026-09-21 16:36:09,932{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:write	144482
+2026-09-21 16:36:09,935{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:info	:write	144482	:unavailable-maybe-applied
+2026-09-21 16:36:10,741{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:read	nil
+2026-09-21 16:36:10,747{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:info	:read	nil	:unavailable-maybe-applied
+2026-09-21 16:36:10,907{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:invoke	:write	758609
+2026-09-21 16:36:10,909{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:info	:write	758609	:unavailable-maybe-applied
+2026-09-21 16:36:11,537{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:invoke	:read	nil
+2026-09-21 16:36:11,537{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-21 16:36:11,650{GMT}	INFO	[jepsen worker 2] jepsen.print: 17	:invoke	:read	nil
+2026-09-21 16:36:11,650{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-21 16:36:12,426{GMT}	INFO	[jepsen worker 3] jepsen.print: 18	:invoke	:write	879881
+2026-09-21 16:36:12,427{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-21 16:36:12,815{GMT}	INFO	[jepsen worker 4] jepsen.print: 19	:invoke	:read	nil
+2026-09-21 16:36:12,815{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-21 16:36:16,036{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-21 16:36:16,072{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Restarting coord on n3
+2026-09-21 16:36:16,073{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-21 16:36:16,072{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Restarting coord on n1
+2026-09-21 16:36:16,073{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-21 16:36:16,075{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Restarting coord on n2
+2026-09-21 16:36:16,075{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-21 16:36:16,179{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-21 16:36:16,179{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-21 16:36:16,184{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-21 16:36:16,287{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-21 16:36:16,301{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-21 16:36:16,301{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-21 16:36:16,301{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n1" [:restarted "n1"], "n2" [:restarted "n2"], "n3" [:restarted "n3"]}
+2026-09-21 16:36:17,244{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:ok	:read	859345
+2026-09-21 16:36:17,244{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:invoke	:read	nil
+2026-09-21 16:36:17,246{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:ok	:read	859345
+2026-09-21 16:36:17,349{GMT}	INFO	[jepsen worker 2] jepsen.print: 17	:ok	:read	859345
+2026-09-21 16:36:17,485{GMT}	INFO	[jepsen worker 3] jepsen.print: 18	:ok	:write	879881
+2026-09-21 16:36:18,009{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:invoke	:write	315900
+2026-09-21 16:36:18,031{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:ok	:write	315900
+2026-09-21 16:36:18,280{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:invoke	:read	nil
+2026-09-21 16:36:18,283{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:ok	:read	315900
+2026-09-21 16:36:18,447{GMT}	INFO	[jepsen worker 2] jepsen.print: 17	:invoke	:write	172945
+2026-09-21 16:36:18,467{GMT}	INFO	[jepsen worker 2] jepsen.print: 17	:ok	:write	172945
+2026-09-21 16:36:18,582{GMT}	INFO	[jepsen worker 3] jepsen.print: 18	:invoke	:read	nil
+2026-09-21 16:36:18,584{GMT}	INFO	[jepsen worker 3] jepsen.print: 18	:ok	:read	172945
+2026-09-21 16:36:18,617{GMT}	INFO	[jepsen worker 4] jepsen.print: 19	:ok	:read	172945
+2026-09-21 16:36:18,649{GMT}	INFO	[jepsen worker 4] jepsen.print: 19	:invoke	:write	364427
+2026-09-21 16:36:18,673{GMT}	INFO	[jepsen worker 4] jepsen.print: 19	:ok	:write	364427
+2026-09-21 16:36:18,817{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:invoke	:write	400405
+2026-09-21 16:36:18,838{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:ok	:write	400405
+2026-09-21 16:36:19,031{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:invoke	:read	nil
+2026-09-21 16:36:19,033{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:ok	:read	400405
+2026-09-21 16:36:19,207{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:invoke	:write	801836
+2026-09-21 16:36:19,239{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:ok	:write	801836
+2026-09-21 16:36:19,288{GMT}	INFO	[jepsen worker 2] jepsen.print: 17	:invoke	:write	836545
+2026-09-21 16:36:19,306{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-21 16:36:19,317{GMT}	INFO	[jepsen worker 2] jepsen.print: 17	:ok	:write	836545
+2026-09-21 16:36:19,320{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n1" [:killed "n1"], "n2" [:killed "n2"], "n3" [:killed "n3"]}
+2026-09-21 16:36:19,933{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:invoke	:write	902494
+2026-09-21 16:36:19,936{GMT}	INFO	[jepsen worker 1] jepsen.print: 16	:info	:write	902494	:unavailable-maybe-applied
+2026-09-21 16:36:20,218{GMT}	INFO	[jepsen worker 1] jepsen.print: 21	:invoke	:write	808017
+2026-09-21 16:36:20,219{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-21 16:36:20,268{GMT}	INFO	[jepsen worker 2] jepsen.print: 17	:invoke	:read	nil
+2026-09-21 16:36:20,272{GMT}	INFO	[jepsen worker 2] jepsen.print: 17	:info	:read	nil	:unavailable-maybe-applied
+2026-09-21 16:36:20,277{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:write	455574
+2026-09-21 16:36:20,278{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-21 16:36:20,327{GMT}	INFO	[jepsen worker 3] jepsen.print: 18	:invoke	:read	nil
+2026-09-21 16:36:20,330{GMT}	INFO	[jepsen worker 3] jepsen.print: 18	:info	:read	nil	:unavailable-maybe-applied
+2026-09-21 16:36:20,387{GMT}	INFO	[jepsen worker 4] jepsen.print: 19	:invoke	:read	nil
+2026-09-21 16:36:20,390{GMT}	INFO	[jepsen worker 4] jepsen.print: 19	:info	:read	nil	:unavailable-maybe-applied
+2026-09-21 16:36:20,528{GMT}	INFO	[jepsen worker 3] jepsen.print: 23	:invoke	:write	550517
+2026-09-21 16:36:20,529{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-21 16:36:20,970{GMT}	INFO	[jepsen worker 4] jepsen.print: 24	:invoke	:write	689479
+2026-09-21 16:36:20,970{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-21 16:36:25,575{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-21 16:36:25,608{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Restarting coord on n1
+2026-09-21 16:36:25,608{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-21 16:36:25,609{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Restarting coord on n2
+2026-09-21 16:36:25,609{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-21 16:36:25,609{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Restarting coord on n3
+2026-09-21 16:36:25,609{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-21 16:36:25,713{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-21 16:36:25,716{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-21 16:36:25,717{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-21 16:36:25,861{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-21 16:36:25,877{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-21 16:36:25,877{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-21 16:36:25,878{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n1" [:restarted "n1"], "n2" [:restarted "n2"], "n3" [:restarted "n3"]}
+2026-09-21 16:36:26,324{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:ok	:write	703112
+2026-09-21 16:36:26,324{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:invoke	:write	926586
+2026-09-21 16:36:26,347{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:ok	:write	926586
+2026-09-21 16:36:26,884{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:invoke	:read	nil
+2026-09-21 16:36:26,887{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:ok	:read	926586
+2026-09-21 16:36:27,112{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:invoke	:write	667606
+2026-09-21 16:36:27,135{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:ok	:write	667606
+2026-09-21 16:36:27,357{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:invoke	:write	703552
+2026-09-21 16:36:27,380{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:ok	:write	703552
+2026-09-21 16:36:27,782{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:invoke	:read	nil
+2026-09-21 16:36:27,785{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:ok	:read	703552
+2026-09-21 16:36:27,978{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:invoke	:write	684816
+2026-09-21 16:36:28,005{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:ok	:write	684816
+2026-09-21 16:36:28,145{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:invoke	:read	nil
+2026-09-21 16:36:28,147{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:ok	:read	684816
+2026-09-21 16:36:28,213{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:invoke	:write	793198
+2026-09-21 16:36:28,237{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:ok	:write	793198
+2026-09-21 16:36:28,408{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:invoke	:write	386003
+2026-09-21 16:36:28,426{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:ok	:write	386003
+2026-09-21 16:36:28,756{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:write	455574
+2026-09-21 16:36:29,170{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:invoke	:write	48627
+2026-09-21 16:36:29,193{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:ok	:write	48627
+2026-09-21 16:36:29,237{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:read	nil
+2026-09-21 16:36:29,239{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:ok	:read	48627
+2026-09-21 16:36:29,261{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-21 16:36:29,277{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n1" [:killed "n1"], "n2" [:killed "n2"], "n3" [:killed "n3"]}
+2026-09-21 16:36:29,521{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:invoke	:write	342139
+2026-09-21 16:36:29,526{GMT}	INFO	[jepsen worker 0] jepsen.print: 15	:info	:write	342139	:unavailable-maybe-applied
+2026-09-21 16:36:29,999{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:write	275228
+2026-09-21 16:36:30,000{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-21 16:36:30,062{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:invoke	:read	nil
+2026-09-21 16:36:30,065{GMT}	INFO	[jepsen worker 2] jepsen.print: 22	:info	:read	nil	:unavailable-maybe-applied
+2026-09-21 16:36:30,308{GMT}	INFO	[jepsen worker 2] jepsen.print: 27	:invoke	:read	nil
+2026-09-21 16:36:30,308{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-21 16:36:33,169{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-21 16:36:33,203{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Restarting coord on n3
+2026-09-21 16:36:33,204{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-21 16:36:33,205{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Restarting coord on n2
+2026-09-21 16:36:33,205{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-21 16:36:33,207{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Restarting coord on n1
+2026-09-21 16:36:33,208{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-21 16:36:33,311{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-21 16:36:33,311{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-21 16:36:33,315{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-21 16:36:33,439{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-21 16:36:33,453{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-21 16:36:33,453{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-21 16:36:33,453{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n1" [:restarted "n1"], "n2" [:restarted "n2"], "n3" [:restarted "n3"]}
+2026-09-21 16:36:35,401{GMT}	INFO	[jepsen worker 2] jepsen.print: 27	:ok	:read	48627
+2026-09-21 16:36:35,401{GMT}	INFO	[jepsen worker 2] jepsen.print: 27	:invoke	:read	nil
+2026-09-21 16:36:35,404{GMT}	INFO	[jepsen worker 2] jepsen.print: 27	:ok	:read	48627
+2026-09-21 16:36:35,607{GMT}	INFO	[jepsen worker 2] jepsen.print: 27	:invoke	:read	nil
+2026-09-21 16:36:35,621{GMT}	INFO	[jepsen worker 2] jepsen.print: 27	:ok	:read	48627
+2026-09-21 16:36:35,697{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:write	275228
+2026-09-21 16:36:35,915{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:write	949725
+2026-09-21 16:36:35,917{GMT}	INFO	[jepsen worker 2] jepsen.print: 27	:invoke	:read	nil
+2026-09-21 16:36:35,930{GMT}	INFO	[jepsen worker 2] jepsen.print: 27	:ok	:read	275228
+2026-09-21 16:36:35,945{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:write	949725
+2026-09-21 16:36:35,993{GMT}	INFO	[jepsen worker 2] jepsen.print: 27	:invoke	:read	nil
+2026-09-21 16:36:35,995{GMT}	INFO	[jepsen worker 2] jepsen.print: 27	:ok	:read	949725
+2026-09-21 16:36:36,631{GMT}	INFO	[jepsen worker 1] jepsen.print: 21	:ok	:write	808017
+2026-09-21 16:36:36,834{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:read	nil
+2026-09-21 16:36:36,838{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:read	808017
+2026-09-21 16:36:36,868{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:read	nil
+2026-09-21 16:36:36,870{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:read	808017
+2026-09-21 16:36:37,226{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:read	nil
+2026-09-21 16:36:37,229{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:read	808017
+2026-09-21 16:36:37,454{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:read	nil
+2026-09-21 16:36:37,462{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:read	808017
+2026-09-21 16:36:37,509{GMT}	INFO	[jepsen worker 1] jepsen.print: 21	:invoke	:write	698638
+2026-09-21 16:36:37,535{GMT}	INFO	[jepsen worker 1] jepsen.print: 21	:ok	:write	698638
+2026-09-21 16:36:37,934{GMT}	INFO	[jepsen worker 4] jepsen.print: 24	:ok	:write	689479
+2026-09-21 16:36:38,093{GMT}	INFO	[jepsen worker 2] jepsen.print: 27	:invoke	:write	348044
+2026-09-21 16:36:38,117{GMT}	INFO	[jepsen worker 2] jepsen.print: 27	:ok	:write	348044
+2026-09-21 16:36:38,212{GMT}	INFO	[jepsen worker 4] jepsen.print: 24	:invoke	:read	nil
+2026-09-21 16:36:38,217{GMT}	INFO	[jepsen worker 4] jepsen.print: 24	:ok	:read	348044
+2026-09-21 16:36:38,310{GMT}	INFO	[jepsen worker 3] jepsen.print: 23	:ok	:write	550517
+2026-09-21 16:36:38,753{GMT}	INFO	[jepsen worker 4] jepsen.print: 24	:invoke	:write	296876
+2026-09-21 16:36:38,777{GMT}	INFO	[jepsen worker 4] jepsen.print: 24	:ok	:write	296876
+2026-09-21 16:36:38,953{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:read	nil
+2026-09-21 16:36:38,955{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:read	296876
+2026-09-21 16:36:39,934{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-21 16:36:39,934{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	:not-started
+2026-09-21 16:36:39,935{GMT}	INFO	[jepsen worker 1] jepsen.generator.interpreter: recovery: letting cluster converge
+2026-09-21 16:37:09,960{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-21 16:37:09,960{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-21 16:37:09,960{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-21 16:37:10,109{GMT}	INFO	[jepsen test runner] jepsen.core: Run complete, writing
+2026-09-21 16:37:10,159{GMT}	INFO	[jepsen test runner] jepsen.core: Snarfing log files
+2026-09-21 16:37:10,160{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Killing coord on n1
+2026-09-21 16:37:10,160{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Killing coord on n2
+2026-09-21 16:37:10,160{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Killing coord on n3
+2026-09-21 16:37:10,219{GMT}	INFO	[jepsen node n1] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-21 16:37:10,219{GMT}	INFO	[jepsen node n2] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-21 16:37:10,219{GMT}	INFO	[jepsen node n3] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-21 16:37:10,327{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-21 16:37:10,328{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-21 16:37:10,329{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-21 16:37:11,981{GMT}	INFO	[jepsen test runner] jepsen.core: Analyzing...
+2026-09-21 16:37:12,007{GMT}	INFO	[Thread-14] knossos.model.memo: More than 1024 reachable models; not memoizing models for this search
+2026-09-21 16:37:12,157{GMT}	INFO	[jepsen test runner] jepsen.core: Analysis complete
+2026-09-21 16:37:12,163{GMT}	INFO	[jepsen results] jepsen.store: Wrote /opt/coord/jepsen/store/coord/2026-09-21T16:35:32.215037076Z/results.edn
+2026-09-21 16:37:12,199{GMT}	INFO	[jepsen test runner] jepsen.core: {:linear {:valid? true,
+          :model #knossos.model.Register{:value 296876},
+          :analyzer :wgl,
+          :final-paths (),
+          :configs ()},
+ :gates {:valid? true,
+         :gates {:premise {:valid? true,
+                           :writes 71,
+                           :duplicate-value-count 0,
+                           :duplicate-values {}},
+                 :availability {:min-ratio 0.95,
+                                :min-sample 100,
+                                :windows 5,
+                                :judged 0,
+                                :skipped-small-sample 5,
+                                :worst-window nil,
+                                :violations []},
+                 :rto {:budget-seconds 120,
+                       :n 5,
+                       :p95 2.3118278918,
+                       :max 2.527351233,
+                       :samples [1.383817893
+                                 0.594197443
+                                 1.449734527
+                                 0.748613603
+                                 2.527351233],
+                       :unrecovered 0,
+                       :not-measured 0,
+                       :details [{:disruption {:start 5975939556,
+                                               :end 12384589911},
+                                  :measurable? true,
+                                  :first-ok-after 13768407804,
+                                  :seconds 1.383817893}
+                                 {:disruption {:start 17333987771,
+                                               :end 23546729012},
+                                  :measurable? true,
+                                  :first-ok-after 24140926455,
+                                  :seconds 0.594197443}
+                                 {:disruption {:start 30057700233,
+                                               :end 37031175940},
+                                  :measurable? true,
+                                  :first-ok-after 38480910467,
+                                  :seconds 1.449734527}
+                                 {:disruption {:start 40315066812,
+                                               :end 46570441504},
+                                  :measurable? true,
+                                  :first-ok-after 47319055107,
+                                  :seconds 0.748613603}
+                                 {:disruption {:start 50272270081,
+                                               :end 54164649321},
+                                  :measurable? true,
+                                  :first-ok-after 56692000554,
+                                  :seconds 2.527351233}]},
+                 :liveness {:min-ok-ratio 0.1,
+                            :min-sample 10,
+                            :ops 2,
+                            :judged 2,
+                            :skipped-small-sample 0,
+                            :ok-ratio 0.8444444444444444,
+                            :by-op {:read {:total 64,
+                                           :ok 53,
+                                           :info 11,
+                                           :fail 0,
+                                           :legit-fail 0,
+                                           :judged 64,
+                                           :errors {:unavailable-maybe-applied 11}},
+                                    :write {:total 71,
+                                            :ok 61,
+                                            :info 10,
+                                            :fail 0,
+                                            :legit-fail 0,
+                                            :judged 71,
+                                            :errors {:unavailable-maybe-applied 10}}},
+                            :violations []},
+                 :agent nil},
+         :failures []},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true}
+
+
+Everything looks good! ヽ(‘ー`)ノ

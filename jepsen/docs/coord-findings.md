@@ -264,6 +264,31 @@ follower 上 `propose_auth_op` 返回 `UNAVAILABLE`（带 leader hint）；**分
 quorum 整体丢失超过客户端登录超时时，登录**必然**失败，属固有可用性属性，
 不能靠改断言消除（§7 证据规范第 4 条：不得弱化断言）。
 
+### 复跑（2026-09-21）——**本 run 未复现**，但判据已改写
+
+**调用**：`make -C jepsen/lab test WORKLOAD=register NEMESIS=kill-all TIME_LIMIT=60
+CONCURRENCY=1n SKIP_CHECKERS=1 JEPSEN_PROVIDER=docker`（binary sha256 前 8 位 `24cd089d`）。
+归档：`docs/production/evidence/20260921T163732Z-w1-2-f05-kill-all-60s/`。
+
+| 项 | 值 |
+|:--|:--|
+| 判决 | ✅ `:valid? true` / `:gates {:valid? true}` / 退出码 0 |
+| `:fail` / `:no-client` | **0 / 0**（5 轮 `kill-all` 下） |
+| RTO | p95 2.31s / max 2.53s（预算 120s），`unrecovered 0` |
+| 可用率门槛 | `quiet-judged 0 / skipped-small-sample 5` ⇒ **本 run 不构成对 0.95 可用率的任何证据** |
+
+**边界（与结论同引）**：只有 1 次 run（原复现路径要求 ×3）；形态不完全同源
+（原出错的多是**经 agent** 的 M5b MQ run 与 `partition-ring`；本 run 是 kill-all +
+register + 默认 AGENTS=2）。⇒ 只能得出「**本 run 未复现**」，**不能**得出「F-05 已消失」。
+
+**判据修正（关键）**：原 W1-2 的「60s 短跑 0 条 `:no-client`」在 **quorum 整体丢失**时
+**不可能成立**（`Authenticate` 要提交两次 `persist_session`），把它当缺陷去修只能改断言。
+可行的判据是**两类失败必须可区分**：密码错 = `UNAUTHENTICATED`（不可重试）；
+无 quorum = `UNAVAILABLE` / `DEADLINE_EXCEEDED`（**必须**可退避重试，否则客户端会
+把自己锁在登录限流里，即 `:no-client` 风暴的成因）。已由
+`coord-server` `auth::service::cct_tests::session_persist_failure_propagates_retryable_code`
+（含负控制：改成 `unauthenticated` ⇒ 必红）钉住；本 run 是它的端到端对照。
+
 ---
 
 ## F-06 [改计划] Watch 语义：丢弃最旧 + 显式 `BufferOverflow`（§9-⑧ 的答案）
