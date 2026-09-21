@@ -1,0 +1,268 @@
+# 备份恢复演练（W6-4）
+commit: 19cb350ec32627d1c04cd3b3f2e18fd126de2559
+worktree: CLEAN (1 处改动)
+utc: 2026-09-21T16:16:53Z
+host: Linux 6.8.0-139-generic x86_64, rustc 1.98.1
+说明：本次为**进程内**演练（不含对象存储/多节点），见 MANIFEST.md 的边界段。
+
+==== cargo test -p coord-server --test snapshot_rpc_test ====
+   Compiling coord-proto v0.2.0 (/data/jepsen/coord/coord-proto)
+   Compiling coord-core v0.2.0 (/data/jepsen/coord/coord-core)
+   Compiling coord-server v0.2.0 (/data/jepsen/coord/coord-server)
+warning: unused import: `tokio_stream::StreamExt`
+   --> coord-server/tests/snapshot_rpc_test.rs:116:9
+    |
+116 |     use tokio_stream::StreamExt;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tokio_stream::StreamExt`
+   --> coord-server/tests/snapshot_rpc_test.rs:206:9
+    |
+206 |     use tokio_stream::StreamExt;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `coord-server` (test "snapshot_rpc_test") generated 2 warnings (run `cargo fix --test "snapshot_rpc_test" -p coord-server` to apply 1 suggestion)
+    Finished `test` profile [optimized + debuginfo] target(s) in 44.53s
+     Running tests/snapshot_rpc_test.rs (target/debug/deps/snapshot_rpc_test-c106e7fe5dc9ba33)
+
+running 2 tests
+test test_snapshot_rpc_matches_local_export ... ok
+test test_snapshot_rpc_stream_and_restore ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
+
+
+==== cargo test -p coord-server --test snapshot_transfer_test ====
+   Compiling coord-server v0.2.0 (/data/jepsen/coord/coord-server)
+    Finished `test` profile [optimized + debuginfo] target(s) in 6.44s
+     Running tests/snapshot_transfer_test.rs (target/debug/deps/snapshot_transfer_test-e5e5420d71a035ef)
+
+running 1 test
+test test_snapshot_export_wipe_import_roundtrip ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+
+
+==== cargo test -p coord-server --test restart_recovery_test ====
+   Compiling coord-server v0.2.0 (/data/jepsen/coord/coord-server)
+    Finished `test` profile [optimized + debuginfo] target(s) in 6.45s
+     Running tests/restart_recovery_test.rs (target/debug/deps/restart_recovery_test-cb06a520e427b566)
+
+running 4 tests
+test test_purge_guard_refuses_without_durable_snapshot ... ok
+test test_snapshot_persisted_and_loaded ... ok
+test test_replay_is_idempotent ... ok
+test test_applied_persisted_across_restart ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.37s
+
+
+==== cargo test -p coord --test m0_recovery_suite ====
+   Compiling rtoolbox v0.0.5
+   Compiling coord-agent v0.2.0 (/data/jepsen/coord/coord-agent)
+   Compiling rpassword v7.5.4
+   Compiling coord v0.2.0 (/data/jepsen/coord/coord)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 46s
+     Running tests/m0_recovery_suite.rs (target/debug/deps/m0_recovery_suite-f2ebdb6e20d08a4d)
+
+running 3 tests
+[2m2026-09-21T16:20:06.941840Z[0m [32m INFO[0m Starting coord server v0.2.0: id=1, grpc=127.0.0.1:46781, raft=127.0.0.1:44865, cluster=coord-cluster, bootstrap=true, auth_enabled=false
+[2m2026-09-21T16:20:06.941938Z[0m [32m INFO[0m Starting coord server v0.2.0: id=1, grpc=127.0.0.1:33439, raft=127.0.0.1:33549, cluster=coord-cluster, bootstrap=true, auth_enabled=false
+[2m2026-09-21T16:20:06.941944Z[0m [32m INFO[0m Starting coord server v0.2.0: id=1, grpc=127.0.0.1:34629, raft=127.0.0.1:44267, cluster=coord-cluster, bootstrap=true, auth_enabled=false
+[2m2026-09-21T16:20:07.006414Z[0m [32m INFO[0m Fresh store: no applied state, no changelog
+[2m2026-09-21T16:20:07.017185Z[0m [32m INFO[0m Fresh store: no applied state, no changelog
+[2m2026-09-21T16:20:07.023133Z[0m [32m INFO[0m Fresh store: no applied state, no changelog
+[2m2026-09-21T16:20:07.075207Z[0m [33m WARN[0m Auth DISABLED in server mode — insecure; intended for dev/test environments only
+[coord] Generated random root password (shown ONCE; store it securely): _dWRHf%LyTdn7Y#=Yc8wqs!4
+[2m2026-09-21T16:20:07.094830Z[0m [33m WARN[0m Auth DISABLED in server mode — insecure; intended for dev/test environments only
+[coord] Generated random root password (shown ONCE; store it securely): Qw!%JBur=NYjzqsHkbeVhbdQ
+[2m2026-09-21T16:20:07.100500Z[0m [33m WARN[0m Auth DISABLED in server mode — insecure; intended for dev/test environments only
+[coord] Generated random root password (shown ONCE; store it securely): B!NXyQDF5BDF9jGzsp#igufi
+[2m2026-09-21T16:20:07.146254Z[0m [32m INFO[0m Auth state loaded: 1 users, 1 roles, 0 revoked tokens
+[2m2026-09-21T16:20:07.146414Z[0m [33m WARN[0m Raft RPC on loopback without mTLS/shared-secret — insecure; dev/test only
+[2m2026-09-21T16:20:07.156835Z[0m [32m INFO[0m Bootstrapping Raft cluster
+[2m2026-09-21T16:20:07.158453Z[0m [32m INFO[0m Auth state loaded: 1 users, 1 roles, 0 revoked tokens
+[2m2026-09-21T16:20:07.158564Z[0m [33m WARN[0m Raft RPC on loopback without mTLS/shared-secret — insecure; dev/test only
+[2m2026-09-21T16:20:07.166805Z[0m [32m INFO[0m Auth state loaded: 1 users, 1 roles, 0 revoked tokens
+[2m2026-09-21T16:20:07.166933Z[0m [33m WARN[0m Raft RPC on loopback without mTLS/shared-secret — insecure; dev/test only
+[2m2026-09-21T16:20:07.168780Z[0m [32m INFO[0m Bootstrapping Raft cluster
+[2m2026-09-21T16:20:07.176929Z[0m [32m INFO[0m Bootstrapping Raft cluster
+[2m2026-09-21T16:20:07.688501Z[0m [32m INFO[0m root user persisted via raft
+[2m2026-09-21T16:20:07.688571Z[0m [32m INFO[0m Static encryption DISABLED (security.encryption_enabled=false)
+[2m2026-09-21T16:20:07.688670Z[0m [32m INFO[0m Generated new auth root key at /tmp/.tmpMBEYvE/auth-root-key.bin (mode 0600)
+[2m2026-09-21T16:20:07.688767Z[0m [32m INFO[0m Capability registry bootstrapped: 81 built-in capabilities
+[2m2026-09-21T16:20:07.689050Z[0m [32m INFO[0m HTTP server (health/BFF/UI) listening on http://127.0.0.1:46791 (ui_enabled=false)
+[2m2026-09-21T16:20:07.689083Z[0m [32m INFO[0m Compaction manager started: auto_compact=true, interval=3600s, retention=100000 revs
+[2m2026-09-21T16:20:07.689100Z[0m [32m INFO[0m Snapshot scheduler started: interval=1h, retention=7d, dir=/tmp/.tmpMBEYvE/snapshots/auto
+[2m2026-09-21T16:20:07.689111Z[0m [32m INFO[0m gRPC reflection disabled (security.reflection_enabled=false)
+[2m2026-09-21T16:20:07.689118Z[0m [32m INFO[0m Coord server v0.2.0 started: node_id=1, grpc_addr=127.0.0.1:46781, raft_addr=127.0.0.1:44865 (no TLS, auth_enabled=false)
+[2m2026-09-21T16:20:07.689124Z[0m [32m INFO[0m LeaseManager rebuilt from state machine: 0 leases
+[2m2026-09-21T16:20:07.689147Z[0m [32m INFO[0m Raft RPC server on 127.0.0.1:44865 WITHOUT TLS (inter-node auth disabled)
+[2m2026-09-21T16:20:07.689151Z[0m [32m INFO[0m Snapshot scheduler started: interval=3600s, retention=604800s, dir=/tmp/.tmpMBEYvE/snapshots/auto
+[2m2026-09-21T16:20:07.726133Z[0m [32m INFO[0m root user persisted via raft
+[2m2026-09-21T16:20:07.726211Z[0m [32m INFO[0m Static encryption DISABLED (security.encryption_enabled=false)
+[2m2026-09-21T16:20:07.726288Z[0m [32m INFO[0m Generated new auth root key at /tmp/.tmpKkv8Dv/auth-root-key.bin (mode 0600)
+[2m2026-09-21T16:20:07.726393Z[0m [32m INFO[0m Capability registry bootstrapped: 81 built-in capabilities
+[2m2026-09-21T16:20:07.726723Z[0m [32m INFO[0m HTTP server (health/BFF/UI) listening on http://127.0.0.1:33449 (ui_enabled=false)
+[2m2026-09-21T16:20:07.726757Z[0m [32m INFO[0m Compaction manager started: auto_compact=true, interval=3600s, retention=100000 revs
+[2m2026-09-21T16:20:07.726773Z[0m [32m INFO[0m Snapshot scheduler started: interval=1h, retention=7d, dir=/tmp/.tmpKkv8Dv/snapshots/auto
+[2m2026-09-21T16:20:07.726794Z[0m [32m INFO[0m gRPC reflection disabled (security.reflection_enabled=false)
+[2m2026-09-21T16:20:07.726804Z[0m [32m INFO[0m Coord server v0.2.0 started: node_id=1, grpc_addr=127.0.0.1:33439, raft_addr=127.0.0.1:33549 (no TLS, auth_enabled=false)
+[2m2026-09-21T16:20:07.726808Z[0m [32m INFO[0m Raft RPC server on 127.0.0.1:33549 WITHOUT TLS (inter-node auth disabled)
+[2m2026-09-21T16:20:07.726830Z[0m [32m INFO[0m Snapshot scheduler started: interval=3600s, retention=604800s, dir=/tmp/.tmpKkv8Dv/snapshots/auto
+[2m2026-09-21T16:20:07.727076Z[0m [32m INFO[0m LeaseManager rebuilt from state machine: 0 leases
+[2m2026-09-21T16:20:07.742984Z[0m [32m INFO[0m root user persisted via raft
+[2m2026-09-21T16:20:07.743049Z[0m [32m INFO[0m Static encryption DISABLED (security.encryption_enabled=false)
+[2m2026-09-21T16:20:07.743132Z[0m [32m INFO[0m Generated new auth root key at /tmp/.tmpfskXJj/auth-root-key.bin (mode 0600)
+[2m2026-09-21T16:20:07.743222Z[0m [32m INFO[0m Capability registry bootstrapped: 81 built-in capabilities
+[2m2026-09-21T16:20:07.743511Z[0m [32m INFO[0m HTTP server (health/BFF/UI) listening on http://127.0.0.1:34639 (ui_enabled=false)
+[2m2026-09-21T16:20:07.743544Z[0m [32m INFO[0m Compaction manager started: auto_compact=true, interval=3600s, retention=100000 revs
+[2m2026-09-21T16:20:07.743560Z[0m [32m INFO[0m Snapshot scheduler started: interval=1h, retention=7d, dir=/tmp/.tmpfskXJj/snapshots/auto
+[2m2026-09-21T16:20:07.743571Z[0m [32m INFO[0m gRPC reflection disabled (security.reflection_enabled=false)
+[2m2026-09-21T16:20:07.743582Z[0m [32m INFO[0m Coord server v0.2.0 started: node_id=1, grpc_addr=127.0.0.1:34629, raft_addr=127.0.0.1:44267 (no TLS, auth_enabled=false)
+[2m2026-09-21T16:20:07.743587Z[0m [32m INFO[0m Raft RPC server on 127.0.0.1:44267 WITHOUT TLS (inter-node auth disabled)
+[2m2026-09-21T16:20:07.743615Z[0m [32m INFO[0m Snapshot scheduler started: interval=3600s, retention=604800s, dir=/tmp/.tmpfskXJj/snapshots/auto
+[2m2026-09-21T16:20:07.744956Z[0m [32m INFO[0m LeaseManager rebuilt from state machine: 0 leases
+[2m2026-09-21T16:20:07.838529Z[0m [32m INFO[0m redb compact: file shrunk (space reclaimed)
+[2m2026-09-21T16:20:07.877569Z[0m [32m INFO[0m redb compact: file shrunk (space reclaimed)
+[2m2026-09-21T16:20:07.882475Z[0m [32m INFO[0m redb compact: file shrunk (space reclaimed)
+[2m2026-09-21T16:20:08.029185Z[0m [32m INFO[0m Starting coord server v0.2.0: id=1, grpc=127.0.0.1:34629, raft=127.0.0.1:44267, cluster=coord-cluster, bootstrap=true, auth_enabled=false
+[2m2026-09-21T16:20:08.076179Z[0m [32m INFO[0m Store consistency OK: applied=5, changelog_tail=5
+[2m2026-09-21T16:20:08.118352Z[0m [33m WARN[0m Auth DISABLED in server mode — insecure; intended for dev/test environments only
+[2m2026-09-21T16:20:08.118529Z[0m [32m INFO[0m Auth state loaded: 1 users, 1 roles, 0 revoked tokens
+[2m2026-09-21T16:20:08.118615Z[0m [33m WARN[0m Raft RPC on loopback without mTLS/shared-secret — insecure; dev/test only
+[2m2026-09-21T16:20:08.146104Z[0m [32m INFO[0m Raft cluster already initialized, skipping bootstrap
+[2m2026-09-21T16:20:08.146171Z[0m [32m INFO[0m Static encryption DISABLED (security.encryption_enabled=false)
+[2m2026-09-21T16:20:08.146326Z[0m [32m INFO[0m Capability registry bootstrapped: 81 built-in capabilities
+[2m2026-09-21T16:20:08.146694Z[0m [32m INFO[0m HTTP server (health/BFF/UI) listening on http://127.0.0.1:34639 (ui_enabled=false)
+[2m2026-09-21T16:20:08.146743Z[0m [32m INFO[0m Compaction manager started: auto_compact=true, interval=3600s, retention=100000 revs
+[2m2026-09-21T16:20:08.146764Z[0m [32m INFO[0m Snapshot scheduler started: interval=1h, retention=7d, dir=/tmp/.tmpfskXJj/snapshots/auto
+[2m2026-09-21T16:20:08.146775Z[0m [32m INFO[0m gRPC reflection disabled (security.reflection_enabled=false)
+[2m2026-09-21T16:20:08.146777Z[0m [32m INFO[0m LeaseManager rebuilt from state machine: 0 leases
+[2m2026-09-21T16:20:08.146783Z[0m [32m INFO[0m Coord server v0.2.0 started: node_id=1, grpc_addr=127.0.0.1:34629, raft_addr=127.0.0.1:44267 (no TLS, auth_enabled=false)
+[2m2026-09-21T16:20:08.146830Z[0m [32m INFO[0m Snapshot scheduler started: interval=3600s, retention=604800s, dir=/tmp/.tmpfskXJj/snapshots/auto
+[2m2026-09-21T16:20:08.146845Z[0m [32m INFO[0m Raft RPC server on 127.0.0.1:44267 WITHOUT TLS (inter-node auth disabled)
+[2m2026-09-21T16:20:08.322541Z[0m [32m INFO[0m redb compact: file shrunk (space reclaimed)
+[2m2026-09-21T16:20:08.324600Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(5) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 5 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 5 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 5 }) read_log_id=T1-N1.5 read_served
+[2m2026-09-21T16:20:08.355929Z[0m [32m INFO[0m Starting coord server v0.2.0: id=1, grpc=127.0.0.1:34629, raft=127.0.0.1:44267, cluster=coord-cluster, bootstrap=true, auth_enabled=false
+[2m2026-09-21T16:20:08.411032Z[0m [32m INFO[0m Store consistency OK: applied=6, changelog_tail=6
+[2m2026-09-21T16:20:08.454759Z[0m [33m WARN[0m Auth DISABLED in server mode — insecure; intended for dev/test environments only
+[2m2026-09-21T16:20:08.454874Z[0m [32m INFO[0m Auth state loaded: 1 users, 1 roles, 0 revoked tokens
+[2m2026-09-21T16:20:08.454949Z[0m [33m WARN[0m Raft RPC on loopback without mTLS/shared-secret — insecure; dev/test only
+[2m2026-09-21T16:20:08.480326Z[0m [32m INFO[0m Raft cluster already initialized, skipping bootstrap
+[2m2026-09-21T16:20:08.480384Z[0m [32m INFO[0m Static encryption DISABLED (security.encryption_enabled=false)
+[2m2026-09-21T16:20:08.480501Z[0m [32m INFO[0m Capability registry bootstrapped: 81 built-in capabilities
+[2m2026-09-21T16:20:08.480779Z[0m [32m INFO[0m HTTP server (health/BFF/UI) listening on http://127.0.0.1:34639 (ui_enabled=false)
+[2m2026-09-21T16:20:08.480827Z[0m [32m INFO[0m Compaction manager started: auto_compact=true, interval=3600s, retention=100000 revs
+[2m2026-09-21T16:20:08.480842Z[0m [32m INFO[0m Snapshot scheduler started: interval=1h, retention=7d, dir=/tmp/.tmpfskXJj/snapshots/auto
+[2m2026-09-21T16:20:08.480853Z[0m [32m INFO[0m gRPC reflection disabled (security.reflection_enabled=false)
+[2m2026-09-21T16:20:08.480858Z[0m [32m INFO[0m Raft RPC server on 127.0.0.1:44267 WITHOUT TLS (inter-node auth disabled)
+[2m2026-09-21T16:20:08.480857Z[0m [32m INFO[0m Snapshot scheduler started: interval=3600s, retention=604800s, dir=/tmp/.tmpfskXJj/snapshots/auto
+[2m2026-09-21T16:20:08.480863Z[0m [32m INFO[0m Coord server v0.2.0 started: node_id=1, grpc_addr=127.0.0.1:34629, raft_addr=127.0.0.1:44267 (no TLS, auth_enabled=false)
+[2m2026-09-21T16:20:08.481940Z[0m [32m INFO[0m LeaseManager rebuilt from state machine: 0 leases
+[2m2026-09-21T16:20:08.650637Z[0m [32m INFO[0m redb compact: file shrunk (space reclaimed)
+[2m2026-09-21T16:20:08.780213Z[0m [32m INFO[0m Starting coord server v0.2.0: id=1, grpc=127.0.0.1:34629, raft=127.0.0.1:44267, cluster=coord-cluster, bootstrap=true, auth_enabled=false
+[2m2026-09-21T16:20:08.857078Z[0m [32m INFO[0m Store consistency OK: applied=9, changelog_tail=9
+[2m2026-09-21T16:20:08.900470Z[0m [33m WARN[0m Auth DISABLED in server mode — insecure; intended for dev/test environments only
+[2m2026-09-21T16:20:08.900619Z[0m [32m INFO[0m Auth state loaded: 1 users, 1 roles, 0 revoked tokens
+[2m2026-09-21T16:20:08.900689Z[0m [33m WARN[0m Raft RPC on loopback without mTLS/shared-secret — insecure; dev/test only
+[2m2026-09-21T16:20:08.926017Z[0m [32m INFO[0m Raft cluster already initialized, skipping bootstrap
+[2m2026-09-21T16:20:08.926058Z[0m [32m INFO[0m Static encryption DISABLED (security.encryption_enabled=false)
+[2m2026-09-21T16:20:08.926190Z[0m [32m INFO[0m Capability registry bootstrapped: 81 built-in capabilities
+[2m2026-09-21T16:20:08.926474Z[0m [32m INFO[0m HTTP server (health/BFF/UI) listening on http://127.0.0.1:34639 (ui_enabled=false)
+[2m2026-09-21T16:20:08.926521Z[0m [32m INFO[0m Compaction manager started: auto_compact=true, interval=3600s, retention=100000 revs
+[2m2026-09-21T16:20:08.926533Z[0m [32m INFO[0m Snapshot scheduler started: interval=1h, retention=7d, dir=/tmp/.tmpfskXJj/snapshots/auto
+[2m2026-09-21T16:20:08.926555Z[0m [32m INFO[0m gRPC reflection disabled (security.reflection_enabled=false)
+[2m2026-09-21T16:20:08.926551Z[0m [32m INFO[0m LeaseManager rebuilt from state machine: 0 leases
+[2m2026-09-21T16:20:08.926551Z[0m [32m INFO[0m Snapshot scheduler started: interval=3600s, retention=604800s, dir=/tmp/.tmpfskXJj/snapshots/auto
+[2m2026-09-21T16:20:08.926564Z[0m [32m INFO[0m Coord server v0.2.0 started: node_id=1, grpc_addr=127.0.0.1:34629, raft_addr=127.0.0.1:44267 (no TLS, auth_enabled=false)
+[2m2026-09-21T16:20:08.926565Z[0m [32m INFO[0m Raft RPC server on 127.0.0.1:44267 WITHOUT TLS (inter-node auth disabled)
+[2m2026-09-21T16:20:09.080615Z[0m [32m INFO[0m redb compact: file shrunk (space reclaimed)
+[2m2026-09-21T16:20:09.081667Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(9) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 9 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 9 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 9 }) read_log_id=T1-N1.9 read_served
+[2m2026-09-21T16:20:09.163693Z[0m [32m INFO[0m Starting coord server v0.2.0: id=1, grpc=127.0.0.1:34629, raft=127.0.0.1:44267, cluster=coord-cluster, bootstrap=true, auth_enabled=false
+[2m2026-09-21T16:20:09.218521Z[0m [32m INFO[0m Store consistency OK: applied=10, changelog_tail=10
+[2m2026-09-21T16:20:09.268001Z[0m [33m WARN[0m Auth DISABLED in server mode — insecure; intended for dev/test environments only
+[2m2026-09-21T16:20:09.268140Z[0m [32m INFO[0m Auth state loaded: 1 users, 1 roles, 0 revoked tokens
+[2m2026-09-21T16:20:09.268249Z[0m [33m WARN[0m Raft RPC on loopback without mTLS/shared-secret — insecure; dev/test only
+[2m2026-09-21T16:20:09.294046Z[0m [32m INFO[0m Raft cluster already initialized, skipping bootstrap
+[2m2026-09-21T16:20:09.294089Z[0m [32m INFO[0m Static encryption DISABLED (security.encryption_enabled=false)
+[2m2026-09-21T16:20:09.294241Z[0m [32m INFO[0m Capability registry bootstrapped: 81 built-in capabilities
+[2m2026-09-21T16:20:09.294546Z[0m [32m INFO[0m HTTP server (health/BFF/UI) listening on http://127.0.0.1:34639 (ui_enabled=false)
+[2m2026-09-21T16:20:09.294589Z[0m [32m INFO[0m Compaction manager started: auto_compact=true, interval=3600s, retention=100000 revs
+[2m2026-09-21T16:20:09.294607Z[0m [32m INFO[0m Snapshot scheduler started: interval=1h, retention=7d, dir=/tmp/.tmpfskXJj/snapshots/auto
+[2m2026-09-21T16:20:09.294620Z[0m [32m INFO[0m gRPC reflection disabled (security.reflection_enabled=false)
+[2m2026-09-21T16:20:09.294623Z[0m [32m INFO[0m LeaseManager rebuilt from state machine: 0 leases
+[2m2026-09-21T16:20:09.294624Z[0m [32m INFO[0m Snapshot scheduler started: interval=3600s, retention=604800s, dir=/tmp/.tmpfskXJj/snapshots/auto
+[2m2026-09-21T16:20:09.294629Z[0m [32m INFO[0m Coord server v0.2.0 started: node_id=1, grpc_addr=127.0.0.1:34629, raft_addr=127.0.0.1:44267 (no TLS, auth_enabled=false)
+[2m2026-09-21T16:20:09.294635Z[0m [32m INFO[0m Raft RPC server on 127.0.0.1:44267 WITHOUT TLS (inter-node auth disabled)
+[2m2026-09-21T16:20:09.494557Z[0m [32m INFO[0m redb compact: file shrunk (space reclaimed)
+[2m2026-09-21T16:20:09.644414Z[0m [32m INFO[0m Starting coord server v0.2.0: id=1, grpc=127.0.0.1:34629, raft=127.0.0.1:44267, cluster=coord-cluster, bootstrap=true, auth_enabled=false
+[2m2026-09-21T16:20:09.689837Z[0m [32m INFO[0m Store consistency OK: applied=13, changelog_tail=13
+[2m2026-09-21T16:20:09.738362Z[0m [33m WARN[0m Auth DISABLED in server mode — insecure; intended for dev/test environments only
+[2m2026-09-21T16:20:09.738525Z[0m [32m INFO[0m Auth state loaded: 1 users, 1 roles, 0 revoked tokens
+[2m2026-09-21T16:20:09.738626Z[0m [33m WARN[0m Raft RPC on loopback without mTLS/shared-secret — insecure; dev/test only
+[2m2026-09-21T16:20:09.764349Z[0m [32m INFO[0m Raft cluster already initialized, skipping bootstrap
+[2m2026-09-21T16:20:09.764411Z[0m [32m INFO[0m Static encryption DISABLED (security.encryption_enabled=false)
+[2m2026-09-21T16:20:09.764552Z[0m [32m INFO[0m Capability registry bootstrapped: 81 built-in capabilities
+[2m2026-09-21T16:20:09.764855Z[0m [32m INFO[0m HTTP server (health/BFF/UI) listening on http://127.0.0.1:34639 (ui_enabled=false)
+[2m2026-09-21T16:20:09.764904Z[0m [32m INFO[0m Compaction manager started: auto_compact=true, interval=3600s, retention=100000 revs
+[2m2026-09-21T16:20:09.764921Z[0m [32m INFO[0m Snapshot scheduler started: interval=1h, retention=7d, dir=/tmp/.tmpfskXJj/snapshots/auto
+[2m2026-09-21T16:20:09.764931Z[0m [32m INFO[0m gRPC reflection disabled (security.reflection_enabled=false)
+[2m2026-09-21T16:20:09.764946Z[0m [32m INFO[0m Coord server v0.2.0 started: node_id=1, grpc_addr=127.0.0.1:34629, raft_addr=127.0.0.1:44267 (no TLS, auth_enabled=false)
+[2m2026-09-21T16:20:09.764944Z[0m [32m INFO[0m Raft RPC server on 127.0.0.1:44267 WITHOUT TLS (inter-node auth disabled)
+[2m2026-09-21T16:20:09.764952Z[0m [32m INFO[0m Snapshot scheduler started: interval=3600s, retention=604800s, dir=/tmp/.tmpfskXJj/snapshots/auto
+[2m2026-09-21T16:20:09.765527Z[0m [32m INFO[0m LeaseManager rebuilt from state machine: 0 leases
+[2m2026-09-21T16:20:09.964028Z[0m [32m INFO[0m redb compact: file shrunk (space reclaimed)
+[2m2026-09-21T16:20:09.966077Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(13) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 13 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 13 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 13 }) read_log_id=T1-N1.13 read_served
+test m0_kill9_restart_revision_stable ... ok
+test m0_purged_log_restart_guard_allows_valid_snapshot has been running for over 60 seconds
+test m0_snapshot_purge_then_restart has been running for over 60 seconds
+[2m2026-09-21T16:22:44.367469Z[0m [32m INFO[0m Starting coord server v0.2.0: id=1, grpc=127.0.0.1:33439, raft=127.0.0.1:33549, cluster=coord-cluster, bootstrap=true, auth_enabled=false
+[2m2026-09-21T16:22:44.393442Z[0m [32m INFO[0m Store consistency OK: applied=5102, changelog_tail=5102
+[2m2026-09-21T16:22:44.417780Z[0m [32m INFO[0m Loaded persisted snapshot: /tmp/.tmpKkv8Dv/snapshots/snapshot-4999-1.snap (last_log_id=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 4999 }))
+[2m2026-09-21T16:22:44.417837Z[0m [32m INFO[0m Purge guard OK: logs purged up to 3999, durable snapshot covers it
+[2m2026-09-21T16:22:44.417843Z[0m [33m WARN[0m Auth DISABLED in server mode — insecure; intended for dev/test environments only
+[2m2026-09-21T16:22:44.417892Z[0m [32m INFO[0m Auth state loaded: 1 users, 1 roles, 0 revoked tokens
+[2m2026-09-21T16:22:44.417915Z[0m [33m WARN[0m Raft RPC on loopback without mTLS/shared-secret — insecure; dev/test only
+[2m2026-09-21T16:22:44.432788Z[0m [32m INFO[0m Raft cluster already initialized, skipping bootstrap
+[2m2026-09-21T16:22:44.432841Z[0m [32m INFO[0m Static encryption DISABLED (security.encryption_enabled=false)
+[2m2026-09-21T16:22:44.432965Z[0m [32m INFO[0m Capability registry bootstrapped: 81 built-in capabilities
+[2m2026-09-21T16:22:44.433243Z[0m [32m INFO[0m HTTP server (health/BFF/UI) listening on http://127.0.0.1:33449 (ui_enabled=false)
+[2m2026-09-21T16:22:44.433278Z[0m [32m INFO[0m Compaction manager started: auto_compact=true, interval=3600s, retention=100000 revs
+[2m2026-09-21T16:22:44.433295Z[0m [32m INFO[0m Snapshot scheduler started: interval=1h, retention=7d, dir=/tmp/.tmpKkv8Dv/snapshots/auto
+[2m2026-09-21T16:22:44.433310Z[0m [32m INFO[0m gRPC reflection disabled (security.reflection_enabled=false)
+[2m2026-09-21T16:22:44.433319Z[0m [32m INFO[0m Coord server v0.2.0 started: node_id=1, grpc_addr=127.0.0.1:33439, raft_addr=127.0.0.1:33549 (no TLS, auth_enabled=false)
+[2m2026-09-21T16:22:44.433326Z[0m [32m INFO[0m Snapshot scheduler started: interval=3600s, retention=604800s, dir=/tmp/.tmpKkv8Dv/snapshots/auto
+[2m2026-09-21T16:22:44.433348Z[0m [32m INFO[0m Raft RPC server on 127.0.0.1:33549 WITHOUT TLS (inter-node auth disabled)
+[2m2026-09-21T16:22:44.434460Z[0m [32m INFO[0m LeaseManager rebuilt from state machine: 0 leases
+[2m2026-09-21T16:22:44.489190Z[0m [32m INFO[0m redb compact: file shrunk (space reclaimed)
+[2m2026-09-21T16:22:44.643468Z[0m [32m INFO[0m Starting coord server v0.2.0: id=1, grpc=127.0.0.1:46781, raft=127.0.0.1:44865, cluster=coord-cluster, bootstrap=true, auth_enabled=false
+[2m2026-09-21T16:22:44.648963Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(5102) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 5102 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 5102 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 5102 }) read_log_id=T1-N1.5102 read_served
+[2m2026-09-21T16:22:44.649222Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(5102) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 5102 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 5102 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 5102 }) read_log_id=T1-N1.5102 read_served
+test m0_snapshot_purge_then_restart ... ok
+[2m2026-09-21T16:22:44.677055Z[0m [32m INFO[0m Store consistency OK: applied=5102, changelog_tail=5102
+[2m2026-09-21T16:22:44.684561Z[0m [32m INFO[0m Loaded persisted snapshot: /tmp/.tmpMBEYvE/snapshots/snapshot-4999-1.snap (last_log_id=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 4999 }))
+[2m2026-09-21T16:22:44.684587Z[0m [32m INFO[0m Purge guard OK: logs purged up to 3999, durable snapshot covers it
+[2m2026-09-21T16:22:44.684608Z[0m [33m WARN[0m Auth DISABLED in server mode — insecure; intended for dev/test environments only
+[2m2026-09-21T16:22:44.684651Z[0m [32m INFO[0m Auth state loaded: 1 users, 1 roles, 0 revoked tokens
+[2m2026-09-21T16:22:44.684682Z[0m [33m WARN[0m Raft RPC on loopback without mTLS/shared-secret — insecure; dev/test only
+[2m2026-09-21T16:22:44.699627Z[0m [32m INFO[0m Raft cluster already initialized, skipping bootstrap
+[2m2026-09-21T16:22:44.699670Z[0m [32m INFO[0m Static encryption DISABLED (security.encryption_enabled=false)
+[2m2026-09-21T16:22:44.699793Z[0m [32m INFO[0m Capability registry bootstrapped: 81 built-in capabilities
+[2m2026-09-21T16:22:44.700076Z[0m [32m INFO[0m HTTP server (health/BFF/UI) listening on http://127.0.0.1:46791 (ui_enabled=false)
+[2m2026-09-21T16:22:44.700110Z[0m [32m INFO[0m Compaction manager started: auto_compact=true, interval=3600s, retention=100000 revs
+[2m2026-09-21T16:22:44.700128Z[0m [32m INFO[0m Snapshot scheduler started: interval=1h, retention=7d, dir=/tmp/.tmpMBEYvE/snapshots/auto
+[2m2026-09-21T16:22:44.700142Z[0m [32m INFO[0m gRPC reflection disabled (security.reflection_enabled=false)
+[2m2026-09-21T16:22:44.700151Z[0m [32m INFO[0m Coord server v0.2.0 started: node_id=1, grpc_addr=127.0.0.1:46781, raft_addr=127.0.0.1:44865 (no TLS, auth_enabled=false)
+[2m2026-09-21T16:22:44.700149Z[0m [32m INFO[0m Snapshot scheduler started: interval=3600s, retention=604800s, dir=/tmp/.tmpMBEYvE/snapshots/auto
+[2m2026-09-21T16:22:44.700156Z[0m [32m INFO[0m Raft RPC server on 127.0.0.1:44865 WITHOUT TLS (inter-node auth disabled)
+[2m2026-09-21T16:22:44.700853Z[0m [32m INFO[0m LeaseManager rebuilt from state machine: 0 leases
+[2m2026-09-21T16:22:44.756752Z[0m [32m INFO[0m redb compact: file shrunk (space reclaimed)
+[2m2026-09-21T16:22:44.884176Z[0m [32m INFO[0m raft_wm node=1 state=Leader leader=Some(1) term=1 last_log_index=Some(5102) local_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 5102 }) cluster_committed=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 5102 }) last_applied=Some(LogId { leader_id: LeaderId { term: 1, node_id: 1 }, index: 5102 }) read_log_id=T1-N1.5102 read_served
+test m0_purged_log_restart_guard_allows_valid_snapshot ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 157.96s
+
+

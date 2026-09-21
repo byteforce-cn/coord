@@ -142,6 +142,11 @@ coord snapshot restore --snapshot /backup/local.snap --data-dir /var/lib/coord -
 
 **演练要求**：至少演练一次「坏一个节点 → 用快照恢复 → `member list` 恢复 → 数据抽样读回」。
 
+> **已有证据（W6-4，2026-09-21）**：**进程内**备份/恢复演练 10/10 通过，
+> 归档于 `docs/production/evidence/20260921T161653Z-w6-4-backup-restore-drill/`
+> （覆盖快照流→恢复、导出→清空→导入、purge 守卫、重放幂等、kill -9 后 revision 不回退）。
+> **它不替代本节的「演练要求」**：坏节点恢复 + 对象存储 + 多节点仍是 ⏳ 未做。
+
 ---
 
 ## §4 密钥轮换与 Seal / Unseal
