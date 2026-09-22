@@ -178,6 +178,7 @@
 | **D-16** | 未决项未裁定：U1 / U3 / U4 / U5 / U6 / U8 / U9 | 计划 §8「未决项」表 | 9 | W0-6 |
 | **D-17** | enum 演进无机械保护（`buf.yaml` 豁免 `ENUM_VALUE_PREFIX`/`ENUM_ZERO_VALUE_SUFFIX`；改名对 grpc-java 是**静默破坏**） | `remaining-known-gaps.md:154-165`（C22）、`coord-proto/buf.yaml` | 2 | W1-7 |
 | **D-18** | 免责声明与任何生产承诺互斥（`README.md:17`） | 同 D-05 | 9 | W0-3 |
+| **D-19** | **「默认开关」两条路径并未拉平**（U-03 的原话过度声称）：`registry` / `config_center` / `lock` / `idgen` / `policy` / `pki` 六项**代码默认 `true`**，但字段是普通 `#[serde(default)]` ⇒ **配置文件路径**下缺省 `false`。⇒ 同一个 agent「走不走 `--agent-config`」得到**不同的服务集合**（前者传个没写 `[services]` 的 TOML 就会把这些服务**全部关掉**） | `coord-agent/src/service.rs`（六处 `#[serde(default)]` vs `impl Default`）；判据：`test_known_divergence_code_default_vs_toml_is_pinned`（**故意钉住不一致**，改任一侧即红）；**发现于 2026-09-22**（因为把 `pki` 加进 `test_service_config_toml_missing_fields_match_code_defaults` 的比对而暴露） | 9 | **本轮仅钉住**；修法二选一（需裁定）：①六项改 `#[serde(default = "default_true")]` ②六项代码默认改 `false`（严守 G9「默认关」） |
 
 ---
 
@@ -222,11 +223,11 @@
 | event | 12-31 | ❌ | ❌ | ❌ | **false** | W3-4 |
 | config / pki | 12-31 | 🟡（进程级） | ❌ | ❌ | true | W3 |
 | policy / cb / rl | 12-31 | 🟡（进程级） | ❌ | ❌ | true/false | W1-6（边界已声明，需 e2e） |
-| transit | 12-31 | 🟡 | ❌ | ❌ | true | W4-2（KEK/U9） |
+| transit | 12-31 | 🟡 | ❌ | ❌ | **false**（U-11） | W4-2a（**已落地**，2026-09-22） |
 | featureflags | 12-31 | 🟡 | ❌ | ❌ | false | W3 |
-| cache | 12-31 | 🟡（不可测 ISR） | 🟡 | ❌ | **true** | **W3-5**（多 agent 拓扑）、W0-5 |
+| cache | 12-31 | 🟡（不可测 ISR） | 🟡 | ❌ | **false**（U-03） | **W3-5**（多 agent 拓扑）、W0-5 |
 | mq | 12-31 | ✅（2026-09-21 `1n`/`1` 两份归档） | 🟡 | ❌ | false | W1-3（F-68，**已闭环**）、W3-5 |
-| workflow | 2027-03-31 | 🟡（进程级） | ❌ | ❌ | **true** | W1-4（无界增长）、W0-5 |
+| workflow | 2027-03-31 | 🟡（进程级） | ❌ | ❌ | **false**（U-03） | W1-4（无界增长）、W0-5 |
 | scheduler | 2027-03-31 | 🟡 | ❌ | ❌ | false | W3 |
 | storage | 12-31 | 🟡（进程级+混沌） | 🟡 | ❌ | n/a | W6-4（快照 rebuild 边界） |
 
@@ -440,7 +441,7 @@
 |:--|:--|:--|:--|:--|
 | **U-01** | **取②「限定」**：两处 README 的「not intended for production use」改为「**接口承诺（L0）可用**；生产面见 `WHITEPAPER.md` §12 与本文 §4」，并写明裁定日期与「本条取代原措辞」 | 决策方（本次会话） | 2026-09-21 | `README.md:17`、`README.zh-CN.md:17` 的 diff；`grep -n 'not intended for production use' README*.md` 归零 |
 | **U-02** | **案 A**：加 1 人（第二人专责 W3 长跑值守 + W5/W6 运维面），12-31 冲 §4 全量 9 门 | 决策方 | 2026-09-21 | 本文 §1.3 表（A 行）；⚠️ 人力属**组织事实**，无法由仓内产物证明 ⇒ 记入 §9 的 Go/No-Go 前检查项 |
-| **U-03** | **默认关，显式启用即可用**（承诺面与未整改面一致）：`cache` / `workflow` 由默认 `true` → `false`；`transit` 保持 `true`（其整改已闭合） | 架构 | 2026-09-21 | `coord-agent/src/service.rs` 的 `impl Default` + 新增测试；`cargo test -p coord-agent --lib service::tests` ⇒ 5 ✓；`cargo test -p coord-agent --lib` ⇒ 468 ✓ |
+| **U-03** | **默认关，显式启用即可用**（承诺面与未整改面一致）：`cache` / `workflow` 由默认 `true` → `false`；`transit` 保持 `true`（其整改已闭合）| 架构 | 2026-09-21 | `coord-agent/src/service.rs` 的 `impl Default` + 新增测试；`cargo test -p coord-agent --lib service::tests` ⇒ 5 ✓；`cargo test -p coord-agent --lib` ⇒ 468 ✓ <br>⚠️ **`transit` 那一句已被 U-11（2026-09-22）超越** ⇒ 现为 `false`，见 §8.5 |
 
 > **U-01 的一个附带事实**：原措辞是「本文件**不可入库**」以外的又一个口径冲突源 —— 它与
 > `WHITEPAPER.md` §10/§12 的契约承诺、与 §4.3 的 L0 分级**互斥**。裁定②保留了风险提示、
@@ -471,6 +472,18 @@
 > **U-04 的一个诚实标注**：本次**只做裁定，没做实施**。因此 P6 的"KEK 供给"判据
 > **仍为红**：`WHITEPAPER.md:520` 披露的"拿到配置即可推导 KEK"这一事实在实施前不变。
 > 把裁定当落地是本仓库反复出现的失败形态（"自述式 no-op"），故单列 W4-2a。
+
+### 8.5 第三轮裁定与 CI 定位（2026-09-22）
+
+> 本轮做两件事：**把 U-04 从裁定推进到落地**（W4-2a），以及**把 §2.2 的三处「常驻红/
+> 间歇红」从现象推进到根因**（W2）。后者的方法见
+> `docs/production/ops/ci-gate-forensics-2026-09-22.md`。
+
+| # | 裁定 / 结论 | 理由（可核验） | 落地物 |
+|:--|:--|:--|:--|
+| **U-11** | **`transit` 默认开关由 `true` 改为 `false`**（**超越 U-03 中"transit 保持 true"那一句**，其余不变） | U-03 给 `transit` 保持 `true` 的唯一理由是"其整改（DEK 持久化）已闭合 ⇒ 启用即可用"。U-04 落地（W4-2a）后**该前提不再成立**：启用 `transit` 必须先注入 32 字节 KEK 材料，缺失即拒绝启动 ⇒ 它已属"未整改面"。按 G9「不得默认开启未整改面」，默认值必须为 `false` | `coord-agent/src/service.rs` 的 `impl Default` + `test_service_config_defaults`（新增负断言）+ `test_service_config_toml_missing_fields_match_code_defaults`（**新增 `transit`/`pki` 两列**——此前这两列根本没被比过） |
+| **W2-2 根因（已定位，非猜测）** | `cargo audit + deny` 的定时红**不是依赖问题**，是 `rustsec/audit-check@v2.0.0` 的**事件名分叉**：`schedule` → `reportIssues()`（调 `issues.create`）／其它事件 → `reportCheck()`（调 `checks.create`）。job 只授了 `checks: write` ⇒ 定时跑在 `issues.create` 上 403 `Resource not accessible by integration` ⇒ `setFailed` | 四面证据：①action 源码 `src/main.ts` 末段的 `eventName == 'schedule'` 分支；②check-run 注释里四条定时跑均有 `Resource not accessible by integration - …/rest/issues#create-an-issue`，而同一 SHA 的 push 跑**没有**这条；③四条跑与 push 跑的 `cargo audit` 结果**完全相同**（都是 `1 warnings found!` = 唯一一条 bincode unmaintained，非漏洞）；④本地复跑 `cargo deny check bans licenses sources` ⇒ `bans ok, licenses ok, sources ok` | `ci.yml` 的 `security-audit` job：补 `issues: write` + 把根因写进注释；顺带修正 step 8 名字（它才是**阻断**闸） |
+| **W2-2 的第二个收益** | 此前 **step 7 一红，step 8 就 `skipped`** ⇒ `licenses` / `bans` / `sources` 三道**从未有过执行记录** | 四条定时跑的 step 列表里 step 8 恒为 `skipped` | 同上（修好后 step 8 会真的跑） |
 
 ---
 
@@ -509,7 +522,8 @@
 
 > 体例：每行必须有**可重跑的判据**与**产物落点**。**「完成」不等于「已验收」** ——
 > 凡依赖 lab / 外部（审计、引入方签字）的判据一律标注**待验收**，不得当作已绿。
-> 最后更新：**2026-09-21（第三轮）**（基线 `8b65290` + 前两轮未提交改动 + 本轮改动）。
+> 最后更新：**2026-09-22（第五轮）**（基线 `8b65290` + 前四轮改动 + 本轮改动）。
+> 第五轮的主题见下表；CI 侧取证方法见 `docs/production/ops/ci-gate-forensics-2026-09-22.md`。
 
 | # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
 |:--|:--|:--|:--|:--|
@@ -573,6 +587,27 @@
 | **W1-2** | **F-05**：登录路径 × 无 quorum | ✅ 完成（判据已修正 + 关键性质已钉住 + lab 复跑已归档） | `cargo test -p coord-server --lib auth::service` ⇒ **146 ✓**（含 2 条新判据）；lab：`make -C jepsen/lab test WORKLOAD=register NEMESIS=kill-all TIME_LIMIT=60 CONCURRENCY=1n SKIP_CHECKERS=1 JEPSEN_PROVIDER=docker` ⇒ 退出码 **0** | **①判据修正**：原判据"60s 短跑 0 条 `:no-client`"在 **quorum 全丢**时**不可能成立**（`Authenticate` 要提交两次 `persist_session`）⇒ 改为两条**可执行**判据：无 quorum 的登录失败必须是**可重试**码、密码错必须是 `UNAUTHENTICATED`（含负控制：改成 `unauthenticated` ⇒ 必红）。<br>**②lab 复跑**：`:fail 0` / `:no-client 0`（5 轮 kill-all），RTO p95 2.31s，**本 run 未复现** F-05 —— 但只有 1 次 run（原路径要求 ×3）且形态不完全同源（原出错的多是经 agent 的 M5b 与 partition-ring）⇒ **不得**读成"F-05 已消失"。归档 `docs/production/evidence/20260921T163732Z-w1-2-f05-kill-all-60s/`（**工作树 clean**）。 |
 | **W6-4** | 备份恢复演练 | ✅ 进程内完成（10/10，**首份 CLEAN 树归档**） | `snapshot_rpc_test` 2 ✓ / `snapshot_transfer_test` 1 ✓ / `restart_recovery_test` 4 ✓ / `m0_recovery_suite` 3 ✓ | `docs/production/evidence/20260921T161653Z-w6-4-backup-restore-drill/`（MANIFEST + run.log + sha256sums）。覆盖在线快照→恢复、导出→清空→导入 roundtrip、落盘重启加载、**purge 守卫**、applied 水位持久化、重放幂等、**kill -9 后 revision 不回退**。<br>**边界与证据同引**：不含对象存储 / 不含多节点 / 未人工复核 ⇒ 不得当作"备份恢复已验收"。 |
 | **提交纪律** | 本轮起证据跑在**已提交的 CLEAN 树**上 | ✅ 完成 | `git log --oneline`：`19cb350`（代码+文档）、`d1b0273`（证据+台账）；`git status --porcelain` 在证据 run 时只剩证据目录自身 | 消掉 D-10 的一半（"全部归档的 worktree 字段为 DIRTY"）：**新归档从此可以是 CLEAN**；旧的 28 份仍为 DIRTY（重跑才能覆盖，归 W3-9） |
+
+### 第五轮追加（2026-09-22）—— 主题：把「裁定」与「现象」都推进到「落地」与「根因」
+
+> 本轮两条线：①**U-04 从裁定到落地**（W4-2a）；②**§2.2 的三处门禁红从现象到根因**（W2）。
+> 方法见 `docs/production/ops/ci-gate-forensics-2026-09-22.md`。
+
+| # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
+|:--|:--|:--|:--|:--|
+| **W4-2a** | **U-04 落地**：transit KEK 改为启动注入 + fail-closed | ✅ 代码完成 | `cargo test -p coord-agent --lib services::transit` ⇒ **35 ✓**（含 6 条新增负控制）；`cargo test -p coord-agent --test agent_transit_test` ⇒ **9 ✓**（含 1 条集成层负控制） | 修前 `SHA-256("coord-transit-kek:" \|\| kek_id)`（拿到配置即可推导 KEK）；修后 `HKDF-SHA256(材料, info="coord-transit-kek-v1:" \|\| kek_id)`，材料由 `COORD_TRANSIT_KEK`（hex64）或 `<data_dir>/transit-kek.bin`（32B）注入。**缺材料 ⇒ agent `serve()` 返回 Err ⇒ 进程非 0 退出**（修前只是 `tracing::error!` 后少注册一个服务 = 静默降级）。`TransitKekMaterial` 的 `Debug` 刻意 redact。<br>负控制：长度 0/1/16/31/33/64 一律拒绝；空 hex/仅空白/非 hex 一律拒绝；**env 非法时不静默回落到文件**；**同 `kek_id`、不同材料 ⇒ 必须解不开**（这条同时证明 KEK 来自材料而非配置串）；HMAC 密钥随材料变化 |
+| **U-11** | `transit` 默认开关 `true` → `false`（**超越 U-03 中那一句**） | ✅ 完成 | `cargo test -p coord-agent --lib service::tests` ⇒ **6 ✓** | 理由：U-03 给 transit 保持 `true` 的前提是"启用即可用"，而 U-04 落地后启用它必须先注入 KEK ⇒ 已属未整改面 ⇒ 按 G9 必为默认关。见 §8.5 |
+| **W2-2** | `cargo audit + deny` 定时红：**根因定位 + 修复** | ✅ 完成（待 CI 实证） | `curl …/check-runs/{job_id}/annotations`；action 源码 `src/main.ts`；RustSec advisory-db 提交列表 + 本地 `Cargo.lock` 交叉比对；本地 `cargo deny check bans licenses sources` ⇒ `bans ok, licenses ok, sources ok` | 根因：`rustsec/audit-check@v2.0.0` 在 **schedule** 事件走 `reportIssues()`（`issues.create`），其余事件走 `reportCheck()`（`checks.create`）；job 只授了 `checks: write` ⇒ 定时跑 403 `Resource not accessible by integration`。**四条定时跑与 push 跑的 audit 结果逐字相同**（`1 warnings found!`，唯一一条是 bincode unmaintained 非漏洞）⇒ 不是依赖问题。修：`ci.yml` 的 `security-audit` 补 `issues: write` + 根因写进注释。**附带**：此前 step 7 一红 step 8 就 skipped ⇒ `licenses`/`bans`/`sources` **从未有执行记录** |
+| **W2-1** | `weekly perf baseline` 13/13 常驻红：**根因已复现 + 修复已验证** | ✅ 已完成（本地验证） | 修前：本地 `PERF_GATE=1 cargo test --release -p coord --test perf_bench -- --ignored --nocapture` ⇒ **`FAILED. 8 passed; 1 failed` / EXIT=101**（与 CI 同形）。修后加 `--test-threads=1` ⇒ **`ok. 9 passed; 0 failed` / EXIT=0` / 324.22s**，**两组实例均过**（25/1 Region ratio 0.944 与 1.044） | 红因是**测量方法**：多个重型基准默认并发（`test-threads = nproc`）争 fsync ⇒ 同一次跑里两组同代码测量结论相反：单独实例 **1.360（过）**，`bench_all` 实例 **0.541（失败）**；1-Region 基线自身漂移 **35 → 219 ops/s（6 倍）**，且裸 Redb 写入在并发下从 227 掉到 57 ops/s ⇒ 0.80 判据落在噪声带内。修：`scripts/bench-ci.sh` 加 `--test-threads=1`（**不动阈值、不删断言**）。**残留（已记账）**：基线只采 200 迭代 vs 25-Region 5000 ⇒ 余量最小仅 0.859，未根治 |
+| **W2-3** | `real-process chaos` 间歇红：**范围收窄**（未定位根因） | 🟡 部分 | 5 次跑逐 step 聚合（`/actions/runs/{id}/jobs`） | 新事实：失败**永远在 step 7**（`chaos_real` kill9 套件），且其后 5 个 step 全部 **skipped** ⇒ `14/31` 不是"6 个套件随机各红一次"。**不声称**是真缺陷或假红（job 日志 403）⇒ 给出可执行判定流程（见 forensics §3.3） |
+| **W2-4** | 分支保护 | ⛔ 阻塞 | `GET /branches/main/protection` ⇒ **401 Requires authentication** | 本环境无 `gh`、无可用于 REST 的 token（推送走 `GIT_ASKPASS`，不应取出当 API token）⇒ 属**组织/仓库设置事实**，必须由 admin 执行；已给出 `gh api` 命令与验证判据（向 `main` 直推被拒） |
+| **D-19（本轮新发现）** | 「默认开关」两条路径**并未拉平** | ✅ 钉住（未修） | `cargo test -p coord-agent --lib service::tests::test_known_divergence_code_default_vs_toml_is_pinned` ⇒ **1 ✓** | 把 `pki` 加进 `test_service_config_toml_missing_fields_match_code_defaults` 的比对时暴露：`registry`/`config_center`/`lock`/`idgen`/`policy`/`pki` 六项**代码默认 `true`** 而字段是普通 `#[serde(default)]`（配置文件缺省 `false`）⇒「走不走 `--agent-config`」得到**不同服务集合**。按纪律不删断言、不放宽：新增**钉住测试**（改任一侧即红），并立 D-19 待裁定修法 |
+| **P1 卡口复核（五轮）** | 本轮改动后的门禁自查 | ✅ 完成 | `cargo fmt --all -- --check`；`cargo clippy --workspace -- -D warnings`；**六道脚本**；`cargo test -p coord-agent --lib` | fmt ✓；clippy ✓（非测试目标）；六道全 `exit 0`（panics / gate-drills / wire-sync / wire-descriptor / sdk-sync / error-code）；**coord-agent lib 488 ✓**（前值 479 + 本轮 9 条新判据） |
+
+**第五轮未触碰**：W2-1 的 CI 实证（需 CI 跑一次 schedule）、W2-3 根因（需 job 日志或本地长跑）、
+W2-4（仓库设置）、W2-5 的九道门逐门负控制（1.5 人日）、W3 全部（要长跑）、
+W4-1（TLS fail-closed，仍按「lab 联立变更」4 步计划）、W4-3（审计）、W4-5（RSS 口径）、
+W5-5、W6-2 实机演练、W7 全部。
 
 **第四轮未触碰**：同第三轮 —— W2-1/W2-2/W2-3（CI 日志不可得）、W2-4（仓库设置项）、
 W3 全部（要长跑）、W4-1/W4-2a/W4-3/W4-5、W5-5、W6-2 实机演练、W7。

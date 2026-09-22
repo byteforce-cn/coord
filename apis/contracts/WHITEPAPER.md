@@ -518,10 +518,15 @@ MAJOR：破坏性变更（非必要不使用；须提前 ≥ 3 个月发布废�
 6. gRPC reflection 由 `security.reflection_enabled` 控制（`main.rs:2549`），
    生产默认关闭时 grpcurl 类工具不可用——消费方应以本契约文件生成客户端，
    不依赖服务端反射。
-7. **`coord.transit.v1` 的 KEK 供给未托管**（U9）：当前 KEK 由 `kek_id` 配置串
-   确定性派生（`SHA-256("coord-transit-kek:" || kek_id)`），因此**拿到配置即可
-   推导 KEK**。持久化解决的是"重启丢密钥 / 单次使用跨进程不成立"，
-   **不是**密钥托管；落盘 DEK 的静态保护实际来自 coord-server 的 redb + Barrier 加密。
+7. **`coord.transit.v1` 的 KEK 供给为「启动注入」，不是外部 KMS**（U9 / U-04，
+   2026-09-22 落地）：KEK **不再**由 `kek_id` 配置串确定性派生。启用本服务时必须
+   注入 32 字节密钥材料（环境变量 `COORD_TRANSIT_KEK`（hex64），或
+   `<agent data_dir>/transit-kek.bin`（32 字节原始材料）），
+   KEK = `HKDF-SHA256(材料, info="coord-transit-kek-v1:" || kek_id)`；
+   材料缺失/长度不符 ⇒ agent **拒绝启动**（fail-closed，无回落路径）。
+   因此「拿到配置即可推导 KEK」**已不成立**（`kek_id` 降级为域分隔/审计标签）。
+   仍未闭合的边界：**本方案不是外部 KMS**——材料以文件/环境形态落在 agent 主机上，
+   主机被控即泄露；落盘 DEK 的静态保护另有一层 coord-server redb + Barrier 加密。
    消费方不应把它当作外部 KMS 的替代品。
 8. **`replication`（`coord.agent.Replica`）永不对外**（红线 §9.3 R3）：
    它是 ISR 内部复制通道，受支持、有测试、有文档，但**不产生对外契约包**。

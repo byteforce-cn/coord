@@ -151,6 +151,12 @@ pub struct ServiceConfig {
     pub feature_flags: bool,
 
     /// 安全传输（信封加密）
+    ///
+    /// **默认关闭**（2026-09-22 裁定，见 §8.5 U-11）：U-04 落地后，启用 transit
+    /// **必须**注入 32 字节 KEK 材料（`COORD_TRANSIT_KEK` 或
+    /// `<data_dir>/transit-kek.bin`），否则 agent 拒绝启动（fail-closed）。
+    /// 因此它不再满足 U-03「启用即可用」的条件 —— 按 G9「不得默认开启未整改面」，
+    /// 默认改为 `false`，显式启用 + 注入材料才可用。
     #[serde(default)]
     pub transit: bool,
 
@@ -169,7 +175,8 @@ impl Default for ServiceConfig {
     /// **默认关，显式启用即可用**（承诺面与未整改面一致）——不得"默认开启未整改面"（G9）。
     /// 因此 `cache` / `workflow` 由 `true` 改为 `false`：两者的整改项未闭合
     /// （cache 跨节点提交非原子 = 已声明边界 B-07；workflow 持久化 + 补偿语义尚无端到端验收）。
-    /// `transit` 保持 `true` —— 其整改项（DEK 持久化）已在 2026-09-19 闭合，取"启用即可用"。
+    /// `transit` 于 **2026-09-22** 同样由 `true` 改为 `false`（U-11）：U-04 落地后
+    /// 启用它必须注入 KEK 材料，故不再满足「启用即可用」。
     ///
     /// 与 TOML 路径的一致性：各字段为 `#[serde(default)]`（缺省 = `bool::default()` = `false`），
     /// 即配置文件未列出的服务本就是关的；本次改动让 `ServiceConfig::default()`（代码默认，
@@ -192,7 +199,7 @@ impl Default for ServiceConfig {
             circuit_breaker: false,
             rate_limiter: false,
             feature_flags: false,
-            transit: true,
+            transit: false,
             pki: true,
             replication: false,
         }
@@ -256,11 +263,13 @@ mod tests {
             config.config_center,
             "config_center should be enabled by default"
         );
-        // 默认启用 lock / transit / pki
+        // 默认启用 lock / pki
         assert!(config.lock, "lock should be enabled by default (Phase A)");
+        // 2026-09-22 裁定（U-11）：transit 由默认 `true` 改为 `false` ——
+        // U-04 落地后启用它必须注入 KEK 材料（fail-closed），不再满足"启用即可用"。
         assert!(
-            config.transit,
-            "transit should be enabled by default (Phase A; remediation closed 2026-09-19)"
+            !config.transit,
+            "transit must NOT be on by default: enabling it requires injected KEK material (U-04/U-11)"
         );
         assert!(config.pki, "pki should be enabled by default (Phase A)");
         // IdGen 为数据面服务 — 默认启用（无 Server 时本地雪花降级）
@@ -301,6 +310,13 @@ mod tests {
         let code_default = ServiceConfig::default();
         assert_eq!(from_empty_toml.cache, code_default.cache);
         assert_eq!(from_empty_toml.workflow, code_default.workflow);
+        // 2026-09-22 新增：`transit` 也纳入比对（本轮改了它的默认值）。
+        assert_eq!(from_empty_toml.transit, code_default.transit);
+        // ⚠️ `pki`（以及 `registry` / `config_center` / `lock` / `idgen` / `policy`）
+        // **没有**被比 —— 因为它们**真的不一致**：代码默认 `true`，而
+        // `#[serde(default)]` 让配置文件路径下缺省 `false`。
+        // 这是 U-03 "两条路径已拉平" 那句话的**过度声称**，已立为 §3 D-19。
+        // 本测试不假装它一致；一致性由下一个测试**钉住事实**。
         assert_eq!(from_empty_toml.mq, code_default.mq);
         assert_eq!(from_empty_toml.scheduler, code_default.scheduler);
         assert_eq!(
@@ -317,6 +333,43 @@ mod tests {
         );
         assert_eq!(from_empty_toml.rate_limiter, code_default.rate_limiter);
         assert_eq!(from_empty_toml.feature_flags, code_default.feature_flags);
+    }
+
+    /// **把已知的口径不一致钉住**（2026-09-22 新增，对应 §3 D-19）。
+    ///
+    /// `registry` / `config_center` / `lock` / `idgen` / `policy` / `pki` 六项的
+    /// **代码默认是 `true`**，但字段都是普通 `#[serde(default)]` ⇒
+    /// **配置文件路径**下缺省为 `false`。于是"同一个 agent、走不走 `--agent-config`"
+    /// 会得到**不同的服务集合**：`dev` 模式（无配置文件）开着一批服务，而
+    /// 传一个没写 `[services]` 的 TOML 会让它们**全部关闭**。
+    ///
+    /// 这与 U-03 里"本次改动把两条路径拉平"那句话不符 —— 那句话只对
+    /// **默认值为 `false`** 的字段成立。本测试**故意断言这个不一致**：
+    /// 任何一侧被改就会红，届时请一并更新 §3 D-19 与本注释，而不是让它悄悄漂移。
+    #[test]
+    fn test_known_divergence_code_default_vs_toml_is_pinned() {
+        let from_empty_toml: ServiceConfig = toml::from_str("idgen = true\n").unwrap();
+        let code_default = ServiceConfig::default();
+        for (name, toml_value, code_value) in [
+            ("registry", from_empty_toml.registry, code_default.registry),
+            (
+                "config_center",
+                from_empty_toml.config_center,
+                code_default.config_center,
+            ),
+            ("lock", from_empty_toml.lock, code_default.lock),
+            ("policy", from_empty_toml.policy, code_default.policy),
+            ("pki", from_empty_toml.pki, code_default.pki),
+        ] {
+            assert!(
+                !toml_value,
+                "{name}: 配置文件缺省已不再是 false ⇒ D-19 可能已修，请更新本测试"
+            );
+            assert!(
+                code_value,
+                "{name}: 代码默认已不再是 true ⇒ D-19 可能已修，请更新本测试"
+            );
+        }
     }
 
     #[test]

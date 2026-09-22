@@ -7,10 +7,16 @@
 // - 支持密钥轮换（rewrap）
 // - 持久化（B-06 / E1）：加密态 DEK 落共享存储 ⇒ 重启后仍可解密、单次使用跨实例成立
 
-use coord_agent::services::transit::{TransitConfig, TransitService};
+use coord_agent::services::transit::{TransitConfig, TransitKekMaterial, TransitService};
 use coord_agent::{MemoryTransitDekStore, TransitDekStore};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// W4-2a：测试用 KEK 材料（32 字节，**非生产**）。
+/// 生产由 `COORD_TRANSIT_KEK`（hex64）或 `<data_dir>/transit-kek.bin` 注入。
+fn test_kek() -> TransitKekMaterial {
+    TransitKekMaterial::from_bytes(&[0x5Au8; 32]).expect("32 字节")
+}
 
 /// 验证 TransitConfig 默认值
 #[test]
@@ -27,7 +33,7 @@ fn test_transit_encrypt_decrypt_roundtrip() {
         kek_id: "test-kek".into(),
         ..Default::default()
     };
-    let svc = TransitService::new(config).expect("创建 TransitService 失败");
+    let svc = TransitService::new(config, test_kek()).expect("创建 TransitService 失败");
 
     let plaintext = b"hello, this is a secret message";
     let (ciphertext, dek_id) = svc.encrypt(plaintext).expect("加密失败");
@@ -43,7 +49,7 @@ fn test_transit_encrypt_decrypt_roundtrip() {
 /// 验证不同明文产生不同密文（随机 DEK/Nonce）
 #[test]
 fn test_transit_unique_ciphertexts() {
-    let svc = TransitService::new(TransitConfig::default()).expect("创建失败");
+    let svc = TransitService::new(TransitConfig::default(), test_kek()).expect("创建失败");
 
     let (ct1, _) = svc.encrypt(b"message one").expect("加密失败");
     let (ct2, _) = svc.encrypt(b"message two").expect("加密失败");
@@ -54,7 +60,7 @@ fn test_transit_unique_ciphertexts() {
 /// 验证用后即焚：DEK 不能重复使用解密
 #[test]
 fn test_transit_dek_single_use() {
-    let svc = TransitService::new(TransitConfig::default()).expect("创建失败");
+    let svc = TransitService::new(TransitConfig::default(), test_kek()).expect("创建失败");
 
     let (ciphertext, dek_id) = svc.encrypt(b"single-use secret").expect("加密失败");
 
@@ -70,7 +76,7 @@ fn test_transit_dek_single_use() {
 /// 验证密钥轮换（rewrap）
 #[test]
 fn test_transit_rewrap() {
-    let svc = TransitService::new(TransitConfig::default()).expect("创建失败");
+    let svc = TransitService::new(TransitConfig::default(), test_kek()).expect("创建失败");
 
     let plaintext = b"data that needs key rotation";
     let (ciphertext, old_dek_id) = svc.encrypt(plaintext).expect("加密失败");
@@ -92,7 +98,7 @@ fn test_transit_rewrap() {
 /// 验证上下文绑定（加密时绑定 context，解密时需匹配）
 #[test]
 fn test_transit_context_binding() {
-    let svc = TransitService::new(TransitConfig::default()).expect("创建失败");
+    let svc = TransitService::new(TransitConfig::default(), test_kek()).expect("创建失败");
 
     let mut context = HashMap::new();
     context.insert("tenant".to_string(), "acme".to_string());
@@ -124,7 +130,31 @@ fn test_transit_context_binding() {
 // ═══════════════════════════════════════════════════════════════════
 
 fn svc_with(store: Arc<dyn TransitDekStore>) -> TransitService {
-    TransitService::with_store(TransitConfig::default(), store).expect("创建 TransitService 失败")
+    TransitService::with_store(TransitConfig::default(), store, test_kek())
+        .expect("创建 TransitService 失败")
+}
+
+/// W4-2a 负控制（集成层）：无注入材料 ⇒ 拒绝，且错误信息给出两条注入路径。
+/// 这是 P-Gate 6「KEK 供给」在进程外可复现的那一半（进程内启动拒绝另见
+/// `coord-agent/src/lib.rs` 的 `services.transit = true` 分支）。
+#[test]
+fn test_transit_without_injected_kek_material_is_fail_closed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let err = TransitKekMaterial::resolve_with(dir.path(), None).expect_err("未注入材料时必须拒绝");
+    assert!(
+        err.contains("COORD_TRANSIT_KEK") && err.contains("transit-kek.bin"),
+        "错误信息必须同时给出环境变量与文件两条路径，实际: {err}"
+    );
+    assert!(
+        err.contains("refusing to start"),
+        "错误信息必须显式声明拒绝启动，实际: {err}"
+    );
+    // 反控制：同一目录下出现合法 32 字节文件 ⇒ 必须接受
+    std::fs::write(dir.path().join("transit-kek.bin"), [0x11u8; 32]).expect("write");
+    assert!(
+        TransitKekMaterial::resolve_with(dir.path(), None).is_ok(),
+        "文件存在且长度正确时必须接受"
+    );
 }
 
 /// 重启后仍能解密重启前产生的密文；且单次使用跨实例成立

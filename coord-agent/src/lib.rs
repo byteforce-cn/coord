@@ -1570,9 +1570,32 @@ impl AgentServer {
         }
 
         // Transit 信封加密（/ DEK 持久化：生产走 coord-server 共享 KV，B-06 / E1）
+        //
+        // W4-2a（U-04 落地）：KEK **不再**由 `kek_id` 配置串派生，改为启动期注入
+        // 32 字节材料（`COORD_TRANSIT_KEK` hex64 → `<data_dir>/transit-kek.bin`）。
+        // **缺材料 ⇒ 拒绝启动**（fail-closed）：这里 `return Err` 让 `serve()` 失败、
+        // 进程非 0 退出，而不是"少注册一个服务"这种静默降级（后者会让调用方以为
+        // 加密面可用，实际拿不到 transit 服务）。
         if self.config.services.transit {
-            use crate::services::transit::{TransitConfig, TransitService};
+            use crate::services::transit::{
+                TransitConfig, TransitKekMaterial, TransitService, TRANSIT_KEK_ENV,
+                TRANSIT_KEK_FILE,
+            };
             use crate::services::transit_store::{KvTransitDekStore, TransitDekStore};
+
+            let kek_material = TransitKekMaterial::resolve(std::path::Path::new(
+                &self.config.data_dir,
+            ))
+            .map_err(|e| {
+                format!(
+                    "services.transit = true but KEK injection failed: {e} \
+                         (inject `{TRANSIT_KEK_ENV}`=hex64 or {}; or set \
+                         services.transit = false to disable the service)",
+                    std::path::Path::new(&self.config.data_dir)
+                        .join(TRANSIT_KEK_FILE)
+                        .display()
+                )
+            })?;
 
             let transit_config = TransitConfig::default();
             // 生产（已连接 server 集群）：加密态 DEK 落共享 KV —— 重启不丢密钥、
@@ -1581,31 +1604,25 @@ impl AgentServer {
                 Some(inner) => {
                     let store: Arc<dyn TransitDekStore> =
                         Arc::new(KvTransitDekStore::new(inner.clone()));
-                    TransitService::with_store(transit_config, store)
+                    TransitService::with_store(transit_config, store, kek_material)
                 }
                 None => {
                     tracing::warn!(
                         "Transit service running without Server KV: DEK persistence disabled \
                          (keys are lost on restart)"
                     );
-                    TransitService::new(transit_config)
-                }
-            };
-
-            match transit_svc {
-                Ok(transit_svc) => {
-                    let transit_svc = Arc::new(transit_svc);
-                    let _ = register_native_service(
-                        &plugin_manager,
-                        transit_svc.clone(),
-                        crate::plugin::AgentGrpcService::Transit(transit_svc),
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    tracing::error!("failed to create transit service: {e}");
+                    TransitService::new(transit_config, kek_material)
                 }
             }
+            .map_err(|e| format!("failed to create transit service: {e}"))?;
+
+            let transit_svc = Arc::new(transit_svc);
+            let _ = register_native_service(
+                &plugin_manager,
+                transit_svc.clone(),
+                crate::plugin::AgentGrpcService::Transit(transit_svc),
+            )
+            .await;
         }
 
         if self.config.services.circuit_breaker {

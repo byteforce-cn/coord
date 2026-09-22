@@ -40,6 +40,10 @@ redb = { workspace = true }
 rand = { workspace = true }
 aes-gcm = { workspace = true }
 sha2 = { workspace = true }
+# W4-2a：transit KEK 由启动注入的材料经 HKDF-SHA256 派生（此前是
+# `SHA-256("coord-transit-kek:" || kek_id)` ⇒ 拿到配置即可推导 KEK）。
+# 已在 workspace 依赖表与 Cargo.lock 中（coord-server 早已使用）⇒ 不新增第三方 crate。
+hkdf = { workspace = true }
 ed25519-dalek = { workspace = true }
 hmac = { workspace = true }
 zeroize = { workspace = true }

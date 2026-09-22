@@ -56,9 +56,9 @@ sed -n '160,182p' coord-agent/src/service.rs
 
 | 服务 | 默认值 | 行 |
 |:--|:--|:--|
-| `cache` | **`true`** | `:171` |
-| `workflow` | **`true`** | `:173` |
-| `transit` | **`true`** | `:179` |
+| `cache` | **`false`**（2026-09-21 U-03，原 `true`） | `:171` |
+| `workflow` | **`false`**（2026-09-21 U-03，原 `true`） | `:173` |
+| `transit` | **`false`**（2026-09-22 U-11，原 `true`） | `:179` |
 | `pki` / `registry` / `config_center` / `lock` / `idgen` / `policy` | `true` | `:162-166`, `:174`, `:180` |
 | `leader_election` / `event_notification` | **`false`** | `:169`, `:170` |
 | `mq` / `scheduler` / `circuit_breaker` / `rate_limiter` / `feature_flags` / `replication` | `false` | `:172`, `:175-178`, `:181` |
@@ -67,8 +67,11 @@ sed -n '160,182p' coord-agent/src/service.rs
 > **默认开启且未整改完毕**。全量 GA 后它们成为承诺面 ⇒ 「默认开启」必须**以整改完成为前提**，
 > 否则等于默认配置即暴露未整改面。
 >
-> **`transit` 已闭合（2026-09-19，D5）**：DEK 已落 coord-server KV（"默认开启 + 重启不丢密钥"），
-> 故 G6 对 transit 取「**启用即可用**」，无需改默认值。**`cache` / `workflow` 仍待裁定**（E5b）。
+> ~~**`transit` 已闭合（2026-09-19，D5）**：DEK 已落 coord-server KV（"默认开启 + 重启不丢密钥"），
+> 故 G6 对 transit 取「**启用即可用**」，无需改默认值。~~ **❌ 本段已被超越（2026-09-22，U-11）**：
+> U-04 落地（`W4-2a`）后，启用 transit **必须注入 KEK 材料**，缺失即拒绝启动 ⇒
+> 不再满足「启用即可用」⇒ `transit` 默认值由 `true` 改为 **`false`**。
+> **`cache` / `workflow` 已由 U-03（2026-09-21）改为 `false`** ⇒ 三项现在**全部默认关闭**。
 
 ---
 

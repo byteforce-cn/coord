@@ -20,34 +20,44 @@
 //   `rewrap_persisted`（gRPC handler 走这三条）；`encrypt` / `decrypt` 等**同步**方法
 //   只操作内存注册表，保留给单测与无 server 的降级场景（历史行为，逐字未改）。
 //
-// 仍未闭合的安全边界（**不要**把本服务读作"密钥已妥善托管"，见整改基线）：
-// - KEK 由 `kek_id` 确定性派生（`SHA-256("coord-transit-kek:" || kek_id)`），
-//   而 `kek_id` 是普通配置字符串 ⇒ **KEK 不具备保密性**。落盘 DEK 的静态保护
-//   依赖 coord-server 的 redb + Barrier 加密，而非 KEK 本身。
-// - 因此本持久化解决的是「重启丢密钥 / 单次使用跨进程不成立」，**不是**密钥托管。
+// KEK 供给（U-04 / W4-2a，2026-09-22 落地；此前由 `kek_id` 确定性派生 ⇒ 不保密）：
+// - KEK **不再**由配置字符串派生。启动时必须**注入 32 字节密钥材料**：
+//     ① 环境变量 `COORD_TRANSIT_KEK`（hex64），或
+//     ② `<agent data_dir>/transit-kek.bin`（32 字节原始材料，0600）。
+//   KEK = HKDF-SHA256(材料, info = "coord-transit-kek-v1:" || kek_id)。
+//   `kek_id` 降级为**域分隔/审计标签**，不再是密钥来源（拿到配置无法推导 KEK）。
+// - **fail-closed**：材料缺失/长度不符 ⇒ 构造失败（`TransitKekMaterial::resolve`
+//   返回 Err）⇒ agent 启动**拒绝**，不静默降级为旧派生路径。见 `security.md` §2。
+// - 仍未闭合的边界（**不要**把本服务读作"密钥已妥善托管"）：本方案**不是外部 KMS**；
+//   材料以文件/环境形态落在 agent 主机上，主机被控 ⇒ KEK 泄露。
+//   落盘 DEK 的静态保护另有一层 coord-server redb + Barrier 加密。
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
+use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use parking_lot::RwLock;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::transit_store::{now_unix, DekRecord, MemoryTransitDekStore, TransitDekStore};
 
 // ──── 公共类型 ────
 
 /// Transit 服务配置
+///
+/// 注意：**不含密钥材料**。KEK 材料见 [`TransitKekMaterial`]（启动注入）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TransitConfig {
     /// DEK 有效期（秒），默认 3600
     pub dek_ttl_secs: u64,
-    /// KEK 标识符
+    /// KEK 标识符 —— **仅作 HKDF 域分隔与审计标签**（不再是密钥来源）
     pub kek_id: String,
 }
 
@@ -57,6 +67,93 @@ impl Default for TransitConfig {
             dek_ttl_secs: 3600,
             kek_id: "default-kek".into(),
         }
+    }
+}
+
+/// 静态加密 KEK 长度（256-bit）
+const KEK_MATERIAL_LEN: usize = 32;
+
+/// 环境变量名：注入 KEK 密钥材料（hex64）
+pub const TRANSIT_KEK_ENV: &str = "COORD_TRANSIT_KEK";
+
+/// 数据目录内的密钥材料文件名（32 字节原始材料）
+pub const TRANSIT_KEK_FILE: &str = "transit-kek.bin";
+
+/// 启动时注入的 KEK 密钥材料（32 字节）。
+///
+/// `Debug` 刻意**不打印材料**（`Zeroizing<[u8;32]>` 的默认 Debug 会打印内部字节）。
+pub struct TransitKekMaterial(Zeroizing<[u8; KEK_MATERIAL_LEN]>);
+
+impl std::fmt::Debug for TransitKekMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TransitKekMaterial(<redacted 32 bytes>)")
+    }
+}
+
+impl TransitKekMaterial {
+    /// 从原始字节构造（长度必须是 32；空/短/长一律 Err —— **不许静默补齐或截断**）
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() != KEK_MATERIAL_LEN {
+            return Err(format!(
+                "transit KEK material must be exactly {KEK_MATERIAL_LEN} bytes, got {}",
+                bytes.len()
+            ));
+        }
+        let mut m = Zeroizing::new([0u8; KEK_MATERIAL_LEN]);
+        m.copy_from_slice(bytes);
+        Ok(Self(m))
+    }
+
+    /// 从 hex 构造（长度为 64 个 hex 字符；大小写均可）
+    pub fn from_hex(hex_str: &str) -> Result<Self, String> {
+        let s = hex_str.trim();
+        if s.is_empty() {
+            return Err("transit KEK material is empty".into());
+        }
+        let bytes =
+            hex::decode(s).map_err(|e| format!("{TRANSIT_KEK_ENV} is not valid hex: {e}"))?;
+        Self::from_bytes(&bytes)
+    }
+
+    /// 启动期解析（**fail-closed**）：
+    ///
+    /// 1. 环境变量 [`TRANSIT_KEK_ENV`]（hex64）；
+    /// 2. `<data_dir>/`[`TRANSIT_KEK_FILE`]（32 字节原始材料）；
+    /// 3. 都不存在 ⇒ `Err`（调用方必**拒绝启动**，不得回落到派生 KEK）。
+    pub fn resolve(data_dir: &Path) -> Result<Self, String> {
+        match std::env::var(TRANSIT_KEK_ENV) {
+            Ok(v) => Self::resolve_with(data_dir, Some(&v)),
+            Err(_) => Self::resolve_with(data_dir, None),
+        }
+    }
+
+    /// [`Self::resolve`] 的确定性内核（环境变量值由调用方传入）。
+    ///
+    /// 拆出来是为了让「无材料 ⇒ 拒绝」这条判据能被**确定性**地测到：
+    /// 直接测 `resolve` 会被进程级环境变量污染（测试并行 + `set_var` 是全局的）。
+    pub fn resolve_with(data_dir: &Path, env_value: Option<&str>) -> Result<Self, String> {
+        if let Some(v) = env_value {
+            return Self::from_hex(v).map_err(|e| format!("invalid {TRANSIT_KEK_ENV}: {e}"));
+        }
+        let path = data_dir.join(TRANSIT_KEK_FILE);
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                Self::from_bytes(&bytes).map_err(|e| format!("invalid {}: {e}", path.display()))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
+                "transit service is enabled but no KEK material was injected: set \
+                 {TRANSIT_KEK_ENV} (hex64) or provide {} (32 raw bytes); refusing to \
+                 start (no silent fallback to a config-derived KEK)",
+                path.display()
+            )),
+            Err(e) => Err(format!("read {}: {e}", path.display())),
+        }
+    }
+
+    /// 仅测试用：固定的非生产材料（**绝不可**用于任何真实部署）。
+    #[cfg(test)]
+    fn for_test() -> Self {
+        Self::from_bytes(&[0x5Au8; KEK_MATERIAL_LEN]).expect("32 bytes")
     }
 }
 
@@ -96,7 +193,7 @@ impl DekEntry {
 /// 信封加密服务
 pub struct TransitService {
     config: TransitConfig,
-    /// KEK（从 Server 获取，简化版使用 SHA-256 派生）
+    /// KEK = HKDF-SHA256(启动注入的材料, info="coord-transit-kek-v1:"||kek_id)，仅存内存
     kek: [u8; DEK_LEN],
     /// DEK 注册表：dek_id → DekEntry（加密态 packet + TTL）
     /// 解密后 DEK 立即移除（用后即焚）
@@ -116,31 +213,42 @@ const HMAC_KEY_LEN: usize = 32;
 const SWEEP_INTERVAL_SECS: u64 = 300;
 
 impl TransitService {
-    /// 构造服务：持久化后端为内存实现（开发/单测；"重启即丢"行为保留给这些场景）
-    pub fn new(config: TransitConfig) -> Result<Self, String> {
-        Self::with_store(config, Arc::new(MemoryTransitDekStore::new()))
+    /// 构造服务：持久化后端为内存实现（开发/单测；"重启即丢"行为保留给这些场景）。
+    ///
+    /// `kek_material` 必填 —— 缺失只能由调用方在**解析期**发现（[`TransitKekMaterial::resolve`]
+    /// 返回 Err），本构造器不接受"没有材料"这种状态。
+    pub fn new(config: TransitConfig, kek_material: TransitKekMaterial) -> Result<Self, String> {
+        Self::with_store(config, Arc::new(MemoryTransitDekStore::new()), kek_material)
     }
 
     /// 构造服务并注入持久化后端
     ///
     /// 生产路径传 [`super::transit_store::KvTransitDekStore`]（coord-server 共享 KV）。
+    ///
+    /// KEK 由**注入的材料**经 HKDF-SHA256 派生（`info = "coord-transit-kek-v1:" || kek_id`），
+    /// 不再由 `kek_id` 配置串直接哈希得到 —— 即"拿到配置即可推导 KEK"这一缺陷已闭合（U-04）。
     pub fn with_store(
         config: TransitConfig,
         store: Arc<dyn TransitDekStore>,
+        kek_material: TransitKekMaterial,
     ) -> Result<Self, String> {
-        let mut hasher = Sha256::new();
-        hasher.update(b"coord-transit-kek:");
-        hasher.update(config.kek_id.as_bytes());
-        let kek_hash = hasher.finalize();
         let mut kek = [0u8; DEK_LEN];
-        kek.copy_from_slice(&kek_hash);
-        // HMAC 密钥：从 KEK 派生（仅内存，不落盘；重启后自动重新派生）
+        let mut info = Vec::with_capacity(24 + config.kek_id.len());
+        info.extend_from_slice(b"coord-transit-kek-v1:");
+        info.extend_from_slice(config.kek_id.as_bytes());
+        Hkdf::<Sha256>::new(None, &*kek_material.0)
+            .expand(&info, &mut kek)
+            .map_err(|e| format!("HKDF expand for transit KEK failed: {e}"))?;
+
+        // HMAC 密钥：同一材料、不同 info（域分隔；仅内存，不落盘）
         let mut hmac_key = [0u8; HMAC_KEY_LEN];
-        let mut hmac_hasher = Sha256::new();
-        hmac_hasher.update(b"coord-transit-hmac:");
-        hmac_hasher.update(config.kek_id.as_bytes());
-        let hmac_hash = hmac_hasher.finalize();
-        hmac_key.copy_from_slice(&hmac_hash);
+        let mut hmac_info = Vec::with_capacity(25 + config.kek_id.len());
+        hmac_info.extend_from_slice(b"coord-transit-hmac-v1:");
+        hmac_info.extend_from_slice(config.kek_id.as_bytes());
+        Hkdf::<Sha256>::new(None, &*kek_material.0)
+            .expand(&hmac_info, &mut hmac_key)
+            .map_err(|e| format!("HKDF expand for transit HMAC key failed: {e}"))?;
+
         Ok(Self {
             config,
             kek,
@@ -834,9 +942,161 @@ mod tests {
         assert_eq!(c.kek_id, "default-kek");
     }
 
+    // ──── W4-2a：KEK 注入与 fail-closed（负控制）────
+    //
+    // 这组判据对应 P-Gate 6 的「KEK 供给裁定落地」。中心命题两条：
+    //   ① **无材料 ⇒ 拒绝**（不许回落到 `SHA-256("coord-transit-kek:"||kek_id)`）；
+    //   ② **密钥来自材料**（同样的 `kek_id`、不同的材料 ⇒ 互相解不开）。
+
+    /// ① 长度不符一律拒绝（0 / 31 / 33 字节）—— 不许静默补齐或截断
+    #[test]
+    fn test_kek_material_rejects_wrong_length() {
+        for bad_len in [0usize, 1, 16, 31, 33, 64] {
+            let bytes = vec![0x11u8; bad_len];
+            let err = TransitKekMaterial::from_bytes(&bytes)
+                .expect_err(&format!("{bad_len} 字节必须被拒绝"));
+            assert!(
+                err.contains("exactly 32 bytes"),
+                "错误信息应说明长度要求，实际: {err}"
+            );
+        }
+        // 正控制：32 字节必须接受
+        assert!(TransitKekMaterial::from_bytes(&[0x11u8; 32]).is_ok());
+    }
+
+    /// ① hex 形态：空串 / 非 hex / 长度不符 都必须拒绝（空串是最隐蔽的一类"配置了但没配"）
+    #[test]
+    fn test_kek_material_from_hex_rejects_empty_and_bad() {
+        assert!(TransitKekMaterial::from_hex("").is_err(), "空串必须拒绝");
+        assert!(
+            TransitKekMaterial::from_hex("   ").is_err(),
+            "只含空白也必须拒绝"
+        );
+        assert!(
+            TransitKekMaterial::from_hex("zzzz").is_err(),
+            "非 hex 必须拒绝"
+        );
+        assert!(
+            TransitKekMaterial::from_hex(&"ab".repeat(16)).is_err(),
+            "16 字节必须拒绝"
+        );
+        // 正控制：64 个 hex 字符（32 字节）必须接受
+        assert!(TransitKekMaterial::from_hex(&"ab".repeat(32)).is_ok());
+    }
+
+    /// ② 无材料（环境变量与文件都不存在）⇒ `Err`，**且错误信息里不许出现任何密钥字节**
+    #[test]
+    fn test_resolve_without_any_material_is_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = TransitKekMaterial::resolve_with(dir.path(), None)
+            .expect_err("无材料时必须拒绝（fail-closed）");
+        assert!(
+            err.contains(TRANSIT_KEK_ENV) && err.contains(TRANSIT_KEK_FILE),
+            "错误信息必须给出两条注入路径，实际: {err}"
+        );
+        assert!(
+            err.contains("refusing to start"),
+            "错误信息必须显式声明拒绝启动，实际: {err}"
+        );
+    }
+
+    /// ② 文件路径：`<data_dir>/transit-kek.bin` 存在且为 32 字节 ⇒ 接受；
+    ///    长度不符 ⇒ 拒绝（而不是忽略文件后当作"无材料"，那样会掩盖运维配错）
+    #[test]
+    fn test_resolve_from_file_enforces_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(TRANSIT_KEK_FILE);
+
+        std::fs::write(&path, [0x7Cu8; 31]).unwrap();
+        assert!(
+            TransitKekMaterial::resolve_with(dir.path(), None).is_err(),
+            "31 字节的文件必须被拒绝"
+        );
+
+        std::fs::write(&path, [0x7Cu8; 32]).unwrap();
+        assert!(
+            TransitKekMaterial::resolve_with(dir.path(), None).is_ok(),
+            "32 字节的文件必须被接受"
+        );
+    }
+
+    /// ② 环境变量优先于文件；且环境变量非法时**不回落到文件**（否则"配错 env + 有旧文件"
+    ///    会静默继续用旧材料，属最难发现的运维错）
+    #[test]
+    fn test_resolve_env_takes_precedence_and_does_not_fall_back() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(TRANSIT_KEK_FILE), [0x7Cu8; 32]).unwrap();
+
+        // 合法 env ⇒ 用 env
+        assert!(TransitKekMaterial::resolve_with(dir.path(), Some(&"cd".repeat(32))).is_ok());
+        // 非法 env + 有合法文件 ⇒ 仍必须 Err（不回落到文件）
+        assert!(
+            TransitKekMaterial::resolve_with(dir.path(), Some("not-hex")).is_err(),
+            "env 非法时不得静默回落到文件"
+        );
+    }
+
+    /// ② **核心负控制**：同样的 `kek_id`、**不同的材料** ⇒ 互相解不开。
+    /// 这条同时证明了"KEK 来自材料"而不是"来自配置串"——修前
+    /// `SHA-256("coord-transit-kek:"||kek_id)` 会让两者**互相解得开**。
+    #[tokio::test]
+    async fn test_kek_comes_from_material_not_from_kek_id() {
+        let cfg = TransitConfig::default();
+        assert_eq!(cfg.kek_id, "default-kek");
+
+        let store: Arc<dyn TransitDekStore> = Arc::new(MemoryTransitDekStore::new());
+        let producer = TransitService::with_store(
+            cfg.clone(),
+            store.clone(),
+            TransitKekMaterial::from_bytes(&[0x01u8; 32]).unwrap(),
+        )
+        .expect("create");
+        let (ct, _id) = producer
+            .encrypt_persisted(b"material-dependent")
+            .await
+            .expect("encrypt");
+
+        // 同 kek_id、不同材料 ⇒ 解不开
+        let wrong = TransitService::with_store(
+            cfg.clone(),
+            store.clone(),
+            TransitKekMaterial::from_bytes(&[0x02u8; 32]).unwrap(),
+        )
+        .expect("create");
+        assert!(
+            wrong.decrypt_persisted(&ct, "").await.is_err(),
+            "不同材料必须解不开（否则 KEK 仍来自 kek_id）"
+        );
+
+        // 正控制：同一材料 ⇒ 解得开
+        let right = TransitService::with_store(
+            cfg,
+            store,
+            TransitKekMaterial::from_bytes(&[0x01u8; 32]).unwrap(),
+        )
+        .expect("create");
+        assert_eq!(
+            right.decrypt_persisted(&ct, "").await.expect("decrypt"),
+            b"material-dependent"
+        );
+    }
+
+    /// KEK 与 HMAC 密钥由**同一材料 + 不同 info** 域分隔派生 ⇒ 两者不相等，
+    /// 且 HMAC 密钥也随材料变化（防止"只改了 KEK 忘了 HMAC"的半截整改）
+    #[tokio::test]
+    async fn test_hmac_key_is_domain_separated_from_material() {
+        let cfg = TransitConfig::default();
+        let a = test_svc(cfg.clone());
+        let b = TransitService::new(cfg, TransitKekMaterial::from_bytes(&[0x03u8; 32]).unwrap())
+            .expect("create");
+        let sig_a = a.hmac_sign(b"same input", "HMAC-SHA256").expect("sign");
+        let sig_b = b.hmac_sign(b"same input", "HMAC-SHA256").expect("sign");
+        assert_ne!(sig_a, sig_b, "HMAC 密钥必须随注入材料变化");
+    }
+
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
-        let svc = TransitService::new(TransitConfig::default()).expect("create");
+        let svc = test_svc(TransitConfig::default());
         let pt = b"hello world";
         let (ct, id) = svc.encrypt(pt).expect("encrypt");
         assert_ne!(ct, pt);
@@ -846,7 +1106,7 @@ mod tests {
 
     #[test]
     fn test_dek_single_use() {
-        let svc = TransitService::new(TransitConfig::default()).expect("create");
+        let svc = test_svc(TransitConfig::default());
         let (ct, id) = svc.encrypt(b"secret").expect("encrypt");
         assert!(svc.decrypt(&ct, &id).is_ok());
         assert!(svc.decrypt(&ct, &id).is_err(), "DEK should be single-use");
@@ -854,7 +1114,7 @@ mod tests {
 
     #[test]
     fn test_context_binding() {
-        let svc = TransitService::new(TransitConfig::default()).expect("create");
+        let svc = test_svc(TransitConfig::default());
         let mut ctx = HashMap::new();
         ctx.insert("tenant".into(), "acme".into());
 
@@ -875,7 +1135,7 @@ mod tests {
 
     #[test]
     fn test_rewrap() {
-        let svc = TransitService::new(TransitConfig::default()).expect("create");
+        let svc = test_svc(TransitConfig::default());
         let pt = b"rotate me";
         let (ct, old_id) = svc.encrypt(pt).expect("encrypt");
 
@@ -889,7 +1149,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sign_sha256_default() {
-        let svc = TransitService::new(TransitConfig::default()).expect("create");
+        let svc = test_svc(TransitConfig::default());
         let data = b"hello hmac";
         let sig = svc.hmac_sign(data, "").expect("hmac_sign");
         assert!(!sig.is_empty());
@@ -899,14 +1159,14 @@ mod tests {
 
     #[test]
     fn test_hmac_sign_sha512() {
-        let svc = TransitService::new(TransitConfig::default()).expect("create");
+        let svc = test_svc(TransitConfig::default());
         let sig = svc.hmac_sign(b"data", "HMAC-SHA512").expect("hmac_sign");
         assert_eq!(sig.len(), 64);
     }
 
     #[test]
     fn test_hmac_verify_roundtrip() {
-        let svc = TransitService::new(TransitConfig::default()).expect("create");
+        let svc = test_svc(TransitConfig::default());
         let data = b"verify me";
         let sig = svc.hmac_sign(data, "HMAC-SHA256").expect("sign");
         assert!(svc.hmac_verify(data, &sig, "HMAC-SHA256").expect("verify"));
@@ -914,7 +1174,7 @@ mod tests {
 
     #[test]
     fn test_hmac_verify_tampered_data() {
-        let svc = TransitService::new(TransitConfig::default()).expect("create");
+        let svc = test_svc(TransitConfig::default());
         let sig = svc.hmac_sign(b"original", "HMAC-SHA256").expect("sign");
         assert!(!svc
             .hmac_verify(b"tampered", &sig, "HMAC-SHA256")
@@ -923,7 +1183,7 @@ mod tests {
 
     #[test]
     fn test_hmac_verify_tampered_signature() {
-        let svc = TransitService::new(TransitConfig::default()).expect("create");
+        let svc = test_svc(TransitConfig::default());
         let data = b"my data";
         let mut sig = svc.hmac_sign(data, "HMAC-SHA256").expect("sign");
         // Corrupt the signature
@@ -933,7 +1193,7 @@ mod tests {
 
     #[test]
     fn test_hmac_deterministic() {
-        let svc = TransitService::new(TransitConfig::default()).expect("create");
+        let svc = test_svc(TransitConfig::default());
         let data = b"deterministic";
         let sig1 = svc.hmac_sign(data, "HMAC-SHA256").expect("sign");
         let sig2 = svc.hmac_sign(data, "HMAC-SHA256").expect("sign");
@@ -942,7 +1202,7 @@ mod tests {
 
     #[test]
     fn test_hmac_unsupported_algorithm() {
-        let svc = TransitService::new(TransitConfig::default()).expect("create");
+        let svc = test_svc(TransitConfig::default());
         assert!(svc.hmac_sign(b"data", "HMAC-MD5").is_err());
     }
 
@@ -951,7 +1211,7 @@ mod tests {
     /// 轮换后 DEK 仍须单次使用（历史实现按包头 id 删除 ⇒ 新 id 条目残留可二次解密）
     #[test]
     fn test_rewrap_dek_is_single_use() {
-        let svc = TransitService::new(TransitConfig::default()).expect("create");
+        let svc = test_svc(TransitConfig::default());
         let (ct, old_id) = svc.encrypt(b"single use after rewrap").expect("encrypt");
         let new_id = svc.rewrap(&old_id).expect("rewrap");
         assert!(svc.decrypt(&ct, &new_id).is_ok(), "轮换后应能解密");
@@ -963,14 +1223,19 @@ mod tests {
 
     #[test]
     fn test_header_dek_id_self_describing() {
-        let svc = TransitService::new(TransitConfig::default()).expect("create");
+        let svc = test_svc(TransitConfig::default());
         let (ct, id) = svc.encrypt(b"header").expect("encrypt");
         assert_eq!(header_dek_id(&ct).as_deref(), Some(id.as_str()));
         assert_eq!(header_dek_id(b"too short"), None);
     }
 
+    /// 测试用构造：固定材料（[`TransitKekMaterial::for_test`]，**非生产**）+ 内存 store
+    fn test_svc(config: TransitConfig) -> TransitService {
+        TransitService::new(config, TransitKekMaterial::for_test()).expect("create")
+    }
+
     fn svc_with_store(config: TransitConfig, store: Arc<dyn TransitDekStore>) -> TransitService {
-        TransitService::with_store(config, store).expect("create")
+        TransitService::with_store(config, store, TransitKekMaterial::for_test()).expect("create")
     }
 
     /// 持久化加密后，**新实例（模拟重启）**仍能解密；且单次使用跨实例成立

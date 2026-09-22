@@ -50,21 +50,38 @@
 
 ---
 
-## §2 KEK 供给（W4-2 / 未决项 U-04，🔴 待裁定）
+## §2 KEK 供给（W4-2 / U-04 / W4-2a，✅ 已实施 2026-09-22）
 
-**现状**：KEK 由配置串**确定性派生** ⇒ 拿到配置即可推导 KEK，非外部 KMS。
-已由白皮书自述披露（`apis/contracts/WHITEPAPER.md` §12.7）。
+### 2.1 裁定与落地
 
-**三个候选**（本计划不替你选，需安全 + 架构裁定，截止 M2 = 10-31）：
+**U-04（2026-09-21）裁定取 K2 + K3**：启动时**注入**密钥材料（不引入外部 KMS），
+并把"非外部 KMS"写进边界清单。**W4-2a 于 2026-09-22 实施完毕**。
 
-| 案 | 做法 | 代价 | 结果 |
-|:--|:--|:--|:--|
-| **K1** | 接外部 KMS（Vault / 云 KMS） | 实现 + 部署依赖；引入外部可用性风险 | 「加密」承诺名副其实 |
-| **K2** | 启动时**注入**密钥材料（不需外部服务，密钥不打进配置） | 需运维流程（Secret/KMS-init/文件权限） | 中 |
-| **K3** | **显式接受**并写进边界清单（`boundaries.md` B-SE-2） | 零实现成本 | 必须**同时**从 README/白皮书的「加密」措辞里去掉暗示，否则是夸大 |
+| 项 | 落地 | 可重跑判据 |
+|:--|:--|:--|
+| ① KEK **不再**由配置串确定性派生 | 修前：`SHA-256("coord-transit-kek:" || kek_id)`。修后：`HKDF-SHA256(材料, info="coord-transit-kek-v1:" || kek_id)`；HMAC 密钥用同一材料、不同 info 域分隔 | `test_kek_comes_from_material_not_from_kek_id`（同 `kek_id`、不同材料 ⇒ 必须解不开；同材料 ⇒ 必须解得开）、`test_hmac_key_is_domain_separated_from_material` |
+| ② **缺材料即拒绝启动**（fail-closed，不许静默降级） | `TransitKekMaterial::resolve`：`COORD_TRANSIT_KEK`（hex64）→ `<data_dir>/transit-kek.bin`（32B）→ **Err**。agent 侧 `serve()` 把该 Err **上抛**（修前只是 `tracing::error!` 后少注册一个服务 = 静默降级） | `test_resolve_without_any_material_is_fail_closed`（错误信息必须同时给出两条注入路径且含 `refusing to start`）、`coord-agent/src/lib.rs`(`services.transit = true` 分支的 `?`) |
+| ③ 负控制测试 | 覆盖：长度 0/1/16/31/33/64 一律拒绝；空 hex / 仅空白 / 非 hex / 16 字节一律拒绝；**env 非法时不静默回落到文件**；文件长度不符必须报错（而不是当作"无材料"） | `test_kek_material_rejects_wrong_length`、`test_kek_material_from_hex_rejects_empty_and_bad`、`test_resolve_env_takes_precedence_and_does_not_fall_back`、`test_resolve_from_file_enforces_length`、集成层 `test_transit_without_injected_kek_material_is_fail_closed` |
+| ④ 文档口径同步 | `WHITEPAPER.md` §12.7 第 7 条、`boundaries.md` B-SE-2/B-SE-5/B-SE-6、本节、`runbook.md` §4.4 | `grep -rn 'coord-transit-kek:' --include=*.md` 归零（旧派生公式不得再出现） |
 
-**纪律**：K3 是唯一「本轮即可闭合」的选项，但闭合的前提是**同步改所有对外措辞**。
-在裁定之前，P-Gate 6 的 KEK 项保持红。
+### 2.2 运维形态（接入方/运维必读）
+
+```bash
+# 方式 A：环境变量（hex64 = 32 字节）
+export COORD_TRANSIT_KEK=$(openssl rand -hex 32)
+# 方式 B：密钥文件（32 字节原始材料，建议 0600；每个 agent 用自己的 data_dir）
+head -c 32 /dev/urandom > /var/lib/coord-agent/transit-kek.bin && chmod 600 …
+```
+
+- **多 agent 必须共享同一材料**（否则一个 agent 写下的 DEK 另一个解不开——见 `boundaries.md` B-SE-6）。
+- `transit` 自 2026-09-22（U-11）起**默认关闭**；显式 `services.transit = true` 且注入材料为唯一可用形态。
+- **仍不是外部 KMS**：材料落在 agent 主机上，主机被控即泄露（`boundaries.md` B-SE-2）。
+
+### 2.3 与 P-Gate 6 的关系
+
+P-Gate 6 的「KEK 供给裁定落地」项由此**转绿**（本地可重跑判据齐全）；
+P-Gate 6 整体仍红——TLS fail-closed（W4-1）、第三方审计（W4-3）未完成，
+且按 W2 的裁决，本轮所有绿在 W2 完成前**不计入对外门禁证据**。
 
 ---
 

@@ -179,6 +179,36 @@ coord security rotate-keys --addr <node>
 
 **失败时**：轮换是**幂等**的，可重试；失败不影响既有读写。
 
+### 4.4 Agent 侧 `transit` 的 KEK 注入与轮换（W4-2a，2026-09-22）
+
+> 与 §4.1–4.3 的 **server** 侧三层密钥（Root→KEK→DEK，分片/Barrier）**不是同一套**。
+> 这一节管的是 `coord-agent` 的 `coord.transit.v1` 信封加密。
+
+**注入（启用 `transit` 的前置条件，缺则 agent 拒绝启动）**：
+
+```bash
+# 方式 A：环境变量（hex64 = 32 字节；多 agent 必须同一值）
+COORD_TRANSIT_KEK=$(openssl rand -hex 32); export COORD_TRANSIT_KEK
+# 方式 B：密钥文件（32 字节原始材料；每个 agent 的 data_dir 下，建议 0600）
+head -c 32 /dev/urandom > /var/lib/coord-agent/transit-kek.bin
+chmod 600 /var/lib/coord-agent/transit-kek.bin
+```
+
+**预期**：agent 正常启动（`services.transit = true` 时日志里不再出现
+"KEK injection failed"）。
+
+**失败时（必须如此）**：进程**非 0 退出**，stderr/日志里含
+`transit service is enabled but no KEK material was injected: set COORD_TRANSIT_KEK …`
+—— 这是**故意的 fail-closed**，不是故障。修法二选一：注入材料，或
+`services.transit = false`。**不要**去改代码回落旧派生路径（该路径已删除）。
+
+**轮换（⚠️ 目前**没有**内建流程）**：
+- KEK 变了 ⇒ **旧材料写下的 DEK 解不开**（判据
+  `test_kek_comes_from_material_not_from_kek_id`）。已知边界见 `boundaries.md` B-SE-6。
+- 临时做法：先用**旧材料**把仍需要的密文解密，再用新材料重新加密（`rewrap` 不适用，
+  它只轮换 DEK、不换 KEK）。
+- **操作风险**：轮换前必须确认没有仍需解密的存量密文；否则数据不可逆。
+
 ---
 
 ## §5 compaction
