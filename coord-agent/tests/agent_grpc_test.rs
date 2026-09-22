@@ -321,7 +321,12 @@ async fn test_agent_mq_poll_end_to_end() {
 #[tokio::test]
 async fn test_agent_cache_rpop_llen() {
     let port = find_port();
-    let config = test_config_isolated(port, "cache"); // cache 服务默认启用；独立数据目录防污染
+    let mut config = test_config_isolated(port, "cache"); // 独立数据目录防污染
+                                                          // 2026-09-22：`cache` 自 W0-5/U-03 起**默认关闭**（跨节点提交原子性是已声明边界
+                                                          // B-07，不得默认开启未整改面）。本测试是 cache 数据面的用例，故**显式启用** ——
+                                                          // 这正是 U-03 的"显式启用即可用"。修前这里依赖"cache 默认启用"，
+                                                          // 在 CI 上一路 `Unimplemented`（服务没注册）。
+    config.services.cache = true;
     let addr = config.agent_addr.clone();
 
     let server = AgentServer::new(config);

@@ -62,7 +62,7 @@
 | ① KEK **不再**由配置串确定性派生 | 修前：`SHA-256("coord-transit-kek:" || kek_id)`。修后：`HKDF-SHA256(材料, info="coord-transit-kek-v1:" || kek_id)`；HMAC 密钥用同一材料、不同 info 域分隔 | `test_kek_comes_from_material_not_from_kek_id`（同 `kek_id`、不同材料 ⇒ 必须解不开；同材料 ⇒ 必须解得开）、`test_hmac_key_is_domain_separated_from_material` |
 | ② **缺材料即拒绝启动**（fail-closed，不许静默降级） | `TransitKekMaterial::resolve`：`COORD_TRANSIT_KEK`（hex64）→ `<data_dir>/transit-kek.bin`（32B）→ **Err**。agent 侧 `serve()` 把该 Err **上抛**（修前只是 `tracing::error!` 后少注册一个服务 = 静默降级） | `test_resolve_without_any_material_is_fail_closed`（错误信息必须同时给出两条注入路径且含 `refusing to start`）、`coord-agent/src/lib.rs`(`services.transit = true` 分支的 `?`) |
 | ③ 负控制测试 | 覆盖：长度 0/1/16/31/33/64 一律拒绝；空 hex / 仅空白 / 非 hex / 16 字节一律拒绝；**env 非法时不静默回落到文件**；文件长度不符必须报错（而不是当作"无材料"） | `test_kek_material_rejects_wrong_length`、`test_kek_material_from_hex_rejects_empty_and_bad`、`test_resolve_env_takes_precedence_and_does_not_fall_back`、`test_resolve_from_file_enforces_length`、集成层 `test_transit_without_injected_kek_material_is_fail_closed` |
-| ④ 文档口径同步 | `WHITEPAPER.md` §12.7 第 7 条、`boundaries.md` B-SE-2/B-SE-5/B-SE-6、本节、`runbook.md` §4.4 | `grep -rn 'coord-transit-kek:' --include=*.md` 归零（旧派生公式不得再出现） |
+| ④ 文档口径同步 | `WHITEPAPER.md` §12.7 第 7 条、`boundaries.md` B-SE-2/B-SE-5/B-SE-6、本节、`runbook.md` §4.4、`agent-ga-remediation-baseline.md` 的 G6 注 | **精确判据**（2026-09-22 实测）：`grep -rn 'coord-transit-kek:' --include=*.md .` 的命中**只允许是"修前对照"**，即本节 ①、计划书 §11 的 W4-2a 行、以及**已就地标注"已被超越"**的本地工作文档 `docs/coord-agent-ga-v0.2.0-plan-2026-09-19.md`（该文件本身 `.gitignore` 命中、不可入库）。**不得**存在把旧公式当作**现状**陈述的用法 |
 
 ### 2.2 运维形态（接入方/运维必读）
 

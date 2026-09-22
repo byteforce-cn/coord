@@ -913,6 +913,31 @@ impl AgentServer {
             .parse()
             .map_err(|e| format!("invalid agent_addr {}: {e}", self.config.agent_addr))?;
 
+        // 数据目录：**启动即创建**（2026-09-22 修复 U-03 暴露的隐性依赖）。
+        //
+        // 背景：`data_dir` 是 agent 的状态根，此前**没有任何地方**主动创建它 ——
+        // 只是恰好由默认开启的数据面服务（cache redb / workflow / transit store）
+        // 在自己的路径里 `create_dir_all` 顺手建出来。W0-5/U-03 把
+        // `cache`/`workflow` 改成默认关之后，这条隐性依赖断了：
+        // `coord/tests/cli_agent_test.rs::test_agent_uses_config_data_dir_unless_flag_is_explicit`
+        // （它显式断言"agent 必须在配置的 data_dir 下创建数据目录"）在 CI 上变红。
+        // 该断言是**产品口径**（`--data-dir` 与配置文件 `data_dir` 的优先级要有可观测结果），
+        // 所以修在产品侧，而不是把断言改弱。
+        //
+        // **刻意 best-effort（只 WARN 不拒绝）**：默认 `data_dir = /var/lib/coord-agent`
+        // 在非 root 环境（CI、本机单测）不可写，而 `agent_non_loopback_guard_test.rs`
+        // 的 `test_loopback_without_auth_allowed` 正是用默认配置起服务并要求**成功**。
+        // 改成 fail-closed 会让这条与"目录不可写"无关的测试因环境权限而红。
+        // 真正需要该目录的服务（cache/workflow/pki/插件账户）在写入时会自己报错。
+        let data_dir = std::path::Path::new(&self.config.data_dir);
+        if let Err(e) = std::fs::create_dir_all(data_dir) {
+            tracing::warn!(
+                "failed to create agent data_dir {}: {e} (services that need it will fail \
+                 on first write)",
+                data_dir.display()
+            );
+        }
+
         // 非 loopback 绑定强制 auth + TLS（与 server 侧 同口径）。
         // 防止生产网络裸奔（默认 auth 关闭、TLS None，仅限本机开发）。
         // 生产收口：TLS 不再是“仅校验配置”——下方 serve 路径真实挂载 `.tls_config()`。

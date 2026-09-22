@@ -602,12 +602,28 @@
 | **W2-3** | `real-process chaos` 间歇红：**范围收窄**（未定位根因） | 🟡 部分 | 5 次跑逐 step 聚合（`/actions/runs/{id}/jobs`） | 新事实：失败**永远在 step 7**（`chaos_real` kill9 套件），且其后 5 个 step 全部 **skipped** ⇒ `14/31` 不是"6 个套件随机各红一次"。**不声称**是真缺陷或假红（job 日志 403）⇒ 给出可执行判定流程（见 forensics §3.3） |
 | **W2-4** | 分支保护 | ⛔ 阻塞 | `GET /branches/main/protection` ⇒ **401 Requires authentication** | 本环境无 `gh`、无可用于 REST 的 token（推送走 `GIT_ASKPASS`，不应取出当 API token）⇒ 属**组织/仓库设置事实**，必须由 admin 执行；已给出 `gh api` 命令与验证判据（向 `main` 直推被拒） |
 | **D-19（本轮新发现）** | 「默认开关」两条路径**并未拉平** | ✅ 钉住（未修） | `cargo test -p coord-agent --lib service::tests::test_known_divergence_code_default_vs_toml_is_pinned` ⇒ **1 ✓** | 把 `pki` 加进 `test_service_config_toml_missing_fields_match_code_defaults` 的比对时暴露：`registry`/`config_center`/`lock`/`idgen`/`policy`/`pki` 六项**代码默认 `true`** 而字段是普通 `#[serde(default)]`（配置文件缺省 `false`）⇒「走不走 `--agent-config`」得到**不同服务集合**。按纪律不删断言、不放宽：新增**钉住测试**（改任一侧即红），并立 D-19 待裁定修法 |
+| **CI 首验第三/四轮** | 推送 `ff2dfb39` 让 CI **第一次真正验证**第三、四轮的改动 ⇒ **抓到 U-03 的两处回归** | ✅ 已修（本地两条均已验证转绿） | CI run `35739871833` 的 `workspace tests` = **failure**（`exit code 101`）。本地 `cargo test --workspace --no-fail-fast` **复现出完全相同的两条**：<br>① `coord/tests/cli_agent_test.rs::test_agent_uses_config_data_dir_unless_flag_is_explicit`<br>② `coord-agent/tests/agent_grpc_test.rs::test_agent_cache_rpop_llen` | **根因（同一个）**：`AgentConfig.services` 是 `#[serde(default)]`，而这两个用例的 TOML **不写 `[services]`** ⇒ 走 `ServiceConfig::default()`。U-03 把 `cache`/`workflow` 由 `true` 改 `false` 后：① **agent 从不主动创建 `data_dir`**（此前只是被 cache/workflow 在自己的路径里顺手建出来）⇒「agent 必须在配置的 `data_dir` 下建目录」这条产品口径失去可观测结果；② cache 服务不注册 ⇒ 客户端 `Unimplemented`。<br>**为什么以前没抓到**：第三、四轮**从未推送**（`origin/main` 停在 `8b65290`），且第三轮的「P1 卡口复核」只跑 `--lib` 目标 ⇒ **集成测试那半边没有任何执行记录**（`ci.yml` 自己记过同型事故：「CI 曾连续 45 次全红无人发现」）。<br>**修法**：①产品侧 —— `serve_inner` 启动即创建 `data_dir`（**best-effort + WARN**：默认 `/var/lib/coord-agent` 在非 root 的 CI 不可写，而 `agent_non_loopback_guard_test::test_loopback_without_auth_allowed` 正是用默认配置起服务并要求**成功**）；②测试侧 —— cache 用例显式 `config.services.cache = true`（U-03 的「显式启用即可用」）。**没有改弱任何断言**；验证：这两个 target 分别 **1 ✓** / **7 ✓**，且 `agent_non_loopback_guard_test` **3 ✓**（证明不影响默认 data_dir 的用例） |
 | **P1 卡口复核（五轮）** | 本轮改动后的门禁自查 | ✅ 完成 | `cargo fmt --all -- --check`；`cargo clippy --workspace -- -D warnings`；**六道脚本**；`cargo test -p coord-agent --lib` | fmt ✓；clippy ✓（非测试目标）；六道全 `exit 0`（panics / gate-drills / wire-sync / wire-descriptor / sdk-sync / error-code）；**coord-agent lib 488 ✓**（前值 479 + 本轮 9 条新判据） |
 
-**第五轮未触碰**：W2-1 的 CI 实证（需 CI 跑一次 schedule）、W2-3 根因（需 job 日志或本地长跑）、
+**第五轮未触碰**：W2-1 的 **CI 实证**（需 CI 跑一次 schedule）、W2-3 根因（需 job 日志或本地长跑）、
 W2-4（仓库设置）、W2-5 的九道门逐门负控制（1.5 人日）、W3 全部（要长跑）、
 W4-1（TLS fail-closed，仍按「lab 联立变更」4 步计划）、W4-3（审计）、W4-5（RSS 口径）、
 W5-5、W6-2 实机演练、W7 全部。
+
+> **第五轮的 CI 实证（push run `35739871833`，`ff2dfb39`）**：`fmt + clippy -D warnings`、`gate self-check`、
+> `proto contract`、`java sdk`、`java example integration`、`frontend lint`、
+> `plugin engine feature matrix`、**`cargo audit + deny`** 均 **success**；
+> `workspace tests` **failure**（见上表「CI 首验第三/四轮」：**不是本轮的代码问题**，
+> 是第三轮 U-03 的回归首次被 CI 抓到，已在下一提交修复）。
+> ⚠️ 另两点必须写清楚：① `weekly perf baseline` 在该 run 是 **`skipped`**（job 条件 `if: schedule`）
+> ⇒ **W2-1 的 CI 实证要等下一次定时跑**，本轮只有**本地同参**实证（`EXIT=0`）；
+> ② W2-2 的修复在 **schedule** 事件下才走 `reportIssues()` 分支 ⇒ 同样**要等定时跑**才算闭环。
+> 因此本节所有 ✅ 仍受 §5 W2 的裁决约束（**W2 未完成 ⇒ 不计入对外门禁证据**）。
+>
+> **流程教训（本轮最重要的非代码收获）**：**未推送的提交 = 从未被验证的提交**。
+> 第三、四轮共 4 个提交在本地停留两天，其间 CI 一直在验证 `8b65290`（= 第二轮）。
+> 而本地"卡口复核"习惯只跑 `--lib` 目标 ⇒ **集成测试层长期无执行记录**。
+> 后续每轮收尾必须：**推送 + 等 CI 出结论 + 把 run id 与结论写回本表**（不接受"本地跑过了"）。
 
 **第四轮未触碰**：同第三轮 —— W2-1/W2-2/W2-3（CI 日志不可得）、W2-4（仓库设置项）、
 W3 全部（要长跑）、W4-1/W4-2a/W4-3/W4-5、W5-5、W6-2 实机演练、W7。
