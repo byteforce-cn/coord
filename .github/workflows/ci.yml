@@ -353,12 +353,33 @@ jobs:
     # 本次实测 `"vulnerabilities":{"found":false,"count":0}`，红的唯一原因是一条
     # **信息性**通告（bincode unmaintained，非漏洞）。
     #
+    # ⚠️ 同一个 action 在 **schedule** 事件下走**另一条**分支（2026-09-22 定位，W2-2）。
+    #
+    # `rustsec/audit-check@v2.0.0` 的 `src/main.ts` 末尾按事件名分叉：
+    #   schedule → `reporter.reportIssues()` → 每个通告调 `issues.create`（建 issue）
+    #   其它事件 → `reporter.reportCheck()`  → 调 `checks.create`（建 check run）
+    # 此前只给了 `checks: write` ⇒ **每次定时跑都在 `issues.create` 上 403**
+    # （`Resource not accessible by integration - .../rest/issues#create-an-issue`，
+    # 实测见 run 35554838318 / 35560812972 / 35567717479 / 35679949475 的 job 注释），
+    # 于是 `setFailed` ⇒ **13/13 常驻红**。同一 SHA 的 push 跑却是绿的：唯一变量是事件名。
+    # 这是"红色的门禁教人忽略门禁"的典型（`remaining-known-gaps.md:249`）——
+    # 依赖本身干净：四次跑的注释里都是 `1 warnings found!`（唯一一条是 bincode
+    # unmaintained，**非漏洞**，且已在 `deny.toml` 显式豁免）。
+    #
     # 只给这一个 job 加权限（而不是顶层），把影响面限制在需要它的地方：
-    # `contents: read` 供 checkout，`checks: write` 供审计结果上报。
-    # 结果：信息性通告作为 check run **可见但不阻断**，真正的漏洞仍会拦住。
+    # `contents: read` 供 checkout；`checks: write` 供 push/PR 的审计结果上报；
+    # `issues: write` 供 schedule 的通告上报（该 action 的定时语义就是"为每条通告建 issue"）。
+    #
+    # ⚠️ **阻断语义在哪**：`reportIssues()` 对漏洞**不会** `setFailed`（只有 push/PR 的
+    # `reportCheck()` 会），所以定时跑的**唯一阻断闸**是下面的 `cargo deny` ——
+    # 它以 `deny.toml` 的显式豁免表为准（`unmaintained = "all"` / `unsound = "all"` /
+    # `yanked = "deny"`），新增未豁免通告会让它 exit≠0。修好本 job 的第二个收益是：
+    # 此前 step 7 一红，step 8 就被 **skipped** —— `licenses` / `bans` / `sources`
+    # 三道**从未有过执行记录**（本地复跑：`bans ok, licenses ok, sources ok`）。
     permissions:
       contents: read
       checks: write
+      issues: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -370,7 +391,8 @@ jobs:
         uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-      - name: cargo deny (licenses/bans)
+      # 这是本 job 的**阻断**判据（见上面的权限说明）：exit≠0 ⇔ 出现未豁免的通告。
+      - name: cargo deny (advisories/licenses/bans/sources) — blocking gate
         uses: EmbarkStudios/cargo-deny-action@v2
 
   chaos-nightly:
