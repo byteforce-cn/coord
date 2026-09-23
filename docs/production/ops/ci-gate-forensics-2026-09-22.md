@@ -357,9 +357,48 @@ spawn 真实 `coord server`（鉴权开启），发 100 × 8 MiB（累计 800 Mi
 | perf 红的具体断言数字 | 🟡 通道已就位 | 下一次 schedule 跑（`cron: 17 2 * * *` 起 **每个** schedule 都带 perf job） |
 | `workspace tests` 间歇红的测试名 | 🟡 通道已就位 | 下一次触发间歇红（本地复跑见计划书 §11 第六轮表） |
 | W2-1 的"同迭代数 + 预热"测量修法 | ⏳ 待数字 | 上面两条的读数（不知道红在哪一格就改测量，属盲改） |
-| W2-3 根因 | 🟡 收窄 | 最近两次 chaos 均 **success**（n=2，不足以宣称稳定化）；失败时的注解已接线；另给 chaos 的 7 个套件 step 加 `if: always()`（此前一次失败会把它后面的套件全部 skip ⇒ 「后面的套件没有任何执行记录」正是无法判定假红/真缺陷的结构原因） |
+| W2-3 根因 | 🟡 收窄（有具体断言） | 最近三次 chaos 两绿一红；红的那次已收窄到 `chaos_soak_distributed` 第 784 次迭代写失败（§6.6-B），且**其余 7 套件全绿**；`if: always()` 已使“后面的套件没有执行记录”不再成立 |
 | W2-4 分支保护 | ⛔ 阻塞 | 仓库 admin（§4 已给命令与验证判据） |
 | W2-5 九道门逐门负控制 | 🟡 **6/9 道已覆盖** | 既有 2 道（fmt、告警↔runbook）+ 本轮新增 4 道：`wire-descriptor`（字段号漂移）、`wire-sync`（rpc 改名）、`sdk-sync`（内部面 import 漂回）、**panic 路径**（注入非测试 `panic!`）；四道都先本地逐条验证“注入 ⇒ exit 1、还原 ⇒ 绿”，再写进 `gate-self-check` job。剩余 3 道的口径：P3–P6 需 lab/审计，P8 需仓库设置 + 真发布，P9 尚无机械门禁 |
+
+### 6.6 首次 CI 实证（run `35869740196`，SHA `a8e6fb3`）
+
+| job | 结论 | 说明 |
+|:--|:--|:--|
+| `workspace tests` | **success** | 间歇红**未复现**（本 run 全套件绿）；注解通道待命 |
+| `fmt + clippy -D warnings` / `proto contract` / `java sdk` / `java example integration` / `frontend lint` / `plugin engine feature matrix` | success | |
+| `cargo audit + deny` / `Security audit` | success | W2-2 修复在 push 与 schedule 下均绿 |
+| `gate self-check` | **failure** | 见 A：新自检**立刻抓到**“门禁在某 job 里跑不起来” |
+| `real-process chaos` | **failure** | 见 B：注解带出具体断言；`if: always()` 让其余 7 套件**全部执行** |
+| `weekly perf baseline` | skipped | push 事件不跑（`if: schedule`） |
+
+**A. `gate self-check`（job `107212428973`）：新自检的第一份产出就是“它自己跑不起来”**
+
+step 7（新加的 `wire-descriptor` 注入步）红、退出码 1，其后 3 步 skipped。
+原因：`check-wire-descriptor.sh` 需要 **protoc**（脚本 `:37` 自己会报
+“需要 protoc（CI 由 protobuf-compiler 提供）”），而 `gate-self-check` 是本仓
+**唯一不装 protoc** 的 job ⇒ **这道门禁在该 job 里从未真正运行**。
+这正是负控制自检要抓的形态（与 fmt 卡口当初“写了但从未生效”同型）。
+修：该 job 增 `Install protoc` 步骤。
+
+**B. `real-process chaos`（job `107212428956`）：注解第一次真的把“为什么”带了出来**
+
+- 注解（`GET /repos/byteforce-cn/coord/check-runs/107212428956/annotations`）：
+  `panic: soak put failed at iteration 784`（`coord/tests/chaos_real.rs:562`）+
+  `门禁命令失败（exit 101）：cargo test -p coord --test chaos_real …`。
+- 逐 step：step 7（`chaos_real` 套件）红，**step 8–14 全部执行且全绿**
+  （soak 120s / multi-raft / auth+plugin×3 / plugin-real / object-storage /
+  agent+auth / **本轮新增的 Gate 0 DoS/RSS drill**）⇒ `if: always()` 的价值当场兑现：
+  7 个套件不再“没有执行记录”；**W4-5 的 DoS/RSS drill 在 CI 首次执行即绿**。
+- 失败点收窄到：`chaos_soak_distributed`（step 7 里以默认 300s 时长跑）**第 784 次迭代**
+  写入失败；而同一次 run 的 step 8 用 120s 单独跑同一用例**通过**。
+- **根因仍未定位**。但已确认两类被排除：① 不是 kill9 用例的节点泄漏
+  （该用例结尾 `for n in &mut nodes { n.kill9() }` 显式清场）；② 不是“重试后仍失败”
+  的形态（soak 的每迭代写本来就只有一次机会，而 kill9 用例是 5 次重试）。
+- 处置（**不弱化断言**）：`put_any` 此前 `if let Ok(resp)` **把错误整个丢弃** ⇒ 现有
+  证据无法区分“无 quorum/写超时”（产品侧信号）与“节点不可达”（就绪/环境）。
+  现改为收集逐节点错误返回，失败时附**集群快照**（逐节点可达性 + `revision`），
+  两条都进 panic 消息 ⇒ 经注解通道直接可见。下一次红即可据此归类。
 
 **另两条记账（本轮顺手核到，未修 —— 避免制造“半程修补”的错觉）**：
 
@@ -370,7 +409,8 @@ spawn 真实 `coord server`（鉴权开启），发 100 × 8 MiB（累计 800 Mi
    不在 W2 的“负控制/取证”范围内。其中 3 处是 `clippy::assertions_on_constants`
    （如 `MAX_SCOPE_BODY_BYTES > MAX_GRPC_DECODING_BYTES`）—— 那是**编译期不变量**，
    **不是**“恒真的空测试”；更干净的写法是 `const _: () = assert!(…)`（编译期即失败）。
-2. 本机 `cargo test --workspace --no-fail-fast` 会**长时间卡在**
-   `test_pd_executor_real_raft_add_transfer_remove_peer`（单用例 >60s 无输出；
-   2026-09-22 已记过“本地别指望全量给结论”）。⇒ 本地全量只能当“烟测”，
+2. 本机 `cargo test --workspace --no-fail-fast` 不可用（2026-09-23 实测：跑完 77 个测试
+   二进制、**0 失败**后，卡在 `test_pd_executor_real_raft_add_transfer_remove_peer`
+   **>45 分钟无输出**而被终止；同一条命令在 CI 上 **2m13s** 完成；途中
+   `m0_snapshot_purge_then_restart` 也报了 >60s）。⇒ 本地全量只能当“烟测”，
    权威结论以 CI 为准（这也解释了为什么 §6.2 的注解通道是必需品而不是锦上添花）。

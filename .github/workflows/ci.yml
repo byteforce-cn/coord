@@ -76,6 +76,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       # 第六轮：panic 卡口要编译 workspace（--all-targets），配缓存避免每次冷编译
       - uses: Swatinem/rust-cache@v2
+      # 第六轮（run 35869740196 实证）：wire-descriptor 自检 step 需要 protoc
+      # （契约副本 ↔ 实现副本的 FileDescriptorSet 比对），而本 job 原先是唯一
+      # **不装 protoc** 的 job ⇒ 该 step 直接以「需要 protoc」退出 1。
+      # 这正是"负控制自检"的用处：它把"门禁在某个 job 里根本跑不起来"暴露成红。
+      - name: Install protoc (coord-proto build + wire-descriptor gate dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Assert the fmt gate turns red on an injected violation
         run: |
           set -euo pipefail

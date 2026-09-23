@@ -261,10 +261,18 @@ impl PartitionProxy {
 }
 
 /// 从集群任一存活节点写（Put），leader 自动发现由重试实现。
-async fn put_any(nodes: &[RealNode], key: &[u8], value: &[u8]) -> Option<u64> {
+/// 向集群任一节点写（每节点一次机会）。
+///
+/// **失败必须自描述**（2026-09-23，第六轮）：此前用 `if let Ok(resp)` 把各节点的
+/// gRPC 错误**整个丢弃**，于是 CI 上只能看到 `soak put failed at iteration 784`
+/// —— 无法判定是「无 quorum」「连接被拒」还是「写超时」（run `35869740196` 的
+/// chaos 红就是这个形态）。现在把逐节点错误收集成字符串交调用方带进 panic 消息
+/// ⇒ 经注解通道（check-run annotations）直接可见。
+async fn put_any(nodes: &[RealNode], key: &[u8], value: &[u8]) -> Result<u64, String> {
+    let mut errs: Vec<String> = Vec::new();
     for node in nodes {
         let mut kv = KvClient::new(node.channel().await);
-        if let Ok(resp) = kv
+        match kv
             .put(PutRequest {
                 key: key.to_vec(),
                 value: value.to_vec(),
@@ -274,10 +282,41 @@ async fn put_any(nodes: &[RealNode], key: &[u8], value: &[u8]) -> Option<u64> {
             })
             .await
         {
-            return Some(resp.into_inner().revision as u64);
+            Ok(resp) => return Ok(resp.into_inner().revision as u64),
+            Err(e) => errs.push(format!("node{}: {} [{}]", node.id, e.message(), e.code())),
         }
     }
-    None
+    Err(errs.join("; "))
+}
+
+/// 失败时的集群快照：逐节点「可达性 + 已应用 revision」。
+///
+/// 用途：把「写不进去」区分为 **节点不可达**（就绪/环境问题）与
+/// **可达但拒绝写**（无 quorum / 写超时等产品侧信号）。`StatusResponse` 的契约
+/// 只保证 `revision`，因此这里只报这两个可核验事实，不臆测内部状态。
+async fn cluster_snapshot(nodes: &[RealNode]) -> String {
+    let mut parts = Vec::new();
+    for node in nodes {
+        let addr = format!("http://127.0.0.1:{}", node.grpc_port);
+        let desc = match Channel::from_shared(addr)
+            .unwrap()
+            .connect_timeout(Duration::from_secs(2))
+            .connect()
+            .await
+        {
+            Ok(ch) => {
+                let mut c =
+                    coord_proto::maintenance::maintenance_client::MaintenanceClient::new(ch);
+                match c.status(coord_proto::maintenance::StatusRequest {}).await {
+                    Ok(r) => format!("reachable revision={}", r.into_inner().revision),
+                    Err(e) => format!("status err: {} [{}]", e.message(), e.code()),
+                }
+            }
+            Err(e) => format!("unreachable: {e}"),
+        };
+        parts.push(format!("node{} {desc}", node.id));
+    }
+    parts.join(" | ")
 }
 
 /// 从集群任一存活节点读（Range 需 leader；重试直至成功）。
@@ -414,7 +453,7 @@ async fn chaos_real_kill9_and_linearizability() {
         let start = Instant::now();
         let mut written = false;
         for _ in 0..5 {
-            if put_any(&nodes, key, value.as_bytes()).await.is_some() {
+            if put_any(&nodes, key, value.as_bytes()).await.is_ok() {
                 written = true;
                 break;
             }
@@ -473,13 +512,17 @@ async fn chaos_real_kill9_and_linearizability() {
     let converge_deadline = Instant::now() + Duration::from_secs(30);
     let mut final_ok = false;
     while Instant::now() < converge_deadline {
-        if put_any(&nodes, key, final_value.as_bytes()).await.is_some() {
+        if put_any(&nodes, key, final_value.as_bytes()).await.is_ok() {
             final_ok = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
-    assert!(final_ok, "final put");
+    assert!(
+        final_ok,
+        "final put after healing all partitions failed; cluster snapshot: {}",
+        cluster_snapshot(&nodes).await
+    );
     for n in &nodes {
         let v = range_any(&nodes, key, converge_deadline).await;
         assert_eq!(
@@ -559,10 +602,11 @@ async fn chaos_soak_distributed() {
     while Instant::now() < deadline {
         counter += 1;
         let value = format!("s{counter}");
-        assert!(
-            put_any(&nodes, key, value.as_bytes()).await.is_some(),
-            "soak put failed at iteration {counter}"
-        );
+        // 失败时把「逐节点错误 + 集群快照」一并带进 panic 消息（⇒ 进 CI 注解）。
+        if let Err(err) = put_any(&nodes, key, value.as_bytes()).await {
+            let snapshot = cluster_snapshot(&nodes).await;
+            panic!("soak put failed at iteration {counter}: {err}; cluster snapshot: {snapshot}");
+        }
         // 每 50 次写校验全节点收敛（无泄漏/漂移的粗检）。
         // 收敛读必须用独立的短截止时间，不能复用全局 `deadline`：浸泡临近
         // 结束时全局 deadline 已过，`range_any` 会立即返回 None，把「浸泡正常
@@ -585,7 +629,13 @@ async fn chaos_soak_distributed() {
     // 终态收敛 + 重启恢复校验
     counter += 1;
     let final_value = format!("s{counter}");
-    assert!(put_any(&nodes, key, final_value.as_bytes()).await.is_some());
+    let final_put = put_any(&nodes, key, final_value.as_bytes()).await;
+    assert!(
+        final_put.is_ok(),
+        "final put failed: {}; cluster snapshot: {}",
+        final_put.as_ref().err().map(String::as_str).unwrap_or(""),
+        cluster_snapshot(&nodes).await
+    );
     let converge = Instant::now() + Duration::from_secs(30);
     for n in &nodes {
         assert_eq!(
