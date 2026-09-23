@@ -522,8 +522,8 @@
 
 > 体例：每行必须有**可重跑的判据**与**产物落点**。**「完成」不等于「已验收」** ——
 > 凡依赖 lab / 外部（审计、引入方签字）的判据一律标注**待验收**，不得当作已绿。
-> 最后更新：**2026-09-22（第五轮）**（基线 `8b65290` + 前四轮改动 + 本轮改动）。
-> 第五轮的主题见下表；CI 侧取证方法见 `docs/production/ops/ci-gate-forensics-2026-09-22.md`。
+> 最后更新：**2026-09-23（第六轮）**（基线 `8b65290` + 前五轮改动 + 本轮改动）。
+> 第六轮主题见下方「第六轮追加」；CI 侧取证方法见 `docs/production/ops/ci-gate-forensics-2026-09-22.md` §6。
 
 | # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
 |:--|:--|:--|:--|:--|
@@ -632,6 +632,29 @@ W3 全部（要长跑）、W4-1/W4-2a/W4-3/W4-5、W5-5、W6-2 实机演练、W7�
 
 > **纪律提醒**：W2 未完成（门禁仍有常驻红/间歇红）⇒ 上表所有 ✅ 都只是「本地可重跑」，
 > 按 §5 W2 的裁决，**尚不得计入对外门禁证据**；⏳ 项一律不得当作已绿。
+
+### 第六轮追加（2026-09-23）—— 主题：**把「取不到的日志」变成「失败的注解」**
+
+> 触发：两次新实跑带来两个必须回答的问题（同 SHA 的 push 红 / 定时绿 ⇒ 间歇红的
+> **测试名**是什么？perf 首次真跑即红 ⇒ **红在哪条断言、什么数字**？）。两者都卡在同一
+> 通道问题上（日志 403 / 工件 401 / 无 `gh`）⇒ 先修通道。方法学见
+> `docs/production/ops/ci-gate-forensics-2026-09-22.md` §6。
+
+| # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
+|:--|:--|:--|:--|:--|
+| **W2-2 闭环实证** | audit 定时红修复在 **schedule 事件**下生效 | ✅ **完成（含 CI 实证）** | schedule run `35810892940`（SHA `1a8c827`）逐 job：`cargo audit + deny` = **success**；`Security audit` = **success** | 第五轮要求的「等下一次定时跑」已兑现；W2-2 从"待实证"转为**已闭环** |
+| **W2-1 首次真跑** | perf job（`weekly perf baseline`）**首次真正执行**即红 | ✅ 取证（根因待数字） | `GET /actions/jobs/107021983636` 的 step 时间戳 02:34:53→02:42:42（**7m49s**） | 7m49s 排除"编译失败/超时"；退出码 **101** 排除 python 门禁（其退出码为 1/2）⇒ 红在 `perf_bench` 内部断言。**具体格数与数字**要等下一次 schedule 跑（注解通道本轮已就位） |
+| **W2-1 附带** | perf 的「静默通过」路径（自述式 no-op）修掉 | ✅ 完成 | `git diff scripts/bench-ci.sh`；`bash -n` 语法检查 | 无基线时不再静默写 baseline + `exit 0`（读起来像通过），改发 `::warning::` **明说"跨运行比较未执行"**；报告工件改 `if: always()`；cargo 输出由 `>"$REPORT"` 改为 `tee`（修前失败时 step 日志几乎为空） |
+| **W2 通道**（新增，服务后续所有轮次） | **失败自描述**：注解器 + 包装器 + 10 处接线 | ✅ 完成 | 合成日志测试：编译错误（带 `--> path:line`，**位置在错误行下方**）、`test ... FAILED` 用例名、`panicked at path:line:col` + 消息、`PERF GATE`/`REGRESSION` 行、兜底尾 5 行；包装器 `ls /nonexistent` ⇒ **exit 2 透传** | `scripts/ci-annotate-test-failures.sh`（≤10 条 `::error::` + step summary，恒 exit 0）、`scripts/ci-run-with-annotations.sh`（tee + 透传退出码）；`ci.yml`：`test` job ×2、`chaos-nightly` ×7 + 新增 DoS step、`perf-bench` 工件 |
+| **W2-3 观察** | chaos **连续两次 success** | 🟡 记录（n=2） | push `35745314425` + schedule `35810892940` 逐 job | 与 14/31 的历史相比是连续两绿；**不得**据此宣称稳定化；失败时的注解已接线 |
+| **W4-5(2)** | Gate 0 DoS 的 **RSS 峰值实测口径** | ✅ **完成（本机可重跑）** | `cargo test -p coord --test dos_rss_peak_test -- --ignored --nocapture` ⇒ **1 ✓** | 新增 `coord/tests/dos_rss_peak_test.rs`（进程级、量**服务端** `VmHWM`）：100 × 8 MiB（累计 800 MiB，在飞并发 25）**100/100 被拒**，总增长 **116 MiB**（阈值 256 MiB），逐波 +69.5/+29/+14/+6.5 MiB **递减**。两条自我防护：读数为 0 必须报错（防解析 bug 使断言恒真）；另设"首波后漂移"断言专抓"随累计字节增长"。已接 `chaos-nightly`；`security.md` §3 表同步 |
+| **workspace tests 间歇红** | push 红（2m12s）/ 同 SHA schedule 绿（2m13s） | 🟡 通道就位（待复现） | 本地 detached 复跑 `cargo test --workspace --no-fail-fast`（结果见下） | 红跑耗时与绿跑一致 ⇒ 整套件跑完才失败（非早期崩溃）；**测试名**由新注解通道在下次复现时带出 |
+| **P1 卡口复核（六轮）** | fmt / clippy / **六道脚本** | ✅ 完成 | `cargo fmt --all -- --check`；`cargo clippy --workspace -- -D warnings`；wire-sync / wire-descriptor / sdk-sync / panics / error-code / gate-drills | fmt ✓；clippy ✓（非测试目标）；**六道全 `exit 0`** |
+
+> **本轮的一条方法论收获（写给后续轮次）**：perf 失败时"报告被重定向进文件、工件又
+> 被 skip"⇒ 一个数字都带不出来；`chaos` 失败时"其后 step 全 skipped"⇒ 后面的套件
+> **没有任何执行记录**。**门禁的价值不在它会不会红，而在它红的时候你能不能知道为什么。**
+> 本轮的注解通道把"能知道"变成默认行为，而不是靠人去想办法。
 
 ---
 

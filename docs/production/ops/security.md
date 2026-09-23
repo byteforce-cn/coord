@@ -90,11 +90,19 @@ P-Gate 6 整体仍红——TLS fail-closed（W4-1）、第三方审计（W4-3）
 | # | 回归项 | 现状 | 判据 |
 |:--|:--|:--|:--|
 | 1 | 越权 | ✅ 既有测试（agent scope fail-closed、interceptor scope 拒绝） | `coord-agent` 的 `watch_scope_is_fail_closed_not_bypassed` 等 |
-| 2 | DoS（含 RSS 断言） | 🟡 有资源上限若干，但**无连接数上限**（`boundaries.md` B-CX-1）、无 RSS 峰值实测口径 | **待补**：RSS 断言口径 |
+| 2 | DoS（含 RSS 断言） | ✅ **2026-09-23（第六轮）**：RSS 峰值实测口径落地并接入 CI | `coord/tests/dos_rss_peak_test.rs`：100 × 8 MiB（累计 800 MiB，在飞并发 25）无凭据请求 ⇒ 全部 `RESOURCE_EXHAUSTED`，且**服务端子进程** `/proc/<pid>/status` 的 `VmHWM` 增长有界。本机实测：**100/100 被拒；总增长 116 MiB（阈值 256 MiB）；逐波 ++69.5/+29/+14/+6.5 MiB 递减**。两条自我防护：读数为 0 必须报错（否则解析 bug 让阈值永远成立）；另设"首波后漂移 ≤128 MiB"断言专抓"随累计字节线性增长" |
 | 3 | 空密钥启动失败 | ✅ `coord/src/main.rs:4019+` 的 `load_or_create_root_key` 测试段（「no key file may be generated when refusing」） | 单测 |
-| 4 | 非 loopback raft 无密钥启动失败 | ✅ `coord/src/main.rs:2215-2221` | 已实现；**需负控制测试**确认覆盖 |
+| 4 | 非 loopback raft 无密钥启动失败 | ✅ `coord/src/main.rs:2215-2221` + `coord/tests/raft_sec03_failclosed_test.rs`（负控制确认覆盖） | 进程级负控制 |
 
-**待补**：第 2 项的 RSS 峰值实测口径（属 W5/W3 的观测面，与 7×24 曲线共用采集）。
+**命令**（本地/CI 同参）：
+
+```bash
+cargo test -p coord --test dos_rss_peak_test -- --ignored --nocapture --test-threads=1
+```
+
+**残余/边界**：① 只打 content-length 预检路径（第二条"带硬上限读取"由 `coord-server` 单测
+`:1809`/`:1827` 覆盖）；② 阈值与漂移阈值为本机实测的 2.2×/2.6× 余量，换机器需重测
+（测试会打印全部读数，证据归档时一并收录）；③ 无连接数上限仍是已声明的边界（`boundaries.md` B-CX-1）。
 
 ---
 

@@ -5,7 +5,15 @@
 # 2. 报告落盘 benchmark-results/report-<date>.md；
 # 3. 解析关键指标与 benchmark-results/baseline.json 比较，
 #    任一指标劣化 >20% 即失败（告警语义，决策文档 §6.4 P2-06）；
+#    ⚠️ 2026-09-23（W2 第六轮）：该**跨运行**比较只在**存在基线文件**时执行。
+#    CI 上 `benchmark-results/` 是临时目录（基线未入库）⇒ 比较**未执行**，
+#    脚本会发 `::warning::` 注解明说（旧版是静默 "baseline updated" + exit 0，
+#    读起来像"门禁通过"——属自述式 no-op）。真门禁是下面的 within-run PERF_GATE。
 # 4. 有意变更后人工执行 `UPDATE_BASELINE=1 bash scripts/bench-ci.sh` 更新基线。
+#
+# 失败自描述（2026-09-23）：输出 **tee** 到报告 + step 日志；失败时把
+# 「断言数字/panic 位置」转成 check-run 注解（匿名可取的唯一通道，见
+# docs/production/ops/ci-gate-forensics-2026-09-22.md）。
 #
 # 本地/CI 同参：bash scripts/bench-ci.sh
 set -euo pipefail
@@ -36,10 +44,19 @@ echo "==> running perf_bench (release) ..."
 # （`iterations = num_regions * 200`），而 25 Region 那次有 5000 次 —— 两者样本量不对称。
 # 若要彻底消除，应让各 Region 数使用**相同迭代数**并加预热；本轮只做了噪声源消除，
 # **没有**放宽 0.80 阈值。
-PERF_GATE=1 cargo test --release -p coord --test perf_bench -- --ignored --nocapture --test-threads=1 >"$REPORT" 2>&1
+PERF_GATE=1 cargo test --release -p coord --test perf_bench -- --ignored --nocapture --test-threads=1 2>&1 | tee "$REPORT"
+PERF_STATUS=${PIPESTATUS[0]}
+if [ "$PERF_STATUS" -ne 0 ]; then
+  # 2026-09-23：首次真跑（run 35810892940）红时报告被 `>"$REPORT"` 吞进文件、
+  # step 日志几近为空、工件又因 skip 而不存在 ⇒ 一个数字都拿不到。现在：
+  # 逐行透传到日志，并把断言/panic 行转成注解。
+  echo "::error::perf_bench 失败（exit ${PERF_STATUS}）；报告：$REPORT"
+  bash scripts/ci-annotate-test-failures.sh "$REPORT" || true
+  exit "$PERF_STATUS"
+fi
 echo "==> report written to $REPORT"
 
-python3 - "$REPORT" "$OUT_DIR/baseline.json" "${UPDATE_BASELINE:-0}" <<'PY'
+python3 - "$REPORT" "$OUT_DIR/baseline.json" "${UPDATE_BASELINE:-0}" <<'PY' 2>&1 | tee /tmp/perf-gate.log
 import json, re, sys
 
 report_path, baseline_path, update = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
@@ -85,7 +102,19 @@ except FileNotFoundError:
 
 if update or not baseline:
     json.dump(current, open(baseline_path, "w", encoding="utf-8"), indent=2)
-    print(f"baseline updated: {len(current)} metrics -> {baseline_path}")
+    if update:
+        print(f"baseline updated (UPDATE_BASELINE=1): {len(current)} metrics -> {baseline_path}")
+        sys.exit(0)
+    # 2026-09-23（W2）：无提交基线时**不得**读成"门禁通过"。CI 上 benchmark-results/
+    # 是临时目录 ⇒ 跨运行 20% 比较在 CI 上**不可能执行**（旧版静默写成
+    # "baseline updated" + exit 0，属自述式 no-op）。此处明说"跳过"并发 warning 注解。
+    # 注：跨机比较本身也不成立（共享 runner 硬件不固定）⇒ 若要把 20% 变成真门禁，
+    # 需要固定 runner；见 docs/production/ops/ci-gate-forensics-2026-09-22.md。
+    print(
+        f"::warning::未找到基线 {baseline_path} ⇒ 跨运行 20% 比较**未执行**"
+        f"（本次只有 within-run PERF_GATE 硬闸；{len(current)} 条指标已写入报告）"
+    )
+    print(f"baseline seeded (advisory only): {len(current)} metrics -> {baseline_path}")
     sys.exit(0)
 
 regressions = []
@@ -116,3 +145,9 @@ if missing:
     sys.exit(1)
 print("PERF GATE PASSED")
 PY
+GATE_STATUS=${PIPESTATUS[0]}
+if [ "$GATE_STATUS" -ne 0 ]; then
+  # 劣化/基线过期（或报告解析失败）也走注解通道：REGRESSION / FATAL 行会被带回。
+  bash scripts/ci-annotate-test-failures.sh /tmp/perf-gate.log || true
+  exit "$GATE_STATUS"
+fi

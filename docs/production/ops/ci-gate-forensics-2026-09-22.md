@@ -1,6 +1,6 @@
 # CI 门禁「常驻红 / 间歇红」定位（W2）
 
-- **日期**：2026-09-22
+- **日期**：2026-09-22（**更新**：2026-09-23，第六轮见 §6）
 - **锚点**：`docs/production/production-readiness-plan-2026-09-21.md` §2.2（红项表）、§3 D-04、§5 W2
 - **体例**：与计划书一致 —— 每条结论必须给**可重跑/可复现**的取证路径。
   **区分「已定位」与「仅收窄范围」**：前者给根因，后者只给"不是哪一类"，不得含糊。
@@ -266,3 +266,97 @@ gh api -X PUT repos/byteforce-cn/coord/branches/main/protection \
 | §2.2「限制与诚实声明」 | 原来"没有根因"的部分，靠 check-run 注释 + action 源码 + advisory-db 交叉比对补齐了一条取证通道（§0） |
 | §5 W2-1 / W2-2 / W2-3 / W2-4 | W2-2 完成；W2-1 部分（见 §2.4）；W2-3 部分（判定流程见 §3.3）；W2-4 阻塞（§4） |
 | §5 W2-5 负控制演练 | 第二轮已交付 `scripts/check-gate-drills.sh` + CI 接线；**九道门逐门负控制**（1.5 人日）仍未做 |
+
+---
+
+## §6 第六轮（2026-09-23）：把「取不到的日志」变成「失败的注解」
+
+> 本轮的触发点是两次新的实跑，它们各带来一个**必须回答的问题**：
+> ① schedule run `35810892940` 上 `workspace tests` 绿、而前一晚 push run
+> `35745314425` 上同 SHA 红 ⇒ 间歇红的**测试名**是什么？② perf job 首次真跑即红
+> ⇒ **红在哪条断言、什么数字**？两者都卡在同一个通道问题上（§0：日志 403、
+> 工件 401、无 `gh`），所以本轮先解决通道，再谈结论。
+
+### 6.1 两次实跑的读数（逐 job，可复现命令见 §0 表）
+
+| run | 事件 | SHA | 关键 job 结论 |
+|:--|:--|:--|:--|
+| `35745314425` | push | `1a8c827` | `workspace tests` **failure**（step 8「Run workspace tests」，`exit 101`）；其余全绿（含 `cargo audit + deny`、`real-process chaos`） |
+| `35810892940` | schedule | `1a8c827` | `workspace tests` **success**；`cargo audit + deny` **success**；`weekly perf baseline` **failure**（step 6，`exit 101`） |
+
+**由 ① 直接闭环的**：W2-2 的修复（补 `issues: write`）在 **schedule 事件**下生效 ——
+这正是第五轮 §2.2 要求"等定时跑"的那个分支，现已实证。
+
+**由 ② 得到的时间取证**（`GET /actions/jobs/{id}` 的 step 时间戳）：
+
+- perf 的失败 step 耗时 **7m49s**（02:34:53 → 02:42:42）。本机同参跑一次
+  `cargo test --release ... --test-threads=1` 约 5.4 min ≈ CI 上"构建 + 跑完"的
+  量级 ⇒ **不是编译失败、也不是超时**，而是 `perf_bench` 内部断言。
+- 退出码 **101** 同时排除了 python 门禁路径（`REGRESSION`/`missing` 的退出码是 1，
+  "报告无可解析指标"是 2）⇒ 红在 `perf_bench` 的 `PERF_GATE` 断言（或 release 编译），
+  与 §2.1 的推断一致，本轮把它**从推断变成时间取证**。
+- `workspace tests` 红跑耗时 **2m12s**、绿跑 **2m13s** ⇒ 整套件**跑完了**才失败，
+  不是"早期崩溃/被杀"。`--no-fail-fast` 会列出全部失败用例 —— 但那文字在日志里，
+  而日志取不到（这正是本轮要修的）。
+
+### 6.2 落地①：**失败自描述**（门禁失败必须携带可读事实）
+
+新增两个脚本（都进仓、都可本地跑）：
+
+| 脚本 | 作用 |
+|:--|:--|
+| `scripts/ci-annotate-test-failures.sh <log>` | 从日志抽取：编译错误（含 `-->` 位置，**在错误行下方**）、`test ... FAILED` 用例名、`panicked at path:line:col` + 消息、`PERF GATE`/`REGRESSION` 行；按优先级发 **≤10 条** `::error::`（GitHub 每 step 上限）；同时写入 `$GITHUB_STEP_SUMMARY`。**恒 exit 0**（不得掩盖原始失败） |
+| `scripts/ci-run-with-annotations.sh <log> <cmd...>` | 包装门禁命令：输出 `tee` 落盘 + 透传；失败时自动调用上面的注解器；**透传原退出码** |
+
+接线（`.github/workflows/ci.yml`）：
+
+- `workspace tests` job：两个测试 step（含 sim 套件）全部包装；
+- `chaos-nightly` job：7 个真实进程套件 step 全部包装 + 新增
+  **Gate 0 DoS/RSS drill** step（W4-5，见 §6.4）；
+- `perf-bench` job：报告工件改为 `if: always()`（失败也上传）；`bench-ci.sh` 内部把
+  cargo 输出从 `>"$REPORT"` 改为 `tee`，失败时对报告调注解器。
+
+**为什么这是 W2 的核心而不是旁支**：注解是**匿名可取**的唯一通道（`GET /check-runs/{id}/annotations`）。
+此前 perf 失败时输出被重定向进报告文件、报告工件又被 `skipped` ⇒ **一个数字都带不出来**；
+`workspace tests` 的失败用例名同样永远带不出来。现在两者都会被以注解形式带出。
+
+### 6.3 落地②：修掉 perf 的「静默通过」路径（自述式 no-op）
+
+`bench-ci.sh` 的跨运行比较**在 CI 上不可能执行**：`benchmark-results/baseline.json`
+不在仓库（`git ls-files benchmark-results` 为空），旧代码在"无基线"时
+**静默**写入并把当前值当基线、`sys.exit(0)` —— 读起来像"PERF GATE PASSED"。
+
+现在的行为：无基线 ⇒ 发 `::warning::` **明说"跨运行比较未执行"**，本轮只有
+within-run `PERF_GATE` 硬闸；基线仅供本机/未来趋势用。
+
+> **为什么不在仓里塞一份基线**：perf 指标全是 ops/s 与延迟 ⇒ 与**机器**强相关，
+> 而 `ubuntu-latest` 是共享池。跨机 20% 比较会把硬件差异读成劣化 ——
+> 这正是 perf 13/13 的历史教训。要把它变成真门禁，前提是**固定 runner**（未做，已记账）。
+
+### 6.4 顺带：W4-5 第 2 项（DoS 的 RSS 峰值口径）落地
+
+新增进程级用例 `coord/tests/dos_rss_peak_test.rs`（`#[ignore]`，已接 chaos job）：
+spawn 真实 `coord server`（鉴权开启），发 100 × 8 MiB（累计 800 MiB，在飞并发 25）
+的无凭据超大请求，要求**全部** `RESOURCE_EXHAUSTED`，并读**服务端子进程**
+`/proc/<pid>/status` 的 `VmHWM`（峰值）断言有界。本机实测：
+
+| 读数 | 值 |
+|:--|--:|
+| 被拒 | 100/100 |
+| VmHWM 总增长 | 116 MiB（阈值 256 MiB） |
+| 逐波增量 | +69.5 / +29 / +14 / +6.5 MiB（**递减** ⇒ 与 body 字节数无关） |
+
+两个**测量口径**上的自我防护（第一版都踩过）：解析后若读到 `0` 必须**报错**
+（否则解析 bug 会让阈值断言永远成立 ⇒ 门禁变 no-op）；另设"首波之后的漂移"断言，
+专门抓"峰值随累计字节线性增长"这一无界读特征。
+
+### 6.5 本轮仍未完成（需要下一次 CI 跑，或需要权限）
+
+| 项 | 状态 | 等什么 |
+|:--|:--|:--|
+| perf 红的具体断言数字 | 🟡 通道已就位 | 下一次 schedule 跑（`cron: 17 2 * * *` 起 **每个** schedule 都带 perf job） |
+| `workspace tests` 间歇红的测试名 | 🟡 通道已就位 | 下一次触发间歇红（本地复跑见计划书 §11 第六轮表） |
+| W2-1 的"同迭代数 + 预热"测量修法 | ⏳ 待数字 | 上面两条的读数（不知道红在哪一格就改测量，属盲改） |
+| W2-3 根因 | 🟡 收窄 | 最近两次 chaos 均 **success**（n=2，不足以宣称稳定化）；失败时的注解已接线 |
+| W2-4 分支保护 | ⛔ 阻塞 | 仓库 admin（§4 已给命令与验证判据） |
+| W2-5 九道门逐门负控制 | ⏳ 未做 | 1.5 人日（计划书 W2-5） |
