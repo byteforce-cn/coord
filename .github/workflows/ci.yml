@@ -69,9 +69,13 @@ jobs:
   gate-self-check:
     name: gate self-check (fmt gate must fail on an injected violation)
     runs-on: ubuntu-latest
+    # 第六轮：本 job 现在含一道 clippy 级扫描（panic 卡口）⇒ 显式超时
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
+      # 第六轮：panic 卡口要编译 workspace（--all-targets），配缓存避免每次冷编译
+      - uses: Swatinem/rust-cache@v2
       - name: Assert the fmt gate turns red on an injected violation
         run: |
           set -euo pipefail
@@ -105,8 +109,67 @@ jobs:
             echo "::error::alert↔runbook gate did NOT fail on an injected anchor mismatch — the gate is not effective"
             exit 1
           fi
-          echo "OK: alert↔runbook gate correctly turned red on the injected violation"
-
+          echo "OK: alert↔runbook gate correctly turned red on the injected violation"      # ── W2-5（第六轮，2026-09-23）：把负控制从 2 道门扩到 6 道 ──────────────
+      # 动机（与 fmt 卡口当初同一形态）：**解析型门禁"看起来在跑" ≠ "真的会红"**。
+      # 下面每一道都注入一个**最小**违规并断言该门禁必须变红；每步结束还原文件
+      # （CI 是全新 checkout，但还原能让"红/绿"只由本步的注入解释）。
+      # 覆盖：P1（fmt、panic 路径）/ P2（wire-sync、wire-descriptor、sdk-sync）/
+      #       P7（告警↔runbook）。未覆盖的 P3–P6/P8/P9 见
+      #       docs/production/ops/ci-gate-forensics-2026-09-22.md §6.5。
+      - name: Assert the wire-descriptor gate turns red on an injected wire drift
+        run: |
+          set -euo pipefail
+          target=coord-proto/src/proto/kv.proto
+          bash apis/contracts/scripts/check-wire-descriptor.sh
+          # 注入：实现副本的字段号 3 → 30（契约副本不动）⇒ descriptor 级结构性漂移
+          sed -i 's/^  int64 limit = 3;/  int64 limit = 30;/' "$target"
+          if bash apis/contracts/scripts/check-wire-descriptor.sh >/dev/null 2>&1; then
+            echo "::error::descriptor gate DID NOT fail on an injected field-number drift — the gate is not effective"
+            exit 1
+          fi
+          git checkout -- "$target"
+          echo "OK: descriptor gate correctly turned red on the injected drift"
+      - name: Assert the wire-sync gate turns red on an injected rpc rename
+        run: |
+          set -euo pipefail
+          target=coord-proto/src/proto/kv.proto
+          bash apis/contracts/scripts/check-wire-sync.sh
+          # 注入：内部副本的 rpc 改名（契约副本不动）⇒ 路径级缺失
+          sed -i 's/rpc Range(/rpc RangeGone(/' "$target"
+          if bash apis/contracts/scripts/check-wire-sync.sh >/dev/null 2>&1; then
+            echo "::error::wire-sync gate DID NOT fail on an injected rpc rename — the gate is not effective"
+            exit 1
+          fi
+          git checkout -- "$target"
+          echo "OK: wire-sync gate correctly turned red on the injected rpc rename"
+      - name: Assert the sdk-sync gate turns red on an injected internal-proto import
+        run: |
+          set -euo pipefail
+          target=coord-java-sdk/src/main/java/cn/byteforce/coord/sdk/internal/rpc/RegistryImpl.java
+          bash apis/contracts/scripts/check-sdk-sync.sh
+          # 注入：给一个**不在 allowlist** 的 GA impl 加上内部面 import（"漂回去"的形态）
+          sed -i '1i import cn.byteforce.coord.sdk.internal.proto.*;' "$target"
+          if bash apis/contracts/scripts/check-sdk-sync.sh >/dev/null 2>&1; then
+            echo "::error::sdk-sync gate DID NOT fail on an injected internal-proto import — the gate is not effective"
+            exit 1
+          fi
+          git checkout -- "$target"
+          echo "OK: sdk-sync gate correctly turned red on the injected import"
+      - name: Assert the panic-path gate turns red on an injected panic
+        # 本门禁的口径是"非测试代码 panic 路径计数 = 0"。注入一个**非测试**的
+        # `panic!` 函数 ⇒ clippy 扫描必须抓到（若脚本碰巧编译失败，同样算"变红"，
+        # 但断言写的是"红"而不是"红的原因"，两者都比静默绿好）。
+        run: |
+          set -euo pipefail
+          target=coord-core/src/error_code.rs
+          bash scripts/check-panics.sh
+          printf '\n/// gate self-check 注入（只在自检步骤内存在，随后即还原）\npub fn __gate_self_check_panic() {\n    panic!("gate self-check");\n}\n' >> "$target"
+          if bash scripts/check-panics.sh >/dev/null 2>&1; then
+            echo "::error::panic-path gate DID NOT fail on an injected panic — the gate is not effective"
+            exit 1
+          fi
+          git checkout -- "$target"
+          echo "OK: panic-path gate correctly turned red on the injected panic"
   frontend-lint:
     name: frontend lint (coord-ui)
     runs-on: ubuntu-latest
