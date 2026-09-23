@@ -400,6 +400,22 @@ step 7（新加的 `wire-descriptor` 注入步）红、退出码 1，其后 3 �
   现改为收集逐节点错误返回，失败时附**集群快照**（逐节点可达性 + `revision`），
   两条都进 panic 消息 ⇒ 经注解通道直接可见。下一次红即可据此归类。
 
+### 6.7 修复后的复跑（run `35876239831`，SHA `e197e2e`）—— **全绿**
+
+| job | 结论 |
+|:--|:--|
+| `gate self-check` | **success**（6 步自检全过：fmt / 告警↔runbook / wire-descriptor / wire-sync / sdk-sync / panic 路径） |
+| `real-process chaos` | **success**（含新 DoS drill） |
+| `workspace tests` / `cargo audit + deny` / `fmt + clippy` / `proto contract` / `java sdk` / `java example integration` / `frontend lint` / `plugin matrix` / `Security audit` | success |
+| `weekly perf baseline` | skipped（push 事件不跑） |
+
+⇒ 本轮三处改动的**立即可验证部分**均已在 CI 上闭环：
+①注解通道（chaos 红时真的把断言带了出来，§6.6-B）；②`if: always()`（7 个套件不再被吞）；
+③protoc 修复（新自检从"跑不起来"变成"6 步全过"）。
+
+**但仍然不宣布 chaos 已稳定**：最近 4 次 chaos 为 绿/绿/**红**/绿（红那次见 §6.6-B，
+根因未定位）。`put_any` 的新诊断要等**下一次红**才会产出归因信息。
+
 **另两条记账（本轮顺手核到，未修 —— 避免制造“半程修补”的错觉）**：
 
 1. `cargo clippy --workspace --all-targets -- -D warnings` 在**测试目标**上仍有约 **23 处**
