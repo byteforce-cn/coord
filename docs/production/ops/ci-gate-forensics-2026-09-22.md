@@ -360,3 +360,17 @@ spawn 真实 `coord server`（鉴权开启），发 100 × 8 MiB（累计 800 Mi
 | W2-3 根因 | 🟡 收窄 | 最近两次 chaos 均 **success**（n=2，不足以宣称稳定化）；失败时的注解已接线；另给 chaos 的 7 个套件 step 加 `if: always()`（此前一次失败会把它后面的套件全部 skip ⇒ 「后面的套件没有任何执行记录」正是无法判定假红/真缺陷的结构原因） |
 | W2-4 分支保护 | ⛔ 阻塞 | 仓库 admin（§4 已给命令与验证判据） |
 | W2-5 九道门逐门负控制 | 🟡 **6/9 道已覆盖** | 既有 2 道（fmt、告警↔runbook）+ 本轮新增 4 道：`wire-descriptor`（字段号漂移）、`wire-sync`（rpc 改名）、`sdk-sync`（内部面 import 漂回）、**panic 路径**（注入非测试 `panic!`）；四道都先本地逐条验证“注入 ⇒ exit 1、还原 ⇒ 绿”，再写进 `gate-self-check` job。剩余 3 道的口径：P3–P6 需 lab/审计，P8 需仓库设置 + 真发布，P9 尚无机械门禁 |
+
+**另两条记账（本轮顺手核到，未修 —— 避免制造“半程修补”的错觉）**：
+
+1. `cargo clippy --workspace --all-targets -- -D warnings` 在**测试目标**上仍有约 **23 处**
+   存量违规（`Default::default()` 后逐字段赋值、`clone` on `Copy`、未用变量/导入等）。
+   计划书 §4 P1 的口径本来就写明“（非测试目标）”，所以现状是**口径一致**的；
+   要把这条卡口升级成 `--all-targets`（更强）需先清掉这 23 处 ⇒ **属独立立项**，
+   不在 W2 的“负控制/取证”范围内。其中 3 处是 `clippy::assertions_on_constants`
+   （如 `MAX_SCOPE_BODY_BYTES > MAX_GRPC_DECODING_BYTES`）—— 那是**编译期不变量**，
+   **不是**“恒真的空测试”；更干净的写法是 `const _: () = assert!(…)`（编译期即失败）。
+2. 本机 `cargo test --workspace --no-fail-fast` 会**长时间卡在**
+   `test_pd_executor_real_raft_add_transfer_remove_peer`（单用例 >60s 无输出；
+   2026-09-22 已记过“本地别指望全量给结论”）。⇒ 本地全量只能当“烟测”，
+   权威结论以 CI 为准（这也解释了为什么 §6.2 的注解通道是必需品而不是锦上添花）。
