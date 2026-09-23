@@ -535,11 +535,15 @@ jobs:
       # 批次 12：+ CLI 凭据文件套件（登录落盘 → 自动携带 → 到期自动续期 → 登出）。
       - name: Run auth/plugin process suites (single + multi-node + CLI credentials)
         if: always()
+        # 三条套件在同一 step：`bash -e` 下**第一条失败会跳过其余两条** ⇒ 与 job 级的
+        # `if: always()` 是同一形态的信息丢失。用 rc 累积：全跑完，但任一失败 ⇒ step 红。
         run: |
           bash scripts/kill-stray-coord-procs.sh
-          bash scripts/ci-run-with-annotations.sh /tmp/ci-plugin-auth.log cargo test -p coord --test plugin_auth_process_test -- --ignored --nocapture --test-threads=1
-          bash scripts/ci-run-with-annotations.sh /tmp/ci-plugin-auth-multinode.log cargo test -p coord --test plugin_auth_multinode_process_test -- --ignored --nocapture --test-threads=1
-          bash scripts/ci-run-with-annotations.sh /tmp/ci-plugin-credentials.log cargo test -p coord --test plugin_credentials_process_test -- --ignored --nocapture --test-threads=1
+          rc=0
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-plugin-auth.log cargo test -p coord --test plugin_auth_process_test -- --ignored --nocapture --test-threads=1 || rc=1
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-plugin-auth-multinode.log cargo test -p coord --test plugin_auth_multinode_process_test -- --ignored --nocapture --test-threads=1 || rc=1
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-plugin-credentials.log cargo test -p coord --test plugin_credentials_process_test -- --ignored --nocapture --test-threads=1 || rc=1
+          exit $rc
       # 批次 9：插件引擎**进程级**端到端（真实 server + 真实 agent 进程 + 磁盘 JS 插件）：
       # 插件身份开通 → 服务端 capability/scope 强制 → SIGHUP 内容级热重载 →
       # agent kill/重启（一次性引导令牌已消费，靠持久化账户续跑）。
