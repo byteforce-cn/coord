@@ -492,7 +492,13 @@ jobs:
       #
       # 脚本只清理数据目录（或 `--agent-config` 配置路径）位于 `/tmp/.tmp*` 的进程
       # ——即测试临时目录；不会碰真实集群。
+      # 2026-09-23（第六轮）：本 job 历史失败**恒在 step 7**（chaos_real kill9），
+      # 而其后 5–6 个 step 全部 `skipped` ⇒ **后面的套件没有任何执行记录**，
+      # 这正是 W2-3 无法判定"假红 vs 真缺陷"的结构原因之一。
+      # 现给每个套件 step 加 `if: always()`：job 的红/绿语义不变（任一失败即红），
+      # 但一次 run 能给出**全部套件**的结论。每步开头仍清孤儿进程（见下方说明）。
       - name: Run real-process chaos suites
+        if: always()
         env:
           CHAOS_REAL: "1"
         # 串行：kill9 与 soak 两个套件各起 3 个真实进程 + 6 个代理，
@@ -506,6 +512,7 @@ jobs:
           bash scripts/kill-stray-coord-procs.sh
           bash scripts/ci-run-with-annotations.sh /tmp/ci-chaos-kill9.log cargo test -p coord --test chaos_real -- --ignored --nocapture --test-threads=1
       - name: Run distributed soak (smoke, 120s)
+        if: always()
         env:
           CHAOS_REAL: "1"
           SOAK_DURATION_SECS: "120"
@@ -516,6 +523,7 @@ jobs:
       # 真实进程 + kill/重启收敛（MULTI_RAFT_REAL=1）。与 chaos 套件同 job 串行
       # 执行（同 host 真实进程互扰规避：kill9 会误伤对端节点导致就绪超时）。
       - name: Run multi-raft real-process suite (T5.18)
+        if: always()
         env:
           MULTI_RAFT_REAL: "1"
         run: |
@@ -526,6 +534,7 @@ jobs:
       # 步骤同 job 串行执行（真实进程互扰规避）。
       # 批次 12：+ CLI 凭据文件套件（登录落盘 → 自动携带 → 到期自动续期 → 登出）。
       - name: Run auth/plugin process suites (single + multi-node + CLI credentials)
+        if: always()
         run: |
           bash scripts/kill-stray-coord-procs.sh
           bash scripts/ci-run-with-annotations.sh /tmp/ci-plugin-auth.log cargo test -p coord --test plugin_auth_process_test -- --ignored --nocapture --test-threads=1
@@ -537,6 +546,7 @@ jobs:
       # 批次 12：+ **运行中新增插件**（SIGHUP 加入第二个插件，此时已无可用引导 CCT，
       # 靠自举的 provisioner 会话新建 `plugin/counter2` 账户并成功写 KV）。
       - name: Run plugin engine real-process e2e (PLUGIN_REAL=1)
+        if: always()
         env:
           PLUGIN_REAL: "1"
         run: |
@@ -546,6 +556,7 @@ jobs:
       # ——客户端自选块边界逐块发送（与服务端 4MiB 默认分帧不同）+ 服务端流逐块取回，
       # 跨 4MiB chunk 边界往返一致；含本地越界拒绝 / abort / 缺失对象。
       - name: Run object-storage streaming sessions (OBJECT_STORAGE_REAL=1)
+        if: always()
         env:
           OBJECT_STORAGE_REAL: "1"
         run: |
@@ -557,6 +568,7 @@ jobs:
       # 结构性回归保障：要求 agent 转发 CCT、scope 提取器在生产路径可用、
       # 能力表命中 `/coord.kv.KV/*`。
       - name: Run agent+auth real-process suite (AGENT_AUTH_REAL=1)
+        if: always()
         env:
           AGENT_AUTH_REAL: "1"
         run: |
@@ -568,6 +580,7 @@ jobs:
       # 放在本 job 的理由：它是 spawn 真实 `coord server` 的进程级套件，
       # 与其它进程套件同 job 串行执行（对齐既有约定）。
       - name: Run Gate 0 DoS/RSS peak drill (W4-5)
+        if: always()
         run: |
           bash scripts/kill-stray-coord-procs.sh
           bash scripts/ci-run-with-annotations.sh /tmp/ci-dos-rss.log cargo test -p coord --test dos_rss_peak_test -- --ignored --nocapture --test-threads=1
