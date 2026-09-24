@@ -394,6 +394,15 @@ static_peers = ["{server_addr}"]
 enabled = true
 verifying_key_hex = "{vk}"
 bootstrap_token = "{BOOTSTRAP_TOKEN}"
+
+[services]
+# 2026-09-24（U-12）：agent 本地面不再默认开启（G9「不得默认开启未整改面」）。
+# 本用例的 F-50 判据以 **idgen 启用**为前提（agent 自发流量把雪花 nodeid 注册进
+# server KV 的 `/_idgen/nodes/{{id}}`）⇒ 显式启用 —— 这正是"显式启用即可用"的验收面。
+# ⚠️ 顺带记录一个语义细节：`AgentConfig.services` 是**字段级** `#[serde(default)]`
+# ⇒ **整张 `[services]` 表缺失**时用的是 `ServiceConfig::default()`（代码默认），
+# 只有"表在但键缺"才走 `bool::default()`=false。U-12 之前本用例靠的正是前者。
+idgen = true
 "#,
             agent_data = agent_dir.display(),
             vk = agent_verifying_key_hex(),
