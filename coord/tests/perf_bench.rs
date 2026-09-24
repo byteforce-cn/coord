@@ -308,7 +308,20 @@ mod tests {
             let config = StorageConfig::default();
             let backend = RedbBackend::open(tmpdir.path(), &config).unwrap();
             let mvcc = Arc::new(MvccStorage::new(backend).unwrap());
-            let iterations: u64 = num_regions * 200;
+            // 等迭代数采样（2026-09-24，W2-1 的第二处测量修复）：
+            // 旧口径 `num_regions * 200` 让各格的测量窗口相差 **25 倍**
+            // （1 Region = 200 次 ≈ 1s；25 Region = 5000 次 ≈ 34s）。2026-09-24
+            // 本地 4 核（taskset 0-3）复跑**复现了 CI 的失败形态**：
+            //   · `bench_all` 实例：1 Region = 222 ops/s（0.9s 窗口）⇒ 25 Region
+            //     = 148 ops/s ⇒ ratio **0.667** ⇒ 断言红（与 CI 的 exit 101 同形）；
+            //   · 同一次跑的 standalone 实例：1 Region = 128 ops/s（1.6s 窗口）
+            //     ⇒ ratio 1.233 ⇒ 绿。
+            // 结论：**不稳定的是分母** —— 短窗口测到「尚未进入稳态」的乐观基线，
+            // 而分子（长窗口）已经把 compaction 等稳态成本算进去。
+            // 修法：所有 Region 数使用**同一迭代数（5000，即旧口径里最大的一格）**
+            // 与同一预热（100，见 `run_bench`）⇒ 测量窗口等长、可比。
+            // **不动 0.80 阈值、不删断言、不放宽口径。**
+            let iterations: u64 = 5000;
             let mut counter: u64 = 0;
 
             let (_, _, rate) = run_bench(

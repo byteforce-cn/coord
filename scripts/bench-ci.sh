@@ -40,10 +40,14 @@ echo "==> running perf_bench (release) ..."
 # 两次的 1-Region 基线本身差了 6 倍（35 vs 219）⇒ **噪声带宽远大于 0.80 判据**，
 # 这才是红的判据。串行执行把测量的前提恢复为"同一时刻只有一个基准在写盘"。
 #
-# ⚠️ 仍然存在的测量脆弱性（**未修**，已记账）：单 Region 基线的采样只有 200 次迭代
-# （`iterations = num_regions * 200`），而 25 Region 那次有 5000 次 —— 两者样本量不对称。
-# 若要彻底消除，应让各 Region 数使用**相同迭代数**并加预热；本轮只做了噪声源消除，
-# **没有**放宽 0.80 阈值。
+# ✅ 2026-09-24（第七轮）：上面这段"样本量不对称"的脆弱性**已修** —— 单 Region 基线
+# 改为与其它档同迭代数（5000）+ 同预热（100），见 `coord/tests/perf_bench.rs` 的注释。
+# 修前本地 4 核（taskset 0-3）复跑**复现了 CI 失败形态**：bench_all 实例 ratio 0.667
+# （1-Region 基线 222 ops/s / 0.9s 窗口），而同一次跑的 standalone 实例 1-Region 只有
+# 128 ops/s ⇒ 不稳定的是**分母**（短窗口测到未进稳态的乐观基线）。
+# 修后同一环境：**9 passed / 0 failed**（bench_all min ratio 0.940；standalone
+# min ratio 1.025，四档 209/215/223/215 ops/s）。
+# **阈值仍是 0.80 —— 只改测量方法，不改判据。**
 # ⚠️ 2026-09-24（第七轮 W2）：管道必须在 `set +e` 下运行。本轮实测：
 # `set -euo pipefail` 下 `false | tee x` 会**立刻终止脚本**（退出码取 pipefail
 # 的非零值）⇒ 紧随其后的 `PERF_STATUS=${PIPESTATUS[0]}` 与失败分支（注解调用）
