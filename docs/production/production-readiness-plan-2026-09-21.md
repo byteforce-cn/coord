@@ -178,7 +178,7 @@
 | **D-16** | 未决项未裁定：U1 / U3 / U4 / U5 / U6 / U8 / U9 | 计划 §8「未决项」表 | 9 | W0-6 |
 | **D-17** | enum 演进无机械保护（`buf.yaml` 豁免 `ENUM_VALUE_PREFIX`/`ENUM_ZERO_VALUE_SUFFIX`；改名对 grpc-java 是**静默破坏**） | `remaining-known-gaps.md:154-165`（C22）、`coord-proto/buf.yaml` | 2 | W1-7 |
 | **D-18** | 免责声明与任何生产承诺互斥（`README.md:17`） | 同 D-05 | 9 | W0-3 |
-| **D-19** | **「默认开关」两条路径并未拉平**（U-03 的原话过度声称）：`registry` / `config_center` / `lock` / `idgen` / `policy` / `pki` 六项**代码默认 `true`**，但字段是普通 `#[serde(default)]` ⇒ **配置文件路径**下缺省 `false`。⇒ 同一个 agent「走不走 `--agent-config`」得到**不同的服务集合**（前者传个没写 `[services]` 的 TOML 就会把这些服务**全部关掉**） | `coord-agent/src/service.rs`（六处 `#[serde(default)]` vs `impl Default`）；判据：`test_known_divergence_code_default_vs_toml_is_pinned`（**故意钉住不一致**，改任一侧即红）；**发现于 2026-09-22**（因为把 `pki` 加进 `test_service_config_toml_missing_fields_match_code_defaults` 的比对而暴露） | 9 | **✅ 2026-09-24 裁定（U-12，见 §8.6）取②：六项代码默认改 `false`**（严守 G9「默认关」）并已落地；判据改为 `test_service_config_toml_missing_fields_match_code_defaults` 的**全字段逐字段等价**——旧的 `test_known_divergence_code_default_vs_toml_is_pinned` 已删（不一致已消） |
+| **D-19** | **「默认开关」两条路径并未拉平**（U-03 的原话过度声称）：`registry` / `config_center` / `lock` / `idgen` / `policy` / `pki` 六项**代码默认 `true`**，但字段是普通 `#[serde(default)]` ⇒ **配置文件路径**下缺省 `false`。⇒ 同一个 agent「走不走 `--agent-config`」得到**不同的服务集合**（**表在但键缺**时全关；**整张表缺失**时（字段级 `#[serde(default)]` 回落到 `ServiceConfig::default()`）走的是**代码默认**——两层语义不同，更正见 §11 第七轮） | `coord-agent/src/service.rs`（六处 `#[serde(default)]` vs `impl Default`）；判据：`test_known_divergence_code_default_vs_toml_is_pinned`（**故意钉住不一致**，改任一侧即红）；**发现于 2026-09-22**（因为把 `pki` 加进 `test_service_config_toml_missing_fields_match_code_defaults` 的比对而暴露） | 9 | **✅ 2026-09-24 裁定（U-12，见 §8.6）取②：六项代码默认改 `false`**（严守 G9「默认关」）并已落地；判据改为 `test_service_config_toml_missing_fields_match_code_defaults` 的**全字段逐字段等价**——旧的 `test_known_divergence_code_default_vs_toml_is_pinned` 已删（不一致已消） |
 
 ---
 
@@ -689,6 +689,16 @@ W3 全部（要长跑）、W4-1/W4-2a/W4-3/W4-5、W5-5、W6-2 实机演练、W7�
 | **U-12（D-19 收口）** | 六服务默认开关取②（代码默认改 `false`） | ✅ 裁定 + 落地 | `cargo test -p coord-agent --lib` ⇒ **487 ✓**；`cargo test -p coord-agent --tests` ⇒ 全 ok；`cargo test -p coord --test dev_mode_test` ⇒ **7 ✓** | 见 §8.6；六项 `true→false`；判据改为**全字段逐字段等价**；`dev_mode_test.rs` 4 条旧默认用例改为显式启用 |
 | **CI 实证（`f01635a`）** | 第七轮脚本改动的首次 CI 验证 | ✅ **全绿** | run **`36000602894`** 逐 job（`/actions/runs/{id}/jobs`） | 全部 success：`fmt+clippy` / `workspace tests` / **`gate self-check`（含新诊断的 6 步）** / `cargo audit + deny` / `Security audit` / `proto contract` / `java sdk` / `java example integration` / `plugin matrix` / `frontend lint` / `real-process chaos`；`weekly perf baseline` skipped（push 不跑）⇒ **perf 的 CI 实证要等 09-25 02:17 schedule（注解通道已修好，数字会直接带出）**。⚠️ 不宣布 chaos 已稳定：最近 5 次 绿/绿/红/绿/绿 |
 | **P1 卡口复核（七轮）** | fmt / clippy / 六道脚本 | ✅ 完成 | `cargo fmt --all -- --check`；`cargo clippy --workspace -- -D warnings`；六道脚本 | fmt ✓；clippy ✓（非测试目标）；**六道全 `exit 0`**（含改写后的 `check-panics.sh` 其自身绿路径） |
+| **CI 实证（`cab765a`）** | U-12 + perf 采样的 CI 验证 | 🟡 `workspace tests` **success**（U-12 影响面在 CI 上过）；`chaos` 抓到一处 U-12 边界效应（已修，见下行） | run **`36007047810`** 逐 job | `workspace tests` / `gate self-check` / `fmt+clippy` / `cargo audit + deny` / `Security audit` / `proto contract` / `java sdk` / `java example integration` / `plugin matrix` / `frontend lint` 全 success；`real-process chaos` **failure** ⇒ **注解通道第一次真正把根因带出来**：`coord/tests/agent_auth_process_test.rs:516` 的 F-50 判据（`idgen nodeid registration … must land in /_idgen/nodes/`） |
+| **F-50 用例修复（U-12 边界）** | `agent_auth_process_test` 的 agent.toml 显式启用 idgen | ✅ 完成（本地复现→修复均实证） | `AGENT_AUTH_REAL=1 cargo test -p coord --test agent_auth_process_test -- --ignored --nocapture --test-threads=1` ⇒ 修前 **FAILED. 0 passed（63.63s，恰好是 60s 注册死线）**，修后 **1 ✓（3.09s）** | 根因：用例的 `agent.toml` **整张 `[services]` 表都没写**，而 `AgentConfig.services` 是**字段级** `#[serde(default)]` ⇒ 缺表时 serde 用的是 **`ServiceConfig::default()`（代码默认）**——U-12 之前 idgen 因此是开的。修法：显式 `[services] idgen = true`（"显式启用即可用"） |
+
+> **被 CI 抓到的 U-12 边界效应（同日修复）**：F-50 用例的 `agent.toml` **整张 `[services]`
+> 表都没写**，而 `AgentConfig.services` 是**字段级** `#[serde(default)]` ⇒ 缺表时 serde 用的是
+> **`ServiceConfig::default()`（代码默认）**，U-12 之前 idgen 因此是开的。**顺带更正 D-19 的
+> 一句话**：原文"传个没写 `[services]` 的 TOML 就会把这些服务全部关掉"**不准确** —— 真正
+> 缺省 `false` 的是「**表在但键缺**」；**整表缺失**走的是代码默认。两层语义本轮两处均已
+> 按实测修正（`service.rs` 注释 + §3 D-19 行）。**这也是注解通道的第一次真实收益**：红 job
+> 在无日志、无 `gh` 的环境下直接给出了文件名:行号与断言文本。
 
 证据归档（6 份；MANIFEST 工作树均 clean、commit `f01635a`、binary `764773c1`）：
 
