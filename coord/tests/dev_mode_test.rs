@@ -202,6 +202,13 @@ mod tests {
             http_addr: format!("127.0.0.1:{}", http_port),
             data_dir: "/tmp/coord-dev-agent-test".into(),
             static_peers: vec![server_addr.to_string()],
+            // 2026-09-24（U-12）：agent 本地面服务不再默认开启（G9「不得默认开启
+            // 未整改面」）—— 本文件的 agent 用例需要 idgen 时须**显式启用**
+            // （这正是「显式启用即可用」的验收面）。
+            services: coord_agent::ServiceConfig {
+                idgen: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -468,6 +475,12 @@ mod tests {
             http_addr: format!("127.0.0.1:{}", http_port),
             data_dir: "/tmp/coord-dev-agent-test".into(),
             static_peers: vec![],
+            // 2026-09-24（U-12）：idgen 不再默认开启；本用例的前提是“显式启用后
+            // 无 Server 也能工作”（雪花降级），故显式启用。
+            services: coord_agent::ServiceConfig {
+                idgen: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -681,6 +694,8 @@ mod tests {
                 .to_string(),
             static_peers: vec![server_addr.clone()],
             services: coord_agent::ServiceConfig {
+                // 2026-09-24（U-12）：idgen 不再默认开启 ⇒ 号段模式用例显式启用。
+                idgen: true,
                 idgen_mode: "segment".into(),
                 ..Default::default()
             },
