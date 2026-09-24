@@ -16,11 +16,26 @@ echo "::group::clippy panic-path scan"
 # 输出到临时文件（JSON），避免与进度输出混流
 # E5：去掉 `|| true` —— clippy 编译失败/未产出结果必须让卡口变红，而不是静默放过。
 rm -f /tmp/coord-clippy.json
+# ⚠️ 2026-09-24（第七轮 W2）：clippy 的**失败路径必须自描述**。
+# 2026-09-23 push run 35881648825 的本步骤：18 秒、exit 101、**零注解**——
+# stderr 被重定向进 /tmp 文件、日志端点又 403 ⇒ 只留下"红过"，不知道红在哪。
+set +e
 CARGO_TERM_COLOR=never cargo clippy --workspace --all-targets --message-format json \
     -- -W clippy::unwrap_used -W clippy::expect_used -W clippy::panic \
        -W clippy::unimplemented -W clippy::todo -W clippy::unreachable \
     > /tmp/coord-clippy.json 2>/tmp/coord-clippy.err
+CLIPPY_STATUS=$?
+set -e
 echo "::endgroup::"
+if [ "$CLIPPY_STATUS" -ne 0 ]; then
+    # E5 的原意（clippy 失败必须让卡口变红）不变；新增的是"红得可解释"：
+    # stderr 尾部进 step 日志 + 转成 check-run 注解（匿名可取的唯一通道）。
+    echo "::error::panic-path gate 无法执行：clippy 退出码 ${CLIPPY_STATUS}（原因见随后输出/注解）"
+    tail -n 30 /tmp/coord-clippy.err || true
+    df -h / | tail -1 || true
+    bash scripts/ci-annotate-test-failures.sh /tmp/coord-clippy.err || true
+    exit 1
+fi
 
 python3 - /tmp/coord-clippy.json <<'PYEOF'
 import json

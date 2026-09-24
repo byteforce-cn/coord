@@ -57,5 +57,11 @@ docs/production/*
 # 运行期产物（jepsen lab 的 nohup 日志等）
 jepsen/lab/nohup.out
 
+# perf 门禁的输出目录（`scripts/bench-ci.sh` 的 report / 临时 baseline）。
+# CI 上它是临时目录；本地跑过之后会留下未跟踪文件。不写这一行的后果：
+# `git status` 出现 `?? benchmark-results/`，而"证据 run 必须在 clean tree 上跑"
+# 的判据恰恰看的就是这个字段 —— 一个可复现的假 DIRTY 来源。
+/benchmark-results/
+
 # CodeGraph 索引（本地工具产物，不入库）
 .codegraph/

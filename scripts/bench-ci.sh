@@ -44,8 +44,16 @@ echo "==> running perf_bench (release) ..."
 # （`iterations = num_regions * 200`），而 25 Region 那次有 5000 次 —— 两者样本量不对称。
 # 若要彻底消除，应让各 Region 数使用**相同迭代数**并加预热；本轮只做了噪声源消除，
 # **没有**放宽 0.80 阈值。
+# ⚠️ 2026-09-24（第七轮 W2）：管道必须在 `set +e` 下运行。本轮实测：
+# `set -euo pipefail` 下 `false | tee x` 会**立刻终止脚本**（退出码取 pipefail
+# 的非零值）⇒ 紧随其后的 `PERF_STATUS=${PIPESTATUS[0]}` 与失败分支（注解调用）
+# 是**不可达代码**。后果实测二次：run 35810892940 / 35947874357 的 perf 红均为
+# "exit 101 + 零注解"——注解器就位却永远不被调用（自述式 no-op 的第二形态：
+# **错误处理路径也要有执行记录**）。
+set +e
 PERF_GATE=1 cargo test --release -p coord --test perf_bench -- --ignored --nocapture --test-threads=1 2>&1 | tee "$REPORT"
 PERF_STATUS=${PIPESTATUS[0]}
+set -e
 if [ "$PERF_STATUS" -ne 0 ]; then
   # 2026-09-23：首次真跑（run 35810892940）红时报告被 `>"$REPORT"` 吞进文件、
   # step 日志几近为空、工件又因 skip 而不存在 ⇒ 一个数字都拿不到。现在：
@@ -56,6 +64,9 @@ if [ "$PERF_STATUS" -ne 0 ]; then
 fi
 echo "==> report written to $REPORT"
 
+# 同上的 set +e 理由：python 门禁失败（REGRESSION / FATAL）时，下面的注解分支
+# 必须可达，否则这条路径同样只剩"红过"而没有任何数字。
+set +e
 python3 - "$REPORT" "$OUT_DIR/baseline.json" "${UPDATE_BASELINE:-0}" <<'PY' 2>&1 | tee /tmp/perf-gate.log
 import json, re, sys
 
@@ -146,6 +157,7 @@ if missing:
 print("PERF GATE PASSED")
 PY
 GATE_STATUS=${PIPESTATUS[0]}
+set -e
 if [ "$GATE_STATUS" -ne 0 ]; then
   # 劣化/基线过期（或报告解析失败）也走注解通道：REGRESSION / FATAL 行会被带回。
   bash scripts/ci-annotate-test-failures.sh /tmp/perf-gate.log || true

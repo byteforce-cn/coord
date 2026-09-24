@@ -86,6 +86,13 @@ for ln in lines:
     if re.search(r"PERF GATE|REGRESSION |PERF GATE FAILED|assertion", ln):
         add(3, ln.strip())
 
+# 4b) perf 报告的关键数字：Region 比值表行（`| 25 | 118 | 0.541 |`）。
+#     2026-09-23/24 两次 perf 红都"只知道红了、不知道数字"；通道修好后，
+#     失败时最需要的就是这一行里的三个数字（Region 数 / ops/s / ratio）。
+for ln in lines:
+    if re.match(r"^\|\s*\d+\s*\|\s*\d+(?:\.\d+)?\s*\|\s*\d+\.\d+\s*\|\s*$", ln):
+        add(3, f"Region 比值: {ln.strip()}")
+
 # 5) 兜底：什么都没抽到 ⇒ 发最后 5 行非空输出（避免"注解为空"）
 if not items:
     tail = [ln.strip() for ln in lines if ln.strip()][-5:]
