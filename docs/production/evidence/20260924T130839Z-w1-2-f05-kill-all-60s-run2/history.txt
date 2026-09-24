@@ -1,0 +1,352 @@
+1	:invoke	:write	804029
+1	:ok	:write	804029
+2	:invoke	:write	613893
+3	:invoke	:write	971601
+2	:ok	:write	613893
+3	:ok	:write	971601
+4	:invoke	:write	654009
+0	:invoke	:write	354248
+1	:invoke	:write	939968
+2	:invoke	:read	nil
+3	:invoke	:read	nil
+1	:ok	:write	939968
+2	:ok	:read	939968
+3	:ok	:read	939968
+4	:ok	:write	654009
+0	:ok	:write	354248
+3	:invoke	:write	309134
+3	:ok	:write	309134
+4	:invoke	:read	nil
+4	:ok	:read	309134
+0	:invoke	:write	728344
+0	:ok	:write	728344
+0	:invoke	:write	161835
+0	:ok	:write	161835
+1	:invoke	:read	nil
+1	:ok	:read	161835
+2	:invoke	:read	nil
+3	:invoke	:write	378028
+2	:ok	:read	161835
+3	:ok	:write	378028
+4	:invoke	:write	675294
+4	:ok	:write	675294
+0	:invoke	:write	510466
+0	:ok	:write	510466
+0	:invoke	:write	222356
+0	:ok	:write	222356
+1	:invoke	:read	nil
+1	:ok	:read	222356
+2	:invoke	:read	nil
+2	:ok	:read	222356
+3	:invoke	:write	795903
+3	:ok	:write	795903
+4	:invoke	:read	nil
+4	:ok	:read	795903
+0	:invoke	:read	nil
+0	:ok	:read	795903
+0	:invoke	:write	725292
+1	:invoke	:read	nil
+0	:ok	:write	725292
+1	:ok	:read	725292
+2	:invoke	:write	692641
+2	:ok	:write	692641
+3	:invoke	:read	nil
+3	:ok	:read	692641
+4	:invoke	:write	356545
+4	:ok	:write	356545
+0	:invoke	:write	181663
+0	:ok	:write	181663
+0	:invoke	:read	nil
+0	:ok	:read	181663
+1	:invoke	:write	905561
+2	:invoke	:read	nil
+2	:ok	:read	181663
+1	:ok	:write	905561
+3	:invoke	:write	93801
+3	:ok	:write	93801
+4	:invoke	:read	nil
+4	:ok	:read	93801
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n1" [:killed "n1"], "n2" [:killed "n2"], "n3" [:killed "n3"]}
+1	:invoke	:write	992107
+1	:info	:write	992107	:unavailable-maybe-applied
+2	:invoke	:read	nil
+2	:info	:read	nil	:unavailable-maybe-applied
+3	:invoke	:write	493131
+3	:info	:write	493131	:unavailable-maybe-applied
+4	:invoke	:write	429436
+4	:info	:write	429436	:unavailable-maybe-applied
+0	:invoke	:read	nil
+0	:info	:read	nil	:unavailable-maybe-applied
+5	:invoke	:read	nil
+6	:invoke	:read	nil
+7	:invoke	:read	nil
+8	:invoke	:write	548827
+9	:invoke	:write	866385
+:nemesis	:info	:stop	nil
+7	:ok	:read	93801
+7	:invoke	:read	nil
+7	:ok	:read	93801
+8	:ok	:write	548827
+7	:invoke	:write	129841
+7	:ok	:write	129841
+5	:ok	:read	129841
+9	:ok	:write	866385
+:nemesis	:info	:stop	{"n1" [:restarted "n1"], "n2" [:restarted "n2"], "n3" [:restarted "n3"]}
+6	:ok	:read	866385
+8	:invoke	:write	33111
+8	:ok	:write	33111
+9	:invoke	:write	202062
+9	:ok	:write	202062
+5	:invoke	:write	308260
+5	:ok	:write	308260
+5	:invoke	:write	624003
+5	:ok	:write	624003
+6	:invoke	:read	nil
+6	:ok	:read	624003
+7	:invoke	:write	560322
+7	:ok	:write	560322
+8	:invoke	:write	157081
+8	:ok	:write	157081
+9	:invoke	:read	nil
+9	:ok	:read	157081
+5	:invoke	:read	nil
+5	:ok	:read	157081
+5	:invoke	:write	77648
+5	:ok	:write	77648
+6	:invoke	:write	501691
+6	:ok	:write	501691
+7	:invoke	:write	396625
+7	:ok	:write	396625
+8	:invoke	:write	266353
+8	:ok	:write	266353
+9	:invoke	:write	625400
+9	:ok	:write	625400
+5	:invoke	:read	nil
+5	:ok	:read	625400
+5	:invoke	:write	127159
+5	:ok	:write	127159
+6	:invoke	:write	486917
+6	:ok	:write	486917
+7	:invoke	:read	nil
+7	:ok	:read	486917
+8	:invoke	:write	83486
+8	:ok	:write	83486
+9	:invoke	:read	nil
+9	:ok	:read	83486
+5	:invoke	:read	nil
+5	:ok	:read	83486
+5	:invoke	:write	397651
+5	:ok	:write	397651
+6	:invoke	:read	nil
+6	:ok	:read	397651
+7	:invoke	:read	nil
+7	:ok	:read	397651
+8	:invoke	:write	251362
+9	:invoke	:read	nil
+9	:ok	:read	397651
+8	:ok	:write	251362
+5	:invoke	:write	446928
+5	:ok	:write	446928
+5	:invoke	:write	746808
+5	:ok	:write	746808
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n1" [:killed "n1"], "n2" [:killed "n2"], "n3" [:killed "n3"]}
+8	:invoke	:write	357348
+8	:info	:write	357348	:unavailable-maybe-applied
+9	:invoke	:write	650957
+9	:info	:write	650957	:unavailable-maybe-applied
+5	:invoke	:read	nil
+5	:info	:read	nil	:unavailable-maybe-applied
+10	:invoke	:write	83798
+6	:invoke	:read	nil
+6	:info	:read	nil	:unavailable-maybe-applied
+7	:invoke	:read	nil
+7	:info	:read	nil	:unavailable-maybe-applied
+13	:invoke	:read	nil
+14	:invoke	:read	nil
+11	:invoke	:write	652016
+12	:invoke	:read	nil
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	{"n1" [:restarted "n1"], "n2" [:restarted "n2"], "n3" [:restarted "n3"]}
+10	:ok	:write	83798
+10	:invoke	:write	763071
+10	:ok	:write	763071
+10	:invoke	:write	864260
+10	:ok	:write	864260
+13	:ok	:read	864260
+14	:ok	:read	864260
+10	:invoke	:read	nil
+10	:ok	:read	864260
+10	:invoke	:write	353472
+10	:ok	:write	353472
+13	:invoke	:write	233162
+13	:ok	:write	233162
+13	:invoke	:read	nil
+13	:ok	:read	233162
+13	:invoke	:read	nil
+13	:ok	:read	233162
+14	:invoke	:write	991551
+14	:ok	:write	991551
+11	:ok	:write	652016
+12	:ok	:read	652016
+10	:invoke	:write	566971
+10	:ok	:write	566971
+10	:invoke	:read	nil
+10	:ok	:read	566971
+11	:invoke	:write	847430
+11	:ok	:write	847430
+12	:invoke	:read	nil
+12	:ok	:read	847430
+13	:invoke	:write	127690
+13	:ok	:write	127690
+14	:invoke	:write	583597
+14	:ok	:write	583597
+10	:invoke	:write	252666
+10	:ok	:write	252666
+10	:invoke	:write	956732
+10	:ok	:write	956732
+11	:invoke	:write	769042
+11	:ok	:write	769042
+12	:invoke	:read	nil
+12	:ok	:read	769042
+13	:invoke	:write	234806
+13	:ok	:write	234806
+14	:invoke	:read	nil
+14	:ok	:read	234806
+10	:invoke	:read	nil
+10	:ok	:read	234806
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n1" [:killed "n1"], "n2" [:killed "n2"], "n3" [:killed "n3"]}
+12	:invoke	:write	344181
+12	:info	:write	344181	:unavailable-maybe-applied
+13	:invoke	:write	29585
+13	:info	:write	29585	:unavailable-maybe-applied
+14	:invoke	:write	56489
+14	:info	:write	56489	:unavailable-maybe-applied
+10	:invoke	:write	528859
+10	:info	:write	528859	:unavailable-maybe-applied
+15	:invoke	:read	nil
+11	:invoke	:write	521515
+11	:info	:write	521515	:unavailable-maybe-applied
+17	:invoke	:write	244566
+18	:invoke	:write	992837
+19	:invoke	:read	nil
+16	:invoke	:read	nil
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	{"n1" [:restarted "n1"], "n2" [:restarted "n2"], "n3" [:restarted "n3"]}
+17	:ok	:write	244566
+17	:invoke	:read	nil
+17	:ok	:read	244566
+17	:invoke	:read	nil
+17	:ok	:read	992837
+18	:ok	:write	992837
+16	:ok	:read	992837
+16	:invoke	:read	nil
+16	:ok	:read	992837
+16	:invoke	:read	nil
+16	:ok	:read	992837
+19	:ok	:read	992837
+16	:invoke	:write	372626
+16	:ok	:write	372626
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n1" [:killed "n1"], "n2" [:killed "n2"], "n3" [:killed "n3"]}
+18	:invoke	:write	84089
+18	:info	:write	84089	:unavailable-maybe-applied
+19	:invoke	:read	nil
+19	:info	:read	nil	:unavailable-maybe-applied
+16	:invoke	:write	137332
+16	:info	:write	137332	:unavailable-maybe-applied
+21	:invoke	:read	nil
+17	:invoke	:read	nil
+17	:info	:read	nil	:unavailable-maybe-applied
+22	:invoke	:write	573805
+23	:invoke	:write	376137
+24	:invoke	:read	nil
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	{"n1" [:restarted "n1"], "n2" [:restarted "n2"], "n3" [:restarted "n3"]}
+24	:ok	:read	372626
+24	:invoke	:read	nil
+24	:ok	:read	372626
+23	:ok	:write	376137
+22	:ok	:write	573805
+22	:invoke	:write	557970
+22	:ok	:write	557970
+23	:invoke	:read	nil
+23	:ok	:read	557970
+24	:invoke	:write	302592
+24	:ok	:write	302592
+22	:invoke	:read	nil
+22	:ok	:read	302592
+21	:ok	:read	302592
+21	:invoke	:write	65645
+21	:ok	:write	65645
+21	:invoke	:write	462843
+22	:invoke	:read	nil
+22	:ok	:read	65645
+21	:ok	:write	462843
+23	:invoke	:write	245166
+23	:ok	:write	245166
+24	:invoke	:write	452180
+24	:ok	:write	452180
+21	:invoke	:write	340470
+21	:ok	:write	340470
+21	:invoke	:read	nil
+21	:ok	:read	340470
+21	:invoke	:write	512780
+21	:ok	:write	512780
+22	:invoke	:write	981252
+22	:ok	:write	981252
+23	:invoke	:write	949564
+23	:ok	:write	949564
+24	:invoke	:write	808132
+24	:ok	:write	808132
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n1" [:killed "n1"], "n2" [:killed "n2"], "n3" [:killed "n3"]}
+21	:invoke	:read	nil
+21	:info	:read	nil	:unavailable-maybe-applied
+22	:invoke	:read	nil
+22	:info	:read	nil	:unavailable-maybe-applied
+23	:invoke	:read	nil
+23	:info	:read	nil	:unavailable-maybe-applied
+24	:invoke	:read	nil
+24	:info	:read	nil	:unavailable-maybe-applied
+26	:invoke	:read	nil
+27	:invoke	:write	618306
+28	:invoke	:write	827364
+29	:invoke	:write	996161
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	{"n1" [:restarted "n1"], "n2" [:restarted "n2"], "n3" [:restarted "n3"]}
+29	:ok	:write	996161
+29	:invoke	:write	872235
+29	:ok	:write	872235
+26	:ok	:read	996161
+26	:invoke	:read	nil
+26	:ok	:read	872235
+27	:ok	:write	618306
+28	:ok	:write	827364
+26	:invoke	:read	nil
+26	:ok	:read	827364
+27	:invoke	:write	975694
+27	:ok	:write	975694
+15	:ok	:read	975694
+28	:invoke	:write	639520
+28	:ok	:write	639520
+29	:invoke	:write	612783
+29	:ok	:write	612783
+15	:invoke	:read	nil
+15	:ok	:read	612783
+15	:invoke	:read	nil
+15	:ok	:read	612783
+26	:invoke	:write	839474
+26	:ok	:write	839474
+27	:invoke	:read	nil
+27	:ok	:read	839474
+:nemesis	:info	:start	nil
+:nemesis	:info	:start	{"n1" [:killed "n1"], "n2" [:killed "n2"], "n3" [:killed "n3"]}
+15	:invoke	:read	nil
+15	:info	:read	nil	:unavailable-maybe-applied
+20	:invoke	:write	139417
+20	:fail	:write	139417	[:no-client Failed to authenticate to coord]
+:nemesis	:info	:stop	nil
+:nemesis	:info	:stop	{"n1" [:restarted "n1"], "n2" [:restarted "n2"], "n3" [:restarted "n3"]}

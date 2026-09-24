@@ -1,0 +1,320 @@
+0	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-1", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+1	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-3", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2	:invoke	:registry-discover	{:name "svc-b"}
+2	:ok	:registry-discover	{:name "svc-b"}
+3	:invoke	:registry-discover	{:name "svc-a"}
+3	:ok	:registry-discover	{:name "svc-a"}
+4	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-6", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+5	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-8", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+6	:invoke	:registry-discover	{:name "svc-b"}
+6	:ok	:registry-discover	{:name "svc-b"}
+7	:invoke	:registry-discover	{:name "svc-b"}
+7	:ok	:registry-discover	{:name "svc-b"}
+8	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-11", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+9	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-13", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2	:invoke	:registry-discover	{:name "svc-b"}
+2	:ok	:registry-discover	{:name "svc-b"}
+2	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-16", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+3	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-18", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+6	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-20", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+7	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-22", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-1", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+0	:invoke	:registry-discover	{:name "svc-a"}
+0	:ok	:registry-discover	{:name "svc-a"}
+1	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-3", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-23", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-24", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+4	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-6", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+4	:invoke	:registry-discover	{:name "svc-a"}
+4	:ok	:registry-discover	{:name "svc-a"}
+4	:invoke	:registry-discover	{:name "svc-a"}
+4	:ok	:registry-discover	{:name "svc-a"}
+4	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-26", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+5	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-8", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+5	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-27", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+3	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-18", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+3	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-28", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+9	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-13", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-16", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+8	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-11", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+6	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-20", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+7	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-22", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2	:invoke	:registry-discover	{:name "svc-a"}
+2	:ok	:registry-discover	{:name "svc-a"}
+2	:invoke	:registry-discover	{:name "svc-a"}
+2	:ok	:registry-discover	{:name "svc-a"}
+6	:invoke	:registry-discover	{:name "svc-a"}
+6	:ok	:registry-discover	{:name "svc-a"}
+6	:invoke	:registry-discover	{:name "svc-a"}
+6	:ok	:registry-discover	{:name "svc-a"}
+6	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-25", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+7	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-29", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+8	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-31", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+0	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-23", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+9	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-33", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+3	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-28", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+1	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-24", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+6	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-25", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+5	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-27", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+4	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-26", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+0	:invoke	:registry-discover	{:name "svc-b"}
+0	:ok	:registry-discover	{:name "svc-b"}
+0	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-36", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-38", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2	:invoke	:registry-discover	{:name "svc-b"}
+2	:ok	:registry-discover	{:name "svc-b"}
+2	:invoke	:registry-discover	{:name "svc-b"}
+2	:ok	:registry-discover	{:name "svc-b"}
+3	:invoke	:registry-discover	{:name "svc-b"}
+3	:ok	:registry-discover	{:name "svc-b"}
+4	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-41", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+5	:invoke	:registry-discover	{:name "svc-b"}
+5	:ok	:registry-discover	{:name "svc-b"}
+6	:invoke	:registry-discover	{:name "svc-b"}
+6	:ok	:registry-discover	{:name "svc-b"}
+2	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-44", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+3	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-46", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+5	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-48", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+6	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-50", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+7	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-29", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+7	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-52", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+9	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-33", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+9	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-53", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+8	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-31", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+8	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-51", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-36", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-38", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-54", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:invoke	:registry-discover	{:name "svc-a"}
+1	:ok	:registry-discover	{:name "svc-a"}
+1	:invoke	:registry-discover	{:name "svc-a"}
+1	:ok	:registry-discover	{:name "svc-a"}
+4	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-41", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+1	:invoke	:registry-discover	{:name "svc-b"}
+1	:ok	:registry-discover	{:name "svc-b"}
+1	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-55", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-44", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+3	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-46", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+5	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-48", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-56", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+6	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-50", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+3	:invoke	:registry-discover	{:name "svc-b"}
+3	:ok	:registry-discover	{:name "svc-b"}
+3	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-59", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+4	:invoke	:registry-discover	{:name "svc-a"}
+4	:ok	:registry-discover	{:name "svc-a"}
+4	:invoke	:registry-discover	{:name "svc-a"}
+4	:ok	:registry-discover	{:name "svc-a"}
+7	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-52", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+9	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-53", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+4	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-64", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+5	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-66", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+8	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-51", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+6	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-69", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+7	:invoke	:registry-discover	{:name "svc-b"}
+7	:ok	:registry-discover	{:name "svc-b"}
+7	:invoke	:registry-discover	{:name "svc-a"}
+7	:ok	:registry-discover	{:name "svc-a"}
+7	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-72", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+8	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-74", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-54", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+9	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-77", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-79", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-55", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-80", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-56", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2	:invoke	:registry-discover	{:name "svc-a"}
+2	:ok	:registry-discover	{:name "svc-a"}
+2	:invoke	:registry-discover	{:name "svc-b"}
+2	:ok	:registry-discover	{:name "svc-b"}
+2	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-82", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+5	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-66", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+7	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-72", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+4	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-64", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+6	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-69", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+1	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-80", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+8	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-74", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+9	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-77", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+3	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-59", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-82", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+0	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-79", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+4	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-81", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+5	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-85", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+6	:invoke	:registry-discover	{:name "svc-a"}
+6	:ok	:registry-discover	{:name "svc-a"}
+7	:invoke	:registry-discover	{:name "svc-a"}
+7	:ok	:registry-discover	{:name "svc-a"}
+8	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-83", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+9	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-87", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-89", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-91", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2	:invoke	:registry-discover	{:name "svc-b"}
+2	:ok	:registry-discover	{:name "svc-b"}
+2	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-94", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+3	:invoke	:registry-discover	{:name "svc-a"}
+3	:ok	:registry-discover	{:name "svc-a"}
+6	:invoke	:registry-discover	{:name "svc-a"}
+6	:ok	:registry-discover	{:name "svc-a"}
+6	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-97", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+7	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-99", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+3	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-101", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+4	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-81", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+4	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-102", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+5	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-85", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+5	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-103", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+8	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-83", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+8	:invoke	:registry-discover	{:name "svc-a"}
+8	:ok	:registry-discover	{:name "svc-a"}
+9	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-87", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-89", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-91", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:invoke	:registry-discover	{:name "svc-a"}
+0	:ok	:registry-discover	{:name "svc-a"}
+2	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-94", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+1	:invoke	:registry-discover	{:name "svc-a"}
+1	:ok	:registry-discover	{:name "svc-a"}
+2	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-104", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+8	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-105", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+7	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-99", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+3	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-101", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+6	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-97", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+6	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-110", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+7	:invoke	:registry-discover	{:name "svc-a"}
+7	:ok	:registry-discover	{:name "svc-a"}
+7	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-113", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+4	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-102", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+5	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-103", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+9	:invoke	:registry-discover	{:name "svc-a"}
+9	:ok	:registry-discover	{:name "svc-a"}
+9	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-116", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-118", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:invoke	:registry-discover	{:name "svc-b"}
+1	:ok	:registry-discover	{:name "svc-b"}
+1	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-121", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+3	:invoke	:registry-discover	{:name "svc-b"}
+3	:ok	:registry-discover	{:name "svc-b"}
+3	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-124", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+4	:invoke	:registry-discover	{:name "svc-a"}
+4	:ok	:registry-discover	{:name "svc-a"}
+4	:invoke	:registry-discover	{:name "svc-a"}
+4	:ok	:registry-discover	{:name "svc-a"}
+5	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-127", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+4	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-129", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+8	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-105", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+8	:invoke	:registry-discover	{:name "svc-b"}
+8	:ok	:registry-discover	{:name "svc-b"}
+2	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-104", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+0	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-118", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+3	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-124", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+6	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-110", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+9	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-116", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-121", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+7	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-113", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+5	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-127", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+4	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-129", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+8	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-131", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+9	:invoke	:registry-discover	{:name "svc-b"}
+9	:ok	:registry-discover	{:name "svc-b"}
+0	:invoke	:registry-discover	{:name "svc-a"}
+0	:ok	:registry-discover	{:name "svc-a"}
+0	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-130", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-133", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-135", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+3	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-137", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+4	:invoke	:registry-discover	{:name "svc-a"}
+4	:ok	:registry-discover	{:name "svc-a"}
+5	:invoke	:registry-discover	{:name "svc-b"}
+5	:ok	:registry-discover	{:name "svc-b"}
+6	:invoke	:registry-discover	{:name "svc-b"}
+6	:ok	:registry-discover	{:name "svc-b"}
+7	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-140", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+9	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-142", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+4	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-144", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+5	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-146", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+6	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-148", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+8	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-131", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+8	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-149", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-130", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:invoke	:registry-discover	{:name "svc-a"}
+0	:ok	:registry-discover	{:name "svc-a"}
+1	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-133", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-135", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+0	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-150", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+3	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-137", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-151", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2	:invoke	:registry-discover	{:name "svc-b"}
+2	:ok	:registry-discover	{:name "svc-b"}
+2	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-154", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+7	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-140", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+9	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-142", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+4	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-144", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+5	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-146", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+7	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-160", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+9	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-162", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+3	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-164", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+6	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-148", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+4	:invoke	:registry-discover	{:name "svc-b"}
+4	:ok	:registry-discover	{:name "svc-b"}
+4	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-167", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+5	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-169", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+6	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-171", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+8	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-149", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+8	:invoke	:registry-discover	{:name "svc-b"}
+8	:ok	:registry-discover	{:name "svc-b"}
+8	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-173", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-150", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:invoke	:registry-discover	{:name "svc-a"}
+0	:ok	:registry-discover	{:name "svc-a"}
+0	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-174", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-151", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+1	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-172", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-154", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-176", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+7	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-160", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+7	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-175", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+9	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-162", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+9	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-178", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+3	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-164", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+8	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-173", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+5	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-169", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-176", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+9	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-178", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-174", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+6	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-171", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-172", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+4	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-167", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+7	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-175", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+0	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-179", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:invoke	:registry-discover	{:name "svc-a"}
+1	:ok	:registry-discover	{:name "svc-a"}
+2	:invoke	:registry-discover	{:name "svc-a"}
+2	:ok	:registry-discover	{:name "svc-a"}
+3	:invoke	:registry-discover	{:name "svc-a"}
+3	:ok	:registry-discover	{:name "svc-a"}
+4	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-177", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+5	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-181", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+6	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-183", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+7	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-185", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+8	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-187", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+9	:invoke	:registry-discover	{:name "svc-a"}
+9	:ok	:registry-discover	{:name "svc-a"}
+1	:invoke	:registry-discover	{:name "svc-b"}
+1	:ok	:registry-discover	{:name "svc-b"}
+1	:invoke	:registry-discover	{:name "svc-b"}
+1	:ok	:registry-discover	{:name "svc-b"}
+1	:invoke	:registry-discover	{:name "svc-a"}
+1	:ok	:registry-discover	{:name "svc-a"}
+2	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s99403590-190", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+3	:invoke	:registry-discover	{:name "svc-b"}
+3	:ok	:registry-discover	{:name "svc-b"}
+9	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s99403590-193", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+1	:invoke	:registry-discover	{:name "svc-b"}
+1	:ok	:registry-discover	{:name "svc-b"}
+0	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-179", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+4	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-177", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+6	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-183", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+5	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-181", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+8	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-187", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+7	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-185", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2	:ok	:registry-cycle	{:name "svc-a", :instance-id "s99403590-190", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+9	:ok	:registry-cycle	{:name "svc-b", :instance-id "s99403590-193", :ttl-seconds 5, :grace-ms 4000, :dup? false}

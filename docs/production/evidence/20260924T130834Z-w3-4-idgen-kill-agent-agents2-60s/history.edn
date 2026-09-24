@@ -1,0 +1,426 @@
+{:index 0, :time 18418432632, :type :invoke, :process 1, :f :idgen, :value {:name "events", :batch? false, :count 12}}
+{:index 1, :name "events", :value {:name "events", :batch? false, :count 12}, :time 18507177402, :process 1, :batch? false, :ids ["378554171588419584"], :type :ok, :f :idgen}
+{:index 2, :time 19240308200, :type :invoke, :process 2, :f :idgen, :value {:name "events", :batch? false, :count 16}}
+{:index 3, :name "events", :value {:name "events", :batch? false, :count 16}, :time 19330014189, :process 2, :batch? false, :ids ["378554175052914688"], :type :ok, :f :idgen}
+{:index 4, :time 19947125480, :type :invoke, :process 3, :f :idgen, :value {:name "orders", :batch? false, :count 16}}
+{:index 5, :name "orders", :value {:name "orders", :batch? false, :count 16}, :time 20043466962, :process 3, :batch? false, :ids ["378554178043453440"], :type :ok, :f :idgen}
+{:index 6, :time 20995978952, :type :invoke, :process 4, :f :idgen, :value {:name "events", :batch? true, :count 11}}
+{:index 7, :time 21077051294, :type :invoke, :process 5, :f :idgen, :value {:name "orders", :batch? false, :count 5}}
+{:index 8, :name "events", :n 11, :value {:name "events", :batch? true, :count 11}, :time 21089696178, :process 4, :batch? true, :ids ["378554182434889728" "378554182434889729" "378554182434889730" "378554182434889731" "378554182434889732" "378554182434889733" "378554182434889734" "378554182434889735" "378554182434889736" "378554182434889737" "378554182434889738"], :type :ok, :requested-count 11, :f :idgen}
+{:index 9, :time 21103663474, :type :invoke, :process 6, :f :idgen, :value {:name "events", :batch? true, :count 15}}
+{:index 10, :name "orders", :value {:name "orders", :batch? false, :count 5}, :time 21214205831, :process 5, :batch? false, :ids ["378554182954983424"], :type :ok, :f :idgen}
+{:index 11, :name "events", :n 15, :value {:name "events", :batch? true, :count 15}, :time 21223171720, :process 6, :batch? true, :ids ["378554182996926464" "378554182996926465" "378554182996926466" "378554182996926467" "378554182996926468" "378554182996926469" "378554182996926470" "378554182996926471" "378554182996926472" "378554182996926473" "378554182996926474" "378554182996926475" "378554182996926476" "378554182996926477" "378554182996926478"], :type :ok, :requested-count 15, :f :idgen}
+{:index 12, :time 21349943812, :type :invoke, :process 7, :f :idgen, :value {:name "orders", :batch? false, :count 1}}
+{:index 13, :time 21439581763, :type :invoke, :process 8, :f :idgen, :value {:name "orders", :batch? true, :count 8}}
+{:index 14, :name "orders", :value {:name "orders", :batch? false, :count 1}, :time 21450308490, :process 7, :batch? false, :ids ["378554183944839168"], :type :ok, :f :idgen}
+{:index 15, :time 21502650165, :type :invoke, :process 9, :f :idgen, :value {:name "events", :batch? true, :count 6}}
+{:index 16, :time 21522689660, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? false, :count 2}}
+{:index 17, :name "orders", :n 8, :value {:name "orders", :batch? true, :count 8}, :time 21532555408, :process 8, :batch? true, :ids ["378554184292966400" "378554184292966401" "378554184292966402" "378554184292966403" "378554184292966404" "378554184292966405" "378554184292966406" "378554184292966407"], :type :ok, :requested-count 8, :f :idgen}
+{:index 18, :name "events", :n 6, :value {:name "events", :batch? true, :count 6}, :time 21622867785, :process 9, :batch? true, :ids ["378554184662065152" "378554184662065153" "378554184662065154" "378554184662065155" "378554184662065156" "378554184662065157"], :type :ok, :requested-count 6, :f :idgen}
+{:index 19, :name "orders", :value {:name "orders", :batch? false, :count 2}, :time 21686864329, :process 0, :batch? false, :ids ["378554184938889216"], :type :ok, :f :idgen}
+{:index 20, :time 22068280634, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? false, :count 12}}
+{:index 21, :name "orders", :value {:name "orders", :batch? false, :count 12}, :time 22075371430, :process 0, :batch? false, :ids ["378554186570473472"], :type :ok, :f :idgen}
+{:index 22, :time 22410091705, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 23, :time 22534103421, :type :info, :process :nemesis, :f :start, :value [:killed-agent "n5"]}
+{:index 24, :time 23254333747, :type :invoke, :process 3, :f :idgen, :value {:name "events", :batch? false, :count 2}}
+{:index 25, :name "events", :value {:name "events", :batch? false, :count 2}, :time 23261166707, :process 3, :batch? false, :ids ["378554191540723712"], :type :ok, :f :idgen}
+{:index 26, :time 24315116439, :type :invoke, :process 4, :f :idgen, :value {:name "events", :batch? true, :count 14}}
+{:index 27, :name "events", :n 14, :value {:name "events", :batch? true, :count 14}, :time 24320772559, :process 4, :batch? true, :ids ["378554195986685952" "378554195986685953" "378554195986685954" "378554195986685955" "378554195986685956" "378554195986685957" "378554195986685958" "378554195986685959" "378554195986685960" "378554195986685961" "378554195986685962" "378554195986685963" "378554195986685964" "378554195986685965"], :type :ok, :requested-count 14, :f :idgen}
+{:index 28, :time 24500240723, :type :invoke, :process 5, :f :idgen, :value {:name "orders", :batch? true, :count 16}}
+{:index 29, :name "orders", :n 16, :value {:name "orders", :batch? true, :count 16}, :time 24507458013, :process 5, :batch? true, :ids ["378554196766826496" "378554196766826497" "378554196766826498" "378554196766826499" "378554196766826500" "378554196766826501" "378554196766826502" "378554196766826503" "378554196766826504" "378554196766826505" "378554196766826506" "378554196766826507" "378554196766826508" "378554196766826509" "378554196766826510" "378554196766826511"], :type :ok, :requested-count 16, :f :idgen}
+{:index 30, :time 24644459870, :type :invoke, :process 6, :f :idgen, :value {:name "orders", :batch? true, :count 1}}
+{:index 31, :name "orders", :n 1, :value {:name "orders", :batch? true, :count 1}, :time 24649982469, :process 6, :batch? true, :ids ["378554197366611968"], :type :ok, :requested-count 1, :f :idgen}
+{:index 32, :time 25101451405, :type :invoke, :process 7, :f :idgen, :value {:name "events", :batch? false, :count 14}}
+{:index 33, :name "events", :value {:name "events", :batch? false, :count 14}, :time 25106845911, :process 7, :batch? false, :ids ["378554199283408896"], :type :ok, :f :idgen}
+{:index 34, :time 25108882189, :type :invoke, :process 8, :f :idgen, :value {:name "events", :batch? false, :count 12}}
+{:index 35, :name "events", :value {:name "events", :batch? false, :count 12}, :time 25114076409, :process 8, :batch? false, :ids ["378554199312769024"], :type :ok, :f :idgen}
+{:index 36, :time 25638109728, :type :invoke, :process 9, :f :idgen, :value {:name "events", :batch? true, :count 15}}
+{:index 37, :name "events", :n 15, :value {:name "events", :batch? true, :count 15}, :time 25643549133, :process 9, :batch? true, :ids ["378554201535750144" "378554201535750145" "378554201535750146" "378554201535750147" "378554201535750148" "378554201535750149" "378554201535750150" "378554201535750151" "378554201535750152" "378554201535750153" "378554201535750154" "378554201535750155" "378554201535750156" "378554201535750157" "378554201535750158"], :type :ok, :requested-count 15, :f :idgen}
+{:index 38, :time 25955225867, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? false, :count 14}}
+{:index 39, :name "orders", :value {:name "orders", :batch? false, :count 14}, :time 25960536496, :process 0, :batch? false, :ids ["378554202865344512"], :type :ok, :f :idgen}
+{:index 40, :time 26747529152, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? false, :count 2}}
+{:index 41, :name "events", :value {:name "events", :batch? false, :count 2}, :time 26752347426, :process 0, :batch? false, :ids ["378554206187233280"], :type :ok, :f :idgen}
+{:index 42, :time 27258935292, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 43, :time 27269855139, :type :invoke, :process 2, :f :idgen, :value {:name "orders", :batch? true, :count 10}}
+{:index 44, :name "orders", :n 10, :value {:name "orders", :batch? true, :count 10}, :time 27274825301, :process 2, :batch? true, :ids ["378554208376659968" "378554208376659969" "378554208376659970" "378554208376659971" "378554208376659972" "378554208376659973" "378554208376659974" "378554208376659975" "378554208376659976" "378554208376659977"], :type :ok, :requested-count 10, :f :idgen}
+{:index 45, :time 27550939921, :type :invoke, :process 3, :f :idgen, :value {:name "orders", :batch? true, :count 11}}
+{:index 46, :name "orders", :n 11, :value {:name "orders", :batch? true, :count 11}, :time 27553653300, :process 3, :batch? true, :ids ["378554209546870784" "378554209546870785" "378554209546870786" "378554209546870787" "378554209546870788" "378554209546870789" "378554209546870790" "378554209546870791" "378554209546870792" "378554209546870793" "378554209546870794"], :type :ok, :requested-count 11, :f :idgen}
+{:index 47, :time 27653081558, :type :invoke, :process 4, :f :idgen, :value {:name "orders", :batch? true, :count 16}}
+{:index 48, :name "orders", :n 16, :value {:name "orders", :batch? true, :count 16}, :time 27655755675, :process 4, :batch? true, :ids ["378554209978884096" "378554209978884097" "378554209978884098" "378554209978884099" "378554209978884100" "378554209978884101" "378554209978884102" "378554209978884103" "378554209978884104" "378554209978884105" "378554209978884106" "378554209978884107" "378554209978884108" "378554209978884109" "378554209978884110" "378554209978884111"], :type :ok, :requested-count 16, :f :idgen}
+{:index 49, :time 27983925686, :type :invoke, :process 5, :f :idgen, :value {:name "orders", :batch? false, :count 11}}
+{:index 50, :name "orders", :value {:name "orders", :batch? false, :count 11}, :time 27988242872, :process 5, :batch? false, :ids ["378554211371393024"], :type :ok, :f :idgen}
+{:index 51, :time 28317423014, :type :invoke, :process 6, :f :idgen, :value {:name "orders", :batch? false, :count 12}}
+{:index 52, :name "orders", :value {:name "orders", :batch? false, :count 12}, :time 28320336290, :process 6, :batch? false, :ids ["378554212763901952"], :type :ok, :f :idgen}
+{:index 53, :time 28362060793, :type :invoke, :process 7, :f :idgen, :value {:name "orders", :batch? false, :count 8}}
+{:index 54, :name "orders", :value {:name "orders", :batch? false, :count 8}, :time 28367095821, :process 7, :batch? false, :ids ["378554212956839936"], :type :ok, :f :idgen}
+{:index 55, :time 28422035759, :type :info, :process :nemesis, :f :stop, :value [:restarted-agent "n5"]}
+{:index 56, :time 28450452186, :type :invoke, :process 9, :f :idgen, :value {:name "events", :batch? false, :count 13}}
+{:index 57, :name "events", :value {:name "events", :batch? false, :count 13}, :time 28453090256, :process 9, :batch? false, :ids ["378554213321744384"], :type :ok, :f :idgen}
+{:index 58, :time 28844873458, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? false, :count 1}}
+{:index 59, :name "events", :value {:name "events", :batch? false, :count 1}, :time 28849536319, :process 0, :batch? false, :ids ["378554214982688768"], :type :ok, :f :idgen}
+{:index 60, :time 28947325074, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? true, :count 2}}
+{:index 61, :name "orders", :n 2, :value {:name "orders", :batch? true, :count 2}, :time 28950474853, :process 0, :batch? true, :ids ["378554215406313472" "378554215406313473"], :type :ok, :requested-count 2, :f :idgen}
+{:index 62, :time 29262404760, :type :invoke, :process 1, :f :idgen, :value {:name "orders", :batch? false, :count 13}}
+{:index 63, :name "orders", :value {:name "orders", :batch? false, :count 13}, :time 29267366684, :process 1, :batch? false, :ids ["378554216731713536"], :type :ok, :f :idgen}
+{:index 64, :time 29506256142, :type :invoke, :process 2, :f :idgen, :value {:name "events", :batch? true, :count 2}}
+{:index 65, :name "events", :n 2, :value {:name "events", :batch? true, :count 2}, :time 29510627877, :process 2, :batch? true, :ids ["378554217755123712" "378554217755123713"], :type :ok, :requested-count 2, :f :idgen}
+{:index 66, :time 30686178066, :type :invoke, :process 3, :f :idgen, :value {:name "orders", :batch? false, :count 2}}
+{:index 67, :name "orders", :value {:name "orders", :batch? false, :count 2}, :time 30690625929, :process 3, :batch? false, :ids ["378554222704402432"], :type :ok, :f :idgen}
+{:index 68, :time 31010296526, :type :invoke, :process 4, :f :idgen, :value {:name "orders", :batch? false, :count 4}}
+{:index 69, :name "orders", :value {:name "orders", :batch? false, :count 4}, :time 31014943158, :process 4, :batch? false, :ids ["378554224063356928"], :type :ok, :f :idgen}
+{:index 70, :time 31176069226, :type :invoke, :process 5, :f :idgen, :value {:name "orders", :batch? false, :count 4}}
+{:index 71, :name "orders", :value {:name "orders", :batch? false, :count 4}, :time 31180914440, :process 5, :batch? false, :ids ["378554224759611392"], :type :ok, :f :idgen}
+{:index 72, :time 31210749000, :type :invoke, :process 6, :f :idgen, :value {:name "events", :batch? true, :count 2}}
+{:index 73, :name "events", :n 2, :value {:name "events", :batch? true, :count 2}, :time 31215064329, :process 6, :batch? true, :ids ["378554224902217728" "378554224902217729"], :type :ok, :requested-count 2, :f :idgen}
+{:index 74, :time 31378156600, :type :invoke, :process 7, :f :idgen, :value {:name "events", :batch? false, :count 5}}
+{:index 75, :name "events", :value {:name "events", :batch? false, :count 5}, :time 31382342724, :process 7, :batch? false, :ids ["378554225606860800"], :type :ok, :f :idgen}
+{:index 76, :time 31448358138, :type :invoke, :process 8, :f :idgen, :value {:name "orders", :batch? false, :count 4}}
+{:index 77, :name "orders", :value {:name "orders", :batch? false, :count 4}, :time 31452778331, :process 8, :batch? false, :ids ["378554225900462080"], :type :ok, :f :idgen}
+{:index 78, :time 31855726289, :type :invoke, :process 9, :f :idgen, :value {:name "orders", :batch? false, :count 7}}
+{:index 79, :name "orders", :value {:name "orders", :batch? false, :count 7}, :time 31860162455, :process 9, :batch? false, :ids ["378554227607543808"], :type :ok, :f :idgen}
+{:index 80, :time 32085104389, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? false, :count 7}}
+{:index 81, :name "events", :value {:name "events", :batch? false, :count 7}, :time 32087192595, :process 0, :batch? false, :ids ["378554228563845120"], :type :ok, :f :idgen}
+{:index 82, :time 32737116385, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? false, :count 11}}
+{:index 83, :name "events", :value {:name "events", :batch? false, :count 11}, :time 32741362698, :process 0, :batch? false, :ids ["378554231306919936"], :type :ok, :f :idgen}
+{:index 84, :time 32966783551, :type :invoke, :process 1, :f :idgen, :value {:name "events", :batch? false, :count 1}}
+{:index 85, :name "events", :value {:name "events", :batch? false, :count 1}, :time 32971084970, :process 1, :batch? false, :ids ["378554232267415552"], :type :ok, :f :idgen}
+{:index 86, :time 33236630731, :type :invoke, :process 2, :f :idgen, :value {:name "orders", :batch? false, :count 13}}
+{:index 87, :name "orders", :value {:name "orders", :batch? false, :count 13}, :time 33241185192, :process 2, :batch? false, :ids ["378554233399877632"], :type :ok, :f :idgen}
+{:index 88, :time 33814289772, :type :invoke, :process 3, :f :idgen, :value {:name "events", :batch? true, :count 16}}
+{:index 89, :name "events", :n 16, :value {:name "events", :batch? true, :count 16}, :time 33818882970, :process 3, :batch? true, :ids ["378554235824185344" "378554235824185345" "378554235824185346" "378554235824185347" "378554235824185348" "378554235824185349" "378554235824185350" "378554235824185351" "378554235824185352" "378554235824185353" "378554235824185354" "378554235824185355" "378554235824185356" "378554235824185357" "378554235824185358" "378554235824185359"], :type :ok, :requested-count 16, :f :idgen}
+{:index 90, :time 33915164402, :type :invoke, :process 4, :f :idgen, :value {:name "events", :batch? false, :count 3}}
+{:index 91, :name "events", :value {:name "events", :batch? false, :count 3}, :time 33919652759, :process 4, :batch? false, :ids ["378554236247810048"], :type :ok, :f :idgen}
+{:index 92, :time 34079022800, :type :invoke, :process 5, :f :idgen, :value {:name "orders", :batch? true, :count 1}}
+{:index 93, :name "orders", :n 1, :value {:name "orders", :batch? true, :count 1}, :time 34083738265, :process 5, :batch? true, :ids ["378554236935675904"], :type :ok, :requested-count 1, :f :idgen}
+{:index 94, :time 34188992922, :type :invoke, :process 6, :f :idgen, :value {:name "events", :batch? true, :count 4}}
+{:index 95, :name "events", :n 4, :value {:name "events", :batch? true, :count 4}, :time 34193889178, :process 6, :batch? true, :ids ["378554237397049344" "378554237397049345" "378554237397049346" "378554237397049347"], :type :ok, :requested-count 4, :f :idgen}
+{:index 96, :time 34928852423, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 97, :time 35056183424, :type :info, :process :nemesis, :f :start, :value [:killed-agent "n4"]}
+{:index 98, :time 35656762698, :type :invoke, :process 9, :f :idgen, :value {:name "events", :batch? true, :count 15}}
+{:index 99, :name "events", :n 15, :value {:name "events", :batch? true, :count 15}, :time 35668037895, :process 9, :batch? true, :ids ["378554243583647744" "378554243583647745" "378554243583647746" "378554243583647747" "378554243583647748" "378554243583647749" "378554243583647750" "378554243583647751" "378554243583647752" "378554243583647753" "378554243583647754" "378554243583647755" "378554243583647756" "378554243583647757" "378554243583647758"], :type :ok, :requested-count 15, :f :idgen}
+{:index 100, :time 36225116384, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? true, :count 15}}
+{:index 101, :name "orders", :n 15, :value {:name "orders", :batch? true, :count 15}, :time 36231007217, :process 0, :batch? true, :ids ["378554245945040896" "378554245945040897" "378554245945040898" "378554245945040899" "378554245945040900" "378554245945040901" "378554245945040902" "378554245945040903" "378554245945040904" "378554245945040905" "378554245945040906" "378554245945040907" "378554245945040908" "378554245945040909" "378554245945040910"], :type :ok, :requested-count 15, :f :idgen}
+{:index 102, :time 36607434266, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? false, :count 7}}
+{:index 103, :name "orders", :value {:name "orders", :batch? false, :count 7}, :time 36611401701, :process 0, :batch? false, :ids ["378554247538876416"], :type :ok, :f :idgen}
+{:index 104, :time 36791508145, :type :invoke, :process 1, :f :idgen, :value {:name "events", :batch? false, :count 7}}
+{:index 105, :name "events", :value {:name "events", :batch? false, :count 7}, :time 36798300712, :process 1, :batch? false, :ids ["378554248323211264"], :type :ok, :f :idgen}
+{:index 106, :time 37324151661, :type :invoke, :process 2, :f :idgen, :value {:name "orders", :batch? true, :count 10}}
+{:index 107, :name "orders", :n 10, :value {:name "orders", :batch? true, :count 10}, :time 37333309594, :process 2, :batch? true, :ids ["378554250567163904" "378554250567163905" "378554250567163906" "378554250567163907" "378554250567163908" "378554250567163909" "378554250567163910" "378554250567163911" "378554250567163912" "378554250567163913"], :type :ok, :requested-count 10, :f :idgen}
+{:index 108, :time 37344945112, :type :invoke, :process 3, :f :idgen, :value {:name "orders", :batch? false, :count 14}}
+{:index 109, :name "orders", :value {:name "orders", :batch? false, :count 14}, :time 37353924847, :process 3, :batch? false, :ids ["378554250651049984"], :type :ok, :f :idgen}
+{:index 110, :time 37623943019, :type :invoke, :process 4, :f :idgen, :value {:name "orders", :batch? true, :count 13}}
+{:index 111, :name "orders", :n 13, :value {:name "orders", :batch? true, :count 13}, :time 37628294313, :process 4, :batch? true, :ids ["378554251804483584" "378554251804483585" "378554251804483586" "378554251804483587" "378554251804483588" "378554251804483589" "378554251804483590" "378554251804483591" "378554251804483592" "378554251804483593" "378554251804483594" "378554251804483595" "378554251804483596"], :type :ok, :requested-count 13, :f :idgen}
+{:index 112, :time 37703950208, :type :invoke, :process 5, :f :idgen, :value {:name "events", :batch? true, :count 3}}
+{:index 113, :name "events", :n 3, :value {:name "events", :batch? true, :count 3}, :time 37713549706, :process 5, :batch? true, :ids ["378554252160999424" "378554252160999425" "378554252160999426"], :type :ok, :requested-count 3, :f :idgen}
+{:index 114, :time 37760239120, :type :invoke, :process 6, :f :idgen, :value {:name "events", :batch? true, :count 5}}
+{:index 115, :name "events", :n 5, :value {:name "events", :batch? true, :count 5}, :time 37769845469, :process 6, :batch? true, :ids ["378554252395880448" "378554252395880449" "378554252395880450" "378554252395880451" "378554252395880452"], :type :ok, :requested-count 5, :f :idgen}
+{:index 116, :time 37778002894, :type :invoke, :process 7, :f :idgen, :value {:name "events", :batch? false, :count 9}}
+{:index 117, :name "events", :value {:name "events", :batch? false, :count 9}, :time 37787002598, :process 7, :batch? false, :ids ["378554252467183616"], :type :ok, :f :idgen}
+{:index 118, :time 37899675948, :type :invoke, :process 8, :f :idgen, :value {:name "events", :batch? true, :count 4}}
+{:index 119, :name "events", :n 4, :value {:name "events", :batch? true, :count 4}, :time 37908912112, :process 8, :batch? true, :ids ["378554252978888704" "378554252978888705" "378554252978888706" "378554252978888707"], :type :ok, :requested-count 4, :f :idgen}
+{:index 120, :time 37925486320, :type :invoke, :process 9, :f :idgen, :value {:name "events", :batch? false, :count 1}}
+{:index 121, :name "events", :value {:name "events", :batch? false, :count 1}, :time 37929978738, :process 9, :batch? false, :ids ["378554253066969088"], :type :ok, :f :idgen}
+{:index 122, :time 37955945684, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? true, :count 5}}
+{:index 123, :name "events", :n 5, :value {:name "events", :batch? true, :count 5}, :time 37961052816, :process 0, :batch? true, :ids ["378554253196992512" "378554253196992513" "378554253196992514" "378554253196992515" "378554253196992516"], :type :ok, :requested-count 5, :f :idgen}
+{:index 124, :time 38329589843, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? true, :count 14}}
+{:index 125, :name "events", :n 14, :value {:name "events", :batch? true, :count 14}, :time 38332615380, :process 0, :batch? true, :ids ["378554254757273600" "378554254757273601" "378554254757273602" "378554254757273603" "378554254757273604" "378554254757273605" "378554254757273606" "378554254757273607" "378554254757273608" "378554254757273609" "378554254757273610" "378554254757273611" "378554254757273612" "378554254757273613"], :type :ok, :requested-count 14, :f :idgen}
+{:index 126, :time 38374426632, :type :invoke, :process 1, :f :idgen, :value {:name "orders", :batch? false, :count 3}}
+{:index 127, :name "orders", :value {:name "orders", :batch? false, :count 3}, :time 38379069231, :process 1, :batch? false, :ids ["378554254950211584"], :type :ok, :f :idgen}
+{:index 128, :time 38430337723, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 129, :time 38435585378, :type :invoke, :process 3, :f :idgen, :value {:name "orders", :batch? true, :count 9}}
+{:index 130, :name "orders", :n 9, :value {:name "orders", :batch? true, :count 9}, :time 38440109440, :process 3, :batch? true, :ids ["378554255206064128" "378554255206064129" "378554255206064130" "378554255206064131" "378554255206064132" "378554255206064133" "378554255206064134" "378554255206064135" "378554255206064136"], :type :ok, :requested-count 9, :f :idgen}
+{:index 131, :time 38485440305, :type :invoke, :process 4, :f :idgen, :value {:name "events", :batch? false, :count 11}}
+{:index 132, :name "events", :value {:name "events", :batch? false, :count 11}, :time 38487933212, :process 4, :batch? false, :ids ["378554255411585024"], :type :ok, :f :idgen}
+{:index 133, :time 38894406217, :type :invoke, :process 5, :f :idgen, :value {:name "orders", :batch? false, :count 12}}
+{:index 134, :name "orders", :value {:name "orders", :batch? false, :count 12}, :time 38899160514, :process 5, :batch? false, :ids ["378554257135443968"], :type :ok, :f :idgen}
+{:index 135, :time 39279223111, :type :invoke, :process 6, :f :idgen, :value {:name "events", :batch? true, :count 13}}
+{:index 136, :name "events", :n 13, :value {:name "events", :batch? true, :count 13}, :time 39283778607, :process 6, :batch? true, :ids ["378554258746056704" "378554258746056705" "378554258746056706" "378554258746056707" "378554258746056708" "378554258746056709" "378554258746056710" "378554258746056711" "378554258746056712" "378554258746056713" "378554258746056714" "378554258746056715" "378554258746056716"], :type :ok, :requested-count 13, :f :idgen}
+{:index 137, :time 39402291391, :type :invoke, :process 7, :f :idgen, :value {:name "events", :batch? false, :count 7}}
+{:index 138, :name "events", :value {:name "events", :batch? false, :count 7}, :time 39404124238, :process 7, :batch? false, :ids ["378554259253567488"], :type :ok, :f :idgen}
+{:index 139, :time 39569193309, :type :info, :process :nemesis, :f :stop, :value [:restarted-agent "n4"]}
+{:index 140, :time 39750536497, :type :invoke, :process 9, :f :idgen, :value {:name "orders", :batch? false, :count 14}}
+{:index 141, :name "orders", :value {:name "orders", :batch? false, :count 14}, :time 39755481456, :process 9, :batch? false, :ids ["378554260725768192"], :type :ok, :f :idgen}
+{:index 142, :time 39900122017, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? false, :count 12}}
+{:index 143, :name "orders", :value {:name "orders", :batch? false, :count 12}, :time 39904216942, :process 0, :batch? false, :ids ["378554261350719488"], :type :ok, :f :idgen}
+{:index 144, :time 40019132762, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? true, :count 2}}
+{:index 145, :name "orders", :n 2, :value {:name "orders", :batch? true, :count 2}, :time 40023416554, :process 0, :batch? true, :ids ["378554261849841664" "378554261849841665"], :type :ok, :requested-count 2, :f :idgen}
+{:index 146, :time 40030081888, :type :invoke, :process 1, :f :idgen, :value {:name "events", :batch? false, :count 7}}
+{:index 147, :name "events", :value {:name "events", :batch? false, :count 7}, :time 40034175009, :process 1, :batch? false, :ids ["378554261891784704"], :type :ok, :f :idgen}
+{:index 148, :time 40278068071, :type :invoke, :process 2, :f :idgen, :value {:name "events", :batch? false, :count 1}}
+{:index 149, :name "events", :value {:name "events", :batch? false, :count 1}, :time 40282243890, :process 2, :batch? false, :ids ["378554262936166400"], :type :ok, :f :idgen}
+{:index 150, :time 40704552262, :type :invoke, :process 3, :f :idgen, :value {:name "events", :batch? false, :count 15}}
+{:index 151, :name "events", :value {:name "events", :batch? false, :count 15}, :time 40708944394, :process 3, :batch? false, :ids ["378554264722939904"], :type :ok, :f :idgen}
+{:index 152, :time 40949271749, :type :invoke, :process 4, :f :idgen, :value {:name "events", :batch? false, :count 9}}
+{:index 153, :name "events", :value {:name "events", :batch? false, :count 9}, :time 40953168791, :process 4, :batch? false, :ids ["378554265750544384"], :type :ok, :f :idgen}
+{:index 154, :time 41383248389, :type :invoke, :process 5, :f :idgen, :value {:name "events", :batch? true, :count 12}}
+{:index 155, :name "events", :n 12, :value {:name "events", :batch? true, :count 12}, :time 41385357550, :process 5, :batch? true, :ids ["378554267562483712" "378554267562483713" "378554267562483714" "378554267562483715" "378554267562483716" "378554267562483717" "378554267562483718" "378554267562483719" "378554267562483720" "378554267562483721" "378554267562483722" "378554267562483723"], :type :ok, :requested-count 12, :f :idgen}
+{:index 156, :time 41425404085, :type :invoke, :process 6, :f :idgen, :value {:name "events", :batch? true, :count 1}}
+{:index 157, :name "events", :n 1, :value {:name "events", :batch? true, :count 1}, :time 41427476353, :process 6, :batch? true, :ids ["378554267742838784"], :type :ok, :requested-count 1, :f :idgen}
+{:index 158, :time 41576033591, :type :invoke, :process 7, :f :idgen, :value {:name "events", :batch? true, :count 6}}
+{:index 159, :name "events", :n 6, :value {:name "events", :batch? true, :count 6}, :time 41580004251, :process 7, :batch? true, :ids ["378554268376178688" "378554268376178689" "378554268376178690" "378554268376178691" "378554268376178692" "378554268376178693"], :type :ok, :requested-count 6, :f :idgen}
+{:index 160, :time 41844054535, :type :invoke, :process 8, :f :idgen, :value {:name "orders", :batch? false, :count 4}}
+{:index 161, :name "orders", :value {:name "orders", :batch? false, :count 4}, :time 41848920756, :process 8, :batch? false, :ids ["378554269504446464"], :type :ok, :f :idgen}
+{:index 162, :time 42101930111, :type :invoke, :process 9, :f :idgen, :value {:name "orders", :batch? true, :count 2}}
+{:index 163, :name "orders", :n 2, :value {:name "orders", :batch? true, :count 2}, :time 42106087058, :process 9, :batch? true, :ids ["378554270582382592" "378554270582382593"], :type :ok, :requested-count 2, :f :idgen}
+{:index 164, :time 42394429528, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? false, :count 12}}
+{:index 165, :name "events", :value {:name "events", :batch? false, :count 12}, :time 42398234860, :process 0, :batch? false, :ids ["378554271811313664"], :type :ok, :f :idgen}
+{:index 166, :time 42535990545, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? false, :count 5}}
+{:index 167, :time 42536445162, :type :invoke, :process 1, :f :idgen, :value {:name "orders", :batch? false, :count 9}}
+{:index 168, :name "events", :value {:name "events", :batch? false, :count 5}, :time 42540511152, :process 0, :batch? false, :ids ["378554272406904832"], :type :ok, :f :idgen}
+{:index 169, :name "orders", :value {:name "orders", :batch? false, :count 9}, :time 42540637911, :process 1, :batch? false, :ids ["378554272406904833"], :type :ok, :f :idgen}
+{:index 170, :time 42589972078, :type :invoke, :process 2, :f :idgen, :value {:name "events", :batch? true, :count 15}}
+{:index 171, :name "events", :n 15, :value {:name "events", :batch? true, :count 15}, :time 42594613001, :process 2, :batch? true, :ids ["378554272633397248" "378554272633397249" "378554272633397250" "378554272633397251" "378554272633397252" "378554272633397253" "378554272633397254" "378554272633397255" "378554272633397256" "378554272633397257" "378554272633397258" "378554272633397259" "378554272633397260" "378554272633397261" "378554272633397262"], :type :ok, :requested-count 15, :f :idgen}
+{:index 172, :time 43094813810, :type :invoke, :process 3, :f :idgen, :value {:name "events", :batch? true, :count 11}}
+{:index 173, :name "events", :n 11, :value {:name "events", :batch? true, :count 11}, :time 43099038415, :process 3, :batch? true, :ids ["378554274747326464" "378554274747326465" "378554274747326466" "378554274747326467" "378554274747326468" "378554274747326469" "378554274747326470" "378554274747326471" "378554274747326472" "378554274747326473" "378554274747326474"], :type :ok, :requested-count 11, :f :idgen}
+{:index 174, :time 43116950333, :type :invoke, :process 4, :f :idgen, :value {:name "orders", :batch? false, :count 9}}
+{:index 175, :name "orders", :value {:name "orders", :batch? false, :count 9}, :time 43120850484, :process 4, :batch? false, :ids ["378554274839601152"], :type :ok, :f :idgen}
+{:index 176, :time 43231868715, :type :invoke, :process 5, :f :idgen, :value {:name "orders", :batch? true, :count 4}}
+{:index 177, :name "orders", :n 4, :value {:name "orders", :batch? true, :count 4}, :time 43236261595, :process 5, :batch? true, :ids ["378554275326140416" "378554275326140417" "378554275326140418" "378554275326140419"], :type :ok, :requested-count 4, :f :idgen}
+{:index 178, :time 43561484401, :type :invoke, :process 6, :f :idgen, :value {:name "orders", :batch? false, :count 11}}
+{:index 179, :name "orders", :value {:name "orders", :batch? false, :count 11}, :time 43566016669, :process 6, :batch? false, :ids ["378554276706066432"], :type :ok, :f :idgen}
+{:index 180, :time 43833497922, :type :invoke, :process 7, :f :idgen, :value {:name "orders", :batch? true, :count 12}}
+{:index 181, :name "orders", :n 12, :value {:name "orders", :batch? true, :count 12}, :time 43838150483, :process 7, :batch? true, :ids ["378554277846917120" "378554277846917121" "378554277846917122" "378554277846917123" "378554277846917124" "378554277846917125" "378554277846917126" "378554277846917127" "378554277846917128" "378554277846917129" "378554277846917130" "378554277846917131"], :type :ok, :requested-count 12, :f :idgen}
+{:index 182, :time 43954324776, :type :invoke, :process 8, :f :idgen, :value {:name "events", :batch? false, :count 13}}
+{:index 183, :name "events", :value {:name "events", :batch? false, :count 13}, :time 43958724212, :process 8, :batch? false, :ids ["378554278354427904"], :type :ok, :f :idgen}
+{:index 184, :time 44291786261, :type :invoke, :process 9, :f :idgen, :value {:name "events", :batch? false, :count 9}}
+{:index 185, :name "events", :value {:name "events", :batch? false, :count 9}, :time 44295806821, :process 9, :batch? false, :ids ["378554279767908352"], :type :ok, :f :idgen}
+{:index 186, :time 44362432067, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? true, :count 7}}
+{:index 187, :name "orders", :n 7, :value {:name "orders", :batch? true, :count 7}, :time 44366257098, :process 0, :batch? true, :ids ["378554280065703936" "378554280065703937" "378554280065703938" "378554280065703939" "378554280065703940" "378554280065703941" "378554280065703942"], :type :ok, :requested-count 7, :f :idgen}
+{:index 188, :time 45984190490, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? true, :count 5}}
+{:index 189, :name "events", :n 5, :value {:name "events", :batch? true, :count 5}, :time 45988150052, :process 0, :batch? true, :ids ["378554286868865024" "378554286868865025" "378554286868865026" "378554286868865027" "378554286868865028"], :type :ok, :requested-count 5, :f :idgen}
+{:index 190, :time 46219442638, :type :invoke, :process 1, :f :idgen, :value {:name "orders", :batch? false, :count 3}}
+{:index 191, :name "orders", :value {:name "orders", :batch? false, :count 3}, :time 46222054043, :process 1, :batch? false, :ids ["378554287850332160"], :type :ok, :f :idgen}
+{:index 192, :time 46297668481, :type :invoke, :process 2, :f :idgen, :value {:name "events", :batch? false, :count 16}}
+{:index 193, :time 46300915350, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 194, :name "events", :value {:name "events", :batch? false, :count 16}, :time 46301867321, :process 2, :batch? false, :ids ["378554288181682176"], :type :ok, :f :idgen}
+{:index 195, :time 46454359000, :type :info, :process :nemesis, :f :start, :value [:killed-agent "n5"]}
+{:index 196, :time 46929763211, :type :invoke, :process 5, :f :idgen, :value {:name "orders", :batch? false, :count 6}}
+{:index 197, :name "orders", :value {:name "orders", :batch? false, :count 6}, :time 46936743294, :process 5, :batch? false, :ids ["378554290845065216"], :type :ok, :f :idgen}
+{:index 198, :time 47032528339, :type :invoke, :process 6, :f :idgen, :value {:name "events", :batch? false, :count 10}}
+{:index 199, :name "events", :value {:name "events", :batch? false, :count 10}, :time 47038691773, :process 6, :batch? false, :ids ["378554291272884224"], :type :ok, :f :idgen}
+{:index 200, :time 47200618360, :type :invoke, :process 7, :f :idgen, :value {:name "events", :batch? true, :count 6}}
+{:index 201, :name "events", :n 6, :value {:name "events", :batch? true, :count 6}, :time 47207571897, :process 7, :batch? true, :ids ["378554291981721600" "378554291981721601" "378554291981721602" "378554291981721603" "378554291981721604" "378554291981721605"], :type :ok, :requested-count 6, :f :idgen}
+{:index 202, :time 47367961420, :type :invoke, :process 8, :f :idgen, :value {:name "orders", :batch? true, :count 6}}
+{:index 203, :name "orders", :n 6, :value {:name "orders", :batch? true, :count 6}, :time 47372170049, :process 8, :batch? true, :ids ["378554292673781760" "378554292673781761" "378554292673781762" "378554292673781763" "378554292673781764" "378554292673781765"], :type :ok, :requested-count 6, :f :idgen}
+{:index 204, :time 47391144003, :type :invoke, :process 9, :f :idgen, :value {:name "events", :batch? false, :count 4}}
+{:index 205, :name "events", :value {:name "events", :batch? false, :count 4}, :time 47394670015, :process 9, :batch? false, :ids ["378554292770250752"], :type :ok, :f :idgen}
+{:index 206, :time 47434974471, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? true, :count 14}}
+{:index 207, :name "events", :n 14, :value {:name "events", :batch? true, :count 14}, :time 47441610034, :process 0, :batch? true, :ids ["378554292963188736" "378554292963188737" "378554292963188738" "378554292963188739" "378554292963188740" "378554292963188741" "378554292963188742" "378554292963188743" "378554292963188744" "378554292963188745" "378554292963188746" "378554292963188747" "378554292963188748" "378554292963188749"], :type :ok, :requested-count 14, :f :idgen}
+{:index 208, :time 47696291282, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? true, :count 5}}
+{:index 209, :name "orders", :n 5, :value {:name "orders", :batch? true, :count 5}, :time 47701142010, :process 0, :batch? true, :ids ["378554294053707776" "378554294053707777" "378554294053707778" "378554294053707779" "378554294053707780"], :type :ok, :requested-count 5, :f :idgen}
+{:index 210, :time 47704692103, :type :invoke, :process 1, :f :idgen, :value {:name "orders", :batch? false, :count 2}}
+{:index 211, :name "orders", :value {:name "orders", :batch? false, :count 2}, :time 47707930447, :process 1, :batch? false, :ids ["378554294083067904"], :type :ok, :f :idgen}
+{:index 212, :time 47789988916, :type :invoke, :process 2, :f :idgen, :value {:name "orders", :batch? false, :count 16}}
+{:index 213, :name "orders", :value {:name "orders", :batch? false, :count 16}, :time 47796098508, :process 2, :batch? false, :ids ["378554294452166656"], :type :ok, :f :idgen}
+{:index 214, :time 48016004644, :type :invoke, :process 3, :f :idgen, :value {:name "events", :batch? true, :count 1}}
+{:index 215, :name "events", :n 1, :value {:name "events", :batch? true, :count 1}, :time 48019140604, :process 3, :batch? true, :ids ["378554295387496448"], :type :ok, :requested-count 1, :f :idgen}
+{:index 216, :time 48905582452, :type :invoke, :process 4, :f :idgen, :value {:name "orders", :batch? false, :count 11}}
+{:index 217, :name "orders", :value {:name "orders", :batch? false, :count 11}, :time 48911850781, :process 4, :batch? false, :ids ["378554299128815616"], :type :ok, :f :idgen}
+{:index 218, :time 49898281009, :type :invoke, :process 5, :f :idgen, :value {:name "events", :batch? true, :count 6}}
+{:index 219, :name "events", :n 6, :value {:name "events", :batch? true, :count 6}, :time 49902799560, :process 5, :batch? true, :ids ["378554303285370880" "378554303285370881" "378554303285370882" "378554303285370883" "378554303285370884" "378554303285370885"], :type :ok, :requested-count 6, :f :idgen}
+{:index 220, :time 49925110946, :type :invoke, :process 6, :f :idgen, :value {:name "events", :batch? true, :count 2}}
+{:index 221, :name "events", :n 2, :value {:name "events", :batch? true, :count 2}, :time 49929208574, :process 6, :batch? true, :ids ["378554303398617088" "378554303398617089"], :type :ok, :requested-count 2, :f :idgen}
+{:index 222, :time 50055170243, :type :invoke, :process 7, :f :idgen, :value {:name "orders", :batch? false, :count 7}}
+{:index 223, :name "orders", :value {:name "orders", :batch? false, :count 7}, :time 50058933157, :process 7, :batch? false, :ids ["378554303943876608"], :type :ok, :f :idgen}
+{:index 224, :time 50086174011, :type :invoke, :process 8, :f :idgen, :value {:name "orders", :batch? false, :count 10}}
+{:index 225, :name "orders", :value {:name "orders", :batch? false, :count 10}, :time 50090335383, :process 8, :batch? false, :ids ["378554304069705728"], :type :ok, :f :idgen}
+{:index 226, :time 50090437621, :type :invoke, :process 9, :f :idgen, :value {:name "events", :batch? true, :count 13}}
+{:index 227, :name "events", :n 13, :value {:name "events", :batch? true, :count 13}, :time 50093954483, :process 9, :batch? true, :ids ["378554304086482944" "378554304086482945" "378554304086482946" "378554304086482947" "378554304086482948" "378554304086482949" "378554304086482950" "378554304086482951" "378554304086482952" "378554304086482953" "378554304086482954" "378554304086482955" "378554304086482956"], :type :ok, :requested-count 13, :f :idgen}
+{:index 228, :time 50692776919, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? false, :count 7}}
+{:index 229, :name "orders", :value {:name "orders", :batch? false, :count 7}, :time 50697014587, :process 0, :batch? false, :ids ["378554306615648256"], :type :ok, :f :idgen}
+{:index 230, :time 51162449154, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? true, :count 7}}
+{:index 231, :name "orders", :n 7, :value {:name "orders", :batch? true, :count 7}, :time 51166821406, :process 0, :batch? true, :ids ["378554308586971136" "378554308586971137" "378554308586971138" "378554308586971139" "378554308586971140" "378554308586971141" "378554308586971142"], :type :ok, :requested-count 7, :f :idgen}
+{:index 232, :time 51694957381, :type :invoke, :process 1, :f :idgen, :value {:name "events", :batch? true, :count 6}}
+{:index 233, :name "events", :n 6, :value {:name "events", :batch? true, :count 6}, :time 51699928328, :process 1, :batch? true, :ids ["378554310822535168" "378554310822535169" "378554310822535170" "378554310822535171" "378554310822535172" "378554310822535173"], :type :ok, :requested-count 6, :f :idgen}
+{:index 234, :time 51932803747, :type :invoke, :process 2, :f :idgen, :value {:name "orders", :batch? false, :count 1}}
+{:index 235, :name "orders", :value {:name "orders", :batch? false, :count 1}, :time 51936712184, :process 2, :batch? false, :ids ["378554311816585216"], :type :ok, :f :idgen}
+{:index 236, :time 52174430512, :type :invoke, :process 3, :f :idgen, :value {:name "events", :batch? true, :count 7}}
+{:index 237, :name "events", :n 7, :value {:name "events", :batch? true, :count 7}, :time 52178518446, :process 3, :batch? true, :ids ["378554312831606784" "378554312831606785" "378554312831606786" "378554312831606787" "378554312831606788" "378554312831606789" "378554312831606790"], :type :ok, :requested-count 7, :f :idgen}
+{:index 238, :time 52367376906, :type :invoke, :process 4, :f :idgen, :value {:name "events", :batch? false, :count 15}}
+{:index 239, :name "events", :value {:name "events", :batch? false, :count 15}, :time 52371543692, :process 4, :batch? false, :ids ["378554313641107456"], :type :ok, :f :idgen}
+{:index 240, :time 52610656587, :type :invoke, :process 5, :f :idgen, :value {:name "orders", :batch? false, :count 14}}
+{:index 241, :name "orders", :value {:name "orders", :batch? false, :count 14}, :time 52614206808, :process 5, :batch? false, :ids ["378554314660323328"], :type :ok, :f :idgen}
+{:index 242, :time 53163786249, :type :invoke, :process 6, :f :idgen, :value {:name "orders", :batch? true, :count 2}}
+{:index 243, :name "orders", :n 2, :value {:name "orders", :batch? true, :count 2}, :time 53167777786, :process 6, :batch? true, :ids ["378554316979773440" "378554316979773441"], :type :ok, :requested-count 2, :f :idgen}
+{:index 244, :time 53586207237, :type :invoke, :process 7, :f :idgen, :value {:name "events", :batch? false, :count 4}}
+{:index 245, :name "events", :value {:name "events", :batch? false, :count 4}, :time 53590111205, :process 7, :batch? false, :ids ["378554318749769728"], :type :ok, :f :idgen}
+{:index 246, :time 53839532428, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 247, :time 54307770197, :type :info, :process :nemesis, :f :stop, :value [:restarted-agent "n4"]}
+{:index 248, :time 54474183888, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? false, :count 13}}
+{:index 249, :name "events", :value {:name "events", :batch? false, :count 13}, :time 54478193409, :process 0, :batch? false, :ids ["378554322474311680"], :type :ok, :f :idgen}
+{:index 250, :time 54715634438, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? false, :count 3}}
+{:index 251, :name "events", :value {:name "events", :batch? false, :count 3}, :time 54719322324, :process 0, :batch? false, :ids ["378554323489333248"], :type :ok, :f :idgen}
+{:index 252, :time 54890891847, :type :invoke, :process 1, :f :idgen, :value {:name "events", :batch? false, :count 14}}
+{:index 253, :name "events", :value {:name "events", :batch? false, :count 14}, :time 54894464126, :process 1, :batch? false, :ids ["378554324223336448"], :type :ok, :f :idgen}
+{:index 254, :time 55169078486, :type :invoke, :process 2, :f :idgen, :value {:name "events", :batch? false, :count 5}}
+{:index 255, :name "events", :value {:name "events", :batch? false, :count 5}, :time 55173695437, :process 2, :batch? false, :ids ["378554325393547264"], :type :ok, :f :idgen}
+{:index 256, :time 55206806625, :type :invoke, :process 3, :f :idgen, :value {:name "events", :batch? true, :count 5}}
+{:index 257, :name "events", :n 5, :value {:name "events", :batch? true, :count 5}, :time 55210578860, :process 3, :batch? true, :ids ["378554325548736512" "378554325548736513" "378554325548736514" "378554325548736515" "378554325548736516"], :type :ok, :requested-count 5, :f :idgen}
+{:index 258, :time 55592170099, :type :invoke, :process 4, :f :idgen, :value {:name "events", :batch? false, :count 6}}
+{:index 259, :name "events", :value {:name "events", :batch? false, :count 6}, :time 55596243635, :process 4, :batch? false, :ids ["378554327167737856"], :type :ok, :f :idgen}
+{:index 260, :time 55779473543, :type :invoke, :process 5, :f :idgen, :value {:name "events", :batch? false, :count 3}}
+{:index 261, :name "events", :value {:name "events", :batch? false, :count 3}, :time 55783374144, :process 5, :batch? false, :ids ["378554327952072704"], :type :ok, :f :idgen}
+{:index 262, :time 55794150482, :type :invoke, :process 6, :f :idgen, :value {:name "orders", :batch? true, :count 9}}
+{:index 263, :name "orders", :n 9, :value {:name "orders", :batch? true, :count 9}, :time 55797998144, :process 6, :batch? true, :ids ["378554328010792960" "378554328010792961" "378554328010792962" "378554328010792963" "378554328010792964" "378554328010792965" "378554328010792966" "378554328010792967" "378554328010792968"], :type :ok, :requested-count 9, :f :idgen}
+{:index 264, :time 55824841415, :type :invoke, :process 7, :f :idgen, :value {:name "orders", :batch? true, :count 8}}
+{:index 265, :name "orders", :n 8, :value {:name "orders", :batch? true, :count 8}, :time 55828878868, :process 7, :batch? true, :ids ["378554328140816384" "378554328140816385" "378554328140816386" "378554328140816387" "378554328140816388" "378554328140816389" "378554328140816390" "378554328140816391"], :type :ok, :requested-count 8, :f :idgen}
+{:index 266, :time 55875191311, :type :invoke, :process 8, :f :idgen, :value {:name "events", :batch? false, :count 11}}
+{:index 267, :name "events", :value {:name "events", :batch? false, :count 11}, :time 55881500607, :process 8, :batch? false, :ids ["378554328363114496"], :type :ok, :f :idgen}
+{:index 268, :time 55993793434, :type :invoke, :process 9, :f :idgen, :value {:name "events", :batch? false, :count 9}}
+{:index 269, :name "events", :value {:name "events", :batch? false, :count 9}, :time 55995608145, :process 9, :batch? false, :ids ["378554328845459456"], :type :ok, :f :idgen}
+{:index 270, :time 56891128580, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? false, :count 6}}
+{:index 271, :name "orders", :value {:name "orders", :batch? false, :count 6}, :time 56895074593, :process 0, :batch? false, :ids ["378554332611944448"], :type :ok, :f :idgen}
+{:index 272, :time 57512409992, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 273, :time 57612928445, :type :info, :process :nemesis, :f :start, :value [:killed-agent "n5"]}
+{:index 274, :time 57904192591, :type :invoke, :process 2, :f :idgen, :value {:name "orders", :batch? false, :count 15}}
+{:index 275, :name "orders", :value {:name "orders", :batch? false, :count 15}, :time 57907920734, :process 2, :batch? false, :ids ["378554336860774400"], :type :ok, :f :idgen}
+{:index 276, :time 58328828402, :type :invoke, :process 3, :f :idgen, :value {:name "orders", :batch? true, :count 15}}
+{:index 277, :time 58330214023, :type :invoke, :process 4, :f :idgen, :value {:name "events", :batch? true, :count 8}}
+{:index 278, :name "events", :n 8, :value {:name "events", :batch? true, :count 8}, :time 58333837351, :process 4, :batch? true, :ids ["378554338647547904" "378554338647547905" "378554338647547906" "378554338647547907" "378554338647547908" "378554338647547909" "378554338647547910" "378554338647547911"], :type :ok, :requested-count 8, :f :idgen}
+{:index 279, :name "orders", :n 15, :value {:name "orders", :batch? true, :count 15}, :time 58334959082, :process 3, :batch? true, :ids ["378554338655936512" "378554338655936513" "378554338655936514" "378554338655936515" "378554338655936516" "378554338655936517" "378554338655936518" "378554338655936519" "378554338655936520" "378554338655936521" "378554338655936522" "378554338655936523" "378554338655936524" "378554338655936525" "378554338655936526"], :type :ok, :requested-count 15, :f :idgen}
+{:index 280, :time 58563283638, :type :invoke, :process 5, :f :idgen, :value {:name "events", :batch? false, :count 14}}
+{:index 281, :name "events", :value {:name "events", :batch? false, :count 14}, :time 58567099326, :process 5, :batch? false, :ids ["378554339624820736"], :type :ok, :f :idgen}
+{:index 282, :time 58650300568, :type :invoke, :process 6, :f :idgen, :value {:name "orders", :batch? true, :count 6}}
+{:index 283, :name "orders", :n 6, :value {:name "orders", :batch? true, :count 6}, :time 58654094038, :process 6, :batch? true, :ids ["378554339989725184" "378554339989725185" "378554339989725186" "378554339989725187" "378554339989725188" "378554339989725189"], :type :ok, :requested-count 6, :f :idgen}
+{:index 284, :time 58803767537, :type :invoke, :process 7, :f :idgen, :value {:name "orders", :batch? false, :count 6}}
+{:index 285, :name "orders", :value {:name "orders", :batch? false, :count 6}, :time 58807050184, :process 7, :batch? false, :ids ["378554340635648000"], :type :ok, :f :idgen}
+{:index 286, :time 58949296907, :type :invoke, :process 8, :f :idgen, :value {:name "events", :batch? true, :count 16}}
+{:index 287, :name "events", :n 16, :value {:name "events", :batch? true, :count 16}, :time 58953250652, :process 8, :batch? true, :ids ["378554341248016384" "378554341248016385" "378554341248016386" "378554341248016387" "378554341248016388" "378554341248016389" "378554341248016390" "378554341248016391" "378554341248016392" "378554341248016393" "378554341248016394" "378554341248016395" "378554341248016396" "378554341248016397" "378554341248016398" "378554341248016399"], :type :ok, :requested-count 16, :f :idgen}
+{:index 288, :time 59192723612, :type :invoke, :process 9, :f :idgen, :value {:name "orders", :batch? false, :count 8}}
+{:index 289, :name "orders", :value {:name "orders", :batch? false, :count 8}, :time 59196936359, :process 9, :batch? false, :ids ["378554342267232256"], :type :ok, :f :idgen}
+{:index 290, :time 59539263620, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? false, :count 2}}
+{:index 291, :name "events", :value {:name "events", :batch? false, :count 2}, :time 59543147901, :process 0, :batch? false, :ids ["378554343718461440"], :type :ok, :f :idgen}
+{:index 292, :time 59785109768, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? false, :count 12}}
+{:index 293, :name "orders", :value {:name "orders", :batch? false, :count 12}, :time 59788523094, :process 0, :batch? false, :ids ["378554344750260224"], :type :ok, :f :idgen}
+{:index 294, :time 59831168328, :type :invoke, :process 1, :f :idgen, :value {:name "events", :batch? true, :count 8}}
+{:index 295, :name "events", :n 8, :value {:name "events", :batch? true, :count 8}, :time 59835048345, :process 1, :batch? true, :ids ["378554344943198208" "378554344943198209" "378554344943198210" "378554344943198211" "378554344943198212" "378554344943198213" "378554344943198214" "378554344943198215"], :type :ok, :requested-count 8, :f :idgen}
+{:index 296, :time 60259488790, :type :invoke, :process 2, :f :idgen, :value {:name "events", :batch? false, :count 15}}
+{:index 297, :name "events", :value {:name "events", :batch? false, :count 15}, :time 60263069647, :process 2, :batch? false, :ids ["378554346742554624"], :type :ok, :f :idgen}
+{:index 298, :time 62471572244, :type :invoke, :process 3, :f :idgen, :value {:name "events", :batch? false, :count 1}}
+{:index 299, :name "events", :value {:name "events", :batch? false, :count 1}, :time 62475335930, :process 3, :batch? false, :ids ["378554356020355072"], :type :ok, :f :idgen}
+{:index 300, :time 62538987583, :type :invoke, :process 4, :f :idgen, :value {:name "orders", :batch? false, :count 12}}
+{:index 301, :name "orders", :value {:name "orders", :batch? false, :count 12}, :time 62542932536, :process 4, :batch? false, :ids ["378554356301373440"], :type :ok, :f :idgen}
+{:index 302, :time 62962701595, :type :invoke, :process 5, :f :idgen, :value {:name "events", :batch? false, :count 5}}
+{:index 303, :name "events", :value {:name "events", :batch? false, :count 5}, :time 62966162621, :process 5, :batch? false, :ids ["378554358079758336"], :type :ok, :f :idgen}
+{:index 304, :time 62985645196, :type :invoke, :process 6, :f :idgen, :value {:name "orders", :batch? false, :count 15}}
+{:index 305, :name "orders", :value {:name "orders", :batch? false, :count 15}, :time 62989078746, :process 6, :batch? false, :ids ["378554358176227328"], :type :ok, :f :idgen}
+{:index 306, :time 63025544396, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 307, :time 63292426196, :type :invoke, :process 8, :f :idgen, :value {:name "events", :batch? true, :count 3}}
+{:index 308, :name "events", :n 3, :value {:name "events", :batch? true, :count 3}, :time 63294262085, :process 8, :batch? true, :ids ["378554359455490048" "378554359455490049" "378554359455490050"], :type :ok, :requested-count 3, :f :idgen}
+{:index 309, :time 63403673336, :type :invoke, :process 9, :f :idgen, :value {:name "events", :batch? true, :count 7}}
+{:index 310, :time 63405350337, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? true, :count 6}}
+{:index 311, :name "events", :n 7, :value {:name "events", :batch? true, :count 7}, :time 63407406761, :process 9, :batch? true, :ids ["378554359929446400" "378554359929446401" "378554359929446402" "378554359929446403" "378554359929446404" "378554359929446405" "378554359929446406"], :type :ok, :requested-count 7, :f :idgen}
+{:index 312, :name "events", :n 6, :value {:name "events", :batch? true, :count 6}, :time 63408706903, :process 0, :batch? true, :ids ["378554359933640704" "378554359933640705" "378554359933640706" "378554359933640707" "378554359933640708" "378554359933640709"], :type :ok, :requested-count 6, :f :idgen}
+{:index 313, :time 63452138824, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? false, :count 14}}
+{:index 314, :name "orders", :value {:name "orders", :batch? false, :count 14}, :time 63453856204, :process 0, :batch? false, :ids ["378554360126578688"], :type :ok, :f :idgen}
+{:index 315, :time 63578712433, :type :invoke, :process 1, :f :idgen, :value {:name "orders", :batch? false, :count 14}}
+{:index 316, :name "orders", :value {:name "orders", :batch? false, :count 14}, :time 63582056680, :process 1, :batch? false, :ids ["378554360663449600"], :type :ok, :f :idgen}
+{:index 317, :time 63749875166, :type :invoke, :process 2, :f :idgen, :value {:name "orders", :batch? false, :count 10}}
+{:index 318, :name "orders", :value {:name "orders", :batch? false, :count 10}, :time 63753691779, :process 2, :batch? false, :ids ["378554361380675584"], :type :ok, :f :idgen}
+{:index 319, :time 64025237077, :type :invoke, :process 3, :f :idgen, :value {:name "events", :batch? false, :count 2}}
+{:index 320, :name "events", :value {:name "events", :batch? false, :count 2}, :time 64029020786, :process 3, :batch? false, :ids ["378554362534109184"], :type :ok, :f :idgen}
+{:index 321, :time 64051367217, :type :invoke, :process 4, :f :idgen, :value {:name "orders", :batch? false, :count 7}}
+{:index 322, :name "orders", :value {:name "orders", :batch? false, :count 7}, :time 64053984667, :process 4, :batch? false, :ids ["378554362643161088"], :type :ok, :f :idgen}
+{:index 323, :time 64218034900, :type :info, :process :nemesis, :f :stop, :value [:restarted-agent "n5"]}
+{:index 324, :time 64318900470, :type :invoke, :process 6, :f :idgen, :value {:name "orders", :batch? true, :count 15}}
+{:index 325, :name "orders", :n 15, :value {:name "orders", :batch? true, :count 15}, :time 64321221231, :process 6, :batch? true, :ids ["378554363763040256" "378554363763040257" "378554363763040258" "378554363763040259" "378554363763040260" "378554363763040261" "378554363763040262" "378554363763040263" "378554363763040264" "378554363763040265" "378554363763040266" "378554363763040267" "378554363763040268" "378554363763040269" "378554363763040270"], :type :ok, :requested-count 15, :f :idgen}
+{:index 326, :time 65205753763, :type :invoke, :process 7, :f :idgen, :value {:name "events", :batch? true, :count 9}}
+{:index 327, :name "events", :n 9, :value {:name "events", :batch? true, :count 9}, :time 65209761067, :process 7, :batch? true, :ids ["378554367487582208" "378554367487582209" "378554367487582210" "378554367487582211" "378554367487582212" "378554367487582213" "378554367487582214" "378554367487582215" "378554367487582216"], :type :ok, :requested-count 9, :f :idgen}
+{:index 328, :time 65531843706, :type :invoke, :process 8, :f :idgen, :value {:name "events", :batch? true, :count 16}}
+{:index 329, :name "events", :n 16, :value {:name "events", :batch? true, :count 16}, :time 65536008236, :process 8, :batch? true, :ids ["378554368854925312" "378554368854925313" "378554368854925314" "378554368854925315" "378554368854925316" "378554368854925317" "378554368854925318" "378554368854925319" "378554368854925320" "378554368854925321" "378554368854925322" "378554368854925323" "378554368854925324" "378554368854925325" "378554368854925326" "378554368854925327"], :type :ok, :requested-count 16, :f :idgen}
+{:index 330, :time 65649558503, :type :invoke, :process 9, :f :idgen, :value {:name "orders", :batch? true, :count 7}}
+{:index 331, :name "orders", :n 7, :value {:name "orders", :batch? true, :count 7}, :time 65653546883, :process 9, :batch? true, :ids ["378554369349853184" "378554369349853185" "378554369349853186" "378554369349853187" "378554369349853188" "378554369349853189" "378554369349853190"], :type :ok, :requested-count 7, :f :idgen}
+{:index 332, :time 65856844849, :type :invoke, :process 0, :f :idgen, :value {:name "events", :batch? true, :count 6}}
+{:index 333, :name "events", :n 6, :value {:name "events", :batch? true, :count 6}, :time 65860356741, :process 0, :batch? true, :ids ["378554370218074112" "378554370218074113" "378554370218074114" "378554370218074115" "378554370218074116" "378554370218074117"], :type :ok, :requested-count 6, :f :idgen}
+{:index 334, :time 66316187177, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? true, :count 14}}
+{:index 335, :name "orders", :n 14, :value {:name "orders", :batch? true, :count 14}, :time 66319547894, :process 0, :batch? true, :ids ["378554372143259648" "378554372143259649" "378554372143259650" "378554372143259651" "378554372143259652" "378554372143259653" "378554372143259654" "378554372143259655" "378554372143259656" "378554372143259657" "378554372143259658" "378554372143259659" "378554372143259660" "378554372143259661"], :type :ok, :requested-count 14, :f :idgen}
+{:index 336, :time 66364772739, :type :invoke, :process 1, :f :idgen, :value {:name "events", :batch? true, :count 9}}
+{:index 337, :name "events", :n 9, :value {:name "events", :batch? true, :count 9}, :time 66371494887, :process 1, :batch? true, :ids ["378554372361363456" "378554372361363457" "378554372361363458" "378554372361363459" "378554372361363460" "378554372361363461" "378554372361363462" "378554372361363463" "378554372361363464"], :type :ok, :requested-count 9, :f :idgen}
+{:index 338, :time 67707065046, :type :invoke, :process 2, :f :idgen, :value {:name "events", :batch? false, :count 5}}
+{:index 339, :name "events", :value {:name "events", :batch? false, :count 5}, :time 67710874202, :process 2, :batch? false, :ids ["378554377977536512"], :type :ok, :f :idgen}
+{:index 340, :time 67789489430, :type :invoke, :process 3, :f :idgen, :value {:name "orders", :batch? true, :count 16}}
+{:index 341, :name "orders", :n 16, :value {:name "orders", :batch? true, :count 16}, :time 67793350678, :process 3, :batch? true, :ids ["378554378325663744" "378554378325663745" "378554378325663746" "378554378325663747" "378554378325663748" "378554378325663749" "378554378325663750" "378554378325663751" "378554378325663752" "378554378325663753" "378554378325663754" "378554378325663755" "378554378325663756" "378554378325663757" "378554378325663758" "378554378325663759"], :type :ok, :requested-count 16, :f :idgen}
+{:index 342, :time 68315579134, :type :invoke, :process 4, :f :idgen, :value {:name "orders", :batch? false, :count 12}}
+{:index 343, :name "orders", :value {:name "orders", :batch? false, :count 12}, :time 68318887314, :process 4, :batch? false, :ids ["378554380531867648"], :type :ok, :f :idgen}
+{:index 344, :time 68463969380, :type :invoke, :process 5, :f :idgen, :value {:name "orders", :batch? true, :count 2}}
+{:index 345, :name "orders", :n 2, :value {:name "orders", :batch? true, :count 2}, :time 68473833284, :process 5, :batch? true, :ids ["378554381156818944" "378554381156818945"], :type :ok, :requested-count 2, :f :idgen}
+{:index 346, :time 68802495726, :type :invoke, :process 6, :f :idgen, :value {:name "events", :batch? true, :count 14}}
+{:index 347, :name "events", :n 14, :value {:name "events", :batch? true, :count 14}, :time 68805990054, :process 6, :batch? true, :ids ["378554382570299392" "378554382570299393" "378554382570299394" "378554382570299395" "378554382570299396" "378554382570299397" "378554382570299398" "378554382570299399" "378554382570299400" "378554382570299401" "378554382570299402" "378554382570299403" "378554382570299404" "378554382570299405"], :type :ok, :requested-count 14, :f :idgen}
+{:index 348, :time 68867116764, :type :invoke, :process 7, :f :idgen, :value {:name "orders", :batch? false, :count 9}}
+{:index 349, :name "orders", :value {:name "orders", :batch? false, :count 9}, :time 68870420856, :process 7, :batch? false, :ids ["378554382842929152"], :type :ok, :f :idgen}
+{:index 350, :time 69456749574, :type :invoke, :process 8, :f :idgen, :value {:name "orders", :batch? false, :count 13}}
+{:index 351, :name "orders", :value {:name "orders", :batch? false, :count 13}, :time 69460061593, :process 8, :batch? false, :ids ["378554385317568512"], :type :ok, :f :idgen}
+{:index 352, :time 69984996875, :type :invoke, :process 9, :f :idgen, :value {:name "orders", :batch? true, :count 11}}
+{:index 353, :name "orders", :n 11, :value {:name "orders", :batch? true, :count 11}, :time 69988872567, :process 9, :batch? true, :ids ["378554387532161024" "378554387532161025" "378554387532161026" "378554387532161027" "378554387532161028" "378554387532161029" "378554387532161030" "378554387532161031" "378554387532161032" "378554387532161033" "378554387532161034"], :type :ok, :requested-count 11, :f :idgen}
+{:index 354, :time 70044299879, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? false, :count 6}}
+{:index 355, :name "orders", :value {:name "orders", :batch? false, :count 6}, :time 70047994477, :process 0, :batch? false, :ids ["378554387779624960"], :type :ok, :f :idgen}
+{:index 356, :time 70056262323, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? true, :count 6}}
+{:index 357, :name "orders", :n 6, :value {:name "orders", :batch? true, :count 6}, :time 70059769893, :process 0, :batch? true, :ids ["378554387829956608" "378554387829956609" "378554387829956610" "378554387829956611" "378554387829956612" "378554387829956613"], :type :ok, :requested-count 6, :f :idgen}
+{:index 358, :time 70190934348, :type :invoke, :process 1, :f :idgen, :value {:name "events", :batch? false, :count 6}}
+{:index 359, :name "events", :value {:name "events", :batch? false, :count 6}, :time 70194271323, :process 1, :batch? false, :ids ["378554388396187648"], :type :ok, :f :idgen}
+{:index 360, :time 70200348298, :type :invoke, :process 2, :f :idgen, :value {:name "events", :batch? false, :count 7}}
+{:index 361, :name "events", :value {:name "events", :batch? false, :count 7}, :time 70203790476, :process 2, :batch? false, :ids ["378554388433936384"], :type :ok, :f :idgen}
+{:index 362, :time 70921975385, :type :invoke, :process 3, :f :idgen, :value {:name "orders", :batch? false, :count 6}}
+{:index 363, :name "orders", :value {:name "orders", :batch? false, :count 6}, :time 70925860371, :process 3, :batch? false, :ids ["378554391462223872"], :type :ok, :f :idgen}
+{:index 364, :time 71079243378, :type :invoke, :process 4, :f :idgen, :value {:name "orders", :batch? false, :count 13}}
+{:index 365, :name "orders", :value {:name "orders", :batch? false, :count 13}, :time 71083517193, :process 4, :batch? false, :ids ["378554392120729600"], :type :ok, :f :idgen}
+{:index 366, :time 71455789449, :type :invoke, :process 5, :f :idgen, :value {:name "events", :batch? true, :count 5}}
+{:index 367, :name "events", :n 5, :value {:name "events", :batch? true, :count 5}, :time 71459964474, :process 5, :batch? true, :ids ["378554393701982208" "378554393701982209" "378554393701982210" "378554393701982211" "378554393701982212"], :type :ok, :requested-count 5, :f :idgen}
+{:index 368, :time 71650514082, :type :info, :process :nemesis, :f :start, :value nil}
+{:index 369, :time 71809200721, :type :info, :process :nemesis, :f :start, :value [:killed-agent "n4"]}
+{:index 370, :time 71840788249, :type :invoke, :process 8, :f :idgen, :value {:name "orders", :batch? false, :count 7}}
+{:index 371, :name "orders", :value {:name "orders", :batch? false, :count 7}, :time 71847283538, :process 8, :batch? false, :ids ["378554395329372160"], :type :ok, :f :idgen}
+{:index 372, :time 71895742428, :type :invoke, :process 9, :f :idgen, :value {:name "orders", :batch? true, :count 5}}
+{:index 373, :time 71900402736, :type :info, :process 9, :f :idgen, :value {:name "orders", :batch? true, :count 5}, :error :unavailable-maybe-applied}
+{:index 374, :time 71950198087, :type :invoke, :process 0, :f :idgen, :value {:name "orders", :batch? true, :count 16}}
+{:index 375, :time 71953825985, :type :info, :process 0, :f :idgen, :value {:name "orders", :batch? true, :count 16}, :error :unavailable-maybe-applied}
+{:index 376, :time 72635943906, :type :invoke, :process 10, :f :idgen, :value {:name "orders", :batch? true, :count 15}}
+{:index 377, :name "orders", :n 15, :value {:name "orders", :batch? true, :count 15}, :time 72726164204, :process 10, :batch? true, :ids ["378554399016165376" "378554399016165377" "378554399016165378" "378554399016165379" "378554399016165380" "378554399016165381" "378554399016165382" "378554399016165383" "378554399016165384" "378554399016165385" "378554399016165386" "378554399016165387" "378554399016165388" "378554399016165389" "378554399016165390"], :type :ok, :requested-count 15, :f :idgen}
+{:index 378, :time 73095783128, :type :invoke, :process 1, :f :idgen, :value {:name "events", :batch? true, :count 8}}
+{:index 379, :time 73099488363, :type :info, :process 1, :f :idgen, :value {:name "events", :batch? true, :count 8}, :error :unavailable-maybe-applied}
+{:index 380, :time 73673367287, :type :invoke, :process 2, :f :idgen, :value {:name "events", :batch? true, :count 13}}
+{:index 381, :time 73676686753, :type :info, :process 2, :f :idgen, :value {:name "events", :batch? true, :count 13}, :error :unavailable-maybe-applied}
+{:index 382, :time 73764637908, :type :invoke, :process 3, :f :idgen, :value {:name "orders", :batch? true, :count 10}}
+{:index 383, :name "orders", :n 10, :value {:name "orders", :batch? true, :count 10}, :time 73770994663, :process 3, :batch? true, :ids ["378554403399213056" "378554403399213057" "378554403399213058" "378554403399213059" "378554403399213060" "378554403399213061" "378554403399213062" "378554403399213063" "378554403399213064" "378554403399213065"], :type :ok, :requested-count 10, :f :idgen}
+{:index 384, :time 73978248257, :type :invoke, :process 4, :f :idgen, :value {:name "events", :batch? false, :count 9}}
+{:index 385, :name "events", :value {:name "events", :batch? false, :count 9}, :time 73984048710, :process 4, :batch? false, :ids ["378554404288405504"], :type :ok, :f :idgen}
+{:index 386, :time 74868930332, :type :invoke, :process 5, :f :idgen, :value {:name "events", :batch? false, :count 2}}
+{:index 387, :name "events", :value {:name "events", :batch? false, :count 2}, :time 74874759691, :process 5, :batch? false, :ids ["378554408025530368"], :type :ok, :f :idgen}
+{:index 388, :time 75147660003, :type :invoke, :process 6, :f :idgen, :value {:name "events", :batch? true, :count 4}}
+{:index 389, :name "events", :n 4, :value {:name "events", :batch? true, :count 4}, :time 75153623271, :process 6, :batch? true, :ids ["378554409195741184" "378554409195741185" "378554409195741186" "378554409195741187"], :type :ok, :requested-count 4, :f :idgen}
+{:index 390, :time 75213449972, :type :invoke, :process 7, :f :idgen, :value {:name "events", :batch? true, :count 14}}
+{:index 391, :time 75218507415, :type :invoke, :process 8, :f :idgen, :value {:name "orders", :batch? false, :count 2}}
+{:index 392, :name "events", :n 14, :value {:name "events", :batch? true, :count 14}, :time 75220000524, :process 7, :batch? true, :ids ["378554409472565248" "378554409472565249" "378554409472565250" "378554409472565251" "378554409472565252" "378554409472565253" "378554409472565254" "378554409472565255" "378554409472565256" "378554409472565257" "378554409472565258" "378554409472565259" "378554409472565260" "378554409472565261"], :type :ok, :requested-count 14, :f :idgen}
+{:index 393, :name "orders", :value {:name "orders", :batch? false, :count 2}, :time 75221835238, :process 8, :batch? false, :ids ["378554409480953856"], :type :ok, :f :idgen}
+{:index 394, :time 75935823083, :type :invoke, :process 19, :f :idgen, :value {:name "orders", :batch? false, :count 3}}
+{:index 395, :time 75995528724, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 396, :name "orders", :value {:name "orders", :batch? false, :count 3}, :time 76024356982, :process 19, :batch? false, :ids ["378554412848979968"], :type :ok, :f :idgen}
+{:index 397, :time 76029944764, :type :invoke, :process 10, :f :idgen, :value {:name "orders", :batch? false, :count 8}}
+{:index 398, :name "orders", :value {:name "orders", :batch? false, :count 8}, :time 76031883844, :process 10, :batch? false, :ids ["378554412882534400"], :type :ok, :f :idgen}
+{:index 399, :time 76135219855, :type :invoke, :process 11, :f :idgen, :value {:name "orders", :batch? false, :count 9}}
+{:index 400, :name "orders", :value {:name "orders", :batch? false, :count 9}, :time 76246871275, :process 11, :batch? false, :ids ["378554413784309760"], :type :ok, :f :idgen}
+{:index 401, :time 76444504565, :type :invoke, :process 12, :f :idgen, :value {:name "orders", :batch? true, :count 16}}
+{:index 402, :name "orders", :n 16, :value {:name "orders", :batch? true, :count 16}, :time 76559558476, :process 12, :batch? true, :ids ["378554415092932608" "378554415092932609" "378554415092932610" "378554415092932611" "378554415092932612" "378554415092932613" "378554415092932614" "378554415092932615" "378554415092932616" "378554415092932617" "378554415092932618" "378554415092932619" "378554415092932620" "378554415092932621" "378554415092932622" "378554415092932623"], :type :ok, :requested-count 16, :f :idgen}
+{:index 403, :time 76565154039, :type :invoke, :process 3, :f :idgen, :value {:name "events", :batch? true, :count 6}}
+{:index 404, :name "events", :n 6, :value {:name "events", :batch? true, :count 6}, :time 76569029621, :process 3, :batch? true, :ids ["378554415134875648" "378554415134875649" "378554415134875650" "378554415134875651" "378554415134875652" "378554415134875653"], :type :ok, :requested-count 6, :f :idgen}
+{:index 405, :time 77101923671, :type :invoke, :process 4, :f :idgen, :value {:name "events", :batch? false, :count 16}}
+{:index 406, :name "events", :value {:name "events", :batch? false, :count 16}, :time 77106009822, :process 4, :batch? false, :ids ["378554417383022592"], :type :ok, :f :idgen}
+{:index 407, :time 77136794970, :type :invoke, :process 5, :f :idgen, :value {:name "events", :batch? true, :count 4}}
+{:index 408, :name "events", :n 4, :value {:name "events", :batch? true, :count 4}, :time 77140070942, :process 5, :batch? true, :ids ["378554417529823232" "378554417529823233" "378554417529823234" "378554417529823235"], :type :ok, :requested-count 4, :f :idgen}
+{:index 409, :time 77179932418, :type :invoke, :process 6, :f :idgen, :value {:name "orders", :batch? true, :count 10}}
+{:index 410, :name "orders", :n 10, :value {:name "orders", :batch? true, :count 10}, :time 77183695156, :process 6, :batch? true, :ids ["378554417710178304" "378554417710178305" "378554417710178306" "378554417710178307" "378554417710178308" "378554417710178309" "378554417710178310" "378554417710178311" "378554417710178312" "378554417710178313"], :type :ok, :requested-count 10, :f :idgen}
+{:index 411, :time 77193553799, :type :info, :process :nemesis, :f :stop, :value [:restarted-agent "n4"]}
+{:index 412, :time 77273851977, :type :invoke, :process 8, :f :idgen, :value {:name "events", :batch? true, :count 7}}
+{:index 413, :name "events", :n 7, :value {:name "events", :batch? true, :count 7}, :time 77277620076, :process 8, :batch? true, :ids ["378554418104442880" "378554418104442881" "378554418104442882" "378554418104442883" "378554418104442884" "378554418104442885" "378554418104442886"], :type :ok, :requested-count 7, :f :idgen}
+{:index 414, :time 77467943374, :type :invoke, :process 19, :f :idgen, :value {:name "orders", :batch? false, :count 9}}
+{:index 415, :name "orders", :value {:name "orders", :batch? false, :count 9}, :time 77471465958, :process 19, :batch? false, :ids ["378554418918137856"], :type :ok, :f :idgen}
+{:index 416, :time 77621968034, :type :invoke, :process 10, :f :idgen, :value {:name "events", :batch? false, :count 1}}
+{:index 417, :name "events", :value {:name "events", :batch? false, :count 1}, :time 77626280779, :process 10, :batch? false, :ids ["378554419568254976"], :type :ok, :f :idgen}
+{:index 418, :time 77972130320, :type :invoke, :process 10, :f :idgen, :value {:name "events", :batch? true, :count 10}}
+{:index 419, :name "events", :n 10, :value {:name "events", :batch? true, :count 10}, :time 77973989584, :process 10, :batch? true, :ids ["378554421027872768" "378554421027872769" "378554421027872770" "378554421027872771" "378554421027872772" "378554421027872773" "378554421027872774" "378554421027872775" "378554421027872776" "378554421027872777"], :type :ok, :requested-count 10, :f :idgen}
+{:index 420, :time 77976542128, :type :invoke, :process 11, :f :idgen, :value {:name "events", :batch? false, :count 4}}
+{:index 421, :name "events", :value {:name "events", :batch? false, :count 4}, :time 77978134681, :process 11, :batch? false, :ids ["378554421044649984"], :type :ok, :f :idgen}
+{:index 422, :time 78161349139, :type :invoke, :process 12, :f :idgen, :value {:name "orders", :batch? true, :count 13}}
+{:index 423, :name "orders", :n 13, :value {:name "orders", :batch? true, :count 13}, :time 78164846558, :process 12, :batch? true, :ids ["378554421824790528" "378554421824790529" "378554421824790530" "378554421824790531" "378554421824790532" "378554421824790533" "378554421824790534" "378554421824790535" "378554421824790536" "378554421824790537" "378554421824790538" "378554421824790539" "378554421824790540"], :type :ok, :requested-count 13, :f :idgen}
+{:index 424, :time 81498608606, :type :info, :process :nemesis, :f :stop, :value nil}
+{:index 425, :time 81907379156, :type :info, :process :nemesis, :f :stop, :value [:restarted-agent "n4"]}

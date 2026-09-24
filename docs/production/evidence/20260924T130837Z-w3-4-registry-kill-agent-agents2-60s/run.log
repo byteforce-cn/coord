@@ -1,0 +1,780 @@
+2026-09-24 13:00:53,530{GMT}	INFO	[jepsen test runner] jepsen.core: Test version f01635ae7ea71858a96234615e327bfc70db724e
+2026-09-24 13:00:53,530{GMT}	INFO	[jepsen test runner] jepsen.core: Command line:
+lein run test --nodes-file /root/nodes --username root --ssh-private-key /root/.ssh/id_ed25519 --workload registry --nemesis kill-agent --time-limit 60 --concurrency 2n --agents 2 --registry-min-cycles 1
+2026-09-24 13:00:53,583{GMT}	INFO	[jepsen test runner] jepsen.core: Running test:
+{:cache-ttl-seconds nil
+ :remote
+ #jepsen.control.retry.Remote{:remote #jepsen.control.scp.Remote{:cmd-remote #jepsen.control.sshj.SSHJRemote{:concurrency-limit 6,
+                                                                                                             :conn-spec nil,
+                                                                                                             :client nil,
+                                                                                                             :semaphore nil},
+                                                                 :conn-spec nil},
+                              :conn nil}
+ :idem-replay-delay-ms 0
+ :agent-plan
+ {:tunnel-base 34587,
+  :root-password "66c57bb56bce306f484344e4a8650836",
+  :coord-dir "/opt/coord",
+  :hosts ["n4" "n5"],
+  :peers ["172.19.0.2:50051" "172.19.0.4:50051" "172.19.0.6:50051"],
+  :idgen-node-ids [],
+  :provisioner-prefix "coord-agent-jepsen",
+  :bootstrap-token "jepsen-agent-bootstrap-token-0123456789abcdef",
+  :auth-root-key "820662a9f85924333d6d466714bc51734b251e73b827a394e1978e36d2429bfc",
+  :count 2,
+  :agent-verifying-key "d0c6d1ff5fd200db97c05ffeb873340adb89a7a6de7f421f6d27db58050eedd4",
+  :coord-bin "/root/coord-test/coord",
+  :services #{:idgen :registry :leader-election :lock}}
+ :ssh-private-key "/root/.ssh/id_ed25519"
+ :idem-min-replay-attempts nil
+ :lock-grace-ms nil
+ :election-ttl-seconds nil
+ :watch-min-events nil
+ :concurrency 10
+ :lease-ttl-seconds nil
+ :soak-disrupt 600
+ :idgen-min-regressions nil
+ :db
+ #jepsen.coord.db.CoordDB{:cluster-name "jepsen-coord",
+                          :pidfile-prefix "/var/run/coord-",
+                          :root-password "66c57bb56bce306f484344e4a8650836",
+                          :coord-dir "/opt/coord",
+                          :config-dir "/etc/coord",
+                          :logfile "/var/log/coord.log",
+                          :agent-bootstrap-token "jepsen-agent-bootstrap-token-0123456789abcdef",
+                          :regions nil,
+                          :agent-peers ["172.19.0.2:50051"
+                                        "172.19.0.4:50051"
+                                        "172.19.0.6:50051"],
+                          :data-dir "/var/lib/coord",
+                          :nodes ["n1" "n2" "n3"],
+                          :auth-root-key "820662a9f85924333d6d466714bc51734b251e73b827a394e1978e36d2429bfc",
+                          :raft-secret "93edf94d2860fec54bc59278a804cb1bbd2d0a7243e4f39d667d66966d9844d1",
+                          :agents 2,
+                          :coord-bin "/root/coord-test/coord"}
+ :leave-db-running? false
+ :agent-idgen-node-ids nil
+ :via-agent false
+ :cache-min-list-ops nil
+ :name "coord"
+ :registry-ttl-seconds nil
+ :logging-json? false
+ :mixture-ratio nil
+ :start-time
+ #object[java.time.OffsetDateTime "0x4b5c84be" "2026-09-24T13:00:53.505550465Z"]
+ :regions nil
+ :lease-min-grants nil
+ :map-keys nil
+ :net
+ #object[jepsen.net$iptables_with_dev$reify__15623
+         "0x404bca88"
+         "jepsen.net$iptables_with_dev$reify__15623@404bca88"]
+ :election-hold-ms nil
+ :client
+ #object[jepsen.coord$with_agent$reify__4814
+         "0x509cf379"
+         "jepsen.coord$with_agent$reify__4814@509cf379"]
+ :lease-revoke-ttl-seconds nil
+ :barrier
+ #object[java.util.concurrent.CyclicBarrier
+         "0x4f517209"
+         "java.util.concurrent.CyclicBarrier@4f517209"]
+ :agent-peers ["172.19.0.2:50051" "172.19.0.4:50051" "172.19.0.6:50051"]
+ :ssh
+ {:dummy? false,
+  :username "root",
+  :password "root",
+  :strict-host-key-checking false,
+  :private-key-path "/root/.ssh/id_ed25519"}
+ :lease-tolerance-ms nil
+ :rate nil
+ :map-min-deletes nil
+ :seed 109486512
+ :mq-topic nil
+ :cache-min-set-ops nil
+ :lock-ttl-seconds nil
+ :checker
+ #jepsen.checker.Compose{:checkers {:linear #object[jepsen.coord.regck$checker$reify__3189
+                                                    "0x60877629"
+                                                    "jepsen.coord.regck$checker$reify__3189@60877629"],
+                                    :gates #object[jepsen.coord.gates$checker$reify__2287
+                                                   "0x7e86ff3b"
+                                                   "jepsen.coord.gates$checker$reify__2287@7e86ff3b"],
+                                    :perf #jepsen.checker.Compose{:checkers {:latency-graph #jepsen.checker.LatencyGraph{:opts {}},
+                                                                             :rate-graph #jepsen.checker.RateGraph{:opts {}}}}}}
+ :lease-min-expiries nil
+ :cache-min-sets nil
+ :mq-min-polls nil
+ :argv
+ ("test"
+  "--nodes-file"
+  "/root/nodes"
+  "--username"
+  "root"
+  "--ssh-private-key"
+  "/root/.ssh/id_ed25519"
+  "--workload"
+  "registry"
+  "--nemesis"
+  "kill-agent"
+  "--time-limit"
+  "60"
+  "--concurrency"
+  "2n"
+  "--agents"
+  "2"
+  "--registry-min-cycles"
+  "1")
+ :nemesis #unprintable "jepsen.coord.nemesis$kill_agent$reify__4197@4936dca9"
+ :watch-resumes nil
+ :mq-consumer-group nil
+ :lease-grace-ms nil
+ :soak-mix nil
+ :mq-expect-idem-dedupe false
+ :nodes ["n1" "n2" "n3"]
+ :test-count 1
+ :no-jitter false
+ :election-min-campaigns nil
+ :registry-min-cycles 1
+ :lock-min-acquires nil
+ :idgen-min-ids nil
+ :cache-min-gets nil
+ :generator
+ #object[jepsen.util.Forgettable
+         "0xf4deb35"
+         ((jepsen.generator.Synchronize
+           {:gen (jepsen.generator.TimeLimit
+                  {:limit 60000000000,
+                   :cutoff nil,
+                   :gen (jepsen.generator.Any
+                         {:gens [(jepsen.generator.OnThreads
+                                  {:f #{:nemesis},
+                                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                           "0x49f2994f"
+                                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@49f2994f"],
+                                   :gen ({:type :sleep,
+                                          :value 4.690180192850714}
+                                         {:type :info, :f :start}
+                                         {:type :sleep,
+                                          :value 3.6818145573087637}
+                                         {:type :info, :f :stop}
+                                         {:type :sleep,
+                                          :value 7.163230612348621}
+                                         {:type :info, :f :start}
+                                         {:type :sleep,
+                                          :value 5.665425362078876}
+                                         {:type :info, :f :stop}
+                                         ...)})
+                                 (jepsen.generator.OnThreads
+                                  {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                           "0x9353d68"
+                                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@9353d68"],
+                                   :gen (jepsen.generator.Stagger
+                                         {:dt-fn #object[jepsen.generator$stagger_exp$dt_fn__6799
+                                                         "0x2a654f27"
+                                                         "jepsen.generator$stagger_exp$dt_fn__6799@2a654f27"],
+                                          :next-time nil,
+                                          :gen (jepsen.generator.OnThreads
+                                                {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                                 :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                                         "0x770093c5"
+                                                                         "jepsen.generator.context$make_thread_filter$lazy_filter__5865@770093c5"],
+                                                 :gen (jepsen.generator.Mix
+                                                       {:i 0,
+                                                        :gens [(jepsen.generator.Mix
+                                                                {:i 2,
+                                                                 :gens [#object[jepsen.coord$registry_gen$op__4511
+                                                                                "0x785dbe3a"
+                                                                                "jepsen.coord$registry_gen$op__4511@785dbe3a"]
+                                                                        #object[jepsen.coord$registry_gen$op__4511
+                                                                                "0x785dbe3a"
+                                                                                "jepsen.coord$registry_gen$op__4511@785dbe3a"]
+                                                                        #object[jepsen.coord$registry_gen$probe__4513
+                                                                                "0x58230224"
+                                                                                "jepsen.coord$registry_gen$probe__4513@58230224"]]})]})})})})]})})})
+          (jepsen.generator.Synchronize
+           {:gen (jepsen.generator.OnThreads
+                  {:f #{:nemesis},
+                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                           "0x583f6270"
+                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@583f6270"],
+                   :gen {:type :info, :f :stop}})})
+          (jepsen.generator.Synchronize
+           {:gen {:type :log, :value "recovery: letting cluster converge"}})
+          (jepsen.generator.Synchronize {:gen {:type :sleep, :value 30}}))]
+ :lock-deadline-ms nil
+ :min-op-ok-ratio nil
+ :soak-max-rto-seconds nil
+ :idem-replay-node-offset 0
+ :lease-keepalive-ms nil
+ :min-op-sample nil
+ :os
+ #object[jepsen.os$reify__16045 "0x2bd24c09" "jepsen.os$reify__16045@2bd24c09"]
+ :time-limit 60
+ :quiet-availability-min nil
+ :soak-quiet 1800
+ :value-size nil
+ :cache-ttl-grace-ms nil
+ :agent-verifying-key nil
+ :quiet-min-sample nil
+ :watch-window-ms nil
+ :workload :registry
+ :registry-grace-ms nil
+ :agents 2
+ :watch-max-events nil
+ :mq-min-publishes nil
+ :watch-semantics nil
+ :lock-hold-ms nil}
+
+2026-09-24 13:00:54,912{GMT}	INFO	[jepsen test runner] jepsen.db: Tearing down DB
+2026-09-24 13:00:54,912{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-24 13:00:54,912{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-24 13:00:54,912{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-24 13:00:56,677{GMT}	INFO	[jepsen test runner] jepsen.db: Setting up DB
+2026-09-24 13:00:56,678{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Setting up coord on n2
+2026-09-24 13:00:56,678{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Setting up coord on n1
+2026-09-24 13:00:56,678{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Setting up coord on n3
+2026-09-24 13:00:59,380{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-24 13:00:59,435{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-24 13:00:59,472{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-24 13:00:59,495{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-24 13:00:59,549{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-24 13:00:59,586{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-24 13:00:59,764{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-24 13:00:59,764{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-24 13:01:00,374{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-24 13:01:00,376{GMT}	INFO	[jepsen test runner] jepsen.core: Relative time begins now
+2026-09-24 13:01:00,379{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-24 13:01:00,379{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-24 13:01:00,827{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: agent-bootstrap role granted against 172.19.0.2:50051
+2026-09-24 13:01:02,324{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: granted 27 capabilities to role root against 172.19.0.2:50051
+2026-09-24 13:01:02,325{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: starting 2 agent(s) on [n4 n5]
+2026-09-24 13:01:12,712{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-24 13:01:15,846{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-24 13:01:16,172{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: a 1 on n4 is ready (http + grpc 19527 )
+2026-09-24 13:01:16,436{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: a 2 on n5 is ready (http + grpc 19527 )
+2026-09-24 13:01:17,475{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: tunnel a 1 127.0.0.1: 34588 -> n4 : 19527 (pid 589495 ) verified end-to-end 
+2026-09-24 13:01:18,516{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: tunnel a 2 127.0.0.1: 34589 -> n5 : 19527 (pid 589513 ) verified end-to-end 
+2026-09-24 13:01:18,516{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: all 2 tunnel(s) verified end-to-end
+2026-09-24 13:01:18,516{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:01:18,606{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-24 13:01:18,606{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-24 13:01:18,606{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-24 13:01:18,621{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord cluster is ready
+2026-09-24 13:01:18,622{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord cluster is ready
+2026-09-24 13:01:18,662{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord cluster is ready
+2026-09-24 13:01:18,676{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:18,677{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-24 13:01:18,766{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:19,460{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-3", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:19,460{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-24 13:01:19,657{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:19,657{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:01:19,744{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:20,372{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-6", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:20,373{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-24 13:01:21,413{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-8", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:21,414{GMT}	INFO	[jepsen worker 5] jepsen.coord.client: Opening coord client on n3
+2026-09-24 13:01:21,570{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-10", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:21,570{GMT}	INFO	[jepsen worker 6] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:01:21,813{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-12", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:21,813{GMT}	INFO	[jepsen worker 7] jepsen.coord.client: Opening coord client on n2
+2026-09-24 13:01:21,853{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-14", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:21,853{GMT}	INFO	[jepsen worker 8] jepsen.coord.client: Opening coord client on n3
+2026-09-24 13:01:21,890{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-16", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:21,890{GMT}	INFO	[jepsen worker 9] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:01:22,044{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-18", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:22,044{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:01:22,749{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:22,753{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:22,813{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-21", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:22,837{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-23", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:23,366{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-24 13:01:23,516{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	[:killed-agent "n4"]
+2026-09-24 13:01:23,587{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-18", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:23,588{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:23,589{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:23,615{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-8", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:23,647{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-23", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:23,658{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-6", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:23,658{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-12", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:23,678{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-3", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:23,678{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-14", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:23,716{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-16", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:23,722{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-21", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:23,722{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-10", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:23,728{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:23,731{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:23,938{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:23,941{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:23,949{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-24", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:24,106{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:24,110{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:24,202{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-28", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:24,227{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:24,232{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:24,436{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:24,439{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:24,555{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-25", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:24,691{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-30", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:24,853{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-32", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:25,694{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-34", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:25,738{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-36", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:25,846{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:25,855{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:25,920{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:25,924{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:25,932{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-39", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:26,217{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:26,220{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:26,267{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-42", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:26,519{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:26,523{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:27,058{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-44", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:27,198{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-24 13:01:27,283{GMT}	INFO	[jepsen worker nemesis] jepsen.control.util: Starting coord
+2026-09-24 13:01:27,624{GMT}	INFO	[jepsen worker nemesis] jepsen.coord.agent: coord-agent: a 2 on n5 is ready (http + grpc 19527 )
+2026-09-24 13:01:27,625{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	[:restarted-agent "n5"]
+2026-09-24 13:01:33,022{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-24", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:33,022{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:33,024{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:33,270{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-28", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:33,335{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-45", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:33,644{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-25", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:33,810{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-30", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:33,913{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:33,915{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:33,964{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-32", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:34,045{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-49", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:34,613{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:34,616{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:34,692{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-43", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:34,709{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-51", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:34,781{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-34", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:34,789{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-24 13:01:34,880{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-36", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:34,913{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-57", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:34,938{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	[:killed-agent "n4"]
+2026-09-24 13:01:34,976{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:34,978{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:35,049{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-39", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:35,096{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-61", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:35,388{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-42", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:35,673{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-64", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:35,787{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:35,789{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:36,053{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:36,055{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:36,151{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-44", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:36,836{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:36,836{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-68", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:36,838{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:36,963{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-71", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:37,148{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:37,150{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:37,181{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-72", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:40,604{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-24 13:01:40,689{GMT}	INFO	[jepsen worker nemesis] jepsen.control.util: Starting coord
+2026-09-24 13:01:41,760{GMT}	INFO	[jepsen worker nemesis] jepsen.coord.agent: coord-agent: a 1 on n4 is ready (http + grpc 19527 )
+2026-09-24 13:01:41,760{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	[:restarted-agent "n4"]
+2026-09-24 13:01:42,377{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-45", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:42,377{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:42,380{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:42,596{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-73", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:43,127{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-49", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:43,371{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-74", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:43,734{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-43", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:43,836{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-51", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:43,978{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-76", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:44,055{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-57", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:44,143{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-61", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:44,611{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-80", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:44,704{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-82", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:44,775{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-64", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:45,079{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-85", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:45,162{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:45,165{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:45,175{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-86", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:46,009{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-68", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:46,035{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:46,036{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:46,094{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-75", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:46,158{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-71", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:46,209{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-72", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:46,234{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-88", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:46,343{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-87", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:48,676{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-24 13:01:48,784{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	[:killed-agent "n5"]
+2026-09-24 13:01:48,898{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-74", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:48,898{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:48,900{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:48,908{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-89", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:49,301{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-76", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:49,301{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-91", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:49,842{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-80", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:49,842{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-92", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:50,310{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-85", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:50,310{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-90", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:50,704{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-82", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:50,704{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-94", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:51,332{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-75", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:51,480{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-88", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:51,633{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-87", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:51,661{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:51,663{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:51,666{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:51,668{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:51,684{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-93", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:51,735{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-73", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:51,759{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-98", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:51,761{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:info	:registry-cycle	{:name "svc-a", :instance-id "s109486512-98", :ttl-seconds 5, :grace-ms 4000, :dup? false}	:unavailable-maybe-applied
+2026-09-24 13:01:51,785{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-101", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:51,786{GMT}	INFO	[jepsen worker 8] jepsen.coord.client: Opening coord client on n3
+2026-09-24 13:01:52,035{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:52,037{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:52,055{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-95", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:52,228{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:52,230{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:52,258{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-86", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:52,408{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-102", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:53,005{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-104", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:54,138{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-89", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:54,138{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-106", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:54,522{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-91", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:54,522{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:54,523{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:54,869{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-105", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:54,979{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-24 13:01:55,073{GMT}	INFO	[jepsen worker nemesis] jepsen.control.util: Starting coord
+2026-09-24 13:01:55,078{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-92", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:55,110{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-107", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:55,458{GMT}	INFO	[jepsen worker nemesis] jepsen.coord.agent: coord-agent: a 1 on n4 is ready (http + grpc 19527 )
+2026-09-24 13:01:55,458{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	[:restarted-agent "n4"]
+2026-09-24 13:01:55,636{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-90", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:55,636{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-108", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:56,009{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-94", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:56,009{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:56,010{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:56,065{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-105", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:56,095{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-101", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:56,132{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-104", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:56,135{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-95", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:56,183{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-107", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:56,183{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-102", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:56,200{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-108", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:56,201{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-109", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:56,213{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-93", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:56,261{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-106", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:57,124{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-114", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:57,360{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-116", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:57,676{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:57,677{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:01:58,627{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-24 13:01:58,681{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-121", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:01:58,755{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	[:killed-agent "n4"]
+2026-09-24 13:01:58,756{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-110", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:01:58,757{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:info	:registry-cycle	{:name "svc-b", :instance-id "s109486512-110", :ttl-seconds 5, :grace-ms 4000, :dup? false}	:unavailable-maybe-applied
+2026-09-24 13:01:58,982{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:58,987{GMT}	INFO	[jepsen worker 8] jepsen.print: 18	:info	:registry-discover	{:name "svc-b"}	:unavailable-maybe-applied
+2026-09-24 13:01:59,866{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:01:59,867{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:info	:registry-discover	{:name "svc-b"}	:unavailable-maybe-applied
+2026-09-24 13:02:00,398{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:02:00,401{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:info	:registry-discover	{:name "svc-b"}	:unavailable-maybe-applied
+2026-09-24 13:02:00,945{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-124", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:00,946{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:02:01,021{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:02:01,024{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:info	:registry-discover	{:name "svc-b"}	:unavailable-maybe-applied
+2026-09-24 13:02:01,028{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:info	:registry-cycle	{:name "svc-b", :instance-id "s109486512-124", :ttl-seconds 5, :grace-ms 4000, :dup? false}	:unavailable-maybe-applied
+2026-09-24 13:02:01,491{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:02:01,491{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-24 13:02:01,576{GMT}	INFO	[jepsen worker 4] jepsen.print: 14	:info	:registry-discover	{:name "svc-b"}	:unavailable-maybe-applied
+2026-09-24 13:02:02,178{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-24 13:02:02,279{GMT}	INFO	[jepsen worker nemesis] jepsen.control.util: Starting coord
+2026-09-24 13:02:02,312{GMT}	INFO	[jepsen worker 4] jepsen.print: 24	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-129", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:02,312{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-24 13:02:02,410{GMT}	INFO	[jepsen worker 4] jepsen.print: 24	:info	:registry-cycle	{:name "svc-a", :instance-id "s109486512-129", :ttl-seconds 5, :grace-ms 4000, :dup? false}	:unavailable-maybe-applied
+2026-09-24 13:02:02,594{GMT}	INFO	[jepsen worker nemesis] jepsen.coord.agent: coord-agent: a 2 on n5 is ready (http + grpc 19527 )
+2026-09-24 13:02:02,595{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	[:restarted-agent "n5"]
+2026-09-24 13:02:02,613{GMT}	INFO	[jepsen worker 6] jepsen.print: 16	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-134", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:02,613{GMT}	INFO	[jepsen worker 6] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:02:02,751{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-136", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:02,752{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:info	:registry-cycle	{:name "svc-a", :instance-id "s109486512-136", :ttl-seconds 5, :grace-ms 4000, :dup? false}	:unavailable-maybe-applied
+2026-09-24 13:02:03,118{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-139", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:03,119{GMT}	INFO	[jepsen worker 8] jepsen.coord.client: Opening coord client on n3
+2026-09-24 13:02:03,125{GMT}	INFO	[jepsen worker 9] jepsen.print: 19	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-141", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:03,125{GMT}	INFO	[jepsen worker 9] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:02:03,129{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-143", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:03,130{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:02:03,305{GMT}	INFO	[jepsen worker 4] jepsen.print: 34	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-145", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:03,305{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-24 13:02:03,416{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-116", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:03,609{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-148", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:03,669{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-150", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:03,670{GMT}	INFO	[jepsen worker 7] jepsen.coord.client: Opening coord client on n2
+2026-09-24 13:02:04,325{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-109", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:04,325{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-151", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:04,388{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-114", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:04,609{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-153", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:05,264{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-121", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:05,264{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:02:05,266{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:02:05,944{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-154", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:07,801{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-24 13:02:07,925{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	[:killed-agent "n5"]
+2026-09-24 13:02:11,708{GMT}	INFO	[jepsen worker 6] jepsen.print: 16	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-134", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:11,708{GMT}	INFO	[jepsen worker 6] jepsen.print: 16	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:02:11,709{GMT}	INFO	[jepsen worker 6] jepsen.print: 16	:info	:registry-discover	{:name "svc-a"}	:unavailable-maybe-applied
+2026-09-24 13:02:12,158{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-152", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:12,159{GMT}	INFO	[jepsen worker 6] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:02:12,166{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-24 13:02:12,254{GMT}	INFO	[jepsen worker nemesis] jepsen.control.util: Starting coord
+2026-09-24 13:02:12,257{GMT}	INFO	[jepsen worker 6] jepsen.print: 26	:info	:registry-cycle	{:name "svc-a", :instance-id "s109486512-152", :ttl-seconds 5, :grace-ms 4000, :dup? false}	:unavailable-maybe-applied
+2026-09-24 13:02:12,265{GMT}	INFO	[jepsen worker 6] jepsen.print: 36	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:02:12,266{GMT}	INFO	[jepsen worker 6] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:02:12,269{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-139", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:12,271{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-156", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:12,272{GMT}	INFO	[jepsen worker 8] jepsen.print: 28	:info	:registry-cycle	{:name "svc-a", :instance-id "s109486512-156", :ttl-seconds 5, :grace-ms 4000, :dup? false}	:unavailable-maybe-applied
+2026-09-24 13:02:12,347{GMT}	INFO	[jepsen worker 6] jepsen.print: 36	:info	:registry-discover	{:name "svc-a"}	:unavailable-maybe-applied
+2026-09-24 13:02:12,360{GMT}	INFO	[jepsen worker 6] jepsen.print: 46	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:02:12,360{GMT}	INFO	[jepsen worker 6] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:02:12,365{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-143", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:12,380{GMT}	INFO	[jepsen worker 9] jepsen.print: 19	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-141", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:12,396{GMT}	INFO	[jepsen worker 8] jepsen.print: 38	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-155", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:12,396{GMT}	INFO	[jepsen worker 8] jepsen.coord.client: Opening coord client on n3
+2026-09-24 13:02:12,492{GMT}	INFO	[jepsen worker 6] jepsen.print: 46	:info	:registry-discover	{:name "svc-a"}	:unavailable-maybe-applied
+2026-09-24 13:02:12,506{GMT}	INFO	[jepsen worker 8] jepsen.print: 38	:info	:registry-cycle	{:name "svc-b", :instance-id "s109486512-155", :ttl-seconds 5, :grace-ms 4000, :dup? false}	:unavailable-maybe-applied
+2026-09-24 13:02:12,531{GMT}	INFO	[jepsen worker 6] jepsen.print: 56	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-160", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:12,531{GMT}	INFO	[jepsen worker 6] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:02:12,579{GMT}	INFO	[jepsen worker 4] jepsen.print: 34	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-145", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:12,616{GMT}	INFO	[jepsen worker 6] jepsen.print: 56	:info	:registry-cycle	{:name "svc-b", :instance-id "s109486512-160", :ttl-seconds 5, :grace-ms 4000, :dup? false}	:unavailable-maybe-applied
+2026-09-24 13:02:12,644{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-148", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:12,668{GMT}	INFO	[jepsen worker 6] jepsen.print: 66	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-165", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:12,669{GMT}	INFO	[jepsen worker 6] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:02:12,767{GMT}	INFO	[jepsen worker 6] jepsen.print: 66	:info	:registry-cycle	{:name "svc-a", :instance-id "s109486512-165", :ttl-seconds 5, :grace-ms 4000, :dup? false}	:unavailable-maybe-applied
+2026-09-24 13:02:12,805{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-150", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:12,850{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:02:12,851{GMT}	INFO	[jepsen worker 7] jepsen.print: 17	:info	:registry-discover	{:name "svc-a"}	:unavailable-maybe-applied
+2026-09-24 13:02:13,000{GMT}	INFO	[jepsen worker 8] jepsen.print: 48	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:02:13,000{GMT}	INFO	[jepsen worker 8] jepsen.coord.client: Opening coord client on n3
+2026-09-24 13:02:13,012{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-151", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:13,073{GMT}	INFO	[jepsen worker 9] jepsen.print: 19	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:02:13,073{GMT}	INFO	[jepsen worker 9] jepsen.print: 19	:info	:registry-discover	{:name "svc-a"}	:unavailable-maybe-applied
+2026-09-24 13:02:13,077{GMT}	INFO	[jepsen worker 8] jepsen.print: 48	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:02:13,313{GMT}	INFO	[jepsen worker nemesis] jepsen.coord.agent: coord-agent: a 1 on n4 is ready (http + grpc 19527 )
+2026-09-24 13:02:13,313{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	[:restarted-agent "n4"]
+2026-09-24 13:02:13,687{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-171", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:13,719{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-153", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:14,434{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:02:14,436{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:02:14,668{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-174", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:14,682{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:02:14,682{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:info	:registry-discover	{:name "svc-b"}	:unavailable-maybe-applied
+2026-09-24 13:02:14,879{GMT}	INFO	[jepsen worker 4] jepsen.print: 34	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-177", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:14,880{GMT}	INFO	[jepsen worker 4] jepsen.print: 34	:info	:registry-cycle	{:name "svc-a", :instance-id "s109486512-177", :ttl-seconds 5, :grace-ms 4000, :dup? false}	:unavailable-maybe-applied
+2026-09-24 13:02:14,893{GMT}	INFO	[jepsen worker 6] jepsen.print: 76	:invoke	:registry-discover	{:name "svc-a"}
+2026-09-24 13:02:14,894{GMT}	INFO	[jepsen worker 6] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:02:14,896{GMT}	INFO	[jepsen worker 7] jepsen.print: 27	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-179", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:14,897{GMT}	INFO	[jepsen worker 7] jepsen.coord.client: Opening coord client on n2
+2026-09-24 13:02:15,027{GMT}	INFO	[jepsen worker 6] jepsen.print: 76	:ok	:registry-discover	{:name "svc-a"}
+2026-09-24 13:02:15,073{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-154", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:15,302{GMT}	INFO	[jepsen worker 8] jepsen.print: 48	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-183", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:15,579{GMT}	INFO	[jepsen worker 9] jepsen.print: 29	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-185", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:15,580{GMT}	INFO	[jepsen worker 9] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:02:16,549{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-187", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:16,940{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:invoke	:registry-cycle	{:name "svc-b", :instance-id "s109486512-189", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:16,941{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:02:17,117{GMT}	INFO	[jepsen worker 4] jepsen.print: 44	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:02:17,118{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-24 13:02:17,202{GMT}	INFO	[jepsen worker 4] jepsen.print: 44	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:02:17,939{GMT}	INFO	[jepsen worker 4] jepsen.print: 44	:invoke	:registry-discover	{:name "svc-b"}
+2026-09-24 13:02:17,940{GMT}	INFO	[jepsen worker 4] jepsen.print: 44	:ok	:registry-discover	{:name "svc-b"}
+2026-09-24 13:02:18,126{GMT}	INFO	[jepsen worker 4] jepsen.print: 44	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-192", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:18,159{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-194", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:18,615{GMT}	INFO	[jepsen worker 6] jepsen.print: 76	:invoke	:registry-cycle	{:name "svc-a", :instance-id "s109486512-196", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:18,935{GMT}	INFO	[jepsen worker 0] jepsen.print: 20	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-171", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:19,900{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-174", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:20,315{GMT}	INFO	[jepsen worker 7] jepsen.print: 27	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-179", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:20,534{GMT}	INFO	[jepsen worker 8] jepsen.print: 48	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-183", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:20,956{GMT}	INFO	[jepsen worker 9] jepsen.print: 29	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-185", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:21,833{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-187", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:22,296{GMT}	INFO	[jepsen worker 3] jepsen.print: 13	:ok	:registry-cycle	{:name "svc-b", :instance-id "s109486512-189", :ttl-seconds 5, :grace-ms 4000, :dup? true}
+2026-09-24 13:02:23,350{GMT}	INFO	[jepsen worker 4] jepsen.print: 44	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-192", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:23,546{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-194", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:23,840{GMT}	INFO	[jepsen worker 6] jepsen.print: 76	:ok	:registry-cycle	{:name "svc-a", :instance-id "s109486512-196", :ttl-seconds 5, :grace-ms 4000, :dup? false}
+2026-09-24 13:02:23,840{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-24 13:02:23,941{GMT}	INFO	[jepsen worker nemesis] jepsen.control.util: Starting coord
+2026-09-24 13:02:24,301{GMT}	INFO	[jepsen worker nemesis] jepsen.coord.agent: coord-agent: a 1 on n4 is ready (http + grpc 19527 )
+2026-09-24 13:02:24,301{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	[:restarted-agent "n4"]
+2026-09-24 13:02:24,302{GMT}	INFO	[jepsen worker 6] jepsen.generator.interpreter: recovery: letting cluster converge
+2026-09-24 13:02:54,327{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-24 13:02:54,327{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-24 13:02:54,327{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-24 13:02:54,465{GMT}	INFO	[jepsen test runner] jepsen.core: Run complete, writing
+2026-09-24 13:02:54,525{GMT}	INFO	[jepsen test runner] jepsen.core: Snarfing log files
+2026-09-24 13:02:54,526{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Killing coord on n1
+2026-09-24 13:02:54,526{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Killing coord on n2
+2026-09-24 13:02:54,526{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Killing coord on n3
+2026-09-24 13:02:54,586{GMT}	INFO	[jepsen node n2] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-24 13:02:54,586{GMT}	INFO	[jepsen node n1] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-24 13:02:54,586{GMT}	INFO	[jepsen node n3] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-24 13:02:54,748{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-24 13:02:54,748{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-24 13:02:54,748{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-24 13:02:56,394{GMT}	INFO	[jepsen test runner] jepsen.core: Analyzing...
+2026-09-24 13:02:56,401{GMT}	INFO	[clojure-agent-send-off-pool-1] jepsen.coord.regck: registry checker: {:cycles 78, :min-cycles 1, :instances 78, :discover-probes 49, :deregistered 68, :gone-unjudged 30, :violations-by-class {}, :failures ()}
+2026-09-24 13:02:56,630{GMT}	WARN	[clojure-agent-send-off-pool-8] jepsen.coord.agent: coord-agent: metrics scrape failed on n5
+clojure.lang.ExceptionInfo: Command exited with non-zero status 1 on node n5:
+sudo -k -S -u root bash -c "cd /; bash -c \"/bin/bash /opt/coord-agent/agent-metrics.sh 19528\""
+
+STDIN:
+null
+
+STDOUT:
+
+
+STDERR:
+/opt/coord-agent/agent-metrics.sh: connect: Connection refused
+/opt/coord-agent/agent-metrics.sh: line 22: /dev/tcp/127.0.0.1/19528: Connection refused
+
+	at clj_commons.slingshot.support$stack_trace.invoke(support.clj:202)
+	at jepsen.control.core$throw_on_nonzero_exit.invokeStatic(core.clj:166)
+	at jepsen.control.core$throw_on_nonzero_exit.invoke(core.clj:161)
+	at jepsen.control$exec_STAR_.invokeStatic(control.clj:145)
+	at jepsen.control$exec_STAR_.doInvoke(control.clj:142)
+	at clojure.lang.RestFn.applyTo(RestFn.java:140)
+	at clojure.core$apply.invokeStatic(core.clj:667)
+	at clojure.core$apply.invoke(core.clj:662)
+	at jepsen.control$exec.invokeStatic(control.clj:161)
+	at jepsen.control$exec.doInvoke(control.clj:155)
+	at clojure.lang.RestFn.invoke(RestFn.java:439)
+	at jepsen.coord.agent$node_metrics_BANG_$fn__712.invoke(agent.clj:505)
+	at jepsen.coord.agent$node_metrics_BANG_.invokeStatic(agent.clj:504)
+	at jepsen.coord.agent$node_metrics_BANG_.invoke(agent.clj:500)
+	at jepsen.coord.agent$routing_proof_BANG_$fn__732.invoke(agent.clj:560)
+	at clojure.core$mapv$fn__8569.invoke(core.clj:7063)
+	at clojure.lang.LongRange.reduce(LongRange.java:170)
+	at clojure.core$reduce.invokeStatic(core.clj:6968)
+	at clojure.core$mapv.invokeStatic(core.clj:7054)
+	at clojure.core$mapv.invoke(core.clj:7054)
+	at jepsen.coord.agent$routing_proof_BANG_.invokeStatic(agent.clj:558)
+	at jepsen.coord.agent$routing_proof_BANG_.invoke(agent.clj:546)
+	at jepsen.coord$checker$fn__4802.invoke(coord.clj:1275)
+	at jepsen.coord.gates$checker$reify__2287$fn__2295.invoke(gates.clj:445)
+	at jepsen.coord.gates$checker$reify__2287.check(gates.clj:445)
+	at jepsen.checker$check_safe.invokeStatic(checker.clj:95)
+	at jepsen.checker$check_safe.invoke(checker.clj:87)
+	at jepsen.checker.Compose$fn__14306.invoke(checker.clj:106)
+	at clojure.core$pmap$fn__8586$fn__8587.invoke(core.clj:7173)
+	at clojure.core$binding_conveyor_fn$fn__5844.invoke(core.clj:2051)
+	at clojure.lang.AFn.call(AFn.java:18)
+	at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:328)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+2026-09-24 13:02:56,633{GMT}	INFO	[jepsen test runner] jepsen.core: Analysis complete
+2026-09-24 13:02:56,649{GMT}	INFO	[jepsen results] jepsen.store: Wrote /opt/coord/jepsen/store/coord/2026-09-24T13:00:53.505550465Z/results.edn
+2026-09-24 13:02:56,672{GMT}	INFO	[jepsen test runner] jepsen.core: {:linear {:valid? true,
+          :registry {:cycles 78,
+                     :min-cycles 1,
+                     :instances 78,
+                     :discover-probes 49,
+                     :deregistered 68,
+                     :gone-unjudged 30,
+                     :violations-by-class {}},
+          :failures []},
+ :gates {:valid? true,
+         :gates {:premise {:valid? true,
+                           :writes 0,
+                           :duplicate-value-count 0,
+                           :duplicate-values {}},
+                 :availability {:min-ratio 0.95,
+                                :min-sample 100,
+                                :windows 5,
+                                :judged 0,
+                                :skipped-small-sample 5,
+                                :worst-window nil,
+                                :violations []},
+                 :rto {:budget-seconds 120,
+                       :n 0,
+                       :p95 nil,
+                       :max nil,
+                       :samples [],
+                       :unrecovered 0,
+                       :not-measured 5,
+                       :details [{:disruption {:start 23141303762,
+                                               :end 26822791624},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}
+                                 {:disruption {:start 34563775903,
+                                               :end 40229232372},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}
+                                 {:disruption {:start 48409710542,
+                                               :end 54604232367},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}
+                                 {:disruption {:start 58381276952,
+                                               :end 61802829100},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}
+                                 {:disruption {:start 67550301586,
+                                               :end 71791607601},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}]},
+                 :liveness {:min-ok-ratio 0.1,
+                            :min-sample 10,
+                            :ops 2,
+                            :judged 2,
+                            :skipped-small-sample 0,
+                            :ok-ratio 0.8405797101449275,
+                            :by-op {:registry-discover {:total 49,
+                                                        :ok 38,
+                                                        :info 11,
+                                                        :fail 0,
+                                                        :legit-fail 0,
+                                                        :judged 49,
+                                                        :errors {:unavailable-maybe-applied 11}},
+                                    :registry-cycle {:total 89,
+                                                     :ok 78,
+                                                     :info 11,
+                                                     :fail 0,
+                                                     :legit-fail 0,
+                                                     :judged 89,
+                                                     :errors {:unavailable-maybe-applied 11}}},
+                            :violations []},
+                 :agent {:proof {:total 0,
+                                 :by-method {:put 0,
+                                             :range 0,
+                                             :delete 0,
+                                             :txn 0,
+                                             :status 0},
+                                 :agents [{:host "n4",
+                                           :up? true,
+                                           :up-now? true,
+                                           :total 0,
+                                           :by-method {:put 0,
+                                                       :range 0,
+                                                       :delete 0,
+                                                       :txn 0,
+                                                       :status 0}}
+                                          {:host "n5",
+                                           :up? false,
+                                           :up-now? false,
+                                           :total 0,
+                                           :by-method nil}]},
+                         :min-requests 1,
+                         :local-surface? true}},
+         :failures []},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true}
+
+
+Everything looks good! ヽ(‘ー`)ノ

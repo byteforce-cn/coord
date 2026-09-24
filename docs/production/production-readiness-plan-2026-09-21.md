@@ -178,7 +178,7 @@
 | **D-16** | 未决项未裁定：U1 / U3 / U4 / U5 / U6 / U8 / U9 | 计划 §8「未决项」表 | 9 | W0-6 |
 | **D-17** | enum 演进无机械保护（`buf.yaml` 豁免 `ENUM_VALUE_PREFIX`/`ENUM_ZERO_VALUE_SUFFIX`；改名对 grpc-java 是**静默破坏**） | `remaining-known-gaps.md:154-165`（C22）、`coord-proto/buf.yaml` | 2 | W1-7 |
 | **D-18** | 免责声明与任何生产承诺互斥（`README.md:17`） | 同 D-05 | 9 | W0-3 |
-| **D-19** | **「默认开关」两条路径并未拉平**（U-03 的原话过度声称）：`registry` / `config_center` / `lock` / `idgen` / `policy` / `pki` 六项**代码默认 `true`**，但字段是普通 `#[serde(default)]` ⇒ **配置文件路径**下缺省 `false`。⇒ 同一个 agent「走不走 `--agent-config`」得到**不同的服务集合**（前者传个没写 `[services]` 的 TOML 就会把这些服务**全部关掉**） | `coord-agent/src/service.rs`（六处 `#[serde(default)]` vs `impl Default`）；判据：`test_known_divergence_code_default_vs_toml_is_pinned`（**故意钉住不一致**，改任一侧即红）；**发现于 2026-09-22**（因为把 `pki` 加进 `test_service_config_toml_missing_fields_match_code_defaults` 的比对而暴露） | 9 | **本轮仅钉住**；修法二选一（需裁定）：①六项改 `#[serde(default = "default_true")]` ②六项代码默认改 `false`（严守 G9「默认关」） |
+| **D-19** | **「默认开关」两条路径并未拉平**（U-03 的原话过度声称）：`registry` / `config_center` / `lock` / `idgen` / `policy` / `pki` 六项**代码默认 `true`**，但字段是普通 `#[serde(default)]` ⇒ **配置文件路径**下缺省 `false`。⇒ 同一个 agent「走不走 `--agent-config`」得到**不同的服务集合**（前者传个没写 `[services]` 的 TOML 就会把这些服务**全部关掉**） | `coord-agent/src/service.rs`（六处 `#[serde(default)]` vs `impl Default`）；判据：`test_known_divergence_code_default_vs_toml_is_pinned`（**故意钉住不一致**，改任一侧即红）；**发现于 2026-09-22**（因为把 `pki` 加进 `test_service_config_toml_missing_fields_match_code_defaults` 的比对而暴露） | 9 | **✅ 2026-09-24 裁定（U-12，见 §8.6）取②：六项代码默认改 `false`**（严守 G9「默认关」）并已落地；判据改为 `test_service_config_toml_missing_fields_match_code_defaults` 的**全字段逐字段等价**——旧的 `test_known_divergence_code_default_vs_toml_is_pinned` 已删（不一致已消） |
 
 ---
 
@@ -485,6 +485,15 @@
 | **W2-2 根因（已定位，非猜测）** | `cargo audit + deny` 的定时红**不是依赖问题**，是 `rustsec/audit-check@v2.0.0` 的**事件名分叉**：`schedule` → `reportIssues()`（调 `issues.create`）／其它事件 → `reportCheck()`（调 `checks.create`）。job 只授了 `checks: write` ⇒ 定时跑在 `issues.create` 上 403 `Resource not accessible by integration` ⇒ `setFailed` | 四面证据：①action 源码 `src/main.ts` 末段的 `eventName == 'schedule'` 分支；②check-run 注释里四条定时跑均有 `Resource not accessible by integration - …/rest/issues#create-an-issue`，而同一 SHA 的 push 跑**没有**这条；③四条跑与 push 跑的 `cargo audit` 结果**完全相同**（都是 `1 warnings found!` = 唯一一条 bincode unmaintained，非漏洞）；④本地复跑 `cargo deny check bans licenses sources` ⇒ `bans ok, licenses ok, sources ok` | `ci.yml` 的 `security-audit` job：补 `issues: write` + 把根因写进注释；顺带修正 step 8 名字（它才是**阻断**闸） |
 | **W2-2 的第二个收益** | 此前 **step 7 一红，step 8 就 `skipped`** ⇒ `licenses` / `bans` / `sources` 三道**从未有过执行记录** | 四条定时跑的 step 列表里 step 8 恒为 `skipped` | 同上（修好后 step 8 会真的跑） |
 
+### 8.6 第四轮裁定（2026-09-24：U-12 —— D-19 收口）
+
+> 体例同 §8.4/§8.5：裁定人记为「本次会话」= **AI 助理代拟 + 需人工复核**；
+> 每条给理由与可核验落地物；「裁定完成、实施未完成」的条目一律单列实施项。
+
+| # | 裁定 | 理由（可核验） | 落地物 |
+|:--|:--|:--|:--|
+| **U-12** | **D-19 取②**：`registry` / `config_center` / `lock` / `idgen` / `policy` / `pki` 六项的**代码默认 `true` → `false`**；两条路径拉平为「全部默认关」（TOML 缺省本来就是 `false`，不动）。 | ①U-03 已立原则「默认关，显式启用即可用」，六项是该原则的遗留例外；②G9 的判据是「与整改状态一致」：六个面的 **G8（soak 覆盖）都没有产物** ⇒ 同属未整改面，默认开违反 G9；③`impl Default` 的注释**自己**写着"不再有『只写代码就默认开着』的口子"，而代码里仍有六个 `true`（自述式不一致，与 §7-5 同族）；④若取①（TOML 侧改 `default_true`）等于把六个未验证面默认对外，与 D-14/W0-5 的方向相反。 | `coord-agent/src/service.rs`：六项 `false` + 注释引 U-12；`test_service_config_defaults` 改为反向断言；`test_service_config_toml_missing_fields_match_code_defaults` **扩到全字段逐字段等价**（D-19 的验收判据）；旧「钉住不一致」测试删除；`coord/tests/dev_mode_test.rs` 的 4 条依赖旧默认的用例按「显式启用即可用」显式启用 `services.idgen = true`。判据：`cargo test -p coord-agent --lib` ⇒ **487 ✓**；`cargo test -p coord-agent --tests` ⇒ 全 ok；`cargo test -p coord --test dev_mode_test` ⇒ **7 ✓** |
+
 ---
 
 ## §9 生产上线 Go / No-Go（一票否决）
@@ -522,8 +531,8 @@
 
 > 体例：每行必须有**可重跑的判据**与**产物落点**。**「完成」不等于「已验收」** ——
 > 凡依赖 lab / 外部（审计、引入方签字）的判据一律标注**待验收**，不得当作已绿。
-> 最后更新：**2026-09-23（第六轮）**（基线 `8b65290` + 前五轮改动 + 本轮改动）。
-> 第六轮主题见下方「第六轮追加」；CI 侧取证方法见 `docs/production/ops/ci-gate-forensics-2026-09-22.md` §6。
+> 最后更新：**2026-09-24（第七轮）**（基线 `8b65290` + 前六轮改动 + 本轮改动）。
+> 第七轮主题见下方「第七轮追加」；CI 侧取证方法见 `docs/production/ops/ci-gate-forensics-2026-09-22.md` §6。
 
 | # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
 |:--|:--|:--|:--|:--|
@@ -660,6 +669,43 @@ W3 全部（要长跑）、W4-1/W4-2a/W4-3/W4-5、W5-5、W6-2 实机演练、W7�
 > 被 skip"⇒ 一个数字都带不出来；`chaos` 失败时"其后 step 全 skipped"⇒ 后面的套件
 > **没有任何执行记录**。**门禁的价值不在它会不会红，而在它红的时候你能不能知道为什么。**
 > 本轮的注解通道把"能知道"变成默认行为，而不是靠人去想办法。
+
+### 第七轮追加（2026-09-24）—— 主题：**把"取不到原因的失败"变成可达的自描述，并给 10-31 硬期限补首批 lab 产物**
+
+> 触发：两个新 CI 红都**取不到原因**——push run `35881648825` 的 `gate self-check` step 11
+> （18s、exit 101、零注解）与 schedule run `35947874357` 的 perf 第 2 次红（同形态）。
+> 本轮先修"为什么拿不到原因"（W2），再用 docker lab 补 W3-4/W1-2 证据（含 10-31 硬期限
+> 且此前**零产物**的 idgen / registry），最后按 G9 收口 D-19（U-12）。
+
+| # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
+|:--|:--|:--|:--|:--|
+| **W2-7a** | perf 注解器**不可达死代码**（两次 perf 红"零注解"的根因） | ✅ 完成 | ①最小复现 `bash -c 'set -euo pipefail; false \| tee /dev/null; echo REACHED'` ⇒ **不打印 REACHED**（管道失败即终止脚本）；②`PATH` 注入 stub cargo 模拟 perf 红 ⇒ `GITHUB_ACTIONS=true` 下发出 **10 条 `::error::`**（含 4 行 Region 比值表）、退出码 **101 透传** | 根因：`set -e` + `pipefail` 下 `cmd \| tee` **直接终止脚本** ⇒ `PERF_STATUS=${PIPESTATUS[0]}` 与失败分支（注解调用）**永远不可达**。修法：两条管道显式 `set +e` / `set -e` 包裹（`collect-evidence.sh` 早有同型先例）。**这是"自述式 no-op"的第三种形态：错误处理代码不可达。** |
+| **W2-7b** | perf 门禁的**第二个真根因**（测量分母）+ 本地复现 | ✅ 完成（本地双向印证） | 修前 `PERF_GATE=1 taskset -c 0-3 cargo test --release -p coord --test perf_bench -- --ignored --nocapture --test-threads=1` ⇒ **FAILED. 8 passed; 1 failed**（474s、退出码 101，与 CI 同形） | `bench_all` 实例：1 Region = **222 ops/s**（200 次 ≈0.9s 的短窗口）⇒ 25 Region = 148 ⇒ **ratio 0.667 红**；**同一次跑**的 standalone 实例：1 Region = 128 ops/s、ratio 1.233 绿。⇒ **不稳定的是分母**（短窗口测到"未进稳态"的乐观基线；旧口径各档窗口相差 25 倍），不是被测系统 |
+| **W2-7c** | 采样对称化：所有档位**同迭代数（5000）+ 同预热（100）** | ✅ 完成（本地验证；**CI 实证待下一次 schedule**） | 修后同参复跑 ⇒ **`9 passed; 0 failed`**（539.61s） | bench_all：1=157 / 5=147（0.940）/ 10=214（1.363）/ 25=207（1.324）；standalone：**209 / 215 / 223 / 215 ops/s**，ratio **1.026 / 1.066 / 1.025**（四档完全贴合，窗口各 ~23s）。**阈值仍 0.80、断言未删**；代价是 perf 测试期 +~65s |
+| **W2-7d** | panic 门自检失败的**自描述** | ✅ 完成 | stub clippy（exit 101 + stderr）⇒ `::error::`（含 `file:line` 编译错误）+ step 日志 stderr tail + `df -h`；退出码 1 置红 | `scripts/check-panics.sh`；run 35881648825 的"18s/101/零注解"形态下次复现即可归因 |
+| **W2-7e** | `.gitignore` 补 `/benchmark-results/` | ✅ 完成 | `git check-ignore -v benchmark-results` ⇒ 命中 | 本地跑 perf 后残留的未跟踪目录（与 §7-2 clean tree 判据冲突的假 DIRTY 来源） |
+| **W3-4（首批产物）** | **idgen / registry 零产物补齐**（10-31 硬期限） | ✅ 4/4 pass、**已归档** | `make -C jepsen/lab test WORKLOAD=idgen\|registry NEMESIS=none\|kill-agent TIME_LIMIT=60 CONCURRENCY=2n SKIP_CHECKERS=1 AGENTS=2 IDGEN_MIN_IDS=10 REGISTRY_MIN_CYCLES=1 JEPSEN_PROVIDER=docker`（binary `764773c1`、commit `f01635a`、F-55 预检 0 DROP） | 四份归档（下附）；`:violations-by-class {}` ×4、`:linear :valid? true`；registry 判定 98 cycles（含 76 次 `dup?` 幂等性重复注册）；MANIFEST 工作树 **clean** |
+| **W1-2（补齐 ×3）** | F-05 复跑第 2、3 次 | ✅ 2/2 pass、**已归档** | 同形式 `WORKLOAD=register NEMESIS=kill-all TIME_LIMIT=60 CONCURRENCY=1n` | run2：写 93 次中 **1 次** `:no-client Failed to authenticate`（`gates-valid: true`、`:linear :valid? true`）；run3：`:fail 0`、valid。**出现率 ≈1%（3 次 run 合计 1 次）且不计入一致性违反**——与第四轮修正后的判据一致 |
+| **U-12（D-19 收口）** | 六服务默认开关取②（代码默认改 `false`） | ✅ 裁定 + 落地 | `cargo test -p coord-agent --lib` ⇒ **487 ✓**；`cargo test -p coord-agent --tests` ⇒ 全 ok；`cargo test -p coord --test dev_mode_test` ⇒ **7 ✓** | 见 §8.6；六项 `true→false`；判据改为**全字段逐字段等价**；`dev_mode_test.rs` 4 条旧默认用例改为显式启用 |
+| **CI 实证（`f01635a`）** | 第七轮脚本改动的首次 CI 验证 | ✅ **全绿** | run **`36000602894`** 逐 job（`/actions/runs/{id}/jobs`） | 全部 success：`fmt+clippy` / `workspace tests` / **`gate self-check`（含新诊断的 6 步）** / `cargo audit + deny` / `Security audit` / `proto contract` / `java sdk` / `java example integration` / `plugin matrix` / `frontend lint` / `real-process chaos`；`weekly perf baseline` skipped（push 不跑）⇒ **perf 的 CI 实证要等 09-25 02:17 schedule（注解通道已修好，数字会直接带出）**。⚠️ 不宣布 chaos 已稳定：最近 5 次 绿/绿/红/绿/绿 |
+| **P1 卡口复核（七轮）** | fmt / clippy / 六道脚本 | ✅ 完成 | `cargo fmt --all -- --check`；`cargo clippy --workspace -- -D warnings`；六道脚本 | fmt ✓；clippy ✓（非测试目标）；**六道全 `exit 0`**（含改写后的 `check-panics.sh` 其自身绿路径） |
+
+证据归档（6 份；MANIFEST 工作树均 clean、commit `f01635a`、binary `764773c1`）：
+
+- `docs/production/evidence/20260924T130833Z-w3-4-idgen-none-agents2-60s/`
+- `docs/production/evidence/20260924T130834Z-w3-4-idgen-kill-agent-agents2-60s/`
+- `docs/production/evidence/20260924T130836Z-w3-4-registry-none-agents2-60s/`
+- `docs/production/evidence/20260924T130837Z-w3-4-registry-kill-agent-agents2-60s/`
+- `docs/production/evidence/20260924T130839Z-w1-2-f05-kill-all-60s-run2/`
+- `docs/production/evidence/20260924T130841Z-w1-2-f05-kill-all-60s-run3/`
+
+> **本轮的方法论收获（第三种形态）**：第六轮发现"失败带不出原因"，第七轮发现原因之一是
+> **错误处理代码本身不可达**（`set -e` + `pipefail` + 管道）——"写了错误处理"≠"错误处理会跑"。
+> 两种形态同属一类：**任何"应该发生的动作"都必须有一条可核验的执行路径**（注解 / 日志 / 退出码）。
+
+**第七轮未触碰**：W2-3 根因（chaos 又连续 2 绿、n=5 仍不宣布稳定）、W2-4（仓库设置）、
+W2-5 剩余 3 道门（P3–P6 / P8 / P9 负控制）、W3-1…W3-3 / W3-5…W3-9（长跑 / 多 agent 拓扑）、
+W4-1（TLS fail-closed，仍按"lab 联立变更"计划）、W4-3（审计采买）、W5-5、W6-2 实机演练、W7。
 
 ---
 

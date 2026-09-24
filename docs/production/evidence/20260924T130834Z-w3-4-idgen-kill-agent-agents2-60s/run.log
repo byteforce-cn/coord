@@ -1,0 +1,836 @@
+2026-09-24 12:52:02,296{GMT}	INFO	[jepsen test runner] jepsen.core: Test version f01635ae7ea71858a96234615e327bfc70db724e
+2026-09-24 12:52:02,297{GMT}	INFO	[jepsen test runner] jepsen.core: Command line:
+lein run test --nodes-file /root/nodes --username root --ssh-private-key /root/.ssh/id_ed25519 --workload idgen --nemesis kill-agent --time-limit 60 --concurrency 2n --agents 2 --idgen-min-ids 10
+2026-09-24 12:52:02,336{GMT}	INFO	[jepsen test runner] jepsen.core: Running test:
+{:cache-ttl-seconds nil
+ :remote
+ #jepsen.control.retry.Remote{:remote #jepsen.control.scp.Remote{:cmd-remote #jepsen.control.sshj.SSHJRemote{:concurrency-limit 6,
+                                                                                                             :conn-spec nil,
+                                                                                                             :client nil,
+                                                                                                             :semaphore nil},
+                                                                 :conn-spec nil},
+                              :conn nil}
+ :idem-replay-delay-ms 0
+ :agent-plan
+ {:tunnel-base 36252,
+  :root-password "66c57bb56bce306f484344e4a8650836",
+  :coord-dir "/opt/coord",
+  :hosts ["n4" "n5"],
+  :peers ["172.19.0.2:50051" "172.19.0.4:50051" "172.19.0.6:50051"],
+  :idgen-node-ids [],
+  :provisioner-prefix "coord-agent-jepsen",
+  :bootstrap-token "jepsen-agent-bootstrap-token-0123456789abcdef",
+  :auth-root-key "820662a9f85924333d6d466714bc51734b251e73b827a394e1978e36d2429bfc",
+  :count 2,
+  :agent-verifying-key "d0c6d1ff5fd200db97c05ffeb873340adb89a7a6de7f421f6d27db58050eedd4",
+  :coord-bin "/root/coord-test/coord",
+  :services #{:idgen :registry :leader-election :lock}}
+ :ssh-private-key "/root/.ssh/id_ed25519"
+ :idem-min-replay-attempts nil
+ :lock-grace-ms nil
+ :election-ttl-seconds nil
+ :watch-min-events nil
+ :concurrency 10
+ :lease-ttl-seconds nil
+ :soak-disrupt 600
+ :idgen-min-regressions nil
+ :db
+ #jepsen.coord.db.CoordDB{:cluster-name "jepsen-coord",
+                          :pidfile-prefix "/var/run/coord-",
+                          :root-password "66c57bb56bce306f484344e4a8650836",
+                          :coord-dir "/opt/coord",
+                          :config-dir "/etc/coord",
+                          :logfile "/var/log/coord.log",
+                          :agent-bootstrap-token "jepsen-agent-bootstrap-token-0123456789abcdef",
+                          :regions nil,
+                          :agent-peers ["172.19.0.2:50051"
+                                        "172.19.0.4:50051"
+                                        "172.19.0.6:50051"],
+                          :data-dir "/var/lib/coord",
+                          :nodes ["n1" "n2" "n3"],
+                          :auth-root-key "820662a9f85924333d6d466714bc51734b251e73b827a394e1978e36d2429bfc",
+                          :raft-secret "93edf94d2860fec54bc59278a804cb1bbd2d0a7243e4f39d667d66966d9844d1",
+                          :agents 2,
+                          :coord-bin "/root/coord-test/coord"}
+ :leave-db-running? false
+ :agent-idgen-node-ids nil
+ :via-agent false
+ :cache-min-list-ops nil
+ :name "coord"
+ :registry-ttl-seconds nil
+ :logging-json? false
+ :mixture-ratio nil
+ :start-time
+ #object[java.time.OffsetDateTime "0x439b893a" "2026-09-24T12:52:02.273183239Z"]
+ :regions nil
+ :lease-min-grants nil
+ :map-keys nil
+ :net
+ #object[jepsen.net$iptables_with_dev$reify__15623
+         "0x4b5c84be"
+         "jepsen.net$iptables_with_dev$reify__15623@4b5c84be"]
+ :election-hold-ms nil
+ :client
+ #object[jepsen.coord$with_agent$reify__4814
+         "0x404bca88"
+         "jepsen.coord$with_agent$reify__4814@404bca88"]
+ :lease-revoke-ttl-seconds nil
+ :barrier
+ #object[java.util.concurrent.CyclicBarrier
+         "0x509cf379"
+         "java.util.concurrent.CyclicBarrier@509cf379"]
+ :agent-peers ["172.19.0.2:50051" "172.19.0.4:50051" "172.19.0.6:50051"]
+ :ssh
+ {:dummy? false,
+  :username "root",
+  :password "root",
+  :strict-host-key-checking false,
+  :private-key-path "/root/.ssh/id_ed25519"}
+ :lease-tolerance-ms nil
+ :rate nil
+ :map-min-deletes nil
+ :seed 1822266891
+ :mq-topic nil
+ :cache-min-set-ops nil
+ :lock-ttl-seconds nil
+ :checker
+ #jepsen.checker.Compose{:checkers {:linear #object[jepsen.coord.idgenck$checker$reify__2479
+                                                    "0x4f517209"
+                                                    "jepsen.coord.idgenck$checker$reify__2479@4f517209"],
+                                    :gates #object[jepsen.coord.gates$checker$reify__2287
+                                                   "0x60877629"
+                                                   "jepsen.coord.gates$checker$reify__2287@60877629"],
+                                    :perf #jepsen.checker.Compose{:checkers {:latency-graph #jepsen.checker.LatencyGraph{:opts {}},
+                                                                             :rate-graph #jepsen.checker.RateGraph{:opts {}}}}}}
+ :lease-min-expiries nil
+ :cache-min-sets nil
+ :mq-min-polls nil
+ :argv
+ ("test"
+  "--nodes-file"
+  "/root/nodes"
+  "--username"
+  "root"
+  "--ssh-private-key"
+  "/root/.ssh/id_ed25519"
+  "--workload"
+  "idgen"
+  "--nemesis"
+  "kill-agent"
+  "--time-limit"
+  "60"
+  "--concurrency"
+  "2n"
+  "--agents"
+  "2"
+  "--idgen-min-ids"
+  "10")
+ :nemesis #unprintable "jepsen.coord.nemesis$kill_agent$reify__4197@7e86ff3b"
+ :watch-resumes nil
+ :mq-consumer-group nil
+ :lease-grace-ms nil
+ :soak-mix nil
+ :mq-expect-idem-dedupe false
+ :nodes ["n1" "n2" "n3"]
+ :test-count 1
+ :no-jitter false
+ :election-min-campaigns nil
+ :registry-min-cycles nil
+ :lock-min-acquires nil
+ :idgen-min-ids 10
+ :cache-min-gets nil
+ :generator
+ #object[jepsen.util.Forgettable
+         "0x53d782b0"
+         ((jepsen.generator.Synchronize
+           {:gen (jepsen.generator.TimeLimit
+                  {:limit 60000000000,
+                   :cutoff nil,
+                   :gen (jepsen.generator.Any
+                         {:gens [(jepsen.generator.OnThreads
+                                  {:f #{:nemesis},
+                                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                           "0x21304869"
+                                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@21304869"],
+                                   :gen ({:type :sleep,
+                                          :value 3.9918950101940336}
+                                         {:type :info, :f :start}
+                                         {:type :sleep,
+                                          :value 4.724246352444119}
+                                         {:type :info, :f :stop}
+                                         {:type :sleep,
+                                          :value 6.506004584920644}
+                                         {:type :info, :f :start}
+                                         {:type :sleep,
+                                          :value 3.3739817071429155}
+                                         {:type :info, :f :stop}
+                                         ...)})
+                                 (jepsen.generator.OnThreads
+                                  {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                           "0x63dd81ee"
+                                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@63dd81ee"],
+                                   :gen (jepsen.generator.Stagger
+                                         {:dt-fn #object[jepsen.generator$stagger_exp$dt_fn__6799
+                                                         "0x9353d68"
+                                                         "jepsen.generator$stagger_exp$dt_fn__6799@9353d68"],
+                                          :next-time nil,
+                                          :gen (jepsen.generator.OnThreads
+                                                {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                                 :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                                         "0x2a654f27"
+                                                                         "jepsen.generator.context$make_thread_filter$lazy_filter__5865@2a654f27"],
+                                                 :gen (jepsen.generator.Mix
+                                                       {:i 0,
+                                                        :gens [(jepsen.generator.Mix
+                                                                {:i 0,
+                                                                 :gens [#object[jepsen.coord$idgen_gen$op__4507
+                                                                                "0x770093c5"
+                                                                                "jepsen.coord$idgen_gen$op__4507@770093c5"]
+                                                                        #object[jepsen.coord$idgen_gen$op__4507
+                                                                                "0x770093c5"
+                                                                                "jepsen.coord$idgen_gen$op__4507@770093c5"]]})]})})})})]})})})
+          (jepsen.generator.Synchronize
+           {:gen (jepsen.generator.OnThreads
+                  {:f #{:nemesis},
+                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                           "0x785dbe3a"
+                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@785dbe3a"],
+                   :gen {:type :info, :f :stop}})})
+          (jepsen.generator.Synchronize
+           {:gen {:type :log, :value "recovery: letting cluster converge"}})
+          (jepsen.generator.Synchronize {:gen {:type :sleep, :value 30}}))]
+ :lock-deadline-ms nil
+ :min-op-ok-ratio nil
+ :soak-max-rto-seconds nil
+ :idem-replay-node-offset 0
+ :lease-keepalive-ms nil
+ :min-op-sample nil
+ :os
+ #object[jepsen.os$reify__16045 "0x58230224" "jepsen.os$reify__16045@58230224"]
+ :time-limit 60
+ :quiet-availability-min nil
+ :soak-quiet 1800
+ :value-size nil
+ :cache-ttl-grace-ms nil
+ :agent-verifying-key nil
+ :quiet-min-sample nil
+ :watch-window-ms nil
+ :workload :idgen
+ :registry-grace-ms nil
+ :agents 2
+ :watch-max-events nil
+ :mq-min-publishes nil
+ :watch-semantics nil
+ :lock-hold-ms nil}
+
+2026-09-24 12:52:03,798{GMT}	INFO	[jepsen test runner] jepsen.db: Tearing down DB
+2026-09-24 12:52:03,811{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-24 12:52:03,814{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-24 12:52:03,815{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-24 12:52:05,574{GMT}	INFO	[jepsen test runner] jepsen.db: Setting up DB
+2026-09-24 12:52:05,575{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Setting up coord on n2
+2026-09-24 12:52:05,575{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Setting up coord on n3
+2026-09-24 12:52:05,575{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Setting up coord on n1
+2026-09-24 12:52:08,263{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-24 12:52:08,323{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-24 12:52:08,332{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-24 12:52:08,382{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-24 12:52:08,433{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-24 12:52:08,435{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-24 12:52:08,630{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-24 12:52:08,630{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-24 12:52:09,200{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-24 12:52:09,202{GMT}	INFO	[jepsen test runner] jepsen.core: Relative time begins now
+2026-09-24 12:52:09,205{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-24 12:52:09,205{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-24 12:52:09,646{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: agent-bootstrap role granted against 172.19.0.2:50051
+2026-09-24 12:52:11,155{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: granted 27 capabilities to role root against 172.19.0.2:50051
+2026-09-24 12:52:11,156{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: starting 2 agent(s) on [n4 n5]
+2026-09-24 12:52:21,614{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-24 12:52:24,805{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-24 12:52:25,136{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: a 1 on n4 is ready (http + grpc 19527 )
+2026-09-24 12:52:25,411{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: a 2 on n5 is ready (http + grpc 19527 )
+2026-09-24 12:52:26,445{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: tunnel a 1 127.0.0.1: 36253 -> n4 : 19527 (pid 584775 ) verified end-to-end 
+2026-09-24 12:52:27,478{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: tunnel a 2 127.0.0.1: 36254 -> n5 : 19527 (pid 584793 ) verified end-to-end 
+2026-09-24 12:52:27,478{GMT}	INFO	[jepsen node n1] jepsen.coord.agent: coord-agent: all 2 tunnel(s) verified end-to-end
+2026-09-24 12:52:27,478{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-24 12:52:27,551{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-24 12:52:27,551{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-24 12:52:27,551{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-24 12:52:27,566{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord cluster is ready
+2026-09-24 12:52:27,568{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord cluster is ready
+2026-09-24 12:52:27,606{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord cluster is ready
+2026-09-24 12:52:27,621{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "events", :batch? false, :count 12}
+2026-09-24 12:52:27,622{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-24 12:52:27,708{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "events", :batch? false, :count 12}
+2026-09-24 12:52:28,442{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "events", :batch? false, :count 16}
+2026-09-24 12:52:28,442{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-24 12:52:28,531{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "events", :batch? false, :count 16}
+2026-09-24 12:52:29,149{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "orders", :batch? false, :count 16}
+2026-09-24 12:52:29,149{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-24 12:52:29,244{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "orders", :batch? false, :count 16}
+2026-09-24 12:52:30,197{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "events", :batch? true, :count 11}
+2026-09-24 12:52:30,198{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-24 12:52:30,279{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "orders", :batch? false, :count 5}
+2026-09-24 12:52:30,279{GMT}	INFO	[jepsen worker 5] jepsen.coord.client: Opening coord client on n3
+2026-09-24 12:52:30,290{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "events", :batch? true, :count 11}
+2026-09-24 12:52:30,305{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "events", :batch? true, :count 15}
+2026-09-24 12:52:30,305{GMT}	INFO	[jepsen worker 6] jepsen.coord.client: Opening coord client on n1
+2026-09-24 12:52:30,415{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "orders", :batch? false, :count 5}
+2026-09-24 12:52:30,424{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "events", :batch? true, :count 15}
+2026-09-24 12:52:30,551{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "orders", :batch? false, :count 1}
+2026-09-24 12:52:30,552{GMT}	INFO	[jepsen worker 7] jepsen.coord.client: Opening coord client on n2
+2026-09-24 12:52:30,641{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "orders", :batch? true, :count 8}
+2026-09-24 12:52:30,641{GMT}	INFO	[jepsen worker 8] jepsen.coord.client: Opening coord client on n3
+2026-09-24 12:52:30,651{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "orders", :batch? false, :count 1}
+2026-09-24 12:52:30,704{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:52:30,704{GMT}	INFO	[jepsen worker 9] jepsen.coord.client: Opening coord client on n1
+2026-09-24 12:52:30,724{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? false, :count 2}
+2026-09-24 12:52:30,724{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-24 12:52:30,733{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "orders", :batch? true, :count 8}
+2026-09-24 12:52:30,823{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:52:30,888{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? false, :count 2}
+2026-09-24 12:52:31,270{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? false, :count 12}
+2026-09-24 12:52:31,276{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? false, :count 12}
+2026-09-24 12:52:31,611{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-24 12:52:31,735{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	[:killed-agent "n5"]
+2026-09-24 12:52:32,456{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "events", :batch? false, :count 2}
+2026-09-24 12:52:32,462{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "events", :batch? false, :count 2}
+2026-09-24 12:52:33,517{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "events", :batch? true, :count 14}
+2026-09-24 12:52:33,521{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "events", :batch? true, :count 14}
+2026-09-24 12:52:33,702{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "orders", :batch? true, :count 16}
+2026-09-24 12:52:33,708{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "orders", :batch? true, :count 16}
+2026-09-24 12:52:33,846{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "orders", :batch? true, :count 1}
+2026-09-24 12:52:33,851{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "orders", :batch? true, :count 1}
+2026-09-24 12:52:34,303{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "events", :batch? false, :count 14}
+2026-09-24 12:52:34,308{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "events", :batch? false, :count 14}
+2026-09-24 12:52:34,310{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "events", :batch? false, :count 12}
+2026-09-24 12:52:34,315{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "events", :batch? false, :count 12}
+2026-09-24 12:52:34,839{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "events", :batch? true, :count 15}
+2026-09-24 12:52:34,844{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "events", :batch? true, :count 15}
+2026-09-24 12:52:35,157{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? false, :count 14}
+2026-09-24 12:52:35,161{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? false, :count 14}
+2026-09-24 12:52:35,949{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? false, :count 2}
+2026-09-24 12:52:35,953{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? false, :count 2}
+2026-09-24 12:52:36,460{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-24 12:52:36,471{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "orders", :batch? true, :count 10}
+2026-09-24 12:52:36,476{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "orders", :batch? true, :count 10}
+2026-09-24 12:52:36,558{GMT}	INFO	[jepsen worker nemesis] jepsen.control.util: Starting coord
+2026-09-24 12:52:36,752{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "orders", :batch? true, :count 11}
+2026-09-24 12:52:36,754{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "orders", :batch? true, :count 11}
+2026-09-24 12:52:36,854{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "orders", :batch? true, :count 16}
+2026-09-24 12:52:36,856{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "orders", :batch? true, :count 16}
+2026-09-24 12:52:37,185{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "orders", :batch? false, :count 11}
+2026-09-24 12:52:37,189{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "orders", :batch? false, :count 11}
+2026-09-24 12:52:37,518{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "orders", :batch? false, :count 12}
+2026-09-24 12:52:37,521{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "orders", :batch? false, :count 12}
+2026-09-24 12:52:37,563{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "orders", :batch? false, :count 8}
+2026-09-24 12:52:37,568{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "orders", :batch? false, :count 8}
+2026-09-24 12:52:37,622{GMT}	INFO	[jepsen worker nemesis] jepsen.coord.agent: coord-agent: a 2 on n5 is ready (http + grpc 19527 )
+2026-09-24 12:52:37,623{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	[:restarted-agent "n5"]
+2026-09-24 12:52:37,651{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "events", :batch? false, :count 13}
+2026-09-24 12:52:37,654{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "events", :batch? false, :count 13}
+2026-09-24 12:52:38,046{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? false, :count 1}
+2026-09-24 12:52:38,050{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? false, :count 1}
+2026-09-24 12:52:38,148{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? true, :count 2}
+2026-09-24 12:52:38,151{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? true, :count 2}
+2026-09-24 12:52:38,464{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "orders", :batch? false, :count 13}
+2026-09-24 12:52:38,468{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "orders", :batch? false, :count 13}
+2026-09-24 12:52:38,707{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "events", :batch? true, :count 2}
+2026-09-24 12:52:38,711{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "events", :batch? true, :count 2}
+2026-09-24 12:52:39,887{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "orders", :batch? false, :count 2}
+2026-09-24 12:52:39,891{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "orders", :batch? false, :count 2}
+2026-09-24 12:52:40,211{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "orders", :batch? false, :count 4}
+2026-09-24 12:52:40,216{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "orders", :batch? false, :count 4}
+2026-09-24 12:52:40,377{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "orders", :batch? false, :count 4}
+2026-09-24 12:52:40,382{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "orders", :batch? false, :count 4}
+2026-09-24 12:52:40,412{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "events", :batch? true, :count 2}
+2026-09-24 12:52:40,416{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "events", :batch? true, :count 2}
+2026-09-24 12:52:40,579{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "events", :batch? false, :count 5}
+2026-09-24 12:52:40,583{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "events", :batch? false, :count 5}
+2026-09-24 12:52:40,650{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "orders", :batch? false, :count 4}
+2026-09-24 12:52:40,654{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "orders", :batch? false, :count 4}
+2026-09-24 12:52:41,057{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "orders", :batch? false, :count 7}
+2026-09-24 12:52:41,061{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "orders", :batch? false, :count 7}
+2026-09-24 12:52:41,286{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? false, :count 7}
+2026-09-24 12:52:41,288{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? false, :count 7}
+2026-09-24 12:52:41,938{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? false, :count 11}
+2026-09-24 12:52:41,942{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? false, :count 11}
+2026-09-24 12:52:42,168{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "events", :batch? false, :count 1}
+2026-09-24 12:52:42,172{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "events", :batch? false, :count 1}
+2026-09-24 12:52:42,438{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "orders", :batch? false, :count 13}
+2026-09-24 12:52:42,442{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "orders", :batch? false, :count 13}
+2026-09-24 12:52:43,016{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "events", :batch? true, :count 16}
+2026-09-24 12:52:43,020{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "events", :batch? true, :count 16}
+2026-09-24 12:52:43,116{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "events", :batch? false, :count 3}
+2026-09-24 12:52:43,120{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "events", :batch? false, :count 3}
+2026-09-24 12:52:43,280{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "orders", :batch? true, :count 1}
+2026-09-24 12:52:43,284{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "orders", :batch? true, :count 1}
+2026-09-24 12:52:43,390{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "events", :batch? true, :count 4}
+2026-09-24 12:52:43,395{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "events", :batch? true, :count 4}
+2026-09-24 12:52:44,130{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-24 12:52:44,256{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	[:killed-agent "n4"]
+2026-09-24 12:52:44,858{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "events", :batch? true, :count 15}
+2026-09-24 12:52:44,869{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "events", :batch? true, :count 15}
+2026-09-24 12:52:45,427{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? true, :count 15}
+2026-09-24 12:52:45,432{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? true, :count 15}
+2026-09-24 12:52:45,809{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? false, :count 7}
+2026-09-24 12:52:45,812{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? false, :count 7}
+2026-09-24 12:52:45,993{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "events", :batch? false, :count 7}
+2026-09-24 12:52:45,999{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "events", :batch? false, :count 7}
+2026-09-24 12:52:46,525{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "orders", :batch? true, :count 10}
+2026-09-24 12:52:46,534{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "orders", :batch? true, :count 10}
+2026-09-24 12:52:46,546{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "orders", :batch? false, :count 14}
+2026-09-24 12:52:46,555{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "orders", :batch? false, :count 14}
+2026-09-24 12:52:46,825{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "orders", :batch? true, :count 13}
+2026-09-24 12:52:46,829{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "orders", :batch? true, :count 13}
+2026-09-24 12:52:46,905{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "events", :batch? true, :count 3}
+2026-09-24 12:52:46,914{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "events", :batch? true, :count 3}
+2026-09-24 12:52:46,961{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "events", :batch? true, :count 5}
+2026-09-24 12:52:46,971{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "events", :batch? true, :count 5}
+2026-09-24 12:52:46,979{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "events", :batch? false, :count 9}
+2026-09-24 12:52:46,988{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "events", :batch? false, :count 9}
+2026-09-24 12:52:47,101{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "events", :batch? true, :count 4}
+2026-09-24 12:52:47,110{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "events", :batch? true, :count 4}
+2026-09-24 12:52:47,127{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "events", :batch? false, :count 1}
+2026-09-24 12:52:47,131{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "events", :batch? false, :count 1}
+2026-09-24 12:52:47,157{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? true, :count 5}
+2026-09-24 12:52:47,162{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? true, :count 5}
+2026-09-24 12:52:47,531{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? true, :count 14}
+2026-09-24 12:52:47,533{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? true, :count 14}
+2026-09-24 12:52:47,576{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "orders", :batch? false, :count 3}
+2026-09-24 12:52:47,580{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "orders", :batch? false, :count 3}
+2026-09-24 12:52:47,631{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-24 12:52:47,637{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "orders", :batch? true, :count 9}
+2026-09-24 12:52:47,641{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "orders", :batch? true, :count 9}
+2026-09-24 12:52:47,686{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "events", :batch? false, :count 11}
+2026-09-24 12:52:47,689{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "events", :batch? false, :count 11}
+2026-09-24 12:52:47,723{GMT}	INFO	[jepsen worker nemesis] jepsen.control.util: Starting coord
+2026-09-24 12:52:48,096{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "orders", :batch? false, :count 12}
+2026-09-24 12:52:48,100{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "orders", :batch? false, :count 12}
+2026-09-24 12:52:48,480{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "events", :batch? true, :count 13}
+2026-09-24 12:52:48,485{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "events", :batch? true, :count 13}
+2026-09-24 12:52:48,603{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "events", :batch? false, :count 7}
+2026-09-24 12:52:48,605{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "events", :batch? false, :count 7}
+2026-09-24 12:52:48,769{GMT}	INFO	[jepsen worker nemesis] jepsen.coord.agent: coord-agent: a 1 on n4 is ready (http + grpc 19527 )
+2026-09-24 12:52:48,770{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	[:restarted-agent "n4"]
+2026-09-24 12:52:48,952{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "orders", :batch? false, :count 14}
+2026-09-24 12:52:48,956{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "orders", :batch? false, :count 14}
+2026-09-24 12:52:49,101{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? false, :count 12}
+2026-09-24 12:52:49,105{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? false, :count 12}
+2026-09-24 12:52:49,220{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? true, :count 2}
+2026-09-24 12:52:49,224{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? true, :count 2}
+2026-09-24 12:52:49,231{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "events", :batch? false, :count 7}
+2026-09-24 12:52:49,235{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "events", :batch? false, :count 7}
+2026-09-24 12:52:49,479{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "events", :batch? false, :count 1}
+2026-09-24 12:52:49,483{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "events", :batch? false, :count 1}
+2026-09-24 12:52:49,906{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "events", :batch? false, :count 15}
+2026-09-24 12:52:49,910{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "events", :batch? false, :count 15}
+2026-09-24 12:52:50,150{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "events", :batch? false, :count 9}
+2026-09-24 12:52:50,154{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "events", :batch? false, :count 9}
+2026-09-24 12:52:50,584{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "events", :batch? true, :count 12}
+2026-09-24 12:52:50,586{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "events", :batch? true, :count 12}
+2026-09-24 12:52:50,626{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "events", :batch? true, :count 1}
+2026-09-24 12:52:50,628{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "events", :batch? true, :count 1}
+2026-09-24 12:52:50,777{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:52:50,781{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:52:51,045{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "orders", :batch? false, :count 4}
+2026-09-24 12:52:51,050{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "orders", :batch? false, :count 4}
+2026-09-24 12:52:51,303{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "orders", :batch? true, :count 2}
+2026-09-24 12:52:51,307{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "orders", :batch? true, :count 2}
+2026-09-24 12:52:51,596{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? false, :count 12}
+2026-09-24 12:52:51,599{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? false, :count 12}
+2026-09-24 12:52:51,737{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? false, :count 5}
+2026-09-24 12:52:51,737{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "orders", :batch? false, :count 9}
+2026-09-24 12:52:51,741{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? false, :count 5}
+2026-09-24 12:52:51,741{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "orders", :batch? false, :count 9}
+2026-09-24 12:52:51,791{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "events", :batch? true, :count 15}
+2026-09-24 12:52:51,795{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "events", :batch? true, :count 15}
+2026-09-24 12:52:52,296{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "events", :batch? true, :count 11}
+2026-09-24 12:52:52,300{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "events", :batch? true, :count 11}
+2026-09-24 12:52:52,318{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "orders", :batch? false, :count 9}
+2026-09-24 12:52:52,322{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "orders", :batch? false, :count 9}
+2026-09-24 12:52:52,433{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "orders", :batch? true, :count 4}
+2026-09-24 12:52:52,437{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "orders", :batch? true, :count 4}
+2026-09-24 12:52:52,763{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "orders", :batch? false, :count 11}
+2026-09-24 12:52:52,767{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "orders", :batch? false, :count 11}
+2026-09-24 12:52:53,035{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "orders", :batch? true, :count 12}
+2026-09-24 12:52:53,039{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "orders", :batch? true, :count 12}
+2026-09-24 12:52:53,156{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "events", :batch? false, :count 13}
+2026-09-24 12:52:53,159{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "events", :batch? false, :count 13}
+2026-09-24 12:52:53,493{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "events", :batch? false, :count 9}
+2026-09-24 12:52:53,497{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "events", :batch? false, :count 9}
+2026-09-24 12:52:53,563{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? true, :count 7}
+2026-09-24 12:52:53,567{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? true, :count 7}
+2026-09-24 12:52:55,185{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? true, :count 5}
+2026-09-24 12:52:55,189{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? true, :count 5}
+2026-09-24 12:52:55,420{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "orders", :batch? false, :count 3}
+2026-09-24 12:52:55,423{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "orders", :batch? false, :count 3}
+2026-09-24 12:52:55,499{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "events", :batch? false, :count 16}
+2026-09-24 12:52:55,502{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-24 12:52:55,503{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "events", :batch? false, :count 16}
+2026-09-24 12:52:55,655{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	[:killed-agent "n5"]
+2026-09-24 12:52:56,131{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "orders", :batch? false, :count 6}
+2026-09-24 12:52:56,137{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "orders", :batch? false, :count 6}
+2026-09-24 12:52:56,234{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "events", :batch? false, :count 10}
+2026-09-24 12:52:56,239{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "events", :batch? false, :count 10}
+2026-09-24 12:52:56,402{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:52:56,408{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:52:56,569{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "orders", :batch? true, :count 6}
+2026-09-24 12:52:56,573{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "orders", :batch? true, :count 6}
+2026-09-24 12:52:56,592{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "events", :batch? false, :count 4}
+2026-09-24 12:52:56,595{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "events", :batch? false, :count 4}
+2026-09-24 12:52:56,636{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? true, :count 14}
+2026-09-24 12:52:56,642{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? true, :count 14}
+2026-09-24 12:52:56,897{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? true, :count 5}
+2026-09-24 12:52:56,902{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? true, :count 5}
+2026-09-24 12:52:56,906{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "orders", :batch? false, :count 2}
+2026-09-24 12:52:56,909{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "orders", :batch? false, :count 2}
+2026-09-24 12:52:56,991{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "orders", :batch? false, :count 16}
+2026-09-24 12:52:56,997{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "orders", :batch? false, :count 16}
+2026-09-24 12:52:57,217{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "events", :batch? true, :count 1}
+2026-09-24 12:52:57,220{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "events", :batch? true, :count 1}
+2026-09-24 12:52:58,107{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "orders", :batch? false, :count 11}
+2026-09-24 12:52:58,113{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "orders", :batch? false, :count 11}
+2026-09-24 12:52:59,099{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:52:59,103{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:52:59,126{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "events", :batch? true, :count 2}
+2026-09-24 12:52:59,130{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "events", :batch? true, :count 2}
+2026-09-24 12:52:59,256{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "orders", :batch? false, :count 7}
+2026-09-24 12:52:59,260{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "orders", :batch? false, :count 7}
+2026-09-24 12:52:59,287{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "orders", :batch? false, :count 10}
+2026-09-24 12:52:59,291{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "orders", :batch? false, :count 10}
+2026-09-24 12:52:59,291{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "events", :batch? true, :count 13}
+2026-09-24 12:52:59,295{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "events", :batch? true, :count 13}
+2026-09-24 12:52:59,894{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? false, :count 7}
+2026-09-24 12:52:59,898{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? false, :count 7}
+2026-09-24 12:53:00,364{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? true, :count 7}
+2026-09-24 12:53:00,368{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? true, :count 7}
+2026-09-24 12:53:00,896{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:53:00,901{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:53:01,134{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "orders", :batch? false, :count 1}
+2026-09-24 12:53:01,137{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "orders", :batch? false, :count 1}
+2026-09-24 12:53:01,376{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "events", :batch? true, :count 7}
+2026-09-24 12:53:01,379{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "events", :batch? true, :count 7}
+2026-09-24 12:53:01,568{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "events", :batch? false, :count 15}
+2026-09-24 12:53:01,572{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "events", :batch? false, :count 15}
+2026-09-24 12:53:01,812{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "orders", :batch? false, :count 14}
+2026-09-24 12:53:01,815{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "orders", :batch? false, :count 14}
+2026-09-24 12:53:02,365{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "orders", :batch? true, :count 2}
+2026-09-24 12:53:02,368{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "orders", :batch? true, :count 2}
+2026-09-24 12:53:02,787{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "events", :batch? false, :count 4}
+2026-09-24 12:53:02,791{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "events", :batch? false, :count 4}
+2026-09-24 12:53:03,041{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-24 12:53:03,132{GMT}	INFO	[jepsen worker nemesis] jepsen.control.util: Starting coord
+2026-09-24 12:53:03,508{GMT}	INFO	[jepsen worker nemesis] jepsen.coord.agent: coord-agent: a 1 on n4 is ready (http + grpc 19527 )
+2026-09-24 12:53:03,508{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	[:restarted-agent "n4"]
+2026-09-24 12:53:03,675{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? false, :count 13}
+2026-09-24 12:53:03,679{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? false, :count 13}
+2026-09-24 12:53:03,917{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? false, :count 3}
+2026-09-24 12:53:03,920{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? false, :count 3}
+2026-09-24 12:53:04,092{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "events", :batch? false, :count 14}
+2026-09-24 12:53:04,095{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "events", :batch? false, :count 14}
+2026-09-24 12:53:04,371{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "events", :batch? false, :count 5}
+2026-09-24 12:53:04,374{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "events", :batch? false, :count 5}
+2026-09-24 12:53:04,408{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "events", :batch? true, :count 5}
+2026-09-24 12:53:04,411{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "events", :batch? true, :count 5}
+2026-09-24 12:53:04,793{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "events", :batch? false, :count 6}
+2026-09-24 12:53:04,797{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "events", :batch? false, :count 6}
+2026-09-24 12:53:04,981{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "events", :batch? false, :count 3}
+2026-09-24 12:53:04,984{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "events", :batch? false, :count 3}
+2026-09-24 12:53:04,995{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "orders", :batch? true, :count 9}
+2026-09-24 12:53:04,999{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "orders", :batch? true, :count 9}
+2026-09-24 12:53:05,026{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "orders", :batch? true, :count 8}
+2026-09-24 12:53:05,030{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "orders", :batch? true, :count 8}
+2026-09-24 12:53:05,076{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "events", :batch? false, :count 11}
+2026-09-24 12:53:05,082{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "events", :batch? false, :count 11}
+2026-09-24 12:53:05,195{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "events", :batch? false, :count 9}
+2026-09-24 12:53:05,196{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "events", :batch? false, :count 9}
+2026-09-24 12:53:06,092{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? false, :count 6}
+2026-09-24 12:53:06,096{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? false, :count 6}
+2026-09-24 12:53:06,713{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-24 12:53:06,814{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	[:killed-agent "n5"]
+2026-09-24 12:53:07,105{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "orders", :batch? false, :count 15}
+2026-09-24 12:53:07,109{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "orders", :batch? false, :count 15}
+2026-09-24 12:53:07,530{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "orders", :batch? true, :count 15}
+2026-09-24 12:53:07,531{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "events", :batch? true, :count 8}
+2026-09-24 12:53:07,535{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "events", :batch? true, :count 8}
+2026-09-24 12:53:07,536{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "orders", :batch? true, :count 15}
+2026-09-24 12:53:07,764{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "events", :batch? false, :count 14}
+2026-09-24 12:53:07,768{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "events", :batch? false, :count 14}
+2026-09-24 12:53:07,851{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "orders", :batch? true, :count 6}
+2026-09-24 12:53:07,855{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "orders", :batch? true, :count 6}
+2026-09-24 12:53:08,005{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "orders", :batch? false, :count 6}
+2026-09-24 12:53:08,008{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "orders", :batch? false, :count 6}
+2026-09-24 12:53:08,150{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "events", :batch? true, :count 16}
+2026-09-24 12:53:08,154{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "events", :batch? true, :count 16}
+2026-09-24 12:53:08,394{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "orders", :batch? false, :count 8}
+2026-09-24 12:53:08,398{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "orders", :batch? false, :count 8}
+2026-09-24 12:53:08,740{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? false, :count 2}
+2026-09-24 12:53:08,744{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? false, :count 2}
+2026-09-24 12:53:08,986{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? false, :count 12}
+2026-09-24 12:53:08,989{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? false, :count 12}
+2026-09-24 12:53:09,032{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "events", :batch? true, :count 8}
+2026-09-24 12:53:09,036{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "events", :batch? true, :count 8}
+2026-09-24 12:53:09,461{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "events", :batch? false, :count 15}
+2026-09-24 12:53:09,464{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "events", :batch? false, :count 15}
+2026-09-24 12:53:11,673{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "events", :batch? false, :count 1}
+2026-09-24 12:53:11,676{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "events", :batch? false, :count 1}
+2026-09-24 12:53:11,740{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "orders", :batch? false, :count 12}
+2026-09-24 12:53:11,744{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "orders", :batch? false, :count 12}
+2026-09-24 12:53:12,164{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "events", :batch? false, :count 5}
+2026-09-24 12:53:12,167{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "events", :batch? false, :count 5}
+2026-09-24 12:53:12,187{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "orders", :batch? false, :count 15}
+2026-09-24 12:53:12,190{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "orders", :batch? false, :count 15}
+2026-09-24 12:53:12,226{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-24 12:53:12,328{GMT}	INFO	[jepsen worker nemesis] jepsen.control.util: Starting coord
+2026-09-24 12:53:12,493{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "events", :batch? true, :count 3}
+2026-09-24 12:53:12,495{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "events", :batch? true, :count 3}
+2026-09-24 12:53:12,605{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "events", :batch? true, :count 7}
+2026-09-24 12:53:12,606{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:53:12,608{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "events", :batch? true, :count 7}
+2026-09-24 12:53:12,609{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:53:12,653{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? false, :count 14}
+2026-09-24 12:53:12,654{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? false, :count 14}
+2026-09-24 12:53:12,780{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "orders", :batch? false, :count 14}
+2026-09-24 12:53:12,783{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "orders", :batch? false, :count 14}
+2026-09-24 12:53:12,951{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "orders", :batch? false, :count 10}
+2026-09-24 12:53:12,954{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "orders", :batch? false, :count 10}
+2026-09-24 12:53:13,226{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "events", :batch? false, :count 2}
+2026-09-24 12:53:13,230{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "events", :batch? false, :count 2}
+2026-09-24 12:53:13,252{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "orders", :batch? false, :count 7}
+2026-09-24 12:53:13,255{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "orders", :batch? false, :count 7}
+2026-09-24 12:53:13,418{GMT}	INFO	[jepsen worker nemesis] jepsen.coord.agent: coord-agent: a 2 on n5 is ready (http + grpc 19527 )
+2026-09-24 12:53:13,419{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	[:restarted-agent "n5"]
+2026-09-24 12:53:13,520{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "orders", :batch? true, :count 15}
+2026-09-24 12:53:13,522{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "orders", :batch? true, :count 15}
+2026-09-24 12:53:14,407{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "events", :batch? true, :count 9}
+2026-09-24 12:53:14,410{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "events", :batch? true, :count 9}
+2026-09-24 12:53:14,733{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "events", :batch? true, :count 16}
+2026-09-24 12:53:14,737{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "events", :batch? true, :count 16}
+2026-09-24 12:53:14,851{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "orders", :batch? true, :count 7}
+2026-09-24 12:53:14,854{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "orders", :batch? true, :count 7}
+2026-09-24 12:53:15,058{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:53:15,061{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:53:15,517{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? true, :count 14}
+2026-09-24 12:53:15,520{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? true, :count 14}
+2026-09-24 12:53:15,566{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "events", :batch? true, :count 9}
+2026-09-24 12:53:15,572{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "events", :batch? true, :count 9}
+2026-09-24 12:53:16,908{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "events", :batch? false, :count 5}
+2026-09-24 12:53:16,912{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "events", :batch? false, :count 5}
+2026-09-24 12:53:16,991{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "orders", :batch? true, :count 16}
+2026-09-24 12:53:16,994{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "orders", :batch? true, :count 16}
+2026-09-24 12:53:17,517{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "orders", :batch? false, :count 12}
+2026-09-24 12:53:17,520{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "orders", :batch? false, :count 12}
+2026-09-24 12:53:17,666{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "orders", :batch? true, :count 2}
+2026-09-24 12:53:17,674{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "orders", :batch? true, :count 2}
+2026-09-24 12:53:18,004{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "events", :batch? true, :count 14}
+2026-09-24 12:53:18,007{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "events", :batch? true, :count 14}
+2026-09-24 12:53:18,068{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "orders", :batch? false, :count 9}
+2026-09-24 12:53:18,071{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "orders", :batch? false, :count 9}
+2026-09-24 12:53:18,658{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "orders", :batch? false, :count 13}
+2026-09-24 12:53:18,661{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "orders", :batch? false, :count 13}
+2026-09-24 12:53:19,186{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "orders", :batch? true, :count 11}
+2026-09-24 12:53:19,190{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:ok	:idgen	{:name "orders", :batch? true, :count 11}
+2026-09-24 12:53:19,245{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? false, :count 6}
+2026-09-24 12:53:19,249{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? false, :count 6}
+2026-09-24 12:53:19,257{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? true, :count 6}
+2026-09-24 12:53:19,260{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:idgen	{:name "orders", :batch? true, :count 6}
+2026-09-24 12:53:19,392{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "events", :batch? false, :count 6}
+2026-09-24 12:53:19,395{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:idgen	{:name "events", :batch? false, :count 6}
+2026-09-24 12:53:19,401{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "events", :batch? false, :count 7}
+2026-09-24 12:53:19,404{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:idgen	{:name "events", :batch? false, :count 7}
+2026-09-24 12:53:20,123{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "orders", :batch? false, :count 6}
+2026-09-24 12:53:20,127{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "orders", :batch? false, :count 6}
+2026-09-24 12:53:20,280{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "orders", :batch? false, :count 13}
+2026-09-24 12:53:20,284{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "orders", :batch? false, :count 13}
+2026-09-24 12:53:20,657{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "events", :batch? true, :count 5}
+2026-09-24 12:53:20,661{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "events", :batch? true, :count 5}
+2026-09-24 12:53:20,851{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-24 12:53:21,009{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	[:killed-agent "n4"]
+2026-09-24 12:53:21,042{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "orders", :batch? false, :count 7}
+2026-09-24 12:53:21,048{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "orders", :batch? false, :count 7}
+2026-09-24 12:53:21,097{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:invoke	:idgen	{:name "orders", :batch? true, :count 5}
+2026-09-24 12:53:21,101{GMT}	INFO	[jepsen worker 9] jepsen.print: 9	:info	:idgen	{:name "orders", :batch? true, :count 5}	:unavailable-maybe-applied
+2026-09-24 12:53:21,151{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:idgen	{:name "orders", :batch? true, :count 16}
+2026-09-24 12:53:21,154{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:info	:idgen	{:name "orders", :batch? true, :count 16}	:unavailable-maybe-applied
+2026-09-24 12:53:21,837{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:idgen	{:name "orders", :batch? true, :count 15}
+2026-09-24 12:53:21,838{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-24 12:53:21,927{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:idgen	{:name "orders", :batch? true, :count 15}
+2026-09-24 12:53:22,297{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:idgen	{:name "events", :batch? true, :count 8}
+2026-09-24 12:53:22,300{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:info	:idgen	{:name "events", :batch? true, :count 8}	:unavailable-maybe-applied
+2026-09-24 12:53:22,874{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:idgen	{:name "events", :batch? true, :count 13}
+2026-09-24 12:53:22,877{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:info	:idgen	{:name "events", :batch? true, :count 13}	:unavailable-maybe-applied
+2026-09-24 12:53:22,966{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "orders", :batch? true, :count 10}
+2026-09-24 12:53:22,972{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "orders", :batch? true, :count 10}
+2026-09-24 12:53:23,179{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "events", :batch? false, :count 9}
+2026-09-24 12:53:23,185{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "events", :batch? false, :count 9}
+2026-09-24 12:53:24,070{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "events", :batch? false, :count 2}
+2026-09-24 12:53:24,075{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "events", :batch? false, :count 2}
+2026-09-24 12:53:24,349{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "events", :batch? true, :count 4}
+2026-09-24 12:53:24,354{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "events", :batch? true, :count 4}
+2026-09-24 12:53:24,414{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:invoke	:idgen	{:name "events", :batch? true, :count 14}
+2026-09-24 12:53:24,420{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "orders", :batch? false, :count 2}
+2026-09-24 12:53:24,420{GMT}	INFO	[jepsen worker 7] jepsen.print: 7	:ok	:idgen	{:name "events", :batch? true, :count 14}
+2026-09-24 12:53:24,422{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "orders", :batch? false, :count 2}
+2026-09-24 12:53:25,137{GMT}	INFO	[jepsen worker 9] jepsen.print: 19	:invoke	:idgen	{:name "orders", :batch? false, :count 3}
+2026-09-24 12:53:25,138{GMT}	INFO	[jepsen worker 9] jepsen.coord.client: Opening coord client on n1
+2026-09-24 12:53:25,196{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-24 12:53:25,225{GMT}	INFO	[jepsen worker 9] jepsen.print: 19	:ok	:idgen	{:name "orders", :batch? false, :count 3}
+2026-09-24 12:53:25,231{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:idgen	{:name "orders", :batch? false, :count 8}
+2026-09-24 12:53:25,232{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:idgen	{:name "orders", :batch? false, :count 8}
+2026-09-24 12:53:25,290{GMT}	INFO	[jepsen worker nemesis] jepsen.control.util: Starting coord
+2026-09-24 12:53:25,336{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:idgen	{:name "orders", :batch? false, :count 9}
+2026-09-24 12:53:25,337{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-24 12:53:25,448{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:idgen	{:name "orders", :batch? false, :count 9}
+2026-09-24 12:53:25,646{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:idgen	{:name "orders", :batch? true, :count 16}
+2026-09-24 12:53:25,646{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-24 12:53:25,760{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:idgen	{:name "orders", :batch? true, :count 16}
+2026-09-24 12:53:25,766{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:53:25,770{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:idgen	{:name "events", :batch? true, :count 6}
+2026-09-24 12:53:26,303{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:idgen	{:name "events", :batch? false, :count 16}
+2026-09-24 12:53:26,307{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:idgen	{:name "events", :batch? false, :count 16}
+2026-09-24 12:53:26,338{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:invoke	:idgen	{:name "events", :batch? true, :count 4}
+2026-09-24 12:53:26,341{GMT}	INFO	[jepsen worker 5] jepsen.print: 5	:ok	:idgen	{:name "events", :batch? true, :count 4}
+2026-09-24 12:53:26,381{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:invoke	:idgen	{:name "orders", :batch? true, :count 10}
+2026-09-24 12:53:26,384{GMT}	INFO	[jepsen worker 6] jepsen.print: 6	:ok	:idgen	{:name "orders", :batch? true, :count 10}
+2026-09-24 12:53:26,394{GMT}	INFO	[jepsen worker nemesis] jepsen.coord.agent: coord-agent: a 1 on n4 is ready (http + grpc 19527 )
+2026-09-24 12:53:26,394{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	[:restarted-agent "n4"]
+2026-09-24 12:53:26,475{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:invoke	:idgen	{:name "events", :batch? true, :count 7}
+2026-09-24 12:53:26,478{GMT}	INFO	[jepsen worker 8] jepsen.print: 8	:ok	:idgen	{:name "events", :batch? true, :count 7}
+2026-09-24 12:53:26,669{GMT}	INFO	[jepsen worker 9] jepsen.print: 19	:invoke	:idgen	{:name "orders", :batch? false, :count 9}
+2026-09-24 12:53:26,672{GMT}	INFO	[jepsen worker 9] jepsen.print: 19	:ok	:idgen	{:name "orders", :batch? false, :count 9}
+2026-09-24 12:53:26,823{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:idgen	{:name "events", :batch? false, :count 1}
+2026-09-24 12:53:26,827{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:idgen	{:name "events", :batch? false, :count 1}
+2026-09-24 12:53:27,173{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:invoke	:idgen	{:name "events", :batch? true, :count 10}
+2026-09-24 12:53:27,175{GMT}	INFO	[jepsen worker 0] jepsen.print: 10	:ok	:idgen	{:name "events", :batch? true, :count 10}
+2026-09-24 12:53:27,177{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:invoke	:idgen	{:name "events", :batch? false, :count 4}
+2026-09-24 12:53:27,179{GMT}	INFO	[jepsen worker 1] jepsen.print: 11	:ok	:idgen	{:name "events", :batch? false, :count 4}
+2026-09-24 12:53:27,362{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:invoke	:idgen	{:name "orders", :batch? true, :count 13}
+2026-09-24 12:53:27,365{GMT}	INFO	[jepsen worker 2] jepsen.print: 12	:ok	:idgen	{:name "orders", :batch? true, :count 13}
+2026-09-24 12:53:30,699{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-24 12:53:30,788{GMT}	INFO	[jepsen worker nemesis] jepsen.control.util: Starting coord
+2026-09-24 12:53:31,108{GMT}	INFO	[jepsen worker nemesis] jepsen.coord.agent: coord-agent: a 1 on n4 is ready (http + grpc 19527 )
+2026-09-24 12:53:31,108{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	[:restarted-agent "n4"]
+2026-09-24 12:53:31,108{GMT}	INFO	[jepsen worker 4] jepsen.generator.interpreter: recovery: letting cluster converge
+2026-09-24 12:54:01,134{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-24 12:54:01,134{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-24 12:54:01,134{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-24 12:54:01,292{GMT}	INFO	[jepsen test runner] jepsen.core: Run complete, writing
+2026-09-24 12:54:01,338{GMT}	INFO	[jepsen test runner] jepsen.core: Snarfing log files
+2026-09-24 12:54:01,339{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Killing coord on n1
+2026-09-24 12:54:01,339{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Killing coord on n2
+2026-09-24 12:54:01,339{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Killing coord on n3
+2026-09-24 12:54:01,398{GMT}	INFO	[jepsen node n2] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-24 12:54:01,400{GMT}	INFO	[jepsen node n1] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-24 12:54:01,401{GMT}	INFO	[jepsen node n3] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-24 12:54:01,544{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-24 12:54:01,544{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-24 12:54:01,544{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-24 12:54:03,207{GMT}	INFO	[jepsen test runner] jepsen.core: Analyzing...
+2026-09-24 12:54:03,216{GMT}	INFO	[clojure-agent-send-off-pool-3] jepsen.coord.idgenck: idgen checker: {:distinct-ids 850, :min-regressions 0, :ids 850, :ops 198, :violations-by-class {}, :regressions 0, :batches 86, :failures (), :min-ids 10}
+2026-09-24 12:54:03,450{GMT}	INFO	[jepsen test runner] jepsen.core: Analysis complete
+2026-09-24 12:54:03,471{GMT}	INFO	[jepsen results] jepsen.store: Wrote /opt/coord/jepsen/store/coord/2026-09-24T12:52:02.273183239Z/results.edn
+2026-09-24 12:54:03,511{GMT}	INFO	[jepsen test runner] jepsen.core: {:linear {:valid? true,
+          :idgen {:ops 198,
+                  :ids 850,
+                  :min-ids 10,
+                  :distinct-ids 850,
+                  :batches 86,
+                  :regressions 0,
+                  :min-regressions 0,
+                  :violations-by-class {}},
+          :failures []},
+ :gates {:valid? true,
+         :gates {:premise {:valid? true,
+                           :writes 0,
+                           :duplicate-value-count 0,
+                           :duplicate-values {}},
+                 :availability {:min-ratio 0.95,
+                                :min-sample 100,
+                                :windows 5,
+                                :judged 0,
+                                :skipped-small-sample 5,
+                                :worst-window nil,
+                                :violations []},
+                 :rto {:budget-seconds 120,
+                       :n 0,
+                       :p95 nil,
+                       :max nil,
+                       :samples [],
+                       :unrecovered 0,
+                       :not-measured 5,
+                       :details [{:disruption {:start 22534103421,
+                                               :end 27258935292},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}
+                                 {:disruption {:start 35056183424,
+                                               :end 38430337723},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}
+                                 {:disruption {:start 46454359000,
+                                               :end 53839532428},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}
+                                 {:disruption {:start 57612928445,
+                                               :end 63025544396},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}
+                                 {:disruption {:start 71809200721,
+                                               :end 75995528724},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}]},
+                 :liveness {:min-ok-ratio 0.1,
+                            :min-sample 10,
+                            :ops 1,
+                            :judged 1,
+                            :skipped-small-sample 0,
+                            :ok-ratio 0.9801980198019802,
+                            :by-op {:idgen {:total 202,
+                                            :ok 198,
+                                            :info 4,
+                                            :fail 0,
+                                            :legit-fail 0,
+                                            :judged 202,
+                                            :errors {:unavailable-maybe-applied 4}}},
+                            :violations []},
+                 :agent {:proof {:total 0,
+                                 :by-method {:put 0,
+                                             :range 0,
+                                             :delete 0,
+                                             :txn 0,
+                                             :status 0},
+                                 :agents [{:host "n4",
+                                           :up? true,
+                                           :up-now? true,
+                                           :total 0,
+                                           :by-method {:put 0,
+                                                       :range 0,
+                                                       :delete 0,
+                                                       :txn 0,
+                                                       :status 0}}
+                                          {:host "n5",
+                                           :up? true,
+                                           :up-now? true,
+                                           :total 0,
+                                           :by-method {:put 0,
+                                                       :range 0,
+                                                       :delete 0,
+                                                       :txn 0,
+                                                       :status 0}}]},
+                         :min-requests 1,
+                         :local-surface? true}},
+         :failures []},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true}
+
+
+Everything looks good! ヽ(‘ー`)ノ
