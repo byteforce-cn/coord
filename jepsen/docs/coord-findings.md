@@ -1879,3 +1879,57 @@ make test WORKLOAD=lock NEMESIS=none TIME_LIMIT=120 CONCURRENCY=2n AGENTS=2 \
   ③拓扑（1 agent 下 shard leader 判定）。
   **在分诊前，`mq` 的 cell 只能算「部分判据可用」**（已把 `:poll-ack-failures` 打进 summary 作为可见信号）。
 * **状态**：`open`（下一轮的第一件事）。
+
+### F-69 [P0 候选，open] 单节点 kill 后 leader 判 fatal（无可用快照）⇒ 全集群写入永久失败
+
+* **发现（2026-09-25，T2.3 2h 组合浸泡）**：`soakfull`（mix `map=20,watch=40,lease=40`，
+  rate 2 / 2n / seed 42，集群 n1/n2/n3）在**首次 kill 之后彻底失能**，run 判 invalid：
+  - 12:27:27 kill n1（当时的 leader，term 1）⇒ n2 当选（term 2），之后 **7.5 分钟服务正常**；
+  - **12:34:55.5 起 n2 的 raft 停止服务**（`raft_wm` 心跳末行 `12:34:55.540750Z`，此后无一行）；
+    自 12:34:55.950 起**所有 client 写**返回
+    `INTERNAL: raft auth write failed: when Read Snapshot(None): snapshot not found`
+    （n2 日志 9626 处，直到 run 结束 13:59）；
+  - 12:38:11 n1 重启、n3 当选 leader 后**首笔写立即同错** ⇒ 不可自愈；
+  - gates：两个 quiet 窗口 `0/955`、`0/1054`（ratio 0.0），`rto-unrecovered=2`（预算 120s）。
+* **机制（已定位到代码）**：错误串唯一构造点 = openraft-0.10.0-alpha.34
+  `src/replication/snapshot_transmitter.rs:203`：leader 给落后 follower 发快照时，
+  state machine 的 `get_current_snapshot()` 返回 `None` ⇒ `StorageError("snapshot not found")`。
+  openraft 把复制路径的 StorageError 经 `replication_context.notify_storage_error()` 上报
+  RaftCore ⇒ **该节点进入 fatal**（“存储错误不可恢复”是 openraft 的设计）⇒ 之后全部
+  `client_write` 返回 `Fatal(StorageError)`。n2 心跳停摆与 fatal 语义一致；另注意 n2 进程
+  **未退出**（服务已停、进程仍在）——生产上需要一条自愈/告警路径（见修法方向 ③）。
+* **触发条件（未完全定位，已收窄）**：快照发送只在「某 follower 的 next_index <
+  leader 的 log_start（已清理区）」时启动。原始 run 中该时刻 ≈ 10009（= 上次快照 4999 +
+  策略 `LogsSinceLast(5000)` 的第二个触发点），当时 n1（失联）的 next_index 8185 恰落在
+  第二次 purge（≈8999）之下。**候选**：purge 推进与快照可用性的时序窗口（发送启动时读到
+  “无快照”）——需要一次命中该窗口的复现（见下）来证实/证伪。
+* **取证缺口（两处，建议修）**：① harness 默认 `RUST_LOG=coord=info`（db.clj:188）⇒
+  **openraft 自身日志不落盘**（本次已用 `COORD_RUST_LOG=coord=info,openraft=info` 绕过）；
+  ② coord stdout 为**块缓冲** ⇒ SIGKILL 丢缓冲（被 kill 节点的最后一段日志消失）、
+  SIGSTOP（`pause` nemesis，实测 `ps` 状态 `Tl`）造成“日志停更”的假象。
+* **次生（非独立缺陷）**：mapck 把 256 条 **`:fail`** 的 delete op 记成
+  `:delete-response-inconsistent`（失败 ≠ 违反；与 F-68 同族的分类问题）；leaseck 的
+  3 条 `:lease-not-expired`（lease id 349–351）与故障同一时刻，是结果不是原因。
+* **对照实验（已跑，未复现）**：`--workload register --nemesis soak --soak-quiet 60
+  --soak-disrupt 240 --rate 30 --time-limit 600` + `COORD_RUST_LOG=…,openraft=info`
+  ⇒ `Everything looks good`；结构差异：kill 仅 ~3 分钟，失联节点（n3，applied=769）
+  在 leader 首次 purge（→3999，14:15:39）之前就已追平 ⇒ **从未出现“next_index <
+  log_start”的 follower，也就没有快照发送**（全 run `ReplicateSnapshot`/`error
+  replication` 计数 = 0）。
+* **复现要点（下一次 lab 作业的第一优先）**：
+  1. **让某 follower 的 next_index 落在 purge 点之下**：kill 早于首次快照触发
+     （index≈5000）~1–2k 条，并让 kill 窗口跨过第二次触发（≈10000），全程不恢复；
+  2. 打开 `COORD_RUST_LOG=coord=info,openraft=info`；
+  3. 监控 `ReplicateSnapshot` / `snapshot sending` / `error replication to target`：
+     若出现 `error replication to target: …Read Snapshot(None)` 即命中。
+* **建议修法方向（待评审，不在本轮实施）**：
+  1. `get_current_snapshot()==None` 时，复制侧应**按需构建**快照（openraft 启动路径
+     `storage/helper.rs:197` 已有此模式），而不是让存储错误升级为节点 fatal；
+  2. 或把“无快照可送”降级为该 follower 的复制暂停 + 告警（不停止整节点服务）；
+  3. coord 进程对 raft fatal 的自愈（退出让编排层重启，或健康检查置死 + 告警）；
+  4. mapck 失败分类修正（与 F-68 同族）。
+* **影响面**：M2 收口（W3-1）受阻；P-Gate 1/3/4 的「故障注入下不得永久失能」判据必须
+  等本缺陷闭环；**RC 冻结前必须修**。
+* **状态**：`open`；证据归档：
+  `docs/production/evidence/20260925T141209Z-t2.3-m2-watch-lease-2h-kill-snapshot-fatal/`
+  （主）、`…/20260925T142520Z-diag-kill-3min-openraft-logs-no-repro/`（对照）。

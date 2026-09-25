@@ -1,0 +1,20 @@
+results-file: store/coord/2026-09-25T11:54:36.371692055Z/results.edn
+overall-valid: false
+linear-valid: false
+gates-valid: false
+gates-failures: [{:type :quiet-availability, :min-ratio 0.95, :violations [{:start 2609130534572, :end 4271409088749, :avail {:ok 0, :total 955, :ratio 0.0}} {:start 4818043780077, :end 6737239300076, :avail {:ok 0, :total 1054, :ratio 0.0}}]} {:type :rto-unrecovered, :count 2, :budget-seconds 120}]
+rto-budget-seconds: 120
+rto-p95-seconds: -
+rto-max-seconds: -
+rto-samples: -
+rto-unrecovered: 2
+rto-not-measured: 1
+quiet-windows: 4
+quiet-judged: 3
+quiet-skipped-small-sample: 1
+quiet-worst-ratio: 0.0
+quiet-violations: 2
+premise-valid: true
+premise-duplicate-values: 0
+soak-converged: -
+soak-regions: -

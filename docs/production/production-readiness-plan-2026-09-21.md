@@ -726,7 +726,7 @@ W4-1（TLS fail-closed，仍按"lab 联立变更"计划）、W4-3（审计采买
 
 ---
 
-### 第八轮追加（2026-09-25）—— 主题：**门禁"常驻红"清零的 CI 实证 + chaos 残余分布归因**
+### 第八轮追加（2026-09-25）—— 主题：**门禁“常驻红”清零的 CI 实证 + W3-1 浸泡首跑（F-69 立项）**
 
 > 触发：第七轮收尾点名了两处"待定时跑"窗口（perf 修复后的首次 schedule 跑、chaos 收窄后的观测序列）。
 > 两者都已在 2026-09-25T02:33Z 的定时跑到期 ⇒ 本轮先取结论回写，再启 W3 长跑。
@@ -736,7 +736,19 @@ W4-1（TLS fail-closed，仍按"lab 联立变更"计划）、W4-3（审计采买
 | **W2-1 闭环实证** | `weekly perf baseline` 在 **schedule 事件**下通过 | ✅ **完成（含 CI 实证）** | schedule run `36086768094`（SHA `b6c0a41`）逐 job 拉 `/actions/runs/{id}/jobs`；对照 push run `36017211618`（同 SHA） | 该 run **全部 job success**，其中 `weekly perf baseline` = **success**（02:33:51→02:43:55 ≈ 10m04s）—— **该 job 历史上第一次通过**（此前 13/13 常驻红）；`real-process chaos` / `cargo audit + deny` / `workspace tests` / `gate self-check` / `plugin engine feature matrix` 同 run 全 success。push run 同 SHA：**10 success + perf skipped**（符合 `if: schedule` 设计；另有仓库外部的 `Security audit` check，见下）⇒ W2-1 的修复（采样对称化 + 注解器可达性）在两种事件下均获印证；§8.1 R-07 随之解除 |
 | **W2-3 观察更新** | chaos 残余分布逐条归因（n=9） | 🟡 记录（**仍不宣布稳定**） | 逐 run 拉 `/actions/runs/{id}/jobs`（9 次，2026-09-23→09-25） | 近 9 次 **7 绿 / 2 红**：`35869740196` **红**（迭代 784，第六轮已收窄、此后未复发）→ 绿×4（`35876239831` / `35881648825` / `35947874357` / `36000602894`）→ `36007047810` **红**（F-50 确定性边界，U-12 引入，当日归因并修复）→ 绿×3（`36013532266` / `36017211618` / `36086768094`）。**两次红都带得出原因**（注解通道的持续收益）；历史 14/31 的残余分布仍无法逐条归因（job 日志 403）。结论按纪律封顶为"观察中" |
 | **W2-5（扩项）** | P-Gate 9 首次拥有机械门禁 + 负控制演练（**6/9 → 7/9**） | ✅ 完成（本轮） | `bash scripts/check-promise-consistency.sh` ⇒ exit 0；四组注入逐一验证：裸免责声明 ⇒ 1、契约版本漂移 ⇒ 1、删承诺行 ⇒ 1、悬空链接 ⇒ 1；**还原后全部回 0**；`python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"` ⇒ OK | 新增 `scripts/check-promise-consistency.sh`（4 条判据：U-01 裸声明归零 / 五份文本悬空引用 / 契约版本三方一致 / 台账↔proto 双向一致），已接 CI `lint` job + `gate-self-check` job 的 self-check。**首跑即抓到 4 处真实悬空链接**（W0-4 改引用时把相对路径写错：`apis/contracts/README.md`×2、`apis/contracts/WHITEPAPER.md`×2，已修复为 `../../docs/production/…`）。演练记录：`docs/production/ops/gate-drills-2026-09-21.md` §4 |
+| **CI 实证（bba0e57）** | 本轮 P9 改动的 CI 验证 | ✅ 全 job success | run `36132342953` 逐 job | `fmt+clippy` / **`gate self-check`（含 P9 演练步骤）** / `workspace tests` / **`real-process chaos`** / `cargo audit + deny` / `proto contract` / `java sdk` / `java example integration` / `plugin matrix` / `frontend lint` 全 success；`weekly perf baseline` skipped（push 不跑）。⚠️ 尾随提交 `e8c9687`（`.gitignore` 补 `.ua/`）的推送本轮因 GitHub 网络中断未完成——待下次重试 |
+| **W3-1（T2.3 收口浸泡）** | 2h `soakfull`（map+watch+lease）首跑 | 🔴 **invalid（新发现 F-69，P0 候选）** | `make soakfull JEPSEN_PROVIDER=docker WORKLOAD=soakfull SOAK_TIME_LIMIT=7200 SOAK_QUIET=1800 SOAK_DISRUPT=600 SOAK_RATE=2 CONCURRENCY=2n SEED=42 SOAK_MIX='map=20,watch=40,lease=40' SOAK_EXTRA='--watch-min-events 200 --lease-min-grants 100 --lease-min-expiries 30'`；判定见 `results.edn` / `summary.txt` | run 11:54:36Z→13:59Z（3 节点 n1/n2/n3）：**kill n1（leader）后 7.5 分钟，n2（新 leader）的 raft 判 fatal**（`when Read Snapshot(None): snapshot not found`）⇒ 其后 **85 分钟全集群写失败（9626 处）**、两个 quiet 窗口 `0/955` 与 `0/1054`、`rto-unrecovered=2`；**F-69 已立项**（`jepsen/docs/coord-findings.md`，含机制/候选/复现要点/修法方向）；另有 checker 次生：256 条 `:fail` 被 mapck 记为 delete 违反（与 F-68 同族）。证据归档：`docs/production/evidence/20260925T141209Z-t2.3-m2-watch-lease-2h-kill-snapshot-fatal/`（MANIFEST 工作树 **clean**）；诊断对照（未复现）：`…/20260925T142520Z-diag-kill-3min-openraft-logs-no-repro/` |
+| **证据归因备注（本轮）** | MANIFEST 的 commit 链路与二进制 | ✅ 记录 | `git log` / `git describe` / `git reflog` | run 的二进制 `747995a0` 构建于 `96f9406`；收集时本地 HEAD = `1c411bb`（= `bba0e57` + `.gitignore` 一行 `.ua/`，系本地 amend 产物）⇒ 已打 tag **`evidence-t2.3-soak-2026-09-25`** 固定该 commit（保证 MANIFEST 引用可达），并以 `e8c9687` 在主线落等价变更；两次提交间**无运行时代码差异** |
 
+> **W3-8 备注（参数台账）**：`backfill-param-confirmation.sh --check` ⇒ 38 份归档、待填 11。
+> 本轮**不批量回填**（观察：已回填的 24 份都是 ①–⑧ 参数时代的面；待填 11 份含 mq/cache/idgen/registry
+> 等使用 §5.4 ⑨–⑫ **未确认参数**的 run ⇒ 回填口径应随确认单更新一起裁定）。本轮新增的两份归档
+> （使用面 map/watch/lease，属 ①–⑧）同样留待统一回填。
+>
+> **U-13（lease 活性窗口）备注**：F-27 的矩阵残余（`partition-halves` 下 4 条）仍是**待裁定的
+> 活性窗口口径**问题；但本轮 soak 的 3 条 `:lease-not-expired` 与之**不同源**（发生在 F-69 的
+> 全集群失能窗口内）。U-13 的实施不因本轮结果降级，也不得用来解释本轮 run。
+>
 > **副观察（一条容易再次踩的坑）**：push 跑的 job 列表里有一条 `Security audit`
 > （`/actions/runs/{id}/jobs` 可见，但其 `html_url` 指向独立路径），而它**不在本仓
 > `.github/workflows/`**（只有 ci.yml / contract-check.yml / release.yml 三份）；
