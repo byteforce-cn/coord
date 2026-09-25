@@ -806,7 +806,8 @@ W4-1（TLS fail-closed，仍按"lab 联立变更"计划）、~~W4-3（审计采�
 | **口径同步（五份文本）** | `adopter-playbook.md` §4/§6、`ops/security.md` §2.3、`ops/governance.md` §5、`gate-drills-2026-09-21.md` §4、`WHITEPAPER.md` §12-2 | ✅ 完成 | 同上的反向判据扫描 | 接入手册新增「可以说：未经独立第三方审计」「不可以说：经第三方审计」；白皮书 §12-2 由"审计缺失"改为"不再作为验收门槛 + 任何声明不得暗示已审计"；`ops/security.md` 的 P6 红因更新为"仅余 TLS fail-closed" |
 | **反向判据机械化（判据 5）** | `check-promise-consistency.sh` 增至**五条判据**：含「第三方(安全)审计 / 独立审计」的行必须带边界语境词（未经/不再/不采买/移出/已按/不得） | ✅ 完成（含负控制） | 基线 ⇒ **exit 0**；向 `WHITEPAPER.md` 注入裸声明「本平台已通过第三方安全审计。」⇒ **exit 1**（`[P9/U-14] WHITEPAPER.md:578 …`，且只报这一条）；还原 ⇒ **exit 0** | 脚本注释同步为五条；`gate-drills-2026-09-21.md` §4 登记"第九轮增至五条" |
 | **卡口复核（九轮）** | 本轮只有 `.md` + 一个 `.sh` 改动（**无 Rust 代码**） | ✅ 完成 | wire-sync / wire-descriptor / sdk-sync / error-code 四道非 cargo 卡口 + `check-promise-consistency.sh` + `check-gate-drills.sh` | 六道全 `exit 0`；`check-panics.sh`（需 clippy）因无代码改动未重跑 |
-| **CI 实证** | 本轮改动的 CI 验证 | ⏳ 推送后待回填 | 等下一次 push run | —— |
+| **CI 实证（`73b86f7`）** | 本轮改动的 CI 验证 | ✅ **全 job success** | run **`36154751619`** 逐 job（push 事件，共 11 job）；另有 `contract-check` run **`36154751497`** = success | **11/11 全绿**：`fmt+clippy` / `workspace tests` / **`gate self-check`（含新增第 5 条判据的脚本）** / **`real-process chaos` success（15:31:35→15:57:10 ≈ 25m35s）** / `cargo audit + deny` / `proto contract` / `java sdk` / `java example integration` / `plugin matrix` / `frontend lint`；`weekly perf baseline` skipped（push 不跑）。⚠️ chaos 本次偏慢（≈25 分钟）但**非卡死**——后续看到"最后一个 job 久不完"先拉 `/jobs` 看 started_at，勿过早判卡 |
+| **推送备注（网络）** | `73b86f7` 的推送前两次失败（`curl 28` 连接 github.com:443 超时 133s/135s），第三次成功 | ✅ 记录 | `git push` ×3；成功时 `21dcca2..73b86f7` | 与第八轮 `e8c9687` 同类（github.com 直连间歇中断）⇒ 推送失败先 `getent hosts github.com` + TCP/curl 探测，网络恢复立即重试即可，**不需要改 remote** |
 
 > **本轮的口径要点（写给后续轮次）**：U-14 之后，安全的对外表述只有两种合法形态 ——
 > ①「未经独立第三方审计」（边界）；②「已按 U-14 不采买 / 移出门槛」类历史或裁定记录。
