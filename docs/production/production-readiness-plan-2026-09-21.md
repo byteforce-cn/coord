@@ -573,7 +573,7 @@
 > 体例：每行必须有**可重跑的判据**与**产物落点**。**「完成」不等于「已验收」** ——
 > 凡依赖 lab / 外部（引入方签字）的判据一律标注**待验收**，不得当作已绿；
 > **U-14 后**「审计」不再是外部依赖（见 §8.7）。
-> 最后更新：**2026-09-25（第九轮：U-14 定义级变更）**（基线 `8b65290` + 前八轮改动 + 本轮改动）。
+> 最后更新：**2026-09-25（第十轮：F-69 修复 + 2h soak 现场复跑 + F-70/F-71 立项）**（基线 `8b65290` + 前九轮改动 + 本轮改动）。
 > 第八轮主题见下方「第八轮追加」；CI 侧取证方法见 `docs/production/ops/ci-gate-forensics-2026-09-22.md` §6。
 
 | # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
@@ -815,6 +815,32 @@ W4-1（TLS fail-closed，仍按"lab 联立变更"计划）、~~W4-3（审计采�
 > 残余风险的承载物是边界文本 + §9-4 的反向 No-Go，不是沉默。
 
 **第九轮未触碰**：所有代码面（W1 剩余项、W2-3/W2-4、W3 长跑与 F-69 修复）、§1.3 的案 A/B 人力裁定。
+
+---
+
+### 第十轮追加（2026-09-25）—— 主题：**F-69 根因修复（复制路径 fatal 形态闭环）+ 2h soak 现场复跑**
+
+> 触发：第八轮 2h soak 判 invalid（F-69：kill 后 leader 判 fatal ⇒ 全集群写失败 85 分钟）。
+> 本轮把 F-69 从「根因候选」推进到「代码闭环 + 进程内复现 + 现场验证」，并按 W3-1 同参数复跑。
+
+| # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
+|:--|:--|:--|:--|:--|
+| **F-69 根因（代码级）** | openraft 在 `get_snapshot_builder()` 的**克隆**上执行 `build_snapshot()`（`core/sm/worker.rs` 的 `try_create_snapshot_builder` + spawn），而复制路径 `GetSnapshot` 走主实例；coord 此前把 `current_snapshot` **深拷贝**给克隆 ⇒ 构建结果对主实例永不可见 ⇒ 落后 follower 需要快照时 `get_current_snapshot()` 恒 `None` ⇒ `StorageError::read_snapshot(None)` ⇒ RaftCore **fatal** | ✅ 定位 | openraft 源码构造点 `snapshot_transmitter.rs:203`（唯一构造点）+ purge 守卫共享（tracker 是 Arc）而槽位不共享的对照 | 现场 9626 条 `INTERNAL: raft auth write failed: when Read Snapshot(None)` 全部可归因 |
+| **F-69 修复** | `coord-server/src/raft/state_machine.rs`：①`current_snapshot` 改 **Arc 共享槽位**；②`build_snapshot` 经 `publish_snapshot()` **单调发布**（防迟到旧构建覆盖新装快照）；③`get_current_snapshot()` **磁盘兜底**（内存空时从 `META_SNAPSHOT`+SHA256 加载） | ✅ 代码完成 | ①单测 3：`cargo test -p coord-server --lib raft::state_machine`（修复前 2 红 → 修复后 3 ✓）；②集成 1：`cargo test -p coord-server --test snapshot_visibility_test`（修复前 60s 超时红 → 修后 0.14s 绿）；③**三节点复现**：`cargo test -p coord-server --test replication_snapshot_f69_test`（隔离 follower ⇒ purge 越位 ⇒ 断言不失能+恢复后经 snapshot 追上；修复前 **2.35s 复现 fatal**，修后 ~10s 绿、连跑 3 次稳定） | commit `eb91d58`；全量复核：coord-server lib 594 ✓ + 全部集成目标 ✓、m0 3 ✓ |
+| **mapck 次生（F-68 同族）** | delete 形状断言只对 `:ok`（`:fail` 无响应字段；现场 256 条 `:fail` 曾被误判 `:delete-response-inconsistent`） | ✅ 完成（双向负控制） | control 内 `run-checker-tests.clj jepsen.coord.mapck scripts/map-fixtures '{:mode :index}'` | 新 13/13；**旧 mapck 12/13（新 fixture 必红）**——修分类不放宽 |
+| **lab 工具陷阱** | `make binary` 只在二进制**缺失**时构建（`test -x \|\| cargo build`）⇒ `make upload` 静默沿用旧二进制（实测修 F-69 后 upload 仍报旧 hash `747995a0`） | ✅ 已发现（修复待提交） | `ls -la target/release/coord` + sha 对比 | 规则：lab 前显式 `cargo build --release -p coord` 并核对 hash；Makefile 修复随下个提交 |
+| **CI 实证（`eb91d58`）** | run `36161178888` 逐 job | ✅ **全 job success** | `/actions/runs/36161178888/jobs` | `fmt+clippy` / `workspace tests` / `gate self-check` / `cargo audit + deny` / `proto contract` / `java sdk` / `java example integration` / `plugin matrix` / `frontend lint` / `real-process chaos`（16:30→16:59 ≈ 29m）全 success；perf skipped（push 不跑）。⚠️ 本轮 CI 构建偏慢（cold cache，Build tests ≈ 13–15 min），非门禁异常 |
+| **W3-1 现场复跑（F-69 验证）** | 2h `soakfull` 同参数（SEED=42；16:40:35→18:44:29 UTC） | ✅ **F-69 场景闭环** | `make soakfull … SOAK_MIX='map=20,watch=40,lease=40'`；二进制 `8dd7f766` @ `eb91d58`；归档 `20260925T185131Z-t2.3-m2-watch-lease-2h-f69-fixed`（MANIFEST 工作树 **clean**） | kill n1（leader，17:13:32）→ 旧 run 的 fatal 窗口（kill 后 ~7.5min、第二次快照 9999、purge≈9000）本轮 **三节点 `snapshot not found` 全 0、客户端全时段 `:fail` 0**；n1 于 17:24 重启后 `Installed snapshot persisted to …/snapshot-9999-2.snap`（17:24:02）——快照成功传输并安装。门槛：gates **valid**、rto-p95 0.295s、**rto-unrecovered 0**、quiet worst-ratio **1.0**（旧 run：0.0/失能 2） |
+| **W3-1 verdict** | 🔴 **仍 invalid：`:violations-by-class {:lease-not-expired 4}`** | 🟡 已归因（两个独立面） | 逐条时间轴 + 日志对照（见 `coord-findings.md` §18） | ①**F-70 [P1 候选]**：failover 窗口 `ka/7636`（grant+put 均 ok，**首次 keepalive 即 NOT_FOUND `lease 1 not found`**，其后 41 次读全成功 Key 始终在 ⇒ 真实 Key 泄漏）；佐证：n3/n2 上任时 `LeaseManager rebuilt … 0/3 leases`、lease id 轨迹 failover 后由 1536 跌回 1。②**F-71 [P2]**：17:45:36-44 两条违规为**观测缺口**（CCT 1h TTL 集中过期波：`auth/service.rs:593` `exp = now+3600`；9 条 `CCT rejected` 重认证；leaseck 轮询把 26/27 次失败读只计 `:failed` 不触发重认证）。**结论不变**：红灯面已从「全集群失能」缩小到「failover 窗口的 lease 语义 + 认证观测口径」 |
+| **卡口复核（十轮）** | fmt / clippy（非测试目标）/ 六道脚本 | ✅ 完成 | `cargo fmt --all -- --check`；`cargo clippy --workspace -- -D warnings`；六道脚本 | 全绿 |
+
+**第十轮未触碰**：F-70 修复（须先复现）、F-71 checker 口径、W2-3/W2-4、W3 其余项（M3/M4）、W4-1 TLS fail-closed、§1.3 案 B 裁定。
+
+> **第十轮的口径要点**：F-69 从「P0 候选」转为「修复 + 现场验证 + 进程内复现判据（2.35s 红/10s 绿）」
+> —— 长跑暴露的失能面**已消失**；W3-1 仍未收口，但剩余红灯全部集中在 **failover 瞬间的
+> lease 语义**（F-70）与 **认证过期波导致的观测缺口**（F-71）。**下一轮第一优先 = F-70 复现
+> 与修复**（含 failover 后租约列表/keepalive 自洽/到期级联删除三判据），F-71 同期修 checker
+> 口径；两者闭环后按同参数重跑 2h soak（判据作废重跑纪律，见 §6.2）。
 
 ---
 

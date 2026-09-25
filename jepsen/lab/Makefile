@@ -336,8 +336,11 @@ keys: ## Generate the lab ssh keypair (keys/, never committed; auto in `make up`
 	  || ssh-keygen -t ed25519 -N '' -f "$(LAB_DIR)/keys/jepsen_ed25519" -q
 	@echo "lab ssh keypair ready: $(LAB_DIR)/keys/jepsen_ed25519(.pub)"
 
-binary: ## Build the coord release binary if missing (target/release/coord)
-	@test -x "$(COORD_BIN)" || { echo ">> building coord release (missing $(COORD_BIN)) ..."; cd $(REPO_ROOT) && cargo build --release -p coord; }
+binary: ## Build the coord release binary (always invoke cargo; no-op when fresh)
+	# 曾经写成 `test -x || cargo build`，于是 `make upload` 在代码改动后仍会用
+	# **旧二进制**布置 control（实测：F-69 修复后 upload 仍报旧 hash 747995a0）。
+	# cargo 本身对已最新的目标秒退，始终调用它才能真正防陈旧二进制。
+	@cd $(REPO_ROOT) && cargo build --release -p coord
 	@echo "coord binary: $(COORD_BIN) ($$(sha256sum $(COORD_BIN) | cut -c1-8))"
 
 up: ## Boot + provision the lab (vagrant: VMs; docker: compose up)

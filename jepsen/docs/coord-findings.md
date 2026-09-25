@@ -1961,3 +1961,89 @@ make test WORKLOAD=lock NEMESIS=none TIME_LIMIT=120 CONCURRENCY=2n AGENTS=2 \
 * **待办（不在本轮）**：修法方向 ③（进程对 raft fatal 的自愈/告警路径）仍开放：
   fatal 后进程不退出、健康检查不置死 ⇒ 生产上需要一条「编排层可感知」的路径；
   归入 W5-4/W6 的后续项评估。
+
+## 18. 第十轮（2026-09-25）：F-69 现场闭环 + 2h soak 复跑的 lease 违规归因
+
+> 输入：`docs/production/evidence/20260925T185131Z-t2.3-m2-watch-lease-2h-f69-fixed/`
+> （run 16:40:35→18:44:29 UTC，SEED=42，二进制 `8dd7f766` @ `eb91d58`，工作树 clean）、
+> 同 run 的 `store/coord/2026-09-25T16:40:27.876181482Z/{history.edn,results.edn}`。
+
+### F-69 收口记录（现场验证通过）
+
+* **修复已验证**：kill n1（leader，17:13:32）后，旧 run 的 fatal 窗口（kill 后 ~7.5 min，
+  第二次快照 9999 触发、purge≈9000 越过失联节点位置）在本轮 **三节点 `snapshot not
+  found` 全 0、客户端全时段 `:fail` 0**；n1 于 17:24 重启后日志出现
+  `Installed snapshot persisted to /var/lib/coord/snapshots/snapshot-9999-2.snap`
+  （17:24:02.717842Z）——快照被成功传输并安装，随即恢复服务。
+* **判据已机械化**（进程内，不需要 lab）：`coord-server/tests/replication_snapshot_f69_test.rs`
+  （3 节点 + 网络阻断隔离一个 follower ⇒ purge 越过其位置 ⇒ 断言 leader 不失能、
+  恢复后经 install_snapshot 追上）。负控制：还原 `state_machine.rs` 至修复前 ⇒ **2.35s
+  复现 `leader went fatal`**；修复版 ~10s 通过、连跑 3 次稳定。
+* **状态：closed（待 CI 覆盖三节点判据后转为常驻回归）**。
+
+### F-70 [P1 候选，open] leader 切换窗口：keepalive 立即 `NOT_FOUND` 且绑定 Key 从未被删
+
+* **证据（同 run）**：
+  - `ka/7636`：17:13:19.019 grant `{:id 1, :ttl 2}` → Put 成功（after-write 读可见）→
+    **首次 KeepAlive 即 `NOT_FOUND: keep-alive failed: lease 1 not found`**
+    （`keepalives []`、`keepalive-error` 置位）；随后 6.16s 内 **41 次轮询读全部成功**
+    且 Key 始终存在（`:observations [{:phase :first-absent, :absent? false, :reads 41,
+    :failed 0}]`）⇒ **不是观测缺口，是真实的活性违反（Key 泄漏）**。
+  - 同时刻上下文：n3 于 17:13:19.030 成为 leader 并记录
+    `LeaseManager rebuilt from state machine: 0 leases`（应为在飞租约数）；
+    本 run 的 lease id 轨迹在 failover 后**从 1536 跌回 1**（17:14 观测序列
+    1,4,6,7,8,9,10,11），随后缓慢爬升——说明重建装载的 max_id 极小。
+  - 第二次 failover：n2 于 17:51:46.937 成为 leader（n3 被 SIGSTOP），
+    `rebuilt from state machine: 3 leases`；17:51:45 发起的 `ka/16692` 同在窗口内
+    判 `:lease-not-expired`（keepalives 正常、停续期后 Key 未在窗口内消失）。
+* **机制（待闭）：failover 路径的 LeaseManager 内存视图与状态机记录出现分叉。**
+  已知的三个可疑面：
+  1. `start_lease_leader_reconciler`（`server/mod.rs:960-984`）在「刚成为 leader」时
+     用 `storage.list_lease_records()` 重建；本轮两次 failover 装载数（0 / 3）与
+     在飞租约数不符；
+  2. `LeaseManager::rebuild`（`lease/mod.rs:453`）确认在装载后 `NEXT_LEASE_ID.fetch_max`，
+     但进程级静态分配器（`lease/mod.rs:72`）在新进程/新 leader 上没有全局屏障
+     （Grant handler 注释自己承认「新主若尚未 apply 到前任已提交的 Grant」这一窗口）；
+  3. KeepAlive 的 `NOT_FOUND` 只看 **本节点 LeaseManager 内存**
+     （`server/mod.rs:2381-2390`），不看状态机记录 ⇒ 重建后的短窗口内出现
+     「grant/put 均成功但 keepalive 立即 not found」的对外不自洽。
+* **复现要点（下一轮第一优先）**：进程内 3 节点（沿用 F-69 判据的骨架）：
+  1. 先建 K 个活跃租约（含 keepalive 流与 ttl=30 的 revoke 场景）；
+  2. kill 当前 leader，等新 leader 上任；
+  3. 断言（a）新 leader `list_lease_records()` 与实际在飞租约一致；
+     （b）对旧 leader 期间创建的租约，keepalive 语义自洽（要么正常续期，要么
+     明确失败且**不产生永不删除的 Key**）；（c）这些租约到期后绑定 Key 在
+     ttl+grace 内被删。
+  * 判据落点：`coord-server/tests/lease_failover_test.rs`（新建）；
+    观测点：`rebuilt from state machine: N leases` 日志 + `results` 的
+    `:lease-not-expired`。
+* **影响面**：lease 级联删除契约在 failover 窗口失守（Key 泄漏直到该租约记录被
+  其他路径清理）；W3-1 的「failover 下 lease 活性」判据红。**RC 冻结前必须闭环**。
+
+### F-71 [P2，open] leaseck 观测缺口：认证失败读计入 `:failed` 但不计入「未判」
+
+* **证据**：`ttl/15232`（17:45:36）与 `ka/15242`（17:45:38）两条 `:lease-not-expired`
+  的 `:observations` 均为 `{:absent? false, :reads 39, :failed 26/27}`——**读失败占多数**；
+  同一秒段（17:45:39-49）客户端日志出现 **9 条 `CCT rejected as unauthenticated —
+  refreshing session`**（跨 9 个 worker，各重认证一次后恢复）。
+* **机制（已定位）**：CCT 的 TTL = **1h**（`coord-server/src/auth/service.rs:593`
+  `let exp = now + 3600`）；run 起始认证的 token 在 ~65 min 后（17:45）集中过期，
+  客户端在收到 `:unauthenticated` 时才懒重认证；`lease-wait-gone`（`client.clj:1025`）
+  的轮询把失败读只计 `:failed`，**不区分「没读到」与「读到仍然存在」**，也不触发
+  重认证 ⇒ 该窗口内的「消失」观测被吞掉，被判成活性违反（实为观测缺口）。
+* **修法方向（二选一或同时）**：
+  1. checker/工作负载侧：轮询循环对 `:unauthenticated` 触发一次会话刷新后重试
+     （与 `invoke-lease-*` 的重认证等价）；记录 `:last-ok-at-ms` / `:last-ok-present?`
+     供判定；「全部读失败」应计入 `:liveness-unjudged` 而不是违反（对标 F-26 的口径）。
+  2. 客户端侧：CCT 接近到期（如剩 5 min）时**主动**重认证，消除集中过期波。
+* **判据落点**：`scripts/lease-fixtures`（若无则新建）：
+  `expect-valid-absence-observed-by-reauth`（历史含一次 UNAUTHENTICATED 中断，Key 实际
+  已删 ⇒ 必须判绿）；配对负控制：Key 确实未删 ⇒ 必须判红。
+
+### 本轮 run 的门槛摘要（供 §11 引用）
+
+* gates **valid**；rto-p95 0.295s、**rto-unrecovered 0**；quiet-windows 4 /
+  judged 3 / **worst-ratio 1.0**；premise valid；map valid（2967 ops）、watch valid；
+* linear **invalid**：`:violations-by-class {:lease-not-expired 4}`（见 F-70/F-71）。
+* 与上一轮同参数 run（判 invalid、rto-unrecovered 2、quiet 0.0、85 min 全集群失能）
+  对比：**F-69 的失能面已消失**；剩余红灯全部集中在 lease failover 窗口与认证观测缺口。
