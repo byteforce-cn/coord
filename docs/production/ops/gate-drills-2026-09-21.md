@@ -99,11 +99,13 @@ OK: alert-runbook gate correctly turned red on the injected violation
 
 ## §4 第八轮追加（2026-09-25）：P-Gate 9 首次拥有机械门禁（`check-promise-consistency.sh`）
 
-> 背景：W2-5 的九道门里，P3–P6 需要 lab/审计、P8 需要仓库设置与真发布，**只有 P9
+> 背景：W2-5 的九道门里，P3–P6 需要 lab（P6 的负控制 = TLS/KEK 注入；**2026-09-25 U-14 后
+> 不再依赖第三方审计**）、P8 需要仓库设置与真发布，**只有 P9
 > 此前没有任何机械门禁**（「四处口径一致」全靠人工比对）。本轮把 P9 的可机械化
 > 子集变成脚本 + CI 卡口 + 自带 self-check；它首跑即抓到 4 处**真实**缺陷。
 
-判据（四条，纯文本 + python3，不需要 Rust/protoc）：
+判据（**第九轮已于 2026-09-25 增至五条** —— 新增判据 5「审计口径（U-14）」：
+含「第三方(安全)审计 / 独立审计」的行必须带边界语境词；纯文本 + python3，不需要 Rust/protoc）：
 
 1. **免责口径（U-01）不得回归**：`README.md` / `README.zh-CN.md` 里**裸**声明
    （行内不含「取代 / 原先 / replaces / former」语境词的旧措辞）为零；
@@ -152,5 +154,6 @@ CI 侧：卡口接 `lint` job（"Promise ↔ docs consistency gate"）；self-ch
 ### 4.4 覆盖率更新（W2-5）
 
 **6/9 → 7/9**：P1（fmt、panic 路径）/ P2（wire-sync、wire-descriptor、sdk-sync）/
-P7（告警↔runbook）/ **P9（本轮新增）**。剩余 3 道：P3–P6（需 lab / 第三方审计）、
+P7（告警↔runbook）/ **P9（本轮新增）**。剩余 3 道：P3–P6（需 lab；**2026-09-25 U-14 后
+P6 不再依赖第三方审计**，负控制改为 TLS fail-closed 注入 + 边界声明 diff）、
 P8（需仓库设置 + 真发布）。

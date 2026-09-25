@@ -80,7 +80,8 @@ head -c 32 /dev/urandom > /var/lib/coord-agent/transit-kek.bin && chmod 600 …
 ### 2.3 与 P-Gate 6 的关系
 
 P-Gate 6 的「KEK 供给裁定落地」项由此**转绿**（本地可重跑判据齐全）；
-P-Gate 6 整体仍红——TLS fail-closed（W4-1）、第三方审计（W4-3）未完成，
+P-Gate 6 整体仍红——TLS fail-closed（W4-1）未完成；**第三方审计已按 U-14（2026-09-25）移出门槛**
+（不采买 ⇒ 改为「未经独立审计」边界声明判据，见计划书 §8.7），
 且按 W2 的裁决，本轮所有绿在 W2 完成前**不计入对外门禁证据**。
 
 ---

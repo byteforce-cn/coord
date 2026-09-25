@@ -16,6 +16,8 @@
 #   4) 承诺面一致：STATUS.md 的 COMMITTED 表（包名+期限）== contracts README 承诺
 #      表（包名+期限）；且 COMMITTED ∪ STABLE 的包名集合 ↔ `proto/coord/`
 #      实际目录集合（双向比对 —— 承诺了却没有 proto、或有 proto 却没进台账，都置红）。
+#   5) 审计口径（U-14，2026-09-25）：五份文本不得把第三方审计当门槛或暗示"已审计"——
+#      含「第三方(安全)审计 / 独立审计」的行必须带边界语境词（未经/不再/不采买/移出/已按/不得）。
 #
 # 用法：bash scripts/check-promise-consistency.sh
 # 退出码：0 = 全过；1 = 有违规（**故意设计成会红**，见 W2-5 的负控制演练）
@@ -101,6 +103,17 @@ def check_links(key):
 
 for key in ("readme", "readme_zh", "contracts_readme", "status", "whitepaper"):
     check_links(key)
+
+# ── 判据 5：审计口径（U-14）—— 不得再把第三方审计当门槛/暗示已审计 ──────
+AUDIT_PHRASE = re.compile(r"第三方(安全)?审计|独立审计")
+AUDIT_CONTEXT = re.compile(r"未经|不再|不采买|移出|已按|不得|former")
+for key in ("readme", "readme_zh", "contracts_readme", "status", "whitepaper"):
+    for lineno, line in enumerate(read(key).splitlines(), 1):
+        if AUDIT_PHRASE.search(line) and not AUDIT_CONTEXT.search(line):
+            failures.append(
+                f"[P9/U-14] {S[key].name}:{lineno} 出现未带边界语境的审计表述"
+                f"（U-14：不得把第三方审计当门槛或暗示已审计）"
+            )
 
 # ── 判据 3：契约版本三方一致 ─────────────────────────────────────────────
 def must_match(label, pattern, text, flags=re.M):
@@ -225,6 +238,6 @@ if failures:
 print(
     "promise-consistency OK：免责口径（U-01）未回归；五份文本无悬空引用；"
     f"契约版本 {v_whitepaper or '-'} 三方一致；COMMITTED {len(committed)} 行 + "
-    f"STABLE {len(stable)} 行 ↔ proto 目录双向一致。"
+    f"STABLE {len(stable)} 行 ↔ proto 目录双向一致；审计口径（U-14）无违规。"
 )
 PY
