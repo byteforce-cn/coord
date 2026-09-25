@@ -8,7 +8,7 @@ KV/Txn/Lease/Watch 是平台实现底座，保留稳定承诺供 SDK 与数据�
 **不构成对业务方的编排建议**：业务方不需要、也不应该用原语自行拼装协调逻辑。
 
 - 📜 承诺文本：[WHITEPAPER.md](./WHITEPAPER.md)（协议白皮书 v1.2.0）
-- 🚦 生产就绪验收门：[../docs/production/production-readiness-plan-2026-09-21.md](../docs/production/production-readiness-plan-2026-09-21.md) §4（**契约期限 ≠ 生产就绪**）
+- 🚦 生产就绪验收门：[docs/production/production-readiness-plan-2026-09-21.md](../../docs/production/production-readiness-plan-2026-09-21.md) §4（**契约期限 ≠ 生产就绪**）
 - 🗂 承诺台账：[STATUS.md](./STATUS.md)（三态分层 + GA/整改期限，CI 解析，单一事实来源）
 
 ## 能力承诺面（契约 v1.2.0，COMMITTED — 期限为硬截止）
@@ -38,7 +38,7 @@ KV/Txn/Lease/Watch 是平台实现底座，保留稳定承诺供 SDK 与数据�
 
 > **`COMMITTED` 是接口承诺，不是生产就绪声明。** 期限到点 = 接口已冻结并挂载契约包；
 > 生产就绪是另一套更严的判据，见
-> [`../docs/production/production-readiness-plan-2026-09-21.md`](../docs/production/production-readiness-plan-2026-09-21.md)
+> [`docs/production/production-readiness-plan-2026-09-21.md`](../../docs/production/production-readiness-plan-2026-09-21.md)
 > §4 的 P-Gate 1–9。
 
 语义契约全文在 proto 注释中（`proto/coord/<domain>/v1/`）；期限逾期 = CI 红牌
