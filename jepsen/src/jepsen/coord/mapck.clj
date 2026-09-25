@@ -190,7 +190,12 @@
         exists (wi/check-reads kops idx prefix pprefix
                                #(and (= :exists (:f %)) (false? (:exists? %)))
                                (constantly nil))
-        shapes (mapcat delete-shape-fails (filter #(= :delete (:f %)) kops))
+        ;; 形状断言只适用于**成功**的 delete（`:fail`/`:info` 的响应里没有
+        ;; `:deleted`/`:prev_kvs`；失败 ≠ 违反）。F-69 浸泡中 256 条 `:fail`
+        ;; 的 delete 曾被误判为 :delete-response-inconsistent（与 F-68 同族）。
+        shapes (mapcat delete-shape-fails (filter #(and (= :delete (:f %))
+                                                        (= :ok (:type %)))
+                                                  kops))
         exists2 (exists-fails kops idx)]
     (concat reads prevs exists shapes exists2)))
 

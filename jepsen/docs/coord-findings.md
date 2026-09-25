@@ -1933,3 +1933,31 @@ make test WORKLOAD=lock NEMESIS=none TIME_LIMIT=120 CONCURRENCY=2n AGENTS=2 \
 * **状态**：`open`；证据归档：
   `docs/production/evidence/20260925T141209Z-t2.3-m2-watch-lease-2h-kill-snapshot-fatal/`
   （主）、`…/20260925T142520Z-diag-kill-3min-openraft-logs-no-repro/`（对照）。
+* **根因（2026-09-25 第十轮已定位到代码，含判据）**：`StateMachineStore` 的
+  `get_snapshot_builder()` 此前把 `current_snapshot` **深拷贝**给 builder 克隆，
+  而 openraft 恰好在克隆上执行 `build_snapshot()`（`sm/worker.rs` 的
+  `try_create_snapshot_builder` → `C::spawn(async { builder.build_snapshot() })`），
+  复制路径的 `GetSnapshot` 又走**主实例** —— 两个实例各持一份内存槽 ⇒ 构建结果
+  对主实例**永远不可见**，`get_current_snapshot()` 恒为 `None`。
+  purge 守卫不受影响（`snapshot_tracker` 本来就是 `Arc` 共享，构建的
+  `record_durable` 生效）⇒「日志已 purge 到 8999 + 主实例无快照」这个组合
+  正是 fatal 的触发面；n1 失联使 `searching_end(8185) < purge_upto_next`
+  ⇒ 快照发送启动 ⇒ `StorageError::read_snapshot(None, "snapshot not found")`
+  ⇒ RaftCore fatal（不可自愈；重启节点只是把同一形态换到下一个 leader）。
+* **修复（第十轮）**：`coord-server/src/raft/state_machine.rs`
+  ①`current_snapshot` 改为 `Arc<Mutex<…>>` **共享槽位**（builder 与主实例共用）；
+  ②`build_snapshot` 经新增的 `publish_snapshot()` **单调发布**（防迟到的旧构建
+  覆盖已安装的新快照）；③`get_current_snapshot()` 增加**磁盘兜底**（内存槽为空时
+  从 `META_SNAPSHOT` + SHA256 校验加载；返回 `None` 的代价是整节点 fatal，
+  一次磁盘读的代价远低于此）。判据：单测 3 条 + 集成 1 条（真实 openraft，
+  见 `coord-server/tests/snapshot_visibility_test.rs`），修复前单测 2 红/集成
+  超时红，修复后全绿（负控制双向）。
+* **次生（同轮顺手修）**：`mapck` 的 `delete-shape-fails` 此前对**所有** delete
+  op（含 `:fail`）断言响应形状 ⇒ 失能窗口里的 256 条 `:fail` 被误判为
+  `:delete-response-inconsistent`（失败 ≠ 违反）。修法：形状断言只适用于
+  `:ok`（与 `exists-fails` 同口径）；新增守门员 fixture
+  `expect-valid-delete-fail-not-shape-violation`，配对的
+  `expect-invalid-delete-response-inconsistent`（`:ok`+deleted=3）必须仍红。
+* **待办（不在本轮）**：修法方向 ③（进程对 raft fatal 的自愈/告警路径）仍开放：
+  fatal 后进程不退出、健康检查不置死 ⇒ 生产上需要一条「编排层可感知」的路径；
+  归入 W5-4/W6 的后续项评估。

@@ -21,6 +21,7 @@ LEIN_ROOT=true lein -o run -m clojure.main scripts/run-checker-tests.clj \
 | `expect-invalid-fabricated` | 读到从来没人写过的值 |
 | `expect-invalid-future` | 读完成早于其值的写的 invoke |
 | `expect-valid-nil-with-pending-delete` | **健全性**：未完成的 tombstone 让 nil 合法（防假红） |
+| `expect-valid-delete-fail-not-shape-violation` | **失败 ≠ 违反**：`:fail` 的 delete（无响应字段）不得被判成 DeleteResponse 形状违反（F-69 浸泡中 256 条 `:fail` 曾被误判；配对的 `expect-invalid-delete-response-inconsistent` 必须仍红） |
 | `expect-invalid-delete-prev-kv-fabricated` | delete 汇报的 prev_kv 不是真实值 |
 | `expect-invalid-delete-response-inconsistent` | `deleted` ∉ {0,1} / 与 `prev_kvs` 条数不符 |
 | `expect-valid-delete-prev-kv-ok` | prev_kv 是当时的真实值 → 合法 |

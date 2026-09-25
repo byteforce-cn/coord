@@ -180,11 +180,60 @@ fn persist_snapshot_file_impl(
     Ok((final_path, checksum))
 }
 
+/// 从磁盘加载最新持久化快照：`META_SNAPSHOT` 元数据 + 文件 SHA256 校验。
+///
+/// 磁盘是"是否存在可用快照"的**共同事实源**（与 purge 守卫同源）：
+/// `new()` 的启动加载与 `get_current_snapshot()` 的兜底路径共用（F-69）。
+fn load_persisted_snapshot_checked(
+    state_machine: &MvccStorage<RedbBackend>,
+) -> Option<(StoredSnapshot, PathBuf)> {
+    let persisted = state_machine
+        .backend()
+        .read(|tx| tx.get(TABLE_META, META_SNAPSHOT))
+        .ok()
+        .flatten()
+        .and_then(|bytes| bincode::deserialize::<PersistedSnapshotMeta>(&bytes).ok())?;
+    match std::fs::read(&persisted.path) {
+        Ok(data) => {
+            if sha256_hex(&data) == persisted.checksum {
+                Some((
+                    StoredSnapshot {
+                        meta: persisted.meta,
+                        data,
+                    },
+                    PathBuf::from(&persisted.path),
+                ))
+            } else {
+                tracing::error!(
+                    "Persisted snapshot {} checksum mismatch — not usable",
+                    persisted.path
+                );
+                None
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                "Persisted snapshot {} unreadable: {e} — not usable",
+                persisted.path
+            );
+            None
+        }
+    }
+}
+
 pub struct StateMachineStore {
     pub state_machine: Arc<MvccStorage<RedbBackend>>,
     pub last_applied: Mutex<Option<LogIdOf<TypeConfig>>>,
     pub last_membership: Mutex<StoredMembershipOf<TypeConfig>>,
-    current_snapshot: Mutex<Option<StoredSnapshot>>,
+    /// 最新一份构建/安装的快照（**共享槽位**：`get_snapshot_builder()` 的克隆
+    /// 与主实例共用同一个 `Arc`）。
+    ///
+    /// openraft 在 builder 克隆上执行 `build_snapshot()`，而复制路径的
+    /// `GetSnapshot` 走主实例。两个实例若各持一份内存槽，构建结果对主实例
+    /// 不可见 ⇒ 落后 follower 需要快照时 `get_current_snapshot()` 仍为 `None`
+    /// ⇒ openraft 把「无快照可送」升级为存储错误并让 RaftCore 进入 fatal
+    /// （F-69：kill 后 7.5 分钟全集群写失败且不可自愈）。
+    current_snapshot: Arc<Mutex<Option<StoredSnapshot>>>,
     /// 快照落盘目录（A.6：临时文件 → fsync → rename → 校验和）
     snapshot_dir: PathBuf,
     /// purge 前置条件守卫（与 LogStore 共享）
@@ -242,47 +291,21 @@ impl StateMachineStore {
         let mut last_applied: Option<LogIdOf<TypeConfig>> = None;
         let mut last_membership =
             StoredMembershipOf::<TypeConfig>::new(None, empty_membership.clone());
+        // 1. 从 META_SNAPSHOT 加载（A.5 步骤 1）——磁盘是"是否存在可用快照"的
+        //    共同事实源（与 purge 守卫同源）
         let mut current_snapshot: Option<StoredSnapshot> = None;
-        // 1. 从 META_SNAPSHOT 加载（A.5 步骤 1）
-        let persisted = state_machine
-            .backend()
-            .read(|tx| tx.get(TABLE_META, META_SNAPSHOT))
-            .ok()
-            .flatten()
-            .and_then(|bytes| bincode::deserialize::<PersistedSnapshotMeta>(&bytes).ok());
-
-        if let Some(ref pmeta) = persisted {
-            match std::fs::read(&pmeta.path) {
-                Ok(data) => {
-                    if sha256_hex(&data) == pmeta.checksum {
-                        current_snapshot = Some(StoredSnapshot {
-                            meta: pmeta.meta.clone(),
-                            data,
-                        });
-                        last_applied = pmeta.meta.last_log_id;
-                        last_membership = pmeta.meta.last_membership.clone();
-                        let idx = last_applied.as_ref().map(|l| l.index).unwrap_or(0);
-                        let term = last_applied.as_ref().map(|l| l.leader_id.term).unwrap_or(0);
-                        snapshot_tracker.record_durable(idx, term, PathBuf::from(&pmeta.path));
-                        tracing::info!(
-                            "Loaded persisted snapshot: {} (last_log_id={:?})",
-                            pmeta.path,
-                            pmeta.meta.last_log_id
-                        );
-                    } else {
-                        tracing::error!(
-                            "Persisted snapshot {} checksum mismatch — starting without snapshot",
-                            pmeta.path
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Persisted snapshot {} unreadable: {e} — starting without snapshot",
-                        pmeta.path
-                    );
-                }
-            }
+        if let Some((snap, path)) = load_persisted_snapshot_checked(state_machine.as_ref()) {
+            last_applied = snap.meta.last_log_id;
+            last_membership = snap.meta.last_membership.clone();
+            let idx = last_applied.as_ref().map(|l| l.index).unwrap_or(0);
+            let term = last_applied.as_ref().map(|l| l.leader_id.term).unwrap_or(0);
+            snapshot_tracker.record_durable(idx, term, path.clone());
+            tracing::info!(
+                "Loaded persisted snapshot: {} (last_log_id={:?})",
+                path.display(),
+                snap.meta.last_log_id
+            );
+            current_snapshot = Some(snap);
         }
 
         // 2. 无快照时从 META_LAST_APPLIED 恢复（A.5 步骤 2）
@@ -320,7 +343,7 @@ impl StateMachineStore {
             state_machine,
             last_applied: Mutex::new(last_applied),
             last_membership: Mutex::new(last_membership),
-            current_snapshot: Mutex::new(current_snapshot),
+            current_snapshot: Arc::new(Mutex::new(current_snapshot)),
             snapshot_dir,
             snapshot_tracker,
             watch_dispatcher: None,
@@ -793,7 +816,6 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         *self.last_applied.lock() = meta.last_log_id;
         *self.last_membership.lock() = meta.last_membership.clone();
         self.persist_membership()?;
-
         let last_idx = meta.last_log_id.as_ref().map(|l| l.index).unwrap_or(0);
         let last_term = meta
             .last_log_id
@@ -820,11 +842,35 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<SnapshotOf<TypeConfig, super::RaftSnapshotData>>, io::Error> {
-        let snap = self.current_snapshot.lock();
-        match snap.as_ref() {
+        // 先把内存槽快照克隆到局部变量再进 match：match 会延长**临时值**的
+        // 生命周期到整个 match 体，若直接在 scrutinee 里 lock()，兜底分支的
+        // 第二次 lock() 会在 parking_lot 上自锁（非重入）。
+        let existing = self.current_snapshot.lock().clone();
+        let snap = match existing {
+            Some(s) => Some(s),
+            None => {
+                // F-69 兜底：内存槽为空但磁盘已有落盘快照时**以磁盘为准**加载。
+                // 历史窗口（构建发生在其它实例/克隆上）曾让此路径返回 None，
+                // 而 openraft 把「无快照可送」升级为存储错误 ⇒ 节点 fatal；
+                // 一次磁盘加载的代价远低于该后果。正常路径不会到这里。
+                match load_persisted_snapshot_checked(self.state_machine.as_ref()) {
+                    Some((s, _path)) => {
+                        tracing::warn!(
+                            "get_current_snapshot: in-memory slot empty; loaded persisted \
+                             snapshot from disk (last_log_id={:?})",
+                            s.meta.last_log_id
+                        );
+                        *self.current_snapshot.lock() = Some(s.clone());
+                        Some(s)
+                    }
+                    None => None,
+                }
+            }
+        };
+        match snap {
             Some(s) => Ok(Some(SnapshotOf::<TypeConfig, super::RaftSnapshotData> {
-                meta: s.meta.clone(),
-                snapshot: Cursor::new(s.data.clone()),
+                meta: s.meta,
+                snapshot: Cursor::new(s.data),
             })),
             None => Ok(None),
         }
@@ -835,7 +881,9 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             state_machine: Arc::clone(&self.state_machine),
             last_applied: Mutex::new(*self.last_applied.lock()),
             last_membership: Mutex::new(self.last_membership.lock().clone()),
-            current_snapshot: Mutex::new(self.current_snapshot.lock().clone()),
+            // F-69：共享槽位——构建器上的 `build_snapshot()` 结果必须能被主实例的
+            // `get_current_snapshot()` 看到（此前这里是深拷贝，构建结果被丢弃）。
+            current_snapshot: Arc::clone(&self.current_snapshot),
             snapshot_dir: self.snapshot_dir.clone(),
             snapshot_tracker: Arc::clone(&self.snapshot_tracker),
             watch_dispatcher: None,
@@ -870,6 +918,33 @@ impl StateMachineStore {
             meta,
             data,
         )
+    }
+
+    /// 把新构建的快照**发布**到共享槽位（F-69）。
+    ///
+    /// **单调**：仅当新快照的 `last_log_id.index` 不低于当前槽位时替换。
+    /// 防的是并发面——构建任务（`build_snapshot` 在 spawn 的任务里跑）与
+    /// `install_snapshot` 可以交叠，迟到的旧构建结果不得覆盖已安装的更新快照。
+    ///
+    /// `install_snapshot` / `rebuild_snapshot_from_mvcc` 不走本方法：它们替换
+    /// 了状态机内容本身，槽位必须与真实内容逐位一致（直接赋值）。
+    fn publish_snapshot(&self, snap: StoredSnapshot) {
+        let new_idx = snap.meta.last_log_id.as_ref().map(|l| l.index).unwrap_or(0);
+        let mut slot = self.current_snapshot.lock();
+        let cur_idx = slot
+            .as_ref()
+            .and_then(|s| s.meta.last_log_id.as_ref())
+            .map(|l| l.index)
+            .unwrap_or(0);
+        if slot.is_none() || new_idx >= cur_idx {
+            *slot = Some(snap);
+        } else {
+            tracing::warn!(
+                "snapshot slot: skip older build result (new index {} < current {})",
+                new_idx,
+                cur_idx
+            );
+        }
     }
 
     /// 异步落盘：磁盘 IO 移入 `spawn_blocking`，避免阻塞 tokio worker
@@ -1017,7 +1092,10 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
             snapshot: Cursor::new(data_bytes.clone()),
         };
 
-        *self.current_snapshot.lock() = Some(StoredSnapshot {
+        // F-69：构建结果发布到**共享**槽位（主实例可见）。
+        // 单调发布：构建任务与 `install_snapshot` 可能交叠（openraft 把构建放进
+        // spawn 的任务），迟到的旧构建结果不得覆盖更新的已安装快照。
+        self.publish_snapshot(StoredSnapshot {
             meta,
             data: data_bytes,
         });
@@ -1028,5 +1106,99 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
         }
 
         Ok(snapshot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openraft::storage::{RaftSnapshotBuilder, RaftStateMachine};
+
+    fn setup_store() -> (tempfile::TempDir, StateMachineStore) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = RedbBackend::open(tmp.path(), &coord_core::types::StorageConfig::default())
+            .expect("open redb backend");
+        let mvcc = Arc::new(MvccStorage::new(backend).expect("create mvcc"));
+        let tracker = Arc::new(SnapshotTracker::default());
+        let store = StateMachineStore::new(mvcc, tmp.path().join("snapshots"), tracker);
+        (tmp, store)
+    }
+
+    /// F-69 判据（机制级，负控制）：openraft 在 `get_snapshot_builder()` 返回的
+    /// **克隆**上执行 `build_snapshot()`，而复制路径的 `GetSnapshot` 走**主实例**。
+    /// 构建结果必须对主实例的 `get_current_snapshot()` 可见——修复前主实例槽位
+    /// 永远为 `None`，openraft 把「无快照可送」升级为存储错误 ⇒ RaftCore fatal。
+    #[tokio::test]
+    async fn test_snapshot_built_via_builder_is_visible_to_main_store() {
+        let (_tmp, mut main) = setup_store();
+
+        let mut builder = main.get_snapshot_builder().await;
+        let built = builder
+            .build_snapshot()
+            .await
+            .expect("build snapshot via builder");
+
+        let seen = main
+            .get_current_snapshot()
+            .await
+            .expect("get_current_snapshot")
+            .expect("主实例必须能看到 builder 刚构建的快照（F-69）");
+        assert_eq!(
+            seen.meta.last_log_id, built.meta.last_log_id,
+            "可见快照的 meta 必须与构建结果一致"
+        );
+        assert_eq!(
+            seen.snapshot.get_ref(),
+            built.snapshot.get_ref(),
+            "可见快照的数据必须与构建结果一致"
+        );
+    }
+
+    /// F-69 兜底判据：内存槽为空但磁盘上已有落盘快照（META_SNAPSHOT + 校验和）时，
+    /// `get_current_snapshot()` 必须从磁盘加载，而不是返回 `None`（返回 None 会让
+    /// openraft 直接把该节点判 fatal）。
+    #[tokio::test]
+    async fn test_get_current_snapshot_falls_back_to_persisted_disk_state() {
+        let (_tmp, mut main) = setup_store();
+
+        let mut builder = main.get_snapshot_builder().await;
+        let built = builder
+            .build_snapshot()
+            .await
+            .expect("build snapshot via builder");
+        let built_bytes = built.snapshot.get_ref().clone();
+
+        // 模拟"构建发生在别的实例上、主实例槽位为空"（F-69 的原始形态）
+        *main.current_snapshot.lock() = None;
+
+        let seen = main
+            .get_current_snapshot()
+            .await
+            .expect("get_current_snapshot")
+            .expect("内存槽为空时必须从磁盘兜底加载已落盘快照");
+        assert_eq!(
+            seen.snapshot.get_ref(),
+            &built_bytes,
+            "兜底加载的数据必须与已落盘快照一致"
+        );
+
+        // 第二次读取：走内存槽（已由兜底路径缓存），仍必须一致
+        let again = main
+            .get_current_snapshot()
+            .await
+            .expect("get_current_snapshot")
+            .expect("第二次读取必须命中缓存");
+        assert_eq!(again.snapshot.get_ref(), &built_bytes);
+    }
+
+    /// 负控制：从未有过快照时（META_SNAPSHOT 缺失），`get_current_snapshot()`
+    /// 必须如实返回 `None`——不得伪造空快照。
+    #[tokio::test]
+    async fn test_get_current_snapshot_none_without_any_snapshot() {
+        let (_tmp, mut main) = setup_store();
+        assert!(
+            main.get_current_snapshot().await.expect("get").is_none(),
+            "无任何快照（内存/磁盘都没有）时必须返回 None"
+        );
     }
 }
