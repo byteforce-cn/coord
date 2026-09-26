@@ -844,6 +844,38 @@ W4-1（TLS fail-closed，仍按"lab 联立变更"计划）、~~W4-3（审计采�
 
 ---
 
+### 第十一轮追加（2026-09-26）—— 主题：**F-70 根因修复（failover 窗口 lease 语义闭环）+ F-71 checker 口径；T2.3 2h soak 复跑首次 `valid`**
+
+> 触发：第十轮把 W3-1 的红灯面收敛到「failover 瞬间的 lease 语义（F-70）」与
+> 「认证过期波的观测缺口（F-71）」并定为本轮第一优先。本轮把 F-70 从
+> 「三个可疑面」推进到**唯一根因 + 三处修复 + 进程内判据**，再修 F-71 的
+> checker 口径，然后按「判据作废重跑」纪律同参数复跑 2h soak。
+
+| # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
+|:--|:--|:--|:--|:--|
+| **F-70 根因** | `rebuild` 的「先清空再装载」抹掉在飞 Grant | ✅ 定位 | 竞态推演：grant 先插本地记录/后入 raft ⇒ reconciler 快照（apply 前读）缺该租约 ⇒ `clear()` 抹掉本地 TTL 调度依据 | ① KeepAlive 本地查不到 ⇒ 立即 `NOT_FOUND`；② 过期任务不再调度 ⇒ 绑定 Key 直到下一次 failover 前**永不删除**（现场 `ka/7636` 的 41 次读均见 Key） |
+| **F-70 修复（三处）** | ①`rebuild` 合并语义（只增不删，两视图都有取更晚 deadline）；②reconciler 装载前加 `ensure_linearizable_barrier`（失败下 tick 重试）；③KeepAlive 本地缺失时 `resolve_keepalive_ttl` 以状态机补水（`rehydrate`；已过期⇒泄漏自愈；屏障/存储失败⇒UNAVAILABLE 不伪装 NOT_FOUND） | ✅ 代码完成 | `cargo check` / `cargo fmt` / `cargo clippy --workspace -- -D warnings` | commit `109b462` |
+| **F-70 判据（进程内）** | 三单测 + 两节点级判据（含负控制） | ✅ 全绿 | `cargo test -p coord-server --lib lease::`（15 ✓）；`cargo test -p coord-server --test lease_raft_test`（5 ✓） | 单测：在飞 Grant 不被抹+到期仍上报 / 合并取更晚 deadline / rehydrate 自愈；节点级：重建竞态后 keepalive 自洽+级联删 Key、状态机有记录/本地缺失时补水+泄漏自愈；负控制=还原旧 `rebuild`/去补水路径 |
+| **F-71 修复** | client.clj 轮询 `:unauthenticated` 先刷新会话重试（记 `:ok-reads/:reauths`）；leaseck.clj `poll-unjudged?`（ok-reads=0 ⇒ 不判活性，计入 `:liveness-unjudged`） | ✅ 完成 | `make -C jepsen/lab checkers JEPSEN_PROVIDER=docker`（全部套件） | lease **12/12** + sample **2/2**；新增 3 fixture（其中 `expect-valid-unjudged-all-poll-reads-failed` 在旧 checker 下必红）；全 lab checker 套件 0 FAIL |
+| **本地卡口（十一轮）** | fmt / clippy / 六道脚本 / 相关套件 | ✅ 完成 | `cargo fmt --all -- --check`；`cargo clippy --workspace -- -D warnings`；6 脚本；`-p coord-server --lib` 596 ✓、`--test region_lease_test` 3 ✓、`--test restart_recovery_test` 4 ✓ | 全绿 |
+| **CI 实证（`109b462`）** | push run **`36206091021`** 逐 job | ✅ **全 job success** | `/actions/runs/36206091021`（00:46:49Z→01:16:03Z） | 11 success + `weekly perf baseline` skipped（push 不跑，符合 `if: schedule` 设计）；含 `workspace tests`（→01:05:35Z）与 `real-process chaos`（→01:16:02Z） |
+| **W3-1 / T2.3 复跑** | 同参数 2h `soakfull`（SEED=42；00:55:38→03:00:xx UTC） | ✅ **valid（首次）** | `make soakfull …`（参数与第十轮逐项相同）；二进制 `ff25fdd6` @ `109b462` | 证据 `docs/production/evidence/20260926T030216Z-t2.3-m2-watch-lease-2h-f70-fixed/`（MANIFEST 工作树 **clean**、`sha256sum -c` OK）：grants **5699** / expiries **2845**（by-scenario：ttl 2845 + revoke 1476 + keepalive 1378）；**`violations-by-class {}`**、`liveness-unjudged 0`、`keepalive-stream-errors 0`、keepalive-responses 8268；gates **valid**、rto-p95 **2.57s** / **unrecovered 0**、quiet worst-ratio **1.0**；nemesis：kill n1 01:28:28→重启 01:39:12、pause n3 02:06:55→02:16:01、partition 02:48:00 |
+| **现场对账（F-70/F-69）** | store 归档的 n1–n3 `coord.log` | ✅ | `grep -ac` 逐节点 | **`keep-alive failed` 三节点全 0**（第十轮 `ka/7636` 形态消失）；`when Read Snapshot(None)` / `snapshot not found` **0**；failover 后 1s（01:28:29）n2 走 `rebuilt from state machine (merge, F-70) tracked=2`；无 `lease rebuild deferred`（屏障一次通过） |
+
+> **本轮口径要点**：T2.3（W3-1）从第十轮的 invalid（`:lease-not-expired 4`）
+> 转为 **valid（violations 空集）** ⇒ F-70/F-71 双双 closed；W3-1 的「2h 归档 +
+> 门槛达标」判据达成。**72h（W3-6）与 ≥14 天（W3-7）仍未执行**，W3 其余分面
+> （M3/M4/M5）不受本轮影响；§5.4 ③ 参数确认仍未签（W3-8）。
+>
+> **本轮自身效力**：归档 MANIFEST 工作树为 **clean**、commit 与二进制哈希可溯源；
+> 但按 §2.3/§7 的既有边界，依赖 ③ 的门禁结论仍「不得用于引入评审」——
+> 本轮不改变该边界。
+
+**第十一轮未触碰**：F-71 修法方向 2（客户端主动提前重认证）、W2-3/W2-4、
+W3-2…W3-9、W4-1 TLS fail-closed、§1.3 案 A/B 人力裁定。
+
+---
+
 ## 附录 A：差距 → 门 → 判据 → 证据（追溯表）
 
 | 差距 | 门 | 判据（可执行） | 证据落点 |

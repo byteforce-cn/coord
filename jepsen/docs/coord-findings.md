@@ -1981,7 +1981,7 @@ make test WORKLOAD=lock NEMESIS=none TIME_LIMIT=120 CONCURRENCY=2n AGENTS=2 \
   复现 `leader went fatal`**；修复版 ~10s 通过、连跑 3 次稳定。
 * **状态：closed（待 CI 覆盖三节点判据后转为常驻回归）**。
 
-### F-70 [P1 候选，fixed（待 2h soak 复验）] leader 切换窗口：keepalive 立即 `NOT_FOUND` 且绑定 Key 从未被删
+### F-70 [P1 候选，closed（2h soak 复跑 valid）] leader 切换窗口：keepalive 立即 `NOT_FOUND` 且绑定 Key 从未被删
 
 * **证据（同 run）**：
   - `ka/7636`：17:13:19.019 grant `{:id 1, :ttl 2}` → Put 成功（after-write 读可见）→
@@ -2034,7 +2034,7 @@ make test WORKLOAD=lock NEMESIS=none TIME_LIMIT=120 CONCURRENCY=2n AGENTS=2 \
     `test_f70_keepalive_rehydrates_from_state_machine_and_heals_leaks`）。
     负控制：还原 `rebuild` 至「先清空再装载」⇒ 单测①与节点判据①红；去掉补水路径
     ⇒ 节点判据②红。
-  - **状态：代码闭环（待 CI + 同参数 2h soak 复跑确认）**。
+  - **状态：closed（2026-09-26 同参数 2h soak 复跑验证，见下）。**
 * **复现要点（下一轮第一优先）**：进程内 3 节点（沿用 F-69 判据的骨架）：
   1. 先建 K 个活跃租约（含 keepalive 流与 ttl=30 的 revoke 场景）；
   2. kill 当前 leader，等新 leader 上任；
@@ -2048,7 +2048,24 @@ make test WORKLOAD=lock NEMESIS=none TIME_LIMIT=120 CONCURRENCY=2n AGENTS=2 \
 * **影响面**：lease 级联删除契约在 failover 窗口失守（Key 泄漏直到该租约记录被
   其他路径清理）；W3-1 的「failover 下 lease 活性」判据红。**RC 冻结前必须闭环**。
 
-### F-71 [P2，closed（checker fixture 实证）] leaseck 观测缺口：认证失败读计入 `:failed` 但不计入「未判」
+### F-70 收口记录（2h soak 现场验证通过，2026-09-26）
+
+* **run**：同参数 2h `soakfull`（SEED=42、`map=20,watch=40,lease=40`、7200s/quiet 1800、2n），
+  二进制 `ff25fdd6` @ `109b462`；证据
+  `docs/production/evidence/20260926T030216Z-t2.3-m2-watch-lease-2h-f70-fixed/`（MANIFEST 工作树 **clean**）。
+* **现场对照（旧的 F-70 形态已消失）**：
+  - 三节点 `coord.log` 中 `keep-alive failed` = **0/0/0**（第十轮 `ka/7636`：grant+put 成功、首次
+    keepalive 即 `lease 1 not found`）；
+  - leaseck：`violations-by-class {}`（第十轮 `:lease-not-expired 4`）、`keepalive-stream-errors 0`、
+    `liveness-unjudged 0`；grants **5699** / expiries **2845**；
+  - failover 后 1s（01:28:29）n2 走新装载路径：`rebuilt from state machine (merge, F-70) tracked=2`；
+    全程无 `lease rebuild deferred`（屏障一次通过）；
+  - `snapshot not found` 三节点 = 0（F-69 修复继续成立）；gates valid、rto-p95 2.57s、
+    unrecovered 0、quiet worst-ratio 1.0。
+* **判定**：W3-1（T2.3 收口）从第十轮 invalid 转为 **valid**；F-70 closed。
+  残余边界不变：§5.4 ③ 参数确认未签 ⇒ 本归档仍不得用于引入评审（计划书 §2.3/§7 口径）。
+
+### F-71 [P2，closed（fixture 实证）] leaseck 观测缺口：认证失败读计入 `:failed` 但不计入「未判」
 
 * **证据**：`ttl/15232`（17:45:36）与 `ka/15242`（17:45:38）两条 `:lease-not-expired`
   的 `:observations` 均为 `{:absent? false, :reads 39, :failed 26/27}`——**读失败占多数**；
@@ -2078,8 +2095,9 @@ make test WORKLOAD=lock NEMESIS=none TIME_LIMIT=120 CONCURRENCY=2n AGENTS=2 \
     `expect-valid-unjudged-all-poll-reads-failed`（旧 checker 下必红，
     `:liveness-unjudged 1` 为该规则的实证）、
     `expect-invalid-present-at-deadline-with-ok-reads`）。
-  - **状态：closed（fixture 实证）；修法方向 2（客户端提前主动重认证）未实施 ——
-    如需进一步消除集中过期波，可单独立项。**
+  - **状态：closed（fixture 实证）；2h soak 复跑中 `liveness-unjudged 0`、认证过期波未产出
+    任何判定逃逸。修法方向 2（客户端提前主动重认证）未实施 —— 如需进一步消除集中
+    过期波，可单独立项。**
 * **判据落点**：`scripts/lease-fixtures`（若无则新建）：
   `expect-valid-absence-observed-by-reauth`（历史含一次 UNAUTHENTICATED 中断，Key 实际
   已删 ⇒ 必须判绿）；配对负控制：Key 确实未删 ⇒ 必须判红。
