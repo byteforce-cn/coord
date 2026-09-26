@@ -1,0 +1,48 @@
+;; expect-valid-kill-shortly-after-acquire —— F-73 回归（正例）。
+;;
+;; 复现的缺陷（2026-09-26 lock/kill-agent 实测）：op 的 `:t0-ns` 是
+;; `System/nanoTime`（raw，ms-since-boot 量级），而 faultwin 的窗口由 nemesis op 的
+;; jepsen `:time`（**相对测试起点**）换算 —— 两空间零点相差「测试启动时刻的
+;; nanoTime」（实测 ~85_840_341ms）。`first-down` 拿 raw 的 start 比相对空间的
+;; `:from-ms` 恒为 nil ⇒ H1（崩溃持有者的回收）永不成立、H2（假丢锁）把「被 kill 的
+;; 持有者留下的锁按 ttl 正常过期」误判成红。
+;;
+;; 本 fixture 显式构造该偏移（offset = 1_000_000ms ≈ 测试启动时的 nanoTime）：
+;;   * 弃锁 op 在 rel t=10ms（raw 1_000_020）拿到锁；
+;;   * rel t=5_000ms（raw 1_005_000）kill 掉持有 agent n4；
+;;   * run 在 rel t=25_000ms 结束（**早于** down+ttl+grace = raw 1_014_000）；
+;;   * raw 1_003_000 的探针（kill 前）看到 key 挂在 a1 名下；
+;;   * raw 1_025_000 的探针（kill 之后、run 末）看到 key 已不在。
+;;
+;; 期望（新 checker）：kill 之后的样本不得用 H2 判（持有者已不可能续期），
+;; 回收窗口又还没到 ⇒ 无违反、且至少一条 held 样本 ⇒ judged ⇒ **valid**。
+;; 旧 checker：first-down 恒 nil ⇒ before=end ⇒ 1_025_000 的探针落进 held 窗口
+;; （holder 失配）⇒ phantom-loss ⇒ **必红**。
+[{:type :ok :f :lock-abandon :process 0
+  :time 10010000 :invoke 10000000
+  :t0-ns 1000010000000
+  :name "lock-a-abandon" :holder-id "a1" :lease-id 7
+  :abandoned? true :acquired-at-ms 10
+  :acquire-node "127.0.0.1:24577"
+  :holder-ttl-seconds 5 :grace-ms 4000 :at-ms 12}
+
+ ;; nemesis：kill agent n4（rel t=5_000ms）→ restart（rel t=12_000ms）
+ {:type :info :process :nemesis :f :kill-agent :time 5000000000
+  :value [:killed-agent "n4"]}
+ {:type :info :process :nemesis :f :kill-agent :time 12000000000
+  :value [:restarted-agent "n4"]}
+
+ ;; 探针 1（kill 之前）：key 挂在 a1 名下 —— 这是被判过（judged）的那条证据
+ {:type :ok :f :lock-probe :process 1
+  :time 3000000000 :invoke 3000000000
+  :t0-ns 1003000000000 :server-at-ms 0
+  :name "lock-a-abandon" :server-key "/_lock/lock-a-abandon"
+  :exists? true :raw-value "{\"holder_id\":\"a1\",\"lease_id\":7}"
+  :server {:holder-id "a1" :lease-id 7 :ttl-secs 5} :node "n1"}
+
+ ;; 探针 2（run 末，kill 之后）：key 已不在 —— 但回收窗口未到，不得据此判 H2
+ {:type :ok :f :lock-probe :process 1
+  :time 25000000000 :invoke 25000000000
+  :t0-ns 1025000000000 :server-at-ms 0
+  :name "lock-a-abandon" :server-key "/_lock/lock-a-abandon"
+  :exists? false :server nil :node "n1"}]

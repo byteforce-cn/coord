@@ -1,0 +1,51 @@
+;; expect-valid-probe-concurrent-with-acquire —— F-74 回归（正例）。
+;;
+;; 复现（2026-09-26 lock/kill-agent 第二次复跑）：一条 `:lock-probe` 的**调用早于**
+;; 弃锁 acquire 的调用（probe 先发出、2ms 后 acquire 才被调用），probe 的读在
+;; acquire 完成 ~15–30ms 后返回 `:absent`。线性一致性只约束「响应先后」的顺序对：
+;; 与写**并发**（甚至早于写调用）的读可以合法地看到旧状态 ⇒ 这不是假丢锁。
+;; 旧 checker 用「读完成时刻」筛样本 ⇒ 该样本落入 held 窗口 ⇒ 必红（假红）。
+;;
+;; 本 fixture（offset = 1_000_000ms，与 F-73 的实验室偏移同构）：
+;;   * probe A：t0 = 1_000_008（**早于** acquire 调用 1_000_010），完成于 1_000_053，
+;;     读得 absent —— 并发读，不得当证据；
+;;   * acquire：start = 1_000_021（t0 1_000_010 + 11ms）；
+;;   * probe B：t0 = 1_000_500，读得 holder a1 —— 顺序证据（held 窗口内）；
+;;   * rel t=50s kill、60s restart；rel t=100s 的探针读到 absent —— 属于
+;;     down+ttl+grace 之后，但那时 holder 已死，且 absence 无 holder ⇒ 不构成 orphan。
+;; 期望：**valid**。旧 checker（完成时刻判定）下 probe A 触发 phantom-loss ⇒ 必红。
+[{:type :ok :f :lock-abandon :process 0
+  :time 10011000 :invoke 10000000
+  :t0-ns 1000010000000
+  :name "lock-a-abandon" :holder-id "a1" :lease-id 7
+  :abandoned? true :acquired-at-ms 11
+  :acquire-node "127.0.0.1:24577"
+  :holder-ttl-seconds 5 :grace-ms 4000 :at-ms 12}
+
+ ;; probe A：与 acquire 并发（调用更早），完成于 acquire 之后 —— absent
+ {:type :ok :f :lock-probe :process 3
+  :time 10000080000 :invoke 10000080000
+  :t0-ns 1000008000000 :server-at-ms 45
+  :name "lock-a-abandon" :server-key "/_lock/lock-a-abandon"
+  :exists? false :server nil :node "n2"}
+
+ ;; probe B：顺序读，key 挂在 a1 名下
+ {:type :ok :f :lock-probe :process 1
+  :time 10005000000 :invoke 10005000000
+  :t0-ns 1000500000000 :server-at-ms 2
+  :name "lock-a-abandon" :server-key "/_lock/lock-a-abandon"
+  :exists? true :raw-value "{\"holder_id\":\"a1\",\"lease_id\":7}"
+  :server {:holder-id "a1" :lease-id 7 :ttl-secs 5} :node "n1"}
+
+ ;; nemesis：rel t=50s kill n4 → rel t=60s 重启
+ {:type :info :process :nemesis :f :kill-agent :time 50000000000
+  :value [:killed-agent "n4"]}
+ {:type :info :process :nemesis :f :kill-agent :time 60000000000
+  :value [:restarted-agent "n4"]}
+
+ ;; probe C：down+ttl+grace 之后，key 已不在（absence 无 holder ⇒ 不算 orphan）
+ {:type :ok :f :lock-probe :process 2
+  :time 100000000000 :invoke 100000000000
+  :t0-ns 1100000000000 :server-at-ms 0
+  :name "lock-a-abandon" :server-key "/_lock/lock-a-abandon"
+  :exists? false :server nil :node "n1"}]

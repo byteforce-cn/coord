@@ -973,6 +973,35 @@ W3-2…W3-9、W4-1 TLS fail-closed、§1.3 案 A/B 人力裁定。
 > lab 组（P3–P5）与 P8 真发布面外全部达成**；两项均绑定 W3 长跑 / W7 发布窗口。§6.1 的
 > M0 出口行已同步更新。
 
+### 第十五轮追加（2026-09-26）—— 主题：**W3 预飞（F-73/F-74：M5a lock checker 判定修复）+ 四矩阵与 9 面冒烟全绿；T6.1 72h 起跑**
+
+> 触发：W1 出口（M1）已达成、功能判「完备」，按「尽快启动 soak」进入 T6.1 预飞。
+> 预飞矩阵首跑即暴露 `matrix-m5` 红 —— 根因不在产品面，而在 **M5a lock checker 的
+> 两处判定缺陷**（F-73/F-74，均为 checker 侧修复，产品二进制不变）。修复后 m5 首度
+> 全绿，全部预飞项通过；72h 起跑参数在表内**预注册**。
+
+| # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
+|:--|:--|:--|:--|:--|
+| 预飞-1 | 二进制与布置 + 门禁 | ✅ | `make binary`（`81955cc2` @ `ed15ea7`）；`make upload`；`make checkers`；`make quick` | 全绿（W4-1 TLS 逃生阀在 lab 生效） |
+| 预飞-2 | `make matrix-m2` | ✅ 全绿 | 8 格（watch/lease × none/kill/pause/partition-halves） | `ALL M2 MATRIX PASSED`；lease `violations {}`；liveness-unjudged 13/15/14（kill/pause/partition 格） |
+| 预飞-3 | **F-73 / F-74 修复** | ✅ 修复 + 全量验证 | lock-agent fixtures **9/9**（新增 3 个：F-73 正例 / F-74 正例 / 「顺序读读到丢失不得假绿」负控制）；两次现场红 run 离线重放 ⇒ 均 `valid? true`、`phantom-loss 0`（`clock-offset-ms 85840376` 实证两轴偏移） | `lockck.clj`：`rel->abs-offset-ms` + `abs-windows`（F-73：faultwin 相对轴 vs `:t0-ns` 绝对轴混用）；H2 双条件证据窗（F-74：并发读不得当顺序证据）；summary 增 `:clock-offset-ms`。文档：coord-findings **§19**、dev.md 教训 **#31/#32** |
+| 预飞-4 | `make matrix-m5` | ✅ **全绿（首度）** | 9 格（lock/election/idgen/registry × none/kill-agent + lock/partition-agent-server；`LOCK_TTL_SECONDS=30`） | `ALL M5 MATRIX PASSED` |
+| 预飞-5 | `make matrix-m5-diff` | ✅ 全绿 | 8 格（map:none、txn:none、watch:kill-agent、lease:none × direct/via-agent） | `ALL M5 DIFF MATRIX PASSED` |
+| 预飞-6 | `make matrix-m1` | ✅ 全绿 | 9 格（map/txn/scan/mixture × none/kill + idempotency:none） | `ALL M1 MATRIX PASSED` |
+| 预飞-7 | soakfull 冒烟（**9 面**） | ✅ 全绿 | `make soakfull`（900s、seed 42、`--agents 2 --via-agent --lock-ttl-seconds 30` + 保守门槛；显式 9 面 mix） | `Everything looks good!`；全部 14 项 `valid? true`（含 **idgen**）；routing 全 9 面见数（map 753 / txn 341 / watch 250 / lease 182 / lock 144 / scan 82 / idgen 73 / registry 41 / election 31）；样本：lease 182 grants / 74 expiries（unjudged 0）、watch events 536、idgen ids 376（distinct 376、regressions 0）、lock acquires 76（phantom-loss 0）、election campaigns 17、registry cycles 27 |
+| **T6.1-72h** | **起跑（预注册参数）** | ⏳ 本轮合并后启动 | `make soakfull`：`SOAK_TIME_LIMIT=259200 SOAK_QUIET=1800 SOAK_DISRUPT=600 SOAK_RATE=2 CONCURRENCY=2n SEED=42`；`SOAK_MIX='map=40,txn=20,scan=5,watch=15,lease=10,lock=10,election=3,registry=2,idgen=5'`；`SOAK_EXTRA='--agents 2 --via-agent --lock-ttl-seconds 30 --watch-min-events 200 --lease-min-grants 100 --lease-min-expiries 30 --lock-min-acquires 200 --election-min-campaigns 50 --registry-min-cycles 30 --idgen-min-ids 100'` | 起跑于 tag `t6.1-72h-2026-09-26`；结果 + 证据归档随结项回写（第十六轮）。PR 号与 CI 结论随下轮回写 |
+
+> **一个踩坑（记录）**：`soakfull` 默认 mix **故意**只含 8 面（不含 idgen；源码 docstring
+> 明确「验收级长跑请显式传完整比例」）。首次冒烟用默认 mix 跑完后，从 `:routing` 面份额
+> 发现 idgen 缺席 ⇒ 以显式 9 面 mix 重跑（上表预飞-7 为**显式 mix** 结果）。若直接以
+> 默认 mix 起 72h，会得到一份「少一个面但全绿」的报告 —— 正是 `soakfull-mix` 注释中
+> 「拒绝静默丢弃」要防的情形（这次由预飞兜住了）。
+
+> **口径边界**：F-73/F-74 均为 checker 侧修复，不改变产品二进制与 lock 验收参数；
+> §5.4-⑨（默认 ttl=5s < 续期节拍 10s）**仍未裁定**，lock 验收沿用 `LOCK_TTL_SECONDS=30`
+> （即 soak 的 `--lock-ttl-seconds 30`，与 2026-09-19 M5a 验收参数一致）。watch 的
+> `unjudged-items 45`（冒烟）按「不判 ≠ 通过」口径如实记录，72h 结项时同读。
+
 ---
 
 ## 附录 A：差距 → 门 → 判据 → 证据（追溯表）

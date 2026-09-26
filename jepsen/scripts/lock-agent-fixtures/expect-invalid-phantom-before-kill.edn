@@ -1,0 +1,41 @@
+;; expect-invalid-phantom-before-kill —— F-73 的**守门员**（防过度豁免）。
+;;
+;; 与 expect-valid-kill-shortly-after-acquire 同一个偏移设定
+;; （offset = 1_000_000ms），但把「key 消失」的时刻放到 **kill 窗口打开之前**：
+;;   * 弃锁 op raw 1_000_020 拿到锁；
+;;   * raw 1_030_000 的探针看到 key 已不在 a1 名下 —— 此时持有者**还活着**
+;;     （kill 窗口 raw 1_050_000 才打开）⇒ 这是真·假丢锁，必须判红；
+;;   * kill 窗口只是背景（不许把「之后有 kill」当成「之前的消失」的借口）。
+;;
+;; 新 checker 下：down = 1_050_000 ⇒ held = [1_000_020, 1_050_000) 含失配探针
+;; ⇒ phantom-loss ⇒ **invalid**。旧 checker 下同样 invalid（原因不同）。
+[{:type :ok :f :lock-abandon :process 0
+  :time 10010000 :invoke 10000000
+  :t0-ns 1000010000000
+  :name "lock-a-abandon" :holder-id "a1" :lease-id 7
+  :abandoned? true :acquired-at-ms 10
+  :acquire-node "127.0.0.1:24577"
+  :holder-ttl-seconds 5 :grace-ms 4000 :at-ms 12}
+
+ ;; 探针：raw 1_030_000 —— kill 窗口（1_050_000）**之前**，key 已经没了
+ {:type :ok :f :lock-probe :process 1
+  :time 30000000000 :invoke 30000000000
+  :t0-ns 1030000000000 :server-at-ms 0
+  :name "lock-a-abandon" :server-key "/_lock/lock-a-abandon"
+  :exists? false :server nil :node "n1"}
+
+ ;; 尾部探针（raw 1_057_000）：把 `end-ms` 推到失配探针之后，使失配样本严格落在
+ ;; held 窗口内（否则它会被 `(< t before)` 截掉、红因退化成 unjudged）。
+ ;; holder 故意用 a2：不触发 orphan（那条要求重挂 a1），让本 fixture 的红因唯一
+ {:type :ok :f :lock-probe :process 1
+  :time 57000000000 :invoke 57000000000
+  :t0-ns 1057000000000 :server-at-ms 0
+  :name "lock-a-abandon" :server-key "/_lock/lock-a-abandon"
+  :exists? true :raw-value "{\"holder_id\":\"a2\",\"lease_id\":9}"
+  :server {:holder-id "a2" :lease-id 9 :ttl-secs 5} :node "n1"}
+
+ ;; nemesis：较晚的 kill（背景，不是豁免理由）
+ {:type :info :process :nemesis :f :kill-agent :time 50000000000
+  :value [:killed-agent "n4"]}
+ {:type :info :process :nemesis :f :kill-agent :time 60000000000
+  :value [:restarted-agent "n4"]}]

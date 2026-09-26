@@ -2185,3 +2185,75 @@ make test WORKLOAD=lock NEMESIS=none TIME_LIMIT=120 CONCURRENCY=2n AGENTS=2 \
 * linear **invalid**：`:violations-by-class {:lease-not-expired 4}`（见 F-70/F-71）。
 * 与上一轮同参数 run（判 invalid、rto-unrecovered 2、quiet 0.0、85 min 全集群失能）
   对比：**F-69 的失能面已消失**；剩余红灯全部集中在 lease failover 窗口与认证观测缺口。
+
+## 19. 第十五轮（2026-09-26）：M5a lock 首跑连抓两条 checker 判据缺陷（F-73 / F-74）
+
+### F-73 [Checker，fixed（2026-09-26）] faultwin 窗口与 op `:t0-ns` 不同轴 ⇒ lock 的 H1 判据永不成立、H2 假红
+
+**怎么撞上的**：第十五轮预飞 `make matrix-m5 LOCK_TTL_SECONDS=30`（复用
+2026-09-19 的 M5a 口径），第一个 lock cell 在 F-50 修复之后**仍然红**：
+`lock / kill-agent` ⇒ `:violations-by-class {:lock-phantom-loss 1}`
+（`store/coord/2026-09-26T07:51:58.021824898Z`）。先排除产品面：agent 端
+`auto-renew` 在 kill 窗口内的失败全部是「进程已被 kill」的正常形态；单点 sanity
+（`lock:none`）绿。
+
+**根因（判据侧，两个时间轴混用，F-34 第三次复发）**：
+
+* op 自读的 `:t0-ns` = `System/nanoTime`（raw，ms-since-boot，实测
+  ~85_866_575ms）；
+* `faultwin/windows` 的 `:from-ms/:to-ms` 来自 nemesis op 的 jepsen `:time`
+  （**相对测试起点**，实测 33_515ms）；
+* `abandon-analysis` 用 `abs-ms`（raw）算 `start`，却拿它去 `first-down` 过滤相
+  对空间的窗口 ⇒ **恒为 nil** ⇒
+  ① H1（`orphan`：崩溃持有者必须在 ttl+grace 内被回收）永远判不到；
+  ② H2 的 `held` 窗口退化成 `[start, run-end)`，「被 kill 的持有者留下的锁按
+  ttl 正常过期」被当成「活着时的假丢锁」⇒ 假红。
+* 偏移量 = 测试启动时刻的 nanoTime（复现读数 `:clock-offset-ms 85840376`）。
+
+**复现配方**：任意 `matrix-m5` 的 `lock:kill-agent` cell（`--agents 2
+SKIP_CHECKERS=1 LOCK_TTL_SECONDS=30`）；或离线重放
+`store/coord/<ts>/history.edn` + `lockck/checker {:probe? true :abandon? true
+:agent-nodes {...}}`。
+
+**修复**（`lockck.clj`）：新增 `rel->abs-offset-ms`（取任一同时带 `:t0-ns` 与
+`:invoke` 的 op 相减；一个都没有 ⇒ 0）与 `abs-windows`（把窗口整体 `+offset`），
+`abandon-analysis` 一律在 raw 空间比较；summary 增 `:clock-offset-ms`。手写
+fixture（无 `:invoke`）偏移 0 ⇒ 旧行为不变。
+
+### F-74 [Checker，fixed（2026-09-26）] 弃锁判据把「与 acquire 并发的读」当顺序证据 ⇒ 假红
+
+**怎么撞上的**：F-73 修复后复跑同一 cell，**只剩一条**违反：
+`lock-c-abandon` 的探针在 `acquired-at-ms` 后 **15ms** 读到 `:absent`
+（`store/coord/2026-09-26T08:13:30.106742486Z`）。
+
+**根因（判据侧，线性一致性的顺序对定义）**：
+
+* 用 jepsen 相对时钟对齐（同一空间）：探针**调用** rel 17_564ms，acquire **调用**
+  rel 17_566ms —— 读的调用**早于**写的调用；探针完成 rel 17_647ms、acquire 完成
+  rel 17_632ms；
+* 线性一致性只约束**响应先后**的顺序对：与写**并发**（甚至先于写被调用）的读
+  **可以合法**看到旧状态；
+* 而 `abandon-analysis` 的证据窗用「读**完成**时刻」（`t-of`）筛选 ⇒ 这条合法
+  观测落入 `held` 窗口（`server :absent`）⇒ 假红。
+
+**修复**（`lockck.clj`）：证据样本改双条件（`t-inv` = 读的调用时刻，来自
+`:t0-ns`，raw 空间）：
+* H2（`held`）：调用 ≥ acquire 完成 **且** 完成 < 下一个故障（顺序读才算数）；
+* H1（`dead`）：调用 > `down + ttl + grace`（收严：整段读都发生在回收窗口之后）。
+
+**判据（双向）**：新增 `expect-valid-probe-concurrent-with-acquire.edn`（构造
+「读调用早于写调用」；旧 checker 必红、新绿）；守门员
+`expect-invalid-phantom-before-kill.edn` 保持必红（**顺序**读、acquire 之后读到
+absent ⇒ 仍是真·假丢锁）。`lock-agent-fixtures` **9/9**。
+
+**离线重放（两轮现场 run，修复后均转绿）**：
+
+| run | valid? | violations | abandon |
+|:--|:--|:--|:--|
+| `2026-09-26T07:51:58Z`（F-73 现场） | **true** | `{}` | ops 5 / judged 3 / phantom 0 / orphan 0 / unjudged 2 |
+| `2026-09-26T08:13:30Z`（F-74 现场） | **true** | `{}` | ops 3 / judged 3 / phantom 0 / orphan 0 / unjudged 0 |
+
+**边界**：F-74 只**排除并发读**，不改变顺序读的判红口径（持有者活着、顺序读读到
+key 丢失仍必红）；两条修复都**不**解决 §5.4-⑨（ttl=5s < 续期节拍 10s 的默认口径
+问题 —— lock cell 的验收口径仍取 `LOCK_TTL_SECONDS=30`）；lab 复跑
+`matrix-m5` 全 9 格绿（见 §11 第十五轮）。

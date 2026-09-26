@@ -809,6 +809,30 @@ quiet 1800±20% / disrupt 600±20%。
     「第一次确认之后又被投递」这一形态被漏掉（fixture 假绿）。凡「某事件是否**已经**
     发生过」的判据（Ack / 提交 / 释放 / 注册），都取**最早**证据；取最后一次是在问
     另一个问题（「最近一次是什么时候」）。
+31. **跨来源的时间比较，先问「两个源的零点是什么」**（F-73，2026-09-26）。lockck
+    的故障窗归因连续三次栽在同一个坑（F-34 区间端点 → `end-ms` → faultwin 窗口）：
+    op 自读的 `:t0-ns` 是 `System/nanoTime`（raw，ms-since-boot），而 nemesis 窗口
+    来自 jepsen 记录的 `:time`（**相对测试起点**）—— 两空间零点相差「测试启动时的
+    nanoTime」（实测 85_840_376ms）。拿 raw 的 start 去比相对空间的 `:from-ms`，
+    `first-down` 恒 nil ⇒ H1（崩溃持有者的回收）永不成立，H2（假丢锁）把「被 kill
+    的持有者留下的锁按 ttl 正常过期」判成红（`lock/kill-agent` 首个真跑即中，1 条
+    phantom-loss）。正解：估计一次偏移（同一 op 同时有 `:t0-ns` 与 `:invoke` 时相
+    减），把窗口**整体平移到 raw 空间**再比较；手写 fixture 无 `:invoke`（偏移 0）
+    时行为不变。判据：lock-agent fixtures **8/8**（新增
+    `expect-valid-kill-shortly-after-acquire`（旧 checker 必红）与守门员
+    `expect-invalid-phantom-before-kill`），并在当次失败 run 的 history 上离线重
+    放：`valid? true`、`phantom-loss 0`。
+32. **判据筛「证据样本」时，先问「这对操作是顺序对还是并发对」**（F-74，
+    2026-09-26）。F-73 修复后的同一 cell 只剩一条违反：探针在 acquire 后 15ms
+    读到 `:absent`。对齐到同一时钟后发现：**探针的调用（17_564ms）早于 acquire
+    的调用（17_566ms）** —— 线性一致性只约束「响应先后」的顺序对，与写并发的读
+    （甚至先于写被调用）**可以合法**看到旧状态。而判据用「读**完成**时刻」筛
+    证据 ⇒ 把它当成「acquire 之后的顺序读」⇒ 假红。正解：证据窗用「读的**调用**
+    时刻」（`:t0-ns`）+ 完成时刻双条件 —— H2 要求「调用 ≥ acquire 完成且完成 <
+    下一个故障」，H1 要求「调用 > down+ttl+grace」（收严到整段读都在回收窗口
+    之后）。判据：新增 `expect-valid-probe-concurrent-with-acquire`（旧必红）、
+    守门员 `expect-invalid-phantom-before-kill` 仍必红、fixtures **9/9**；两轮
+    现场 run 离线重放均 `valid? true`。
 
 ### 5.4 待 coord 团队确认参数表
 
