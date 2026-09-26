@@ -13,7 +13,7 @@ use coord_core::storage::StorageBackend;
 use coord_core::types::StorageConfig;
 use coord_proto::lease::lease_server::Lease as LeaseSvc;
 use coord_proto::lease::{LeaseGrantRequest, LeaseRevokeRequest};
-use coord_server::lease::wall_clock_now_ms;
+use coord_server::lease::{wall_clock_now_ms, LeaseAction};
 use coord_server::raft::log_store::LogStore;
 use coord_server::raft::network::{RaftNetworkFactoryImpl, RaftRpcServer, RaftRpcService};
 use coord_server::raft::state_machine::StateMachineStore;
@@ -464,4 +464,194 @@ async fn test_follower_rejects_lease_operations() {
         .await
         .expect("leader must accept grant");
     assert!(resp.into_inner().id > 0);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// F-70（2026-09-25 2h soak 立项）：leader 切换窗口的「grant/put 成功、首次
+// keepalive 即 NOT_FOUND、绑定 Key 永不删除」。
+//
+// 根因（第十一轮定位，进程内可复现）：旧 `LeaseManager::rebuild` 是
+// 「先清空再装载」——reconciler 读状态机快照若发生在本次 Grant 的 apply 之前，
+// 快照就没有该租约，而 `grant_with_id_checked` 已把记录插进本地管理器 ⇒
+// 清空把它抹掉 ⇒ KeepAlive 本地查不到（NOT_FOUND）、过期任务不再调度 ⇒
+// 绑定 Key 直到下一次 failover 前**永不删除**。
+// 判据分两层：
+//   ①合并语义：快照缺失的本地在飞租约必须保留、到期仍上报；
+//   ②补水路径：本地视图缺失但状态机记录仍在时，keepalive 不得谎报 NOT_FOUND；
+//     已过期的状态机记录必须被排入清理（泄漏自愈）。
+// 负控制：还原 `rebuild` 至「先清空再装载」⇒ ①红（本地记录被抹）；
+//         去掉 keepalive 补水路径 ⇒ ②红（本地缺失直接 NOT_FOUND）。
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// **F-70-①②**：reconcile 装载与在飞 Grant 竞态。
+///
+/// 1. `lease_grant` 走真实 handler（本地插入 + 入 raft 日志），Put 绑定 Key；
+/// 2. 模拟 reconciler 读到**不含该租约**的快照（apply 前读）并 rebuild；
+/// 3. 断言本地视图仍在、keepalive 语义自洽、到期经 raft Revoke 级联删 Key。
+#[tokio::test]
+async fn test_f70_rebuild_race_keeps_inflight_grant_and_expiry_cascades() {
+    let _serial = serial_guard();
+    let nodes = TestNode::start_cluster(1).await;
+    let leader = &nodes[wait_for_leader(&nodes, Duration::from_secs(5))
+        .await
+        .unwrap()];
+
+    // 1) 真实 handler 路径：grant + put{lease_id}
+    let lid = leader
+        .node
+        .lease_grant(tonic::Request::new(LeaseGrantRequest { ttl: 2, id: 0 }))
+        .await
+        .expect("leader must accept grant")
+        .into_inner()
+        .id;
+    assert!(lid > 0, "auto-allocated lease id must be positive");
+    put_with_lease(leader, b"/f70/inflight", b"v1", lid).await;
+    assert!(
+        leader
+            .mvcc
+            .get(b"/f70/inflight")
+            .map(|v| v.is_some())
+            .unwrap_or(false),
+        "precondition: bound key must be present"
+    );
+
+    // 2) 竞态：reconciler 的快照（空）与本地在飞记录并存 ⇒ rebuild
+    let tracked = leader.lease_manager.rebuild(vec![]).await;
+    assert_eq!(tracked, 1, "the in-flight grant must still be tracked");
+    assert!(
+        leader.lease_manager.get_lease(lid).is_some(),
+        "F-70: rebuild must not wipe a locally accepted (in-flight) lease"
+    );
+
+    // 3) keepalive 语义自洽：本地视图在 ⇒ 正常续约（不得 NOT_FOUND）
+    let ttl = leader
+        .node
+        .keepalive_ttl(lid)
+        .await
+        .expect("a live in-flight lease must renew after the racy rebuild");
+    assert!(ttl > 0);
+
+    // 4) 到期仍被上报（否则 Revoke 不下发、Key 永不删除）
+    tokio::time::sleep(Duration::from_millis(2400)).await;
+    let actions = leader.lease_manager.check_expired();
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, LeaseAction::Expired { lease_id, .. } if *lease_id == lid)),
+        "the in-flight lease must still expire after the racy rebuild"
+    );
+
+    // 5) 过期 worker 的动作：经 raft Revoke ⇒ 绑定 Key 级联删除
+    propose_lease(
+        leader,
+        LeaseOp::Revoke {
+            id: lid,
+            delete_keys: true,
+        },
+    )
+    .await;
+    wait_until(
+        "bound key cascade-deleted after expiry revoke",
+        || {
+            leader
+                .mvcc
+                .get(b"/f70/inflight")
+                .map(|v| v.is_none())
+                .unwrap_or(false)
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+}
+
+/// **F-70-②**：本地视图缺失但状态机记录仍在 ⇒ keepalive 必须补水续约；
+/// 已过期的状态机记录（泄漏形态）必须被排入清理（自愈）。
+#[tokio::test]
+async fn test_f70_keepalive_rehydrates_from_state_machine_and_heals_leaks() {
+    let _serial = serial_guard();
+    let nodes = TestNode::start_cluster(1).await;
+    let leader = &nodes[wait_for_leader(&nodes, Duration::from_secs(5))
+        .await
+        .unwrap()];
+
+    // 1) 直接经 raft 提交 Grant + 绑定 Key（**不经 handler**）⇒ 本地 LeaseManager
+    //    没有该租约，精确模拟「新 leader 本地视图缺失、状态机有权威记录」的窗口。
+    let deadline = wall_clock_now_ms() + 30_000;
+    propose_lease(
+        leader,
+        LeaseOp::Grant {
+            id: 77,
+            ttl: 30,
+            deadline_wall_ms: deadline,
+        },
+    )
+    .await;
+    put_with_lease(leader, b"/f70/rehydrate", b"v", 77).await;
+    assert!(
+        leader.lease_manager.get_lease(77).is_none(),
+        "precondition: the local TTL view misses this lease"
+    );
+
+    // 2) 补水：存活租约必须恢复跟踪并报告 ttl（旧行为：本地缺失 ⇒ NOT_FOUND）
+    let ttl = leader
+        .node
+        .keepalive_ttl(77)
+        .await
+        .expect("a live lease in the state machine must not be reported as missing");
+    assert!(ttl > 0);
+    assert!(
+        leader.lease_manager.get_lease(77).is_some(),
+        "local tracking must be restored by rehydration"
+    );
+
+    // 3) 泄漏形态：状态机里的记录已过期、本地视图也没有 ⇒ 补水必须
+    //    ①对客户端回 NOT_FOUND（= 已不存在）；②把记录排入清理并自愈删 Key。
+    let past = wall_clock_now_ms() - 1_000;
+    propose_lease(
+        leader,
+        LeaseOp::Grant {
+            id: 78,
+            ttl: 1,
+            deadline_wall_ms: past,
+        },
+    )
+    .await;
+    put_with_lease(leader, b"/f70/leaked", b"v", 78).await;
+
+    let err = leader
+        .node
+        .keepalive_ttl(78)
+        .await
+        .expect_err("an expired lease must not be revived");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+
+    let actions = leader.lease_manager.check_expired();
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, LeaseAction::Expired { lease_id, .. } if *lease_id == 78)),
+        "an expired state-machine record must be scheduled for revoke (leak self-heal)"
+    );
+
+    // 4) 自愈闭环：Revoke ⇒ 绑定 Key 被级联删除
+    propose_lease(
+        leader,
+        LeaseOp::Revoke {
+            id: 78,
+            delete_keys: true,
+        },
+    )
+    .await;
+    wait_until(
+        "leaked key removed by self-heal revoke",
+        || {
+            leader
+                .mvcc
+                .get(b"/f70/leaked")
+                .map(|v| v.is_none())
+                .unwrap_or(false)
+        },
+        Duration::from_secs(5),
+    )
+    .await;
 }

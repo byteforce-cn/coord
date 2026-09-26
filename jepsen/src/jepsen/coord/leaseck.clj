@@ -45,6 +45,10 @@
   * 读失败（`:read-ok? false`）**不**当作「Key 消失」：只有 `:read-ok? true`
     且 `:present? false` 的观测参与判据 1/3/4（否则一次 transient 读失败会产出
     一条像被测系统违约的假红）；
+  * **F-71（2026-09-25）**：轮询**从未读成功**（`:ok-reads = 0`，典型形态是
+    CCT 集中过期波期间读全部 `:unauthenticated`）时，判据 3/3'/4 **不判**，
+    计入 summary 的 `:liveness-unjudged`（不判 ≠ 通过；客户端已在轮询内刷新
+    会话重试，仍全失败则窗口内没有可信观测，不得据此报活性违反）；
   * Leader 切换后由新 Leader 重建 TTL（契约明确可能略晚）⇒ grace 是必要条件，
     不是宽容；`pause`（长冻结）与 `kill`（重启丢 deadline）是 T3.4 的证伪故障。"
   (:require [clojure.tools.logging :refer [info]]
@@ -137,6 +141,18 @@
 
     absent))
 
+(defn- poll-unjudged?
+  "F-71：轮询期间**没有任何一次读成功**（`:ok-reads = 0`）⇒ 「没观察到消失」
+  不是活性违反，而是**没判**（不判 ≠ 通过，计入 summary 的
+  `:liveness-unjudged`）。
+
+  读失败的典型来源：CCT 集中过期波（客户端侧已在轮询里刷新会话重试；
+  仍全失败时说明窗口内根本没有可信观测）。旧格式观测（无 `:ok-reads` 字段）
+  按旧口径判 —— 历史 fixture 语义不变。"
+  [op]
+  (let [o (first (filter #(= :first-absent (:phase %)) (:observations op)))]
+    (and o (some? (:ok-reads o)) (zero? (long (:ok-reads o))))))
+
 (defn- liveness-fails
   "判据 2/3/4/5/6。活性（3/4）只在**锚点存在**时判；锚点缺失的 op 记入
   summary 的 `:liveness-unjudged`（不判 ≠ 通过）。"
@@ -156,7 +172,9 @@
              :note "Put{lease_id} 返回 :ok 后立刻点读看不到该 Key"})
 
       ;; 判据 3：到期后必须在 ttl+grace 内消失（锚点 = op 起点）
-      (and (= :ttl (:scenario op))
+      ;; F-71：轮询从未读成功（`:ok-reads = 0`）时不判（计入 :liveness-unjudged）
+      (and (not (poll-unjudged? op))
+           (= :ttl (:scenario op))
            (or (nil? absent) (> (long rel) (+ ttl grace))))
       (conj {:type :lease-not-expired
              :scenario (:scenario op) :lease (:lease op) :key (:key op)
@@ -166,7 +184,9 @@
       ;; 判据 3'：停续期后必须在 ttl+grace 内消失（锚点 = 停续期时刻）。
       ;; 注意 `(nil? absent)` 分支必须保留：「**从未消失**」本身就是活性违反，
       ;; 与锚点是否存在无关（重构时丢了它，守门员 fixture 立刻抓到）。
-      (and (= :keepalive (:scenario op))
+      ;; F-71：轮询从未读成功（`:ok-reads = 0`）时不判。
+      (and (not (poll-unjudged? op))
+           (= :keepalive (:scenario op))
            (or (nil? absent) (and rel? (> (long rel) (+ ttl grace)))))
       (conj {:type :lease-not-expired
              :scenario (:scenario op) :lease (:lease op) :key (:key op)
@@ -174,8 +194,9 @@
              :ttl-ms ttl :grace-ms grace
              :note "停止续期后 Key 未在 ttl+grace 内消失"})
 
-      ;; 判据 4：Revoke 级联删除（锚点 = Revoke 时刻）
-      (and (= :revoke (:scenario op)) (:revoked? op)
+      ;; 判据 4：Revoke 级联删除（锚点 = Revoke 时刻）；F-71：轮询全读失败时不判
+      (and (not (poll-unjudged? op))
+           (= :revoke (:scenario op)) (:revoked? op)
            (or (nil? absent) (and rel? (> (long rel) (long grace)))))
       (conj {:type :lease-revoke-not-cascaded
              :scenario (:scenario op) :lease (:lease op) :key (:key op)
@@ -202,11 +223,13 @@
              :note "KeepAlive 从未回过 ttl>0：续期路径没真的生效（「Key 仍在」不可归因于续期）"}))))
 
 (defn- unjudged-liveness?
-  "该 op 的活性是否因为**锚点缺失**而无法判定（必须计入 summary，不能静默通过）。"
+  "该 op 的活性是否**无法判定**（必须计入 summary，不能静默通过）：
+  ①锚点缺失（F-26 口径）；②F-71：轮询从未读成功（`:ok-reads 0`）。"
   [op]
-  (and (contains? #{:keepalive :revoke} (:scenario op))
-       (some? (:absent-ms op))
-       (nil? (relative-absence op (:absent-ms op)))))
+  (or (and (contains? #{:keepalive :revoke} (:scenario op))
+           (some? (:absent-ms op))
+           (nil? (relative-absence op (:absent-ms op))))
+      (poll-unjudged? op)))
 
 (defn checker
   "T2.2 checker。opts：

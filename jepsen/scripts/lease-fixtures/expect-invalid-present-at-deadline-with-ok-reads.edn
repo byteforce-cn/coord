@@ -1,0 +1,17 @@
+;; expect-invalid-present-at-deadline-with-ok-reads —— F-71 的负控制（不可逃逸）：
+;; 轮询**读成功过**（`:ok-reads 12`）且最后仍见 Key ⇒ 必须判 `:lease-not-expired`。
+;;
+;; 守的是新加的「全读失败 ⇒ 不判」规则不被滥用：只有 `:ok-reads = 0` 才能
+;; 逃逸判定；只要有可信观测，`(nil? absent)` 仍是活性违反。
+[{:type :ok :f :lease-keepalive :process 0 :invoke 1 :time 10
+  :lease {:id 2601 :ttl 2} :key "/jepsen/lease/s42/ka/26" :node "n1"
+  :scenario :keepalive :grace-ms 4000
+  :keepalives [{:id 2601 :ttl 2}]
+  :observations [{:phase :after-write :at-ms 25 :read-ok? true :present? true}
+                 {:phase :during-keepalive :at-ms 4050 :read-ok? true :present? true}
+                 ;; 8 次失败（CCT 波）+ 12 次成功；最后一次成功读（6500ms）
+                 ;; 仍观察到 Key 存在 ⇒ 窗口内没有消失
+                 {:phase :first-absent :at-ms 12000 :read-ok? false :present? false
+                  :absent? false :reads 20 :failed 8 :ok-reads 12 :reauths 1
+                  :last-ok-present? true :last-ok-at-ms 6500}]
+  :absent-ms nil}]

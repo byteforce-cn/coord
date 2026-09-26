@@ -743,6 +743,28 @@ impl CoordNode {
         Ok(())
     }
 
+    /// **F-70**：keepalive 语义的租约存在性判定 —— 本地 TTL 缓存缺失时，
+    /// 以状态机为权威补水（与 handler 内的同名调用共享 [resolve_keepalive_ttl]）。
+    ///
+    /// 供测试与内部调用复用；返回存活租约的 ttl（秒）。
+    pub async fn keepalive_ttl(&self, lease_id: LeaseID) -> Result<i64, tonic::Status> {
+        let lm = self
+            .lease_manager
+            .as_deref()
+            .ok_or_else(|| tonic::Status::unavailable("lease manager not available"))?;
+        let read_timeout = self.limits.read().read_timeout;
+        resolve_keepalive_ttl(
+            self.node_id,
+            read_timeout,
+            self.raft.as_deref(),
+            self.raft_log_store.as_ref(),
+            &self.storage,
+            lm,
+            lease_id,
+        )
+        .await
+    }
+
     /// 下发一次 Lease 过期 revoke（**F-27** 的"提交"步骤）。
     ///
     /// 返回 `Ok(())` **仅当** revoke 已在状态机提交：
@@ -951,36 +973,76 @@ impl CoordNode {
         });
     }
 
-    /// 启动 Lease failover reconciler（B.4.4）
+    /// 启动 Lease failover reconciler（B.4.4；**F-70**：屏障 + 合并语义）
     ///
     /// 每 500ms 检测 leader 身份；检测到本节点成为 leader（含启动即 leader 与
-    /// 单节点模式）时，从状态机 `/_lease/` 记录重建 LeaseManager：
+    /// 单节点模式）时，**先做线性一致屏障**，再从状态机 `/_lease/` 记录合并进
+    /// LeaseManager（合并语义见 `LeaseManager::rebuild`）：
     /// - 新 leader 接管：未过期 Lease 以剩余 TTL 继续（at-least TTL），
-    /// - 已过期 Lease：立即到期，由过期 worker 经 raft propose Revoke 清理。
+    /// - 已过期 Lease：立即到期，由过期 worker 经 raft propose Revoke 清理，
+    /// - 本地已接受、快照尚未包含的在飞 Grant：**保留**（不得抹掉）。
+    ///
+    /// 屏障或读取失败时**不**标记本任期完成，下个 tick 重试。
     pub fn start_lease_leader_reconciler(self: &Arc<Self>) {
         let node = Arc::clone(self);
         tokio::spawn(async move {
-            let mut was_leader = false;
+            // 本任期是否已完成装载。屏障/读取失败时保持 false，下个 tick 重试 ——
+            // 不得把「没装上」当成「装好了」（F-70）。
+            let mut rebuilt = false;
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
             loop {
                 interval.tick().await;
                 let is_leader = node.is_raft_leader().await;
-                if is_leader && !was_leader {
-                    let Some(ref lm) = node.lease_manager else {
-                        was_leader = is_leader;
-                        continue;
-                    };
-                    match node.storage.list_lease_records() {
-                        Ok(records) => {
-                            let n = lm.rebuild(records).await;
-                            tracing::info!("LeaseManager rebuilt from state machine: {n} leases");
-                        }
-                        Err(e) => {
-                            tracing::warn!("failed to read lease records for rebuild: {e}")
-                        }
+                if !is_leader {
+                    rebuilt = false;
+                    continue;
+                }
+                if rebuilt {
+                    continue;
+                }
+
+                // F-70①：装载前先做线性一致屏障（本地状态机追平提交位）。
+                // 否则会漏读「已提交但尚未 apply」的租约记录 ⇒ 其绑定 Key 在新主上
+                // 既续不了约、也永远不会被过期清理（旧实现还会把在飞 Grant 抹掉）。
+                let read_timeout = node.limits.read().read_timeout;
+                if let Err(status) = ensure_linearizable_barrier(
+                    node.node_id,
+                    read_timeout,
+                    node.raft.as_deref(),
+                    node.raft_log_store.as_ref(),
+                    0,
+                )
+                .await
+                {
+                    tracing::info!(
+                        node_id = node.node_id,
+                        %status,
+                        "lease rebuild deferred: linearizable barrier not ready"
+                    );
+                    continue; // rebuilt 保持 false ⇒ 下个 tick 重试
+                }
+
+                let Some(ref lm) = node.lease_manager else {
+                    rebuilt = true;
+                    continue;
+                };
+                match node.storage.list_lease_records() {
+                    Ok(records) => {
+                        let n = lm.rebuild(records).await;
+                        tracing::info!(
+                            node_id = node.node_id,
+                            tracked = n,
+                            "LeaseManager rebuilt from state machine (merge, F-70)"
+                        );
+                        rebuilt = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            node_id = node.node_id,
+                            "failed to read lease records for rebuild: {e}"
+                        )
                     }
                 }
-                was_leader = is_leader;
             }
         });
     }
@@ -1114,124 +1176,194 @@ impl CoordNode {
         raft_log_store: Option<&LogStore>,
         region_id: RegionId,
     ) -> Result<(), tonic::Status> {
-        if let Some(raft) = raft {
-            let timeout = self.limits.read().read_timeout;
-            let read_log_id =
-                tokio::time::timeout(timeout, raft.ensure_linearizable(ReadPolicy::ReadIndex))
-                    .await
-                    .map_err(|_| tonic::Status::deadline_exceeded("linearizable read timed out"))?
-                    .map_err(|e| {
-                        tonic::Status::internal(format!("linearizable read failed: {e}"))
-                    })?;
+        let read_timeout = self.limits.read().read_timeout;
+        ensure_linearizable_barrier(self.node_id, read_timeout, raft, raft_log_store, region_id)
+            .await
+    }
+}
 
-            // R-SVC-18 补充：ReadIndex 之后的一致性 / 身份复核（防陈旧读）
-            let m = raft.metrics().borrow_watched().clone();
+/// **F-70**：线性一致读屏障（ReadIndex + 陈旧读 / 幻影态终检），供多条路径复用：
+/// 读路径（`CoordNode::ensure_linearizable_on`）、**租约重建器**（新 Leader 装载
+/// `/_lease/` 前必须先追平提交位，否则会漏读「已提交但尚未 apply」的租约 ⇒ 其绑定
+/// Key 在新主上既续不了约、也永远不会被过期清理）与 keepalive 补水路径。
+///
+/// 语义与水位观测日志详见 `CoordNode::ensure_linearizable_on` 的文档（region 0 的
+/// 日志格式与历史完全一致，soak 取证日志不变量不变）。
+pub async fn ensure_linearizable_barrier(
+    node_id: u64,
+    read_timeout: std::time::Duration,
+    raft: Option<&CoordRaft>,
+    raft_log_store: Option<&LogStore>,
+    region_id: RegionId,
+) -> Result<(), tonic::Status> {
+    if let Some(raft) = raft {
+        let timeout = read_timeout;
+        let read_log_id =
+            tokio::time::timeout(timeout, raft.ensure_linearizable(ReadPolicy::ReadIndex))
+                .await
+                .map_err(|_| tonic::Status::deadline_exceeded("linearizable read timed out"))?
+                .map_err(|e| tonic::Status::internal(format!("linearizable read failed: {e}")))?;
 
-            // 水位观测（迭代 #2 陈旧读定位）：成功放行与每个拒绝分支都输出 raft 水位，
-            // 用于对照返回给客户端的实际值，判定 openraft 屏障声称的 applied/committed
-            // 是否与状态机真实数据一致（区分「屏障/水位超前」与「读值滞后」两类缺陷）。
-            let raft_wm = || {
-                format!(
-                    "raft_wm{} node={} state={:?} leader={:?} term={} last_log_index={:?} \
+        // R-SVC-18 补充：ReadIndex 之后的一致性 / 身份复核（防陈旧读）
+        let m = raft.metrics().borrow_watched().clone();
+
+        // 水位观测（迭代 #2 陈旧读定位）：成功放行与每个拒绝分支都输出 raft 水位，
+        // 用于对照返回给客户端的实际值，判定 openraft 屏障声称的 applied/committed
+        // 是否与状态机真实数据一致（区分「屏障/水位超前」与「读值滞后」两类缺陷）。
+        let raft_wm = || {
+            format!(
+                "raft_wm{} node={} state={:?} leader={:?} term={} last_log_index={:?} \
                      local_committed={:?} cluster_committed={:?} last_applied={:?} read_log_id={}",
-                    if region_id != 0 {
-                        format!(" region={region_id}")
-                    } else {
-                        String::new()
-                    },
-                    self.node_id,
-                    m.state,
-                    m.current_leader,
-                    m.current_term,
-                    m.last_log_index,
-                    m.local_committed,
-                    m.cluster_committed,
-                    m.last_applied,
-                    read_log_id,
-                )
-            };
+                if region_id != 0 {
+                    format!(" region={region_id}")
+                } else {
+                    String::new()
+                },
+                node_id,
+                m.state,
+                m.current_leader,
+                m.current_term,
+                m.last_log_index,
+                m.local_committed,
+                m.cluster_committed,
+                m.last_applied,
+                read_log_id,
+            )
+        };
 
-            if !matches!(m.state, openraft::ServerState::Leader) {
-                tracing::info!("{} read_refused=not_leader", raft_wm());
-                return Err(tonic::Status::unavailable(
-                    "not leader: refusing linearizable read (leadership lost during ReadIndex)",
-                ));
-            }
-            if let (Some(applied), Some(committed)) =
-                (m.last_applied.as_ref(), m.local_committed.as_ref())
-            {
-                if applied.index > committed.index {
-                    tracing::info!(
-                        "{} read_refused=applied_ahead_of_committed applied_index={} \
+        if !matches!(m.state, openraft::ServerState::Leader) {
+            tracing::info!("{} read_refused=not_leader", raft_wm());
+            return Err(tonic::Status::unavailable(
+                "not leader: refusing linearizable read (leadership lost during ReadIndex)",
+            ));
+        }
+        if let (Some(applied), Some(committed)) =
+            (m.last_applied.as_ref(), m.local_committed.as_ref())
+        {
+            if applied.index > committed.index {
+                tracing::info!(
+                    "{} read_refused=applied_ahead_of_committed applied_index={} \
                          committed_index={}",
-                        raft_wm(),
-                        applied.index,
-                        committed.index
-                    );
-                    return Err(tonic::Status::unavailable(format!(
-                        "read consistency check failed: last_applied index {} exceeds \
+                    raft_wm(),
+                    applied.index,
+                    committed.index
+                );
+                return Err(tonic::Status::unavailable(format!(
+                    "read consistency check failed: last_applied index {} exceeds \
                          local_committed index {} (state machine ahead of commit frontier); \
                          refusing to serve stale data",
-                        applied.index, committed.index
-                    )));
-                }
+                    applied.index, committed.index
+                )));
             }
+        }
 
-            // 幻影态终检：last_applied 必须与本地日志同 index 的实际条目一致。
-            // 若该 index 已被 purge（快照覆盖），则视为合法（状态机来自快照）。
-            if let (Some(applied), Some(log_store)) = (m.last_applied.as_ref(), raft_log_store) {
-                let covered_by_snapshot = log_store
-                    .last_purged()
-                    .ok()
-                    .flatten()
-                    .is_some_and(|purged| applied.index <= purged.index);
-                if !covered_by_snapshot {
-                    match log_store.get_entry_at(applied.index) {
-                        Ok(Some(entry)) => {
-                            if entry.log_id != *applied {
-                                tracing::info!(
-                                    "{} read_refused=phantom_state applied={:?} log_entry={:?}",
-                                    raft_wm(),
-                                    applied,
-                                    entry.log_id
-                                );
-                                return Err(tonic::Status::unavailable(format!(
-                                    "read consistency check failed: state machine applied {:?} \
-                                     but local log at index {} is {:?} (stale/phantom state); \
-                                     refusing to serve stale data",
-                                    applied, applied.index, entry.log_id
-                                )));
-                            }
-                        }
-                        Ok(None) => {
+        // 幻影态终检：last_applied 必须与本地日志同 index 的实际条目一致。
+        // 若该 index 已被 purge（快照覆盖），则视为合法（状态机来自快照）。
+        if let (Some(applied), Some(log_store)) = (m.last_applied.as_ref(), raft_log_store) {
+            let covered_by_snapshot = log_store
+                .last_purged()
+                .ok()
+                .flatten()
+                .is_some_and(|purged| applied.index <= purged.index);
+            if !covered_by_snapshot {
+                match log_store.get_entry_at(applied.index) {
+                    Ok(Some(entry)) => {
+                        if entry.log_id != *applied {
                             tracing::info!(
-                                "{} read_refused=no_local_log applied_index={}",
+                                "{} read_refused=phantom_state applied={:?} log_entry={:?}",
                                 raft_wm(),
-                                applied.index
+                                applied,
+                                entry.log_id
                             );
                             return Err(tonic::Status::unavailable(format!(
-                                "read consistency check failed: no local log entry at applied \
-                                 index {} (stale/phantom state); refusing to serve stale data",
-                                applied.index
-                            )));
-                        }
-                        Err(e) => {
-                            tracing::info!(
-                                "{} read_refused=log_read_error applied_index={}",
-                                raft_wm(),
-                                applied.index
-                            );
-                            return Err(tonic::Status::internal(format!(
-                                "read consistency check failed: log read error at index {}: {e}",
-                                applied.index
+                                "read consistency check failed: state machine applied {:?} \
+                                     but local log at index {} is {:?} (stale/phantom state); \
+                                     refusing to serve stale data",
+                                applied, applied.index, entry.log_id
                             )));
                         }
                     }
+                    Ok(None) => {
+                        tracing::info!(
+                            "{} read_refused=no_local_log applied_index={}",
+                            raft_wm(),
+                            applied.index
+                        );
+                        return Err(tonic::Status::unavailable(format!(
+                            "read consistency check failed: no local log entry at applied \
+                                 index {} (stale/phantom state); refusing to serve stale data",
+                            applied.index
+                        )));
+                    }
+                    Err(e) => {
+                        tracing::info!(
+                            "{} read_refused=log_read_error applied_index={}",
+                            raft_wm(),
+                            applied.index
+                        );
+                        return Err(tonic::Status::internal(format!(
+                            "read consistency check failed: log read error at index {}: {e}",
+                            applied.index
+                        )));
+                    }
                 }
             }
-            tracing::info!("{} read_served", raft_wm());
         }
-        Ok(())
+        tracing::info!("{} read_served", raft_wm());
+    }
+    Ok(())
+}
+
+/// **F-70**：keepalive 的租约存在性判定 —— 本地 TTL 缓存缺失时以状态机为权威补水。
+///
+/// 步骤：
+/// 1. 线性一致屏障（本地状态机追平提交位）。屏障失败**不得**退化为 NOT_FOUND：
+///    那会把「暂时读不到」说成「租约不存在」；
+/// 2. 读 `/_lease/{id}`：
+///    - 存在且未过期 ⇒ `LeaseManager::rehydrate` 恢复本地跟踪，返回其 ttl；
+///    - 存在但已过期 ⇒ 记录以「立即到期」入本地，过期 worker 下一 tick 经 raft
+///      Revoke 删除绑定 Key（泄漏自愈），对客户端回 NOT_FOUND（= 已不存在）；
+///    - 不存在 ⇒ NOT_FOUND（真正已失效）。
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_keepalive_ttl(
+    node_id: u64,
+    read_timeout: std::time::Duration,
+    raft: Option<&CoordRaft>,
+    raft_log_store: Option<&LogStore>,
+    storage: &MvccStorage<RedbBackend>,
+    lease_mgr: &LeaseManager,
+    lease_id: LeaseID,
+) -> Result<i64, tonic::Status> {
+    ensure_linearizable_barrier(node_id, read_timeout, raft, raft_log_store, 0).await?;
+
+    match storage.get_lease_record(lease_id) {
+        Ok(Some(record)) => {
+            let now = crate::lease::wall_clock_now_ms();
+            match lease_mgr
+                .rehydrate(lease_id, record.ttl, record.deadline_wall_ms, now)
+                .await
+            {
+                Ok(true) => Ok(record.ttl.max(1)),
+                Ok(false) => Err(tonic::Status::not_found(format!(
+                    "keep-alive failed: lease {lease_id} expired"
+                ))),
+                Err(e) => {
+                    // 时间轮不可用：这是系统性故障，如实上报（UNAVAILABLE）而不是
+                    // 伪装成「租约不存在」——否则客户端会误以为可重新 Grant。
+                    tracing::error!(lease_id, error = %e, "lease rehydrate failed");
+                    Err(tonic::Status::unavailable(
+                        "lease tracking unavailable: cannot verify lease liveness",
+                    ))
+                }
+            }
+        }
+        Ok(None) => Err(tonic::Status::not_found(format!(
+            "keep-alive failed: lease {lease_id} not found"
+        ))),
+        Err(e) => {
+            tracing::error!(lease_id, error = %e, "lease record read failed");
+            Err(tonic::Status::internal("lease record read failed"))
+        }
     }
 }
 
@@ -2354,10 +2486,13 @@ impl Lease for CoordNode {
             .ok_or_else(|| tonic::Status::unavailable("lease manager not available"))?;
         let lease_mgr = Arc::clone(lease_mgr);
         let raft = self.raft.clone();
+        let raft_log_store = self.raft_log_store.clone();
         let storage = Arc::clone(&self.storage);
         let node_id = self.node_id;
         // C2：keep_alive 的 raft 提交必须带上超时（与 submit_lease_op 同口径）。
         let lease_timeout = self.limits.read().lease_timeout;
+        // F-70②：本地视图缺失时的补水路径需要读屏障超时
+        let read_timeout = self.limits.read().read_timeout;
 
         let mut stream = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<LeaseKeepAliveResponse, tonic::Status>>(16);
@@ -2379,17 +2514,30 @@ impl Lease for CoordNode {
                     break;
                 }
 
-                // TTL 以本地缓存为准；deadline 由 leader 计算后随命令入日志（确定性）
+                // 本地缓存命中即为权威 TTL；未命中时**不轻易回 NOT_FOUND**：
+                // F-70 —— 本地视图缺失 ≠ 租约不存在（failover 重建窗口 / 快照滞后 /
+                // 刚上任的新 leader）。此时以状态机为权威补水（屏障 + 读 /_lease/{id}）。
                 let ttl = match lease_mgr.get_lease(req.id) {
                     Some(lease) => lease.ttl_seconds,
-                    None => {
-                        let status = tonic::Status::not_found(format!(
-                            "keep-alive failed: lease {} not found",
-                            req.id
-                        ));
-                        let _ = tx.send(Err(status)).await;
-                        break;
-                    }
+                    None => match resolve_keepalive_ttl(
+                        node_id,
+                        read_timeout,
+                        raft.as_deref(),
+                        raft_log_store.as_ref(),
+                        &storage,
+                        &lease_mgr,
+                        req.id,
+                    )
+                    .await
+                    {
+                        Ok(ttl) => ttl,
+                        Err(status) => {
+                            // 屏障失败 / 存储读失败 / 时间轮不可用：如实上报（可为重试类），
+                            // **不得**伪装成 NOT_FOUND（-—那会把系统性故障说成「租约不存在」）
+                            let _ = tx.send(Err(status)).await;
+                            break;
+                        }
+                    },
                 };
 
                 let deadline_wall_ms = crate::lease::wall_clock_now_ms() + ttl * 1000;

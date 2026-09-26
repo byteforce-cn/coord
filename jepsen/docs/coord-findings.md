@@ -1981,7 +1981,7 @@ make test WORKLOAD=lock NEMESIS=none TIME_LIMIT=120 CONCURRENCY=2n AGENTS=2 \
   复现 `leader went fatal`**；修复版 ~10s 通过、连跑 3 次稳定。
 * **状态：closed（待 CI 覆盖三节点判据后转为常驻回归）**。
 
-### F-70 [P1 候选，open] leader 切换窗口：keepalive 立即 `NOT_FOUND` 且绑定 Key 从未被删
+### F-70 [P1 候选，fixed（待 2h soak 复验）] leader 切换窗口：keepalive 立即 `NOT_FOUND` 且绑定 Key 从未被删
 
 * **证据（同 run）**：
   - `ka/7636`：17:13:19.019 grant `{:id 1, :ttl 2}` → Put 成功（after-write 读可见）→
@@ -2007,6 +2007,34 @@ make test WORKLOAD=lock NEMESIS=none TIME_LIMIT=120 CONCURRENCY=2n AGENTS=2 \
   3. KeepAlive 的 `NOT_FOUND` 只看 **本节点 LeaseManager 内存**
      （`server/mod.rs:2381-2390`），不看状态机记录 ⇒ 重建后的短窗口内出现
      「grant/put 均成功但 keepalive 立即 not found」的对外不自洽。
+* **根因与修复（第十一轮，2026-09-26）**：
+  - **根因（唯一且已闭环）**：`LeaseManager::rebuild` 旧实现「**先清空再装载**」。
+    竞态序列：`lease_grant` 先在 `grant_with_id_checked` 插入本地记录、后入 raft
+    日志；reconciler（每 500ms）读状态机快照（`list_lease_records`）若发生在该
+    Grant 的 apply 之前 ⇒ 快照不含该租约 ⇒ `leases.clear()` 把本地记录（= 唯一
+    的 TTL 调度依据）抹掉 ⇒ ①KeepAlive 查本地——`lease_mgr.get_lease` 命中 None
+    ⇒ 立即 `NOT_FOUND`（grant/put 刚成功，对外不自洽）；②过期 worker 靠本地记录
+    驱动（`check_expired`）⇒ 该租约**永不 revoke** ⇒ 绑定 Key 直到下一次 failover
+    前**永不删除**。三个"可疑面"里 ②（分配器无全局屏障）在 C1 的 ReadIndex 屏障后
+    只剩效率问题（逐 probe 查状态机），③（KeepAlive 只看本地）是本根因的放大器。
+  - **修复（三处）**：①`rebuild` 改**只增不删的合并语义**（状态机 = 存在性权威，
+    本地视图 = TTL 调度缓存；快照缺的本地记录一律保留；两视图都有取**更晚**
+    deadline；分配器覆盖两视图最大 ID）；②reconciler 装载前加**线性一致屏障**
+    （`ensure_linearizable_barrier`，追平提交位后再读，杜绝「已提交未 apply」漏读），
+    失败下个 tick 重试（不再把「没装上」当「装好了」）；③KeepAlive 本地缺失时
+    **以状态机为权威补水**（`resolve_keepalive_ttl`：屏障 + 读 `/_lease/{id}` +
+    `LeaseManager::rehydrate`）——未过期 ⇒ 恢复跟踪并正常续期；已过期 ⇒ 记录以
+    「立即到期」入本地（过期 worker 下一 tick Revoke ⇒ **泄漏自愈**）并回 NOT_FOUND；
+    屏障/存储失败回可重试状态，**不得**伪装成 NOT_FOUND。
+  - **判据（进程内，已绿）**：
+    ①`cargo test -p coord-server --lib lease::` —— 三条 F-70 单测（在飞 Grant 不被抹
+    + 到期仍上报；合并取更晚 deadline；rehydrate 自愈）；
+    ②`cargo test -p coord-server --test lease_raft_test` —— 两条节点级判据
+    （`test_f70_rebuild_race_keeps_inflight_grant_and_expiry_cascades`、
+    `test_f70_keepalive_rehydrates_from_state_machine_and_heals_leaks`）。
+    负控制：还原 `rebuild` 至「先清空再装载」⇒ 单测①与节点判据①红；去掉补水路径
+    ⇒ 节点判据②红。
+  - **状态：代码闭环（待 CI + 同参数 2h soak 复跑确认）**。
 * **复现要点（下一轮第一优先）**：进程内 3 节点（沿用 F-69 判据的骨架）：
   1. 先建 K 个活跃租约（含 keepalive 流与 ttl=30 的 revoke 场景）；
   2. kill 当前 leader，等新 leader 上任；
@@ -2020,7 +2048,7 @@ make test WORKLOAD=lock NEMESIS=none TIME_LIMIT=120 CONCURRENCY=2n AGENTS=2 \
 * **影响面**：lease 级联删除契约在 failover 窗口失守（Key 泄漏直到该租约记录被
   其他路径清理）；W3-1 的「failover 下 lease 活性」判据红。**RC 冻结前必须闭环**。
 
-### F-71 [P2，open] leaseck 观测缺口：认证失败读计入 `:failed` 但不计入「未判」
+### F-71 [P2，closed（checker fixture 实证）] leaseck 观测缺口：认证失败读计入 `:failed` 但不计入「未判」
 
 * **证据**：`ttl/15232`（17:45:36）与 `ka/15242`（17:45:38）两条 `:lease-not-expired`
   的 `:observations` 均为 `{:absent? false, :reads 39, :failed 26/27}`——**读失败占多数**；
@@ -2036,6 +2064,22 @@ make test WORKLOAD=lock NEMESIS=none TIME_LIMIT=120 CONCURRENCY=2n AGENTS=2 \
      （与 `invoke-lease-*` 的重认证等价）；记录 `:last-ok-at-ms` / `:last-ok-present?`
      供判定；「全部读失败」应计入 `:liveness-unjudged` 而不是违反（对标 F-26 的口径）。
   2. 客户端侧：CCT 接近到期（如剩 5 min）时**主动**重认证，消除集中过期波。
+* **修复（第十一轮，2026-09-26）**：
+  - 客户端（`client.clj`）：新增 `lease-read-with-reauth` —— 轮询中的
+    `:unauthenticated` 读失败先刷新会话再重试一次；`lease-wait-gone` 改为记录
+    `:ok-reads` / `:reauths` / `:last-ok-present?` / `:last-ok-at-ms`。
+  - checker（`leaseck.clj`）：新增 `poll-unjudged?` —— `:ok-reads = 0`（轮询期间
+    **从未读成功**）时，判据 3/3'/4 **不判**，计入 summary 的
+    `:liveness-unjudged`（不判 ≠ 通过）；读成功过则照旧判定（防逃逸负控制：
+    `expect-invalid-present-at-deadline-with-ok-reads.edn`）。旧格式观测（无
+    `:ok-reads` 字段）按旧口径判，历史 fixture 语义不变。
+  - 判据（已跑）：`jepsen.coord.leaseck` × `scripts/lease-fixtures` **12/12**、
+    `lease-fixtures-sample` **2/2**（新增：`expect-valid-absence-observed-by-reauth`、
+    `expect-valid-unjudged-all-poll-reads-failed`（旧 checker 下必红，
+    `:liveness-unjudged 1` 为该规则的实证）、
+    `expect-invalid-present-at-deadline-with-ok-reads`）。
+  - **状态：closed（fixture 实证）；修法方向 2（客户端提前主动重认证）未实施 ——
+    如需进一步消除集中过期波，可单独立项。**
 * **判据落点**：`scripts/lease-fixtures`（若无则新建）：
   `expect-valid-absence-observed-by-reauth`（历史含一次 UNAUTHENTICATED 中断，Key 实际
   已删 ⇒ 必须判绿）；配对负控制：Key 确实未删 ⇒ 必须判红。

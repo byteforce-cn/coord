@@ -443,39 +443,79 @@ impl LeaseManager {
             .count()
     }
 
-    /// 从持久化 Lease 记录重建内存视图（B.4.4 failover）
+    /// 从持久化 Lease 记录重建内存 TTL 视图（B.4.4 failover；**F-70 合并语义**）
     ///
-    /// 新 Leader 接管时调用：清空旧视图与定时器，按状态机 `/_lease/` 记录重建。
-    /// - `deadline_wall_ms` 未到 → 以剩余时长插入时间轮（"at-least TTL" 语义，
-    ///   failover 期间按墙钟重估，即 B.4.5 的重估）；
-    /// - 已过期 → 立即到期，由 leader 过期 worker 经 raft propose Revoke 清理。
-    ///   同时推进全局 LeaseID 分配器，避免重启后自动分配与存量 ID 冲突。
+    /// 状态机是租约**存在性**的权威；本地视图只是 **TTL 调度缓存**。
+    /// 因此本函数**只增不删**。旧实现"先清空再装载"有一个致命竞态：
+    /// reconciler 读状态机快照时，本次 Grant 可能尚未 apply（快照缺该租约），
+    /// 而 `grant_with_id_checked` 已把记录插进本地管理器 ⇒ 清空把它抹掉 ⇒
+    /// KeepAlive 本地查不到（NOT_FOUND）、过期任务不再调度 ⇒ 绑定 Key 直到下一次
+    /// failover 前**永不删除**。2026-09-25 的 2h soak 实测到该形态：
+    /// `ka/7636` grant+put 均成功、首次 keepalive 即 `lease 1 not found`，
+    /// 随后 41 次读观测 Key 始终在（`jepsen/docs/coord-findings.md` F-70）。
+    ///
+    /// 合并规则：
+    /// - 快照有、本地无 → 插入（未过期按剩余墙钟时长；已过期立即到期，交过期
+    ///   worker 经 raft propose Revoke 清理）；
+    /// - 快照有、本地也有 → 取两者**更晚**的截止时刻（中途可能被其他 Leader
+    ///   续过期；取早 = 提前删除绑定 Key = 安全违约，取晚 = 契约允许的"略晚"）；
+    /// - 本地有、快照无（快照读取之后才提交/apply 的 Grant）→ **保留**；
+    /// - 不删除任何本地记录：被其他 Leader 吊销后留下的本地残留会在本地下一次
+    ///   apply/过期时收敛（Revoke 幂等），代价至多是一条空转记录。
+    ///
+    /// 同时推进全局 LeaseID 分配器（覆盖快照与本地两者的最大 ID），避免重启/
+    /// 换主后自动分配与存量 ID 冲突。
     pub async fn rebuild(
         &self,
         records: Vec<(LeaseID, crate::storage::mvcc::LeaseRecord)>,
     ) -> usize {
-        // 清空旧视图并取消旧定时器
-        let stale_timers: Vec<u64> = {
-            let mut leases = self.leases.write();
-            let ids = leases.values().map(|r| r.timer_id).collect();
-            leases.clear();
-            ids
-        };
-        for timer_id in stale_timers {
-            let _ = self.timer.cancel(timer_id).await;
-        }
-
         let now_wall_ms = wall_clock_now_ms();
-        let mut rebuilt = 0usize;
         let mut max_id = 0i64;
 
         for (id, record) in records {
             max_id = max_id.max(id);
             let remaining_ms = record.deadline_wall_ms.saturating_sub(now_wall_ms);
+            let snapshot_timeout = Duration::from_millis(remaining_ms.max(1) as u64);
+
+            // 本地已有该租约：只做"取更晚截止"，绝不降级/删除（F-70）
+            let existing = self
+                .leases
+                .read()
+                .get(&id)
+                .map(|r| (r.timer_id, r.expired_pending_revoke, r.lease.deadline));
+            if let Some((timer_id, pending, local_deadline)) = existing {
+                if pending {
+                    // 已判定过期、revoke 待提交：不得复活（F-27 fail-closed），
+                    // 保持原样由过期 worker 继续重试
+                    continue;
+                }
+                let snapshot_deadline = tokio::time::Instant::now() + snapshot_timeout;
+                if snapshot_deadline > local_deadline {
+                    if !self.timer.reschedule(timer_id, snapshot_timeout).await {
+                        tracing::warn!(
+                            lease_id = id,
+                            "timer wheel reschedule failed during lease rebuild \
+                             (deadline is still enforced by the periodic expiry check)"
+                        );
+                    }
+                    let mut leases = self.leases.write();
+                    if let Some(rec) = leases.get_mut(&id) {
+                        if !rec.expired_pending_revoke && snapshot_deadline > rec.lease.deadline {
+                            rec.lease.deadline = snapshot_deadline;
+                            if record.ttl > 0 {
+                                rec.lease.ttl_seconds = record.ttl;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // 快照新增：按剩余时长插入（已过期者立即到期，交过期 worker 清理）
             let (deadline, timeout) = if remaining_ms > 0 {
                 (
-                    tokio::time::Instant::now() + Duration::from_millis(remaining_ms as u64),
-                    Duration::from_millis(remaining_ms as u64),
+                    tokio::time::Instant::now() + snapshot_timeout,
+                    snapshot_timeout,
                 )
             } else {
                 // 已过期：立即到期，由过期 worker 经 raft 清理（不得直写本地存储）
@@ -492,29 +532,127 @@ impl LeaseManager {
                 );
                 continue;
             };
-            self.leases.write().insert(
-                id,
-                LeaseRecord {
-                    lease: Lease {
-                        id,
-                        ttl_seconds: record.ttl,
-                        deadline,
-                        attached_keys: Vec::new(),
-                    },
-                    timer_id,
-                    // F-27：rebuild 后由 check_expired() 重新判定（deadline 已过期者
-                    // 立即过期）⇒ revoke 未提交前记录保留、可重试。
-                    expired_pending_revoke: false,
-                },
-            );
-            rebuilt += 1;
+            // 与 grant 同款 TOCTOU 收口：检查与插入在同一写锁临界区，且无 await。
+            let inserted = {
+                let mut leases = self.leases.write();
+                match leases.entry(id) {
+                    std::collections::hash_map::Entry::Occupied(_) => false,
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(LeaseRecord {
+                            lease: Lease {
+                                id,
+                                ttl_seconds: record.ttl,
+                                deadline,
+                                attached_keys: Vec::new(),
+                            },
+                            timer_id,
+                            // F-27：rebuild 只把 deadline 搬进来；是否过期统一由
+                            // check_expired() 判定（revoke 未提交前记录保留、可重试）。
+                            expired_pending_revoke: false,
+                        });
+                        true
+                    }
+                }
+            };
+            if !inserted {
+                // 并发路径已经建立了该记录：归还刚插入的定时器
+                let _ = self.timer.cancel(timer_id).await;
+                continue;
+            }
+            // R-OBS-10：与 grant 对称计数（跃迁到 expired 时由 check_expired 递减一次）
+            if let Some(metrics) = &self.metrics {
+                metrics.inc_lease_active();
+            }
         }
 
-        // 推进分配器，防止重启后自动分配与存量 ID 冲突
+        // 本地残留记录可能带着更大的 ID（快照读取之后接受的 Grant）⇒ 一并纳入上界
+        {
+            let leases = self.leases.read();
+            for id in leases.keys() {
+                max_id = max_id.max(*id);
+            }
+        }
         if max_id > 0 {
             NEXT_LEASE_ID.fetch_max(max_id + 1, Ordering::SeqCst);
         }
-        rebuilt
+
+        self.leases.read().len()
+    }
+
+    /// **F-70**：从状态机记录为本地 TTL 视图「补水」。
+    ///
+    /// 用于「本地视图缺失、但状态机权威记录仍在」的窗口（failover 重建尚未轮到、
+    /// 快照读取滞后、KeepAlive 落到刚上任的新 leader）。语义：
+    /// - 记录**未过期** ⇒ 按剩余墙钟时长插入时间轮并返回 `Ok(true)`；
+    /// - 记录**已过期** ⇒ 以"立即到期"插入（过期 worker 下一 tick 经 raft
+    ///   propose Revoke ⇒ 绑定 Key 级联删除 —— 这也是"泄漏租约"的自愈路径），
+    ///   返回 `Ok(false)`（对外语义 = 已不存在）；
+    /// - 本地已有记录（并发路径已建立）⇒ 按其当前状态回答，不重复插入。
+    ///
+    /// 失败（时间轮不可用）返回 `Err`：调用方**不得**把"无法跟踪"当作"租约不存在"
+    /// 回给客户端 —— 那会把系统性故障伪装成 NOT_FOUND。
+    pub async fn rehydrate(
+        &self,
+        lease_id: LeaseID,
+        ttl_seconds: i64,
+        deadline_wall_ms: i64,
+        now_wall_ms: i64,
+    ) -> Result<bool> {
+        // 已有记录：按其自身状态回答（不重置计时）
+        if let Some(record) = self.leases.read().get(&lease_id) {
+            return Ok(!record.expired_pending_revoke && !record.lease.is_expired());
+        }
+
+        let remaining_ms = deadline_wall_ms.saturating_sub(now_wall_ms);
+        let (deadline, timeout) = if remaining_ms > 0 {
+            (
+                tokio::time::Instant::now() + Duration::from_millis(remaining_ms as u64),
+                Duration::from_millis(remaining_ms as u64),
+            )
+        } else {
+            (tokio::time::Instant::now(), Duration::from_millis(1))
+        };
+
+        let Some(timer_id) = self.timer.insert(timeout).await else {
+            return Err(Error::Internal(
+                "timer wheel unavailable: refusing to track a rehydrated lease that could \
+                 never expire"
+                    .to_string(),
+            ));
+        };
+
+        let inserted = {
+            let mut leases = self.leases.write();
+            match leases.entry(lease_id) {
+                std::collections::hash_map::Entry::Occupied(_) => false,
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(LeaseRecord {
+                        lease: Lease {
+                            id: lease_id,
+                            ttl_seconds: ttl_seconds.max(1),
+                            deadline,
+                            attached_keys: Vec::new(),
+                        },
+                        timer_id,
+                        expired_pending_revoke: false,
+                    });
+                    true
+                }
+            }
+        };
+        if !inserted {
+            let _ = self.timer.cancel(timer_id).await;
+        } else if let Some(metrics) = &self.metrics {
+            // 与 grant 对称计数；若该记录已过期，check_expired 的跃迁会递减一次
+            metrics.inc_lease_active();
+        }
+
+        Ok(self
+            .leases
+            .read()
+            .get(&lease_id)
+            .map(|r| !r.expired_pending_revoke && !r.lease.is_expired())
+            .unwrap_or(false))
     }
 }
 
@@ -890,22 +1028,135 @@ mod tests {
         });
     }
 
+    /// **F-70 回归**：rebuild 不得抹掉「快照里没有、但本地已接受」的租约。
+    ///
+    /// 竞态形态（2026-09-25 2h soak 实测）：`grant_with_id_checked` 先插本地记录、
+    /// 后入 raft 日志；reconciler 读状态机快照若发生在 apply 之前，快照就没有该租约。
+    /// 旧实现「先清空再装载」会把它从本地抹掉 ⇒ KeepAlive 本地 NOT_FOUND、
+    /// 过期任务丢失 ⇒ 绑定 Key 直到下一次 failover 前**永不删除**（`ka/7636`）。
     #[test]
-    fn test_rebuild_replaces_previous_view() {
+    fn test_f70_rebuild_keeps_inflight_grant_and_keeps_expiry() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let handle = TimerWheel::start();
             let manager = LeaseManager::new(handle);
 
-            let old_id = manager.grant(60).await.unwrap();
-            assert_eq!(manager.active_lease_count(), 1);
+            // 本地已接受（模拟 grant 的本地插入）—— raft apply 尚未发生
+            let inflight = manager
+                .grant_with_id_checked(1, 7, |_| false)
+                .await
+                .unwrap();
+
+            // reconciler 读到的快照为空（本次 Grant 尚未 apply）
+            let tracked = manager.rebuild(vec![]).await;
+            assert_eq!(tracked, 1, "the in-flight grant must still be tracked");
+            assert!(
+                manager.get_lease(inflight).is_some(),
+                "F-70: rebuild must not wipe a locally accepted (in-flight) lease"
+            );
+
+            // 到期仍必须被上报 —— 否则过期 revoke 不会下发、绑定 Key 永不删除
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            let actions = manager.check_expired();
+            assert_eq!(
+                actions.len(),
+                1,
+                "the in-flight lease must still expire after the racy rebuild"
+            );
+            match &actions[0] {
+                LeaseAction::Expired { lease_id, .. } => assert_eq!(*lease_id, inflight),
+            }
+        });
+    }
+
+    /// **F-70 合并语义**：快照与本地都有 ⇒ 取**更晚**截止时刻（中途被其他 Leader
+    /// 续过期不得被旧记录提前收走 —— 提前删除绑定 Key 是安全违约）；
+    /// 快照里没有的本地记录保留；快照里的新记录装载。
+    #[test]
+    fn test_f70_rebuild_merges_deadlines_and_keeps_local_only_records() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let handle = TimerWheel::start();
+            let manager = LeaseManager::new(handle);
+
+            // 本地：ttl 60（deadline ≈ now+60s）；快照：同一租约已被续到 now+120s
+            let _ = manager
+                .grant_with_id_checked(60, 100, |_| false)
+                .await
+                .unwrap();
+            let now = wall_clock_now_ms();
+            let records = vec![
+                (100, persisted_record(60, now + 120_000)),
+                // 快照独有（本地没有）⇒ 装载
+                (101, persisted_record(30, now + 30_000)),
+            ];
+            let tracked = manager.rebuild(records).await;
+            assert_eq!(tracked, 2, "local-only + snapshot records must merge");
+
+            let merged = manager.get_lease(100).expect("merged record must stay");
+            assert!(
+                merged.remaining_ttl_secs() > 100.0,
+                "the later (snapshot) deadline must win; got {}s",
+                merged.remaining_ttl_secs()
+            );
+            assert!(
+                manager.get_lease(101).is_some(),
+                "snapshot-only record must be loaded"
+            );
+
+            // 反向：快照更早 ⇒ 不得把本地已续期的租约提前收走（安全侧）
+            let _ = manager
+                .grant_with_id_checked(60, 200, |_| false)
+                .await
+                .unwrap();
+            let now = wall_clock_now_ms();
+            manager
+                .rebuild(vec![(200, persisted_record(60, now + 1_000))])
+                .await;
+            let kept = manager.get_lease(200).expect("local record must stay");
+            assert!(
+                kept.remaining_ttl_secs() > 50.0,
+                "a shorter snapshot deadline must not shorten a locally tracked lease"
+            );
+        });
+    }
+
+    /// **F-70 自愈路径**：状态机记录存在而本地视图缺失时，`rehydrate` 必须恢复
+    /// 跟踪（未过期 ⇒ `true`）；已过期的记录以「立即到期」插入并返回 `false`，
+    /// 由过期 worker 经 raft Revoke 删除绑定 Key（泄漏租约的自愈）。
+    #[test]
+    fn test_f70_rehydrate_restores_tracking_and_heals_expired() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let handle = TimerWheel::start();
+            let manager = LeaseManager::new(handle);
 
             let now = wall_clock_now_ms();
-            let records = vec![(42, persisted_record(30, now + 30_000))];
-            manager.rebuild(records).await;
+            // 未过期：恢复跟踪并回答「存活」
+            assert!(manager
+                .rehydrate(9001, 30, now + 30_000, now)
+                .await
+                .unwrap());
+            assert!(manager.get_lease(9001).is_some());
             assert_eq!(manager.active_lease_count(), 1);
-            assert!(manager.get_lease(old_id).is_none());
-            assert!(manager.get_lease(42).is_some());
+            // 幂等：重复补水不改结论
+            assert!(manager
+                .rehydrate(9001, 30, now + 30_000, now)
+                .await
+                .unwrap());
+
+            // 已过期：回答「已不存在」，但记录立即到期 ⇒ 下一轮 check_expired 上报（自愈）
+            assert!(!manager.rehydrate(9002, 1, now - 1_000, now).await.unwrap());
+            let actions = manager.check_expired();
+            assert_eq!(actions.len(), 1);
+            match &actions[0] {
+                LeaseAction::Expired { lease_id, .. } => assert_eq!(*lease_id, 9002),
+            }
+            // 判定过期（revoke 待提交）后，对调用方即「不存在」
+            assert!(
+                manager.get_lease(9002).is_none(),
+                "a revoke-pending record is absent for callers"
+            );
         });
     }
 }

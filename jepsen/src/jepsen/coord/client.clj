@@ -1008,39 +1008,78 @@
 (defn- lease-sleep [ms]
   (try (Thread/sleep (long ms)) (catch InterruptedException _ nil)))
 
+(defn- lease-read-with-reauth
+  "F-71：点读；CCT 过期（`:unauthenticated`）时**刷新会话并重试一次**。
+
+  为什么必须在这里做：`invoke-coord!` 的重认证只在 op 级（整次 invoke 返回
+  `:fail :unauthenticated` 时）触发，而 lease 的轮询（`lease-wait-gone`）内部
+  可能有几十次读 —— CCT 在轮询中途过期时，失败读只会被计成 `:failed`，
+  「消失」的观测被整段吞掉，最后被判成活性违反（2026-09-25 2h soak 实测，
+  `jepsen/docs/coord-findings.md` F-71）。
+
+  返回点读结果；`:reauth?` 标注本次读是否发生过重认证（进观测供对账）。"
+  [this key]
+  (let [r (try (point-read this key) (catch Exception _ {:ok? false}))]
+    (if (and (not (:ok? r)) (= :unauthenticated (:error r)))
+      (let [refreshed? (try (reauthenticate! this) true (catch Exception _ false))]
+        (if refreshed?
+          (assoc (try (point-read this key) (catch Exception _ {:ok? false}))
+                 :reauth? true)
+          r))
+      r)))
+
 (defn- lease-try-read
   "点读一次并做成观测 map。
 
   `:read-ok? false`（读失败）与 `:present? false`（读成功但 key 不存在）
   **必须分开**：混在一起会把一次 transient 读失败当成「key 提前消失」，
   产出一条看起来像被测系统违约的假红。checker 只在 `:read-ok? true` 的观测上
-  判安全/活性。"
+  判安全/活性。
+
+  F-71：读失败若是 CCT 过期所致，`lease-read-with-reauth` 会先刷新会话再重试。"
   [this el phase key]
-  (let [r (try (point-read this key) (catch Exception _ {:ok? false}))]
-    {:phase    phase
-     :at-ms    (el)
-     :read-ok? (boolean (:ok? r))
-     :present? (boolean (and (:ok? r) (some? (:kv r))))}))
+  (let [r (lease-read-with-reauth this key)]
+    (cond-> {:phase    phase
+             :at-ms    (el)
+             :read-ok? (boolean (:ok? r))
+             :present? (boolean (and (:ok? r) (some? (:kv r))))}
+      (:reauth? r) (assoc :reauth? true))))
 
 (defn- lease-wait-gone
   "轮询到 key 不存在或超过 `deadline-ns`。
 
-  返回 `{:absent? bool :at-ms n :reads n :failed n}` —— `:failed` 是其中读失败的
-  次数（读失败不算「消失」）。"
+  返回 `{:absent? bool :at-ms n :reads n :failed n :ok-reads n :reauths n
+        :last-ok-present? bool|nil :last-ok-at-ms n|nil}` —— `:failed` 是其中读失败的
+  次数（读失败不算「消失」），`:ok-reads` 是读成功的次数。
+
+  F-71：失败读若是 CCT 过期所致，每轮自动刷新会话后重试
+  （`lease-read-with-reauth`）；`:ok-reads = 0`（**从未读成功**）时
+  「没观察到消失」不是活性违反而是「没判」，checker 依此计入
+  `:liveness-unjudged`（不判 ≠ 通过）。"
   [this el key deadline-ns]
-  (loop [reads 0 failed 0]
-    (let [r   (try (point-read this key) (catch Exception _ {:ok? false}))
-          now (System/nanoTime)]
+  (loop [reads 0 failed 0 ok-reads 0 reauths 0 last-ok-present? nil last-ok-at-ms nil]
+    (let [r        (lease-read-with-reauth this key)
+          now      (System/nanoTime)
+          reauths' (if (:reauth? r) (inc reauths) reauths)]
       (cond
         (and (:ok? r) (nil? (:kv r)))
-        {:absent? true :at-ms (el) :reads (inc reads) :failed failed}
+        {:absent? true :at-ms (el) :reads (inc reads) :failed failed
+         :ok-reads (inc ok-reads) :reauths reauths'
+         :last-ok-present? false :last-ok-at-ms (el)}
 
         (>= now (long deadline-ns))
-        {:absent? false :at-ms (el) :reads (inc reads) :failed failed}
+        {:absent? false :at-ms (el) :reads (inc reads) :failed failed
+         :ok-reads ok-reads :reauths reauths'
+         :last-ok-present? last-ok-present? :last-ok-at-ms last-ok-at-ms}
 
         :else
         (do (lease-sleep lease-poll-ms)
-            (recur (inc reads) (if (:ok? r) failed (inc failed))))))))
+            (recur (inc reads)
+                   (if (:ok? r) failed (inc failed))
+                   (if (:ok? r) (inc ok-reads) ok-reads)
+                   reauths'
+                   (if (:ok? r) (some? (:kv r)) last-ok-present?)
+                   (if (:ok? r) (el) last-ok-at-ms)))))))
 
 (defn- lease-open-keepalive!
   "从缓存 leader 开始轮询所有节点，取第一个能建流的（与 `watch-open!` 同构）。
