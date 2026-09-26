@@ -74,6 +74,14 @@ if [[ -f "$STORE/history.edn" ]]; then
     fi
 fi
 
+# 长跑曲线（soak-curves.sh 的产物；≥14 天 run 必带）：整目录归档、计入校验和。
+# 目录不存在时零副作用 —— 72h / 矩阵 run 的归档与以前完全一致。
+CURVES="no"
+if [[ -d "$STORE/curves" ]]; then
+    cp -R "$STORE/curves" "$OUT/curves"
+    CURVES="yes"
+fi
+
 # 门槛摘要（有 lein/clojure 时用 reader 取嵌套的 checker 结果，失败则退化为提示）
 TEST_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 run_summarizer() {
@@ -164,6 +172,7 @@ cat > "$OUT/MANIFEST.md" <<EOF
 | 命令行（jepsen.log 记录） | \`${run_cmd}\` |
 | 选项 | \`${run_args}\` |
 | history.edn | $( [[ "$HIST_GZ" == no ]] && echo "history.edn（未压缩）" || echo "history.edn.gz — ${HIST_GZ}" ) |
+| 长跑曲线 | $( [[ "$CURVES" == no ]] && echo "n/a（本次 run 未采集）" || echo "curves/（soak-curves.sh 采集；间隔见 curves/meta.txt）" ) |
 | §5.4 参数确认记录链接 | _(待填：issue/邮件存档链接)_ |
 
 ## 门槛结论
@@ -195,7 +204,8 @@ EOF
 ( cd "$OUT" && sha256sum MANIFEST.md summary.txt 2>/dev/null; \
   for f in run.log results.edn history.edn history.edn.gz history.txt; do
       [[ -f "$f" ]] && sha256sum "$f"
-  done ) > "$OUT/sha256sums.txt"
+  done; \
+  if [[ -d curves ]]; then find curves -type f -print0 | sort -z | xargs -0 -r sha256sum; fi ) > "$OUT/sha256sums.txt"
 
 echo "evidence archived -> $OUT"
 echo "  overall-valid: ${overall_ok:-unknown}  gates-valid: ${gates_ok:-unknown}"

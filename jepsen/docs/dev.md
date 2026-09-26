@@ -331,6 +331,7 @@ T3.3/T3.4/T3.5 彼此。
 | 类别 | 明细 | 时长 |
 |:--|:--|:--|
 | 计划内长跑 | M1 2h · M2 2h · M3 8h · M5 冒烟 2h · M5 24h · T6.0 12h · T6.1 72h | **122h** |
+| 生产门 P5 补充（非原始预算） | T6.4 ≥14 天连续运行（336h；生产计划 W3-7；预注册见生产计划 §11 第十六轮） | 336h |
 | 短矩阵/冒烟/fixture | 不计入主表，计入 §7.2 lab 占用日历 | — |
 | 重跑/补采预留 | 失败复现、争议段重跑、证据补采 | +30–80h |
 | **上限** | | **200h** |
@@ -531,6 +532,16 @@ quiet 1800±20% / disrupt 600±20%。
 > 启动：`make soakfull SOAK_TIME_LIMIT=7200`，或夜间门禁 `make nightly`
 > （`checkers → matrix-m1 → matrix-m2 → soakfull + soak-wait + soak-results`）。
 **T6.2 证据+文档（0.5d）** / **T6.3 缺陷账（0.5d）**——通过标准按 §5.2/§6。
+
+**T6.4 ≥14 天连续运行（1d + 14d 墙钟）**——生产门 P5 的第二半（生产计划 §5 W3-7）。
+**参数与判据预注册在生产计划书 §11 第十六轮：起跑前不得再改、跑后不得调。** 要点：
+`SOAK_TIME_LIMIT=1209600`、9 面 mix 与 T6.1 现行起跑参数一致、`SOAK_RATE=1`、
+`CONCURRENCY=2n`、`SEED=42`；四条曲线（内存/磁盘/重启/keep_alive）由
+`scripts/soak-curves.sh` 采集（300s 间隔；起跑后 ≤5 分钟内 start；
+`collect-evidence.sh` 自动收录 `curves/` 并计入校验和）。**档位（无故障稳定档
+`--nemesis none` / 同 T6.1 故障档）与起跑序列（72h 结束即跑 / 先清产品改动）属
+起跑前裁定项**——见该表。`SOAK_NEMESIS` 已从 `make`/`coord-soak.sh` 透传
+（默认 `soak`，既有行为不变）。
 
 ---
 
