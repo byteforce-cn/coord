@@ -89,6 +89,46 @@
   (+ (quot (long (or (:t0-ns op) (:invoke op) (:time op) 0)) 1000000)
      (long rel-ms)))
 
+(defn- rel->abs-offset-ms
+  "jepsen **相对时刻**（测试起点 = 0；`:time`/`:invoke` 除以 1e6 都是这一空间）→
+  `abs-ms` 的 **raw** 空间（`System/nanoTime`，ms-since-boot）的加法偏移。
+
+  为什么必须有这一步（2026-09-26 lock/kill-agent 实测，F-73）：`abs-ms` 用 op 自读的
+  `:t0-ns`（raw，实测 ~85_866_575ms = 容器 uptime），而 `faultwin` 的窗口
+  `:from-ms/:to-ms` 由 nemesis op 的 jepsen `:time` 换算（相对，实测 33_515ms）
+  —— 两个空间的零点相差「测试启动时刻的 nanoTime」（实测 ~85_840_341ms）。
+  `first-down` 拿 raw 的 start 去比相对空间的 `:from-ms` 恒为 nil ⇒ 故障窗归因
+  **永不成立**：H1（崩溃持有者必须被回收）判不到，H2（假丢锁）把「被 kill 的持有者
+  留下的锁按 ttl 正常过期」误判成红。这是 F-34 「两个时间轴混用」的第三次复发
+  （前两次：holding-interval 端点、`end-ms`）。
+
+  采样：取任一**同时**带 `:t0-ns` 与 `:invoke` 的 op —— 两者由同一 JVM 在 op 生命
+  周期的两端读取，差一次派发/队列抖动（实测 40–290ms），对秒级窗口判据无影响。
+  两端齐全的 op 一个都没有（手写 fixture / 旧历史：两空间本就同源）⇒ 返回 0。"
+  [ops]
+  (if-let [op (first (filter #(and (:t0-ns %) (:invoke %)) ops))]
+    (- (quot (long (:t0-ns op)) 1000000)
+       (quot (long (:invoke op)) 1000000))
+    0))
+
+(defn- abs-windows
+  "把 `faultwin/windows` 的窗口平移到 `abs-ms` 的 raw 空间（`+ offset`，见
+  `rel->abs-offset-ms`）。offset = 0（fixture / 旧历史）时原样返回。"
+  [wins offset]
+  (let [off (long offset)]
+    (if (zero? off)
+      wins
+      (update wins :by-host
+              (fn [by-host]
+                (into {}
+                      (map (fn [[h ws]]
+                             [h (mapv (fn [w]
+                                        (cond-> w
+                                          (:from-ms w) (update :from-ms + off)
+                                          (:to-ms w)   (update :to-ms + off)))
+                                      ws)]))
+                      by-host))))))
+
 (defn- held-interval
   "一个成功持有者的 `[start end)` 区间（**绝对**毫秒，同一时钟）：
 
@@ -302,9 +342,13 @@
   例外（**显式记未判**，不是漏洞）：归因不到 agent 的弃锁 op（`:acquire-node` 不在
   映射表里）永远记 `:no-agent-attribution` —— 接线/映射断了的时候不许算绿。
 
+  **时钟对齐（F-73）**：`start`/样本时刻走 `abs-ms`（raw `System/nanoTime` 空间），
+  所以 `faultwin` 的窗口必须先经 `abs-windows` 平移到同一空间再比较；否则
+  `first-down` 恒为 nil（详见 `rel->abs-offset-ms`）。
+
   返回：`{:violations [...] :judged n :unjudged [...]}`。"
   [ops agent-nodes end-ms]
-  (let [wins   (fw/windows ops)
+  (let [wins   (abs-windows (fw/windows ops) (rel->abs-offset-ms ops))
         byname (probes-by-name ops)]
     (reduce
       (fn [acc op]
@@ -319,14 +363,23 @@
               before (min (long (or down Long/MAX_VALUE)) (long end-ms))
               samples (get byname name)
               t-of   (fn [p] (abs-ms p (:server-at-ms p)))
+              ;; 读的**调用**时刻（raw 空间）。为什么证据窗要用它而不是完成时刻：
+              ;; 线性一致性只约束「响应先后」的顺序对 —— 与 acquire **并发**的读
+              ;; （甚至在写被调用之前就已开始）可以合法地看到旧状态。用完成时刻会
+              ;; 把这类合法观测判成「持有者活着时 key 消失」（F-74：lock/kill-agent
+              ;; 实测一条 +15ms 的 absent 探针，其调用早于 acquire 调用 2ms）。
+              t-inv  (fn [p] (quot (long (or (:t0-ns p) (:invoke p) (:time p) 0))
+                                   1000000))
               ;; H2：持有 agent 活着（还没遇到下一个 kill/pause/分区）时，服务端 key
               ;; 必须一直挂在这个 holder 名下 —— **任何 TTL 都判**（见 renew-cadence-ms
-              ;; 的说明：小 TTL 是第二个成因，不是豁免理由）。
-              held   (filterv (fn [p] (and (>= (t-of p) start) (< (t-of p) before)))
+              ;; 的说明：小 TTL 是第二个成因，不是豁免理由）。样本必须构成**顺序
+              ;; 证据**：调用在 acquire 完成之后、完成在下一个故障之前。
+              held   (filterv (fn [p] (let [s (t-inv p) c (t-of p)]
+                                        (and (>= s start) (< c before))))
                               samples)
               dead   (when down
-                       (filterv (fn [p] (> (t-of p) (+ (long down) ttl grace
-                                                       (long default-orphan-tolerance-ms))))
+                       (filterv (fn [p] (> (t-inv p) (+ (long down) ttl grace
+                                                        (long default-orphan-tolerance-ms))))
                                 samples))
               phantom (first (filter #(not= holder (get-in % [:server :holder-id]))
                                      held))
@@ -479,6 +532,10 @@
                                   ;; （诊断用；不是豁免）
                                   :phantom-loss-below-cadence h2-cadence
                                   :renew-cadence-ms renew-cadence-ms
+                                  ;; F-73：raw ↔ 相对空间的偏移（ms）。判据内部已
+                                  ;; 把窗口平移到 raw 空间；这里的
+                                  ;; `:fault-windows` 仍是**相对空间**（人读友好）。
+                                  :clock-offset-ms (rel->abs-offset-ms ops)
                                   :fault-windows (into {}
                                                        (map (fn [[h ws]]
                                                               [h (mapv #(select-keys % [:kind :from-ms :to-ms :closed?])
