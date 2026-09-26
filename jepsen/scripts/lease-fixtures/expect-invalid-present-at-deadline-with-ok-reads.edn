@@ -1,17 +1,19 @@
-;; expect-invalid-present-at-deadline-with-ok-reads —— F-71 的负控制（不可逃逸）：
-;; 轮询**读成功过**（`:ok-reads 12`）且最后仍见 Key ⇒ 必须判 `:lease-not-expired`。
+;; expect-invalid-present-at-deadline-with-ok-reads —— F-71/F-72 的负控制（不可逃逸）：
+;; 轮询**采样覆盖到了判定窗口末端**（`:last-ok-at-ms` 落在窗口末端附近）且始终见
+;; Key ⇒ 必须判 `:lease-not-expired`。
 ;;
-;; 守的是新加的「全读失败 ⇒ 不判」规则不被滥用：只有 `:ok-reads = 0` 才能
-;; 逃逸判定；只要有可信观测，`(nil? absent)` 仍是活性违反。
+;; 守的是新加的「全读失败 ⇒ 不判」（F-71）与「窗口末端采样断档 ⇒ 不判」（F-72）
+;; 两条规则不被滥用：只要采样真的覆盖了窗口，`(nil? absent)` 仍是活性违反。
+;; 时间轴：停续期锚点 4050ms；窗口 = [6050, 10050]（ttl 2000 + grace 4000）；
+;; 最后一次成功观测 9800ms（≥ 10050−500 容差）且仍见 Key ⇒ 判红。
 [{:type :ok :f :lease-keepalive :process 0 :invoke 1 :time 10
   :lease {:id 2601 :ttl 2} :key "/jepsen/lease/s42/ka/26" :node "n1"
   :scenario :keepalive :grace-ms 4000
   :keepalives [{:id 2601 :ttl 2}]
   :observations [{:phase :after-write :at-ms 25 :read-ok? true :present? true}
                  {:phase :during-keepalive :at-ms 4050 :read-ok? true :present? true}
-                 ;; 8 次失败（CCT 波）+ 12 次成功；最后一次成功读（6500ms）
-                 ;; 仍观察到 Key 存在 ⇒ 窗口内没有消失
+                 ;; 整个窗口内读一直成功且始终见 Key（采样无断档）
                  {:phase :first-absent :at-ms 12000 :read-ok? false :present? false
-                  :absent? false :reads 20 :failed 8 :ok-reads 12 :reauths 1
-                  :last-ok-present? true :last-ok-at-ms 6500}]
+                  :absent? false :reads 40 :failed 0 :ok-reads 40 :reauths 0
+                  :last-ok-present? true :last-ok-at-ms 9800}]
   :absent-ms nil}]

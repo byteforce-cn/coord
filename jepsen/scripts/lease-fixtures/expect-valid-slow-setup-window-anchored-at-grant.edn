@@ -1,0 +1,21 @@
+;; expect-valid-slow-setup-window-anchored-at-grant —— F-72b 的守门员：
+;; 判定窗口必须以 **grant ack** 为锚（`:grant-at-ms`），不是 op 起点。
+;;
+;; 形态（matrix-m2 lease/pause，2026-09-26 实测，seed 1310193536）：pause 窗口内
+;; grant 自身花了 ~4.3s（客户端轮换节点直到新 leader 就位）；lease 的真实截止
+;; = grant+2s，级联删除发生在 grant+2.5s（服务端日志
+;; `lease expiry revokes committed lease_ids=[67,70]`）——**服务端行为正确**。
+;; 旧口径从 op 起点起算 [2000, 6000]，把 grant 前的时间也算进窗口 ⇒ 假红。
+;; 新口径窗口 = grant+[2000, 6000] = [6300, 10300]，删除发生在 6800 ⇒ 判绿。
+;;
+;; 配对负控制：`expect-invalid-slow-setup-late-deletion.edn`（锚点前移 ≠ 免罪：
+;; 删除晚于 grant+ttl+grace 仍必红）。
+[{:type :ok :f :lease-ttl :process 4 :invoke 1 :time 10
+  :lease {:id 67 :ttl 2} :key "/jepsen/lease/s1310193536/ttl/83"
+  :scenario :ttl :grace-ms 4000
+  :grant-at-ms 4300
+  :observations [{:phase :after-write :at-ms 4664 :read-ok? true :present? true}
+                 {:phase :first-absent :at-ms 6800 :read-ok? true :present? false
+                  :absent? true :reads 15 :failed 0 :ok-reads 15 :reauths 0
+                  :last-ok-present? false :last-ok-at-ms 6800}]
+  :absent-ms 6800}]

@@ -1008,6 +1008,25 @@
 (defn- lease-sleep [ms]
   (try (Thread/sleep (long ms)) (catch InterruptedException _ nil)))
 
+(def ^:private lease-read-timeout-ms
+  "F-72：lease 观测读的**单节点**超时（ms）。
+
+  默认 5000ms 会把一次读钉在冻结节点上（SIGSTOP 的进程 TCP 连接照常建立、
+  但永不响应）：实测（matrix-m2 lease/pause，seed 737037196）n1 被冻结 10.4s，
+  轮询的下一次读在 n1 上等满 5s ⇒ 判定窗口内零次成功观测 ⇒ 假红。
+  500ms 远大于健康读延迟（~1-3ms），冻结节点最多耗 0.5s 就会被 try-nodes
+  轮换到下一个节点。"
+  500)
+
+(defn- lease-point-read
+  "lease 专用点读：单节点 `lease-read-timeout-ms` 超时。
+
+  慢读不得变成「Key 消失/未消失」的结论 —— 失败读只计 `:failed`（见 F-71/F-72）。"
+  [this key]
+  (attempt! this key
+            #(p/call % p/kv-range (p/range-req key) lease-read-timeout-ms)
+            (fn [resp] {:kv (kv-edn (first (p/range-kvs resp)))})))
+
 (defn- lease-read-with-reauth
   "F-71：点读；CCT 过期（`:unauthenticated`）时**刷新会话并重试一次**。
 
@@ -1017,13 +1036,16 @@
   「消失」的观测被整段吞掉，最后被判成活性违反（2026-09-25 2h soak 实测，
   `jepsen/docs/coord-findings.md` F-71）。
 
+  F-72：读走 `lease-point-read`（单节点 500ms 超时），冻结节点不会把轮询
+  钉死 5s。
+
   返回点读结果；`:reauth?` 标注本次读是否发生过重认证（进观测供对账）。"
   [this key]
-  (let [r (try (point-read this key) (catch Exception _ {:ok? false}))]
+  (let [r (try (lease-point-read this key) (catch Exception _ {:ok? false}))]
     (if (and (not (:ok? r)) (= :unauthenticated (:error r)))
       (let [refreshed? (try (reauthenticate! this) true (catch Exception _ false))]
         (if refreshed?
-          (assoc (try (point-read this key) (catch Exception _ {:ok? false}))
+          (assoc (try (lease-point-read this key) (catch Exception _ {:ok? false}))
                  :reauth? true)
           r))
       r)))
@@ -1049,37 +1071,44 @@
   "轮询到 key 不存在或超过 `deadline-ns`。
 
   返回 `{:absent? bool :at-ms n :reads n :failed n :ok-reads n :reauths n
-        :last-ok-present? bool|nil :last-ok-at-ms n|nil}` —— `:failed` 是其中读失败的
-  次数（读失败不算「消失」），`:ok-reads` 是读成功的次数。
+        :last-ok-present? bool|nil :last-ok-at-ms n|nil}` —— 每次读**恰好被
+  归类一次**（含退出时那一次）；`:failed` 是读失败次数（读失败不算「消失」），
+  `:ok-reads` 是读成功次数。
 
   F-71：失败读若是 CCT 过期所致，每轮自动刷新会话后重试
   （`lease-read-with-reauth`）；`:ok-reads = 0`（**从未读成功**）时
-  「没观察到消失」不是活性违反而是「没判」，checker 依此计入
-  `:liveness-unjudged`（不判 ≠ 通过）。"
+  「没观察到消失」不是活性违反而是「没判」。
+
+  F-72：每读带单节点 500ms 超时；`last-ok-at-ms` 记录最后一次成功观测的时刻，
+  checker 据此识别「判定窗口末端采样断档」（断档同样计入 :liveness-unjudged，
+  不判 ≠ 通过）。"
   [this el key deadline-ns]
   (loop [reads 0 failed 0 ok-reads 0 reauths 0 last-ok-present? nil last-ok-at-ms nil]
     (let [r        (lease-read-with-reauth this key)
+          at       (el)
           now      (System/nanoTime)
-          reauths' (if (:reauth? r) (inc reauths) reauths)]
+          reauths' (if (:reauth? r) (inc reauths) reauths)
+          ok?      (boolean (:ok? r))
+          present? (boolean (and ok? (some? (:kv r))))
+          failed'  (if ok? failed (inc failed))
+          ok-reads' (if ok? (inc ok-reads) ok-reads)
+          last-ok-present?' (if ok? present? last-ok-present?)
+          last-ok-at-ms' (if ok? at last-ok-at-ms)]
       (cond
-        (and (:ok? r) (nil? (:kv r)))
-        {:absent? true :at-ms (el) :reads (inc reads) :failed failed
-         :ok-reads (inc ok-reads) :reauths reauths'
-         :last-ok-present? false :last-ok-at-ms (el)}
+        (and ok? (not present?))
+        {:absent? true :at-ms at :reads (inc reads) :failed failed'
+         :ok-reads ok-reads' :reauths reauths'
+         :last-ok-present? false :last-ok-at-ms at}
 
         (>= now (long deadline-ns))
-        {:absent? false :at-ms (el) :reads (inc reads) :failed failed
-         :ok-reads ok-reads :reauths reauths'
-         :last-ok-present? last-ok-present? :last-ok-at-ms last-ok-at-ms}
+        {:absent? false :at-ms at :reads (inc reads) :failed failed'
+         :ok-reads ok-reads' :reauths reauths'
+         :last-ok-present? last-ok-present?' :last-ok-at-ms last-ok-at-ms'}
 
         :else
         (do (lease-sleep lease-poll-ms)
-            (recur (inc reads)
-                   (if (:ok? r) failed (inc failed))
-                   (if (:ok? r) (inc ok-reads) ok-reads)
-                   reauths'
-                   (if (:ok? r) (some? (:kv r)) last-ok-present?)
-                   (if (:ok? r) (el) last-ok-at-ms)))))))
+            (recur (inc reads) failed' ok-reads' reauths'
+                   last-ok-present?' last-ok-at-ms'))))))
 
 (defn- lease-open-keepalive!
   "从缓存 leader 开始轮询所有节点，取第一个能建流的（与 `watch-open!` 同构）。
@@ -1148,7 +1177,11 @@
   契约预期：
     * **安全** —— 没有 Renew/Revoke 时，Lease 存活期内绑定 Key 不得消失
                   （§5.1「安全（TTL 内消失）= 0」）；
-    * **活性** —— 停止续租的 Key 必须在 ttl+grace 内消失（§5.2 的 100%）。"
+    * **活性** —— 停止续租的 Key 必须在 ttl+grace 内消失（§5.2 的 100%）。
+
+  F-72b：判定时钟**锚在 grant ack**（`:grant-at-ms`）而不是 op 起点 —— 故障注入
+  下 setup 可能很慢（实测 pause 窗口：grant 自身花 2-4.6s），若仍从 op 起点起算，
+  “窗口末端”会落在租约真实截止之前，产生假红。"
   [this op]
   (let [{:keys [key ttl grace-ms]} (:value op)
         t0 (System/nanoTime)
@@ -1159,7 +1192,8 @@
                                     :granted-ttl (p/lease-ttl resp)}))]
     (if-not (:ok? grant)
       (assoc op :type (or (:kind grant) :info) :error (:error grant))
-      (let [lid  (:lease-id grant)
+      (let [t-grant (el)
+            lid  (:lease-id grant)
             gttl (:granted-ttl grant)
             put  (attempt! this key
                            #(p/call % p/put (p/put-req* {:key key
@@ -1170,13 +1204,17 @@
           (assoc op :type (or (:kind put) :info) :error (:error put)
                  :lease {:id lid :ttl gttl} :key key)
           (let [o1   (lease-try-read this el :after-write key)
-                dl   (+ t0 (* 1000000 (+ (* gttl 1000) (long grace-ms))))
+                ;; dl 必须是**绝对** nanoTime：t0（op 起点的绝对时钟）+ 以 grant ack
+                ;; 为锚的窗口（F-72b）
+                dl   (+ t0 (* 1000000 (+ (long t-grant)
+                                         (* gttl 1000) (long grace-ms))))
                 gone (lease-wait-gone this el key dl)]
             (assoc op :type :ok
                    :lease {:id lid :ttl gttl}
                    :key key
                    :scenario :ttl
                    :grace-ms (long grace-ms)
+                   :grant-at-ms (long t-grant)
                    :observations [o1 (assoc gone :phase :first-absent)]
                    :absent-ms (when (:absent? gone) (:at-ms gone)))))))))
 
@@ -1198,7 +1236,8 @@
                                     :granted-ttl (p/lease-ttl resp)}))]
     (if-not (:ok? grant)
       (assoc op :type (or (:kind grant) :info) :error (:error grant))
-      (let [lid  (:lease-id grant)
+      (let [t-grant (el)
+            lid  (:lease-id grant)
             gttl (:granted-ttl grant)
             put  (attempt! this key
                            #(p/call % p/put (p/put-req* {:key key
@@ -1234,6 +1273,7 @@
                          :node node
                          :scenario :keepalive
                          :grace-ms (long grace-ms)
+                         :grant-at-ms (long t-grant)
                          :keepalives (vec resps)
                          :keepalive-error err
                          :observations [o1 o2 (assoc gone :phase :first-absent)]
@@ -1257,7 +1297,8 @@
                                     :granted-ttl (p/lease-ttl resp)}))]
     (if-not (:ok? grant)
       (assoc op :type (or (:kind grant) :info) :error (:error grant))
-      (let [lid  (:lease-id grant)
+      (let [t-grant (el)
+            lid  (:lease-id grant)
             gttl (:granted-ttl grant)
             put  (attempt! this key
                            #(p/call % p/put (p/put-req* {:key key
@@ -1280,6 +1321,7 @@
                    :key key
                    :scenario :revoke
                    :grace-ms (long grace-ms)
+                   :grant-at-ms (long t-grant)
                    :revoked? (boolean (:ok? rev))
                    :revoke-at-ms rev-at
                    :revoke-error (when-not (:ok? rev) (:error rev))

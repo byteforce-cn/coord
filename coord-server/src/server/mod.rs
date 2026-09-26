@@ -820,12 +820,24 @@ impl CoordNode {
             let mut pending: std::collections::BTreeSet<LeaseID> = Default::default();
             // 失败告警节流（每 5s 最多一条），避免失去 quorum 时刷爆日志
             let mut last_warn: Option<tokio::time::Instant> = None;
+            // P7/W5-4：领导权视图变化必须可观测 —— pause/kill 窗口里“新 leader 的
+            // 过期清理到底跑没跑”是离线判定的锚点（此前成功路径完全静默）。
+            let mut was_leader = false;
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
             loop {
                 interval.tick().await;
                 // B.4.2：过期检测仅 leader 执行（follower 上 LeaseManager 空转无意义，
                 // 且 follower 经 raft propose 会被 openraft 拒绝）
-                if !node.is_raft_leader().await {
+                let is_leader = node.is_raft_leader().await;
+                if is_leader != was_leader {
+                    tracing::info!(
+                        node_id = node.node_id,
+                        is_leader,
+                        "lease expiry worker: leadership view changed"
+                    );
+                    was_leader = is_leader;
+                }
+                if !is_leader {
                     continue;
                 }
                 let Some(ref lm) = node.lease_manager else {
@@ -854,6 +866,16 @@ impl CoordNode {
                     pending.remove(lease_id);
                     // 提交已确认 ⇒ 此刻才移除本地记录（此后 revoke 不会再丢）
                     lm.finish_expired(*lease_id).await;
+                }
+                if !round.done.is_empty() {
+                    // P7/W5-4：过期清理的**提交事实**必须可观测（成功路径此前完全静默，
+                    // pause/failover 窗口的“到底删没删”无法离线判定）
+                    tracing::info!(
+                        node_id = node.node_id,
+                        committed = round.done.len(),
+                        lease_ids = ?round.done,
+                        "lease expiry revokes committed"
+                    );
                 }
                 if round.failed > 0 {
                     let should_log = last_warn
@@ -1028,10 +1050,18 @@ impl CoordNode {
                 };
                 match node.storage.list_lease_records() {
                     Ok(records) => {
+                        // F-72：装载的租约 ID 样本必须可观测（“到底装进了哪几条”
+                        // 是 pause/换主窗口离线判定的关键锚点）
+                        let mut ids: Vec<LeaseID> = records.iter().map(|(id, _)| *id).collect();
+                        ids.sort_unstable();
+                        let snapshot = ids.len();
+                        let sample: Vec<LeaseID> = ids.iter().copied().take(16).collect();
                         let n = lm.rebuild(records).await;
                         tracing::info!(
                             node_id = node.node_id,
                             tracked = n,
+                            snapshot,
+                            lease_ids = ?sample,
                             "LeaseManager rebuilt from state machine (merge, F-70)"
                         );
                         rebuilt = true;

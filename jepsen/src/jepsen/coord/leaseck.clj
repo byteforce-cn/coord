@@ -49,6 +49,11 @@
     CCT 集中过期波期间读全部 `:unauthenticated`）时，判据 3/3'/4 **不判**，
     计入 summary 的 `:liveness-unjudged`（不判 ≠ 通过；客户端已在轮询内刷新
     会话重试，仍全失败则窗口内没有可信观测，不得据此报活性违反）；
+  * **F-72（2026-09-26）**：**判定窗口末端采样断档**（新格式观测里
+    `:last-ok-at-ms` 远早于窗口末端，形态：leader 被 SIGSTOP ⇒ 轮询读卡在
+    冻结节点上）时，判据 3/3'/4 同样**不判**，计入 `:liveness-unjudged`；
+    客户端已修（单节点读 500ms 超时）；旧格式观测（无 `:last-ok-at-ms`）
+    语义不变；
   * Leader 切换后由新 Leader 重建 TTL（契约明确可能略晚）⇒ grace 是必要条件，
     不是宽容；`pause`（长冻结）与 `kill`（重启丢 deadline）是 T3.4 的证伪故障。"
   (:require [clojure.tools.logging :refer [info]]
@@ -84,7 +89,9 @@
   "判据 1：在 Lease 仍然存活的窗口内观察到 Key 不存在。
 
   存活窗口按场景算：
-    * `:ttl`       —— [0, ttl)，只到 ttl（之后它**应该**消失）；
+    * `:ttl`       —— [grant, grant+ttl)，只到 ttl（之后它**应该**消失）；
+                     F-72b：锚在 grant ack（`:grant-at-ms`，旧数据回退 op 起点）——
+                     故障注入下 setup 本身可能花数秒，从 op 起点起算会误判。
     * `:keepalive` —— [0, 停续期时刻 + ttl)，停续期后还有一个 ttl 的余寿；
     * `:revoke`    —— [0, revoke 时刻)，Revoke 之前一秒都不许少。
   容差 `tolerance-ms` 只用于「提前」这一侧。"
@@ -102,7 +109,7 @@
         alive-until (case (:scenario op)
                       :keepalive (+ stop ttl)
                       :revoke    stop
-                      ttl)]
+                      (+ (long (or (:grant-at-ms op) 0)) ttl))]
     (vec
       (for [o (ok-obs op :after-write :during-keepalive :first-absent :after-revoke)
             :when (not (:present? o))
@@ -153,15 +160,63 @@
   (let [o (first (filter #(= :first-absent (:phase %)) (:observations op)))]
     (and o (some? (:ok-reads o)) (zero? (long (:ok-reads o))))))
 
-(defn- liveness-fails
-  "判据 2/3/4/5/6。活性（3/4）只在**锚点存在**时判；锚点缺失的 op 记入
-  summary 的 `:liveness-unjudged`（不判 ≠ 通过）。"
+(defn- observation-truncated?
+  "F-72：观测序列是否在**判定窗口末端之前就断了** —— 最后一次成功观测
+  （`:last-ok-at-ms`）早于窗口末端减容差。
+
+  形态（matrix-m2 lease/pause，seed 737037196）：n1 被 SIGSTOP 10.4s，轮询的
+  下一次读卡在冻结节点上等满默认 5s 超时 ⇒ 判定窗口在 [22.7s, 27.7s] 内**零次
+  成功观测**；旧口径把 `:absent-ms nil` 判成 `:lease-not-expired`，但那是采样
+  断档，不是产品违约（客户端侧 F-72 修复后单节点读 500ms 超时，断档本身也应
+  降到最小；本判据是兜底：断档 ⇒ 不判，计入 `:liveness-unjudged`）。
+
+  窗口末端按场景推（锚点均用客户端单调量）：
+    :ttl       → grant ack + ttl + grace（F-72b 锚；旧数据回退 op 起点）；
+    :keepalive → 停续期时刻 + ttl + grace；
+    :revoke    → revoke 时刻 + grace。
+
+  只在新格式观测（带 `:last-ok-at-ms`）上生效：旧 fixture 语义不变；
+  无法计算窗口（锚点缺失）时返回 nil（= 不管，保持旧口径）。"
+  [op tolerance-ms]
+  (let [o       (first (filter #(= :first-absent (:phase %)) (:observations op)))
+        last-ok (when o (:last-ok-at-ms o))
+        end     (case (:scenario op)
+                  :ttl (+ (long (or (:grant-at-ms op) 0)) (ttl-ms op) (grace-ms op))
+                  :keepalive (when-let [stop (:at-ms (first (ok-obs op :during-keepalive)))]
+                               (+ (long stop) (ttl-ms op) (grace-ms op)))
+                  :revoke (when-let [r (:revoke-at-ms op)]
+                            (+ (long r) (grace-ms op)))
+                  nil)]
+    (when (and o (some? last-ok) (some? end))
+      (boolean (< (long last-ok) (- (long end) (long tolerance-ms)))))))
+
+(defn- late-absence-unattributable?
+  "F-72c：**迟到性判据**（absent 晚于窗口末端）只在轮询采样**未断档**时成立。
+
+  轮询期间有读失败（`:failed > 0`）时，观测到的 absent 时刻无法归因为删除时刻：
+  实测（matrix-m2 lease/pause，2026-09-26）ka/109：服务端在停续期后 ~2.1s 就提交了
+  revoke（http 日志 `revokes committed lease_ids=[78]`，早于窗口末端），但读数在
+  13.7s 才恢复 ⇒ 拿 13.78s 当删除时刻会假红。
+
+  注意：该规则只豁免**迟到性**，不豁免「从未观察到消失」（absent nil 走
+  F-71/F-72 的轮询/断档分支）与「提前消失」（early-absence 是安全侧，不受影响）。"
   [op]
+  (let [o (first (filter #(= :first-absent (:phase %)) (:observations op)))]
+    (and o (pos? (long (or (:failed o) 0))))))
+
+(defn- liveness-fails
+  "判据 2/3/4/5/6。活性（3/4）只在**锚点存在、且采样未断档**时判；锚点缺失
+  （F-26）、轮询全读失败（F-71）或窗口末端采样断档（F-72）的 op 记入 summary 的
+  `:liveness-unjudged`（不判 ≠ 通过）。"
+  [op tolerance-ms]
   (let [ttl   (ttl-ms op)
         grace (grace-ms op)
         absent (:absent-ms op)
         rel    (relative-absence op absent)
-        rel?   (some? rel)]
+        rel?   (some? rel)
+        ;; F-72b：ttl 场景的窗口锚在 grant ack（旧数据回退 op 起点）
+        ttl-base (long (or (:grant-at-ms op) 0))
+        ttl-end  (+ ttl-base ttl grace)]
     (cond-> []
       ;; 判据 2：写入后必须立刻可见
       (let [o (first (ok-obs op :after-write))]
@@ -171,11 +226,16 @@
              :lease (:lease op) :observation (first (ok-obs op :after-write))
              :note "Put{lease_id} 返回 :ok 后立刻点读看不到该 Key"})
 
-      ;; 判据 3：到期后必须在 ttl+grace 内消失（锚点 = op 起点）
+      ;; 判据 3：到期后必须在 ttl+grace 内消失（F-72b：锚 = grant ack）
       ;; F-71：轮询从未读成功（`:ok-reads = 0`）时不判（计入 :liveness-unjudged）
+      ;; F-72：窗口末端采样断档（`:last-ok-at-ms` 远早于 ttl+grace）时同样不判
+      ;; F-72c：迟到性只在采样未断档时可归因（有读失败 ⇒ 不判）
       (and (not (poll-unjudged? op))
+           (not (and (nil? absent) (observation-truncated? op tolerance-ms)))
            (= :ttl (:scenario op))
-           (or (nil? absent) (> (long rel) (+ ttl grace))))
+           (or (nil? absent)
+               (and (not (late-absence-unattributable? op))
+                    (> (long absent) ttl-end))))
       (conj {:type :lease-not-expired
              :scenario (:scenario op) :lease (:lease op) :key (:key op)
              :absent-ms absent :ttl-ms ttl :grace-ms grace
@@ -185,19 +245,28 @@
       ;; 注意 `(nil? absent)` 分支必须保留：「**从未消失**」本身就是活性违反，
       ;; 与锚点是否存在无关（重构时丢了它，守门员 fixture 立刻抓到）。
       ;; F-71：轮询从未读成功（`:ok-reads = 0`）时不判。
+      ;; F-72：窗口末端采样断档时不判。
       (and (not (poll-unjudged? op))
+           (not (and (nil? absent) (observation-truncated? op tolerance-ms)))
            (= :keepalive (:scenario op))
-           (or (nil? absent) (and rel? (> (long rel) (+ ttl grace)))))
+           (or (nil? absent)
+               (and rel?
+                    (not (late-absence-unattributable? op))
+                    (> (long rel) (+ ttl grace)))))
       (conj {:type :lease-not-expired
              :scenario (:scenario op) :lease (:lease op) :key (:key op)
              :absent-ms absent :stop-relative-ms rel
              :ttl-ms ttl :grace-ms grace
              :note "停止续期后 Key 未在 ttl+grace 内消失"})
 
-      ;; 判据 4：Revoke 级联删除（锚点 = Revoke 时刻）；F-71：轮询全读失败时不判
+      ;; 判据 4：Revoke 级联删除（锚点 = Revoke 时刻）；F-71/F-72：不判条件同判据 3
       (and (not (poll-unjudged? op))
+           (not (and (nil? absent) (observation-truncated? op tolerance-ms)))
            (= :revoke (:scenario op)) (:revoked? op)
-           (or (nil? absent) (and rel? (> (long rel) (long grace)))))
+           (or (nil? absent)
+               (and rel?
+                    (not (late-absence-unattributable? op))
+                    (> (long rel) (long grace)))))
       (conj {:type :lease-revoke-not-cascaded
              :scenario (:scenario op) :lease (:lease op) :key (:key op)
              :absent-ms absent :revoke-relative-ms rel :grace-ms grace
@@ -224,12 +293,17 @@
 
 (defn- unjudged-liveness?
   "该 op 的活性是否**无法判定**（必须计入 summary，不能静默通过）：
-  ①锚点缺失（F-26 口径）；②F-71：轮询从未读成功（`:ok-reads 0`）。"
-  [op]
+  ①锚点缺失（F-26 口径）；②F-71：轮询从未读成功（`:ok-reads 0`）；
+  ③F-72：判定窗口末端采样断档；④F-72c：迟到性在采样断档时不可归因。"
+  [op tolerance-ms]
   (or (and (contains? #{:keepalive :revoke} (:scenario op))
            (some? (:absent-ms op))
            (nil? (relative-absence op (:absent-ms op))))
-      (poll-unjudged? op)))
+      (poll-unjudged? op)
+      (and (nil? (:absent-ms op))
+           (observation-truncated? op tolerance-ms))
+      (and (some? (:absent-ms op))
+           (late-absence-unattributable? op))))
 
 (defn checker
   "T2.2 checker。opts：
@@ -255,11 +329,11 @@
                                        done))
                fails (vec (concat
                             (mapcat #(early-absence % tolerance-ms) done)
-                            (mapcat liveness-fails done)))
+                            (mapcat #(liveness-fails % tolerance-ms) done)))
                by-class (frequencies (map :type fails))
                sample-ok? (and (>= grants min-grants)
                                (>= expiries min-expiries))
-               unjudged (count (filter unjudged-liveness? done))
+               unjudged (count (filter #(unjudged-liveness? % tolerance-ms) done))
                summary {:grants grants
                         :expiries expiries
                         :min-grants min-grants
