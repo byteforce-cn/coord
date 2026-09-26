@@ -26,7 +26,7 @@
 | F-02 | `Put` 幂等**命中**时 `prev_kv` 恒为 `None`，与"返回首次执行的结果"不符 | P2 | **`closed`**（已修 + 同上回归） | T1.4 / T1.1 |
 | F-03 | 幂等缓存是**单节点进程内**（TTL 60s / 4096 FIFO），不随 raft 复制、不持久化 → 换节点/换 leader/重启后重放会重复生效 | P1 | **`confirmed-by-run`**（换 leader 重放：13 组 revision-advanced / 13 组 version-over-advance）+ 契约已限缩 | T1.4 ⇒ T5.2 |
 | F-04 | `scripts/nemesis-timeline.clj` 把 `history.edn` 的纳秒当 epoch 毫秒输出 | P2（测试自身） | `closed` | 上一轮已修 |
-| F-05 | 60s 短跑即可见 `:fail :write [:no-client Failed to authenticate to coord]`（鉴权/登录限流） | P1 | `confirmed-by-run`（**形态已定位：非限流，是登录路径需 raft quorum**，见本节末） | §5.4-④ / E4 |
+| F-05 | 60s 短跑即可见 `:fail :write [:no-client Failed to authenticate to coord]`（鉴权/登录限流） | P1 | **`closed`**（2026-09-26：①分类判据由两条测试钉住 ②3×(kill-all,60s) 复跑 0/3 次、0 次 INTERNAL；见本节末收口记录） | §5.4-④ / E4 |
 | F-06 | Watch 语义既不是 coalescing 也不是 lossless：**缓冲区满时丢弃最旧事件 + 合成 `BufferOverflow`** | — | `open`（**改计划**） | T2.1 前置 |
 | F-07 | 磁盘写满行为**已定义**：可用 <5% → 写 `RESOURCE_EXHAUSTED`、读仍可用 | — | `closed`（§9-② 已答） | T3.5 |
 | F-08 | Lease 到期判定用**单调时钟**（`tokio::time::Instant`），契约成立 | — | `closed`（§9-⑤ 已答） | T2.2 / T3.4 |
@@ -288,6 +288,37 @@ register + 默认 AGENTS=2）。⇒ 只能得出「**本 run 未复现**」，**
 把自己锁在登录限流里，即 `:no-client` 风暴的成因）。已由
 `coord-server` `auth::service::cct_tests::session_persist_failure_propagates_retryable_code`
 （含负控制：改成 `unauthenticated` ⇒ 必红）钉住；本 run 是它的端到端对照。
+
+### F-05 收口（2026-09-26，W1-2 一轮完成）
+
+**复跑（本轮 ×3）**：`make -C jepsen/lab test WORKLOAD=register NEMESIS=kill-all
+TIME_LIMIT=60 CONCURRENCY=1n`（binary `ff25fdd6` @ `109b462` 之后的工作树，含 F-70/F-72
+改动；每轮前 env-reset）。三个 store：`2026-09-26T04:49:52Z` / `04:51:39Z` / `04:53:27Z`；
+代表 run 归档：`docs/production/evidence/20260926T045524Z-w1-2-f05-kill-all-60s/`。
+
+| 指标 | REP1 | REP2 | REP3 |
+|:--|:--|:--|:--|
+| 判决 | ✅ valid | ✅ valid | ✅ valid |
+| `:fail` / `:no-client` | **0 / 0** | **0 / 0** | **0 / 0** |
+| 服务端 `raft auth write failed`（错误码被吃成 INTERNAL 的形态） | 0 | 0 | 0 |
+| 登录成功（三节点合计） | 34 | 31 | 36 |
+
+**累计口径**：本问题在 lab 上的复跑合计 **4 个 run（≈20 个 kill-all 周期）**——2026-09-21
+的 1 run（5 周期，见上）+ 本轮 3 runs——**全部 0 条 `:no-client`、0 条 INTERNAL**。
+
+**归因与边界（与结论同引）**：
+- 分类闸门已机械化（两条测试，正反双向）；服务端在 quorum 窗口返回
+  `UNAVAILABLE`/`DEADLINE_EXCEEDED`（follower 的 `propose_auth_op` 携带 leader hint），
+  本轮 3 run 的服务端日志无一处 INTERNAL/误分类；
+- **残余是固有可用性属性**：quorum 整体丢失时长 > 客户端登录超时（60s）时，
+  登录**必然**失败——属 §5.4-④/⑤ 的参数裁定项（与 U-13 同族），**不是**缺陷；
+  可选加固（`persist_session` 有界重试覆盖选举窗口）记录在
+  `docs/production/ops/boundaries.md` §5 B-SE-4，未列为 L2 门槛；
+- 出现率上界：本 config（kill-all+register，默认 2 agent）下 **<1/4 run**；原始形态
+  （经 agent 的 M5b MQ run / `partition-ring`）不在本轮覆盖内 —— 该形态若再观测到
+  `:no-client`，按「分类是否被破坏」分诊：分类正确 ⇒ 计入参数裁定项；分类错误 ⇒ 重开。
+
+**状态：closed（2026-09-26，W1-2 判据双条达成：分类测试钉住 + 复跑统计归因）。**
 
 ---
 

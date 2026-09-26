@@ -904,6 +904,25 @@ W3-2…W3-9、W4-1 TLS fail-closed、§1.3 案 A/B 人力裁定。
 
 ---
 
+### 第十二轮追加（2026-09-26）—— 主题：**W1-2 闭环（F-05 登录路径 × quorum 窗口）**
+
+> 触发：M1 出口的「F-27/F-05/F-68 闭环」还差 F-05。按 2026-09-21 修订后的判据执行
+> （不再要求「0 条 `:no-client`」——quorum 整体丢失超过登录超时时该失败**固有**）。
+
+| # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
+|:--|:--|:--|:--|:--|
+| **W1-2① 分类判据** | 两类失败可区分：密码错=UNAUTHENTICATED；无 quorum=UNAVAILABLE/DEADLINE_EXCEEDED | ✅ 已由测试钉住（复核） | `cargo test -p coord-server --lib -- wrong_password_yields_unauthenticated session_persist_failure_propagates` | 两测全过（`auth::service::cct_tests`，含负控制）；服务端 quorum 窗口路径映射为 `UNAVAILABLE`+leader hint / `DEADLINE_EXCEEDED`，不落 `INTERNAL` |
+| **W1-2② 复跑统计与归因** | `kill-all ×3`（60s）统计 `:no-client` 出现率并归因 | ✅ **0/3 复现** | `make -C jepsen/lab test WORKLOAD=register NEMESIS=kill-all TIME_LIMIT=60 CONCURRENCY=1n`（每轮 env-reset；bin 工作树 = `109b462` + F-70/F-72） | REP1/2/3：全部 valid、**`:fail` 0 / `:no-client` 0 / 服务端 INTERNAL-auth 0**；登录成功 34/31/36。累计口径（含 09-21 的 1 run≈5 周期）＝ **4 runs≈20 kill-all 周期，0 出现**；代表 run 归档 `docs/production/evidence/20260926T045524Z-w1-2-f05-kill-all-60s/` |
+| **边界（与结论同引）** | —— | —— | —— | 残余是**固有可用性属性**（quorum 丢失 > 登录超时 ⇒ 登录必失败），属参数裁定项（与 U-13 同族），非缺陷；出现率上界 <1/4 run（本 config）；原经 agent 的 M5b MQ 形态不在覆盖内，若再现按「分类是否被破坏」分诊。详见 `coord-findings.md` F-05 收口记录 |
+
+> **M1 出口进度**：`matrix-m2` 由红转绿 ✅（第十一轮（续））；F-27 ✅ / F-68 ✅ / F-05 ✅
+> ⇒ M1 出口三条（`matrix-m2`、F-27/F-05/F-68 闭环）**全部达成**；剩余为 W1 其余项
+> （W1-4 无界增长、W1-5 未接线机制、W1-6 watch scope、W1-7 enum 保护）与 W2-3/W2-4。
+
+**第十二轮未触碰**：W1-4/W1-5/W1-6/W1-7、W2-3/W2-4、W3、W4、§1.3 裁定。
+
+---
+
 ## 附录 A：差距 → 门 → 判据 → 证据（追溯表）
 
 | 差距 | 门 | 判据（可执行） | 证据落点 |
