@@ -301,7 +301,7 @@
 | W2-1 | `weekly perf baseline` **13/13 常驻红**定位（`ci.yml:448` 仅 schedule 触发） | 要么修到绿，要么按 `coord-ui` 覆盖率先例改成 **ratchet** 并写明"这不是目标值"（`remaining-known-gaps.md:241-257` 的先例） | 3 |
 | W2-2 | `cargo audit + deny` 定时红定位（HEAD 同 SHA：push 绿 / 定时红） | 取一次 job 日志，判定属于：advisory-db 拉取失败 / 权限 / 新通告三类之一，并给出对应处置 | 2 |
 | W2-3 | `real-process chaos` 间歇红（14/31）稳定化 | 产出"红的判据是产品缺陷还是假红"的**判定流程**（孤儿进程清理已做，但 14/31 的残余分布未分析） | 3 |
-| W2-4 | 分支保护（B5⑧，仓库设置项，提交无法保证） | 设置后验证：向 `main` 直接 push 被拒；无该设置则"45 次全红 CI"可重演 | 0.5 |
+| W2-4 | 分支保护（B5⑧，仓库设置项，提交无法保证） | 设置后验证：向 `main` 直接 push 被拒；无该设置则"45 次全红 CI"可重演 **（✅ 2026-09-26 已执行，证据见 §11 第十四轮与 `ops/ci-gate-forensics-2026-09-22.md` §4）** | 0.5 |
 | W2-5 | 九道门的**负控制演练** | 对每道门各注入一次违规并确认置红（沿用 `ci.yml` 的 gate self-check 模式），留档 | 1.5 |
 
 ### W3 长跑与故障注入证据（20 人日 + 墙钟）
@@ -322,7 +322,7 @@
 
 | # | 任务 | 判据 | 人日 |
 |:--|:--|:--|--:|
-| W4-1 | **TLS fail-closed** | `README.md:61` 自述的三种放行形态逐条关闭：`dev` 模式 / 鉴权开启 + `raft_shared_secret` / 非 loopback 且无 mTLS。判据：负控制测试（缺 CA ⇒ 拒绝启动，不静默降级明文） | 3 |
+| W4-1 | **TLS fail-closed** | `README.md:61` 自述的三种放行形态逐条关闭：`dev` 模式 / 鉴权开启 + `raft_shared_secret` / 非 loopback 且无 mTLS。判据：负控制测试（缺 CA ⇒ 拒绝启动，不静默降级明文）**（✅ 2026-09-26 已落地：`coord/tests/plaintext_remote_failclosed_test.rs` 4 条正反双向；见 §11 第十四轮）** | 3 |
 | W4-2 | **U9 KEK 供给** | 三选一：外部 KMS / 启动注入密钥材料 / 显式接受并写入边界（`WHITEPAPER.md:520` 已披露"拿到配置即可推导 KEK"）。**L2 前必须裁定**，否则"加密"承诺有名无实。**✅ 2026-09-21 已裁定：取「启动注入 + 显式边界」** | 3 |
 | **W4-2a** | **U-04 的实施**（裁定 ≠ 落地）：①KEK 不再由配置串**确定性派生**，改为启动时从环境/文件注入；②**缺材料即拒绝启动**（fail-closed，不许静默降级）；③负控制测试（无材料 ⇒ 拒绝启动；材料为空 ⇒ 拒绝启动）；④`WHITEPAPER.md` §12.7 / `security.md` 口径同步为"启动注入（非外部 KMS）" | 判据：`cargo test` 的三条负控制 + 启动日志里不再出现派生 KEK 的路径 | 3 |
 | ~~W4-3~~ | **已移除（U-14，2026-09-25：无经费）**：不采买第三方审计 ⇒ 不再是 P6 判据、不再是 §9 No-Go 项。替代物 = ①「未经独立审计」边界声明（P6 判据）②内部安全评估**仅作整改输入**（明确非独立、不当作门禁证据；该本地文件未入库，如需引用先迁入版本化路径） | 边界声明 diff + 整改输入清单 | 0（原 5 人日整改 + 3–6 周交付期一并移出） |
@@ -379,7 +379,7 @@
 
 | 里程碑 | 日期 | 出口判据 | 证据 |
 |:--|:--|:--|:--|
-| **M0 文本与门禁先立** | 09-30 | W0 全部完成（对外口径一致）+ W2 完成（门禁可信）——**W2-1…W2-3 ✅（第十三轮收尾），W2-4 待 admin** | 四份 diff + 门禁负控制演练记录 |
+| **M0 文本与门禁先立** | 09-30 | W0 全部完成（对外口径一致）+ W2 完成（门禁可信）——**W2-1…W2-4 ✅（第十三/十四轮收尾）；W2-5 余 P3–P5（lab 组）与 P8 真发布面（与 W3/W7 同期回填）** | 四份 diff + 门禁负控制演练记录（`gate-drills-2026-09-21.md` §4） |
 | **M1 代码面清账** | 10-24 | W1 全部完成；`matrix-m2` 由红转绿；F-27/F-05/F-68 闭环 | CI run + lab 归档 |
 | **M2 安全裁定** | 10-31 | W4-1/W4-2/W4-4 完成；**U-14 边界声明已落地**；批次 1（registry/idgen）**契约期限到点** | 裁定记录 + 边界声明 diff |
 | **M3 覆盖补齐** | 11-21 | W3-1…W3-5 完成（含 idgen/registry/多 agent 拓扑）；批次 2（lock/election）期限到点 | 各面归档 |
@@ -573,7 +573,7 @@
 > 体例：每行必须有**可重跑的判据**与**产物落点**。**「完成」不等于「已验收」** ——
 > 凡依赖 lab / 外部（引入方签字）的判据一律标注**待验收**，不得当作已绿；
 > **U-14 后**「审计」不再是外部依赖（见 §8.7）。
-> 最后更新：**2026-09-25（第十轮：F-69 修复 + 2h soak 现场复跑 + F-70/F-71 立项）**（基线 `8b65290` + 前九轮改动 + 本轮改动）。
+> 最后更新：**2026-09-26（第十四轮：W2-4 分支保护落地 + W4-1 TLS fail-closed 落地）**（基线 `8b65290` + 前十三轮改动 + 本轮改动）。
 > 第八轮主题见下方「第八轮追加」；CI 侧取证方法见 `docs/production/ops/ci-gate-forensics-2026-09-22.md` §6。
 
 | # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
@@ -949,6 +949,26 @@ W3-2…W3-9、W4-1 TLS fail-closed、§1.3 案 A/B 人力裁定。
 | chaos 稳定性宣布 | 🟡 **仍不宣布** | 最后一次 chaos 红 = `cab765a`（09-24，F-05 形态）；其后**连续绿 n=11**（不含在跑的 `42c09ca`） | n 不足，且其中 9 次早于 W1-2 修复 |
 
 **第十三轮未触碰**：W2-4（仓库设置，需 admin）、W3、W4、§1.3 裁定。
+
+---
+
+### 第十四轮追加（2026-09-26）—— 主题：**W2-4 分支保护落地（M0 最后一项）+ W4-1 TLS fail-closed 落地（P6 余项）**
+
+> 触发：拿到 **repo admin token**（`$GHT`，不落盘/不打印）⇒ M0 唯一未完成项（W2-4）
+> 可执行；同时按 §5 W4 推进 P6 的最后一块（TLS fail-closed）。**本轮起 `main` 有分支
+> 保护**：交付流程从"直推"改为"PR + 必需检查 + merge"（见下表与 forensics §4）。
+
+| # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
+|:--|:--|:--|:--|:--|
+| **W2-4** | 分支保护设置 + 负控制实证 | ✅ **完成** | `PUT /branches/main/protection`（`strict=true` + 3 必需检查 + `enforce_admins=true`）；真实直推（从未被 CI 验证过的空提交）⇒ **`GH006: Protected branch update failed` / `3 of 3 required status checks are expected` / `protected branch hook declined`，exit=1** | 3 个 context 与 check-run 名逐字一致（`fmt + clippy -D warnings` / `workspace tests` / `proto contract (buf lint + breaking)`，app=actions，`app_id=15368`）；**与原拟命令的差异**：`enforce_admins=false → true`（token 属主 `admin=true`，`false` 下可按 GitHub 语义绕过直推 ⇒ 与"直推被拒"判据互斥；取更强且无锁死）。⚠️ **`--dry-run` 不构成证据**（dry-run 不触发服务端评估，实测 exit 0 假绿）。证据原文见 forensics **§4** |
+| **W4-1** | **TLS fail-closed 落地**（P6 最后一块） | ✅ **代码完成（正反双向全绿）** | `cargo test -p coord --test plaintext_remote_failclosed_test -- --test-threads=1` ⇒ **4 ✓**（拒绝含 `R-SEC-04`+逃生阀名 / 逃生阀正例 / TLS 正例 / loopback 豁免）；回归 `raft_sec03_failclosed_test`+`dev_insecure_bind_test`+`auth_enforcement_test`+`cli_tls_test` ⇒ **9 ✓** | 新规则：`auth_enabled=true` + gRPC 非 loopback + 无 `tls_cert/tls_key` ⇒ 拒绝启动；逃生阀 `security.allow_plaintext_remote`（默认 false，启用时 WARN）；三处 fail-closed 判定统一 `is_non_loopback_bind()`。**lab 以显式逃生阀保持证据链**（`db.clj` + 注释）；**lab mTLS 登记为后续强化项**（不影响 P6 判据）。口径同步：README×2 / `config.example.toml` / `boundaries.md` B-SE-1 / `runbook.md` / `security.md` §1.4 / `adopter-playbook.md` §4 |
+| **W2-5（扩项）** | 负控制演练再补两道：**P6**（TLS fail-closed 拒绝启动）+ **P8 仓库设置面**（直推 ⇒ GH006） | ✅ 完成 | 同 W2-4 / W4-1 两行；演练记录 `gate-drills-2026-09-21.md` §4.5 | 剩余：P3–P5（lab 组）与 P8 的**真发布**面（随 W7-3 做） |
+| **卡口复核（十四轮）** | fmt / clippy（非测试目标）/ 六道脚本 | ✅ 完成 | `cargo fmt --all -- --check`；`cargo clippy --workspace -- -D warnings`；wire-sync / wire-descriptor / sdk-sync / panics / error-code / gate-drills | 全绿；panics 0 violations |
+| **交付流程变更** | `main` 启用保护后的纪律 | ✅ 记录 | 本轮回写起改走 **PR 流程**合入（push 分支 → PR → 必需检查 → merge） | PR 号与检查结论随下轮回写 |
+
+> **M0 状态更新**：W0 ✅、W2-1…W2-4 ✅（W2-3 见第十三轮、W2-4 见本轮）⇒ **M0 除 W2-5 的
+> lab 组（P3–P5）与 P8 真发布面外全部达成**；两项均绑定 W3 长跑 / W7 发布窗口。§6.1 的
+> M0 出口行已同步更新。
 
 ---
 

@@ -2059,12 +2059,7 @@ async fn run_server(
     let auth_enabled = cfg.security.auth_enabled;
     if !auth_enabled && !dev_mode {
         // 无鉴权 + 非 loopback 绑定 → 拒绝启动（防止裸奔暴露）
-        let non_loopback = |addr: &str| {
-            !addr.starts_with("127.")
-                && !addr.starts_with("localhost")
-                && !addr.starts_with("[::1]")
-        };
-        if non_loopback(&grpc_addr) || non_loopback(raft_addr) {
+        if is_non_loopback_bind(&grpc_addr) || is_non_loopback_bind(raft_addr) {
             return Err(format!(
                 "refusing to start with auth disabled on non-loopback bind (grpc={grpc_addr}, \
                  raft={raft_addr}); enable security.auth_enabled or bind loopback"
@@ -2074,6 +2069,30 @@ async fn run_server(
         tracing::warn!(
             "Auth DISABLED in server mode — insecure; intended for dev/test environments only"
         );
+    }
+
+    // W4-1（R-SEC-04）gRPC 侧 TLS fail-closed：鉴权开启 + gRPC 绑定非 loopback
+    // 且未配置 gRPC TLS（security.tls_cert/tls_key）⇒ 拒绝启动。修前该形态会
+    // 静默明文启动（README「Not fail-closed」的第三条路径）。唯一逃生阀为显式
+    // `security.allow_plaintext_remote = true`（默认 false；仅限 dev/test，
+    // 如 docker 内网的 jepsen lab），使用时会以 WARN 明示。
+    if !dev_mode && auth_enabled {
+        let grpc_use_tls = cfg.security.tls_cert.is_some() && cfg.security.tls_key.is_some();
+        if !grpc_use_tls && is_non_loopback_bind(&grpc_addr) {
+            if !cfg.security.allow_plaintext_remote {
+                return Err(format!(
+                    "refusing to start: auth_enabled with non-loopback grpc bind \
+                     ({grpc_addr}) requires gRPC TLS (security.tls_cert/tls_key), or \
+                     explicit security.allow_plaintext_remote = true for dev/test \
+                     (R-SEC-04 fail-closed; no silent plaintext downgrade)"
+                )
+                .into());
+            }
+            tracing::warn!(
+                "Plaintext gRPC on non-loopback bind ({grpc_addr}) explicitly allowed by \
+                 security.allow_plaintext_remote = true — insecure; dev/test only"
+            );
+        }
     }
 
     let auth_manager: Arc<AuthManager> = if dev_mode {
@@ -2212,10 +2231,7 @@ async fn run_server(
         tracing::info!("Raft inter-node shared-secret (HMAC) authentication enabled");
     }
     if !raft_use_tls && cfg.security.raft_shared_secret.is_none() {
-        let raft_is_loopback = raft_addr.starts_with("127.")
-            || raft_addr.starts_with("localhost")
-            || raft_addr.starts_with("[::1]");
-        if !raft_is_loopback {
+        if is_non_loopback_bind(raft_addr) {
             return Err(format!(
                 "refusing to start: raft_addr={raft_addr} is non-loopback with neither \
                  raft mTLS (tls_cert/tls_key/tls_ca) nor security.raft_shared_secret \
@@ -3770,6 +3786,15 @@ async fn shutdown_signal() {
 fn is_loopback_host(host: &str) -> bool {
     let host = host.trim();
     host == "localhost" || host == "::1" || host.starts_with("[::1]") || host.starts_with("127.")
+}
+
+/// 判断 "host:port" 形式的 bind 地址是否为**非** loopback。
+///
+/// server 侧四处 fail-closed 拒绝（无鉴权 / gRPC 无 TLS / raft 无 mTLS+密钥，
+/// R-SEC-03 / R-SEC-04 / W4-1）共用本函数；此前是逐处内联的同一表达式，
+/// 单一实现可以避免判定口径漂移。
+fn is_non_loopback_bind(addr: &str) -> bool {
+    !addr.starts_with("127.") && !addr.starts_with("localhost") && !addr.starts_with("[::1]")
 }
 
 /// 开发模式：同时启动单节点 Server + Agent

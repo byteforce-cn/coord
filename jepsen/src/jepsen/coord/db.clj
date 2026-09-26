@@ -139,6 +139,10 @@
        (str "agent_bootstrap_tokens = [\"" (:agent-bootstrap-token db) "\"]\n"))
      "auth_root_key = \"" (:auth-root-key db) "\"\n"
      "raft_shared_secret = \"" (:raft-secret db) "\"\n"
+     ;; W4-1：lab 是 docker 内网测试环境（非生产），gRPC 未启用 TLS；
+     ;; coord 默认 fail-closed（鉴权开启 + 非 loopback gRPC + 无 TLS ⇒ 拒绝启动，
+     ;; R-SEC-04），此处为显式逃生阀。生产严禁开启。
+     "allow_plaintext_remote = true\n"
      (when multi-raft multi-raft))))
 
 (defn- write-config!

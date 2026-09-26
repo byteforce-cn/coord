@@ -60,7 +60,7 @@ Server 的 `50051` / `50052` 端口仅对 Agent 可达，**对业务应用永不
 |:---|:---|
 | KV / Txn / Watch / Lease | 单 Region 内线性一致；Jepsen 工程已就位，**产物已入仓**（见「验证与质量」） |
 | Auth / RBAC | 用户 / 角色 / 权限，Ed25519 CCT 令牌，登录限流 |
-| TLS / mTLS | gRPC 与 Raft 通道加密。**并非 fail-closed**：`dev` 模式、以及“开启鉴权 + 配了 `raft_shared_secret`”的集群仍会以明文启动。只有在（a）鉴权关闭**且**绑定非 loopback，或（b）Raft 端口非 loopback 且既无 Raft mTLS 又无 `raft_shared_secret` 时才拒绝启动。生产请显式配置 `[tls]` |
+| TLS / mTLS | gRPC 与 Raft 通道加密。**默认 fail-closed**（W4-1，2026-09-26）：鉴权开启时，gRPC 绑定非 loopback 必须配置 TLS（`[security] tls_cert/tls_key`，配 `tls_ca` 即 mTLS），否则拒绝启动、不静默降级明文；此外（a）鉴权关闭且绑定非 loopback、（b）Raft 端口非 loopback 且既无 Raft mTLS 又无 `raft_shared_secret`，同样拒绝启动。dev/test 若确需明文远端，只能显式 `security.allow_plaintext_remote = true`（默认 false，启动日志会 WARN 明示）。`coord -- dev` 仍是 loopback 优先的 dev 模式（绑非 loopback 必须 `--allow-insecure`） |
 | 静态加密 | AES-256-GCM，外加 Shamir 分片的 Seal / Unseal |
 | 运维 | 快照、MVCC 压缩、动态成员管理、Prometheus 指标 |
 | Multi-Raft（opt-in） | 多 Raft 组 Region 分片 + 内嵌 PD 调度；`[multi_raft]` 显式开启（见 [`config.example.toml`](config.example.toml)） |

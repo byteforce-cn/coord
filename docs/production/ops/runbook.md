@@ -65,6 +65,10 @@ coord server --config /etc/coord/coord.toml --bootstrap
 - `/ready` 恒 503 → 未选出 leader。查 `raft_leader_id` 指标、节点间 raft 端口连通性、
   `security.raft_shared_secret`（配了 raft mTLS/共享密钥的集群，密钥不一致会互相拒绝）。
 - 启动即退出且报 TLS 文件读取失败 → `--tls-*` 路径/权限问题（fail-closed，不会降级明文）。
+- 启动即退出且报 `R-SEC-04`（`auth_enabled with non-loopback grpc bind …`）→ 鉴权开启 +
+  gRPC 绑定非 loopback 但没配 `[security] tls_cert/tls_key`。配置证书（mTLS 另配
+  `tls_ca`），或**仅限 dev/test** 显式 `allow_plaintext_remote = true`（默认 false，
+  会 WARN；生产不得开启）。
 
 ### 1.2 后续节点（join）
 

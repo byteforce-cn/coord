@@ -873,6 +873,15 @@ pub struct SecurityConfig {
     #[serde(default)]
     pub raft_shared_secret: Option<String>,
 
+    /// W4-1（R-SEC-04）gRPC 侧 TLS fail-closed 的**显式逃生阀**（默认 false）。
+    ///
+    /// 默认（false）：`auth_enabled = true` 且 `grpc_addr` 绑定非 loopback 时，
+    /// 必须配置 gRPC TLS（`tls_cert/tls_key`），否则**拒绝启动**（不静默明文降级）。
+    /// 仅 dev/test（如 docker 内网的 jepsen lab）可显式置 true 恢复明文远端；
+    /// 生产集群严禁开启——启用时启动日志会以 WARN 明示该形态。
+    #[serde(default)]
+    pub allow_plaintext_remote: bool,
+
     /// Agent 注册引导令牌（一次性；默认空 = 不开放 agent 自助注册）。
     ///
     /// agent 配置 `[auth].bootstrap_token` 后，用该令牌调 `Auth.Bootstrap`
@@ -904,6 +913,7 @@ impl Default for SecurityConfig {
             encryption_enabled: false,
             encryption_root_key: None,
             raft_shared_secret: None,
+            allow_plaintext_remote: false,
             agent_bootstrap_tokens: Vec::new(),
         }
     }
