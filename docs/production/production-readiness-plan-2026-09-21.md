@@ -924,8 +924,8 @@ W3-2…W3-9、W4-1 TLS fail-closed、§1.3 案 A/B 人力裁定。
 > **M1 出口进度（2026-09-26 复核）**：`matrix-m2` 由红转绿 ✅（第十一轮（续））；
 > F-27 ✅ / F-68 ✅ / F-05 ✅；**W1-1…W1-7 已全部完成**（W1-4/W1-5 见第四轮台账
 > §11:598-601，W1-6/W1-7 见同轮 :623-624）⇒ **M1 出口三条全部达成，M1 达成**
-> （早于 10-24 里程碑日）。尚欠 **M0 一项**：W2-4（分支保护，仓库设置项，需 admin
-> ；W2-3 已于第十三轮完成 —— 16 红分解 + 判定流程，见 §11 第十三轮与 forensics §7）
+> （早于 10-24 里程碑日）。**M0 亦达成**：W2-3 第十三轮完成（16 红分解 + 判定流程）；
+> W2-4 于 2026-09-26 由 admin 启用（读数与直推被拒实证见 forensics §4/§7 与 §11 第十四轮）
 > ；后续按 §6 推进 W3 覆盖（含 10-31 硬期限的
 > idgen/registry lab 产物）与 W4。
 
@@ -946,9 +946,12 @@ W3-2…W3-9、W4-1 TLS fail-closed、§1.3 案 A/B 人力裁定。
 | **W2-3 取证：3 次 soak 红** | ✅ 形态判定 + **口径修正** | 三次均为 `chaos_soak_distributed` @ `chaos_real.rs:562`（`soak put failed at iteration 793/958/784`）；**无注水**、**单 pass 零重试**（三节点各一次机会）、失败于 196–240s；同 run kill9 套件绿、50 次收敛检查从未触发。修正：新增 `soak_put()`（3 pass × 250ms，瞬时失败**可见不判红**，超窗口 panic 带全部错误串＋快照＋瞬时报数）；本地验证 45s ⇒ `writes=194 transient_retried_ok=0` ✓ | 三次红早于"逐节点错误串"诊断落地 ⇒ **不声称**根因（产品瞬断 vs 环境抖动）；新口径下判红 = "**重试窗口内仍写不进**" |
 | **判定流程（W2-3 产物）** | ✅ 完成（取代旧 §3.3） | forensics §7.5：失败 step × 签名 → 归因表；**无法归类必须显式登记**（禁止"偶发"结案）；绿色 run 的 `transient_retried_ok > 0` 也要登记 | 门禁可诊断性 + 观察义务 |
 | **W3-8 台账（参数确认）** | ✅ 15 份回填 / 4 份保持待填 | `backfill-param-confirmation.sh --check` ⇒ **待填 4 / 已回填 39 / 无该字段 3**；`PARAM-CONFIRMATION.md` 2026-09-26 更新段 | 按**第十轮裁定**拆分覆盖面：①–⑧ 覆盖的 15 份回填；**mq ×4 因 ⑨–⑫ 未确认保持待填**。本轮曾误全量回填（含 mq），同一会话内**回退 4 份 + 重算校验和**，两处文档均留痕 |
-| chaos 稳定性宣布 | 🟡 **仍不宣布** | 最后一次 chaos 红 = `cab765a`（09-24，F-05 形态）；其后**连续绿 n=11**（不含在跑的 `42c09ca`） | n 不足，且其中 9 次早于 W1-2 修复 |
+| **CI 实证（`f20501c`）** | ✅ **全 job success** | run **`36219956592`**：`fmt+clippy` / **`real-process chaos`** / `workspace tests` / `gate self-check` / `cargo audit + deny` / `proto contract` / `java sdk` / `java example integration` / `plugin matrix` / `frontend lint` / `Security audit` 全 success（`weekly perf baseline` skipped：push 不跑）。该 run 同时覆盖 `120474c` 的 soak 判据改动 | **观察义务（§7.5）首次执行**：chaos 日志两处 `soak summary` ⇒ `writes=1305 transient_retried_ok=0`（300s 档）与 `writes=492 transient_retried_ok=0`（120s 档）⇒ **零瞬时失败**，登记表无新增 |
+| chaos 稳定性宣布 | 🟡 **仍不宣布**（n=12） | 最后一次 chaos 红 = `cab765a`（09-24，F-05 形态）；其后**连续绿 n=12**（9 次窗口内 + `109b462` + `44d4156` + `f20501c`；cancelled/取代不计） | n 仍不足门槛；其中 9 次早于 W1-2 修复；`f20501c` 是**soak 判据修正后**的首个 green（两档 soak 零瞬时失败） |
 
-**第十三轮未触碰**：W2-4（仓库设置，需 admin）、W3、W4、§1.3 裁定。
+| **W2-4（分支保护）** | ✅ **关闭（2026-09-26 实测）** | `GET /branches/main/protection` 读数：`enforce_admins=true`、`strict=true`、必需检查 3 条（`fmt + clippy -D warnings` / `workspace tests` / `proto contract`）、无必审 review；**负控制**：直推 `main` ⇒ `GH006 Protected branch update failed`（正是计划书要求的验证判据） | 自本轮起所有变更走 **PR + 必需检查**；`docs/production/ops/ci-gate-forensics-2026-09-22.md` §4 已更新 |
+
+**第十三轮未触碰**：W3、W4、§1.3 裁定。
 
 ---
 

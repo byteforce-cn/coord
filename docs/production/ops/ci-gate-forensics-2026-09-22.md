@@ -305,7 +305,7 @@ error: failed to push some refs to 'https://github.com/byteforce-cn/coord'
 |:--|:--|
 | §2.2「定时门禁不可信」表 | 三处红各自**收窄/定位**：audit **根因已定位并修复**；perf **红在测试内部（已排除 baseline 那条路）**；chaos **收窄到第一个套件** |
 | §2.2「限制与诚实声明」 | 原来"没有根因"的部分，靠 check-run 注释 + action 源码 + advisory-db 交叉比对补齐了一条取证通道（§0） |
-| §5 W2-1 / W2-2 / W2-3 / W2-4 | W2-2 完成；W2-1 部分（见 §2.4）；W2-3 部分（判定流程见 §3.3，后由 §7 全量取证）；**W2-4 ✅ 已落地并实证（§4，2026-09-26）** |
+| §5 W2-1 / W2-2 / W2-3 / W2-4 | W2-2 完成；W2-1 部分（见 §2.4；schedule 侧已有闭环实证）；W2-3 部分（判定流程见 §3.3，后由 §7 全量取证 —— 16 红分解 + 判定流程）；**W2-4 ✅ 已落地并实证（§4，2026-09-26）** |
 | §5 W2-5 负控制演练 | 第二轮已交付 `scripts/check-gate-drills.sh` + CI 接线；**九道门逐门负控制**（1.5 人日）仍未做 |
 
 ---
@@ -587,3 +587,16 @@ CHAOS_REAL=1 SOAK_DURATION_SECS=45 cargo test -p coord --test chaos_real \
   位；**若**新口径下再现 `soak put failed … after 3 passes`，那将是**首次可归因
   的 soak 红**（带错误串+快照），按 7.5 表处置。
 - 与 §3.2 同样的纪律：本节所有"归属"列都有原文日志支撑；无原文的只进"未判定"。
+
+### 7.7 观察义务首次执行（run `36219956592`，SHA `f20501c`）
+
+修正落地后的首个 green run，两档 soak 的摘要行（`--nocapture`）：
+
+| 档 | 摘要 |
+|:--|:--|
+| 300s（`Run real-process chaos suites`） | `writes=1305 duration_secs=300 transient_retried_ok=0 transient_samples_kept=0` |
+| 120s（`Run distributed soak (smoke, 120s)`） | `writes=492 duration_secs=120 transient_retried_ok=0 transient_samples_kept=0` |
+
+⇒ **零瞬时失败**（登记表无新增）；§7.5 第 5 条的"观察义务"机制**已实际跑通**（此前此类
+信息在绿 run 中根本不存在）。全 job 结论：11 个 success + `weekly perf baseline`
+skipped（push 事件不跑）。
