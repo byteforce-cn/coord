@@ -5,7 +5,8 @@
 # 目的（P5 / W3-7）：长跑（72h / ≥14 天）期间按固定间隔采样四条曲线的原始数据：
 #   内存   rss_sum_kb            —— 该节点上 coord / coord-agent 进程 RSS 之和
 #   磁盘   disk_kb               —— /var/lib/coord 数据目录大小（du -sk）
-#   重启   restarts_total        —— 采样器累计：pid 变化 或 etimes 回退 ⇒ +1
+#   重启   restarts_total        —— 活进程 pid 变化或 etimes 回退 ⇒ +1
+#                                （进程缺席窗口不更新基线 ⇒ 一次 kill 只计 1 次）
 #   挂起   keepalive_failed_total / snapshot_not_found_total
 #                                —— 节点日志（/var/log/coord.log）的**增量**计数
 #
@@ -91,7 +92,9 @@ REMOTE
 }
 
 # 一轮采样：逐节点采样并追加一行到 curves.csv。
-# state 文件：<pid> <etimes> <restarts> <ka_total> <sn_total> <off>
+# state 文件：<last_live_pid> <last_live_etimes> <restarts> <ka_total> <sn_total> <off>
+# 重启口径：只跟踪**活进程**的 pid/etimes —— 进程缺席（pid=0，nemesis kill 窗口）
+# 不更新 last_live_*，因此「123→缺席→Y」只计 1 次（回到 Y 时 123→Y 不等）。
 sample_cycle() {
   local outdir=$1; shift
   local nodes=("$@")
@@ -114,17 +117,23 @@ sample_cycle() {
     fi
     local ok pid et n rss disk lb cka csn rot
     IFS=, read -r ok pid et n rss disk lb cka csn rot <<< "$raw"
-    if [[ "$pid" != "0" && "$prev_pid" != "-" && "$prev_pid" != "0" ]]; then
-      if [[ "$pid" != "$prev_pid" ]] || (( et < prev_et - 10 )); then
-        restarts=$((restarts + 1))
-        warn "RESTART $node: pid $prev_pid -> $pid, etimes $prev_et -> $et (累计 $restarts)"
+    if [[ "$pid" != "0" ]]; then
+      if [[ "$prev_pid" != "-" ]]; then
+        if [[ "$pid" != "$prev_pid" ]]; then
+          restarts=$((restarts + 1))
+          warn "RESTART $node: pid $prev_pid -> $pid (et $prev_et -> $et; 累计 $restarts)"
+        elif (( et < prev_et - 10 )); then
+          restarts=$((restarts + 1))
+          warn "RESTART $node: pid $pid 不变但 etimes 回退（$prev_et -> $et; 累计 $restarts）"
+        fi
       fi
+      prev_pid=$pid; prev_et=$et
     fi
     ka=$((ka + cka)); sn=$((sn + csn)); off=$lb
     (( rot == 1 )) && warn "LOG_ROTATED $node: 日志回退，已全量重扫（off=$lb）"
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
       "$ts" "$node" "$pid" "$et" "$n" "$rss" "$disk" "$lb" "$restarts" "$ka" "$sn" >> "$csv"
-    printf '%s %s %s %s %s %s\n' "$pid" "$et" "$restarts" "$ka" "$sn" "$off" > "$st"
+    printf '%s %s %s %s %s %s\n' "$prev_pid" "$prev_et" "$restarts" "$ka" "$sn" "$off" > "$st"
   done
 }
 
