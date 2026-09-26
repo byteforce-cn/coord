@@ -38,7 +38,7 @@ SOAK_DIR="$PROJECT/soak"
 PIDFILE="$SOAK_DIR/soak-curves.pid"
 KEY=/root/.ssh/id_ed25519
 
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 
 warn() { echo "[soak-curves $(date -u +%FT%TZ)] $*"; }
 
@@ -144,6 +144,8 @@ csv_header() {
 cmd_once() {
   local outdir=${1:-}; shift || true
   [[ -n "$outdir" ]] || usage
+  # 解析到绝对路径（如果经 store/coord/latest 之类的软链进来，现在就钉住实际目录）
+  outdir=$(readlink -f "$outdir")
   local nodes
   if [[ $# -gt 0 ]]; then nodes=("$@"); else mapfile -t nodes < <(default_nodes); fi
   mkdir -p "$outdir/state"
@@ -155,6 +157,9 @@ cmd_once() {
 cmd_start() {
   local outdir=${1:-}; shift || true
   [[ -n "$outdir" ]] || usage
+  # 解析到绝对路径（如果经 store/coord/latest 之类的软链进来，现在就钉住实际目录，
+  # 避免 latest 软链后续移动导致曲线分散到两个 run 目录）
+  outdir=$(readlink -f "$outdir")
   local interval=${1:-300}; shift || true
   local nodes
   if [[ $# -gt 0 ]]; then nodes=("$@"); else mapfile -t nodes < <(default_nodes); fi
@@ -251,7 +256,7 @@ cmd_stop() {
   local pid; pid=$(running_pid || true)
   if [[ -z "$pid" ]]; then
     echo "soak-curves not running"
-    rm -f "$PIDFILE" "$SOAK_DIR/curves.outdir"
+    rm -f "$PIDFILE"
     exit 0
   fi
   echo "stopping soak-curves (session $pid)…"
