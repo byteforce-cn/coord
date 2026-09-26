@@ -218,6 +218,10 @@ PERF_GATE=1 cargo test --release -p coord --test perf_bench -- --ignored --nocap
 - ✗「chaos 的红是假红」——没有证据；
 - ✗「chaos 的红是真缺陷」——同样没有证据。
 
+> **2026-09-26 更新**：API token（`$GHT`）可用后，历史 job 日志已可下载 ⇒ **§7 完
+> 成了全量取证**（16 红逐条分解、3 次 soak 红的形态判定、判据修正与本地验证）。本节
+> "日志 403" 的限制**只对 09-22 之前成立**；判定流程以 **§7.5** 为准。
+
 ### 3.3 可执行的下一步（判定流程）
 
 按计划书 W2-3 的要求，产出的是**判定流程**而不是猜测：
@@ -430,3 +434,119 @@ step 7（新加的 `wire-descriptor` 注入步）红、退出码 1，其后 3 �
    **>45 分钟无输出**而被终止；同一条命令在 CI 上 **2m13s** 完成；途中
    `m0_snapshot_purge_then_restart` 也报了 >60s）。⇒ 本地全量只能当“烟测”，
    权威结论以 CI 为准（这也解释了为什么 §6.2 的注解通道是必需品而不是锦上添花）。
+
+---
+
+## §7 第十三轮（2026-09-26）：chaos 红**全量取证**（token 可得后）+ 浸泡写活性判据修
+正
+
+§3 的"日志 403 ⇒ 无法判定"在 API token（`$GHT`，**不落盘、不打印**）可用后解除。
+本节把 W2-3 从"范围收窄"推到"**分布已分解 + 判据已修正**"。
+
+### 7.1 取数方法（可复现）
+
+```bash
+# 1) 列 CI run（可按 created_at / conclusion 过滤）
+curl -s -H "Authorization: Bearer $GHT" \
+  'https://api.github.com/repos/byteforce-cn/coord/actions/runs?per_page=100&page=1'
+# 2) 逐 run 取 job 结论与失败 step
+curl -s -H "Authorization: Bearer $GHT" \
+  'https://api.github.com/repos/byteforce-cn/coord/actions/runs/<run_id>/jobs'
+# 3) 下载失败 job 的完整日志（跟随 302，日志保留期内均可得）
+curl -sL -H "Authorization: Bearer $GHT" \
+  'https://api.github.com/repos/byteforce-cn/coord/actions/jobs/<job_id>/logs' \
+  -o /tmp/job.log
+# 4) 抽签名
+grep -nE "panicked at|FAILED|##\[error\]|panic:" /tmp/job.log
+```
+
+### 7.2 分布（窗口 = 最近 60 次 `CI` run，覆盖 2026-09-12…09-25；chaos job 口径）
+
+| chaos job 结论 | 次数 |
+|:--|--:|
+| success | 34 |
+| **failure（红）** | **16** |
+| cancelled（并发取代，**不是红**） | 8 |
+| skipped / 无该 job（窗口边缘的旧 run） | 1 / 1 |
+
+16 红的**逐条分解**（每条都有下载到的日志原文支撑）：
+
+| 签名 | 次数 | 失败形态（原文） | 归属 |
+|:--|--:|:--|:--|
+| `dtolnay/rust-toolchain@master` step 本身 | 7 | `##[error]Process completed with exit code 1`；日志含该 action 自带的 `Work around spurious network errors in curl 8.0` 包装步骤（全部发生在 09-12 半天内） | **基建红**（runner/网络；与产品无关） |
+| `plugin_real_agent_process_e2e` @ `plugin_real_process_test.rs:623` | 4 | `plugin KV write must still succeed after agent restart (persisted account): … ErrForbidden: unauthenticated: missing CCT token`（09-13 05:14–10:36 的迭代 push） | **真实缺口（当日已修）**：CCT 恢复路径；其后同套件全绿 |
+| `agent_forwards_credentials_and_enforces_scope_under_auth` @ `agent_auth_process_test.rs:516` | 2 | 09-13 10:36 与 09-24 13:38（`cab765a`） | **F-05 形态**（登录限流 × 重启窗口）；W1-2 已于 09-26 收口（类别可区分性 + 3× kill-all 统计） |
+| `chaos_soak_distributed` @ `chaos_real.rs:562`（`soak put failed at iteration N`） | 3 | 09-18 schedule（N=793）、09-21 schedule（N=958）、09-23 push（N=784） | **口径缺陷（本轮修正，见 7.4）**；根因（产品瞬断 vs 环境抖动）**不声称**已定位 |
+
+**同 run 佐证**（三份 soak 红日志一致）：`chaos_real_kill9_and_linearizability` 均
+**通过**；50 次写一次的收敛检查从未触发（无 `diverged` 记录）；红只发生在 soak 的单
+个迭代。
+
+### 7.3 三次 soak 红的可判定/不可判定
+
+- **可判定**（日志直接给出）：
+  - 全部是 `chaos_soak_distributed` 的**无注水**浸泡阶段（本套件不注入任何故障）；
+  - 失败时为"**每节点一次机会**"的单 pass，即**三节点同时失败一次即判红，零重试试
+    错**；
+  - 失败时刻 ≈ 浸泡开始后 **196–240s**（迭代数 × 实测 ~250ms/迭代，预算 300s）；
+  - 出错前瞬时统计不可得（该次 run 早于 09-23 的"逐节点错误串"增强）。
+- **不可判定**（诚实边界）：三次的 gRPC 错误内容**没有落进日志**（增强在其后落
+  地）⇒ 不能区分「无 quorum 瞬断」与「连接/环境抖动」。**不写"假红"也不写"真缺陷"
+  。**
+
+### 7.4 落地：浸泡写判据修正（有界重试 + 瞬时失败自描述）
+
+**判据口径**：无注水集群上，**单 pass** 三节点同时失败**不是**活性违反 —— 领导权抖
+动（含 CI 负载导致的选举超时）会让某个瞬间任何节点都写不进；活性判据应为「**有界重
+试窗口内仍写不进**」。
+
+改动（`coord/tests/chaos_real.rs`）：
+
+- 新增 `soak_put()`：最多 `SOAK_PUT_PASSES = 3` 轮（轮间 250ms，覆盖一次典型重新选
+  举的亚秒级时长），返回**每个失败 pass 的逐节点错误串**与所用 pass 数；
+- 浸泡循环与**终态 put** 都走同一口径；超出窗口才 panic，panic 消息携带**全部 pass
+  的错误串 + 集群快照 + 之前瞬时次数**（经注解通道直接可见）；
+- 瞬时失败（重试后成功）**不判红但必须可见**：逐条打印（保留前 10 条样例）+ 计数进
+  入收尾摘要行：
+
+  ```text
+  soak summary: writes=194 duration_secs=45 transient_retried_ok=0 transient_samples_kept=0
+  ```
+
+**本地验证**（2026-09-26，debug 二进制）：
+
+```bash
+CHAOS_REAL=1 SOAK_DURATION_SECS=45 cargo test -p coord --test chaos_real \
+  chaos_soak_distributed -- --ignored --nocapture --test-threads=1
+# ⇒ 1 passed; summary: writes=194 transient_retried_ok=0
+```
+
+### 7.5 判定流程（**取代 §3.3**）
+
+1. 取 run 的 jobs ⇒ 找到红 job 与**失败 step 名**；
+2. 下载该 job 日志，抽签名（7.1）；
+3. 按**归因表**分流：
+
+   | 失败 step / 签名 | 归类 | 处置 |
+   |:--|:--|:--|
+   | `dtolnay/rust-toolchain@master` 等**基建 step** | 基建红 | 记录 + 重跑；不进入产品缺陷台账 |
+   | `Run real-process chaos suites` ⇒ `chaos_soak_distributed` | 写活性（新口径：重试窗口） | 有错误串 ⇒ 按"可达但拒绝写（无 quorum）/ 不可达"分流；无错误串 ⇒ 不可能（新口径必带串） |
+   | `Run real-process chaos suites` ⇒ `chaos_real_kill9_and_linearizability` / `…diverged` / 线性一致违反 | **产品红** | 立即立项（规则 4） |
+   | `Run agent+auth …` ⇒ `agent_forwards_credentials…` | F-05 类别 | 若再现 ⇒ **重开 F-05**（W1-2 的收口只覆盖其统计面） |
+   | `Run plugin engine real-process e2e` ⇒ `missing CCT token` | CCT 恢复类别 | 同上表定位 |
+   | 其它/无法归类 | **未判定** | **必须**在本节新增一行登记（禁止"偶发"二字结案） |
+
+4. 只有「**重试窗口内仍失败** / 节点发散 / 线性一致违反」才算产品红；其余红（基建、
+   已修类、口径类）也要**归档证据后**方可重跑。
+5. **绿色 run 的观察义务**：`soak summary` 行 `transient_retried_ok > 0` 时要在此登
+   记（它是对"领导权抖动"的直接观测）。
+
+### 7.6 残余与不声称
+
+- **不宣布 chaos 稳定**。事实记账：最后一次 chaos 红 = `cab765a`（09-24 13:38，
+  F-05 形态）；其后 chaos job **连续绿 n=11**（09-24T14:32 … 09-26 `44d4156`；不含
+  尚在跑的 `42c09ca`）。n=11 仍小于"宣布稳定"的门槛，且其中 9 次早于 W1-2 修复。
+- 三次历史 soak 红在**新口径下大概率不会判红**，但这是**口径修正**，不等于根因定
+  位；**若**新口径下再现 `soak put failed … after 3 passes`，那将是**首次可归因
+  的 soak 红**（带错误串+快照），按 7.5 表处置。
+- 与 §3.2 同样的纪律：本节所有"归属"列都有原文日志支撑；无原文的只进"未判定"。
