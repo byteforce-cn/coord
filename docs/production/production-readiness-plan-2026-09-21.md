@@ -893,7 +893,7 @@ W3-2…W3-9、W4-1 TLS fail-closed、§1.3 案 A/B 人力裁定。
 | **lease/pause 单元复跑** | 修复后稳定性 | ✅ **3/3 绿** | `make -C jepsen/lab test WORKLOAD=lease NEMESIS=pause TIME_LIMIT=45 …`（每轮 env-reset） | 3 轮 `violations-by-class {}`，`:liveness-unjudged 9/15/13`（如实计数） |
 | **matrix-m2（M1 出口）** | 全 8 格 | ✅ **ALL M2 MATRIX PASSED** | `make -C jepsen/lab matrix-m2 JEPSEN_PROVIDER=docker`（exit 0；8 格逐格绿） | watch×{none,kill,pause,partition-halves} + lease×{none,kill,pause,partition-halves} 全绿；**第十轮的 U-13 残余（lease/partition-halves 4 条）与本次 lease/pause 均转绿** |
 | **证据归档** | 两格归档 | ✅ | `collect-evidence.sh m2-lease-pause-fixed` / `m2-lease-partition-halves` | `docs/production/evidence/20260926T035534Z-m2-lease-pause-fixed/`、`…T035535Z-m2-lease-partition-halves/`（均 clean、`overall-valid: true`、`violations-by-class {}`）；旧口径红格诊断归档 `…T032009Z-m2-lease-pause-leader-freeze-diag/` |
-| **CI 实证** | `12bf740`（F-72 代码） | 🔄 运行中 | `/actions/runs/36215852431` | 结果随下一轮台账回写 |
+| **CI 实证** | `12bf740`（F-72 代码）+ `44d4156`（台账） | ✅ **全 job success**（门禁 run `36216573898`，HEAD） | `/actions/runs/36216573898`（push；11 success + `weekly perf baseline` skipped，符合设计） | 含 `workspace tests` / `fmt+clippy` / `gate self-check` / `cargo audit + deny` / **`real-process chaos`（约 29 分钟，success）** 等全绿。⚠️ `12bf740` 自己的 run `36215852431` 被随后推送触发的并发组**取消**（superseded）——有效门禁以 HEAD 的 run 为准；另注：GitHub badge/shields 会拾取"最近一次完成的 run"而把被取消的旧 run 显示为 `failing`，**判读 CI 一律以 `/actions/runs/<HEAD 的 run>` 逐 job 为准** |
 
 > **判据达成说明**：「matrix-m2 由红转绿」（§6.1 M1 出口之一）**达成**：
 > 第十轮记 `7/8`（lease/partition-halves 红，U-13 残余）；本轮 8/8 全绿，
