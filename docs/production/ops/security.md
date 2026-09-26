@@ -1,13 +1,16 @@
 # 安全面现状与处置计划（W4-1 / W4-2 / W4-5）
 
-- **日期**：2026-09-21
+- **日期**：2026-09-21（**更新**：2026-09-26，W4-1 落地记录见 §1.4）
 - **锚点**：`docs/production/production-readiness-plan-2026-09-21.md` §5 W4、§3 D-11、P-Gate 6
 - **纪律**：本文「现状」列的每条都带 `file:line` 或可重跑命令；「未做」的**必须**写清楚
   为什么不能在本轮做（尤其是会影响别的门禁的）。
 
 ---
 
-## §1 TLS：当前**不是** fail-closed（W4-1，🔴 未完成）
+## §1 TLS：fail-closed（W4-1）—— ✅ **已落地（2026-09-26，第十四轮；实现见 §1.4）**
+
+> 下面 1.1–1.3 保留 2026-09-21 的现状核验与处置计划原文（决策记录）；实际执行采用
+> "逃生阀先行"的等价序，理由与代价见 §1.4.1。
 
 ### 1.1 事实（本轮核验）
 
@@ -22,7 +25,7 @@
 - dev 模式的第三条在 `coord/src/main.rs:3789-3796`（`allow_insecure` 必须显式给）。
 
 ⇒ 也就是说：**「鉴权开启 + gRPC 端口在可路由地址上 + 无 gRPC TLS」这一条没有被拦**。
-这正是 P-Gate 6 要关的口子。
+这正是 P-Gate 6 要关的口子。（**2026-09-26 已关闭**，见 §1.4。）
 
 ### 1.2 为什么本轮**没有**直接改（关键约束）
 
@@ -47,6 +50,42 @@
 
 **本轮交付**：本节的**现状 + 计划 + 阻塞理由**（可核验），**不是**「已完成」。
 按 §7 证据规范，未做的不写成已做。
+
+### 1.4 落地记录（2026-09-26，第十四轮）
+
+**实现**（`coord/src/main.rs` 6.5 节，紧跟「无鉴权拒绝」之后）：`auth_enabled = true`
+且 `grpc_addr` 绑定非 loopback 且未配置 gRPC TLS（`tls_cert/tls_key`）⇒ **拒绝启动**
+（错误含 `R-SEC-04` 与逃生阀名，不静默降级明文）。唯一逃生阀 = 显式
+`security.allow_plaintext_remote = true`（新字段，默认 `false`；启用时启动日志 WARN
+明示）。三处 fail-closed 判定（无鉴权 / gRPC 无 TLS / raft 无 mTLS+密钥）统一为
+`is_non_loopback_bind()` 单一实现。
+
+**正反双向判据**（`coord/tests/plaintext_remote_failclosed_test.rs`；本机实测 4 ✓）：
+
+| # | 形态 | 期望 | 实测 |
+|:--|:--|:--|:--|
+| 1 | 非 loopback gRPC + 鉴权 + 无 TLS + 无逃生阀 | 拒绝启动（exit≠0；信息含 `R-SEC-04`+`allow_plaintext_remote`；端口不残留） | ✅ |
+| 2 | 同上 + `allow_plaintext_remote = true` | 启动到 serve 且日志 WARN 明示 | ✅ |
+| 3 | 同上 + CA 签发 `tls_cert/tls_key/tls_ca` | 启动到 serve（raft TLS 启用时强制 `tls_ca`，沿用既有校验） | ✅ |
+| 4 | loopback gRPC + 鉴权 + 无 TLS | 不因本规则拒绝（不误伤 dev/test） | ✅ |
+
+复跑：`cargo test -p coord --test plaintext_remote_failclosed_test -- --test-threads=1`。
+回归：`raft_sec03_failclosed_test` / `dev_insecure_bind_test` / `auth_enforcement_test` /
+`cli_tls_test` 全绿（9 ✓）；六道卡口（wire-sync / wire-descriptor / sdk-sync / panics /
+error-code / gate-drills）全 `exit 0`。
+
+**口径同步**：README（EN/zh-CN）TLS 行、`config.example.toml`（新增注释）、
+`boundaries.md` B-SE-1、`runbook.md` §1.1、接入手册 §4 的 P1/P3/P4/P6/P8 行。
+
+#### 1.4.1 与原计划的差异（为什么"逃生阀先行"）
+
+原计划序为 ①lab 先启 mTLS → ②拒绝规则 → ③逃生阀。按原序，① 需要 lab 全节点 + 客户
+端侧完成 mTLS 接入（`db.clj` 证书生成/分发、Clojure 客户端与 agent 的 TLS 通道），是
+本轮无法可靠完成的工程量。改为 **②+③ 先行**：规则与逃生阀同时落地，**lab 以显式逃生阀
+保持全部证据链**（`jepsen/src/jepsen/coord/db.clj` 写入 `allow_plaintext_remote = true`
++ 注释）。**残余（已记账）**：lab 仍以明文运行（显式 opt-in、非静默）；**lab 启用 mTLS**
+保留为 W4-1 的后续强化项——它不影响 P6 判据（判据 = 默认拒绝 + 负控制 + 显式逃生阀），
+但作为"证据链本身也跑在 TLS 上"的加强，登记于计划书 §11 第十四轮待办。
 
 ---
 
@@ -80,13 +119,15 @@ head -c 32 /dev/urandom > /var/lib/coord-agent/transit-kek.bin && chmod 600 …
 ### 2.3 与 P-Gate 6 的关系
 
 P-Gate 6 的「KEK 供给裁定落地」项由此**转绿**（本地可重跑判据齐全）；
-P-Gate 6 整体仍红——TLS fail-closed（W4-1）未完成；**第三方审计已按 U-14（2026-09-25）移出门槛**
-（不采买 ⇒ 改为「未经独立审计」边界声明判据，见计划书 §8.7），
-且按 W2 的裁决，本轮所有绿在 W2 完成前**不计入对外门禁证据**。
+**TLS fail-closed（W4-1）已于 2026-09-26 落地**（正反双向判据见 §1.4）；
+**第三方审计已按 U-14（2026-09-25）移出门槛**（不采买 ⇒ 改为「未经独立审计」边界声明判据，
+见计划书 §8.7）。P-Gate 6 剩余项 = `cargo deny` 的 bincode 豁免替代路径
+（W4-4 分阶段，P3 完成才删豁免）。按 W2 的裁决，W2 完全收口前所有绿**不计入对外门禁证据**
+（W2 收口进度见计划书 §11 第十四轮）。
 
 ---
 
-## §3 Gate 0 四条回归（W4-5，🟡 部分）
+## §3 Gate 0 四条回归（W4-5，✅ 四条全绿；RSS 口径 2026-09-23 落地）
 
 | # | 回归项 | 现状 | 判据 |
 |:--|:--|:--|:--|

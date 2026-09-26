@@ -151,8 +151,11 @@ enabled = false
 # 生产：配置证书 + CA → raft/gRPC 强制 mTLS（缺 CA 拒绝启动，fail-closed）
 # tls_cert = "/etc/coord/server.crt"
 # tls_key  = "/etc/coord/server.key"
-# tls_ca    = "/etc/coord/ca.crt"
-
+# tls_ca    = "/etc/coord/ca.crt"#
+# W4-1（R-SEC-04）gRPC TLS fail-closed：auth_enabled=true 且 grpc_addr 非 loopback
+# 时必须配置 tls_cert/tls_key，否则拒绝启动（不静默明文降级）。
+# 仅 dev/test（如容器内网 lab）可显式逃生（默认 false；生产严禁开启）：
+# allow_plaintext_remote = true
 auth_enabled = true                     # 生产默认开启（唯一开关）
 
 # ── 以下三项必须显式配置（占位默认值会被启动校验拒绝）──

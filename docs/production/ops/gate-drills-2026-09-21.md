@@ -157,3 +157,25 @@ CI 侧：卡口接 `lint` job（"Promise ↔ docs consistency gate"）；self-ch
 P7（告警↔runbook）/ **P9（本轮新增）**。剩余 3 道：P3–P6（需 lab；**2026-09-25 U-14 后
 P6 不再依赖第三方审计**，负控制改为 TLS fail-closed 注入 + 边界声明 diff）、
 P8（需仓库设置 + 真发布）。
+
+**2026-09-26（第十四轮）再补两道（见 §4.5）**：**P6**（TLS fail-closed 负控制：非 loopback
++ 鉴权 + 无 TLS ⇒ 拒绝启动；4 条进程级正反测试）与 **P8 的仓库设置面**（分支保护已设置，
+直推 main 被 GH006 拒绝——真实推送实证）。剩余：P3–P5（lab 组）与 P8 的**真发布**面
+（随 W7-3 做）。
+
+### 4.5 第十四轮新增（2026-09-26）：P8（分支保护）+ P6（TLS fail-closed）
+
+**P8 仓库设置面 —— 分支保护负控制（注入"直推违规" ⇒ 必须置红）**：
+
+| 项 | 内容 |
+|:--|:--|
+| 设置 | `PUT /repos/byteforce-cn/coord/branches/main/protection`：`strict=true`、3 个必需检查（`fmt + clippy -D warnings` / `workspace tests` / `proto contract (buf lint + breaking)`）、**`enforce_admins=true`**、禁强推/禁删除。回读与方法见 `ops/ci-gate-forensics-2026-09-22.md` §4 |
+| 注入 | 构造从未被 CI 验证过的提交（空提交），`git push origin HEAD:main` |
+| 期望 | 被拒（`GH006`，提及必需检查未满足） |
+| 实测 | ✅ `remote: error: GH006: Protected branch update failed for refs/heads/main.` / `remote: - 3 of 3 required status checks are expected.` / `! [remote rejected] HEAD -> main (protected branch hook declined)`，`exit=1` |
+| 注意 | **`git push --dry-run` 不构成证据**：dry-run 不下发服务端更新（实测 dry-run=`exit 0` 且显示可直接推送），必须真实推送 |
+
+**P6 —— TLS fail-closed 负控制（注入"非 loopback + 鉴权 + 无 TLS" ⇒ 必须拒绝启动）**：
+判据 `coord/tests/plaintext_remote_failclosed_test.rs` 4 条（拒绝含 `R-SEC-04` 文案 /
+逃生阀正例 / TLS 正例 / loopback 豁免），本机全绿；落地记录见
+`docs/production/ops/security.md` §1.4。

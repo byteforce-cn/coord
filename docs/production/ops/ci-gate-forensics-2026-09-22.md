@@ -237,28 +237,65 @@ PERF_GATE=1 cargo test --release -p coord --test perf_bench -- --ignored --nocap
 
 ---
 
-## §4 W2-4：分支保护（B5⑧）—— ⛔ 本环境**阻塞**
+## §4 W2-4：分支保护（B5⑧）—— ✅ **已落地并实证（2026-09-26，第十四轮）**
 
-- 读该设置需要鉴权：`GET /repos/byteforce-cn/coord/branches/main/protection`
-  ⇒ **401 Requires authentication**（匿名不可读）。
-- 本环境没有 `gh`、也没有可用于 REST 的 token（推送走 VS Code 注入的
-  `GIT_ASKPASS`，不应把凭据取出当 API token 用）。
-- 因此 **W2-4 仍是未完成项**，且**无法由仓内产物证明**——与 §9 的 U-02（人力）同类：
-  属**组织/仓库设置事实**，必须由有 admin 权限的人执行并留档。
+> 本节 2026-09-22 的原状态是「⛔ 本环境阻塞」（无 `gh`、无可用于 REST 的 token ⇒
+> `GET .../protection` 401）。第十四轮拿到 **repo admin token** 后一次性完成设置与
+> **负控制实证**；原拟命令与实际的差异、证据原文见下。
 
-可执行命令（交给有权限的人）：
+### 4.1 设置（实际执行）
 
 ```bash
-# 需要 repo admin 的 token
-gh api -X PUT repos/byteforce-cn/coord/branches/main/protection \
-  -F required_status_checks.strict=true \
-  -F 'required_status_checks.contexts[]=fmt + clippy -D warnings' \
-  -F 'required_status_checks.contexts[]=workspace tests' \
-  -F 'required_status_checks.contexts[]=proto contract (buf lint + breaking)' \
-  -F enforce_admins=false -F required_pull_request_reviews='' -F restrictions=''
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" \
+  https://api.github.com/repos/byteforce-cn/coord/branches/main/protection \
+  -d '{"required_status_checks":{"strict":true,"contexts":["fmt + clippy -D warnings","workspace tests","proto contract (buf lint + breaking)"]},"enforce_admins":true,"required_pull_request_reviews":null,"restrictions":null}'
 ```
 
-**验证判据**（设置后必须做）：向 `main` 直接 push 被拒。
+回读（`GET .../branches/main/protection`）：`strict=true`；3 个必需检查**逐条绑定
+app_id=15368（GitHub Actions）**；`enforce_admins.enabled=true`；
+`required_pull_request_reviews=null`；`restrictions=null`；
+`allow_force_pushes.enabled=false`；`allow_deletions.enabled=false`。三个 context 名与
+本仓 check-run 名**逐字一致**（对照 `GET /commits/{sha}/check-runs`）。
+
+**与 2026-09-22 拟命令的一处差异（必须记录）**：原命令写 `enforce_admins=false`。但
+执行 token 属主的仓库权限是 `admin=true` ⇒ 在 `false` 下按 GitHub 语义 admin **可绕过**
+保护直推，与本节验证判据「直推被拒」互斥。故取 **`enforce_admins=true`**（更强：连
+admin 也受检查约束；设置本身仍可由 admin 修改，不存在锁死）。**后果**：`main` 从此
+不能直推未验证提交，日常交付改走 PR（见 4.3）。
+
+### 4.2 负控制（验证判据，已做）
+
+构造一个**从未被 CI 验证过**的提交（空提交）并**真实**推送：
+
+```bash
+git fetch origin && git checkout -b w2-4-probe origin/main
+git commit --allow-empty -m "test: W2-4 negative control"
+git push origin HEAD:main
+```
+
+实测（原文，`exit=1`）：
+
+```text
+remote: error: GH006: Protected branch update failed for refs/heads/main.
+remote:
+remote: - 3 of 3 required status checks are expected.
+To https://github.com/byteforce-cn/coord
+ ! [remote rejected] HEAD -> main (protected branch hook declined)
+error: failed to push some refs to 'https://github.com/byteforce-cn/coord'
+```
+
+**一个必须写下的踩坑**：`git push --dry-run` **exit 0** 且显示
+`f20501c..80c9328  HEAD -> main`（看起来"可推"）——**dry-run 不触发服务端保护评估**。
+**此证据只能来自真实推送**。
+
+### 4.3 语义与影响
+
+- `main` 现在只接受「3 个必需检查已在该提交上通过」的更新：正常路径 = PR 合并
+  （检查在 PR 头上跑）；非 PR 直推**同一 SHA**（检查已过）按 GitHub 语义仍允许。
+- 未要求 PR review（单人仓；`required_pull_request_reviews=null`）⇒ PR 在必需检查
+  通过后可由作者自行合并；`strict=true` 要求分支与 `main` 同步后才可合并。
+- 本仓后续轮次交付流程随之变更：**push 分支 → 开 PR → 等必需检查 → merge**
+  （不再"直推 main"）。已写入计划书 §11 第十四轮。
 
 ---
 
@@ -268,7 +305,7 @@ gh api -X PUT repos/byteforce-cn/coord/branches/main/protection \
 |:--|:--|
 | §2.2「定时门禁不可信」表 | 三处红各自**收窄/定位**：audit **根因已定位并修复**；perf **红在测试内部（已排除 baseline 那条路）**；chaos **收窄到第一个套件** |
 | §2.2「限制与诚实声明」 | 原来"没有根因"的部分，靠 check-run 注释 + action 源码 + advisory-db 交叉比对补齐了一条取证通道（§0） |
-| §5 W2-1 / W2-2 / W2-3 / W2-4 | W2-2 完成；W2-1 部分（见 §2.4）；W2-3 部分（判定流程见 §3.3）；W2-4 阻塞（§4） |
+| §5 W2-1 / W2-2 / W2-3 / W2-4 | W2-2 完成；W2-1 部分（见 §2.4）；W2-3 部分（判定流程见 §3.3，后由 §7 全量取证）；**W2-4 ✅ 已落地并实证（§4，2026-09-26）** |
 | §5 W2-5 负控制演练 | 第二轮已交付 `scripts/check-gate-drills.sh` + CI 接线；**九道门逐门负控制**（1.5 人日）仍未做 |
 
 ---
