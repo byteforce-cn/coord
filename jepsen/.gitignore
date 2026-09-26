@@ -12,3 +12,4 @@
 /store/
 *.log
 soak.pid
+soak-curves.pid

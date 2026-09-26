@@ -731,6 +731,7 @@ soak: ## Start the soak in the background on control (SOAK_HOURS / SOAK_TIME_LIM
 	$(call runctl, cd $(CTRL_PROJECT) && ./scripts/coord-soak.sh start \
 	    $(if $(SOAK_TIME_LIMIT),--time-limit $(SOAK_TIME_LIMIT),--hours $(SOAK_HOURS)) \
 	    --rate $(SOAK_RATE) --quiet $(SOAK_QUIET) --disrupt $(SOAK_DISRUPT) \
+	    $(if $(SOAK_NEMESIS),--nemesis $(SOAK_NEMESIS)) \
 	    $(if $(SOAK_REGIONS),--regions $(SOAK_REGIONS)) \
 	    --concurrency $(CONCURRENCY) \
 	    $(if $(SEED),--seed $(SEED)) \

@@ -314,7 +314,7 @@
 | W3-4 | **M5 agent 面：idgen、registry、event、RBAC 安全面**（idgen/registry 是 **10-31 硬期限，当前零产物**） | 每个面一份归档；安全面三条：断连降级 / CCT 失效回退 / 网关拒绝**是否真阻断** | 5 |
 | W3-5 | **多 agent 拓扑**（F-58） | 给出 agent 间可达的拓扑，使 **cache ISR 复制面与 mq 跨 agent 投递可测**；否则 cache/mq 的复制语义**永远无法验收** | 3 |
 | W3-6 | T6.1 72h soak-full | 72h 归档 + 分面统计（每面样本门槛达标） | 1.5 + 3d 墙钟 |
-| W3-7 | ≥14 天连续运行 | 曲线：内存 / 磁盘 / `keep_alive` / 重启次数（第四轮 §6.3.4 的四条曲线） | 1 + 14d 墙钟 |
+| W3-7 | ≥14 天连续运行 | 曲线：内存 / 磁盘 / `keep_alive` / 重启次数（第四轮 §6.3.4 的四条曲线）；**预注册与工具见 §11 第十六轮（T6.4）** | 1 + 14d 墙钟 |
 | W3-8 | §5.4 参数确认 ③ 由**引入方团队**签回 | `bash jepsen/scripts/backfill-param-confirmation.sh --check` 台账 `待签 0` | 0.5（协调） |
 | W3-9 | 所有验收 run 在 **clean tree** 上跑 | MANIFEST 的 worktree 字段为 `CLEAN`（消掉 28 份 DIRTY 的复现折扣） | 0.5 |
 
@@ -1001,6 +1001,58 @@ W3-2…W3-9、W4-1 TLS fail-closed、§1.3 案 A/B 人力裁定。
 > §5.4-⑨（默认 ttl=5s < 续期节拍 10s）**仍未裁定**，lock 验收沿用 `LOCK_TTL_SECONDS=30`
 > （即 soak 的 `--lock-ttl-seconds 30`，与 2026-09-19 M5a 验收参数一致）。watch 的
 > `unjudged-items 45`（冒烟）按「不判 ≠ 通过」口径如实记录，72h 结项时同读。
+
+---
+
+### 第十六轮追加（2026-09-26）—— 主题：**第十五轮写回（PR #4 / CI `36235977424`）+ T6.1 72h 健康检查（运行中）+ T6.4（≥14 天）预注册与曲线采集工具**
+
+> 触发：T6.1 72h 于合并完成后（10:30Z）起跑，预计 ≈09-29T10:30Z 结项。本轮**不触碰
+> 产品二进制与 lab 测试面**（运行中的 72h 证据必须可追溯），只推进 P5 第二半（W3-7）
+> 的预飞：曲线采集工具 + 14 天 run 预注册 + 健康检查。
+
+| # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
+|:--|:--|:--|:--|:--|
+| 写回-1 | 第十五轮 PR/CI 写回 | ✅ | GitHub API（`/commits/5ec4e50/pulls`、`/actions/runs?branch=main`） | PR **#4** merged **2026-09-26T10:30:09Z**；main push CI run **`36235977424`**（head `5ec4e50`）**全 job success**；tag `t6.1-72h-2026-09-26` ⇒ **`5ec4e50`**（第十五轮记录的产品二进制 `81955cc2` @ `ed15ea7`；F-73/F-74 仅 checker 侧 ⇒ 二进制等价） |
+| 健康-1 | T6.1 72h 健康检查（截至 12:50Z，运行 2h20m） | ✅ 运行中、无异常信号 | soak.log 计数 + nemesis 事件 + 节点实采 | `:ok=16460`、`:fail=291`（**全部**为白名单 `:lock-held`）、`:info=23`、**`:no-client=0` / `:unauthenticated=0`**；9 条 WARN 均为 JVM/库启动告警（Unsafe / native-access / `core/compare`），非产品面；nemesis 按排期推进：kill n3 11:03:40 → kill-stop 11:14:24（restarted）、pause n2 11:42:06 → 11:51:13、partition-stop 12:34:49Z；store 11MB；soak 进程（PID 624365）存活 |
+| 工具-1 | `soak-curves.sh`：四条曲线采集（控制机侧 detached，state 持久化） | ✅ 落地 + 实采自检 | `bash -n`；`once` 对 n1–n5 实采（一轮 0.77s）；60s 间隔 rehearsal 运行中 | 12:50:20Z 实采：n1 RSS 244MB / n2 131MB / n3 175MB、n4/n5（agent 宿主）28/23MB；**重启检测口径现场校验**：n3 `etimes` 8381→5756（≈11:14 重启）与 kill-stop 11:14:24 精确吻合；rehearsal 产物 `jepsen/store/curves-rehearsal-20260926/`（**不入证据**） |
+| 工具-2 | `collect-evidence.sh` 收录 `curves/` | ✅ 落地 + 正反双测 | 假 store 双跑（有/无 `curves/`） | 有 ⇒ `curves/*` 计入 `sha256sums.txt` + MANIFEST 新增「长跑曲线」行；无 ⇒ 与旧行为一致（零副作用） |
+| 工具-3 | `SOAK_NEMESIS` 透传（默认 `soak`，既有行为不变） | ✅ 落地 + 活体验证 | `bash -n`；`make -n` 双跑；控制机 `check`/`status` 实跑 | 默认命令无 `--nemesis` 旗标（等价旧行为）；`SOAK_NEMESIS=none` ⇒ `--nemesis none` |
+| 预注册 | **T6.4 ≥14 天连续运行**（P5 第二半 / W3-7） | ⏳ 已预注册；**两处待起跑前裁定** | 见下节 | 起跑前不得再改、跑后不得调 |
+
+#### T6.4 ≥14 天连续运行 —— 预注册（2026-09-26）
+
+**固定参数**（9 面 mix 与 T6.1 现行起跑参数一致；起跑时须给冻结 commit 打 tag
+`t6.4-14d-<YYYY-MM-DD>`，整个 14 天不得合入产品面改动——harness/文档改动须在
+collect 前保持 clean tree）：
+
+```bash
+make soakfull SOAK_TIME_LIMIT=1209600 SOAK_RATE=1 CONCURRENCY=2n SEED=42 \
+  SOAK_MIX='map=40,txn=20,scan=5,watch=15,lease=10,lock=10,election=3,registry=2,idgen=5' \
+  SOAK_EXTRA='--agents 2 --via-agent --lock-ttl-seconds 30 --watch-min-events 200 --lease-min-grants 100 --lease-min-expiries 30 --lock-min-acquires 200 --election-min-campaigns 50 --registry-min-cycles 30 --idgen-min-ids 100' \
+  [SOAK_NEMESIS=none]
+# SOAK_QUIET/SOAK_DISRUPT 保持默认 1800/600（仅故障档生效）
+# 曲线：起跑后 ≤5 分钟 ./scripts/soak-curves.sh start store/coord/latest/curves 300
+# 结项：collect-evidence.sh soak-14d <run>（自动收录 curves/ 并计入校验和）
+```
+
+**判据**（数值阈值起跑前可改、起跑后不得改）：
+1. **重启**：案 A 全程 `restarts_total=0`；案 B 仅允许 nemesis kill 窗口内重启、次数=种子回放表；
+2. **内存**：每节点 RSS 后 7 天 max ≤ 前 7 天 max × 1.25，且无 OOM / 节点重启记录；
+3. **磁盘**：`disk_kb` 后 7 天 max ≤ 前 7 天 max × 1.5，且无 `no space` 记录；
+4. **keep_alive**：`keepalive_failed_total` 全程 +0；结项时 checker `keepalive-stream-errors=0`，leaseck `liveness-unjudged` 同读（「不判 ≠ 通过」）；
+5. **终末**：`results.edn` `:valid? true`、gates valid、9 面 routing 门槛达标。
+
+**待裁定（最迟 09-29T10:30Z 前）**：
+- **档位**：**案 A（推荐）= 无故障稳定档** `SOAK_NEMESIS=none`——「无重启」字面成立；故障覆盖由 matrix-* 与 T6.1 承担。起跑前须一次 120s `--nemesis none` 冒烟，验证 checker 判定路径（`final-converged` 取值确定、`:valid?` 有定义）；冒烟不通过则做最小 checker 修复（保留 soak? 语义）并留 fixture。**案 B = 同 T6.1 故障档**（零 harness 改动；「无重启」读作「无计划外重启」）。
+- **起跑序列**：**(一)** 72h 结束即起跑（最快；但 09-29 后任何产品面改动 ⇒ 按 R-03 两份长跑判据作废重跑）；**(二)（推荐）** 先清产品面改动（W4-4 P0–P2、W3-5 结论、§5.4-⑨ 若涉码）与 W2-5 P3–P5 演练窗口，**在冻结 commit 上起跑**。本项与「T6.1 是否即终版」是同一裁定：选 (一) 则须在 09-29 前确认 T6.1 终版地位；选 (二) 则本轮起的 T6.1 按「提前缺陷搜索跑」口径使用（最终效力随冻结版本决定）。
+
+> **T6.1 结项预备清单（09-29 用）**：①`soak-wait` 退出后确认无残留进程；②全仓 clean
+> （本轮及之后改动均已合并）；③控制机 `./scripts/collect-evidence.sh soak-72h store/coord/latest`；
+> ④读 `results.edn` 关键判据（9 面 routing / gates / liveness-unjudged / keepalive-stream-errors）；
+> ⑤run 号与结论写回 §11（第十七轮）。
+
+> **未触碰（本轮）**：W3-5（多 agent 拓扑，需 lab 窗口）、W2-5 的 P3–P5 演练（lab）、
+> W4-4（产品面改动，与运行中的 72h 冻结冲突）、W7（tag/制品，随冻结版本做）。
 
 ---
 

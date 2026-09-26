@@ -7,7 +7,7 @@
 #
 # Usage:
 #   ./coord-soak.sh start  [--hours N] [--time-limit S] [--rate R] [--workload W]
-#                         [--checker C] [--quiet S] [--disrupt S] [--regions N]
+#                         [--checker C] [--quiet S] [--disrupt S] [--nemesis N] [--regions N]
 #                         [--seed S] [--concurrency C] [--mixture-ratio W,W,W]
 #                         [--map-min-deletes N] [--extra "..."]
 #                         [--map-min-deletes N]
@@ -73,7 +73,7 @@ cmd_check() {
 # ---------------------------------------------------------------------------
 
 cmd_start() {
-  local hours=72 time_limit="" rate=0.5 workload=register checker=soak quiet=1800 disrupt=600 regions=""
+  local hours=72 time_limit="" rate=0.5 workload=register checker=soak quiet=1800 disrupt=600 regions="" nemesis=soak
   # T0.5/T1.5：种子（回放）、并发度、mixture 混合比、map 面的 §5.1 delete 样本门槛
   # T6.1：--extra 是**通用透传**（原样拼进 lein 命令），用于新加的选项（例如
   # `--extra "--soak-mix map=40,txn=20,scan=5,watch=15,lease=10 --watch-min-events 200 --lease-min-grants 100 --lease-min-expiries 30"`）。
@@ -89,6 +89,7 @@ cmd_start() {
       --checker)    checker=$2; shift 2 ;;
       --quiet)      quiet=$2; shift 2 ;;
       --disrupt)    disrupt=$2; shift 2 ;;
+      --nemesis)    nemesis=$2; shift 2 ;;
       --regions)    regions=$2; shift 2 ;;
       --seed)       seed=$2; shift 2 ;;
       --concurrency) concurrency=$2; shift 2 ;;
@@ -106,7 +107,7 @@ cmd_start() {
 
   local time_limit=${time_limit:-$((hours * 3600))}
   echo "== starting coord soak =="
-  echo "   time-limit=${time_limit}s (${hours}h) rate=$rate workload=$workload checker=$checker regions=${regions:-(single-Raft)}"
+  echo "   time-limit=${time_limit}s (${hours}h) rate=$rate workload=$workload checker=$checker nemesis=$nemesis regions=${regions:-(single-Raft)}"
   echo "   quiet=${quiet}s disrupt=${disrupt}s concurrency=$concurrency seed=${seed:-(random)}"
   echo "   extra: mixture-ratio=${mixture_ratio:-(default 4,2,2)} map-min-deletes=${map_min_deletes:-(off)} extra=${extra:-(none)}"
   echo "   log: $LOG"
@@ -117,7 +118,7 @@ cmd_start() {
   # with `cd && lein ...` bash cannot exec-replace itself, so a redirect
   # inside the string would leave the wrapper holding the SSH channel open
   # and `vagrant ssh` would hang until lein exits.
-  setsid bash -c "cd '$PROJECT' && ${LEIN_BASE[*]} --workload $workload --nemesis soak --checker $checker --rate $rate --soak-quiet $quiet --soak-disrupt $disrupt ${regions:+--regions $regions} ${seed:+--seed $seed} ${mixture_ratio:+--mixture-ratio $mixture_ratio} ${map_min_deletes:+--map-min-deletes $map_min_deletes} $extra --time-limit $time_limit --concurrency $concurrency" > "$LOG" 2>&1 < /dev/null &
+  setsid bash -c "cd '$PROJECT' && ${LEIN_BASE[*]} --workload $workload --nemesis $nemesis --checker $checker --rate $rate --soak-quiet $quiet --soak-disrupt $disrupt ${regions:+--regions $regions} ${seed:+--seed $seed} ${mixture_ratio:+--mixture-ratio $mixture_ratio} ${map_min_deletes:+--map-min-deletes $map_min_deletes} $extra --time-limit $time_limit --concurrency $concurrency" > "$LOG" 2>&1 < /dev/null &
   local pid=$!
   echo "$pid" > "$PIDFILE"
   sleep 5
