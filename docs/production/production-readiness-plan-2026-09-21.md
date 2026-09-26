@@ -876,6 +876,34 @@ W3-2…W3-9、W4-1 TLS fail-closed、§1.3 案 A/B 人力裁定。
 
 ---
 
+### 第十一轮（续）追加（2026-09-26）—— 主题：**matrix-m2 全绿（M1 出口判据之一）+ F-72 口径修复（pause 窗口）**
+
+> 触发：拟闭 M1 的「`matrix-m2` 由红转绿」判据，先复跑 matrix-m2 ⇒ 在 F-70
+> 二进制上 `lease / pause` 格判红（3 条 `:lease-not-expired`）。定位结论：
+> **服务端行为正确**（新 leader 接管后 sub-second 提交 revoke），红灯来自
+> **判定口径**三类缺陷（与 F-71 同族），立 **F-72** 并修复。
+
+| # | 任务 | 状态 | 判据（已跑的命令） | 结果 / 产物 |
+|:--|:--|:--|:--|:--|
+| **F-72a 观测断档** | lease 观测读默认 5000ms 超时，被 SIGSTOP 节点钉死 5s ⇒ 窗口内零观测 | ✅ 修复 | `p/call` 单节点超时 500ms（`lease-point-read`，仅 lease 观测路径）；checker 新增 `observation-truncated?` | 客户端：`lease-read-timeout-ms=500`；checker：断档 ⇒ 计入 `:liveness-unjudged`（不判≠通过） |
+| **F-72b 锚点** | ttl 场景窗口锚在 op 起点；pause 下 grant 自身花 2–4.6s ⇒ 窗口末端落在真实截止之前 | ✅ 修复 | workload 记录 `:grant-at-ms` 并以它起算轮询 deadline；checker 窗口同锚（旧数据回退 op 起点） | 首版有 `dl` 单位错误（相对毫秒当绝对 ns），由 run 的 `expiries=0` 当场暴露并修正 |
+| **F-72c 迟发不可归因** | 读断档恢复后的「观测到消失时刻」≠「删除时刻」（ka/109：删除在 grant+2.1s，读数 13.7s 才恢复） | ✅ 修复 | 轮询有 `:failed` 读时迟到性不判，计 `:liveness-unjudged` | 豁免只针对迟到性；`absent=nil`（走 F-71/断档分支）与提前消失（安全侧）不受影响 |
+| **服务端可观测性（P7/W5-4）** | pause 窗口「到底删没删」此前无法离线判定 | ✅ 落地 | 过期 worker：`leadership view changed` / `revokes committed`（含 lease_ids）；reconciler：`snapshot` 数 + `lease_ids` 样本；客户端：每次读仅归类一次 + `ok-reads/failed/reauths/last-ok-at-ms/last-ok-present?` | 本次三类口径缺陷全部靠这些字段在离线数据里定位（现场首见 `revokes committed lease_ids=[44,45]`） |
+| **F-72 判据（fixture）** | 4 新增 + 1 更新（含双向负控制） | ✅ 16/16 | `make -C jepsen/lab checkers`（lease 档）；另 `jepsen.coord.client` 命名空间加载 | 新增：断档⇒valid（旧必红）、慢启动锚点⇒valid（旧必红）、读断档迟发⇒valid（旧必红）、慢启动晚删⇒invalid（防免罪）；更新 present-at-deadline 负控制（采样覆盖窗口末端仍必红） |
+| **lease/pause 单元复跑** | 修复后稳定性 | ✅ **3/3 绿** | `make -C jepsen/lab test WORKLOAD=lease NEMESIS=pause TIME_LIMIT=45 …`（每轮 env-reset） | 3 轮 `violations-by-class {}`，`:liveness-unjudged 9/15/13`（如实计数） |
+| **matrix-m2（M1 出口）** | 全 8 格 | ✅ **ALL M2 MATRIX PASSED** | `make -C jepsen/lab matrix-m2 JEPSEN_PROVIDER=docker`（exit 0；8 格逐格绿） | watch×{none,kill,pause,partition-halves} + lease×{none,kill,pause,partition-halves} 全绿；**第十轮的 U-13 残余（lease/partition-halves 4 条）与本次 lease/pause 均转绿** |
+| **证据归档** | 两格归档 | ✅ | `collect-evidence.sh m2-lease-pause-fixed` / `m2-lease-partition-halves` | `docs/production/evidence/20260926T035534Z-m2-lease-pause-fixed/`、`…T035535Z-m2-lease-partition-halves/`（均 clean、`overall-valid: true`、`violations-by-class {}`）；旧口径红格诊断归档 `…T032009Z-m2-lease-pause-leader-freeze-diag/` |
+| **CI 实证** | `12bf740`（F-72 代码） | 🔄 运行中 | `/actions/runs/36215852431` | 结果随下一轮台账回写 |
+
+> **判据达成说明**：「matrix-m2 由红转绿」（§6.1 M1 出口之一）**达成**：
+> 第十轮记 `7/8`（lease/partition-halves 红，U-13 残余）；本轮 8/8 全绿，
+> 且原来那格的 4 条残余在 F-70/F-72 口径修复后**自然消失**（服务端行为一直正确）。
+> 注意：F-72 的三类豁免必须与 `:liveness-unjudged` 一并阅读 —— **不判 ≠ 通过**。
+
+**第十一轮（续）未触碰**：W2-3/W2-4、W3-2…W3-6/W3-7、W3-8/W3-9、W4、§1.3 裁定。
+
+---
+
 ## 附录 A：差距 → 门 → 判据 → 证据（追溯表）
 
 | 差距 | 门 | 判据（可执行） | 证据落点 |

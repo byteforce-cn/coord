@@ -2102,6 +2102,51 @@ make test WORKLOAD=lock NEMESIS=none TIME_LIMIT=120 CONCURRENCY=2n AGENTS=2 \
   `expect-valid-absence-observed-by-reauth`（历史含一次 UNAUTHENTICATED 中断，Key 实际
   已删 ⇒ 必须判绿）；配对负控制：Key 确实未删 ⇒ 必须判红。
 
+### F-72 [口径，fixed（2026-09-26）] pause/冻结窗口的三类判定口径缺陷（观测断档/锚点/迟发归因被当成活性违反）
+
+* **立项现场**：matrix-m2 的 `lease / pause` 格（旧口径，seed 737037196）3 条
+  `:lease-not-expired`。诊断归档：`docs/production/evidence/20260926T032009Z-m2-lease-pause-leader-freeze-diag/`。
+* **服务端实测（第十一轮新增可观测日志）**：**不是产品缺陷**。新 leader 接管后
+  sub-second 提交 revoke（`lease expiry revokes committed lease_ids=[44,45] …
+  [67,70] … [78]`），删除并不晚；n3 装载 `tracked=3 snapshot=3` 后逐一清理。
+  三条红灯全部来自**判定/观测口径**：
+  1. **F-72a 观测断档**：lease 观测读走 `p/call` 默认 **5000ms** 超时 ⇒ SIGSTOP 的
+     节点把一次读钉死 5s ⇒ 判定窗口 [22.7s, 27.7s] 内零次成功观测；旧口径把
+     `absent=nil` 判红。修复：`lease-read-timeout-ms=500` + `lease-point-read`
+     （仅 lease 观测路径）；checker 新增 `observation-truncated?`（`:last-ok-at-ms`
+     早于窗口末端 ⇒ 不判）。
+  2. **F-72b 锚点**：ttl 场景窗口锚在 **op 起点**，但 pause 下 grant 自身花
+     2–4.6s ⇒ 窗口末端落在真实截止之前。修复：workload 记录 `:grant-at-ms`
+     （grant ack）并以它起算轮询 deadline；checker 的窗口/提前消失判据同锚
+     （旧数据回退 op 起点）。修复首版有一个 `dl` 单位错误（相对毫秒当绝对
+     ns 基准），由 run 自身的 `expiries=0` 当场暴露并修正。
+  3. **F-72c 迟发性不可归因**：读断档恢复后首次观测到 absent 的时刻 ≠ 删除时刻
+     （ka/109：删除在停续期后 ~2.1s，读数 13.7s 才恢复；观测晚 3.8s）⇒ 轮询
+     有 `:failed` 读时迟到性不判（计 `:liveness-unjudged`）。
+* **判据**：
+  - fixtures **16/16**（新增 4 + 更新 1）：
+    `expect-valid-poll-stall-during-pause-window`（断档 ⇒ 不判；旧 checker 下必红）、
+    `expect-valid-slow-setup-window-anchored-at-grant`（锚点前移 ⇒ 绿；旧必红）、
+    `expect-valid-late-absence-under-read-outage`（迟发不可归因 ⇒ 不判；旧必红）、
+    `expect-invalid-slow-setup-late-deletion`（锚点前移 ≠ 免罪：晚于
+    grant+ttl+grace 仍必红）、更新 `expect-invalid-present-at-deadline-with-ok-reads`
+    （采样覆盖窗口末端 ⇒ 仍必红）；
+  - `lease / pause` 单元复跑 **3/3 绿**（violations 空集，`liveness-unjudged` 9/15/13
+    如实计数 —— **不判 ≠ 通过**）；
+  - **matrix-m2 全 8 格绿**（2026-09-26，`ALL M2 MATRIX PASSED`）：此前红的
+    `lease/pause` 与第十轮遗留的 `lease/partition-halves`（U-13 残余 4 条）均转绿；
+    两格证据归档：`docs/production/evidence/20260926T035534Z-m2-lease-pause-fixed/`、
+    `…/20260926T035535Z-m2-lease-partition-halves/`（均 `overall-valid: true`、
+    `violations-by-class {}`）。
+* **附带可观测性（P7/W5-4）**：过期 worker 的 `leadership view changed` /
+  `revokes committed`（含 lease_ids）日志、reconciler rebuild 日志的
+  `snapshot` 数与 `lease_ids` 样本、客户端 wait-gone 的
+  `ok-reads/failed/reauths/last-ok-at-ms/last-ok-present?` —— 本次三个口径缺陷
+  全部靠这些字段在离线数据里定位。
+* **状态：closed（口径修复 + matrix 全绿）。** 残余边界：三类豁免只在
+  「采样不可观测」时生效且全部计入 `:liveness-unjudged`；若未来要把 pause 下的
+  活性判定权重调回全绿，需要服务端侧延迟指标（当前只有 committed 日志）。
+
 ### 本轮 run 的门槛摘要（供 §11 引用）
 
 * gates **valid**；rto-p95 0.295s、**rto-unrecovered 0**；quiet-windows 4 /

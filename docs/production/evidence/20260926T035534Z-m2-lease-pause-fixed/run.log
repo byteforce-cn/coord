@@ -1,0 +1,593 @@
+2026-09-26 03:52:18,506{GMT}	INFO	[jepsen test runner] jepsen.core: Test version 12bf740954fe7327758b513e728134dfa837abac
+2026-09-26 03:52:18,507{GMT}	INFO	[jepsen test runner] jepsen.core: Command line:
+lein run test --nodes-file /root/nodes --username root --ssh-private-key /root/.ssh/id_ed25519 --workload lease --nemesis pause --time-limit 45 --concurrency 1n --lease-min-grants 5 --lease-min-expiries 2
+2026-09-26 03:52:18,552{GMT}	INFO	[jepsen test runner] jepsen.core: Running test:
+{:cache-ttl-seconds nil
+ :remote
+ #jepsen.control.retry.Remote{:remote #jepsen.control.scp.Remote{:cmd-remote #jepsen.control.sshj.SSHJRemote{:concurrency-limit 6,
+                                                                                                             :conn-spec nil,
+                                                                                                             :client nil,
+                                                                                                             :semaphore nil},
+                                                                 :conn-spec nil},
+                              :conn nil}
+ :idem-replay-delay-ms 0
+ :ssh-private-key "/root/.ssh/id_ed25519"
+ :idem-min-replay-attempts nil
+ :lock-grace-ms nil
+ :election-ttl-seconds nil
+ :watch-min-events nil
+ :concurrency 5
+ :lease-ttl-seconds nil
+ :soak-disrupt 600
+ :idgen-min-regressions nil
+ :db
+ #jepsen.coord.db.CoordDB{:cluster-name "jepsen-coord",
+                          :pidfile-prefix "/var/run/coord-",
+                          :root-password "66c57bb56bce306f484344e4a8650836",
+                          :coord-dir "/opt/coord",
+                          :config-dir "/etc/coord",
+                          :logfile "/var/log/coord.log",
+                          :agent-bootstrap-token nil,
+                          :regions nil,
+                          :agent-peers nil,
+                          :data-dir "/var/lib/coord",
+                          :nodes ["n1" "n2" "n3"],
+                          :auth-root-key "820662a9f85924333d6d466714bc51734b251e73b827a394e1978e36d2429bfc",
+                          :raft-secret "93edf94d2860fec54bc59278a804cb1bbd2d0a7243e4f39d667d66966d9844d1",
+                          :agents 0,
+                          :coord-bin "/root/coord-test/coord"}
+ :leave-db-running? false
+ :agent-idgen-node-ids nil
+ :via-agent false
+ :cache-min-list-ops nil
+ :name "coord"
+ :registry-ttl-seconds nil
+ :logging-json? false
+ :mixture-ratio nil
+ :start-time
+ #object[java.time.OffsetDateTime "0x7b159d1b" "2026-09-26T03:52:18.484771380Z"]
+ :regions nil
+ :lease-min-grants 5
+ :map-keys nil
+ :net
+ #object[jepsen.net$iptables_with_dev$reify__15623
+         "0x247246ea"
+         "jepsen.net$iptables_with_dev$reify__15623@247246ea"]
+ :election-hold-ms nil
+ :client
+ #jepsen.coord.client.CoordClient{:probe-raw-channels nil,
+                                  :auth-nodes ["n1" "n2" "n3"],
+                                  :root-password "66c57bb56bce306f484344e4a8650836",
+                                  :mq-cursor nil,
+                                  :channels nil,
+                                  :cct nil,
+                                  :raw-channels nil,
+                                  :probe-nodes nil,
+                                  :mq-topic nil,
+                                  :parse-values? false,
+                                  :nodes ["n1" "n2" "n3"],
+                                  :leader-idx #object[clojure.lang.Atom
+                                                      "0x10ba757f"
+                                                      {:status :ready, :val {}}],
+                                  :last-rev #object[clojure.lang.Atom
+                                                    "0x711cd6f9"
+                                                    {:status :ready, :val {}}],
+                                  :last-watch-rev #object[clojure.lang.Atom
+                                                          "0x1cb3de26"
+                                                          {:status :ready,
+                                                           :val {}}],
+                                  :auth-raw-channels nil,
+                                  :probe-channels nil}
+ :lease-revoke-ttl-seconds nil
+ :barrier
+ #object[java.util.concurrent.CyclicBarrier
+         "0x7307e418"
+         "java.util.concurrent.CyclicBarrier@7307e418"]
+ :ssh
+ {:dummy? false,
+  :username "root",
+  :password "root",
+  :strict-host-key-checking false,
+  :private-key-path "/root/.ssh/id_ed25519"}
+ :lease-tolerance-ms nil
+ :rate nil
+ :map-min-deletes nil
+ :seed 1762609241
+ :mq-topic nil
+ :cache-min-set-ops nil
+ :lock-ttl-seconds nil
+ :checker
+ #jepsen.checker.Compose{:checkers {:linear #object[jepsen.coord.leaseck$checker$reify__2622
+                                                    "0x30d5668a"
+                                                    "jepsen.coord.leaseck$checker$reify__2622@30d5668a"],
+                                    :gates #object[jepsen.coord.gates$checker$reify__2299
+                                                   "0x2769d577"
+                                                   "jepsen.coord.gates$checker$reify__2299@2769d577"],
+                                    :perf #jepsen.checker.Compose{:checkers {:latency-graph #jepsen.checker.LatencyGraph{:opts {}},
+                                                                             :rate-graph #jepsen.checker.RateGraph{:opts {}}}}}}
+ :lease-min-expiries 2
+ :cache-min-sets nil
+ :mq-min-polls nil
+ :argv
+ ("test"
+  "--nodes-file"
+  "/root/nodes"
+  "--username"
+  "root"
+  "--ssh-private-key"
+  "/root/.ssh/id_ed25519"
+  "--workload"
+  "lease"
+  "--nemesis"
+  "pause"
+  "--time-limit"
+  "45"
+  "--concurrency"
+  "1n"
+  "--lease-min-grants"
+  "5"
+  "--lease-min-expiries"
+  "2")
+ :nemesis #unprintable "jepsen.nemesis$node_start_stopper$reify__15946@25297d52"
+ :watch-resumes nil
+ :mq-consumer-group nil
+ :lease-grace-ms nil
+ :soak-mix nil
+ :mq-expect-idem-dedupe false
+ :nodes ["n1" "n2" "n3"]
+ :test-count 1
+ :no-jitter false
+ :election-min-campaigns nil
+ :registry-min-cycles nil
+ :lock-min-acquires nil
+ :idgen-min-ids nil
+ :cache-min-gets nil
+ :generator
+ #object[jepsen.util.Forgettable
+         "0x3bc57af4"
+         ((jepsen.generator.Synchronize
+           {:gen (jepsen.generator.TimeLimit
+                  {:limit 45000000000,
+                   :cutoff nil,
+                   :gen (jepsen.generator.Any
+                         {:gens [(jepsen.generator.OnThreads
+                                  {:f #{:nemesis},
+                                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                           "0x7be29ac4"
+                                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@7be29ac4"],
+                                   :gen ({:type :sleep,
+                                          :value 5.570765691968727}
+                                         {:type :info, :f :start}
+                                         {:type :sleep,
+                                          :value 4.032627732401201}
+                                         {:type :info, :f :stop}
+                                         {:type :sleep,
+                                          :value 7.932691791305702}
+                                         {:type :info, :f :start}
+                                         {:type :sleep,
+                                          :value 5.105818077225033}
+                                         {:type :info, :f :stop}
+                                         ...)})
+                                 (jepsen.generator.OnThreads
+                                  {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                           "0x25c887ca"
+                                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@25c887ca"],
+                                   :gen (jepsen.generator.Stagger
+                                         {:dt-fn #object[jepsen.generator$stagger_exp$dt_fn__6799
+                                                         "0xba65354"
+                                                         "jepsen.generator$stagger_exp$dt_fn__6799@ba65354"],
+                                          :next-time nil,
+                                          :gen (jepsen.generator.OnThreads
+                                                {:f #jepsen.generator.context.AllBut{:element :nemesis},
+                                                 :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                                                         "0x647dcc5e"
+                                                                         "jepsen.generator.context$make_thread_filter$lazy_filter__5865@647dcc5e"],
+                                                 :gen (jepsen.generator.Mix
+                                                       {:i 0,
+                                                        :gens [(jepsen.generator.Mix
+                                                                {:i 1,
+                                                                 :gens [#object[jepsen.coord$lease_gen$ttl_op__4532
+                                                                                "0x5af850f1"
+                                                                                "jepsen.coord$lease_gen$ttl_op__4532@5af850f1"]
+                                                                        #object[jepsen.coord$lease_gen$ttl_op__4532
+                                                                                "0x5af850f1"
+                                                                                "jepsen.coord$lease_gen$ttl_op__4532@5af850f1"]
+                                                                        #object[jepsen.coord$lease_gen$ka_op__4534
+                                                                                "0x3b6f7ab3"
+                                                                                "jepsen.coord$lease_gen$ka_op__4534@3b6f7ab3"]
+                                                                        #object[jepsen.coord$lease_gen$rev_op__4536
+                                                                                "0x2eab279"
+                                                                                "jepsen.coord$lease_gen$rev_op__4536@2eab279"]]})]})})})})]})})})
+          (jepsen.generator.Synchronize
+           {:gen (jepsen.generator.OnThreads
+                  {:f #{:nemesis},
+                   :context-filter #object[jepsen.generator.context$make_thread_filter$lazy_filter__5865
+                                           "0x87f8146"
+                                           "jepsen.generator.context$make_thread_filter$lazy_filter__5865@87f8146"],
+                   :gen {:type :info, :f :stop}})})
+          (jepsen.generator.Synchronize
+           {:gen {:type :log, :value "recovery: letting cluster converge"}})
+          (jepsen.generator.Synchronize {:gen {:type :sleep, :value 30}}))]
+ :lock-deadline-ms nil
+ :min-op-ok-ratio nil
+ :soak-max-rto-seconds nil
+ :idem-replay-node-offset 0
+ :lease-keepalive-ms nil
+ :min-op-sample nil
+ :os
+ #object[jepsen.os$reify__16045 "0x10982760" "jepsen.os$reify__16045@10982760"]
+ :time-limit 45
+ :quiet-availability-min nil
+ :soak-quiet 1800
+ :value-size nil
+ :cache-ttl-grace-ms nil
+ :agent-verifying-key nil
+ :quiet-min-sample nil
+ :watch-window-ms nil
+ :workload :lease
+ :registry-grace-ms nil
+ :agents 0
+ :watch-max-events nil
+ :mq-min-publishes nil
+ :watch-semantics nil
+ :lock-hold-ms nil}
+
+2026-09-26 03:52:19,839{GMT}	INFO	[jepsen test runner] jepsen.db: Tearing down DB
+2026-09-26 03:52:19,840{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-26 03:52:19,840{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-26 03:52:19,840{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-26 03:52:21,516{GMT}	INFO	[jepsen test runner] jepsen.db: Setting up DB
+2026-09-26 03:52:21,518{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Setting up coord on n1
+2026-09-26 03:52:21,518{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Setting up coord on n3
+2026-09-26 03:52:21,518{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Setting up coord on n2
+2026-09-26 03:52:24,316{GMT}	INFO	[jepsen node n3] jepsen.control.util: Starting coord
+2026-09-26 03:52:24,372{GMT}	INFO	[jepsen node n1] jepsen.control.util: Starting coord
+2026-09-26 03:52:24,442{GMT}	INFO	[jepsen node n2] jepsen.control.util: Starting coord
+2026-09-26 03:52:24,449{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Waiting for coord on n3 to be ready
+2026-09-26 03:52:24,493{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Waiting for coord on n1 to be ready
+2026-09-26 03:52:24,544{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Waiting for coord on n2 to be ready
+2026-09-26 03:52:24,705{GMT}	INFO	[jepsen node n3] jepsen.coord.db: coord n3 is ready
+2026-09-26 03:52:24,705{GMT}	INFO	[jepsen node n2] jepsen.coord.db: coord n2 is ready
+2026-09-26 03:52:25,081{GMT}	INFO	[jepsen node n1] jepsen.coord.db: coord n1 is ready
+2026-09-26 03:52:25,082{GMT}	INFO	[jepsen test runner] jepsen.core: Relative time begins now
+2026-09-26 03:52:25,083{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-26 03:52:25,083{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-26 03:52:25,083{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-26 03:52:25,146{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-26 03:52:25,146{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-26 03:52:25,146{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord client setup: waiting for a successful read (quorum + auth)
+2026-09-26 03:52:25,192{GMT}	INFO	[jepsen node n3] jepsen.coord.client: coord cluster is ready
+2026-09-26 03:52:25,192{GMT}	INFO	[jepsen node n2] jepsen.coord.client: coord cluster is ready
+2026-09-26 03:52:25,192{GMT}	INFO	[jepsen node n1] jepsen.coord.client: coord cluster is ready
+2026-09-26 03:52:25,208{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/1", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:25,209{GMT}	INFO	[jepsen worker 0] jepsen.coord.client: Opening coord client on n1
+2026-09-26 03:52:25,437{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/4", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:25,437{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-26 03:52:25,598{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/6", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:25,598{GMT}	INFO	[jepsen worker 3] jepsen.coord.client: Opening coord client on n1
+2026-09-26 03:52:25,930{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/8", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:25,930{GMT}	INFO	[jepsen worker 4] jepsen.coord.client: Opening coord client on n2
+2026-09-26 03:52:26,712{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/10", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:26,712{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-26 03:52:27,324{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/1", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:27,325{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/12", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:27,743{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/4", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:27,744{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/13", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:27,911{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/6", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:27,911{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/16", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:28,285{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/8", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:28,766{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/17", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:28,972{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/10", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:29,172{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/18", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:29,508{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/12", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:29,509{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/15", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:29,903{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/13", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:29,903{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/14", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:30,224{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/16", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:30,225{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/19", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:30,778{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-26 03:52:30,805{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n3" [:paused "n3"]}
+2026-09-26 03:52:30,924{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/17", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:30,924{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/21", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:31,345{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/18", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:31,346{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/20", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:31,813{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/15", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:31,813{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/22", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:32,122{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/14", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:32,122{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/23", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:32,383{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/19", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:32,384{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/11", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:32,449{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/11", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:32,790{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/24", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:33,151{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/21", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:33,151{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/28", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:33,495{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/20", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:33,972{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/22", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:34,341{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/23", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:34,838{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-26 03:52:34,967{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n3" [:resumed "n3"]}
+2026-09-26 03:52:35,079{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/25", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:35,090{GMT}	INFO	[jepsen worker 1] jepsen.print: 1	:info	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/25", :ttl 2, :grace-ms 4000}	:unavailable-maybe-applied
+2026-09-26 03:52:35,139{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/32", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:35,150{GMT}	INFO	[jepsen worker 2] jepsen.print: 2	:info	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/32", :ttl 2, :grace-ms 4000}	:unavailable-maybe-applied
+2026-09-26 03:52:35,264{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/24", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:35,322{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/28", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:35,373{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/27", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:35,439{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/27", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:35,463{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/26", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:35,646{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/34", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:35,711{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/34", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:35,829{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/37", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:35,893{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/39", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:35,894{GMT}	INFO	[jepsen worker 1] jepsen.coord.client: Opening coord client on n2
+2026-09-26 03:52:35,897{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/37", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:36,348{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/42", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:36,349{GMT}	INFO	[jepsen worker 2] jepsen.coord.client: Opening coord client on n3
+2026-09-26 03:52:36,507{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/44", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:36,571{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/44", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:36,767{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/47", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:36,834{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/47", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:37,173{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/50", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:37,219{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/52", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:37,829{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/26", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:37,829{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/29", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:38,121{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/39", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:38,122{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/54", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:38,799{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/42", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:38,883{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/57", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:39,396{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/50", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:39,397{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/58", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:39,587{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/52", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:39,587{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/55", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:39,975{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/29", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:40,248{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/56", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:40,419{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/54", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:40,467{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/61", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:41,179{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/57", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:41,180{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/60", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:41,543{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/58", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:41,543{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/63", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:41,795{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/55", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:41,807{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/59", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:42,398{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/56", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:42,398{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/53", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:42,460{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/53", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:42,475{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/65", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:42,616{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/61", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:42,617{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/66", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:42,679{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/66", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:42,900{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-26 03:52:42,925{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n3" [:paused "n3"]}
+2026-09-26 03:52:43,093{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/62", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:43,384{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/60", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:43,384{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/64", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:43,752{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/63", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:43,753{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/67", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:43,958{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/59", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:43,959{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/71", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:44,626{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/65", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:44,626{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/69", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:45,388{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/62", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:45,389{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/68", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:45,452{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/68", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:45,453{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/72", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:45,593{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/64", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:45,593{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/73", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:45,896{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/67", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:45,950{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/76", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:46,100{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/71", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:46,101{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/74", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:46,160{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/74", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:46,161{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/70", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:46,768{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/69", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:46,769{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/79", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:47,602{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/72", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:47,602{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/75", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:47,740{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/73", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:48,031{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-26 03:52:48,137{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n3" [:resumed "n3"]}
+2026-09-26 03:52:48,365{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/70", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:48,405{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/76", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:48,412{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/78", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:48,475{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/78", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:48,482{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/77", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:48,606{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/83", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:48,686{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/80", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:48,978{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/79", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:49,241{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/84", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:49,754{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/75", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:49,754{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/87", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:50,750{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/83", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:50,750{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/86", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:50,773{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/77", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:50,809{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/86", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:50,890{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/80", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:51,599{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/84", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:51,958{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/87", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:52,054{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/81", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:52,337{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/89", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:52,360{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-26 03:52:52,370{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n1" [:paused "n1"]}
+2026-09-26 03:52:53,237{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/95", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:53,576{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/88", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:53,741{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/97", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:55,719{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-26 03:52:55,743{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/81", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:55,743{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/98", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:55,743{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/89", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:55,819{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n1" [:resumed "n1"]}
+2026-09-26 03:52:56,117{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/104", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:57,889{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/95", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:57,889{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/97", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:57,889{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/99", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:58,109{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/88", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:58,110{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/98", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:58,218{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/109", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:58,479{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/104", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:58,535{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/100", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:58,598{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/100", :ttl 30, :grace-ms 4000}
+2026-09-26 03:52:58,619{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/105", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:52:58,688{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/111", :ttl 2, :grace-ms 4000}
+2026-09-26 03:52:58,719{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/85", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:00,033{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/99", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:00,033{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/112", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:00,515{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/109", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:00,658{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/116", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:00,832{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/111", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:00,832{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/117", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:00,833{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/105", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:53:00,873{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/85", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:00,893{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	nil
+2026-09-26 03:53:00,917{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:start	{"n3" [:paused "n3"]}
+2026-09-26 03:53:01,022{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/114", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:01,507{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/119", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:02,330{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/112", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:02,330{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/115", :ttl 30, :grace-ms 4000}
+2026-09-26 03:53:02,393{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/115", :ttl 30, :grace-ms 4000}
+2026-09-26 03:53:02,428{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/121", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:02,803{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/116", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:02,891{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/113", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:53:03,124{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/117", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:03,247{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/124", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:53:03,315{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/114", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:03,588{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/120", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:03,660{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/119", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:03,807{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/125", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:53:04,739{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/121", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:04,739{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/122", :ttl 30, :grace-ms 4000}
+2026-09-26 03:53:04,806{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/122", :ttl 30, :grace-ms 4000}
+2026-09-26 03:53:05,097{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/113", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:53:05,449{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/124", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:53:05,878{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/120", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:06,010{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/125", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:53:06,592{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/123", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:06,623{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/127", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:53:06,755{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/130", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:53:07,385{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/132", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:08,469{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/126", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:08,615{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-26 03:53:08,747{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	{"n3" [:resumed "n3"]}
+2026-09-26 03:53:08,986{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/127", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:53:08,986{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/128", :ttl 30, :grace-ms 4000}
+2026-09-26 03:53:09,044{GMT}	INFO	[jepsen worker 4] jepsen.print: 4	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/128", :ttl 30, :grace-ms 4000}
+2026-09-26 03:53:09,046{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/123", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:09,049{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/136", :ttl 30, :grace-ms 4000}
+2026-09-26 03:53:09,110{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/136", :ttl 30, :grace-ms 4000}
+2026-09-26 03:53:09,114{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/130", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:53:09,123{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:invoke	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/140", :ttl 30, :grace-ms 4000}
+2026-09-26 03:53:09,184{GMT}	INFO	[jepsen worker 0] jepsen.print: 0	:ok	:lease-revoke	{:key "/jepsen/lease/s1762609241/rev/140", :ttl 30, :grace-ms 4000}
+2026-09-26 03:53:09,684{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/132", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:09,868{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:invoke	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/135", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:53:10,088{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:invoke	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/134", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:10,614{GMT}	INFO	[jepsen worker 2] jepsen.print: 7	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/126", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:12,077{GMT}	INFO	[jepsen worker 1] jepsen.print: 6	:ok	:lease-keepalive	{:key "/jepsen/lease/s1762609241/ka/135", :ttl 2, :grace-ms 4000, :keepalive-ms 4000}
+2026-09-26 03:53:12,229{GMT}	INFO	[jepsen worker 3] jepsen.print: 3	:ok	:lease-ttl	{:key "/jepsen/lease/s1762609241/ttl/134", :ttl 2, :grace-ms 4000}
+2026-09-26 03:53:15,831{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	nil
+2026-09-26 03:53:15,831{GMT}	INFO	[jepsen worker nemesis] jepsen.print: :nemesis	:info	:stop	:not-started
+2026-09-26 03:53:15,832{GMT}	INFO	[jepsen worker 4] jepsen.generator.interpreter: recovery: letting cluster converge
+2026-09-26 03:53:45,850{GMT}	INFO	[jepsen node n1] jepsen.coord.client: Opening coord client on n1
+2026-09-26 03:53:45,850{GMT}	INFO	[jepsen node n3] jepsen.coord.client: Opening coord client on n3
+2026-09-26 03:53:45,850{GMT}	INFO	[jepsen node n2] jepsen.coord.client: Opening coord client on n2
+2026-09-26 03:53:45,936{GMT}	INFO	[jepsen test runner] jepsen.core: Run complete, writing
+2026-09-26 03:53:45,986{GMT}	INFO	[jepsen test runner] jepsen.core: Snarfing log files
+2026-09-26 03:53:45,987{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Killing coord on n3
+2026-09-26 03:53:45,987{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Killing coord on n2
+2026-09-26 03:53:45,987{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Killing coord on n1
+2026-09-26 03:53:46,047{GMT}	INFO	[jepsen node n1] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-26 03:53:46,047{GMT}	INFO	[jepsen node n2] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-26 03:53:46,048{GMT}	INFO	[jepsen node n3] jepsen.core: downloading /var/log/coord.log to coord.log
+2026-09-26 03:53:46,211{GMT}	INFO	[jepsen node n1] jepsen.coord.db: Tearing down coord on n1
+2026-09-26 03:53:46,211{GMT}	INFO	[jepsen node n2] jepsen.coord.db: Tearing down coord on n2
+2026-09-26 03:53:46,211{GMT}	INFO	[jepsen node n3] jepsen.coord.db: Tearing down coord on n3
+2026-09-26 03:53:47,881{GMT}	INFO	[jepsen test runner] jepsen.core: Analyzing...
+2026-09-26 03:53:47,909{GMT}	INFO	[clojure-agent-send-off-pool-1] jepsen.coord.leaseck: lease checker: {:expiries 50, :grants 98, :liveness-unjudged 12, :violations-by-class {}, :keepalive-stream-errors 0, :min-expiries 2, :by-scenario {:ttl 50, :keepalive 29, :revoke 19}, :failures (), :keepalive-responses 174, :min-grants 5}
+2026-09-26 03:53:48,042{GMT}	INFO	[jepsen test runner] jepsen.core: Analysis complete
+2026-09-26 03:53:48,048{GMT}	INFO	[jepsen results] jepsen.store: Wrote /opt/coord/jepsen/store/coord/2026-09-26T03:52:18.48477138Z/results.edn
+2026-09-26 03:53:48,060{GMT}	INFO	[jepsen test runner] jepsen.core: {:linear {:valid? true,
+          :lease {:expiries 50,
+                  :grants 98,
+                  :liveness-unjudged 12,
+                  :violations-by-class {},
+                  :keepalive-stream-errors 0,
+                  :min-expiries 2,
+                  :by-scenario {:ttl 50, :keepalive 29, :revoke 19},
+                  :keepalive-responses 174,
+                  :min-grants 5},
+          :failures []},
+ :gates {:valid? true,
+         :gates {:premise {:valid? true,
+                           :writes 0,
+                           :duplicate-value-count 0,
+                           :duplicate-values {}},
+                 :availability {:min-ratio 0.95,
+                                :min-sample 100,
+                                :windows 4,
+                                :judged 0,
+                                :skipped-small-sample 4,
+                                :worst-window nil,
+                                :violations []},
+                 :rto {:budget-seconds 120,
+                       :n 0,
+                       :p95 nil,
+                       :max nil,
+                       :samples [],
+                       :unrecovered 0,
+                       :not-measured 4,
+                       :details [{:disruption {:start 5721281326,
+                                               :end 9756360555},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}
+                                 {:disruption {:start 17843800778,
+                                               :end 22949483190},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}
+                                 {:disruption {:start 27288669147,
+                                               :end 30637098321},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}
+                                 {:disruption {:start 35835657169,
+                                               :end 43533145081},
+                                  :measurable? false,
+                                  :first-ok-after nil,
+                                  :seconds nil}]},
+                 :liveness {:min-ok-ratio 0.1,
+                            :min-sample 10,
+                            :ops 3,
+                            :judged 3,
+                            :skipped-small-sample 0,
+                            :ok-ratio 0.98,
+                            :by-op {:lease-ttl {:total 52,
+                                                :ok 50,
+                                                :info 2,
+                                                :fail 0,
+                                                :legit-fail 0,
+                                                :judged 52,
+                                                :errors {:unavailable-maybe-applied 2}},
+                                    :lease-keepalive {:total 29,
+                                                      :ok 29,
+                                                      :info 0,
+                                                      :fail 0,
+                                                      :legit-fail 0,
+                                                      :judged 29,
+                                                      :errors {}},
+                                    :lease-revoke {:total 19,
+                                                   :ok 19,
+                                                   :info 0,
+                                                   :fail 0,
+                                                   :legit-fail 0,
+                                                   :judged 19,
+                                                   :errors {}}},
+                            :violations []},
+                 :agent nil},
+         :failures []},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true}
+
+
+Everything looks good! ヽ(‘ー`)ノ
