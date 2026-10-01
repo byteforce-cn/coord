@@ -10,15 +10,56 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 
 use crate::metrics::AgentMetrics;
 
+// ──── 端点资源上限 ────
+
+/// health 端点默认最大并发连接数。
+///
+/// 每个连接占用一个 fd 与一个任务，且该端点**不带鉴权**：
+/// 无上限时慢连接（slowloris）可把两者耗尽。
+const DEFAULT_MAX_HEALTH_CONNECTIONS: usize = 64;
+
+/// 默认请求读超时：慢客户端超过此时限仍未发出请求即被断开，
+/// 使 fd/任务占用是**有界时长**而非无限。
+const DEFAULT_HEALTH_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 默认响应写超时：对端不读时任务与配额不得无限挂起。
+const DEFAULT_HEALTH_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// health 监听器的资源上限（连接数 + 读/写超时）。
+///
+/// 生产入口使用 [`HealthLimits::default`]；测试注入小上限/短超时，
+/// 以在毫秒级断言限流与超时行为真实生效。
+#[derive(Debug, Clone, Copy)]
+pub struct HealthLimits {
+    /// 最大并发连接数（含已接受但未完成的慢连接）
+    pub max_connections: usize,
+    /// 单连接请求读超时
+    pub read_timeout: Duration,
+    /// 单连接响应写超时
+    pub write_timeout: Duration,
+}
+
+impl Default for HealthLimits {
+    fn default() -> Self {
+        Self {
+            max_connections: DEFAULT_MAX_HEALTH_CONNECTIONS,
+            read_timeout: DEFAULT_HEALTH_READ_TIMEOUT,
+            write_timeout: DEFAULT_HEALTH_WRITE_TIMEOUT,
+        }
+    }
+}
+
 // ──── 公共 API ────
 
-/// 启动轻量级 HTTP Health/Metrics 端点
+/// 启动轻量级 HTTP Health/Metrics 端点（资源上限见 [`HealthLimits::default`]）
 ///
 /// 监听指定地址，处理 /health 和 /metrics 请求。
 ///
@@ -31,6 +72,19 @@ pub fn start_health_server(
     addr: &str,
     metrics: AgentMetrics,
     ready: Arc<std::sync::atomic::AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    start_health_server_with_limits(addr, metrics, ready, HealthLimits::default())
+}
+
+/// 同 [`start_health_server`]，但可注入连接上限与读/写超时。
+///
+/// 上限语义：接受连接前先取配额，**超限连接立即关闭**（不排队、不回响应），
+/// 避免慢连接经 accept 队列或任务堆积占用资源。
+pub fn start_health_server_with_limits(
+    addr: &str,
+    metrics: AgentMetrics,
+    ready: Arc<std::sync::atomic::AtomicBool>,
+    limits: HealthLimits,
 ) -> tokio::task::JoinHandle<()> {
     let metrics = Arc::new(metrics);
     let addr = addr.to_string();
@@ -45,17 +99,45 @@ pub fn start_health_server(
         };
         tracing::info!("Agent health/metrics HTTP server listening on http://{addr}");
 
+        // 连接配额：与读/写超时共同保证 fd 与任务占用有界。
+        let connections = Arc::new(Semaphore::new(limits.max_connections));
+
         loop {
             match listener.accept().await {
                 Ok((mut socket, _)) => {
+                    let permit = match Arc::clone(&connections).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            // 超限：立即断开，不排队也不回响应——慢连接不得借排队占位。
+                            // 用 debug 而非 warn：被扫描/攻击时 warn 日志本身会变成洪泛面。
+                            tracing::debug!(
+                                max_connections = limits.max_connections,
+                                "health connection limit reached; closing new connection"
+                            );
+                            continue;
+                        }
+                    };
                     let metrics = Arc::clone(&metrics);
                     let ready = Arc::clone(&ready);
                     tokio::spawn(async move {
+                        // 处理期间持有配额；连接结束（读完/超时/写完）即释放
+                        let _permit = permit;
                         let mut buf = [0u8; 4096];
-                        let n = match socket.read(&mut buf).await {
-                            Ok(n) if n > 0 => n,
-                            _ => return,
-                        };
+                        let n =
+                            match tokio::time::timeout(limits.read_timeout, socket.read(&mut buf))
+                                .await
+                            {
+                                Ok(Ok(n)) if n > 0 => n,
+                                // EOF / 读错误：对端已关闭，直接结束
+                                Ok(_) => return,
+                                Err(_) => {
+                                    // 读超时：slowloris 防护——慢客户端不得无限占用 fd 与配额
+                                    tracing::debug!(
+                                        "health request read timed out; closing connection"
+                                    );
+                                    return;
+                                }
+                            };
 
                         let request = String::from_utf8_lossy(&buf[..n]);
                         let first_line = request.lines().next().unwrap_or("");
@@ -93,7 +175,12 @@ pub fn start_health_server(
                             body
                         );
 
-                        let _ = socket.write_all(response.as_bytes()).await;
+                        // 写超时：对端不读时任务与配额不得无限挂起
+                        let _ = tokio::time::timeout(
+                            limits.write_timeout,
+                            socket.write_all(response.as_bytes()),
+                        )
+                        .await;
                     });
                 }
                 Err(e) => {
