@@ -37,7 +37,7 @@
 
 | # | 不承诺 | 事实锚点 | 若要变成承诺 |
 |:--|:--|:--|:--|
-| B-CX-1 | **没有连接数上限**。`max_concurrent_streams` 限的是**每连接**的流数（512 客户端口 / 256 raft 口），不是连接数；唯一的 Semaphore 类原语是快照字节限流 | `coord-server/src/storage/snapshot_limiter.rs`、`coord-server/src/server/mod.rs`（tonic 装配） | 加 `ConcurrencyLimitLayer` / accept 限流 + `max_connection_age`，并配指标与告警 |
+| B-CX-1 | 客户端口的**连接数**已有全局上限（`network.max_connections`，默认 4096，超限在 accept 后立即断开），但**没有连接寿命/空闲回收**（`max_connection_age` 类语义未实现）；被静默连接占满配额时新连接会被拒（`coord_grpc_connections_rejected_total` 可见） | `coord-server/src/server/connection_gate.rs`、`coord/src/main.rs`（装配）、`coord-server/src/metrics.rs` | 若需要「占坑」自愈，评估 tonic 的连接寿命/空闲超时能力后再接线（勿承诺不存在的语义） |
 | B-CX-2 | 客户端连接池的**回收是机会式**的（挂在取连接路径上，窗口 = `idle_timeout`，最小节流 60s），不是定时后台回收 | 本仓 `coord-client/src/pool.rs`（`maybe_sweep`） | 若需要严格定时回收，改由调用方持有 runtime 时启动 reaper |
 
 ## 5. 鉴权 / 安全

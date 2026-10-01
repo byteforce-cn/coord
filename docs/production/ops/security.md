@@ -94,7 +94,7 @@ cargo test -p coord --test dos_rss_peak_test -- --ignored --nocapture --test-thr
 
 **残余/边界**：① 只打 content-length 预检路径（第二条"带硬上限读取"由 `coord-server` 单测
 `:1809`/`:1827` 覆盖）；② 阈值与漂移阈值为本机实测的 2.2×/2.6× 余量，换机器需重测
-（测试会打印全部读数，证据归档时一并收录）；③ 无连接数上限仍是已声明的边界（`boundaries.md` B-CX-1）。
+（测试会打印全部读数，证据归档时一并收录）；③ 客户端口连接数上限已落地（`network.max_connections`，默认 4096；超限立即断开，`/metrics` 可见活跃/拒绝计数）；残余：连接寿命无主动回收（`boundaries.md` B-CX-1）。
 
 ---
 

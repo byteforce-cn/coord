@@ -15,6 +15,7 @@ name = "coord-01"
 grpc_addr = "0.0.0.0:50051"   # 客户端 gRPC
 raft_addr = "0.0.0.0:50052"   # 节点间 Raft（必须与 grpc 不同端口）
 http_addr = "0.0.0.0:50061"   # HTTP /metrics /healthz（生产建议内网绑定）
+max_connections = 4096        # 客户端口全局连接数上限（超限立即断开；raft 口不设闸）
 
 [cluster]
 cluster_name = "prod-cluster"
