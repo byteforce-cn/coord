@@ -16,6 +16,9 @@
 // - agent_cache_active_bytes / agent_cache_limit_bytes: 缓存活跃字节与上界（B-PL-3）
 // - agent_cache_reaped_entries_total / agent_cache_evicted_entries_total /
 //   agent_cache_reaper_faults_total: reaper 回收/淘汰/失败累计（B-PL-3）
+// - agent_mq_active_bytes / agent_mq_limit_bytes: MQ 活跃字节与上界（B-PL-4）
+// - agent_mq_purged_entries_total / agent_mq_publish_rejected_total /
+//   agent_mq_reaper_faults_total: 保留回收/配额拒绝/失败累计（B-PL-4）
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -91,6 +94,16 @@ struct MetricsInner {
     pub cache_evicted_entries: AtomicU64,
     /// 缓存 reaper 累计失败轮数（单调；>0 = 至少有一轮回收失败）
     pub cache_reaper_faults: AtomicU64,
+    /// MQ 活跃字节（记账口径；B-PL-4）
+    pub mq_active_bytes: AtomicU64,
+    /// MQ 容量上界（字节；0 = 不限）
+    pub mq_limit_bytes: AtomicU64,
+    /// MQ reaper 累计保留回收条目数（消息 + DLQ；单调）
+    pub mq_purged_entries: AtomicU64,
+    /// MQ publish 因配额被拒绝的累计次数（单调；背压生效可观测）
+    pub mq_publish_rejected: AtomicU64,
+    /// MQ reaper 累计失败轮数（单调；>0 = 至少有一轮回收失败）
+    pub mq_reaper_faults: AtomicU64,
 }
 
 impl AgentMetrics {
@@ -118,6 +131,11 @@ impl AgentMetrics {
                 cache_reaped_entries: AtomicU64::new(0),
                 cache_evicted_entries: AtomicU64::new(0),
                 cache_reaper_faults: AtomicU64::new(0),
+                mq_active_bytes: AtomicU64::new(0),
+                mq_limit_bytes: AtomicU64::new(0),
+                mq_purged_entries: AtomicU64::new(0),
+                mq_publish_rejected: AtomicU64::new(0),
+                mq_reaper_faults: AtomicU64::new(0),
             }),
         }
     }
@@ -253,6 +271,39 @@ impl AgentMetrics {
             .store(evicted_entries_total, Ordering::Relaxed);
         self.inner
             .cache_reaper_faults
+            .store(faults_total, Ordering::Relaxed);
+    }
+
+    /// 写入 MQ 容量上界事实（B-PL-4）；由周期采样任务从 MessageQueueService 拉取。
+    ///
+    /// 语义：
+    /// - `active_bytes ≤ limit_bytes`（limit > 0）是写路径强制的**严格不变量**
+    ///   （与 cache 的周期收敛不同：超界发生在 publish 之前而不是事后再收敛）；
+    /// - `publish_rejected_total` 单调：>0 表示至少一次 publish 因配额被拒
+    ///   （背压生效 —— 消费/保留回收跟不上生产）；
+    /// - `faults_total` 单调：>0 表示至少有一轮回收失败。
+    pub fn set_mq_reaper_stats(
+        &self,
+        active_bytes: u64,
+        limit_bytes: u64,
+        purged_entries_total: u64,
+        publish_rejected_total: u64,
+        faults_total: u64,
+    ) {
+        self.inner
+            .mq_active_bytes
+            .store(active_bytes, Ordering::Relaxed);
+        self.inner
+            .mq_limit_bytes
+            .store(limit_bytes, Ordering::Relaxed);
+        self.inner
+            .mq_purged_entries
+            .store(purged_entries_total, Ordering::Relaxed);
+        self.inner
+            .mq_publish_rejected
+            .store(publish_rejected_total, Ordering::Relaxed);
+        self.inner
+            .mq_reaper_faults
             .store(faults_total, Ordering::Relaxed);
     }
 
@@ -435,6 +486,51 @@ impl AgentMetrics {
         out.push_str(&format!(
             "coord_agent_cache_reaper_faults_total {}\n",
             self.inner.cache_reaper_faults.load(Ordering::Relaxed)
+        ));
+
+        // ──── MQ 容量上界（B-PL-4；周期采样自 MessageQueueService）────
+        out.push_str(
+            "# HELP coord_agent_mq_active_bytes Accounted active MQ bytes (messages + DLQ)\n",
+        );
+        out.push_str("# TYPE coord_agent_mq_active_bytes gauge\n");
+        out.push_str(&format!(
+            "coord_agent_mq_active_bytes {}\n",
+            self.inner.mq_active_bytes.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP coord_agent_mq_limit_bytes Configured MQ capacity limit in bytes \
+             (0 = unlimited)\n",
+        );
+        out.push_str("# TYPE coord_agent_mq_limit_bytes gauge\n");
+        out.push_str(&format!(
+            "coord_agent_mq_limit_bytes {}\n",
+            self.inner.mq_limit_bytes.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP coord_agent_mq_purged_entries_total Retention-expired MQ entries \
+             (messages + DLQ) purged by the reaper; monotonic\n",
+        );
+        out.push_str("# TYPE coord_agent_mq_purged_entries_total counter\n");
+        out.push_str(&format!(
+            "coord_agent_mq_purged_entries_total {}\n",
+            self.inner.mq_purged_entries.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP coord_agent_mq_publish_rejected_total MQ publishes rejected by the \
+             byte quota (backpressure); monotonic\n",
+        );
+        out.push_str("# TYPE coord_agent_mq_publish_rejected_total counter\n");
+        out.push_str(&format!(
+            "coord_agent_mq_publish_rejected_total {}\n",
+            self.inner.mq_publish_rejected.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP coord_agent_mq_reaper_faults_total Failed MQ reaper passes; monotonic\n",
+        );
+        out.push_str("# TYPE coord_agent_mq_reaper_faults_total counter\n");
+        out.push_str(&format!(
+            "coord_agent_mq_reaper_faults_total {}\n",
+            self.inner.mq_reaper_faults.load(Ordering::Relaxed)
         ));
 
         // ──── 插件指标 ────
@@ -684,6 +780,35 @@ mod tests {
         let healthy = AgentMetrics::new().render_prometheus_text();
         assert!(healthy.contains("coord_agent_cache_active_bytes 0"));
         assert!(healthy.contains("coord_agent_cache_reaper_faults_total 0"));
+    }
+
+    /// MQ 容量上界（B-PL-4）的五个事实必须真的出现在抓取面上
+    /// （与 cache reaper 同一判据：指标的全部意义是"能力可观测"）。
+    #[test]
+    fn test_mq_reaper_metrics_render() {
+        let m = AgentMetrics::new();
+        m.set_mq_reaper_stats(512, 1024 * 1024, 9, 3, 1);
+        let text = m.render_prometheus_text();
+
+        assert!(text.contains("# TYPE coord_agent_mq_active_bytes gauge"));
+        assert!(text.contains("coord_agent_mq_active_bytes 512"));
+        assert!(text.contains("coord_agent_mq_limit_bytes 1048576"));
+        assert!(
+            text.contains("# TYPE coord_agent_mq_purged_entries_total counter"),
+            "保留回收条目是单调累计 ⇒ counter：{text}"
+        );
+        assert!(text.contains("coord_agent_mq_purged_entries_total 9"));
+        assert!(
+            text.contains("# TYPE coord_agent_mq_publish_rejected_total counter"),
+            "配额拒绝次数是单调累计 ⇒ counter：{text}"
+        );
+        assert!(text.contains("coord_agent_mq_publish_rejected_total 3"));
+        assert!(text.contains("coord_agent_mq_reaper_faults_total 1"));
+
+        // 健康态：HELP/TYPE 仍在（Grafana 无数据时不断线），值为 0
+        let healthy = AgentMetrics::new().render_prometheus_text();
+        assert!(healthy.contains("coord_agent_mq_active_bytes 0"));
+        assert!(healthy.contains("coord_agent_mq_reaper_faults_total 0"));
     }
 
     #[test]

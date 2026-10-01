@@ -200,7 +200,9 @@ Coord 处于 pre-1.0，并明确列出**不承诺**的事项；完整清单（�
 - **鉴权依赖 raft quorum**——登录与令牌刷新需要 quorum；凭据过期的客户端在 quorum 恢复前不可用。
 - **`transit` 的 KEK 由运维注入**——不接外部 KMS，也没有内建的材料轮换流程。
 - **资源边界**——插件队列有界；客户端口与 agent 健康监听均有连接上限（但无连接寿命回收）；
-  缓存容量上界由 reaper 周期强制（默认 1GB；周期内可短暂超界，指标可观测）。
+  缓存容量上界由 reaper 周期强制（默认 1GB；周期内可短暂超界，指标可观测）；
+  消息队列的字节配额在 publish 入口严格强制（同事务记账，超界拒绝 `RESOURCE_EXHAUSTED`），
+  过期消息/DLQ 由 reaper 按 topic 的 `retention_secs` 周期回收（0 = 不按时间回收）。
 
 **非目标**：不提供 Spring Boot starter（见「快速开始」）。
 

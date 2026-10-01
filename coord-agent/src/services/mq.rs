@@ -14,11 +14,20 @@
 //   + 消息 + 复制日志 + 幂等键 + 本地序列号）→ 同步推送到 ISR Followers → min_isr 校验
 // - Follower 幂等应用 + 自动建 topic；subscribe / ack 仅 Leader
 // - `services.replication=false` = 纯单 agent 本地语义；启用后为分布式 / 高可用形态
+//
+// ── 容量上界（B-PL-4）──
+// `max_size_bytes`（0 = 不限）在 publish 入口**强制**：消息与 DLQ 的物理字节计入
+// `mq:meta`（与数据同一次写事务 ⇒ 逐写严格上界；超界与单条超限均拒绝
+// `RESOURCE_EXHAUSTED`）。服务内 reaper（默认 10s）按 topic 的 `retention_secs`
+// （0 = 不按时间回收）清扫过期消息与 DLQ 条目。周期回收语义与残余边界（记账范围 /
+// ISR 本地行为 / delete_topic 存量行）见 `docs/production/ops/boundaries.md`
+// B-PL-4（单一归属）。
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -70,7 +79,39 @@ pub struct MqStats {
     pub topic_count: u64,
     pub total_messages: u64,
     pub dlq_messages: u64,
+    /// 记账口径的活跃字节（消息 + DLQ 物理字节；见模块头「容量上界」，
+    /// `MessageQueueService::accounted_bytes` 为同一真值）
     pub total_bytes: u64,
+}
+
+/// 单轮 reaper 统计（`MessageQueueService::reap_once` 返回）
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MqReapStats {
+    /// 本轮回收到期的消息数
+    pub expired_messages: u64,
+    /// 本轮回收到期的 DLQ 条目数
+    pub expired_dlq: u64,
+    /// 本轮回收的字节数（记账口径）
+    pub purged_bytes: u64,
+    /// 本轮结束时的活跃字节
+    pub active_bytes: u64,
+    /// 当前上界（0 = 不限）
+    pub limit_bytes: u64,
+}
+
+/// reaper 累计统计（单调；由 reaper 后台任务/显式调用更新）
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MqReapCounters {
+    /// 累计执行轮数
+    pub passes: u64,
+    /// 累计回收到期的消息数
+    pub expired_messages: u64,
+    /// 累计回收到期的 DLQ 条目数
+    pub expired_dlq: u64,
+    /// 累计回收字节数（记账口径）
+    pub purged_bytes: u64,
+    /// 累计失败轮数（单调；>0 表示至少有一轮 reap 失败）
+    pub faults: u64,
 }
 
 // ──── redb 表定义 ────
@@ -108,6 +149,22 @@ const REPL_APPLIED_KEYS: redb::TableDefinition<&[u8], ()> =
 // 各 shard 最后已应用序列号: key = shard bytes
 const REPL_LOCAL_SEQ: redb::TableDefinition<&[u8], u64> =
     redb::TableDefinition::new("mq:repl_local_seq");
+
+// ──── 容量记账表（B-PL-4）────
+//
+// 记账口径：`active_bytes` = `mq:messages` + `mq:dlq` 内**物理存储行**大小之和，
+// 单条大小 = 物理 key 长度 + 存储值长度。不含消费位点（每 group×topic×partition
+// 一行，非消息级增长）、幂等索引（已有窗口清扫）、ISR 复制日志（复制设计保留）
+// 与 redb 页面开销 —— 因此 redb 文件体积**大于**记账值。
+const MQ_META_TABLE: redb::TableDefinition<&str, u64> = redb::TableDefinition::new("mq:meta");
+
+/// meta 表键：已记账活跃字节
+const META_ACTIVE_BYTES: &str = "active_bytes";
+
+/// reaper 过期清扫每批最多删除的条目数（控制单事务规模）
+const REAP_PURGE_CHUNK: usize = 512;
+/// 后台 reaper 默认周期（毫秒）
+const DEFAULT_REAPER_INTERVAL_MS: u64 = 10_000;
 
 // ──── Key 编码辅助 ────
 
@@ -298,10 +355,27 @@ pub struct MessageQueueService {
     db_path: PathBuf,
     db: RwLock<Option<redb::Database>>,
     started: RwLock<bool>,
-    /// 声明的容量上限（字节）。**当前未被强制执行** —— 缓存侧（B-PL-3）已落地
-    /// 记账 + reaper 淘汰，MQ 尚未；保留值以便如实报出，而不是用一个
-    /// `#[allow(dead_code)]` 字段假装遵守。方向决策跟踪见仓库 issue（MQ 容量上界）。
+    /// 容量上界（字节；0 = 不限）。**已在 publish 入口强制**（消息 + DLQ 与数据
+    /// 同事务记账 ⇒ 逐写严格上界；超界与单条超限均拒绝），并按 topic 的
+    /// `retention_secs` 由 reaper 周期回收 —— 契约与残余边界见
+    /// `docs/production/ops/boundaries.md` B-PL-4。
     max_size_bytes: u64,
+    /// 后台 reaper 周期（毫秒；装配/测试旋钮）
+    reaper_interval_ms: AtomicU64,
+    /// 后台 reaper 是否已挂载（幂等；与 cache 同口径）
+    reaper_spawned: AtomicBool,
+    /// reaper 累计执行轮数
+    reap_passes: AtomicU64,
+    /// reaper 累计回收消息数
+    reap_expired_messages: AtomicU64,
+    /// reaper 累计回收 DLQ 条目数
+    reap_expired_dlq: AtomicU64,
+    /// reaper 累计回收字节数（记账口径）
+    reap_purged_bytes: AtomicU64,
+    /// reaper 累计失败轮数
+    reap_faults: AtomicU64,
+    /// publish 因配额被拒绝的累计次数（单调；背压可观测）
+    publish_rejections: AtomicU64,
     /// 订阅者注册表：topic → (consumer_group, 消息 channel [(partition, record)])
     subscriptions: RwLock<HashMap<String, Vec<SubscriberEntry>>>,
     /// ISR 复制管理器（None = 单 agent 本地语义，零复制路径保留）
@@ -310,7 +384,7 @@ pub struct MessageQueueService {
     self_arc: RwLock<Option<std::sync::Weak<MessageQueueService>>>,
     /// 幂等条目机会式清扫计数器（每 `IDEM_PRUNE_EVERY` 次触发一次，
     /// 避免每次生产都 O(n) 扫全表）
-    idem_prune_tick: std::sync::atomic::AtomicU64,
+    idem_prune_tick: AtomicU64,
 }
 
 impl std::fmt::Debug for MessageQueueService {
@@ -318,21 +392,29 @@ impl std::fmt::Debug for MessageQueueService {
         f.debug_struct("MessageQueueService")
             .field("db_path", &self.db_path)
             .field("started", &self.started)
-            // 如实报出"配了多少、有没有生效"：该上限**未被执行**
-            // （缓存已强制执行，MQ 尚未；见字段注释）。
+            // 如实报出"配了多少、有没有生效"（0 = 不限 ⇒ 未设置强制上界）
             .field("max_size_bytes", &self.max_size_bytes)
-            .field("max_size_enforced", &false)
+            .field("max_size_enforced", &(self.max_size_bytes > 0))
             .finish()
     }
 }
 
 impl MessageQueueService {
+    /// 创建 MQ 服务。
+    ///
+    /// # 容量上界（B-PL-4）
+    ///
+    /// `max_size_bytes`（0 = 不限）**在 publish 入口强制**：消息与 DLQ 物理字节
+    /// 与数据在**同一次写事务**记账（redb 单写者串行化 ⇒ 逐写严格上界，超界即
+    /// 拒绝 `RESOURCE_EXHAUSTED`，不是周期收敛）。后台 reaper（默认 10s）按
+    /// topic 的 `retention_secs`（0 = 不按时间回收）清扫过期消息与 DLQ 条目、
+    /// 释放配额。语义边界（记账范围 / ISR 本地行为 / delete_topic 存量行）与
+    /// `docs/production/ops/boundaries.md` B-PL-4 单一归属。
     pub fn new(db_path: PathBuf, max_size_bytes: u64) -> Self {
-        if max_size_bytes > 0 {
+        if max_size_bytes == 0 {
             tracing::warn!(
-                max_size_bytes,
-                "MessageQueueService: configured size limit is NOT enforced (no eviction \
-                 implemented); growth is bounded only by message consumption and disk space"
+                "MessageQueueService: no size limit configured (max_size_bytes=0); growth \
+                 is bounded only by consumption and retention reaping"
             );
         }
         Self {
@@ -340,10 +422,18 @@ impl MessageQueueService {
             db: RwLock::new(None),
             started: RwLock::new(false),
             max_size_bytes,
+            reaper_interval_ms: AtomicU64::new(DEFAULT_REAPER_INTERVAL_MS),
+            reaper_spawned: AtomicBool::new(false),
+            reap_passes: AtomicU64::new(0),
+            reap_expired_messages: AtomicU64::new(0),
+            reap_expired_dlq: AtomicU64::new(0),
+            reap_purged_bytes: AtomicU64::new(0),
+            reap_faults: AtomicU64::new(0),
+            publish_rejections: AtomicU64::new(0),
             subscriptions: RwLock::new(HashMap::new()),
             replication: RwLock::new(None),
             self_arc: RwLock::new(None),
-            idem_prune_tick: std::sync::atomic::AtomicU64::new(0),
+            idem_prune_tick: AtomicU64::new(0),
         }
     }
 
@@ -405,6 +495,324 @@ impl MessageQueueService {
         let guard = self.db.read();
         let db = guard.as_ref().ok_or("MQ Service not started")?;
         Ok(db.begin_write()?)
+    }
+
+    // ──── 容量上界：记账 / 配额 / reaper（B-PL-4）────
+    //
+    // 契约与残余边界与 `docs/production/ops/boundaries.md` B-PL-4 单一归属：
+    // - 记账 = `mq:messages` + `mq:dlq` 物理行大小之和（key 长度 + 存储值长度），
+    //   与数据在**同一次写事务**提交（redb 单写者串行化 ⇒ 无读-改-写竞态）；
+    // - 强制点只有 publish 入口（单 agent 与 ISR Leader 本地提交前）：`active +
+    //   entry > max` 即拒绝；Follower apply 刻意不检查 —— 必须镜像 Leader 已提交
+    //   的决定，否则副本分叉（配额为节点本地 ingress 行为）；
+    // - 回收 = 按 topic `retention_secs` 周期清扫过期行（消息 + DLQ）；
+    // - `move_to_dlq` 为维护路径，不受配额拒绝（净增仅 reason/detail 开销）。
+
+    /// 服务是否已启动（后台 reaper 据此决定是否执行本轮）
+    pub fn is_started(&self) -> bool {
+        *self.started.read()
+    }
+
+    /// 配置的容量上界（字节；0 = 不限）
+    pub fn max_size_bytes(&self) -> u64 {
+        self.max_size_bytes
+    }
+
+    /// 已记账的活跃字节（直接读 redb meta；未启动返回 Err）
+    pub fn accounted_bytes(&self) -> ServiceResult<u64> {
+        let rtx = self.read_tx()?;
+        let meta = rtx.open_table(MQ_META_TABLE)?;
+        let x = meta.get(META_ACTIVE_BYTES)?.map(|v| v.value()).unwrap_or(0);
+        Ok(x)
+    }
+
+    /// publish 因配额被拒绝的累计次数（单调；背压可观测）
+    pub fn publish_rejections(&self) -> u64 {
+        self.publish_rejections.load(Ordering::Relaxed)
+    }
+
+    /// reaper 累计统计快照（原子读；单调计数器）
+    pub fn reap_counters(&self) -> MqReapCounters {
+        MqReapCounters {
+            passes: self.reap_passes.load(Ordering::Relaxed),
+            expired_messages: self.reap_expired_messages.load(Ordering::Relaxed),
+            expired_dlq: self.reap_expired_dlq.load(Ordering::Relaxed),
+            purged_bytes: self.reap_purged_bytes.load(Ordering::Relaxed),
+            faults: self.reap_faults.load(Ordering::Relaxed),
+        }
+    }
+
+    /// 调整后台 reaper 周期（装配/测试旋钮；默认 10s）
+    pub fn set_reaper_interval(&self, interval: Duration) {
+        self.reaper_interval_ms
+            .store(interval.as_millis().max(1) as u64, Ordering::Relaxed);
+    }
+
+    /// 当前后台 reaper 周期
+    pub fn reaper_interval(&self) -> Duration {
+        Duration::from_millis(self.reaper_interval_ms.load(Ordering::Relaxed))
+    }
+
+    fn record_reap_fault(&self) {
+        self.reap_faults.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 单条记账大小：物理 key 长度 + 存储值长度
+    fn entry_size(physical_key_len: usize, stored_value_len: usize) -> u64 {
+        (physical_key_len + stored_value_len) as u64
+    }
+
+    /// 配额检查（在写事务内）：`active + entry ≤ max` 才放行。
+    /// 单条自身超界与总量超界走同一拒绝路径（这种条目永远装不下，写成功再
+    /// 回收等于假成功）；拒绝计入 `publish_rejections`。
+    ///
+    /// **负控制**：移除 `produce_idempotent` 中的本调用 ⇒
+    /// `test_produce_rejected_over_limit` 必红。
+    fn ensure_quota_tx(&self, wtx: &redb::WriteTransaction, entry_size: u64) -> ServiceResult<()> {
+        if self.max_size_bytes == 0 {
+            return Ok(());
+        }
+        let cur = {
+            let meta = wtx.open_table(MQ_META_TABLE)?;
+            let x = meta.get(META_ACTIVE_BYTES)?.map(|v| v.value()).unwrap_or(0);
+            x
+        };
+        let total = cur
+            .checked_add(entry_size)
+            .ok_or_else(|| format!("mq accounting overflow (cur={cur} entry={entry_size})"))?;
+        if total > self.max_size_bytes {
+            self.publish_rejections.fetch_add(1, Ordering::Relaxed);
+            return Err(format!(
+                "mq publish rejected: message needs {entry_size} bytes, active {cur} (sum \
+                 {total}) exceeds max_size_bytes={} — quota is enforced at publish \
+                 (no silent drop); consume/ack or the retention reaper frees space \
+                 (see boundaries.md B-PL-4)",
+                self.max_size_bytes
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    /// 同事务增加记账，返回更新后的 active_bytes。
+    fn account_add_tx(wtx: &redb::WriteTransaction, added: u64) -> ServiceResult<u64> {
+        let mut meta = wtx.open_table(MQ_META_TABLE)?;
+        let cur = meta.get(META_ACTIVE_BYTES)?.map(|v| v.value()).unwrap_or(0);
+        let new_cur = cur
+            .checked_add(added)
+            .ok_or_else(|| format!("mq accounting overflow (cur={cur} added={added})"))?;
+        meta.insert(META_ACTIVE_BYTES, new_cur)?;
+        Ok(new_cur)
+    }
+
+    /// 同事务扣减记账，返回更新后的 active_bytes。
+    fn account_sub_tx(wtx: &redb::WriteTransaction, removed: u64) -> ServiceResult<u64> {
+        let mut meta = wtx.open_table(MQ_META_TABLE)?;
+        let cur = meta.get(META_ACTIVE_BYTES)?.map(|v| v.value()).unwrap_or(0);
+        let new_cur = cur.checked_sub(removed).ok_or_else(|| {
+            format!("mq accounting underflow on remove (cur={cur} removed={removed})")
+        })?;
+        meta.insert(META_ACTIVE_BYTES, new_cur)?;
+        Ok(new_cur)
+    }
+
+    /// 启动时初始化记账：已存在 ⇒ 直接采用；缺失（旧库升级）⇒ 一次性全量重建。
+    fn ensure_accounting_initialized(&self) -> ServiceResult<u64> {
+        let existing = {
+            let rtx = self.read_tx()?;
+            match rtx.open_table(MQ_META_TABLE) {
+                Ok(meta) => {
+                    let x = meta.get(META_ACTIVE_BYTES)?.map(|v| v.value());
+                    x
+                }
+                Err(redb::TableError::TableDoesNotExist(_)) => None,
+                Err(e) => return Err(e.into()),
+            }
+        };
+        if let Some(v) = existing {
+            return Ok(v);
+        }
+        // 重建：扫描消息 + DLQ 全表（一次性升级成本，单事务）。
+        let wtx = self.write_tx()?;
+        let mut accounted = 0u64;
+        {
+            macro_rules! sum_table {
+                ($def:expr) => {{
+                    let table = wtx.open_table($def)?;
+                    for item in table.iter()? {
+                        let (k, v) = item?;
+                        accounted += Self::entry_size(k.value().len(), v.value().len());
+                    }
+                }};
+            }
+            sum_table!(MESSAGE_TABLE);
+            sum_table!(DLQ_TABLE);
+        }
+        {
+            let mut meta = wtx.open_table(MQ_META_TABLE)?;
+            meta.insert(META_ACTIVE_BYTES, accounted)?;
+        }
+        wtx.commit()?;
+        tracing::info!(
+            accounted_bytes = accounted,
+            "MessageQueueService: rebuilt capacity accounting for existing database \
+             (one-time upgrade; see boundaries.md B-PL-4)"
+        );
+        Ok(accounted)
+    }
+
+    /// 执行一轮回收：按 topic 的 `retention_secs` 清扫过期消息与 DLQ 条目。
+    ///
+    /// 由后台任务按周期调用；测试可直接调用以获得确定性（无 sleep）。
+    /// `retention_secs = 0` 的 topic 不做时间回收（沿用 cache 的「0 = 不限」口径）。
+    ///
+    /// **负控制**：移除对 `MESSAGE_TABLE` 的 `purge_expired_in_table` 调用 ⇒
+    /// `test_reaper_purges_expired_messages` 必红。
+    pub fn reap_once(&self) -> ServiceResult<MqReapStats> {
+        if !self.is_started() {
+            return Err("MessageQueueService not started".into());
+        }
+        let now = now_millis();
+        let mut stats = MqReapStats {
+            limit_bytes: self.max_size_bytes,
+            ..MqReapStats::default()
+        };
+        for t in self.list_topics()? {
+            let retention = t.config.retention_secs;
+            if retention == 0 {
+                continue;
+            }
+            let cutoff = now.saturating_sub(retention.saturating_mul(1000));
+            let (n, bytes) =
+                self.purge_expired_in_table(MESSAGE_TABLE, &t.name, t.config.partitions, cutoff)?;
+            stats.expired_messages += n;
+            stats.purged_bytes += bytes;
+            let (n, bytes) =
+                self.purge_expired_in_table(DLQ_TABLE, &t.name, t.config.partitions, cutoff)?;
+            stats.expired_dlq += n;
+            stats.purged_bytes += bytes;
+        }
+        stats.active_bytes = self.accounted_bytes()?;
+
+        self.reap_passes.fetch_add(1, Ordering::Relaxed);
+        self.reap_expired_messages
+            .fetch_add(stats.expired_messages, Ordering::Relaxed);
+        self.reap_expired_dlq
+            .fetch_add(stats.expired_dlq, Ordering::Relaxed);
+        self.reap_purged_bytes
+            .fetch_add(stats.purged_bytes, Ordering::Relaxed);
+        Ok(stats)
+    }
+
+    /// 清扫单表内某 topic 的过期行（消息表 / DLQ 表共用：key 布局相同，
+    /// 时间戳都在存储值前 8 字节）。按分区从最旧 offset 开始，遇到未过期行即停
+    /// （时间戳由写入/入队时刻决定，分区内单写者 ⇒ 正常单调；时钟回拨的极端
+    /// 情形下，被非过期行挡住的过期行会等该行过期后的后续轮次再回收），
+    /// 每批至多 `REAP_PURGE_CHUNK` 条、单事务删除并扣账。返回 (条数, 字节)。
+    fn purge_expired_in_table(
+        &self,
+        table_def: redb::TableDefinition<&[u8], &[u8]>,
+        topic: &str,
+        partitions: u32,
+        cutoff_ms: u64,
+    ) -> ServiceResult<(u64, u64)> {
+        let mut total_entries = 0u64;
+        let mut total_bytes = 0u64;
+        for partition in 0..partitions {
+            let prefix = msg_key_prefix(topic, partition);
+            loop {
+                let wtx = self.write_tx()?;
+                let mut batch: Vec<(Vec<u8>, u64)> = Vec::new();
+                {
+                    let table = wtx.open_table(table_def)?;
+                    for item in table.range(prefix.as_slice()..)? {
+                        let (k, v) = item?;
+                        let k = k.value();
+                        if !k.starts_with(&prefix) {
+                            break;
+                        }
+                        let raw = v.value();
+                        if raw.len() < 8 {
+                            continue; // 损坏行：跳过（不猜测，不删除）
+                        }
+                        let ts = u64::from_be_bytes(raw[..8].try_into().unwrap_or_default());
+                        if ts >= cutoff_ms {
+                            break; // 未过期：其后的行更新（正常单调）
+                        }
+                        batch.push((k.to_vec(), Self::entry_size(k.len(), raw.len())));
+                        if batch.len() >= REAP_PURGE_CHUNK {
+                            break;
+                        }
+                    }
+                }
+                if batch.is_empty() {
+                    // 无过期行：释放写事务（redb 只允许一个写事务，不 commit 会一直占着）
+                    drop(wtx);
+                    break;
+                }
+                let n = batch.len();
+                let mut bytes = 0u64;
+                {
+                    let mut table = wtx.open_table(table_def)?;
+                    for (k, size) in &batch {
+                        table.remove(k.as_slice())?;
+                        bytes += size;
+                    }
+                }
+                Self::account_sub_tx(&wtx, bytes)?;
+                wtx.commit()?;
+                total_entries += n as u64;
+                total_bytes += bytes;
+                if n < REAP_PURGE_CHUNK {
+                    break;
+                }
+                // 满批：继续本分区（已删除的行不会被再扫到，严格前进）
+            }
+        }
+        Ok((total_entries, total_bytes))
+    }
+
+    /// 挂载后台 reaper（每周期一轮 `reap_once`；幂等 —— 仅在首次 start 时 spawn）。
+    ///
+    /// 依赖装配时 `bind_self_weak`（与 `run_blocking` 同一前置条件）；未绑定或
+    /// 无 tokio runtime 时不挂载（单测直接调用 `reap_once` 获得确定性）。
+    fn spawn_reaper(&self) {
+        if self.reaper_spawned.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(me) = self.self_arc() else {
+            tracing::debug!(
+                "MessageQueueService: self_arc not bound; background reaper not spawned"
+            );
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!("MessageQueueService: no tokio runtime; background reaper not spawned");
+            return;
+        };
+        handle.spawn(async move {
+            loop {
+                tokio::time::sleep(me.reaper_interval()).await;
+                if !me.is_started() {
+                    continue;
+                }
+                let worker = me.clone();
+                match tokio::task::spawn_blocking(move || worker.reap_once()).await {
+                    Ok(Ok(_stats)) => {}
+                    Ok(Err(e)) => {
+                        me.record_reap_fault();
+                        tracing::warn!(
+                            error = %e,
+                            "mq reaper pass failed (metric: coord_agent_mq_reaper_faults_total)"
+                        );
+                    }
+                    Err(join) => {
+                        me.record_reap_fault();
+                        tracing::error!(error = %join, "mq reaper blocking task failed");
+                    }
+                }
+            }
+        });
     }
 
     // ──── Topic 管理 ────
@@ -568,6 +976,10 @@ impl MessageQueueService {
             }
         }
 
+        // 容量配额（B-PL-4，同事务 ⇒ 逐写严格上界）；拒绝不推进 offset
+        let entry_size = Self::entry_size(msg_key_prefix.len() + 8, encoded.len());
+        self.ensure_quota_tx(&wtx, entry_size)?;
+
         // Get and increment next offset
         let offset = {
             let current = {
@@ -599,6 +1011,9 @@ impl MessageQueueService {
             table.insert(ik.as_slice(), bytes.as_slice())?;
         }
 
+        // 记账（与消息同事务提交；幂等索引不计入 —— 见模块头「容量上界」）
+        Self::account_add_tx(&wtx, entry_size)?;
+
         wtx.commit()?;
 
         let _ = (msg_key_prefix, next_key); // silence unused warnings
@@ -619,7 +1034,6 @@ impl MessageQueueService {
     /// 保留窗口取 topic 的 `retention_secs`（与消息保留一致 —— 消息已过期后，
     /// 对它的去重已无意义）。清扫失败**不阻断生产**（best-effort），仅记日志。
     fn maybe_prune_idempotency(&self, topic: &str, retention_secs: u64, now_ms: u64) {
-        use std::sync::atomic::Ordering;
         let tick = self.idem_prune_tick.fetch_add(1, Ordering::Relaxed);
         if !tick.is_multiple_of(IDEM_PRUNE_EVERY) {
             return;
@@ -888,6 +1302,10 @@ impl MessageQueueService {
         let dlq_encoded = encode_dlq_message(&payload, reason, detail);
         let dk = encode_dlq_key(topic, partition, offset);
 
+        // 维护路径不受配额拒绝（B-PL-4）：记账做净额调整（消息行 → DLQ 行）
+        let removed_size = Self::entry_size(mk.len(), raw.len());
+        let added_size = Self::entry_size(dk.len(), dlq_encoded.len());
+
         let wtx = self.write_tx()?;
         // Delete from main message table
         {
@@ -899,6 +1317,8 @@ impl MessageQueueService {
             let mut table = wtx.open_table(DLQ_TABLE)?;
             table.insert(dk.as_slice(), dlq_encoded.as_slice())?;
         }
+        Self::account_sub_tx(&wtx, removed_size)?;
+        Self::account_add_tx(&wtx, added_size)?;
         wtx.commit()?;
         Ok(())
     }
@@ -967,16 +1387,15 @@ impl MessageQueueService {
             table.iter()?.count() as u64
         };
 
-        let (total_messages, total_bytes) = {
+        let total_messages = {
             let table = rtx.open_table(MESSAGE_TABLE)?;
-            let mut count = 0u64;
-            let mut bytes = 0u64;
-            for item in table.iter()? {
-                let (_, raw) = item?;
-                count += 1;
-                bytes += raw.value().len() as u64;
-            }
-            (count, bytes)
+            table.iter()?.count() as u64
+        };
+        // 记账口径（消息 + DLQ 物理字节；见模块头「容量上界」）
+        let total_bytes = {
+            let meta = rtx.open_table(MQ_META_TABLE)?;
+            let x = meta.get(META_ACTIVE_BYTES)?.map(|v| v.value()).unwrap_or(0);
+            x
         };
 
         let dlq_messages = {
@@ -1074,8 +1493,12 @@ impl MessageQueueService {
         let encoded = encode_message(payload, &BTreeMap::new());
         let nk = encode_next_offset_key(topic, partition);
         let mk = encode_msg_key(topic, partition, offset);
+        let entry_size = Self::entry_size(mk.len(), encoded.len());
 
         let wtx = self.write_tx()?;
+        // 配额在 Leader 本地提交前强制（Follower apply 刻意不检查——镜像已提交
+        // 的决定，避免复制分叉；B-PL-4）
+        self.ensure_quota_tx(&wtx, entry_size)?;
         {
             let cur = {
                 let t = wtx.open_table(NEXT_OFFSET_TABLE)?;
@@ -1100,6 +1523,9 @@ impl MessageQueueService {
                 let mut t = wtx.open_table(IDEMPOTENCY_TABLE)?;
                 t.insert(ik, bytes.as_slice())?;
             }
+
+            // 记账（与消息同事务；B-PL-4）
+            Self::account_add_tx(&wtx, entry_size)?;
 
             Self::write_repl_bookkeeping_tx(&wtx, entry)?;
         }
@@ -1169,6 +1595,10 @@ impl MessageQueueService {
             t.insert(nk.as_slice(), cur.max(offset + 1))?;
             let mut t = wtx.open_table(MESSAGE_TABLE)?;
             t.insert(mk.as_slice(), encoded.as_slice())?;
+
+            // 记账必须包含镜像写入（否则本节点配额记账失真）；配额检查刻意
+            // 缺席 —— Follower 镜像 Leader 已提交的决定（B-PL-4）
+            Self::account_add_tx(&wtx, Self::entry_size(mk.len(), encoded.len()))?;
 
             Self::write_repl_bookkeeping_tx(&wtx, entry)?;
             Ok(())
@@ -1400,12 +1830,31 @@ impl BaseService for MessageQueueService {
             wtx.open_table(REPL_ENTRY_TABLE)?;
             wtx.open_table(REPL_APPLIED_KEYS)?;
             wtx.open_table(REPL_LOCAL_SEQ)?;
+            wtx.open_table(MQ_META_TABLE)?;
         }
         wtx.commit()?;
 
         *self.db.write() = Some(db);
+        // 记账初始化（旧库无 mq:meta ⇒ 启动时一次性重建）—— 必须在
+        // started=true / reaper 挂载之前完成；失败时回退 db 句柄，避免重试
+        // start 时对仍打开的文件重开（redb 会拒绝）。
+        let accounted = match self.ensure_accounting_initialized() {
+            Ok(a) => a,
+            Err(e) => {
+                *self.db.write() = None;
+                return Err(e);
+            }
+        };
         *self.started.write() = true;
-        tracing::info!("MessageQueueService started: db_path={}", db_path.display());
+        self.spawn_reaper();
+        tracing::info!(
+            db_path = %db_path.display(),
+            max_size_bytes = self.max_size_bytes,
+            accounted_bytes = accounted,
+            reaper_interval_ms = self.reaper_interval().as_millis() as u64,
+            "MessageQueueService started (capacity quota + retention reaper active; \
+             see boundaries.md B-PL-4)"
+        );
         Ok(())
     }
 
@@ -1614,5 +2063,249 @@ mod tests {
             svc.subscribe("sub-topic", "cg-sub", tx2).await.unwrap();
         });
         assert!(rx2.try_recv().is_err(), "已提交偏移后新订阅不应重放旧消息");
+    }
+
+    // ── 容量上界（B-PL-4）：记账 / 配额 / retention reaper ──
+    //
+    // 负控制（提交前已实跑，破坏后还原）：
+    // - 移除 `reap_once` 中对 `MESSAGE_TABLE` 的 `purge_expired_in_table` 调用 ⇒
+    //   `test_reaper_purges_expired_messages` 必红；
+    // - 移除 `produce_idempotent` 的 `ensure_quota_tx` 调用 ⇒
+    //   `test_produce_rejected_over_limit` 必红；
+    // - 移除 `produce_idempotent` 的 `account_add_tx` 调用 ⇒
+    //   `test_accounting_bytes_tracked` 必红。
+
+    fn new_svc_with_max(dir: &TempDir, max_size_bytes: u64) -> MessageQueueService {
+        let svc = MessageQueueService::new(dir.path().to_path_buf(), max_size_bytes);
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async { svc.start().await.expect("start") });
+        svc
+    }
+
+    fn topic_cfg(partitions: u32, retention_secs: u64) -> TopicConfig {
+        TopicConfig {
+            partitions,
+            retention_secs,
+            max_message_size: 1024,
+        }
+    }
+
+    /// 消息行的记账大小（口径 = 物理 key + 存储值）：
+    /// key = [topic_len:4][topic][partition:4][offset:8]；
+    /// value = [ts:8][headers_len:4][headers_json("{}")=2][payload]。
+    fn message_entry_size(topic: &str, payload_len: usize) -> u64 {
+        (4 + topic.len() + 4 + 8 + 8 + 4 + 2 + payload_len) as u64
+    }
+
+    /// 记账口径：单条 = 物理 key 长度 + 存储值长度；consume 不回收；
+    /// move_to_dlq 为净额调整（消息行 → DLQ 行）。
+    #[test]
+    fn test_accounting_bytes_tracked() {
+        let dir = temp_dir();
+        let svc = new_svc_with_max(&dir, 1024 * 1024);
+        svc.create_topic("t", topic_cfg(1, 3600)).unwrap();
+        assert_eq!(svc.accounted_bytes().unwrap(), 0);
+
+        let one = message_entry_size("t", 5); // "hello"
+        svc.produce("t", 0, b"hello".to_vec(), None).unwrap();
+        assert_eq!(svc.accounted_bytes().unwrap(), one);
+        assert_eq!(svc.stats().unwrap().total_bytes, one);
+
+        svc.produce("t", 0, b"hello".to_vec(), None).unwrap();
+        assert_eq!(svc.accounted_bytes().unwrap(), 2 * one);
+
+        // consume 不回收配额（回收只由 retention reaper / move_to_dlq 产生）
+        assert_eq!(svc.consume("t", 0, 0, 10).unwrap().len(), 2);
+        assert_eq!(svc.accounted_bytes().unwrap(), 2 * one);
+
+        // move_to_dlq：扣消息行，加 DLQ 行（dk 同长 17；
+        // dlq value = 8 + (4+3) + (4+7) + 5 = 31）
+        svc.move_to_dlq("t", 0, 0, "err", "details").unwrap();
+        let dlq_one = 17 + 8 + (4 + 3) + (4 + 7) + 5;
+        assert_eq!(svc.accounted_bytes().unwrap(), one + dlq_one);
+        assert_eq!(svc.stats().unwrap().total_bytes, one + dlq_one);
+    }
+
+    /// 配额：publish 入口**严格**拒绝（超界不写入、不推进 offset、计数），
+    /// 错误含 `max_size_bytes` 锚点（handler 映射 RESOURCE_EXHAUSTED）。
+    #[test]
+    fn test_produce_rejected_over_limit() {
+        let dir = temp_dir();
+        // 两条 36B 消息已 72B；仅剩 8B —— 第三条必须被拒
+        let svc = new_svc_with_max(&dir, 80);
+        svc.create_topic("t", topic_cfg(1, 3600)).unwrap();
+        svc.produce("t", 0, b"hello".to_vec(), None).unwrap();
+        svc.produce("t", 0, b"hello".to_vec(), None).unwrap();
+        assert_eq!(svc.accounted_bytes().unwrap(), 72);
+
+        let err = svc
+            .produce("t", 0, b"hello".to_vec(), None)
+            .expect_err("over quota must be rejected");
+        assert!(
+            err.to_string().contains("max_size_bytes"),
+            "错误信息需含 max_size_bytes 锚点（handler 映射 RESOURCE_EXHAUSTED）: {err}"
+        );
+        assert_eq!(svc.accounted_bytes().unwrap(), 72, "拒绝不得产生任何写入");
+        assert_eq!(svc.publish_rejections(), 1);
+        assert_eq!(svc.consume("t", 0, 0, 10).unwrap().len(), 2);
+
+        // 单条自身超上界：同路径拒绝（永远装不下；写成功再回收等于假成功）
+        let err = svc
+            .produce("t", 0, vec![0u8; 300], None)
+            .expect_err("single oversize entry must be rejected");
+        assert!(err.to_string().contains("max_size_bytes"));
+        assert_eq!(svc.accounted_bytes().unwrap(), 72);
+        assert_eq!(svc.publish_rejections(), 2);
+    }
+
+    /// retention 回收（负控制目标）：过期消息由 reaper 物理删除并扣账；
+    /// 回收释放的配额可再次写入，被拒的 publish 未推进 offset ⇒ 新消息 offset=2。
+    #[test]
+    fn test_reaper_purges_expired_messages() {
+        let dir = temp_dir();
+        let svc = new_svc_with_max(&dir, 80);
+        svc.create_topic("t", topic_cfg(1, 1)).unwrap(); // retention = 1s
+        svc.produce("t", 0, b"hello".to_vec(), None).unwrap();
+        svc.produce("t", 0, b"hello".to_vec(), None).unwrap();
+        let err = svc
+            .produce("t", 0, b"hello".to_vec(), None)
+            .expect_err("full");
+        assert!(err.to_string().contains("max_size_bytes"));
+
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        let stats = svc.reap_once().unwrap();
+        assert_eq!(stats.expired_messages, 2);
+        assert_eq!(stats.expired_dlq, 0);
+        assert_eq!(stats.purged_bytes, 72);
+        assert_eq!(stats.active_bytes, 0);
+        assert_eq!(svc.accounted_bytes().unwrap(), 0);
+
+        // 幂等：已在界内 ⇒ 再跑一轮不再回收
+        let again = svc.reap_once().unwrap();
+        assert_eq!(again.expired_messages, 0);
+        assert_eq!(again.purged_bytes, 0);
+
+        // 回收释放配额；被拒的 publish 未推进 offset ⇒ 新消息 offset = 2
+        let off = svc.produce("t", 0, b"hello".to_vec(), None).unwrap();
+        assert_eq!(off, 2);
+        let counters = svc.reap_counters();
+        assert_eq!(counters.passes, 2);
+        assert_eq!(counters.expired_messages, 2);
+        assert_eq!(counters.expired_dlq, 0);
+        assert_eq!(counters.purged_bytes, 72);
+        assert_eq!(counters.faults, 0);
+    }
+
+    /// DLQ 同窗口回收：move_to_dlq 的条目也按 topic retention 清扫、释放配额。
+    #[test]
+    fn test_reaper_purges_expired_dlq() {
+        let dir = temp_dir();
+        let svc = new_svc_with_max(&dir, 1024 * 1024);
+        svc.create_topic("t", topic_cfg(1, 1)).unwrap();
+        svc.produce("t", 0, b"bad".to_vec(), None).unwrap();
+        svc.move_to_dlq("t", 0, 0, "err", "details").unwrap();
+        assert_eq!(svc.consume_dlq("t", 0, 10).unwrap().len(), 1);
+        assert!(svc.accounted_bytes().unwrap() > 0);
+
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        let stats = svc.reap_once().unwrap();
+        assert_eq!(stats.expired_messages, 0);
+        assert_eq!(stats.expired_dlq, 1);
+        assert_eq!(stats.active_bytes, 0);
+        assert!(svc.consume_dlq("t", 0, 10).unwrap().is_empty());
+        assert_eq!(svc.accounted_bytes().unwrap(), 0);
+    }
+
+    /// `retention_secs = 0` ⇒ 不做时间回收（不误删）。
+    #[test]
+    fn test_retention_zero_disables_time_purge() {
+        let dir = temp_dir();
+        let svc = new_svc_with_max(&dir, 1024 * 1024);
+        svc.create_topic("t", topic_cfg(1, 0)).unwrap();
+        svc.produce("t", 0, b"keep".to_vec(), None).unwrap();
+        let stats = svc.reap_once().unwrap();
+        assert_eq!(stats.purged_bytes, 0);
+        assert_eq!(svc.consume("t", 0, 0, 10).unwrap().len(), 1);
+    }
+
+    /// 记账跨重启持久化（redb 同事务真值）：重启后继续使用不漂移。
+    #[test]
+    fn test_accounting_persists_across_restart() {
+        let dir = temp_dir();
+        let db_path = dir.path().to_path_buf();
+        let expected;
+        {
+            let svc = new_svc_with_max(&dir, 4096);
+            svc.create_topic("p", topic_cfg(1, 3600)).unwrap();
+            svc.produce("p", 0, b"persist".to_vec(), None).unwrap();
+            expected = svc.accounted_bytes().unwrap();
+            assert!(expected > 0);
+            // drop（未 stop）——模拟重启前崩溃窗口
+        }
+        let svc = MessageQueueService::new(db_path, 4096);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { svc.start().await.expect("restart") });
+        assert_eq!(svc.accounted_bytes().unwrap(), expected);
+        assert_eq!(svc.reap_once().unwrap().purged_bytes, 0);
+    }
+
+    /// 旧库迁移：无 `mq:meta` 的存量库启动时一次性重建记账。
+    #[test]
+    fn test_migration_rebuilds_accounting_for_legacy_db() {
+        let dir = temp_dir();
+        let db_path = dir.path().join("mq.redb");
+
+        // 手工构造「旧版本」库：只有消息表，无 mq:meta
+        {
+            let db = redb::Database::create(&db_path).unwrap();
+            let wtx = db.begin_write().unwrap();
+            {
+                let mut t = wtx.open_table(MESSAGE_TABLE).unwrap();
+                let mk = encode_msg_key("legacy", 0, 0);
+                let encoded = encode_message(b"old", &BTreeMap::new());
+                t.insert(mk.as_slice(), encoded.as_slice()).unwrap();
+            }
+            wtx.commit().unwrap();
+        }
+
+        let svc = MessageQueueService::new(dir.path().to_path_buf(), 4096);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { svc.start().await.expect("start") });
+        assert_eq!(
+            svc.accounted_bytes().unwrap(),
+            message_entry_size("legacy", 3)
+        );
+    }
+
+    /// 后台 reaper 闭环：绑定 self_arc + 短周期后，过期消息**无需手动调用**
+    /// reap 即被回收。负控制：移除 `start` 中的 `spawn_reaper` ⇒ 本测试必红（超时）。
+    #[test]
+    fn test_background_reaper_converges() {
+        let dir = temp_dir();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let svc = Arc::new(MessageQueueService::new(
+            dir.path().to_path_buf(),
+            1024 * 1024,
+        ));
+        svc.bind_self_weak(&svc);
+        svc.set_reaper_interval(std::time::Duration::from_millis(50));
+        rt.block_on(async { svc.start().await.expect("start") });
+        svc.create_topic("t", topic_cfg(1, 1)).unwrap();
+        svc.produce("t", 0, b"x".to_vec(), None).unwrap();
+        assert!(svc.accounted_bytes().unwrap() > 0);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let accounted = svc.accounted_bytes().unwrap();
+            if accounted == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "后台 reaper 未在期限内回收: accounted={accounted}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(svc.reap_counters().passes > 0);
     }
 }

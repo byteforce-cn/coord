@@ -212,7 +212,7 @@ current status and the work required to close each item — is
 - **No aggregate connection limit** — only per-connection stream caps.
 - **Authentication needs raft quorum** — logins and token refresh require quorum; clients whose credentials have expired cannot operate until quorum returns.
 - **`transit` KEK is operator-supplied** — no external KMS integration, and no built-in key-rotation flow.
-- **Resource bounds** — plugin queues are bounded; the client port and the agent health listener enforce connection caps (but not connection-lifetime recycling), and the cache enforces its configured size limit via a periodic reaper (brief overshoot within the reaper interval is possible).
+- **Resource bounds** — plugin queues are bounded; the client port and the agent health listener enforce connection caps (but not connection-lifetime recycling); the cache enforces its configured size limit via a periodic reaper (brief overshoot within the reaper interval is possible); the message queue enforces its byte quota at publish (same-transaction accounting — over-quota and oversize publishes are rejected with `RESOURCE_EXHAUSTED`) and a reaper prunes messages/DLQ past each topic's `retention_secs` (`0` disables time-based pruning).
 
 **Non-goals.** No Spring Boot starter (see [Quick start](#quick-start)).
 

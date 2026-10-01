@@ -23,7 +23,7 @@
 | 安全传输（信封加密） | coord.transit.v1 | COMMITTED | 2026-12-31 | coord-agent/src/services/transit.rs：已迁移至契约包；**DEK 持久化为验收项** |
 | PKI 证书签发 | coord.pki.v1 | COMMITTED | 2026-12-31 | coord-agent/src/pki.rs：已迁移至契约包（coord-server KV + Barrier 加密） |
 | 缓存 | coord.cache.v1 | COMMITTED | 2026-12-31 | coord-agent/src/services/cache.rs：已迁移至契约包；**跨节点提交原子性 + 分区 Leader 故障转移为验收项**；容量上界（B-PL-3）已强制：默认 1GB、周期 reaper 收敛（不含 ISR 复制日志，边界见 boundaries.md） |
-| 消息队列 | coord.mq.v1 | COMMITTED | 2026-12-31 | coord-agent/src/services/mq.rs：已迁移至契约包；**poll+ack 全链路与幂等键为验收项；Subscribe 背压丢消息语义见 proto 声明** |
+| 消息队列 | coord.mq.v1 | COMMITTED | 2026-12-31 | coord-agent/src/services/mq.rs：已迁移至契约包；**poll+ack 全链路与幂等键为验收项；Subscribe 背压丢消息语义见 proto 声明**；容量上界（B-PL-4）已在 publish 入口强制：默认 1GB、同事务记账 ⇒ 逐写严格上界（超界拒绝 `RESOURCE_EXHAUSTED`）+ 保留窗口周期回收（不含 ISR 复制日志，边界见 boundaries.md） |
 | 特性开关 | coord.featureflags.v1 | COMMITTED | 2026-12-31 | coord-agent/src/services/feature_flags.rs：已迁移至契约包；**KV 化（重启不丢）为验收项** |
 | 工作流（Saga） | coord.workflow.v1 | COMMITTED | 2027-03-31 | coord-agent/src/services/workflow_store.rs（KvWorkflowStore）：已迁移至契约包；持久化 + 补偿语义端到端验收 |
 | 调度 | coord.scheduler.v1 | COMMITTED | 2027-03-31 | coord-agent/src/services/scheduler.rs：已迁移至契约包；**KV 存储实现（替代内存 HashMap）为验收项** |

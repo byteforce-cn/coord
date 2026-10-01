@@ -1538,16 +1538,57 @@ impl AgentServer {
             let data_dir = std::path::PathBuf::from(&self.config.data_dir);
             let mq_svc = Arc::new(crate::services::mq::MessageQueueService::new(
                 data_dir.clone(),
-                1024 * 1024 * 1024, // 1GB max
+                // 容量上界（B-PL-4——已强制执行）：消息 + DLQ 与数据同事务记账，
+                // publish 入口逐写严格拒绝（超界 `RESOURCE_EXHAUSTED`）；retention
+                // reaper 周期回收过期消息/DLQ。残余边界见 boundaries.md B-PL-4。
+                1024 * 1024 * 1024, // 1GB（强制；超界拒绝，不是事后淘汰）
             ));
-            // 绑定自身弱引用，gRPC handler 才能升级 Arc 走 spawn_blocking
+            // 绑定自身弱引用：gRPC handler 升级 Arc 走 spawn_blocking；start() 据此
+            // 挂载后台 reaper（未绑定则不挂载——单测直接调用 reap_once）。
             mq_svc.bind_self_weak(&mq_svc);
             mq_grpc_svc = register_native_service(
                 &plugin_manager,
                 mq_svc.clone(),
-                crate::plugin::AgentGrpcService::Mq(mq_svc),
+                crate::plugin::AgentGrpcService::Mq(mq_svc.clone()),
             )
             .await;
+
+            // 容量上界可观测（B-PL-4）：与 cache 同一口径 — 周期把记账/回收/拒绝
+            // 事实拉进指标，并在首次出现 reaper 失败时打 ERROR。采样任务只读，
+            // 任务死亡表现为指标停滞（本身就是可观测的）。
+            if let Some(metrics) = self.metrics.clone() {
+                let svc = Arc::clone(&mq_svc);
+                tokio::spawn(async move {
+                    let tick = std::time::Duration::from_secs(15);
+                    let mut last_faults = 0u64;
+                    loop {
+                        tokio::time::sleep(tick).await;
+                        if !svc.is_started() {
+                            continue;
+                        }
+                        let Ok(active) = svc.accounted_bytes() else {
+                            continue;
+                        };
+                        let counters = svc.reap_counters();
+                        metrics.set_mq_reaper_stats(
+                            active,
+                            svc.max_size_bytes(),
+                            counters.expired_messages + counters.expired_dlq,
+                            svc.publish_rejections(),
+                            counters.faults,
+                        );
+                        if counters.faults > last_faults {
+                            tracing::error!(
+                                faults_total = counters.faults,
+                                "mq reaper pass failed (metric: \
+                                 coord_agent_mq_reaper_faults_total); expired entries may \
+                                 accumulate until a pass succeeds"
+                            );
+                        }
+                        last_faults = counters.faults;
+                    }
+                });
+            }
         }
 
         // ISR 跨 Agent 数据复制（v2.1 已落地）：Cache/MQ 写路径经复制管理器
