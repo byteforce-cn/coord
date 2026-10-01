@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use coord_agent::health::start_health_server;
+use coord_agent::health::{start_health_server, start_health_server_with_limits, HealthLimits};
 use coord_agent::metrics::AgentMetrics;
 
 /// /health 端点返回 200 OK
@@ -85,6 +85,81 @@ async fn test_metrics_endpoint() {
     assert!(
         response.contains("coord_agent"),
         "expected coord_agent metric, got: {response}"
+    );
+
+    handle.abort();
+}
+
+/// 慢连接（不发任何字节）必须被读超时断开。
+///
+/// 负控制：移除 health.rs 的读超时（恢复为无超时的一次 read）⇒ 客户端读不到
+/// EOF，外层 timeout 令本测试必红。
+#[tokio::test]
+async fn test_health_slow_client_disconnected_by_read_timeout() {
+    let port = find_port();
+    let addr = format!("127.0.0.1:{}", port);
+    let limits = HealthLimits {
+        max_connections: 4,
+        read_timeout: Duration::from_millis(200),
+        write_timeout: Duration::from_millis(500),
+    };
+    let handle = start_health_server_with_limits(
+        &addr,
+        AgentMetrics::new(),
+        Arc::new(AtomicBool::new(false)),
+        limits,
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut stream = TcpStream::connect(&addr).await.unwrap();
+    // 故意不发任何字节
+    let mut buf = [0u8; 8];
+    let read = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf))
+        .await
+        .expect("slow client was not disconnected: health read timeout is not enforced");
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "expected EOF/reset after read timeout, got {read:?}"
+    );
+
+    handle.abort();
+}
+
+/// 达到并发上限后，新连接必须被立即关闭而非被服务。
+///
+/// 负控制：移除 health.rs 的连接配额（恢复为无 Semaphore 的 accept 循环）⇒
+/// 第三个连接会读到 HTTP 响应（Ok(n) 且 n > 0），本测试必红。
+#[tokio::test]
+async fn test_health_connection_cap_closes_excess() {
+    let port = find_port();
+    let addr = format!("127.0.0.1:{}", port);
+    // read_timeout 拉长：前两个连接在测试窗口内稳定占用配额
+    let limits = HealthLimits {
+        max_connections: 2,
+        read_timeout: Duration::from_secs(30),
+        write_timeout: Duration::from_millis(500),
+    };
+    let handle = start_health_server_with_limits(
+        &addr,
+        AgentMetrics::new(),
+        Arc::new(AtomicBool::new(false)),
+        limits,
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let _held1 = TcpStream::connect(&addr).await.unwrap();
+    let _held2 = TcpStream::connect(&addr).await.unwrap();
+    // 等服务端 accept 前两个连接并占满配额
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut excess = TcpStream::connect(&addr).await.unwrap();
+    let mut buf = [0u8; 16];
+    let read = tokio::time::timeout(Duration::from_secs(2), excess.read(&mut buf))
+        .await
+        .expect("excess connection was neither served nor closed within 2s");
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "excess connection must be closed without a response, got {read:?}"
     );
 
     handle.abort();

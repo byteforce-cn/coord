@@ -56,7 +56,6 @@
 | # | 不承诺 | 事实锚点 | 若要变成承诺 |
 |:--|:--|:--|:--|
 | B-PL-1 | JS/wasm 引擎队列**有上界 16**；wasm 引擎的 `WasmCommand` 队列必须同为有界（曾为无界） | `coord-agent/src/plugin/js_engine.rs:427`、`plugin/component_engine.rs:1490`、`plugin/wasm_engine.rs:1024` | 统一三引擎的背压语义并测试溢出行为 |
-| B-PL-2 | agent 原生健康监听器（`http_addr`）**无 accept 上限、每连接一任务、单次 read 无超时** ⇒ 可被 slowloris 耗 fd | `coord-agent/src/health.rs:48-103`；生产已接线（`coord/src/main.rs` dev-mode、`coord-agent/src/lib.rs:1870`） | 加连接上限 + 读超时 |
 | B-PL-3 | 缓存 `max_size_bytes` **在 agent 侧被丢弃**（`pub fn new(db_path, _max_size_bytes, …)`），调用点传 1GB 但**无 reaper、无上限** | `coord-agent/src/services/cache.rs:223`、`coord-agent/src/lib.rs:1245` | 落地 LRU/TTL reaper 并测试上界 |
 
 ---
