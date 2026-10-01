@@ -1800,6 +1800,65 @@ mod tests {
         assert_eq!(meta.leader_agent, "a:9500");
         assert_eq!(svc.list_shards().unwrap().len(), 1);
     }
+
+    // ── 属性测试：存储值编解码（非可信字节解析路径） ──
+    //
+    // 负控制：移除 `decode_value` 的 `raw.len() < 8` 检查 ⇒
+    // `prop_decode_value_truncated_prefix_is_none` 必红（切片 panic）。
+    use proptest::prelude::*;
+
+    proptest! {
+        /// 往返：任意 value + 未来 TTL ⇒ 原样返回（8 字节前缀不吞字节）。
+        #[test]
+        fn prop_decode_value_roundtrip(
+            value in proptest::collection::vec(any::<u8>(), 0..1024),
+            ttl in 60u64..86_400,
+        ) {
+            let encoded = encode_value(&value, ttl);
+            prop_assert!(encoded.len() >= 8);
+            let decoded = decode_value(&encoded);
+            prop_assert_eq!(decoded.as_deref(), Some(value.as_slice()));
+        }
+
+        /// ttl=0（永不过期）与任意 value 的往返。
+        #[test]
+        fn prop_decode_value_zero_ttl_roundtrip(
+            value in proptest::collection::vec(any::<u8>(), 0..1024),
+        ) {
+            let encoded = encode_value(&value, 0);
+            let decoded = decode_value(&encoded);
+            prop_assert_eq!(decoded.as_deref(), Some(value.as_slice()));
+        }
+
+        /// 截断（<8 字节前缀）必须是 None，且不得 panic。
+        #[test]
+        fn prop_decode_value_truncated_prefix_is_none(
+            raw in proptest::collection::vec(any::<u8>(), 0..8),
+        ) {
+            prop_assert!(decode_value(&raw).is_none());
+        }
+
+        /// 任意字节串不得 panic；一旦 Some，返回的必须是前缀之后的原样字节。
+        #[test]
+        fn prop_decode_value_arbitrary_bytes_never_panics(
+            raw in proptest::collection::vec(any::<u8>(), 0..2048),
+        ) {
+            if let Some(v) = decode_value(&raw) {
+                prop_assert!(raw.len() >= 8);
+                prop_assert_eq!(v, raw[8..].to_vec());
+            }
+        }
+
+        /// 过期前缀（expires_at=1，已是过去）必须判过期：不得漏出 value。
+        #[test]
+        fn prop_decode_value_expired_prefix_is_none(
+            value in proptest::collection::vec(any::<u8>(), 0..1024),
+        ) {
+            let mut raw = 1u64.to_be_bytes().to_vec();
+            raw.extend_from_slice(&value);
+            prop_assert!(decode_value(&raw).is_none());
+        }
+    }
 }
 
 // ──── CacheBackend / CacheConfig / MokaCacheService ────

@@ -110,3 +110,4 @@ tempfile = { workspace = true }
 uuid = { workspace = true }
 rcgen = { version = "0.14", features = ["x509-parser"] }
 tracing-subscriber = { workspace = true }
+proptest = { workspace = true }

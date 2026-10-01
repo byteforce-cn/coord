@@ -256,3 +256,45 @@ impl coord_proto::agent::health_server::Health for GrpcHealthService {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── 属性测试：health 请求行解析（非可信输入，经 from_utf8_lossy 后的任意字符串） ──
+    //
+    // 负控制：把实现里的 `raw.split_once('?')` 改成 `raw.split_once('!')` ⇒
+    // `prop_parse_path_and_query_first_segment` 必红。
+
+    proptest! {
+        /// path 恒为 `?` 之前（不含）的首段；不含 `?` 时参数表为空。
+        #[test]
+        fn prop_parse_path_and_query_first_segment(raw in any::<String>()) {
+            let (path, params) = parse_path_and_query(&raw);
+            prop_assert_eq!(&path, raw.split('?').next().unwrap());
+            if !raw.contains('?') {
+                prop_assert!(params.is_empty());
+            }
+        }
+
+        /// 参数表只包含确实出现在原查询串 `&` 段中的 `k=v` 对；
+        /// 且个数不超过含 `=` 的段数（重复键去重只能更少）。
+        #[test]
+        fn prop_parse_params_come_from_query_segments(raw in any::<String>()) {
+            let (_, params) = parse_path_and_query(&raw);
+            let query = raw.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let segments: Vec<&str> = query.split('&').collect();
+            for (k, v) in &params {
+                let kv = format!("{k}={v}");
+                prop_assert!(
+                    segments.iter().any(|seg| *seg == kv),
+                    "参数 {:?} 不在原查询串中",
+                    kv
+                );
+            }
+            let with_eq = segments.iter().filter(|s| s.contains('=')).count();
+            prop_assert!(params.len() <= with_eq);
+        }
+    }
+}

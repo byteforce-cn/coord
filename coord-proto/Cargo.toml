@@ -17,3 +17,5 @@ tonic-prost-build = "0.14.6"
 # 枚举 wire 冻结校验（`tests/enum_wire_freeze.rs`）需要反解
 # `FILE_DESCRIPTOR_SET` 以枚举全部枚举值 —— 与 coord-core 用同一版本。
 prost-types = "0.14.4"
+# wire 解码鲁棒性属性测试（`tests/decode_proptest.rs`）。
+proptest = { workspace = true }

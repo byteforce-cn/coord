@@ -77,7 +77,7 @@ KEK 供给与 TLS fail-closed 均已落地（判据见 1.2 与本节）；**未�
 
 ---
 
-## 3. 回归检查（四条）
+## 3. 回归检查（五条）
 
 | # | 回归项 | 现状 | 判据 |
 |:--|:--|:--|:--|
@@ -85,11 +85,14 @@ KEK 供给与 TLS fail-closed 均已落地（判据见 1.2 与本节）；**未�
 | 2 | DoS（含 RSS 断言） | ✅ RSS 峰值实测口径已接入 CI | `coord/tests/dos_rss_peak_test.rs`：100 × 8 MiB（累计 800 MiB，在飞并发 25）无凭据请求 ⇒ 全部 `RESOURCE_EXHAUSTED`，且**服务端子进程** `/proc/<pid>/status` 的 `VmHWM` 增长有界（本机实测：100/100 被拒；总增长 116 MiB，阈值 256 MiB）。两条自我防护：读数为 0 必须报错；另设"首波后漂移 ≤128 MiB"断言 |
 | 3 | 空密钥启动失败 | ✅ `coord/src/main.rs:4019+` 的 `load_or_create_root_key` 测试段（「no key file may be generated when refusing」） | 单测 |
 | 4 | 非 loopback raft 无密钥启动失败 | ✅ `coord/src/main.rs:2215-2221` + `coord/tests/raft_sec03_failclosed_test.rs`（负控制确认覆盖） | 进程级负控制 |
+| 5 | 非可信字节解析鲁棒性（属性测试） | ✅ proptest 第一阶段：cache 值编解码往返/截断/过期、health 请求行解析、wire 解码任意字节不 panic | `cargo test -p coord-agent --lib prop_`；`cargo test -p coord-proto --test decode_proptest` |
 
 **命令**（本地/CI 同参）：
 
 ```bash
 cargo test -p coord --test dos_rss_peak_test -- --ignored --nocapture --test-threads=1
+cargo test -p coord-agent --lib prop_            # 属性测试：cache 编解码 / health 请求行
+cargo test -p coord-proto --test decode_proptest # 属性测试：wire 解码
 ```
 
 **残余/边界**：① 只打 content-length 预检路径（第二条"带硬上限读取"由 `coord-server` 单测
