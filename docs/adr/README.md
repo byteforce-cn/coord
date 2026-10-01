@@ -25,3 +25,4 @@
 | [ADR-0001](0001-default-off-until-production-verified.md) | 默认关闭：未经生产验收的能力面（显式启用即可用） | accepted |
 | [ADR-0002](0002-cross-node-commit-atomicity-boundary.md) | Cache 跨节点提交原子性边界 | accepted |
 | [ADR-0003](0003-read-path-convergence.md) | 读路径收敛：配置与发现必须走门面 API | accepted |
+| [ADR-0004](0004-raft-log-reclamation-snapshot-anchored.md) | Raft 日志回收——快照锚定的保留窗口 | accepted |
