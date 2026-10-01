@@ -1,8 +1,8 @@
 # ADR-0004: Raft 日志回收——快照锚定的保留窗口
 
-- 状态：proposed
+- 状态：accepted
 - 日期：2026-10-01
-- 决策者：维护团队（设计评审记录见本 ADR 对应 PR）
+- 决策者：维护团队（2026-10-01 设计评审通过）
 
 ## 背景
 
@@ -51,4 +51,4 @@
 - 上游（openraft =0.10.0-alpha.34）：`src/docs/data/log_pointers.md`（不变量）；`src/engine/engine_impl.rs::trigger_purge_log`；`src/engine/handler/log_handler/mod.rs::calc_purge_upto`；`src/raft/trigger.rs::purge_log`；`src/config/config.rs`（`SnapshotPolicy` / `max_in_snapshot_log_to_keep` 字段文档）；`src/errors/fatal.rs`（`StorageError` → `Fatal`）。
 - coord 代码：`coord-server/src/raft/mod.rs`（`apply_tuning`）；`coord-server/src/raft/log_store.rs`（`purge` 守卫）；`coord-server/src/storage/snapshot.rs`（`SnapshotTracker`）；`coord-server/src/storage/compaction.rs`（`CompactionConfig`）；`coord/src/main.rs`（启动 WARN 与恢复检查）。
 - 测试锚点：`coord-server/tests/snapshot_visibility_test.rs`（快照构建可见性）；实现 PR 增补有界性受控实验与负控制测试。
-- 边界：`docs/production/ops/boundaries.md` B-ST-1 / B-ST-2。
+- 边界：`docs/production/ops/boundaries.md`（B-ST-1；B-ST-2 的处置见「决定」）。
