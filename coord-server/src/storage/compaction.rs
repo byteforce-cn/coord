@@ -23,12 +23,9 @@ use crate::metrics::Metrics;
 /// Compaction 配置
 #[derive(Debug, Clone)]
 pub struct CompactionConfig {
-    /// Changelog 保留的 Revision 数量（默认 100,000）
+    /// Changelog 保留的 Revision 数量（默认 100,000）；tombstone 物理清理与
+    /// changelog 共用该水位（无独立窗口，见 ADR-0004）
     pub changelog_retention_revisions: u64,
-    /// Raft Log 保留的 Entry 数量（默认 1,000）
-    pub raft_log_retention_entries: u64,
-    /// KV Tombstone 保留的 Revision 数量（默认 100,000）
-    pub tombstone_retention_revisions: u64,
     /// 定时 Compaction 间隔（默认 1 小时）
     pub interval: Duration,
     /// 是否启用自动 Compaction
@@ -39,8 +36,6 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             changelog_retention_revisions: 100_000,
-            raft_log_retention_entries: 1_000,
-            tombstone_retention_revisions: 100_000,
             interval: Duration::from_secs(3600),
             auto_compact: true,
         }
@@ -283,8 +278,6 @@ mod tests {
     fn test_config_defaults() {
         let config = CompactionConfig::default();
         assert_eq!(config.changelog_retention_revisions, 100_000);
-        assert_eq!(config.raft_log_retention_entries, 1_000);
-        assert_eq!(config.tombstone_retention_revisions, 100_000);
         assert!(config.auto_compact);
     }
 

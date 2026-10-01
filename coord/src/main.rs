@@ -2275,21 +2275,18 @@ async fn run_server(
             election_timeout_max_ms: cfg.raft.election_timeout_max_ms,
             install_snapshot_timeout_ms: cfg.raft.install_snapshot_timeout_ms,
             snapshot_logs_since_last: cfg.raft.snapshot_logs_since_last,
+            max_in_snapshot_log_to_keep: cfg.raft.max_in_snapshot_log_to_keep,
         },
     );
     let raft_config = Arc::new(raft_config);
 
-    // `snapshot_logs_since_last = 0` 的**真实**语义是
-    // `SnapshotPolicy::Never`。它不只是“禁用自动快照”：没有持久快照之后，
-    // `LogStore::purge` 的判据（“tracker 必须持有覆盖该 index 的持久快照”）
-    // 永远不成立 ⇒ **raft 日志永不回收**，磁盘随写入单调增长。
-    // config.example.toml 以前只写“0 = 禁用自动快照”，会让运维按文档配出一个
-    // 只涨不落的盘。这里在启动时把这个后果明写出来（不拒绝启动：单节点/短命
-    // 部署可能确实不需要回收）。
+    // 见 ADR-0004：`snapshot_logs_since_last = 0` 是「手动快照模式」——不产生新
+    // 快照即没有回收路径（`LogStore::purge` 依赖持久快照覆盖该 index）。启动时
+    // 明示后果（不拒绝启动：单节点/短命部署可能显式选择该模式）。
     if cfg.raft.snapshot_logs_since_last == Some(0) {
         tracing::warn!(
-            "raft.snapshot_logs_since_last = 0 ⇒ 自动快照禁用 ⇒ raft 日志**永不回收** \
-             （LogStore::purge 依赖持久快照）。仅当你能接受磁盘随写入单调增长时才这样配"
+            "raft.snapshot_logs_since_last = 0 ⇒ 手动快照模式 ⇒ raft 日志**不回收** \
+             （purge 依赖持久快照；见 ADR-0004）。仅当你能接受磁盘随写入单调增长时才这样配"
         );
     }
 
