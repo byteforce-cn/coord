@@ -92,6 +92,10 @@ chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
 hex = "0.4"
 
+# 属性测试（dev-only）：随机输入 + 自动收缩；约束非可信字节解析路径
+# （值编解码 / 请求行解析 / wire 解码）的边界行为。
+proptest = "1.11"
+
 # BFF / HTTP 层
 axum = "0.8"
 tower = "0.5"
