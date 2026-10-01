@@ -52,6 +52,9 @@ use crate::watch::WatchDispatcher;
 /// 见 `storage/object_store.rs` 与 docs/production/volume-object-storage.md 决策记录。
 pub mod object_storage;
 
+/// 客户端口连接维度全局闸（B-CX-1）：超限连接在 accept 后立即断开。
+pub mod connection_gate;
+
 // ──── CoordNode ────
 
 /// 运行时资源限制（per-RPC 超时、规模上限、幂等缓存参数）。

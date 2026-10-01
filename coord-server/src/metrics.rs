@@ -129,6 +129,12 @@ struct MetricsInner {
     /// 鉴权拒绝总数
     pub auth_denied_total: AtomicU64,
 
+    // ── 客户端口连接闸指标（B-CX-1） ──
+    /// 当前活跃的客户端 gRPC 连接数（accept 层全局闸计数）
+    pub grpc_conn_active: AtomicI64,
+    /// 因全局连接上限被拒绝（accept 后立即断开）的连接总数
+    pub grpc_conn_rejected_total: AtomicU64,
+
     // ── 启动时间 ──
     pub start_time: Instant,
 }
@@ -224,6 +230,8 @@ impl Default for MetricsInner {
             snapshot_duration_us_total: AtomicU64::new(0),
             compact_reclaimed_bytes_total: AtomicU64::new(0),
             auth_denied_total: AtomicU64::new(0),
+            grpc_conn_active: AtomicI64::new(0),
+            grpc_conn_rejected_total: AtomicU64::new(0),
             start_time: Instant::now(),
         }
     }
@@ -455,6 +463,25 @@ impl Metrics {
 
     pub fn inc_auth_denied(&self) {
         self.inner.auth_denied_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // ── 客户端口连接闸指标更新（B-CX-1） ──
+
+    /// 记录一个被接受的客户端口连接（活跃 gauge +1）
+    pub fn inc_grpc_conn_active(&self) {
+        self.inner.grpc_conn_active.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 记录一个客户端口连接关闭（活跃 gauge -1；配额同时由连接对象 drop 归还）
+    pub fn dec_grpc_conn_active(&self) {
+        self.inner.grpc_conn_active.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// 记录一个因全局连接上限被拒绝（立即断开）的连接
+    pub fn inc_grpc_conn_rejected(&self) {
+        self.inner
+            .grpc_conn_rejected_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     // ── Seal 指标 ──
@@ -801,6 +828,21 @@ impl Metrics {
             inner.auth_denied_total.load(Ordering::Relaxed)
         ));
 
+        // 客户端口连接闸（B-CX-1）
+        out.push_str("\n# HELP coord_grpc_connections_active Active client gRPC connections (accept-layer cap)\n");
+        out.push_str("# TYPE coord_grpc_connections_active gauge\n");
+        out.push_str(&format!(
+            "coord_grpc_connections_active {}\n",
+            inner.grpc_conn_active.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("\n# HELP coord_grpc_connections_rejected_total Client gRPC connections rejected by the global connection cap\n");
+        out.push_str("# TYPE coord_grpc_connections_rejected_total counter\n");
+        out.push_str(&format!(
+            "coord_grpc_connections_rejected_total {}\n",
+            inner.grpc_conn_rejected_total.load(Ordering::Relaxed)
+        ));
+
         // Seal
         out.push_str("\n# HELP seal_status Seal status (0=unsealed, 1=in_progress, 2=sealed)\n");
         out.push_str("# TYPE seal_status gauge\n");
@@ -1132,6 +1174,19 @@ mod tests {
 
         let output = m.render_prometheus_text();
         assert!(output.contains("seal_status 2"));
+    }
+
+    #[test]
+    fn test_metrics_grpc_connection_gate() {
+        let m = Metrics::new();
+        m.inc_grpc_conn_active();
+        m.inc_grpc_conn_active();
+        m.dec_grpc_conn_active();
+        m.inc_grpc_conn_rejected();
+
+        let output = m.render_prometheus_text();
+        assert!(output.contains("coord_grpc_connections_active 1"));
+        assert!(output.contains("coord_grpc_connections_rejected_total 1"));
     }
 
     #[test]

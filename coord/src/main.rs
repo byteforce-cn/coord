@@ -3368,6 +3368,14 @@ async fn run_server(
     // 10c. 服务端鉴权拦截器挂载（TLS/非 TLS 两分支统一）
     // MetricsLayer 挂最外层（覆盖全部服务，含鉴权拒绝路径）
     let metrics_layer = coord_server::metrics::MetricsLayer::new(Arc::clone(&metrics));
+
+    // 客户端口的连接维度全局闸（B-CX-1）：连接数达上限时 accept 后立即断开，
+    // 使 fd / 连接级内存占用有界（上限 network.max_connections，默认 4096）。
+    // 跨 TLS 热加载共享同一实例，上限在多次 serve 间保持全局一致。
+    let connection_gate = coord_server::server::connection_gate::ConnectionGate::new(
+        cfg.network.max_connections,
+        (*metrics).clone(),
+    );
     let mut auth_interceptor = ServerAuthInterceptor::new(
         Arc::clone(&signing_keyring),
         Arc::clone(&revocation_store),
@@ -3469,6 +3477,8 @@ async fn run_server(
                     tokio_stream::wrappers::TcpListenerStream::new(listener)
                 }
             };
+            // 连接闸在 accept 层生效（超限立即断开）；与上面 listener 解耦，热加载不重置配额
+            let stream = connection_gate.wrap(stream);
 
             // 本次 serve 的退出条件：SIGINT/SIGTERM 或证书热加载请求（500ms 轮询标志位）
             let reload_flag_for_serve = Arc::clone(&tls_reload_requested);
@@ -3552,7 +3562,7 @@ async fn run_server(
             .add_service(auth_svc)
             .add_service(capability_svc)
             .serve_with_incoming_shutdown(
-                grpc_stream.take().ok_or("grpc_stream already consumed")?,
+                connection_gate.wrap(grpc_stream.take().ok_or("grpc_stream already consumed")?),
                 shutdown_signal_future,
             );
 

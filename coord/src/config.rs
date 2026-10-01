@@ -231,6 +231,9 @@ impl Config {
         if self.network.max_concurrent_streams == 0 {
             errs.push("network.max_concurrent_streams must be >= 1".to_string());
         }
+        if self.network.max_connections == 0 {
+            errs.push("network.max_connections must be >= 1".to_string());
+        }
 
         // 8. 集群模式互斥与 initial_nodes 成员合法性
         if self.cluster.bootstrap && self.cluster.join_addr.is_some() {
@@ -714,6 +717,12 @@ pub struct NetworkConfig {
     /// gRPC 单连接并发流上限（默认 512）
     #[serde(default = "default_max_concurrent_streams")]
     pub max_concurrent_streams: u32,
+
+    /// 客户端口全局连接数上限（默认 4096；超限连接 accept 后立即断开）。
+    ///
+    /// 只管客户端口（grpc_addr）；raft 口是节点间 mTLS 通道，不设连接闸。
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
 }
 
 fn default_watch_buffer() -> usize {
@@ -722,6 +731,10 @@ fn default_watch_buffer() -> usize {
 
 fn default_max_concurrent_streams() -> u32 {
     512
+}
+
+fn default_max_connections() -> usize {
+    4096
 }
 
 impl Default for NetworkConfig {
@@ -734,6 +747,7 @@ impl Default for NetworkConfig {
             ui_enabled: false,
             watch_buffer: default_watch_buffer(),
             max_concurrent_streams: default_max_concurrent_streams(),
+            max_connections: default_max_connections(),
         }
     }
 }
@@ -1294,6 +1308,7 @@ mod tests {
         assert_eq!(config.node.id, 1);
         assert_eq!(config.node.name, "coord-01");
         assert_eq!(config.network.grpc_addr, "127.0.0.1:50051");
+        assert_eq!(config.network.max_connections, 4096);
         assert_eq!(config.cluster.cluster_name, "coord-cluster");
         assert_eq!(config.storage.data_dir, PathBuf::from("/var/lib/coord"));
         assert!(!config.cluster.bootstrap);
@@ -1415,6 +1430,17 @@ auth_enabled = true
         assert!(
             errs.iter().any(|e| e.contains("grpc_addr")),
             "out-of-range port must be rejected: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_connections() {
+        let mut config = Config::default();
+        config.network.max_connections = 0;
+        let errs = config.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("max_connections")),
+            "zero max_connections must be rejected: {errs:?}"
         );
     }
 
