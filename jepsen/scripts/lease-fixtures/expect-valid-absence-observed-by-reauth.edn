@@ -1,0 +1,18 @@
+;; expect-valid-absence-observed-by-reauth —— F-71 的正常路径：
+;; CCT 在轮询中途过期 ⇒ 客户端刷新会话后重试 ⇒ 观测到「消失」，必须判绿。
+;;
+;; 这条守的是「刷新会话重试」本身：如果客户端不重试（旧行为），失败读会被吞掉；
+;; 如果 checker 把 `:reauths`/`:ok-reads` 的存在误判成违约，这条会先红。
+;; 时间轴：停续期发生在 4050ms（during-keepalive 锚点）；6150ms 观测到消失
+;; ⇒ 相对锚点 2100ms ≤ ttl(2000) + grace(4000) ⇒ 活性通过。
+[{:type :ok :f :lease-keepalive :process 0 :invoke 1 :time 10
+  :lease {:id 2501 :ttl 2} :key "/jepsen/lease/s42/ka/25" :node "n1"
+  :scenario :keepalive :grace-ms 4000
+  :keepalives [{:id 2501 :ttl 2} {:id 2501 :ttl 2}]
+  :observations [{:phase :after-write :at-ms 25 :read-ok? true :present? true}
+                 {:phase :during-keepalive :at-ms 4050 :read-ok? true :present? true}
+                 ;; 轮询中途 9 次读因 CCT 过期失败 → 刷新会话 → 13 次成功读
+                 ;; → 6150ms 观察到 Key 已消失
+                 {:phase :first-absent :at-ms 6150 :read-ok? true :present? false
+                  :absent? true :reads 22 :failed 9 :ok-reads 13 :reauths 1}]
+  :absent-ms 6150}]

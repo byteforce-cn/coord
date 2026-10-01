@@ -1,0 +1,6 @@
+;; expect-invalid-batch-not-distinct —— **P0**：单个 NextBatch 响应内部就重复了。
+;;
+;; 这条判据**不需要跨节点、不需要跨时钟**：契约原文承诺「返回 count 个互异 ID」，
+;; 一个响应里出现两个相同 ID 即为违约。是 idgen 面最便宜的高价值判据。
+[{:type :ok :f :idgen :process 0 :time 10 :name "orders"
+  :batch? true :requested-count 3 :ids ["5001" "5002" "5001"] :n 3}]

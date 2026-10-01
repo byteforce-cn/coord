@@ -1,0 +1,21 @@
+;; expect-valid-poll-stall-during-pause-window —— F-72 的守门员：
+;; 判定窗口末端采样断档是「没判」，不是活性违反。
+;;
+;; 形态（matrix-m2 lease/pause，seed 737037196，2026-09-26 实测）：leader n1 被
+;; SIGSTOP 10.4s；stale/128 的轮询前 14 次读全部成功（22.7s 前，lease 尚存活），
+;; 之后一次读卡在冻结节点上等满默认 5s 超时 ⇒ 判定窗口 [2000, 6000] 的后半段
+;; **零次成功观测**；旧 checker 只看到 `:absent-ms nil` ⇒ 判红（假红）。
+;;
+;; 正确行为：不判（计入 `:liveness-unjudged`）。客户端侧已同步修复（单节点读
+;; 500ms 超时 ⇒ 断档降到最小）；配对负控制见
+;; `expect-invalid-present-at-deadline-with-ok-reads.edn`（采样覆盖到窗口末端且
+;; 仍见 Key ⇒ 必红）。
+[{:type :ok :f :lease-ttl :process 1 :invoke 1 :time 10
+  :lease {:id 94 :ttl 2} :key "/jepsen/lease/s737037196/ttl/129"
+  :scenario :ttl :grace-ms 4000
+  :observations [{:phase :after-write :at-ms 14 :read-ok? true :present? true}
+                 ;; 读到 2139ms 后就再没有成功观测；轮询在 7140ms 以“未见消失”退出
+                 {:phase :first-absent :at-ms 7140 :absent? false :read-ok? false
+                  :present? false :reads 15 :failed 0 :ok-reads 14 :reauths 0
+                  :last-ok-present? true :last-ok-at-ms 2139}]
+  :absent-ms nil}]

@@ -1,0 +1,16 @@
+;; expect-invalid-event-loss —— **P0：静默丢事件**。写 revision 11 是确认写，
+;; 落在会话有效区间 (10, 12] 内，却既没作为事件出现、也没有任何溢出/历史标记
+;; ——客户端按契约既收不到事件、也收不到「去重同步」的提示，会永久错过这次写。
+[{:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 1 :time 2
+  :value "w1" :revision 10}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 3 :time 4
+  :value "w2" :revision 11}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 5 :time 6
+  :value "w3" :revision 12}
+ {:type :ok :f :watch-session :process 0 :invoke 7 :time 30
+  :key "/jepsen/watch/s42"
+  :value {:key "/jepsen/watch/s42" :start-revision 0}
+  :start-revision 0
+  :end-revision 12
+  :events [{:type :put :revision 10 :kvs [{:key "/jepsen/watch/s42" :value "w1"}]}
+           {:type :put :revision 12 :kvs [{:key "/jepsen/watch/s42" :value "w3"}]}]}]

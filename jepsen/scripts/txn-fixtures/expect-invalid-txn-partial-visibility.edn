@@ -1,0 +1,17 @@
+;; expect-invalid-txn-partial-visibility —— P0：多 key 写集只被观察到**非空真子集**
+;; （半应用可见）。契约的原子可见性要求：要么全看到，要么一个都看不到。
+[{:type :ok, :f :txn-write-set, :process 0, :invoke 10, :time 20
+  :value {:prefix "/jepsen/txn/s42-set-1/" :vals ["1-a" "1-b" "1-c"]
+          :range-start "/jepsen/txn/s42-set-1/" :range-end "/jepsen/txn/s42-set-1/z"}
+  :succeeded true
+  :wrote {"/jepsen/txn/s42-set-1/0" "1-a"
+          "/jepsen/txn/s42-set-1/1" "1-b"
+          "/jepsen/txn/s42-set-1/2" "1-c"}
+  :success-wrote {"/jepsen/txn/s42-set-1/0" "1-a"
+                  "/jepsen/txn/s42-set-1/1" "1-b"
+                  "/jepsen/txn/s42-set-1/2" "1-c"}
+  :failure-wrote {}
+  :setup-ok? true
+  ;; 只看到第 0 个 key（第 1、2 个不可见）
+  :post-read {:kvs [{:key "/jepsen/txn/s42-set-1/0" :value "1-a"}]}
+  :post-read-ok? true}]

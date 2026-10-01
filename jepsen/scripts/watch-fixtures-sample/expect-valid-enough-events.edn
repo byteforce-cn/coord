@@ -1,0 +1,22 @@
+;; expect-valid-enough-events —— 同目录（`{:min-events 5}`）下的样本达标基线：
+;; 5 个事件、结构合法、无缺口 ⇒ valid。
+[{:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 1 :time 2
+  :value "w1" :revision 10}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 3 :time 4
+  :value "w2" :revision 11}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 5 :time 6
+  :value "w3" :revision 12}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 7 :time 8
+  :value "w4" :revision 13}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 9 :time 10
+  :value "w5" :revision 14}
+ {:type :ok :f :watch-session :process 0 :invoke 11 :time 40
+  :key "/jepsen/watch/s42"
+  :value {:key "/jepsen/watch/s42" :start-revision 0}
+  :start-revision 0
+  :end-revision 14
+  :events [{:type :put :revision 10 :kvs [{:key "/jepsen/watch/s42" :value "w1"}]}
+           {:type :put :revision 11 :kvs [{:key "/jepsen/watch/s42" :value "w2"}]}
+           {:type :put :revision 12 :kvs [{:key "/jepsen/watch/s42" :value "w3"}]}
+           {:type :put :revision 13 :kvs [{:key "/jepsen/watch/s42" :value "w4"}]}
+           {:type :put :revision 14 :kvs [{:key "/jepsen/watch/s42" :value "w5"}]}]}]

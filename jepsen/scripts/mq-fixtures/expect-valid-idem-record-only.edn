@@ -1,0 +1,14 @@
+;; expect-valid-idem-record-only —— 默认口径：同 idempotency_key 的重发**只记录
+;; 不判红**（契约措辞待确认：proto 声明了字段，但发布路径不读它）。
+;;
+;; 本 fixture 只有在 `{:expect-idem-dedupe? false}`（默认）下才 valid；配套的
+;; `mq-fixtures-idem/` 用 `{:expect-idem-dedupe? true}` 跑同一条历史，必须判红
+;; —— 两个方向都钉住，参数才不会「接没接上没人知道」（watch 语义档那套纪律）。
+[{:type :ok :f :mq-publish :process 0 :t0-ns 0 :time 1000000
+  :topic "jepsen-mq" :partition 0 :payload "m0" :idempotency-key "idem-0"
+  :offset 0 :dup? true :dup-offset 1}
+ {:type :ok :f :mq-poll :process 1 :t0-ns 10000000 :time 11000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 0 :payload "m0"}
+             {:topic "jepsen-mq" :partition 0 :offset 1 :payload "m0"}]
+  :acked-offsets [0 1]}]

@@ -1,0 +1,43 @@
+syntax = "proto3";
+package coord.plugin;
+
+// 通用插件调用面（内部 proto；不进 apis/contracts）。
+//
+// v1 采用 (plugin_id, method, payload bytes) 透传，避免为每个插件动态注册
+// typed proto 的复杂度；typed 插件面延后。
+
+service Plugin {
+  // 调用插件的一个方法（请求/响应载荷为不透明的 bytes）。
+  rpc Invoke(InvokeRequest) returns (InvokeResponse);
+
+  // 列出当前加载的插件（观测面）。
+  rpc List(ListPluginsRequest) returns (ListPluginsResponse);
+}
+
+message InvokeRequest {
+  string plugin_id = 1;
+  string method = 2;
+  bytes payload = 3;
+}
+
+message InvokeResponse {
+  bytes payload = 1;
+}
+
+message ListPluginsRequest {}
+
+message PluginInfo {
+  string name = 1;
+  string version = 2;
+  string runtime = 3; // js | wasm | native
+  string trust = 4; // first_party | third_party
+  string status = 5; // loaded | started | stopped | failed
+  // 统一健康面：原生服务（内建插件）与脚本插件用同一语义上报。
+  bool healthy = 6;
+  // true = 宿主自有服务（原生服务适配器），不参与配置驱动的 reload diff。
+  bool builtin = 7;
+}
+
+message ListPluginsResponse {
+  repeated PluginInfo plugins = 1;
+}

@@ -1,0 +1,12 @@
+;; expect-invalid-not-freed —— P1：Release 回了 true，但锁还在。
+;;
+;; 「释放」如果只是回了个 true 而没真删（或删的是本地缓存、没删服务端 key），
+;; 上层会以为锁空了、实际仍在被自己持有 —— 生产上表现为「重启后锁永远不释放」。
+[{:type :ok :f :lock-contend :process 0 :time 10
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  :acquired-at-ms 10 :released-at-ms 400 :released? true :gone? false
+  ;; 轮询 5 次之后锁依旧挂在自己名下 ⇒ 「释放」没有真的释放
+  :still-mine-after-release true
+  :holder-ttl-seconds 10 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :holder-id "h1" :lease-id 11 :exists true}}]

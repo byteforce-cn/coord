@@ -1,0 +1,8 @@
+;; expect-invalid-scan-keys-only-violation —— `keys_only=true` 却返回了 value
+;; （多余的字节会让 keys_only 失去「只取 Key」的语义与带宽收益）。
+[{:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-0", :invoke 1, :time 2
+  :value "v1" :revision 10}
+ {:type :ok, :f :scan, :process 0, :invoke 10, :time 20
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42." :keys-only true}
+  :count 1
+  :kvs [{:key "/jepsen/scan/s42-0" :value "v1"}]}]

@@ -1,0 +1,16 @@
+;; expect-invalid-probe-missing —— 声明了探针却一条样本都没有 ⇒ 判**未执行**。
+;;
+;; 服务端真值判据是这个 workload 的核心证据之一：没有探针样本，「互斥成立」就
+;; 只有客户端自述这一半证据。而在 `--workload lock` 的生成器里探针是**必然**混
+;; 进去的（1/5 槽位），所以「一条都没有」只能是接线断了（探针端点写错、op 没接
+;; 进 dispatch、生成器漏了）—— 属于测试侧缺陷，必须红成「未执行」，不能绿。
+;;
+;; 这条 fixture 同时钉住 `:probe?` 这个开关本身：把 lockgen 的探针删掉、
+;; 或把 `:probe? true` 从 checker 调用处去掉，这条必然变绿 ⇒ 违反 expect-invalid。
+[{:type :ok :f :lock-contend :process 0 :time 10
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  :acquired-at-ms 10 :released-at-ms 600 :released? true
+  :gone? true :gone-at-ms 600 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}]

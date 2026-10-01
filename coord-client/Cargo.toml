@@ -1,0 +1,26 @@
+[package]
+name = "coord-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+coord-proto = { workspace = true }
+coord-core = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+coord-server = { workspace = true }
+tempfile = { workspace = true }
+openraft = { workspace = true }
+tonic = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+tokio-stream = { workspace = true }
+rcgen = { version = "0.14", features = ["x509-parser"] }

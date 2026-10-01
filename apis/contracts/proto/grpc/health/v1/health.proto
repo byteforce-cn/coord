@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+// ============================================================
+// 标准 gRPC 健康检查协议（grpc.health.v1）
+//
+// Coord Server 客户端端口已实现本标准协议（tonic-health），
+// 此处收录以便消费方直接生成客户端，避免额外依赖。
+//
+// 服务名约定：
+//   - ""（空串）：整体存活（liveness）
+//   - "coord.kv.KV" 等服务全名：按服务粒度的就绪状态（readiness）
+// ============================================================
+
+package grpc.health.v1;
+
+option java_multiple_files = true;
+option java_package = "io.grpc.health.v1";
+option go_package = "google.golang.org/grpc/health/grpc_health_v1";
+
+message HealthCheckRequest {
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+    SERVICE_UNKNOWN = 3; // 仅由 Watch 流使用
+  }
+  ServingStatus status = 1;
+}
+
+service Health {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc Watch(HealthCheckRequest) returns (stream HealthCheckResponse);
+}

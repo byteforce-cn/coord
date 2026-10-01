@@ -1,0 +1,24 @@
+;; expect-valid-clean —— M5a lock 的基线：两个 holder **顺序**持有同一把锁。
+;;
+;; 判定口径（jepsen.coord.lockck）：
+;;   * 互斥：同一锁名上两个不同 holder 的持有区间不得重叠
+;;     （区间 = [acquired-at-ms, gone-at-ms)；一个「已不在我名下」的证据都没有时
+;;     才 fail-safe 延到 acquired + ttl + grace）；
+;;   * fencing：错误 lease_id 的 Release 必须返回 released=false；
+;;   * 释放：released=true 之后 GetLockInfo 必须显示锁不挂在自己名下；
+;;   * 时间基准：所有客户端在同一 JVM 里 ⇒ 单一时钟，tolerance 默认 0。
+[{:type :ok :f :lock-contend :process 0 :time 10
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  :acquired-at-ms 10 :released-at-ms 400 :released? true
+  :gone? true :gone-at-ms 400 :still-mine-after-release false
+  :holder-ttl-seconds 10 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :holder-id "" :lease-id 0 :exists false}}
+
+ {:type :ok :f :lock-contend :process 1 :time 20
+  :name "lock-a" :holder-id "h2" :lease-id 12
+  :acquired-at-ms 500 :released-at-ms 900 :released? true
+  :gone? true :gone-at-ms 900 :still-mine-after-release false
+  :holder-ttl-seconds 10 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :holder-id "" :lease-id 0 :exists false}}]

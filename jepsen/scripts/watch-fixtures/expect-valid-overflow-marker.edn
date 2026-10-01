@@ -1,0 +1,18 @@
+;; expect-valid-overflow-marker —— 同一个「有缺口」的历史，但缺口之后出现了
+;; `BUFFER_OVERFLOW` 标记（revision 12 ≥ 缺失的 11）⇒ 按契约这是**合法**的：
+;; 客户端据该 revision 做 Range 全量重同步即可。这条 fixture 钉住
+;; `--watch-semantics overflow-marker`（默认）与 `lossless` 的区别。
+[{:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 1 :time 2
+  :value "w1" :revision 10}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 3 :time 4
+  :value "w2" :revision 11}
+ {:type :ok :f :watch-session :process 0 :invoke 5 :time 30
+  :key "/jepsen/watch/s42"
+  :value {:key "/jepsen/watch/s42" :start-revision 0}
+  :start-revision 0
+  :end-revision 12
+  :events [{:type :put :revision 10 :kvs [{:key "/jepsen/watch/s42" :value "w1"}]}
+           {:type :buffer-overflow :revision 12 :kvs []}
+           {:type :put :revision 13 :kvs [{:key "/jepsen/watch/s42" :value "w3"}]}]}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 6 :time 7
+  :value "w3" :revision 13}]

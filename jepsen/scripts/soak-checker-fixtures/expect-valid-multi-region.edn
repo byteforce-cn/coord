@@ -1,0 +1,19 @@
+{:index 0 :time 100 :type :invoke :f :write :key "/jepsen/register-001" :value 1 :process 0}
+{:index 1 :time 200 :type :ok :f :write :key "/jepsen/register-001" :value 1 :process 0}
+{:index 2 :time 300 :type :invoke :f :write :key "/jepsen/register-002" :value 10 :process 0}
+{:index 3 :time 400 :type :ok :f :write :key "/jepsen/register-002" :value 10 :process 0}
+{:index 4 :time 500 :type :invoke :f :read :key "/jepsen/register-001" :value nil :process 1}
+{:index 5 :time 600 :type :ok :f :read :key "/jepsen/register-001" :value 1 :process 1}
+{:index 6 :time 700 :type :invoke :f :read :key "/jepsen/register-002" :value nil :process 1}
+{:index 7 :time 800 :type :ok :f :read :key "/jepsen/register-002" :value 10 :process 1}
+{:index 8 :time 900 :type :info :f :kill :process 0}
+{:index 9 :time 1000 :type :info :f :kill-stop :process 0}
+{:index 10 :time 1100 :type :invoke :f :write :key "/jepsen/register-001" :value 2 :process 2}
+{:index 11 :time 1200 :type :ok :f :write :key "/jepsen/register-001" :value 2 :process 2}
+{:index 12 :time 1300 :type :invoke :f :write :key "/jepsen/register-002" :value 20 :process 2}
+{:index 13 :time 1400 :type :ok :f :write :key "/jepsen/register-002" :value 20 :process 2}
+{:index 14 :time 1500 :type :info :f :stop :process 0}
+{:index 15 :time 1600 :type :invoke :f :read :key "/jepsen/register-001" :value nil :process 1}
+{:index 16 :time 1700 :type :ok :f :read :key "/jepsen/register-001" :value 2 :process 1}
+{:index 17 :time 1800 :type :invoke :f :read :key "/jepsen/register-002" :value nil :process 1}
+{:index 18 :time 1900 :type :ok :f :read :key "/jepsen/register-002" :value 20 :process 1}

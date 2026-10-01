@@ -1,0 +1,16 @@
+;; expect-valid-delete-fail-not-shape-violation —— 「失败 ≠ 违反」守门员。
+;;
+;; `:fail` 的 delete（客户端错误：F-69 失能窗口里的
+;; `INTERNAL: raft auth write failed`）没有响应字段（`:deleted`/`:prev_kvs`
+;; 缺失）——形状断言只适用于**成功**的 delete。修复前该行历史被判
+;; `:delete-response-inconsistent`，把"集群不可用"这个已归因的故障面二次计成
+;; 数据面违反（与 F-68 同族），并让浸泡判定 invalid。
+;;
+;; 配对的负控制：`expect-invalid-delete-response-inconsistent`（`:ok` 且
+;; deleted=3）在修复后必须**仍然**判 invalid —— 修的是分类，不是放宽断言。
+[{:type :ok,   :f :write,  :process 0, :key "/jepsen/map/k0", :invoke 5,  :time 10
+  :value "v1"}
+ {:type :fail, :f :delete, :process 0, :key "/jepsen/map/k0", :invoke 15, :time 20
+  :error "INTERNAL: raft auth write failed: when Read Snapshot(None): snapshot not found"}
+ {:type :ok,   :f :read,   :process 0, :key "/jepsen/map/k0", :invoke 25, :time 30
+  :value "v1"}]

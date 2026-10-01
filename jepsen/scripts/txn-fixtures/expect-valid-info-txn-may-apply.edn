@@ -1,0 +1,13 @@
+;; expect-valid-info-txn-may-apply —— **健全性**守门员：响应丢失（`:info`）的 txn
+;; 无法归因分支，它两边的写值都「可能已经生效」。所以后来的读观察到其中任何一个
+;; 都是合法的（不许判 fabricated），而且它不参与「成功分支泄漏」判定
+;; （`succeeded` 未知，无法归因）。
+[{:type :info, :f :txn-cas, :process 0, :invoke 10, :time 20
+  :error :timeout
+  :value {:key "/jepsen/txn/s42-cas-7" :old "old-7" :val "new-7"}
+  :success-wrote {"/jepsen/txn/s42-cas-7" "new-7"}
+  :failure-wrote {}
+  :wrote-possible {"/jepsen/txn/s42-cas-7" "new-7"}
+  :setup-ok? true}
+ {:type :ok, :f :read, :process 0, :key "/jepsen/txn/s42-cas-7", :invoke 30, :time 40
+  :value "new-7"}]

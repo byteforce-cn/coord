@@ -1,0 +1,22 @@
+;; expect-valid-unjudged-all-poll-reads-failed —— F-71 的守门员：
+;; 「轮询从未读成功」是**没判**，不是活性违反。
+;;
+;; 形态（2026-09-25 2h soak 实测）：CCT 于 ~1h 集中过期，停续期后的轮询窗口内
+;; 41 次点读**全部** `:unauthenticated` 失败 ⇒ 从未产生一个可信观测。
+;; 旧 checker 只看到 `:absent-ms nil`（判据 3' 的「从未消失」分支）⇒ 判红；
+;; 但那 6 秒里根本没人成功看过一眼 Key —— 这是把「观测缺口」当成「产品违约」。
+;;
+;; 正确行为：**不判**（计入 summary 的 `:liveness-unjudged`，不判 ≠ 通过）；
+;; 客户端侧已在轮询内刷新会话重试（F-71 的 client.clj 修复），仍全失败说明
+;; 该窗口不可观测，不得据此报红。配对负控制见
+;; `expect-invalid-present-at-deadline-with-ok-reads.edn`（读成功且 Key 仍在 ⇒ 必红）。
+[{:type :ok :f :lease-keepalive :process 0 :invoke 1 :time 10
+  :lease {:id 2401 :ttl 2} :key "/jepsen/lease/s42/ka/24" :node "n1"
+  :scenario :keepalive :grace-ms 4000
+  :keepalives [] :keepalive-error "UNAUTHENTICATED: CCT expired"
+  :observations [{:phase :after-write :at-ms 25 :read-ok? true :present? true}
+                 {:phase :during-keepalive :at-ms 4050 :read-ok? true :present? true}
+                 ;; 停续期后的轮询 41 次全部读失败：ok-reads = 0
+                 {:phase :first-absent :at-ms 12000 :read-ok? false :present? false
+                  :absent? false :reads 41 :failed 41 :ok-reads 0 :reauths 0}]
+  :absent-ms nil}]

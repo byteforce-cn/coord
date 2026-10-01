@@ -1,0 +1,25 @@
+;; expect-valid-sample-met —— §5.1 的样本门槛**接线**证明（门槛侧）。
+;;
+;; 本目录用 `'{:min-grants 3 :min-expiries 2}'` 跑（见 lab/Makefile 的 checkers
+;; 目标）。这份 fixture 有 3 个授予（2 个到期 + 1 个续期）与 2 个真正观察到到期的
+;; 场景 ⇒ 达到门槛 ⇒ 必须判 valid。它保证「门槛不是恒红」。
+[{:type :ok :f :lease-ttl :process 0 :invoke 1 :time 10
+  :lease {:id 9001 :ttl 2} :key "/jepsen/lease/s42/ttl/a"
+  :scenario :ttl :grace-ms 4000
+  :observations [{:phase :after-write :at-ms 20 :read-ok? true :present? true}
+                 {:phase :first-absent :at-ms 2400 :read-ok? true :present? false}]
+  :absent-ms 2400}
+ {:type :ok :f :lease-ttl :process 0 :invoke 3 :time 20
+  :lease {:id 9002 :ttl 2} :key "/jepsen/lease/s42/ttl/b"
+  :scenario :ttl :grace-ms 4000
+  :observations [{:phase :after-write :at-ms 25 :read-ok? true :present? true}
+                 {:phase :first-absent :at-ms 2600 :read-ok? true :present? false}]
+  :absent-ms 2600}
+ {:type :ok :f :lease-keepalive :process 0 :invoke 5 :time 30
+  :lease {:id 9003 :ttl 2} :key "/jepsen/lease/s42/ka/c" :node "n1"
+  :scenario :keepalive :grace-ms 4000
+  :keepalives [{:id 9003 :ttl 2} {:id 9003 :ttl 2}]
+  :observations [{:phase :after-write :at-ms 25 :read-ok? true :present? true}
+                 {:phase :during-keepalive :at-ms 4000 :read-ok? true :present? true}
+                 {:phase :first-absent :at-ms 6000 :read-ok? true :present? false}]
+  :absent-ms 6000}]

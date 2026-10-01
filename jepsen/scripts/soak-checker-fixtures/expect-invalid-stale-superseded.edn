@@ -1,0 +1,16 @@
+;; A read that returns a value a LATER-COMMITTING confirmed write already
+;; replaced -- a genuine stale read (the mirror image of
+;; expect-valid-reordered-commit.edn, and the case the old
+;; "newest :ok write completed before the read began" rule MISSED).
+;;
+;; Write 100 completes (t=200). Write 50 is invoked afterwards (t=300, so every
+;; linearization orders it after 100) and completes at t=400, before the read
+;; begins (t=500). The register therefore holds 50 when the read runs, but the
+;; read returns 100 -- the state machine served a value that had already been
+;; overwritten.
+{:index 0 :time 100 :type :invoke :f :write :value 100 :process 0}
+{:index 1 :time 200 :type :ok     :f :write :value 100 :process 0}
+{:index 2 :time 300 :type :invoke :f :write :value 50  :process 1}
+{:index 3 :time 400 :type :ok     :f :write :value 50  :process 1}
+{:index 4 :time 500 :type :invoke :f :read  :value nil :process 2}
+{:index 5 :time 600 :type :ok     :f :read  :value 100 :process 2}

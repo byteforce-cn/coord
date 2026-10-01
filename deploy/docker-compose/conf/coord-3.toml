@@ -1,0 +1,33 @@
+[node]
+id = 3
+name = "coord-3"
+
+[network]
+grpc_addr = "0.0.0.0:50051"
+raft_addr = "0.0.0.0:50052"
+http_addr = "0.0.0.0:50061"
+
+[cluster]
+cluster_name = "compose-cluster"
+bootstrap = false
+join_addr = "coord-1:50051"
+initial_nodes = [
+  { id = 1, grpc = "coord-1:50051", raft = "coord-1:50052" },
+  { id = 2, grpc = "coord-2:50051", raft = "coord-2:50052" },
+  { id = 3, grpc = "coord-3:50051", raft = "coord-3:50052" },
+]
+
+[storage]
+data_dir = "/var/lib/coord"
+
+[security]
+auth_enabled = true
+# 与 coord-1 完全一致
+auth_root_key = "__FILL_AUTH_ROOT_KEY__"
+raft_shared_secret = "__FILL_RAFT_SHARED_SECRET__"
+# 传输层 TLS/mTLS（gRPC + raft 同口径）：证书由 ./certs/gen-certs.sh 生成并挂载到
+# /etc/coord/tls；三节点共用同一 server 证书。缺证书拒绝启动（fail-closed）。
+tls_cert = "/etc/coord/tls/server.crt"
+tls_key = "/etc/coord/tls/server.key"
+tls_ca = "/etc/coord/tls/ca.crt"
+reflection_enabled = false

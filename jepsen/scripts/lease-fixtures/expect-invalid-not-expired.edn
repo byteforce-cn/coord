@@ -1,0 +1,12 @@
+;; expect-invalid-not-expired —— 判据 3（活性，§5.2）：
+;; 停续期/到期后 Key 没有在 ttl+grace 内消失。
+;;
+;; ttl=2s、grace=4000ms ⇒ 上界 6000ms。这里 9000ms 才消失 ⇒ 过期回收失效
+;; （Leader 侧定时调度没跑 / 过期后没做级联删除）。
+[{:type :ok :f :lease-ttl :process 0 :invoke 1 :time 10
+  :lease {:id 4001 :ttl 2} :key "/jepsen/lease/s42/ttl/4"
+  :scenario :ttl :grace-ms 4000
+  :observations [{:phase :after-write :at-ms 20 :read-ok? true :present? true}
+                 {:phase :first-absent :at-ms 9000 :read-ok? true :present? false
+                  :absent? true :reads 60 :failed 0}]
+  :absent-ms 9000}]

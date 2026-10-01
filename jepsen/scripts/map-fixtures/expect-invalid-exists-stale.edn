@@ -1,0 +1,6 @@
+;; expect-invalid-exists-stale —— `exists?=false` 就是一次 nil 读：
+;; 有确认写（invoke 5 / 完成 10）且没有任何 tombstone，却报「不存在」。
+[{:type :ok, :f :write,  :process 0, :key "/jepsen/map/k0", :invoke 5,  :time 10
+  :value "v1"}
+ {:type :ok, :f :exists, :process 0, :key "/jepsen/map/k0", :invoke 15, :time 20
+  :exists? false}]

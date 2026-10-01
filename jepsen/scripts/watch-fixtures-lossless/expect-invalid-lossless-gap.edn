@@ -1,0 +1,18 @@
+;; expect-invalid-lossless-gap —— 与 `expect-valid-overflow-marker.edn` 是**同一
+;; 条历史**，但本目录用 `{:semantics :lossless}` 驱动：lossless 口径下任何缺口
+;; 都不接受（连标记也不豁免）。这条 fixture 的价值是证明语义参数**真的生效**，
+;; 而不是被默认值吃掉（F-09 那一类「门槛没接上」）。
+[{:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 1 :time 2
+  :value "w1" :revision 10}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 3 :time 4
+  :value "w2" :revision 11}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 6 :time 7
+  :value "w3" :revision 13}
+ {:type :ok :f :watch-session :process 0 :invoke 5 :time 30
+  :key "/jepsen/watch/s42"
+  :value {:key "/jepsen/watch/s42" :start-revision 0}
+  :start-revision 0
+  :end-revision 13
+  :events [{:type :put :revision 10 :kvs [{:key "/jepsen/watch/s42" :value "w1"}]}
+           {:type :buffer-overflow :revision 12 :kvs []}
+           {:type :put :revision 13 :kvs [{:key "/jepsen/watch/s42" :value "w3"}]}]}]

@@ -1,0 +1,11 @@
+;; expect-invalid-insufficient-sample —— §5.1：一个 watch run 必须观察到足够的
+;; 事件（默认 200），否则该 cell 视为**未执行**（既不算绿也不算红）。本目录用
+;; `{:min-events 5}` 驱动，这里只有 2 个事件 ⇒ invalid。
+[{:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 1 :time 2
+  :value "w1" :revision 10}
+ {:type :ok :f :watch-session :process 0 :invoke 5 :time 30
+  :key "/jepsen/watch/s42"
+  :value {:key "/jepsen/watch/s42" :start-revision 0}
+  :start-revision 0
+  :end-revision 10
+  :events [{:type :put :revision 10 :kvs [{:key "/jepsen/watch/s42" :value "w1"}]}]}]

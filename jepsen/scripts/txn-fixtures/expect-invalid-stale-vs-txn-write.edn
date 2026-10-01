@@ -1,0 +1,16 @@
+;; expect-invalid-stale-vs-txn-write —— 原子性在单个 key 上的投影（§5.1）：
+;; 成功 txn 的写（invoke 30 / 完成 40）已被强制排在该读之前，读却返回 setup
+;; 时的旧值 old-1（写于 t=15）⇒ 陈旧读。
+[{:type :ok, :f :txn-cas, :process 0, :invoke 30, :time 40
+  :value {:key "/jepsen/txn/s42-cas-1" :old "old-1" :val "new-1"}
+  :succeeded true
+  :wrote {"/jepsen/txn/s42-cas-1" "new-1"}
+  :success-wrote {"/jepsen/txn/s42-cas-1" "new-1"}
+  :failure-wrote {}
+  :setup {:key "/jepsen/txn/s42-cas-1" :value "old-1"}
+  :setup-ok? true
+  :post-read {:kv {:key "/jepsen/txn/s42-cas-1" :value "new-1"}}
+  :post-read-ok? true}
+ ;; setup 写（t=15）在索引里是一次真实写，必须进索引
+ {:type :ok, :f :read, :process 0, :key "/jepsen/txn/s42-cas-1", :invoke 50, :time 60
+  :value "old-1"}]

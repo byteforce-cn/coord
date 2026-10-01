@@ -1,0 +1,5 @@
+;; expect-invalid-delete-response-inconsistent —— DeleteResponse 自洽性：
+;; 单键 delete 的 deleted 只能 ∈ {0,1}；请求了 prev_kv 时
+;; count(prev_kvs) 必须等于 deleted。这里 deleted=3（且 prev_kvs 为空）。
+[{:type :ok, :f :delete, :process 0, :key "/jepsen/map/k0", :invoke 15, :time 20
+  :value nil, :deleted 3, :prev-kv-requested? true, :prev-kvs []}]

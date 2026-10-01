@@ -1,0 +1,165 @@
+name: Release
+
+# tag `v*` 时构建发布产物：Linux（x86_64 / aarch64）+ macOS（x86_64）二进制、
+# SHA256 校验和，并创建 GitHub Release（Docker 镜像推到 ghcr.io）。
+#
+# 构建期注意事项（每一条都曾让 workflow 在构建期失败）：
+#  - 工具链固定 `@1.98.1`（与 `rust-toolchain.toml` 一致）；`@master` 不带
+#    required input `toolchain` 会直接 `exit 1`。
+#  - 必须有外部 `protoc`（`coord-proto/build.rs` 走 `prost-build`，`Cargo.lock`
+#    里没有 `protoc-bin-vendored`）。
+#  - aarch64-linux 矩阵腿需要交叉链接器（`gcc-aarch64-linux-gnu`）。
+#  - macOS 目标用 macos runner 构建（ubuntu runner 上不可构建）。
+#  - Docker 推镜像用内置 `GITHUB_TOKEN`（`packages: write` 足够推同仓库 GHCR；
+#    不要依赖未配置的 `secrets.GHCR_TOKEN`）。
+#  - 构建加 `--locked`，保证产物可由 `Cargo.lock` 复现。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-binaries:
+    name: binary (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一条腿失败不取消其余：先拿到能产出的产物，失败原因逐条可见。
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc + cross linker (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Configure cross linker (aarch64-linux)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} -p coord
+
+      # 产物面澄清（v0.2.0）：**不存在独立的 coord-agent 产物**。
+      # agent 是 `coord` 的子命令（`coord agent …`），jepsen lab 也只是把
+      # `/opt/coord/coord` 复制成 `/opt/coord-agent/coord`（见
+      # jepsen/src/jepsen/coord/agent.clj:8）。因此本 workflow 的产物
+      # 同时服务于 server 与 agent 两种角色，无需新增 build target。
+      # 但“产物真的带 agent 面”必须被断言，否则用例会静默丢失。
+      # （交叉编译腿无法在本机 runner 执行，故只冒烟原生腿。）
+      - name: Smoke the artifact (native leg only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/coord"
+          # 版本头：`coord --version` 取自 CARGO_PKG_VERSION，应与 tag 同名
+          "$BIN" --version | grep -q "${GITHUB_REF_NAME#v}"
+          # agent 面必须可用（子命令存在且能打印帮助）
+          "$BIN" agent --help > /dev/null
+
+      - name: Package binary + checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/coord" "dist/coord-${{ matrix.target }}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "coord-${{ matrix.target }}" > "coord-${{ matrix.target }}.sha256")
+          else
+            (cd dist && shasum -a 256 "coord-${{ matrix.target }}" > "coord-${{ matrix.target }}.sha256")
+          fi
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coord-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  github-release:
+    name: publish GitHub Release
+    needs: build-binaries
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # `gh release create --generate-notes` 需要 git 仓库上下文与**历史 tag**：
+      # 没有 checkout 会直接失败于 `failed to run git: fatal: not a git repository`；
+      # `fetch-depth: 0` 是必须的（浅克隆里 `--generate-notes` 找不到上一个 tag）。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release with artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ls -l dist
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/*
+
+  docker:
+    name: docker image (ghcr.io)
+    runs-on: ubuntu-latest
+    needs: build-binaries
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # 内置 token 已具备推同仓库 GHCR 镜像的权限（无需额外 GHCR_TOKEN secret）。
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=tag
+            type=sha
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

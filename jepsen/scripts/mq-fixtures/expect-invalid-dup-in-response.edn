@@ -1,0 +1,7 @@
+;; expect-invalid-dup-in-response —— **P1**：同一个 Poll 响应里同一 offset 出现
+;; 多次（结构性重复，与消费组语义无关）。
+[{:type :ok :f :mq-poll :process 0 :t0-ns 10000000 :time 11000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 5 :payload "m5"}
+             {:topic "jepsen-mq" :partition 0 :offset 5 :payload "m5"}]
+  :acked-offsets [5]}]

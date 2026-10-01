@@ -1,0 +1,13 @@
+;; expect-valid-agent-route-proven —— AG-01 的正控制：计数 > 门槛 ⇒ 路由已被证明。
+;;
+;; fixture 的 opts（运行器第三个参数）：
+;;   {:agent-scrape {:total 500 :by-method {:put 300 :range 200}
+;;                   :agents [{:host "n4" :up? true :total 500}]}
+;;    :min-agent-requests 1 :nemesis :none}
+;;
+;; 与 expect-invalid-agent-route-not-proven **同一条历史**（只有证明值不同）——
+;; 这样「该红必红、该绿必绿」两向都被钉住，而不是只钉住一向。
+[{:type :invoke  :f :write :value 1 :process 0 :time 100000000 :key "/jepsen/register"}
+ {:type :ok      :f :write :value 1 :process 0 :time 100100000 :key "/jepsen/register"}
+ {:type :invoke  :f :read  :process 0 :time 100200000 :key "/jepsen/register"}
+ {:type :ok      :f :read  :value 1 :process 0 :time 100300000 :key "/jepsen/register"}]

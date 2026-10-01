@@ -1,0 +1,6 @@
+# gen-certs.sh 生成的证书/私钥（测试用途，勿提交）
+*.crt
+*.key
+*.csr
+*.srl
+*.ext

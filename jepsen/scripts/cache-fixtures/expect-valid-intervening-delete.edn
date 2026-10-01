@@ -1,0 +1,10 @@
+;; expect-valid-intervening-delete —— 守门员：Delete 之后读不到是**合法**的。
+;;
+;; 这条 fixture 专门防「修 lost-write 假红时把真实语义也判红」：判据要求
+;; 「中间没有任何写/删能解释它」才成立，而这里有一次已确认的 Delete。
+[{:type :ok :f :cache-set :process 0 :t0-ns 0 :time 100000000
+  :key "cache-str-1" :value "v-1" :ttl-seconds 0}
+ {:type :ok :f :cache-del :process 0 :t0-ns 300000000 :time 301000000
+  :key "cache-str-1" :deleted true}
+ {:type :ok :f :cache-get :process 0 :t0-ns 700000000 :time 701000000
+  :key "cache-str-1" :found false :value nil}]

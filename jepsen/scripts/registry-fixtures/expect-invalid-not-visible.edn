@@ -1,0 +1,13 @@
+;; expect-invalid-not-visible —— P1 活性：注册成功后立刻 Discover 看不到自己。
+;;
+;; 服务发现的**可用性**底线：注册成功后必须立刻可见。看不到就等于「注册了但不可发现」，
+;; 上层会认为实例不存在（负载均衡把流量发给不存在的实例 / 客户端找不到服务）。
+;; 注意 :read-ok? true 才判 —— 读失败是另一回事（见 expect-valid-read-failed）。
+[{:type :ok :f :registry-cycle :process 0 :time 1000000000
+  :name "svc-a" :instance-id "inst-1" :lease-id 31
+  :holder-ttl-seconds 5 :grace-ms 2000 :dup? false
+  :absent-ms 5100 :deregistered? true
+  :observations [{:phase :after-register :at-ms 20 :read-ok? true :present? false
+                  :instances []}
+                 {:phase :after-ttl :at-ms 5100 :read-ok? true :present? false
+                  :instances []}]}]

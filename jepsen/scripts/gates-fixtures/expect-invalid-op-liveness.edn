@@ -1,0 +1,42 @@
+;; expect-invalid-op-liveness —— F-13 的复现凭证。
+;;
+;; 12 次 `:cas` 全部是 `:info`（客户端构造请求就抛异常，jepsen 记 `:info`），
+;; 0 次 `:ok`：`cas-register` 的 knossos checker 对一份全是 `:info` 的历史
+;; **照样判 valid**（没有可判的 op），于是整条 Txn 路径「看着是绿的」。
+;; G6 门槛要求单类 op 的 `:ok` 率 ≥ 0.1（样本 ≥ 10）⇒ 本 fixture 必须 invalid。
+[{:index 0, :type :invoke, :process 1, :f :cas, :value [nil 1], :time 1}
+ {:index 1, :type :info, :process 1, :f :cas, :value [nil 1], :time 2
+  :error "indeterminate: No matching method addAllField found taking 2 args for class com.google.protobuf.DynamicMessage$Builder"}
+ {:index 2, :type :invoke, :process 1, :f :cas, :value [nil 2], :time 3}
+ {:index 3, :type :info, :process 1, :f :cas, :value [nil 2], :time 4
+  :error "indeterminate: No matching method addAllField found taking 2 args for class com.google.protobuf.DynamicMessage$Builder"}
+ {:index 4, :type :invoke, :process 1, :f :cas, :value [nil 3], :time 5}
+ {:index 5, :type :info, :process 1, :f :cas, :value [nil 3], :time 6
+  :error "indeterminate: No matching method addAllField found taking 2 args for class com.google.protobuf.DynamicMessage$Builder"}
+ {:index 6, :type :invoke, :process 1, :f :cas, :value [nil 4], :time 7}
+ {:index 7, :type :info, :process 1, :f :cas, :value [nil 4], :time 8
+  :error "indeterminate: No matching method addAllField found taking 2 args for class com.google.protobuf.DynamicMessage$Builder"}
+ {:index 8, :type :invoke, :process 1, :f :cas, :value [nil 5], :time 9}
+ {:index 9, :type :info, :process 1, :f :cas, :value [nil 5], :time 10
+  :error "indeterminate: No matching method addAllField found taking 2 args for class com.google.protobuf.DynamicMessage$Builder"}
+ {:index 10, :type :invoke, :process 1, :f :cas, :value [nil 6], :time 11}
+ {:index 11, :type :info, :process 1, :f :cas, :value [nil 6], :time 12
+  :error "indeterminate: No matching method addAllField found taking 2 args for class com.google.protobuf.DynamicMessage$Builder"}
+ {:index 12, :type :invoke, :process 1, :f :cas, :value [nil 7], :time 13}
+ {:index 13, :type :info, :process 1, :f :cas, :value [nil 7], :time 14
+  :error "indeterminate: No matching method addAllField found taking 2 args for class com.google.protobuf.DynamicMessage$Builder"}
+ {:index 14, :type :invoke, :process 1, :f :cas, :value [nil 8], :time 15}
+ {:index 15, :type :info, :process 1, :f :cas, :value [nil 8], :time 16
+  :error "indeterminate: No matching method addAllField found taking 2 args for class com.google.protobuf.DynamicMessage$Builder"}
+ {:index 16, :type :invoke, :process 1, :f :cas, :value [nil 9], :time 17}
+ {:index 17, :type :info, :process 1, :f :cas, :value [nil 9], :time 18
+  :error "indeterminate: No matching method addAllField found taking 2 args for class com.google.protobuf.DynamicMessage$Builder"}
+ {:index 18, :type :invoke, :process 1, :f :cas, :value [nil 10], :time 19}
+ {:index 19, :type :info, :process 1, :f :cas, :value [nil 10], :time 20
+  :error "indeterminate: No matching method addAllField found taking 2 args for class com.google.protobuf.DynamicMessage$Builder"}
+ {:index 20, :type :invoke, :process 1, :f :cas, :value [nil 11], :time 21}
+ {:index 21, :type :info, :process 1, :f :cas, :value [nil 11], :time 22
+  :error "indeterminate: No matching method addAllField found taking 2 args for class com.google.protobuf.DynamicMessage$Builder"}
+ {:index 22, :type :invoke, :process 1, :f :cas, :value [nil 12], :time 23}
+ {:index 23, :type :info, :process 1, :f :cas, :value [nil 12], :time 24
+  :error "indeterminate: No matching method addAllField found taking 2 args for class com.google.protobuf.DynamicMessage$Builder"}]

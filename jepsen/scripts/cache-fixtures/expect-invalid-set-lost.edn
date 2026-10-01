@@ -1,0 +1,5 @@
+;; expect-invalid-set-lost —— **P0**：SAdd 的成员在读结果里缺失。
+[{:type :ok :f :cache-sadd :process 0 :t0-ns 0 :time 300000 :key "cache-set-1" :member "m-1"}
+ {:type :ok :f :cache-sadd :process 0 :t0-ns 1000000 :time 1300000 :key "cache-set-1" :member "m-2"}
+ {:type :ok :f :cache-smembers :process 1 :t0-ns 1000000000 :time 1001000000
+  :key "cache-set-1" :members ["m-1"]}]

@@ -1,0 +1,13 @@
+;; expect-invalid-ack-not-honoured —— **P1**：已 Ack 的消息又被投递。
+;;
+;; at-least-once 允许**未确认**消息重投（那是合法语义，见
+;; expect-valid-redelivery-without-ack），但已确认的重投说明消费组偏移没被
+;; 记住 ⇒ 业务会被重放一次（下游若不幂等就是重复扣款/重复发货那一类）。
+[{:type :ok :f :mq-poll :process 0 :t0-ns 10000000 :time 11000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 0 :payload "m0"}]
+  :acked-offsets [0]}
+ {:type :ok :f :mq-poll :process 0 :t0-ns 90000000 :time 91000000
+  :topic "jepsen-mq" :partition 0 :start-offset 1
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 0 :payload "m0"}]
+  :acked-offsets [0]}]

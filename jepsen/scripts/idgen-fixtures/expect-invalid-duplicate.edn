@@ -1,0 +1,10 @@
+;; expect-invalid-duplicate —— **P0**：同一个 ID 发了两次。
+;;
+;; 这是 snowflake nodeid 冲突（两台同名主机 / 容器主机名重复 / 显式 nodeid 撞车
+;; + 同一毫秒同一 seq）在**外部**唯一的可观测形态，也是「ID 当业务主键」场景下
+;; 的静默数据损坏。单进程测试结构性看不到这一形态。
+[{:type :ok :f :idgen :process 0 :time 10 :name "orders"
+  :batch? true :requested-count 2 :ids ["7001" "7002"] :n 2}
+
+ {:type :ok :f :idgen :process 1 :time 20 :name "orders"
+  :batch? true :requested-count 2 :ids ["8001" "7001"] :n 2}]

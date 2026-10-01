@@ -1,0 +1,15 @@
+;; expect-invalid-failure-branch-leak —— P0：`succeeded=false` 的 txn 的成功分支
+;; 写值被后来的读观察到了。契约要求「未执行的分支不得有任何副作用」，
+;; 出现即意味着失败分支被静默执行了成功分支（或两分支都执行了）。
+[{:type :ok, :f :txn-cas-delete, :process 0, :invoke 10, :time 20
+  :value {:key "/jepsen/txn/s42-casd-1" :old "old-1" :val "new-1"}
+  :succeeded false
+  :wrote {"/jepsen/txn/s42-casd-1" nil}
+  :success-wrote {"/jepsen/txn/s42-casd-1" "new-1"}
+  :failure-wrote {"/jepsen/txn/s42-casd-1" nil}
+  :setup {:key "/jepsen/txn/s42-casd-1" :value "old-1"}
+  :setup-ok? true
+  :post-read {:kv nil}
+  :post-read-ok? true}
+ {:type :ok, :f :read, :process 0, :key "/jepsen/txn/s42-casd-1", :invoke 30, :time 40
+  :value "new-1"}]

@@ -1,0 +1,30 @@
+;; expect-invalid-untagged —— 与 `mixture-fixtures/` 的同名 fixture 同一职责，
+;; 但门槛放宽到 `:min-sample 3`：这里的红**只能**由「存在未路由的客户端 op」
+;; 引起（样本都在门槛之上），从而把两条路由判据分开钉住。
+[{:type :ok :f :write :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 1 :time 2 :value "m1"}
+ {:type :ok :f :read :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 3 :time 4 :value "m1"}
+ {:type :ok :f :exists :sub :map :process 0 :key "/jepsen/map/s42-1"
+  :invoke 5 :time 6 :exists? false}
+ {:type :ok :f :write :sub :scan :process 2 :key "/jepsen/scan/s42-0"
+  :invoke 7 :time 8 :value "s1" :revision 10}
+ {:type :ok :f :scan :sub :scan :process 2 :invoke 9 :time 10
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42."}
+  :count 1 :kvs [{:key "/jepsen/scan/s42-0" :value "s1"}]}
+ {:type :ok :f :read-at :sub :scan :process 2 :invoke 11 :time 12
+  :value {:key "/jepsen/scan/s42-0" :revision 10}
+  :kvs [{:key "/jepsen/scan/s42-0" :value "s1"}]}
+ {:type :ok :f :txn-create :sub :txn :process 1 :invoke 13 :time 14
+  :value {:key "/jepsen/txn/s42-create-1" :val "1"}
+  :succeeded true
+  :wrote {"/jepsen/txn/s42-create-1" "1"}
+  :post-read {:kv {:key "/jepsen/txn/s42-create-1" :value "1"}}
+  :post-read-ok? true}
+ {:type :ok :f :txn-read :sub :txn :process 1 :invoke 15 :time 16
+  :key "/jepsen/txn/s42-create-1" :value "1"}
+ {:type :ok :f :txn-read :sub :txn :process 1 :invoke 17 :time 18
+  :key "/jepsen/txn/s42-create-1" :value "1"}
+ ;; ↓ 未打标记的 op
+ {:type :ok :f :write :process 3 :invoke 19 :time 20
+  :key "/jepsen/map/s42-0" :value "m2"}]

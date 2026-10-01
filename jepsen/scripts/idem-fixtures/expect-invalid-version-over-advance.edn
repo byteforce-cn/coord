@@ -1,0 +1,12 @@
+;; expect-invalid-version-over-advance —— 响应谎报缓存 revision、实际却再次生效。
+;; 这是 `:revision-advanced` 之外**独立**的一道断言：即使 k 次响应的 revision
+;; 都是首次的 70，收尾读的 version（2 > expected-version 1）也证明写了两次。
+;; 缺了这道断言，「命中缓存但真的重放了一次」这形态就会被放行。
+{:type :ok, :f :idem-put, :process 0, :time 1000
+ :request {:rid "put-6000-1", :key "/jepsen/idem/put/10", :val "10"
+           :replays 2, :expected-version 1}
+ :attempts [{:ok? true, :node "n1", :revision 70, :prev-kv nil}
+            {:ok? true, :node "n1", :revision 70, :prev-kv nil}]
+ :final {:ok? true, :node "n1", :kv
+         {:key "/jepsen/idem/put/10", :value "10"
+          :version 2, :create-revision 70, :mod-revision 71}}}

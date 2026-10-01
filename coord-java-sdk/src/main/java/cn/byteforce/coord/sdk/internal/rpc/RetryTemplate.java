@@ -1,0 +1,99 @@
+package cn.byteforce.coord.sdk.internal.rpc;
+
+import cn.byteforce.coord.sdk.CoordException;
+import cn.byteforce.coord.sdk.ErrorCode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.function.Function;
+
+/**
+ * Retry template for RPC calls.
+ * <p>
+ * Retry policy:
+ * <ul>
+ *   <li>Max 3 attempts total (1 initial + 2 retries).</li>
+ *   <li>Retries on {@link ErrorCode#NOT_LEADER}, {@link ErrorCode#UNAVAILABLE},
+ *       {@link ErrorCode#AGENT_UNAVAILABLE}, {@link ErrorCode#RESOURCE_EXHAUSTED}
+ *       and {@link ErrorCode#DEADLINE_EXCEEDED}——与 Rust 客户端矩阵对齐
+ *       （unavailable/deadline/timeout 均重试）。</li>
+ *   <li>{@code NOT_LEADER} 由服务端显式标注；若被压成 {@code AGENT_UNAVAILABLE}，
+ *       语义上是"等 agent 恢复"而非"换 leader 重试"。本模板重试两者——但调用方
+ *       与日志必须能区分它们。</li>
+ *   <li>Backoff: 100ms, 200ms, 500ms for retry attempts 2, 3.</li>
+ * </ul>
+ */
+public final class RetryTemplate {
+
+    private static final Logger log = LoggerFactory.getLogger(RetryTemplate.class);
+    private static final int MAX_ATTEMPTS = 3;
+    private static final long[] BACKOFF_MS = {0, 100, 200, 500};
+
+    /**
+     * Execute with retry logic.
+     *
+     * @param call the RPC call function that takes a retry context and returns a result
+     * @param <T>  the result type
+     * @return the result
+     * @throws CoordException if all retries are exhausted
+     */
+    public <T> T execute(Function<RetryContext, T> call) throws CoordException {
+        CoordException lastException = null;
+
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            RetryContext ctx = new RetryContext(attempt);
+            try {
+                T result = call.apply(ctx);
+                if (attempt > 1) {
+                    log.debug("RPC succeeded on attempt {}", attempt);
+                }
+                return result;
+            } catch (CoordException e) {
+                lastException = e;
+                if (!isRetryable(e.getErrorCode())) {
+                    throw e;
+                }
+                if (attempt < MAX_ATTEMPTS) {
+                    long delay = BACKOFF_MS[attempt];
+                    log.debug("RPC attempt {} failed with {}, retrying in {}ms",
+                            attempt, e.getErrorCode(), delay);
+                    try {
+                        Thread.sleep(delay);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new CoordException(ErrorCode.INTERNAL, "Retry interrupted", ie);
+                    }
+                }
+            } catch (RuntimeException e) {
+                // Non-Coord exceptions are NOT retried
+                throw e;
+            }
+        }
+
+        throw lastException;
+    }
+
+    private boolean isRetryable(ErrorCode code) {
+        return code == ErrorCode.NOT_LEADER
+                || code == ErrorCode.UNAVAILABLE
+                || code == ErrorCode.AGENT_UNAVAILABLE
+                || code == ErrorCode.RESOURCE_EXHAUSTED
+                || code == ErrorCode.DEADLINE_EXCEEDED;
+    }
+
+    /**
+     * Context passed to each retry attempt.
+     */
+    public static final class RetryContext {
+        private final int attemptNumber;
+
+        RetryContext(int attemptNumber) {
+            this.attemptNumber = attemptNumber;
+        }
+
+        /** 1-based attempt number. */
+        public int getAttemptNumber() {
+            return attemptNumber;
+        }
+    }
+}

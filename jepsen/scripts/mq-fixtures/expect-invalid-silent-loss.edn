@@ -1,0 +1,13 @@
+;; expect-invalid-silent-loss —— **P0**：已确认发布的消息被**跳过**。
+;;
+;; 发布拿到 offset 0 与 1；一次 `start_offset=0` 的 Poll 只返回 offset 1 ——
+;; 消费者的游标越过了 0，而 0 从没被投递过 ⇒ 静默丢失（at-least-once 被破坏）。
+;; 这是 MQ 面最严重的一类：没有错误、没有异常，只是少了一条消息。
+[{:type :ok :f :mq-publish :process 0 :t0-ns 0 :time 1000000
+  :topic "jepsen-mq" :partition 0 :payload "m0" :idempotency-key "idem-0" :offset 0}
+ {:type :ok :f :mq-publish :process 0 :t0-ns 2000000 :time 3000000
+  :topic "jepsen-mq" :partition 0 :payload "m1" :idempotency-key "idem-1" :offset 1}
+ {:type :ok :f :mq-poll :process 1 :t0-ns 10000000 :time 11000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 1 :payload "m1"}]
+  :acked-offsets [1]}]

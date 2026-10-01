@@ -1,0 +1,15 @@
+;; expect-invalid-prev-kv-mismatch —— F-02 的**纯形态**（server/mod.rs:1425）：
+;; key 已存在（本组先做了一次无 rid 的 setup 写），所以首次执行的响应带
+;; prev_kv = OLD；而幂等命中路径恒返回 `prev_kv: None`。
+;; 「返回首次执行的结果」不成立，且依赖 prev_kv 的上层会把 None 读成
+;; 「该 key 此前不存在」——静默的错误结论。
+{:type :ok, :f :idem-put, :process 0, :time 1000
+ :request {:rid "put-5000-1", :key "/jepsen/idem/put/8", :val "8"
+           :replays 2, :setup-val "OLD", :expected-version 2}
+ :attempts [{:ok? true, :node "n1", :revision 60, :prev-kv
+             {:key "/jepsen/idem/put/8", :value "OLD", :version 1
+              :create-revision 55, :mod-revision 55}}
+            {:ok? true, :node "n1", :revision 60, :prev-kv nil}]
+ :final {:ok? true, :node "n1", :kv
+         {:key "/jepsen/idem/put/8", :value "8"
+          :version 2, :create-revision 55, :mod-revision 60}}}

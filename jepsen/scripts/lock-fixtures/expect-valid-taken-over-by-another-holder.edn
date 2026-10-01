@@ -1,0 +1,33 @@
+;; expect-valid-taken-over-by-another-holder —— **守门员**（F-34 根因 ②）。
+;;
+;; 形态：持有者释放后进入观测循环，此时**另一个持有者合法接管**了同一把锁。
+;; 于是 GetLockInfo 返回 `exists=true`，但 holder 已经不是自己。
+;;
+;; 如果「锁已不在我名下」判成 `exists=false`，这条 op 就永远等不到
+;; `exists=false`（会轮询满 5 次），`gone?` 变 false，区间被 fail-safe 延长
+;; 整整 `ttl + grace`（= 9s）—— 而在这 9s 里后面所有合法持有者都会与它「重叠」。
+;; 实测（F-34 那一轮）99 次重叠里有 85 次是这一条贡献的。
+;;
+;; 正确的判据是「不再挂在我名下」（`exists=false` **或** holder 换人）。
+;; 下例中 h2 在 700ms 合法接管，h1 的区间必须在 400ms 就闭合 ⇒ 无重叠。
+;;
+;; 去掉这个口径（改成只看 exists=false）⇒ h1 的区间变成
+;; [10, 10 + 5000 + 4000) = [10, 9010)，与 h2 重叠 ⇒ 变红。
+[{:type :ok :f :lock-contend :process 0 :time 10
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  :acquired-at-ms 10 :released-at-ms 400 :released? true
+  :gone? true :gone-at-ms 400
+  ;; 观测到的是「存在、但 holder 不是我」—— 这正是合法接管的形态
+  :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :holder-id "h2" :lease-id 12 :exists true}}
+
+ ;; h2 在 h1 的 ttl+grace 窗口（=9010）之内接管 —— 在正确口径下完全合法
+ {:type :ok :f :lock-contend :process 1 :time 20
+  :name "lock-a" :holder-id "h2" :lease-id 12
+  :acquired-at-ms 700 :released-at-ms 1000 :released? true
+  :gone? true :gone-at-ms 1000 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}]

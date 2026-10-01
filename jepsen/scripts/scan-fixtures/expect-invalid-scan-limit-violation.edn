@@ -1,0 +1,14 @@
+;; expect-invalid-scan-limit-violation —— 返回条数超过 `limit`。
+;; 契约：`limit` 是硬上限（服务端另有 max_range_limit 兜底）。
+[{:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-0", :invoke 1, :time 2
+  :value "v1" :revision 10}
+ {:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-1", :invoke 3, :time 4
+  :value "v2" :revision 11}
+ {:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-2", :invoke 5, :time 6
+  :value "v3" :revision 12}
+ {:type :ok, :f :scan, :process 0, :invoke 10, :time 20
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42." :limit 1}
+  :count 3
+  :kvs [{:key "/jepsen/scan/s42-0" :value "v1"}
+        {:key "/jepsen/scan/s42-1" :value "v2"}
+        {:key "/jepsen/scan/s42-2" :value "v3"}]}]

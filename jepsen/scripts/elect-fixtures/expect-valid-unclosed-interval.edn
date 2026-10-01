@@ -1,0 +1,22 @@
+;; expect-valid-unclosed-interval —— **守门员**：未闭合区间不得用于双 leader 判定。
+;;
+;; c1 当选后**没有** Resign（例如它所在的 agent 被 kill 了，或 Resign 请求失败）。
+;; 这种情况无法区分「它还在位」与「它已被动过期」：
+;;   * 若它已被动过期，c2 在 900ms 当选完全合法；
+;;   * 若它真还在位，那才是双 leader —— 但**本 op 的汇报里没有证据**。
+;; 所以双 leader 判据只用**已 Resign**（闭合）的区间，未闭合的只记进
+;; summary 的 :unclosed-intervals（不判 ≠ 通过，但也不许拿它当证据判红）。
+[{:type :ok :f :elect-campaign :process 0 :time 10
+  :elected? true :group-name "g1" :candidate-id "c1" :lease-id 21
+  :campaign-at-ms 10 :resigned-at-ms 400 :resigned? false
+  ;; Resign 失败且没有任何「已不在位」的观测 ⇒ 区间不闭合（不参与双 leader 判定）
+  :gone? false :gone-at-ms nil :still-leader-after-resign true
+  :holder-ttl-seconds 2
+  :leader-after-resign nil}
+
+ {:type :ok :f :elect-campaign :process 1 :time 20
+  :elected? true :group-name "g1" :candidate-id "c2" :lease-id 22
+  :campaign-at-ms 900 :resigned-at-ms 1400 :resigned? true
+  :gone? true :gone-at-ms 1400 :still-leader-after-resign false
+  :holder-ttl-seconds 10
+  :leader-after-resign {:leader-id "" :exists false}}]

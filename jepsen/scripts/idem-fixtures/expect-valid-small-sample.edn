@@ -1,0 +1,9 @@
+;; expect-valid-small-sample —— 单分组、单次重放（无重放可判），自洽即 valid。
+;; 样本门槛由运行器的 opts（{:min-replay-attempts 0}）下调；生产默认 50 见
+;; jepsen.coord.idem 的 :min-replay-attempts。
+{:type :ok, :f :idem-put, :process 0, :time 1000
+ :request {:rid "put-3000-1", :key "/jepsen/idem/put/5", :val "5", :replays 1}
+ :attempts [{:ok? true, :node "n1", :revision 40, :prev-kv nil}]
+ :final {:ok? true, :node "n1", :kv
+         {:key "/jepsen/idem/put/5", :value "5"
+          :version 1, :create-revision 40, :mod-revision 40}}}

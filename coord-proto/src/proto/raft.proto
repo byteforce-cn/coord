@@ -1,0 +1,49 @@
+syntax = "proto3";
+package coord.raft;
+
+// Wrapper for all Raft RPC messages (bincode-serialized payload from Openraft types)
+message RaftMessage {
+  bytes payload = 1;
+  // v6.0 Multi-Raft: target Region ID for RPC demultiplexing
+  uint64 region_id = 2;
+  // v6.0 Multi-Raft: W3C Trace Context for distributed tracing
+  bytes trace_context = 3;
+  // R-SEC-03: HMAC-SHA256 tag over `payload`（无 mTLS 时的共享密钥认证；
+  // 未配置共享密钥时为空）
+  bytes auth_tag = 4;
+}
+
+// Internal Raft RPC service for node-to-node communication
+// Runs on raft_addr (separate from client-facing gRPC)
+service Raft {
+  // AppendEntries: replicate log entries from Leader to Follower
+  rpc AppendEntries(RaftMessage) returns (RaftMessage);
+
+  // Vote: request vote during Leader election
+  rpc Vote(RaftMessage) returns (RaftMessage);
+
+  // TransferLeader: 领导权转移。Leader 向每个 voter 广播 TransferLeader 请求，
+  // 目标节点（req.to）据此立即发起带 leadership_transfer 的选举接管领导权。
+  // payload = bincode(openraft TransferLeaderRequest)；region_id 用于 Multi-Raft 解复用。
+  rpc TransferLeader(RaftMessage) returns (RaftMessage);
+
+  // InstallSnapshot: send full state snapshot to lagging Follower
+  rpc InstallSnapshot(RaftMessage) returns (RaftMessage);
+
+  // InstallSnapshotStreaming (R-RFT-06): client-streaming snapshot transfer.
+  // 每帧为 RaftMessage（payload = bincode(SnapshotStreamMessage)），
+  // follower 侧重组后安装；避免整包单条 gRPC 超出解码上限。
+  rpc InstallSnapshotStreaming(stream RaftMessage) returns (RaftMessage);
+
+  // SubmitPdOp (R-MR-08 / D1-a P5): 把一条 PD 队列命令（bincode(PdOp)）提交到
+  // 目标节点 **本地的 region 0 raft** 并等待 apply，返回日志 index。
+  //
+  // 用途：PD operator 执行器在「目标 Region 的当前 leader」节点运行，但
+  // region 0（system raft）的 `client_write` 只有其 leader 节点可本地提出；
+  // 非 region 0 leader 节点的执行器经本 RPC 把 Claim/Complete/Requeue 转发到
+  // region 0 leader 节点提出（跟随 openraft 的 ForwardToLeader 语义）。
+  // 请求 region_id = 0（region 0 承载 PD 队列）；payload = bincode(PdSubmitOp)，
+  // 响应 payload = bincode(PdSubmitReply{index,error})。节点间认证（共享密钥
+  // HMAC / mTLS）与其他 Raft RPC 同口径。
+  rpc SubmitPdOp(RaftMessage) returns (RaftMessage);
+}

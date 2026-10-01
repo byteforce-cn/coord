@@ -1,0 +1,6 @@
+;; expect-invalid-future —— 读返回的值，其写在该读**完成之后**才被 invoke
+;; （done 40 < write invoke 50）：任何线性化都排不出这种顺序。
+[{:type :ok, :f :read,  :process 0, :key "/jepsen/map/k0", :invoke 35, :time 40
+  :value "v1"}
+ {:type :ok, :f :write, :process 0, :key "/jepsen/map/k0", :invoke 50, :time 60
+  :value "v1"}]

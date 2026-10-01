@@ -1,0 +1,16 @@
+;; expect-valid-info-write-observed —— F-17 语义在组合层仍然成立：
+;; `:info`（响应丢失）的写**可能已生效**，后续读看到它的值是合法的，
+;; 不得判 `:fabricated`。三个面各自都要能吃到这条语义。
+[{:type :info :f :write :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 1 :time 2 :value "m1"}
+ {:type :ok :f :read :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 3 :time 4 :value "m1"}
+ {:type :info :f :write :sub :scan :process 2 :key "/jepsen/scan/s42-0"
+  :invoke 5 :time 6 :value "s1" :revision 10}
+ {:type :ok :f :scan :sub :scan :process 2 :invoke 7 :time 8
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42."}
+  :count 1
+  :kvs [{:key "/jepsen/scan/s42-0" :value "s1"}]}
+ {:type :info :f :txn-create :sub :txn :process 1 :invoke 9 :time 10
+  :value {:key "/jepsen/txn/s42-create-1" :val "1"}
+  :wrote-possible {"/jepsen/txn/s42-create-1" "1"}}]

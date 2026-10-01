@@ -1,0 +1,9 @@
+;; expect-invalid-ttl-early —— **P0**：TTL 提前到期。
+;;
+;; set(ttl=10s) 在 0–5ms 完成；get 在 2s 就 found=false。TTL 最早也只能从写
+;; **起点**开始计 ⇒ 10s 之前不可能到期。生产表现：把还在 TTL 内的缓存条目当
+;; 不存在 → 回源风暴 / 业务误判「已过期」。
+[{:type :ok :f :cache-set :process 0 :t0-ns 0 :time 5000000
+  :key "cache-str-1" :value "v-1" :ttl-seconds 10}
+ {:type :ok :f :cache-get :process 1 :t0-ns 2000000000 :time 2001000000
+  :key "cache-str-1" :found false :value nil}]

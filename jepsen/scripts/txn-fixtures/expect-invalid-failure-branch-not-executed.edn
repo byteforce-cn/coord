@@ -1,0 +1,13 @@
+;; expect-invalid-failure-branch-not-executed —— `succeeded=false` 且失败分支是
+;; delete，但回读仍然能看到该 key：失败分支被静默跳过（与「成功分支泄漏」互为
+;; 镜像，两者一起才能把「哪条分支真的跑了」钉死）。
+[{:type :ok, :f :txn-cas-delete, :process 0, :invoke 10, :time 20
+  :value {:key "/jepsen/txn/s42-casd-4" :old "old-4" :val "new-4"}
+  :succeeded false
+  :wrote {"/jepsen/txn/s42-casd-4" nil}
+  :success-wrote {"/jepsen/txn/s42-casd-4" "new-4"}
+  :failure-wrote {"/jepsen/txn/s42-casd-4" nil}
+  :setup {:key "/jepsen/txn/s42-casd-4" :value "old-4"}
+  :setup-ok? true
+  :post-read {:kv {:key "/jepsen/txn/s42-casd-4" :value "old-4"}}
+  :post-read-ok? true}]

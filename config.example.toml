@@ -1,0 +1,192 @@
+# coord-server 生产配置示例（对齐 R-OBS-15）
+#
+# 三节点集群部署时：
+#   1. 每个节点一份本文件，按注释修改 node.id 与端口；
+#   2. 三节点 security.auth_root_key 必须一致（CCT 签发根密钥，hex 64 字符）；
+#   3. security.raft_shared_secret 必须一致（raft 端口 HMAC 认证）；
+#   4. 生产建议配置 tls_cert/tls_key/tls_ca（raft/gRPC mTLS，缺 CA 拒绝启动）；
+#   5. 首节点 bootstrap=true，其余节点 join_addr=首节点 grpc 地址。
+
+[node]
+id = 1                # 节点唯一 ID（1/2/3）
+name = "coord-01"
+
+[network]
+grpc_addr = "0.0.0.0:50051"   # 客户端 gRPC
+raft_addr = "0.0.0.0:50052"   # 节点间 Raft（必须与 grpc 不同端口）
+http_addr = "0.0.0.0:50061"   # HTTP /metrics /healthz（生产建议内网绑定）
+
+[cluster]
+cluster_name = "prod-cluster"
+bootstrap = true               # 仅首节点 true
+# join_addr = "coord-01:50051"  # 其余节点填首节点地址
+# initial_nodes = [             # 或显式列出全部节点（bootstrap 时使用）
+#   { id = 1, grpc = "coord-01:50051", raft = "coord-01:50052" },
+#   { id = 2, grpc = "coord-02:50051", raft = "coord-02:50052" },
+#   { id = 3, grpc = "coord-03:50051", raft = "coord-03:50052" },
+# ]
+
+[storage]
+data_dir = "/var/lib/coord"
+
+# Multi-Raft 多 Region 模式（默认关闭 = 单 Raft，字节级退化）
+#
+# enabled = true 时：
+#   - 每个 initial_regions 是一个独立 Raft 组（Region ≥ 1），目录级存储隔离于
+#     <data_dir>/regions/region-{id:016x}/；region 0 保留为 system raft
+#     （鉴权/会话等系统数据）仍在根目录；
+#   - 每个 Region 复制到 cluster.initial_nodes 全部成员（v1 静态复制，每节点
+#     配置必须一致；本节点必须在 initial_nodes 中，且不支持 join 流程）；
+#   - 各 Region key range 必须平铺整个 keyspace：首个 start_key 为空、相邻
+#     首尾相接（无空洞/重叠）、最后一个 end_key 为空（无上界）；
+#   - 仅首节点 bootstrap=true（负责初始化各 Region 成员），其余节点置
+#     bootstrap=false 等待 leader 复制；
+#   - v1 语义边界：
+#       * 静态 Region 表：成员 = cluster.initial_nodes 全量复制，不支持 join/
+#         动态成员变更（配置含 join 即拒绝）；不支持在线 Split/Merge；
+#       * 跨 Region Txn/Range 显式拒绝（不裁剪不静默）；Watch 单 key/前缀路由到
+#         所属 Region，start_revision 为 per-Region revision（各 Region 独立）；
+#       * Lease 已支持：lease_id 全局唯一（元数据存 region 0 全局租约表），
+#         到期清理按 key 路由到所属 Region 执行删除；
+#       * 快照/压缩 per-Region：Snapshot RPC/coord snapshot --region 带 region_id，
+#         各 Region 独立 compact 水位；备份须覆盖 <data_dir>/regions/region-*/；
+#       * 存量单 Raft 用户 KV 升级必须先迁移：`[multi_raft].legacy_migration =
+#         true` 一次性放行——boot 期各节点把 region 0 根 store 活用户 KV 经 raft
+#         导入所属 Region（经 raft 日志复制，日志==状态机；只读源、不删源数据，
+#         回滚 = 关闭 multi_raft 用原数据）并写迁移标记；未迁移又未显式授权时
+#         fail-closed 拒绝启动（allow_unmigrated=true 为救援强制放行，数据面由
+#         运维负责）。迁移语义见 coord-server/src/migration.rs 模块文档。
+[multi_raft]
+enabled = false
+# legacy_migration = false      # 本次启动执行 Legacy→Multi-Raft 迁移（一次性）
+# allow_unmigrated = false      # 救援——未迁移也强制放行（数据 Region 为空）
+# [[multi_raft.initial_regions]]
+# id = 1
+# start_key = ""      # 首 Region 起点（空 = keyspace 起点）
+# end_key = "m"
+# [[multi_raft.initial_regions]]
+# id = 2
+# start_key = "m"
+# end_key = ""        # 末 Region 终点（空 = 无上界）
+
+# Multi-Raft PD（[multi_raft.pd] 段；默认关闭 = 多 Region 装配但不调度）
+#
+# enabled = true（要求上方 multi_raft.enabled = true）时，每个节点内嵌运行
+# PlacementDriver：Region/节点心跳上报 + 成员对账（PD 元数据随 raft 已提交
+# 成员收敛，落盘 <data_dir>/pd/pd-meta.db）+ 调度/operator 执行循环。
+# v1 仅支持内嵌模式（独立 PD 进程为后续演进方向）；全部字段可选，缺省见下方。
+[multi_raft.pd]
+enabled = false
+# heartbeat_interval_ms = 5000     # Region/节点心跳与成员对账节拍
+# balance_interval = 120           # Leader/副本均衡调度间隔（秒）
+# split_check_interval = 30        # Region 分裂检查间隔（秒）
+# merge_check_interval = 60        # Region 合并检查间隔（秒）
+# node_heartbeat_timeout = 30      # 节点心跳超时（秒；超时标记离线）
+# operator_running_timeout = 300   # operator 认领超时（秒）——认领者
+#                                  # 失联/Complete 丢失时放回队列由存活 Region
+#                                  # leader 重认领（须大于单次执行时长）
+# target_replicas = 3              # 目标副本数（≤ cluster.initial_nodes 成员数）
+# max_concurrent_operators = 10    # 最大并发调度 operator 数
+# region_split_size_mb = 256       # 分裂大小阈值
+# region_split_keys = 1000000      # 分裂 key 数阈值
+# region_merge_size_mb = 16        # 合并大小阈值
+# scheduler_paused = false         # 初始调度暂停（true = 启动即不产生新
+#                                  # operator，仅 drain 已排队；维护窗口/演练冻结调度用）
+
+# R-RFT-19：Raft 运行时调优（全部可选，缺省 = openraft 默认：心跳 50ms、
+# 选举 150–300ms、快照策略 since_last:5000）
+[raft]
+# heartbeat_interval_ms = 50
+# election_timeout_min_ms = 150
+# election_timeout_max_ms = 300
+# install_snapshot_timeout_ms = 200
+# snapshot_logs_since_last = 5000      # 0 = 禁用自动快照；**注意**：没有持久快照
+#                                      # 时 raft 日志**永不回收**（purge 依赖快照），
+#                                      # 磁盘会随写入单调增长。除非明确接受这点，别设 0
+# snapshot_rate_limit_bytes_per_sec = 52428800   # 50 MiB/s；0 = 不限速
+
+# R-SVC-18：运行时资源限制（per-RPC 超时、规模上限、幂等缓存；以下为默认值）
+[limits]
+read_timeout_ms = 5000          # 读路径（线性一致性读）超时
+write_timeout_ms = 5000         # 写路径 raft 提交超时（失去 quorum 快速失败）
+lease_timeout_ms = 5000         # Lease 写超时
+compact_timeout_ms = 10000      # Compact 提案超时
+max_range_limit = 10000         # Range 单次扫描上限（超限 INVALID_ARGUMENT）
+max_txn_ops = 128               # Txn compare+success+failure 操作数上限
+idempotency_ttl_secs = 60       # 幂等缓存 TTL
+idempotency_max_entries = 4096  # 幂等缓存容量（FIFO 淘汰）
+
+# 对象存储（experimental 数据面；默认关闭，与 [multi_raft] 正交）
+#
+# 设计（docs/production/volume-object-storage.md 决策记录）：
+#   - 对象 = (bucket, object_id)，manifest 走 raft 强一致（保留前缀 /obj/ 对
+#     用户 KV/Txn/Watch 不可见），chunk 数据随 raft 日志复制后落各节点本地
+#     append-only 文件（不进 MVCC、不入快照，快照仅携带 manifest）；
+#   - 流式协议 coord.storage（Put 客户端流 / Get 服务端流）：单消息 ≤
+#     chunk_size_bytes（默认 4MiB = gRPC MAX_DECODING_MSG），单对象 ≤
+#     max_object_size_bytes（默认 256MiB）；
+#   - 删除 = manifest tombstone + apply 同步删 chunk 文件 + 后台 GC；
+#   - 磁盘只读水位与 KV 写共用（ReadOnly 时对象写同样 RESOURCE_EXHAUSTED）；
+#   - 约束：全集群各节点配置必须一致；启用后不可热关（数据保留，服务消失）；
+#     enabled 与 multi_raft.legacy_migration 互斥（配置校验拒绝）；
+#     快照恢复的落后节点本地 chunk 被清空标记 rebuild（Get 返 UNAVAILABLE，
+#     客户端换节点重试——v1 已知边界）。
+[object_storage]
+enabled = false
+# chunk_size_bytes = 4194304        # 单 chunk ≤ 4MiB（RPC 解码上限）
+# max_object_size_bytes = 268435456 # 单对象上限（默认 256MiB）
+# max_total_storage_bytes = 0       # 配额（0 = 不限；admission 侧尽力而为）
+# upload_timeout_secs = 300         # Creating 对象（中断上传）过期回收
+# gc_interval_secs = 60             # 对象 GC / 孤儿文件回收扫描间隔
+# encryption_enabled = false        # chunk 文件静态加密（独立开关）
+# encryption_root_key = "…hex 64 字符…"   # 或经环境变量
+#                                      # COORD_OBJECT_STORAGE_ENCRYPTION_ROOT_KEY
+# encryption_rotation_days = 90     # chunk DEK 自动轮换间隔（天；0 = 关闭）。
+#                                  # 根密钥仅经 HKDF 派生 KEK 包裹随机 DEK
+#                                  # （key_id 版本化，密文落盘
+#                                  #  <data_dir>/objects/keys/），到期轮换只影响
+#                                  # 新写入（旧 DEK 保留解密历史，对齐 /kv/）
+
+[security]
+# 生产：配置证书 + CA → raft/gRPC 强制 mTLS（缺 CA 拒绝启动，fail-closed）
+# tls_cert = "/etc/coord/server.crt"
+# tls_key  = "/etc/coord/server.key"
+# tls_ca    = "/etc/coord/ca.crt"
+# R-SEC-04：gRPC TLS fail-closed：auth_enabled=true 且 grpc_addr 非 loopback
+# 时必须配置 tls_cert/tls_key，否则拒绝启动（不静默明文降级）。
+# 仅 dev/test（如容器内网 lab）可显式逃生（默认 false；生产严禁开启）：
+# allow_plaintext_remote = true
+auth_enabled = true                     # 生产默认开启（唯一开关）
+
+# ── 以下三项必须显式配置（占位默认值会被启动校验拒绝）──
+# root_password：或经环境变量 COORD_ROOT_PASSWORD 注入；缺省随机生成并仅打印一次
+# root_password = "<strong-password>"
+# auth_root_key：hex 64 字符（32 字节），三节点一致；生成：openssl rand -hex 32
+# auth_root_key = "<hex-64>"
+# raft_shared_secret：≥16 字符，三节点一致；生成：openssl rand -hex 32
+# raft_shared_secret = "<hex-32>"
+
+# 静态加密（开启后 /kv/ 用户数据 AES-256-GCM 落盘；灰度时先做明文迁移）
+# encryption_enabled = true
+# encryption_root_key = "…hex 64 字符…"
+
+# Agent 注册引导令牌（一次性，≥16 随机字符；留空 = 不开放 agent 自助注册）
+# 用途：agent 用该令牌换取短期限 agent-bootstrap CCT，再代插件开通受限账户。
+# 服务端不预置该角色能力，需管理员一次性授予最小集（幂等；角色不存在会自动创建）：
+#   TOKEN=$(coord auth login root --token-only)          # 交互输入密码
+#   coord security bootstrap-role --token "$TOKEN"       # 可用 --addr 指定节点
+# 或非交互（脚本）：coord auth login root --password "$PW" --token-only
+# 注：鉴权开启时管理命令需携带管理员 CCT（全局 --token 或 COORD_TOKEN）；
+#     密码亦可经 COORD_PASSWORD 环境变量提供。
+# agent_bootstrap_tokens = ["<openssl rand -hex 24>"]
+
+# 动态引导令牌（TTL + 一次性 + raft 持久化）：配置静态令牌之外/替代方案，
+# 由管理员按需签发，明文仅在签发响应中出现一次（服务端只存 SHA256）：
+#   coord security bootstrap-token create --label site-a --ttl-secs 3600 --token-only \
+#     --token "$ADMIN_CCT"                                # 输出 cbt_… 明文令牌
+#   coord security bootstrap-token list  --token "$ADMIN_CCT"
+#   coord security bootstrap-token revoke --id <id> --token "$ADMIN_CCT"
+# 所需能力：admin:auth:bootstrap_token（root 角色隐含全部能力）。
+# 令牌经 raft 复制 + 重启重放；消费一次后记录标记为 consumed（保留供审计）。
+
+reflection_enabled = false              # 生产关闭 gRPC 反射

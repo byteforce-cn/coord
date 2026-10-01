@@ -1,0 +1,23 @@
+;; expect-valid-agent-was-up-but-killed-at-end —— AG-01 本地面路由证明的**守门员**。
+;;
+;; fixture 的 opts（运行器第三个参数）：
+;;   {:agent-local-surface? true :min-agent-requests 1 :nemesis :none
+;;    :agent-scrape {:total 0 :by-method {}
+;;                   :agents [{:host "n4" :up? true :up-now? false :total 0}
+;;                            {:host "n5" :up? true :up-now? true  :total 0}]}}
+;;
+;; 形态：本地面 workload（lock/election/idgen/registry）跑在 2 个 agent 上，
+;; nemesis 把其中一个 kill 掉 —— check 时 `n4` 还没起回来（`:up-now? false`），
+;; 但它在 run 期间**确实被抓到过**（`:up? true`）。
+;;
+;; 为什么这必须判绿：本地面 op 由 agent 的本地服务处理、**不走代理面**，所以
+;; 「代理计数 > 0」这条判据用不上，退而求其次的「进程存在过」就是唯一证据；而
+;; kill 类 nemesis 的存在意义就是让 agent 消失 —— 把「nemesis 生效了」读成
+;; 「请求没经过 agent」是假红。实测（M5a 第二轮矩阵）idgen/kill-agent 就是这么红的
+;; （`:agents [{:host "n4" :up? false} {:host "n5" :up? true :total 0}]`）。
+;;
+;; 去掉这条口径（改回「每个 agent 的 up-now? 都必须为真」）⇒ 本 fixture 必红。
+[{:type :invoke  :f :write :value 1 :process 0 :time 100000000 :key "/jepsen/register"}
+ {:type :ok      :f :write :value 1 :process 0 :time 100100000 :key "/jepsen/register"}
+ {:type :invoke  :f :read  :process 0 :time 100200000 :key "/jepsen/register"}
+ {:type :ok      :f :read  :value 1 :process 0 :time 100300000 :key "/jepsen/register"}]

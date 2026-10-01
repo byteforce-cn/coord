@@ -1,0 +1,14 @@
+;; expect-invalid-revision-advanced —— F-03 的形态：
+;; 同一 request_id 的第二次重放落到**另一个节点**（那里没有该 rid 的缓存），
+;; 于是请求被重复生效 → 两次响应 revision 不同。
+;; 契约（kv.proto:44-45）：「重复提交相同 request_id 的请求不会重复生效，
+;; 返回首次执行的结果」，未对「同一节点」作任何限定 → 判红。
+{:type :ok, :f :idem-put, :process 0, :time 1000
+ :request {:rid "put-4000-1", :key "/jepsen/idem/put/7", :val "7", :replays 2}
+ :attempts [{:ok? true, :node "n1", :revision 50, :prev-kv nil}
+            {:ok? true, :node "n3", :revision 51, :prev-kv
+             {:key "/jepsen/idem/put/7", :value "7", :version 1
+              :create-revision 50, :mod-revision 50}}]
+ :final {:ok? true, :node "n3", :kv
+         {:key "/jepsen/idem/put/7", :value "7"
+          :version 2, :create-revision 50, :mod-revision 51}}}

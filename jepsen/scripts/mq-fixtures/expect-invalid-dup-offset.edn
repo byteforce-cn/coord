@@ -1,0 +1,8 @@
+;; expect-invalid-dup-offset —— **P0**：两次已确认的发布拿到**同一 offset**。
+;;
+;; offset 是分区内序号，必须唯一；重复说明第二次发布覆盖了第一条消息
+;; （或 offset 表被并发读写破坏）。
+[{:type :ok :f :mq-publish :process 0 :t0-ns 0 :time 1000000
+  :topic "jepsen-mq" :partition 0 :payload "m0" :idempotency-key "idem-0" :offset 7}
+ {:type :ok :f :mq-publish :process 1 :t0-ns 2000000 :time 3000000
+  :topic "jepsen-mq" :partition 0 :payload "m1" :idempotency-key "idem-1" :offset 7}]

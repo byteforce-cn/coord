@@ -1,0 +1,11 @@
+;; expect-invalid-scan-order-violation —— 返回的 key 不是严格字典序递增
+;; （契约：按 Key 字典序返回；乱序/重复会让客户端分页漏项或重复）。
+[{:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-1", :invoke 1, :time 2
+  :value "v2" :revision 10}
+ {:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-2", :invoke 3, :time 4
+  :value "v3" :revision 11}
+ {:type :ok, :f :scan, :process 0, :invoke 10, :time 20
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42."}
+  :count 2
+  :kvs [{:key "/jepsen/scan/s42-2" :value "v3"}
+        {:key "/jepsen/scan/s42-1" :value "v2"}]}]

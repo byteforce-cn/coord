@@ -1,0 +1,14 @@
+;; expect-valid-clean —— 基线：watch 会话按 revision 递增收到一次写的事件。
+;; 有效下界 = start-revision 0 ⇒ 取首个事件 revision（保守下界），上界 =
+;; :end-revision；区间内的确认写都出现了 ⇒ 合法。
+[{:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 1 :time 2
+  :value "w1" :revision 10}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 3 :time 4
+  :value "w2" :revision 11}
+ {:type :ok :f :watch-session :process 0 :invoke 5 :time 30
+  :key "/jepsen/watch/s42"
+  :value {:key "/jepsen/watch/s42" :start-revision 0}
+  :start-revision 0
+  :end-revision 11
+  :events [{:type :put :revision 10 :kvs [{:key "/jepsen/watch/s42" :value "w1"}]}
+           {:type :put :revision 11 :kvs [{:key "/jepsen/watch/s42" :value "w2"}]}]}]

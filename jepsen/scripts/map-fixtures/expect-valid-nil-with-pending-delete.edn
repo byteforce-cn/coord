@@ -1,0 +1,10 @@
+;; expect-valid-nil-with-pending-delete —— **判据健全性**守门员。
+;; 有一条 tombstone 的 invoke（t=20）但**没有完成**：它可能已经生效，也可能
+;; 还没生效，所以 t=30 读到 nil 是合法的（可以把它线性化到读之前）。
+;; 收敛判据（尤其是「已删除 ⇒ 读不到」）必须容忍这种未完成状态，否则会
+;; 产出假红 —— 这条 fixture 就是防这个的。
+[{:type :ok,     :f :write,  :process 0, :key "/jepsen/map/k0", :invoke 5,  :time 10
+  :value "v1"}
+ {:type :invoke, :f :delete, :process 1, :key "/jepsen/map/k0", :time 20}
+ {:type :ok,     :f :read,   :process 0, :key "/jepsen/map/k0", :invoke 25, :time 30
+  :value nil}]

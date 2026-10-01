@@ -1,0 +1,22 @@
+;; expect-valid-not-released-then-taken —— **守门员**：fail-safe 延长不得产出假红。
+;;
+;; 第一个 holder 的 Release 失败（例如分区期间 agent 不可用），于是区间被
+;; **fail-safe** 延长到 acquired + ttl + grace = 0 + 2000 + 1000 = 3000ms。
+;; 第二个 holder 在 5000ms 才拿到锁 ⇒ 合法，绝不能因为「第一个从没释放」就判重叠。
+;;
+;; 这条 fixture 固定住 lockck 的取向：**宁可漏报一个真实的泄漏，也不要误报一个
+;; 合法的先后关系** —— 与 F-01/F-02 那一类「不弱化断言、但也不产出假红」的纪律一致。
+[{:type :ok :f :lock-contend :process 0 :time 10
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  :acquired-at-ms 0 :released-at-ms 120 :released? false :gone? false
+  :holder-ttl-seconds 2 :grace-ms 1000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists true}}
+
+ {:type :ok :f :lock-contend :process 1 :time 20
+  :name "lock-a" :holder-id "h2" :lease-id 12
+  :acquired-at-ms 5000 :released-at-ms 5200 :released? true
+  :gone? true :gone-at-ms 5200 :still-mine-after-release false
+  :holder-ttl-seconds 2 :grace-ms 1000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}]

@@ -1,0 +1,12 @@
+;; expect-invalid-read-at-mismatch —— 历史 revision 读的**精确**断言：
+;; 写 `/jepsen/scan/s42-1` 的响应 revision = 11，值 "v2"；按 revision=11 读回，
+;; 必须拿到 "v2"。这里拿到的是后来那次写的值（revision 12 的 "v3"）——
+;; 历史读返回了**更新的**值 = 错答（P0-7 类）。
+[{:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-1", :invoke 1, :time 2
+  :value "v2" :revision 11}
+ {:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-1", :invoke 3, :time 4
+  :value "v3" :revision 12}
+ {:type :ok, :f :read-at, :process 0, :invoke 10, :time 20
+  :value {:key "/jepsen/scan/s42-1" :revision 11}
+  :read-revision 11
+  :kvs [{:key "/jepsen/scan/s42-1" :value "v3"}]}]

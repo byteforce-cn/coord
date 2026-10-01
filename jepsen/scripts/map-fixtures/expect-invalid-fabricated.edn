@@ -1,0 +1,5 @@
+;; expect-invalid-fabricated —— 读返回了一个从来没有任何写写过的值。
+[{:type :ok, :f :write, :process 0, :key "/jepsen/map/k0", :invoke 5,  :time 10
+  :value "v1"}
+ {:type :ok, :f :read,  :process 0, :key "/jepsen/map/k0", :invoke 15, :time 20
+  :value "v-ghost"}]

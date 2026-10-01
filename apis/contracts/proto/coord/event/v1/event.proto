@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+// ============================================================
+// Coord 对外契约 — 事件通知（能力承诺面，v1.1）
+//
+// 状态：COMMITTED（承诺中）｜ 目标日期：2026-12-31 ｜ 状态表：apis/contracts/STATUS.md
+// wire 基线：coord-proto/src/proto/agent_api.proto 的 coord.agent.Event
+//           （简化 CloudEvents 形态；完整属性封装为 v1.2 增量）
+//
+// 语义契约（WHITEPAPER.md 的 Event 约定）：
+//   - 连接存续期间 at-least-once、单订阅内按发布顺序投递；
+//   - 断线窗口不承诺补投（持久化游标 = v1.2 候选）；
+//   - event_id 服务端分配、全局唯一；specversion 固定 "1.0"。
+// ============================================================
+
+package coord.event.v1;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.contracts.event.v1";
+option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/event/v1;eventv1";
+
+// 发布请求。
+message EventPublishRequest {
+  string event_type = 1;        // 事件类型（订阅匹配键）
+  string source = 2;            // 事件来源（发布方标识）
+  bytes data = 3;               // 事件负载（原始字节）
+  string data_content_type = 4; // 负载 MIME 类型（如 application/json）
+  string subject = 5;           // 事件主体（可选，业务语义）
+}
+
+message EventPublishResponse {
+  string event_id = 1; // 服务端分配、全局唯一的事件 ID
+}
+
+// 订阅请求（服务端流）。语义承诺：按 event_type 精确匹配；
+// 前缀匹配为 v1.2 候选。
+message EventSubscribeRequest {
+  string event_type = 1; // 精确匹配的事件类型
+}
+
+// 投递的事件（CloudEvents 1.0 简化形态）。
+message CloudEventMessage {
+  string id = 1;
+  string specversion = 2;      // 固定 "1.0"
+  string type = 3;
+  string source = 4;
+  bytes data = 5;
+  string data_content_type = 6;
+  string subject = 7;
+  string time = 8;             // 服务端生成时间（RFC3339）
+}
+
+// 取消订阅。
+//
+// ⚠️ 边界声明（按 WHITEPAPER.md 的边界声明规则）：本 RPC **不携带状态**。
+//   - 订阅的生存期就是那条 gRPC 流本身：服务端侧没有按 subscription_id 索引的
+//     注册表，因此本调用**被接受并返回成功，但不会停止任何投递**；
+//   - **真正取消订阅的方式是关闭 Subscribe 流**（SDK 的
+//     EventSubscription.close() 就是做这个）；
+//   - subscription_id 当前**不是服务端分配**（Subscribe 是流，不回传 id）；
+//     由 event_type 派生。显式下发 subscription_id 为验收项（见 STATUS.md）。
+//
+// 保留本 RPC 而不是删除：契约里对外承诺过它，删除会让已按契约生成的客户端
+// 直接编译不过；声明边界则让消费方看见它到底做了什么（与 Cache/MQ 同口径）。
+message EventUnsubscribeRequest {
+  string subscription_id = 1;
+}
+
+message EventUnsubscribeResponse {}
+
+// 事件通知服务。
+service Event {
+  rpc Publish(EventPublishRequest) returns (EventPublishResponse);
+  rpc Subscribe(EventSubscribeRequest) returns (stream CloudEventMessage);
+  rpc Unsubscribe(EventUnsubscribeRequest) returns (EventUnsubscribeResponse);
+}

@@ -1,0 +1,9 @@
+;; expect-invalid-insufficient-sample —— 样本门槛：不是"没违反"就是绿。
+;;
+;; 这份历史**逻辑上完全干净**（一次持久写 + 一次成功读），但 Set 样本只有 1，
+;; 而本 fixture 套用 `{:min-sets 5}` 跑 ⇒ 必须是 invalid（§5.1：样本不足的 cell
+;; 视为**未执行**，不计绿也不计红）。
+[{:type :ok :f :cache-set :process 0 :t0-ns 0 :time 100000000
+  :key "cache-str-1" :value "v-1" :ttl-seconds 0}
+ {:type :ok :f :cache-get :process 0 :t0-ns 700000000 :time 701000000
+  :key "cache-str-1" :found true :value "v-1"}]

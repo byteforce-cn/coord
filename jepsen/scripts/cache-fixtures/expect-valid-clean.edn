@@ -1,0 +1,29 @@
+;; expect-valid-clean —— 正例：三类面（string / list / set）的读写都自洽。
+;;
+;; 时间轴：`:t0-ns` = op 起点，`:time` = 完成时刻（都是 ns，同域）。
+;; 判据全部只看「读起点之前已确认完成」的写 ⇒ 这份历史必须判 valid。
+;;   * 持久写（ttl=0）：set@100ms 完成 → get@700ms 必须看得到；
+;;   * TTL 面：set(ttl=5)@200ms 完成 → get@3s 看得见（未到期）、
+;;     get@12s 看不见（到期后，且值不是那次写的 → 不判幽灵）；
+;;   * list：两次 LPush 完成后，LRange 含两个值、LLen=2；
+;;   * set：两次 SAdd 完成后，SMembers 含两个成员。
+[{:type :ok :f :cache-set :process 0 :t0-ns 0 :time 100000000
+  :key "cache-str-1" :value "v-1" :ttl-seconds 0}
+ {:type :ok :f :cache-get :process 0 :t0-ns 700000000 :time 701000000
+  :key "cache-str-1" :found true :value "v-1"}
+ {:type :ok :f :cache-set :process 1 :t0-ns 200000000 :time 200500000
+  :key "cache-str-2" :value "v-2" :ttl-seconds 5}
+ {:type :ok :f :cache-get :process 1 :t0-ns 3000000000 :time 3000500000
+  :key "cache-str-2" :found true :value "v-2"}
+ {:type :ok :f :cache-get :process 1 :t0-ns 12000000000 :time 12000500000
+  :key "cache-str-2" :found false :value nil}
+ {:type :ok :f :cache-lpush :process 2 :t0-ns 0 :time 400000 :key "cache-list-1" :value "l-1" :length 1}
+ {:type :ok :f :cache-lpush :process 2 :t0-ns 1000000 :time 1400000 :key "cache-list-1" :value "l-2" :length 2}
+ {:type :ok :f :cache-lrange :process 0 :t0-ns 900000000 :time 901000000
+  :key "cache-list-1" :values ["l-2" "l-1"]}
+ {:type :ok :f :cache-llen :process 1 :t0-ns 950000000 :time 951000000
+  :key "cache-list-1" :length 2}
+ {:type :ok :f :cache-sadd :process 3 :t0-ns 0 :time 300000 :key "cache-set-1" :member "m-1"}
+ {:type :ok :f :cache-sadd :process 3 :t0-ns 1000000 :time 1300000 :key "cache-set-1" :member "m-2"}
+ {:type :ok :f :cache-smembers :process 1 :t0-ns 990000000 :time 991000000
+  :key "cache-set-1" :members ["m-1" "m-2"]}]

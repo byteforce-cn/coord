@@ -1,0 +1,1204 @@
+// Raft StateMachine — Openraft RaftStateMachine + RaftSnapshotBuilder 实现
+//
+// 重建：applied 状态同事务持久化、revision ≡ log index、
+// apply 幂等守卫、快照落盘生命周期、Lease 状态表（骨架）。
+
+use std::fmt;
+use std::io;
+use std::io::Cursor;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use coord_core::storage::StorageBackend;
+use futures::Stream;
+use futures::TryStreamExt;
+use openraft::storage::EntryResponder;
+use openraft::storage::RaftSnapshotBuilder;
+use openraft::storage::RaftStateMachine;
+use openraft::type_config::alias::{LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf};
+use openraft::{EntryPayload, Membership, OptionalSend};
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use super::type_config::{Command, Response, TypeConfig};
+use crate::auth::manager::AuthManager;
+use crate::auth::revocation::RevocationStore;
+use crate::auth::token::TokenManager;
+use crate::metrics::Metrics;
+use crate::storage::mvcc::{
+    AppliedLogId, ChangeEvent, EventType, KeyValueChange, MvccStorage, META_MEMBERSHIP,
+    META_SNAPSHOT, TABLE_META,
+};
+use crate::storage::object_store::ChunkStore;
+use crate::storage::redb_backend::RedbBackend;
+use crate::storage::snapshot::{
+    export_snapshot_data, import_snapshot_data, SnapshotData, SnapshotTracker,
+};
+use crate::watch::WatchDispatcher;
+
+fn io_err(e: impl std::error::Error + Send + Sync + 'static) -> io::Error {
+    io::Error::other(e)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredSnapshot {
+    pub meta: SnapshotMetaOf<TypeConfig>,
+    pub data: Vec<u8>,
+}
+
+/// 持久化到 `META_SNAPSHOT` 的快照元数据（启动时加载 current_snapshot）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedSnapshotMeta {
+    pub meta: SnapshotMetaOf<TypeConfig>,
+    pub checksum: [u8; 32],
+    pub path: String,
+}
+
+/// 计算快照数据字节的 SHA256 校验和
+fn sha256_hex(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
+
+/// 解析 Raft 快照文件名 `snapshot-{idx}-{term}.snap`，返回 (idx, term)。
+///
+/// scheduler 的 `snapshot-{unix_ts}.snap`（单段数字）不匹配：清理逻辑绝不能把
+/// 目录下所有 `.snap` 混排——时间戳文件名（约 1.7e9）字典序大于 Raft 的 index
+/// 段，会被误判为“更新”，刚落盘的 Raft 快照随即被删除，META_SNAPSHOT/purge
+/// 守卫悬空，重启即不可恢复。
+fn parse_raft_snapshot_name_free(name: &str) -> Option<(u64, u64)> {
+    let rest = name.strip_prefix("snapshot-")?.strip_suffix(".snap")?;
+    let (idx_s, term_s) = rest.split_once('-')?;
+    Some((idx_s.parse().ok()?, term_s.parse().ok()?))
+}
+
+/// 清理快照目录，仅保留最新 3 份 Raft 快照（纯函数，可在 spawn_blocking 内执行）
+fn cleanup_old_snapshots_free(snapshot_dir: &PathBuf, keep: &PathBuf) -> Result<(), io::Error> {
+    let mut snaps: Vec<(u64, u64, PathBuf)> = match std::fs::read_dir(snapshot_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name();
+                let (idx, term) = parse_raft_snapshot_name_free(name.to_str()?)?;
+                Some((idx, term, e.path()))
+            })
+            .collect(),
+        Err(_) => return Ok(()),
+    };
+    // 按 index 降序（同 index 按 term 降序），保留最新 3 份
+    snaps.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    for (_, _, path) in snaps.iter().skip(3) {
+        if path == keep {
+            continue; // 双保险：绝不删除刚写入的快照
+        }
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::warn!("Failed to remove old snapshot {}: {e}", path.display());
+        }
+    }
+    Ok(())
+}
+
+/// 落盘纯函数：临时文件 → fsync → 原子 rename → 目录 fsync → SHA256 →
+/// `META_SNAPSHOT` 写事务 → purge 守卫登记 → 旧快照清理。
+///
+/// 不触碰 `StateMachineStore` 内部锁（只经传入的 `Arc` 句柄访问
+/// state_machine / snapshot_tracker），因此可放入 `spawn_blocking` 而无需持有
+/// `&mut self`。`snapshot_tracker.record_durable` 在落盘成功后执行，登记时序与
+/// 原同步实现完全一致。
+#[allow(clippy::too_many_arguments)]
+fn persist_snapshot_file_impl(
+    snapshot_dir: &PathBuf,
+    state_machine: &Arc<MvccStorage<RedbBackend>>,
+    snapshot_tracker: &Arc<SnapshotTracker>,
+    meta: &SnapshotMetaOf<TypeConfig>,
+    data: &[u8],
+) -> Result<(PathBuf, [u8; 32]), io::Error> {
+    use std::io::Write;
+
+    std::fs::create_dir_all(snapshot_dir).map_err(|e| {
+        io::Error::other(format!(
+            "create snapshot dir {}: {e}",
+            snapshot_dir.display()
+        ))
+    })?;
+
+    let last_idx = meta.last_log_id.as_ref().map(|l| l.index).unwrap_or(0);
+    let last_term = meta
+        .last_log_id
+        .as_ref()
+        .map(|l| l.leader_id.term)
+        .unwrap_or(0);
+    let final_path = snapshot_dir.join(format!("snapshot-{last_idx}-{last_term}.snap"));
+    let tmp_path = snapshot_dir.join(format!(".snapshot-{last_idx}-{last_term}.snap.tmp"));
+
+    // 1. 写临时文件并 fsync
+    {
+        let mut f = std::fs::File::create(&tmp_path)
+            .map_err(|e| io::Error::other(format!("create {}: {e}", tmp_path.display())))?;
+        f.write_all(data)
+            .map_err(|e| io::Error::other(format!("write {}: {e}", tmp_path.display())))?;
+        f.sync_all()
+            .map_err(|e| io::Error::other(format!("fsync {}: {e}", tmp_path.display())))?;
+    }
+
+    // 2. 原子 rename + 目录 fsync（尽力而为）
+    std::fs::rename(&tmp_path, &final_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        io::Error::other(format!(
+            "rename {} -> {}: {e}",
+            tmp_path.display(),
+            final_path.display()
+        ))
+    })?;
+    if let Ok(dir) = std::fs::File::open(snapshot_dir) {
+        let _ = dir.sync_all();
+    }
+
+    // 3. SHA256 校验和
+    let checksum = sha256_hex(data);
+
+    // 4. 持久化 META_SNAPSHOT + 登记 purge 守卫
+    let persisted = PersistedSnapshotMeta {
+        meta: meta.clone(),
+        checksum,
+        path: final_path.to_string_lossy().to_string(),
+    };
+    let persisted_bytes = bincode::serialize(&persisted)
+        .map_err(|e| io::Error::other(format!("serialize snapshot meta: {e}")))?;
+    state_machine
+        .backend()
+        .write(|tx| tx.insert(TABLE_META, META_SNAPSHOT, &persisted_bytes))
+        .map_err(io_err)?;
+    snapshot_tracker.record_durable(last_idx, last_term, final_path.clone());
+
+    // 5. 保留最近 3 份 Raft 快照，清理旧份
+    //    （只识别 snapshot-{idx}-{term}.snap，绝不删除本次写入的文件）
+    cleanup_old_snapshots_free(snapshot_dir, &final_path)?;
+
+    Ok((final_path, checksum))
+}
+
+/// 从磁盘加载最新持久化快照：`META_SNAPSHOT` 元数据 + 文件 SHA256 校验。
+///
+/// 磁盘是"是否存在可用快照"的**共同事实源**（与 purge 守卫同源）：
+/// `new()` 的启动加载与 `get_current_snapshot()` 的兜底路径共用。
+fn load_persisted_snapshot_checked(
+    state_machine: &MvccStorage<RedbBackend>,
+) -> Option<(StoredSnapshot, PathBuf)> {
+    let persisted = state_machine
+        .backend()
+        .read(|tx| tx.get(TABLE_META, META_SNAPSHOT))
+        .ok()
+        .flatten()
+        .and_then(|bytes| bincode::deserialize::<PersistedSnapshotMeta>(&bytes).ok())?;
+    match std::fs::read(&persisted.path) {
+        Ok(data) => {
+            if sha256_hex(&data) == persisted.checksum {
+                Some((
+                    StoredSnapshot {
+                        meta: persisted.meta,
+                        data,
+                    },
+                    PathBuf::from(&persisted.path),
+                ))
+            } else {
+                tracing::error!(
+                    "Persisted snapshot {} checksum mismatch — not usable",
+                    persisted.path
+                );
+                None
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                "Persisted snapshot {} unreadable: {e} — not usable",
+                persisted.path
+            );
+            None
+        }
+    }
+}
+
+pub struct StateMachineStore {
+    pub state_machine: Arc<MvccStorage<RedbBackend>>,
+    pub last_applied: Mutex<Option<LogIdOf<TypeConfig>>>,
+    pub last_membership: Mutex<StoredMembershipOf<TypeConfig>>,
+    /// 最新一份构建/安装的快照（**共享槽位**：`get_snapshot_builder()` 的克隆
+    /// 与主实例共用同一个 `Arc`）。
+    ///
+    /// openraft 在 builder 克隆上执行 `build_snapshot()`，而复制路径的
+    /// `GetSnapshot` 走主实例。两个实例若各持一份内存槽，构建结果对主实例
+    /// 不可见 ⇒ 落后 follower 需要快照时 `get_current_snapshot()` 仍为 `None`
+    /// ⇒ openraft 把「无快照可送」升级为存储错误并让 RaftCore 进入 fatal
+    /// （全集群写失败且不可自愈）。
+    current_snapshot: Arc<Mutex<Option<StoredSnapshot>>>,
+    /// 快照落盘目录（临时文件 → fsync → rename → 校验和）
+    snapshot_dir: PathBuf,
+    /// purge 前置条件守卫（与 LogStore 共享）
+    snapshot_tracker: Arc<SnapshotTracker>,
+    /// Watch 事件分发器（可选，Leader 节点持有，与 CoordNode 共享同一实例）
+    pub watch_dispatcher: Option<Arc<WatchDispatcher>>,
+    /// AuthManager 内存缓存视图（apply 后同步，可选）
+    pub auth_manager: Option<Arc<AuthManager>>,
+    /// 吊销登记存储（RevokeJti apply 后同步，可选）
+    pub revocation_store: Option<Arc<RevocationStore>>,
+    /// 会话表视图（IssueSession/ConsumeSession apply 后同步，可选）
+    pub session_manager: Option<Arc<TokenManager>>,
+    /// 指标注册表（R-OBS-10：apply 延迟 / 快照耗时埋点，可选）
+    pub metrics: Option<Arc<Metrics>>,
+    /// Lease Revoke 广播（可选，仅 region 0 状态机设置）。
+    ///
+    /// region 0 的 `LeaseOp::Revoke` apply（含过期清理）后向通道广播 lease_id，
+    /// 各节点据此通知 Region raft leader 经 `Command::DeleteKeysByLease` 清理
+    /// 各自 MVCC 中绑定该 Lease 的 Key（详见 `server/mod.rs` 的
+    /// `start_region_lease_revoker`）。所有节点（含 follower）都会 apply region 0
+    /// 日志并收到广播——因此无论哪个节点最终成为某 Region 的 leader，都能
+    /// 看到广播并完成删除（幂等）。
+    pub lease_revoke_tx: Option<tokio::sync::mpsc::UnboundedSender<i64>>,
+    /// 对象存储 chunk 文件存储（本 raft 数据目录下；`Command::ObjectStore`
+    /// apply 时写/删 chunk 文件）。None = 未启用对象存储（收到 ObjectStore 命令
+    /// 即配置不一致，apply 报错）。
+    pub object_chunk_store: Option<Arc<ChunkStore>>,
+}
+
+// Manual Debug impl since MvccStorage may not be Debug
+impl fmt::Debug for StateMachineStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StateMachineStore")
+            .field("state_machine", &"MvccStorage<RedbBackend>")
+            .field("last_applied", &self.last_applied)
+            .field("last_membership", &self.last_membership)
+            .finish()
+    }
+}
+
+impl StateMachineStore {
+    /// 创建状态机存储。
+    ///
+    /// 启动时：从 `META_SNAPSHOT` 加载已落盘快照（校验 SHA256），
+    /// 并向 `snapshot_tracker` 登记；`last_applied` 优先取快照 meta，否则取
+    /// `META_LAST_APPLIED`（AppliedLogId → LogId）。
+    pub fn new(
+        state_machine: Arc<MvccStorage<RedbBackend>>,
+        snapshot_dir: PathBuf,
+        snapshot_tracker: Arc<SnapshotTracker>,
+    ) -> Self {
+        let empty_membership: Membership<u64, openraft::BasicNode> =
+            Membership::new_with_defaults(vec![], vec![]);
+
+        let mut last_applied: Option<LogIdOf<TypeConfig>> = None;
+        let mut last_membership =
+            StoredMembershipOf::<TypeConfig>::new(None, empty_membership.clone());
+        // 1. 从 META_SNAPSHOT 加载——磁盘是"是否存在可用快照"的
+        //    共同事实源（与 purge 守卫同源）
+        let mut current_snapshot: Option<StoredSnapshot> = None;
+        if let Some((snap, path)) = load_persisted_snapshot_checked(state_machine.as_ref()) {
+            last_applied = snap.meta.last_log_id;
+            last_membership = snap.meta.last_membership.clone();
+            let idx = last_applied.as_ref().map(|l| l.index).unwrap_or(0);
+            let term = last_applied.as_ref().map(|l| l.leader_id.term).unwrap_or(0);
+            snapshot_tracker.record_durable(idx, term, path.clone());
+            tracing::info!(
+                "Loaded persisted snapshot: {} (last_log_id={:?})",
+                path.display(),
+                snap.meta.last_log_id
+            );
+            current_snapshot = Some(snap);
+        }
+
+        // 2. 无快照时从 META_LAST_APPLIED 恢复
+        if current_snapshot.is_none() {
+            if let Some(applied) = state_machine
+                .get_applied_log_id()
+                .ok()
+                .flatten()
+                .filter(|a| a.index > 0)
+            {
+                last_applied = Some(LogIdOf::<TypeConfig>::new(
+                    openraft::impls::leader_id_adv::LeaderId {
+                        term: applied.term,
+                        node_id: applied.node_id,
+                    },
+                    applied.index,
+                ));
+            }
+        }
+
+        // 2.5 从 META_MEMBERSHIP 恢复（applied 持久化后，membership 不再依靠日志重放重建）
+        if current_snapshot.is_none() {
+            let persisted_membership = state_machine
+                .backend()
+                .read(|tx| tx.get(TABLE_META, META_MEMBERSHIP))
+                .ok()
+                .flatten()
+                .and_then(|bytes| bincode::deserialize(&bytes).ok());
+            if let Some(m) = persisted_membership {
+                last_membership = m;
+            }
+        }
+
+        Self {
+            state_machine,
+            last_applied: Mutex::new(last_applied),
+            last_membership: Mutex::new(last_membership),
+            current_snapshot: Arc::new(Mutex::new(current_snapshot)),
+            snapshot_dir,
+            snapshot_tracker,
+            watch_dispatcher: None,
+            auth_manager: None,
+            revocation_store: None,
+            session_manager: None,
+            metrics: None,
+            lease_revoke_tx: None,
+            object_chunk_store: None,
+        }
+    }
+
+    /// 设置对象存储 chunk 文件存储（对象存储启用时，root/Region 各自设置）
+    pub fn set_object_chunk_store(&mut self, store: Option<Arc<ChunkStore>>) {
+        self.object_chunk_store = store;
+    }
+
+    /// 设置 Lease Revoke 广播通道（仅 region 0 状态机调用）
+    pub fn set_lease_revoke_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<i64>) {
+        self.lease_revoke_tx = Some(tx);
+    }
+
+    /// 设置 Watch 事件分发器（通常在 Leader 选举后调用）
+    /// 与 CoordNode 共享同一 `Arc<WatchDispatcher>`，确保 apply 路径
+    /// 分发的 Watch 事件与 gRPC Watch 订阅者使用同一个订阅表。
+    pub fn set_watch_dispatcher(&mut self, dispatcher: Arc<WatchDispatcher>) {
+        self.watch_dispatcher = Some(dispatcher);
+    }
+
+    /// 设置 AuthManager 内存缓存视图（apply AuthOp 后同步）
+    pub fn set_auth_manager(&mut self, manager: Arc<AuthManager>) {
+        self.auth_manager = Some(manager);
+    }
+
+    /// 设置吊销登记存储（apply RevokeJti 后同步）
+    pub fn set_revocation_store(&mut self, store: Arc<RevocationStore>) {
+        self.revocation_store = Some(store);
+    }
+
+    /// 设置会话表（apply IssueSession/ConsumeSession 后同步 TokenManager 视图）
+    pub fn set_session_manager(&mut self, manager: Arc<TokenManager>) {
+        self.session_manager = Some(manager);
+    }
+
+    /// 推进 applied 状态：更新内存 + 持久化 `META_LAST_APPLIED`
+    ///
+    /// Normal 条目在命令事务内已持久化，此路径用于 Membership/Blank 等
+    /// 不写 KV 事务的条目（单独小事务，幂等）。
+    fn update_applied(&self, log_id: LogIdOf<TypeConfig>) -> Result<(), io::Error> {
+        {
+            *self.last_applied.lock() = Some(log_id);
+        }
+        let applied = AppliedLogId {
+            term: log_id.leader_id.term,
+            node_id: log_id.leader_id.node_id,
+            index: log_id.index,
+        };
+        self.state_machine.set_last_applied(applied).map_err(io_err)
+    }
+
+    /// 持久化 membership（与 applied 持久化配套；重启后不再依靠日志重放重建）
+    fn persist_membership(&self) -> Result<(), io::Error> {
+        let bytes = bincode::serialize(&*self.last_membership.lock())
+            .map_err(|e| io::Error::other(format!("serialize membership: {e}")))?;
+        self.state_machine
+            .backend()
+            .write(|tx| tx.insert(TABLE_META, META_MEMBERSHIP, &bytes))
+            .map_err(io_err)
+    }
+
+    /// 从磁盘恢复 applied LogId（`META_LAST_APPLIED`）
+    fn load_applied(&self) -> Result<Option<LogIdOf<TypeConfig>>, io::Error> {
+        let applied = self.state_machine.get_applied_log_id().map_err(io_err)?;
+        Ok(applied.map(|a| {
+            LogIdOf::<TypeConfig>::new(
+                openraft::impls::leader_id_adv::LeaderId {
+                    term: a.term,
+                    node_id: a.node_id,
+                },
+                a.index,
+            )
+        }))
+    }
+
+    /// 执行单个 Normal 命令：revision ≡ entry index，返回响应与 Watch 事件
+    ///
+    /// 幂等守卫：replayed 时返回 `(resp, None)`（不产生副作用、不分发事件）。
+    fn execute_command(
+        &self,
+        sm: &MvccStorage<RedbBackend>,
+        cmd: &Command,
+        revision: u64,
+        applied: AppliedLogId,
+    ) -> Result<(Response, Option<ChangeEvent>), io::Error> {
+        match cmd {
+            Command::Put {
+                key,
+                value,
+                lease_id,
+            } => {
+                let outcome = sm
+                    .put_at_revision(key, value, *lease_id, revision, applied)
+                    .map_err(io_err)?;
+                let event = if outcome.replayed {
+                    None
+                } else {
+                    Some(ChangeEvent {
+                        revision,
+                        changes: vec![KeyValueChange {
+                            key: key.clone(),
+                            value: Some(value.clone()),
+                            prev_value: None,
+                        }],
+                        event_type: EventType::Put,
+                    })
+                };
+                Ok((Response::Put { revision }, event))
+            }
+            Command::Delete { key } => {
+                let outcome = sm
+                    .delete_at_revision(key, revision, applied)
+                    .map_err(io_err)?;
+                let event = if outcome.replayed {
+                    None
+                } else {
+                    Some(ChangeEvent {
+                        revision,
+                        changes: vec![KeyValueChange {
+                            key: key.clone(),
+                            value: None,
+                            prev_value: None,
+                        }],
+                        event_type: EventType::Delete,
+                    })
+                };
+                Ok((Response::Delete { revision }, event))
+            }
+            Command::DeleteRange { key, range_end } => {
+                let outcome = sm
+                    .delete_range_at_revision(key, range_end, revision, applied)
+                    .map_err(io_err)?;
+                let event = if outcome.replayed {
+                    None
+                } else {
+                    Some(ChangeEvent {
+                        revision,
+                        changes: outcome
+                            .deleted_keys
+                            .iter()
+                            .map(|k| KeyValueChange {
+                                key: k.clone(),
+                                value: None,
+                                prev_value: None,
+                            })
+                            .collect(),
+                        event_type: EventType::Delete,
+                    })
+                };
+                Ok((
+                    Response::DeleteRange {
+                        revision,
+                        deleted: outcome.deleted_keys.len() as u64,
+                    },
+                    event,
+                ))
+            }
+            Command::Txn {
+                compares,
+                success_ops,
+                failure_ops,
+            } => {
+                // 幂等守卫：apply 持有 sm 独占锁，先查后写无 TOCTOU 窗口
+                let replayed = sm.changelog_contains_revision(revision).map_err(io_err)?;
+                if replayed {
+                    return Ok((
+                        Response::Txn {
+                            succeeded: false,
+                            revision,
+                            responses: Vec::new(),
+                        },
+                        None,
+                    ));
+                }
+
+                let result = sm
+                    .execute_txn_at_revision(compares, success_ops, failure_ops, revision, applied)
+                    .map_err(io_err)?;
+
+                // R-OBS-10：Txn 计数（条件不满足 = 冲突）
+                if let Some(metrics) = &self.metrics {
+                    metrics.record_txn(!result.succeeded);
+                }
+
+                // 从 Txn 操作中提取变更 Key
+                // 将 success/failure 分支的操作转为 changes
+                let ops = if result.succeeded {
+                    success_ops
+                } else {
+                    failure_ops
+                };
+                let txn_changes: Vec<KeyValueChange> = ops
+                    .iter()
+                    .map(|op| match op {
+                        crate::txn::TxnOp::Put { key, value, .. } => KeyValueChange {
+                            key: key.clone(),
+                            value: Some(value.clone()),
+                            prev_value: None,
+                        },
+                        crate::txn::TxnOp::Delete { key } => KeyValueChange {
+                            key: key.clone(),
+                            value: None,
+                            prev_value: None,
+                        },
+                        crate::txn::TxnOp::Range { .. } => KeyValueChange {
+                            key: vec![],
+                            value: None,
+                            prev_value: None,
+                        },
+                    })
+                    .filter(|c| !c.key.is_empty())
+                    .collect();
+
+                Ok((
+                    Response::Txn {
+                        succeeded: result.succeeded,
+                        revision: result.revision,
+                        responses: result.responses,
+                    },
+                    Some(ChangeEvent {
+                        revision,
+                        changes: txn_changes,
+                        event_type: EventType::Txn,
+                    }),
+                ))
+            }
+            Command::Lease(op) => {
+                let (outcome, changes) =
+                    sm.apply_lease_op(op, revision, applied).map_err(io_err)?;
+                let event = if outcome.replayed {
+                    None
+                } else {
+                    Some(ChangeEvent {
+                        revision,
+                        changes,
+                        event_type: EventType::Lease,
+                    })
+                };
+                Ok((Response::Lease { revision }, event))
+            }
+            Command::Auth(op) => {
+                // AuthOp 入 raft 日志，apply 持久化 `/_sys/auth/`
+                let outcome = sm.apply_auth_op(op, revision, applied).map_err(io_err)?;
+                if !outcome.replayed {
+                    // 同步内存缓存视图（AuthManager 与 RevocationStore）
+                    if let Some(ref manager) = self.auth_manager {
+                        manager.apply_auth_op_to_view(op);
+                    }
+                    if let (Some(ref store), crate::raft::type_config::AuthOp::RevokeJti { jti }) =
+                        (&self.revocation_store, op)
+                    {
+                        store.revoke(jti);
+                    }
+                    // 同步会话表视图（TokenManager，各节点一致）
+                    if let Some(ref tm) = self.session_manager {
+                        match op {
+                            crate::raft::type_config::AuthOp::IssueSession {
+                                hash_hex,
+                                username,
+                                expires_at_unix,
+                                is_refresh,
+                            } => tm.register_session(
+                                hash_hex,
+                                username,
+                                *expires_at_unix,
+                                *is_refresh,
+                            ),
+                            crate::raft::type_config::AuthOp::ConsumeSession { hash_hex } => {
+                                tm.remove_session(hash_hex)
+                            }
+                            crate::raft::type_config::AuthOp::ConsumeSessions { hash_hexes } => {
+                                for hash_hex in hash_hexes {
+                                    tm.remove_session(hash_hex);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok((Response::Auth { revision }, None))
+            }
+            Command::Compact { revision } => {
+                // raft 下发 compact revision，apply 分片删除（幂等、确定性）。
+                // 非法 revision（> applied）在 apply 内钳制，拒绝由 RPC/提案层负责。
+                let outcome = sm.apply_compact(*revision, applied).map_err(io_err)?;
+                let _ = outcome; // 计数已由 apply 内日志记录
+                let effective = (*revision).min(applied.index);
+                Ok((
+                    Response::Compact {
+                        compacted_revision: effective,
+                    },
+                    None,
+                ))
+            }
+            Command::DeleteKeysByLease { lease_id } => {
+                // per-Region lease 清理（apply 期按 lease_id 索引扫描
+                // 删除，幂等；事件供 Watch 分发）。
+                let (outcome, changes) = sm
+                    .apply_delete_keys_by_lease(*lease_id, revision, applied)
+                    .map_err(io_err)?;
+                let (deleted, event) = if outcome.replayed {
+                    (0, None)
+                } else {
+                    (
+                        changes.len() as u64,
+                        Some(ChangeEvent {
+                            revision,
+                            changes,
+                            event_type: EventType::Lease,
+                        }),
+                    )
+                };
+                Ok((Response::DeleteRange { revision, deleted }, event))
+            }
+            Command::Pd(op) => {
+                // PD 全局队列命令 apply（region 0 raft）。
+                // 队列条目为内部记录（`/_pd/ops/*`）：不上 Watch、无用户变更事件；
+                // 幂等守卫 + META_LAST_APPLIED 由 apply_pd_op 在写事务内处理。
+                let outcome = sm.apply_pd_op(op, revision, applied).map_err(io_err)?;
+                let _ = outcome;
+                Ok((Response::Put { revision }, None))
+            }
+            Command::ObjectStore(op) => {
+                // 对象存储数据面：manifest 状态迁移 + chunk 文件副作用。
+                // ok=false（冲突/no-op）不是 raft 错误——用户级竞态不得 wedge raft；
+                // 文件写失败（磁盘）→ Err（由水位/配额前置避免）。不上 Watch。
+                let ok = crate::storage::object_store::apply_object_store_op(
+                    sm,
+                    op,
+                    revision,
+                    applied,
+                    self.object_chunk_store.as_deref(),
+                )
+                .map_err(io_err)?;
+                Ok((Response::ObjectStore { revision, ok }, None))
+            }
+        }
+    }
+}
+
+impl RaftStateMachine<TypeConfig> for StateMachineStore {
+    type SnapshotData = super::RaftSnapshotData;
+    type SnapshotBuilder = Self;
+
+    async fn applied_state(
+        &mut self,
+    ) -> Result<(Option<LogIdOf<TypeConfig>>, StoredMembershipOf<TypeConfig>), io::Error> {
+        // 从盘读取（修复重启后全量重放问题）
+        let last_applied = self.load_applied()?;
+        let membership = self.last_membership.lock().clone();
+        Ok((last_applied, membership))
+    }
+
+    async fn apply<Strm>(&mut self, entries: Strm) -> Result<(), io::Error>
+    where
+        Strm: Stream<Item = Result<EntryResponder<TypeConfig>, io::Error>> + Unpin + OptionalSend,
+    {
+        let entries: Vec<EntryResponder<TypeConfig>> = entries.try_collect().await?;
+        let sm: &MvccStorage<RedbBackend> = &self.state_machine;
+        // R-OBS-10：apply 耗时埋点
+        let apply_start = std::time::Instant::now();
+
+        // Normal 条目 apply 时必须同步内存 last_applied：若只在 Membership 路径
+        // 更新内存（持久化水位由写路径同事务写入 META_LAST_APPLIED），
+        // build_snapshot 会用陈旧/空白的 last_log_id 生成快照 meta——openraft
+        // 按错误水位计算 purge 点（或根本跳过 purge），重启后快照 meta 也无法
+        // 覆盖已 purge 的日志。
+        let mut last_normal_log_id: Option<LogIdOf<TypeConfig>> = None;
+
+        for (entry, maybe_responder) in entries {
+            let response = match &entry.payload {
+                EntryPayload::Normal(cmd) => {
+                    // revision ≡ log index
+                    let revision = entry.log_id.index;
+                    let applied = AppliedLogId {
+                        term: entry.log_id.leader_id.term,
+                        node_id: entry.log_id.leader_id.node_id,
+                        index: revision,
+                    };
+                    let (resp, change_event) = self.execute_command(sm, cmd, revision, applied)?;
+                    last_normal_log_id = Some(entry.log_id);
+
+                    // region 0 状态机在 LeaseOp::Revoke apply（含
+                    // 过期清理与显式 revoke）后广播 lease_id——所有节点 apply region 0
+                    // 日志都会收到，最终由各 Region 的 raft leader 完成 per-Region
+                    // Key 清理（幂等；重复广播仅产生 no-op）。
+                    if let Some(tx) = &self.lease_revoke_tx {
+                        if let crate::raft::type_config::Command::Lease(
+                            crate::raft::type_config::LeaseOp::Revoke { id, .. },
+                        ) = cmd
+                        {
+                            let _ = tx.send(*id);
+                        }
+                    }
+
+                    // 分发 Watch 事件（非阻塞；replayed 时事件为 None）
+                    if let (Some(dispatcher), Some(event)) = (&self.watch_dispatcher, change_event)
+                    {
+                        dispatcher.as_ref().dispatch(event);
+                    }
+
+                    resp
+                }
+                EntryPayload::Membership(mem) => {
+                    *self.last_membership.lock() =
+                        StoredMembershipOf::<TypeConfig>::new(Some(entry.log_id), mem.clone());
+                    self.update_applied(entry.log_id)?;
+                    self.persist_membership()?;
+                    Response::Put { revision: 0 }
+                }
+                EntryPayload::Blank => Response::Put { revision: 0 },
+            };
+
+            if let Some(responder) = maybe_responder {
+                responder.send(response);
+            }
+        }
+
+        // 修复：以本批最后一个 Normal 条目同步内存 last_applied。
+        if let Some(log_id) = last_normal_log_id {
+            *self.last_applied.lock() = Some(log_id);
+        }
+
+        // R-OBS-10：记录 apply 耗时
+        if let Some(metrics) = &self.metrics {
+            metrics.record_apply(apply_start.elapsed().as_micros() as u64);
+        }
+        Ok(())
+    }
+
+    async fn install_snapshot(
+        &mut self,
+        meta: &SnapshotMetaOf<TypeConfig>,
+        snapshot: Cursor<Vec<u8>>,
+    ) -> Result<(), io::Error> {
+        let data = snapshot.get_ref().clone();
+
+        // 恢复快照数据到 MvccStorage
+        if !data.is_empty() {
+            let snapshot_data = SnapshotData::from_bytes_migrating(&data)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            // R-RFT-06：快照携带完整 applied LogId（term/node_id/index），
+            // 导入时不再降级为 AppliedLogId::standalone（term/node_id 置零）
+            let sm = Arc::clone(&self.state_machine);
+            tokio::task::spawn_blocking(move || import_snapshot_data(sm.as_ref(), &snapshot_data))
+                .await
+                .map_err(|e| io::Error::other(format!("snapshot import task join: {e}")))?
+                .map_err(|e| io::Error::other(e.to_string()))?;
+        }
+
+        // 安装的快照同样落盘（tmp → fsync → rename → 校验和），保证重启可恢复。
+        // fsync 落盘段在阻塞线程池执行。
+        let (path, checksum) = self
+            .persist_snapshot_file_blocking(meta, data.clone())
+            .await?;
+
+        *self.current_snapshot.lock() = Some(StoredSnapshot {
+            meta: meta.clone(),
+            data,
+        });
+        *self.last_applied.lock() = meta.last_log_id;
+        *self.last_membership.lock() = meta.last_membership.clone();
+        self.persist_membership()?;
+        let last_idx = meta.last_log_id.as_ref().map(|l| l.index).unwrap_or(0);
+        let last_term = meta
+            .last_log_id
+            .as_ref()
+            .map(|l| l.leader_id.term)
+            .unwrap_or(0);
+        self.snapshot_tracker
+            .record_durable(last_idx, last_term, path.clone());
+        tracing::info!("Installed snapshot persisted to {}", path.display());
+
+        // 对象存储数据面：快照不含 chunk 文件。本节点 MVCC 已整体替换为快照，
+        // 本地 chunk 文件可能陈旧/不完整 → 全部清空（manifest 从快照恢复；本节点
+        // 缺 chunk 的 Get 返回 UNAVAILABLE，客户端换节点重试——v1 已知边界）。
+        if let Some(store) = &self.object_chunk_store {
+            match store.clear_all() {
+                Ok(()) => tracing::warn!("Snapshot installed: cleared local object chunk store"),
+                Err(e) => tracing::error!("clear object chunk store after snapshot: {e}"),
+            }
+        }
+        let _ = checksum;
+        Ok(())
+    }
+
+    async fn get_current_snapshot(
+        &mut self,
+    ) -> Result<Option<SnapshotOf<TypeConfig, super::RaftSnapshotData>>, io::Error> {
+        // 先把内存槽快照克隆到局部变量再进 match：match 会延长**临时值**的
+        // 生命周期到整个 match 体，若直接在 scrutinee 里 lock()，兜底分支的
+        // 第二次 lock() 会在 parking_lot 上自锁（非重入）。
+        let existing = self.current_snapshot.lock().clone();
+        let snap = match existing {
+            Some(s) => Some(s),
+            None => {
+                // 兜底：内存槽为空但磁盘已有落盘快照时**以磁盘为准**加载。
+                // 构建发生在其它实例/克隆上时此路径可能拿到 None——openraft
+                // 会把「无快照可送」升级为存储错误 ⇒ 节点 fatal；一次磁盘加载的
+                // 代价远低于该后果。正常路径不会到这里。
+                match load_persisted_snapshot_checked(self.state_machine.as_ref()) {
+                    Some((s, _path)) => {
+                        tracing::warn!(
+                            "get_current_snapshot: in-memory slot empty; loaded persisted \
+                             snapshot from disk (last_log_id={:?})",
+                            s.meta.last_log_id
+                        );
+                        *self.current_snapshot.lock() = Some(s.clone());
+                        Some(s)
+                    }
+                    None => None,
+                }
+            }
+        };
+        match snap {
+            Some(s) => Ok(Some(SnapshotOf::<TypeConfig, super::RaftSnapshotData> {
+                meta: s.meta,
+                snapshot: Cursor::new(s.data),
+            })),
+            None => Ok(None),
+        }
+    }
+
+    async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
+        StateMachineStore {
+            state_machine: Arc::clone(&self.state_machine),
+            last_applied: Mutex::new(*self.last_applied.lock()),
+            last_membership: Mutex::new(self.last_membership.lock().clone()),
+            // 共享槽位——构建器上的 `build_snapshot()` 结果必须能被主实例的
+            // `get_current_snapshot()` 看到（深拷贝会让构建结果被丢弃）。
+            current_snapshot: Arc::clone(&self.current_snapshot),
+            snapshot_dir: self.snapshot_dir.clone(),
+            snapshot_tracker: Arc::clone(&self.snapshot_tracker),
+            watch_dispatcher: None,
+            auth_manager: None,
+            revocation_store: None,
+            session_manager: None,
+            metrics: self.metrics.clone(),
+            lease_revoke_tx: None,
+            object_chunk_store: self.object_chunk_store.clone(),
+        }
+    }
+}
+
+impl StateMachineStore {
+    /// 快照字节落盘 —— 临时文件 → fsync → 原子 rename → SHA256
+    ///
+    /// 返回（最终路径，SHA256 校验和）。同时持久化 `META_SNAPSHOT` 并登记 purge 守卫。
+    ///
+    /// 磁盘 IO（create_dir_all / File::create / write_all / fsync /
+    /// rename / 目录 fsync / redb META_SNAPSHOT 写事务 / 旧快照清理）整体在阻塞线程池
+    /// 执行（见 `persist_snapshot_file_blocking`）；本方法保留同步实现供启动自愈等
+    /// 非热路径使用，内部委托同一纯函数，保证登记时序一致。
+    fn persist_snapshot_file(
+        &self,
+        meta: &SnapshotMetaOf<TypeConfig>,
+        data: &[u8],
+    ) -> Result<(PathBuf, [u8; 32]), io::Error> {
+        persist_snapshot_file_impl(
+            &self.snapshot_dir,
+            &self.state_machine,
+            &self.snapshot_tracker,
+            meta,
+            data,
+        )
+    }
+
+    /// 把新构建的快照**发布**到共享槽位。
+    ///
+    /// **单调**：仅当新快照的 `last_log_id.index` 不低于当前槽位时替换。
+    /// 防的是并发面——构建任务（`build_snapshot` 在 spawn 的任务里跑）与
+    /// `install_snapshot` 可以交叠，迟到的旧构建结果不得覆盖已安装的更新快照。
+    ///
+    /// `install_snapshot` / `rebuild_snapshot_from_mvcc` 不走本方法：它们替换
+    /// 了状态机内容本身，槽位必须与真实内容逐位一致（直接赋值）。
+    fn publish_snapshot(&self, snap: StoredSnapshot) {
+        let new_idx = snap.meta.last_log_id.as_ref().map(|l| l.index).unwrap_or(0);
+        let mut slot = self.current_snapshot.lock();
+        let cur_idx = slot
+            .as_ref()
+            .and_then(|s| s.meta.last_log_id.as_ref())
+            .map(|l| l.index)
+            .unwrap_or(0);
+        if slot.is_none() || new_idx >= cur_idx {
+            *slot = Some(snap);
+        } else {
+            tracing::warn!(
+                "snapshot slot: skip older build result (new index {} < current {})",
+                new_idx,
+                cur_idx
+            );
+        }
+    }
+
+    /// 异步落盘：磁盘 IO 移入 `spawn_blocking`，避免阻塞 tokio worker
+    /// （Multi-Raft 前置）。保持 snapshot_tracker 登记时序
+    /// （落盘成功后才 `record_durable`，与同步版完全一致）。
+    async fn persist_snapshot_file_blocking(
+        &self,
+        meta: &SnapshotMetaOf<TypeConfig>,
+        data: Vec<u8>,
+    ) -> Result<(PathBuf, [u8; 32]), io::Error> {
+        let snapshot_dir = self.snapshot_dir.clone();
+        let state_machine = Arc::clone(&self.state_machine);
+        let snapshot_tracker = Arc::clone(&self.snapshot_tracker);
+        let meta = meta.clone();
+        tokio::task::spawn_blocking(move || {
+            persist_snapshot_file_impl(
+                &snapshot_dir,
+                &state_machine,
+                &snapshot_tracker,
+                &meta,
+                &data,
+            )
+        })
+        .await
+        .map_err(|e| io::Error::other(format!("snapshot persist task join: {e}")))?
+    }
+
+    /// S-RCV-01 启动自愈：日志已被 purge 但快照文件缺失时，从 MVCC 的
+    /// `META_LAST_APPLIED` 重新导出并落盘快照（数据同源，无需网络安装）。
+    ///
+    /// 调用方须先确认 `META_LAST_APPLIED ≥ purge 点`（否则 MVCC 状态不足以
+    /// 覆盖已删除的日志，应放行启动、依赖 leader 的 install-snapshot 补齐）。
+    /// 成功返回快照文件路径，并同步恢复 `META_SNAPSHOT`、purge 守卫与内存视图。
+    pub fn rebuild_snapshot_from_mvcc(&self) -> Result<PathBuf, io::Error> {
+        let applied = self
+            .state_machine
+            .get_applied_log_id()
+            .map_err(io_err)?
+            .filter(|a| a.index > 0)
+            .ok_or_else(|| {
+                io::Error::other("MVCC has no applied state; cannot rebuild snapshot locally")
+            })?;
+
+        let last_log_id = LogIdOf::<TypeConfig>::new(
+            openraft::impls::leader_id_adv::LeaderId {
+                term: applied.term,
+                node_id: applied.node_id,
+            },
+            applied.index,
+        );
+
+        let last_membership = self
+            .state_machine
+            .backend()
+            .read(|tx| tx.get(TABLE_META, META_MEMBERSHIP))
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize(&bytes).ok())
+            .unwrap_or_else(|| {
+                StoredMembershipOf::<TypeConfig>::new(
+                    None,
+                    Membership::<u64, openraft::BasicNode>::new_with_defaults(vec![], vec![]),
+                )
+            });
+
+        let meta = SnapshotMetaOf::<TypeConfig> {
+            last_log_id: Some(last_log_id),
+            last_membership: last_membership.clone(),
+        };
+
+        let snapshot_data = export_snapshot_data(&self.state_machine, applied.index, applied.term)
+            .map_err(io_err)?;
+        let data_bytes = snapshot_data.to_bytes().map_err(io_err)?;
+
+        // 落盘（临时文件 → fsync → rename → 校验和 → META_SNAPSHOT → purge 守卫）
+        let (path, _checksum) = self.persist_snapshot_file(&meta, &data_bytes)?;
+
+        *self.current_snapshot.lock() = Some(StoredSnapshot {
+            meta: meta.clone(),
+            data: data_bytes,
+        });
+        *self.last_applied.lock() = Some(last_log_id);
+        *self.last_membership.lock() = last_membership;
+
+        tracing::warn!(
+            "Rebuilt missing raft snapshot from MVCC state: {} (last_log_id={:?})",
+            path.display(),
+            meta.last_log_id
+        );
+        Ok(path)
+    }
+}
+
+impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
+    type SnapshotData = super::RaftSnapshotData;
+
+    async fn build_snapshot(
+        &mut self,
+    ) -> Result<SnapshotOf<TypeConfig, super::RaftSnapshotData>, io::Error> {
+        // 快照构建耗时埋点
+        let snapshot_start = std::time::Instant::now();
+
+        let last_log_id = match self.load_applied() {
+            // 快照 meta 必须以存储层 META_LAST_APPLIED 为准（与快照数据
+            // 导出同源），内存值仅作回退：直接读内存 last_applied 会在
+            // 长时间无 Membership 变更时写入陈旧/空白水位，导致快照 meta
+            // 无法覆盖已 purge 日志或 openraft 跳过 purge。
+            Ok(Some(applied)) => Some(applied),
+            Ok(None) => *self.last_applied.lock(),
+            Err(e) => return Err(e),
+        };
+        let last_membership = self.last_membership.lock().clone();
+
+        let meta = SnapshotMetaOf::<TypeConfig> {
+            last_log_id,
+            last_membership: last_membership.clone(),
+        };
+
+        // 从 MvccStorage 导出真实快照数据（全库单读事务）——阻塞线程池执行
+        let sm = Arc::clone(&self.state_machine);
+        let export_last_idx = last_log_id.as_ref().map(|id| id.index).unwrap_or(0);
+        let export_last_term = last_log_id
+            .as_ref()
+            .map(|id| id.leader_id.term)
+            .unwrap_or(0);
+        let data_bytes = tokio::task::spawn_blocking(move || {
+            let snapshot_data =
+                export_snapshot_data(sm.as_ref(), export_last_idx, export_last_term)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+            snapshot_data
+                .to_bytes()
+                .map_err(|e| io::Error::other(e.to_string()))
+        })
+        .await
+        .map_err(|e| io::Error::other(format!("snapshot export task join: {e}")))??;
+
+        // 落盘（临时文件 → fsync → rename → 校验和 → META_SNAPSHOT → purge 守卫）。
+        // fsync 落盘段在阻塞线程池执行。
+        let (_path, _checksum) = self
+            .persist_snapshot_file_blocking(&meta, data_bytes.clone())
+            .await?;
+
+        let snapshot = SnapshotOf::<TypeConfig, super::RaftSnapshotData> {
+            meta: meta.clone(),
+            snapshot: Cursor::new(data_bytes.clone()),
+        };
+
+        // 构建结果发布到**共享**槽位（主实例可见）。
+        // 单调发布：构建任务与 `install_snapshot` 可能交叠（openraft 把构建放进
+        // spawn 的任务），迟到的旧构建结果不得覆盖更新的已安装快照。
+        self.publish_snapshot(StoredSnapshot {
+            meta,
+            data: data_bytes,
+        });
+
+        // R-OBS-10：记录快照构建耗时
+        if let Some(metrics) = &self.metrics {
+            metrics.record_snapshot(snapshot_start.elapsed().as_micros() as u64);
+        }
+
+        Ok(snapshot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openraft::storage::{RaftSnapshotBuilder, RaftStateMachine};
+
+    fn setup_store() -> (tempfile::TempDir, StateMachineStore) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = RedbBackend::open(tmp.path(), &coord_core::types::StorageConfig::default())
+            .expect("open redb backend");
+        let mvcc = Arc::new(MvccStorage::new(backend).expect("create mvcc"));
+        let tracker = Arc::new(SnapshotTracker::default());
+        let store = StateMachineStore::new(mvcc, tmp.path().join("snapshots"), tracker);
+        (tmp, store)
+    }
+
+    /// 判据（机制级，负控制）：openraft 在 `get_snapshot_builder()` 返回的
+    /// **克隆**上执行 `build_snapshot()`，而复制路径的 `GetSnapshot` 走**主实例**。
+    /// 构建结果必须对主实例的 `get_current_snapshot()` 可见——否则主实例槽位
+    /// 为 `None`，openraft 把「无快照可送」升级为存储错误 ⇒ RaftCore fatal。
+    #[tokio::test]
+    async fn test_snapshot_built_via_builder_is_visible_to_main_store() {
+        let (_tmp, mut main) = setup_store();
+
+        let mut builder = main.get_snapshot_builder().await;
+        let built = builder
+            .build_snapshot()
+            .await
+            .expect("build snapshot via builder");
+
+        let seen = main
+            .get_current_snapshot()
+            .await
+            .expect("get_current_snapshot")
+            .expect("主实例必须能看到 builder 刚构建的快照");
+        assert_eq!(
+            seen.meta.last_log_id, built.meta.last_log_id,
+            "可见快照的 meta 必须与构建结果一致"
+        );
+        assert_eq!(
+            seen.snapshot.get_ref(),
+            built.snapshot.get_ref(),
+            "可见快照的数据必须与构建结果一致"
+        );
+    }
+
+    /// 兜底判据：内存槽为空但磁盘上已有落盘快照（META_SNAPSHOT + 校验和）时，
+    /// `get_current_snapshot()` 必须从磁盘加载，而不是返回 `None`（返回 None 会让
+    /// openraft 直接把该节点判 fatal）。
+    #[tokio::test]
+    async fn test_get_current_snapshot_falls_back_to_persisted_disk_state() {
+        let (_tmp, mut main) = setup_store();
+
+        let mut builder = main.get_snapshot_builder().await;
+        let built = builder
+            .build_snapshot()
+            .await
+            .expect("build snapshot via builder");
+        let built_bytes = built.snapshot.get_ref().clone();
+
+        // 模拟"构建发生在别的实例上、主实例槽位为空"
+        *main.current_snapshot.lock() = None;
+
+        let seen = main
+            .get_current_snapshot()
+            .await
+            .expect("get_current_snapshot")
+            .expect("内存槽为空时必须从磁盘兜底加载已落盘快照");
+        assert_eq!(
+            seen.snapshot.get_ref(),
+            &built_bytes,
+            "兜底加载的数据必须与已落盘快照一致"
+        );
+
+        // 第二次读取：走内存槽（已由兜底路径缓存），仍必须一致
+        let again = main
+            .get_current_snapshot()
+            .await
+            .expect("get_current_snapshot")
+            .expect("第二次读取必须命中缓存");
+        assert_eq!(again.snapshot.get_ref(), &built_bytes);
+    }
+
+    /// 负控制：从未有过快照时（META_SNAPSHOT 缺失），`get_current_snapshot()`
+    /// 必须如实返回 `None`——不得伪造空快照。
+    #[tokio::test]
+    async fn test_get_current_snapshot_none_without_any_snapshot() {
+        let (_tmp, mut main) = setup_store();
+        assert!(
+            main.get_current_snapshot().await.expect("get").is_none(),
+            "无任何快照（内存/磁盘都没有）时必须返回 None"
+        );
+    }
+}

@@ -1,0 +1,13 @@
+;; expect-invalid-delete-count-mismatch —— F-01 的形态：
+;; `delete` 处理器（server/mod.rs:1650 起）没有任何 `*_idempotent*` 调用，
+;; 所以同一 request_id 的第二次删除真的又执行了一次：deleted 从 1 变成 0。
+;; 契约（kv.proto:81）明确说 Delete 的 request_id 语义同 Put（不重复生效）。
+{:type :ok, :f :idem-delete, :process 0, :time 1000
+ :request {:rid "del-7000-1", :key "/jepsen/idem/del/7", :val "7"
+           :replays 2, :expected-version 0}
+ :attempts [{:ok? true, :node "n1", :deleted 1, :revision 80
+             :prev-kvs [{:key "/jepsen/idem/del/7", :value "7", :version 1
+                         :create-revision 79, :mod-revision 79}]}
+            {:ok? true, :node "n1", :deleted 0, :revision 81
+             :prev-kvs []}]
+ :final {:ok? true, :node "n1", :kv nil}}

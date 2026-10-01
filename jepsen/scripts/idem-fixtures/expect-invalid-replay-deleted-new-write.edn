@@ -1,0 +1,16 @@
+;; expect-invalid-replay-deleted-new-write —— F-01 第 3 条预测的**最严重形态**：
+;; 「重试放大破坏面」。
+;;   1) 范围删 [a, z) 首次执行 :ok（deleted=3）；
+;;   2) 区间内新写入一个 key（post-write）；
+;;   3) 用**同一个 request_id** 重放范围删 —— 没有幂等的实现会真的再删一次，
+;;      把首次执行之后才写入的数据删掉（契约未限定的重试路径 = 数据破坏）。
+;; 这里 attempt 2 的 deleted=4（把 post-write 也删了）、收尾读为空。
+{:type :ok, :f :idem-range-delete, :process 0, :time 1000
+ :request {:rid "rdel-9500-1"
+           :range-start "/jepsen/idem/rd/9/a"
+           :range-end   "/jepsen/idem/rd/9/z"
+           :post-write-key "/jepsen/idem/rd/9/m"
+           :post-write-val 9}
+ :attempts [{:ok? true, :node "n1", :deleted 3, :revision 110, :prev-kvs []}
+            {:ok? true, :node "n1", :deleted 4, :revision 111, :prev-kvs []}]
+ :post-write-final {:ok? true, :node "n1", :kv nil}}

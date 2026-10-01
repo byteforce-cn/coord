@@ -1,0 +1,36 @@
+;; expect-valid-overlap-within-measurement-resolution —— **守门员**（F-40）。
+;;
+;; 形态：后继持有者在前一任的**删除 RPC 返回之前** 1ms 拿到了锁。
+;;
+;; 这是**完全合法**的：区间闭合时刻是「客户端**观察到**锁已不在我名下」的时刻，
+;; 它永远是真实闭合时刻的**上界**（差一个 RPC 往返）。上一任的 key 是在那次 RPC
+;; **内部**被删掉的，所以后继者在 RPC 返回前 1ms 成功 CAS 并不违反互斥。
+;;
+;; 实测（M5a 第二轮）：每个 45s run 都会出现 0–1 条这类 1–3ms 的「重叠」，而同一
+;; 时间窗内**服务端地面真值探针一次矛盾都没看到**（`:contradictions 0`）。
+;;
+;; 判据的取向：`tolerance-ms`（默认 50ms，`default-overlap-tolerance-ms`）以内的
+;; 重叠记成 `:lock-mutual-exclusion-near-boundary`（出现在报告里，不进 `valid?`），
+;; 超过容差才是硬违约。**不静默丢弃**是这个取向成立的前提。
+;;
+;; 去掉这条容差（把 tolerance 改回 0）⇒ 本 fixture 必红。
+[{:type :ok :f :lock-contend :process 0 :time 10
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  :acquired-at-ms 10 :released-at-ms 200 :released? false
+  ;; h1 的锁在 201ms 被观测到「已不在我名下」（无论路径是 Release 成功、
+  ;; farming 探针删掉、还是观测到换人 —— 对区间闭合而言都一样）。
+  ;; 注意 fencing 探针必须**被拒**（`:released? false`），否则本 fixture
+  ;; 会额外命中 `:lock-fencing-missing`（那是另一条判据，不在本 fixture 的靶心）。
+  :gone? true :gone-at-ms 201 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}
+
+ ;; h2 在 200ms 就拿到了锁 —— 比 h1 的 RPC 返回早 1ms，但**晚于**真实的删除
+ {:type :ok :f :lock-contend :process 1 :time 20
+  :name "lock-a" :holder-id "h2" :lease-id 12
+  :acquired-at-ms 200 :released-at-ms 500 :released? true
+  :gone? true :gone-at-ms 500 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}]

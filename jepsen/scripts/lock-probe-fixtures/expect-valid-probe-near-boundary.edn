@@ -1,0 +1,21 @@
+;; expect-valid-probe-near-boundary —— 边界样本**不得**当铁证（但必须出现在报告里）。
+;;
+;; 区间闭合时刻是「客户端**观察到**锁已不在我名下」的时刻，永远是真实闭合时刻的
+;; 上界（差一个 RPC 往返 + 观测抖动）。所以紧贴边界的探针样本可能只是测量误差：
+;; 本例探针在 860ms 看到 "h-other"，而 h1 的区间到 900ms 才闭合 —— 距离边界
+;; 只有 40ms < 100ms（default-probe-margin-ms）。
+;;
+;; 判定：valid（不把测量误差当铁证），但 `:lock.probe.near-boundary` = 1，
+;; 报告里能看见。这样做的代价（可能漏掉一个真实但极短的重叠）是明示的，
+;; 不是静默的。
+[{:type :ok :f :lock-contend :process 0 :time 10
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  :acquired-at-ms 10 :released-at-ms 900 :released? true
+  :gone? true :gone-at-ms 900 :still-mine-after-release false
+  :holder-ttl-seconds 5 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}
+
+ {:type :ok :f :lock-probe :process 2 :time 860
+  :name "lock-a" :server-at-ms 860 :exists? true
+  :server {:holder-id "h-other" :lease-id 99 :ttl-secs 5}}]

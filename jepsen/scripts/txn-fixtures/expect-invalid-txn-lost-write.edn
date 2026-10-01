@@ -1,0 +1,12 @@
+;; expect-invalid-txn-lost-write —— P0：succeeded=true 且回读成功，但写集一个都
+;; 没读到（提案返回成功而效果丢失）。
+[{:type :ok, :f :txn-write-set, :process 0, :invoke 10, :time 20
+  :value {:prefix "/jepsen/txn/s42-set-1/" :vals ["1-a" "1-b"]
+          :range-start "/jepsen/txn/s42-set-1/" :range-end "/jepsen/txn/s42-set-1/z"}
+  :succeeded true
+  :wrote {"/jepsen/txn/s42-set-1/0" "1-a" "/jepsen/txn/s42-set-1/1" "1-b"}
+  :success-wrote {"/jepsen/txn/s42-set-1/0" "1-a" "/jepsen/txn/s42-set-1/1" "1-b"}
+  :failure-wrote {}
+  :setup-ok? true
+  :post-read {:kvs []}
+  :post-read-ok? true}]

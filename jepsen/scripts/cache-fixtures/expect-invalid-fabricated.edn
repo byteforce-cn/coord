@@ -1,0 +1,8 @@
+;; expect-invalid-fabricated —— **P0**：读回来的值从来没被写过。
+;;
+;; 写集合里只有 "v-real"，而 Get 返回 "v-ghost"（found=true）。这类形态在生产
+;; 是「缓存把别人的值 / 脏槽位返回了」，比丢数据更难自查（读是成功的）。
+[{:type :ok :f :cache-set :process 0 :t0-ns 0 :time 100000000
+  :key "cache-str-1" :value "v-real" :ttl-seconds 0}
+ {:type :ok :f :cache-get :process 1 :t0-ns 500000000 :time 501000000
+  :key "cache-str-1" :found true :value "v-ghost"}]

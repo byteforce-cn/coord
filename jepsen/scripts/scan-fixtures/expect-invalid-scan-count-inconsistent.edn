@@ -1,0 +1,12 @@
+;; expect-invalid-scan-count-inconsistent —— `RangeResponse.count` 与实际返回条数
+;; 不自洽：已扫完（返回 2 条 < limit 100）时 count 必须等于 2，这里报 5。
+;; count 是客户端分页/合计的依据，不自洽会让上层得到错误的「还有多少」。
+[{:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-0", :invoke 1, :time 2
+  :value "v1" :revision 10}
+ {:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-1", :invoke 3, :time 4
+  :value "v2" :revision 11}
+ {:type :ok, :f :scan, :process 0, :invoke 10, :time 20
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42." :limit 100}
+  :count 5
+  :kvs [{:key "/jepsen/scan/s42-0" :value "v1"}
+        {:key "/jepsen/scan/s42-1" :value "v2"}]}]

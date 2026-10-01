@@ -1,0 +1,46 @@
+;; expect-valid-five-surfaces —— T6.1 soak-full 的**五面组合**基线。
+;;
+;; 本目录用 `'{:surfaces [:map :txn :scan :watch :lease] :min-sample 1
+;;            :watch-min-events 1 :min-grants 1 :min-expiries 1}` 跑。
+;; 它的作用：证明 `mixck/checker` 的 `:surfaces` 入口能把**watch / lease** 也
+;; 组合进来（T6.1 的比例里它们占 15% / 10%），且每面都仍然由**该面自己的**
+;; checker 判（组合层不新造判据）。
+[{:type :ok :f :write :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 1 :time 2 :value "m1"}
+ {:type :ok :f :read :sub :map :process 0 :key "/jepsen/map/s42-0"
+  :invoke 3 :time 4 :value "m1"}
+
+ {:type :ok :f :txn-create :sub :txn :process 1 :invoke 5 :time 6
+  :value {:key "/jepsen/txn/s42-create-1" :val "1"}
+  :succeeded true
+  :wrote {"/jepsen/txn/s42-create-1" "1"}
+  :post-read {:kv {:key "/jepsen/txn/s42-create-1" :value "1"}}
+  :post-read-ok? true}
+
+ {:type :ok :f :write :sub :scan :process 2 :key "/jepsen/scan/s42-0"
+  :invoke 7 :time 8 :value "s1" :revision 10}
+ {:type :ok :f :scan :sub :scan :process 2 :invoke 9 :time 10
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42."}
+  :count 1 :kvs [{:key "/jepsen/scan/s42-0" :value "s1"}]}
+ {:type :ok :f :read-at :sub :scan :process 2 :invoke 11 :time 12
+  :value {:key "/jepsen/scan/s42-0" :revision 10}
+  :kvs [{:key "/jepsen/scan/s42-0" :value "s1"}]}
+
+ ;; watch 面：写产生事件；会话从最新开始、收到该事件（值必须真的写过）
+ {:type :ok :f :write :sub :watch :process 3 :key "/jepsen/watch/s42"
+  :invoke 13 :time 14 :value "w1" :revision 20}
+ {:type :ok :f :watch-session :sub :watch :process 3 :invoke 15 :time 16
+  :key "/jepsen/watch/s42"
+  :value {:key "/jepsen/watch/s42" :start-revision 0}
+  :start-revision 0
+  :end-revision 20
+  :events [{:type :put :revision 20
+            :kvs [{:key "/jepsen/watch/s42" :value "w1"}]}]}
+
+ ;; lease 面：到期场景（安全 + 活性都成立）
+ {:type :ok :f :lease-ttl :sub :lease :process 4 :invoke 17 :time 18
+  :lease {:id 1001 :ttl 2} :key "/jepsen/lease/s42/ttl/1"
+  :scenario :ttl :grace-ms 4000
+  :observations [{:phase :after-write :at-ms 20 :read-ok? true :present? true}
+                 {:phase :first-absent :at-ms 2400 :read-ok? true :present? false}]
+  :absent-ms 2400}]

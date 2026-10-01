@@ -1,0 +1,19 @@
+;; expect-valid-clean —— 正例：发布 → Poll → Ack 全部自洽，没有违反。
+;;
+;; `:acked-offsets` 是 poll op 内部 Ack 掉的那批 offset（客户端在 poll 之后
+;; 立刻确认）——checker 用它判「已确认的又被重投」。
+[{:type :ok :f :mq-publish :process 0 :t0-ns 0 :time 1000000
+  :topic "jepsen-mq" :partition 0 :payload "m0" :idempotency-key "idem-0" :offset 0}
+ {:type :ok :f :mq-publish :process 0 :t0-ns 2000000 :time 3000000
+  :topic "jepsen-mq" :partition 0 :payload "m1" :idempotency-key "idem-1" :offset 1}
+ {:type :ok :f :mq-publish :process 1 :t0-ns 4000000 :time 5000000
+  :topic "jepsen-mq" :partition 0 :payload "m2" :idempotency-key "idem-2" :offset 2}
+ {:type :ok :f :mq-poll :process 2 :t0-ns 10000000 :time 11000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 0 :payload "m0"}
+             {:topic "jepsen-mq" :partition 0 :offset 1 :payload "m1"}]
+  :acked-offsets [0 1]}
+ {:type :ok :f :mq-poll :process 2 :t0-ns 20000000 :time 21000000
+  :topic "jepsen-mq" :partition 0 :start-offset 2
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 2 :payload "m2"}]
+  :acked-offsets [2]}]

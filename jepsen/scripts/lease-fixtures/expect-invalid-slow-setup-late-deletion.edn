@@ -1,0 +1,12 @@
+;; expect-invalid-slow-setup-late-deletion —— F-72b 的负控制：
+;; 锚点前移 ≠ 免罪。窗口 = grant+[ttl, ttl+grace] = [6300, 10300]；
+;; 删除发生在 11300（晚于 grant+ttl+grace）⇒ 仍必须判 `:lease-not-expired`。
+[{:type :ok :f :lease-ttl :process 4 :invoke 1 :time 10
+  :lease {:id 68 :ttl 2} :key "/jepsen/lease/s1310193536/ttl/84"
+  :scenario :ttl :grace-ms 4000
+  :grant-at-ms 4300
+  :observations [{:phase :after-write :at-ms 4664 :read-ok? true :present? true}
+                 {:phase :first-absent :at-ms 11300 :read-ok? true :present? false
+                  :absent? true :reads 45 :failed 0 :ok-reads 45 :reauths 0
+                  :last-ok-present? false :last-ok-at-ms 11300}]
+  :absent-ms 11300}]

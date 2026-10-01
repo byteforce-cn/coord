@@ -1,0 +1,10 @@
+;; expect-valid-read-at-compacted —— 历史读被压缩清理时必须返回
+;; OUT_OF_RANGE（白名单 `:fail`），**不得**静默给错值。
+;; 这条 fixture 证明 checker 不会把这类合法拒绝判成违规（假红守门员）。
+[{:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-0", :invoke 1, :time 2
+  :value "v1" :revision 10}
+ {:type :fail, :f :read-at, :process 0, :invoke 10, :time 20
+  :error :out-of-range
+  :value {:key "/jepsen/scan/s42-0" :revision 9}
+  :read-revision 9
+  :kvs []}]

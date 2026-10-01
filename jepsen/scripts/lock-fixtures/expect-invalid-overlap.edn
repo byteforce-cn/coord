@@ -1,0 +1,21 @@
+;; expect-invalid-overlap —— **P0**：互斥被破坏。
+;;
+;; h1 持有 [10, 5000)，h2 在 500 就开始持有同一把锁 ⇒ 区间重叠。
+;; 这是 T5.3 的核心形态：分区愈合后的旧持有者、或 agent 本地缓存各自为政时，
+;; 都会长成这个样子。
+[{:type :ok :f :lock-contend :process 0 :time 10
+  :name "lock-a" :holder-id "h1" :lease-id 11
+  :acquired-at-ms 10 :released-at-ms 5000 :released? true
+  ;; 服务端直到 5000ms 才不再挂 h1 名下 ⇒ 区间真的延续到 5000
+  :gone? true :gone-at-ms 5000 :still-mine-after-release false
+  :holder-ttl-seconds 10 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}
+
+ {:type :ok :f :lock-contend :process 1 :time 20
+  :name "lock-a" :holder-id "h2" :lease-id 12
+  :acquired-at-ms 500 :released-at-ms 900 :released? true
+  :gone? true :gone-at-ms 900 :still-mine-after-release false
+  :holder-ttl-seconds 10 :grace-ms 4000
+  :foreign-release {:ok? true :released? false}
+  :lock-info-after-release {:name "lock-a" :exists false}}]

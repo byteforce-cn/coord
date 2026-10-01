@@ -1,0 +1,9 @@
+;; expect-valid-delete-prev-kv-ok —— 正例：delete 汇报的 prev_kv 正是当时的值
+;; （写 v1 在 t=10 完成，delete 在 t=20 完成且 prev_kv = v1）。
+;; 判据：v1 的写是真实的（不是 fabricated），且没有被强制排在 delete 之前，
+;; 所以 delete 观察到 v1 合法。
+[{:type :ok, :f :write,  :process 0, :key "/jepsen/map/k0", :invoke 5,  :time 10
+  :value "v1"}
+ {:type :ok, :f :delete, :process 0, :key "/jepsen/map/k0", :invoke 15, :time 20
+  :value nil, :deleted 1, :prev-kv-requested? true
+  :prev-kvs [{:key "/jepsen/map/k0", :value "v1", :version 1}]}]

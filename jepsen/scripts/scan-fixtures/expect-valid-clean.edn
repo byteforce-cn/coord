@@ -1,0 +1,31 @@
+;; expect-valid-clean —— T1.3 基线正例。
+;;   * 三次写 → 一次区间扫描（limit 100 ⇒ 扫完，count 必须等于返回条数）；
+;;   * keys_only 扫描（value 必须为空）；
+;;   * count_only 扫描（kvs 必须为空）；
+;;   * 按写响应 revision=11 的历史读必须拿回那次写的值 "v2"。
+[{:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-0", :invoke 1, :time 2
+  :value "v1" :revision 10}
+ {:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-1", :invoke 3, :time 4
+  :value "v2" :revision 11}
+ {:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-2", :invoke 5, :time 6
+  :value "v3" :revision 12}
+ {:type :ok, :f :scan, :process 0, :invoke 10, :time 20
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42." :limit 100}
+  :count 3
+  :kvs [{:key "/jepsen/scan/s42-0" :value "v1"}
+        {:key "/jepsen/scan/s42-1" :value "v2"}
+        {:key "/jepsen/scan/s42-2" :value "v3"}]}
+ {:type :ok, :f :scan, :process 0, :invoke 30, :time 40
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42." :keys-only true}
+  :count 3
+  :kvs [{:key "/jepsen/scan/s42-0" :value nil}
+        {:key "/jepsen/scan/s42-1" :value nil}
+        {:key "/jepsen/scan/s42-2" :value nil}]}
+ {:type :ok, :f :scan, :process 0, :invoke 50, :time 60
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42." :count-only true}
+  :count 3
+  :kvs []}
+ {:type :ok, :f :read-at, :process 0, :invoke 70, :time 80
+  :value {:key "/jepsen/scan/s42-1" :revision 11}
+  :read-revision 11
+  :kvs [{:key "/jepsen/scan/s42-1" :value "v2"}]}]

@@ -1,0 +1,23 @@
+;; expect-valid-late-absence-under-read-outage —— F-72c 的守门员：
+;; 轮询采样断档时，「观测到消失的时刻」不能当「删除时刻」用（迟到性不可归因）。
+;;
+;; 形态（matrix-m2 lease/pause，2026-09-26 实测）：ka/109 停续期于 87ms；
+;; 服务端在停续期后 ~2.1s 就提交了 revoke（n1 日志
+;; `lease expiry revokes committed lease_ids=[78]`，早于窗口末端 6087ms），
+;; 但读数在 13.7s 才恢复 ⇒ 首次观测到消失的 13780ms 只是**观测晚**，删除并不晚。
+;; 旧 checker 拿观测时刻判 `:lease-not-expired`（假红）。
+;;
+;; 正确行为：不判（计入 `:liveness-unjudged`）。注意该豁免只针对**迟到性**：
+;; 「从未观察到消失」（absent nil）与「提前消失」（early-absence，安全侧）不受影响。
+[{:type :ok :f :lease-keepalive :process 1 :invoke 1 :time 10
+  :lease {:id 78 :ttl 2} :key "/jepsen/lease/s1156570546/ka/109" :node "n2"
+  :scenario :keepalive :grace-ms 4000 :grant-at-ms 8
+  :keepalives [{:id 78 :ttl 2} {:id 78 :ttl 2} {:id 78 :ttl 2}
+               {:id 78 :ttl 2} {:id 78 :ttl 2} {:id 78 :ttl 2}]
+  :observations [{:phase :after-write :at-ms 14 :read-ok? true :present? true}
+                 {:phase :during-keepalive :at-ms 87 :read-ok? true :present? true}
+                 {:phase :first-absent :at-ms 6266 :absent? true
+                  :read-ok? true :present? false
+                  :reads 15 :failed 8 :ok-reads 7 :reauths 0
+                  :last-ok-present? false :last-ok-at-ms 6266}]
+  :absent-ms 6266}]

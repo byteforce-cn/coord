@@ -1,0 +1,16 @@
+;; expect-valid-coalescing —— coalescing 口径下只保留结构判据（丢事件由
+;; 「合并/压缩」解释）。同一条有缺口的历史在这里必须判 valid，证明第三个语义
+;; 档也真的接上了（否则「参数化」只是文档里的说法）。
+[{:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 1 :time 2
+  :value "w1" :revision 10}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 3 :time 4
+  :value "w2" :revision 11}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 5 :time 6
+  :value "w3" :revision 12}
+ {:type :ok :f :watch-session :process 0 :invoke 7 :time 30
+  :key "/jepsen/watch/s42"
+  :value {:key "/jepsen/watch/s42" :start-revision 0}
+  :start-revision 0
+  :end-revision 12
+  :events [{:type :put :revision 10 :kvs [{:key "/jepsen/watch/s42" :value "w1"}]}
+           {:type :put :revision 12 :kvs [{:key "/jepsen/watch/s42" :value "w3"}]}]}]

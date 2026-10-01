@@ -1,0 +1,28 @@
+;; expect-valid-clean —— M5a registry 基线：注册可见 → 停心跳 → ttl+grace 内消失。
+;;
+;; 判定口径（jepsen.coord.regck）：
+;;   * 健康态不得有幽灵实例（P0）；
+;;   * 注册后必须立即可见（P1 活性）；
+;;   * 停心跳后 ttl+grace 内必须消失（P1）；
+;;   * 重复注册幂等（P1）；
+;;   * 分区期间保留陈旧快照是**刻意设计**（registry.rs:6-9「自我保护」），
+;;     所以陈旧本身不判红 —— 只有「属主已确认消失、别的客户端仍看得见」才判
+;;     （expect-invalid-ghost-other-client）。
+[{:type :ok :f :registry-cycle :process 0 :time 1000000000
+  :name "svc-a" :instance-id "inst-1" :lease-id 31
+  :holder-ttl-seconds 5 :grace-ms 2000 :dup? false
+  :absent-ms 6200 :deregistered? true
+  :observations [{:phase :after-register :at-ms 20 :read-ok? true :present? true
+                  :instances ["inst-1"]}
+                 {:phase :after-ttl :at-ms 6200 :read-ok? true :present? false
+                  :instances []}]}
+
+ ;; 重复注册分支：仍只有一条 inst-2
+ {:type :ok :f :registry-cycle :process 1 :time 2000000000
+  :name "svc-a" :instance-id "inst-2" :lease-id 32 :dup? true
+  :holder-ttl-seconds 5 :grace-ms 2000
+  :absent-ms 5900 :deregistered? true
+  :observations [{:phase :after-register :at-ms 25 :read-ok? true :present? true
+                  :instances ["inst-2"]}
+                 {:phase :after-ttl :at-ms 5900 :read-ok? true :present? false
+                  :instances []}]}]

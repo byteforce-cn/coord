@@ -1,0 +1,150 @@
+syntax = "proto3";
+package coord.agent;
+
+option java_multiple_files = true;
+option java_package = "cn.byteforce.coord.sdk.internal.proto";
+
+// ============================================================
+// coord.agent —— 内部面（不对业务消费者承诺）
+//
+// 本文件只保留三类内部服务：
+//   - Handshake：协议版本协商（WHITEPAPER 防空头承诺；两端均须实现）
+//   - Health：探活（agent 内部健康检查）
+//   - Replica：ISR 复制通道（WHITEPAPER.md 红线 R3「永不对外」）
+//
+// 其余 16 个服务已于 contracts/v1.2.0 迁出为独立契约包
+// （package coord.<domain>.v1），本文件不再包含它们。
+// ============================================================
+
+// ============================================================
+
+service Handshake {
+  rpc Negotiate(HandshakeRequest) returns (HandshakeResponse);
+}
+
+message HandshakeRequest {
+  string client_version = 1;
+}
+
+message HandshakeResponse {
+  repeated string supported_versions = 1;
+}
+
+// ============================================================
+// Registry
+
+// ============================================================
+
+service Health {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+  }
+  ServingStatus status = 1;
+}
+
+// ============================================================
+// Lock — Distributed Lock
+
+// ============================================================
+
+// 跨 Agent ISR 复制服务（Phase A 已落地）。
+//
+// 数据面写路径（Cache/MQ）经分区 Leader 本地提交（含复制条目同事务持久化）
+// 后，通过本服务把 ReplicationEntry 推送到 ISR Followers 并等待确认；
+// Follower 落后时经 Reconcile 拉取缺失序列号区间重放；IsrHeartbeat 双向
+// 心跳维护 ISR 成员关系并交换各 shard 最后序列号（落后检测）。
+//
+// 语义边界见 cache.proto / mq.proto 的声明与 docs/adr/0002-cross-node-commit-atomicity-boundary.md。
+service Replica {
+  // Leader → Follower: 应用一条复制条目（幂等；重复条目返回 applied=true）
+  rpc Apply(ReplicaApplyRequest) returns (ReplicaApplyResponse);
+  // Follower → Leader: 拉取缺失序列号区间的复制条目（stream 回放）
+  rpc Reconcile(ReplicaReconcileRequest) returns (stream ReplicaEntry);
+  // 双向心跳: 维护 ISR 成员关系 + 交换各 shard 最后序列号（落后检测）
+  rpc IsrHeartbeat(ReplicaHeartbeatRequest) returns (ReplicaHeartbeatResponse);
+}
+
+message ReplicaApplyRequest {
+  ReplicaEntry entry = 1;
+}
+
+message ReplicaApplyResponse {
+  // 是否已应用（true = 已应用或幂等跳过，false = 拒绝）
+  bool applied = 1;
+  // 应用后该 shard 的最后序列号
+  uint64 last_sequence = 2;
+}
+
+message ReplicaReconcileRequest {
+  string shard_id = 1;
+  // 缺失起始序列号（含）
+  uint64 start_sequence = 2;
+  // 单次拉取上限（0 = 服务端默认 1000）
+  uint64 limit = 3;
+}
+
+message ReplicaEntry {
+  string idempotency_key = 1;
+  uint64 idempotency_timestamp_ms = 2;
+  string shard_id = 3;
+  uint64 sequence_num = 4;
+  ReplicaOp operation = 5;
+}
+
+message ReplicaOp {
+  oneof op {
+    ReplicaCachePut cache_put = 1;
+    ReplicaCacheDelete cache_delete = 2;
+    ReplicaMqPublish mq_publish = 3;
+  }
+}
+
+message ReplicaCachePut {
+  // 物理 key：string=原 key；hash=key\0field；list=key\0index；set=key\0member
+  bytes key = 1;
+  // 编码后的值（含 Leader 计算的绝对到期时间戳，TTL 决策 C5）
+  bytes value = 2;
+  string data_type = 3;
+}
+
+message ReplicaCacheDelete {
+  bytes key = 1;
+  string data_type = 2;
+}
+
+message ReplicaMqPublish {
+  string topic = 1;
+  uint32 partition = 2;
+  // Leader 独占分配的全局一致 offset（决策 C1）
+  uint64 offset = 3;
+  bytes payload = 4;
+}
+
+message ReplicaHeartbeatRequest {
+  string agent_addr = 1;
+  // 本 agent 各 shard 的最后序列号（Leader 侧用于落后检测 / Follower 侧声明进度）
+  repeated ReplicaShardProgress progress = 2;
+}
+
+message ReplicaShardProgress {
+  string shard_id = 1;
+  uint64 last_sequence = 2;
+}
+
+message ReplicaHeartbeatResponse {
+  // 本 agent 是否将该对端视为 ISR 成员
+  bool in_isr = 1;
+  // Leader 侧各 shard 的最后序列号（Follower 据此判断是否落后）
+  repeated ReplicaShardProgress leader_progress = 2;
+}
+
+// ============================================================
+// Scheduler — Distributed Scheduler

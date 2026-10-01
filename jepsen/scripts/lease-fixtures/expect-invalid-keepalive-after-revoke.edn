@@ -1,0 +1,14 @@
+;; expect-invalid-keepalive-after-revoke —— 判据 5：
+;; 对**已经 Revoke** 的 Lease 续期回了 ttl > 0。
+;;
+;; 契约（lease.proto 的 LeaseKeepAliveResponse.ttl）：ttl = 0 表示 Lease 已不
+;; 存在（过期或被 Revoke），客户端应重新 Grant。回 ttl>0 会让客户端以为租约还
+;; 活着 —— 对「锁 / 注册 / 选举」这类上层是致命的错误结论。
+[{:type :ok :f :lease-revoke :process 0 :invoke 1 :time 10
+  :lease {:id 6001 :ttl 30} :key "/jepsen/lease/s42/rev/6"
+  :scenario :revoke :grace-ms 4000 :revoked? true :revoke-at-ms 60
+  ;; 已 Revoke 却回了 ttl=30
+  :post-revoke-keepalive {:id 6001 :ttl 30}
+  :observations [{:phase :after-write :at-ms 30 :read-ok? true :present? true}
+                 {:phase :after-revoke :at-ms 400 :read-ok? true :present? false}]
+  :absent-ms 400}]

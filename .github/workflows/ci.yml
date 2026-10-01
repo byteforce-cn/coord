@@ -1,0 +1,604 @@
+name: CI
+
+# PR 校验与验收标准
+#
+# - fmt / clippy（非测试目标 -D warnings，测试目标警告级）/ panic 校验
+# - 全量 workspace 测试（含 restart_recovery_test / lease_raft_test /
+#   snapshot_transfer_test / snapshot_rpc_test / compaction_raft_test /
+#   m0_recovery_suite 真实二进制套件）
+# - 前端 lint（coord-ui）
+# - proto 契约（buf lint + 格式 + 对 main 的 breaking 检查）
+# - nightly 真实故障注入（chaos_real）
+# - 每周性能基准（perf_bench + 劣化 >20% 校验）
+# - 定时 cargo audit / cargo deny（安全依赖治理）
+#
+# 工具链版本由 rust-toolchain.toml 固定（Rust 1.98.1）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # nightly 触发真实故障注入套件（chaos_real 等 #[ignore] 套件）
+  schedule:
+    - cron: "17 2 * * *"
+    # 每周依赖审计
+    - cron: "0 4 * * 1"
+    # 每周性能基准（劣化 >20% 告警）
+    - cron: "0 6 * * 1"
+
+concurrency:
+  # 三条 cron 的 `github.ref` 同为 `refs/heads/main`：把 cron 表达式纳入 group，
+  # 并禁止定时运行互相取消——否则 04:00 的依赖审计会**静默取消** 02:17 的 60 分钟
+  # chaos，06:00 的 perf 再取消 04:00。
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event.schedule }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+jobs:
+  lint:
+    name: fmt + clippy -D warnings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc (coord-proto build dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy (non-test targets, -D warnings)
+        run: cargo clippy --workspace --lib --bins -- -D warnings
+      - name: Clippy (all targets, warning level)
+        run: cargo clippy --workspace --all-targets
+      - name: Panic-path gate (non-test unwrap/expect/panic count = 0)
+        run: bash scripts/check-panics.sh
+      - name: Alert ↔ runbook gate
+        # 每条告警必须有 runbook_url，且锚点必须在 runbook 文档里真实存在，
+        # 且告警处置段里没有孤儿小节。纯文本 + python3，不需要 Rust/protoc。
+        run: bash scripts/check-gate-drills.sh
+      - name: Doc references gate (no dangling paths)
+        # 注释 / 文档中引用的文件路径必须存在；
+        # 同时警告 Rust 注释中的日期（白名单文件除外）。
+        run: bash scripts/check-doc-refs.sh
+
+  # **检查自检**——唯一能区分「检查存在」与「检查生效」的机制。
+  #
+  # 教训：CI 曾连续多次全红而无人发现（工具链 action 缺 required input）；
+  # YAML 里写得很认真，只是**从未跑起来**。
+  # 静默失效无法靠"再读一遍 YAML"发现，只能靠"故意让它失败、断言它真的失败"。
+  #
+  # 做法：注入一个 fmt 违规，断言 `cargo fmt --check` 变红。若它**没有**变红，
+  # 说明校验已被绕过（工具链没装上 / 命令被改坏 / 被 || true 吞掉），本 job 失败。
+  gate-self-check:
+    name: gate self-check (fmt gate must fail on an injected violation)
+    runs-on: ubuntu-latest
+    # 本 job 含一道 clippy 级扫描（panic 校验）⇒ 显式超时
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      # panic 校验要编译 workspace（--all-targets），配缓存避免每次冷编译
+      - uses: Swatinem/rust-cache@v2
+      # wire-descriptor 自检 step 需要 protoc
+      # （契约副本 ↔ 实现副本的 FileDescriptorSet 比对），而本 job 原先是唯一
+      # **不装 protoc** 的 job ⇒ 该 step 直接以「需要 protoc」退出 1。
+      # 这正是"负控制自检"的用处：它把"校验在某个 job 里根本跑不起来"暴露成红。
+      - name: Install protoc (coord-proto build + wire-descriptor gate dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Assert the fmt gate turns red on an injected violation
+        run: |
+          set -euo pipefail
+          target=coord-core/src/kv_range.rs
+          # 先确认基线是绿的（否则"注入后变红"没有信息量）
+          cargo fmt --all -- --check
+          printf '\nfn __gate_self_check() {let x=1;let _=x;}\n' >> "$target"
+          if cargo fmt --all -- --check >/dev/null 2>&1; then
+            echo "::error::fmt gate did NOT fail on an injected violation — the gate is not effective"
+            exit 1
+          fi
+          echo "OK: fmt gate correctly turned red on the injected violation"
+      - name: Assert the alert↔runbook gate turns red on an injected violation
+        # 自检思路用在**新加的**运维面校验上：注入一条锚点失配（把 runbook 的小节
+        # 标题改名）⇒ 断言 `check-gate-drills.sh` 必须变红。没有这一步，新校验可能
+        # 与 fmt 校验当初一样「写了但从未生效」。
+        run: |
+          set -euo pipefail
+          runbook=docs/production/ops/runbook.md
+          # 先确认基线是绿的（否则“注入后变红”没有信息量）
+          bash scripts/check-gate-drills.sh
+          python3 - "$runbook" <<'PY'
+          import pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          t = p.read_text(encoding="utf-8")
+          old = "### `CoordNoLeader` — 集群 60s 无 leader"
+          assert old in t, "self-check anchor missing: runbook 结构变了，请更新本步骤"
+          p.write_text(t.replace(old, "### `CoordNoLeader` 集群无主", 1), encoding="utf-8")
+          PY
+          if bash scripts/check-gate-drills.sh >/dev/null 2>&1; then
+            echo "::error::alert↔runbook gate did NOT fail on an injected anchor mismatch — the gate is not effective"
+            exit 1
+          fi
+          echo "OK: alert↔runbook gate correctly turned red on the injected violation"
+      # 负控制从 2 道门扩到 6 道：**解析型校验"看起来在跑" ≠ "真的会红"**。
+      # 下面每一道都注入一个**最小**违规并断言该校验必须变红；每步结束还原文件
+      # （CI 是全新 checkout，但还原能让"红/绿"只由本步的注入解释）。
+      # 覆盖：fmt、panic 路径、wire-sync、wire-descriptor、sdk-sync、告警↔runbook、doc-refs。
+      - name: Assert the wire-descriptor gate turns red on an injected wire drift
+        run: |
+          set -euo pipefail
+          target=coord-proto/src/proto/kv.proto
+          bash apis/contracts/scripts/check-wire-descriptor.sh
+          # 注入：实现副本的字段号 3 → 30（契约副本不动）⇒ descriptor 级结构性漂移
+          sed -i 's/^  int64 limit = 3;/  int64 limit = 30;/' "$target"
+          if bash apis/contracts/scripts/check-wire-descriptor.sh >/dev/null 2>&1; then
+            echo "::error::descriptor gate DID NOT fail on an injected field-number drift — the gate is not effective"
+            exit 1
+          fi
+          git checkout -- "$target"
+          echo "OK: descriptor gate correctly turned red on the injected drift"
+      - name: Assert the wire-sync gate turns red on an injected rpc rename
+        run: |
+          set -euo pipefail
+          target=coord-proto/src/proto/kv.proto
+          bash apis/contracts/scripts/check-wire-sync.sh
+          # 注入：内部副本的 rpc 改名（契约副本不动）⇒ 路径级缺失
+          sed -i 's/rpc Range(/rpc RangeGone(/' "$target"
+          if bash apis/contracts/scripts/check-wire-sync.sh >/dev/null 2>&1; then
+            echo "::error::wire-sync gate DID NOT fail on an injected rpc rename — the gate is not effective"
+            exit 1
+          fi
+          git checkout -- "$target"
+          echo "OK: wire-sync gate correctly turned red on the injected rpc rename"
+      - name: Assert the sdk-sync gate turns red on an injected internal-proto import
+        run: |
+          set -euo pipefail
+          target=coord-java-sdk/src/main/java/cn/byteforce/coord/sdk/internal/rpc/RegistryImpl.java
+          bash apis/contracts/scripts/check-sdk-sync.sh
+          # 注入：给一个**不在 allowlist** 的 GA impl 加上内部面 import（"漂回去"的形态）
+          sed -i '1i import cn.byteforce.coord.sdk.internal.proto.*;' "$target"
+          if bash apis/contracts/scripts/check-sdk-sync.sh >/dev/null 2>&1; then
+            echo "::error::sdk-sync gate DID NOT fail on an injected internal-proto import — the gate is not effective"
+            exit 1
+          fi
+          git checkout -- "$target"
+          echo "OK: sdk-sync gate correctly turned red on the injected import"
+      - name: Assert the panic-path gate turns red on an injected panic
+        # 本校验的口径是"非测试代码 panic 路径计数 = 0"。注入一个**非测试**的
+        # `panic!` 函数 ⇒ clippy 扫描必须抓到（若脚本碰巧编译失败，同样算"变红"，
+        # 但断言写的是"红"而不是"红的原因"，两者都比静默绿好）。
+        run: |
+          set -euo pipefail
+          target=coord-core/src/error_code.rs
+          bash scripts/check-panics.sh
+          printf '\n/// gate self-check 注入（只在自检步骤内存在，随后即还原）\npub fn __gate_self_check_panic() {\n    panic!("gate self-check");\n}\n' >> "$target"
+          if bash scripts/check-panics.sh >/dev/null 2>&1; then
+            echo "::error::panic-path gate DID NOT fail on an injected panic — the gate is not effective"
+            exit 1
+          fi
+          git checkout -- "$target"
+          echo "OK: panic-path gate correctly turned red on the injected panic"
+      - name: Assert the doc-refs gate turns red on an injected dangling link
+        # 文档引用校验的负控制：注入一条指向不存在文件的链接 ⇒ 断言校验必须变红。
+        run: |
+          set -euo pipefail
+          target=CONTRIBUTING.md
+          bash scripts/check-doc-refs.sh
+          printf '\n[dangling](docs/__gate_self_check_missing__.md)\n' >> "$target"
+          if bash scripts/check-doc-refs.sh >/dev/null 2>&1; then
+            echo "::error::doc-refs gate DID NOT fail on an injected dangling link — the gate is not effective"
+            exit 1
+          fi
+          git checkout -- "$target"
+          echo "OK: doc-refs gate correctly turned red on the injected dangling link"
+  frontend-lint:
+    name: frontend lint (coord-ui)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: coord-ui
+    steps:
+      - uses: actions/checkout@v4
+      # `pnpm/action-setup@v4` 必须显式给 `version`（`package.json` 无
+      # `packageManager` 字段），否则 action 直接退出，frontend job 第 3 步即死。
+      # lockfileVersion = 9.0。
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: coord-ui/pnpm-lock.yaml
+      - name: Install deps (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint
+      - name: Build
+        run: pnpm build
+      # coord-ui 的 vitest 单测必须在 CI 里执行（`test:ci` 曾被漏跑：
+      # job 只做 lint + build，单测从不运行）。
+      # 注：`test:ci` 还包含 playwright e2e，而 e2e 的 `baseURL` 指向 agent 的
+      # HTTP 端口（19528，UI 由 rust-embed 嵌入 agent 二进制）→ 需要真实 agent 进程，
+      # 不适合放在本 job；本 job 只跑自包含的单测。
+      - name: Unit tests (vitest, coverage)
+        run: pnpm test:coverage
+
+  java-sdk:
+    name: java sdk (maven verify)
+    # Java SDK + example 必须有 CI：20+ 个 Java 测试文件依赖本 job 执行。
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # 与 pom 的 <release>21</release> 对齐。注意：Mockito 5.12 的 inline mock
+          # 尚不支持 JDK 25（ByteBuddy 无法 instrument），故不跟随最新 JDK。
+          java-version: '21'
+          cache: maven
+      - name: SDK ↔ contract face smoke
+        # SDK 契约面校验放在**SDK 自己的 job** 里（不只靠 contract-check 触发的
+        # workflow）。两层判据：
+        #   ① 每个 GA impl 必须引用契约命名空间（防漂回内部 proto）；
+        #   ② **反向**：每个 GA 契约包必须有一个 SDK 客户端面 —— 清单是代码从契约
+        #      目录反推的，不依赖人记得同步改（人写清单会漂移）。
+        # 不需要 maven/protoc，放在 `mvn verify` **之前**：纯文本断言，最快给出 反馈。
+        run: bash apis/contracts/scripts/check-sdk-sync.sh
+      - name: Java SDK — mvn verify (unit + contract tests)
+        working-directory: coord-java-sdk
+        run: mvn -B -q verify
+      - name: Cross-language error-code contract (Rust ↔ Java)
+        # Java 的 `ErrorCode.fromProtoName` 对**未知** wire 值返回 INTERNAL（静默
+        # 降级为"不可重试"）：Rust 发出的每个码都必须在 Java 枚举里逐字存在——由
+        # 脚本强制，而不是靠两侧各维护一份定义慢慢漂移。
+        # 本步骤必须在 Java 编译之后：它直接解析 ErrorCode.java 的字面量。
+        run: bash scripts/check-error-code-contract.sh
+      - name: Java example — compile only
+        # 只做编译：java-example 的默认 profile 排除全部用例（本步骤不跑任何测试）。
+        # 真实进程集成测试（连本机 agent gRPC）由下面的 java-example-it job 跑。
+        working-directory: java-example
+        run: mvn -B -q verify -DskipTests
+
+  java-example-it:
+    name: java example integration (real server + agent)
+    # Java 接入的可复现证据：起真实 coord server + coord agent，再跑 java-example
+    # 的集成套件（KV/Txn/Lease/Watch/Registry），让"Java 应用可通过 gRPC 接入"
+    # 有可复现的执行记录。
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc (coord-proto build dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build coord binaries
+        run: cargo build --workspace --bins
+      - name: Start dev cluster (real server + agent)
+        run: scripts/ci-java-it-cluster.sh start
+      - name: Java example — integration suites
+        working-directory: java-example
+        run: mvn -B verify -Pit
+      - name: Java SDK — integration suite (real cluster, -Pit)
+        # SDK 的 CoordClientIntegrationTest 不得靠 assumeThat 静默跳过（那样永远
+        # 不产生证据）：它只在 -Pit 下执行，由本 job 提供真实集群（硬失败即真校验）。
+        working-directory: coord-java-sdk
+        run: mvn -B verify -Pit
+      - name: Dump cluster logs (always)
+        if: always()
+        run: |
+          echo "::group::coord server log"
+          tail -200 .coord-dev-cluster/server.log 2>/dev/null || true
+          echo "::endgroup::"
+          echo "::group::coord agent log"
+          tail -200 .coord-dev-cluster/agent.log 2>/dev/null || true
+          echo "::endgroup::"
+      - name: Stop dev cluster
+        if: always()
+        run: scripts/ci-java-it-cluster.sh stop
+
+  proto-lint:
+    name: proto contract (buf lint + breaking)
+    # proto 契约治理——lint + 格式 + 对 main 的 breaking 检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: buf lint
+        run: buf lint coord-proto
+      - name: buf format (normalize so the breaking gate always runs)
+        # 必须用 `-w` 归一化，保证紧随其后的 `buf breaking`（protobuf 契约**
+        # 破坏性变更校验**）一定被执行：若这一步用 `--diff --exit-code` 直接红，
+        # breaking 校验就永远执行不到。
+        # 归一化产生的差异打印为 ::warning::（违规仍然可见，只是不再阻断后续校验）。
+        run: |
+          set -euo pipefail
+          before=$(mktemp -d)
+          cp -r coord-proto "$before/"
+          buf format -w coord-proto
+          if ! diff -ru "$before/coord-proto" coord-proto; then
+            echo "::warning::buf format rewrote the protos above; commit the formatted files"
+          fi
+      - name: buf breaking against main
+        # 基线（main）尚无 buf.yaml 时跳过；合入本 PR 后下一 PR 起生效
+        run: |
+          if git show origin/main:coord-proto/buf.yaml >/dev/null 2>&1; then
+            buf breaking coord-proto --against ".git#branch=origin/main,subdir=coord-proto"
+          else
+            echo "base revision has no buf.yaml; breaking gate active from next merge"
+          fi
+
+  test:
+    name: workspace tests
+    runs-on: ubuntu-latest
+    # 测试 job 显式超时（无 timeout-minutes 时卡死无上限）
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc (coord-proto build dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Build tests
+        run: cargo build --workspace --tests
+      - name: Pre-clean leaked test processes
+        # 进程级套件在超时/中断时会留下孤儿 `coord server`（本地实测可积累 30+ 个、
+        # 最久 11 小时），它们抢 CPU/端口 → 后续套件出现假红
+        # （"raft write timed out (no quorum?)"）。CI 是全新 VM，这步通常是 no-op，
+        # 但能保证重跑/自托管 runner 上的确定性。只清理 /tmp/.tmp* 数据目录的进程。
+        run: bash scripts/kill-stray-coord-procs.sh
+      - name: Run workspace tests
+        # 测试失败即红：不得用「首次失败降级为 warning 并重跑」掩盖不稳定，
+        # 真 flaky 必须被修。
+        #
+        # 失败必须**自描述**：间歇红（同一 SHA 定时跑绿、push 跑红）曾因日志不可取
+        # 而无法定位测试。现经包装脚本落盘 + 注解：失败测试名与 panic 位置会以
+        # **check-run 注解**（匿名可取）带出。
+        run: bash scripts/ci-run-with-annotations.sh /tmp/ci-workspace-tests.log cargo test --workspace --no-fail-fast
+      - name: Run deterministic simulation suites (gated)
+        # sim_jepsen/sim_chaos 是**自建模型**而非系统级证据，用
+        # `required-features = ["sim-tests"]` 移出默认套件（避免测试数量虚高）；
+        # 这里显式跑它们，保证"移出默认"不等于"永不运行"。
+        run: bash scripts/ci-run-with-annotations.sh /tmp/ci-sim-suites.log cargo test -p coord-server --features sim-tests --test sim_jepsen_test --test sim_chaos_test
+
+  feature-matrix:
+    name: plugin engine feature matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc (coord-proto build dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # 插件引擎 feature 门控：默认（plugin-js）、全开、全关三种组合必须构建通过
+      - name: Check default features (plugin-js)
+        run: cargo check -p coord-agent --all-targets
+      - name: Check all plugin engines (js + wasm)
+        run: cargo check -p coord-agent --all-targets --features plugin-js,plugin-wasm
+      - name: Check no plugin engines
+        run: cargo check -p coord-agent --all-targets --no-default-features
+      # wasm 宿主（Phase 4）单测只在 feature 开启时存在 → 必须真正跑一遍，
+      # 否则「构建通过」会掩盖沙箱行为回归（fuel/epoch/内存上限/能力边界）。
+      - name: Run plugin engine tests (js + wasm)
+        run: "cargo test -p coord-agent --lib --features plugin-js,plugin-wasm plugin::"
+      # 插件指标（调用/trap/加载失败；含 wasm fuel/epoch 分类）——同一 feature 组合下验证。
+      - name: Run plugin metrics tests
+        run: "cargo test -p coord-agent --lib --features plugin-js,plugin-wasm metrics::"
+      # 原生服务 = 真插件（内建插件）：gRPC 服务面由 PluginManager 动态组装，
+      # 未启用的服务不得挂载。用真实的 AgentServer + 真实 gRPC 调用验证，而不是
+      # 只断言注册表内容（「登记即算」不能作为判据）。
+      - name: Run native-service plugin host tests (dynamic gRPC assembly)
+        run: cargo test -p coord-agent --test agent_plugin_grpc_test
+      # 组件模型 ABI（Phase 4.1）：组件夹具已提交仓库（`tests/fixtures/`），
+      # 因此**不需要** wasm 工具链就能跑宿主侧的全部验收断言。
+      - name: Run component-model plugin tests (committed fixture)
+        run: |
+          cargo test -p coord-agent --test agent_plugin_component_test --features plugin-js,plugin-wasm
+      # 额外验证「从 guest 源码 + WIT 重建夹具」这条链路（rustc wasm 后端 + wasm-tools
+      # embed/new + 无 WASI import 断言），再跑一次组件测试（这次用的是新产物）。
+      - name: Install wasm guest toolchain
+        run: |
+          rustup target add wasm32-unknown-unknown
+          curl -fsSL --retry 3 -o /tmp/wasm-tools.tar.gz \
+            "https://github.com/bytecodealliance/wasm-tools/releases/download/v1.259.0/wasm-tools-1.259.0-x86_64-linux.tar.gz"
+          tar xzf /tmp/wasm-tools.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/wasm-tools-1.259.0-x86_64-linux/wasm-tools /usr/local/bin/wasm-tools
+          wasm-tools --version
+      - name: Rebuild component fixture from source and re-run tests
+        run: |
+          scripts/build-plugin-guest.sh
+          cargo test -p coord-agent --test agent_plugin_component_test --features plugin-js,plugin-wasm
+
+  security-audit:
+    name: cargo audit + deny
+    # audit/deny 是 PR 校验（不做成 schedule-only：PR 必须拦截已知漏洞依赖）。
+    #
+    # ⚠️ 该 job 必须显式给权限，且 `audit-check` 的行为**按事件名分叉**：
+    #   schedule → `reporter.reportIssues()` → 每个通告调 `issues.create`（建 issue）
+    #   其它事件 → `reporter.reportCheck()`  → 调 `checks.create`（建 check run）
+    # cargo audit 的 exit code 不参与判定（`ignoreReturnCode: true`），**权限才是**：
+    # 权限不足时 action 直接 `core.setFailed("Resource not accessible by integration")`
+    # ——安全检查因为"没权限上报"而失败（依赖干净、通告全是信息性时也一样）。
+    #
+    # 只给这一个 job 加权限（而不是顶层）：`contents: read` 供 checkout；
+    # `checks: write` 供 push/PR 上报；`issues: write` 供 schedule 上报
+    # （该 action 的定时语义就是"为每条通告建 issue"）。
+    #
+    # ⚠️ **阻断语义**：`reportIssues()` 对漏洞**不会** `setFailed`（只有 push/PR 的
+    # `reportCheck()` 会），所以定时跑的**唯一阻断闸**是下面的 `cargo deny` —— 它以
+    # `deny.toml` 的显式豁免表为准（`unmaintained = "all"` / `unsound = "all"` /
+    # `yanked = "deny"`），新增未豁免通告会让它 exit≠0。每个 step 都必须能执行到：
+    # 前一步变红而跳过后续 step，会让 `licenses` / `bans` / `sources` 没有执行记录。
+    permissions:
+      contents: read
+      checks: write
+      issues: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc (coord-proto build dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: cargo audit (RustSec)
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      # 这是本 job 的**阻断**判据（见上面的权限说明）：exit≠0 ⇔ 出现未豁免的通告。
+      - name: cargo deny (advisories/licenses/bans/sources) — blocking gate
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+  chaos-nightly:
+    name: real-process chaos (nightly + PR gate)
+    # 真实故障注入套件：PR + push + schedule/手动均执行
+    # （只挂 schedule/手动会让"验证过"在 PR 层没有证据）。
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc (coord-proto build dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Build tests
+        run: cargo build --workspace --tests
+      # 每个进程级套件之前都要清一次孤儿进程（而不只是 job 开头清一次）。
+      #
+      # 事故（已在本地复现并 A/B 定位）：本 job 里各套件**串行但相互污染**。
+      # `chaos_real`（kill9）、soak、multi-raft、plugin_auth×3 都会在超时/中断时
+      # 留下常驻孤儿 `coord server`/`coord agent`，它们继续抢 CPU/端口，于是**后面的**
+      # 套件开始“看起来像产品 bug”的假红。本地实测：
+      #   · 连跑一遍后残留孤儿 → `plugin_real_process_test` 红
+      #     （`bootstrap-role ... raft auth write timed out (no quorum?)`）
+      #   · `kill-stray-coord-procs.sh` 清一次 → 同一条命令、同一提交 **绿（4.03s）**
+      # CI 上同一提交的不同表现（`missing CCT token`）是同一根因的另一种表现：
+      # 负载下 agent 自举插件的 `Authenticate` 失败 → 插件降级为无凭据客户端。
+      #
+      # 脚本只清理数据目录（或 `--agent-config` 配置路径）位于 `/tmp/.tmp*` 的进程
+      # ——即测试临时目录；不会碰真实集群。
+      # 每个套件 step 加 `if: always()`：job 的红/绿语义不变（任一失败即红），
+      # 但一次 run 能给出**全部套件**的结论——前一步失败而跳过后续 step，会让
+      # 后面的套件没有任何执行记录（无法判定"假红 vs 真缺陷"）。
+      # 每步开头仍清孤儿进程（见下方说明）。
+      - name: Run real-process chaos suites
+        if: always()
+        env:
+          CHAOS_REAL: "1"
+        # 串行：kill9 与 soak 两个套件各起 3 个真实进程 + 6 个代理，
+        # 并行互扰会导致节点就绪超时（实测）
+        #
+        # 失败必须**自描述**：间歇红曾因日志不可得而无法判定「真缺陷 vs 假红」。
+        # 失败测试名/panic 以注解带出（见 scripts/ci-annotate-test-failures.sh）。
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-chaos-kill9.log cargo test -p coord --test chaos_real -- --ignored --nocapture --test-threads=1
+      - name: Run distributed soak (smoke, 120s)
+        if: always()
+        env:
+          CHAOS_REAL: "1"
+          SOAK_DURATION_SECS: "120"
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-chaos-soak.log cargo test -p coord --test chaos_real chaos_soak_distributed -- --ignored --nocapture
+      # Multi-Raft 进程级套件：3 节点 × 3 Region 真实进程 + kill/重启收敛
+      # （MULTI_RAFT_REAL=1）。与 chaos 套件同 job 串行执行（同 host 真实进程
+      # 互扰规避：kill9 会误伤对端节点导致就绪超时）。
+      - name: Run multi-raft real-process suite
+        if: always()
+        env:
+          MULTI_RAFT_REAL: "1"
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-multi-raft.log cargo test -p coord --test multi_raft_process_test -- --ignored --nocapture --test-threads=1
+      # 鉴权 + 插件账户进程套件——单节点重启存续（Bootstrap 引导）
+      # + 双节点 raft 复制存续。同为 spawn 真实 `coord server` 的重型套件，与上述
+      # 步骤同 job 串行执行（真实进程互扰规避）。
+      # + CLI 凭据文件套件（登录落盘 → 自动携带 → 到期自动续期 → 登出）。
+      - name: Run auth/plugin process suites (single + multi-node + CLI credentials)
+        if: always()
+        # 三条套件在同一 step：`bash -e` 下**第一条失败会跳过其余两条** ⇒ 与 job 级的
+        # `if: always()` 是同一形态的信息丢失。用 rc 累积：全跑完，但任一失败 ⇒ step 红。
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          rc=0
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-plugin-auth.log cargo test -p coord --test plugin_auth_process_test -- --ignored --nocapture --test-threads=1 || rc=1
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-plugin-auth-multinode.log cargo test -p coord --test plugin_auth_multinode_process_test -- --ignored --nocapture --test-threads=1 || rc=1
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-plugin-credentials.log cargo test -p coord --test plugin_credentials_process_test -- --ignored --nocapture --test-threads=1 || rc=1
+          exit $rc
+      # 插件引擎**进程级**端到端（真实 server + 真实 agent 进程 + 磁盘 JS 插件）：
+      # 插件身份开通 → 服务端 capability/scope 强制 → SIGHUP 内容级热重载 →
+      # agent kill/重启（一次性引导令牌已消费，靠持久化账户续跑）。
+      # + **运行中新增插件**（SIGHUP 加入第二个插件，此时已无可用引导 CCT，
+      # 靠自举的 provisioner 会话新建 `plugin/counter2` 账户并成功写 KV）。
+      - name: Run plugin engine real-process e2e (PLUGIN_REAL=1)
+        if: always()
+        env:
+          PLUGIN_REAL: "1"
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-plugin-real.log cargo test -p coord --test plugin_real_process_test -- --ignored --nocapture --test-threads=1
+      # coord-client **流式会话**（ObjectWriter / ObjectReader）真实进程验证
+      # ——客户端自选块边界逐块发送（与服务端 4MiB 默认分帧不同）+ 服务端流逐块取回，
+      # 跨 4MiB chunk 边界往返一致；含本地越界拒绝 / abort / 缺失对象。
+      - name: Run object-storage streaming sessions (OBJECT_STORAGE_REAL=1)
+        if: always()
+        env:
+          OBJECT_STORAGE_REAL: "1"
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-object-storage.log cargo test -p coord --test object_storage_process_test object_storage_real_streaming_sessions -- --ignored --nocapture --test-threads=1
+      # **「应用 → agent → server」在 auth_enabled=true 下的全链路**：本套件是
+      # 鉴权链路唯一的进程级回归保障——要求 agent 转发 CCT、scope 提取器在生产
+      # 路径可用、能力表命中 `/coord.kv.KV/*`（经 agent 的旧进程测试一律关鉴权、
+      # 开鉴权的测试一律直连 server，两者都不覆盖这条组合）。
+      - name: Run agent+auth real-process suite (AGENT_AUTH_REAL=1)
+        if: always()
+        env:
+          AGENT_AUTH_REAL: "1"
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-agent-auth.log cargo test -p coord --test agent_auth_process_test -- --ignored --nocapture --test-threads=1
+      # DoS 的 **RSS 峰值实测口径**：100 × 8 MiB 超大请求（累计 800 MiB，在飞并发
+      # 25）必须全部被拒（RESOURCE_EXHAUSTED）且**服务端进程 VmHWM 增长有界**
+      # （阈值写死在测试里）。它是 spawn 真实 `coord server` 的进程级套件，
+      # 与其它进程套件同 job 串行执行。
+      - name: Run DoS/RSS peak drill
+        if: always()
+        run: |
+          bash scripts/kill-stray-coord-procs.sh
+          bash scripts/ci-run-with-annotations.sh /tmp/ci-dos-rss.log cargo test -p coord --test dos_rss_peak_test -- --ignored --nocapture --test-threads=1
+
+  perf-bench:
+    name: weekly perf baseline (regression gate)
+    # 每周基准入仓 + 劣化 >20% 告警；也可手动触发
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc (coord-proto build dependency)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Run release benchmarks + regression gate
+        run: bash scripts/bench-ci.sh
+      - name: Upload benchmark report
+        # **失败也要上传**：perf 红时若工件被 skip，一条数字都带不出来
+        # （工件下载又需鉴权）。
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-bench-report
+          path: benchmark-results/report-*.md
+          retention-days: 30

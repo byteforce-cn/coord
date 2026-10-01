@@ -1,0 +1,11 @@
+;; expect-invalid-scan-stale-value —— 扫描返回的值已被确认写覆盖
+;; （写 "v2" 在 t=20 完成、invoke 15；扫在 invoke 25 开始 ⇒ 强制序把它排在扫描
+;; 之前），扫描却还返回 "v1"。这就是 §5.1 里 scan 形态的陈旧读。
+[{:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-0", :invoke 1, :time 2
+  :value "v1" :revision 10}
+ {:type :ok, :f :write, :process 0, :key "/jepsen/scan/s42-0", :invoke 15, :time 20
+  :value "v2" :revision 11}
+ {:type :ok, :f :scan, :process 0, :invoke 25, :time 30
+  :value {:key "/jepsen/scan/s42-" :range-end "/jepsen/scan/s42."}
+  :count 1
+  :kvs [{:key "/jepsen/scan/s42-0" :value "v1"}]}]

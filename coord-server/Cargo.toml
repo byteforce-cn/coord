@@ -1,0 +1,71 @@
+[package]
+name = "coord-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# 确定性**模拟**套件（`sim_jepsen_test` / `sim_chaos_test`）是自建
+# 模型（只 import `coord_core::types` 的数据类型，用 HashMap/BTreeMap 做参考模型），
+# 不是系统级混沌证据。它们混在默认 `cargo test` 里会让"测试数量"虚高、并且让
+# 真正需要审视的"伪测试"更容易蒙混过关。现按 feature 隔离：
+# - 默认 `cargo test` 不跑；
+# - `cargo test -p coord-server --features sim-tests` 或 CI 显式运行。
+default = []
+sim-tests = []
+
+[[test]]
+name = "sim_jepsen_test"
+required-features = ["sim-tests"]
+
+[[test]]
+name = "sim_chaos_test"
+required-features = ["sim-tests"]
+
+[dependencies]
+coord-core = { workspace = true }
+coord-proto = { workspace = true }
+
+tokio = { workspace = true }
+tonic = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+prost = { workspace = true }
+tonic-health = { workspace = true }
+redb = { workspace = true }
+openraft = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+futures = { workspace = true }
+dashmap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+bytes = { workspace = true }
+zeroize = { workspace = true }
+thiserror = { workspace = true }
+tokio-stream = { workspace = true }
+libc = { workspace = true }
+
+# 安全层（P2）
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+argon2 = { workspace = true }
+rand = { workspace = true }
+lru = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+
+# BFF 层（UI 控制台代理）
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+rust-embed = { workspace = true }
+openraft-multi = { workspace = true }
+[dev-dependencies]
+tempfile = "3"

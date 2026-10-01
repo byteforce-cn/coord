@@ -1,0 +1,15 @@
+;; expect-invalid-event-before-start —— resume 起点错：会话要求从 revision 11
+;; 开始续传，却收到了 revision 10 的事件（= 重复投递已确认段）。这与
+;; 「同一流内严格递增」不同：它单独破坏的是**续传语义**（客户端会把旧数据
+;; 当成新事件），因此在 checker 里是独立判据。
+[{:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 1 :time 2
+  :value "w1" :revision 10}
+ {:type :ok :f :write :process 0 :key "/jepsen/watch/s42" :invoke 3 :time 4
+  :value "w2" :revision 11}
+ {:type :ok :f :watch-session :process 0 :invoke 5 :time 30
+  :key "/jepsen/watch/s42"
+  :value {:key "/jepsen/watch/s42" :start-revision :last}
+  :start-revision 11
+  :end-revision 11
+  :events [{:type :put :revision 10 :kvs [{:key "/jepsen/watch/s42" :value "w1"}]}
+           {:type :put :revision 11 :kvs [{:key "/jepsen/watch/s42" :value "w2"}]}]}]

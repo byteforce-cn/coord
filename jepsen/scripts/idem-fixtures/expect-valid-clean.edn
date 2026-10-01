@@ -1,0 +1,58 @@
+;; expect-valid-clean —— 幂等契约成立的基线历史。
+;; put 分组：2 次重放都返回 revision 10 与同一个 prev_kv（nil），收尾读 version=1。
+;; put 分组（带 setup 写）：首次带 prev_kv=OLD，重放必须返回同一个 prev_kv，
+;;                       收尾读 version=2（setup 一次 + 本组一次）。
+;; delete 分组：2 次重放都返回 deleted=1 与同一组 prev_kvs，收尾读已不存在。
+;; range-delete 分组：重放后区间内新写入的 key 仍然存在。
+{:type :ok, :f :idem-put, :process 0, :time 1000
+ :request {:rid "put-1000-1", :key "/jepsen/idem/put/1", :val "1", :replays 2}
+ :attempts [{:ok? true, :node "n1", :revision 10, :prev-kv nil}
+            {:ok? true, :node "n1", :revision 10, :prev-kv nil}]
+ :final {:ok? true, :node "n1"
+         :kv {:key "/jepsen/idem/put/1", :value "1", :version 1
+              :create-revision 10, :mod-revision 10}}}
+
+{:type :ok, :f :idem-put, :process 0, :time 2000
+ :request {:rid "put-1000-2", :key "/jepsen/idem/put/2", :val "2", :replays 3}
+ :attempts [{:ok? true, :node "n2", :revision 11, :prev-kv nil}
+            {:ok? true, :node "n2", :revision 11, :prev-kv nil}
+            {:ok? true, :node "n2", :revision 11, :prev-kv nil}]
+ :final {:ok? true, :node "n2"
+         :kv {:key "/jepsen/idem/put/2", :value "2", :version 1
+              :create-revision 11, :mod-revision 11}}}
+
+{:type :ok, :f :idem-put, :process 0, :time 2500
+ :request {:rid "put-1000-3", :key "/jepsen/idem/put/3", :val "3"
+           :replays 2, :setup-val "OLD-3", :expected-version 2}
+ :attempts [{:ok? true, :node "n1", :revision 12, :prev-kv
+             {:key "/jepsen/idem/put/3", :value "OLD-3", :version 1
+              :create-revision 9, :mod-revision 9}}
+            {:ok? true, :node "n1", :revision 12, :prev-kv
+             {:key "/jepsen/idem/put/3", :value "OLD-3", :version 1
+              :create-revision 9, :mod-revision 9}}]
+ :final {:ok? true, :node "n1"
+         :kv {:key "/jepsen/idem/put/3", :value "3", :version 2
+              :create-revision 9, :mod-revision 12}}}
+
+{:type :ok, :f :idem-delete, :process 0, :time 3000
+ :request {:rid "del-1000-1", :key "/jepsen/idem/del/1", :val "1", :replays 2}
+ :attempts [{:ok? true, :node "n1", :deleted 1, :revision 13
+             :prev-kvs [{:key "/jepsen/idem/del/1", :value "1", :version 1
+                         :create-revision 12, :mod-revision 12}]}
+            {:ok? true, :node "n1", :deleted 1, :revision 13
+             :prev-kvs [{:key "/jepsen/idem/del/1", :value "1", :version 1
+                         :create-revision 12, :mod-revision 12}]}]
+ :final {:ok? true, :node "n1", :kv nil}}
+
+{:type :ok, :f :idem-range-delete, :process 0, :time 4000
+ :request {:rid "rdel-1000-1"
+           :range-start "/jepsen/idem/rd/1/a"
+           :range-end   "/jepsen/idem/rd/1/z"
+           :post-write-key "/jepsen/idem/rd/1/m"
+           :post-write-val 9}
+ :attempts [{:ok? true, :node "n1", :deleted 3, :revision 20, :prev-kvs []}
+            {:ok? true, :node "n1", :deleted 3, :revision 20, :prev-kvs []}]
+ :post-write-final {:ok? true, :node "n1",
+                    :kv {:key "/jepsen/idem/rd/1/m"
+                         :value "9", :version 1
+                         :create-revision 21, :mod-revision 21}}}

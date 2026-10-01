@@ -1,0 +1,10 @@
+;; expect-invalid-payload-mismatch —— **P0**：投递的 payload 与发布的不一致。
+;;
+;; offset 0 上确认发布的 payload 是 "m0"，Poll 返回的却是 "m0-CORRUPT"
+;; ⇒ 日志把内容串了/截断了（比丢消息更隐蔽：幂等键还能对上 offset）。
+[{:type :ok :f :mq-publish :process 0 :t0-ns 0 :time 1000000
+  :topic "jepsen-mq" :partition 0 :payload "m0" :idempotency-key "idem-0" :offset 0}
+ {:type :ok :f :mq-poll :process 1 :t0-ns 10000000 :time 11000000
+  :topic "jepsen-mq" :partition 0 :start-offset 0
+  :messages [{:topic "jepsen-mq" :partition 0 :offset 0 :payload "m0-CORRUPT"}]
+  :acked-offsets [0]}]

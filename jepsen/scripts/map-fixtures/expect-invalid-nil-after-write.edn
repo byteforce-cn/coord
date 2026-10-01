@@ -1,0 +1,8 @@
+;; expect-invalid-nil-after-write —— 有确认写、又没有任何 tombstone，
+;; 读却返回 nil（key 不存在）：等价于「写完就丢了」。
+;; 判据：nil 生产者集合为空 ⇒ 阈值 0；强制序探针（确认写的最大 invoke = 5）
+;; > 0 ⇒ 违反。
+[{:type :ok, :f :write, :process 0, :key "/jepsen/map/k0", :invoke 5,  :time 10
+  :value "v1"}
+ {:type :ok, :f :read,  :process 0, :key "/jepsen/map/k0", :invoke 15, :time 20
+  :value nil}]
