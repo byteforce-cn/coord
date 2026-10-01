@@ -298,9 +298,9 @@ pub struct MessageQueueService {
     db_path: PathBuf,
     db: RwLock<Option<redb::Database>>,
     started: RwLock<bool>,
-    /// 声明的容量上限（字节）。**当前未被强制执行**，与
-    /// [`crate::services::cache::CacheService`] 同一取舍：
-    /// 保留值以便如实报出，而不是用一个 `#[allow(dead_code)]` 字段假装遵守。
+    /// 声明的容量上限（字节）。**当前未被强制执行** —— 缓存侧（B-PL-3）已落地
+    /// 记账 + reaper 淘汰，MQ 尚未；保留值以便如实报出，而不是用一个
+    /// `#[allow(dead_code)]` 字段假装遵守。方向决策跟踪见仓库 issue（MQ 容量上界）。
     max_size_bytes: u64,
     /// 订阅者注册表：topic → (consumer_group, 消息 channel [(partition, record)])
     subscriptions: RwLock<HashMap<String, Vec<SubscriberEntry>>>,
@@ -318,8 +318,8 @@ impl std::fmt::Debug for MessageQueueService {
         f.debug_struct("MessageQueueService")
             .field("db_path", &self.db_path)
             .field("started", &self.started)
-            // 如实报出"配了多少、有没有生效"：该上限**未被执行**（与
-            // `CacheService::max_size_bytes` 同一取舍）。
+            // 如实报出"配了多少、有没有生效"：该上限**未被执行**
+            // （缓存已强制执行，MQ 尚未；见字段注释）。
             .field("max_size_bytes", &self.max_size_bytes)
             .field("max_size_enforced", &false)
             .finish()

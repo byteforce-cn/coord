@@ -13,6 +13,9 @@
 // - agent_plugin_invocations_total: 插件调用总数（plugin/engine/outcome）
 // - agent_plugin_traps_total: 插件沙箱 trap 总数（plugin/reason：fuel/epoch/…）
 // - agent_plugin_load_failures_total: 插件加载/启动失败总数（plugin）
+// - agent_cache_active_bytes / agent_cache_limit_bytes: 缓存活跃字节与上界（B-PL-3）
+// - agent_cache_reaped_entries_total / agent_cache_evicted_entries_total /
+//   agent_cache_reaper_faults_total: reaper 回收/淘汰/失败累计（B-PL-3）
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -78,6 +81,16 @@ struct MetricsInner {
     pub credential_recovery_attempts: AtomicU64,
     /// 凭据恢复成功次数（单调）
     pub credential_recoveries: AtomicU64,
+    /// 缓存活跃字节（记账口径；B-PL-3）
+    pub cache_active_bytes: AtomicU64,
+    /// 缓存容量上界（字节；0 = 不限）
+    pub cache_limit_bytes: AtomicU64,
+    /// 缓存 reaper 累计 TTL 过期回收条目数（单调）
+    pub cache_reaped_entries: AtomicU64,
+    /// 缓存 reaper 累计超界淘汰条目数（单调）
+    pub cache_evicted_entries: AtomicU64,
+    /// 缓存 reaper 累计失败轮数（单调；>0 = 至少有一轮回收失败）
+    pub cache_reaper_faults: AtomicU64,
 }
 
 impl AgentMetrics {
@@ -100,6 +113,11 @@ impl AgentMetrics {
                 credential_alive: AtomicI64::new(0),
                 credential_recovery_attempts: AtomicU64::new(0),
                 credential_recoveries: AtomicU64::new(0),
+                cache_active_bytes: AtomicU64::new(0),
+                cache_limit_bytes: AtomicU64::new(0),
+                cache_reaped_entries: AtomicU64::new(0),
+                cache_evicted_entries: AtomicU64::new(0),
+                cache_reaper_faults: AtomicU64::new(0),
             }),
         }
     }
@@ -205,6 +223,37 @@ impl AgentMetrics {
         self.inner
             .credential_alive
             .store(if alive { 1 } else { 0 }, Ordering::Relaxed);
+    }
+
+    /// 写入缓存容量上界事实（B-PL-3）；由周期采样任务从 CacheService 拉取。
+    ///
+    /// 语义：
+    /// - `active_bytes > limit_bytes`（且 limit > 0）说明处于 reaper 周期内的
+    ///   短暂超界窗口 —— 周期收敛是**已承诺语义**（不是缺陷）；
+    /// - `faults_total` 单调：>0 表示至少有一轮回收失败（缓存可能持续超界）。
+    pub fn set_cache_reaper_stats(
+        &self,
+        active_bytes: u64,
+        limit_bytes: u64,
+        reaped_entries_total: u64,
+        evicted_entries_total: u64,
+        faults_total: u64,
+    ) {
+        self.inner
+            .cache_active_bytes
+            .store(active_bytes, Ordering::Relaxed);
+        self.inner
+            .cache_limit_bytes
+            .store(limit_bytes, Ordering::Relaxed);
+        self.inner
+            .cache_reaped_entries
+            .store(reaped_entries_total, Ordering::Relaxed);
+        self.inner
+            .cache_evicted_entries
+            .store(evicted_entries_total, Ordering::Relaxed);
+        self.inner
+            .cache_reaper_faults
+            .store(faults_total, Ordering::Relaxed);
     }
 
     // ──── 插件指标（观测面）────
@@ -341,6 +390,51 @@ impl AgentMetrics {
         out.push_str(&format!(
             "coord_agent_outbound_credential_recoveries_total {}\n",
             self.inner.credential_recoveries.load(Ordering::Relaxed)
+        ));
+
+        // ──── 缓存容量上界（B-PL-3；周期采样自 CacheService）────
+        out.push_str(
+            "# HELP coord_agent_cache_active_bytes Accounted active cache bytes (data tables)\n",
+        );
+        out.push_str("# TYPE coord_agent_cache_active_bytes gauge\n");
+        out.push_str(&format!(
+            "coord_agent_cache_active_bytes {}\n",
+            self.inner.cache_active_bytes.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP coord_agent_cache_limit_bytes Configured cache capacity limit in bytes \
+             (0 = unlimited)\n",
+        );
+        out.push_str("# TYPE coord_agent_cache_limit_bytes gauge\n");
+        out.push_str(&format!(
+            "coord_agent_cache_limit_bytes {}\n",
+            self.inner.cache_limit_bytes.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP coord_agent_cache_reaped_entries_total TTL-expired cache entries reclaimed \
+             by the reaper; monotonic\n",
+        );
+        out.push_str("# TYPE coord_agent_cache_reaped_entries_total counter\n");
+        out.push_str(&format!(
+            "coord_agent_cache_reaped_entries_total {}\n",
+            self.inner.cache_reaped_entries.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP coord_agent_cache_evicted_entries_total Cache entries evicted to enforce \
+             max_size_bytes; monotonic\n",
+        );
+        out.push_str("# TYPE coord_agent_cache_evicted_entries_total counter\n");
+        out.push_str(&format!(
+            "coord_agent_cache_evicted_entries_total {}\n",
+            self.inner.cache_evicted_entries.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP coord_agent_cache_reaper_faults_total Failed cache reaper passes; monotonic\n",
+        );
+        out.push_str("# TYPE coord_agent_cache_reaper_faults_total counter\n");
+        out.push_str(&format!(
+            "coord_agent_cache_reaper_faults_total {}\n",
+            self.inner.cache_reaper_faults.load(Ordering::Relaxed)
         ));
 
         // ──── 插件指标 ────
@@ -563,6 +657,33 @@ mod tests {
         assert!(healthy.contains("coord_agent_workflow_worker_faults_total 0"));
         assert!(healthy.contains("coord_agent_workflow_loops_finished 0"));
         assert!(healthy.contains("# TYPE coord_agent_workflow_loops_finished gauge"));
+    }
+
+    /// 缓存容量上界（B-PL-3）的五个事实必须真的出现在抓取面上：
+    /// 与 workflow liveness 同一判据 —— 指标的全部意义是"能力可观测"，
+    /// 只测 setter 不测渲染会漏掉"存了但看不到"。
+    #[test]
+    fn test_cache_reaper_metrics_render() {
+        let m = AgentMetrics::new();
+        m.set_cache_reaper_stats(2048, 1024 * 1024, 7, 13, 1);
+        let text = m.render_prometheus_text();
+
+        assert!(text.contains("# TYPE coord_agent_cache_active_bytes gauge"));
+        assert!(text.contains("coord_agent_cache_active_bytes 2048"));
+        assert!(text.contains("coord_agent_cache_limit_bytes 1048576"));
+        assert!(
+            text.contains("# TYPE coord_agent_cache_reaped_entries_total counter"),
+            "过期回收条目是单调累计 ⇒ counter：{text}"
+        );
+        assert!(text.contains("coord_agent_cache_reaped_entries_total 7"));
+        assert!(text.contains("# TYPE coord_agent_cache_evicted_entries_total counter"));
+        assert!(text.contains("coord_agent_cache_evicted_entries_total 13"));
+        assert!(text.contains("coord_agent_cache_reaper_faults_total 1"));
+
+        // 健康态：HELP/TYPE 仍在（Grafana 无数据时不断线），值为 0
+        let healthy = AgentMetrics::new().render_prometheus_text();
+        assert!(healthy.contains("coord_agent_cache_active_bytes 0"));
+        assert!(healthy.contains("coord_agent_cache_reaper_faults_total 0"));
     }
 
     #[test]

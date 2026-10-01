@@ -1479,20 +1479,59 @@ impl AgentServer {
             let data_dir = std::path::PathBuf::from(&self.config.data_dir);
             let cache_svc = Arc::new(crate::services::cache::CacheService::new(
                 data_dir.clone(),
-                // ⚠️ 这个值**只是声明**，CacheService 尚未实现淘汰（见 `CacheService::new`
-                // 的注释与启动告警）。构造参数保留是为了把"配了多少"如实报出来，而不是继续
-                // 用一个下划线参数假装遵守了它。
-                1024 * 1024 * 1024, // 声明的上限：1GB（未强制执行）
+                // 容量上界（B-PL-3——已强制执行）：数据面活跃字节记账 + 服务内
+                // reaper 周期回收（TTL 过期清扫 + 超界按「最后写入序」淘汰；单条
+                // 超限写被拒绝）。周期收敛语义与残余边界见 cache.rs 模块注释与
+                // docs/production/ops/boundaries.md。
+                1024 * 1024 * 1024, // 1GB（强制；周期内收敛，指标可观测）
                 3600,               // default TTL 1 hour
             ));
-            // 绑定自身弱引用，gRPC handler 才能升级 Arc 走 spawn_blocking
+            // 绑定自身弱引用：gRPC handler 升级 Arc 走 spawn_blocking；start() 据此
+            // 挂载后台 reaper（未绑定则不挂载——单测直接调用 reap_once）。
             cache_svc.bind_self_weak(&cache_svc);
             cache_grpc_svc = register_native_service(
                 &plugin_manager,
                 cache_svc.clone(),
-                crate::plugin::AgentGrpcService::Cache(cache_svc),
+                crate::plugin::AgentGrpcService::Cache(cache_svc.clone()),
             )
             .await;
+
+            // 容量上界可观测（B-PL-3）：周期把记账/淘汰事实拉进指标，并在首次出现
+            // reaper 失败时打 ERROR。与 workflow worker 存活采样同一口径：采样任务
+            // 只读，任务死亡表现为指标停滞（本身就是可观测的）。
+            if let Some(metrics) = self.metrics.clone() {
+                let svc = Arc::clone(&cache_svc);
+                tokio::spawn(async move {
+                    let tick = std::time::Duration::from_secs(15);
+                    let mut last_faults = 0u64;
+                    loop {
+                        tokio::time::sleep(tick).await;
+                        if !svc.is_started() {
+                            continue;
+                        }
+                        let Ok(active) = svc.accounted_bytes() else {
+                            continue;
+                        };
+                        let counters = svc.reap_counters();
+                        metrics.set_cache_reaper_stats(
+                            active,
+                            svc.max_size_bytes(),
+                            counters.expired_entries,
+                            counters.evicted_entries,
+                            counters.faults,
+                        );
+                        if counters.faults > last_faults {
+                            tracing::error!(
+                                faults_total = counters.faults,
+                                "cache reaper pass failed (metric: \
+                                 coord_agent_cache_reaper_faults_total); cache may exceed \
+                                 max_size_bytes until a pass succeeds"
+                            );
+                        }
+                        last_faults = counters.faults;
+                    }
+                });
+            }
         }
 
         if self.config.services.mq {

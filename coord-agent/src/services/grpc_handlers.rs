@@ -97,6 +97,11 @@ fn map_service_error(e: impl std::fmt::Display) -> Status {
     if msg.to_ascii_lowercase().contains("not leader") {
         return Status::failed_precondition(msg);
     }
+    if msg.contains("max_size_bytes") {
+        // 容量上界拒绝（B-PL-3）：可诊断的语义错误，不脱敏。
+        // 锚点 "max_size_bytes" 由 CacheService::ensure_entry_fits 生成。
+        return Status::resource_exhausted(msg);
+    }
     sanitized_internal(msg)
 }
 
@@ -434,7 +439,7 @@ impl Cache for CacheService {
             let key = req.key.clone();
             self.run_blocking(move |me| me.string_put(&key, req.value, ttl))
                 .await
-                .map_err(sanitized_internal)?;
+                .map_err(map_service_error)?;
         }
         Ok(Response::new(CacheSetResponse {}))
     }
@@ -491,7 +496,7 @@ impl Cache for CacheService {
             let field = req.field.clone();
             self.run_blocking(move |me| me.hash_field_put(&key, &field, req.value, None))
                 .await
-                .map_err(sanitized_internal)?;
+                .map_err(map_service_error)?;
         }
         Ok(Response::new(CacheHSetResponse {}))
     }
@@ -524,7 +529,7 @@ impl Cache for CacheService {
             let key = req.key.clone();
             self.run_blocking(move |me| me.list_push_left(&key, req.value, None))
                 .await
-                .map_err(sanitized_internal)?;
+                .map_err(map_service_error)?;
         }
         let key = req.key.clone();
         match self.run_blocking(move |me| me.list_length(&key)).await {
@@ -600,7 +605,7 @@ impl Cache for CacheService {
             let key = req.key.clone();
             self.run_blocking(move |me| me.set_add(&key, req.member, None))
                 .await
-                .map_err(sanitized_internal)?;
+                .map_err(map_service_error)?;
         }
         Ok(Response::new(CacheSAddResponse {}))
     }
