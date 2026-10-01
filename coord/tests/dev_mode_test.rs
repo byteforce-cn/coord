@@ -177,11 +177,18 @@ mod tests {
                 .await;
         });
 
-        // 等待 Raft Leader 选举完成
-        for _ in 0..30 {
+        // 等待 Raft Leader 选举完成。
+        // 有界等待 + fail-loud（与 coord/tests/common 的同类等待同口径）：
+        // 静默放行会把选举超时藏进下游用例；CI 满载下 3s 不足（R-TST-21）。
+        let leader_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
             if raft.current_leader().await.is_some() {
                 break;
             }
+            assert!(
+                tokio::time::Instant::now() < leader_deadline,
+                "raft did not elect a leader within 10s"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 

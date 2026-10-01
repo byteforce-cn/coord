@@ -188,12 +188,27 @@ export async function handleInvoke(method, payload) {
         });
 
         tokio::time::sleep(Duration::from_millis(300)).await;
-        for _ in 0..30 {
+        // 返回前必须确定「leader 已选出 + server gRPC 可连」，二者缺一都可能让
+        // 后续 invoke 以不可定位的方式假红（"no leader found; all endpoints
+        // unreachable" 或 agent 自举被拖死）：
+        // - leader 等待放宽到 10s（R-TST-21 同口径：CI 满载下选举被调度延迟，3s
+        //   不足）；超时必须 panic —— 静默继续等于把超时藏进下游用例；
+        // - leader 检查只看 raft 任务，不能证明 gRPC serve 任务已 bind（固定
+        //   sleep 同理），所以再由 `connect_ready` 的有界重试保证 listener 可连。
+        let leader_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
             if raft.current_leader().await.is_some() {
                 break;
             }
+            assert!(
+                tokio::time::Instant::now() < leader_deadline,
+                "single-node raft did not elect a leader within 10s — slower than \
+                 the CI-full-load baseline; investigate instead of letting \
+                 downstream invokes fail with misleading errors"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        connect_ready(&grpc_addr).await;
 
         (
             grpc_addr,
@@ -627,7 +642,7 @@ export async function handleInvoke(method, payload) {
         KvClient::new(connect_ready(addr).await)
     }
 
-    /// 等本地 gRPC 端点就绪后建链。
+    /// 等本地 gRPC 端点（agent / server）就绪后建链。
     ///
     /// 为什么是有界重试而不是固定 sleep：测试进程内的 `serve()` 是异步 spawn 的，
     /// 固定等待**并不保证**在结束时已经 bind；并发跑全量套件时（8 核跑多个
@@ -642,7 +657,7 @@ export async function handleInvoke(method, payload) {
                 Ok(channel) => return channel,
                 Err(e) => {
                     if tokio::time::Instant::now() >= deadline {
-                        panic!("agent gRPC endpoint {addr} never became ready: {e}");
+                        panic!("gRPC endpoint {addr} never became ready: {e}");
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
