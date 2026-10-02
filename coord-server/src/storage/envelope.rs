@@ -1,16 +1,19 @@
-// 持久化值统一格式信封 —— bincode 退场 P0「先立格式可辨识」
-// （计划与判据见 docs/production/ops/dependencies.md）
+// 持久化值统一格式信封 —— bincode 退场 P0「先立格式可辨识」/ P1「读路径双解」
+// （计划与判据见 docs/production/ops/dependencies.md；替代编码选型见 docs/adr/0005）
 //
-// 布局：MAGIC(4B) | VERSION(1B) | bincode(payload)
+// 布局：MAGIC(4B) | VERSION(1B) | payload
+//   VERSION=1 ⇒ bincode(payload)（现行写路径）
+//   VERSION=2 ⇒ postcard(payload)（读路径支持；写路径切换另阶段）
+//   无魔数    ⇒ 历史无前缀行，整行按 bincode 解码
 //
 // 为什么需要信封：raft 日志行 / PD 元数据行 / 对象 manifest 行的值直接是
 // bincode 字节，且载体类型（openraft 实体类型、无版本字段的自定义结构）
 // 无法在不破坏旧数据解码的前提下追加版本字段——换序列化格式前必须先能
 // 从字节上**辨识**一行数据用了什么格式。
 //
-// 读兼容：无前缀的行（本信封落地前写入的旧数据）按旧格式直接 bincode 解码。
-// 写路径：一律写带前缀的新格式。滚动升级必须先升级读路径（本模块随二进制
-// 发布），再产生新格式写入。
+// 读兼容：三路（V1 / V2 / 无前缀）；三条路径均精确消费——尾随字节必须显式
+// 报错，不得被便捷解码函数静默忽略。写路径：一律写带前缀的 V1。滚动升级
+// 必须先升级读路径（本模块随二进制发布），再产生新格式写入。
 
 use serde::{Deserialize, Serialize};
 
@@ -21,8 +24,11 @@ use serde::{Deserialize, Serialize};
 /// 信封；`"CRD"` 便于在 hexdump 中肉眼辨识。
 pub const MAGIC: [u8; 4] = [0x02, b'C', b'R', b'D'];
 
-/// 信封格式版本（魔数之后的 1 字节）。
+/// 写路径当前信封版本（bincode 载荷），魔数之后的 1 字节。
 pub const VERSION: u8 = 1;
+
+/// V2 信封版本：postcard 载荷（ADR-0005；读路径支持，写路径切换在 P2）。
+pub const VERSION_V2: u8 = 2;
 
 /// 前缀总长：魔数 4B + 版本 1B。
 pub const PREFIX_LEN: usize = MAGIC.len() + 1;
@@ -30,19 +36,28 @@ pub const PREFIX_LEN: usize = MAGIC.len() + 1;
 /// 信封/旧格式解码错误。
 #[derive(Debug)]
 pub enum DecodeError {
-    /// 数据带信封魔数，但版本字节不是当前支持的值（不认识的新版本或被篡改）。
+    /// 数据带信封魔数，但版本字节不是任何受支持的版本（不认识的新版本或被篡改）。
     UnsupportedVersion(u8),
-    /// payload（或旧格式整行）bincode 解码失败。
+    /// V1 行 payload（或旧格式整行）bincode 解码失败（含尾随字节）。
     Payload(bincode::Error),
+    /// V2 行 payload postcard 解码失败。
+    PayloadV2(postcard::Error),
+    /// V2 行 payload 精确消费后仍有剩余字节（解码器不得静默忽略尾随数据）。
+    TrailingBytes(usize),
 }
 
 impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnsupportedVersion(v) => {
-                write!(f, "unsupported envelope version: {v} (expected {VERSION})")
+                write!(
+                    f,
+                    "unsupported envelope version: {v} (expected {VERSION} or {VERSION_V2})"
+                )
             }
             Self::Payload(e) => write!(f, "payload decode failed: {e}"),
+            Self::PayloadV2(e) => write!(f, "postcard payload decode failed: {e}"),
+            Self::TrailingBytes(n) => write!(f, "trailing bytes after envelope payload: {n}"),
         }
     }
 }
@@ -61,26 +76,64 @@ pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, bincode::Error> {
     Ok(out)
 }
 
-/// 解码：带前缀行校验版本后解 payload；无前缀行（旧数据）按旧格式解码。
+/// 解码（三路）：V1（bincode payload）/ V2（postcard payload）按版本分发；
+/// 无前缀行（历史数据）按 bincode 整行解码。
 ///
-/// 篡改前缀 ⇒ 显式错误而非静默解出垃圾：
-/// - 版本字节被篡改 ⇒ [`DecodeError::UnsupportedVersion`]；
-/// - 魔数被破坏 ⇒ 只能走旧格式路径，由 bincode 的结构校验与调用方的行
-///   key/内容不变量（raft 日志条目 index、PD region_id）兜底拦截。
+/// 精确消费：三条路径均拒绝尾随字节（不得静默解出前缀合法但内容多余的垃圾）。
+/// 篡改前缀 ⇒ 显式错误：
+/// - 版本字节非受支持版本 ⇒ [`DecodeError::UnsupportedVersion`]；
+/// - 魔数被破坏 ⇒ 走旧格式路径，由 bincode 的结构校验与调用方的行 key/内容
+///   不变量（raft 日志条目 index、PD region_id）兜底拦截。
 ///
-/// 已知边界：对既无结构约束又无内容不变量的行（如 openraft `Vote` 全字段均为
-/// 任意数值），魔数单字节损坏存在被宽松解码接受的理论窗口；该类残余窗口在 P1
-/// 换格式（更强信封/校验）时消除。
+/// 已知边界：V1 行中既无结构约束又无内容不变量的类型（如 openraft `Vote`
+/// 全字段均为任意数值）在魔数单字节损坏后存在静默解出偏差值的理论窗口；
+/// V2（postcard）载荷按 bincode 结构几乎不可能成立（ADR-0005 实测逐字节
+/// 破坏全部显式失败），V1 残余窗口在 bincode 退场完成后消失。
 pub fn decode<'a, T: Deserialize<'a>>(data: &'a [u8]) -> Result<T, DecodeError> {
     if data.len() >= PREFIX_LEN && data[..MAGIC.len()] == MAGIC {
-        let version = data[MAGIC.len()];
-        if version != VERSION {
-            return Err(DecodeError::UnsupportedVersion(version));
+        let payload = &data[PREFIX_LEN..];
+        match data[MAGIC.len()] {
+            VERSION => decode_bincode_exact(payload),
+            VERSION_V2 => decode_postcard_exact(payload),
+            other => Err(DecodeError::UnsupportedVersion(other)),
         }
-        bincode::deserialize(&data[PREFIX_LEN..]).map_err(DecodeError::Payload)
     } else {
-        bincode::deserialize(data).map_err(DecodeError::Payload)
+        decode_bincode_exact(data)
     }
+}
+
+/// bincode 精确消费：fixint + 小端（与历史行字节兼容），拒绝尾随字节。
+fn decode_bincode_exact<'a, T: Deserialize<'a>>(data: &'a [u8]) -> Result<T, DecodeError> {
+    use bincode::Options;
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .deserialize(data)
+        .map_err(DecodeError::Payload)
+}
+
+/// postcard 精确消费：`take_from_bytes` 取 remainder 并断言为空
+/// （`postcard::from_bytes` 等便捷函数会静默忽略尾随字节）。
+fn decode_postcard_exact<'a, T: Deserialize<'a>>(data: &'a [u8]) -> Result<T, DecodeError> {
+    let (value, remainder) =
+        postcard::take_from_bytes::<T>(data).map_err(DecodeError::PayloadV2)?;
+    if !remainder.is_empty() {
+        return Err(DecodeError::TrailingBytes(remainder.len()));
+    }
+    Ok(value)
+}
+
+/// 测试构造器：生成 V2（postcard 载荷）信封行。
+///
+/// 写路径切换（P2）前生产代码不产生 V2 行；载体读路径的正反用例与对照测试
+/// 需要构造合法 V2 行。
+#[cfg(test)]
+pub(crate) fn encode_v2<T: Serialize>(value: &T) -> Vec<u8> {
+    let payload = postcard::to_allocvec(value).expect("postcard payload encode");
+    let mut out = Vec::with_capacity(PREFIX_LEN + payload.len());
+    out.extend_from_slice(&MAGIC);
+    out.push(VERSION_V2);
+    out.extend_from_slice(&payload);
+    out
 }
 
 #[cfg(test)]
@@ -148,5 +201,87 @@ mod tests {
             decode::<Sample>(&bytes).is_err(),
             "tampered magic must not decode into a value"
         );
+    }
+
+    // ──── V2（postcard）读路径：双解对照 + 精确消费 ────
+
+    /// V2 行布局：MAGIC + VERSION_V2 + postcard payload（逐字节）。
+    #[test]
+    fn test_v2_layout() {
+        let bytes = encode_v2(&sample());
+        assert!(bytes.starts_with(&MAGIC));
+        assert_eq!(bytes[MAGIC.len()], VERSION_V2);
+        let payload = postcard::to_allocvec(&sample()).unwrap();
+        assert_eq!(&bytes[PREFIX_LEN..], payload.as_slice());
+    }
+
+    /// 对照测试（bincode 侧）：解码 → 再编码逐字节稳定。
+    #[test]
+    fn test_v1_reencode_is_byte_stable() {
+        let bytes = encode(&sample()).unwrap();
+        let decoded: Sample = decode(&bytes).unwrap();
+        assert_eq!(decoded, sample());
+        assert_eq!(encode(&decoded).unwrap(), bytes);
+    }
+
+    /// 对照测试（postcard 侧）：解码 → 再编码逐字节稳定。
+    #[test]
+    fn test_v2_reencode_is_byte_stable() {
+        let bytes = encode_v2(&sample());
+        let decoded: Sample = decode(&bytes).unwrap();
+        assert_eq!(decoded, sample());
+        assert_eq!(encode_v2(&decoded), bytes);
+    }
+
+    /// 三路尾随篡改 ⇒ 全部显式失败，不得静默忽略剩余字节（精确消费）。
+    /// 负控制：bincode 侧改用 allow_trailing / 去掉 V2 remainder 断言 ⇒ 对应用例必红。
+    #[test]
+    fn test_trailing_bytes_rejected_on_all_paths() {
+        let mut v1 = encode(&sample()).unwrap();
+        v1.extend_from_slice(&[0xDE, 0xAD]);
+        assert!(matches!(
+            decode::<Sample>(&v1),
+            Err(DecodeError::Payload(_))
+        ));
+
+        let mut legacy = bincode::serialize(&sample()).unwrap();
+        legacy.extend_from_slice(&[0xDE, 0xAD]);
+        assert!(matches!(
+            decode::<Sample>(&legacy),
+            Err(DecodeError::Payload(_))
+        ));
+
+        let mut v2 = encode_v2(&sample());
+        v2.extend_from_slice(&[0xDE, 0xAD]);
+        assert!(matches!(
+            decode::<Sample>(&v2),
+            Err(DecodeError::TrailingBytes(2))
+        ));
+    }
+
+    /// V2 行魔数逐字节破坏 ⇒ 全部显式失败（ADR-0005 实验锚点：postcard 载荷
+    /// 不可能按 bincode 结构成立，不得静默解出偏差值）。
+    /// 负控制：去掉魔数比较（仅按版本字节分发）⇒ 本用例必红。
+    #[test]
+    fn test_v2_magic_corruption_fails_explicitly() {
+        for i in 0..MAGIC.len() {
+            let mut bytes = encode_v2(&sample());
+            bytes[i] = bytes[i].wrapping_add(1);
+            assert!(
+                decode::<Sample>(&bytes).is_err(),
+                "V2 row with corrupted magic byte {i} must fail explicitly"
+            );
+        }
+    }
+
+    /// 已知版本之外的版本字节 ⇒ UnsupportedVersion。
+    #[test]
+    fn test_unknown_version_after_v2_is_rejected() {
+        let mut bytes = encode(&sample()).unwrap();
+        bytes[MAGIC.len()] = VERSION_V2 + 1;
+        match decode::<Sample>(&bytes) {
+            Err(DecodeError::UnsupportedVersion(v)) => assert_eq!(v, VERSION_V2 + 1),
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
     }
 }

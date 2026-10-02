@@ -36,7 +36,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 // ──── Redb 表定义 ────
 
 /// PD Region 元数据表：Key = `/pd/region/{region_id:016x}`，
-/// Value = 统一信封包裹的 bincode(RegionMeta)（见 `crate::storage::envelope`）
+/// Value = 统一信封包裹的 RegionMeta（V1/V2/无前缀读兼容见 `crate::storage::envelope`）
 const TABLE_PD_REGION: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pd_region");
 
 // ============================================================================
@@ -906,7 +906,7 @@ mod tests {
     /// 负控制：放宽版本校验 / 去掉行 key 不变量 ⇒ 对应用例必红。
     #[test]
     fn test_pd_tampered_envelope_fails_loudly() {
-        use crate::storage::envelope::{MAGIC, VERSION};
+        use crate::storage::envelope::{MAGIC, VERSION, VERSION_V2};
 
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("pd/pd-meta.db");
@@ -924,11 +924,11 @@ mod tests {
         };
         assert_eq!(original[MAGIC.len()], VERSION);
 
-        // 1) 篡改版本字节 ⇒ 显式错误（认识魔数、版本不支持）
+        // 1) 篡改版本字节 ⇒ 显式错误（认识魔数、不在受支持版本内）
         {
             let db = redb::Database::open(&db_path).unwrap();
             let mut row = original.clone();
-            row[MAGIC.len()] = VERSION + 1;
+            row[MAGIC.len()] = VERSION_V2 + 1;
             let write_tx = db.begin_write().unwrap();
             {
                 let mut table = write_tx.open_table(super::TABLE_PD_REGION).unwrap();
@@ -962,6 +962,139 @@ mod tests {
         match PdMetaStore::open(dir.path()) {
             Err(Error::DataCorruption(_)) => {}
             _ => panic!("tampered magic must fail open explicitly"),
+        }
+    }
+
+    // ──── V2（postcard）读路径：双解 + 混读 + 精确消费 ────
+
+    /// V2 行（postcard payload）必须可恢复（新行读）。
+    /// 负控制：删除 V2 分支 ⇒ 本用例必红。
+    #[test]
+    fn test_pd_v2_row_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = make_meta(0x88, vec![0x11], vec![0x22]);
+        {
+            let _store = PdMetaStore::open(dir.path()).unwrap();
+        }
+        {
+            let db = redb::Database::open(dir.path().join("pd/pd-meta.db")).unwrap();
+            let write_tx = db.begin_write().unwrap();
+            {
+                let mut table = write_tx.open_table(super::TABLE_PD_REGION).unwrap();
+                let key = coord_core::region::encode_pd_region_key(0x88);
+                table
+                    .insert(
+                        key.as_slice(),
+                        crate::storage::envelope::encode_v2(&meta).as_slice(),
+                    )
+                    .unwrap();
+            }
+            write_tx.commit().unwrap();
+        }
+
+        let store = PdMetaStore::open(dir.path()).unwrap();
+        let loaded = store.get_region(0x88).unwrap();
+        assert_eq!(loaded.start_key, vec![0x11]);
+        assert_eq!(loaded.end_key, vec![0x22]);
+    }
+
+    /// 混读：旧行（无前缀）/ V1 / V2 三种编码的 Region 行共存，全部可恢复。
+    /// 负控制：任一读路径移除 ⇒ 本用例必红。
+    #[test]
+    fn test_pd_mixed_rows_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = make_meta(0x71, vec![0x01], vec![0x02]);
+        let v1 = make_meta(0x72, vec![0x03], vec![0x04]);
+        let v2 = make_meta(0x73, vec![0x05], vec![0x06]);
+        {
+            let _store = PdMetaStore::open(dir.path()).unwrap();
+        }
+        {
+            let db = redb::Database::open(dir.path().join("pd/pd-meta.db")).unwrap();
+            let write_tx = db.begin_write().unwrap();
+            {
+                let mut table = write_tx.open_table(super::TABLE_PD_REGION).unwrap();
+                for (id, row) in [
+                    (0x71u64, bincode::serialize(&legacy).unwrap()),
+                    (0x72u64, crate::storage::envelope::encode(&v1).unwrap()),
+                    (0x73u64, crate::storage::envelope::encode_v2(&v2)),
+                ] {
+                    let key = coord_core::region::encode_pd_region_key(id);
+                    table.insert(key.as_slice(), row.as_slice()).unwrap();
+                }
+            }
+            write_tx.commit().unwrap();
+        }
+
+        let store = PdMetaStore::open(dir.path()).unwrap();
+        assert_eq!(store.list_regions().len(), 3);
+        assert_eq!(store.get_region(0x71).unwrap().start_key, vec![0x01]);
+        assert_eq!(store.get_region(0x72).unwrap().start_key, vec![0x03]);
+        assert_eq!(store.get_region(0x73).unwrap().start_key, vec![0x05]);
+    }
+
+    /// V2 行魔数逐字节破坏 ⇒ open 全部显式 DataCorruption（ADR-0005 锚点）。
+    /// 负控制：去掉魔数比较 / 加试错解码 ⇒ 本用例必红。
+    #[test]
+    fn test_pd_v2_magic_corruption_fails_loudly() {
+        use crate::storage::envelope::{encode_v2, MAGIC};
+
+        let meta = make_meta(0x99, vec![], vec![]);
+        for i in 0..MAGIC.len() {
+            let dir = tempfile::tempdir().unwrap();
+            {
+                let _store = PdMetaStore::open(dir.path()).unwrap();
+            }
+            {
+                let db = redb::Database::open(dir.path().join("pd/pd-meta.db")).unwrap();
+                let write_tx = db.begin_write().unwrap();
+                {
+                    let mut table = write_tx.open_table(super::TABLE_PD_REGION).unwrap();
+                    let key = coord_core::region::encode_pd_region_key(0x99);
+                    let mut row = encode_v2(&meta);
+                    row[i] = row[i].wrapping_add(1);
+                    table.insert(key.as_slice(), row.as_slice()).unwrap();
+                }
+                write_tx.commit().unwrap();
+            }
+            match PdMetaStore::open(dir.path()) {
+                Err(Error::DataCorruption(_)) => {}
+                _ => panic!("V2 row magic byte {i} corruption must fail open explicitly"),
+            }
+        }
+    }
+
+    /// 尾随字节篡改（无前缀 / V1 / V2）⇒ open 显式 DataCorruption（精确消费）。
+    /// 负控制：bincode 侧改回 allow_trailing / 去掉 V2 remainder 断言 ⇒ 对应用例必红。
+    #[test]
+    fn test_pd_trailing_bytes_fail_loudly() {
+        let meta = make_meta(0xA1, vec![0x01], vec![]);
+        let mut legacy = bincode::serialize(&meta).unwrap();
+        legacy.extend_from_slice(&[0xDE, 0xAD]);
+        let mut v1 = crate::storage::envelope::encode(&meta).unwrap();
+        v1.extend_from_slice(&[0xDE, 0xAD]);
+        let mut v2 = crate::storage::envelope::encode_v2(&meta);
+        v2.extend_from_slice(&[0xDE, 0xAD]);
+
+        for (label, row) in [("legacy", legacy), ("v1", v1), ("v2", v2)] {
+            let dir = tempfile::tempdir().unwrap();
+            {
+                let _store = PdMetaStore::open(dir.path()).unwrap();
+            }
+            {
+                let db = redb::Database::open(dir.path().join("pd/pd-meta.db")).unwrap();
+                let write_tx = db.begin_write().unwrap();
+                {
+                    let mut table = write_tx.open_table(super::TABLE_PD_REGION).unwrap();
+                    let key = coord_core::region::encode_pd_region_key(0xA1);
+                    table.insert(key.as_slice(), row.as_slice()).unwrap();
+                }
+                write_tx.commit().unwrap();
+            }
+            match PdMetaStore::open(dir.path()) {
+                Err(Error::DataCorruption(_)) => {}
+                _ => panic!("{label} row with trailing bytes must fail open explicitly"),
+            }
         }
     }
 }

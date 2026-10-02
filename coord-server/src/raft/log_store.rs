@@ -23,8 +23,8 @@ use crate::storage::snapshot::SnapshotTracker;
 
 // ──── Redb 表定义 ────
 
-/// Raft Log 条目表：Key = index (u64 BE)，Value = 统一信封包裹的 bincode(Entry)
-/// （信封与旧格式兼容见 `crate::storage::envelope`）
+/// Raft Log 条目表：Key = index (u64 BE)，Value = 统一信封包裹的 Entry
+/// （V1/V2/无前缀读兼容见 `crate::storage::envelope`）
 const TABLE_LOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("raft_log");
 
 /// Vote 表：单条记录 Key = b"vote"
@@ -44,9 +44,9 @@ const KEY_LAST_PURGED: &[u8] = b"last_purged";
 
 // ──── 序列化工具（仅用于本模块持久化行） ────
 //
-// 行值统一为「格式信封 + bincode」（`crate::storage::envelope`）：写路径一律带
-// 魔数/版本前缀；读路径兼容本信封落地前写入的无前缀旧行。四项表（日志条目/
-// Vote/Committed/LastPurged）共用这两个函数，保证前缀口径一致。
+// 行值统一为格式信封（`crate::storage::envelope`）：写路径一律带魔数/版本
+// 前缀（V1 bincode）；读路径兼容无前缀旧行与 V1 / V2（postcard）。四项表
+// （日志条目/Vote/Committed/LastPurged）共用这两个函数，保证前缀口径一致。
 
 fn serialize<T: Serialize>(value: &T) -> Result<Vec<u8>, io::Error> {
     crate::storage::envelope::encode(value)
@@ -636,7 +636,7 @@ mod tests {
     /// 负控制：放宽版本校验 / 把损坏行当旧格式强行解码 ⇒ 本用例必红。
     #[test]
     fn test_raft_tampered_envelope_fails_loudly() {
-        use crate::storage::envelope::{MAGIC, VERSION};
+        use crate::storage::envelope::{MAGIC, VERSION, VERSION_V2};
 
         let mut store = create_test_log_store();
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -667,10 +667,10 @@ mod tests {
                 write_tx.commit().unwrap();
             };
 
-        // 1) 篡改 Vote 行的版本字节（认识魔数、版本不支持 ⇒ 显式错误）
+        // 1) 篡改 Vote 行的版本字节（认识魔数、不在受支持版本内 ⇒ 显式错误）
         let mut vote_row = raw_row(&store, TABLE_VOTE, KEY_VOTE);
         assert_eq!(vote_row[MAGIC.len()], VERSION);
-        vote_row[MAGIC.len()] = VERSION + 1;
+        vote_row[MAGIC.len()] = VERSION_V2 + 1;
         overwrite_row(&store, TABLE_VOTE, KEY_VOTE, &vote_row);
         let err = rt.block_on(async { store.read_vote().await }).unwrap_err();
         assert!(
@@ -678,17 +678,274 @@ mod tests {
             "tampered version must fail explicitly, got: {err}"
         );
 
-        // 2) 篡改 Entry 行的魔数首字节（只能按旧格式解；bincode 对 Option 宽松，
-        //    可能解出垃圾条目 ⇒ 由行 key 与内容的 index 不变量兜底拦截）
+        // 2) 篡改 Entry 行的魔数首字节（魔数损坏 ⇒ 只能按旧格式整行解码；
+        //    bincode 结构不成立或尾随剩余字节 ⇒ 显式失败，不会静默解出垃圾）
         let mut entry_row = raw_row(&store, TABLE_LOG, index_key(1).as_slice());
         assert_eq!(entry_row[0], MAGIC[0]);
         entry_row[0] = 0x03;
         overwrite_row(&store, TABLE_LOG, index_key(1).as_slice(), &entry_row);
         let err = store.get_entry_at(1).unwrap_err();
         assert!(
-            err.to_string().contains("index mismatch"),
+            err.to_string().contains("decode raft row"),
             "corrupted magic must fail explicitly, got: {err}"
         );
+
+        // 3) 结构合法但内容被改（index 与行 key 不一致）⇒ 由 key/内容
+        //    不变量兜底拦截（魔数完好时结构校验拦不住数值篡改）
+        let mut entry = test_entry(1);
+        entry.log_id.index = 2;
+        overwrite_row(
+            &store,
+            TABLE_LOG,
+            index_key(1).as_slice(),
+            &serialize(&entry).unwrap(),
+        );
+        let err = store.get_entry_at(1).unwrap_err();
+        assert!(
+            err.to_string().contains("index mismatch"),
+            "row key invariant must catch index tamper, got: {err}"
+        );
+    }
+
+    /// V2（postcard）行：四个表全部可读（新行读）。
+    /// 负控制：删除 V2 分支（视为不支持版本）⇒ 本用例必红。
+    #[test]
+    fn test_raft_v2_rows_decode_all_tables() {
+        use crate::storage::envelope::encode_v2;
+
+        let mut store = create_test_log_store();
+        let vote = VoteOf::<TypeConfig>::new(7, 2);
+        let entry = test_entry(1);
+        let committed = LogIdOf::<TypeConfig>::new(
+            openraft::impls::leader_id_adv::LeaderId {
+                term: 3u64,
+                node_id: 1u64,
+            },
+            5,
+        );
+        let last_purged = LogIdOf::<TypeConfig>::new(
+            openraft::impls::leader_id_adv::LeaderId {
+                term: 2u64,
+                node_id: 1u64,
+            },
+            3,
+        );
+
+        {
+            let write_tx = store.db.begin_write().unwrap();
+            {
+                let mut vote_table = write_tx.open_table(TABLE_VOTE).unwrap();
+                vote_table
+                    .insert(KEY_VOTE, encode_v2(&vote).as_slice())
+                    .unwrap();
+                let mut committed_table = write_tx.open_table(TABLE_COMMITTED).unwrap();
+                committed_table
+                    .insert(KEY_COMMITTED, encode_v2(&committed).as_slice())
+                    .unwrap();
+                let mut purged_table = write_tx.open_table(TABLE_LAST_PURGED).unwrap();
+                purged_table
+                    .insert(KEY_LAST_PURGED, encode_v2(&last_purged).as_slice())
+                    .unwrap();
+                let mut log_table = write_tx.open_table(TABLE_LOG).unwrap();
+                log_table
+                    .insert(index_key(1).as_slice(), encode_v2(&entry).as_slice())
+                    .unwrap();
+            }
+            write_tx.commit().unwrap();
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            assert_eq!(store.read_vote().await.unwrap(), Some(vote));
+            assert_eq!(store.read_committed().await.unwrap(), Some(committed));
+            let entries = store.try_get_log_entries(1u64..=1).await.unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].log_id, entry.log_id);
+        });
+        assert_eq!(store.last_purged().unwrap(), Some(last_purged));
+    }
+
+    /// 混读：同一存储内旧行（无前缀）/ V1 / V2 三路共存，全部可读。
+    /// 负控制：任一读路径移除 ⇒ 对应用例必红。
+    #[test]
+    fn test_raft_mixed_format_rows_decode() {
+        use crate::storage::envelope::encode_v2;
+
+        let mut store = create_test_log_store();
+        let vote_v2 = VoteOf::<TypeConfig>::new(7, 2);
+        let committed_legacy = LogIdOf::<TypeConfig>::new(
+            openraft::impls::leader_id_adv::LeaderId {
+                term: 3u64,
+                node_id: 1u64,
+            },
+            5,
+        );
+        let purged_v1 = LogIdOf::<TypeConfig>::new(
+            openraft::impls::leader_id_adv::LeaderId {
+                term: 2u64,
+                node_id: 1u64,
+            },
+            3,
+        );
+        let entry_legacy = test_entry(1);
+        let entry_v1 = test_entry(2);
+        let entry_v2 = test_entry(3);
+
+        {
+            let write_tx = store.db.begin_write().unwrap();
+            {
+                let mut vote_table = write_tx.open_table(TABLE_VOTE).unwrap();
+                vote_table
+                    .insert(KEY_VOTE, encode_v2(&vote_v2).as_slice())
+                    .unwrap();
+                let mut committed_table = write_tx.open_table(TABLE_COMMITTED).unwrap();
+                committed_table
+                    .insert(
+                        KEY_COMMITTED,
+                        bincode::serialize(&committed_legacy).unwrap().as_slice(),
+                    )
+                    .unwrap();
+                let mut purged_table = write_tx.open_table(TABLE_LAST_PURGED).unwrap();
+                purged_table
+                    .insert(KEY_LAST_PURGED, serialize(&purged_v1).unwrap().as_slice())
+                    .unwrap();
+                let mut log_table = write_tx.open_table(TABLE_LOG).unwrap();
+                log_table
+                    .insert(
+                        index_key(1).as_slice(),
+                        bincode::serialize(&entry_legacy).unwrap().as_slice(),
+                    )
+                    .unwrap();
+                log_table
+                    .insert(
+                        index_key(2).as_slice(),
+                        serialize(&entry_v1).unwrap().as_slice(),
+                    )
+                    .unwrap();
+                log_table
+                    .insert(index_key(3).as_slice(), encode_v2(&entry_v2).as_slice())
+                    .unwrap();
+            }
+            write_tx.commit().unwrap();
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            assert_eq!(store.read_vote().await.unwrap(), Some(vote_v2));
+            assert_eq!(
+                store.read_committed().await.unwrap(),
+                Some(committed_legacy)
+            );
+            let entries = store.try_get_log_entries(1u64..=3).await.unwrap();
+            let indices: Vec<u64> = entries.iter().map(|e| e.log_id.index).collect();
+            assert_eq!(indices, vec![1, 2, 3]);
+        });
+        assert_eq!(store.last_purged().unwrap(), Some(purged_v1));
+    }
+
+    /// 尾随字节篡改（V1 / 无前缀 / V2）⇒ 读路径显式失败（精确消费）。
+    /// 负控制：bincode 侧改回 allow_trailing / 去掉 V2 remainder 断言 ⇒ 对应用例必红。
+    #[test]
+    fn test_raft_trailing_bytes_rejected() {
+        use crate::storage::envelope::encode_v2;
+
+        let mut store = create_test_log_store();
+        let mut vote_v1 = serialize(&VoteOf::<TypeConfig>::new(5, 1)).unwrap();
+        vote_v1.extend_from_slice(&[0xDE, 0xAD]);
+        let mut committed_legacy = bincode::serialize(&LogIdOf::<TypeConfig>::new(
+            openraft::impls::leader_id_adv::LeaderId {
+                term: 1u64,
+                node_id: 0u64,
+            },
+            10,
+        ))
+        .unwrap();
+        committed_legacy.extend_from_slice(&[0xDE, 0xAD]);
+        let mut purged_v2 = encode_v2(&LogIdOf::<TypeConfig>::new(
+            openraft::impls::leader_id_adv::LeaderId {
+                term: 1u64,
+                node_id: 0u64,
+            },
+            9,
+        ));
+        purged_v2.extend_from_slice(&[0xDE, 0xAD]);
+
+        {
+            let write_tx = store.db.begin_write().unwrap();
+            {
+                let mut vote_table = write_tx.open_table(TABLE_VOTE).unwrap();
+                vote_table.insert(KEY_VOTE, vote_v1.as_slice()).unwrap();
+                let mut committed_table = write_tx.open_table(TABLE_COMMITTED).unwrap();
+                committed_table
+                    .insert(KEY_COMMITTED, committed_legacy.as_slice())
+                    .unwrap();
+                let mut purged_table = write_tx.open_table(TABLE_LAST_PURGED).unwrap();
+                purged_table
+                    .insert(KEY_LAST_PURGED, purged_v2.as_slice())
+                    .unwrap();
+            }
+            write_tx.commit().unwrap();
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt.block_on(async { store.read_vote().await }).unwrap_err();
+        assert!(
+            err.to_string().contains("decode raft row"),
+            "V1 trailing bytes must fail explicitly, got: {err}"
+        );
+        let err = rt
+            .block_on(async { store.read_committed().await })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("decode raft row"),
+            "legacy trailing bytes must fail explicitly, got: {err}"
+        );
+        let err = store.last_purged().unwrap_err();
+        assert!(
+            err.to_string().contains("trailing bytes"),
+            "V2 trailing bytes must fail explicitly, got: {err}"
+        );
+    }
+
+    /// V2 行魔数逐字节破坏 ⇒ 四个表类型全部显式失败（ADR-0005 锚点：
+    /// postcard 载荷不可能按 bincode 结构成立）。
+    /// 负控制：去掉魔数比较 / 给旧格式回退加试错解码 ⇒ 本用例必红。
+    #[test]
+    fn test_v2_magic_corruption_fails_explicitly_all_tables() {
+        use crate::storage::envelope::{encode_v2, MAGIC};
+
+        let vote = VoteOf::<TypeConfig>::new(5, 1);
+        let entry = test_entry(1);
+        let log_id = LogIdOf::<TypeConfig>::new(
+            openraft::impls::leader_id_adv::LeaderId {
+                term: 1u64,
+                node_id: 1u64,
+            },
+            1,
+        );
+
+        for i in 0..MAGIC.len() {
+            let mut vote_row = encode_v2(&vote);
+            vote_row[i] = vote_row[i].wrapping_add(1);
+            assert!(
+                deserialize::<VoteOf<TypeConfig>>(&vote_row).is_err(),
+                "V2 vote row magic byte {i} corruption must fail explicitly"
+            );
+
+            let mut entry_row = encode_v2(&entry);
+            entry_row[i] = entry_row[i].wrapping_add(1);
+            assert!(
+                deserialize::<EntryOf<TypeConfig>>(&entry_row).is_err(),
+                "V2 entry row magic byte {i} corruption must fail explicitly"
+            );
+
+            let mut log_id_row = encode_v2(&log_id);
+            log_id_row[i] = log_id_row[i].wrapping_add(1);
+            assert!(
+                deserialize::<LogIdOf<TypeConfig>>(&log_id_row).is_err(),
+                "V2 committed/last_purged row magic byte {i} corruption must fail explicitly"
+            );
+        }
     }
 
     // ──── LogStore 创建与元数据操作 ────

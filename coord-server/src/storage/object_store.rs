@@ -237,13 +237,12 @@ impl ObjectManifest {
             last_write_at_unix: started_at_unix,
         }
     }
-    /// 编码为存储行字节：统一信封（魔数+版本，`crate::storage::envelope`）
-    /// 包裹 bincode；读路径兼容无前缀旧行。
+    /// 编码为存储行字节：统一信封（V1 = bincode；见 `crate::storage::envelope`）。
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         crate::storage::envelope::encode(self)
             .map_err(|e| Error::Internal(format!("encode object manifest: {e}")))
     }
-    /// 解码存储行（带前缀新格式与无前缀旧数据均可）；损坏 ⇒ None。
+    /// 解码存储行（V1 / V2 / 无前缀旧数据均可）；损坏 ⇒ None。
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         crate::storage::envelope::decode(bytes).ok()
     }
@@ -1237,12 +1236,12 @@ mod tests {
     /// 负控制：放宽版本校验 ⇒ 本用例必红。
     #[test]
     fn test_tampered_manifest_envelope_rejected() {
-        use crate::storage::envelope::{MAGIC, VERSION};
+        use crate::storage::envelope::{MAGIC, VERSION_V2};
 
         let m = sample_manifest();
 
         let mut version_tampered = m.to_bytes().unwrap();
-        version_tampered[MAGIC.len()] = VERSION + 1;
+        version_tampered[MAGIC.len()] = VERSION_V2 + 1;
         assert!(
             ObjectManifest::from_bytes(&version_tampered).is_none(),
             "tampered version must be rejected, not decoded"
@@ -1254,6 +1253,69 @@ mod tests {
             ObjectManifest::from_bytes(&magic_tampered).is_none(),
             "tampered magic must be rejected, not decoded"
         );
+    }
+
+    // ──── V2（postcard）读路径：双解 + 混读 + 精确消费 ────
+
+    /// V2 行（postcard payload）必须可解码（新行读）。
+    /// 负控制：删除 V2 分支 ⇒ 本用例必红。
+    #[test]
+    fn test_v2_manifest_decodes() {
+        let bytes = crate::storage::envelope::encode_v2(&sample_manifest());
+        let m = ObjectManifest::from_bytes(&bytes).expect("V2 manifest must decode");
+        assert_eq!(m.size, 10);
+        assert!(m.committed);
+        assert_eq!(m.chunks[0].sha256, [7u8; 32]);
+    }
+
+    /// 混读：旧行（无前缀）/ V1 / V2 三种编码均可解码。
+    /// 负控制：任一读路径移除 ⇒ 本用例必红。
+    #[test]
+    fn test_mixed_manifest_encodings_decode() {
+        let m = sample_manifest();
+        let legacy = bincode::serialize(&m).unwrap();
+        let v1 = m.to_bytes().unwrap();
+        let v2 = crate::storage::envelope::encode_v2(&m);
+        for (label, bytes) in [("legacy", legacy), ("v1", v1), ("v2", v2)] {
+            let decoded = ObjectManifest::from_bytes(&bytes)
+                .unwrap_or_else(|| panic!("{label} manifest must decode"));
+            assert_eq!(decoded.size, 10, "{label}");
+        }
+    }
+
+    /// V2 行魔数逐字节破坏 ⇒ 必须显式拒绝（None），不得返回垃圾对象
+    /// （ADR-0005 锚点）。负控制：去掉魔数比较 / 加试错解码 ⇒ 本用例必红。
+    #[test]
+    fn test_v2_magic_corruption_rejected() {
+        use crate::storage::envelope::{encode_v2, MAGIC};
+
+        for i in 0..MAGIC.len() {
+            let mut bytes = encode_v2(&sample_manifest());
+            bytes[i] = bytes[i].wrapping_add(1);
+            assert!(
+                ObjectManifest::from_bytes(&bytes).is_none(),
+                "V2 manifest with corrupted magic byte {i} must be rejected"
+            );
+        }
+    }
+
+    /// 尾随字节篡改（无前缀 / V1 / V2）⇒ 必须显式拒绝（None）。
+    /// 负控制：bincode 侧改回 allow_trailing / 去掉 V2 remainder 断言 ⇒ 对应用例必红。
+    #[test]
+    fn test_manifest_trailing_bytes_rejected() {
+        let m = sample_manifest();
+        let mut legacy = bincode::serialize(&m).unwrap();
+        legacy.extend_from_slice(&[0xDE, 0xAD]);
+        let mut v1 = m.to_bytes().unwrap();
+        v1.extend_from_slice(&[0xDE, 0xAD]);
+        let mut v2 = crate::storage::envelope::encode_v2(&m);
+        v2.extend_from_slice(&[0xDE, 0xAD]);
+        for (label, bytes) in [("legacy", legacy), ("v1", v1), ("v2", v2)] {
+            assert!(
+                ObjectManifest::from_bytes(&bytes).is_none(),
+                "{label} manifest with trailing bytes must be rejected"
+            );
+        }
     }
 
     #[test]
