@@ -511,10 +511,10 @@ fn test_region_meta_serialization_roundtrip() {
         approximate_keys: 5000,
     };
 
-    // 通过 bincode 序列化（模拟存储格式）
-    let serialized = bincode::serialize(&original).expect("serialization should succeed");
+    // 通过 postcard 序列化（当前存储格式 = 信封 V2 payload）
+    let serialized = postcard::to_allocvec(&original).expect("serialization should succeed");
     let deserialized: RegionMeta =
-        bincode::deserialize(&serialized).expect("deserialization should succeed");
+        postcard::from_bytes(&serialized).expect("deserialization should succeed");
 
     assert_eq!(deserialized.region_id, original.region_id);
     assert_eq!(deserialized.start_key, original.start_key);
@@ -528,36 +528,19 @@ fn test_region_meta_serialization_roundtrip() {
 
 #[test]
 fn test_snapshot_format_version_compatibility() {
-    // 验证 Snapshot 版本字段兼容性
-    #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
-    struct SnapshotHeader {
-        version: u32,
-        created_at: i64,
-        region_count: u32,
-    }
+    use coord_server::storage::envelope;
 
-    // v1 格式 roundtrip
-    let v1 = SnapshotHeader {
-        version: 1,
-        created_at: 1234567890,
-        region_count: 10,
-    };
-
-    let serialized = bincode::serialize(&v1).unwrap();
-    let deserialized: SnapshotHeader = bincode::deserialize(&serialized).unwrap();
-    assert_eq!(deserialized, v1);
-
-    // v2 格式（新增字段，序列化和反序列化时字段对应）
+    // 格式演进语义：postcard（信封 V2 payload）非自描述——给结构**新增字段**
+    // 属 Breaking，必须经信封版本字节显式区分（`storage::envelope`），
+    // 不能依赖 serde default 自动兼容。
     #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
     struct SnapshotHeaderV2 {
         version: u32,
         created_at: i64,
         region_count: u32,
-        #[serde(default)]
         checksum: u64,
     }
 
-    // v2 roundtrip
     let v2 = SnapshotHeaderV2 {
         version: 2,
         created_at: 1234567890,
@@ -565,20 +548,19 @@ fn test_snapshot_format_version_compatibility() {
         checksum: 0xDEADBEEF,
     };
 
-    let v2_serialized = bincode::serialize(&v2).unwrap();
-    let v2_deserialized: SnapshotHeaderV2 = bincode::deserialize(&v2_serialized).unwrap();
-    assert_eq!(v2_deserialized.version, 2);
-    assert_eq!(v2_deserialized.checksum, 0xDEADBEEF);
+    let bytes = postcard::to_allocvec(&v2).unwrap();
+    let decoded: SnapshotHeaderV2 = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!(decoded, v2);
 
-    // v2 格式中 checksum=0 的兼容性（类似 v1 升级后的数据）
-    let v2_default = SnapshotHeaderV2 {
-        version: 2,
-        created_at: 1234567890,
-        region_count: 10,
-        checksum: 0,
-    };
-    let v2_default_serialized = bincode::serialize(&v2_default).unwrap();
-    let v2_default_deserialized: SnapshotHeaderV2 =
-        bincode::deserialize(&v2_default_serialized).unwrap();
-    assert_eq!(v2_default_deserialized.checksum, 0);
+    // 信封版本字节是格式演进的可辨识锚点：V2 接受；未知版本显式拒绝。
+    let mut enveloped = Vec::new();
+    enveloped.extend_from_slice(&envelope::MAGIC);
+    enveloped.push(envelope::VERSION_V2);
+    enveloped.extend_from_slice(&bytes);
+    let back: SnapshotHeaderV2 = envelope::decode(&enveloped).unwrap();
+    assert_eq!(back, v2);
+
+    let mut unknown = enveloped.clone();
+    unknown[envelope::MAGIC.len()] = 9;
+    assert!(envelope::decode::<SnapshotHeaderV2>(&unknown).is_err());
 }

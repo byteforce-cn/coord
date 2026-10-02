@@ -81,7 +81,7 @@ pub enum AuthOp {
     ConsumeSession { hash_hex: String },
     /// 角色授予能力（capability_id + scope；持久化到角色记录 `capability_grants`）
     ///
-    /// 只允许末尾追加（bincode 变体索引 = 旧日志/快照升级兼容）。
+    /// 只允许末尾追加（变体索引 = 旧日志/快照升级兼容）。
     RoleGrantCapability {
         role: String,
         capability_id: String,
@@ -127,7 +127,7 @@ pub enum AuthOp {
 /// PD 全局 operator 队列治理命令（经 **region 0 system raft** 承载）。
 ///
 /// 设计要点：
-/// - 本枚举及 `Command::Pd` 变体**只允许末尾追加**（bincode 变体索引 = 旧日志/快照
+/// - 本枚举及 `Command::Pd` 变体**只允许末尾追加**（变体索引 = 旧日志/快照
 ///   升级兼容）；
 /// - 仅 region 0 raft 提出并 apply；data region raft 收到（不应发生）视为其各自
 ///   MVCC 上的无害记录（键前缀 `/_pd/` 不在业务 keyspace）；
@@ -166,7 +166,7 @@ pub enum PdOp {
     Requeue { op_id: u64 },
 }
 
-/// region 0 PD 队列条目（`/_pd/ops/{op_id:u64be}` 的 bincode 载荷）
+/// region 0 PD 队列条目（`/_pd/ops/{op_id:u64be}` 的信封 V2 载荷）
 ///
 /// `op_id` ≡ 入队日志 index（revision）：单调、唯一、全序、跨重放/重启稳定，
 /// 无需独立计数器。
@@ -284,8 +284,7 @@ impl PdQueueEntry {
             .map_err(|e| Error::Internal(format!("encode pd queue entry: {e}")))
     }
 
-    /// 反序列化（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；均精确
-    /// 消费，损坏行返回 None，调用方跳过）。
+    /// 反序列化（唯一格式：信封 V2-postcard；损坏/退役行返回 None，调用方跳过）。
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         crate::storage::envelope::decode(bytes).ok()
     }
@@ -308,7 +307,7 @@ impl PdQueueEntry {
 ///   （幂等）；不符/无数据 → no-op（GC 收尾）；
 /// - Delete：KV tombstone + 同步删除 chunk 文件（幂等；no-op 也消耗 revision）。
 ///
-/// **末尾追加**（bincode 变体索引兼容；勿插队）。
+/// **末尾追加**（变体索引 = 旧日志/快照兼容；勿插队）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ObjectStoreOp {
     /// 开始上传：创建 Creating manifest（声明期望总字节数）。
@@ -507,8 +506,8 @@ mod tests {
             value: b"world".to_vec(),
             lease_id: Some(42),
         };
-        let bytes = bincode::serialize(&cmd).unwrap();
-        let decoded: Command = bincode::deserialize(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&cmd).unwrap();
+        let decoded: Command = postcard::from_bytes(&bytes).unwrap();
         match decoded {
             Command::Put {
                 key,
@@ -528,8 +527,8 @@ mod tests {
         let cmd = Command::Delete {
             key: b"bye".to_vec(),
         };
-        let bytes = bincode::serialize(&cmd).unwrap();
-        let decoded: Command = bincode::deserialize(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&cmd).unwrap();
+        let decoded: Command = postcard::from_bytes(&bytes).unwrap();
         match decoded {
             Command::Delete { key } => assert_eq!(key, b"bye"),
             _ => panic!("expected Delete"),
@@ -552,8 +551,8 @@ mod tests {
             }],
             failure_ops: vec![TxnOp::Delete { key: b"k".to_vec() }],
         };
-        let bytes = bincode::serialize(&cmd).unwrap();
-        let decoded: Command = bincode::deserialize(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&cmd).unwrap();
+        let decoded: Command = postcard::from_bytes(&bytes).unwrap();
         match decoded {
             Command::Txn {
                 compares,
@@ -575,8 +574,8 @@ mod tests {
             value: b"val".to_vec(),
             lease_id: None,
         };
-        let bytes = bincode::serialize(&cmd).unwrap();
-        let decoded: Command = bincode::deserialize(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&cmd).unwrap();
+        let decoded: Command = postcard::from_bytes(&bytes).unwrap();
         match decoded {
             Command::Put { lease_id, .. } => assert_eq!(lease_id, None),
             _ => panic!("expected Put"),
@@ -588,8 +587,8 @@ mod tests {
     #[test]
     fn test_command_compact_serde_roundtrip() {
         let cmd = Command::Compact { revision: 123456 };
-        let bytes = bincode::serialize(&cmd).unwrap();
-        let decoded: Command = bincode::deserialize(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&cmd).unwrap();
+        let decoded: Command = postcard::from_bytes(&bytes).unwrap();
         match decoded {
             Command::Compact { revision } => assert_eq!(revision, 123456),
             _ => panic!("expected Compact"),
@@ -613,8 +612,8 @@ mod tests {
             requester: 2,
             proposed_at_unix: 1_700_000_000,
         });
-        let bytes = bincode::serialize(&cmd).unwrap();
-        let decoded: Command = bincode::deserialize(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&cmd).unwrap();
+        let decoded: Command = postcard::from_bytes(&bytes).unwrap();
         match decoded {
             Command::Pd(PdOp::Enqueue {
                 op,
@@ -646,8 +645,8 @@ mod tests {
             Command::Pd(PdOp::Requeue { op_id: 42 }),
         ];
         for cmd in cmds {
-            let bytes = bincode::serialize(&cmd).unwrap();
-            let decoded: Command = bincode::deserialize(&bytes).unwrap();
+            let bytes = postcard::to_allocvec(&cmd).unwrap();
+            let decoded: Command = postcard::from_bytes(&bytes).unwrap();
             assert!(matches!(decoded, Command::Pd(_)), "roundtrip {:?}", cmd);
         }
     }
@@ -675,21 +674,12 @@ mod tests {
         assert_eq!(requeued.claimed_at_unix, 0);
     }
 
-    /// 三路读 + 篡改拒绝（P2a：PD 队列条目）。
-    /// 负控制：删 V2 读腿 ⇒ V2 断言红；放宽精确消费 ⇒ 尾随/截断断言红；
-    /// 放宽版本检查 ⇒ 未知版本断言红。
+    /// 唯一 V2 + 退役格式拒绝（P3：PD 队列条目）。
+    /// 负控制：恢复 V1/无前缀读腿 ⇒ 退役断言红；放宽精确消费 ⇒
+    /// 尾随/截断断言红；放宽版本检查 ⇒ 未知版本断言红。
     #[test]
-    fn test_pd_queue_entry_three_way_read_and_tamper() {
+    fn test_pd_queue_entry_v2_only_read_and_retired_rejected() {
         let entry = PdQueueEntry::new_pending(42, test_add_peer(), 1, 1_700_000_000);
-
-        // 旧行（无前缀 bincode）
-        let legacy = bincode::serialize(&entry).unwrap();
-        assert_eq!(PdQueueEntry::from_bytes(&legacy).as_ref(), Some(&entry));
-        // V1 / V2 行
-        let v1 = crate::storage::envelope::encode_v1(&entry).unwrap();
-        assert_eq!(PdQueueEntry::from_bytes(&v1).as_ref(), Some(&entry));
-        let v2 = crate::storage::envelope::encode_v2(&entry).unwrap();
-        assert_eq!(PdQueueEntry::from_bytes(&v2).as_ref(), Some(&entry));
 
         // 写路径断言：to_bytes 产物必须为 V2 前缀，且可回读
         let written = entry.to_bytes().unwrap();
@@ -700,17 +690,25 @@ mod tests {
         );
         assert_eq!(PdQueueEntry::from_bytes(&written).as_ref(), Some(&entry));
 
+        // 退役格式：V1 / 无前缀行 ⇒ None
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(&crate::storage::envelope::MAGIC);
+        v1.push(1);
+        v1.extend_from_slice(&[0xAA, 0xBB]);
+        assert!(PdQueueEntry::from_bytes(&v1).is_none());
+        assert!(PdQueueEntry::from_bytes(&[0x05u8, 0, 0, 0, 0, 0, 0, 0]).is_none());
+
         // 篡改矩阵：未知版本 / 魔数 / 尾随 / 截断 ⇒ None
-        let mut bad_version = v2.clone();
+        let mut bad_version = written.clone();
         bad_version[crate::storage::envelope::MAGIC.len()] = 9;
         assert!(PdQueueEntry::from_bytes(&bad_version).is_none());
-        let mut bad_magic = v2.clone();
+        let mut bad_magic = written.clone();
         bad_magic[0] = 0x03;
         assert!(PdQueueEntry::from_bytes(&bad_magic).is_none());
-        let mut trailing = v2.clone();
+        let mut trailing = written.clone();
         trailing.extend_from_slice(&[0xDE, 0xAD]);
         assert!(PdQueueEntry::from_bytes(&trailing).is_none());
-        assert!(PdQueueEntry::from_bytes(&v2[..v2.len() - 1]).is_none());
+        assert!(PdQueueEntry::from_bytes(&written[..written.len() - 1]).is_none());
     }
 
     #[test]
@@ -726,8 +724,8 @@ mod tests {
         let resp = Response::Compact {
             compacted_revision: 777,
         };
-        let bytes = bincode::serialize(&resp).unwrap();
-        let decoded: Response = bincode::deserialize(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&resp).unwrap();
+        let decoded: Response = postcard::from_bytes(&bytes).unwrap();
         match decoded {
             Response::Compact { compacted_revision } => assert_eq!(compacted_revision, 777),
             _ => panic!("expected Compact response"),
@@ -739,8 +737,8 @@ mod tests {
     #[test]
     fn test_response_put_serde_roundtrip() {
         let resp = Response::Put { revision: 12345 };
-        let bytes = bincode::serialize(&resp).unwrap();
-        let decoded: Response = bincode::deserialize(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&resp).unwrap();
+        let decoded: Response = postcard::from_bytes(&bytes).unwrap();
         match decoded {
             Response::Put { revision } => assert_eq!(revision, 12345),
             _ => panic!("expected Put"),
@@ -750,8 +748,8 @@ mod tests {
     #[test]
     fn test_response_delete_serde_roundtrip() {
         let resp = Response::Delete { revision: 67890 };
-        let bytes = bincode::serialize(&resp).unwrap();
-        let decoded: Response = bincode::deserialize(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&resp).unwrap();
+        let decoded: Response = postcard::from_bytes(&bytes).unwrap();
         match decoded {
             Response::Delete { revision } => assert_eq!(revision, 67890),
             _ => panic!("expected Delete"),
@@ -768,8 +766,8 @@ mod tests {
                 TxnOpResponse::Delete { revision: 101 },
             ],
         };
-        let bytes = bincode::serialize(&resp).unwrap();
-        let decoded: Response = bincode::deserialize(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&resp).unwrap();
+        let decoded: Response = postcard::from_bytes(&bytes).unwrap();
         match decoded {
             Response::Txn {
                 succeeded,

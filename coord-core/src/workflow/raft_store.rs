@@ -9,7 +9,7 @@
 // 原始设计：
 // - 包装 MemoryWorkflowStore 作为热数据缓存（读取无 Raft 开销）
 // - 所有写操作通过 RaftProposer trait 提交到 Raft 共识层
-// - 序列化使用 bincode（紧凑二进制，快速序列化）
+// - 序列化载荷由 Raft 实现方编码（当前 = 信封 V2/postcard）
 //
 // RaftProposer trait 由 coord-server 实现，coord-core 不依赖 coord-server。
 //
@@ -68,7 +68,7 @@ impl std::error::Error for RaftProposeError {}
 
 /// Raft 日志中的工作流命令（所有确定性状态变更的载体）
 // 大载荷变体（定义/实例）与轻量变体大小差悬殊；Box 会改变内部状态机
-// 序列化契约（虽 bincode 对 Box 透明，但保留现状以冻结 M1 前兼容面）
+// 序列化契约（Box 对线格式透明，但保留现状以冻结 M1 前兼容面）
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkflowCommand {

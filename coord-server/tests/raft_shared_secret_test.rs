@@ -20,9 +20,12 @@ fn find_port() -> u16 {
 }
 
 fn hmac_sha256(payload: &[u8], secret: &[u8]) -> Vec<u8> {
+    // codec=1 域分离输入：DOMAIN || codec_be || payload（ADR-0007 D3）
     use hmac::{Hmac, Mac};
     type HmacSha256 = Hmac<sha2::Sha256>;
     let mut mac = HmacSha256::new_from_slice(secret).unwrap();
+    mac.update(b"coord-raft-payload-v2");
+    mac.update(&1u32.to_be_bytes());
     mac.update(payload);
     mac.finalize().into_bytes().to_vec()
 }
@@ -33,8 +36,8 @@ fn raft_msg(payload: Vec<u8>, tag: Vec<u8>) -> RaftMessage {
         region_id: 0,
         trace_context: Vec::new(),
         auth_tag: tag,
-        // 默认 = bincode（历史发送方不带该字段时 proto3 读作 0）
-        payload_codec: 0,
+        // 唯一受支持标记（ADR-0007；bincode=0 已退役）
+        payload_codec: 1,
     }
 }
 
@@ -148,7 +151,7 @@ async fn test_raft_shared_secret_accepts_valid_tag() {
     handle.abort();
 }
 
-/// ADR-0007：未知载荷标记 fail-closed（在认证/解码前拒绝）。
+/// ADR-0007：未知标记与退役 bincode=0 均 fail-closed（认证/解码前拒绝）。
 #[tokio::test]
 async fn test_raft_unknown_payload_codec_rejected() {
     let secret = "integration-secret-16+chars";
@@ -161,6 +164,7 @@ async fn test_raft_unknown_payload_codec_rejected() {
         .unwrap();
     let mut client = RaftClient::new(channel);
 
+    // 未知标记（2）⇒ InvalidArgument
     let mut msg = raft_msg(b"payload".to_vec(), Vec::new());
     msg.payload_codec = 2;
     let resp = client.append_entries(tonic::Request::new(msg)).await;
@@ -169,16 +173,22 @@ async fn test_raft_unknown_payload_codec_rejected() {
         "unknown codec must be rejected fail-closed: {resp:?}"
     );
 
+    // 退役 bincode=0 ⇒ 同样 fail-closed
+    let mut retired = raft_msg(b"payload".to_vec(), Vec::new());
+    retired.payload_codec = 0;
+    let resp = client.append_entries(tonic::Request::new(retired)).await;
+    assert!(
+        matches!(resp, Err(ref s) if s.code() == tonic::Code::InvalidArgument),
+        "retired codec=0 must be rejected fail-closed: {resp:?}"
+    );
+
     handle.abort();
 }
 
-/// ADR-0007 R1：codec=1（域分离 MAC）在认证层被正确接受
+/// ADR-0007：codec=1（域分离 MAC）在认证层被正确接受
 /// （载荷不是合法 postcard ⇒ 认证过后的解码失败，但不得是 UNAUTHENTICATED）。
 #[tokio::test]
 async fn test_raft_codec1_message_accepted_by_auth_layer() {
-    use hmac::{Hmac, Mac};
-    type HmacSha256 = Hmac<sha2::Sha256>;
-
     let secret = "integration-secret-16+chars";
     let (addr, handle) = start_raft_server(secret).await;
 
@@ -189,13 +199,10 @@ async fn test_raft_codec1_message_accepted_by_auth_layer() {
         .unwrap();
     let mut client = RaftClient::new(channel);
 
-    let mut msg = raft_msg(b"postcard-payload".to_vec(), Vec::new());
-    msg.payload_codec = 1;
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-    mac.update(b"coord-raft-payload-v2");
-    mac.update(&1u32.to_be_bytes());
-    mac.update(&msg.payload);
-    msg.auth_tag = mac.finalize().into_bytes().to_vec();
+    let msg = raft_msg(
+        b"postcard-payload".to_vec(),
+        hmac_sha256(b"postcard-payload", secret.as_bytes()),
+    );
 
     let resp = client.vote(tonic::Request::new(msg)).await;
     match resp {

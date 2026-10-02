@@ -275,7 +275,7 @@ impl<B: StorageBackend + 'static> SnapshotScheduler<B> {
             Error::Internal(format!("read snapshot {}: {e}", snapshot_path.display()))
         })?;
 
-        let snapshot_data = SnapshotData::from_bytes_migrating(&bytes)?;
+        let snapshot_data = SnapshotData::from_bytes(&bytes)?;
 
         import_snapshot_data(&self.storage, &snapshot_data)?;
 

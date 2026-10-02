@@ -4,8 +4,8 @@
 // - export_snapshot_data: 从 MvccStorage 导出全量数据
 // - import_snapshot_data: 将快照数据恢复到 MvccStorage
 //
-// 快照格式：读路径三路（无前缀 bincode / 信封 V1 / 信封 V2-postcard，均精确
-// 消费）；写路径当前为无前缀 bincode（P2b 统一切换 V2）。包含所有 KV 数据、
+// 快照格式：统一信封 V2（`MAGIC | VERSION_V2 | postcard`），读写一致；
+// V1 / 无前缀历史行已退役（显式拒绝，无迁移阶梯）。包含所有 KV 数据、
 // 元数据和 Raft 检查点。
 
 use std::path::PathBuf;
@@ -104,14 +104,10 @@ pub struct SnapshotKvMeta {
 }
 
 impl SnapshotData {
-    /// 当前快照格式版本（版本号 +1；0.1.x 数据不承诺兼容）
-    /// v3（R-RFT-06）：新增 auth/lease 域 + compacted 水位，导入写完整 LogId。
-    /// v4：新增 region 0 `/_pd/*`（PD 队列）与 `/_sys/*`
-    ///   非 auth 域（迁移标记等）原始条目——region 0 状态机的内部记录不再丢失。
-    /// v5：新增 changelog 窗口（`changelog_entries`）——装快照后历史读/
-    ///   watch 重放不再出现「洞」（静默返回前值）。v4 及更早格式经
-    ///   `from_bytes_migrating` 迁移：changelog 置空并把 compacted 水位抬到
-    ///   applied（洞内 target 的历史读显式报 `RevisionCompacted`，不静默错答）。
+    /// 当前快照格式版本（版本号 +1；0.1.x 数据不承诺兼容）。
+    /// v5：携带 changelog 窗口（`changelog_entries`）——装快照后历史读 /
+    ///   watch 重放不再出现「洞」（静默返回前值）。v2–v4 格式已随 bincode
+    ///   退场退役：`from_bytes` 仅接受 v5，旧字节显式拒绝（无迁移阶梯）。
     const CURRENT_VERSION: u32 = 5;
 
     /// 创建空快照
@@ -141,28 +137,13 @@ impl SnapshotData {
         envelope::encode(self).map_err(|e| Error::Internal(format!("snapshot serialize: {e}")))
     }
 
-    /// 从字节反序列化（当前版本，不迁移）。
+    /// 从字节反序列化（唯一格式：信封 V2 / postcard；内部 `version` 必须为
+    /// [`Self::CURRENT_VERSION`]）。
     ///
-    /// 三路读（P2a）：信封 V2 ⇒ postcard（仅承载 v5，`version != 5` 显式错）；
-    /// 信封 V1 / 无前缀 ⇒ bincode。三条均精确消费（拒绝尾随字节）。
+    /// P3 后快照无迁移阶梯：V1 / 无前缀历史行显式拒绝（不得按旧结构试解）。
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        match envelope::classify(data) {
-            Ok(envelope::Envelope::V2(payload)) => Self::decode_v2_v5(payload),
-            Ok(envelope::Envelope::V1(payload)) | Ok(envelope::Envelope::Legacy(payload)) => {
-                envelope::decode_bincode_exact::<Self>(payload)
-                    .map_err(|e| Error::Internal(format!("snapshot deserialize: {e}")))
-            }
-            Err(e) => Err(Error::Internal(format!("snapshot envelope: {e}"))),
-        }
-    }
-
-    /// V2（postcard）腿：只承载当前版本（v5）。
-    ///
-    /// postcard payload 只会由本轮写路径产生，没有迁移阶梯；不是 v5 的行
-    /// 不可能来自正常写入 ⇒ 显式报错（不得按旧结构试解）。
-    fn decode_v2_v5(payload: &[u8]) -> Result<Self> {
-        let snapshot: Self = envelope::decode_postcard_exact(payload)
-            .map_err(|e| Error::Internal(format!("snapshot V2 deserialize: {e}")))?;
+        let snapshot: Self = envelope::decode(data)
+            .map_err(|e| Error::Internal(format!("snapshot deserialize: {e}")))?;
         if snapshot.version != Self::CURRENT_VERSION {
             return Err(Error::Internal(format!(
                 "unsupported snapshot version: {} (expected {})",
@@ -172,233 +153,6 @@ impl SnapshotData {
         }
         Ok(snapshot)
     }
-
-    /// R-TST-21：反序列化 + 旧格式迁移（数据格式升级兼容）。
-    ///
-    /// 按格式分区（[`envelope::classify`]，读路径按标记/魔数分派，不做“先试
-    /// 一种再回落另一种”的试错解码）：
-    /// - 信封 V2 ⇒ postcard，仅承载 v5（`version != 5` 显式错，尾随拒绝）；
-    /// - 信封 V1 / 无前缀（历史行）⇒ bincode 迁移阶梯。
-    ///
-    /// bincode 阶梯：直接解析成功且版本匹配 → 原样返回；否则逐级回退
-    /// **v4 → v3 → v2** 迁移
-    /// （顺序敏感：bincode 为位置编码，旧格式是更新格式的**前缀**布局，必须从
-    /// 最新的旧版本开始试）：
-    /// - v4：无 changelog 窗口 → 迁移为空窗口，并把 compacted
-    ///   水位抬到 `applied_index`（导入者无法重建 `(水位, applied]` 的历史 ——
-    ///   抬水位让洞内 target 的历史读**显式报 `RevisionCompacted`**，而不是
-    ///   静默返回前值）；
-    /// - v3 = 之前：无 `/_pd/*` 与 `/_sys/*`（非 auth）域 → 迁移后
-    ///   补空域（region 0 内部记录本就丢失，运行时会重新经 raft 收敛）；
-    /// - v2 = R-RFT-06 之前：无 auth/lease 域、无 compacted 水位、applied
-    ///   term/node_id 不持久化 → 迁移结果域置空、水位 0、applied 回退 0。
-    pub fn from_bytes_migrating(data: &[u8]) -> Result<Self> {
-        match envelope::classify(data) {
-            Err(e) => Err(Error::Internal(format!("snapshot envelope: {e}"))),
-            Ok(envelope::Envelope::V2(payload)) => Self::decode_v2_v5(payload),
-            Ok(envelope::Envelope::V1(payload)) | Ok(envelope::Envelope::Legacy(payload)) => {
-                Self::migrate_from_bincode(payload)
-            }
-        }
-    }
-
-    /// bincode 迁移阶梯（v5 → v4 → v3 → v2；各腿均精确消费）。
-    fn migrate_from_bincode(data: &[u8]) -> Result<Self> {
-        match envelope::decode_bincode_exact::<Self>(data) {
-            Ok(snapshot) if snapshot.version == Self::CURRENT_VERSION => Ok(snapshot),
-            Ok(snapshot) => Err(Error::Internal(format!(
-                "unsupported snapshot version: {} (expected {})",
-                snapshot.version,
-                Self::CURRENT_VERSION
-            ))),
-            Err(_) => {
-                // 尝试 v4 迁移
-                match envelope::decode_bincode_exact::<SnapshotDataV4>(data) {
-                    Ok(v4) if v4.version == 4 => {
-                        tracing::warn!(
-                            "snapshot v4 detected; migrating to v{} (changelog window empty; \
-                             history watermark raised to applied — gap reads will fail explicitly \
-                             instead of returning stale values)",
-                            Self::CURRENT_VERSION
-                        );
-                        Ok(Self::migrate_v4_to_v5(v4))
-                    }
-                    Ok(v4) => Err(Error::Internal(format!(
-                        "unsupported snapshot version: {} (expected 2, 3, 4 or {})",
-                        v4.version,
-                        Self::CURRENT_VERSION
-                    ))),
-                    Err(_) => {
-                        // 尝试 v3 迁移
-                        match envelope::decode_bincode_exact::<SnapshotDataV3>(data) {
-                            Ok(v3) if v3.version == 3 => {
-                                tracing::warn!(
-                                    "snapshot v3 detected; migrating to v{} (pd/sys internal \
-                                     domains empty)",
-                                    Self::CURRENT_VERSION
-                                );
-                                Ok(Self::migrate_v3_to_v4(v3))
-                            }
-                            Ok(v3) => Err(Error::Internal(format!(
-                                "unsupported snapshot version: {} (expected 2, 3, 4 or {})",
-                                v3.version,
-                                Self::CURRENT_VERSION
-                            ))),
-                            Err(_) => {
-                                // 尝试 v2 迁移
-                                let v2: SnapshotDataV2 = envelope::decode_bincode_exact(data)
-                                    .map_err(|e| {
-                                        Error::Internal(format!(
-                                            "snapshot deserialize (v5+v4+v3+v2): {e}"
-                                        ))
-                                    })?;
-                                if v2.version != 2 {
-                                    return Err(Error::Internal(format!(
-                                        "unsupported snapshot version: {} (expected 2, 3, 4 or {})",
-                                        v2.version,
-                                        Self::CURRENT_VERSION
-                                    )));
-                                }
-                                tracing::warn!(
-                                    "snapshot v2 detected; migrating to v{} (auth/lease/pd/sys \
-                                     empty, compacted=0, applied standalone)",
-                                    Self::CURRENT_VERSION
-                                );
-                                Ok(Self::migrate_v2_to_v4(v2))
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// v4 → v5 迁移。v4 快照不携带 changelog ⇒ 迁移为空窗口，并把
-    /// compacted 水位抬到 `applied_index`：
-    ///
-    /// 导入 v4 快照后，本节点无法重建 `(原水位, applied]` 区间任一 target 的
-    /// 历史（本地旧 changelog 会被导入流程清空）——抬水位使该区间的历史读在
-    /// `ensure_history_reconstructable` 处**显式报 `RevisionCompacted`**，
-    /// 绝不再静默返回前值。
-    fn migrate_v4_to_v5(v4: SnapshotDataV4) -> Self {
-        let compacted = v4.compacted_revision.max(v4.applied_index);
-        Self {
-            version: Self::CURRENT_VERSION,
-            last_included_index: v4.last_included_index,
-            last_included_term: v4.last_included_term,
-            next_revision: v4.next_revision,
-            applied_index: v4.applied_index,
-            applied_term: v4.applied_term,
-            applied_node_id: v4.applied_node_id,
-            kv_pairs: v4.kv_pairs,
-            kv_metadata: v4.kv_metadata,
-            auth_entries: v4.auth_entries,
-            lease_entries: v4.lease_entries,
-            compacted_revision: compacted,
-            pd_entries: v4.pd_entries,
-            sys_entries: v4.sys_entries,
-            changelog_entries: Vec::new(),
-        }
-    }
-
-    /// v3 → 当前版本迁移：补空 pd/sys 域（v3 无 region 0 内部记录域）。
-    ///
-    /// v3 同样不携带 changelog ⇒ compacted 水位取 `max(原水位, applied)`，
-    /// 使洞内 target 的历史读显式报错（见 [`Self::migrate_v4_to_v5`] 注释）。
-    fn migrate_v3_to_v4(v3: SnapshotDataV3) -> Self {
-        Self {
-            version: Self::CURRENT_VERSION,
-            last_included_index: v3.last_included_index,
-            last_included_term: v3.last_included_term,
-            next_revision: v3.next_revision,
-            applied_index: v3.applied_index,
-            applied_term: v3.applied_term,
-            applied_node_id: v3.applied_node_id,
-            kv_pairs: v3.kv_pairs,
-            kv_metadata: v3.kv_metadata,
-            auth_entries: v3.auth_entries,
-            lease_entries: v3.lease_entries,
-            compacted_revision: v3.compacted_revision.max(v3.applied_index),
-            pd_entries: Vec::new(),
-            sys_entries: Vec::new(),
-            changelog_entries: Vec::new(),
-        }
-    }
-
-    /// v2 → 当前版本迁移：补空 auth/lease/pd/sys 域、applied term/node_id 回退 0。
-    ///
-    /// v2 无 compacted 水位且无 changelog ⇒ 水位取 `applied_index`
-    /// （`(0, applied]` 的历史在该导入者上不可重建，必须显式报错而非静默错答）。
-    fn migrate_v2_to_v4(v2: SnapshotDataV2) -> Self {
-        Self {
-            version: Self::CURRENT_VERSION,
-            last_included_index: v2.last_included_index,
-            last_included_term: v2.last_included_term,
-            next_revision: v2.next_revision,
-            applied_index: v2.applied_index,
-            applied_term: 0,
-            applied_node_id: 0,
-            kv_pairs: v2.kv_pairs,
-            kv_metadata: v2.kv_metadata,
-            auth_entries: Vec::new(),
-            lease_entries: Vec::new(),
-            compacted_revision: v2.applied_index,
-            pd_entries: Vec::new(),
-            sys_entries: Vec::new(),
-            changelog_entries: Vec::new(),
-        }
-    }
-}
-
-/// v4 快照格式（changelog 窗口之前）。字段顺序与 v4 时点一致，
-/// 仅用于旧数据升级迁移，不参与导出。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SnapshotDataV4 {
-    version: u32,
-    last_included_index: u64,
-    last_included_term: u64,
-    next_revision: u64,
-    applied_index: u64,
-    applied_term: u64,
-    applied_node_id: u64,
-    kv_pairs: Vec<SnapshotKvPair>,
-    kv_metadata: Vec<SnapshotKvMeta>,
-    auth_entries: Vec<SnapshotRawEntry>,
-    lease_entries: Vec<SnapshotRawEntry>,
-    compacted_revision: u64,
-    pd_entries: Vec<SnapshotRawEntry>,
-    sys_entries: Vec<SnapshotRawEntry>,
-}
-
-/// v3 快照格式（PD/迁移内部域之前）。字段顺序与 v3 时点
-/// 一致，仅用于旧数据升级迁移，不参与导出。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SnapshotDataV3 {
-    version: u32,
-    last_included_index: u64,
-    last_included_term: u64,
-    next_revision: u64,
-    applied_index: u64,
-    applied_term: u64,
-    applied_node_id: u64,
-    kv_pairs: Vec<SnapshotKvPair>,
-    kv_metadata: Vec<SnapshotKvMeta>,
-    auth_entries: Vec<SnapshotRawEntry>,
-    lease_entries: Vec<SnapshotRawEntry>,
-    compacted_revision: u64,
-}
-
-/// R-TST-21：v2 快照格式（R-RFT-06 之前）。字段顺序与 v2 时点一致，
-/// 仅用于旧数据升级迁移，不参与导出。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SnapshotDataV2 {
-    version: u32,
-    last_included_index: u64,
-    last_included_term: u64,
-    next_revision: u64,
-    applied_index: u64,
-    kv_pairs: Vec<SnapshotKvPair>,
-    kv_metadata: Vec<SnapshotKvMeta>,
 }
 
 // ──── 导出/导入函数 ────
@@ -992,7 +746,7 @@ mod tests {
 
         // 序列化往返（当前版本直接解析）
         let bytes = data.to_bytes().unwrap();
-        let restored = SnapshotData::from_bytes_migrating(&bytes).unwrap();
+        let restored = SnapshotData::from_bytes(&bytes).unwrap();
         assert_eq!(restored.version, SnapshotData::CURRENT_VERSION);
         assert_eq!(restored.pd_entries.len(), 2);
         assert_eq!(restored.sys_entries.len(), 1);
@@ -1033,133 +787,42 @@ mod tests {
         assert_eq!(storage3.compacted_revision().unwrap(), 0);
     }
 
-    // ──── R-TST-21：数据格式升级兼容（v2 / v3 → v4 迁移）────
+    // ──── 退役格式（P3）：旧字节显式拒绝 ────
 
+    /// 退役锚点：V1 信封行 / 无前缀历史行 / 未知版本 ⇒ 显式拒绝
+    /// （不得按旧结构试解，无迁移阶梯）。
+    /// 负控制：恢复任一历史读腿 ⇒ 本用例必红。
     #[test]
-    fn test_snapshot_v3_upgrade_migration() {
-        // 构造一条 v3 格式快照（之前：无 `/_pd/` 与 `/_sys/` 非 auth 域）
-        let v3 = SnapshotDataV3 {
-            version: 3,
-            last_included_index: 11,
-            last_included_term: 6,
-            next_revision: 12,
-            applied_index: 11,
-            applied_term: 7,
-            applied_node_id: 3,
-            kv_pairs: vec![SnapshotKvPair {
-                key: b"/legacy/key".to_vec(),
-                value: b"legacy-value".to_vec(),
-            }],
-            kv_metadata: Vec::new(),
-            auth_entries: vec![SnapshotRawEntry {
-                internal_key: b"/_sys/auth/user/alice".to_vec(),
-                value: b"hash-bytes".to_vec(),
-            }],
-            lease_entries: Vec::new(),
-            compacted_revision: 5,
-        };
-        let v3_bytes = bincode::serialize(&v3).unwrap();
-
-        // v4 结构直接解析失败 → v3 迁移路径成功（域补空；既有域保留）
-        assert!(SnapshotData::from_bytes(&v3_bytes).is_err());
-        let migrated =
-            SnapshotData::from_bytes_migrating(&v3_bytes).expect("v3 快照应可迁移为当前版本");
-        assert_eq!(migrated.version, SnapshotData::CURRENT_VERSION);
-        assert_eq!(migrated.last_included_index, 11);
-        assert_eq!(migrated.applied_term, 7, "v3 applied term 保留");
-        assert_eq!(migrated.applied_node_id, 3);
-        assert_eq!(migrated.auth_entries.len(), 1, "v3 auth 域保留");
-        assert_eq!(
-            migrated.compacted_revision, 11,
-            "v3 无 changelog ⇒ 水位抬到 max(原水位 5, applied 11)"
-        );
-        assert!(migrated.pd_entries.is_empty(), "v3 无 pd 域 → 补空");
-        assert!(migrated.sys_entries.is_empty(), "v3 无 sys 域 → 补空");
+    fn test_snapshot_retired_formats_rejected() {
+        // V1 信封行（历史写路径产物）
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(&envelope::MAGIC);
+        v1.push(1);
+        v1.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
         assert!(
-            migrated.changelog_entries.is_empty(),
-            "v3 无 changelog 窗口 → 补空"
+            SnapshotData::from_bytes(&v1).is_err(),
+            "V1 快照行必须显式拒绝"
         );
 
-        // 迁移后可正常导入恢复
-        let tmp = TempDir::new().unwrap();
-        let backend = RedbBackend::open(tmp.path(), &StorageConfig::default()).unwrap();
-        let storage = MvccStorage::new(backend).unwrap();
-        import_snapshot_data(&storage, &migrated).unwrap();
-        assert_eq!(
-            storage.get(b"/legacy/key").unwrap(),
-            Some(b"legacy-value".to_vec())
+        // 无前缀历史行
+        let legacy = vec![0x05u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert!(
+            SnapshotData::from_bytes(&legacy).is_err(),
+            "无前缀快照行必须显式拒绝"
         );
-        let applied = storage.get_applied_log_id().unwrap().unwrap();
-        assert_eq!(applied.index, 11);
-        assert_eq!(applied.term, 7);
+
+        // 未知版本字节
+        let mut unknown = Vec::new();
+        unknown.extend_from_slice(&envelope::MAGIC);
+        unknown.push(9);
+        unknown.extend_from_slice(&[0xAA]);
+        assert!(
+            SnapshotData::from_bytes(&unknown).is_err(),
+            "未知信封版本必须显式拒绝"
+        );
     }
 
-    #[test]
-    fn test_snapshot_v2_upgrade_migration() {
-        // 构造一条 v2 格式快照（R-RFT-06 之前的字段序，无 auth/lease/水位）
-        let v2 = SnapshotDataV2 {
-            version: 2,
-            last_included_index: 11,
-            last_included_term: 6,
-            next_revision: 12,
-            applied_index: 11,
-            kv_pairs: vec![SnapshotKvPair {
-                key: b"/legacy/key".to_vec(),
-                value: b"legacy-value".to_vec(),
-            }],
-            kv_metadata: vec![SnapshotKvMeta {
-                key: b"/legacy/key".to_vec(),
-                version: 1,
-                create_revision: 3,
-                mod_revision: 3,
-                lease_id: 0,
-                deleted: false,
-            }],
-        };
-        let v2_bytes = bincode::serialize(&v2).unwrap();
-
-        // 直接解析（当前/v4/v3 结构）失败 → 迁移路径成功
-        assert!(SnapshotData::from_bytes(&v2_bytes).is_err());
-        let migrated =
-            SnapshotData::from_bytes_migrating(&v2_bytes).expect("v2 快照应可迁移为当前版本");
-        assert_eq!(migrated.version, SnapshotData::CURRENT_VERSION);
-        assert_eq!(migrated.last_included_index, 11);
-        assert_eq!(migrated.last_included_term, 6);
-        assert_eq!(migrated.applied_index, 11);
-        assert_eq!(migrated.applied_term, 0, "v2 无 applied term → 回退 0");
-        assert_eq!(migrated.applied_node_id, 0);
-        assert!(migrated.auth_entries.is_empty());
-        assert!(migrated.lease_entries.is_empty());
-        assert!(migrated.pd_entries.is_empty());
-        assert!(migrated.sys_entries.is_empty());
-        assert_eq!(
-            migrated.compacted_revision, 11,
-            "v2 无 changelog ⇒ 水位取 applied_index"
-        );
-        assert!(migrated.changelog_entries.is_empty());
-        assert_eq!(migrated.kv_pairs.len(), 1);
-        assert_eq!(migrated.kv_pairs[0].value, b"legacy-value");
-
-        // 迁移后的 v4 快照可正常导入恢复
-        let tmp = TempDir::new().unwrap();
-        let backend = RedbBackend::open(tmp.path(), &StorageConfig::default()).unwrap();
-        let storage = MvccStorage::new(backend).unwrap();
-        import_snapshot_data(&storage, &migrated).unwrap();
-        assert_eq!(
-            storage.get(b"/legacy/key").unwrap(),
-            Some(b"legacy-value".to_vec())
-        );
-        let applied = storage.get_applied_log_id().unwrap().unwrap();
-        assert_eq!(applied.index, 11);
-
-        // 未知版本拒绝（v1 等）
-        let mut v1 = v2.clone();
-        v1.version = 1;
-        let v1_bytes = bincode::serialize(&v1).unwrap();
-        assert!(SnapshotData::from_bytes_migrating(&v1_bytes).is_err());
-    }
-
-    // ──── 装快照后洞内历史读（判据 + 旧格式迁移）────
+    // ──── 装快照后洞内历史读（判据）────
 
     /// 判据（正）：快照携带 changelog 窗口 ⇒ 装快照后洞内 target 的历史读
     /// 返回**真值**。
@@ -1227,73 +890,7 @@ mod tests {
         assert_eq!(tail, Some(4), "changelog 尾部应覆盖到最新 apply");
     }
 
-    /// 判据（旧格式迁移）：v4 快照（不带 changelog）迁移后水位抬到 applied；
-    /// 导入到带旧 changelog 的节点上时，洞内 target 的读必须**显式报
-    /// `RevisionCompacted`**，绝不静默返回前值。
-    #[test]
-    fn test_v4_snapshot_migration_makes_gap_reads_explicit() {
-        let (_tmp_a, storage_a) = setup_storage();
-        storage_a
-            .put_at_revision(b"/k", b"v_old", None, 1, AppliedLogId::standalone(1))
-            .unwrap();
-        storage_a
-            .put_at_revision(b"/k", b"v_new", None, 3, AppliedLogId::standalone(3))
-            .unwrap();
-        let data = export_snapshot_data(&storage_a, 3, 1).unwrap();
-
-        // 构造 v4 格式字节（无 changelog 字段）
-        let v4 = SnapshotDataV4 {
-            version: 4,
-            last_included_index: data.last_included_index,
-            last_included_term: data.last_included_term,
-            next_revision: data.next_revision,
-            applied_index: data.applied_index,
-            applied_term: data.applied_term,
-            applied_node_id: data.applied_node_id,
-            kv_pairs: data.kv_pairs.clone(),
-            kv_metadata: data.kv_metadata.clone(),
-            auth_entries: data.auth_entries.clone(),
-            lease_entries: data.lease_entries.clone(),
-            compacted_revision: data.compacted_revision,
-            pd_entries: data.pd_entries.clone(),
-            sys_entries: data.sys_entries.clone(),
-        };
-        let v4_bytes = bincode::serialize(&v4).unwrap();
-        let migrated = SnapshotData::from_bytes_migrating(&v4_bytes).expect("v4 快照应可迁移");
-        assert_eq!(migrated.version, SnapshotData::CURRENT_VERSION);
-        assert!(migrated.changelog_entries.is_empty());
-        assert_eq!(
-            migrated.compacted_revision, 3,
-            "v4 无 changelog ⇒ 水位抬到 applied（3）"
-        );
-
-        // 导入到带旧 changelog 的 B（本地有 r1）：旧条目必须被清掉，
-        // 洞内 target 必须显式报错（不能静默返回 v_old）
-        let tmp_b = TempDir::new().unwrap();
-        let backend_b = RedbBackend::open(tmp_b.path(), &StorageConfig::default()).unwrap();
-        let storage_b = MvccStorage::new(backend_b).unwrap();
-        storage_b
-            .put_at_revision(b"/k", b"v_old", None, 1, AppliedLogId::standalone(1))
-            .unwrap();
-        import_snapshot_data(&storage_b, &migrated).unwrap();
-
-        assert_eq!(storage_b.compacted_revision().unwrap(), 3);
-        let err = storage_b
-            .get_at_revision(b"/k", 2)
-            .expect_err("v4 迁移快照的洞内历史读必须显式报错");
-        assert!(
-            matches!(err, Error::RevisionCompacted { .. }),
-            "错误必须是 RevisionCompacted，实际：{err:?}"
-        );
-        // 水位之上的新区域不受影响：当前状态读正常、新 revision 历史读可重建
-        assert_eq!(storage_b.get(b"/k").unwrap(), Some(b"v_new".to_vec()));
-        assert_eq!(
-            storage_b.get_at_revision(b"/k", 4).unwrap(),
-            Some(b"v_new".to_vec())
-        );
-    }
-
-    // ──── 格式信封（P2a：快照三路读 + 精确消费）────
+    // ──── 格式信封（P3：唯一 V2 + 精确消费）────
 
     fn envelope_sample_snapshot() -> SnapshotData {
         let mut data = SnapshotData::new(7, 3);
@@ -1312,38 +909,34 @@ mod tests {
         data
     }
 
-    /// V2 行（postcard，仅承载 v5）⇒ 解码成功（from_bytes / from_bytes_migrating）。
+    /// V2 行（postcard，唯一格式，仅承载 v5）⇒ 解码成功。
     /// 负控制：删除 V2 读腿 ⇒ 本用例必红。
     #[test]
     fn test_snapshot_v2_row_decodes() {
         let data = envelope_sample_snapshot();
-        let bytes = envelope::encode_v2(&data).unwrap();
+        let bytes = envelope::encode(&data).unwrap();
 
-        let restored = SnapshotData::from_bytes_migrating(&bytes).expect("V2 快照必须可解码");
+        let restored = SnapshotData::from_bytes(&bytes).expect("V2 快照必须可解码");
         assert_eq!(restored.version, SnapshotData::CURRENT_VERSION);
         assert_eq!(restored.last_included_index, 7);
         assert_eq!(restored.kv_pairs.len(), 1);
         assert_eq!(restored.changelog_entries.len(), 1);
-
-        let direct = SnapshotData::from_bytes(&bytes).expect("from_bytes 必须读 V2");
-        assert_eq!(direct.applied_term, 3);
+        assert_eq!(restored.applied_term, 3);
     }
 
-    /// V2 腿版本不是 v5 ⇒ 显式报错（V2 无迁移阶梯，不得按旧结构试解）。
+    /// V2 行版本不是 v5 ⇒ 显式报错（无迁移阶梯，不得按旧结构试解）。
     /// 负控制：去掉 `version == CURRENT_VERSION` 检查 ⇒ 本用例必红。
     #[test]
     fn test_snapshot_v2_wrong_version_rejected() {
         let mut data = envelope_sample_snapshot();
         data.version = 4;
-        let bytes = envelope::encode_v2(&data).unwrap();
+        let bytes = envelope::encode(&data).unwrap();
 
-        let err = SnapshotData::from_bytes_migrating(&bytes)
-            .expect_err("V2 行 version != 5 必须显式报错");
+        let err = SnapshotData::from_bytes(&bytes).expect_err("version != 5 必须显式报错");
         assert!(
             format!("{err:?}").contains("unsupported snapshot version"),
             "错误必须是版本不受支持，实际：{err:?}"
         );
-        assert!(SnapshotData::from_bytes(&bytes).is_err());
     }
 
     /// V2 行尾随字节 ⇒ 显式失败（精确消费）。
@@ -1351,9 +944,8 @@ mod tests {
     #[test]
     fn test_snapshot_v2_trailing_bytes_rejected() {
         let data = envelope_sample_snapshot();
-        let mut bytes = envelope::encode_v2(&data).unwrap();
+        let mut bytes = envelope::encode(&data).unwrap();
         bytes.extend_from_slice(&[0xDE, 0xAD]);
-        assert!(SnapshotData::from_bytes_migrating(&bytes).is_err());
         assert!(SnapshotData::from_bytes(&bytes).is_err());
     }
 
@@ -1363,16 +955,16 @@ mod tests {
     fn test_snapshot_v2_tampered_prefix_rejected() {
         let data = envelope_sample_snapshot();
 
-        let mut magic = envelope::encode_v2(&data).unwrap();
+        let mut magic = envelope::encode(&data).unwrap();
         magic[0] = 0x03;
         assert!(
-            SnapshotData::from_bytes_migrating(&magic).is_err(),
+            SnapshotData::from_bytes(&magic).is_err(),
             "魔数破坏后不得静默解出快照"
         );
 
-        let mut version = envelope::encode_v2(&data).unwrap();
+        let mut version = envelope::encode(&data).unwrap();
         version[envelope::MAGIC.len()] = 9;
-        let err = SnapshotData::from_bytes_migrating(&version).expect_err("未知版本必须显式报错");
+        let err = SnapshotData::from_bytes(&version).expect_err("未知版本必须显式报错");
         assert!(
             format!("{err:?}").contains("unsupported envelope version"),
             "错误必须是未知信封版本，实际：{err:?}"
@@ -1383,66 +975,12 @@ mod tests {
     #[test]
     fn test_snapshot_v2_truncated_rejected() {
         let data = envelope_sample_snapshot();
-        let bytes = envelope::encode_v2(&data).unwrap();
-        assert!(SnapshotData::from_bytes_migrating(&bytes[..bytes.len() - 1]).is_err());
+        let bytes = envelope::encode(&data).unwrap();
+        assert!(SnapshotData::from_bytes(&bytes[..bytes.len() - 1]).is_err());
     }
 
-    /// V1 行（bincode payload）读：v5 直接成功；V1 包裹的 v4 行走阶梯迁移。
-    /// 负控制：V1 分区不接 bincode 阶梯 ⇒ 本用例必红。
-    #[test]
-    fn test_snapshot_v1_row_decodes_with_ladder() {
-        let data = envelope_sample_snapshot();
-        let v1 = envelope::encode_v1(&data).unwrap();
-        let restored = SnapshotData::from_bytes_migrating(&v1).expect("V1 v5 行必须可解码");
-        assert_eq!(restored.last_included_index, 7);
-
-        // V1 包裹的 v4 行（无 changelog 窗口）⇒ 阶梯迁移，水位抬到 applied
-        let v4 = SnapshotDataV4 {
-            version: 4,
-            last_included_index: 11,
-            last_included_term: 6,
-            next_revision: 12,
-            applied_index: 11,
-            applied_term: 7,
-            applied_node_id: 3,
-            kv_pairs: Vec::new(),
-            kv_metadata: Vec::new(),
-            auth_entries: Vec::new(),
-            lease_entries: Vec::new(),
-            compacted_revision: 5,
-            pd_entries: Vec::new(),
-            sys_entries: Vec::new(),
-        };
-        let payload = bincode::serialize(&v4).unwrap();
-        let mut v1_v4 = Vec::with_capacity(envelope::PREFIX_LEN + payload.len());
-        v1_v4.extend_from_slice(&envelope::MAGIC);
-        v1_v4.push(envelope::VERSION);
-        v1_v4.extend_from_slice(&payload);
-        let migrated =
-            SnapshotData::from_bytes_migrating(&v1_v4).expect("V1 包裹的 v4 行必须走阶梯迁移");
-        assert_eq!(migrated.version, SnapshotData::CURRENT_VERSION);
-        assert!(migrated.changelog_entries.is_empty());
-        assert_eq!(migrated.compacted_revision, 11);
-    }
-
-    /// 混读：同一快照的无前缀 / V1 / V2 三种编码均可解码，内容一致。
-    /// 负控制：任一读腿移除 ⇒ 本用例必红。
-    #[test]
-    fn test_snapshot_mixed_encodings_decode() {
-        let data = envelope_sample_snapshot();
-        let legacy = bincode::serialize(&data).unwrap();
-        let v1 = envelope::encode_v1(&data).unwrap();
-        let v2 = envelope::encode_v2(&data).unwrap();
-        for (label, bytes) in [("legacy", legacy), ("v1", v1), ("v2", v2)] {
-            let restored = SnapshotData::from_bytes_migrating(&bytes)
-                .unwrap_or_else(|e| panic!("{label} 快照必须可解码：{e:?}"));
-            assert_eq!(restored.last_included_index, 7, "{label}");
-            assert_eq!(restored.applied_node_id, 1, "{label}");
-        }
-    }
-
-    /// 写路径断言：`to_bytes` 产物必须带 `MAGIC + VERSION_V2` 前缀（P2b）。
-    /// 负控制：写路径回退 V1（bincode 载荷）或无前缀 bincode ⇒ 本用例必红。
+    /// 写路径断言：`to_bytes` 产物必须带 `MAGIC + VERSION_V2` 前缀（唯一格式）。
+    /// 负控制：写路径回退 V1 版本字节 ⇒ 本用例必红。
     #[test]
     fn test_snapshot_to_bytes_writes_v2_envelope() {
         let data = envelope_sample_snapshot();
@@ -1456,23 +994,7 @@ mod tests {
             envelope::VERSION_V2,
             "快照写产物必须为 V2 信封"
         );
-        // 写产物回读走 V2 腿
-        let restored = SnapshotData::from_bytes_migrating(&bytes).unwrap();
+        let restored = SnapshotData::from_bytes(&bytes).unwrap();
         assert_eq!(restored.last_included_index, 7);
-    }
-
-    /// 无前缀 / V1 行尾随字节 ⇒ 显式失败（旧格式读收窄为精确消费）。
-    /// 负控制：bincode 侧改回 allow_trailing ⇒ 本用例必红。
-    #[test]
-    fn test_snapshot_legacy_and_v1_trailing_bytes_rejected() {
-        let data = envelope_sample_snapshot();
-
-        let mut legacy = bincode::serialize(&data).unwrap();
-        legacy.extend_from_slice(&[0xDE, 0xAD]);
-        assert!(SnapshotData::from_bytes_migrating(&legacy).is_err());
-
-        let mut v1 = envelope::encode_v1(&data).unwrap();
-        v1.extend_from_slice(&[0xDE, 0xAD]);
-        assert!(SnapshotData::from_bytes_migrating(&v1).is_err());
     }
 }

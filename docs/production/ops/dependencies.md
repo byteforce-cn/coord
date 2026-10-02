@@ -1,65 +1,60 @@
-# 依赖治理与 bincode 退场计划
+# 依赖治理与 bincode 退场记录（已完成）
 
 > Owner: maintainers ｜ Last verified: 2026-10-02
 
-- **现状**：`deny.toml` 的 `ignore` 只有 **1** 条：`RUSTSEC-2025-0141`（bincode 1.3.3
-  被标记为 **unmaintained**，**不是漏洞**，且 `Solution: No safe upgrade is available!`）。
-- **目标**：以**分阶段、每步带判据**的退场计划替换序列化格式，最终关闭该豁免。
+- **现状（完成态）**：bincode 已完全退场——依赖图无 bincode（`cargo tree -i bincode`
+  无匹配）、`deny.toml` 无豁免条目；持久化与 RPC 载荷统一为信封 V2（postcard，
+  `MAGIC(4B) | VERSION_V2(1B)`），无前缀 / V1 / RPC codec=0 等旧格式一律**显式拒绝**
+  （不静默错读、不试错解码）。
+- **目标（已达成）**：以分阶段、每步带判据的退场计划替换序列化格式并关闭豁免；
+  后续依赖纪律 = 不得重新引入 bincode（`unmaintained = "all"` 且无豁免，重新引入直接
+  fail-closed）。
 
 ---
 
-## 1. 为什么不能"直接换掉"
+## 1. 退场为什么分阶段（记录）
 
-bincode 在本仓库不是工具库，而是**持久化格式**，直接承载六类**长期存活**的数据：
+bincode 在本仓库不是工具库，而是**持久化格式**，直接承载多类**长期存活**的数据：
 
-| # | 承载物 | 位置 | 是否有版本化 |
+| # | 承载物 | 位置 | 退场后格式 |
 |:--|:--|:--|:--|
-| 1 | 快照 | `coord-server/src/storage/snapshot.rs` | ✅ `SnapshotDataV1/V2/V3` 三代兼容解码 |
-| 2 | Raft 日志条目 | `coord-server/src/raft/log_store.rs`（Entry/Vote/Committed/LastPurged；region 模式复用同一实现） | ✅ 统一前缀信封（P0） |
-| 3 | auth 用户/角色/会话/吊销 | `coord-server/src/auth/manager.rs`（`/_sys/auth/`） | 🟡 变体索引即变体号（`test_auth_op_bincode_variant_indices_appended`） |
-| 4 | PD Region 元数据 | `coord-server/src/pd/meta_store.rs` | ✅ 统一前缀信封（P0） |
-| 5 | 对象存储 manifest | `coord-server/src/storage/object_store.rs` | ✅ 统一前缀信封（P0） |
-| 6 | `AppliedLogId` 旧编码回退 | `coord-server/src/storage/mvcc.rs` | 🟡 专为兼容旧 bincode 编码而保留 |
+| 1 | 快照 | `coord-server/src/storage/snapshot.rs` | 信封 V2（postcard；内部 `version=5`） |
+| 2 | Raft 日志条目 | `coord-server/src/raft/log_store.rs`（Entry/Vote/Committed/LastPurged；region 模式复用同一实现） | 信封 V2 |
+| 3 | auth 用户/角色/会话/吊销/bootstrap | `coord-server/src/auth/manager.rs`（`/_sys/auth/`） | 信封 V2（变体索引 = wire 的一部分，只允许末尾追加，见 `test_auth_op_variant_indices_appended`） |
+| 4 | PD Region 元数据 | `coord-server/src/pd/meta_store.rs` | 信封 V2 |
+| 5 | 对象存储 manifest | `coord-server/src/storage/object_store.rs` | 信封 V2 |
+| 6 | `AppliedLogId` | `coord-server/src/storage/mvcc.rs` | `ALI1` 手写定长（无失败路径；旧 bincode 回退已删除） |
+| 7 | raft RPC 载荷（跨节点） | `coord-server/src/raft/network.rs` | postcard（`payload_codec=1`；ADR-0007） |
 
-> 注：`coord-core` 声明的 `bincode` 依赖无源码使用点，随 P3 从依赖图删除。
-
-⇒ 一次「换库」= **六处数据迁移 + 双向兼容窗口**。在没有生产部署之前做（现在是窗口），
-成本最低；但**不能**在没有迁移期与回滚路径的情况下做。
+⇒ 一次「换库」= **多处数据迁移 + 双向兼容窗口**；本仓当时无生产部署，按分级判据
+逐阶段推进（见下一节表）完成。
 
 ---
 
-## 2. 退场计划（分阶段，每步可独立验收）
+## 2. 退场阶段（全部完成）
 
-| 阶段 | 动作 | 判据（可执行） | 回滚 |
+| 阶段 | 动作 | 判据（可执行） | 状态 |
 |:--|:--|:--|:--|
-| **P0 先立"格式可辨识"** | 给第 2/4/5 项（当前无版本信封的）加**统一的格式魔数 + 版本字节前缀** | 新增单测：旧数据（无前缀）仍能解码；新数据带前缀；篡改前缀 ⇒ 显式报错（不是"解码成垃圾"） | 前缀写入可降级（解码兼容） |
-| **P1 选型 + 双解** | 选定替代（候选：`postcard` / `wincode` / `bitcode` / `rkyv`；**选型结论见 ADR-0005**（accepted：`postcard`）），信封层**读路径三路双解**（V1 / V2 / 无前缀）、写路径仍写 bincode | 全量 workspace 测试绿；新增对照测试：同一结构两种编码**逐字节可往返** | 删除新 codec |
-| **P2 迁移窗口** | 写路径切到新格式（打新前缀）；读路径同时支持两种；剩余直写面逐个信封化（设计：ADR-0006；分 P2a 读先行 / P2b 写切换两步；RPC 载荷标记单独评审：ADR-0007） | 快照/日志/auth/PD/manifest 五类各有「旧数据读 + 新数据读 + 混读」测试 | 切回旧写路径（旧数据未动） |
-| **P3 关闭豁免** | 从 `deny.toml` 删除 `ignore` 条目，bincode 从依赖图消失（或仅测试用） | `cargo deny check advisories` 绿且 `grep -rn bincode Cargo.toml */Cargo.toml` 归零 | 恢复依赖 + 旧解码路径保留一个 minor |
+| **P0 先立"格式可辨识"** | 给第 2/4/5 项加统一魔数 + 版本字节前缀 | 旧数据仍能解码；新数据带前缀；篡改前缀 ⇒ 显式报错 | ✅ |
+| **P1 选型 + 双解** | 选型（ADR-0005：postcard，`VERSION_V2`）；读路径三路双解 + 精确消费 | 两种编码逐字节对照可往返；篡改矩阵全部显式失败 | ✅ |
+| **P2 迁移窗口** | 写路径切 V2 + 四个直写面信封化（P2a 读先行 / P2b 写切换，ADR-0006）；RPC 载荷标记先读后写（R1/R2，ADR-0007） | 每面「旧行 / V1 / V2 / 混读 / 篡改」矩阵 + 写前缀白盒断言 + 负控制 | ✅ |
+| **P3 关闭豁免** | 删除旧读腿与迁移阶梯；bincode 从依赖图消失；删 `deny.toml` 豁免 | `cargo deny check advisories` 无豁免；`grep bincode Cargo.toml */Cargo.toml` 与 `bincode::`（`.rs`）归零；全量测试绿 | ✅ |
 
-> **进度**：P0「格式可辨识」已落地（2026-10-02）——第 2/4/5 项写路径统一为
-> `MAGIC(4B) + VERSION(1B) + bincode` 信封，读路径兼容无前缀旧行（实现：
-> `coord-server/src/storage/envelope.rs`）；P1 选型已定（ADR-0005：postcard，
-> `VERSION=2`），读路径三路双解（V1 / V2 / 无前缀）+ 精确消费（拒绝尾随字节）
-> 已落地（2026-10-02）。
-> **P2 设计评审已通过**（ADR-0006：持久化写路径 V2 迁移 + 剩余直写面信封化；
-> ADR-0007：RPC 载荷编码标记，单独评审），实现拆分 P2a（读先行）/ P2b（写
-> 切换）两步。
-> **P2a 读先行已落地**（2026-10-02）：快照 / auth 记录×5 / SM 元数据 /
-> PD 队列条目四个直写面接入三路读，旧格式读收窄为精确消费（快照的 bincode
-> 迁移阶梯保留）。
-> **P2b 写切换已落地**（2026-10-02）：`envelope::encode` 唯一写入口切 V2
-> （postcard）——快照 / auth 记录×5 / SM 元数据（META_SNAPSHOT、
-> META_MEMBERSHIP）/ PD 队列条目 / region manifest 各写路径统一写
-> `MAGIC + VERSION_V2 + postcard`；旧格式维持只读窗口，待 P3 删除。
+> **完成记录**（2026-10-02）：P0–P3 落地，判据均以测试钉住——信封实现：
+> `coord-server/src/storage/envelope.rs`（唯一 V2；旧格式显式拒绝）；各面拒绝用例
+> （快照 / auth / SM 元数据 / PD 队列 / raft 四表 / PD Region / manifest / RPC）与
+> 写路径白盒断言分布在对应模块测试中；负控制逐项实跑后还原。
 
-**完成判据**：P3 完成且 `cargo deny` 无豁免。
+**完成判据（已满足）**：`cargo deny check advisories` 无豁免；bincode 不在依赖图；
+旧格式读写路径已删除（出现即为显式错误）。
 
 ---
 
 ## 3. 约定
 
-- 阶段 **P0 的测试**必须**正反两向**验证（能读旧数据 **且** 篡改前缀会显式失败）。
-- 阶段 **P2 的混读测试**是数据面的对应物：契约面已有 descriptor 校验，数据面此前没有。
-- **不得**以「bincode 有豁免所以可以再加一条豁免」的方式推进：`deny.toml` 的维护约定
-  写明「`ignore` 只允许按『一个通告 + 一段理由 + 一条关闭路径』增长」。
+- 格式演进只经**信封版本字节**（`storage/envelope.rs`）：新增字段/改结构属 Breaking，
+  不得依赖 `#[serde(default)]` 之类的宽松解码行为。
+- 篡改防护要求：每条读路径必须**精确消费**（拒绝尾随字节）且对未知版本/损坏前缀
+  **显式失败**；新增持久化面必须复用统一信封。
+- **不得**重新引入 bincode：`deny.toml` 无豁免（`unmaintained = "all"`），重新引入
+  将直接 fail-closed。

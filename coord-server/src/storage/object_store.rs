@@ -193,7 +193,7 @@ pub fn range_touches_object_space(start: &[u8], end: &[u8]) -> bool {
     !below_start && !above_end
 }
 
-// ──── manifest（raft 强一致的 /kv/ 用户行，统一信封 + bincode） ────
+// ──── manifest（raft 强一致的 /kv/ 用户行，统一信封 V2） ────
 
 /// 单个 chunk 记录（写入 apply 时由数据计算 sha256，确定性）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,7 +237,7 @@ impl ObjectManifest {
             last_write_at_unix: started_at_unix,
         }
     }
-    /// 编码为存储行字节：统一信封（V1 = bincode；见 `crate::storage::envelope`）。
+    /// 编码为存储行字节：统一信封（V2 = postcard；见 `crate::storage::envelope`）。
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         crate::storage::envelope::encode(self)
             .map_err(|e| Error::Internal(format!("encode object manifest: {e}")))
@@ -1207,7 +1207,7 @@ mod tests {
     }
 
     /// 新写入的 manifest 必须带统一信封前缀（白盒字节断言）。
-    /// 负控制：写路径回退 V1（bincode 载荷）⇒ 本用例必红。
+    /// 负控制：写路径回退 V1 版本字节 ⇒ 本用例必红。
     #[test]
     fn test_manifest_bytes_use_format_envelope() {
         use crate::storage::envelope::{MAGIC, VERSION_V2};
@@ -1220,16 +1220,24 @@ mod tests {
         assert_eq!(bytes[MAGIC.len()], VERSION_V2);
     }
 
-    /// 旧数据（无前缀 bincode）必须仍能解码。
-    /// 负控制：读路径删掉旧格式回退 ⇒ 本用例必红。
+    /// 退役格式（无前缀行）⇒ 必须显式拒绝（None）。
+    /// 负控制：恢复旧格式回退 ⇒ 本用例必红。
     #[test]
-    fn test_legacy_manifest_without_prefix_still_decodes() {
-        let m = sample_manifest();
-        let legacy = bincode::serialize(&m).unwrap();
-        let decoded =
-            ObjectManifest::from_bytes(&legacy).expect("legacy manifest must still decode");
-        assert_eq!(decoded.size, 10);
-        assert_eq!(decoded.chunks.len(), 1);
+    fn test_retired_manifest_without_prefix_rejected() {
+        let legacy = [0x05u8, 0, 0, 0, 0, 0, 0, 0];
+        assert!(
+            ObjectManifest::from_bytes(&legacy).is_none(),
+            "退役无前缀行必须显式拒绝"
+        );
+
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(&crate::storage::envelope::MAGIC);
+        v1.push(1);
+        v1.extend_from_slice(&[0xAA, 0xBB]);
+        assert!(
+            ObjectManifest::from_bytes(&v1).is_none(),
+            "V1 退役行必须显式拒绝"
+        );
     }
 
     /// 篡改信封（版本字节 / 魔数）⇒ 必须显式拒绝（None），不得返回垃圾对象。
@@ -1261,36 +1269,44 @@ mod tests {
     /// 负控制：删除 V2 分支 ⇒ 本用例必红。
     #[test]
     fn test_v2_manifest_decodes() {
-        let bytes = crate::storage::envelope::encode_v2(&sample_manifest()).unwrap();
+        let bytes = crate::storage::envelope::encode(&sample_manifest()).unwrap();
         let m = ObjectManifest::from_bytes(&bytes).expect("V2 manifest must decode");
         assert_eq!(m.size, 10);
         assert!(m.committed);
         assert_eq!(m.chunks[0].sha256, [7u8; 32]);
     }
 
-    /// 混读：旧行（无前缀）/ V1 / V2 三种编码均可解码。
-    /// 负控制：任一读路径移除 ⇒ 本用例必红。
+    /// 退役格式拒绝：V1 / 无前缀 ⇒ None；写产物（V2）正常。
+    /// 负控制：恢复任一历史读腿 ⇒ 本用例必红。
     #[test]
-    fn test_mixed_manifest_encodings_decode() {
+    fn test_v2_and_retired_manifest_encodings() {
         let m = sample_manifest();
-        let legacy = bincode::serialize(&m).unwrap();
-        let v1 = crate::storage::envelope::encode_v1(&m).unwrap();
-        let v2 = crate::storage::envelope::encode_v2(&m).unwrap();
-        for (label, bytes) in [("legacy", legacy), ("v1", v1), ("v2", v2)] {
-            let decoded = ObjectManifest::from_bytes(&bytes)
-                .unwrap_or_else(|| panic!("{label} manifest must decode"));
-            assert_eq!(decoded.size, 10, "{label}");
-        }
+        let v2 = crate::storage::envelope::encode(&m).unwrap();
+        let decoded = ObjectManifest::from_bytes(&v2).expect("V2 manifest must decode");
+        assert_eq!(decoded.size, 10);
+
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(&crate::storage::envelope::MAGIC);
+        v1.push(1);
+        v1.extend_from_slice(&[0xAA]);
+        assert!(
+            ObjectManifest::from_bytes(&v1).is_none(),
+            "V1 退役行必须显式拒绝"
+        );
+        assert!(
+            ObjectManifest::from_bytes(&[0x05u8, 0, 0, 0, 0, 0, 0, 0]).is_none(),
+            "无前缀退役行必须显式拒绝"
+        );
     }
 
     /// V2 行魔数逐字节破坏 ⇒ 必须显式拒绝（None），不得返回垃圾对象
     /// （ADR-0005 锚点）。负控制：去掉魔数比较 / 加试错解码 ⇒ 本用例必红。
     #[test]
     fn test_v2_magic_corruption_rejected() {
-        use crate::storage::envelope::{encode_v2, MAGIC};
+        use crate::storage::envelope::MAGIC;
 
         for i in 0..MAGIC.len() {
-            let mut bytes = encode_v2(&sample_manifest()).unwrap();
+            let mut bytes = crate::storage::envelope::encode(&sample_manifest()).unwrap();
             bytes[i] = bytes[i].wrapping_add(1);
             assert!(
                 ObjectManifest::from_bytes(&bytes).is_none(),
@@ -1299,21 +1315,25 @@ mod tests {
         }
     }
 
-    /// 尾随字节篡改（无前缀 / V1 / V2）⇒ 必须显式拒绝（None）。
-    /// 负控制：bincode 侧改回 allow_trailing / 去掉 V2 remainder 断言 ⇒ 对应用例必红。
+    /// 尾随字节 / 退役格式 ⇒ 显式拒绝（None）——精确消费 + 无历史读腿。
+    /// 负控制：去掉 V2 remainder 断言 / 恢复历史读腿 ⇒ 对应用例必红。
     #[test]
-    fn test_manifest_trailing_bytes_rejected() {
+    fn test_manifest_trailing_and_retired_rejected() {
         let m = sample_manifest();
-        let mut legacy = bincode::serialize(&m).unwrap();
-        legacy.extend_from_slice(&[0xDE, 0xAD]);
-        let mut v1 = crate::storage::envelope::encode_v1(&m).unwrap();
-        v1.extend_from_slice(&[0xDE, 0xAD]);
-        let mut v2 = crate::storage::envelope::encode_v2(&m).unwrap();
+        let mut v2 = crate::storage::envelope::encode(&m).unwrap();
         v2.extend_from_slice(&[0xDE, 0xAD]);
-        for (label, bytes) in [("legacy", legacy), ("v1", v1), ("v2", v2)] {
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(&crate::storage::envelope::MAGIC);
+        v1.push(1);
+        v1.extend_from_slice(&[0xAA]);
+        for (label, bytes) in [
+            ("v2-trailing", v2),
+            ("v1", v1),
+            ("legacy", vec![0x05u8, 0, 0, 0, 0, 0, 0, 0]),
+        ] {
             assert!(
                 ObjectManifest::from_bytes(&bytes).is_none(),
-                "{label} manifest with trailing bytes must be rejected"
+                "{label} manifest must be rejected"
             );
         }
     }

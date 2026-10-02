@@ -11,34 +11,13 @@ yanked = "deny"
 unmaintained = "all"
 unsound = "all"
 
-# 例外：只允许下面这一条，且必须写明理由与关闭路径。
-#
-# RUSTSEC-2025-0141 —— bincode 1.3.3 被标记为 **unmaintained**（**不是漏洞**）。
-# 背景：bincode 团队因骚扰事件永久停止开发，并声明 1.3.3 是"完整版"。
-# 该通告 `Solution: No safe upgrade is available!`，也没有 CVE。
-#
-# 为什么这里选择「记录后豁免」而不是「升级/替换」：
-#   bincode 在本仓库不是可有可无的工具库，而是**持久化格式**，直接承载
-#   · 快照（storage/snapshot.rs，且保留 SnapshotDataV1/V2/V3 三代格式的向后兼容解码）、
-#   · Raft 日志条目（coord-server/src/raft/log_store.rs；region 模式复用同一实现）、
-#   · auth 用户/角色/会话/吊销记录（auth/manager.rs，`/_sys/auth/` 原生 bincode，
-#     变体索引即变体号，见 `test_auth_op_bincode_variant_indices_appended`）、
-#   · PD Region 元数据（pd/meta_store.rs）、
-#   · 对象存储 manifest（storage/object_store.rs）、
-#   · `AppliedLogId` 的**旧编码回退路径**（storage/mvcc.rs，专门为兼容旧 bincode 编码而保留）。
-#   切换格式（postcard / wincode / rkyv…）是一次**跨版本数据迁移**，需要新旧格式双向
-#   兼容窗口 + 迁移期，属于独立立项的工作；在 0.1.0 这种"还没有任何生产部署"的节点上
-#   强行替换，风险远大于收益，而且会破坏代码里刻意维持的历史兼容分支。
-#
-# 结论：这是一条**信息性**通告（无漏洞、无可用升级），豁免是正确处理方式；
-# 但"换成维护中的序列化格式"是**真实的技术债**，已随退场计划跟踪
-# （见 `docs/production/ops/dependencies.md`），不允许静默遗忘。
+# 例外：当前**无豁免条目**——唯一的 RUSTSEC-2025-0141 / bincode 豁免已随退场计划
+# 关闭（bincode 已从依赖图消失，见 docs/production/ops/dependencies.md）；
+# 重新引入 bincode 将直接 fail-closed。
 #
 # 维护约定：`ignore` 只允许按「一个通告 + 一段理由 + 一条关闭路径」的形式增长；
 # 新增条目必须同时登记到退场计划文档。
-ignore = [
-    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 为 unmaintained（非漏洞，且无可用升级）。它是本仓库的持久化格式（快照/Raft 日志/auth 记录/PD 元数据/对象清单），替换属于跨版本数据迁移，已列为已知事项跟踪（见 docs/production/ops/dependencies.md）。" },
-]
+ignore = []
 
 [licenses]
 # 默认拒绝未明确列出的许可证；coord 依赖栈常用许可白名单
