@@ -11,6 +11,31 @@
 
     <name>Coord Java SDK</name>
     <description>Java SDK for Coord Agent — service registration, discovery, and dynamic configuration via gRPC</description>
+    <url>https://github.com/byteforce-cn/coord</url>
+
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <id>byteforce-cn</id>
+            <name>ByteForce</name>
+            <email>byteforce@qq.com</email>
+            <organization>ByteForce</organization>
+            <organizationUrl>https://github.com/byteforce-cn</organizationUrl>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:https://github.com/byteforce-cn/coord.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/byteforce-cn/coord.git</developerConnection>
+        <url>https://github.com/byteforce-cn/coord</url>
+    </scm>
 
     <properties>
         <java.version>21</java.version>
@@ -166,6 +191,86 @@
     </build>
 
     <profiles>
+        <!--
+            `-Prelease`：发布到 Maven Central 的完整链路（sources/javadoc + GPG 签名 +
+            Central Portal 上传）。只在发布环境激活——CI 的 `mvn verify` 不依赖 GPG 私钥。
+
+            ⚠️ 需用 Maven 3.9.x 执行（已验证 3.9.16）：Maven 3.10 的 Resolver 会把
+            staging 元数据写成 maven-metadata-local.xml，而插件只清理
+            maven-metadata-central-staging.xml，残留文件导致 Central 校验报
+            「Bundle has content that does NOT have a .pom file」。
+
+            发布者前置条件：
+              * `~/.m2/settings.xml` 中 server id `central` = Central Portal 用户 token；
+              * 本机 GPG 私钥（`-Dgpg.keyname=<指纹>` 明示；护照经 MAVEN_GPG_PASSPHRASE
+                环境变量或 gpg-agent 提供）。
+            上传后停留在 validated 状态（autoPublish=false），由人工在
+            central.sonatype.com 的部署页确认发布。
+        -->
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <version>3.4.0</version>
+                        <executions>
+                            <execution>
+                                <id>attach-sources</id>
+                                <goals>
+                                    <goal>jar-no-fork</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <version>3.12.0</version>
+                        <configuration>
+                            <!-- 注释含中文与 HTML 片段；doclint 严格模式误报多，
+                                 Central 要求的是 javadoc 包存在且可打开。 -->
+                            <doclint>none</doclint>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>attach-javadocs</id>
+                                <goals>
+                                    <goal>jar</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.8</version>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>0.11.0</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                            <deploymentName>coord-java-sdk-${project.version}</deploymentName>
+                            <autoPublish>false</autoPublish>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
         <!--
             `-Pit`：只跑需要真实 coord-agent 的集成套件（此时**不**排除它们）。
             若 Agent 不可达，测试以明确原因**失败**——刻意不使用 `assumeTrue` 静默跳过。
