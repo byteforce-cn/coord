@@ -33,13 +33,15 @@ bincode 在本仓库不是工具库，而是**持久化格式**，直接承载�
 | 阶段 | 动作 | 判据（可执行） | 回滚 |
 |:--|:--|:--|:--|
 | **P0 先立"格式可辨识"** | 给第 2/4/5 项（当前无版本信封的）加**统一的格式魔数 + 版本字节前缀** | 新增单测：旧数据（无前缀）仍能解码；新数据带前缀；篡改前缀 ⇒ 显式报错（不是"解码成垃圾"） | 前缀写入可降级（解码兼容） |
-| **P1 选型 + 双写（阴影）** | 选定替代（候选：`postcard` / `wincode` / `bitcode` / `rkyv`；**选型结论见 ADR-0005**（accepted：`postcard`）），实现 `Codec` trait，**读路径双解**、写路径仍写 bincode | 全量 workspace 测试绿；新增对照测试：同一结构两种编码**逐字节可往返** | 删除新 codec |
+| **P1 选型 + 双解** | 选定替代（候选：`postcard` / `wincode` / `bitcode` / `rkyv`；**选型结论见 ADR-0005**（accepted：`postcard`）），信封层**读路径三路双解**（V1 / V2 / 无前缀）、写路径仍写 bincode | 全量 workspace 测试绿；新增对照测试：同一结构两种编码**逐字节可往返** | 删除新 codec |
 | **P2 迁移窗口** | 写路径切到新格式（打新前缀）；读路径同时支持两种 | 快照/日志/auth/PD/manifest 五类各有「旧数据读 + 新数据读 + 混读」测试 | 切回旧写路径（旧数据未动） |
 | **P3 关闭豁免** | 从 `deny.toml` 删除 `ignore` 条目，bincode 从依赖图消失（或仅测试用） | `cargo deny check advisories` 绿且 `grep -rn bincode Cargo.toml */Cargo.toml` 归零 | 恢复依赖 + 旧解码路径保留一个 minor |
 
 > **进度**：P0「格式可辨识」已落地（2026-10-02）——第 2/4/5 项写路径统一为
 > `MAGIC(4B) + VERSION(1B) + bincode` 信封，读路径兼容无前缀旧行（实现：
-> `coord-server/src/storage/envelope.rs`）；P1（选型 + 双写）未开始。
+> `coord-server/src/storage/envelope.rs`）；P1 选型已定（ADR-0005：postcard，
+> `VERSION=2`），读路径三路双解（V1 / V2 / 无前缀）+ 精确消费（拒绝尾随字节）
+> 已落地（2026-10-02），写路径仍写 bincode——P2 迁移窗口未开始。
 
 **完成判据**：P3 完成且 `cargo deny` 无豁免。
 
