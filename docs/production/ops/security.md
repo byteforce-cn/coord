@@ -72,8 +72,8 @@ head -c 32 /dev/urandom > /var/lib/coord-agent/transit-kek.bin && chmod 600 …
 ### 2.3 当前状态
 
 KEK 供给与 TLS fail-closed 均已落地（判据见 1.2 与本节）；**未经独立第三方安全审计**，
-任何声明不得暗示已审计。剩余项：`cargo deny` 的 bincode 豁免替代路径
-（见 `dependencies.md`）。
+任何声明不得暗示已审计。`cargo deny` 豁免已清零（bincode 退场完成，见
+`dependencies.md`）。
 
 ---
 
@@ -103,5 +103,6 @@ cargo test -p coord-proto --test decode_proptest # 属性测试：wire 解码
 
 ## 4. 依赖治理
 
-`deny.toml` 的 bincode 豁免是**唯一**例外（`RUSTSEC-2025-0141`，unmaintained 非漏洞）；
-「替换格式」以分阶段、有判据的迁移计划推进，见 `dependencies.md`。
+`deny.toml` 当前**无豁免条目**：`RUSTSEC-2025-0141`（bincode unmaintained）已随
+分阶段退场计划关闭（P0–P3，bincode 已从依赖图消失；重新引入将直接 fail-closed），
+见 `dependencies.md`。

@@ -55,14 +55,14 @@ struct PersistedSnapshotMeta {
     pub path: String,
 }
 
-/// `META_SNAPSHOT` 行解码（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；
-/// 均精确消费，损坏 ⇒ None，启动按「无快照」处理）。
+/// `META_SNAPSHOT` 行解码（唯一格式：信封 V2-postcard；损坏/退役行 ⇒ None，
+/// 启动按「无快照」处理）。
 fn decode_persisted_snapshot_meta(bytes: &[u8]) -> Option<PersistedSnapshotMeta> {
     crate::storage::envelope::decode(bytes).ok()
 }
 
-/// `META_MEMBERSHIP` 行解码（三路；损坏 ⇒ None，启动回退空 membership 并用
-/// 日志重放兜底）。
+/// `META_MEMBERSHIP` 行解码（唯一格式：信封 V2-postcard；损坏/退役行 ⇒ None，
+/// 启动回退空 membership 并用日志重放兜底）。
 fn decode_persisted_membership(bytes: &[u8]) -> Option<StoredMembershipOf<TypeConfig>> {
     crate::storage::envelope::decode(bytes).ok()
 }
@@ -804,8 +804,8 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
         // 恢复快照数据到 MvccStorage
         if !data.is_empty() {
-            let snapshot_data = SnapshotData::from_bytes_migrating(&data)
-                .map_err(|e| io::Error::other(e.to_string()))?;
+            let snapshot_data =
+                SnapshotData::from_bytes(&data).map_err(|e| io::Error::other(e.to_string()))?;
             // R-RFT-06：快照携带完整 applied LogId（term/node_id/index），
             // 导入时不再降级为 AppliedLogId::standalone（term/node_id 置零）
             let sm = Arc::clone(&self.state_machine);
@@ -1216,10 +1216,10 @@ mod tests {
 
     // ──── 格式信封（P2a：SM 元数据三路读 + 精确消费）────
 
-    /// `META_SNAPSHOT` 行解码：旧行 / V1 / V2 均可读；篡改 ⇒ None。
-    /// 负控制：删 V2 读腿 ⇒ V2 断言红；放宽精确消费 ⇒ 尾随/截断断言红。
+    /// `META_SNAPSHOT` 行解码：唯一 V2 + 退役（V1/无前缀）拒绝 + 篡改矩阵。
+    /// 负控制：恢复 V1/无前缀读腿 ⇒ 退役断言红；放宽精确消费 ⇒ 尾随/截断断言红。
     #[test]
-    fn test_persisted_snapshot_meta_three_way_read_and_tamper() {
+    fn test_persisted_snapshot_meta_v2_only_read_and_retired_rejected() {
         let meta = PersistedSnapshotMeta {
             meta: SnapshotMetaOf::<TypeConfig> {
                 last_log_id: Some(LogIdOf::<TypeConfig>::new(
@@ -1238,36 +1238,43 @@ mod tests {
             path: "snapshots/snapshot-9-2.snap".to_string(),
         };
 
-        let legacy = bincode::serialize(&meta).unwrap();
-        let decoded = decode_persisted_snapshot_meta(&legacy).expect("旧行必须可解码");
+        // 写路径断言 + 回读
+        let written = crate::storage::envelope::encode(&meta).unwrap();
+        assert!(written.starts_with(&crate::storage::envelope::MAGIC));
+        assert_eq!(
+            written[crate::storage::envelope::MAGIC.len()],
+            crate::storage::envelope::VERSION_V2
+        );
+        let decoded = decode_persisted_snapshot_meta(&written).expect("V2 行必须可解码");
         assert_eq!(decoded.checksum, [7u8; 32]);
         assert_eq!(decoded.path, meta.path);
         assert_eq!(decoded.meta.last_log_id, meta.meta.last_log_id);
 
-        let v1 = crate::storage::envelope::encode_v1(&meta).unwrap();
-        let decoded = decode_persisted_snapshot_meta(&v1).expect("V1 行必须可解码");
-        assert_eq!(decoded.meta.last_log_id, meta.meta.last_log_id);
+        // 退役格式：V1 / 无前缀 ⇒ None
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(&crate::storage::envelope::MAGIC);
+        v1.push(1);
+        v1.extend_from_slice(&[0xAA, 0xBB]);
+        assert!(decode_persisted_snapshot_meta(&v1).is_none());
+        assert!(decode_persisted_snapshot_meta(&[0x05u8, 0, 0, 0, 0, 0, 0, 0]).is_none());
 
-        let v2 = crate::storage::envelope::encode_v2(&meta).unwrap();
-        let decoded = decode_persisted_snapshot_meta(&v2).expect("V2 行必须可解码");
-        assert_eq!(decoded.checksum, meta.checksum);
-
-        let mut bad_version = v2.clone();
+        // 篡改矩阵：未知版本 / 魔数 / 尾随 / 截断 ⇒ None
+        let mut bad_version = written.clone();
         bad_version[crate::storage::envelope::MAGIC.len()] = 9;
         assert!(decode_persisted_snapshot_meta(&bad_version).is_none());
-        let mut bad_magic = v2.clone();
+        let mut bad_magic = written.clone();
         bad_magic[0] = 0x03;
         assert!(decode_persisted_snapshot_meta(&bad_magic).is_none());
-        let mut trailing = v2.clone();
+        let mut trailing = written.clone();
         trailing.extend_from_slice(&[0xDE, 0xAD]);
         assert!(decode_persisted_snapshot_meta(&trailing).is_none());
-        assert!(decode_persisted_snapshot_meta(&v2[..v2.len() - 1]).is_none());
+        assert!(decode_persisted_snapshot_meta(&written[..written.len() - 1]).is_none());
     }
 
-    /// `META_MEMBERSHIP` 行解码：旧行 / V1 / V2 均可读；篡改 ⇒ None。
-    /// 负控制：删 V2 读腿 / 放宽精确消费 ⇒ 对应用例必红。
+    /// `META_MEMBERSHIP` 行解码：唯一 V2 + 退役（V1/无前缀）拒绝 + 篡改矩阵。
+    /// 负控制：恢复 V1/无前缀读腿 / 放宽精确消费 ⇒ 对应用例必红。
     #[test]
-    fn test_persisted_membership_three_way_read_and_tamper() {
+    fn test_persisted_membership_v2_only_read_and_retired_rejected() {
         let membership = StoredMembershipOf::<TypeConfig>::new(
             Some(LogIdOf::<TypeConfig>::new(
                 openraft::impls::leader_id_adv::LeaderId {
@@ -1282,29 +1289,36 @@ mod tests {
             ),
         );
 
-        let legacy = bincode::serialize(&membership).unwrap();
-        assert!(decode_persisted_membership(&legacy).is_some());
-        let v1 = crate::storage::envelope::encode_v1(&membership).unwrap();
-        assert!(decode_persisted_membership(&v1).is_some());
-        let v2 = crate::storage::envelope::encode_v2(&membership).unwrap();
-        let decoded = decode_persisted_membership(&v2).expect("V2 行必须可解码");
+        // 写路径断言 + 回读
+        let written = crate::storage::envelope::encode(&membership).unwrap();
+        assert!(written.starts_with(&crate::storage::envelope::MAGIC));
+        let decoded = decode_persisted_membership(&written).expect("V2 行必须可解码");
         assert_eq!(decoded, membership);
 
-        let mut bad_version = v2.clone();
+        // 退役格式：V1 / 无前缀 ⇒ None
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(&crate::storage::envelope::MAGIC);
+        v1.push(1);
+        v1.extend_from_slice(&[0xAA, 0xBB]);
+        assert!(decode_persisted_membership(&v1).is_none());
+        assert!(decode_persisted_membership(&[0x05u8, 0, 0, 0, 0, 0, 0, 0]).is_none());
+
+        // 篡改矩阵：未知版本 / 魔数 / 尾随 / 截断 ⇒ None
+        let mut bad_version = written.clone();
         bad_version[crate::storage::envelope::MAGIC.len()] = 9;
         assert!(decode_persisted_membership(&bad_version).is_none());
-        let mut bad_magic = v2.clone();
+        let mut bad_magic = written.clone();
         bad_magic[0] = 0x03;
         assert!(decode_persisted_membership(&bad_magic).is_none());
-        let mut trailing = v2.clone();
+        let mut trailing = written.clone();
         trailing.extend_from_slice(&[0xDE, 0xAD]);
         assert!(decode_persisted_membership(&trailing).is_none());
-        assert!(decode_persisted_membership(&v2[..v2.len() - 1]).is_none());
+        assert!(decode_persisted_membership(&written[..written.len() - 1]).is_none());
     }
 
     /// P2b 写路径断言：`META_SNAPSHOT` / `META_MEMBERSHIP` 新写入行必须为 V2
     /// 前缀（白盒字节断言）。
-    /// 负控制：写路径回退 V1（bincode 载荷）⇒ 本用例必红。
+    /// 负控制：写路径回退 V1 版本字节 ⇒ 本用例必红。
     #[tokio::test]
     async fn test_sm_meta_rows_written_as_v2_envelope() {
         use crate::storage::envelope::{MAGIC, VERSION_V2};

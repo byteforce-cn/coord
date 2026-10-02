@@ -45,7 +45,7 @@ const AUTH_PREFIX: &[u8] = b"/_auth/";
 /// 已 Apply 的最大 Raft LogId（崩溃恢复检查点；与命令写入同一事务）
 pub(crate) const META_LAST_APPLIED: &[u8] = b"/_meta/last_applied";
 
-/// `AppliedLogId` 持久化编码的魔数（区分定长编码与旧 bincode 编码）。
+/// `AppliedLogId` 持久化编码的魔数（标识 `ALI1` 定长编码；非该魔数按水位缺失处理）。
 const APPLIED_LOG_ID_MAGIC: &[u8; 4] = b"ALI1";
 
 /// 已持久化快照元数据（last_log_id/checksum/path）
@@ -387,8 +387,8 @@ impl AppliedLogId {
     pub(crate) fn to_bytes(self) -> Vec<u8> {
         // **手写定长编码**（4B 魔数 + 3×8B 大端），不得有失败路径。
         //
-        // 若用 `bincode::serialize(&self).unwrap_or_else(|_| Vec::new())`：
-        // 序列化失败会写入**空字节**，而这段字节会成为 `META_LAST_APPLIED`
+        // 若采用「序列化失败降级为空值」的写法：
+        // 失败会写入**空字节**，而这段字节会成为 `META_LAST_APPLIED`
         // 的水位；`from_bytes` 对空字节返回 `None` → 重启时水位报 0 →
         // **从 0 重放整个 raft 日志**——把可检测的错误转成静默的状态损坏。
         //
@@ -402,20 +402,18 @@ impl AppliedLogId {
         out
     }
 
-    /// 解码。**向后兼容**：魔数不匹配时回落到旧的 bincode 编码，
-    /// 保证升级后既有 `META_LAST_APPLIED` 不会丢水位。
+    /// 解码。P3：只接受 `ALI1` 手写定长编码（旧 bincode 回退已随退场删除；
+    /// 魔数/长度不符 ⇒ None，读取方按「未持久化」处理并由日志重放兜底）。
     pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if let Some(body) = bytes.strip_prefix(APPLIED_LOG_ID_MAGIC) {
-            let term = u64::from_be_bytes(body.get(0..8)?.try_into().ok()?);
-            let node_id = u64::from_be_bytes(body.get(8..16)?.try_into().ok()?);
-            let index = u64::from_be_bytes(body.get(16..24)?.try_into().ok()?);
-            return Some(Self {
-                term,
-                node_id,
-                index,
-            });
-        }
-        bincode::deserialize(bytes).ok()
+        let body = bytes.strip_prefix(APPLIED_LOG_ID_MAGIC)?;
+        let term = u64::from_be_bytes(body.get(0..8)?.try_into().ok()?);
+        let node_id = u64::from_be_bytes(body.get(8..16)?.try_into().ok()?);
+        let index = u64::from_be_bytes(body.get(16..24)?.try_into().ok()?);
+        Some(Self {
+            term,
+            node_id,
+            index,
+        })
     }
 }
 
@@ -1626,7 +1624,7 @@ impl<B: StorageBackend> MvccStorage<B> {
 
     /// 应用 AuthOp（raft apply 路径）：revision ≡ log index
     ///
-    /// 用户/角色/吊销登记写入 `/_sys/auth/` 前缀（原始 bincode，不经 Barrier
+    /// 用户/角色/吊销登记写入 `/_sys/auth/` 前缀（原始信封 V2 行值，不经 Barrier
     /// 加密——auth 元数据非密文，与 Lease 记录同口径），与 changelog +
     /// META_LAST_APPLIED 同事务原子完成；幂等守卫同 lease 路径。
     pub fn apply_auth_op(
@@ -2739,12 +2737,11 @@ mod tests {
         assert_eq!(storage.current_revision(), 42);
     }
 
-    /// `AppliedLogId` 的持久化编码**不得有失败路径**。
-    ///
-    /// `bincode::serialize(..).unwrap_or_else(|_| Vec::new())` 失败即写入空字节
-    /// → 重启时水位读回 `None` → **从 0 重放整个 raft 日志**。
+    /// `AppliedLogId` 的持久化编码**不得有失败路径**（手写定长）：编码绝不为
+    /// 空（空字节会让重启把水位读回 `None` → **从 0 重放整个 raft 日志**）；
+    /// 非 `ALI1` 前缀/截断字节一律 `None`。
     #[test]
-    fn test_applied_log_id_encoding_is_total_and_backward_compatible() {
+    fn test_applied_log_id_encoding_is_total_and_strict() {
         let id = AppliedLogId {
             term: 7,
             node_id: 3,
@@ -2755,17 +2752,16 @@ mod tests {
         assert!(!bytes.is_empty(), "编码绝不允许为空");
         assert_eq!(AppliedLogId::from_bytes(&bytes), Some(id));
 
-        // 旧格式（bincode 1.3 legacy：定长小端，24B）必须仍可解码——
-        // 升级不得让既有 META_LAST_APPLIED 丢水位。
-        let legacy = bincode::serialize(&AppliedLogId::standalone(42)).unwrap();
-        assert_eq!(legacy.len(), 24);
+        // 退役格式（旧 bincode 定长 24B）⇒ None（P3：不再回落解码，
+        // 调用方按「水位缺失」处理并由日志重放兜底）
+        let retired = [0u8; 24];
         assert_eq!(
-            AppliedLogId::from_bytes(&legacy),
-            Some(AppliedLogId::standalone(42)),
-            "旧 bincode 编码必须向后兼容"
+            AppliedLogId::from_bytes(&retired),
+            None,
+            "退役 bincode 行必须显式丢弃（不得误读为水位）"
         );
 
-        // 空字节 / 截断字节一律是 None（调用方据此判定水位缺失），
+        // 空字节 / 截断字节一律 None（调用方据此判定水位缺失），
         // 而**新编码永远不会产生空字节**。
         assert_eq!(AppliedLogId::from_bytes(&[]), None);
         assert_eq!(AppliedLogId::from_bytes(b"ALI1"), None);

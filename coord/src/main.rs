@@ -1811,8 +1811,7 @@ async fn snapshot_restore(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(snapshot_path)?;
     // 用迁移接口：本地保存的旧格式（v4 及更早）快照文件同样可恢复。
-    let snapshot_data =
-        coord_server::storage::snapshot::SnapshotData::from_bytes_migrating(&bytes)?;
+    let snapshot_data = coord_server::storage::snapshot::SnapshotData::from_bytes(&bytes)?;
 
     let target_dir = coord_server::raft::region_runtime::region_data_dir(data_dir, region);
     tracing::info!(

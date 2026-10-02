@@ -1745,7 +1745,7 @@ mod idgen_reset_tests {
 /// 在线拉取快照（Maintenance/Snapshot 流式导出）。
 ///
 /// 从源节点按块接收 SnapshotData（首块携带 last_included_index/term），
-/// 拼接后先解析校验（版本 + bincode）再落盘（tmp → 原子 rename）。
+/// 拼接后先解析校验（版本 + 信封 V2）再落盘（tmp → 原子 rename）。
 /// region = 0 拉 region 0 / 单 Raft；>0 拉对应 Region。
 pub async fn snapshot_pull(
     conn: impl Into<CliConn>,
@@ -1778,8 +1778,7 @@ pub async fn snapshot_pull(
 
     // 先解析校验，再落盘（避免写入损坏备份）。
     // 用迁移接口：旧格式（v4 及更早）快照文件同样可校验/恢复。
-    let snapshot_data =
-        coord_server::storage::snapshot::SnapshotData::from_bytes_migrating(&bytes)?;
+    let snapshot_data = coord_server::storage::snapshot::SnapshotData::from_bytes(&bytes)?;
 
     let tmp = output.with_extension("snap.tmp");
     std::fs::write(&tmp, &bytes)?;

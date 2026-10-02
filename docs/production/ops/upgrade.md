@@ -74,15 +74,14 @@ curl -s localhost:2379/health?ready=true   # 必须 200
 
 ### 3.2 持久化格式（快照 / raft 日志 / `/_sys/auth/` / PD 元数据 / 对象存储 manifest）—— ❌ **未验证**
 
-> **诚实的坏消息**：仓库里唯一名为"快照格式版本兼容"的测试
-> （`coord-server/tests/sim_chaos_test.rs:530 test_snapshot_format_version_compatibility`）
-> **不覆盖真实快照路径** —— 它在测试内**重新定义**了一个
-> `struct SnapshotHeader { version, created_at, region_count }`（还有 V2 变体）做
-> bincode roundtrip。也就是说：它只证明了"`#[serde(default)]` 能让新增字段反序列化成功"，
-> 而**真实**快照的格式版本字段、以及"v0.2.0 的快照能否被 v0.3.0 读出"**完全没有被验证**。
+> **更新**：原「快照格式版本兼容」测试已在 bincode 退场（P3）中改写——现在检查
+> 的是**信封语义**：V2 可读、未知版本显式拒绝（`sim_chaos_test.rs`）。真实快照
+> 的格式锚点 = 信封版本字节（`storage::envelope`）+ 快照内部 `version` 字段
+> （仅 v5 可读，旧格式显式拒绝）。
 
-真实格式由 bincode 编码的 Rust 结构决定，而 bincode **不做字段名/顺序的自描述**：
-给某个结构**新增字段**对 bincode 就是**不兼容**（除非 `#[serde(default)]` 且顺序一致）。
+真实格式由信封（`MAGIC | VERSION_V2 | postcard`）包裹的 Rust 结构决定，postcard
+**不做字段名/顺序的自描述**：给结构**新增字段**属 **Breaking**，必须经信封版本
+字节显式演进（不得依赖 `#[serde(default)]`）。
 因此：
 
 - **同一 Minor 内的补丁升级**（只改实现、不改持久化结构）：可以直接停机升级；

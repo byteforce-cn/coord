@@ -25,7 +25,6 @@ base64 = "0.22"
 uuid = { workspace = true }
 rand = { workspace = true }
 async-trait = "0.1"
-bincode = "1.3"
 
 [dev-dependencies]
 # 仅测试用：把 `coord_proto::FILE_DESCRIPTOR_SET` 反解成 FileDescriptorSet，

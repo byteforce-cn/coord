@@ -16,6 +16,6 @@
 | [`ops/observability.md`](production/ops/observability.md) | 观测面与告警绑定 |
 | [`ops/slo.md`](production/ops/slo.md) | SLO 定义 |
 | [`ops/k8s-verification.md`](production/ops/k8s-verification.md) | Kubernetes 部署验证清单 |
-| [`ops/dependencies.md`](production/ops/dependencies.md) | 依赖治理与 bincode 退场计划 |
+| [`ops/dependencies.md`](production/ops/dependencies.md) | 依赖治理与 bincode 退场记录（已完成） |
 | [`ops/boundaries.md`](production/ops/boundaries.md) | 范围与「不承诺」边界 |
 | [`ops/security.md`](production/ops/security.md) | 安全模型与加固 |

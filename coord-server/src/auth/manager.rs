@@ -231,7 +231,7 @@ pub struct AuthManager {
 /// 既有引用方。
 pub use coord_core::auth::ROOT_ROLE;
 
-// ──── 持久化记录（`/_sys/auth/` 前缀，bincode 序列化）────
+// ──── 持久化记录（`/_sys/auth/` 前缀，统一信封 V2 序列化）────
 
 /// 用户条目存储前缀 `/_sys/auth/user/{name}`
 pub const AUTH_USER_PREFIX: &[u8] = b"/_sys/auth/user/";
@@ -280,8 +280,7 @@ impl AuthBootstrapTokenRecord {
             .map_err(|e| Error::Internal(format!("serialize bootstrap: {e}")))
     }
 
-    /// 反序列化（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；均精确
-    /// 消费，损坏行 ⇒ None，调用方跳过）。
+    /// 反序列化（唯一格式：信封 V2-postcard；损坏/退役行 ⇒ None，调用方跳过）。
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         crate::storage::envelope::decode(bytes).ok()
     }
@@ -302,8 +301,7 @@ impl AuthSessionRecord {
             .map_err(|e| Error::Internal(format!("serialize session: {e}")))
     }
 
-    /// 反序列化（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；均精确
-    /// 消费，损坏行 ⇒ None，调用方跳过）。
+    /// 反序列化（唯一格式：信封 V2-postcard；损坏/退役行 ⇒ None，调用方跳过）。
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         crate::storage::envelope::decode(bytes).ok()
     }
@@ -324,8 +322,7 @@ impl AuthUserRecord {
             .map_err(|e| Error::Internal(format!("encode auth user: {e}")))
     }
 
-    /// 反序列化（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；均精确
-    /// 消费，损坏行 ⇒ None，调用方跳过）。
+    /// 反序列化（唯一格式：信封 V2-postcard；损坏/退役行 ⇒ None，调用方跳过）。
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         crate::storage::envelope::decode(bytes).ok()
     }
@@ -363,8 +360,7 @@ impl AuthRoleRecord {
             .map_err(|e| Error::Internal(format!("encode auth role: {e}")))
     }
 
-    /// 反序列化（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；均精确
-    /// 消费，损坏行 ⇒ None，调用方跳过）。
+    /// 反序列化（唯一格式：信封 V2-postcard；损坏/退役行 ⇒ None，调用方跳过）。
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         crate::storage::envelope::decode(bytes).ok()
     }
@@ -384,8 +380,7 @@ impl AuthRevocationRecord {
             .map_err(|e| Error::Internal(format!("encode revocation: {e}")))
     }
 
-    /// 反序列化（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；均精确
-    /// 消费，损坏行 ⇒ None，调用方跳过）。
+    /// 反序列化（唯一格式：信封 V2-postcard；损坏/退役行 ⇒ None，调用方跳过）。
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         crate::storage::envelope::decode(bytes).ok()
     }
@@ -1338,14 +1333,16 @@ mod tests {
         assert!(manager.check_capability(&roles, "data:storage:read", Some("anything")));
     }
 
-    /// AuthOp bincode 变体索引固定：能力授予两变体**末尾追加**，
-    /// 既有变体（含 ConsumeSession）索引不漂移（旧日志/快照升级兼容）。
+    /// AuthOp 枚举变体索引固定：能力授予两变体**末尾追加**，
+    /// 既有变体（含 ConsumeSession）索引不漂移（旧日志/快照升级兼容；
+    /// 线格式 = 信封 V2/postcard，变体索引按 varint 编码）。
     #[test]
-    fn test_auth_op_bincode_variant_indices_appended() {
+    fn test_auth_op_variant_indices_appended() {
         use crate::raft::type_config::AuthOp;
-        fn variant_index(op: &AuthOp) -> u32 {
-            let bytes = bincode::serialize(op).unwrap();
-            u32::from_le_bytes(bytes[0..4].try_into().unwrap())
+        fn variant_index(op: &AuthOp) -> u64 {
+            let bytes = postcard::to_allocvec(op).unwrap();
+            // 本测试内所有变体索引 < 128（varint 单字节）
+            bytes[0] as u64
         }
         assert_eq!(
             variant_index(&AuthOp::UserAdd {
@@ -1679,38 +1676,18 @@ mod tests {
         assert!(mgr.authenticate("heidi", "pass").is_err());
     }
 
-    // ──── 格式信封（P2a：auth 记录三路读 + 精确消费）────
+    // ──── 格式信封（P3：唯一 V2 + 退役格式拒绝）────
 
-    /// 三路读 + 篡改矩阵通用断言（auth 5 类记录共用）。
+    /// 唯一格式断言（auth 5 类记录共用）：写产物 V2 前缀且可回读；V1 /
+    /// 无前缀退役格式与篡改矩阵（未知版本、魔数、尾随、截断）均显式拒绝。
     ///
-    /// 负控制（实跑逐项验证）：删 V2 读腿 ⇒ V2 断言红；放宽精确消费 ⇒
-    /// 尾随/截断断言红；放宽版本检查 ⇒ 未知版本断言红。
-    macro_rules! assert_envelope_three_way {
+    /// 负控制（实跑逐项验证）：恢复 V1/无前缀读腿 ⇒ 退役断言红；放宽精确
+    /// 消费 ⇒ 尾随/截断断言红；放宽版本检查 ⇒ 未知版本断言红。
+    macro_rules! assert_envelope_v2_only {
         ($ty:ty, $value:expr) => {{
             use crate::storage::envelope;
             let value = $value;
             let label = stringify!($ty);
-
-            // 旧行（无前缀 bincode，历史写路径）
-            let legacy = bincode::serialize(&value).unwrap();
-            assert_eq!(
-                <$ty>::from_bytes(&legacy).as_ref(),
-                Some(&value),
-                "{label}: 旧行必须可解码"
-            );
-            // V1 / V2 行
-            let v1 = envelope::encode_v1(&value).unwrap();
-            assert_eq!(
-                <$ty>::from_bytes(&v1).as_ref(),
-                Some(&value),
-                "{label}: V1 行必须可解码"
-            );
-            let v2 = envelope::encode_v2(&value).unwrap();
-            assert_eq!(
-                <$ty>::from_bytes(&v2).as_ref(),
-                Some(&value),
-                "{label}: V2 行必须可解码"
-            );
 
             // 写路径断言：to_bytes 产物必须为 V2 前缀，且可回读
             let written = value.to_bytes().unwrap();
@@ -1729,35 +1706,47 @@ mod tests {
                 "{label}: 写产物必须可回读"
             );
 
+            // 退役格式：V1 / 无前缀行 ⇒ None（显式拒绝）
+            let mut v1 = Vec::new();
+            v1.extend_from_slice(&envelope::MAGIC);
+            v1.push(1);
+            v1.extend_from_slice(&[0xAA, 0xBB]);
+            assert!(<$ty>::from_bytes(&v1).is_none(), "{label}: V1 行必须拒绝");
+            let legacy = [0x05u8, 0, 0, 0, 0, 0, 0, 0];
+            assert!(
+                <$ty>::from_bytes(&legacy).is_none(),
+                "{label}: 无前缀行必须拒绝"
+            );
+
             // 篡改矩阵：未知版本 / 魔数 / 尾随 / 截断 ⇒ None（显式拒绝）
-            let mut bad_version = v2.clone();
+            let mut bad_version = written.clone();
             bad_version[envelope::MAGIC.len()] = 9;
             assert!(
                 <$ty>::from_bytes(&bad_version).is_none(),
                 "{label}: 未知版本必须拒绝"
             );
-            let mut bad_magic = v2.clone();
+            let mut bad_magic = written.clone();
             bad_magic[0] = 0x03;
             assert!(
                 <$ty>::from_bytes(&bad_magic).is_none(),
                 "{label}: 魔数篡改必须拒绝"
             );
-            let mut trailing = v2.clone();
+            let mut trailing = written.clone();
             trailing.extend_from_slice(&[0xDE, 0xAD]);
             assert!(
                 <$ty>::from_bytes(&trailing).is_none(),
                 "{label}: 尾随字节必须拒绝"
             );
             assert!(
-                <$ty>::from_bytes(&v2[..v2.len() - 1]).is_none(),
+                <$ty>::from_bytes(&written[..written.len() - 1]).is_none(),
                 "{label}: 截断行必须拒绝"
             );
         }};
     }
 
     #[test]
-    fn test_auth_records_three_way_read_and_tamper() {
-        assert_envelope_three_way!(
+    fn test_auth_records_v2_only_read_and_retired_rejected() {
+        assert_envelope_v2_only!(
             AuthBootstrapTokenRecord,
             AuthBootstrapTokenRecord {
                 id: "boot-1".into(),
@@ -1769,7 +1758,7 @@ mod tests {
                 consumed_at_unix: None,
             }
         );
-        assert_envelope_three_way!(
+        assert_envelope_v2_only!(
             AuthSessionRecord,
             AuthSessionRecord {
                 username: "alice".into(),
@@ -1777,7 +1766,7 @@ mod tests {
                 is_refresh: true,
             }
         );
-        assert_envelope_three_way!(
+        assert_envelope_v2_only!(
             AuthUserRecord,
             AuthUserRecord {
                 name: "alice".into(),
@@ -1785,7 +1774,7 @@ mod tests {
                 roles: vec!["admin".into(), "reader".into()],
             }
         );
-        assert_envelope_three_way!(
+        assert_envelope_v2_only!(
             AuthRoleRecord,
             AuthRoleRecord {
                 name: "admin".into(),
@@ -1801,7 +1790,7 @@ mod tests {
                 high_sensitive: true,
             }
         );
-        assert_envelope_three_way!(
+        assert_envelope_v2_only!(
             AuthRevocationRecord,
             AuthRevocationRecord {
                 jti: "jti-1".into(),
