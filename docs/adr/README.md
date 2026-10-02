@@ -27,3 +27,4 @@
 | [ADR-0003](0003-read-path-convergence.md) | 读路径收敛：配置与发现必须走门面 API | accepted |
 | [ADR-0004](0004-raft-log-reclamation-snapshot-anchored.md) | Raft 日志回收——快照锚定的保留窗口 | accepted |
 | [ADR-0005](0005-bincode-replacement-codec-selection.md) | bincode 退场 P1：替代序列化格式选型（postcard） | accepted |
+| [ADR-0006](0006-bincode-p2-write-path-migration.md) | bincode 退场 P2：写路径 V2 迁移与剩余直写面信封化 | proposed |
