@@ -55,6 +55,18 @@ struct PersistedSnapshotMeta {
     pub path: String,
 }
 
+/// `META_SNAPSHOT` 行解码（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；
+/// 均精确消费，损坏 ⇒ None，启动按「无快照」处理）。
+fn decode_persisted_snapshot_meta(bytes: &[u8]) -> Option<PersistedSnapshotMeta> {
+    crate::storage::envelope::decode(bytes).ok()
+}
+
+/// `META_MEMBERSHIP` 行解码（三路；损坏 ⇒ None，启动回退空 membership 并用
+/// 日志重放兜底）。
+fn decode_persisted_membership(bytes: &[u8]) -> Option<StoredMembershipOf<TypeConfig>> {
+    crate::storage::envelope::decode(bytes).ok()
+}
+
 /// 计算快照数据字节的 SHA256 校验和
 fn sha256_hex(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -192,7 +204,7 @@ fn load_persisted_snapshot_checked(
         .read(|tx| tx.get(TABLE_META, META_SNAPSHOT))
         .ok()
         .flatten()
-        .and_then(|bytes| bincode::deserialize::<PersistedSnapshotMeta>(&bytes).ok())?;
+        .and_then(|bytes| decode_persisted_snapshot_meta(&bytes))?;
     match std::fs::read(&persisted.path) {
         Ok(data) => {
             if sha256_hex(&data) == persisted.checksum {
@@ -333,7 +345,7 @@ impl StateMachineStore {
                 .read(|tx| tx.get(TABLE_META, META_MEMBERSHIP))
                 .ok()
                 .flatten()
-                .and_then(|bytes| bincode::deserialize(&bytes).ok());
+                .and_then(|bytes| decode_persisted_membership(&bytes));
             if let Some(m) = persisted_membership {
                 last_membership = m;
             }
@@ -1002,7 +1014,7 @@ impl StateMachineStore {
             .read(|tx| tx.get(TABLE_META, META_MEMBERSHIP))
             .ok()
             .flatten()
-            .and_then(|bytes| bincode::deserialize(&bytes).ok())
+            .and_then(|bytes| decode_persisted_membership(&bytes))
             .unwrap_or_else(|| {
                 StoredMembershipOf::<TypeConfig>::new(
                     None,
@@ -1200,5 +1212,93 @@ mod tests {
             main.get_current_snapshot().await.expect("get").is_none(),
             "无任何快照（内存/磁盘都没有）时必须返回 None"
         );
+    }
+
+    // ──── 格式信封（P2a：SM 元数据三路读 + 精确消费）────
+
+    /// `META_SNAPSHOT` 行解码：旧行 / V1 / V2 均可读；篡改 ⇒ None。
+    /// 负控制：删 V2 读腿 ⇒ V2 断言红；放宽精确消费 ⇒ 尾随/截断断言红。
+    #[test]
+    fn test_persisted_snapshot_meta_three_way_read_and_tamper() {
+        let meta = PersistedSnapshotMeta {
+            meta: SnapshotMetaOf::<TypeConfig> {
+                last_log_id: Some(LogIdOf::<TypeConfig>::new(
+                    openraft::impls::leader_id_adv::LeaderId {
+                        term: 2,
+                        node_id: 1,
+                    },
+                    9,
+                )),
+                last_membership: StoredMembershipOf::<TypeConfig>::new(
+                    None,
+                    Membership::<u64, openraft::BasicNode>::new_with_defaults(vec![], vec![]),
+                ),
+            },
+            checksum: [7u8; 32],
+            path: "snapshots/snapshot-9-2.snap".to_string(),
+        };
+
+        let legacy = bincode::serialize(&meta).unwrap();
+        let decoded = decode_persisted_snapshot_meta(&legacy).expect("旧行必须可解码");
+        assert_eq!(decoded.checksum, [7u8; 32]);
+        assert_eq!(decoded.path, meta.path);
+        assert_eq!(decoded.meta.last_log_id, meta.meta.last_log_id);
+
+        let v1 = crate::storage::envelope::encode(&meta).unwrap();
+        let decoded = decode_persisted_snapshot_meta(&v1).expect("V1 行必须可解码");
+        assert_eq!(decoded.meta.last_log_id, meta.meta.last_log_id);
+
+        let v2 = crate::storage::envelope::encode_v2(&meta);
+        let decoded = decode_persisted_snapshot_meta(&v2).expect("V2 行必须可解码");
+        assert_eq!(decoded.checksum, meta.checksum);
+
+        let mut bad_version = v2.clone();
+        bad_version[crate::storage::envelope::MAGIC.len()] = 9;
+        assert!(decode_persisted_snapshot_meta(&bad_version).is_none());
+        let mut bad_magic = v2.clone();
+        bad_magic[0] = 0x03;
+        assert!(decode_persisted_snapshot_meta(&bad_magic).is_none());
+        let mut trailing = v2.clone();
+        trailing.extend_from_slice(&[0xDE, 0xAD]);
+        assert!(decode_persisted_snapshot_meta(&trailing).is_none());
+        assert!(decode_persisted_snapshot_meta(&v2[..v2.len() - 1]).is_none());
+    }
+
+    /// `META_MEMBERSHIP` 行解码：旧行 / V1 / V2 均可读；篡改 ⇒ None。
+    /// 负控制：删 V2 读腿 / 放宽精确消费 ⇒ 对应用例必红。
+    #[test]
+    fn test_persisted_membership_three_way_read_and_tamper() {
+        let membership = StoredMembershipOf::<TypeConfig>::new(
+            Some(LogIdOf::<TypeConfig>::new(
+                openraft::impls::leader_id_adv::LeaderId {
+                    term: 5,
+                    node_id: 2,
+                },
+                11,
+            )),
+            Membership::<u64, openraft::BasicNode>::new_with_defaults(
+                vec![std::collections::BTreeSet::from([1u64, 2, 3])],
+                vec![1u64, 2, 3],
+            ),
+        );
+
+        let legacy = bincode::serialize(&membership).unwrap();
+        assert!(decode_persisted_membership(&legacy).is_some());
+        let v1 = crate::storage::envelope::encode(&membership).unwrap();
+        assert!(decode_persisted_membership(&v1).is_some());
+        let v2 = crate::storage::envelope::encode_v2(&membership);
+        let decoded = decode_persisted_membership(&v2).expect("V2 行必须可解码");
+        assert_eq!(decoded, membership);
+
+        let mut bad_version = v2.clone();
+        bad_version[crate::storage::envelope::MAGIC.len()] = 9;
+        assert!(decode_persisted_membership(&bad_version).is_none());
+        let mut bad_magic = v2.clone();
+        bad_magic[0] = 0x03;
+        assert!(decode_persisted_membership(&bad_magic).is_none());
+        let mut trailing = v2.clone();
+        trailing.extend_from_slice(&[0xDE, 0xAD]);
+        assert!(decode_persisted_membership(&trailing).is_none());
+        assert!(decode_persisted_membership(&v2[..v2.len() - 1]).is_none());
     }
 }

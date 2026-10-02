@@ -12,8 +12,10 @@
 // 从字节上**辨识**一行数据用了什么格式。
 //
 // 读兼容：三路（V1 / V2 / 无前缀）；三条路径均精确消费——尾随字节必须显式
-// 报错，不得被便捷解码函数静默忽略。写路径：一律写带前缀的 V1。滚动升级
-// 必须先升级读路径（本模块随二进制发布），再产生新格式写入。
+// 报错，不得被便捷解码函数静默忽略。写路径：三载体一律写带前缀的 V1（P2b
+// 切换 V2）；快照/auth/SM 元数据/PD 队列四个直写面借道 `classify` + 精确解码
+// 辅助接入三路读（P2a；快照的 bincode 迁移阶梯保留）。滚动升级必须先升级读
+// 路径（本模块随二进制发布），再产生新格式写入。
 
 use serde::{Deserialize, Serialize};
 
@@ -76,6 +78,36 @@ pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, bincode::Error> {
     Ok(out)
 }
 
+/// 行格式分区（[`classify`] 的判别结果）。
+#[derive(Debug, Clone, Copy)]
+pub enum Envelope<'a> {
+    /// 无魔数：历史无前缀行，整段按 bincode 解码。
+    Legacy(&'a [u8]),
+    /// `MAGIC | VERSION | bincode(payload)`。
+    V1(&'a [u8]),
+    /// `MAGIC | VERSION_V2 | postcard(payload)`。
+    V2(&'a [u8]),
+}
+
+/// 判别一行数据的格式分区（读路径按此分派，不做试错解码）。
+///
+/// - 魔数成立且版本受支持 ⇒ 对应分区；
+/// - 魔数成立但版本字节未知（篡改/未来版本）⇒ [`DecodeError::UnsupportedVersion`]；
+/// - 其余（长度不足或魔数不成立）⇒ [`Envelope::Legacy`]（交旧格式路径由结构
+///   校验兜底拦截魔数损坏）。
+pub fn classify(data: &[u8]) -> Result<Envelope<'_>, DecodeError> {
+    if data.len() >= PREFIX_LEN && data[..MAGIC.len()] == MAGIC {
+        let payload = &data[PREFIX_LEN..];
+        match data[MAGIC.len()] {
+            VERSION => Ok(Envelope::V1(payload)),
+            VERSION_V2 => Ok(Envelope::V2(payload)),
+            other => Err(DecodeError::UnsupportedVersion(other)),
+        }
+    } else {
+        Ok(Envelope::Legacy(data))
+    }
+}
+
 /// 解码（三路）：V1（bincode payload）/ V2（postcard payload）按版本分发；
 /// 无前缀行（历史数据）按 bincode 整行解码。
 ///
@@ -90,20 +122,18 @@ pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, bincode::Error> {
 /// V2（postcard）载荷按 bincode 结构几乎不可能成立（ADR-0005 实测逐字节
 /// 破坏全部显式失败），V1 残余窗口在 bincode 退场完成后消失。
 pub fn decode<'a, T: Deserialize<'a>>(data: &'a [u8]) -> Result<T, DecodeError> {
-    if data.len() >= PREFIX_LEN && data[..MAGIC.len()] == MAGIC {
-        let payload = &data[PREFIX_LEN..];
-        match data[MAGIC.len()] {
-            VERSION => decode_bincode_exact(payload),
-            VERSION_V2 => decode_postcard_exact(payload),
-            other => Err(DecodeError::UnsupportedVersion(other)),
-        }
-    } else {
-        decode_bincode_exact(data)
+    match classify(data)? {
+        Envelope::V2(payload) => decode_postcard_exact(payload),
+        Envelope::V1(payload) | Envelope::Legacy(payload) => decode_bincode_exact(payload),
     }
 }
 
 /// bincode 精确消费：fixint + 小端（与历史行字节兼容），拒绝尾随字节。
-fn decode_bincode_exact<'a, T: Deserialize<'a>>(data: &'a [u8]) -> Result<T, DecodeError> {
+///
+/// 快照的 bincode 迁移阶梯（v5→v4→v3→v2）按版本逐级调用本函数。
+pub(crate) fn decode_bincode_exact<'a, T: Deserialize<'a>>(
+    data: &'a [u8],
+) -> Result<T, DecodeError> {
     use bincode::Options;
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
@@ -113,7 +143,9 @@ fn decode_bincode_exact<'a, T: Deserialize<'a>>(data: &'a [u8]) -> Result<T, Dec
 
 /// postcard 精确消费：`take_from_bytes` 取 remainder 并断言为空
 /// （`postcard::from_bytes` 等便捷函数会静默忽略尾随字节）。
-fn decode_postcard_exact<'a, T: Deserialize<'a>>(data: &'a [u8]) -> Result<T, DecodeError> {
+pub(crate) fn decode_postcard_exact<'a, T: Deserialize<'a>>(
+    data: &'a [u8],
+) -> Result<T, DecodeError> {
     let (value, remainder) =
         postcard::take_from_bytes::<T>(data).map_err(DecodeError::PayloadV2)?;
     if !remainder.is_empty() {
@@ -283,5 +315,29 @@ mod tests {
             Err(DecodeError::UnsupportedVersion(v)) => assert_eq!(v, VERSION_V2 + 1),
             other => panic!("expected UnsupportedVersion, got {other:?}"),
         }
+    }
+
+    /// classify：四种分区判别（V1 / V2 / 无前缀 / 未知版本）。
+    /// 负控制：删去版本判别（仅凭魔数当同一种）⇒ 本用例必红。
+    #[test]
+    fn test_classify_partitions() {
+        let v1 = encode(&sample()).unwrap();
+        assert!(matches!(classify(&v1), Ok(Envelope::V1(_))));
+
+        let v2 = encode_v2(&sample());
+        assert!(matches!(classify(&v2), Ok(Envelope::V2(_))));
+
+        let legacy = bincode::serialize(&sample()).unwrap();
+        assert!(matches!(classify(&legacy), Ok(Envelope::Legacy(_))));
+
+        // 魔数前缀但长度不足 ⇒ 按旧格式分区（交结构校验兜底）
+        assert!(matches!(classify(&MAGIC[..2]), Ok(Envelope::Legacy(_))));
+
+        let mut unknown = v1.clone();
+        unknown[MAGIC.len()] = 9;
+        assert!(matches!(
+            classify(&unknown),
+            Err(DecodeError::UnsupportedVersion(9))
+        ));
     }
 }

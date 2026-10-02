@@ -278,14 +278,16 @@ impl PdQueueEntry {
         }
     }
 
-    /// bincode 序列化（redb 原始行）
+    /// bincode 序列化（redb 原始行；写路径当前为无前缀 bincode，P2b 收编进
+    /// 统一信封 V2）。
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         bincode::serialize(self).map_err(|e| Error::Internal(format!("encode pd queue entry: {e}")))
     }
 
-    /// bincode 反序列化（损坏行返回 None，调用方跳过）
+    /// 反序列化（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；均精确
+    /// 消费，损坏行返回 None，调用方跳过）。
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        bincode::deserialize(bytes).ok()
+        crate::storage::envelope::decode(bytes).ok()
     }
 }
 
@@ -671,6 +673,35 @@ mod tests {
         let mut requeued = decoded;
         assert!(requeued.try_requeue());
         assert_eq!(requeued.claimed_at_unix, 0);
+    }
+
+    /// 三路读 + 篡改拒绝（P2a：PD 队列条目）。
+    /// 负控制：删 V2 读腿 ⇒ V2 断言红；放宽精确消费 ⇒ 尾随/截断断言红；
+    /// 放宽版本检查 ⇒ 未知版本断言红。
+    #[test]
+    fn test_pd_queue_entry_three_way_read_and_tamper() {
+        let entry = PdQueueEntry::new_pending(42, test_add_peer(), 1, 1_700_000_000);
+
+        // 旧行（无前缀 bincode）
+        let legacy = bincode::serialize(&entry).unwrap();
+        assert_eq!(PdQueueEntry::from_bytes(&legacy).as_ref(), Some(&entry));
+        // V1 / V2 行
+        let v1 = crate::storage::envelope::encode(&entry).unwrap();
+        assert_eq!(PdQueueEntry::from_bytes(&v1).as_ref(), Some(&entry));
+        let v2 = crate::storage::envelope::encode_v2(&entry);
+        assert_eq!(PdQueueEntry::from_bytes(&v2).as_ref(), Some(&entry));
+
+        // 篡改矩阵：未知版本 / 魔数 / 尾随 / 截断 ⇒ None
+        let mut bad_version = v2.clone();
+        bad_version[crate::storage::envelope::MAGIC.len()] = 9;
+        assert!(PdQueueEntry::from_bytes(&bad_version).is_none());
+        let mut bad_magic = v2.clone();
+        bad_magic[0] = 0x03;
+        assert!(PdQueueEntry::from_bytes(&bad_magic).is_none());
+        let mut trailing = v2.clone();
+        trailing.extend_from_slice(&[0xDE, 0xAD]);
+        assert!(PdQueueEntry::from_bytes(&trailing).is_none());
+        assert!(PdQueueEntry::from_bytes(&v2[..v2.len() - 1]).is_none());
     }
 
     #[test]

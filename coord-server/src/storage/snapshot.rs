@@ -4,7 +4,9 @@
 // - export_snapshot_data: 从 MvccStorage 导出全量数据
 // - import_snapshot_data: 将快照数据恢复到 MvccStorage
 //
-// 快照格式使用 bincode 序列化，包含所有 KV 数据、元数据和 Raft 检查点。
+// 快照格式：读路径三路（无前缀 bincode / 信封 V1 / 信封 V2-postcard，均精确
+// 消费）；写路径当前为无前缀 bincode（P2b 统一切换 V2）。包含所有 KV 数据、
+// 元数据和 Raft 检查点。
 
 use std::path::PathBuf;
 
@@ -14,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use coord_core::error::{Error, Result};
 use coord_core::storage::StorageBackend;
 
+use super::envelope;
 use super::mvcc::{
     encode_kv_key, encode_kv_meta_key, AppliedLogId, KvMetadata, MvccStorage, CHANGELOG_PREFIX,
     META_COMPACT_REVISION, META_LAST_APPLIED, TABLE_CHANGELOG, TABLE_KV, TABLE_KV_META, TABLE_META,
@@ -132,20 +135,54 @@ impl SnapshotData {
         }
     }
 
-    /// 序列化为字节（用于网络传输和磁盘存储）
+    /// 序列化为字节（用于网络传输和磁盘存储）。
+    ///
+    /// 写路径当前为无前缀 bincode（P2b 统一切换 V2-postcard）。
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         bincode::serialize(self).map_err(|e| Error::Internal(format!("snapshot serialize: {e}")))
     }
 
-    /// 从字节反序列化
+    /// 从字节反序列化（当前版本，不迁移）。
+    ///
+    /// 三路读（P2a）：信封 V2 ⇒ postcard（仅承载 v5，`version != 5` 显式错）；
+    /// 信封 V1 / 无前缀 ⇒ bincode。三条均精确消费（拒绝尾随字节）。
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        bincode::deserialize(data)
-            .map_err(|e| Error::Internal(format!("snapshot deserialize: {e}")))
+        match envelope::classify(data) {
+            Ok(envelope::Envelope::V2(payload)) => Self::decode_v2_v5(payload),
+            Ok(envelope::Envelope::V1(payload)) | Ok(envelope::Envelope::Legacy(payload)) => {
+                envelope::decode_bincode_exact::<Self>(payload)
+                    .map_err(|e| Error::Internal(format!("snapshot deserialize: {e}")))
+            }
+            Err(e) => Err(Error::Internal(format!("snapshot envelope: {e}"))),
+        }
+    }
+
+    /// V2（postcard）腿：只承载当前版本（v5）。
+    ///
+    /// postcard payload 只会由本轮写路径产生，没有迁移阶梯；不是 v5 的行
+    /// 不可能来自正常写入 ⇒ 显式报错（不得按旧结构试解）。
+    fn decode_v2_v5(payload: &[u8]) -> Result<Self> {
+        let snapshot: Self = envelope::decode_postcard_exact(payload)
+            .map_err(|e| Error::Internal(format!("snapshot V2 deserialize: {e}")))?;
+        if snapshot.version != Self::CURRENT_VERSION {
+            return Err(Error::Internal(format!(
+                "unsupported snapshot version: {} (expected {})",
+                snapshot.version,
+                Self::CURRENT_VERSION
+            )));
+        }
+        Ok(snapshot)
     }
 
     /// R-TST-21：反序列化 + 旧格式迁移（数据格式升级兼容）。
     ///
-    /// 直接解析成功且版本匹配 → 原样返回；否则逐级回退 **v4 → v3 → v2** 迁移
+    /// 按格式分区（[`envelope::classify`]，读路径按标记/魔数分派，不做“先试
+    /// 一种再回落另一种”的试错解码）：
+    /// - 信封 V2 ⇒ postcard，仅承载 v5（`version != 5` 显式错，尾随拒绝）；
+    /// - 信封 V1 / 无前缀（历史行）⇒ bincode 迁移阶梯。
+    ///
+    /// bincode 阶梯：直接解析成功且版本匹配 → 原样返回；否则逐级回退
+    /// **v4 → v3 → v2** 迁移
     /// （顺序敏感：bincode 为位置编码，旧格式是更新格式的**前缀**布局，必须从
     /// 最新的旧版本开始试）：
     /// - v4：无 changelog 窗口 → 迁移为空窗口，并把 compacted
@@ -157,7 +194,18 @@ impl SnapshotData {
     /// - v2 = R-RFT-06 之前：无 auth/lease 域、无 compacted 水位、applied
     ///   term/node_id 不持久化 → 迁移结果域置空、水位 0、applied 回退 0。
     pub fn from_bytes_migrating(data: &[u8]) -> Result<Self> {
-        match bincode::deserialize::<Self>(data) {
+        match envelope::classify(data) {
+            Err(e) => Err(Error::Internal(format!("snapshot envelope: {e}"))),
+            Ok(envelope::Envelope::V2(payload)) => Self::decode_v2_v5(payload),
+            Ok(envelope::Envelope::V1(payload)) | Ok(envelope::Envelope::Legacy(payload)) => {
+                Self::migrate_from_bincode(payload)
+            }
+        }
+    }
+
+    /// bincode 迁移阶梯（v5 → v4 → v3 → v2；各腿均精确消费）。
+    fn migrate_from_bincode(data: &[u8]) -> Result<Self> {
+        match envelope::decode_bincode_exact::<Self>(data) {
             Ok(snapshot) if snapshot.version == Self::CURRENT_VERSION => Ok(snapshot),
             Ok(snapshot) => Err(Error::Internal(format!(
                 "unsupported snapshot version: {} (expected {})",
@@ -166,7 +214,7 @@ impl SnapshotData {
             ))),
             Err(_) => {
                 // 尝试 v4 迁移
-                match bincode::deserialize::<SnapshotDataV4>(data) {
+                match envelope::decode_bincode_exact::<SnapshotDataV4>(data) {
                     Ok(v4) if v4.version == 4 => {
                         tracing::warn!(
                             "snapshot v4 detected; migrating to v{} (changelog window empty; \
@@ -183,7 +231,7 @@ impl SnapshotData {
                     ))),
                     Err(_) => {
                         // 尝试 v3 迁移
-                        match bincode::deserialize::<SnapshotDataV3>(data) {
+                        match envelope::decode_bincode_exact::<SnapshotDataV3>(data) {
                             Ok(v3) if v3.version == 3 => {
                                 tracing::warn!(
                                     "snapshot v3 detected; migrating to v{} (pd/sys internal \
@@ -199,8 +247,8 @@ impl SnapshotData {
                             ))),
                             Err(_) => {
                                 // 尝试 v2 迁移
-                                let v2: SnapshotDataV2 =
-                                    bincode::deserialize(data).map_err(|e| {
+                                let v2: SnapshotDataV2 = envelope::decode_bincode_exact(data)
+                                    .map_err(|e| {
                                         Error::Internal(format!(
                                             "snapshot deserialize (v5+v4+v3+v2): {e}"
                                         ))
@@ -1244,5 +1292,168 @@ mod tests {
             storage_b.get_at_revision(b"/k", 4).unwrap(),
             Some(b"v_new".to_vec())
         );
+    }
+
+    // ──── 格式信封（P2a：快照三路读 + 精确消费）────
+
+    fn envelope_sample_snapshot() -> SnapshotData {
+        let mut data = SnapshotData::new(7, 3);
+        data.next_revision = 8;
+        data.applied_index = 7;
+        data.applied_term = 3;
+        data.applied_node_id = 1;
+        data.kv_pairs = vec![SnapshotKvPair {
+            key: b"/k".to_vec(),
+            value: b"v".to_vec(),
+        }];
+        data.changelog_entries = vec![SnapshotRawEntry {
+            internal_key: b"/_changelog/0000000000000007".to_vec(),
+            value: b"ev".to_vec(),
+        }];
+        data
+    }
+
+    /// V2 行（postcard，仅承载 v5）⇒ 解码成功（from_bytes / from_bytes_migrating）。
+    /// 负控制：删除 V2 读腿 ⇒ 本用例必红。
+    #[test]
+    fn test_snapshot_v2_row_decodes() {
+        let data = envelope_sample_snapshot();
+        let bytes = envelope::encode_v2(&data);
+
+        let restored = SnapshotData::from_bytes_migrating(&bytes).expect("V2 快照必须可解码");
+        assert_eq!(restored.version, SnapshotData::CURRENT_VERSION);
+        assert_eq!(restored.last_included_index, 7);
+        assert_eq!(restored.kv_pairs.len(), 1);
+        assert_eq!(restored.changelog_entries.len(), 1);
+
+        let direct = SnapshotData::from_bytes(&bytes).expect("from_bytes 必须读 V2");
+        assert_eq!(direct.applied_term, 3);
+    }
+
+    /// V2 腿版本不是 v5 ⇒ 显式报错（V2 无迁移阶梯，不得按旧结构试解）。
+    /// 负控制：去掉 `version == CURRENT_VERSION` 检查 ⇒ 本用例必红。
+    #[test]
+    fn test_snapshot_v2_wrong_version_rejected() {
+        let mut data = envelope_sample_snapshot();
+        data.version = 4;
+        let bytes = envelope::encode_v2(&data);
+
+        let err = SnapshotData::from_bytes_migrating(&bytes)
+            .expect_err("V2 行 version != 5 必须显式报错");
+        assert!(
+            format!("{err:?}").contains("unsupported snapshot version"),
+            "错误必须是版本不受支持，实际：{err:?}"
+        );
+        assert!(SnapshotData::from_bytes(&bytes).is_err());
+    }
+
+    /// V2 行尾随字节 ⇒ 显式失败（精确消费）。
+    /// 负控制：去掉 postcard remainder 空断言 ⇒ 本用例必红。
+    #[test]
+    fn test_snapshot_v2_trailing_bytes_rejected() {
+        let data = envelope_sample_snapshot();
+        let mut bytes = envelope::encode_v2(&data);
+        bytes.extend_from_slice(&[0xDE, 0xAD]);
+        assert!(SnapshotData::from_bytes_migrating(&bytes).is_err());
+        assert!(SnapshotData::from_bytes(&bytes).is_err());
+    }
+
+    /// V2 行魔数 / 版本字节篡改 ⇒ 显式失败（不得按旧格式静默解出偏差值）。
+    /// 负控制：去掉魔数比较 / 版本检查放宽 ⇒ 本用例必红。
+    #[test]
+    fn test_snapshot_v2_tampered_prefix_rejected() {
+        let data = envelope_sample_snapshot();
+
+        let mut magic = envelope::encode_v2(&data);
+        magic[0] = 0x03;
+        assert!(
+            SnapshotData::from_bytes_migrating(&magic).is_err(),
+            "魔数破坏后不得静默解出快照"
+        );
+
+        let mut version = envelope::encode_v2(&data);
+        version[envelope::MAGIC.len()] = 9;
+        let err = SnapshotData::from_bytes_migrating(&version).expect_err("未知版本必须显式报错");
+        assert!(
+            format!("{err:?}").contains("unsupported envelope version"),
+            "错误必须是未知信封版本，实际：{err:?}"
+        );
+    }
+
+    /// V2 行截断 ⇒ 显式失败。
+    #[test]
+    fn test_snapshot_v2_truncated_rejected() {
+        let data = envelope_sample_snapshot();
+        let bytes = envelope::encode_v2(&data);
+        assert!(SnapshotData::from_bytes_migrating(&bytes[..bytes.len() - 1]).is_err());
+    }
+
+    /// V1 行（bincode payload）读：v5 直接成功；V1 包裹的 v4 行走阶梯迁移。
+    /// 负控制：V1 分区不接 bincode 阶梯 ⇒ 本用例必红。
+    #[test]
+    fn test_snapshot_v1_row_decodes_with_ladder() {
+        let data = envelope_sample_snapshot();
+        let v1 = envelope::encode(&data).unwrap();
+        let restored = SnapshotData::from_bytes_migrating(&v1).expect("V1 v5 行必须可解码");
+        assert_eq!(restored.last_included_index, 7);
+
+        // V1 包裹的 v4 行（无 changelog 窗口）⇒ 阶梯迁移，水位抬到 applied
+        let v4 = SnapshotDataV4 {
+            version: 4,
+            last_included_index: 11,
+            last_included_term: 6,
+            next_revision: 12,
+            applied_index: 11,
+            applied_term: 7,
+            applied_node_id: 3,
+            kv_pairs: Vec::new(),
+            kv_metadata: Vec::new(),
+            auth_entries: Vec::new(),
+            lease_entries: Vec::new(),
+            compacted_revision: 5,
+            pd_entries: Vec::new(),
+            sys_entries: Vec::new(),
+        };
+        let payload = bincode::serialize(&v4).unwrap();
+        let mut v1_v4 = Vec::with_capacity(envelope::PREFIX_LEN + payload.len());
+        v1_v4.extend_from_slice(&envelope::MAGIC);
+        v1_v4.push(envelope::VERSION);
+        v1_v4.extend_from_slice(&payload);
+        let migrated =
+            SnapshotData::from_bytes_migrating(&v1_v4).expect("V1 包裹的 v4 行必须走阶梯迁移");
+        assert_eq!(migrated.version, SnapshotData::CURRENT_VERSION);
+        assert!(migrated.changelog_entries.is_empty());
+        assert_eq!(migrated.compacted_revision, 11);
+    }
+
+    /// 混读：同一快照的无前缀 / V1 / V2 三种编码均可解码，内容一致。
+    /// 负控制：任一读腿移除 ⇒ 本用例必红。
+    #[test]
+    fn test_snapshot_mixed_encodings_decode() {
+        let data = envelope_sample_snapshot();
+        let legacy = bincode::serialize(&data).unwrap();
+        let v1 = envelope::encode(&data).unwrap();
+        let v2 = envelope::encode_v2(&data);
+        for (label, bytes) in [("legacy", legacy), ("v1", v1), ("v2", v2)] {
+            let restored = SnapshotData::from_bytes_migrating(&bytes)
+                .unwrap_or_else(|e| panic!("{label} 快照必须可解码：{e:?}"));
+            assert_eq!(restored.last_included_index, 7, "{label}");
+            assert_eq!(restored.applied_node_id, 1, "{label}");
+        }
+    }
+
+    /// 无前缀 / V1 行尾随字节 ⇒ 显式失败（旧格式读收窄为精确消费）。
+    /// 负控制：bincode 侧改回 allow_trailing ⇒ 本用例必红。
+    #[test]
+    fn test_snapshot_legacy_and_v1_trailing_bytes_rejected() {
+        let data = envelope_sample_snapshot();
+
+        let mut legacy = bincode::serialize(&data).unwrap();
+        legacy.extend_from_slice(&[0xDE, 0xAD]);
+        assert!(SnapshotData::from_bytes_migrating(&legacy).is_err());
+
+        let mut v1 = envelope::encode(&data).unwrap();
+        v1.extend_from_slice(&[0xDE, 0xAD]);
+        assert!(SnapshotData::from_bytes_migrating(&v1).is_err());
     }
 }
