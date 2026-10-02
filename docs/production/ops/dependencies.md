@@ -47,7 +47,11 @@ bincode 在本仓库不是工具库，而是**持久化格式**，直接承载�
 > 切换）两步。
 > **P2a 读先行已落地**（2026-10-02）：快照 / auth 记录×5 / SM 元数据 /
 > PD 队列条目四个直写面接入三路读，旧格式读收窄为精确消费（快照的 bincode
-> 迁移阶梯保留）；写路径保持现状——P2b（写切换）进行中。
+> 迁移阶梯保留）。
+> **P2b 写切换已落地**（2026-10-02）：`envelope::encode` 唯一写入口切 V2
+> （postcard）——快照 / auth 记录×5 / SM 元数据（META_SNAPSHOT、
+> META_MEMBERSHIP）/ PD 队列条目 / region manifest 各写路径统一写
+> `MAGIC + VERSION_V2 + postcard`；旧格式维持只读窗口，待 P3 删除。
 
 **完成判据**：P3 完成且 `cargo deny` 无豁免。
 
