@@ -194,9 +194,8 @@ Coord 处于 pre-1.0，并明确列出**不承诺**的事项；完整清单（�
 [`docs/production/ops/boundaries.md`](docs/production/ops/boundaries.md)。摘要：
 
 - **工作流状态 append-only**——定义与实例均无删除/保留 API。
-- **Raft 日志压缩**——默认禁用自动快照（`raft.snapshot_logs_since_last = 0`），日志不会自动回收；部分压缩配置尚未接线。
+- **Raft 日志压缩**——缺省每 5000 条自动快照并回收已入快照的日志（保留窗口 `raft.max_in_snapshot_log_to_keep`，默认保留 1000 条供落后副本追赶）；`raft.snapshot_logs_since_last = 0` 会同时关闭两者，日志不再回收（见 ADR-0004）。
 - **Multi-Raft（region 模式）**——不支持动态增删 region；watch 不能跨 region。
-- **无连接总数上限**——只有每连接流数上限。
 - **鉴权依赖 raft quorum**——登录与令牌刷新需要 quorum；凭据过期的客户端在 quorum 恢复前不可用。
 - **`transit` 的 KEK 由运维注入**——不接外部 KMS，也没有内建的材料轮换流程。
 - **资源边界**——插件队列有界；客户端口与 agent 健康监听均有连接上限（但无连接寿命回收）；

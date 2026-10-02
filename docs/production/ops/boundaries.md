@@ -22,8 +22,7 @@
 
 | # | 不承诺 | 事实锚点 | 若要变成承诺 |
 |:--|:--|:--|:--|
-| B-ST-1 | `raft.snapshot_logs_since_last = 0`（= 禁用自动快照）⇒ **raft 日志永不回收**。`LogStore::purge` 要求 tracker 持有覆盖该 index 的持久快照，没有快照该判据恒不成立 | `coord-server/src/raft/mod.rs:76-81`；启动 WARN 在 `coord/src/main.rs`（`snapshot_logs_since_last == Some(0)` 分支） | 区分「禁用自动快照」与「禁用日志回收」两个开关；或显式支持「只 compact 不 snapshot」 |
-| B-ST-2 | `compaction.rs` 的 `raft_log_retention_entries` / `tombstone_retention_revisions` 是**死配置**（无读取点），不要按注释理解它的作用 | `coord-server/src/storage/compaction.rs:29-31`（仅测试断言） | 接线或删字段（删字段是破坏性配置变更，需版本说明） |
+| B-ST-1 | raft 日志回收**快照锚定**（ADR-0004）：缺省自动快照（每 5000 条）开启即回收（快照后保留窗口 `max_in_snapshot_log_to_keep`，默认 1000）；「不依赖快照的回收 / 只 compact 不 snapshot」**不实现**（上游 `purged ≤ snapshot` 不变量）。`snapshot_logs_since_last = 0` = 手动快照模式 ⇒ **不回收**（启动 WARN；手动快照/`purge_log` 触发面未开放） | `coord-server/src/raft/mod.rs`（`apply_tuning`）、`coord-server/src/raft/log_store.rs`（`purge` 守卫）、`coord/src/main.rs`；语义见 ADR-0004 | 需要时开放本节点手动快照 / 手动 purge 的运维出口（语义仍以快照为锚） |
 | B-ST-3 | 对象存储：快照恢复落后的节点会**清空本地 chunk 并 rebuild**，期间 `Get` 返回 `UNAVAILABLE`；全集群配置必须一致 | `docs/production/volume-object-storage.md`、`docs/production/ops/runbook.md` | 增量 rebuild / 本地缓存保留策略 |
 
 ## 3. Multi-Raft / Region

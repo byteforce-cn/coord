@@ -221,9 +221,12 @@ coord compact <revision> --addr <leader>
 
 **预期**：`mvvccompact` 相关日志；磁盘的 changelog/tombstone 被物理删除。
 
-**注意**：`raft.snapshot_logs_since_last = 0` 时**自动快照被禁用 ⇒ raft 日志永不回收**
-（`LogStore::purge` 依赖持久快照）。启动会对该配置打 WARN（`coord/src/main.rs` 的
-`snapshot_logs_since_last == Some(0)` 分支）。见 `boundaries.md`。
+**注意**：raft 日志回收是**快照锚定**的（ADR-0004）：缺省每 5000 条自动快照、并按
+保留窗口 `raft.max_in_snapshot_log_to_keep`（默认 1000）回收已入快照的日志；
+`raft.snapshot_logs_since_last = 0` = 手动快照模式 ⇒ **日志不回收**（启动 WARN，
+`coord/src/main.rs` 的 `snapshot_logs_since_last == Some(0)` 分支）。可复现口径：
+`coord-server/tests/raft_log_reclamation_test.rs`（有界实验 + 负控制）。见
+`boundaries.md`。
 
 ---
 

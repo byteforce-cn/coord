@@ -1108,9 +1108,14 @@ pub struct RaftTuningConfig {
     #[serde(default)]
     pub install_snapshot_timeout_ms: Option<u64>,
 
-    /// 快照策略：距上次快照累积日志条数（0 = Never 禁用自动快照）
+    /// 快照策略：距上次快照累积日志条数（0 = Never 禁用自动快照；见 ADR-0004）
     #[serde(default)]
     pub snapshot_logs_since_last: Option<u64>,
+
+    /// 快照保留窗口（ADR-0004）：快照点之后仍保留的（已入快照）日志条数；
+    /// 0 = 允许回收紧贴快照点
+    #[serde(default)]
+    pub max_in_snapshot_log_to_keep: Option<u64>,
 
     /// 快照传输限速（字节/秒；0 = 不限速）
     #[serde(default)]

@@ -40,8 +40,9 @@ pub type RaftConfig = openraft::Config;
 
 /// R-RFT-19：Raft 运行时调优参数（来自 `[raft]` 配置段）。
 ///
-/// 全部字段为 `Option`：`None` = 保持 openraft 默认值（0.10.0-alpha.25：
-/// 心跳 50ms、选举 150–300ms、安装快照 200ms、快照策略 since_last:5000）。
+/// 全部字段为 `Option`：`None` = 保持 openraft 默认值（0.10.0-alpha.34：
+/// 心跳 50ms、选举 150–300ms、安装快照 200ms、快照策略 since_last:5000、
+/// 快照保留窗口 1000；回收语义见 ADR-0004）。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RaftTuning {
     /// 心跳间隔（毫秒）
@@ -52,8 +53,10 @@ pub struct RaftTuning {
     pub election_timeout_max_ms: Option<u64>,
     /// 安装快照超时（毫秒）
     pub install_snapshot_timeout_ms: Option<u64>,
-    /// 快照策略：距上次快照累积的日志条数（0 = Never，禁用自动快照）
+    /// 快照策略：距上次快照累积的日志条数（0 = Never，禁用自动快照；见 ADR-0004）
     pub snapshot_logs_since_last: Option<u64>,
+    /// 快照保留窗口：快照点之后仍保留的（已入快照）日志条数（见 ADR-0004）
+    pub max_in_snapshot_log_to_keep: Option<u64>,
 }
 
 /// R-RFT-19：将调优参数应用到 RaftConfig（None 字段保持 openraft 默认值）。
@@ -79,6 +82,9 @@ pub fn apply_tuning(config: &mut RaftConfig, tuning: &RaftTuning) {
         } else {
             openraft::SnapshotPolicy::LogsSinceLast(v)
         };
+    }
+    if let Some(v) = tuning.max_in_snapshot_log_to_keep {
+        config.max_in_snapshot_log_to_keep = v;
     }
 }
 
@@ -149,11 +155,16 @@ mod tests {
         let mut config = RaftConfig::default();
         let defaults = RaftConfig::default();
 
-        // 全部 None：保持默认
+        // 全部 None：保持 openraft 默认（快照策略与保留窗口 = ADR-0004 的缺省口径）
         apply_tuning(&mut config, &RaftTuning::default());
         assert_eq!(config.heartbeat_interval, defaults.heartbeat_interval);
         assert_eq!(config.election_timeout_min, defaults.election_timeout_min);
         assert_eq!(config.election_timeout_max, defaults.election_timeout_max);
+        assert!(matches!(
+            config.snapshot_policy,
+            openraft::SnapshotPolicy::LogsSinceLast(5000)
+        ));
+        assert_eq!(config.max_in_snapshot_log_to_keep, 1000);
 
         // 部分覆盖：仅改心跳与选举
         apply_tuning(
@@ -164,6 +175,7 @@ mod tests {
                 election_timeout_max_ms: Some(800),
                 install_snapshot_timeout_ms: None,
                 snapshot_logs_since_last: None,
+                max_in_snapshot_log_to_keep: None,
             },
         );
         assert_eq!(config.heartbeat_interval, 100);
@@ -197,5 +209,15 @@ mod tests {
             config.snapshot_policy,
             openraft::SnapshotPolicy::LogsSinceLast(2500)
         ));
+
+        // 保留窗口：透传（0 = 允许回收紧贴快照点）
+        apply_tuning(
+            &mut config,
+            &RaftTuning {
+                max_in_snapshot_log_to_keep: Some(0),
+                ..RaftTuning::default()
+            },
+        );
+        assert_eq!(config.max_in_snapshot_log_to_keep, 0);
     }
 }

@@ -207,9 +207,8 @@ current status and the work required to close each item — is
 [`docs/production/ops/boundaries.md`](docs/production/ops/boundaries.md). Highlights:
 
 - **Workflow state is append-only** — no delete/retention API for definitions or instances.
-- **Raft log compaction** — automatic snapshots are disabled by default (`raft.snapshot_logs_since_last = 0`), so Raft logs are not reclaimed; some compaction settings are not wired yet.
+- **Raft log compaction** — automatic snapshots run every 5000 logs by default and logs covered by a snapshot are reclaimed (`raft.max_in_snapshot_log_to_keep` keeps 1000 behind the snapshot for lagging followers); setting `raft.snapshot_logs_since_last = 0` disables both, so logs are never reclaimed (see ADR-0004).
 - **Multi-Raft (region mode)** — no dynamic region add/remove; watches cannot span regions.
-- **No aggregate connection limit** — only per-connection stream caps.
 - **Authentication needs raft quorum** — logins and token refresh require quorum; clients whose credentials have expired cannot operate until quorum returns.
 - **`transit` KEK is operator-supplied** — no external KMS integration, and no built-in key-rotation flow.
 - **Resource bounds** — plugin queues are bounded; the client port and the agent health listener enforce connection caps (but not connection-lifetime recycling); the cache enforces its configured size limit via a periodic reaper (brief overshoot within the reaper interval is possible); the message queue enforces its byte quota at publish (same-transaction accounting — over-quota and oversize publishes are rejected with `RESOURCE_EXHAUSTED`) and a reaper prunes messages/DLQ past each topic's `retention_secs` (`0` disables time-based pruning).
