@@ -20,7 +20,7 @@ unsound = "all"
 # 为什么这里选择「记录后豁免」而不是「升级/替换」：
 #   bincode 在本仓库不是可有可无的工具库，而是**持久化格式**，直接承载
 #   · 快照（storage/snapshot.rs，且保留 SnapshotDataV1/V2/V3 三代格式的向后兼容解码）、
-#   · Raft 日志条目（coord-core/src/workflow/raft_store.rs）、
+#   · Raft 日志条目（coord-server/src/raft/log_store.rs；region 模式复用同一实现）、
 #   · auth 用户/角色/会话/吊销记录（auth/manager.rs，`/_sys/auth/` 原生 bincode，
 #     变体索引即变体号，见 `test_auth_op_bincode_variant_indices_appended`）、
 #   · PD Region 元数据（pd/meta_store.rs）、
