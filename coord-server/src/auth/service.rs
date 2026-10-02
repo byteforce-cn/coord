@@ -53,6 +53,13 @@ const MAX_SESSION_CLEANUP_BATCH: usize = 4096;
 /// 每轮维护最多连排的批数（用于追赶积压；4096 × 8 ≈ 3.3 万/min）。
 const MAX_SESSION_CLEANUP_BATCHES_PER_TICK: usize = 8;
 
+/// `persist_session` 的有界重试：覆盖选举窗口（选举超时缺省 150–300ms，见
+/// `RaftTuning`）。4 次尝试 × 200ms ≈ 600ms —— 必须远小于客户端凭据轮换窗口
+/// （60s）；「无 quorum」持续存在时不得把失败时延拖到轮换窗口量级。
+const SESSION_PERSIST_MAX_ATTEMPTS: u32 = 4;
+/// `persist_session` 重试的固定退避间隔。
+const SESSION_PERSIST_RETRY_DELAY: Duration = Duration::from_millis(200);
+
 struct TokenBucket {
     tokens: f64,
     last_refill: Instant,
@@ -450,7 +457,32 @@ impl AuthService {
         self.bootstrap_tokens.write().remove(token)
     }
 
+    /// 会话持久化失败是否应在**本节点**做有界重试（覆盖选举窗口）。
+    ///
+    /// 判据只有一个事实：领导权失败是否给出了可重定向目标（`coord-leader-hint`）。
+    ///
+    /// * `NOT_LEADER` 且**无** hint —— 选举进行中（新 leader 未选出，本节点可能当选）：
+    ///   这是本重试要覆盖的窗口，短暂退避后重试有意义；
+    /// * `NOT_LEADER` 且**有** hint —— 存在可重定向的新 leader：在**同一节点**重试
+    ///   不可能成功，立即透传（码 + hint）让客户端重定向（R-SVC-08 语义），不得拖延；
+    /// * 其余（含 `DEADLINE_EXCEEDED` —— 已等满 `write_timeout`）：不重试；无 quorum
+    ///   持续存在是客户端按可重试码轮换处理的场景。
+    fn session_persist_retryable(status: &tonic::Status) -> bool {
+        use coord_core::error_code::{error_code_of, CoordErrorCode};
+        let not_leader =
+            error_code_of(status).is_some_and(|c| c == CoordErrorCode::NotLeader.as_str());
+        not_leader
+            && !status
+                .metadata()
+                .contains_key(crate::server::LEADER_HINT_METADATA_KEY)
+    }
+
     /// 将签发的会话经 raft 持久化（proposer None 时仅本地视图）。
+    ///
+    /// 领导权流动（选举窗口）内无 hint 的 `NOT_LEADER` 在本节点做**有界**重试：
+    /// 窗口缺省 < 1s（选举超时 150–300ms），退避后本节点可能已当选；一旦出现
+    /// hint（别人当选）立即停止、原样透传（客户端按 R-SVC-08 重定向）。重试耗尽后
+    /// 返回最后一次的 Status —— 可重试码性质不变（见 [`Self::session_persist_retryable`]）。
     async fn persist_session(
         &self,
         hash_hex: &str,
@@ -459,15 +491,36 @@ impl AuthService {
         is_refresh: bool,
     ) -> Result<(), tonic::Status> {
         match &self.auth_proposer {
-            Some(p) => p
-                .propose_auth_op(AuthOp::IssueSession {
+            Some(p) => {
+                // IssueSession 幂等（同 hash 覆盖写同一行）：重试重复提案是安全的。
+                let op = AuthOp::IssueSession {
                     hash_hex: hash_hex.to_string(),
                     username: username.to_string(),
                     expires_at_unix,
                     is_refresh,
-                })
-                .await
-                .map(|_| ()),
+                };
+                let mut attempt = 1u32;
+                loop {
+                    match p.propose_auth_op(op.clone()).await {
+                        Ok(_) => return Ok(()),
+                        Err(status)
+                            if attempt < SESSION_PERSIST_MAX_ATTEMPTS
+                                && Self::session_persist_retryable(&status) =>
+                        {
+                            // 日志保持 debug：选举窗口是瞬态，且无 quorum 的 follower
+                            // 高频路径不得刷 warn。
+                            tracing::debug!(
+                                attempt,
+                                code = %status.code(),
+                                "auth session persist retrying after leadership change"
+                            );
+                            tokio::time::sleep(SESSION_PERSIST_RETRY_DELAY).await;
+                            attempt += 1;
+                        }
+                        Err(status) => return Err(status),
+                    }
+                }
+            }
             None => {
                 self.token_manager.register_session(
                     hash_hex,
@@ -1884,6 +1937,246 @@ mod cct_tests {
             })
             .expect("提案成功时登录必须成功");
         assert!(!resp.into_inner().token.is_empty());
+    }
+
+    // ──── 选举窗口：`persist_session` 的有界重试（B-SE-4 仍待办项）────
+    //
+    // 判据锚点：重试**只**发生在「领导权在流动且无可重定向目标」（NOT_LEADER 无
+    // hint）时；有 hint ⇒ 立即透传（客户端重定向，R-SVC-08）；DEADLINE_EXCEEDED
+    // ⇒ 不重试。所有用例都断言**调用计数**——"有界"必须是可检验的，不是注释。
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 选举窗口形态的失败：`NOT_LEADER`、**无** hint（尚无可重定向目标）。
+    fn leaderless_status() -> tonic::Status {
+        coord_core::error_code::attach(
+            tonic::Status::unavailable("not leader: forward to current leader"),
+            coord_core::error_code::CoordErrorCode::NotLeader,
+        )
+    }
+
+    /// `NOT_LEADER` + `coord-leader-hint`（可重定向到已知新 leader）。
+    fn not_leader_with_hint() -> tonic::Status {
+        let mut status = leaderless_status();
+        status.metadata_mut().insert(
+            crate::server::LEADER_HINT_METADATA_KEY,
+            tonic::metadata::MetadataValue::try_from("10.0.0.7:7171").unwrap(),
+        );
+        status
+    }
+
+    /// 「先失败 `failures` 次（无 hint），之后成功」的 proposer；记录调用数。
+    struct ElectionWindowProposer {
+        failures: usize,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl AuthOpProposer for ElectionWindowProposer {
+        async fn propose_auth_op(&self, _op: AuthOp) -> Result<u64, tonic::Status> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if n <= self.failures {
+                return Err(leaderless_status());
+            }
+            Ok(n as u64)
+        }
+    }
+
+    /// 「每次固定返回 `status()`」的 proposer；记录调用数。
+    struct StatusProposer {
+        status: fn() -> tonic::Status,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl AuthOpProposer for StatusProposer {
+        async fn propose_auth_op(&self, _op: AuthOp) -> Result<u64, tonic::Status> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err((self.status)())
+        }
+    }
+
+    /// 选举窗口的瞬态无 leader 失败必须被有界重试吸收（成功即停）。
+    ///
+    /// 负控制：删掉重试循环 ⇒ 调用数 == 1 ≠ 3，必红。
+    #[tokio::test]
+    async fn persist_session_retries_leaderless_window_then_succeeds() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let svc = build_service_with_cct().with_proposer(Arc::new(ElectionWindowProposer {
+            failures: 2,
+            calls: Arc::clone(&calls),
+        }));
+
+        svc.persist_session("hash-window", "alice", 123, false)
+            .await
+            .expect("选举窗口内的瞬态无 leader 必须被有界重试吸收");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "两次失败 + 一次成功；成功必须立即停止（不得多提案）"
+        );
+    }
+
+    /// 有界性 + 可重试码不变：持续无 hint 时调用数 == 上限，且终态仍是可重试码。
+    ///
+    /// 负控制：① 删重试 ⇒ 第一个断言红；② 上限放大到轮换窗口量级（如 10）⇒
+    /// 第二个断言红——"预算 ~1s 量级"是判据本身，不是建议。
+    #[tokio::test]
+    async fn persist_session_retry_is_bounded_and_keeps_retryable_code() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let svc = build_service_with_cct().with_proposer(Arc::new(ElectionWindowProposer {
+            failures: usize::MAX,
+            calls: Arc::clone(&calls),
+        }));
+
+        let err = svc
+            .persist_session("hash-bounded", "bob", 123, false)
+            .await
+            .expect_err("持续无 leader 必须失败（fail-closed：不能签发未持久化的会话）");
+        let n = calls.load(Ordering::SeqCst);
+        assert_eq!(
+            n, SESSION_PERSIST_MAX_ATTEMPTS as usize,
+            "重试必须恰好有界：调用数 == 上限（不得静默无限重试）"
+        );
+        assert!(
+            n <= 4,
+            "预算必须保持 ~1s 量级（选举超时缺省 150–300ms），不得放大到轮换窗口量级"
+        );
+        assert_eq!(err.code(), tonic::Code::Unavailable, "耗尽后仍是可重试码");
+        assert_ne!(
+            err.code(),
+            tonic::Code::Unauthenticated,
+            "不得把「集群没有 leader」退化成凭据错误"
+        );
+    }
+
+    /// 有 hint ⇒ **不**在本节点重试（同一节点重试不可能成功），码 + hint 原样透传。
+    ///
+    /// 负控制：谓词忽略 hint（`not_leader && true`）⇒ 调用数 == 上限 ≠ 1，必红。
+    #[tokio::test]
+    async fn persist_session_does_not_retry_not_leader_with_hint() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let svc = build_service_with_cct().with_proposer(Arc::new(StatusProposer {
+            status: not_leader_with_hint,
+            calls: Arc::clone(&calls),
+        }));
+
+        let err = svc
+            .persist_session("hash-hint", "carol", 123, false)
+            .await
+            .expect_err("有重定向目标时仍须失败（客户端去新 leader 重试，而不是本节点拖延）");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "有 hint ⇒ 必须立即透传（重试是拖延，不是帮助）"
+        );
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert_eq!(
+            coord_core::error_code::error_code_of(&err).as_deref(),
+            Some(coord_core::error_code::CoordErrorCode::NotLeader.as_str()),
+            "NOT_LEADER 码必须原样透传（SDK 按它做重定向决策）"
+        );
+        assert_eq!(
+            err.metadata()
+                .get(crate::server::LEADER_HINT_METADATA_KEY)
+                .and_then(|v| v.to_str().ok()),
+            Some("10.0.0.7:7171"),
+            "leader hint 必须原样保留"
+        );
+    }
+
+    /// 重试期间新 leader 当选（hint 出现）⇒ 立即停止重试并透传 hint。
+    ///
+    /// 负控制：谓词忽略 hint ⇒ 调用数 == 上限 ≠ 2，必红。
+    #[tokio::test]
+    async fn persist_session_stops_retrying_once_hint_appears() {
+        /// 第 1 次失败无 hint（选举中）；之后失败带 hint（新 leader 已选出）。
+        struct HintAppears {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl AuthOpProposer for HintAppears {
+            async fn propose_auth_op(&self, _op: AuthOp) -> Result<u64, tonic::Status> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Err(leaderless_status())
+                } else {
+                    Err(not_leader_with_hint())
+                }
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let svc = build_service_with_cct().with_proposer(Arc::new(HintAppears {
+            calls: Arc::clone(&calls),
+        }));
+
+        let err = svc
+            .persist_session("hash-stop", "dave", 123, false)
+            .await
+            .expect_err("别人当选后本节点仍不是 leader，必须失败");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "第一次无 hint 触发一次重试；hint 出现后不得再重试"
+        );
+        assert_eq!(
+            err.metadata()
+                .get(crate::server::LEADER_HINT_METADATA_KEY)
+                .and_then(|v| v.to_str().ok()),
+            Some("10.0.0.7:7171"),
+            "最终错误必须携带 hint 供客户端重定向"
+        );
+    }
+
+    /// `DEADLINE_EXCEEDED`（已等满 `write_timeout`）⇒ 不重试，原样透传。
+    ///
+    /// 负控制：谓词加上 `|| code == DeadlineExceeded` ⇒ 调用数 == 上限 ≠ 1，必红。
+    #[tokio::test]
+    async fn persist_session_does_not_retry_deadline_exceeded() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let svc = build_service_with_cct().with_proposer(Arc::new(StatusProposer {
+            status: || tonic::Status::deadline_exceeded("raft auth write timed out (no quorum?)"),
+            calls: Arc::clone(&calls),
+        }));
+
+        let err = svc
+            .persist_session("hash-deadline", "erin", 123, false)
+            .await
+            .expect_err("无 quorum 超时必须失败");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "超时路径已等满 write_timeout，服务端不得再重试（由客户端按可重试码轮换）"
+        );
+        assert_eq!(err.code(), tonic::Code::DeadlineExceeded);
+    }
+
+    /// 集成：选举窗口（前两次提案无 hint 失败）经服务端重试后**登录对客户端不可见**——
+    /// access 第 3 次尝试成功、refresh 直接成功，客户端无需轮换。
+    #[tokio::test]
+    async fn authenticate_survives_leaderless_window() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let svc = build_service_with_cct().with_proposer(Arc::new(ElectionWindowProposer {
+            failures: 2,
+            calls: Arc::clone(&calls),
+        }));
+        svc.auth_manager.user_add("f05-window", "pw").unwrap();
+
+        let resp = svc
+            .authenticate(tonic::Request::new(AuthenticateRequest {
+                name: "f05-window".to_string(),
+                password: "pw".to_string(),
+            }))
+            .await
+            .expect("选举窗口内的瞬态失败必须被服务端重试吸收（登录对客户端不可见）");
+        assert!(!resp.into_inner().token.is_empty());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "access：2 失败 + 1 成功；refresh：1 次成功 —— 全程无客户端可见失败"
+        );
     }
 
     // ──── Role→Capability storage ────
