@@ -26,4 +26,4 @@
 | [ADR-0002](0002-cross-node-commit-atomicity-boundary.md) | Cache 跨节点提交原子性边界 | accepted |
 | [ADR-0003](0003-read-path-convergence.md) | 读路径收敛：配置与发现必须走门面 API | accepted |
 | [ADR-0004](0004-raft-log-reclamation-snapshot-anchored.md) | Raft 日志回收——快照锚定的保留窗口 | accepted |
-| [ADR-0005](0005-bincode-replacement-codec-selection.md) | bincode 退场 P1：替代序列化格式选型（postcard） | proposed |
+| [ADR-0005](0005-bincode-replacement-codec-selection.md) | bincode 退场 P1：替代序列化格式选型（postcard） | accepted |
