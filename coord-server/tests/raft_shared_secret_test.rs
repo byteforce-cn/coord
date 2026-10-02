@@ -33,6 +33,8 @@ fn raft_msg(payload: Vec<u8>, tag: Vec<u8>) -> RaftMessage {
         region_id: 0,
         trace_context: Vec::new(),
         auth_tag: tag,
+        // 默认 = bincode（历史发送方不带该字段时 proto3 读作 0）
+        payload_codec: 0,
     }
 }
 
@@ -138,6 +140,70 @@ async fn test_raft_shared_secret_accepts_valid_tag() {
                 s.code(),
                 tonic::Code::Unauthenticated,
                 "valid tag must pass auth layer: {s:?}"
+            );
+        }
+        Ok(_) => {}
+    }
+
+    handle.abort();
+}
+
+/// ADR-0007：未知载荷标记 fail-closed（在认证/解码前拒绝）。
+#[tokio::test]
+async fn test_raft_unknown_payload_codec_rejected() {
+    let secret = "integration-secret-16+chars";
+    let (addr, handle) = start_raft_server(secret).await;
+
+    let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = RaftClient::new(channel);
+
+    let mut msg = raft_msg(b"payload".to_vec(), Vec::new());
+    msg.payload_codec = 2;
+    let resp = client.append_entries(tonic::Request::new(msg)).await;
+    assert!(
+        matches!(resp, Err(ref s) if s.code() == tonic::Code::InvalidArgument),
+        "unknown codec must be rejected fail-closed: {resp:?}"
+    );
+
+    handle.abort();
+}
+
+/// ADR-0007 R1：codec=1（域分离 MAC）在认证层被正确接受
+/// （载荷不是合法 postcard ⇒ 认证过后的解码失败，但不得是 UNAUTHENTICATED）。
+#[tokio::test]
+async fn test_raft_codec1_message_accepted_by_auth_layer() {
+    use hmac::{Hmac, Mac};
+    type HmacSha256 = Hmac<sha2::Sha256>;
+
+    let secret = "integration-secret-16+chars";
+    let (addr, handle) = start_raft_server(secret).await;
+
+    let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = RaftClient::new(channel);
+
+    let mut msg = raft_msg(b"postcard-payload".to_vec(), Vec::new());
+    msg.payload_codec = 1;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(b"coord-raft-payload-v2");
+    mac.update(&1u32.to_be_bytes());
+    mac.update(&msg.payload);
+    msg.auth_tag = mac.finalize().into_bytes().to_vec();
+
+    let resp = client.vote(tonic::Request::new(msg)).await;
+    match resp {
+        Err(s) => {
+            assert_ne!(
+                s.code(),
+                tonic::Code::Unauthenticated,
+                "codec=1 message with domain-separated tag must pass auth layer: {s:?}"
             );
         }
         Ok(_) => {}
