@@ -278,10 +278,10 @@ impl PdQueueEntry {
         }
     }
 
-    /// bincode 序列化（redb 原始行；写路径当前为无前缀 bincode，P2b 收编进
-    /// 统一信封 V2）。
+    /// 统一信封 V2 序列化（redb 原始行；读路径兼容旧格式）。
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(|e| Error::Internal(format!("encode pd queue entry: {e}")))
+        crate::storage::envelope::encode(self)
+            .map_err(|e| Error::Internal(format!("encode pd queue entry: {e}")))
     }
 
     /// 反序列化（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；均精确
@@ -686,10 +686,19 @@ mod tests {
         let legacy = bincode::serialize(&entry).unwrap();
         assert_eq!(PdQueueEntry::from_bytes(&legacy).as_ref(), Some(&entry));
         // V1 / V2 行
-        let v1 = crate::storage::envelope::encode(&entry).unwrap();
+        let v1 = crate::storage::envelope::encode_v1(&entry).unwrap();
         assert_eq!(PdQueueEntry::from_bytes(&v1).as_ref(), Some(&entry));
-        let v2 = crate::storage::envelope::encode_v2(&entry);
+        let v2 = crate::storage::envelope::encode_v2(&entry).unwrap();
         assert_eq!(PdQueueEntry::from_bytes(&v2).as_ref(), Some(&entry));
+
+        // 写路径断言：to_bytes 产物必须为 V2 前缀，且可回读
+        let written = entry.to_bytes().unwrap();
+        assert!(written.starts_with(&crate::storage::envelope::MAGIC));
+        assert_eq!(
+            written[crate::storage::envelope::MAGIC.len()],
+            crate::storage::envelope::VERSION_V2
+        );
+        assert_eq!(PdQueueEntry::from_bytes(&written).as_ref(), Some(&entry));
 
         // 篡改矩阵：未知版本 / 魔数 / 尾随 / 截断 ⇒ None
         let mut bad_version = v2.clone();

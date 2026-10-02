@@ -2,8 +2,8 @@
 // （计划与判据见 docs/production/ops/dependencies.md；替代编码选型见 docs/adr/0005）
 //
 // 布局：MAGIC(4B) | VERSION(1B) | payload
-//   VERSION=1 ⇒ bincode(payload)（现行写路径）
-//   VERSION=2 ⇒ postcard(payload)（读路径支持；写路径切换另阶段）
+//   VERSION=1 ⇒ bincode(payload)（只读兼容：历史写路径产物）
+//   VERSION=2 ⇒ postcard(payload)（当前写路径）
 //   无魔数    ⇒ 历史无前缀行，整行按 bincode 解码
 //
 // 为什么需要信封：raft 日志行 / PD 元数据行 / 对象 manifest 行的值直接是
@@ -12,10 +12,10 @@
 // 从字节上**辨识**一行数据用了什么格式。
 //
 // 读兼容：三路（V1 / V2 / 无前缀）；三条路径均精确消费——尾随字节必须显式
-// 报错，不得被便捷解码函数静默忽略。写路径：三载体一律写带前缀的 V1（P2b
-// 切换 V2）；快照/auth/SM 元数据/PD 队列四个直写面借道 `classify` + 精确解码
-// 辅助接入三路读（P2a；快照的 bincode 迁移阶梯保留）。滚动升级必须先升级读
-// 路径（本模块随二进制发布），再产生新格式写入。
+// 报错，不得被便捷解码函数静默忽略。写路径：全部持久化面统一写 V2（P2b）；
+// 快照/auth/SM 元数据/PD 队列四个直写面同样经本模块接入三路读（P2a；快照的
+// bincode 迁移阶梯保留）。滚动升级必须先升级读路径（本模块随二进制发布），
+// 再产生新格式写入。
 
 use serde::{Deserialize, Serialize};
 
@@ -26,10 +26,11 @@ use serde::{Deserialize, Serialize};
 /// 信封；`"CRD"` 便于在 hexdump 中肉眼辨识。
 pub const MAGIC: [u8; 4] = [0x02, b'C', b'R', b'D'];
 
-/// 写路径当前信封版本（bincode 载荷），魔数之后的 1 字节。
+/// V1 信封版本（bincode 载荷）：**只读兼容**——历史写路径产物（P2b 起新写入
+/// 不再产生）；读侧保留至 P3。
 pub const VERSION: u8 = 1;
 
-/// V2 信封版本：postcard 载荷（ADR-0005；读路径支持，写路径切换在 P2）。
+/// 当前写路径信封版本：postcard 载荷（ADR-0005）。
 pub const VERSION_V2: u8 = 2;
 
 /// 前缀总长：魔数 4B + 版本 1B。
@@ -66,14 +67,20 @@ impl std::fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
-/// 编码：`MAGIC | VERSION | bincode(value)`。
+/// 编码（写路径唯一入口）：`MAGIC | VERSION_V2 | postcard(value)`。
 ///
-/// 所有持久化写路径必须使用本函数（白盒测试会断言原始行前缀）。
-pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, bincode::Error> {
-    let payload = bincode::serialize(value)?;
+/// 所有持久化写路径必须使用本函数（白盒测试会断言原始行前缀）。写侧无运行期
+/// 版本开关——同一二进制只有一种写格式，迁移期的「两种格式」只存在于读侧。
+pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, postcard::Error> {
+    encode_v2(value)
+}
+
+/// V2 编码：`MAGIC | VERSION_V2 | postcard(value)`（读路径另有 V1/无前缀腿）。
+pub fn encode_v2<T: Serialize>(value: &T) -> Result<Vec<u8>, postcard::Error> {
+    let payload = postcard::to_allocvec(value)?;
     let mut out = Vec::with_capacity(PREFIX_LEN + payload.len());
     out.extend_from_slice(&MAGIC);
-    out.push(VERSION);
+    out.push(VERSION_V2);
     out.extend_from_slice(&payload);
     Ok(out)
 }
@@ -154,18 +161,16 @@ pub(crate) fn decode_postcard_exact<'a, T: Deserialize<'a>>(
     Ok(value)
 }
 
-/// 测试构造器：生成 V2（postcard 载荷）信封行。
-///
-/// 写路径切换（P2）前生产代码不产生 V2 行；载体读路径的正反用例与对照测试
-/// 需要构造合法 V2 行。
+/// 测试构造器：生成 V1（bincode 载荷）信封行——历史写格式，供读兼容用例与
+/// 负控制构造「旧写路径产物」。
 #[cfg(test)]
-pub(crate) fn encode_v2<T: Serialize>(value: &T) -> Vec<u8> {
-    let payload = postcard::to_allocvec(value).expect("postcard payload encode");
+pub(crate) fn encode_v1<T: Serialize>(value: &T) -> Result<Vec<u8>, bincode::Error> {
+    let payload = bincode::serialize(value)?;
     let mut out = Vec::with_capacity(PREFIX_LEN + payload.len());
     out.extend_from_slice(&MAGIC);
-    out.push(VERSION_V2);
+    out.push(VERSION);
     out.extend_from_slice(&payload);
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -187,15 +192,19 @@ mod tests {
         }
     }
 
-    /// 新数据必须带 `MAGIC + VERSION` 前缀（正判据）。
+    /// 新数据（写路径唯一入口 `encode`）必须带 `MAGIC + VERSION_V2` 前缀，
+    /// payload 为 postcard（正判据）。
+    /// 负控制：写路径回退 V1（bincode 载荷）⇒ 本用例必红。
     #[test]
-    fn test_encode_prefixes_magic_and_version() {
+    fn test_encode_writes_v2_prefix() {
         let bytes = encode(&sample()).unwrap();
         assert!(bytes.starts_with(&MAGIC));
-        assert_eq!(bytes[MAGIC.len()], VERSION);
-        // 前缀之外是标准 bincode payload（逐字节一致）
-        let payload = bincode::serialize(&sample()).unwrap();
+        assert_eq!(bytes[MAGIC.len()], VERSION_V2);
+        // 前缀之外是标准 postcard payload（逐字节一致）
+        let payload = postcard::to_allocvec(&sample()).unwrap();
         assert_eq!(&bytes[PREFIX_LEN..], payload.as_slice());
+        // 与 encode_v2 同一产物（写侧只有一种格式，无运行期开关）
+        assert_eq!(bytes, encode_v2(&sample()).unwrap());
     }
 
     #[test]
@@ -240,36 +249,36 @@ mod tests {
     /// V2 行布局：MAGIC + VERSION_V2 + postcard payload（逐字节）。
     #[test]
     fn test_v2_layout() {
-        let bytes = encode_v2(&sample());
+        let bytes = encode_v2(&sample()).unwrap();
         assert!(bytes.starts_with(&MAGIC));
         assert_eq!(bytes[MAGIC.len()], VERSION_V2);
         let payload = postcard::to_allocvec(&sample()).unwrap();
         assert_eq!(&bytes[PREFIX_LEN..], payload.as_slice());
     }
 
-    /// 对照测试（bincode 侧）：解码 → 再编码逐字节稳定。
+    /// 对照测试（V1/bincode 侧，只读兼容格式）：解码 → 再编码逐字节稳定。
     #[test]
     fn test_v1_reencode_is_byte_stable() {
-        let bytes = encode(&sample()).unwrap();
+        let bytes = encode_v1(&sample()).unwrap();
         let decoded: Sample = decode(&bytes).unwrap();
         assert_eq!(decoded, sample());
-        assert_eq!(encode(&decoded).unwrap(), bytes);
+        assert_eq!(encode_v1(&decoded).unwrap(), bytes);
     }
 
     /// 对照测试（postcard 侧）：解码 → 再编码逐字节稳定。
     #[test]
     fn test_v2_reencode_is_byte_stable() {
-        let bytes = encode_v2(&sample());
+        let bytes = encode_v2(&sample()).unwrap();
         let decoded: Sample = decode(&bytes).unwrap();
         assert_eq!(decoded, sample());
-        assert_eq!(encode_v2(&decoded), bytes);
+        assert_eq!(encode_v2(&decoded).unwrap(), bytes);
     }
 
     /// 三路尾随篡改 ⇒ 全部显式失败，不得静默忽略剩余字节（精确消费）。
     /// 负控制：bincode 侧改用 allow_trailing / 去掉 V2 remainder 断言 ⇒ 对应用例必红。
     #[test]
     fn test_trailing_bytes_rejected_on_all_paths() {
-        let mut v1 = encode(&sample()).unwrap();
+        let mut v1 = encode_v1(&sample()).unwrap();
         v1.extend_from_slice(&[0xDE, 0xAD]);
         assert!(matches!(
             decode::<Sample>(&v1),
@@ -283,7 +292,7 @@ mod tests {
             Err(DecodeError::Payload(_))
         ));
 
-        let mut v2 = encode_v2(&sample());
+        let mut v2 = encode(&sample()).unwrap();
         v2.extend_from_slice(&[0xDE, 0xAD]);
         assert!(matches!(
             decode::<Sample>(&v2),
@@ -297,7 +306,7 @@ mod tests {
     #[test]
     fn test_v2_magic_corruption_fails_explicitly() {
         for i in 0..MAGIC.len() {
-            let mut bytes = encode_v2(&sample());
+            let mut bytes = encode_v2(&sample()).unwrap();
             bytes[i] = bytes[i].wrapping_add(1);
             assert!(
                 decode::<Sample>(&bytes).is_err(),
@@ -321,10 +330,10 @@ mod tests {
     /// 负控制：删去版本判别（仅凭魔数当同一种）⇒ 本用例必红。
     #[test]
     fn test_classify_partitions() {
-        let v1 = encode(&sample()).unwrap();
+        let v1 = encode_v1(&sample()).unwrap();
         assert!(matches!(classify(&v1), Ok(Envelope::V1(_))));
 
-        let v2 = encode_v2(&sample());
+        let v2 = encode_v2(&sample()).unwrap();
         assert!(matches!(classify(&v2), Ok(Envelope::V2(_))));
 
         let legacy = bincode::serialize(&sample()).unwrap();
