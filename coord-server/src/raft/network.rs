@@ -47,11 +47,11 @@ pub const PAYLOAD_CODEC_BINCODE: u32 = 0;
 /// postcard 载荷标记（写路径目标格式）。
 pub const PAYLOAD_CODEC_POSTCARD: u32 = 1;
 
-/// 写路径标记（R1 读双分派阶段写仍为 bincode；R2 起切 postcard）。
+/// 写路径标记（R2 起写 postcard）。
 ///
 /// 写侧无运行期开关：同一二进制只有一种写格式（升级秩序由部署纪律固化，
-/// 见 ADR-0007 D4）。
-const WRITE_PAYLOAD_CODEC: u32 = PAYLOAD_CODEC_BINCODE;
+/// 见 ADR-0007 D4——全部接收方运行含 R1 的版本后才部署含 R2 的版本）。
+const WRITE_PAYLOAD_CODEC: u32 = PAYLOAD_CODEC_POSTCARD;
 
 /// codec=1 的 HMAC 域分离标签（ADR-0007 D3）。
 ///
@@ -87,15 +87,10 @@ fn parse_payload_codec(codec: u32) -> Result<PayloadCodec, tonic::Status> {
     }
 }
 
-/// 编码出站载荷（写路径唯一编码器，标记由 [`WRITE_PAYLOAD_CODEC`] 常量决定）。
+/// 编码出站载荷（写路径唯一编码器：postcard，ADR-0007 R2）。
 fn serialize_payload<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, tonic::Status> {
-    if WRITE_PAYLOAD_CODEC == PAYLOAD_CODEC_POSTCARD {
-        postcard::to_allocvec(value)
-            .map_err(|e| tonic::Status::internal(format!("postcard serialize failed: {e}")))
-    } else {
-        bincode::serialize(value)
-            .map_err(|e| tonic::Status::internal(format!("bincode serialize failed: {e}")))
-    }
+    postcard::to_allocvec(value)
+        .map_err(|e| tonic::Status::internal(format!("postcard serialize failed: {e}")))
 }
 
 /// 按标记分派解码（读双分派；两条腿均精确消费——拒绝尾随字节）。
@@ -1513,9 +1508,14 @@ mod tests {
     fn test_raft_shared_secret_roundtrip() {
         let secret = b"test-raft-secret-16chars";
         let payload = b"raft-payload".to_vec();
-        let tag = compute_raft_auth_tag(&payload, secret, PayloadCodec::Bincode).unwrap();
+        let payload_tag = compute_raft_auth_tag(
+            &payload,
+            secret,
+            parse_payload_codec(WRITE_PAYLOAD_CODEC).unwrap(),
+        )
+        .unwrap();
         let mut msg = make_raft_message(payload);
-        msg.auth_tag = tag;
+        msg.auth_tag = payload_tag;
         assert!(verify_raft_auth(&msg, Some(secret)).is_ok());
         // 未配置密钥时不验签（兼容明文 loopback dev/test 路径）
         assert!(verify_raft_auth(&msg, None).is_ok());
@@ -1525,7 +1525,12 @@ mod tests {
     fn test_raft_shared_secret_rejects_tampered_payload() {
         let secret = b"test-raft-secret-16chars";
         let payload = b"raft-payload".to_vec();
-        let tag = compute_raft_auth_tag(&payload, secret, PayloadCodec::Bincode).unwrap();
+        let tag = compute_raft_auth_tag(
+            &payload,
+            secret,
+            parse_payload_codec(WRITE_PAYLOAD_CODEC).unwrap(),
+        )
+        .unwrap();
         let mut msg = make_raft_message(b"tampered".to_vec());
         msg.auth_tag = tag;
         assert!(verify_raft_auth(&msg, Some(secret)).is_err());
@@ -1632,9 +1637,10 @@ mod tests {
         let secret = b"test-raft-secret-16chars";
         let payload = b"raft-payload";
 
-        // 合法 codec=0 消息（旧输入 MAC）
+        // 合法 codec=0 消息（旧输入 MAC；显式构造旧发送方形态）
         let tag0 = compute_raft_auth_tag(payload, secret, PayloadCodec::Bincode).unwrap();
         let mut msg = make_raft_message(payload.to_vec());
+        msg.payload_codec = PAYLOAD_CODEC_BINCODE;
         msg.auth_tag = tag0;
         assert!(verify_raft_auth(&msg, Some(secret)).is_ok());
 
@@ -1661,15 +1667,32 @@ mod tests {
 
         // 交叉使用也不成立：codec=1 的 tag 不能通过 codec=0 检查
         let mut msg = make_raft_message(payload.to_vec());
+        msg.payload_codec = PAYLOAD_CODEC_BINCODE;
         msg.auth_tag = compute_raft_auth_tag(payload, secret, PayloadCodec::Postcard).unwrap();
         assert!(verify_raft_auth(&msg, Some(secret)).is_err());
     }
 
-    /// 写路径标记由常量唯一决定（R1 = 0/bincode；R2 切换后断言更新为 1）。
+    /// 写路径标记由常量唯一决定（R2：断言为 1/postcard）。
     #[test]
     fn test_outbound_message_carries_write_codec() {
         let msg = make_raft_message(b"x".to_vec());
         assert_eq!(msg.payload_codec, WRITE_PAYLOAD_CODEC);
-        assert_eq!(msg.payload_codec, PAYLOAD_CODEC_BINCODE);
+        assert_eq!(msg.payload_codec, PAYLOAD_CODEC_POSTCARD);
+    }
+
+    /// R2 写切换后的完整往返：写侧产出 codec=1 + 域分离 MAC，读侧双分派解出。
+    /// 负控制：写侧回退 codec=0（bincode）⇒ 本用例标记/认证断言必红。
+    #[test]
+    fn test_r2_write_path_roundtrip_with_domain_separated_mac() {
+        let secret = b"test-raft-secret-16chars";
+        let value = (42u64, "payload".to_string());
+        let payload = serialize_payload(&value).unwrap();
+        let mut msg = make_raft_message(payload);
+        assert_eq!(msg.payload_codec, PAYLOAD_CODEC_POSTCARD);
+        let codec = parse_payload_codec(msg.payload_codec).unwrap();
+        msg.auth_tag = compute_raft_auth_tag(&msg.payload, secret, codec).unwrap();
+        assert!(verify_raft_auth(&msg, Some(secret)).is_ok());
+        let decoded: (u64, String) = decode_message_payload(&msg).unwrap();
+        assert_eq!(decoded, value);
     }
 }
