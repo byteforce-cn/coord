@@ -7,9 +7,11 @@
 // - snapshot_scheduler:    自动定时快照调度（生产特性）
 // - compaction:            Compaction 调度与管理（生产特性）
 // - write_batcher:         Multi-Raft 共享写入批处理器（v6.0）
+// - envelope:              持久化值统一格式信封（魔数+版本前缀，bincode 退场 P0）
 
 pub mod compaction;
 pub mod disk_watermark;
+pub mod envelope;
 pub mod mvcc;
 pub mod object_store;
 pub mod redb_backend;

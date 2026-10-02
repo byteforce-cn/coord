@@ -35,7 +35,8 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 // ──── Redb 表定义 ────
 
-/// PD Region 元数据表：Key = `/pd/region/{region_id:016x}`，Value = bincode(RegionMeta)
+/// PD Region 元数据表：Key = `/pd/region/{region_id:016x}`，
+/// Value = 统一信封包裹的 bincode(RegionMeta)（见 `crate::storage::envelope`）
 const TABLE_PD_REGION: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pd_region");
 
 // ============================================================================
@@ -92,7 +93,7 @@ impl PdMetaDurable {
     /// 写入/更新一个 Region 元数据（key = `/pd/region/{region_id:016x}`）
     fn put_region(&self, meta: &RegionMeta) -> Result<()> {
         let key = encode_pd_region_key(meta.region_id);
-        let value = bincode::serialize(meta)
+        let value = crate::storage::envelope::encode(meta)
             .map_err(|e| Error::Internal(format!("serialize pd region meta: {e}")))?;
 
         let write_tx = self
@@ -150,10 +151,19 @@ impl PdMetaDurable {
             .iter()
             .map_err(|e| Error::Storage(format!("scan pd_region table: {e}")))?;
         for entry in iter {
-            let (_key, value) =
+            let (key, value) =
                 entry.map_err(|e| Error::Storage(format!("read pd region row: {e}")))?;
-            let meta: RegionMeta = bincode::deserialize(value.value())
+            let meta: RegionMeta = crate::storage::envelope::decode(value.value())
                 .map_err(|e| Error::DataCorruption(format!("deserialize pd region meta: {e}")))?;
+            // 行 key 由 meta.region_id 生成（写入路径唯一）；不一致只可能来自
+            // 损坏行的“宽松解码”（篡改魔数时只能走旧格式路径）
+            if key.value() != encode_pd_region_key(meta.region_id).as_slice() {
+                return Err(Error::DataCorruption(format!(
+                    "pd region row key/content mismatch: key={:?} region_id={} (corrupted row?)",
+                    key.value(),
+                    meta.region_id
+                )));
+            }
             out.push(meta);
         }
         Ok(out)
@@ -831,5 +841,127 @@ mod tests {
             .map(|entry| entry.unwrap().0.value().to_vec())
             .collect();
         assert_eq!(keys, vec![coord_core::region::encode_pd_region_key(0xABC)]);
+    }
+
+    // ──── 格式信封（P0：格式可辨识） ────
+
+    /// 新写入的 Region 行必须带统一信封前缀（白盒校验原始字节）。
+    /// 负控制：写路径去掉 `envelope::encode` ⇒ 本用例必红。
+    #[test]
+    fn test_pd_region_row_uses_format_envelope() {
+        use crate::storage::envelope::{MAGIC, VERSION};
+
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = PdMetaStore::open(dir.path()).unwrap();
+            store.create_region(make_meta(0x1, vec![], vec![])).unwrap();
+        }
+
+        let db = redb::Database::open(dir.path().join("pd/pd-meta.db")).unwrap();
+        let read_tx = db.begin_read().unwrap();
+        let table = read_tx.open_table(super::TABLE_PD_REGION).unwrap();
+        let key = coord_core::region::encode_pd_region_key(0x1);
+        let row = table.get(key.as_slice()).unwrap().unwrap();
+        assert!(
+            row.value().starts_with(&MAGIC),
+            "pd region row must carry envelope magic"
+        );
+        assert_eq!(row.value()[MAGIC.len()], VERSION);
+    }
+
+    /// 旧数据（无前缀 bincode）必须仍能恢复。
+    /// 负控制：读路径删掉旧格式回退 ⇒ 本用例必红。
+    #[test]
+    fn test_pd_legacy_row_without_prefix_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = make_meta(0x77, vec![0x10], vec![0x20]);
+
+        // 先建库（建表），再白盒注入旧格式行（纯 bincode，无信封前缀）
+        {
+            let _store = PdMetaStore::open(dir.path()).unwrap();
+        }
+        {
+            let db = redb::Database::open(dir.path().join("pd/pd-meta.db")).unwrap();
+            let write_tx = db.begin_write().unwrap();
+            {
+                let mut table = write_tx.open_table(super::TABLE_PD_REGION).unwrap();
+                let key = coord_core::region::encode_pd_region_key(0x77);
+                table
+                    .insert(
+                        key.as_slice(),
+                        bincode::serialize(&meta).unwrap().as_slice(),
+                    )
+                    .unwrap();
+            }
+            write_tx.commit().unwrap();
+        }
+
+        let store = PdMetaStore::open(dir.path()).unwrap();
+        let loaded = store.get_region(0x77).unwrap();
+        assert_eq!(loaded.start_key, vec![0x10]);
+        assert_eq!(loaded.end_key, vec![0x20]);
+    }
+
+    /// 篡改信封 ⇒ open 必须显式报错（DataCorruption），不得载入垃圾。
+    /// 负控制：放宽版本校验 / 去掉行 key 不变量 ⇒ 对应用例必红。
+    #[test]
+    fn test_pd_tampered_envelope_fails_loudly() {
+        use crate::storage::envelope::{MAGIC, VERSION};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("pd/pd-meta.db");
+        {
+            let store = PdMetaStore::open(dir.path()).unwrap();
+            store.create_region(make_meta(0x2, vec![], vec![])).unwrap();
+        }
+
+        let key = coord_core::region::encode_pd_region_key(0x2);
+        let original = {
+            let db = redb::Database::open(&db_path).unwrap();
+            let read_tx = db.begin_read().unwrap();
+            let table = read_tx.open_table(super::TABLE_PD_REGION).unwrap();
+            table.get(key.as_slice()).unwrap().unwrap().value().to_vec()
+        };
+        assert_eq!(original[MAGIC.len()], VERSION);
+
+        // 1) 篡改版本字节 ⇒ 显式错误（认识魔数、版本不支持）
+        {
+            let db = redb::Database::open(&db_path).unwrap();
+            let mut row = original.clone();
+            row[MAGIC.len()] = VERSION + 1;
+            let write_tx = db.begin_write().unwrap();
+            {
+                let mut table = write_tx.open_table(super::TABLE_PD_REGION).unwrap();
+                table.insert(key.as_slice(), row.as_slice()).unwrap();
+            }
+            write_tx.commit().unwrap();
+        }
+        match PdMetaStore::open(dir.path()) {
+            Err(Error::DataCorruption(msg)) => {
+                assert!(
+                    msg.contains("unsupported envelope version"),
+                    "tampered version must fail explicitly, got: {msg}"
+                );
+            }
+            _ => panic!("tampered version must fail open explicitly"),
+        }
+
+        // 2) 篡改魔数首字节 ⇒ 只能按旧格式解；宽松解码出的垃圾由
+        //    行 key 与 region_id 的不变量兜底拦截，不得静默载入。
+        {
+            let db = redb::Database::open(&db_path).unwrap();
+            let mut row = original.clone();
+            row[0] = 0x03;
+            let write_tx = db.begin_write().unwrap();
+            {
+                let mut table = write_tx.open_table(super::TABLE_PD_REGION).unwrap();
+                table.insert(key.as_slice(), row.as_slice()).unwrap();
+            }
+            write_tx.commit().unwrap();
+        }
+        match PdMetaStore::open(dir.path()) {
+            Err(Error::DataCorruption(_)) => {}
+            _ => panic!("tampered magic must fail open explicitly"),
+        }
     }
 }

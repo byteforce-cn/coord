@@ -1,6 +1,6 @@
 # 依赖治理与 bincode 退场计划
 
-> Owner: maintainers ｜ Last verified: 2026-10-01
+> Owner: maintainers ｜ Last verified: 2026-10-02
 
 - **现状**：`deny.toml` 的 `ignore` 只有 **1** 条：`RUSTSEC-2025-0141`（bincode 1.3.3
   被标记为 **unmaintained**，**不是漏洞**，且 `Solution: No safe upgrade is available!`）。
@@ -15,11 +15,13 @@ bincode 在本仓库不是工具库，而是**持久化格式**，直接承载�
 | # | 承载物 | 位置 | 是否有版本化 |
 |:--|:--|:--|:--|
 | 1 | 快照 | `coord-server/src/storage/snapshot.rs` | ✅ `SnapshotDataV1/V2/V3` 三代兼容解码 |
-| 2 | Raft 日志条目 | `coord-core/src/workflow/raft_store.rs` | ❌ 无显式版本信封 |
+| 2 | Raft 日志条目 | `coord-server/src/raft/log_store.rs`（Entry/Vote/Committed/LastPurged；region 模式复用同一实现） | ✅ 统一前缀信封（P0） |
 | 3 | auth 用户/角色/会话/吊销 | `coord-server/src/auth/manager.rs`（`/_sys/auth/`） | 🟡 变体索引即变体号（`test_auth_op_bincode_variant_indices_appended`） |
-| 4 | PD Region 元数据 | `coord-server/src/pd/meta_store.rs` | ❌ |
-| 5 | 对象存储 manifest | `coord-server/src/storage/object_store.rs` | ❌ |
+| 4 | PD Region 元数据 | `coord-server/src/pd/meta_store.rs` | ✅ 统一前缀信封（P0） |
+| 5 | 对象存储 manifest | `coord-server/src/storage/object_store.rs` | ✅ 统一前缀信封（P0） |
 | 6 | `AppliedLogId` 旧编码回退 | `coord-server/src/storage/mvcc.rs` | 🟡 专为兼容旧 bincode 编码而保留 |
+
+> 注：`coord-core` 声明的 `bincode` 依赖无源码使用点，随 P3 从依赖图删除。
 
 ⇒ 一次「换库」= **六处数据迁移 + 双向兼容窗口**。在没有生产部署之前做（现在是窗口），
 成本最低；但**不能**在没有迁移期与回滚路径的情况下做。
@@ -34,6 +36,10 @@ bincode 在本仓库不是工具库，而是**持久化格式**，直接承载�
 | **P1 选型 + 双写（阴影）** | 选定替代（候选：`postcard` / `wincode` / `bitcode` / `rkyv`；**选型结论见 ADR-0005**（accepted：`postcard`）），实现 `Codec` trait，**读路径双解**、写路径仍写 bincode | 全量 workspace 测试绿；新增对照测试：同一结构两种编码**逐字节可往返** | 删除新 codec |
 | **P2 迁移窗口** | 写路径切到新格式（打新前缀）；读路径同时支持两种 | 快照/日志/auth/PD/manifest 五类各有「旧数据读 + 新数据读 + 混读」测试 | 切回旧写路径（旧数据未动） |
 | **P3 关闭豁免** | 从 `deny.toml` 删除 `ignore` 条目，bincode 从依赖图消失（或仅测试用） | `cargo deny check advisories` 绿且 `grep -rn bincode Cargo.toml */Cargo.toml` 归零 | 恢复依赖 + 旧解码路径保留一个 minor |
+
+> **进度**：P0「格式可辨识」已落地（2026-10-02）——第 2/4/5 项写路径统一为
+> `MAGIC(4B) + VERSION(1B) + bincode` 信封，读路径兼容无前缀旧行（实现：
+> `coord-server/src/storage/envelope.rs`）；P1（选型 + 双写）未开始。
 
 **完成判据**：P3 完成且 `cargo deny` 无豁免。
 

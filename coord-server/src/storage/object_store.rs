@@ -193,7 +193,7 @@ pub fn range_touches_object_space(start: &[u8], end: &[u8]) -> bool {
     !below_start && !above_end
 }
 
-// ──── manifest（raft 强一致的 /kv/ 用户行，bincode） ────
+// ──── manifest（raft 强一致的 /kv/ 用户行，统一信封 + bincode） ────
 
 /// 单个 chunk 记录（写入 apply 时由数据计算 sha256，确定性）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,12 +237,15 @@ impl ObjectManifest {
             last_write_at_unix: started_at_unix,
         }
     }
+    /// 编码为存储行字节：统一信封（魔数+版本，`crate::storage::envelope`）
+    /// 包裹 bincode；读路径兼容无前缀旧行。
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self)
+        crate::storage::envelope::encode(self)
             .map_err(|e| Error::Internal(format!("encode object manifest: {e}")))
     }
+    /// 解码存储行（带前缀新格式与无前缀旧数据均可）；损坏 ⇒ None。
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        bincode::deserialize(bytes).ok()
+        crate::storage::envelope::decode(bytes).ok()
     }
 }
 
@@ -1183,6 +1186,74 @@ mod tests {
         assert_eq!(m2.size, 10);
         assert!(m2.committed);
         assert_eq!(m2.chunks[0].sha256, [7u8; 32]);
+    }
+
+    // ──── 格式信封（P0：格式可辨识） ────
+
+    fn sample_manifest() -> ObjectManifest {
+        ObjectManifest {
+            total_size: 10,
+            size: 10,
+            chunks: vec![ChunkRec {
+                seq: 0,
+                len: 10,
+                sha256: [7u8; 32],
+            }],
+            committed: true,
+            create_revision: 1,
+            last_revision: 2,
+            started_at_unix: 100,
+            last_write_at_unix: 200,
+        }
+    }
+
+    /// 新写入的 manifest 必须带统一信封前缀（白盒字节断言）。
+    /// 负控制：写路径去掉 `envelope::encode` ⇒ 本用例必红。
+    #[test]
+    fn test_manifest_bytes_use_format_envelope() {
+        use crate::storage::envelope::{MAGIC, VERSION};
+
+        let bytes = sample_manifest().to_bytes().unwrap();
+        assert!(
+            bytes.starts_with(&MAGIC),
+            "manifest row must carry envelope magic"
+        );
+        assert_eq!(bytes[MAGIC.len()], VERSION);
+    }
+
+    /// 旧数据（无前缀 bincode）必须仍能解码。
+    /// 负控制：读路径删掉旧格式回退 ⇒ 本用例必红。
+    #[test]
+    fn test_legacy_manifest_without_prefix_still_decodes() {
+        let m = sample_manifest();
+        let legacy = bincode::serialize(&m).unwrap();
+        let decoded =
+            ObjectManifest::from_bytes(&legacy).expect("legacy manifest must still decode");
+        assert_eq!(decoded.size, 10);
+        assert_eq!(decoded.chunks.len(), 1);
+    }
+
+    /// 篡改信封（版本字节 / 魔数）⇒ 必须显式拒绝（None），不得返回垃圾对象。
+    /// 负控制：放宽版本校验 ⇒ 本用例必红。
+    #[test]
+    fn test_tampered_manifest_envelope_rejected() {
+        use crate::storage::envelope::{MAGIC, VERSION};
+
+        let m = sample_manifest();
+
+        let mut version_tampered = m.to_bytes().unwrap();
+        version_tampered[MAGIC.len()] = VERSION + 1;
+        assert!(
+            ObjectManifest::from_bytes(&version_tampered).is_none(),
+            "tampered version must be rejected, not decoded"
+        );
+
+        let mut magic_tampered = m.to_bytes().unwrap();
+        magic_tampered[0] = 0x03;
+        assert!(
+            ObjectManifest::from_bytes(&magic_tampered).is_none(),
+            "tampered magic must be rejected, not decoded"
+        );
     }
 
     #[test]
