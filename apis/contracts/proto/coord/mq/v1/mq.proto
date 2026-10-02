@@ -9,6 +9,16 @@ syntax = "proto3";
 //
 // 说明：wire 服务名保留实现原样 `MQ`（迁移只改 package，不改 service 名；
 // 文档中曾出现的 `Mq` 写法系笔误，实际实现为 `MQ`）。
+//
+// 语义与边界（按 WHITEPAPER.md 的规则：不承诺的语义必须显式写出）
+// ------------------------------------------------------------
+//   - **容量上界（B-PL-4，已强制）**：默认 1GB（`max_size_bytes`，0 = 不限）。
+//     消息与 DLQ 在 publish 入口同事务记账 ⇒ **逐写严格上界**：超界与单条超限的
+//     publish 被拒绝 `RESOURCE_EXHAUSTED`（不静默丢历史，也不按最老分区截断）。
+//     消息与 DLQ 由 reaper（默认 10s）按 topic 的 `retention_secs` 周期回收
+//     （`0` = 不按时间回收）。**不承诺**：记账覆盖消费位点 / 幂等索引 / ISR 复制
+//     日志；ISR 启用时各节点配额与回收为**本地行为** —— 完整边界与判据见
+//     `docs/production/ops/boundaries.md` B-PL-4（单一归属）。
 
 // 验收口径与目标日期约定见 WHITEPAPER.md。
 // ============================================================
@@ -41,7 +51,8 @@ service MQ {
   //
   // 边界（显式声明，不承诺的部分不写在这里就不算承诺）：本 RPC 只承诺
   // "消息已持久化到该 agent 的本地日志"；跨 agent 复制由 ISR 通道负责，
-  // 其进度**不**在本 RPC 的返回值里体现。
+  // 其进度**不**在本 RPC 的返回值里体现；容量上界（B-PL-4）耗尽时返回
+  // `RESOURCE_EXHAUSTED`（同事务记账的严格拒绝，不是事后淘汰）。
   rpc Publish(MqPublishRequest) returns (MqPublishResponse);
 
   // 流式推送订阅。

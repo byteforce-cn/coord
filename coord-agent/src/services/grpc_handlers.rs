@@ -98,8 +98,9 @@ fn map_service_error(e: impl std::fmt::Display) -> Status {
         return Status::failed_precondition(msg);
     }
     if msg.contains("max_size_bytes") {
-        // 容量上界拒绝（B-PL-3）：可诊断的语义错误，不脱敏。
-        // 锚点 "max_size_bytes" 由 CacheService::ensure_entry_fits 生成。
+        // 容量上界拒绝（B-PL-3 / B-PL-4）：可诊断的语义错误，不脱敏。
+        // 锚点由 CacheService::ensure_entry_fits 与 MQ 配额检查
+        // （MessageQueueService::ensure_quota_tx）生成。
         return Status::resource_exhausted(msg);
     }
     sanitized_internal(msg)
@@ -704,7 +705,7 @@ impl Mq for MessageQueueService {
                 Ok(offset) => Ok(Response::new(MqPublishResponse {
                     offset: offset as i64,
                 })),
-                Err(e) => Err(sanitized_internal(e)),
+                Err(e) => Err(map_service_error(e)),
             }
         }
     }
@@ -2235,6 +2236,14 @@ mod tests {
         let not_leader = map_service_error("not leader for shard 'mq:t' (leader is other-agent)");
         assert_eq!(not_leader.code(), tonic::Code::FailedPrecondition);
         assert!(not_leader.message().contains("not leader"));
+
+        // 容量上界（B-PL-3 / B-PL-4）：可诊断的语义错误 ⇒ RESOURCE_EXHAUSTED
+        let quota = map_service_error(
+            "mq publish rejected: ... max_size_bytes=80 — quota is enforced at publish \
+             (see boundaries.md B-PL-4)",
+        );
+        assert_eq!(quota.code(), tonic::Code::ResourceExhausted);
+        assert!(quota.message().contains("max_size_bytes"));
 
         let other = map_service_error("sensitive store detail");
         assert_eq!(other.code(), tonic::Code::Internal);
