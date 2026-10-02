@@ -11,6 +11,10 @@ message RaftMessage {
   // R-SEC-03: HMAC-SHA256 tag over `payload`（无 mTLS 时的共享密钥认证；
   // 未配置共享密钥时为空）
   bytes auth_tag = 4;
+  // RPC 载荷编码标记（ADR-0007）：0 = bincode（兼容默认，历史发送方不带该
+  // 字段时 proto3 读作 0）；1 = postcard；其余值 fail-closed 拒绝（禁试错
+  // 解码）。codec=1 时 auth_tag 输入为 DOMAIN || codec || payload（域分离）。
+  uint32 payload_codec = 5;
 }
 
 // Internal Raft RPC service for node-to-node communication
