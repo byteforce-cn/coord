@@ -81,8 +81,13 @@ jobs:
         run: |
           set -euo pipefail
           BIN="target/${{ matrix.target }}/release/coord"
-          # 版本头：`coord --version` 取自 CARGO_PKG_VERSION，应与 tag 同名
-          "$BIN" --version | grep -q "${GITHUB_REF_NAME#v}"
+          # tag 触发时版本头必须与 tag 同名（`--version` 取自 CARGO_PKG_VERSION）。
+          # workflow_dispatch 干跑没有 tag 可对照，只验证产物本身可用（打印版本）。
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            "$BIN" --version | grep -q "${GITHUB_REF_NAME#v}"
+          else
+            "$BIN" --version
+          fi
           # agent 面必须可用（子命令存在且能打印帮助）
           "$BIN" agent --help > /dev/null
 
@@ -160,6 +165,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          # 仅 tag 触发行推送镜像；workflow_dispatch 干跑只构建不推送（dry-run 不污染 GHCR）。
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
