@@ -23,7 +23,8 @@ use crate::storage::snapshot::SnapshotTracker;
 
 // ──── Redb 表定义 ────
 
-/// Raft Log 条目表：Key = index (u64 BE), Value = bincode 序列化的 Entry
+/// Raft Log 条目表：Key = index (u64 BE)，Value = 统一信封包裹的 bincode(Entry)
+/// （信封与旧格式兼容见 `crate::storage::envelope`）
 const TABLE_LOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("raft_log");
 
 /// Vote 表：单条记录 Key = b"vote"
@@ -41,19 +42,40 @@ const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
 
-// ──── 序列化工具 ────
+// ──── 序列化工具（仅用于本模块持久化行） ────
+//
+// 行值统一为「格式信封 + bincode」（`crate::storage::envelope`）：写路径一律带
+// 魔数/版本前缀；读路径兼容本信封落地前写入的无前缀旧行。四项表（日志条目/
+// Vote/Committed/LastPurged）共用这两个函数，保证前缀口径一致。
 
 fn serialize<T: Serialize>(value: &T) -> Result<Vec<u8>, io::Error> {
-    bincode::serialize(value).map_err(io::Error::other)
+    crate::storage::envelope::encode(value)
+        .map_err(|e| io::Error::other(format!("encode raft row: {e}")))
 }
 
 fn deserialize<'a, T: Deserialize<'a>>(data: &'a [u8]) -> Result<T, io::Error> {
-    bincode::deserialize(data).map_err(io::Error::other)
+    crate::storage::envelope::decode(data)
+        .map_err(|e| io::Error::other(format!("decode raft row: {e}")))
 }
 
 /// 将 index 编码为 Redb Key（u64 大端）
 fn index_key(index: u64) -> [u8; 8] {
     index.to_be_bytes()
+}
+
+/// 校验解码条目的 index 与行 key 一致。
+///
+/// 行 key 由 `entry.log_id.index` 生成（写入路径唯一），不一致的行不可能来自
+/// 正常写入——是格式信封/字节损坏后“宽松解码”出垃圾值的兜底拦截（篡改魔数时
+/// 只能走旧格式路径，例如 bincode 对 Option 的非 0/1 字节按 `Some` 宽松接受）。
+fn check_entry_key(key_bytes: &[u8], entry: &EntryOf<TypeConfig>) -> Result<(), io::Error> {
+    if key_bytes != index_key(entry.log_id.index) {
+        return Err(io::Error::other(format!(
+            "log row index mismatch: key={:?} entry.log_id.index={} (corrupted row?)",
+            key_bytes, entry.log_id.index
+        )));
+    }
+    Ok(())
 }
 
 // ──── LogStore ────
@@ -153,6 +175,7 @@ impl LogStore {
         {
             Some(guard) => {
                 let entry: EntryOf<TypeConfig> = deserialize(guard.value())?;
+                check_entry_key(key_bytes.as_slice(), &entry)?;
                 Ok(Some(entry))
             }
             None => Ok(None),
@@ -290,6 +313,7 @@ impl RaftLogReader<TypeConfig> for LogStore {
                 Some(guard) => {
                     let data = guard.value();
                     let entry: EntryOf<TypeConfig> = deserialize(data)?;
+                    check_entry_key(key_bytes.as_slice(), &entry)?;
                     entries.push(entry);
                 }
                 None => break, // 到达日志末尾
@@ -332,8 +356,9 @@ impl RaftLogStorage<TypeConfig> for LogStore {
                 .last()
                 .map_err(|e| io::Error::other(format!("get last log: {e}")))?;
             guard
-                .map(|(_, v)| {
+                .map(|(k, v)| {
                     let entry: EntryOf<TypeConfig> = deserialize(v.value())?;
+                    check_entry_key(k.value(), &entry)?;
                     Ok::<_, io::Error>(entry.log_id)
                 })
                 .transpose()?
@@ -523,6 +548,147 @@ mod tests {
         let bytes = serialize(&val).unwrap();
         let decoded: (u64, String) = deserialize(&bytes).unwrap();
         assert_eq!(decoded, (7, "test".to_string()));
+    }
+
+    // ──── 格式信封（P0：格式可辨识） ────
+
+    fn test_entry(index: u64) -> EntryOf<TypeConfig> {
+        EntryOf::<TypeConfig>::new_blank(LogIdOf::<TypeConfig>::new(
+            openraft::impls::leader_id_adv::LeaderId {
+                term: 1u64,
+                node_id: 1u64,
+            },
+            index,
+        ))
+    }
+
+    /// 新写入的行必须带统一信封前缀（白盒校验原始字节）。
+    /// 负控制：写路径去掉 `envelope::encode` ⇒ 本用例必红。
+    #[test]
+    fn test_raft_rows_use_format_envelope() {
+        use crate::storage::envelope::{MAGIC, VERSION};
+
+        let mut store = create_test_log_store();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            store
+                .save_vote(&VoteOf::<TypeConfig>::new(5, 1))
+                .await
+                .unwrap();
+            store
+                .append(vec![test_entry(1)], IOFlushed::noop())
+                .await
+                .unwrap();
+        });
+
+        let read_tx = store.db.begin_read().unwrap();
+        let vote_table = read_tx.open_table(TABLE_VOTE).unwrap();
+        let vote_row = vote_table.get(KEY_VOTE).unwrap().unwrap();
+        assert!(
+            vote_row.value().starts_with(&MAGIC),
+            "vote row must carry envelope magic"
+        );
+        assert_eq!(vote_row.value()[MAGIC.len()], VERSION);
+
+        let log_table = read_tx.open_table(TABLE_LOG).unwrap();
+        let entry_row = log_table.get(index_key(1).as_slice()).unwrap().unwrap();
+        assert!(
+            entry_row.value().starts_with(&MAGIC),
+            "log entry row must carry envelope magic"
+        );
+        assert_eq!(entry_row.value()[MAGIC.len()], VERSION);
+    }
+
+    /// 旧数据（无前缀 bincode）必须仍能解码（白盒注入旧格式行）。
+    /// 负控制：读路径删掉旧格式回退 ⇒ 本用例必红。
+    #[test]
+    fn test_raft_legacy_rows_without_prefix_still_decode() {
+        let mut store = create_test_log_store();
+        let vote = VoteOf::<TypeConfig>::new(9, 3);
+        let entry = test_entry(1);
+
+        {
+            let write_tx = store.db.begin_write().unwrap();
+            {
+                let mut vote_table = write_tx.open_table(TABLE_VOTE).unwrap();
+                vote_table
+                    .insert(KEY_VOTE, bincode::serialize(&vote).unwrap().as_slice())
+                    .unwrap();
+                let mut log_table = write_tx.open_table(TABLE_LOG).unwrap();
+                log_table
+                    .insert(
+                        index_key(1).as_slice(),
+                        bincode::serialize(&entry).unwrap().as_slice(),
+                    )
+                    .unwrap();
+            }
+            write_tx.commit().unwrap();
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            assert_eq!(store.read_vote().await.unwrap(), Some(vote));
+        });
+        assert_eq!(store.get_entry_at(1).unwrap().unwrap().log_id.index, 1);
+    }
+
+    /// 篡改信封 ⇒ 读行必须显式报错，不得静默解成垃圾。
+    /// 负控制：放宽版本校验 / 把损坏行当旧格式强行解码 ⇒ 本用例必红。
+    #[test]
+    fn test_raft_tampered_envelope_fails_loudly() {
+        use crate::storage::envelope::{MAGIC, VERSION};
+
+        let mut store = create_test_log_store();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            store
+                .save_vote(&VoteOf::<TypeConfig>::new(2, 1))
+                .await
+                .unwrap();
+            store
+                .append(vec![test_entry(1)], IOFlushed::noop())
+                .await
+                .unwrap();
+        });
+
+        let raw_row =
+            |store: &LogStore, table: TableDefinition<&[u8], &[u8]>, key: &[u8]| -> Vec<u8> {
+                let read_tx = store.db.begin_read().unwrap();
+                let t = read_tx.open_table(table).unwrap();
+                t.get(key).unwrap().unwrap().value().to_vec()
+            };
+        let overwrite_row =
+            |store: &LogStore, table: TableDefinition<&[u8], &[u8]>, key: &[u8], bytes: &[u8]| {
+                let write_tx = store.db.begin_write().unwrap();
+                {
+                    let mut t = write_tx.open_table(table).unwrap();
+                    t.insert(key, bytes).unwrap();
+                }
+                write_tx.commit().unwrap();
+            };
+
+        // 1) 篡改 Vote 行的版本字节（认识魔数、版本不支持 ⇒ 显式错误）
+        let mut vote_row = raw_row(&store, TABLE_VOTE, KEY_VOTE);
+        assert_eq!(vote_row[MAGIC.len()], VERSION);
+        vote_row[MAGIC.len()] = VERSION + 1;
+        overwrite_row(&store, TABLE_VOTE, KEY_VOTE, &vote_row);
+        let err = rt.block_on(async { store.read_vote().await }).unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported envelope version"),
+            "tampered version must fail explicitly, got: {err}"
+        );
+
+        // 2) 篡改 Entry 行的魔数首字节（只能按旧格式解；bincode 对 Option 宽松，
+        //    可能解出垃圾条目 ⇒ 由行 key 与内容的 index 不变量兜底拦截）
+        let mut entry_row = raw_row(&store, TABLE_LOG, index_key(1).as_slice());
+        assert_eq!(entry_row[0], MAGIC[0]);
+        entry_row[0] = 0x03;
+        overwrite_row(&store, TABLE_LOG, index_key(1).as_slice(), &entry_row);
+        let err = store.get_entry_at(1).unwrap_err();
+        assert!(
+            err.to_string().contains("index mismatch"),
+            "corrupted magic must fail explicitly, got: {err}"
+        );
     }
 
     // ──── LogStore 创建与元数据操作 ────
