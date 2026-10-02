@@ -846,10 +846,10 @@ mod tests {
     // ──── 格式信封（P0：格式可辨识） ────
 
     /// 新写入的 Region 行必须带统一信封前缀（白盒校验原始字节）。
-    /// 负控制：写路径去掉 `envelope::encode` ⇒ 本用例必红。
+    /// 负控制：写路径回退 V1（bincode 载荷）⇒ 本用例必红。
     #[test]
     fn test_pd_region_row_uses_format_envelope() {
-        use crate::storage::envelope::{MAGIC, VERSION};
+        use crate::storage::envelope::{MAGIC, VERSION_V2};
 
         let dir = tempfile::tempdir().unwrap();
         {
@@ -866,7 +866,7 @@ mod tests {
             row.value().starts_with(&MAGIC),
             "pd region row must carry envelope magic"
         );
-        assert_eq!(row.value()[MAGIC.len()], VERSION);
+        assert_eq!(row.value()[MAGIC.len()], VERSION_V2);
     }
 
     /// 旧数据（无前缀 bincode）必须仍能恢复。
@@ -906,7 +906,7 @@ mod tests {
     /// 负控制：放宽版本校验 / 去掉行 key 不变量 ⇒ 对应用例必红。
     #[test]
     fn test_pd_tampered_envelope_fails_loudly() {
-        use crate::storage::envelope::{MAGIC, VERSION, VERSION_V2};
+        use crate::storage::envelope::{MAGIC, VERSION_V2};
 
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("pd/pd-meta.db");
@@ -922,7 +922,7 @@ mod tests {
             let table = read_tx.open_table(super::TABLE_PD_REGION).unwrap();
             table.get(key.as_slice()).unwrap().unwrap().value().to_vec()
         };
-        assert_eq!(original[MAGIC.len()], VERSION);
+        assert_eq!(original[MAGIC.len()], VERSION_V2);
 
         // 1) 篡改版本字节 ⇒ 显式错误（认识魔数、不在受支持版本内）
         {
@@ -985,7 +985,9 @@ mod tests {
                 table
                     .insert(
                         key.as_slice(),
-                        crate::storage::envelope::encode_v2(&meta).as_slice(),
+                        crate::storage::envelope::encode_v2(&meta)
+                            .unwrap()
+                            .as_slice(),
                     )
                     .unwrap();
             }
@@ -1016,8 +1018,8 @@ mod tests {
                 let mut table = write_tx.open_table(super::TABLE_PD_REGION).unwrap();
                 for (id, row) in [
                     (0x71u64, bincode::serialize(&legacy).unwrap()),
-                    (0x72u64, crate::storage::envelope::encode(&v1).unwrap()),
-                    (0x73u64, crate::storage::envelope::encode_v2(&v2)),
+                    (0x72u64, crate::storage::envelope::encode_v1(&v1).unwrap()),
+                    (0x73u64, crate::storage::envelope::encode_v2(&v2).unwrap()),
                 ] {
                     let key = coord_core::region::encode_pd_region_key(id);
                     table.insert(key.as_slice(), row.as_slice()).unwrap();
@@ -1051,7 +1053,7 @@ mod tests {
                 {
                     let mut table = write_tx.open_table(super::TABLE_PD_REGION).unwrap();
                     let key = coord_core::region::encode_pd_region_key(0x99);
-                    let mut row = encode_v2(&meta);
+                    let mut row = encode_v2(&meta).unwrap();
                     row[i] = row[i].wrapping_add(1);
                     table.insert(key.as_slice(), row.as_slice()).unwrap();
                 }
@@ -1071,9 +1073,9 @@ mod tests {
         let meta = make_meta(0xA1, vec![0x01], vec![]);
         let mut legacy = bincode::serialize(&meta).unwrap();
         legacy.extend_from_slice(&[0xDE, 0xAD]);
-        let mut v1 = crate::storage::envelope::encode(&meta).unwrap();
+        let mut v1 = crate::storage::envelope::encode_v1(&meta).unwrap();
         v1.extend_from_slice(&[0xDE, 0xAD]);
-        let mut v2 = crate::storage::envelope::encode_v2(&meta);
+        let mut v2 = crate::storage::envelope::encode_v2(&meta).unwrap();
         v2.extend_from_slice(&[0xDE, 0xAD]);
 
         for (label, row) in [("legacy", legacy), ("v1", v1), ("v2", v2)] {

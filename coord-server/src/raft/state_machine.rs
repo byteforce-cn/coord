@@ -177,7 +177,7 @@ fn persist_snapshot_file_impl(
         checksum,
         path: final_path.to_string_lossy().to_string(),
     };
-    let persisted_bytes = bincode::serialize(&persisted)
+    let persisted_bytes = crate::storage::envelope::encode(&persisted)
         .map_err(|e| io::Error::other(format!("serialize snapshot meta: {e}")))?;
     state_machine
         .backend()
@@ -418,7 +418,7 @@ impl StateMachineStore {
 
     /// 持久化 membership（与 applied 持久化配套；重启后不再依靠日志重放重建）
     fn persist_membership(&self) -> Result<(), io::Error> {
-        let bytes = bincode::serialize(&*self.last_membership.lock())
+        let bytes = crate::storage::envelope::encode(&*self.last_membership.lock())
             .map_err(|e| io::Error::other(format!("serialize membership: {e}")))?;
         self.state_machine
             .backend()
@@ -1244,11 +1244,11 @@ mod tests {
         assert_eq!(decoded.path, meta.path);
         assert_eq!(decoded.meta.last_log_id, meta.meta.last_log_id);
 
-        let v1 = crate::storage::envelope::encode(&meta).unwrap();
+        let v1 = crate::storage::envelope::encode_v1(&meta).unwrap();
         let decoded = decode_persisted_snapshot_meta(&v1).expect("V1 行必须可解码");
         assert_eq!(decoded.meta.last_log_id, meta.meta.last_log_id);
 
-        let v2 = crate::storage::envelope::encode_v2(&meta);
+        let v2 = crate::storage::envelope::encode_v2(&meta).unwrap();
         let decoded = decode_persisted_snapshot_meta(&v2).expect("V2 行必须可解码");
         assert_eq!(decoded.checksum, meta.checksum);
 
@@ -1284,9 +1284,9 @@ mod tests {
 
         let legacy = bincode::serialize(&membership).unwrap();
         assert!(decode_persisted_membership(&legacy).is_some());
-        let v1 = crate::storage::envelope::encode(&membership).unwrap();
+        let v1 = crate::storage::envelope::encode_v1(&membership).unwrap();
         assert!(decode_persisted_membership(&v1).is_some());
-        let v2 = crate::storage::envelope::encode_v2(&membership);
+        let v2 = crate::storage::envelope::encode_v2(&membership).unwrap();
         let decoded = decode_persisted_membership(&v2).expect("V2 行必须可解码");
         assert_eq!(decoded, membership);
 
@@ -1300,5 +1300,40 @@ mod tests {
         trailing.extend_from_slice(&[0xDE, 0xAD]);
         assert!(decode_persisted_membership(&trailing).is_none());
         assert!(decode_persisted_membership(&v2[..v2.len() - 1]).is_none());
+    }
+
+    /// P2b 写路径断言：`META_SNAPSHOT` / `META_MEMBERSHIP` 新写入行必须为 V2
+    /// 前缀（白盒字节断言）。
+    /// 负控制：写路径回退 V1（bincode 载荷）⇒ 本用例必红。
+    #[tokio::test]
+    async fn test_sm_meta_rows_written_as_v2_envelope() {
+        use crate::storage::envelope::{MAGIC, VERSION_V2};
+
+        let (_tmp, mut main) = setup_store();
+        let mut builder = main.get_snapshot_builder().await;
+        builder.build_snapshot().await.expect("build snapshot");
+
+        let row = main
+            .state_machine
+            .backend()
+            .read(|tx| tx.get(TABLE_META, META_SNAPSHOT))
+            .unwrap()
+            .expect("META_SNAPSHOT row must be written");
+        assert!(row.starts_with(&MAGIC), "META_SNAPSHOT 必须带信封魔数");
+        assert_eq!(row[MAGIC.len()], VERSION_V2, "META_SNAPSHOT 必须为 V2 信封");
+
+        main.persist_membership().expect("persist membership");
+        let row = main
+            .state_machine
+            .backend()
+            .read(|tx| tx.get(TABLE_META, META_MEMBERSHIP))
+            .unwrap()
+            .expect("META_MEMBERSHIP row must be written");
+        assert!(row.starts_with(&MAGIC), "META_MEMBERSHIP 必须带信封魔数");
+        assert_eq!(
+            row[MAGIC.len()],
+            VERSION_V2,
+            "META_MEMBERSHIP 必须为 V2 信封"
+        );
     }
 }

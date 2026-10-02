@@ -44,9 +44,9 @@ const KEY_LAST_PURGED: &[u8] = b"last_purged";
 
 // ──── 序列化工具（仅用于本模块持久化行） ────
 //
-// 行值统一为格式信封（`crate::storage::envelope`）：写路径一律带魔数/版本
-// 前缀（V1 bincode）；读路径兼容无前缀旧行与 V1 / V2（postcard）。四项表
-// （日志条目/Vote/Committed/LastPurged）共用这两个函数，保证前缀口径一致。
+// 行值统一为格式信封（`crate::storage::envelope`）：写路径统一 V2
+// （postcard）；读路径兼容无前缀旧行与 V1 / V2。四项表（日志条目/Vote/
+// Committed/LastPurged）共用这两个函数，保证前缀口径一致。
 
 fn serialize<T: Serialize>(value: &T) -> Result<Vec<u8>, io::Error> {
     crate::storage::envelope::encode(value)
@@ -563,10 +563,10 @@ mod tests {
     }
 
     /// 新写入的行必须带统一信封前缀（白盒校验原始字节）。
-    /// 负控制：写路径去掉 `envelope::encode` ⇒ 本用例必红。
+    /// 负控制：写路径回退 V1（bincode 载荷）⇒ 本用例必红。
     #[test]
     fn test_raft_rows_use_format_envelope() {
-        use crate::storage::envelope::{MAGIC, VERSION};
+        use crate::storage::envelope::{MAGIC, VERSION_V2};
 
         let mut store = create_test_log_store();
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -588,7 +588,7 @@ mod tests {
             vote_row.value().starts_with(&MAGIC),
             "vote row must carry envelope magic"
         );
-        assert_eq!(vote_row.value()[MAGIC.len()], VERSION);
+        assert_eq!(vote_row.value()[MAGIC.len()], VERSION_V2);
 
         let log_table = read_tx.open_table(TABLE_LOG).unwrap();
         let entry_row = log_table.get(index_key(1).as_slice()).unwrap().unwrap();
@@ -596,7 +596,7 @@ mod tests {
             entry_row.value().starts_with(&MAGIC),
             "log entry row must carry envelope magic"
         );
-        assert_eq!(entry_row.value()[MAGIC.len()], VERSION);
+        assert_eq!(entry_row.value()[MAGIC.len()], VERSION_V2);
     }
 
     /// 旧数据（无前缀 bincode）必须仍能解码（白盒注入旧格式行）。
@@ -636,7 +636,7 @@ mod tests {
     /// 负控制：放宽版本校验 / 把损坏行当旧格式强行解码 ⇒ 本用例必红。
     #[test]
     fn test_raft_tampered_envelope_fails_loudly() {
-        use crate::storage::envelope::{MAGIC, VERSION, VERSION_V2};
+        use crate::storage::envelope::{MAGIC, VERSION_V2};
 
         let mut store = create_test_log_store();
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -669,7 +669,7 @@ mod tests {
 
         // 1) 篡改 Vote 行的版本字节（认识魔数、不在受支持版本内 ⇒ 显式错误）
         let mut vote_row = raw_row(&store, TABLE_VOTE, KEY_VOTE);
-        assert_eq!(vote_row[MAGIC.len()], VERSION);
+        assert_eq!(vote_row[MAGIC.len()], VERSION_V2);
         vote_row[MAGIC.len()] = VERSION_V2 + 1;
         overwrite_row(&store, TABLE_VOTE, KEY_VOTE, &vote_row);
         let err = rt.block_on(async { store.read_vote().await }).unwrap_err();
@@ -736,19 +736,22 @@ mod tests {
             {
                 let mut vote_table = write_tx.open_table(TABLE_VOTE).unwrap();
                 vote_table
-                    .insert(KEY_VOTE, encode_v2(&vote).as_slice())
+                    .insert(KEY_VOTE, encode_v2(&vote).unwrap().as_slice())
                     .unwrap();
                 let mut committed_table = write_tx.open_table(TABLE_COMMITTED).unwrap();
                 committed_table
-                    .insert(KEY_COMMITTED, encode_v2(&committed).as_slice())
+                    .insert(KEY_COMMITTED, encode_v2(&committed).unwrap().as_slice())
                     .unwrap();
                 let mut purged_table = write_tx.open_table(TABLE_LAST_PURGED).unwrap();
                 purged_table
-                    .insert(KEY_LAST_PURGED, encode_v2(&last_purged).as_slice())
+                    .insert(KEY_LAST_PURGED, encode_v2(&last_purged).unwrap().as_slice())
                     .unwrap();
                 let mut log_table = write_tx.open_table(TABLE_LOG).unwrap();
                 log_table
-                    .insert(index_key(1).as_slice(), encode_v2(&entry).as_slice())
+                    .insert(
+                        index_key(1).as_slice(),
+                        encode_v2(&entry).unwrap().as_slice(),
+                    )
                     .unwrap();
             }
             write_tx.commit().unwrap();
@@ -796,7 +799,7 @@ mod tests {
             {
                 let mut vote_table = write_tx.open_table(TABLE_VOTE).unwrap();
                 vote_table
-                    .insert(KEY_VOTE, encode_v2(&vote_v2).as_slice())
+                    .insert(KEY_VOTE, encode_v2(&vote_v2).unwrap().as_slice())
                     .unwrap();
                 let mut committed_table = write_tx.open_table(TABLE_COMMITTED).unwrap();
                 committed_table
@@ -807,7 +810,12 @@ mod tests {
                     .unwrap();
                 let mut purged_table = write_tx.open_table(TABLE_LAST_PURGED).unwrap();
                 purged_table
-                    .insert(KEY_LAST_PURGED, serialize(&purged_v1).unwrap().as_slice())
+                    .insert(
+                        KEY_LAST_PURGED,
+                        crate::storage::envelope::encode_v1(&purged_v1)
+                            .unwrap()
+                            .as_slice(),
+                    )
                     .unwrap();
                 let mut log_table = write_tx.open_table(TABLE_LOG).unwrap();
                 log_table
@@ -819,11 +827,16 @@ mod tests {
                 log_table
                     .insert(
                         index_key(2).as_slice(),
-                        serialize(&entry_v1).unwrap().as_slice(),
+                        crate::storage::envelope::encode_v1(&entry_v1)
+                            .unwrap()
+                            .as_slice(),
                     )
                     .unwrap();
                 log_table
-                    .insert(index_key(3).as_slice(), encode_v2(&entry_v2).as_slice())
+                    .insert(
+                        index_key(3).as_slice(),
+                        encode_v2(&entry_v2).unwrap().as_slice(),
+                    )
                     .unwrap();
             }
             write_tx.commit().unwrap();
@@ -850,7 +863,8 @@ mod tests {
         use crate::storage::envelope::encode_v2;
 
         let mut store = create_test_log_store();
-        let mut vote_v1 = serialize(&VoteOf::<TypeConfig>::new(5, 1)).unwrap();
+        let mut vote_v1 =
+            crate::storage::envelope::encode_v1(&VoteOf::<TypeConfig>::new(5, 1)).unwrap();
         vote_v1.extend_from_slice(&[0xDE, 0xAD]);
         let mut committed_legacy = bincode::serialize(&LogIdOf::<TypeConfig>::new(
             openraft::impls::leader_id_adv::LeaderId {
@@ -867,7 +881,8 @@ mod tests {
                 node_id: 0u64,
             },
             9,
-        ));
+        ))
+        .unwrap();
         purged_v2.extend_from_slice(&[0xDE, 0xAD]);
 
         {
@@ -925,21 +940,21 @@ mod tests {
         );
 
         for i in 0..MAGIC.len() {
-            let mut vote_row = encode_v2(&vote);
+            let mut vote_row = encode_v2(&vote).unwrap();
             vote_row[i] = vote_row[i].wrapping_add(1);
             assert!(
                 deserialize::<VoteOf<TypeConfig>>(&vote_row).is_err(),
                 "V2 vote row magic byte {i} corruption must fail explicitly"
             );
 
-            let mut entry_row = encode_v2(&entry);
+            let mut entry_row = encode_v2(&entry).unwrap();
             entry_row[i] = entry_row[i].wrapping_add(1);
             assert!(
                 deserialize::<EntryOf<TypeConfig>>(&entry_row).is_err(),
                 "V2 entry row magic byte {i} corruption must fail explicitly"
             );
 
-            let mut log_id_row = encode_v2(&log_id);
+            let mut log_id_row = encode_v2(&log_id).unwrap();
             log_id_row[i] = log_id_row[i].wrapping_add(1);
             assert!(
                 deserialize::<LogIdOf<TypeConfig>>(&log_id_row).is_err(),

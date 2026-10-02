@@ -1207,17 +1207,17 @@ mod tests {
     }
 
     /// 新写入的 manifest 必须带统一信封前缀（白盒字节断言）。
-    /// 负控制：写路径去掉 `envelope::encode` ⇒ 本用例必红。
+    /// 负控制：写路径回退 V1（bincode 载荷）⇒ 本用例必红。
     #[test]
     fn test_manifest_bytes_use_format_envelope() {
-        use crate::storage::envelope::{MAGIC, VERSION};
+        use crate::storage::envelope::{MAGIC, VERSION_V2};
 
         let bytes = sample_manifest().to_bytes().unwrap();
         assert!(
             bytes.starts_with(&MAGIC),
             "manifest row must carry envelope magic"
         );
-        assert_eq!(bytes[MAGIC.len()], VERSION);
+        assert_eq!(bytes[MAGIC.len()], VERSION_V2);
     }
 
     /// 旧数据（无前缀 bincode）必须仍能解码。
@@ -1261,7 +1261,7 @@ mod tests {
     /// 负控制：删除 V2 分支 ⇒ 本用例必红。
     #[test]
     fn test_v2_manifest_decodes() {
-        let bytes = crate::storage::envelope::encode_v2(&sample_manifest());
+        let bytes = crate::storage::envelope::encode_v2(&sample_manifest()).unwrap();
         let m = ObjectManifest::from_bytes(&bytes).expect("V2 manifest must decode");
         assert_eq!(m.size, 10);
         assert!(m.committed);
@@ -1274,8 +1274,8 @@ mod tests {
     fn test_mixed_manifest_encodings_decode() {
         let m = sample_manifest();
         let legacy = bincode::serialize(&m).unwrap();
-        let v1 = m.to_bytes().unwrap();
-        let v2 = crate::storage::envelope::encode_v2(&m);
+        let v1 = crate::storage::envelope::encode_v1(&m).unwrap();
+        let v2 = crate::storage::envelope::encode_v2(&m).unwrap();
         for (label, bytes) in [("legacy", legacy), ("v1", v1), ("v2", v2)] {
             let decoded = ObjectManifest::from_bytes(&bytes)
                 .unwrap_or_else(|| panic!("{label} manifest must decode"));
@@ -1290,7 +1290,7 @@ mod tests {
         use crate::storage::envelope::{encode_v2, MAGIC};
 
         for i in 0..MAGIC.len() {
-            let mut bytes = encode_v2(&sample_manifest());
+            let mut bytes = encode_v2(&sample_manifest()).unwrap();
             bytes[i] = bytes[i].wrapping_add(1);
             assert!(
                 ObjectManifest::from_bytes(&bytes).is_none(),
@@ -1306,9 +1306,9 @@ mod tests {
         let m = sample_manifest();
         let mut legacy = bincode::serialize(&m).unwrap();
         legacy.extend_from_slice(&[0xDE, 0xAD]);
-        let mut v1 = m.to_bytes().unwrap();
+        let mut v1 = crate::storage::envelope::encode_v1(&m).unwrap();
         v1.extend_from_slice(&[0xDE, 0xAD]);
-        let mut v2 = crate::storage::envelope::encode_v2(&m);
+        let mut v2 = crate::storage::envelope::encode_v2(&m).unwrap();
         v2.extend_from_slice(&[0xDE, 0xAD]);
         for (label, bytes) in [("legacy", legacy), ("v1", v1), ("v2", v2)] {
             assert!(

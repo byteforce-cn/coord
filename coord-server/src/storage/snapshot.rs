@@ -135,11 +135,10 @@ impl SnapshotData {
         }
     }
 
-    /// 序列化为字节（用于网络传输和磁盘存储）。
-    ///
-    /// 写路径当前为无前缀 bincode（P2b 统一切换 V2-postcard）。
+    /// 序列化为字节（用于网络传输和磁盘存储；统一信封 V2-postcard，内部
+    /// `version` 字段仍为 [`Self::CURRENT_VERSION`]。
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(|e| Error::Internal(format!("snapshot serialize: {e}")))
+        envelope::encode(self).map_err(|e| Error::Internal(format!("snapshot serialize: {e}")))
     }
 
     /// 从字节反序列化（当前版本，不迁移）。
@@ -1318,7 +1317,7 @@ mod tests {
     #[test]
     fn test_snapshot_v2_row_decodes() {
         let data = envelope_sample_snapshot();
-        let bytes = envelope::encode_v2(&data);
+        let bytes = envelope::encode_v2(&data).unwrap();
 
         let restored = SnapshotData::from_bytes_migrating(&bytes).expect("V2 快照必须可解码");
         assert_eq!(restored.version, SnapshotData::CURRENT_VERSION);
@@ -1336,7 +1335,7 @@ mod tests {
     fn test_snapshot_v2_wrong_version_rejected() {
         let mut data = envelope_sample_snapshot();
         data.version = 4;
-        let bytes = envelope::encode_v2(&data);
+        let bytes = envelope::encode_v2(&data).unwrap();
 
         let err = SnapshotData::from_bytes_migrating(&bytes)
             .expect_err("V2 行 version != 5 必须显式报错");
@@ -1352,7 +1351,7 @@ mod tests {
     #[test]
     fn test_snapshot_v2_trailing_bytes_rejected() {
         let data = envelope_sample_snapshot();
-        let mut bytes = envelope::encode_v2(&data);
+        let mut bytes = envelope::encode_v2(&data).unwrap();
         bytes.extend_from_slice(&[0xDE, 0xAD]);
         assert!(SnapshotData::from_bytes_migrating(&bytes).is_err());
         assert!(SnapshotData::from_bytes(&bytes).is_err());
@@ -1364,14 +1363,14 @@ mod tests {
     fn test_snapshot_v2_tampered_prefix_rejected() {
         let data = envelope_sample_snapshot();
 
-        let mut magic = envelope::encode_v2(&data);
+        let mut magic = envelope::encode_v2(&data).unwrap();
         magic[0] = 0x03;
         assert!(
             SnapshotData::from_bytes_migrating(&magic).is_err(),
             "魔数破坏后不得静默解出快照"
         );
 
-        let mut version = envelope::encode_v2(&data);
+        let mut version = envelope::encode_v2(&data).unwrap();
         version[envelope::MAGIC.len()] = 9;
         let err = SnapshotData::from_bytes_migrating(&version).expect_err("未知版本必须显式报错");
         assert!(
@@ -1384,7 +1383,7 @@ mod tests {
     #[test]
     fn test_snapshot_v2_truncated_rejected() {
         let data = envelope_sample_snapshot();
-        let bytes = envelope::encode_v2(&data);
+        let bytes = envelope::encode_v2(&data).unwrap();
         assert!(SnapshotData::from_bytes_migrating(&bytes[..bytes.len() - 1]).is_err());
     }
 
@@ -1393,7 +1392,7 @@ mod tests {
     #[test]
     fn test_snapshot_v1_row_decodes_with_ladder() {
         let data = envelope_sample_snapshot();
-        let v1 = envelope::encode(&data).unwrap();
+        let v1 = envelope::encode_v1(&data).unwrap();
         let restored = SnapshotData::from_bytes_migrating(&v1).expect("V1 v5 行必须可解码");
         assert_eq!(restored.last_included_index, 7);
 
@@ -1432,14 +1431,34 @@ mod tests {
     fn test_snapshot_mixed_encodings_decode() {
         let data = envelope_sample_snapshot();
         let legacy = bincode::serialize(&data).unwrap();
-        let v1 = envelope::encode(&data).unwrap();
-        let v2 = envelope::encode_v2(&data);
+        let v1 = envelope::encode_v1(&data).unwrap();
+        let v2 = envelope::encode_v2(&data).unwrap();
         for (label, bytes) in [("legacy", legacy), ("v1", v1), ("v2", v2)] {
             let restored = SnapshotData::from_bytes_migrating(&bytes)
                 .unwrap_or_else(|e| panic!("{label} 快照必须可解码：{e:?}"));
             assert_eq!(restored.last_included_index, 7, "{label}");
             assert_eq!(restored.applied_node_id, 1, "{label}");
         }
+    }
+
+    /// 写路径断言：`to_bytes` 产物必须带 `MAGIC + VERSION_V2` 前缀（P2b）。
+    /// 负控制：写路径回退 V1（bincode 载荷）或无前缀 bincode ⇒ 本用例必红。
+    #[test]
+    fn test_snapshot_to_bytes_writes_v2_envelope() {
+        let data = envelope_sample_snapshot();
+        let bytes = data.to_bytes().unwrap();
+        assert!(
+            bytes.starts_with(&envelope::MAGIC),
+            "快照写产物必须带信封魔数"
+        );
+        assert_eq!(
+            bytes[envelope::MAGIC.len()],
+            envelope::VERSION_V2,
+            "快照写产物必须为 V2 信封"
+        );
+        // 写产物回读走 V2 腿
+        let restored = SnapshotData::from_bytes_migrating(&bytes).unwrap();
+        assert_eq!(restored.last_included_index, 7);
     }
 
     /// 无前缀 / V1 行尾随字节 ⇒ 显式失败（旧格式读收窄为精确消费）。
@@ -1452,7 +1471,7 @@ mod tests {
         legacy.extend_from_slice(&[0xDE, 0xAD]);
         assert!(SnapshotData::from_bytes_migrating(&legacy).is_err());
 
-        let mut v1 = envelope::encode(&data).unwrap();
+        let mut v1 = envelope::encode_v1(&data).unwrap();
         v1.extend_from_slice(&[0xDE, 0xAD]);
         assert!(SnapshotData::from_bytes_migrating(&v1).is_err());
     }

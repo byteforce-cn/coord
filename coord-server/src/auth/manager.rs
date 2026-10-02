@@ -274,8 +274,10 @@ impl AuthBootstrapTokenRecord {
         !self.is_consumed() && !self.is_expired(now_unix)
     }
 
+    /// 统一信封 V2 序列化（读路径兼容旧格式；损坏 ⇒ None 语义在 from_bytes）。
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(|e| Error::Internal(format!("serialize bootstrap: {e}")))
+        crate::storage::envelope::encode(self)
+            .map_err(|e| Error::Internal(format!("serialize bootstrap: {e}")))
     }
 
     /// 反序列化（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；均精确
@@ -294,8 +296,10 @@ pub struct AuthSessionRecord {
 }
 
 impl AuthSessionRecord {
+    /// 统一信封 V2 序列化（读路径兼容旧格式）。
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(|e| Error::Internal(format!("serialize session: {e}")))
+        crate::storage::envelope::encode(self)
+            .map_err(|e| Error::Internal(format!("serialize session: {e}")))
     }
 
     /// 反序列化（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；均精确
@@ -314,8 +318,10 @@ pub struct AuthUserRecord {
 }
 
 impl AuthUserRecord {
+    /// 统一信封 V2 序列化（读路径兼容旧格式）。
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(|e| Error::Internal(format!("encode auth user: {e}")))
+        crate::storage::envelope::encode(self)
+            .map_err(|e| Error::Internal(format!("encode auth user: {e}")))
     }
 
     /// 反序列化（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；均精确
@@ -351,8 +357,10 @@ pub struct AuthRoleRecord {
 }
 
 impl AuthRoleRecord {
+    /// 统一信封 V2 序列化（读路径兼容旧格式）。
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(|e| Error::Internal(format!("encode auth role: {e}")))
+        crate::storage::envelope::encode(self)
+            .map_err(|e| Error::Internal(format!("encode auth role: {e}")))
     }
 
     /// 反序列化（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；均精确
@@ -370,8 +378,10 @@ pub struct AuthRevocationRecord {
 }
 
 impl AuthRevocationRecord {
+    /// 统一信封 V2 序列化（读路径兼容旧格式）。
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(|e| Error::Internal(format!("encode revocation: {e}")))
+        crate::storage::envelope::encode(self)
+            .map_err(|e| Error::Internal(format!("encode revocation: {e}")))
     }
 
     /// 反序列化（三路：无前缀 bincode / 信封 V1 / 信封 V2-postcard；均精确
@@ -1689,17 +1699,34 @@ mod tests {
                 "{label}: 旧行必须可解码"
             );
             // V1 / V2 行
-            let v1 = envelope::encode(&value).unwrap();
+            let v1 = envelope::encode_v1(&value).unwrap();
             assert_eq!(
                 <$ty>::from_bytes(&v1).as_ref(),
                 Some(&value),
                 "{label}: V1 行必须可解码"
             );
-            let v2 = envelope::encode_v2(&value);
+            let v2 = envelope::encode_v2(&value).unwrap();
             assert_eq!(
                 <$ty>::from_bytes(&v2).as_ref(),
                 Some(&value),
                 "{label}: V2 行必须可解码"
+            );
+
+            // 写路径断言：to_bytes 产物必须为 V2 前缀，且可回读
+            let written = value.to_bytes().unwrap();
+            assert!(
+                written.starts_with(&envelope::MAGIC),
+                "{label}: 写产物必须带信封魔数"
+            );
+            assert_eq!(
+                written[envelope::MAGIC.len()],
+                envelope::VERSION_V2,
+                "{label}: 写产物必须为 V2 信封"
+            );
+            assert_eq!(
+                <$ty>::from_bytes(&written).as_ref(),
+                Some(&value),
+                "{label}: 写产物必须可回读"
             );
 
             // 篡改矩阵：未知版本 / 魔数 / 尾随 / 截断 ⇒ None（显式拒绝）
