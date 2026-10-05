@@ -76,7 +76,7 @@ rquickjs = { version = "0.12.2", optional = true, default-features = false, feat
 ] }
 
 # 插件引擎（Phase 4）：wasmtime 组件模型宿主（第三方强沙箱）。
-# - 锁 48.0.1（MSRV 1.95.0，工具链 1.98.1）；deny.toml 已加
+# - 锁 48.0.4（含 RUSTSEC-2026-0325/0326/0327 修复；MSRV 1.95.0，工具链 1.98.1）；deny.toml 已加
 #   `Apache-2.0 WITH LLVM-exception` 例外；
 # - 特性裁剪：只要编译器 + 运行时 + WAT（测试夹具）+ 组件模型（D3）；
 #   不开 WASI（第三方插件无系统接口）、不开线程/GC/coredump/backtrace；
@@ -92,7 +92,7 @@ rquickjs = { version = "0.12.2", optional = true, default-features = false, feat
 #   （watch 的阻塞式 `next` 由宿主 await，见 `wit/coord-plugin.wit`）。
 # - 沙箱手段（D8）：fuel（指令预算）+ epoch（墙钟超时）+ 内存上限
 #   （`StoreLimits`）+ 宿主 import 边界 capability 白名单。
-wasmtime = { version = "48.0.1", optional = true, default-features = false, features = [
+wasmtime = { version = "48.0.4", optional = true, default-features = false, features = [
     "std",
     "runtime",
     "cranelift",
