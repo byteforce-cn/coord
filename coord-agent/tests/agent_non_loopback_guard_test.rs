@@ -2,6 +2,8 @@
 //
 // agent 非 loopback 绑定强制 auth+TLS（与 server 侧
 // "非 loopback 无鉴权拒绝启动" 同口径）。
+// dev 专用放行（ADR-0008）：仅 `coord dev --allow-insecure` 经进程内 builder
+// 注入；`AgentConfig` 配置文件不可达。
 
 use std::net::TcpListener;
 
@@ -136,5 +138,75 @@ async fn test_non_loopback_with_auth_and_tls_allowed() {
         Ok(Ok(())) => {}
         Ok(Err(e)) => panic!("non-loopback auth+TLS serve failed: {e}"),
         Err(_) => panic!("serve timed out (shutdown future should have fired)"),
+    }
+}
+
+/// dev 放行：非 loopback + builder 开关 ⇒ 允许启动（仅 `coord dev --allow-insecure`，
+/// 见 ADR-0008）。
+#[tokio::test]
+async fn test_non_loopback_with_dev_bypass_allowed() {
+    let port = find_port();
+    let mut config = AgentConfig::default();
+    config.agent_addr = format!("0.0.0.0:{port}");
+    config.http_addr = format!("127.0.0.1:{}", find_port());
+    config.auth.enabled = false;
+    config.tls = None;
+
+    let server = AgentServer::new(config).with_dev_allow_insecure_non_loopback(true);
+    let shutdown = async move {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "dev-bypass agent never became ready"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    };
+    let serve = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        server.serve_with_shutdown(shutdown),
+    )
+    .await;
+    match serve {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => panic!("dev-bypass serve failed: {e}"),
+        Err(_) => panic!("serve timed out (shutdown future should have fired)"),
+    }
+}
+
+/// 配置文件不可达：`agent.toml` 里的同名未知键无法开启 dev 放行
+/// （load 失败 = fail-closed；load 成功但守卫仍拒绝——二者均满足）。
+#[tokio::test]
+async fn test_toml_cannot_enable_dev_bypass() {
+    let port = find_port();
+    let tmpdir = tempfile::tempdir().unwrap();
+    let cfg_path = tmpdir.path().join("agent.toml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "agent_addr = \"0.0.0.0:{port}\"\n\
+             http_addr = \"127.0.0.1:{}\"\n\
+             dev_allow_insecure_non_loopback = true\n",
+            find_port()
+        ),
+    )
+    .unwrap();
+
+    if let Ok(config) = AgentConfig::from_file(&cfg_path) {
+        let err = AgentServer::new(config)
+            .serve()
+            .await
+            .expect_err("config file must not be able to enable the dev bypass");
+        assert!(
+            err.to_string().contains("non-loopback"),
+            "expected non-loopback guard refusal, got: {err}"
+        );
     }
 }

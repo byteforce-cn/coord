@@ -247,8 +247,8 @@ enum Commands {
 
     /// 开发模式：同时启动 Server + Agent（单节点集群）
     Dev {
-        /// 监听地址（默认 127.0.0.1；容器化部署需设为 0.0.0.0，
-        /// 此时必须显式传 --allow-insecure）
+        /// 监听地址（默认 127.0.0.1；容器化部署可设为 0.0.0.0 并配合
+        /// --allow-insecure；该场景下 Raft 自动收敛 loopback，见 ADR-0008）
         #[arg(long, default_value = "127.0.0.1")]
         bind_addr: String,
 
@@ -269,7 +269,8 @@ enum Commands {
         fresh: bool,
 
         /// 显式确认：允许鉴权关闭的 dev 模式绑定非 loopback 地址
-        /// （仅限容器化本地调试；Agent 仍会按自身策略拒绝非 loopback）
+        /// （仅限容器化本地调试：Raft 收敛 loopback、Agent 明文绑定由 dev 放行
+        /// 并启动 WARN；见 ADR-0008）
         #[arg(long, default_value = "false")]
         allow_insecure: bool,
     },
@@ -3829,10 +3830,25 @@ async fn run_dev(
         )
         .into());
     }
+    if allow_insecure && !is_loopback_host(bind_addr) {
+        tracing::warn!(
+            "dev mode on non-loopback bind ({bind_addr}) with auth disabled — container/dev \
+             only; Raft stays on loopback, agent binds plaintext (explicit --allow-insecure; \
+             see ADR-0008)"
+        );
+    }
 
     let server_addr = format!("{}:{}", bind_addr, grpc_port);
     let raft_port = grpc_port + 1;
-    let raft_addr = format!("{}:{}", bind_addr, raft_port);
+    // 非 loopback 绑定时 Raft 收敛 loopback（见 ADR-0008）：dev 是单节点拓扑，
+    // Raft 端口无对外用途；收敛后 R-SEC-03 判定无需任何密钥材料即满足。
+    let raft_converged_to_loopback = !is_loopback_host(bind_addr);
+    let raft_host = if raft_converged_to_loopback {
+        "127.0.0.1"
+    } else {
+        bind_addr
+    };
+    let raft_addr = format!("{}:{}", raft_host, raft_port);
     let agent_addr = format!("{}:{}", bind_addr, agent_port);
     let http_port = agent_port + 1;
 
@@ -3873,10 +3889,21 @@ async fn run_dev(
     // BFF HTTP 端口（与 run_server 保持一致：grpc_port + 10）
     let bff_http_port = grpc_port + 10;
 
+    // 非 loopback 绑定时 BFF/UI HTTP 与 bind 同口径（见 ADR-0008）：否则容器内
+    // 仍只绑 loopback，宿主端口映射（grpc+10）不可达。
+    if raft_converged_to_loopback {
+        server_cfg.network.http_addr = format!("{}:{}", bind_addr, bff_http_port);
+    }
+
     tracing::info!(
-        "Dev mode: starting server on {} (raft: {}, data: {}, http: {})",
+        "Dev mode: starting server on {} (raft: {}{}, data: {}, http: {})",
         server_addr,
         raft_addr,
+        if raft_converged_to_loopback {
+            " [loopback-only]"
+        } else {
+            ""
+        },
         dev_data_dir.display(),
         bff_http_port
     );
@@ -3973,7 +4000,9 @@ async fn run_dev(
 
     let agent_server = coord_agent::AgentServer::new(agent_config)
         .with_metrics(coord_agent::metrics::AgentMetrics::new())
-        .with_ready_flag(agent_ready_flag);
+        .with_ready_flag(agent_ready_flag)
+        // dev 专用放行（见 ADR-0008）：非 loopback 明文绑定仅经本调用链可达。
+        .with_dev_allow_insecure_non_loopback(allow_insecure);
     let (agent_shutdown_tx, agent_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let agent_handle = tokio::spawn(async move {

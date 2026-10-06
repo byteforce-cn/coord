@@ -98,6 +98,16 @@ cargo run -p coord -- dev --fresh
 
 Server gRPC 监听 `127.0.0.1:50051`，Agent 监听 `127.0.0.1:19527`。
 
+**或在容器中运行**（Docker，仅限本地开发：鉴权关闭，`root`/`root`）：
+
+```bash
+docker compose -f deploy/docker-compose/docker-compose.dev.yml up -d --build
+```
+
+宿主端口仅发布到 loopback：UI `http://127.0.0.1:50061`、Agent `127.0.0.1:19527`、
+Server gRPC `127.0.0.1:50051`。`down -v` 重置全部数据；细节见
+[`deploy/docker-compose/README.md`](deploy/docker-compose/README.md)。
+
 **启动真实集群**：
 
 ```bash
@@ -177,7 +187,7 @@ coord/
 ├── coord-ui/            # Web 管理界面（React 19 + Vite）
 ├── jepsen/              # 仓库内 Jepsen 测试工程与 lab
 ├── apis/contracts/      # 协议契约与能力承诺
-├── deploy/              # docker-compose 三节点 + Kubernetes StatefulSet
+├── deploy/              # docker-compose 三节点/单节点 dev + Kubernetes StatefulSet
 └── monitoring/          # Grafana 面板 + Prometheus 规则
 ```
 
@@ -207,7 +217,7 @@ Coord 处于 pre-1.0，并明确列出**不承诺**的事项；完整清单（�
 
 ## 部署
 
-- **docker-compose**：三节点集群见 [`deploy/docker-compose/`](deploy/docker-compose/README.md)
+- **docker-compose**：三节点集群与单节点 dev 组合见 [`deploy/docker-compose/`](deploy/docker-compose/README.md)
 - **Kubernetes**：含探针与 PDB 的 StatefulSet 见 [`deploy/k8s/statefulset.yaml`](deploy/k8s/statefulset.yaml)
 - **监控**：Grafana 面板 + Prometheus 告警规则见 [`monitoring/`](monitoring/)
 - **Web 界面**：见 [`coord-ui/README.md`](coord-ui/README.md)

@@ -1,0 +1,44 @@
+# coord 单节点 dev 模式（容器）——本地开发快速启动
+#
+# 用法：
+#   docker compose -f deploy/docker-compose/docker-compose.dev.yml up -d --build
+#   UI:         http://127.0.0.1:50061
+#   Agent gRPC: 127.0.0.1:19527（应用 / SDK 连接目标）
+#   Server:     127.0.0.1:50051（Direct 模式 / gRPC 工具）
+#   重置数据：  docker compose -f deploy/docker-compose/docker-compose.dev.yml down -v
+#
+# 说明：
+#   - 仅限本机开发：鉴权强制关闭（root/root）、明文传输；宿主端口只发布到
+#     loopback（127.0.0.1），不暴露局域网；
+#   - 容器内 `--bind-addr 0.0.0.0` 由 dev 模式显式放行（见 docs/adr/0008-dev-container-mode.md）：
+#     Raft 自动收敛 loopback（容器内不监听 0.0.0.0:50052），Agent 明文非 loopback
+#     绑定放行并启动 WARN；
+#   - 数据落命名卷 coord-dev-data（重启保留；默认不带 --fresh）。
+name: coord-dev
+
+services:
+  coord-dev:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: byteforce/coord:local
+    container_name: coord-dev
+    command: ["dev", "--bind-addr", "0.0.0.0", "--allow-insecure"]
+    volumes:
+      - coord-dev-data:/var/lib/coord
+    ports:
+      - "127.0.0.1:50051:50051"   # Server gRPC
+      - "127.0.0.1:19527:19527"   # Agent gRPC
+      - "127.0.0.1:50061:50061"   # UI / BFF / healthz
+      - "127.0.0.1:19528:19528"   # Agent health / metrics
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:50061/healthz"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 6
+    # dev 优雅关闭：Agent ≤10s + Server ≤10s 的内部等待
+    stop_grace_period: 30s
+
+volumes:
+  coord-dev-data:

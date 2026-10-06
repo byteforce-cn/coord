@@ -104,6 +104,16 @@ cargo run -p coord -- dev --fresh
 
 Server gRPC listens on `127.0.0.1:50051`; the agent on `127.0.0.1:19527`.
 
+**Or run it in a container** (Docker — dev only: authentication off, `root`/`root`):
+
+```bash
+docker compose -f deploy/docker-compose/docker-compose.dev.yml up -d --build
+```
+
+Host ports are published on loopback only: UI `http://127.0.0.1:50061`, agent `127.0.0.1:19527`,
+server gRPC `127.0.0.1:50051`. Reset all data with `down -v`; see
+[`deploy/docker-compose/README.md`](deploy/docker-compose/README.md).
+
 **Start a real cluster:**
 
 ```bash
@@ -189,7 +199,7 @@ coord/
 ├── coord-ui/            # Web management UI (React 19 + Vite)
 ├── jepsen/              # In-repo Jepsen test project + lab
 ├── apis/contracts/      # Protocol contracts & capability commitments
-├── deploy/              # docker-compose 3-node + Kubernetes StatefulSet
+├── deploy/              # docker-compose (3-node + single-node dev) + Kubernetes StatefulSet
 └── monitoring/          # Grafana dashboard + Prometheus rules
 ```
 
@@ -217,7 +227,7 @@ current status and the work required to close each item — is
 
 ## Deploy
 
-- **docker-compose:** 3-node cluster in [`deploy/docker-compose/`](deploy/docker-compose/README.md)
+- **docker-compose:** 3-node cluster（+ single-node dev compose）in [`deploy/docker-compose/`](deploy/docker-compose/README.md)
 - **Kubernetes:** StatefulSet with probes & PDB in [`deploy/k8s/statefulset.yaml`](deploy/k8s/statefulset.yaml)
 - **Monitoring:** Grafana dashboard + Prometheus rules in [`monitoring/`](monitoring/)
 - **Web UI:** see [`coord-ui/README.md`](coord-ui/README.md)
