@@ -33,7 +33,9 @@
 
 `run_dev` 在 bind 非 loopback 时把 `raft_addr` 收敛为 `127.0.0.1:<grpc+1>`
 （监听与通告同址）。dev 是单节点拓扑，Raft 端口无对外用途；收敛后 R-SEC-03
-判定逐字不动、无需引入任何密钥材料，容器内也不暴露 raft 端口。
+判定逐字不动、无需引入任何密钥材料，容器内也不暴露 raft 端口。BFF/UI HTTP
+（`grpc+10`）在非 loopback 绑定时随 `bind_addr` 同口径（默认 loopback 绑定
+下容器端口映射不可达）。
 
 ### D2 Agent 旁路 = 进程内 builder 开关，不进配置面
 
