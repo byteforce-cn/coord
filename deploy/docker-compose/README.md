@@ -1,6 +1,7 @@
 # coord docker-compose 三节点集群
 
 > R-OBS-15 交付物。
+> 本地开发的单节点 dev 组合见文末「单节点 dev（容器，本地开发）」一节。
 
 ## 快速启动
 
@@ -58,3 +59,26 @@ coord member list --addr 127.0.0.1:50051 \
 ```
 
 详见 `docs/production/ops/security.md`。
+
+## 单节点 dev（容器，本地开发）
+
+本地开发用单节点 dev 组合（与上文的集群组合相互独立，同一镜像）：
+
+```bash
+docker compose -f deploy/docker-compose/docker-compose.dev.yml up -d --build
+# UI:         http://127.0.0.1:50061
+# Agent gRPC: 127.0.0.1:19527（应用 / SDK 连接目标）
+# Server:     127.0.0.1:50051（Direct 模式）
+# 重置数据:   docker compose -f deploy/docker-compose/docker-compose.dev.yml down -v
+```
+
+要点：
+
+- **仅限本机开发**：鉴权强制关闭（默认凭据 `root`/`root`）、明文传输；宿主端口只发布到
+  `127.0.0.1`（不暴露局域网）；
+- `coord dev --bind-addr 0.0.0.0 --allow-insecure` 在容器内可用：Raft 收敛 loopback
+  （不对外暴露 raft 端口），Agent 非 loopback 明文绑定为 dev 显式放行（启动 WARN；见
+  `docs/adr/0008-dev-container-mode.md`）；
+- 数据存命名卷 `coord-dev-data`：重启保留，`down -v` 清空（默认不带 `--fresh`，
+  避免每次重启清库）；
+- 镜像与集群组合共用（`byteforce/coord:local`，同一 `Dockerfile`）：已构建过则无需重复构建。

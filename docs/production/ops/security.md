@@ -15,8 +15,12 @@ Coord 的安全模型与关键加固项：默认 fail-closed，例外必须在�
 ⇒ **拒绝启动**（错误含 `R-SEC-04`，不静默降级明文）。唯一逃生阀 = 显式
 `security.allow_plaintext_remote = true`（默认 `false`；启用时启动日志 WARN 明示）。
 三处 fail-closed 判定（无鉴权 / gRPC 无 TLS / raft 无 mTLS+密钥）共用
-`is_non_loopback_bind()` 单一实现（`coord/src/main.rs`）；dev 模式的 `allow_insecure`
-必须显式给出。
+`is_non_loopback_bind()` 单一实现（`coord/src/main.rs`）。
+
+`coord dev --allow-insecure` 是 dev 专用的显式开关（见 ADR-0008）：非 loopback
+绑定时 Raft 收敛 loopback（不触碰 R-SEC-03 判定、无需密钥材料）、BFF/UI HTTP
+随 bind 同口径，Agent 明文非 loopback 绑定经进程内 dev 开关放行并输出启动
+WARN；`agent` 子命令与 `agent.toml` 无此路径（配置文件不可达）。
 
 ### 1.2 测试判据（正反双向）
 
@@ -35,7 +39,8 @@ Coord 的安全模型与关键加固项：默认 fail-closed，例外必须在�
 error-code / gate-drills）全 `exit 0`。
 
 **配置同步**：README（EN/zh-CN）TLS 行、`config.example.toml` 注释、`boundaries.md`
-B-SE-1、`runbook.md` 均描述上述 fail-closed 行为。
+B-SE-1、`runbook.md` 均描述上述 fail-closed 行为；dev 容器化放行语义见
+`boundaries.md` B-SE-7 与 ADR-0008。
 
 > **jepsen lab 现状**：lab 节点以显式 `security.allow_plaintext_remote = true` 运行
 > （明文、非静默，仅限测试环境）；lab 启用 mTLS 是后续强化项。

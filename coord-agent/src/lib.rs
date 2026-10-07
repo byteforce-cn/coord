@@ -837,6 +837,10 @@ pub struct AgentServer {
     ready_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// 配置文件监视器（Some = 支持 SIGHUP 触发的插件集热重载）
     config_watcher: Option<crate::config_watcher::ConfigWatcher>,
+    /// dev 专用放行开关（见 ADR-0008）：允许非 loopback 明文绑定。
+    /// 仅 `coord dev --allow-insecure` 经 builder 注入；不进 `AgentConfig`
+    /// 反序列化面（配置文件不可达）。
+    dev_allow_insecure_non_loopback: bool,
 }
 
 impl AgentServer {
@@ -848,6 +852,7 @@ impl AgentServer {
             metrics: None,
             ready_flag: None,
             config_watcher: None,
+            dev_allow_insecure_non_loopback: false,
         }
     }
 
@@ -866,6 +871,15 @@ impl AgentServer {
     /// 挂载共享就绪标志（连接探针实时回写）。
     pub fn with_ready_flag(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
         self.ready_flag = Some(flag);
+        self
+    }
+
+    /// dev 专用：放行非 loopback 明文绑定（`coord dev --allow-insecure` 使用）。
+    ///
+    /// 不进入 `AgentConfig` serde 面（`agent.toml` 无法开启）；启用且非 loopback
+    /// 时 `serve_with_shutdown` 输出 WARN（见 ADR-0008）。
+    pub fn with_dev_allow_insecure_non_loopback(mut self, allow: bool) -> Self {
+        self.dev_allow_insecure_non_loopback = allow;
         self
     }
 
@@ -946,12 +960,21 @@ impl AgentServer {
             let is_loopback = addr.ip().is_loopback();
             let auth_ok = self.config.auth.enabled;
             let tls_ok = self.config.tls.is_some();
-            if !(is_loopback || auth_ok && tls_ok) {
+            // dev 旁路（见 ADR-0008）：仅 `coord dev --allow-insecure` 经 builder 注入，
+            // 配置文件不可达；其余调用方行为不变。
+            let dev_insecure_bind = self.dev_allow_insecure_non_loopback;
+            if !(is_loopback || auth_ok && tls_ok || dev_insecure_bind) {
                 return Err(format!(
                     "refusing to bind non-loopback address {addr} without auth+TLS \
                      (auth.enabled={auth_ok}, tls={tls_ok}); set both or bind a loopback address"
                 )
                 .into());
+            }
+            if dev_insecure_bind && !is_loopback {
+                tracing::warn!(
+                    "binding non-loopback address {addr} without auth+TLS — explicitly \
+                     allowed by `coord dev --allow-insecure` (dev only; never in production)"
+                );
             }
         }
 
