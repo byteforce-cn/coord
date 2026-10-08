@@ -79,6 +79,8 @@ docker compose -f deploy/docker-compose/docker-compose.dev.yml up -d --build
 - `coord dev --bind-addr 0.0.0.0 --allow-insecure` 在容器内可用：Raft 收敛 loopback
   （不对外暴露 raft 端口），Agent 非 loopback 明文绑定为 dev 显式放行（启动 WARN；见
   `docs/adr/0008-dev-container-mode.md`）；
+- Agent 内建服务在 dev 下全开（`replication` 除外）；`transit` 回退 dev 专用默认 KEK
+  （启动 WARN、数据无保密性；见 `docs/adr/0009-dev-mode-builtin-services.md`）；
 - 数据存命名卷 `coord-dev-data`：重启保留，`down -v` 清空（默认不带 `--fresh`，
   避免每次重启清库）；
 - 镜像与集群组合共用（`byteforce/coord:local`，同一 `Dockerfile`）：已构建过则无需重复构建。

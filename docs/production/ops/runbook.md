@@ -203,6 +203,10 @@ chmod 600 /var/lib/coord-agent/transit-kek.bin
 —— 这是**故意的 fail-closed**，不是故障。修法二选一：注入材料，或
 `services.transit = false`。**不要**去改代码回落旧派生路径（该路径已删除）。
 
+> 本节适用于生产 `agent` 子命令。`coord dev` 是唯一例外：未注入材料时回退到
+> 内建 dev 默认 KEK（启动 WARN，数据无保密性；`agent` 子命令 / `agent.toml`
+> 不可达该回退，见 ADR-0009）。
+
 **轮换（⚠️ 目前**没有**内建流程）**：
 - KEK 变了 ⇒ **旧材料写下的 DEK 解不开**（判据
   `test_kek_comes_from_material_not_from_kek_id`）。已知边界见 `boundaries.md` B-SE-6。
