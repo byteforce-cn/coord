@@ -1,16 +1,17 @@
-# Coord 平台对外协议白皮书（v1.2.0）
+# Coord 平台对外协议白皮书（v1.3.0）
 
-> 版本：contracts/v1.2.0 ｜ 修订日期：2026-09-20 ｜ 基线代码：`fdbeef3`（main）
+> 版本：contracts/v1.3.0 ｜ 修订日期：2026-10-09 ｜ 基线代码：`d03a6ad`（main，ADR-0010 批次 1+2）
 >
-> **本版变更（v1.1.0 → v1.2.0，Minor）**：契约范围由「5 项服务协调能力」扩为
-> **coord-agent 全部 17 项能力 + `coord.storage`**（`STATUS.md` COMMITTED 段）；
-> `EXPERIMENTAL` 区**清空**（原 4 个 `coord.experimental.*` 包从未有 proto、
-> 从未有消费者，直接建为稳定包，**不以实验包形态开放任何能力**）。
-> 逐包对照与消费者告知见 `CHANGELOG.md` 的 `contracts/v1.2.0` 条目（§11.2 流程）。
+> **本版变更（v1.2.0 → v1.3.0，Minor）**：新增 4 个 RPC（`MQ/GetTopicLeader`、
+> `MQ/MoveToDlq`、`MQ/DeleteTopic`、`Transit/Rewrap`）与 `MqMessage` 的
+> `dlq_reason`/`dlq_detail` 字段（均向后兼容），并补齐 MQ Leader 路由/删除语义、
+> Policy 本地 RBAC 定位、Scheduler result 持久化、Transit 多材料等边界声明。
+> 逐项对照与消费者告知见 `CHANGELOG.md` 的 `contracts/v1.3.0` 条目（§11.2 流程）；
+> 缺口编号与验收锚点见 `docs/adr/0010-eis-consumer-gaps-full-landing.md`。
 >
 > **契约地位**：本白皮书是 Coord 平台对上游业务方（100+ 微服务，Java/Go）的
 > **服务协调能力承诺**：注册发现、分布式锁、Leader 选举、分布式 ID、事件通知，
-> 以及本版新增的配置中心、权限策略、熔断、限流、信封加密、PKI、缓存、消息队列、
+> 以及配置中心、权限策略、熔断、限流、信封加密、PKI、缓存、消息队列、
 > 特性开关、工作流（Saga）、调度、对象存储。
 > 契约把能力的目标日期与实现落点显式化——目标日期逾期即 CI 校验失败（§13）。
 >
@@ -68,10 +69,10 @@ COMMITTED 服务带公开的目标日期（§13）：目标日期逾期而未落
 | 权限策略引擎 | `coord.policy.v1` | `CheckPermission` / `Evaluate` / `Explain` / `PutBundle` / `DeleteBundle` / `ListBundles` / `SetBundleEnabled` / `RollbackBundle` / `ListBundleVersions` | 2026-12-31 |
 | 熔断器 | `coord.circuitbreaker.v1` | `GetState` / `ReportSuccess` / `ReportFailure` / `Reset` | 2026-12-31 |
 | 限流器 | `coord.ratelimiter.v1` | `Allow` | 2026-12-31 |
-| 安全传输（信封加密） | `coord.transit.v1` | `Encrypt` / `Decrypt` / `HmacSign` / `HmacVerify` | 2026-12-31 |
+| 安全传输（信封加密） | `coord.transit.v1` | `Encrypt` / `Decrypt` / `HmacSign` / `HmacVerify` / `Rewrap` | 2026-12-31 |
 | PKI 证书签发 | `coord.pki.v1` | `InitCa` / `IssueCert` / `RenewCert` / `VerifyCert` / `GetCaCert` / `RotateCert` / `ListCerts` / `GetCertByCN` | 2026-12-31 |
 | 缓存 | `coord.cache.v1` | `Get` / `Set` / `Delete` / `HGet` / `HSet` / `HGetAll` / `LPush` / `LRange` / `RPop` / `LLen` / `SAdd` / `SMembers` | 2026-12-31 |
-| 消息队列 | `coord.mq.v1` | `CreateTopic` / `Publish` / `Subscribe` / `Poll` / `Ack` / `PollDlq` | 2026-12-31 |
+| 消息队列 | `coord.mq.v1` | `CreateTopic` / `Publish` / `Subscribe` / `Poll` / `Ack` / `PollDlq` / `GetTopicLeader` / `MoveToDlq` / `DeleteTopic` | 2026-12-31 |
 | 特性开关 | `coord.featureflags.v1` | `IsEnabled` / `Evaluate` | 2026-12-31 |
 | 工作流（Saga） | `coord.workflow.v1` | `Start` / `GetStatus` / `Signal` / `Cancel` / `Deploy` / `ListDefinitions` / `GetDefinition` / `ListDefinitionVersions` / `RollbackDefinition` / `ListInstances` | 2027-03-31 |
 | 调度 | `coord.scheduler.v1` | `RegisterJob` / `ClaimJob` / `Heartbeat` / `CompleteJob` | 2027-03-31 |

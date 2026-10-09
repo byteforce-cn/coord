@@ -2,6 +2,51 @@
 
 版本规则见 WHITEPAPER.md。契约版本独立于代码版本。
 
+## [contracts/v1.3.0] — 2026-10-09（Minor：ADR-0010 全量承接批次 1+2 的契约增量）
+
+**发布口径**：本条目为 **Minor**（新增 RPC / 新增字段 / 注释级语义声明；
+不改动任何既有字段编号与类型；`buf breaking` 基线 = `contracts/v1.2.0`，CI 强制）。
+
+**新增 RPC（4 个）**
+
+| 契约包 | RPC | 能力 | 说明 |
+|:--|:--|:--|:--|
+| `coord.mq.v1` | `GetTopicLeader` | `coord:mq:consume` | topic 的 Leader/ISR 拓扑查询（任意 agent 可答；单 agent 语义显式） |
+| `coord.mq.v1` | `MoveToDlq` | `coord:mq:manage` | 显式移入 DLQ（管理路径；ISR 启用时经复制通道全域一致） |
+| `coord.mq.v1` | `DeleteTopic` | `coord:mq:manage` | 删除 topic 并全量回收存量（配额归还；ISR 全域一致；同名重建 = 空 topic） |
+| `coord.transit.v1` | `Rewrap` | `coord:transit:crypto` | KEK 材料迁移管理路径（旧材料解出 → 主材料重包） |
+
+**新增字段（1 个消息，向后兼容）**
+
+- `coord.mq.v1.MqMessage` 新增 `dlq_reason = 7` / `dlq_detail = 8`
+  （仅 `PollDlq` 填充；普通消息为空）——DLQ 内容含原因可读（G-MQ-2）。
+
+**注释级语义声明变更（wire 不变）**
+
+- `coord.mq.v1`：Leader 与消费路由（非 Leader 写路径 = `FAILED_PRECONDITION` +
+  `x-coord-error-code: NOT_LEADER` + `coord-leader-hint` trailer，可编程判别）、
+  删除语义（前置条件 / 全域一致 / 删除后 `NOT_FOUND`）。
+- `coord.policy.v1`：`CheckPermission` 明确为 **agent 本地 / 嵌入式**用途；
+  生产接入走 OPA bundle（分发/加载/收敛口径一并声明）+ `Evaluate`。
+- `coord.scheduler.v1`：`CompleteJob.result` 由「接受但不留档」变更为
+  **随任务记录持久化**（首个结果为准；契约面仍无读取 RPC）——能力增强，
+  不构成 Breaking。
+- `coord.transit.v1`：多材料解密窗口与 `Rewrap` 的错误语义声明。
+
+**消费者告知**
+
+- 全量承接口径与批次计划见 `docs/adr/0010-eis-consumer-gaps-full-landing.md`；
+  缺口编号（G-*）与验收锚点同上。
+- 非 Leader 错误新增结构化 trailer：既有按文案解析的消费者可不变，新代码应
+  优先读 `x-coord-error-code` / `coord-leader-hint`。
+- `DeleteTopic` 为破坏性管理路径：调用方须先停该 topic 读写（前置条件见 proto 头注）。
+
+**校验**（本地已跑）
+
+- `apis/contracts/scripts/check-wire-sync.sh` exit 0（包名/rpc/字段编号双副本一致）
+- `apis/contracts/scripts/check-wire-descriptor.sh` exit 0（descriptor 级 wire 相等）
+- `bash scripts/check-gate-drills.sh` exit 0（告警↔runbook 一一对应）
+
 ## [contracts/v1.2.0] — 2026-09-19（Minor：coord-agent 全量契约面补齐 + EXPERIMENTAL 区清空）
 
 **发布口径**：本条目为 **Minor**（新增包 + 状态位提升），**不改动任何既有包的字段编号与类型**
