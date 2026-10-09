@@ -841,6 +841,10 @@ pub struct AgentServer {
     /// 仅 `coord dev --allow-insecure` 经 builder 注入；不进 `AgentConfig`
     /// 反序列化面（配置文件不可达）。
     dev_allow_insecure_non_loopback: bool,
+    /// dev 专用 transit 默认 KEK 开关（见 ADR-0009）：缺注入材料时使用内建
+    /// dev 默认材料（启动 WARN）。仅 `coord dev` 经 builder 注入；不进
+    /// `AgentConfig` 反序列化面（配置文件不可达）。
+    dev_default_transit_kek: bool,
 }
 
 impl AgentServer {
@@ -853,6 +857,7 @@ impl AgentServer {
             ready_flag: None,
             config_watcher: None,
             dev_allow_insecure_non_loopback: false,
+            dev_default_transit_kek: false,
         }
     }
 
@@ -880,6 +885,15 @@ impl AgentServer {
     /// 时 `serve_with_shutdown` 输出 WARN（见 ADR-0008）。
     pub fn with_dev_allow_insecure_non_loopback(mut self, allow: bool) -> Self {
         self.dev_allow_insecure_non_loopback = allow;
+        self
+    }
+
+    /// dev 专用：transit 缺注入材料时回退到内建 dev 默认 KEK（`coord dev` 使用）。
+    ///
+    /// 不进入 `AgentConfig` serde 面（`agent.toml` / `agent` 子命令不可达）；
+    /// 回退发生时输出 WARN。生产路径缺材料仍 fail-closed 拒绝启动（见 ADR-0009）。
+    pub fn with_dev_default_transit_kek(mut self, allow: bool) -> Self {
+        self.dev_default_transit_kek = allow;
         self
     }
 
@@ -1717,6 +1731,8 @@ impl AgentServer {
         // **缺材料 ⇒ 拒绝启动**（fail-closed）：这里 `return Err` 让 `serve()` 失败、
         // 进程非 0 退出，而不是"少注册一个服务"这种静默降级（后者会让调用方以为
         // 加密面可用，实际拿不到 transit 服务）。
+        // dev 例外（ADR-0009）：仅 `with_dev_default_transit_kek(true)` 的调用链
+        // （`coord dev`）在缺材料时回退到内建默认材料；生产路径不可达。
         if self.config.services.transit {
             use crate::services::transit::{
                 TransitConfig, TransitKekMaterial, TransitService, TRANSIT_KEK_ENV,
@@ -1724,19 +1740,30 @@ impl AgentServer {
             };
             use crate::services::transit_store::{KvTransitDekStore, TransitDekStore};
 
-            let kek_material = TransitKekMaterial::resolve(std::path::Path::new(
-                &self.config.data_dir,
-            ))
-            .map_err(|e| {
-                format!(
-                    "services.transit = true but KEK injection failed: {e} \
+            let kek_material =
+                match TransitKekMaterial::resolve(std::path::Path::new(&self.config.data_dir)) {
+                    Ok(material) => material,
+                    Err(_) if self.dev_default_transit_kek => {
+                        tracing::warn!(
+                            "services.transit: no KEK material injected — using the built-in \
+                         dev-mode default KEK (coord dev only; see ADR-0009). Data encrypted \
+                         with it provides no confidentiality; never use outside local dev"
+                        );
+                        TransitKekMaterial::from_bytes(&crate::services::transit::DEV_DEFAULT_KEK)
+                            .map_err(|e| format!("dev default KEK material invalid: {e}"))?
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "services.transit = true but KEK injection failed: {e} \
                          (inject `{TRANSIT_KEK_ENV}`=hex64 or {}; or set \
                          services.transit = false to disable the service)",
-                    std::path::Path::new(&self.config.data_dir)
-                        .join(TRANSIT_KEK_FILE)
-                        .display()
-                )
-            })?;
+                            std::path::Path::new(&self.config.data_dir)
+                                .join(TRANSIT_KEK_FILE)
+                                .display()
+                        )
+                        .into());
+                    }
+                };
 
             let transit_config = TransitConfig::default();
             // 生产（已连接 server 集群）：加密态 DEK 落共享 KV —— 重启不丢密钥、

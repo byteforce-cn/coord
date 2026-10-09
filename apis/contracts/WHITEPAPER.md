@@ -510,7 +510,7 @@ MAJOR：破坏性变更（非必要不使用；须提前 ≥ 3 个月发布废�
    注入 32 字节密钥材料（环境变量 `COORD_TRANSIT_KEK`（hex64），或
    `<agent data_dir>/transit-kek.bin`（32 字节原始材料）），
    KEK = `HKDF-SHA256(材料, info="coord-transit-kek-v1:" || kek_id)`；
-   材料缺失/长度不符 ⇒ agent **拒绝启动**（fail-closed，无回落路径）。
+   材料缺失/长度不符 ⇒ agent **拒绝启动**（fail-closed；唯一例外为 `coord dev` 的 dev 专用默认材料，仅进程内 dev 调用链可达——`agent` 子命令无此路径，见 ADR-0009）。
    因此「拿到配置即可推导 KEK」**已不成立**（`kek_id` 降级为域分隔/审计标签）。
    仍未闭合的边界：**本方案不是外部 KMS**——材料以文件/环境形态落在 agent 主机上，
    主机被控即泄露；落盘 DEK 的静态保护另有一层 coord-server redb + Barrier 加密。

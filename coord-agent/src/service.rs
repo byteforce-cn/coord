@@ -206,6 +206,49 @@ impl Default for ServiceConfig {
     }
 }
 
+impl ServiceConfig {
+    /// dev 模式（`coord dev`）的内建服务集：**除 `replication` 外全部开启**
+    /// （见 ADR-0009）。
+    ///
+    /// - `transit`：开启，但由 dev 专用默认 KEK 支撑——`coord dev` 经
+    ///   `AgentServer::with_dev_default_transit_kek(true)` 在未注入材料时回退到
+    ///   内建 dev 默认材料（启动 WARN；生产路径不可达，缺材料仍 fail-closed）。
+    /// - `replication` 排除：跨 Agent ISR 复制；dev 是单 Agent 拓扑，
+    ///   没有复制对端。
+    ///
+    /// 这是 `coord dev` 的**显式预设**（进程内构造，不进 serde 面）：
+    /// 生产默认口径 `ServiceConfig::default()` / TOML 缺省仍全关（见
+    /// ADR-0001），本方法不得被用作任何配置路径的缺省值。
+    ///
+    /// 字段按穷举方式书写：`ServiceConfig` 新增字段时本构造触发编译错误，
+    /// 强制对新服务的 dev 归属做出显式决定（开 / 不开 + 理由）。
+    pub fn dev_mode() -> Self {
+        Self {
+            registry: true,
+            config_center: true,
+            lock: true,
+            idgen: true,
+            idgen_mode: default_idgen_mode(),
+            idgen_node_id: None,
+            leader_election: true,
+            event_notification: true,
+            cache: true,
+            mq: true,
+            workflow: true,
+            policy: true,
+            scheduler: true,
+            circuit_breaker: true,
+            rate_limiter: true,
+            feature_flags: true,
+            // dev 默认 KEK 支撑（回退逻辑在 AgentServer，见 ADR-0009）
+            transit: true,
+            pki: true,
+            // 例外集（ADR-0009）：单 Agent 拓扑无复制对端。
+            replication: false,
+        }
+    }
+}
+
 // ──── ServiceConfig 辅助 ────
 
 /// ID 生成器默认实现模式（雪花，决策）
@@ -366,5 +409,49 @@ policy = false
         assert!(config.registry);
         assert!(!config.lock);
         assert!(!config.workflow);
+    }
+
+    /// `dev_mode()` 预设 = 全部内建服务开启 − {replication}（见 ADR-0009）。
+    /// 破坏任一侧（漏开一个 / 误开排除项）⇒ 必红；同口径的端到端锚点在
+    /// `coord/tests/dev_mode_services_test.rs`（Plugin.List 清单集合相等 +
+    /// Registry / Config / Lock / Transit 真实调用）。
+    #[test]
+    fn test_dev_mode_preset_enables_all_but_replication() {
+        let dev = ServiceConfig::dev_mode();
+
+        // ── 开启集：与 README「17 内建服务」清单逐项对应（除下方例外）──
+        assert!(dev.registry, "dev must enable registry");
+        assert!(dev.config_center, "dev must enable config_center");
+        assert!(dev.lock, "dev must enable lock");
+        assert!(dev.idgen, "dev must enable idgen");
+        assert!(dev.leader_election, "dev must enable leader_election");
+        assert!(dev.event_notification, "dev must enable event_notification");
+        assert!(dev.cache, "dev must enable cache");
+        assert!(dev.mq, "dev must enable mq");
+        assert!(dev.workflow, "dev must enable workflow");
+        assert!(dev.policy, "dev must enable policy");
+        assert!(dev.scheduler, "dev must enable scheduler");
+        assert!(dev.circuit_breaker, "dev must enable circuit_breaker");
+        assert!(dev.rate_limiter, "dev must enable rate_limiter");
+        assert!(dev.feature_flags, "dev must enable feature_flags");
+        assert!(
+            dev.transit,
+            "dev must enable transit (backed by the dev-only default KEK; see ADR-0009)"
+        );
+        assert!(dev.pki, "dev must enable pki");
+
+        // ── 例外集：dev 单 Agent 拓扑无复制对端（ADR-0009）──
+        assert!(
+            !dev.replication,
+            "dev must NOT enable replication: dev is a single-agent topology"
+        );
+
+        // idgen 参数沿用默认（雪花 + 节点 ID 自动派生）：预设只翻转开关，
+        // 不动取值类字段。
+        assert_eq!(dev.idgen_mode, default_idgen_mode());
+        assert_eq!(dev.idgen_node_id, None);
+
+        // 生产默认口径不受本预设影响（另由 test_service_config_defaults 钉住）。
+        assert!(!ServiceConfig::default().registry);
     }
 }

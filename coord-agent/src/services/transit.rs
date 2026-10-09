@@ -79,6 +79,14 @@ pub const TRANSIT_KEK_ENV: &str = "COORD_TRANSIT_KEK";
 /// 数据目录内的密钥材料文件名（32 字节原始材料）
 pub const TRANSIT_KEK_FILE: &str = "transit-kek.bin";
 
+/// dev 模式默认 KEK 材料（`coord dev` 专用；见 ADR-0009）。
+///
+/// 固定值 ⇒ 只能用于本地开发：任何拿到源码的人都可解密用它加密的数据。
+/// 进程内**仅**经 `AgentServer::with_dev_default_transit_kek(true)` 的调用链
+/// （`coord dev`）在「env / 文件材料均缺失」时使用；`agent` 子命令 /
+/// `agent.toml` 不可达，生产路径缺材料仍 fail-closed（`resolve` 口径逐字不变）。
+pub const DEV_DEFAULT_KEK: [u8; KEK_MATERIAL_LEN] = *b"coord-dev-mode-insecure-kek-0000";
+
 /// 启动时注入的 KEK 密钥材料（32 字节）。
 ///
 /// `Debug` 刻意**不打印材料**（`Zeroizing<[u8;32]>` 的默认 Debug 会打印内部字节）。
@@ -998,6 +1006,14 @@ mod tests {
             err.contains("refusing to start"),
             "错误信息必须显式声明拒绝启动，实际: {err}"
         );
+    }
+
+    /// dev 默认 KEK（ADR-0009）：必须是可入构造的合法材料——长度由类型
+    /// `[u8; KEK_MATERIAL_LEN]` 在编译期钉住，这里再钉「构造器接受」。
+    #[test]
+    fn test_dev_default_kek_is_valid_material() {
+        TransitKekMaterial::from_bytes(&DEV_DEFAULT_KEK)
+            .expect("dev default KEK must be valid 32-byte material");
     }
 
     /// ② 文件路径：`<data_dir>/transit-kek.bin` 存在且为 32 字节 ⇒ 接受；

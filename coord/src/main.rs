@@ -3974,13 +3974,24 @@ async fn run_dev(
     }
 
     // 5. 构建 Agent 配置并启动
+    //
+    // 内建服务集：dev 走显式预设（除 replication 外全开，见 ADR-0009）——
+    // 否则一键 dev 里只有无条件注册的 handshake，registry / config / lock
+    // 等协调能力全部缺席。transit 由 dev 专用默认 KEK 支撑（builder 开关，
+    // 见下）。
     let agent_config = coord_agent::AgentConfig {
         agent_addr: agent_addr.clone(),
         http_addr: format!("{}:{}", bind_addr, http_port),
         data_dir: dev_data_dir.join("agent").to_string_lossy().to_string(),
         static_peers: vec![server_addr_for_agent],
+        services: coord_agent::ServiceConfig::dev_mode(),
         ..Default::default()
     };
+
+    tracing::info!(
+        "Dev mode: agent builtin services enabled (all except replication; transit \
+         uses the dev-only default KEK)"
+    );
 
     tracing::info!(
         "Dev mode: starting agent on {} (http: {})",
@@ -4002,7 +4013,10 @@ async fn run_dev(
         .with_metrics(coord_agent::metrics::AgentMetrics::new())
         .with_ready_flag(agent_ready_flag)
         // dev 专用放行（见 ADR-0008）：非 loopback 明文绑定仅经本调用链可达。
-        .with_dev_allow_insecure_non_loopback(allow_insecure);
+        .with_dev_allow_insecure_non_loopback(allow_insecure)
+        // dev 专用默认 KEK（见 ADR-0009）：仅当未注入 transit 材料时使用；
+        // `agent.toml` / `agent` 子命令不可达。
+        .with_dev_default_transit_kek(true);
     let (agent_shutdown_tx, agent_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let agent_handle = tokio::spawn(async move {

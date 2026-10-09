@@ -30,3 +30,4 @@
 | [ADR-0006](0006-bincode-p2-write-path-migration.md) | bincode 退场 P2：写路径 V2 迁移与剩余直写面信封化 | accepted |
 | [ADR-0007](0007-raft-rpc-payload-codec-marker.md) | bincode 退场 P2-RPC：Raft 载荷编码标记（单独评审） | accepted |
 | [ADR-0008](0008-dev-container-mode.md) | 容器化 dev 模式：dev 非 loopback 绑定的显式放行 | accepted |
+| [ADR-0009](0009-dev-mode-builtin-services.md) | dev 模式的 Agent 内建服务集与 dev 专用默认 KEK | accepted |
