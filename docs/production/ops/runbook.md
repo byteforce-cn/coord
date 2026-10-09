@@ -22,7 +22,7 @@
 
 ## 0. 通用前置
 
-- **二进制**：`coord`（`Cargo.toml` 的 `workspace.package.version` 为准，当前 `0.2.0`）。
+- **二进制**：`coord`（`Cargo.toml` 的 `workspace.package.version` 为准，当前 `0.2.1`）。
   版本自检：`coord --version` 必须与 `Cargo.toml:15` 一致。
 - **配置文件**：全局 `--config <path>`；CLI 参数覆盖配置文件同名字段。
 - **数据目录**：`--data-dir`（缺省 `server` = `/var/lib/coord`，`agent` = `/var/lib/coord-agent`）。

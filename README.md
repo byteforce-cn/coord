@@ -239,7 +239,7 @@ current status and the work required to close each item — is
 
 ## Status
 
-Version `0.2.0` (pre-1.0). The Raft engine (`openraft`) is an alpha dependency and Coord is **not yet recommended for production**. The consistency core is continuously exercised by the in-repo Jepsen project and CI; see [Testing & verification](#testing--verification) and [Limitations / non-goals](#limitations--non-goals) before adopting.
+Version `0.2.1` (pre-1.0). The Raft engine (`openraft`) is an alpha dependency and Coord is **not yet recommended for production**. The consistency core is continuously exercised by the in-repo Jepsen project and CI; see [Testing & verification](#testing--verification) and [Limitations / non-goals](#limitations--non-goals) before adopting.
 
 ## Documentation
 
