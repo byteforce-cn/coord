@@ -23,7 +23,10 @@ mod tests {
 
     type EventGrpc = EventClient<tonic::transport::Channel>;
 
-    async fn start_agent(server_addr: &str, data_dir: &std::path::Path) -> (String, tokio::task::JoinHandle<()>) {
+    async fn start_agent(
+        server_addr: &str,
+        data_dir: &std::path::Path,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let agent_port = find_port();
         let agent_addr = format!("127.0.0.1:{agent_port}");
         let mut config = AgentConfig {

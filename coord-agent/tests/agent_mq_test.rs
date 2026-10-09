@@ -663,7 +663,10 @@ fn test_delete_topic_full_reclaims_all_state() {
     assert!(before > 0);
 
     let stats = svc.delete_topic_full("a").unwrap();
-    assert_eq!(stats.messages_removed, 1, "主日志剩余 1 条（另一条已入 DLQ）");
+    assert_eq!(
+        stats.messages_removed, 1,
+        "主日志剩余 1 条（另一条已入 DLQ）"
+    );
     assert_eq!(stats.dlq_removed, 1);
     assert_eq!(stats.offsets_removed, 1);
     assert_eq!(stats.idempotency_removed, 2);

@@ -353,18 +353,10 @@ impl KvWorkflowStore {
             return false;
         };
         for d in defs {
-            let k = Self::def_key(
-                &d.document.namespace,
-                &d.document.name,
-                &d.document.version,
-            );
+            let k = Self::def_key(&d.document.namespace, &d.document.name, &d.document.version);
             if k == key {
                 return cache
-                    .delete_definition(
-                        &d.document.namespace,
-                        &d.document.name,
-                        &d.document.version,
-                    )
+                    .delete_definition(&d.document.namespace, &d.document.name, &d.document.version)
                     .await
                     .unwrap_or(false);
             }

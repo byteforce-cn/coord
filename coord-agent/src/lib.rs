@@ -1618,11 +1618,10 @@ impl AgentServer {
                         if let (Ok(offsets), Ok(nexts)) =
                             (svc.consumer_offsets(), svc.next_offsets_all())
                         {
-                            let next_map: std::collections::HashMap<(String, u32), u64> =
-                                nexts
-                                    .iter()
-                                    .map(|(t, p, n)| ((t.clone(), *p), *n))
-                                    .collect();
+                            let next_map: std::collections::HashMap<(String, u32), u64> = nexts
+                                .iter()
+                                .map(|(t, p, n)| ((t.clone(), *p), *n))
+                                .collect();
                             let consumers = offsets
                                 .into_iter()
                                 .map(|(group, topic, partition, committed)| {
@@ -1800,10 +1799,9 @@ impl AgentServer {
                          dev-mode default KEK (coord dev only; see ADR-0009). Data encrypted \
                          with it provides no confidentiality; never use outside local dev"
                     );
-                    let material = TransitKekMaterial::from_bytes(
-                        &crate::services::transit::DEV_DEFAULT_KEK,
-                    )
-                    .map_err(|e| format!("dev default KEK material invalid: {e}"))?;
+                    let material =
+                        TransitKekMaterial::from_bytes(&crate::services::transit::DEV_DEFAULT_KEK)
+                            .map_err(|e| format!("dev default KEK material invalid: {e}"))?;
                     TransitKekKeyring::single(&transit_config.kek_id, material)
                 }
                 Err(e) => {

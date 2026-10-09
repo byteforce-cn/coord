@@ -29,7 +29,10 @@ fn make_pki_with_store(store: Arc<MemoryPkiStore>) -> PkiService {
 fn test_pki_config_defaults() {
     let config = PkiConfig::default();
     assert_eq!(config.cert_ttl_hours, 24, "证书默认 24h TTL");
-    assert_eq!(config.expiry_warn_hours, 6, "到期告警窗口默认 6h（G-PKI-2）");
+    assert_eq!(
+        config.expiry_warn_hours, 6,
+        "到期告警窗口默认 6h（G-PKI-2）"
+    );
     assert_eq!(config.ca_cert_path, None);
 }
 
@@ -342,7 +345,9 @@ async fn test_expired_current_record_is_reissued_not_returned() {
 
     let store = Arc::new(MemoryPkiStore::new());
     let pki = make_pki_with_store(store.clone());
-    pki.init_ca("Expiry Semantics CA").await.expect("初始化 CA 失败");
+    pki.init_ca("Expiry Semantics CA")
+        .await
+        .expect("初始化 CA 失败");
 
     let cn = "svc-expiry.coord.local";
     let expired = CertRecord {
@@ -384,5 +389,8 @@ async fn test_expired_current_record_is_reissued_not_returned() {
     assert!(pki.verify_cert(&recovered.cert_pem).expect("verify"));
 
     // 轮换链：最新 active 的 parent 指向上一代
-    assert_eq!(recovered.parent_serial.as_deref(), Some(rotated.serial.as_str()));
+    assert_eq!(
+        recovered.parent_serial.as_deref(),
+        Some(rotated.serial.as_str())
+    );
 }

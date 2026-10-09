@@ -304,7 +304,8 @@ impl SchedulerService {
 
     /// 标记任务完成（校验认领归属）
     pub async fn mark_completed(&self, task_id: &str, worker_id: &str) -> ServiceResult<()> {
-        self.mark_completed_impl(task_id, Some(worker_id), None).await
+        self.mark_completed_impl(task_id, Some(worker_id), None)
+            .await
     }
 
     /// 按 claim 句柄标记完成（wire 无 worker 身份；`job_id` 即凭据）

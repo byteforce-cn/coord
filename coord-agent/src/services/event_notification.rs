@@ -598,11 +598,11 @@ mod tests {
     fn test_event_seq_key_is_order_preserving() {
         let k1 = Event::seq_key(2);
         let k2 = Event::seq_key(10);
-        assert_eq!(String::from_utf8_lossy(&k1), "/_events/e/00000000000000000002");
-        assert!(
-            k1 < k2,
-            "定长补零 ⇒ 键序 = 序号序（补投扫描依赖）"
+        assert_eq!(
+            String::from_utf8_lossy(&k1),
+            "/_events/e/00000000000000000002"
         );
+        assert!(k1 < k2, "定长补零 ⇒ 键序 = 序号序（补投扫描依赖）");
         // 前缀必须包含全部事件键（range 扫描的分界）
         assert!(k1.starts_with(Event::EVENTS_PREFIX));
         assert!(k2.starts_with(Event::EVENTS_PREFIX));

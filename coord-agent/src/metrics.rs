@@ -694,7 +694,9 @@ impl AgentMetrics {
         out.push_str("# TYPE coord_agent_policy_bundle_last_sync_timestamp gauge\n");
         out.push_str(&format!(
             "coord_agent_policy_bundle_last_sync_timestamp {}\n",
-            self.inner.policy_bundle_last_sync_unix.load(Ordering::Relaxed)
+            self.inner
+                .policy_bundle_last_sync_unix
+                .load(Ordering::Relaxed)
         ));
         out.push_str(
             "# HELP coord_agent_policy_bundle_sync_total Bundle load/reconcile events by result\n",
@@ -710,9 +712,7 @@ impl AgentMetrics {
         ));
 
         // ──── PKI 到期观测（G-PKI-2；周期采样自 PkiService）────
-        out.push_str(
-            "# HELP coord_agent_pki_certs_active Currently active PKI certificates\n",
-        );
+        out.push_str("# HELP coord_agent_pki_certs_active Currently active PKI certificates\n");
         out.push_str("# TYPE coord_agent_pki_certs_active gauge\n");
         out.push_str(&format!(
             "coord_agent_pki_certs_active {}\n",
@@ -734,7 +734,9 @@ impl AgentMetrics {
         out.push_str("# TYPE coord_agent_pki_expiry_warn_window_hours gauge\n");
         out.push_str(&format!(
             "coord_agent_pki_expiry_warn_window_hours {}\n",
-            self.inner.pki_expiry_warn_window_hours.load(Ordering::Relaxed)
+            self.inner
+                .pki_expiry_warn_window_hours
+                .load(Ordering::Relaxed)
         ));
 
         // ──── 插件指标 ────
@@ -917,13 +919,7 @@ mod tests {
     fn test_render_mq_consumer_lag_and_policy_bundle_metrics() {
         let m = AgentMetrics::new();
         m.set_mq_consumer_lag_stats(
-            vec![(
-                "orders".to_string(),
-                "cg".to_string(),
-                0u32,
-                2u64,
-                1u64,
-            )],
+            vec![("orders".to_string(), "cg".to_string(), 0u32, 2u64, 1u64)],
             vec![("orders".to_string(), 0u32, 3u64)],
         );
         m.set_policy_bundle_stats(2, 1_700_000_000, 5, 1);
@@ -944,7 +940,10 @@ mod tests {
             text.contains("coord_agent_mq_next_offset{topic=\"orders\",partition=\"0\"} 3"),
             "{text}"
         );
-        assert!(text.contains("coord_agent_policy_bundles_loaded 2"), "{text}");
+        assert!(
+            text.contains("coord_agent_policy_bundles_loaded 2"),
+            "{text}"
+        );
         assert!(
             text.contains("coord_agent_policy_bundle_last_sync_timestamp 1700000000"),
             "{text}"

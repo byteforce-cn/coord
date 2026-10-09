@@ -2578,7 +2578,10 @@ do:
         store.save_instance(&inst).await.unwrap();
 
         // 实例引用存在（任意状态）⇒ 拒绝删定义
-        let err = svc.delete_definition(&ns, &name, &version).await.unwrap_err();
+        let err = svc
+            .delete_definition(&ns, &name, &version)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, WorkflowEngineError::FailedPrecondition(_)),
             "expected FailedPrecondition while instances reference the definition, got {err:?}"
@@ -2588,7 +2591,10 @@ do:
         svc.delete_instance(&inst.id).await.unwrap();
         svc.delete_definition(&ns, &name, &version).await.unwrap();
         assert!(svc.get_definition(&def_id).await.unwrap().is_none());
-        let err = svc.delete_definition(&ns, &name, &version).await.unwrap_err();
+        let err = svc
+            .delete_definition(&ns, &name, &version)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, WorkflowEngineError::NotFound(_)),
             "second delete should be NotFound, got {err:?}"
@@ -3261,9 +3267,7 @@ events:
             for _ in 0..60 {
                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 let cur = svc.get_instance(&inst.id).await.unwrap().unwrap();
-                if cur.status == InstanceStatus::Completed
-                    || cur.status == InstanceStatus::Failed
-                {
+                if cur.status == InstanceStatus::Completed || cur.status == InstanceStatus::Failed {
                     terminal = true;
                     break;
                 }

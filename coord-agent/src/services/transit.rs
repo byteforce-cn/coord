@@ -221,7 +221,12 @@ impl TransitKekKeyring {
         primary_id: &str,
         primary: TransitKekMaterial,
     ) -> Result<Self, String> {
-        Self::resolve_with_env(data_dir, primary_id, primary, std::env::var(TRANSIT_KEK_OLD_ENV).ok())
+        Self::resolve_with_env(
+            data_dir,
+            primary_id,
+            primary,
+            std::env::var(TRANSIT_KEK_OLD_ENV).ok(),
+        )
     }
 
     /// 同 [`Self::resolve_with`]，历史材料环境变量显式传入（测试用；
@@ -282,11 +287,9 @@ impl TransitKekKeyring {
 
     /// `kek_id:hex64` / `kek_id<空白>hex64` 单条历史材料
     fn parse_old_entry(entry: &str) -> Result<(String, TransitKekMaterial), String> {
-        let (id, hex) = entry
-            .split_once([':', ' ', '\t'])
-            .ok_or_else(|| {
-                format!("invalid historical KEK entry '{entry}' (expect `kek_id:hex64`)")
-            })?;
+        let (id, hex) = entry.split_once([':', ' ', '\t']).ok_or_else(|| {
+            format!("invalid historical KEK entry '{entry}' (expect `kek_id:hex64`)")
+        })?;
         let id = id.trim();
         let hex = hex.trim();
         if id.is_empty() {
@@ -462,7 +465,10 @@ impl TransitService {
 
     /// 按标识选材料（未注入返回 None）
     fn kek_for_id(&self, kek_id: &str) -> Option<&[u8; DEK_LEN]> {
-        self.keks.iter().find(|(id, _)| id == kek_id).map(|(_, k)| k)
+        self.keks
+            .iter()
+            .find(|(id, _)| id == kek_id)
+            .map(|(_, k)| k)
     }
 
     /// 解包 DEK（多材料，G-TR-1）：
@@ -470,7 +476,11 @@ impl TransitService {
     /// - `kek_hint` 命中已注入材料 → 只用该材料解（解不开即报错，不降级到试解）；
     /// - `kek_hint` 缺失/未注入（旧格式、旧记录、材料已下线）→ 按「主 → 历史」
     ///   逐材料试解；全部失败 ⇒ 报错列出可用材料标识（fail-loud）。
-    fn unwrap_dek(&self, dek_packet: &[u8], kek_hint: Option<&str>) -> Result<[u8; DEK_LEN], String> {
+    fn unwrap_dek(
+        &self,
+        dek_packet: &[u8],
+        kek_hint: Option<&str>,
+    ) -> Result<[u8; DEK_LEN], String> {
         if dek_packet.len() < DEK_PACKET_LEN {
             return Err("invalid DEK packet".into());
         }
@@ -503,7 +513,10 @@ impl TransitService {
                 format!(
                     "KEK material '{hint}' is not injected; inject it (COORD_TRANSIT_KEK_OLD) \
                      to decrypt or rewrap legacy ciphertext (available: {:?})",
-                    self.keks.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>()
+                    self.keks
+                        .iter()
+                        .map(|(id, _)| id.as_str())
+                        .collect::<Vec<_>>()
                 )
             })?;
             return try_unwrap(kek, dek_packet);
@@ -517,7 +530,10 @@ impl TransitService {
         Err(format!(
             "DEK decrypt failed: none of the injected KEK materials match \
              (available: {:?})",
-            self.keks.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>()
+            self.keks
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>()
         ))
     }
 
@@ -779,7 +795,12 @@ impl TransitService {
                 .get(old_dek_id)
                 .cloned()
                 .ok_or_else(|| format!("DEK '{old_dek_id}' not found for rewrap"))?;
-            (entry.packet, entry.created_at, entry.expires_at, entry.kek_id)
+            (
+                entry.packet,
+                entry.created_at,
+                entry.expires_at,
+                entry.kek_id,
+            )
         };
         if expires_at != 0 && now_unix() >= expires_at {
             return Err(format!("DEK '{old_dek_id}' expired, refusing to rewrap"));
@@ -1139,7 +1160,11 @@ fn parse_packet_layout(packet: &[u8], fallback_dek_id: &str) -> Result<PacketLay
             .to_string();
         return Ok(PacketLayout {
             dek_id,
-            kek_id: if kek_id.is_empty() { None } else { Some(kek_id) },
+            kek_id: if kek_id.is_empty() {
+                None
+            } else {
+                Some(kek_id)
+            },
             data_nonce_start: PACKET_V2_MAGIC.len() + kek_end,
             dek_packet_start: PACKET_V2_MAGIC.len() + kek_end + NONCE_LEN,
         });
@@ -1867,10 +1892,7 @@ mod tests {
             .decrypt_persisted(&packet2, &dek_id2)
             .await
             .expect_err("旧材料未注入必须 fail-loud");
-        assert!(
-            err.contains("is not injected"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("is not injected"), "unexpected error: {err}");
     }
 
     /// 旧记录（无材料标识）⇒ 解密按「主 → 历史」试解（迁移兼容路径）
@@ -1887,10 +1909,7 @@ mod tests {
         )
         .expect("old svc");
 
-        let (packet, dek_id) = old_svc
-            .encrypt_persisted(b"legacy")
-            .await
-            .expect("encrypt");
+        let (packet, dek_id) = old_svc.encrypt_persisted(b"legacy").await.expect("encrypt");
 
         // 抹掉 KV 记录的材料标识（模拟多材料上线前的旧记录）
         let entry_packet = old_svc
@@ -1960,7 +1979,10 @@ mod tests {
             Some(old_env_for(&[("new", 1)])),
         )
         .expect_err("duplicate primary id must be rejected");
-        assert!(err.contains("duplicates the primary id"), "unexpected: {err}");
+        assert!(
+            err.contains("duplicates the primary id"),
+            "unexpected: {err}"
+        );
 
         // 历史 id 重复 ⇒ 拒绝
         let err = TransitKekKeyring::resolve_with_env(
@@ -1970,7 +1992,10 @@ mod tests {
             Some(old_env_for(&[("old-a", 1), ("old-a", 3)])),
         )
         .expect_err("duplicate historical id must be rejected");
-        assert!(err.contains("duplicate historical KEK id"), "unexpected: {err}");
+        assert!(
+            err.contains("duplicate historical KEK id"),
+            "unexpected: {err}"
+        );
 
         // 非法条目（缺 hex）⇒ 拒绝，不静默跳过
         let err = TransitKekKeyring::resolve_with_env(

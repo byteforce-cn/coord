@@ -436,9 +436,7 @@ impl PkiStore for KvPkiStore {
             .await
             .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
         match kvs.first() {
-            Some((_k, v, _lease, version)) => {
-                Ok(Some((deserialize_cert(v)?, *version)))
-            }
+            Some((_k, v, _lease, version)) => Ok(Some((deserialize_cert(v)?, *version))),
             None => Ok(None),
         }
     }

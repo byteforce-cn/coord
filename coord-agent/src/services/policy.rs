@@ -1322,7 +1322,10 @@ mod tests {
                 serde_json::to_vec(&disabled).expect("ser"),
             ),
             // 坏记录：跳过并计数，不阻断全量加载
-            (BundleRecord::storage_key("t1/default/p3"), b"not-json".to_vec()),
+            (
+                BundleRecord::storage_key("t1/default/p3"),
+                b"not-json".to_vec(),
+            ),
         ];
 
         let (loaded, skipped) = collect_enabled_bundles(&pairs);

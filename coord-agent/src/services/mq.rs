@@ -895,7 +895,10 @@ impl MessageQueueService {
     /// 范围：消息 / DLQ / next-offset（topic 前缀）+ 消费位点（内嵌 topic 段，
     /// 全表扫描匹配）+ 幂等索引（topic 前缀）；同步做记账净额调整。
     /// 复制日志/序列号**不**在此清扫：落后的 Follower 依赖复制日志重放删除决定。
-    fn purge_topic_tx(wtx: &redb::WriteTransaction, topic: &str) -> ServiceResult<DeleteTopicStats> {
+    fn purge_topic_tx(
+        wtx: &redb::WriteTransaction,
+        topic: &str,
+    ) -> ServiceResult<DeleteTopicStats> {
         let mut stats = DeleteTopicStats::default();
         let mut account_removed: u64 = 0;
 

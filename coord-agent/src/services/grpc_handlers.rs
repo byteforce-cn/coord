@@ -59,9 +59,9 @@ use coord_proto::agent::{
     MqDeleteTopicResponse, MqGetTopicLeaderRequest, MqGetTopicLeaderResponse, MqMessage,
     MqMoveToDlqRequest, MqMoveToDlqResponse, MqPollDlqRequest, MqPollDlqResponse, MqPollRequest,
     MqPollResponse, MqPublishRequest, MqPublishResponse, MqSubscribeRequest, PolicyBundleInfo,
-    PolicyBundleVersionInfo, PolicyCheckPermissionRequest,
-    PolicyCheckPermissionResponse, PolicyDeleteBundleRequest, PolicyDeleteBundleResponse,
-    PolicyEvaluateRequest, PolicyEvaluateResponse, PolicyExplainRequest, PolicyExplainResponse,
+    PolicyBundleVersionInfo, PolicyCheckPermissionRequest, PolicyCheckPermissionResponse,
+    PolicyDeleteBundleRequest, PolicyDeleteBundleResponse, PolicyEvaluateRequest,
+    PolicyEvaluateResponse, PolicyExplainRequest, PolicyExplainResponse,
     PolicyListBundleVersionsRequest, PolicyListBundleVersionsResponse, PolicyListBundlesRequest,
     PolicyListBundlesResponse, PolicyPutBundleRequest, PolicyPutBundleResponse,
     PolicyRollbackBundleRequest, PolicyRollbackBundleResponse, PolicySetBundleEnabledRequest,
@@ -74,10 +74,9 @@ use coord_proto::agent::{
     TransitDecryptRequest, TransitDecryptResponse, TransitEncryptRequest, TransitEncryptResponse,
     TransitHmacSignRequest, TransitHmacSignResponse, TransitHmacVerifyRequest,
     TransitHmacVerifyResponse, TransitRewrapRequest, TransitRewrapResponse, WorkflowCancelRequest,
-    WorkflowCancelResponse,
-    WorkflowDefinitionSummary, WorkflowDefinitionVersion, WorkflowDeleteDefinitionRequest,
-    WorkflowDeleteDefinitionResponse, WorkflowDeleteInstanceRequest, WorkflowDeleteInstanceResponse,
-    WorkflowDeployRequest,
+    WorkflowCancelResponse, WorkflowDefinitionSummary, WorkflowDefinitionVersion,
+    WorkflowDeleteDefinitionRequest, WorkflowDeleteDefinitionResponse,
+    WorkflowDeleteInstanceRequest, WorkflowDeleteInstanceResponse, WorkflowDeployRequest,
     WorkflowDeployResponse, WorkflowGetDefinitionRequest, WorkflowGetDefinitionResponse,
     WorkflowGetStatusRequest, WorkflowGetStatusResponse, WorkflowInstanceSummary,
     WorkflowListDefinitionVersionsRequest, WorkflowListDefinitionVersionsResponse,
@@ -138,10 +137,8 @@ fn mq_not_leader_status(shard: &str, leader: &str) -> Status {
     let status = Status::failed_precondition(format!(
         "not leader for shard '{shard}' (leader is {leader})"
     ));
-    let mut status = coord_core::error_code::attach(
-        status,
-        coord_core::error_code::CoordErrorCode::NotLeader,
-    );
+    let mut status =
+        coord_core::error_code::attach(status, coord_core::error_code::CoordErrorCode::NotLeader);
     if let Ok(v) = tonic::metadata::MetadataValue::try_from(leader) {
         status.metadata_mut().insert(MQ_LEADER_HINT_TRAILER, v);
     }
@@ -417,9 +414,12 @@ impl EventSvc for EventNotificationService {
         let cursor: Option<u64> = if req.cursor.trim().is_empty() {
             None
         } else {
-            Some(req.cursor.trim().parse::<u64>().map_err(|_| {
-                Status::invalid_argument("event cursor must be a decimal seq")
-            })?)
+            Some(
+                req.cursor
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|_| Status::invalid_argument("event cursor must be a decimal seq"))?,
+            )
         };
 
         // 先订阅 live（在补投扫描之前建立 ⇒ 扫描期间的新事件不漏、经 seq 去重）
@@ -942,7 +942,10 @@ impl Mq for MessageQueueService {
             .map_err(map_service_error)?
             .is_some();
         if !exists {
-            return Err(Status::not_found(format!("topic '{}' not found", req.topic)));
+            return Err(Status::not_found(format!(
+                "topic '{}' not found",
+                req.topic
+            )));
         }
 
         match self
@@ -1082,9 +1085,11 @@ impl Mq for MessageQueueService {
             let topic = req.topic.clone();
             let reason = req.reason.clone();
             let detail = req.detail.clone();
-            self.run_blocking(move |me| me.move_to_dlq(&topic, partition, offset, &reason, &detail))
-                .await
-                .map_err(map_service_error)?;
+            self.run_blocking(move |me| {
+                me.move_to_dlq(&topic, partition, offset, &reason, &detail)
+            })
+            .await
+            .map_err(map_service_error)?;
         }
         Ok(Response::new(MqMoveToDlqResponse {}))
     }

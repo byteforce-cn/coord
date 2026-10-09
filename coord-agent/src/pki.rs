@@ -332,12 +332,7 @@ impl PkiService {
                 // 首次签发：CAS Version==0 原子创建
                 None => {
                     let new_record = self
-                        .sign_new_cert_blocking(
-                            common_name,
-                            ttl_seconds,
-                            CertStatus::Active,
-                            None,
-                        )
+                        .sign_new_cert_blocking(common_name, ttl_seconds, CertStatus::Active, None)
                         .await?;
                     match self.store.create_cert(common_name, &new_record).await {
                         Ok(()) => return Ok(new_record.into()),
@@ -942,7 +937,11 @@ mod tests {
             pki.verify_cert(&cert.cert_pem).expect("verify"),
             "换新后的证书必须可验签"
         );
-        assert_eq!(cert.parent_serial.as_deref(), Some("expired-0x1"), "轮换链指向被替换的 serial");
+        assert_eq!(
+            cert.parent_serial.as_deref(),
+            Some("expired-0x1"),
+            "轮换链指向被替换的 serial"
+        );
 
         // store 中当前 active 已是新证书；过期记录进入历史（按 serial 仍可寻回）
         let (active, version) = store
@@ -968,7 +967,10 @@ mod tests {
         pki.init_ca("Expiry CA").await.expect("init");
 
         store
-            .create_cert("svc-expired.local", &expired_record("svc-expired.local", "expired-0x2"))
+            .create_cert(
+                "svc-expired.local",
+                &expired_record("svc-expired.local", "expired-0x2"),
+            )
             .await
             .expect("seed expired");
 
@@ -977,7 +979,9 @@ mod tests {
             .await
             .expect("rotate over expired");
         assert_ne!(cert.serial, "expired-0x2");
-        assert!(!cert.key_pem.starts_with("-----BEGIN PRIVATE KEY-----\nEXPIRED"));
+        assert!(!cert
+            .key_pem
+            .starts_with("-----BEGIN PRIVATE KEY-----\nEXPIRED"));
         assert!(pki.verify_cert(&cert.cert_pem).expect("verify"));
     }
 
@@ -989,7 +993,10 @@ mod tests {
         pki.init_ca("Recover CA").await.expect("init");
 
         store
-            .create_cert("svc-recover.local", &expired_record("svc-recover.local", "expired-0x3"))
+            .create_cert(
+                "svc-recover.local",
+                &expired_record("svc-recover.local", "expired-0x3"),
+            )
             .await
             .expect("seed expired");
 
@@ -1018,13 +1025,19 @@ mod tests {
         let first = pki.issue_cert("svc-ttl.local", 1).await.expect("issue");
 
         // 过期前：幂等返回同一证书
-        let same = pki.issue_cert("svc-ttl.local", 0).await.expect("issue again");
+        let same = pki
+            .issue_cert("svc-ttl.local", 0)
+            .await
+            .expect("issue again");
         assert_eq!(first.serial, same.serial, "过期前必须幂等");
 
         // 越过 TTL（1s）→ 再次 issue 必须换新
         // 留出 2 秒级余量：not_after 为秒级截断，1s TTL 在跨秒边界上最多需 ~2s 才判过期
         tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
-        let renewed = pki.issue_cert("svc-ttl.local", 0).await.expect("issue after expiry");
+        let renewed = pki
+            .issue_cert("svc-ttl.local", 0)
+            .await
+            .expect("issue after expiry");
         assert_ne!(renewed.serial, first.serial, "过期后必须换新 serial");
         assert_ne!(renewed.key_pem, first.key_pem, "过期后必须换新密钥");
         assert!(pki.verify_cert(&renewed.cert_pem).expect("verify"));
@@ -1036,7 +1049,10 @@ mod tests {
         let store = Arc::new(MemoryPkiStore::new());
 
         let seed_svc = PkiService::with_store(PkiConfig::default(), store.clone());
-        seed_svc.init_ca("Concurrent Rotate CA").await.expect("init");
+        seed_svc
+            .init_ca("Concurrent Rotate CA")
+            .await
+            .expect("init");
         let first = seed_svc
             .issue_cert("svc-conc.local", 0)
             .await
@@ -1090,7 +1106,9 @@ mod tests {
         pki.init_ca("Snapshot CA").await.expect("init");
 
         // 1h TTL → 窗口内；48h → 不在窗口
-        pki.issue_cert("short.local", 3600).await.expect("issue short");
+        pki.issue_cert("short.local", 3600)
+            .await
+            .expect("issue short");
         pki.issue_cert("long.local", 48 * 3600)
             .await
             .expect("issue long");
@@ -1132,10 +1150,12 @@ mod tests {
         assert_ne!(cert_a.serial, "expired-0x9");
         assert_ne!(cert_b.serial, "expired-0x9");
         assert_ne!(
-            cert_a.key_pem, "-----BEGIN PRIVATE KEY-----\nEXPIRED\n-----END PRIVATE KEY-----"
+            cert_a.key_pem,
+            "-----BEGIN PRIVATE KEY-----\nEXPIRED\n-----END PRIVATE KEY-----"
         );
         assert_ne!(
-            cert_b.key_pem, "-----BEGIN PRIVATE KEY-----\nEXPIRED\n-----END PRIVATE KEY-----"
+            cert_b.key_pem,
+            "-----BEGIN PRIVATE KEY-----\nEXPIRED\n-----END PRIVATE KEY-----"
         );
     }
 }
