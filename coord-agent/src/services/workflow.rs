@@ -3,8 +3,15 @@
 // 实现 BaseService trait，提供工作流定义管理与实例执行能力。
 // 基于 Coord 核心原语（KV + Txn + Lease + Watch）构建。
 //
-// 当前状态: 基础工作流定义 CRUD + 实例状态管理。
-// 完整的 DSL 解释器和 Saga 补偿执行器为后续扩展蓝图。
+// 当前状态（与 docs/production/workflow-semantics.md / STATUS.md 同一口径）：
+//   - CNCF SW DSL 全状态编译（coord-core sw.rs）+ 端到端执行（phase4
+//     WorkflowEngineService）；
+//   - Saga 补偿：`compensatedBy` → catch-all 转场 + 补偿动作派发；三步
+//     逆序补偿端到端判据
+//     phase4_tests::test_sw_three_step_failure_compensates_in_reverse_order_and_replays；
+//   - 保留策略：`DeleteInstance` / `DeleteDefinition`（显式、能力门禁；
+//     无自动 TTL/归档）。
+// 语义细节（补偿幂等/重试/超时/信号/保留）见 docs/production/workflow-semantics.md。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -2194,6 +2201,93 @@ pub mod phase4 {
                 .await
                 .map_err(|e| format!("store error: {e}"))
         }
+
+        /// 测试辅助：暴露 store 以构造确定性状态（仅测试构建可见）。
+        #[cfg(test)]
+        pub(crate) fn store_for_test(
+            &self,
+        ) -> Arc<dyn coord_core::workflow::ports::WorkflowStore + Send + Sync> {
+            Arc::clone(&self.store)
+        }
+
+        /// 删除实例（保留策略，G-WF-1）。
+        ///
+        /// 仅终态实例（COMPLETED / FAULTED / CANCELLED）可删；运行/等待/挂起中
+        /// 返回 `FailedPrecondition`（先 Cancel）。删除不可回滚（无归档副本）。
+        /// 读与删之间的并发删除按幂等成功处理（终态一致：不存在）。
+        pub async fn delete_instance(&self, instance_id: &str) -> Result<(), WorkflowEngineError> {
+            let inst = self
+                .store
+                .load_instance(instance_id)
+                .await
+                .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?
+                .ok_or_else(|| {
+                    WorkflowEngineError::NotFound(format!("instance not found: {instance_id}"))
+                })?;
+
+            if !inst.status.is_terminal() {
+                return Err(WorkflowEngineError::FailedPrecondition(format!(
+                    "instance is not in a terminal state ({:?}); cancel it first",
+                    inst.status
+                )));
+            }
+
+            let _ = self
+                .store
+                .delete_instance(instance_id)
+                .await
+                .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?;
+            Ok(())
+        }
+
+        /// 删除定义（保留策略，G-WF-1）。
+        ///
+        /// 守卫：**任何**实例（含终态）引用该 `(namespace, name, version)` 都
+        /// 不允许删除（先删实例）。删除后 `GetDefinition` / 回滚到该版本返回
+        /// `NotFound`；同名同版本可重新 Deploy（= 全新定义）。
+        pub async fn delete_definition(
+            &self,
+            namespace: &str,
+            name: &str,
+            version: &str,
+        ) -> Result<(), WorkflowEngineError> {
+            let exists = self
+                .store
+                .load_definition(namespace, name, version)
+                .await
+                .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?
+                .is_some();
+            if !exists {
+                return Err(WorkflowEngineError::NotFound(format!(
+                    "definition not found: {namespace}/{name}@{version}"
+                )));
+            }
+
+            // 引用检查以存储为准（KV 后端会全量扫实例表并刷新缓存，避免缓存滞后
+            // 误放行）。保留策略是低频运维操作，全量扫描代价可接受。
+            let instances = self
+                .store
+                .list_instances(None, None, usize::MAX, None)
+                .await
+                .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?;
+            let referenced = instances.iter().any(|i| {
+                i.definition_ns == namespace
+                    && i.definition_name == name
+                    && i.definition_version == version
+            });
+            if referenced {
+                return Err(WorkflowEngineError::FailedPrecondition(format!(
+                    "definition {namespace}/{name}@{version} is still referenced by one or more instances; delete them first"
+                )));
+            }
+
+            let _ = self
+                .store
+                .delete_definition(namespace, name, version)
+                .await
+                .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?;
+            Ok(())
+        }
     }
 
     impl Default for WorkflowEngineService {
@@ -2250,7 +2344,7 @@ pub mod phase4 {
 #[cfg(test)]
 mod phase4_tests {
     use super::phase4::*;
-    use coord_core::workflow::model::{InstanceStatus, Task};
+    use coord_core::workflow::model::{InstanceStatus, Task, WorkflowInstance};
     use coord_core::workflow::ports::{DispatchResult, TaskDispatcher};
 
     fn sample_linear_yaml() -> String {
@@ -2414,6 +2508,91 @@ do:
             let loaded = svc.get_instance(&inst.id).await.unwrap().unwrap();
             assert_eq!(loaded.status, InstanceStatus::Cancelled);
         }
+    }
+
+    #[tokio::test]
+    async fn test_engine_delete_instance_requires_terminal_state() {
+        let svc = WorkflowEngineService::new_for_test();
+        let store = svc.store_for_test();
+
+        // 非终态（挂起/运行）不可删，必须 FailedPrecondition
+        let yaml = sample_wait_yaml();
+        let def_id = svc.deploy_definition("test", &yaml).await.unwrap();
+        let inst = svc
+            .start_instance(&def_id, serde_json::json!({}))
+            .await
+            .unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let loaded = svc.get_instance(&inst.id).await.unwrap().unwrap();
+        if !loaded.status.is_terminal() {
+            let err = svc.delete_instance(&inst.id).await.unwrap_err();
+            assert!(
+                matches!(err, WorkflowEngineError::FailedPrecondition(_)),
+                "expected FailedPrecondition for non-terminal instance, got {err:?}"
+            );
+        }
+
+        // 终态可删；再删 → NotFound（不存在报错，不是静默成功）
+        let mut terminal = loaded.clone();
+        terminal.status = InstanceStatus::Cancelled;
+        store.save_instance(&terminal).await.unwrap();
+        svc.delete_instance(&inst.id).await.unwrap();
+        assert!(svc.get_instance(&inst.id).await.unwrap().is_none());
+        let err = svc.delete_instance(&inst.id).await.unwrap_err();
+        assert!(
+            matches!(err, WorkflowEngineError::NotFound(_)),
+            "second delete should be NotFound, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_engine_delete_definition_guard_and_roundtrip() {
+        let svc = WorkflowEngineService::new_for_test();
+        let store = svc.store_for_test();
+
+        let yaml = sample_linear_yaml();
+        let def_id = svc.deploy_definition("test", &yaml).await.unwrap();
+        let def = svc.get_definition(&def_id).await.unwrap().unwrap();
+        let (ns, name, version) = (
+            def.document.namespace.clone(),
+            def.document.name.clone(),
+            def.document.version.clone(),
+        );
+
+        // 直接构造一个引用该定义的终态实例（确定性；不依赖运行时推进节奏）
+        let inst = WorkflowInstance {
+            id: "inst-ref-1".into(),
+            definition_ns: ns.clone(),
+            definition_name: name.clone(),
+            definition_version: version.clone(),
+            status: InstanceStatus::Cancelled,
+            context: serde_json::json!({}),
+            task_stack: vec![],
+            current_task_index: 0,
+            created_at: 0,
+            updated_at: 0,
+            output: None,
+            fault: None,
+            suspension_meta: None,
+        };
+        store.save_instance(&inst).await.unwrap();
+
+        // 实例引用存在（任意状态）⇒ 拒绝删定义
+        let err = svc.delete_definition(&ns, &name, &version).await.unwrap_err();
+        assert!(
+            matches!(err, WorkflowEngineError::FailedPrecondition(_)),
+            "expected FailedPrecondition while instances reference the definition, got {err:?}"
+        );
+
+        // 删除引用实例后可删定义；再删 → NotFound
+        svc.delete_instance(&inst.id).await.unwrap();
+        svc.delete_definition(&ns, &name, &version).await.unwrap();
+        assert!(svc.get_definition(&def_id).await.unwrap().is_none());
+        let err = svc.delete_definition(&ns, &name, &version).await.unwrap_err();
+        assert!(
+            matches!(err, WorkflowEngineError::NotFound(_)),
+            "second delete should be NotFound, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -3004,6 +3183,118 @@ events:
         assert!(
             requests.iter().any(|r| r.contains("/refund")),
             "补偿动作未真正 dispatch（服务端未收到 /refund 请求）：{requests:?}"
+        );
+    }
+
+    /// 三步流程 + 逆序补偿链：step1 ✓ → step2 ✓ → step3 ✗ ⇒ undo2 → undo1。
+    ///
+    /// `step3.compensatedBy = undo2` 把「第 3 步失败」路由进补偿链；`undo2` 自身
+    /// 完成后 `transition` 到 `undo1`（补偿按**逆序**逐级回溯，由 DSL 连线显式
+    /// 表达——引擎不内置自动逆序栈，见 `docs/production/workflow-semantics.md`）。
+    fn sample_reverse_compensation_sw(ok_addr: &str, dead_url: &str) -> String {
+        format!(
+            r#"{{
+          "id": "rev-comp-wf",
+          "version": "1.0",
+          "start": "step1",
+          "functions": [
+            {{ "name": "charge1", "operation": "http://{ok_addr}/charge1" }},
+            {{ "name": "charge2", "operation": "http://{ok_addr}/charge2" }},
+            {{ "name": "charge3", "operation": "{dead_url}" }},
+            {{ "name": "refund2", "operation": "http://{ok_addr}/refund2" }},
+            {{ "name": "refund1", "operation": "http://{ok_addr}/refund1" }}
+          ],
+          "states": [
+            {{ "name": "step1", "type": "operation",
+              "actions": [ {{ "name": "c1",
+                              "functionRef": {{ "refName": "charge1" }} }} ],
+              "compensatedBy": "undo1",
+              "transition": "step2" }},
+            {{ "name": "step2", "type": "operation",
+              "actions": [ {{ "name": "c2",
+                              "functionRef": {{ "refName": "charge2" }} }} ],
+              "compensatedBy": "undo2",
+              "transition": "step3" }},
+            {{ "name": "step3", "type": "operation",
+              "actions": [ {{ "name": "c3",
+                              "functionRef": {{ "refName": "charge3" }} }} ],
+              "compensatedBy": "undo2",
+              "transition": "done" }},
+            {{ "name": "undo2", "type": "compensate",
+              "actions": [ {{ "name": "r2",
+                              "functionRef": {{ "refName": "refund2" }} }} ],
+              "transition": "undo1" }},
+            {{ "name": "undo1", "type": "compensate",
+              "actions": [ {{ "name": "r1",
+                              "functionRef": {{ "refName": "refund1" }} }} ],
+              "end": true }},
+            {{ "name": "done", "type": "inject",
+              "data": {{ "ok": true }}, "end": true }}
+          ]
+        }}"#
+        )
+    }
+
+    /// G-WF-1 验收锚点：三步流程中途失败 → **逆序**补偿且可重放。
+    ///
+    /// 同一 DSL 起两个实例，逐实例断言动作序列 `c1 → c2 → r2 → r1`：
+    /// ① 前两步动作真的成功（服务端有记录）；
+    /// ② 第 3 步失败后，补偿链**先 r2 再 r1**（逆序，不是按声明顺序）；
+    /// ③ 整个序列可重放（第二个实例重复同一序列）。
+    #[tokio::test]
+    async fn test_sw_three_step_failure_compensates_in_reverse_order_and_replays() {
+        let (ok_addr, log) = spawn_recording_server().await;
+        let dead_url = "http://127.0.0.1:1/charge3".to_string();
+        let doc = sample_reverse_compensation_sw(&ok_addr, &dead_url);
+
+        // 真 HttpTaskDispatcher（不是 Noop）：动作要真的发到记录服务器
+        let svc = WorkflowEngineService::new();
+        let def_id = svc.deploy_definition("test", &doc).await.unwrap();
+
+        for run in 0..2 {
+            let inst = svc
+                .start_instance(&def_id, serde_json::json!({ "run": run }))
+                .await
+                .unwrap();
+
+            let mut terminal = false;
+            for _ in 0..60 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                let cur = svc.get_instance(&inst.id).await.unwrap().unwrap();
+                if cur.status == InstanceStatus::Completed
+                    || cur.status == InstanceStatus::Failed
+                {
+                    terminal = true;
+                    break;
+                }
+            }
+            assert!(terminal, "run {run}: 补偿链未在限时内终止");
+        }
+
+        let requests = log.lock().clone();
+
+        // 逐请求归类 → 断言完整动作序列（两个实例各一遍，逐实例顺序固定）
+        let seq: Vec<&str> = requests
+            .iter()
+            .map(|r| {
+                if r.contains("/charge1") {
+                    "c1"
+                } else if r.contains("/charge2") {
+                    "c2"
+                } else if r.contains("/refund2") {
+                    "r2"
+                } else if r.contains("/refund1") {
+                    "r1"
+                } else {
+                    "other"
+                }
+            })
+            .collect();
+        assert_eq!(
+            seq,
+            vec!["c1", "c2", "r2", "r1", "c1", "c2", "r2", "r1"],
+            "应为「前两步成功 → 逆序补偿（先 refund2 再 refund1）」且可重放；\
+             实际请求：{requests:?}"
         );
     }
 

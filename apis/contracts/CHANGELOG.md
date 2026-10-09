@@ -2,15 +2,15 @@
 
 版本规则见 WHITEPAPER.md。契约版本独立于代码版本。
 
-## [contracts/v1.3.0] — 2026-10-09（Minor：ADR-0010 全量承接批次 1+2 的契约增量）
+## [contracts/v1.3.0] — 2026-10-09（Minor：ADR-0010 全量承接批次的契约增量）
 
 **发布口径**：本条目为 **Minor**（新增 RPC / 新增字段 / 注释级语义声明；
 不改动任何既有字段编号与类型；`buf breaking` 基线 = `contracts/v1.2.0`，CI 强制）。
-新增 RPC 4 个（MQ ×3、Transit ×1）、新增字段 4 个（MqMessage ×2、event ×2，
-全部向后兼容），以及 MQ 路由/删除、Policy 本地定位、Scheduler result 持久化、
-Transit 多材料、Event 持久化游标等边界声明。
+新增 RPC 6 个（MQ ×3、Transit ×1、Workflow ×2）、新增字段 4 个（MqMessage ×2、
+event ×2，全部向后兼容），以及 MQ 路由/删除、Policy 本地定位、Scheduler result
+持久化、Transit 多材料、Event 持久化游标、Workflow 保留策略等边界声明。
 
-**新增 RPC（4 个）**
+**新增 RPC（6 个）**
 
 | 契约包 | RPC | 能力 | 说明 |
 |:--|:--|:--|:--|
@@ -18,6 +18,8 @@ Transit 多材料、Event 持久化游标等边界声明。
 | `coord.mq.v1` | `MoveToDlq` | `coord:mq:manage` | 显式移入 DLQ（管理路径；ISR 启用时经复制通道全域一致） |
 | `coord.mq.v1` | `DeleteTopic` | `coord:mq:manage` | 删除 topic 并全量回收存量（配额归还；ISR 全域一致；同名重建 = 空 topic） |
 | `coord.transit.v1` | `Rewrap` | `coord:transit:crypto` | KEK 材料迁移管理路径（旧材料解出 → 主材料重包） |
+| `coord.workflow.v1` | `DeleteDefinition` | `coord:workflow:define` | 保留策略：删定义（前置：无实例引用；拒绝→`FAILED_PRECONDITION`） |
+| `coord.workflow.v1` | `DeleteInstance` | `coord:workflow:execute` | 保留策略：删实例（仅终态；非终态→`FAILED_PRECONDITION`；不可回滚） |
 
 **新增字段（2 个消息，向后兼容）**
 
@@ -39,6 +41,9 @@ Transit 多材料、Event 持久化游标等边界声明。
   **随任务记录持久化**（首个结果为准；契约面仍无读取 RPC）——能力增强，
   不构成 Breaking。
 - `coord.transit.v1`：多材料解密窗口与 `Rewrap` 的错误语义声明。
+- `coord.workflow.v1`：删除语义（终态守卫 / 引用守卫 / 删除后 `NOT_FOUND` /
+  不可回滚）；补偿语义口径（`compensatedBy` 为 catch-all 转场，**无自动逆序
+  栈**——逆序由 DSL 连线表达）。
 
 **消费者告知**
 
@@ -47,6 +52,9 @@ Transit 多材料、Event 持久化游标等边界声明。
 - 非 Leader 错误新增结构化 trailer：既有按文案解析的消费者可不变，新代码应
   优先读 `x-coord-error-code` / `coord-leader-hint`。
 - `DeleteTopic` 为破坏性管理路径：调用方须先停该 topic 读写（前置条件见 proto 头注）。
+- `DeleteInstance` / `DeleteDefinition` 为保留策略管理路径：删除**不可回滚**
+  （无归档副本），保留节奏由调用方显式管理（语义见
+  `docs/production/workflow-semantics.md`）。
 
 **校验**（本地已跑）
 

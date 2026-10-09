@@ -69,7 +69,7 @@ served by the Rust `coord-client`.
 | Event | `client.events()` | live by default; pass a persisted `seq` cursor to replay within the retention window |
 | Cache (EXPERIMENTAL) | `client.cache()` | capacity is per-agent, converged periodically |
 | MQ (EXPERIMENTAL) | `client.mq()` | `poll+ack` reliability path; leader routing via `getTopicLeader` |
-| Scheduler / Workflow (EXPERIMENTAL) | `client.scheduler()`, `client.workflow()` | claim-based jobs; workflow results persist on completion |
+| Scheduler / Workflow (EXPERIMENTAL) | `client.scheduler()`, `client.workflow()` | claim-based jobs; workflow results persist on completion; retention via `deleteInstance` / `deleteDefinition` |
 | Policy | `client.policy()` | `checkPermission` is agent-local RBAC; production path is OPA bundle + `evaluate` |
 | PKI | `client.pki()` | `getCertByCN` returns the **private key** — treat "read" as private-key read |
 | Transit | `client.transit()` | envelope encryption + HMAC; `rewrap` migrates DEKs during KEK rotation |

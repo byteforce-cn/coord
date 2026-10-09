@@ -13,7 +13,7 @@
 
 | # | 不承诺 | 事实锚点 | 若要变成承诺 |
 |:--|:--|:--|:--|
-| B-WF-1 | **实例与定义是 append-only**：没有删除/保留策略 API。`WorkflowStore` 未声明任何 `remove/delete/retain/clear`，`MemoryWorkflowStore`（同时是 `KvWorkflowStore` 的本地读缓存）因此**永不收缩** | `coord-core/src/workflow/ports.rs:344`（trait 方法清单）、`coord-agent/src/services/workflow_store.rs:43` | 走 raft 增加 `DeleteInstance`/`DeleteDefinition` + 缓存失效路径；或增加 TTL/归档 |
+| B-WF-1 | **工作流有显式保留 API，但无自动 TTL/归档**（G-WF-1 落地后的口径）：`DeleteInstance`（仅终态；非终态→`FAILED_PRECONDITION`）与 `DeleteDefinition`（**无任何实例引用**才可删）；删除不可回滚（无归档副本）。`KvWorkflowStore` 删除 = KV delete + watch 删除事件缓存失效 + 断连对账剪枝；`MemoryWorkflowStore` = 内存移除；**已退役的 `RaftWorkflowStore` 不支持删除**（fail-closed `Unsupported`，不得被当作已删除）。仍不承诺：自动保留周期（TTL）/归档存储/删除审计（保留节奏由运维显式执行） | `coord-core/src/workflow/ports.rs`（trait `delete_definition`/`delete_instance` 与 Memory 实现）、`coord-agent/src/services/workflow_store.rs`（KV 删除 + 剪枝）、`coord-agent/src/services/workflow.rs`（引擎守卫）；判据：`test_memory_store_delete_definition_and_instance`、`test_engine_delete_instance_requires_terminal_state`、`test_engine_delete_definition_guard_and_roundtrip`；语义见 `docs/production/workflow-semantics.md` | 若要自动保留：增加 TTL/归档策略（需先定保留语义与审计面），或接入外部生命周期管理 |
 | B-WF-2 | 子流程恢复扫描是**周期轮询**（5s）。稳态代价已从 O(全部实例) 降到 O(待恢复父子对)，但**仍是轮询**，且扫描任务本身**不受 supervisor 监督** | `coord-core/src/workflow/runtime.rs`（`SUBFLOW_SCAN_INTERVAL_SECS`、`pending_subflows`） | 事件驱动化 + 把扫描任务纳入监督并配 `coord_dead_background_tasks` |
 | B-WF-3 | 子流程恢复时**若父定义暂时读不到**，该父实例会停在 `Running` 且不再被扫描器接管 | `runtime.rs::resume_parent_after_subflow`（`return false` 分支） | 增加「已恢复但未驱动」的持久标记 + 启动期重扫 |
 | B-WF-4 | `MemoryWorkflowStore` **不是**生产存储（仅在无 KV 的测试/单机路径使用）；生产用 `KvWorkflowStore` | `coord-agent/src/services/workflow_store.rs:32-46` | 无需（这是设计），但接入方必须知道 |

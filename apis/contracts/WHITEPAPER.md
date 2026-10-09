@@ -376,7 +376,7 @@ MAJOR：破坏性变更（非必要不使用；须提前 ≥ 3 个月发布废�
 |:---|:---|:---|:---:|:---|
 | Cache | ISR 提交非原子、分区 Leader 静态无故障转移 | ISR 原子提交 + 分区 Leader 故障转移，验收后申请晋升 | 2026-12-31 | **改判为设计边界并写入契约**：跨节点复制为 best-effort（`min_isr` 不满足时 RPC 返错，但**本地写入已生效** ⇒ 错误不可读作"未写入"）；分区 Leader 为确定性静态判定（显式覆盖优先，否则 ISR 成员中地址最小者），**不产生脑裂**，代价是 fail-closed。原文"Follower **永久**落后"经逐行核验**过强**，实为"暂时不一致 + 心跳 Reconcile 可补齐" |
 | MQ | push 背压丢消息（ISR 同上） | 生产语义收敛为单 Agent at-least-once（poll+ack），背压不丢消息并文档化 | 2026-12-31 | **承诺面收缩 + 显式声明**：`Subscribe` 服务级注释声明为 **best-effort 推送**（channel 打满即丢弃、不报错不重投）、**不是 at-least-once 通道**；at-least-once 的唯一承诺路径 = `Poll` + `Ack`。`Publish` 的 `idempotency_key` 已真正生效（同键不追加、重启后仍去重） |
-| Workflow（Saga） | 生产路径为内存态，无持久化/补偿 | 持久化 + 补偿语义落地后方允许对外 | 2027-03-31 | **两项均落地**：`KvWorkflowStore`（持久化）+ 补偿端到端验收（真 dispatcher + 真失败 + 记录型 HTTP 服务端证明动作**真的发出**）。验收过程另修两处缺陷：try 块丢弃 `Suspend`（静默丢副作用）、`functionRef` 从未解析到 `functions[].operation`（任何 CNCF `operation` 状态必然失败） |
+| Workflow（Saga） | 生产路径为内存态，无持久化/补偿 | 持久化 + 补偿语义落地后方允许对外 | 2027-03-31 | **两项均落地**：`KvWorkflowStore`（持久化）+ 补偿端到端验收（真 dispatcher + 真失败 + 记录型 HTTP 服务端证明动作**真的发出**）。验收过程另修两处缺陷：try 块丢弃 `Suspend`（静默丢副作用）、`functionRef` 从未解析到 `functions[].operation`（任何 CNCF `operation` 状态必然失败）；**续（G-WF-1）**：三步**逆序**补偿 e2e（`test_sw_three_step_failure_compensates_in_reverse_order_and_replays`，暴露并修复 try 体内层索引未归零 / 包装器 goto 失配两处静默丢副作用）；保留策略 `DeleteInstance`/`DeleteDefinition`（终态/引用守卫，无自动 TTL；语义见 `docs/production/workflow-semantics.md`） |
 | Scheduler | 头部声称 KV CAS + Lease，实现为内存 HashMap | 改为 KV 真实现，多节点唯一调度 | 2027-03-31 | **已改**：三张 HashMap 合并为 `TaskRecord` 一条记录，生产走 `KvSchedulerStore`（`coord.txn` value-CAS 跨节点原子认领）；模块头自述与实现现已一致。另修两处使 gRPC 面实质不可用的缺陷（`task_id` 注册/认领键不一致、Heartbeat/Complete 硬编码 `"worker"`） |
 
 以上各项的当前状态见 `STATUS.md`。

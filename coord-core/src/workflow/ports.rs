@@ -424,6 +424,33 @@ pub trait WorkflowStore: Send + Sync {
         instance_id: &str,
         key: &str,
     ) -> Result<bool, StoreError>;
+
+    /// 删除定义（保留策略入口，G-WF-1）。
+    ///
+    /// 存储层只做删除与缓存失效；「是否允许删」（无实例引用等）的守卫由调用方
+    /// （引擎层）执行。返回 `Ok(true)` = 存在并已删除，`Ok(false)` = 本就不存在。
+    /// 未实现删除原语的后端返回 [`StoreError::Unsupported`]，调用方必须按
+    /// 「不支持」fail-closed 处理。删除不可回滚（无归档副本）。
+    async fn delete_definition(
+        &self,
+        namespace: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<bool, StoreError> {
+        let _ = (namespace, name, version);
+        Err(StoreError::Unsupported(
+            "delete_definition is not supported by this store".into(),
+        ))
+    }
+
+    /// 删除实例（保留策略入口，G-WF-1）。语义与 [`WorkflowStore::delete_definition`]
+    /// 相同：存储层不做状态守卫，`Ok(true)` = 存在并已删除。
+    async fn delete_instance(&self, id: &str) -> Result<bool, StoreError> {
+        let _ = id;
+        Err(StoreError::Unsupported(
+            "delete_instance is not supported by this store".into(),
+        ))
+    }
 }
 
 /// 存储错误
@@ -433,6 +460,9 @@ pub enum StoreError {
     AlreadyExists(String),
     IoError(String),
     SerializationError(String),
+    /// 后端不支持该原语（如未实现删除的存储）——调用方必须 fail-closed 处理，
+    /// 不得当作「已删除」或「不存在」。
+    Unsupported(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -442,6 +472,7 @@ impl std::fmt::Display for StoreError {
             StoreError::AlreadyExists(msg) => write!(f, "already exists: {msg}"),
             StoreError::IoError(msg) => write!(f, "io error: {msg}"),
             StoreError::SerializationError(msg) => write!(f, "serialization error: {msg}"),
+            StoreError::Unsupported(msg) => write!(f, "unsupported: {msg}"),
         }
     }
 }
@@ -569,6 +600,30 @@ impl WorkflowStore for MemoryWorkflowStore {
             .map_err(|e| StoreError::IoError(e.to_string()))?;
         Ok(keys.insert(combined))
     }
+
+    async fn delete_definition(
+        &self,
+        namespace: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<bool, StoreError> {
+        let key = Self::def_key(namespace, name, version);
+        Ok(self
+            .definitions
+            .lock()
+            .map_err(|e| StoreError::IoError(e.to_string()))?
+            .remove(&key)
+            .is_some())
+    }
+
+    async fn delete_instance(&self, id: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .instances
+            .lock()
+            .map_err(|e| StoreError::IoError(e.to_string()))?
+            .remove(id)
+            .is_some())
+    }
 }
 
 // WorkflowStore 委托实现 for Arc<MemoryWorkflowStore>
@@ -631,6 +686,21 @@ impl WorkflowStore for Arc<MemoryWorkflowStore> {
             .save_resume_idempotency_key(instance_id, key)
             .await
     }
+
+    async fn delete_definition(
+        &self,
+        namespace: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<bool, StoreError> {
+        self.as_ref()
+            .delete_definition(namespace, name, version)
+            .await
+    }
+
+    async fn delete_instance(&self, id: &str) -> Result<bool, StoreError> {
+        self.as_ref().delete_instance(id).await
+    }
 }
 
 // WorkflowStore 委托实现 for Arc<dyn WorkflowStore + Send + Sync>
@@ -692,6 +762,21 @@ impl WorkflowStore for Arc<dyn WorkflowStore + Send + Sync> {
         self.as_ref()
             .save_resume_idempotency_key(instance_id, key)
             .await
+    }
+
+    async fn delete_definition(
+        &self,
+        namespace: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<bool, StoreError> {
+        self.as_ref()
+            .delete_definition(namespace, name, version)
+            .await
+    }
+
+    async fn delete_instance(&self, id: &str) -> Result<bool, StoreError> {
+        self.as_ref().delete_instance(id).await
     }
 }
 
@@ -869,6 +954,65 @@ mod tests {
         let store = MemoryWorkflowStore::new();
         let result = store.load_instance("nonexistent").await.unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_delete_definition_and_instance() {
+        let store = MemoryWorkflowStore::new();
+
+        // 定义：删除返回「是否命中」，重复删除返回 false（幂等语义在调用方）
+        let def = WorkflowDefinition {
+            id: None,
+            document: Document {
+                dsl: "1.0.0".into(),
+                namespace: "test".into(),
+                name: "wf".into(),
+                version: "1.0".into(),
+                title: None,
+                summary: None,
+                tags: None,
+            },
+            do_tasks: vec![],
+            input: None,
+            output: None,
+            timeout: None,
+            use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
+            raw_yaml: None,
+        };
+        store.save_definition(&def).await.unwrap();
+        assert!(store.delete_definition("test", "wf", "1.0").await.unwrap());
+        assert!(store
+            .load_definition("test", "wf", "1.0")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!store.delete_definition("test", "wf", "1.0").await.unwrap());
+
+        // 实例：同上
+        let inst = WorkflowInstance {
+            id: "inst-del-1".into(),
+            definition_ns: "test".into(),
+            definition_name: "wf".into(),
+            definition_version: "1.0".into(),
+            status: crate::workflow::model::InstanceStatus::Completed,
+            context: serde_json::json!({}),
+            task_stack: vec![],
+            current_task_index: 0,
+            created_at: 1000,
+            updated_at: 1000,
+            output: None,
+            fault: None,
+            suspension_meta: None,
+        };
+        store.save_instance(&inst).await.unwrap();
+        assert!(store.delete_instance("inst-del-1").await.unwrap());
+        assert!(store.load_instance("inst-del-1").await.unwrap().is_none());
+        assert!(!store.delete_instance("inst-del-1").await.unwrap());
     }
 
     // ─── Idempotency Key 测试 ───

@@ -1798,10 +1798,16 @@ where
                         //     而工作流继续沿正常路径前进 —— 调用方以为副作用执行了。
                         // 这是"最坏的一类"：静默丢副作用。故此处与主循环
                         // （见 `SuspendReason::ExternalCall` 分支）同口径派发。
+                        //
+                        // ⚠️ 内层 `execute_step` 的 `current_task_index` **必须归零**：
+                        // 它按索引在单任务视图（`do_tasks: vec![task]`）里取任务，
+                        // 而 `..inst.clone()` 带的是**外层包装器的索引**——索引越界时
+                        // 执行器静默不做事，同样造成"try 体被跳过但实例继续前进"。
                         for task in &try_tasks {
                             let step_result = self.executor.execute_step(
                                 &WorkflowInstance {
                                     context: try_ctx.clone(),
+                                    current_task_index: 0,
                                     ..inst.clone()
                                 },
                                 &WorkflowDefinition {
@@ -1880,10 +1886,12 @@ where
                                 };
                                 if matches {
                                     // 执行 catch 任务（onErrors 转场：Goto → 路由到目标状态）
+                                    // 同样：单任务视图必须用索引 0（见 try 块的同名说明）。
                                     for task in &clause.tasks {
                                         let step_result = self.executor.execute_step(
                                             &WorkflowInstance {
                                                 context: inst.context.clone(),
+                                                current_task_index: 0,
                                                 ..inst.clone()
                                             },
                                             &WorkflowDefinition {

@@ -198,8 +198,7 @@
   重派；**任务完成结果随完成持久化**（G-SC-1）——`CompleteJob` 携带 `result`
   字节（可选），任务详情可回读 `result` / `completed_at`；**首个结果生效**
   （重复完成幂等，不覆盖）。
-- 工作流：实例与定义 **append-only**（无删除/保留 API，`boundaries.md`
-  B-WF-1）；子流程恢复为周期扫描（B-WF-2/B-WF-3）。
+- 工作流：**保留策略已落地（G-WF-1）**——`DeleteInstance`（仅终态）/`DeleteDefinition`（无实例引用才可删）；删除**不可回滚**、**无自动 TTL/归档**（`boundaries.md` B-WF-1；完整语义见 `workflow-semantics.md`）；子流程恢复为周期扫描（B-WF-2/B-WF-3）。
 - **补偿（saga）已落地**：`sw.rs` 编译 DSL 的 `CompensatedBy`，实例失败/取消
   时按序执行补偿步骤（端到端判据
   `coord-agent/src/services/workflow.rs::test_sw_compensated_by_runs_compensation_end_to_end`）。

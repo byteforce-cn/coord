@@ -1049,8 +1049,12 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
             });
         }
 
+        // 包装名必须**等于状态名**：运行时 goto/转场按 `name == 目标状态名` 查找
+        // do_tasks（runtime.rs 的 switch 分支）——若包装后原状态名消失，任何
+        // transition 到「带 compensatedBy/onErrors 的状态」都会报
+        // "goto target not found"（三步级联补偿这类链式转场的硬前提）。
         let wrapper = NamedTask {
-            name: format!("{}__try", s.name),
+            name: s.name.clone(),
             task: Task::TryCatch(TryCatchTask {
                 r#try: body_tasks,
                 catch: catch_clauses,
@@ -2143,7 +2147,7 @@ mod tests {
         let wrapper = def
             .do_tasks
             .iter()
-            .find(|t| t.name == "call__try")
+            .find(|t| t.name == "call")
             .expect("try-catch wrapper");
         match &wrapper.task {
             Task::TryCatch(tc) => {
@@ -2173,7 +2177,7 @@ mod tests {
             "functions": [ fn_json("doWork"), fn_json("undoWork") ]
         });
         let def = parse_cncf_sw_value(v).expect("compensatedBy should parse");
-        let wrapper = def.do_tasks.iter().find(|t| t.name == "work__try").unwrap();
+        let wrapper = def.do_tasks.iter().find(|t| t.name == "work").unwrap();
         match &wrapper.task {
             Task::TryCatch(tc) => {
                 // catch-all 转场到补偿状态

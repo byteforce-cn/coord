@@ -205,6 +205,9 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         "/coord.workflow.v1.Workflow/ListInstances" => Some("coord:workflow:read"),
         "/coord.workflow.v1.Workflow/Deploy" => Some("coord:workflow:define"),
         "/coord.workflow.v1.Workflow/RollbackDefinition" => Some("coord:workflow:define"),
+        // 保留策略（G-WF-1）：定义删除 = 定义管理面；实例删除 = 执行面。
+        "/coord.workflow.v1.Workflow/DeleteDefinition" => Some("coord:workflow:define"),
+        "/coord.workflow.v1.Workflow/DeleteInstance" => Some("coord:workflow:execute"),
 
         // Policy —— 策略/OPA
         "/coord.policy.v1.Policy/CheckPermission" => Some("coord:policy:evaluate"),

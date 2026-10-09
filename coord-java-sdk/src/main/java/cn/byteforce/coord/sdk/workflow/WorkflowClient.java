@@ -163,6 +163,43 @@ public interface WorkflowClient {
      */
     WorkflowDefinition rollbackDefinition(String namespace, String name, String version);
 
+    // ──── 保留策略（G-WF-1）────
+
+    /**
+     * Delete a workflow instance (retention policy; capability
+     * {@code coord:workflow:execute}).
+     * <p>
+     * Only <b>terminal</b> instances (completed / faulted / cancelled) can be
+     * deleted — non-terminal ones are rejected with
+     * {@link cn.byteforce.coord.sdk.ErrorCode#FAILED_PRECONDITION} (cancel it
+     * first). Missing instances raise {@code NOT_FOUND}. Deletion is
+     * <b>not reversible</b> (no archive copy); there is no automatic TTL.
+     *
+     * @param workflowId the instance id
+     * @throws cn.byteforce.coord.sdk.CoordException on communication failure or
+     *                                               guard violation
+     */
+    void deleteInstance(String workflowId);
+
+    /**
+     * Delete a workflow definition version (retention policy; capability
+     * {@code coord:workflow:define}).
+     * <p>
+     * Only allowed when <b>no instance</b> references the
+     * {@code (namespace, name, version)} triple — otherwise
+     * {@link cn.byteforce.coord.sdk.ErrorCode#FAILED_PRECONDITION} (delete the
+     * instances first). After deletion {@link #getDefinition} / rollback to that
+     * version return {@code NOT_FOUND}; re-deploying the same version yields a
+     * fresh definition. Deletion is <b>not reversible</b>.
+     *
+     * @param namespace definition namespace
+     * @param name      definition name
+     * @param version   definition version
+     * @throws cn.byteforce.coord.sdk.CoordException on communication failure or
+     *                                               guard violation
+     */
+    void deleteDefinition(String namespace, String name, String version);
+
     // ──── 工作流实例查询 ────
 
     /**

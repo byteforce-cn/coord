@@ -153,7 +153,7 @@ impl KvWorkflowStore {
         Self::reconcile_instances(&self.inner, &self.cache).await
     }
 
-    /// 全量对账：重新扫描定义（覆盖缓存中的陈旧条目）。
+    /// 全量对账：重新扫描定义（覆盖缓存中的陈旧条目，并**剪除**已删除条目）。
     async fn reconcile_definitions(
         inner: &Arc<AgentInner>,
         cache: &Arc<MemoryWorkflowStore>,
@@ -168,15 +168,38 @@ impl KvWorkflowStore {
             .await
             .map_err(|e| StoreError::IoError(e.to_string()))?;
 
-        for (_k, v) in pairs {
+        // KV 现存定义了哪些 (ns, name, version)——用于剪枝（删除不存在于 KV 的缓存条目）
+        let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (k, v) in pairs {
             if let Ok(def) = serde_json::from_slice::<WorkflowDefinition>(&v) {
+                present.insert(String::from_utf8_lossy(&k).into_owned());
                 let _ = cache.save_definition(&def).await;
+            }
+        }
+
+        // 剪枝：缓存中有、KV 中没有的定义 → 删除（否则删除操作会被旧缓存遮蔽）
+        if let Ok(cached) = cache.list_definitions("", usize::MAX, None).await {
+            for def in cached {
+                let key = Self::def_key(
+                    &def.document.namespace,
+                    &def.document.name,
+                    &def.document.version,
+                );
+                if !present.contains(&String::from_utf8_lossy(&key).into_owned()) {
+                    let _ = cache
+                        .delete_definition(
+                            &def.document.namespace,
+                            &def.document.name,
+                            &def.document.version,
+                        )
+                        .await;
+                }
             }
         }
         Ok(())
     }
 
-    /// 全量对账：重新扫描实例（覆盖缓存中的陈旧条目）。
+    /// 全量对账：重新扫描实例（覆盖缓存中的陈旧条目，并**剪除**已删除条目）。
     async fn reconcile_instances(
         inner: &Arc<AgentInner>,
         cache: &Arc<MemoryWorkflowStore>,
@@ -190,9 +213,21 @@ impl KvWorkflowStore {
             .await
             .map_err(|e| StoreError::IoError(e.to_string()))?;
 
-        for (_k, v) in pairs {
+        let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (k, v) in pairs {
             if let Ok(inst) = serde_json::from_slice::<WorkflowInstance>(&v) {
+                present.insert(inst.id.clone());
                 let _ = cache.save_instance(&inst).await;
+            }
+            let _ = k; // 键前缀即实例空间；id 以值中的 id 为准（两处一致）
+        }
+
+        // 剪枝：缓存中有、KV 中没有的实例 → 删除
+        if let Ok(cached) = cache.list_instances(None, None, usize::MAX, None).await {
+            for inst in cached {
+                if !present.contains(&inst.id) {
+                    let _ = cache.delete_instance(&inst.id).await;
+                }
             }
         }
         Ok(())
@@ -269,18 +304,29 @@ impl KvWorkflowStore {
                         t if t == EventType::BufferOverflow as i32
                             || t == EventType::HistoryUnavailable as i32
                     );
+                    let is_delete = event.r#type == EventType::Delete as i32;
                     if event.revision > last_rev {
                         last_rev = event.revision;
                     }
                     for kv in &event.kvs {
                         let key_str = String::from_utf8_lossy(&kv.key);
                         if key_str.starts_with("/_workflow/v3/defs/") {
-                            if let Ok(def) = serde_json::from_slice::<WorkflowDefinition>(&kv.value)
+                            if is_delete {
+                                // 删除事件不携带可解析的值：按键比对缓存条目并移除
+                                // （定义表小，线性扫描足够；否则旧缓存会把已删定义遮蔽）。
+                                Self::evict_definition_by_key(cache, &kv.key).await;
+                            } else if let Ok(def) =
+                                serde_json::from_slice::<WorkflowDefinition>(&kv.value)
                             {
                                 let _ = cache.save_definition(&def).await;
                             }
                         } else if key_str.starts_with("/_workflow/v3/instances/") {
-                            if let Ok(inst) = serde_json::from_slice::<WorkflowInstance>(&kv.value)
+                            if is_delete {
+                                if let Some(id) = key_str.rsplit('/').next() {
+                                    let _ = cache.delete_instance(id).await;
+                                }
+                            } else if let Ok(inst) =
+                                serde_json::from_slice::<WorkflowInstance>(&kv.value)
                             {
                                 let _ = cache.save_instance(&inst).await;
                             }
@@ -300,6 +346,30 @@ impl KvWorkflowStore {
         }
         // 流自然结束（服务端关闭）→ 上层重连
         Ok(last_rev)
+    }
+    /// 按 KV 键从缓存中移除对应定义（删除事件；定义表小，线性比对足够）。
+    async fn evict_definition_by_key(cache: &Arc<MemoryWorkflowStore>, key: &[u8]) -> bool {
+        let Ok(defs) = cache.list_definitions("", usize::MAX, None).await else {
+            return false;
+        };
+        for d in defs {
+            let k = Self::def_key(
+                &d.document.namespace,
+                &d.document.name,
+                &d.document.version,
+            );
+            if k == key {
+                return cache
+                    .delete_definition(
+                        &d.document.namespace,
+                        &d.document.name,
+                        &d.document.version,
+                    )
+                    .await
+                    .unwrap_or(false);
+            }
+        }
+        false
     }
 }
 
@@ -591,6 +661,68 @@ impl WorkflowStore for KvWorkflowStore {
         expected_mod_rev: i64,
     ) -> Result<bool, StoreError> {
         self.save_instance_atomic(inst, expected_mod_rev).await
+    }
+
+    async fn delete_definition(
+        &self,
+        namespace: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<bool, StoreError> {
+        let key = Self::def_key(namespace, name, version);
+
+        // KV Delete 对不存在的 key 也成功 ⇒ 先探测存在性（返回语义：Ok(false)
+        // 表示本就不存在，调用方可据此报 NOT_FOUND）。
+        let existed = {
+            let pairs = self
+                .inner
+                .client
+                .kv()
+                .range(&key, &key, 1, 0)
+                .await
+                .map_err(|e| StoreError::IoError(e.to_string()))?;
+            !pairs.is_empty()
+        };
+
+        if existed {
+            self.inner
+                .client
+                .kv()
+                .delete(&key)
+                .await
+                .map_err(|e| StoreError::IoError(e.to_string()))?;
+        }
+
+        // 缓存失效：缓存是派生数据，删除后必须不可见（无论 KV 是否命中）。
+        let _ = self.cache.delete_definition(namespace, name, version).await;
+        Ok(existed)
+    }
+
+    async fn delete_instance(&self, id: &str) -> Result<bool, StoreError> {
+        let key = Self::instance_key(id);
+
+        let existed = {
+            let pairs = self
+                .inner
+                .client
+                .kv()
+                .range(&key, &key, 1, 0)
+                .await
+                .map_err(|e| StoreError::IoError(e.to_string()))?;
+            !pairs.is_empty()
+        };
+
+        if existed {
+            self.inner
+                .client
+                .kv()
+                .delete(&key)
+                .await
+                .map_err(|e| StoreError::IoError(e.to_string()))?;
+        }
+
+        let _ = self.cache.delete_instance(id).await;
+        Ok(existed)
     }
 }
 

@@ -75,7 +75,9 @@ use coord_proto::agent::{
     TransitHmacSignRequest, TransitHmacSignResponse, TransitHmacVerifyRequest,
     TransitHmacVerifyResponse, TransitRewrapRequest, TransitRewrapResponse, WorkflowCancelRequest,
     WorkflowCancelResponse,
-    WorkflowDefinitionSummary, WorkflowDefinitionVersion, WorkflowDeployRequest,
+    WorkflowDefinitionSummary, WorkflowDefinitionVersion, WorkflowDeleteDefinitionRequest,
+    WorkflowDeleteDefinitionResponse, WorkflowDeleteInstanceRequest, WorkflowDeleteInstanceResponse,
+    WorkflowDeployRequest,
     WorkflowDeployResponse, WorkflowGetDefinitionRequest, WorkflowGetDefinitionResponse,
     WorkflowGetStatusRequest, WorkflowGetStatusResponse, WorkflowInstanceSummary,
     WorkflowListDefinitionVersionsRequest, WorkflowListDefinitionVersionsResponse,
@@ -1739,6 +1741,25 @@ impl Workflow for WorkflowService {
             Err(e) => Err(sanitized_internal(e)),
         }
     }
+
+    // 保留策略（G-WF-1）同样由 WorkflowEngineService 提供，legacy 显式 Unimplemented。
+    async fn delete_definition(
+        &self,
+        _request: Request<WorkflowDeleteDefinitionRequest>,
+    ) -> Result<Response<WorkflowDeleteDefinitionResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow definition deletion is provided by WorkflowEngineService (phase4); legacy WorkflowService is deprecated",
+        ))
+    }
+
+    async fn delete_instance(
+        &self,
+        _request: Request<WorkflowDeleteInstanceRequest>,
+    ) -> Result<Response<WorkflowDeleteInstanceResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow instance deletion is provided by WorkflowEngineService (phase4); legacy WorkflowService is deprecated",
+        ))
+    }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -2108,6 +2129,28 @@ impl Workflow for WorkflowEngineService {
             }
             Err(e) => Err(sanitized_internal(e)),
         }
+    }
+
+    async fn delete_definition(
+        &self,
+        request: Request<WorkflowDeleteDefinitionRequest>,
+    ) -> Result<Response<WorkflowDeleteDefinitionResponse>, Status> {
+        let req = request.into_inner();
+        self.delete_definition(&req.namespace, &req.name, &req.version)
+            .await
+            .map_err(map_engine_error)?;
+        Ok(Response::new(WorkflowDeleteDefinitionResponse {}))
+    }
+
+    async fn delete_instance(
+        &self,
+        request: Request<WorkflowDeleteInstanceRequest>,
+    ) -> Result<Response<WorkflowDeleteInstanceResponse>, Status> {
+        let req = request.into_inner();
+        self.delete_instance(&req.workflow_id)
+            .await
+            .map_err(map_engine_error)?;
+        Ok(Response::new(WorkflowDeleteInstanceResponse {}))
     }
 }
 

@@ -7,6 +7,8 @@ import cn.byteforce.coord.contracts.workflow.v1.WorkflowCancelRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowCancelResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowDeployRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowDeployResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowDeleteDefinitionRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowDeleteInstanceRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetDefinitionRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetDefinitionResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetStatusRequest;
@@ -305,6 +307,37 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         return new WorkflowDefinition(
                 response.getWorkflowId(), response.getName(), "",
                 response.getVersion(), "active", System.currentTimeMillis() / 1000);
+    }
+
+    // ──── 保留策略（G-WF-1）────
+
+    @Override
+    public void deleteInstance(String workflowId) {
+        WorkflowDeleteInstanceRequest request = WorkflowDeleteInstanceRequest.newBuilder()
+                .setWorkflowId(workflowId == null ? "" : workflowId)
+                .build();
+        callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .deleteInstance((WorkflowDeleteInstanceRequest) r),
+                request, "workflow.deleteInstance");
+        log.debug("Workflow deleteInstance: id={}", workflowId);
+    }
+
+    @Override
+    public void deleteDefinition(String namespace, String name, String version) {
+        WorkflowDeleteDefinitionRequest request = WorkflowDeleteDefinitionRequest.newBuilder()
+                .setNamespace(namespace == null ? "" : namespace)
+                .setName(name == null ? "" : name)
+                .setVersion(version == null ? "" : version)
+                .build();
+        callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .deleteDefinition((WorkflowDeleteDefinitionRequest) r),
+                request, "workflow.deleteDefinition");
+        log.debug("Workflow deleteDefinition: ns={}, name={}, version={}",
+                namespace, name, version);
     }
 
     // ──── 工作流实例查询 ────

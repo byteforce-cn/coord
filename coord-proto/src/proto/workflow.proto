@@ -35,6 +35,20 @@ service Workflow {
 
   // 新增 — 工作流实例管理
   rpc ListInstances(WorkflowListInstancesRequest) returns (WorkflowListInstancesResponse);
+
+  // 保留策略：删除定义（能力门禁 `coord:workflow:define`）。
+  //
+  // 前置条件：没有任何实例引用该 (namespace, name, version)——否则
+  // FAILED_PRECONDITION（先删/截断引用实例）。删除后 GetDefinition /
+  // RollbackDefinition 指向该版本返回 NOT_FOUND；同名同版本可重新 Deploy
+  // （= 全新定义）。删除不可回滚。
+  rpc DeleteDefinition(WorkflowDeleteDefinitionRequest) returns (WorkflowDeleteDefinitionResponse);
+
+  // 保留策略：删除实例（能力门禁 `coord:workflow:execute`）。
+  //
+  // 仅终态实例可删（COMPLETED / FAULTED / CANCELLED）；运行 / 等待 / 挂起中
+  // 返回 FAILED_PRECONDITION（先 Cancel）。删除不可回滚（无归档副本）。
+  rpc DeleteInstance(WorkflowDeleteInstanceRequest) returns (WorkflowDeleteInstanceResponse);
 }
 
 message WorkflowStartRequest {
@@ -202,6 +216,22 @@ message WorkflowInstanceSummary {
   bytes output_json = 8; // 输出数据（JSON）
   bytes context_json = 9; // 运行时上下文（JSON）
 }
+
+// 删除定义（保留策略；定义未被任何实例引用才允许）
+message WorkflowDeleteDefinitionRequest {
+  string namespace = 1;
+  string name = 2;
+  string version = 3;
+}
+
+message WorkflowDeleteDefinitionResponse {}
+
+// 删除实例（保留策略；仅终态实例）
+message WorkflowDeleteInstanceRequest {
+  string workflow_id = 1;
+}
+
+message WorkflowDeleteInstanceResponse {}
 
 // ============================================================
 // Policy — OPA Policy Engine (Regorus)
