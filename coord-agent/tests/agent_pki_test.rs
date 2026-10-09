@@ -10,6 +10,8 @@
 // 4. 多 agent：A 签发的证书可在 B 验签（同一 CA 根）
 // 5. renewCert(serial) → 返回原 CN、新 serial，旧证书保留可验签
 // 6. rotateCert(CN) 后 listCerts(CN) → active + retired 两份
+// 7. 到期 = 换新触发：过期后 IssueCert/RotateCert 换新（新 serial/密钥），
+//    RenewCert(serial) 可恢复；过期记录不通过 GetCertByCN 返回（G-PKI-1）
 
 use std::sync::Arc;
 
@@ -326,4 +328,60 @@ async fn test_renew_unknown_serial_returns_not_found() {
         ),
         "应返回 CertNotFound"
     );
+}
+
+/// G-PKI-1 验收：到期 = 换新触发
+///
+/// 过期后 IssueCert / RotateCert 必须走替换路径（新 serial / 新密钥），不得返回
+/// 既有过期记录；RenewCert(serial) 保持按序列号恢复入口可用；GetCertByCN 对过期
+/// 记录返回 None（gRPC 层 NOT_FOUND）。
+#[tokio::test]
+async fn test_expired_current_record_is_reissued_not_returned() {
+    use coord_agent::pki_store::{CertRecord, CertStatus};
+
+    let store = Arc::new(MemoryPkiStore::new());
+    let pki = make_pki_with_store(store.clone());
+    pki.init_ca("Expiry Semantics CA").await.expect("初始化 CA 失败");
+
+    let cn = "svc-expiry.coord.local";
+    let expired = CertRecord {
+        common_name: cn.into(),
+        cert_pem: "-----BEGIN CERTIFICATE-----\nEXPIRED\n-----END CERTIFICATE-----".into(),
+        key_pem: "-----BEGIN PRIVATE KEY-----\nEXPIRED\n-----END PRIVATE KEY-----".into(),
+        not_before: 1_700_000_000,
+        not_after: 1_700_000_001,
+        serial: "expired-0x1".into(),
+        status: CertStatus::Active,
+        parent_serial: None,
+    };
+    store.create_cert(cn, &expired).await.expect("seed expired");
+
+    // GetCertByCN：过期当前记录不得返回
+    assert!(
+        pki.get_cert_by_cn(cn).await.expect("get").is_none(),
+        "过期记录不通过 GetCertByCN 返回"
+    );
+
+    // IssueCert：过期 → 替换重签（新 serial / 新密钥）
+    let issued = pki.issue_cert(cn, 0).await.expect("issue over expired");
+    assert_ne!(issued.serial, expired.serial, "IssueCert 必须换新 serial");
+    assert_ne!(issued.key_pem, expired.key_pem, "IssueCert 必须换新密钥");
+    assert!(pki.verify_cert(&issued.cert_pem).expect("verify"));
+
+    // RotateCert：对当前（已是新证书）继续轮换，仍换新
+    let rotated = pki.rotate_cert(cn, 0).await.expect("rotate");
+    assert_ne!(rotated.serial, issued.serial, "RotateCert 必须换新 serial");
+    assert!(pki.verify_cert(&rotated.cert_pem).expect("verify"));
+
+    // RenewCert(serial)：过期 serial（已入历史）仍可作恢复入口
+    let recovered = pki
+        .renew_cert("expired-0x1", 0)
+        .await
+        .expect("renew via expired serial");
+    assert_eq!(recovered.common_name, cn);
+    assert_ne!(recovered.serial, "expired-0x1");
+    assert!(pki.verify_cert(&recovered.cert_pem).expect("verify"));
+
+    // 轮换链：最新 active 的 parent 指向上一代
+    assert_eq!(recovered.parent_serial.as_deref(), Some(rotated.serial.as_str()));
 }

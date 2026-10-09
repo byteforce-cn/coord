@@ -5,6 +5,8 @@
 // 核心能力：
 // - 初始化 CA（自签名根证书，**持久化到共享 KV**，重启/多 agent 共享同一 CA 根）
 // - **按 CN 幂等取回（get-or-create）**：同一 CN 未过期证书直接返回既有记录
+// - **到期即换新**：IssueCert / RotateCert 对过期记录走替换路径重签（新 serial / 新密钥），
+//   不返回过期记录；RenewCert(serial) 为按序列号恢复入口
 // - 证书轮换（rotate / renew，旧证书保留至 not_after 供验签）
 // - 证书验证（链式验证）
 // - 证书列表（按 CN 取 active + 历史，验签方按 serial/kid 构建多密钥 JWKS）
@@ -229,53 +231,27 @@ impl PkiService {
         Ok((cert.pem(), key_pem))
     }
 
-    /// 签发终端证书（**get-or-create**）
+    /// 版本化 CAS 替换的最大重试次数（仅在并发替换/并发创建冲突时消耗）。
+    const MAX_REPLACE_ATTEMPTS: usize = 5;
+
+    /// 签发终端证书（**get-or-create，到期即换新**）
     ///
     /// 同一 CN 未过期证书直接返回既有记录（同 serial / 公钥 / 私钥）；
-    /// 未命中或已过期才新签发，Txn CAS 原子写入，冲突则重读返回胜者。
-    /// `ttl_seconds`: 证书有效期（秒）。为 0 时使用 config.cert_ttl_hours 默认值。
+    /// 未命中则 CAS 创建；**已过期则走替换路径重签（新 serial / 新密钥）**，
+    /// 绝不返回既有过期记录。替换走版本化 CAS：并发冲突时重读按当前状态重试，
+    /// 不丢更新。`ttl_seconds`: 有效期（秒）。为 0 时使用 config.cert_ttl_hours。
     pub async fn issue_cert(
         &self,
         common_name: &str,
         ttl_seconds: u64,
     ) -> Result<CertInfo, PkiError> {
-        // 1. get-or-create 快路径：命中未过期 → 直接返回
-        if let Some(record) = self
-            .store
-            .get_cert(common_name)
-            .await
-            .map_err(|e| PkiError::Store(e.to_string()))?
-        {
-            if !record.is_expired(now_unix()) {
-                return Ok(record.into());
-            }
-        }
-
-        // 2. 新签发（CPU 密集 → spawn_blocking）
-        let record = self
-            .sign_new_cert_blocking(common_name, ttl_seconds, CertStatus::Active, None)
-            .await?;
-
-        // 3. Txn CAS 原子写入；冲突 → 重读并返回胜者
-        match self.store.create_cert(common_name, &record).await {
-            Ok(()) => Ok(record.into()),
-            Err(PkiStoreError::AlreadyExists(_)) => {
-                let winner = self
-                    .store
-                    .get_cert(common_name)
-                    .await
-                    .map_err(|e| PkiError::Store(e.to_string()))?
-                    .ok_or(PkiError::CertMissing)?;
-                Ok(winner.into())
-            }
-            Err(e) => Err(PkiError::Store(e.to_string())),
-        }
+        self.ensure_cert(common_name, ttl_seconds, false).await
     }
 
-    /// 续期证书：**按 serial 查回真实 CN**，再签发新证书（新密钥 + 新 serial）
+    /// 续期证书：**按 serial 查回真实 CN**，再替换出一个新证书（新密钥 + 新 serial）
     ///
-    /// 修复：不再把 serial 当 CN 使用。
-    /// 旧证书保留至 not_after 仍可验签。
+    /// 按序列号恢复入口：serial 可来自 active 或历史（含已过期）记录。
+    /// 旧证书保留至 not_after 供验签方按 serial/kid 取用。
     pub async fn renew_cert(&self, serial: &str, ttl_seconds: u64) -> Result<CertInfo, PkiError> {
         let old = self
             .store
@@ -283,60 +259,88 @@ impl PkiService {
             .await
             .map_err(|e| PkiError::Store(e.to_string()))?
             .ok_or_else(|| PkiError::CertNotFound(serial.to_string()))?;
-        self.rotate_locked(&old.common_name, ttl_seconds).await
+        self.ensure_cert(&old.common_name, ttl_seconds, true).await
     }
 
-    /// 按 CN 显式轮换：签发新 active，旧证书标记 retired 保留至 not_after
+    /// 按 CN 显式轮换：签发新 active，旧记录（含已过期）retired 入历史
     pub async fn rotate_cert(
         &self,
         common_name: &str,
         ttl_seconds: u64,
     ) -> Result<CertInfo, PkiError> {
-        // 无 active 或已过期 → 走 get-or-create 首次签发
-        match self
-            .store
-            .get_cert(common_name)
-            .await
-            .map_err(|e| PkiError::Store(e.to_string()))?
-        {
-            Some(old) if !old.is_expired(now_unix()) => {
-                self.rotate_locked(common_name, ttl_seconds).await
-            }
-            _ => self.issue_cert(common_name, ttl_seconds).await,
-        }
+        self.ensure_cert(common_name, ttl_seconds, true).await
     }
 
-    /// 轮换实现（调用方已确认存在未过期 active）：新签发 + 旧 retired 原子入历史
-    async fn rotate_locked(
+    /// 统一的签发/轮换实现。
+    ///
+    /// - `force_rotate = false`（IssueCert）：当前记录未过期 → 幂等返回；过期 → 替换重签。
+    /// - `force_rotate = true`（RotateCert / RenewCert）：无条件替换出新 active。
+    ///
+    /// 三条路径的并发安全：创建用 CAS Version==0；替换用「读到的 key version」做
+    /// CAS 比较（见 [`PkiStore::replace_active_cert_cas`]）。冲突即重读，按最新状态
+    /// 重新决策（未过期则返回胜者；仍过期/仍缺失则重试），保证不返回过期记录、无丢更新。
+    async fn ensure_cert(
         &self,
         common_name: &str,
         ttl_seconds: u64,
+        force_rotate: bool,
     ) -> Result<CertInfo, PkiError> {
-        let old = self
-            .store
-            .get_cert(common_name)
-            .await
-            .map_err(|e| PkiError::Store(e.to_string()))?
-            .ok_or(PkiError::CertMissing)?;
-
-        let new_record = self
-            .sign_new_cert_blocking(
-                common_name,
-                ttl_seconds,
-                CertStatus::Active,
-                Some(old.serial.clone()),
-            )
-            .await?;
-
-        let mut retired = old.clone();
-        retired.status = CertStatus::Retired;
-
-        self.store
-            .replace_active_cert(common_name, &new_record, &retired)
-            .await
-            .map_err(|e| PkiError::Store(e.to_string()))?;
-
-        Ok(new_record.into())
+        for _ in 0..Self::MAX_REPLACE_ATTEMPTS {
+            match self
+                .store
+                .get_cert_with_version(common_name)
+                .await
+                .map_err(|e| PkiError::Store(e.to_string()))?
+            {
+                // 幂等快路径：未过期且非强制轮换 → 直接返回
+                Some((record, _version)) if !force_rotate && !record.is_expired(now_unix()) => {
+                    return Ok(record.into());
+                }
+                // 替换路径：过期记录或强制轮换 → 新签 + 版本化 CAS 替换
+                Some((record, version)) => {
+                    let new_record = self
+                        .sign_new_cert_blocking(
+                            common_name,
+                            ttl_seconds,
+                            CertStatus::Active,
+                            Some(record.serial.clone()),
+                        )
+                        .await?;
+                    let mut retired = record.clone();
+                    retired.status = CertStatus::Retired;
+                    match self
+                        .store
+                        .replace_active_cert_cas(common_name, version, &new_record, &retired)
+                        .await
+                    {
+                        Ok(()) => return Ok(new_record.into()),
+                        // 并发替换：重读后按新状态重试（不丢更新）
+                        Err(PkiStoreError::VersionConflict(_)) => continue,
+                        Err(e) => return Err(PkiError::Store(e.to_string())),
+                    }
+                }
+                // 首次签发：CAS Version==0 原子创建
+                None => {
+                    let new_record = self
+                        .sign_new_cert_blocking(
+                            common_name,
+                            ttl_seconds,
+                            CertStatus::Active,
+                            None,
+                        )
+                        .await?;
+                    match self.store.create_cert(common_name, &new_record).await {
+                        Ok(()) => return Ok(new_record.into()),
+                        // 并发创建：重读（未过期即返回胜者；过期则转替换路径）
+                        Err(PkiStoreError::AlreadyExists(_)) => continue,
+                        Err(e) => return Err(PkiError::Store(e.to_string())),
+                    }
+                }
+            }
+        }
+        Err(PkiError::Store(format!(
+            "replace attempts exhausted for CN {common_name} (persistent concurrent replace)"
+        )))
     }
 
     /// 按 CN 取当前 + 历史未过期证书（验签方按 serial/kid 构建多密钥 JWKS）
@@ -861,5 +865,214 @@ mod tests {
             .await
             .expect("issue after init");
         assert!(!cert.cert_pem.is_empty());
+    }
+
+    // ──── G-PKI-1：过期语义（到期 = 换新触发）────
+
+    /// 合成一条已过期的当前记录（PEM 仅为占位——替换路径不校验旧证书）
+    fn expired_record(cn: &str, serial: &str) -> CertRecord {
+        CertRecord {
+            common_name: cn.to_string(),
+            cert_pem: "-----BEGIN CERTIFICATE-----\nEXPIRED\n-----END CERTIFICATE-----".into(),
+            key_pem: "-----BEGIN PRIVATE KEY-----\nEXPIRED\n-----END PRIVATE KEY-----".into(),
+            not_before: 1_700_000_000,
+            not_after: 1_700_000_001,
+            serial: serial.to_string(),
+            status: CertStatus::Active,
+            parent_serial: None,
+        }
+    }
+
+    /// G-PKI-1：IssueCert 对过期记录走替换路径——新 serial / 新密钥，绝不返回过期记录
+    #[tokio::test]
+    async fn test_issue_cert_replaces_expired_record() {
+        let store = Arc::new(MemoryPkiStore::new());
+        let pki = PkiService::with_store(PkiConfig::default(), store.clone());
+        pki.init_ca("Expiry CA").await.expect("init");
+
+        let expired = expired_record("svc-expired.local", "expired-0x1");
+        store
+            .create_cert("svc-expired.local", &expired)
+            .await
+            .expect("seed expired");
+
+        let cert = pki
+            .issue_cert("svc-expired.local", 0)
+            .await
+            .expect("issue over expired");
+
+        assert_ne!(cert.serial, expired.serial, "必须换新 serial");
+        assert_ne!(cert.key_pem, expired.key_pem, "必须换新密钥");
+        assert!(
+            pki.verify_cert(&cert.cert_pem).expect("verify"),
+            "换新后的证书必须可验签"
+        );
+        assert_eq!(cert.parent_serial.as_deref(), Some("expired-0x1"), "轮换链指向被替换的 serial");
+
+        // store 中当前 active 已是新证书；过期记录进入历史（按 serial 仍可寻回）
+        let (active, version) = store
+            .get_cert_with_version("svc-expired.local")
+            .await
+            .expect("read")
+            .expect("active");
+        assert_eq!(active.serial, cert.serial);
+        assert!(version >= 2, "替换后版本递增");
+        let old = store
+            .get_cert_by_serial("expired-0x1")
+            .await
+            .expect("by serial")
+            .expect("history keeps expired record");
+        assert_eq!(old.status, CertStatus::Retired);
+    }
+
+    /// G-PKI-1：RotateCert 对过期记录同样换新（不返回过期记录）
+    #[tokio::test]
+    async fn test_rotate_cert_replaces_expired_record() {
+        let store = Arc::new(MemoryPkiStore::new());
+        let pki = PkiService::with_store(PkiConfig::default(), store.clone());
+        pki.init_ca("Expiry CA").await.expect("init");
+
+        store
+            .create_cert("svc-expired.local", &expired_record("svc-expired.local", "expired-0x2"))
+            .await
+            .expect("seed expired");
+
+        let cert = pki
+            .rotate_cert("svc-expired.local", 0)
+            .await
+            .expect("rotate over expired");
+        assert_ne!(cert.serial, "expired-0x2");
+        assert!(!cert.key_pem.starts_with("-----BEGIN PRIVATE KEY-----\nEXPIRED"));
+        assert!(pki.verify_cert(&cert.cert_pem).expect("verify"));
+    }
+
+    /// G-PKI-1：RenewCert(serial) 为按序列号恢复入口——过期 serial 也能恢复出新证书
+    #[tokio::test]
+    async fn test_renew_cert_recovers_from_expired_serial() {
+        let store = Arc::new(MemoryPkiStore::new());
+        let pki = PkiService::with_store(PkiConfig::default(), store.clone());
+        pki.init_ca("Recover CA").await.expect("init");
+
+        store
+            .create_cert("svc-recover.local", &expired_record("svc-recover.local", "expired-0x3"))
+            .await
+            .expect("seed expired");
+
+        let recovered = pki
+            .renew_cert("expired-0x3", 0)
+            .await
+            .expect("renew by expired serial");
+        assert_eq!(recovered.common_name, "svc-recover.local");
+        assert_ne!(recovered.serial, "expired-0x3");
+        assert!(pki.verify_cert(&recovered.cert_pem).expect("verify"));
+
+        // 恢复后旧 serial 已入历史，再次按同一 serial 恢复仍可用（恢复到最新）
+        let again = pki
+            .renew_cert("expired-0x3", 0)
+            .await
+            .expect("renew again from history");
+        assert_ne!(again.serial, recovered.serial);
+    }
+
+    /// G-PKI-1 验收锚点：短 TTL——过期前幂等；过期后 issue 得到新 serial/新密钥
+    #[tokio::test]
+    async fn test_issue_cert_short_ttl_expiry_reissues() {
+        let pki = make_pki();
+        pki.init_ca("Short TTL CA").await.expect("init");
+
+        let first = pki.issue_cert("svc-ttl.local", 1).await.expect("issue");
+
+        // 过期前：幂等返回同一证书
+        let same = pki.issue_cert("svc-ttl.local", 0).await.expect("issue again");
+        assert_eq!(first.serial, same.serial, "过期前必须幂等");
+
+        // 越过 TTL（1s）→ 再次 issue 必须换新
+        // 留出 2 秒级余量：not_after 为秒级截断，1s TTL 在跨秒边界上最多需 ~2s 才判过期
+        tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+        let renewed = pki.issue_cert("svc-ttl.local", 0).await.expect("issue after expiry");
+        assert_ne!(renewed.serial, first.serial, "过期后必须换新 serial");
+        assert_ne!(renewed.key_pem, first.key_pem, "过期后必须换新密钥");
+        assert!(pki.verify_cert(&renewed.cert_pem).expect("verify"));
+    }
+
+    /// G-PKI-1：并发替换（版本化 CAS）——双 agent 同时 rotate：都成功、无丢更新
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_rotate_no_lost_update() {
+        let store = Arc::new(MemoryPkiStore::new());
+
+        let seed_svc = PkiService::with_store(PkiConfig::default(), store.clone());
+        seed_svc.init_ca("Concurrent Rotate CA").await.expect("init");
+        let first = seed_svc
+            .issue_cert("svc-conc.local", 0)
+            .await
+            .expect("seed");
+
+        let pki_a = PkiService::with_store(PkiConfig::default(), store.clone());
+        let pki_b = PkiService::with_store(PkiConfig::default(), store.clone());
+        pki_a.init_ca("Concurrent Rotate CA").await.expect("init A");
+        pki_b.init_ca("Concurrent Rotate CA").await.expect("init B");
+
+        let a = tokio::spawn(async move { pki_a.rotate_cert("svc-conc.local", 0).await });
+        let b = tokio::spawn(async move { pki_b.rotate_cert("svc-conc.local", 0).await });
+        let cert_a = a.await.expect("join A").expect("rotate A");
+        let cert_b = b.await.expect("join B").expect("rotate B");
+
+        assert_ne!(cert_a.serial, cert_b.serial, "并发轮换产生两个不同新证书");
+
+        // 无丢更新：两个新证书都在 store 中（一个 active、另一个 retired），旧证书也在
+        let check_svc = PkiService::with_store(PkiConfig::default(), store.clone());
+        let all = check_svc.list_certs("svc-conc.local").await.expect("list");
+        let serials: Vec<&str> = all.iter().map(|c| c.serial.as_str()).collect();
+        assert!(serials.contains(&first.serial.as_str()), "旧证书保留");
+        assert!(serials.contains(&cert_a.serial.as_str()), "A 的证书保留");
+        assert!(serials.contains(&cert_b.serial.as_str()), "B 的证书保留");
+
+        // 重启一致性：新实例（同一 store）取回当前 active，且为本次轮换之一
+        let pki_restart = PkiService::with_store(PkiConfig::default(), store.clone());
+        pki_restart
+            .init_ca("Concurrent Rotate CA")
+            .await
+            .expect("restart init");
+        let current = pki_restart
+            .issue_cert("svc-conc.local", 0)
+            .await
+            .expect("restart issue");
+        assert!(
+            current.serial == cert_a.serial || current.serial == cert_b.serial,
+            "重启后 active 必须为本次轮换之一"
+        );
+    }
+
+    /// G-PKI-1：并发过期替换——双 agent 同时 issue(已过期)：都拿到未过期证书
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_issue_over_expired_returns_unexpired() {
+        let store = Arc::new(MemoryPkiStore::new());
+        let pki_a = PkiService::with_store(PkiConfig::default(), store.clone());
+        let pki_b = PkiService::with_store(PkiConfig::default(), store.clone());
+        pki_a.init_ca("Concurrent Expired CA").await.expect("init");
+        pki_b.init_ca("Concurrent Expired CA").await.expect("init");
+
+        store
+            .create_cert(
+                "svc-exp.local",
+                &expired_record("svc-exp.local", "expired-0x9"),
+            )
+            .await
+            .expect("seed expired");
+
+        let a = tokio::spawn(async move { pki_a.issue_cert("svc-exp.local", 0).await });
+        let b = tokio::spawn(async move { pki_b.issue_cert("svc-exp.local", 0).await });
+        let cert_a = a.await.expect("join A").expect("issue A");
+        let cert_b = b.await.expect("join B").expect("issue B");
+
+        // 双方都不得拿到过期记录；两方各自拿到的是未过期的新证书（同一胜者或先后替换）
+        assert_ne!(cert_a.serial, "expired-0x9");
+        assert_ne!(cert_b.serial, "expired-0x9");
+        assert_ne!(
+            cert_a.key_pem, "-----BEGIN PRIVATE KEY-----\nEXPIRED\n-----END PRIVATE KEY-----"
+        );
+        assert_ne!(
+            cert_b.key_pem, "-----BEGIN PRIVATE KEY-----\nEXPIRED\n-----END PRIVATE KEY-----"
+        );
     }
 }

@@ -86,6 +86,8 @@ pub struct CaRecord {
 pub enum PkiStoreError {
     /// 键已存在（CAS 冲突），get-or-create 的创建方应重读并返回胜者
     AlreadyExists(String),
+    /// 版本化替换的 key version 与预期不符（并发替换），调用方应重读再决策
+    VersionConflict(String),
     /// 未找到（按 serial 查不到任何记录）
     NotFound(String),
     /// 底层 KV/Txn 错误
@@ -98,6 +100,7 @@ impl std::fmt::Display for PkiStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AlreadyExists(key) => write!(f, "key already exists: {key}"),
+            Self::VersionConflict(key) => write!(f, "version conflict on replace: {key}"),
             Self::NotFound(s) => write!(f, "not found: {s}"),
             Self::Kv(msg) => write!(f, "kv error: {msg}"),
             Self::Serialization(msg) => write!(f, "serialization error: {msg}"),
@@ -124,6 +127,12 @@ pub trait PkiStore: Send + Sync {
     /// 读取当前 active 证书（无返回 Ok(None)）
     async fn get_cert(&self, cn: &str) -> Result<Option<CertRecord>, PkiStoreError>;
 
+    /// 读取当前 active 证书及 key version（版本化 CAS 替换用；无返回 Ok(None)）
+    async fn get_cert_with_version(
+        &self,
+        cn: &str,
+    ) -> Result<Option<(CertRecord, i64)>, PkiStoreError>;
+
     /// 原子创建 active 证书（Txn CAS Version==0）；已存在返回 AlreadyExists
     async fn create_cert(&self, cn: &str, record: &CertRecord) -> Result<(), PkiStoreError>;
 
@@ -133,10 +142,14 @@ pub trait PkiStore: Send + Sync {
     /// 按 serial 全量查找（active + 历史），用于 renew 按 serial 还原真实 CN
     async fn get_cert_by_serial(&self, serial: &str) -> Result<Option<CertRecord>, PkiStoreError>;
 
-    /// 原子轮换：旧 active 移入历史（retired），新 active 写入（同 Txn 两写）
-    async fn replace_active_cert(
+    /// 版本化 CAS 替换 active：仅当 key version == expected_version 时成功。
+    ///
+    /// 成功：旧 active 以 retired 移入历史 + 新 active 同 Txn 写入（无丢更新）；
+    /// 版本不符返回 VersionConflict，调用方应重读后重试或返回胜者。
+    async fn replace_active_cert_cas(
         &self,
         cn: &str,
+        expected_version: i64,
         active: &CertRecord,
         retired: &CertRecord,
     ) -> Result<(), PkiStoreError>;
@@ -223,6 +236,8 @@ pub struct MemoryPkiStore {
     ca: Mutex<Option<CaRecord>>,
     /// cn -> active
     active: Mutex<HashMap<String, CertRecord>>,
+    /// cn -> active key version（与 Kv Range 返回的 version 同口径；创建=1，替换递增）
+    active_versions: Mutex<HashMap<String, i64>>,
     /// cn -> retired 历史（按 serial）
     history: Mutex<HashMap<String, HashMap<String, CertRecord>>>,
 }
@@ -252,6 +267,20 @@ impl PkiStore for MemoryPkiStore {
         Ok(self.active.lock().get(cn).cloned())
     }
 
+    async fn get_cert_with_version(
+        &self,
+        cn: &str,
+    ) -> Result<Option<(CertRecord, i64)>, PkiStoreError> {
+        let record = self.active.lock().get(cn).cloned();
+        match record {
+            Some(record) => {
+                let version = self.active_versions.lock().get(cn).copied().unwrap_or(1);
+                Ok(Some((record, version)))
+            }
+            None => Ok(None),
+        }
+    }
+
     async fn create_cert(&self, cn: &str, record: &CertRecord) -> Result<(), PkiStoreError> {
         let mut active = self.active.lock();
         if active.contains_key(cn) {
@@ -260,6 +289,7 @@ impl PkiStore for MemoryPkiStore {
             ));
         }
         active.insert(cn.to_string(), record.clone());
+        self.active_versions.lock().insert(cn.to_string(), 1);
         Ok(())
     }
 
@@ -298,21 +328,28 @@ impl PkiStore for MemoryPkiStore {
         Ok(None)
     }
 
-    async fn replace_active_cert(
+    async fn replace_active_cert_cas(
         &self,
         cn: &str,
+        expected_version: i64,
         active: &CertRecord,
         retired: &CertRecord,
     ) -> Result<(), PkiStoreError> {
         let mut act = self.active.lock();
-        let mut hist = self.history.lock();
-        // 旧 active 移入历史（按 retired.serial）
-        if let Some(old) = act.get(cn) {
-            let entry = hist.entry(cn.to_string()).or_default();
-            entry.insert(old.serial.clone(), old.clone());
+        let mut vers = self.active_versions.lock();
+        let current = vers.get(cn).copied().unwrap_or(0);
+        if current != expected_version {
+            return Err(PkiStoreError::VersionConflict(
+                String::from_utf8_lossy(&active_key(cn)).into_owned(),
+            ));
         }
+        let mut hist = self.history.lock();
+        // 旧 active 以调用方标记的 retired 形态入历史（与 KvPkiStore 同口径）
+        hist.entry(cn.to_string())
+            .or_default()
+            .insert(retired.serial.clone(), retired.clone());
         act.insert(cn.to_string(), active.clone());
-        let _ = retired; // retired 已由调用方标记 status=Retired；历史记录以原 active 为准
+        vers.insert(cn.to_string(), expected_version + 1);
         Ok(())
     }
 }
@@ -376,6 +413,25 @@ impl PkiStore for KvPkiStore {
             .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
         match pairs.first() {
             Some((_k, v)) => deserialize_cert(v).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn get_cert_with_version(
+        &self,
+        cn: &str,
+    ) -> Result<Option<(CertRecord, i64)>, PkiStoreError> {
+        let (kvs, _count, _rev) = self
+            .inner
+            .client
+            .kv()
+            .range_with_lease_full(&active_key(cn), &[], 1, 0, false, false)
+            .await
+            .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
+        match kvs.first() {
+            Some((_k, v, _lease, version)) => {
+                Ok(Some((deserialize_cert(v)?, *version)))
+            }
             None => Ok(None),
         }
     }
@@ -486,14 +542,24 @@ impl PkiStore for KvPkiStore {
         Ok(None)
     }
 
-    async fn replace_active_cert(
+    async fn replace_active_cert_cas(
         &self,
         cn: &str,
+        expected_version: i64,
         active: &CertRecord,
         retired: &CertRecord,
     ) -> Result<(), PkiStoreError> {
+        let key = active_key(cn);
         let new_active_value = serialize_cert(active)?;
         let retired_value = serialize_cert(retired)?;
+
+        // 仅当 key version 仍为读取时的版本才替换（无丢更新）
+        let compare = Compare {
+            result: CompareResult::Equal as i32,
+            target: Target::Version as i32,
+            key: key.clone(),
+            target_value: Some(TargetValue::Version(expected_version)),
+        };
 
         let history_put = RequestOp {
             op: Some(Op::RequestPut(PutRequest {
@@ -506,7 +572,7 @@ impl PkiStore for KvPkiStore {
         };
         let active_put = RequestOp {
             op: Some(Op::RequestPut(PutRequest {
-                key: active_key(cn),
+                key,
                 value: new_active_value,
                 lease_id: 0,
                 prev_kv: false,
@@ -518,13 +584,15 @@ impl PkiStore for KvPkiStore {
             .inner
             .client
             .txn()
-            .txn(vec![], vec![history_put, active_put], vec![])
+            .txn(vec![compare], vec![history_put, active_put], vec![])
             .await
             .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
         if resp.succeeded {
             Ok(())
         } else {
-            Err(PkiStoreError::Kv("txn failed".into()))
+            Err(PkiStoreError::VersionConflict(
+                String::from_utf8_lossy(&active_key(cn)).into_owned(),
+            ))
         }
     }
 }
@@ -673,7 +741,7 @@ mod tests {
         let mut retired = old.clone();
         retired.status = CertStatus::Retired;
         store
-            .replace_active_cert("svc-a", &new, &retired)
+            .replace_active_cert_cas("svc-a", 1, &new, &retired)
             .await
             .expect("rotate");
         let all = store.list_certs("svc-a").await.expect("list");
@@ -691,7 +759,7 @@ mod tests {
         let retired = sample_cert("svc-a", "0x1", CertStatus::Retired);
         store.create_cert("svc-a", &old).await.expect("create");
         store
-            .replace_active_cert("svc-a", &new, &retired)
+            .replace_active_cert_cas("svc-a", 1, &new, &retired)
             .await
             .expect("rotate");
 
@@ -703,6 +771,48 @@ mod tests {
         let found = store.get_cert_by_serial("0x1").await.unwrap().unwrap();
         assert_eq!(found.common_name, "svc-a");
         assert_eq!(found.serial, "0x1");
+    }
+
+    /// 版本化 CAS：过期版本号不匹配 → VersionConflict，且不产生任何写入
+    #[tokio::test]
+    async fn test_memory_replace_active_version_conflict_is_noop() {
+        let store = MemoryPkiStore::new();
+        let old = sample_cert("svc-a", "0x1", CertStatus::Active);
+        let new = sample_cert("svc-a", "0x2", CertStatus::Active);
+        let retired = sample_cert("svc-a", "0x1", CertStatus::Retired);
+        store.create_cert("svc-a", &old).await.expect("create");
+
+        // 预期版本 0（不存在）→ 冲突
+        let err = store
+            .replace_active_cert_cas("svc-a", 0, &new, &retired)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PkiStoreError::VersionConflict(_)));
+        assert_eq!(
+            store.get_cert("svc-a").await.unwrap().unwrap().serial,
+            "0x1",
+            "冲突不得改写 active"
+        );
+    }
+
+    /// 读取版本：创建后 version=1，一次替换后 version=2
+    #[tokio::test]
+    async fn test_memory_get_cert_with_version_monotonic() {
+        let store = MemoryPkiStore::new();
+        let old = sample_cert("svc-a", "0x1", CertStatus::Active);
+        store.create_cert("svc-a", &old).await.expect("create");
+        let (_, v1) = store.get_cert_with_version("svc-a").await.unwrap().unwrap();
+        assert_eq!(v1, 1);
+
+        let new = sample_cert("svc-a", "0x2", CertStatus::Active);
+        let retired = sample_cert("svc-a", "0x1", CertStatus::Retired);
+        store
+            .replace_active_cert_cas("svc-a", v1, &new, &retired)
+            .await
+            .expect("replace");
+        let (record, v2) = store.get_cert_with_version("svc-a").await.unwrap().unwrap();
+        assert_eq!(v2, 2, "替换后版本必须递增（单调）");
+        assert_eq!(record.serial, "0x2");
     }
 
     #[tokio::test]
