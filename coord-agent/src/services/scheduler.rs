@@ -122,6 +122,10 @@ pub struct TaskDetail {
     pub metadata: HashMap<String, String>,
     pub state: TaskState,
     pub claimed_by: Option<String>,
+    /// 完成时持久化的结果（G-SC-1；`None` = 未完成或未提交）
+    pub result: Option<Vec<u8>>,
+    /// 完成墙钟毫秒（自 UNIX_EPOCH）
+    pub completed_at_ms: Option<u64>,
 }
 
 // ──── SchedulerService ────
@@ -300,20 +304,33 @@ impl SchedulerService {
 
     /// 标记任务完成（校验认领归属）
     pub async fn mark_completed(&self, task_id: &str, worker_id: &str) -> ServiceResult<()> {
-        self.mark_completed_impl(task_id, Some(worker_id)).await
+        self.mark_completed_impl(task_id, Some(worker_id), None).await
     }
 
     /// 按 claim 句柄标记完成（wire 无 worker 身份；`job_id` 即凭据）
     ///
     /// 语义：清空认领、状态置 `Completed`；已完成的任务不可再被认领（Exactly-Once）。
     pub async fn mark_completed_any(&self, task_id: &str) -> ServiceResult<()> {
-        self.mark_completed_impl(task_id, None).await
+        self.mark_completed_impl(task_id, None, None).await
+    }
+
+    /// 按 claim 句柄标记完成并**持久化结果**（G-SC-1；wire 的 `result` 走这里）
+    ///
+    /// 幂等语义：**首个完成的 result 为准**——重复完成（含带不同 result）不覆盖，
+    /// 与「已 Completed 的任务重复完成仍幂等」的契约一致。
+    pub async fn mark_completed_any_with_result(
+        &self,
+        task_id: &str,
+        result: Option<Vec<u8>>,
+    ) -> ServiceResult<()> {
+        self.mark_completed_impl(task_id, None, result).await
     }
 
     async fn mark_completed_impl(
         &self,
         task_id: &str,
         worker_id: Option<&str>,
+        result: Option<Vec<u8>>,
     ) -> ServiceResult<()> {
         for _ in 0..MAX_CAS_RETRIES {
             let Some(current) = self.load(task_id).await? else {
@@ -327,9 +344,16 @@ impl SchedulerService {
                 }
             }
 
+            // 幂等：已 Completed ⇒ 不覆盖既有 result / 完成时刻
+            if current.state == TaskState::Completed {
+                return Ok(());
+            }
+
             let mut next = current.clone();
             next.claim = None;
             next.state = TaskState::Completed;
+            next.result = result.clone();
+            next.completed_at_ms = Some(crate::services::scheduler_store::now_ms());
 
             if self.cas(task_id, &current, &next).await? {
                 return Ok(());
@@ -407,6 +431,8 @@ impl SchedulerService {
             metadata: record.task.metadata.clone(),
             state: record.state,
             claimed_by: record.claim.as_ref().map(|c| c.worker_id.clone()),
+            result: record.result.clone(),
+            completed_at_ms: record.completed_at_ms,
         }))
     }
 
@@ -794,6 +820,41 @@ mod tests {
         assert_eq!(d.claimed_by.as_deref(), Some("w1"), "认领必须存续");
         // 且存续的认领仍然排斥第二个 worker
         assert!(s2.try_claim("j", "w2").await.unwrap().is_none());
+    }
+
+    /// G-SC-1：result 随完成持久化（重启存续），且重复完成不覆盖首个 result
+    #[tokio::test]
+    async fn test_complete_persists_result_across_restart_and_is_idempotent() {
+        let store: Arc<dyn SchedulerStore> = Arc::new(MemorySchedulerStore::new());
+        {
+            let s = SchedulerService::with_store(Arc::clone(&store), Duration::from_secs(300));
+            s.register_task(task("j", TaskType::Once)).await.unwrap();
+            s.try_claim("j", "w1").await.unwrap();
+            s.mark_completed_any_with_result("j", Some(b"result-v1".to_vec()))
+                .await
+                .unwrap();
+
+            let d = s.get_task_detail("j").await.unwrap().unwrap();
+            assert_eq!(d.result.as_deref(), Some(&b"result-v1"[..]));
+            assert!(d.completed_at_ms.is_some(), "完成时刻必须记录");
+
+            // 重复完成（带不同 result）⇒ 幂等，首个 result 不被覆盖
+            s.mark_completed_any_with_result("j", Some(b"result-v2".to_vec()))
+                .await
+                .unwrap();
+            let d = s.get_task_detail("j").await.unwrap().unwrap();
+            assert_eq!(
+                d.result.as_deref(),
+                Some(&b"result-v1"[..]),
+                "首个完成的 result 为准"
+            );
+        }
+
+        // "重启"：新实例、同一 store ⇒ result 存续
+        let s2 = SchedulerService::with_store(Arc::clone(&store), Duration::from_secs(300));
+        let d = s2.get_task_detail("j").await.unwrap().unwrap();
+        assert_eq!(d.state, TaskState::Completed);
+        assert_eq!(d.result.as_deref(), Some(&b"result-v1"[..]));
     }
 
     #[test]

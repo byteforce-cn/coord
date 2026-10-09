@@ -73,6 +73,10 @@ pub struct TaskRecord {
     pub state: TaskState,
     /// 当前认领（`None` = 无人认领）
     pub claim: Option<ClaimRecord>,
+    /// 完成时提交的结果（G-SC-1 持久化；首个完成的 result 为准，重复完成不覆盖）
+    pub result: Option<Vec<u8>>,
+    /// 完成墙钟毫秒（自 UNIX_EPOCH；`None` = 未完成）
+    pub completed_at_ms: Option<u64>,
 }
 
 impl TaskRecord {
@@ -82,6 +86,8 @@ impl TaskRecord {
             task,
             state: TaskState::Pending,
             claim: None,
+            result: None,
+            completed_at_ms: None,
         }
     }
 
@@ -114,6 +120,11 @@ struct TaskRecordWire {
     metadata: BTreeMap<String, String>,
     state: TaskState,
     claim: Option<ClaimRecord>,
+    // G-SC-1 result 持久化；`#[serde(default)]` 兼容旧记录（无字段 ⇒ None）
+    #[serde(default)]
+    result: Option<Vec<u8>>,
+    #[serde(default)]
+    completed_at_ms: Option<u64>,
 }
 
 fn canonicalize(record: &TaskRecord) -> TaskRecordWire {
@@ -129,6 +140,8 @@ fn canonicalize(record: &TaskRecord) -> TaskRecordWire {
             .collect(),
         state: record.state,
         claim: record.claim.clone(),
+        result: record.result.clone(),
+        completed_at_ms: record.completed_at_ms,
     }
 }
 
@@ -151,6 +164,8 @@ pub fn deserialize_task(bytes: &[u8]) -> Result<TaskRecord, SchedulerStoreError>
         },
         state: wire.state,
         claim: wire.claim,
+        result: wire.result,
+        completed_at_ms: wire.completed_at_ms,
     })
 }
 

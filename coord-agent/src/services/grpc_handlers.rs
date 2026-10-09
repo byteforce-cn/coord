@@ -1436,9 +1436,16 @@ impl Scheduler for SchedulerService {
                 )));
             }
         }
-        self.mark_completed_any(&req.job_id)
-            .await
-            .map_err(sanitized_internal)?;
+        self.mark_completed_any_with_result(
+            &req.job_id,
+            if req.result.is_empty() {
+                None
+            } else {
+                Some(req.result.clone())
+            },
+        )
+        .await
+        .map_err(sanitized_internal)?;
         Ok(Response::new(SchedulerCompleteJobResponse {}))
     }
 }

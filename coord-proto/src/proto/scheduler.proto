@@ -70,8 +70,10 @@ message SchedulerHeartbeatResponse {}
 // 边界声明（WHITEPAPER.md）：
 //   - 无有效认领且任务尚未 Completed ⇒ `FAILED_PRECONDITION`；
 //   - 已 Completed 的任务**幂等**：重复完成仍返回成功；
-//   - `result` **被接受但不留档** —— 契约里没有“读取任务结果”的 RPC，
-//     写了也没有任何面能读回来。不要依赖它传递业务结果。
+//   - `result` **随完成持久化**（G-SC-1：KV 任务记录，重启不丢）；
+//     首个完成的 result 为准（重复完成不覆盖）。
+//     注意：当前契约面**没有**读取结果的 RPC——留档用于重启不丢与后续读取面
+//     演进，不要依赖它传递业务结果。
 message SchedulerCompleteJobRequest {
   string job_id = 1;
   bytes result = 2;
