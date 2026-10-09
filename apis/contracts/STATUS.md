@@ -15,7 +15,7 @@
 | 分布式锁 | coord.lock.v1 | COMMITTED | 2026-11-30 | coord-agent/src/services/lock.rs：已迁移至契约包；release 校验 `lease_id`（fencing）为验收项 |
 | Leader 选举 | coord.election.v1 | COMMITTED | 2026-11-30 | coord-agent/src/services/leader_election.rs：已迁移至契约包；续约（重新 Campaign）语义验证 |
 | 分布式 ID | coord.idgen.v1 | COMMITTED | 2026-10-31 | coord-agent/src/services/idgen.rs：已迁移至契约包；时钟回拨防护（或显式声明不承诺边界）为验收项 |
-| 事件通知 | coord.event.v1 | COMMITTED | 2026-12-31 | coord-agent/src/services/event_notification.rs：已迁移至契约包；Subscribe 显式下发 subscription_id 为验收项；**持久化游标与保留窗口内补投（G-EV-1）为待落地验收项** |
+| 事件通知 | coord.event.v1 | COMMITTED | 2026-12-31 | coord-agent/src/services/event_notification.rs：已迁移至契约包；Subscribe 显式下发 subscription_id 为验收项；**持久化游标矩阵与保留窗口内补投（G-EV-1）已落地**（默认实时不补投；显式 cursor 位点补投；seq 全局单调） |
 | 配置中心 | coord.config.v1 | COMMITTED | 2026-12-31 | coord-agent/src/services/config_center.rs：已迁移至契约包（KV 驱动 + 本地 cache + watch） |
 | 权限策略引擎 | coord.policy.v1 | COMMITTED | 2026-12-31 | coord-agent/src/services/policy.rs：已迁移至契约包；**边界声明：OPA bundle 在 server KV，RBAC 策略为 Agent 本地（CheckPermission 仅本地/嵌入式用途）**；bundle 分发已落地：启动全量加载 + Watch 收敛（≤10s 量级）+ per-key CAS 版本单调（G-POL-1） |
 | 熔断器 | coord.circuitbreaker.v1 | COMMITTED | 2026-12-31 | coord-agent/src/services/circuit_breaker.rs：已迁移至契约包；**边界声明：本地内存，不跨 Agent 共享** |

@@ -373,6 +373,22 @@ impl LeaderElection for LeaderElectionService {
 // Event Service
 // ════════════════════════════════════════════════════════════
 
+/// 事件 → 契约消息（CloudEvents 1.0 简化形态 + 全局序号 seq；G-EV-1）
+fn event_to_message(event: &crate::services::event_notification::Event) -> CloudEventMessage {
+    let ce = CloudEvent::from_event(event);
+    CloudEventMessage {
+        id: ce.id,
+        specversion: ce.specversion,
+        r#type: ce.event_type,
+        source: ce.source,
+        data: ce.data.unwrap_or_default(),
+        data_content_type: ce.datacontenttype.unwrap_or_default(),
+        subject: ce.subject.unwrap_or_default(),
+        time: ce.time.unwrap_or_default(),
+        seq: event.seq,
+    }
+}
+
 #[tonic::async_trait]
 impl EventSvc for EventNotificationService {
     async fn publish(
@@ -396,33 +412,111 @@ impl EventSvc for EventNotificationService {
     ) -> Result<Response<Self::SubscribeStream>, Status> {
         let req = request.into_inner();
         let filter_type = req.event_type.clone();
+        let cursor: Option<u64> = if req.cursor.trim().is_empty() {
+            None
+        } else {
+            Some(req.cursor.trim().parse::<u64>().map_err(|_| {
+                Status::invalid_argument("event cursor must be a decimal seq")
+            })?)
+        };
+
+        // 先订阅 live（在补投扫描之前建立 ⇒ 扫描期间的新事件不漏、经 seq 去重）
         let mut rx = EventNotificationService::subscribe(self);
         let (tx, out_rx) = tokio::sync::mpsc::channel(64);
 
+        // 默认路径：实时推送（既有语义不变，不补投）
+        if cursor.is_none() {
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(event) => {
+                            if !filter_type.is_empty() && event.event_type != filter_type {
+                                continue;
+                            }
+                            if tx.send(Ok(event_to_message(&event))).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+            return Ok(Response::new(ReceiverStream::new(out_rx)));
+        }
+
+        // 持久化游标路径（G-EV-1）：先按位点补投（保留窗口 = KV 中仍在的事件），
+        // 再转入实时；重放与实时之间不丢事件（可能重复——消费方按 seq 幂等）。
+        let inner = Arc::clone(self.inner());
+        let filter = filter_type.clone();
+        let start = cursor.unwrap();
         tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        if !filter_type.is_empty() && event.event_type != filter_type {
+            let mut last = start;
+            'catchup: loop {
+                // 水位：补投扫描前读计数器（此后发布的事件全部走 live）
+                let watermark =
+                    match crate::services::event_notification::read_seq_counter(&inner).await {
+                        Ok(w) => w,
+                        Err(e) => {
+                            let _ = tx.send(Err(sanitized_internal(e))).await;
+                            return;
+                        }
+                    };
+
+                // 分页补投 (last, watermark]
+                loop {
+                    let page = match crate::services::event_notification::fetch_events_page(
+                        &inner, last, watermark, 256,
+                    )
+                    .await
+                    {
+                        Ok(p) => p,
+                        Err(e) => {
+                            let _ = tx.send(Err(sanitized_internal(e))).await;
+                            return;
+                        }
+                    };
+                    if page.is_empty() {
+                        break;
+                    }
+                    let mut max_seq = last;
+                    for event in &page {
+                        max_seq = max_seq.max(event.seq);
+                        if !filter.is_empty() && event.event_type != filter {
                             continue;
                         }
-                        let ce = CloudEvent::from_event(&event);
-                        let msg = CloudEventMessage {
-                            id: ce.id,
-                            specversion: ce.specversion,
-                            r#type: ce.event_type,
-                            source: ce.source,
-                            data: ce.data.unwrap_or_default(),
-                            data_content_type: ce.datacontenttype.unwrap_or_default(),
-                            subject: ce.subject.unwrap_or_default(),
-                            time: ce.time.unwrap_or_default(),
-                        };
-                        if tx.send(Ok(msg)).await.is_err() {
-                            break;
+                        if tx.send(Ok(event_to_message(event))).await.is_err() {
+                            return;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    if max_seq <= last {
+                        break;
+                    }
+                    last = max_seq;
+                }
+                last = last.max(watermark);
+
+                // 实时阶段：seq ≤ last（= 补投水位）的事件已覆盖 ⇒ 跳过
+                loop {
+                    match rx.recv().await {
+                        Ok(event) => {
+                            if event.seq <= last {
+                                continue;
+                            }
+                            let seq = event.seq;
+                            if filter.is_empty() || event.event_type == filter {
+                                if tx.send(Ok(event_to_message(&event))).await.is_err() {
+                                    return;
+                                }
+                            }
+                            last = last.max(seq);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            // 广播追不上：回到补投（从 last 续扫，KV 中仍在的事件不丢）
+                            continue 'catchup;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
                 }
             }
         });

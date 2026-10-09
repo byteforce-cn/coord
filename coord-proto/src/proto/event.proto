@@ -9,7 +9,12 @@ syntax = "proto3";
 //
 // 语义契约（WHITEPAPER.md 的 Event 约定）：
 //   - 连接存续期间 at-least-once、单订阅内按发布顺序投递；
-//   - 断线窗口不承诺补投（持久化游标 = v1.2 候选）；
+//   - **默认断线不补投**（`Subscribe.cursor` 为空）；
+//     显式携带 `cursor`（上次收到的 `seq`）时，在**保留窗口**内按位点补投
+//     （G-EV-1：补投范围 = Server KV 中仍保留的事件；窗口上界由部署方对事件
+//     键空间的管理策略决定）；
+//   - `seq` 服务端分配、全局单调递增（跨重启不重置），是**持久化游标**的取值；
+//     消费方应在收到事件后自行持久化最大 `seq`，重连时回传它获得补投；
 //   - event_id 服务端分配、全局唯一；specversion 固定 "1.0"。
 // ============================================================
 
@@ -34,8 +39,15 @@ message EventPublishResponse {
 
 // 订阅请求（服务端流）。语义承诺：按 event_type 精确匹配；
 // 前缀匹配为 v1.2 候选。
+//
+// `cursor`（持久化游标，G-EV-1）：
+//   - 空 = **默认实时推送**：只投递订阅之后发布的事件（既有语义不变）；
+//   - 非空 = 上次收到的事件的十进制 `seq`：先按位点补投存储中仍在保留窗口内
+//     的事件（seq > cursor，按 seq 升序），再转入实时投递；重放与实时之间
+//     不丢事件，可能重复（消费方按 seq 幂等）。
 message EventSubscribeRequest {
   string event_type = 1; // 精确匹配的事件类型
+  string cursor = 2; // 订阅位点（十进制 seq；空 = 不补投）
 }
 
 // 投递的事件（CloudEvents 1.0 简化形态）。
@@ -48,6 +60,7 @@ message CloudEventMessage {
   string data_content_type = 6;
   string subject = 7;
   string time = 8;             // 服务端生成时间（RFC3339）
+  uint64 seq = 9;              // 全局单调序号（持久化游标取值，G-EV-1）
 }
 
 // 取消订阅。

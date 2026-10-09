@@ -6,6 +6,9 @@
 
 **发布口径**：本条目为 **Minor**（新增 RPC / 新增字段 / 注释级语义声明；
 不改动任何既有字段编号与类型；`buf breaking` 基线 = `contracts/v1.2.0`，CI 强制）。
+新增 RPC 4 个（MQ ×3、Transit ×1）、新增字段 4 个（MqMessage ×2、event ×2，
+全部向后兼容），以及 MQ 路由/删除、Policy 本地定位、Scheduler result 持久化、
+Transit 多材料、Event 持久化游标等边界声明。
 
 **新增 RPC（4 个）**
 
@@ -16,10 +19,14 @@
 | `coord.mq.v1` | `DeleteTopic` | `coord:mq:manage` | 删除 topic 并全量回收存量（配额归还；ISR 全域一致；同名重建 = 空 topic） |
 | `coord.transit.v1` | `Rewrap` | `coord:transit:crypto` | KEK 材料迁移管理路径（旧材料解出 → 主材料重包） |
 
-**新增字段（1 个消息，向后兼容）**
+**新增字段（2 个消息，向后兼容）**
 
 - `coord.mq.v1.MqMessage` 新增 `dlq_reason = 7` / `dlq_detail = 8`
   （仅 `PollDlq` 填充；普通消息为空）——DLQ 内容含原因可读（G-MQ-2）。
+- `coord.event.v1`：`EventSubscribeRequest.cursor = 2`（持久化游标，十进制 seq；
+  空 = 默认实时不补投）与 `CloudEventMessage.seq = 9`（全局单调序号）——
+  断线重连后可在保留窗口内按位点补投（G-EV-1；“保留窗口 = Server KV 中
+  仍保留的事件”，投递窗口与语义见 proto 头注）。
 
 **注释级语义声明变更（wire 不变）**
 

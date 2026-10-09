@@ -40,6 +40,9 @@ pub struct Event {
     pub subject: String,
     /// 数据内容类型
     pub data_content_type: String,
+    /// 全局单调序号（发布时服务端分配；持久化游标取值，G-EV-1。`0` = 未分配/旧记录）
+    #[serde(default)]
+    pub seq: u64,
 }
 
 impl Event {
@@ -56,13 +59,21 @@ impl Event {
             timestamp_ms: now,
             subject: String::new(),
             data_content_type: "application/json".into(),
+            seq: 0,
         }
     }
 
-    /// 构造 Server 存储 key（事件持久化）
-    pub fn storage_key(id: &str) -> Vec<u8> {
-        format!("/_events/{id}").into_bytes()
+    /// 事件存储键（按序号定长补零 ⇒ KV range 顺序 = 发布顺序）。
+    pub fn seq_key(seq: u64) -> Vec<u8> {
+        let mut k = Self::EVENTS_PREFIX.to_vec();
+        k.extend_from_slice(format!("{seq:020}").as_bytes());
+        k
     }
+
+    /// 事件键空间前缀（G-EV-1 补投扫描用）
+    pub const EVENTS_PREFIX: &'static [u8] = b"/_events/e/";
+    /// 全局序号计数器键（CAS 自增）
+    pub const SEQ_COUNTER_KEY: &'static [u8] = b"/_events/meta/seq";
 }
 
 /// 生成简易 UUID v4 风格 ID（不引入 uuid crate）
@@ -170,6 +181,7 @@ impl CloudEvent {
             timestamp_ms: rfc3339_to_ms(self.time.as_deref().unwrap_or("")),
             subject: self.subject.clone().unwrap_or_default(),
             data_content_type: self.datacontenttype.clone().unwrap_or_default(),
+            seq: 0,
         }
     }
 }
@@ -315,12 +327,21 @@ impl EventNotificationService {
         }
     }
 
+    /// 内部客户端句柄（补投路径 G-EV-1 需要 service 外的任务访问 KV）
+    pub fn inner(&self) -> &Arc<AgentInner> {
+        &self.inner
+    }
+
     /// 发布事件
     ///
-    /// 事件持久化到 Server（KV 存储）并通过 broadcast 推送给本地订阅者。
-    pub async fn publish(&self, event: Event) -> ServiceResult<()> {
-        // 持久化到 Server
-        let storage_key = Event::storage_key(&event.id);
+    /// 事件持久化到 Server（KV）+ 通过 broadcast 推送给本地订阅者。
+    /// 发布时分配**全局单调序号**（CAS 计数器）并按序号键落库：KV range 顺序
+    /// 即发布顺序，供持久化游标补投（G-EV-1）。
+    pub async fn publish(&self, mut event: Event) -> ServiceResult<()> {
+        let seq = allocate_event_seq(&self.inner).await?;
+        event.seq = seq;
+
+        let storage_key = Event::seq_key(seq);
         let value =
             serde_json::to_vec(&event).map_err(|e| format!("failed to serialize event: {e}"))?;
 
@@ -376,6 +397,128 @@ impl EventNotificationService {
     pub fn cache_len(&self) -> usize {
         self.cache.read().len()
     }
+}
+
+// ──── 持久化游标辅助（G-EV-1）────
+
+/// 读取全局序号计数器（不存在 = 0）
+pub async fn read_seq_counter(inner: &Arc<AgentInner>) -> Result<u64, String> {
+    let (kvs, _count, _rev) = inner
+        .client
+        .kv()
+        .range_with_lease_full(Event::SEQ_COUNTER_KEY, &[], 1, 0, false, false)
+        .await
+        .map_err(|e| format!("event seq counter read failed: {e}"))?;
+    match kvs.first() {
+        Some((_k, v, _l, _ver)) if v.len() == 8 => {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(v);
+            Ok(u64::from_be_bytes(buf))
+        }
+        _ => Ok(0),
+    }
+}
+
+/// CAS 自增分配全局序号（并发安全；冲突重试有界）
+///
+/// 序号只增不减且跨重启不重置（计数器落 Server KV）；分配失败不落事件，
+/// 允许出现序号空洞（空洞不影响游标语义：客户端只持久化收到的最大 seq）。
+pub async fn allocate_event_seq(inner: &Arc<AgentInner>) -> Result<u64, String> {
+    use coord_proto::kv::PutRequest;
+    use coord_proto::txn::compare::{CompareResult, Target, TargetValue};
+    use coord_proto::txn::request_op::Op;
+    use coord_proto::txn::{Compare, RequestOp};
+
+    for _ in 0..8 {
+        let (kvs, _count, _rev) = inner
+            .client
+            .kv()
+            .range_with_lease_full(Event::SEQ_COUNTER_KEY, &[], 1, 0, false, false)
+            .await
+            .map_err(|e| format!("event seq counter read failed: {e}"))?;
+        let (current, version) = match kvs.first() {
+            Some((_k, v, _l, ver)) if v.len() == 8 => {
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(v);
+                (u64::from_be_bytes(buf), *ver)
+            }
+            _ => (0u64, 0i64),
+        };
+        let next = current + 1;
+
+        let compare = Compare {
+            result: CompareResult::Equal as i32,
+            target: Target::Version as i32,
+            key: Event::SEQ_COUNTER_KEY.to_vec(),
+            target_value: Some(TargetValue::Version(version)),
+        };
+        let put = RequestOp {
+            op: Some(Op::RequestPut(PutRequest {
+                key: Event::SEQ_COUNTER_KEY.to_vec(),
+                value: next.to_be_bytes().to_vec(),
+                lease_id: 0,
+                prev_kv: false,
+                request_id: vec![],
+            })),
+        };
+        let resp = inner
+            .client
+            .txn()
+            .txn(vec![compare], vec![put], vec![])
+            .await
+            .map_err(|e| format!("event seq counter txn failed: {e}"))?;
+        if resp.succeeded {
+            return Ok(next);
+        }
+    }
+    Err("event seq allocation contention (8 retries exhausted)".into())
+}
+
+/// 补投读取：返回 seq 在 `(after, watermark]` 内的事件（升序，单页上限）
+///
+/// 键为定长补零 ⇒ KV range 顺序 = seq 顺序；跳过无法解析的键（防御旧布局残留）。
+pub async fn fetch_events_page(
+    inner: &Arc<AgentInner>,
+    after: u64,
+    watermark: u64,
+    max: usize,
+) -> Result<Vec<Event>, String> {
+    if after >= watermark {
+        return Ok(Vec::new());
+    }
+    let start = Event::seq_key(after + 1);
+    let mut end = Event::EVENTS_PREFIX.to_vec();
+    // 前缀收尾：/ → 0（前缀后继）
+    if let Some(last) = end.last_mut() {
+        *last = last.wrapping_add(1);
+    }
+    let pairs = inner
+        .client
+        .kv()
+        .range(&start, &end, max as i64, 0)
+        .await
+        .map_err(|e| format!("event replay scan failed: {e}"))?;
+
+    let mut out = Vec::with_capacity(pairs.len());
+    for (k, v) in pairs {
+        let Ok(seq) = std::str::from_utf8(&k[Event::EVENTS_PREFIX.len()..])
+            .unwrap_or("")
+            .parse::<u64>()
+        else {
+            continue;
+        };
+        if seq <= after || seq > watermark {
+            continue;
+        }
+        match serde_json::from_slice::<Event>(&v) {
+            Ok(mut ev) => {
+                ev.seq = seq;
+                out.push(ev);
+            }
+            Err(_) => continue, // 防御：坏记录跳过（不阻断补投）
+        }
+    }
+    Ok(out)
 }
 
 #[async_trait]
@@ -452,9 +595,23 @@ mod tests {
     }
 
     #[test]
-    fn test_event_storage_key() {
-        let key = Event::storage_key("evt-001");
-        assert_eq!(String::from_utf8_lossy(&key), "/_events/evt-001");
+    fn test_event_seq_key_is_order_preserving() {
+        let k1 = Event::seq_key(2);
+        let k2 = Event::seq_key(10);
+        assert_eq!(String::from_utf8_lossy(&k1), "/_events/e/00000000000000000002");
+        assert!(
+            k1 < k2,
+            "定长补零 ⇒ 键序 = 序号序（补投扫描依赖）"
+        );
+        // 前缀必须包含全部事件键（range 扫描的分界）
+        assert!(k1.starts_with(Event::EVENTS_PREFIX));
+        assert!(k2.starts_with(Event::EVENTS_PREFIX));
+    }
+
+    #[test]
+    fn test_event_new_has_unassigned_seq() {
+        let e = Event::new("t", "s", vec![]);
+        assert_eq!(e.seq, 0, "发布前 seq 未分配");
     }
 
     #[test]
@@ -467,6 +624,7 @@ mod tests {
             timestamp_ms: 1700000000000,
             subject: "test-subject".into(),
             data_content_type: "application/json".into(),
+            seq: 7,
         };
         let json = serde_json::to_vec(&event).unwrap();
         let restored: Event = serde_json::from_slice(&json).unwrap();
