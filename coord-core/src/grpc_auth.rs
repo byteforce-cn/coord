@@ -222,6 +222,8 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         "/coord.transit.v1.Transit/Decrypt" => Some("coord:transit:crypto"),
         "/coord.transit.v1.Transit/HmacSign" => Some("coord:transit:crypto"),
         "/coord.transit.v1.Transit/HmacVerify" => Some("coord:transit:crypto"),
+        // KEK 材料迁移（G-TR-1 管理路径）
+        "/coord.transit.v1.Transit/Rewrap" => Some("coord:transit:crypto"),
 
         // CircuitBreaker —— 熔断
         "/coord.circuitbreaker.v1.CircuitBreaker/GetState" => Some("coord:breaker:read"),

@@ -207,12 +207,33 @@ chmod 600 /var/lib/coord-agent/transit-kek.bin
 > 内建 dev 默认 KEK（启动 WARN，数据无保密性；`agent` 子命令 / `agent.toml`
 > 不可达该回退，见 ADR-0009）。
 
-**轮换（⚠️ 目前**没有**内建流程）**：
-- KEK 变了 ⇒ **旧材料写下的 DEK 解不开**（判据
-  `test_kek_comes_from_material_not_from_kek_id`）。已知边界见 `boundaries.md` B-SE-6。
-- 临时做法：先用**旧材料**把仍需要的密文解密，再用新材料重新加密（`rewrap` 不适用，
-  它只轮换 DEK、不换 KEK）。
-- **操作风险**：轮换前必须确认没有仍需解密的存量密文；否则数据不可逆。
+**轮换（G-TR-1 多材料流程，含回退路径）**：
+
+KEK 更换分三步，**在完成迁移前不得移除旧材料**：
+
+1. **并存窗口**：主材料与新注入方式不变（`COORD_TRANSIT_KEK`），把**旧材料**
+   同时注入：
+   - 环境变量 `COORD_TRANSIT_KEK_OLD`：`kek_id:hex64[,kek_id:hex64...]`；
+   - 或 `<data_dir>/transit-kek-old.txt`（每行 `kek_id hex64`，`#` 注释）。
+   此时新写入的 DEK 由主材料包裹；旧材料密文按记录中的材料标识自动选旧材料解密
+   （旧记录无标识 ⇒ 按「主 → 历史」逐材料试解）。
+2. **迁移存量**：对仍有效的存量 DEK 调 `Transit/Rewrap`（管理路径）：
+   旧材料解出 DEK → **主材料重包**（新 nonce / 新 dek_id，材料标识更新为
+   主材料）；返回 `new_dek_id` 与 `kek_id`。此后旧材料对该条已无依赖。
+3. **下线旧材料**：确认无存量后，从注入集合移除旧材料并重启 agent。
+
+**回退路径**：任一步出问题都可退回「新旧并存」——只要旧材料仍在注入集合，
+旧密文（含未 rewrap 的）仍可解密。移除旧材料后旧密文解密报
+`KEK material '<id>' is not injected`（fail-loud，不静默降级）。
+
+**演练（预期 / 判据）**：
+
+- 预期：并存窗口内旧材料密文可解密；`Rewrap` 后记录 `kek_id` 变为主材料且仅主
+  材料可解；移除旧材料后未迁移的旧密文**必须**解密失败（负控制）。
+- 判据（自动化）：`coord-agent` 单测
+  `test_multi_material_decrypt_window_and_rewrap`（含负控制）、
+  `test_legacy_record_without_material_id_falls_back_to_try_all`、
+  `test_keyring_old_material_parsing_rules`。
 
 ---
 

@@ -1781,51 +1781,63 @@ impl AgentServer {
         // （`coord dev`）在缺材料时回退到内建默认材料；生产路径不可达。
         if self.config.services.transit {
             use crate::services::transit::{
-                TransitConfig, TransitKekMaterial, TransitService, TRANSIT_KEK_ENV,
-                TRANSIT_KEK_FILE,
+                TransitConfig, TransitKekKeyring, TransitKekMaterial, TransitService,
+                TRANSIT_KEK_ENV, TRANSIT_KEK_FILE, TRANSIT_KEK_OLD_ENV,
             };
             use crate::services::transit_store::{KvTransitDekStore, TransitDekStore};
 
-            let kek_material =
-                match TransitKekMaterial::resolve(std::path::Path::new(&self.config.data_dir)) {
-                    Ok(material) => material,
-                    Err(_) if self.dev_default_transit_kek => {
-                        tracing::warn!(
-                            "services.transit: no KEK material injected — using the built-in \
+            let transit_config = TransitConfig::default();
+            // 主材料 fail-closed（口径不变）；历史材料可选（G-TR-1 多材料解密窗口，
+            // 供旧材料密文在新材料实例上可读；清空前必须先 rewrap 全部存量 DEK）。
+            let keyring = match TransitKekKeyring::resolve(
+                std::path::Path::new(&self.config.data_dir),
+                &transit_config.kek_id,
+            ) {
+                Ok(keyring) => keyring,
+                Err(_) if self.dev_default_transit_kek => {
+                    tracing::warn!(
+                        "services.transit: no KEK material injected — using the built-in \
                          dev-mode default KEK (coord dev only; see ADR-0009). Data encrypted \
                          with it provides no confidentiality; never use outside local dev"
-                        );
-                        TransitKekMaterial::from_bytes(&crate::services::transit::DEV_DEFAULT_KEK)
-                            .map_err(|e| format!("dev default KEK material invalid: {e}"))?
-                    }
-                    Err(e) => {
-                        return Err(format!(
-                            "services.transit = true but KEK injection failed: {e} \
-                         (inject `{TRANSIT_KEK_ENV}`=hex64 or {}; or set \
-                         services.transit = false to disable the service)",
-                            std::path::Path::new(&self.config.data_dir)
-                                .join(TRANSIT_KEK_FILE)
-                                .display()
-                        )
-                        .into());
-                    }
-                };
+                    );
+                    let material = TransitKekMaterial::from_bytes(
+                        &crate::services::transit::DEV_DEFAULT_KEK,
+                    )
+                    .map_err(|e| format!("dev default KEK material invalid: {e}"))?;
+                    TransitKekKeyring::single(&transit_config.kek_id, material)
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "services.transit = true but KEK injection failed: {e} \
+                         (inject `{TRANSIT_KEK_ENV}`=hex64 or {}; historical materials via \
+                         `{TRANSIT_KEK_OLD_ENV}`; or set services.transit = false to \
+                         disable the service)",
+                        std::path::Path::new(&self.config.data_dir)
+                            .join(TRANSIT_KEK_FILE)
+                            .display()
+                    )
+                    .into());
+                }
+            };
 
-            let transit_config = TransitConfig::default();
             // 生产（已连接 server 集群）：加密态 DEK 落共享 KV —— 重启不丢密钥、
             // 单次使用跨 Agent 成立；骨架模式（无 server）：降级内存 store（dev/单测）。
             let transit_svc = match &inner {
                 Some(inner) => {
                     let store: Arc<dyn TransitDekStore> =
                         Arc::new(KvTransitDekStore::new(inner.clone()));
-                    TransitService::with_store(transit_config, store, kek_material)
+                    TransitService::with_store_keyring(transit_config, store, keyring)
                 }
                 None => {
                     tracing::warn!(
                         "Transit service running without Server KV: DEK persistence disabled \
                          (keys are lost on restart)"
                     );
-                    TransitService::new(transit_config, kek_material)
+                    TransitService::with_store_keyring(
+                        transit_config,
+                        Arc::new(crate::services::transit_store::MemoryTransitDekStore::new()),
+                        keyring,
+                    )
                 }
             }
             .map_err(|e| format!("failed to create transit service: {e}"))?;

@@ -73,7 +73,8 @@ use coord_proto::agent::{
     SchedulerHeartbeatResponse, SchedulerRegisterJobRequest, SchedulerRegisterJobResponse,
     TransitDecryptRequest, TransitDecryptResponse, TransitEncryptRequest, TransitEncryptResponse,
     TransitHmacSignRequest, TransitHmacSignResponse, TransitHmacVerifyRequest,
-    TransitHmacVerifyResponse, WorkflowCancelRequest, WorkflowCancelResponse,
+    TransitHmacVerifyResponse, TransitRewrapRequest, TransitRewrapResponse, WorkflowCancelRequest,
+    WorkflowCancelResponse,
     WorkflowDefinitionSummary, WorkflowDefinitionVersion, WorkflowDeployRequest,
     WorkflowDeployResponse, WorkflowGetDefinitionRequest, WorkflowGetDefinitionResponse,
     WorkflowGetStatusRequest, WorkflowGetStatusResponse, WorkflowInstanceSummary,
@@ -2272,6 +2273,36 @@ impl Transit for TransitService {
         match self.hmac_verify(&req.data, &req.signature, &req.algorithm) {
             Ok(valid) => Ok(Response::new(TransitHmacVerifyResponse { valid })),
             Err(e) => Err(sanitized_internal(e)),
+        }
+    }
+
+    /// KEK 材料迁移（管理路径，G-TR-1）：旧材料解出 DEK → 主材料重包。
+    /// 旧材料密文经此迁移后，旧材料方可从注入集合下线。
+    async fn rewrap(
+        &self,
+        request: Request<TransitRewrapRequest>,
+    ) -> Result<Response<TransitRewrapResponse>, Status> {
+        let req = request.into_inner();
+        if req.dek_id.is_empty() {
+            return Err(Status::invalid_argument("dek_id must not be empty"));
+        }
+        match self.rewrap_persisted(&req.dek_id).await {
+            Ok(new_dek_id) => Ok(Response::new(TransitRewrapResponse {
+                new_dek_id,
+                kek_id: self.primary_kek_id().to_string(),
+            })),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("not found") || msg.contains("expired") {
+                    // 不存在 / 已过期：明确 NOT_FOUND（过期拒绝轮换）
+                    Err(Status::not_found(msg))
+                } else if msg.contains("is not injected") {
+                    // 包裹材料未注入（旧材料已下线但仍有存量）：前置条件不满足
+                    Err(Status::failed_precondition(msg))
+                } else {
+                    Err(sanitized_internal(msg))
+                }
+            }
         }
     }
 }

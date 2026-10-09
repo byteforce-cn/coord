@@ -9,6 +9,10 @@
 // - DEK 使用后立即从内存销毁（zeroize）
 // - 支持上下文绑定（context-dependent encryption，在数据层实现）
 // - 支持密钥轮换（rewrap：用 KEK 重新加密 DEK）
+// - **多材料解密窗口（G-TR-1）**：主材料 + 历史材料并存；密文包头与 DEK 记录
+//   携带材料标识，解密按标识选材料（旧材料密文在新材料实例可读；旧记录无标识
+//   时按「主 → 历史」逐材料试解）；`Transit/Rewrap` 管理路径把旧材料 DEK 迁移
+//   到主材料（新 nonce / 新 id），迁移完成后旧材料方可下线。
 //
 // 持久化：
 // - 加密后的 DEK packet **落 coord-server KV**（`/_transit/v1/dek/{dek_id}`，见
@@ -24,9 +28,13 @@
 // - KEK **不再**由配置字符串派生。启动时必须**注入 32 字节密钥材料**：
 //     ① 环境变量 `COORD_TRANSIT_KEK`（hex64），或
 //     ② `<agent data_dir>/transit-kek.bin`（32 字节原始材料，0600）。
-//   KEK = HKDF-SHA256(材料, info = "coord-transit-kek-v1:" || kek_id)。
+//   KEK = HKDF-SHA256(材料, info = "coord-transit-kek-v1:" || 材料标识)。
 //   `kek_id` 降级为**域分隔/审计标签**，不再是密钥来源（拿到配置无法推导 KEK）。
-// - **fail-closed**：材料缺失/长度不符 ⇒ 构造失败（`TransitKekMaterial::resolve`
+// - **多材料（G-TR-1）**：历史材料经 `COORD_TRANSIT_KEK_OLD`
+//   （`kek_id:hex64[,...]`）或 `<data_dir>/transit-kek-old.txt` 注入；格式非法
+//   即拒绝启动（不静默跳过）。轮换/回退流程见
+//   `docs/production/ops/runbook.md` §4.4。
+// - **fail-closed**：主材料缺失/长度不符 ⇒ 构造失败（`TransitKekMaterial::resolve`
 //   返回 Err）⇒ agent 启动**拒绝**，不静默降级为 `kek_id` 派生路径。见 `security.md`。
 // - 仍未闭合的边界（**不要**把本服务读作"密钥已妥善托管"）：本方案**不是外部 KMS**；
 //   材料以文件/环境形态落在 agent 主机上，主机被控 ⇒ KEK 泄露。
@@ -78,6 +86,12 @@ pub const TRANSIT_KEK_ENV: &str = "COORD_TRANSIT_KEK";
 
 /// 数据目录内的密钥材料文件名（32 字节原始材料）
 pub const TRANSIT_KEK_FILE: &str = "transit-kek.bin";
+
+/// 历史材料环境变量（`kek_id:hex64[,kek_id:hex64...]`；G-TR-1 多材料解密窗口）
+pub const TRANSIT_KEK_OLD_ENV: &str = "COORD_TRANSIT_KEK_OLD";
+
+/// 历史材料文件名（每行 `kek_id hex64`；`#` 注释）
+pub const TRANSIT_KEK_OLD_FILE: &str = "transit-kek-old.txt";
 
 /// dev 模式默认 KEK 材料（`coord dev` 专用；见 ADR-0009）。
 ///
@@ -165,6 +179,152 @@ impl TransitKekMaterial {
     }
 }
 
+// ──── 多材料（G-TR-1）────
+
+/// KEK 材料集合：主材料 + 历史材料（多材料并存解密窗口，G-TR-1）。
+///
+/// - 加密/回包只使用**主材料**；
+/// - 解密按 DEK 记录 / 密文自带的材料标识选材料；无标识（旧格式旧记录）按
+///   「主 → 历史」逐材料试解；
+/// - 历史材料仅用于**解密窗口**：清空历史材料前必须先 rewrap 全部存量 DEK
+///   （演练与回退路径见 `docs/production/ops/runbook.md` §4.4）。
+#[derive(Debug)]
+pub struct TransitKekKeyring {
+    primary_id: String,
+    primary: TransitKekMaterial,
+    historical: Vec<(String, TransitKekMaterial)>,
+}
+
+impl TransitKekKeyring {
+    /// 单主材料集合（无历史；dev / 单测 / 兼容构造）
+    pub fn single(primary_id: &str, primary: TransitKekMaterial) -> Self {
+        Self {
+            primary_id: primary_id.to_string(),
+            primary,
+            historical: Vec::new(),
+        }
+    }
+
+    /// 解析材料集合（主材料 fail-closed；历史材料可选）：
+    ///
+    /// - 主：`COORD_TRANSIT_KEK` hex64 → `<data_dir>/transit-kek.bin`（口径不变）；
+    /// - 历史：`COORD_TRANSIT_KEK_OLD` 或 `<data_dir>/transit-kek-old.txt`
+    ///   （格式见常量文档；任一历史条目非法 ⇒ 拒绝启动，不静默跳过）。
+    pub fn resolve(data_dir: &Path, primary_id: &str) -> Result<Self, String> {
+        let primary = TransitKekMaterial::resolve(data_dir)?;
+        Self::resolve_with(data_dir, primary_id, primary)
+    }
+
+    /// [`Self::resolve`] 的确定性内核：环境变量经 [`Self::resolve_with_env`] 注入。
+    pub fn resolve_with(
+        data_dir: &Path,
+        primary_id: &str,
+        primary: TransitKekMaterial,
+    ) -> Result<Self, String> {
+        Self::resolve_with_env(data_dir, primary_id, primary, std::env::var(TRANSIT_KEK_OLD_ENV).ok())
+    }
+
+    /// 同 [`Self::resolve_with`]，历史材料环境变量显式传入（测试用；
+    /// 进程级 env 在测试并行下不确定）。
+    pub fn resolve_with_env(
+        data_dir: &Path,
+        primary_id: &str,
+        primary: TransitKekMaterial,
+        old_env_value: Option<String>,
+    ) -> Result<Self, String> {
+        let mut historical: Vec<(String, TransitKekMaterial)> = Vec::new();
+
+        match old_env_value {
+            Some(v) if !v.trim().is_empty() => {
+                for entry in v.split([',', ';']) {
+                    let entry = entry.trim();
+                    if entry.is_empty() {
+                        continue;
+                    }
+                    historical.push(Self::parse_old_entry(entry)?);
+                }
+            }
+            _ => {
+                let path = data_dir.join(TRANSIT_KEK_OLD_FILE);
+                if path.exists() {
+                    let content = std::fs::read_to_string(&path)
+                        .map_err(|e| format!("read {}: {e}", path.display()))?;
+                    for line in content.lines() {
+                        let line = line.trim();
+                        if line.is_empty() || line.starts_with('#') {
+                            continue;
+                        }
+                        historical.push(Self::parse_old_entry(line)?);
+                    }
+                }
+            }
+        }
+
+        // 同一标识只能对应一份材料：主材料 id 出现在历史 / 历史重复 id ⇒ 拒绝
+        if historical.iter().any(|(id, _)| id == primary_id) {
+            return Err(format!(
+                "historical KEK id '{primary_id}' duplicates the primary id"
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (id, _) in &historical {
+            if !seen.insert(id.clone()) {
+                return Err(format!("duplicate historical KEK id '{id}'"));
+            }
+        }
+
+        Ok(Self {
+            primary_id: primary_id.to_string(),
+            primary,
+            historical,
+        })
+    }
+
+    /// `kek_id:hex64` / `kek_id<空白>hex64` 单条历史材料
+    fn parse_old_entry(entry: &str) -> Result<(String, TransitKekMaterial), String> {
+        let (id, hex) = entry
+            .split_once([':', ' ', '\t'])
+            .ok_or_else(|| {
+                format!("invalid historical KEK entry '{entry}' (expect `kek_id:hex64`)")
+            })?;
+        let id = id.trim();
+        let hex = hex.trim();
+        if id.is_empty() {
+            return Err("historical KEK id must not be empty".into());
+        }
+        let material = TransitKekMaterial::from_hex(hex)?;
+        Ok((id.to_string(), material))
+    }
+
+    pub fn primary_id(&self) -> &str {
+        &self.primary_id
+    }
+
+    pub fn primary(&self) -> &TransitKekMaterial {
+        &self.primary
+    }
+
+    pub fn historical(&self) -> &[(String, TransitKekMaterial)] {
+        &self.historical
+    }
+}
+
+/// 由材料 + `kek_id` 域分隔派生 32 字节密钥（KEK / HMAC 共用内核）
+fn derive_key32(
+    material: &TransitKekMaterial,
+    info_prefix: &[u8],
+    kek_id: &str,
+) -> Result<[u8; DEK_LEN], String> {
+    let mut out = [0u8; DEK_LEN];
+    let mut info = Vec::with_capacity(info_prefix.len() + kek_id.len());
+    info.extend_from_slice(info_prefix);
+    info.extend_from_slice(kek_id.as_bytes());
+    Hkdf::<Sha256>::new(None, &*material.0)
+        .expand(&info, &mut out)
+        .map_err(|e| format!("HKDF expand for transit key failed: {e}"))?;
+    Ok(out)
+}
+
 /// 常量
 const NONCE_LEN: usize = 12;
 const DEK_LEN: usize = 32; // AES-256 key
@@ -182,6 +342,8 @@ struct DekEntry {
     created_at: u64,
     /// 过期时间（UNIX 秒）；0 = 永不过期
     expires_at: u64,
+    /// 包裹本 DEK 的材料标识（G-TR-1；空 = 未知/旧记录 → 解密按「主→历史」试解）
+    kek_id: String,
 }
 
 impl DekEntry {
@@ -194,6 +356,11 @@ impl DekEntry {
             dek_packet: self.packet.clone(),
             created_at: self.created_at,
             expires_at: self.expires_at,
+            kek_id: if self.kek_id.is_empty() {
+                None
+            } else {
+                Some(self.kek_id.clone())
+            },
         }
     }
 }
@@ -201,8 +368,9 @@ impl DekEntry {
 /// 信封加密服务
 pub struct TransitService {
     config: TransitConfig,
-    /// KEK = HKDF-SHA256(启动注入的材料, info="coord-transit-kek-v1:"||kek_id)，仅存内存
-    kek: [u8; DEK_LEN],
+    /// KEK 集：`(材料标识, KEK)`，**主材料在最前**（`keks[0]`）。
+    /// KEK = HKDF-SHA256(注入材料, info="coord-transit-kek-v1:"||材料标识)，仅存内存。
+    keks: Vec<(String, [u8; DEK_LEN])>,
     /// DEK 注册表：dek_id → DekEntry（加密态 packet + TTL）
     /// 解密后 DEK 立即移除（用后即焚）
     dek_store: RwLock<HashMap<String, DekEntry>>,
@@ -240,31 +408,117 @@ impl TransitService {
         store: Arc<dyn TransitDekStore>,
         kek_material: TransitKekMaterial,
     ) -> Result<Self, String> {
-        let mut kek = [0u8; DEK_LEN];
-        let mut info = Vec::with_capacity(24 + config.kek_id.len());
-        info.extend_from_slice(b"coord-transit-kek-v1:");
-        info.extend_from_slice(config.kek_id.as_bytes());
-        Hkdf::<Sha256>::new(None, &*kek_material.0)
-            .expand(&info, &mut kek)
-            .map_err(|e| format!("HKDF expand for transit KEK failed: {e}"))?;
+        let keyring = TransitKekKeyring::single(&config.kek_id, kek_material);
+        Self::with_store_keyring(config, store, keyring)
+    }
 
-        // HMAC 密钥：同一材料、不同 info（域分隔；仅内存，不落盘）
-        let mut hmac_key = [0u8; HMAC_KEY_LEN];
-        let mut hmac_info = Vec::with_capacity(25 + config.kek_id.len());
-        hmac_info.extend_from_slice(b"coord-transit-hmac-v1:");
-        hmac_info.extend_from_slice(config.kek_id.as_bytes());
-        Hkdf::<Sha256>::new(None, &*kek_material.0)
-            .expand(&hmac_info, &mut hmac_key)
-            .map_err(|e| format!("HKDF expand for transit HMAC key failed: {e}"))?;
+    /// 同 [`Self::with_store`]，材料集合显式传入（主 + 历史；G-TR-1 多材料解密窗口）
+    pub fn with_store_keyring(
+        config: TransitConfig,
+        store: Arc<dyn TransitDekStore>,
+        keyring: TransitKekKeyring,
+    ) -> Result<Self, String> {
+        // 主材料：KEK + HMAC 密钥（域分隔；仅内存）
+        let primary_kek = derive_key32(
+            keyring.primary(),
+            b"coord-transit-kek-v1:",
+            keyring.primary_id(),
+        )?;
+        let hmac_key = derive_key32(
+            keyring.primary(),
+            b"coord-transit-hmac-v1:",
+            keyring.primary_id(),
+        )?;
+
+        // 历史材料：仅派生解密用 KEK（不参与加密/HMAC）
+        let mut keks: Vec<(String, [u8; DEK_LEN])> =
+            vec![(keyring.primary_id().to_string(), primary_kek)];
+        for (id, material) in keyring.historical() {
+            keks.push((
+                id.clone(),
+                derive_key32(material, b"coord-transit-kek-v1:", id)?,
+            ));
+        }
 
         Ok(Self {
             config,
-            kek,
+            keks,
             dek_store: RwLock::new(HashMap::new()),
             hmac_key,
             store,
             last_sweep: AtomicU64::new(0),
         })
+    }
+
+    /// 主材料标识（加密与 HMAC 的身份）
+    pub fn primary_kek_id(&self) -> &str {
+        &self.keks[0].0
+    }
+
+    /// 主材料 KEK
+    fn primary_kek(&self) -> &[u8; DEK_LEN] {
+        &self.keks[0].1
+    }
+
+    /// 按标识选材料（未注入返回 None）
+    fn kek_for_id(&self, kek_id: &str) -> Option<&[u8; DEK_LEN]> {
+        self.keks.iter().find(|(id, _)| id == kek_id).map(|(_, k)| k)
+    }
+
+    /// 解包 DEK（多材料，G-TR-1）：
+    ///
+    /// - `kek_hint` 命中已注入材料 → 只用该材料解（解不开即报错，不降级到试解）；
+    /// - `kek_hint` 缺失/未注入（旧格式、旧记录、材料已下线）→ 按「主 → 历史」
+    ///   逐材料试解；全部失败 ⇒ 报错列出可用材料标识（fail-loud）。
+    fn unwrap_dek(&self, dek_packet: &[u8], kek_hint: Option<&str>) -> Result<[u8; DEK_LEN], String> {
+        if dek_packet.len() < DEK_PACKET_LEN {
+            return Err("invalid DEK packet".into());
+        }
+
+        fn try_unwrap(kek: &[u8; DEK_LEN], dek_packet: &[u8]) -> Result<[u8; DEK_LEN], String> {
+            let kek_cipher =
+                Aes256Gcm::new_from_slice(kek).map_err(|e| format!("invalid KEK: {e}"))?;
+            let dek_nonce = Nonce::from_slice(&dek_packet[..NONCE_LEN]);
+            let fixed_aad = b"coord-transit-dek-v1";
+            let mut dek_bytes = kek_cipher
+                .decrypt(
+                    dek_nonce,
+                    Payload {
+                        msg: &dek_packet[NONCE_LEN..],
+                        aad: fixed_aad.as_ref(),
+                    },
+                )
+                .map_err(|e| format!("DEK decrypt failed: {e}"))?;
+            if dek_bytes.len() != DEK_LEN {
+                return Err("invalid DEK length".into());
+            }
+            let mut dek = [0u8; DEK_LEN];
+            dek.copy_from_slice(&dek_bytes);
+            dek_bytes.zeroize();
+            Ok(dek)
+        }
+
+        if let Some(hint) = kek_hint.filter(|s| !s.is_empty()) {
+            let kek = self.kek_for_id(hint).ok_or_else(|| {
+                format!(
+                    "KEK material '{hint}' is not injected; inject it (COORD_TRANSIT_KEK_OLD) \
+                     to decrypt or rewrap legacy ciphertext (available: {:?})",
+                    self.keks.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>()
+                )
+            })?;
+            return try_unwrap(kek, dek_packet);
+        }
+
+        for (_id, kek) in &self.keks {
+            if let Ok(dek) = try_unwrap(kek, dek_packet) {
+                return Ok(dek);
+            }
+        }
+        Err(format!(
+            "DEK decrypt failed: none of the injected KEK materials match \
+             (available: {:?})",
+            self.keks.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>()
+        ))
     }
 
     /// 持久化后端（测试/可观测性用）
@@ -300,8 +554,8 @@ impl TransitService {
         OsRng.fill_bytes(&mut dek);
 
         // 2. 用 KEK 加密 DEK（固定 AAD，不使用上下文）
-        let kek_cipher =
-            Aes256Gcm::new_from_slice(&self.kek).map_err(|e| format!("invalid KEK: {e}"))?;
+        let kek_cipher = Aes256Gcm::new_from_slice(self.primary_kek())
+            .map_err(|e| format!("invalid KEK: {e}"))?;
         let mut dek_nonce_bytes = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut dek_nonce_bytes);
         let dek_nonce = Nonce::from_slice(&dek_nonce_bytes);
@@ -360,19 +614,33 @@ impl TransitService {
                 packet: dek_packet.clone(),
                 created_at: now,
                 expires_at,
+                kek_id: self.primary_kek_id().to_string(),
             },
         );
 
-        // 7. 组装数据包: dek_id_len(1B) || dek_id || data_nonce(12) || dek_packet(60) || ciphertext
+        // 7. 组装数据包 v2（G-TR-1：包头携带材料标识）：
+        //    MAGIC(4) || dek_id_len(1B) || dek_id || kek_id_len(1B) || kek_id
+        //    || data_nonce(12) || dek_packet(60) || ciphertext
         let dek_id_bytes = dek_id.as_bytes();
-        if dek_id_bytes.len() > 255 {
-            return Err("dek_id too long".into());
+        let kek_id_bytes = self.primary_kek_id().as_bytes();
+        if dek_id_bytes.len() > 255 || kek_id_bytes.len() > 255 {
+            return Err("dek_id/kek_id too long".into());
         }
         let mut packet = Vec::with_capacity(
-            1 + dek_id_bytes.len() + NONCE_LEN + DEK_PACKET_LEN + ciphertext.len(),
+            PACKET_V2_MAGIC.len()
+                + 1
+                + dek_id_bytes.len()
+                + 1
+                + kek_id_bytes.len()
+                + NONCE_LEN
+                + DEK_PACKET_LEN
+                + ciphertext.len(),
         );
+        packet.extend_from_slice(PACKET_V2_MAGIC);
         packet.push(dek_id_bytes.len() as u8);
         packet.extend_from_slice(dek_id_bytes);
+        packet.push(kek_id_bytes.len() as u8);
+        packet.extend_from_slice(kek_id_bytes);
         packet.extend_from_slice(&data_nonce_bytes);
         packet.extend_from_slice(&dek_packet);
         packet.append(&mut ciphertext);
@@ -429,7 +697,8 @@ impl TransitService {
 
         // 1. 获取加密的 DEK packet
         // 优先从包头提取 dek_id；若对应 DEK 不在 store 中，回退到显式传入的 _dek_id
-        let (dek_packet_data, consumed_id) = {
+        let layout_kek_hint = layout.kek_id.clone();
+        let (dek_packet_data, consumed_id, entry_kek_id) = {
             let store = self.dek_store.read();
             let id_to_try = if store.contains_key(&dek_id) {
                 &dek_id
@@ -439,43 +708,29 @@ impl TransitService {
                 // 都不存在，用头部的 dek_id 报错（保持原有错误信息）
                 &dek_id
             };
-            let packet = store
-                .get(id_to_try)
-                .map(|e| e.packet.clone())
-                .ok_or_else(|| {
-                    format!(
-                        "DEK '{}' not found (already used or not created)",
-                        id_to_try
-                    )
-                })?;
-            (packet, id_to_try.to_string())
+            let entry = store.get(id_to_try).ok_or_else(|| {
+                format!(
+                    "DEK '{}' not found (already used or not created)",
+                    id_to_try
+                )
+            })?;
+            (
+                entry.packet.clone(),
+                id_to_try.to_string(),
+                entry.kek_id.clone(),
+            )
         };
         if dek_packet_data.len() < DEK_PACKET_LEN {
             return Err("invalid DEK packet".into());
         }
 
-        // 2. 用 KEK 解密 DEK
-        let kek_cipher =
-            Aes256Gcm::new_from_slice(&self.kek).map_err(|e| format!("invalid KEK: {e}"))?;
-        let dek_nonce = Nonce::from_slice(&dek_packet_data[..NONCE_LEN]);
-        let fixed_aad = b"coord-transit-dek-v1";
-
-        let mut dek_bytes = kek_cipher
-            .decrypt(
-                dek_nonce,
-                Payload {
-                    msg: &dek_packet_data[NONCE_LEN..],
-                    aad: fixed_aad.as_ref(),
-                },
-            )
-            .map_err(|e| format!("DEK decrypt failed: {e}"))?;
-
-        if dek_bytes.len() != DEK_LEN {
-            return Err("invalid DEK length".into());
-        }
-        let mut dek = [0u8; DEK_LEN];
-        dek.copy_from_slice(&dek_bytes);
-        dek_bytes.zeroize();
+        // 2. 用材料解包 DEK（G-TR-1：按记录/包头标识选材料；无标识按主→历史试解）
+        let kek_hint = if !entry_kek_id.is_empty() {
+            Some(entry_kek_id.as_str())
+        } else {
+            layout_kek_hint.as_deref()
+        };
+        let mut dek = self.unwrap_dek(&dek_packet_data, kek_hint)?;
 
         // 3. 销毁存储中的 DEK（用后即焚）
         //
@@ -513,40 +768,35 @@ impl TransitService {
     // ──── 密钥轮换 ────
 
     /// **仅内存**轮换（单测 / 无 server 降级场景）。生产路径见 [`Self::rewrap_persisted`]。
+    ///
+    /// 跨材料语义（G-TR-1）：用**包裹该 DEK 的材料**（按记录标识选择；无标识按
+    /// 主→历史试解）解出 DEK，再用**主材料**重包 ⇒ 旧材料密文迁移到新材料 +
+    /// 新 nonce + 新 id；TTL 沿用原条目（轮换不延长密钥寿命）。
     pub fn rewrap(&self, old_dek_id: &str) -> Result<String, String> {
-        let (dek_packet, created_at, expires_at) = {
+        let (dek_packet, created_at, expires_at, old_kek_id) = {
             let store = self.dek_store.read();
             let entry = store
                 .get(old_dek_id)
                 .cloned()
                 .ok_or_else(|| format!("DEK '{old_dek_id}' not found for rewrap"))?;
-            (entry.packet, entry.created_at, entry.expires_at)
+            (entry.packet, entry.created_at, entry.expires_at, entry.kek_id)
         };
         if expires_at != 0 && now_unix() >= expires_at {
             return Err(format!("DEK '{old_dek_id}' expired, refusing to rewrap"));
         }
 
-        // 解密旧 DEK
-        let kek_cipher =
-            Aes256Gcm::new_from_slice(&self.kek).map_err(|e| format!("invalid KEK: {e}"))?;
-        let dek_nonce = Nonce::from_slice(&dek_packet[..NONCE_LEN]);
+        // 解密旧 DEK（按记录材料标识；无标识按主→历史试解）
+        let hint = if old_kek_id.is_empty() {
+            None
+        } else {
+            Some(old_kek_id.as_str())
+        };
+        let mut dek = self.unwrap_dek(&dek_packet, hint)?;
+
+        // 重新加密 DEK（**主材料** + 新 nonce）——跨材料迁移的落点
+        let kek_cipher = Aes256Gcm::new_from_slice(self.primary_kek())
+            .map_err(|e| format!("invalid KEK: {e}"))?;
         let fixed_aad = b"coord-transit-dek-v1";
-
-        let mut dek_bytes = kek_cipher
-            .decrypt(
-                dek_nonce,
-                Payload {
-                    msg: &dek_packet[NONCE_LEN..],
-                    aad: fixed_aad.as_ref(),
-                },
-            )
-            .map_err(|e| format!("DEK decrypt for rewrap failed: {e}"))?;
-
-        let mut dek = [0u8; DEK_LEN];
-        dek.copy_from_slice(&dek_bytes);
-        dek_bytes.zeroize();
-
-        // 重新加密 DEK（新 nonce）
         let mut new_nonce_bytes = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut new_nonce_bytes);
         let new_nonce = Nonce::from_slice(&new_nonce_bytes);
@@ -567,7 +817,7 @@ impl TransitService {
 
         let new_dek_id = compute_dek_id(&new_packet);
 
-        // 替换旧 DEK（TTL 沿用原条目：轮换不延长密钥寿命）
+        // 替换旧 DEK（TTL 沿用原条目：轮换不延长密钥寿命；材料标识更新为主材料）
         {
             let mut store = self.dek_store.write();
             store.insert(
@@ -576,6 +826,7 @@ impl TransitService {
                     packet: new_packet.clone(),
                     created_at,
                     expires_at,
+                    kek_id: self.primary_kek_id().to_string(),
                 },
             );
             if let Some(mut entry) = store.remove(old_dek_id) {
@@ -686,8 +937,12 @@ impl TransitService {
         Ok(plaintext)
     }
 
-    /// 持久化轮换：新 id 落 KV、旧 id 从 KV 删除（TTL 沿用原条目）
+    /// 持久化轮换：新 id 落 KV、旧 id 从 KV 删除（TTL 沿用原条目）。
+    ///
+    /// 跨实例/重启场景：旧 DEK 先按 id 从 KV 回取到内存（幂等）；不存在则
+    /// 由 [`Self::rewrap`] 报既有的 "not found" 语义。
     pub async fn rewrap_persisted(&self, old_dek_id: &str) -> Result<String, String> {
+        self.hydrate_from_store(old_dek_id).await?;
         let new_dek_id = self.rewrap(old_dek_id)?;
 
         let record = {
@@ -729,6 +984,8 @@ impl TransitService {
                 packet: record.dek_packet,
                 created_at: record.created_at,
                 expires_at: record.expires_at,
+                // 旧记录（无字段）⇒ 空：解密按「主→历史」试解
+                kek_id: record.kek_id.unwrap_or_default(),
             },
         );
         Ok(())
@@ -832,20 +1089,60 @@ impl TransitService {
 struct PacketLayout {
     /// DEK id（新格式取包头；旧格式取调用方传入的 fallback）
     dek_id: String,
+    /// 材料标识（仅 v2 包头携带；v1/旧格式为 None）
+    kek_id: Option<String>,
     /// 数据 nonce 起始偏移
     data_nonce_start: usize,
     /// DEK packet 起始偏移
     dek_packet_start: usize,
 }
 
-/// 解析密文包头（自描述新格式 / 无前缀旧格式）
+/// v2 包头魔数（G-TR-1：包头携带材料标识）。
 ///
-/// 两种格式的判别与偏移计算在此**唯一**实现：解密与持久化回取（[`header_dek_id`]）
+/// 旧格式（v1/无前缀）首字节是 `dek_id_len ∈ [1,64]`；`'C' = 0x43 = 67`
+/// 不在该区间，先判魔数不会与旧格式混淆。
+const PACKET_V2_MAGIC: &[u8; 4] = b"CCT2";
+
+/// 解析密文包头（v2 自描述 / v1 自描述 dek_id / 无前缀旧格式）
+///
+/// 三种格式的判别与偏移计算在此**唯一**实现：解密与持久化回取（[`header_dek_id`]）
 /// 必须用同一判据，否则会出现"回取了 A 的 DEK 却按 B 解密"的错位。
 fn parse_packet_layout(packet: &[u8], fallback_dek_id: &str) -> Result<PacketLayout, String> {
     let min_legacy_len = NONCE_LEN + DEK_PACKET_LEN + TAG_LEN;
     if packet.len() < min_legacy_len {
         return Err("packet too short".into());
+    }
+
+    // v2：MAGIC(4) || dek_id_len(1) || dek_id || kek_id_len(1) || kek_id
+    //     || data_nonce(12) || dek_packet(60) || ciphertext
+    if packet.starts_with(&PACKET_V2_MAGIC[..]) {
+        let rest = &packet[PACKET_V2_MAGIC.len()..];
+        if rest.is_empty() {
+            return Err("packet too short (v2 header)".into());
+        }
+        let dlen = rest[0] as usize;
+        let dek_end = 1 + dlen;
+        if dlen == 0 || rest.len() < dek_end + 1 {
+            return Err("invalid v2 packet header".into());
+        }
+        let dek_id = std::str::from_utf8(&rest[1..dek_end])
+            .map_err(|_| "invalid dek_id encoding".to_string())?
+            .to_string();
+        let klen = rest[dek_end] as usize;
+        let kek_start = dek_end + 1;
+        let kek_end = kek_start + klen;
+        if rest.len() < kek_end + NONCE_LEN + DEK_PACKET_LEN + TAG_LEN {
+            return Err("packet too short (v2 payload)".into());
+        }
+        let kek_id = std::str::from_utf8(&rest[kek_start..kek_end])
+            .map_err(|_| "invalid kek_id encoding".to_string())?
+            .to_string();
+        return Ok(PacketLayout {
+            dek_id,
+            kek_id: if kek_id.is_empty() { None } else { Some(kek_id) },
+            data_nonce_start: PACKET_V2_MAGIC.len() + kek_end,
+            dek_packet_start: PACKET_V2_MAGIC.len() + kek_end + NONCE_LEN,
+        });
     }
 
     let candidate_len = packet[0] as usize;
@@ -855,12 +1152,13 @@ fn parse_packet_layout(packet: &[u8], fallback_dek_id: &str) -> Result<PacketLay
         && candidate_end < packet.len()
         && packet.len() - candidate_end >= NONCE_LEN + DEK_PACKET_LEN + TAG_LEN
     {
-        // 新格式：提取 dek_id
+        // v1 格式：提取 dek_id
         let id = std::str::from_utf8(&packet[1..candidate_end])
             .map_err(|_| "invalid dek_id encoding".to_string())?
             .to_string();
         Ok(PacketLayout {
             dek_id: id,
+            kek_id: None,
             data_nonce_start: candidate_end,
             dek_packet_start: candidate_end + NONCE_LEN,
         })
@@ -868,6 +1166,7 @@ fn parse_packet_layout(packet: &[u8], fallback_dek_id: &str) -> Result<PacketLay
         // 旧格式：使用传入的 fallback（兼容路径）
         Ok(PacketLayout {
             dek_id: fallback_dek_id.to_string(),
+            kek_id: None,
             data_nonce_start: 0,
             dek_packet_start: NONCE_LEN,
         })
@@ -1473,5 +1772,214 @@ mod tests {
         async fn sweep_expired(&self, now: u64) -> Result<usize, DekStoreError> {
             self.inner.sweep_expired(now).await
         }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // G-TR-1：多材料解密窗口 + rewrap（跨材料迁移）
+    // ════════════════════════════════════════════════════════════
+
+    fn material(byte: u8) -> TransitKekMaterial {
+        TransitKekMaterial::from_bytes(&[byte; 32]).expect("32 bytes")
+    }
+
+    fn old_env_for(entries: &[(&str, u8)]) -> String {
+        entries
+            .iter()
+            .map(|(id, b)| format!("{id}:{}", hex::encode([*b; 32])))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// 旧材料实例写的密文，在新材料实例（带历史材料）可解密；
+    /// rewrap 后仅主材料可解（历史材料可下线）
+    #[tokio::test]
+    async fn test_multi_material_decrypt_window_and_rewrap() {
+        let shared = Arc::new(MemoryTransitDekStore::new());
+        let old_svc = TransitService::with_store_keyring(
+            TransitConfig {
+                kek_id: "old".into(),
+                ..Default::default()
+            },
+            shared.clone(),
+            TransitKekKeyring::single("old", material(1)),
+        )
+        .expect("old svc");
+
+        let (packet, dek_id) = old_svc
+            .encrypt_persisted(b"legacy data")
+            .await
+            .expect("encrypt");
+
+        // 新部署：主材料 material(2)（id "new"）+ 历史 material(1)（id "old"）
+        let new_svc = TransitService::with_store_keyring(
+            TransitConfig {
+                kek_id: "new".into(),
+                ..Default::default()
+            },
+            shared.clone(),
+            TransitKekKeyring::resolve_with_env(
+                std::path::Path::new("/nonexistent"),
+                "new",
+                material(2),
+                Some(old_env_for(&[("old", 1)])),
+            )
+            .expect("keyring"),
+        )
+        .expect("new svc");
+
+        // rewrap：旧材料解出 → 主材料重包（不先解密，避免消费 DEK）
+        let new_dek_id = new_svc
+            .rewrap_persisted(&dek_id)
+            .await
+            .expect("rewrap cross-material");
+        assert_ne!(new_dek_id, dek_id);
+
+        // KV 记录材料标识已迁移到主材料
+        let record = shared
+            .get_dek(&new_dek_id)
+            .await
+            .expect("get")
+            .expect("record");
+        assert_eq!(record.kek_id.as_deref(), Some("new"));
+
+        // 用新 id 解密（包头仍是旧 id，走显式 id 回退路径）
+        let plain = new_svc
+            .decrypt_persisted(&packet, &new_dek_id)
+            .await
+            .expect("decrypt after rewrap");
+        assert_eq!(plain, b"legacy data");
+
+        // 负控制：没有历史材料的实例，解不开**未经 rewrap** 的旧材料密文
+        let (packet2, dek_id2) = old_svc
+            .encrypt_persisted(b"not yet rewrapped")
+            .await
+            .expect("encrypt 2");
+        let no_history_svc = TransitService::with_store_keyring(
+            TransitConfig {
+                kek_id: "new".into(),
+                ..Default::default()
+            },
+            shared.clone(),
+            TransitKekKeyring::single("new", material(2)),
+        )
+        .expect("no-history svc");
+        let err = no_history_svc
+            .decrypt_persisted(&packet2, &dek_id2)
+            .await
+            .expect_err("旧材料未注入必须 fail-loud");
+        assert!(
+            err.contains("is not injected"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// 旧记录（无材料标识）⇒ 解密按「主 → 历史」试解（迁移兼容路径）
+    #[tokio::test]
+    async fn test_legacy_record_without_material_id_falls_back_to_try_all() {
+        let shared = Arc::new(MemoryTransitDekStore::new());
+        let old_svc = TransitService::with_store_keyring(
+            TransitConfig {
+                kek_id: "old".into(),
+                ..Default::default()
+            },
+            shared.clone(),
+            TransitKekKeyring::single("old", material(1)),
+        )
+        .expect("old svc");
+
+        let (packet, dek_id) = old_svc
+            .encrypt_persisted(b"legacy")
+            .await
+            .expect("encrypt");
+
+        // 抹掉 KV 记录的材料标识（模拟多材料上线前的旧记录）
+        let entry_packet = old_svc
+            .dek_store
+            .read()
+            .get(&dek_id)
+            .expect("entry")
+            .packet
+            .clone();
+        shared
+            .put_dek(
+                &dek_id,
+                &DekRecord {
+                    dek_packet: entry_packet,
+                    created_at: 0,
+                    expires_at: 0,
+                    kek_id: None,
+                },
+            )
+            .await
+            .expect("put legacy record");
+
+        let new_svc = TransitService::with_store_keyring(
+            TransitConfig {
+                kek_id: "new".into(),
+                ..Default::default()
+            },
+            shared.clone(),
+            TransitKekKeyring::resolve_with_env(
+                std::path::Path::new("/nonexistent"),
+                "new",
+                material(2),
+                Some(old_env_for(&[("old", 1)])),
+            )
+            .expect("keyring"),
+        )
+        .expect("new svc");
+
+        let plain = new_svc
+            .decrypt_persisted(&packet, &dek_id)
+            .await
+            .expect("try-all decrypt");
+        assert_eq!(plain, b"legacy");
+    }
+
+    /// 材料集合解析：合法环境条目 / 主 id 重复 / 历史 id 重复 / 非法 hex 全部可判
+    #[test]
+    fn test_keyring_old_material_parsing_rules() {
+        let dir = std::path::Path::new("/nonexistent");
+
+        let ok = TransitKekKeyring::resolve_with_env(
+            dir,
+            "new",
+            material(2),
+            Some(old_env_for(&[("old-a", 1), ("old-b", 3)])),
+        )
+        .expect("parse");
+        assert_eq!(ok.primary_id(), "new");
+        assert_eq!(ok.historical().len(), 2);
+        assert_eq!(ok.historical()[0].0, "old-a");
+
+        // 主 id 出现在历史 ⇒ 拒绝（同 id 两份材料 = 解密选择不确定）
+        let err = TransitKekKeyring::resolve_with_env(
+            dir,
+            "new",
+            material(2),
+            Some(old_env_for(&[("new", 1)])),
+        )
+        .expect_err("duplicate primary id must be rejected");
+        assert!(err.contains("duplicates the primary id"), "unexpected: {err}");
+
+        // 历史 id 重复 ⇒ 拒绝
+        let err = TransitKekKeyring::resolve_with_env(
+            dir,
+            "new",
+            material(2),
+            Some(old_env_for(&[("old-a", 1), ("old-a", 3)])),
+        )
+        .expect_err("duplicate historical id must be rejected");
+        assert!(err.contains("duplicate historical KEK id"), "unexpected: {err}");
+
+        // 非法条目（缺 hex）⇒ 拒绝，不静默跳过
+        let err = TransitKekKeyring::resolve_with_env(
+            dir,
+            "new",
+            material(2),
+            Some("old-a:zz".to_string()),
+        )
+        .expect_err("invalid hex must be rejected");
+        assert!(!err.is_empty());
     }
 }

@@ -46,6 +46,10 @@ pub struct DekRecord {
     pub created_at: u64,
     /// 过期时间（UNIX 秒）；0 = 永不过期（`dek_ttl_secs = 0`）
     pub expires_at: u64,
+    /// 包裹该 DEK 的 KEK 材料标识（G-TR-1 多材料解密窗口）。
+    /// 旧记录（多材料上线前）无此字段 ⇒ `None`：解密按「主→历史」逐材料试解。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kek_id: Option<String>,
 }
 
 impl DekRecord {
@@ -60,6 +64,7 @@ impl DekRecord {
             dek_packet,
             created_at,
             expires_at,
+            kek_id: None,
         }
     }
 

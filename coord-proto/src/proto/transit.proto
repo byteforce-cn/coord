@@ -25,6 +25,14 @@ service Transit {
   // 新增 — HMAC 签名与验签 (Phase B.2)
   rpc HmacSign(TransitHmacSignRequest) returns (TransitHmacSignResponse);
   rpc HmacVerify(TransitHmacVerifyRequest) returns (TransitHmacVerifyResponse);
+
+  // KEK 材料迁移（管理路径，G-TR-1）：用包裹该 DEK 的材料解出 DEK，
+  // 再用当前**主材料**重包（新 nonce / 新 dek_id）。旧材料密文经此迁移到
+  // 新材料后，旧材料方可从注入集合下线。
+  //
+  // 错误：dek_id 不存在 / 已过期 → `NOT_FOUND`（已过期拒绝轮换）；
+  // 包裹材料未注入（旧材料已下线但仍有存量）→ `FAILED_PRECONDITION`。
+  rpc Rewrap(TransitRewrapRequest) returns (TransitRewrapResponse);
 }
 
 message TransitEncryptRequest {
@@ -65,6 +73,19 @@ message TransitHmacVerifyRequest {
 
 message TransitHmacVerifyResponse {
   bool valid = 1;
+}
+
+// Transit KEK 材料迁移（G-TR-1）
+
+message TransitRewrapRequest {
+  string dek_id = 1;
+}
+
+message TransitRewrapResponse {
+  // 重包后的新 dek_id（旧 id 在同一操作中下线）
+  string new_dek_id = 1;
+  // 重包后的材料标识（= 当前主材料）
+  string kek_id = 2;
 }
 
 // ============================================================
