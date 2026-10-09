@@ -34,9 +34,53 @@ use coord_server::timer::TimerWheel;
 use coord_server::watch::WatchDispatcher;
 
 /// 申请一个空闲的本地端口。
+///
+/// ⚠️ 本函数 bind(:0) → 取端口 → **立即释放**，服务器随后才重绑 —— 存在
+/// TOCTOU 竞态：并行的测试（同进程内的其它测试线程）可能拿到**同一个**端口，
+/// 后绑定的 server 失败被 `let _ = serve(..)` 吞掉后，客户端会连到**别的**
+/// 测试的监听器上（典型症状：租约/读写 RPC 偶发 `Unimplemented`、`transport
+/// error`、`no leader found`，即「假故障」）。
+///
+/// 因此：
+/// - 进程内起 server 一律用 [`bind_listener`]（监听器保持到 `serve_with_incoming`
+///   接管），不得用本函数返回值再 `serve(addr)`；
+/// - 保留本函数仅供「端口号要交给**子进程**（无法传递监听器）」的调用方，
+///   并经进程级去重避免同一进程内两次调用返回同一端口。
 pub fn find_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+
+    // 进程级已发放端口集合：并发调用时若内核把刚释放的端口再次分配出来，
+    // 重试换一个。只增不删——端口池 6w+，测试量级下不会耗尽。
+    static ISSUED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+    let issued = ISSUED.get_or_init(|| Mutex::new(HashSet::new()));
+
+    for _ in 0..128 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        // 先登记再返回：登记失败（并发调用已抢先登记同一端口）则重试。
+        if issued.lock().unwrap().insert(port) {
+            return port;
+        }
+    }
+    panic!("find_port: 128 次尝试仍拿到重复端口（端口池异常）");
+}
+
+/// 绑定一个本地监听器并返回 `(listener, "127.0.0.1:port")`。
+///
+/// 与 [`find_port`] 不同：监听器**保持绑定**，直到交给
+/// `tonic::transport::Server::serve_with_incoming[_shutdown]` 接管。
+/// 这消除了「取端口→释放→重绑」窗口 —— 并行测试不可能再撞到同一端口。
+pub async fn bind_listener() -> (tokio::net::TcpListener, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let addr = listener
+        .local_addr()
+        .expect("listener local_addr")
+        .to_string();
+    (listener, addr)
 }
 
 /// 进程内启动单节点 coord-server（真实 raft + 真实 gRPC），返回：
@@ -44,6 +88,9 @@ pub fn find_port() -> u16 {
 ///
 /// 数据目录由返回的 `TempDir` 持有；drop 即清理。返回时已经等到 raft 选出 Leader
 /// （或 3 秒超时），调用方可直接发起请求。
+///
+/// 端口用 [`bind_listener`] 预绑定（而非 `find_port` 后重绑）：见 `find_port`
+/// 的竞态说明。
 pub async fn start_test_server() -> (
     String,
     tokio::sync::oneshot::Sender<()>,
@@ -54,10 +101,10 @@ pub async fn start_test_server() -> (
     let tmpdir = tempfile::tempdir().unwrap();
     let data_dir = tmpdir.path().to_path_buf();
 
-    let grpc_port = find_port();
-    let raft_port = find_port();
-    let grpc_addr = format!("127.0.0.1:{grpc_port}");
-    let raft_addr = format!("127.0.0.1:{raft_port}");
+    // 预绑定（保持到 serve_with_incoming 接管）：不得用 find_port() + serve(addr)，
+    // 那存在「取端口→释放→重绑」竞态（见 find_port 文档）。
+    let (grpc_listener, grpc_addr) = bind_listener().await;
+    let (raft_listener, raft_addr) = bind_listener().await;
 
     let storage_config = StorageConfig::default();
     let backend = RedbBackend::open(&data_dir, &storage_config).expect("open redb backend");
@@ -130,15 +177,15 @@ pub async fn start_test_server() -> (
     let maint_svc = MaintenanceServer::from_arc(Arc::clone(&node));
 
     let raft_rpc_svc = RaftRpcServer::new(raft_rpc_service);
-    let raft_addr_parse: std::net::SocketAddr = raft_addr.parse().unwrap();
     let raft_handle = tokio::spawn(async move {
         let _ = tonic::transport::Server::builder()
             .add_service(raft_rpc_svc)
-            .serve(raft_addr_parse)
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
+                raft_listener,
+            ))
             .await;
     });
 
-    let grpc_addr_parse: std::net::SocketAddr = grpc_addr.parse().unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let grpc_handle = tokio::spawn(async move {
         let _ = tonic::transport::Server::builder()
@@ -147,9 +194,12 @@ pub async fn start_test_server() -> (
             .add_service(lease_svc)
             .add_service(watch_svc)
             .add_service(maint_svc)
-            .serve_with_shutdown(grpc_addr_parse, async {
-                let _ = shutdown_rx.await;
-            })
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(grpc_listener),
+                async {
+                    let _ = shutdown_rx.await;
+                },
+            )
             .await;
     });
 
