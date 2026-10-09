@@ -10,6 +10,7 @@
 
 | 文档 | 内容 |
 |:--|:--|
+| [`consumer-contract.md`](production/consumer-contract.md) | 消费方契约页（按服务：一致性/路由/失败语义/范式/能力/边界索引） |
 | [`volume-object-storage.md`](production/volume-object-storage.md) | 对象存储数据面评估与边界 |
 | [`ops/runbook.md`](production/ops/runbook.md) | 运维 Runbook |
 | [`ops/upgrade.md`](production/ops/upgrade.md) | 升级与版本兼容 |
