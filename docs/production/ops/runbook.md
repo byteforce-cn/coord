@@ -1,6 +1,6 @@
 # coord 运维 Runbook
 
-> Owner: maintainers ｜ Last verified: 2026-10-01
+> Owner: maintainers ｜ Last verified: 2026-10-09
 
 - **体例**：每条 = **触发 / 命令 / 预期输出 / 失败时怎么办**。
   「命令」一律是别人能重跑的东西；写不出的条目不入本表。
@@ -235,6 +235,43 @@ KEK 更换分三步，**在完成迁移前不得移除旧材料**：
   `test_legacy_record_without_material_id_falls_back_to_try_all`、
   `test_keyring_old_material_parsing_rules`。
 
+### 4.5 PKI 证书轮换与泄露应急（G-PKI-3）
+
+> 适用 `coord.pki.v1`（agent 内置 CA）。**没有** CRL/OCSP、也**没有** revoke
+> RPC——泄露收口 = CN 轮换 + 消费侧剔除（口径与优先级见 `security.md` §3）。
+
+**常规轮换（到期前处理 `CoordPkiCertExpiringSoon`，窗口默认 6h）**：
+
+```bash
+# 任何 gRPC 客户端均可，下例示意 RPC 面
+# 1) 看摘要（不含私钥）
+grpcurl -d '{"common_name":"orders-api"}' <agent>:<port> coord.pki.v1.PKI/ListCerts
+# 2) 同 CN 换新材料（旧序列作废）——或换新 CN 重新 IssueCert
+grpcurl -d '{"common_name":"orders-api","ttl_seconds":2592000}' <agent>:<port> coord.pki.v1.PKI/RotateCert
+# 3) 验证新链
+grpcurl -d '{"cert_pem":"<新证书 PEM>"}' <agent>:<port> coord.pki.v1.PKI/VerifyCert
+```
+
+**预期**：`RotateCert` 后 `GetCertByCN` 返回新 serial / 新密钥材料，
+`VerifyCert` `valid=true`；`ListCerts` 可见 active（新）+ retired（旧）并存
+（滚动验签窗口）。
+
+**泄露应急（严格按此顺序）**：
+
+1. **先剔除信任**：把受影响 CN 从**消费侧** mTLS 授权 / 校验白名单移除——
+   即刻生效，不依赖 CA（CA 侧无法阻止不校验本 store 的消费方继续接受旧
+   证书）；
+2. **再作废材料**：`RotateCert`（同 CN）或换新 CN `IssueCert`；若需按序列号
+   恢复签名能力用 `RenewCert(serial)`；
+3. **负控制验证**：用旧证书做一次验证/连接——**必须失败**；
+4. **归档**：CN / 旧 serial / 新 serial / 时间 / 执行人（演练记录按 §7）。
+
+**判据（自动化）**：`coord-agent/src/pki.rs` 单测
+`test_rotate_cert_replaces_expired_record`、
+`test_concurrent_rotate_no_lost_update`、
+`coord-agent/tests/agent_pki_test.rs::test_rotate_then_list_returns_active_and_retired`
+（active/retired 并存）；到期观测：`test_cert_expiry_snapshot_counts_window`。
+
 ---
 
 ## 5. compaction
@@ -363,8 +400,9 @@ auto-resolve 语义，处置是人工的。
 - 口径：仍有效且剩余有效期 < `coord_agent_pki_expiry_warn_window_hours`（默认 6h，
   配置项 `expiry_warn_hours`）的 active 证书数；已过期证书**不**计入（到期即换新，
   由下一次 `IssueCert`/`RotateCert` 处理）。
-- 处置：对窗口内的 CN 调 `RotateCert`（或按序列号 `RenewCert`）换新；消费方按
-  `ListCerts` 的 serial/kid 在双密钥重叠窗口内滚动验签。
+- 处置：对窗口内的 CN 调 `RotateCert`（或按序列号 `RenewCert`）换新（操作步骤
+  与泄露应急见 §4.5）；消费方按 `ListCerts` 的 serial/kid 在双密钥重叠窗口内
+  滚动验签。
 - 若计数长期不降：确认轮换确实执行（换新会改变 active serial）。
 
 ---
