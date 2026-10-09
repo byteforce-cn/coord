@@ -33,6 +33,11 @@ pub struct PkiConfig {
     #[serde(default = "default_cert_ttl_hours")]
     pub cert_ttl_hours: u32,
 
+    /// 到期告警窗口（小时，默认 6）：剩余有效期 < 该窗口的 active 证书计入
+    /// `coord_agent_pki_certs_expiring_soon`（G-PKI-2）
+    #[serde(default = "default_expiry_warn_hours")]
+    pub expiry_warn_hours: i64,
+
     /// CA 证书路径（用于持久化）
     #[serde(default)]
     pub ca_cert_path: Option<PathBuf>,
@@ -46,10 +51,15 @@ fn default_cert_ttl_hours() -> u32 {
     24
 }
 
+fn default_expiry_warn_hours() -> i64 {
+    6
+}
+
 impl Default for PkiConfig {
     fn default() -> Self {
         Self {
             cert_ttl_hours: 24,
+            expiry_warn_hours: 6,
             ca_cert_path: None,
             ca_key_path: None,
         }
@@ -539,6 +549,31 @@ impl PkiService {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let remaining = cert.not_after - now;
         remaining < within_hours * 3600
+    }
+
+    /// 到期观测快照（G-PKI-2）：(active 证书总数, 窗口内即将过期数)。
+    ///
+    /// 「即将过期」= 仍有效（now <= not_after）且剩余有效期 < `expiry_warn_hours`
+    /// （基于 `is_expiring_soon` 语义，排除已过期——已过期由「换新触发」处理）。
+    pub async fn cert_expiry_snapshot(&self) -> Result<(u64, u64), PkiError> {
+        let records = self
+            .store
+            .list_active_certs()
+            .await
+            .map_err(|e| PkiError::Store(e.to_string()))?;
+        let now = now_unix();
+        let window = self.config.expiry_warn_hours;
+        let total = records.len() as u64;
+        let expiring = records
+            .iter()
+            .filter(|r| !r.is_expired(now) && r.not_after - now < window * 3600)
+            .count() as u64;
+        Ok((total, expiring))
+    }
+
+    /// 到期告警窗口（小时；G-PKI-2 指标口径与文档共用）
+    pub fn expiry_warn_hours(&self) -> i64 {
+        self.config.expiry_warn_hours
     }
 }
 
@@ -1041,6 +1076,34 @@ mod tests {
             current.serial == cert_a.serial || current.serial == cert_b.serial,
             "重启后 active 必须为本次轮换之一"
         );
+    }
+
+    /// G-PKI-2：到期快照——窗口内即将到期计数（排除已过期）与 active 总数
+    #[tokio::test]
+    async fn test_cert_expiry_snapshot_counts_window() {
+        let store = Arc::new(MemoryPkiStore::new());
+        let config = PkiConfig {
+            expiry_warn_hours: 6,
+            ..Default::default()
+        };
+        let pki = PkiService::with_store(config, store.clone());
+        pki.init_ca("Snapshot CA").await.expect("init");
+
+        // 1h TTL → 窗口内；48h → 不在窗口
+        pki.issue_cert("short.local", 3600).await.expect("issue short");
+        pki.issue_cert("long.local", 48 * 3600)
+            .await
+            .expect("issue long");
+        // 已过期（合成）→ 计入总数、不计入 expiring_soon
+        store
+            .create_cert("gone.local", &expired_record("gone.local", "expired-0x5"))
+            .await
+            .expect("seed");
+
+        let (total, expiring) = pki.cert_expiry_snapshot().await.expect("snapshot");
+        assert_eq!(total, 3, "active 总数含已过期记录");
+        assert_eq!(expiring, 1, "仅 1h TTL 计入窗口（已过期不算）");
+        assert_eq!(pki.expiry_warn_hours(), 6);
     }
 
     /// G-PKI-1：并发过期替换——双 agent 同时 issue(已过期)：都拿到未过期证书

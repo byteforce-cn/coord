@@ -55,9 +55,11 @@ use coord_proto::agent::{
     LeaderResignRequest, LeaderResignResponse, LeaderWatchEvent, LeaderWatchRequest,
     LockAcquireRequest, LockAcquireResponse, LockGetInfoRequest, LockGetInfoResponse,
     LockReleaseRequest, LockReleaseResponse, LockRenewRequest, LockRenewResponse, MqAckRequest,
-    MqAckResponse, MqCreateTopicRequest, MqCreateTopicResponse, MqMessage, MqPollDlqRequest,
-    MqPollDlqResponse, MqPollRequest, MqPollResponse, MqPublishRequest, MqPublishResponse,
-    MqSubscribeRequest, PolicyBundleInfo, PolicyBundleVersionInfo, PolicyCheckPermissionRequest,
+    MqAckResponse, MqCreateTopicRequest, MqCreateTopicResponse, MqDeleteTopicRequest,
+    MqDeleteTopicResponse, MqGetTopicLeaderRequest, MqGetTopicLeaderResponse, MqMessage,
+    MqMoveToDlqRequest, MqMoveToDlqResponse, MqPollDlqRequest, MqPollDlqResponse, MqPollRequest,
+    MqPollResponse, MqPublishRequest, MqPublishResponse, MqSubscribeRequest, PolicyBundleInfo,
+    PolicyBundleVersionInfo, PolicyCheckPermissionRequest,
     PolicyCheckPermissionResponse, PolicyDeleteBundleRequest, PolicyDeleteBundleResponse,
     PolicyEvaluateRequest, PolicyEvaluateResponse, PolicyExplainRequest, PolicyExplainResponse,
     PolicyListBundleVersionsRequest, PolicyListBundleVersionsResponse, PolicyListBundlesRequest,
@@ -92,10 +94,28 @@ fn sanitized_internal<E: std::fmt::Display>(e: E) -> Status {
 
 /// 数据面复制/存储错误映射：安全可回传的语义错误保留（not leader 为显式
 /// 契约），其余脱敏。与 coord-server `map_err` 的字符串模式识别同口径。
+///
+/// 错误码面（与 `coord_core::error_code` 对齐）：not leader → `NOT_LEADER`
+/// （Java SDK 按码决策“重定向到 leader 重试”）；ISR 降级 → `UNAVAILABLE`
+/// （可退避重试）；资源不存在 → `NOT_FOUND`；配额拒绝 → `RESOURCE_EXHAUSTED`。
 fn map_service_error(e: impl std::fmt::Display) -> Status {
     let msg = e.to_string();
-    if msg.to_ascii_lowercase().contains("not leader") {
-        return Status::failed_precondition(msg);
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("not leader") {
+        return coord_core::error_code::attach(
+            Status::failed_precondition(msg),
+            coord_core::error_code::CoordErrorCode::NotLeader,
+        );
+    }
+    if lower.contains("isr degraded") {
+        // 副本不足 = 可用性条件（可重试等待），不是数据错误
+        return coord_core::error_code::attach(
+            Status::unavailable(msg),
+            coord_core::error_code::CoordErrorCode::Unavailable,
+        );
+    }
+    if lower.contains("not found") {
+        return Status::not_found(msg);
     }
     if msg.contains("max_size_bytes") {
         // 容量上界拒绝（B-PL-3 / B-PL-4）：可诊断的语义错误，不脱敏。
@@ -104,6 +124,25 @@ fn map_service_error(e: impl std::fmt::Display) -> Status {
         return Status::resource_exhausted(msg);
     }
     sanitized_internal(msg)
+}
+
+/// MQ 非 Leader 的统一错误：`FAILED_PRECONDITION` + 结构化错误码 `NOT_LEADER`
+/// + `coord-leader-hint` trailer（leader 地址）。消费者据此可编程路由，
+/// **无需解析错误文案**（G-MQ-1）。
+pub const MQ_LEADER_HINT_TRAILER: &str = "coord-leader-hint";
+
+fn mq_not_leader_status(shard: &str, leader: &str) -> Status {
+    let status = Status::failed_precondition(format!(
+        "not leader for shard '{shard}' (leader is {leader})"
+    ));
+    let mut status = coord_core::error_code::attach(
+        status,
+        coord_core::error_code::CoordErrorCode::NotLeader,
+    );
+    if let Ok(v) = tonic::metadata::MetadataValue::try_from(leader) {
+        status.metadata_mut().insert(MQ_LEADER_HINT_TRAILER, v);
+    }
+    status
 }
 
 // ════════════════════════════════════════════════════════════
@@ -673,6 +712,13 @@ impl Mq for MessageQueueService {
         };
 
         if self.replication_enabled() {
+            // 非 Leader 在写入前拒绝（结构化：错误码 NOT_LEADER + leader trailer）
+            if let Some(rm) = self.replication_manager() {
+                let shard = format!("mq:{}", req.topic);
+                if !rm.is_leader(&shard) {
+                    return Err(mq_not_leader_status(&shard, &rm.shard_leader(&shard)));
+                }
+            }
             match self
                 .produce_replicated(
                     &req.topic,
@@ -722,10 +768,7 @@ impl Mq for MessageQueueService {
         if let Some(rm) = self.replication_manager() {
             let shard = format!("mq:{}", req.topic);
             if !rm.is_leader(&shard) {
-                return Err(Status::failed_precondition(format!(
-                    "not leader for shard '{shard}' (leader is {})",
-                    rm.shard_leader(&shard)
-                )));
+                return Err(mq_not_leader_status(&shard, &rm.shard_leader(&shard)));
             }
         }
         let (tx, out_rx) = tokio::sync::mpsc::channel(64);
@@ -744,6 +787,8 @@ impl Mq for MessageQueueService {
                 key: Vec::new(),
                 payload: record.payload,
                 timestamp: record.timestamp as i64,
+                dlq_reason: String::new(),
+                dlq_detail: String::new(),
             })
         });
         Ok(Response::new(Box::pin(stream)))
@@ -755,10 +800,7 @@ impl Mq for MessageQueueService {
         if let Some(rm) = self.replication_manager() {
             let shard = format!("mq:{}", req.topic);
             if !rm.is_leader(&shard) {
-                return Err(Status::failed_precondition(format!(
-                    "not leader for shard '{shard}' (leader is {})",
-                    rm.shard_leader(&shard)
-                )));
+                return Err(mq_not_leader_status(&shard, &rm.shard_leader(&shard)));
             }
         }
         let partition = if req.partition >= 0 {
@@ -793,7 +835,18 @@ impl Mq for MessageQueueService {
             req.max_count as u64
         };
         let topic = req.topic.clone();
+        let topic_check = req.topic.clone();
         let start_offset = req.start_offset.max(0) as u64;
+
+        // 删除后的 topic 必须返回明确错误（G-MQ-4），不得退化为「空结果」
+        let exists = self
+            .run_blocking(move |me| me.get_topic_config(&topic_check))
+            .await
+            .map_err(map_service_error)?
+            .is_some();
+        if !exists {
+            return Err(Status::not_found(format!("topic '{}' not found", req.topic)));
+        }
 
         match self
             .run_blocking(move |me| me.consume(&topic, partition, start_offset, max_count))
@@ -809,6 +862,8 @@ impl Mq for MessageQueueService {
                         key: Vec::new(), // 引擎当前不持久化 key，见 mq.rs MessageRecord
                         payload: r.payload,
                         timestamp: r.timestamp as i64,
+                        dlq_reason: String::new(),
+                        dlq_detail: String::new(),
                     })
                     .collect();
                 Ok(Response::new(MqPollResponse { messages }))
@@ -849,12 +904,128 @@ impl Mq for MessageQueueService {
                         key: Vec::new(),
                         payload: r.payload,
                         timestamp: r.timestamp as i64,
+                        // G-MQ-2：DLQ 内容含原因，消费者可读
+                        dlq_reason: r.error_reason.unwrap_or_default(),
+                        dlq_detail: r.error_detail.unwrap_or_default(),
                     })
                     .collect();
                 Ok(Response::new(MqPollDlqResponse { messages }))
             }
             Err(e) => Err(sanitized_internal(e)),
         }
+    }
+
+    /// Leader/ISR 拓扑查询（G-MQ-1）：任意 agent 可答；单 agent 时
+    /// `replication_enabled=false`、`leader_agent` 为空（调用方视本 agent 为 Leader）。
+    async fn get_topic_leader(
+        &self,
+        request: Request<MqGetTopicLeaderRequest>,
+    ) -> Result<Response<MqGetTopicLeaderResponse>, Status> {
+        let req = request.into_inner();
+        let topic_check = req.topic.clone();
+        let cfg = self
+            .run_blocking(move |me| me.get_topic_config(&topic_check))
+            .await
+            .map_err(map_service_error)?
+            .ok_or_else(|| Status::not_found(format!("topic '{}' not found", req.topic)))?;
+
+        // ISR 成员枚举结果含自身；单 agent 自动降级 min_isr=1（effective_min_isr）
+        let (leader_agent, isr_members, replication_enabled, degraded, min_isr) =
+            match self.replication_manager() {
+                Some(rm) => {
+                    let shard = format!("mq:{}", req.topic);
+                    (
+                        rm.shard_leader(&shard),
+                        rm.isr_members(),
+                        true,
+                        rm.is_degraded(),
+                        rm.effective_min_isr() as u64,
+                    )
+                }
+                None => (String::new(), Vec::new(), false, false, 0),
+            };
+
+        Ok(Response::new(MqGetTopicLeaderResponse {
+            topic: req.topic,
+            leader_agent,
+            isr_members,
+            replication_enabled,
+            degraded,
+            partitions: cfg.partitions as i32,
+            min_isr,
+        }))
+    }
+
+    /// 显式移入 DLQ（G-MQ-2，管理路径）：主日志 → DLQ 净额记账，分区不被阻塞；
+    /// 消息或 topic 不存在返回 `NOT_FOUND`。ISR 启用时仅 Leader 可写（Follower
+    /// 返回 `FAILED_PRECONDITION` + leader 提示），且迁移经复制通道全域一致。
+    async fn move_to_dlq(
+        &self,
+        request: Request<MqMoveToDlqRequest>,
+    ) -> Result<Response<MqMoveToDlqResponse>, Status> {
+        let req = request.into_inner();
+        let partition = if req.partition >= 0 {
+            req.partition as u32
+        } else {
+            0
+        };
+        let offset = req.offset.max(0) as u64;
+
+        if self.replication_enabled() {
+            if let Some(rm) = self.replication_manager() {
+                let shard = format!("mq:{}", req.topic);
+                if !rm.is_leader(&shard) {
+                    return Err(mq_not_leader_status(&shard, &rm.shard_leader(&shard)));
+                }
+            }
+            self.move_to_dlq_replicated(&req.topic, partition, offset, &req.reason, &req.detail)
+                .await
+                .map_err(map_service_error)?;
+        } else {
+            let topic = req.topic.clone();
+            let reason = req.reason.clone();
+            let detail = req.detail.clone();
+            self.run_blocking(move |me| me.move_to_dlq(&topic, partition, offset, &reason, &detail))
+                .await
+                .map_err(map_service_error)?;
+        }
+        Ok(Response::new(MqMoveToDlqResponse {}))
+    }
+
+    /// 删除 topic 并回收全部存量（G-MQ-4，管理路径）。
+    ///
+    /// ISR 启用时必须向 Leader 调用（Follower 返回 `FAILED_PRECONDITION` +
+    /// leader 提示）；删除决定经复制通道全域下发，Follower 幂等应用。
+    async fn delete_topic(
+        &self,
+        request: Request<MqDeleteTopicRequest>,
+    ) -> Result<Response<MqDeleteTopicResponse>, Status> {
+        let req = request.into_inner();
+        let topic = req.topic.clone();
+
+        let stats = if self.replication_enabled() {
+            if let Some(rm) = self.replication_manager() {
+                let shard = format!("mq:{topic}");
+                if !rm.is_leader(&shard) {
+                    return Err(mq_not_leader_status(&shard, &rm.shard_leader(&shard)));
+                }
+            }
+            self.delete_topic_replicated(&topic)
+                .await
+                .map_err(map_service_error)?
+        } else {
+            self.run_blocking(move |me| me.delete_topic_full(&topic))
+                .await
+                .map_err(map_service_error)?
+        };
+
+        Ok(Response::new(MqDeleteTopicResponse {
+            messages_removed: stats.messages_removed,
+            dlq_removed: stats.dlq_removed,
+            offsets_removed: stats.offsets_removed,
+            idempotency_removed: stats.idempotency_removed,
+            bytes_reclaimed: stats.bytes_reclaimed,
+        }))
     }
 }
 
@@ -2230,12 +2401,30 @@ mod tests {
         assert!(!status.message().contains("store.db"));
     }
 
-    /// 数据面错误映射：not leader 保留为显式契约，其余脱敏
+    /// 数据面错误映射：not leader 保留为显式契约（含 NOT_LEADER 错误码），
+    /// ISR 降级 → UNAVAILABLE，not found → NOT_FOUND，其余脱敏
     #[test]
     fn test_map_service_error_preserves_not_leader() {
         let not_leader = map_service_error("not leader for shard 'mq:t' (leader is other-agent)");
         assert_eq!(not_leader.code(), tonic::Code::FailedPrecondition);
         assert!(not_leader.message().contains("not leader"));
+        assert_eq!(
+            coord_core::error_code::error_code_of(&not_leader).as_deref(),
+            Some("NOT_LEADER"),
+            "结构化错误码必须是 NOT_LEADER（SDK 按码决策重定向）"
+        );
+
+        // ISR 降级 = 可用性条件（可退避重试）⇒ UNAVAILABLE
+        let degraded = map_service_error("ISR degraded: need 2 replicas, have 1");
+        assert_eq!(degraded.code(), tonic::Code::Unavailable);
+        assert_eq!(
+            coord_core::error_code::error_code_of(&degraded).as_deref(),
+            Some("UNAVAILABLE")
+        );
+
+        // 资源不存在 ⇒ NOT_FOUND（删除后的 topic 读写、move_to_dlq 等）
+        let missing = map_service_error("topic 'orders' not found");
+        assert_eq!(missing.code(), tonic::Code::NotFound);
 
         // 容量上界（B-PL-3 / B-PL-4）：可诊断的语义错误 ⇒ RESOURCE_EXHAUSTED
         let quota = map_service_error(
@@ -2248,6 +2437,23 @@ mod tests {
         let other = map_service_error("sensitive store detail");
         assert_eq!(other.code(), tonic::Code::Internal);
         assert_eq!(other.message(), "internal error");
+    }
+
+    /// 非 Leader 统一错误：FAILED_PRECONDITION + NOT_LEADER + leader 提示 trailer
+    /// （可编程路由，不解析文案；G-MQ-1）
+    #[test]
+    fn test_mq_not_leader_status_carries_structured_hint() {
+        let status = mq_not_leader_status("mq:orders", "127.0.0.1:19201");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            coord_core::error_code::error_code_of(&status).as_deref(),
+            Some("NOT_LEADER")
+        );
+        let hint = status
+            .metadata()
+            .get(MQ_LEADER_HINT_TRAILER)
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(hint, Some("127.0.0.1:19201"));
     }
 
     /// 部署错误映射：校验错误保留细节（InvalidArgument），存储错误脱敏

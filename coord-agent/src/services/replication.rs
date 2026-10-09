@@ -111,6 +111,16 @@ pub enum ReplicationOp {
         offset: u64,
         payload: Vec<u8>,
     },
+    /// topic 删除决定（G-MQ-4：删除经复制通道全域下发；Follower 幂等应用）
+    MqDeleteTopic { topic: String },
+    /// 显式移入 DLQ（G-MQ-2：ISR 启用时全域下发，避免副本分叉）
+    MqMoveToDlq {
+        topic: String,
+        partition: u32,
+        offset: u64,
+        reason: String,
+        detail: String,
+    },
 }
 
 // ──── ReplicationEntry ────
@@ -185,6 +195,47 @@ impl ReplicationEntry {
                 partition,
                 offset,
                 payload,
+            },
+        }
+    }
+
+    /// 创建 topic 删除复制条目（G-MQ-4；删除决定经复制通道全域下发）
+    pub fn new_mq_delete_topic(
+        idempotency_key: IdempotencyKey,
+        shard_id: String,
+        topic: String,
+        sequence_num: u64,
+    ) -> Self {
+        Self {
+            idempotency_key,
+            shard_id,
+            sequence_num,
+            operation: ReplicationOp::MqDeleteTopic { topic },
+        }
+    }
+
+    /// 创建移入 DLQ 复制条目（G-MQ-2；ISR 全域一致）
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_mq_move_to_dlq(
+        idempotency_key: IdempotencyKey,
+        shard_id: String,
+        topic: String,
+        partition: u32,
+        offset: u64,
+        reason: String,
+        detail: String,
+        sequence_num: u64,
+    ) -> Self {
+        Self {
+            idempotency_key,
+            shard_id,
+            sequence_num,
+            operation: ReplicationOp::MqMoveToDlq {
+                topic,
+                partition,
+                offset,
+                reason,
+                detail,
             },
         }
     }
@@ -580,7 +631,7 @@ pub trait ReplicatedStore: Send + Sync {
 
 use coord_proto::agent::{
     replica_op, ReplicaCacheDelete, ReplicaCachePut, ReplicaEntry as ReplicaEntryProto,
-    ReplicaMqPublish, ReplicaShardProgress,
+    ReplicaMqDeleteTopic, ReplicaMqMoveToDlq, ReplicaMqPublish, ReplicaShardProgress,
 };
 
 impl ReplicationEntry {
@@ -613,6 +664,24 @@ impl ReplicationEntry {
                     partition: *partition,
                     offset: *offset,
                     payload: payload.clone(),
+                }),
+                ReplicationOp::MqDeleteTopic { topic } => {
+                    replica_op::Op::MqDeleteTopic(ReplicaMqDeleteTopic {
+                        topic: topic.clone(),
+                    })
+                }
+                ReplicationOp::MqMoveToDlq {
+                    topic,
+                    partition,
+                    offset,
+                    reason,
+                    detail,
+                } => replica_op::Op::MqMoveToDlq(ReplicaMqMoveToDlq {
+                    topic: topic.clone(),
+                    partition: *partition,
+                    offset: *offset,
+                    reason: reason.clone(),
+                    detail: detail.clone(),
                 }),
             }),
         });
@@ -647,6 +716,16 @@ impl ReplicationEntry {
                 partition: x.partition,
                 offset: x.offset,
                 payload: x.payload.clone(),
+            },
+            replica_op::Op::MqDeleteTopic(x) => ReplicationOp::MqDeleteTopic {
+                topic: x.topic.clone(),
+            },
+            replica_op::Op::MqMoveToDlq(x) => ReplicationOp::MqMoveToDlq {
+                topic: x.topic.clone(),
+                partition: x.partition,
+                offset: x.offset,
+                reason: x.reason.clone(),
+                detail: x.detail.clone(),
             },
         };
         Ok(Self {

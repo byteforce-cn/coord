@@ -114,6 +114,21 @@ pub struct MqReapCounters {
     pub faults: u64,
 }
 
+/// topic 删除的逐项回收计数（`delete_topic_full` 返回；G-MQ-4）
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeleteTopicStats {
+    /// 删除的消息条目数
+    pub messages_removed: u64,
+    /// 删除的 DLQ 条目数
+    pub dlq_removed: u64,
+    /// 删除的消费位点条目数
+    pub offsets_removed: u64,
+    /// 删除的幂等索引条目数
+    pub idempotency_removed: u64,
+    /// 回收的记账字节（消息 + DLQ 物理字节；B-PL-4 同口径）
+    pub bytes_reclaimed: u64,
+}
+
 // ──── redb 表定义 ────
 
 const TOPIC_TABLE: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("mq:topics");
@@ -848,6 +863,168 @@ impl MessageQueueService {
         Ok(())
     }
 
+    /// 删除 topic 并**回收全部存量**（G-MQ-4）：消息 / DLQ / 消费位点 /
+    /// 幂等索引 / next-offset 计数 / 配置行，配额随之归还。
+    ///
+    /// 单事务执行（调用方应先停该 topic 的读写——前置条件与并发语义见
+    /// mq.proto 头注「删除语义」）；ISR 启用时由 Leader 调用并把删除决定经
+    /// 复制通道下发（`delete_topic_replicated`）。
+    ///
+    /// topic 不存在 → 错误（`NOT_FOUND` 语义）。同名重建 = 空 topic。
+    pub fn delete_topic_full(&self, name: &str) -> ServiceResult<DeleteTopicStats> {
+        let wtx = self.write_tx()?;
+        let existed = {
+            let table = wtx.open_table(TOPIC_TABLE)?;
+            let x = table.get(name)?.is_some();
+            x
+        };
+        if !existed {
+            return Err(format!("topic '{name}' not found").into());
+        }
+        let stats = Self::purge_topic_tx(&wtx, name)?;
+        {
+            let mut table = wtx.open_table(TOPIC_TABLE)?;
+            table.remove(name)?;
+        }
+        wtx.commit()?;
+        Ok(stats)
+    }
+
+    /// 在给定写事务内清扫 topic 的全部存量（幂等：无存量时各计数为 0）。
+    ///
+    /// 范围：消息 / DLQ / next-offset（topic 前缀）+ 消费位点（内嵌 topic 段，
+    /// 全表扫描匹配）+ 幂等索引（topic 前缀）；同步做记账净额调整。
+    /// 复制日志/序列号**不**在此清扫：落后的 Follower 依赖复制日志重放删除决定。
+    fn purge_topic_tx(wtx: &redb::WriteTransaction, topic: &str) -> ServiceResult<DeleteTopicStats> {
+        let mut stats = DeleteTopicStats::default();
+        let mut account_removed: u64 = 0;
+
+        // [len:u32][topic] —— 消息 / DLQ / next-offset / 幂等索引四表的公共前缀
+        let mut topic_prefix = Vec::with_capacity(4 + topic.len());
+        topic_prefix.extend_from_slice(&(topic.len() as u32).to_be_bytes());
+        topic_prefix.extend_from_slice(topic.as_bytes());
+
+        // 按前缀删三个同构表（消息 / DLQ / next-offset）
+        macro_rules! purge_prefixed {
+            ($table:expr, $counter:ident, $count_bytes:expr) => {{
+                let mut victims: Vec<(Vec<u8>, u64)> = Vec::new();
+                {
+                    let table = wtx.open_table($table)?;
+                    let range: std::ops::RangeFrom<&[u8]> = topic_prefix.as_slice()..;
+                    for item in table.range(range)? {
+                        let (k, v) = item?;
+                        let kb = k.value();
+                        if !kb.starts_with(&topic_prefix) {
+                            break;
+                        }
+                        let bytes = Self::entry_size(kb.len(), v.value().len());
+                        victims.push((kb.to_vec(), bytes));
+                    }
+                }
+                let mut table = wtx.open_table($table)?;
+                for (k, bytes) in &victims {
+                    table.remove(k.as_slice())?;
+                    if $count_bytes {
+                        account_removed += bytes;
+                    }
+                }
+                stats.$counter = victims.len() as u64;
+            }};
+        }
+
+        purge_prefixed!(MESSAGE_TABLE, messages_removed, true);
+        purge_prefixed!(DLQ_TABLE, dlq_removed, true);
+        // next-offset 计数行（不单列计数；清除即可 —— 同名重建从 0 起）
+        {
+            let mut victims: Vec<Vec<u8>> = Vec::new();
+            {
+                let table = wtx.open_table(NEXT_OFFSET_TABLE)?;
+                let range: std::ops::RangeFrom<&[u8]> = topic_prefix.as_slice()..;
+                for item in table.range(range)? {
+                    let (k, _v) = item?;
+                    if !k.value().starts_with(&topic_prefix) {
+                        break;
+                    }
+                    victims.push(k.value().to_vec());
+                }
+            }
+            let mut table = wtx.open_table(NEXT_OFFSET_TABLE)?;
+            for k in &victims {
+                table.remove(k.as_slice())?;
+            }
+        }
+
+        // 幂等索引（[len][topic][partition][ikey]），不计入记账（模块头口径）
+        {
+            let mut victims: Vec<Vec<u8>> = Vec::new();
+            {
+                let table = wtx.open_table(IDEMPOTENCY_TABLE)?;
+                let range: std::ops::RangeFrom<&[u8]> = topic_prefix.as_slice()..;
+                for item in table.range(range)? {
+                    let (k, _v) = item?;
+                    if !k.value().starts_with(&topic_prefix) {
+                        break;
+                    }
+                    victims.push(k.value().to_vec());
+                }
+            }
+            let mut table = wtx.open_table(IDEMPOTENCY_TABLE)?;
+            for k in &victims {
+                table.remove(k.as_slice())?;
+            }
+            stats.idempotency_removed = victims.len() as u64;
+        }
+
+        // 消费位点：[group_len][group][topic_len][topic][partition] —— topic 段在
+        // 键中间，按前缀无法命中，全表扫描匹配（位点条目数 = 组×topic×分区，量级小）
+        {
+            let mut victims: Vec<Vec<u8>> = Vec::new();
+            {
+                let table = wtx.open_table(OFFSET_TABLE)?;
+                for item in table.iter()? {
+                    let (k, _v) = item?;
+                    let kb = k.value();
+                    if Self::offset_key_matches_topic(kb, topic) {
+                        victims.push(kb.to_vec());
+                    }
+                }
+            }
+            let mut table = wtx.open_table(OFFSET_TABLE)?;
+            for k in &victims {
+                table.remove(k.as_slice())?;
+            }
+            stats.offsets_removed = victims.len() as u64;
+        }
+
+        // 记账净额（消息 + DLQ 物理字节）
+        if account_removed > 0 {
+            Self::account_sub_tx(wtx, account_removed)?;
+            stats.bytes_reclaimed = account_removed;
+        }
+        Ok(stats)
+    }
+
+    /// 消费位点键（[group_len][group][topic_len][topic][partition]）的 topic 段匹配
+    fn offset_key_matches_topic(key: &[u8], topic: &str) -> bool {
+        if key.len() < 8 {
+            return false;
+        }
+        let glen = u32::from_be_bytes(key[..4].try_into().unwrap_or([0; 4])) as usize;
+        let topic_len_pos = 4 + glen;
+        if key.len() < topic_len_pos + 4 {
+            return false;
+        }
+        let tlen = u32::from_be_bytes(
+            key[topic_len_pos..topic_len_pos + 4]
+                .try_into()
+                .unwrap_or([0; 4]),
+        ) as usize;
+        if key.len() < topic_len_pos + 4 + tlen {
+            return false;
+        }
+        &key[topic_len_pos + 4..topic_len_pos + 4 + tlen] == topic.as_bytes()
+    }
+
     pub fn topic_exists(&self, name: &str) -> ServiceResult<bool> {
         let rtx = self.read_tx()?;
         let table = rtx.open_table(TOPIC_TABLE)?;
@@ -1279,21 +1456,37 @@ impl MessageQueueService {
         reason: &str,
         detail: &str,
     ) -> ServiceResult<()> {
-        // Read the message first
-        let mk = encode_msg_key(topic, partition, offset);
-        let rtx = self.read_tx()?;
-        let raw = {
-            let table = rtx.open_table(MESSAGE_TABLE)?;
-            match table.get(mk.as_slice())? {
-                Some(v) => v.value().to_vec(),
-                None => {
-                    return Err(format!("message {topic}/{partition}/{offset} not found").into())
-                }
-            }
-        };
-        drop(rtx);
+        let wtx = self.write_tx()?;
+        let moved = Self::move_to_dlq_tx(&wtx, topic, partition, offset, reason, detail)?;
+        if !moved {
+            return Err(format!("message {topic}/{partition}/{offset} not found").into());
+        }
+        wtx.commit()?;
+        Ok(())
+    }
 
-        // Decode payload
+    /// 在给定写事务内把一条消息从主日志移入 DLQ（净额记账：消息行 → DLQ 行）。
+    ///
+    /// 返回 `false` = 主日志无该消息（调用方决定错误语义；ISR Follower 应用时为
+    /// 幂等 no-op）。维护路径不受配额拒绝（B-PL-4）。
+    fn move_to_dlq_tx(
+        wtx: &redb::WriteTransaction,
+        topic: &str,
+        partition: u32,
+        offset: u64,
+        reason: &str,
+        detail: &str,
+    ) -> ServiceResult<bool> {
+        let mk = encode_msg_key(topic, partition, offset);
+        let raw = {
+            let table = wtx.open_table(MESSAGE_TABLE)?;
+            let x = table.get(mk.as_slice())?.map(|v| v.value().to_vec());
+            x
+        };
+        let Some(raw) = raw else {
+            return Ok(false);
+        };
+
         let payload = match decode_message(&raw) {
             Some((p, _, _)) => p,
             None => return Err("failed to decode message".into()),
@@ -1302,25 +1495,20 @@ impl MessageQueueService {
         let dlq_encoded = encode_dlq_message(&payload, reason, detail);
         let dk = encode_dlq_key(topic, partition, offset);
 
-        // 维护路径不受配额拒绝（B-PL-4）：记账做净额调整（消息行 → DLQ 行）
         let removed_size = Self::entry_size(mk.len(), raw.len());
         let added_size = Self::entry_size(dk.len(), dlq_encoded.len());
 
-        let wtx = self.write_tx()?;
-        // Delete from main message table
         {
             let mut table = wtx.open_table(MESSAGE_TABLE)?;
             table.remove(mk.as_slice())?;
         }
-        // Insert into DLQ
         {
             let mut table = wtx.open_table(DLQ_TABLE)?;
             table.insert(dk.as_slice(), dlq_encoded.as_slice())?;
         }
-        Self::account_sub_tx(&wtx, removed_size)?;
-        Self::account_add_tx(&wtx, added_size)?;
-        wtx.commit()?;
-        Ok(())
+        Self::account_sub_tx(wtx, removed_size)?;
+        Self::account_add_tx(wtx, added_size)?;
+        Ok(true)
     }
 
     pub fn consume_dlq(
@@ -1409,6 +1597,80 @@ impl MessageQueueService {
             dlq_messages,
             total_bytes,
         })
+    }
+
+    /// 消费位点快照：(group, topic, partition, committed_offset)（G-MQ-3 指标采样用）
+    pub fn consumer_offsets(&self) -> ServiceResult<Vec<(String, String, u32, u64)>> {
+        let rtx = self.read_tx()?;
+        let table = match rtx.open_table(OFFSET_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::new();
+        for item in table.iter()? {
+            let (k, v) = item?;
+            let kb = k.value();
+            if kb.len() < 12 {
+                continue;
+            }
+            let Ok(glen_bytes) = kb[..4].try_into() else {
+                continue;
+            };
+            let glen = u32::from_be_bytes(glen_bytes) as usize;
+            let tlpos = 4 + glen;
+            if kb.len() < tlpos + 4 {
+                continue;
+            }
+            let Ok(tlen_bytes) = kb[tlpos..tlpos + 4].try_into() else {
+                continue;
+            };
+            let tlen = u32::from_be_bytes(tlen_bytes) as usize;
+            if kb.len() < tlpos + 4 + tlen + 4 {
+                continue;
+            }
+            let group = String::from_utf8_lossy(&kb[4..4 + glen]).to_string();
+            let topic = String::from_utf8_lossy(&kb[tlpos + 4..tlpos + 4 + tlen]).to_string();
+            let plen = tlpos + 4 + tlen;
+            let Ok(p_bytes) = kb[plen..plen + 4].try_into() else {
+                continue;
+            };
+            let partition = u32::from_be_bytes(p_bytes);
+            out.push((group, topic, partition, v.value()));
+        }
+        Ok(out)
+    }
+
+    /// 全部 topic 的 next-offset 快照：(topic, partition, next_offset)（G-MQ-3）
+    pub fn next_offsets_all(&self) -> ServiceResult<Vec<(String, u32, u64)>> {
+        let rtx = self.read_tx()?;
+        let table = match rtx.open_table(NEXT_OFFSET_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::new();
+        for item in table.iter()? {
+            let (k, v) = item?;
+            let kb = k.value();
+            if kb.len() < 8 {
+                continue;
+            }
+            let Ok(tlen_bytes) = kb[..4].try_into() else {
+                continue;
+            };
+            let tlen = u32::from_be_bytes(tlen_bytes) as usize;
+            if kb.len() < 4 + tlen + 4 {
+                continue;
+            }
+            let topic = String::from_utf8_lossy(&kb[4..4 + tlen]).to_string();
+            let Ok(p_bytes) = kb[4 + tlen..4 + tlen + 4].try_into() else {
+                continue;
+            };
+            let partition = u32::from_be_bytes(p_bytes);
+            out.push((topic, partition, v.value()));
+        }
+        Ok(out)
     }
 }
 
@@ -1716,6 +1978,216 @@ impl MessageQueueService {
 
         Ok(offset)
     }
+
+    /// topic 删除幂等键（携带 shard 序列号 ⇒ 全局唯一）
+    fn delete_idem_key(topic: &str, seq: u64) -> IdempotencyKey {
+        IdempotencyKey::new(format!("mq:delete-topic:{topic}:{seq}"), now_millis())
+    }
+
+    /// Leader 侧删除（ISR 启用）：本地单事务全量回收 + 复制日志记录删除决定 →
+    /// 推送到 ISR Followers → min_isr 校验。删除决定留存于复制日志 ⇒ 落后的
+    /// Follower 重连后经 Reconcile 重放（G-MQ-4 全域一致）。
+    pub async fn delete_topic_replicated(&self, topic: &str) -> ServiceResult<DeleteTopicStats> {
+        let rm = self
+            .replication
+            .read()
+            .clone()
+            .ok_or_else(|| "replication not enabled".to_string())?;
+        let shard = Self::topic_shard(topic);
+        if !rm.is_leader(&shard) {
+            return Err(format!(
+                "not leader for shard '{shard}' (leader is {})",
+                rm.shard_leader(&shard)
+            )
+            .into());
+        }
+        if self.get_topic_config(topic)?.is_none() {
+            return Err(format!("topic '{topic}' not found").into());
+        }
+
+        let seq = self.next_sequence(&shard)?;
+        let entry = ReplicationEntry::new_mq_delete_topic(
+            Self::delete_idem_key(topic, seq),
+            shard.clone(),
+            topic.to_string(),
+            seq,
+        );
+
+        // 本地：全量回收 + 配置行删除 + 复制簿记（同事务）
+        let stats = {
+            let wtx = self.write_tx()?;
+            let stats = Self::purge_topic_tx(&wtx, topic)?;
+            {
+                let mut table = wtx.open_table(TOPIC_TABLE)?;
+                table.remove(topic)?;
+            }
+            Self::write_repl_bookkeeping_tx(&wtx, &entry)?;
+            wtx.commit()?;
+            stats
+        };
+
+        // 全域下发（Follower 幂等应用）；min_isr 不足时返回错误，
+        // 删除决定仍在复制日志中，Follower 重连后补课
+        let acked = rm
+            .push_to_followers(&entry)
+            .await
+            .map_err(|e| e.to_string())?;
+        rm.ensure_isr(acked + 1).map_err(|e| e.to_string())?;
+        Ok(stats)
+    }
+
+    /// Leader 侧移入 DLQ（ISR 启用）：本地净额迁移 + 复制簿记同事务 →
+    /// 推送到 ISR Followers（副本不分叉）→ min_isr 校验。
+    pub async fn move_to_dlq_replicated(
+        &self,
+        topic: &str,
+        partition: u32,
+        offset: u64,
+        reason: &str,
+        detail: &str,
+    ) -> ServiceResult<()> {
+        let rm = self
+            .replication
+            .read()
+            .clone()
+            .ok_or_else(|| "replication not enabled".to_string())?;
+        let shard = Self::topic_shard(topic);
+        if !rm.is_leader(&shard) {
+            return Err(format!(
+                "not leader for shard '{shard}' (leader is {})",
+                rm.shard_leader(&shard)
+            )
+            .into());
+        }
+
+        let seq = self.next_sequence(&shard)?;
+        let entry = ReplicationEntry::new_mq_move_to_dlq(
+            IdempotencyKey::new(
+                format!("mq:dlq:{topic}:{partition}:{offset}:{seq}"),
+                now_millis(),
+            ),
+            shard.clone(),
+            topic.to_string(),
+            partition,
+            offset,
+            reason.to_string(),
+            detail.to_string(),
+            seq,
+        );
+
+        let moved = {
+            let wtx = self.write_tx()?;
+            let moved = Self::move_to_dlq_tx(&wtx, topic, partition, offset, reason, detail)?;
+            if moved {
+                Self::write_repl_bookkeeping_tx(&wtx, &entry)?;
+            }
+            wtx.commit()?;
+            moved
+        };
+        if !moved {
+            return Err(format!("message {topic}/{partition}/{offset} not found").into());
+        }
+
+        let acked = rm
+            .push_to_followers(&entry)
+            .await
+            .map_err(|e| e.to_string())?;
+        rm.ensure_isr(acked + 1).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Follower 侧应用 MqMoveToDlq（幂等；主日志无该消息时为 no-op 但仍记幂等键
+    /// —— 重放/追平不重复入 DLQ，也不阻断序列推进）
+    fn apply_mq_move_to_dlq(&self, entry: &ReplicationEntry) -> Result<(), ReplicationError> {
+        let (topic, partition, offset, reason, detail) = match &entry.operation {
+            ReplicationOp::MqMoveToDlq {
+                topic,
+                partition,
+                offset,
+                reason,
+                detail,
+            } => (
+                topic.as_str(),
+                *partition,
+                *offset,
+                reason.as_str(),
+                detail.as_str(),
+            ),
+            _ => {
+                return Err(ReplicationError::Store(
+                    "apply_mq_move_to_dlq: not an MqMoveToDlq op".to_string(),
+                ))
+            }
+        };
+        let wtx = match self.write_tx() {
+            Ok(t) => t,
+            Err(e) => return Err(ReplicationError::Store(e.to_string())),
+        };
+        let result: ServiceResult<()> = (|| {
+            let ik = entry.idempotency_key.to_string();
+            let applied = {
+                let t = wtx.open_table(REPL_APPLIED_KEYS)?;
+                let x = t.get(ik.as_bytes())?.is_some();
+                x
+            };
+            if applied {
+                return Ok(());
+            }
+            let _ = Self::move_to_dlq_tx(&wtx, topic, partition, offset, reason, detail)?;
+            Self::write_repl_bookkeeping_tx(&wtx, entry)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                wtx.commit()
+                    .map_err(|e| ReplicationError::Store(e.to_string()))?;
+                Ok(())
+            }
+            Err(e) => Err(ReplicationError::Store(e.to_string())),
+        }
+    }
+
+    /// Follower 侧应用 MqDeleteTopic（幂等；单事务：幂等检查 + 全量回收 + 簿记）
+    fn apply_mq_delete_topic(&self, entry: &ReplicationEntry) -> Result<(), ReplicationError> {
+        let topic = match &entry.operation {
+            ReplicationOp::MqDeleteTopic { topic } => topic.as_str(),
+            _ => {
+                return Err(ReplicationError::Store(
+                    "apply_mq_delete_topic: not an MqDeleteTopic op".to_string(),
+                ))
+            }
+        };
+        let wtx = match self.write_tx() {
+            Ok(t) => t,
+            Err(e) => return Err(ReplicationError::Store(e.to_string())),
+        };
+        let result: ServiceResult<()> = (|| {
+            let ik = entry.idempotency_key.to_string();
+            let applied = {
+                let t = wtx.open_table(REPL_APPLIED_KEYS)?;
+                let x = t.get(ik.as_bytes())?.is_some();
+                x
+            };
+            if applied {
+                return Ok(());
+            }
+            Self::purge_topic_tx(&wtx, topic)?;
+            {
+                let mut t = wtx.open_table(TOPIC_TABLE)?;
+                t.remove(topic)?;
+            }
+            Self::write_repl_bookkeeping_tx(&wtx, entry)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                wtx.commit()
+                    .map_err(|e| ReplicationError::Store(e.to_string()))?;
+                Ok(())
+            }
+            Err(e) => Err(ReplicationError::Store(e.to_string())),
+        }
+    }
 }
 
 // ──── ReplicatedStore（复制存储接口实现）────
@@ -1749,6 +2221,8 @@ impl ReplicatedStore for MessageQueueService {
     fn apply_entry(&self, entry: &ReplicationEntry) -> Result<(), ReplicationError> {
         match &entry.operation {
             ReplicationOp::MqPublish { .. } => self.apply_mq_publish(entry),
+            ReplicationOp::MqDeleteTopic { .. } => self.apply_mq_delete_topic(entry),
+            ReplicationOp::MqMoveToDlq { .. } => self.apply_mq_move_to_dlq(entry),
             other => Err(ReplicationError::Store(format!(
                 "mq cannot apply op {other:?}"
             ))),

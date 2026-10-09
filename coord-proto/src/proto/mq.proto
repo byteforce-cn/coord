@@ -19,6 +19,28 @@ syntax = "proto3";
 //     （`0` = 不按时间回收）。**不承诺**：记账覆盖消费位点 / 幂等索引 / ISR 复制
 //     日志；ISR 启用时各节点配额与回收为**本地行为** —— 完整边界与判据见
 //     `docs/production/ops/boundaries.md` B-PL-4（单一归属）。
+//
+// Leader 与消费路由（G-MQ-1）
+// ------------------------------------------------------------
+//   - 分区（shard = topic 级）Leader 为**静态一致分配**（ISR 成员中地址最小者，
+//     可显式覆盖），任意 agent 经 `GetTopicLeader` 可查；响应含 ISR 成员、
+//     是否降级与分区数。
+//   - 非 Leader 的写操作（`Publish` / `Ack` / `Subscribe` / `DeleteTopic`）返回
+//     `FAILED_PRECONDITION`，并携带结构化 trailer `coord-leader-hint: <leader>`
+//     （可编程判别，无需解析错误文案）。恢复步骤：`GetTopicLeader` 重解析 →
+//     改发 Leader → 指数退避重试；Leader 不可达（连接失败 = `UNAVAILABLE`）时
+//     等待其恢复，**不要**向非 Leader 重放写操作。
+//   - `Poll` 可读任意 agent 的本地副本（含 Follower），不要求 Leader；
+//     消费位点（`Ack` / `Subscribe` 自动提交）为 Leader 本地状态。
+//
+// 删除语义（G-MQ-4，`DeleteTopic`）
+// ------------------------------------------------------------
+//   - 删除为**管理路径**（能力门禁）：调用方应先停该 topic 的读写；删除进行中
+//     到达的读写按「配置已删」语义返回 `NOT_FOUND`（不承诺与删除原子交错）。
+//   - ISR 启用时删除必经复制通道全域下发（Follower 幂等应用）；删除后所有 agent
+//     对该 topic 的读写返回 `NOT_FOUND`，同名重建 = 空 topic。
+//   - 回收范围 = 消息 / DLQ / 消费位点 / 幂等索引 / next-offset 计数；
+//     响应返回逐项实际删除计数，配额随之归还。
 
 // 验收口径与目标日期约定见 WHITEPAPER.md。
 // ============================================================
@@ -80,6 +102,22 @@ service MQ {
 
   // 读取死信队列（可选扩展：毒消息可观测）
   rpc PollDlq(MqPollDlqRequest) returns (MqPollDlqResponse);
+
+  // 查询 topic 的 Leader 与 ISR 拓扑（任意 agent 可答；单 agent 时
+  // `replication_enabled=false`、`leader_agent` 为空 = 调用方视本 agent 为 Leader）。
+  rpc GetTopicLeader(MqGetTopicLeaderRequest) returns (MqGetTopicLeaderResponse);
+
+  // 显式移入死信队列（管理路径，能力门禁 `coord:mq:manage`）。
+  //
+  // 语义：把 (topic, partition, offset) 的消息从主日志移入 DLQ（净额记账、
+  // 分区不被阻塞），reason / detail 原样可读（`PollDlq` 可见）；消息或 topic
+  // 不存在返回 `NOT_FOUND`。自动投毒判定（按重试次数 / 策略）不在承诺内。
+  rpc MoveToDlq(MqMoveToDlqRequest) returns (MqMoveToDlqResponse);
+
+  // 删除 topic 并回收全部存量（管理路径，能力门禁 `coord:mq:manage`）。
+  //
+  // 前置条件、ISR 全域一致性与删除后错误语义见头注「删除语义」。
+  rpc DeleteTopic(MqDeleteTopicRequest) returns (MqDeleteTopicResponse);
 }
 
 message MqCreateTopicRequest {
@@ -113,6 +151,9 @@ message MqMessage {
   bytes key = 4;
   bytes payload = 5;
   int64 timestamp = 6;
+  // DLQ 专用（仅 PollDlq 填充；普通消息为空）：移入原因 / 详情（G-MQ-2）
+  string dlq_reason = 7;
+  string dlq_detail = 8;
 }
 
 message MqAckRequest {
@@ -144,6 +185,51 @@ message MqPollDlqRequest {
 
 message MqPollDlqResponse {
   repeated MqMessage messages = 1;
+}
+
+message MqGetTopicLeaderRequest {
+  string topic = 1;
+}
+
+message MqGetTopicLeaderResponse {
+  string topic = 1;
+  // Leader 的 agent 地址（host:port）；单 agent 部署为空（本 agent 即 Leader）
+  string leader_agent = 2;
+  // 当前 ISR 成员（含 Leader）；单 agent 部署为空
+  repeated string isr_members = 3;
+  // 是否启用 ISR 复制（false = 单 agent 本地语义）
+  bool replication_enabled = 4;
+  // ISR 是否不足（当前成员数 < min_isr；true 时写操作被拒绝）
+  bool degraded = 5;
+  int32 partitions = 6;
+  // 生效的 min_isr（单 agent 自动降级为 1；未启用复制时为 0）
+  uint64 min_isr = 7;
+}
+
+message MqMoveToDlqRequest {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  // 可读的移入原因（如 "poison" / "decode_error"）
+  string reason = 4;
+  // 补充细节（自由文本，可为空）
+  string detail = 5;
+}
+
+message MqMoveToDlqResponse {}
+
+message MqDeleteTopicRequest {
+  string topic = 1;
+}
+
+message MqDeleteTopicResponse {
+  // 各表实际删除条目数（Leader 本地；Followers 幂等应用同一删除）
+  uint64 messages_removed = 1;
+  uint64 dlq_removed = 2;
+  uint64 offsets_removed = 3;
+  uint64 idempotency_removed = 4;
+  // 回收的记账字节（消息 + DLQ 物理字节，与 B-PL-4 同口径）
+  uint64 bytes_reclaimed = 5;
 }
 
 // ============================================================

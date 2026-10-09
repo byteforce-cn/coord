@@ -326,6 +326,26 @@ auto-resolve 语义，处置是人工的。
 5. 事后：确认 `coord_agent_workflow_loops_finished` 回落为 0（循环型死亡**不会**
    自愈：它是 `tokio::spawn` 出去的死句柄 ⇒ 必须重启 agent 进程）。
 
+### `CoordMqConsumerLag` — MQ 消费组滞后
+
+- 指标：`coord_agent_mq_consumer_lag{topic,group,partition}`（lag = next_offset −
+  committed，下限 0）、`coord_agent_mq_consumer_offset`、`coord_agent_mq_next_offset`。
+- 滞后持续增长 = 生产快于消费：扩容消费者（注意 `Ack` 必须发往分区 Leader，见
+  MQ 契约页的消费路由小节）或降低生产速率。
+- 滞后停滞但 > 0 = 消费者已停摆：检查消费者进程与错误率。消费位点只在 `Ack`
+  成功后前进，**重复投递是 at-least-once 的正常形态**（不要按重复告警）。
+- 分区 Leader 查询：`GetTopicLeader`；非 Leader 写路径返回
+  `FAILED_PRECONDITION` + `coord-leader-hint` trailer。
+
+### `CoordPkiCertExpiringSoon` — PKI 证书即将到期
+
+- 口径：仍有效且剩余有效期 < `coord_agent_pki_expiry_warn_window_hours`（默认 6h，
+  配置项 `expiry_warn_hours`）的 active 证书数；已过期证书**不**计入（到期即换新，
+  由下一次 `IssueCert`/`RotateCert` 处理）。
+- 处置：对窗口内的 CN 调 `RotateCert`（或按序列号 `RenewCert`）换新；消费方按
+  `ListCerts` 的 serial/kid 在双密钥重叠窗口内滚动验签。
+- 若计数长期不降：确认轮换确实执行（换新会改变 active serial）。
+
 ---
 
 ## 7. 演练纪律

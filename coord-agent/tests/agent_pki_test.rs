@@ -29,6 +29,7 @@ fn make_pki_with_store(store: Arc<MemoryPkiStore>) -> PkiService {
 fn test_pki_config_defaults() {
     let config = PkiConfig::default();
     assert_eq!(config.cert_ttl_hours, 24, "证书默认 24h TTL");
+    assert_eq!(config.expiry_warn_hours, 6, "到期告警窗口默认 6h（G-PKI-2）");
     assert_eq!(config.ca_cert_path, None);
 }
 

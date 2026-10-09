@@ -157,6 +157,22 @@ fn test_replication_entry_proto_roundtrip() {
         cache,
         ReplicationEntry::from_proto(&cache.to_proto()).unwrap()
     );
+
+    // G-MQ-4：topic 删除决定的 proto 往返
+    let delete = ReplicationEntry::new_mq_delete_topic(
+        IdempotencyKey::new("mq:delete-topic:orders:8", 1700000000001),
+        "mq:orders".to_string(),
+        "orders".to_string(),
+        8,
+    );
+    assert_eq!(
+        delete,
+        ReplicationEntry::from_proto(&delete.to_proto()).unwrap()
+    );
+    assert!(matches!(
+        delete.operation,
+        ReplicationOp::MqDeleteTopic { ref topic } if topic == "orders"
+    ));
 }
 
 // ════════════════════════════════════════════════════════════
@@ -523,7 +539,8 @@ async fn test_two_agent_cache_replication() {
 
 #[tokio::test]
 async fn test_follower_write_rejected_not_leader() {
-    // 非 Leader 的写请求返回明确「非 Leader」错误
+    // 非 Leader 的写请求返回明确「非 Leader」错误：FAILED_PRECONDITION +
+    // 结构化错误码 NOT_LEADER + coord-leader-hint trailer（可编程路由，G-MQ-1）
     let (ha, hb, leader, follower) = spawn_pair(2, "notleader").await;
 
     let mut lc = mq_client(&leader).await;
@@ -548,6 +565,263 @@ async fn test_follower_write_rejected_not_leader() {
     assert!(result.is_err(), "follower publish should be rejected");
     let status = result.unwrap_err();
     assert!(status.message().contains("not leader"), "status: {status}");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        status
+            .metadata()
+            .get("x-coord-error-code")
+            .and_then(|v| v.to_str().ok()),
+        Some("NOT_LEADER"),
+        "结构化错误码必须为 NOT_LEADER"
+    );
+    assert_eq!(
+        status
+            .metadata()
+            .get("coord-leader-hint")
+            .and_then(|v| v.to_str().ok()),
+        Some(leader.as_str()),
+        "leader 提示必须结构可读（不解析文案）"
+    );
+
+    // Follower 上的 Ack 同样给出结构化提示（消费位点仅 Leader 本地状态）
+    let ack = fc
+        .ack(coord_proto::agent::MqAckRequest {
+            topic: "t".to_string(),
+            consumer_group: "cg".to_string(),
+            partition: 0,
+            offset: 1,
+        })
+        .await;
+    let ack_status = ack.expect_err("follower ack should be rejected");
+    assert_eq!(
+        ack_status
+            .metadata()
+            .get("coord-leader-hint")
+            .and_then(|v| v.to_str().ok()),
+        Some(leader.as_str())
+    );
+
+    ha.abort();
+    hb.abort();
+}
+
+/// G-MQ-1/2/4：Leader 查询 → 显式 DLQ → 删除全域一致 → 同名重建空 topic
+#[tokio::test]
+async fn test_leader_query_dlq_and_delete_across_agents() {
+    let (ha, hb, leader, follower) = spawn_pair(2, "leaderdel").await;
+
+    let mut lc = mq_client(&leader).await;
+    let mut fc = mq_client(&follower).await;
+    lc.create_topic(coord_proto::agent::MqCreateTopicRequest {
+        topic: "orders".to_string(),
+        partitions: 1,
+    })
+    .await
+    .unwrap();
+    for i in 0..2u32 {
+        lc.publish(coord_proto::agent::MqPublishRequest {
+            topic: "orders".to_string(),
+            partition: 0,
+            key: Vec::new(),
+            payload: format!("m{i}").into_bytes(),
+            idempotency_key: String::new(),
+        })
+        .await
+        .unwrap();
+    }
+
+    // ── G-MQ-1：GetTopicLeader（任意 agent 可答，含 ISR 拓扑）──
+    let info = fc
+        .get_topic_leader(coord_proto::agent::MqGetTopicLeaderRequest {
+            topic: "orders".to_string(),
+        })
+        .await
+        .expect("follower can answer leader query")
+        .into_inner();
+    assert!(info.replication_enabled);
+    assert_eq!(info.leader_agent, leader);
+    assert_eq!(info.min_isr, 2);
+    assert!(!info.degraded);
+    assert_eq!(info.partitions, 1);
+    assert!(info.isr_members.contains(&leader));
+    assert!(info.isr_members.contains(&follower));
+
+    // ── G-MQ-2：显式移入 DLQ（管理路径），原因可读 ──
+    lc.move_to_dlq(coord_proto::agent::MqMoveToDlqRequest {
+        topic: "orders".to_string(),
+        partition: 0,
+        offset: 0,
+        reason: "poison".to_string(),
+        detail: "retries exceeded".to_string(),
+    })
+    .await
+    .expect("move to dlq");
+    let dlq = lc
+        .poll_dlq(coord_proto::agent::MqPollDlqRequest {
+            topic: "orders".to_string(),
+            partition: 0,
+            max_count: 10,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(dlq.messages.len(), 1);
+    assert_eq!(dlq.messages[0].payload, b"m0".to_vec());
+    assert_eq!(dlq.messages[0].dlq_reason, "poison");
+    assert_eq!(dlq.messages[0].dlq_detail, "retries exceeded");
+
+    // 不存在的消息 → NOT_FOUND（明确错误）
+    let missing = lc
+        .move_to_dlq(coord_proto::agent::MqMoveToDlqRequest {
+            topic: "orders".to_string(),
+            partition: 0,
+            offset: 999,
+            reason: "x".to_string(),
+            detail: String::new(),
+        })
+        .await
+        .expect_err("unknown offset must fail");
+    assert_eq!(missing.code(), tonic::Code::NotFound);
+
+    // Follower 收敛：DLQ 迁移全域一致（副本不分叉）
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let fedlq = fc
+            .poll_dlq(coord_proto::agent::MqPollDlqRequest {
+                topic: "orders".to_string(),
+                partition: 0,
+                max_count: 10,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        if fedlq.messages.len() == 1
+            && fedlq.messages[0].payload == b"m0".to_vec()
+            && fedlq.messages[0].dlq_reason == "poison"
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "follower must converge to moved DLQ entry within 10s"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // ── G-MQ-4：Follower 上删除 → 明确非 Leader；Leader 上删除 → 全域回收 ──
+    let denied = fc
+        .delete_topic(coord_proto::agent::MqDeleteTopicRequest {
+            topic: "orders".to_string(),
+        })
+        .await
+        .expect_err("follower delete must be rejected");
+    assert_eq!(denied.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        denied
+            .metadata()
+            .get("coord-leader-hint")
+            .and_then(|v| v.to_str().ok()),
+        Some(leader.as_str())
+    );
+
+    let stats = lc
+        .delete_topic(coord_proto::agent::MqDeleteTopicRequest {
+            topic: "orders".to_string(),
+        })
+        .await
+        .expect("leader delete")
+        .into_inner();
+    assert_eq!(stats.messages_removed, 1, "剩 1 条（另一条已入 DLQ）");
+    assert_eq!(stats.dlq_removed, 1);
+    assert!(stats.bytes_reclaimed > 0);
+
+    // Follower 收敛：删除后 poll 返回 NOT_FOUND（不再退化为空结果）
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let probe = fc
+            .poll(coord_proto::agent::MqPollRequest {
+                topic: "orders".to_string(),
+                partition: 0,
+                consumer_group: "cg".to_string(),
+                start_offset: 0,
+                max_count: 10,
+            })
+            .await;
+        match probe {
+            Err(s) if s.code() == tonic::Code::NotFound => break,
+            Ok(resp) => assert!(
+                resp.into_inner().messages.is_empty() || tokio::time::Instant::now() < deadline,
+                "follower must converge to deleted within 10s"
+            ),
+            Err(s) => panic!("unexpected follower poll status: {s}"),
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "follower must converge to deleted within 10s"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Leader 上删除后 publish → NOT_FOUND
+    let pub_missing = lc
+        .publish(coord_proto::agent::MqPublishRequest {
+            topic: "orders".to_string(),
+            partition: 0,
+            key: Vec::new(),
+            payload: b"x".to_vec(),
+            idempotency_key: String::new(),
+        })
+        .await
+        .expect_err("publish after delete must fail");
+    assert_eq!(pub_missing.code(), tonic::Code::NotFound);
+
+    // 同名重建 = 空 topic（offset 从 0 起，且复制到 Follower）
+    lc.create_topic(coord_proto::agent::MqCreateTopicRequest {
+        topic: "orders".to_string(),
+        partitions: 1,
+    })
+    .await
+    .unwrap();
+    let off = lc
+        .publish(coord_proto::agent::MqPublishRequest {
+            topic: "orders".to_string(),
+            partition: 0,
+            key: Vec::new(),
+            payload: b"fresh".to_vec(),
+            idempotency_key: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .offset;
+    assert_eq!(off, 0, "重建后 offset 从 0 起（旧存量已回收）");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let poll = fc
+            .poll(coord_proto::agent::MqPollRequest {
+                topic: "orders".to_string(),
+                partition: 0,
+                consumer_group: "cg2".to_string(),
+                start_offset: 0,
+                max_count: 10,
+            })
+            .await;
+        match poll {
+            Ok(resp) => {
+                let msgs = resp.into_inner().messages;
+                if msgs.len() == 1 && msgs[0].payload == b"fresh".to_vec() {
+                    break;
+                }
+            }
+            Err(_) => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "follower must receive recreated topic message within 10s"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     ha.abort();
     hb.abort();

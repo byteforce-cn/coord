@@ -629,3 +629,163 @@ fn test_mq_replicated_path_rejects_headers_instead_of_dropping() {
         "unexpected error: {err}"
     );
 }
+
+// ════════════════════════════════════════════════════════════
+// G-MQ-4: topic 删除与回收（删除后配额归还 / 同名重建 = 空 topic）
+// ════════════════════════════════════════════════════════════
+
+/// 删除 = 全量回收：消息 / DLQ / 位点 / 幂等索引 / 配置；配额归还
+#[test]
+fn test_delete_topic_full_reclaims_all_state() {
+    let dir = temp_data_dir();
+    let svc = new_mq_service(&dir);
+
+    let cfg = || TopicConfig {
+        partitions: 1,
+        retention_secs: 3600,
+        max_message_size: 1024,
+    };
+
+    // topic A：消息 + DLQ + 位点 + 幂等索引
+    svc.create_topic("a", cfg()).unwrap();
+    svc.produce_idempotent("a", 0, b"m1".to_vec(), None, Some("k1"))
+        .unwrap();
+    svc.produce_idempotent("a", 0, b"m2".to_vec(), None, Some("k2"))
+        .unwrap();
+    svc.move_to_dlq("a", 0, 0, "poison", "bad").unwrap();
+    svc.commit_offset("cg", "a", 0, 2).unwrap();
+
+    // topic B（对照组）：不得被误伤
+    svc.create_topic("b", cfg()).unwrap();
+    svc.produce("b", 0, b"keep".to_vec(), None).unwrap();
+
+    let before = svc.accounted_bytes().unwrap();
+    assert!(before > 0);
+
+    let stats = svc.delete_topic_full("a").unwrap();
+    assert_eq!(stats.messages_removed, 1, "主日志剩余 1 条（另一条已入 DLQ）");
+    assert_eq!(stats.dlq_removed, 1);
+    assert_eq!(stats.offsets_removed, 1);
+    assert_eq!(stats.idempotency_removed, 2);
+    assert!(stats.bytes_reclaimed > 0);
+    assert!(!svc.topic_exists("a").unwrap(), "配置行必须删除");
+
+    // 配额归还：记账 = 仅剩 topic B 的消息
+    let after = svc.accounted_bytes().unwrap();
+    assert!(after < before, "after={after} before={before}");
+    assert_eq!(
+        after,
+        before - stats.bytes_reclaimed,
+        "回收字节必须精确等于记账净减少"
+    );
+
+    // 删除后读写明确报错（RPC 层映射 NOT_FOUND）
+    assert!(
+        svc.produce("a", 0, b"x".to_vec(), None).is_err(),
+        "删除后 publish 必须报错"
+    );
+    assert_eq!(
+        svc.get_consumer_offset("cg", "a", 0).unwrap(),
+        0,
+        "位点已回收（回默认 0）"
+    );
+    assert!(svc.consume_dlq("a", 0, 10).unwrap().is_empty());
+
+    // 同名重建 = 空 topic（offset 从 0 起）
+    svc.create_topic("a", cfg()).unwrap();
+    assert!(
+        svc.consume("a", 0, 0, 10).unwrap().is_empty(),
+        "重建后必须为空"
+    );
+    let off = svc.produce("a", 0, b"fresh".to_vec(), None).unwrap();
+    assert_eq!(off, 0, "重建后 offset 从 0 起");
+
+    // 删除不存在的 topic：明确报错（NOT_FOUND 语义）
+    let err = svc.delete_topic_full("ghost").unwrap_err();
+    assert!(err.to_string().contains("not found"), "unexpected: {err}");
+}
+
+// ════════════════════════════════════════════════════════════
+// G-MQ-2: 显式 DLQ 管理路径（服务层语义；gRPC 侧见 agent_isr_test）
+// ════════════════════════════════════════════════════════════
+
+/// move_to_dlq：净额记账（消息行 → DLQ 行）+ 未知消息/未知 topic 明确报错
+#[test]
+fn test_move_to_dlq_net_accounting_and_not_found() {
+    let dir = temp_data_dir();
+    let svc = new_mq_service(&dir);
+    svc.create_topic(
+        "orders",
+        TopicConfig {
+            partitions: 1,
+            retention_secs: 3600,
+            max_message_size: 1024,
+        },
+    )
+    .unwrap();
+    svc.produce("orders", 0, b"poison-msg".to_vec(), None)
+        .unwrap();
+
+    svc.move_to_dlq("orders", 0, 0, "poison", "retries exceeded")
+        .unwrap();
+    let dlq = svc.consume_dlq("orders", 0, 10).unwrap();
+    assert_eq!(dlq.len(), 1);
+    assert_eq!(dlq[0].error_reason.as_deref(), Some("poison"));
+    assert_eq!(dlq[0].error_detail.as_deref(), Some("retries exceeded"));
+
+    // 未知 offset / 未知 topic：明确错误（RPC 层映射 NOT_FOUND）
+    let e1 = svc.move_to_dlq("orders", 0, 999, "x", "").unwrap_err();
+    assert!(e1.to_string().contains("not found"), "unexpected: {e1}");
+
+    // 分区不被阻塞：后续消息照常写入与消费
+    svc.produce("orders", 0, b"m2".to_vec(), None).unwrap();
+    let msgs = svc.consume("orders", 0, 1, 10).unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].payload, b"m2");
+}
+
+// ════════════════════════════════════════════════════════════
+// G-MQ-3: 消费位点/滞后快照（指标采样的输入面）
+// ════════════════════════════════════════════════════════════
+
+/// 位点快照与 next-offset 快照按 (topic, group, partition) 正确解码
+#[test]
+fn test_consumer_offsets_and_next_offsets_snapshot() {
+    let dir = temp_data_dir();
+    let svc = new_mq_service(&dir);
+    svc.create_topic(
+        "orders",
+        TopicConfig {
+            partitions: 2,
+            retention_secs: 3600,
+            max_message_size: 1024,
+        },
+    )
+    .unwrap();
+    for i in 0..3u32 {
+        svc.produce("orders", 0, format!("m{i}").into_bytes(), None)
+            .unwrap();
+    }
+    svc.produce("orders", 1, b"p1".to_vec(), None).unwrap();
+    svc.commit_offset("cg", "orders", 0, 2).unwrap();
+
+    let offsets = svc.consumer_offsets().unwrap();
+    assert_eq!(
+        offsets,
+        vec![("cg".to_string(), "orders".to_string(), 0u32, 2u64)]
+    );
+
+    let mut nexts = svc.next_offsets_all().unwrap();
+    nexts.sort();
+    assert_eq!(
+        nexts,
+        vec![
+            ("orders".to_string(), 0u32, 3u64),
+            ("orders".to_string(), 1u32, 1u64)
+        ]
+    );
+
+    // lag 组合口径（采样任务）：next - committed
+    let lag_p0 = 3u64.saturating_sub(2);
+    assert_eq!(lag_p0, 1);
+}

@@ -33,7 +33,13 @@ option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/poli
 
 service Policy {
   // 策略评估
+  //
+  // CheckPermission：**agent 本地 / 嵌入式用途**——仅对目标 agent 进程内装载的
+  // RBAC 策略求解（无跨 agent 管理面、无持久化，重启即空）。
+  // 生产接入统一走 OPA bundle（PutBundle，跨 agent 分发/加载/收敛见头注 G-POL-1）
+  // + Evaluate；二者不是同一策略面，RBAC 结构化策略不随 bundle 分发。
   rpc CheckPermission(PolicyCheckPermissionRequest) returns (PolicyCheckPermissionResponse);
+  // Evaluate：对本地引擎已加载的全部 enabled bundle（含启动加载与 Watch 传播）求值
   rpc Evaluate(PolicyEvaluateRequest) returns (PolicyEvaluateResponse);
 
   // 策略解释 — 返回决策 trace，说明为什么允许/拒绝

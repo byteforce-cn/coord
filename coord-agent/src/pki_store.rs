@@ -133,6 +133,9 @@ pub trait PkiStore: Send + Sync {
         cn: &str,
     ) -> Result<Option<(CertRecord, i64)>, PkiStoreError>;
 
+    /// 列出全部 active 记录（不区分 CN；G-PKI-2 到期观测面）
+    async fn list_active_certs(&self) -> Result<Vec<CertRecord>, PkiStoreError>;
+
     /// 原子创建 active 证书（Txn CAS Version==0）；已存在返回 AlreadyExists
     async fn create_cert(&self, cn: &str, record: &CertRecord) -> Result<(), PkiStoreError>;
 
@@ -279,6 +282,10 @@ impl PkiStore for MemoryPkiStore {
             }
             None => Ok(None),
         }
+    }
+
+    async fn list_active_certs(&self) -> Result<Vec<CertRecord>, PkiStoreError> {
+        Ok(self.active.lock().values().cloned().collect())
     }
 
     async fn create_cert(&self, cn: &str, record: &CertRecord) -> Result<(), PkiStoreError> {
@@ -434,6 +441,25 @@ impl PkiStore for KvPkiStore {
             }
             None => Ok(None),
         }
+    }
+
+    async fn list_active_certs(&self) -> Result<Vec<CertRecord>, PkiStoreError> {
+        let prefix = active_prefix();
+        let range_end = prefix_end(&prefix);
+        let pairs = self
+            .inner
+            .client
+            .kv()
+            .range(&prefix, &range_end, 0, 0)
+            .await
+            .map_err(|e| PkiStoreError::Kv(e.to_string()))?;
+        let mut out = Vec::with_capacity(pairs.len());
+        for (_k, v) in pairs {
+            if let Ok(record) = deserialize_cert(&v) {
+                out.push(record);
+            }
+        }
+        Ok(out)
     }
 
     async fn create_cert(&self, cn: &str, record: &CertRecord) -> Result<(), PkiStoreError> {

@@ -195,3 +195,38 @@ groups:
             处置：先确认受影响的实例清单（workflow ListInstances 里长期 Running 的项），
             再按 runbook 重启 agent 进程并用 `Workflow/Start` 之外的 resume 路径恢复。
 
+  - name: coord-agent-dataplane
+    rules:
+      # MQ 消费组滞后（G-MQ-3）：单消费组在单 topic 上滞后 > 1000 条且持续 10
+      # 分钟。lag = next_offset - committed_offset（同分区上下文，下限 0），
+      # 逐 (topic, group, partition) 暴露，此处取各分区最大。
+      - alert: CoordMqConsumerLag
+        expr: |
+          max by (instance, topic, group) (coord_agent_mq_consumer_lag{job=~"coord.*"}) > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord-agent {{ $labels.instance }} 消费组 {{ $labels.group }} 在 topic {{ $labels.topic }} 滞后 {{ $value }} 条"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordmqconsumerlag--mq-消费组滞后"
+          description: |
+            消费进度查询：coord_agent_mq_consumer_offset{...} 与
+            coord_agent_mq_next_offset{topic,partition}。持续增长 = 消费能力跟不上
+            生产（扩容消费者 / 检查消费者错误率）；停滞但 lag>0 = 消费者已停摆。
+
+      # PKI 即将到期（G-PKI-2）：告警窗口（coord_agent_pki_expiry_warn_window_hours，
+      # 默认 6h）内存在即将到期的 active 证书。
+      - alert: CoordPkiCertExpiringSoon
+        expr: |
+          coord_agent_pki_certs_expiring_soon{job=~"coord.*"} > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "coord-agent {{ $labels.instance }} 有 {{ $value }} 张证书将在告警窗口内到期"
+          runbook_url: "https://github.com/byteforce-cn/coord/blob/main/docs/production/ops/runbook.md#coordpkicertexpiringsoon--pki-证书即将到期"
+          description: |
+            窗口小时数见 coord_agent_pki_expiry_warn_window_hours；active 证书总数见
+            coord_agent_pki_certs_active。到期 = 换新触发：调 RotateCert/RenewCert
+            换新即可（见 runbook 小节）。
+

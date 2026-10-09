@@ -104,6 +104,10 @@ message ReplicaOp {
     ReplicaCachePut cache_put = 1;
     ReplicaCacheDelete cache_delete = 2;
     ReplicaMqPublish mq_publish = 3;
+    // topic 删除决定（G-MQ-4：删除经复制通道全域下发，Follower 幂等应用）
+    ReplicaMqDeleteTopic mq_delete_topic = 4;
+    // 显式移入 DLQ（G-MQ-2：ISR 启用时跟同删除一样全域下发，避免副本分叉）
+    ReplicaMqMoveToDlq mq_move_to_dlq = 5;
   }
 }
 
@@ -126,6 +130,18 @@ message ReplicaMqPublish {
   // Leader 独占分配的全局一致 offset（决策 C1）
   uint64 offset = 3;
   bytes payload = 4;
+}
+
+message ReplicaMqDeleteTopic {
+  string topic = 1;
+}
+
+message ReplicaMqMoveToDlq {
+  string topic = 1;
+  uint32 partition = 2;
+  uint64 offset = 3;
+  string reason = 4;
+  string detail = 5;
 }
 
 message ReplicaHeartbeatRequest {

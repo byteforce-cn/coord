@@ -37,6 +37,15 @@ public interface PolicyClient {
 
     /**
      * Check whether a principal is allowed to perform an action on a resource.
+     * <p>
+     * <b>Agent-local / embedded use only:</b> this evaluates the RBAC rules
+     * loaded in-process on the addressed agent (no cross-agent management
+     * surface, no persistence — rules are gone after an agent restart). Over a
+     * remote SDK call the agent typically has no RBAC rules loaded and every
+     * request defaults to deny. For production authorization use a Rego bundle
+     * ({@link #putBundle}) together with {@link #evaluate}: bundles are
+     * distributed across agents (startup load + watch propagation) and survive
+     * restarts.
      *
      * @param principal the subject identifier (e.g., "user:alice", "role:admin")
      * @param resource  the target resource (e.g., "/api/orders", "*")

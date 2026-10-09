@@ -177,6 +177,11 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         "/coord.mq.v1.MQ/Subscribe" => Some("coord:mq:subscribe"),
         "/coord.mq.v1.MQ/Ack" => Some("coord:mq:consume"),
         "/coord.mq.v1.MQ/Poll" => Some("coord:mq:consume"),
+        // Leader/ISR 拓扑查询：消费者路由所需（读面，与消费同能力）
+        "/coord.mq.v1.MQ/GetTopicLeader" => Some("coord:mq:consume"),
+        // 显式移入 DLQ / 删除 topic：管理路径（G-MQ-2 / G-MQ-4）
+        "/coord.mq.v1.MQ/MoveToDlq" => Some("coord:mq:manage"),
+        "/coord.mq.v1.MQ/DeleteTopic" => Some("coord:mq:manage"),
 
         // Replica —— 副本（内部面，但经 agent 暴露）
         "/coord.agent.Replica/Apply" => Some("coord:replica:write"),

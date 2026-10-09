@@ -1614,6 +1614,33 @@ impl AgentServer {
                             svc.publish_rejections(),
                             counters.faults,
                         );
+                        // G-MQ-3：消费组位点/滞后快照（只读；任务死亡 ⇒ 指标停滞）
+                        if let (Ok(offsets), Ok(nexts)) =
+                            (svc.consumer_offsets(), svc.next_offsets_all())
+                        {
+                            let next_map: std::collections::HashMap<(String, u32), u64> =
+                                nexts
+                                    .iter()
+                                    .map(|(t, p, n)| ((t.clone(), *p), *n))
+                                    .collect();
+                            let consumers = offsets
+                                .into_iter()
+                                .map(|(group, topic, partition, committed)| {
+                                    let next = next_map
+                                        .get(&(topic.clone(), partition))
+                                        .copied()
+                                        .unwrap_or(0);
+                                    (
+                                        topic,
+                                        group,
+                                        partition,
+                                        committed,
+                                        next.saturating_sub(committed),
+                                    )
+                                })
+                                .collect();
+                            metrics.set_mq_consumer_lag_stats(consumers, nexts);
+                        }
                         if counters.faults > last_faults {
                             tracing::error!(
                                 faults_total = counters.faults,
@@ -1894,12 +1921,36 @@ impl AgentServer {
                 // CA 的 get-or-create 是 `PkiService::start()` 的动作（插件生命周期），
                 // 不再在此处内联 await。
                 let pki_svc = Arc::new(pki_svc);
+                let sampler_svc = Arc::clone(&pki_svc);
                 let _ = register_native_service(
                     &plugin_manager,
                     pki_svc.clone(),
                     crate::plugin::AgentGrpcService::Pki(pki_svc),
                 )
                 .await;
+
+                // G-PKI-2：到期观测面（周期采样 issued 证书的到期分布；只读，
+                // 任务死亡 ⇒ 指标停滞）。不加 RPC——指标面足够。
+                if let Some(metrics) = self.metrics.clone() {
+                    tokio::spawn(async move {
+                        let tick = std::time::Duration::from_secs(30);
+                        loop {
+                            tokio::time::sleep(tick).await;
+                            match sampler_svc.cert_expiry_snapshot().await {
+                                Ok((total, expiring)) => {
+                                    metrics.set_pki_cert_stats(
+                                        total as i64,
+                                        expiring as i64,
+                                        sampler_svc.expiry_warn_hours(),
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!("pki expiry snapshot failed: {e}");
+                                }
+                            }
+                        }
+                    });
+                }
             } else {
                 tracing::error!("failed to create PKI service");
             }

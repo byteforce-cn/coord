@@ -104,6 +104,12 @@ struct MetricsInner {
     pub mq_publish_rejected: AtomicU64,
     /// MQ reaper 累计失败轮数（单调；>0 = 至少有一轮回收失败）
     pub mq_reaper_faults: AtomicU64,
+    /// 消费组已提交位点：(topic, group, partition) → committed offset（G-MQ-3）
+    pub mq_consumer_offsets: RwLock<BTreeMap<(String, String, u32), u64>>,
+    /// 消费组滞后量：(topic, group, partition) → next_offset - committed（G-MQ-3）
+    pub mq_consumer_lags: RwLock<BTreeMap<(String, String, u32), u64>>,
+    /// 各 (topic, partition) 的 next offset（已生产条数；G-MQ-3）
+    pub mq_next_offsets: RwLock<BTreeMap<(String, u32), u64>>,
     /// 已加载 enabled OPA bundle 数（G-POL-1；gauge）
     pub policy_bundles_loaded: AtomicI64,
     /// 最近一次成功 bundle 加载/对账的 unix 秒（0 = 从未成功；gauge）
@@ -112,6 +118,12 @@ struct MetricsInner {
     pub policy_bundle_sync_ok: AtomicU64,
     /// bundle 加载/对账/事件应用失败累计（单调）
     pub policy_bundle_sync_errors: AtomicU64,
+    /// PKI active 证书总数（G-PKI-2；gauge）
+    pub pki_certs_active: AtomicI64,
+    /// PKI 窗口内即将到期的 active 证书数（G-PKI-2；gauge）
+    pub pki_certs_expiring_soon: AtomicI64,
+    /// PKI 到期告警窗口（小时；G-PKI-2）
+    pub pki_expiry_warn_window_hours: AtomicI64,
 }
 
 impl AgentMetrics {
@@ -144,10 +156,16 @@ impl AgentMetrics {
                 mq_purged_entries: AtomicU64::new(0),
                 mq_publish_rejected: AtomicU64::new(0),
                 mq_reaper_faults: AtomicU64::new(0),
+                mq_consumer_offsets: RwLock::new(BTreeMap::new()),
+                mq_consumer_lags: RwLock::new(BTreeMap::new()),
+                mq_next_offsets: RwLock::new(BTreeMap::new()),
                 policy_bundles_loaded: AtomicI64::new(0),
                 policy_bundle_last_sync_unix: AtomicI64::new(0),
                 policy_bundle_sync_ok: AtomicU64::new(0),
                 policy_bundle_sync_errors: AtomicU64::new(0),
+                pki_certs_active: AtomicI64::new(0),
+                pki_certs_expiring_soon: AtomicI64::new(0),
+                pki_expiry_warn_window_hours: AtomicI64::new(0),
             }),
         }
     }
@@ -343,6 +361,50 @@ impl AgentMetrics {
         self.inner
             .policy_bundle_sync_errors
             .store(errors_total, Ordering::Relaxed);
+    }
+
+    /// 写入 MQ 消费组位点/滞后快照（G-MQ-3）；由周期采样任务从
+    /// MessageQueueService 拉取。
+    ///
+    /// `consumers` = (topic, group, partition, committed_offset, lag)；
+    /// `next_offsets` = (topic, partition, next_offset)。
+    /// lag = next_offset - committed（同分区上下文；无生产记录时取 0 下限）。
+    pub fn set_mq_consumer_lag_stats(
+        &self,
+        consumers: Vec<(String, String, u32, u64, u64)>,
+        next_offsets: Vec<(String, u32, u64)>,
+    ) {
+        {
+            let mut offsets = self.inner.mq_consumer_offsets.write();
+            let mut lags = self.inner.mq_consumer_lags.write();
+            offsets.clear();
+            lags.clear();
+            for (topic, group, partition, offset, lag) in consumers {
+                let key = (topic, group, partition);
+                offsets.insert(key.clone(), offset);
+                lags.insert(key, lag);
+            }
+        }
+        {
+            let mut next = self.inner.mq_next_offsets.write();
+            next.clear();
+            for (topic, partition, offset) in next_offsets {
+                next.insert((topic, partition), offset);
+            }
+        }
+    }
+
+    /// 写入 PKI 到期观测（G-PKI-2）；由周期采样任务从 PkiService 拉取。
+    ///
+    /// `expiring_soon` = 仍有效且剩余有效期 < `window_hours` 的 active 证书数。
+    pub fn set_pki_cert_stats(&self, total: i64, expiring_soon: i64, window_hours: i64) {
+        self.inner.pki_certs_active.store(total, Ordering::Relaxed);
+        self.inner
+            .pki_certs_expiring_soon
+            .store(expiring_soon, Ordering::Relaxed);
+        self.inner
+            .pki_expiry_warn_window_hours
+            .store(window_hours, Ordering::Relaxed);
     }
 
     // ──── 插件指标（观测面）────
@@ -571,6 +633,50 @@ impl AgentMetrics {
             self.inner.mq_reaper_faults.load(Ordering::Relaxed)
         ));
 
+        // ──── MQ 消费组位点 / 滞后（G-MQ-3；周期采样自 MessageQueueService）────
+        out.push_str(
+            "# HELP coord_agent_mq_consumer_offset Committed consumer-group offset per \
+             (topic, group, partition)\n",
+        );
+        out.push_str("# TYPE coord_agent_mq_consumer_offset gauge\n");
+        {
+            let offsets = self.inner.mq_consumer_offsets.read();
+            for ((topic, group, partition), value) in offsets.iter() {
+                out.push_str(&format!(
+                    "coord_agent_mq_consumer_offset{{topic=\"{topic}\",group=\"{group}\",\
+                     partition=\"{partition}\"}} {value}\n"
+                ));
+            }
+        }
+        out.push_str(
+            "# HELP coord_agent_mq_consumer_lag Messages behind the producer per \
+             (topic, group, partition) = next_offset - committed, floored at 0\n",
+        );
+        out.push_str("# TYPE coord_agent_mq_consumer_lag gauge\n");
+        {
+            let lags = self.inner.mq_consumer_lags.read();
+            for ((topic, group, partition), value) in lags.iter() {
+                out.push_str(&format!(
+                    "coord_agent_mq_consumer_lag{{topic=\"{topic}\",group=\"{group}\",\
+                     partition=\"{partition}\"}} {value}\n"
+                ));
+            }
+        }
+        out.push_str(
+            "# HELP coord_agent_mq_next_offset Next offset (produced count) per \
+             (topic, partition)\n",
+        );
+        out.push_str("# TYPE coord_agent_mq_next_offset gauge\n");
+        {
+            let next = self.inner.mq_next_offsets.read();
+            for ((topic, partition), value) in next.iter() {
+                out.push_str(&format!(
+                    "coord_agent_mq_next_offset{{topic=\"{topic}\",partition=\"{partition}\"}} \
+                     {value}\n"
+                ));
+            }
+        }
+
         // ──── OPA bundle 分发态（G-POL-1；周期采样自 PolicyService）────
         out.push_str(
             "# HELP coord_agent_policy_bundles_loaded Enabled OPA bundles loaded in the \
@@ -601,6 +707,34 @@ impl AgentMetrics {
         out.push_str(&format!(
             "coord_agent_policy_bundle_sync_total{{result=\"error\"}} {}\n",
             self.inner.policy_bundle_sync_errors.load(Ordering::Relaxed)
+        ));
+
+        // ──── PKI 到期观测（G-PKI-2；周期采样自 PkiService）────
+        out.push_str(
+            "# HELP coord_agent_pki_certs_active Currently active PKI certificates\n",
+        );
+        out.push_str("# TYPE coord_agent_pki_certs_active gauge\n");
+        out.push_str(&format!(
+            "coord_agent_pki_certs_active {}\n",
+            self.inner.pki_certs_active.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP coord_agent_pki_certs_expiring_soon Active certificates expiring within \
+             the configured window (still valid)\n",
+        );
+        out.push_str("# TYPE coord_agent_pki_certs_expiring_soon gauge\n");
+        out.push_str(&format!(
+            "coord_agent_pki_certs_expiring_soon {}\n",
+            self.inner.pki_certs_expiring_soon.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP coord_agent_pki_expiry_warn_window_hours Configured expiry warning window \
+             in hours\n",
+        );
+        out.push_str("# TYPE coord_agent_pki_expiry_warn_window_hours gauge\n");
+        out.push_str(&format!(
+            "coord_agent_pki_expiry_warn_window_hours {}\n",
+            self.inner.pki_expiry_warn_window_hours.load(Ordering::Relaxed)
         ));
 
         // ──── 插件指标 ────
@@ -776,6 +910,53 @@ mod tests {
         m.dec_watch_subscribers();
         let text = m.render_prometheus_text();
         assert!(text.contains("coord_agent_watch_subscribers 1"));
+    }
+
+    /// G-MQ-3 / G-POL-1：新指标必须真的出现在抓取面上（含标签序列）
+    #[test]
+    fn test_render_mq_consumer_lag_and_policy_bundle_metrics() {
+        let m = AgentMetrics::new();
+        m.set_mq_consumer_lag_stats(
+            vec![(
+                "orders".to_string(),
+                "cg".to_string(),
+                0u32,
+                2u64,
+                1u64,
+            )],
+            vec![("orders".to_string(), 0u32, 3u64)],
+        );
+        m.set_policy_bundle_stats(2, 1_700_000_000, 5, 1);
+        let text = m.render_prometheus_text();
+        assert!(
+            text.contains(
+                "coord_agent_mq_consumer_offset{topic=\"orders\",group=\"cg\",partition=\"0\"} 2"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "coord_agent_mq_consumer_lag{topic=\"orders\",group=\"cg\",partition=\"0\"} 1"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("coord_agent_mq_next_offset{topic=\"orders\",partition=\"0\"} 3"),
+            "{text}"
+        );
+        assert!(text.contains("coord_agent_policy_bundles_loaded 2"), "{text}");
+        assert!(
+            text.contains("coord_agent_policy_bundle_last_sync_timestamp 1700000000"),
+            "{text}"
+        );
+        assert!(
+            text.contains("coord_agent_policy_bundle_sync_total{result=\"ok\"} 5"),
+            "{text}"
+        );
+        assert!(
+            text.contains("coord_agent_policy_bundle_sync_total{result=\"error\"} 1"),
+            "{text}"
+        );
     }
 
     #[test]
