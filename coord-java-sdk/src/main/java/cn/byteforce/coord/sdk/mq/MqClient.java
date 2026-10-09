@@ -27,6 +27,14 @@ import java.util.List;
  * For multi-instance reliable decoupling, prefer the DB Outbox pattern for
  * business-side concerns.
  *
+ * <p>
+ * <b>Consumer routing (ISR replication enabled):</b> partition-scoped writes
+ * ({@link #publish}, {@link #ack}) must reach the partition leader. Query it with
+ * {@link #getTopicLeader(String)}; when a non-leader rejects the call it carries a
+ * structured error with a {@code coord-leader-hint} trailer surfaced by
+ * {@link CoordException#getLeaderHint()} — re-route to that address and retry.
+ * Never parse the exception message to discover the leader.
+ *
  * <pre>{@code
  * try (CoordClient client = CoordClient.create(config)) {
  *     MqClient mq = client.mq();
@@ -125,4 +133,58 @@ public interface MqClient {
      * @throws CoordException on communication failure or unknown topic
      */
     AutoCloseable subscribe(MqSubscribeRequest request, java.util.function.Consumer<MqMessage> listener);
+
+    /**
+     * Query the routing topology of a topic: leader agent address + current ISR
+     * members (G-MQ-1). Any agent answers from the replicated topic config.
+     * <p>
+     * Single-agent deployment: {@code replicationEnabled() == false} and an empty
+     * {@code leaderAgent()} — treat the connected agent as the leader. ISR enabled:
+     * route {@link #publish} / {@link #ack} to {@code leaderAgent()}. When the ISR is
+     * below {@code minIsr} ({@code degraded() == true}) writes are rejected until it
+     * recovers — retry with backoff instead of re-routing.
+     *
+     * @param topic topic name
+     * @return routing snapshot (never {@code null})
+     * @throws CoordException on communication failure, or {@code NOT_FOUND} for an
+     *                        unknown topic
+     */
+    MqTopicLeader getTopicLeader(String topic);
+
+    /**
+     * Explicitly move a message into the dead-letter queue (management path;
+     * capability {@code coord:mq:manage}, G-MQ-2).
+     * <p>
+     * The message is removed from the main log and appended to the DLQ within one
+     * transaction (net accounting — the partition is not blocked). {@code reason} and
+     * {@code detail} stay readable via {@link #pollDlq}. There is no automatic
+     * poison-message detection: the decision stays with the consumer.
+     *
+     * @param topic     topic name
+     * @param partition partition number
+     * @param offset    offset of the message to move
+     * @param reason    short machine-readable reason (e.g. {@code "poison"})
+     * @param detail    optional free-text detail (may be null or empty)
+     * @throws CoordException on communication failure, or {@code NOT_FOUND} when the
+     *                        topic or message does not exist
+     */
+    void moveToDlq(String topic, int partition, long offset, String reason, String detail);
+
+    /**
+     * Delete a topic and reclaim all of its state (management path; capability
+     * {@code coord:mq:manage}, G-MQ-4).
+     * <p>
+     * Removes the topic config plus every stored message, DLQ entry, consumer
+     * offset and idempotency-index row, and returns the accounted bytes to the
+     * quota. Precondition: stop all readers/writers of the topic first — concurrent
+     * publish/poll/ack observe explicit errors (unknown topic / not found) rather
+     * than silent partial state. With ISR enabled the deletion is applied
+     * consistently across all ISR members. Re-creating the same topic afterwards
+     * yields an empty topic.
+     *
+     * @param topic topic name
+     * @return per-table reclamation counts
+     * @throws CoordException on communication failure or unknown topic
+     */
+    MqDeleteTopicResult deleteTopic(String topic);
 }

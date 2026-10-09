@@ -76,15 +76,27 @@ public final class EventClientImpl extends AgentRpcClient implements EventClient
 
     @Override
     public EventSubscription subscribe(String eventType, EventListener listener) {
+        return subscribe(eventType, -1L, listener);
+    }
+
+    @Override
+    public EventSubscription subscribe(String eventType, long cursor, EventListener listener) {
         if (listener == null) {
             throw new IllegalArgumentException("listener must not be null");
         }
         String filter = nullToEmpty(eventType);
 
+        EventSubscribeRequest.Builder req = EventSubscribeRequest.newBuilder()
+                .setEventType(filter);
+        if (cursor >= 0) {
+            // 位点是十进制 seq 字符串（uint64 全范围）；-1 = 不携带 cursor（默认实时）。
+            req.setCursor(Long.toUnsignedString(cursor));
+        }
+
         CancellableStream stream = new GrpcWatchStream(
                 channelManager.getChannel(),
                 EventGrpc.getSubscribeMethod(),
-                EventSubscribeRequest.newBuilder().setEventType(filter).build());
+                req.build());
 
         EventSubscriptionImpl sub = new EventSubscriptionImpl(deriveSubscriptionId(filter), stream, listener);
         sub.start(streamExecutor);
@@ -152,7 +164,8 @@ public final class EventClientImpl extends AgentRpcClient implements EventClient
                                     ce.getData().toByteArray(),
                                     ce.getDataContentType(),
                                     ce.getSubject(),
-                                    ce.getTime()));
+                                    ce.getTime(),
+                                    ce.getSeq()));
                         }
                     }
                 } catch (RuntimeException e) {

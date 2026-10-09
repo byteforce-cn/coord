@@ -109,4 +109,26 @@ public interface TransitClient {
      * @throws CoordException on verification or communication failure
      */
     boolean hmacVerify(byte[] data, byte[] signature, String algorithm);
+
+    // ──── KEK 材料迁移（G-TR-1）────
+
+    /**
+     * Re-wrap a persisted DEK with the current primary KEK material (management
+     * path; capability {@code coord:transit:crypto}).
+     * <p>
+     * Used during KEK rotation: while the old material is still injected
+     * ({@code COORD_TRANSIT_KEK_OLD} / {@code transit-kek-old.txt}), call this for
+     * every still-needed DEK so it no longer depends on the old material; only
+     * then may the old material be removed. The reply carries the new
+     * {@code dek_id} and the material id it is now wrapped with.
+     *
+     * @param dekId id of the DEK to migrate ({@code dek_id} as carried in stored
+     *              packets / records)
+     * @return the new dek id and material id
+     * @throws CoordException on communication failure; {@code NOT_FOUND} when the
+     *                        DEK is unknown or expired; {@code FAILED_PRECONDITION}
+     *                        when the DEK's material is not injected (fail-loud —
+     *                        re-inject the historical material first)
+     */
+    TransitRewrapResult rewrap(String dekId);
 }

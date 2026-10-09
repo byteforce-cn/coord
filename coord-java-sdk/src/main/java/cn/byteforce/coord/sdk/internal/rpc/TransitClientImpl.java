@@ -12,8 +12,11 @@ import cn.byteforce.coord.contracts.transit.v1.TransitHmacSignRequest;
 import cn.byteforce.coord.contracts.transit.v1.TransitHmacSignResponse;
 import cn.byteforce.coord.contracts.transit.v1.TransitHmacVerifyRequest;
 import cn.byteforce.coord.contracts.transit.v1.TransitHmacVerifyResponse;
+import cn.byteforce.coord.contracts.transit.v1.TransitRewrapRequest;
+import cn.byteforce.coord.contracts.transit.v1.TransitRewrapResponse;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import cn.byteforce.coord.sdk.transit.TransitClient;
+import cn.byteforce.coord.sdk.transit.TransitRewrapResult;
 
 import com.google.protobuf.ByteString;
 
@@ -132,5 +135,26 @@ public final class TransitClientImpl extends AgentRpcClient implements TransitCl
         boolean valid = response.getValid();
         log.debug("Transit hmacVerify: data_len={}, valid={}", data.length, valid);
         return valid;
+    }
+
+    // ──── KEK 材料迁移（G-TR-1）────
+
+    @Override
+    public TransitRewrapResult rewrap(String dekId) {
+        TransitRewrapRequest request = TransitRewrapRequest.newBuilder()
+                .setDekId(dekId == null ? "" : dekId)
+                .build();
+
+        TransitRewrapResponse response = callWithRetry(
+                (ch, r) -> TransitGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .rewrap((TransitRewrapRequest) r),
+                request, "transit.rewrap");
+
+        TransitRewrapResult result = new TransitRewrapResult(
+                response.getNewDekId(), response.getKekId());
+        log.debug("Transit rewrap: old_dek={} -> new_dek={}, kek_id={}",
+                dekId, result.newDekId(), result.kekId());
+        return result;
     }
 }

@@ -12,11 +12,13 @@ import cn.byteforce.coord.sdk.CoordException;
  * <ul>
  *   <li><b>Delivery is at-least-once while the stream is alive</b>, in publish order
  *       within one subscription;</li>
- *   <li><b>The disconnect window is not replayed.</b> There is no persisted cursor, so
- *       events published while you were disconnected are lost to you. If that matters,
- *       treat events as a <i>hint</i> and re-read authoritative state after
- *       reconnecting (the same discipline as {@code Watch} in
- *       {@code WHITEPAPER.md} watch resync rules);</li>
+ *   <li><b>Reconnect replay (G-EV-1):</b> by default the disconnect window is
+ *       <i>not</i> replayed (live-only). Connect with
+ *       {@link #subscribe(String, long, EventListener)} carrying the last seen
+ *       {@link CloudEvent#getSeq() seq} to have events published since then
+ *       replayed (within the server's retention window = events still present in
+ *       storage), then hand over to live delivery — replay/live do not lose
+ *       events, but the handoff may duplicate (keep consumers idempotent);</li>
  *   <li><b>{@code Unsubscribe} is a compatibility no-op.</b> Subscriptions live in the
  *       gRPC stream itself, so the way to unsubscribe is to
  *       {@link EventSubscription#close() close the subscription} (which cancels the
@@ -78,6 +80,25 @@ public interface EventClient {
     EventSubscription subscribe(String eventType, EventListener listener);
 
     /**
+     * Subscribe starting from a persisted cursor (G-EV-1): events with
+     * {@code seq > cursor} that are still within the server's retention window
+     * are replayed in seq order, then delivery goes live without losing events
+     * (the handoff may duplicate — keep consumers idempotent).
+     * <p>
+     * Persist {@link CloudEvent#getSeq()} of the last successfully processed
+     * event and pass it here on reconnect. A cursor outside the retention window
+     * replays only what is still retained (the gap is not detectable from the
+     * cursor alone — treat replay as best-effort catch-up over retained state).
+     *
+     * @param eventType event type to match exactly; empty string = no filter (all events)
+     * @param cursor    last processed {@link CloudEvent#getSeq() seq}; 0 = replay
+     *                  everything still retained
+     * @param listener  callback invoked on the SDK's streaming executor
+     * @throws CoordException on communication failure while opening the stream
+     */
+    EventSubscription subscribe(String eventType, long cursor, EventListener listener);
+
+    /**
      * Declared by the contract, but <b>state-free</b>: the server accepts it and
      * returns success without doing anything, because a subscription is the gRPC
      * stream itself. Kept so that callers who follow the contract literally still
@@ -132,9 +153,17 @@ public interface EventClient {
         private final String dataContentType;
         private final String subject;
         private final String time;
+        private final long seq;
 
         public CloudEvent(String id, String specversion, String type, String source,
                           byte[] data, String dataContentType, String subject, String time) {
+            this(id, specversion, type, source, data, dataContentType, subject, time, 0L);
+        }
+
+        /** Full constructor including the global sequence number (G-EV-1). */
+        public CloudEvent(String id, String specversion, String type, String source,
+                          byte[] data, String dataContentType, String subject, String time,
+                          long seq) {
             this.id = id;
             this.specversion = specversion;
             this.type = type;
@@ -143,6 +172,7 @@ public interface EventClient {
             this.dataContentType = dataContentType;
             this.subject = subject;
             this.time = time;
+            this.seq = seq;
         }
 
         /** Server-assigned, globally unique event id. */
@@ -190,10 +220,18 @@ public interface EventClient {
             return time;
         }
 
+        /**
+         * Global monotonically increasing sequence number (G-EV-1) — persist it
+         * to reconnect via {@link EventClient#subscribe(String, long, EventListener)}.
+         */
+        public long getSeq() {
+            return seq;
+        }
+
         @Override
         public String toString() {
             return "CloudEvent{id=" + id + ", type=" + type + ", source=" + source
-                    + ", subject=" + subject + ", time=" + time + "}";
+                    + ", subject=" + subject + ", time=" + time + ", seq=" + seq + "}";
         }
     }
 }

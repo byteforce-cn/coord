@@ -5,7 +5,12 @@ import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
 import cn.byteforce.coord.contracts.mq.v1.MQGrpc;
 import cn.byteforce.coord.contracts.mq.v1.MqAckRequest;
 import cn.byteforce.coord.contracts.mq.v1.MqCreateTopicRequest;
+import cn.byteforce.coord.contracts.mq.v1.MqDeleteTopicRequest;
+import cn.byteforce.coord.contracts.mq.v1.MqDeleteTopicResponse;
+import cn.byteforce.coord.contracts.mq.v1.MqGetTopicLeaderRequest;
+import cn.byteforce.coord.contracts.mq.v1.MqGetTopicLeaderResponse;
 import cn.byteforce.coord.contracts.mq.v1.MqMessage;
+import cn.byteforce.coord.contracts.mq.v1.MqMoveToDlqRequest;
 import cn.byteforce.coord.contracts.mq.v1.MqPollDlqRequest;
 import cn.byteforce.coord.contracts.mq.v1.MqPollDlqResponse;
 import cn.byteforce.coord.contracts.mq.v1.MqPollRequest;
@@ -13,7 +18,9 @@ import cn.byteforce.coord.contracts.mq.v1.MqPollResponse;
 import cn.byteforce.coord.contracts.mq.v1.MqPublishRequest;
 import cn.byteforce.coord.contracts.mq.v1.MqPublishResponse;
 import cn.byteforce.coord.sdk.mq.MqClient;
+import cn.byteforce.coord.sdk.mq.MqDeleteTopicResult;
 import cn.byteforce.coord.sdk.mq.MqSubscribeRequest;
+import cn.byteforce.coord.sdk.mq.MqTopicLeader;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import com.google.protobuf.ByteString;
 import io.grpc.CallOptions;
@@ -190,6 +197,65 @@ public final class MqClientImpl extends AgentRpcClient implements MqClient {
         return handle;
     }
 
+    @Override
+    public MqTopicLeader getTopicLeader(String topic) {
+        MqGetTopicLeaderRequest request = MqGetTopicLeaderRequest.newBuilder()
+                .setTopic(topic)
+                .build();
+        MqGetTopicLeaderResponse response = callWithRetry(
+                (ch, req) -> MQGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .getTopicLeader((MqGetTopicLeaderRequest) req),
+                request, "mq.getTopicLeader");
+        return new MqTopicLeader(
+                response.getTopic(),
+                response.getLeaderAgent(),
+                response.getIsrMembersList(),
+                response.getReplicationEnabled(),
+                response.getDegraded(),
+                response.getPartitions(),
+                response.getMinIsr());
+    }
+
+    @Override
+    public void moveToDlq(String topic, int partition, long offset, String reason, String detail) {
+        MqMoveToDlqRequest request = MqMoveToDlqRequest.newBuilder()
+                .setTopic(topic)
+                .setPartition(partition)
+                .setOffset(offset)
+                .setReason(reason == null ? "" : reason)
+                .setDetail(detail == null ? "" : detail)
+                .build();
+        callWithRetry(
+                (ch, req) -> MQGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .moveToDlq((MqMoveToDlqRequest) req),
+                request, "mq.moveToDlq");
+        log.debug("MQ moveToDlq: topic={}, partition={}, offset={}, reason={}",
+                topic, partition, offset, reason);
+    }
+
+    @Override
+    public MqDeleteTopicResult deleteTopic(String topic) {
+        MqDeleteTopicRequest request = MqDeleteTopicRequest.newBuilder()
+                .setTopic(topic)
+                .build();
+        MqDeleteTopicResponse response = callWithRetry(
+                (ch, req) -> MQGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .deleteTopic((MqDeleteTopicRequest) req),
+                request, "mq.deleteTopic");
+        log.debug("MQ topic deleted: topic={}, messages={}, dlq={}, bytes={}",
+                topic, response.getMessagesRemoved(), response.getDlqRemoved(),
+                response.getBytesReclaimed());
+        return new MqDeleteTopicResult(
+                response.getMessagesRemoved(),
+                response.getDlqRemoved(),
+                response.getOffsetsRemoved(),
+                response.getIdempotencyRemoved(),
+                response.getBytesReclaimed());
+    }
+
     /**
      * 取消全部未关闭的订阅（{@code CoordClient.close()} 调用）。
      *
@@ -216,7 +282,9 @@ public final class MqClientImpl extends AgentRpcClient implements MqClient {
                 m.getOffset(),
                 m.getKey().toByteArray(),
                 m.getPayload().toByteArray(),
-                m.getTimestamp());
+                m.getTimestamp(),
+                m.getDlqReason(),
+                m.getDlqDetail());
     }
 
     private static List<cn.byteforce.coord.sdk.mq.MqMessage> toSdkMessages(List<MqMessage> protoMessages) {

@@ -20,22 +20,32 @@ public final class ErrorMapper {
             Metadata.Key.of("x-coord-error-code", Metadata.ASCII_STRING_MARSHALLER);
 
     /**
+     * The gRPC trailers metadata key for the leader-address hint attached to
+     * data-plane routing errors (G-MQ-1). Callers re-route using this value;
+     * they must not parse error message text.
+     */
+    public static final Metadata.Key<String> LEADER_HINT_KEY =
+            Metadata.Key.of("coord-leader-hint", Metadata.ASCII_STRING_MARSHALLER);
+
+    /**
      * Map a gRPC exception to a {@link CoordException}.
      */
     public CoordException map(StatusRuntimeException sre) {
-        // 1. Check trailers for explicit error code (takes highest precedence)
         Metadata trailers = sre.getTrailers();
+        String hint = trailers == null ? null : trailers.get(LEADER_HINT_KEY);
+
+        // 1. Check trailers for explicit error code (takes highest precedence)
         if (trailers != null) {
             String trailerCode = trailers.get(ERROR_CODE_KEY);
             if (trailerCode != null) {
                 ErrorCode code = ErrorCode.fromProtoName(trailerCode);
-                return new CoordException(code, sre.getMessage(), sre);
+                return new CoordException(code, sre.getMessage(), sre, hint);
             }
         }
 
         // 2. Map gRPC status code to error code
         ErrorCode code = mapGrpcStatus(sre.getStatus());
-        return new CoordException(code, sre.getMessage(), sre);
+        return new CoordException(code, sre.getMessage(), sre, hint);
     }
 
     private ErrorCode mapGrpcStatus(Status status) {
