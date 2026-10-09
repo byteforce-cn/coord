@@ -9,6 +9,16 @@ syntax = "proto3";
 //
 // 边界声明：OPA bundle 存于 coord-server KV（跨 Agent 共享）；
 // RBAC 策略为 **Agent 本地内存**，不承诺跨 Agent 共享（按 WHITEPAPER.md 的边界声明规则）。
+//
+// Bundle 分发 / 加载 / 收敛（G-POL-1 承诺口径）：
+// - 启动加载：Agent 启动时从 Server KV 全量加载全部 enabled bundles；
+// - 变更传播：Put / Rollback / SetEnabled / Delete 经 Watch 传播到各 Agent，
+//   稳态收敛为亚秒级；断连窗口经「指数退避（封顶 8s）+ 全量对账」恢复，
+//   承诺 ≤10s 量级内收敛；
+// - 版本一致性：每次成功 Put/Rollback 版本号严格 +1（单调）；写入为 per-key
+//   version CAS，并发冲突有限重试（≤5）后返回错误，无丢更新；
+// - 承诺边界：收敛为**最终一致**（各 Agent 独立加载同一 KV 事实），
+//   「跨 Agent 同一时刻同判」不在承诺内。
 
 // 验收口径与目标日期约定见 WHITEPAPER.md。
 // ============================================================

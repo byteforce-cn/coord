@@ -8,12 +8,23 @@
 // - 策略包存储在 Server KV（`/_policy/bundles/` 前缀），多 Agent 共享
 // - OpaEngine 负责本地 Rego 求值和 explain
 // - PolicyService 负责 bundle CRUD（KV 读写）和 OpaEngine 策略同步
+//
+// Bundle 分发与加载（G-POL-1）：
+// - **启动加载**：`start()` 从 Server KV 全量加载 enabled bundles 进本地引擎
+//   （不带 KV 的骨架模式跳过）；
+// - **变更传播**：Watch 订阅 `/_policy/bundles/` 前缀（水位续传），断连/溢出
+//   退化为「指数退避 + 全量对账」重连；收敛口径见 proto 与契约页
+//   （稳态亚秒级；断连窗口 + 对账 ≤10s 量级）；
+// - **版本一致性**：Put / Rollback / SetEnabled 均为 per-key version CAS，
+//   冲突有限重试（≤5）后报错；并发下版本单调、无丢更新。
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
+use tokio::sync::watch;
 
 use crate::proxy::AgentInner;
 use crate::service::{BaseService, ServiceResult};
@@ -107,6 +118,21 @@ struct BundleRecord {
     pub rego_content: String,
 }
 
+// ──── Bundle 分发态（G-POL-1 观测）────
+
+/// bundle 分发/加载统计（由启动加载与 Watch 后台任务维护；采样任务读入指标）。
+#[derive(Debug, Default)]
+pub struct PolicySyncStats {
+    /// 本地引擎当前已加载的 enabled bundle 数（gauge）
+    pub loaded_bundles: AtomicI64,
+    /// 最近一次成功全量加载/对账的 unix 秒（0 = 从未成功；gauge）
+    pub last_success_unix: AtomicI64,
+    /// 成功加载/对账累计次数（单调）
+    pub load_ok_total: AtomicU64,
+    /// 失败（订阅失败/对账失败/事件应用失败）累计次数（单调）
+    pub load_error_total: AtomicU64,
+}
+
 impl BundleRecord {
     /// 当前生效记录 key（唯一键 = tenant/namespace/name）
     fn storage_key(bundle_id: &str) -> Vec<u8> {
@@ -175,6 +201,246 @@ where
         .map_err(|e| e.into())
 }
 
+// ──── Bundle 加载与变更传播（G-POL-1，自由函数以便 Watch 任务共享）────
+
+/// 从 bundle KV key 推导本地 OPA policy_id（`{namespace}/{name}`）。
+///
+/// 返回 `None` 表示不是当前记录（版本快照 `@v` 或格式不符）——不直接消费。
+fn policy_id_from_bundle_key(key: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(key).ok()?;
+    let rest = s.strip_prefix("/_policy/bundles/")?;
+    if rest.contains("@v") {
+        return None;
+    }
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    // tenant/namespace/name → policy_id = namespace/name（与 put_bundle 的同步口径一致）
+    Some(format!("{}/{}", parts[1], parts[2]))
+}
+
+/// 汇总 KV pairs 中「可加载的 enabled bundle」（跳过快照/disabled）。
+///
+/// 解析失败的单条记录跳过并计数（不因单条坏记录阻断全量加载，
+/// 与「断连对账覆盖式恢复」同一姿态）。
+fn collect_enabled_bundles(pairs: &[(Vec<u8>, Vec<u8>)]) -> (Vec<(String, String)>, usize) {
+    let mut loaded = Vec::new();
+    let mut skipped = 0usize;
+    for (k, v) in pairs {
+        if policy_id_from_bundle_key(k).is_none() {
+            continue; // 版本快照不参与引擎加载
+        }
+        match serde_json::from_slice::<BundleRecord>(v) {
+            Ok(rec) if rec.info.enabled => {
+                loaded.push((
+                    format!("{}/{}", rec.info.namespace, rec.info.name),
+                    rec.rego_content,
+                ));
+            }
+            Ok(_) => {} // disabled：不加载
+            Err(_) => skipped += 1,
+        }
+    }
+    (loaded, skipped)
+}
+
+/// 全量加载/对账：KV 扫描 → 本地引擎整体替换（覆盖式，消除断连窗口差异）。
+async fn load_all_bundles(
+    inner: &Arc<AgentInner>,
+    opa: &Arc<OpaEngine>,
+    stats: &PolicySyncStats,
+) -> Result<usize, String> {
+    let prefix = BundleRecord::prefix_key();
+    let range_end = prefix_end(&prefix);
+    let pairs = inner
+        .client
+        .kv()
+        .range(&prefix, &range_end, 0, 0)
+        .await
+        .map_err(|e| format!("kv range bundles: {e}"))?;
+    let (loaded, skipped) = collect_enabled_bundles(&pairs);
+    if skipped > 0 {
+        tracing::warn!("Policy: skipped {skipped} unparseable bundle record(s) during load");
+    }
+    let count = loaded.len();
+    let opa_owned = Arc::clone(opa);
+    opa_blocking(move || opa_owned.load_policies(&loaded))
+        .await
+        .map_err(|e| format!("load bundles into engine: {e}"))?;
+    stats.loaded_bundles.store(count as i64, Ordering::Relaxed);
+    stats
+        .last_success_unix
+        .store(unix_ts_i64(), Ordering::Relaxed);
+    stats.load_ok_total.fetch_add(1, Ordering::Relaxed);
+    Ok(count)
+}
+
+/// 应用单条 bundle Watch 事件（新增/更新/删除/启停）。
+async fn apply_bundle_event(
+    opa: &Arc<OpaEngine>,
+    stats: &PolicySyncStats,
+    key: &[u8],
+    value: Option<&[u8]>,
+) -> Result<(), String> {
+    let Some(policy_id) = policy_id_from_bundle_key(key) else {
+        return Ok(()); // 快照 key 不直接消费
+    };
+    match value {
+        None => {
+            let opa_owned = Arc::clone(opa);
+            let pid = policy_id.clone();
+            opa_blocking(move || {
+                opa_owned.remove_policy(&pid);
+                Ok(())
+            })
+            .await
+            .map_err(|e| format!("remove bundle policy: {e}"))?;
+        }
+        Some(v) => {
+            let rec: BundleRecord =
+                serde_json::from_slice(v).map_err(|e| format!("deserialize bundle event: {e}"))?;
+            let pid = format!("{}/{}", rec.info.namespace, rec.info.name);
+            if rec.info.enabled {
+                let opa_owned = Arc::clone(opa);
+                let rego = rec.rego_content;
+                opa_blocking(move || opa_owned.add_policy(&pid, &rego))
+                    .await
+                    .map_err(|e| format!("apply bundle policy: {e}"))?;
+            } else {
+                let opa_owned = Arc::clone(opa);
+                let pid = pid;
+                opa_blocking(move || {
+                    opa_owned.remove_policy(&pid);
+                    Ok(())
+                })
+                .await
+                .map_err(|e| format!("remove disabled bundle policy: {e}"))?;
+            }
+        }
+    }
+    stats
+        .loaded_bundles
+        .store(opa.policy_count() as i64, Ordering::Relaxed);
+    stats
+        .last_success_unix
+        .store(unix_ts_i64(), Ordering::Relaxed);
+    Ok(())
+}
+
+/// Bundle 变更传播后台任务：Watch 订阅 + 断连/溢出对账重连。
+///
+/// 收敛口径（与 proto/契约页同口径）：
+/// - 稳态：Watch 推送驱动，亚秒级生效；
+/// - 断连/溢出：指数退避（封顶 8s）后全量对账重连 ⇒ ≤10s 量级收敛。
+async fn run_bundle_watch(
+    inner: Arc<AgentInner>,
+    opa: Arc<OpaEngine>,
+    stats: Arc<PolicySyncStats>,
+    mut shutdown: watch::Receiver<()>,
+) {
+    use coord_proto::watch::watch_event::EventType;
+
+    let prefix: &[u8] = b"/_policy/bundles/";
+    let mut last_rev: i64 = 0;
+    let mut attempt: u32 = 0;
+
+    'outer: loop {
+        match inner.client.watch().watch(prefix, last_rev).await {
+            Ok(mut event_rx) => {
+                attempt = 0;
+                loop {
+                    tokio::select! {
+                        _ = shutdown.changed() => break 'outer,
+                        event = event_rx.recv() => match event {
+                            Some(Ok(we)) => {
+                                if we.revision > last_rev {
+                                    last_rev = we.revision;
+                                }
+                                let needs_reconcile = matches!(
+                                    we.r#type,
+                                    t if t == EventType::BufferOverflow as i32
+                                        || t == EventType::HistoryUnavailable as i32
+                                );
+                                let mut apply_failed = false;
+                                for kv in &we.kvs {
+                                    let value = if we.r#type == EventType::Delete as i32 {
+                                        None
+                                    } else {
+                                        Some(kv.value.as_slice())
+                                    };
+                                    if let Err(e) =
+                                        apply_bundle_event(&opa, &stats, &kv.key, value).await
+                                    {
+                                        tracing::warn!(
+                                            "Policy: apply bundle event failed: {e}; will reconcile"
+                                        );
+                                        stats.load_error_total.fetch_add(1, Ordering::Relaxed);
+                                        apply_failed = true;
+                                    }
+                                }
+                                if apply_failed {
+                                    match load_all_bundles(&inner, &opa, &stats).await {
+                                        Ok(n) => tracing::info!(
+                                            "Policy: reconciled {n} bundles after apply error"
+                                        ),
+                                        Err(e) => {
+                                            stats.load_error_total.fetch_add(1, Ordering::Relaxed);
+                                            tracing::error!("Policy: reconcile after apply error failed: {e}");
+                                        }
+                                    }
+                                }
+                                if needs_reconcile {
+                                    tracing::warn!(
+                                        "Policy: watch overflow/history-unavailable; full reconcile"
+                                    );
+                                    break; // → 对账重连
+                                }
+                            }
+                            Some(Err(e)) => {
+                                tracing::warn!(
+                                    "Policy: bundle watch stream error: {e}; reconcile + reconnect"
+                                );
+                                break;
+                            }
+                            None => {
+                                tracing::warn!(
+                                    "Policy: bundle watch stream ended; reconcile + reconnect"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Policy: bundle watch subscribe failed: {e}; will retry");
+                stats.load_error_total.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // 断连/溢出/订阅失败 → 指数退避（封顶 8s，收敛承诺 ≤10s 量级）+ 全量对账
+        attempt += 1;
+        let backoff = std::time::Duration::from_secs(1u64 << attempt.saturating_sub(1).min(3));
+        tokio::select! {
+            _ = shutdown.changed() => break 'outer,
+            _ = tokio::time::sleep(backoff) => {}
+        }
+        match load_all_bundles(&inner, &opa, &stats).await {
+            Ok(n) => {
+                tracing::info!("Policy: reconciled {n} bundles after reconnect");
+                last_rev = 0;
+                attempt = 0;
+            }
+            Err(e) => {
+                stats.load_error_total.fetch_add(1, Ordering::Relaxed);
+                tracing::error!("Policy: reconcile failed: {e}; retrying");
+            }
+        }
+    }
+    tracing::info!("Policy: bundle watch task stopped");
+}
+
 // ──── PolicyService ────
 
 /// 权限策略引擎
@@ -191,6 +457,10 @@ pub struct PolicyService {
     opa_engine: Arc<OpaEngine>,
     /// Agent 内部句柄（访问 Server KV）
     inner: Option<Arc<AgentInner>>,
+    /// Bundle 分发态观测（G-POL-1）
+    sync_stats: Arc<PolicySyncStats>,
+    /// Watch 后台任务停机信号（仅带 KV 时存在）
+    shutdown_tx: RwLock<Option<watch::Sender<()>>>,
 }
 
 impl std::fmt::Debug for PolicyService {
@@ -222,6 +492,8 @@ impl PolicyService {
             max_policies,
             opa_engine,
             inner: None,
+            sync_stats: Arc::new(PolicySyncStats::default()),
+            shutdown_tx: RwLock::new(None),
         }
     }
 
@@ -242,7 +514,14 @@ impl PolicyService {
             max_policies,
             opa_engine,
             inner: Some(inner),
+            sync_stats: Arc::new(PolicySyncStats::default()),
+            shutdown_tx: RwLock::new(None),
         }
+    }
+
+    /// Bundle 分发态观测统计（采样任务读入指标；G-POL-1）
+    pub fn sync_stats(&self) -> Arc<PolicySyncStats> {
+        Arc::clone(&self.sync_stats)
     }
 
     /// 获取 OPA 引擎引用
@@ -800,11 +1079,41 @@ impl BaseService for PolicyService {
 
     async fn start(&self) -> ServiceResult<()> {
         *self.started.write() = true;
+
+        // G-POL-1：启动加载——全量 enabled bundles 进本地引擎（骨架模式跳过）
+        if let Some(inner) = self.inner.clone() {
+            match load_all_bundles(&inner, &self.opa_engine, &self.sync_stats).await {
+                Ok(n) => tracing::info!("Policy: loaded {n} enabled bundle(s) at startup"),
+                Err(e) => {
+                    self.sync_stats
+                        .load_error_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        "Policy: initial bundle load failed: {e}; watch + reconcile will retry"
+                    );
+                }
+            }
+
+            // G-POL-1：变更传播——Watch 订阅 + 断连对账（重启时先停旧任务）
+            if let Some(tx) = self.shutdown_tx.write().take() {
+                let _ = tx.send(());
+            }
+            let (tx, rx) = watch::channel::<()>(());
+            *self.shutdown_tx.write() = Some(tx);
+            let inner = inner.clone();
+            let opa = Arc::clone(&self.opa_engine);
+            let stats = Arc::clone(&self.sync_stats);
+            tokio::spawn(run_bundle_watch(inner, opa, stats, rx));
+        }
+
         tracing::info!("PolicyService started");
         Ok(())
     }
 
     async fn stop(&self) -> ServiceResult<()> {
+        if let Some(tx) = self.shutdown_tx.write().take() {
+            let _ = tx.send(());
+        }
         *self.started.write() = false;
         self.policies.write().clear();
         tracing::info!("PolicyService stopped");
@@ -971,5 +1280,66 @@ mod tests {
         assert_eq!(rec.info.version, 0);
         assert_eq!(rec.info.name, "p");
         assert_eq!(rec.rego_content, "package p");
+    }
+
+    // ──── G-POL-1：bundle 加载/分发纯函数 ────
+
+    #[test]
+    fn test_policy_id_from_bundle_key() {
+        assert_eq!(
+            policy_id_from_bundle_key(b"/_policy/bundles/t1/default/p1"),
+            Some("default/p1".to_string())
+        );
+        // 版本快照不直接消费（回滚/上传由当前记录事件驱动）
+        assert_eq!(
+            policy_id_from_bundle_key(b"/_policy/bundles/t1/default/p1@v3"),
+            None
+        );
+        // 前缀不符
+        assert_eq!(policy_id_from_bundle_key(b"/_policy/other/t1"), None);
+        // 段数不符（非法 key 不得让任务 panic/误删）
+        assert_eq!(policy_id_from_bundle_key(b"/_policy/bundles/t1/p1"), None);
+    }
+
+    #[test]
+    fn test_collect_enabled_bundles_skips_snapshot_disabled_and_bad_json() {
+        let enabled = BundleRecord::new("t1", "default", "p1", "package a", 1, 1);
+        let mut disabled = BundleRecord::new("t1", "default", "p2", "package b", 1, 1);
+        disabled.info.enabled = false;
+
+        let pairs = vec![
+            (
+                BundleRecord::storage_key("t1/default/p1"),
+                serde_json::to_vec(&enabled).expect("ser"),
+            ),
+            // 版本快照：即便内容 enabled 也不参与加载
+            (
+                BundleRecord::snapshot_key("t1/default/p1", 1),
+                serde_json::to_vec(&enabled).expect("ser"),
+            ),
+            (
+                BundleRecord::storage_key("t1/default/p2"),
+                serde_json::to_vec(&disabled).expect("ser"),
+            ),
+            // 坏记录：跳过并计数，不阻断全量加载
+            (BundleRecord::storage_key("t1/default/p3"), b"not-json".to_vec()),
+        ];
+
+        let (loaded, skipped) = collect_enabled_bundles(&pairs);
+        assert_eq!(
+            loaded,
+            vec![("default/p1".to_string(), "package a".to_string())],
+            "仅 enabled 当前记录进入引擎"
+        );
+        assert_eq!(skipped, 1, "坏记录计数但不阻断");
+    }
+
+    #[test]
+    fn test_policy_sync_stats_default() {
+        let stats = PolicySyncStats::default();
+        assert_eq!(stats.loaded_bundles.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.last_success_unix.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.load_ok_total.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.load_error_total.load(Ordering::Relaxed), 0);
     }
 }

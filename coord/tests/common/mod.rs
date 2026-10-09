@@ -116,11 +116,15 @@ pub async fn start_test_server() -> (
         .await
         .expect("create raft log store")
         .with_snapshot_tracker(Arc::clone(&snapshot_tracker));
-    let sm_store = StateMachineStore::new(
+    let mut sm_store = StateMachineStore::new(
         Arc::clone(&mvcc),
         data_dir.join("snapshots"),
         Arc::clone(&snapshot_tracker),
     );
+    // 与生产装配同口径（coord/src/main.rs 的 `set_watch_dispatcher` /
+    // region_runtime.rs）：状态机 apply 时据此分发 Watch 事件。
+    // 缺这一步 ⇒ 测试里所有 watch 订阅收不到任何事件（与订阅顺序无关）。
+    sm_store.set_watch_dispatcher(Arc::clone(&watch_dispatcher));
 
     let network_factory = RaftNetworkFactoryImpl::new(1);
     network_factory.register_node(1, raft_addr.clone());

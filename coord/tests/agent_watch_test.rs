@@ -53,20 +53,9 @@ mod tests {
     /// 2. 通过 Agent 写入相同 key（应触发 Watch 事件）
     /// 3. 通过 Agent 接收 Watch 事件
     ///
-    /// # ⚠️ 已知失效（`#[ignore]`）—— 这不是“跳过一个不稳定的测试”
-    ///
-    /// 本用例对投递做**显式断言**：超时/出错分支不得宽容返回，否则"一个事件都收不到"
-    /// 也表现为**通过**（基线跑 33s = 建立 + 8s 空等 + 收尾）。在**进程内 agent**
-    /// 形态下本用例确实收不到事件，而同一个链路（Java → agent WatchProxy → coord_client →
-    /// server）在真实集群下由 `java-example` 的 `WatchAdvancedTest` / `WatchIntegrationTest`
-    /// （6 个带真实断言的用例，跑在 CI 的 `java-example-it` job 里）**已验证通过与投递**。
-    ///
-    /// 因此保留断言并显式 `#[ignore]`：不静默通过、也不静默删除。待排查的是**本用例的
-    /// 进程内 agent 装配**（`WatchProxy` 已确认 `inner = Some` 且已向上游订阅，但
-    /// 上游 `coord_client` 收不到事件）。
-    #[ignore = "in-process agent watch probe never delivered events (pre-existing); the same path 
-                is covered with assertions by java-example WatchAdvancedTest/WatchIntegrationTest 
-                in the java-example-it CI job"]
+    /// 投递前提：测试夹具必须把 WatchDispatcher 挂进状态机（见
+    /// `tests/common/mod.rs::start_test_server` 的 `set_watch_dispatcher`）——
+    /// 与生产装配（`coord/src/main.rs` / `region_runtime.rs`）同口径。
     #[tokio::test(flavor = "multi_thread")]
     async fn test_agent_watch_single_subscriber() {
         let _ = tracing_subscriber::fmt()

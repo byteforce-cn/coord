@@ -104,6 +104,14 @@ struct MetricsInner {
     pub mq_publish_rejected: AtomicU64,
     /// MQ reaper 累计失败轮数（单调；>0 = 至少有一轮回收失败）
     pub mq_reaper_faults: AtomicU64,
+    /// 已加载 enabled OPA bundle 数（G-POL-1；gauge）
+    pub policy_bundles_loaded: AtomicI64,
+    /// 最近一次成功 bundle 加载/对账的 unix 秒（0 = 从未成功；gauge）
+    pub policy_bundle_last_sync_unix: AtomicI64,
+    /// bundle 加载/对账成功累计（单调）
+    pub policy_bundle_sync_ok: AtomicU64,
+    /// bundle 加载/对账/事件应用失败累计（单调）
+    pub policy_bundle_sync_errors: AtomicU64,
 }
 
 impl AgentMetrics {
@@ -136,6 +144,10 @@ impl AgentMetrics {
                 mq_purged_entries: AtomicU64::new(0),
                 mq_publish_rejected: AtomicU64::new(0),
                 mq_reaper_faults: AtomicU64::new(0),
+                policy_bundles_loaded: AtomicI64::new(0),
+                policy_bundle_last_sync_unix: AtomicI64::new(0),
+                policy_bundle_sync_ok: AtomicU64::new(0),
+                policy_bundle_sync_errors: AtomicU64::new(0),
             }),
         }
     }
@@ -305,6 +317,32 @@ impl AgentMetrics {
         self.inner
             .mq_reaper_faults
             .store(faults_total, Ordering::Relaxed);
+    }
+
+    /// 写入 OPA bundle 分发态（G-POL-1）；由周期采样任务从 PolicyService 拉取。
+    ///
+    /// 语义：`loaded` = 本地引擎已加载的 enabled bundle 数；
+    /// `last_sync_unix` = 最近一次成功加载/对账时间（0 = 从未成功）；
+    /// `errors_total` 持续增长而 `ok_total` 不增长 = watch/对账持续失败。
+    pub fn set_policy_bundle_stats(
+        &self,
+        loaded: i64,
+        last_sync_unix: i64,
+        ok_total: u64,
+        errors_total: u64,
+    ) {
+        self.inner
+            .policy_bundles_loaded
+            .store(loaded, Ordering::Relaxed);
+        self.inner
+            .policy_bundle_last_sync_unix
+            .store(last_sync_unix, Ordering::Relaxed);
+        self.inner
+            .policy_bundle_sync_ok
+            .store(ok_total, Ordering::Relaxed);
+        self.inner
+            .policy_bundle_sync_errors
+            .store(errors_total, Ordering::Relaxed);
     }
 
     // ──── 插件指标（观测面）────
@@ -531,6 +569,38 @@ impl AgentMetrics {
         out.push_str(&format!(
             "coord_agent_mq_reaper_faults_total {}\n",
             self.inner.mq_reaper_faults.load(Ordering::Relaxed)
+        ));
+
+        // ──── OPA bundle 分发态（G-POL-1；周期采样自 PolicyService）────
+        out.push_str(
+            "# HELP coord_agent_policy_bundles_loaded Enabled OPA bundles loaded in the \
+             local engine\n",
+        );
+        out.push_str("# TYPE coord_agent_policy_bundles_loaded gauge\n");
+        out.push_str(&format!(
+            "coord_agent_policy_bundles_loaded {}\n",
+            self.inner.policy_bundles_loaded.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP coord_agent_policy_bundle_last_sync_timestamp Unix time of the last \
+             successful bundle load/reconcile (0 = never)\n",
+        );
+        out.push_str("# TYPE coord_agent_policy_bundle_last_sync_timestamp gauge\n");
+        out.push_str(&format!(
+            "coord_agent_policy_bundle_last_sync_timestamp {}\n",
+            self.inner.policy_bundle_last_sync_unix.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP coord_agent_policy_bundle_sync_total Bundle load/reconcile events by result\n",
+        );
+        out.push_str("# TYPE coord_agent_policy_bundle_sync_total counter\n");
+        out.push_str(&format!(
+            "coord_agent_policy_bundle_sync_total{{result=\"ok\"}} {}\n",
+            self.inner.policy_bundle_sync_ok.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "coord_agent_policy_bundle_sync_total{{result=\"error\"}} {}\n",
+            self.inner.policy_bundle_sync_errors.load(Ordering::Relaxed)
         ));
 
         // ──── 插件指标 ────

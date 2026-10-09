@@ -1715,12 +1715,31 @@ impl AgentServer {
             let registered = register_native_service(
                 &plugin_manager,
                 policy_svc.clone(),
-                crate::plugin::AgentGrpcService::Policy(policy_svc),
+                crate::plugin::AgentGrpcService::Policy(policy_svc.clone()),
             )
             .await
             .is_some();
             if registered {
                 tracing::info!("Policy service registered (v3.0, RBAC/ABAC engine)");
+            }
+
+            // Bundle 分发态可观测（G-POL-1）：与 cache/mq 同一口径——周期把
+            // 加载/对账事实拉进指标（只读；任务死亡表现为指标停滞）。
+            if let Some(metrics) = self.metrics.clone() {
+                let stats = policy_svc.sync_stats();
+                tokio::spawn(async move {
+                    use std::sync::atomic::Ordering;
+                    let tick = std::time::Duration::from_secs(15);
+                    loop {
+                        tokio::time::sleep(tick).await;
+                        metrics.set_policy_bundle_stats(
+                            stats.loaded_bundles.load(Ordering::Relaxed),
+                            stats.last_success_unix.load(Ordering::Relaxed),
+                            stats.load_ok_total.load(Ordering::Relaxed),
+                            stats.load_error_total.load(Ordering::Relaxed),
+                        );
+                    }
+                });
             }
         }
 
