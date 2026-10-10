@@ -128,8 +128,8 @@ fn map_service_error(e: impl std::fmt::Display) -> Status {
     sanitized_internal(msg)
 }
 
-/// MQ 非 Leader 的统一错误：`FAILED_PRECONDITION` + 结构化错误码 `NOT_LEADER`
-/// + `coord-leader-hint` trailer（leader 地址）。消费者据此可编程路由，
+/// MQ 非 Leader 的统一错误：`FAILED_PRECONDITION` + 结构化错误码 `NOT_LEADER`，
+/// `coord-leader-hint` trailer 携带 leader 地址。消费者据此可编程路由，
 /// **无需解析错误文案**（G-MQ-1）。
 pub const MQ_LEADER_HINT_TRAILER: &str = "coord-leader-hint";
 
@@ -427,7 +427,7 @@ impl EventSvc for EventNotificationService {
         let (tx, out_rx) = tokio::sync::mpsc::channel(64);
 
         // 默认路径：实时推送（既有语义不变，不补投）
-        if cursor.is_none() {
+        let Some(start) = cursor else {
             tokio::spawn(async move {
                 loop {
                     match rx.recv().await {
@@ -445,13 +445,12 @@ impl EventSvc for EventNotificationService {
                 }
             });
             return Ok(Response::new(ReceiverStream::new(out_rx)));
-        }
+        };
 
         // 持久化游标路径（G-EV-1）：先按位点补投（保留窗口 = KV 中仍在的事件），
         // 再转入实时；重放与实时之间不丢事件（可能重复——消费方按 seq 幂等）。
         let inner = Arc::clone(self.inner());
         let filter = filter_type.clone();
-        let start = cursor.unwrap();
         tokio::spawn(async move {
             let mut last = start;
             'catchup: loop {
@@ -506,10 +505,10 @@ impl EventSvc for EventNotificationService {
                                 continue;
                             }
                             let seq = event.seq;
-                            if filter.is_empty() || event.event_type == filter {
-                                if tx.send(Ok(event_to_message(&event))).await.is_err() {
-                                    return;
-                                }
+                            if (filter.is_empty() || event.event_type == filter)
+                                && tx.send(Ok(event_to_message(&event))).await.is_err()
+                            {
+                                return;
                             }
                             last = last.max(seq);
                         }

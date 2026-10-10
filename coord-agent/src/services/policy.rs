@@ -309,7 +309,6 @@ async fn apply_bundle_event(
                     .map_err(|e| format!("apply bundle policy: {e}"))?;
             } else {
                 let opa_owned = Arc::clone(opa);
-                let pid = pid;
                 opa_blocking(move || {
                     opa_owned.remove_policy(&pid);
                     Ok(())
