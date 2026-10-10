@@ -18,14 +18,23 @@ Maven coordinates: `cn.byteforce:coord-java-sdk` (Java 21+).
 - A reachable **agent** endpoint (`agentHost` / `agentPort` in `CoordConfig`;
   the local agent default is `127.0.0.1:19527`).
 
-## Build & install from source
+## Install
 
-```bash
-mvn -pl coord-java-sdk install      # from the repository root
+Available on **Maven Central**:
+
+```xml
+<dependency>
+    <groupId>cn.byteforce</groupId>
+    <artifactId>coord-java-sdk</artifactId>
+    <version>0.2.1</version>
+</dependency>
 ```
 
-The SDK is versioned `0.2.0` and is **not published to any repository** —
-install it from this repo as above.
+Or build & install from source (repository root):
+
+```bash
+mvn -pl coord-java-sdk install
+```
 
 ## Quick start
 
