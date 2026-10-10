@@ -263,4 +263,4 @@ tombstone + 后台 GC。
 |:---|:---|:---|
 | Rust SDK（coord-client） | ✅ | `Client::storage()` + `StorageClient`（put/put_chunked/get/stat/delete/delete_full），流式实现 + leader 自动路由/重试；进程级 SDK 回环测试 ✅ |
 | Agent 存储代理 | ✅ | `coord-agent` `StorageProxy`（经 coord-client SDK 转发；Put 缓冲整对象后上传、Get 按 ≤4MiB 回放、Stat/Delete unary），注册到 agent gRPC 路由 + 双侧鉴权映射 |
-| Java SDK（coord-java-sdk） | ✅ 代码落地（需 mvn 构建验证） | `CoordClient.objectStore()` → `ObjectStoreClient`（put 异步流 / get/stat/delete blocking），经 agent 代理访问；本环境无 Java 工具链，未编译验证 |
+| Java SDK（coord-java-sdk） | ✅ 已编译验证（JDK21 `mvn verify` 174/174；0.2.1 已发布 Maven Central） | `CoordClient.objectStore()` → `ObjectStoreClient`（put 异步流 / get/stat/delete blocking），经 agent 代理访问 |
