@@ -125,8 +125,8 @@ spec:
       containers:
         - name: coord
           # 发布时替换为实际镜像 tag（避免 :latest 漂移）。
-          # 与 `Cargo.toml` 的 `workspace.package.version` 对齐（0.2.1）。
-          image: byteforce/coord:0.2.1
+          # 与 `Cargo.toml` 的 `workspace.package.version` 对齐（0.2.2）。
+          image: byteforce/coord:0.2.2
           imagePullPolicy: IfNotPresent
           command:
             - coord

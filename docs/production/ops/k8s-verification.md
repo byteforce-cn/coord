@@ -14,7 +14,7 @@
 |:--|:--|:--|:--|
 | 1 | **就绪探针**用 `/ready`（未选主时 **503**） | ✅ 正确 | `/healthz` 是存活语义（永远 200，body 里才写 SERVING/NOT_SERVING，见 `coord-server/src/bff/mod.rs:183-195`）；`/ready` 在 `bff/mod.rs:197-212` 返回 503 |
 | 2 | **存活探针**用 `/healthz`（不查 raft 就绪） | ✅ 正确 | 用 `/ready` 做存活会在选举期被 kubelet 重启，反而制造更多选举 |
-| 3 | **镜像 tag** 与版本对齐 | ✅ `0.2.1` | 版本事实：`Cargo.toml:15` |
+| 3 | **镜像 tag** 与版本对齐 | ✅ `0.2.2` | 版本事实：`Cargo.toml:15` |
 | 4 | **反亲和** | ✅ 软反亲和（`preferredDuringScheduling`，weight 100，`kubernetes.io/hostname`） | 硬反亲和在单节点 kind 集群上会 Pending ⇒ 不适合本地验证；软反亲和两全 |
 | 5 | 优雅下线 | ✅ `terminationGracePeriodSeconds: 60` | 对应 `coord/src/main.rs` 的 SIGTERM → 先移交 leader 再退出 |
 | 6 | PDB | ✅ `minAvailable: 2` | 保证驱逐时 quorum |
@@ -74,7 +74,7 @@ kubectl get pods -l app=coord -o wide
 | # | 缺口 | 说明 |
 |:--|:--|:--|
 | 1 | **无验证证据**：仓库里没有一次 k8s 端到端运行的归档 | 待实机演练补齐 |
-| 2 | `image: byteforce/coord:0.2.1` 需要真实存在的镜像 | 依赖制品构建与镜像发布；镜像未发布前不存在 |
+| 2 | `image: byteforce/coord:0.2.2` 需要真实存在的镜像 | 依赖制品构建与镜像发布；镜像未发布前不存在 |
 | 3 | 未验证**滚动升级**（N-1 兼容） | 见 `upgrade.md`（当前已写入「不支持」清单） |
 | 4 | 未验证**备份恢复在 k8s 下的挂载路径** | runbook 的备份恢复用 `--data-dir`，需与 PVC 配置对齐 |
 | 5 | mTLS 证书过期轮换流程未演练 | 并入 runbook 的密钥轮换演练 |
