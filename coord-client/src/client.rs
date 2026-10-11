@@ -210,7 +210,7 @@ impl Client {
         MaintenanceClient::new(self.clone())
     }
 
-    /// 返回对象存储客户端（coord.storage；EXPERIMENTAL）
+    /// 返回对象存储客户端（coord.storage）
     pub fn storage(&self) -> StorageClient {
         StorageClient::new(self.clone())
     }
@@ -1133,7 +1133,7 @@ impl MaintenanceClient {
     }
 }
 
-// ──── 对象存储客户端（coord.storage；EXPERIMENTAL 数据面） ────
+// ──── 对象存储客户端（coord.storage 数据面） ────
 
 /// 默认 chunk 分片字节数（对齐服务端 `[object_storage].chunk_size_bytes` 默认
 /// 4MiB；服务端配置更小或对象超 `max_object_size_bytes` 时 Put 返回

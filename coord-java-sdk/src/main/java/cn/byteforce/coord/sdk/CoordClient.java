@@ -246,7 +246,7 @@ public final class CoordClient implements Closeable {
 
     /**
      * Returns the {@link ObjectStoreClient} API for object storage
-     * (coord.storage, EXPERIMENTAL).
+     * (coord.storage).
      * <p>
      * Proxied through the Coord Agent to the server cluster.
      */

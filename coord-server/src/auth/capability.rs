@@ -395,7 +395,7 @@ fn builtin_capabilities() -> Vec<CapabilityDef> {
             CapabilityType::Read,
             "订阅 Key 变更事件",
         ),
-        // 对象存储（coord.storage，EXPERIMENTAL 数据面）
+        // 对象存储（coord.storage 数据面）
         def(
             "data:storage:read",
             "data",

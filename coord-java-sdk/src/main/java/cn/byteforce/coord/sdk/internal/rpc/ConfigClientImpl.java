@@ -149,13 +149,12 @@ public final class ConfigClientImpl extends AgentRpcClient implements ConfigClie
 
     @Override
     public Map<String, String> list(String prefix) {
-        ConfigListRequest request = ConfigListRequest.newBuilder().setPrefix(prefix).build();
         try {
             ConfigListResponse response = callWithRetry(
                     (ch, req) -> ConfigGrpc.newBlockingStub(ch)
                             .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
                             .list((ConfigListRequest) req),
-                    request, "config.list");
+                    ConfigListRequest.newBuilder().setPrefix(prefix).build(), "config.list");
             return new HashMap<>(response.getEntriesMap());
         } catch (CoordException e) {
             // 不能把"查询失败"变成"没有配置"——调用方会据此认为前缀下确实为空，
@@ -169,34 +168,71 @@ public final class ConfigClientImpl extends AgentRpcClient implements ConfigClie
     }
 
     @Override
+    public ConfigSnapshot listWithRevision(String prefix) {
+        ConfigListRequest request = ConfigListRequest.newBuilder().setPrefix(prefix).build();
+        ConfigListResponse response = callWithRetry(
+                (ch, req) -> ConfigGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .list((ConfigListRequest) req),
+                request, "config.listWithRevision");
+        return new ConfigSnapshot(response.getEntriesMap(), response.getRevision());
+    }
+
+    @Override
     public ConfigWatchSubscription watch(String prefix, ConfigListener listener) {
+        // 兼容入口 = 从最新开始（不回溯历史）；需要闭合「快照 → 订阅」窗口用 watchFrom。
+        return watchFrom(prefix, 0L, listener);
+    }
+
+    @Override
+    public ConfigWatchSubscription watchFrom(String prefix, long startRevision,
+                                             ConfigListener listener) {
         String watchId = "cfg-" + prefix + "-" + UUID.randomUUID().toString().substring(0, 8);
 
         // 流是**可取消**的 GrpcWatchStream（用阻塞式 stub iterator 时，取消要等到
         // 下一条事件才生效），并支持断线重连 + 从 lastRevision+1 续订。
-        // 重连所需的 start revision 由 WatchManager 传入（首次为 0 = 从最新开始）。
+        // 重连所需的 start revision 由 WatchManager 传入（首次为调用方给的值：
+        // 0 = 从最新开始；快照位点 = 回放快照之后的变更）。
         WatchManager.ActiveWatch watch = new WatchManager.ActiveWatch(
                 watchId,
-                (startRevision) -> new GrpcWatchStream(
+                (startRevisionOnReconnect) -> new GrpcWatchStream(
                         channelManager.getChannel(),
                         ConfigGrpc.getWatchMethod(),
                         ConfigWatchRequest.newBuilder()
                                 .setPrefix(prefix)
-                                .setStartRevision(startRevision)
+                                .setStartRevision(startRevisionOnReconnect)
                                 .build()),
                 (ConfigWatchEvent protoEvent) -> {
+                    // presence 语义（见 config.proto）：缺省 = 键已删除；在场（含空串）
+                    // = 当前值。
                     Optional<String> newValue = protoEvent.hasNewValue()
                             ? Optional.of(protoEvent.getNewValue())
                             : Optional.empty();
-                    listener.onEvent(new ConfigEvent(protoEvent.getKey(), newValue, protoEvent.getRevision()));
+                    listener.onEvent(new ConfigEvent(protoEvent.getKey(), newValue,
+                            protoEvent.getRevision()));
                 },
                 // revision 水位在消费线程上同步推进（见 WatchManager），不再由异步回调维护
                 (Object e) -> ((ConfigWatchEvent) e).getRevision(),
-                0,
+                startRevision,
                 listener::onTerminated
         );
 
         watchManager.startWatch(watch);
         return () -> watchManager.cancelWatch(watchId);
+    }
+
+    @Override
+    public long putReturningRevision(String key, String value) {
+        cn.byteforce.coord.contracts.config.v1.ConfigPutRequest request =
+                cn.byteforce.coord.contracts.config.v1.ConfigPutRequest.newBuilder()
+                        .setKey(key)
+                        .setValue(value)
+                        .build();
+        cn.byteforce.coord.contracts.config.v1.ConfigPutResponse response = callWithRetry(
+                (ch, req) -> cn.byteforce.coord.contracts.config.v1.ConfigGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .put((cn.byteforce.coord.contracts.config.v1.ConfigPutRequest) req),
+                request, "config.putReturningRevision");
+        return response.getRevision();
     }
 }

@@ -18,15 +18,40 @@ Maven coordinates: `cn.byteforce:coord-java-sdk` (Java 21+).
 - A reachable **agent** endpoint (`agentHost` / `agentPort` in `CoordConfig`;
   the local agent default is `127.0.0.1:19527`).
 
+## Dependency compatibility
+
+The SDK manages its gRPC / protobuf transitive dependencies via
+`grpc-bom` / `protobuf-bom` (dependency management — no scattered pins).
+The tested compatibility range:
+
+| Dependency | Built & tested with | Also tested (consumer-platform combo) |
+|:--|:--|:--|
+| `io.grpc:*` | **1.68.0** (repo default) | **1.83.1** |
+| `com.google.protobuf:protobuf-java` | **4.28.0** (repo default) | **4.35.1** |
+
+The CI runs `mvn verify` twice — once with the repo pins, once with the
+tested-upper combo — so "compiles against a newer platform BOM" is a machine
+fact, not an assumption. Consumers who need a specific combination can align
+via their own BOM imports; within the range above both compile and pass the
+SDK test suite. **Outside the range is not covered**: if you hit behaviour
+suspicious of a gRPC/protobuf mismatch, pin back to a tested combo first.
+
+**Shading / relocation** (evaluated, not adopted): the SDK's **public API does
+not expose gRPC or protobuf types** (all public signatures use SDK types), so
+consumers can freely align versions through BOMs without a shaded artifact;
+shading would only add relocation complexity. Re-evaluate if a future API ever
+leaks wire types into the public surface.
+
 ## Install
 
-Available on **Maven Central**:
+Available on **Maven Central** — repository version `0.3.0`
+(latest published release: `0.2.1`; if `0.3.0` is not yet resolvable there, use `0.2.1` or the from-source path below):
 
 ```xml
 <dependency>
     <groupId>cn.byteforce</groupId>
     <artifactId>coord-java-sdk</artifactId>
-    <version>0.2.1</version>
+    <version>0.3.0</version>
 </dependency>
 ```
 
@@ -73,17 +98,17 @@ served by the Rust `coord-client`.
 
 | Surface | Entry point | Notes |
 |:--|:--|:--|
-| Registry / Config | `client.registry()`, `client.configClient()` | service discovery / config center |
+| Registry / Config | `client.registry()`, `client.configClient()` | service discovery / config center; config resync = `listWithRevision` + `watchFrom` (snapshot position closes the delete window) |
 | Lock / LeaderElection / IdGen | `client.lock()`, `client.election()`, `client.idgen()` | lease-based lock; global ids |
 | Event | `client.events()` | live by default; pass a persisted `seq` cursor to replay within the retention window |
-| Cache (EXPERIMENTAL) | `client.cache()` | capacity is per-agent, converged periodically |
-| MQ (EXPERIMENTAL) | `client.mq()` | `poll+ack` reliability path; leader routing via `getTopicLeader` |
-| Scheduler / Workflow (EXPERIMENTAL) | `client.scheduler()`, `client.workflow()` | claim-based jobs; workflow results persist on completion; retention via `deleteInstance` / `deleteDefinition` |
+| Cache | `client.cache()` | capacity is per-agent, converged periodically; `setIfAbsent` (SETNX), `keys`, `clear` |
+| MQ | `client.mq()` | `poll+ack` reliability path; leader routing via `getTopicLeader` |
+| Scheduler / Workflow | `client.scheduler()`, `client.workflow()` | claim-based jobs; completion results persist (first result wins) and read back via `getJob`; workflow retention via `deleteInstance` / `deleteDefinition` |
 | Policy | `client.policy()` | `checkPermission` is agent-local RBAC; production path is OPA bundle + `evaluate` |
 | PKI | `client.pki()` | `getCertByCN` returns the **private key** — treat "read" as private-key read |
 | Transit | `client.transit()` | envelope encryption + HMAC; `rewrap` migrates DEKs during KEK rotation |
-| CircuitBreaker / RateLimiter / FeatureFlags | `client.circuitBreaker()`, `client.rateLimiter()`, `client.featureFlags()` | local (per-agent) state |
-| ObjectStore (EXPERIMENTAL) | `client.objectStore()` | see `docs/production/volume-object-storage.md` |
+| CircuitBreaker / RateLimiter / FeatureFlags | `client.circuitBreaker()`, `client.rateLimiter()`, `client.featureFlags()` | breaker/limiter are local (per-agent); feature flags live in the shared KV — `putFlag` / `putPercentageFlag` / `deleteFlag` / `listFlags` (management plane; takes effect immediately) |
+| ObjectStore | `client.objectStore()` | see `docs/production/volume-object-storage.md` |
 | Health | `client.healthCheck()` | agent health check |
 
 ## Errors

@@ -38,30 +38,33 @@ use coord_proto::agent::{
     leader_election_server::LeaderElection, lock_server::Lock, mq_server::Mq,
     policy_server::Policy, rate_limiter_server::RateLimiter, replica_server::Replica,
     scheduler_server::Scheduler, transit_server::Transit, workflow_server::Workflow,
-    CacheDeleteRequest, CacheDeleteResponse, CacheGetRequest, CacheGetResponse,
-    CacheHGetAllRequest, CacheHGetAllResponse, CacheHGetRequest, CacheHGetResponse,
-    CacheHSetRequest, CacheHSetResponse, CacheLLenRequest, CacheLLenResponse, CacheLPushRequest,
-    CacheLPushResponse, CacheLRangeRequest, CacheLRangeResponse, CacheRPopRequest,
-    CacheRPopResponse, CacheSAddRequest, CacheSAddResponse, CacheSMembersRequest,
-    CacheSMembersResponse, CacheSetRequest, CacheSetResponse, CircuitBreakerGetStateRequest,
+    CacheClearRequest, CacheClearResponse, CacheDeleteRequest, CacheDeleteResponse,
+    CacheGetRequest, CacheGetResponse, CacheHGetAllRequest, CacheHGetAllResponse, CacheHGetRequest,
+    CacheHGetResponse, CacheHSetRequest, CacheHSetResponse, CacheKeysRequest, CacheKeysResponse,
+    CacheLLenRequest, CacheLLenResponse, CacheLPushRequest, CacheLPushResponse, CacheLRangeRequest,
+    CacheLRangeResponse, CacheRPopRequest, CacheRPopResponse, CacheSAddRequest, CacheSAddResponse,
+    CacheSMembersRequest, CacheSMembersResponse, CacheSetIfAbsentRequest, CacheSetIfAbsentResponse,
+    CacheSetRequest, CacheSetResponse, CircuitBreakerGetStateRequest,
     CircuitBreakerGetStateResponse, CircuitBreakerReportFailureRequest,
     CircuitBreakerReportFailureResponse, CircuitBreakerReportSuccessRequest,
     CircuitBreakerReportSuccessResponse, CircuitBreakerResetRequest, CircuitBreakerResetResponse,
     CloudEventMessage, EventPublishRequest, EventPublishResponse, EventSubscribeRequest,
-    EventUnsubscribeRequest, EventUnsubscribeResponse, FeatureFlagEvaluateRequest,
+    EventUnsubscribeRequest, EventUnsubscribeResponse, FeatureFlagDeleteFlagRequest,
+    FeatureFlagDeleteFlagResponse, FeatureFlagEntry, FeatureFlagEvaluateRequest,
     FeatureFlagEvaluateResponse, FeatureFlagIsEnabledRequest, FeatureFlagIsEnabledResponse,
-    IdGenNextBatchRequest, IdGenNextBatchResponse, IdGenNextIdRequest, IdGenNextIdResponse,
-    LeaderCampaignRequest, LeaderCampaignResponse, LeaderGetLeaderRequest, LeaderGetLeaderResponse,
-    LeaderResignRequest, LeaderResignResponse, LeaderWatchEvent, LeaderWatchRequest,
-    LockAcquireRequest, LockAcquireResponse, LockGetInfoRequest, LockGetInfoResponse,
-    LockReleaseRequest, LockReleaseResponse, LockRenewRequest, LockRenewResponse, MqAckRequest,
-    MqAckResponse, MqCreateTopicRequest, MqCreateTopicResponse, MqDeleteTopicRequest,
-    MqDeleteTopicResponse, MqGetTopicLeaderRequest, MqGetTopicLeaderResponse, MqMessage,
-    MqMoveToDlqRequest, MqMoveToDlqResponse, MqPollDlqRequest, MqPollDlqResponse, MqPollRequest,
-    MqPollResponse, MqPublishRequest, MqPublishResponse, MqSubscribeRequest, PolicyBundleInfo,
-    PolicyBundleVersionInfo, PolicyCheckPermissionRequest, PolicyCheckPermissionResponse,
-    PolicyDeleteBundleRequest, PolicyDeleteBundleResponse, PolicyEvaluateRequest,
-    PolicyEvaluateResponse, PolicyExplainRequest, PolicyExplainResponse,
+    FeatureFlagListFlagsRequest, FeatureFlagListFlagsResponse, FeatureFlagPutFlagRequest,
+    FeatureFlagPutFlagResponse, IdGenNextBatchRequest, IdGenNextBatchResponse, IdGenNextIdRequest,
+    IdGenNextIdResponse, LeaderCampaignRequest, LeaderCampaignResponse, LeaderGetLeaderRequest,
+    LeaderGetLeaderResponse, LeaderResignRequest, LeaderResignResponse, LeaderWatchEvent,
+    LeaderWatchRequest, LockAcquireRequest, LockAcquireResponse, LockGetInfoRequest,
+    LockGetInfoResponse, LockReleaseRequest, LockReleaseResponse, LockRenewRequest,
+    LockRenewResponse, MqAckRequest, MqAckResponse, MqCreateTopicRequest, MqCreateTopicResponse,
+    MqDeleteTopicRequest, MqDeleteTopicResponse, MqGetTopicLeaderRequest, MqGetTopicLeaderResponse,
+    MqMessage, MqMoveToDlqRequest, MqMoveToDlqResponse, MqPollDlqRequest, MqPollDlqResponse,
+    MqPollRequest, MqPollResponse, MqPublishRequest, MqPublishResponse, MqSubscribeRequest,
+    PolicyBundleInfo, PolicyBundleVersionInfo, PolicyCheckPermissionRequest,
+    PolicyCheckPermissionResponse, PolicyDeleteBundleRequest, PolicyDeleteBundleResponse,
+    PolicyEvaluateRequest, PolicyEvaluateResponse, PolicyExplainRequest, PolicyExplainResponse,
     PolicyListBundleVersionsRequest, PolicyListBundleVersionsResponse, PolicyListBundlesRequest,
     PolicyListBundlesResponse, PolicyPutBundleRequest, PolicyPutBundleResponse,
     PolicyRollbackBundleRequest, PolicyRollbackBundleResponse, PolicySetBundleEnabledRequest,
@@ -69,21 +72,21 @@ use coord_proto::agent::{
     ReplicaApplyRequest, ReplicaApplyResponse, ReplicaEntry as ReplicaEntryProto,
     ReplicaHeartbeatRequest, ReplicaHeartbeatResponse, ReplicaReconcileRequest,
     ReplicaShardProgress, SchedulerClaimJobRequest, SchedulerClaimJobResponse,
-    SchedulerCompleteJobRequest, SchedulerCompleteJobResponse, SchedulerHeartbeatRequest,
-    SchedulerHeartbeatResponse, SchedulerRegisterJobRequest, SchedulerRegisterJobResponse,
-    TransitDecryptRequest, TransitDecryptResponse, TransitEncryptRequest, TransitEncryptResponse,
-    TransitHmacSignRequest, TransitHmacSignResponse, TransitHmacVerifyRequest,
-    TransitHmacVerifyResponse, TransitRewrapRequest, TransitRewrapResponse, WorkflowCancelRequest,
-    WorkflowCancelResponse, WorkflowDefinitionSummary, WorkflowDefinitionVersion,
-    WorkflowDeleteDefinitionRequest, WorkflowDeleteDefinitionResponse,
-    WorkflowDeleteInstanceRequest, WorkflowDeleteInstanceResponse, WorkflowDeployRequest,
-    WorkflowDeployResponse, WorkflowGetDefinitionRequest, WorkflowGetDefinitionResponse,
-    WorkflowGetStatusRequest, WorkflowGetStatusResponse, WorkflowInstanceSummary,
-    WorkflowListDefinitionVersionsRequest, WorkflowListDefinitionVersionsResponse,
-    WorkflowListDefinitionsRequest, WorkflowListDefinitionsResponse, WorkflowListInstancesRequest,
-    WorkflowListInstancesResponse, WorkflowRollbackDefinitionRequest,
-    WorkflowRollbackDefinitionResponse, WorkflowSignalRequest, WorkflowSignalResponse,
-    WorkflowStartRequest, WorkflowStartResponse,
+    SchedulerCompleteJobRequest, SchedulerCompleteJobResponse, SchedulerGetJobRequest,
+    SchedulerGetJobResponse, SchedulerHeartbeatRequest, SchedulerHeartbeatResponse,
+    SchedulerRegisterJobRequest, SchedulerRegisterJobResponse, TransitDecryptRequest,
+    TransitDecryptResponse, TransitEncryptRequest, TransitEncryptResponse, TransitHmacSignRequest,
+    TransitHmacSignResponse, TransitHmacVerifyRequest, TransitHmacVerifyResponse,
+    TransitRewrapRequest, TransitRewrapResponse, WorkflowCancelRequest, WorkflowCancelResponse,
+    WorkflowDefinitionSummary, WorkflowDefinitionVersion, WorkflowDeleteDefinitionRequest,
+    WorkflowDeleteDefinitionResponse, WorkflowDeleteInstanceRequest,
+    WorkflowDeleteInstanceResponse, WorkflowDeployRequest, WorkflowDeployResponse,
+    WorkflowGetDefinitionRequest, WorkflowGetDefinitionResponse, WorkflowGetStatusRequest,
+    WorkflowGetStatusResponse, WorkflowInstanceSummary, WorkflowListDefinitionVersionsRequest,
+    WorkflowListDefinitionVersionsResponse, WorkflowListDefinitionsRequest,
+    WorkflowListDefinitionsResponse, WorkflowListInstancesRequest, WorkflowListInstancesResponse,
+    WorkflowRollbackDefinitionRequest, WorkflowRollbackDefinitionResponse, WorkflowSignalRequest,
+    WorkflowSignalResponse, WorkflowStartRequest, WorkflowStartResponse,
 };
 
 use tonic::{Request, Response, Status};
@@ -578,6 +581,87 @@ impl Cache for CacheService {
                 .map_err(map_service_error)?;
         }
         Ok(Response::new(CacheSetResponse {}))
+    }
+
+    /// 原子条件写（SetNX）：仅当 key 不存在（或已过期）时写入。
+    /// 单 agent：判定与写入同一写事务；ISR：判定在 Leader 本地事务，成功时全域下发。
+    async fn set_if_absent(
+        &self,
+        request: Request<CacheSetIfAbsentRequest>,
+    ) -> Result<Response<CacheSetIfAbsentResponse>, Status> {
+        let req = request.into_inner();
+        let ttl = if req.ttl_seconds > 0 {
+            Some(req.ttl_seconds as u64)
+        } else {
+            None
+        };
+        let written = if self.replication_enabled() {
+            self.string_put_if_absent_replicated(&req.key, req.value, ttl)
+                .await
+                .map_err(map_service_error)?
+        } else {
+            let key = req.key.clone();
+            self.run_blocking(move |me| me.string_put_if_absent(&key, req.value, ttl))
+                .await
+                .map_err(map_service_error)?
+        };
+        Ok(Response::new(CacheSetIfAbsentResponse { written }))
+    }
+
+    /// 键枚举（有界、游标分页）：按逻辑键前缀，四表去重后按键升序。
+    async fn keys(
+        &self,
+        request: Request<CacheKeysRequest>,
+    ) -> Result<Response<CacheKeysResponse>, Status> {
+        let req = request.into_inner();
+        if req.limit < 0 {
+            return Err(Status::invalid_argument("cache keys: limit must be >= 0"));
+        }
+        if req.prefix.contains('\0') || req.cursor.contains('\0') {
+            return Err(Status::invalid_argument(
+                "cache keys: prefix/cursor must not contain NUL (\\x00)",
+            ));
+        }
+        if !req.cursor.is_empty() && !req.cursor.starts_with(&req.prefix) {
+            return Err(Status::invalid_argument(
+                "cache keys: cursor does not belong to prefix",
+            ));
+        }
+        let prefix = req.prefix.clone();
+        let cursor = req.cursor.clone();
+        let limit = req.limit as u32;
+        let (keys, next_cursor) = self
+            .run_blocking(move |me| me.keys_page(&prefix, limit, &cursor))
+            .await
+            .map_err(map_service_error)?;
+        Ok(Response::new(CacheKeysResponse { keys, next_cursor }))
+    }
+
+    /// 按逻辑键前缀清理（四表全覆盖；批式多事务；记账同步扣减）。
+    async fn clear(
+        &self,
+        request: Request<CacheClearRequest>,
+    ) -> Result<Response<CacheClearResponse>, Status> {
+        let req = request.into_inner();
+        if req.prefix.contains('\0') {
+            return Err(Status::invalid_argument(
+                "cache clear: prefix must not contain NUL (\\x00)",
+            ));
+        }
+        let (removed_entries, bytes_reclaimed) = if self.replication_enabled() {
+            self.clear_prefix_replicated(&req.prefix)
+                .await
+                .map_err(map_service_error)?
+        } else {
+            let prefix = req.prefix.clone();
+            self.run_blocking(move |me| me.clear_prefix(&prefix))
+                .await
+                .map_err(map_service_error)?
+        };
+        Ok(Response::new(CacheClearResponse {
+            removed_entries,
+            bytes_reclaimed,
+        }))
     }
 
     async fn delete(
@@ -1547,6 +1631,28 @@ impl Scheduler for SchedulerService {
         .await
         .map_err(sanitized_internal)?;
         Ok(Response::new(SchedulerCompleteJobResponse {}))
+    }
+
+    /// 任务详情 / 结果回读（G-SC-1 读取面）。只读幂等；任务未注册 ⇒ found=false。
+    async fn get_job(
+        &self,
+        request: Request<SchedulerGetJobRequest>,
+    ) -> Result<Response<SchedulerGetJobResponse>, Status> {
+        let req = request.into_inner();
+        match self.get_task_detail(&req.job_id).await {
+            Ok(Some(detail)) => Ok(Response::new(SchedulerGetJobResponse {
+                found: true,
+                job_id: detail.task_id,
+                state: helper_scheduler_state_str(detail.state),
+                result: detail.result.unwrap_or_default(),
+                completed_at_ms: detail.completed_at_ms.unwrap_or(0) as i64,
+            })),
+            Ok(None) => Ok(Response::new(SchedulerGetJobResponse {
+                found: false,
+                ..Default::default()
+            })),
+            Err(e) => Err(sanitized_internal(e)),
+        }
     }
 }
 
@@ -2560,6 +2666,63 @@ impl FeatureFlags for FeatureFlagService {
             Err(e) => Err(sanitized_internal(e)),
         }
     }
+
+    /// 写入 / 覆盖开关状态（管理面）。`percentage` 缺省 = 全量开关；给出时必须在
+    /// [0,100]（否者 `INVALID_ARGUMENT`）。生效立即（读路径无本地缓存）。
+    async fn put_flag(
+        &self,
+        request: Request<FeatureFlagPutFlagRequest>,
+    ) -> Result<Response<FeatureFlagPutFlagResponse>, Status> {
+        let req = request.into_inner();
+        match req.percentage {
+            Some(pct) => {
+                if pct > 100 {
+                    return Err(Status::invalid_argument(format!(
+                        "feature flag '{}': percentage {pct} out of range [0,100]",
+                        req.flag_name
+                    )));
+                }
+                self.set_percentage_flag(&req.flag_name, req.enabled, pct as u8)
+                    .await
+                    .map_err(sanitized_internal)?;
+            }
+            None => {
+                self.set_flag(&req.flag_name, req.enabled)
+                    .await
+                    .map_err(sanitized_internal)?;
+            }
+        }
+        Ok(Response::new(FeatureFlagPutFlagResponse {}))
+    }
+
+    /// 删除开关（幂等：不存在也成功）。
+    async fn delete_flag(
+        &self,
+        request: Request<FeatureFlagDeleteFlagRequest>,
+    ) -> Result<Response<FeatureFlagDeleteFlagResponse>, Status> {
+        let req = request.into_inner();
+        self.delete_flag(&req.flag_name)
+            .await
+            .map_err(sanitized_internal)?;
+        Ok(Response::new(FeatureFlagDeleteFlagResponse {}))
+    }
+
+    /// 列出全部开关（按 flag_name 升序，结果稳定可比）。
+    async fn list_flags(
+        &self,
+        _request: Request<FeatureFlagListFlagsRequest>,
+    ) -> Result<Response<FeatureFlagListFlagsResponse>, Status> {
+        let flags = self.list_flags().await.map_err(sanitized_internal)?;
+        let flags = flags
+            .into_iter()
+            .map(|(flag_name, state)| FeatureFlagEntry {
+                flag_name,
+                enabled: state.enabled,
+                percentage: state.percentage.map(|p| p as u32),
+            })
+            .collect();
+        Ok(Response::new(FeatureFlagListFlagsResponse { flags }))
+    }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -2697,6 +2860,18 @@ fn helper_workflow_state_str(state: &WorkflowState) -> String {
         WorkflowState::Failed => "FAILED",
         WorkflowState::Cancelled => "CANCELLED",
         _ => "UNKNOWN",
+    }
+    .to_string()
+}
+
+/// 调度任务状态 → wire 字符串（与 scheduler.proto 的 GetJob 声明一致）
+fn helper_scheduler_state_str(state: crate::services::scheduler::TaskState) -> String {
+    use crate::services::scheduler::TaskState;
+    match state {
+        TaskState::Pending => "Pending",
+        TaskState::Running => "Running",
+        TaskState::Completed => "Completed",
+        TaskState::Failed => "Failed",
     }
     .to_string()
 }

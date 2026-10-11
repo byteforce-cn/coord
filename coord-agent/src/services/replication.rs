@@ -103,6 +103,9 @@ pub enum ReplicationOp {
     },
     /// 缓存删除
     CacheDelete { key: Vec<u8>, data_type: String },
+    /// 按逻辑键前缀的缓存清理（Cache/Clear：清理决定经复制通道全域下发，
+    /// Follower 幂等应用）
+    CacheClear { prefix: String },
     /// 消息发布（offset 由分区 Leader 独占分配并广播）
     MqPublish {
         topic: String,
@@ -630,8 +633,9 @@ pub trait ReplicatedStore: Send + Sync {
 // ──── Proto 转换 ────
 
 use coord_proto::agent::{
-    replica_op, ReplicaCacheDelete, ReplicaCachePut, ReplicaEntry as ReplicaEntryProto,
-    ReplicaMqDeleteTopic, ReplicaMqMoveToDlq, ReplicaMqPublish, ReplicaShardProgress,
+    replica_op, ReplicaCacheClear, ReplicaCacheDelete, ReplicaCachePut,
+    ReplicaEntry as ReplicaEntryProto, ReplicaMqDeleteTopic, ReplicaMqMoveToDlq, ReplicaMqPublish,
+    ReplicaShardProgress,
 };
 
 impl ReplicationEntry {
@@ -652,6 +656,11 @@ impl ReplicationEntry {
                     replica_op::Op::CacheDelete(ReplicaCacheDelete {
                         key: key.clone(),
                         data_type: data_type.clone(),
+                    })
+                }
+                ReplicationOp::CacheClear { prefix } => {
+                    replica_op::Op::CacheClear(ReplicaCacheClear {
+                        prefix: prefix.clone(),
                     })
                 }
                 ReplicationOp::MqPublish {
@@ -710,6 +719,9 @@ impl ReplicationEntry {
             replica_op::Op::CacheDelete(x) => ReplicationOp::CacheDelete {
                 key: x.key.clone(),
                 data_type: x.data_type.clone(),
+            },
+            replica_op::Op::CacheClear(x) => ReplicationOp::CacheClear {
+                prefix: x.prefix.clone(),
             },
             replica_op::Op::MqPublish(x) => ReplicationOp::MqPublish {
                 topic: x.topic.clone(),

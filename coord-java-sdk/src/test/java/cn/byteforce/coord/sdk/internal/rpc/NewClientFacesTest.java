@@ -23,10 +23,17 @@ import cn.byteforce.coord.contracts.election.v1.LeaderGetLeaderRequest;
 import cn.byteforce.coord.contracts.election.v1.LeaderGetLeaderResponse;
 import cn.byteforce.coord.contracts.election.v1.LeaderResignRequest;
 import cn.byteforce.coord.contracts.election.v1.LeaderResignResponse;
+import cn.byteforce.coord.contracts.featureflags.v1.FeatureFlagDeleteFlagRequest;
+import cn.byteforce.coord.contracts.featureflags.v1.FeatureFlagDeleteFlagResponse;
+import cn.byteforce.coord.contracts.featureflags.v1.FeatureFlagEntry;
 import cn.byteforce.coord.contracts.featureflags.v1.FeatureFlagEvaluateRequest;
 import cn.byteforce.coord.contracts.featureflags.v1.FeatureFlagEvaluateResponse;
 import cn.byteforce.coord.contracts.featureflags.v1.FeatureFlagIsEnabledRequest;
 import cn.byteforce.coord.contracts.featureflags.v1.FeatureFlagIsEnabledResponse;
+import cn.byteforce.coord.contracts.featureflags.v1.FeatureFlagListFlagsRequest;
+import cn.byteforce.coord.contracts.featureflags.v1.FeatureFlagListFlagsResponse;
+import cn.byteforce.coord.contracts.featureflags.v1.FeatureFlagPutFlagRequest;
+import cn.byteforce.coord.contracts.featureflags.v1.FeatureFlagPutFlagResponse;
 import cn.byteforce.coord.contracts.featureflags.v1.FeatureFlagsGrpc;
 import cn.byteforce.coord.contracts.ratelimiter.v1.RateLimiterAllowRequest;
 import cn.byteforce.coord.contracts.ratelimiter.v1.RateLimiterAllowResponse;
@@ -44,6 +51,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -241,6 +249,39 @@ class NewClientFacesTest {
         assertThat(result).isEqualTo("{\"bucket\":7}");
     }
 
+    @Test
+    void featureFlagManagementPlaneRoundTrip() {
+        // putFlag（全量）
+        flagClient.putFlag("beta", true);
+        assertThat(flags.lastPutName).isEqualTo("beta");
+        assertThat(flags.lastPutEnabled).isTrue();
+        assertThat(flags.lastPutHasPercentage).isFalse();
+
+        // putPercentageFlag（灰度）：percentage 必须显式送达
+        flagClient.putPercentageFlag("canary", true, 25);
+        assertThat(flags.lastPutName).isEqualTo("canary");
+        assertThat(flags.lastPutHasPercentage).isTrue();
+        assertThat(flags.lastPutPercentage).isEqualTo(25);
+
+        // 越界 percentage：本地拒绝（IllegalArgument），不发 RPC
+        assertThatThrownBy(() -> flagClient.putPercentageFlag("bad", true, 101))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        // deleteFlag
+        flagClient.deleteFlag("beta");
+        assertThat(flags.lastDeletedName).isEqualTo("beta");
+
+        // listFlags：条目字段映射（percentage 缺省 → null = 全量开关）
+        flags.listFlags = java.util.List.of(
+                FeatureFlagEntry.newBuilder().setFlagName("beta2").setEnabled(true).build(),
+                FeatureFlagEntry.newBuilder().setFlagName("canary2").setEnabled(true).setPercentage(25).build());
+        java.util.List<FeatureFlagClient.FlagInfo> infos = flagClient.listFlags();
+        assertThat(infos).hasSize(2);
+        assertThat(infos.get(0).getFlagName()).isEqualTo("beta2");
+        assertThat(infos.get(0).getPercentage()).isNull();
+        assertThat(infos.get(1).getPercentage()).isEqualTo(25);
+    }
+
     // ── fakes ───────────────────────────────────────────────────────────────
 
     private static final class FakeElection extends LeaderElectionGrpc.LeaderElectionImplBase {
@@ -349,6 +390,12 @@ class NewClientFacesTest {
         String lastEnabledName;
         ByteString lastEnabledContext = ByteString.EMPTY;
         String lastEvaluateName;
+        String lastPutName;
+        boolean lastPutEnabled;
+        boolean lastPutHasPercentage;
+        int lastPutPercentage;
+        String lastDeletedName;
+        java.util.List<FeatureFlagEntry> listFlags = java.util.List.of();
 
         @Override
         public void isEnabled(FeatureFlagIsEnabledRequest req,
@@ -368,6 +415,34 @@ class NewClientFacesTest {
             lastEvaluateName = req.getFlagName();
             o.onNext(FeatureFlagEvaluateResponse.newBuilder()
                     .setResult(ByteString.copyFrom(result, StandardCharsets.UTF_8))
+                    .build());
+            o.onCompleted();
+        }
+
+        @Override
+        public void putFlag(FeatureFlagPutFlagRequest req,
+                            StreamObserver<FeatureFlagPutFlagResponse> o) {
+            lastPutName = req.getFlagName();
+            lastPutEnabled = req.getEnabled();
+            lastPutHasPercentage = req.hasPercentage();
+            lastPutPercentage = req.getPercentage();
+            o.onNext(FeatureFlagPutFlagResponse.getDefaultInstance());
+            o.onCompleted();
+        }
+
+        @Override
+        public void deleteFlag(FeatureFlagDeleteFlagRequest req,
+                               StreamObserver<FeatureFlagDeleteFlagResponse> o) {
+            lastDeletedName = req.getFlagName();
+            o.onNext(FeatureFlagDeleteFlagResponse.getDefaultInstance());
+            o.onCompleted();
+        }
+
+        @Override
+        public void listFlags(FeatureFlagListFlagsRequest req,
+                              StreamObserver<FeatureFlagListFlagsResponse> o) {
+            o.onNext(FeatureFlagListFlagsResponse.newBuilder()
+                    .addAllFlags(listFlags)
                     .build());
             o.onCompleted();
         }

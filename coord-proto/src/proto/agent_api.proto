@@ -108,6 +108,8 @@ message ReplicaOp {
     ReplicaMqDeleteTopic mq_delete_topic = 4;
     // 显式移入 DLQ（G-MQ-2：ISR 启用时跟同删除一样全域下发，避免副本分叉）
     ReplicaMqMoveToDlq mq_move_to_dlq = 5;
+    // 按逻辑键前缀的缓存清理（Cache/Clear；Follower 幂等应用）
+    ReplicaCacheClear cache_clear = 6;
   }
 }
 
@@ -122,6 +124,11 @@ message ReplicaCachePut {
 message ReplicaCacheDelete {
   bytes key = 1;
   string data_type = 2;
+}
+
+message ReplicaCacheClear {
+  // 逻辑键前缀（UTF-8）；空 = 全部键。Follower 删除本地匹配行并按同一口径记账。
+  string prefix = 1;
 }
 
 message ReplicaMqPublish {

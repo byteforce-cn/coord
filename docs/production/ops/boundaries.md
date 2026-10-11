@@ -1,6 +1,6 @@
 # 能力边界清单（Scope & non-goals）
 
-> Owner: maintainers ｜ Last verified: 2026-10-09
+> Owner: maintainers ｜ Last verified: 2026-10-11
 
 本清单逐条列出各能力**明确不承诺**的边界，与承诺同等重要（见
 `apis/contracts/WHITEPAPER.md`）。每条都带可核对的实现锚点；凡「不承诺」，
@@ -61,6 +61,7 @@
 | B-PL-1 | JS/wasm 引擎队列**有上界 16**；wasm 引擎的 `WasmCommand` 队列必须同为有界（曾为无界） | `coord-agent/src/plugin/js_engine.rs:427`、`plugin/component_engine.rs:1490`、`plugin/wasm_engine.rs:1024` | 统一三引擎的背压语义并测试溢出行为 |
 | B-PL-3 | 缓存容量上界（默认 1GB）**已由 reaper 强制**：数据面活跃字节记账 + TTL 回收 + 超界淘汰 + 单条超限写拒绝（`RESOURCE_EXHAUSTED`），但**仍不承诺**：<br>(a) 严格逐写上界 —— 周期收敛（默认 10s，周期内可短暂超界；`coord_agent_cache_active_bytes` 可观测）；<br>(b) 真 LRU —— 淘汰按「最后写入」新近度近似（读不刷新，get 零写放大）；<br>(c) 记账只含数据面活跃字节 —— 不含 ISR 复制日志（见 cache.rs 模块头保留声明）与 redb 页面开销（文件体积 > 记账值）；<br>(d) ISR 启用时淘汰/过期回收为**各节点本地行为**，不跨节点复制 | `coord-agent/src/services/cache.rs`（`reap_once` / `account_upsert_tx` / `CACHE_META_TABLE`）、`coord-agent/src/lib.rs`（cache 装配 + 指标采样）、`coord-agent/src/metrics.rs`（`coord_agent_cache_*`） | 逐写严格上界；读触达 LRU；记账覆盖复制日志与文件真空压缩；ISR 一致淘汰 |
 | B-PL-4 | MQ 容量上界（默认 1GB）**已在 publish 入口强制**：消息 + DLQ 与数据同事务记账（redb 单写者 ⇒ **逐写严格上界**，无 reaper 周期收敛窗口）；超界与单条超限的 publish 均拒绝 `RESOURCE_EXHAUSTED`（不静默丢历史）。过期回收由 reaper（默认 10s）按 topic 的 `retention_secs` 清扫消息与 DLQ（`0` = 不按时间回收）。**仍不承诺**：<br>(a) 记账只含消息 + DLQ 物理字节 —— 不含消费位点 / 幂等索引 / ISR 复制日志（复制设计保留）与 redb 页面开销（文件体积 > 记账值）；<br>(b) ISR 启用时配额与回收为**各节点本地行为**（Follower 镜像 Leader 已提交的决定并照常记账，但**不做**配额检查——避免复制分叉）；<br>(c) `move_to_dlq` 为维护路径不受配额拒绝（净增仅 reason/detail 开销）；<br>(d) topic 删除的存量回收**仅经 `DeleteTopic`（RPC，全量：消息/DLQ/位点/幂等索引/next-offset + 配额归还）**；**内部分段方法 `delete_topic`（仅删配置行）仍存在**（其他维护路径使用），经它删除后存量行不被清扫但仍计入配额 —— 运营面不得使用内部方法代餐；<br>(e) 时钟回拨等极端情形下，被非过期行挡住的过期行会延迟到后续轮次回收 | `coord-agent/src/services/mq.rs`（`ensure_quota_tx` / `reap_once` / `purge_expired_in_table` / `delete_topic_full` / `MQ_META_TABLE`）、`coord-agent/src/lib.rs`（MQ 装配 + 指标采样）、`coord-agent/src/metrics.rs`（`coord_agent_mq_*`）；删除判据：`test_delete_topic_full_reclaims_all_state`、`test_leader_query_dlq_and_delete_across_agents` | per-topic size-retention（可选 opt-in）；记账覆盖复制日志与文件真空压缩 |
+| B-PL-5 | **缓存键空间操作（Keys / Clear）的边界**：`Keys` 为**本节点视角**的 best-effort 枚举（ISR 落后节点可能缺新键；string/hash/list/set 逻辑键去重）；单次调用扫描有界（limit 封顶 10000），不退化全表阻塞扫描。`Clear` 按逻辑键前缀**批式**执行（单批 ≤1024 行为一个写事务），与并发写**按到达顺序**竞争（调用窗口内观测到的匹配键都会被清掉；窗口后新写入可能存活）；有 1000 万行安全阀（超限报错；部分清理已提交，重跑幂等）；ISR 启用时清理决定经复制通道全域下发（Follower 幂等应用）。键/前缀**不得含 NUL**（存储编码用 NUL 作分隔） | `coord-agent/src/services/cache.rs`（`keys_page` / `clear_prefix` / `clear_prefix_loop` / `clear_prefix_chunk_tx`）、`coord-agent/src/services/replication.rs`（`CacheClear` 复制条目）；判据：`test_keys_page_prefix_filter_order_and_pagination`、`test_keys_page_covers_all_data_types_deduped`、`test_clear_prefix_all_types_and_accounting`、`test_cache_replicated_setnx_and_clear` | 跨节点一致枚举（等 ISR 同步读）；逐键删除事件（更强的新旧次序保证）需先定语义 |
 
 ---
 

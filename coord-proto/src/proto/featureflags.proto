@@ -8,6 +8,14 @@ syntax = "proto3";
 //            （字段编号/类型逐项一致；迁移 = 机械式重挂载，禁止趁机改 wire）
 //
 // 验收口径与目标日期约定见 WHITEPAPER.md。
+//
+// 语义（管理面 / 求值面）
+// ------------------------------------------------------------
+//   - 开关状态存 **Server KV**（重启不丢、跨 agent 共享）；读路径直读存储、
+//     无本地缓存 ⇒ 写入**立即生效**（从任一已连接 agent 求值一致）。
+//   - 能力：读面（IsEnabled / Evaluate / ListFlags）= `coord:flags:read`；
+//     管理面（PutFlag / DeleteFlag）= `coord:flags:manage`。
+//   - 百分比灰度：求值按 user_id hash 一致性分桶；`percentage` 缺省 = 全量开关。
 // ============================================================
 
 package coord.featureflags.v1;
@@ -21,6 +29,10 @@ option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/feat
 service FeatureFlags {
   rpc IsEnabled(FeatureFlagIsEnabledRequest) returns (FeatureFlagIsEnabledResponse);
   rpc Evaluate(FeatureFlagEvaluateRequest) returns (FeatureFlagEvaluateResponse);
+  // 管理面（写入 / 删除 / 列表）：能力见头注。
+  rpc PutFlag(FeatureFlagPutFlagRequest) returns (FeatureFlagPutFlagResponse);
+  rpc DeleteFlag(FeatureFlagDeleteFlagRequest) returns (FeatureFlagDeleteFlagResponse);
+  rpc ListFlags(FeatureFlagListFlagsRequest) returns (FeatureFlagListFlagsResponse);
 }
 
 message FeatureFlagIsEnabledRequest {
@@ -40,6 +52,37 @@ message FeatureFlagEvaluateRequest {
 
 message FeatureFlagEvaluateResponse {
   bytes result = 1; // JSON evaluation result
+}
+
+// 写入 / 覆盖开关状态（同 flag_name 覆盖，幂等）。
+//   - `percentage` 缺省 = 全量开关；给出时必须在 [0,100]，否则 INVALID_ARGUMENT；
+//   - 生效**立即**（读路径无本地缓存）；状态重启不丢、跨 agent 一致。
+message FeatureFlagPutFlagRequest {
+  string flag_name = 1;
+  bool enabled = 2;
+  optional uint32 percentage = 3; // 0-100；缺省 = 全量
+}
+
+message FeatureFlagPutFlagResponse {}
+
+// 删除开关（幂等：不存在也成功）。删除后求值为 false（与未注册同义）。
+message FeatureFlagDeleteFlagRequest {
+  string flag_name = 1;
+}
+
+message FeatureFlagDeleteFlagResponse {}
+
+// 列出全部开关（按 flag_name 升序，结果稳定可比）。
+message FeatureFlagListFlagsRequest {}
+
+message FeatureFlagListFlagsResponse {
+  repeated FeatureFlagEntry flags = 1;
+}
+
+message FeatureFlagEntry {
+  string flag_name = 1;
+  bool enabled = 2;
+  optional uint32 percentage = 3; // 缺省 = 全量开关
 }
 
 // ============================================================

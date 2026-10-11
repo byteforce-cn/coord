@@ -41,8 +41,10 @@ import java.util.Optional;
  * <ul>
  *   <li>The contract's {@code cron_expression} has no documented dialect; pass the
  *       6-field form the coordinator accepts.</li>
- *   <li>{@code result} on completion is accepted but <b>not stored</b> — the contract
- *       has no result-retrieval RPC, so there is nothing to read it back from.</li>
+ *   <li>{@code result} on completion <b>is persisted</b> with the job record
+ *       (KV-backed, survives restarts; the <b>first</b> completion's result wins and
+ *       later completions never overwrite it) — read it back with
+ *       {@link #getJob(String)}.</li>
  * </ul>
  */
 public interface SchedulerClient {
@@ -90,11 +92,30 @@ public interface SchedulerClient {
     /**
      * Mark a job completed, releasing the claim.
      *
+     * <p>The {@code result} is <b>persisted with the job record</b> (G-SC-1: KV-backed,
+     * survives restarts). The <b>first</b> completion's result wins; duplicate
+     * completions are idempotent and never overwrite it. Read it back with
+     * {@link #getJob(String)}.
+     *
      * @param jobId  the job id returned by {@link #claimJob(String)}
-     * @param result accepted for contract compatibility; <b>not persisted</b>
+     * @param result bytes persisted at completion (first completion wins)
      * @throws CoordException on communication failure
      */
     void completeJob(String jobId, byte[] result);
+
+    /**
+     * Read job detail, including the persisted completion result.
+     *
+     * <p>Read-only and idempotent; an unknown job returns {@link Optional#empty()}
+     * (not an error). The job state is {@code Pending} / {@code Running} /
+     * {@code Completed} / {@code Failed}; the result is readable after completion,
+     * across restarts and from any agent (state lives in the shared KV).
+     *
+     * @param jobId the job id returned by {@link #claimJob(String)} (or the registration name)
+     * @return the job snapshot, or empty when the job was never registered
+     * @throws CoordException on communication failure
+     */
+    Optional<JobStatus> getJob(String jobId);
 
     /** Complete a job with a UTF-8 string result. */
     default void completeJob(String jobId, String result) {

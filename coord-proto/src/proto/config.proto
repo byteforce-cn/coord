@@ -8,6 +8,19 @@ syntax = "proto3";
 //            （字段编号/类型逐项一致；迁移 = 机械式重挂载，禁止趁机改 wire）
 //
 // 验收口径与目标日期约定见 WHITEPAPER.md。
+//
+// 语义与纪律（快照 + 增量）
+// ------------------------------------------------------------
+//   - 键存在性以 `ConfigGetResponse.found` 为唯一判据：value 为空串 ≠ 不存在。
+//   - `ConfigWatchEvent.new_value` 的 presence 表达变更形态：
+//       在场（可为空串）= 当前值；缺省 = **键已删除**。
+//   - `ConfigWatchEvent.revision` 为**全局位点**（Server KV 全局 Revision 口径，
+//     流内单调递增；回放段 ≤ 订阅水位，其后转实时）。持久化它以支持续订。
+//   - resync 纪律：先 `List` 取快照 `entries + revision`（W），再从
+//     `Watch(start_revision = W)` 起订（服务端回放 revision ≥ W 的变更再转实时，
+//     可能重复——应用须幂等）；断线重连传 `last_revision + 1`。
+//     位点已不可达（历史压缩）时流以 `FAILED_PRECONDITION` 终止：须重读 `List`
+//     取新位点后重订，不得静默续跑。
 // ============================================================
 
 package coord.config.v1;
@@ -30,8 +43,8 @@ message ConfigGetRequest {
 }
 
 message ConfigGetResponse {
-  string value = 1; // empty means key not found OR empty value stored
-  bool found = 2; // true if key exists, false otherwise
+  string value = 1; // found=true 时 = 键当前值（可为空串）；found=false 时恒为空
+  bool found = 2; // 键存在性唯一判据
 }
 
 message ConfigPutRequest {
@@ -40,6 +53,8 @@ message ConfigPutRequest {
 }
 
 message ConfigPutResponse {
+  // 该次写入的**全局位点**（Server KV 全局 Revision 口径，与 List/Watch 的
+  // revision 同一坐标轴）：可用它作为「已知含本次写入」的起订下限。
   int64 revision = 1;
 }
 
@@ -49,17 +64,23 @@ message ConfigListRequest {
 
 message ConfigListResponse {
   map<string, string> entries = 1;
+  // 快照位点 W（见头注「语义与纪律」）；起订位点即用它。
+  // 0 = 位点未知（尚未完成一次快照对账）——消费者按「无位点」处理。
+  int64 revision = 2;
 }
 
 message ConfigWatchRequest {
   string prefix = 1;
+  // 起始位点：0 = 从最新开始（不回溯历史）；>0 = 回放 revision ≥ start_revision
+  // 的变更后转实时。断线重连传 last_revision + 1。
   int64 start_revision = 2;
 }
 
 message ConfigWatchEvent {
-  string key = 1;
+  string key = 1; // 逻辑配置键（无 /_config/ 存储前缀）
+  // presence：在场 = 当前值（可为空串）；缺省 = 键已删除。
   optional string new_value = 2;
-  int64 revision = 3;
+  int64 revision = 3; // 全局位点（同流单调递增；不是每键版本号）
 }
 
 // ============================================================

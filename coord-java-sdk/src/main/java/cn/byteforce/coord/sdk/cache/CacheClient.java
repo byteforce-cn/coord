@@ -48,6 +48,58 @@ public interface CacheClient {
     void set(String key, byte[] value, long ttlSeconds);
 
     /**
+     * Atomically set a string value <b>only if the key does not exist</b>
+     * (SETNX / putIfAbsent). Expired keys count as absent.
+     *
+     * <p>Semantics:
+     * <ul>
+     *   <li>returns {@code true} when this call performed the write; the TTL applies
+     *       only then. When {@code false}, the existing value and TTL are untouched.</li>
+     *   <li>Single-agent: check-and-set in one write transaction (atomic under
+     *       concurrency). ISR enabled: decided in the Leader's local transaction and
+     *       replicated on success.</li>
+     *   <li><b>Error semantics match {@code set}</b>: on error the local write may
+     *       already be in effect. A retry is a <i>fresh attempt to acquire</i> — if the
+     *       first attempt actually wrote, the retry returns {@code false} (like Redis
+     *       SETNX); never use {@code false} to infer "this call did not write".</li>
+     * </ul>
+     *
+     * @return {@code true} iff this call wrote the value
+     */
+    boolean setIfAbsent(String key, byte[] value, long ttlSeconds);
+
+    /**
+     * Enumerate keys under a logical-key prefix (bounded, cursor-paginated,
+     * string/hash/list/set logical keys deduplicated and ascending).
+     *
+     * <p>Bounded scan per call (never a full-table blocking scan); best-effort view
+     * of <b>this agent's</b> data (a lagging ISR replica may miss recent keys). Keys
+     * must not contain NUL bytes. Pass an empty {@code cursor} to start; loop while
+     * {@link CacheKeyPage#hasMore()}.
+     *
+     * @param prefix logical-key prefix ("" = all keys)
+     * @param limit  page size; {@code 0} = server default (1000), capped server-side
+     * @param cursor continuation cursor from the previous page ("" to start)
+     */
+    CacheKeyPage keys(String prefix, int limit, String cursor);
+
+    /**
+     * Clear every entry whose <b>logical key</b> starts with {@code prefix}
+     * (all data types: string / hash / list / set).
+     *
+     * <p>Administrative path for namespace cleanup / capacity reclaim:
+     * <ul>
+     *   <li>no matches = success (no-op); deletion cannot be rolled back (no archive);</li>
+     *   <li>executed in bounded batches; concurrent writes race by arrival order;</li>
+     *   <li>capacity accounting (B-PL-3) is decremented with the deletions;</li>
+     *   <li>ISR enabled: the clear decision is replicated cluster-wide (idempotent apply).</li>
+     * </ul>
+     *
+     * @param prefix logical-key prefix ("" = every key)
+     */
+    CacheClearResult clear(String prefix);
+
+    /**
      * Delete a key.
      *
      * @return true if the key existed and was deleted

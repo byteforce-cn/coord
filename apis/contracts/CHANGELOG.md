@@ -2,6 +2,55 @@
 
 版本规则见 WHITEPAPER.md。契约版本独立于代码版本。
 
+## [contracts/v1.4.0] — 2026-10-11（Minor：消费方审计第二批增量——配置位点/缓存键空间/调度结果回读/开关管理面）
+
+**发布口径**：本条目为 **Minor**（新增 RPC / 新增字段 / 注释级语义声明；
+不改动任何既有字段编号与类型；`buf breaking` 基线 = 上一合同的既有包，CI 强制）。
+新增 RPC 7 个（Cache ×3、Scheduler ×1、FeatureFlags ×3）、新增字段 1 个
+（`ConfigListResponse.revision`）与 1 个新消息组（`CacheSetIfAbsent*` /
+`CacheKeys*` / `CacheClear*` / `SchedulerGetJob*` / `FeatureFlagPutFlag*` /
+`FeatureFlagDeleteFlag*` / `FeatureFlagListFlags` / `FeatureFlagEntry`，全部新增）。
+
+**新增 RPC（7 个）**
+
+| 契约包 | RPC | 能力 | 说明 |
+|:--|:--|:--|:--|
+| `coord.cache.v1` | `SetIfAbsent` | `coord:cache:write` | 原子条件写（SETNX）：仅当键不存在/已过期时写入；返回 `written`；单 agent 同事务判定，ISR 在 Leader 本地事务判定 |
+| `coord.cache.v1` | `Keys` | `coord:cache:read` | 键枚举：有界、游标分页、四类逻辑键去重升序；本节点视角 best-effort |
+| `coord.cache.v1` | `Clear` | `coord:cache:write` | 按逻辑键前缀清理全部数据类型（批式；ISR 经复制通道全域下发） |
+| `coord.scheduler.v1` | `GetJob` | `coord:scheduler:read` | 任务详情 / 结果回读（G-SC-1 读取面）：只读幂等；未注册 ⇒ `found=false` |
+| `coord.featureflags.v1` | `PutFlag` | `coord:flags:manage` | 写入 / 覆盖开关（全量或 `percentage` 灰度，`[0,100]` 外拒绝） |
+| `coord.featureflags.v1` | `DeleteFlag` | `coord:flags:manage` | 删除开关（幂等） |
+| `coord.featureflags.v1` | `ListFlags` | `coord:flags:read` | 列出全部开关（按键升序） |
+
+**新增字段（1 个消息，向后兼容）**
+
+- `coord.config.v1.ConfigListResponse` 新增 `int64 revision = 2`（快照位点 W；
+  0 = 位点未知）。
+
+**语义声明变更（wire 不变；含一处「坐标轴变更」告知）**
+
+- `coord.config.v1`：**快照 + 位点续订（resync 纪律）**——`List` 返回快照位点；
+  `Watch(start_revision)` 按位点回放后转实时；`WatchEvent.new_value` 的
+  presence 缺省 = **键已删除**（空串 = 存储的空值）；事件 `revision` 为**全局位点**。
+  ⚠️ **Consumer 告知**：`ConfigPutResponse.revision` 由「每键版本号」改为
+  **全局位点**（Server KV 全局 Revision 口径）——此前该字段无文档承诺，
+  若曾按每键版本号解析需改用全局位点语义（与 List/Watch 同一坐标轴）。
+  位点不可达（历史压缩）时 Watch 流以 `FAILED_PRECONDITION` 终止（重读 List 重订）。
+- `coord.cache.v1`：SetNX / TTL 交互（仅写入成功时生效）、ISR 错误语义同 `Set`
+  （本地可能已生效；重试 = 再次尝试获取）；Keys/Clear 的边界（有界扫描 /
+  批式 / ISR 全域下发 / NUL 限制）见 proto 与 `boundaries.md` B-PL-5。
+- `coord.scheduler.v1`：`CompleteJob.result` 的读取面已补（`GetJob`）——
+  「留档用于重启不丢、无读取面」的旧注释作废；结果首个为准、重启/换 agent 可读。
+- `coord.featureflags.v1`：管理面 RPC 落地 ⇒「开关更新是带外发生的」的旧口径
+  改为「RPC 管理面 + 带外 KV 路径并存」；读路径直读存储无本地缓存 ⇒ 写入立即生效。
+
+**校验**（本地已跑）
+
+- `apis/contracts/scripts/check-wire-sync.sh` exit 0（包名/rpc/字段编号双副本一致）
+- `apis/contracts/scripts/check-wire-descriptor.sh` exit 0（descriptor 级 wire 相等）
+- `apis/contracts/scripts/check-sdk-sync.sh` exit 0（契约面 ↔ Java SDK 命名空间）
+
 ## [contracts/v1.3.0] — 2026-10-09（Minor：ADR-0010 全量承接批次的契约增量）
 
 **发布口径**：本条目为 **Minor**（新增 RPC / 新增字段 / 注释级语义声明；

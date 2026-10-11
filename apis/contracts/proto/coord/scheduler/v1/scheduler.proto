@@ -23,6 +23,8 @@ service Scheduler {
   rpc ClaimJob(SchedulerClaimJobRequest) returns (SchedulerClaimJobResponse);
   rpc Heartbeat(SchedulerHeartbeatRequest) returns (SchedulerHeartbeatResponse);
   rpc CompleteJob(SchedulerCompleteJobRequest) returns (SchedulerCompleteJobResponse);
+  // 任务详情读取（含完成结果回读，G-SC-1 读取面）。
+  rpc GetJob(SchedulerGetJobRequest) returns (SchedulerGetJobResponse);
 }
 
 message SchedulerRegisterJobRequest {
@@ -71,15 +73,33 @@ message SchedulerHeartbeatResponse {}
 //   - 无有效认领且任务尚未 Completed ⇒ `FAILED_PRECONDITION`；
 //   - 已 Completed 的任务**幂等**：重复完成仍返回成功；
 //   - `result` **随完成持久化**（G-SC-1：KV 任务记录，重启不丢）；
-//     首个完成的 result 为准（重复完成不覆盖）。
-//     注意：当前契约面**没有**读取结果的 RPC——留档用于重启不丢与后续读取面
-//     演进，不要依赖它传递业务结果。
+//     首个完成的 result 为准（重复完成不覆盖）；结果经 `GetJob` 回读。
 message SchedulerCompleteJobRequest {
   string job_id = 1;
   bytes result = 2;
 }
 
 message SchedulerCompleteJobResponse {}
+
+// 读取任务详情（含完成结果回读）。
+//
+// 语义：
+//   - 只读、幂等；任务未注册 ⇒ `found=false`（不是错误码）；
+//   - `state` ∈ {"Pending","Running","Completed","Failed"}；
+//   - `result`：完成后持久化的结果字节（首个完成为准）；非 Completed 时为空；
+//   - `completed_at_ms`：完成墙钟毫秒（自 UNIX_EPOCH）；未完成时为 0。
+//   - 重启 / 换 agent 后结果仍可读（状态在 Server KV，跨节点共享）。
+message SchedulerGetJobRequest {
+  string job_id = 1; // 注册返回的 job_id（= 注册名）
+}
+
+message SchedulerGetJobResponse {
+  bool found = 1;
+  string job_id = 2;
+  string state = 3;
+  bytes result = 4;
+  int64 completed_at_ms = 5;
+}
 
 // ============================================================
 // Workflow — Serverless Workflow

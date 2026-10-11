@@ -53,7 +53,7 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         // ── Watch ──
         "/coord.watch.Watch/Watch" => Some("data:watch:subscribe"),
 
-        // ── 对象存储（coord.storage，EXPERIMENTAL 数据面）──
+        // ── 对象存储（coord.storage，Server 侧数据面）──
         "/coord.storage.Storage/Get" => Some("data:storage:read"),
         "/coord.storage.Storage/Stat" => Some("data:storage:read"),
         "/coord.storage.Storage/Put" => Some("data:storage:write"),
@@ -156,21 +156,24 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         "/coord.event.v1.Event/Subscribe" => Some("coord:event:subscribe"),
         "/coord.event.v1.Event/Unsubscribe" => Some("coord:event:unsubscribe"),
 
-        // Cache —— 缓存（EXPERIMENTAL）
+        // Cache —— 缓存（COMMITTED）
         "/coord.cache.v1.Cache/Get" => Some("coord:cache:read"),
         "/coord.cache.v1.Cache/HGet" => Some("coord:cache:read"),
         "/coord.cache.v1.Cache/HGetAll" => Some("coord:cache:read"),
         "/coord.cache.v1.Cache/LRange" => Some("coord:cache:read"),
         "/coord.cache.v1.Cache/LLen" => Some("coord:cache:read"),
         "/coord.cache.v1.Cache/SMembers" => Some("coord:cache:read"),
+        "/coord.cache.v1.Cache/Keys" => Some("coord:cache:read"),
         "/coord.cache.v1.Cache/Set" => Some("coord:cache:write"),
+        "/coord.cache.v1.Cache/SetIfAbsent" => Some("coord:cache:write"),
+        "/coord.cache.v1.Cache/Clear" => Some("coord:cache:write"),
         "/coord.cache.v1.Cache/HSet" => Some("coord:cache:write"),
         "/coord.cache.v1.Cache/LPush" => Some("coord:cache:write"),
         "/coord.cache.v1.Cache/RPop" => Some("coord:cache:write"),
         "/coord.cache.v1.Cache/SAdd" => Some("coord:cache:write"),
         "/coord.cache.v1.Cache/Delete" => Some("coord:cache:write"),
 
-        // MQ —— 消息队列（EXPERIMENTAL）
+        // MQ —— 消息队列（COMMITTED）
         "/coord.mq.v1.MQ/CreateTopic" => Some("coord:mq:manage"),
         "/coord.mq.v1.MQ/PollDlq" => Some("coord:mq:manage"),
         "/coord.mq.v1.MQ/Publish" => Some("coord:mq:publish"),
@@ -188,13 +191,15 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         "/coord.agent.Replica/IsrHeartbeat" => Some("coord:replica:write"),
         "/coord.agent.Replica/Reconcile" => Some("coord:replica:read"),
 
-        // Scheduler —— 调度（EXPERIMENTAL）
+        // Scheduler —— 调度（COMMITTED）
         "/coord.scheduler.v1.Scheduler/RegisterJob" => Some("coord:scheduler:manage"),
         "/coord.scheduler.v1.Scheduler/ClaimJob" => Some("coord:scheduler:execute"),
         "/coord.scheduler.v1.Scheduler/Heartbeat" => Some("coord:scheduler:execute"),
         "/coord.scheduler.v1.Scheduler/CompleteJob" => Some("coord:scheduler:execute"),
+        // 任务详情 / 结果回读（只读面）
+        "/coord.scheduler.v1.Scheduler/GetJob" => Some("coord:scheduler:read"),
 
-        // Workflow —— 工作流（EXPERIMENTAL）
+        // Workflow —— 工作流（COMMITTED）
         "/coord.workflow.v1.Workflow/Start" => Some("coord:workflow:execute"),
         "/coord.workflow.v1.Workflow/Signal" => Some("coord:workflow:execute"),
         "/coord.workflow.v1.Workflow/Cancel" => Some("coord:workflow:execute"),
@@ -238,6 +243,10 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         "/coord.ratelimiter.v1.RateLimiter/Allow" => Some("coord:ratelimit:check"),
         "/coord.featureflags.v1.FeatureFlags/IsEnabled" => Some("coord:flags:read"),
         "/coord.featureflags.v1.FeatureFlags/Evaluate" => Some("coord:flags:read"),
+        "/coord.featureflags.v1.FeatureFlags/ListFlags" => Some("coord:flags:read"),
+        // 管理面（写入 / 删除）
+        "/coord.featureflags.v1.FeatureFlags/PutFlag" => Some("coord:flags:manage"),
+        "/coord.featureflags.v1.FeatureFlags/DeleteFlag" => Some("coord:flags:manage"),
 
         // PKI：私钥集中存储前必须上鉴权
         "/coord.pki.v1.Pki/InitCa" => Some("pki:ca:init"),

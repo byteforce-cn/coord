@@ -11,6 +11,8 @@ import cn.byteforce.coord.contracts.scheduler.v1.SchedulerClaimJobRequest;
 import cn.byteforce.coord.contracts.scheduler.v1.SchedulerClaimJobResponse;
 import cn.byteforce.coord.contracts.scheduler.v1.SchedulerCompleteJobRequest;
 import cn.byteforce.coord.contracts.scheduler.v1.SchedulerCompleteJobResponse;
+import cn.byteforce.coord.contracts.scheduler.v1.SchedulerGetJobRequest;
+import cn.byteforce.coord.contracts.scheduler.v1.SchedulerGetJobResponse;
 import cn.byteforce.coord.contracts.scheduler.v1.SchedulerGrpc;
 import cn.byteforce.coord.contracts.scheduler.v1.SchedulerHeartbeatRequest;
 import cn.byteforce.coord.contracts.scheduler.v1.SchedulerHeartbeatResponse;
@@ -20,6 +22,7 @@ import cn.byteforce.coord.sdk.CoordConfig;
 import cn.byteforce.coord.sdk.CoordException;
 import cn.byteforce.coord.sdk.event.EventClient;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
+import cn.byteforce.coord.sdk.scheduler.JobStatus;
 import cn.byteforce.coord.sdk.scheduler.SchedulerClient;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import com.google.protobuf.ByteString;
@@ -222,13 +225,42 @@ class EventSchedulerContractTest {
     }
 
     @Test
-    @DisplayName("completeJob：job_id 与 result 都送达（result 契约接受但不留档）")
+    @DisplayName("completeJob：job_id 与 result 都送达（result 随任务持久化，首个为准）")
     void schedulerCompleteJobSendsHandleAndResult() {
         schedulerClient.completeJob("nightly-report", "ok");
 
         SchedulerCompleteJobRequest sent = scheduler.lastComplete;
         assertThat(sent.getJobId()).isEqualTo("nightly-report");
         assertThat(sent.getResult().toStringUtf8()).isEqualTo("ok");
+    }
+
+    @Test
+    @DisplayName("getJob：结果回读——found/state/result/completed_at_ms 逐字段映射")
+    void schedulerGetJobMapsPersistedResult() {
+        scheduler.getJobFound = true;
+        scheduler.getJobState = "Completed";
+        scheduler.getJobResult = "first-result";
+        scheduler.getJobCompletedAtMs = 1_700_000_000_000L;
+
+        Optional<JobStatus> status = schedulerClient.getJob("nightly-report");
+
+        assertThat(scheduler.lastGetJob.getJobId()).isEqualTo("nightly-report");
+        assertThat(status).isPresent();
+        assertThat(status.get().getJobId()).isEqualTo("nightly-report");
+        assertThat(status.get().getState()).isEqualTo("Completed");
+        assertThat(status.get().isCompleted()).isTrue();
+        assertThat(status.get().getResultAsString()).isEqualTo("first-result");
+        assertThat(status.get().getCompletedAtMillis()).isEqualTo(1_700_000_000_000L);
+    }
+
+    @Test
+    @DisplayName("getJob：未注册任务 → found=false → 空 Optional（正常返回，不是错误）")
+    void schedulerGetJobMapsUnknownJobToEmpty() {
+        scheduler.getJobFound = false;
+
+        Optional<JobStatus> status = schedulerClient.getJob("never-registered");
+
+        assertThat(status).isEmpty();
     }
 
     // ── fakes ───────────────────────────────────────────────────────────────
@@ -279,10 +311,15 @@ class EventSchedulerContractTest {
     private static final class FakeScheduler extends SchedulerGrpc.SchedulerImplBase {
         volatile boolean claimFound = true;
         volatile boolean heartbeatFails = false;
+        volatile boolean getJobFound = true;
+        volatile String getJobState = "Pending";
+        volatile String getJobResult = "";
+        volatile long getJobCompletedAtMs = 0L;
         volatile SchedulerRegisterJobRequest lastRegister;
         volatile SchedulerClaimJobRequest lastClaim;
         volatile SchedulerHeartbeatRequest lastHeartbeat;
         volatile SchedulerCompleteJobRequest lastComplete;
+        volatile SchedulerGetJobRequest lastGetJob;
         private final AtomicBoolean claimConsumed = new AtomicBoolean(false);
 
         @Override
@@ -334,6 +371,26 @@ class EventSchedulerContractTest {
                                 StreamObserver<SchedulerCompleteJobResponse> o) {
             lastComplete = req;
             o.onNext(SchedulerCompleteJobResponse.getDefaultInstance());
+            o.onCompleted();
+        }
+
+        @Override
+        public void getJob(SchedulerGetJobRequest req,
+                           StreamObserver<SchedulerGetJobResponse> o) {
+            lastGetJob = req;
+            if (!getJobFound) {
+                // 未注册任务：found=false（正常返回，非错误码）
+                o.onNext(SchedulerGetJobResponse.getDefaultInstance());
+                o.onCompleted();
+                return;
+            }
+            o.onNext(SchedulerGetJobResponse.newBuilder()
+                    .setFound(true)
+                    .setJobId(req.getJobId())
+                    .setState(getJobState)
+                    .setResult(ByteString.copyFromUtf8(getJobResult))
+                    .setCompletedAtMs(getJobCompletedAtMs)
+                    .build());
             o.onCompleted();
         }
     }

@@ -1,6 +1,6 @@
 # 消费方契约页（Consumer Contract）
 
-> Owner: maintainers ｜ Last verified: 2026-10-09
+> Owner: maintainers ｜ Last verified: 2026-10-11
 
 面向**接入方**的聚合页：按服务给出「一致性 / 路由 / 失败语义 + 推荐消费范式」，
 并把每 RPC 的能力名与已接受的边界汇总为可检索的表。
@@ -79,6 +79,16 @@
 - 注册发现：实例心跳过期由服务端判定下线；消费者侧以 `Discover` 结果为准，
   `Watch` 只作变更信号。
 - 配置中心：读取「KV + 本地 cache + watch」；变更传播是收敛语义（§0.3）。
+  - **快照 + 位点续订（resync 纪律）**：`List` 返回 `entries + revision`（位点 W）；
+    以 W 为起订位点订阅，闭合「快照 → 订阅」窗口——**快照后被删除的 key
+    也能从位点事件可靠收敛**（可能重复，应用须幂等）。Java SDK：
+    `listWithRevision` + `watchFrom`（SDK 断线重连自动按 `last + 1` 续订）。
+  - **删除语义（presence）**：`ConfigWatchEvent.new_value` 缺省 = 键已删除；
+    空串 = 存储的空值。键存在性以 `ConfigGetResponse.found` 为准，不以空串推断。
+  - `revision` 为**全局位点**（Server KV 全局 Revision 口径）：`Put` 响应、
+    `List` 快照、`Watch` 事件三者同一坐标轴；持久化事件的 `revision` 作为续订游标。
+  - 位点已不可达（历史压缩）时 Watch 流以 `FAILED_PRECONDITION` 终止：须重读
+    `List` 取新位点后重订（不得静默续跑；overflow 终止为 `UNAVAILABLE`，按位点重连即可重放）。
 
 ## 3. Lock / LeaderElection / IdGen（场景 ②）
 
@@ -172,32 +182,43 @@
   `coord_agent_mq_next_offset`；告警 `CoordMqConsumerLag`（处置见 runbook §6）。
 - 滞后持续增长 = 生产快于消费（扩消费者）；停滞且 > 0 = 消费者停摆。
 
-## 6. Cache（缓存，EXPERIMENTAL）
+## 6. Cache（缓存）
 
 | RPC（组） | 能力 |
 |:--|:--|
-| `Cache/Get` / `HGet` / `HGetAll` / `LRange` / `LLen` / `SMembers` | `coord:cache:read` |
-| `Cache/Set` / `HSet` / `LPush` / `RPop` / `SAdd` / `Delete` | `coord:cache:write` |
+| `Cache/Get` / `HGet` / `HGetAll` / `LRange` / `LLen` / `SMembers` / `Keys` | `coord:cache:read` |
+| `Cache/Set` / `SetIfAbsent` / `HSet` / `LPush` / `RPop` / `SAdd` / `Delete` / `Clear` | `coord:cache:write` |
 
 - 容量：默认 1GB，超界淘汰 + 单条超限写拒绝（`RESOURCE_EXHAUSTED`）；
   周期收敛、非逐写严格上界的口径与 ISR 本地回收行为见 `boundaries.md` B-PL-3。
 - 缓存**不是**权威存储；跨节点提交非原子（ADR-0002 边界）——以数据库/权威源
   为准。
+- **原子条件写 `SetIfAbsent`（SETNX）**：仅当 key 不存在（或已过期）时写入并返回
+  `written=true`；已存在时不改动原值与 TTL，TTL 仅在写入成功时生效。单 agent 下
+  判定与写入同一写事务（N 并发仅 1 个成功）；ISR 下判定在 Leader 本地事务完成、
+  成功经复制通道下发。错误语义与 `Set` 相同（本地可能已生效）；重试 = 再次尝试
+  获取（首次已写则返回 false，与 Redis SETNX 同口径）。
+- **键空间操作**：`Keys(prefix, limit, cursor)` 有界枚举（string/hash/list/set
+  逻辑键去重、升序、游标分页；本节点视角 best-effort）；`Clear(prefix)` 按逻辑键
+  前缀清理**全部数据类型**（批式执行、记账同步扣减；ISR 下清理决定经复制通道
+  全域下发）。键不得含 NUL（`\x00`）字节。边界见 `boundaries.md` B-PL-5。
 
-## 7. Workflow / Scheduler（EXPERIMENTAL）
+## 7. Workflow / Scheduler
 
 | RPC（组） | 能力 |
 |:--|:--|
 | `Scheduler/RegisterJob` | `coord:scheduler:manage` |
 | `Scheduler/ClaimJob` / `Heartbeat` / `CompleteJob` | `coord:scheduler:execute` |
+| `Scheduler/GetJob` | `coord:scheduler:read` |
 | `Workflow/Start` / `Signal` / `Cancel` | `coord:workflow:execute` |
 | `Workflow/GetStatus` / `ListDefinitions` / `GetDefinition` / `ListDefinitionVersions` / `ListInstances` | `coord:workflow:read` |
 | `Workflow/Deploy` / `RollbackDefinition` | `coord:workflow:define` |
 
 - 调度：认领式（`ClaimJob` 带租约，`Heartbeat` 续约），worker 崩溃由租约过期
   重派；**任务完成结果随完成持久化**（G-SC-1）——`CompleteJob` 携带 `result`
-  字节（可选），任务详情可回读 `result` / `completed_at`；**首个结果生效**
-  （重复完成幂等，不覆盖）。
+  字节（可选），**首个结果为准**（重复完成幂等，不覆盖）；结果与完成时刻经
+  **`GetJob` 回读**（只读、幂等；未注册 ⇒ `found=false`，不是错误码；重启 /
+  换 agent 后仍可读，状态在 Server KV）。
 - 工作流：**保留策略已落地（G-WF-1）**——`DeleteInstance`（仅终态）/`DeleteDefinition`（无实例引用才可删）；删除**不可回滚**、**无自动 TTL/归档**（`boundaries.md` B-WF-1；完整语义见 `workflow-semantics.md`）；子流程恢复为周期扫描（B-WF-2/B-WF-3）。
 - **补偿（saga）已落地**：`sw.rs` 编译 DSL 的 `CompensatedBy`，实例失败/取消
   时按序执行补偿步骤（端到端判据
@@ -276,14 +297,21 @@
 | `CircuitBreaker/ReportSuccess` / `ReportFailure` | `coord:breaker:report` |
 | `CircuitBreaker/Reset` | `coord:breaker:manage` |
 | `RateLimiter/Allow` | `coord:ratelimit:check` |
-| `FeatureFlags/IsEnabled` / `Evaluate` | `coord:flags:read` |
+| `FeatureFlags/IsEnabled` / `Evaluate` / `ListFlags` | `coord:flags:read` |
+| `FeatureFlags/PutFlag` / `DeleteFlag` | `coord:flags:manage` |
 
 - 熔断器与限流器是**本 agent 本地内存态**：不跨 agent 共享（每个 agent 一份
   计数/令牌桶；多 agent 部署 = 各节点独立配额）。契约声明见 `STATUS.md` 与
   `circuitbreaker.proto` / `ratelimiter.proto`。
 - 方法应为「就近调用」（同进程/同主机 agent），不要当作全局协调器。
+- 特性开关：状态存 **Server KV**（重启不丢、跨 agent 共享）；读路径直读存储、
+  无本地缓存 ⇒ `PutFlag`（全量；`percentage` 给出时为灰度，`[0,100]` 外拒绝
+  `INVALID_ARGUMENT`）与 `DeleteFlag`（幂等）**写入立即生效**，从任一已连接
+  agent 求值一致；`ListFlags` 按键升序返回全部开关。带外 KV 写入路径仍可用：
+  键 `/_featureflags/v1/flag/{flag_name}`，值为 `{"enabled":bool,"percentage":0-100|null}`
+  （JSON）。
 
-## 12. 对象存储（EXPERIMENTAL 数据面）
+## 12. 对象存储（数据面）
 
 - RPC：`Storage/Get` / `Stat`（`data:storage:read`）、`Put` / `Delete`
   （`data:storage:write`）。
@@ -297,7 +325,7 @@
 
 | 边界 | 一句话 | 消费影响 |
 |:--|:--|:--|
-| B-WF-1 | 工作流实例与定义 append-only（无删除/保留 API） | 生命周期由业务侧自己的保留策略兜 |
+| B-WF-1 | 工作流有显式保留 API（`DeleteInstance` 仅终态 / `DeleteDefinition` 无实例引用才可删），但**无自动 TTL/归档/删除审计** | 保留节奏由调用方显式管理；删除不可回滚（无归档副本） |
 | B-WF-2 / B-WF-3 | 子流程恢复为周期轮询；父定义暂读不到时暂停接管 | 恢复有秒级延迟，不是事件驱动 |
 | B-RG-1 / B-RG-2 | 不支持动态增删 region；region 模式 watch 拒绝跨 region | 静态拓扑规划；watch 前缀受限 |
 | B-CX-1 / B-CX-2 | 连接数上限但无寿命回收；客户端连接池机会式回收 | 容量规划考虑长连接占坑 |
@@ -305,6 +333,7 @@
 | B-PKI-1 | 非 HSM + 无吊销；`GetCertByCN`=私钥读取权 | 授权口径 + 轮换应急（§9） |
 | B-TR-1 | 不提供远程非对称签名（G-TR-2） | 需「私钥不出域」签名时另行立项 |
 | B-PL-3 | 缓存容量周期收敛、非真 LRU、ISR 本地回收 | 缓存不作为配额硬边界依赖 |
+| B-PL-5 | 缓存 `Keys` 为有界/本节点视角枚举；`Clear` 批式、与并发写按到达顺序 | 运维清理窗口内暂停并发写；键不得含 NUL |
 | B-PL-4 | MQ 逐写严格上界；ISR 下配额/回收各节点本地；删除仅经 `DeleteTopic` | §5.4 前置条件；不得用内部分段方法代餐 |
 | B-ST-1 / B-ST-3 | 日志回收快照锚定；对象存储恢复期间 `UNAVAILABLE` | 备份/恢复演练按 runbook §3 |
 

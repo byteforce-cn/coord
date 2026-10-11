@@ -15,7 +15,20 @@ public final class ConfigEvent {
     }
 
     public String getKey() { return key; }
+
+    /**
+     * The new value as presence semantics (per {@code config.proto}): an
+     * <b>empty Optional means the key was deleted</b>; a stored empty value arrives
+     * as {@code Optional.of("")}.
+     */
     public Optional<String> getNewValue() { return newValue; }
+
+    /**
+     * Global position (server-wide KV revision) of this event; monotonically
+     * increasing within a stream. Persist it — reconnect resumes from
+     * {@code lastRevision + 1}, and it seeds a fresh watch after a history-loss
+     * termination.
+     */
     public long getRevision() { return revision; }
 
     @Override

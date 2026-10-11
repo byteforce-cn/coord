@@ -48,7 +48,7 @@ use crate::storage::redb_backend::RedbBackend;
 use crate::txn::{TxnCompare, TxnOp, TxnOpResponse};
 use crate::watch::WatchDispatcher;
 
-/// 对象存储 gRPC 服务实现（coord.storage，EXPERIMENTAL 数据面）。
+/// 对象存储 gRPC 服务实现（coord.storage 数据面）。
 /// 见 `storage/object_store.rs` 与 docs/production/volume-object-storage.md 决策记录。
 pub mod object_storage;
 

@@ -539,8 +539,8 @@ fn uuid_like() -> String {
 
 use coord_proto::agent::scheduler_server::Scheduler;
 use coord_proto::agent::{
-    SchedulerClaimJobRequest, SchedulerCompleteJobRequest, SchedulerHeartbeatRequest,
-    SchedulerRegisterJobRequest,
+    SchedulerClaimJobRequest, SchedulerCompleteJobRequest, SchedulerGetJobRequest,
+    SchedulerHeartbeatRequest, SchedulerRegisterJobRequest,
 };
 use tonic::{Code, Request};
 
@@ -728,5 +728,128 @@ async fn test_has_live_claim_tracks_handle_validity() {
     assert!(
         !svc.has_live_claim("live-job").await.unwrap(),
         "完成后句柄必须失效"
+    );
+}
+
+/// ⑤ GetJob：结果回读（G-SC-1 读取面）——complete 后必须能读到**首个** result。
+#[tokio::test]
+async fn test_grpc_get_job_reads_back_first_result() {
+    let svc = SchedulerService::new(Default::default());
+
+    // 未注册 ⇒ found=false（不是错误码；查询是幂等只读）
+    let resp = svc
+        .get_job(Request::new(SchedulerGetJobRequest {
+            job_id: "nope".into(),
+        }))
+        .await
+        .expect("未注册不报错")
+        .into_inner();
+    assert!(!resp.found);
+    assert!(resp.result.is_empty());
+
+    svc.register_job(Request::new(SchedulerRegisterJobRequest {
+        name: "read-job".into(),
+        cron_expression: "0 0 3 * * ?".into(),
+        payload: vec![],
+    }))
+    .await
+    .expect("register 必须成功");
+
+    // 未完成：state=Pending，result 为空，completed_at_ms=0
+    let resp = svc
+        .get_job(Request::new(SchedulerGetJobRequest {
+            job_id: "read-job".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(resp.found);
+    assert_eq!(resp.state, "Pending");
+    assert!(resp.result.is_empty());
+    assert_eq!(resp.completed_at_ms, 0);
+
+    svc.claim_job(Request::new(SchedulerClaimJobRequest {
+        name: "read-job".into(),
+    }))
+    .await
+    .expect("claim 必须成功");
+    svc.complete_job(Request::new(SchedulerCompleteJobRequest {
+        job_id: "read-job".into(),
+        result: b"first".to_vec(),
+    }))
+    .await
+    .expect("完成必须成功");
+
+    let resp = svc
+        .get_job(Request::new(SchedulerGetJobRequest {
+            job_id: "read-job".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.state, "Completed");
+    assert_eq!(resp.result, b"first".to_vec());
+    assert!(resp.completed_at_ms > 0, "完成墙钟必须回传");
+
+    // 首个结果为准：重复完成（不同 result）不覆盖
+    svc.complete_job(Request::new(SchedulerCompleteJobRequest {
+        job_id: "read-job".into(),
+        result: b"second".to_vec(),
+    }))
+    .await
+    .expect("重复完成必须幂等");
+    let resp = svc
+        .get_job(Request::new(SchedulerGetJobRequest {
+            job_id: "read-job".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        resp.result,
+        b"first".to_vec(),
+        "首个完成的 result 为准，重复完成不覆盖"
+    );
+}
+
+/// ⑥ GetJob 重启存续：同一共享 store 的**新服务实例**（重启等价物）仍能读到结果。
+#[tokio::test]
+async fn test_get_job_survives_restart_shared_store() {
+    let store: Arc<dyn SchedulerStore> = Arc::new(MemorySchedulerStore::new());
+    let svc = SchedulerService::with_store(Arc::clone(&store), Duration::from_secs(30));
+    svc.register_job(Request::new(SchedulerRegisterJobRequest {
+        name: "persist-read".into(),
+        cron_expression: "0 0 3 * * ?".into(),
+        payload: vec![],
+    }))
+    .await
+    .unwrap();
+    svc.claim_job(Request::new(SchedulerClaimJobRequest {
+        name: "persist-read".into(),
+    }))
+    .await
+    .unwrap();
+    svc.complete_job(Request::new(SchedulerCompleteJobRequest {
+        job_id: "persist-read".into(),
+        result: b"persisted".to_vec(),
+    }))
+    .await
+    .unwrap();
+
+    // “重启”：新实例、同一 store（生产为 KvSchedulerStore，重启不丢）
+    let svc2 = SchedulerService::with_store(store, Duration::from_secs(30));
+    let resp = svc2
+        .get_job(Request::new(SchedulerGetJobRequest {
+            job_id: "persist-read".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(resp.found, "重启后任务仍必须在");
+    assert_eq!(resp.state, "Completed");
+    assert_eq!(
+        resp.result,
+        b"persisted".to_vec(),
+        "重启后必须能读到完成结果（G-SC-1 读取面）"
     );
 }

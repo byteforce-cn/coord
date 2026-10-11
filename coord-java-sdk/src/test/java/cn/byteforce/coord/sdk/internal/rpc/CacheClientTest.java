@@ -1,17 +1,25 @@
 package cn.byteforce.coord.sdk.internal.rpc;
 
 import cn.byteforce.coord.sdk.CoordConfig;
+import cn.byteforce.coord.sdk.cache.CacheClearResult;
 import cn.byteforce.coord.sdk.cache.CacheClient;
+import cn.byteforce.coord.sdk.cache.CacheKeyPage;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
+import cn.byteforce.coord.contracts.cache.v1.CacheClearRequest;
+import cn.byteforce.coord.contracts.cache.v1.CacheClearResponse;
 import cn.byteforce.coord.contracts.cache.v1.CacheGetRequest;
 import cn.byteforce.coord.contracts.cache.v1.CacheGetResponse;
 import cn.byteforce.coord.contracts.cache.v1.CacheGrpc;
+import cn.byteforce.coord.contracts.cache.v1.CacheKeysRequest;
+import cn.byteforce.coord.contracts.cache.v1.CacheKeysResponse;
 import cn.byteforce.coord.contracts.cache.v1.CacheLLenRequest;
 import cn.byteforce.coord.contracts.cache.v1.CacheLLenResponse;
 import cn.byteforce.coord.contracts.cache.v1.CacheLPushRequest;
 import cn.byteforce.coord.contracts.cache.v1.CacheLPushResponse;
 import cn.byteforce.coord.contracts.cache.v1.CacheRPopRequest;
 import cn.byteforce.coord.contracts.cache.v1.CacheRPopResponse;
+import cn.byteforce.coord.contracts.cache.v1.CacheSetIfAbsentRequest;
+import cn.byteforce.coord.contracts.cache.v1.CacheSetIfAbsentResponse;
 import cn.byteforce.coord.contracts.cache.v1.CacheSetRequest;
 import cn.byteforce.coord.contracts.cache.v1.CacheSetResponse;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
@@ -101,14 +109,98 @@ class CacheClientTest {
         assertThat(cache.get("k")).isEqualTo("v".getBytes());
     }
 
+    @Test
+    void shouldSetIfAbsentReportWrittenFlag() {
+        // 首次写入成功
+        assertThat(cache.setIfAbsent("nx", "v1".getBytes(), 30)).isTrue();
+        // 已存在：不写入（written=false），原值不动
+        assertThat(cache.setIfAbsent("nx", "v2".getBytes(), 30)).isFalse();
+        assertThat(fake.strings.get("nx")).isEqualTo("v1".getBytes());
+    }
+
+    @Test
+    void shouldPageKeysWithCursor() {
+        fake.keyPages.add(new String[]{"a.1", "a.2"});
+        fake.keyPages.add(new String[]{"a.3"});
+
+        CacheKeyPage page1 = cache.keys("a.", 2, "");
+        assertThat(fake.lastKeysPrefix).isEqualTo("a.");
+        assertThat(fake.lastKeysLimit).isEqualTo(2);
+        assertThat(page1.getKeys()).containsExactly("a.1", "a.2");
+        assertThat(page1.getNextCursor()).isEqualTo("a.2");
+        assertThat(page1.hasMore()).isTrue();
+
+        CacheKeyPage page2 = cache.keys("a.", 2, page1.getNextCursor());
+        assertThat(fake.lastKeysCursor).isEqualTo("a.2");
+        assertThat(page2.getKeys()).containsExactly("a.3");
+        assertThat(page2.hasMore()).isFalse();
+    }
+
+    @Test
+    void shouldClearPrefixAndMapCounts() {
+        fake.clearRemovedEntries = 5;
+        fake.clearBytesReclaimed = 128;
+
+        CacheClearResult result = cache.clear("ns.");
+
+        assertThat(fake.lastClearPrefix).isEqualTo("ns.");
+        assertThat(result.getRemovedEntries()).isEqualTo(5);
+        assertThat(result.getBytesReclaimed()).isEqualTo(128);
+    }
+
     // ──── In-process stub server ────
 
     /** Minimal Cache server stub with list state, mimicking agent semantics. */
     static class FakeCacheService extends CacheGrpc.CacheImplBase {
         final Map<String, java.util.List<byte[]>> lists = new LinkedHashMap<>();
+        final Map<String, byte[]> strings = new LinkedHashMap<>();
+        final java.util.List<String[]> keyPages = new java.util.ArrayList<>();
+        String lastKeysPrefix;
+        int lastKeysLimit;
+        String lastKeysCursor;
+        String lastClearPrefix;
+        long clearRemovedEntries;
+        long clearBytesReclaimed;
 
         java.util.List<byte[]> list(String key) {
             return lists.getOrDefault(key, java.util.List.of());
+        }
+
+        @Override
+        public void setIfAbsent(CacheSetIfAbsentRequest request,
+                                StreamObserver<CacheSetIfAbsentResponse> responseObserver) {
+            boolean written = !strings.containsKey(request.getKey());
+            if (written) {
+                strings.put(request.getKey(), request.getValue().toByteArray());
+            }
+            responseObserver.onNext(CacheSetIfAbsentResponse.newBuilder().setWritten(written).build());
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void keys(CacheKeysRequest request, StreamObserver<CacheKeysResponse> responseObserver) {
+            lastKeysPrefix = request.getPrefix();
+            lastKeysLimit = request.getLimit();
+            lastKeysCursor = request.getCursor();
+            int pageIndex = request.getCursor().isEmpty() ? 0 : 1;
+            String[] page = keyPages.get(pageIndex);
+            String next = pageIndex + 1 < keyPages.size() ? page[page.length - 1] : "";
+            CacheKeysResponse.Builder resp = CacheKeysResponse.newBuilder().setNextCursor(next);
+            for (String k : page) {
+                resp.addKeys(k);
+            }
+            responseObserver.onNext(resp.build());
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void clear(CacheClearRequest request, StreamObserver<CacheClearResponse> responseObserver) {
+            lastClearPrefix = request.getPrefix();
+            responseObserver.onNext(CacheClearResponse.newBuilder()
+                    .setRemovedEntries(clearRemovedEntries)
+                    .setBytesReclaimed(clearBytesReclaimed)
+                    .build());
+            responseObserver.onCompleted();
         }
 
         @Override

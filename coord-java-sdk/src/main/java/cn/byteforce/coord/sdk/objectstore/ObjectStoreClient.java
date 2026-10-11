@@ -5,7 +5,7 @@ import cn.byteforce.coord.sdk.CoordException;
 import java.util.Optional;
 
 /**
- * Object storage client ({@code coord.storage}) — EXPERIMENTAL data plane.
+ * Object storage client ({@code coord.storage}) — server-side data plane.
  * <p>
  * Talks to the Coord Agent, which proxies {@code coord.storage.Storage} to the
  * server cluster. Object = (bucket, objectId): bucket is non-empty UTF-8 (≤255

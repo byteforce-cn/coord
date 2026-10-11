@@ -37,7 +37,7 @@
 // 路径直接拒绝）。周期收敛语义与残余边界见 `CacheService::new` 文档与
 // `docs/production/ops/boundaries.md` B-PL-3（单一归属）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -47,6 +47,7 @@ use parking_lot::RwLock;
 use redb::{ReadableDatabase, ReadableTable};
 
 use crate::service::{BaseService, ServiceResult};
+use crate::services::workflow_store::prefix_end;
 
 // ──── 可重导出类型 ────
 
@@ -175,6 +176,13 @@ const REAP_SWEEP_CHUNK: usize = 1024;
 const REAP_EVICT_CHUNK: usize = 256;
 /// 后台 reaper 默认周期（毫秒）
 const DEFAULT_REAPER_INTERVAL_MS: u64 = 10_000;
+/// Keys 单页默认 / 上限（有界扫描，见 `keys_page`）
+const KEYS_DEFAULT_LIMIT: u32 = 1000;
+const KEYS_MAX_LIMIT: u32 = 10_000;
+/// Clear 单批（单个写事务）最多删除的物理行数（控制事务规模）
+const CLEAR_BATCH_ROWS: usize = 1024;
+/// Clear 单次调用的物理行数安全阀（超限即报错；部分清理已提交，重跑幂等）
+const CLEAR_MAX_TOTAL_ENTRIES: u64 = 10_000_000;
 
 // ──── Key 编码辅助 ────
 
@@ -242,6 +250,15 @@ fn set_key_prefix(key: &str) -> Vec<u8> {
 /// 从 Set 编码 key 中提取 member
 fn decode_set_member(encoded: &[u8], prefix_len: usize) -> Vec<u8> {
     encoded[prefix_len..].to_vec()
+}
+
+/// 从物理键解析逻辑键：首个 NUL 之前的部分（无 NUL = 整体）。
+/// hash/list/set 的物理键编码为 `logical\x00rest`；string 键（不含 NUL）即整体。
+fn logical_key(physical: &[u8]) -> &[u8] {
+    match physical.iter().position(|b| *b == 0) {
+        Some(i) => &physical[..i],
+        None => physical,
+    }
 }
 
 // ──── 淘汰索引编码辅助（B-PL-3）────
@@ -1024,6 +1041,319 @@ impl CacheService {
         self.string_get(key).map(|v| v.is_some())
     }
 
+    /// 原子条件写（SetNX）：仅当 key 不存在（或已过期）时写入。
+    ///
+    /// 条件判定与写入在**同一写事务**内完成（redb 单写者 ⇒ 对并发调用原子）；
+    /// 已存在时不改动原值与 TTL；TTL 仅在写入成功时生效。
+    pub fn string_put_if_absent(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        ttl_secs: Option<u64>,
+    ) -> ServiceResult<bool> {
+        let ttl = ttl_secs.unwrap_or(self.default_ttl_secs);
+        let encoded = encode_value(&value, ttl);
+        self.ensure_entry_fits(key.as_bytes(), &encoded)?;
+        let wtx = self.write_tx()?;
+        let (exists, old_len) = {
+            let mut table = wtx.open_table(STRING_TABLE)?;
+            let exists = match table.get(key.as_bytes())? {
+                Some(raw) => decode_value(raw.value()).is_some(), // 已过期视同不存在
+                None => false,
+            };
+            if exists {
+                (true, None)
+            } else {
+                let old_len = table
+                    .insert(key.as_bytes(), encoded.as_slice())?
+                    .map(|v| v.value().len());
+                (false, old_len)
+            }
+        };
+        if !exists {
+            Self::account_upsert_tx(&wtx, TID_STRING, key.as_bytes(), old_len, encoded.len())?;
+        }
+        wtx.commit()?;
+        Ok(!exists)
+    }
+
+    // ──── 键空间：Keys / Clear ────
+
+    /// 键枚举（有界、游标分页）：按**逻辑键**前缀枚举（四表去重后按键升序）。
+    ///
+    /// - 扫描严格限制在 [scan_start, prefix_successor) 区间（有界，不退化全表
+    ///   阻塞扫描）；`limit` 封顶 [`KEYS_MAX_LIMIT`]（0 = [`KEYS_DEFAULT_LIMIT`]）；
+    /// - `cursor` = 上一页返回的最后一个键（严格续扫）；
+    /// - 过期行不枚举（语义上不存在的键不应出现在结果里）；
+    /// - 返回 `next_cursor`：本页已满时非空（下一页可能为空页=已到末尾）。
+    pub fn keys_page(
+        &self,
+        prefix: &str,
+        limit: u32,
+        cursor: &str,
+    ) -> ServiceResult<(Vec<String>, String)> {
+        if prefix.contains('\0') || cursor.contains('\0') {
+            return Err("cache keys: prefix/cursor must not contain NUL (\\x00)".into());
+        }
+        if !cursor.is_empty() && !cursor.starts_with(prefix) {
+            return Err("cache keys: cursor does not belong to prefix".into());
+        }
+        let limit = match limit {
+            0 => KEYS_DEFAULT_LIMIT,
+            n => n.min(KEYS_MAX_LIMIT),
+        } as usize;
+        let prefix_bytes = prefix.as_bytes();
+        // 扫描下界：cursor 非空 ⇒ 严格大于 cursor（cursor + 0x00 是最小可能后继）
+        let scan_start: Vec<u8> = if cursor.is_empty() {
+            prefix_bytes.to_vec()
+        } else {
+            let mut v = cursor.as_bytes().to_vec();
+            v.push(0);
+            v
+        };
+        let upper = prefix_end(prefix_bytes);
+        let mut keys: BTreeSet<String> = BTreeSet::new();
+
+        let rtx = self.read_tx()?;
+
+        /// 对一张 [&[u8], &[u8]] 表扫描并收集逻辑键（含过期过滤）。
+        macro_rules! scan_bytes_table {
+            ($table_def:expr) => {{
+                let table = rtx.open_table($table_def)?;
+                let iter = if upper.is_empty() {
+                    let range: std::ops::RangeFrom<&[u8]> = scan_start.as_slice()..;
+                    table.range(range)?
+                } else {
+                    let range: std::ops::Range<&[u8]> = scan_start.as_slice()..upper.as_slice();
+                    table.range(range)?
+                };
+                for item in iter {
+                    if keys.len() >= limit {
+                        break;
+                    }
+                    let (k, raw) = item?;
+                    let k = k.value();
+                    if decode_value(raw.value()).is_none() {
+                        continue; // 过期行
+                    }
+                    let logical = logical_key(k);
+                    if logical.starts_with(prefix_bytes) {
+                        if let Ok(s) = std::str::from_utf8(logical) {
+                            keys.insert(s.to_string());
+                        }
+                    }
+                }
+            }};
+        }
+
+        let rtx = self.read_tx()?;
+        scan_bytes_table!(STRING_TABLE);
+        scan_bytes_table!(HASH_TABLE);
+        scan_bytes_table!(LIST_TABLE);
+        // SET：存储值 = 绝对到期时间戳（u64，0 = 不限期）
+        {
+            let table = rtx.open_table(SET_TABLE)?;
+            let iter = if upper.is_empty() {
+                let range: std::ops::RangeFrom<&[u8]> = scan_start.as_slice()..;
+                table.range(range)?
+            } else {
+                let range: std::ops::Range<&[u8]> = scan_start.as_slice()..upper.as_slice();
+                table.range(range)?
+            };
+            for item in iter {
+                if keys.len() >= limit {
+                    break;
+                }
+                let (k, v) = item?;
+                if is_expired(v.value()) {
+                    continue;
+                }
+                let logical = logical_key(k.value());
+                if logical.starts_with(prefix_bytes) {
+                    if let Ok(s) = std::str::from_utf8(logical) {
+                        keys.insert(s.to_string());
+                    }
+                }
+            }
+        }
+        drop(rtx);
+
+        let out: Vec<String> = keys.into_iter().collect(); // BTreeSet 已按键升序
+        let next_cursor = if out.len() >= limit {
+            out.last().cloned().unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok((out, next_cursor))
+    }
+
+    /// 按逻辑键前缀清理（四表全覆盖；批式多事务；记账同步扣减）。
+    ///
+    /// 返回（删除行数, 回收活跃字节数）。删除不可回滚；无匹配 = 空操作成功。
+    pub fn clear_prefix(&self, prefix: &str) -> ServiceResult<(u64, u64)> {
+        if prefix.contains('\0') {
+            return Err("cache clear: prefix must not contain NUL (\\x00)".into());
+        }
+        self.clear_prefix_loop(prefix.as_bytes(), None)
+    }
+
+    /// 单批清理：在一个写事务内删除至多 `quota` 行「逻辑键以 prefix 开头」的物理
+    /// 行（四表全覆盖），并同步记账（B-PL-3）。返回（删除行数, 回收字节数）。
+    ///
+    /// redb 的 range 迭代器**不允许迭代期间修改表**（见 `evict_oldest_batch` 的
+    /// 先读后删约定），故先收集本批 key（≤ quota，内存有界）再删除。
+    fn clear_prefix_chunk_tx(
+        wtx: &redb::WriteTransaction,
+        prefix: &[u8],
+        upper: &[u8],
+        quota: usize,
+    ) -> ServiceResult<(u64, u64)> {
+        let mut removed: u64 = 0;
+        let mut bytes: u64 = 0;
+
+        // STRING / HASH / LIST：value 长度含 TTL 前缀（记 entry_size 口径）
+        macro_rules! clear_bytes_table {
+            ($table_def:expr, $tid:expr) => {{
+                let remaining = quota.saturating_sub(removed as usize);
+                if remaining > 0 {
+                    let mut batch: Vec<(Vec<u8>, usize)> = Vec::new();
+                    {
+                        let table = wtx.open_table($table_def)?;
+                        let iter = if upper.is_empty() {
+                            let range: std::ops::RangeFrom<&[u8]> = prefix..;
+                            table.range(range)?
+                        } else {
+                            let range: std::ops::Range<&[u8]> = prefix..upper;
+                            table.range(range)?
+                        };
+                        for item in iter {
+                            if batch.len() >= remaining {
+                                break;
+                            }
+                            let (k, v) = item?;
+                            batch.push((k.value().to_vec(), v.value().len()));
+                        }
+                    }
+                    if !batch.is_empty() {
+                        let mut table = wtx.open_table($table_def)?;
+                        for (k, stored_len) in batch {
+                            if table.remove(k.as_slice())?.is_some() {
+                                Self::account_remove_tx(wtx, $tid, &k, stored_len)?;
+                                removed += 1;
+                                bytes += (k.len() + stored_len) as u64;
+                            }
+                        }
+                    }
+                }
+            }};
+        }
+        clear_bytes_table!(STRING_TABLE, TID_STRING);
+        clear_bytes_table!(HASH_TABLE, TID_HASH);
+        clear_bytes_table!(LIST_TABLE, TID_LIST);
+
+        // SET：value = 绝对到期时间戳（8 字节，计 8）
+        let remaining = quota.saturating_sub(removed as usize);
+        if remaining > 0 {
+            let mut batch: Vec<Vec<u8>> = Vec::new();
+            {
+                let table = wtx.open_table(SET_TABLE)?;
+                let iter = if upper.is_empty() {
+                    let range: std::ops::RangeFrom<&[u8]> = prefix..;
+                    table.range(range)?
+                } else {
+                    let range: std::ops::Range<&[u8]> = prefix..upper;
+                    table.range(range)?
+                };
+                for item in iter {
+                    if batch.len() >= remaining {
+                        break;
+                    }
+                    let (k, _v) = item?;
+                    batch.push(k.value().to_vec());
+                }
+            }
+            if !batch.is_empty() {
+                let mut table = wtx.open_table(SET_TABLE)?;
+                for k in batch {
+                    if table.remove(k.as_slice())?.is_some() {
+                        Self::account_remove_tx(wtx, TID_SET, &k, 8)?;
+                        removed += 1;
+                        bytes += (k.len() + 8) as u64;
+                    }
+                }
+            }
+        }
+        Ok((removed, bytes))
+    }
+
+    /// Follower 侧应用 CacheClear（幂等；批式多事务，内存有界）。
+    fn apply_cache_clear(&self, entry: &ReplicationEntry) -> Result<(), ReplicationError> {
+        let prefix = match &entry.operation {
+            ReplicationOp::CacheClear { prefix } => prefix.clone(),
+            _ => {
+                return Err(ReplicationError::Store(
+                    "apply_cache_clear: not a CacheClear op".to_string(),
+                ))
+            }
+        };
+        self.clear_prefix_loop(prefix.as_bytes(), Some(entry))
+            .map(|_| ())
+            .map_err(|e| ReplicationError::Store(e.to_string()))
+    }
+
+    /// 多事务批式前缀清理（内存有界：单批 ≤ [`CLEAR_BATCH_ROWS`] 行）。
+    ///
+    /// `bookkeeping`: Some(entry) 时把复制簿记写在**最后一次空批次**的同一事务里
+    /// （不变量：簿记已写 ⇒ 清理已完整；崩溃重放至多重清一遍——删除幂等）。
+    /// 安全阀：[`CLEAR_MAX_TOTAL_ENTRIES`] 行超限即报错（部分清理已提交，重跑幂等）。
+    fn clear_prefix_loop(
+        &self,
+        prefix: &[u8],
+        bookkeeping: Option<&ReplicationEntry>,
+    ) -> ServiceResult<(u64, u64)> {
+        // 幂等预检（Follower 应用路径；重复应用直接成功返回）
+        if let Some(entry) = bookkeeping {
+            let rtx = self.read_tx()?;
+            let applied = {
+                let t = rtx.open_table(CACHE_REPL_APPLIED_KEYS)?;
+                let x = t
+                    .get(entry.idempotency_key.to_string().as_bytes())?
+                    .is_some();
+                x
+            };
+            drop(rtx);
+            if applied {
+                return Ok((0, 0));
+            }
+        }
+        let upper = prefix_end(prefix);
+        let mut total_entries = 0u64;
+        let mut total_bytes = 0u64;
+        loop {
+            let wtx = self.write_tx()?;
+            let (entries, bytes) =
+                Self::clear_prefix_chunk_tx(&wtx, prefix, &upper, CLEAR_BATCH_ROWS)?;
+            if entries == 0 {
+                if let Some(entry) = bookkeeping {
+                    Self::write_repl_bookkeeping_tx(&wtx, entry)?;
+                }
+                wtx.commit()?;
+                break;
+            }
+            if total_entries + entries > CLEAR_MAX_TOTAL_ENTRIES {
+                return Err(format!(
+                    "cache clear exceeded safety valve ({CLEAR_MAX_TOTAL_ENTRIES} rows); \
+                     partial clear committed — rerun to continue"
+                )
+                .into());
+            }
+            wtx.commit()?;
+            total_entries += entries;
+            total_bytes += bytes;
+        }
+        Ok((total_entries, total_bytes))
+    }
+
     // ──── Hash 操作 ────
 
     pub fn hash_field_put(
@@ -1673,10 +2003,16 @@ fn decode_repl_seq(encoded: &[u8], prefix_len: usize) -> Option<u64> {
 }
 
 impl CacheService {
-    /// 生成缓存写幂等键（基于物理 key，全局唯一）
-    fn cache_idem_key(op: &str, key: &[u8]) -> IdempotencyKey {
+    /// 生成缓存写幂等键（基于物理 key + 本地序列号，全局唯一）
+    ///
+    /// 序列号必须参与键：仅 `{op}:{key}:{秒}` 会让同一秒内的同 key 重写产生
+    /// **相同幂等键**，`apply_op_tx` 会把它当重复应用静默跳过——Leader 与
+    /// Follower 一起停在旧值（RPC 返回成功、数据没变）。序列号在单次操作内固定
+    /// ⇒ push / Reconcile 重放同一 entry 仍正确去重（回归用例：
+    /// `agent_isr_test::test_cache_replicated_same_second_rewrite_is_not_deduped`）。
+    fn cache_idem_key(op: &str, key: &[u8], seq: u64) -> IdempotencyKey {
         IdempotencyKey::new(
-            format!("cache:{op}:{}", String::from_utf8_lossy(key)),
+            format!("cache:{op}:{}:{seq}", String::from_utf8_lossy(key)),
             now_secs(),
         )
     }
@@ -1829,6 +2165,11 @@ impl CacheService {
                 }
                 other => return Err(format!("unknown cache data_type '{other}'").into()),
             },
+            ReplicationOp::CacheClear { .. } => {
+                return Err(
+                    "CacheClear must be applied via apply_cache_clear (multi-transaction)".into(),
+                )
+            }
             _ => return Err("cache cannot apply MqPublish op".into()),
         }
         Self::write_repl_bookkeeping_tx(wtx, entry)?;
@@ -1866,8 +2207,8 @@ impl CacheService {
         }
         let seq = self.next_sequence()?;
         let ik = match &op {
-            ReplicationOp::CachePut { key, .. } => Self::cache_idem_key("put", key),
-            ReplicationOp::CacheDelete { key, .. } => Self::cache_idem_key("del", key),
+            ReplicationOp::CachePut { key, .. } => Self::cache_idem_key("put", key, seq),
+            ReplicationOp::CacheDelete { key, .. } => Self::cache_idem_key("del", key, seq),
             _ => return Err("cache replicated_write: unexpected op".into()),
         };
         let entry = ReplicationEntry {
@@ -1956,6 +2297,116 @@ impl CacheService {
         })
         .await?;
         Ok(existed)
+    }
+
+    /// ISR 下的原子条件写：判定在 Leader 本地事务内完成，成功时经复制通道下发。
+    ///
+    /// 未写入（键已存在）时不复制也不写簿记（无变更）。错误语义与 `Set` 相同：
+    /// 错误返回时本地写入可能已生效；重试 = 再次尝试获取（首次已写入则返回 false，
+    /// 与 Redis SETNX 同口径，见 cache.proto 的声明）。
+    pub async fn string_put_if_absent_replicated(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        ttl_secs: Option<u64>,
+    ) -> ServiceResult<bool> {
+        let rm = self
+            .replication
+            .read()
+            .clone()
+            .ok_or_else(|| "replication not enabled".to_string())?;
+        if !rm.is_leader(CACHE_SHARD) {
+            return Err(format!(
+                "not leader for shard '{CACHE_SHARD}' (leader is {})",
+                rm.shard_leader(CACHE_SHARD)
+            )
+            .into());
+        }
+        let ttl = ttl_secs.unwrap_or(self.default_ttl_secs);
+        let encoded = encode_value(&value, ttl);
+        self.ensure_entry_fits(key.as_bytes(), &encoded)?;
+        let encoded_len = encoded.len();
+        let seq = self.next_sequence()?;
+
+        // 单事务：条件判定 + 写入（+ 成功时的簿记）——与单 agent 路径同一原子口径
+        let wtx = self.write_tx()?;
+        let (written, old_len) = {
+            let mut table = wtx.open_table(STRING_TABLE)?;
+            let exists = match table.get(key.as_bytes())? {
+                Some(raw) => decode_value(raw.value()).is_some(),
+                None => false,
+            };
+            if exists {
+                (false, None)
+            } else {
+                let old_len = table
+                    .insert(key.as_bytes(), encoded.as_slice())?
+                    .map(|v| v.value().len());
+                (true, old_len)
+            }
+        };
+        let entry = if written {
+            Self::account_upsert_tx(&wtx, TID_STRING, key.as_bytes(), old_len, encoded_len)?;
+            let entry = ReplicationEntry {
+                idempotency_key: Self::cache_idem_key("putnx", key.as_bytes(), seq),
+                shard_id: CACHE_SHARD.to_string(),
+                sequence_num: seq,
+                operation: ReplicationOp::CachePut {
+                    key: key.as_bytes().to_vec(),
+                    value: encoded,
+                    data_type: "string".to_string(),
+                },
+            };
+            Self::write_repl_bookkeeping_tx(&wtx, &entry)?;
+            Some(entry)
+        } else {
+            None
+        };
+        wtx.commit()?;
+
+        if let Some(entry) = entry {
+            let acked = rm
+                .push_to_followers(&entry)
+                .await
+                .map_err(|e| e.to_string())?;
+            rm.ensure_isr(acked + 1).map_err(|e| e.to_string())?;
+        }
+        Ok(written)
+    }
+
+    /// ISR 下按前缀清理：清理决定经复制通道全域下发（Follower 幂等应用）。
+    pub async fn clear_prefix_replicated(&self, prefix: &str) -> ServiceResult<(u64, u64)> {
+        let rm = self
+            .replication
+            .read()
+            .clone()
+            .ok_or_else(|| "replication not enabled".to_string())?;
+        if !rm.is_leader(CACHE_SHARD) {
+            return Err(format!(
+                "not leader for shard '{CACHE_SHARD}' (leader is {})",
+                rm.shard_leader(CACHE_SHARD)
+            )
+            .into());
+        }
+        if prefix.contains('\0') {
+            return Err("cache clear: prefix must not contain NUL (\\x00)".into());
+        }
+        let seq = self.next_sequence()?;
+        let entry = ReplicationEntry {
+            idempotency_key: Self::cache_idem_key("clear", prefix.as_bytes(), seq),
+            shard_id: CACHE_SHARD.to_string(),
+            sequence_num: seq,
+            operation: ReplicationOp::CacheClear {
+                prefix: prefix.to_string(),
+            },
+        };
+        let (entries, bytes) = self.clear_prefix_loop(prefix.as_bytes(), Some(&entry))?;
+        let acked = rm
+            .push_to_followers(&entry)
+            .await
+            .map_err(|e| e.to_string())?;
+        rm.ensure_isr(acked + 1).map_err(|e| e.to_string())?;
+        Ok((entries, bytes))
     }
 
     pub async fn hash_field_put_replicated(
@@ -2072,7 +2523,7 @@ impl CacheService {
                     let pkey = encode_list_key(key, idx);
                     table.remove(pkey.as_slice())?;
                     let entry = ReplicationEntry {
-                        idempotency_key: Self::cache_idem_key("pop", &pkey),
+                        idempotency_key: Self::cache_idem_key("pop", &pkey, seq),
                         shard_id: CACHE_SHARD.to_string(),
                         sequence_num: seq,
                         operation: ReplicationOp::CacheDelete {
@@ -2151,6 +2602,10 @@ impl ReplicatedStore for CacheService {
     }
 
     fn apply_entry(&self, entry: &ReplicationEntry) -> Result<(), ReplicationError> {
+        // CacheClear 是多事务批式清理（内存有界），不走单事务 apply_op_tx。
+        if matches!(entry.operation, ReplicationOp::CacheClear { .. }) {
+            return self.apply_cache_clear(entry);
+        }
         let wtx = match self.write_tx() {
             Ok(t) => t,
             Err(e) => return Err(ReplicationError::Store(e.to_string())),
@@ -2336,6 +2791,173 @@ mod tests {
         let dir = temp_dir();
         let svc = new_svc(&dir, 3600);
         assert_eq!(svc.string_get("nope").unwrap(), None);
+    }
+
+    // ──── Atomic SetNX（#50）────
+
+    #[test]
+    fn test_string_put_if_absent_semantics() {
+        let dir = temp_dir();
+        let svc = new_svc(&dir, 3600);
+        // 首次写入成功
+        assert!(svc.string_put_if_absent("k", b"v1".to_vec(), None).unwrap());
+        // 已存在 ⇒ 不写入、不改原值与 TTL
+        assert!(!svc.string_put_if_absent("k", b"v2".to_vec(), None).unwrap());
+        assert_eq!(svc.string_get("k").unwrap(), Some(b"v1".to_vec()));
+        // 删除后重新可写
+        svc.string_delete("k").unwrap();
+        assert!(svc.string_put_if_absent("k", b"v3".to_vec(), None).unwrap());
+        assert_eq!(svc.string_get("k").unwrap(), Some(b"v3".to_vec()));
+    }
+
+    #[test]
+    fn test_string_put_if_absent_expired_key_is_absent() {
+        let dir = temp_dir();
+        let svc = new_svc(&dir, 3600);
+        // 直接落一条「已过期」的行（expires_at = 现在 - 10s；写路径不会产生该形态，
+        // 这里模拟时钟推进后的残留行）
+        let mut expired_raw = Vec::new();
+        expired_raw.extend_from_slice(&(now_secs().saturating_sub(10)).to_be_bytes());
+        expired_raw.extend_from_slice(b"old");
+        {
+            let wtx = svc.write_tx().unwrap();
+            let old_len = {
+                let mut table = wtx.open_table(STRING_TABLE).unwrap();
+                table
+                    .insert("k".as_bytes(), expired_raw.as_slice())
+                    .unwrap()
+                    .map(|v| v.value().len())
+            };
+            CacheService::account_upsert_tx(&wtx, TID_STRING, b"k", old_len, expired_raw.len())
+                .unwrap();
+            wtx.commit().unwrap();
+        }
+        // 过期视同不存在 ⇒ SetNX 写入成功并替换旧行
+        assert!(svc
+            .string_put_if_absent("k", b"new".to_vec(), None)
+            .unwrap());
+        assert_eq!(svc.string_get("k").unwrap(), Some(b"new".to_vec()));
+    }
+
+    // ──── 并发判据：N 并发 SetNX 只有一个成功（#50 DoD）────
+
+    #[test]
+    fn test_string_put_if_absent_concurrent_single_winner() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let dir = temp_dir();
+        let svc = Arc::new(new_svc(&dir, 3600));
+
+        let threads = 16;
+        let barrier = Arc::new(Barrier::new(threads));
+        let mut handles = vec![];
+        for i in 0..threads {
+            let svc = svc.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait(); // 同步起跑，放大竞争窗口
+                svc.string_put_if_absent("nx", format!("v{i}").into_bytes(), None)
+                    .unwrap()
+            }));
+        }
+        let wins = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|w| *w)
+            .count();
+        assert_eq!(wins, 1, "N 并发 SetNX 必须恰好一个成功（原子条件写）");
+        assert!(svc.string_get("nx").unwrap().is_some(), "赢家值必须在场");
+    }
+
+    // ──── Keys / Clear（#51）────
+
+    #[test]
+    fn test_keys_page_prefix_filter_order_and_pagination() {
+        let dir = temp_dir();
+        let svc = new_svc(&dir, 3600);
+        svc.string_put("app.a", b"1".to_vec(), None).unwrap();
+        svc.string_put("app.b", b"2".to_vec(), None).unwrap();
+        svc.string_put("app.c", b"3".to_vec(), None).unwrap();
+        svc.string_put("other.x", b"4".to_vec(), None).unwrap();
+
+        // 全量（升序）
+        let (keys, cursor) = svc.keys_page("app.", 10, "").unwrap();
+        assert_eq!(keys, vec!["app.a", "app.b", "app.c"]);
+        assert!(cursor.is_empty(), "未填满页 = 已到末尾");
+
+        // 分页：limit=2 → 首页 2 个 + 游标；续页拿到剩余
+        let (page1, cur1) = svc.keys_page("app.", 2, "").unwrap();
+        assert_eq!(page1, vec!["app.a", "app.b"]);
+        assert_eq!(cur1, "app.b");
+        let (page2, cur2) = svc.keys_page("app.", 2, &cur1).unwrap();
+        assert_eq!(page2, vec!["app.c"]);
+        assert!(cur2.is_empty());
+
+        // 前缀过滤 + 不属于前缀的游标必须报错（fail-loud，不静默全表）
+        let (keys, _) = svc.keys_page("other", 10, "").unwrap();
+        assert_eq!(keys, vec!["other.x"]);
+        assert!(svc.keys_page("app.", 10, "zzz").is_err());
+    }
+
+    #[test]
+    fn test_keys_page_covers_all_data_types_deduped() {
+        let dir = temp_dir();
+        let svc = new_svc(&dir, 3600);
+        svc.string_put("ns.k", b"v".to_vec(), None).unwrap();
+        // 同一逻辑键存在于 hash 表（应去重）
+        svc.hash_field_put("ns.k", "f", b"v".to_vec(), None)
+            .unwrap();
+        svc.list_push_left("ns.l", b"v".to_vec(), None).unwrap();
+        svc.set_add("ns.s", b"m".to_vec(), None).unwrap();
+
+        let (keys, _) = svc.keys_page("ns.", 10, "").unwrap();
+        assert_eq!(keys, vec!["ns.k", "ns.l", "ns.s"], "四表逻辑键去重 + 升序");
+    }
+
+    #[test]
+    fn test_clear_prefix_all_types_and_accounting() {
+        let dir = temp_dir();
+        let svc = new_svc(&dir, 3600);
+        svc.string_put("ns.a", b"1".to_vec(), None).unwrap();
+        svc.string_put("ns.b", b"2".to_vec(), None).unwrap();
+        svc.hash_field_put("ns.h", "f", b"x".to_vec(), None)
+            .unwrap();
+        svc.list_push_left("ns.l", b"x".to_vec(), None).unwrap();
+        svc.set_add("ns.s", b"m".to_vec(), None).unwrap();
+        svc.string_put("keep.a", b"k".to_vec(), None).unwrap();
+
+        let before = svc.accounted_bytes().unwrap();
+        let (entries, bytes) = svc.clear_prefix("ns.").unwrap();
+        let after = svc.accounted_bytes().unwrap();
+        assert_eq!(entries, 5, "四表全覆盖（string×2 + hash + list + set）");
+        assert!(bytes > 0);
+        assert_eq!(before - after, bytes, "回收字节 == 记账扣减（B-PL-3）");
+
+        // 清理结果
+        assert_eq!(svc.string_get("ns.a").unwrap(), None);
+        assert_eq!(svc.hash_field_get("ns.h", "f").unwrap(), None);
+        assert_eq!(svc.list_length("ns.l").unwrap(), 0);
+        assert_eq!(svc.set_members("ns.s").unwrap(), Vec::<Vec<u8>>::new());
+        assert_eq!(svc.string_get("keep.a").unwrap(), Some(b"k".to_vec()));
+        // 重跑 = 空操作（幂等）
+        let (entries2, _) = svc.clear_prefix("ns.").unwrap();
+        assert_eq!(entries2, 0);
+    }
+
+    #[test]
+    fn test_keys_page_bounded_default_limit_and_cap() {
+        // limit=0 → 默认 1000；> MAX → 封顶（不得无界返回）
+        let dir = temp_dir();
+        let svc = new_svc(&dir, 3600);
+        for i in 0..3 {
+            svc.string_put(&format!("p.{i}"), b"v".to_vec(), None)
+                .unwrap();
+        }
+        let (keys, _) = svc.keys_page("p.", 0, "").unwrap();
+        assert_eq!(keys.len(), 3);
+        let (keys, _) = svc.keys_page("p.", u32::MAX, "").unwrap();
+        assert_eq!(keys.len(), 3);
     }
 
     #[test]

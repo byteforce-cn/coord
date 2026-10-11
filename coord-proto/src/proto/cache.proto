@@ -29,6 +29,9 @@ syntax = "proto3";
 //     ISR 复制日志与 redb 页面开销、ISR 启用时的跨节点一致淘汰 —— 完整边界与
 //     判据见 `docs/production/ops/boundaries.md` B-PL-3（单一归属）。
 //   - **不承诺**：跨键事务、跨 agent 的线性一致读。
+//   - **键空间操作（Keys / Clear）**：单次调用扫描有界；Keys 为**本节点视角**
+//     的 best-effort 枚举；Clear 覆盖全部数据类型并按逻辑键前缀批式删除，
+//     ISR 启用时经复制通道全域下发。键不得含 NUL 字节（见消息注释）。
 // ============================================================
 
 package coord.cache.v1;
@@ -43,6 +46,8 @@ service Cache {
   // String operations
   rpc Get(CacheGetRequest) returns (CacheGetResponse);
   rpc Set(CacheSetRequest) returns (CacheSetResponse);
+  // 原子条件写：仅当 key 不存在（或已过期）时写入（SetNX）。
+  rpc SetIfAbsent(CacheSetIfAbsentRequest) returns (CacheSetIfAbsentResponse);
   rpc Delete(CacheDeleteRequest) returns (CacheDeleteResponse);
   // Hash operations
   rpc HGet(CacheHGetRequest) returns (CacheHGetResponse);
@@ -57,6 +62,9 @@ service Cache {
   // Set operations
   rpc SAdd(CacheSAddRequest) returns (CacheSAddResponse);
   rpc SMembers(CacheSMembersRequest) returns (CacheSMembersResponse);
+  // 键空间操作（有界）：枚举 string 键 / 按前缀清理（全部数据类型）。
+  rpc Keys(CacheKeysRequest) returns (CacheKeysResponse);
+  rpc Clear(CacheClearRequest) returns (CacheClearResponse);
 }
 
 message CacheGetRequest {
@@ -75,6 +83,24 @@ message CacheSetRequest {
 }
 
 message CacheSetResponse {}
+
+// 原子条件写（SetNX）：仅当 key 不存在或已过期时写入。
+//   - 写入成功返回 written=true；否则不改动原有值/TTL，返回 written=false；
+//   - TTL 仅在写入成功时生效；
+//   - 单 agent：条件判定与写入在同一写事务内原子完成；
+//   - ISR 启用：判定在 Leader 本地事务内完成，成功时经复制通道下发。
+//     错误语义与 `Set` 相同（本地写入可能已生效）；重试 = **再次尝试获取**——
+//     若首次实际已写入，重试返回 written=false（与 Redis SETNX 同口径），
+//     调用方不得用 false 推断「未被本次调用写入」。
+message CacheSetIfAbsentRequest {
+  string key = 1;
+  bytes value = 2;
+  int64 ttl_seconds = 3;
+}
+
+message CacheSetIfAbsentResponse {
+  bool written = 1;
+}
 
 message CacheDeleteRequest {
   string key = 1;
@@ -159,6 +185,39 @@ message CacheSMembersRequest {
 
 message CacheSMembersResponse {
   repeated bytes members = 1;
+}
+
+// 键枚举（有界、游标分页）：按**逻辑键**前缀枚举 string 键，按键升序。
+//   - limit：单页上限（0 = 服务端默认 1000；服务端另有上限封顶）；
+//   - cursor：上一页的 next_cursor（空 = 从头开始）；next_cursor 为空 = 已到末尾；
+//   - 单次调用扫描有界（不退化全表阻塞扫描）；ISR 下为**本节点视角**的
+//     best-effort 结果（落后节点可能缺新键）；hash/list/set 的逻辑键不在本面枚举；
+//   - 键不得包含 NUL（\x00）字节：含 NUL 的键不保证被枚举（存储编码用 NUL 作分隔）。
+message CacheKeysRequest {
+  string prefix = 1;
+  int32 limit = 2;
+  string cursor = 3;
+}
+
+message CacheKeysResponse {
+  repeated string keys = 1;
+  string next_cursor = 2;
+}
+
+// 按逻辑键前缀清理（string/hash/list/set **全部数据类型**）：命名空间清理 /
+// 容量回收的管理路径。
+//   - 无匹配 = 成功（空操作）；删除不可回滚（无归档副本）；
+//   - 批式执行（单批有界，不退化全表阻塞事务）；与并发写的先后由到达顺序决定；
+//   - ISR 启用：清理决定经复制通道全域下发（Follower 幂等应用）；
+//   - 容量记账（B-PL-3）随删除同步扣减；
+//   - 键不得包含 NUL（\x00）字节（同 Keys）。
+message CacheClearRequest {
+  string prefix = 1;
+}
+
+message CacheClearResponse {
+  uint64 removed_entries = 1; // 被清理的物理行数（hash field / list 元素 / set 成员逐行计）
+  uint64 bytes_reclaimed = 2; // 回收的活跃字节（记账口径，B-PL-3）
 }
 
 // ============================================================

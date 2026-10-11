@@ -14,7 +14,8 @@ option go_package = "github.com/byteforce/coord/apis/contracts/gen/go/coord/stor
 // 逐字节一致，由 apis/contracts/scripts/check-wire-sync.sh 校验：rpc 存在性 + 字段编号）。
 
 // ────────────────────────────────────────────────────────────
-// 对象存储（Server 侧 EXPERIMENTAL 数据面；治理口径见 apis/contracts/STATUS.md）
+// 对象存储（Server 侧数据面；状态见 apis/contracts/STATUS.md，
+// 设计决策见 docs/production/volume-object-storage.md）
 //
 // 设计要点：
 //   - 对象 = (bucket, object_id)。对象键落 `/obj/{bucket}/{object_id}` 前缀，

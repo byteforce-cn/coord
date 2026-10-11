@@ -4,6 +4,8 @@ import cn.byteforce.coord.contracts.scheduler.v1.SchedulerClaimJobRequest;
 import cn.byteforce.coord.contracts.scheduler.v1.SchedulerClaimJobResponse;
 import cn.byteforce.coord.contracts.scheduler.v1.SchedulerCompleteJobRequest;
 import cn.byteforce.coord.contracts.scheduler.v1.SchedulerCompleteJobResponse;
+import cn.byteforce.coord.contracts.scheduler.v1.SchedulerGetJobRequest;
+import cn.byteforce.coord.contracts.scheduler.v1.SchedulerGetJobResponse;
 import cn.byteforce.coord.contracts.scheduler.v1.SchedulerGrpc;
 import cn.byteforce.coord.contracts.scheduler.v1.SchedulerHeartbeatRequest;
 import cn.byteforce.coord.contracts.scheduler.v1.SchedulerHeartbeatResponse;
@@ -11,6 +13,7 @@ import cn.byteforce.coord.contracts.scheduler.v1.SchedulerRegisterJobRequest;
 import cn.byteforce.coord.contracts.scheduler.v1.SchedulerRegisterJobResponse;
 import cn.byteforce.coord.sdk.CoordConfig;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
+import cn.byteforce.coord.sdk.scheduler.JobStatus;
 import cn.byteforce.coord.sdk.scheduler.SchedulerClient;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import com.google.protobuf.ByteString;
@@ -113,6 +116,29 @@ public final class SchedulerClientImpl extends AgentRpcClient implements Schedul
                         .completeJob((SchedulerCompleteJobRequest) req),
                 request, "scheduler.completeJob");
         log.debug("Scheduler job completed: jobId={} (ack={})", jobId, ignored != null);
+    }
+
+    @Override
+    public Optional<JobStatus> getJob(String jobId) {
+        SchedulerGetJobRequest request = SchedulerGetJobRequest.newBuilder()
+                .setJobId(nullToEmpty(jobId))
+                .build();
+
+        SchedulerGetJobResponse response = callWithRetry(
+                (ch, req) -> SchedulerGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .getJob((SchedulerGetJobRequest) req),
+                request, "scheduler.getJob");
+
+        // `found=false` 是**正常返回**（任务未注册），不是错误码。
+        if (!response.getFound()) {
+            return Optional.empty();
+        }
+        return Optional.of(new JobStatus(
+                response.getJobId(),
+                response.getState(),
+                response.getResult().toByteArray(),
+                response.getCompletedAtMs()));
     }
 
     private static String nullToEmpty(String s) {

@@ -60,6 +60,10 @@ jobs:
         # 注释 / 文档中引用的文件路径必须存在；
         # 同时警告 Rust 注释中的日期（白名单文件除外）。
         run: bash scripts/check-doc-refs.sh
+      - name: Consumer doc status labels gate (STATUS.md is the single source)
+        # 消费方文档（consumer-contract.md / SDK README）不得残留 EXPERIMENTAL
+        # 标注——STATUS.md 已把相应能力提升为 COMMITTED；再漂一次必须机器可见。
+        run: bash scripts/check-consumer-doc-labels.sh
 
   # **检查自检**——唯一能区分「检查存在」与「检查生效」的机制。
   #
@@ -190,6 +194,21 @@ jobs:
           fi
           git checkout -- "$target"
           echo "OK: doc-refs gate correctly turned red on the injected dangling link"
+      - name: Assert the consumer-doc labels gate turns red on an injected EXPERIMENTAL label
+        # 文档标签一致性门的负控制：注入一行 EXPERIMENTAL ⇒ 断言校验必须变红。
+        # 注意用 `git checkout --` 还原整个文件：CI 是全新 checkout，注入前该文件
+        # 处于本 commit 的状态（与本地未提交改动不同，本地验证时需手动清注入行）。
+        run: |
+          set -euo pipefail
+          target=coord-java-sdk/README.md
+          bash scripts/check-consumer-doc-labels.sh
+          printf '\nEXPERIMENTAL injected by gate self-check\n' >> "$target"
+          if bash scripts/check-consumer-doc-labels.sh >/dev/null 2>&1; then
+            echo "::error::consumer-doc labels gate DID NOT fail on an injected EXPERIMENTAL label — the gate is not effective"
+            exit 1
+          fi
+          git checkout -- "$target"
+          echo "OK: consumer-doc labels gate correctly turned red on the injected label"
   frontend-lint:
     name: frontend lint (coord-ui)
     runs-on: ubuntu-latest
@@ -259,6 +278,27 @@ jobs:
         # 真实进程集成测试（连本机 agent gRPC）由下面的 java-example-it job 跑。
         working-directory: java-example
         run: mvn -B -q verify -DskipTests
+
+  java-sdk-deps-matrix:
+    # 依赖治理矩阵（#53）：上方的 `java sdk (maven verify)` 跑**仓库钉住组合**
+    # （gRPC 1.68.0 / protobuf 4.28.0）；本 job 跑**消费方平台实测组合**
+    # （Spring Boot 4 平台 BOM 下实际解析出的 gRPC 1.83.1 / protobuf 4.35.1）。
+    # 两组都过，"发布物在测试区间内可用"才是机器事实而非假设。
+    # 刻意独立成 job（而非 matrix 化上面的 job）：required status check 名称
+    # 依赖既有 job 名，改矩阵会让分支保护面失效。
+    name: java sdk deps matrix (consumer platform combo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Java SDK — mvn verify with platform combo (grpc 1.83.1 / protobuf 4.35.1)
+        working-directory: coord-java-sdk
+        run: mvn -B -q verify -Dgrpc.version=1.83.1 -Dprotobuf.version=4.35.1
 
   java-example-it:
     name: java example integration (real server + agent)

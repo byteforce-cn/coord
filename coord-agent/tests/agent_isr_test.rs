@@ -346,6 +346,129 @@ async fn test_cache_replicated_put_and_delete() {
     assert_eq!(follower.string_get("k1").unwrap(), None);
 }
 
+/// 回归：同秒内的「同 key 连续覆盖写」不得被幂等键误去重。
+///
+/// 旧缺陷（本用例即负控制）：幂等键 = `{op}:{key}:{秒}` ⇒ 同一秒内第二次
+/// `Set` 的幂等键与第一次相同，`apply_op_tx` 把它当「重复应用」跳过 ——
+/// Leader 与 Follower 都静默停在旧值（RPC 返回成功，数据没变）。
+/// 判据：去掉幂等键里的序列号 ⇒ 本用例必红（第一处 leader 断言即命中）。
+#[tokio::test]
+async fn test_cache_replicated_same_second_rewrite_is_not_deduped() {
+    let leader = cache_svc(&tempfile::tempdir().unwrap().path().to_path_buf()).await;
+    let leader_mgr = ReplicationManager::new(
+        ReplicationConfig {
+            min_isr: 1,
+            sync_timeout_ms: 1000,
+        },
+        "leader:1".into(),
+    );
+    leader.set_replication(Some(std::sync::Arc::new(leader_mgr)));
+
+    let follower = cache_svc(&tempfile::tempdir().unwrap().path().to_path_buf()).await;
+
+    // 同一秒内的连续覆盖写（v1 → v2，无任何间隔控制）
+    leader
+        .string_put_replicated("k", b"v1".to_vec(), None)
+        .await
+        .unwrap();
+    leader
+        .string_put_replicated("k", b"v2".to_vec(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        leader.string_get("k").unwrap(),
+        Some(b"v2".to_vec()),
+        "Leader 同秒覆盖写被幂等键误去重（数据静默停在 v1）"
+    );
+
+    let entries = leader.read_entries("cache", 1, 0);
+    assert_eq!(entries.len(), 2, "两次写都要进复制日志（第二次不得被跳过）");
+    for e in &entries {
+        follower.apply_entry(e).unwrap();
+    }
+    assert_eq!(
+        follower.string_get("k").unwrap(),
+        Some(b"v2".to_vec()),
+        "Follower 必须收敛到最新值"
+    );
+
+    // put → delete → put 同秒序列（第三笔的幂等键不得与第一笔碰撞）
+    leader.string_delete_replicated("k").await.unwrap();
+    leader
+        .string_put_replicated("k", b"v3".to_vec(), None)
+        .await
+        .unwrap();
+    let entries = leader.read_entries("cache", 1, 0);
+    for e in &entries {
+        follower.apply_entry(e).unwrap();
+    }
+    assert_eq!(
+        follower.string_get("k").unwrap(),
+        Some(b"v3".to_vec()),
+        "put→del→put 同秒序列：Follower 必须收敛到 v3"
+    );
+}
+
+/// ISR 下的 SetNX（#50）与 Clear（#51）：
+/// - SetNX：首次写入成功（写入命令进复制日志），第二次被存在性拦截（无复制条目）；
+/// - Clear：清理决定经复制通道全域下发；Follower 幂等应用后与 Leader 收敛；
+/// - 重复应用同一批条目（含 CacheClear）不报错、不改变结果（幂等预检生效）。
+#[tokio::test]
+async fn test_cache_replicated_setnx_and_clear() {
+    let leader = cache_svc(&tempfile::tempdir().unwrap().path().to_path_buf()).await;
+    let leader_mgr = ReplicationManager::new(
+        ReplicationConfig {
+            min_isr: 1,
+            sync_timeout_ms: 1000,
+        },
+        "leader:1".into(),
+    );
+    leader.set_replication(Some(std::sync::Arc::new(leader_mgr)));
+
+    let follower = cache_svc(&tempfile::tempdir().unwrap().path().to_path_buf()).await;
+
+    // SetNX：v1 抢先；v2 被拦截（不改动）
+    assert!(leader
+        .string_put_if_absent_replicated("nx", b"v1".to_vec(), None)
+        .await
+        .unwrap());
+    assert!(!leader
+        .string_put_if_absent_replicated("nx", b"v2".to_vec(), None)
+        .await
+        .unwrap());
+    assert_eq!(leader.string_get("nx").unwrap(), Some(b"v1".to_vec()));
+
+    // Clear：前缀清理 2 个 string 键
+    leader
+        .string_put_replicated("ns.a", b"a".to_vec(), None)
+        .await
+        .unwrap();
+    leader
+        .string_put_replicated("ns.b", b"b".to_vec(), None)
+        .await
+        .unwrap();
+    let (removed, bytes) = leader.clear_prefix_replicated("ns.").await.unwrap();
+    assert_eq!(removed, 2, "清除 ns.a / ns.b 两行");
+    assert!(bytes > 0, "回收字节必须记账");
+    assert_eq!(leader.string_get("ns.a").unwrap(), None);
+
+    // Follower 收敛（按序应用全部复制条目）
+    let entries = leader.read_entries("cache", 1, 0);
+    for e in &entries {
+        follower.apply_entry(e).unwrap();
+    }
+    assert_eq!(follower.string_get("nx").unwrap(), Some(b"v1".to_vec()));
+    assert_eq!(follower.string_get("ns.a").unwrap(), None);
+    assert_eq!(follower.string_get("ns.b").unwrap(), None);
+
+    // 幂等：整批重复应用（含 CacheClear 的簿记预检）不报错、结果不变
+    for e in &entries {
+        follower.apply_entry(e).unwrap();
+    }
+    assert_eq!(follower.string_get("ns.a").unwrap(), None);
+    assert_eq!(follower.string_get("nx").unwrap(), Some(b"v1".to_vec()));
+}
+
 #[tokio::test]
 async fn test_cache_replicated_ttl_absolute() {
     // 复制 Leader 计算的绝对到期时间戳；Follower 原样应用，独立到期

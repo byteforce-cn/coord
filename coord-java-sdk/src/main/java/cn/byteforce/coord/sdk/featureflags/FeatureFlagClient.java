@@ -4,15 +4,24 @@ import cn.byteforce.coord.sdk.CoordException;
 
 /**
  * Feature flag API.
- * <p>
- * Flags are evaluated by the Coord Agent. The wire surface is <b>read-only</b>
- * ({@code IsEnabled} / {@code Evaluate}) — flags are created and updated out of band
- * (configuration / admin plane), so the SDK deliberately performs no local caching:
- * a cache without invalidation would go stale silently.
+ *
+ * <h2>读面</h2>
+ *
+ * Flags are evaluated by the Coord Agent; evaluation has <b>no local caching</b>
+ * (reads go straight to the shared store), so a successful management write takes
+ * effect immediately — evaluated consistently from any connected agent.
+ *
+ * <h2>管理面</h2>
+ *
+ * {@link #putFlag} / {@link #putPercentageFlag} / {@link #deleteFlag} write the flag
+ * state (stored in the server-wide KV: survives restarts, shared across agents —
+ * capability {@code coord:flags:manage}); {@link #listFlags} enumerates them
+ * ({@code coord:flags:read}).
  *
  * <pre>{@code
  * FeatureFlagClient ff = client.featureFlags();
- * if (ff.isEnabled("new-checkout", "{\"userId\":\"u-1\"}")) {
+ * ff.putFlag("new-checkout", true);
+ * if (ff.isEnabled("new-checkout", "{\"userId\":\"u-1\"}").isEnabled()) {
  *     // new code path
  * }
  * }</pre>
@@ -38,6 +47,67 @@ public interface FeatureFlagClient {
      * @throws CoordException on communication failure
      */
     String evaluate(String flagName, String context);
+
+    /**
+     * Create or overwrite a full on/off flag (idempotent). Takes effect immediately.
+     *
+     * @throws CoordException on communication failure
+     */
+    void putFlag(String flagName, boolean enabled);
+
+    /**
+     * Create or overwrite a percentage-rollout flag (idempotent).
+     *
+     * <p>Evaluation buckets by {@code user_id} (consistent hashing);
+     * {@code percentage} must be within {@code [0, 100]}.
+     *
+     * @throws CoordException on communication failure (server rejects out-of-range
+     *                         values with {@code INVALID_ARGUMENT})
+     */
+    void putPercentageFlag(String flagName, boolean enabled, int percentage);
+
+    /**
+     * Delete a flag (idempotent: deleting a missing flag also succeeds).
+     * After deletion the flag evaluates to disabled (same as never registered).
+     */
+    void deleteFlag(String flagName);
+
+    /**
+     * List all flags, ordered by name (stable and comparable).
+     */
+    java.util.List<FlagInfo> listFlags();
+
+    /** Flag state as returned by {@link #listFlags}. */
+    final class FlagInfo {
+        private final String flagName;
+        private final boolean enabled;
+        private final Integer percentage;
+
+        public FlagInfo(String flagName, boolean enabled, Integer percentage) {
+            this.flagName = flagName;
+            this.enabled = enabled;
+            this.percentage = percentage;
+        }
+
+        public String getFlagName() {
+            return flagName;
+        }
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        /** Rollout percentage {@code 0..100}; {@code null} = full on/off flag. */
+        public Integer getPercentage() {
+            return percentage;
+        }
+
+        @Override
+        public String toString() {
+            return "FlagInfo{flagName=" + flagName + ", enabled=" + enabled
+                    + ", percentage=" + percentage + "}";
+        }
+    }
 
     /** Outcome of {@link #isEnabled}. */
     final class FlagDecision {

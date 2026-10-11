@@ -143,3 +143,118 @@ async fn test_feature_flag_state_survives_instance_recreation() {
         "重启后灰度百分比必须存续"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// gRPC 管理面（PutFlag / DeleteFlag / ListFlags，#52）
+// ═══════════════════════════════════════════════════════════════════
+
+use coord_proto::agent::feature_flags_server::FeatureFlags;
+use coord_proto::agent::{
+    FeatureFlagDeleteFlagRequest, FeatureFlagListFlagsRequest, FeatureFlagPutFlagRequest,
+};
+use tonic::{Code, Request};
+
+/// PutFlag（全量/百分比）→ 求值立即生效；ListFlags 按键升序；DeleteFlag 幂等。
+///
+/// 同名方法消歧：`delete_flag` / `list_flags` 与服务的固有方法同名，
+/// 方法解析不按实参排除固有方法 ⇒ 必须用 UFCS 调 trait 实现。
+#[tokio::test]
+async fn test_grpc_flags_management_roundtrip() {
+    let svc = FeatureFlagService::new(FlagConfig::default());
+
+    // 全量开关
+    svc.put_flag(Request::new(FeatureFlagPutFlagRequest {
+        flag_name: "beta".into(),
+        enabled: true,
+        percentage: None,
+    }))
+    .await
+    .expect("put_flag 必须成功");
+    assert!(svc.is_enabled("beta").await.unwrap());
+
+    // 百分比灰度
+    svc.put_flag(Request::new(FeatureFlagPutFlagRequest {
+        flag_name: "canary".into(),
+        enabled: true,
+        percentage: Some(25),
+    }))
+    .await
+    .expect("put percentage flag 必须成功");
+    let state = svc.get_flag_state("canary").await.unwrap();
+    assert_eq!(state.percentage, Some(25));
+
+    // 越界 percentage ⇒ INVALID_ARGUMENT（fail-loud，不静默裁剪）
+    let err = svc
+        .put_flag(Request::new(FeatureFlagPutFlagRequest {
+            flag_name: "bad".into(),
+            enabled: true,
+            percentage: Some(101),
+        }))
+        .await
+        .expect_err("percentage > 100 必须拒绝");
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    // ListFlags：按键升序、字段对齐
+    let resp = FeatureFlags::list_flags(&svc, Request::new(FeatureFlagListFlagsRequest {}))
+        .await
+        .expect("list_flags 必须成功")
+        .into_inner();
+    let names: Vec<&str> = resp.flags.iter().map(|f| f.flag_name.as_str()).collect();
+    assert_eq!(names, vec!["beta", "canary"], "按键升序、结果稳定可比");
+    let canary = resp
+        .flags
+        .iter()
+        .find(|f| f.flag_name == "canary")
+        .expect("canary 必须在列表中");
+    assert!(canary.enabled);
+    assert_eq!(canary.percentage, Some(25));
+
+    // DeleteFlag：删除后求值 false；重复删除幂等
+    FeatureFlags::delete_flag(
+        &svc,
+        Request::new(FeatureFlagDeleteFlagRequest {
+            flag_name: "beta".into(),
+        }),
+    )
+    .await
+    .expect("delete_flag 必须成功");
+    assert!(!svc.is_enabled("beta").await.unwrap());
+    FeatureFlags::delete_flag(
+        &svc,
+        Request::new(FeatureFlagDeleteFlagRequest {
+            flag_name: "beta".into(),
+        }),
+    )
+    .await
+    .expect("重复删除必须幂等");
+    let resp = FeatureFlags::list_flags(&svc, Request::new(FeatureFlagListFlagsRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.flags.len(), 1, "删除后列表不再包含该开关");
+}
+
+/// 跨 agent 一致：两个服务实例共享同一 store（生产 = 共享 KV），一方写、另一方读。
+///
+/// 判据：写入**无本地缓存延迟**——写成功即可从另一实例求值一致（无需等待）。
+#[tokio::test]
+async fn test_grpc_flags_management_cross_instance_immediate() {
+    let store = Arc::new(MemoryFeatureFlagStore::new());
+    let a: Arc<dyn FeatureFlagStore> = store.clone();
+    let b: Arc<dyn FeatureFlagStore> = store;
+    let svc_a = FeatureFlagService::with_store(FlagConfig::default(), a);
+    let svc_b = FeatureFlagService::with_store(FlagConfig::default(), b);
+
+    svc_a
+        .put_flag(Request::new(FeatureFlagPutFlagRequest {
+            flag_name: "shared".into(),
+            enabled: true,
+            percentage: None,
+        }))
+        .await
+        .expect("put_flag 必须成功");
+    assert!(
+        svc_b.is_enabled("shared").await.unwrap(),
+        "写方立即生效、读方一致（读路径无本地缓存）"
+    );
+}
