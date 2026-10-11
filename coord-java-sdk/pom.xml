@@ -6,7 +6,7 @@
 
     <groupId>cn.byteforce</groupId>
     <artifactId>coord-java-sdk</artifactId>
-    <version>0.2.1</version>
+    <version>0.3.0</version>
     <packaging>jar</packaging>
 
     <name>Coord Java SDK</name>
@@ -55,29 +55,48 @@
         <logback.version>1.5.6</logback.version>
     </properties>
 
+    <!-- BOM 统一管理 gRPC / protobuf 传递版本（消除散钉；消费者可按需对齐）。
+         ${grpc.version} / ${protobuf.version} 可被 -D 覆盖 ⇒ CI 依赖矩阵
+         （仓库钉住组合 × 消费者平台组合）复用同一份 pom。
+         测试区间与 shading 评估见 README「Dependency compatibility」。 -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.grpc</groupId>
+                <artifactId>grpc-bom</artifactId>
+                <version>${grpc.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.google.protobuf</groupId>
+                <artifactId>protobuf-bom</artifactId>
+                <version>${protobuf.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
-        <!-- gRPC -->
+        <!-- gRPC（版本由 grpc-bom 管理） -->
         <dependency>
             <groupId>io.grpc</groupId>
             <artifactId>grpc-netty-shaded</artifactId>
-            <version>${grpc.version}</version>
         </dependency>
         <dependency>
             <groupId>io.grpc</groupId>
             <artifactId>grpc-protobuf</artifactId>
-            <version>${grpc.version}</version>
         </dependency>
         <dependency>
             <groupId>io.grpc</groupId>
             <artifactId>grpc-stub</artifactId>
-            <version>${grpc.version}</version>
         </dependency>
 
-        <!-- Protobuf -->
+        <!-- Protobuf（版本由 protobuf-bom 管理） -->
         <dependency>
             <groupId>com.google.protobuf</groupId>
             <artifactId>protobuf-java</artifactId>
-            <version>${protobuf.version}</version>
         </dependency>
 
         <!-- javax.annotation (required by gRPC generated code) -->
