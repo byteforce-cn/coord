@@ -2510,10 +2510,18 @@ impl Transit for TransitService {
         request: Request<TransitHmacSignRequest>,
     ) -> Result<Response<TransitHmacSignResponse>, Status> {
         let req = request.into_inner();
-        match self.hmac_sign(&req.data, &req.algorithm) {
-            Ok(signature) => Ok(Response::new(TransitHmacSignResponse {
+        // 空 key_id = 主材料（新写入口径）；响应回带实际参与签名的材料标识，
+        // 调用方必须与签名一起持久化（验签必填）。
+        let key_id = if req.key_id.is_empty() {
+            None
+        } else {
+            Some(req.key_id.as_str())
+        };
+        match self.hmac_sign(&req.data, &req.purpose, &req.algorithm, key_id) {
+            Ok((signature, key_id)) => Ok(Response::new(TransitHmacSignResponse {
                 signature,
                 algorithm: req.algorithm,
+                key_id,
             })),
             Err(e) => Err(sanitized_internal(e)),
         }
@@ -2524,7 +2532,13 @@ impl Transit for TransitService {
         request: Request<TransitHmacVerifyRequest>,
     ) -> Result<Response<TransitHmacVerifyResponse>, Status> {
         let req = request.into_inner();
-        match self.hmac_verify(&req.data, &req.signature, &req.algorithm) {
+        match self.hmac_verify(
+            &req.data,
+            &req.signature,
+            &req.purpose,
+            &req.algorithm,
+            &req.key_id,
+        ) {
             Ok(valid) => Ok(Response::new(TransitHmacVerifyResponse { valid })),
             Err(e) => Err(sanitized_internal(e)),
         }
