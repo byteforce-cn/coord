@@ -1,6 +1,6 @@
 # 能力边界清单（Scope & non-goals）
 
-> Owner: maintainers ｜ Last verified: 2026-10-11
+> Owner: maintainers ｜ Last verified: 2026-10-12
 
 本清单逐条列出各能力**明确不承诺**的边界，与承诺同等重要（见
 `apis/contracts/WHITEPAPER.md`）。每条都带可核对的实现锚点；凡「不承诺」，

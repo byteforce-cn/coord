@@ -1574,6 +1574,20 @@ mod tests {
 
     // ──── HMAC 签名与验签测试 ────
 
+    /// ADR-0012 §1 派生公式的黄金向量：公式一旦漂移（同 sign/verify 互测无法发现）本测试必红。
+    #[test]
+    fn test_hmac_derivation_golden_vector() {
+        let svc = test_svc(TransitConfig::default());
+        let (sig, key_id) = svc
+            .hmac_sign(b"golden-vector", "p:golden", "HMAC-SHA256", None)
+            .expect("sign");
+        assert_eq!(key_id, "default-kek");
+        assert_eq!(
+            hex::encode(sig),
+            "5060a19382984c49ca53ac217ea0df9e44c8f8d4d6baa97453918c80978c2ef3"
+        );
+    }
+
     #[test]
     fn test_hmac_sign_sha256_default() {
         let svc = test_svc(TransitConfig::default());

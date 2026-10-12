@@ -23,6 +23,18 @@
   未提供（含 coord-java-sdk 0.2.1 二进制）⇒ `INVALID_ARGUMENT`。
 - 不支持算法由 `INTERNAL` 改为 `INVALID_ARGUMENT`（与参数非法同口径；无已知消费者依赖）。
 - Java SDK：无用途/无 `key_id` 的旧 HMAC 方法被用途化 API 取代（0.3.x 未发布窗口内）。
+- **存量签名不可迁移**：本改动前产出的 HMAC（无 key_id、旧派生公式）一律不可复算；升级后须按新主材料重散列回写（流程见 runbook §4.4）。
+
+**影响范围（消费者数量/名单）**：本仓已知 HMAC 调用方 **0**（`coord-client` / `coord` /
+`java-example` 无调用；`coord-java-sdk` 0.2.1 已发布二进制中的 `hmacSign` / `hmacVerify`
+调用将收到 `INVALID_ARGUMENT`）。EIS 尚未切换到 transit（ADR-0012；`eis/docs/IMPLEMENTATION.md`
+将其列为可选映射）。仓外不知情消费者无法在仓内证否，按「零已知消费者 + 本条目公告」处理。
+
+**回滚预案**：回滚本分支即可；无服务端状态迁移（材料注入集合与落盘格式均未变），
+回滚后旧客户端行为恢复。
+
+**灰度计划**：不支持滚动升级（见 `docs/production/ops/upgrade.md`）——全集群同版本切换；
+切换前完成客户端 SDK 升级与 `key_id` 持久化改造。
 
 **语义声明（wire 不变）**
 

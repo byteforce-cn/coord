@@ -59,6 +59,7 @@ message TransitDecryptResponse {
 // key_id 为材料标识，承担 Vault Transit「密钥版本」角色；跨 agent 一致性要求：
 // 同一集群所有 agent 必须注入相同材料与相同标识，同一 (purpose, data, key_id, algorithm)
 // 在任一 agent 结果一致。
+// purpose 是域分隔标签，不是授权边界：持有 coord:transit:crypto 的调用方可使用任意合法 purpose（不设白名单，见 ADR-0012 §1）。
 
 message TransitHmacSignRequest {
   bytes data = 1;

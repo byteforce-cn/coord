@@ -44,7 +44,7 @@ coord Transit 若要作为该能力的可选平台映射，必须满足这两条
 - 派生（HKDF-SHA256，**单次** Extract+Expand，段长前缀编码消除歧义）：
 
   ```text
-  info     = "coord-transit-hmac-v1:" || u32be(len(id)) || id
+  info     = "coord-transit-hmac-v1:" || u32be(len(kek_id)) || kek_id
                                         || u32be(len(purpose)) || purpose
   hmac_key = HKDF-SHA256(材料, salt=None, info)
   ```
@@ -120,6 +120,9 @@ coord Transit 若要作为该能力的可选平台映射，必须满足这两条
   agent 本就不可用。
 - 契约记录：`apis/contracts/CHANGELOG.md` 新增 `[contracts/v1.5.0]`、`STATUS.md` transit 行
   补 G-TR-3、`WHITEPAPER.md` 相关口径行同步。
+- 版本分类：判为 **Minor**——wire 层仅新增字段；行为收紧面的**已知消费者为 0**，且已在
+  `apis/contracts/CHANGELOG.md`（`contracts/v1.5.0`）按 §11.2 模板公告。不走 Major 的
+  `coord.transit.v2` + 长期双跑（无已知消费者，代价不成比例；规则见 WHITEPAPER §4）。
 
 ## 后果
 

@@ -1,6 +1,6 @@
 # 消费方契约页（Consumer Contract）
 
-> Owner: maintainers ｜ Last verified: 2026-10-11
+> Owner: maintainers ｜ Last verified: 2026-10-12
 
 面向**接入方**的聚合页：按服务给出「一致性 / 路由 / 失败语义 + 推荐消费范式」，
 并把每 RPC 的能力名与已接受的边界汇总为可检索的表。
@@ -296,6 +296,7 @@
   新写入不传 `key_id`（主材料）；显式 `key_id` 用于轮换期按旧材料复算散列变体（DRV-005
   防重）。轮换/下线/回退见 runbook §4.4。**跨 agent 一致性**：同集群所有 agent 必须注入
   相同材料与标识；同一 `(purpose, data, key_id, algorithm)` 在任一 agent 结果一致。
+  用途是**域分隔标签，不是授权边界**——持有 `coord:transit:crypto` 的调用方可签/验任意合法 `purpose`；按服务隔离用途不属本契约承诺。
 
 ## 11. 本地态服务（CircuitBreaker / RateLimiter / FeatureFlags）
 
