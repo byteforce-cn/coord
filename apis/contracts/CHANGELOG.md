@@ -2,6 +2,46 @@
 
 版本规则见 WHITEPAPER.md。契约版本独立于代码版本。
 
+## [contracts/v1.5.0] — 2026-10-12（Minor：Transit HMAC 用途化密钥与轮换窗口，G-TR-3 / ADR-0012）
+
+**发布口径**：本条目为 **Minor**（新增字段 + 注释级语义声明 + 行为收紧；
+不改动任何既有字段编号与类型；`buf breaking` 基线 = `contracts/v1.4.0`，CI 强制）。
+
+**新增字段（3 个消息，向后兼容）**
+
+| 消息 | 字段 | 语义 |
+|:--|:--|:--|
+| `coord.transit.v1.TransitHmacSignRequest` | `string purpose = 3` | 必填用途标签（非空、不含 NUL、≤128 字节）；按用途域分隔派生 HMAC 密钥，不同用途互不可验 |
+| 同上 | `string key_id = 4` | 可选材料标识：空 = 主材料（新写入）；显式 = 指定材料（轮换期散列变体复算） |
+| `coord.transit.v1.TransitHmacSignResponse` | `string key_id = 3` | 服务端分配：实际签名材料标识；调用方必须与签名一起持久化 |
+| `coord.transit.v1.TransitHmacVerifyRequest` | `string purpose = 4` | 必填：签名时的用途 |
+| 同上 | `string key_id = 5` | 必填：签名时的材料；空 ⇒ `INVALID_ARGUMENT`，未注入 ⇒ `FAILED_PRECONDITION`（fail-loud） |
+
+**行为收紧（消费者告知）**
+
+- `HmacSign` / `HmacVerify` 的 `purpose` 与 `HmacVerify` 的 `key_id` 由缺省变为必填；
+  未提供（含 coord-java-sdk 0.2.1 二进制）⇒ `INVALID_ARGUMENT`。
+- 不支持算法由 `INTERNAL` 改为 `INVALID_ARGUMENT`（与参数非法同口径；无已知消费者依赖）。
+- Java SDK：无用途/无 `key_id` 的旧 HMAC 方法被用途化 API 取代（0.3.x 未发布窗口内）。
+
+**语义声明（wire 不变）**
+
+- HMAC 密钥 = `HKDF-SHA256(注入材料, info = "coord-transit-hmac-v1:" || u32be(len(kek_id)) || kek_id || u32be(len(purpose)) || purpose)`；
+  历史材料**参与** HMAC 派生（作废「仅派生解密 KEK」注释）。
+- 轮换窗口：新签名用主材料；旧签名按其 `key_id` 在历史材料注入期可复算；材料下线后显式
+  `key_id` ⇒ `FAILED_PRECONDITION`。HMAC 不参与 `Rewrap`（迁移 = 重散列回写）。
+- 跨 agent 一致性：同集群所有 agent 必须注入相同材料与标识；同一
+  `(purpose, data, key_id, algorithm)` 在任一 agent 结果一致。
+
+**校验（本地已跑）**
+
+- `apis/contracts/scripts/check-wire-sync.sh` exit 0；`check-wire-descriptor.sh` exit 0；
+  `check-sdk-sync.sh` exit 0；`cargo fmt --all -- --check` / `cargo clippy --all-targets --all-features`
+  / `cargo test` 全绿；`scripts/check-doc-refs.sh` / `scripts/check-panics.sh` /
+  `scripts/check-consumer-doc-labels.sh` exit 0。
+- `coord-java-sdk` `mvn -B -q verify` 全绿 —— **JDK 21.0.12.1（Temurin）**（Tests run 186 /
+  failures 0 / errors 0）；`java-example` `mvn -B -q verify -DskipTests` exit 0。
+
 ## [contracts/v1.4.0] — 2026-10-11（Minor：消费方审计第二批增量——配置位点/缓存键空间/调度结果回读/开关管理面）
 
 **发布口径**：本条目为 **Minor**（新增 RPC / 新增字段 / 注释级语义声明；

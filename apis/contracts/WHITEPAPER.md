@@ -1,13 +1,14 @@
-# Coord 平台对外协议白皮书（v1.3.0）
+# Coord 平台对外协议白皮书（v1.5.0）
 
-> 版本：contracts/v1.3.0 ｜ 修订日期：2026-10-09 ｜ 基线代码：`d03a6ad`（main，ADR-0010 批次 1+2）
+> 版本：contracts/v1.5.0 ｜ 修订日期：2026-10-12 ｜ 基线代码：`656a049`（main，v0.3.0）
 >
-> **本版变更（v1.2.0 → v1.3.0，Minor）**：新增 4 个 RPC（`MQ/GetTopicLeader`、
-> `MQ/MoveToDlq`、`MQ/DeleteTopic`、`Transit/Rewrap`）与 `MqMessage` 的
-> `dlq_reason`/`dlq_detail` 字段（均向后兼容），并补齐 MQ Leader 路由/删除语义、
-> Policy 本地 RBAC 定位、Scheduler result 持久化、Transit 多材料等边界声明。
-> 逐项对照与消费者告知见 `CHANGELOG.md` 的 `contracts/v1.3.0` 条目（§11.2 流程）；
-> 缺口编号与验收锚点见 `docs/adr/0010-eis-consumer-gaps-full-landing.md`。
+> **本版变更（v1.4.0 → v1.5.0，Minor）**：`coord.transit.v1` 的 HMAC 用途化字段
+> （`purpose` / `key_id`）与行为收紧——`purpose` 与验签 `key_id` 必填、按用途域
+> 分隔派生、轮换窗口内旧材料可复算、材料下线后 fail-loud（G-TR-3，ADR-0012）。
+> v1.4.0（配置位点/缓存键空间/调度结果回读/开关管理面，ADR-0011）见
+> `CHANGELOG.md` 的 `contracts/v1.4.0` 条目。逐项对照与消费者告知见 `CHANGELOG.md`
+> 的 `contracts/v1.5.0` 条目（§11.2 流程）；缺口编号与验收锚点见
+> `docs/adr/0012-transit-hmac-purpose-bound-keys.md`。
 >
 > **契约地位**：本白皮书是 Coord 平台对上游业务方（100+ 微服务，Java/Go）的
 > **服务协调能力承诺**：注册发现、分布式锁、Leader 选举、分布式 ID、事件通知，
@@ -518,6 +519,11 @@ MAJOR：破坏性变更（非必要不使用；须提前 ≥ 3 个月发布废�
    消费方不应把它当作外部 KMS 的替代品。
 8. **`replication`（`coord.agent.Replica`）永不对外**（红线 §9.3 R3）：
    它是 ISR 内部复制通道，受支持、有测试、有文档，但**不产生对外契约包**。
+9. **`coord.transit.v1` 的 HMAC 密钥为用途派生**（ADR-0012 / G-TR-3）：`purpose` 必填且
+   互不可验；签名携带材料标识 `key_id`（`HmacSign` 缺省 = 主材料，显式 = 历史材料，仅用于
+   轮换期变体复算）；`HmacVerify` 必填 `key_id`，材料未注入 ⇒ `FAILED_PRECONDITION`
+   （fail-loud）；同集群须注入相同材料与标识。历史材料同时承担 DEK 解密与 HMAC 复算，
+   下线前须两类依赖都清零（runbook §4.4）。
 
 ---
 

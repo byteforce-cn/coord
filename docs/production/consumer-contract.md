@@ -272,7 +272,7 @@
   （playbook：`security.md` §3.2 / runbook §4.5）；非 HSM 边界与重估触发见
   `boundaries.md` B-PKI-1。
 
-## 10. Transit（信封加密与 HMAC，G-TR-1 / G-TR-2）
+## 10. Transit（信封加密与 HMAC，G-TR-1 / G-TR-2 / G-TR-3）
 
 | RPC（组） | 能力 |
 |:--|:--|
@@ -288,6 +288,14 @@
   加密 + HMAC，PKI 维持「密钥交付持有方」模型。「私钥不出域」的签名场景
   （token / 审计锚点等）不在承诺内；触发条件（组织 KMS 方向确定）时另行立项
   评估。边界条目：`boundaries.md` B-TR-1。
+- **HMAC 用途化与轮换窗口（G-TR-3，ADR-0012）**：`HmacSign` / `HmacVerify` 的 `purpose`
+  必填（非空、不含 NUL、≤128 字节；空/非法 ⇒ `INVALID_ARGUMENT`），按用途域分隔派生、
+  互不可验。签名的 `key_id` 是材料标识（Vault Transit 的 key version 等价物），**必须与
+  签名一起持久化**；验签 `key_id` 必填（空 ⇒ `INVALID_ARGUMENT`），只按该材料复算：材料
+  已注入 ⇒ 正常校验；未注入 ⇒ `FAILED_PRECONDITION`（fail-loud，不是 `valid=false`）。
+  新写入不传 `key_id`（主材料）；显式 `key_id` 用于轮换期按旧材料复算散列变体（DRV-005
+  防重）。轮换/下线/回退见 runbook §4.4。**跨 agent 一致性**：同集群所有 agent 必须注入
+  相同材料与标识；同一 `(purpose, data, key_id, algorithm)` 在任一 agent 结果一致。
 
 ## 11. 本地态服务（CircuitBreaker / RateLimiter / FeatureFlags）
 

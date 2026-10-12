@@ -235,6 +235,23 @@ KEK 更换分三步，**在完成迁移前不得移除旧材料**：
   `test_legacy_record_without_material_id_falls_back_to_try_all`、
   `test_keyring_old_material_parsing_rules`。
 
+**HMAC 轮换（G-TR-3 / ADR-0012）**：
+
+HMAC 与 DEK 共用材料集合，但**不参与 `Rewrap`**；迁移 = 业务按新主材料重散列并回写。
+
+1. **写入侧**：`HmacSign` 必带 `purpose`；把响应的 `key_id` 与签名（散列）一起持久化——
+   丢失 `key_id` 的存量在旧材料下线后既不可复算也不会 fail-loud。
+2. **并存窗口**：按本节 KEK 步骤 1 注入旧材料；旧散列按 `key_id` 可验；防重按
+   `HmacSign(purpose, data, key_id=旧)` 复算变体（DRV-005）。
+3. **下线**：确认业务库无引用旧 `key_id` 的存量散列（或已在窗口内重建）后移除旧材料；
+   此后按旧 `key_id` 验签/复算报
+   `FAILED_PRECONDITION: KEK material '<id>' is not injected …`（fail-loud）。
+4. **回退**：重新注入旧材料（同 id / 同材料）即恢复复算；未确认无依赖前不得下线。
+
+**判据（自动化）**：`test_hmac_rotation_window_and_offline_fail_loud`（窗口可验 + 变体复算
++ 下线 fail-loud）、`test_hmac_cross_agent_consistency`、`test_hmac_purposes_are_mutually_unverifiable`、
+`test_grpc_hmac_purpose_key_id_and_fail_loud`（错误码）。
+
 ### 4.5 PKI 证书轮换与泄露应急（G-PKI-3）
 
 > 适用 `coord.pki.v1`（agent 内置 CA）。**没有** CRL/OCSP、也**没有** revoke
