@@ -33,3 +33,4 @@
 | [ADR-0009](0009-dev-mode-builtin-services.md) | dev 模式的 Agent 内建服务集与 dev 专用默认 KEK | accepted |
 | [ADR-0010](0010-eis-consumer-gaps-full-landing.md) | 全量承接 EIS 消费方能力缺口（G-*）：方向、批次与治理 | accepted |
 | [ADR-0011](0011-consumer-audit-batch-2.md) | 消费方审计第二批（#44–#53）：配置位点、缓存键空间、调度回读、开关管理面与 SDK 依赖治理 | accepted |
+| [ADR-0012](0012-transit-hmac-purpose-bound-keys.md) | Transit HMAC 用途化密钥与轮换窗口（G-TR-3） | accepted |
