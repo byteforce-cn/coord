@@ -16,6 +16,7 @@ import cn.byteforce.coord.contracts.transit.v1.TransitRewrapRequest;
 import cn.byteforce.coord.contracts.transit.v1.TransitRewrapResponse;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
 import cn.byteforce.coord.sdk.transit.TransitClient;
+import cn.byteforce.coord.sdk.transit.TransitHmacSignature;
 import cn.byteforce.coord.sdk.transit.TransitRewrapResult;
 
 import com.google.protobuf.ByteString;
@@ -88,53 +89,56 @@ public final class TransitClientImpl extends AgentRpcClient implements TransitCl
         return plaintext;
     }
 
-    // ──── HMAC 签名与验签 ────
+    // ──── HMAC 签名与验签（G-TR-3 / ADR-0012）────
 
     @Override
-    public byte[] hmacSign(byte[] data) {
-        return hmacSign(data, "HMAC-SHA256");
+    public TransitHmacSignature hmacSignWithPurpose(byte[] data, String purpose) {
+        return hmacSignWithPurpose(data, purpose, "HMAC-SHA256", "");
     }
 
     @Override
-    public byte[] hmacSign(byte[] data, String algorithm) {
+    public TransitHmacSignature hmacSignWithPurpose(byte[] data, String purpose, String algorithm) {
+        return hmacSignWithPurpose(data, purpose, algorithm, "");
+    }
+
+    @Override
+    public TransitHmacSignature hmacSignWithPurpose(byte[] data, String purpose, String algorithm, String keyId) {
         TransitHmacSignRequest request = TransitHmacSignRequest.newBuilder()
                 .setData(ByteString.copyFrom(data))
                 .setAlgorithm(algorithm != null ? algorithm : "HMAC-SHA256")
+                .setPurpose(purpose != null ? purpose : "")
+                .setKeyId(keyId != null ? keyId : "")
                 .build();
-
         TransitHmacSignResponse response = callWithRetry(
                 (ch, r) -> TransitGrpc.newBlockingStub(ch)
                         .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
                         .hmacSign((TransitHmacSignRequest) r),
                 request, "transit.hmacSign");
-
-        byte[] signature = response.getSignature().toByteArray();
-        log.debug("Transit hmacSign: data_len={}, algo={}, sig_len={}", data.length, algorithm, signature.length);
-        return signature;
+        return new TransitHmacSignature(
+                response.getSignature().toByteArray(), response.getKeyId(), response.getAlgorithm());
     }
 
     @Override
-    public boolean hmacVerify(byte[] data, byte[] signature) {
-        return hmacVerify(data, signature, "HMAC-SHA256");
+    public boolean hmacVerifyWithPurpose(byte[] data, byte[] signature, String purpose, String keyId) {
+        return hmacVerifyWithPurpose(data, signature, purpose, keyId, "HMAC-SHA256");
     }
 
     @Override
-    public boolean hmacVerify(byte[] data, byte[] signature, String algorithm) {
+    public boolean hmacVerifyWithPurpose(byte[] data, byte[] signature, String purpose,
+                                         String keyId, String algorithm) {
         TransitHmacVerifyRequest request = TransitHmacVerifyRequest.newBuilder()
                 .setData(ByteString.copyFrom(data))
                 .setSignature(ByteString.copyFrom(signature))
                 .setAlgorithm(algorithm != null ? algorithm : "HMAC-SHA256")
+                .setPurpose(purpose != null ? purpose : "")
+                .setKeyId(keyId != null ? keyId : "")
                 .build();
-
         TransitHmacVerifyResponse response = callWithRetry(
                 (ch, r) -> TransitGrpc.newBlockingStub(ch)
                         .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
                         .hmacVerify((TransitHmacVerifyRequest) r),
                 request, "transit.hmacVerify");
-
-        boolean valid = response.getValid();
-        log.debug("Transit hmacVerify: data_len={}, valid={}", data.length, valid);
-        return valid;
+        return response.getValid();
     }
 
     // ──── KEK 材料迁移（G-TR-1）────

@@ -68,47 +68,48 @@ public interface TransitClient {
      */
     byte[] decrypt(byte[] ciphertext, byte[] context);
 
-    // ──── HMAC 签名与验签 ────
+    // ──── HMAC 签名与验签（G-TR-3 / ADR-0012）────
 
     /**
-     * Sign data using HMAC-SHA256 (default algorithm).
+     * Sign data with a purpose-bound HMAC key (default algorithm HMAC-SHA256),
+     * using the current primary material.
+     * <p>
+     * The purpose is a required opaque label; different purposes derive different
+     * keys and are mutually unverifiable. Persist {@code result.keyId()} with the
+     * signature — verification requires it.
      *
-     * @param data the data to sign
-     * @return the signature bytes
-     * @throws CoordException on signing or communication failure
+     * @param data    the data to sign
+     * @param purpose required purpose label (non-empty, no NUL, &le;128 bytes)
+     * @return signature bytes plus the signing material id
+     * @throws CoordException {@code INVALID_ARGUMENT} when the purpose is missing/invalid
      */
-    byte[] hmacSign(byte[] data);
+    TransitHmacSignature hmacSignWithPurpose(byte[] data, String purpose);
+
+    /** Same as {@link #hmacSignWithPurpose(byte[], String)} with an explicit algorithm. */
+    TransitHmacSignature hmacSignWithPurpose(byte[] data, String purpose, String algorithm);
 
     /**
-     * Sign data using HMAC with the specified algorithm.
+     * Sign with an explicit material id (rotation window). Used to recompute
+     * hash variants with a historical material for cross-rotation duplicate
+     * detection (DRV-005); new writes must leave {@code keyId} empty/primary.
      *
-     * @param data      the data to sign
-     * @param algorithm the HMAC algorithm ("HMAC-SHA256" or "HMAC-SHA512")
-     * @return the signature bytes
-     * @throws CoordException on signing or communication failure
+     * @throws CoordException {@code FAILED_PRECONDITION} when the material is not injected
      */
-    byte[] hmacSign(byte[] data, String algorithm);
+    TransitHmacSignature hmacSignWithPurpose(byte[] data, String purpose, String algorithm, String keyId);
 
     /**
-     * Verify an HMAC signature using HMAC-SHA256 (default).
+     * Verify a signature against the given purpose and material id.
+     * <p>
+     * Both parameters are required: the material id selects the key version used
+     * at signing time. A missing (not injected) material fails loudly with
+     * {@code FAILED_PRECONDITION} instead of returning {@code false}.
      *
-     * @param data      the original data
-     * @param signature the signature to verify
-     * @return true if the signature is valid
-     * @throws CoordException on verification or communication failure
+     * @return true when the signature matches
      */
-    boolean hmacVerify(byte[] data, byte[] signature);
+    boolean hmacVerifyWithPurpose(byte[] data, byte[] signature, String purpose, String keyId);
 
-    /**
-     * Verify an HMAC signature with the specified algorithm.
-     *
-     * @param data      the original data
-     * @param signature the signature to verify
-     * @param algorithm the HMAC algorithm used ("HMAC-SHA256" or "HMAC-SHA512")
-     * @return true if the signature is valid
-     * @throws CoordException on verification or communication failure
-     */
-    boolean hmacVerify(byte[] data, byte[] signature, String algorithm);
+    /** Same as {@link #hmacVerifyWithPurpose(byte[], byte[], String, String)} with an explicit algorithm. */
+    boolean hmacVerifyWithPurpose(byte[] data, byte[] signature, String purpose, String keyId, String algorithm);
 
     // ──── KEK 材料迁移（G-TR-1）────
 
