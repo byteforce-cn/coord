@@ -2477,6 +2477,23 @@ impl Policy for PolicyService {
 // Transit Service
 // ════════════════════════════════════════════════════════════
 
+/// HMAC 错误映射（G-TR-3 / ADR-0012）：
+/// 参数非法（purpose / key_id / algorithm）→ INVALID_ARGUMENT；
+/// 指定材料未注入 → FAILED_PRECONDITION（fail-loud，不是静默 valid=false）；
+/// 其余 → sanitized_internal。
+fn map_transit_hmac_error(e: String) -> Status {
+    if e.contains("is not injected") {
+        Status::failed_precondition(e)
+    } else if e.starts_with("invalid purpose")
+        || e.starts_with("invalid key_id")
+        || e.starts_with("unsupported HMAC algorithm")
+    {
+        Status::invalid_argument(e)
+    } else {
+        sanitized_internal(e)
+    }
+}
+
 #[tonic::async_trait]
 impl Transit for TransitService {
     async fn encrypt(
@@ -2523,7 +2540,7 @@ impl Transit for TransitService {
                 algorithm: req.algorithm,
                 key_id,
             })),
-            Err(e) => Err(sanitized_internal(e)),
+            Err(e) => Err(map_transit_hmac_error(e)),
         }
     }
 
@@ -2540,7 +2557,7 @@ impl Transit for TransitService {
             &req.key_id,
         ) {
             Ok(valid) => Ok(Response::new(TransitHmacVerifyResponse { valid })),
-            Err(e) => Err(sanitized_internal(e)),
+            Err(e) => Err(map_transit_hmac_error(e)),
         }
     }
 
