@@ -1740,6 +1740,87 @@ mod tests {
         );
     }
 
+    /// 主材料 + 历史材料实例（HMAC 轮换窗口测试用）
+    fn svc_with_history(primary_id: &str, primary_byte: u8, old: &[(&str, u8)]) -> TransitService {
+        let store: Arc<dyn TransitDekStore> = Arc::new(MemoryTransitDekStore::new());
+        TransitService::with_store_keyring(
+            TransitConfig {
+                kek_id: primary_id.into(),
+                ..Default::default()
+            },
+            store,
+            TransitKekKeyring::resolve_with_env(
+                std::path::Path::new("/nonexistent"),
+                primary_id,
+                material(primary_byte),
+                if old.is_empty() {
+                    None
+                } else {
+                    Some(old_env_for(old))
+                },
+            )
+            .expect("keyring"),
+        )
+        .expect("svc")
+    }
+
+    #[test]
+    fn test_hmac_rotation_window_and_offline_fail_loud() {
+        let purpose = "eis:hr:employee:id_number:v1";
+        // 旧部署（材料 1 / id "old"）产生存量签名
+        let old_svc = svc_with_history("old", 1, &[]);
+        let (sig, key_id) = old_svc
+            .hmac_sign(b"stored hash", purpose, "HMAC-SHA256", None)
+            .expect("sign");
+        assert_eq!(key_id, "old");
+
+        // 轮换：主材料 2 / id "new" + 历史材料 1 / id "old" ⇒ 窗口内可验
+        let rotated = svc_with_history("new", 2, &[("old", 1)]);
+        assert!(rotated
+            .hmac_verify(b"stored hash", &sig, purpose, "HMAC-SHA256", "old")
+            .expect("window verify"));
+        // 新签名用主材料
+        let (sig_new, id_new) = rotated
+            .hmac_sign(b"stored hash", purpose, "HMAC-SHA256", None)
+            .expect("sign new");
+        assert_eq!(id_new, "new");
+        assert_ne!(sig, sig_new);
+        // 旧材料复算散列变体（DRV-005 防重）
+        let (variant, variant_id) = rotated
+            .hmac_sign(b"stored hash", purpose, "HMAC-SHA256", Some("old"))
+            .expect("variant");
+        assert_eq!(variant_id, "old");
+        assert_eq!(variant, sig, "同 (purpose,data,key_id) 必须可复算");
+
+        // 历史材料下线（未注入）⇒ fail-loud（不是 valid=false）
+        let offline = svc_with_history("new", 2, &[]);
+        let err = offline
+            .hmac_verify(b"stored hash", &sig, purpose, "HMAC-SHA256", "old")
+            .expect_err("offline must fail loud");
+        assert!(err.contains("is not injected"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn test_hmac_cross_agent_consistency() {
+        let cfg = || TransitConfig {
+            kek_id: "k1".into(),
+            ..Default::default()
+        };
+        let a = test_svc(cfg());
+        let b = test_svc(cfg());
+        let (sig_a, id_a) = a
+            .hmac_sign(b"same data", "p:same", "HMAC-SHA256", None)
+            .expect("a");
+        let (sig_b, id_b) = b
+            .hmac_sign(b"same data", "p:same", "HMAC-SHA256", None)
+            .expect("b");
+        assert_eq!(id_a, id_b);
+        assert_eq!(sig_a, sig_b, "同材料+id+purpose ⇒ 同签名");
+        assert!(b
+            .hmac_verify(b"same data", &sig_a, "p:same", "HMAC-SHA256", &id_a)
+            .expect("cross-agent verify"));
+    }
+
     // ──── 持久化路径 ────
 
     /// 轮换后 DEK 仍须单次使用（不得只按包头 id 删除 —— 新 id 条目残留即可二次解密）
