@@ -40,6 +40,7 @@ coord-dev-data/
 docs/*
 !docs/*.md
 !docs/adr/
+!docs/superpowers/
 !docs/production/
 docs/production/*
 # docs/production/ 顶层与 ops/ 需可入库（它们被仓库内文档引用）。
