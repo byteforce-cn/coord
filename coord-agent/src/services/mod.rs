@@ -25,5 +25,6 @@ pub mod scheduler_store;
 pub mod transit;
 pub mod transit_store;
 pub mod workflow;
+pub mod workflow_lease;
 pub mod workflow_scheduler;
 pub mod workflow_store;

@@ -22,7 +22,8 @@ use super::model::{
     WorkflowDefinition, WorkflowFault, WorkflowInstance,
 };
 use super::ports::{
-    Clock, DispatchResult, EventProvider, ExpressionEval, TaskDispatcher, WorkflowStore,
+    Clock, DispatchResult, EventProvider, ExpressionEval, InstanceLease, LeaseGuard,
+    TaskDispatcher, WorkflowStore,
 };
 use super::retry::{RetryConfig, RetryScheduler};
 
@@ -289,6 +290,12 @@ where
     /// 没有它，`spawn` 出去的后台任务死亡时**没有任何出口**：`coord-core` 无 supervisor、
     /// 无 `tracing`，调用方也拿不到 join handle。出口由上层（`coord-agent`）周期性拉取。
     workers: Arc<WorkerRegistry>,
+    /// 实例驱动租约（可选注入）：`Some` 时 `spawn_drive` 先取租约，保证一实例一驱动。
+    lease: Option<Arc<dyn InstanceLease>>,
+    /// 因租约被他人持有 / 租约后端不可用而**跳过**驱动的次数（可观测信号）。
+    lease_skipped: Arc<std::sync::atomic::AtomicU64>,
+    /// CAS 写回失败的次数（修订号冲突或 fencing 拒绝，可观测信号，不静默吞掉）。
+    cas_conflicts: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl<E, C, S, D, B> WorkflowRuntime<E, C, S, D, B>
@@ -315,6 +322,9 @@ where
             event_provider: Arc::new(event_provider),
             pending_subflows: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             workers: Arc::new(WorkerRegistry::default()),
+            lease: None,
+            lease_skipped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cas_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         // 启动后台扫描器，定期检查 RunSubflow 挂起的父流程并恢复
         rt.start_subflow_scanner();
@@ -330,6 +340,25 @@ where
     /// 遥测依赖，也不该持有。
     pub fn worker_liveness(&self) -> WorkerLiveness {
         self.workers.snapshot()
+    }
+
+    /// 注入实例驱动租约（“一实例一驱动”）。
+    ///
+    /// 不注入时引擎不做租约去重，行为与现状一致。builder 形式不破坏现有
+    /// `new` 构造函数。
+    pub fn with_instance_lease(mut self, lease: Arc<dyn InstanceLease>) -> Self {
+        self.lease = Some(lease);
+        self
+    }
+
+    /// 因租约被持有 / 后端不可用而跳过驱动的累计次数。
+    pub fn lease_skipped_total(&self) -> u64 {
+        self.lease_skipped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// CAS 写回失败的累计次数（修订号冲突或 fencing 拒绝）。
+    pub fn cas_conflict_total(&self) -> u64 {
+        self.cas_conflicts.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// 启动后台子流程扫描器
@@ -369,7 +398,50 @@ where
         let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = Arc::clone(&completed);
         let handle = tokio::spawn(async move {
-            rt.drive(instance_id, definition, store).await;
+            // 实例租约：一实例一驱动（未注入租约时跳过此段，退化为现状）。
+            // 获取失败（他人持有 / 后端不可用）→ 跳过驱动，**不得**退化为无租约驱动。
+            let guard: Option<Arc<dyn LeaseGuard>> = match rt.lease.as_ref() {
+                Some(lease) => match lease.acquire(&instance_id).await {
+                    Ok(Some(g)) => Some(g),
+                    // 已被其他驱动者持有：跳过（正常收尾，不计为故障）。
+                    Ok(None) => {
+                        rt.lease_skipped
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        return;
+                    }
+                    // 后端不可用：fail-closed 跳过，并留下可观测信号。
+                    Err(_) => {
+                        rt.lease_skipped
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        return;
+                    }
+                },
+                None => None,
+            };
+            // 租约有效期内的后台续租（drive 期间）；租约丢失时停止。
+            let renewer = guard.as_ref().map(|g| {
+                let g = Arc::clone(g);
+                let interval = g.renew_interval();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(interval).await;
+                        match g.renew().await {
+                            Ok(true) => {}
+                            _ => break,
+                        }
+                    }
+                })
+            });
+            rt.drive(instance_id, definition, store, guard.as_deref())
+                .await;
+            if let Some(h) = renewer {
+                h.abort();
+            }
+            if let Some(g) = guard {
+                g.release().await;
+            }
             // ⚠️ 这一行是判据的一部分：`drive` 中途死亡时它不会被执行，
             // 结算时该 worker 即被判为"未正常收尾"。不要把它移出 async 块。
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -866,10 +938,10 @@ where
             self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
             self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &inst)
                 .await;
-            self.drive(instance_id, definition, store).await;
+            self.spawn_drive(instance_id, definition, store);
         } else if reason == "retry" {
             // 重试：直接重新 drive（重新执行当前任务）
-            self.drive(instance_id, definition, store).await;
+            self.spawn_drive(instance_id, definition, store);
         }
     }
 
@@ -1124,22 +1196,90 @@ where
         Ok(inst)
     }
 
+    /// 对一个**已存在**的实例（重）启动驱动 —— 恢复/对账入口。
+    ///
+    /// 与 `start`/`resume` 的区别：不创建实例、不改变实例状态，只加载定义并
+    /// 经 [`Self::spawn_drive`] 受监督地驱动（受同一实例租约约束）。
+    /// 上游 supervisor 在进程重启后重驱动挂起/在飞实例时使用。
+    pub async fn drive_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
+        let inst = self
+            .store
+            .load_instance(instance_id)
+            .await
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| RuntimeError::NotFound(instance_id.to_string()))?;
+        let def = self
+            .store
+            .load_definition(
+                &inst.definition_ns,
+                &inst.definition_name,
+                &inst.definition_version,
+            )
+            .await
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| {
+                RuntimeError::DefinitionNotFound(format!(
+                    "{}/{}@{}",
+                    inst.definition_ns, inst.definition_name, inst.definition_version
+                ))
+            })?;
+        self.spawn_drive(inst.id.clone(), def, Arc::clone(&self.store));
+        Ok(())
+    }
+
+    /// 写回实例状态的一次尝试：优先用租约 fencing / 修订号 CAS，不可用时回退普通写。
+    ///
+    /// 返回 `true` = 写入生效（并刷新 `rev` 供后续 CAS 使用）；`false` = CAS 冲突或
+    /// fencing 拒绝 —— 计入 [`Self::cas_conflict_total`]，调用方不得静默吞掉。
+    async fn persist_instance(
+        &self,
+        store: &Arc<S>,
+        inst: &WorkflowInstance,
+        rev: &mut Option<i64>,
+        guard: Option<&dyn LeaseGuard>,
+    ) -> bool {
+        let ok = match guard {
+            Some(g) => matches!(g.fenced_save(inst, rev.unwrap_or(-1)).await, Ok(true)),
+            None => match *rev {
+                Some(r) => matches!(store.save_instance_atomic(inst, r).await, Ok(true)),
+                None => store.save_instance(inst).await.is_ok(),
+            },
+        };
+        if ok {
+            // 刷新修订号：后续 CAS 必须以写入后的新值为期望。
+            if let Ok(Some((_, r))) = store.load_instance_with_rev(&inst.id).await {
+                *rev = Some(r);
+            }
+        } else if guard.is_some() || rev.is_some() {
+            self.cas_conflicts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        ok
+    }
+
     /// 执行驱动循环 —— 在 spawn 后独立运行
     ///
     /// 以 BoxFuture 返回（而非 async fn），避免递归异步造成的 opaque 类型循环。
-    pub(crate) fn drive(
-        &self,
+    ///
+    /// `guard` 为调用方持有的实例驱动租约（未注入租约时为 `None`）；非空时关键
+    /// 写回走 [`LeaseGuard::fenced_save`]（双 compare），并拒绝失去租约的迟到写。
+    pub(crate) fn drive<'a>(
+        &'a self,
         instance_id: String,
         definition: WorkflowDefinition,
         store: Arc<S>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        guard: Option<&'a dyn LeaseGuard>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             'drive_loop: loop {
-                // 加载最新实例状态
-                let mut inst = match store.load_instance(&instance_id).await {
-                    Ok(Some(i)) => i,
-                    Ok(None) => break,
-                    Err(_) => break,
+                // 加载最新实例状态；存储支持 CAS 时同时取存储修订号（线性一致读）。
+                let (mut inst, mut rev) = match store.load_instance_with_rev(&instance_id).await {
+                    Ok(Some((i, r))) => (i, Some(r)),
+                    _ => match store.load_instance(&instance_id).await {
+                        Ok(Some(i)) => (i, None),
+                        Ok(None) => break,
+                        Err(_) => break,
+                    },
                 };
 
                 // 终端状态则退出
@@ -1147,11 +1287,14 @@ where
                     break;
                 }
 
-                // 标准相位：Pending → Running（start 后首步推进）
+                // 标准相位：Pending → Running（start 后首步推进）。
+                // 首写走 CAS/fencing：两个驱动者并发时恰一个赢，输者退出 drive。
                 if inst.status == InstanceStatus::Pending {
                     inst.status = InstanceStatus::Running;
                     inst.updated_at = self.clock.now_ms();
-                    let _ = store.save_instance(&inst).await;
+                    if !self.persist_instance(&store, &inst, &mut rev, guard).await {
+                        break 'drive_loop;
+                    }
                     self.emit_lifecycle(lifecycle::WORKFLOW_STARTED, &inst)
                         .await;
                     continue;
@@ -1185,7 +1328,7 @@ where
                         inst.task_stack.push(frame);
                         inst.current_task_index += 1;
                         inst.updated_at = self.clock.now_ms();
-                        let _ = store.save_instance(&inst).await;
+                        let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                     }
 
                     StepResult::Goto { target, frame } => {
@@ -1194,7 +1337,7 @@ where
                             Some(idx) => {
                                 inst.current_task_index = idx;
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                             }
                             None => {
                                 inst.status = InstanceStatus::Failed;
@@ -1203,7 +1346,7 @@ where
                                 "The switch condition referenced a task that does not exist in do_tasks",
                             ));
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                                 break;
                             }
                         }
@@ -1269,7 +1412,9 @@ where
                                         inst.current_task_index += 1;
                                         inst.updated_at = self.clock.now_ms();
                                         inst.suspension_meta = None;
-                                        let _ = store.save_instance(&inst).await;
+                                        let _ = self
+                                            .persist_instance(&store, &inst, &mut rev, guard)
+                                            .await;
                                         self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
                                         continue;
                                     }
@@ -1339,7 +1484,9 @@ where
                                         });
                                         inst.status = InstanceStatus::Waiting;
                                         inst.updated_at = self.clock.now_ms();
-                                        let _ = store.save_instance(&inst).await;
+                                        let _ = self
+                                            .persist_instance(&store, &inst, &mut rev, guard)
+                                            .await;
                                         self.emit_lifecycle(lifecycle::TASK_RETRIED, &inst).await;
                                         self.schedule_auto_resume(
                                             inst.id.clone(),
@@ -1378,7 +1525,9 @@ where
                                         "The referenced sub-workflow definition does not exist",
                                     ));
                                         inst.updated_at = self.clock.now_ms();
-                                        let _ = store.save_instance(&inst).await;
+                                        let _ = self
+                                            .persist_instance(&store, &inst, &mut rev, guard)
+                                            .await;
                                         break 'drive_loop;
                                     }
                                     Err(e) => {
@@ -1390,7 +1539,9 @@ where
                                                 e.to_string(),
                                             ));
                                         inst.updated_at = self.clock.now_ms();
-                                        let _ = store.save_instance(&inst).await;
+                                        let _ = self
+                                            .persist_instance(&store, &inst, &mut rev, guard)
+                                            .await;
                                         break 'drive_loop;
                                     }
                                 };
@@ -1411,7 +1562,8 @@ where
                                             e.to_string(),
                                         ));
                                     inst.updated_at = self.clock.now_ms();
-                                    let _ = store.save_instance(&inst).await;
+                                    let _ =
+                                        self.persist_instance(&store, &inst, &mut rev, guard).await;
                                     break 'drive_loop;
                                 }
 
@@ -1429,7 +1581,7 @@ where
                                 inst.context["_subflow_instance_id"] =
                                     Value::String(sub_id.clone());
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                                 // 登记父子对，交给 per-tick 的登记表扫描
                                 // （不再依赖每 5 秒的全量列举）。
                                 self.register_pending_subflow(inst.id.clone(), sub_id.clone());
@@ -1446,7 +1598,7 @@ where
                                 inst.status = InstanceStatus::Waiting;
                                 inst.suspension_meta = Some(reason.to_meta());
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                                 self.emit_lifecycle(lifecycle::WORKFLOW_WAITING, &inst)
                                     .await;
 
@@ -1469,7 +1621,7 @@ where
                                 inst.status = InstanceStatus::Waiting;
                                 inst.suspension_meta = Some(reason.to_meta());
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                                 self.emit_lifecycle(lifecycle::WORKFLOW_WAITING, &inst)
                                     .await;
 
@@ -1537,7 +1689,7 @@ where
                                 inst.status = InstanceStatus::Suspended;
                                 inst.suspension_meta = Some(reason.to_meta());
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                                 self.emit_lifecycle(lifecycle::WORKFLOW_SUSPENDED, &inst)
                                     .await;
                                 break 'drive_loop;
@@ -1562,7 +1714,7 @@ where
                         inst.task_stack.push(frame);
                         inst.current_task_index += 1;
                         inst.updated_at = self.clock.now_ms();
-                        let _ = store.save_instance(&inst).await;
+                        let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                         self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
                     }
 
@@ -1607,7 +1759,9 @@ where
                                         inst.status = InstanceStatus::Failed;
                                         inst.fault = fault;
                                         inst.updated_at = clock.now_ms();
-                                        let _ = store.save_instance(&inst).await;
+                                        let _ = self
+                                            .persist_instance(&store, &inst, &mut rev, guard)
+                                            .await;
                                         continue 'drive_loop;
                                     }
                                     let output = results
@@ -1627,7 +1781,7 @@ where
                                 inst.task_stack.push(completed_frame);
                                 inst.current_task_index += 1;
                                 inst.updated_at = clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                             }
                         } else {
                             // 非 compete 模式：等待所有分支完成
@@ -1686,14 +1840,14 @@ where
                                 inst.status = InstanceStatus::Failed;
                                 inst.fault = fork_fault;
                                 inst.updated_at = clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                                 break;
                             }
 
                             inst.task_stack.push(completed_frame);
                             inst.current_task_index += 1;
                             inst.updated_at = clock.now_ms();
-                            let _ = store.save_instance(&inst).await;
+                            let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                         }
                     }
 
@@ -1765,14 +1919,14 @@ where
                             inst.status = InstanceStatus::Failed;
                             inst.fault = foreach_fault;
                             inst.updated_at = self.clock.now_ms();
-                            let _ = store.save_instance(&inst).await;
+                            let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                             break;
                         }
 
                         inst.task_stack.push(completed_frame);
                         inst.current_task_index += 1;
                         inst.updated_at = self.clock.now_ms();
-                        let _ = store.save_instance(&inst).await;
+                        let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                     }
 
                     StepResult::TryBlock {
@@ -1918,7 +2072,7 @@ where
                                 inst.status = InstanceStatus::Failed;
                                 inst.fault = try_fault;
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = store.save_instance(&inst).await;
+                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                                 break;
                             }
 
@@ -1939,7 +2093,7 @@ where
                             inst.current_task_index += 1;
                         }
                         inst.updated_at = self.clock.now_ms();
-                        let _ = store.save_instance(&inst).await;
+                        let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
                     }
 
                     StepResult::Completed { output } => {
@@ -1955,7 +2109,10 @@ where
                         inst.status = InstanceStatus::Completed;
                         inst.output = Some(final_output);
                         inst.updated_at = self.clock.now_ms();
-                        let _ = store.save_instance(&inst).await;
+                        // 终态写回不得因 CAS 冲突而“卡住”：冲突则重读重试（下一轮重算）。
+                        if !self.persist_instance(&store, &inst, &mut rev, guard).await {
+                            continue 'drive_loop;
+                        }
                         self.emit_lifecycle(lifecycle::WORKFLOW_COMPLETED, &inst)
                             .await;
                         break;
@@ -1980,6 +2137,9 @@ where
             event_provider: Arc::clone(&self.event_provider),
             pending_subflows: Arc::clone(&self.pending_subflows),
             workers: Arc::clone(&self.workers),
+            lease: self.lease.clone(),
+            lease_skipped: Arc::clone(&self.lease_skipped),
+            cas_conflicts: Arc::clone(&self.cas_conflicts),
         }
     }
 }
