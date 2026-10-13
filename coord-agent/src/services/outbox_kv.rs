@@ -191,6 +191,63 @@ impl KvOutboxStore {
         let _ = self.txn(vec![], success).await?;
         Ok(())
     }
+
+    /// 一批 outbox 记录的同事务写操作：seq 计数器 + 每条 `ids/records/pending`。
+    ///
+    /// `seq_start` = 第一条分配的 sequence（= 读到的当前 seq + 1）；记录按数组顺序
+    /// 占号 `seq_start..seq_start + n - 1`，seq 计数器推进到 `seq_start + n - 1`。
+    /// 调用方须保证 `recs` 同属一个聚合根（seq 键取首条的 `aggregate_id`）；空切片
+    /// 返回空操作（此时不写 seq，仅提交实例状态）。乐观 CAS 与租约 fenced 路径共用，
+    /// 使键布局与序号分配只有一处定义。
+    fn outbox_ops(recs: &[OutboxRecord], seq_start: u64) -> Result<Vec<RequestOp>, StoreError> {
+        let Some(first) = recs.first() else {
+            return Ok(Vec::new());
+        };
+        let aggregate = &first.aggregate_id;
+        let last = seq_start + recs.len() as u64 - 1;
+        let mut ops = Vec::with_capacity(1 + recs.len() * 3);
+        ops.push(Self::put(
+            Self::seq_key(aggregate),
+            last.to_string().into_bytes(),
+        ));
+        for (i, rec) in recs.iter().enumerate() {
+            let sequence = seq_start + i as u64;
+            let mut stored = rec.clone();
+            stored.sequence = sequence;
+            stored.status = OutboxStatus::Pending;
+            let raw = serde_json::to_vec(&stored)
+                .map_err(|e| StoreError::SerializationError(e.to_string()))?;
+            ops.push(Self::put(
+                Self::id_key(&rec.id),
+                Self::record_key(aggregate, sequence),
+            ));
+            ops.push(Self::put(
+                Self::record_key(aggregate, sequence),
+                raw.clone(),
+            ));
+            ops.push(Self::put(
+                Self::pending_key(stored.next_attempt_at_ms, &rec.id),
+                raw,
+            ));
+        }
+        Ok(ops)
+    }
+
+    /// 一批记录的 outbox 侧 CAS 谓词：seq `VALUE == 当前字节` + 每条 id `VERSION == 0`。
+    ///
+    /// 实例状态侧的谓词（MOD_REV 或租约持有）由调用方追加：无论乐观 CAS 还是租约
+    /// fenced 提交，outbox 侧谓词都相同，故只在此处构造。
+    fn outbox_compares(aggregate: &str, cur_bytes: Vec<u8>, recs: &[OutboxRecord]) -> Vec<Compare> {
+        let mut compares = Vec::with_capacity(1 + recs.len());
+        compares.push(Self::compare_value_equal(
+            Self::seq_key(aggregate),
+            cur_bytes,
+        ));
+        for rec in recs {
+            compares.push(Self::compare_version_equal(Self::id_key(&rec.id), 0));
+        }
+        compares
+    }
 }
 
 #[async_trait]
@@ -202,28 +259,9 @@ impl OutboxStore for KvOutboxStore {
         }
         for _ in 0..8 {
             let (cur, cur_bytes) = self.read_sequence(&rec.aggregate_id).await?;
-            let sequence = cur + 1;
-            let mut stored = rec.clone();
-            stored.sequence = sequence;
-            stored.status = OutboxStatus::Pending;
-            let raw = serde_json::to_vec(&stored)
-                .map_err(|e| StoreError::SerializationError(e.to_string()))?;
-            let success = vec![
-                Self::put(
-                    Self::seq_key(&rec.aggregate_id),
-                    sequence.to_string().into_bytes(),
-                ),
-                Self::put(
-                    Self::id_key(&rec.id),
-                    Self::record_key(&rec.aggregate_id, sequence),
-                ),
-                Self::put(Self::record_key(&rec.aggregate_id, sequence), raw.clone()),
-                Self::put(Self::pending_key(stored.next_attempt_at_ms, &rec.id), raw),
-            ];
-            let compares = vec![
-                Self::compare_value_equal(Self::seq_key(&rec.aggregate_id), cur_bytes),
-                Self::compare_version_equal(Self::id_key(&rec.id), 0),
-            ];
+            let success = Self::outbox_ops(std::slice::from_ref(rec), cur + 1)?;
+            let compares =
+                Self::outbox_compares(&rec.aggregate_id, cur_bytes, std::slice::from_ref(rec));
             if self.txn(compares, success).await? {
                 return Ok(());
             }
@@ -418,28 +456,29 @@ impl DurableTimerStore for KvOutboxStore {
 
 #[async_trait]
 impl AtomicOutboxCommit for KvOutboxStore {
-    async fn commit_state_and_outbox(
+    async fn commit_state_and_outbox_batch(
         &self,
         inst: &WorkflowInstance,
-        rec: &OutboxRecord,
+        recs: &[OutboxRecord],
         expected_mod_rev: Option<i64>,
     ) -> Result<bool, StoreError> {
+        // 批次属于一个聚合根（= 实例 id）；用记录侧聚合键读 seq，保持与 append 同一计数器。
+        let aggregate = recs
+            .first()
+            .map(|r| r.aggregate_id.as_str())
+            .unwrap_or(inst.id.as_str());
         for _ in 0..8 {
-            let (cur, cur_bytes) = self.read_sequence(&rec.aggregate_id).await?;
-            let sequence = cur + 1;
-            let mut stored = rec.clone();
-            stored.sequence = sequence;
-            stored.status = OutboxStatus::Pending;
-
+            let (cur, cur_bytes) = self.read_sequence(aggregate).await?;
             let instance_raw = serde_json::to_vec(inst)
                 .map_err(|e| StoreError::SerializationError(e.to_string()))?;
-            let outbox_raw = serde_json::to_vec(&stored)
-                .map_err(|e| StoreError::SerializationError(e.to_string()))?;
 
-            let mut compares = vec![
-                Self::compare_value_equal(Self::seq_key(&rec.aggregate_id), cur_bytes),
-                Self::compare_version_equal(Self::id_key(&rec.id), 0),
-            ];
+            let mut success = vec![Self::put(
+                KvWorkflowStore::instance_key(&inst.id),
+                instance_raw,
+            )];
+            success.extend(Self::outbox_ops(recs, cur + 1)?);
+
+            let mut compares = Self::outbox_compares(aggregate, cur_bytes, recs);
             if let Some(rev) = expected_mod_rev {
                 compares.push(Compare {
                     result: CompareResult::Equal as i32,
@@ -449,31 +488,18 @@ impl AtomicOutboxCommit for KvOutboxStore {
                 });
             }
 
-            let success = vec![
-                Self::put(KvWorkflowStore::instance_key(&inst.id), instance_raw),
-                Self::put(
-                    Self::seq_key(&rec.aggregate_id),
-                    sequence.to_string().into_bytes(),
-                ),
-                Self::put(
-                    Self::id_key(&rec.id),
-                    Self::record_key(&rec.aggregate_id, sequence),
-                ),
-                Self::put(
-                    Self::record_key(&rec.aggregate_id, sequence),
-                    outbox_raw.clone(),
-                ),
-                Self::put(
-                    Self::pending_key(stored.next_attempt_at_ms, &rec.id),
-                    outbox_raw,
-                ),
-            ];
-
             if self.txn(compares, success).await? {
                 return Ok(true);
             }
-            // CAS 失败：同 id 已存在（前一次其实已提交）⇒ 视为已提交；否则重试。
-            if self.record_by_id(&rec.id).await?.is_some() {
+            // CAS 失败：**全部** id 已存在（前一次其实已提交）⇒ 幂等重提交；否则重读 seq 重试。
+            let mut all_present = !recs.is_empty();
+            for rec in recs {
+                if self.record_by_id(&rec.id).await?.is_none() {
+                    all_present = false;
+                    break;
+                }
+            }
+            if all_present {
                 return Ok(true);
             }
         }

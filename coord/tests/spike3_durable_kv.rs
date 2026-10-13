@@ -200,6 +200,105 @@ async fn state_and_outbox_commit_is_all_or_nothing() {
     assert_eq!(seq_c, 2, "同一 aggregate 的 sequence 单调 +1");
 }
 
+/// 批量同事务：一次提交实例状态 + N 条伴生事件，两条 `sequence` 连续、各一条记录。
+#[tokio::test]
+async fn state_and_multiple_events_commit_atomically() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+    let kv = CoordKv::new(&inner);
+
+    let inst_a = inst("batch-a");
+    let recs = vec![
+        outbox_rec(
+            "batch-a",
+            "com.china-workflow.spike3.created",
+            "evt-batch-a-1",
+            10,
+        ),
+        outbox_rec(
+            "batch-a",
+            "com.china-workflow.spike3.step",
+            "evt-batch-a-2",
+            11,
+        ),
+    ];
+    let committed = store
+        .commit_state_and_outbox_batch(&inst_a, &recs, None)
+        .await
+        .expect("batch txn");
+    assert!(committed, "无 CAS 约束 ⇒ 批量事务应提交");
+
+    let read_back: WorkflowInstance = kv
+        .get_instance("batch-a")
+        .await
+        .expect("state visible with the batch");
+    assert_eq!(read_back.id, "batch-a");
+
+    let all = OutboxStore::list_all(&*store).await.unwrap();
+    let mut got: Vec<OutboxRecord> = all
+        .into_iter()
+        .filter(|r| r.aggregate_id == "batch-a")
+        .collect();
+    got.sort_by_key(|r| r.sequence);
+    assert_eq!(got.len(), 2, "同批两条事件各一条记录");
+    assert_eq!(got[0].id, "evt-batch-a-1");
+    assert_eq!(got[0].sequence, 1);
+    assert_eq!(got[1].id, "evt-batch-a-2");
+    assert_eq!(got[1].sequence, 2, "sequence 连续；数组顺序即序号顺序");
+}
+
+/// 同批重放：全部 id 已存在 ⇒ 幂等 `Ok(true)`，不新增记录。
+#[tokio::test]
+async fn batch_commit_is_idempotent_on_replay() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+
+    let inst = inst("batch-replay");
+    let recs = vec![
+        outbox_rec(
+            "batch-replay",
+            "com.china-workflow.spike3.created",
+            "evt-replay-1",
+            20,
+        ),
+        outbox_rec(
+            "batch-replay",
+            "com.china-workflow.spike3.step",
+            "evt-replay-2",
+            21,
+        ),
+    ];
+    assert!(
+        store
+            .commit_state_and_outbox_batch(&inst, &recs, None)
+            .await
+            .unwrap(),
+        "首次提交成功"
+    );
+    let count = |all: Vec<OutboxRecord>| {
+        all.into_iter()
+            .filter(|r| r.aggregate_id == "batch-replay")
+            .count()
+    };
+    assert_eq!(count(OutboxStore::list_all(&*store).await.unwrap()), 2);
+
+    // 重放同一批 ⇒ 全部 id 已存在 ⇒ 幂等成功，不新增记录
+    assert!(
+        store
+            .commit_state_and_outbox_batch(&inst, &recs, None)
+            .await
+            .unwrap(),
+        "重放应返回幂等成功"
+    );
+    assert_eq!(
+        count(OutboxStore::list_all(&*store).await.unwrap()),
+        2,
+        "重放不新增记录"
+    );
+}
+
 /// 判据 2（问题 2）：Relay 投递 + 标位 + 失败退避，事件不丢、重复靠 event_id 去重。
 #[tokio::test]
 async fn relay_delivers_all_records_and_consumer_dedups_by_event_id() {

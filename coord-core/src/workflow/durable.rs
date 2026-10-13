@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::model::WorkflowInstance;
-use super::ports::StoreError;
+use super::ports::{MemoryWorkflowStore, StoreError, WorkflowStore};
 
 /// 事件契约命名空间前缀（`com.china-workflow.*`）。
 pub const EVENT_TYPE_NAMESPACE: &str = "com.china-workflow";
@@ -181,7 +181,7 @@ pub trait OutboxStore: Send + Sync {
 /// 「状态已改而事件缺失」的窗口。
 #[async_trait]
 pub trait AtomicOutboxCommit: Send + Sync {
-    /// 同一事务内提交 `inst` 状态与 `rec`（`sequence == 0` 时同事务分配）。
+    /// 同一事务内提交 `inst` 状态与单条 `rec`（`sequence == 0` 时同事务分配）。
     ///
     /// 返回 `Ok(false)` = 事务比较失败（**什么都没写**），调用方可退化为分步
     /// `append`；返回 `Err` = 基础设施错误，同样什么都没写。
@@ -189,6 +189,20 @@ pub trait AtomicOutboxCommit: Send + Sync {
         &self,
         inst: &WorkflowInstance,
         rec: &OutboxRecord,
+        expected_mod_rev: Option<i64>,
+    ) -> Result<bool, StoreError> {
+        self.commit_state_and_outbox_batch(inst, std::slice::from_ref(rec), expected_mod_rev)
+            .await
+    }
+
+    /// 同一事务内提交 `inst` 状态与一批 `recs`；数组顺序即 `sequence` 顺序。
+    ///
+    /// 语义同 [`Self::commit_state_and_outbox`]（`recs` 为空时只提交状态）。一批
+    /// 伴生事件必须落在**同一个**事务里，否则会出现「状态已改而部分事件缺失」的窗口。
+    async fn commit_state_and_outbox_batch(
+        &self,
+        inst: &WorkflowInstance,
+        recs: &[OutboxRecord],
         expected_mod_rev: Option<i64>,
     ) -> Result<bool, StoreError>;
 }
@@ -529,6 +543,41 @@ impl OutboxStore for MemoryOutboxStore {
     }
 }
 
+/// 进程内「状态 + outbox」批量提交（**仅供测试 / 无 KV 装配**）。
+///
+/// 状态写 [`MemoryWorkflowStore`]，事件追加到 [`MemoryOutboxStore`]。两者各自持锁、
+/// 相互独立，**不构成跨存储原子性**：写实例成功而追加事件失败会留下「状态已落、
+/// 事件未落」的半提交，故**不得**用于生产装配——生产路径必须用单事务实现
+/// （`coord-agent` 的 `KvOutboxStore`，KV Txn + CAS）。
+///
+/// `expected_mod_rev` 被忽略：内存存储不暴露 mod_revision，没有可比较的版本。
+pub struct MemoryAtomicCommit {
+    instances: Arc<MemoryWorkflowStore>,
+    outbox: Arc<MemoryOutboxStore>,
+}
+
+impl MemoryAtomicCommit {
+    pub fn new(instances: Arc<MemoryWorkflowStore>, outbox: Arc<MemoryOutboxStore>) -> Self {
+        Self { instances, outbox }
+    }
+}
+
+#[async_trait]
+impl AtomicOutboxCommit for MemoryAtomicCommit {
+    async fn commit_state_and_outbox_batch(
+        &self,
+        inst: &WorkflowInstance,
+        recs: &[OutboxRecord],
+        _expected_mod_rev: Option<i64>,
+    ) -> Result<bool, StoreError> {
+        self.instances.save_instance(inst).await?;
+        for rec in recs {
+            self.outbox.append(rec).await?;
+        }
+        Ok(true)
+    }
+}
+
 /// 进程内定时器存储（测试/降级用；重启即失，**不**提供持久性）。
 #[derive(Debug, Default)]
 pub struct MemoryTimerStore {
@@ -751,6 +800,43 @@ mod tests {
             assert_eq!(seq("b"), 2);
             assert_eq!(seq("c"), 1, "sequence is per-aggregate, not global");
         });
+    }
+
+    #[tokio::test]
+    async fn memory_atomic_commit_writes_state_and_batch() {
+        use crate::workflow::model::WorkflowInstance;
+        use crate::workflow::ports::{MemoryWorkflowStore, WorkflowStore};
+
+        let instances = Arc::new(MemoryWorkflowStore::new());
+        let outbox = Arc::new(MemoryOutboxStore::new());
+        let commit = MemoryAtomicCommit::new(Arc::clone(&instances), Arc::clone(&outbox));
+
+        let inst: WorkflowInstance = serde_json::from_value(serde_json::json!({
+            "id": "mem-1",
+            "definition_ns": "mem",
+            "definition_name": "wf",
+            "definition_version": "1.0.0",
+            "status": "running",
+            "context": {},
+            "current_task_index": 0,
+            "created_at": 1,
+            "updated_at": 1
+        }))
+        .unwrap();
+
+        let recs = vec![rec("m1", "mem-1", 10), rec("m2", "mem-1", 11)];
+        assert!(commit
+            .commit_state_and_outbox_batch(&inst, &recs, None)
+            .await
+            .unwrap());
+
+        let stored = instances.load_instance("mem-1").await.unwrap().unwrap();
+        assert_eq!(stored.id, "mem-1");
+        let all = outbox.list_all().await.unwrap();
+        assert_eq!(all.len(), 2, "两条伴生事件都追加");
+        let seq = |id: &str| all.iter().find(|r| r.id == id).unwrap().sequence;
+        assert_eq!(seq("m1"), 1);
+        assert_eq!(seq("m2"), 2, "数组顺序即 sequence 顺序");
     }
 
     #[derive(Default)]

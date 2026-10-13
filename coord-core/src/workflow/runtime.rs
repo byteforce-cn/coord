@@ -2780,7 +2780,7 @@ mod tests {
     /// 注入 outbox 后，生命周期事件只经 `OutboxStore::append` 入 outbox；实例状态由
     /// 调用方的 `persist_instance`（CAS / 租约 `fenced_save`）负责。
     ///
-    /// 负控制：若 emit 走 `AtomicOutboxCommit::commit_state_and_outbox`，就产生了一条
+    /// 负控制：若 emit 走 `AtomicOutboxCommit::commit_state_and_outbox(_batch)`，就产生了一条
     /// 无 CAS/无 fencing 的实例写通道，并推进 mod_revision 使调用方随后的 CAS 失配。
     #[tokio::test]
     async fn durable_emit_appends_without_writing_instance_state() {
@@ -2798,10 +2798,10 @@ mod tests {
 
         #[async_trait::async_trait]
         impl AtomicOutboxCommit for RecordingCommit {
-            async fn commit_state_and_outbox(
+            async fn commit_state_and_outbox_batch(
                 &self,
                 _inst: &WorkflowInstance,
-                _rec: &OutboxRecord,
+                _recs: &[OutboxRecord],
                 _expected_mod_rev: Option<i64>,
             ) -> Result<bool, crate::workflow::ports::StoreError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
@@ -2829,7 +2829,7 @@ mod tests {
         assert_eq!(
             commit.calls.load(Ordering::SeqCst),
             0,
-            "emit 不得调用会写实例状态的 commit_state_and_outbox（无 CAS/fencing 的写通道）"
+            "emit 不得调用会写实例状态的 AtomicOutboxCommit（无 CAS/fencing 的写通道）"
         );
         assert!(
             !outbox.snapshot().is_empty(),
