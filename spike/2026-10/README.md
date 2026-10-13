@@ -24,7 +24,8 @@
 - 现状事实源：`apis/contracts/proto/coord/`、`coord-core/src/workflow/`、
   `docs/production/workflow-semantics.md`、`docs/production/ops/boundaries.md`、`docs/adr/`。
 - 本目录只记录 Spike 的假设、验证与结论；与现状冲突处以现状事实源为准。
-- 不修改 `main`；不新增对外 RPC/字段；不把 Spike crate 登记进根工作区。
+- 不修改 `main`；不新增对外 RPC/字段；Spike 工装只在 spike 分支登记
+  （`spike/2026-10/spike-4-conformance/harness` 是唯一根工作区成员，main 上不存在）。
 
 ## 复现方法（Spike 1）
 
