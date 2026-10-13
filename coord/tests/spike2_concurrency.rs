@@ -760,6 +760,24 @@ async fn fenced_commit_writes_state_and_events_in_one_txn() {
     assert_eq!(got[0].sequence, 1);
     assert_eq!(got[1].id, "evt-fc-2");
     assert_eq!(got[1].sequence, 2, "sequence 连续；数组顺序即序号顺序");
+
+    // 同一 Txn 的机器判据：KV 在同一事务里给所有写分配同一 revision，
+    // 故实例键与两条 outbox 记录键的 `mod_revision` 必须相等——仅「都可见」
+    // 不足以证明同事务（分步写也会两者都可见）。
+    let inst_mod_rev = read_kv(&mut kv, &inst_key)
+        .await
+        .expect("state after commit")
+        .mod_revision;
+    for (seq, id) in [(1u64, "evt-fc-1"), (2u64, "evt-fc-2")] {
+        let rec_key = format!("/_workflow/v3/outbox/records/{}/{seq:020}", inst.id).into_bytes();
+        let rec = read_kv(&mut kv, &rec_key)
+            .await
+            .unwrap_or_else(|| panic!("outbox record {id} must exist"));
+        assert_eq!(
+            rec.mod_revision, inst_mod_rev,
+            "记录 {id} 必须与实例状态在同一 Txn（mod_revision 相同）"
+        );
+    }
 }
 
 // ─── 场景 8：陈旧驱动者的 fenced 提交零写入 ───

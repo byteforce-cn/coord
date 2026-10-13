@@ -1957,6 +1957,9 @@ pub mod phase4 {
                 RuntimeError::AlreadyCompleted(id) => WorkflowEngineError::FailedPrecondition(
                     format!("instance already in terminal state: {id}"),
                 ),
+                RuntimeError::StaleRevision(id) => WorkflowEngineError::FailedPrecondition(
+                    format!("stale revision for instance: {id}"),
+                ),
                 RuntimeError::InvalidSignal(msg) => WorkflowEngineError::InvalidArgument(msg),
                 RuntimeError::DefinitionNotFound(id) => {
                     WorkflowEngineError::NotFound(format!("workflow definition not found: {id}"))
