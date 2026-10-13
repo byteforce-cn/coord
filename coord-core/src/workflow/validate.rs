@@ -645,16 +645,57 @@ impl Validator {
 
         // 官方 1.0.3 把载荷嵌在 `emit.event.with.{type, source?, data?}`
         // （schema workflow-1.0.3.yaml `emitTask`/`eventProperties`，Spike 4 corpus 09）。
-        // `event` 在场即官方形状：`with.type` 是必填事件类型，缺失则点名构造 fail-closed，
-        // 不得静默落成空 event_type；`source`/`data` 可选。既有平铺
-        // `{type, source, data}` 形状保持不变。
+        // `event` 在场即官方形状。coord 的 EmitEvent 只有 type/source/data 三个字段：
+        // - schema `EmitEventDefinition` 声明 `additionalProperties: true`，`event`
+        //   兄弟键（如 id）schema 合法但无对应字段；
+        // - eventProperties 另定义 id/time/subject/datacontenttype/dataschema。
+        // 两类超范围键都无法映射，静默丢弃即误读，故一律点名构造 fail-closed。
+        // `with.type` 是必填事件类型，缺失同样点名拒绝，不得落成空 event_type。
+        // 既有平铺 `{type, source, data}` 形状保持不变。
         let (event_type, source, data) = match obj {
             Some(obj) if obj.contains_key("event") => {
-                let with = obj
-                    .get("event")
-                    .and_then(|e| e.as_object())
+                let event = obj.get("event").and_then(|e| e.as_object());
+                if let Some(event) = event {
+                    let unknown: Vec<String> = event
+                        .keys()
+                        .filter(|k| k.as_str() != "with")
+                        .map(|k| format!("emit.event.{k}"))
+                        .collect();
+                    if !unknown.is_empty() {
+                        let construct = unknown.join(", ");
+                        self.errors.push(ValidationError {
+                            span: Some(raw.span),
+                            kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                            message: format!(
+                                "unimplemented construct '{construct}': emit event supports only \
+                                 'with'"
+                            ),
+                        });
+                        return None;
+                    }
+                }
+                let with = event
                     .and_then(|e| e.get("with"))
                     .and_then(|w| w.as_object());
+                if let Some(with) = with {
+                    let unknown: Vec<String> = with
+                        .keys()
+                        .filter(|k| !matches!(k.as_str(), "type" | "source" | "data"))
+                        .map(|k| format!("emit.event.with.{k}"))
+                        .collect();
+                    if !unknown.is_empty() {
+                        let construct = unknown.join(", ");
+                        self.errors.push(ValidationError {
+                            span: Some(raw.span),
+                            kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                            message: format!(
+                                "unimplemented construct '{construct}': emit event supports only \
+                                 'type'/'source'/'data'"
+                            ),
+                        });
+                        return None;
+                    }
+                }
                 let Some(event_type) = with.and_then(|w| w.get("type")).and_then(|v| v.as_str())
                 else {
                     self.errors.push(ValidationError {
@@ -2294,7 +2335,15 @@ do:
       wait: {}
 "#;
         let errs = parse_and_validate_yaml(yaml).expect_err("empty wait object must be rejected");
-        assert!(errors_naming(&errs, "wait"), "got {errs:?}");
+        // 判别性断言：构造名必须恰为 `wait`（`wait.weeks`/`wait.until` 不满足），
+        // 且原因指向「至少一个组件」。
+        assert!(
+            errs.iter().any(|e| {
+                matches!(&e.kind, ValidationErrorKind::UnsupportedConstruct(s) if s == "wait")
+                    && e.message.contains("at least one")
+            }),
+            "got {errs:?}"
+        );
     }
 
     #[test]
@@ -2343,6 +2392,126 @@ do:
 "#;
         let errs = parse_and_validate_yaml(yaml).expect_err("emit without type must be rejected");
         assert!(errors_naming(&errs, "emit.event.with.type"), "got {errs:?}");
+    }
+
+    #[test]
+    fn test_emit_official_extra_with_key_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: emit-extra-with
+  version: "1.0"
+do:
+  - notify:
+      emit:
+        event:
+          with:
+            type: com.example.notify
+            source: "https://example.com/coord"
+            subject: approvals
+"#;
+        // eventProperties 额外字段（subject 等）无对应 EmitEvent 字段，不得静默丢弃。
+        let errs = parse_and_validate_yaml(yaml)
+            .expect_err("out-of-range emit.event.with key must be rejected");
+        assert!(
+            errors_naming(&errs, "emit.event.with.subject"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_emit_official_extra_event_key_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: emit-extra-event
+  version: "1.0"
+do:
+  - notify:
+      emit:
+        event:
+          id: evt-1
+          with:
+            type: com.example.notify
+            source: "https://example.com/coord"
+"#;
+        // `event` 的 `with` 兄弟键（schema additionalProperties: true）无法映射，不得静默丢弃。
+        let errs = parse_and_validate_yaml(yaml)
+            .expect_err("unexpected emit.event sibling key must be rejected");
+        assert!(errors_naming(&errs, "emit.event.id"), "got {errs:?}");
+    }
+
+    #[test]
+    fn test_emit_flat_legacy_shape_is_compatible() {
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: emit-flat
+  version: "1.0"
+do:
+  - notify:
+      emit:
+        type: com.example.flat
+        source: "/flat"
+        data:
+          n: 1
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("flat emit must remain accepted");
+        match &def.do_tasks[0].task {
+            Task::Emit(e) => {
+                assert_eq!(e.emit.event_type, "com.example.flat");
+                assert_eq!(e.emit.source.as_deref(), Some("/flat"));
+                assert_eq!(e.emit.data, Some(serde_json::json!({ "n": 1 })));
+            }
+            other => panic!("expected Emit task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wait_rejection_messages_are_single_line() {
+        // 三条 wait 拒绝路径的用户可见消息不得内嵌换行/缩进（曾因续行反斜杠缺失而断裂）。
+        let unknown_key = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-msg-unknown
+  version: "1.0"
+do:
+  - pause:
+      wait:
+        weeks: 2
+"#;
+        let until = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-msg-until
+  version: "1.0"
+do:
+  - pause:
+      wait:
+        until: "2026-01-01T00:00:00Z"
+"#;
+        let bad_shape = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-msg-shape
+  version: "1.0"
+do:
+  - pause:
+      wait: true
+"#;
+        for yaml in [unknown_key, until, bad_shape] {
+            let errs = parse_and_validate_yaml(yaml).expect_err("wait variant must be rejected");
+            assert!(
+                errs.iter().all(|e| !e.message.contains('\n')),
+                "user-visible message must be single-line: {errs:?}"
+            );
+        }
     }
 
     #[test]
