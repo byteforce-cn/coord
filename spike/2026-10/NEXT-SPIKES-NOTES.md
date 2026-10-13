@@ -76,6 +76,13 @@
 
 ## Spike 5 · 基准测试（平台架构组主责，10-18 阈值定稿）
 
+**状态：已执行（2026-10-13 初版）。** 产出见 `../spike-5-bench/`（`REPORT.md` +
+逐条原始数据 `evidence/raw/` + `coord/tests/spike5_bench.rs` +
+`spike/2026-10/spike-5-bench/scripts/repro.sh`）。
+结论：Txn 上限 128、单值上限 ≈4 MiB（gRPC 消息）、Watch 1000 路 0 丢失 P99 108 ms、
+存储 2819.5 B/写。**非目标硬件 + 共享负载（loadavg 5–8），KV 档须安静机器复跑后方可
+用于容量规划；不做达标判定。**
+
 **现状锚点（已核实）**
 
 - 已有基准入口：`coord/tests/perf_bench.rs`、`coord-core/tests/cct_perf_bench.rs`；

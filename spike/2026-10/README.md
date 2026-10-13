@@ -16,7 +16,7 @@
 | `spike-4-conformance/` | Spike 4 规范符合性 | ✅ 初版完成（10-13，24 语料，报告+原始数据） |
 | `spike-2-concurrency/` | Spike 2 单写者并发演练 | ✅ 初版完成（10-13，7/7，CAS+租约+fencing，可复现） |
 | `spike-3-recovery/` | Spike 3 Outbox + 恢复 | ✅ 初版完成（10-13；kill -9 三场景 PASS，机制测试 6/6，事件 schema 校验通过） |
-| `spike-5-bench/` | Spike 5 基准测试 | 未启动（平台架构组主责；需 10-18 阈值） |
+| `spike-5-bench/` | Spike 5 基准测试 | ✅ 初版完成（10-13，5/5，报告+逐条原始数据；共享测试机、非目标硬件） |
 | `spike-6-adr/` | Spike 6 形态决策 | ✅ 详细 ADR 已落 `docs/adr/0013-*.md`（proposed）；本目录为证据索引 |
 
 ## 事实源与边界
