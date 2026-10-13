@@ -407,44 +407,95 @@ impl Validator {
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let fork_val = &map["fork"];
-        let branches = match fork_val {
-            Value::Array(arr) => arr
-                .iter()
-                .filter_map(|b| self.parse_fork_branch(b, raw.span))
-                .collect(),
-            Value::Object(obj) if obj.contains_key("branches") => {
-                if let Some(branches_arr) = obj["branches"].as_array() {
-                    branches_arr
-                        .iter()
-                        .filter_map(|b| self.parse_fork_branch(b, raw.span))
-                        .collect()
-                } else {
-                    Vec::new()
-                }
-            }
-            _ => Vec::new(),
+        // 官方 1.0.3 形状 `fork: {compete?, branches: [{<branch_name>: <taskBody>}, ...]}`
+        // 与 coord 既有裸数组/`{branches}` 形状兼容：两者都规约到同一分支数组。
+        let branches_arr = match fork_val {
+            Value::Array(arr) => Some(arr),
+            Value::Object(obj) => obj.get("branches").and_then(|v| v.as_array()),
+            _ => None,
+        };
+        let compete = map.get("compete").and_then(|v| v.as_bool());
+
+        // 缺 branches / 非数组 / 空列表都不得静默产出 0 分支的 Fork。
+        let Some(branches_arr) = branches_arr.filter(|arr| !arr.is_empty()) else {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("fork.branches".to_string()),
+                message: "unimplemented construct 'fork.branches': fork requires a non-empty \
+                          'branches' list"
+                    .to_string(),
+            });
+            return None;
         };
 
-        let compete = map.get("compete").and_then(|v| v.as_bool());
+        let mut branches = Vec::with_capacity(branches_arr.len());
+        for (index, branch) in branches_arr.iter().enumerate() {
+            if let Some(parsed) = self.parse_fork_branch(branch, index, raw.span) {
+                branches.push(parsed);
+            }
+        }
+        // 有无法映射的分支项时已点名登记错误，整体 fail-closed。
+        if branches.len() != branches_arr.len() {
+            return None;
+        }
 
         Some(Task::Fork(ForkTask { branches, compete }))
     }
 
-    fn parse_fork_branch(&mut self, branch: &Value, span: Span) -> Option<ForkBranch> {
-        let obj = branch.as_object()?;
-        let name = obj
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let tasks = if let Some(do_val) = obj.get("do") {
-            self.parse_sub_tasks(do_val, span)
-        } else if let Some(tasks_val) = obj.get("tasks") {
-            self.parse_sub_tasks(tasks_val, span)
-        } else {
-            Vec::new()
+    fn parse_fork_branch(
+        &mut self,
+        branch: &Value,
+        index: usize,
+        span: Span,
+    ) -> Option<ForkBranch> {
+        let Some(obj) = branch.as_object() else {
+            self.reject_fork_branch(index, span);
+            return None;
         };
-        Some(ForkBranch { name, tasks })
+
+        // coord 既有形状：`{name, do|tasks}`。
+        if obj.contains_key("name") {
+            let name = obj
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let tasks = if let Some(do_val) = obj.get("do") {
+                self.parse_sub_tasks(do_val, span)
+            } else if let Some(tasks_val) = obj.get("tasks") {
+                self.parse_sub_tasks(tasks_val, span)
+            } else {
+                Vec::new()
+            };
+            return Some(ForkBranch { name, tasks });
+        }
+
+        // 官方 1.0.3 形状：单键 map `{<branch_name>: <taskBody>}`，键名即分支名；
+        // 分支项本身就是一个 taskList 项，交由 parse_sub_tasks 解析其 body。
+        if obj.len() == 1 {
+            if let Some(name) = obj.keys().next() {
+                let tasks = self.parse_sub_tasks(&Value::Array(vec![branch.clone()]), span);
+                return Some(ForkBranch {
+                    name: name.clone(),
+                    tasks,
+                });
+            }
+        }
+
+        self.reject_fork_branch(index, span);
+        None
+    }
+
+    fn reject_fork_branch(&mut self, index: usize, span: Span) {
+        let construct = format!("fork.branches[{index}]");
+        self.errors.push(ValidationError {
+            span: Some(span),
+            kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+            message: format!(
+                "unimplemented construct '{construct}': each fork branch must be a single-key map \
+                 '{{<branch_name>: <task>}}' or an object with a 'name' field"
+            ),
+        });
     }
 
     fn parse_for_each(
@@ -604,9 +655,9 @@ impl Validator {
         let listen_val = &map["listen"];
 
         // 官方 1.0.3 形状：`listen.to.{one|all|any}.with.{type, source?, subject?}`
-        // （schema workflow-1.0.3.yaml `listenTask`/`eventConsumptionStrategy`，
-        // Spike 4 corpus 08 曾把 `to.one.with` 过滤条件静默丢掉）。检测到 `to` 即按
-        // 官方形状严格解析；`to` 缺失时保留 coord 既有平铺/字符串形状。
+        // （schema workflow-1.0.3.yaml `listenTask`/`eventConsumptionStrategy`）。陷阱：把
+        // `to.one.with` 过滤条件当平铺形状读会静默丢过滤器，故检测到 `to` 即按官方形状
+        // 严格解析；`to` 缺失时保留 coord 既有平铺/字符串形状。
         if let Some(listen_obj) = listen_val.as_object() {
             if listen_obj.contains_key("to") {
                 return self.parse_listen_official(raw, listen_obj);
@@ -1473,6 +1524,15 @@ impl Validator {
                     .or_else(|| fork.get("branches").and_then(|v| v.as_array()));
                 if let Some(branches) = branches {
                     for b in branches {
+                        if let Some(bobj) = b.as_object() {
+                            // 官方单键 map 形状 `{<branch_name>: <task>}`：整个分支项就是一个
+                            // 具名任务，其标准字段（if/input/…）必须按该分支名收集。
+                            if !bobj.contains_key("name") && bobj.len() == 1 {
+                                let nested = extract_raw_sub_tasks(std::slice::from_ref(b));
+                                self.collect_task_meta(&nested, map);
+                                continue;
+                            }
+                        }
                         let tasks = b
                             .get("tasks")
                             .and_then(|v| v.as_array())
@@ -2064,6 +2124,107 @@ do:
             }
             _ => panic!("expected Fork task"),
         }
+    }
+
+    #[test]
+    fn test_fork_official_branch_map_shape() {
+        // 官方 1.0.3 形状：branches 是单键 map 列表 `{<branch_name>: <taskBody>}`。
+        // 分支名取自键名，tasks 取自该 task body；不得再落成空名 0 任务分支。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: fork-map
+  version: "1.0"
+do:
+  - fan:
+      fork:
+        compete: false
+        branches:
+          - branch_a:
+              set:
+                variable: x
+                value: "1"
+          - branch_b:
+              set:
+                variable: y
+                value: "2"
+      then: exit
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official fork branch map must parse");
+        match &def.do_tasks[0].task {
+            Task::Fork(fork) => {
+                assert_eq!(fork.branches.len(), 2);
+                assert_eq!(fork.branches[0].name, "branch_a");
+                assert_eq!(fork.branches[1].name, "branch_b");
+                assert_eq!(
+                    fork.branches[0].tasks,
+                    vec![NamedTask {
+                        name: "branch_a".into(),
+                        task: Task::Set(SetTask {
+                            variable: "x".into(),
+                            value: "1".into(),
+                        }),
+                    }]
+                );
+                assert_eq!(
+                    fork.branches[1].tasks,
+                    vec![NamedTask {
+                        name: "branch_b".into(),
+                        task: Task::Set(SetTask {
+                            variable: "y".into(),
+                            value: "2".into(),
+                        }),
+                    }]
+                );
+            }
+            other => panic!("expected Fork task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fork_empty_branches_rejected() {
+        // 空 branches 不得静默产出 0 分支的 Fork：必须点名 fork.branches 拒绝。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: fork-empty
+  version: "1.0"
+do:
+  - fan:
+      fork:
+        branches: []
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("empty branches must be rejected");
+        assert!(errors_naming(&errs, "fork.branches"), "got {errs:?}");
+    }
+
+    #[test]
+    fn test_fork_branch_item_without_name_rejected() {
+        // 分支项既非单键 map 也无 `name` 时无法确定分支名/body，必须按序号点名拒绝。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: fork-bad-branch
+  version: "1.0"
+do:
+  - fan:
+      fork:
+        branches:
+          - branch_x:
+              set:
+                variable: x
+                value: "1"
+            branch_y:
+              set:
+                variable: y
+                value: "2"
+"#;
+        let errs =
+            parse_and_validate_yaml(yaml).expect_err("malformed branch item must be rejected");
+        assert!(errors_naming(&errs, "fork.branches[0]"), "got {errs:?}");
     }
 
     #[test]
@@ -2750,6 +2911,81 @@ do:
         let errs = parse_and_validate_yaml(yaml).expect_err("listen without type must be rejected");
         assert!(
             errors_naming(&errs, "listen.to.one.with.type"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_listen_read_rejected() {
+        // `listen.read`（envelope/raw 读取模式）无映射面：不得静默丢字段后照常接受。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-read
+  version: "1.0"
+do:
+  - await_event:
+      listen:
+        read: raw
+        to:
+          one:
+            with:
+              type: com.example.approved
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("listen.read must be rejected");
+        assert!(errors_naming(&errs, "listen.read"), "got {errs:?}");
+    }
+
+    #[test]
+    fn test_listen_to_one_correlate_rejected() {
+        // `eventFilter.correlate` 需把事件属性关联到输入数据属性，无映射面。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-correlate
+  version: "1.0"
+do:
+  - await_event:
+      listen:
+        to:
+          one:
+            correlate:
+              from: "${ .context }"
+            with:
+              type: com.example.approved
+"#;
+        let errs =
+            parse_and_validate_yaml(yaml).expect_err("listen.to.one.correlate must be rejected");
+        assert!(
+            errors_naming(&errs, "listen.to.one.correlate"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_listen_unknown_with_key_rejected() {
+        // `with` 只支持 type/source/subject；其余键（如 id）无映射面，必须点名拒绝。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-with-extra
+  version: "1.0"
+do:
+  - await_event:
+      listen:
+        to:
+          one:
+            with:
+              type: com.example.approved
+              id: evt-1
+"#;
+        let errs = parse_and_validate_yaml(yaml)
+            .expect_err("unknown listen.to.one.with key must be rejected");
+        assert!(
+            errors_naming(&errs, "listen.to.one.with.id"),
             "got {errs:?}"
         );
     }

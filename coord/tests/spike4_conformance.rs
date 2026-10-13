@@ -159,3 +159,22 @@ fn listen_official_to_one_with_maps_filter() {
         other => panic!("corpus 08: expected Listen task, got {other:?}"),
     }
 }
+
+#[test]
+fn fork_official_branch_map_maps_branches() {
+    // 05：官方 `fork.branches` 是单键 map 列表 `{<branch_name>: <taskBody>}`，分支名取自
+    // 键名、tasks 取自 body；不得再落成空名 0 任务分支（Spike 4 误读之一）。
+    let def = parse_corpus("05-fork.yaml").expect("corpus 05 must parse OK");
+    match &def.do_tasks[0].task {
+        Task::Fork(fork) => {
+            assert_eq!(fork.branches.len(), 2);
+            assert_eq!(fork.branches[0].name, "branch_a");
+            assert_eq!(fork.branches[1].name, "branch_b");
+            assert_eq!(fork.branches[0].tasks.len(), 1);
+            assert_eq!(fork.branches[0].tasks[0].name, "branch_a");
+            assert_eq!(fork.branches[1].tasks.len(), 1);
+            assert_eq!(fork.branches[1].tasks[0].name, "branch_b");
+        }
+        other => panic!("corpus 05: expected Fork task, got {other:?}"),
+    }
+}
