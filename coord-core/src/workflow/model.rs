@@ -938,6 +938,8 @@ pub enum ValidationErrorKind {
     TypeMismatch(String),
     /// 重复任务名
     DuplicateTaskName(String),
+    /// 未实现的 DSL 构造（fail-closed：解析期显式拒绝，不静默误读；消息点名构造）
+    UnsupportedConstruct(String),
 }
 
 /// 校验错误 —— 携带位置信息

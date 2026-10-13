@@ -589,6 +589,7 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "tokio-stream",

@@ -339,6 +339,15 @@ fn parse_use_components(use_val: &Value, span: Span) -> ParseResult<RawUseCompon
         .as_object()
         .ok_or_else(|| ParseError::new("'use' must be a JSON object").with_span(span))?;
 
+    // 官方 `use.extensions`（含 before/after 任务）当前无执行面：静默丢弃会让
+    // 审计/拦截类扩展被误信为已生效（Spike 4 核心发现），因此解析期显式拒绝。
+    if obj.contains_key("extensions") {
+        return Err(ParseError::new(
+            "unimplemented construct 'use.extensions': coord does not execute official extension points",
+        )
+        .with_span(span));
+    }
+
     let functions = obj
         .get("functions")
         .map(|f| parse_function_map(f, span))

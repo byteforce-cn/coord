@@ -373,6 +373,14 @@ pub fn looks_like_cncf_sw(value: &Value) -> bool {
 
 /// 解析 CNCF SW 文档（serde_json::Value）为内部执行模型
 pub fn parse_cncf_sw_value(root: Value) -> Result<WorkflowDefinition, String> {
+    // 官方 use.extensions 在 states/start 路线同样无执行面；serde 会静默忽略它，
+    // 与 document/do 路线保持一致的 fail-closed（Spike 4 核心发现）。
+    if root.get("use").and_then(|u| u.get("extensions")).is_some() {
+        return Err(
+            "unimplemented construct 'use.extensions': coord does not execute official extension points"
+                .into(),
+        );
+    }
     let doc: SwWorkflowDoc = serde_json::from_value(root)
         .map_err(|e| format!("invalid Serverless Workflow document: {e}"))?;
     convert(doc)
