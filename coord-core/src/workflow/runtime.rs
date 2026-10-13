@@ -3601,6 +3601,120 @@ mod tests {
         assert_eq!(loaded.context["_event"]["arrived"], true);
     }
 
+    // ─── 多 onEvents 路由：事件总线自动恢复按 arrived eventType 分支 ───
+
+    #[tokio::test]
+    async fn test_multi_on_events_routes_by_arrived_event_type() {
+        use crate::workflow::ports::MemoryEventProvider;
+        use std::sync::Arc;
+
+        let expr = ExpressionEvaluator::new();
+        let clock = TestClock::new(1000);
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let store = Arc::new(MemoryWorkflowStore::new());
+        let dispatcher = NoopTaskDispatcher;
+        let events = Arc::new(MemoryEventProvider::new());
+        let runtime = WorkflowRuntime::new(
+            executor,
+            clock,
+            Arc::clone(&store),
+            dispatcher,
+            Arc::clone(&events),
+        );
+
+        // 编译多 onEvents 路由：两个目标各写不同 output，用于区分「正确路由」与「走缺省」
+        let def = crate::workflow::sw::parse_cncf_sw_value(serde_json::json!({
+            "id": "multi-event-wf", "version": "1.0", "start": "approve",
+            "states": [
+                { "name": "approve", "type": "event",
+                  "onEvents": [
+                      { "eventRefs": [ { "eventRef": "approved" } ], "transition": "notify" },
+                      { "eventRefs": [ { "eventRef": "rejected" } ], "transition": "reject" }
+                  ] },
+                { "name": "notify", "type": "inject", "data": { "result": "approved" }, "end": true },
+                { "name": "reject", "type": "inject", "data": { "result": "rejected" }, "end": true }
+            ],
+            "events": [
+                { "name": "approved", "type": "icps.approval.approved" },
+                { "name": "rejected", "type": "icps.approval.rejected" }
+            ]
+        }))
+        .expect("multi-onEvents SW should compile");
+        store.save_definition(&def).await.unwrap();
+
+        let inst = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mid = store.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(mid.status, InstanceStatus::Waiting);
+        assert_eq!(mid.suspension_meta.as_ref().unwrap().reason, "listen");
+
+        // 事件总线到达 rejected 类型 → 应路由到 reject 分支（而非缺省直通 end）
+        events
+            .emit("icps.approval.rejected", None, &serde_json::json!({}))
+            .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let done = store.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(done.status, InstanceStatus::Completed);
+        assert_eq!(
+            done.context["result"], "rejected",
+            "arrived event type must route to the reject branch, not the default branch"
+        );
+    }
+
+    // ─── switch+eventConditions 路由：事件总线自动恢复按 arrived eventType 分支 ───
+
+    #[tokio::test]
+    async fn test_event_conditions_switch_routes_by_arrived_event_type() {
+        use crate::workflow::ports::MemoryEventProvider;
+        use std::sync::Arc;
+
+        let expr = ExpressionEvaluator::new();
+        let clock = TestClock::new(1000);
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let store = Arc::new(MemoryWorkflowStore::new());
+        let dispatcher = NoopTaskDispatcher;
+        let events = Arc::new(MemoryEventProvider::new());
+        let runtime = WorkflowRuntime::new(
+            executor,
+            clock,
+            Arc::clone(&store),
+            dispatcher,
+            Arc::clone(&events),
+        );
+
+        let def = crate::workflow::sw::parse_cncf_sw_value(serde_json::json!({
+            "id": "event-switch-wf", "version": "1.0", "start": "route",
+            "states": [
+                { "name": "route", "type": "switch",
+                  "eventConditions": [
+                      { "eventRef": "order.created", "transition": "created" },
+                      { "eventRef": "order.cancelled", "transition": "cancelled" }
+                  ],
+                  "defaultCondition": { "end": true } },
+                { "name": "created", "type": "inject", "data": { "result": "created" }, "end": true },
+                { "name": "cancelled", "type": "inject", "data": { "result": "cancelled" }, "end": true }
+            ]
+        }))
+        .expect("eventConditions switch SW should compile");
+        store.save_definition(&def).await.unwrap();
+
+        let inst = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mid = store.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(mid.status, InstanceStatus::Waiting);
+
+        events
+            .emit("order.cancelled", None, &serde_json::json!({}))
+            .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let done = store.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(done.status, InstanceStatus::Completed);
+        assert_eq!(
+            done.context["result"], "cancelled",
+            "arrived event type must route to the matching eventCondition, not the default branch"
+        );
+    }
+
     // ─── listen 事件超时（标准 Events） ───
 
     #[tokio::test]
