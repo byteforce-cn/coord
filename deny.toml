@@ -11,13 +11,21 @@ yanked = "deny"
 unmaintained = "all"
 unsound = "all"
 
-# 例外：当前**无豁免条目**——唯一的 RUSTSEC-2025-0141 / bincode 豁免已随退场计划
-# 关闭（bincode 已从依赖图消失，见 docs/production/ops/dependencies.md）；
+# 例外：当前 1 条，为 **unmaintained（非漏洞）**；每条必须写明理由与关闭路径。
+#
+# RUSTSEC-2024-0449 —— unsafe-libyaml（serde_yaml 的 YAML 后端）被标记为 unmaintained。
+# coord-core / coord-agent 直接用 serde_yaml 解析工作流 YAML；serde_yaml 0.9.34 是最后
+# 一版（deprecated），无同 API 的维护替代。解析器迁移属于工作流 DSL 输入面的独立
+# 工作，关闭路径见 docs/production/ops/dependencies.md §4。
+#
+# （历史）RUSTSEC-2025-0141 / bincode 豁免已随退场计划关闭，bincode 已从依赖图消失；
 # 重新引入 bincode 将直接 fail-closed。
 #
 # 维护约定：`ignore` 只允许按「一个通告 + 一段理由 + 一条关闭路径」的形式增长；
 # 新增条目必须同时登记到退场计划文档。
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml 为 unmaintained（非漏洞，无可用升级）：它是 serde_yaml 的 YAML 后端，coord-core / coord-agent 直接用 serde_yaml 解析工作流 YAML；serde_yaml 0.9.34 为最后一版且无同 API 维护替代。关闭路径：迁移工作流 YAML 解析到维护中的实现，见 docs/production/ops/dependencies.md §4。" },
+]
 
 [licenses]
 # 默认拒绝未明确列出的许可证；coord 依赖栈常用许可白名单
