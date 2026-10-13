@@ -1,4 +1,4 @@
 case\tstatus\tfinal_status\toutbox_pending\tmissing_event_ids\tduplicate_event_ids\tlog
-wait\tPASS\tcompleted\t0\t0\t0\tspike/2026-10/spike-3-recovery/evidence/kill9-wait-20261013-125645.log
-listen\tPASS\tcompleted\t0\t0\t0\tspike/2026-10/spike-3-recovery/evidence/kill9-listen-20261013-125645.log
-retry\tPASS\tfailed\t0\t0\t0\tspike/2026-10/spike-3-recovery/evidence/kill9-retry-20261013-125645.log
+wait\tPASS\tcompleted\t0\t0\t0\t/tmp/coord-v2/wt/spike/2026-10/spike-3-recovery/evidence/kill9-wait-20261013-153645.log
+listen\tPASS\tcompleted\t0\t0\t0\t/tmp/coord-v2/wt/spike/2026-10/spike-3-recovery/evidence/kill9-listen-20261013-153645.log
+retry\tPASS\tfailed\t0\t0\t0\t/tmp/coord-v2/wt/spike/2026-10/spike-3-recovery/evidence/kill9-retry-20261013-153645.log

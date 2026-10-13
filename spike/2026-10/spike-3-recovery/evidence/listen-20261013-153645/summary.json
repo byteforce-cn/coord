@@ -1,0 +1,15 @@
+{
+  "delivered_unique": 7,
+  "duplicate_event_ids": 0,
+  "final_status": "completed",
+  "generated_at_ms": 1791905818457,
+  "instance": "18832e34-11ec-4878-a86d-af4d3deea622",
+  "missing_event_ids": 0,
+  "mq_messages_total": 7,
+  "outbox_delivered": 6,
+  "outbox_pending": 0,
+  "outbox_records": 6,
+  "remaining_timers_for_instance": 0,
+  "scenario": "listen",
+  "timers_total": 0
+}

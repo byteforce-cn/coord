@@ -2654,6 +2654,8 @@ pub mod phase4 {
 
             // Spike 3：持久化恢复 —— 到期定时器先触发，再对账挂起实例（重订阅 listen、
             // 补写 wait/retry 定时器），最后拉起周期扫描与 relay。
+            // 恢复必须先于投递：relay 一启动就会把崩溃前遗留的 outbox 事件投出去，
+            // 而此刻实例尚未重建驱动/重订阅 —— 先投递会让消费者看到「无人在驱动」的实例。
             if let (Some(runtime), Some(_durable)) = (&self.runtime, &self.durable_store) {
                 runtime.recover_durable_state().await;
                 runtime.start_durable_workers();

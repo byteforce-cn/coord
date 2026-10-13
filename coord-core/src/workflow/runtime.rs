@@ -656,11 +656,18 @@ where
         }
     }
 
-    /// 对账可恢复实例：重启后重新驱动/重订阅挂起的 Waiting 实例。
+    /// 对账所有非终态可恢复实例：重启后重新驱动/重订阅。
     ///
-    /// - `listen`：重建事件等待（重订阅）；
-    /// - `wait` / `retry`：补写持久化定时器；已到期则立即触发；
-    /// - 其它（`signal` / 子流程）：人工恢复或由子流程扫描器负责，这里不驱动。
+    /// - `Pending` / `Running`：上个进程的 drive 任务随进程消失（进程内任务无跨进程存活，
+    ///   `drivers/` 租约键也无主）⇒ 重驱动一个。经 [`Self::spawn_drive`] 先取租约，
+    ///   多进程并发时只有一个真正驱动（其余计入 `lease_skipped`）。
+    /// - `Waiting`：`listen` 重建事件订阅；`wait` / `retry` 补写持久化定时器（已到期立即触发）。
+    /// - `Suspended`（signal）：人工恢复语义 —— 没有外部 signal 就自动重驱动会把人工审批
+    ///   直接跑过去，故**不**自动驱动（ADR 的「所有非终态」在此显式排除 signal 挂起）。
+    /// - 终态：跳过。
+    ///
+    /// `coord-core` 无 `tracing`，signal 挂起的跳过是设计内非动作（不是故障），故只以注释
+    /// 记录原因、不新增日志/计数出口（观测出口在上层 `WorkerLiveness` 等）。
     async fn reconcile_resumable_instances(&self, store: Arc<S>) {
         let Ok((instances, _next)) = store.list_instances(None, None, usize::MAX, None).await
         else {
@@ -671,14 +678,8 @@ where
         };
         let now = self.clock.now_ms();
         for inst in instances {
-            if inst.status != InstanceStatus::Waiting {
-                continue;
-            }
-            let Some(meta) = inst.suspension_meta.clone() else {
-                continue;
-            };
-            match meta.reason.as_str() {
-                "listen" => {
+            match inst.status {
+                InstanceStatus::Pending | InstanceStatus::Running => {
                     let def = match store
                         .load_definition(
                             &inst.definition_ns,
@@ -688,21 +689,52 @@ where
                         .await
                     {
                         Ok(Some(d)) => d,
+                        // 定义暂读不到：留待下次启动对账（不在此处造状态）。
                         _ => continue,
                     };
-                    let filter = meta.event_filter.clone().unwrap_or(EventFilter {
-                        event_type: None,
-                        event_types: vec![],
-                        source: None,
-                        subject: None,
-                    });
-                    self.spawn_event_wait(inst.id.clone(), def, Arc::clone(&store), filter, None);
+                    self.spawn_drive(inst.id.clone(), def, Arc::clone(&store));
                 }
-                "wait" | "retry" => {
-                    let due = meta.until_ms.unwrap_or(now);
-                    let rec = TimerRecord::auto_resume(&inst.id, &meta.reason, due, now);
-                    let _ = durable.timers.schedule(&rec).await;
+                InstanceStatus::Waiting => {
+                    let Some(meta) = inst.suspension_meta.clone() else {
+                        continue;
+                    };
+                    match meta.reason.as_str() {
+                        "listen" => {
+                            let def = match store
+                                .load_definition(
+                                    &inst.definition_ns,
+                                    &inst.definition_name,
+                                    &inst.definition_version,
+                                )
+                                .await
+                            {
+                                Ok(Some(d)) => d,
+                                _ => continue,
+                            };
+                            let filter = meta.event_filter.clone().unwrap_or(EventFilter {
+                                event_type: None,
+                                event_types: vec![],
+                                source: None,
+                                subject: None,
+                            });
+                            self.spawn_event_wait(
+                                inst.id.clone(),
+                                def,
+                                Arc::clone(&store),
+                                filter,
+                                None,
+                            );
+                        }
+                        "wait" | "retry" => {
+                            let due = meta.until_ms.unwrap_or(now);
+                            let rec = TimerRecord::auto_resume(&inst.id, &meta.reason, due, now);
+                            let _ = durable.timers.schedule(&rec).await;
+                        }
+                        _ => {}
+                    }
                 }
+                // 终态跳过；`Suspended`（signal 挂起）是人工恢复语义，无外部 signal 就
+                // 不自动驱动（见函数文档，ADR 的「所有非终态」在此显式排除 signal 挂起）。
                 _ => {}
             }
         }
@@ -1467,6 +1499,12 @@ where
     ///
     /// 仅在 [`Self::drive`] 内调用：复用 drive 当轮的 `rev`/`guard`，与状态 + 事件
     /// 走同一次 CAS/fencing 提交（不另起无 CAS 的裸写）。
+    ///
+    /// 有界重试：首次提交失败常是并发控制面已推进修订号（CAS 冲突）。失败后以
+    /// `load_instance_with_rev` 重取最新修订号并重放，至多 [`CONTROL_PLANE_CAS_ATTEMPTS`]
+    /// 次 —— 不重试会让一次冲突静默丢掉终态 fault 写、把实例留在 Running。
+    /// 耗尽仍未提交：实例保持非终态，由启动对账重新驱动；失败已计入
+    /// `cas_conflict_total`，drop 非静默。
     async fn fail_instance(
         &self,
         inst: &mut WorkflowInstance,
@@ -1475,12 +1513,27 @@ where
         guard: Option<&dyn LeaseGuard>,
         fault: WorkflowFault,
     ) {
-        inst.status = InstanceStatus::Failed;
-        inst.fault = Some(fault);
-        inst.updated_at = self.clock.now_ms();
-        let _ = self
-            .commit_instance(store, inst, rev, guard, &[lifecycle::WORKFLOW_FAULTED])
-            .await;
+        for _ in 0..CONTROL_PLANE_CAS_ATTEMPTS {
+            inst.status = InstanceStatus::Failed;
+            inst.fault = Some(fault.clone());
+            inst.updated_at = self.clock.now_ms();
+            if self
+                .commit_instance(store, inst, rev, guard, &[lifecycle::WORKFLOW_FAULTED])
+                .await
+            {
+                return;
+            }
+            // 重取最新修订号：下一次 CAS 以新值为期望。
+            match store.load_instance_with_rev(&inst.id).await {
+                // 只在实例仍非终态时重放：并发控制面已提交终态则不覆盖。
+                Ok(Some((latest, r))) if !latest.status.is_terminal() => {
+                    *inst = latest;
+                    *rev = Some(r);
+                }
+                // 实例已终态 / 读不到 / 存储无修订号：重放无意义，停止。
+                _ => break,
+            }
+        }
     }
 
     /// 恢复挂起的实例
