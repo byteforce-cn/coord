@@ -79,3 +79,13 @@ bincode 在本仓库不是工具库，而是**持久化格式**，直接承载�
 - **判据**：`cargo tree --target all -i unsafe-libyaml` 无匹配；
   `grep -rn serde_yaml --include=Cargo.toml .` 归零；`cargo deny check advisories`
   无豁免。
+
+---
+
+## 5. 通告处置记录（2026-10-13）
+
+- **RUSTSEC-2026-0338 / 0339 / 0340 / 0341 / 0342（quinn-proto ≤ 0.11.15）**：以锁文件升级
+  `quinn-proto 0.11.15 → 0.11.18` 修复（`quinn` 经 `reqwest` 进入依赖图，生产代码不直接
+  使用，无源码改动）；`cargo audit` 复跑 0 vulnerabilities。修复 PR：#62。
+- **RUSTSEC-2024-0449（unsafe-libyaml / serde_yaml，unmaintained）**：见 §4——登记豁免 +
+  关闭路径（工作流 YAML 解析迁移）。登记 PR：#62。
