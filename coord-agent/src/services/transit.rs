@@ -78,6 +78,28 @@ impl Default for TransitConfig {
     }
 }
 
+impl TransitConfig {
+    /// 读取主材料标识（`COORD_TRANSIT_KEK_ID`；未设置 / 空白 ⇒ `default-kek`）。
+    ///
+    /// 生产装配（`services.transit` 分支）用本构造器取代逐字默认：轮换 = 新标识 +
+    /// 新材料，旧材料按**旧标识**注入历史集合后，旧 `key_id` / 旧 DEK 记录才能命中
+    /// 历史材料（窗口可验；材料下线 fail-loud）。
+    pub fn from_env() -> Self {
+        Self {
+            kek_id: kek_id_from_env_value(std::env::var(TRANSIT_KEK_ID_ENV).ok().as_deref()),
+            ..Self::default()
+        }
+    }
+}
+
+/// 环境值 → 材料标识（空白视为未设置：不把不可见字符当标识）
+fn kek_id_from_env_value(raw: Option<&str>) -> String {
+    raw.map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| TransitConfig::default().kek_id)
+}
+
 /// 静态加密 KEK 长度（256-bit）
 const KEK_MATERIAL_LEN: usize = 32;
 
@@ -92,6 +114,12 @@ pub const TRANSIT_KEK_OLD_ENV: &str = "COORD_TRANSIT_KEK_OLD";
 
 /// 历史材料文件名（每行 `kek_id hex64`；`#` 注释）
 pub const TRANSIT_KEK_OLD_FILE: &str = "transit-kek-old.txt";
+
+/// 主材料标识环境变量（域分隔 / 审计标签；**轮换时随材料换代**）。
+///
+/// 同一标识只能对应一份材料（历史集合拒绝与主 id 重复的条目）；标识不换代，
+/// 旧记录 / 旧签名会落到新材料上，窗口命中与 fail-loud 都失效。
+pub const TRANSIT_KEK_ID_ENV: &str = "COORD_TRANSIT_KEK_ID";
 
 /// dev 模式默认 KEK 材料（`coord dev` 专用；见 ADR-0009）。
 ///
@@ -197,13 +225,31 @@ pub struct TransitKekKeyring {
 }
 
 impl TransitKekKeyring {
-    /// 单主材料集合（无历史；dev / 单测 / 兼容构造）
-    pub fn single(primary_id: &str, primary: TransitKekMaterial) -> Self {
-        Self {
+    /// 主材料标识校验：非空、不含 NUL、≤255 字节。
+    ///
+    /// DEK 包头用 1 字节长度写入标识 ⇒ 超长必须提前到构造期 fail-closed
+    /// （否则要到加密期才报错，实例已带着非法配置启动）。
+    fn validate_primary_kek_id(id: &str) -> Result<(), String> {
+        if id.trim().is_empty() {
+            return Err("primary KEK id must not be empty".into());
+        }
+        if id.contains('\0') {
+            return Err("primary KEK id must not contain NUL".into());
+        }
+        if id.len() > u8::MAX as usize {
+            return Err(format!("primary KEK id must not exceed {} bytes", u8::MAX));
+        }
+        Ok(())
+    }
+
+    /// 单主材料集合（无历史；dev / 单测 / 兼容构造；标识非法 ⇒ Err）
+    pub fn single(primary_id: &str, primary: TransitKekMaterial) -> Result<Self, String> {
+        Self::validate_primary_kek_id(primary_id)?;
+        Ok(Self {
             primary_id: primary_id.to_string(),
             primary,
             historical: Vec::new(),
-        }
+        })
     }
 
     /// 解析材料集合（主材料 fail-closed；历史材料可选）：
@@ -238,6 +284,7 @@ impl TransitKekKeyring {
         primary: TransitKekMaterial,
         old_env_value: Option<String>,
     ) -> Result<Self, String> {
+        Self::validate_primary_kek_id(primary_id)?;
         let mut historical: Vec<(String, TransitKekMaterial)> = Vec::new();
 
         match old_env_value {
@@ -484,7 +531,7 @@ impl TransitService {
         store: Arc<dyn TransitDekStore>,
         kek_material: TransitKekMaterial,
     ) -> Result<Self, String> {
-        let keyring = TransitKekKeyring::single(&config.kek_id, kek_material);
+        let keyring = TransitKekKeyring::single(&config.kek_id, kek_material)?;
         Self::with_store_keyring(config, store, keyring)
     }
 
@@ -1574,7 +1621,7 @@ mod tests {
 
     // ──── HMAC 签名与验签测试 ────
 
-    /// ADR-0012 §1 派生公式的黄金向量：公式一旦漂移（同 sign/verify 互测无法发现）本测试必红。
+    /// ADR-0012 派生公式的黄金向量：公式一旦漂移（同 sign/verify 互测无法发现）本测试必红。
     #[test]
     fn test_hmac_derivation_golden_vector() {
         let svc = test_svc(TransitConfig::default());
@@ -2115,7 +2162,7 @@ mod tests {
                 ..Default::default()
             },
             shared.clone(),
-            TransitKekKeyring::single("old", material(1)),
+            TransitKekKeyring::single("old", material(1)).expect("old keyring"),
         )
         .expect("old svc");
 
@@ -2174,7 +2221,7 @@ mod tests {
                 ..Default::default()
             },
             shared.clone(),
-            TransitKekKeyring::single("new", material(2)),
+            TransitKekKeyring::single("new", material(2)).expect("new keyring"),
         )
         .expect("no-history svc");
         let err = no_history_svc
@@ -2194,7 +2241,7 @@ mod tests {
                 ..Default::default()
             },
             shared.clone(),
-            TransitKekKeyring::single("old", material(1)),
+            TransitKekKeyring::single("old", material(1)).expect("old keyring"),
         )
         .expect("old svc");
 
@@ -2295,5 +2342,34 @@ mod tests {
         )
         .expect_err("invalid hex must be rejected");
         assert!(!err.is_empty());
+    }
+
+    /// 主材料标识来自 `COORD_TRANSIT_KEK_ID`（未设置 / 空白 ⇒ default）：轮换的装配面
+    #[test]
+    fn test_kek_id_from_env_value_defaults_and_trims() {
+        assert_eq!(kek_id_from_env_value(None), "default-kek");
+        assert_eq!(kek_id_from_env_value(Some("")), "default-kek");
+        assert_eq!(kek_id_from_env_value(Some("   ")), "default-kek");
+        assert_eq!(kek_id_from_env_value(Some(" gen-2 ")), "gen-2");
+        assert_eq!(kek_id_from_env_value(Some("default-kek")), "default-kek");
+    }
+
+    /// 主材料标识非法（空 / 空白 / NUL / >255 字节）⇒ 构造期拒绝（不等到加密期）
+    #[test]
+    fn test_keyring_rejects_invalid_primary_id() {
+        for bad in ["", "   ", "bad\0id", &"x".repeat(256)] {
+            let err = TransitKekKeyring::single(bad, material(1))
+                .expect_err("invalid primary id must be rejected");
+            assert!(err.contains("primary KEK id"), "unexpected: {err}");
+        }
+        let err = TransitKekKeyring::resolve_with_env(
+            std::path::Path::new("/nonexistent"),
+            "bad\0id",
+            material(1),
+            None,
+        )
+        .expect_err("resolve must validate the primary id");
+        assert!(err.contains("primary KEK id"), "unexpected: {err}");
+        assert!(TransitKekKeyring::single(&"x".repeat(255), material(1)).is_ok());
     }
 }

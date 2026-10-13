@@ -340,6 +340,18 @@ async fn test_grpc_hmac_purpose_key_id_and_fail_loud() {
         .expect_err("not injected must fail loud");
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
 
+    // sign 显式指定未注入材料 → 同口径 FAILED_PRECONDITION（不得退化成用新材料签名）
+    let err = client
+        .hmac_sign(TransitHmacSignRequest {
+            data: b"data".to_vec(),
+            algorithm: String::new(),
+            purpose: "eis:hr:employee:id_number:v1".into(),
+            key_id: "ghost".into(),
+        })
+        .await
+        .expect_err("sign with not-injected key_id must fail loud");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
     // 验签 key_id 空 → INVALID_ARGUMENT
     let err = client
         .hmac_verify(TransitHmacVerifyRequest {
