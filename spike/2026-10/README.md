@@ -37,3 +37,46 @@ cargo test 2>&1 | tee ../evidence/test-run-$(date +%Y%m%d-%H%M%S).log
 ```
 
 每个 Spike 的 `README.md` 给出该项的最小复现步骤。
+
+## 阶段二 M1 落地状态
+
+> Owner: Spike 执行（AI 协作者）｜ Last verified: 2026-10-13
+> M1 = 分支 `feat/workflow-v2-foundation`（基线 `spike/2026-10-workflow-v2@850989a`）；
+> 判定在 HEAD 上全量执行。本节只记录落地判定，**不**改本目录的历史证据。
+
+### 里程碑判据（判据 → 覆盖测试/证据 → 结论）
+
+| 判据 | 覆盖测试/证据 | 结论 |
+|:--|:--|:--|
+| 并发驱动/控制面：恰一胜、败者零写入 | `workflow_foundation::concurrent_resume_exactly_one_takes_effect`；`spike2_concurrency::fenced_write_rejects_stale_driver`、`stale_driver_fenced_commit_rejects_state_and_events` | ✅ 通过 |
+| 状态 + 伴生事件同 Txn | `spike3_durable_kv::state_and_multiple_events_commit_atomically`；`spike2_concurrency::fenced_commit_writes_state_and_events_in_one_txn` | ✅ 通过 |
+| 外部副作用幂等键先登记后派发、跨重试不变 | `workflow_steptoken::register_is_create_if_absent_and_mark_done_is_visible`、`retry_reuses_same_idempotency_key` | ✅ 通过 |
+| 崩溃恢复：wait/listen/retry + Running 重驱动 | `workflow_foundation::running_instance_is_redriven_after_restart`；`spike3_durable_kv::{wait_instance_recovers_after_engine_restart, listen_instance_resubscribes_after_engine_restart, outbox_events_pending_at_crash_are_delivered_after_restart}`；kill9 repro 三场景 | ✅ 通过 |
+| 定义漂移 fail-closed | `workflow_foundation::resume_after_redeploy_same_version_fails_closed`、`stale_pin_running_instance_faults_on_restart_reconcile` | ✅ 通过 |
+| 未实现构造 fail-closed | `spike4_conformance` 8/8（`run_script_container_shell_fail_closed`、`run_await_return_fail_closed`、`use_extensions_fail_closed`、`official_switch_then_fail_closed`、`matrix_gap_files_still_rejected` …） | ✅ 通过 |
+| 对外契约零改动 | `git diff --stat spike/2026-10-workflow-v2..HEAD -- apis/` 空输出；`git diff --name-only a4e0e22..HEAD` 无 proto/RPC 文件 | ✅ 通过 |
+
+### 验收证据（Task 11，HEAD `c24469c`）
+
+- 静态检查：`cargo fmt --all -- --check` 通过；`cargo clippy --all-targets --all-features`
+  通过（0 error；warning 均为基线既有、非 error）。
+- 全量测试：`cargo test -p coord-core` 391 passed / 0 failed；`cargo test -p coord-agent`
+  878 passed / 0 failed；覆盖测试套件 `--test-threads=1` 全通过 ——
+  `spike2_concurrency` 9、`spike3_durable_kv` 17、`spike4_conformance` 8、
+  `workflow_foundation` 5、`workflow_steptoken` 2。
+- 文档引用：`bash scripts/check-doc-refs.sh` OK（悬空路径 0）。
+- 抖动 soak：`listen_instance_resubscribes_after_engine_restart` 10/10 通过；
+  `spike3_durable_kv` 全量复跑 3/3 通过（各 17/17）。
+- 进程级 kill -9：`SPIKE3_SKIP_BUILD=1 bash spike/2026-10/spike-3-recovery/scripts/repro.sh`
+  → wait/listen/retry 三场景 PASS，`outbox_pending=0`、`missing_event_ids=0`、
+  `duplicate_event_ids=0`；`evidence/verdict.tsv` 的日志列为仓库相对路径。
+
+### 与 Spike 3 文档的一处语义更正（ack-after-state）
+
+M1 把 `MqEventProvider` 的消费语义改为 **ack-after-state**（commit `53ce23d`）：
+`wait_for_event` 只返回投递信封、**不**提交游标，位点由调用方在实例状态写成功后经
+`ack_event` 提交 ⇒ 崩溃窗口从「丢一次投递」变为「重复投递」，由消费方状态守卫吸收。
+这修正了 `spike-3-recovery/RECOVERY.md` §5/§5.1/§7 记录的 R1（listen 崩溃窗口）；
+该文档对应位置已就地标注（历史证据保留）。覆盖测试：
+`workflow_foundation::listen_event_is_acked_after_state_commit`、
+`coord-agent::services::mq_event_provider::delivery_is_acked_only_after_explicit_ack`。
