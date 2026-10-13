@@ -181,7 +181,7 @@ pub trait OutboxStore: Send + Sync {
 /// 「状态已改而事件缺失」的窗口。
 #[async_trait]
 pub trait AtomicOutboxCommit: Send + Sync {
-    /// 同一事务内提交 `inst` 状态与单条 `rec`（`sequence == 0` 时同事务分配）。
+    /// 同一事务内提交 `inst` 状态与单条 `rec`。
     ///
     /// 返回 `Ok(false)` = 事务比较失败（**什么都没写**），调用方可退化为分步
     /// `append`；返回 `Err` = 基础设施错误，同样什么都没写。

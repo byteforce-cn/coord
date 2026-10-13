@@ -13,6 +13,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use super::durable::OutboxRecord;
 use super::expression::ExpressionError;
 use super::model::{WorkflowDefinition, WorkflowInstance};
 
@@ -584,6 +585,25 @@ pub trait LeaseGuard: Send + Sync {
     ) -> Result<bool, StoreError> {
         Err(StoreError::Unsupported(
             "fenced_save is not supported by this lease backend".into(),
+        ))
+    }
+
+    /// 在 fencing 保护下原子提交实例状态 + 伴生事件（同一次提交）。
+    ///
+    /// `events` 为空时等价 [`Self::fenced_save`]。默认实现 **fail-closed**：
+    /// 不支持「状态 + 事件」批量原子提交的后端返回 [`StoreError::Unsupported`]，
+    /// 不得静默分两次写（那会出现「状态已改而事件缺失」的窗口）。
+    async fn fenced_commit(
+        &self,
+        inst: &WorkflowInstance,
+        expected_mod_rev: i64,
+        events: &[OutboxRecord],
+    ) -> Result<bool, StoreError> {
+        if events.is_empty() {
+            return self.fenced_save(inst, expected_mod_rev).await;
+        }
+        Err(StoreError::Unsupported(
+            "fenced_commit with events is not supported by this lease backend".into(),
         ))
     }
 }

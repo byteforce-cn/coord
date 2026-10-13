@@ -150,7 +150,10 @@ impl KvOutboxStore {
     ///
     /// 键不存在时 compare 的目标必须是**空值**（而非 "0" 字符串）：coord 的
     /// Txn 对缺失键的 `VALUE` 比较取空字节（见 mvcc 的 `value.unwrap_or_default()`）。
-    async fn read_sequence(&self, aggregate: &str) -> Result<(u64, Vec<u8>), StoreError> {
+    pub(crate) async fn read_sequence(
+        &self,
+        aggregate: &str,
+    ) -> Result<(u64, Vec<u8>), StoreError> {
         let raw = self.get(&Self::seq_key(aggregate)).await?;
         match raw {
             None => Ok((0, Vec::new())),
@@ -199,7 +202,10 @@ impl KvOutboxStore {
     /// 调用方须保证 `recs` 同属一个聚合根（seq 键取首条的 `aggregate_id`）；空切片
     /// 返回空操作（此时不写 seq，仅提交实例状态）。乐观 CAS 与租约 fenced 路径共用，
     /// 使键布局与序号分配只有一处定义。
-    fn outbox_ops(recs: &[OutboxRecord], seq_start: u64) -> Result<Vec<RequestOp>, StoreError> {
+    pub(crate) fn outbox_ops(
+        recs: &[OutboxRecord],
+        seq_start: u64,
+    ) -> Result<Vec<RequestOp>, StoreError> {
         let Some(first) = recs.first() else {
             return Ok(Vec::new());
         };
@@ -236,8 +242,16 @@ impl KvOutboxStore {
     /// 一批记录的 outbox 侧 CAS 谓词：seq `VALUE == 当前字节` + 每条 id `VERSION == 0`。
     ///
     /// 实例状态侧的谓词（MOD_REV 或租约持有）由调用方追加：无论乐观 CAS 还是租约
-    /// fenced 提交，outbox 侧谓词都相同，故只在此处构造。
-    fn outbox_compares(aggregate: &str, cur_bytes: Vec<u8>, recs: &[OutboxRecord]) -> Vec<Compare> {
+    /// fenced 提交，outbox 侧谓词都相同，故只在此处构造。空批次返回空谓词——没有
+    /// 对应写入时比较 seq 只会让一次纯状态提交被并发的 `append` 无端判失败。
+    pub(crate) fn outbox_compares(
+        aggregate: &str,
+        cur_bytes: Vec<u8>,
+        recs: &[OutboxRecord],
+    ) -> Vec<Compare> {
+        if recs.is_empty() {
+            return Vec::new();
+        }
         let mut compares = Vec::with_capacity(1 + recs.len());
         compares.push(Self::compare_value_equal(
             Self::seq_key(aggregate),

@@ -299,6 +299,47 @@ async fn batch_commit_is_idempotent_on_replay() {
     );
 }
 
+/// 空批次（纯状态提交）：只写实例状态，不碰 outbox 的 seq/记录。
+#[tokio::test]
+async fn empty_batch_commits_state_without_touching_outbox() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+    let kv = CoordKv::new(&inner);
+
+    // 先落一条已有事件：聚合的 seq 计数器已在 KV 里。
+    store
+        .append(&outbox_rec(
+            "empty-batch",
+            "com.china-workflow.spike3.step",
+            "evt-seed",
+            5,
+        ))
+        .await
+        .unwrap();
+
+    let inst = inst("empty-batch");
+    assert!(
+        store
+            .commit_state_and_outbox_batch(&inst, &[], None)
+            .await
+            .unwrap(),
+        "空批次应提交实例状态"
+    );
+
+    let read_back = kv.get_instance("empty-batch").await.expect("state visible");
+    assert_eq!(read_back.id, "empty-batch");
+
+    let all = OutboxStore::list_all(&*store).await.unwrap();
+    let mine: Vec<OutboxRecord> = all
+        .into_iter()
+        .filter(|r| r.aggregate_id == "empty-batch")
+        .collect();
+    assert_eq!(mine.len(), 1, "空批次不新增 outbox 记录");
+    assert_eq!(mine[0].id, "evt-seed");
+    assert_eq!(mine[0].sequence, 1, "空批次不重写 seq 计数器");
+}
+
 /// 判据 2（问题 2）：Relay 投递 + 标位 + 失败退避，事件不丢、重复靠 event_id 去重。
 #[tokio::test]
 async fn relay_delivers_all_records_and_consumer_dedups_by_event_id() {

@@ -12,8 +12,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use coord_agent::services::outbox_kv::KvOutboxStore;
 use coord_agent::services::workflow_lease::KvInstanceLease;
 use coord_agent::services::workflow_store::KvWorkflowStore;
+use coord_core::workflow::durable::{OutboxRecord, OutboxStore};
 use coord_core::workflow::engine::WorkflowExecutor;
 use coord_core::workflow::expression::ExpressionEvaluator;
 use coord_core::workflow::model::{
@@ -21,7 +23,7 @@ use coord_core::workflow::model::{
     WorkflowInstance,
 };
 use coord_core::workflow::ports::{
-    DispatchResult, NoopEventProvider, SystemClock, TaskDispatcher, WorkflowStore,
+    DispatchResult, InstanceLease, NoopEventProvider, SystemClock, TaskDispatcher, WorkflowStore,
 };
 use coord_core::workflow::runtime::WorkflowRuntime;
 use coord_proto::kv::kv_client::KvClient;
@@ -596,7 +598,8 @@ fn make_runtime(
         NoopEventProvider,
     );
     if with_lease {
-        rt.with_instance_lease(Arc::new(KvInstanceLease::new(inner, 30)))
+        let outbox = Arc::new(KvOutboxStore::new(inner.clone()));
+        rt.with_instance_lease(Arc::new(KvInstanceLease::new(inner, 30, outbox)))
     } else {
         rt
     }
@@ -683,5 +686,146 @@ async fn engine_concurrent_drivers_duplicate_without_lease() {
         calls.load(Ordering::SeqCst),
         2,
         "without a lease both concurrent drivers dispatch the side effect"
+    );
+}
+
+// ─── 场景 7：fenced 提交 —— 状态 + 伴生事件同一 Txn ───
+
+/// 持租约的 `fenced_commit` 在同一次 Txn 里写实例状态与一批事件：
+/// 状态可见，两条事件各一条记录、序号连续。
+#[tokio::test(flavor = "multi_thread")]
+async fn fenced_commit_writes_state_and_events_in_one_txn() {
+    let (addr, _sd, _g, _r, _tmp) = common::start_test_server().await;
+    let mut kv = KvClient::new(connect(&addr).await);
+    let inner = agent_inner(&addr).await;
+
+    let def = single_effect_definition();
+    let store = KvWorkflowStore::new(inner.clone());
+    let mut inst = seed_running_instance(&store, &def).await;
+    let inst_key = format!("/_workflow/v3/instances/{}", inst.id).into_bytes();
+    let rev = read_kv(&mut kv, &inst_key)
+        .await
+        .expect("seeded instance")
+        .mod_revision;
+
+    let outbox_store = Arc::new(KvOutboxStore::new(inner.clone()));
+    let lease = KvInstanceLease::new(inner.clone(), 30, Arc::clone(&outbox_store));
+    let guard = lease
+        .acquire(&inst.id)
+        .await
+        .expect("acquire lease")
+        .expect("lease must be free");
+
+    let events = vec![
+        OutboxRecord::lifecycle(
+            &inst.id,
+            "io.serverlessworkflow.workflow.started.v1",
+            serde_json::json!({"n": 1}),
+            100,
+            "evt-fc-1".to_string(),
+        ),
+        OutboxRecord::lifecycle(
+            &inst.id,
+            "io.serverlessworkflow.task.completed.v1",
+            serde_json::json!({"n": 2}),
+            101,
+            "evt-fc-2".to_string(),
+        ),
+    ];
+
+    inst.status = InstanceStatus::Completed;
+    let ok = guard
+        .fenced_commit(&inst, rev, &events)
+        .await
+        .expect("fenced commit");
+    assert!(ok, "持租约的 fenced 提交必须成功");
+
+    let after: WorkflowInstance = serde_json::from_slice(
+        &read_kv(&mut kv, &inst_key)
+            .await
+            .expect("state after commit")
+            .value,
+    )
+    .expect("state decodes");
+    assert_eq!(after.status, InstanceStatus::Completed, "状态写生效");
+
+    let all = OutboxStore::list_all(&*outbox_store).await.unwrap();
+    let mut got: Vec<OutboxRecord> = all
+        .into_iter()
+        .filter(|r| r.aggregate_id == inst.id)
+        .collect();
+    got.sort_by_key(|r| r.sequence);
+    assert_eq!(got.len(), 2, "同批两条事件各一条记录");
+    assert_eq!(got[0].id, "evt-fc-1");
+    assert_eq!(got[0].sequence, 1);
+    assert_eq!(got[1].id, "evt-fc-2");
+    assert_eq!(got[1].sequence, 2, "sequence 连续；数组顺序即序号顺序");
+}
+
+// ─── 场景 8：陈旧驱动者的 fenced 提交零写入 ───
+
+/// 撤销并重授租约后，旧 guard 的迟到 `fenced_commit` 必须返回 `false`：
+/// 实例状态与 outbox 均无变化（事件不得与状态分离落库）。
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_driver_fenced_commit_rejects_state_and_events() {
+    let (addr, _sd, _g, _r, _tmp) = common::start_test_server().await;
+    let mut kv = KvClient::new(connect(&addr).await);
+    let inner = agent_inner(&addr).await;
+
+    let def = single_effect_definition();
+    let store = KvWorkflowStore::new(inner.clone());
+    let mut inst = seed_running_instance(&store, &def).await;
+    let inst_key = format!("/_workflow/v3/instances/{}", inst.id).into_bytes();
+    let rev = read_kv(&mut kv, &inst_key)
+        .await
+        .expect("seeded instance")
+        .mod_revision;
+
+    let outbox_store = Arc::new(KvOutboxStore::new(inner.clone()));
+    let lease = KvInstanceLease::new(inner.clone(), 30, Arc::clone(&outbox_store));
+    let old_guard = lease
+        .acquire(&inst.id)
+        .await
+        .expect("acquire old lease")
+        .expect("lease must be free");
+
+    // 撤销旧租约（级联删除 driver key）后重授给新驱动者：旧 epoch/token 失配。
+    old_guard.release().await;
+    let driver_key = KvInstanceLease::driver_key(&inst.id);
+    await_key_gone(&mut kv, &driver_key, "old driver key released").await;
+    let _new_guard = lease
+        .acquire(&inst.id)
+        .await
+        .expect("acquire new lease")
+        .expect("lease must be free after revoke");
+
+    inst.status = InstanceStatus::Completed;
+    let events = vec![OutboxRecord::lifecycle(
+        &inst.id,
+        "io.serverlessworkflow.workflow.started.v1",
+        serde_json::json!({"n": 1}),
+        100,
+        "evt-stale-1".to_string(),
+    )];
+    let ok = old_guard
+        .fenced_commit(&inst, rev, &events)
+        .await
+        .expect("fenced commit");
+    assert!(!ok, "陈旧驱动者的 fenced 提交必须被拒绝");
+
+    let after: WorkflowInstance = serde_json::from_slice(
+        &read_kv(&mut kv, &inst_key)
+            .await
+            .expect("state after stale commit")
+            .value,
+    )
+    .expect("state decodes");
+    assert_eq!(after.status, InstanceStatus::Running, "陈旧提交不得改状态");
+    assert!(
+        OutboxStore::list_all(&*outbox_store)
+            .await
+            .unwrap()
+            .is_empty(),
+        "陈旧提交不得写事件"
     );
 }
