@@ -1,0 +1,18 @@
+{
+  "connect_stagger_us": 2000,
+  "connected": 1000,
+  "connection_errors": [],
+  "cpu_seconds_total": 2.62,
+  "cpu_ticks_total": 262,
+  "loadavg": "6.51 6.65 5.92 7/1056 212052",
+  "notes": "所有 watcher 订阅同一 key；每轮一次 Put 后等待各订阅端事件；延迟=写发出到订阅端收到；每 watcher 一条独立连接",
+  "primed_first_round_delivered": 1000,
+  "round_timeout_ms": 5000,
+  "rounds": 20,
+  "rss_kib_after_connect": 186280,
+  "rss_kib_after_rounds": 191212,
+  "rss_kib_before": 140728,
+  "rss_kib_delta": 50484,
+  "scenario": "watch_fanout_1000",
+  "watchers": 1000
+}

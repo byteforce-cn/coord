@@ -4,7 +4,7 @@
   "dir_bytes_base": 618496,
   "dir_bytes_delta": 56389846,
   "dir_bytes_final": 57008342,
-  "elapsed_secs": 244.060084432,
+  "elapsed_secs": 52.585376981,
   "errors": 0,
   "final_per_file": [
     {
@@ -23,9 +23,9 @@
       "name": "raft-log"
     }
   ],
-  "loadavg": "6.56 6.66 5.92 10/1056 211892",
+  "loadavg": "1.53 1.89 2.21 2/997 271833",
   "notes": "data-dir 增量按递归文件大小求和；含 raft log + redb + changelog 等全部文件",
-  "ops_per_sec": 81.94703384843088,
+  "ops_per_sec": 380.33387128186496,
   "sample_every": 1000,
   "scenario": "storage_growth",
   "value_bytes": 256,

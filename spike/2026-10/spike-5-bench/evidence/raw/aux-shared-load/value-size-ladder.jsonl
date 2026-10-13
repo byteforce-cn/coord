@@ -1,0 +1,9 @@
+{"read_bytes":1024,"read_error":null,"read_ok":true,"value_bytes":1024,"write_error":null,"write_latency_us":4301,"write_revision":2,"write_rpc_ok":true}
+{"read_bytes":65536,"read_error":null,"read_ok":true,"value_bytes":65536,"write_error":null,"write_latency_us":24631,"write_revision":3,"write_rpc_ok":true}
+{"read_bytes":1048576,"read_error":null,"read_ok":true,"value_bytes":1048576,"write_error":null,"write_latency_us":138279,"write_revision":4,"write_rpc_ok":true}
+{"read_bytes":2097152,"read_error":null,"read_ok":true,"value_bytes":2097152,"write_error":null,"write_latency_us":255448,"write_revision":5,"write_rpc_ok":true}
+{"read_bytes":0,"read_error":"OutOfRange: Error, decoded message length too large: found 4194318 bytes, the limit is: 4194304 bytes","read_ok":false,"value_bytes":4194276,"write_error":null,"write_latency_us":523782,"write_revision":6,"write_rpc_ok":true}
+{"read_bytes":0,"read_error":null,"read_ok":false,"value_bytes":4194304,"write_error":"OutOfRange: Error, decoded message length too large: found 4194331 bytes, the limit is: 4194304 bytes","write_latency_us":1733,"write_revision":0,"write_rpc_ok":false}
+{"read_bytes":0,"read_error":null,"read_ok":false,"value_bytes":8388608,"write_error":"OutOfRange: Error, decoded message length too large: found 8388635 bytes, the limit is: 4194304 bytes","write_latency_us":6292,"write_revision":0,"write_rpc_ok":false}
+{"read_bytes":0,"read_error":null,"read_ok":false,"value_bytes":16777216,"write_error":"OutOfRange: Error, decoded message length too large: found 16777244 bytes, the limit is: 4194304 bytes","write_latency_us":11133,"write_revision":0,"write_rpc_ok":false}
+{"read_bytes":0,"read_error":null,"read_ok":false,"value_bytes":33554432,"write_error":"OutOfRange: Error, decoded message length too large: found 33554460 bytes, the limit is: 4194304 bytes","write_latency_us":21172,"write_revision":0,"write_rpc_ok":false}

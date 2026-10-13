@@ -79,9 +79,11 @@
 **状态：已执行（2026-10-13 初版）。** 产出见 `../spike-5-bench/`（`REPORT.md` +
 逐条原始数据 `evidence/raw/` + `coord/tests/spike5_bench.rs` +
 `spike/2026-10/spike-5-bench/scripts/repro.sh`）。
-结论：Txn 上限 128、单值上限 ≈4 MiB（gRPC 消息）、Watch 1000 路 0 丢失 P99 108 ms、
-存储 2819.5 B/写。**非目标硬件 + 共享负载（loadavg 5–8），KV 档须安静机器复跑后方可
-用于容量规划；不做达标判定。**
+结论：Txn 上限 128、单值上限 ≈4 MiB（gRPC 消息）、Watch 1000 路 0 丢失 P99 16.6 ms、
+存储 2819.5 B/写（单写者 380 写/s）、KV 安静机成功吞吐 636–724 ops/s（P50 134–1331 ms）。
+canonical 为安静机复跑（loadavg 1.5–2.5）；共享负载首跑（loadavg 5–8，并发 ≥500
+全部 5s 超时）保留在 `evidence/raw/aux-shared-load/` 作负载敏感性证据。
+**非目标硬件 + dev profile；不做达标判定，目标硬件/release 口径待复测。**
 
 **现状锚点（已核实）**
 
