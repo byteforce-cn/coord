@@ -133,7 +133,7 @@ impl KvWorkflowStore {
         format!("/_workflow/v3/defs/{namespace}/").into_bytes()
     }
 
-    fn instance_key(id: &str) -> Vec<u8> {
+    pub(crate) fn instance_key(id: &str) -> Vec<u8> {
         format!("/_workflow/v3/instances/{id}").into_bytes()
     }
 

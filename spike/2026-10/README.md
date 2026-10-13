@@ -15,7 +15,7 @@
 | `spike-1-state-model/` | Spike 1 状态模型 v2 内存验证 | ✅ 初版完成（10-13，16/16，可复现） |
 | `spike-4-conformance/` | Spike 4 规范符合性 | ✅ 初版完成（10-13，24 语料，报告+原始数据） |
 | `spike-2-concurrency/` | Spike 2 单写者并发演练 | 未启动（10-31 截止；接续见 `NEXT-SPIKES-NOTES.md`） |
-| `spike-3-recovery/` | Spike 3 Outbox + 恢复 | 未启动（10-31 截止；接续见 `NEXT-SPIKES-NOTES.md`） |
+| `spike-3-recovery/` | Spike 3 Outbox + 恢复 | ✅ 初版完成（10-13；kill -9 三场景 PASS，机制测试 6/6，事件 schema 校验通过） |
 | `spike-5-bench/` | Spike 5 基准测试 | 未启动（平台架构组主责；需 10-18 阈值） |
 | `spike-6-adr/` | Spike 6 形态决策 | ✅ 详细 ADR 已落 `docs/adr/0013-*.md`（proposed）；本目录为证据索引 |
 
@@ -26,7 +26,8 @@
   `docs/production/workflow-semantics.md`、`docs/production/ops/boundaries.md`、`docs/adr/`。
 - 本目录只记录 Spike 的假设、验证与结论；与现状冲突处以现状事实源为准。
 - 不修改 `main`；不新增对外 RPC/字段；Spike 工装只在 spike 分支登记
-  （`spike/2026-10/spike-4-conformance/harness` 是唯一根工作区成员，main 上不存在）。
+  （根工作区成员：`spike/2026-10/spike-4-conformance/harness`、
+  `spike/2026-10/spike-3-recovery/harness`，main 上均不存在）。
 
 ## 复现方法（Spike 1）
 
