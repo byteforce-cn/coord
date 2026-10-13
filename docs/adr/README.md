@@ -34,3 +34,4 @@
 | [ADR-0010](0010-eis-consumer-gaps-full-landing.md) | 全量承接 EIS 消费方能力缺口（G-*）：方向、批次与治理 | accepted |
 | [ADR-0011](0011-consumer-audit-batch-2.md) | 消费方审计第二批（#44–#53）：配置位点、缓存键空间、调度回读、开关管理面与 SDK 依赖治理 | accepted |
 | [ADR-0012](0012-transit-hmac-purpose-bound-keys.md) | Transit HMAC 用途化密钥与轮换窗口（G-TR-3） | accepted |
+| [ADR-0013](0013-workflow-approval-v2.md) | 工作流引擎 v2：中国式审批能力落地（状态模型/并发/事件/恢复/契约） | proposed |

@@ -17,10 +17,11 @@
 | `spike-2-concurrency/` | Spike 2 单写者并发演练 | 未启动（10-31 截止；接续见 `NEXT-SPIKES-NOTES.md`） |
 | `spike-3-recovery/` | Spike 3 Outbox + 恢复 | 未启动（10-31 截止；接续见 `NEXT-SPIKES-NOTES.md`） |
 | `spike-5-bench/` | Spike 5 基准测试 | 未启动（平台架构组主责；需 10-18 阈值） |
-| `spike-6-adr/` | Spike 6 形态决策 ADR 草案 | 📝 草案已建（待 Spike 2/3/5 证据补全） |
+| `spike-6-adr/` | Spike 6 形态决策 | ✅ 详细 ADR 已落 `docs/adr/0013-*.md`（proposed）；本目录为证据索引 |
 
 ## 事实源与边界
 
+- 架构决策：`docs/adr/0013-workflow-approval-v2.md`（proposed，本分支落档）。
 - 现状事实源：`apis/contracts/proto/coord/`、`coord-core/src/workflow/`、
   `docs/production/workflow-semantics.md`、`docs/production/ops/boundaries.md`、`docs/adr/`。
 - 本目录只记录 Spike 的假设、验证与结论；与现状冲突处以现状事实源为准。
