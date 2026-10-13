@@ -1,14 +1,14 @@
 # 依赖治理与 bincode 退场记录（已完成）
 
-> Owner: maintainers ｜ Last verified: 2026-10-02
+> Owner: maintainers ｜ Last verified: 2026-10-13
 
-- **现状（完成态）**：bincode 已完全退场——依赖图无 bincode（`cargo tree -i bincode`
-  无匹配）、`deny.toml` 无豁免条目；持久化与 RPC 载荷统一为信封 V2（postcard，
+- **现状**：bincode 已完全退场——依赖图无 bincode（`cargo tree -i bincode`
+  无匹配）；持久化与 RPC 载荷统一为信封 V2（postcard，
   `MAGIC(4B) | VERSION_V2(1B)`），无前缀 / V1 / RPC codec=0 等旧格式一律**显式拒绝**
-  （不静默错读、不试错解码）。
+  （不静默错读、不试错解码）。当前唯一豁免条目为 `RUSTSEC-2024-0449`
+  （unsafe-libyaml / serde_yaml，见 §4）。
 - **目标（已达成）**：以分阶段、每步带判据的退场计划替换序列化格式并关闭豁免；
-  后续依赖纪律 = 不得重新引入 bincode（`unmaintained = "all"` 且无豁免，重新引入直接
-  fail-closed）。
+  后续依赖纪律 = 不得重新引入 bincode（bincode 无豁免，重新引入直接 fail-closed）。
 
 ---
 
@@ -56,5 +56,26 @@ bincode 在本仓库不是工具库，而是**持久化格式**，直接承载�
   不得依赖 `#[serde(default)]` 之类的宽松解码行为。
 - 篡改防护要求：每条读路径必须**精确消费**（拒绝尾随字节）且对未知版本/损坏前缀
   **显式失败**；新增持久化面必须复用统一信封。
-- **不得**重新引入 bincode：`deny.toml` 无豁免（`unmaintained = "all"`），重新引入
-  将直接 fail-closed。
+- **不得**重新引入 bincode：`deny.toml` 无 bincode 豁免（`unmaintained = "all"`），
+  重新引入将直接 fail-closed。
+
+---
+
+## 4. 豁免登记：RUSTSEC-2024-0449（unsafe-libyaml / serde_yaml）
+
+- **通告性质**：`unsafe-libyaml 0.2.11` 为 **unmaintained**（非漏洞）；它是
+  `serde_yaml 0.9.34+deprecated` 的 YAML 后端。`deny.toml` 的 `unmaintained = "all"`
+  会拦下它（2026-10-12 通告库/工具口径更新后开始显式失败）。
+- **为什么选择「记录后豁免」而不是立即升级/替换**：本仓 `coord-core` /
+  `coord-agent` **直接依赖** `serde_yaml` 解析工作流 YAML
+  （`coord-core/src/workflow/parser.rs`、`sw.rs`、`coord-agent/src/services/workflow.rs`）；
+  `serde_yaml` 已 deprecated 且 `0.9.34` 为最后一版，没有同 API 的维护替代。换解析器
+  （如 `serde-saphyr` / `saphyr`）是工作流 DSL 输入面的迁移，需独立评估 DSL 兼容性
+  （锚点 / 多文档 / 流式等），不宜随依赖审计混做。
+- **旁路**：`regorus 0.12+` 已把其 YAML 后端切到 `yaml_serde`；本仓固定
+  `regorus 0.10.1`，升级可消除该侧路径，但无法消除本仓直连路径。
+- **关闭路径**：完成工作流 YAML 解析迁移后，删除 `deny.toml` 的本条豁免并恢复
+  `ignore = []`。
+- **判据**：`cargo tree --target all -i unsafe-libyaml` 无匹配；
+  `grep -rn serde_yaml --include=Cargo.toml .` 归零；`cargo deny check advisories`
+  无豁免。
