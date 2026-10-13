@@ -57,7 +57,7 @@ B-SE-1、`runbook.md` 均描述上述 fail-closed 行为；dev 容器化放行�
 | 项 | 落地 | 可重跑判据 |
 |:--|:--|:--|
 | ① KEK 由注入材料派生（不是配置串） | `KEK = HKDF-SHA256(材料, info="coord-transit-kek-v1:" || kek_id)`；HMAC 密钥 = `HKDF-SHA256(材料, info = "coord-transit-hmac-v1:" || u32be(len(kek_id)) || kek_id || u32be(len(purpose)) || purpose)`（用途派生，不同用途互不可验；G-TR-3 / ADR-0012） | `test_kek_comes_from_material_not_from_kek_id`（同 `kek_id`、不同材料 ⇒ 必须解不开；同材料 ⇒ 必须解得开）、`test_hmac_key_is_domain_separated_from_material`、`test_hmac_purposes_are_mutually_unverifiable`、`test_hmac_rotation_window_and_offline_fail_loud` |
-| ② **缺材料即拒绝启动**（fail-closed，不许静默降级） | `TransitKekMaterial::resolve`：`COORD_TRANSIT_KEK`（hex64）→ `<data_dir>/transit-kek.bin`（32B）→ **Err**。agent 侧 `serve()` 把该 Err **上抛**（fail-closed：不允许静默降级）；生产路径不变（dev 例外见 2.2） | `test_resolve_without_any_material_is_fail_closed`（错误信息必须同时给出两条注入路径且含 `refusing to start`）、`coord-agent/src/lib.rs`(`services.transit = true` 分支的 `?`) |
+| ② **缺材料即拒绝启动**（fail-closed，不许静默降级） | `TransitKekMaterial::resolve`：`COORD_TRANSIT_KEK`（hex64）→ `<data_dir>/transit-kek.bin`（32B）→ **Err**；主材料标识 `COORD_TRANSIT_KEK_ID`（缺省 `default-kek`；轮换随材料换代，同一标识不得对应两份材料）。agent 侧 `serve()` 把该 Err **上抛**（fail-closed：不允许静默降级）；生产路径不变（dev 例外见 2.2） | `test_resolve_without_any_material_is_fail_closed`（错误信息必须同时给出两条注入路径且含 `refusing to start`）、`test_kek_id_from_env_value_defaults_and_trims`、`test_keyring_rejects_invalid_primary_id`、`coord-agent/src/lib.rs`(`services.transit = true` 分支的 `?`) |
 | ③ 负控制测试 | 覆盖：长度 0/1/16/31/33/64 一律拒绝；空 hex / 仅空白 / 非 hex / 16 字节一律拒绝；**env 非法时不静默回落到文件**；文件长度不符必须报错（而不是当作"无材料"） | `test_kek_material_rejects_wrong_length`、`test_kek_material_from_hex_rejects_empty_and_bad`、`test_resolve_env_takes_precedence_and_does_not_fall_back`、`test_resolve_from_file_enforces_length`、集成层 `test_transit_without_injected_kek_material_is_fail_closed` |
 | ④ 文档口径与实现一致 | `WHITEPAPER.md`、`boundaries.md` B-SE-2/B-SE-5/B-SE-6/B-SE-8、本节、`runbook.md` | `grep -rn -e 'coord-transit-kek:' -e 'coord-transit-hmac-v1:' --include=*.md .` 的命中不得出现把旧公式当作**现状**的用法 |
 
@@ -66,6 +66,8 @@ B-SE-1、`runbook.md` 均描述上述 fail-closed 行为；dev 容器化放行�
 ```bash
 # 方式 A：环境变量（hex64 = 32 字节）
 export COORD_TRANSIT_KEK=$(openssl rand -hex 32)
+# 可选：主材料标识（默认 default-kek；轮换时随材料换代，见 runbook §4.4）
+# export COORD_TRANSIT_KEK_ID=gen-2026-10
 # 方式 B：密钥文件（32 字节原始材料，建议 0600；每个 agent 用自己的 data_dir）
 head -c 32 /dev/urandom > /var/lib/coord-agent/transit-kek.bin && chmod 600 …
 ```

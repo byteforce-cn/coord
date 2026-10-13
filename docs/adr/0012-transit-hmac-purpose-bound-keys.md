@@ -58,7 +58,7 @@ coord Transit 若要作为该能力的可选平台映射，必须满足这两条
 
 ### 2. `key_id`（Vault key version 类比）
 
-`key_id` = 注入材料标识（主材料 = 配置 `kek_id`；历史材料 = `COORD_TRANSIT_KEK_OLD` 条目标识）。
+`key_id` = 注入材料标识（主材料 = `COORD_TRANSIT_KEK_ID`（配置面），缺省 `default-kek`；历史材料 = `COORD_TRANSIT_KEK_OLD` 条目标识）。**轮换 = 新标识 + 新材料**：同一标识不得对应两份材料（历史集合拒绝与主 id 重复的条目），否则旧记录 / 旧签名落到新材料上，窗口命中与 fail-loud 均失效。
 
 | 消息 | 新增字段 | 语义 |
 |:--|:--|:--|

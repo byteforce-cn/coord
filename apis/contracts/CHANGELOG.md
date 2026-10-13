@@ -42,6 +42,8 @@
   历史材料**参与** HMAC 派生（作废「仅派生解密 KEK」注释）。
 - 轮换窗口：新签名用主材料；旧签名按其 `key_id` 在历史材料注入期可复算；材料下线后显式
   `key_id` ⇒ `FAILED_PRECONDITION`。HMAC 不参与 `Rewrap`（迁移 = 重散列回写）。
+- 主材料标识经 `COORD_TRANSIT_KEK_ID` 注入（缺省 `default-kek`）；**轮换 = 新标识 + 新材料**，
+  旧材料按旧标识注入历史集合；同一标识不得对应两份材料。
 - 跨 agent 一致性：同集群所有 agent 必须注入相同材料与标识；同一
   `(purpose, data, key_id, algorithm)` 在任一 agent 结果一致。
 

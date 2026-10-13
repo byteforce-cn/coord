@@ -296,6 +296,9 @@
   新写入不传 `key_id`（主材料）；显式 `key_id` 用于轮换期按旧材料复算散列变体（DRV-005
   防重）。轮换/下线/回退见 runbook §4.4。**跨 agent 一致性**：同集群所有 agent 必须注入
   相同材料与标识；同一 `(purpose, data, key_id, algorithm)` 在任一 agent 结果一致。
+  主材料标识由部署注入（`COORD_TRANSIT_KEK_ID`，缺省 `default-kek`），**轮换时随材料
+  换代**（同一标识不得对应两份材料）；旧材料按旧标识注入历史集合，旧签名 / 旧记录
+  才可按 `key_id` 复算。
   用途是**域分隔标签，不是授权边界**——持有 `coord:transit:crypto` 的调用方可签/验任意合法 `purpose`；按服务隔离用途不属本契约承诺。
 
 ## 11. 本地态服务（CircuitBreaker / RateLimiter / FeatureFlags）
