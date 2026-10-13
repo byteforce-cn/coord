@@ -60,7 +60,7 @@ pub use pki_store::{
     CaRecord, CertRecord, CertStatus, KvPkiStore, MemoryPkiStore, PkiStore, PkiStoreError,
 };
 pub use proxy::AgentInner;
-pub use service::{BaseService, ServiceConfig, ServiceResult};
+pub use service::{BaseService, ServiceConfig, ServiceResult, WorkflowDispatchConfig};
 pub use services::transit_store::{
     DekRecord, DekStoreError, KvTransitDekStore, MemoryTransitDekStore, TransitDekStore,
 };
@@ -1378,15 +1378,20 @@ impl AgentServer {
             // 无连接时退回内存态（单 agent 测试/离线场景）。
             let workflow_svc = match &inner {
                 Some(inner_ref) => Arc::new(
-                    crate::services::workflow::phase4::WorkflowEngineService::new_with_kv_store(
+                    crate::services::workflow::phase4::WorkflowEngineService::new_with_kv_store_and_dispatch(
                         inner_ref.clone(),
+                        &self.config.services.workflow_dispatch,
                     ),
                 ),
                 None => {
                     tracing::warn!(
                         "Workflow engine enabled but no server connection; using memory-only store"
                     );
-                    Arc::new(crate::services::workflow::phase4::WorkflowEngineService::new())
+                    Arc::new(
+                        crate::services::workflow::phase4::WorkflowEngineService::new_with_dispatch(
+                            &self.config.services.workflow_dispatch,
+                        ),
+                    )
                 }
             };
             let workflow_grpc_svc = register_native_service(

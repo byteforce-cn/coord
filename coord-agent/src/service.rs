@@ -165,6 +165,30 @@ pub struct ServiceConfig {
     /// 跨 Agent ISR 数据复制（Cache/MQ 数据面高可用；默认关闭 = 单 agent 零破坏）
     #[serde(default)]
     pub replication: bool,
+
+    /// HTTP 任务派发的凭据/常量注入（`call` 动作的 `${ $secrets.x }` /
+    /// `${ $constants.x }` 占位符解析；对应 TOML `[services.workflow_dispatch]`）
+    ///
+    /// 缺省为空 = 与既有无注入行为一致（既有配置文件不写本段照常加载）。
+    #[serde(default)]
+    pub workflow_dispatch: WorkflowDispatchConfig,
+}
+
+/// HTTP 任务派发（`call` 动作）的 secrets/constants 注入配置。
+///
+/// 工作流定义随 KV/快照/备份跨节点流转，凭据不得进定义存储 —— 定义里只写
+/// `${ $secrets.<key> }` / `${ $constants.<key> }` 占位符，材料由 agent 侧本配置
+/// 注入（见 `docs/production/workflow-semantics.md` §6）。某个占位符未在本配置
+/// 命中时派发 fail-closed（错误信息含缺失 key 名，不含值）。
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct WorkflowDispatchConfig {
+    /// 密钥映射：`${ $secrets.<key> }` 的取值（如 bearer token）；不落定义存储
+    #[serde(default)]
+    pub secrets: std::collections::HashMap<String, String>,
+
+    /// 常量映射：`${ $constants.<key> }` 的取值，可承载任意 JSON 值
+    #[serde(default)]
+    pub constants: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Default for ServiceConfig {
@@ -202,6 +226,7 @@ impl Default for ServiceConfig {
             transit: false,
             pki: false,
             replication: false,
+            workflow_dispatch: WorkflowDispatchConfig::default(),
         }
     }
 }
@@ -245,6 +270,9 @@ impl ServiceConfig {
             pki: true,
             // 例外集（ADR-0009）：单 Agent 拓扑无复制对端。
             replication: false,
+            // 配置类字段（非服务开关）：dev 不注入凭据，工作流定义里的占位符
+            // 缺材料时 fail-closed，不会静默带上字面量发出。
+            workflow_dispatch: WorkflowDispatchConfig::default(),
         }
     }
 }
@@ -372,6 +400,56 @@ mod tests {
         assert_eq!(from_empty_toml.rate_limiter, code_default.rate_limiter);
         assert_eq!(from_empty_toml.feature_flags, code_default.feature_flags);
         assert_eq!(from_empty_toml.replication, code_default.replication);
+        assert_eq!(
+            from_empty_toml.workflow_dispatch,
+            code_default.workflow_dispatch
+        );
+    }
+
+    /// `[services.workflow_dispatch]` 段：secrets 为字符串映射，constants 可承载
+    /// 任意 JSON 值（数字/布尔/数组/嵌套表）——TOML → serde_json 转换必须保形。
+    /// 缺省段 = 空映射（既有配置文件向后兼容）。
+    #[test]
+    fn test_workflow_dispatch_config_toml_shape() {
+        let toml_str = r#"
+[workflow_dispatch]
+[workflow_dispatch.secrets]
+approvalToken = "SECRET-123"
+
+[workflow_dispatch.constants]
+region = "cn-north-1"
+retries = 3
+async = true
+weights = [1, 2, 3]
+
+[workflow_dispatch.constants.limits]
+qps = 100
+"#;
+        let config: ServiceConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.workflow_dispatch.secrets.get("approvalToken"),
+            Some(&"SECRET-123".to_string())
+        );
+        assert_eq!(
+            config.workflow_dispatch.constants.get("region"),
+            Some(&serde_json::json!("cn-north-1"))
+        );
+        assert_eq!(
+            config.workflow_dispatch.constants.get("retries"),
+            Some(&serde_json::json!(3))
+        );
+        assert_eq!(
+            config.workflow_dispatch.constants.get("async"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            config.workflow_dispatch.constants.get("weights"),
+            Some(&serde_json::json!([1, 2, 3]))
+        );
+        assert_eq!(
+            config.workflow_dispatch.constants.get("limits"),
+            Some(&serde_json::json!({"qps": 100}))
+        );
     }
 
     #[test]

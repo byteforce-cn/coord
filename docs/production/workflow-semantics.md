@@ -1,6 +1,6 @@
 # 工作流语义（补偿 / 重试 / 信号 / 保留）
 
-> Owner: maintainers ｜ Last verified: 2026-10-09
+> Owner: maintainers ｜ Last verified: 2026-10-13
 
 面向接入方的语义单一归属页（G-WF-1）。事实源：`coord.workflow.v1` 的 proto 声明
 （wire 字段）、`coord-core/src/workflow/`（sw 编译器 + runtime）与
@@ -66,3 +66,43 @@
 `PENDING → RUNNING ⇄ WAITING/SUSPENDED → COMPLETED | FAILED(FAULTED) | CANCELLED`；
 `GetStatus.status` 字符串映射见 `grpc_handlers.rs`（`FAULTED` 即 Failed）。
 子流程恢复的轮询边界见 `boundaries.md` B-WF-2 / B-WF-3。
+
+## 6. HTTP 任务派发与凭据注入（`$secrets` / `$constants`）
+
+`call` / operation 任务的 `with` 支持 HTTP 调用（`endpoint` / `method` / `headers` /
+`body` / `auth`）。凭据**不写进定义**（定义随 KV / 快照 / 备份流转，`GetDefinition`
+可原样读出），而是在 agent 侧配置注入、只在进程内解析：
+
+```yaml
+- name: notify
+  type: operation
+  with:
+    method: POST
+    endpoint: "http://ims-approval:8083/api/internal/activate"
+    auth: { scheme: bearer, token: "${ $secrets.approvalToken }" }
+    body: { requestId: "${ $context.requestId }" }
+```
+
+- 占位符映射由 agent 配置 `[services.workflow_dispatch]` 注入：
+
+```toml
+[services.workflow_dispatch.secrets]
+approvalToken = "..."       # key → 字符串
+
+[services.workflow_dispatch.constants]
+region = "cn-north-1"       # key → 任意 JSON 值（字符串/数字/布尔/数组/嵌套表）
+retries = 3
+```
+
+- 缺省空映射 = 不注入（与无本配置段的既有行为一致）。
+- **fail-closed**：解析后仍残留 `${ $secrets.<key> }` / `${ $constants.<key> }`
+  ⇒ 派发前拒绝（`retryable: false`），错误信息点名缺失的 key（不含凭据值）；
+  不会把占位符字面量当请求头发出去（否则远端 401/403 会被误判为对端问题）。
+- 字符串常量按 JSON 序列化（带引号）替换，数字/布尔原样——与 `with_constants`
+  既有语义一致。
+- `$context` / `$input` 等运行时绑定由表达式求值器处理；本配置只影响 `with` 内的
+  `$secrets` / `$constants` 占位符。
+- 判据：`test_http_dispatcher_secret_injected_into_authorization_header`、
+  `test_http_dispatcher_missing_placeholders_fail_closed`、
+  `test_engine_new_with_dispatch_injects_secret_end_to_end`、
+  `test_engine_new_with_dispatch_missing_secret_fails_closed_end_to_end`。
