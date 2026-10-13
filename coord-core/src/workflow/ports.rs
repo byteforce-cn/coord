@@ -143,15 +143,32 @@ pub enum DispatchResult {
 /// 任务派发器 —— 负责执行 call 任务的外部调用
 #[async_trait]
 pub trait TaskDispatcher: Send + Sync {
-    /// 派发外部调用并等待结果
-    async fn dispatch(&self, service: &str, with: Option<&Value>, input: &Value) -> DispatchResult;
+    /// 派发外部调用并等待结果。
+    ///
+    /// `idempotency_key` 为 `Some` 时，实现必须把它作为下游去重键透传（HTTP 用
+    /// `Idempotency-Key` 头）；`None` = 本次派发无去重语义（未注入 step token 存储）。
+    async fn dispatch(
+        &self,
+        service: &str,
+        with: Option<&Value>,
+        input: &Value,
+        idempotency_key: Option<&str>,
+    ) -> DispatchResult;
 }
 
 /// 为 Arc<T> 提供 TaskDispatcher 的委托实现（支持 trait object 类型擦除）
 #[async_trait]
 impl<T: TaskDispatcher + Send + Sync + ?Sized> TaskDispatcher for Arc<T> {
-    async fn dispatch(&self, service: &str, with: Option<&Value>, input: &Value) -> DispatchResult {
-        self.as_ref().dispatch(service, with, input).await
+    async fn dispatch(
+        &self,
+        service: &str,
+        with: Option<&Value>,
+        input: &Value,
+        idempotency_key: Option<&str>,
+    ) -> DispatchResult {
+        self.as_ref()
+            .dispatch(service, with, input, idempotency_key)
+            .await
     }
 }
 
@@ -1015,6 +1032,7 @@ pub mod test_utils {
             _service: &str,
             _with: Option<&Value>,
             _input: &Value,
+            _idempotency_key: Option<&str>,
         ) -> DispatchResult {
             DispatchResult::Success { data: Value::Null }
         }

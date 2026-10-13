@@ -267,6 +267,48 @@ pub trait DurableTimerStore: Send + Sync {
     async fn list_all(&self) -> Result<Vec<TimerRecord>, StoreError>;
 }
 
+/// step token 状态：`Pending` = 已登记待确认；`Done` = 外部调用已成功。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepState {
+    Pending,
+    Done,
+}
+
+/// 一条 step token 记录 —— 幂等键与确认状态的持久化形态。
+///
+/// `token` 是确定性派生的幂等键（跨重试/崩溃重建不变）；`at_ms` 是登记时刻。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepRecord {
+    pub token: String,
+    pub state: StepState,
+    pub at_ms: i64,
+}
+
+/// step token 存储契约 —— 「外部副作用去重」的持久基座。
+///
+/// `call` 在派发**前**登记 token，成功后标 `Done`；重试/崩溃重建复用同一 token
+/// （确定性派生），下游按幂等键去重即得「不重」。`register` 是 create-if-absent：
+/// 并发/重放只保留首个 token，后来者读到既有记录。
+#[async_trait]
+pub trait StepTokenStore: Send + Sync {
+    /// create-if-absent；`created=false` 时返回的 `token` 是既有记录的值。
+    async fn register(
+        &self,
+        instance_id: &str,
+        step_id: &str,
+        token: &str,
+        now_ms: i64,
+    ) -> Result<(StepRecord, bool), StoreError>;
+
+    /// 标记该 step 的外部调用已成功。
+    async fn mark_done(&self, instance_id: &str, step_id: &str) -> Result<(), StoreError>;
+
+    /// 读取 step 记录（不存在返回 `None`）。
+    async fn get(&self, instance_id: &str, step_id: &str)
+        -> Result<Option<StepRecord>, StoreError>;
+}
+
 /// 投递面契约 —— 把一条 outbox 记录交给下游（MQ / Event）。
 #[async_trait]
 pub trait OutboxSink: Send + Sync {
@@ -376,6 +418,8 @@ pub struct DurableSupport {
     pub outbox: Arc<dyn OutboxStore>,
     /// 可用时，生命周期事件走「状态 + outbox 同事务」提交
     pub atomic_commit: Option<Arc<dyn AtomicOutboxCommit>>,
+    /// step token 存储（外部副作用去重）。`None` = 派发不带幂等键（旧行为）。
+    pub steps: Option<Arc<dyn StepTokenStore>>,
 }
 
 impl DurableSupport {
@@ -384,11 +428,17 @@ impl DurableSupport {
             timers,
             outbox,
             atomic_commit: None,
+            steps: None,
         }
     }
 
     pub fn with_atomic_commit(mut self, commit: Arc<dyn AtomicOutboxCommit>) -> Self {
         self.atomic_commit = Some(commit);
+        self
+    }
+
+    pub fn with_steps(mut self, steps: Arc<dyn StepTokenStore>) -> Self {
+        self.steps = Some(steps);
         self
     }
 }
@@ -534,6 +584,61 @@ impl DurableTimerStore for MemoryTimerStore {
         let mut out: Vec<TimerRecord> = map.values().cloned().collect();
         out.sort_by_key(|r| (r.fire_at_ms, r.id.clone()));
         Ok(out)
+    }
+}
+
+/// 进程内 step token 存储（测试/降级用；重启即失，**不**提供跨进程去重）。
+#[derive(Debug, Default)]
+pub struct MemoryStepStore {
+    inner: std::sync::Mutex<std::collections::HashMap<(String, String), StepRecord>>,
+}
+
+impl MemoryStepStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl StepTokenStore for MemoryStepStore {
+    async fn register(
+        &self,
+        instance_id: &str,
+        step_id: &str,
+        token: &str,
+        now_ms: i64,
+    ) -> Result<(StepRecord, bool), StoreError> {
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (instance_id.to_string(), step_id.to_string());
+        if let Some(existing) = map.get(&key) {
+            return Ok((existing.clone(), false));
+        }
+        let rec = StepRecord {
+            token: token.to_string(),
+            state: StepState::Pending,
+            at_ms: now_ms,
+        };
+        map.insert(key, rec.clone());
+        Ok((rec, true))
+    }
+
+    async fn mark_done(&self, instance_id: &str, step_id: &str) -> Result<(), StoreError> {
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(rec) = map.get_mut(&(instance_id.to_string(), step_id.to_string())) {
+            rec.state = StepState::Done;
+        }
+        Ok(())
+    }
+
+    async fn get(
+        &self,
+        instance_id: &str,
+        step_id: &str,
+    ) -> Result<Option<StepRecord>, StoreError> {
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(map
+            .get(&(instance_id.to_string(), step_id.to_string()))
+            .cloned())
     }
 }
 

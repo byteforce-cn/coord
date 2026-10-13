@@ -41,6 +41,19 @@ const SUBFLOW_SCAN_INTERVAL_SECS: u64 = 5;
 /// 让到期触发足够及时（补偿延迟 = tick 间隔上界）。
 const DURABLE_TIMER_SCAN_INTERVAL_MS: u64 = 200;
 
+/// `call` 的 step 标识（v1 临时口径：任务索引 + 任务名）。
+///
+/// v2 由分支/轮次/席位替换（见 ADR D2）。retry 时任务索引不前移，故重试派发
+/// 派生出的 `step_id`/`token` 逐字相同 —— 这是「重试复用同一幂等键」的依据。
+fn step_id(task_index: usize, task_name: &str) -> String {
+    format!("{task_index}:{task_name}")
+}
+
+/// 由实例 + step 确定性派生的幂等键（跨重试/崩溃重建不变）。
+fn step_token(instance_id: &str, step_id: &str) -> String {
+    format!("wf:{instance_id}:{step_id}")
+}
+
 // ─── 后台任务存活登记（能力死亡必须可观测） ───
 
 /// 长活后台任务的**存活事实**（只读快照，供出口/指标拉取）。
@@ -436,6 +449,42 @@ where
         self.fire_due_timers().await;
         self.reconcile_resumable_instances(Arc::clone(&self.store))
             .await;
+    }
+
+    /// 派发前登记 step token（幂等键）。
+    ///
+    /// - `Ok(None)`：未注入 [`StepTokenStore`](super::durable::StepTokenStore) ⇒ 本次派发不带幂等键（旧行为）。
+    /// - `Ok(Some(key))`：要透传给 dispatcher 的幂等键。
+    /// - `Err`：存储不可用 ⇒ 调用方折叠为不可重试的派发失败（fail-closed，不静默
+    ///   把「无去重的副作用」发出去）。
+    async fn register_step(
+        &self,
+        instance_id: &str,
+        task_index: usize,
+        task_name: &str,
+    ) -> Result<Option<String>, String> {
+        let Some(steps) = self.durable.as_ref().and_then(|d| d.steps.as_ref()) else {
+            return Ok(None);
+        };
+        let sid = step_id(task_index, task_name);
+        let token = step_token(instance_id, &sid);
+        steps
+            .register(instance_id, &sid, &token, self.clock.now_ms())
+            .await
+            .map(|(rec, _)| Some(rec.token))
+            .map_err(|e| format!("step token register failed: {e}"))
+    }
+
+    /// 派发成功后把 step token 标 `Done`（未注入 steps 时空操作）。
+    ///
+    /// 标位失败不致命：token 仍为 `Pending` ⇒ 重试复用同一 token，下游按幂等键
+    /// 去重即可（at-least-once）；所以吞掉错误，不把已成功的调用翻成失败。
+    async fn mark_step_done(&self, instance_id: &str, task_index: usize, task_name: &str) {
+        let Some(steps) = self.durable.as_ref().and_then(|d| d.steps.as_ref()) else {
+            return;
+        };
+        let sid = step_id(task_index, task_name);
+        let _ = steps.mark_done(instance_id, &sid).await;
     }
 
     /// 建立（或重启后重建）一个 listen 挂起实例的事件等待。
@@ -1656,13 +1705,26 @@ where
                                 with,
                                 input,
                             } => {
-                                let result = self
-                                    .dispatcher
-                                    .dispatch(service, with.as_ref(), input)
-                                    .await;
+                                let task_index = inst.current_task_index;
+                                let task_name = frame.task_name.clone();
+                                let result = match self
+                                    .register_step(&inst.id, task_index, &task_name)
+                                    .await
+                                {
+                                    Ok(key) => {
+                                        self.dispatcher
+                                            .dispatch(service, with.as_ref(), input, key.as_deref())
+                                            .await
+                                    }
+                                    Err(error) => DispatchResult::Failure {
+                                        error,
+                                        retryable: false,
+                                    },
+                                };
 
                                 match result {
                                     DispatchResult::Success { data } => {
+                                        self.mark_step_done(&inst.id, task_index, &task_name).await;
                                         // 派发成功 —— 不挂起，直接推进
                                         let mut completed_frame = frame;
                                         completed_frame.status = TaskStatus::Completed;
@@ -2242,12 +2304,31 @@ where
                                         },
                                     frame: call_frame,
                                 } => {
-                                    let result = self
-                                        .dispatcher
-                                        .dispatch(&service, with.as_ref(), &input)
-                                        .await;
+                                    let task_index = inst.current_task_index;
+                                    let task_name = call_frame.task_name.clone();
+                                    let result = match self
+                                        .register_step(&inst.id, task_index, &task_name)
+                                        .await
+                                    {
+                                        Ok(key) => {
+                                            self.dispatcher
+                                                .dispatch(
+                                                    &service,
+                                                    with.as_ref(),
+                                                    &input,
+                                                    key.as_deref(),
+                                                )
+                                                .await
+                                        }
+                                        Err(error) => DispatchResult::Failure {
+                                            error,
+                                            retryable: false,
+                                        },
+                                    };
                                     match result {
                                         DispatchResult::Success { data } => {
+                                            self.mark_step_done(&inst.id, task_index, &task_name)
+                                                .await;
                                             let mut done = call_frame;
                                             done.status = TaskStatus::Completed;
                                             done.output = Some(data);
@@ -3269,6 +3350,7 @@ mod tests {
             _service: &str,
             _with: Option<&Value>,
             _input: &Value,
+            _idempotency_key: Option<&str>,
         ) -> DispatchResult {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < self.fail_times {

@@ -464,6 +464,7 @@ impl TaskDispatcher for RendezvousDispatcher {
         _service: &str,
         _with: Option<&serde_json::Value>,
         _input: &serde_json::Value,
+        _idempotency_key: Option<&str>,
     ) -> DispatchResult {
         let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         timeline(self.label, "side_effect_dispatch", &format!("call#{n}"));

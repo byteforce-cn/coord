@@ -1389,6 +1389,7 @@ pub mod phase4 {
             _service: &str,
             _with: Option<&Value>,
             _input: &Value,
+            _idempotency_key: Option<&str>,
         ) -> DispatchResult {
             DispatchResult::Success { data: Value::Null }
         }
@@ -1554,6 +1555,7 @@ pub mod phase4 {
             service: &str,
             with: Option<&Value>,
             input: &Value,
+            idempotency_key: Option<&str>,
         ) -> DispatchResult {
             // 先解析 secrets/constants 占位符；残留未命中 key ⇒ fail-closed，
             // 绝不把字面量 `${ $secrets.x }` 当凭据发出去（远端 401/403 看不出
@@ -1575,7 +1577,10 @@ pub mod phase4 {
                 None => None,
             };
             match service {
-                "http" => self.dispatch_http(resolved_with.as_ref(), input).await,
+                "http" => {
+                    self.dispatch_http(resolved_with.as_ref(), input, idempotency_key)
+                        .await
+                }
                 "grpc" => self.dispatch_grpc(resolved_with.as_ref(), input).await,
                 _ => {
                     // function call — 从 use.functions 解析后 fallback 到 http/grpc 语义
@@ -1625,7 +1630,12 @@ pub mod phase4 {
         /// - `headers`: 请求头映射
         /// - `body`: 显式请求体（缺省用工作流输入）
         /// - `auth`: 认证（basic/bearer）
-        async fn dispatch_http(&self, with: Option<&Value>, input: &Value) -> DispatchResult {
+        async fn dispatch_http(
+            &self,
+            with: Option<&Value>,
+            input: &Value,
+            idempotency_key: Option<&str>,
+        ) -> DispatchResult {
             let (method, endpoint, query, body, headers, auth) = match with {
                 Some(w) => {
                     // endpoint 对象形式 { uri, method } 或字符串
@@ -1697,6 +1707,12 @@ pub mod phase4 {
                         req = req.header(k.as_str(), val);
                     }
                 }
+            }
+
+            // 幂等键：派发前已在 step token store 登记的确定性 token。
+            // 在自定义 headers 之后注入，使去重键来自运行时派生而非调用方 config。
+            if let Some(key) = idempotency_key {
+                req = req.header("Idempotency-Key", key);
             }
 
             // 请求体：显式 body 优先，其次工作流输入
@@ -3736,7 +3752,7 @@ events:
         });
 
         let result = dispatcher
-            .dispatch("http", Some(&with), &serde_json::json!({"x": 1}))
+            .dispatch("http", Some(&with), &serde_json::json!({"x": 1}), None)
             .await;
         match result {
             DispatchResult::Success { data } => {
@@ -3773,7 +3789,7 @@ events:
             "auth": {"scheme": "bearer", "token": "${ $secrets.approvalToken }"},
         });
         match dispatcher
-            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
             .await
         {
             DispatchResult::Success { data } => {
@@ -3802,7 +3818,7 @@ events:
             "query": {"region": "${ $constants.region }", "retries": "${ $constants.retries }"},
         });
         match dispatcher
-            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
             .await
         {
             DispatchResult::Success { data } => {
@@ -3832,7 +3848,7 @@ events:
             "headers": {"X-Region": "${ $constants.region }"},
         });
         match dispatcher
-            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
             .await
         {
             DispatchResult::Failure { error, retryable } => {
@@ -3857,7 +3873,7 @@ events:
             "headers": {"X-Test": "yes"},
         });
         match dispatcher
-            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
             .await
         {
             DispatchResult::Success { data } => {
@@ -4022,7 +4038,7 @@ events:
             "endpoint": format!("http://{addr}"),
         });
         let result = dispatcher
-            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .dispatch("http", Some(&with), &serde_json::json!({}), None)
             .await;
         match result {
             DispatchResult::Success { data } => {
@@ -4040,7 +4056,7 @@ events:
         // 缺少 method → 配置错误（非重试）
         let with = serde_json::json!({"endpoint": {"uri": "http://127.0.0.1:1"}});
         let result = dispatcher
-            .dispatch("grpc", Some(&with), &serde_json::json!({}))
+            .dispatch("grpc", Some(&with), &serde_json::json!({}), None)
             .await;
         assert!(matches!(
             result,
