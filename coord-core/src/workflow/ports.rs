@@ -339,6 +339,10 @@ impl EventProvider for MemoryEventProvider {
 
 // ─── WorkflowStore ───
 
+/// `list_instances` / `list_definitions` 的缺省页大小：调用方未指定
+/// （`page_size == 0`）时存储层采用的兜底值。
+pub const DEFAULT_LIST_PAGE_SIZE: usize = 50;
+
 /// 工作流持久化存储
 #[async_trait]
 pub trait WorkflowStore: Send + Sync {
@@ -406,14 +410,26 @@ pub trait WorkflowStore: Send + Sync {
         page_token: Option<&str>,
     ) -> Result<Vec<WorkflowDefinition>, StoreError>;
 
-    /// 列出工作流实例
+    /// 列出工作流实例（过滤 + 分页）
+    ///
+    /// # 过滤
+    /// - `namespace`：`None` 或空串 = 不过滤；否则按实例的 `definition_ns` 精确匹配；
+    /// - `definition_name`：`None` 或空串 = 不过滤；否则按实例的 `definition_name`
+    ///   精确匹配。取值可为定义名或定义 ID（实现负责把 ID 解析为定义名）。
+    ///
+    /// # 分页契约
+    /// - `page_size` 限制**过滤后**的返回条数；`0` 取 [`DEFAULT_LIST_PAGE_SIZE`]；
+    /// - `page_token` 为上一页返回的续读令牌（**不透明**：调用方只应原样回传，
+    ///   不得解析其内容）；
+    /// - 返回 `(instances, next_token)`；`next_token` 仅在过滤结果仍有剩余时为
+    ///   `Some`，为 `None` 表示已到末尾。逐页续读保证不重不漏。
     async fn list_instances(
         &self,
         namespace: Option<&str>,
         definition_name: Option<&str>,
         page_size: usize,
         page_token: Option<&str>,
-    ) -> Result<Vec<WorkflowInstance>, StoreError>;
+    ) -> Result<(Vec<WorkflowInstance>, Option<String>), StoreError>;
 
     /// 保存恢复幂等键
     ///
@@ -502,6 +518,54 @@ impl MemoryWorkflowStore {
     fn def_key(namespace: &str, name: &str, version: &str) -> String {
         format!("{namespace}/{name}@{version}")
     }
+
+    /// 把 `list_instances` 的 definition 过滤值（定义名或定义 ID）解析为定义名。
+    /// 定义名直接命中；否则按 ID 匹配定义取其名；都不命中则回退为原值
+    /// （等价于按名精确匹配，通常结果为空）。
+    fn resolve_definition_name(&self, definition: &str) -> Result<String, StoreError> {
+        let defs = self
+            .definitions
+            .lock()
+            .map_err(|e| StoreError::IoError(e.to_string()))?;
+        if defs.values().any(|d| d.document.name == definition) {
+            return Ok(definition.to_string());
+        }
+        if let Some(def) = defs.values().find(|d| d.id.as_deref() == Some(definition)) {
+            return Ok(def.document.name.clone());
+        }
+        Ok(definition.to_string())
+    }
+}
+
+/// 对已过滤的实例集合做稳定排序、分页与续读。
+///
+/// 排序键为实例 id（与 KV 前缀扫描的键序一致），续读令牌即上一页最后一条的
+/// 实例 id；实现按 id **严格大于**令牌定位起点，避免分页边界重复或遗漏。
+/// 返回的 `next_token` 仅在仍有剩余时为 `Some`。
+fn paginate_instances(
+    mut matched: Vec<WorkflowInstance>,
+    page_size: usize,
+    page_token: Option<&str>,
+) -> (Vec<WorkflowInstance>, Option<String>) {
+    matched.sort_by(|a, b| a.id.cmp(&b.id));
+    let page_size = if page_size == 0 {
+        DEFAULT_LIST_PAGE_SIZE
+    } else {
+        page_size
+    };
+    let start = match page_token.filter(|t| !t.is_empty()) {
+        Some(token) => matched.partition_point(|i| i.id.as_str() <= token),
+        None => 0,
+    };
+    let end = start.saturating_add(page_size).min(matched.len());
+    let has_more = end < matched.len();
+    let page = matched[start..end].to_vec();
+    let next_token = if has_more {
+        page.last().map(|i| i.id.clone())
+    } else {
+        None
+    };
+    (page, next_token)
 }
 
 #[async_trait]
@@ -574,18 +638,28 @@ impl WorkflowStore for MemoryWorkflowStore {
 
     async fn list_instances(
         &self,
-        _namespace: Option<&str>,
-        _definition_name: Option<&str>,
-        _page_size: usize,
-        _page_token: Option<&str>,
-    ) -> Result<Vec<WorkflowInstance>, StoreError> {
-        Ok(self
+        namespace: Option<&str>,
+        definition_name: Option<&str>,
+        page_size: usize,
+        page_token: Option<&str>,
+    ) -> Result<(Vec<WorkflowInstance>, Option<String>), StoreError> {
+        let ns = namespace.filter(|s| !s.is_empty());
+        let def = match definition_name.filter(|s| !s.is_empty()) {
+            Some(d) => Some(self.resolve_definition_name(d)?),
+            None => None,
+        };
+
+        let matched: Vec<WorkflowInstance> = self
             .instances
             .lock()
             .map_err(|e| StoreError::IoError(e.to_string()))?
             .values()
+            .filter(|i| ns.is_none_or(|ns| i.definition_ns == ns))
+            .filter(|i| def.as_deref().is_none_or(|name| i.definition_name == name))
             .cloned()
-            .collect())
+            .collect();
+
+        Ok(paginate_instances(matched, page_size, page_token))
     }
 
     async fn save_resume_idempotency_key(
@@ -671,7 +745,7 @@ impl WorkflowStore for Arc<MemoryWorkflowStore> {
         definition_name: Option<&str>,
         page_size: usize,
         page_token: Option<&str>,
-    ) -> Result<Vec<WorkflowInstance>, StoreError> {
+    ) -> Result<(Vec<WorkflowInstance>, Option<String>), StoreError> {
         self.as_ref()
             .list_instances(namespace, definition_name, page_size, page_token)
             .await
@@ -748,7 +822,7 @@ impl WorkflowStore for Arc<dyn WorkflowStore + Send + Sync> {
         definition_name: Option<&str>,
         page_size: usize,
         page_token: Option<&str>,
-    ) -> Result<Vec<WorkflowInstance>, StoreError> {
+    ) -> Result<(Vec<WorkflowInstance>, Option<String>), StoreError> {
         self.as_ref()
             .list_instances(namespace, definition_name, page_size, page_token)
             .await
@@ -1173,5 +1247,158 @@ mod tests {
             Some("broadcast.test"),
             "subscriber 2 should receive event"
         );
+    }
+
+    // ─── list_instances 过滤 + 分页（issue #56 契约） ───
+
+    fn mk_instance(id: &str, ns: &str, name: &str) -> WorkflowInstance {
+        WorkflowInstance {
+            id: id.into(),
+            definition_ns: ns.into(),
+            definition_name: name.into(),
+            definition_version: "1.0".into(),
+            status: crate::workflow::model::InstanceStatus::Running,
+            context: serde_json::json!({}),
+            task_stack: vec![],
+            current_task_index: 0,
+            created_at: 0,
+            updated_at: 0,
+            output: None,
+            fault: None,
+            suspension_meta: None,
+        }
+    }
+
+    fn mk_definition(id: Option<&str>, ns: &str, name: &str) -> WorkflowDefinition {
+        WorkflowDefinition {
+            id: id.map(str::to_string),
+            document: Document {
+                dsl: "1.0.0".into(),
+                namespace: ns.into(),
+                name: name.into(),
+                version: "1.0".into(),
+                title: None,
+                summary: None,
+                tags: None,
+            },
+            do_tasks: vec![],
+            input: None,
+            output: None,
+            timeout: None,
+            use_components: None,
+            schedule: Default::default(),
+            auth: Default::default(),
+            secrets: Default::default(),
+            constants: Default::default(),
+            task_meta: Default::default(),
+            raw_yaml: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_instances_filters_by_namespace_and_definition() {
+        let store = MemoryWorkflowStore::new();
+        store
+            .save_definition(&mk_definition(Some("def-a"), "ns-a", "alpha-wf"))
+            .await
+            .unwrap();
+        store
+            .save_definition(&mk_definition(Some("def-b"), "ns-b", "beta-wf"))
+            .await
+            .unwrap();
+        store
+            .save_instance(&mk_instance("a-1", "ns-a", "alpha-wf"))
+            .await
+            .unwrap();
+        store
+            .save_instance(&mk_instance("a-2", "ns-a", "alpha-wf"))
+            .await
+            .unwrap();
+        store
+            .save_instance(&mk_instance("b-1", "ns-b", "beta-wf"))
+            .await
+            .unwrap();
+
+        // namespace 过滤：ns-b 实例不得出现
+        let (all_a, token) = store
+            .list_instances(Some("ns-a"), None, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(all_a.len(), 2);
+        assert!(all_a.iter().all(|i| i.definition_ns == "ns-a"));
+        assert!(token.is_none());
+
+        // definition 过滤：ID 解析为定义名
+        let (by_id, _) = store
+            .list_instances(None, Some("def-a"), 10, None)
+            .await
+            .unwrap();
+        assert_eq!(by_id.len(), 2);
+        assert!(by_id.iter().all(|i| i.definition_name == "alpha-wf"));
+
+        // definition 过滤：直接按名
+        let (by_name, _) = store
+            .list_instances(None, Some("beta-wf"), 10, None)
+            .await
+            .unwrap();
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].id, "b-1");
+    }
+
+    #[tokio::test]
+    async fn test_list_instances_paginates_without_overlap_or_omission() {
+        let store = MemoryWorkflowStore::new();
+        for i in 0..5u32 {
+            store
+                .save_instance(&mk_instance(&format!("a-{i}"), "ns-a", "alpha-wf"))
+                .await
+                .unwrap();
+        }
+
+        let (page1, t1) = store
+            .list_instances(Some("ns-a"), Some("alpha-wf"), 2, None)
+            .await
+            .unwrap();
+        assert_eq!(page1.len(), 2);
+        let t1 = t1.expect("有剩余时必须返回续读令牌");
+
+        let (page2, t2) = store
+            .list_instances(Some("ns-a"), Some("alpha-wf"), 2, Some(&t1))
+            .await
+            .unwrap();
+        assert_eq!(page2.len(), 2);
+        let t2 = t2.expect("有剩余时必须返回续读令牌");
+
+        let (page3, t3) = store
+            .list_instances(Some("ns-a"), Some("alpha-wf"), 2, Some(&t2))
+            .await
+            .unwrap();
+        assert_eq!(page3.len(), 1);
+        assert!(t3.is_none(), "末页不得返回续读令牌");
+
+        let mut ids: Vec<String> = page1
+            .iter()
+            .chain(page2.iter())
+            .chain(page3.iter())
+            .map(|i| i.id.clone())
+            .collect();
+        assert_eq!(ids.len(), 5);
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 5, "分页不得重叠");
+    }
+
+    #[tokio::test]
+    async fn test_list_instances_page_size_zero_uses_default() {
+        let store = MemoryWorkflowStore::new();
+        for i in 0..(DEFAULT_LIST_PAGE_SIZE + 1) {
+            store
+                .save_instance(&mk_instance(&format!("i-{i:04}"), "ns", "wf"))
+                .await
+                .unwrap();
+        }
+        let (page, token) = store.list_instances(None, None, 0, None).await.unwrap();
+        assert_eq!(page.len(), DEFAULT_LIST_PAGE_SIZE);
+        assert!(token.is_some(), "超过一页时必须返回续读令牌");
     }
 }
