@@ -1,0 +1,13 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: run-workflow
+  version: "1.0.0"
+do:
+  - sub:
+      run:
+        workflow:
+          namespace: spike
+          name: child-workflow
+          version: "1.0.0"
+      then: exit

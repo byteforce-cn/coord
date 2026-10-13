@@ -1,0 +1,18 @@
+id: legacy-flow
+version: "1.0"
+specVersion: "0.8"
+name: legacy-flow
+start: Check
+states:
+  - name: Check
+    type: switch
+    dataConditions:
+      - condition: "${ .x > 0 }"
+        transition: Done
+    defaultCondition:
+      transition: Done
+  - name: Done
+    type: inject
+    data:
+      done: true
+    end: true

@@ -1,0 +1,14 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: run-await-return
+  version: "1.0.0"
+do:
+  - exec:
+      run:
+        await: false
+        return: none
+        script:
+          language: python
+          code: "print(1)"
+      then: exit

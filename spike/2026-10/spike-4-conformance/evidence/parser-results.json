@@ -1,0 +1,505 @@
+{
+  "results": [
+    {
+      "errors": [],
+      "file": "01-minimal-set.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "init",
+          "task": {
+            "kind": "set"
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "02-call-http.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "fetch",
+          "task": {
+            "call_type": "Http",
+            "kind": "call"
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "03-do-task.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "group",
+          "task": {
+            "kind": "do",
+            "sub_tasks": 2
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [
+        "switch condition missing transition target",
+        "switch condition missing transition target"
+      ],
+      "file": "04-switch.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [],
+      "parser_ok": false,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "05-fork.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "fan",
+          "task": {
+            "branches": 2,
+            "compete": null,
+            "kind": "fork"
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "06-for.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "loop",
+          "task": {
+            "kind": "do",
+            "sub_tasks": 1
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "07-wait.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "pause",
+          "task": {
+            "kind": "wait"
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "08-listen.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "await_event",
+          "task": {
+            "kind": "listen"
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "09-emit.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "notify",
+          "task": {
+            "kind": "emit"
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "10-raise.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "fail",
+          "task": {
+            "kind": "raise"
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "11-try-catch.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "guarded",
+          "task": {
+            "kind": "try_catch"
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "12-run-script.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "exec",
+          "task": {
+            "kind": "run_subflow",
+            "workflow_ref": {
+              "name": "",
+              "namespace": "",
+              "version": ""
+            }
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [
+        "script"
+      ],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "13-run-container.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "exec",
+          "task": {
+            "kind": "run_subflow",
+            "workflow_ref": {
+              "name": "",
+              "namespace": "",
+              "version": ""
+            }
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [
+        "container"
+      ],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "14-run-shell.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "exec",
+          "task": {
+            "kind": "run_subflow",
+            "workflow_ref": {
+              "name": "",
+              "namespace": "",
+              "version": ""
+            }
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [
+        "shell"
+      ],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "15-run-workflow.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "sub",
+          "task": {
+            "kind": "run_subflow",
+            "workflow_ref": {
+              "name": "",
+              "namespace": "",
+              "version": ""
+            }
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [
+        "workflow"
+      ],
+      "yaml_ok": true
+    },
+    {
+      "errors": [
+        "task 'invoke' references unknown function 'myFunction'"
+      ],
+      "file": "16-call-function.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [],
+      "parser_ok": false,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "17-use-extensions.yaml",
+      "has_extensions": true,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "main",
+          "task": {
+            "kind": "set"
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "18-run-await-return.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "exec",
+          "task": {
+            "kind": "run_subflow",
+            "workflow_ref": {
+              "name": "",
+              "namespace": "",
+              "version": ""
+            }
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [
+        "await",
+        "return",
+        "script"
+      ],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "19-legacy-states-0.8.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "Check",
+          "task": {
+            "conditions": 2,
+            "kind": "switch"
+          }
+        },
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "Done",
+          "task": {
+            "kind": "set"
+          }
+        },
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "Done__transition",
+          "task": {
+            "conditions": 1,
+            "kind": "switch"
+          }
+        },
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "__end",
+          "task": {
+            "kind": "end"
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "cncf_sw(states/start)",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [
+        "missing required 'document' block"
+      ],
+      "file": "20-invalid-no-document.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [],
+      "parser_ok": false,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "21-call-grpc.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "rpc",
+          "task": {
+            "call_type": "Grpc",
+            "kind": "call"
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "22-if-condition.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": "${ .enabled }",
+          "meta_timeout": null,
+          "name": "maybe",
+          "task": {
+            "kind": "set"
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [
+        "task 'api' references unknown function 'openapi'"
+      ],
+      "file": "23-call-openapi.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [],
+      "parser_ok": false,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    },
+    {
+      "errors": [],
+      "file": "24-use-functions.yaml",
+      "has_extensions": false,
+      "parsed_tasks": [
+        {
+          "meta_if": null,
+          "meta_timeout": null,
+          "name": "invoke",
+          "task": {
+            "call_type": "Function(\"myFunction\")",
+            "kind": "call"
+          }
+        }
+      ],
+      "parser_ok": true,
+      "route": "document/do",
+      "run_kinds": [],
+      "yaml_ok": true
+    }
+  ],
+  "route_dispatch": "coord-agent workflow.rs:2137",
+  "tool": "spike-conformance"
+}

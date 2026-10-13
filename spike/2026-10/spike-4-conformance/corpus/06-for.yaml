@@ -1,0 +1,15 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: for-loop
+  version: "1.0.0"
+do:
+  - loop:
+      for:
+        each: item
+        in: "${ .items }"
+      do:
+        - process:
+            set:
+              last: "${ $item }"
+      then: exit

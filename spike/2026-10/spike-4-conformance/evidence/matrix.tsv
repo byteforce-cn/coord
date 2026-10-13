@@ -1,0 +1,25 @@
+真实结论	文件	schema	parser	route	run_kinds	extensions	错误信息
+PASS	01-minimal-set.yaml	OK	OK	document/do	-	no	
+PASS	02-call-http.yaml	OK	OK	document/do	-	no	
+PASS	03-do-task.yaml	OK	OK	document/do	-	no	
+GAP	04-switch.yaml	OK	FAIL	document/do	-	no	switch condition missing transition target | switch condition missing transition target
+PASS	05-fork.yaml	OK	OK	document/do	-	no	
+PASS	06-for.yaml	OK	OK	document/do	-	no	
+PASS	07-wait.yaml	OK	OK	document/do	-	no	
+PASS	08-listen.yaml	OK	OK	document/do	-	no	
+PASS	09-emit.yaml	OK	OK	document/do	-	no	
+PASS	10-raise.yaml	OK	OK	document/do	-	no	
+PASS	11-try-catch.yaml	OK	OK	document/do	-	no	
+PASS	12-run-script.yaml	OK	OK	document/do	script	no	
+PASS	13-run-container.yaml	OK	OK	document/do	container	no	
+PASS	14-run-shell.yaml	OK	OK	document/do	shell	no	
+PASS	15-run-workflow.yaml	OK	OK	document/do	workflow	no	
+GAP	16-call-function.yaml	OK	FAIL	document/do	-	no	task 'invoke' references unknown function 'myFunction'
+PASS	17-use-extensions.yaml	OK	OK	document/do	-	yes	
+PASS	18-run-await-return.yaml	OK	OK	document/do	await,return,script	no	
+LAX	19-legacy-states-0.8.yaml	FAIL	OK	cncf_sw(states/start)	-	no	: 'document' is a required property | : 'do' is a required property
+REJECTED	20-invalid-no-document.yaml	FAIL	FAIL	document/do	-	no	missing required 'document' block
+PASS	21-call-grpc.yaml	OK	OK	document/do	-	no	
+PASS	22-if-condition.yaml	OK	OK	document/do	-	no	
+GAP	23-call-openapi.yaml	OK	FAIL	document/do	-	no	task 'api' references unknown function 'openapi'
+PASS	24-use-functions.yaml	OK	OK	document/do	-	no	

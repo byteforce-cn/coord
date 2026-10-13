@@ -1,0 +1,12 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: run-container
+  version: "1.0.0"
+do:
+  - exec:
+      run:
+        container:
+          image: "alpine:3.20"
+          command: "echo hi"
+      then: exit

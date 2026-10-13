@@ -1,0 +1,10 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: wait
+  version: "1.0.0"
+do:
+  - pause:
+      wait:
+        seconds: 5
+      then: exit

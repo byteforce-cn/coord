@@ -1,0 +1,12 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: run-script
+  version: "1.0.0"
+do:
+  - exec:
+      run:
+        script:
+          language: js
+          code: "return 1 + 1;"
+      then: exit

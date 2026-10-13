@@ -1,0 +1,10 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: minimal-set
+  version: "1.0.0"
+do:
+  - init:
+      set:
+        counter: 0
+      then: exit

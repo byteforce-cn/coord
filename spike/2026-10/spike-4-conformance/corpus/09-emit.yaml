@@ -1,0 +1,15 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: emit
+  version: "1.0.0"
+do:
+  - notify:
+      emit:
+        event:
+          with:
+            source: "https://example.com/coord"
+            type: com.example.notify
+            data:
+              msg: hi
+      then: exit
