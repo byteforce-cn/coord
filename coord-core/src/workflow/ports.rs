@@ -517,7 +517,7 @@ impl std::error::Error for StoreError {}
 // 「一实例一驱动」的端口抽象。coord Lease **没有 fencing token**
 // （见 `docs/production/consumer-contract.md` §3），因此正确性**不能**只靠租约互斥：
 // 失去租约的驱动者可能迟到写入。fencing 由**实现方**用「租约 key 的 mod_revision
-// 作为 epoch + 写入时双 compare（实例 mod_revision + 租约 key mod_revision）」承担
+// 作为 epoch + 写入时三重 compare（实例 mod_revision + 租约 key mod_revision + 租约 key 值==token）」承担
 // （见 [`LeaseGuard::fenced_save`]）。
 
 /// 实例驱动租约 —— 保证同一实例同一时刻只有一个驱动者。

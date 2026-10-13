@@ -42,7 +42,9 @@ fn summarize_task(t: &Task) -> Value {
         Task::Call(c) => json!({"kind": "call", "call_type": format!("{:?}", c.call)}),
         Task::Do(d) => json!({"kind": "do", "sub_tasks": d.tasks.len()}),
         Task::Switch(s) => json!({"kind": "switch", "conditions": s.conditions.len()}),
-        Task::Fork(f) => json!({"kind": "fork", "branches": f.branches.len(), "compete": f.compete}),
+        Task::Fork(f) => {
+            json!({"kind": "fork", "branches": f.branches.len(), "compete": f.compete})
+        }
         Task::ForEach(_) => json!({"kind": "for_each"}),
         Task::Wait(_) => json!({"kind": "wait"}),
         Task::Listen(_) => json!({"kind": "listen"}),
@@ -80,7 +82,9 @@ fn summarize_def(def: &WorkflowDefinition) -> Value {
 }
 
 fn main() {
-    let dir = std::env::args().nth(1).expect("usage: spike-conformance <corpus-dir>");
+    let dir = std::env::args()
+        .nth(1)
+        .expect("usage: spike-conformance <corpus-dir>");
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .expect("corpus dir")
         .filter_map(|e| {
@@ -104,10 +108,13 @@ fn main() {
         };
 
         let looks_sw = coord_core::workflow::sw::looks_like_cncf_sw(&value);
-        let route = if looks_sw { "cncf_sw(states/start)" } else { "document/do" };
+        let route = if looks_sw {
+            "cncf_sw(states/start)"
+        } else {
+            "document/do"
+        };
         let parsed: Result<WorkflowDefinition, Vec<String>> = if looks_sw {
-            coord_core::workflow::sw::parse_cncf_sw_value(value.clone())
-                .map_err(|e| vec![e])
+            coord_core::workflow::sw::parse_cncf_sw_value(value.clone()).map_err(|e| vec![e])
         } else {
             coord_core::workflow::validate::parse_and_validate_yaml(&text)
                 .map_err(|errs| errs.iter().map(|e| e.message.clone()).collect())

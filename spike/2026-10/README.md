@@ -17,7 +17,7 @@
 | `spike-2-concurrency/` | Spike 2 单写者并发演练 | ✅ 初版完成（10-13，7/7，CAS+租约+fencing，可复现） |
 | `spike-3-recovery/` | Spike 3 Outbox + 恢复 | ✅ 初版完成（10-13；kill -9 三场景 PASS，机制测试 6/6，事件 schema 校验通过） |
 | `spike-5-bench/` | Spike 5 基准测试 | ✅ 初版完成（10-13，5/5；安静机 canonical + 逐条原始数据；共享负载首跑入 aux，非目标硬件） |
-| `spike-6-adr/` | Spike 6 形态决策 | ✅ 详细 ADR 已落 `docs/adr/0013-*.md`（proposed）；本目录为证据索引 |
+| `spike-6-adr/` | Spike 6 形态决策 | ✅ ADR-0013（proposed）+ 判据对照表；Spike 1–5 证据齐备，H3（性能）待 10-18 阈值/目标硬件 |
 
 ## 事实源与边界
 

@@ -1,6 +1,6 @@
 # ADR-0013: 工作流引擎 v2 —— 中国式审批能力落地（状态模型 / 并发 / 事件 / 恢复 / 契约）
 
-- 状态：proposed（待 Spike 2/3/5 证据齐备并经 CTO/契约 owner 评审后转 accepted）
+- 状态：proposed（Spike 1–5 证据已齐备；H3 性能判据待 10-18 阈值定稿与目标硬件复测；待 CTO/契约 owner 评审后转 accepted）
 - 日期：2026-10-13
 - 决策者：Spike Lead（张三）+ 契约 owner；评审：CTO、平台架构组、EIS/ICPS 接口人
 
@@ -36,8 +36,22 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   `spike/2026-10/spike-1-state-model/`。
 - Spike 4（已完成）：官方 SW 1.0.3 语料 24 份，语义可用 13/23；`run:*` 与
   `use.extensions` 静默误读。证据 `spike/2026-10/spike-4-conformance/REPORT.md`。
-- Spike 2（CAS/租约/StepToken）、Spike 3（Outbox/恢复）、Spike 5（基准）：
-  **未完成，是本 ADR 的验收门**（见「待验证假设与触发重议」）。
+- Spike 2（已完成）：CAS + 租约 + fencing 在真实单节点 Raft 上验证（7/7）：
+  `save_instance_atomic`（`Compare(ModRev)`）并发恰一胜；`LeaseGrant` + Txn
+  create-if-absent 得互斥租约；Lease 无 fencing token 的处置为「租约 key 的
+  `mod_revision` 作 epoch + 写回多重 compare」——旧驱动迟到写被拒。缺口：fencing
+  只覆盖状态写回，外部副作用与部分保存点（resume/timeout/fail 等）未接线；
+  StepToken 必须用 CAS key（`request_id` 不可用）。证据
+  `spike/2026-10/spike-2-concurrency/`。
+- Spike 3（已完成）：状态 + outbox 同 Txn、relay at-least-once + `event_id` 去重、
+  持久化定时器 + 重启扫描；进程级 kill -9 的 wait/listen/retry 三场景均恢复，
+  事件不丢不重；`MqEventProvider` 两处缺陷已修。缺口：`drive` 的状态保存点与 outbox
+  提交仍是两次写（外部可先见终态后见伴生事件）、listen 游标与实例状态不同事务、
+  outbox 无 TTL/清理。证据 `spike/2026-10/spike-3-recovery/`。
+- Spike 5（已完成，阈值未定稿）：安静机原始基准 —— KV 写 636–724 ops/s、
+  P50 134–1331 ms；Watch 1000 路 0 丢失、P99 16.6 ms；Txn ≤128 操作；单值 ≤4 MiB
+  （gRPC）；存储 2819.5 B/写。阈值（§3.3）与目标硬件缺失 ⇒ 不做达标判定。
+  证据 `spike/2026-10/spike-5-bench/REPORT.md`。
 
 ### 约束
 
@@ -82,8 +96,13 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 
 - **KV Txn `mod_revision` CAS 是唯一权威写路径**：引擎驱动的每次实例写回改用
   `save_instance_atomic`；`save_instance` 在 v2 路径删除（不留后门）。
+  **落地要求（Spike 2 证据）**：v2 的全部实例写路径（含 resume/timeout/fail 等
+  非 drive 保存点）必须纳入同一 CAS/fenced 提交；只改 `drive` 会留下迟到写窗口。
 - 实例租约（`coord.lease`）只作驱动权优化（减少无效竞争），**不作为正确性基础**；
-  fencing token 缺失是已知边界（`consumer-contract.md` §3），先记录、后按需扩展。
+  fencing token 缺失的处置（已验证方案）：实例状态写用 Txn 同时比较实例
+  `mod_revision`、租约 key `mod_revision`（epoch）与租约 key 值（holder token），
+  旧驱动迟到写被拒。**残余风险**：fencing 只拒绝状态写回，**无法撤回已发出的
+  外部副作用**——必须由 StepToken 兜底（外部调用幂等键）。
 - **StepToken = (instance_id, step_seq)** 持久化在实例实体上，与状态同 Txn 写入；
   外部副作用幂等键 = StepToken，经 `TaskDispatcher` 扩展签名透传（HTTP header）。
   KV `request_id`（单节点/进程内/60s）**不得**作为幂等或 StepToken 基础。
@@ -99,7 +118,12 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   固定到实例。
 - outbox 保留 24h（TTL 由 Relay 清理）；历史归档是外部消费者职责，coord 不承诺。
 - 生产装配必须走 MQ/Event；`MemoryEventProvider` 仅 dev。接线前先修
-  `MqEventProvider` 的两处缺陷（offset 重启归零、共享单游标）。
+  `MqEventProvider` 的两处缺陷（offset 重启归零、共享单游标）——**Spike 3 已修并
+  带回归测试**。
+- **落地要求（Spike 3 集成发现）**：outbox 记录必须搭上状态写同一次 Txn
+  （v2 写路径为 `persist_instance`/`fenced_save` 的 CAS Txn），不得在状态写之后
+  另行 append；否则外部观测者可先见终态、后见伴生事件（证据与缺口见
+  `spike-3-recovery/OUTBOX.md` §2.1 / G1）。
 
 ### D5 崩溃恢复
 
@@ -168,6 +192,17 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   7. Spike 4 语料回归 + Spike 2/3 注入用例纳入 CI；
   8. SDK/UI 影响评估（coord-client / coord-java-sdk / coord-ui）。
 
+### D10.1 形态判据对照（手册 §4 Spike 6，证据截至 2026-10-13）
+
+| 手册判据 | 证据 | 结论 |
+|:--|:--|:--|
+| 现有状态模型可通过扩展满足五层状态要求，且改动不影响现有契约 | Spike 1（P0 语义 16/16，`spike-1-state-model/`）；Spike 2/3 均未新增/修改对外 RPC 或 proto 字段 | ✅ 满足（扩展路径） |
+| 现有状态模型无法扩展 / 扩展破坏契约兼容 | 无证据（Spike 1/2/3 均为增量） | ✅ 不触发 |
+| 现有引擎性能不达标（按 §3.3 阈值） | Spike 5 安静机 dev profile：KV 636–724 ops/s、P50 134–1331 ms；**阈值与目标硬件未定稿** | ⏸ 无法判定（待 10-18 阈值 + 目标硬件/release 复测） |
+| 性能不达标但新建可达标 / 性能达标但状态模型不达标 | 同上前提未定 | ⏸ 不适用 |
+| 两者均不达标 ⇒ No-Go | 无证据 | ✅ 不触发 |
+| **当前形态选择（可随时按上表重议）** | — | **扩展现有 `coord-core/workflow`（D1）维持；H3 判定前不新建独立 crate，触发条件与退出条件见 D1 / 「待验证假设」** |
+
 ## 后果
 
 - 收益：审批语义原生、单一口径；复用 KV/Txn/Watch/Lease/Event/MQ，不重造持久层；
@@ -180,18 +215,20 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 
 ## 待验证假设与触发重议
 
-| # | 假设 | 验证（Spike） | 不成立的后果 |
+| # | 假设 | 验证（Spike） | 结论（2026-10-13） |
 |:--|:--|:--|:--|
-| H1 | KV Txn CAS + Lease 可实现「一实例一驱动」且无重复副作用 | Spike 2 | 重议 D1/D3（形态或新协调原语，新 ADR） |
-| H2 | 状态+Outbox 同 Txn + 持久定时器可实现崩溃恢复且事件不丢不重 | Spike 3 | D4/D5 降级或重议；No-Go 判据 |
-| H3 | 扩展路径的写延迟/吞吐/Txn 上限满足 10-18 定稿阈值 | Spike 5 | 按手册判据表选择新 crate 或 No-Go |
-| H4 | 审批规模下 v2 作用域缓存不触发内存/扫描问题 | Spike 5 | D8 引入外部读模型（新 ADR） |
-| H5 | EIS/ICPS 对 run:script 等执行语义非 P0 | 10-18 需求清单 | D6 范围上调，排期顺延需走契约流程 |
+| H1 | KV Txn CAS + Lease 可实现「一实例一驱动」且无重复副作用 | Spike 2 | **成立**（真实 Raft 7/7；带内对照：无租约时副作用重复 2 次）。附带缺口：fencing 仅覆盖状态写回；StepToken 执行路径未实现，落地面 D3 |
+| H2 | 状态+Outbox 同 Txn + 持久定时器可实现崩溃恢复且事件不丢不重 | Spike 3 | **成立**（kill -9 三场景 PASS，`missing/duplicate = 0`）。附带缺口：drive 保存点与 outbox 提交仍两次写、listen 游标窗口；落地面 D4/D5 |
+| H3 | 扩展路径的写延迟/吞吐/Txn 上限满足 10-18 定稿阈值 | Spike 5 | **未判定**（阈值/目标硬件缺失；安静机 dev profile 原始数据已备，重议触发：阈值定稿 + 目标硬件/release 复测） |
+| H4 | 审批规模下 v2 作用域缓存不触发内存/扫描问题 | Spike 5 | **部分**：1000 路 watch 0 丢失、RSS +60.6 MB；v2 作用域缓存未单独验证（Spike 1 为纯内存原型）→ 作为阶段二验收项 |
+| H5 | EIS/ICPS 对 run:script 等执行语义非 P0 | 10-18 需求清单 | 未变（清单未到位，临时口径见 `CHARTER-INPUTS.md`） |
 
 ## 参考
 
-- 验证产出：`spike/2026-10/spike-1-state-model/`、`spike/2026-10/spike-4-conformance/`、
-  `spike/2026-10/NEXT-SPIKES-NOTES.md`、`spike/2026-10/spike-6-adr/`。
+- 验证产出：`spike/2026-10/spike-1-state-model/`、`spike/2026-10/spike-2-concurrency/`、
+  `spike/2026-10/spike-3-recovery/`、`spike/2026-10/spike-4-conformance/`、
+  `spike/2026-10/spike-5-bench/REPORT.md`、`spike/2026-10/NEXT-SPIKES-NOTES.md`、
+  `spike/2026-10/spike-6-adr/`。
 - 契约与治理：`apis/contracts/WHITEPAPER.md`、`apis/contracts/STATUS.md`、
   `apis/contracts/proto/coord/workflow/v1/workflow.proto`、
   `docs/production/ops/boundaries.md`、`docs/production/workflow-semantics.md`、

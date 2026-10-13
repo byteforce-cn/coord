@@ -12,10 +12,10 @@
 | 问题 | 结论 | 证据 |
 |:--|:--|:--|
 | 1. KV Txn CAS 能否实现实例状态写入（替换普通 Put）？ | **可行**。`Compare(Target::ModRev)` + `Put` 的 Txn 语义成立；引擎 drive 的关键写回已走 CAS/fencing。 | `cas_two_writers_same_rev_one_wins`、`cas_stale_revision_rejected`、`engine_concurrent_drivers_*` |
-| 2. coord Lease 能否实现实例租约（一实例一驱动）？无 fencing token 的缺口？ | **可行**。`LeaseGrant` + `Txn create-if-absent` 得到互斥租约，撤销/过期后可重新竞争。**Lease 无 fencing token** 的处置：用「**租约 key 的 mod_revision 作为 epoch** + 写回时**双 compare**」实现 fencing（见 `DESIGN.md`）。残余风险：fencing 只能拒绝**状态写回**，无法撤回**已产生的外部副作用** → 需 StepToken 兜底。 | `lease_mutex_exclusive`、`lease_expiry_reacquire`、`fenced_write_rejects_stale_driver` |
+| 2. coord Lease 能否实现实例租约（一实例一驱动）？无 fencing token 的缺口？ | **可行**。`LeaseGrant` + `Txn create-if-absent` 得到互斥租约，撤销/过期后可重新竞争。**Lease 无 fencing token** 的处置：用「**租约 key 的 mod_revision 作为 epoch** + 写回时**三重 compare**」实现 fencing（见 `DESIGN.md`）。残余风险：fencing 只能拒绝**状态写回**，无法撤回**已产生的外部副作用** → 需 StepToken 兜底。 | `lease_mutex_exclusive`、`lease_expiry_reacquire`、`fenced_write_rejects_stale_driver` |
 | 3. 并发场景下能否做到无重复副作用？StepToken 用 CAS key 还是 `request_id`？ | **在单写者租约覆盖的写路径下成立**（单效果恰好一次；去掉租约即重复）。StepToken 必须用 **CAS key**：`request_id` 是**单节点 / 进程内 / 60s / 不复制不持久**（`apis/contracts/proto/coord/kv/kv.proto`），不可作为幂等基础。 | `engine_concurrent_drivers_single_effect`（count=1）对照 `engine_concurrent_drivers_duplicate_without_lease`（count=2）；方案见 `STEPTOKEN.md` |
 
-**红线遵守**：本 spike **不**宣称「Lease 无 fencing 时安全」。fencing 方案（双 compare）
+**红线遵守**：本 spike **不**宣称「Lease 无 fencing 时安全」。fencing 方案（三重 compare）
 已单独验证，但引擎写路径只覆盖 drive 循环；`resume`/`auto_resume`/`apply_timeout`/`fail_instance`
 的写回仍是普通 Put —— 见 `DESIGN.md`「未接线项与残余风险」。
 
@@ -55,7 +55,7 @@ CARGO_BUILD_JOBS=3 cargo test -p coord --test spike2_concurrency -- --nocapture 
   + `lease_skipped_total`/`cas_conflict_total` 可观测信号；`drive` 关键写回走 CAS/fencing；
   新增公开入口 `WorkflowRuntime::drive_instance`（supervisor 重驱动）。
 - `coord-agent`：`KvWorkflowStore::load_instance_with_rev`（线性一致读 mod_revision）；
-  新增 `services/workflow_lease.rs`（`KvInstanceLease` + `KvLeaseGuard`，fencing 双 compare）。
+  新增 `services/workflow_lease.rs`（`KvInstanceLease` + `KvLeaseGuard`，fencing 三重 compare）。
 - `coord-client`：`KvClient::range_with_rev`（读取 `mod_revision`）。
 
 不新增/修改任何对外 RPC 或 proto 字段。

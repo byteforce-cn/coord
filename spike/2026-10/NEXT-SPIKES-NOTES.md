@@ -7,7 +7,7 @@
 ## Spike 2 · 单写者并发演练（截止 10-31）
 
 > **已执行（10-13）：见 `spike-2-concurrency/`。** 真实单节点 Raft 上 7/7 全绿
-> （CAS 写路径、实例租约、fencing 双 compare、引擎级单效果 vs 无租约重复）；
+> （CAS 写路径、实例租约、fencing 三重 compare、引擎级单效果 vs 无租约重复）；
 > 结论、残余风险（fencing 不保护外部副作用、未接线的写回点）与复现命令见该目录
 > `README.md` / `DESIGN.md` / `STEPTOKEN.md`。本小节以下的“第一步”保留为历史接续记录。
 

@@ -1547,7 +1547,7 @@ where
     /// 以 BoxFuture 返回（而非 async fn），避免递归异步造成的 opaque 类型循环。
     ///
     /// `guard` 为调用方持有的实例驱动租约（未注入租约时为 `None`）；非空时关键
-    /// 写回走 [`LeaseGuard::fenced_save`]（双 compare），并拒绝失去租约的迟到写。
+    /// 写回走 [`LeaseGuard::fenced_save`]（三重 compare），并拒绝失去租约的迟到写。
     pub(crate) fn drive<'a>(
         &'a self,
         instance_id: String,

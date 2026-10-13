@@ -4,7 +4,7 @@
 //
 // coord Lease **没有 fencing token**（见 `docs/production/consumer-contract.md` §3），
 // 因此不能只靠租约互斥。本实现用「**租约 key 的 mod_revision 作为 epoch**」+
-// 写回时的**双 compare**（实例 mod_revision + 租约 key mod_revision）承担 fencing：
+// 写回时的**三重 compare**（实例 mod_revision + 租约 key mod_revision + 租约 key 值==token）承担 fencing：
 // 失去租约的驱动者在租约被撤销/重授后，epoch 不再匹配，其迟到写被 Txn 拒绝。
 //
 // 残余风险：若引擎在两次写之间已经产生了**外部副作用**（call 节点已发出请求），
