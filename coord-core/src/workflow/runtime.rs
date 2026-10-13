@@ -1642,15 +1642,18 @@ where
     /// 控制面入口的定义钉死校验：读回实例 → [`assert_definition_pin`] → 漂移时置 Failed
     /// 并返回 [`RuntimeError::DefinitionDrift`]。
     ///
-    /// 读不到实例时放行：后续路径会按 NotFound / 状态守卫处理，守卫不在此造状态。
+    /// 实例不存在时放行：后续路径会按 NotFound / 状态守卫处理，守卫不在此造状态。
+    /// 读失败是存储错误，不得回退成「实例不存在」——那会让守卫静默失效。
     async fn fail_closed_on_definition_drift(
         &self,
         store: &Arc<S>,
         instance_id: &str,
         definition: &WorkflowDefinition,
     ) -> Result<(), RuntimeError> {
-        let Ok(Some(inst)) = store.load_instance(instance_id).await else {
-            return Ok(());
+        let inst = match store.load_instance(instance_id).await {
+            Ok(Some(inst)) => inst,
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(RuntimeError::StoreError(e.to_string())),
         };
         match assert_definition_pin(&inst, definition) {
             Ok(()) => Ok(()),
@@ -1696,6 +1699,41 @@ where
                     .ok_or_else(|| RuntimeError::NotFound(instance_id.to_string()));
             }
         }
+        // 定义漂移守卫必须在**任何状态写之前**：先读实例 + 加载定义 + 校验钉死哈希。
+        // 先提交 Waiting→Running 再发现漂移会留下一次无效果的状态转换与 `workflow.resumed`。
+        let pre = self
+            .store
+            .load_instance(instance_id)
+            .await
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| RuntimeError::NotFound(instance_id.to_string()))?;
+        let def = self
+            .store
+            .load_definition(
+                &pre.definition_ns,
+                &pre.definition_name,
+                &pre.definition_version,
+            )
+            .await
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| {
+                RuntimeError::DefinitionNotFound(format!(
+                    "{}/{}@{}",
+                    pre.definition_ns, pre.definition_name, pre.definition_version
+                ))
+            })?;
+        if let Err(drift) = assert_definition_pin(&pre, &def) {
+            let (expected, actual) = match drift {
+                RuntimeError::DefinitionDrift {
+                    expected, actual, ..
+                } => (expected, actual),
+                other => return Err(other),
+            };
+            return Err(self
+                .definition_drift_error(&self.store, instance_id, expected, actual)
+                .await);
+        }
+
         let outcome = self
             .commit_control_plane(
                 &self.store,
@@ -1782,28 +1820,6 @@ where
                 return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()))
             }
         };
-
-        // 需要加载 definition
-        let def = self
-            .store
-            .load_definition(
-                &inst.definition_ns,
-                &inst.definition_name,
-                &inst.definition_version,
-            )
-            .await
-            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
-            .ok_or_else(|| {
-                RuntimeError::DefinitionNotFound(format!(
-                    "{}/{}@{}",
-                    inst.definition_ns, inst.definition_name, inst.definition_version
-                ))
-            })?;
-
-        // 定义漂移守卫：resume 已把实例推进到 Running，加载到的定义必须仍是启动时
-        // 钉死的那一份；否则 fail-closed（置 Failed + DefinitionDrift），不得在新语义下驱动。
-        self.fail_closed_on_definition_drift(&self.store, &inst.id, &def)
-            .await?;
 
         // 后台 drive（受监督：见 [`Self::spawn_drive`]）
         self.spawn_drive(inst.id.clone(), def, Arc::clone(&self.store));

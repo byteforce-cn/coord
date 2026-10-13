@@ -476,7 +476,7 @@ async fn resume_after_redeploy_same_version_fails_closed() {
         "fault 文本必须含稳定诊断锚点: {fault:?}"
     );
 
-    // 终态事件落 outbox。
+    // outbox：只允许漂移 fault —— 钉死校验在状态写之前，不得落 `workflow.resumed`。
     let outbox = Arc::new(KvOutboxStore::new(inner.clone()));
     let all = OutboxStore::list_all(&*outbox).await.expect("list outbox");
     assert!(
@@ -484,6 +484,12 @@ async fn resume_after_redeploy_same_version_fails_closed() {
             r.aggregate_id == inst.id && r.event_type.ends_with("workflow.faulted.v1")
         }),
         "漂移 fault 必须落 workflow.faulted: {all:?}"
+    );
+    assert!(
+        !all.iter().any(|r| {
+            r.aggregate_id == inst.id && r.event_type.ends_with("workflow.resumed.v1")
+        }),
+        "钉死漂移不得提交 resume 转换（workflow.resumed）: {all:?}"
     );
 }
 

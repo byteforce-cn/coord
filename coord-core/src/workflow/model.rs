@@ -308,13 +308,24 @@ pub const ENGINE_VERSION: &str = "v1";
 /// 用于钉死实例启动时的定义内容：同 `(namespace, name, version)` 被重部署成不同内容时，
 /// 实例必须按哈希识别出漂移，而不是在另一份语义上继续推进。
 ///
+/// 只哈希**执行语义**，排除两个部署期字段：`id`（部署时按时间戳赋值，同内容重部署会变）
+/// 与 `raw_yaml`（源文本，不参与执行，格式化差异不应触发漂移）。包含它们会让
+/// 「字节相同的 DSL 在不同秒重部署」把该版本上所有健康实例误判成漂移。
+/// `document`（含 namespace/name/version/dsl）与其余执行字段全部保留。
+///
 /// 序列化前先转 `serde_json::Value` 并**递归按键排序**：`use` / `task_meta` / `auth` / `tags`
 /// 等字段是无序 map，直接序列化 struct 会受插入顺序影响（同一文档算出不同哈希，
 /// 把正常重部署误判成漂移）。数组顺序保留（任务顺序是语义的一部分）。
 pub fn definition_hash(def: &WorkflowDefinition) -> String {
     use sha2::{Digest, Sha256};
 
-    let canonical = canonical_json(serde_json::to_value(def).unwrap_or(Value::Null));
+    let mut value = serde_json::to_value(def).unwrap_or(Value::Null);
+    // 仅剔顶层部署元信息（按 key 名）；不从嵌套结构中名称相同的字段上剔。
+    if let Value::Object(map) = &mut value {
+        map.remove("id");
+        map.remove("raw_yaml");
+    }
+    let canonical = canonical_json(value);
     let mut hasher = Sha256::new();
     hasher.update(serde_json::to_vec(&canonical).unwrap_or_default());
     hasher
@@ -1084,6 +1095,69 @@ mod tests {
         let mut changed = forward.clone();
         changed.document.version = "2.0".to_string();
         assert_ne!(definition_hash(&forward), definition_hash(&changed));
+    }
+
+    #[test]
+    fn definition_hash_ignores_deploy_metadata() {
+        fn sample() -> WorkflowDefinition {
+            WorkflowDefinition {
+                id: None,
+                document: Document {
+                    dsl: "1.0.0".to_string(),
+                    namespace: "test".to_string(),
+                    name: "deploy-metadata".to_string(),
+                    version: "1.0".to_string(),
+                    title: None,
+                    summary: None,
+                    tags: None,
+                },
+                do_tasks: vec![NamedTask {
+                    name: "wait".to_string(),
+                    task: Task::Wait(WaitTask {
+                        wait: "PT1S".to_string(),
+                    }),
+                }],
+                input: None,
+                output: None,
+                timeout: None,
+                use_components: None,
+                schedule: Default::default(),
+                auth: Default::default(),
+                secrets: Default::default(),
+                constants: Default::default(),
+                task_meta: Default::default(),
+                raw_yaml: None,
+            }
+        }
+
+        // 同内容、不同秒重部署：id（时间戳）与 raw_yaml（源文本）变化不得改变哈希。
+        let mut original = sample();
+        original.id = Some("test-1a2b3c".to_string());
+        original.raw_yaml = Some("document:\n  name: deploy-metadata\n".to_string());
+        let mut redeployed = sample();
+        redeployed.id = Some("test-9f8e7d".to_string());
+        redeployed.raw_yaml = Some("document:   \n  name: deploy-metadata\n".to_string());
+        assert_eq!(
+            definition_hash(&original),
+            definition_hash(&redeployed),
+            "部署元信息（id / raw_yaml）不得影响定义哈希"
+        );
+
+        // 执行语义变化必须改变哈希。
+        let mut retitled = original.clone();
+        retitled.document.title = Some("changed".to_string());
+        assert_ne!(definition_hash(&original), definition_hash(&retitled));
+
+        let mut retasked = original.clone();
+        retasked.do_tasks[0].task = Task::Wait(WaitTask {
+            wait: "PT2S".to_string(),
+        });
+        assert_ne!(definition_hash(&original), definition_hash(&retasked));
+
+        // namespace 是定义键 / 执行语义的一部分，不得被排除。
+        let mut renamespaced = original.clone();
+        renamespaced.document.namespace = "other".to_string();
+        assert_ne!(definition_hash(&original), definition_hash(&renamespaced));
     }
 
     #[test]
