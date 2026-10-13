@@ -482,14 +482,72 @@ impl Validator {
 
     fn parse_wait(
         &mut self,
-        _raw: &RawNamedTask,
+        raw: &RawNamedTask,
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let wait_val = &map["wait"];
         let wait_str = match wait_val {
             Value::String(s) => s.clone(),
             Value::Number(_) => wait_val.to_string(),
-            _ => String::new(),
+            Value::Object(obj) => {
+                // 官方 1.0.3 把相对时长写成 `{seconds: N}` / `{milliseconds: N}`；
+                // WaitTask.wait 只消费 ISO8601 时长字符串，故在此归一化。`until` 是
+                // 绝对时刻，解析期无时钟；未知键无语义——两者都点名构造 fail-closed，
+                // 不得静默落成空任务（Spike 4 corpus 07 误读）。
+                let recognized = ["seconds", "milliseconds"];
+                let unknown: Vec<String> = obj
+                    .keys()
+                    .filter(|k| k.as_str() != "until" && !recognized.contains(&k.as_str()))
+                    .map(|k| format!("wait.{k}"))
+                    .collect();
+                if !unknown.is_empty() {
+                    let construct = unknown.join(", ");
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                        message: format!(
+                            "unimplemented construct '{construct}': coord wait supports only 
+                             'seconds'/'milliseconds'"
+                        ),
+                    });
+                    return None;
+                }
+                if obj.contains_key("until") {
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct("wait.until".to_string()),
+                        message: "unimplemented construct 'wait.until': coord has no wall-clock at 
+                                  parse time; use a relative duration"
+                            .to_string(),
+                    });
+                    return None;
+                }
+                if let Some(secs) = obj.get("seconds").and_then(|x| x.as_u64()) {
+                    format!("PT{secs}S")
+                } else if let Some(ms) = obj.get("milliseconds").and_then(|x| x.as_u64()) {
+                    format!("PT{}S", ms as f64 / 1000.0)
+                } else {
+                    // 形状合法但无可映射时长（空对象 / 非整数 seconds）：拒绝，不静默
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct("wait".to_string()),
+                        message: "wait duration requires an integer 'seconds' or 'milliseconds'"
+                            .to_string(),
+                    });
+                    return None;
+                }
+            }
+            _ => {
+                // 非法 wait 形状（bool/array/null）不得静默落成空任务
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::UnsupportedConstruct("wait".to_string()),
+                    message: "wait must be an ISO8601 duration string, a number, or a duration 
+                              object"
+                        .to_string(),
+                });
+                return None;
+            }
         };
         Some(Task::Wait(WaitTask { wait: wait_str }))
     }
@@ -2053,6 +2111,60 @@ do:
             matches!(&e.kind, ValidationErrorKind::UnsupportedConstruct(_))
                 && e.message.contains(construct)
         })
+    }
+
+    #[test]
+    fn test_wait_official_seconds_maps_to_duration() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-seconds
+  version: "1.0"
+do:
+  - pause:
+      wait:
+        seconds: 5
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official wait seconds must parse");
+        match &def.do_tasks[0].task {
+            Task::Wait(w) => assert_eq!(w.wait, "PT5S"),
+            other => panic!("expected Wait task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wait_until_is_rejected_with_construct_name() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-until
+  version: "1.0"
+do:
+  - pause:
+      wait:
+        until: "2026-01-01T00:00:00Z"
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("wait.until must be rejected");
+        assert!(errors_naming(&errs, "wait.until"), "got {errs:?}");
+    }
+
+    #[test]
+    fn test_wait_unknown_key_is_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-minutes
+  version: "1.0"
+do:
+  - pause:
+      wait:
+        minutes: 5
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("unknown wait key must be rejected");
+        assert!(errors_naming(&errs, "wait.minutes"), "got {errs:?}");
     }
 
     #[test]
