@@ -818,6 +818,40 @@ impl WorkflowStore for MemoryWorkflowStore {
 
 #[async_trait]
 impl WorkflowStore for Arc<MemoryWorkflowStore> {
+    // 有非平凡默认实现的方法必须显式转发，否则委托层会用 trait 默认值悄悄换掉
+    // 内层的 CAS / 修订号语义（`save_instance_atomic` 退化为普通写并恒真、
+    // `load_instance_with_rev` 恒返回 `None`）。
+    async fn save_definition_atomic(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
+        self.as_ref().save_definition_atomic(def).await
+    }
+
+    async fn list_definition_versions(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Vec<WorkflowDefinition>, StoreError> {
+        self.as_ref()
+            .list_definition_versions(namespace, name)
+            .await
+    }
+
+    async fn save_instance_atomic(
+        &self,
+        inst: &WorkflowInstance,
+        expected_mod_rev: i64,
+    ) -> Result<bool, StoreError> {
+        self.as_ref()
+            .save_instance_atomic(inst, expected_mod_rev)
+            .await
+    }
+
+    async fn load_instance_with_rev(
+        &self,
+        id: &str,
+    ) -> Result<Option<(WorkflowInstance, i64)>, StoreError> {
+        self.as_ref().load_instance_with_rev(id).await
+    }
+
     async fn save_definition(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
         self.as_ref().save_definition(def).await
     }
@@ -895,6 +929,41 @@ impl WorkflowStore for Arc<MemoryWorkflowStore> {
 
 #[async_trait]
 impl WorkflowStore for Arc<dyn WorkflowStore + Send + Sync> {
+    // 有非平凡默认实现的方法必须显式转发。默认 `load_instance_with_rev` 恒返回
+    // `Ok(None)`、`save_instance_atomic` 退化为普通写并恒返回 `Ok(true)`：若不在
+    // 此处转发，经 `Arc<dyn WorkflowStore>` 装配的运行时永远拿不到修订号 ⇒ 写入
+    // 不带 `MOD_REV` 比较 ⇒ 并发驱动者互相覆盖（丢更新）。
+    async fn save_definition_atomic(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
+        self.as_ref().save_definition_atomic(def).await
+    }
+
+    async fn list_definition_versions(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Vec<WorkflowDefinition>, StoreError> {
+        self.as_ref()
+            .list_definition_versions(namespace, name)
+            .await
+    }
+
+    async fn save_instance_atomic(
+        &self,
+        inst: &WorkflowInstance,
+        expected_mod_rev: i64,
+    ) -> Result<bool, StoreError> {
+        self.as_ref()
+            .save_instance_atomic(inst, expected_mod_rev)
+            .await
+    }
+
+    async fn load_instance_with_rev(
+        &self,
+        id: &str,
+    ) -> Result<Option<(WorkflowInstance, i64)>, StoreError> {
+        self.as_ref().load_instance_with_rev(id).await
+    }
+
     async fn save_definition(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
         self.as_ref().save_definition(def).await
     }

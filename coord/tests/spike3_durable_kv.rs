@@ -18,6 +18,7 @@ use coord_agent::services::mq_event_provider::{CursorStore, MqEventProvider};
 use coord_agent::services::outbox_kv::{KvCursorStore, KvOutboxStore};
 use coord_agent::services::outbox_relay::{drain_topic, MqOutboxSink};
 use coord_agent::services::workflow::phase4::{DurableEngineOptions, WorkflowEngineService};
+use coord_agent::services::workflow_store::KvWorkflowStore;
 use coord_agent::{AgentInner, WorkflowDispatchConfig};
 use coord_client::config::Config;
 use coord_client::Client;
@@ -28,7 +29,7 @@ use coord_core::workflow::durable::{
 use coord_core::workflow::model::{
     InstanceStatus, SuspensionMeta, TaskFrame, TaskStatus, WorkflowInstance,
 };
-use coord_core::workflow::ports::EventProvider;
+use coord_core::workflow::ports::{EventProvider, WorkflowStore};
 
 const TOPIC: &str = "com.china-workflow.spike3.events";
 
@@ -338,6 +339,55 @@ async fn empty_batch_commits_state_without_touching_outbox() {
     assert_eq!(mine.len(), 1, "空批次不新增 outbox 记录");
     assert_eq!(mine[0].id, "evt-seed");
     assert_eq!(mine[0].sequence, 1, "空批次不重写 seq 计数器");
+}
+
+/// `Arc<dyn WorkflowStore>` 委托必须转发 CAS 原语。
+///
+/// 默认 `load_instance_with_rev` 恒返回 `Ok(None)`、`save_instance_atomic` 退化为
+/// 普通写并恒返回 `Ok(true)`。若委托不覆盖它们，经 trait object 装配的运行时永远
+/// 拿不到修订号，写入不带 `MOD_REV` 比较，并发驱动者互相覆盖（丢更新）。
+#[tokio::test]
+async fn dyn_workflow_store_forwards_revision_and_cas_primitives() {
+    let env = setup().await;
+    let store: Arc<dyn WorkflowStore + Send + Sync> = Arc::new(KvWorkflowStore::new(env.inner()));
+
+    let mut inst = inst("dyn-cas");
+    store.save_instance(&inst).await.expect("save instance");
+
+    // (a) 经 dyn 路径读回修订号（默认实现会返回 None）。
+    let (loaded, rev) = store
+        .load_instance_with_rev("dyn-cas")
+        .await
+        .expect("load_instance_with_rev")
+        .expect("dyn path must return a revision, not None");
+    assert_eq!(loaded.id, "dyn-cas");
+
+    // (b) 陈旧修订号 CAS 被拒绝，当前修订号 CAS 成功。
+    inst.context = serde_json::json!({"v": 1});
+    let stale = store
+        .save_instance_atomic(&inst, rev + 1)
+        .await
+        .expect("stale save_instance_atomic");
+    assert!(!stale, "dyn path must reject a stale revision CAS");
+
+    inst.context = serde_json::json!({"v": 2});
+    let ok = store
+        .save_instance_atomic(&inst, rev)
+        .await
+        .expect("current save_instance_atomic");
+    assert!(ok, "dyn path must accept the current revision CAS");
+
+    let (after, new_rev) = store
+        .load_instance_with_rev("dyn-cas")
+        .await
+        .expect("reload")
+        .expect("revision after CAS");
+    assert!(new_rev > rev, "CAS must advance the revision");
+    assert_eq!(
+        after.context,
+        serde_json::json!({"v": 2}),
+        "CAS write visible"
+    );
 }
 
 /// 判据 2（问题 2）：Relay 投递 + 标位 + 失败退避，事件不丢、重复靠 event_id 去重。
