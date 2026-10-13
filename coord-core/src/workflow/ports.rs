@@ -1233,6 +1233,8 @@ mod tests {
             output: None,
             fault: None,
             suspension_meta: None,
+            definition_hash: None,
+            engine_version: None,
         };
 
         store.save_instance(&inst).await.unwrap();
@@ -1303,6 +1305,8 @@ mod tests {
             output: None,
             fault: None,
             suspension_meta: None,
+            definition_hash: None,
+            engine_version: None,
         };
         store.save_instance(&inst).await.unwrap();
         assert!(store.delete_instance("inst-del-1").await.unwrap());
@@ -1487,6 +1491,8 @@ mod tests {
             output: None,
             fault: None,
             suspension_meta: None,
+            definition_hash: None,
+            engine_version: None,
         }
     }
 

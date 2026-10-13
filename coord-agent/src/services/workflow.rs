@@ -1960,6 +1960,13 @@ pub mod phase4 {
                 RuntimeError::StaleRevision(id) => WorkflowEngineError::FailedPrecondition(
                     format!("stale revision for instance: {id}"),
                 ),
+                RuntimeError::DefinitionDrift {
+                    instance_id,
+                    expected,
+                    actual,
+                } => WorkflowEngineError::FailedPrecondition(format!(
+                    "definition drift: instance {instance_id} pinned {expected}, loaded {actual}"
+                )),
                 RuntimeError::InvalidSignal(msg) => WorkflowEngineError::InvalidArgument(msg),
                 RuntimeError::DefinitionNotFound(id) => {
                     WorkflowEngineError::NotFound(format!("workflow definition not found: {id}"))
@@ -2919,6 +2926,8 @@ do:
             output: None,
             fault: None,
             suspension_meta: None,
+            definition_hash: None,
+            engine_version: None,
         };
         store.save_instance(&inst).await.unwrap();
 

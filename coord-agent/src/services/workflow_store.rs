@@ -998,6 +998,8 @@ mod tests {
             output: Some(serde_json::json!({"result": "ok"})),
             fault: None,
             suspension_meta: None,
+            definition_hash: None,
+            engine_version: None,
         };
 
         let json = serde_json::to_vec(&inst).unwrap();

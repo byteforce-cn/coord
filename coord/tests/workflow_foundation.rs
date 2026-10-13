@@ -24,8 +24,8 @@ use coord_core::workflow::durable::{
 use coord_core::workflow::engine::WorkflowExecutor;
 use coord_core::workflow::expression::ExpressionEvaluator;
 use coord_core::workflow::model::{
-    Document, EventFilter, InstanceStatus, ListenTask, NamedTask, Task, WorkflowDefinition,
-    WorkflowInstance,
+    definition_hash, Document, EventFilter, InstanceStatus, ListenTask, NamedTask, Task,
+    WorkflowDefinition, WorkflowInstance,
 };
 use coord_core::workflow::ports::{
     DispatchResult, EventDelivery, EventProvider, NoopEventProvider, SystemClock, TaskDispatcher,
@@ -406,4 +406,166 @@ async fn listen_event_is_acked_after_state_commit() {
         Some(InstanceStatus::Running) | Some(InstanceStatus::Completed) => {}
         other => panic!("ack 必须晚于实例状态写（ack 时状态 = {other:?}）"),
     }
+}
+
+/// 同 `(namespace, name, version)` 重部署成不同内容后 `resume`：
+/// 实例钉死的定义哈希与当前加载的定义不匹配 ⇒ fail-closed。
+///
+/// 语义：定义内容覆盖（重部署）不改变实例的钉死哈希，实例会看出「加载到的不是启动时那一份」，
+/// 因此不得在新语义上继续推进 —— 控制面返回 `DefinitionDrift`，实例置 `Faulted` 并落
+/// `workflow.faulted`。
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_after_redeploy_same_version_fails_closed() {
+    let (addr, _sd, _g, _r, _tmp) = common::start_test_server().await;
+    let inner = agent_inner(&addr).await;
+    let rt = make_runtime(inner.clone());
+    let store = KvWorkflowStore::new(inner.clone());
+
+    let def = listen_definition();
+    store
+        .save_definition(&def)
+        .await
+        .expect("deploy definition");
+    let inst = rt.start(&def, serde_json::json!({})).await.expect("start");
+    wait_until_waiting(&store, &inst.id).await;
+
+    // 同版本、同键重部署，但内容变了（改文档标题即可改变内容哈希）。
+    let mut redeployed = def.clone();
+    redeployed.document.title = Some("redeployed-content".into());
+    store
+        .save_definition(&redeployed)
+        .await
+        .expect("redeploy same version");
+
+    let err = rt
+        .resume(
+            &inst.id,
+            Some("approval.requested"),
+            None,
+            Some("key-drift"),
+        )
+        .await
+        .expect_err("定义漂移时 resume 必须 fail-closed");
+    let (expected, actual) = match err {
+        RuntimeError::DefinitionDrift {
+            instance_id,
+            expected,
+            actual,
+        } => {
+            assert_eq!(instance_id, inst.id);
+            // expected = 实例创建时钉死的原始内容哈希；actual = 重部署后的内容哈希
+            assert_eq!(expected, definition_hash(&def));
+            assert_ne!(expected, actual, "漂移的 expected/actual 必须不同");
+            (expected, actual)
+        }
+        other => panic!("期望 RuntimeError::DefinitionDrift，实际: {other:?}"),
+    };
+
+    // 实例置 Faulted，fault 文本含运行时的逐字诊断锚点。
+    let failed = store
+        .load_instance(&inst.id)
+        .await
+        .expect("load instance")
+        .expect("instance exists");
+    assert_eq!(failed.status, InstanceStatus::Failed);
+    let fault = failed.fault.expect("faulted 实例必须带 fault");
+    assert!(
+        fault.detail.contains(&format!(
+            "definition drift: instance pinned {expected}, loaded {actual}"
+        )),
+        "fault 文本必须含稳定诊断锚点: {fault:?}"
+    );
+
+    // 终态事件落 outbox。
+    let outbox = Arc::new(KvOutboxStore::new(inner.clone()));
+    let all = OutboxStore::list_all(&*outbox).await.expect("list outbox");
+    assert!(
+        all.iter().any(|r| {
+            r.aggregate_id == inst.id && r.event_type.ends_with("workflow.faulted.v1")
+        }),
+        "漂移 fault 必须落 workflow.faulted: {all:?}"
+    );
+}
+
+/// 钉死哈希与当前定义不一致的 `Running` 实例：启动对账经 `spawn_drive` 进入 drive，
+/// drive 的定义钉死守卫在**执行任何任务前** fail-closed（置 Failed + 稳定诊断锚点）。
+///
+/// 与 `resume_after_redeploy_same_version_fails_closed` 互补：那条走控制面入口，
+/// 这条走 drive 本体，覆盖「对账重驱动一个钉死已过期的实例」。
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_pin_running_instance_faults_on_restart_reconcile() {
+    let (addr, _sd, _g, _r, tmp) = common::start_test_server().await;
+    let inner = agent_inner(&addr).await;
+    let mq = Arc::new(MessageQueueService::new(
+        tmp.path().to_path_buf(),
+        64 * 1024 * 1024,
+    ));
+    mq.start().await.expect("start mq");
+
+    let opts = || DurableEngineOptions {
+        mq: Arc::clone(&mq),
+        topic: "com.china-workflow.foundation.events".to_string(),
+        relay_enabled: true,
+        relay_interval_ms: 50,
+    };
+    let svc = WorkflowEngineService::new_with_kv_store_durable(
+        Arc::clone(&inner),
+        &WorkflowDispatchConfig::default(),
+        opts(),
+    );
+    svc.start().await.expect("engine start");
+    let def_id = svc
+        .deploy_definition("foundation", RUN_YAML)
+        .await
+        .expect("deploy");
+    let def = svc
+        .get_definition(&def_id)
+        .await
+        .expect("get definition")
+        .expect("definition exists");
+
+    // 崩溃快照：`Running`、无人驱动，但钉死哈希指向一份**已不在定义键上**的内容。
+    let stale = "f".repeat(64);
+    let mut snapshot = WorkflowInstance::new(&def, serde_json::json!({}), now_ms());
+    snapshot.status = InstanceStatus::Running;
+    snapshot.definition_hash = Some(stale.clone());
+    snapshot.updated_at = now_ms();
+    let store = KvWorkflowStore::new(Arc::clone(&inner));
+    store
+        .save_instance(&snapshot)
+        .await
+        .expect("seed stale-pin snapshot");
+    drop(svc);
+
+    let svc2 = WorkflowEngineService::new_with_kv_store_durable(
+        Arc::clone(&inner),
+        &WorkflowDispatchConfig::default(),
+        opts(),
+    );
+    svc2.start().await.expect("restart engine");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let fault = loop {
+        if let Ok(Some((inst, _))) = store.load_instance_with_rev(&snapshot.id).await {
+            if inst.status == InstanceStatus::Failed {
+                break inst.fault.expect("faulted 实例必须带 fault");
+            }
+            assert!(
+                !inst.status.is_terminal(),
+                "钉死漂移的实例不得被推进到 Completed: {inst:?}"
+            );
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "钉死漂移的 Running 实例未被对账 fail-closed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        fault.detail.contains(&format!(
+            "definition drift: instance pinned {stale}, loaded {}",
+            definition_hash(&def)
+        )),
+        "fault 文本必须含运行时的逐字诊断锚点: {fault:?}"
+    );
 }

@@ -68,6 +68,8 @@ mod tests {
             output: None,
             fault: None,
             suspension_meta: None,
+            definition_hash: None,
+            engine_version: None,
         }
     }
 

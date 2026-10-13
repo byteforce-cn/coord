@@ -304,6 +304,12 @@ pub enum RuntimeError {
     InvalidSignal(String),
     /// 控制面 CAS 冲突重放耗尽：实例修订号已被并发写者推进，本次写被拒绝
     StaleRevision(String),
+    /// 定义内容漂移：实例钉死的定义哈希与当前加载的定义不一致（fail-closed）
+    DefinitionDrift {
+        instance_id: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -324,8 +330,56 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::StaleRevision(id) => {
                 write!(f, "stale revision for instance: {id}")
             }
+            RuntimeError::DefinitionDrift {
+                instance_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "definition drift: instance {instance_id} pinned {expected}, loaded {actual}"
+            ),
         }
     }
+}
+
+/// 定义钉死守卫 —— 实例钉死的定义内容哈希必须等于当前加载的定义。
+///
+/// `None`（旧快照未钉死）放行：首次成功驱动时回填。返回的 `(expected, actual)` 供
+/// 调用方构造稳定诊断锚点 `definition drift: instance pinned {expected}, loaded {actual}`。
+pub fn assert_definition_pin(
+    inst: &WorkflowInstance,
+    def: &WorkflowDefinition,
+) -> Result<(), RuntimeError> {
+    match definition_content_drift(inst, def) {
+        Some((expected, actual)) => Err(RuntimeError::DefinitionDrift {
+            instance_id: inst.id.clone(),
+            expected,
+            actual,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// 钉死哈希与加载定义不一致时返回 `(expected, actual)`；未钉死则 `None`。
+fn definition_content_drift(
+    inst: &WorkflowInstance,
+    def: &WorkflowDefinition,
+) -> Option<(String, String)> {
+    let expected = inst.definition_hash.as_ref()?;
+    let actual = super::model::definition_hash(def);
+    if expected == &actual {
+        None
+    } else {
+        Some((expected.clone(), actual))
+    }
+}
+
+/// 定义漂移 fault —— detail 为跨模块稳定诊断锚点（runbook / 测试逐字断言）。
+fn definition_drift_fault(expected: &str, actual: &str) -> WorkflowFault {
+    crate::workflow::errors::WorkflowFault::conflict(
+        "definition drift",
+        format!("definition drift: instance pinned {expected}, loaded {actual}"),
+    )
 }
 
 impl std::error::Error for RuntimeError {}
@@ -1333,6 +1387,10 @@ where
         store: Arc<S>,
         reason: &str,
     ) -> Result<(), RuntimeError> {
+        // 定义漂移守卫：自动恢复不得在新语义下推进/重试（fail-closed）。
+        self.fail_closed_on_definition_drift(&store, &instance_id, &definition)
+            .await?;
+
         if reason == "retry" {
             // 重试：直接重新 drive（重新执行当前任务），本路径**不写实例**；
             // 保留「仅当仍处于同一挂起原因才驱动」的守卫（陈旧定时器不得多驱动一轮）。
@@ -1395,6 +1453,10 @@ where
         store: Arc<S>,
         arrived_event_type: String,
     ) -> Result<(), RuntimeError> {
+        // 定义漂移守卫：事件恢复不得在新语义下推进（fail-closed）。
+        self.fail_closed_on_definition_drift(&store, &instance_id, &definition)
+            .await?;
+
         let outcome = self
             .commit_control_plane(
                 &store,
@@ -1545,6 +1607,62 @@ where
         }
     }
 
+    /// 定义漂移 fail-closed（控制面）：置实例 Failed + 伴生 `workflow.faulted`（有界 CAS），
+    /// 并把漂移报成 [`RuntimeError::DefinitionDrift`]。
+    ///
+    /// 控制面没有 drive 当轮的 `rev`/`guard`，故复用 [`Self::commit_control_plane`] 的
+    /// 「线性一致读修订号 + 冲突重放」；fault 提交耗尽也不掩盖返回的漂移错误
+    /// （失败已计入 `cas_conflict_total`，实例保持非终态，由启动对账重新驱动）。
+    async fn definition_drift_error(
+        &self,
+        store: &Arc<S>,
+        instance_id: &str,
+        expected: String,
+        actual: String,
+    ) -> RuntimeError {
+        let fault = definition_drift_fault(&expected, &actual);
+        let _ = self
+            .commit_control_plane(store, instance_id, &[lifecycle::WORKFLOW_FAULTED], |inst| {
+                if inst.status.is_terminal() {
+                    return Ok(false);
+                }
+                inst.status = InstanceStatus::Failed;
+                inst.fault = Some(fault.clone());
+                inst.updated_at = self.clock.now_ms();
+                Ok(true)
+            })
+            .await;
+        RuntimeError::DefinitionDrift {
+            instance_id: instance_id.to_string(),
+            expected,
+            actual,
+        }
+    }
+
+    /// 控制面入口的定义钉死校验：读回实例 → [`assert_definition_pin`] → 漂移时置 Failed
+    /// 并返回 [`RuntimeError::DefinitionDrift`]。
+    ///
+    /// 读不到实例时放行：后续路径会按 NotFound / 状态守卫处理，守卫不在此造状态。
+    async fn fail_closed_on_definition_drift(
+        &self,
+        store: &Arc<S>,
+        instance_id: &str,
+        definition: &WorkflowDefinition,
+    ) -> Result<(), RuntimeError> {
+        let Ok(Some(inst)) = store.load_instance(instance_id).await else {
+            return Ok(());
+        };
+        match assert_definition_pin(&inst, definition) {
+            Ok(()) => Ok(()),
+            Err(RuntimeError::DefinitionDrift {
+                expected, actual, ..
+            }) => Err(self
+                .definition_drift_error(store, instance_id, expected, actual)
+                .await),
+            Err(other) => Err(other),
+        }
+    }
+
     /// 恢复挂起的实例
     ///
     /// 1. 加载实例，校验状态为 Suspended
@@ -1682,6 +1800,11 @@ where
                 ))
             })?;
 
+        // 定义漂移守卫：resume 已把实例推进到 Running，加载到的定义必须仍是启动时
+        // 钉死的那一份；否则 fail-closed（置 Failed + DefinitionDrift），不得在新语义下驱动。
+        self.fail_closed_on_definition_drift(&self.store, &inst.id, &def)
+            .await?;
+
         // 后台 drive（受监督：见 [`Self::spawn_drive`]）
         self.spawn_drive(inst.id.clone(), def, Arc::clone(&self.store));
 
@@ -1715,6 +1838,9 @@ where
                     inst.definition_ns, inst.definition_name, inst.definition_version
                 ))
             })?;
+        // 定义漂移守卫：驱动前先校验钉死哈希（fail-closed），不得在新语义下驱动。
+        self.fail_closed_on_definition_drift(&self.store, &inst.id, &def)
+            .await?;
         self.spawn_drive(inst.id.clone(), def, Arc::clone(&self.store));
         Ok(())
     }
@@ -1881,6 +2007,25 @@ where
                 // 终端状态则退出
                 if inst.status.is_terminal() {
                     break;
+                }
+
+                // 定义钉死守卫（fail-closed）：钉死的定义内容与本次加载的定义不一致
+                // ⇒ 不再在新语义上推进，置 Failed + 伴生 workflow.faulted（同一次提交），
+                // 由上层控制面/启动对账以 `DefinitionDrift` 报出。
+                if let Some((expected, actual)) = definition_content_drift(&inst, &definition) {
+                    let fault = definition_drift_fault(&expected, &actual);
+                    self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                        .await;
+                    break 'drive_loop;
+                }
+
+                // 未钉死的旧快照：
+                // 驱动成功即视作「认下这份定义」，在内存回填，随后下一次提交随之落库。
+                if inst.definition_hash.is_none() {
+                    inst.definition_hash = Some(super::model::definition_hash(&definition));
+                }
+                if inst.engine_version.is_none() {
+                    inst.engine_version = Some(super::model::ENGINE_VERSION.to_string());
                 }
 
                 // 标准相位：Pending → Running（start 后首步推进）。
@@ -5142,6 +5287,8 @@ mod tests {
             output: None,
             fault: None,
             suspension_meta: None,
+            definition_hash: None,
+            engine_version: None,
         }
     }
 

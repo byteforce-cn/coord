@@ -1894,6 +1894,8 @@ mod tests {
             output: None,
             fault: None,
             suspension_meta: None,
+            definition_hash: None,
+            engine_version: None,
         };
 
         // 线性推进（不实际派发 call）：走到 check 前（init 的 set/转移）
