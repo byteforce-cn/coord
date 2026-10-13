@@ -1,0 +1,594 @@
+{
+  "connect_stagger_us": 0,
+  "connected": 856,
+  "connection_errors": [
+    {
+      "error": "Unknown: transport error",
+      "watcher": 875
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 856
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 699
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 836
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 877
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 876
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 591
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 590
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 589
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 697
+    },
+    {
+      "error": "Cancelled: operation was canceled",
+      "watcher": 577
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 813
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 383
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 830
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 585
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 799
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 588
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 693
+    },
+    {
+      "error": "Cancelled: operation was canceled",
+      "watcher": 743
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 862
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 380
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 789
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 807
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 861
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 838
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 377
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 382
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 850
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 376
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 795
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 778
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 851
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 379
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 863
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 230
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 846
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 374
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 786
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 781
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 801
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 228
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 575
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 809
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 794
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 569
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 796
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 764
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 827
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 760
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 458
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 558
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 460
+    },
+    {
+      "error": "Cancelled: operation was canceled",
+      "watcher": 788
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 372
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 873
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 461
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 870
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 871
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 218
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 680
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 867
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 825
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 698
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 369
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 821
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 839
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 730
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 818
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 375
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 578
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 700
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 849
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 833
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 727
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 864
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 687
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 586
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 695
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 852
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 793
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 694
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 584
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 455
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 854
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 845
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 570
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 792
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 819
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 843
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 685
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 373
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 378
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 774
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 690
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 800
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 835
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 580
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 579
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 837
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 688
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 828
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 576
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 686
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 226
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 820
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 842
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 227
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 224
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 808
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 459
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 804
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 371
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 736
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 574
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 571
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 785
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 739
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 769
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 370
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 733
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 223
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 566
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 565
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 567
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 823
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 745
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 858
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 381
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 583
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 692
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 582
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 691
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 587
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 696
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 857
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 803
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 581
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 844
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 689
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 832
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 225
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 229
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 826
+    },
+    {
+      "error": "Unknown: transport error",
+      "watcher": 773
+    }
+  ],
+  "cpu_seconds_total": 0.43,
+  "cpu_ticks_total": 43,
+  "notes": "所有 watcher 订阅同一 key；每轮一次 Put 后等待各订阅端事件；延迟=写发出到订阅端收到；每 watcher 一条独立连接",
+  "primed_first_round_delivered": 0,
+  "round_timeout_ms": 5000,
+  "rounds": 3,
+  "rss_kib_after_connect": 106408,
+  "rss_kib_after_rounds": 108228,
+  "rss_kib_before": 38200,
+  "rss_kib_delta": 70028,
+  "scenario": "watch_fanout_1000",
+  "watchers": 1000
+}

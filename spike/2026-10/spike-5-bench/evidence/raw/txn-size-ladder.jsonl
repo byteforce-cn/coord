@@ -1,0 +1,14 @@
+{"compares":0,"error":null,"latency_us":4511,"puts":1,"revision":2,"rpc_ok":true,"scenario":"puts_only","succeeded":true,"total_ops":1}
+{"compares":0,"error":null,"latency_us":4779,"puts":2,"revision":3,"rpc_ok":true,"scenario":"puts_only","succeeded":true,"total_ops":2}
+{"compares":0,"error":null,"latency_us":4236,"puts":10,"revision":4,"rpc_ok":true,"scenario":"puts_only","succeeded":true,"total_ops":10}
+{"compares":0,"error":null,"latency_us":62866,"puts":50,"revision":5,"rpc_ok":true,"scenario":"puts_only","succeeded":true,"total_ops":50}
+{"compares":0,"error":null,"latency_us":48951,"puts":100,"revision":6,"rpc_ok":true,"scenario":"puts_only","succeeded":true,"total_ops":100}
+{"compares":0,"error":null,"latency_us":63947,"puts":127,"revision":7,"rpc_ok":true,"scenario":"puts_only","succeeded":true,"total_ops":127}
+{"compares":0,"error":null,"latency_us":52401,"puts":128,"revision":8,"rpc_ok":true,"scenario":"puts_only","succeeded":true,"total_ops":128}
+{"compares":0,"error":"InvalidArgument: txn ops 129 exceeds max 128","latency_us":508,"puts":129,"revision":0,"rpc_ok":false,"scenario":"puts_only","succeeded":false,"total_ops":129}
+{"compares":0,"error":"InvalidArgument: txn ops 200 exceeds max 128","latency_us":396,"puts":200,"revision":0,"rpc_ok":false,"scenario":"puts_only","succeeded":false,"total_ops":200}
+{"compares":0,"error":"InvalidArgument: txn ops 500 exceeds max 128","latency_us":536,"puts":500,"revision":0,"rpc_ok":false,"scenario":"puts_only","succeeded":false,"total_ops":500}
+{"compares":0,"error":"InvalidArgument: txn ops 1000 exceeds max 128","latency_us":955,"puts":1000,"revision":0,"rpc_ok":false,"scenario":"puts_only","succeeded":false,"total_ops":1000}
+{"compares":0,"error":"InvalidArgument: txn ops 2000 exceeds max 128","latency_us":1779,"puts":2000,"revision":0,"rpc_ok":false,"scenario":"puts_only","succeeded":false,"total_ops":2000}
+{"compares":1,"error":null,"latency_us":66325,"puts":127,"revision":9,"rpc_ok":true,"scenario":"cas_compare_plus_puts","succeeded":true,"total_ops":128}
+{"compares":1,"error":"InvalidArgument: txn ops 129 exceeds max 128","latency_us":493,"puts":128,"revision":0,"rpc_ok":false,"scenario":"cas_compare_plus_puts","succeeded":false,"total_ops":129}

@@ -1,0 +1,22 @@
+# Spike 5 运行环境（非目标硬件，判定须等目标硬件清单）
+captured_at: 2026-10-13T11:44:53+00:00
+nproc: 8
+loadavg: 5.99 6.15 5.44 2/1028 202455
+kernel: Linux byteforce 6.8.0-142-generic #142-Ubuntu SMP PREEMPT_DYNAMIC Wed Sep  2 14:24:27 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+rustc: rustc 1.98.1 (48a229cea 2026-09-01)
+cargo: cargo 1.98.1 (797e8a9bc 2026-08-05)
+--- free -h ---
+               total        used        free      shared  buff/cache   available
+Mem:            31Gi       4.6Gi       1.9Gi        16Mi        25Gi        26Gi
+Swap:          8.0Gi       3.4Gi       4.6Gi
+--- lscpu ---
+CPU(s):                                  8
+Model name:                              11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz
+BIOS Model name:                         11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz To Be Filled By O.E.M. CPU @ 2.8GHz
+CPU(s) scaling MHz:                      21%
+CPU max MHz:                             4700.0000
+CPU min MHz:                             400.0000
+L3 cache:                                12 MiB (1 instance)
+--- disk ---
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv  936G  146G  751G  17% /
