@@ -1,5 +1,0 @@
-offset	event_id	aggregate_id	sequence	event_type	duplicate
-0	evt-aa775b72-2533-48ec-b5d6-8855d6c415ed	3095d509-25b5-4a16-b690-44e8494f84ce	1	com.china-workflow.workflow.started.v1	false
-1	evt-d78eadaf-9801-49a7-a5fb-614e72dcefb9	3095d509-25b5-4a16-b690-44e8494f84ce	2	com.china-workflow.task.retried.v1	false
-2	evt-54793b39-62bf-45a3-941b-ee4c8ee7f466	3095d509-25b5-4a16-b690-44e8494f84ce	3	com.china-workflow.task.retried.v1	false
-3	evt-b681cc7d-6a00-48d8-b02c-a8b48560a03b	3095d509-25b5-4a16-b690-44e8494f84ce	4	com.china-workflow.workflow.faulted.v1	false

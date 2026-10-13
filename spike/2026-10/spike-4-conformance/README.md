@@ -28,7 +28,7 @@ python3 "$S/scripts/matrix.py" "$S/evidence/schema-results.json" "$S/evidence/pa
 
 - schema-合法语料 23 份：解析接受 19、硬拒 3、双方拒绝 1（另有 1 份 0.8 遗留
   格式被接受 = LAX）。
-- 19 份「接受」中 6 份语义被静默误读/丢弃 → **语义可用 13/23**。
+- 19 份「接受」中 6 份语义被静默误读/丢弃 → **语义可用 13/22**。
 - 最严重：`run: script|container|shell|workflow` 全部编译为空引用子流程且不报错；
   `use.extensions` 静默丢弃。
 - 详见 `REPORT.md` §3/§4。

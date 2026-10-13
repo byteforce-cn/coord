@@ -1,15 +1,15 @@
 {
-  "delivered_unique": 6,
+  "delivered_unique": 7,
   "duplicate_event_ids": 0,
   "final_status": "completed",
-  "generated_at_ms": 1791894719569,
-  "instance": "07acdc8a-eb27-4127-98a9-edd2e74ff651",
+  "generated_at_ms": 1791896217087,
+  "instance": "0fb3a447-c9ca-484c-8e74-171ba2c81708",
   "missing_event_ids": 0,
-  "mq_messages_total": 6,
+  "mq_messages_total": 7,
   "outbox_delivered": 6,
   "outbox_pending": 0,
   "outbox_records": 6,
   "remaining_timers_for_instance": 0,
-  "scenario": "wait",
+  "scenario": "listen",
   "timers_total": 0
 }

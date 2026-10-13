@@ -71,28 +71,25 @@ failure ops: 空
 
 ### 2.1 当前装配下的边界（必须说清楚）
 
-`WorkflowRuntime::emit_lifecycle`（`coord-core/src/workflow/runtime.rs:1025`）在生命周期
-事件处走同事务提交：**事件与"该实例的当前状态快照"同一个 Txn**。`drive()` 内部的其余
-状态保存仍是普通 Put（不在同一 Txn）——把 `drive` 的每一处保存都折叠进 Txn 需要重构
-3885 行的驱动循环，超出 Spike 范围。
+**实例状态只有一个写路径**：`drive` 的 `persist_instance`（CAS / 租约 `fenced_save`）。
+`emit_lifecycle` 在注入 outbox 时**只 append 事件记录**，不写实例状态——若 emit 另
+写实例，就会产生一条无 CAS/无 fencing 的迟到写通道，并推进 `mod_revision` 使调用方
+随后的 CAS 失配（回归测试 `durable_emit_appends_without_writing_instance_state`，
+`coord-core/src/workflow/runtime.rs` 测试模块）。
 
-这不影响不丢：事件只要没和状态一起提交，就压根没发布；状态照旧由既有的保存点保证。
-它影响的是"状态与事件严格同版本"这一更强性质，留给阶段二（见 §7 缺口 G1）。
+`AtomicOutboxCommit::commit_state_and_outbox`（§2）仍是「状态 + 事件同 Txn」的
+落地形态：它的原子性/幂等/序号单调由 `spike3_durable_kv` 的
+`state_and_outbox_commit_is_all_or_nothing` 在真实 Raft 上验证。但在当前合并装配下，
+`drive` **尚未**调用它——把 outbox 记录搭进 `persist_instance`/`fenced_save` 的同一
+次写入，是阶段二落地要求（见 §7 缺口 G1 / ADR-0013 D4）。
 
-在「Spike 2 CAS/fencing 写路径 + 本 spike durable 能力」的当前装配下，这条边界
-没有收窄、反而多了一层：`drive` 的状态写回走 `persist_instance`（CAS / 租约
-`fenced_save`），随后 `emit_lifecycle` 才用 `commit_state_and_outbox` 提交
-「同一份快照 + 事件」。于是外部观测者可能先看到终态、后看到事件记录（两次写
-之间的窗口）。编排者在集成分支复跑 kill -9 retry 场景捕获到该窗口：终态已是
-`failed`、单次 `pending==0` 观测之后，1.8s 时 summary 仍见
-`workflow.faulted.v1` 为 `Pending`（证据 `evidence/verdict-20261013-122925.tsv`
-与 `evidence/kill9-retry-20261013-122925.log`）。
-
-这不构成事件丢失（relay 随后投递、消费者按 `event_id` 去重），但说明：阶段二的
-正确集成点是让 outbox 记录搭上 `persist_instance`/`fenced_save` 的同一次 CAS
-Txn，而不是在状态写之后单独提交；否则「状态与事件严格同版本」在 CAS/fencing
-路径上不成立。harness 的排空判定已改为「连续多轮为 0」的稳定性观测，避免把这个
-窗口误报成事件丢失（窗口本身仍保留在证据里）。
+因此当前仍存在「状态已落、伴生事件稍后 append」的观测窗口。编排者在集成分支复跑
+kill -9 retry 场景捕获到该窗口：终态已是 `failed`、单次 `pending==0` 观测之后，
+1.8s 时 summary 仍见 `workflow.faulted.v1` 为 `Pending`（证据
+`evidence/verdict-20261013-122925.tsv` 与
+`evidence/kill9-retry-20261013-122925.log`）。这不构成事件丢失（relay 随后投递、
+消费者按 `event_id` 去重）；harness 的排空判定已改为「连续多轮为 0」的稳定性观测，
+避免把窗口误报成丢失。
 
 ## 3. 记录结构
 
@@ -185,9 +182,9 @@ python3 spike/2026-10/spike-3-recovery/scripts/schema_check.py
 ## 7. 缺口（阶段二输入）
 
 - **G1（状态/事件同版本）**：`drive()` 的状态保存点尚未全部折叠进同事务提交（§2.1），
-  且当前装配下状态写回走 CAS/fencing、事件提交是随后的独立 Txn。要拿到
-  「任意时刻状态与事件严格同版本」，需要把 outbox 记录并入 `persist_instance`
-  （KV 侧 `fenced_save` 的 Txn 增加 outbox ops），或统一成
+  且当前装配下状态写回走 CAS/fencing、事件提交是随后的独立 Txn。emit 已改为
+  append-only（阻断无 fencing 的实例写通道）；剩下的集成点是把 outbox 记录并入
+  `persist_instance`（KV 侧 `fenced_save` 的 Txn 增加 outbox ops），或统一成
   `commit_state_and_outbox` 单写路径；工作量集中在
   `coord-core/src/workflow/runtime.rs` 的 `drive` 与
   `coord-agent/src/services/workflow_lease.rs` 的 `fenced_save`。
@@ -197,3 +194,6 @@ python3 spike/2026-10/spike-3-recovery/scripts/schema_check.py
   按 outbox 分区归属。
 - **G4（背压）**：`RelayPolicy.batch = 64`、扫描在每次 tick 全前缀 range；事件量大时
   需要 range 分页与并发投递上限。
+- **G5（投递面消息上限）**：`outbox_relay` 建 topic 时 `max_message_size = 1 MiB`，
+  而实例快照/事件载荷可接近 gRPC 4 MiB（Spike 5 §4.4）。大实例事件会重试至
+  `dead`（不静默丢弃，但不投递）。落地面：大载荷分片或走对象存储。

@@ -16,8 +16,9 @@
 
 ## 1. 状态写回的 CAS / Txn 形状
 
-所有写回都归纳到一个入口：`WorkflowRuntime::persist_instance(store, inst, &mut rev, guard)`，
-按「有租约 / 无租约但存储支持修订号 / 都不支持」三级降级：
+**`drive` 循环的写回**归纳到一个入口：`WorkflowRuntime::persist_instance(store, inst, &mut rev, guard)`，
+按「有租约 / 无租约但存储支持修订号 / 都不支持」三级降级（其余保存点为已知未接线，
+见 §5.1；`emit_lifecycle` 只 append 事件、**不**写实例状态）：
 
 1. **有租约（`guard = Some`）** → `LeaseGuard::fenced_save(inst, expected_mod_rev)`，
    即带 fencing 的 Txn（见 §3）。
@@ -113,6 +114,8 @@ fencing 写（`KvLeaseGuard::fenced_save`）在一个原子 Txn 内做**三重 c
    其中 `auto_resume`/`resume_by_event` 已改为经 `spawn_drive`（受同一租约约束）；
    `resume`/`apply_timeout`/`fail_instance` 的前置写回**未**加 fencing
    —— 多 agent 并发 `resume` 时存在丢更新可能，属**已知未接线**。
+   另：`emit_lifecycle` 曾是一条无 CAS/fencing 的实例写通道，已改为 append-only
+   （回归测试 `durable_emit_appends_without_writing_instance_state`），不再计入写路径。
 2. **fencing 只保护状态写回，不保护外部副作用**：若驱动者在两次写之间已发出 `call`，
    撤销租约**无法撤回**该副作用。**唯一正确兜底是 StepToken**（见 `STEPTOKEN.md`），
    本 spike 只验证租约+fencing，未实现 StepToken 执行路径。

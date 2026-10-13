@@ -1,5 +1,0 @@
-id	aggregate_id	sequence	event_type	status	attempts	created_at_ms	delivered_at_ms
-evt-aa775b72-2533-48ec-b5d6-8855d6c415ed	3095d509-25b5-4a16-b690-44e8494f84ce	1	com.china-workflow.workflow.started.v1	Delivered	0	1791894723081	1791894723695
-evt-d78eadaf-9801-49a7-a5fb-614e72dcefb9	3095d509-25b5-4a16-b690-44e8494f84ce	2	com.china-workflow.task.retried.v1	Delivered	0	1791894723093	1791894723695
-evt-54793b39-62bf-45a3-941b-ee4c8ee7f466	3095d509-25b5-4a16-b690-44e8494f84ce	3	com.china-workflow.task.retried.v1	Delivered	0	1791894728156	1791894728160
-evt-b681cc7d-6a00-48d8-b02c-a8b48560a03b	3095d509-25b5-4a16-b690-44e8494f84ce	4	com.china-workflow.workflow.faulted.v1	Delivered	0	1791894733267	1791894733386

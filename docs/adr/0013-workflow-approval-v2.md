@@ -34,7 +34,7 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 - Spike 1（已完成）：P0 审批语义在 `Instance/Branch/Task/Round/三级作用域` 上
   全部可表达（16/16）；裁定 Round 作用域=分支、分支通过≠实例收口。证据
   `spike/2026-10/spike-1-state-model/`。
-- Spike 4（已完成）：官方 SW 1.0.3 语料 24 份，语义可用 13/23；`run:*` 与
+- Spike 4（已完成）：官方 SW 1.0.3 语料 24 份，语义可用 13/22；`run:*` 与
   `use.extensions` 静默误读。证据 `spike/2026-10/spike-4-conformance/REPORT.md`。
 - Spike 2（已完成）：CAS + 租约 + fencing 在真实单节点 Raft 上验证（7/7）：
   `save_instance_atomic`（`Compare(ModRev)`）并发恰一胜；`LeaseGrant` + Txn
@@ -110,13 +110,15 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 
 ### D4 事件契约与 Outbox
 
-- 状态变更与 outbox 记录**同一 KV Txn 原子写入**；Relay 轮询 outbox → 投递 →
+- 状态变更与 outbox 记录**同一 KV Txn 原子写入**（v2 写路径落地要求；Spike 已证
+  机制可行，drive 集成见下条）；Relay 轮询 outbox → 投递 →
   标位，至少一次；失败指数退避；DLQ 复用 MQ 路径。
 - 事件命名空间固定 `com.china-workflow.*`（CTO 手册口径）；每条事件含
   `id/source/specversion/type/dataschema/subject(instance_id)/partitionkey(instance_id)/
   sequence(每实例单调)`；消费者按 `(instance_id, sequence)` 去重；`event_schema_version`
   固定到实例。
-- outbox 保留 24h（TTL 由 Relay 清理）；历史归档是外部消费者职责，coord 不承诺。
+- outbox 保留 24h（TTL 由 Relay 清理；**Spike 未实现 TTL，属落地要求**，见
+  `spike-3-recovery/OUTBOX.md` §5.1/§7）；历史归档是外部消费者职责，coord 不承诺。
 - 生产装配必须走 MQ/Event；`MemoryEventProvider` 仅 dev。接线前先修
   `MqEventProvider` 的两处缺陷（offset 重启归零、共享单游标）——**Spike 3 已修并
   带回归测试**。
@@ -202,6 +204,12 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 | 性能不达标但新建可达标 / 性能达标但状态模型不达标 | 同上前提未定 | ⏸ 不适用 |
 | 两者均不达标 ⇒ No-Go | 无证据 | ✅ 不触发 |
 | **当前形态选择（可随时按上表重议）** | — | **扩展现有 `coord-core/workflow`（D1）维持；H3 判定前不新建独立 crate，触发条件与退出条件见 D1 / 「待验证假设」** |
+
+**Go / No-Go（当前判定）**：**Go（有条件）** —— 状态模型（Spike 1）、并发（Spike 2）、
+恢复（Spike 3）三条判据有可复现证据，D1 形态维持；**条件**是 H3 在 10-18 阈值定稿 +
+目标硬件/release 复测后复核：若性能判据不达标，按上表重议（新建独立 crate 或 No-Go，
+新 ADR），不静默顺延。前置输入缺失（`CHARTER-INPUTS.md` 3.2/3.3）为手册允许的
+启动口径，不是本文档可自决项。
 
 ## 后果
 

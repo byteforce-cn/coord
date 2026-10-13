@@ -11,7 +11,7 @@
 | Spike 1 状态模型 v2 | ✅ 完成（P0 语义 16/16） | `../spike-1-state-model/README.md` |
 | Spike 2 单写者并发 | ✅ 完成（真实 Raft 7/7；fencing 方案 + 残余风险） | `../spike-2-concurrency/README.md`、`DESIGN.md`、`STEPTOKEN.md` |
 | Spike 3 Outbox + 恢复 | ✅ 完成（kill -9 wait/listen/retry 三场景 PASS） | `../spike-3-recovery/README.md`、`OUTBOX.md`、`RECOVERY.md` |
-| Spike 4 规范符合性 | ✅ 完成（24 语料；语义可用 13/23） | `../spike-4-conformance/REPORT.md` |
+| Spike 4 规范符合性 | ✅ 完成（24 语料；语义可用 13/22） | `../spike-4-conformance/REPORT.md` |
 | Spike 5 基准 | ✅ 完成（安静机 canonical；非目标硬件/阈值未定稿） | `../spike-5-bench/REPORT.md` |
 | 前置输入台账 | 3.2/3.3 未到位（临时口径已标注） | `../CHARTER-INPUTS.md` |
 

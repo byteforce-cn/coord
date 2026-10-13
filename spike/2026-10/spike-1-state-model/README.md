@@ -43,7 +43,7 @@ cargo run --example dump_scenario > ../evidence/scenario-snapshot-$(date +%Y%m%d
 |:--|:--|
 | P0 场景全部跑通 | ✅ 5/5 场景用例通过 |
 | 状态转换表完整 | ✅ `docs/TRANSITIONS.md`（4 个实体状态机 + 命令表 + 判定表） |
-| 无法表达项有明确清单 | ✅ `docs/GAPS.md`（0 项 P0；13 项未决/未覆盖） |
+| 无法表达项有明确清单 | ✅ `docs/GAPS.md`（0 项 P0；14 项未决/未覆盖，Q1–Q14） |
 | 测试用例可执行 + 日志 | ✅ 16 例 + `evidence/*.log` |
 | 不接 KV / 不接网络 | ✅ 独立 crate，无 coord 依赖 |
 

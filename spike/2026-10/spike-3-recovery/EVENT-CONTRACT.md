@@ -90,7 +90,8 @@ MQ headers（`coord-agent/src/services/outbox_relay.rs`）：
 
 1. **至少一次**：同一 `id` 可能到达多次；业务副作用必须以 `id` 为幂等键。
 2. **per-instance 有序**：同一 `aggregate_id` 内 `sequence` 连续 +1；分区选择由
-   `partitionkey = aggregate_id` 保证同实例事件落同一分区。
+   `partitionkey = aggregate_id` 保证同实例事件落同一分区（当前 relay 固定
+   **单分区**，该保证尚未被多分区场景区分验证）。
 3. **重复不空洞**：允许重复，**不允许**缺席 —— 只要 outbox 里标了 `delivered`，消费者侧
    必然能看到该 `id`（本次 spike 的 `missing_event_ids = 0` 即此判据）。
 4. **不得假设全局顺序**：`sequence` 只在实例内单调；跨实例无先后语义。

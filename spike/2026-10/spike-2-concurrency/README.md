@@ -19,6 +19,10 @@
 已单独验证，但引擎写路径只覆盖 drive 循环；`resume`/`auto_resume`/`apply_timeout`/`fail_instance`
 的写回仍是普通 Put —— 见 `DESIGN.md`「未接线项与残余风险」。
 
+**验收状态（手册 §4 Spike 2）**：并发无重复副作用 ✅（drive 路径）、租约过期处理 ✅、
+StepToken 方案 ✅（实现留阶段二）、**「CAS 写路径全覆盖」⚠️ 未达成**（上述非 drive
+保存点仍为普通 Put；v2 落地要求见 ADR-0013 D3）。
+
 ## 复现（一条命令）
 
 ```bash

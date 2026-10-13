@@ -306,8 +306,8 @@ where
     cas_conflicts: Arc<std::sync::atomic::AtomicU64>,
     /// 持久化能力（outbox + 定时器）。`None` = 进程内语义（旧行为）。
     ///
-    /// 注入后：生命周期事件进 outbox（可用时同事务提交）；wait/retry/timeout 的
-    /// 到期时间落 KV，重启后由扫描器补齐进程内定时器丢失的部分。
+    /// 注入后：生命周期事件 append 进 outbox（实例状态仍只由写路径负责）；
+    /// wait/retry/timeout 的到期时间落 KV，重启后由扫描器补齐进程内定时器丢失的部分。
     durable: Option<Arc<DurableSupport>>,
 }
 
@@ -1091,9 +1091,9 @@ where
 
     /// 发布生命周期 CloudEvent（标准 Lifecycle Events）
     ///
-    /// 注入持久化 outbox 后，事件先落 outbox 再经 relay 投递：状态与事件在同一
-    /// KV Txn 提交（`AtomicOutboxCommit` 可用时），进程崩溃不会留下「状态已改而
-    /// 事件缺失」的窗口。
+    /// 注入持久化 outbox 后，事件 append 进 outbox 再经 relay 投递：
+    /// 状态与事件的同 Txn 原子提交由 v2 写路径（`persist_instance`/`fenced_save`）
+    /// 承担；本函数**不**写实例状态——否则会绕过 CAS/fencing。
     ///
     /// 发布出口只有一个：注入 outbox 时**不**再直发进程内 `event_provider`
     /// （否则同一事件会有两条 ID 不同的副本，下游按 `event_id` 去重失效）。
@@ -1116,18 +1116,11 @@ where
                 self.clock.now_ms(),
                 format!("evt-{}", uuid::Uuid::new_v4()),
             );
-            // 同事务提交优先；比较失败/不可用时退化为分步 append（`id` 唯一，
-            // 失败的事务什么都没写 ⇒ 不会产生重发）。
-            let committed = match &durable.atomic_commit {
-                Some(commit) => commit
-                    .commit_state_and_outbox(inst, &record, None)
-                    .await
-                    .unwrap_or(false),
-                None => false,
-            };
-            if !committed {
-                let _ = durable.outbox.append(&record).await;
-            }
+            // 只 append，**不**写实例状态：实例状态由调用方的 `persist_instance`
+            // （CAS / 租约 `fenced_save`）负责。emit 若另行写实例，会绕过 fencing、
+            // 并推进 mod_revision 使调用方随后的 CAS 失配。状态与 outbox 的同事务
+            // 合并由 v2 写路径承担（见 spike-3 OUTBOX.md G1 / ADR-0013 D4）。
+            let _ = durable.outbox.append(&record).await;
             // 注入 outbox 后**不再**直发进程内事件总线：发布职责归 relay 一个出口，
             // 否则同一生命周期事件会出现两条 ID 不同的副本（去重失效）。
         } else {
@@ -2701,6 +2694,66 @@ mod tests {
         assert_eq!(inst.status, InstanceStatus::Pending);
         assert_eq!(inst.definition_name, "test-wf");
         assert_eq!(inst.context, serde_json::json!({"key": "value"}));
+    }
+
+    /// 注入 outbox 后，生命周期事件只经 `OutboxStore::append` 入 outbox；实例状态由
+    /// 调用方的 `persist_instance`（CAS / 租约 `fenced_save`）负责。
+    ///
+    /// 负控制：若 emit 走 `AtomicOutboxCommit::commit_state_and_outbox`，就产生了一条
+    /// 无 CAS/无 fencing 的实例写通道，并推进 mod_revision 使调用方随后的 CAS 失配。
+    #[tokio::test]
+    async fn durable_emit_appends_without_writing_instance_state() {
+        use crate::workflow::durable::{
+            AtomicOutboxCommit, DurableSupport, MemoryOutboxStore, MemoryTimerStore, OutboxRecord,
+        };
+        use crate::workflow::model::WorkflowInstance;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        #[derive(Default)]
+        struct RecordingCommit {
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl AtomicOutboxCommit for RecordingCommit {
+            async fn commit_state_and_outbox(
+                &self,
+                _inst: &WorkflowInstance,
+                _rec: &OutboxRecord,
+                _expected_mod_rev: Option<i64>,
+            ) -> Result<bool, crate::workflow::ports::StoreError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(true)
+            }
+        }
+
+        let outbox = Arc::new(MemoryOutboxStore::new());
+        let commit = Arc::new(RecordingCommit::default());
+        let durable = DurableSupport::new(Arc::new(MemoryTimerStore::new()), outbox.clone())
+            .with_atomic_commit(commit.clone());
+
+        let rt = make_runtime().with_durable(durable);
+        let def = make_simple_definition();
+        let inst = rt.start(&def, serde_json::json!({})).await.unwrap();
+
+        // drive 是 spawn 的后台任务：等实例走到终态（空 `do_tasks` 立即完成）。
+        for _ in 0..200 {
+            match rt.store.load_instance(&inst.id).await {
+                Ok(Some(cur)) if cur.status.is_terminal() => break,
+                _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            }
+        }
+
+        assert_eq!(
+            commit.calls.load(Ordering::SeqCst),
+            0,
+            "emit 不得调用会写实例状态的 commit_state_and_outbox（无 CAS/fencing 的写通道）"
+        );
+        assert!(
+            !outbox.snapshot().is_empty(),
+            "生命周期事件必须仍然写入 outbox（事件不丢）"
+        );
     }
 
     #[tokio::test]
