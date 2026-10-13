@@ -33,7 +33,11 @@
 
 **红线**：Lease 无 fencing 时**不得**宣称安全；记录为缺口并评估扩展 Lease 契约。
 
-## Spike 3 · Outbox + 恢复（截止 10-31）
+## Spike 3 · Outbox + 恢复（截止 10-31）—— **已执行**（10-13 初版完成）
+
+> 产出物：`spike-3-recovery/`（`OUTBOX.md` / `RECOVERY.md` / `EVENT-CONTRACT.md` +
+> `schema/` + `harness/` + `spike/2026-10/spike-3-recovery/scripts/repro.sh` + `evidence/`）。以下为本节原定的
+> 现状锚点与第一步，保留作为对照；实际结果与缺口见各产出物 §7。
 
 **现状锚点（已核实）**
 
@@ -59,6 +63,16 @@
 
 **注意**：`MqEventProvider` 现有两处缺陷（offset 重启归零、共享单游标）在接线前
 必须先修，否则重启会重放/偷事件。
+
+**执行结果（10-13）**
+
+- 两处缺陷已写好**可复现的缺陷测试**（断言缺陷症状）+ 已修复（按订阅寻址的游标 +
+  可选 KV 持久化），测试见 `coord-agent/src/services/mq_event_provider.rs`。
+- kill -9 三场景（wait/listen/retry）均 PASS，进程内定时器消失后由持久化定时器
+  恢复；事件不丢不重（`missing_event_ids = 0`、`duplicate_event_ids = 0`）。
+- 遗留缺口（待阶段二）：listen 的「游标推进与实例状态不同事务」崩溃窗口；
+  outbox 无 TTL/清理；`drive()` 的状态保存点尚未全部折叠进同事务。
+- 新工装：`spike/2026-10/spike-3-recovery/harness` 已登记为根工作区成员。
 
 ## Spike 5 · 基准测试（平台架构组主责，10-18 阈值定稿）
 

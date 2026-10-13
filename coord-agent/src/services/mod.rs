@@ -16,6 +16,8 @@ pub mod lock;
 pub mod mq;
 pub mod mq_event_provider;
 pub mod opa;
+pub mod outbox_kv;
+pub mod outbox_relay;
 pub mod policy;
 pub mod rate_limiter;
 pub mod registry;

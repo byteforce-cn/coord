@@ -16,9 +16,10 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use super::durable::{DurableSupport, OutboxRecord, TimerKind, TimerRecord};
 use super::engine::WorkflowExecutor;
 use super::model::{
-    InstanceStatus, StepResult, SuspendReason, SuspensionMeta, TaskFrame, TaskStatus,
+    EventFilter, InstanceStatus, StepResult, SuspendReason, SuspensionMeta, TaskFrame, TaskStatus,
     WorkflowDefinition, WorkflowFault, WorkflowInstance,
 };
 use super::ports::{
@@ -32,6 +33,13 @@ use super::retry::{RetryConfig, RetryScheduler};
 /// tick 本身不做全量列举（见 `pending_subflows` 字段注释），
 /// 所以固定 5s 不再有实例规模相关的代价。
 const SUBFLOW_SCAN_INTERVAL_SECS: u64 = 5;
+
+/// 持久化定时器扫描器的 tick 间隔（毫秒）。
+///
+/// 进程内快速路径仍由 `schedule_auto_resume`/`schedule_timeout` 的 `sleep` 承担；
+/// 扫描器只负责「进程内定时器随进程消失」之后的那部分（重启补齐），间隔取小值以
+/// 让到期触发足够及时（补偿延迟 = tick 间隔上界）。
+const DURABLE_TIMER_SCAN_INTERVAL_MS: u64 = 200;
 
 // ─── 后台任务存活登记（能力死亡必须可观测） ───
 
@@ -296,6 +304,11 @@ where
     lease_skipped: Arc<std::sync::atomic::AtomicU64>,
     /// CAS 写回失败的次数（修订号冲突或 fencing 拒绝，可观测信号，不静默吞掉）。
     cas_conflicts: Arc<std::sync::atomic::AtomicU64>,
+    /// 持久化能力（outbox + 定时器）。`None` = 进程内语义（旧行为）。
+    ///
+    /// 注入后：生命周期事件进 outbox（可用时同事务提交）；wait/retry/timeout 的
+    /// 到期时间落 KV，重启后由扫描器补齐进程内定时器丢失的部分。
+    durable: Option<Arc<DurableSupport>>,
 }
 
 impl<E, C, S, D, B> WorkflowRuntime<E, C, S, D, B>
@@ -325,10 +338,19 @@ where
             lease: None,
             lease_skipped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cas_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            durable: None,
         };
         // 启动后台扫描器，定期检查 RunSubflow 挂起的父流程并恢复
         rt.start_subflow_scanner();
         rt
+    }
+
+    /// 注入持久化能力（outbox + 持久化定时器）。
+    ///
+    /// builder 形态：不改变 [`Self::new`] 的构造签名，内存路径行为逐字不变。
+    pub fn with_durable(mut self, durable: DurableSupport) -> Self {
+        self.durable = Some(Arc::new(durable));
+        self
     }
 
     /// 长活后台任务的存活快照（能力死亡必须可观测）。
@@ -380,6 +402,209 @@ where
         // 不需要捕获 panic：任务 panic 时 `is_finished()` 也变成 true，同一判据覆盖两种死法。
         self.workers
             .register_loop("workflow_subflow_scanner", handle);
+    }
+
+    // ─── 持久化定时器 / 重启恢复（Spike 2026-10 Spike 3） ───
+
+    /// 启动持久化定时器扫描器（未注入 [`DurableSupport`] 时是空操作）。
+    ///
+    /// 进程内快速路径仍在 `schedule_auto_resume` / `schedule_timeout` 里；
+    /// 扫描器补的是「进程内定时器随进程消失」那半 —— 重启后按 KV 到期时间重放。
+    pub fn start_durable_workers(&self) {
+        if self.durable.is_none() {
+            return;
+        }
+        let rt = self.clone_runtime();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(DURABLE_TIMER_SCAN_INTERVAL_MS)).await;
+                rt.fire_due_timers().await;
+            }
+        });
+        self.workers
+            .register_loop("workflow_durable_timer_scanner", handle);
+    }
+
+    /// 启动恢复（应在 `start()` 时调用一次）：先触发到期定时器，再对账挂起实例。
+    ///
+    /// 顺序很重要：到期定时器优先，避免同一实例同时被「到期触发」与「对账重订阅」
+    /// 两条路径驱动。两条路径都是幂等的（`auto_resume` 有状态守卫）。
+    pub async fn recover_durable_state(&self) {
+        if self.durable.is_none() {
+            return;
+        }
+        self.fire_due_timers().await;
+        self.reconcile_resumable_instances(Arc::clone(&self.store))
+            .await;
+    }
+
+    /// 建立（或重启后重建）一个 listen 挂起实例的事件等待。
+    ///
+    /// 重启后原订阅随进程消失，必须重订阅 —— 否则实例永远等不到事件。
+    fn spawn_event_wait(
+        &self,
+        instance_id: String,
+        definition: WorkflowDefinition,
+        store: Arc<S>,
+        filter: EventFilter,
+        event_timeout_ms: Option<u64>,
+    ) {
+        let rt = self.clone_runtime();
+        // 多事件类型：event 状态多 onEvents / eventConditions 多条件
+        let filter_types: Vec<String> = if !filter.event_types.is_empty() {
+            filter.event_types.clone()
+        } else if let Some(et) = filter.event_type.clone() {
+            vec![et]
+        } else {
+            vec![]
+        };
+        let filter_source = filter.source.clone();
+        let filter_subject = filter.subject.clone();
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = Arc::clone(&completed);
+        let handle = tokio::spawn(async move {
+            let timeout_ms = event_timeout_ms.unwrap_or(60 * 60 * 1000);
+            let type_refs: Vec<&str> = filter_types.iter().map(|s| s.as_str()).collect();
+            let arrived_type = rt
+                .event_provider
+                .wait_for_event(
+                    &type_refs,
+                    filter_source.as_deref(),
+                    filter_subject.as_deref(),
+                    timeout_ms,
+                )
+                .await;
+            if let Some(et) = arrived_type {
+                rt.resume_by_event(instance_id, definition, store, et).await;
+            }
+            // 走到这一行才算正常收尾；中途 panic 则不置位（由 `WorkerLiveness` 报出）。
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        // 一次性 worker：正常结束（事件到达/超时）是预期行为，不记为故障。
+        self.workers
+            .register_oneshot("workflow_event_wait".to_string(), handle, completed);
+    }
+
+    /// 触发所有到期的持久化定时器。
+    async fn fire_due_timers(&self) {
+        let Some(durable) = &self.durable else {
+            return;
+        };
+        let now = self.clock.now_ms();
+        let due = match durable.timers.due(now, 64).await {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        for rec in due {
+            self.fire_timer(rec).await;
+        }
+    }
+
+    /// 根据一条到期定时器记录触发对应处理（状态守卫在 `auto_resume`/`apply_timeout`）。
+    async fn fire_timer(&self, rec: TimerRecord) {
+        let Some(durable) = &self.durable else {
+            return;
+        };
+        let store = Arc::clone(&self.store);
+        match rec.kind.clone() {
+            TimerKind::AutoResume { reason } => {
+                let inst = match store.load_instance(&rec.instance_id).await {
+                    Ok(Some(i)) => i,
+                    // 实例已删除/读不到：定时器成陈旧记录，移除
+                    _ => {
+                        let _ = durable.timers.remove(&rec.id).await;
+                        return;
+                    }
+                };
+                // 陈旧定时器守卫：`fire_at_ms` 必须等于**当前**挂起的 `until_ms`。
+                // 不相等说明这条记录对应的是一个已被取代的挂起（重复键、人工改期、
+                // 时钟回拨）。没有它，retry 会被陈旧定时器多驱动一轮 —— 重试预算
+                // 提前耗尽（RECOVERY.md 记录了修复前的实测）。
+                let current_until = inst.suspension_meta.as_ref().and_then(|m| m.until_ms);
+                let still = inst.status == InstanceStatus::Waiting
+                    && inst.suspension_meta.as_ref().map(|m| m.reason.as_str())
+                        == Some(reason.as_str())
+                    && current_until == Some(rec.fire_at_ms);
+                if !still {
+                    let _ = durable.timers.remove(&rec.id).await;
+                    return;
+                }
+                let def = match store
+                    .load_definition(
+                        &inst.definition_ns,
+                        &inst.definition_name,
+                        &inst.definition_version,
+                    )
+                    .await
+                {
+                    Ok(Some(d)) => d,
+                    // 定义暂读不到：保留定时器，下一 tick 再试
+                    _ => return,
+                };
+                let _ = durable.timers.remove(&rec.id).await;
+                self.auto_resume(rec.instance_id.clone(), def, store, &reason)
+                    .await;
+            }
+            TimerKind::Timeout { expected_index } => {
+                let _ = durable.timers.remove(&rec.id).await;
+                self.apply_timeout(rec.instance_id.clone(), store, expected_index)
+                    .await;
+            }
+        }
+    }
+
+    /// 对账可恢复实例：重启后重新驱动/重订阅挂起的 Waiting 实例。
+    ///
+    /// - `listen`：重建事件等待（重订阅）；
+    /// - `wait` / `retry`：补写持久化定时器；已到期则立即触发；
+    /// - 其它（`signal` / 子流程）：人工恢复或由子流程扫描器负责，这里不驱动。
+    async fn reconcile_resumable_instances(&self, store: Arc<S>) {
+        let Ok((instances, _next)) = store.list_instances(None, None, usize::MAX, None).await
+        else {
+            return;
+        };
+        let Some(durable) = &self.durable else {
+            return;
+        };
+        let now = self.clock.now_ms();
+        for inst in instances {
+            if inst.status != InstanceStatus::Waiting {
+                continue;
+            }
+            let Some(meta) = inst.suspension_meta.clone() else {
+                continue;
+            };
+            match meta.reason.as_str() {
+                "listen" => {
+                    let def = match store
+                        .load_definition(
+                            &inst.definition_ns,
+                            &inst.definition_name,
+                            &inst.definition_version,
+                        )
+                        .await
+                    {
+                        Ok(Some(d)) => d,
+                        _ => continue,
+                    };
+                    let filter = meta.event_filter.clone().unwrap_or(EventFilter {
+                        event_type: None,
+                        event_types: vec![],
+                        source: None,
+                        subject: None,
+                    });
+                    self.spawn_event_wait(inst.id.clone(), def, Arc::clone(&store), filter, None);
+                }
+                "wait" | "retry" => {
+                    let due = meta.until_ms.unwrap_or(now);
+                    let rec = TimerRecord::auto_resume(&inst.id, &meta.reason, due, now);
+                    let _ = durable.timers.schedule(&rec).await;
+                }
+                _ => {}
+            }
+        }
+        // 补写的定时器里可能已经到期（崩溃窗口 / 恢复耗时），统一再触发一轮。
+        self.fire_due_timers().await;
     }
 
     /// spawn 一个**一次性** drive 任务，并把它"是否正常收尾"变成可拉取的事实。
@@ -865,6 +1090,14 @@ where
     }
 
     /// 发布生命周期 CloudEvent（标准 Lifecycle Events）
+    ///
+    /// 注入持久化 outbox 后，事件先落 outbox 再经 relay 投递：状态与事件在同一
+    /// KV Txn 提交（`AtomicOutboxCommit` 可用时），进程崩溃不会留下「状态已改而
+    /// 事件缺失」的窗口。
+    ///
+    /// 发布出口只有一个：注入 outbox 时**不**再直发进程内 `event_provider`
+    /// （否则同一事件会有两条 ID 不同的副本，下游按 `event_id` 去重失效）。
+    /// 未注入时行为与旧路径逐字相同。
     async fn emit_lifecycle(&self, event_type: &str, inst: &WorkflowInstance) {
         let data = serde_json::json!({
             "workflowId": inst.id,
@@ -875,23 +1108,62 @@ where
             "output": inst.output,
             "fault": inst.fault,
         });
-        self.event_provider
-            .emit(event_type, Some("coord/workflow"), &data)
-            .await;
+        if let Some(durable) = &self.durable {
+            let record = OutboxRecord::lifecycle(
+                &inst.id,
+                event_type,
+                data,
+                self.clock.now_ms(),
+                format!("evt-{}", uuid::Uuid::new_v4()),
+            );
+            // 同事务提交优先；比较失败/不可用时退化为分步 append（`id` 唯一，
+            // 失败的事务什么都没写 ⇒ 不会产生重发）。
+            let committed = match &durable.atomic_commit {
+                Some(commit) => commit
+                    .commit_state_and_outbox(inst, &record, None)
+                    .await
+                    .unwrap_or(false),
+                None => false,
+            };
+            if !committed {
+                let _ = durable.outbox.append(&record).await;
+            }
+            // 注入 outbox 后**不再**直发进程内事件总线：发布职责归 relay 一个出口，
+            // 否则同一生命周期事件会出现两条 ID 不同的副本（去重失效）。
+        } else {
+            self.event_provider
+                .emit(event_type, Some("coord/workflow"), &data)
+                .await;
+        }
     }
 
-    /// 调度自动恢复：delay 后按 reason 恢复挂起实例
+    /// 调度自动恢复：`due_ms` 到期后按 reason 恢复挂起实例
     ///
     /// - reason="wait"：完成当前 wait 帧并推进到下一任务
     /// - reason="retry"：重新执行当前任务（重试）
+    ///
+    /// `due_ms` 必须是**写进 `suspension_meta.until_ms` 的同一个值**。用
+    /// 「当前时间 + delay」重新推导会让持久化定时器的主键（含到期时间）与
+    /// 挂起元信息里的到期时间错开几毫秒 —— 重启对账就会再写一个**同语义不同键**
+    /// 的定时器，同一挂起被触发两次（retry 会因此多跑一轮，见 RECOVERY.md）。
     fn schedule_auto_resume(
         &self,
         instance_id: String,
         definition: WorkflowDefinition,
         store: Arc<S>,
-        delay_ms: u64,
+        due_ms: i64,
         reason: String,
     ) {
+        let now_ms = self.clock.now_ms();
+        let delay_ms = (due_ms - now_ms).max(0) as u64;
+        if let Some(durable) = &self.durable {
+            // 先落 KV：进程内定时器随进程消失，持久化定时器才是重启后能补上的那半。
+            let timers = Arc::clone(&durable.timers);
+            let rec = TimerRecord::auto_resume(&instance_id, &reason, due_ms, now_ms);
+            tokio::spawn(async move {
+                let _ = timers.schedule(&rec).await;
+            });
+        }
         let rt = self.clone_runtime();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -1004,6 +1276,19 @@ where
         after_ms: u64,
         expected_index: Option<usize>,
     ) {
+        if let Some(durable) = &self.durable {
+            let timers = Arc::clone(&durable.timers);
+            let now_ms = self.clock.now_ms();
+            let rec = TimerRecord::timeout(
+                &instance_id,
+                expected_index,
+                now_ms + after_ms as i64,
+                now_ms,
+            );
+            tokio::spawn(async move {
+                let _ = timers.schedule(&rec).await;
+            });
+        }
         let rt = self.clone_runtime();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(after_ms)).await;
@@ -1492,7 +1777,7 @@ where
                                             inst.id.clone(),
                                             definition.clone(),
                                             store.clone(),
-                                            delay,
+                                            until,
                                             "retry".to_string(),
                                         );
                                         break 'drive_loop;
@@ -1603,12 +1888,11 @@ where
                                     .await;
 
                                 // 自动恢复定时器（wait 到期后完成帧并推进）
-                                let wait_ms = (until_ms - self.clock.now_ms()).max(0) as u64;
                                 self.schedule_auto_resume(
                                     inst.id.clone(),
                                     definition.clone(),
                                     store.clone(),
-                                    wait_ms,
+                                    *until_ms,
                                     "wait".to_string(),
                                 );
                                 break 'drive_loop;
@@ -1650,37 +1934,13 @@ where
 
                                 // 主动事件等待（标准 Events：listen 升级为主动订阅 + correlation）：
                                 // 每个挂起实例持有独立订阅，事件到达 → 自动恢复该实例。
-                                let rt = self.clone_runtime();
-                                let wait_store = store.clone();
-                                let wait_def = definition.clone();
-                                let wait_id = inst.id.clone();
-                                // 多事件类型：event 状态多 onEvents / eventConditions 多条件
-                                let filter_types: Vec<String> = if !filter.event_types.is_empty() {
-                                    filter.event_types.clone()
-                                } else if let Some(et) = filter.event_type.clone() {
-                                    vec![et]
-                                } else {
-                                    vec![]
-                                };
-                                let filter_source = filter.source.clone();
-                                let filter_subject = filter.subject.clone();
-                                tokio::spawn(async move {
-                                    let timeout_ms = event_timeout_ms.unwrap_or(60 * 60 * 1000);
-                                    let type_refs: Vec<&str> =
-                                        filter_types.iter().map(|s| s.as_str()).collect();
-                                    let arrived_type = rt
-                                        .event_provider
-                                        .wait_for_event(
-                                            &type_refs,
-                                            filter_source.as_deref(),
-                                            filter_subject.as_deref(),
-                                            timeout_ms,
-                                        )
-                                        .await;
-                                    if let Some(et) = arrived_type {
-                                        rt.resume_by_event(wait_id, wait_def, wait_store, et).await;
-                                    }
-                                });
+                                self.spawn_event_wait(
+                                    inst.id.clone(),
+                                    definition.clone(),
+                                    Arc::clone(&store),
+                                    filter.clone(),
+                                    event_timeout_ms,
+                                );
                                 break 'drive_loop;
                             }
                             SuspendReason::WaitingForSignal { .. } => {
@@ -2140,6 +2400,7 @@ where
             lease: self.lease.clone(),
             lease_skipped: Arc::clone(&self.lease_skipped),
             cas_conflicts: Arc::clone(&self.cas_conflicts),
+            durable: self.durable.clone(),
         }
     }
 }
