@@ -8,7 +8,7 @@
 // ```text
 // /_workflow/v3/outbox/records/{aggregate_id}/{sequence:020}   → OutboxRecord JSON（权威归档）
 // /_workflow/v3/outbox/ids/{event_id}                          → 记录键（幂等索引）
-// /_workflow/v3/outbox/seq/{aggregate_id}                      → 该聚合的 seq 计数器
+// /_workflow/v3/outbox/seq/{aggregate_id}                      → 该聚合的 seq 计数器（prune 永久保留）
 // /_workflow/v3/outbox/pending/{next_attempt_at:020}:{event_id} → OutboxRecord JSON（到期扫描索引）
 // /_workflow/v3/timers/{fire_at_ms:020}:{instance_id}:{kind}   → TimerRecord JSON
 // ```
@@ -264,6 +264,21 @@ impl KvOutboxStore {
     }
 }
 
+/// 保留窗口的计时基准（删除条件缺一不可的两项之一）；`None` = 不可删（未投递）。
+///
+/// - `Delivered`：投递成功时刻（`delivered_at_ms`）；缺字段的老记录退回入库时刻。
+/// - `Dead`：末次尝试时刻，即 `max(created_at_ms, next_attempt_at_ms)`。记录不携带
+///   「末次尝试」的独立时间戳，而是每次失败重试把 `next_attempt_at_ms` 写成该次
+///   尝试的到期时刻且进入死信后不再更新，无重试时它就是入库时刻。仅以入库时刻为
+///   基准，会在旧事件刚失败进死信时把它当成早已过期删掉。
+fn retention_basis_ms(rec: &OutboxRecord) -> Option<i64> {
+    match rec.status {
+        OutboxStatus::Pending => None,
+        OutboxStatus::Delivered => Some(rec.delivered_at_ms.unwrap_or(rec.created_at_ms)),
+        OutboxStatus::Dead => Some(rec.created_at_ms.max(rec.next_attempt_at_ms)),
+    }
+}
+
 #[async_trait]
 impl OutboxStore for KvOutboxStore {
     async fn append(&self, rec: &OutboxRecord) -> Result<(), StoreError> {
@@ -390,6 +405,63 @@ impl OutboxStore for KvOutboxStore {
                 .then(a.sequence.cmp(&b.sequence))
         });
         Ok(out)
+    }
+
+    /// 回收已终结且过保留窗口的记录（删除条件缺一不可，见 trait 契约）。
+    ///
+    /// 扫描 `records/`（权威归档，含删改）逐个判定，每条一个 Txn 删
+    /// `records/` + `ids/` + 残留的 `pending/`：
+    ///
+    /// - compare 用「记录值未变」做 CAS：清扫期间记录被并发重写（例如死信被重新投递、
+    ///   已投递记录被补写时间）时该条本轮跳过，不会把新状态删掉；
+    /// - `seq/` **不删** —— 它是 per-instance 序号单调的唯一载体，删了会让清理后新事件
+    ///   的序号与已投递事件的历史序号重叠；
+    /// - 一次最多删 `limit` 条，扫不完/超额的由后续 tick 继续分批回收。
+    async fn prune(
+        &self,
+        now_ms: i64,
+        retention_ms: i64,
+        limit: usize,
+    ) -> Result<usize, StoreError> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let prefix = Self::records_prefix();
+        let pairs = self
+            .inner
+            .client
+            .kv()
+            .range(&prefix, &prefix_end(&prefix), 0, 0)
+            .await
+            .map_err(|e| StoreError::IoError(e.to_string()))?;
+
+        let mut pruned = 0usize;
+        for (record_key, value) in pairs {
+            if pruned >= limit {
+                break;
+            }
+            let Ok(rec) = serde_json::from_slice::<OutboxRecord>(&value) else {
+                continue;
+            };
+            let Some(basis_ms) = retention_basis_ms(&rec) else {
+                continue; // Pending：未投递不删
+            };
+            if basis_ms.saturating_add(retention_ms) >= now_ms {
+                continue;
+            }
+            let ops = vec![
+                Self::del(record_key.clone()),
+                Self::del(Self::id_key(&rec.id)),
+                Self::del(Self::pending_key(rec.next_attempt_at_ms, &rec.id)),
+            ];
+            if self
+                .txn(vec![Self::compare_value_equal(record_key, value)], ops)
+                .await?
+            {
+                pruned += 1;
+            }
+        }
+        Ok(pruned)
     }
 }
 

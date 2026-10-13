@@ -446,6 +446,324 @@ async fn relay_delivers_all_records_and_consumer_dedups_by_event_id() {
     );
 }
 
+// ─── outbox 保留清理（守卫式 prune） ───
+
+/// 未投递不删：`Pending` 记录无论多旧都不在清理范围内。
+#[tokio::test]
+async fn prune_never_deletes_pending_records() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+    let kv = CoordKv::new(&inner);
+
+    let ancient = now_ms() - 365 * 24 * 3600 * 1000;
+    store
+        .append(&outbox_rec(
+            "prune-pending",
+            "com.china-workflow.spike3.step",
+            "evt-ancient-pending",
+            ancient,
+        ))
+        .await
+        .unwrap();
+
+    let pruned = store.prune(now_ms(), 1_000, 64).await.expect("prune");
+    assert_eq!(pruned, 0, "Pending 记录永不删（无论多旧）");
+    assert!(
+        kv.get(&kv_outbox_id_key("evt-ancient-pending"))
+            .await
+            .is_some(),
+        "pending 的幂等索引仍在"
+    );
+    assert!(
+        !store.pending(now_ms(), 64).await.unwrap().is_empty(),
+        "pending 仍可被 relay 轮询到"
+    );
+}
+
+/// 已投递 + 过保留窗口 ⇒ 删记录键、幂等索引与残留 pending 索引；`Pending` 邻居保留。
+#[tokio::test]
+async fn prune_deletes_delivered_records_past_retention() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+    let kv = CoordKv::new(&inner);
+
+    let now = now_ms();
+    let created = now - 10 * 60 * 1000;
+    for (i, id) in ["evt-prune-1", "evt-prune-2"].iter().enumerate() {
+        store
+            .append(&outbox_rec(
+                "prune-delivered",
+                "com.china-workflow.spike3.step",
+                id,
+                created + i as i64,
+            ))
+            .await
+            .unwrap();
+        store.mark_delivered(id, now - 5 * 60 * 1000).await.unwrap();
+    }
+    store
+        .append(&outbox_rec(
+            "prune-delivered",
+            "com.china-workflow.spike3.step",
+            "evt-prune-keep",
+            created,
+        ))
+        .await
+        .unwrap();
+
+    let pruned = store.prune(now, 60_000, 64).await.expect("prune");
+    assert_eq!(pruned, 2, "两条已投递且过窗的记录被回收");
+
+    let mine: Vec<OutboxRecord> = OutboxStore::list_all(&*store)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.aggregate_id == "prune-delivered")
+        .collect();
+    assert_eq!(mine.len(), 1, "只剩未投递的那条: {mine:?}");
+    assert_eq!(mine[0].id, "evt-prune-keep");
+    assert!(
+        kv.get(&kv_outbox_id_key("evt-prune-1")).await.is_none(),
+        "幂等索引 ids/ 随记录一起删"
+    );
+    assert!(
+        kv.get(&kv_outbox_record_key("prune-delivered", 1))
+            .await
+            .is_none(),
+        "权威归档 records/ 已删（直读 KV）"
+    );
+    assert!(
+        kv.get(&kv_outbox_seq_key("prune-delivered"))
+            .await
+            .is_some(),
+        "seq/ 计数器不随清理删除"
+    );
+}
+
+/// `Dead` 以末次尝试时刻计时（无重试时即入库时刻）：刚重试过的死信未过窗不删。
+#[tokio::test]
+async fn prune_dead_records_age_from_last_attempt() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+
+    let now = now_ms();
+    let created = now - 24 * 3600 * 1000;
+    // 入库很旧且末次尝试也已过窗 ⇒ 删
+    store
+        .append(&outbox_rec(
+            "prune-dead",
+            "com.china-workflow.spike3.step",
+            "evt-dead-old",
+            created,
+        ))
+        .await
+        .unwrap();
+    store
+        .mark_retry("evt-dead-old", 3, now - 3600 * 1000)
+        .await
+        .unwrap();
+    store.mark_dead("evt-dead-old", 4).await.unwrap();
+    // 入库同样很旧，但刚重试过 ⇒ 保留（不因 created_at 老就提前删）
+    store
+        .append(&outbox_rec(
+            "prune-dead",
+            "com.china-workflow.spike3.step",
+            "evt-dead-fresh",
+            created,
+        ))
+        .await
+        .unwrap();
+    store
+        .mark_retry("evt-dead-fresh", 3, now - 10_000)
+        .await
+        .unwrap();
+    store.mark_dead("evt-dead-fresh", 4).await.unwrap();
+
+    let pruned = store.prune(now, 60_000, 64).await.expect("prune");
+    assert_eq!(pruned, 1, "只回收末次尝试已过窗的死信");
+    let ids: Vec<String> = OutboxStore::list_all(&*store)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.aggregate_id == "prune-dead")
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(ids, vec!["evt-dead-fresh".to_string()]);
+}
+
+/// 序号不回退：清理后同一聚合的新事件接着已删序号继续 +1。
+#[tokio::test]
+async fn prune_does_not_reset_sequence_counter() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+    let kv = CoordKv::new(&inner);
+
+    let now = now_ms();
+    let created = now - 3600 * 1000;
+    for i in 1..=3u64 {
+        store
+            .append(&outbox_rec(
+                "prune-seq",
+                "com.china-workflow.spike3.step",
+                &format!("evt-seq-{i}"),
+                created + i as i64,
+            ))
+            .await
+            .unwrap();
+    }
+    let seqs: Vec<u64> = OutboxStore::list_all(&*store)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.aggregate_id == "prune-seq")
+        .map(|r| r.sequence)
+        .collect();
+    assert_eq!(seqs, vec![1, 2, 3], "初始序号 1..3");
+
+    for i in 1..=3u64 {
+        store
+            .mark_delivered(&format!("evt-seq-{i}"), now - 1800 * 1000)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store.prune(now, 60_000, 64).await.unwrap(),
+        3,
+        "三条已投递记录全部回收"
+    );
+    assert_eq!(
+        kv.get(&kv_outbox_seq_key("prune-seq")).await,
+        Some(b"3".to_vec()),
+        "seq 计数器在清理后仍是 3"
+    );
+
+    store
+        .append(&outbox_rec(
+            "prune-seq",
+            "com.china-workflow.spike3.step",
+            "evt-seq-4",
+            now,
+        ))
+        .await
+        .unwrap();
+    let next = OutboxStore::list_all(&*store)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == "evt-seq-4")
+        .expect("新事件已入库");
+    assert_eq!(next.sequence, 4, "清理后新事件接着 4，序号不回退/不重叠");
+}
+
+/// 幂等 + 单批上限：重复 prune 返回 0，每轮最多删 `limit` 条。
+#[tokio::test]
+async fn repeated_prune_is_idempotent_and_bounded_by_limit() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+
+    let now = now_ms();
+    let created = now - 10 * 60 * 1000;
+    for i in 1..=3u64 {
+        let id = format!("evt-idem-{i}");
+        store
+            .append(&outbox_rec(
+                "prune-idem",
+                "com.china-workflow.spike3.step",
+                &id,
+                created + i as i64,
+            ))
+            .await
+            .unwrap();
+        store
+            .mark_delivered(&id, now - 5 * 60 * 1000)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(store.prune(now, 60_000, 1).await.unwrap(), 1, "单批上限");
+    assert_eq!(store.prune(now, 60_000, 1).await.unwrap(), 1);
+    assert_eq!(store.prune(now, 60_000, 1).await.unwrap(), 1);
+    let after = store.prune(now, 60_000, 1).await.unwrap();
+    assert_eq!(after, 0, "同日重复 tick 幂等：已无过窗记录");
+    assert!(
+        OutboxStore::list_all(&*store)
+            .await
+            .unwrap()
+            .into_iter()
+            .all(|r| r.aggregate_id != "prune-idem"),
+        "三次清理后聚合记录已空"
+    );
+}
+
+/// relay tick 出口：投递与回收同轮完成，`RelayReport.pruned` 是清理的可观测出口。
+#[tokio::test]
+async fn relay_tick_reports_pruned_after_delivery() {
+    let env = setup().await;
+    let inner = env.inner();
+    let mq = start_mq(&env.mq_dir()).await;
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+
+    let now = now_ms();
+    // 早先 tick 已投递、现已过窗的记录：本轮应被回收
+    store
+        .append(&outbox_rec(
+            "prune-relay",
+            "com.china-workflow.spike3.step",
+            "evt-relay-old",
+            now - 600_000,
+        ))
+        .await
+        .unwrap();
+    store
+        .mark_delivered("evt-relay-old", now - 300_000)
+        .await
+        .unwrap();
+    // 本轮新投递的记录：按本 tick 时间计时，同一轮内不回收
+    store
+        .append(&outbox_rec(
+            "prune-relay",
+            "com.china-workflow.spike3.step",
+            "evt-relay-new",
+            now,
+        ))
+        .await
+        .unwrap();
+
+    let sink: Arc<dyn OutboxSink> = Arc::new(MqOutboxSink::new(Arc::clone(&mq), TOPIC));
+    let relay = OutboxRelay::new(
+        Arc::clone(&store) as Arc<dyn OutboxStore>,
+        sink,
+        RelayPolicy {
+            retention_ms: 60_000,
+            ..RelayPolicy::default()
+        },
+    );
+
+    let first = relay.tick(now).await.unwrap();
+    assert_eq!(first.delivered, 1, "本轮投递新记录");
+    assert_eq!(first.pruned, 1, "同轮回收过窗的旧已投递记录");
+    let ids: Vec<String> = OutboxStore::list_all(&*store)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.aggregate_id == "prune-relay")
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(ids, vec!["evt-relay-new".to_string()], "旧记录已回收");
+
+    let within = relay.tick(now + 30_000).await.unwrap();
+    assert_eq!(within.delivered, 0);
+    assert_eq!(within.pruned, 0, "还在保留窗内：不回收");
+
+    let after = relay.tick(now + 61_000).await.unwrap();
+    assert_eq!(after.pruned, 1, "过窗后由后续 tick 回收");
+}
+
 /// 判据 3（问题 4）：持久化定时器可按到期时间扫描与移除。
 #[tokio::test]
 async fn durable_timers_scan_by_due_time() {
@@ -862,6 +1180,18 @@ fn now_ms() -> i64 {
 
 fn kv_instance_key(id: &str) -> Vec<u8> {
     format!("/_workflow/v3/instances/{id}").into_bytes()
+}
+
+fn kv_outbox_id_key(id: &str) -> Vec<u8> {
+    format!("/_workflow/v3/outbox/ids/{id}").into_bytes()
+}
+
+fn kv_outbox_record_key(aggregate: &str, sequence: u64) -> Vec<u8> {
+    format!("/_workflow/v3/outbox/records/{aggregate}/{sequence:020}").into_bytes()
+}
+
+fn kv_outbox_seq_key(aggregate: &str) -> Vec<u8> {
+    format!("/_workflow/v3/outbox/seq/{aggregate}").into_bytes()
 }
 
 /// 直读 KV（证据断言用）。

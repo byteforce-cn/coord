@@ -171,6 +171,24 @@ pub trait OutboxStore: Send + Sync {
     /// 标记重试耗尽（进死信状态，保留记录可查）。
     async fn mark_dead(&self, id: &str, attempts: u32) -> Result<(), StoreError>;
 
+    /// 回收已终结（`Delivered`/`Dead`）且已过保留窗口的记录，返回本次删除条数。
+    ///
+    /// 删除条件缺一不可：状态是终态，且「计时基准 + `retention_ms` < `now_ms`」。
+    /// `Pending`（未投递）**永不**删除。实现必须保留 per-instance 序号计数器
+    /// （见 [`Self::append`] 的分配契约）：清理后新事件接着已删序号继续递增，
+    /// 否则消费者的 per-instance 序号会回退/重叠。
+    ///
+    /// `limit` 是单批上限（一个 tick 最多删多少条），未清完的由后续 tick 继续。
+    /// 默认实现为空操作：内存实现没有需要回收的持久保留。
+    async fn prune(
+        &self,
+        _now_ms: i64,
+        _retention_ms: i64,
+        _limit: usize,
+    ) -> Result<usize, StoreError> {
+        Ok(0)
+    }
+
     /// 列出全部记录（证据导出/对账）。
     async fn list_all(&self) -> Result<Vec<OutboxRecord>, StoreError>;
 }
@@ -341,6 +359,9 @@ pub struct RelayPolicy {
     pub base_backoff_ms: u64,
     /// 退避上限
     pub max_backoff_ms: u64,
+    /// 已终结记录（`Delivered`/`Dead`）的保留窗口（毫秒）；超窗后由 tick 回收。
+    /// 未投递的 `Pending` 不受它影响。
+    pub retention_ms: u64,
 }
 
 impl Default for RelayPolicy {
@@ -350,6 +371,7 @@ impl Default for RelayPolicy {
             max_attempts: 8,
             base_backoff_ms: 200,
             max_backoff_ms: 30_000,
+            retention_ms: 24 * 60 * 60 * 1000,
         }
     }
 }
@@ -361,6 +383,8 @@ pub struct RelayReport {
     pub delivered: usize,
     pub retried: usize,
     pub dead: usize,
+    /// 本轮回收的已终结记录条数（内部清理，不产生事件）
+    pub pruned: usize,
 }
 
 /// Outbox Relay —— 轮询待投递记录，投递成功后标位，失败指数退避。
@@ -422,6 +446,13 @@ impl OutboxRelay {
                 }
             }
         }
+        // 保留回收挂在本 tick：relay 循环是唯一的周期驱动，没有独立的清理任务。
+        // 放在投递之后，使本轮投递结果先落盘、再按它评估清理窗口。
+        let retention_ms = i64::try_from(self.policy.retention_ms).unwrap_or(i64::MAX);
+        report.pruned = self
+            .store
+            .prune(now_ms, retention_ms, self.policy.batch)
+            .await?;
         Ok(report)
     }
 }
@@ -919,6 +950,7 @@ mod tests {
                 base_backoff_ms: 1,
                 max_backoff_ms: 1,
                 batch: 8,
+                ..RelayPolicy::default()
             },
         );
         assert_eq!(relay.tick(0).await.unwrap().retried, 1);
