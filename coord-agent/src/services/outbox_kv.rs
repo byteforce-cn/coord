@@ -271,6 +271,9 @@ impl KvOutboxStore {
 ///   「末次尝试」的独立时间戳，而是每次失败重试把 `next_attempt_at_ms` 写成该次
 ///   尝试的到期时刻且进入死信后不再更新，无重试时它就是入库时刻。仅以入库时刻为
 ///   基准，会在旧事件刚失败进死信时把它当成早已过期删掉。
+///   边界：`max_attempts == 1` 时首次失败即进死信、基址可能是旧的到期时刻，记录
+///   可在进死信的**同一 tick** 被回收（丢失死信证据）；默认策略 `max_attempts = 8`
+///   下每次失败都经 `mark_retry` 重置基址，此边界不可达。
 fn retention_basis_ms(rec: &OutboxRecord) -> Option<i64> {
     match rec.status {
         OutboxStatus::Pending => None,
@@ -416,7 +419,11 @@ impl OutboxStore for KvOutboxStore {
     ///   已投递记录被补写时间）时该条本轮跳过，不会把新状态删掉；
     /// - `seq/` **不删** —— 它是 per-instance 序号单调的唯一载体，删了会让清理后新事件
     ///   的序号与已投递事件的历史序号重叠；
-    /// - 一次最多删 `limit` 条，扫不完/超额的由后续 tick 继续分批回收。
+    /// - 单次调用只扫**一个** `records/` 前缀窗口（`limit = 0` 的 range 被服务端
+    ///   `max_range_limit` 截断，无截断标记）；回收因而是**每次调用尽力而为**：只有
+    ///   当合格记录落在本次窗口内才会被回收，落在窗口外的要等后续 tick 重扫命中。
+    ///   「全前缀扫描 + 无分页游标」的代价与有界化（aged index / 续读游标）是 M2
+    ///   的跟进项，本实现不改键布局。
     async fn prune(
         &self,
         now_ms: i64,

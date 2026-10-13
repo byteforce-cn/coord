@@ -2028,7 +2028,21 @@ pub mod phase4 {
         relay_enabled: bool,
         /// Spike 3：relay 轮询间隔（毫秒）
         relay_interval_ms: u64,
+        /// durable 装配的 MQ 句柄 + 事件 topic（仅 durable 构造设置）。
+        ///
+        /// 装配期构造早于 `PluginManager::start_all()`（MQ 的 redb 尚未打开），
+        /// 构造时 `create_topic` 必然失败；因此 topic 的创建推迟到 `start()`——
+        /// 等 MQ 就绪后在第一个产出/订阅之前建 topic。
+        durable_mq: Option<Arc<crate::services::mq::MessageQueueService>>,
+        durable_topic: String,
     }
+
+    /// durable 装配的实例驱动租约 TTL（秒）。
+    ///
+    /// 续租间隔由 TTL 推导（`ttl/3`，见 `KvInstanceLease`）——30s TTL ⇒ 10s 续租，
+    /// 单次 KV 抖动或 GC 停顿不会立即丢失租约，同时驱动者在崩溃后 ≤30s 内可被
+    /// 其他进程接管。取值与 Task 3 的 spike2 并发判据一致。
+    const DURABLE_INSTANCE_LEASE_TTL_SECS: i64 = 30;
 
     /// Spike 3：持久化 outbox / 定时器接线选项。
     ///
@@ -2101,7 +2115,10 @@ pub mod phase4 {
         /// - 事件先落 KV outbox（`AtomicOutboxCommit` 时与状态同事务），
         ///   由 relay 投递到 MQ；
         /// - `wait`/`retry`/超时写持久化定时器，重启后扫描到期项；
-        /// - `listen` 用 MQ 订阅 + KV 持久化游标（重启续读）。
+        /// - `listen` 用 MQ 订阅 + KV 持久化游标（重启续读）；
+        /// - 实例驱动租约（`KvInstanceLease`，构造传入同一 outbox store）保证
+        ///   「一实例一驱动」；
+        /// - step token 存储（`KvStepStore`）为 `call` 派发登记幂等键。
         pub fn new_with_kv_store_durable(
             inner: Arc<AgentInner>,
             dispatch: &WorkflowDispatchConfig,
@@ -2110,10 +2127,13 @@ pub mod phase4 {
             use crate::services::mq_event_provider::{CursorStore, MqEventProvider};
             use crate::services::outbox_kv::{KvCursorStore, KvOutboxStore};
             use crate::services::outbox_relay::MqOutboxSink;
+            use crate::services::step_kv::KvStepStore;
+            use crate::services::workflow_lease::KvInstanceLease;
             use coord_core::workflow::durable::{
                 AtomicOutboxCommit, DurableSupport, DurableTimerStore, OutboxRelay, OutboxSink,
-                OutboxStore, RelayPolicy,
+                OutboxStore, RelayPolicy, StepTokenStore,
             };
+            use coord_core::workflow::ports::InstanceLease;
 
             let kv_store = Arc::new(KvWorkflowStore::new(Arc::clone(&inner)));
             let store: Arc<dyn WorkflowStore + Send + Sync> =
@@ -2136,23 +2156,39 @@ pub mod phase4 {
                     cursors,
                 ));
 
+            // step token 存储：`call` 派发前的幂等键（去重外部副作用），与 outbox
+            // 同在 `/_workflow/v3/` 键空间；注入后重试/恢复复用同一 token。
             let support = DurableSupport::new(
                 Arc::clone(&durable_kv) as Arc<dyn DurableTimerStore>,
                 Arc::clone(&durable_kv) as Arc<dyn OutboxStore>,
             )
-            .with_atomic_commit(Arc::clone(&durable_kv) as Arc<dyn AtomicOutboxCommit>);
+            .with_atomic_commit(Arc::clone(&durable_kv) as Arc<dyn AtomicOutboxCommit>)
+            .with_steps(Arc::new(KvStepStore::new(Arc::clone(&inner))) as Arc<dyn StepTokenStore>);
 
-            Self::assemble(
+            // 实例驱动租约：一实例一驱动；fenced_commit 复用同一 outbox store 的
+            // 键布局（见 `KvInstanceLease`）。
+            let instance_lease: Arc<dyn InstanceLease> = Arc::new(KvInstanceLease::new(
+                Arc::clone(&inner),
+                DURABLE_INSTANCE_LEASE_TTL_SECS,
+                Arc::clone(&durable_kv),
+            ));
+
+            let mut svc = Self::assemble(
                 store,
                 Some(kv_store),
                 Arc::new(HttpTaskDispatcher::from_config(dispatch)),
                 event_provider,
+                Some(instance_lease),
                 Some(support),
                 Some(Arc::clone(&durable_kv)),
                 Some(relay),
                 opts.relay_enabled,
                 opts.relay_interval_ms,
-            )
+            );
+            // topic 创建推迟到 `start()`（届时 MQ 已就绪）；此处只留句柄。
+            svc.durable_mq = Some(opts.mq);
+            svc.durable_topic = opts.topic;
+            svc
         }
 
         /// 共享装配：store + dispatcher 决定 runtime，其余字段相同（内存路径）。
@@ -2169,9 +2205,49 @@ pub mod phase4 {
                 None,
                 None,
                 None,
+                None,
                 false,
                 1000,
             )
+        }
+
+        /// 确保 durable 事件 topic 已创建（create-if-absent）。
+        ///
+        /// 只能在 MQ 就绪后调用：`create_topic` 要求 MQ 已 `start()`（redb 打开），
+        /// 而 durable 引擎的构造早于 `start_all()`。因此先**有界**等 `is_started`，
+        /// 超时则 fail-closed 报错（不静默不投递）。已存在时跳过——构造期若 MQ
+        /// 已启动（如测试先起 MQ），当时的 `create_topic` 已建过。
+        async fn ensure_durable_topic(
+            mq: &crate::services::mq::MessageQueueService,
+            topic: &str,
+        ) -> Result<(), String> {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !mq.is_started() {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "workflow durable: MQ service not started within 30s; cannot ensure \
+                         events topic '{topic}'"
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            if mq
+                .get_topic_config(topic)
+                .map_err(|e| format!("workflow durable: read topic '{topic}' failed: {e}"))?
+                .is_none()
+            {
+                // 与 `MqOutboxSink` / `MqEventProvider` 的建 topic 参数逐字一致。
+                // 并发创建竞争（already exists）视为已满足。
+                let _ = mq.create_topic(
+                    topic,
+                    crate::services::mq::TopicConfig {
+                        partitions: 1,
+                        retention_secs: 7 * 24 * 3600,
+                        max_message_size: 1024 * 1024,
+                    },
+                );
+            }
+            Ok(())
         }
 
         /// 装配入口（内存路径与 durable 路径共用；不破坏既有构造签名）。
@@ -2181,6 +2257,7 @@ pub mod phase4 {
             kv_store: Option<Arc<KvWorkflowStore>>,
             dispatcher: Arc<dyn TaskDispatcher + Send + Sync>,
             event_provider: Arc<dyn EventProvider + Send + Sync>,
+            instance_lease: Option<Arc<dyn coord_core::workflow::ports::InstanceLease>>,
             durable: Option<coord_core::workflow::durable::DurableSupport>,
             durable_store: Option<Arc<crate::services::outbox_kv::KvOutboxStore>>,
             outbox_relay: Option<Arc<coord_core::workflow::durable::OutboxRelay>>,
@@ -2200,6 +2277,9 @@ pub mod phase4 {
                 dispatcher,
                 event_provider,
             );
+            if let Some(lease) = instance_lease {
+                runtime = runtime.with_instance_lease(lease);
+            }
             if let Some(durable) = durable {
                 runtime = runtime.with_durable(durable);
             }
@@ -2214,6 +2294,8 @@ pub mod phase4 {
                 outbox_relay,
                 relay_enabled,
                 relay_interval_ms,
+                durable_mq: None,
+                durable_topic: String::new(),
             }
         }
 
@@ -2247,6 +2329,8 @@ pub mod phase4 {
                 outbox_relay: None,
                 relay_enabled: false,
                 relay_interval_ms: 1000,
+                durable_mq: None,
+                durable_topic: String::new(),
             }
         }
 
@@ -2637,6 +2721,8 @@ pub mod phase4 {
                 outbox_relay: self.outbox_relay.clone(),
                 relay_enabled: self.relay_enabled,
                 relay_interval_ms: self.relay_interval_ms,
+                durable_mq: self.durable_mq.clone(),
+                durable_topic: self.durable_topic.clone(),
             }
         }
     }
@@ -2657,6 +2743,13 @@ pub mod phase4 {
                     .await
                     .map_err(|e| format!("workflow KvWorkflowStore init failed: {e}"))?;
                 tracing::info!("Workflow engine started with KvWorkflowStore (raft-persisted)");
+            }
+
+            // durable 装配：此刻 MQ 插件已 start()（装配期构造早于 start_all，构造时
+            // 建 topic 必失败）。在拉起 relay / 恢复驱动之前确保事件 topic 存在，
+            // 否则产出与订阅都会报 topic not found。
+            if let Some(mq) = &self.durable_mq {
+                Self::ensure_durable_topic(mq, &self.durable_topic).await?;
             }
 
             // Spike 3：持久化恢复 —— 到期定时器先触发，再对账挂起实例（重订阅 listen、

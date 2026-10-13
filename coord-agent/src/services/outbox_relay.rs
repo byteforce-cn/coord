@@ -93,13 +93,37 @@ impl OutboxSink for MqOutboxSink {
 }
 
 /// 运行 relay 循环直到进程结束。
+///
+/// `tick()` 的返回**不得静默丢弃**：它同时承载投递结果与保留清理计数，
+/// 一次失败的 tick 意味着本轮到期的投递与回收都停摆——留一条 WARN 让运维
+/// 可见；`pruned > 0` 是真实的回收事件，用 INFO 留证（`RelayReport` 无指标
+/// 出口，日志是当前唯一的可读路径）。
 pub async fn run_outbox_relay_loop(relay: Arc<OutboxRelay>, interval: Duration) {
     loop {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        let _ = relay.tick(now_ms).await;
+        match relay.tick(now_ms).await {
+            Ok(report) => {
+                if report.pruned > 0 {
+                    tracing::info!(
+                        pruned = report.pruned,
+                        delivered = report.delivered,
+                        retried = report.retried,
+                        dead = report.dead,
+                        "outbox relay reclaimed records past retention"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "outbox relay tick failed: due deliveries and retention reclamation \
+                     are stalled until a tick succeeds"
+                );
+            }
+        }
         tokio::time::sleep(interval).await;
     }
 }

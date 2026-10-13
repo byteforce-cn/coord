@@ -999,6 +999,43 @@ async fn wait_instance_recovers_after_engine_restart() {
     );
 }
 
+/// Topic 生命周期回归：真实 `serve_with_shutdown` 中 durable 引擎**先构造**、
+/// MQ 插件**后 `start()`**——构造时的 `create_topic` 因 MQ 未起而失败，topic
+/// 必须由 `start()` 在 MQ 就绪后补建，否则 relay 产出/ listen 订阅都报
+/// topic not found。此处刻意反向于 harness（先造引擎、后起 MQ）复现该顺序。
+#[tokio::test]
+async fn durable_service_creates_events_topic_after_late_mq_start() {
+    let env = setup().await;
+    let inner = env.inner();
+
+    // MQ 构造但**不** start。
+    let mq = Arc::new(MessageQueueService::new(env.mq_dir(), 1024 * 1024 * 1024));
+    let svc = WorkflowEngineService::new_with_kv_store_durable(
+        Arc::clone(&inner),
+        &WorkflowDispatchConfig::default(),
+        DurableEngineOptions {
+            mq: Arc::clone(&mq),
+            topic: TOPIC.to_string(),
+            relay_enabled: true,
+            relay_interval_ms: 100,
+        },
+    );
+    // 构造时 MQ 未起（`get_topic_config` 读表需 MQ 已 start，故此断言只能验证
+    // 未启动这一前置本身）：构造时的 `create_topic` 因而失败。
+    assert!(
+        !mq.is_started(),
+        "MQ must not be started at engine construction"
+    );
+
+    // MQ 就绪后再启引擎：`start()` 必须补建 topic。
+    mq.start().await.expect("start mq");
+    svc.start().await.expect("engine start");
+    assert!(
+        mq.get_topic_config(TOPIC).unwrap().is_some(),
+        "start() must create the durable events topic once MQ is up"
+    );
+}
+
 /// listen 挂起实例在引擎重启后重新订阅，事件到达即恢复。
 #[tokio::test]
 async fn listen_instance_resubscribes_after_engine_restart() {
