@@ -1,0 +1,13 @@
+[package]
+name = "spike-approval-model"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "SPIKE 2026-10 Spike 1 — 审批工作流 v2 内存状态模型（决策证据，非生产代码）"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 独立于 coord 根工作区：Spike 产物不登记进仓库构建图
+[workspace]

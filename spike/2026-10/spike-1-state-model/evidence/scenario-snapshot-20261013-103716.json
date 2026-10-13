@@ -1,0 +1,170 @@
+{
+  "branches": {
+    "branch-0002": {
+      "attempt": 1,
+      "closed_at": 1800,
+      "created_at": 1100,
+      "id": "branch-0002",
+      "instance_id": "inst-0001",
+      "join": "all",
+      "node": "apply",
+      "parent_branch_id": null,
+      "reject": "any_reject",
+      "round_ids": [
+        "round-0003"
+      ],
+      "scope": {},
+      "status": "rejected"
+    }
+  },
+  "instance": {
+    "audit": [
+      {
+        "action": "enter_branch",
+        "at": 1100,
+        "branch": "branch-0002",
+        "by": "engine",
+        "detail": "node=apply attempt=1"
+      },
+      {
+        "action": "add_sign",
+        "at": 1400,
+        "branch": "branch-0002",
+        "by": "admin",
+        "detail": "seats=1 comment=追加分管领导"
+      }
+    ],
+    "context": {},
+    "created_at": 1000,
+    "definition_name": "leave-approval",
+    "definition_ns": "eis",
+    "definition_version": "1.0.0",
+    "id": "inst-0001",
+    "initiator": "zhangsan",
+    "jump_count": 0,
+    "returns": [],
+    "revision": 8,
+    "root_branch_id": "branch-0002",
+    "status": "rejected",
+    "updated_at": 1800
+  },
+  "rounds": {
+    "round-0003": {
+      "branch_id": "branch-0002",
+      "closed_at": 1800,
+      "completed_count": 3,
+      "id": "round-0003",
+      "number": 1,
+      "opened_at": 1200,
+      "rejected_count": 1,
+      "status": "rejected",
+      "total_count": 4
+    }
+  },
+  "tasks": {
+    "task-0004": {
+      "assignee": "alice",
+      "branch_id": "branch-0002",
+      "candidates": [],
+      "created_at": 1200,
+      "deadline": null,
+      "delegation": null,
+      "id": "task-0004",
+      "kind": "approval",
+      "round_id": "round-0003",
+      "scope": {},
+      "status": "completed",
+      "transferred_from": [],
+      "updated_at": 1300,
+      "votes": [
+        {
+          "actor": "alice",
+          "at": 1300,
+          "comment": "同意",
+          "decision": "approve",
+          "on_behalf_of": null,
+          "round_id": "round-0003"
+        }
+      ]
+    },
+    "task-0005": {
+      "assignee": "bob",
+      "branch_id": "branch-0002",
+      "candidates": [],
+      "created_at": 1200,
+      "deadline": null,
+      "delegation": {
+        "from": "bob",
+        "granted_at": 1500,
+        "to": "dave"
+      },
+      "id": "task-0005",
+      "kind": "approval",
+      "round_id": "round-0003",
+      "scope": {},
+      "status": "completed",
+      "transferred_from": [],
+      "updated_at": 1600,
+      "votes": [
+        {
+          "actor": "dave",
+          "at": 1600,
+          "comment": "代批",
+          "decision": "approve",
+          "on_behalf_of": "bob",
+          "round_id": "round-0003"
+        }
+      ]
+    },
+    "task-0006": {
+      "assignee": "carol",
+      "branch_id": "branch-0002",
+      "candidates": [],
+      "created_at": 1200,
+      "deadline": null,
+      "delegation": null,
+      "id": "task-0006",
+      "kind": "approval",
+      "round_id": "round-0003",
+      "scope": {},
+      "status": "completed",
+      "transferred_from": [],
+      "updated_at": 1700,
+      "votes": [
+        {
+          "actor": "carol",
+          "at": 1700,
+          "comment": "同意",
+          "decision": "approve",
+          "on_behalf_of": null,
+          "round_id": "round-0003"
+        }
+      ]
+    },
+    "task-0007": {
+      "assignee": "dave",
+      "branch_id": "branch-0002",
+      "candidates": [],
+      "created_at": 1400,
+      "deadline": null,
+      "delegation": null,
+      "id": "task-0007",
+      "kind": "approval",
+      "round_id": "round-0003",
+      "scope": {},
+      "status": "rejected",
+      "transferred_from": [],
+      "updated_at": 1800,
+      "votes": [
+        {
+          "actor": "dave",
+          "at": 1800,
+          "comment": "不同意",
+          "decision": "reject",
+          "on_behalf_of": null,
+          "round_id": "round-0003"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,67 @@
+    Updating `mirror` index
+     Locking 11 packages to latest compatible versions
+ Downloading crates ...
+  Downloaded zmij v1.0.23 (registry `mirror`)
+  Downloaded quote v1.0.47 (registry `mirror`)
+  Downloaded unicode-ident v1.0.27 (registry `mirror`)
+  Downloaded serde_derive v1.0.229 (registry `mirror`)
+  Downloaded proc-macro2 v1.0.107 (registry `mirror`)
+  Downloaded serde_core v1.0.229 (registry `mirror`)
+  Downloaded serde v1.0.229 (registry `mirror`)
+  Downloaded memchr v2.8.3 (registry `mirror`)
+  Downloaded serde_json v1.0.154 (registry `mirror`)
+  Downloaded syn v3.0.9 (registry `mirror`)
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling serde_core v1.0.229
+   Compiling zmij v1.0.23
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.154
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling syn v3.0.9
+   Compiling serde_derive v1.0.229
+   Compiling spike-approval-model v0.1.0 (/tmp/coord-spike/wt/spike/2026-10/spike-1-state-model/crate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.05s
+     Running unittests src/lib.rs (target/debug/deps/spike_approval_model-db5b39289758c8e2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scenarios.rs (target/debug/deps/scenarios-a2e6d16398727391)
+
+running 16 tests
+test deadline_expire_excludes_seat_from_quorum ... ok
+test p0_any_sign_cancels_rest ... ok
+test delegate_allows_proxy_and_keeps_principal ... ok
+test p0_huiqian_with_add_sign ... ok
+test p0_one_vote_veto ... ok
+test evidence_snapshot_serializable ... ok
+test p0_return_to_node_reopens_history ... FAILED
+test return_target_whitelist_and_jump_limit ... ok
+test pool_claim_rules ... ok
+test read_ack_does_not_gate_and_reader_only_branch_passes ... ok
+test p0_transfer_moves_authority ... ok
+test ratio_pass_then_exhausted_reject ... ok
+test stale_revision_is_rejected ... ok
+test terminate_cascades_and_seals_instance ... ok
+test variable_scope_precedence ... ok
+test withdraw_only_by_initiator ... ok
+
+failures:
+
+---- p0_return_to_node_reopens_history stdout ----
+
+thread 'p0_return_to_node_reopens_history' (112881) panicked at tests/scenarios.rs:100:10:
+called `Result::unwrap()` on an `Err` value: InvalidTransition("instance is Completed")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    p0_return_to_node_reopens_history
+
+test result: FAILED. 15 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test scenarios`
