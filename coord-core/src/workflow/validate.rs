@@ -598,10 +598,21 @@ impl Validator {
 
     fn parse_listen(
         &mut self,
-        _raw: &RawNamedTask,
+        raw: &RawNamedTask,
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let listen_val = &map["listen"];
+
+        // 官方 1.0.3 形状：`listen.to.{one|all|any}.with.{type, source?, subject?}`
+        // （schema workflow-1.0.3.yaml `listenTask`/`eventConsumptionStrategy`，
+        // Spike 4 corpus 08 曾把 `to.one.with` 过滤条件静默丢掉）。检测到 `to` 即按
+        // 官方形状严格解析；`to` 缺失时保留 coord 既有平铺/字符串形状。
+        if let Some(listen_obj) = listen_val.as_object() {
+            if listen_obj.contains_key("to") {
+                return self.parse_listen_official(raw, listen_obj);
+            }
+        }
+
         let obj = listen_val.as_object();
 
         let event_filter = if let Some(obj) = obj {
@@ -635,6 +646,163 @@ impl Validator {
         }))
     }
 
+    /// 解析官方 `listen.to` 消费策略（当前仅 `one`）。返回 `None` 表示已登记错误。
+    ///
+    /// coord 的 `EventFilter` 只有 event_type/source/subject；官方形状里其余键
+    /// （`listen.read`、`eventFilter.correlate`、`eventProperties` 的 id/time/data 等）
+    /// 无映射面，一律点名构造 fail-closed，绝不静默丢字段。
+    fn parse_listen_official(
+        &mut self,
+        raw: &RawNamedTask,
+        listen_obj: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
+        // `ListenTaskConfiguration` 只声明 `to`/`read`；`read`（envelope/raw 读取模式）
+        // 无对应字段，未知键同样不可映射。
+        let listen_extras: Vec<String> = listen_obj
+            .keys()
+            .filter(|k| !matches!(k.as_str(), "to" | "read"))
+            .map(|k| format!("listen.{k}"))
+            .chain(
+                listen_obj
+                    .contains_key("read")
+                    .then_some("listen.read".to_string()),
+            )
+            .collect();
+        if !listen_extras.is_empty() {
+            let construct = listen_extras.join(", ");
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                message: format!(
+                    "unimplemented construct '{construct}': coord listen supports only \
+                     'listen.to.one.with'"
+                ),
+            });
+            return None;
+        }
+
+        let Some(to) = listen_obj.get("to").and_then(|v| v.as_object()) else {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("listen.to".to_string()),
+                message: "unimplemented construct 'listen.to': expected a consumption strategy \
+                          object"
+                    .to_string(),
+            });
+            return None;
+        };
+
+        // `EventConsumptionStrategy` oneOf all/any/one：本期只实现 `one`。
+        if let Some(strategy) = ["all", "any"].iter().find(|s| to.contains_key(**s)) {
+            let construct = format!("listen.to.{strategy}");
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                message: format!(
+                    "unimplemented construct '{construct}': coord listen supports only 'to.one'"
+                ),
+            });
+            return None;
+        }
+        let to_extras: Vec<String> = to
+            .keys()
+            .filter(|k| k.as_str() != "one")
+            .map(|k| format!("listen.to.{k}"))
+            .collect();
+        if !to_extras.is_empty() {
+            let construct = to_extras.join(", ");
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                message: format!(
+                    "unimplemented construct '{construct}': coord listen supports only 'to.one'"
+                ),
+            });
+            return None;
+        }
+
+        let Some(one) = to.get("one").and_then(|v| v.as_object()) else {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("listen.to.one".to_string()),
+                message: "unimplemented construct 'listen.to.one': expected an event filter object"
+                    .to_string(),
+            });
+            return None;
+        };
+
+        // `eventFilter` 只有 `with`（+`correlate`）；`correlate` 需把事件属性关联到
+        // 输入数据属性，无映射面。
+        let one_extras: Vec<String> = one
+            .keys()
+            .filter(|k| !matches!(k.as_str(), "with" | "correlate"))
+            .map(|k| format!("listen.to.one.{k}"))
+            .chain(
+                one.contains_key("correlate")
+                    .then_some("listen.to.one.correlate".to_string()),
+            )
+            .collect();
+        if !one_extras.is_empty() {
+            let construct = one_extras.join(", ");
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                message: format!(
+                    "unimplemented construct '{construct}': event filter supports only 'with'"
+                ),
+            });
+            return None;
+        }
+
+        let with = one.get("with").and_then(|v| v.as_object());
+        let with_unknown: Vec<String> = with
+            .map(|w| {
+                w.keys()
+                    .filter(|k| !matches!(k.as_str(), "type" | "source" | "subject"))
+                    .map(|k| format!("listen.to.one.with.{k}"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !with_unknown.is_empty() {
+            let construct = with_unknown.join(", ");
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                message: format!(
+                    "unimplemented construct '{construct}': listen filter supports only \
+                     'type'/'source'/'subject'"
+                ),
+            });
+            return None;
+        }
+
+        let Some(event_type) = with.and_then(|w| w.get("type")).and_then(|v| v.as_str()) else {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct(
+                    "listen.to.one.with.type".to_string(),
+                ),
+                message: "listen requires a string 'listen.to.one.with.type'".to_string(),
+            });
+            return None;
+        };
+
+        Some(Task::Listen(ListenTask {
+            listen: EventFilter {
+                event_type: Some(event_type.to_string()),
+                event_types: vec![],
+                source: with
+                    .and_then(|w| w.get("source"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                subject: with
+                    .and_then(|w| w.get("subject"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            },
+        }))
+    }
+
     fn parse_emit(
         &mut self,
         raw: &RawNamedTask,
@@ -654,6 +822,25 @@ impl Validator {
         // 既有平铺 `{type, source, data}` 形状保持不变。
         let (event_type, source, data) = match obj {
             Some(obj) if obj.contains_key("event") => {
+                // `event` 的兄弟键在 `emit` 下 schema 非法（EmitTaskConfiguration
+                // `unevaluatedProperties: false`），且无 EmitEvent 映射面；静默丢弃即误读。
+                let emit_siblings: Vec<String> = obj
+                    .keys()
+                    .filter(|k| k.as_str() != "event")
+                    .map(|k| format!("emit.{k}"))
+                    .collect();
+                if !emit_siblings.is_empty() {
+                    let construct = emit_siblings.join(", ");
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                        message: format!(
+                            "unimplemented construct '{construct}': emit supports only \
+                             'emit.event'"
+                        ),
+                    });
+                    return None;
+                }
                 let event = obj.get("event").and_then(|e| e.as_object());
                 if let Some(event) = event {
                     let unknown: Vec<String> = event
@@ -2468,6 +2655,125 @@ do:
             }
             other => panic!("expected Emit task, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_listen_official_to_one_with_shape() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-official
+  version: "1.0"
+do:
+  - await_event:
+      listen:
+        to:
+          one:
+            with:
+              type: com.example.approved
+              source: "https://example.com/coord"
+              subject: approvals
+      then: exit
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official listen to.one.with must parse");
+        match &def.do_tasks[0].task {
+            Task::Listen(l) => {
+                assert_eq!(l.listen.event_type.as_deref(), Some("com.example.approved"));
+                assert_eq!(
+                    l.listen.source.as_deref(),
+                    Some("https://example.com/coord")
+                );
+                assert_eq!(l.listen.subject.as_deref(), Some("approvals"));
+            }
+            other => panic!("expected Listen task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_listen_unsupported_strategy_rejected() {
+        // 消费策略 all/any 本期不支持：不得静默丢过滤器后照常接受。
+        let all = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-all
+  version: "1.0"
+do:
+  - await_event:
+      listen:
+        to:
+          all:
+            - with:
+                type: com.example.approved
+"#;
+        let any = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-any
+  version: "1.0"
+do:
+  - await_event:
+      listen:
+        to:
+          any:
+            - with:
+                type: com.example.approved
+"#;
+        for (yaml, strategy) in [(all, "all"), (any, "any")] {
+            let errs = parse_and_validate_yaml(yaml)
+                .expect_err("non-one consumption strategy must be rejected");
+            assert!(
+                errors_naming(&errs, &format!("listen.to.{strategy}")),
+                "got {errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_listen_missing_type_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-missing-type
+  version: "1.0"
+do:
+  - await_event:
+      listen:
+        to:
+          one:
+            with:
+              source: "https://example.com/coord"
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("listen without type must be rejected");
+        assert!(
+            errors_naming(&errs, "listen.to.one.with.type"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_emit_extra_emit_level_key_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: emit-extra-emit
+  version: "1.0"
+do:
+  - notify:
+      emit:
+        event:
+          with:
+            type: com.example.notify
+        id: evt-1
+"#;
+        // `emit` 的 `event` 兄弟键 schema 非法（unevaluatedProperties: false），不得静默丢弃。
+        let errs = parse_and_validate_yaml(yaml)
+            .expect_err("unexpected emit-level sibling key must be rejected");
+        assert!(errors_naming(&errs, "emit.id"), "got {errs:?}");
     }
 
     #[test]

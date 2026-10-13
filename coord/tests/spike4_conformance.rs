@@ -148,3 +148,14 @@ fn emit_event_with_payload_is_mapped() {
         other => panic!("corpus 09: expected Emit task, got {other:?}"),
     }
 }
+
+#[test]
+fn listen_official_to_one_with_maps_filter() {
+    // 08：官方 `listen.to.one.with.type` 必须映射进 Task::Listen 过滤条件，
+    // 不得静默丢过滤器（Spike 4 误读之一）。
+    let def = parse_corpus("08-listen.yaml").expect("corpus 08 must parse OK");
+    match &def.do_tasks[0].task {
+        Task::Listen(l) => assert_eq!(l.listen.event_type.as_deref(), Some("com.example.approved")),
+        other => panic!("corpus 08: expected Listen task, got {other:?}"),
+    }
+}
