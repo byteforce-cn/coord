@@ -12,7 +12,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use coord_core::workflow::model::{WorkflowDefinition, WorkflowInstance};
-use coord_core::workflow::ports::{MemoryWorkflowStore, StoreError, WorkflowStore};
+use coord_core::workflow::ports::{
+    MemoryWorkflowStore, StoreError, WorkflowStore, DEFAULT_LIST_PAGE_SIZE,
+};
 use coord_proto::kv::PutRequest;
 use coord_proto::txn::compare::{CompareResult, Target, TargetValue};
 use coord_proto::txn::request_op::Op;
@@ -143,6 +145,36 @@ impl KvWorkflowStore {
         format!("/_workflow/v3/idem/{instance_id}:{key}").into_bytes()
     }
 
+    /// 把 `list_instances` 的 definition 过滤值（定义名或定义 ID）解析为定义名。
+    ///
+    /// 定义键以 `(namespace, name, version)` 定位（见 [`Self::def_key`]），无法按
+    /// ID 直接取键，故扫描定义表：定义名命中优先，其次按 ID 命中取其名，都不命中
+    /// 则回退为原值（等价于按名精确匹配）。定义数量少，全表扫描可接受。
+    async fn resolve_definition_name(&self, definition: &str) -> Result<String, StoreError> {
+        let prefix = b"/_workflow/v3/defs/".to_vec();
+        let range_end = prefix_end(&prefix);
+        let pairs = self
+            .inner
+            .client
+            .kv()
+            .range(&prefix, &range_end, 0, 0)
+            .await
+            .map_err(|e| StoreError::IoError(e.to_string()))?;
+        let mut id_match: Option<String> = None;
+        for (_k, v) in pairs {
+            let Ok(def) = serde_json::from_slice::<WorkflowDefinition>(&v) else {
+                continue;
+            };
+            if def.document.name == definition {
+                return Ok(definition.to_string());
+            }
+            if id_match.is_none() && def.id.as_deref() == Some(definition) {
+                id_match = Some(def.document.name.clone());
+            }
+        }
+        Ok(id_match.unwrap_or_else(|| definition.to_string()))
+    }
+
     // ─── 内部辅助：全量加载 ───
 
     async fn load_all_definitions(&self) -> Result<(), StoreError> {
@@ -223,7 +255,7 @@ impl KvWorkflowStore {
         }
 
         // 剪枝：缓存中有、KV 中没有的实例 → 删除
-        if let Ok(cached) = cache.list_instances(None, None, usize::MAX, None).await {
+        if let Ok((cached, _)) = cache.list_instances(None, None, usize::MAX, None).await {
             for inst in cached {
                 if !present.contains(&inst.id) {
                     let _ = cache.delete_instance(&inst.id).await;
@@ -580,35 +612,89 @@ impl WorkflowStore for KvWorkflowStore {
 
     async fn list_instances(
         &self,
-        _namespace: Option<&str>,
-        _definition_name: Option<&str>,
-        _page_size: usize,
-        _page_token: Option<&str>,
-    ) -> Result<Vec<WorkflowInstance>, StoreError> {
+        namespace: Option<&str>,
+        definition_name: Option<&str>,
+        page_size: usize,
+        page_token: Option<&str>,
+    ) -> Result<(Vec<WorkflowInstance>, Option<String>), StoreError> {
+        let page_size = if page_size == 0 {
+            DEFAULT_LIST_PAGE_SIZE
+        } else {
+            page_size
+        };
+        let ns_filter = namespace.filter(|s| !s.is_empty());
+        let def_filter = match definition_name.filter(|s| !s.is_empty()) {
+            Some(d) => Some(self.resolve_definition_name(d).await?),
+            None => None,
+        };
+
         let prefix = Self::instance_prefix();
         let range_end = prefix_end(&prefix);
+        // 续读：从上一页最后一条实例之后开始（前缀 + id + 0x00 是紧邻后继键）。
+        let mut start = match page_token.filter(|t| !t.is_empty()) {
+            Some(token) => key_after(&Self::instance_key(token)),
+            None => prefix.clone(),
+        };
 
-        let pairs = self
-            .inner
-            .client
-            .kv()
-            .range(&prefix, &range_end, 0, 0)
-            .await
-            .map_err(|e| StoreError::IoError(e.to_string()))?;
-
-        let mut instances = Vec::with_capacity(pairs.len());
-        for (_k, v) in pairs {
-            let inst: WorkflowInstance = serde_json::from_slice(&v)
-                .map_err(|e| StoreError::SerializationError(e.to_string()))?;
-            instances.push(inst);
+        // 过取一条：多扫到一条匹配项即可确认「仍有剩余」，从而给出真实续读令牌。
+        let target = page_size.saturating_add(1);
+        let mut matched: Vec<WorkflowInstance> = Vec::new();
+        loop {
+            // KV range 的 limit 在**过滤之前**生效；若按 page_size 截断会漏掉
+            // 被过滤项后面的匹配项。因此每批一次全量（limit 0，由 server 的
+            // max_range_limit 封顶）扫描，循环推进直到收满或前缀扫尽。
+            let pairs = self
+                .inner
+                .client
+                .kv()
+                .range(&start, &range_end, 0, 0)
+                .await
+                .map_err(|e| StoreError::IoError(e.to_string()))?;
+            if pairs.is_empty() {
+                break;
+            }
+            let last_key = pairs.last().map(|(k, _)| k.clone());
+            for (_k, v) in &pairs {
+                let inst: WorkflowInstance = serde_json::from_slice(v)
+                    .map_err(|e| StoreError::SerializationError(e.to_string()))?;
+                if ns_filter.is_some_and(|ns| inst.definition_ns != ns) {
+                    continue;
+                }
+                if def_filter
+                    .as_deref()
+                    .is_some_and(|name| inst.definition_name != name)
+                {
+                    continue;
+                }
+                matched.push(inst);
+                if matched.len() >= target {
+                    break;
+                }
+            }
+            if matched.len() >= target {
+                break;
+            }
+            // 续读起点严格大于上一批最后一个键，保证向前推进、不重不漏。
+            match last_key {
+                Some(lk) => start = key_after(&lk),
+                None => break,
+            }
         }
 
-        // 批量更新缓存
-        for inst in &instances {
+        let has_more = matched.len() > page_size;
+        matched.truncate(page_size);
+        let next_token = if has_more {
+            matched.last().map(|i| i.id.clone())
+        } else {
+            None
+        };
+
+        // 批量更新缓存（仅本页）
+        for inst in &matched {
             let _ = self.cache.save_instance(inst).await;
         }
 
-        Ok(instances)
+        Ok((matched, next_token))
     }
 
     async fn save_resume_idempotency_key(
@@ -727,6 +813,16 @@ impl WorkflowStore for KvWorkflowStore {
 
 // ─── 工具函数 ───
 
+/// 计算「严格大于 `key` 的最小键」：追加 0x00 字节。
+///
+/// 用于 KV range 的续读起点：只要上一键非空，就能保证下一批从它之后开始
+/// （不重不漏）；对任意字节串避免做进位，比 `+1` 更直观。
+pub(crate) fn key_after(key: &[u8]) -> Vec<u8> {
+    let mut next = key.to_vec();
+    next.push(0);
+    next
+}
+
 /// 计算前缀扫描的 range_end（prefix 最后一个字节 +1）
 ///
 /// 例如：prefix "/_workflow/v3/defs/ns/" → range_end "/_workflow/v3/defs/ns0"
@@ -797,6 +893,28 @@ mod tests {
         let key = KvWorkflowStore::idem_key("inst-abc", "idem-xyz");
         let key_str = String::from_utf8(key).unwrap();
         assert_eq!(key_str, "/_workflow/v3/idem/inst-abc:idem-xyz");
+    }
+
+    #[test]
+    fn test_key_after_is_strict_successor() {
+        let a = KvWorkflowStore::instance_key("a");
+        let after_a = key_after(&a);
+        // 续读起点严格大于上一键
+        assert!(after_a.as_slice() > a.as_slice());
+
+        // 顺序上的下一个实例键仍落在续读区间内（不重不漏）
+        let b = KvWorkflowStore::instance_key("b");
+        assert!(b.as_slice() > after_a.as_slice());
+
+        // 紧邻后继 = 实例键 + 0x00
+        let expected: Vec<u8> = KvWorkflowStore::instance_key("inst-42")
+            .into_iter()
+            .chain([0u8])
+            .collect();
+        assert_eq!(
+            key_after(&KvWorkflowStore::instance_key("inst-42")),
+            expected
+        );
     }
 
     // ─── prefix_end 测试 ───

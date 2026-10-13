@@ -280,9 +280,7 @@ where
     ///
     /// 子流程恢复**不得**靠每 5 秒 `list_instances(None, None, usize::MAX, None)`
     /// 全量列举 —— 稳态下每次 tick 都把**全部**工作流实例（包括与子流程完全无关
-    /// 的）列出并反序列化/克隆一遍，代价随实例总数**线性增长**，且
-    /// `list_instances` 签名不返回翻页 token，无法安全分页（截断会让超出一页的
-    /// 挂起实例**永不恢复**）。本登记表：父流程因 `RunSubflow` 挂起时**登记**，
+    /// 的）列出并反序列化/克隆一遍，代价随实例总数**线性增长**。本登记表：父流程因 `RunSubflow` 挂起时**登记**，
     /// 每 tick 只检查登记表里的父子对（登记表为空 ⇒ O(1)）。启动时仍做**一次**
     /// 全量对账，用于恢复上个进程遗留的挂起实例。
     pending_subflows: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
@@ -397,7 +395,7 @@ where
     /// 然后立刻检查一轮。**只在启动时跑一次**（稳态不再全量列举）。
     async fn reconcile_suspended_subflows(&self, store: Arc<S>) {
         let instances = match store.list_instances(None, None, usize::MAX, None).await {
-            Ok(list) => list,
+            Ok((list, _next)) => list,
             Err(_) => return,
         };
         for inst in instances {

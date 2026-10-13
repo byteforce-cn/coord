@@ -169,6 +169,7 @@ impl WorkflowScheduler {
                 .engine
                 .list_instances(None, Some(&def.document.name), usize::MAX, None)
                 .await
+                .map(|(instances, _)| instances)
                 .unwrap_or_default();
             let latest_completed = instances
                 .iter()
@@ -302,6 +303,7 @@ do:
         let instances = engine
             .list_instances(None, Some("scheduled-wf"), usize::MAX, None)
             .await
+            .map(|(instances, _)| instances)
             .unwrap();
         // 首次 tick 排程 + 2 次触发 → ≥2 个实例
         assert!(
@@ -341,6 +343,7 @@ do:
         let instances = engine
             .list_instances(None, Some("scheduled-wf"), usize::MAX, None)
             .await
+            .map(|(instances, _)| instances)
             .unwrap();
         assert_eq!(instances.len(), 1);
         // 事件触发输入为事件数组
@@ -357,6 +360,7 @@ do:
         let instances = engine
             .list_instances(None, Some("scheduled-wf"), usize::MAX, None)
             .await
+            .map(|(instances, _)| instances)
             .unwrap();
         assert_eq!(instances.len(), 1);
     }

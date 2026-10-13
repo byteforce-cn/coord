@@ -2197,14 +2197,17 @@ impl Workflow for WorkflowEngineService {
         let page_size = if req.page_size > 0 {
             req.page_size as usize
         } else {
-            50
+            coord_core::workflow::ports::DEFAULT_LIST_PAGE_SIZE
         };
+        let namespace = (!req.namespace.is_empty()).then_some(req.namespace.as_str());
+        let definition = (!req.workflow_id.is_empty()).then_some(req.workflow_id.as_str());
+        let page_token = (!req.page_token.is_empty()).then_some(req.page_token.as_str());
 
         match self
-            .list_instances(Some(&req.namespace), None, page_size, Some(&req.page_token))
+            .list_instances(namespace, definition, page_size, page_token)
             .await
         {
-            Ok(instances) => {
+            Ok((instances, next_token)) => {
                 let summaries: Vec<WorkflowInstanceSummary> = instances
                     .into_iter()
                     .map(|i| {
@@ -2234,7 +2237,7 @@ impl Workflow for WorkflowEngineService {
                     .collect();
                 Ok(Response::new(WorkflowListInstancesResponse {
                     instances: summaries,
-                    next_page_token: String::new(),
+                    next_page_token: next_token.unwrap_or_default(),
                 }))
             }
             Err(e) => Err(sanitized_internal(e)),
@@ -2732,6 +2735,165 @@ impl FeatureFlags for FeatureFlagService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 两个 namespace、两个定义、每定义多实例的端到端夹具（issue #56）。
+    const LIST_INSTANCES_NS_A_YAML: &str = r#"
+document:
+  dsl: "1.0.0"
+  namespace: ignored
+  name: alpha-wf
+  version: "1.0"
+do:
+  - step1:
+      call: http
+      with:
+        method: POST
+        endpoint: "http://localhost/step1"
+"#;
+    const LIST_INSTANCES_NS_B_YAML: &str = r#"
+document:
+  dsl: "1.0.0"
+  namespace: ignored
+  name: beta-wf
+  version: "1.0"
+do:
+  - step1:
+      call: http
+      with:
+        method: POST
+        endpoint: "http://localhost/step1"
+"#;
+
+    fn list_instances_request(
+        namespace: &str,
+        workflow_id: &str,
+        page_size: i32,
+        page_token: &str,
+    ) -> WorkflowListInstancesRequest {
+        WorkflowListInstancesRequest {
+            workflow_id: workflow_id.to_string(),
+            namespace: namespace.to_string(),
+            page_size,
+            page_token: page_token.to_string(),
+            status_filter: String::new(),
+        }
+    }
+
+    /// issue #56 回归：listInstances 必须按 namespace/定义过滤 + 真实分页。
+    #[tokio::test]
+    async fn test_list_instances_filters_namespace_definition_and_paginates() {
+        let svc = WorkflowEngineService::new_for_test();
+        let def_a = svc
+            .deploy_definition("ns-a", LIST_INSTANCES_NS_A_YAML)
+            .await
+            .unwrap();
+        let def_b = svc
+            .deploy_definition("ns-b", LIST_INSTANCES_NS_B_YAML)
+            .await
+            .unwrap();
+
+        let mut ns_a_ids = Vec::new();
+        for _ in 0..3 {
+            let inst = svc
+                .start_instance(&def_a, serde_json::json!({"owner": "ns-a"}))
+                .await
+                .unwrap();
+            ns_a_ids.push(inst.id);
+        }
+        // nsB 实例带可识别 context，用于验证绝不泄漏到 nsA 查询
+        svc.start_instance(&def_b, serde_json::json!({"owner": "ns-b"}))
+            .await
+            .unwrap();
+
+        // (a) 定义 ID 过滤 + namespace 过滤：只含 nsA/defA，数量 ≤10
+        let resp = Workflow::list_instances(
+            &svc,
+            tonic::Request::new(list_instances_request("ns-a", &def_a, 10, "")),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.instances.len(), 3, "ns-a/alpha-wf 应有 3 个实例");
+        assert!(
+            resp.next_page_token.is_empty(),
+            "一页装下全部时 next_page_token 必须为空"
+        );
+        for i in &resp.instances {
+            assert_eq!(i.namespace, "ns-a");
+            assert_eq!(i.definition_name, "alpha-wf");
+            // (c) nsB 实例（含 context/output）不出现
+            assert!(
+                !String::from_utf8_lossy(&i.context_json).contains("ns-b"),
+                "nsA 查询不得返回 nsB 实例的 context"
+            );
+        }
+
+        // 定义「名」过滤等价于定义 ID 过滤
+        let by_name = Workflow::list_instances(
+            &svc,
+            tonic::Request::new(list_instances_request("ns-a", "alpha-wf", 10, "")),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(by_name.instances.len(), 3, "按定义名过滤应等价于按 ID 过滤");
+
+        // nsB 查询只返回自己的实例
+        let resp_b = Workflow::list_instances(
+            &svc,
+            tonic::Request::new(list_instances_request("ns-b", &def_b, 10, "")),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp_b.instances.len(), 1);
+        assert_eq!(resp_b.instances[0].definition_name, "beta-wf");
+
+        // (b) 分页：page_size=2 → 第一页 2 条 + 非空 token；第二页续读无重叠、无遗漏
+        let page1 = Workflow::list_instances(
+            &svc,
+            tonic::Request::new(list_instances_request("ns-a", &def_a, 2, "")),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(page1.instances.len(), 2);
+        assert!(
+            !page1.next_page_token.is_empty(),
+            "仍有剩余时 next_page_token 必须非空"
+        );
+        let page2 = Workflow::list_instances(
+            &svc,
+            tonic::Request::new(list_instances_request(
+                "ns-a",
+                &def_a,
+                2,
+                &page1.next_page_token,
+            )),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(page2.instances.len(), 1, "第二页应为剩余 1 条");
+        assert!(
+            page2.next_page_token.is_empty(),
+            "末页 next_page_token 必须为空"
+        );
+
+        let mut seen: Vec<String> = page1
+            .instances
+            .iter()
+            .chain(page2.instances.iter())
+            .map(|i| i.instance_id.clone())
+            .collect();
+        let total = seen.len();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), total, "分页不得重叠");
+        let mut expected = ns_a_ids.clone();
+        expected.sort();
+        assert_eq!(seen, expected, "分页不得遗漏 nsA 实例");
+    }
 
     /// internal 错误脱敏：客户端仅收到通用 "internal error"，不含内部细节
     #[test]
