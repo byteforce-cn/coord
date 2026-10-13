@@ -10,13 +10,14 @@
 
 | 目录 | 对应 Spike | 状态 |
 |:--|:--|:--|
-| `CHARTER-INPUTS.md` | 前置条件 3.1/3.2/3.3 的台账（含临时替代输入声明） | 已建立 |
-| `spike-1-state-model/` | Spike 1 状态模型 v2 内存验证 | 进行中 |
-| `spike-4-conformance/` | Spike 4 规范符合性 | 待启动 |
-| `spike-2-concurrency/` | Spike 2 单写者并发演练 | 待启动（10-31 截止） |
-| `spike-3-recovery/` | Spike 3 Outbox + 恢复 | 待启动（10-31 截止） |
-| `spike-5-bench/` | Spike 5 基准测试 | 待启动（平台架构组主责） |
-| `spike-6-adr/` | Spike 6 形态决策 ADR 草案 | 待启动（11-01 起） |
+| `CHARTER-INPUTS.md` | 前置条件 3.1/3.2/3.3 的台账（含临时替代输入声明） | 已建立（3.2/3.3 未到位） |
+| `NEXT-SPIKES-NOTES.md` | Spike 2/3/5 接续手册（第一步 + 锚点 + 红线） | 已建立 |
+| `spike-1-state-model/` | Spike 1 状态模型 v2 内存验证 | ✅ 初版完成（10-13，16/16，可复现） |
+| `spike-4-conformance/` | Spike 4 规范符合性 | ✅ 初版完成（10-13，24 语料，报告+原始数据） |
+| `spike-2-concurrency/` | Spike 2 单写者并发演练 | 未启动（10-31 截止；接续见 `NEXT-SPIKES-NOTES.md`） |
+| `spike-3-recovery/` | Spike 3 Outbox + 恢复 | 未启动（10-31 截止；接续见 `NEXT-SPIKES-NOTES.md`） |
+| `spike-5-bench/` | Spike 5 基准测试 | 未启动（平台架构组主责；需 10-18 阈值） |
+| `spike-6-adr/` | Spike 6 形态决策 ADR 草案 | 📝 草案已建（待 Spike 2/3/5 证据补全） |
 
 ## 事实源与边界
 
