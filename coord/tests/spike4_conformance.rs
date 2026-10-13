@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use coord_core::workflow::model::WorkflowDefinition;
+use coord_core::workflow::model::{Task, WorkflowDefinition};
 use serde_json::Value;
 
 fn corpus_dir() -> PathBuf {
@@ -68,8 +68,17 @@ fn run_await_return_fail_closed() {
 
 #[test]
 fn run_workflow_subflow_accepted() {
-    // 15：唯一的受支持 run 形状（子流程调用），保持现行语义
-    assert_accepted("15-run-workflow.yaml");
+    // 15：唯一的受支持 run 形状（子流程调用）；嵌套 `workflow.*` 必须落到 WorkflowRef，
+    // 不得再把 schema-legal 文档静默编译成空 ref（Spike 4 误读）
+    let def = parse_corpus("15-run-workflow.yaml").expect("corpus 15 must parse OK");
+    match &def.do_tasks[0].task {
+        Task::Run(run) => {
+            assert_eq!(run.workflow.namespace, "spike");
+            assert_eq!(run.workflow.name, "child-workflow");
+            assert_eq!(run.workflow.version, "1.0.0");
+        }
+        other => panic!("corpus 15: expected Run task, got {other:?}"),
+    }
 }
 
 #[test]
@@ -86,8 +95,9 @@ fn supported_constructs_still_accepted() {
 }
 
 #[test]
-fn documented_gaps_stay_fail_closed() {
-    // matrix.tsv GAP：coord 按函数名解析，未定义函数被引用校验拒绝（fail-closed 可接受）
+fn matrix_gap_files_still_rejected() {
+    // matrix.tsv GAP：16/23 被 `call: <未定义函数>` 的**未知函数引用校验**拒绝，
+    // 不是未实现构造拒绝；fail-closed 结果可接受。
     assert_rejected_naming("16-call-function.yaml", "myFunction");
     assert_rejected_naming("23-call-openapi.yaml", "openapi");
 }
@@ -99,9 +109,14 @@ fn official_switch_then_fail_closed() {
 }
 
 #[test]
-fn semantically_aligned_corpus_still_accepted() {
-    // matrix.tsv PASS：仅用顺序执行 + switch transition 的语料；
-    // 末任务的 `then: exit` 与工作流结束等价，必须继续接受。
+fn matrix_pass_corpus_still_parses() {
+    // matrix.tsv PASS 且与顺序执行语义一致：末任务的 `then: exit` 等价于工作流结束，
+    // 必须继续接受（该断言同时锁住 `then` 规则的边界，防止后续收紧时静默破坏 PASS 集）。
+    //
+    // 已知**静默丢弃**仍留在 PASS 集，但不在 Task 8 的拒绝清单内，属符合性里程碑：
+    // 05-fork（branches 形状未解析成任务）、06-for（each/in 迭代语义未接线）、
+    // 07-wait（duration 未读进 WaitTask）、08-listen（to.one.with 过滤器未完整映射）、
+    // 09-emit（event.with 载荷未完整映射）。
     for file in [
         "01-minimal-set.yaml",
         "02-call-http.yaml",

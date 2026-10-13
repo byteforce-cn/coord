@@ -677,30 +677,28 @@ impl Validator {
 
     fn parse_run(
         &mut self,
-        _raw: &RawNamedTask,
+        raw: &RawNamedTask,
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let run_val = &map["run"];
-        let obj = run_val.as_object();
 
-        // coord 只实现 `run.workflow`（子流程调用）。`run.script|container|shell`
-        // 无执行面，`run.await|return` 无可表达的时序/输出语义；raw 值若原样落到
-        // `run_subflow`（且 ref 为空）就是「接受但语义不同」的静默误读
-        // （Spike 4 核心发现）。因此任何非 `run.workflow` 形状在解析期显式拒绝。
-        if let Some(obj) = obj {
+        let workflow = if let Some(s) = run_val.as_str() {
+            // 简写: "namespace::name@version"
+            Self::parse_workflow_ref_short(s)
+        } else if let Some(obj) = run_val.as_object() {
+            // coord 只实现 `run.workflow`（子流程调用）。`run.script|container|shell`
+            // 无执行面，`run.await|return` 无可表达的时序/输出语义；raw 值若原样
+            // 落到 `run_subflow`（且 ref 为空）就是「接受但语义不同」的静默误读
+            // （Spike 4 核心发现）。因此这些键一律在解析期显式拒绝。
             let named: Vec<String> = ["script", "container", "shell", "await", "return"]
                 .iter()
                 .filter(|k| obj.contains_key(**k))
                 .map(|k| format!("run.{k}"))
                 .collect();
-            if obj.get("workflow").is_none() || !named.is_empty() {
-                let construct = if named.is_empty() {
-                    "run".to_string()
-                } else {
-                    named.join(", ")
-                };
+            if !named.is_empty() {
+                let construct = named.join(", ");
                 self.errors.push(ValidationError {
-                    span: Some(_raw.span),
+                    span: Some(raw.span),
                     kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
                     message: format!(
                         "unimplemented construct '{construct}': coord only supports 'run.workflow'"
@@ -708,38 +706,43 @@ impl Validator {
                 });
                 return None;
             }
-        } else if !matches!(run_val, Value::String(_)) {
+
+            // 官方形状把引用嵌在 `workflow` 下（`run: {workflow: {namespace,name,version}}`）；
+            // 旧方言把 namespace/name/version 直接放在 `run` 上。嵌套优先、缺失回退到
+            // 扁平键，否则 schema-legal 文档会被静默编译成空 ref（Spike 4 误读）。
+            let nested = obj.get("workflow").and_then(|v| v.as_object());
+            let pick = |key: &str| -> String {
+                nested
+                    .and_then(|n| n.get(key))
+                    .or_else(|| obj.get(key))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            WorkflowRef {
+                namespace: pick("namespace"),
+                name: pick("name"),
+                version: pick("version"),
+            }
+        } else {
             self.errors.push(ValidationError {
-                span: Some(_raw.span),
+                span: Some(raw.span),
                 kind: ValidationErrorKind::UnsupportedConstruct("run".to_string()),
                 message: "unimplemented construct 'run': coord only supports 'run.workflow'"
                     .to_string(),
             });
             return None;
-        }
-
-        let workflow = if let Some(obj) = obj {
-            WorkflowRef {
-                namespace: obj
-                    .get("namespace")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                name: obj
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                version: obj
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            }
-        } else {
-            // 非对象时上方守卫已保证是字符串（简写: "namespace::name@version"）
-            Self::parse_workflow_ref_short(run_val.as_str().unwrap_or_default())
         };
+
+        // 有形状无目标（`run: {}` / `run: {workflow: {}}`）同样不许静默通过
+        if workflow.name.is_empty() {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::MissingRequiredField("run.workflow.name".to_string()),
+                message: "run.workflow requires a non-empty 'name' (subflow target)".to_string(),
+            });
+            return None;
+        }
 
         let input = map.get("input").cloned();
         Some(Task::Run(RunTask { workflow, input }))
@@ -2184,7 +2187,62 @@ do:
           version: "1.0"
 "#;
         let def = parse_and_validate_yaml(yaml).expect("run.workflow 是受支持形状");
-        assert!(matches!(def.do_tasks[0].task, Task::Run(_)));
+        match &def.do_tasks[0].task {
+            Task::Run(run) => {
+                assert_eq!(run.workflow.namespace, "other");
+                assert_eq!(run.workflow.name, "child");
+                assert_eq!(run.workflow.version, "1.0");
+            }
+            other => panic!("expected Run task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_workflow_flat_legacy_ref_extracted() {
+        // 旧方言：namespace/name/version 直接放在 `run` 上（无 `workflow` 层）
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: run-workflow-flat
+  version: "1.0"
+do:
+  - sub:
+      run:
+        namespace: other
+        name: child
+        version: "2.0"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("扁平 ref 是旧方言受支持形状");
+        match &def.do_tasks[0].task {
+            Task::Run(run) => {
+                assert_eq!(run.workflow.namespace, "other");
+                assert_eq!(run.workflow.name, "child");
+                assert_eq!(run.workflow.version, "2.0");
+            }
+            other => panic!("expected Run task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_workflow_without_name_rejected() {
+        // 有形状无目标：`workflow: {}` 不得静默编译成空 ref
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: run-workflow-empty
+  version: "1.0"
+do:
+  - sub:
+      run:
+        workflow: {}
+"#;
+        let errs = parse_and_validate_yaml(yaml).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.message.contains("run.workflow")),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
