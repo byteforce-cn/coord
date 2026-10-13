@@ -369,18 +369,17 @@
 ### Task 10: durable 装配可配置（默认关闭）
 
 **Files:**
-- Modify: `coord-agent/src/service.rs`（`ServicesConfig`：`workflow_durable: bool` 默认 `false`；`workflow_events_topic: String` 默认 `com.china-workflow.events`，均 `#[serde(default)]`）
+- Modify: `coord-agent/src/service.rs`（`ServicesConfig`：`workflow_durable: bool` 默认 `false`；`workflow_events_topic: String` 默认 `com.china-workflow.events`，均 `#[serde(default)]`；新字段 rustdoc 即配置单一归属，`config.example.toml` 是 server 示例不追加 agent 段）
 - Modify: `coord-agent/src/lib.rs`（`config.services.workflow && workflow_durable && inner.is_some()` ⇒ `new_with_kv_store_durable`，同时注入 `KvInstanceLease`（构造时传 outbox store）与 `KvStepStore`；否则保持现状）
-- Modify: `config.example.toml`（追加注释块，说明默认关闭与前置条件）
 - Test: 配置默认值单测；`coord-agent` 既有装配测试回归
 
 **Interfaces:**
-- 装配矩阵：`workflow=false` ⇒ 不注册；`workflow=true, durable=false` ⇒ 现有 `new_with_kv_store_and_dispatch`（不注入租约/outbox）；`workflow=true, durable=true, 有 server` ⇒ durable 路径（KvOutboxStore + MqEventProvider + KvCursorStore + KvInstanceLease + KvStepStore + relay）；无 server ⇒ 内存路径 + `warn!`。
+- 装配矩阵：`workflow=false` ⇒ 不注册；`workflow=true, durable=false` ⇒ 现有 `new_with_kv_store_and_dispatch`（不注入租约/outbox；缺 server 时保持现状 warn+内存）；`workflow=true, durable=true, 有 server + MQ` ⇒ durable 路径（KvOutboxStore + MqEventProvider + KvCursorStore + KvInstanceLease + KvStepStore + relay）；durable=true 但缺 server 或 `services.mq` ⇒ **启动 fail-closed 报错**（不静默降级）。
 - 不改变任何默认行为；durable 路径关闭时不得要求 MQ 存在。
 
 - [ ] **Step 1: 写失败测试（默认值 false + durable 关闭不触 MQ）**
 
-- [ ] **Step 2: 接线并更新 `config.example.toml`**
+- [ ] **Step 2: 接线；新字段文档写进 `ServicesConfig` rustdoc；补装配级 fail-closed 测试（缺 MQ / 缺 server / durable&&!workflow）**
 
 - [ ] **Step 3: 提交**
 
