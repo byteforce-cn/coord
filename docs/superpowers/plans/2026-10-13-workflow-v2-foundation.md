@@ -148,7 +148,7 @@
 **Files:**
 - Modify: `coord-core/src/workflow/ports.rs`（`LeaseGuard::fenced_commit`）
 - Modify: `coord-agent/src/services/workflow_lease.rs`（`KvLeaseGuard` 持 `Arc<KvOutboxStore>` 并实现）
-- Modify: `coord-agent/src/services/workflow.rs`（`KvInstanceLease::new` 增 outbox 参数；装配点同步）
+- Modify: `coord/tests/spike2_concurrency.rs`（唯一 `KvInstanceLease::new` 调用点传入 outbox store；生产装配留给 Task 10）
 - Modify: `coord-core/src/workflow/runtime.rs`（`persist_instance` → `commit_instance`；drive 内 `emit_lifecycle` 调用点收进提交）
 - Test: `coord/tests/spike2_concurrency.rs`（新增 fenced+事件原子性用例）；`coord-core/src/workflow/runtime.rs` 测试模块
 
@@ -370,7 +370,7 @@
 
 **Files:**
 - Modify: `coord-agent/src/service.rs`（`ServicesConfig`：`workflow_durable: bool` 默认 `false`；`workflow_events_topic: String` 默认 `com.china-workflow.events`，均 `#[serde(default)]`）
-- Modify: `coord-agent/src/lib.rs`（`config.services.workflow && workflow_durable && inner.is_some()` ⇒ `new_with_kv_store_durable`，同时注入 `KvInstanceLease` 与 `KvStepStore`；否则保持现状）
+- Modify: `coord-agent/src/lib.rs`（`config.services.workflow && workflow_durable && inner.is_some()` ⇒ `new_with_kv_store_durable`，同时注入 `KvInstanceLease`（构造时传 outbox store）与 `KvStepStore`；否则保持现状）
 - Modify: `config.example.toml`（追加注释块，说明默认关闭与前置条件）
 - Test: 配置默认值单测；`coord-agent` 既有装配测试回归
 
