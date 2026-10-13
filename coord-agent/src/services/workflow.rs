@@ -2846,6 +2846,12 @@ events:
             InstanceStatus::Completed,
             "reject signal should route to reject state and complete"
         );
+        // 路由必须落到 reject 分支（inject result=rejected），而非缺省直通 end：
+        // 用裸标识符的路由条件恒假，会静默走缺省分支，使 result 缺失
+        assert_eq!(
+            done.context["result"], "rejected",
+            "reject signal must route to the reject branch, not the default branch"
+        );
 
         // ④ 对已完成的终端实例 signal → FailedPrecondition（gRPC → FailedPrecondition）
         let err = svc
@@ -2860,6 +2866,43 @@ events:
         assert!(
             matches!(err, WorkflowEngineError::FailedPrecondition(_)),
             "expected FailedPrecondition, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_engine_signal_approved_routes_to_notify_branch() {
+        let svc = WorkflowEngineService::new_for_test();
+        let def_id = svc
+            .deploy_definition("test", &sample_approval_sw_yaml())
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance(&def_id, serde_json::json!({"orderId": "ORD-2"}))
+            .await
+            .unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+        let loaded = svc.get_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Waiting);
+
+        // approve 分支：手动 signal 命中期望事件类型 → 按事件类型路由到 notify
+        let resumed = svc
+            .resume_instance(
+                &inst.id,
+                Some("icps.approval.approved"),
+                Some(serde_json::json!({"ok": true})),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed.status, InstanceStatus::Running);
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+        let done = svc.get_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(done.status, InstanceStatus::Completed);
+        assert_eq!(
+            done.context["result"], "approved",
+            "approve signal must route to the notify branch, not the default branch"
         );
     }
 
