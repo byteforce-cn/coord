@@ -13,7 +13,7 @@
 //     无自动 TTL/归档）。
 // 语义细节（补偿幂等/重试/超时/信号/保留）见 docs/production/workflow-semantics.md。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -578,7 +578,7 @@ impl WorkflowService {
     pub async fn list_instances(
         &self,
         workflow_id: &str,
-        _namespace: &str,
+        namespace: &str,
         page_size: i32,
         page_token: &str,
     ) -> ServiceResult<(Vec<InstSummary>, String)> {
@@ -629,15 +629,54 @@ impl WorkflowService {
             }
         };
 
-        let filtered: Vec<&WorkflowInstance> = match &filter_name {
-            None => all_instances.iter().collect(),
-            Some(name) => all_instances
-                .iter()
-                .filter(|i| {
-                    i.workflow_name == *name || i.definition_id.as_deref() == Some(workflow_id)
-                })
-                .collect(),
+        // namespace 过滤：遗留实例自身不带 namespace，需经其关联定义归属判定。
+        // 先收齐该 namespace 下的定义（id 与 name），再据此过滤实例。
+        // 直接扫 namespace 索引（limit 0 ⇒ server max_range_limit 兜底）：
+        // legacy `list_definitions` 会把 page_size=0 解释成 50 条缺省页，
+        // 定义多于 50 个时会漏掉后一半，进而误滤实例。
+        let ns_refs: Option<(HashSet<String>, HashSet<String>)> = if namespace.is_empty() {
+            None
+        } else {
+            let prefix = WorkflowDefinition::namespace_key(namespace);
+            let range_end = prefix_end(&prefix);
+            let pairs = self
+                .inner
+                .client
+                .kv()
+                .range(&prefix, &range_end, 0, 0)
+                .await
+                .map_err(|e| format!("kv range definitions: {e}"))?;
+            let mut ids = HashSet::new();
+            let mut names = HashSet::new();
+            for (_k, v) in &pairs {
+                let def_id = String::from_utf8_lossy(v).to_string();
+                let def_key = WorkflowDefinition::storage_key(&def_id);
+                if let Ok(def_pairs) = self.inner.client.kv().range(&def_key, &def_key, 1, 0).await
+                {
+                    if let Some((_dk, dv)) = def_pairs.into_iter().next() {
+                        if let Ok(def) = serde_json::from_slice::<WorkflowDefinition>(&dv) {
+                            ids.insert(def.id.clone());
+                            names.insert(def.name.clone());
+                        }
+                    }
+                }
+            }
+            Some((ids, names))
         };
+
+        let filtered: Vec<&WorkflowInstance> = all_instances
+            .iter()
+            .filter(|i| match &filter_name {
+                None => true,
+                Some(name) => {
+                    i.workflow_name == *name || i.definition_id.as_deref() == Some(workflow_id)
+                }
+            })
+            .filter(|i| match &ns_refs {
+                None => true,
+                Some((ids, names)) => legacy_instance_in_namespace(i, ids, names),
+            })
+            .collect();
 
         // 应用分页
         let start_idx = if page_token.is_empty() {
@@ -687,6 +726,20 @@ impl WorkflowService {
 
         Ok((summaries, next_token))
     }
+}
+
+/// 遗留实例的 namespace 归属判定：实例经其关联定义（`definition_id` 优先，
+/// 回退 `workflow_name`）归属到 namespace。`ns_def_ids`/`ns_def_names` 为
+/// 目标 namespace 下的定义 id 与定义名集合。
+fn legacy_instance_in_namespace(
+    inst: &WorkflowInstance,
+    ns_def_ids: &HashSet<String>,
+    ns_def_names: &HashSet<String>,
+) -> bool {
+    inst.definition_id
+        .as_deref()
+        .is_some_and(|id| ns_def_ids.contains(id))
+        || ns_def_names.contains(&inst.workflow_name)
 }
 
 /// 计算 range 前缀的结束键（前缀各字节 +1）
@@ -1180,6 +1233,37 @@ mod tests {
         c.put_instance(WorkflowInstance::new("i1", "a", vec![]));
         assert!(c.get_instance("i1").is_some());
         assert_eq!(c.list_instances_by_workflow("a").len(), 1);
+    }
+
+    #[test]
+    fn test_legacy_instance_namespace_membership() {
+        let ids: HashSet<String> = ["def-a".to_string()].into_iter().collect();
+        let names: HashSet<String> = ["alpha-wf".to_string()].into_iter().collect();
+        let other_ids: HashSet<String> = ["def-b".to_string()].into_iter().collect();
+        let other_names: HashSet<String> = ["beta-wf".to_string()].into_iter().collect();
+
+        // definition_id 命中目标 namespace 的定义
+        let mut inst = WorkflowInstance::new("i1", "alpha-wf", vec![]);
+        inst.definition_id = Some("def-a".into());
+        assert!(legacy_instance_in_namespace(&inst, &ids, &names));
+        assert!(!legacy_instance_in_namespace(
+            &inst,
+            &other_ids,
+            &other_names
+        ));
+
+        // definition_id 缺失时回退 workflow_name
+        let no_id = WorkflowInstance::new("i2", "alpha-wf", vec![]);
+        assert!(legacy_instance_in_namespace(
+            &no_id,
+            &other_ids.clone(),
+            &names
+        ));
+        assert!(!legacy_instance_in_namespace(
+            &no_id,
+            &other_ids,
+            &other_names
+        ));
     }
 
     // ──── 新数据类型测试 ────
@@ -2283,13 +2367,14 @@ pub mod phase4 {
             Ok(())
         }
 
+        /// 列出工作流实例（过滤 + 分页）——契约见 [`WorkflowStore::list_instances`]。
         pub async fn list_instances(
             &self,
             namespace: Option<&str>,
             definition_name: Option<&str>,
             page_size: usize,
             page_token: Option<&str>,
-        ) -> Result<Vec<WorkflowInstance>, String> {
+        ) -> Result<(Vec<WorkflowInstance>, Option<String>), String> {
             self.store
                 .list_instances(namespace, definition_name, page_size, page_token)
                 .await
@@ -2359,7 +2444,7 @@ pub mod phase4 {
 
             // 引用检查以存储为准（KV 后端会全量扫实例表并刷新缓存，避免缓存滞后
             // 误放行）。保留策略是低频运维操作，全量扫描代价可接受。
-            let instances = self
+            let (instances, _) = self
                 .store
                 .list_instances(None, None, usize::MAX, None)
                 .await
@@ -2757,11 +2842,12 @@ do:
             .await
             .unwrap();
 
-        let instances = svc
+        let (instances, next_token) = svc
             .list_instances(None, Some("linear-wf"), 10, None)
             .await
             .unwrap();
         assert_eq!(instances.len(), 2);
+        assert!(next_token.is_none(), "一页装下全部时不得给续读令牌");
     }
 
     #[tokio::test]
