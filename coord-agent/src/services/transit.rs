@@ -51,7 +51,7 @@ use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use parking_lot::RwLock;
 use rand::RngCore;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::transit_store::{now_unix, DekRecord, MemoryTransitDekStore, TransitDekStore};
@@ -78,6 +78,28 @@ impl Default for TransitConfig {
     }
 }
 
+impl TransitConfig {
+    /// 读取主材料标识（`COORD_TRANSIT_KEK_ID`；未设置 / 空白 ⇒ `default-kek`）。
+    ///
+    /// 生产装配（`services.transit` 分支）用本构造器取代逐字默认：轮换 = 新标识 +
+    /// 新材料，旧材料按**旧标识**注入历史集合后，旧 `key_id` / 旧 DEK 记录才能命中
+    /// 历史材料（窗口可验；材料下线 fail-loud）。
+    pub fn from_env() -> Self {
+        Self {
+            kek_id: kek_id_from_env_value(std::env::var(TRANSIT_KEK_ID_ENV).ok().as_deref()),
+            ..Self::default()
+        }
+    }
+}
+
+/// 环境值 → 材料标识（空白视为未设置：不把不可见字符当标识）
+fn kek_id_from_env_value(raw: Option<&str>) -> String {
+    raw.map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| TransitConfig::default().kek_id)
+}
+
 /// 静态加密 KEK 长度（256-bit）
 const KEK_MATERIAL_LEN: usize = 32;
 
@@ -92,6 +114,12 @@ pub const TRANSIT_KEK_OLD_ENV: &str = "COORD_TRANSIT_KEK_OLD";
 
 /// 历史材料文件名（每行 `kek_id hex64`；`#` 注释）
 pub const TRANSIT_KEK_OLD_FILE: &str = "transit-kek-old.txt";
+
+/// 主材料标识环境变量（域分隔 / 审计标签；**轮换时随材料换代**）。
+///
+/// 同一标识只能对应一份材料（历史集合拒绝与主 id 重复的条目）；标识不换代，
+/// 旧记录 / 旧签名会落到新材料上，窗口命中与 fail-loud 都失效。
+pub const TRANSIT_KEK_ID_ENV: &str = "COORD_TRANSIT_KEK_ID";
 
 /// dev 模式默认 KEK 材料（`coord dev` 专用；见 ADR-0009）。
 ///
@@ -186,8 +214,9 @@ impl TransitKekMaterial {
 /// - 加密/回包只使用**主材料**；
 /// - 解密按 DEK 记录 / 密文自带的材料标识选材料；无标识（旧格式旧记录）按
 ///   「主 → 历史」逐材料试解；
-/// - 历史材料仅用于**解密窗口**：清空历史材料前必须先 rewrap 全部存量 DEK
-///   （演练与回退路径见 `docs/production/ops/runbook.md` §4.4）。
+/// - 历史材料承担**解密窗口**与按显式 `key_id` 的 HMAC 复算（ADR-0012；HMAC 迁移
+///   由消费方按新主材料重散列，`Rewrap` 只迁移 DEK）：清空历史材料前必须先 rewrap
+///   全部存量 DEK（演练与回退路径见 `docs/production/ops/runbook.md` §4.4）。
 #[derive(Debug)]
 pub struct TransitKekKeyring {
     primary_id: String,
@@ -196,13 +225,31 @@ pub struct TransitKekKeyring {
 }
 
 impl TransitKekKeyring {
-    /// 单主材料集合（无历史；dev / 单测 / 兼容构造）
-    pub fn single(primary_id: &str, primary: TransitKekMaterial) -> Self {
-        Self {
+    /// 主材料标识校验：非空、不含 NUL、≤255 字节。
+    ///
+    /// DEK 包头用 1 字节长度写入标识 ⇒ 超长必须提前到构造期 fail-closed
+    /// （否则要到加密期才报错，实例已带着非法配置启动）。
+    fn validate_primary_kek_id(id: &str) -> Result<(), String> {
+        if id.trim().is_empty() {
+            return Err("primary KEK id must not be empty".into());
+        }
+        if id.contains('\0') {
+            return Err("primary KEK id must not contain NUL".into());
+        }
+        if id.len() > u8::MAX as usize {
+            return Err(format!("primary KEK id must not exceed {} bytes", u8::MAX));
+        }
+        Ok(())
+    }
+
+    /// 单主材料集合（无历史；dev / 单测 / 兼容构造；标识非法 ⇒ Err）
+    pub fn single(primary_id: &str, primary: TransitKekMaterial) -> Result<Self, String> {
+        Self::validate_primary_kek_id(primary_id)?;
+        Ok(Self {
             primary_id: primary_id.to_string(),
             primary,
             historical: Vec::new(),
-        }
+        })
     }
 
     /// 解析材料集合（主材料 fail-closed；历史材料可选）：
@@ -237,6 +284,7 @@ impl TransitKekKeyring {
         primary: TransitKekMaterial,
         old_env_value: Option<String>,
     ) -> Result<Self, String> {
+        Self::validate_primary_kek_id(primary_id)?;
         let mut historical: Vec<(String, TransitKekMaterial)> = Vec::new();
 
         match old_env_value {
@@ -310,9 +358,21 @@ impl TransitKekKeyring {
     pub fn historical(&self) -> &[(String, TransitKekMaterial)] {
         &self.historical
     }
+
+    /// 按标识取材料（主或历史；未注入返回 None）
+    pub fn material_for(&self, kek_id: &str) -> Option<&TransitKekMaterial> {
+        if kek_id == self.primary_id {
+            Some(&self.primary)
+        } else {
+            self.historical
+                .iter()
+                .find(|(id, _)| id == kek_id)
+                .map(|(_, m)| m)
+        }
+    }
 }
 
-/// 由材料 + `kek_id` 域分隔派生 32 字节密钥（KEK / HMAC 共用内核）
+/// 由材料 + `kek_id` 域分隔派生 32 字节密钥（KEK 专用内核）
 fn derive_key32(
     material: &TransitKekMaterial,
     info_prefix: &[u8],
@@ -326,6 +386,68 @@ fn derive_key32(
         .expand(&info, &mut out)
         .map_err(|e| format!("HKDF expand for transit key failed: {e}"))?;
     Ok(out)
+}
+
+/// `purpose` 字节上限（含多字节 UTF-8；不 trim）
+pub const HMAC_PURPOSE_MAX_LEN: usize = 128;
+
+/// 用途标签校验（ADR-0012）：非空、不含 NUL、字节长度 ≤128
+fn validate_hmac_purpose(purpose: &str) -> Result<(), String> {
+    if purpose.is_empty() {
+        return Err("invalid purpose: must not be empty".into());
+    }
+    if purpose.len() > HMAC_PURPOSE_MAX_LEN {
+        return Err(format!(
+            "invalid purpose: must not exceed {HMAC_PURPOSE_MAX_LEN} bytes"
+        ));
+    }
+    if purpose.contains('\0') {
+        return Err("invalid purpose: must not contain NUL".into());
+    }
+    Ok(())
+}
+
+/// 用途化 HMAC 密钥（ADR-0012 规范形式；段长前缀编码消除歧义）
+fn derive_hmac_key(
+    material: &TransitKekMaterial,
+    kek_id: &str,
+    purpose: &str,
+) -> Result<[u8; DEK_LEN], String> {
+    let mut info = Vec::with_capacity(24 + 4 + kek_id.len() + 4 + purpose.len());
+    info.extend_from_slice(b"coord-transit-hmac-v1:");
+    info.extend_from_slice(&(kek_id.len() as u32).to_be_bytes());
+    info.extend_from_slice(kek_id.as_bytes());
+    info.extend_from_slice(&(purpose.len() as u32).to_be_bytes());
+    info.extend_from_slice(purpose.as_bytes());
+    let mut out = [0u8; DEK_LEN];
+    Hkdf::<Sha256>::new(None, &*material.0)
+        .expand(&info, &mut out)
+        .map_err(|e| format!("HKDF expand for transit HMAC key failed: {e}"))?;
+    Ok(out)
+}
+
+/// 由已派生密钥计算 HMAC（空 `algorithm` = 默认 HMAC-SHA256）
+fn hmac_bytes(key: &[u8; DEK_LEN], data: &[u8], algorithm: &str) -> Result<Vec<u8>, String> {
+    let algo = if algorithm.is_empty() {
+        "HMAC-SHA256"
+    } else {
+        algorithm
+    };
+    match algo.to_uppercase().as_str() {
+        "HMAC-SHA256" => {
+            let mut mac: Hmac<Sha256> = hmac::digest::KeyInit::new_from_slice(key)
+                .map_err(|e| format!("HMAC-SHA256 init: {e}"))?;
+            Mac::update(&mut mac, data);
+            Ok(Mac::finalize(mac).into_bytes().to_vec())
+        }
+        "HMAC-SHA512" => {
+            let mut mac: Hmac<Sha512> = hmac::digest::KeyInit::new_from_slice(key)
+                .map_err(|e| format!("HMAC-SHA512 init: {e}"))?;
+            Mac::update(&mut mac, data);
+            Ok(Mac::finalize(mac).into_bytes().to_vec())
+        }
+        other => Err(format!("unsupported HMAC algorithm: {other}")),
+    }
 }
 
 /// 常量
@@ -374,19 +496,17 @@ pub struct TransitService {
     /// KEK 集：`(材料标识, KEK)`，**主材料在最前**（`keks[0]`）。
     /// KEK = HKDF-SHA256(注入材料, info="coord-transit-kek-v1:"||材料标识)，仅存内存。
     keks: Vec<(String, [u8; DEK_LEN])>,
+    /// 材料集合：HMAC 密钥**每次签名/验签**按 `(key_id, purpose)` 派生
+    /// （历史材料同样参与 HMAC 派生；见 ADR-0012）
+    keyring: TransitKekKeyring,
     /// DEK 注册表：dek_id → DekEntry（加密态 packet + TTL）
     /// 解密后 DEK 立即移除（用后即焚）
     dek_store: RwLock<HashMap<String, DekEntry>>,
-    /// HMAC 密钥（仅内存，不落盘；重启后从 Server 重新获取）
-    hmac_key: [u8; HMAC_KEY_LEN],
     /// DEK 持久化后端（生产：coord-server KV；单测/骨架：内存）
     store: Arc<dyn TransitDekStore>,
     /// 上次清扫过期 DEK 的 UNIX 秒（0 = 从未）；避免每次加密都全量扫描
     last_sweep: AtomicU64,
 }
-
-/// HMAC 密钥长度（256 位）
-const HMAC_KEY_LEN: usize = 32;
 
 /// 两次过期清扫的最小间隔（秒）
 const SWEEP_INTERVAL_SECS: u64 = 300;
@@ -411,7 +531,7 @@ impl TransitService {
         store: Arc<dyn TransitDekStore>,
         kek_material: TransitKekMaterial,
     ) -> Result<Self, String> {
-        let keyring = TransitKekKeyring::single(&config.kek_id, kek_material);
+        let keyring = TransitKekKeyring::single(&config.kek_id, kek_material)?;
         Self::with_store_keyring(config, store, keyring)
     }
 
@@ -421,19 +541,14 @@ impl TransitService {
         store: Arc<dyn TransitDekStore>,
         keyring: TransitKekKeyring,
     ) -> Result<Self, String> {
-        // 主材料：KEK + HMAC 密钥（域分隔；仅内存）
+        // 主材料：只派生 KEK（HMAC 密钥按 (key_id, purpose) 即时派生）
         let primary_kek = derive_key32(
             keyring.primary(),
             b"coord-transit-kek-v1:",
             keyring.primary_id(),
         )?;
-        let hmac_key = derive_key32(
-            keyring.primary(),
-            b"coord-transit-hmac-v1:",
-            keyring.primary_id(),
-        )?;
 
-        // 历史材料：仅派生解密用 KEK（不参与加密/HMAC）
+        // 历史材料：派生解密用 KEK（HMAC 派生直接从 keyring 取材料）
         let mut keks: Vec<(String, [u8; DEK_LEN])> =
             vec![(keyring.primary_id().to_string(), primary_kek)];
         for (id, material) in keyring.historical() {
@@ -446,8 +561,8 @@ impl TransitService {
         Ok(Self {
             config,
             keks,
+            keyring,
             dek_store: RwLock::new(HashMap::new()),
-            hmac_key,
             store,
             last_sweep: AtomicU64::new(0),
         })
@@ -1049,54 +1164,69 @@ impl TransitService {
         self.dek_store.read().len()
     }
 
-    // ──── HMAC 签名与验签（仅内存密钥，不落盘）───
+    // ──── HMAC 签名与验签（用途化派生；密钥仅内存）───
 
-    /// 使用 HMAC 对数据进行签名
+    /// 按材料标识 + 用途派生 HMAC 密钥（未注入 ⇒ fail-loud）
+    fn hmac_key_for(&self, key_id: &str, purpose: &str) -> Result<[u8; DEK_LEN], String> {
+        let material = self.keyring.material_for(key_id).ok_or_else(|| {
+            let available: Vec<&str> = self.keks.iter().map(|(id, _)| id.as_str()).collect();
+            format!(
+                "KEK material '{key_id}' is not injected (available: {available:?}); inject it \
+                 (COORD_TRANSIT_KEK_OLD) to use it for HMAC"
+            )
+        })?;
+        derive_hmac_key(material, key_id, purpose)
+    }
+
+    /// 使用 HMAC 对数据进行签名（返回 `(签名, 实际材料标识)`）
     ///
-    /// 支持算法: HMAC-SHA256（默认）, HMAC-SHA512
-    /// 密钥仅存于内存，重启后通过 KEK 重新派生。
-    pub fn hmac_sign(&self, data: &[u8], algorithm: &str) -> Result<Vec<u8>, String> {
-        let algo = if algorithm.is_empty() {
-            "HMAC-SHA256"
-        } else {
-            algorithm
-        };
-        match algo.to_uppercase().as_str() {
-            "HMAC-SHA256" => {
-                use sha2::Sha256;
-                // 使用 digest::KeyInit 消除与 aes_gcm::aead::KeyInit 和 Mac::new_from_slice 的歧义
-                let mut mac: Hmac<Sha256> = hmac::digest::KeyInit::new_from_slice(&self.hmac_key)
-                    .map_err(|e| format!("HMAC-SHA256 init: {e}"))?;
-                Mac::update(&mut mac, data);
-                Ok(Mac::finalize(mac).into_bytes().to_vec())
-            }
-            "HMAC-SHA512" => {
-                use sha2::Sha512;
-                let mut mac: Hmac<Sha512> = hmac::digest::KeyInit::new_from_slice(&self.hmac_key)
-                    .map_err(|e| format!("HMAC-SHA512 init: {e}"))?;
-                Mac::update(&mut mac, data);
-                Ok(Mac::finalize(mac).into_bytes().to_vec())
-            }
-            other => Err(format!("unsupported HMAC algorithm: {other}")),
-        }
+    /// 支持算法: HMAC-SHA256（默认）, HMAC-SHA512。
+    /// `purpose` 必填（不同用途派生的密钥互不可验）；`key_id` 缺省/空 = 主材料。
+    /// 签名密钥每次按 `(key_id, purpose)` 即时派生，不缓存。
+    pub fn hmac_sign(
+        &self,
+        data: &[u8],
+        purpose: &str,
+        algorithm: &str,
+        key_id: Option<&str>,
+    ) -> Result<(Vec<u8>, String), String> {
+        validate_hmac_purpose(purpose)?;
+        let key_id = key_id
+            .filter(|s| !s.is_empty())
+            .unwrap_or(self.primary_kek_id());
+        let key = self.hmac_key_for(key_id, purpose)?;
+        Ok((hmac_bytes(&key, data, algorithm)?, key_id.to_string()))
     }
 
     /// 验证 HMAC 签名
+    ///
+    /// `key_id` 必填：只按该材料复算，无 fallback 试解；材料未注入 ⇒ 错误
+    /// （不是 `valid=false`）。签名长度不符 / 不匹配 ⇒ `Ok(false)`。
     pub fn hmac_verify(
         &self,
         data: &[u8],
         signature: &[u8],
+        purpose: &str,
         algorithm: &str,
+        key_id: &str,
     ) -> Result<bool, String> {
-        let expected = self.hmac_sign(data, algorithm)?;
+        validate_hmac_purpose(purpose)?;
+        if key_id.is_empty() {
+            return Err(
+                "invalid key_id: must not be empty (persist the HmacSign key_id with the \
+                 signature)"
+                    .into(),
+            );
+        }
+        let key = self.hmac_key_for(key_id, purpose)?;
+        let expected = hmac_bytes(&key, data, algorithm)?;
         // 常量时间比较
-        Ok(expected.len() == signature.len() && {
-            let mut acc = 0u8;
-            for (a, b) in expected.iter().zip(signature.iter()) {
-                acc |= a ^ b;
-            }
-            acc == 0
-        })
+        Ok(expected.len() == signature.len()
+            && expected
+                .iter()
+                .zip(signature.iter())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0)
     }
 
     pub fn config(&self) -> &TransitConfig {
@@ -1429,8 +1559,12 @@ mod tests {
         let a = test_svc(cfg.clone());
         let b = TransitService::new(cfg, TransitKekMaterial::from_bytes(&[0x03u8; 32]).unwrap())
             .expect("create");
-        let sig_a = a.hmac_sign(b"same input", "HMAC-SHA256").expect("sign");
-        let sig_b = b.hmac_sign(b"same input", "HMAC-SHA256").expect("sign");
+        let (sig_a, _) = a
+            .hmac_sign(b"same input", "p:test", "HMAC-SHA256", None)
+            .expect("sign");
+        let (sig_b, _) = b
+            .hmac_sign(b"same input", "p:test", "HMAC-SHA256", None)
+            .expect("sign");
         assert_ne!(sig_a, sig_b, "HMAC 密钥必须随注入材料变化");
     }
 
@@ -1487,11 +1621,25 @@ mod tests {
 
     // ──── HMAC 签名与验签测试 ────
 
+    /// ADR-0012 派生公式的黄金向量：公式一旦漂移（同 sign/verify 互测无法发现）本测试必红。
+    #[test]
+    fn test_hmac_derivation_golden_vector() {
+        let svc = test_svc(TransitConfig::default());
+        let (sig, key_id) = svc
+            .hmac_sign(b"golden-vector", "p:golden", "HMAC-SHA256", None)
+            .expect("sign");
+        assert_eq!(key_id, "default-kek");
+        assert_eq!(
+            hex::encode(sig),
+            "5060a19382984c49ca53ac217ea0df9e44c8f8d4d6baa97453918c80978c2ef3"
+        );
+    }
+
     #[test]
     fn test_hmac_sign_sha256_default() {
         let svc = test_svc(TransitConfig::default());
         let data = b"hello hmac";
-        let sig = svc.hmac_sign(data, "").expect("hmac_sign");
+        let (sig, _) = svc.hmac_sign(data, "p:test", "", None).expect("hmac_sign");
         assert!(!sig.is_empty());
         // SHA-256 HMAC 输出 32 字节
         assert_eq!(sig.len(), 32);
@@ -1500,7 +1648,9 @@ mod tests {
     #[test]
     fn test_hmac_sign_sha512() {
         let svc = test_svc(TransitConfig::default());
-        let sig = svc.hmac_sign(b"data", "HMAC-SHA512").expect("hmac_sign");
+        let (sig, _) = svc
+            .hmac_sign(b"data", "p:test", "HMAC-SHA512", None)
+            .expect("hmac_sign");
         assert_eq!(sig.len(), 64);
     }
 
@@ -1508,16 +1658,22 @@ mod tests {
     fn test_hmac_verify_roundtrip() {
         let svc = test_svc(TransitConfig::default());
         let data = b"verify me";
-        let sig = svc.hmac_sign(data, "HMAC-SHA256").expect("sign");
-        assert!(svc.hmac_verify(data, &sig, "HMAC-SHA256").expect("verify"));
+        let (sig, _) = svc
+            .hmac_sign(data, "p:test", "HMAC-SHA256", None)
+            .expect("sign");
+        assert!(svc
+            .hmac_verify(data, &sig, "p:test", "HMAC-SHA256", "default-kek")
+            .expect("verify"));
     }
 
     #[test]
     fn test_hmac_verify_tampered_data() {
         let svc = test_svc(TransitConfig::default());
-        let sig = svc.hmac_sign(b"original", "HMAC-SHA256").expect("sign");
+        let (sig, _) = svc
+            .hmac_sign(b"original", "p:test", "HMAC-SHA256", None)
+            .expect("sign");
         assert!(!svc
-            .hmac_verify(b"tampered", &sig, "HMAC-SHA256")
+            .hmac_verify(b"tampered", &sig, "p:test", "HMAC-SHA256", "default-kek")
             .expect("verify"));
     }
 
@@ -1525,25 +1681,205 @@ mod tests {
     fn test_hmac_verify_tampered_signature() {
         let svc = test_svc(TransitConfig::default());
         let data = b"my data";
-        let mut sig = svc.hmac_sign(data, "HMAC-SHA256").expect("sign");
+        let (mut sig, _) = svc
+            .hmac_sign(data, "p:test", "HMAC-SHA256", None)
+            .expect("sign");
         // Corrupt the signature
         sig[0] ^= 0xFF;
-        assert!(!svc.hmac_verify(data, &sig, "HMAC-SHA256").expect("verify"));
+        assert!(!svc
+            .hmac_verify(data, &sig, "p:test", "HMAC-SHA256", "default-kek")
+            .expect("verify"));
     }
 
     #[test]
     fn test_hmac_deterministic() {
         let svc = test_svc(TransitConfig::default());
         let data = b"deterministic";
-        let sig1 = svc.hmac_sign(data, "HMAC-SHA256").expect("sign");
-        let sig2 = svc.hmac_sign(data, "HMAC-SHA256").expect("sign");
+        let (sig1, _) = svc
+            .hmac_sign(data, "p:test", "HMAC-SHA256", None)
+            .expect("sign");
+        let (sig2, _) = svc
+            .hmac_sign(data, "p:test", "HMAC-SHA256", None)
+            .expect("sign");
         assert_eq!(sig1, sig2);
     }
 
     #[test]
     fn test_hmac_unsupported_algorithm() {
         let svc = test_svc(TransitConfig::default());
-        assert!(svc.hmac_sign(b"data", "HMAC-MD5").is_err());
+        assert!(svc.hmac_sign(b"data", "p:test", "HMAC-MD5", None).is_err());
+    }
+
+    #[test]
+    fn test_hmac_purpose_must_not_be_empty() {
+        let svc = test_svc(TransitConfig::default());
+        let err = svc
+            .hmac_sign(b"data", "", "HMAC-SHA256", None)
+            .expect_err("empty purpose must fail");
+        assert!(err.starts_with("invalid purpose"), "unexpected: {err}");
+        let err = svc
+            .hmac_verify(b"data", b"sig", "", "HMAC-SHA256", "default-kek")
+            .expect_err("empty purpose must fail");
+        assert!(err.starts_with("invalid purpose"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn test_hmac_purpose_validation_is_byte_level_and_never_trims() {
+        let svc = test_svc(TransitConfig::default());
+        assert!(svc
+            .hmac_sign(b"d", "a\0b", "", None)
+            .unwrap_err()
+            .starts_with("invalid purpose"));
+        let max = "x".repeat(128);
+        assert!(
+            svc.hmac_sign(b"d", &max, "", None).is_ok(),
+            "128 bytes must pass"
+        );
+        let too_long = "x".repeat(129);
+        assert!(svc
+            .hmac_sign(b"d", &too_long, "", None)
+            .unwrap_err()
+            .starts_with("invalid purpose"));
+        // 多字节按字节计：64 个 4 字节码位 = 256 字节 ⇒ 拒绝
+        let multibyte = "🦀".repeat(64);
+        assert!(svc
+            .hmac_sign(b"d", &multibyte, "", None)
+            .unwrap_err()
+            .starts_with("invalid purpose"));
+        // 空白串是合法不透明标签（不得 trim）
+        assert!(svc.hmac_sign(b"d", " ", "", None).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sign_default_and_explicit_primary_return_key_id() {
+        let svc = test_svc(TransitConfig::default());
+        let (sig_default, id_default) = svc
+            .hmac_sign(b"data", "p:id", "HMAC-SHA256", None)
+            .expect("sign");
+        let (sig_empty, id_empty) = svc
+            .hmac_sign(b"data", "p:id", "HMAC-SHA256", Some(""))
+            .expect("sign with empty key_id = primary");
+        assert_eq!(id_default, "default-kek");
+        assert_eq!(id_empty, "default-kek");
+        assert_eq!(sig_default, sig_empty);
+    }
+
+    #[test]
+    fn test_hmac_purposes_are_mutually_unverifiable() {
+        let svc = test_svc(TransitConfig::default());
+        let (sig, _) = svc
+            .hmac_sign(b"same data", "p:a", "HMAC-SHA256", None)
+            .expect("sign");
+        assert!(svc
+            .hmac_verify(b"same data", &sig, "p:a", "HMAC-SHA256", "default-kek")
+            .expect("same purpose"));
+        assert!(!svc
+            .hmac_verify(b"same data", &sig, "p:b", "HMAC-SHA256", "default-kek")
+            .expect("other purpose"));
+    }
+
+    #[test]
+    fn test_hmac_verify_requires_non_empty_key_id() {
+        let svc = test_svc(TransitConfig::default());
+        let err = svc
+            .hmac_verify(b"data", b"sig", "p:a", "HMAC-SHA256", "")
+            .expect_err("empty key_id must fail");
+        assert!(err.starts_with("invalid key_id"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn test_hmac_unknown_key_id_fails_loud() {
+        let svc = test_svc(TransitConfig::default());
+        let err = svc
+            .hmac_verify(b"data", b"sig", "p:a", "HMAC-SHA256", "ghost")
+            .expect_err("not injected must fail loud");
+        assert!(err.contains("is not injected"), "unexpected: {err}");
+        assert!(
+            svc.hmac_sign(b"data", "p:a", "HMAC-SHA256", Some("ghost"))
+                .is_err(),
+            "sign with unknown material must fail"
+        );
+    }
+
+    /// 主材料 + 历史材料实例（HMAC 轮换窗口测试用）
+    fn svc_with_history(primary_id: &str, primary_byte: u8, old: &[(&str, u8)]) -> TransitService {
+        let store: Arc<dyn TransitDekStore> = Arc::new(MemoryTransitDekStore::new());
+        TransitService::with_store_keyring(
+            TransitConfig {
+                kek_id: primary_id.into(),
+                ..Default::default()
+            },
+            store,
+            TransitKekKeyring::resolve_with_env(
+                std::path::Path::new("/nonexistent"),
+                primary_id,
+                material(primary_byte),
+                if old.is_empty() {
+                    None
+                } else {
+                    Some(old_env_for(old))
+                },
+            )
+            .expect("keyring"),
+        )
+        .expect("svc")
+    }
+
+    #[test]
+    fn test_hmac_rotation_window_and_offline_fail_loud() {
+        let purpose = "eis:hr:employee:id_number:v1";
+        // 旧部署（材料 1 / id "old"）产生存量签名
+        let old_svc = svc_with_history("old", 1, &[]);
+        let (sig, key_id) = old_svc
+            .hmac_sign(b"stored hash", purpose, "HMAC-SHA256", None)
+            .expect("sign");
+        assert_eq!(key_id, "old");
+
+        // 轮换：主材料 2 / id "new" + 历史材料 1 / id "old" ⇒ 窗口内可验
+        let rotated = svc_with_history("new", 2, &[("old", 1)]);
+        assert!(rotated
+            .hmac_verify(b"stored hash", &sig, purpose, "HMAC-SHA256", "old")
+            .expect("window verify"));
+        // 新签名用主材料
+        let (sig_new, id_new) = rotated
+            .hmac_sign(b"stored hash", purpose, "HMAC-SHA256", None)
+            .expect("sign new");
+        assert_eq!(id_new, "new");
+        assert_ne!(sig, sig_new);
+        // 旧材料复算散列变体（DRV-005 防重）
+        let (variant, variant_id) = rotated
+            .hmac_sign(b"stored hash", purpose, "HMAC-SHA256", Some("old"))
+            .expect("variant");
+        assert_eq!(variant_id, "old");
+        assert_eq!(variant, sig, "同 (purpose,data,key_id) 必须可复算");
+
+        // 历史材料下线（未注入）⇒ fail-loud（不是 valid=false）
+        let offline = svc_with_history("new", 2, &[]);
+        let err = offline
+            .hmac_verify(b"stored hash", &sig, purpose, "HMAC-SHA256", "old")
+            .expect_err("offline must fail loud");
+        assert!(err.contains("is not injected"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn test_hmac_cross_agent_consistency() {
+        let cfg = || TransitConfig {
+            kek_id: "k1".into(),
+            ..Default::default()
+        };
+        let a = test_svc(cfg());
+        let b = test_svc(cfg());
+        let (sig_a, id_a) = a
+            .hmac_sign(b"same data", "p:same", "HMAC-SHA256", None)
+            .expect("a");
+        let (sig_b, id_b) = b
+            .hmac_sign(b"same data", "p:same", "HMAC-SHA256", None)
+            .expect("b");
+        assert_eq!(id_a, id_b);
+        assert_eq!(sig_a, sig_b, "同材料+id+purpose ⇒ 同签名");
+        assert!(b
+            .hmac_verify(b"same data", &sig_a, "p:same", "HMAC-SHA256", &id_a)
+            .expect("cross-agent verify"));
     }
 
     // ──── 持久化路径 ────
@@ -1826,7 +2162,7 @@ mod tests {
                 ..Default::default()
             },
             shared.clone(),
-            TransitKekKeyring::single("old", material(1)),
+            TransitKekKeyring::single("old", material(1)).expect("old keyring"),
         )
         .expect("old svc");
 
@@ -1885,7 +2221,7 @@ mod tests {
                 ..Default::default()
             },
             shared.clone(),
-            TransitKekKeyring::single("new", material(2)),
+            TransitKekKeyring::single("new", material(2)).expect("new keyring"),
         )
         .expect("no-history svc");
         let err = no_history_svc
@@ -1905,7 +2241,7 @@ mod tests {
                 ..Default::default()
             },
             shared.clone(),
-            TransitKekKeyring::single("old", material(1)),
+            TransitKekKeyring::single("old", material(1)).expect("old keyring"),
         )
         .expect("old svc");
 
@@ -2006,5 +2342,34 @@ mod tests {
         )
         .expect_err("invalid hex must be rejected");
         assert!(!err.is_empty());
+    }
+
+    /// 主材料标识来自 `COORD_TRANSIT_KEK_ID`（未设置 / 空白 ⇒ default）：轮换的装配面
+    #[test]
+    fn test_kek_id_from_env_value_defaults_and_trims() {
+        assert_eq!(kek_id_from_env_value(None), "default-kek");
+        assert_eq!(kek_id_from_env_value(Some("")), "default-kek");
+        assert_eq!(kek_id_from_env_value(Some("   ")), "default-kek");
+        assert_eq!(kek_id_from_env_value(Some(" gen-2 ")), "gen-2");
+        assert_eq!(kek_id_from_env_value(Some("default-kek")), "default-kek");
+    }
+
+    /// 主材料标识非法（空 / 空白 / NUL / >255 字节）⇒ 构造期拒绝（不等到加密期）
+    #[test]
+    fn test_keyring_rejects_invalid_primary_id() {
+        for bad in ["", "   ", "bad\0id", &"x".repeat(256)] {
+            let err = TransitKekKeyring::single(bad, material(1))
+                .expect_err("invalid primary id must be rejected");
+            assert!(err.contains("primary KEK id"), "unexpected: {err}");
+        }
+        let err = TransitKekKeyring::resolve_with_env(
+            std::path::Path::new("/nonexistent"),
+            "bad\0id",
+            material(1),
+            None,
+        )
+        .expect_err("resolve must validate the primary id");
+        assert!(err.contains("primary KEK id"), "unexpected: {err}");
+        assert!(TransitKekKeyring::single(&"x".repeat(255), material(1)).is_ok());
     }
 }

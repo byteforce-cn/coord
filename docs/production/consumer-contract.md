@@ -1,6 +1,6 @@
 # 消费方契约页（Consumer Contract）
 
-> Owner: maintainers ｜ Last verified: 2026-10-11
+> Owner: maintainers ｜ Last verified: 2026-10-12
 
 面向**接入方**的聚合页：按服务给出「一致性 / 路由 / 失败语义 + 推荐消费范式」，
 并把每 RPC 的能力名与已接受的边界汇总为可检索的表。
@@ -272,7 +272,7 @@
   （playbook：`security.md` §3.2 / runbook §4.5）；非 HSM 边界与重估触发见
   `boundaries.md` B-PKI-1。
 
-## 10. Transit（信封加密与 HMAC，G-TR-1 / G-TR-2）
+## 10. Transit（信封加密与 HMAC，G-TR-1 / G-TR-2 / G-TR-3）
 
 | RPC（组） | 能力 |
 |:--|:--|
@@ -288,6 +288,18 @@
   加密 + HMAC，PKI 维持「密钥交付持有方」模型。「私钥不出域」的签名场景
   （token / 审计锚点等）不在承诺内；触发条件（组织 KMS 方向确定）时另行立项
   评估。边界条目：`boundaries.md` B-TR-1。
+- **HMAC 用途化与轮换窗口（G-TR-3，ADR-0012）**：`HmacSign` / `HmacVerify` 的 `purpose`
+  必填（非空、不含 NUL、≤128 字节；空/非法 ⇒ `INVALID_ARGUMENT`），按用途域分隔派生、
+  互不可验。签名的 `key_id` 是材料标识（Vault Transit 的 key version 等价物），**必须与
+  签名一起持久化**；验签 `key_id` 必填（空 ⇒ `INVALID_ARGUMENT`），只按该材料复算：材料
+  已注入 ⇒ 正常校验；未注入 ⇒ `FAILED_PRECONDITION`（fail-loud，不是 `valid=false`）。
+  新写入不传 `key_id`（主材料）；显式 `key_id` 用于轮换期按旧材料复算散列变体（DRV-005
+  防重）。轮换/下线/回退见 runbook §4.4。**跨 agent 一致性**：同集群所有 agent 必须注入
+  相同材料与标识；同一 `(purpose, data, key_id, algorithm)` 在任一 agent 结果一致。
+  主材料标识由部署注入（`COORD_TRANSIT_KEK_ID`，缺省 `default-kek`），**轮换时随材料
+  换代**（同一标识不得对应两份材料）；旧材料按旧标识注入历史集合，旧签名 / 旧记录
+  才可按 `key_id` 复算。
+  用途是**域分隔标签，不是授权边界**——持有 `coord:transit:crypto` 的调用方可签/验任意合法 `purpose`；按服务隔离用途不属本契约承诺。
 
 ## 11. 本地态服务（CircuitBreaker / RateLimiter / FeatureFlags）
 

@@ -1,6 +1,6 @@
 # coord 运维 Runbook
 
-> Owner: maintainers ｜ Last verified: 2026-10-09
+> Owner: maintainers ｜ Last verified: 2026-10-12
 
 - **体例**：每条 = **触发 / 命令 / 预期输出 / 失败时怎么办**。
   「命令」一律是别人能重跑的东西；写不出的条目不入本表。
@@ -190,6 +190,8 @@ coord security rotate-keys --addr <node>
 ```bash
 # 方式 A：环境变量（hex64 = 32 字节；多 agent 必须同一值）
 COORD_TRANSIT_KEK=$(openssl rand -hex 32); export COORD_TRANSIT_KEK
+# 可选：主材料标识（默认 default-kek；轮换时必须随材料换代，见下方「轮换」）
+# export COORD_TRANSIT_KEK_ID=gen-2026-10
 # 方式 B：密钥文件（32 字节原始材料；每个 agent 的 data_dir 下，建议 0600）
 head -c 32 /dev/urandom > /var/lib/coord-agent/transit-kek.bin
 chmod 600 /var/lib/coord-agent/transit-kek.bin
@@ -211,12 +213,13 @@ chmod 600 /var/lib/coord-agent/transit-kek.bin
 
 KEK 更换分三步，**在完成迁移前不得移除旧材料**：
 
-1. **并存窗口**：主材料与新注入方式不变（`COORD_TRANSIT_KEK`），把**旧材料**
-   同时注入：
-   - 环境变量 `COORD_TRANSIT_KEK_OLD`：`kek_id:hex64[,kek_id:hex64...]`；
+1. **并存窗口**：轮换 = **新标识 + 新材料**——`COORD_TRANSIT_KEK_ID=<新标识>` +
+   `COORD_TRANSIT_KEK=<新材料>`；把**旧材料按旧标识**同时注入（同一标识只能对应一份
+   材料，标识不换代会让旧记录 / 旧签名落到新材料上）：
+   - 环境变量 `COORD_TRANSIT_KEK_OLD`：`<旧标识>:hex64[,...]`；
    - 或 `<data_dir>/transit-kek-old.txt`（每行 `kek_id hex64`，`#` 注释）。
-   此时新写入的 DEK 由主材料包裹；旧材料密文按记录中的材料标识自动选旧材料解密
-   （旧记录无标识 ⇒ 按「主 → 历史」逐材料试解）。
+   此时新写入的 DEK 由主材料（新标识）包裹；旧材料密文按记录中的材料标识自动选旧
+   材料解密（旧记录无标识 ⇒ 按「主 → 历史」逐材料试解）。
 2. **迁移存量**：对仍有效的存量 DEK 调 `Transit/Rewrap`（管理路径）：
    旧材料解出 DEK → **主材料重包**（新 nonce / 新 dek_id，材料标识更新为
    主材料）；返回 `new_dek_id` 与 `kek_id`。此后旧材料对该条已无依赖。
@@ -234,6 +237,23 @@ KEK 更换分三步，**在完成迁移前不得移除旧材料**：
   `test_multi_material_decrypt_window_and_rewrap`（含负控制）、
   `test_legacy_record_without_material_id_falls_back_to_try_all`、
   `test_keyring_old_material_parsing_rules`。
+
+**HMAC 轮换（G-TR-3 / ADR-0012）**：
+
+HMAC 与 DEK 共用材料集合，但**不参与 `Rewrap`**；迁移 = 业务按新主材料重散列并回写。
+
+1. **写入侧**：`HmacSign` 必带 `purpose`；把响应的 `key_id` 与签名（散列）一起持久化——
+   丢失 `key_id` 的存量在旧材料下线后既不可复算也不会 fail-loud。本改动前产出的（无 key_id / 旧派生公式）存量散列同样不可复算，须按新主材料重散列回写。
+2. **并存窗口**：按本节 KEK 步骤 1 注入旧材料（**旧标识 + 旧材料**）；旧散列按 `key_id` 可验；防重按
+   `HmacSign(purpose, data, key_id=旧)` 复算变体（DRV-005）。
+3. **下线**：确认业务库无引用旧 `key_id` 的存量散列（或已在窗口内重建）后移除旧材料；
+   此后按旧 `key_id` 验签/复算报
+   `FAILED_PRECONDITION: KEK material '<id>' is not injected …`（fail-loud）。
+4. **回退**：重新注入旧材料（同 id / 同材料）即恢复复算；未确认无依赖前不得下线。
+
+**判据（自动化）**：`test_hmac_rotation_window_and_offline_fail_loud`（窗口可验 + 变体复算
++ 下线 fail-loud）、`test_hmac_cross_agent_consistency`、`test_hmac_purposes_are_mutually_unverifiable`、
+`test_grpc_hmac_purpose_key_id_and_fail_loud`（错误码）。
 
 ### 4.5 PKI 证书轮换与泄露应急（G-PKI-3）
 

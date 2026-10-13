@@ -53,22 +53,38 @@ message TransitDecryptResponse {
   bytes plaintext = 1;
 }
 
-// Transit HMAC 签名与验签 (Phase B.2 新增)
+// Transit HMAC 签名与验签（G-TR-3 / ADR-0012：用途化密钥 + 轮换窗口）
+//
+// purpose 必填：按用途域分隔派生 HMAC 密钥 ⇒ 不同用途互不可验；空/非法 ⇒ INVALID_ARGUMENT。
+// key_id 为材料标识，承担 Vault Transit「密钥版本」角色；跨 agent 一致性要求：
+// 同一集群所有 agent 必须注入相同材料与相同标识，同一 (purpose, data, key_id, algorithm)
+// 在任一 agent 结果一致。
+// purpose 是域分隔标签，不是授权边界：持有 coord:transit:crypto 的调用方可使用任意合法 purpose（不设白名单，见 ADR-0012 §1）。
 
 message TransitHmacSignRequest {
   bytes data = 1;
   string algorithm = 2; // 默认 "HMAC-SHA256"
+  // 用途标签：非空、不含 NUL、≤128 字节；空/非法 ⇒ INVALID_ARGUMENT。
+  string purpose = 3;
+  // 材料标识：空 = 主材料（新写入口径）；显式给出 = 指定材料（轮换期散列变体复算）。
+  string key_id = 4;
 }
 
 message TransitHmacSignResponse {
   bytes signature = 1;
   string algorithm = 2;
+  // 服务端分配：实际参与签名的材料标识；调用方必须与签名一起持久化（验签必填）。
+  string key_id = 3;
 }
 
 message TransitHmacVerifyRequest {
   bytes data = 1;
   bytes signature = 2;
   string algorithm = 3;
+  // 用途标签：必填；签名时的用途。
+  string purpose = 4;
+  // 材料标识：必填；签名时的材料。未注入 ⇒ FAILED_PRECONDITION（fail-loud，不是 valid=false）。
+  string key_id = 5;
 }
 
 message TransitHmacVerifyResponse {

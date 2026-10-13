@@ -8,7 +8,11 @@
 // - 持久化：加密态 DEK 落共享存储 ⇒ 重启后仍可解密、单次使用跨实例成立
 
 use coord_agent::services::transit::{TransitConfig, TransitKekMaterial, TransitService};
-use coord_agent::{MemoryTransitDekStore, TransitDekStore};
+use coord_agent::{
+    AgentConfig, AgentServer, MemoryTransitDekStore, ServiceConfig, TransitDekStore,
+};
+use coord_proto::transit::v1::transit_client::TransitClient as TransitGrpcClient;
+use coord_proto::transit::v1::{TransitHmacSignRequest, TransitHmacVerifyRequest};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -219,4 +223,157 @@ async fn test_transit_persisted_rewrap_survives_restart() {
             .expect("新 DEK 解密失败"),
         plaintext
     );
+}
+
+/// 启动使用 dev 默认 KEK 的 agent（HMAC 语义与材料无关；与 ADR-0009 dev 路径同口径），
+/// 返回 gRPC 地址与保活 TempDir。
+async fn start_transit_agent() -> (String, tempfile::TempDir) {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let http_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let config = AgentConfig {
+        agent_addr: format!("127.0.0.1:{port}"),
+        http_addr: format!("127.0.0.1:{http_port}"),
+        data_dir: tmpdir.path().join("data").to_string_lossy().into_owned(),
+        static_peers: vec![],
+        services: ServiceConfig {
+            transit: true,
+            ..ServiceConfig::default()
+        },
+        ..Default::default()
+    };
+    let server = AgentServer::new(config).with_dev_default_transit_kek(true);
+    tokio::spawn(async move {
+        let _ = server.serve().await;
+    });
+    let addr = format!("127.0.0.1:{port}");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "agent did not start on {addr}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    (addr, tmpdir)
+}
+
+#[tokio::test]
+async fn test_grpc_hmac_purpose_key_id_and_fail_loud() {
+    let (addr, _tmp) = start_transit_agent().await;
+    let mut client = TransitGrpcClient::connect(format!("http://{addr}"))
+        .await
+        .expect("connect");
+
+    // purpose 缺失 → INVALID_ARGUMENT
+    let err = client
+        .hmac_sign(TransitHmacSignRequest {
+            data: b"data".to_vec(),
+            algorithm: String::new(),
+            purpose: String::new(),
+            key_id: String::new(),
+        })
+        .await
+        .expect_err("empty purpose must fail");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // 正常签名：响应携带 key_id
+    let signed = client
+        .hmac_sign(TransitHmacSignRequest {
+            data: b"data".to_vec(),
+            algorithm: String::new(),
+            purpose: "eis:hr:employee:id_number:v1".into(),
+            key_id: String::new(),
+        })
+        .await
+        .expect("sign")
+        .into_inner();
+    assert!(!signed.key_id.is_empty());
+
+    // 同用途 → valid=true；不同用途 → valid=false（互不可验）
+    let ok = client
+        .hmac_verify(TransitHmacVerifyRequest {
+            data: b"data".to_vec(),
+            signature: signed.signature.clone(),
+            algorithm: String::new(),
+            purpose: "eis:hr:employee:id_number:v1".into(),
+            key_id: signed.key_id.clone(),
+        })
+        .await
+        .expect("verify")
+        .into_inner();
+    assert!(ok.valid);
+    let wrong = client
+        .hmac_verify(TransitHmacVerifyRequest {
+            data: b"data".to_vec(),
+            signature: signed.signature.clone(),
+            algorithm: String::new(),
+            purpose: "eis:hr:employee:id_number:v2".into(),
+            key_id: signed.key_id.clone(),
+        })
+        .await
+        .expect("verify")
+        .into_inner();
+    assert!(!wrong.valid);
+
+    // 指定材料未注入 → FAILED_PRECONDITION（fail-loud）
+    let err = client
+        .hmac_verify(TransitHmacVerifyRequest {
+            data: b"data".to_vec(),
+            signature: signed.signature.clone(),
+            algorithm: String::new(),
+            purpose: "eis:hr:employee:id_number:v1".into(),
+            key_id: "ghost".into(),
+        })
+        .await
+        .expect_err("not injected must fail loud");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+    // sign 显式指定未注入材料 → 同口径 FAILED_PRECONDITION（不得退化成用新材料签名）
+    let err = client
+        .hmac_sign(TransitHmacSignRequest {
+            data: b"data".to_vec(),
+            algorithm: String::new(),
+            purpose: "eis:hr:employee:id_number:v1".into(),
+            key_id: "ghost".into(),
+        })
+        .await
+        .expect_err("sign with not-injected key_id must fail loud");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+    // 验签 key_id 空 → INVALID_ARGUMENT
+    let err = client
+        .hmac_verify(TransitHmacVerifyRequest {
+            data: b"data".to_vec(),
+            signature: vec![0u8; 32],
+            algorithm: String::new(),
+            purpose: "p".into(),
+            key_id: String::new(),
+        })
+        .await
+        .expect_err("empty key_id must fail");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // 不支持算法 → INVALID_ARGUMENT
+    let err = client
+        .hmac_sign(TransitHmacSignRequest {
+            data: b"data".to_vec(),
+            algorithm: "HMAC-MD5".into(),
+            purpose: "p".into(),
+            key_id: String::new(),
+        })
+        .await
+        .expect_err("unsupported algorithm must fail");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }

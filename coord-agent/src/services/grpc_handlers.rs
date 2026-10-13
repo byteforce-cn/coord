@@ -2480,6 +2480,23 @@ impl Policy for PolicyService {
 // Transit Service
 // ════════════════════════════════════════════════════════════
 
+/// HMAC 错误映射（G-TR-3 / ADR-0012）：
+/// 参数非法（purpose / key_id / algorithm）→ INVALID_ARGUMENT；
+/// 指定材料未注入 → FAILED_PRECONDITION（fail-loud，不是静默 valid=false）；
+/// 其余 → sanitized_internal。
+fn map_transit_hmac_error(e: String) -> Status {
+    if e.contains("is not injected") {
+        Status::failed_precondition(e)
+    } else if e.starts_with("invalid purpose")
+        || e.starts_with("invalid key_id")
+        || e.starts_with("unsupported HMAC algorithm")
+    {
+        Status::invalid_argument(e)
+    } else {
+        sanitized_internal(e)
+    }
+}
+
 #[tonic::async_trait]
 impl Transit for TransitService {
     async fn encrypt(
@@ -2513,12 +2530,20 @@ impl Transit for TransitService {
         request: Request<TransitHmacSignRequest>,
     ) -> Result<Response<TransitHmacSignResponse>, Status> {
         let req = request.into_inner();
-        match self.hmac_sign(&req.data, &req.algorithm) {
-            Ok(signature) => Ok(Response::new(TransitHmacSignResponse {
+        // 空 key_id = 主材料（新写入口径）；响应回带实际参与签名的材料标识，
+        // 调用方必须与签名一起持久化（验签必填）。
+        let key_id = if req.key_id.is_empty() {
+            None
+        } else {
+            Some(req.key_id.as_str())
+        };
+        match self.hmac_sign(&req.data, &req.purpose, &req.algorithm, key_id) {
+            Ok((signature, key_id)) => Ok(Response::new(TransitHmacSignResponse {
                 signature,
                 algorithm: req.algorithm,
+                key_id,
             })),
-            Err(e) => Err(sanitized_internal(e)),
+            Err(e) => Err(map_transit_hmac_error(e)),
         }
     }
 
@@ -2527,9 +2552,15 @@ impl Transit for TransitService {
         request: Request<TransitHmacVerifyRequest>,
     ) -> Result<Response<TransitHmacVerifyResponse>, Status> {
         let req = request.into_inner();
-        match self.hmac_verify(&req.data, &req.signature, &req.algorithm) {
+        match self.hmac_verify(
+            &req.data,
+            &req.signature,
+            &req.purpose,
+            &req.algorithm,
+            &req.key_id,
+        ) {
             Ok(valid) => Ok(Response::new(TransitHmacVerifyResponse { valid })),
-            Err(e) => Err(sanitized_internal(e)),
+            Err(e) => Err(map_transit_hmac_error(e)),
         }
     }
 

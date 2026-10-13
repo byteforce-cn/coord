@@ -1790,7 +1790,7 @@ impl AgentServer {
             };
             use crate::services::transit_store::{KvTransitDekStore, TransitDekStore};
 
-            let transit_config = TransitConfig::default();
+            let transit_config = TransitConfig::from_env();
             // 主材料 fail-closed（口径不变）；历史材料可选（G-TR-1 多材料解密窗口，
             // 供旧材料密文在新材料实例上可读；清空前必须先 rewrap 全部存量 DEK）。
             let keyring = match TransitKekKeyring::resolve(
@@ -1807,7 +1807,7 @@ impl AgentServer {
                     let material =
                         TransitKekMaterial::from_bytes(&crate::services::transit::DEV_DEFAULT_KEK)
                             .map_err(|e| format!("dev default KEK material invalid: {e}"))?;
-                    TransitKekKeyring::single(&transit_config.kek_id, material)
+                    TransitKekKeyring::single(&transit_config.kek_id, material)?
                 }
                 Err(e) => {
                     return Err(format!(
