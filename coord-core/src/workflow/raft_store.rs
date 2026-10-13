@@ -433,7 +433,7 @@ impl<P: RaftProposer + 'static> WorkflowStore for RaftWorkflowStore<P> {
         definition_name: Option<&str>,
         page_size: usize,
         page_token: Option<&str>,
-    ) -> Result<Vec<WorkflowInstance>, StoreError> {
+    ) -> Result<(Vec<WorkflowInstance>, Option<String>), StoreError> {
         self.inner
             .list_instances(namespace, definition_name, page_size, page_token)
             .await
