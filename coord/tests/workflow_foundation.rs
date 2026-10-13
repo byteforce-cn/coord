@@ -9,7 +9,7 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use coord_agent::service::BaseService;
@@ -28,7 +28,8 @@ use coord_core::workflow::model::{
     WorkflowInstance,
 };
 use coord_core::workflow::ports::{
-    DispatchResult, NoopEventProvider, SystemClock, TaskDispatcher, WorkflowStore,
+    DispatchResult, EventDelivery, EventProvider, NoopEventProvider, SystemClock, TaskDispatcher,
+    WorkflowStore,
 };
 use coord_core::workflow::runtime::{RuntimeError, WorkflowRuntime};
 
@@ -293,4 +294,116 @@ async fn running_instance_is_redriven_after_restart() {
         }),
         "重驱动后的终态事件必须落 outbox: {all:?}"
     );
+}
+
+/// ack 记录：(事件类型, 投递 offset, ack 时读回的实例状态)
+type AckRecord = (String, u64, Option<InstanceStatus>);
+
+/// 事件提供者：`wait_for_event` 立即交付；`ack_event` 时按 id 读回实例状态并记录。
+///
+/// 用来断言 ack **晚于**状态写：投递原子化要求「位点提交延后到实例状态写成功之后」，
+/// 读回 `Waiting` 即意味着 ack 抢在状态写之前（崩溃窗口会丢投递）。
+struct AckAfterStateProvider {
+    store: KvWorkflowStore,
+    instance_id: String,
+    acks: Arc<Mutex<Vec<AckRecord>>>,
+}
+
+#[tonic::async_trait]
+impl EventProvider for AckAfterStateProvider {
+    async fn emit(&self, _event_type: &str, _source: Option<&str>, _data: &serde_json::Value) {}
+
+    async fn wait_for_event(
+        &self,
+        _event_types: &[&str],
+        _source: Option<&str>,
+        _subject: Option<&str>,
+        _timeout_ms: u64,
+    ) -> Option<EventDelivery> {
+        Some(EventDelivery {
+            event_type: "approval.requested".into(),
+            subscription: "foundation-sub".into(),
+            offset: 7,
+        })
+    }
+
+    async fn ack_event(&self, delivery: &EventDelivery) {
+        let status = self
+            .store
+            .load_instance(&self.instance_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|i| i.status);
+        self.acks
+            .lock()
+            .unwrap()
+            .push((delivery.event_type.clone(), delivery.offset, status));
+    }
+}
+
+/// listen 的事件在实例状态写成功之后才被 ack，且 ack 携带原投递的信封。
+#[tokio::test(flavor = "multi_thread")]
+async fn listen_event_is_acked_after_state_commit() {
+    let (addr, _sd, _g, _r, _tmp) = common::start_test_server().await;
+    let inner = agent_inner(&addr).await;
+    let store = KvWorkflowStore::new(inner.clone());
+
+    let def = listen_definition();
+    store.save_definition(&def).await.expect("save definition");
+
+    // 已知 id 的 Pending 快照由本测试驱动：provider 才能在 ack 时按 id 读回状态。
+    let mut snapshot = WorkflowInstance::new(&def, serde_json::json!({}), now_ms());
+    snapshot.id = "foundation-listen-ack-order".into();
+    store.save_instance(&snapshot).await.expect("seed instance");
+
+    let acks = Arc::new(Mutex::new(Vec::new()));
+    let provider = AckAfterStateProvider {
+        store: KvWorkflowStore::new(inner.clone()),
+        instance_id: snapshot.id.clone(),
+        acks: Arc::clone(&acks),
+    };
+
+    let executor = WorkflowExecutor::new(ExpressionEvaluator::new(), SystemClock::new());
+    let outbox = Arc::new(KvOutboxStore::new(inner.clone()));
+    let durable = DurableSupport::new(
+        Arc::clone(&outbox) as Arc<dyn DurableTimerStore>,
+        Arc::clone(&outbox) as Arc<dyn OutboxStore>,
+    )
+    .with_atomic_commit(Arc::clone(&outbox) as Arc<dyn AtomicOutboxCommit>);
+    let rt = WorkflowRuntime::new(
+        executor,
+        SystemClock::new(),
+        store,
+        NoopDispatcher,
+        provider,
+    )
+    .with_durable(durable);
+
+    rt.drive_instance(&snapshot.id).await.expect("drive");
+
+    // provider 立即交付 ⇒ listen 恢复并驱动到终态。
+    let probe = KvWorkflowStore::new(inner.clone());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(Some((inst, _))) = probe.load_instance_with_rev(&snapshot.id).await {
+            if inst.status == InstanceStatus::Completed {
+                break;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "listen 实例在事件到达后未完成"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let recorded = acks.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "listen 事件恰 ack 一次: {recorded:?}");
+    assert_eq!(recorded[0].0, "approval.requested");
+    assert_eq!(recorded[0].1, 7, "ack 必须携带原投递的 offset");
+    match recorded[0].2 {
+        Some(InstanceStatus::Running) | Some(InstanceStatus::Completed) => {}
+        other => panic!("ack 必须晚于实例状态写（ack 时状态 = {other:?}）"),
+    }
 }

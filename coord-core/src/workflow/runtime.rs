@@ -563,7 +563,7 @@ where
         let handle = tokio::spawn(async move {
             let timeout_ms = event_timeout_ms.unwrap_or(60 * 60 * 1000);
             let type_refs: Vec<&str> = filter_types.iter().map(|s| s.as_str()).collect();
-            let arrived_type = rt
+            let delivery = rt
                 .event_provider
                 .wait_for_event(
                     &type_refs,
@@ -572,9 +572,16 @@ where
                     timeout_ms,
                 )
                 .await;
-            if let Some(et) = arrived_type {
+            if let Some(delivery) = delivery {
                 // 背景路径无消费方：错误已计入 `cas_conflict_total`，此处释放。
-                let _ = rt.resume_by_event(instance_id, definition, store, et).await;
+                let _ = rt
+                    .resume_by_event(instance_id, definition, store, delivery.event_type.clone())
+                    .await;
+                // 状态写成功后才提交消费位点：这一步之前崩溃只会重复投递，
+                // 由 `resume_by_event` 的状态守卫（非 `Waiting`/reason 不匹配即返回）
+                // 吸收；反过来（先提交位点）崩溃就是丢投递。守卫 no-op 也照样 ack ——
+                // 那条事件与本实例已无关，位点仍必须推进。
+                rt.event_provider.ack_event(&delivery).await;
             }
             // 走到这一行才算正常收尾；中途 panic 则不置位（由 `WorkerLiveness` 报出）。
             done.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -659,8 +666,10 @@ where
     /// 对账所有非终态可恢复实例：重启后重新驱动/重订阅。
     ///
     /// - `Pending` / `Running`：上个进程的 drive 任务随进程消失（进程内任务无跨进程存活，
-    ///   `drivers/` 租约键也无主）⇒ 重驱动一个。经 [`Self::spawn_drive`] 先取租约，
-    ///   多进程并发时只有一个真正驱动（其余计入 `lease_skipped`）。
+    ///   `drivers/` 租约键也无主）⇒ 重驱动一个。**未注入租约时**（当前 durable 装配，租约由
+    ///   Task 10 接入）同进程重叠驱动是可容忍的：每次 drive 都重读最新实例状态，CAS 失败的
+    ///   提交直接退出驱动循环 —— 不会丢更新，只是白跑一轮。注入租约后（经 [`Self::spawn_drive`]
+    ///   先取租约）由租约提供互斥：多进程并发时只有一个真正驱动（其余计入 `lease_skipped`）。
     /// - `Waiting`：`listen` 重建事件订阅；`wait` / `retry` 补写持久化定时器（已到期立即触发）。
     /// - `Suspended`（signal）：人工恢复语义 —— 没有外部 signal 就自动重驱动会把人工审批
     ///   直接跑过去，故**不**自动驱动（ADR 的「所有非终态」在此显式排除 signal 挂起）。
@@ -2914,6 +2923,7 @@ mod tests {
     use crate::workflow::ports::test_utils::{
         MemoryWorkflowStore, NoopEventProvider, NoopTaskDispatcher, TestClock,
     };
+    use crate::workflow::ports::StoreError;
 
     fn make_runtime() -> WorkflowRuntime<
         ExpressionEvaluator,
@@ -4985,5 +4995,218 @@ mod tests {
         B: EventProvider,
     {
         &runtime.store
+    }
+
+    // ─── fail_instance 有界 CAS 重试（可控冲突的假存储） ───
+
+    /// 可控 CAS 冲突的存储：期望修订号匹配时，前 `conflicts_remaining` 次返回冲突并推进
+    /// 存储修订号（模拟并发写者抢先提交）；其余读写转发给内存存储。
+    struct ConflictOnceStore {
+        inner: MemoryWorkflowStore,
+        rev: std::sync::atomic::AtomicI64,
+        conflicts_remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ConflictOnceStore {
+        fn new(conflicts: usize) -> Self {
+            Self {
+                inner: MemoryWorkflowStore::new(),
+                rev: std::sync::atomic::AtomicI64::new(0),
+                conflicts_remaining: std::sync::atomic::AtomicUsize::new(conflicts),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowStore for ConflictOnceStore {
+        async fn save_definition(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
+            self.inner.save_definition(def).await
+        }
+
+        async fn load_definition(
+            &self,
+            namespace: &str,
+            name: &str,
+            version: &str,
+        ) -> Result<Option<WorkflowDefinition>, StoreError> {
+            self.inner.load_definition(namespace, name, version).await
+        }
+
+        async fn save_instance(&self, inst: &WorkflowInstance) -> Result<(), StoreError> {
+            self.inner.save_instance(inst).await
+        }
+
+        async fn load_instance(&self, id: &str) -> Result<Option<WorkflowInstance>, StoreError> {
+            self.inner.load_instance(id).await
+        }
+
+        async fn list_definitions(
+            &self,
+            namespace: &str,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<Vec<WorkflowDefinition>, StoreError> {
+            self.inner
+                .list_definitions(namespace, page_size, page_token)
+                .await
+        }
+
+        async fn list_instances(
+            &self,
+            namespace: Option<&str>,
+            definition_name: Option<&str>,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<(Vec<WorkflowInstance>, Option<String>), StoreError> {
+            self.inner
+                .list_instances(namespace, definition_name, page_size, page_token)
+                .await
+        }
+
+        async fn save_resume_idempotency_key(
+            &self,
+            instance_id: &str,
+            key: &str,
+        ) -> Result<bool, StoreError> {
+            self.inner
+                .save_resume_idempotency_key(instance_id, key)
+                .await
+        }
+
+        async fn load_instance_with_rev(
+            &self,
+            id: &str,
+        ) -> Result<Option<(WorkflowInstance, i64)>, StoreError> {
+            use std::sync::atomic::Ordering;
+            match self.inner.load_instance(id).await? {
+                Some(inst) => Ok(Some((inst, self.rev.load(Ordering::SeqCst)))),
+                None => Ok(None),
+            }
+        }
+
+        async fn save_instance_atomic(
+            &self,
+            inst: &WorkflowInstance,
+            expected_mod_rev: i64,
+        ) -> Result<bool, StoreError> {
+            use std::sync::atomic::Ordering;
+            if expected_mod_rev != self.rev.load(Ordering::SeqCst) {
+                return Ok(false);
+            }
+            if self
+                .conflicts_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                // 模拟并发写者抢先提交：修订号前进，本次 CAS 失去写权。
+                self.rev.fetch_add(1, Ordering::SeqCst);
+                return Ok(false);
+            }
+            self.inner.save_instance(inst).await?;
+            self.rev.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }
+    }
+
+    fn runtime_with_conflict_store(
+        conflicts: usize,
+    ) -> WorkflowRuntime<
+        ExpressionEvaluator,
+        TestClock,
+        ConflictOnceStore,
+        NoopTaskDispatcher,
+        NoopEventProvider,
+    > {
+        let executor = WorkflowExecutor::new(ExpressionEvaluator::new(), TestClock::new(1000));
+        WorkflowRuntime::new(
+            executor,
+            TestClock::new(1000),
+            ConflictOnceStore::new(conflicts),
+            NoopTaskDispatcher,
+            NoopEventProvider,
+        )
+    }
+
+    fn running_instance(id: &str) -> WorkflowInstance {
+        WorkflowInstance {
+            id: id.into(),
+            definition_ns: "test".into(),
+            definition_name: "wf".into(),
+            definition_version: "1.0".into(),
+            status: InstanceStatus::Running,
+            context: serde_json::json!({}),
+            task_stack: vec![],
+            current_task_index: 0,
+            created_at: 0,
+            updated_at: 0,
+            output: None,
+            fault: None,
+            suspension_meta: None,
+        }
+    }
+
+    /// 一次 CAS 冲突后 `fail_instance` 重读修订号并重提 ⇒ 终态写落地，冲突计数为 1。
+    #[tokio::test]
+    async fn fail_instance_recommits_after_one_cas_conflict() {
+        let rt = runtime_with_conflict_store(1);
+        let mut inst = running_instance("inst-cas-retry");
+        store_of(&rt).save_instance(&inst).await.unwrap();
+        let mut rev = Some(0);
+
+        rt.fail_instance(
+            &mut inst,
+            store_of(&rt),
+            &mut rev,
+            None,
+            WorkflowFault::timeout("t", "d"),
+        )
+        .await;
+
+        let saved = store_of(&rt)
+            .load_instance(&inst.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.status,
+            InstanceStatus::Failed,
+            "冲突重提后终态写必须落地"
+        );
+        assert!(saved.fault.is_some());
+        assert_eq!(rt.cas_conflict_total(), 1, "一次冲突只计一次");
+    }
+
+    /// 冲突耗尽 ⇒ 实例保持非终态（由启动对账重新驱动），冲突全部计入 `cas_conflict_total`。
+    #[tokio::test]
+    async fn fail_instance_exhaustion_leaves_instance_non_terminal() {
+        let rt = runtime_with_conflict_store(usize::MAX);
+        let mut inst = running_instance("inst-cas-exhausted");
+        store_of(&rt).save_instance(&inst).await.unwrap();
+        let mut rev = Some(0);
+
+        rt.fail_instance(
+            &mut inst,
+            store_of(&rt),
+            &mut rev,
+            None,
+            WorkflowFault::timeout("t", "d"),
+        )
+        .await;
+
+        let saved = store_of(&rt)
+            .load_instance(&inst.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.status,
+            InstanceStatus::Running,
+            "耗尽后不得留下伪终态"
+        );
+        assert_eq!(
+            rt.cas_conflict_total(),
+            CONTROL_PLANE_CAS_ATTEMPTS as u64,
+            "每次失败尝试都必须计数"
+        );
     }
 }

@@ -175,6 +175,20 @@ impl<T: TaskDispatcher + Send + Sync + ?Sized> TaskDispatcher for Arc<T> {
 
 // ─── EventProvider ───
 
+/// 一次事件投递的信封 —— 提交消费位点所需的最小信息。
+///
+/// `subscription` 标识消费位点所属的订阅，`offset` 是本次命中记录在该订阅里的位置。
+/// 调用方把信封原样交回 [`EventProvider::ack_event`]，位点才被提交；因此「状态写成功」
+/// 与「位点提交」之间崩溃只会**重复投递**（由消费方的状态守卫吸收），不会丢投递。
+pub struct EventDelivery {
+    /// 实际到达的事件类型
+    pub event_type: String,
+    /// 消费位点所属的订阅标识
+    pub subscription: String,
+    /// 本次命中记录在订阅内的 offset
+    pub offset: u64,
+}
+
 /// 事件提供者 —— 负责事件的发布与监听
 #[async_trait]
 pub trait EventProvider: Send + Sync {
@@ -183,14 +197,21 @@ pub trait EventProvider: Send + Sync {
 
     /// 等待任一匹配的事件（事件类型集合任一命中即返回）
     ///
-    /// 返回实际到达的事件类型（`None` = 超时 / 未匹配 / 不支持）。
+    /// 返回命中事件的投递信封（`None` = 超时 / 未匹配 / 不支持）。**不**提交消费位点：
+    /// 调用方必须在实例状态写成功后调用 [`EventProvider::ack_event`] 才推进位点。
     async fn wait_for_event(
         &self,
         event_types: &[&str],
         source: Option<&str>,
         subject: Option<&str>,
         timeout_ms: u64,
-    ) -> Option<String>;
+    ) -> Option<EventDelivery>;
+
+    /// 确认投递完成：提交 `delivery` 对应的消费位点。
+    ///
+    /// 由 [`EventProvider::wait_for_event`] 的调用方在实例状态写成功后调用。
+    /// 没有持久化位点的实现（如内存广播）为 no-op。
+    async fn ack_event(&self, delivery: &EventDelivery);
 }
 
 /// 为 Arc<T> 提供 EventProvider 的委托实现（支持 trait object 类型擦除）
@@ -206,10 +227,14 @@ impl<T: EventProvider + Send + Sync + ?Sized> EventProvider for Arc<T> {
         source: Option<&str>,
         subject: Option<&str>,
         timeout_ms: u64,
-    ) -> Option<String> {
+    ) -> Option<EventDelivery> {
         self.as_ref()
             .wait_for_event(event_types, source, subject, timeout_ms)
             .await
+    }
+
+    async fn ack_event(&self, delivery: &EventDelivery) {
+        self.as_ref().ack_event(delivery).await
     }
 }
 
@@ -227,9 +252,11 @@ impl EventProvider for NoopEventProvider {
         _source: Option<&str>,
         _subject: Option<&str>,
         _timeout_ms: u64,
-    ) -> Option<String> {
+    ) -> Option<EventDelivery> {
         None
     }
+
+    async fn ack_event(&self, _delivery: &EventDelivery) {}
 }
 
 /// 事件元组类型别名（clippy::type_complexity）
@@ -286,7 +313,7 @@ impl EventProvider for MemoryEventProvider {
         source: Option<&str>,
         _subject: Option<&str>,
         timeout_ms: u64,
-    ) -> Option<String> {
+    ) -> Option<EventDelivery> {
         if event_types.is_empty() {
             return None; // 不支持无过滤的通配监听
         }
@@ -327,7 +354,13 @@ impl EventProvider for MemoryEventProvider {
                             }
                         }
                         if event_types.contains(&recv_type.as_str()) {
-                            return Some(recv_type);
+                            // 订阅以监听的事件类型标识（channel 按事件类型分）；进程内
+                            // broadcast 无持久化位点，ack_event 因此是 no-op。
+                            return Some(EventDelivery {
+                                event_type: recv_type,
+                                subscription: et.clone(),
+                                offset: 0,
+                            });
                         }
                     }
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_n))) => {
@@ -353,6 +386,9 @@ impl EventProvider for MemoryEventProvider {
             }
         }
     }
+
+    /// 进程内 broadcast 无持久化位点：投递即消费，确认是 no-op。
+    async fn ack_event(&self, _delivery: &EventDelivery) {}
 }
 
 // ─── WorkflowStore ───
@@ -1106,9 +1142,11 @@ pub mod test_utils {
             _source: Option<&str>,
             _subject: Option<&str>,
             _timeout_ms: u64,
-        ) -> Option<String> {
+        ) -> Option<EventDelivery> {
             None
         }
+
+        async fn ack_event(&self, _delivery: &EventDelivery) {}
     }
 
     /// 空任务派发器（测试用）
@@ -1341,7 +1379,7 @@ mod tests {
 
         let received = handle.await.unwrap();
         assert_eq!(
-            received.as_deref(),
+            received.map(|d| d.event_type).as_deref(),
             Some("order.created"),
             "should receive the emitted event"
         );
@@ -1390,7 +1428,7 @@ mod tests {
         // source A 的 wait 应该匹配
         let r_a = handle_a.await.unwrap();
         assert_eq!(
-            r_a.as_deref(),
+            r_a.map(|d| d.event_type).as_deref(),
             Some("ping"),
             "should match the emitted source"
         );
@@ -1421,12 +1459,12 @@ mod tests {
         let r1 = h1.await.unwrap();
         let r2 = h2.await.unwrap();
         assert_eq!(
-            r1.as_deref(),
+            r1.map(|d| d.event_type).as_deref(),
             Some("broadcast.test"),
             "subscriber 1 should receive event"
         );
         assert_eq!(
-            r2.as_deref(),
+            r2.map(|d| d.event_type).as_deref(),
             Some("broadcast.test"),
             "subscriber 2 should receive event"
         );

@@ -18,8 +18,10 @@
 //
 // 现在游标按**订阅**（topic + 过滤器规范化后的哈希）寻址，且可注入持久化
 // [`CursorStore`]：每个订阅各走各的游标，重启后从上次位点续读。
-// 匹配到事件时**先提交游标再返回** ⇒ 同一订阅不重放（至多一次消费）；「崩溃窗口内
-// 丢一次投递」的口径见 `spike/2026-10/spike-3-recovery/RECOVERY.md` 的残余缺口表。
+// 匹配到事件时**只返回投递信封、不提交游标**：消费位点在调用方把实例状态写成功
+// 之后经 `ack_event` 提交（`offset + 1`）⇒ 崩溃窗口从「丢一次投递」变为「重复
+// 投递」，由消费方的状态守卫吸收（`spawn_event_wait` 的接线见 `coord-core` 运行时）。
+// 扫描中不匹配的记录只推进本地扫描、不提交位点（下次重扫同一段无害）。
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -27,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use coord_core::workflow::ports::EventProvider;
+use coord_core::workflow::ports::{EventDelivery, EventProvider};
 
 use super::mq::MessageQueueService;
 
@@ -188,7 +190,7 @@ impl EventProvider for MqEventProvider {
         source: Option<&str>,
         subject: Option<&str>,
         timeout_ms: u64,
-    ) -> Option<String> {
+    ) -> Option<EventDelivery> {
         let subscription = subscription_key(&self.topic, event_types, source, subject);
         // 该订阅自己的游标：并发订阅之间不共享、不互相推进。
         let mut cursor = self.cursors.load(&subscription).await.unwrap_or(0);
@@ -206,14 +208,18 @@ impl EventProvider for MqEventProvider {
                             let subject_match =
                                 subject.map(|s| sub.as_deref() == Some(s)).unwrap_or(true);
                             if type_match && source_match && subject_match {
-                                // 先提交游标再返回：同一订阅不重放该事件。
-                                let _ = self.cursors.store(&subscription, cursor).await;
-                                return Some(et);
+                                // 命中即返回，**不**提交游标：位点由调用方在状态写成功后
+                                // 经 `ack_event` 提交（先提交会让崩溃窗口丢投递）。
+                                return Some(EventDelivery {
+                                    event_type: et,
+                                    subscription,
+                                    offset: rec.offset,
+                                });
                             }
                         }
                     }
-                    // 本轮全是无关事件：提交跳过后的游标，下次从这里继续。
-                    let _ = self.cursors.store(&subscription, cursor).await;
+                    // 本轮全是无关事件：只推进本地扫描（不持久化）；命中那条才由
+                    // `ack_event` 真正推进位点。
                 }
             }
             if std::time::Instant::now() >= deadline {
@@ -221,6 +227,16 @@ impl EventProvider for MqEventProvider {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+
+    /// 提交消费位点：命中记录的下一个 offset（`offset + 1`）。
+    ///
+    /// 由调用方在实例状态写成功后调用；此前的崩溃只会重投同一事件。
+    async fn ack_event(&self, delivery: &EventDelivery) {
+        let _ = self
+            .cursors
+            .store(&delivery.subscription, delivery.offset + 1)
+            .await;
     }
 }
 
@@ -292,7 +308,7 @@ mod tests {
             .wait_for_event(&["order.created"], Some("coord/orders"), None, 2000)
             .await;
         assert_eq!(
-            found.as_deref(),
+            found.map(|d| d.event_type).as_deref(),
             Some("order.created"),
             "should find the emitted event"
         );
@@ -439,7 +455,7 @@ mod tests {
             .wait_for_event(&["b.only.event"], None, None, 1000)
             .await;
         assert_eq!(
-            b.as_deref(),
+            b.map(|d| d.event_type).as_deref(),
             Some("b.only.event"),
             "修复后：B 的订阅游标独立，事件不被偷"
         );
@@ -481,13 +497,12 @@ mod tests {
             Arc::clone(&cursors),
         );
         first.emit("once.event", Some("test"), &Value::Null).await;
-        assert_eq!(
-            first
-                .wait_for_event(&["once.event"], None, None, 1000)
-                .await
-                .as_deref(),
-            Some("once.event")
-        );
+        let delivery = first
+            .wait_for_event(&["once.event"], None, None, 1000)
+            .await
+            .expect("first delivery");
+        assert_eq!(delivery.event_type, "once.event");
+        first.ack_event(&delivery).await;
 
         // 「重启」：新 provider，同一持久化游标存储
         let restarted =
@@ -497,7 +512,52 @@ mod tests {
             .await;
         assert!(
             replayed.is_none(),
-            "修复后：游标持久化，重启不重放已消费事件"
+            "修复后：游标持久化，ack 后重启不重放已消费事件"
+        );
+    }
+
+    /// 位点只在**显式** `ack_event` 后推进：未 ack ⇒ 「重启」后同一事件重投；
+    /// ack 后 ⇒ 不再投递。前者是崩溃窗口从「丢投递」变为「重复投递」的根据。
+    #[tokio::test]
+    async fn delivery_is_acked_only_after_explicit_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let mq = mq_started(&dir).await;
+        let cursors: Arc<dyn CursorStore> = Arc::new(MemoryCursorStore::new());
+
+        let first = MqEventProvider::new_with_cursor_store(
+            Arc::clone(&mq),
+            "ack.events",
+            Arc::clone(&cursors),
+        );
+        first.emit("ack.me", Some("test"), &Value::Null).await;
+
+        let delivery = first
+            .wait_for_event(&["ack.me"], None, None, 1000)
+            .await
+            .expect("event delivered");
+        assert_eq!(delivery.event_type, "ack.me");
+
+        // 未 ack：位点未提交 ⇒ 新 provider（= 重启）仍能再次取到
+        let restarted = MqEventProvider::new_with_cursor_store(
+            Arc::clone(&mq),
+            "ack.events",
+            Arc::clone(&cursors),
+        );
+        let redelivered = restarted
+            .wait_for_event(&["ack.me"], None, None, 1000)
+            .await
+            .expect("未 ack 的投递在「重启」后必须重投");
+
+        // ack 后：位点提交到 offset+1 ⇒ 不再取到
+        restarted.ack_event(&redelivered).await;
+        let after_ack =
+            MqEventProvider::new_with_cursor_store(Arc::clone(&mq), "ack.events", cursors);
+        assert!(
+            after_ack
+                .wait_for_event(&["ack.me"], None, None, 300)
+                .await
+                .is_none(),
+            "ack 之后位点已提交，不得再投递"
         );
     }
 

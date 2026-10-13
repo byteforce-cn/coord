@@ -100,6 +100,8 @@ verdict_lines=("case\tstatus\tfinal_status\toutbox_pending\tmissing_event_ids\td
 run_case() { # scenario trigger_event expected_final
   local scenario=$1 with_trigger=$2 expected_final=$3
   local case_log="$EVIDENCE_DIR/kill9-$scenario-$TS.log"
+  # 判定表只记仓库相对路径：绝对路径随工作目录漂移，重跑会污染 tracked 证据。
+  local case_log_rel="${case_log#"$REPO_ROOT"/}"
   local case_report="$EVIDENCE_DIR/$scenario-$TS"
   # 每个场景独立 MQ 目录：证据自包含（同一 MQ 目录跨场景会让 events.tsv 混入别案事件）
   local MQ_DIR="$RUN_DIR/mq-$scenario"
@@ -118,7 +120,7 @@ run_case() { # scenario trigger_event expected_final
   if ! wait_for_line "$case_log" "READY" 60; then
     echo "case=$scenario FAILED: no READY line" >&2
     cat "$case_log" >&2
-    verdict_lines+=("$scenario\tFAIL-no-ready\t-\t-\t-\t-\t$case_log")
+    verdict_lines+=("$scenario\tFAIL-no-ready\t-\t-\t-\t-\t$case_log_rel")
     return 1
   fi
   local instance
@@ -150,7 +152,7 @@ run_case() { # scenario trigger_event expected_final
     else
       echo "case=$scenario FAILED: recover never resubscribed" >&2
       kill -9 "$rec_pid" 2>/dev/null || true
-      verdict_lines+=("$scenario\tFAIL-no-subscribe\t-\t-\t-\t-\t$case_log")
+      verdict_lines+=("$scenario\tFAIL-no-subscribe\t-\t-\t-\t-\t$case_log_rel")
       return 1
     fi
   fi
@@ -158,13 +160,13 @@ run_case() { # scenario trigger_event expected_final
   if ! wait "$rec_pid"; then
     echo "case=$scenario FAILED: recover exited non-zero" >&2
     tail -30 "$rec_log" >&2
-    verdict_lines+=("$scenario\tFAIL-recover\t-\t-\t-\t-\t$case_log")
+    verdict_lines+=("$scenario\tFAIL-recover\t-\t-\t-\t-\t$case_log_rel")
     return 1
   fi
 
   # 4) 断言（从 summary.json 取事实，不解析人类可读文案）
   local summary="$case_report/summary.json"
-  [[ -f "$summary" ]] || { echo "case=$scenario FAILED: no summary.json" >&2; verdict_lines+=("$scenario\tFAIL-no-summary\t-\t-\t-\t-\t$case_log"); return 1; }
+  [[ -f "$summary" ]] || { echo "case=$scenario FAILED: no summary.json" >&2; verdict_lines+=("$scenario\tFAIL-no-summary\t-\t-\t-\t-\t$case_log_rel"); return 1; }
   local final pending missing duplicate
   final=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['final_status'])" "$summary")
   pending=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['outbox_pending'])" "$summary")
@@ -178,7 +180,7 @@ run_case() { # scenario trigger_event expected_final
   [[ "$duplicate" == "0" ]] || status="FAIL-duplicate:$duplicate"
 
   echo "case=$scenario status=$status final=$final pending=$pending missing=$missing duplicate=$duplicate"
-  verdict_lines+=("$scenario\t$status\t$final\t$pending\t$missing\t$duplicate\t$case_log")
+  verdict_lines+=("$scenario\t$status\t$final\t$pending\t$missing\t$duplicate\t$case_log_rel")
   [[ "$status" == "PASS" ]]
 }
 
