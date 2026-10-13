@@ -435,8 +435,16 @@ async fn run_recover(
 
     // 终态后等 outbox 排空：relay 是异步的，「状态终态」与「事件全部投递」之间
     // 有一个 relay 轮询窗口；把窗口收进恢复流程，避免把「还在投」误报成「丢了」。
+    //
+    // **稳定性要求**：驱动的状态写与生命周期事件的 outbox 提交是两次写（见
+    // OUTBOX.md「与 CAS/fencing 写路径的集成」），外部观测者可能先看到终态、
+    // 后看到事件记录。单点 `pending==0` 观测会把这个窗口误报成「事件丢失」，
+    // 因此要求连续多轮（间隔 500ms）都为 0 才判定排空。
+    const STABLE_ROUNDS: u32 = 4;
+    const STABLE_INTERVAL: Duration = Duration::from_millis(500);
     let outbox_store = KvOutboxStore::new(Arc::clone(inner));
     let drain_deadline = Instant::now() + Duration::from_secs(30);
+    let mut zero_rounds = 0u32;
     loop {
         let pending = OutboxStore::pending(&outbox_store, now_ms(), 256)
             .await
@@ -445,13 +453,18 @@ async fn run_recover(
             .filter(|r| r.aggregate_id == instance)
             .count();
         if pending == 0 {
-            break;
+            zero_rounds += 1;
+            if zero_rounds >= STABLE_ROUNDS {
+                break;
+            }
+        } else {
+            zero_rounds = 0;
         }
         if Instant::now() >= drain_deadline {
             line(clock, "DRAIN_TIMEOUT", format!("pending={pending}"));
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(STABLE_INTERVAL).await;
     }
     line(clock, "OUTBOX_DRAINED", "pending=0");
 

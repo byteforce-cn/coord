@@ -77,7 +77,22 @@ failure ops: 空
 3885 行的驱动循环，超出 Spike 范围。
 
 这不影响不丢：事件只要没和状态一起提交，就压根没发布；状态照旧由既有的保存点保证。
-它影响的是"状态与事件严格同版本"这一更强性质，留给阶段二（见 §5 缺口 G1）。
+它影响的是"状态与事件严格同版本"这一更强性质，留给阶段二（见 §7 缺口 G1）。
+
+在「Spike 2 CAS/fencing 写路径 + 本 spike durable 能力」的当前装配下，这条边界
+没有收窄、反而多了一层：`drive` 的状态写回走 `persist_instance`（CAS / 租约
+`fenced_save`），随后 `emit_lifecycle` 才用 `commit_state_and_outbox` 提交
+「同一份快照 + 事件」。于是外部观测者可能先看到终态、后看到事件记录（两次写
+之间的窗口）。编排者在集成分支复跑 kill -9 retry 场景捕获到该窗口：终态已是
+`failed`、单次 `pending==0` 观测之后，1.8s 时 summary 仍见
+`workflow.faulted.v1` 为 `Pending`（证据 `evidence/verdict-20261013-122925.tsv`
+与 `evidence/kill9-retry-20261013-122925.log`）。
+
+这不构成事件丢失（relay 随后投递、消费者按 `event_id` 去重），但说明：阶段二的
+正确集成点是让 outbox 记录搭上 `persist_instance`/`fenced_save` 的同一次 CAS
+Txn，而不是在状态写之后单独提交；否则「状态与事件严格同版本」在 CAS/fencing
+路径上不成立。harness 的排空判定已改为「连续多轮为 0」的稳定性观测，避免把这个
+窗口误报成事件丢失（窗口本身仍保留在证据里）。
 
 ## 3. 记录结构
 
@@ -169,10 +184,13 @@ python3 spike/2026-10/spike-3-recovery/scripts/schema_check.py
 
 ## 7. 缺口（阶段二输入）
 
-- **G1（状态/事件同版本）**：`drive()` 的状态保存点尚未全部折叠进同事务提交（§2.1）。
-  要拿到「任意时刻状态与事件严格同版本」，需要把实例保存路径统一成
-  `commit_state_and_outbox`；工作量集中在 `coord-core/src/workflow/runtime.rs` 的
-  `drive`。
+- **G1（状态/事件同版本）**：`drive()` 的状态保存点尚未全部折叠进同事务提交（§2.1），
+  且当前装配下状态写回走 CAS/fencing、事件提交是随后的独立 Txn。要拿到
+  「任意时刻状态与事件严格同版本」，需要把 outbox 记录并入 `persist_instance`
+  （KV 侧 `fenced_save` 的 Txn 增加 outbox ops），或统一成
+  `commit_state_and_outbox` 单写路径；工作量集中在
+  `coord-core/src/workflow/runtime.rs` 的 `drive` 与
+  `coord-agent/src/services/workflow_lease.rs` 的 `fenced_save`。
 - **G2（outbox 无清理）**：记录只增不删（§5.1）。需要保留策略 + 审计删除。
 - **G3（relay 单点）**：relay 在 agent 进程内轮询；多 agent 部署下多副本会重复投递
   （被 broker 幂等键与消费者去重吸收，但会放大流量）。阶段二需要 relay 选主或

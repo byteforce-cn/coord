@@ -69,6 +69,14 @@ python3 spike/2026-10/spike-3-recovery/scripts/schema_check.py
 | `listen-20261013-121200/`、`retry-20261013-121200/` | 同上，按场景分目录 |
 | `verdict.tsv`、`verdict-20261013-121200.tsv` | 机器可读判定（case / status / 四个计数 / 日志路径） |
 
+合并树复跑（2026-10-13 12:31:50，`spike/2026-10-workflow-v2` 合并 Spike 2/3/5 之后）：
+
+| 文件 | 内容 |
+|:--|:--|
+| `verdict.tsv`（当前指向） | 合并树运行：wait / listen / retry 三场景全 PASS |
+| `kill9-{wait,listen,retry}-20261013-123150.log` + `{wait,listen,retry}-20261013-123150/` | 合并树三场景完整时间线与流水 |
+| `verdict-20261013-122925.tsv` + `kill9-retry-20261013-122925.log` + `retry-20261013-122925/` | 合并树**首跑**捕获的观测窗口：终态已 `failed`、单次 `pending==0` 之后 summary 仍见 `workflow.faulted.v1` 为 `Pending`。该次失败不是事件丢失，而是「状态写与伴生事件提交分属两次写」；harness 排空判定已改为连续 4 轮（间隔 500ms）稳定观测，复跑两次均 PASS。引擎侧的同事务集成要求见 `OUTBOX.md` §2.1 与缺口 G1。 |
+
 时间线读法示例（wait）：
 
 ```text

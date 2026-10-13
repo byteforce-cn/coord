@@ -437,7 +437,8 @@ async fn fenced_write_rejects_stale_driver() {
 
 // ─── 场景 6：引擎级单写者 —— 单效果 vs 无租约重复 ───
 
-/// 输出一行并发时间线事件（供 `scripts/repro.sh` 抽取到 `evidence/timeline-*.jsonl`）。
+/// 输出一行并发时间线事件（供 `spike/2026-10/spike-2-concurrency/scripts/repro.sh` 抽取到
+/// `evidence/timeline-*.jsonl`）。
 fn timeline(test: &str, event: &str, detail: &str) {
     let ts_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

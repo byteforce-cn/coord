@@ -1,0 +1,15 @@
+{
+  "delivered_unique": 3,
+  "duplicate_event_ids": 0,
+  "final_status": "failed",
+  "generated_at_ms": 1791894588207,
+  "instance": "267910ec-43f1-4e7b-b739-873b24caa957",
+  "missing_event_ids": 0,
+  "mq_messages_total": 3,
+  "outbox_delivered": 3,
+  "outbox_pending": 1,
+  "outbox_records": 4,
+  "remaining_timers_for_instance": 0,
+  "scenario": "retry",
+  "timers_total": 0
+}
