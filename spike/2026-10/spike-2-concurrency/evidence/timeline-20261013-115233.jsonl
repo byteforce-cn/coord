@@ -1,0 +1,7 @@
+{"test":"no_lease_contrast","ts_ms":1791892367444,"event":"drive_requested","detail":"runtime-A,runtime-B"}
+{"test":"no_lease_contrast","ts_ms":1791892367529,"event":"side_effect_dispatch","detail":"call#1"}
+{"test":"no_lease_contrast","ts_ms":1791892367568,"event":"side_effect_dispatch","detail":"call#2"}
+{"test":"no_lease_contrast","ts_ms":1791892368117,"event":"terminal","detail":"reached"}
+{"test":"single_effect","ts_ms":1791892368218,"event":"drive_requested","detail":"runtime-A,runtime-B"}
+{"test":"single_effect","ts_ms":1791892368325,"event":"side_effect_dispatch","detail":"call#1"}
+{"test":"single_effect","ts_ms":1791892368869,"event":"terminal","detail":"reached"}

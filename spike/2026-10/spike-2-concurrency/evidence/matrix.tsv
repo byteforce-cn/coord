@@ -1,0 +1,8 @@
+test	scenario	mechanism	expected	observed
+cas_two_writers_same_rev_one_wins	两个写者同 mod_revision 竞争	Compare(ModRev==r) + Put	Txn CAS 恰一个 succeeded；version 只 +1	1 win; version 1->2
+cas_stale_revision_rejected	旧修订号 CAS	Compare(ModRev==旧值) + Put	返回 false，不覆盖新值、不改 revision	false; value/revision 不变
+lease_mutex_exclusive	两驱动者抢实例租约	LeaseGrant + Txn Compare(Version==0) create-if-absent	恰一个拿到；失败方 revoke 自己的空租约	1 acquire; lease key bound winner
+lease_expiry_reacquire	租约撤销后重新竞争	LeaseRevoke 级联删 key + 再 Grant/CAS	key 消失后第二个获取者成功	revoke->key deleted->reacquire ok
+fenced_write_rejects_stale_driver	fencing 拒绝旧驱动者	双 compare（state ModRev + driver_key ModRev + driver_key Value）	旧 epoch/token 写 false；新 epoch 写 true	stale=false; current=true
+engine_concurrent_drivers_single_effect	两 WorkflowRuntime 并发驱动同实例（注入租约）	KvInstanceLease（Lease+Txn）+ drive CAS/fencing 	side effect 恰好一次；失败方跳过	call count=1; skipped>=1
+engine_concurrent_drivers_duplicate_without_lease	同上但**不**注入租约（对照）	无 lease	两驱动者各自派发 => 重复	call count=2
