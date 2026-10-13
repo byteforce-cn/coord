@@ -133,3 +133,18 @@ fn matrix_pass_corpus_still_parses() {
         assert_accepted(file);
     }
 }
+
+#[test]
+fn emit_event_with_payload_is_mapped() {
+    // 09：官方 `emit.event.with.{type,source,data}` 必须逐字段映射进 Task::Emit，
+    // 不得静默丢弃载荷（Spike 4 误读之一）。
+    let def = parse_corpus("09-emit.yaml").expect("corpus 09 must parse OK");
+    match &def.do_tasks[0].task {
+        Task::Emit(e) => {
+            assert_eq!(e.emit.event_type, "com.example.notify");
+            assert_eq!(e.emit.source.as_deref(), Some("https://example.com/coord"));
+            assert_eq!(e.emit.data, Some(serde_json::json!({ "msg": "hi" })));
+        }
+        other => panic!("corpus 09: expected Emit task, got {other:?}"),
+    }
+}

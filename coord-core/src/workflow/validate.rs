@@ -490,11 +490,13 @@ impl Validator {
             Value::String(s) => s.clone(),
             Value::Number(_) => wait_val.to_string(),
             Value::Object(obj) => {
-                // 官方 1.0.3 把相对时长写成 `{seconds: N}` / `{milliseconds: N}`；
-                // WaitTask.wait 只消费 ISO8601 时长字符串，故在此归一化。`until` 是
-                // 绝对时刻，解析期无时钟；未知键无语义——两者都点名构造 fail-closed，
-                // 不得静默落成空任务（Spike 4 corpus 07 误读）。
-                let recognized = ["seconds", "milliseconds"];
+                // 官方 1.0.3 的相对时长是 `{days?, hours?, minutes?, seconds?,
+                // milliseconds?}` 组件对象（schema workflow-1.0.3.yaml `duration`）；
+                // WaitTask.wait 只消费 ISO8601 时长字符串，故把全部在场组件合成一个
+                // duration（如 `{seconds:1, milliseconds:500}` → `PT1.5S`）。`until` 是
+                // 绝对时刻，解析期无时钟；真正未知的键无语义——两者都点名构造
+                // fail-closed，不得静默丢字段（Spike 4 corpus 07 误读）。
+                let recognized = ["days", "hours", "minutes", "seconds", "milliseconds"];
                 let unknown: Vec<String> = obj
                     .keys()
                     .filter(|k| k.as_str() != "until" && !recognized.contains(&k.as_str()))
@@ -506,8 +508,8 @@ impl Validator {
                         span: Some(raw.span),
                         kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
                         message: format!(
-                            "unimplemented construct '{construct}': coord wait supports only 
-                             'seconds'/'milliseconds'"
+                            "unimplemented construct '{construct}': coord wait supports only \
+                             'days'/'hours'/'minutes'/'seconds'/'milliseconds'"
                         ),
                     });
                     return None;
@@ -516,33 +518,75 @@ impl Validator {
                     self.errors.push(ValidationError {
                         span: Some(raw.span),
                         kind: ValidationErrorKind::UnsupportedConstruct("wait.until".to_string()),
-                        message: "unimplemented construct 'wait.until': coord has no wall-clock at 
+                        message:
+                            "unimplemented construct 'wait.until': coord has no wall-clock at \
                                   parse time; use a relative duration"
-                            .to_string(),
+                                .to_string(),
                     });
                     return None;
                 }
-                if let Some(secs) = obj.get("seconds").and_then(|x| x.as_u64()) {
-                    format!("PT{secs}S")
-                } else if let Some(ms) = obj.get("milliseconds").and_then(|x| x.as_u64()) {
-                    format!("PT{}S", ms as f64 / 1000.0)
-                } else {
-                    // 形状合法但无可映射时长（空对象 / 非整数 seconds）：拒绝，不静默
+                // 在场组件必须是非负整数；非法值不得静默忽略（fail-closed）。
+                for key in recognized {
+                    if obj.get(key).is_some_and(|v| v.as_u64().is_none()) {
+                        self.errors.push(ValidationError {
+                            span: Some(raw.span),
+                            kind: ValidationErrorKind::UnsupportedConstruct(format!("wait.{key}")),
+                            message: format!("wait.{key} must be a non-negative integer"),
+                        });
+                        return None;
+                    }
+                }
+                let component = |key: &str| obj.get(key).and_then(|v| v.as_u64());
+                if !recognized.iter().any(|k| obj.contains_key(*k)) {
+                    // 空对象 / 无从映射的时长：拒绝，不静默落成空 wait。
                     self.errors.push(ValidationError {
                         span: Some(raw.span),
                         kind: ValidationErrorKind::UnsupportedConstruct("wait".to_string()),
-                        message: "wait duration requires an integer 'seconds' or 'milliseconds'"
+                        message: "wait duration requires at least one of \
+                                  'days'/'hours'/'minutes'/'seconds'/'milliseconds'"
                             .to_string(),
                     });
                     return None;
                 }
+                let mut dur = String::from("P");
+                if let Some(days) = component("days") {
+                    dur.push_str(&format!("{days}D"));
+                }
+                let mut time = String::new();
+                if let Some(hours) = component("hours") {
+                    time.push_str(&format!("{hours}H"));
+                }
+                if let Some(minutes) = component("minutes") {
+                    time.push_str(&format!("{minutes}M"));
+                }
+                if obj.contains_key("seconds") || obj.contains_key("milliseconds") {
+                    // 秒与毫秒合并成一个（可带小数的）秒分量，避免 `PT1S` + `PT0.5S` 冲突。
+                    let total_ms: u128 = component("seconds").unwrap_or(0) as u128 * 1000
+                        + component("milliseconds").unwrap_or(0) as u128;
+                    let whole = total_ms / 1000;
+                    let frac = total_ms % 1000;
+                    if frac == 0 {
+                        time.push_str(&format!("{whole}S"));
+                    } else {
+                        let mut frac_digits = format!("{frac:03}");
+                        while frac_digits.ends_with('0') {
+                            frac_digits.pop();
+                        }
+                        time.push_str(&format!("{whole}.{frac_digits}S"));
+                    }
+                }
+                if !time.is_empty() {
+                    dur.push('T');
+                    dur.push_str(&time);
+                }
+                dur
             }
             _ => {
                 // 非法 wait 形状（bool/array/null）不得静默落成空任务
                 self.errors.push(ValidationError {
                     span: Some(raw.span),
                     kind: ValidationErrorKind::UnsupportedConstruct("wait".to_string()),
-                    message: "wait must be an ISO8601 duration string, a number, or a duration 
+                    message: "wait must be an ISO8601 duration string, a number, or a duration \
                               object"
                         .to_string(),
                 });
@@ -593,23 +637,52 @@ impl Validator {
 
     fn parse_emit(
         &mut self,
-        _raw: &RawNamedTask,
+        raw: &RawNamedTask,
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let emit_val = &map["emit"];
         let obj = emit_val.as_object();
 
-        let (event_type, source, data) = if let Some(obj) = obj {
-            (
+        // 官方 1.0.3 把载荷嵌在 `emit.event.with.{type, source?, data?}`
+        // （schema workflow-1.0.3.yaml `emitTask`/`eventProperties`，Spike 4 corpus 09）。
+        // `event` 在场即官方形状：`with.type` 是必填事件类型，缺失则点名构造 fail-closed，
+        // 不得静默落成空 event_type；`source`/`data` 可选。既有平铺
+        // `{type, source, data}` 形状保持不变。
+        let (event_type, source, data) = match obj {
+            Some(obj) if obj.contains_key("event") => {
+                let with = obj
+                    .get("event")
+                    .and_then(|e| e.as_object())
+                    .and_then(|e| e.get("with"))
+                    .and_then(|w| w.as_object());
+                let Some(event_type) = with.and_then(|w| w.get("type")).and_then(|v| v.as_str())
+                else {
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(
+                            "emit.event.with.type".to_string(),
+                        ),
+                        message: "emit requires a string 'emit.event.with.type'".to_string(),
+                    });
+                    return None;
+                };
+                (
+                    event_type.to_string(),
+                    with.and_then(|w| w.get("source"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    with.and_then(|w| w.get("data")).cloned(),
+                )
+            }
+            Some(obj) => (
                 obj.get("type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
                 obj.get("source").and_then(|v| v.as_str()).map(String::from),
                 obj.get("data").cloned(),
-            )
-        } else {
-            (String::new(), None, None)
+            ),
+            None => (String::new(), None, None),
         };
 
         Some(Task::Emit(EmitTask {
@@ -2151,7 +2224,7 @@ do:
     }
 
     #[test]
-    fn test_wait_unknown_key_is_rejected() {
+    fn test_wait_minutes_only_maps_to_duration() {
         let yaml = r#"
 document:
   dsl: "1.0.3"
@@ -2163,8 +2236,113 @@ do:
       wait:
         minutes: 5
 "#;
+        let def = parse_and_validate_yaml(yaml).expect("official wait minutes must parse");
+        match &def.do_tasks[0].task {
+            Task::Wait(w) => assert_eq!(w.wait, "PT5M"),
+            other => panic!("expected Wait task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wait_seconds_and_milliseconds_compose() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-composite
+  version: "1.0"
+do:
+  - pause:
+      wait:
+        seconds: 1
+        milliseconds: 500
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("composite wait must parse");
+        match &def.do_tasks[0].task {
+            Task::Wait(w) => assert_eq!(w.wait, "PT1.5S"),
+            other => panic!("expected Wait task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wait_unknown_key_is_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-unknown
+  version: "1.0"
+do:
+  - pause:
+      wait:
+        weeks: 2
+"#;
         let errs = parse_and_validate_yaml(yaml).expect_err("unknown wait key must be rejected");
-        assert!(errors_naming(&errs, "wait.minutes"), "got {errs:?}");
+        assert!(errors_naming(&errs, "wait.weeks"), "got {errs:?}");
+    }
+
+    #[test]
+    fn test_wait_empty_object_is_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-empty
+  version: "1.0"
+do:
+  - pause:
+      wait: {}
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("empty wait object must be rejected");
+        assert!(errors_naming(&errs, "wait"), "got {errs:?}");
+    }
+
+    #[test]
+    fn test_emit_official_event_with_shape() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: emit-official
+  version: "1.0"
+do:
+  - notify:
+      emit:
+        event:
+          with:
+            source: "https://example.com/coord"
+            type: com.example.notify
+            data:
+              msg: hi
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official emit event shape must parse");
+        match &def.do_tasks[0].task {
+            Task::Emit(e) => {
+                assert_eq!(e.emit.event_type, "com.example.notify");
+                assert_eq!(e.emit.source.as_deref(), Some("https://example.com/coord"));
+                assert_eq!(e.emit.data, Some(serde_json::json!({ "msg": "hi" })));
+            }
+            other => panic!("expected Emit task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_emit_missing_type_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: emit-missing-type
+  version: "1.0"
+do:
+  - notify:
+      emit:
+        event:
+          with:
+            source: "https://example.com/coord"
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("emit without type must be rejected");
+        assert!(errors_naming(&errs, "emit.event.with.type"), "got {errs:?}");
     }
 
     #[test]
