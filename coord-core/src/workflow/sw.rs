@@ -711,8 +711,11 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                 });
 
                 if s.on_events.len() > 1 {
-                    // 多 onEvents：按 `_signal.name` / `_event.eventType` 路由各 per-event transition
-                    // （手动 signal 与事件总线自动恢复双路径一致生效）
+                    // 多 onEvents：按 `$context._event.eventType` / `$context._signal.name` 路由各
+                    // per-event transition。必须带 `$context` 前缀：求值器对裸标识符兜底返回
+                    // 整个 context（见 expression.rs 的 eval_jq_subset 默认分支），会使条件恒假、
+                    // 静默走缺省分支。手动 signal 与事件总线自动恢复双路径均注入 `_event`
+                    // （手动 signal 额外注入 `_signal`），故两条路由条件都生效。
                     let mut conditions: Vec<SwitchCondition> = Vec::new();
                     for ev in &s.on_events {
                         let ev_type = resolve_event_type(&doc, ev).ok_or_else(|| {
@@ -726,11 +729,15 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                             needs_end = true;
                         }
                         conditions.push(SwitchCondition {
-                            condition: Some(format!("${{ _event.eventType == \"{ev_type}\" }}")),
+                            condition: Some(format!(
+                                "${{ $context._event.eventType == \"{ev_type}\" }}"
+                            )),
                             transition: target.clone(),
                         });
                         conditions.push(SwitchCondition {
-                            condition: Some(format!("${{ _signal.name == \"{ev_type}\" }}")),
+                            condition: Some(format!(
+                                "${{ $context._signal.name == \"{ev_type}\" }}"
+                            )),
                             transition: target,
                         });
                     }
@@ -846,7 +853,7 @@ fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
                         let ev_type = event_condition_type(&doc, std::slice::from_ref(c));
                         conditions.push(SwitchCondition {
                             condition: Some(format!(
-                                "${{ _event.eventType == \"{}\" }}",
+                                "${{ $context._event.eventType == \"{}\" }}",
                                 ev_type.unwrap_or_default()
                             )),
                             transition: target,
@@ -1975,7 +1982,7 @@ mod tests {
 
     #[test]
     fn test_event_state_multi_on_events_compiles_to_routing_switch() {
-        // event 状态多 onEvents 生成按 _signal.name / _event.eventType 的路由 switch
+        // event 状态多 onEvents 生成按 $context._signal.name / $context._event.eventType 的路由 switch
         let v: Value = serde_json::json!({
             "id": "wf", "version": "1.0", "start": "ev",
             "states": [
@@ -2013,18 +2020,19 @@ mod tests {
             other => panic!("expected listen task, got {other:?}"),
         }
 
-        // 路由 switch：按 _signal.name / _event.eventType 分支到 per-event transition
+        // 路由 switch：按 $context._signal.name / $context._event.eventType 分支到 per-event transition
+        // （must 带 $context 前缀：裸标识符写法在求值器中会兜底返回整个 context ⇒ 恒假）
         let route = def.do_tasks.iter().find(|t| t.name == "ev__route").unwrap();
         match &route.task {
             Task::Switch(sw) => {
                 assert!(sw.conditions.iter().any(|c| {
                     c.condition.as_deref()
-                        == Some("${ _event.eventType == \"icps.approval.approved\" }")
+                        == Some("${ $context._event.eventType == \"icps.approval.approved\" }")
                         && c.transition == "notify"
                 }));
                 assert!(sw.conditions.iter().any(|c| {
                     c.condition.as_deref()
-                        == Some("${ _signal.name == \"icps.approval.rejected\" }")
+                        == Some("${ $context._signal.name == \"icps.approval.rejected\" }")
                         && c.transition == "reject"
                 }));
                 // 默认：状态级 transition
