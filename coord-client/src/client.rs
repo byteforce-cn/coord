@@ -588,6 +588,46 @@ impl KvClient {
         }
     }
 
+    /// 范围读取并返回每个 Key 的 `mod_revision`（乐观并发控制的前置读取）。
+    ///
+    /// `KvWorkflowStore` 用它在**同一线性一致读**中拿到实例值与其存储修订号，
+    /// 作为后续 `Compare(ModRev)` CAS 的期望值。
+    ///
+    /// # 返回
+    /// `(key, value, mod_revision)` 列表。
+    pub async fn range_with_rev(
+        &self,
+        key: &[u8],
+        range_end: &[u8],
+        limit: i64,
+        revision: i64,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>, i64)>> {
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub = KvStub::new(channel.clone());
+
+        let request = tonic::Request::new(RangeRequest {
+            key: key.to_vec(),
+            range_end: range_end.to_vec(),
+            limit,
+            revision,
+            keys_only: false,
+            count_only: false,
+        });
+
+        match stub.range(request).await {
+            Ok(resp) => {
+                self.client.return_channel(&endpoint, channel);
+                Ok(resp
+                    .into_inner()
+                    .kvs
+                    .into_iter()
+                    .map(|kv| (kv.key, kv.value, kv.mod_revision))
+                    .collect())
+            }
+            Err(status) => Err(from_status(status)),
+        }
+    }
+
     /// 删除键值对（完整选项）。
     ///
     /// # 返回

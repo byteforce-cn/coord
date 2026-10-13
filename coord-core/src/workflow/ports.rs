@@ -402,6 +402,23 @@ pub trait WorkflowStore: Send + Sync {
     /// 加载工作流实例
     async fn load_instance(&self, id: &str) -> Result<Option<WorkflowInstance>, StoreError>;
 
+    /// 线性一致地读取实例及其**存储修订号**（`mod_revision`）。
+    ///
+    /// 供驱动循环做 `Compare(ModRev)` 的乐观并发控制：拿到期望修订号后，
+    /// 关键状态转换用 [`WorkflowStore::save_instance_atomic`] 写回，冲突即失去写权。
+    ///
+    /// 返回 `Ok(Some((inst, mod_revision)))` 表示该存储支持 CAS 前置读取；
+    /// `Ok(None)` 表示该存储不提供修订号 —— 调用方**必须回退**到普通
+    /// `save_instance`，且不得把它当作「实例不存在」（不存在由 `load_instance`
+    /// 的 `Ok(None)` 表达）。默认实现返回 `Ok(None)`，保证内存存储行为不变。
+    async fn load_instance_with_rev(
+        &self,
+        id: &str,
+    ) -> Result<Option<(WorkflowInstance, i64)>, StoreError> {
+        let _ = id;
+        Ok(None)
+    }
+
     /// 列出命名空间下的工作流定义
     async fn list_definitions(
         &self,
@@ -494,6 +511,65 @@ impl std::fmt::Display for StoreError {
 }
 
 impl std::error::Error for StoreError {}
+
+// ─── 实例驱动租约（单写者） ───
+//
+// 「一实例一驱动」的端口抽象。coord Lease **没有 fencing token**
+// （见 `docs/production/consumer-contract.md` §3），因此正确性**不能**只靠租约互斥：
+// 失去租约的驱动者可能迟到写入。fencing 由**实现方**用「租约 key 的 mod_revision
+// 作为 epoch + 写入时双 compare（实例 mod_revision + 租约 key mod_revision）」承担
+// （见 [`LeaseGuard::fenced_save`]）。
+
+/// 实例驱动租约 —— 保证同一实例同一时刻只有一个驱动者。
+///
+/// 对象安全，可注入 [`super::runtime::WorkflowRuntime`]；未注入时引擎不做租约，
+/// 行为与现状一致。
+#[async_trait]
+pub trait InstanceLease: Send + Sync {
+    /// 尝试获取 `instance_id` 的驱动租约。
+    ///
+    /// - `Ok(Some(guard))`：获得写权（guard 在释放/过期前有效，需周期续租）；
+    /// - `Ok(None)`：已被其他驱动者持有 —— 调用方应**跳过**驱动（不等待、不阻塞）；
+    /// - `Err(_)`：租约后端不可用 —— 调用方必须 **fail-closed** 跳过驱动，
+    ///   不得退化为无租约驱动。
+    async fn acquire(&self, instance_id: &str) -> Result<Option<Arc<dyn LeaseGuard>>, StoreError>;
+}
+
+/// 实例驱动租约句柄 —— 持有期间代表本驱动者拥有实例写权。
+#[async_trait]
+pub trait LeaseGuard: Send + Sync {
+    /// 续租；返回 `false` 表示租约已丢失（写权失效）。
+    async fn renew(&self) -> Result<bool, StoreError>;
+
+    /// 主动释放租约（尽力而为：释放失败由 TTL 过期兜底回收）。
+    async fn release(&self);
+
+    /// fencing epoch：租约权威的单调标识（KV 侧 = 租约 key 的 `mod_revision`）。
+    fn epoch(&self) -> i64;
+
+    /// 续租间隔（默认 1s）；由驱动的后台续租任务使用。
+    fn renew_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(1)
+    }
+
+    /// 在 fencing 保护下原子写实例状态。
+    ///
+    /// 实现必须**同时**校验：
+    /// 1. 实例 key 的 `mod_revision == expected_mod_rev`（乐观并发）；
+    /// 2. 租约 key 的 `mod_revision == self.epoch()`（租约未被撤销/重授）。
+    ///
+    /// 返回 `true` 表示写入生效；`false` 表示校验失败（本驱动已失去写权）。
+    /// 默认实现返回 `false`（fail-closed）——不支持 fencing 的租约**不得**静默写入。
+    async fn fenced_save(
+        &self,
+        _inst: &WorkflowInstance,
+        _expected_mod_rev: i64,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported(
+            "fenced_save is not supported by this lease backend".into(),
+        ))
+    }
+}
 
 // ─── MemoryWorkflowStore（生产可用，RaftWorkflowStore 的热缓存） ───
 
