@@ -1281,6 +1281,7 @@ pub mod phase4 {
     };
 
     use crate::proxy::AgentInner;
+    use crate::service::WorkflowDispatchConfig;
     use crate::services::workflow_store::KvWorkflowStore;
 
     // NoopEventProvider 仅在测试中使用
@@ -1365,6 +1366,14 @@ pub mod phase4 {
             self
         }
 
+        /// 按 agent 配置（`[services.workflow_dispatch]`）构造：secrets/constants
+        /// 来自配置而非仅 builder，使生产构造路径也能解析占位符。
+        pub fn from_config(config: &WorkflowDispatchConfig) -> Self {
+            Self::new()
+                .with_secrets(config.secrets.clone())
+                .with_constants(config.constants.clone())
+        }
+
         /// 解析 `with` 中的 `${ $secrets.x }` / `${ $constants.x }` 占位符
         fn resolve_placeholders(&self, value: &Value) -> Value {
             match value {
@@ -1395,6 +1404,57 @@ pub mod phase4 {
                 other => other.clone(),
             }
         }
+
+        /// 解析占位符，并在仍有未命中 key 时返回缺失 key 名（fail-closed 用）。
+        fn resolve_placeholders_checked(&self, value: &Value) -> Result<Value, Vec<String>> {
+            let resolved = self.resolve_placeholders(value);
+            let mut missing = Vec::new();
+            collect_unresolved_placeholders(&resolved, &mut missing);
+            if missing.is_empty() {
+                Ok(resolved)
+            } else {
+                Err(missing)
+            }
+        }
+    }
+
+    /// 占位符前缀与错误信息里的标签（两者必须一致）。
+    const SECRETS_PLACEHOLDER_PREFIX: &str = "${ $secrets.";
+    const CONSTANTS_PLACEHOLDER_PREFIX: &str = "${ $constants.";
+
+    /// 收集解析后残留的 `${ $secrets.<key> }` / `${ $constants.<key> }`，
+    /// 以 `secrets.<key>` / `constants.<key>` 形式去重列出（不含凭据值）。
+    fn collect_unresolved_placeholders(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(s) => {
+                for (prefix, label) in [
+                    (SECRETS_PLACEHOLDER_PREFIX, "secrets"),
+                    (CONSTANTS_PLACEHOLDER_PREFIX, "constants"),
+                ] {
+                    let mut rest = s.as_str();
+                    while let Some(pos) = rest.find(prefix) {
+                        let after = &rest[pos + prefix.len()..];
+                        // 占位符语法以 ` }` 收尾（与 resolve_placeholders 的 format 一致）
+                        let end = after.find(" }").unwrap_or(after.len());
+                        let key = after[..end].trim();
+                        if !key.is_empty() {
+                            let token = format!("{label}.{key}");
+                            if !out.contains(&token) {
+                                out.push(token);
+                            }
+                        }
+                        rest = &after[end..];
+                    }
+                }
+            }
+            Value::Array(arr) => arr
+                .iter()
+                .for_each(|v| collect_unresolved_placeholders(v, out)),
+            Value::Object(obj) => obj
+                .values()
+                .for_each(|v| collect_unresolved_placeholders(v, out)),
+            _ => {}
+        }
     }
 
     impl Default for HttpTaskDispatcher {
@@ -1411,8 +1471,25 @@ pub mod phase4 {
             with: Option<&Value>,
             input: &Value,
         ) -> DispatchResult {
-            // 先解析 secrets/constants 占位符
-            let resolved_with = with.map(|w| self.resolve_placeholders(w));
+            // 先解析 secrets/constants 占位符；残留未命中 key ⇒ fail-closed，
+            // 绝不把字面量 `${ $secrets.x }` 当凭据发出去（远端 401/403 看不出
+            // 是本地配置缺失）。错误只含 key 名，不含任何凭据值。
+            let resolved_with = match with {
+                Some(w) => match self.resolve_placeholders_checked(w) {
+                    Ok(v) => Some(v),
+                    Err(missing) => {
+                        return DispatchResult::Failure {
+                            error: format!(
+                                "workflow dispatch blocked: unresolved placeholder(s) {} — \
+                                 缺失的 key 未配置于 agent 的 [services.workflow_dispatch]",
+                                missing.join(", ")
+                            ),
+                            retryable: false,
+                        }
+                    }
+                },
+                None => None,
+            };
             match service {
                 "http" => self.dispatch_http(resolved_with.as_ref(), input).await,
                 "grpc" => self.dispatch_grpc(resolved_with.as_ref(), input).await,
@@ -1838,28 +1915,20 @@ pub mod phase4 {
     impl WorkflowEngineService {
         /// 创建生产级 WorkflowEngineService（使用 MemoryWorkflowStore + HttpTaskDispatcher + MemoryEventProvider）
         pub fn new() -> Self {
-            let store: Arc<dyn WorkflowStore + Send + Sync> = Arc::new(MemoryWorkflowStore::new());
-            let expression = ExpressionEvaluator::new();
-            let clock = SystemClock;
-            let executor = coord_core::workflow::engine::WorkflowExecutor::new(
-                expression.clone(),
-                clock.clone(),
-            );
-            let runtime = WorkflowRuntime::new(
-                executor,
-                clock.clone(),
-                Arc::clone(&store),
-                Arc::new(HttpTaskDispatcher::new()) as Arc<dyn TaskDispatcher + Send + Sync>,
-                Arc::new(MemoryEventProvider::new()) as Arc<dyn EventProvider + Send + Sync>,
-            );
+            Self::new_with_dispatch(&WorkflowDispatchConfig::default())
+        }
 
-            Self {
+        /// 创建内存态 WorkflowEngineService，并注入派发 secrets/constants 配置
+        ///
+        /// 无 server 连接时的回退路径（单 agent 测试/离线场景），
+        /// `dispatch.workflow_dispatch` 仍生效（与 KV 路径同口径）。
+        pub fn new_with_dispatch(dispatch: &WorkflowDispatchConfig) -> Self {
+            let store: Arc<dyn WorkflowStore + Send + Sync> = Arc::new(MemoryWorkflowStore::new());
+            Self::with_dispatcher(
                 store,
-                kv_store: None,
-                runtime: Some(Arc::new(runtime)),
-                expression,
-                clock,
-            }
+                None,
+                Arc::new(HttpTaskDispatcher::from_config(dispatch)),
+            )
         }
 
         /// 创建基于 KvWorkflowStore 的生产级 WorkflowEngineService
@@ -1870,9 +1939,34 @@ pub mod phase4 {
         /// R-AGT-09：`start()` 时调用 `KvWorkflowStore::init()`（全量重建
         /// 本地缓存 + 启动 watch），watch 断连自动重连并对账。
         pub fn new_with_kv_store(inner: Arc<AgentInner>) -> Self {
+            Self::new_with_kv_store_and_dispatch(inner, &WorkflowDispatchConfig::default())
+        }
+
+        /// 基于 KvWorkflowStore 且注入派发 secrets/constants 配置的生产构造。
+        ///
+        /// 工作流定义存 KV，凭据不进定义存储（见
+        /// `docs/production/workflow-semantics.md` §6）——定义只写占位符，
+        /// 材料在本构造处注入。
+        pub fn new_with_kv_store_and_dispatch(
+            inner: Arc<AgentInner>,
+            dispatch: &WorkflowDispatchConfig,
+        ) -> Self {
             let kv_store = Arc::new(KvWorkflowStore::new(inner));
             let store: Arc<dyn WorkflowStore + Send + Sync> =
                 Arc::clone(&kv_store) as Arc<dyn WorkflowStore + Send + Sync>;
+            Self::with_dispatcher(
+                store,
+                Some(kv_store),
+                Arc::new(HttpTaskDispatcher::from_config(dispatch)),
+            )
+        }
+
+        /// 共享装配：store + dispatcher 决定 runtime，其余字段相同。
+        fn with_dispatcher(
+            store: Arc<dyn WorkflowStore + Send + Sync>,
+            kv_store: Option<Arc<KvWorkflowStore>>,
+            dispatcher: Arc<dyn TaskDispatcher + Send + Sync>,
+        ) -> Self {
             let expression = ExpressionEvaluator::new();
             let clock = SystemClock;
             let executor = coord_core::workflow::engine::WorkflowExecutor::new(
@@ -1883,13 +1977,13 @@ pub mod phase4 {
                 executor,
                 clock.clone(),
                 Arc::clone(&store),
-                Arc::new(HttpTaskDispatcher::new()) as Arc<dyn TaskDispatcher + Send + Sync>,
+                dispatcher,
                 Arc::new(MemoryEventProvider::new()) as Arc<dyn EventProvider + Send + Sync>,
             );
 
             Self {
                 store,
-                kv_store: Some(kv_store),
+                kv_store,
                 runtime: Some(Arc::new(runtime)),
                 expression,
                 clock,
@@ -3319,10 +3413,21 @@ events:
                     let mut buf = [0u8; 8192];
                     let _ = sock.read(&mut buf).await;
                     let req_str = String::from_utf8_lossy(&buf);
-                    // 回显请求首行 + body
+                    // 回显请求首行 + Authorization 头（后者用于断言凭据注入）
                     let first_line = req_str.lines().next().unwrap_or("");
-                    let echoed = first_line.to_string();
-                    let body = serde_json::json!({"echo": echoed}).to_string();
+                    let authorization = req_str
+                        .lines()
+                        .find_map(|l| {
+                            let (name, value) = l.split_once(':')?;
+                            name.eq_ignore_ascii_case("authorization")
+                                .then(|| value.trim().to_string())
+                        })
+                        .unwrap_or_default();
+                    let body = serde_json::json!({
+                        "echo": first_line,
+                        "authorization": authorization,
+                    })
+                    .to_string();
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
@@ -3370,6 +3475,267 @@ events:
             }
             DispatchResult::Failure { error, .. } => panic!("HTTP dispatch failed: {error}"),
         }
+    }
+
+    /// 注入的 secret 真的进了 Authorization 头（配置 → dispatcher 映射验证）。
+    #[tokio::test]
+    async fn test_http_dispatcher_secret_injected_into_authorization_header() {
+        use crate::service::WorkflowDispatchConfig;
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let addr = spawn_echo_server().await;
+
+        let config = WorkflowDispatchConfig {
+            secrets: std::collections::HashMap::from([(
+                "approvalToken".to_string(),
+                "TOKEN-XYZ".to_string(),
+            )]),
+            ..WorkflowDispatchConfig::default()
+        };
+        let dispatcher = HttpTaskDispatcher::from_config(&config);
+
+        let with = serde_json::json!({
+            "method": "GET",
+            "endpoint": format!("http://{addr}"),
+            "auth": {"scheme": "bearer", "token": "${ $secrets.approvalToken }"},
+        });
+        match dispatcher
+            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .await
+        {
+            DispatchResult::Success { data } => {
+                let auth = data
+                    .get("authorization")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                assert_eq!(auth, "Bearer TOKEN-XYZ", "Authorization 头未带上注入凭据");
+            }
+            DispatchResult::Failure { error, .. } => panic!("HTTP dispatch failed: {error}"),
+        }
+    }
+
+    /// constants（字符串 + 数字 JSON 值）替换生效。
+    #[tokio::test]
+    async fn test_http_dispatcher_constants_replacement() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let addr = spawn_echo_server().await;
+        let dispatcher = HttpTaskDispatcher::new().with_constants(serde_json::Map::from_iter([
+            ("region".to_string(), serde_json::json!("cn-north-1")),
+            ("retries".to_string(), serde_json::json!(3)),
+        ]));
+        let with = serde_json::json!({
+            "method": "GET",
+            "endpoint": format!("http://{addr}"),
+            "query": {"region": "${ $constants.region }", "retries": "${ $constants.retries }"},
+        });
+        match dispatcher
+            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .await
+        {
+            DispatchResult::Success { data } => {
+                let echo = data.get("echo").and_then(|v| v.as_str()).unwrap_or("");
+                // 字符串常量按 JSON 序列化（带引号）替换，数字常量原样；两者均与
+                // `with_constants` 既有行为一致（本次不改替代表达式）。
+                assert!(
+                    echo.contains("region=%22cn-north-1%22"),
+                    "unexpected echo: {echo}"
+                );
+                assert!(echo.contains("retries=3"), "unexpected echo: {echo}");
+            }
+            DispatchResult::Failure { error, .. } => panic!("HTTP dispatch failed: {error}"),
+        }
+    }
+
+    /// 未命中 key ⇒ fail-closed：retryable=false，错误含全部缺失 key 名，
+    /// 不含占位符字面量（绝不把 `${ $secrets.x }` 当凭据发出）。
+    #[tokio::test]
+    async fn test_http_dispatcher_missing_placeholders_fail_closed() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let dispatcher = HttpTaskDispatcher::new();
+        let with = serde_json::json!({
+            "method": "GET",
+            "endpoint": "http://127.0.0.1:1/never-sent",
+            "body": {"token": "${ $secrets.approvalToken }"},
+            "headers": {"X-Region": "${ $constants.region }"},
+        });
+        match dispatcher
+            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .await
+        {
+            DispatchResult::Failure { error, retryable } => {
+                assert!(!retryable, "配置缺失不得可重试：{error}");
+                assert!(error.contains("secrets.approvalToken"), "error: {error}");
+                assert!(error.contains("constants.region"), "error: {error}");
+                assert!(!error.contains("${"), "错误不得回显占位符字面量：{error}");
+            }
+            DispatchResult::Success { .. } => panic!("缺失占位符不得派发成功"),
+        }
+    }
+
+    /// 默认（未注入）配置下，不含占位符的请求行为不变。
+    #[tokio::test]
+    async fn test_http_dispatcher_default_config_unchanged_without_placeholders() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let addr = spawn_echo_server().await;
+        let dispatcher = HttpTaskDispatcher::from_config(&Default::default());
+        let with = serde_json::json!({
+            "method": "GET",
+            "endpoint": format!("http://{addr}"),
+            "headers": {"X-Test": "yes"},
+        });
+        match dispatcher
+            .dispatch("http", Some(&with), &serde_json::json!({}))
+            .await
+        {
+            DispatchResult::Success { data } => {
+                let echo = data.get("echo").and_then(|v| v.as_str()).unwrap_or("");
+                assert!(echo.starts_with("GET /"), "unexpected echo: {echo}");
+            }
+            DispatchResult::Failure { error, .. } => panic!("HTTP dispatch failed: {error}"),
+        }
+    }
+
+    // ═══ P2：`new_with_dispatch` 接线端到端（定义里的占位符 → 真实请求）═══
+
+    /// 记录 Authorization 头的服务器（接线验证用）。
+    async fn spawn_auth_recording_server(
+    ) -> (String, std::sync::Arc<parking_lot::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let log: std::sync::Arc<parking_lot::Mutex<Vec<String>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let log_for_task = log.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let log = log_for_task.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    let req = String::from_utf8_lossy(&buf).to_string();
+                    let auth = req
+                        .lines()
+                        .find_map(|l| {
+                            let (name, value) = l.split_once(':')?;
+                            name.eq_ignore_ascii_case("authorization")
+                                .then(|| value.trim().to_string())
+                        })
+                        .unwrap_or_default();
+                    log.lock().push(auth);
+                    let body = serde_json::json!({"ok": true}).to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (addr, log)
+    }
+
+    /// 单动作 SW：GET `http://<addr>/ping`，bearer token 用 secret 占位符。
+    fn sample_secret_dispatch_sw(addr: &str) -> String {
+        format!(
+            r#"{{
+          "id": "dispatch-secret-wf",
+          "version": "1.0",
+          "start": "call",
+          "functions": [ {{ "name": "ping", "operation": "http://{addr}/ping" }} ],
+          "states": [
+            {{ "name": "call", "type": "operation",
+              "actions": [ {{ "name": "pingAction",
+                              "functionRef": {{ "refName": "ping",
+                                "arguments": {{ "method": "GET",
+                                  "auth": {{ "scheme": "bearer", "token": "${{ $secrets.approvalToken }}" }} }} }} }} ],
+              "end": true }}
+          ]
+        }}"#
+        )
+    }
+
+    /// 生产构造 `new_with_dispatch` 把 `[services.workflow_dispatch]` 的 secrets
+    /// 真的接到了 HTTP 派发上（定义里的占位符 → 真实 Authorization 头）。
+    #[tokio::test]
+    async fn test_engine_new_with_dispatch_injects_secret_end_to_end() {
+        let (addr, log) = spawn_auth_recording_server().await;
+        let cfg = crate::service::WorkflowDispatchConfig {
+            secrets: std::collections::HashMap::from([(
+                "approvalToken".to_string(),
+                "E2E-TOKEN".to_string(),
+            )]),
+            ..Default::default()
+        };
+        let svc = WorkflowEngineService::new_with_dispatch(&cfg);
+        let def_id = svc
+            .deploy_definition("test", &sample_secret_dispatch_sw(&addr))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance(&def_id, serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let mut terminal = false;
+        for _ in 0..40 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let cur = svc.get_instance(&inst.id).await.unwrap().unwrap();
+            if cur.status == InstanceStatus::Completed || cur.status == InstanceStatus::Failed {
+                assert_eq!(
+                    cur.status,
+                    InstanceStatus::Completed,
+                    "工作流未成功：{:?}",
+                    cur.fault
+                );
+                terminal = true;
+                break;
+            }
+        }
+        assert!(terminal, "工作流未在限时内终止");
+        let auths = log.lock().clone();
+        assert!(
+            auths.iter().any(|a| a == "Bearer E2E-TOKEN"),
+            "注入的 secret 未到达 Authorization 头：{auths:?}"
+        );
+    }
+
+    /// 未配置 secret ⇒ 占位符 fail-closed：工作流失败，且请求根本不发出。
+    #[tokio::test]
+    async fn test_engine_new_with_dispatch_missing_secret_fails_closed_end_to_end() {
+        let (addr, log) = spawn_auth_recording_server().await;
+        let svc = WorkflowEngineService::new_with_dispatch(&Default::default());
+        let def_id = svc
+            .deploy_definition("test", &sample_secret_dispatch_sw(&addr))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance(&def_id, serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let mut status = None;
+        for _ in 0..40 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let cur = svc.get_instance(&inst.id).await.unwrap().unwrap();
+            if cur.status == InstanceStatus::Completed || cur.status == InstanceStatus::Failed {
+                status = Some(cur.status);
+                break;
+            }
+        }
+        assert_eq!(
+            status,
+            Some(InstanceStatus::Failed),
+            "缺 secret 应 fail-closed 令工作流失败"
+        );
+        assert!(
+            log.lock().is_empty(),
+            "fail-closed 不应发出任何请求：{:?}",
+            log.lock()
+        );
     }
 
     #[tokio::test]
