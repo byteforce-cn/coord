@@ -319,7 +319,10 @@ pub const ENGINE_VERSION: &str = "v1";
 pub fn definition_hash(def: &WorkflowDefinition) -> String {
     use sha2::{Digest, Sha256};
 
-    let mut value = serde_json::to_value(def).unwrap_or(Value::Null);
+    let mut value = serde_json::to_value(def).expect(
+        "WorkflowDefinition 转 serde_json::Value 不可失败：字段均为 JSON 可表示类型 \
+         （字符串/数值/bool/Option/Vec/Map），无 map key 非字符串的情形",
+    );
     // 仅剔顶层部署元信息（按 key 名）；不从嵌套结构中名称相同的字段上剔。
     if let Value::Object(map) = &mut value {
         map.remove("id");
@@ -327,7 +330,10 @@ pub fn definition_hash(def: &WorkflowDefinition) -> String {
     }
     let canonical = canonical_json(value);
     let mut hasher = Sha256::new();
-    hasher.update(serde_json::to_vec(&canonical).unwrap_or_default());
+    hasher.update(
+        serde_json::to_vec(&canonical)
+            .expect("canonical_json 只构造纯 JSON Value，序列化到字节不可失败"),
+    );
     hasher
         .finalize()
         .iter()

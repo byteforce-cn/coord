@@ -1400,8 +1400,8 @@ impl AgentServer {
         if self.config.services.workflow {
             // durable 装配承诺「事件不丢 / 一实例一驱动 / 副作用不重」：缺前置条件
             // （Server 连接 = KV 持久化面、`services.mq` = 投递面）必须 fail-closed
-            // 拒绝启动——静默降级到非 durable 路径正是本里程碑要消除的静默降级类
-            // 缺陷。
+            // 拒绝启动——静默降级到非 durable 路径正是这条装配边界要消除的缺陷：
+            // 前置缺失却照常启动，让承诺（不丢/不重/一实例一驱动）失效而不报错。
             let workflow_svc = if self.config.services.workflow_durable {
                 // 先查配置级前置（MQ 开关），再查连接级前置：两者都缺时优先报出配置
                 // 错误——它无需外部依赖即可修正。

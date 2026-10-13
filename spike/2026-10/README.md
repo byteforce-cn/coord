@@ -56,7 +56,7 @@ cargo test 2>&1 | tee ../evidence/test-run-$(date +%Y%m%d-%H%M%S).log
 | 未实现构造 fail-closed | `spike4_conformance` 8/8（`run_script_container_shell_fail_closed`、`run_await_return_fail_closed`、`use_extensions_fail_closed`、`official_switch_then_fail_closed`、`matrix_gap_files_still_rejected` …） | ✅ 通过 |
 | 对外契约零改动 | `git diff --stat spike/2026-10-workflow-v2..HEAD -- apis/` 空输出；`git diff --name-only a4e0e22..HEAD` 无 proto/RPC 文件 | ✅ 通过 |
 
-### 验收证据（Task 11，HEAD `c24469c`）
+### 验收证据（Task 11，HEAD `cb45ced`）
 
 - 静态检查：`cargo fmt --all -- --check` 通过；`cargo clippy --all-targets --all-features`
   通过（0 error；warning 均为基线既有、非 error）。
@@ -70,6 +70,14 @@ cargo test 2>&1 | tee ../evidence/test-run-$(date +%Y%m%d-%H%M%S).log
 - 进程级 kill -9：`SPIKE3_SKIP_BUILD=1 bash spike/2026-10/spike-3-recovery/scripts/repro.sh`
   → wait/listen/retry 三场景 PASS，`outbox_pending=0`、`missing_event_ids=0`、
   `duplicate_event_ids=0`；`evidence/verdict.tsv` 的日志列为仓库相对路径。
+
+### 已知边界（M1，记录非静默丢弃）
+
+- 嵌套在 `for` / `fork` 分支体内的 `call` **不派发**：分支执行器只处理
+  `NextTask | Completed | Failed`，而 `call` 返回的 `Suspend` 落进 `_ => {}`（for-each）
+  / `_ => push(null)`（fork 分支，`execute_branch`）路径被丢弃。这是 M1 记录的
+  边界（失败案例见 `coord-core/src/workflow/runtime.rs` 的 `StepResult::ForEach` /
+  `execute_branch`），不得当作已支持。
 
 ### 与 Spike 3 文档的一处语义更正（ack-after-state）
 

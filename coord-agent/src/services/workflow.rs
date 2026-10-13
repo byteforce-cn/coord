@@ -1354,11 +1354,11 @@ pub mod phase4 {
 
     use coord_core::workflow::{
         expression::ExpressionEvaluator,
-        model::{InstanceStatus, WorkflowDefinition, WorkflowInstance},
+        model::{WorkflowDefinition, WorkflowInstance},
         parser,
         ports::{
-            Clock, DispatchResult, EventProvider, MemoryEventProvider, MemoryWorkflowStore,
-            SystemClock, TaskDispatcher, WorkflowStore,
+            DispatchResult, EventProvider, MemoryEventProvider, MemoryWorkflowStore, SystemClock,
+            TaskDispatcher, WorkflowStore,
         },
         runtime::WorkflowRuntime,
         sw,
@@ -2589,31 +2589,16 @@ pub mod phase4 {
                 .map_err(WorkflowEngineError::from)
         }
 
+        /// 取消实例（控制面）：非终态 → `Cancelled` + `workflow.cancelled`（同一次提交）。
+        ///
+        /// 经 [`WorkflowRuntime::cancel_instance`] 的 CAS 写路径：线性一致读修订号 +
+        /// 冲突重放，并发完成的终态不会被取消覆盖。终态 ⇒ `FailedPrecondition`，
+        /// 实例不存在 ⇒ `NotFound`。
         pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), WorkflowEngineError> {
-            let mut inst = self
-                .store
-                .load_instance(instance_id)
+            self.runtime()?
+                .cancel_instance(instance_id)
                 .await
-                .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?
-                .ok_or_else(|| {
-                    WorkflowEngineError::NotFound(format!("instance not found: {instance_id}"))
-                })?;
-
-            if inst.status.is_terminal() {
-                return Err(WorkflowEngineError::FailedPrecondition(format!(
-                    "instance already in terminal state: {:?}",
-                    inst.status
-                )));
-            }
-
-            inst.status = InstanceStatus::Cancelled;
-            inst.updated_at = SystemClock.now_ms();
-            self.store
-                .save_instance(&inst)
-                .await
-                .map_err(|e| WorkflowEngineError::Internal(format!("store error: {e}")))?;
-
-            Ok(())
+                .map_err(WorkflowEngineError::from)
         }
 
         /// 列出工作流实例（过滤 + 分页）——契约见 [`WorkflowStore::list_instances`]。

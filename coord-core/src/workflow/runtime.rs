@@ -627,7 +627,7 @@ where
                 )
                 .await;
             if let Some(delivery) = delivery {
-                // 背景路径无消费方：错误已计入 `cas_conflict_total`，此处释放。
+                // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
                 let _ = rt
                     .resume_by_event(instance_id, definition, store, delivery.event_type.clone())
                     .await;
@@ -702,14 +702,14 @@ where
                     _ => return,
                 };
                 let _ = durable.timers.remove(&rec.id).await;
-                // 背景路径无消费方：错误已计入 `cas_conflict_total`，此处释放。
+                // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
                 let _ = self
                     .auto_resume(rec.instance_id.clone(), def, store, &reason)
                     .await;
             }
             TimerKind::Timeout { expected_index } => {
                 let _ = durable.timers.remove(&rec.id).await;
-                // 背景路径无消费方：错误已计入 `cas_conflict_total`，此处释放。
+                // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
                 let _ = self
                     .apply_timeout(rec.instance_id.clone(), store, expected_index)
                     .await;
@@ -720,8 +720,8 @@ where
     /// 对账所有非终态可恢复实例：重启后重新驱动/重订阅。
     ///
     /// - `Pending` / `Running`：上个进程的 drive 任务随进程消失（进程内任务无跨进程存活，
-    ///   `drivers/` 租约键也无主）⇒ 重驱动一个。**未注入租约时**（当前 durable 装配，租约由
-    ///   Task 10 接入）同进程重叠驱动是可容忍的：每次 drive 都重读最新实例状态，CAS 失败的
+    ///   `drivers/` 租约键也无主）⇒ 重驱动一个。**未注入租约时**同进程重叠驱动是可容忍的：
+    ///   每次 drive 都重读最新实例状态，CAS 失败的
     ///   提交直接退出驱动循环 —— 不会丢更新，只是白跑一轮。注入租约后（经 [`Self::spawn_drive`]
     ///   先取租约）由租约提供互斥：多进程并发时只有一个真正驱动（其余计入 `lease_skipped`）。
     /// - `Waiting`：`listen` 重建事件订阅；`wait` / `retry` 补写持久化定时器（已到期立即触发）。
@@ -1372,7 +1372,7 @@ where
         let rt = self.clone_runtime();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            // 背景路径无消费方：错误已计入 `cas_conflict_total`，此处释放。
+            // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
             let _ = rt
                 .auto_resume(instance_id, definition, store, &reason)
                 .await;
@@ -1394,12 +1394,26 @@ where
         if reason == "retry" {
             // 重试：直接重新 drive（重新执行当前任务），本路径**不写实例**；
             // 保留「仅当仍处于同一挂起原因才驱动」的守卫（陈旧定时器不得多驱动一轮）。
-            let still = match store.load_instance(&instance_id).await {
-                Ok(Some(inst)) => {
+            //
+            // 守卫必须走**线性一致读**（`load_instance_with_rev`）：durable 写路径
+            // 绕过本地读缓存，若 Watch 滞后，cache-first 的 `load_instance` 会把已推进/
+            // 已取消的实例读成陈旧快照，本次重试于是被错误地放弃——定时器已在触发前
+            // 移除，实例就永久停在 Waiting 而没有任何驱动者。
+            let still = {
+                let is_still = |inst: &WorkflowInstance| {
                     inst.status == InstanceStatus::Waiting
                         && inst.suspension_meta.as_ref().map(|m| m.reason.as_str()) == Some(reason)
+                };
+                match store.load_instance_with_rev(&instance_id).await {
+                    Ok(Some((inst, _))) => is_still(&inst),
+                    // 存储不提供修订号：回退普通读（与 [`Self::commit_control_plane`] 同口径）。
+                    Ok(None) => match store.load_instance(&instance_id).await {
+                        Ok(Some(inst)) => is_still(&inst),
+                        _ => false,
+                    },
+                    // 线性一致读失败：不驱动（fail-closed，不回退到可能陈旧的缓存）。
+                    Err(_) => false,
                 }
-                _ => false,
             };
             if still {
                 self.spawn_drive(instance_id, definition, store);
@@ -1526,7 +1540,7 @@ where
         let rt = self.clone_runtime();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(after_ms)).await;
-            // 背景路径无消费方：错误已计入 `cas_conflict_total`，此处释放。
+            // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
             let _ = rt.apply_timeout(instance_id, store, expected_index).await;
         });
     }
@@ -1825,6 +1839,41 @@ where
         self.spawn_drive(inst.id.clone(), def, Arc::clone(&self.store));
 
         Ok(inst)
+    }
+
+    /// 取消实例：非终态 → `Cancelled` + `workflow.cancelled`（同一次提交）。
+    ///
+    /// 控制面路径（[`Self::commit_control_plane`]）：线性一致读修订号后在 CAS 提交里
+    /// 重新校验状态。一次「取消 vs 完成」的竞态里，若完成先提交则取消读到的是终态
+    /// 而拒绝写入 —— 不会用 `Cancelled` 覆盖已提交的 `Completed`（消费者已见
+    /// `workflow.completed`，再发 `workflow.cancelled` 会撕裂终态）。
+    ///
+    /// 终态 ⇒ [`RuntimeError::AlreadyCompleted`]（服务层映射为 FailedPrecondition），
+    /// 与「实例不存在」的 [`RuntimeError::NotFound`] 区分。
+    ///
+    /// 生命周期事件与状态写同一次提交（durable 装配下同 Txn/同事务；legacy 分步，
+    /// 见 [`Self::commit_instance`]）。
+    pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
+        let outcome = self
+            .commit_control_plane(
+                &self.store,
+                instance_id,
+                &[lifecycle::WORKFLOW_CANCELLED],
+                |inst| {
+                    if inst.status.is_terminal() {
+                        return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()));
+                    }
+                    inst.status = InstanceStatus::Cancelled;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
+        match outcome {
+            ControlPlaneOutcome::Committed(_) => Ok(()),
+            // 取消守卫不产生 Skip（非终态即提交）；为完整匹配仍按成功处理。
+            ControlPlaneOutcome::Skipped => Ok(()),
+        }
     }
 
     /// 对一个**已存在**的实例（重）启动驱动 —— 恢复/对账入口。
@@ -3084,7 +3133,7 @@ mod tests {
     use crate::workflow::ports::test_utils::{
         MemoryWorkflowStore, NoopEventProvider, NoopTaskDispatcher, TestClock,
     };
-    use crate::workflow::ports::StoreError;
+    use crate::workflow::ports::{StoreError, WorkflowStore};
 
     fn make_runtime() -> WorkflowRuntime<
         ExpressionEvaluator,
@@ -3445,6 +3494,221 @@ mod tests {
         assert!(
             counting.calls.load(Ordering::SeqCst) >= 1,
             "drive 的状态写必须经 AtomicOutboxCommit（否则状态与事件可分离落库）"
+        );
+    }
+
+    /// 取消必须把状态写与 `workflow.cancelled` 放进**同一次**提交：durable 装配下走
+    /// `AtomicOutboxCommit`（状态 + outbox 同事务），而不是「先盲写状态、再补发事件」。
+    ///
+    /// 反（负控制）：旧实现（cache-first `load_instance` + 无条件 `save_instance`，且
+    /// 不发事件）两条都不过：事件缺失，且无 CAS 的写会在并发下覆盖终态。本测试断言
+    /// 事件随原子提交落地。
+    #[tokio::test]
+    async fn cancel_commits_state_and_cancelled_event_atomically() {
+        use crate::workflow::durable::{
+            AtomicOutboxCommit, DurableSupport, MemoryAtomicCommit, MemoryOutboxStore,
+            MemoryTimerStore, OutboxRecord, OutboxStore,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct CountingAtomicCommit {
+            inner: MemoryAtomicCommit,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl AtomicOutboxCommit for CountingAtomicCommit {
+            async fn commit_state_and_outbox_batch(
+                &self,
+                inst: &WorkflowInstance,
+                recs: &[OutboxRecord],
+                expected_mod_rev: Option<i64>,
+            ) -> Result<bool, StoreError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.inner
+                    .commit_state_and_outbox_batch(inst, recs, expected_mod_rev)
+                    .await
+            }
+        }
+
+        let instances = Arc::new(MemoryWorkflowStore::new());
+        let outbox = Arc::new(MemoryOutboxStore::new());
+        let counting = Arc::new(CountingAtomicCommit {
+            inner: MemoryAtomicCommit::new(Arc::clone(&instances), Arc::clone(&outbox)),
+            calls: AtomicUsize::new(0),
+        });
+        let durable = DurableSupport::new(
+            Arc::new(MemoryTimerStore::new()),
+            Arc::clone(&outbox) as Arc<dyn OutboxStore>,
+        )
+        .with_atomic_commit(counting.clone() as Arc<dyn AtomicOutboxCommit>);
+
+        let expr = ExpressionEvaluator::new();
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let rt = WorkflowRuntime::new(
+            executor,
+            TestClock::new(1000),
+            Arc::clone(&instances),
+            NoopTaskDispatcher,
+            NoopEventProvider,
+        )
+        .with_durable(durable);
+
+        // 非终态（Running）实例；扫描器只驱动 Suspended/Waiting，不会介入。
+        let def = make_simple_definition();
+        let mut inst = WorkflowInstance::new(&def, serde_json::json!({}), 1000);
+        inst.status = InstanceStatus::Running;
+        instances.save_instance(&inst).await.unwrap();
+
+        let before = counting.calls.load(Ordering::SeqCst);
+        rt.cancel_instance(&inst.id).await.unwrap();
+
+        let stored = instances.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, InstanceStatus::Cancelled);
+        let types: Vec<String> = outbox
+            .snapshot()
+            .into_iter()
+            .map(|r| r.event_type)
+            .collect();
+        assert!(
+            types.iter().any(|t| t.ends_with("workflow.cancelled.v1")),
+            "取消必须经同一原子提交发出 workflow.cancelled：{types:?}"
+        );
+        assert!(
+            counting.calls.load(Ordering::SeqCst) > before,
+            "取消的状态写必须经 AtomicOutboxCommit（状态与事件同一次提交）"
+        );
+    }
+
+    /// 取消与完成的存储替身：`load_instance`（cache-first）返回陈旧快照，
+    /// `load_instance_with_rev`（线性一致）返回真值。取消若走 cache-first 读，
+    /// 就会用陈旧的非终态快照盲写，覆盖已提交的终态。
+    struct StaleCacheStore {
+        inner: Arc<MemoryWorkflowStore>,
+        stale: std::sync::Mutex<Option<WorkflowInstance>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowStore for StaleCacheStore {
+        async fn save_definition(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
+            self.inner.save_definition(def).await
+        }
+        async fn load_definition(
+            &self,
+            namespace: &str,
+            name: &str,
+            version: &str,
+        ) -> Result<Option<WorkflowDefinition>, StoreError> {
+            self.inner.load_definition(namespace, name, version).await
+        }
+        async fn save_instance(&self, inst: &WorkflowInstance) -> Result<(), StoreError> {
+            self.inner.save_instance(inst).await
+        }
+        async fn load_instance(&self, id: &str) -> Result<Option<WorkflowInstance>, StoreError> {
+            if let Some(stale) = self.stale.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                return Ok(Some(stale));
+            }
+            self.inner.load_instance(id).await
+        }
+        async fn load_instance_with_rev(
+            &self,
+            id: &str,
+        ) -> Result<Option<(WorkflowInstance, i64)>, StoreError> {
+            match self.inner.load_instance(id).await? {
+                Some(inst) => Ok(Some((inst, 1))),
+                None => Ok(None),
+            }
+        }
+        async fn list_definitions(
+            &self,
+            namespace: &str,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<Vec<WorkflowDefinition>, StoreError> {
+            self.inner
+                .list_definitions(namespace, page_size, page_token)
+                .await
+        }
+        async fn list_instances(
+            &self,
+            namespace: Option<&str>,
+            definition_name: Option<&str>,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<(Vec<WorkflowInstance>, Option<String>), StoreError> {
+            self.inner
+                .list_instances(namespace, definition_name, page_size, page_token)
+                .await
+        }
+        async fn save_resume_idempotency_key(
+            &self,
+            instance_id: &str,
+            key: &str,
+        ) -> Result<bool, StoreError> {
+            self.inner
+                .save_resume_idempotency_key(instance_id, key)
+                .await
+        }
+    }
+
+    /// 反（负控制）：取消不得覆盖已提交的终态。
+    ///
+    /// 确定性复现「取消 vs 完成」竞态：完成先提交（线性一致真值 = Completed），
+    /// 而读缓存仍滞后在 Running。取消若走 cache-first `load_instance` 并盲写，就会把
+    /// 已提交的 `Completed` 改成 `Cancelled`（消费者却已看到 `workflow.completed`）。
+    /// 新实现经 `load_instance_with_rev` 读到真值并拒绝 ⇒ 状态不变、无事件。
+    ///
+    /// 反（负控制）：本测试的 store 故意让 `load_instance` 返回陈旧 Running；若取消改回
+    /// cache-first 读，`inner` 会变成 Cancelled，断言失败。
+    #[tokio::test]
+    async fn cancel_cannot_clobber_committed_terminal_state() {
+        use std::sync::Arc;
+
+        let inner = Arc::new(MemoryWorkflowStore::new());
+        let def = make_simple_definition();
+        let mut running = WorkflowInstance::new(&def, serde_json::json!({}), 1000);
+        running.status = InstanceStatus::Running;
+        inner.save_instance(&running).await.unwrap();
+
+        // 完成已提交（线性一致真值 = Completed），但读缓存仍滞后在 Running。
+        let mut completed = running.clone();
+        completed.status = InstanceStatus::Completed;
+        completed.updated_at = 2000;
+        inner.save_instance(&completed).await.unwrap();
+
+        let store = StaleCacheStore {
+            inner: Arc::clone(&inner),
+            stale: std::sync::Mutex::new(Some(running.clone())),
+        };
+
+        let events = Arc::new(RecordingEventProvider::new());
+        let expr = ExpressionEvaluator::new();
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let rt = WorkflowRuntime::new(
+            executor,
+            TestClock::new(1000),
+            store,
+            NoopTaskDispatcher,
+            Arc::clone(&events),
+        );
+
+        let err = rt.cancel_instance(&running.id).await.unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::AlreadyCompleted(_)),
+            "已终态实例的取消必须拒绝（AlreadyCompleted ⇒ 服务层 FailedPrecondition）：{err:?}"
+        );
+        let stored = inner.load_instance(&running.id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.status,
+            InstanceStatus::Completed,
+            "取消不得用陈旧缓存快照覆盖已提交的终态"
+        );
+        assert_eq!(
+            events.emitted_count(),
+            0,
+            "取消被拒绝时不得发出任何生命周期事件：{:?}",
+            events.emitted_events.lock().unwrap()
         );
     }
 

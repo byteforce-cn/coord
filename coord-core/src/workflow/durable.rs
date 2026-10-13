@@ -416,7 +416,15 @@ impl OutboxRelay {
 
     /// 推进一轮：取待投递 → 逐条投递 → 标位/退避。
     pub async fn tick(&self, now_ms: i64) -> Result<RelayReport, StoreError> {
-        let records = self.store.pending(now_ms, self.policy.batch).await?;
+        let mut records = self.store.pending(now_ms, self.policy.batch).await?;
+        // `pending` 只保证按 `next_attempt_at_ms` 升序；同一批提交的记录共享该时间戳，
+        // 组内顺序退化为后端键序（KV 按 UUID id，随机）。per-instance `sequence` 顺序
+        // 是交付契约（消费方按 `(instance_id, sequence)` 去重），故投递前重排。
+        records.sort_by(|a, b| {
+            a.aggregate_id
+                .cmp(&b.aggregate_id)
+                .then(a.sequence.cmp(&b.sequence))
+        });
         let mut report = RelayReport {
             polled: records.len(),
             ..RelayReport::default()
@@ -892,6 +900,32 @@ mod tests {
         }
     }
 
+    /// 记录投递顺序的 sink（正控制用：断言 per-instance `sequence` 顺序）。
+    #[derive(Default)]
+    struct RecordingSink {
+        delivered: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingSink {
+        fn ids(&self) -> Vec<String> {
+            self.delivered
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl OutboxSink for RecordingSink {
+        async fn deliver(&self, rec: &OutboxRecord) -> Result<(), String> {
+            self.delivered
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(rec.id.clone());
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn relay_delivers_and_retries_with_backoff() {
         let store: Arc<dyn OutboxStore> = Arc::new(MemoryOutboxStore::new());
@@ -957,6 +991,113 @@ mod tests {
         assert_eq!(relay.tick(10).await.unwrap().dead, 1);
         let all = store.list_all().await.unwrap();
         assert_eq!(all[0].status, OutboxStatus::Dead);
+    }
+
+    /// 正控制：同一批提交的事件共享 `next_attempt_at_ms`，`pending` 的组内顺序退化为
+    /// 后端键序（KV 按 UUID id，随机）。relay 必须在投递**前**按 `(aggregate_id, sequence)`
+    /// 重排，否则消费者会先看到 `sequence=3` 再看到 2，破坏 per-instance 顺序契约。
+    ///
+    /// 反（负控制）：本测试的 store 故意按 id 降序返回（与 sequence 顺序相反）；
+    /// 不加排序就会以 `[c, b, a]`（sequence 3,2,1）投递而**失败**。
+    #[tokio::test]
+    async fn relay_delivers_same_batch_in_sequence_order() {
+        use crate::workflow::model::WorkflowInstance;
+        use crate::workflow::ports::MemoryWorkflowStore;
+
+        /// 模拟 KV outbox 键序：`pending` 按 id 降序（不保证 sequence 顺序）。
+        struct IdOrderedStore {
+            inner: Arc<MemoryOutboxStore>,
+        }
+
+        #[async_trait]
+        impl OutboxStore for IdOrderedStore {
+            async fn append(&self, rec: &OutboxRecord) -> Result<(), StoreError> {
+                self.inner.append(rec).await
+            }
+            async fn pending(
+                &self,
+                now_ms: i64,
+                limit: usize,
+            ) -> Result<Vec<OutboxRecord>, StoreError> {
+                let mut v = self.inner.pending(now_ms, limit).await?;
+                v.sort_by(|a, b| b.id.cmp(&a.id));
+                Ok(v)
+            }
+            async fn mark_delivered(
+                &self,
+                id: &str,
+                delivered_at_ms: i64,
+            ) -> Result<(), StoreError> {
+                self.inner.mark_delivered(id, delivered_at_ms).await
+            }
+            async fn mark_retry(
+                &self,
+                id: &str,
+                attempts: u32,
+                next_attempt_at_ms: i64,
+            ) -> Result<(), StoreError> {
+                self.inner
+                    .mark_retry(id, attempts, next_attempt_at_ms)
+                    .await
+            }
+            async fn mark_dead(&self, id: &str, attempts: u32) -> Result<(), StoreError> {
+                self.inner.mark_dead(id, attempts).await
+            }
+            async fn list_all(&self) -> Result<Vec<OutboxRecord>, StoreError> {
+                self.inner.list_all().await
+            }
+        }
+
+        // 同一次批量原子提交：3 条事件共享 `next_attempt_at_ms`，追加顺序 a,b,c
+        // 即 sequence 1,2,3；而模拟的键序（id 降序）与之相反。
+        let mem = Arc::new(MemoryOutboxStore::new());
+        let commit =
+            MemoryAtomicCommit::new(Arc::new(MemoryWorkflowStore::new()), Arc::clone(&mem));
+        let inst: WorkflowInstance = serde_json::from_value(serde_json::json!({
+            "id": "seq-1",
+            "definition_ns": "seq",
+            "definition_name": "wf",
+            "definition_version": "1.0.0",
+            "status": "running",
+            "context": {},
+            "current_task_index": 0,
+            "created_at": 1,
+            "updated_at": 1
+        }))
+        .unwrap();
+        let recs = vec![
+            rec("a", "seq-1", 100),
+            rec("b", "seq-1", 100),
+            rec("c", "seq-1", 100),
+        ];
+        assert!(commit
+            .commit_state_and_outbox_batch(&inst, &recs, None)
+            .await
+            .unwrap());
+        let all = mem.list_all().await.unwrap();
+        let seq_of = |id: &str| all.iter().find(|r| r.id == id).unwrap().sequence;
+        assert_eq!((seq_of("a"), seq_of("b"), seq_of("c")), (1, 2, 3));
+
+        let store: Arc<dyn OutboxStore> = Arc::new(IdOrderedStore {
+            inner: Arc::clone(&mem),
+        });
+        let sink = Arc::new(RecordingSink::default());
+        let relay = OutboxRelay::new(
+            Arc::clone(&store),
+            Arc::clone(&sink) as Arc<dyn OutboxSink>,
+            RelayPolicy {
+                batch: 8,
+                ..RelayPolicy::default()
+            },
+        );
+
+        let report = relay.tick(100).await.unwrap();
+        assert_eq!(report.delivered, 3);
+        assert_eq!(
+            sink.ids(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            "投递顺序必须是 per-instance sequence 顺序，而非 pending 的后端键序"
+        );
     }
 
     #[tokio::test]
