@@ -2237,15 +2237,33 @@ pub mod phase4 {
                 .is_none()
             {
                 // 与 `MqOutboxSink` / `MqEventProvider` 的建 topic 参数逐字一致。
-                // 并发创建竞争（already exists）视为已满足。
-                let _ = mq.create_topic(
+                if let Err(create_err) = mq.create_topic(
                     topic,
                     crate::services::mq::TopicConfig {
                         partitions: 1,
                         retention_secs: 7 * 24 * 3600,
                         max_message_size: 1024 * 1024,
                     },
-                );
+                ) {
+                    // 只在并发创建竞争（另一驱动者已建同名 topic）下容忍失败：
+                    // 回读确认存在则不报错；仍不存在（或回读也失败）则 fail-closed，
+                    // 否则投递会在无 topic 下静默停摆。
+                    match mq.get_topic_config(topic) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            return Err(format!(
+                                "workflow durable: failed to create events topic '{topic}': \
+                                 {create_err}"
+                            ));
+                        }
+                        Err(read_err) => {
+                            return Err(format!(
+                                "workflow durable: create topic '{topic}' failed ({create_err}); \
+                                 re-read failed: {read_err}"
+                            ));
+                        }
+                    }
+                }
             }
             Ok(())
         }
@@ -2748,6 +2766,10 @@ pub mod phase4 {
             // durable 装配：此刻 MQ 插件已 start()（装配期构造早于 start_all，构造时
             // 建 topic 必失败）。在拉起 relay / 恢复驱动之前确保事件 topic 存在，
             // 否则产出与订阅都会报 topic not found。
+            //
+            // 顺序不变式：`PluginManager::start_all()` 按插件名 BTreeMap 序启动，
+            // MQ 插件名 `"mq"` < 本引擎名 `"workflow-engine"` ⇒ MQ 先启动。此处
+            // 的 30s 有界等待只是防该命名/排序变化的保险，不能替代它。
             if let Some(mq) = &self.durable_mq {
                 Self::ensure_durable_topic(mq, &self.durable_topic).await?;
             }

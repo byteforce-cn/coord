@@ -96,8 +96,9 @@ impl OutboxSink for MqOutboxSink {
 ///
 /// `tick()` 的返回**不得静默丢弃**：它同时承载投递结果与保留清理计数，
 /// 一次失败的 tick 意味着本轮到期的投递与回收都停摆——留一条 WARN 让运维
-/// 可见；`pruned > 0` 是真实的回收事件，用 INFO 留证（`RelayReport` 无指标
-/// 出口，日志是当前唯一的可读路径）。
+/// 可见；`dead > 0`（逐条投递耗尽尝试上限）同样是 WARN，否则单条投递失败
+/// 要等到 24h 保留窗口清理时才可见；`pruned > 0` 是真实的回收事件，用 INFO
+/// 留证（`RelayReport` 无指标出口，日志是当前唯一的可读路径）。
 pub async fn run_outbox_relay_loop(relay: Arc<OutboxRelay>, interval: Duration) {
     loop {
         let now_ms = SystemTime::now()
@@ -106,6 +107,13 @@ pub async fn run_outbox_relay_loop(relay: Arc<OutboxRelay>, interval: Duration) 
             .as_millis() as i64;
         match relay.tick(now_ms).await {
             Ok(report) => {
+                if report.dead > 0 {
+                    tracing::warn!(
+                        dead = report.dead,
+                        "outbox relay moved records to dead-letter after exhausting delivery \
+                         attempts; they remain until the retention prune"
+                    );
+                }
                 if report.pruned > 0 {
                     tracing::info!(
                         pruned = report.pruned,

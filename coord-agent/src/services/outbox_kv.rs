@@ -422,8 +422,8 @@ impl OutboxStore for KvOutboxStore {
     /// - 单次调用只扫**一个** `records/` 前缀窗口（`limit = 0` 的 range 被服务端
     ///   `max_range_limit` 截断，无截断标记）；回收因而是**每次调用尽力而为**：只有
     ///   当合格记录落在本次窗口内才会被回收，落在窗口外的要等后续 tick 重扫命中。
-    ///   「全前缀扫描 + 无分页游标」的代价与有界化（aged index / 续读游标）是 M2
-    ///   的跟进项，本实现不改键布局。
+    ///   「全前缀扫描 + 无分页游标」的有界化（aged index / 续读游标）是明确的后续
+    ///   跟进项，本实现不改键布局。
     async fn prune(
         &self,
         now_ms: i64,

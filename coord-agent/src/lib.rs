@@ -1372,6 +1372,14 @@ impl AgentServer {
             }
         }
 
+        // durable 是 workflow 的持久化增强而非独立开关：workflow 未启用时该标记
+        // 无装配目标，静默失效会掩盖配置错误（fail-closed）。
+        if self.config.services.workflow_durable && !self.config.services.workflow {
+            return Err(
+                "services.workflow_durable = true requires services.workflow = true".into(),
+            );
+        }
+
         // Durable 工作流装配需要 MQ 投递面（outbox relay / listen 订阅）。此处在
         // workflow 块之前把 MQ 句柄构造一次：构造本身无副作用（redb 在 start()
         // 才打开），注册与后台任务仍留在下方 `services.mq` 块——注册顺序不变，
@@ -1395,17 +1403,19 @@ impl AgentServer {
             // 拒绝启动——静默降级到非 durable 路径正是本里程碑要消除的静默降级类
             // 缺陷。
             let workflow_svc = if self.config.services.workflow_durable {
-                let Some(inner_ref) = inner.as_ref() else {
-                    return Err(
-                        "services.workflow_durable = true requires a server connection \
-                         (KV persistence backend); none is configured"
-                            .into(),
-                    );
-                };
+                // 先查配置级前置（MQ 开关），再查连接级前置：两者都缺时优先报出配置
+                // 错误——它无需外部依赖即可修正。
                 let Some(mq) = mq_handle.as_ref() else {
                     return Err(
                         "services.workflow_durable = true requires services.mq = true \
                          (outbox relay / listen delivery surface)"
+                            .into(),
+                    );
+                };
+                let Some(inner_ref) = inner.as_ref() else {
+                    return Err(
+                        "services.workflow_durable = true requires a server connection \
+                         (KV persistence backend); none is configured"
                             .into(),
                     );
                 };
