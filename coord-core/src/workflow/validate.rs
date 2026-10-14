@@ -29,21 +29,20 @@ use super::parser::{
 
 // ─── 校验器 ───
 
-/// 官方 1.0.3 switch case 形状判定：`{<case_name>: {when?, then}}` —— 单键对象且值为对象。
-/// legacy `{condition, transition}` / `{defaultCondition}` 的值均为字符串，不会命中。
+/// 官方 1.0.3 switch case 形状判定：`{<case_name>: {when?, then}}` —— 单键对象，且 case 体
+/// 含 `when`/`then`。按字段集而非排除键名判定，使 case 名恰为 `condition` 等 legacy 键名时
+/// 仍按官方形状解析；legacy `{condition, transition}` 的值为字符串，不会命中。
 fn official_switch_case(cond: &Value) -> Option<(&str, &serde_json::Map<String, Value>)> {
     let obj = cond.as_object()?;
     if obj.len() != 1 {
         return None;
     }
     let (name, body) = obj.iter().next()?;
-    if matches!(
-        name.as_str(),
-        "condition" | "transition" | "defaultCondition"
-    ) {
+    let case_obj = body.as_object()?;
+    if !case_obj.contains_key("when") && !case_obj.contains_key("then") {
         return None;
     }
-    Some((name.as_str(), body.as_object()?))
+    Some((name.as_str(), case_obj))
 }
 
 /// 语义校验器
@@ -125,12 +124,30 @@ impl Validator {
         // Step 4: 校验 switch transition 引用完整性
         // 官方 switch case `then: end|exit` 映射为终端任务 `__end`：用户未定义时补一个
         // Task::End，保证引用校验与运行期跳转都能解析（与 sw.rs 的终端约定同一个保留名）。
-        if v.needs_end && !v.task_names.contains(super::sw::END_TASK) {
-            named_tasks.push(NamedTask {
-                name: super::sw::END_TASK.to_string(),
-                task: Task::End(EndTask {}),
-            });
-            v.task_names.insert(super::sw::END_TASK.to_string());
+        if v.needs_end {
+            let end_is_terminal = named_tasks
+                .iter()
+                .any(|t| t.name == super::sw::END_TASK && matches!(&t.task, Task::End(_)));
+            if !v.task_names.contains(super::sw::END_TASK) {
+                named_tasks.push(NamedTask {
+                    name: super::sw::END_TASK.to_string(),
+                    task: Task::End(EndTask {}),
+                });
+                v.task_names.insert(super::sw::END_TASK.to_string());
+            } else if !end_is_terminal {
+                // `__end` 为终端保留名：用户定义的非终端同名任务会让 `then: exit` 落到
+                // 普通任务并 fall-through，fail-closed 拒绝并点名保留名。
+                v.errors.push(ValidationError {
+                    span: None,
+                    kind: ValidationErrorKind::UnsupportedConstruct(
+                        super::sw::END_TASK.to_string(),
+                    ),
+                    message: format!(
+                        "task name '{}' is reserved for the switch terminal (then: end|exit) and must be an 'end' task",
+                        super::sw::END_TASK
+                    ),
+                });
+            }
         }
         v.check_task_refs(&named_tasks);
 
@@ -385,6 +402,9 @@ impl Validator {
             if let Some((case_name, case_obj)) = official_switch_case(item) {
                 // 官方 1.0.3 case：`when` 可选（缺失即默认 case），`then` 必需。
                 if let Some(cond) = self.parse_official_switch_case(case_name, case_obj, raw.span) {
+                    // 无 `when` 的官方 case 提升到 default_condition：运行期在全部 `when`
+                    // 条件之后才求值，而官方按数组顺序求值 when-less case。此为已裁定偏差：
+                    // 单个 default case 语义等价，多个 when-less case 由下方唯一性校验拒绝。
                     if cond.condition.is_some() {
                         conditions.push(cond);
                     } else if default_condition.is_none() {
@@ -1482,20 +1502,22 @@ impl Validator {
         for task in tasks {
             match &task.task {
                 Task::Switch(switch) => {
-                    for cond in &switch.conditions {
-                        // defaultCondition 不是显式目标（它就是当前分支）
-                        if cond.condition.is_none() {
-                            continue;
-                        }
-                        if !self.task_names.contains(&cond.transition) {
+                    // 每个条件（含 condition=None 的 legacy defaultCondition）与
+                    // default_condition 都是运行期 Goto 目标，必须存在于任务集合；
+                    // 官方 default case 使该洞首次可达（此前官方形状整体被拒）。
+                    let targets = switch
+                        .conditions
+                        .iter()
+                        .map(|c| &c.transition)
+                        .chain(switch.default_condition.iter().map(|c| &c.transition));
+                    for target in targets {
+                        if !self.task_names.contains(target) {
                             self.errors.push(ValidationError {
                                 span: None,
-                                kind: ValidationErrorKind::UnknownTaskReference(
-                                    cond.transition.clone(),
-                                ),
+                                kind: ValidationErrorKind::UnknownTaskReference(target.clone()),
                                 message: format!(
                                     "switch in '{}' references unknown task '{}'",
-                                    task.name, cond.transition
+                                    task.name, target
                                 ),
                             });
                         }
@@ -2289,6 +2311,128 @@ do:
     }
 
     #[test]
+    fn test_switch_default_condition_unknown_target_rejected() {
+        // default 分支同样是运行期 Goto 目标：官方 default case 使其首次可达，
+        // 未知目标必须 fail-closed（此前官方形状整体被拒，该洞不可达）。
+        let official = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-switch-default-typo
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - default:
+            then: typoTask
+"#;
+        let legacy = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: legacy-switch-default-typo
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - defaultCondition: typoTask
+"#;
+        for yaml in [official, legacy] {
+            let errs =
+                parse_and_validate_yaml(yaml).expect_err("unknown default target must reject");
+            assert!(
+                errs.iter().any(|e| matches!(
+                    &e.kind,
+                    ValidationErrorKind::UnknownTaskReference(t) if t == "typoTask"
+                )),
+                "errors: {errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_switch_reserved_end_non_terminal_rejected() {
+        // `__end` 是 switch 终端保留名：用户定义的非终端 `__end` 不得被 `then: exit` 当作目标，
+        // 否则 `exit` 会落到普通任务并 fall-through。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: reserved-end-non-terminal
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - high:
+            when: "${ .counter > 10 }"
+            then: exit
+  - __end:
+      set:
+        variable: result
+        value: "\"done\""
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("non-terminal __end must reject");
+        assert!(error_kind_naming(&errs, "__end"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_switch_user_defined_end_terminal_reused() {
+        // 用户已定义 `__end` 终端（end: true）时复用之，不得再补一个重复任务。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: user-end-terminal
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - high:
+            when: "${ .counter > 10 }"
+            then: exit
+  - __end:
+      end: true
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("user __end terminal must be reused");
+        assert_eq!(def.do_tasks.iter().filter(|t| t.name == "__end").count(), 1);
+        assert!(def
+            .do_tasks
+            .iter()
+            .any(|t| t.name == "__end" && matches!(&t.task, Task::End(_))));
+    }
+
+    #[test]
+    fn test_switch_case_named_condition_maps() {
+        // case 名恰为 legacy 键名（condition/transition/defaultCondition）时，
+        // 按字段集（when/then）判定为官方形状，不得误入 legacy 路径报「缺 transition」。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-switch-keyword-case
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - condition:
+            when: "${ .counter > 10 }"
+            then: exit
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("case named `condition` must map");
+        match &def.do_tasks[0].task {
+            Task::Switch(s) => {
+                assert_eq!(s.conditions.len(), 1);
+                assert_eq!(
+                    s.conditions[0].condition.as_deref(),
+                    Some("${ .counter > 10 }")
+                );
+                assert_eq!(s.conditions[0].transition, "__end");
+            }
+            other => panic!("expected Switch task, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_validate_workflow_with_function_ref() {
         let yaml = r#"
 document:
@@ -2902,7 +3046,7 @@ do:
 "#;
 
         let errs = parse_and_validate_yaml(yaml).expect_err("non-object for must reject");
-        assert!(errors_naming(&errs, "for"), "errors: {errs:?}");
+        assert!(error_kind_naming(&errs, "for"), "errors: {errs:?}");
     }
 
     #[test]
