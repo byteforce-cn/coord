@@ -1,7 +1,7 @@
 //! v2 审批存储端口与内存实现。
 //!
 //! 端口只有带 CAS 的提交一条写路径（ADR-0013 D3）：没有「无 CAS」形态，冲突一律
-//! `Ok(false)` 且零写入。生产实现（coord-server KV Txn）在 `coord-agent`；本模块的
+//! `Ok(false)` 且零写入。生产实现（KV Txn）在 `coord-agent`；本模块的
 //! 内存实现供正确性测试使用。
 
 use std::collections::BTreeMap;

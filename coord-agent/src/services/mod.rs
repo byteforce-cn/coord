@@ -4,6 +4,7 @@
 // 服务由 `PluginManager` 统一托管：注册进插件表（内建插件）、由其驱动生命周期、
 // 并由 `Plugin::grpc_service()` 暴露 gRPC 面。
 
+pub mod approval_store;
 pub mod cache;
 pub mod circuit_breaker;
 pub mod config_center;
