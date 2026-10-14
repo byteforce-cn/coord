@@ -1387,8 +1387,24 @@ impl Validator {
                     .to_string()
             };
             // 子流程入参嵌在 `run.workflow.input`：与 ref 同处嵌套层，不得只读任务级
-            // `input` 而丢弃（Spike 4 误读）。
-            let nested_input = nested.and_then(|n| n.get("input")).cloned();
+            // `input` 而丢弃（Spike 4 误读）。schema 要求其为对象；present 但非对象
+            // （含 null）fail-closed 点名，绝不静默忽略或遮蔽扁平回退。
+            let nested_input = match nested.and_then(|n| n.get("input")) {
+                None => None,
+                Some(v) if v.is_object() => Some(v.clone()),
+                Some(_) => {
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(
+                            "run.workflow.input".to_string(),
+                        ),
+                        message: "unimplemented construct 'run.workflow.input': subflow input \
+                                  must be a JSON object"
+                            .to_string(),
+                    });
+                    return None;
+                }
+            };
             (
                 WorkflowRef {
                     namespace: pick("namespace"),
@@ -1617,8 +1633,8 @@ impl Validator {
     fn check_cycles(&mut self, tasks: &[NamedTask]) {
         // 构建 transition 图。`condition` 为 None 的 legacy defaultCondition 与官方 when-less
         // case 提升出的 `default_condition` 同样是运行期 Goto 目标，必须计入：运行期无步数预算，
-        // 自环会无限循环。Goto 目标只解析顶层任务（runtime `find_task_index`），故此图只含顶层
-        // 节点；嵌套 switch 的名字无法成为合法目标（引用校验只认顶层 task_names），不会成环。
+        // 自环会无限循环。本图只含顶层 switch 节点（Goto 目标只解析顶层任务，runtime
+        // `find_task_index`）；经由嵌套 switch 绕回顶层任务的环超出本检查范围（既有缺口，未扩大）。
         let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
         for task in tasks {
             if let Task::Switch(switch) = &task.task {
@@ -4375,6 +4391,37 @@ do:
                 assert_eq!(run.input, Some(serde_json::json!({ "orderId": 42 })));
             }
             other => panic!("expected Run task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_workflow_nested_input_non_object_rejected() {
+        // 官方 schema 要求 `workflow.input` 为对象：present 但非对象（含 null）必须
+        // fail-closed 点名 `run.workflow.input`，不得静默忽略或遮蔽扁平回退。
+        for bad in ["\"foo\"", "null", "[1, 2]"] {
+            let yaml = format!(
+                r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: run-workflow-bad-input
+  version: "1.0"
+do:
+  - sub:
+      run:
+        workflow:
+          namespace: other
+          name: child
+          version: "1.0"
+          input: {bad}
+"#
+            );
+            let errs =
+                parse_and_validate_yaml(&yaml).expect_err("non-object workflow.input must reject");
+            assert!(
+                error_kind_naming(&errs, "run.workflow.input"),
+                "input={bad}: errors: {errs:?}"
+            );
         }
     }
 

@@ -69,15 +69,14 @@ fn run_await_return_fail_closed() {
 #[test]
 fn run_workflow_subflow_accepted() {
     // 15：唯一的受支持 run 形状（子流程调用）；嵌套 `workflow.*` 必须落到 WorkflowRef，
-    // 且 `workflow.input` 必须落到 RunTask.input（子流程入参槽），
-    // 不得再把 schema-legal 文档静默编译成空 ref / 丢输入（Spike 4 误读）。
+    // 不得再把 schema-legal 文档静默编译成空 ref（Spike 4 误读）。
+    // corpus 15 为冻结历史证据（无 `input`）：嵌套输入映射由单元测试锁定，不在此改语料。
     let def = parse_corpus("15-run-workflow.yaml").expect("corpus 15 must parse OK");
     match &def.do_tasks[0].task {
         Task::Run(run) => {
             assert_eq!(run.workflow.namespace, "spike");
             assert_eq!(run.workflow.name, "child-workflow");
             assert_eq!(run.workflow.version, "1.0.0");
-            assert_eq!(run.input, Some(serde_json::json!({ "orderId": 42 })));
         }
         other => panic!("corpus 15: expected Run task, got {other:?}"),
     }
