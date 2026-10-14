@@ -4,7 +4,7 @@
 //! `Ok(false)` 且零写入。生产实现（KV Txn）在 `coord-agent`；本模块的
 //! 内存实现供正确性测试使用。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -19,7 +19,10 @@ use super::engine::Engine;
 pub enum ExpectedRev {
     /// 要求键不存在（创建实例；恰好一次语义）。
     CreateOnly,
-    /// 要求当前修订号恰为 `n`（读写之间的乐观 CAS）。
+    /// 要求当前修订号恰为 `n`，`n >= 1`（`load` 返回的 `mod_rev`；首次写入后的修订号是 1）。
+    ///
+    /// 首次写入用 [`ExpectedRev::CreateOnly`]；`Exact(0)` 是保留值（缺键在 KV 里读作
+    /// `mod_revision == 0`，会让「不存在」被误判成匹配），`commit` 一律拒绝。
     Exact(i64),
 }
 
@@ -38,6 +41,11 @@ pub trait ApprovalStore: Send + Sync {
     /// 分配 per-instance 单调 `sequence`）、修订号 +1，返回 `Ok(true)`；不匹配 ⇒ 零写入
     /// 返回 `Ok(false)`；调用方构造记录时填的 `sequence` 由存储侧覆盖。
     ///
+    /// 重放/幂等重复提交（状态逐字相同且本批事件全部已在库）也返回 `Ok(true)`，但零写入、
+    /// 不推进修订号。
+    ///
+    /// `Exact(0)` 是保留值：`ensure_expected_rev_allowed` 在写路径前 fail-closed 拒绝。
+    ///
     /// `sequence` 的分配基准由实现决定：内存实现取已存事件的最大 `sequence` + 1；KV 实现
     /// 取持久化的 outbox 序号计数器 `/_workflow/v3/outbox/seq/{aggregate}`（见 `coord-agent`
     /// 的 `KvApprovalStore`），该计数器不随事件日志剪枝而回退，序号因此不会回退或重叠。
@@ -55,18 +63,51 @@ pub trait ApprovalStore: Send + Sync {
 /// 校验失败；消息逐字稳定，供 KV 实现（`coord-agent`）复用同一锚点。
 pub const APPROVAL_COMMIT_AGGREGATE_MISMATCH: &str = "approval commit: event aggregate_id mismatch";
 
-/// `commit` 前置校验：一批事件的 `aggregate_id` 必须全部等于实例 id。
+/// 同一批事件里出现重复 `id` 时的 fail-closed 拒绝消息。
+///
+/// 事件按 `id` 写 `ids/{id}` 索引；重复 id 会让后者覆盖前者，一条记录变得无法按 id 找回，
+/// 而重放判定仍报告「批次在库」。消息逐字稳定，供 KV 实现（`coord-agent`）复用同一锚点。
+pub const APPROVAL_COMMIT_DUPLICATE_EVENT_ID: &str = "approval commit: duplicate event id in batch";
+
+/// `Exact(0)` 被保留时的 fail-closed 拒绝消息。
+///
+/// 缺键的 `mod_revision` 在不同后端语义不同（KV 读作 0，内存实现从不匹配），`Exact(0)`
+/// 会让「键不存在」被误判成匹配；首次写入必须用 `CreateOnly`。消息逐字稳定，供 KV 实现
+/// （`coord-agent`）复用同一锚点。
+pub const APPROVAL_COMMIT_EXACT_ZERO_RESERVED: &str =
+    "approval commit: Exact(0) is reserved; use CreateOnly for first writes";
+
+/// `commit` 前置校验：`Exact(0)` 是保留值，必须拒绝。
+///
+/// 内存与 KV 两个实现的第一条前置校验，保证「缺键 ⇒ 匹配」的分歧在写路径前就被拦截。
+pub fn ensure_expected_rev_allowed(expected: ExpectedRev) -> Result<(), StoreError> {
+    match expected {
+        ExpectedRev::Exact(0) => Err(StoreError::IoError(
+            APPROVAL_COMMIT_EXACT_ZERO_RESERVED.to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// `commit` 前置校验：一批事件的 `aggregate_id` 必须全部等于实例 id，且 `id` 互不重复。
 ///
 /// 事件写进 `records/{aggregate}/` 后 relay 按聚合分区投递；聚合根不一致意味着调用方
-/// 把别家事件挂到本实例上，必须在写前拒绝。
+/// 把别家事件挂到本实例上，必须在写前拒绝。批内重复 id 会让一条记录被后来的覆盖、
+/// 无法按 id 找回，同样必须在写前拒绝。
 pub fn ensure_event_aggregates_match(
     engine: &Engine,
     events: &[OutboxRecord],
 ) -> Result<(), StoreError> {
+    let mut seen = HashSet::new();
     for rec in events {
         if rec.aggregate_id != engine.instance.id {
             return Err(StoreError::IoError(
                 APPROVAL_COMMIT_AGGREGATE_MISMATCH.to_string(),
+            ));
+        }
+        if !seen.insert(rec.id.as_str()) {
+            return Err(StoreError::IoError(
+                APPROVAL_COMMIT_DUPLICATE_EVENT_ID.to_string(),
             ));
         }
     }
@@ -134,6 +175,7 @@ impl ApprovalStore for MemoryApprovalStore {
         events: &[OutboxRecord],
         expected: ExpectedRev,
     ) -> Result<bool, StoreError> {
+        ensure_expected_rev_allowed(expected)?;
         ensure_event_aggregates_match(engine, events)?;
         let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let id = engine.instance.id.as_str();
@@ -249,11 +291,9 @@ mod tests {
             .commit(&first, &[], ExpectedRev::CreateOnly)
             .await
             .unwrap());
-        // 首次成功提交后修订号是 1，而不是 0。
-        assert!(!store
-            .commit(&first, &[], ExpectedRev::Exact(0))
-            .await
-            .unwrap());
+        // 首次成功提交后修订号是 1；`Exact(0)` 是保留值（见
+        // `memory_store_rejects_reserved_exact_zero`），不再作为 CAS 输入。
+        assert_eq!(store.mod_rev(INSTANCE_ID).await, Some(1));
 
         let mut second = first.clone();
         second.instance.initiator = "lisi".into();
@@ -271,6 +311,26 @@ mod tests {
             .await
             .unwrap());
         assert_eq!(store.mod_rev(INSTANCE_ID).await, Some(3));
+    }
+
+    #[tokio::test]
+    async fn memory_store_rejects_reserved_exact_zero() {
+        // `Exact(0)` 是保留值：即便键不存在也必须拒绝，不能与 `CreateOnly` 混同。
+        // KV 实现把缺键读作 `mod_revision == 0`，若不拦，`Exact(0)` 会创建实例；内存
+        // 实现则从不匹配——两个实现共用 `ensure_expected_rev_allowed` 这一锚点消歧。
+        let store = MemoryApprovalStore::new();
+        let engine = start(INSTANCE_ID);
+        let err = store
+            .commit(&engine, &[evt("evt-1")], ExpectedRev::Exact(0))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            StoreError::IoError(APPROVAL_COMMIT_EXACT_ZERO_RESERVED.into())
+        );
+        assert!(store.load(INSTANCE_ID).await.unwrap().is_none());
+        assert_eq!(store.mod_rev(INSTANCE_ID).await, None);
+        assert!(store.events(INSTANCE_ID).await.is_empty());
     }
 
     #[tokio::test]
@@ -391,6 +451,25 @@ mod tests {
         assert_eq!(
             err,
             StoreError::IoError("approval commit: event aggregate_id mismatch".into())
+        );
+        assert!(store.load(INSTANCE_ID).await.unwrap().is_none());
+        assert!(store.events(INSTANCE_ID).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_store_rejects_duplicate_event_ids() {
+        // 批内重复 id 会让 `ids/{id}` 索引被后来的覆盖、一条记录无法按 id 找回，
+        // 而重放判定仍报告「批次在库」；必须在写前 fail-closed。
+        let store = MemoryApprovalStore::new();
+        let engine = start(INSTANCE_ID);
+        let dup = vec![evt("evt-1"), evt("evt-2"), evt("evt-1")];
+        let err = store
+            .commit(&engine, &dup, ExpectedRev::CreateOnly)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            StoreError::IoError(APPROVAL_COMMIT_DUPLICATE_EVENT_ID.into())
         );
         assert!(store.load(INSTANCE_ID).await.unwrap().is_none());
         assert!(store.events(INSTANCE_ID).await.is_empty());

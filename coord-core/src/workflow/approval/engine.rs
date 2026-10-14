@@ -289,11 +289,11 @@ impl Engine {
                 ApprovalError::InvalidTransition("no open round to remove seats".into())
             })?;
         let mut out = Vec::new();
+        // 先校验全部目标：任一目标非法即整批零写入（命令错误不改状态）。
         for tid in task_ids {
             let t = self
                 .tasks
                 .get(tid)
-                .cloned()
                 .ok_or_else(|| ApprovalError::NotFound(tid.clone()))?;
             if t.round_id != rid {
                 return Err(ApprovalError::InvalidArgument(format!(
@@ -307,7 +307,14 @@ impl Engine {
                     t.id
                 )));
             }
-            let from = t.status;
+        }
+        // 校验全部通过后才开始变更，保证错误路径对先前目标也零副作用。
+        for tid in task_ids {
+            let from = self
+                .tasks
+                .get(tid)
+                .ok_or_else(|| ApprovalError::NotFound(tid.clone()))?
+                .status;
             let t = self
                 .tasks
                 .get_mut(tid)

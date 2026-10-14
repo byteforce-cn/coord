@@ -437,7 +437,10 @@ async fn load_after_reload_preserves_semantics() {
         again.snapshot_json().unwrap(),
         loaded.snapshot_json().unwrap()
     );
-    assert_eq!(rev_final, rev_after + 1);
+    assert!(
+        rev_final > rev_after,
+        "re-commit must strictly advance the store-wide revision"
+    );
 }
 
 // ─────────────────────────────────────────────── 判据 5：v1 列表看不见 v2

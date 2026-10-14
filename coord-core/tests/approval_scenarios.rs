@@ -954,6 +954,66 @@ fn delegate_allows_proxy_and_keeps_principal() {
     assert_eq!(e2.tasks[&seats2[0]].votes[0].on_behalf_of, None);
 }
 
+/// 减签批量零副作用：`[open, decided]` 混合批次在任何变更前被整批拒绝，状态逐字不变。
+///
+/// 这是对 Spike 原型错误路径行为的**裁定偏离**：原实现在变更循环内校验，会先取消第一个
+/// 席位再报 `InvalidTransition`；命令错误必须零状态变化（模块不变量），故改为先全量校验。
+#[test]
+fn remove_sign_mixed_batch_is_all_or_nothing() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "approve",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (r, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::approver("alice"), SeatSpec::approver("bob")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    // bob 已表态（decided），alice 仍未决（open）；轮次仍是 Open。
+    e.approve(e.instance.revision, &seats[1], "bob", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.rounds[&r].status, RoundStatus::Open);
+
+    let before_rev = e.instance.revision;
+    let before_alice = e.tasks[&seats[0]].status;
+    let before_bob = e.tasks[&seats[1]].status;
+    let before_round = e.rounds[&r].clone();
+    let before_snapshot = e.snapshot_json().unwrap();
+
+    // 批次顺序 [open, decided]：不得先取消 alice 再报错。
+    let err = e
+        .remove_sign(
+            e.instance.revision,
+            &b,
+            &[seats[0].clone(), seats[1].clone()],
+            "admin",
+            tick(&mut t),
+        )
+        .unwrap_err();
+    assert_eq!(
+        err,
+        ApprovalError::InvalidTransition(format!("task {} already decided", seats[1]))
+    );
+
+    assert_eq!(e.instance.revision, before_rev);
+    assert_eq!(e.tasks[&seats[0]].status, before_alice);
+    assert_eq!(e.tasks[&seats[1]].status, before_bob);
+    assert_eq!(e.rounds[&r], before_round);
+    assert_eq!(e.snapshot_json().unwrap(), before_snapshot);
+}
+
 /// 撤回：仅发起人；级联取消未决席位并 seal 实例。
 #[test]
 fn withdraw_only_by_initiator() {

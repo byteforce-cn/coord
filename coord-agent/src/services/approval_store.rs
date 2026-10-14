@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use coord_core::workflow::approval::engine::Engine;
 use coord_core::workflow::approval::keys;
 use coord_core::workflow::approval::store::{
-    ensure_event_aggregates_match, ApprovalStore, ExpectedRev,
+    ensure_event_aggregates_match, ensure_expected_rev_allowed, ApprovalStore, ExpectedRev,
 };
 use coord_core::workflow::durable::OutboxRecord;
 use coord_core::workflow::ports::StoreError;
@@ -112,6 +112,7 @@ impl ApprovalStore for KvApprovalStore {
         events: &[OutboxRecord],
         expected: ExpectedRev,
     ) -> Result<bool, StoreError> {
+        ensure_expected_rev_allowed(expected)?;
         ensure_event_aggregates_match(engine, events)?;
         let key = keys::instance_key(&engine.instance.id);
         let value = serde_json::to_vec(engine)
