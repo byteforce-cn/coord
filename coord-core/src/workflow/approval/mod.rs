@@ -13,4 +13,7 @@
 //! 本模块默认关闭、尚未接线：能力面（proto/RPC）与事件契约的固化在生产验收流程内完成。
 
 pub mod engine;
+pub mod events;
+pub mod keys;
 pub mod model;
+pub mod store;
