@@ -148,10 +148,10 @@ fn matrix_pass_corpus_still_parses() {
     // matrix.tsv PASS 且与顺序执行语义一致：末任务的 `then: exit` 等价于工作流结束，
     // 必须继续接受（该断言同时锁住 `then` 规则的边界，防止后续收紧时静默破坏 PASS 集）。
     //
-    // 05/06/07/08/09 的官方形状已逐字段适配，断言见本文件各自的 `*_maps_*` 测试；
-    // 本列表中的语料语义均已对齐。唯一仍被静默接受的是 0.8 遗留 `states/start` 类
-    // （corpus 19：走 cncf_sw 路线接受，schema 判非法，属有意兼容），不在 1.0.3 标准
-    // 子集内，故不列于此列表。
+    // 05/06/07/08/09 的官方形状已逐字段适配，断言见本文件各自的 `*_maps_*` /
+    // `emit_event_with_payload_is_mapped` 测试；本列表中的语料语义均已对齐。唯一仍被
+    // 静默接受的是 LAX 类（有意兼容）：corpus 19 的 0.8 遗留 `states/start`，走 cncf_sw
+    // 路线接受而 schema 判非法，不在 1.0.3 标准子集内，故不列于此列表。
     for file in [
         "01-minimal-set.yaml",
         "02-call-http.yaml",

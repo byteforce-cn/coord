@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让官方 1.0.3 形状的**标准子集**（`switch.when/then`、`fork.branches` map、`for.each/in`、`wait.seconds|milliseconds|until`、`listen.to.one.with`、`emit.event.with`、`run.workflow.input`）解析后**语义正确**，不再有「解析通过但字段丢失」的静默误读（Spike 4 §3.3 的 05/06/07/08/09 与 GAP 04/15）。
+**Goal:** 让官方 1.0.3 形状的**标准子集**（`switch.when/then`、`fork.branches` map、`for.each/in`、`wait.seconds|milliseconds`、`listen.to.one.with`、`emit.event.with`、`run.workflow.input`）解析后**语义正确**，不再有「解析通过但字段丢失」的静默误读（Spike 4 §3.3 的 05/06/07/08/09 与 GAP 04/15）。
 
 **Architecture:** 方案 A —— 在现有解析/校验层内置形状归一（不做独立 crate、不改执行引擎 IR）：`coord-core/src/workflow/validate.rs` 的 `resolve_task`/`parse_*` 识别官方形状并映射到现有 `Task` 模型；`coord-core/src/workflow/sw.rs` 的 states 路线保持现状。所有归一化后仍走 `Task`/`TaskMeta` 既有执行路径，未实现构造继续 fail-closed（M1 Task 8 的拒绝清单不放松）。
 
@@ -24,7 +24,7 @@
 
 ## Review Focus
 
-1. **官方形状变体**：`wait` 字符串("PT5S")与对象(`seconds`/`milliseconds`/`until`)并存时，二者的 `WaitTask` 表示必须语义等价；`for` 有/无 `do`（body 与 `for` 同级）都必须吃到循环体；`fork` 的 map-列表与 `{name,do}` 两种形状都必须产出命名分支与非空 tasks。
+1. **官方形状变体**：`wait` 字符串("PT5S")与对象(`seconds`/`milliseconds`)并存时，二者的 `WaitTask` 表示必须语义等价；`for` 有/无 `do`（body 与 `for` 同级）都必须吃到循环体；`fork` 的 map-列表与 `{name,do}` 两种形状都必须产出命名分支与非空 tasks。
 2. **`then` 指令语义**：switch case 的 `then: <task>/end/exit/continue` 必须映射为该 case 的转场；任务级 `then` 仍按 M1 规则（顶层末尾 exit/end 接受、其余拒绝）。
 3. **表达式上下文**：`for.each`/`in` 与 `switch.when` 的 `${...}` 在映射后仍由现有表达式求值器处理，不得在解析期求值或丢失。
 4. **未知/不支持变体**：官方形状中未覆盖的键（如 `fork.branches` 项非法、`wait` 未知键）必须显式报错并指名构造，不得静默产出空任务。
@@ -40,7 +40,7 @@
 
 **Interfaces:**
 - Produces: `WaitTask.wait` 统一为 ISO8601 时长字符串（现有执行器消费形态）。
-- 映射：`wait: "PT5S"`（字符串）原样；`wait: {seconds: N}` → `PT{N}S`；`{milliseconds: N}` → 毫秒时长；`{until: "<ISO8601 绝对时刻>"}` → 现有 `WaitTask` 若只支持时长，则该变体在解析期换算为「相对现在的时长」不可行（解析期无时钟）⇒ **显式拒绝**并指名 `wait.until`（fail-closed，不静默）。
+- 映射：`wait: "PT5S"`（字符串）原样；`wait: {seconds: N}` → `PT{N}S`；`{milliseconds: N}` → 毫秒时长。`until` 不是官方 1.0.3 `duration` 字段（`duration` 只含 `days/hours/minutes/seconds/milliseconds`）；作为未知键拒绝并指名 `wait.until`（fail-closed，不静默）。
 - 未知键（如 `{minutes: …}` 非规范键）：拒绝并指名 `wait.<key>`。
 
 - [ ] **Step 1: 写失败测试**

@@ -667,6 +667,20 @@ impl Validator {
             return None;
         }
 
+        // `while`（forTask 的循环继续条件，与 `for` 同级）coord 未实现：当前解析不读它，
+        // 条件会被静默忽略而迭代无界——点名 `while` fail-closed。`for` 内出现 `while`
+        // （非 schema 形状）同样拒绝，不静默。
+        if map.contains_key("while") || obj.contains_key("while") {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("while".to_string()),
+                message: "unimplemented construct 'while': coord for-each has no loop \
+                          continuation condition"
+                    .to_string(),
+            });
+            return None;
+        }
+
         // 官方 1.0.3 形状 `for: {each, in}`，循环体是与 `for` 同级的 `do`；legacy 形状
         // `for: {input, iteration, do|tasks}`。出现 each/in 即按官方形状严格校验，缺项点名，
         // 不回退默认值静默丢失迭代语义。既无官方键也无 legacy 键的对象（含 `for: {}`）无
@@ -742,7 +756,21 @@ impl Validator {
     ) -> Option<Task> {
         let wait_val = &map["wait"];
         let wait_str = match wait_val {
-            Value::String(s) => s.clone(),
+            Value::String(s) => {
+                // 含 `${` 的字符串是运行时表达式形式：ISO8601 解析失败会落成零等待，
+                // 静默把定时变成 no-op——点名 `wait` 拒绝，不伪装支持。
+                if s.contains("${") {
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct("wait".to_string()),
+                        message: "unimplemented construct 'wait': runtime expression durations \
+                                  are not supported"
+                            .to_string(),
+                    });
+                    return None;
+                }
+                s.clone()
+            }
             Value::Number(_) => wait_val.to_string(),
             Value::Object(obj) => {
                 // 官方 1.0.3 的相对时长是 `{days?, hours?, minutes?, seconds?,
@@ -841,8 +869,7 @@ impl Validator {
                 self.errors.push(ValidationError {
                     span: Some(raw.span),
                     kind: ValidationErrorKind::UnsupportedConstruct("wait".to_string()),
-                    message: "wait must be an ISO8601 duration string, a number, or a duration \
-                              object"
+                    message: "wait must be an ISO8601 duration string or a duration object"
                         .to_string(),
                 });
                 return None;
@@ -888,12 +915,14 @@ impl Validator {
                 subject: None,
             }
         } else {
-            EventFilter {
-                event_type: None,
-                event_types: vec![],
-                source: None,
-                subject: None,
-            }
+            // 非对象也非字符串的 listen（bool/array/null/number）无过滤器可映射；
+            // 不得静默落成空监听。
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("listen".to_string()),
+                message: "listen must be an object or an event-type string".to_string(),
+            });
+            return None;
         };
 
         Some(Task::Listen(ListenTask {
@@ -1165,7 +1194,17 @@ impl Validator {
                 obj.get("source").and_then(|v| v.as_str()).map(String::from),
                 obj.get("data").cloned(),
             ),
-            None => (String::new(), None, None),
+            None => {
+                // 非对象 emit（bool/array/null/number）无字段可映射；不得静默落成空事件。
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::UnsupportedConstruct("emit".to_string()),
+                    message: "emit must be an object (`emit.event.with` or flat \
+                              `{type,source,data}`)"
+                        .to_string(),
+                });
+                return None;
+            }
         };
 
         Some(Task::Emit(EmitTask {
@@ -1192,16 +1231,16 @@ impl Validator {
             return None;
         };
 
-        // coord 既有形状：`{variable, value}`（`value` 为 jq 表达式字符串）。
-        if let Some(variable) = obj.get("variable").and_then(Value::as_str) {
-            let value = obj
-                .get("value")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+        // coord 既有形状：`{variable, value}`（`value` 为 jq 表达式字符串）。必须两键齐备
+        // 才走 native 分支：官方单键 map `set: {variable: "x"}` 的键名恰为 `variable`，
+        // 只看 `variable` 会把它的值误当变量名、丢 `value`。
+        if let (Some(variable), Some(value)) = (
+            obj.get("variable").and_then(Value::as_str),
+            obj.get("value").and_then(Value::as_str),
+        ) {
             return Some(Task::Set(SetTask {
                 variable: variable.to_string(),
-                value,
+                value: value.to_string(),
             }));
         }
 
@@ -1209,12 +1248,15 @@ impl Validator {
         // 单键映射成单变量 SetTask；多键超出单变量模型，逐键点名 fail-closed。
         if obj.len() == 1 {
             let (variable, value) = obj.iter().next().expect("len == 1 guarantees an entry");
-            // 值里嵌了 `${ ... }`（trim 后不是完整的 `${ ... }`）时 coord 无字符串插值/
-            // 部分模板面，当字面量处理会静默丢模板语义或丢尾部——fail-closed 点名 `set.<key>`。
+            // 值里嵌了 `${ ... }`（trim 后不是单个完整 `${ ... }` 表达式）时 coord 无字符串
+            // 插值/部分模板面，当字面量处理会静默丢模板语义或丢尾部——fail-closed 点名
+            // `set.<key>`。`${ .a }${ .b }` 这类多段拼接也算非单段完整表达式。
             if let Value::String(s) = value {
                 let trimmed = s.trim();
-                let is_full_expr = trimmed.starts_with("${") && trimmed.ends_with('}');
-                if trimmed.contains("${") && !is_full_expr {
+                let segments = trimmed.matches("${").count();
+                let is_full_expr =
+                    segments == 1 && trimmed.starts_with("${") && trimmed.ends_with('}');
+                if segments > 0 && !is_full_expr {
                     let construct = format!("set.{variable}");
                     self.errors.push(ValidationError {
                         span: Some(raw.span),
@@ -1226,6 +1268,19 @@ impl Validator {
                     });
                     return None;
                 }
+            }
+            // 数组字面量（含对象字面量内嵌）求值器无 `[...]` 分支，会落到 `Ok(context)`——
+            // 静默把整个上下文当变量值。数组字面量支持前解析期点名拒绝。
+            if set_value_contains_array(value) {
+                let construct = format!("set.{variable}");
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                    message: format!(
+                        "unimplemented construct '{construct}': array values are not supported"
+                    ),
+                });
+                return None;
             }
             return Some(Task::Set(SetTask {
                 variable: variable.clone(),
@@ -1956,6 +2011,18 @@ fn official_set_value_expr(value: &Value) -> String {
     match value {
         Value::String(s) if s.trim().starts_with("${") && s.trim().ends_with('}') => s.clone(),
         other => crate::workflow::sw::json_to_jq_literal(other),
+    }
+}
+
+/// 官方 `set` 值是否含数组字面量（含对象字面量内嵌）。
+///
+/// `eval_jq_subset` 无 `[...]` 数组字面量分支，数组表达式会落到 `Ok(context.clone())`，
+/// 即把整个上下文写成变量值（Spike 4 式的静默误读）。数组字面量支持前解析期点名拒绝。
+fn set_value_contains_array(value: &Value) -> bool {
+    match value {
+        Value::Array(_) => true,
+        Value::Object(map) => map.values().any(set_value_contains_array),
+        _ => false,
     }
 }
 
@@ -3214,6 +3281,34 @@ do:
     }
 
     #[test]
+    fn test_for_while_rejected() {
+        // 官方 1.0.3 `while`（forTask 循环继续条件，与 `for` 同级）coord 未实现：
+        // 当前不读它，条件会被静默忽略而迭代无界——fail-closed 点名 `while`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-while
+  version: "1.0"
+do:
+  - loop:
+      for:
+        each: item
+        in: "${ .items }"
+      while: "${ .more }"
+      do:
+        - process:
+            call: http
+            with:
+              method: GET
+              endpoint: "https://api/process"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("while must reject");
+        assert!(error_kind_naming(&errs, "while"), "errors: {errs:?}");
+    }
+
+    #[test]
     fn test_for_body_unknown_function_rejected() {
         // 优先级改动后 for 体不再当 Do；未知函数引用校验必须递归进 ForEach.tasks。
         let yaml = r#"
@@ -3488,6 +3583,95 @@ do:
         assert!(errors_naming(&errs, "set.greeting"), "errors: {errs:?}");
     }
 
+    #[test]
+    fn test_set_official_double_expression_rejected() {
+        // 多于一个 `${...}` 段（拼接）无法当一个完整表达式剥壳，求值器会静默丢段或丢尾部；
+        // 只有单个完整 `${...}` 才接受。fail-closed 点名 `set.<key>`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-double-expr
+  version: "1.0"
+do:
+  - init:
+      set:
+        joined: "${ .a }${ .b }"
+"#;
+
+        let errs =
+            parse_and_validate_yaml(yaml).expect_err("multi-segment set expression must reject");
+        assert!(errors_naming(&errs, "set.joined"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_set_official_array_value_rejected() {
+        // 数组字面量求值器无 `[...]` 分支，会落到 `Ok(context)` 静默把整个上下文写成变量值；
+        // 数组字面量支持前 fail-closed 点名 `set.<key>`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-array
+  version: "1.0"
+do:
+  - init:
+      set:
+        items: [1, 2, 3]
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("array set value must reject");
+        assert!(errors_naming(&errs, "set.items"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_set_official_nested_object_array_value_rejected() {
+        // 对象字面量内嵌数组同样会经 try_object_literal 落到数组求值路径：一并 fail-closed。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-nested-array
+  version: "1.0"
+do:
+  - init:
+      set:
+        payload:
+          list: [1, 2]
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("nested array set value must reject");
+        assert!(errors_naming(&errs, "set.payload"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_set_official_single_key_named_variable_survives() {
+        // 官方单键 map 的键名恰为 `variable` 时，不得被 native `{variable, value}` 分支误读：
+        // native 分支现要求两键齐备，故此例应落成 variable="variable"、value 求值为 "x"。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-var-key
+  version: "1.0"
+do:
+  - init:
+      set:
+        variable: "x"
+"#;
+
+        let def = parse_and_validate_yaml(yaml).expect("single-key official set must parse");
+        let s = match &def.do_tasks[0].task {
+            Task::Set(s) => s,
+            other => panic!("expected Set task, got {other:?}"),
+        };
+        assert_eq!(s.variable, "variable");
+        let value = ExpressionEvaluator::new()
+            .evaluate(&s.value, &serde_json::json!({}))
+            .expect("evaluate set value");
+        assert_eq!(value, serde_json::json!("x"));
+    }
+
     // ═══ 任务级标准字段 / 顶层扩展块解析（P0 全特性） ═══
 
     #[test]
@@ -3714,6 +3898,25 @@ do:
     }
 
     #[test]
+    fn test_wait_runtime_expression_rejected() {
+        // 字符串含 `${` 是运行时表达式形式：会落成非法 ISO8601 → 零等待（定时变 no-op），
+        // fail-closed 点名 `wait`。其它非法字符串（如 "INVALID"）仍按零等待兼容。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-expr
+  version: "1.0"
+do:
+  - pause:
+      wait: "${ .delay }"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("runtime expression wait must reject");
+        assert!(errors_naming(&errs, "wait"), "errors: {errs:?}");
+    }
+
+    #[test]
     fn test_wait_until_is_rejected_with_construct_name() {
         let yaml = r#"
 document:
@@ -3937,6 +4140,24 @@ do:
     }
 
     #[test]
+    fn test_emit_non_object_rejected() {
+        // 非对象 emit 无字段可映射，不得静默落成空事件。fail-closed 点名 `emit`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: emit-non-object
+  version: "1.0"
+do:
+  - notify:
+      emit: []
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("non-object emit must reject");
+        assert!(errors_naming(&errs, "emit"), "errors: {errs:?}");
+    }
+
+    #[test]
     fn test_listen_official_to_one_with_shape() {
         let yaml = r#"
 document:
@@ -3967,6 +4188,24 @@ do:
             }
             other => panic!("expected Listen task, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_listen_non_object_rejected() {
+        // 非对象也非字符串的 listen 无过滤器可映射，不得静默落成空监听。fail-closed 点名 `listen`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-non-object
+  version: "1.0"
+do:
+  - await_event:
+      listen: []
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("non-object listen must reject");
+        assert!(errors_naming(&errs, "listen"), "errors: {errs:?}");
     }
 
     #[test]
