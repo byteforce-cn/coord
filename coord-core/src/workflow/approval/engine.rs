@@ -451,6 +451,297 @@ impl Engine {
         }])
     }
 
+    /// 转办：责任人变更，原审批人保留审计痕迹但不再审批（`transferred_from`）。
+    ///
+    /// 允许 `by` 是当前责任人（`assignee`）或未认领池席位的候选人；转办同时清空已有委派。
+    pub fn transfer(
+        &mut self,
+        expected: u64,
+        task_id: &str,
+        to: &str,
+        by: &str,
+        now: i64,
+    ) -> Result<Vec<Effect>, ApprovalError> {
+        self.guard(expected)?;
+        let mut t = self
+            .tasks
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(task_id.into()))?;
+        if !t.status.is_open() {
+            return Err(ApprovalError::InvalidTransition(format!(
+                "task {} is {:?}",
+                t.id, t.status
+            )));
+        }
+        if t.kind != TaskKind::Approval {
+            return Err(ApprovalError::InvalidTransition(
+                "only approval tasks can be transferred".into(),
+            ));
+        }
+        let from_principal = match &t.assignee {
+            Some(a) if a == by => a.clone(),
+            Some(a) => {
+                return Err(ApprovalError::NotAuthorized(format!(
+                    "{by} is not the assignee ({a}) of {}",
+                    t.id
+                )))
+            }
+            None => {
+                if !t.candidates.iter().any(|c| c == by) {
+                    return Err(ApprovalError::NotAuthorized(format!(
+                        "{by} is not a candidate of {}",
+                        t.id
+                    )));
+                }
+                by.into()
+            }
+        };
+        t.transferred_from.push(from_principal);
+        t.assignee = Some(to.into());
+        t.delegation = None;
+        let mut out = Vec::new();
+        if t.status == TaskStatus::Created {
+            t.status = TaskStatus::Claimed;
+            out.push(Effect::TaskStatus {
+                id: t.id.clone(),
+                from: TaskStatus::Created,
+                to: TaskStatus::Claimed,
+            });
+        }
+        t.updated_at = now;
+        let id = t.id.clone();
+        self.tasks.insert(id.clone(), t);
+        out.push(Effect::TaskAssigned {
+            id,
+            assignee: to.into(),
+            kind: AssignKind::Transfer,
+        });
+        self.touch(now);
+        Ok(out)
+    }
+
+    /// 委派：原审批人保留权限，被委派人可代批（投票记录带 `on_behalf_of`）。
+    ///
+    /// 只有当前责任人可委派；委派会覆盖同一席位已有的委派。
+    pub fn delegate(
+        &mut self,
+        expected: u64,
+        task_id: &str,
+        to: &str,
+        by: &str,
+        now: i64,
+    ) -> Result<Vec<Effect>, ApprovalError> {
+        self.guard(expected)?;
+        let mut t = self
+            .tasks
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(task_id.into()))?;
+        if !t.status.is_open() {
+            return Err(ApprovalError::InvalidTransition(format!(
+                "task {} is {:?}",
+                t.id, t.status
+            )));
+        }
+        match &t.assignee {
+            Some(a) if a == by => {}
+            _ => {
+                return Err(ApprovalError::NotAuthorized(format!(
+                    "only the assignee can delegate task {}",
+                    t.id
+                )))
+            }
+        }
+        t.delegation = Some(Delegation {
+            from: by.into(),
+            to: to.into(),
+            granted_at: now,
+        });
+        t.updated_at = now;
+        let id = t.id.clone();
+        self.tasks.insert(id.clone(), t);
+        self.touch(now);
+        Ok(vec![Effect::TaskAssigned {
+            id,
+            assignee: to.into(),
+            kind: AssignKind::Delegate,
+        }])
+    }
+
+    /// 驳回至节点：关闭当前分支（`Returned`），作废目标节点旧尝试，重开新尝试。
+    ///
+    /// 目标必须在已进入节点白名单（`node_attempts`）内；累计次数受 [`MAX_JUMPS`] 限制。
+    /// 驳回记录写入 `instance.returns`，并递增 `jump_count`；新分支沿用目标旧尝试的
+    /// join/reject 与父分支。
+    pub fn return_to_node(
+        &mut self,
+        expected: u64,
+        branch_id: &str,
+        target_node: &str,
+        by: &str,
+        comment: Option<&str>,
+        now: i64,
+    ) -> Result<(Id, Vec<Effect>), ApprovalError> {
+        self.guard(expected)?;
+        let branch = self
+            .branches
+            .get(branch_id)
+            .cloned()
+            .ok_or_else(|| ApprovalError::NotFound(branch_id.into()))?;
+        if branch.status != BranchStatus::Open {
+            return Err(ApprovalError::InvalidTransition(format!(
+                "branch {} is {:?}",
+                branch.id, branch.status
+            )));
+        }
+        if !self.node_attempts.contains_key(target_node) {
+            return Err(ApprovalError::InvalidArgument(format!(
+                "target node {target_node} is not in the reached-node whitelist"
+            )));
+        }
+        if self.instance.jump_count >= MAX_JUMPS {
+            return Err(ApprovalError::InvalidArgument(format!(
+                "jump limit {MAX_JUMPS} reached"
+            )));
+        }
+        let mut out = Vec::new();
+        let open_round = self
+            .rounds
+            .values()
+            .find(|r| r.branch_id == branch.id && r.status == RoundStatus::Open)
+            .map(|r| r.id.clone());
+        if let Some(rid) = &open_round {
+            self.cancel_pending_tasks(rid, now, &mut out);
+        }
+        self.close_rounds_of_branch(&branch.id, RoundStatus::Superseded, now, &mut out);
+        self.set_branch_status(&branch.id, BranchStatus::Returned, now, &mut out);
+
+        let target_latest = self
+            .branches
+            .values()
+            .filter(|b| b.node == target_node)
+            .max_by_key(|b| b.attempt)
+            .cloned();
+        let (join, reject) = target_latest
+            .as_ref()
+            .map(|b| (b.join, b.reject))
+            .unwrap_or((JoinPolicy::All, RejectPolicy::AnyReject));
+        if let Some(tb) = &target_latest {
+            self.set_branch_status(&tb.id, BranchStatus::Superseded, now, &mut out);
+        }
+        let new_id = self.create_branch(
+            target_node,
+            target_latest
+                .as_ref()
+                .and_then(|b| b.parent_branch_id.clone()),
+            join,
+            reject,
+            now,
+            &mut out,
+        );
+        self.instance.jump_count += 1;
+        self.instance.returns.push(ReturnRecord {
+            from_node: branch.node.clone(),
+            to_node: target_node.into(),
+            by: by.into(),
+            comment: comment.map(str::to_string),
+            at: now,
+        });
+        self.instance.audit.push(AuditEntry {
+            at: now,
+            action: "return_to_node".into(),
+            branch: Some(branch.id.clone()),
+            by: by.into(),
+            detail: format!("{} -> {}", branch.node, target_node),
+        });
+        let jump_count = self.instance.jump_count;
+        self.emit(
+            &mut out,
+            "com.china-workflow.instance.returned",
+            json!({
+                "instance_id": self.instance.id,
+                "from_node": branch.node,
+                "to_node": target_node,
+                "jump_count": jump_count,
+            }),
+        );
+        self.touch(now);
+        Ok((new_id, out))
+    }
+
+    /// 撤回（仅发起人）：级联取消全部 open 分支 / 轮次 / 未决席位，实例置 `Cancelled`。
+    pub fn withdraw(
+        &mut self,
+        expected: u64,
+        by: &str,
+        now: i64,
+    ) -> Result<Vec<Effect>, ApprovalError> {
+        self.guard(expected)?;
+        if self.instance.initiator != by {
+            return Err(ApprovalError::NotAuthorized(format!(
+                "{by} is not the initiator"
+            )));
+        }
+        let mut out = Vec::new();
+        self.cancel_open_branches(BranchStatus::Cancelled, &mut out, now);
+        let from = self.instance.status;
+        self.instance.status = InstanceStatus::Cancelled;
+        out.push(Effect::InstanceStatus {
+            from,
+            to: InstanceStatus::Cancelled,
+        });
+        self.instance.audit.push(AuditEntry {
+            at: now,
+            action: "withdraw".into(),
+            branch: None,
+            by: by.into(),
+            detail: String::new(),
+        });
+        self.emit(
+            &mut out,
+            "com.china-workflow.instance.cancelled",
+            json!({"instance_id": self.instance.id}),
+        );
+        self.touch(now);
+        Ok(out)
+    }
+
+    /// 强制终止（管理路径）：与 `withdraw` 相同的级联取消，实例置 `Terminated`。
+    ///
+    /// 权限规则不在本模型层范围（见 Spike 1 GAPS.md Q6），由驱动/授权层把关。
+    pub fn terminate(
+        &mut self,
+        expected: u64,
+        by: &str,
+        reason: &str,
+        now: i64,
+    ) -> Result<Vec<Effect>, ApprovalError> {
+        self.guard(expected)?;
+        let mut out = Vec::new();
+        self.cancel_open_branches(BranchStatus::Terminated, &mut out, now);
+        let from = self.instance.status;
+        self.instance.status = InstanceStatus::Terminated;
+        out.push(Effect::InstanceStatus {
+            from,
+            to: InstanceStatus::Terminated,
+        });
+        self.instance.audit.push(AuditEntry {
+            at: now,
+            action: "terminate".into(),
+            branch: None,
+            by: by.into(),
+            detail: reason.into(),
+        });
+        self.emit(
+            &mut out,
+            "com.china-workflow.instance.terminated",
+            json!({"instance_id": self.instance.id, "reason": reason}),
+        );
+        self.touch(now);
+        Ok(out)
+    }
+
     /// 定义层已无后继节点时，由驱动方显式收口实例（分支通过与实例收口解耦：
     /// 状态机内部无法得知定义是否还有后继节点）。
     pub fn finish(&mut self, expected: u64, now: i64) -> Result<Vec<Effect>, ApprovalError> {
@@ -958,11 +1249,7 @@ impl Engine {
     }
 
     /// 非判定性关闭（Returned / Superseded / Cancelled / Terminated）：不触发实例收口，
-    /// 与判定路径 [`Engine::close_branch`] 相对；关闭时间只写一次。
-    ///
-    /// 核心生命周期命令不经过这条路径（判定一律走 `close_branch`），故当前没有调用方；
-    /// 保留它是为了让管理命令沿用同一套关闭语义。
-    #[allow(dead_code)]
+    /// 与判定路径 [`Engine::close_branch`] 相对；关闭时间只写一次，重复设为同一状态无副作用。
     fn set_branch_status(
         &mut self,
         branch_id: &str,
@@ -981,6 +1268,30 @@ impl Engine {
             }
             let id = b.id.clone();
             out.push(Effect::BranchStatus { id, from, to });
+        }
+    }
+
+    /// 作废/取消一个分支下的全部 Open 轮次（非判定性，不经 [`Engine::recount`]）。
+    fn close_rounds_of_branch(
+        &mut self,
+        branch_id: &str,
+        to: RoundStatus,
+        now: i64,
+        out: &mut Vec<Effect>,
+    ) {
+        let ids: Vec<Id> = self
+            .rounds
+            .values()
+            .filter(|r| r.branch_id == branch_id && r.status == RoundStatus::Open)
+            .map(|r| r.id.clone())
+            .collect();
+        for id in ids {
+            if let Some(r) = self.rounds.get_mut(&id) {
+                let from = r.status;
+                r.status = to;
+                r.closed_at = Some(now);
+                out.push(Effect::RoundStatus { id, from, to });
+            }
         }
     }
 
@@ -1010,6 +1321,33 @@ impl Engine {
                     });
                 }
             }
+        }
+    }
+
+    /// 级联取消全部 Open 分支：先取消其未决席位，再取消 Open 轮次，最后将分支置为
+    /// `branch_status`（`withdraw` → `Cancelled`；`terminate` → `Terminated`）。
+    fn cancel_open_branches(
+        &mut self,
+        branch_status: BranchStatus,
+        out: &mut Vec<Effect>,
+        now: i64,
+    ) {
+        let branch_ids: Vec<Id> = self
+            .branches
+            .values()
+            .filter(|b| b.status == BranchStatus::Open)
+            .map(|b| b.id.clone())
+            .collect();
+        for bid in &branch_ids {
+            let task_ids: Vec<Id> = self
+                .tasks
+                .values()
+                .filter(|t| t.branch_id == *bid && t.status.is_open())
+                .map(|t| t.id.clone())
+                .collect();
+            self.cancel_tasks(&task_ids, now, out);
+            self.close_rounds_of_branch(bid, RoundStatus::Cancelled, now, out);
+            self.set_branch_status(bid, branch_status, now, out);
         }
     }
 }

@@ -1,11 +1,10 @@
-//! v2 审批引擎的核心场景（生命周期 / 席位 / 计票判定）。
+//! v2 审批引擎的场景：核心生命周期 / 席位 / 计票判定，以及管理命令（驳回至节点 / 转办 /
+//! 委派 / 撤回 / 终止）与变量作用域。
 //!
 //! 用例取自 Spike 1 的冻结场景文件（`spike/2026-10/spike-1-state-model/crate/tests/scenarios.rs`）：
 //! 用例名与断言逐字保留，只把 `Engine::start(ns, name, version, initiator, context, now)` 改为
 //! 调用方注入实例 id 与定义哈希的 `Engine::start(StartSpec { .. }, now)`。
 //! 判定顺序见 `spike/2026-10/spike-1-state-model/docs/TRANSITIONS.md` §3。
-//!
-//! 管理命令（驳回至节点 / 转办 / 委派 / 撤回 / 终止）的场景由后续任务追加到本文件。
 
 use coord_core::workflow::approval::{engine::*, model::*};
 
@@ -700,4 +699,618 @@ fn snapshot_json_failure_is_error_not_panic() {
         .collect();
     keys.sort_unstable();
     assert_eq!(keys, vec!["branches", "instance", "rounds", "tasks"]);
+}
+
+// ------------------------------------------------- 管理命令与变量作用域
+
+/// 驳回至节点：当前节点关闭为 `Returned`，目标节点旧尝试作废，重开新尝试并记 `returns`。
+#[test]
+fn p0_return_to_node_reopens_history() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b1, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "apply",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, ts1, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b1,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.approve(e.instance.revision, &ts1[0], "alice", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.branches[&b1].status, BranchStatus::Completed);
+
+    let (b2, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (r2, _ts2, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b2,
+            vec![SeatSpec::approver("bob")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+
+    let out = e
+        .return_to_node(
+            e.instance.revision,
+            &b2,
+            "apply",
+            "bob",
+            Some("材料不全，退回重填"),
+            tick(&mut t),
+        )
+        .unwrap();
+    let b3 = out.0;
+    assert_eq!(e.branches[&b2].status, BranchStatus::Returned);
+    assert_eq!(e.branches[&b1].status, BranchStatus::Superseded);
+    assert_eq!(e.rounds[&r2].status, RoundStatus::Superseded);
+    assert_eq!(e.branches[&b3].node, "apply");
+    assert_eq!(e.branches[&b3].attempt, 2);
+    assert_eq!(e.instance.jump_count, 1);
+    assert_eq!(e.instance.returns.len(), 1);
+    assert_eq!(e.instance.returns[0].from_node, "review");
+    assert_eq!(e.instance.returns[0].to_node, "apply");
+    assert_eq!(e.instance.returns[0].by, "bob");
+    assert_eq!(
+        e.instance.returns[0].comment.as_deref(),
+        Some("材料不全，退回重填")
+    );
+    assert!(has_event(&out.1, "com.china-workflow.instance.returned"));
+    assert_eq!(e.instance.status, InstanceStatus::Running);
+
+    // 重开 A、走完 B
+    let (_, ts3, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b3,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.approve(e.instance.revision, &ts3[0], "alice", None, tick(&mut t))
+        .unwrap();
+    let (b4, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    assert_eq!(e.branches[&b4].attempt, 2);
+    let (_, ts4, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b4,
+            vec![SeatSpec::approver("bob")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.approve(e.instance.revision, &ts4[0], "bob", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.instance.status, InstanceStatus::Running);
+    e.finish(e.instance.revision, tick(&mut t)).unwrap();
+    assert_eq!(e.instance.status, InstanceStatus::Completed);
+}
+
+/// 转办：责任人变更；原审批人失去审批权（保留审计链），新责任人可批。
+#[test]
+fn p0_transfer_moves_authority() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "approve",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_r, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::pool(vec!["alice".into(), "bob".into()])],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let task = seats[0].clone();
+    assert_eq!(e.open_tasks_for("alice").len(), 1);
+    assert_eq!(e.open_tasks_for("bob").len(), 1);
+
+    e.claim(e.instance.revision, &task, "alice", tick(&mut t))
+        .unwrap();
+    assert_eq!(e.tasks[&task].status, TaskStatus::Claimed);
+    let out = e
+        .transfer(e.instance.revision, &task, "carol", "alice", tick(&mut t))
+        .unwrap();
+    assert_eq!(e.tasks[&task].assignee.as_deref(), Some("carol"));
+    assert_eq!(e.tasks[&task].transferred_from, vec!["alice".to_string()]);
+    assert!(out.iter().any(|x| matches!(
+        x,
+        Effect::TaskAssigned {
+            kind: AssignKind::Transfer,
+            ..
+        }
+    )));
+
+    let err = e
+        .approve(e.instance.revision, &task, "alice", None, tick(&mut t))
+        .unwrap_err();
+    assert!(matches!(err, ApprovalError::NotAuthorized(_)));
+    e.approve(e.instance.revision, &task, "carol", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.instance.status, InstanceStatus::Running);
+    e.finish(e.instance.revision, tick(&mut t)).unwrap();
+    assert_eq!(e.instance.status, InstanceStatus::Completed);
+}
+
+/// 委派：被委派人代批（记录 `on_behalf_of`）；原审批人权限保留。
+#[test]
+fn delegate_allows_proxy_and_keeps_principal() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "approve",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.delegate(
+        e.instance.revision,
+        &seats[0],
+        "dave",
+        "alice",
+        tick(&mut t),
+    )
+    .unwrap();
+    assert_eq!(e.open_tasks_for("dave").len(), 1);
+    assert_eq!(e.open_tasks_for("alice").len(), 1);
+    e.approve(e.instance.revision, &seats[0], "dave", None, tick(&mut t))
+        .unwrap();
+    let v = &e.tasks[&seats[0]].votes[0];
+    assert_eq!(v.actor, "dave");
+    assert_eq!(v.on_behalf_of.as_deref(), Some("alice"));
+
+    // 原审批人保留权限：独立实例里 alice 在被委派后仍可自己批
+    let mut e2 = start();
+    let mut t2 = 1_000;
+    let (b2, _) = e2
+        .enter_branch(
+            e2.instance.revision,
+            "approve",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t2),
+        )
+        .unwrap();
+    let (_, seats2, _) = e2
+        .open_approval(
+            e2.instance.revision,
+            &b2,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t2),
+        )
+        .unwrap();
+    e2.delegate(
+        e2.instance.revision,
+        &seats2[0],
+        "dave",
+        "alice",
+        tick(&mut t2),
+    )
+    .unwrap();
+    e2.approve(
+        e2.instance.revision,
+        &seats2[0],
+        "alice",
+        None,
+        tick(&mut t2),
+    )
+    .unwrap();
+    assert_eq!(e2.tasks[&seats2[0]].votes[0].on_behalf_of, None);
+}
+
+/// 撤回：仅发起人；级联取消未决席位并 seal 实例。
+#[test]
+fn withdraw_only_by_initiator() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "approve",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let err = e
+        .withdraw(e.instance.revision, "lisi", tick(&mut t))
+        .unwrap_err();
+    assert!(matches!(err, ApprovalError::NotAuthorized(_)));
+    let out = e
+        .withdraw(e.instance.revision, "zhangsan", tick(&mut t))
+        .unwrap();
+    assert_eq!(e.instance.status, InstanceStatus::Cancelled);
+    assert_eq!(e.branches[&b].status, BranchStatus::Cancelled);
+    assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Cancelled);
+    assert!(has_event(&out, "com.china-workflow.instance.cancelled"));
+}
+
+/// 终止：管理路径级联取消 open 分支/轮次/席位，终态实例拒绝后续命令。
+#[test]
+fn terminate_cascades_and_seals_instance() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "approve",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let out = e
+        .terminate(
+            e.instance.revision,
+            "admin",
+            "policy violation",
+            tick(&mut t),
+        )
+        .unwrap();
+    assert_eq!(e.instance.status, InstanceStatus::Terminated);
+    assert_eq!(e.branches[&b].status, BranchStatus::Terminated);
+    assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Cancelled);
+    assert!(has_event(&out, "com.china-workflow.instance.terminated"));
+    let err = e
+        .approve(e.instance.revision, &seats[0], "alice", None, tick(&mut t))
+        .unwrap_err();
+    assert!(matches!(err, ApprovalError::InvalidTransition(_)));
+}
+
+/// 驳回白名单与 jump 上限：未进入过的节点不可作为目标；超限拒绝且状态零变化。
+#[test]
+fn return_target_whitelist_and_jump_limit() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "apply",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let err = e
+        .return_to_node(
+            e.instance.revision,
+            &b,
+            "never-visited",
+            "alice",
+            None,
+            tick(&mut t),
+        )
+        .unwrap_err();
+    assert!(matches!(err, ApprovalError::InvalidArgument(_)));
+    assert_eq!(e.branches[&b].status, BranchStatus::Open);
+
+    e.instance.jump_count = MAX_JUMPS;
+    let err = e
+        .return_to_node(
+            e.instance.revision,
+            &b,
+            "apply",
+            "alice",
+            None,
+            tick(&mut t),
+        )
+        .unwrap_err();
+    assert!(matches!(err, ApprovalError::InvalidArgument(_)));
+}
+
+/// 三级作用域：task 覆盖 branch 覆盖 instance。
+#[test]
+fn variable_scope_precedence() {
+    let mut e = start();
+    let mut t = 1_000;
+    e.instance
+        .context
+        .insert("region".into(), serde_json::json!("cn-north-1"));
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "approve",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.branches
+        .get_mut(&b)
+        .unwrap()
+        .scope
+        .insert("region".into(), serde_json::json!("cn-east-2"));
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.tasks
+        .get_mut(&seats[0])
+        .unwrap()
+        .scope
+        .insert("region".into(), serde_json::json!("cn-south-1"));
+    assert_eq!(
+        e.resolve_var(&seats[0], "region").unwrap(),
+        &serde_json::json!("cn-south-1")
+    );
+    assert_eq!(e.resolve_var(&seats[0], "absent"), None);
+    e.tasks.get_mut(&seats[0]).unwrap().scope.remove("region");
+    assert_eq!(
+        e.resolve_var(&seats[0], "region").unwrap(),
+        &serde_json::json!("cn-east-2")
+    );
+    e.branches.get_mut(&b).unwrap().scope.remove("region");
+    assert_eq!(
+        e.resolve_var(&seats[0], "region").unwrap(),
+        &serde_json::json!("cn-north-1")
+    );
+}
+
+/// 证据快照：完整场景可 `serde_json::to_value`，且固定含四键。
+#[test]
+fn evidence_snapshot_serializable() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "apply",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.approve(
+        e.instance.revision,
+        &seats[0],
+        "alice",
+        Some("同意"),
+        tick(&mut t),
+    )
+    .unwrap();
+    e.finish(e.instance.revision, tick(&mut t)).unwrap();
+    let snap = e.snapshot_json().expect("snapshot");
+    serde_json::to_value(&snap).expect("snapshot is JSON");
+    assert!(snap.get("instance").is_some());
+    assert!(snap.get("branches").is_some());
+    assert!(snap.get("tasks").is_some());
+    assert!(snap.get("rounds").is_some());
+    assert_eq!(snap["instance"]["status"].as_str(), Some("completed"));
+}
+
+/// 驳回目标不在白名单：错误消息点名目标节点，且分支保持 `Open`。
+#[test]
+fn return_to_node_rejects_non_whitelisted_target() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "apply",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let err = e
+        .return_to_node(
+            e.instance.revision,
+            &b,
+            "never-visited",
+            "alice",
+            None,
+            tick(&mut t),
+        )
+        .unwrap_err();
+    let ApprovalError::InvalidArgument(msg) = &err else {
+        panic!("expected InvalidArgument, got {err:?}");
+    };
+    assert!(
+        msg.contains("never-visited"),
+        "错误消息须点名目标节点: {msg}"
+    );
+    assert_eq!(e.branches[&b].status, BranchStatus::Open);
+    assert_eq!(e.instance.jump_count, 0);
+    assert!(e.instance.returns.is_empty());
+}
+
+/// 驳回之后无 completed 根分支：`finish` 拒绝且实例保持 `Running`。
+#[test]
+fn finish_after_returned_branch_is_invalid_transition() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b1, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "apply",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    pass_branch(&mut e, &b1, "alice", &mut t);
+    assert_eq!(e.branches[&b1].status, BranchStatus::Completed);
+
+    let (b2, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.open_approval(
+        e.instance.revision,
+        &b2,
+        vec![SeatSpec::approver("bob")],
+        None,
+        tick(&mut t),
+    )
+    .unwrap();
+    let (b3, _) = e
+        .return_to_node(e.instance.revision, &b2, "apply", "bob", None, tick(&mut t))
+        .unwrap();
+    // 根分支链：b1 已作废、b2 已退回、b3 重开且 Open —— 无 completed 根分支。
+    assert_eq!(e.branches[&b1].status, BranchStatus::Superseded);
+    assert_eq!(e.branches[&b2].status, BranchStatus::Returned);
+    assert_eq!(e.branches[&b3].status, BranchStatus::Open);
+
+    let err = e.finish(e.instance.revision, tick(&mut t)).unwrap_err();
+    assert!(matches!(err, ApprovalError::InvalidTransition(_)));
+    assert_eq!(e.instance.status, InstanceStatus::Running);
+}
+
+/// 判定顺序：`AnyReject` 一票否决先于「全通过」与「耗尽」判定。
+///
+/// 3 席位 + `JoinPolicy::All`：A 通过后 `completed=1, total=3`（既不满足全通过，也未耗尽）；
+/// B 否决时，正确顺序（先一票否决）→ `Rejected`，若否决规则排在耗尽判定之后，则
+/// `completed+rejected=2 ≠ total=3` 会让轮次停在 `Open`。
+#[test]
+fn any_reject_takes_precedence_over_exhaustion_and_pass_rules() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "approve",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (r, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![
+                SeatSpec::approver("alice"),
+                SeatSpec::approver("bob"),
+                SeatSpec::approver("carol"),
+            ],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.approve(e.instance.revision, &seats[0], "alice", None, tick(&mut t))
+        .unwrap();
+    assert_eq!(e.rounds[&r].status, RoundStatus::Open);
+    assert_eq!(e.rounds[&r].completed_count, 1);
+    assert_eq!(e.tasks[&seats[2]].status, TaskStatus::Created);
+
+    let out = e
+        .reject(
+            e.instance.revision,
+            &seats[1],
+            "bob",
+            Some("不同意"),
+            tick(&mut t),
+        )
+        .unwrap();
+    assert_eq!(e.rounds[&r].status, RoundStatus::Rejected);
+    assert_eq!(e.rounds[&r].rejected_count, 1);
+    assert_eq!(e.branches[&b].status, BranchStatus::Rejected);
+    assert_eq!(e.instance.status, InstanceStatus::Rejected);
+    assert_eq!(e.tasks[&seats[2]].status, TaskStatus::Cancelled);
+    assert!(has_event(
+        &out,
+        "com.china-workflow.approval.round.rejected"
+    ));
 }
