@@ -303,6 +303,14 @@ pub struct WorkflowDefinition {
 /// 当前引擎版本 —— 实例钉死启动时的引擎版本；M2 引入 v2 后按此分派执行语义。
 pub const ENGINE_VERSION: &str = "v1";
 
+/// `definition_hash` 无法计算时的哨兵值。
+///
+/// `WorkflowDefinition` 字段均为 JSON 可表示类型，序列化在类型上不会失败；但生产代码
+/// 不得 panic（panic-path gate），不可达失败也必须走值路径。哨兵不是合法哈希（成功值为
+/// 64 位 hex），钉死比较遇到它必然判漂移（见 `definition_content_drift`）——fail-closed，
+/// 绝不静默按新语义继续。
+pub const DEFINITION_HASH_UNAVAILABLE: &str = "definition-hash-unavailable";
+
 /// 定义内容哈希 —— 规范化 JSON 的 sha256（hex）。
 ///
 /// 用于钉死实例启动时的定义内容：同 `(namespace, name, version)` 被重部署成不同内容时，
@@ -319,21 +327,20 @@ pub const ENGINE_VERSION: &str = "v1";
 pub fn definition_hash(def: &WorkflowDefinition) -> String {
     use sha2::{Digest, Sha256};
 
-    let mut value = serde_json::to_value(def).expect(
-        "WorkflowDefinition 转 serde_json::Value 不可失败：字段均为 JSON 可表示类型 \
-         （字符串/数值/bool/Option/Vec/Map），无 map key 非字符串的情形",
-    );
+    let Ok(mut value) = serde_json::to_value(def) else {
+        return DEFINITION_HASH_UNAVAILABLE.to_string();
+    };
     // 仅剔顶层部署元信息（按 key 名）；不从嵌套结构中名称相同的字段上剔。
     if let Value::Object(map) = &mut value {
         map.remove("id");
         map.remove("raw_yaml");
     }
     let canonical = canonical_json(value);
+    let Ok(bytes) = serde_json::to_vec(&canonical) else {
+        return DEFINITION_HASH_UNAVAILABLE.to_string();
+    };
     let mut hasher = Sha256::new();
-    hasher.update(
-        serde_json::to_vec(&canonical)
-            .expect("canonical_json 只构造纯 JSON Value，序列化到字节不可失败"),
-    );
+    hasher.update(bytes);
     hasher
         .finalize()
         .iter()

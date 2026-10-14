@@ -367,6 +367,10 @@ fn definition_content_drift(
 ) -> Option<(String, String)> {
     let expected = inst.definition_hash.as_ref()?;
     let actual = super::model::definition_hash(def);
+    // 哈希不可计算（类型上不可达）不得放行：按漂移 fail-closed。
+    if actual == super::model::DEFINITION_HASH_UNAVAILABLE {
+        return Some((expected.clone(), actual));
+    }
     if expected == &actual {
         None
     } else {
