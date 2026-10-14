@@ -161,7 +161,7 @@
 - Modify: `spike/2026-10/spike-4-conformance/REPORT.md`（§5「立即/短期」两项标注已落地 + 指向本测试；不改历史结论）
 
 **Interfaces:**
-- 每条语料的断言：04 → 两个 case 的 `when`/`then` 映射；05 → `branch_a`/`branch_b` 名与 tasks 非空；06 → `iteration=="item"`、`in=="${ .items }"`、循环体任务名 `process`；07 → `wait=="PT5S"`；08 → filter `type=="com.example.approved"`；09 → `type/source/data` 逐字；15 → ref + （Task 7 选定映射）。
+- 每条语料的断言：04 → 两个 case 的 `when`/`then` 映射；05 → `branch_a`/`branch_b` 名与各分支 set 载荷（`{x:1}`/`{y:2}`）；06 → `iteration=="item"`、`in=="${ .items }"`、循环体 set 载荷 `last=="${ $item }"`；07 → `wait=="PT5S"`；08 → filter `type=="com.example.approved"`；09 → `type/source/data` 逐字；15 → 仅 ref（语料冻结，`run.workflow.input` 由单测钉住）。
 - 负控制：任一 `assert_eq!` 去掉后测试必须失败（报告写明验证方式）。
 
 - [ ] **Step 1: 升级断言并先看失败**（对当前 HEAD 应有多条红——逐字段缺失）。
