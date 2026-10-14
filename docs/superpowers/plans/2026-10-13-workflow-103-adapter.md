@@ -128,11 +128,12 @@
 - Test: `validate.rs` 单测 + `spike4_conformance.rs`
 
 **Interfaces:**
-- 官方形状：`switch: [ {<case_name>: {when: "<expr>", then: "<target>|end|exit|continue"}}, ... ]` + 可选默认（`default`）⇒ 现有 `Task::Switch { conditions: [{condition, transition?}] }`：`when` → `condition`，`then` → `transition`（`end`/`exit` → END、`continue` → 下一任务、其他字符串 → 目标任务名）。
-- `when` 缺失 ⇒ 拒绝并指名 `switch.<case>.when`；`then` 缺失 ⇒ 拒绝并指名 `switch.<case>.then`。
-- 保留既有 `{condition, transition}` 形状兼容（含 M1 对官方 `then` 的 "missing transition target" 拒绝消息不再出现于该形状——由本任务改为正确映射）。
+- 官方形状：`switch: [ {<case_name>: {when: "<expr>", then: "<target>|end|exit|continue"}}, ... ]` ⇒ 现有 `Task::Switch`：`when` → `condition`，`then` → `transition`（`end`/`exit` → `"__end"` 并在需要时合成 `Task::End`；其他字符串 → 目标任务名）。保留既有 `{condition, transition}` 形状兼容。
+- 无 `when` 的 case ⇒ 映射到 `default_condition`（多个默认 case ⇒ 拒绝并指名 `switch.<case>.when`）。
+- `then: continue` ⇒ 拒绝并指名 `switch.<case>.then`（fall-through 后处理为后续项，不在本任务）。
+- `then` 缺失 ⇒ 拒绝并指名 `switch.<case>.then`；`default_condition`/条件目标必须通过引用校验；用户定义的 `__end` 若非 `Task::End` ⇒ 拒绝（保留终名）。
 
-- [ ] **Step 1: 写失败测试**：`test_switch_official_when_then_shape`（两个 case 的 condition/transition 逐字断言）；`test_switch_case_missing_when_rejected`。
+- [ ] **Step 1: 写失败测试**：`test_switch_official_when_then_shape`（两个 case 的 condition/transition 逐字断言）；`test_switch_default_case_maps_to_default_condition`；`test_switch_multiple_default_cases_rejected`。
 - [ ] **Step 2: 实现**
 - [ ] **Step 3: 回归 + 提交**。Commit: `feat(workflow): adapt official 1.0.3 switch when/then`
 
