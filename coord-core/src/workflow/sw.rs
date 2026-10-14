@@ -1492,7 +1492,7 @@ fn transition_task(state: &str, target: &str) -> NamedTask {
 }
 
 /// JSON 值 → jq 字面量表达式字符串
-fn json_to_jq_literal(v: &Value) -> String {
+pub(crate) fn json_to_jq_literal(v: &Value) -> String {
     match v {
         Value::Null => "null".into(),
         Value::Bool(b) => b.to_string(),

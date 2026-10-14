@@ -977,28 +977,63 @@ impl Validator {
 
     fn parse_set(
         &mut self,
-        _raw: &RawNamedTask,
+        raw: &RawNamedTask,
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let set_val = &map["set"];
-        let obj = set_val.as_object();
-
-        let (variable, value) = if let Some(obj) = obj {
-            (
-                obj.get("variable")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                obj.get("value")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            )
-        } else {
-            (String::new(), String::new())
+        let Some(obj) = set_val.as_object() else {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("set".to_string()),
+                message: "set must be an object of variable assignments".to_string(),
+            });
+            return None;
         };
 
-        Some(Task::Set(SetTask { variable, value }))
+        // coord 既有形状：`{variable, value}`（`value` 为 jq 表达式字符串）。
+        if let Some(variable) = obj.get("variable").and_then(Value::as_str) {
+            let value = obj
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            return Some(Task::Set(SetTask {
+                variable: variable.to_string(),
+                value,
+            }));
+        }
+
+        // 官方 1.0.3 形状：`set: {<var>: <literal-or-${expr}>}`（corpus 01/05/06）。
+        // 单键映射成单变量 SetTask；多键超出单变量模型，逐键点名 fail-closed。
+        if obj.len() == 1 {
+            let (variable, value) = obj.iter().next().expect("len == 1 guarantees an entry");
+            return Some(Task::Set(SetTask {
+                variable: variable.clone(),
+                value: official_set_value_expr(value),
+            }));
+        }
+
+        if obj.is_empty() {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("set".to_string()),
+                message: "set requires at least one variable assignment".to_string(),
+            });
+            return None;
+        }
+
+        for key in obj.keys() {
+            let construct = format!("set.{key}");
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                message: format!(
+                    "unimplemented construct '{construct}': coord set binds a single variable; \
+                     multi-key set is not representable"
+                ),
+            });
+        }
+        None
     }
 
     fn parse_raise(
@@ -1654,6 +1689,19 @@ impl Validator {
     }
 }
 
+/// 官方 1.0.3 `set` map 的 value → jq 表达式字符串。
+///
+/// 陷阱：官方 `<var>` 值既可能是 JSON 字面量，也可能是运行时表达式 `"${ ... }"`。
+/// 若把字符串字面量直接当裸标识符传下去，`set.rs` 会当作字段访问；故 JSON 字面量一律
+/// 序列化（`"hi"` → `"\"hi\""`），确保求值结果等于字面量本身。`${ ... }` 由
+/// `ExpressionEvaluator::unwrap_expression` 负责剥壳，原样透传即可。
+fn official_set_value_expr(value: &Value) -> String {
+    match value {
+        Value::String(s) if s.trim().starts_with("${") && s.trim().ends_with('}') => s.clone(),
+        other => crate::workflow::sw::json_to_jq_literal(other),
+    }
+}
+
 // ─── 便捷入口 ───
 
 /// 一步完成解析 + 校验：YAML → WorkflowDefinition
@@ -1793,6 +1841,7 @@ pub fn parse_timeout_value(v: &Value) -> Option<TimeoutConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workflow::expression::ExpressionEvaluator;
 
     // ─── 完整解析 + 校验流程测试 ───
 
@@ -2444,6 +2493,107 @@ do:
             }
             _ => panic!("expected Set task"),
         }
+    }
+
+    #[test]
+    fn test_set_official_map_numeric_literal() {
+        // 官方 1.0.3 形状 `set: {counter: 0}`（corpus 01/05）必须映射成 variable=counter、
+        // value 求值为数字 0，不得落成空 SetTask。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-num
+  version: "1.0"
+do:
+  - init:
+      set:
+        counter: 0
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official single-key set must parse");
+        let s = match &def.do_tasks[0].task {
+            Task::Set(s) => s,
+            other => panic!("expected Set task, got {other:?}"),
+        };
+        assert_eq!(s.variable, "counter");
+        let value = ExpressionEvaluator::new()
+            .evaluate(&s.value, &serde_json::json!({}))
+            .expect("evaluate set value");
+        assert_eq!(value, serde_json::json!(0));
+    }
+
+    #[test]
+    fn test_set_official_map_string_literal() {
+        // 字符串字面量必须以 JSON 形式序列化（`"hi"`），求值为字符串而非字段访问：
+        // context 里放同名 `hi` 字段，若误当字段访问会取到 "field"。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-str
+  version: "1.0"
+do:
+  - init:
+      set:
+        greeting: "hi"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official single-key set must parse");
+        let s = match &def.do_tasks[0].task {
+            Task::Set(s) => s,
+            other => panic!("expected Set task, got {other:?}"),
+        };
+        assert_eq!(s.variable, "greeting");
+        let value = ExpressionEvaluator::new()
+            .evaluate(&s.value, &serde_json::json!({"hi": "field"}))
+            .expect("evaluate set value");
+        assert_eq!(value, serde_json::json!("hi"));
+    }
+
+    #[test]
+    fn test_set_official_map_runtime_expression_passthrough() {
+        // 运行时表达式 `${ ... }` 原样透传（求值器负责剥壳），corpus 06 的 `last: "${ $item }"` 走此路。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-expr
+  version: "1.0"
+do:
+  - init:
+      set:
+        last: "${ .amount }"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official single-key set must parse");
+        let s = match &def.do_tasks[0].task {
+            Task::Set(s) => s,
+            other => panic!("expected Set task, got {other:?}"),
+        };
+        assert_eq!(s.variable, "last");
+        assert_eq!(s.value, "${ .amount }");
+        let value = ExpressionEvaluator::new()
+            .evaluate(&s.value, &serde_json::json!({"amount": 7}))
+            .expect("evaluate set value");
+        assert_eq!(value, serde_json::json!(7));
+    }
+
+    #[test]
+    fn test_set_official_multi_key_rejected_naming_key() {
+        // 多键官方 map 超出单变量 SetTask 表达面：fail-closed 点名 `set.<key>`，
+        // 绝不静默只留首键。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-multi
+  version: "1.0"
+do:
+  - init:
+      set:
+        a: 1
+        b: 2
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("multi-key official set must reject");
+        assert!(errors_naming(&errs, "set.b"), "errors: {errs:?}");
     }
 
     // ═══ 任务级标准字段 / 顶层扩展块解析（P0 全特性） ═══
