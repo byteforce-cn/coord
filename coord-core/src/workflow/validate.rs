@@ -1247,7 +1247,10 @@ impl Validator {
         // 官方 1.0.3 形状：`set: {<var>: <literal-or-${expr}>}`（corpus 01/05/06）。
         // 单键映射成单变量 SetTask；多键超出单变量模型，逐键点名 fail-closed。
         if obj.len() == 1 {
-            let (variable, value) = obj.iter().next().expect("len == 1 guarantees an entry");
+            let Some((variable, value)) = obj.iter().next() else {
+                // 不可达：`len == 1` 必有唯一键；不可达分支不得 panic（panic-path gate）。
+                return None;
+            };
             // 值里嵌了 `${ ... }`（trim 后不是单个完整 `${ ... }` 表达式）时 coord 无字符串
             // 插值/部分模板面，当字面量处理会静默丢模板语义或丢尾部——fail-closed 点名
             // `set.<key>`。`${ .a }${ .b }` 这类多段拼接也算非单段完整表达式。
