@@ -41,7 +41,7 @@ pub enum InstanceStatus {
     Terminated,
     /// 发起人撤回。
     Cancelled,
-    /// 驱动层标记的故障终态；命令路径不产生该状态。
+    /// 终态之一；命令路径不产生该状态。
     Faulted,
 }
 
@@ -85,7 +85,8 @@ pub struct Instance {
     pub root_branch_id: Option<Id>,
     /// 每次状态变更 +1；命令以它做乐观并发守卫（CAS）。
     pub revision: u64,
-    /// 驳回至节点的累计次数（防驳回循环；上限由命令层守卫）。
+    /// 驳回至节点的累计次数（防驳回循环；达到
+    /// [`MAX_JUMPS`](crate::workflow::approval::engine::MAX_JUMPS) 即拒绝再次驳回）。
     pub jump_count: u32,
     pub audit: Vec<AuditEntry>,
     pub returns: Vec<ReturnRecord>,
@@ -428,7 +429,14 @@ pub enum ApprovalError {
     InvalidTransition(String),
     NotAuthorized(String),
     InvalidArgument(String),
-    StaleRevision { expected: u64, actual: u64 },
+    StaleRevision {
+        expected: u64,
+        actual: u64,
+    },
+    /// 快照等纯序列化失败（不改变状态，调用方拿不到半份结果）。
+    ///
+    /// 生产代码里序列化失败必须走返回错误（证据快照 `snapshot_json`），不是 panic。
+    SerializationError(String),
 }
 
 impl std::fmt::Display for ApprovalError {
@@ -440,6 +448,9 @@ impl std::fmt::Display for ApprovalError {
             ApprovalError::InvalidArgument(x) => write!(f, "invalid argument: {x}"),
             ApprovalError::StaleRevision { expected, actual } => {
                 write!(f, "stale revision: expected {expected}, actual {actual}")
+            }
+            ApprovalError::SerializationError(msg) => {
+                write!(f, "serialization error: {msg}")
             }
         }
     }
@@ -759,6 +770,15 @@ mod tests {
             })
             .expect("serialize error"),
             json!({"stale_revision": {"expected": 3, "actual": 4}})
+        );
+        assert_eq!(
+            ApprovalError::SerializationError("bad snapshot".into()).to_string(),
+            "serialization error: bad snapshot"
+        );
+        assert_eq!(
+            serde_json::to_value(ApprovalError::SerializationError("bad snapshot".into()))
+                .expect("serialize error"),
+            json!({"serialization_error": "bad snapshot"})
         );
         let as_std_error: &dyn std::error::Error = &ApprovalError::InvalidArgument("id".into());
         assert_eq!(as_std_error.to_string(), "invalid argument: id");
