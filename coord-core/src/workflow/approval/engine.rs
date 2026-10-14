@@ -709,7 +709,8 @@ impl Engine {
 
     /// 强制终止（管理路径）：与 `withdraw` 相同的级联取消，实例置 `Terminated`。
     ///
-    /// 权限规则不在本模型层范围（见 Spike 1 GAPS.md Q6），由驱动/授权层把关。
+    /// 本模型层不做权限判定：只记录 `by` 与审计；授权的契约面归 M2-C（见 ADR-0013 D7）。
+    /// 缺口口径见 `spike/2026-10/spike-1-state-model/docs/GAPS.md`（Q6）。
     pub fn terminate(
         &mut self,
         expected: u64,

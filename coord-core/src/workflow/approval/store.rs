@@ -35,8 +35,12 @@ pub trait ApprovalStore: Send + Sync {
     /// CAS 提交：状态与事件同一次写入。
     ///
     /// `expected` 与当前修订号匹配 ⇒ 存储 `engine`、追加 `events`（存储侧按批次顺序
-    /// 分配 per-instance 单调 `sequence`，首条 = 已存 max + 1）、修订号 +1，返回
-    /// `Ok(true)`；不匹配 ⇒ 零写入返回 `Ok(false)`。
+    /// 分配 per-instance 单调 `sequence`）、修订号 +1，返回 `Ok(true)`；不匹配 ⇒ 零写入
+    /// 返回 `Ok(false)`；调用方构造记录时填的 `sequence` 由存储侧覆盖。
+    ///
+    /// `sequence` 的分配基准由实现决定：内存实现取已存事件的最大 `sequence` + 1；KV 实现
+    /// 取持久化的 outbox 序号计数器 `/_workflow/v3/outbox/seq/{aggregate}`（见 `coord-agent`
+    /// 的 `KvApprovalStore`），该计数器不随事件日志剪枝而回退，序号因此不会回退或重叠。
     async fn commit(
         &self,
         engine: &Engine,
