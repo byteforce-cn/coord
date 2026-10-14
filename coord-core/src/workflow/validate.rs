@@ -242,7 +242,6 @@ impl Validator {
             Value::Object(map) if map.contains_key("do") => self.parse_do(raw, map),
             Value::Object(map) if map.contains_key("switch") => self.parse_switch(raw, map),
             Value::Object(map) if map.contains_key("fork") => self.parse_fork(raw, map),
-            Value::Object(map) if map.contains_key("for") => self.parse_for_each(raw, map),
             Value::Object(map) if map.contains_key("wait") => self.parse_wait(raw, map),
             Value::Object(map) if map.contains_key("listen") => self.parse_listen(raw, map),
             Value::Object(map) if map.contains_key("emit") => self.parse_emit(raw, map),
@@ -520,10 +519,23 @@ impl Validator {
             return None;
         };
 
+        // `for.at`（集合路径表达式）是官方 schema 字段，coord 未实现；即使与 each/in 同现
+        // 也不能静默忽略，否则 at 指向的集合被丢弃、迭代语义错位。
+        if obj.contains_key("at") {
+            self.reject_for_field("for.at", raw.span);
+            return None;
+        }
+
         // 官方 1.0.3 形状 `for: {each, in}`，循环体是与 `for` 同级的 `do`；legacy 形状
         // `for: {input, iteration, do|tasks}`。出现 each/in 即按官方形状严格校验，缺项点名，
-        // 不回退默认值静默丢失迭代语义。
+        // 不回退默认值静默丢失迭代语义。既无官方键也无 legacy 键的对象（含 `for: {}`）无
+        // 迭代来源，fail-closed 而非伪造 `iteration="item"`/`input=""`。
         let official = obj.contains_key("each") || obj.contains_key("in");
+        let legacy = obj.contains_key("input") || obj.contains_key("iteration");
+        if !official && !legacy {
+            self.reject_for_field("for.in", raw.span);
+            return None;
+        }
         let (iteration, input) = if official {
             let Some(each) = obj.get("each").and_then(Value::as_str) else {
                 self.reject_for_field("for.each", raw.span);
@@ -1056,11 +1068,12 @@ impl Validator {
         // 单键映射成单变量 SetTask；多键超出单变量模型，逐键点名 fail-closed。
         if obj.len() == 1 {
             let (variable, value) = obj.iter().next().expect("len == 1 guarantees an entry");
-            // 值里嵌了 `${ ... }`（trim 后不以 `${` 开头）时 coord 无字符串插值面，
-            // 当字面量处理会静默丢模板语义——fail-closed 点名 `set.<key>`。
+            // 值里嵌了 `${ ... }`（trim 后不是完整的 `${ ... }`）时 coord 无字符串插值/
+            // 部分模板面，当字面量处理会静默丢模板语义或丢尾部——fail-closed 点名 `set.<key>`。
             if let Value::String(s) = value {
                 let trimmed = s.trim();
-                if trimmed.contains("${") && !trimmed.starts_with("${") {
+                let is_full_expr = trimmed.starts_with("${") && trimmed.ends_with('}');
+                if trimmed.contains("${") && !is_full_expr {
                     let construct = format!("set.{variable}");
                     self.errors.push(ValidationError {
                         span: Some(raw.span),
@@ -1390,6 +1403,9 @@ impl Validator {
                 Task::Do(do_task) => {
                     self.check_task_refs(&do_task.tasks);
                 }
+                Task::ForEach(fe) => {
+                    self.check_task_refs(&fe.tasks);
+                }
                 Task::TryCatch(tc) => {
                     self.check_task_refs(&tc.r#try);
                     for clause in &tc.catch {
@@ -1426,6 +1442,9 @@ impl Validator {
                 }
                 Task::Do(do_task) => {
                     self.check_function_refs(&do_task.tasks);
+                }
+                Task::ForEach(fe) => {
+                    self.check_function_refs(&fe.tasks);
                 }
                 Task::TryCatch(tc) => {
                     self.check_function_refs(&tc.r#try);
@@ -2547,6 +2566,184 @@ do:
     }
 
     #[test]
+    fn test_for_missing_in_rejected() {
+        // 官方形状缺 `in`：fail-closed 点名 `for.in`，不回退空 input。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-missing-in
+  version: "1.0"
+do:
+  - loop:
+      for:
+        each: item
+      do:
+        - process:
+            call: http
+            with:
+              method: GET
+              endpoint: "https://api/process"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("missing for.in must reject");
+        assert!(errors_naming(&errs, "for.in"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_for_missing_body_rejected() {
+        // 官方形状缺循环体 `do`：fail-closed 点名 `for.do`，不得产出空迭代。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-missing-body
+  version: "1.0"
+do:
+  - loop:
+      for:
+        each: item
+        in: "${ .items }"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("missing for.do must reject");
+        assert!(errors_naming(&errs, "for.do"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_for_non_object_rejected() {
+        // 非对象 `for`：fail-closed 点名 `for`，不得静默丢掉整个任务。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-non-object
+  version: "1.0"
+do:
+  - loop:
+      for: "${ .items }"
+      do:
+        - process:
+            call: http
+            with:
+              method: GET
+              endpoint: "https://api/process"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("non-object for must reject");
+        assert!(errors_naming(&errs, "for"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_for_empty_object_rejected() {
+        // `for: {}` + 同级 `do`：既无官方键也无 legacy 键，不得伪造 `iteration="item"`
+        // / `input=""`，fail-closed 点名 `for.in`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-empty-object
+  version: "1.0"
+do:
+  - loop:
+      for: {}
+      do:
+        - process:
+            call: http
+            with:
+              method: GET
+              endpoint: "https://api/process"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("empty for object must reject");
+        assert!(errors_naming(&errs, "for.in"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_for_at_rejected() {
+        // 官方 schema 的 `for.at`（集合路径）coord 未实现：fail-closed 点名 `for.at`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-at
+  version: "1.0"
+do:
+  - loop:
+      for:
+        each: item
+        at: "${ .items }"
+      do:
+        - process:
+            call: http
+            with:
+              method: GET
+              endpoint: "https://api/process"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("for.at must reject");
+        assert!(errors_naming(&errs, "for.at"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_for_body_unknown_function_rejected() {
+        // 优先级改动后 for 体不再当 Do；未知函数引用校验必须递归进 ForEach.tasks。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-body-fn
+  version: "1.0"
+do:
+  - loop:
+      for:
+        each: item
+        in: "${ .items }"
+      do:
+        - process:
+            call: myFunction
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("unknown fn in for body must reject");
+        assert!(
+            errs.iter().any(|e| e.message.contains("myFunction")),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_for_body_invalid_transition_rejected() {
+        // 同上：for 体内 switch 的未知跳转目标必须递归校验（UnknownTaskReference）。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-body-transition
+  version: "1.0"
+do:
+  - loop:
+      for:
+        each: item
+        in: "${ .items }"
+      do:
+        - branch:
+            switch:
+              - condition: "${ .x > 0 }"
+                transition: nowhere
+"#;
+
+        let errs =
+            parse_and_validate_yaml(yaml).expect_err("unknown transition in for body must reject");
+        assert!(
+            errs.iter().any(|e| matches!(
+                e.kind,
+                ValidationErrorKind::UnknownTaskReference(ref n) if n == "nowhere"
+            )),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
     fn test_detect_cyclic_dependency() {
         let yaml = r#"
 document:
@@ -2739,6 +2936,27 @@ do:
 "#;
 
         let errs = parse_and_validate_yaml(yaml).expect_err("embedded set expression must reject");
+        assert!(errors_naming(&errs, "set.greeting"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_set_official_unbalanced_expression_rejected() {
+        // 以 `${` 开头但未以 `}` 结尾：求值器不会当模板表达式剥壳，`"${ .x } tail"` 会
+        // 被当作字面量、表达式静默不求值——fail-closed 点名 `set.<key>`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-unbalanced
+  version: "1.0"
+do:
+  - init:
+      set:
+        greeting: "${ .name } tail"
+"#;
+
+        let errs =
+            parse_and_validate_yaml(yaml).expect_err("unbalanced set expression must reject");
         assert!(errors_naming(&errs, "set.greeting"), "errors: {errs:?}");
     }
 
