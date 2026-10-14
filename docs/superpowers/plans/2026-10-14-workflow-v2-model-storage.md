@@ -131,8 +131,8 @@
 **Interfaces:**
 - Consumes: Task 2 的 `Engine`/`StartSpec`/`ApprovalError`。
 - Produces（逐字移植，签名与 spike 一致）：
-  - `pub fn transfer(&mut self, expected: u64, task_id: &str, by: &str, to: &str, now: i64) -> Result<Vec<Effect>, ApprovalError>`
-  - `pub fn delegate(&mut self, expected: u64, task_id: &str, by: &str, to: &str, now: i64) -> Result<Vec<Effect>, ApprovalError>`
+  - `pub fn transfer(&mut self, expected: u64, task_id: &str, to: &str, by: &str, now: i64) -> Result<Vec<Effect>, ApprovalError>`
+  - `pub fn delegate(&mut self, expected: u64, task_id: &str, to: &str, by: &str, now: i64) -> Result<Vec<Effect>, ApprovalError>`
   - `pub fn return_to_node(&mut self, expected: u64, branch_id: &str, target_node: &str, by: &str, comment: Option<&str>, now: i64) -> Result<(Id, Vec<Effect>), ApprovalError>`
   - `pub fn withdraw(&mut self, expected: u64, by: &str, now: i64) -> Result<Vec<Effect>, ApprovalError>`
   - `pub fn terminate(&mut self, expected: u64, by: &str, reason: &str, now: i64) -> Result<Vec<Effect>, ApprovalError>`
