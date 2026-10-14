@@ -178,3 +178,19 @@ fn fork_official_branch_map_maps_branches() {
         other => panic!("corpus 05: expected Fork task, got {other:?}"),
     }
 }
+
+#[test]
+fn for_official_each_in_maps_iteration() {
+    // 06：官方 `for: {each, in}` 的迭代语义必须接线：iteration 取 each、input 取 in、
+    // tasks 取与 `for` 同级的 `do`；不得再把循环体当顺序任务、丢掉迭代（Spike 4 误读之一）。
+    let def = parse_corpus("06-for.yaml").expect("corpus 06 must parse OK");
+    match &def.do_tasks[0].task {
+        Task::ForEach(fe) => {
+            assert_eq!(fe.iteration, "item");
+            assert_eq!(fe.input, "${ .items }");
+            assert_eq!(fe.tasks.len(), 1);
+            assert_eq!(fe.tasks[0].name, "process");
+        }
+        other => panic!("corpus 06: expected ForEach task, got {other:?}"),
+    }
+}

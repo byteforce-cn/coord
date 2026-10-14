@@ -236,6 +236,9 @@ impl Validator {
     fn resolve_task(&mut self, raw: &RawNamedTask) -> Option<Task> {
         match &raw.body {
             Value::Object(map) if map.contains_key("call") => self.parse_call(raw, map),
+            // `for` 必须先于裸 `do` 分类：官方 1.0.3 循环体 `do` 与 `for` 同级，若先命中
+            // `do` 会把循环体当顺序任务、静默丢掉迭代语义（Spike 4 corpus 06）。
+            Value::Object(map) if map.contains_key("for") => self.parse_for_each(raw, map),
             Value::Object(map) if map.contains_key("do") => self.parse_do(raw, map),
             Value::Object(map) if map.contains_key("switch") => self.parse_switch(raw, map),
             Value::Object(map) if map.contains_key("fork") => self.parse_fork(raw, map),
@@ -506,31 +509,77 @@ impl Validator {
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let for_val = &map["for"];
-        let obj = for_val.as_object()?;
-
-        let input = obj
-            .get("input")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let iteration = obj
-            .get("iteration")
-            .and_then(|v| v.as_str())
-            .unwrap_or("item")
-            .to_string();
-        let tasks = if let Some(do_val) = obj.get("do") {
-            self.parse_sub_tasks(do_val, raw.span)
-        } else if let Some(tasks_val) = obj.get("tasks") {
-            self.parse_sub_tasks(tasks_val, raw.span)
-        } else {
-            Vec::new()
+        let Some(obj) = for_val.as_object() else {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("for".to_string()),
+                message: "unimplemented construct 'for': 'for' must be an object with \
+                          'each'/'in' (official) or 'input'/'iteration' (legacy)"
+                    .to_string(),
+            });
+            return None;
         };
+
+        // 官方 1.0.3 形状 `for: {each, in}`，循环体是与 `for` 同级的 `do`；legacy 形状
+        // `for: {input, iteration, do|tasks}`。出现 each/in 即按官方形状严格校验，缺项点名，
+        // 不回退默认值静默丢失迭代语义。
+        let official = obj.contains_key("each") || obj.contains_key("in");
+        let (iteration, input) = if official {
+            let Some(each) = obj.get("each").and_then(Value::as_str) else {
+                self.reject_for_field("for.each", raw.span);
+                return None;
+            };
+            let Some(input) = obj.get("in").and_then(Value::as_str) else {
+                self.reject_for_field("for.in", raw.span);
+                return None;
+            };
+            (each.to_string(), input.to_string())
+        } else {
+            (
+                obj.get("iteration")
+                    .and_then(Value::as_str)
+                    .unwrap_or("item")
+                    .to_string(),
+                obj.get("input")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        };
+
+        // 循环体：官方在 `for` 同级，legacy 在 `for` 内（`do`/`tasks`）。
+        let body = map
+            .get("do")
+            .or_else(|| obj.get("do"))
+            .or_else(|| obj.get("tasks"));
+        let Some(body) = body else {
+            self.reject_for_field("for.do", raw.span);
+            return None;
+        };
+        let tasks = self.parse_sub_tasks(body, raw.span);
+        // 空循环体等于跑零次迭代——字段在场却无语义，fail-closed 而非静默接受。
+        if tasks.is_empty() {
+            self.reject_for_field("for.do", raw.span);
+            return None;
+        }
 
         Some(Task::ForEach(ForEachTask {
             input,
             iteration,
             tasks,
         }))
+    }
+
+    /// `for` 形状缺项 fail-closed：点名构造，绝不回退默认值。
+    fn reject_for_field(&mut self, construct: &str, span: Span) {
+        self.errors.push(ValidationError {
+            span: Some(span),
+            kind: ValidationErrorKind::UnsupportedConstruct(construct.to_string()),
+            message: format!(
+                "unimplemented construct '{construct}': coord for-each requires this field \
+                 (official shape: for.each / for.in / sibling for.do)"
+            ),
+        });
     }
 
     fn parse_wait(
@@ -1007,6 +1056,23 @@ impl Validator {
         // 单键映射成单变量 SetTask；多键超出单变量模型，逐键点名 fail-closed。
         if obj.len() == 1 {
             let (variable, value) = obj.iter().next().expect("len == 1 guarantees an entry");
+            // 值里嵌了 `${ ... }`（trim 后不以 `${` 开头）时 coord 无字符串插值面，
+            // 当字面量处理会静默丢模板语义——fail-closed 点名 `set.<key>`。
+            if let Value::String(s) = value {
+                let trimmed = s.trim();
+                if trimmed.contains("${") && !trimmed.starts_with("${") {
+                    let construct = format!("set.{variable}");
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                        message: format!(
+                            "unimplemented construct '{construct}': coord set has no string \
+                             interpolation; embedded '${{...}}' would be dropped as a literal"
+                        ),
+                    });
+                    return None;
+                }
+            }
             return Some(Task::Set(SetTask {
                 variable: variable.clone(),
                 value: official_set_value_expr(value),
@@ -2421,6 +2487,66 @@ do:
     }
 
     #[test]
+    fn test_for_official_each_in_with_sibling_do() {
+        // 官方 1.0.3 形状（corpus 06）：`for: {each, in}` 且循环体 `do` 与 `for` 同级。
+        // `each` → iteration、`in` → input、同级 `do` → 循环体任务，逐字映射，不得回退默认值。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for
+  version: "1.0"
+do:
+  - loop:
+      for:
+        each: item
+        in: "${ .items }"
+      do:
+        - process:
+            call: http
+            with:
+              method: POST
+              endpoint: "https://api/process"
+"#;
+
+        let def = parse_and_validate_yaml(yaml).expect("official for-each must parse");
+        match &def.do_tasks[0].task {
+            Task::ForEach(fe) => {
+                assert_eq!(fe.iteration, "item");
+                assert_eq!(fe.input, "${ .items }");
+                assert_eq!(fe.tasks.len(), 1);
+                assert_eq!(fe.tasks[0].name, "process");
+            }
+            other => panic!("expected ForEach task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_for_missing_each_rejected() {
+        // 官方形状缺 `each`：fail-closed 点名 `for.each`，不得静默用默认变量名。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-missing-each
+  version: "1.0"
+do:
+  - loop:
+      for:
+        in: "${ .items }"
+      do:
+        - process:
+            call: http
+            with:
+              method: GET
+              endpoint: "https://api/process"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("missing for.each must reject");
+        assert!(errors_naming(&errs, "for.each"), "errors: {errs:?}");
+    }
+
+    #[test]
     fn test_detect_cyclic_dependency() {
         let yaml = r#"
 document:
@@ -2594,6 +2720,26 @@ do:
 "#;
         let errs = parse_and_validate_yaml(yaml).expect_err("multi-key official set must reject");
         assert!(errors_naming(&errs, "set.b"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_set_official_embedded_expression_rejected() {
+        // 官方 map 值里嵌了 `${ ... }`（trim 后不以 `${` 开头）：coord set 无字符串插值面，
+        // 当字面量处理会静默丢掉模板语义，fail-closed 点名 `set.<key>`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-embedded
+  version: "1.0"
+do:
+  - init:
+      set:
+        greeting: "hello ${ .name }"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("embedded set expression must reject");
+        assert!(errors_naming(&errs, "set.greeting"), "errors: {errs:?}");
     }
 
     // ═══ 任务级标准字段 / 顶层扩展块解析（P0 全特性） ═══
