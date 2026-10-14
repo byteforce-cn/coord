@@ -10,4 +10,6 @@ do:
           namespace: spike
           name: child-workflow
           version: "1.0.0"
+          input:
+            orderId: 42
       then: exit

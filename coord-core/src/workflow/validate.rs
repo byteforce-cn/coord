@@ -33,16 +33,22 @@ use super::parser::{
 /// 含 `when`/`then`。按字段集而非排除键名判定，使 case 名恰为 `condition` 等 legacy 键名时
 /// 仍按官方形状解析；legacy `{condition, transition}` 的值为字符串，不会命中。
 fn official_switch_case(cond: &Value) -> Option<(&str, &serde_json::Map<String, Value>)> {
+    let (name, case_obj) = single_key_object_case(cond)?;
+    if !case_obj.contains_key("when") && !case_obj.contains_key("then") {
+        return None;
+    }
+    Some((name, case_obj))
+}
+
+/// 单键对象 + 对象 case 体的形状判定：官方 case 的公共外壳（无论是否含 `when`/`then`）。
+/// legacy 项的值均为字符串（`condition`/`transition`/`defaultCondition`），不会命中。
+fn single_key_object_case(cond: &Value) -> Option<(&str, &serde_json::Map<String, Value>)> {
     let obj = cond.as_object()?;
     if obj.len() != 1 {
         return None;
     }
     let (name, body) = obj.iter().next()?;
-    let case_obj = body.as_object()?;
-    if !case_obj.contains_key("when") && !case_obj.contains_key("then") {
-        return None;
-    }
-    Some((name.as_str(), case_obj))
+    Some((name.as_str(), body.as_object()?))
 }
 
 /// 语义校验器
@@ -398,7 +404,7 @@ impl Validator {
 
         let mut conditions = Vec::new();
         let mut default_condition: Option<SwitchCondition> = None;
-        for item in arr {
+        for (index, item) in arr.iter().enumerate() {
             if let Some((case_name, case_obj)) = official_switch_case(item) {
                 // 官方 1.0.3 case：`when` 可选（缺失即默认 case），`then` 必需。
                 if let Some(cond) = self.parse_official_switch_case(case_name, case_obj, raw.span) {
@@ -414,9 +420,23 @@ impl Validator {
                         self.reject_switch_field(case_name, "when", raw.span);
                     }
                 }
+            } else if let Some((case_name, _)) = single_key_object_case(item) {
+                // 官方单键 case 体是对象但缺 `when`/`then`（如 `{high: {}}`）：不得回退 legacy
+                // 报「缺 transition」，fail-closed 点名 `switch.<case>.then`。
+                self.reject_switch_field(case_name, "then", raw.span);
             } else if let Some(cond) = self.parse_switch_condition(item, raw.span) {
                 // legacy `{condition, transition}` / `{defaultCondition}` 形状保持兼容。
                 conditions.push(cond);
+            } else if !item.is_object() {
+                // `switch: ["foo"]` 非对象项：legacy 路径会静默丢弃 → fail-closed 点名 `switch[i]`。
+                let construct = format!("switch[{index}]");
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                    message: format!(
+                        "unimplemented construct '{construct}': each switch item must be an object"
+                    ),
+                });
             }
         }
 
@@ -1329,9 +1349,9 @@ impl Validator {
     ) -> Option<Task> {
         let run_val = &map["run"];
 
-        let workflow = if let Some(s) = run_val.as_str() {
+        let (workflow, nested_input) = if let Some(s) = run_val.as_str() {
             // 简写: "namespace::name@version"
-            Self::parse_workflow_ref_short(s)
+            (Self::parse_workflow_ref_short(s), None)
         } else if let Some(obj) = run_val.as_object() {
             // coord 只实现 `run.workflow`（子流程调用）。`run.script|container|shell`
             // 无执行面，`run.await|return` 无可表达的时序/输出语义；raw 值若原样
@@ -1366,11 +1386,17 @@ impl Validator {
                     .unwrap_or("")
                     .to_string()
             };
-            WorkflowRef {
-                namespace: pick("namespace"),
-                name: pick("name"),
-                version: pick("version"),
-            }
+            // 子流程入参嵌在 `run.workflow.input`：与 ref 同处嵌套层，不得只读任务级
+            // `input` 而丢弃（Spike 4 误读）。
+            let nested_input = nested.and_then(|n| n.get("input")).cloned();
+            (
+                WorkflowRef {
+                    namespace: pick("namespace"),
+                    name: pick("name"),
+                    version: pick("version"),
+                },
+                nested_input,
+            )
         } else {
             self.errors.push(ValidationError {
                 span: Some(raw.span),
@@ -1391,7 +1417,9 @@ impl Validator {
             return None;
         }
 
-        let input = map.get("input").cloned();
+        // 子流程输入：官方嵌于 `run.workflow.input`（nested_input），旧方言放在任务级
+        // `input`。嵌套优先、缺失回退扁平键，绝不静默丢弃。
+        let input = nested_input.or_else(|| map.get("input").cloned());
         Some(Task::Run(RunTask { workflow, input }))
     }
 
@@ -1587,19 +1615,24 @@ impl Validator {
 
     /// 循环依赖检测：switch transition 不能形成环
     fn check_cycles(&mut self, tasks: &[NamedTask]) {
-        // 构建 transition 图
+        // 构建 transition 图。`condition` 为 None 的 legacy defaultCondition 与官方 when-less
+        // case 提升出的 `default_condition` 同样是运行期 Goto 目标，必须计入：运行期无步数预算，
+        // 自环会无限循环。Goto 目标只解析顶层任务（runtime `find_task_index`），故此图只含顶层
+        // 节点；嵌套 switch 的名字无法成为合法目标（引用校验只认顶层 task_names），不会成环。
         let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
         for task in tasks {
             if let Task::Switch(switch) = &task.task {
-                for cond in &switch.conditions {
-                    if cond.condition.is_none() {
-                        continue; // defaultCondition 不形成边
-                    }
-                    edges
-                        .entry(task.name.as_str())
-                        .or_default()
-                        .push(cond.transition.as_str());
-                }
+                let targets = switch
+                    .conditions
+                    .iter()
+                    .map(|c| c.transition.as_str())
+                    .chain(
+                        switch
+                            .default_condition
+                            .iter()
+                            .map(|c| c.transition.as_str()),
+                    );
+                edges.entry(task.name.as_str()).or_default().extend(targets);
             }
         }
 
@@ -2430,6 +2463,70 @@ do:
             }
             other => panic!("expected Switch task, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_switch_default_case_self_reference_rejected() {
+        // 官方 when-less case（default）映射到 default_condition，同样是运行期 Goto 目标：
+        // 自环会让运行期无限循环（运行期无步数预算），必须计入环检测并 fail-closed 拒绝。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: switch-default-self-loop
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - default:
+            then: route
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("self-referential default must reject");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e.kind, ValidationErrorKind::CyclicDependency(_))),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_switch_non_object_item_rejected() {
+        // `switch: ["foo"]` 非对象项：legacy 路径静默丢弃 → fail-closed 点名 `switch[0]`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: switch-non-object-item
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - "foo"
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("non-object switch item must reject");
+        assert!(error_kind_naming(&errs, "switch[0]"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_switch_case_missing_when_and_then_rejected() {
+        // 官方单键 case 体缺 `when`/`then`（`{high: {}}`）：曾回退 legacy 报「缺 transition」，
+        // 现 fail-closed 点名 `switch.high.then`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: switch-case-empty-body
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - high: {}
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("empty official case body must reject");
+        assert!(
+            error_kind_naming(&errs, "switch.high.then"),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
@@ -4249,6 +4346,36 @@ do:
             errs.iter().any(|e| e.message.contains("run.workflow")),
             "errors: {errs:?}"
         );
+    }
+
+    #[test]
+    fn test_run_workflow_nested_input_preserved() {
+        // 官方把子流程输入嵌在 `run.workflow.input`：必须落到 RunTask.input（子流程的入参槽），
+        // 不得只取任务级 `input` 而静默丢弃嵌套载荷（Spike 4 误读之一）。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: run-workflow-input
+  version: "1.0"
+do:
+  - sub:
+      run:
+        workflow:
+          namespace: other
+          name: child
+          version: "1.0"
+          input:
+            orderId: 42
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("nested run.workflow.input must parse");
+        match &def.do_tasks[0].task {
+            Task::Run(run) => {
+                assert_eq!(run.workflow.name, "child");
+                assert_eq!(run.input, Some(serde_json::json!({ "orderId": 42 })));
+            }
+            other => panic!("expected Run task, got {other:?}"),
+        }
     }
 
     #[test]
