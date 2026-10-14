@@ -41,7 +41,7 @@
 **Interfaces:**
 - Produces: `WaitTask.wait` 统一为 ISO8601 时长字符串（现有执行器消费形态）。
 - 映射：`wait: "PT5S"`（字符串）原样；`wait: {seconds: N}` → `PT{N}S`；`{milliseconds: N}` → 毫秒时长。`until` 不是官方 1.0.3 `duration` 字段（`duration` 只含 `days/hours/minutes/seconds/milliseconds`）；作为未知键拒绝并指名 `wait.until`（fail-closed，不静默）。
-- 未知键（如 `{minutes: …}` 非规范键）：拒绝并指名 `wait.<key>`。
+- 未知键（不在 `days/hours/minutes/seconds/milliseconds` 内）：拒绝并指名 `wait.<key>`。
 
 - [ ] **Step 1: 写失败测试**
 
