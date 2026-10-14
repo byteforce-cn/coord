@@ -5,11 +5,13 @@
 # 或者折中：只保留行号回溯，不要完整变量调试信息（体积减少约 30%）
 # debug = 1
 
+# crates.io 稀疏索引镜像（CI 与开发机共用）。选 rsproxy：持续同步全部版本，
+# 含最新安全修复（如 rustls 0.23.46）；与开发机用户级镜像同名同源，避免重复定义。
 [source.crates-io]
-replace-with = 'mirror'
+replace-with = 'rsproxy-sparse'
 
-[source.mirror]
-registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
 
-[registries.mirror]
-index = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
+[registries.rsproxy-sparse]
+index = "sparse+https://rsproxy.cn/index/"
