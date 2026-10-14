@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust（coord-core / coord-agent）、serde/serde_json、async-trait、coord-server KV Txn（mod_revision CAS）。
 
-**Spec:** `docs/adr/0013-workflow-approval-v2.md` D1/D2/D3/D8（本计划固化 D8 的具体键布局）；语义与字段清单 `spike/2026-10/spike-1-state-model/docs/MODEL.md`、`docs/TRANSITIONS.md`；缺口口径 `docs/GAPS.md`。证据原型 `spike/2026-10/spike-1-state-model/crate/`。
+**Spec:** `docs/adr/0013-workflow-approval-v2.md` D1/D2/D3/D8（本计划固化 D8 的具体键布局）；语义与字段清单 `spike/2026-10/spike-1-state-model/docs/MODEL.md`、`spike/2026-10/spike-1-state-model/docs/TRANSITIONS.md`；缺口口径 `spike/2026-10/spike-1-state-model/docs/GAPS.md`。证据原型 `spike/2026-10/spike-1-state-model/crate/`。
 
 **Base:** 分支 `feat/workflow-v2-model`，基线 `feat/workflow-103-adapter@a12c8ea`（M2-A 已收口，stack 在 PR #71 之上）。
 
@@ -26,7 +26,7 @@
 
 ## 移植规则（Task 1–3 共用，评审逐条核对）
 
-1. **语义逐字**：状态转换、判定顺序、错误分类、审计字段与 `docs/TRANSITIONS.md` §1–§3 完全一致；不得"顺手简化"或调整判定优先级。
+1. **语义逐字**：状态转换、判定顺序、错误分类、审计字段与 `spike/2026-10/spike-1-state-model/docs/TRANSITIONS.md` §1–§3 完全一致；不得"顺手简化"或调整判定优先级。
 2. **文件映射**：`crate/src/model.rs` → `approval/model.rs`；`crate/src/engine.rs` → `approval/engine.rs`；`crate/tests/scenarios.rs` → `coord-core/tests/approval_scenarios.rs`（公开 API 集成测试）。
 3. **命名**：`Error` → `ApprovalError`（避免与 `coord_core::workflow::errors` 混淆）；其余类型/字段/方法名逐字保留（含 `Effect` 的 serde tag 形状）。
 4. **可持久化**：`Engine` 增 `Serialize/Deserialize`；`seq` 与 `node_attempts` 必须随聚合持久化（重载后 ID 不重复、attempt 不倒退）。
