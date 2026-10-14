@@ -398,7 +398,7 @@ pub fn parse_cncf_sw(input: &str) -> Result<WorkflowDefinition, String> {
 // ─── 转换 ───
 
 /// 终端任务保留名（SW 状态不得占用）
-const END_TASK: &str = "__end";
+pub(crate) const END_TASK: &str = "__end";
 
 fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
     // ── 1. 基础校验 ──

@@ -103,9 +103,32 @@ fn matrix_gap_files_still_rejected() {
 }
 
 #[test]
-fn official_switch_then_fail_closed() {
-    // 04：官方 case 形状 {caseName: {when, then}}；保留拒绝并点名被忽略的 `then`
-    assert_rejected_naming("04-switch.yaml", "then");
+fn official_switch_when_then_shape_maps() {
+    // 04：官方 case 形状 {caseName: {when, then}} 映射为 {condition, transition}；
+    // `then: exit` → 终端任务 `__end`（逐字段断言升级由 Task 8 负责）。
+    let def = parse_corpus("04-switch.yaml").expect("corpus 04 must parse OK");
+    match &def.do_tasks[0].task {
+        Task::Switch(s) => {
+            assert_eq!(s.conditions.len(), 2);
+            assert_eq!(
+                s.conditions[0].condition.as_deref(),
+                Some("${ .counter > 10 }")
+            );
+            assert_eq!(s.conditions[0].transition, "__end");
+            assert_eq!(
+                s.conditions[1].condition.as_deref(),
+                Some("${ .counter <= 10 }")
+            );
+            assert_eq!(s.conditions[1].transition, "__end");
+        }
+        other => panic!("corpus 04: expected Switch task, got {other:?}"),
+    }
+    assert!(
+        def.do_tasks
+            .iter()
+            .any(|t| t.name == "__end" && matches!(&t.task, Task::End(_))),
+        "then: exit must synthesize the __end terminal task"
+    );
 }
 
 #[test]

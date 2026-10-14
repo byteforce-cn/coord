@@ -29,6 +29,23 @@ use super::parser::{
 
 // ─── 校验器 ───
 
+/// 官方 1.0.3 switch case 形状判定：`{<case_name>: {when?, then}}` —— 单键对象且值为对象。
+/// legacy `{condition, transition}` / `{defaultCondition}` 的值均为字符串，不会命中。
+fn official_switch_case(cond: &Value) -> Option<(&str, &serde_json::Map<String, Value>)> {
+    let obj = cond.as_object()?;
+    if obj.len() != 1 {
+        return None;
+    }
+    let (name, body) = obj.iter().next()?;
+    if matches!(
+        name.as_str(),
+        "condition" | "transition" | "defaultCondition"
+    ) {
+        return None;
+    }
+    Some((name.as_str(), body.as_object()?))
+}
+
 /// 语义校验器
 pub struct Validator {
     errors: Vec<ValidationError>,
@@ -38,6 +55,8 @@ pub struct Validator {
     function_names: HashSet<String>,
     /// use.retries 已解析映射（任务级 `retry: <name>` 引用解析）
     retry_refs: HashMap<String, RetryPolicy>,
+    /// 官方 switch case `then: end|exit` 命中：需确保定义中存在终端任务 `__end`
+    needs_end: bool,
 }
 
 impl Validator {
@@ -48,6 +67,7 @@ impl Validator {
             task_names: HashSet::new(),
             function_names: HashSet::new(),
             retry_refs: HashMap::new(),
+            needs_end: false,
         };
 
         // 预先收集 function 名
@@ -103,6 +123,15 @@ impl Validator {
         }
 
         // Step 4: 校验 switch transition 引用完整性
+        // 官方 switch case `then: end|exit` 映射为终端任务 `__end`：用户未定义时补一个
+        // Task::End，保证引用校验与运行期跳转都能解析（与 sw.rs 的终端约定同一个保留名）。
+        if v.needs_end && !v.task_names.contains(super::sw::END_TASK) {
+            named_tasks.push(NamedTask {
+                name: super::sw::END_TASK.to_string(),
+                task: Task::End(EndTask {}),
+            });
+            v.task_names.insert(super::sw::END_TASK.to_string());
+        }
         v.check_task_refs(&named_tasks);
 
         // Step 5: 校验 use.functions 引用
@@ -338,11 +367,8 @@ impl Validator {
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let switch_val = &map["switch"];
-        let conditions = match switch_val {
-            Value::Array(arr) => arr
-                .iter()
-                .filter_map(|cond| self.parse_switch_condition(cond, raw.span))
-                .collect(),
+        let arr = match switch_val {
+            Value::Array(arr) => arr,
             _ => {
                 self.errors.push(ValidationError {
                     span: Some(raw.span),
@@ -353,10 +379,96 @@ impl Validator {
             }
         };
 
+        let mut conditions = Vec::new();
+        let mut default_condition: Option<SwitchCondition> = None;
+        for item in arr {
+            if let Some((case_name, case_obj)) = official_switch_case(item) {
+                // 官方 1.0.3 case：`when` 可选（缺失即默认 case），`then` 必需。
+                if let Some(cond) = self.parse_official_switch_case(case_name, case_obj, raw.span) {
+                    if cond.condition.is_some() {
+                        conditions.push(cond);
+                    } else if default_condition.is_none() {
+                        default_condition = Some(cond);
+                    } else {
+                        // default 只能有一个：多个无 `when` case fail-closed 点名冲突项。
+                        self.reject_switch_field(case_name, "when", raw.span);
+                    }
+                }
+            } else if let Some(cond) = self.parse_switch_condition(item, raw.span) {
+                // legacy `{condition, transition}` / `{defaultCondition}` 形状保持兼容。
+                conditions.push(cond);
+            }
+        }
+
         Some(Task::Switch(SwitchTask {
             conditions,
-            default_condition: None, // defaultCondition 在 conditions 数组中
+            default_condition,
         }))
+    }
+
+    /// 官方 1.0.3 case 形状：`when`（可选）→ condition、`then`（必需，flowDirective）→ transition。
+    /// `then: end|exit` 映射到终端任务 `__end`；`then: continue`（do 列表 fall-through）coord 在
+    /// 不改执行器的前提下无法表达，fail-closed 拒绝并点名 `switch.<case>.then`。
+    fn parse_official_switch_case(
+        &mut self,
+        case_name: &str,
+        case_obj: &serde_json::Map<String, Value>,
+        span: Span,
+    ) -> Option<SwitchCondition> {
+        // 未知键（schema unevaluatedProperties: false）不得静默丢弃。
+        for key in case_obj.keys() {
+            if key != "when" && key != "then" {
+                self.reject_switch_field(case_name, key, span);
+                return None;
+            }
+        }
+        let condition = match case_obj.get("when") {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(_) => {
+                self.reject_switch_field(case_name, "when", span);
+                return None;
+            }
+            None => None,
+        };
+        let Some(then) = case_obj.get("then").and_then(Value::as_str) else {
+            self.reject_switch_field(case_name, "then", span);
+            return None;
+        };
+        let transition = match then {
+            "end" | "exit" => {
+                self.needs_end = true;
+                super::sw::END_TASK.to_string()
+            }
+            "continue" => {
+                self.errors.push(ValidationError {
+                    span: Some(span),
+                    kind: ValidationErrorKind::UnsupportedConstruct(format!(
+                        "switch.{case_name}.then"
+                    )),
+                    message: format!(
+                        "unimplemented construct 'switch.{case_name}.then': 'continue' (do-list fall-through) is not mapped"
+                    ),
+                });
+                return None;
+            }
+            target => target.to_string(),
+        };
+        Some(SwitchCondition {
+            condition,
+            transition,
+        })
+    }
+
+    /// 官方 switch case 缺项/未知键 fail-closed：点名 `switch.<case>.<field>`，绝不回退默认。
+    fn reject_switch_field(&mut self, case_name: &str, field: &str, span: Span) {
+        let construct = format!("switch.{case_name}.{field}");
+        self.errors.push(ValidationError {
+            span: Some(span),
+            kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+            message: format!(
+                "unimplemented construct '{construct}': official switch case requires 'when'/'then' (then: <target>|end|exit)"
+            ),
+        });
     }
 
     fn parse_switch_condition(&mut self, cond: &Value, span: Span) -> Option<SwitchCondition> {
@@ -376,23 +488,12 @@ impl Validator {
         } else if let Some(d) = obj.get("default").and_then(|v| v.as_str()) {
             d.to_string()
         } else {
-            // 官方 1.0 的 switch case 形状为 `{caseName: {when, then}}`；coord 只认
-            // `{condition, transition}`。探测到官方 `then` 时点名构造，避免只看
-            // 「缺 transition」而看不出被忽略的是流程指令（Spike 4 GAP）。
-            let names_then = obj
-                .values()
-                .any(|v| v.as_object().is_some_and(|o| o.contains_key("then")));
-            let detail = if names_then {
-                " (unimplemented construct 'then': coord switch conditions use 'transition')"
-            } else {
-                ""
-            };
             self.errors.push(ValidationError {
                 span: Some(span),
                 kind: ValidationErrorKind::MissingRequiredField(
                     "transition or defaultCondition".into(),
                 ),
-                message: format!("switch condition missing transition target{detail}"),
+                message: "switch condition missing transition target".to_string(),
             });
             return None;
         };
@@ -2018,6 +2119,176 @@ do:
     }
 
     #[test]
+    fn test_switch_official_when_then_shape() {
+        // 官方 1.0.3 case 形状 `{<case>: {when, then}}`：`when` → condition、`then` → transition；
+        // `then: end|exit` 映射到终端任务 `__end`（Spike 4 corpus 04）。逐字断言，不得静默丢字段。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-switch
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - high:
+            when: "${ .counter > 10 }"
+            then: exit
+        - low:
+            when: "${ .counter <= 10 }"
+            then: next
+  - next:
+      call: http
+      with:
+        method: GET
+        endpoint: "https://api/next"
+"#;
+
+        let def = parse_and_validate_yaml(yaml).expect("official switch must parse");
+        let s = match &def.do_tasks[0].task {
+            Task::Switch(s) => s,
+            other => panic!("expected Switch task, got {other:?}"),
+        };
+        assert_eq!(s.conditions.len(), 2);
+        assert_eq!(
+            s.conditions[0].condition.as_deref(),
+            Some("${ .counter > 10 }")
+        );
+        assert_eq!(s.conditions[0].transition, "__end");
+        assert_eq!(
+            s.conditions[1].condition.as_deref(),
+            Some("${ .counter <= 10 }")
+        );
+        assert_eq!(s.conditions[1].transition, "next");
+        assert!(s.default_condition.is_none());
+        // `then: exit` 的终端引用必须可解析：定义中补出 `__end` 终端任务。
+        assert!(
+            def.do_tasks
+                .iter()
+                .any(|t| t.name == "__end" && matches!(t.task, Task::End(_))),
+            "exit must map to a synthesized __end terminal task: {:?}",
+            def.do_tasks.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_switch_default_case_maps_to_default_condition() {
+        // 官方 case 的 `when` 可选：无 `when` 的 case（含 `default`）映射到 default_condition，
+        // 不得当作「缺 when」拒绝，也不得产出无名分支。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-switch-default
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - high:
+            when: "${ .counter > 10 }"
+            then: approved
+        - default:
+            then: exit
+  - approved:
+      call: http
+      with:
+        method: GET
+        endpoint: "https://api/approved"
+"#;
+
+        let def = parse_and_validate_yaml(yaml).expect("official default case must parse");
+        let s = match &def.do_tasks[0].task {
+            Task::Switch(s) => s,
+            other => panic!("expected Switch task, got {other:?}"),
+        };
+        assert_eq!(s.conditions.len(), 1);
+        assert_eq!(
+            s.conditions[0].condition.as_deref(),
+            Some("${ .counter > 10 }")
+        );
+        assert_eq!(s.conditions[0].transition, "approved");
+        let default = s.default_condition.as_ref().expect("default case mapped");
+        assert_eq!(default.condition, None);
+        assert_eq!(default.transition, "__end");
+    }
+
+    #[test]
+    fn test_switch_multiple_default_cases_rejected() {
+        // 多个无 `when` case：default 唯一，fail-closed 点名冲突项 `switch.<case>.when`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-switch-multi-default
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - first:
+            when: "${ .counter > 10 }"
+            then: exit
+        - a:
+            then: exit
+        - b:
+            then: exit
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("multiple default cases must reject");
+        assert!(
+            error_kind_naming(&errs, "switch.b.when"),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_switch_case_missing_then_rejected() {
+        // 官方 case 缺 `then`：fail-closed 点名 `switch.<case>.then`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-switch-missing-then
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - high:
+            when: "${ .counter > 10 }"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("missing switch.high.then must reject");
+        assert!(
+            error_kind_naming(&errs, "switch.high.then"),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_switch_case_continue_rejected() {
+        // `then: continue`（do 列表 fall-through）在不改执行器的前提下无法表达：
+        // fail-closed 拒绝并点名 `switch.<case>.then`，不得静默误判为下一任务。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-switch-continue
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - high:
+            when: "${ .counter > 10 }"
+            then: continue
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("then: continue must reject");
+        assert!(
+            error_kind_naming(&errs, "switch.high.then"),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
     fn test_validate_workflow_with_function_ref() {
         let yaml = r#"
 document:
@@ -2562,7 +2833,7 @@ do:
 "#;
 
         let errs = parse_and_validate_yaml(yaml).expect_err("missing for.each must reject");
-        assert!(errors_naming(&errs, "for.each"), "errors: {errs:?}");
+        assert!(error_kind_naming(&errs, "for.each"), "errors: {errs:?}");
     }
 
     #[test]
@@ -2587,7 +2858,7 @@ do:
 "#;
 
         let errs = parse_and_validate_yaml(yaml).expect_err("missing for.in must reject");
-        assert!(errors_naming(&errs, "for.in"), "errors: {errs:?}");
+        assert!(error_kind_naming(&errs, "for.in"), "errors: {errs:?}");
     }
 
     #[test]
@@ -2607,7 +2878,7 @@ do:
 "#;
 
         let errs = parse_and_validate_yaml(yaml).expect_err("missing for.do must reject");
-        assert!(errors_naming(&errs, "for.do"), "errors: {errs:?}");
+        assert!(error_kind_naming(&errs, "for.do"), "errors: {errs:?}");
     }
 
     #[test]
@@ -2656,7 +2927,7 @@ do:
 "#;
 
         let errs = parse_and_validate_yaml(yaml).expect_err("empty for object must reject");
-        assert!(errors_naming(&errs, "for.in"), "errors: {errs:?}");
+        assert!(error_kind_naming(&errs, "for.in"), "errors: {errs:?}");
     }
 
     #[test]
@@ -3155,6 +3426,14 @@ do:
             matches!(&e.kind, ValidationErrorKind::UnsupportedConstruct(_))
                 && e.message.contains(construct)
         })
+    }
+
+    /// 判别性断言：错误 KIND 载荷里的构造名恰为 `construct`。
+    /// `errors_naming` 只查消息子串，而 `reject_for_field` 的消息列出全部字段名，无法区分。
+    fn error_kind_naming(errs: &[ValidationError], construct: &str) -> bool {
+        errs.iter().any(
+            |e| matches!(&e.kind, ValidationErrorKind::UnsupportedConstruct(c) if c == construct),
+        )
     }
 
     #[test]
