@@ -180,3 +180,27 @@
 | 无法映射的变体 fail-closed 且指名构造 | 各任务负例（until/未知键/空 branches/缺 each 等） |
 | 拒绝清单不放松 | M1 Task 8 既有断言保持绿 |
 | 对外契约零改动 | `git diff --stat feat/workflow-v2-foundation..HEAD -- apis/` 为空 |
+
+---
+
+### Task 9: `set` 官方 map 形状（执行顺序：紧随 Task 4）
+
+> 该项由 Task 4 实现者发现：官方 `set: {counter: 0}`（corpus 01/05/06）当前解析为**空 SetTask** —— 静默丢字段，必须先于 Task 8 的语义断言修复。
+
+**Files:**
+- Modify: `coord-core/src/workflow/validate.rs`（`parse_set`）
+- Test: `validate.rs` 单测 + `spike4_conformance.rs`（Task 8 会追加逐字段断言）
+
+**Interfaces:**
+- 官方形状：`set: {<var>: <literal-or-runtime-expression>}`（单键）。
+- 映射：`variable = <key>`；`value` 必须让现有 `tasks/set.rs` 的表达式求值得到正确结果：
+  - `${ <expr> }` 运行时表达式 → 取 `<expr>` 本体（与引擎既有表达式语法对齐，实现者先读 `expression.rs`/`set.rs` 确认 `${}` 是否已由求值器处理，并报告选择）；
+  - 其余 JSON 字面量 → 以 JSON 序列化形式作为表达式（如 `0` → `"0"`、`"hello"` → `"\"hello\""`），保证求值结果等于字面量本身。
+- 多键 `set`（官方合法但现有 `SetTask` 单变量模型表达不了）⇒ **显式拒绝**并指名 `set.<key>`（fail-closed；多键支持需 `SetTask`/`StepResult` 扩展，属后续任务，不在本里程碑承诺）。
+- 既有 native `{variable, value}` 形状保持兼容。
+
+- [ ] **Step 1: 写失败测试**：`test_set_official_map_numeric_literal`（`{counter: 0}` ⇒ variable=="counter" 且求值得到 0）；`test_set_official_map_string_literal`（`{greeting: "hi"}` ⇒ 求值得到字符串 `hi`，不是字段访问）；`test_set_official_multi_key_rejected_naming_key`。
+- [ ] **Step 2: 实现映射与拒绝**
+- [ ] **Step 3: 回归 + 提交**
+
+  Run: `CARGO_BUILD_JOBS=3 cargo test -p coord-core --lib workflow` 与 `cargo test -p coord --test spike4_conformance -- --test-threads=1`。Commit: `feat(workflow): adapt official 1.0.3 set map shape`
