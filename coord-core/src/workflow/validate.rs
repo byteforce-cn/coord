@@ -414,7 +414,12 @@ impl Validator {
             Value::Object(obj) => obj.get("branches").and_then(|v| v.as_array()),
             _ => None,
         };
-        let compete = map.get("compete").and_then(|v| v.as_bool());
+        // 官方把 `compete` 放在 `fork` 对象内；coord 既有形状把它放在任务体上。
+        // official-first，legacy 兄弟键回退；裸数组形状没有 `compete` 取 None。
+        let compete = fork_val
+            .get("compete")
+            .or_else(|| map.get("compete"))
+            .and_then(Value::as_bool);
 
         // 缺 branches / 非数组 / 空列表都不得静默产出 0 分支的 Fork。
         let Some(branches_arr) = branches_arr.filter(|arr| !arr.is_empty()) else {
@@ -453,13 +458,10 @@ impl Validator {
             return None;
         };
 
-        // coord 既有形状：`{name, do|tasks}`。
-        if obj.contains_key("name") {
-            let name = obj
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+        // coord 既有形状：`{name, do|tasks}`——`name` 必须是字符串才走此路；否则
+        // `{name: <body>}` 是官方单键 map（分支名恰为 `name`），不得落成空名分支。
+        if let Some(name) = obj.get("name").and_then(Value::as_str) {
+            let name = name.to_string();
             let tasks = if let Some(do_val) = obj.get("do") {
                 self.parse_sub_tasks(do_val, span)
             } else if let Some(tasks_val) = obj.get("tasks") {
@@ -2155,6 +2157,7 @@ do:
         match &def.do_tasks[0].task {
             Task::Fork(fork) => {
                 assert_eq!(fork.branches.len(), 2);
+                assert_eq!(fork.compete, Some(false));
                 assert_eq!(fork.branches[0].name, "branch_a");
                 assert_eq!(fork.branches[1].name, "branch_b");
                 assert_eq!(
@@ -2174,6 +2177,71 @@ do:
                         task: Task::Set(SetTask {
                             variable: "y".into(),
                             value: "2".into(),
+                        }),
+                    }]
+                );
+            }
+            other => panic!("expected Fork task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fork_official_compete_true_is_read_from_fork_object() {
+        // 官方把 `compete` 放在 `fork` 对象内；误从任务体读会得到 None 并以非竞速模式运行。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: fork-compete
+  version: "1.0"
+do:
+  - race:
+      fork:
+        compete: true
+        branches:
+          - branch_a:
+              set:
+                variable: x
+                value: "1"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official fork compete must parse");
+        match &def.do_tasks[0].task {
+            Task::Fork(fork) => assert_eq!(fork.compete, Some(true)),
+            other => panic!("expected Fork task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fork_branch_keyed_name_is_official_map() {
+        // 分支项键名为 `name` 且值为对象：不是 legacy `{name: <string>, ...}`，而是官方
+        // 单键 map——分支名恰为 `name`，不得落成空名 0 任务分支。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: fork-name-key
+  version: "1.0"
+do:
+  - fan:
+      fork:
+        branches:
+          - name:
+              set:
+                variable: x
+                value: "1"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("branch keyed name must parse");
+        match &def.do_tasks[0].task {
+            Task::Fork(fork) => {
+                assert_eq!(fork.branches.len(), 1);
+                assert_eq!(fork.branches[0].name, "name");
+                assert_eq!(
+                    fork.branches[0].tasks,
+                    vec![NamedTask {
+                        name: "name".into(),
+                        task: Task::Set(SetTask {
+                            variable: "x".into(),
+                            value: "1".into(),
                         }),
                     }]
                 );
