@@ -150,7 +150,7 @@
 
 - [ ] **Step 3: 跑通并提交**
 
-  Run: `CARGO_BUILD_JOBS=3 cargo test -p coord-core --test approval_scenarios`（16 个移植用例 + 6 个新增全绿）。
+  Run: `CARGO_BUILD_JOBS=3 cargo test -p coord-core --test approval_scenarios`（16 个移植用例 + 7 个新增全绿）。
   Commit: `feat(workflow): port v2 approval management commands and scopes`
 
 ---
@@ -287,7 +287,7 @@
 
 | 判据 | 测试/证据 |
 |:--|:--|
-| 五层模型语义与 Spike 1 逐字一致（P0 全场景） | `coord-core/tests/approval_scenarios.rs`（16 移植 + 6 新增） |
+| 五层模型语义与 Spike 1 逐字一致（P0 全场景） | `coord-core/tests/approval_scenarios.rs`（16 移植 + 7 新增 = 23） |
 | CAS 是唯一写路径，冲突零写入 | Task 4 单测；Task 6 `exact_rev_conflict_is_zero_write` |
 | 状态与事件同 Txn（无半提交） | Task 4 单测；Task 6 `commit_persists_state_and_events_in_one_txn` |
 | v2 键空间与 v1 扫描面互不可见 | Task 4 键布局单测；Task 6 双向隔离用例 |
