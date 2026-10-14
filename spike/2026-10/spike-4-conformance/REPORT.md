@@ -123,6 +123,13 @@ python3 spike/2026-10/spike-4-conformance/scripts/matrix.py \
 4. 「完整 1.0.3」若作为对外承诺，必须连带执行语义与验收项，否则会制造
    解析层符合、运行期失败的新口径分裂。
 
+> **落地标注（M2-A，追加）**：上文建议 1「立即」与建议 2「短期」已由 1.0.3 形状适配
+> 里程碑（M2-A）落地——未实现构造在解析期 fail-closed 且错误点名构造，官方 1.0.3
+> 标准子集（04–09/15）的形状逐字段语义对齐，既有形状（01–03/10–11/21–24）不回退。
+> 判据与证据：`coord/tests/spike4_conformance.rs` 的逐字段断言套件
+> （`CARGO_BUILD_JOBS=3 cargo test -p coord --test spike4_conformance -- --test-threads=1`）。
+> 本行为追加状态标注，不改动上文既有结论与证据。
+
 ## 6. 对消费方与治理的影响
 
 - 现有消费方（EIS/IMS，ADR-0010 G-WF-1）使用 native `document/do` 方言，

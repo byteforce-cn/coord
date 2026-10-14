@@ -33,6 +33,17 @@ fn parse_corpus(file: &str) -> Result<WorkflowDefinition, Vec<String>> {
     }
 }
 
+/// 断言任务是单变量 set 且变量名/jq 表达式逐字命中（`Task::Set` 无别的语义面）。
+fn assert_set_payload(task: &Task, variable: &str, value: &str) {
+    match task {
+        Task::Set(set) => {
+            assert_eq!(set.variable, variable, "set variable mismatch");
+            assert_eq!(set.value, value, "set value mismatch");
+        }
+        other => panic!("expected Set({variable}), got {other:?}"),
+    }
+}
+
 fn assert_accepted(file: &str) {
     match parse_corpus(file) {
         Ok(_) => {}
@@ -106,7 +117,7 @@ fn matrix_gap_files_still_rejected() {
 #[test]
 fn official_switch_when_then_shape_maps() {
     // 04：官方 case 形状 {caseName: {when, then}} 映射为 {condition, transition}；
-    // `then: exit` → 终端任务 `__end`（逐字段断言升级由 Task 8 负责）。
+    // `then: exit` → 终端任务 `__end`。
     let def = parse_corpus("04-switch.yaml").expect("corpus 04 must parse OK");
     match &def.do_tasks[0].task {
         Task::Switch(s) => {
@@ -137,10 +148,10 @@ fn matrix_pass_corpus_still_parses() {
     // matrix.tsv PASS 且与顺序执行语义一致：末任务的 `then: exit` 等价于工作流结束，
     // 必须继续接受（该断言同时锁住 `then` 规则的边界，防止后续收紧时静默破坏 PASS 集）。
     //
-    // 已知**静默丢弃**仍留在 PASS 集，但不在 Task 8 的拒绝清单内，属符合性里程碑：
-    // 05-fork（branches 形状未解析成任务）、06-for（each/in 迭代语义未接线）、
-    // 07-wait（duration 未读进 WaitTask）、08-listen（to.one.with 过滤器未完整映射）、
-    // 09-emit（event.with 载荷未完整映射）。
+    // 05/06/07/08/09 的官方形状已逐字段适配，断言见本文件各自的 `*_maps_*` 测试；
+    // 本列表中的语料语义均已对齐。唯一仍被静默接受的是 0.8 遗留 `states/start` 类
+    // （corpus 19：走 cncf_sw 路线接受，schema 判非法，属有意兼容），不在 1.0.3 标准
+    // 子集内，故不列于此列表。
     for file in [
         "01-minimal-set.yaml",
         "02-call-http.yaml",
@@ -198,6 +209,8 @@ fn fork_official_branch_map_maps_branches() {
             assert_eq!(fork.branches[0].tasks[0].name, "branch_a");
             assert_eq!(fork.branches[1].tasks.len(), 1);
             assert_eq!(fork.branches[1].tasks[0].name, "branch_b");
+            assert_set_payload(&fork.branches[0].tasks[0].task, "x", "1");
+            assert_set_payload(&fork.branches[1].tasks[0].task, "y", "2");
         }
         other => panic!("corpus 05: expected Fork task, got {other:?}"),
     }
@@ -214,7 +227,19 @@ fn for_official_each_in_maps_iteration() {
             assert_eq!(fe.input, "${ .items }");
             assert_eq!(fe.tasks.len(), 1);
             assert_eq!(fe.tasks[0].name, "process");
+            assert_set_payload(&fe.tasks[0].task, "last", "${ $item }");
         }
         other => panic!("corpus 06: expected ForEach task, got {other:?}"),
+    }
+}
+
+#[test]
+fn wait_official_duration_object_maps_iso8601() {
+    // 07：官方 `wait: {seconds, ...}` 组件对象必须合成为 ISO8601 duration 进 WaitTask，
+    // 不得静默落成空 wait（Spike 4 误读之一）。
+    let def = parse_corpus("07-wait.yaml").expect("corpus 07 must parse OK");
+    match &def.do_tasks[0].task {
+        Task::Wait(w) => assert_eq!(w.wait, "PT5S"),
+        other => panic!("corpus 07: expected Wait task, got {other:?}"),
     }
 }
