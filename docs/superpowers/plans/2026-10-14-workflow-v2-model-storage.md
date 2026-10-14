@@ -95,7 +95,8 @@
   - `pub struct StartSpec { pub id: String, pub definition_ns: String, pub definition_name: String, pub definition_version: String, pub definition_hash: String, pub initiator: Principal, pub context: Scope }`
   - `pub const MAX_JUMPS: u32 = 20;`
   - `pub fn Engine::start(spec: StartSpec, now: i64) -> Result<Engine, ApprovalError>`：空 `id`/`definition_ns`/`definition_name`/`definition_version`/`definition_hash`/`initiator`、`id.contains('/')` 或 `id.len() > 128` ⇒ `ApprovalError::InvalidArgument("<字段名>")`；成功时 `revision=0`、`status=Pending`、`engine_version=APPROVAL_ENGINE_VERSION`。
-  - 逐字移植：`enter_branch`、`open_approval`、`add_sign`、`remove_sign`、`claim`、`approve`、`reject`、`acknowledge`、`expire`、`finish`、`resolve_var`、`open_tasks_for`、`snapshot_json(&self) -> Result<Value, ApprovalError>`（spike 的 `snapshot_json` 由无返回失败的 `Value` 改为 `Result`，序列化失败 `SerializationError`）。
+  - 逐字移植：`enter_branch`、`open_approval`、`add_sign`、`remove_sign`、`claim`、`approve`、`reject`、`acknowledge`、`expire`、`finish`、`resolve_var`、`open_tasks_for`、`snapshot_json(&self) -> Result<Value, ApprovalError>`（spike 的 `snapshot_json` 由无返回失败的 `Value` 改为 `Result`，序列化失败映射 `ApprovalError::SerializationError`）。
+  - `ApprovalError` 加性变体（裁定，Task 2 落地）：`SerializationError(String)`（Display `serialization error: {msg}`）。计划原稿引用了该失败但冻结枚举无此变体；裁定**不**引 `StoreError`（领域层引存储端口倒置分层）、也**不**映射到 `InvalidArgument`（新造语义）。既有 5 变体与 Display 文案不变；`ApprovalError` 不入任何持久文档，此行不影响契约。
   - 子实体 ID 规则（移植规则 5）：`format!("{}:{prefix}-{seq:04}", self.instance.id)`。
 
 - [ ] **Step 1: 写失败测试（`coord-core/tests/approval_scenarios.rs`）**
@@ -135,6 +136,7 @@
   - `pub fn return_to_node(&mut self, expected: u64, branch_id: &str, target_node: &str, by: &str, comment: Option<&str>, now: i64) -> Result<(Id, Vec<Effect>), ApprovalError>`
   - `pub fn withdraw(&mut self, expected: u64, by: &str, now: i64) -> Result<Vec<Effect>, ApprovalError>`
   - `pub fn terminate(&mut self, expected: u64, by: &str, reason: &str, now: i64) -> Result<Vec<Effect>, ApprovalError>`
+  - 内部助手（本任务移植，仅被上述命令调用）：`close_rounds_of_branch`、`cancel_open_branches`。
 
 - [ ] **Step 1: 写失败测试**
 
