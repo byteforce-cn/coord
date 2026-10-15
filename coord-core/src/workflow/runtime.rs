@@ -847,7 +847,8 @@ where
     /// - `Waiting`：`listen` 重建事件订阅；`wait` / `retry` 补写持久化定时器（已到期立即触发）。
     /// - `Suspended`（signal / approve 挂起）：人工/审批恢复语义 —— 没有外部 signal 或审批
     ///   结论就自动重驱动会把人工审批直接跑过去，故**不**自动驱动（ADR 的「所有非终态」在此
-    ///   显式排除挂起）。
+    ///   显式排除挂起）。但 approve 挂起的**截止定时器**必须重建：挂起臂是「先提交 `Suspended`
+    ///   再异步落定时器」，在这个窗口里死亡会让截止驱动永久丢失（重驱 no-op 守卫不会再建）。
     /// - 终态：跳过。
     ///
     /// `coord-core` 无 `tracing`，挂起实例的跳过是设计内非动作（不是故障），故只以注释
@@ -917,9 +918,30 @@ where
                         _ => {}
                     }
                 }
-                // 终态跳过；`Suspended`（signal / approve 挂起）是人工恢复语义，无外部
-                // signal 或审批结论就不自动驱动（见函数文档，ADR 的「所有非终态」在此显式
-                // 排除挂起）。
+                InstanceStatus::Suspended => {
+                    // 仅审批挂起有可重建的截止定时器；signal 挂起无定时器。
+                    let Some(meta) = inst.suspension_meta.as_ref() else {
+                        continue;
+                    };
+                    if meta.reason != "approval" {
+                        continue;
+                    }
+                    let Some(bridge) = self.approval.as_ref() else {
+                        continue;
+                    };
+                    let approval_id = meta
+                        .approval_instance_id
+                        .as_deref()
+                        .unwrap_or(inst.id.as_str());
+                    // 仍有未到期的 open 席位 ⇒ 重建定时器（确定性 id 幂等覆盖；
+                    // 已到期则由末尾的 `fire_due_timers` 立即驱动）。审批实例不存在
+                    // （`Ok(None)`）或存储错误一律 no-op，不在此处造状态。
+                    if let Ok(Some(d)) = bridge.next_open_deadline(approval_id).await {
+                        let rec = TimerRecord::approval_deadline(&inst.id, approval_id, d, now);
+                        let _ = durable.timers.schedule(&rec).await;
+                    }
+                }
+                // 终态跳过；`Suspended` 的 signal 挂起是人工恢复语义，不自动驱动。
                 _ => {}
             }
         }
@@ -7151,6 +7173,53 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(suspended.status, InstanceStatus::Suspended);
+    }
+
+    /// 重启对账：`Suspended` 的审批挂起在「实例已写 Suspended、截止定时器尚未落 KV」
+    /// 崩溃窗口后必须按审批引擎里仍 open 的席位重建定时器（重驱守卫不会再建）。
+    #[tokio::test]
+    async fn reconcile_reschedules_missing_approval_deadline_timer() {
+        let (rt, bridge, approval_store, timers) = approval_deadline_runtime();
+        let def = approve_deadline_definition("approve-reconcile-wf", Some("PT60S"), &["alice"]);
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let mut inst = suspended_approval_instance("approve-reconcile-inst", &def);
+        inst.definition_hash = Some(crate::workflow::model::definition_hash(&def));
+        store_of(&rt).save_instance(&inst).await.unwrap();
+
+        // 审批引擎已开节点（open 席位 deadline = 61_000），但定时器 KV 缺失。
+        let approve = match &def.do_tasks[0].task {
+            Task::Approve(t) => t.clone(),
+            _ => panic!("approve node"),
+        };
+        bridge
+            .ensure_node_open(&inst, "review", &approve)
+            .await
+            .unwrap();
+        assert!(
+            timers.list_all().await.unwrap().is_empty(),
+            "崩溃窗口后的起始态：无截止定时器"
+        );
+
+        // 重启对账重建定时器。
+        rt.reconcile_resumable_instances(Arc::clone(store_of(&rt)))
+            .await;
+        let rec = await_approval_deadline_timer(&timers, 61_000).await;
+        assert_eq!(rec.instance_id, inst.id);
+
+        // 到期后过期席位，证明重建的定时器确实可驱动。
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+        let (engine, _) = approval_store.load(&inst.id).await.unwrap().unwrap();
+        let seat = engine
+            .tasks
+            .values()
+            .find(|t| t.assignee.as_deref() == Some("alice"))
+            .expect("seat for alice");
+        assert_eq!(
+            seat.status,
+            crate::workflow::approval::model::TaskStatus::Expired
+        );
     }
 
     /// 从 runtime 中取出 store（测试辅助）
