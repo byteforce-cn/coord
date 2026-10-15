@@ -26,7 +26,9 @@ use coord_core::workflow::approval::engine::{Engine, StartSpec};
 use coord_core::workflow::approval::events::event_record;
 use coord_core::workflow::approval::keys;
 use coord_core::workflow::approval::model::{JoinPolicy, RejectPolicy, Scope, SeatSpec};
-use coord_core::workflow::approval::store::{ApprovalStore, ExpectedRev};
+use coord_core::workflow::approval::store::{
+    ApprovalInstanceEntry, ApprovalStore, ExpectedRev, IdemRecord,
+};
 use coord_core::workflow::durable::{OutboxRecord, OutboxStatus, OutboxStore};
 use coord_core::workflow::model::WorkflowInstance;
 use coord_core::workflow::ports::WorkflowStore;
@@ -685,5 +687,226 @@ async fn empty_event_batch_commits_state_only() {
         records_for(&outbox, id2).await,
         recs_before,
         "rejected partial batch must not touch the outbox"
+    );
+}
+
+// ────────────────────────────────────────── 判据 9：幂等记录与状态同 Txn
+
+/// 幂等记录与状态、事件同一 Txn：成功即三者同时可见；CAS 失败即三者同时不可见。
+#[tokio::test]
+async fn kv_idem_and_state_are_same_txn() {
+    let env = setup().await;
+    let inner = env.inner();
+    let outbox = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+    let store = KvApprovalStore::new(Arc::clone(&inner), Arc::clone(&outbox));
+    let id = "inst-t6-idem";
+
+    let eng = start_engine(id, "alice", "sha256:t6-idem");
+    let resp = json!({ "instance_id": id, "status": "APPROVED" });
+    let batch = vec![event(id, "evt-t6-idem-1", 1_001)];
+    assert!(store
+        .commit_with_idem(
+            &eng,
+            &batch,
+            ExpectedRev::CreateOnly,
+            Some(&IdemRecord {
+                key: "cmd-1".into(),
+                response: resp.clone(),
+            }),
+        )
+        .await
+        .unwrap());
+
+    let (loaded, rev) = store.load(id).await.unwrap().expect("committed");
+    assert_eq!(loaded, eng);
+    assert_eq!(records_for(&outbox, id).await.len(), 1);
+    assert_eq!(
+        store.load_idem(id, "cmd-1").await.unwrap(),
+        Some(resp.clone())
+    );
+
+    // 同一 key 重放（同状态 + 同批事件）：幂等成功且缓存响应逐字不变。
+    assert!(store
+        .commit_with_idem(
+            &eng,
+            &batch,
+            ExpectedRev::CreateOnly,
+            Some(&IdemRecord {
+                key: "cmd-1".into(),
+                response: json!({ "instance_id": id, "status": "REJECTED" }),
+            }),
+        )
+        .await
+        .unwrap());
+    assert_eq!(
+        store.load_idem(id, "cmd-1").await.unwrap(),
+        Some(resp.clone()),
+        "the first successful commit owns the cached response"
+    );
+
+    // CAS 失败：状态、事件、幂等记录三者都不得留痕。
+    let mut stale = eng.clone();
+    stale.instance.context.insert("spoof".into(), json!(true));
+    assert!(!store
+        .commit_with_idem(
+            &stale,
+            &[event(id, "evt-t6-idem-2", 1_002)],
+            ExpectedRev::Exact(rev + 999),
+            Some(&IdemRecord {
+                key: "cmd-2".into(),
+                response: json!({ "instance_id": id, "status": "APPROVED" }),
+            }),
+        )
+        .await
+        .unwrap());
+    assert_eq!(store.load(id).await.unwrap().unwrap(), (eng.clone(), rev));
+    assert_eq!(records_for(&outbox, id).await.len(), 1);
+    assert_eq!(
+        store.load_idem(id, "cmd-2").await.unwrap(),
+        None,
+        "a failed commit must not publish its idempotency record"
+    );
+    // 幂等键空间按实例隔离。
+    assert_eq!(
+        store
+            .load_idem("inst-t6-idem-other", "cmd-1")
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+// ────────────────────────────────────────── 判据 10：v4 前缀扫描 + 分页
+
+/// `scan` 只扫 v4 实例前缀：v1 实例、v4 内的幂等键与其他非实例键都不出现，分页不重不漏。
+#[tokio::test]
+async fn kv_scan_sees_v4_only_paginates() {
+    let env = setup().await;
+    let inner = env.inner();
+    let outbox = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+    let store = KvApprovalStore::new(Arc::clone(&inner), Arc::clone(&outbox));
+
+    let wf = KvWorkflowStore::new(Arc::clone(&inner));
+    wf.save_instance(&v1_instance("inst-t6-scan-v1"))
+        .await
+        .unwrap();
+
+    for id in [
+        "inst-t6-scan-b",
+        "inst-t6-scan-a",
+        "inst-t6-scan-d",
+        "inst-t6-scan-c",
+    ] {
+        assert!(store
+            .commit(
+                &start_engine(id, "alice", "sha256:t6-scan"),
+                &[],
+                ExpectedRev::CreateOnly
+            )
+            .await
+            .unwrap());
+    }
+
+    // v4 内的非实例键：幂等记录写 `/_workflow/v4/idempotency/`，v4 内又排在实例前缀之前；
+    // 另有一个排在实例前缀之后的脏值，扫描面若只卡起点不卡终点就会吞到它。
+    let mut eng_a = start_engine("inst-t6-scan-a", "alice", "sha256:t6-scan");
+    let (_, rev_a) = store
+        .load("inst-t6-scan-a")
+        .await
+        .unwrap()
+        .expect("created");
+    eng_a
+        .enter_branch(
+            eng_a.instance.revision,
+            "apply",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            1_001,
+        )
+        .expect("enter branch");
+    assert!(store
+        .commit_with_idem(
+            &eng_a,
+            &[],
+            ExpectedRev::Exact(rev_a),
+            Some(&IdemRecord {
+                key: "cmd-x".into(),
+                response: json!({ "ok": true }),
+            }),
+        )
+        .await
+        .unwrap());
+    assert_eq!(
+        store.load_idem("inst-t6-scan-a", "cmd-x").await.unwrap(),
+        Some(json!({ "ok": true }))
+    );
+    inner
+        .client
+        .kv()
+        .put(b"/_workflow/v4/zz-non-instance", b"not-json")
+        .await
+        .unwrap();
+
+    let ids = |entries: Vec<ApprovalInstanceEntry>| {
+        entries.into_iter().map(|e| e.id).collect::<Vec<String>>()
+    };
+
+    let first = store.scan(None, 2).await.unwrap();
+    assert_eq!(ids(first), ["inst-t6-scan-a", "inst-t6-scan-b"]);
+    let second = store.scan(Some("inst-t6-scan-b"), 2).await.unwrap();
+    assert_eq!(ids(second.clone()), ["inst-t6-scan-c", "inst-t6-scan-d"]);
+    // 续读令牌取上一页最后一条 id：下一块为空。
+    assert!(store.scan(Some(&second[1].id), 2).await.unwrap().is_empty());
+    // `after` 指向不存在的 id 时独占语义仍不重不漏。
+    assert_eq!(
+        ids(store.scan(Some("inst-t6-scan-aa"), 10).await.unwrap()),
+        ["inst-t6-scan-b", "inst-t6-scan-c", "inst-t6-scan-d"]
+    );
+
+    let all = store.scan(None, usize::MAX).await.unwrap();
+    assert_eq!(all.len(), 4, "only v4 instances are listed");
+    assert!(all.iter().all(|e| e.id.starts_with("inst-t6-scan-")));
+    // 条目自带状态与修订号（a 已因幂等提交写过一版）。
+    assert_eq!(all[0].id, "inst-t6-scan-a");
+    assert_eq!(all[0].engine, eng_a);
+    assert!(
+        all[0].mod_rev > rev_a,
+        "entries carry the stored revision (a advanced by the idempotent commit)"
+    );
+    assert_eq!(store.scan(None, 0).await.unwrap().len(), 4);
+}
+
+// ─────────────────────────────────────── 判据 8b：空批次不占 outbox 序号
+
+/// 零事件提交不推进 per-aggregate 序号计数器：随后的首批事件的 `sequence` 从 1 起。
+#[tokio::test]
+async fn empty_event_batch_does_not_advance_seq_counter() {
+    let env = setup().await;
+    let inner = env.inner();
+    let outbox = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+    let store = KvApprovalStore::new(Arc::clone(&inner), Arc::clone(&outbox));
+    let id = "inst-t6-empty-seq";
+
+    let eng = start_engine(id, "alice", "sha256:t6-empty-seq");
+    assert!(store
+        .commit(&eng, &[], ExpectedRev::CreateOnly)
+        .await
+        .unwrap());
+    let (_, rev) = store.load(id).await.unwrap().expect("created");
+    assert!(store
+        .commit(
+            &eng,
+            &[event(id, "evt-t6-empty-seq-1", 1_001)],
+            ExpectedRev::Exact(rev)
+        )
+        .await
+        .unwrap());
+
+    let recs = records_for(&outbox, id).await;
+    assert_eq!(recs.len(), 1);
+    assert_eq!(
+        recs[0].sequence, 1,
+        "a state-only commit must not consume an outbox sequence number"
     );
 }

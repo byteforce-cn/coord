@@ -4,10 +4,10 @@
 //! `coord_core::workflow::approval::keys`），伴生事件写共享的 v3 outbox 设施
 //! `/_workflow/v3/outbox/**`，两者在**同一个 Txn** 提交（ADR-0013 D3/D8）。
 //!
-//! 唯一的写路径 [`ApprovalStore::commit`] 带 CAS：谓词 = outbox 侧（seq 计数器值与
-//! 本批每条事件 id `VERSION==0`，复用 [`KvOutboxStore`] 的构造）+ 实例侧
-//! （`CreateOnly` ⇒ `VERSION==0`，即 create-if-absent；`Exact(n)` ⇒ `MOD_REV==n`）。
-//! 任一谓词不成立整个 Txn 零写入，绝不盲写覆盖。
+//! 唯一的写路径 [`ApprovalStore::commit_with_idem`] 带 CAS，谓词由三部分构成：outbox
+//! 侧（seq 计数器值与本批每条事件 id 的 `VERSION==0`，复用 [`KvOutboxStore`] 的构造）、
+//! 实例侧（`CreateOnly` ⇒ `VERSION==0`，即 create-if-absent；`Exact(n)` ⇒ `MOD_REV==n`）、
+//! 以及可选的幂等键侧（`VERSION==0`）。任一谓词不成立整个 Txn 零写入，绝不盲写覆盖。
 //!
 //! outbox 序号取自持久化的 `/_workflow/v3/outbox/seq/{aggregate}` 计数器
 //! （[`KvOutboxStore::read_sequence`]），**不**取自事件日志：日志可被 `prune` 清理，
@@ -16,11 +16,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde_json::Value;
 
 use coord_core::workflow::approval::engine::Engine;
 use coord_core::workflow::approval::keys;
 use coord_core::workflow::approval::store::{
-    ensure_event_aggregates_match, ensure_expected_rev_allowed, ApprovalStore, ExpectedRev,
+    clamp_scan_limit, ensure_event_aggregates_match, ensure_expected_rev_allowed,
+    ApprovalInstanceEntry, ApprovalStore, ExpectedRev, IdemRecord,
 };
 use coord_core::workflow::durable::OutboxRecord;
 use coord_core::workflow::ports::StoreError;
@@ -32,6 +34,7 @@ use coord_proto::txn::{Compare, RequestOp};
 use crate::proxy::AgentInner;
 
 use super::outbox_kv::KvOutboxStore;
+use super::workflow_store::key_after;
 
 /// 提交时对同一 Txn 的重试上限。
 ///
@@ -40,9 +43,9 @@ const COMMIT_RETRY_LIMIT: usize = 8;
 
 /// 基于 coord-server KV Txn 的 v2 审批存储。
 ///
-/// 状态文档 `/_workflow/v4/instances/{id}`，事件走 v3 outbox 传输设施；一次
-/// [`ApprovalStore::commit`] 把状态与本批全部事件放进同一个 Txn，成功即全部生效、
-/// 失败即零写入。
+/// 状态文档 `/_workflow/v4/instances/{id}`，事件走 v3 outbox 传输设施，幂等记录写
+/// `/_workflow/v4/idempotency/{id}/{key}`；一次 [`ApprovalStore::commit_with_idem`] 把
+/// 这三者放进同一个 Txn，成功即全部生效、失败即零写入。
 pub struct KvApprovalStore {
     inner: Arc<AgentInner>,
     outbox: Arc<KvOutboxStore>,
@@ -106,17 +109,44 @@ impl ApprovalStore for KvApprovalStore {
         self.load_instance(&key).await
     }
 
-    async fn commit(
+    async fn load_idem(&self, instance_id: &str, key: &str) -> Result<Option<Value>, StoreError> {
+        let idem_key = keys::idem_key(instance_id, key);
+        let rows = self
+            .inner
+            .client
+            .kv()
+            .range_with_rev(&idem_key, &idem_key, 1, 0)
+            .await
+            .map_err(|e| StoreError::IoError(e.to_string()))?;
+        match rows.into_iter().next() {
+            Some((_k, value, _rev)) => serde_json::from_slice::<IdemRecord>(&value)
+                .map(|rec| Some(rec.response))
+                .map_err(|e| StoreError::SerializationError(e.to_string())),
+            None => Ok(None),
+        }
+    }
+
+    async fn commit_with_idem(
         &self,
         engine: &Engine,
         events: &[OutboxRecord],
         expected: ExpectedRev,
+        idem: Option<&IdemRecord>,
     ) -> Result<bool, StoreError> {
         ensure_expected_rev_allowed(expected)?;
         ensure_event_aggregates_match(engine, events)?;
         let key = keys::instance_key(&engine.instance.id);
         let value = serde_json::to_vec(engine)
             .map_err(|e| StoreError::SerializationError(e.to_string()))?;
+        // 幂等键与内容在循环外定下：每一轮重试写的都是同一份记录。
+        let idem_ops = match idem {
+            Some(rec) => Some((
+                keys::idem_key(&engine.instance.id, &rec.key),
+                serde_json::to_vec(rec)
+                    .map_err(|e| StoreError::SerializationError(e.to_string()))?,
+            )),
+            None => None,
+        };
 
         for _ in 0..COMMIT_RETRY_LIMIT {
             let current = self.load_instance(&key).await?;
@@ -130,20 +160,68 @@ impl ApprovalStore for KvApprovalStore {
                 return Ok(false);
             }
 
-            // 谓词成立 ⇒ 状态 + 全部事件在同一 Txn 提交；序号接在持久化计数器之后。
+            // 谓词成立 ⇒ 状态 + 全部事件（+ 幂等记录）在同一 Txn 提交；序号接在持久化
+            // 计数器之后。
             let (cur, cur_bytes) = self.outbox.read_sequence(&engine.instance.id).await?;
             let mut compares =
                 KvOutboxStore::outbox_compares(&engine.instance.id, cur_bytes, events);
             compares.push(instance_predicate(&key, expected));
             let mut success = vec![put(key.clone(), value.clone())];
             success.extend(KvOutboxStore::outbox_ops(events, cur + 1)?);
+            if let Some((idem_key, idem_value)) = idem_ops.as_ref() {
+                // 幂等键必须不存在：同一命令键只有首次成功提交能写（重放不覆盖缓存响应）。
+                compares.push(idem_predicate(idem_key));
+                success.push(put(idem_key.clone(), idem_value.clone()));
+            }
 
             if self.txn(compares, success).await? {
                 return Ok(true);
             }
-            // Txn 失败（多半是 outbox 序号被并发写者推进）：下一轮重读后重新判定。
+            // Txn 失败（多半是 outbox 序号或幂等键被并发写者占住）：下一轮重读后重新判定。
         }
         Ok(false)
+    }
+
+    async fn scan(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ApprovalInstanceEntry>, StoreError> {
+        let prefix = keys::instance_prefix();
+        // `after` 独占续读：`key_after` 给出严格后继键，等于 `after` 的实例不重复出现。
+        // 范围终点卡在实例前缀内，v4 内的其他键（幂等记录）不会进入本扫描面。
+        let start = match after {
+            Some(id) => key_after(&keys::instance_key(id)),
+            None => prefix.to_vec(),
+        };
+        let end = keys::prefix_range_end(prefix);
+        let rows = self
+            .inner
+            .client
+            .kv()
+            .range_with_rev(&start, &end, clamp_scan_limit(limit) as i64, 0)
+            .await
+            .map_err(|e| StoreError::IoError(e.to_string()))?;
+
+        let mut entries = Vec::with_capacity(rows.len());
+        for (key, value, mod_revision) in rows {
+            let Some(id) = key
+                .strip_prefix(prefix)
+                .and_then(|suffix| std::str::from_utf8(suffix).ok())
+            else {
+                return Err(StoreError::SerializationError(
+                    "approval scan: key outside the instance prefix".to_string(),
+                ));
+            };
+            let engine: Engine = serde_json::from_slice(&value)
+                .map_err(|e| StoreError::SerializationError(e.to_string()))?;
+            entries.push(ApprovalInstanceEntry {
+                id: id.to_string(),
+                engine,
+                mod_rev: mod_revision,
+            });
+        }
+        Ok(entries)
     }
 }
 
@@ -175,6 +253,16 @@ fn instance_predicate(key: &[u8], expected: ExpectedRev) -> Compare {
             key: key.to_vec(),
             target_value: Some(TargetValue::ModRevision(n)),
         },
+    }
+}
+
+/// 幂等键侧 CAS 谓词：要求键不存在（`VERSION==0`），即该命令键只被成功写入一次。
+fn idem_predicate(key: &[u8]) -> Compare {
+    Compare {
+        result: CompareResult::Equal as i32,
+        target: Target::Version as i32,
+        key: key.to_vec(),
+        target_value: Some(TargetValue::Version(0)),
     }
 }
 

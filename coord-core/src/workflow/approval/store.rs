@@ -5,9 +5,12 @@
 //! 内存实现供正确性测试使用。
 
 use std::collections::{BTreeMap, HashSet};
+use std::ops::Bound;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::workflow::durable::{OutboxRecord, OutboxStatus};
 use crate::workflow::ports::StoreError;
@@ -26,16 +29,63 @@ pub enum ExpectedRev {
     Exact(i64),
 }
 
+/// `scan` 的默认页大小：`limit == 0` 时取该值。
+pub const APPROVAL_SCAN_DEFAULT_LIMIT: usize = 50;
+
+/// `scan` 的硬上限：任何 `limit` 都不会一次返回超过该条数。
+pub const APPROVAL_SCAN_MAX_LIMIT: usize = 200;
+
+/// 把调用方给的 `limit` 钳成实际页大小（`0` ⇒ [`APPROVAL_SCAN_DEFAULT_LIMIT`，
+/// 上限 [`APPROVAL_SCAN_MAX_LIMIT`]）。
+///
+/// 两个实现共用：分页上限只此一处定义，避免内存与 KV 行为分叉。
+pub fn clamp_scan_limit(limit: usize) -> usize {
+    match limit {
+        0 => APPROVAL_SCAN_DEFAULT_LIMIT,
+        n => n.min(APPROVAL_SCAN_MAX_LIMIT),
+    }
+}
+
+/// 一条已提交命令的幂等记录。
+///
+/// 与产生它的状态、事件在同一临界区/Txn 写入（见
+/// [`ApprovalStore::commit_with_idem`]），因此「响应落了库」与「命令已生效」等价。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IdemRecord {
+    /// 命令幂等键（同一实例内唯一定位一次命令调用）。
+    pub key: String,
+    /// 首次成功提交时返回给调用方的响应；重试命中即原样返回。
+    pub response: Value,
+}
+
+/// [`ApprovalStore::scan`] 返回的实例条目。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApprovalInstanceEntry {
+    /// 实例 id（`/_workflow/v4/instances/{id}` 的 `{id}` 段）。
+    pub id: String,
+    /// 已提交的实例状态。
+    pub engine: Engine,
+    /// 存储修订号（下一次 `Exact(rev)` 提交的期望值）。
+    pub mod_rev: i64,
+}
+
 /// v2 审批实例存储端口。
 ///
-/// 写路径只有 [`ApprovalStore::commit`]，且必须带 [`ExpectedRev`]：状态与一批事件在
-/// 一次提交里同生共死，冲突时零写入返回 `Ok(false)`（调用方重读后重试，禁止盲写覆盖）。
+/// 写路径只有 [`ApprovalStore::commit_with_idem`]（及其 `idem = None` 形态
+/// [`ApprovalStore::commit`]），且必须带 [`ExpectedRev`]：状态与一批事件在一次提交里
+/// 同生共死，冲突时零写入返回 `Ok(false)`（调用方重读后重试，禁止盲写覆盖）。
 #[async_trait]
 pub trait ApprovalStore: Send + Sync {
     /// 线性一致地读取实例状态与其修订号；键不存在返回 `Ok(None)`。
     async fn load(&self, instance_id: &str) -> Result<Option<(Engine, i64)>, StoreError>;
 
-    /// CAS 提交：状态与事件同一次写入。
+    /// 读命令幂等记录（`/_workflow/v4/idempotency/{instance}/{key}`）；键不存在返回
+    /// `Ok(None)`。
+    ///
+    /// 命中即「该命令已成功提交」：调用方直接返回 `response`，不再执行命令。
+    async fn load_idem(&self, instance_id: &str, key: &str) -> Result<Option<Value>, StoreError>;
+
+    /// CAS 提交：状态、本批事件与可选幂等记录同一次写入。
     ///
     /// `expected` 与当前修订号匹配 ⇒ 存储 `engine`、追加 `events`（存储侧按批次顺序
     /// 分配 per-instance 单调 `sequence`）、修订号 +1，返回 `Ok(true)`；不匹配 ⇒ 零写入
@@ -44,17 +94,44 @@ pub trait ApprovalStore: Send + Sync {
     /// 重放/幂等重复提交（状态逐字相同且本批事件全部已在库）也返回 `Ok(true)`，但零写入、
     /// 不推进修订号。
     ///
+    /// `idem` 为 `Some` 时，幂等记录与状态、事件在同一临界区/Txn 生效：只有提交成功它
+    /// 才存在，失败时 `load_idem` 读不到——重试方因此不会拿到从未落库的响应。同一
+    /// `key` 只有首次成功提交能写（失败/重放都不覆盖已缓存的响应）。
+    ///
     /// `Exact(0)` 是保留值：`ensure_expected_rev_allowed` 在写路径前 fail-closed 拒绝。
     ///
     /// `sequence` 的分配基准由实现决定：内存实现取已存事件的最大 `sequence` + 1；KV 实现
     /// 取持久化的 outbox 序号计数器 `/_workflow/v3/outbox/seq/{aggregate}`（见 `coord-agent`
     /// 的 `KvApprovalStore`），该计数器不随事件日志剪枝而回退，序号因此不会回退或重叠。
+    async fn commit_with_idem(
+        &self,
+        engine: &Engine,
+        events: &[OutboxRecord],
+        expected: ExpectedRev,
+        idem: Option<&IdemRecord>,
+    ) -> Result<bool, StoreError>;
+
+    /// 带 CAS 的提交（不带幂等记录）：取
+    /// [`ApprovalStore::commit_with_idem`] 的 `idem = None` 形态。
     async fn commit(
         &self,
         engine: &Engine,
         events: &[OutboxRecord],
         expected: ExpectedRev,
-    ) -> Result<bool, StoreError>;
+    ) -> Result<bool, StoreError> {
+        self.commit_with_idem(engine, events, expected, None).await
+    }
+
+    /// 按实例 id 字典序分页扫描已提交实例；`after` 独占续读，`limit` 经
+    /// [`clamp_scan_limit`] 钳制。
+    ///
+    /// 只扫 v4 实例前缀：v1 实例扫描面（`/_workflow/v3/instances/`）与 v4 内的其他
+    /// 键（如幂等记录）都不在本方法的结果里。
+    async fn scan(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ApprovalInstanceEntry>, StoreError>;
 }
 
 /// 事件聚合根与实例不一致时的 fail-closed 拒绝消息。
@@ -120,13 +197,15 @@ struct Entry {
     engine: Engine,
     mod_rev: i64,
     events: Vec<OutboxRecord>,
+    /// 幂等记录（命令键 ⇒ 首次成功提交的响应），与状态同锁。
+    idem: BTreeMap<String, Value>,
 }
 
 /// 进程内审批存储（正确性测试用）。
 ///
-/// **原子性**：状态、修订号与事件批次存在同一个 `Mutex` 下的同一条记录里，
-/// [`MemoryApprovalStore::commit`] 在一次临界区内完成三者更新 ⇒ 成功即全部生效，
-/// `Ok(false)` 即三者与提交前逐字相同。这与 `durable.rs` 的 `MemoryAtomicCommit`
+/// **原子性**：状态、修订号、事件批次与幂等记录存在同一个 `Mutex` 下的同一条记录里，
+/// [`ApprovalStore::commit_with_idem`] 在一次临界区内完成更新 ⇒ 成功即全部生效，
+/// `Ok(false)` 即它们与提交前逐字相同。这与 `durable.rs` 的 `MemoryAtomicCommit`
 /// （先写状态、再逐条写事件，**非原子**，文档明确禁止生产使用）不同；生产路径必须用
 /// `coord-agent` 的 KV Txn 实现。
 #[derive(Debug, Default)]
@@ -169,11 +248,19 @@ impl ApprovalStore for MemoryApprovalStore {
             .map(|entry| (entry.engine.clone(), entry.mod_rev)))
     }
 
-    async fn commit(
+    async fn load_idem(&self, instance_id: &str, key: &str) -> Result<Option<Value>, StoreError> {
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(map
+            .get(instance_id)
+            .and_then(|entry| entry.idem.get(key).cloned()))
+    }
+
+    async fn commit_with_idem(
         &self,
         engine: &Engine,
         events: &[OutboxRecord],
         expected: ExpectedRev,
+        idem: Option<&IdemRecord>,
     ) -> Result<bool, StoreError> {
         ensure_expected_rev_allowed(expected)?;
         ensure_event_aggregates_match(engine, events)?;
@@ -207,19 +294,54 @@ impl ApprovalStore for MemoryApprovalStore {
                 entry.engine = engine.clone();
                 entry.events.extend(batch);
                 entry.mod_rev += 1;
+                if let Some(rec) = idem {
+                    // 首次成功提交拥有该 key：KV 实现的 `VERSION==0` 谓词保证重复提交
+                    // 写不进该键，重试方以 `load_idem` 命中的响应为准。
+                    entry
+                        .idem
+                        .entry(rec.key.clone())
+                        .or_insert(rec.response.clone());
+                }
             }
             None => {
+                let mut idem_map = BTreeMap::new();
+                if let Some(rec) = idem {
+                    idem_map.insert(rec.key.clone(), rec.response.clone());
+                }
                 map.insert(
                     id.to_string(),
                     Entry {
                         engine: engine.clone(),
                         mod_rev: 1,
                         events: batch,
+                        idem: idem_map,
                     },
                 );
             }
         }
         Ok(true)
+    }
+
+    async fn scan(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ApprovalInstanceEntry>, StoreError> {
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // `after` 独占：起点是同名实例键的严格后继。
+        let start: Bound<String> = match after {
+            Some(id) => Bound::Excluded(id.to_string()),
+            None => Bound::Unbounded,
+        };
+        Ok(map
+            .range((start, Bound::Unbounded))
+            .take(clamp_scan_limit(limit))
+            .map(|(id, entry)| ApprovalInstanceEntry {
+                id: id.clone(),
+                engine: entry.engine.clone(),
+                mod_rev: entry.mod_rev,
+            })
+            .collect())
     }
 }
 
@@ -233,6 +355,28 @@ mod tests {
     use serde_json::json;
 
     const INSTANCE_ID: &str = "inst-t4";
+
+    fn idem(key: &str, response: Value) -> IdemRecord {
+        IdemRecord {
+            key: key.into(),
+            response,
+        }
+    }
+
+    /// 一页扫描结果的实例 id（按返回顺序）。
+    async fn scan_ids(
+        store: &MemoryApprovalStore,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Vec<String> {
+        store
+            .scan(after, limit)
+            .await
+            .expect("scan")
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect()
+    }
 
     fn start(id: &str) -> Engine {
         Engine::start(
@@ -454,6 +598,236 @@ mod tests {
         );
         assert!(store.load(INSTANCE_ID).await.unwrap().is_none());
         assert!(store.events(INSTANCE_ID).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_event_batch_does_not_advance_seq_counter() {
+        // 空批次只写状态：序号分配基准不得因此前进，下一批事件从 1 号起。
+        let store = MemoryApprovalStore::new();
+        let engine = start(INSTANCE_ID);
+        assert!(store
+            .commit(&engine, &[], ExpectedRev::CreateOnly)
+            .await
+            .unwrap());
+        assert!(store
+            .commit(&engine, &[evt("evt-1")], ExpectedRev::Exact(1))
+            .await
+            .unwrap());
+
+        let stored = store.events(INSTANCE_ID).await;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].sequence, 1);
+    }
+
+    #[tokio::test]
+    async fn idem_record_roundtrips_and_is_isolated_per_instance() {
+        let store = MemoryApprovalStore::new();
+        let a = start("inst-t4-a");
+        let b = start("inst-t4-b");
+        let rec = idem("cmd-1", json!({ "status": "APPROVED" }));
+
+        // 记录以 JSON 存 KV：键与响应必须原样往返。
+        let raw = serde_json::to_string(&rec).unwrap();
+        assert_eq!(serde_json::from_str::<IdemRecord>(&raw).unwrap(), rec);
+
+        assert!(store
+            .commit_with_idem(&a, &[], ExpectedRev::CreateOnly, Some(&rec))
+            .await
+            .unwrap());
+        assert!(store
+            .commit_with_idem(&b, &[], ExpectedRev::CreateOnly, Some(&rec))
+            .await
+            .unwrap());
+
+        assert_eq!(
+            store.load_idem("inst-t4-a", "cmd-1").await.unwrap(),
+            Some(json!({ "status": "APPROVED" }))
+        );
+        assert_eq!(
+            store.load_idem("inst-t4-b", "cmd-1").await.unwrap(),
+            Some(json!({ "status": "APPROVED" }))
+        );
+        // 键空间按实例隔离：别的实例、别的 key 都读不到。
+        assert_eq!(store.load_idem("inst-t4-c", "cmd-1").await.unwrap(), None);
+        assert_eq!(store.load_idem("inst-t4-a", "cmd-2").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn commit_with_idem_writes_record_on_success() {
+        let store = MemoryApprovalStore::new();
+        let engine = start(INSTANCE_ID);
+        let rec = idem("cmd-1", json!({ "status": "APPROVED", "rev": 1 }));
+
+        assert!(store
+            .commit_with_idem(
+                &engine,
+                &[evt("evt-1")],
+                ExpectedRev::CreateOnly,
+                Some(&rec)
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            store.load_idem(INSTANCE_ID, "cmd-1").await.unwrap(),
+            Some(json!({ "status": "APPROVED", "rev": 1 }))
+        );
+        assert_eq!(store.load_idem(INSTANCE_ID, "cmd-2").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn commit_with_idem_failure_leaves_no_idem_record() {
+        // 幂等记录只随**成功**提交生效：CAS 不匹配与输入校验失败都必须零留痕。
+        let store = MemoryApprovalStore::new();
+        let engine = start(INSTANCE_ID);
+        assert!(store
+            .commit_with_idem(&engine, &[], ExpectedRev::CreateOnly, None)
+            .await
+            .unwrap());
+
+        let mut other = engine.clone();
+        other.instance.initiator = "lisi".into();
+        assert!(!store
+            .commit_with_idem(
+                &other,
+                &[],
+                ExpectedRev::CreateOnly,
+                Some(&idem("cmd-x", json!({ "status": "APPROVED" })))
+            )
+            .await
+            .unwrap());
+        assert!(!store
+            .commit_with_idem(
+                &other,
+                &[],
+                ExpectedRev::Exact(99),
+                Some(&idem("cmd-y", json!({ "status": "APPROVED" })))
+            )
+            .await
+            .unwrap());
+        assert_eq!(store.load_idem(INSTANCE_ID, "cmd-x").await.unwrap(), None);
+        assert_eq!(store.load_idem(INSTANCE_ID, "cmd-y").await.unwrap(), None);
+
+        let foreign = event_record(
+            "inst-other",
+            "com.china-workflow.instance.completed.v1",
+            &json!({ "instance_id": "inst-other" }),
+            1_000,
+            "evt-f".into(),
+        )
+        .unwrap();
+        assert!(store
+            .commit_with_idem(
+                &engine,
+                &[foreign],
+                ExpectedRev::Exact(1),
+                Some(&idem("cmd-z", json!({ "status": "APPROVED" })))
+            )
+            .await
+            .is_err());
+        assert_eq!(store.load_idem(INSTANCE_ID, "cmd-z").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn commit_with_idem_keeps_the_first_cached_response() {
+        // 同一 key 再次提交（重试方漏看 `load_idem`）不覆盖首次响应：KV 实现的
+        // `VERSION==0` 谓词保证该键只有首次成功提交能写，两个实现必须同观。
+        let store = MemoryApprovalStore::new();
+        let engine = start(INSTANCE_ID);
+        assert!(store
+            .commit_with_idem(
+                &engine,
+                &[],
+                ExpectedRev::CreateOnly,
+                Some(&idem("cmd-1", json!({ "status": "APPROVED" })))
+            )
+            .await
+            .unwrap());
+        assert!(store
+            .commit_with_idem(
+                &engine,
+                &[],
+                ExpectedRev::Exact(1),
+                Some(&idem("cmd-1", json!({ "status": "REJECTED" })))
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            store.load_idem(INSTANCE_ID, "cmd-1").await.unwrap(),
+            Some(json!({ "status": "APPROVED" }))
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_paginates_in_key_order() {
+        let store = MemoryApprovalStore::new();
+        // 乱序写入，扫描必须按实例 id 字典序返回。
+        for id in ["inst-b", "inst-a", "inst-d", "inst-c", "inst-e"] {
+            assert!(store
+                .commit(&start(id), &[], ExpectedRev::CreateOnly)
+                .await
+                .unwrap());
+        }
+
+        assert_eq!(scan_ids(&store, None, 2).await, ["inst-a", "inst-b"]);
+        // `after` 独占：等于某实例 id 时它不重复出现在下一页。
+        assert_eq!(
+            scan_ids(&store, Some("inst-b"), 2).await,
+            ["inst-c", "inst-d"]
+        );
+        assert_eq!(scan_ids(&store, Some("inst-d"), 2).await, ["inst-e"]);
+        assert!(scan_ids(&store, Some("inst-e"), 2).await.is_empty());
+
+        // 条目携带状态与修订号（供查询 RPC 直接用）。
+        let first = store
+            .scan(None, 1)
+            .await
+            .unwrap()
+            .pop()
+            .expect("first entry");
+        assert_eq!(first.engine, start("inst-a"));
+        assert_eq!(first.mod_rev, 1);
+
+        // 幂等记录不进入实例扫描面。
+        let rec = idem("cmd-1", json!({ "status": "APPROVED" }));
+        assert!(store
+            .commit_with_idem(&start("inst-a"), &[], ExpectedRev::Exact(1), Some(&rec))
+            .await
+            .unwrap());
+        assert_eq!(scan_ids(&store, None, 10).await.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn scan_limit_bounds() {
+        let store = MemoryApprovalStore::new();
+        for i in 0..(APPROVAL_SCAN_MAX_LIMIT + 1) {
+            let id = format!("inst-cap-{i:03}");
+            assert!(store
+                .commit(&start(&id), &[], ExpectedRev::CreateOnly)
+                .await
+                .unwrap());
+        }
+
+        assert_eq!(clamp_scan_limit(0), APPROVAL_SCAN_DEFAULT_LIMIT);
+        assert_eq!(clamp_scan_limit(3), 3);
+        assert_eq!(clamp_scan_limit(usize::MAX), APPROVAL_SCAN_MAX_LIMIT);
+        assert_eq!(store.scan(None, 3).await.unwrap().len(), 3);
+        assert_eq!(
+            store.scan(None, 0).await.unwrap().len(),
+            APPROVAL_SCAN_DEFAULT_LIMIT
+        );
+        // 上限对带 `after` 的续页同样生效。
+        assert_eq!(
+            store.scan(None, usize::MAX).await.unwrap().len(),
+            APPROVAL_SCAN_MAX_LIMIT
+        );
+        assert_eq!(
+            store
+                .scan(Some("inst-cap-000"), usize::MAX)
+                .await
+                .unwrap()
+                .len(),
+            APPROVAL_SCAN_MAX_LIMIT
+        );
     }
 
     #[tokio::test]
