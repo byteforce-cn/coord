@@ -428,12 +428,12 @@
   ```
   语义：CAS 重放（≤3）；前置 `suspension_meta.reason == "approval"`；完成最后一个 `Running` frame（`output = outcome`）；`context["_approval"] = outcome`；`next_target` 有值 ⇒ `current_task_index = find_task_index(target)`（缺失 ⇒ `RuntimeError`，fail-closed），否则 `+1`；`status=Running`、`suspension_meta=None`；提交 `TASK_COMPLETED, WORKFLOW_RESUMED`；`spawn_drive`。
   终态分工：`Completed` ⇒ `next_target=None`；`Rejected` ⇒ 由调用方（service）按 `on_reject` 传 target，无 target 时以 `approval_rejected` 置 fault；`Cancelled`/`Terminated` ⇒ **不**按 `on_reject` 路由，由 service 分别以 `approval_cancelled`/`approval_terminated` 置 fault（映射事实源 ADR-0013 D11）。
-  `cancel_instance`：若 `suspension_meta.reason=="approval"` ⇒ 先 `bridge.terminate(id,"system","workflow_cancelled")`（未终态时才调），再按既有取消路径提交。
+  `cancel_instance`：**所有非终态实例**先经共享 `finalize_approval_aggregate(id, "workflow_cancelled")` 收口审批聚合（无 open 分支 ⇒ `finish_if_complete` 收 `Completed`；否则 `SYSTEM_ACTOR` terminate；`NotFound`/`InvalidTransition` 视为已收口；其它错误传播中止取消），再按既有取消路径提交。
   workflow `Completed` 分支：提交前调 `bridge.finish_if_complete(id)`（幂等；不存在审批实例时为 no-op）。
 
 - [ ] **Step 1: 写失败测试**
 
-  `approve_completed_resumes_to_next_task`；`approve_rejected_resumes_to_on_reject_target`；`approve_cancelled_resumes_to_on_reject_target`；`resume_approval_without_approval_suspension_rejected`；`resume_approval_unknown_target_rejected_and_state_unchanged`；`workflow_completion_finishes_approval_instance`；`workflow_cancel_terminates_open_approval`；`resume_approval_is_cas_safe_under_replay`.
+  `approve_completed_resumes_to_next_task`；`approve_rejected_resumes_to_on_reject_target`；`cancel_running_instance_after_passed_approval_finalizes_aggregate`；`workflow_fault_after_passed_approval_finalizes_or_documents_aggregate`；`resume_approval_without_approval_suspension_rejected`；`resume_approval_unknown_target_rejected_and_state_unchanged`；`workflow_completion_finishes_approval_instance`；`workflow_cancel_terminates_open_approval`；`resume_approval_is_cas_safe_under_replay`.
   Run: `CARGO_BUILD_JOBS=3 cargo test -p coord-core --test approval_bridge_runtime`。Expected: FAIL。
 
 - [ ] **Step 2: 实现**

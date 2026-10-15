@@ -256,8 +256,10 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   （`AddSign` 补席或 `Terminate` 终止是唯一出口）。
 - 命令路径**不产生审批实例 `Faulted`**：RPC 命令只收口为 `Completed / Rejected / Cancelled /
   Terminated`；`Faulted` 保留给版本级故障——定义漂移时 `resume_approval` 在写前 fail-closed，
-  工作流实例置 `Failed`（`FAULTED`），审批命令不返回 `Faulted`。`cancel_instance` 经内部
-  `SYSTEM_ACTOR` 先终止未决审批，再按既有取消路径收口。
+  工作流实例置 `Failed`（`FAULTED`），审批命令不返回 `Faulted`。`cancel_instance` 对所有非终态
+  实例经共享 `finalize_approval_aggregate` 收口（无 open 分支 ⇒ `finish_if_complete` 收 `Completed`；
+  否则内部 `SYSTEM_ACTOR` terminate）；`fail_instance`/`fail_approval` 尽力而为，失败时聚合留待
+  管理员 `Terminate`。
 - carry（本期不接线、不在承诺内）：无 UI 审批面、无 REST facade（`coord-ui` 只做影响评估）；
   `roles` 的外部解析服务未接线（仅启动/命令路径注入的静态映射，见 D2）；审批实例**未实现**
   D8 的 watch 驱动按实例有界缓存（KV 实现按实例做线性一致单键读，无缓存/淘汰）。

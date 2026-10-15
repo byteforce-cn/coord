@@ -128,8 +128,9 @@ retries = 3
 - **挂起 / 恢复**：走到 `approve` 节点 ⇒ 实例 `SUSPENDED`，`SuspensionMeta` 给出
   `reason="approval"`、`expected_signal="approval.completed"`、`approval_instance_id` 与节点名
   （审批实例 id = workflow 实例 id）。分支本轮通过 ⇒ 按节点 `onPass` 恢复（缺省顺序推进下一
-  任务）；实例级否决/取消/终止 ⇒ 有 `onReject` 则路由，否则工作流 fault。重启对账**不**重驱动
-  挂起实例，但重建 deadline 定时器。
+  任务）；实例级否决 ⇒ 有 `onReject` 则路由，否则以 `approval_rejected` 置 fault；取消/终止
+  **不**按 `onReject` 路由，分别以 `approval_cancelled`/`approval_terminated` 置 fault
+  （映射事实源 ADR-0013 D11）。重启对账**不**重驱动挂起实例，但重建 deadline 定时器。
 - **授权**：引擎 `actor_can_act`（席位责任人/候选/被委派人）叠加桥的职责分离——默认发起人
   不可自批（`allowSelfApprove` 可开，匿名发起豁免）、加签/减签 = `signAdmins` ∪ 发起人、
   驳回至节点 = 未决席位持有人 ∪ `signAdmins` ∪ 发起人、终止 = `signAdmins`（内部
@@ -150,7 +151,8 @@ retries = 3
   过期席位从 `total` 剔除；剔除后剩余席位全部通过 ⇒ 本轮**判通过**（与「全员过期保持
   `Open`」区分）。重开（`ReturnToNode`）的席位不设 deadline。
 - **启用条件（`workflow_durable` 默认关闭）**：审批桥与审批聚合仅在 durable 工作流引擎装配时
-  注入。默认部署未开 `workflow_durable` 时审批 RPC 一律返回 `FAILED_PRECONDITION`，且 `approve`
+  注入。默认部署未开 `workflow_durable` 时审批 RPC 返回 `FAILED_PRECONDITION`（例外：保留
+  actor `system` 的 `Terminate` 先被授权拒绝为 `PERMISSION_DENIED`），且 `approve`
   节点在驱动时 fail-closed（实例 `Failed` + `workflow.faulted`）——绝不静默降级为无审批继续。
 - **存储与写路径**：状态单文档 `/_workflow/v4/instances/{instance_id}`，与 v1 的
   `/_workflow/v3/instances/` 扫描面互不可见；唯一写路径带 CAS
