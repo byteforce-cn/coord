@@ -14,8 +14,9 @@
 // 说明：raft gRPC 为真实网络（复制/选举必需）；Watch/KV 走真实 gRPC 服务
 // （Watch 为双向流，需真实 server 端承载）。
 
+mod common;
+
 use std::collections::BTreeMap;
-use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,13 +36,7 @@ use coord_server::server::CoordNode;
 use coord_server::storage::mvcc::MvccStorage;
 use coord_server::storage::redb_backend::RedbBackend;
 
-fn find_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+use crate::common::bind_listener;
 
 fn region_meta(
     region_id: RegionId,
@@ -78,12 +73,21 @@ struct NodeHost {
 }
 
 async fn start_two_node_two_region_watch_cluster() -> Vec<NodeHost> {
-    let raft_addrs: BTreeMap<u64, String> = (1..=2)
-        .map(|id| (id, format!("127.0.0.1:{}", find_port())))
-        .collect();
-    let kv_addrs: BTreeMap<u64, String> = (1..=2)
-        .map(|id| (id, format!("127.0.0.1:{}", find_port())))
-        .collect();
+    // 监听器预绑定并保持到 serve_with_incoming 接管（见 common::bind_listener）：
+    // 不得改成「find_port() 取号 → 稍后 serve(addr)」——并行测试可能拿到同一
+    // 端口，落败方 serve 静默失败 → raft 无 quorum，region leader 等待假超时。
+    let mut raft_listeners = BTreeMap::new();
+    let mut raft_addrs: BTreeMap<u64, String> = BTreeMap::new();
+    let mut kv_listeners = BTreeMap::new();
+    let mut kv_addrs: BTreeMap<u64, String> = BTreeMap::new();
+    for id in 1..=2u64 {
+        let (listener, addr) = bind_listener().await;
+        raft_listeners.insert(id, listener);
+        raft_addrs.insert(id, addr);
+        let (listener, addr) = bind_listener().await;
+        kv_listeners.insert(id, listener);
+        kv_addrs.insert(id, addr);
+    }
     let regions: [(RegionId, &[u8], &[u8]); 2] = [(1, b"", b"m"), (2, b"m", b"")];
 
     let mut hosts = Vec::new();
@@ -128,24 +132,30 @@ async fn start_two_node_two_region_watch_cluster() -> Vec<NodeHost> {
         let node = Arc::new(node);
 
         // raft gRPC（承载全部 Region）
-        let raft_addr: SocketAddr = raft_addrs[&node_id].parse().expect("parse raft addr");
+        let raft_listener = raft_listeners
+            .remove(&node_id)
+            .expect("raft listener pre-bound");
         let raft_svc = RaftRpcServer::new(rpc);
         let raft_handle = tokio::spawn(async move {
             let _ = tonic::transport::Server::builder()
                 .add_service(raft_svc)
-                .serve(raft_addr)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
+                    raft_listener,
+                ))
                 .await;
         });
 
         // KV + Watch gRPC（真实 handler）
+        let kv_listener = kv_listeners
+            .remove(&node_id)
+            .expect("kv listener pre-bound");
         let kv_svc = KvServer::from_arc(Arc::clone(&node));
         let watch_svc = WatchServer::from_arc(Arc::clone(&node));
-        let grpc_addr: SocketAddr = kv_addrs[&node_id].parse().expect("parse kv addr");
         let grpc_handle = tokio::spawn(async move {
             let _ = tonic::transport::Server::builder()
                 .add_service(kv_svc)
                 .add_service(watch_svc)
-                .serve(grpc_addr)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(kv_listener))
                 .await;
         });
 
