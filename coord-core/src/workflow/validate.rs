@@ -55,19 +55,29 @@ fn single_key_object_case(cond: &Value) -> Option<(&str, &serde_json::Map<String
 
 /// approve `mode` DSL 字符串：`all` | `any` | `quorum:<n>` | `ratio:<num>/<den>`。
 /// 其它形状返回 `None`，由调用方 fail-closed 拒绝（不猜测策略）。
+///
+/// 零阈值一律拒绝：`recount` 把 `Quorum(n)` 判作 `completed >= n`、`Ratio{num,den}` 判作
+/// `completed*den >= total*num`——`quorum:0` 与 `ratio:0/<den>` 恒真（零审批自动通过），
+/// `ratio:<num>/0` 退化（0/0 恒真，其余恒假），都在此挡在解析期。
 fn parse_join_policy(s: &str) -> Option<JoinPolicy> {
     match s {
         "all" => Some(JoinPolicy::All),
         "any" => Some(JoinPolicy::Any),
         _ => {
             if let Some(n) = s.strip_prefix("quorum:") {
-                n.parse::<u32>().ok().map(JoinPolicy::Quorum)
+                match n.parse::<u32>() {
+                    Ok(0) | Err(_) => None,
+                    Ok(n) => Some(JoinPolicy::Quorum(n)),
+                }
             } else if let Some(rest) = s.strip_prefix("ratio:") {
                 let (num, den) = rest.split_once('/')?;
-                Some(JoinPolicy::Ratio {
-                    num: num.parse().ok()?,
-                    den: den.parse().ok()?,
-                })
+                let num = num.parse::<u32>().ok()?;
+                let den = den.parse::<u32>().ok()?;
+                if num > 0 && den > 0 {
+                    Some(JoinPolicy::Ratio { num, den })
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -5090,6 +5100,33 @@ do:
 "#;
         let errs = parse_and_validate_yaml(yaml).expect_err("unknown approve.mode must reject");
         assert!(error_kind_naming(&errs, "approve.mode"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn parse_approve_rejects_zero_threshold_modes() {
+        // 零阈值在 recount 下恒真/退化：`quorum:0` 与 `ratio:0/<den>` 零审批自动通过，
+        // `ratio:<num>/0` 退化。全部必须在解析期 fail-closed，不得携带任务进入运行期。
+        for mode in ["quorum:0", "ratio:0/3", "ratio:3/0", "ratio:0/0"] {
+            let yaml = format!(
+                r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-zero-mode
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        mode: "{mode}"
+"#
+            );
+            let errs = parse_and_validate_yaml(&yaml).expect_err("zero threshold mode must reject");
+            assert!(
+                error_kind_naming(&errs, "approve.mode"),
+                "mode {mode} must reject as approve.mode: {errs:?}"
+            );
+        }
     }
 
     #[test]
