@@ -1,0 +1,2 @@
+case	status	final_status	outbox_pending	missing_event_ids	duplicate_event_ids	log
+retry	FAIL-pending:1	failed	1	0	0	spike/2026-10/spike-3-recovery/evidence/kill9-retry-20261013-122925.log

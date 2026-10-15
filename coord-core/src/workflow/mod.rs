@@ -11,6 +11,7 @@
 // - runtime: WorkflowRuntime（异步驱动循环）
 
 pub mod cron;
+pub mod durable;
 pub mod engine;
 pub mod errors;
 pub mod expression;

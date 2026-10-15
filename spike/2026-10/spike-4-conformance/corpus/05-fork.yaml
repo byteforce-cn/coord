@@ -1,0 +1,17 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: fork
+  version: "1.0.0"
+do:
+  - fan:
+      fork:
+        compete: false
+        branches:
+          - branch_a:
+              set:
+                x: 1
+          - branch_b:
+              set:
+                y: 2
+      then: exit

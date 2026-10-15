@@ -1,0 +1,14 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: call-http
+  version: "1.0.0"
+do:
+  - fetch:
+      call: http
+      with:
+        method: get
+        endpoint: "https://example.com/data"
+        headers:
+          accept: application/json
+      then: exit

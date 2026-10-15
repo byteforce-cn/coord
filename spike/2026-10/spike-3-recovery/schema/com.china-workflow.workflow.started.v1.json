@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.coord.dev/events/com.china-workflow.workflow.started.v1.json",
+  "title": "com.china-workflow.workflow.started.v1",
+  "description": "coord 工作流 Outbox 事件（投递面载荷 = OutboxRecord）。partitionkey = aggregate_id（= instance_id）；sequence 为 per-instance 单调序号。",
+  "type": "object",
+  "required": [
+    "id",
+    "aggregate_id",
+    "sequence",
+    "event_type",
+    "specversion",
+    "source",
+    "dataschema",
+    "time",
+    "data",
+    "created_at_ms",
+    "status",
+    "attempts",
+    "next_attempt_at_ms"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "全局唯一事件 ID（消费者去重键）"
+    },
+    "aggregate_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "partitionkey = instance_id"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "per-instance 单调序号"
+    },
+    "event_type": {
+      "const": "com.china-workflow.workflow.started.v1"
+    },
+    "specversion": {
+      "const": "1.0"
+    },
+    "source": {
+      "type": "string"
+    },
+    "subject": {
+      "type": "string"
+    },
+    "dataschema": {
+      "const": "https://schemas.coord.dev/events/com.china-workflow.workflow.started.v1.json"
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "data": {
+      "type": "object",
+      "description": "生命周期事件负载：实例状态快照（`emit_lifecycle` 的 data）",
+      "required": [
+        "workflowId",
+        "workflowName",
+        "workflowVersion",
+        "namespace",
+        "status"
+      ],
+      "properties": {
+        "workflowId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workflowName": {
+          "type": "string"
+        },
+        "workflowVersion": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "running"
+          ]
+        },
+        "output": {},
+        "fault": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "created_at_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "delivered",
+        "dead"
+      ]
+    },
+    "attempts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "next_attempt_at_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "delivered_at_ms": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

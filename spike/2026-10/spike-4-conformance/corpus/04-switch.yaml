@@ -1,0 +1,15 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: switch
+  version: "1.0.0"
+do:
+  - route:
+      switch:
+        - high:
+            when: "${ .counter > 10 }"
+            then: exit
+        - low:
+            when: "${ .counter <= 10 }"
+            then: exit
+      then: exit

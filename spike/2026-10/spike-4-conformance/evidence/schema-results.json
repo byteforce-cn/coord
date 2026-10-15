@@ -1,0 +1,155 @@
+{
+  "tool": "schema_check",
+  "schema": "spike/2026-10/spike-4-conformance/schema/workflow-1.0.3.yaml",
+  "results": [
+    {
+      "file": "01-minimal-set.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "02-call-http.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "03-do-task.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "04-switch.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "05-fork.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "06-for.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "07-wait.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "08-listen.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "09-emit.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "10-raise.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "11-try-catch.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "12-run-script.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "13-run-container.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "14-run-shell.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "15-run-workflow.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "16-call-function.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "17-use-extensions.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "18-run-await-return.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "19-legacy-states-0.8.yaml",
+      "schema_ok": false,
+      "errors": [
+        ": 'document' is a required property",
+        ": 'do' is a required property"
+      ],
+      "dsl": null
+    },
+    {
+      "file": "20-invalid-no-document.yaml",
+      "schema_ok": false,
+      "errors": [
+        ": 'document' is a required property"
+      ],
+      "dsl": null
+    },
+    {
+      "file": "21-call-grpc.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "22-if-condition.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "23-call-openapi.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    },
+    {
+      "file": "24-use-functions.yaml",
+      "schema_ok": true,
+      "errors": [],
+      "dsl": "1.0.3"
+    }
+  ]
+}

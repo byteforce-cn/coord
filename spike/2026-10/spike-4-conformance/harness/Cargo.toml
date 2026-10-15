@@ -1,0 +1,11 @@
+[package]
+name = "spike-conformance"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "SPIKE 2026-10 Spike 4 — 官方 1.0.3 语料 × coord 解析器 符合性扫描（决策证据）"
+
+[dependencies]
+coord-core = { path = "../../../../coord-core" }
+serde_json = { workspace = true }
+serde_yaml = "0.9"

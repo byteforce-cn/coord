@@ -1,0 +1,4 @@
+do:
+  - init:
+      set:
+        counter: 0

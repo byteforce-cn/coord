@@ -1994,6 +1994,30 @@ pub mod phase4 {
         runtime: Option<Arc<EngineRuntime>>,
         expression: ExpressionEvaluator,
         clock: SystemClock,
+        /// Spike 3：KV outbox/定时器存储（Some = durable 装配）
+        durable_store: Option<Arc<crate::services::outbox_kv::KvOutboxStore>>,
+        /// Spike 3：outbox relay（Some 且 `relay_enabled` = 启动后持续投递）
+        outbox_relay: Option<Arc<coord_core::workflow::durable::OutboxRelay>>,
+        /// Spike 3：relay 是否由 `start()` 拉起
+        relay_enabled: bool,
+        /// Spike 3：relay 轮询间隔（毫秒）
+        relay_interval_ms: u64,
+    }
+
+    /// Spike 3：持久化 outbox / 定时器接线选项。
+    ///
+    /// 只在 [`WorkflowEngineService::new_with_kv_store_durable`] 使用；
+    /// 内存路径（`new` / `new_with_dispatch` / `new_for_test`）行为逐字不变。
+    pub struct DurableEngineOptions {
+        /// 事件投递面（MQ 服务实例，agent 内 redb 持久化）
+        pub mq: Arc<crate::services::mq::MessageQueueService>,
+        /// 事件 topic
+        pub topic: String,
+        /// 是否由 `start()` 拉起 relay：
+        /// `false` 时事件只落 outbox（崩溃恢复证据刻意拆开「写」与「投递」两段）
+        pub relay_enabled: bool,
+        /// relay 轮询间隔（毫秒）
+        pub relay_interval_ms: u64,
     }
 
     impl WorkflowEngineService {
@@ -2045,11 +2069,97 @@ pub mod phase4 {
             )
         }
 
-        /// 共享装配：store + dispatcher 决定 runtime，其余字段相同。
+        /// 创建「KV 持久化 + Outbox + 持久化定时器」的引擎（Spike 2026-10 Spike 3）。
+        ///
+        /// 与 [`Self::new_with_kv_store_and_dispatch`] 的差别仅在注入面：
+        /// - 事件先落 KV outbox（`AtomicOutboxCommit` 时与状态同事务），
+        ///   由 relay 投递到 MQ；
+        /// - `wait`/`retry`/超时写持久化定时器，重启后扫描到期项；
+        /// - `listen` 用 MQ 订阅 + KV 持久化游标（重启续读）。
+        pub fn new_with_kv_store_durable(
+            inner: Arc<AgentInner>,
+            dispatch: &WorkflowDispatchConfig,
+            opts: DurableEngineOptions,
+        ) -> Self {
+            use crate::services::mq_event_provider::{CursorStore, MqEventProvider};
+            use crate::services::outbox_kv::{KvCursorStore, KvOutboxStore};
+            use crate::services::outbox_relay::MqOutboxSink;
+            use coord_core::workflow::durable::{
+                AtomicOutboxCommit, DurableSupport, DurableTimerStore, OutboxRelay, OutboxSink,
+                OutboxStore, RelayPolicy,
+            };
+
+            let kv_store = Arc::new(KvWorkflowStore::new(Arc::clone(&inner)));
+            let store: Arc<dyn WorkflowStore + Send + Sync> =
+                Arc::clone(&kv_store) as Arc<dyn WorkflowStore + Send + Sync>;
+
+            let durable_kv = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+            let sink: Arc<dyn OutboxSink> =
+                Arc::new(MqOutboxSink::new(Arc::clone(&opts.mq), opts.topic.clone()));
+            let relay = Arc::new(OutboxRelay::new(
+                Arc::clone(&durable_kv) as Arc<dyn OutboxStore>,
+                sink,
+                RelayPolicy::default(),
+            ));
+
+            let cursors: Arc<dyn CursorStore> = Arc::new(KvCursorStore::new(Arc::clone(&inner)));
+            let event_provider: Arc<dyn EventProvider + Send + Sync> =
+                Arc::new(MqEventProvider::new_with_cursor_store(
+                    Arc::clone(&opts.mq),
+                    opts.topic.clone(),
+                    cursors,
+                ));
+
+            let support = DurableSupport::new(
+                Arc::clone(&durable_kv) as Arc<dyn DurableTimerStore>,
+                Arc::clone(&durable_kv) as Arc<dyn OutboxStore>,
+            )
+            .with_atomic_commit(Arc::clone(&durable_kv) as Arc<dyn AtomicOutboxCommit>);
+
+            Self::assemble(
+                store,
+                Some(kv_store),
+                Arc::new(HttpTaskDispatcher::from_config(dispatch)),
+                event_provider,
+                Some(support),
+                Some(Arc::clone(&durable_kv)),
+                Some(relay),
+                opts.relay_enabled,
+                opts.relay_interval_ms,
+            )
+        }
+
+        /// 共享装配：store + dispatcher 决定 runtime，其余字段相同（内存路径）。
         fn with_dispatcher(
             store: Arc<dyn WorkflowStore + Send + Sync>,
             kv_store: Option<Arc<KvWorkflowStore>>,
             dispatcher: Arc<dyn TaskDispatcher + Send + Sync>,
+        ) -> Self {
+            Self::assemble(
+                store,
+                kv_store,
+                dispatcher,
+                Arc::new(MemoryEventProvider::new()) as Arc<dyn EventProvider + Send + Sync>,
+                None,
+                None,
+                None,
+                false,
+                1000,
+            )
+        }
+
+        /// 装配入口（内存路径与 durable 路径共用；不破坏既有构造签名）。
+        #[allow(clippy::too_many_arguments)]
+        fn assemble(
+            store: Arc<dyn WorkflowStore + Send + Sync>,
+            kv_store: Option<Arc<KvWorkflowStore>>,
+            dispatcher: Arc<dyn TaskDispatcher + Send + Sync>,
+            event_provider: Arc<dyn EventProvider + Send + Sync>,
+            durable: Option<coord_core::workflow::durable::DurableSupport>,
+            durable_store: Option<Arc<crate::services::outbox_kv::KvOutboxStore>>,
+            outbox_relay: Option<Arc<coord_core::workflow::durable::OutboxRelay>>,
+            relay_enabled: bool,
+            relay_interval_ms: u64,
         ) -> Self {
             let expression = ExpressionEvaluator::new();
             let clock = SystemClock;
@@ -2057,13 +2167,16 @@ pub mod phase4 {
                 expression.clone(),
                 clock.clone(),
             );
-            let runtime = WorkflowRuntime::new(
+            let mut runtime = WorkflowRuntime::new(
                 executor,
                 clock.clone(),
                 Arc::clone(&store),
                 dispatcher,
-                Arc::new(MemoryEventProvider::new()) as Arc<dyn EventProvider + Send + Sync>,
+                event_provider,
             );
+            if let Some(durable) = durable {
+                runtime = runtime.with_durable(durable);
+            }
 
             Self {
                 store,
@@ -2071,6 +2184,10 @@ pub mod phase4 {
                 runtime: Some(Arc::new(runtime)),
                 expression,
                 clock,
+                durable_store,
+                outbox_relay,
+                relay_enabled,
+                relay_interval_ms,
             }
         }
 
@@ -2100,6 +2217,10 @@ pub mod phase4 {
                 runtime: Some(Arc::new(runtime)),
                 expression,
                 clock,
+                durable_store: None,
+                outbox_relay: None,
+                relay_enabled: false,
+                relay_interval_ms: 1000,
             }
         }
 
@@ -2486,6 +2607,10 @@ pub mod phase4 {
                 runtime: self.runtime.clone(),
                 expression: self.expression.clone(),
                 clock: self.clock.clone(),
+                durable_store: self.durable_store.clone(),
+                outbox_relay: self.outbox_relay.clone(),
+                relay_enabled: self.relay_enabled,
+                relay_interval_ms: self.relay_interval_ms,
             }
         }
     }
@@ -2506,6 +2631,26 @@ pub mod phase4 {
                     .await
                     .map_err(|e| format!("workflow KvWorkflowStore init failed: {e}"))?;
                 tracing::info!("Workflow engine started with KvWorkflowStore (raft-persisted)");
+            }
+
+            // Spike 3：持久化恢复 —— 到期定时器先触发，再对账挂起实例（重订阅 listen、
+            // 补写 wait/retry 定时器），最后拉起周期扫描与 relay。
+            if let (Some(runtime), Some(_durable)) = (&self.runtime, &self.durable_store) {
+                runtime.recover_durable_state().await;
+                runtime.start_durable_workers();
+                tracing::info!("Workflow engine durable recovery done (outbox + persisted timers)");
+            }
+            if self.relay_enabled {
+                if let Some(relay) = &self.outbox_relay {
+                    let _handle = crate::services::outbox_relay::spawn_outbox_relay(
+                        Arc::clone(relay),
+                        std::time::Duration::from_millis(self.relay_interval_ms.max(1)),
+                    );
+                    tracing::info!(
+                        interval_ms = self.relay_interval_ms,
+                        "Workflow outbox relay started"
+                    );
+                }
             }
             Ok(())
         }

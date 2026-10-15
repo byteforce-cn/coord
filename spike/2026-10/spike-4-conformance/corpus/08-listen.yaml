@@ -1,0 +1,13 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: listen
+  version: "1.0.0"
+do:
+  - await_event:
+      listen:
+        to:
+          one:
+            with:
+              type: com.example.approved
+      then: exit

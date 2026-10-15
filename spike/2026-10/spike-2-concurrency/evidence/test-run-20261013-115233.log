@@ -1,0 +1,22 @@
+warning: coord-server@0.3.0: coord-ui/dist/ 未构建，已生成占位页面。运行 `cd coord-ui && pnpm install && pnpm build` 构建完整前端。
+    Finished `test` profile [optimized + debuginfo] target(s) in 11.16s
+     Running tests/spike2_concurrency.rs (target/debug/deps/spike2_concurrency-0ce5437db02d7587)
+
+running 7 tests
+test cas_stale_revision_rejected ... ok
+test cas_two_writers_same_rev_one_wins ... ok
+test engine_concurrent_drivers_duplicate_without_lease ... TIMELINE {"test":"no_lease_contrast","ts_ms":1791892367444,"event":"drive_requested","detail":"runtime-A,runtime-B"}
+TIMELINE {"test":"no_lease_contrast","ts_ms":1791892367529,"event":"side_effect_dispatch","detail":"call#1"}
+TIMELINE {"test":"no_lease_contrast","ts_ms":1791892367568,"event":"side_effect_dispatch","detail":"call#2"}
+TIMELINE {"test":"no_lease_contrast","ts_ms":1791892368117,"event":"terminal","detail":"reached"}
+ok
+test engine_concurrent_drivers_single_effect ... TIMELINE {"test":"single_effect","ts_ms":1791892368218,"event":"drive_requested","detail":"runtime-A,runtime-B"}
+TIMELINE {"test":"single_effect","ts_ms":1791892368325,"event":"side_effect_dispatch","detail":"call#1"}
+TIMELINE {"test":"single_effect","ts_ms":1791892368869,"event":"terminal","detail":"reached"}
+ok
+test fenced_write_rejects_stale_driver ... ok
+test lease_expiry_reacquire ... ok
+test lease_mutex_exclusive ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.00s
+

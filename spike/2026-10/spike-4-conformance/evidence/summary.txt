@@ -1,0 +1,7 @@
+{"counts": {"PASS": 19, "GAP": 3, "LAX": 1, "REJECTED": 1}, "out": "spike/2026-10/spike-4-conformance/evidence/matrix.tsv"}
+== GAP ==
+  04-switch.yaml: switch condition missing transition target | switch condition missing transition target
+  16-call-function.yaml: task 'invoke' references unknown function 'myFunction'
+  23-call-openapi.yaml: task 'api' references unknown function 'openapi'
+== LAX ==
+  19-legacy-states-0.8.yaml: : 'document' is a required property | : 'do' is a required property

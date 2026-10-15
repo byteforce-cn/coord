@@ -3523,6 +3523,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "spike-conformance"
+version = "0.1.0"
+dependencies = [
+ "coord-core",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
+name = "spike3-recovery-harness"
+version = "0.1.0"
+dependencies = [
+ "coord-agent",
+ "coord-client",
+ "coord-core",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "spin"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

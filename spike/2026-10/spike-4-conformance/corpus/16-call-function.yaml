@@ -1,0 +1,11 @@
+document:
+  dsl: "1.0.3"
+  namespace: spike
+  name: call-function
+  version: "1.0.0"
+do:
+  - invoke:
+      call: myFunction
+      with:
+        arg1: 1
+      then: exit

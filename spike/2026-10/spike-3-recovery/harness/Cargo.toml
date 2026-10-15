@@ -1,0 +1,13 @@
+[package]
+name = "spike3-recovery-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "SPIKE 2026-10 Spike 3 — Outbox + 崩溃恢复的进程级 kill -9 工装（决策证据）"
+
+[dependencies]
+coord-core = { path = "../../../../coord-core" }
+coord-agent = { path = "../../../../coord-agent" }
+coord-client = { path = "../../../../coord-client" }
+tokio = { workspace = true }
+serde_json = { workspace = true }
