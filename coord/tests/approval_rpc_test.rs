@@ -26,7 +26,7 @@ use coord_agent::WorkflowDispatchConfig;
 use coord_client::config::Config;
 use coord_client::Client;
 use coord_core::workflow::approval::bridge::{ApprovalCommand, BridgeError};
-use coord_core::workflow::approval::model::{BranchStatus, SeatSpec, TaskStatus};
+use coord_core::workflow::approval::model::{BranchStatus, SeatSpec, TaskKind, TaskStatus};
 use coord_core::workflow::durable::OutboxStore;
 use coord_core::workflow::model::InstanceStatus;
 use serde_json::json;
@@ -268,6 +268,24 @@ do:
         mode: "all"
         deadline:
           seconds: 2
+  - done:
+      set:
+        variable: done
+        value: '"yes"'
+"#;
+
+/// 单节点会签 + 驳回重开：重开时复用目标节点上一次次尝试的席位。
+const SELF_RETURN_YAML: &str = r#"
+document:
+  dsl: "1.0.3"
+  namespace: acceptance-return-seats
+  name: approve-return-seats
+  version: "1.0.0"
+do:
+  - review:
+      approve:
+        approvers: ["u1"]
+        mode: "all"
   - done:
       set:
         variable: done
@@ -784,4 +802,99 @@ async fn expired_seat_never_auto_passes() {
     assert_eq!(inst.status, InstanceStatus::Suspended);
     assert_eq!(env.event_count(&wf_id, ROUND_PASSED).await, 0);
     assert_eq!(env.event_count(&wf_id, APPROVAL_COMPLETED).await, 0);
+}
+
+// ──────────────────────────────────────── 判据 3b：驳回重开必须重开席位
+
+/// `ReturnToNode` 重开后必须同批重开目标节点席位：新席位可查、可批，工作流恢复并完成。
+///
+/// 若只重开分支不开轮次，节点会停在「Open 但零席位」——无待办、无 deadline、无人可投，
+/// 工作流永久 `SUSPENDED`。本用例证明重开后仍有可恢复的投票路径。
+#[tokio::test(flavor = "multi_thread")]
+async fn return_to_node_reopens_seats_and_can_pass_again() {
+    let env = setup().await;
+    let wf_id = env
+        .deploy_start("acceptance-return-seats", SELF_RETURN_YAML, "origin")
+        .await;
+    env.await_status(&wf_id, InstanceStatus::Suspended).await;
+
+    let before = env.svc.get_instance_detail(&wf_id).await.expect("detail");
+    let review_branch = before
+        .branches
+        .iter()
+        .find(|b| b.node == "review" && b.attempt == 1)
+        .expect("review attempt 1")
+        .id
+        .clone();
+
+    env.svc
+        .approval_command(
+            &wf_id,
+            "origin",
+            ApprovalCommand::ReturnToNode {
+                branch_id: &review_branch,
+                target_node: "review",
+                comment: Some("rework"),
+            },
+            None,
+        )
+        .await
+        .expect("return to node");
+
+    // 重开分支 Open 且带可计票席位（不再是无席可批的死分支）。
+    let reopened = env.svc.get_instance_detail(&wf_id).await.expect("detail");
+    let attempt2 = reopened
+        .branches
+        .iter()
+        .find(|b| b.node == "review" && b.attempt == 2)
+        .expect("review attempt 2");
+    assert_eq!(attempt2.status, BranchStatus::Open);
+    let seat = reopened
+        .tasks
+        .iter()
+        .find(|t| t.branch_id == attempt2.id && t.assignee.as_deref() == Some("u1"))
+        .expect("reopened seat for u1");
+    assert_eq!(seat.kind, TaskKind::Approval);
+    assert!(seat.deadline.is_none(), "重开席位不带 deadline");
+
+    // 待办可见：重开席位进入 u1 的待办投影。
+    let pending = env
+        .svc
+        .list_pending_tasks("u1", 0, None)
+        .await
+        .expect("list pending")
+        .0;
+    assert!(
+        pending
+            .iter()
+            .any(|t| t.instance_id == wf_id && t.task_id == seat.id),
+        "重开席位必须进入 u1 待办: {pending:?}"
+    );
+
+    // 新席位可批 ⇒ 工作流恢复并走到终态。
+    let (_, status) = env
+        .svc
+        .approval_command(
+            &wf_id,
+            "u1",
+            ApprovalCommand::Approve {
+                task_id: &seat.id,
+                comment: None,
+            },
+            None,
+        )
+        .await
+        .expect("approve reopened seat");
+    assert_eq!(status, "RUNNING", "重开通过不产生审批实例终态");
+    env.await_status(&wf_id, InstanceStatus::Completed).await;
+
+    let inst = env
+        .svc
+        .get_instance(&wf_id)
+        .await
+        .unwrap()
+        .expect("instance");
+    assert_eq!(inst.context["done"], json!("yes"));
+    let final_detail = env.svc.get_instance_detail(&wf_id).await.expect("detail");
+    assert_eq!(final_detail.status, "COMPLETED");
 }

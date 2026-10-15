@@ -669,9 +669,19 @@ impl ApprovalBridge {
                 comment,
             } => {
                 self.guard_return_to_node(engine, actor, branch_id)?;
-                engine
-                    .return_to_node(expected, branch_id, target_node, actor, comment, now)
-                    .map(|(_, effects)| effects)
+                // 驳回重开必须与开席**同批**：`return_to_node` 只建新 attempt 分支、不开
+                // 轮次，若不同批 `open_approval`，节点会停在「Open 但零席位」——无待办、
+                // 无 deadline、无人可投，工作流永久挂起。席位取目标节点最近一次 attempt
+                // 的席位；重开不设 deadline（旧的绝对截止早已过期，沿用会立即过期），
+                // 兜底出口是 `sign_admins` 的 Terminate / AddSign。
+                let seats = prior_seats(engine, target_node)?;
+                let (new_branch, mut effects) =
+                    engine.return_to_node(expected, branch_id, target_node, actor, comment, now)?;
+                let rev = engine.instance.revision;
+                let (_, _, open_effects) =
+                    engine.open_approval(rev, &new_branch, seats, None, now)?;
+                effects.extend(open_effects);
+                Ok(effects)
             }
             ApprovalCommand::Withdraw => engine.withdraw(expected, actor, now),
             ApprovalCommand::Terminate { reason } => {
@@ -874,6 +884,42 @@ fn node_outcome_for(status: BranchStatus) -> Option<NodeOutcome> {
         BranchStatus::Rejected => Some(NodeOutcome::Rejected),
         _ => None,
     }
+}
+
+/// 目标节点最近一次 attempt 的席位，供驳回重开复用。
+///
+/// 席位按 `Task` 逐字还原（`kind` / `assignee` / `candidates`）。目标节点无可复用席位时
+/// fail-closed：绝不留下「Open 但零席位」的不可恢复分支。
+fn prior_seats(engine: &Engine, target_node: &str) -> Result<Vec<SeatSpec>, ApprovalError> {
+    let branch = match engine
+        .branches
+        .values()
+        .filter(|b| b.node == target_node)
+        .max_by_key(|b| b.attempt)
+    {
+        Some(b) => b,
+        None => {
+            return Err(ApprovalError::InvalidTransition(
+                "return target has no prior seats".into(),
+            ))
+        }
+    };
+    let seats: Vec<SeatSpec> = engine
+        .tasks
+        .values()
+        .filter(|t| t.branch_id == branch.id)
+        .map(|t| SeatSpec {
+            assignee: t.assignee.clone(),
+            candidates: t.candidates.clone(),
+            kind: t.kind,
+        })
+        .collect();
+    if seats.is_empty() {
+        return Err(ApprovalError::InvalidTransition(
+            "return target has no prior seats".into(),
+        ));
+    }
+    Ok(seats)
 }
 
 /// 工作流实例的 JSON 上下文 → 审批实例作用域；非对象（含 `Null`）取空作用域。
