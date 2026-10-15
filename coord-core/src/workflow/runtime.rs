@@ -29,8 +29,8 @@ use super::approval::bridge::{ApprovalBridge, BridgeError, NodeOutcome, SYSTEM_A
 use super::durable::{DurableSupport, OutboxRecord, TimerKind, TimerRecord};
 use super::engine::WorkflowExecutor;
 use super::model::{
-    EventFilter, InstanceStatus, StepResult, SuspendReason, SuspensionMeta, Task, TaskFrame,
-    TaskStatus, WorkflowDefinition, WorkflowFault, WorkflowInstance,
+    ApproveTask, EventFilter, InstanceStatus, StepResult, SuspendReason, SuspensionMeta, Task,
+    TaskFrame, TaskStatus, WorkflowDefinition, WorkflowFault, WorkflowInstance,
 };
 use super::ports::{
     Clock, DispatchResult, EventProvider, ExpressionEval, InstanceLease, LeaseGuard,
@@ -799,9 +799,10 @@ where
 
     /// 审批节点结论 → 恢复 / 路由 / 故障。
     ///
-    /// 通过：清挂起并顺序推进到后继任务；否决：节点声明了 `on_reject` 则路由到目标，
-    /// 否则以 `approval_rejected` 置 fault。截止路径与审批命令的服务层共用本映射，
-    /// 故 `on_reject` 按挂起帧所在节点的 [`ApproveTask`](super::model::ApproveTask) 解析。非审批挂起 / 定义漂移由
+    /// 通过：清挂起并按节点声明的 `on_pass` 路由（未声明则顺序推进）；否决：节点声明了
+    /// `on_reject` 则路由到目标，否则以 `approval_rejected` 置 fault。截止路径与审批命令的
+    /// 服务层共用本映射，故 `on_pass`/`on_reject` 都按挂起帧所在节点的
+    /// [`ApproveTask`](super::model::ApproveTask) 解析。非审批挂起 / 定义漂移由
     /// [`Self::resume_approval`]、[`Self::fail_approval`] 的前置守卫 fail-closed。
     pub async fn apply_approval_node_outcome(
         &self,
@@ -810,8 +811,13 @@ where
     ) -> Result<WorkflowInstance, RuntimeError> {
         match node_outcome {
             NodeOutcome::Passed => {
-                self.resume_approval(instance_id, serde_json::json!({"status": "passed"}), None)
-                    .await
+                let target = self.suspended_approve_on_pass(instance_id).await?;
+                self.resume_approval(
+                    instance_id,
+                    serde_json::json!({"status": "passed"}),
+                    target.as_deref(),
+                )
+                .await
             }
             NodeOutcome::Rejected => match self.suspended_approve_on_reject(instance_id).await? {
                 Some(target) => {
@@ -834,11 +840,31 @@ where
         }
     }
 
+    /// 解析挂起实例当前 approve 节点的 `on_pass` 目标：按 `current_task_index` 在钉死定义里
+    /// 定位 [`ApproveTask`](super::model::ApproveTask)（与驱动挂起时的口径一致）；非 approve 节点或未声明返回 `None`。
+    async fn suspended_approve_on_pass(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<String>, RuntimeError> {
+        self.suspended_approve_target(instance_id, |task| task.on_pass.clone())
+            .await
+    }
+
     /// 解析挂起实例当前 approve 节点的 `on_reject` 目标：按 `current_task_index` 在钉死定义里
     /// 定位 [`ApproveTask`](super::model::ApproveTask)（与驱动挂起时的口径一致）；非 approve 节点或未声明返回 `None`。
     async fn suspended_approve_on_reject(
         &self,
         instance_id: &str,
+    ) -> Result<Option<String>, RuntimeError> {
+        self.suspended_approve_target(instance_id, |task| task.on_reject.clone())
+            .await
+    }
+
+    /// 读取挂起实例钉死的定义，并对当前 approve 节点取 `select` 选中的跳转目标。
+    async fn suspended_approve_target(
+        &self,
+        instance_id: &str,
+        select: impl FnOnce(&ApproveTask) -> Option<String>,
     ) -> Result<Option<String>, RuntimeError> {
         let inst = self
             .store
@@ -865,7 +891,7 @@ where
             .do_tasks
             .get(inst.current_task_index)
             .and_then(|named| match &named.task {
-                Task::Approve(task) => task.on_reject.clone(),
+                Task::Approve(task) => select(task),
                 _ => None,
             }))
     }
@@ -1245,6 +1271,21 @@ where
         definition: &WorkflowDefinition,
         input: Value,
     ) -> Result<WorkflowInstance, RuntimeError> {
+        self.start_as(definition, input, None).await
+    }
+
+    /// [`Self::start`] 的发起人形态：把 CCT 主体钉到实例的 `initiator` 上。
+    ///
+    /// 发起人必须在 `save_instance` **之前**落到实例上：审批节点开启时桥读它做
+    /// 自审判定（`allow_self_approve` 关时发起人不可自批），而 `spawn_drive` 异步
+    /// 拉起驱动，事后回填会与之竞争并可能让审批实例记成 `anonymous`。
+    /// `None` 与旧快照兼容（实例无 `initiator` 字段）。
+    pub async fn start_as(
+        &self,
+        definition: &WorkflowDefinition,
+        input: Value,
+        initiator: Option<&str>,
+    ) -> Result<WorkflowInstance, RuntimeError> {
         let now_ms = self.clock.now_ms();
 
         // 工作流级输入变换/校验
@@ -1255,6 +1296,7 @@ where
                 let mut inst = WorkflowInstance::new(definition, Value::Null, now_ms);
                 inst.status = InstanceStatus::Failed;
                 inst.fault = Some(fault);
+                inst.initiator = initiator.map(str::to_string);
                 inst.updated_at = now_ms;
                 self.store
                     .save_instance(&inst)
@@ -1264,7 +1306,8 @@ where
             }
         };
 
-        let inst = WorkflowInstance::new(definition, input_val, now_ms);
+        let mut inst = WorkflowInstance::new(definition, input_val, now_ms);
+        inst.initiator = initiator.map(str::to_string);
 
         self.store
             .save_instance(&inst)
@@ -7252,6 +7295,70 @@ mod tests {
         assert!(
             done.context.get("done").is_none(),
             "通过路径顺序推进到 end，不执行 rework"
+        );
+        assert_eq!(done.context["_approval"]["status"], "passed");
+    }
+
+    /// 审批节点声明 `on_pass` ⇒ 截止路径的通过也必须路由到该目标，而不是顺序推进
+    ///（命令路径与截止路径共用 helper，两条入口不得分叉）。
+    #[tokio::test]
+    async fn expire_triggered_pass_routes_to_on_pass_target() {
+        let (rt, bridge, approval_store, timers) = approval_deadline_runtime();
+        let mut task = approve_task(&["alice", "bob"]);
+        task.deadline = Some("PT60S".into());
+        task.on_pass = Some("rework".into());
+        let def = make_definition_ext(
+            "approve-expire-onpass-wf",
+            vec![
+                NamedTask {
+                    name: "review".into(),
+                    task: Task::Approve(task),
+                },
+                NamedTask {
+                    name: "end".into(),
+                    task: Task::End(EndTask {}),
+                },
+                NamedTask {
+                    name: "rework".into(),
+                    task: Task::Set(SetTask {
+                        variable: "done".into(),
+                        value: "\"rework-done\"".into(),
+                    }),
+                },
+            ],
+            None,
+            None,
+            None,
+            Default::default(),
+        );
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let _ = await_approval_deadline_timer(&timers, 61_000).await;
+
+        let seat = seat_id_for(&approval_store, &started.id, "alice").await;
+        bridge
+            .command(
+                &started.id,
+                "alice",
+                ApprovalCommand::Approve {
+                    task_id: &seat,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // bob 到期 ⇒ 混合判定为通过 ⇒ 按 on_pass 路由到 rework（跳过 end）。
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+
+        let done = await_status(store_of(&rt), &started.id, InstanceStatus::Completed).await;
+        assert_eq!(
+            done.context["done"], "rework-done",
+            "on_pass 目标必须生效，不得顺序推进到 end"
         );
         assert_eq!(done.context["_approval"]["status"], "passed");
     }

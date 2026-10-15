@@ -319,20 +319,22 @@ impl ApprovalBridge {
         cmd: ApprovalCommand<'_>,
         idem_key: Option<&str>,
     ) -> Result<CommandOutcome, BridgeError> {
-        if let Some(key) = idem_key {
-            if let Some(cached) = self
-                .store
-                .load_idem(approval_id, key)
-                .await
-                .map_err(BridgeError::from)?
-            {
-                return Ok(CommandOutcome::Duplicate(cached));
-            }
-        }
         let now = self.clock.now_ms();
         let mut attempt = 0u32;
         loop {
             attempt += 1;
+            // 每轮重查幂等键：并发同 key 的命令里，先提交者写下了响应，慢者的 CAS
+            // 冲突重试必须在此命中 `Duplicate` 而不是拿新修订号再 Apply 一次。
+            if let Some(key) = idem_key {
+                if let Some(cached) = self
+                    .store
+                    .load_idem(approval_id, key)
+                    .await
+                    .map_err(BridgeError::from)?
+                {
+                    return Ok(CommandOutcome::Duplicate(cached));
+                }
+            }
             let (mut engine, mod_rev) = self
                 .store
                 .load(approval_id)
@@ -369,6 +371,13 @@ impl ApprovalBridge {
                 return Err(BridgeError::Stale(format!("command on {approval_id}")));
             }
         }
+    }
+
+    /// 底层存储的只读句柄（查询面：实例快照投影 + 待办分页扫描）。
+    ///
+    /// 只暴露读；写路径仍只有本模块的命令方法（服务层不得绕过桥直接写）。
+    pub fn store(&self) -> &Arc<dyn ApprovalStore> {
+        &self.store
     }
 
     /// 仍 open 的席位中最早的 `deadline`（无 open 席位或无 deadline 返回 `None`）。
@@ -881,7 +890,7 @@ mod tests {
     use crate::workflow::approval::model::{
         Branch, InstanceStatus as ApprovalStatus, JoinPolicy, RejectPolicy, RoundStatus, TaskStatus,
     };
-    use crate::workflow::approval::store::MemoryApprovalStore;
+    use crate::workflow::approval::store::{ApprovalInstanceEntry, MemoryApprovalStore};
     use crate::workflow::ports::test_utils::TestClock;
     use serde_json::json;
 
@@ -1265,6 +1274,99 @@ mod tests {
             events_after_first,
             "重放不得重复写事件"
         );
+    }
+
+    /// 并发同 key：当本轮 CAS 冲突（他人已推进修订号）时，重试环必须先重查幂等键，
+    /// 命中即返回 `Duplicate`，**不得**拿新修订号再 Apply 一次。
+    #[tokio::test]
+    async fn command_idem_retry_after_cas_conflict_returns_duplicate() {
+        // 包装内存存储：open 提交（首轮）透传；命令提交一律 CAS 冲突；
+        // 幂等键第二次读取才命中（模拟先提交者已写下响应）。
+        struct ConflictOnceStore {
+            inner: Arc<MemoryApprovalStore>,
+            idem_reads: std::sync::atomic::AtomicUsize,
+            commits: std::sync::atomic::AtomicUsize,
+            cached: Value,
+        }
+
+        #[async_trait::async_trait]
+        impl ApprovalStore for ConflictOnceStore {
+            async fn load(&self, id: &str) -> Result<Option<(Engine, i64)>, StoreError> {
+                self.inner.load(id).await
+            }
+            async fn load_idem(&self, id: &str, key: &str) -> Result<Option<Value>, StoreError> {
+                if self
+                    .idem_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    >= 1
+                {
+                    Ok(Some(self.cached.clone()))
+                } else {
+                    self.inner.load_idem(id, key).await
+                }
+            }
+            async fn commit_with_idem(
+                &self,
+                engine: &Engine,
+                events: &[OutboxRecord],
+                expected: ExpectedRev,
+                idem: Option<&IdemRecord>,
+            ) -> Result<bool, StoreError> {
+                let n = self
+                    .commits
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    self.inner
+                        .commit_with_idem(engine, events, expected, idem)
+                        .await
+                } else {
+                    Ok(false)
+                }
+            }
+            async fn scan(
+                &self,
+                after: Option<&str>,
+                limit: usize,
+            ) -> Result<Vec<ApprovalInstanceEntry>, StoreError> {
+                self.inner.scan(after, limit).await
+            }
+        }
+
+        let inner = Arc::new(MemoryApprovalStore::new());
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(T0));
+        let cached = json!({"instance_id": ID, "status": "RUNNING"});
+        let bridge = ApprovalBridge::new(
+            Arc::new(ConflictOnceStore {
+                inner: Arc::clone(&inner),
+                idem_reads: std::sync::atomic::AtomicUsize::new(0),
+                commits: std::sync::atomic::AtomicUsize::new(0),
+                cached: cached.clone(),
+            }),
+            clock,
+            None,
+        );
+        bridge
+            .ensure_node_open(&wf(), "review", &approve_task(&["alice"]))
+            .await
+            .unwrap();
+        let task_id = task_id_for(&inner, "alice").await;
+
+        let outcome = bridge
+            .command(
+                ID,
+                "alice",
+                ApprovalCommand::Approve {
+                    task_id: &task_id,
+                    comment: None,
+                },
+                Some("idem-race"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, CommandOutcome::Duplicate(cached));
+        // 冲突轮不落状态：状态仍是 open 单席，命令未被重复应用。
+        let (engine, _) = inner.load(ID).await.unwrap().unwrap();
+        assert!(engine.tasks.values().all(|t| t.status.is_open()));
     }
 
     #[tokio::test]

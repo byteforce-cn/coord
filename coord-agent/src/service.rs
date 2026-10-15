@@ -148,6 +148,14 @@ pub struct ServiceConfig {
     #[serde(default = "default_workflow_events_topic")]
     pub workflow_events_topic: String,
 
+    /// 审批节点 `roles` 的角色解析映射（角色名 → 审批人）。
+    ///
+    /// `approve` 节点的 `roles` 在节点开启时经 `MapApproverResolver` 展开为具体审批人；
+    /// 未映射的角色 fail-closed（不静默当空席位，否则无人可批的节点会被引擎立即判通过）。
+    /// 缺省为空映射 = 既有配置文件不写本段照常加载（未使用 `roles` 的节点不受影响）。
+    #[serde(default)]
+    pub workflow_approval_roles: std::collections::HashMap<String, Vec<String>>,
+
     /// 权限策略引擎（OPA）
     #[serde(default)]
     pub policy: bool,
@@ -238,6 +246,7 @@ impl Default for ServiceConfig {
             workflow: false,
             workflow_durable: false,
             workflow_events_topic: default_workflow_events_topic(),
+            workflow_approval_roles: std::collections::HashMap::new(),
             policy: false,
             scheduler: false,
             circuit_breaker: false,
@@ -284,6 +293,7 @@ impl ServiceConfig {
             // dev 保持与生产默认相同的现有装配路径；开启须显式。
             workflow_durable: false,
             workflow_events_topic: default_workflow_events_topic(),
+            workflow_approval_roles: std::collections::HashMap::new(),
             policy: true,
             scheduler: true,
             circuit_breaker: true,
@@ -426,6 +436,10 @@ mod tests {
         assert_eq!(
             from_empty_toml.workflow_events_topic,
             code_default.workflow_events_topic
+        );
+        assert_eq!(
+            from_empty_toml.workflow_approval_roles,
+            code_default.workflow_approval_roles
         );
         assert_eq!(from_empty_toml.transit, code_default.transit);
         assert_eq!(from_empty_toml.pki, code_default.pki);
