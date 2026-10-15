@@ -95,7 +95,8 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 #### 原生 `approve` 节点 DSL（已固化）
 
 节点体为单键对象 `approve:`，键集合恰为下列 camelCase 字段名；出现未知键即 fail-closed
-（`UnsupportedConstruct("approve.<key>")`，不静默丢弃——拼错的 `allowSelfApprove` 会静默改变审批权）：
+（`UnsupportedConstruct("approve.<key>")`，不静默丢弃——把 `allowSelfApprove` 写成 snake_case 的
+`allow_self_approve` 会被拒绝，而不是静默改变审批权）：
 
 ```yaml
 - finance:
@@ -107,10 +108,10 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
       mode: all                 # all|any|quorum:<n>|ratio:<num>/<den>，默认 all
       veto: true                # 默认 true（一票否决）；false = 投尽未达才判不通过
       deadline: PT24H           # 可选 ISO8601/官方 duration；相对挂起时刻换算
-      on_pass: notify           # 可选；缺省 = 顺序推进下一任务
-      on_reject: rework         # 可选；缺省 = 工作流 fault（approval_rejected）
-      sign_admins: [admin]      # 可选；加签/减签/驳回重开/终止的授权名单
-      allow_self_approve: false # 默认 false（发起人不可自批）
+      onPass: notify            # 可选；缺省 = 顺序推进下一任务
+      onReject: rework          # 可选；缺省 = 工作流 fault（approval_rejected）
+      signAdmins: [admin]       # 可选；加签/减签/驳回重开/终止的授权名单
+      allowSelfApprove: false   # 默认 false（发起人不可自批）
 ```
 
 - 席位来源 `approvers/pool/readers/roles` 全空 ⇒ `MissingRequiredField`；`mode` 非法形状
@@ -200,11 +201,11 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 
   | 操作 | 授权主体 |
   |:--|:--|
-  | `Approve / Reject / Acknowledge / Transfer / Delegate` | 席位责任人 / 候选池成员 / 被委派人（引擎 `actor_can_act`）；当节点 `allow_self_approve=false` 时附加 `actor != initiator`（`initiator == "anonymous"` 豁免——匿名发起无自审约束） |
-  | `AddSign / RemoveSign` | 分支 `sign_admins` ∪ 实例发起人 |
-  | `ReturnToNode` | 分支未决席位持有人（`assignee`/`candidate`/被委派人）∪ `sign_admins` ∪ 发起人 |
+  | `Approve / Reject / Acknowledge / Transfer / Delegate` | 席位责任人 / 候选池成员 / 被委派人（引擎 `actor_can_act`）；当节点 `allowSelfApprove=false` 时附加 `actor != initiator`（`initiator == "anonymous"` 豁免——匿名发起无自审约束） |
+  | `AddSign / RemoveSign` | 分支 `signAdmins` ∪ 实例发起人 |
+  | `ReturnToNode` | 分支未决席位持有人（`assignee`/`candidate`/被委派人）∪ `signAdmins` ∪ 发起人 |
   | `Withdraw` | 仅发起人（引擎自身强制） |
-  | `Terminate` | `sign_admins`（任一分支声明者）；保留内部 `SYSTEM_ACTOR="system"` 生命周期权威——恒可终止，用于 `cancel_instance` 运行时收口，不对用户暴露 |
+  | `Terminate` | `signAdmins`（任一分支声明者）；保留内部 `SYSTEM_ACTOR="system"` 生命周期权威——恒可终止，用于 `cancel_instance` 运行时收口，不对用户暴露 |
   | `expire` | 仅桥（持久化定时器），无 RPC |
 
 - 契约交付顺序：proto 先行 → 实现 → 验收项；COMMITTED 状态提升在生产验收之后
@@ -300,16 +301,16 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   未注入审批桥或未启用 durable 装配时，`approve` 节点 fail-closed（实例 `Failed` +
   `workflow.faulted`），**不**静默降级为无审批继续。
 - **`NodeOutcome{Passed,Rejected}` 与实例终态 `ApprovalOutcome` 分离**：`NodeOutcome` 是
-  **分支/轮次级**的本轮结论，用于驱动 workflow 的 `on_pass`/`on_reject` 路由；`ApprovalOutcome`
+  **分支/轮次级**的本轮结论，用于驱动 workflow 的 `onPass`/`onReject` 路由；`ApprovalOutcome`
   （`Completed / Rejected / Cancelled / Terminated`）是**实例级**终态。命令路径与截止路径共享同一
   映射（`apply_approval_node_outcome`）。实例 `Completed` 由工作流驱动收尾
   （`finish_if_complete`）达成，命令路径无额外动作。
-- **resume-on-pass**：分支本轮 `Passed` ⇒ 清挂起并按节点 `on_pass` 恢复（缺省顺序推进下一
-  任务）；实例级 `Rejected` 走同一映射（有 `on_reject` 则路由，否则 fault `approval_rejected`）；
+- **resume-on-pass**：分支本轮 `Passed` ⇒ 清挂起并按节点 `onPass` 恢复（缺省顺序推进下一
+  任务）；实例级 `Rejected` 走同一映射（有 `onReject` 则路由，否则 fault `approval_rejected`）；
   `Cancelled`/`Terminated` 按既有口径 fault。
 - **`return_to_node` 重开目标节点**：目标席位取该节点**最近一次 attempt** 的席位逐字还原
   （`kind`/`assignee`/`candidates`）；重开**不设 deadline**（旧的绝对截止早已过期，沿用会立即
-  过期），兜底出口是 `sign_admins` 的 `Terminate`/`AddSign`；目标节点无既有席位可复用 ⇒
+  过期），兜底出口是 `signAdmins` 的 `Terminate`/`AddSign`；目标节点无既有席位可复用 ⇒
   **fail-closed**（拒绝，绝不留下「Open 但零席位」的不可恢复分支）。重开必须与开轮**同批**提交。
 
 ## 后果

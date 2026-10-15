@@ -122,17 +122,17 @@ retries = 3
     错误码映射：`StaleRevision → ABORTED`、`NotAuthorized → PERMISSION_DENIED`、
     `InvalidTransition → FAILED_PRECONDITION`。能力与错误码事实源见
     `coord-core/src/grpc_auth.rs` 与 `consumer-contract.md` §0.2 / §7。
-- **DSL**：定义里用原生 `approve` 节点声明席位与策略（`approvers / pool / readers / roles /
-  mode / veto / deadline / on_pass / on_reject / sign_admins / allow_self_approve`），未知键、
+- **DSL**：定义里用原生 `approve` 节点声明席位与策略（camelCase 键：`approvers / pool / readers /
+  roles / mode / veto / deadline / onPass / onReject / signAdmins / allowSelfApprove`），未知键、
   非法 `mode`、不可换算 `deadline`、四席位来源全空均 fail-closed；语法逐字见 ADR-0013 D2。
 - **挂起 / 恢复**：走到 `approve` 节点 ⇒ 实例 `SUSPENDED`，`SuspensionMeta` 给出
   `reason="approval"`、`expected_signal="approval.completed"`、`approval_instance_id` 与节点名
-  （审批实例 id = workflow 实例 id）。分支本轮通过 ⇒ 按节点 `on_pass` 恢复（缺省顺序推进下一
-  任务）；实例级否决/取消/终止 ⇒ 有 `on_reject` 则路由，否则工作流 fault。重启对账**不**重驱动
+  （审批实例 id = workflow 实例 id）。分支本轮通过 ⇒ 按节点 `onPass` 恢复（缺省顺序推进下一
+  任务）；实例级否决/取消/终止 ⇒ 有 `onReject` 则路由，否则工作流 fault。重启对账**不**重驱动
   挂起实例，但重建 deadline 定时器。
 - **授权**：引擎 `actor_can_act`（席位责任人/候选/被委派人）叠加桥的职责分离——默认发起人
-  不可自批（`allow_self_approve` 可开，匿名发起豁免）、加签/减签 = `sign_admins` ∪ 发起人、
-  驳回至节点 = 未决席位持有人 ∪ `sign_admins` ∪ 发起人、终止 = `sign_admins`（内部
+  不可自批（`allowSelfApprove` 可开，匿名发起豁免）、加签/减签 = `signAdmins` ∪ 发起人、
+  驳回至节点 = 未决席位持有人 ∪ `signAdmins` ∪ 发起人、终止 = `signAdmins`（内部
   `SYSTEM_ACTOR="system"` 恒可，用于运行时收口）。矩阵逐行见 ADR-0013 D7。
 - **幂等**：命令按 `idempotency_key` 去重，记录键
   `/_workflow/v4/idempotency/{instance}/{key}`，与状态、本批事件**同一次 CAS 提交**写入；

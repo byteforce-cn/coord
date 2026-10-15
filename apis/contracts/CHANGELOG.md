@@ -12,11 +12,11 @@
 | 契约包 | RPC | 能力 | 说明 |
 |:--|:--|:--|:--|
 | `coord.workflow.v1` | `Approve` / `Reject` / `Acknowledge` | `coord:workflow:execute` | 席位的通过 / 否决 / 阅签（会签 / 或签 / 票签 / 一票否决） |
-| `coord.workflow.v1` | `AddSign` / `RemoveSign` | `coord:workflow:execute` | 加签 / 减签（`sign_admins` ∪ 发起人） |
+| `coord.workflow.v1` | `AddSign` / `RemoveSign` | `coord:workflow:execute` | 加签 / 减签（`signAdmins` ∪ 发起人） |
 | `coord.workflow.v1` | `ReturnToNode` | `coord:workflow:execute` | 驳回至节点：重开目标节点最近一次 attempt 的席位，重开席位不带 deadline |
 | `coord.workflow.v1` | `Transfer` / `Delegate` | `coord:workflow:execute` | 转办（原审批人失去审批权、保审计）/ 委派（原审批人保留权限） |
 | `coord.workflow.v1` | `Withdraw` | `coord:workflow:execute` | 撤回（仅发起人） |
-| `coord.workflow.v1` | `Terminate` | `coord:workflow:execute` | 终止（`sign_admins`；内部生命周期权威另有保留 actor） |
+| `coord.workflow.v1` | `Terminate` | `coord:workflow:execute` | 终止（`signAdmins`；内部生命周期权威另有保留 actor） |
 | `coord.workflow.v1` | `ListPendingTasks` | `coord:workflow:read` | 待办席位查询（actor 过滤 + 实例 id 分页） |
 | `coord.workflow.v1` | `GetInstanceDetail` | `coord:workflow:read` | 实例审批详情（branches / tasks / rounds + `revision`） |
 
@@ -34,14 +34,14 @@
 
 **语义声明变更（wire 不变）**
 
-- `coord.workflow.v1` 新增原生 `approve` 节点 DSL（`approvers/pool/readers/roles/mode/veto/deadline/
-on_pass/on_reject/sign_admins/allow_self_approve`）；未知键、非法 `mode`、零阈值 `mode`、
-  不可换算 `deadline`、四席位来源全空均 fail-closed。
+- `coord.workflow.v1` 新增原生 `approve` 节点 DSL（camelCase 键：
+  `approvers/pool/readers/roles/mode/veto/deadline/onPass/onReject/signAdmins/allowSelfApprove`）；
+  未知键、非法 `mode`、零阈值 `mode`、不可换算 `deadline`、四席位来源全空均 fail-closed。
 - 挂起 / 恢复：走到 `approve` 节点 ⇒ 工作流 `SUSPENDED`（`expected_signal = "approval.completed"`）；
-  分支通过按 `on_pass` 恢复，实例级否决 / 取消 / 终止按 `on_reject` 路由，否则 fault。
-- 授权矩阵：责任人 / 候选 / 被委派 + 自审禁止（`allow_self_approve=false` 默认；匿名豁免）；
-  加签 / 减签 = `sign_admins` ∪ 发起人；驳回至节点 = 未决席位持有人 ∪ `sign_admins` ∪ 发起人；
-  终止 = `sign_admins`（内部 `SYSTEM_ACTOR` 恒可，不对用户暴露）。
+  分支通过按 `onPass` 恢复，实例级否决 / 取消 / 终止按 `onReject` 路由，否则 fault。
+- 授权矩阵：责任人 / 候选 / 被委派 + 自审禁止（`allowSelfApprove=false` 默认；匿名豁免）；
+  加签 / 减签 = `signAdmins` ∪ 发起人；驳回至节点 = 未决席位持有人 ∪ `signAdmins` ∪ 发起人；
+  终止 = `signAdmins`（内部 `SYSTEM_ACTOR` 恒可，不对用户暴露）。
 - deadline 到期**无自动处置**：只置席位置过期并从计票分母剔除；全员过期 / 被减签保持 `Open`，处置由人。
 - 命令路径**不产生审批实例 `Faulted`**：只收口为 `Completed / Rejected / Cancelled / Terminated`。
 
