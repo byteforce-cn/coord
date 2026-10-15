@@ -1040,9 +1040,9 @@ async fn return_to_earlier_node_does_not_skip_intervening_approval() {
                 .get_instance_detail(&wf_id)
                 .await
                 .map(|d| {
-                    d.branches
-                        .iter()
-                        .any(|b| b.node == "first" && b.attempt == 2 && b.status == BranchStatus::Open)
+                    d.branches.iter().any(|b| {
+                        b.node == "first" && b.attempt == 2 && b.status == BranchStatus::Open
+                    })
                 })
                 .unwrap_or(false);
             suspended && reopened
@@ -1051,13 +1051,21 @@ async fn return_to_earlier_node_does_not_skip_intervening_approval() {
         "workflow re-suspends on reopened first node",
     )
     .await;
-    let inst = env.svc.get_instance(&wf_id).await.unwrap().expect("instance");
+    let inst = env
+        .svc
+        .get_instance(&wf_id)
+        .await
+        .unwrap()
+        .expect("instance");
     assert_eq!(
         inst.status,
         InstanceStatus::Suspended,
         "ReturnToNode 后必须重新挂起（不得停在返回节点，也不得跳过中间审批）"
     );
-    assert!(inst.context.get("done").is_none(), "不得跳过 second 直接进 done");
+    assert!(
+        inst.context.get("done").is_none(),
+        "不得跳过 second 直接进 done"
+    );
 
     let detail = env.svc.get_instance_detail(&wf_id).await.expect("detail");
     let first2 = detail
@@ -1093,9 +1101,9 @@ async fn return_to_earlier_node_does_not_skip_intervening_approval() {
                 .get_instance_detail(&wf_id)
                 .await
                 .map(|d| {
-                    d.branches
-                        .iter()
-                        .any(|b| b.node == "second" && b.attempt == 2 && b.status == BranchStatus::Open)
+                    d.branches.iter().any(|b| {
+                        b.node == "second" && b.attempt == 2 && b.status == BranchStatus::Open
+                    })
                 })
                 .unwrap_or(false);
             suspended && reopened
@@ -1129,7 +1137,12 @@ async fn return_to_earlier_node_does_not_skip_intervening_approval() {
         .await
         .expect("approve second attempt 2");
     env.await_status(&wf_id, InstanceStatus::Completed).await;
-    let inst = env.svc.get_instance(&wf_id).await.unwrap().expect("instance");
+    let inst = env
+        .svc
+        .get_instance(&wf_id)
+        .await
+        .unwrap()
+        .expect("instance");
     assert_eq!(inst.context["done"], json!("yes"));
 }
 

@@ -2333,9 +2333,9 @@ where
             Ok(Some(_)) | Err(BridgeError::NotFound(_)) => Ok(()),
             Ok(None) => match bridge.terminate(workflow_id, SYSTEM_ACTOR, reason).await {
                 // 无聚合可终止 / 已终态：终止目标已达成。
-                Ok(())
-                | Err(BridgeError::NotFound(_))
-                | Err(BridgeError::InvalidTransition(_)) => Ok(()),
+                Ok(()) | Err(BridgeError::NotFound(_)) | Err(BridgeError::InvalidTransition(_)) => {
+                    Ok(())
+                }
                 Err(e) => Err(RuntimeError::StoreError(format!(
                     "approval finalize terminate failed: {e}"
                 ))),

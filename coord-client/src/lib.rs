@@ -25,8 +25,8 @@ mod tls;
 // 重新导出主要类型
 pub use auth::AuthClient;
 pub use client::{
-    ApprovalClient, Client, KvClient, LeaseClient, LeaseKeeper, Lock, MaintenanceClient, ObjectData,
-    ObjectReader, ObjectWriter, PutObjectResult, StorageClient, TxnClient, WatchClient,
+    ApprovalClient, Client, KvClient, LeaseClient, LeaseKeeper, Lock, MaintenanceClient,
+    ObjectData, ObjectReader, ObjectWriter, PutObjectResult, StorageClient, TxnClient, WatchClient,
     DEFAULT_OBJECT_CHUNK_SIZE,
 };
 pub use config::{Config, TlsConfig};

@@ -5065,8 +5065,8 @@ do:
         deadline: "{dur}"
 "#
             );
-            let errs = parse_and_validate_yaml(&yaml)
-                .expect_err("month/year deadline must be rejected");
+            let errs =
+                parse_and_validate_yaml(&yaml).expect_err("month/year deadline must be rejected");
             assert!(
                 error_kind_naming(&errs, "approve.deadline"),
                 "deadline '{dur}' 必须以 approve.deadline 拒绝: {errs:?}"
