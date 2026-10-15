@@ -8,7 +8,9 @@
 //! - [`keys`]：v4 实例键布局 `/_workflow/v4/instances/{instance_id}`；
 //! - [`events`]：事件类型草案目录与出站记录构造（记录写 v3 outbox 设施）；
 //! - [`store`]：存储端口 [`store::ApprovalStore`] + 内存实现 [`store::MemoryApprovalStore`]
-//!   （仅测试用；生产实现是 `coord-agent` 的 `KvApprovalStore`）。
+//!   （仅测试用；生产实现是 `coord-agent` 的 `KvApprovalStore`）；
+//! - [`bridge`]：唯一写路径 [`bridge::ApprovalBridge`]（开节点 / 授权+命令 / 效果→事件 /
+//!   终态上报），运行时接线在 M2-C 后续任务。
 //!
 //! # 与 ADR-0013 的对应
 //!
@@ -24,8 +26,10 @@
 //! `docs/adr/0013-workflow-approval-v2.md`；字段清单与逐条状态转换表的冻结证据在
 //! `spike/2026-10/spike-1-state-model/`（只读）。
 //!
-//! 本模块默认关闭、尚未接线：能力面（proto/RPC）、授权与事件契约固化归 M2-C。
+//! 能力面（proto/RPC）与运行时接线归 M2-C 后续任务；授权判定与事件映射已收敛到
+//! [`bridge`]。
 
+pub mod bridge;
 pub mod engine;
 pub mod events;
 pub mod keys;

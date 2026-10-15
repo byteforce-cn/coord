@@ -55,7 +55,7 @@ mod tests {
     use super::*;
     use crate::workflow::approval::engine::{Engine, StartSpec};
     use crate::workflow::approval::model::{
-        ApprovalError, Effect, JoinPolicy, RejectPolicy, Scope, SeatSpec,
+        ApprovalError, ApprovalPolicy, Effect, JoinPolicy, RejectPolicy, Scope, SeatSpec,
     };
     use crate::workflow::durable::OutboxStatus;
     use serde_json::json;
@@ -163,6 +163,7 @@ mod tests {
                     None,
                     JoinPolicy::All,
                     RejectPolicy::AnyReject,
+                    ApprovalPolicy::default(),
                     tick(&mut t),
                 )
                 .unwrap();
@@ -195,6 +196,7 @@ mod tests {
                     None,
                     JoinPolicy::All,
                     RejectPolicy::AnyReject,
+                    ApprovalPolicy::default(),
                     tick(&mut t),
                 )
                 .unwrap();
@@ -224,6 +226,7 @@ mod tests {
                     None,
                     JoinPolicy::All,
                     RejectPolicy::AnyReject,
+                    ApprovalPolicy::default(),
                     tick(&mut t),
                 )
                 .unwrap();
@@ -245,6 +248,7 @@ mod tests {
                     None,
                     JoinPolicy::All,
                     RejectPolicy::AnyReject,
+                    ApprovalPolicy::default(),
                     tick(&mut t),
                 )
                 .unwrap();
@@ -264,6 +268,7 @@ mod tests {
                 None,
                 JoinPolicy::All,
                 RejectPolicy::AnyReject,
+                ApprovalPolicy::default(),
                 tick(&mut t),
             )
             .unwrap();
@@ -283,6 +288,7 @@ mod tests {
                 None,
                 JoinPolicy::All,
                 RejectPolicy::AnyReject,
+                ApprovalPolicy::default(),
                 tick(&mut t),
             )
             .unwrap();

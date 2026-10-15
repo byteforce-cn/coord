@@ -350,7 +350,9 @@ mod tests {
     use super::*;
     use crate::workflow::approval::engine::{Engine, StartSpec};
     use crate::workflow::approval::events::event_record;
-    use crate::workflow::approval::model::{JoinPolicy, RejectPolicy, Scope, SeatSpec};
+    use crate::workflow::approval::model::{
+        ApprovalPolicy, JoinPolicy, RejectPolicy, Scope, SeatSpec,
+    };
     use crate::workflow::durable::OutboxStatus;
     use serde_json::json;
 
@@ -527,6 +529,7 @@ mod tests {
                 None,
                 JoinPolicy::All,
                 RejectPolicy::AnyReject,
+                ApprovalPolicy::default(),
                 1_001,
             )
             .unwrap();

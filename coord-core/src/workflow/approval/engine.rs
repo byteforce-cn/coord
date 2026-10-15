@@ -109,6 +109,11 @@ impl Engine {
     // -------------------------------------------------------------- 流程
 
     /// 进入节点（分支）。线性原型：同一时刻只允许一个 Open 分支。
+    ///
+    /// `policy` 由驱动层从 `approve` 节点降级注入，随分支持久化供授权判定读取。
+    ///
+    /// 参数面由调用契约钉死（节点 / 父分支 / 判定策略 / 时钟逐项注入）。
+    #[allow(clippy::too_many_arguments)]
     pub fn enter_branch(
         &mut self,
         expected: u64,
@@ -116,6 +121,7 @@ impl Engine {
         parent: Option<Id>,
         join: JoinPolicy,
         reject: RejectPolicy,
+        policy: ApprovalPolicy,
         now: i64,
     ) -> Result<(Id, Vec<Effect>), ApprovalError> {
         self.guard(expected)?;
@@ -136,7 +142,7 @@ impl Engine {
                 to: InstanceStatus::Running,
             });
         }
-        let id = self.create_branch(node, parent, join, reject, now, &mut out);
+        let id = self.create_branch(node, parent, join, reject, policy, now, &mut out);
         let attempt = self.branches[&id].attempt;
         self.instance.audit.push(AuditEntry {
             at: now,
@@ -644,10 +650,14 @@ impl Engine {
             .filter(|b| b.node == target_node)
             .max_by_key(|b| b.attempt)
             .cloned();
-        let (join, reject) = target_latest
+        let (join, reject, policy) = target_latest
             .as_ref()
-            .map(|b| (b.join, b.reject))
-            .unwrap_or((JoinPolicy::All, RejectPolicy::AnyReject));
+            .map(|b| (b.join, b.reject, b.policy.clone()))
+            .unwrap_or((
+                JoinPolicy::All,
+                RejectPolicy::AnyReject,
+                ApprovalPolicy::default(),
+            ));
         if let Some(tb) = &target_latest {
             self.set_branch_status(&tb.id, BranchStatus::Superseded, now, &mut out);
         }
@@ -658,6 +668,7 @@ impl Engine {
                 .and_then(|b| b.parent_branch_id.clone()),
             join,
             reject,
+            policy,
             now,
             &mut out,
         );
@@ -943,12 +954,14 @@ impl Engine {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_branch(
         &mut self,
         node: &str,
         parent: Option<Id>,
         join: JoinPolicy,
         reject: RejectPolicy,
+        policy: ApprovalPolicy,
         now: i64,
         out: &mut Vec<Effect>,
     ) -> Id {
@@ -966,6 +979,7 @@ impl Engine {
                 status: BranchStatus::Open,
                 join,
                 reject,
+                policy,
                 scope: Scope::new(),
                 round_ids: Vec::new(),
                 created_at: now,

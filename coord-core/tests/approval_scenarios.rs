@@ -76,6 +76,7 @@ fn p0_huiqian_with_add_sign() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -170,6 +171,7 @@ fn p0_one_vote_veto() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -222,6 +224,7 @@ fn p0_any_sign_cancels_rest() {
             None,
             JoinPolicy::Any,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -275,6 +278,7 @@ fn ratio_pass_then_exhausted_reject() {
             None,
             JoinPolicy::Ratio { num: 2, den: 3 },
             RejectPolicy::OnExhausted,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -311,6 +315,7 @@ fn ratio_pass_then_exhausted_reject() {
             None,
             JoinPolicy::Ratio { num: 2, den: 3 },
             RejectPolicy::OnExhausted,
+            ApprovalPolicy::default(),
             tick(&mut t2),
         )
         .unwrap();
@@ -350,6 +355,7 @@ fn read_ack_does_not_gate_and_reader_only_branch_passes() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -382,6 +388,7 @@ fn read_ack_does_not_gate_and_reader_only_branch_passes() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t2),
         )
         .unwrap();
@@ -414,6 +421,7 @@ fn stale_revision_is_rejected() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -454,6 +462,7 @@ fn pool_claim_rules() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -500,6 +509,7 @@ fn deadline_expire_excludes_seat_from_quorum() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -574,6 +584,7 @@ fn generated_ids_are_derived_from_instance_and_survive_reload() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -587,6 +598,7 @@ fn generated_ids_are_derived_from_instance_and_survive_reload() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -607,6 +619,7 @@ fn generated_ids_are_derived_from_instance_and_survive_reload() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -634,6 +647,7 @@ fn terminal_instance_rejects_commands() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -658,6 +672,7 @@ fn terminal_instance_rejects_commands() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap_err();
@@ -680,6 +695,7 @@ fn snapshot_json_failure_is_error_not_panic() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -718,6 +734,7 @@ fn p0_return_to_node_reopens_history() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -741,6 +758,7 @@ fn p0_return_to_node_reopens_history() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -801,6 +819,7 @@ fn p0_return_to_node_reopens_history() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -833,6 +852,7 @@ fn p0_transfer_moves_authority() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -888,6 +908,7 @@ fn delegate_allows_proxy_and_keeps_principal() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -926,6 +947,7 @@ fn delegate_allows_proxy_and_keeps_principal() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t2),
         )
         .unwrap();
@@ -973,6 +995,7 @@ fn remove_sign_mixed_batch_is_all_or_nothing() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1024,6 +1047,7 @@ fn withdraw_only_by_initiator() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1061,6 +1085,7 @@ fn terminate_cascades_and_seals_instance() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1103,6 +1128,7 @@ fn return_target_whitelist_and_jump_limit() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1148,6 +1174,7 @@ fn variable_scope_precedence() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1199,6 +1226,7 @@ fn evidence_snapshot_serializable() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1241,6 +1269,7 @@ fn return_to_node_rejects_non_whitelisted_target() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1278,6 +1307,7 @@ fn finish_after_returned_branch_is_invalid_transition() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1291,6 +1321,7 @@ fn finish_after_returned_branch_is_invalid_transition() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1331,6 +1362,7 @@ fn any_reject_takes_precedence_over_exhaustion_and_pass_rules() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1388,6 +1420,7 @@ fn all_seats_expired_keeps_round_open() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1428,6 +1461,7 @@ fn remove_all_unvoted_seats_keeps_round_open() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1477,6 +1511,7 @@ fn remove_sign_duplicate_targets_rejected() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1523,6 +1558,7 @@ fn remove_sign_skips_terminal_targets() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1593,6 +1629,7 @@ fn round_close_cancels_open_read_ack_seats() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1616,6 +1653,7 @@ fn round_close_cancels_open_read_ack_seats() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t),
         )
         .unwrap();
@@ -1662,6 +1700,7 @@ fn round_close_cancels_open_read_ack_seats() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             tick(&mut t2),
         )
         .unwrap();

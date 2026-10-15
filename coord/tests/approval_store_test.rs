@@ -25,7 +25,9 @@ use coord_client::Client;
 use coord_core::workflow::approval::engine::{Engine, StartSpec};
 use coord_core::workflow::approval::events::event_record;
 use coord_core::workflow::approval::keys;
-use coord_core::workflow::approval::model::{JoinPolicy, RejectPolicy, Scope, SeatSpec};
+use coord_core::workflow::approval::model::{
+    ApprovalPolicy, JoinPolicy, RejectPolicy, Scope, SeatSpec,
+};
 use coord_core::workflow::approval::store::{
     ApprovalInstanceEntry, ApprovalStore, ExpectedRev, IdemRecord,
 };
@@ -230,6 +232,7 @@ async fn exact_rev_conflict_is_zero_write() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             1_002,
         )
         .expect("enter branch");
@@ -288,6 +291,7 @@ async fn commit_persists_state_and_events_in_one_txn() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             1_001,
         )
         .expect("enter branch");
@@ -361,6 +365,7 @@ async fn load_after_reload_preserves_semantics() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             1_001,
         )
         .expect("enter branch");
@@ -420,6 +425,7 @@ async fn load_after_reload_preserves_semantics() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             1_004,
         )
         .expect("enter branch after reload");
@@ -557,6 +563,7 @@ async fn replay_after_lost_response_is_idempotent() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             1_001,
         )
         .expect("enter branch");
@@ -619,6 +626,7 @@ async fn empty_event_batch_commits_state_only() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             1_001,
         )
         .expect("enter branch");
@@ -653,6 +661,7 @@ async fn empty_event_batch_commits_state_only() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             1_001,
         )
         .expect("enter branch");
@@ -895,6 +904,7 @@ async fn kv_scan_sees_v4_only_paginates() {
             None,
             JoinPolicy::All,
             RejectPolicy::AnyReject,
+            ApprovalPolicy::default(),
             1_001,
         )
         .expect("enter branch");

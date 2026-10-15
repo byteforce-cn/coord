@@ -156,6 +156,20 @@ pub enum RejectPolicy {
     OnExhausted,
 }
 
+/// 节点的授权策略（Q6 授权落地，见 ADR-0013 D7）。
+///
+/// 由 `approve` DSL 节点降级而来，随分支持久化：授权判定在唯一写路径
+/// （`workflow/approval/bridge.rs`）读它，缺省（`Default`）即最保守口径。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ApprovalPolicy {
+    /// 发起人是否可审批自己发起的节点；缺省 `false`（不允许自审）。
+    #[serde(default)]
+    pub allow_self_approve: bool,
+    /// 管理动作（加签 / 减签 / 驳回至节点 / 终止）的授权人集合。
+    #[serde(default)]
+    pub sign_admins: Vec<Principal>,
+}
+
 /// 分支：一个节点的一次运行实例。
 ///
 /// 不变量（v2.0 线性模型）：同一实例同时最多一个 `Open` 分支。
@@ -171,6 +185,9 @@ pub struct Branch {
     pub status: BranchStatus,
     pub join: JoinPolicy,
     pub reject: RejectPolicy,
+    /// 本节点的授权策略；`serde(default)` 让无该字段的旧文档反序列化为保守缺省。
+    #[serde(default)]
+    pub policy: ApprovalPolicy,
     /// 分支级变量（作用域第二级）。
     pub scope: Scope,
     pub round_ids: Vec<Id>,
@@ -516,6 +533,10 @@ mod tests {
             status: BranchStatus::Returned,
             join: JoinPolicy::Ratio { num: 2, den: 3 },
             reject: RejectPolicy::OnExhausted,
+            policy: ApprovalPolicy {
+                allow_self_approve: true,
+                sign_admins: vec!["u-admin".into()],
+            },
             scope: BTreeMap::from([("level".to_string(), json!("l2"))]),
             round_ids: vec!["inst-1:r0002".into()],
             created_at: 120,
