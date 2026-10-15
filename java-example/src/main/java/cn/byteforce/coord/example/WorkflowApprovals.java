@@ -92,12 +92,15 @@ public class WorkflowApprovals implements AutoCloseable {
      */
     public String approve(String workflowId, String taskId, String comment,
                           String idempotencyKey) {
-        WorkflowApproveResponse resp = workflowStub.approve(WorkflowApproveRequest.newBuilder()
+        WorkflowApproveRequest.Builder req = WorkflowApproveRequest.newBuilder()
                 .setWorkflowId(workflowId)
                 .setTaskId(taskId)
-                .setComment(comment)
-                .setIdempotencyKey(idempotencyKey)
-                .build());
+                .setIdempotencyKey(idempotencyKey);
+        // comment 可选：proto3 空串与缺省同义，null 直接传给 setComment 会 NPE。
+        if (comment != null && !comment.isEmpty()) {
+            req.setComment(comment);
+        }
+        WorkflowApproveResponse resp = workflowStub.approve(req.build());
         return resp.getStatus();
     }
 

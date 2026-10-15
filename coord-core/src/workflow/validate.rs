@@ -85,6 +85,25 @@ fn parse_join_policy(s: &str) -> Option<JoinPolicy> {
     }
 }
 
+/// `approve.deadline` 是否无法换算成确定的毫秒时长。
+///
+/// [`parse_iso8601_duration_ms`](crate::workflow::engine::parse_iso8601_duration_ms)
+/// 对日期部分的 `M`(月)/`Y`(年) 不换算（月/年长度不定），`P1M`/`P1Y` 会静默返回
+/// `Some(0)`——被当成「立即到期」把所有席位秒过期；解析结果 `0` 自身也无意义。故结果
+/// 为 `None`/`0`，或 `T` 之前的日期部分含 `M`/`Y` 单位时拒绝；`PT...` 时间部分的
+/// `M`(分钟) 不受影响（仍可换算为确定毫秒）。
+fn approve_deadline_is_unsupported(duration: &str) -> bool {
+    let trimmed = duration.trim();
+    match crate::workflow::engine::parse_iso8601_duration_ms(trimmed) {
+        None | Some(0) => true,
+        Some(_) => {
+            let rest = trimmed.strip_prefix('P').unwrap_or(trimmed);
+            let date_part = rest.split_once('T').map_or(rest, |(d, _)| d);
+            date_part.contains('M') || date_part.contains('Y')
+        }
+    }
+}
+
 /// 语义校验器
 pub struct Validator {
     errors: Vec<ValidationError>,
@@ -1682,7 +1701,7 @@ impl Validator {
                 let dur = self.parse_duration_value(raw.span, v, "approve.deadline")?;
                 // 解析期就必须可换算：否则运行期 `deadline_ms()==None`，
                 // 无期限被当成默认（fail-open）。
-                if crate::workflow::engine::parse_iso8601_duration_ms(&dur).is_none() {
+                if approve_deadline_is_unsupported(&dur) {
                     self.errors.push(ValidationError {
                         span: Some(raw.span),
                         kind: ValidationErrorKind::UnsupportedConstruct(
@@ -5023,6 +5042,57 @@ do:
                 assert!(a.sign_admins.is_empty());
             }
             other => panic!("expected Approve task, got {other:?}"),
+        }
+    }
+
+    /// `deadline` 必须能换算成确定的毫秒时长：日期部分的月/年（`P1M`/`P1Y`/`P1Y2M`）长度
+    /// 不定，`parse_iso8601_duration_ms` 会静默落成 0（= 立即到期、把所有席位秒过期），
+    /// 故解析期即以 `UnsupportedConstruct("approve.deadline")` 拒绝；`PT...` 时间部分仍接受。
+    #[test]
+    fn parse_approve_rejects_month_year_deadlines() {
+        for dur in ["P1M", "P1Y", "P1Y2M"] {
+            let yaml = format!(
+                r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-deadline-month
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        deadline: "{dur}"
+"#
+            );
+            let errs = parse_and_validate_yaml(&yaml)
+                .expect_err("month/year deadline must be rejected");
+            assert!(
+                error_kind_naming(&errs, "approve.deadline"),
+                "deadline '{dur}' 必须以 approve.deadline 拒绝: {errs:?}"
+            );
+        }
+        for dur in ["PT1H", "PT30M"] {
+            let yaml = format!(
+                r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-deadline-time
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        deadline: "{dur}"
+"#
+            );
+            let def = parse_and_validate_yaml(&yaml)
+                .unwrap_or_else(|e| panic!("time-part deadline '{dur}' must parse: {e:?}"));
+            match &def.do_tasks[0].task {
+                Task::Approve(a) => assert_eq!(a.deadline.as_deref(), Some(dur)),
+                other => panic!("expected Approve task, got {other:?}"),
+            }
         }
     }
 

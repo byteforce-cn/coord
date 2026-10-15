@@ -146,7 +146,12 @@ retries = 3
   `(instance_id, sequence)` 去重（`sequence` 每实例单调）。
 - **deadline**：节点 `deadline` 换算为席位的绝对截止，由**持久化定时器**驱动过期；到期只把
   席位置 `Expired` 并从计票分母剔除，**绝不自动通过/驳回**——全员过期或被减签的轮次保持
-  `Open`，处置由人（`AddSign` 或 `Terminate`）决定。重开（`ReturnToNode`）的席位不设 deadline。
+  `Open`，处置由人（`AddSign` 或 `Terminate`）决定。**混合轮次**（部分席位已批、部分过期）里
+  过期席位从 `total` 剔除；剔除后剩余席位全部通过 ⇒ 本轮**判通过**（与「全员过期保持
+  `Open`」区分）。重开（`ReturnToNode`）的席位不设 deadline。
+- **启用条件（`workflow_durable` 默认关闭）**：审批桥与审批聚合仅在 durable 工作流引擎装配时
+  注入。默认部署未开 `workflow_durable` 时审批 RPC 一律返回 `FAILED_PRECONDITION`，且 `approve`
+  节点在驱动时 fail-closed（实例 `Failed` + `workflow.faulted`）——绝不静默降级为无审批继续。
 - **存储与写路径**：状态单文档 `/_workflow/v4/instances/{instance_id}`，与 v1 的
   `/_workflow/v3/instances/` 扫描面互不可见；唯一写路径带 CAS
   （`ExpectedRev::{CreateOnly, Exact(mod_rev)}`，无无守卫写入形态），状态与本批事件同一

@@ -1844,6 +1844,11 @@ where
                 .commit_instance(store, inst, rev, guard, &[lifecycle::WORKFLOW_FAULTED])
                 .await
             {
+                // 工作流 fault 是权威结论：审批聚合收口最佳努力，失败不阻断 fault
+                // （聚合留给管理员 `Terminate`）。
+                let _ = self
+                    .finalize_approval_aggregate(&inst.id, "workflow_faulted")
+                    .await;
                 return;
             }
             // 重取最新修订号：下一次 CAS 以新值为期望。
@@ -2232,7 +2237,14 @@ where
             )
             .await?;
         match cp {
-            ControlPlaneOutcome::Committed(inst) => Ok(*inst),
+            ControlPlaneOutcome::Committed(inst) => {
+                // 工作流 fault 是权威结论：审批聚合收口最佳努力，失败不阻断 fault
+                // （聚合留给管理员 `Terminate`）。
+                let _ = self
+                    .finalize_approval_aggregate(instance_id, "workflow_faulted")
+                    .await;
+                Ok(*inst)
+            }
             // 已终态：不覆盖他人终态，与 resume/cancel 的 AlreadyCompleted 同口径。
             ControlPlaneOutcome::Skipped => {
                 Err(RuntimeError::AlreadyCompleted(instance_id.to_string()))
@@ -2242,10 +2254,10 @@ where
 
     /// 取消实例：非终态 → `Cancelled` + `workflow.cancelled`（同一次提交）。
     ///
-    /// 挂起在审批上时先经桥终止审批实例（内部生命周期权威 actor，不受节点
-    /// `sign_admins` 约束）：只有终止成功才继续取消。terminal 失败（除「无审批实例」
-    /// 的 `NotFound`）一律 fail-closed 传播 —— 绝不留下「工作流已取消、审批仍 open
-    /// 可投票」的孤儿。
+    /// 非终态实例先经 [`Self::finalize_approval_aggregate`] 收口审批聚合（内部生命周期
+    /// 权威 actor，不受节点 `sign_admins` 约束，聚合不存在时为 no-op）：只有收口成功才
+    /// 继续取消，失败 fail-closed 传播 —— 绝不留下「工作流已取消、审批仍 open 可投票」
+    /// 的孤儿。
     ///
     /// 控制面路径（[`Self::commit_control_plane`]）：线性一致读修订号后在 CAS 提交里
     /// 重新校验状态。一次「取消 vs 完成」的竞态里，若完成先提交则取消读到的是终态
@@ -2258,40 +2270,19 @@ where
     /// 生命周期事件与状态写同一次提交（durable 装配下同 Txn/同事务；legacy 分步，
     /// 见 [`Self::commit_instance`]）。
     pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
-        // 挂起在审批上 ⇒ 审批实例尚未终态（终态会经恢复/fault 清掉挂起），先终止它。
-        if let Some(bridge) = &self.approval {
+        // 取消即工作流终态：先收口审批聚合（完成或在途终止），失败 fail-closed 传播——
+        // 绝不留下「工作流已取消、审批仍 open 可投票」的孤儿。收口覆盖**所有非终态实例**
+        // （不止挂起在审批上的）：审批节点通过后工作流可能在下游 Running/Suspended，其聚合
+        // 仍是 `RUNNING`。终态实例由下方 commit 的守卫处理（`AlreadyCompleted`）。
+        if self.approval.is_some() {
             let inst = self
                 .store
                 .load_instance(instance_id)
                 .await
                 .map_err(|e| RuntimeError::StoreError(e.to_string()))?;
-            if let Some(inst) = inst {
-                let on_approval = inst.status == InstanceStatus::Suspended
-                    && inst
-                        .suspension_meta
-                        .as_ref()
-                        .is_some_and(|m| m.reason == "approval");
-                if on_approval {
-                    // 审批实例 id 恒等于 workflow 实例 id（见 SuspensionMeta.approval_instance_id）。
-                    match bridge
-                        .terminate(instance_id, SYSTEM_ACTOR, "workflow_cancelled")
-                        .await
-                    {
-                        // 无审批实例可终止（从未开启/已被清除）：no-op。
-                        Ok(()) | Err(BridgeError::NotFound(_)) => {}
-                        // 审批已终态（上次取消在 terminate 后提交失败 / 并发取消重试到已终态 /
-                        // 外部终止）：无 open 审批残留，终止目标已达成，不得阻塞或毒化本次取消。
-                        // 此处的 `InvalidTransition` 只可能来自引擎的终态守卫（`Engine::guard`：
-                        // revision 匹配但 status 已 terminal）——terminate 别无它途返回该变体。
-                        Err(BridgeError::InvalidTransition(_)) => {}
-                        // 其余错误 fail-closed 传播：审批状态未知，宁可不取消也不留孤儿。
-                        Err(e) => {
-                            return Err(RuntimeError::StoreError(format!(
-                                "approval terminate failed: {e}"
-                            )))
-                        }
-                    }
-                }
+            if inst.as_ref().is_some_and(|i| !i.status.is_terminal()) {
+                self.finalize_approval_aggregate(instance_id, "workflow_cancelled")
+                    .await?;
             }
         }
         let outcome = self
@@ -2313,6 +2304,45 @@ where
             ControlPlaneOutcome::Committed(_) => Ok(()),
             // 取消守卫不产生 Skip（非终态即提交）；为完整匹配仍按成功处理。
             ControlPlaneOutcome::Skipped => Ok(()),
+        }
+    }
+
+    /// 工作流进入终态时收口审批聚合实例（完成或终止在途）。
+    ///
+    /// 审批聚合是独立文档（id = workflow id），只在工作流 `Completed` 分支经
+    /// [`ApprovalBridge::finish_if_complete`] 收口；工作流因下游 fault/cancel 提前
+    /// 终结时聚合会残留 `RUNNING`（甚至仍有 open 分支）。本 helper 弥合该缝隙：
+    /// 1. 无审批桥 ⇒ no-op（legacy / 内存装配无聚合）；
+    /// 2. 已收口（`Some`）或聚合不存在（`NotFound`）⇒ `Ok`；
+    /// 3. 仍未收口（`None`）⇒ 以内部生命周期权威 [`SYSTEM_ACTOR`] 终止在途聚合，终止目标
+    ///    已终态（`NotFound` / `InvalidTransition`）视为成功。
+    ///
+    /// 错误处置由调用方决定：`cancel_instance` fail-closed 传播（宁可不取消也不留孤儿），
+    /// `fail_instance` / `fail_approval` 最佳努力（工作流 fault 是权威结论，收口失败不阻断
+    /// fault，聚合留给管理员 `Terminate`）。
+    async fn finalize_approval_aggregate(
+        &self,
+        workflow_id: &str,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        let Some(bridge) = &self.approval else {
+            return Ok(());
+        };
+        match bridge.finish_if_complete(workflow_id).await {
+            // 已收口（`Some`）或聚合不存在（`NotFound`）：终止目标已达成。
+            Ok(Some(_)) | Err(BridgeError::NotFound(_)) => Ok(()),
+            Ok(None) => match bridge.terminate(workflow_id, SYSTEM_ACTOR, reason).await {
+                // 无聚合可终止 / 已终态：终止目标已达成。
+                Ok(())
+                | Err(BridgeError::NotFound(_))
+                | Err(BridgeError::InvalidTransition(_)) => Ok(()),
+                Err(e) => Err(RuntimeError::StoreError(format!(
+                    "approval finalize terminate failed: {e}"
+                ))),
+            },
+            Err(e) => Err(RuntimeError::StoreError(format!(
+                "approval finalize failed: {e}"
+            ))),
         }
     }
 

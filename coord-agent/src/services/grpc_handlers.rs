@@ -102,7 +102,7 @@ use coord_proto::agent::{
     WorkflowWithdrawRequest, WorkflowWithdrawResponse,
 };
 
-use coord_core::workflow::approval::bridge::{ApprovalCommand, BridgeError};
+use coord_core::workflow::approval::bridge::{ApprovalCommand, BridgeError, SYSTEM_ACTOR};
 use coord_core::workflow::approval::model::{JoinPolicy, SeatSpec};
 
 use crate::plugin::GatewayIdentity;
@@ -2713,11 +2713,21 @@ impl Workflow for WorkflowEngineService {
         request: Request<WorkflowTerminateRequest>,
     ) -> Result<Response<WorkflowTerminateResponse>, Status> {
         let identity = gateway_identity(&request);
+        let actor = approval_actor(&identity);
+        // 保留内部生命周期权威 actor 不得从 wire 冒充：`system` 恒可终止审批实例
+        // （`guard_terminate`），仅供 `WorkflowRuntime::cancel_instance` 经桥直调；
+        // 放行的话，任何请求只要 `subject="system"`（或鉴权关闭下伪造）就能绕过
+        // `signAdmins`。授权错误按契约返回 PERMISSION_DENIED。
+        if actor == SYSTEM_ACTOR {
+            return Err(Status::permission_denied(
+                "reserved internal actor 'system' cannot be used on the wire",
+            ));
+        }
         let req = request.into_inner();
         let (instance_id, status) = self
             .approval_command(
                 &req.workflow_id,
-                &approval_actor(&identity),
+                &actor,
                 ApprovalCommand::Terminate {
                     reason: &req.reason,
                 },
@@ -3711,6 +3721,25 @@ do:
             tonic::Code::PermissionDenied,
             "缺失身份 ⇒ anonymous actor 被拒（不得默认放行）"
         );
+    }
+
+    /// 保留内部生命周期权威 actor 不得从 wire 冒充：`subject="system"` ⇒ PERMISSION_DENIED。
+    /// 该检查先于审批桥（无桥也应先被授权拒，而不是 FailedPrecondition）；内部
+    /// `cancel_instance` 直调桥、不经本 handler，故不受影响。
+    #[tokio::test]
+    async fn terminate_rejects_reserved_system_actor_from_wire() {
+        let svc = WorkflowEngineService::new_for_test();
+        let mut req = Request::new(WorkflowTerminateRequest {
+            workflow_id: "w".into(),
+            reason: "ops".into(),
+            idempotency_key: String::new(),
+        });
+        req.extensions_mut().insert(GatewayIdentity {
+            subject: "system".into(),
+            roles: vec![],
+        });
+        let err = Workflow::terminate(&svc, req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
     /// 空批次在 RPC 边界拒绝（引擎空批次语义未定义）。

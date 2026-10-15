@@ -24,16 +24,16 @@ service Workflow {
   rpc Signal(WorkflowSignalRequest) returns (WorkflowSignalResponse);
   rpc Cancel(WorkflowCancelRequest) returns (WorkflowCancelResponse);
 
-  // 新增 — 工作流定义管理
+  // 工作流定义管理
   rpc Deploy(WorkflowDeployRequest) returns (WorkflowDeployResponse);
   rpc ListDefinitions(WorkflowListDefinitionsRequest) returns (WorkflowListDefinitionsResponse);
   rpc GetDefinition(WorkflowGetDefinitionRequest) returns (WorkflowGetDefinitionResponse);
 
-  // 新增 — 工作流定义版本化 / 回滚（对齐 policy PutBundle 语义）
+  // 工作流定义版本化 / 回滚（对齐 policy PutBundle 语义）
   rpc ListDefinitionVersions(WorkflowListDefinitionVersionsRequest) returns (WorkflowListDefinitionVersionsResponse);
   rpc RollbackDefinition(WorkflowRollbackDefinitionRequest) returns (WorkflowRollbackDefinitionResponse);
 
-  // 新增 — 工作流实例管理
+  // 工作流实例管理
   rpc ListInstances(WorkflowListInstancesRequest) returns (WorkflowListInstancesResponse);
 
   // 保留策略：删除定义（能力门禁 `coord:workflow:define`）。
@@ -50,7 +50,7 @@ service Workflow {
   // 返回 FAILED_PRECONDITION（先 Cancel）。删除不可回滚（无归档副本）。
   rpc DeleteInstance(WorkflowDeleteInstanceRequest) returns (WorkflowDeleteInstanceResponse);
 
-  // 新增 — 人工审批 v2（ADR-0013 D7）。命令类能力门禁 `coord:workflow:execute`。
+  // 人工审批 v2（ADR-0013 D7）。命令类能力门禁 `coord:workflow:execute`。
   rpc Approve(WorkflowApproveRequest) returns (WorkflowApproveResponse);
   rpc Reject(WorkflowRejectRequest) returns (WorkflowRejectResponse);
   rpc Acknowledge(WorkflowAcknowledgeRequest) returns (WorkflowAcknowledgeResponse);
@@ -62,7 +62,7 @@ service Workflow {
   rpc Withdraw(WorkflowWithdrawRequest) returns (WorkflowWithdrawResponse);
   rpc Terminate(WorkflowTerminateRequest) returns (WorkflowTerminateResponse);
 
-  // 新增 — 人工审批 v2 查询。能力门禁 `coord:workflow:read`。
+  // 人工审批 v2 查询。能力门禁 `coord:workflow:read`。
   rpc ListPendingTasks(WorkflowListPendingTasksRequest) returns (WorkflowListPendingTasksResponse);
   rpc GetInstanceDetail(WorkflowGetInstanceDetailRequest) returns (WorkflowGetInstanceDetailResponse);
 }
@@ -255,7 +255,9 @@ message WorkflowDeleteInstanceResponse {}
 //   响应，状态与事件只写一次；
 // - 操作主体身份取自认证上下文（CCT），请求体不携带 actor 字段；
 // - 命令响应 `status` 为大写实例状态：RUNNING / COMPLETED / REJECTED /
-//   CANCELLED / TERMINATED。
+//   CANCELLED / TERMINATED；`GetInstanceDetailResponse.status` 同为该大写实例状态，
+//   嵌套的 `branches[].status/join/reject`、`tasks[].status/kind`、`rounds[].status`
+//   则是模型标签（引擎枚举的 wire 标签，非大写实例状态）。
 message WorkflowApproveRequest {
   string workflow_id = 1;
   string task_id = 2;

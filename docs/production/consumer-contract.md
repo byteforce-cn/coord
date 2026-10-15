@@ -230,6 +230,8 @@
   写 `com.china-workflow.*` 命名空间、带 `.v1` 后缀：实例级 `instance.returned|cancelled|terminated|
   completed|rejected.v1`、轮次级 `approval.round.passed|rejected.v1`；**消费者按
   `(instance_id, sequence)` 去重**，每个类型的 JSON Schema 在 `apis/contracts/schemas/events/`。
+  审批面依赖 durable 装配（`workflow_durable`，**默认关闭**）：默认部署未启用时审批 RPC 返回
+  `FAILED_PRECONDITION`，且 `approve` 节点在驱动时 fault（实例 `FAILED`）。
   授权矩阵、deadline 无自动处置、幂等与分页口径见 `workflow-semantics.md` §7 / ADR-0013。
 - **补偿（saga）已落地**：`sw.rs` 编译 DSL 的 `CompensatedBy`，实例失败/取消
   时按序执行补偿步骤（端到端判据

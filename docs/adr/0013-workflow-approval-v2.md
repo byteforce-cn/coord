@@ -117,10 +117,15 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 - 席位来源 `approvers/pool/readers/roles` 全空 ⇒ `MissingRequiredField`；`mode` 非法形状
   （含 `quorum:0`、`ratio:0/<den>`、`ratio:<num>/0` 等零阈值——恒真会退化成「零审批自动通过」）
   在解析期 fail-closed；`deadline` 必须在解析期可换算为具体时刻，否则拒绝（不得把无期限当默认）。
-- 仅阅签席的轮次没有可计票席位，立即判通过（阅签不计票）；而 `total == 0`（全员过期或被减签）
-  的轮次**保持 Open、绝不自动通过**。
+- 纯阅签席（只声明 `readers`、无可计票席位）的 `approve` 节点在**开启时即 fail-closed**
+  （`InvalidArgument("approve seats")`，见桥的 `resolve_seats` 守卫）——`readers` 必须与 ≥1 个
+  可计票席位（`approvers`／`pool`／`roles` 解析结果）并存，否则空轮次会被引擎判成自动通过。
+  内部阅签本身不计票；而 `total == 0`（全员过期或被减签）的轮次**保持 Open、绝不自动通过**。
 - `roles` 在启动/命令路径注入 `ApproverResolver` 后展开为具体审批人；未注入或无对应映射时，
   节点开启即 fail-closed（`approve.role.<name>`），不静默少派席位。
+- `approve` 各策略字段（含 `deadline`）**必须写在 `approve:` 对象内**：写在其**兄弟位置**
+  （任务级）会被解析器当作未知任务级兄弟**静默忽略**（任务级未知兄弟是既有口径，本期不收紧），
+  于是 `deadline` 落到任务级就无声地无期限——解析期校验与运行期都看不到它。
 
 ### D3 实例级并发控制（单写者）
 
@@ -307,7 +312,8 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   （`finish_if_complete`）达成，命令路径无额外动作。
 - **resume-on-pass**：分支本轮 `Passed` ⇒ 清挂起并按节点 `onPass` 恢复（缺省顺序推进下一
   任务）；实例级 `Rejected` 走同一映射（有 `onReject` 则路由，否则 fault `approval_rejected`）；
-  `Cancelled`/`Terminated` 按既有口径 fault。
+  `Cancelled`/`Terminated` 分别以 `approval_cancelled`/`approval_terminated` 置 fault
+  （`Cancelled`/`Terminated` **不**按 `onReject` 路由）。
 - **`return_to_node` 重开目标节点**：目标席位取该节点**最近一次 attempt** 的席位逐字还原
   （`kind`/`assignee`/`candidates`）；重开**不设 deadline**（旧的绝对截止早已过期，沿用会立即
   过期），兜底出口是 `signAdmins` 的 `Terminate`/`AddSign`；目标节点无既有席位可复用 ⇒

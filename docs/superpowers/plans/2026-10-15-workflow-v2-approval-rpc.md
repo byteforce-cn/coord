@@ -14,7 +14,7 @@
 
 1. **审批实例 id = workflow 实例 id**（确定、可查询、可对账）；一个 workflow 实例懒创建一个 v2 `Engine`，跨多个 `approve` 节点复用（`node_attempts` 白名单支撑 `return_to_node`）。
 2. **挂起协议**：新 `SuspendReason::WaitingForApproval { approval_instance_id, node }`；`SuspensionMeta` 增 `approval_instance_id: Option<String>`（`#[serde(default, skip_serializing_if = "Option::is_none")]`）；`expected_signal = "approval.completed"`；状态 `Suspended`（人工；`reconcile_resumable_instances` 不得重驱动）。
-3. **恢复协议**：新 `WorkflowRuntime::resume_approval(instance_id, outcome: Value, next_target: Option<&str>)`。`Completed` → `next_target=None`（推进到下一任务）；`Rejected/Cancelled/Terminated` → 有 `on_reject` 则 `next_target=Some(target)`，否则 fault（`WorkflowFault`，错误码 `approval_rejected`）。
+3. **恢复协议**：新 `WorkflowRuntime::resume_approval(instance_id, outcome: Value, next_target: Option<&str>)`。`Completed` → `next_target=None`（推进到下一任务）；`Rejected` → 有 `on_reject` 则 `next_target=Some(target)`，否则 fault（`approval_rejected`）；`Cancelled`/`Terminated` → **不**按 `on_reject` 路由，分别以 `approval_cancelled`/`approval_terminated` 置 fault。
 4. **DSL 节点**（原生、非 SW extensions）：
    ```yaml
    - finance:
@@ -427,7 +427,7 @@
       -> Result<WorkflowInstance, RuntimeError>
   ```
   语义：CAS 重放（≤3）；前置 `suspension_meta.reason == "approval"`；完成最后一个 `Running` frame（`output = outcome`）；`context["_approval"] = outcome`；`next_target` 有值 ⇒ `current_task_index = find_task_index(target)`（缺失 ⇒ `RuntimeError`，fail-closed），否则 `+1`；`status=Running`、`suspension_meta=None`；提交 `TASK_COMPLETED, WORKFLOW_RESUMED`；`spawn_drive`。
-  终态分工：`Completed` ⇒ `next_target=None`；`Rejected/Cancelled/Terminated` ⇒ 由调用方（service）按 `on_reject` 传 target；无 target 时 service 调既有 `fail_instance`/等价路径置 fault（错误码 `approval_rejected`）。
+  终态分工：`Completed` ⇒ `next_target=None`；`Rejected` ⇒ 由调用方（service）按 `on_reject` 传 target，无 target 时以 `approval_rejected` 置 fault；`Cancelled`/`Terminated` ⇒ **不**按 `on_reject` 路由，由 service 分别以 `approval_cancelled`/`approval_terminated` 置 fault（映射事实源 ADR-0013 D11）。
   `cancel_instance`：若 `suspension_meta.reason=="approval"` ⇒ 先 `bridge.terminate(id,"system","workflow_cancelled")`（未终态时才调），再按既有取消路径提交。
   workflow `Completed` 分支：提交前调 `bridge.finish_if_complete(id)`（幂等；不存在审批实例时为 no-op）。
 
@@ -490,7 +490,7 @@
 - Produces:
   - Service 方法（供 handler 调用，全部返回 `(instance_id, status)` 语义或既有错误族）：
     `start_instance_as(def_id, input, initiator: Option<&str>)`（原 `start_instance` 保留并转调 `None`）；
-    `approval_command(workflow_id, actor, cmd, idem) -> (instance_id, status)`：无 `approval` ⇒ `FailedPrecondition`；命令 `Applied{node_outcome,terminal}` ⇒：`node_outcome==Some(Passed)` 调 `runtime.resume_approval(id, json!({"status":"passed"}), node.on_pass)`（无 `on_pass` 则 `None`）；`terminal ∈ {Rejected,Cancelled,Terminated}` 调 `runtime.apply_approval_node_outcome`（有 `on_reject` 走目标，无则 fault `approval_rejected`）；`Duplicate(resp)` 直接返回；
+    `approval_command(workflow_id, actor, cmd, idem) -> (instance_id, status)`：无 `approval` ⇒ `FailedPrecondition`；命令 `Applied{node_outcome,terminal}` ⇒：`node_outcome==Some(Passed)` 调 `runtime.resume_approval(id, json!({"status":"passed"}), node.on_pass)`（无 `on_pass` 则 `None`）；`terminal==Rejected` 调 `runtime.apply_approval_node_outcome(id, Rejected)`（有 `on_reject` 走目标，无则 fault `approval_rejected`），`terminal==Cancelled`/`Terminated` 分别以 `approval_cancelled`/`approval_terminated` 置 fault（不按 `on_reject` 路由）；`Duplicate(resp)` 直接返回；
     `list_pending_tasks(actor, page_size, page_token)`；`get_instance_detail(workflow_id)`。
   - **Task 11A 接口消费**：`bridge::NodeOutcome`/`apply_approval_node_outcome`（公开 helper）；审批 `command` 的 CAS 重试环内**每轮先重查 `load_idem`**（Task 7 review P2：并发同 key 防双重 Apply）；`RemoveSign` 空 `task_ids` 与 `AddSign` 无席位在 RPC 边界 ⇒ `InvalidArgument`；deadline 路径（Task 10/11A）已用 helper，Task 11 须把命令路径的 `on_pass` 与之一致（若 11A 未传 `on_pass`，在 helper 中补上）。
   - 角色解析：`ApprovalBridge` 构造时注入 `MapApproverResolver`（service 配置 `workflow_approval_roles: HashMap<String, Vec<String>>`，`ServicesConfig` 新增字段，`#[serde(default)]`）；无映射角色在节点开启时 fail-closed（Task 7 负责）。
@@ -581,7 +581,7 @@
 **Files:**
 - Modify: `coord-java-sdk/src/main/java/cn/byteforce/coord/sdk/workflow/WorkflowClient.java`（新增方法）
 - Modify: `coord-java-sdk/src/main/java/cn/byteforce/coord/sdk/internal/rpc/WorkflowClientImpl.java`
-- Create: `coord-java-sdk/src/main/java/cn/byteforce/coord/sdk/workflow/ApprovalDecision.java`、`PendingApprovalTask.java`、`ApprovalInstanceDetail.java`（+ 需要时 `ApprovalBranch/Task/Round.java`）
+- Create: `coord-java-sdk/src/main/java/cn/byteforce/coord/sdk/workflow/PendingApprovalTask.java`、`ApprovalInstanceDetail.java`、`ApprovalBranch.java`、`ApprovalTask.java`、`ApprovalRound.java`
 - Modify: `coord-java-sdk/src/test/java/cn/byteforce/coord/sdk/internal/rpc/WorkflowClientContractTest.java`（`FakeWorkflowService` 覆写 + 请求断言 + proto→DTO 映射）
 - Modify: `coord-java-sdk/src/test/java/cn/byteforce/coord/sdk/WorkflowClientVersioningTest.java`（新 DTO）
 - Create: `java-example/src/main/java/cn/byteforce/coord/example/WorkflowApprovals.java`
@@ -619,7 +619,7 @@
 ### Task 15: coord-client 包装与 UI 影响评估
 
 **Files:**
-- Modify: `coord-client/src/client.rs`（`WorkflowClient`/`ApprovalClient` + `Client::workflow()`）
+- Modify: `coord-client/src/client.rs`（`ApprovalClient` + `Client::approval()`）
 - Create: `docs/production/approval-ui-impact.md`（UI 影响评估：dangling `/workflow` 路由、REST facade 缺失、所需 `api.workflow` 面与后续里程碑口径；含 Owner/Last verified）
 - Test: `coord-client` 编译 + 既有测试；`coord-ui` 不改代码
 

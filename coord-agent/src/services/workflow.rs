@@ -2745,6 +2745,10 @@ pub mod phase4 {
         ///
         /// `Duplicate`（幂等键命中）原样返回首次响应，不重复驱动；`Applied` 时按分支
         /// 结论 / 实例终态恢复或故障工作流（与截止路径共用 `apply_approval_node_outcome`）。
+        ///
+        /// `ReturnToNode` 例外：桥只重开目标节点分支、工作流仍挂在返回节点上，故命令
+        /// 生效后额外 `resume_approval(.., Some(target_node))` 把实例重新驱动到目标节点
+        /// （否则目标分支通过时会按返回节点的 `onPass` 恢复，跳过中间审批节点）。
         pub async fn approval_command(
             &self,
             workflow_id: &str,
@@ -2753,6 +2757,16 @@ pub mod phase4 {
             idempotency_key: Option<&str>,
         ) -> Result<(String, String), BridgeError> {
             let bridge = self.approval_bridge()?;
+            // `ReturnToNode` 的恢复目标须在命令被桥消费前取出：桥只重开**目标节点**的
+            // 分支，工作流仍挂在**返回节点**上。若不把实例重新驱动到目标节点，目标分支
+            // 通过时 `apply_approval_node_outcome` 会用返回节点的 `onPass` 恢复，跳过
+            // 二者之间的所有审批节点。
+            let return_target = match &cmd {
+                ApprovalCommand::ReturnToNode { target_node, .. } => {
+                    Some((*target_node).to_string())
+                }
+                _ => None,
+            };
             match bridge
                 .command(workflow_id, actor, cmd, idempotency_key)
                 .await?
@@ -2763,8 +2777,28 @@ pub mod phase4 {
                     node_outcome,
                     terminal,
                 } => {
-                    self.drive_approval_outcome(workflow_id, node_outcome, terminal)
-                        .await?;
+                    match return_target {
+                        Some(target) => {
+                            // 重新驱动到目标节点：其重开分支已是 `Open`，`ensure_node_open`
+                            // 复用并重新挂起（attempt 已递增）。恢复失败即命令失败——绝不
+                            // 静默返回成功却停在错误的节点上。
+                            let runtime = self.runtime.as_ref().ok_or_else(|| {
+                                BridgeError::Store("runtime not initialized".into())
+                            })?;
+                            runtime
+                                .resume_approval(
+                                    workflow_id,
+                                    serde_json::json!({"status": "returned"}),
+                                    Some(&target),
+                                )
+                                .await
+                                .map_err(map_runtime_to_bridge)?;
+                        }
+                        None => {
+                            self.drive_approval_outcome(workflow_id, node_outcome, terminal)
+                                .await?;
+                        }
+                    }
                     approval_response_status(&response)
                 }
             }
