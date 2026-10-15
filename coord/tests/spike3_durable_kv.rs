@@ -940,6 +940,7 @@ async fn wait_instance_recovers_after_engine_restart() {
         payload: None,
         event_filter: None,
         expected_signal: None,
+        approval_instance_id: None,
         retry_count: None,
         error: None,
     });
