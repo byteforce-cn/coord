@@ -355,8 +355,9 @@
       AddSign{branch_id:&'a str, seats:Vec<SeatSpec>, comment:Option<&'a str>}, RemoveSign{task_ids:Vec<String>},
       ReturnToNode{branch_id:&'a str, target_node:&'a str, comment:Option<&'a str>}, Transfer{task_id:&'a str, to:&'a str},
       Delegate{task_id:&'a str, to:&'a str}, Withdraw, Terminate{reason:&'a str} }
-  pub enum CommandOutcome { Applied{response:Value, terminal:Option<ApprovalOutcome>}, Duplicate(Value) }
-  pub struct ExpireOutcome { pub expired: u32, pub terminal: Option<ApprovalOutcome> }
+  pub enum NodeOutcome { Passed, Rejected }   // 节点/分支级结果（Task 11A）
+  pub enum CommandOutcome { Applied{response:Value, node_outcome:Option<NodeOutcome>, terminal:Option<ApprovalOutcome>}, Duplicate(Value) }
+  pub struct ExpireOutcome { pub expired: u32, pub node_outcome: Option<NodeOutcome> }
   pub enum ApprovalOutcome { Completed, Rejected, Cancelled, Terminated }
   pub enum BridgeError { NotFound(String), NotAuthorized(String), InvalidTransition(String), InvalidArgument(String), Stale(String), Store(String), Serialization(String) }
   ```
@@ -489,8 +490,9 @@
 - Produces:
   - Service 方法（供 handler 调用，全部返回 `(instance_id, status)` 语义或既有错误族）：
     `start_instance_as(def_id, input, initiator: Option<&str>)`（原 `start_instance` 保留并转调 `None`）；
-    `approval_command(workflow_id, actor, cmd, idem) -> (instance_id, status)`：无 `approval` ⇒ `FailedPrecondition`；命令 `Applied{terminal}` ⇒ 按 Task 9 恢复/fault（`Rejected/Cancelled/Terminated` 用节点 `on_reject`，查不到定义 ⇒ fault）；`Duplicate(resp)` 直接返回；
+    `approval_command(workflow_id, actor, cmd, idem) -> (instance_id, status)`：无 `approval` ⇒ `FailedPrecondition`；命令 `Applied{node_outcome,terminal}` ⇒：`node_outcome==Some(Passed)` 调 `runtime.resume_approval(id, json!({"status":"passed"}), node.on_pass)`（无 `on_pass` 则 `None`）；`terminal ∈ {Rejected,Cancelled,Terminated}` 调 `runtime.apply_approval_node_outcome`（有 `on_reject` 走目标，无则 fault `approval_rejected`）；`Duplicate(resp)` 直接返回；
     `list_pending_tasks(actor, page_size, page_token)`；`get_instance_detail(workflow_id)`。
+  - **Task 11A 接口消费**：`bridge::NodeOutcome`/`apply_approval_node_outcome`（公开 helper）；审批 `command` 的 CAS 重试环内**每轮先重查 `load_idem`**（Task 7 review P2：并发同 key 防双重 Apply）；`RemoveSign` 空 `task_ids` 与 `AddSign` 无席位在 RPC 边界 ⇒ `InvalidArgument`；deadline 路径（Task 10/11A）已用 helper，Task 11 须把命令路径的 `on_pass` 与之一致（若 11A 未传 `on_pass`，在 helper 中补上）。
   - 角色解析：`ApprovalBridge` 构造时注入 `MapApproverResolver`（service 配置 `workflow_approval_roles: HashMap<String, Vec<String>>`，`ServicesConfig` 新增字段，`#[serde(default)]`）；无映射角色在节点开启时 fail-closed（Task 7 负责）。
   - `map_approval_error`：决定 11 的映射。
   - handler：先 `let identity = request.extensions().get::<GatewayIdentity>().cloned().unwrap_or_default();` 再 `into_inner()`；actor = `identity.subject`（空 ⇒ `"anonymous"`）；`start` 用 `identity.subject` 注入 initiator。
