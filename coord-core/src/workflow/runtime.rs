@@ -2571,6 +2571,20 @@ where
                                 break 'drive_loop;
                             }
                             SuspendReason::WaitingForApproval { node, .. } => {
+                                // 已挂起在同一审批节点上的再驱动是零写入无动作：挂起点与审批
+                                // 实例都已落库，再走一遍只会重复入栈 approve 帧、重复提交
+                                // workflow.suspended。恢复路径在驱动前推进状态 / 清空挂起元数据
+                                // （同 `resume`），因此不会落到此守卫。
+                                if inst.status == InstanceStatus::Suspended
+                                    && inst.suspension_meta.as_ref().is_some_and(|m| {
+                                        m.reason == "approval"
+                                            && m.approval_instance_id.as_deref()
+                                                == Some(inst.id.as_str())
+                                    })
+                                {
+                                    break 'drive_loop;
+                                }
+
                                 // approve 节点：先经审批桥开启审批实例（幂等），再按人工恢复
                                 // 语义挂起 —— 不 spawn 任何自动恢复（审批完成由恢复路径驱动）。
                                 //
@@ -2612,6 +2626,16 @@ where
                                     break 'drive_loop;
                                 }
 
+                                // 同节点的 Running approve 帧已存在（引擎已提交 Suspend 但实例
+                                // 尚未写成 Suspended 的崩溃窗口内再驱动）⇒ 就地替换；否则入栈。
+                                if matches!(
+                                    inst.task_stack.last(),
+                                    Some(last) if last.task_name == frame.task_name
+                                        && last.task_type == "approve"
+                                        && last.status == TaskStatus::Running
+                                ) {
+                                    inst.task_stack.pop();
+                                }
                                 inst.task_stack.push(frame);
                                 inst.status = InstanceStatus::Suspended;
                                 inst.suspension_meta = Some(reason.to_meta());
@@ -5623,7 +5647,7 @@ mod tests {
         assert!(seat.status.is_open());
     }
 
-    /// 挂起后强制再驱动：approve 节点幂等复用既有 open 分支，不得重复开分支/轮次。
+    /// 挂起后强制再驱动：既不得重复开审批分支/轮次，也不得重复入栈 approve 帧或重写实例。
     #[tokio::test]
     async fn re_drive_after_suspend_does_not_double_open() {
         let (bridge, approval_store) = approval_bridge();
@@ -5631,8 +5655,13 @@ mod tests {
         let def = approve_definition("approve-redrive-wf");
 
         let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
-        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+        let suspended =
+            await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+        assert_eq!(suspended.task_stack.len(), 1, "挂起恰一帧（approve）");
 
+        // 逻辑时钟前进：再驱动若真的写了实例，`updated_at` 会跟着变（零写入可观测）。
+        runtime.clock.advance(50);
+        let events_before = approval_store.events(&started.id).await.len();
         let (before, rev_before) = approval_store.load(&started.id).await.unwrap().unwrap();
 
         runtime
@@ -5649,8 +5678,13 @@ mod tests {
         assert_eq!(after.branches.len(), before.branches.len());
         assert_eq!(after.rounds.len(), before.rounds.len());
         assert_eq!(after.tasks.len(), before.tasks.len());
+        assert_eq!(
+            approval_store.events(&started.id).await.len(),
+            events_before,
+            "重驱动不得新发审批事件"
+        );
 
-        // workflow 实例仍在 Suspended（重驱动不得把审批节点推进过去）
+        // workflow 实例零写入：仍 Suspended、恰一帧 approve、索引 0、updated_at 未变
         let reloaded = store_of(&runtime)
             .load_instance(&started.id)
             .await
@@ -5659,6 +5693,68 @@ mod tests {
         assert_eq!(reloaded.status, InstanceStatus::Suspended);
         assert_eq!(reloaded.current_task_index, 0);
         assert!(reloaded.context.get("done").is_none());
+        assert_eq!(
+            reloaded.task_stack.len(),
+            1,
+            "重驱动不得重复入栈 approve 帧"
+        );
+        assert_eq!(reloaded.task_stack[0].task_name, "review");
+        assert_eq!(reloaded.task_stack[0].task_type, "approve");
+        assert_eq!(reloaded.task_stack[0].status, TaskStatus::Running);
+        assert_eq!(
+            reloaded.updated_at, suspended.updated_at,
+            "无动作重驱动不得写实例（updated_at 不变）"
+        );
+    }
+
+    /// 崩溃窗口内的再驱动（approve 帧已在栈上置 Running，实例尚未写成 Suspended）：
+    /// 同节点的 Running approve 帧必须就地替换，不得压成两帧。
+    #[tokio::test]
+    async fn crash_window_re_drive_replaces_running_approve_frame() {
+        let (bridge, _approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_definition("approve-crash-window-wf");
+        store_of(&runtime).save_definition(&def).await.unwrap();
+
+        let mut inst = WorkflowInstance::new(&def, serde_json::json!({}), 1000);
+        inst.status = InstanceStatus::Running;
+        inst.task_stack.push(TaskFrame {
+            task_name: "review".into(),
+            task_type: "approve".into(),
+            status: TaskStatus::Running,
+            input: Some(inst.context.clone()),
+            output: None,
+            started_at: Some(1000),
+            ended_at: None,
+            retry_count: 0,
+            pending_branches: None,
+        });
+        store_of(&runtime).save_instance(&inst).await.unwrap();
+
+        runtime
+            .drive(
+                inst.id.clone(),
+                def.clone(),
+                Arc::clone(store_of(&runtime)),
+                None,
+            )
+            .await;
+
+        let reloaded = store_of(&runtime)
+            .load_instance(&inst.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, InstanceStatus::Suspended);
+        assert_eq!(
+            reloaded.task_stack.len(),
+            1,
+            "同节点的 Running approve 帧必须就地替换"
+        );
+        assert_eq!(reloaded.task_stack[0].task_name, "review");
+        assert_eq!(reloaded.task_stack[0].task_type, "approve");
+        assert_eq!(reloaded.task_stack[0].status, TaskStatus::Running);
+        assert_eq!(reloaded.current_task_index, 0);
     }
 
     /// 未注入审批桥：approve 节点没有可开的审批实例 ⇒ fault-closed，不得静默继续。
