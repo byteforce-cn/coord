@@ -1678,27 +1678,25 @@ impl Validator {
 
         let deadline = match body.get("deadline") {
             None => None,
-            Some(v) => match self.parse_duration_value(raw.span, v, "approve.deadline") {
-                Some(dur) => {
-                    // 解析期就必须可换算：否则运行期 `deadline_ms()==None`，
-                    // 无期限被当成默认（fail-open）。
-                    if crate::workflow::engine::parse_iso8601_duration_ms(&dur).is_none() {
-                        self.errors.push(ValidationError {
-                            span: Some(raw.span),
-                            kind: ValidationErrorKind::UnsupportedConstruct(
-                                "approve.deadline".to_string(),
-                            ),
-                            message: format!(
-                                "approve.deadline must be an ISO8601 duration coord can evaluate, \
-                                 got '{dur}'"
-                            ),
-                        });
-                        return None;
-                    }
-                    Some(dur)
+            Some(v) => {
+                let dur = self.parse_duration_value(raw.span, v, "approve.deadline")?;
+                // 解析期就必须可换算：否则运行期 `deadline_ms()==None`，
+                // 无期限被当成默认（fail-open）。
+                if crate::workflow::engine::parse_iso8601_duration_ms(&dur).is_none() {
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(
+                            "approve.deadline".to_string(),
+                        ),
+                        message: format!(
+                            "approve.deadline must be an ISO8601 duration coord can evaluate, \
+                             got '{dur}'"
+                        ),
+                    });
+                    return None;
                 }
-                None => return None,
-            },
+                Some(dur)
+            }
         };
 
         let on_pass = match body.get("onPass") {
