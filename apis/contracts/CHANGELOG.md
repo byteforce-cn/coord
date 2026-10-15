@@ -2,6 +2,68 @@
 
 版本规则见 WHITEPAPER.md。契约版本独立于代码版本。
 
+## [contracts/v1.6.0] — 2026-10-15（Minor：workflow 审批 v2 RPC，ADR-0013 / G-WF-1）
+
+**发布口径**：本条目为 **Minor**（新增 RPC + 注释级语义声明；不改动任何既有字段编号与类型；
+`buf breaking` 基线 = `contracts/v1.5.0`，CI 强制）。
+
+**新增 RPC（12 个，`coord.workflow.v1`）**
+
+| 契约包 | RPC | 能力 | 说明 |
+|:--|:--|:--|:--|
+| `coord.workflow.v1` | `Approve` / `Reject` / `Acknowledge` | `coord:workflow:execute` | 席位的通过 / 否决 / 阅签（会签 / 或签 / 票签 / 一票否决） |
+| `coord.workflow.v1` | `AddSign` / `RemoveSign` | `coord:workflow:execute` | 加签 / 减签（`sign_admins` ∪ 发起人） |
+| `coord.workflow.v1` | `ReturnToNode` | `coord:workflow:execute` | 驳回至节点：重开目标节点最近一次 attempt 的席位，重开席位不带 deadline |
+| `coord.workflow.v1` | `Transfer` / `Delegate` | `coord:workflow:execute` | 转办（原审批人失去审批权、保审计）/ 委派（原审批人保留权限） |
+| `coord.workflow.v1` | `Withdraw` | `coord:workflow:execute` | 撤回（仅发起人） |
+| `coord.workflow.v1` | `Terminate` | `coord:workflow:execute` | 终止（`sign_admins`；内部生命周期权威另有保留 actor） |
+| `coord.workflow.v1` | `ListPendingTasks` | `coord:workflow:read` | 待办席位查询（actor 过滤 + 实例 id 分页） |
+| `coord.workflow.v1` | `GetInstanceDetail` | `coord:workflow:read` | 实例审批详情（branches / tasks / rounds + `revision`） |
+
+- 命令请求末字段 `idempotency_key`（复用 Signal 幂等模式）：同键重放返回首次响应、状态与事件只写一次；
+  记录键 `/_workflow/v4/idempotency/{instance}/{key}`，与状态、本批事件同一次 CAS 提交写入。
+- 主体身份取自认证上下文（CCT），**请求体不携带 actor 字段**。
+- 错误码映射：`StaleRevision → ABORTED`、`NotAuthorized → PERMISSION_DENIED`、`InvalidTransition → FAILED_PRECONDITION`。
+
+**新增事件类型（`com.china-workflow.*`，带 `.v1` 后缀，写 v3 outbox 传输设施）**
+
+- 实例级：`com.china-workflow.instance.returned|cancelled|terminated|completed|rejected.v1`；
+- 轮次级：`com.china-workflow.approval.round.passed|rejected.v1`；
+- JSON Schema 落 `apis/contracts/schemas/events/<type>.json`（`$id` = `https://schemas.coord.dev/events/<type>.json`），
+  由 `scripts/check-event-schemas.sh` 门禁（catalog ↔ schema 双向一致）；消费者按 `(instance_id, sequence)` 去重。
+
+**语义声明变更（wire 不变）**
+
+- `coord.workflow.v1` 新增原生 `approve` 节点 DSL（`approvers/pool/readers/roles/mode/veto/deadline/
+on_pass/on_reject/sign_admins/allow_self_approve`）；未知键、非法 `mode`、零阈值 `mode`、
+  不可换算 `deadline`、四席位来源全空均 fail-closed。
+- 挂起 / 恢复：走到 `approve` 节点 ⇒ 工作流 `SUSPENDED`（`expected_signal = "approval.completed"`）；
+  分支通过按 `on_pass` 恢复，实例级否决 / 取消 / 终止按 `on_reject` 路由，否则 fault。
+- 授权矩阵：责任人 / 候选 / 被委派 + 自审禁止（`allow_self_approve=false` 默认；匿名豁免）；
+  加签 / 减签 = `sign_admins` ∪ 发起人；驳回至节点 = 未决席位持有人 ∪ `sign_admins` ∪ 发起人；
+  终止 = `sign_admins`（内部 `SYSTEM_ACTOR` 恒可，不对用户暴露）。
+- deadline 到期**无自动处置**：只置席位置过期并从计票分母剔除；全员过期 / 被减签保持 `Open`，处置由人。
+- 命令路径**不产生审批实例 `Faulted`**：只收口为 `Completed / Rejected / Cancelled / Terminated`。
+
+**影响范围（消费者数量 / 名单）**：新增面，无既有消费者受影响（既有 RPC 的 wire 与语义未变）。
+审批面沿用 durable 开关语义：未启用 KV/durable 装配时审批 RPC 一律 `FAILED_PRECONDITION`
+（`workflow durable engine disabled`）；`approve` 节点在非 durable 装配下进入即 fault（fail-closed，
+不静默降级）。已知消费方 EIS/ICPS 已在集成后确认无疑问（ADR-0013 转 accepted）。
+
+**回滚预案**：回滚本分支即可；无既有 wire / 落盘格式迁移（新增 v4 键空间与服务面，v1 实例不受影响）。
+回滚后已写入的 v4 审批状态成为惰性数据（不再被驱动），不影响 v1 路径。
+
+**灰度计划**：不支持滚动升级（见 `docs/production/ops/upgrade.md`）——全集群同版本切换；
+审批面按 `workflow_durable` opt-in 启用，可在单实例验证后再全量开启。
+
+**校验（本地已跑）**
+
+- `apis/contracts/scripts/check-wire-sync.sh` exit 0（包名/rpc/字段编号双副本一致，目标日期无逾期）；
+  `apis/contracts/scripts/check-wire-descriptor.sh` exit 0（descriptor 级 wire 相等）；`buf lint`（`apis/contracts`）exit 0。
+- `scripts/check-event-schemas.sh` exit 0；`cargo fmt --all -- --check` 无输出。
+- `scripts/check-doc-refs.sh`：除计划文档（`docs/superpowers/plans/2026-10-15-workflow-v2-approval-rpc.md`）
+  引用 Task 15 待建文件一处外，无新增悬空。
+
 ## [contracts/v1.5.0] — 2026-10-12（Minor：Transit HMAC 用途化密钥与轮换窗口，G-TR-3 / ADR-0012）
 
 **发布口径**：本条目为 **Minor**（新增字段 + 注释级语义声明 + 行为收紧；
