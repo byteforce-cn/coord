@@ -88,7 +88,7 @@
   - `WorkflowReturnToNodeRequest{workflow_id=1,branch_id=2,target_node=3,comment=4,idempotency_key=5}`。
   - `WorkflowTransferRequest{workflow_id=1,task_id=2,to=3,comment=4,idempotency_key=5}`；`WorkflowDelegateRequest` 同形。
   - `WorkflowWithdrawRequest{workflow_id=1,comment=2,idempotency_key=3}`；`WorkflowTerminateRequest{workflow_id=1,reason=2,idempotency_key=3}`。
-  - `WorkflowApprovalCommandResponse{instance_id=1,status=2}`（status 大写：`RUNNING/COMPLETED/REJECTED/CANCELLED/TERMINATED`）。
+  - 每命令独立响应消息（buf STANDARD `RPC_REQUEST_RESPONSE_UNIQUE`；`apis/contracts/buf.yaml` 的豁免栏只给既有 RPC，不为新面放宽）：`WorkflowApproveResponse`/`WorkflowRejectResponse`/`WorkflowAcknowledgeResponse`/`WorkflowAddSignResponse`/`WorkflowRemoveSignResponse`/`WorkflowReturnToNodeResponse`/`WorkflowTransferResponse`/`WorkflowDelegateResponse`/`WorkflowWithdrawResponse`/`WorkflowTerminateResponse`，各 `{instance_id=1,status=2}`（status 大写：`RUNNING/COMPLETED/REJECTED/CANCELLED/TERMINATED`）。
   - `WorkflowListPendingTasksRequest{page_size=1,page_token=2}`；`WorkflowListPendingTasksResponse{repeated PendingApprovalTask tasks=1,next_page_token=2}`；`PendingApprovalTask{instance_id=1,task_id=2,node=3,branch_id=4,round_id=5,kind=6,status=7,assignee=8,deadline_ms=9,created_at_ms=10}`。
   - `WorkflowGetInstanceDetailRequest{workflow_id=1}`；`WorkflowGetInstanceDetailResponse{instance_id=1,status=2,initiator=3,revision=4,definition_name=5,repeated ApprovalBranch branches=6,repeated ApprovalTask tasks=7,repeated ApprovalRound rounds=8}`；`ApprovalBranch{id=1,node=2,attempt=3,status=4,join=5,reject=6,repeated string round_ids=7}`；`ApprovalTask{id=1,branch_id=2,round_id=3,kind=4,status=5,assignee=6,repeated string candidates=7,deadline_ms=8}`；`ApprovalRound{id=1,branch_id=2,number=3,status=4,total_count=5,completed_count=6,rejected_count=7}`。
 - 能力表新增（`grpc_auth.rs:202-215` 后）：
@@ -101,14 +101,14 @@
 
 - [ ] **Step 2: 两份 proto 同改 + 能力表登记**
 
-  先改 `apis/contracts/proto/...`，再机械复制到 `coord-proto/src/proto/workflow.proto`（`cmp` 逐字节一致）。RPC 追加在 `DeleteInstance` 之后。
-  Run: `cargo build -p coord-proto`（生成通过）；`cmp apis/contracts/proto/coord/workflow/v1/workflow.proto coord-proto/src/proto/workflow.proto`（无输出）。
-  契约脚本：`bash apis/contracts/scripts/check-wire-sync.sh`、`bash apis/contracts/scripts/check-wire-descriptor.sh`（需 `buf`/`protoc`；本机缺失则记录并在 Task 13 前补跑）。
-  `buf lint`（working-directory `apis/contracts`）与 `buf breaking --against origin/main`（在 `apis/contracts` 下）全绿；`buf format` 不改写（若改写则提交格式化结果）。
+  先改 `apis/contracts/proto/...`，再机械复制到 `coord-proto/src/proto/workflow.proto`（`cmp` 逐字节一致）。RPC 追加在 `DeleteInstance` 之后。同时在 `coord-agent/src/services/grpc_handlers.rs` 的两个 `impl Workflow` 块（legacy `WorkflowService` 与 `WorkflowEngineService`）各补 12 个 `Status::unimplemented` 桩（禁止 panic）：否则新 trait 方法使中间提交无法编译；Task 11 替换 engine service 的桩体。
+  Run: `cargo build -p coord-proto`（生成通过）；`cargo check -p coord-agent`（exit 0）；`cmp apis/contracts/proto/coord/workflow/v1/workflow.proto coord-proto/src/proto/workflow.proto`（无输出）。
+  契约脚本：`bash apis/contracts/scripts/check-wire-sync.sh`、`bash apis/contracts/scripts/check-wire-descriptor.sh`（protoc 已装）。
+  `buf lint`/`buf breaking`：本机 sandbox 下 buf 二进制 segfault（exit 139），本地不可执行——由 CI `contract-check` 在 PR 上覆盖；proto 手写必须守 STANDARD（字段 snake_case、命名不冲突），**不得**声称本地跑过 buf。
 
 - [ ] **Step 3: 能力表测试转绿 + 全量回归**
 
-  Run: `CARGO_BUILD_JOBS=3 cargo test -p coord-core --lib grpc_auth`；`cargo fmt --all -- --check`。
+  Run: `CARGO_BUILD_JOBS=3 cargo test -p coord-core --lib grpc_auth`；`cargo check -p coord-agent`；`cargo fmt --all -- --check`。
   Commit: `feat(workflow): add approval v2 RPC contract and capabilities`
 
 ---
@@ -487,7 +487,7 @@
 **Interfaces:**
 - Consumes: Task 1 RPC 类型；Task 4 store；Task 7 bridge；Task 8/9 runtime 方法；`GatewayIdentity`（`coord-agent/src/plugin/gateway.rs`）。
 - Produces:
-  - Service 方法（供 handler 调用，全部返回 `Result<WorkflowApprovalCommandResponse 语义类型, WorkflowEngineError>` 或既有错误族）：
+  - Service 方法（供 handler 调用，全部返回 `(instance_id, status)` 语义或既有错误族）：
     `start_instance_as(def_id, input, initiator: Option<&str>)`（原 `start_instance` 保留并转调 `None`）；
     `approval_command(workflow_id, actor, cmd, idem) -> (instance_id, status)`：无 `approval` ⇒ `FailedPrecondition`；命令 `Applied{terminal}` ⇒ 按 Task 9 恢复/fault（`Rejected/Cancelled/Terminated` 用节点 `on_reject`，查不到定义 ⇒ fault）；`Duplicate(resp)` 直接返回；
     `list_pending_tasks(actor, page_size, page_token)`；`get_instance_detail(workflow_id)`。
