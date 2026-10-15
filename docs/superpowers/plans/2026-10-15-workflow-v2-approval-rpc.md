@@ -168,7 +168,7 @@
 
 - [ ] **Step 2: 改名 + schema + 门禁**
 
-  全量改名 catalog 与 engine emit 字面量（含 `finish` 的 `status_changed` 兜底 arm，保证 catalog==emit 断言可判别），并同步所有测试中引用旧名的断言（Task 2 新增测试的事件名断言一并改名）。7 个 JSON Schema（draft 2020-12）核心字段：`id/source/specversion/type/dataschema/subject/time/data`；`data` 含 `instance_id`（`instance.*`）或 `instance_id/branch_id/round_id/total/completed/rejected`（`round.*`）；`additionalProperties: true`（消费者前向兼容），`required` 只钉上列键。
+  全量改名 catalog 与 engine emit 字面量（含 `finish` 的 `status_changed` 兜底 arm，保证 catalog==emit 断言可判别），并同步所有测试中引用旧名的断言（Task 2 新增测试的事件名断言一并改名）。7 个 JSON Schema（draft 2020-12）核心字段：`id/aggregate_id/sequence/event_type/specversion/source/subject/dataschema/time/data`（记录序列化键为 `event_type`，非 CloudEvents 概念属性 `type`）；`data` 含 `instance_id`（`instance.*`）或 `instance_id/branch_id/round_id/total/completed/rejected`（`round.*`）；`additionalProperties: true`（消费者前向兼容），`required` 只钉上列键。
   `scripts/check-event-schemas.sh`：① catalog（`events.rs`）中每个类型有对应文件；② 每个 schema `$id` == `dataschema_for(type)`；③ `python3 -m json.tool` 解析通过；类型清单用 `grep` 从 `events.rs` 提取（与文件比对，缺一即 exit 1）。CI 步骤：`bash scripts/check-event-schemas.sh`。
   Run: `bash scripts/check-event-schemas.sh`；`cargo test -p coord-core --lib workflow::approval`。
 
