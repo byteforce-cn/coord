@@ -35,6 +35,10 @@ use super::store::{ApprovalStore, ExpectedRev, IdemRecord};
 /// CAS 冲突后的最大尝试次数（含首次）：达到即放弃并返回 [`BridgeError::Stale`]。
 const MAX_COMMIT_ATTEMPTS: u32 = 3;
 
+/// 内部生命周期权威 actor：终止等由工作流运行时驱动的内部动作以它执行，不受节点
+/// `sign_admins` 用户授权面约束（用户路径仍只认 `sign_admins`）。
+pub const SYSTEM_ACTOR: &str = "system";
+
 /// 席位解析端口：把 `approve` 节点的角色名展开为具体审批人。
 ///
 /// 解析在启动/命令路径注入（定义解析期只做形状校验）。返回 `None` 表示无映射，调用方
@@ -455,7 +459,8 @@ impl ApprovalBridge {
         }
     }
 
-    /// 管理路径强制终止实例；仅 `sign_admins` 可调用。
+    /// 管理路径强制终止实例；用户 actor 仅 `sign_admins` 可调用，内部生命周期权威
+    /// [`SYSTEM_ACTOR`] 恒可调用。
     pub async fn terminate(
         &self,
         approval_id: &str,
@@ -689,8 +694,12 @@ impl ApprovalBridge {
         )))
     }
 
-    /// 终止守卫：仅 `sign_admins`（实例任一分支声明者）。
+    /// 终止守卫：内部生命周期权威 [`SYSTEM_ACTOR`] 恒可调用；用户 actor 仅 `sign_admins`
+    /// （实例任一分支声明者）。
     fn guard_terminate(&self, engine: &Engine, actor: &str) -> Result<(), BridgeError> {
+        if actor == SYSTEM_ACTOR {
+            return Ok(());
+        }
         let allowed = engine
             .branches
             .values()
@@ -1094,6 +1103,25 @@ mod tests {
         assert!(matches!(err, BridgeError::NotAuthorized(_)), "{err:?}");
 
         bridge.terminate(ID, "admin", "audit").await.unwrap();
+        let (engine, _) = store.load(ID).await.unwrap().unwrap();
+        assert_eq!(engine.instance.status, ApprovalStatus::Terminated);
+    }
+
+    /// 内部生命周期权威（[`SYSTEM_ACTOR`]）在**默认空** `sign_admins` 策略下也可终止：
+    /// 取消工作流不得因节点未声明系统角色而留下仍可投票的 open 审批。
+    #[tokio::test]
+    async fn terminate_allows_system_actor_on_default_policy() {
+        let (bridge, store) = build(None);
+        bridge
+            .ensure_node_open(&wf(), "review", &approve_task(&["alice"]))
+            .await
+            .unwrap();
+
+        bridge
+            .terminate(ID, SYSTEM_ACTOR, "workflow_cancelled")
+            .await
+            .unwrap();
+
         let (engine, _) = store.load(ID).await.unwrap().unwrap();
         assert_eq!(engine.instance.status, ApprovalStatus::Terminated);
     }

@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::approval::bridge::ApprovalBridge;
+use super::approval::bridge::{ApprovalBridge, BridgeError, SYSTEM_ACTOR};
 use super::durable::{DurableSupport, OutboxRecord, TimerKind, TimerRecord};
 use super::engine::WorkflowExecutor;
 use super::model::{
@@ -1917,6 +1917,21 @@ where
                 ))
             })?;
 
+        // 定义漂移守卫必须在**任何状态写之前**（ADR-0013 D6）：先读实例 + 加载定义 +
+        // 校验钉死哈希。漂移 ⇒ 置 `Failed` + `workflow.faulted` 并报 `DefinitionDrift`，
+        // 绝不提交 `WORKFLOW_RESUMED`（与 [`Self::resume`] 同口径）。
+        if let Err(drift) = assert_definition_pin(&pre, &def) {
+            let (expected, actual) = match drift {
+                RuntimeError::DefinitionDrift {
+                    expected, actual, ..
+                } => (expected, actual),
+                other => return Err(other),
+            };
+            return Err(self
+                .definition_drift_error(&self.store, instance_id, expected, actual)
+                .await);
+        }
+
         let cp = self
             .commit_control_plane(
                 &self.store,
@@ -2023,6 +2038,11 @@ where
 
     /// 取消实例：非终态 → `Cancelled` + `workflow.cancelled`（同一次提交）。
     ///
+    /// 挂起在审批上时先经桥终止审批实例（内部生命周期权威 actor，不受节点
+    /// `sign_admins` 约束）：只有终止成功才继续取消。terminal 失败（除「无审批实例」
+    /// 的 `NotFound`）一律 fail-closed 传播 —— 绝不留下「工作流已取消、审批仍 open
+    /// 可投票」的孤儿。
+    ///
     /// 控制面路径（[`Self::commit_control_plane`]）：线性一致读修订号后在 CAS 提交里
     /// 重新校验状态。一次「取消 vs 完成」的竞态里，若完成先提交则取消读到的是终态
     /// 而拒绝写入 —— 不会用 `Cancelled` 覆盖已提交的 `Completed`（消费者已见
@@ -2034,9 +2054,7 @@ where
     /// 生命周期事件与状态写同一次提交（durable 装配下同 Txn/同事务；legacy 分步，
     /// 见 [`Self::commit_instance`]）。
     pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
-        // 挂起在审批上时先终止对应审批实例（best-effort）：审批实例的终态由桥维护，
-        // 工作流取消是权威操作 —— 终止失败不得阻塞取消。挂起在审批上等价于审批实例
-        // 尚未终态（终态会经恢复/fault 清掉挂起），故无需另查审批状态。
+        // 挂起在审批上 ⇒ 审批实例尚未终态（终态会经恢复/fault 清掉挂起），先终止它。
         if let Some(bridge) = &self.approval {
             let inst = self
                 .store
@@ -2051,9 +2069,19 @@ where
                         .is_some_and(|m| m.reason == "approval");
                 if on_approval {
                     // 审批实例 id 恒等于 workflow 实例 id（见 SuspensionMeta.approval_instance_id）。
-                    let _ = bridge
-                        .terminate(instance_id, "system", "workflow_cancelled")
-                        .await;
+                    match bridge
+                        .terminate(instance_id, SYSTEM_ACTOR, "workflow_cancelled")
+                        .await
+                    {
+                        // 无审批实例可终止（从未开启/已被清除）：no-op。
+                        Ok(()) | Err(BridgeError::NotFound(_)) => {}
+                        // 其余错误 fail-closed 传播：宁可不取消，也不留 open 审批孤儿。
+                        Err(e) => {
+                            return Err(RuntimeError::StoreError(format!(
+                                "approval terminate failed: {e}"
+                            )))
+                        }
+                    }
                 }
             }
         }
@@ -5708,7 +5736,9 @@ mod tests {
     use crate::workflow::approval::model::{
         BranchStatus, InstanceStatus as ApprovalStatus, JoinPolicy,
     };
-    use crate::workflow::approval::store::{ApprovalStore, MemoryApprovalStore};
+    use crate::workflow::approval::store::{
+        ApprovalInstanceEntry, ApprovalStore, ExpectedRev, IdemRecord, MemoryApprovalStore,
+    };
     use crate::workflow::model::ApproveTask;
 
     /// approve 节点的席位（具体审批人，保证节点有可批的席位）。
@@ -6073,6 +6103,90 @@ mod tests {
             .expect("seat for assignee")
     }
 
+    /// 手工构造一个挂起在审批上的实例（绕过 drive；取消 / 漂移测试用）。
+    fn suspended_approval_instance(id: &str, def: &WorkflowDefinition) -> WorkflowInstance {
+        let mut inst = running_instance(id);
+        inst.definition_ns = def.document.namespace.clone();
+        inst.definition_name = def.document.name.clone();
+        inst.definition_version = def.document.version.clone();
+        inst.status = InstanceStatus::Suspended;
+        inst.suspension_meta = Some(SuspensionMeta {
+            reason: "approval".into(),
+            until_ms: None,
+            service: None,
+            payload: None,
+            event_filter: None,
+            expected_signal: Some("approval.completed".into()),
+            approval_instance_id: Some(id.to_string()),
+            retry_count: None,
+            error: None,
+        });
+        inst
+    }
+
+    /// 带事件记录的运行时：断言生命周期事件的有/无（无 durable 时直发事件总线）。
+    #[allow(clippy::type_complexity)]
+    fn recording_runtime() -> (
+        WorkflowRuntime<
+            ExpressionEvaluator,
+            TestClock,
+            MemoryWorkflowStore,
+            NoopTaskDispatcher,
+            Arc<RecordingEventProvider>,
+        >,
+        Arc<RecordingEventProvider>,
+    ) {
+        let executor = WorkflowExecutor::new(ExpressionEvaluator::new(), TestClock::new(1000));
+        let events = Arc::new(RecordingEventProvider::new());
+        let runtime = WorkflowRuntime::new(
+            executor,
+            TestClock::new(1000),
+            MemoryWorkflowStore::new(),
+            NoopTaskDispatcher,
+            Arc::clone(&events),
+        );
+        (runtime, events)
+    }
+
+    /// 审批存储替身：所有读写恒失败（验证 cancel 对非 `NotFound` 错误的 fail-closed 传播）。
+    struct FailingApprovalStore;
+
+    #[async_trait::async_trait]
+    impl ApprovalStore for FailingApprovalStore {
+        async fn load(
+            &self,
+            _instance_id: &str,
+        ) -> Result<Option<(crate::workflow::approval::engine::Engine, i64)>, StoreError> {
+            Err(StoreError::SerializationError("approval store down".into()))
+        }
+
+        async fn load_idem(
+            &self,
+            _instance_id: &str,
+            _key: &str,
+        ) -> Result<Option<Value>, StoreError> {
+            Err(StoreError::SerializationError("approval store down".into()))
+        }
+
+        async fn commit_with_idem(
+            &self,
+            _engine: &crate::workflow::approval::engine::Engine,
+            _events: &[OutboxRecord],
+            _expected: ExpectedRev,
+            _idem: Option<&IdemRecord>,
+        ) -> Result<bool, StoreError> {
+            Err(StoreError::SerializationError("approval store down".into()))
+        }
+
+        async fn scan(
+            &self,
+            _after: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<ApprovalInstanceEntry>, StoreError> {
+            Err(StoreError::SerializationError("approval store down".into()))
+        }
+    }
+
     /// 审批通过：`next_target=None` ⇒ 顺序推进到下一任务并最终 `Completed`。
     #[tokio::test]
     async fn approve_completed_resumes_to_next_task() {
@@ -6286,12 +6400,13 @@ mod tests {
         );
     }
 
-    /// 工作流取消：挂起在审批上 ⇒ 先终止审批实例，再取消工作流。
+    /// 工作流取消：挂起在审批上 ⇒ 以内部系统 actor 终止审批实例（**默认空**
+    /// `sign_admins` 下也生效），再取消工作流。
     #[tokio::test]
     async fn workflow_cancel_terminates_open_approval() {
         let (bridge, approval_store) = approval_bridge();
         let runtime = make_runtime().with_approval_bridge(Arc::clone(&bridge));
-        let def = approve_resume_definition("approve-cancel-terminate-wf", None, &["system"]);
+        let def = approve_resume_definition("approve-cancel-terminate-wf", None, &[]);
 
         let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
         await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
@@ -6308,6 +6423,138 @@ mod tests {
             engine.instance.status,
             ApprovalStatus::Terminated,
             "取消工作流必须终止未决审批实例"
+        );
+    }
+
+    /// 挂起在审批上但审批实例不存在（从未开启/已被清除）：terminate 返回 `NotFound` ⇒
+    /// no-op，取消照常提交。
+    #[tokio::test]
+    async fn cancel_without_approval_instance_is_noop_then_cancels() {
+        let (bridge, approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_resume_definition("cancel-no-approval-instance-wf", None, &[]);
+        store_of(&runtime).save_definition(&def).await.unwrap();
+        let inst = suspended_approval_instance("cancel-noop-inst", &def);
+        store_of(&runtime).save_instance(&inst).await.unwrap();
+
+        runtime.cancel_instance(&inst.id).await.unwrap();
+
+        let reloaded = store_of(&runtime)
+            .load_instance(&inst.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, InstanceStatus::Cancelled);
+        assert!(
+            approval_store.load(&inst.id).await.unwrap().is_none(),
+            "无审批实例可终止"
+        );
+    }
+
+    /// 审批存储不可用：terminate 返回非 `NotFound` 错误 ⇒ fail-closed 传播，取消中止
+    /// （不得留下仍可投票的 open 审批孤儿）。
+    #[tokio::test]
+    async fn cancel_aborts_when_approval_store_errors() {
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1000));
+        let bridge = Arc::new(ApprovalBridge::new(
+            Arc::new(FailingApprovalStore),
+            clock,
+            None,
+        ));
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_resume_definition("cancel-failing-approval-wf", None, &[]);
+        store_of(&runtime).save_definition(&def).await.unwrap();
+        let inst = suspended_approval_instance("cancel-failing-inst", &def);
+        store_of(&runtime).save_instance(&inst).await.unwrap();
+
+        let err = runtime.cancel_instance(&inst.id).await.unwrap_err();
+        assert!(matches!(err, RuntimeError::StoreError(_)), "{err:?}");
+
+        let reloaded = store_of(&runtime)
+            .load_instance(&inst.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reloaded.status,
+            InstanceStatus::Suspended,
+            "审批终止失败 ⇒ 不得取消（无孤儿）"
+        );
+    }
+
+    /// 定义漂移：`resume_approval` 在任何状态写之前 fail-closed（同 `resume`）——
+    /// 报 `DefinitionDrift`、不落 `workflow.resumed`；实例被漂移 fault 置 `Failed`，
+    /// 既不恢复也不推进（挂起点/索引不变）。
+    #[tokio::test]
+    async fn resume_approval_fails_closed_on_definition_drift() {
+        let (bridge, _approval_store) = approval_bridge();
+        let (runtime, events) = recording_runtime();
+        let runtime = runtime.with_approval_bridge(bridge);
+        let def = approve_definition("approve-drift-wf");
+        store_of(&runtime).save_definition(&def).await.unwrap();
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        // 同版本、同键重部署，但内容变了（改文档标题即改变内容哈希）。
+        let mut redeployed = def.clone();
+        redeployed.document.title = Some("redeployed-content".into());
+        store_of(&runtime)
+            .save_definition(&redeployed)
+            .await
+            .unwrap();
+
+        let err = runtime
+            .resume_approval(
+                &started.id,
+                serde_json::json!({"outcome": "completed"}),
+                None,
+            )
+            .await
+            .expect_err("定义漂移时 resume_approval 必须 fail-closed");
+        let (expected, actual) = match err {
+            RuntimeError::DefinitionDrift {
+                instance_id,
+                expected,
+                actual,
+            } => {
+                assert_eq!(instance_id, started.id);
+                (expected, actual)
+            }
+            other => panic!("期望 DefinitionDrift，实际: {other:?}"),
+        };
+        assert_eq!(expected, crate::workflow::model::definition_hash(&def));
+        assert_ne!(expected, actual, "漂移的 expected/actual 必须不同");
+
+        // 未被恢复：漂移 fault 置 Failed；索引与挂起元数据保持原状（未走 resume 变更）。
+        let loaded = store_of(&runtime)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, InstanceStatus::Failed);
+        assert_eq!(loaded.current_task_index, 0);
+        assert_eq!(
+            loaded.suspension_meta.as_ref().map(|m| m.reason.as_str()),
+            Some("approval"),
+            "漂移未走 resume，挂起元数据不得被清除"
+        );
+
+        // 事件：落漂移 fault，绝不落 `workflow.resumed`（钉死校验在状态写之前）。
+        let emitted: Vec<String> = events
+            .emitted_events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(t, _, _)| t.clone())
+            .collect();
+        assert!(
+            emitted.iter().any(|t| t == lifecycle::WORKFLOW_FAULTED),
+            "漂移必须落 workflow.faulted：{emitted:?}"
+        );
+        assert!(
+            !emitted.iter().any(|t| t == lifecycle::WORKFLOW_RESUMED),
+            "漂移不得落 workflow.resumed：{emitted:?}"
         );
     }
 
