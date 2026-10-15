@@ -25,6 +25,12 @@
 ## 提交与检查
 
 - 断言消息不得包含一次性任务编号；检查缺失必须 fail-closed（拒绝把「未跑」伪装成「通过」）。
+- **提 PR（含对已开 PR 分支的推送）前，必须在本机跑通 CI 基础门禁**——禁止把「等 CI 跑」
+  当作首次验证。与 `.github/workflows/ci.yml` 的 lint / security-audit job 对齐：
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --workspace --lib --bins -- -D warnings`
+  - `bash scripts/check-panics.sh`
+  - `cargo audit` 与 `cargo deny check`（advisories / licenses / bans / sources）
 
 ## 临时文件（强制）
 
