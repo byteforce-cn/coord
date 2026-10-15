@@ -1,6 +1,6 @@
 # 依赖治理与 bincode 退场记录（已完成）
 
-> Owner: maintainers ｜ Last verified: 2026-10-13
+> Owner: maintainers ｜ Last verified: 2026-10-15
 
 - **现状**：bincode 已完全退场——依赖图无 bincode（`cargo tree -i bincode`
   无匹配）；持久化与 RPC 载荷统一为信封 V2（postcard，
@@ -89,3 +89,18 @@ bincode 在本仓库不是工具库，而是**持久化格式**，直接承载�
   使用，无源码改动）；`cargo audit` 复跑 0 vulnerabilities。修复 PR：#62。
 - **RUSTSEC-2024-0449（unsafe-libyaml / serde_yaml，unmaintained）**：见 §4——登记豁免 +
   关闭路径（工作流 YAML 解析迁移）。登记 PR：#62。
+
+---
+
+## 6. 通告处置记录（2026-10-15）
+
+- **RUSTSEC-2026-0346 / 0347 / 0348 / 0349（rustls < 0.23.46）**：`rustls 0.23.45 →
+  0.23.46` 修复（经 `tonic` / `reqwest` / `hyper-rustls` 共用进入依赖图，无源码
+  改动）；同期把仓库级 crates.io 镜像从 tuna 切到 rsproxy（tuna 未同步 0.23.46，
+  解析阶段即失败）。修复 PR：#75。
+- **RUSTSEC-2026-0353 … 0364（wasmtime 48.0.5）**：`wasmtime 48.0.5 → 48.0.6` 修复
+  （cranelift / pulley 同版本簇一并升级）。wasmtime 是 `coord-agent`
+  `plugin-wasm`（非默认 feature）的可选依赖，无源码改动；沙箱行为（fuel / epoch /
+  内存上限 / 能力边界）由插件套件复验。修复 PR：#91。
+- 两条均为**漏洞型**通告，由版本升级关闭；`deny.toml` 的 `ignore` 不新增条目
+  （当前仍只有 §4 的 unmaintained 豁免）。
