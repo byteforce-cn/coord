@@ -387,6 +387,18 @@ fn definition_drift_fault(expected: &str, actual: &str) -> WorkflowFault {
     )
 }
 
+/// 审批终态 fault：`error_code` 同时写入 `type`（标准命名空间）与 `title`，使调用方
+/// 能按稳定码定位（reject 无目标场景为 `approval_rejected`）。
+fn approval_fault(error_code: &str, message: &str) -> WorkflowFault {
+    WorkflowFault {
+        r#type: crate::workflow::errors::error_type(error_code),
+        title: error_code.to_string(),
+        status: 409,
+        detail: message.to_string(),
+        instance: None,
+    }
+}
+
 impl std::error::Error for RuntimeError {}
 
 // ─── WorkflowRuntime ───
@@ -1863,6 +1875,152 @@ where
         Ok(inst)
     }
 
+    /// 从审批终态恢复工作流实例。
+    ///
+    /// `outcome` = 审批终态负载：作为 approve 帧输出写入并注入 `context["_approval"]`。
+    /// `next_target`：`Some(target)` = 按节点的 `on_pass`/`on_reject` 路由到目标任务；
+    /// `None` = 顺序推进到下一任务（审批正常通过）。目标必须与定义解析期的
+    /// `check_task_refs` 同口径（顶层任务名），未知目标 fail-closed。
+    ///
+    /// 前置：实例必须挂起在审批上（`suspension_meta.reason == "approval"`），否则
+    /// fail-closed —— 不得把 signal/listen 挂起当作审批恢复。
+    ///
+    /// CAS 语义复用 [`Self::resume`]：线性一致读修订号 + 冲突重放（≤3），
+    /// 提交 `task.completed` + `workflow.resumed` 后重新驱动。挂起必须在同一次变更里
+    /// 清掉（`status=Running` + `suspension_meta=None`），否则 drive 的同节点 no-op
+    /// 守卫会静默跳过驱动。
+    pub async fn resume_approval(
+        &self,
+        instance_id: &str,
+        outcome: Value,
+        next_target: Option<&str>,
+    ) -> Result<WorkflowInstance, RuntimeError> {
+        let pre = self
+            .store
+            .load_instance(instance_id)
+            .await
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| RuntimeError::NotFound(instance_id.to_string()))?;
+        let def = self
+            .store
+            .load_definition(
+                &pre.definition_ns,
+                &pre.definition_name,
+                &pre.definition_version,
+            )
+            .await
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| {
+                RuntimeError::DefinitionNotFound(format!(
+                    "{}/{}@{}",
+                    pre.definition_ns, pre.definition_name, pre.definition_version
+                ))
+            })?;
+
+        let cp = self
+            .commit_control_plane(
+                &self.store,
+                instance_id,
+                &[lifecycle::TASK_COMPLETED, lifecycle::WORKFLOW_RESUMED],
+                |inst| {
+                    // 前置守卫：只有挂起在审批上的实例才可由审批终态恢复。
+                    let on_approval = inst
+                        .suspension_meta
+                        .as_ref()
+                        .is_some_and(|m| m.reason == "approval");
+                    if !on_approval {
+                        return Err(RuntimeError::InvalidSignal(format!(
+                            "instance '{instance_id}' is not suspended on an approval"
+                        )));
+                    }
+                    // 未知目标在写之前拒绝：`mutate` 返回 Err 时 `commit_control_plane`
+                    // 直接传播，实例保持原状（本地改动的副本被丢弃）。
+                    let next_index = match next_target {
+                        Some(target) => find_task_index(&def.do_tasks, target)
+                            .ok_or_else(|| RuntimeError::GotoTargetNotFound(target.to_string()))?,
+                        None => inst.current_task_index + 1,
+                    };
+
+                    // 完成挂起的 approve 帧：审批终态即帧输出。
+                    if let Some(last) = inst.task_stack.last_mut() {
+                        last.status = TaskStatus::Completed;
+                        last.output = Some(outcome.clone());
+                        last.ended_at = Some(self.clock.now_ms());
+                    }
+                    inst.current_task_index = next_index;
+                    inst.context["_approval"] = outcome.clone();
+                    inst.status = InstanceStatus::Running;
+                    inst.suspension_meta = None;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
+
+        let inst = match cp {
+            ControlPlaneOutcome::Committed(inst) => *inst,
+            // 守卫不产生 Skip（非审批挂起走 Err）；为完整匹配按「已不可恢复」返回。
+            ControlPlaneOutcome::Skipped => {
+                return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()))
+            }
+        };
+
+        // 后台 drive（受监督：见 [`Self::spawn_drive`]）
+        self.spawn_drive(inst.id.clone(), def, Arc::clone(&self.store));
+
+        Ok(inst)
+    }
+
+    /// 把挂起在审批上的实例置为 `Failed`（有界 CAS，冲突重放）。
+    ///
+    /// 审批终态（rejected/cancelled/terminated）没有可用恢复目标时由服务层调用：
+    /// fault 携带 `error_code`（reject 无 `on_reject` 场景为 `approval_rejected`）。
+    /// 复用控制面 CAS 写路径（同 [`Self::definition_drift_error`]），不新开无 CAS 写路径。
+    ///
+    /// 前置与 [`Self::resume_approval`] 同口径：仅挂起在审批上的实例可被处置；
+    /// 已终态则 Skip（返回 [`RuntimeError::AlreadyCompleted`]），不覆盖他人终态。
+    pub async fn fail_approval(
+        &self,
+        instance_id: &str,
+        error_code: &str,
+        message: &str,
+    ) -> Result<WorkflowInstance, RuntimeError> {
+        let fault = approval_fault(error_code, message);
+        let cp = self
+            .commit_control_plane(
+                &self.store,
+                instance_id,
+                &[lifecycle::WORKFLOW_FAULTED],
+                |inst| {
+                    if inst.status.is_terminal() {
+                        return Ok(false);
+                    }
+                    let on_approval = inst
+                        .suspension_meta
+                        .as_ref()
+                        .is_some_and(|m| m.reason == "approval");
+                    if !on_approval {
+                        return Err(RuntimeError::InvalidSignal(format!(
+                            "instance '{instance_id}' is not suspended on an approval"
+                        )));
+                    }
+                    inst.status = InstanceStatus::Failed;
+                    inst.fault = Some(fault.clone());
+                    inst.suspension_meta = None;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
+        match cp {
+            ControlPlaneOutcome::Committed(inst) => Ok(*inst),
+            // 已终态：不覆盖他人终态，与 resume/cancel 的 AlreadyCompleted 同口径。
+            ControlPlaneOutcome::Skipped => {
+                Err(RuntimeError::AlreadyCompleted(instance_id.to_string()))
+            }
+        }
+    }
+
     /// 取消实例：非终态 → `Cancelled` + `workflow.cancelled`（同一次提交）。
     ///
     /// 控制面路径（[`Self::commit_control_plane`]）：线性一致读修订号后在 CAS 提交里
@@ -1876,6 +2034,29 @@ where
     /// 生命周期事件与状态写同一次提交（durable 装配下同 Txn/同事务；legacy 分步，
     /// 见 [`Self::commit_instance`]）。
     pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
+        // 挂起在审批上时先终止对应审批实例（best-effort）：审批实例的终态由桥维护，
+        // 工作流取消是权威操作 —— 终止失败不得阻塞取消。挂起在审批上等价于审批实例
+        // 尚未终态（终态会经恢复/fault 清掉挂起），故无需另查审批状态。
+        if let Some(bridge) = &self.approval {
+            let inst = self
+                .store
+                .load_instance(instance_id)
+                .await
+                .map_err(|e| RuntimeError::StoreError(e.to_string()))?;
+            if let Some(inst) = inst {
+                let on_approval = inst.status == InstanceStatus::Suspended
+                    && inst
+                        .suspension_meta
+                        .as_ref()
+                        .is_some_and(|m| m.reason == "approval");
+                if on_approval {
+                    // 审批实例 id 恒等于 workflow 实例 id（见 SuspensionMeta.approval_instance_id）。
+                    let _ = bridge
+                        .terminate(instance_id, "system", "workflow_cancelled")
+                        .await;
+                }
+            }
+        }
         let outcome = self
             .commit_control_plane(
                 &self.store,
@@ -3105,6 +3286,12 @@ where
                                     break;
                                 }
                             };
+                        // 定义走到末端：收口审批实例（幂等；非 approve 定义无审批实例时为
+                        // no-op）。分支通过与实例收口解耦，工作流完成是驱动方唯一的收口时机。
+                        // 失败不得阻塞工作流完成：审批侧自身有 CAS/定时器兜底。
+                        if let Some(bridge) = &self.approval {
+                            let _ = bridge.finish_if_complete(&inst.id).await;
+                        }
                         inst.status = InstanceStatus::Completed;
                         inst.output = Some(final_output);
                         inst.updated_at = self.clock.now_ms();
@@ -5517,8 +5704,10 @@ mod tests {
 
     // ─── approve 节点 → Suspended 接线（v2 审批） ───
 
-    use crate::workflow::approval::bridge::ApprovalBridge;
-    use crate::workflow::approval::model::{BranchStatus, JoinPolicy};
+    use crate::workflow::approval::bridge::{ApprovalBridge, ApprovalCommand};
+    use crate::workflow::approval::model::{
+        BranchStatus, InstanceStatus as ApprovalStatus, JoinPolicy,
+    };
     use crate::workflow::approval::store::{ApprovalStore, MemoryApprovalStore};
     use crate::workflow::model::ApproveTask;
 
@@ -5813,6 +6002,392 @@ mod tests {
         assert!(
             approval_store.load(&started.id).await.unwrap().is_none(),
             "非 approve 定义不得开出审批实例"
+        );
+    }
+
+    // ─── 审批终态 → workflow 恢复 / 故障 / 收口（v2 返回路径） ───
+
+    /// approve 节点（可配 `on_reject` / `sign_admins`）—— 恢复与取消路径测试用。
+    fn approve_task_with(
+        approvers: &[&str],
+        on_reject: Option<&str>,
+        sign_admins: &[&str],
+    ) -> ApproveTask {
+        let mut task = approve_task(approvers);
+        task.on_reject = on_reject.map(str::to_string);
+        task.sign_admins = sign_admins.iter().map(|s| s.to_string()).collect();
+        task
+    }
+
+    /// 定义：`review(approve)` → `after` → `rework`；`on_reject` 可指向 `rework`。
+    fn approve_resume_definition(
+        name: &str,
+        on_reject: Option<&str>,
+        sign_admins: &[&str],
+    ) -> WorkflowDefinition {
+        make_definition_ext(
+            name,
+            vec![
+                NamedTask {
+                    name: "review".into(),
+                    task: Task::Approve(approve_task_with(&["alice"], on_reject, sign_admins)),
+                },
+                NamedTask {
+                    name: "after".into(),
+                    task: Task::Set(SetTask {
+                        variable: "done".into(),
+                        value: "\"after-approve\"".into(),
+                    }),
+                },
+                NamedTask {
+                    name: "rework".into(),
+                    task: Task::Set(SetTask {
+                        variable: "done".into(),
+                        value: "\"rework-done\"".into(),
+                    }),
+                },
+            ],
+            None,
+            None,
+            None,
+            Default::default(),
+        )
+    }
+
+    /// 取出审批实例中某审批人的未决席位 id（恢复 / 收口测试辅助）。
+    async fn seat_id_for(
+        approval_store: &MemoryApprovalStore,
+        approval_id: &str,
+        assignee: &str,
+    ) -> String {
+        let (engine, _) = approval_store
+            .load(approval_id)
+            .await
+            .unwrap()
+            .expect("approval instance persisted");
+        engine
+            .tasks
+            .values()
+            .find(|t| t.assignee.as_deref() == Some(assignee))
+            .map(|t| t.id.clone())
+            .expect("seat for assignee")
+    }
+
+    /// 审批通过：`next_target=None` ⇒ 顺序推进到下一任务并最终 `Completed`。
+    #[tokio::test]
+    async fn approve_completed_resumes_to_next_task() {
+        let (bridge, _approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_definition("approve-resume-next-wf");
+        store_of(&runtime).save_definition(&def).await.unwrap();
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        let outcome = serde_json::json!({"outcome": "completed", "actor": "alice"});
+        let resumed = runtime
+            .resume_approval(&started.id, outcome.clone(), None)
+            .await
+            .unwrap();
+
+        // 同一处变更里清挂起：否则 drive 的同节点 no-op 守卫会静默跳过驱动。
+        assert_eq!(resumed.status, InstanceStatus::Running);
+        assert!(resumed.suspension_meta.is_none());
+        assert_eq!(resumed.current_task_index, 1, "None ⇒ 顺序推进到下一任务");
+        assert_eq!(resumed.context["_approval"], outcome);
+        let frame = resumed.task_stack.last().expect("approve frame");
+        assert_eq!(frame.status, TaskStatus::Completed);
+        assert_eq!(frame.output.as_ref(), Some(&outcome));
+
+        let done = await_status(store_of(&runtime), &started.id, InstanceStatus::Completed).await;
+        assert_eq!(done.context["done"], "after-approve");
+    }
+
+    /// 审批驳回：恢复后路由到节点 `on_reject` 目标任务。
+    #[tokio::test]
+    async fn approve_rejected_resumes_to_on_reject_target() {
+        let (bridge, _approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_resume_definition("approve-reject-wf", Some("rework"), &[]);
+        store_of(&runtime).save_definition(&def).await.unwrap();
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        let outcome = serde_json::json!({"outcome": "rejected", "actor": "alice"});
+        let resumed = runtime
+            .resume_approval(&started.id, outcome.clone(), Some("rework"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resumed.current_task_index, 2,
+            "on_reject ⇒ 跳到目标任务索引"
+        );
+        assert_eq!(resumed.context["_approval"], outcome);
+
+        let done = await_status(store_of(&runtime), &started.id, InstanceStatus::Completed).await;
+        assert_eq!(done.context["done"], "rework-done");
+    }
+
+    /// 审批取消：与驳回同口径，恢复后路由到 `on_reject` 目标任务。
+    #[tokio::test]
+    async fn approve_cancelled_resumes_to_on_reject_target() {
+        let (bridge, _approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_resume_definition("approve-cancel-wf", Some("rework"), &[]);
+        store_of(&runtime).save_definition(&def).await.unwrap();
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        let outcome = serde_json::json!({"outcome": "cancelled"});
+        let resumed = runtime
+            .resume_approval(&started.id, outcome.clone(), Some("rework"))
+            .await
+            .unwrap();
+        assert_eq!(resumed.current_task_index, 2);
+        assert_eq!(resumed.context["_approval"], outcome);
+
+        let done = await_status(store_of(&runtime), &started.id, InstanceStatus::Completed).await;
+        assert_eq!(done.context["done"], "rework-done");
+    }
+
+    /// 非审批挂起：`resume_approval` fail-closed（仍 Waiting，索引不变）。
+    #[tokio::test]
+    async fn resume_approval_without_approval_suspension_rejected() {
+        let runtime = make_runtime();
+        let def = make_definition_ext(
+            "approve-resume-wrong-reason-wf",
+            vec![NamedTask {
+                name: "pause".into(),
+                task: Task::Wait(WaitTask {
+                    wait: "PT10S".into(),
+                }),
+            }],
+            None,
+            None,
+            None,
+            Default::default(),
+        );
+        store_of(&runtime).save_definition(&def).await.unwrap();
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Waiting).await;
+
+        let err = runtime
+            .resume_approval(
+                &started.id,
+                serde_json::json!({"outcome": "completed"}),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::InvalidSignal(_)),
+            "非审批挂起必须被拒：{err:?}"
+        );
+
+        let reloaded = store_of(&runtime)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, InstanceStatus::Waiting, "拒绝后状态不变");
+        assert_eq!(reloaded.current_task_index, 0);
+        assert_eq!(
+            reloaded.suspension_meta.as_ref().map(|m| m.reason.as_str()),
+            Some("wait")
+        );
+    }
+
+    /// 未知 `next_target`：fail-closed，且状态零变更（不写实例）。
+    #[tokio::test]
+    async fn resume_approval_unknown_target_rejected_and_state_unchanged() {
+        let (bridge, _approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_resume_definition("approve-unknown-target-wf", Some("rework"), &[]);
+        store_of(&runtime).save_definition(&def).await.unwrap();
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        let suspended =
+            await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        let err = runtime
+            .resume_approval(
+                &started.id,
+                serde_json::json!({"outcome": "rejected"}),
+                Some("nope"),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::GotoTargetNotFound(ref t) if t == "nope"),
+            "未知目标必须 fail-closed：{err:?}"
+        );
+
+        let reloaded = store_of(&runtime)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, InstanceStatus::Suspended);
+        assert_eq!(reloaded.current_task_index, 0);
+        assert_eq!(reloaded.updated_at, suspended.updated_at, "拒绝不得写实例");
+        assert_eq!(
+            reloaded.suspension_meta.as_ref().map(|m| m.reason.as_str()),
+            Some("approval")
+        );
+    }
+
+    /// 工作流完成时收口审批实例：分支已通过 ⇒ 审批实例随之 `Completed`。
+    #[tokio::test]
+    async fn workflow_completion_finishes_approval_instance() {
+        let (bridge, approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(Arc::clone(&bridge));
+        let def = approve_definition("approve-finish-wf");
+        store_of(&runtime).save_definition(&def).await.unwrap();
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        // 唯一席位通过 → 审批分支通过（审批实例尚未收口）
+        let seat = seat_id_for(&approval_store, &started.id, "alice").await;
+        bridge
+            .command(
+                &started.id,
+                "alice",
+                ApprovalCommand::Approve {
+                    task_id: &seat,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        runtime
+            .resume_approval(
+                &started.id,
+                serde_json::json!({"outcome": "completed"}),
+                None,
+            )
+            .await
+            .unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Completed).await;
+
+        let (engine, _) = approval_store
+            .load(&started.id)
+            .await
+            .unwrap()
+            .expect("approval instance");
+        assert_eq!(
+            engine.instance.status,
+            ApprovalStatus::Completed,
+            "工作流完成后必须收口审批实例"
+        );
+    }
+
+    /// 工作流取消：挂起在审批上 ⇒ 先终止审批实例，再取消工作流。
+    #[tokio::test]
+    async fn workflow_cancel_terminates_open_approval() {
+        let (bridge, approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(Arc::clone(&bridge));
+        let def = approve_resume_definition("approve-cancel-terminate-wf", None, &["system"]);
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        runtime.cancel_instance(&started.id).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Cancelled).await;
+
+        let (engine, _) = approval_store
+            .load(&started.id)
+            .await
+            .unwrap()
+            .expect("approval instance");
+        assert_eq!(
+            engine.instance.status,
+            ApprovalStatus::Terminated,
+            "取消工作流必须终止未决审批实例"
+        );
+    }
+
+    /// 控制面 CAS：`resume_approval` 冲突后重读重放，不得盲写。
+    #[tokio::test]
+    async fn resume_approval_is_cas_safe_under_replay() {
+        let rt = runtime_with_conflict_store(1);
+        let def = approve_resume_definition("approve-resume-cas-wf", None, &[]);
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let mut inst = running_instance("approve-resume-cas-inst");
+        inst.definition_name = "approve-resume-cas-wf".into();
+        inst.status = InstanceStatus::Suspended;
+        inst.suspension_meta = Some(SuspensionMeta {
+            reason: "approval".into(),
+            until_ms: None,
+            service: None,
+            payload: None,
+            event_filter: None,
+            expected_signal: Some("approval.completed".into()),
+            approval_instance_id: Some("approve-resume-cas-inst".into()),
+            retry_count: None,
+            error: None,
+        });
+        inst.task_stack.push(TaskFrame {
+            task_name: "review".into(),
+            task_type: "approve".into(),
+            status: TaskStatus::Running,
+            input: None,
+            output: None,
+            started_at: Some(0),
+            ended_at: None,
+            retry_count: 0,
+            pending_branches: None,
+        });
+        store_of(&rt).save_instance(&inst).await.unwrap();
+
+        let resumed = rt
+            .resume_approval(&inst.id, serde_json::json!({"outcome": "completed"}), None)
+            .await
+            .unwrap();
+
+        assert_eq!(resumed.status, InstanceStatus::Running);
+        assert_eq!(resumed.current_task_index, 1);
+        assert_eq!(rt.cas_conflict_total(), 1, "一次冲突只计一次并成功重放");
+    }
+
+    /// 无可用恢复目标：`fail_approval` 以稳定错误码置 fault（复用 CAS 写路径）。
+    #[tokio::test]
+    async fn fail_approval_faults_with_stable_error_code() {
+        let (bridge, _approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_definition("approve-fail-wf");
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        let failed = runtime
+            .fail_approval(
+                &started.id,
+                "approval_rejected",
+                "approval rejected without an on_reject target",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(failed.status, InstanceStatus::Failed);
+        assert!(
+            failed.suspension_meta.is_none(),
+            "fault 后不得残留挂起元数据"
+        );
+        let fault = failed.fault.as_ref().expect("fault");
+        assert_eq!(
+            fault.r#type,
+            crate::workflow::errors::error_type("approval_rejected")
+        );
+        assert_eq!(fault.title, "approval_rejected");
+        assert_eq!(
+            fault.detail,
+            "approval rejected without an on_reject target"
         );
     }
 
