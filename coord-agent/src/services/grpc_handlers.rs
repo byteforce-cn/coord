@@ -89,6 +89,19 @@ use coord_proto::agent::{
     WorkflowSignalResponse, WorkflowStartRequest, WorkflowStartResponse,
 };
 
+// 审批 v2（ADR-0013 D7）请求/响应类型。
+use coord_proto::agent::{
+    WorkflowAcknowledgeRequest, WorkflowAcknowledgeResponse, WorkflowAddSignRequest,
+    WorkflowAddSignResponse, WorkflowApproveRequest, WorkflowApproveResponse,
+    WorkflowDelegateRequest, WorkflowDelegateResponse, WorkflowGetInstanceDetailRequest,
+    WorkflowGetInstanceDetailResponse, WorkflowListPendingTasksRequest,
+    WorkflowListPendingTasksResponse, WorkflowRejectRequest, WorkflowRejectResponse,
+    WorkflowRemoveSignRequest, WorkflowRemoveSignResponse, WorkflowReturnToNodeRequest,
+    WorkflowReturnToNodeResponse, WorkflowTerminateRequest, WorkflowTerminateResponse,
+    WorkflowTransferRequest, WorkflowTransferResponse, WorkflowWithdrawRequest,
+    WorkflowWithdrawResponse,
+};
+
 use tonic::{Request, Response, Status};
 /// 内部错误脱敏（与 coord-server 同口径）：详情只进 agent 日志，
 /// gRPC 客户端仅收到通用 `internal error`，不泄露存储/引擎内部细节。
@@ -1870,6 +1883,114 @@ impl Workflow for WorkflowService {
             "workflow instance deletion is provided by WorkflowEngineService (phase4); legacy WorkflowService is deprecated",
         ))
     }
+
+    async fn approve(
+        &self,
+        _request: Request<WorkflowApproveRequest>,
+    ) -> Result<Response<WorkflowApproveResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn reject(
+        &self,
+        _request: Request<WorkflowRejectRequest>,
+    ) -> Result<Response<WorkflowRejectResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn acknowledge(
+        &self,
+        _request: Request<WorkflowAcknowledgeRequest>,
+    ) -> Result<Response<WorkflowAcknowledgeResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn add_sign(
+        &self,
+        _request: Request<WorkflowAddSignRequest>,
+    ) -> Result<Response<WorkflowAddSignResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn remove_sign(
+        &self,
+        _request: Request<WorkflowRemoveSignRequest>,
+    ) -> Result<Response<WorkflowRemoveSignResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn return_to_node(
+        &self,
+        _request: Request<WorkflowReturnToNodeRequest>,
+    ) -> Result<Response<WorkflowReturnToNodeResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn transfer(
+        &self,
+        _request: Request<WorkflowTransferRequest>,
+    ) -> Result<Response<WorkflowTransferResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn delegate(
+        &self,
+        _request: Request<WorkflowDelegateRequest>,
+    ) -> Result<Response<WorkflowDelegateResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn withdraw(
+        &self,
+        _request: Request<WorkflowWithdrawRequest>,
+    ) -> Result<Response<WorkflowWithdrawResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn terminate(
+        &self,
+        _request: Request<WorkflowTerminateRequest>,
+    ) -> Result<Response<WorkflowTerminateResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn list_pending_tasks(
+        &self,
+        _request: Request<WorkflowListPendingTasksRequest>,
+    ) -> Result<Response<WorkflowListPendingTasksResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn get_instance_detail(
+        &self,
+        _request: Request<WorkflowGetInstanceDetailRequest>,
+    ) -> Result<Response<WorkflowGetInstanceDetailResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -2264,6 +2385,114 @@ impl Workflow for WorkflowEngineService {
             .await
             .map_err(map_engine_error)?;
         Ok(Response::new(WorkflowDeleteInstanceResponse {}))
+    }
+
+    async fn approve(
+        &self,
+        _request: Request<WorkflowApproveRequest>,
+    ) -> Result<Response<WorkflowApproveResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 handlers are not wired yet",
+        ))
+    }
+
+    async fn reject(
+        &self,
+        _request: Request<WorkflowRejectRequest>,
+    ) -> Result<Response<WorkflowRejectResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 handlers are not wired yet",
+        ))
+    }
+
+    async fn acknowledge(
+        &self,
+        _request: Request<WorkflowAcknowledgeRequest>,
+    ) -> Result<Response<WorkflowAcknowledgeResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 handlers are not wired yet",
+        ))
+    }
+
+    async fn add_sign(
+        &self,
+        _request: Request<WorkflowAddSignRequest>,
+    ) -> Result<Response<WorkflowAddSignResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 handlers are not wired yet",
+        ))
+    }
+
+    async fn remove_sign(
+        &self,
+        _request: Request<WorkflowRemoveSignRequest>,
+    ) -> Result<Response<WorkflowRemoveSignResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 handlers are not wired yet",
+        ))
+    }
+
+    async fn return_to_node(
+        &self,
+        _request: Request<WorkflowReturnToNodeRequest>,
+    ) -> Result<Response<WorkflowReturnToNodeResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 handlers are not wired yet",
+        ))
+    }
+
+    async fn transfer(
+        &self,
+        _request: Request<WorkflowTransferRequest>,
+    ) -> Result<Response<WorkflowTransferResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 handlers are not wired yet",
+        ))
+    }
+
+    async fn delegate(
+        &self,
+        _request: Request<WorkflowDelegateRequest>,
+    ) -> Result<Response<WorkflowDelegateResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 handlers are not wired yet",
+        ))
+    }
+
+    async fn withdraw(
+        &self,
+        _request: Request<WorkflowWithdrawRequest>,
+    ) -> Result<Response<WorkflowWithdrawResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 handlers are not wired yet",
+        ))
+    }
+
+    async fn terminate(
+        &self,
+        _request: Request<WorkflowTerminateRequest>,
+    ) -> Result<Response<WorkflowTerminateResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 handlers are not wired yet",
+        ))
+    }
+
+    async fn list_pending_tasks(
+        &self,
+        _request: Request<WorkflowListPendingTasksRequest>,
+    ) -> Result<Response<WorkflowListPendingTasksResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 handlers are not wired yet",
+        ))
+    }
+
+    async fn get_instance_detail(
+        &self,
+        _request: Request<WorkflowGetInstanceDetailRequest>,
+    ) -> Result<Response<WorkflowGetInstanceDetailResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 handlers are not wired yet",
+        ))
     }
 }
 
