@@ -195,6 +195,18 @@ impl<E: ExpressionEval, C: Clock> WorkflowExecutor<E, C> {
             }
             Task::Run(run) => super::tasks::run::execute(named, run, inst, &self.clock),
             Task::End(end) => super::tasks::end::execute(named, end, inst, &self.clock),
+            // approve 节点尚未接线：v2 审批挂起执行体在 Task 6 落地。此处显式失败，
+            // 绝不静默推进到下一任务（那会把审批节点当 no-op 绕过）。
+            Task::Approve(_) => StepResult::Failed {
+                fault: crate::workflow::errors::WorkflowFault::internal(
+                    "approve task is not wired yet",
+                    format!(
+                        "task '{}' uses the native approve node, whose v2 suspension executor \
+                         is not wired in this engine version",
+                        named.name
+                    ),
+                ),
+            },
         }
     }
 }
@@ -257,6 +269,7 @@ pub(crate) fn task_type_name(task: &Task) -> String {
         Task::TryCatch(_) => "try".into(),
         Task::Run(_) => "run".into(),
         Task::End(_) => "end".into(),
+        Task::Approve(_) => "approve".into(),
     }
 }
 
@@ -350,7 +363,7 @@ mod tests {
     use super::*;
     use crate::workflow::expression::ExpressionEvaluator;
     use crate::workflow::model::{
-        Document, InstanceStatus, NamedTask, Task, WaitTask, WorkflowDefinition,
+        ApproveTask, Document, InstanceStatus, NamedTask, Task, WaitTask, WorkflowDefinition,
     };
     use crate::workflow::ports::test_utils::TestClock;
 
@@ -399,6 +412,7 @@ mod tests {
             output: None,
             fault: None,
             suspension_meta: None,
+            initiator: None,
             definition_hash: None,
             engine_version: None,
         }
@@ -442,6 +456,39 @@ mod tests {
 
         let result = executor.execute_step(&inst, &def);
         assert!(matches!(result, StepResult::Completed { .. }));
+    }
+
+    #[test]
+    fn test_execute_step_approve_is_not_silently_skipped() {
+        // approve 节点的挂起执行体尚未接线：必须显式 Failed，不得静默推进到下一任务。
+        let executor = make_executor();
+        let def = make_definition(vec![NamedTask {
+            name: "review".into(),
+            task: Task::Approve(ApproveTask {
+                approvers: vec!["alice".into()],
+                pool: vec![],
+                readers: vec![],
+                roles: vec![],
+                mode: crate::workflow::approval::model::JoinPolicy::All,
+                veto: true,
+                deadline: None,
+                on_pass: None,
+                on_reject: None,
+                sign_admins: vec![],
+                allow_self_approve: false,
+            }),
+        }]);
+        let inst = make_instance(0);
+
+        match executor.execute_step(&inst, &def) {
+            StepResult::Failed { fault } => {
+                assert!(
+                    fault.title.contains("approve task is not wired yet"),
+                    "unexpected fault: {fault:?}"
+                );
+            }
+            other => panic!("approve must fail explicitly, got {other:?}"),
+        }
     }
 
     // ─── ISO 8601 Duration 解析测试 ───

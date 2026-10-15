@@ -14,13 +14,15 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 
 use super::model::{
-    AuthConfig, BackoffStrategy, CallTask, CallType, CatchClause, ConstantsConfig, DoTask,
-    Document, EmitEvent, EmitTask, EndTask, ErrorDef, EventFilter, ExportConfig, ForEachTask,
-    ForkBranch, ForkTask, FunctionDef, InputConfig, JitterConfig, ListenTask, NamedTask,
-    OutputConfig, RaiseTask, RetryPolicy, RunTask, ScheduleConfig, SecretsConfig, SetTask, Span,
-    SwitchCondition, SwitchTask, Task, TaskMeta, TimeoutConfig, TryCatchTask, UseComponents,
-    ValidationError, ValidationErrorKind, WaitTask, WorkflowDefinition, WorkflowRef,
+    ApproveTask, AuthConfig, BackoffStrategy, CallTask, CallType, CatchClause, ConstantsConfig,
+    DoTask, Document, EmitEvent, EmitTask, EndTask, ErrorDef, EventFilter, ExportConfig,
+    ForEachTask, ForkBranch, ForkTask, FunctionDef, InputConfig, JitterConfig, ListenTask,
+    NamedTask, OutputConfig, RaiseTask, RetryPolicy, RunTask, ScheduleConfig, SecretsConfig,
+    SetTask, Span, SwitchCondition, SwitchTask, Task, TaskMeta, TimeoutConfig, TryCatchTask,
+    UseComponents, ValidationError, ValidationErrorKind, WaitTask, WorkflowDefinition, WorkflowRef,
 };
+
+use crate::workflow::approval::model::JoinPolicy;
 
 use super::parser::{
     RawFunctionDef, RawNamedTask, RawRetryPolicy, RawTimeoutConfig, RawUseComponents,
@@ -49,6 +51,28 @@ fn single_key_object_case(cond: &Value) -> Option<(&str, &serde_json::Map<String
     }
     let (name, body) = obj.iter().next()?;
     Some((name.as_str(), body.as_object()?))
+}
+
+/// approve `mode` DSL 字符串：`all` | `any` | `quorum:<n>` | `ratio:<num>/<den>`。
+/// 其它形状返回 `None`，由调用方 fail-closed 拒绝（不猜测策略）。
+fn parse_join_policy(s: &str) -> Option<JoinPolicy> {
+    match s {
+        "all" => Some(JoinPolicy::All),
+        "any" => Some(JoinPolicy::Any),
+        _ => {
+            if let Some(n) = s.strip_prefix("quorum:") {
+                n.parse::<u32>().ok().map(JoinPolicy::Quorum)
+            } else if let Some(rest) = s.strip_prefix("ratio:") {
+                let (num, den) = rest.split_once('/')?;
+                Some(JoinPolicy::Ratio {
+                    num: num.parse().ok()?,
+                    den: den.parse().ok()?,
+                })
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// 语义校验器
@@ -301,6 +325,7 @@ impl Validator {
             Value::Object(map) if map.contains_key("raise") => self.parse_raise(raw, map),
             Value::Object(map) if map.contains_key("try") => self.parse_try_catch(raw, map),
             Value::Object(map) if map.contains_key("run") => self.parse_run(raw, map),
+            Value::Object(map) if map.contains_key("approve") => self.parse_approve(raw, map),
             Value::Object(map) if map.contains_key("end") => self.parse_end(raw, map),
             _ => {
                 self.errors.push(ValidationError {
@@ -754,44 +779,49 @@ impl Validator {
         raw: &RawNamedTask,
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
-        let wait_val = &map["wait"];
-        let wait_str = match wait_val {
+        let wait_str = self.parse_duration_value(raw.span, &map["wait"], "wait")?;
+        Some(Task::Wait(WaitTask { wait: wait_str }))
+    }
+
+    /// 解析 duration 值（ISO8601 字符串 / 官方相对时长组件对象 / 数字）为规范化 duration 字符串。
+    ///
+    /// `construct` 是错误锚点（`wait` / `approve.deadline`）。官方 1.0.3 的相对时长是
+    /// `{days?, hours?, minutes?, seconds?, milliseconds?}` 组件对象（schema
+    /// workflow-1.0.3.yaml `duration`）；调用方只消费 ISO8601 时长字符串，故把全部在场组件
+    /// 合成一个 duration（如 `{seconds:1, milliseconds:500}` → `PT1.5S`）。`until` 是绝对时刻、
+    /// 解析期无墙钟，`${...}` 是运行时表达式，未知键无语义——三者都改变语义，一律点名构造
+    /// fail-closed，不得静默丢字段（Spike 4 corpus 07 误读）。
+    fn parse_duration_value(&mut self, span: Span, val: &Value, construct: &str) -> Option<String> {
+        match val {
             Value::String(s) => {
-                // 含 `${` 的字符串是运行时表达式形式：ISO8601 解析失败会落成零等待，
-                // 静默把定时变成 no-op——点名 `wait` 拒绝，不伪装支持。
                 if s.contains("${") {
                     self.errors.push(ValidationError {
-                        span: Some(raw.span),
-                        kind: ValidationErrorKind::UnsupportedConstruct("wait".to_string()),
-                        message: "unimplemented construct 'wait': runtime expression durations \
-                                  are not supported"
-                            .to_string(),
+                        span: Some(span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(construct.to_string()),
+                        message: format!(
+                            "unimplemented construct '{construct}': runtime expression durations \
+                             are not supported"
+                        ),
                     });
                     return None;
                 }
-                s.clone()
+                Some(s.clone())
             }
-            Value::Number(_) => wait_val.to_string(),
+            Value::Number(_) => Some(val.to_string()),
             Value::Object(obj) => {
-                // 官方 1.0.3 的相对时长是 `{days?, hours?, minutes?, seconds?,
-                // milliseconds?}` 组件对象（schema workflow-1.0.3.yaml `duration`）；
-                // WaitTask.wait 只消费 ISO8601 时长字符串，故把全部在场组件合成一个
-                // duration（如 `{seconds:1, milliseconds:500}` → `PT1.5S`）。`until` 是
-                // 绝对时刻，解析期无时钟；真正未知的键无语义——两者都点名构造
-                // fail-closed，不得静默丢字段（Spike 4 corpus 07 误读）。
                 let recognized = ["days", "hours", "minutes", "seconds", "milliseconds"];
                 let unknown: Vec<String> = obj
                     .keys()
                     .filter(|k| k.as_str() != "until" && !recognized.contains(&k.as_str()))
-                    .map(|k| format!("wait.{k}"))
+                    .map(|k| format!("{construct}.{k}"))
                     .collect();
                 if !unknown.is_empty() {
-                    let construct = unknown.join(", ");
+                    let joined = unknown.join(", ");
                     self.errors.push(ValidationError {
-                        span: Some(raw.span),
-                        kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                        span: Some(span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(joined.clone()),
                         message: format!(
-                            "unimplemented construct '{construct}': coord wait supports only \
+                            "unimplemented construct '{joined}': coord {construct} supports only \
                              'days'/'hours'/'minutes'/'seconds'/'milliseconds'"
                         ),
                     });
@@ -799,12 +829,14 @@ impl Validator {
                 }
                 if obj.contains_key("until") {
                     self.errors.push(ValidationError {
-                        span: Some(raw.span),
-                        kind: ValidationErrorKind::UnsupportedConstruct("wait.until".to_string()),
-                        message:
-                            "unimplemented construct 'wait.until': coord has no wall-clock at \
-                                  parse time; use a relative duration"
-                                .to_string(),
+                        span: Some(span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(format!(
+                            "{construct}.until"
+                        )),
+                        message: format!(
+                            "unimplemented construct '{construct}.until': coord has no wall-clock \
+                             at parse time; use a relative duration"
+                        ),
                     });
                     return None;
                 }
@@ -812,22 +844,25 @@ impl Validator {
                 for key in recognized {
                     if obj.get(key).is_some_and(|v| v.as_u64().is_none()) {
                         self.errors.push(ValidationError {
-                            span: Some(raw.span),
-                            kind: ValidationErrorKind::UnsupportedConstruct(format!("wait.{key}")),
-                            message: format!("wait.{key} must be a non-negative integer"),
+                            span: Some(span),
+                            kind: ValidationErrorKind::UnsupportedConstruct(format!(
+                                "{construct}.{key}"
+                            )),
+                            message: format!("{construct}.{key} must be a non-negative integer"),
                         });
                         return None;
                     }
                 }
                 let component = |key: &str| obj.get(key).and_then(|v| v.as_u64());
                 if !recognized.iter().any(|k| obj.contains_key(*k)) {
-                    // 空对象 / 无从映射的时长：拒绝，不静默落成空 wait。
+                    // 空对象 / 无从映射的时长：拒绝，不静默落成空值。
                     self.errors.push(ValidationError {
-                        span: Some(raw.span),
-                        kind: ValidationErrorKind::UnsupportedConstruct("wait".to_string()),
-                        message: "wait duration requires at least one of \
-                                  'days'/'hours'/'minutes'/'seconds'/'milliseconds'"
-                            .to_string(),
+                        span: Some(span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(construct.to_string()),
+                        message: format!(
+                            "{construct} duration requires at least one of \
+                             'days'/'hours'/'minutes'/'seconds'/'milliseconds'"
+                        ),
                     });
                     return None;
                 }
@@ -862,20 +897,20 @@ impl Validator {
                     dur.push('T');
                     dur.push_str(&time);
                 }
-                dur
+                Some(dur)
             }
             _ => {
-                // 非法 wait 形状（bool/array/null）不得静默落成空任务
+                // 非法形状（bool/array/null）不得静默落成空任务。
                 self.errors.push(ValidationError {
-                    span: Some(raw.span),
-                    kind: ValidationErrorKind::UnsupportedConstruct("wait".to_string()),
-                    message: "wait must be an ISO8601 duration string or a duration object"
-                        .to_string(),
+                    span: Some(span),
+                    kind: ValidationErrorKind::UnsupportedConstruct(construct.to_string()),
+                    message: format!(
+                        "{construct} must be an ISO8601 duration string or a duration object"
+                    ),
                 });
-                return None;
+                None
             }
-        };
-        Some(Task::Wait(WaitTask { wait: wait_str }))
+        }
     }
 
     fn parse_listen(
@@ -1506,6 +1541,214 @@ impl Validator {
         Some(Task::End(EndTask {}))
     }
 
+    /// approve 任务 —— 原生审批节点。
+    ///
+    /// 键集合恰为 camelCase 字段名（approvers/pool/readers/roles/mode/veto/deadline/
+    /// onPass/onReject/signAdmins/allowSelfApprove）；未知键 fail-closed 点名 `approve.<key>`，
+    /// 不静默丢弃（拼错的 `allowSelfApprove` 会静默改变审批权）。
+    fn parse_approve(
+        &mut self,
+        raw: &RawNamedTask,
+        map: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
+        let body = match map.get("approve").and_then(|v| v.as_object()) {
+            Some(obj) => obj,
+            None => {
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::UnsupportedConstruct("approve".to_string()),
+                    message: "approve must be an object".to_string(),
+                });
+                return None;
+            }
+        };
+
+        let known = [
+            "approvers",
+            "pool",
+            "readers",
+            "roles",
+            "mode",
+            "veto",
+            "deadline",
+            "onPass",
+            "onReject",
+            "signAdmins",
+            "allowSelfApprove",
+        ];
+        let unknown: Vec<String> = body
+            .keys()
+            .filter(|k| !known.contains(&k.as_str()))
+            .map(|k| format!("approve.{k}"))
+            .collect();
+        if !unknown.is_empty() {
+            for construct in unknown {
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                    message: format!(
+                        "unimplemented construct '{construct}': unknown approve field"
+                    ),
+                });
+            }
+            return None;
+        }
+
+        let approvers =
+            self.parse_approve_string_list(raw.span, "approve.approvers", body.get("approvers"));
+        let pool = self.parse_approve_string_list(raw.span, "approve.pool", body.get("pool"));
+        let readers =
+            self.parse_approve_string_list(raw.span, "approve.readers", body.get("readers"));
+        let roles = self.parse_approve_string_list(raw.span, "approve.roles", body.get("roles"));
+        let sign_admins =
+            self.parse_approve_string_list(raw.span, "approve.signAdmins", body.get("signAdmins"));
+
+        // 四个席位来源全空：无从产生审批席位，静默接受会把节点变成 no-op。
+        if approvers.is_empty() && pool.is_empty() && readers.is_empty() && roles.is_empty() {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::MissingRequiredField("approve seats".to_string()),
+                message: "approve requires at least one of approvers/pool/readers/roles"
+                    .to_string(),
+            });
+            return None;
+        }
+
+        let mode = match body.get("mode") {
+            None => JoinPolicy::All,
+            Some(Value::String(s)) => match parse_join_policy(s) {
+                Some(policy) => policy,
+                None => {
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct("approve.mode".to_string()),
+                        message: format!(
+                            "unimplemented construct 'approve.mode': expected \
+                             all|any|quorum:<n>|ratio:<num>/<den>, got '{s}'"
+                        ),
+                    });
+                    return None;
+                }
+            },
+            Some(_) => {
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::UnsupportedConstruct("approve.mode".to_string()),
+                    message: "approve.mode must be a string".to_string(),
+                });
+                return None;
+            }
+        };
+
+        let veto = match body.get("veto") {
+            None => true,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => {
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::TypeMismatch("approve.veto".to_string()),
+                    message: "approve.veto must be a boolean".to_string(),
+                });
+                return None;
+            }
+        };
+
+        let allow_self_approve = match body.get("allowSelfApprove") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => {
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::TypeMismatch("approve.allowSelfApprove".to_string()),
+                    message: "approve.allowSelfApprove must be a boolean".to_string(),
+                });
+                return None;
+            }
+        };
+
+        let deadline = match body.get("deadline") {
+            None => None,
+            Some(v) => match self.parse_duration_value(raw.span, v, "approve.deadline") {
+                Some(dur) => Some(dur),
+                None => return None,
+            },
+        };
+
+        let on_pass = match body.get("onPass") {
+            None => None,
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(_) => {
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::TypeMismatch("approve.onPass".to_string()),
+                    message: "approve.onPass must be a task name string".to_string(),
+                });
+                return None;
+            }
+        };
+
+        let on_reject = match body.get("onReject") {
+            None => None,
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(_) => {
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::TypeMismatch("approve.onReject".to_string()),
+                    message: "approve.onReject must be a task name string".to_string(),
+                });
+                return None;
+            }
+        };
+
+        Some(Task::Approve(ApproveTask {
+            approvers,
+            pool,
+            readers,
+            roles,
+            mode,
+            veto,
+            deadline,
+            on_pass,
+            on_reject,
+            sign_admins,
+            allow_self_approve,
+        }))
+    }
+
+    /// approve 席位字段：缺省为空；在场则必须是非空字符串数组（非字符串项 fail-closed）。
+    fn parse_approve_string_list(
+        &mut self,
+        span: Span,
+        construct: &str,
+        val: Option<&Value>,
+    ) -> Vec<String> {
+        match val {
+            None => Vec::new(),
+            Some(Value::Array(items)) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    match item.as_str() {
+                        Some(s) => out.push(s.to_string()),
+                        None => self.errors.push(ValidationError {
+                            span: Some(span),
+                            kind: ValidationErrorKind::TypeMismatch(construct.to_string()),
+                            message: format!("{construct} entries must be strings"),
+                        }),
+                    }
+                }
+                out
+            }
+            Some(_) => {
+                self.errors.push(ValidationError {
+                    span: Some(span),
+                    kind: ValidationErrorKind::TypeMismatch(construct.to_string()),
+                    message: format!("{construct} must be an array of strings"),
+                });
+                Vec::new()
+            }
+        }
+    }
+
     fn parse_workflow_ref_short(s: &str) -> WorkflowRef {
         // 支持 "namespace::name@version" 格式
         let parts: Vec<&str> = s.split("::").collect();
@@ -1642,6 +1885,21 @@ impl Validator {
                         self.check_task_refs(&branch.tasks);
                     }
                 }
+                // onPass/onReject 是运行期的分支目标，必须存在于任务集合。
+                Task::Approve(approve) => {
+                    for target in approve.on_pass.iter().chain(approve.on_reject.iter()) {
+                        if !self.task_names.contains(target) {
+                            self.errors.push(ValidationError {
+                                span: None,
+                                kind: ValidationErrorKind::UnknownTaskReference(target.clone()),
+                                message: format!(
+                                    "approve in '{}' references unknown task '{}'",
+                                    task.name, target
+                                ),
+                            });
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1691,22 +1949,34 @@ impl Validator {
     fn check_cycles(&mut self, tasks: &[NamedTask]) {
         // 构建 transition 图。`condition` 为 None 的 legacy defaultCondition 与官方 when-less
         // case 提升出的 `default_condition` 同样是运行期 Goto 目标，必须计入：运行期无步数预算，
-        // 自环会无限循环。本图只含顶层 switch 节点（Goto 目标只解析顶层任务，runtime
-        // `find_task_index`）；经由嵌套 switch 绕回顶层任务的环超出本检查范围（既有缺口，未扩大）。
+        // 自环会无限循环。approve 的 onPass/onReject 也是分支目标，同纳入。本图只含顶层
+        // switch / approve 节点（Goto 目标只解析顶层任务，runtime `find_task_index`）；经由嵌套
+        // switch 绕回顶层任务的环超出本检查范围（既有缺口，未扩大）。
         let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
         for task in tasks {
-            if let Task::Switch(switch) = &task.task {
-                let targets = switch
-                    .conditions
-                    .iter()
-                    .map(|c| c.transition.as_str())
-                    .chain(
-                        switch
-                            .default_condition
-                            .iter()
-                            .map(|c| c.transition.as_str()),
-                    );
-                edges.entry(task.name.as_str()).or_default().extend(targets);
+            match &task.task {
+                Task::Switch(switch) => {
+                    let targets = switch
+                        .conditions
+                        .iter()
+                        .map(|c| c.transition.as_str())
+                        .chain(
+                            switch
+                                .default_condition
+                                .iter()
+                                .map(|c| c.transition.as_str()),
+                        );
+                    edges.entry(task.name.as_str()).or_default().extend(targets);
+                }
+                Task::Approve(approve) => {
+                    let targets = approve
+                        .on_pass
+                        .iter()
+                        .map(String::as_str)
+                        .chain(approve.on_reject.iter().map(String::as_str));
+                    edges.entry(task.name.as_str()).or_default().extend(targets);
+                }
+                _ => {}
             }
         }
 
@@ -4693,6 +4963,252 @@ do:
         let errs = parse_and_validate_yaml(yaml).unwrap_err();
         assert!(
             errs.iter().any(|e| e.message.contains("use.extensions")),
+            "errors: {errs:?}"
+        );
+    }
+
+    // ─── approve 节点（workflow v2 审批） ───
+
+    #[test]
+    fn parse_approve_minimal() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-min
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("minimal approve must parse");
+        match &def.do_tasks[0].task {
+            Task::Approve(a) => {
+                assert_eq!(a.approvers, vec!["alice".to_string()]);
+                assert_eq!(a.mode, JoinPolicy::All);
+                assert!(a.veto, "default veto must be true");
+                assert!(!a.allow_self_approve);
+                assert!(a.pool.is_empty());
+                assert!(a.readers.is_empty());
+                assert!(a.roles.is_empty());
+                assert!(a.deadline.is_none());
+                assert!(a.on_pass.is_none());
+                assert!(a.on_reject.is_none());
+                assert!(a.sign_admins.is_empty());
+            }
+            other => panic!("expected Approve task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_approve_full() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-full
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        pool: ["bob", "carol"]
+        readers: ["dave"]
+        roles: ["manager"]
+        mode: "ratio:2/3"
+        veto: false
+        deadline: "PT1H"
+        onPass: "next"
+        onReject: "rejected"
+        signAdmins: ["admin"]
+        allowSelfApprove: true
+  - next:
+      set:
+        variable: a
+        value: "1"
+  - rejected:
+      set:
+        variable: b
+        value: "2"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("full approve must parse");
+        match &def.do_tasks[0].task {
+            Task::Approve(a) => {
+                assert_eq!(a.approvers, vec!["alice".to_string()]);
+                assert_eq!(a.pool, vec!["bob".to_string(), "carol".to_string()]);
+                assert_eq!(a.readers, vec!["dave".to_string()]);
+                assert_eq!(a.roles, vec!["manager".to_string()]);
+                assert_eq!(a.mode, JoinPolicy::Ratio { num: 2, den: 3 });
+                assert!(!a.veto);
+                assert_eq!(a.deadline.as_deref(), Some("PT1H"));
+                assert_eq!(a.on_pass.as_deref(), Some("next"));
+                assert_eq!(a.on_reject.as_deref(), Some("rejected"));
+                assert_eq!(a.sign_admins, vec!["admin".to_string()]);
+                assert!(a.allow_self_approve);
+                // 席位数：1 指定审批 + 1 候选池 + 1 阅签（roles 不在此解析）
+                assert_eq!(a.to_seats().len(), 3);
+            }
+            other => panic!("expected Approve task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_approve_rejects_unknown_key() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-unknown
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        bogus: 1
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("unknown approve key must reject");
+        assert!(
+            error_kind_naming(&errs, "approve.bogus"),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn parse_approve_rejects_unknown_mode() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-mode
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        mode: "majority"
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("unknown approve.mode must reject");
+        assert!(error_kind_naming(&errs, "approve.mode"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn parse_approve_rejects_absolute_deadline() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-deadline
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        deadline:
+          until: "2026-01-01T00:00:00Z"
+"#;
+        let errs =
+            parse_and_validate_yaml(yaml).expect_err("absolute approve deadline must reject");
+        assert!(
+            error_kind_naming(&errs, "approve.deadline.until"),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn parse_approve_requires_a_seat_source() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-no-seats
+  version: "1.0"
+do:
+  - review:
+      approve:
+        mode: all
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("seatless approve must reject");
+        assert!(
+            errs.iter().any(|e| matches!(
+                &e.kind,
+                ValidationErrorKind::MissingRequiredField(f) if f == "approve seats"
+            )),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn parse_approve_on_pass_target_must_exist() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-onpass
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        onPass: "ghost"
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("unknown onPass target must reject");
+        assert!(
+            errs.iter().any(|e| matches!(
+                &e.kind,
+                ValidationErrorKind::UnknownTaskReference(t) if t == "ghost"
+            )),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn parse_approve_on_reject_target_must_exist() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-onreject
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        onReject: "ghost"
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("unknown onReject target must reject");
+        assert!(
+            errs.iter().any(|e| matches!(
+                &e.kind,
+                ValidationErrorKind::UnknownTaskReference(t) if t == "ghost"
+            )),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn parse_approve_edges_participate_in_cycle_check() {
+        // approve.onPass 是运行期分支目标：approve → switch → approve 构成环，必须被拒绝。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-cycle
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        onPass: "route"
+  - route:
+      switch:
+        - condition: "${ true }"
+          transition: "review"
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("approve cycle must reject");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(&e.kind, ValidationErrorKind::CyclicDependency(_))),
             "errors: {errs:?}"
         );
     }
