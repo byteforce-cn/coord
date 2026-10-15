@@ -26,12 +26,12 @@
          mode: all                        # all|any|quorum:<n>|ratio:<num>/<den>，默认 all
          veto: true                       # 默认 true = AnyReject 一票否决；false = OnExhausted
          deadline: {hours: 24}            # 可选，官方 duration 形状/ISO8601 字符串（复用 parse_wait 口径）
-         on_pass: notify                  # 可选；默认 = 顺序下一任务
-         on_reject: rework                # 可选；缺省 = workflow fault
-         sign_admins: [admin]             # 可选；加签/减签/驳回重开/终止的授权名单
-         allow_self_approve: false        # 默认 false（发起人不可自批）
+         onPass: notify                   # 可选；默认 = 顺序下一任务
+         onReject: rework                 # 可选；缺省 = workflow fault
+         signAdmins: [admin]              # 可选；加签/减签/驳回重开/终止的授权名单
+         allowSelfApprove: false          # 默认 false（发起人不可自批）
    ```
-   未知键一律 `UnsupportedConstruct`（fail-closed）；`on_pass`/`on_reject` 目标必须存在于顶层任务名（`check_task_refs` 覆盖）。
+   未知键一律 `UnsupportedConstruct`（fail-closed）；`onPass`/`onReject` 目标必须存在于顶层任务名（`check_task_refs` 覆盖）。
 5. **授权矩阵**（引擎已有 `actor_can_act` 保留；桥补职责分离）：
    - `approve/reject/acknowledge/claim/transfer/delegate`：引擎 `actor_can_act` + `actor != initiator`（`allow_self_approve=false` 时；`initiator == "anonymous"` 跳过该检查）。
    - `add_sign/remove_sign`：`actor ∈ branch.policy.sign_admins` 或 `actor == initiator`。
