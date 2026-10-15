@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.coord.dev/events/com.china-workflow.instance.completed.v1.json",
+  "title": "com.china-workflow.instance.completed.v1",
+  "description": "coord v2 审批生命周期事件（投递面载荷 = OutboxRecord）。partitionkey = aggregate_id（= instance_id）；消费者按 (instance_id, sequence) 去重。`event_type` 为记录字段名（CloudEvents 属性 `type` 的对应），`additionalProperties: true` 供消费者前向兼容（outbox 记录新增内部字段不破坏本契约）。",
+  "type": "object",
+  "required": [
+    "id",
+    "source",
+    "specversion",
+    "event_type",
+    "dataschema",
+    "subject",
+    "time",
+    "data"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "全局唯一事件 ID（消费者去重键）"
+    },
+    "source": {
+      "type": "string",
+      "description": "事件来源（引擎固定 `coord/workflow`）"
+    },
+    "specversion": {
+      "const": "1.0"
+    },
+    "event_type": {
+      "const": "com.china-workflow.instance.completed.v1"
+    },
+    "dataschema": {
+      "const": "https://schemas.coord.dev/events/com.china-workflow.instance.completed.v1.json"
+    },
+    "subject": {
+      "type": "string",
+      "minLength": 1,
+      "description": "= aggregate_id = instance_id"
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "data": {
+      "type": "object",
+      "description": "实例级事件负载（引擎 emit 的 data；`subject` 也是 instance_id）。",
+      "required": [
+        "instance_id"
+      ],
+      "properties": {
+        "instance_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

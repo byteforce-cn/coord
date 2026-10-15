@@ -253,7 +253,7 @@ mod tests {
     fn evt(id: &str) -> OutboxRecord {
         event_record(
             INSTANCE_ID,
-            "com.china-workflow.instance.completed",
+            "com.china-workflow.instance.completed.v1",
             &json!({ "instance_id": INSTANCE_ID }),
             1_000,
             id.into(),
@@ -438,7 +438,7 @@ mod tests {
         let engine = start(INSTANCE_ID);
         let foreign = event_record(
             "inst-other",
-            "com.china-workflow.instance.completed",
+            "com.china-workflow.instance.completed.v1",
             &json!({}),
             1_000,
             "evt-x".into(),

@@ -87,7 +87,7 @@ fn start_engine(id: &str, initiator: &str, definition_hash: &str) -> Engine {
 fn event(instance_id: &str, event_id: &str, now: i64) -> OutboxRecord {
     event_record(
         instance_id,
-        "com.china-workflow.instance.completed",
+        "com.china-workflow.instance.completed.v1",
         &json!({ "instance_id": instance_id, "event_id": event_id }),
         now,
         event_id.into(),

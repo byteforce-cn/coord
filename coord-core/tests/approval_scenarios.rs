@@ -148,11 +148,14 @@ fn p0_huiqian_with_add_sign() {
         .unwrap();
     assert_eq!(e.rounds[&r].status, RoundStatus::Passed);
     assert_eq!(e.branches[&b].status, BranchStatus::Completed);
-    assert!(has_event(&out, "com.china-workflow.approval.round.passed"));
+    assert!(has_event(
+        &out,
+        "com.china-workflow.approval.round.passed.v1"
+    ));
     assert_eq!(e.instance.status, InstanceStatus::Running);
     let out = e.finish(e.instance.revision, tick(&mut t)).unwrap();
     assert_eq!(e.instance.status, InstanceStatus::Completed);
-    assert!(has_event(&out, "com.china-workflow.instance.completed"));
+    assert!(has_event(&out, "com.china-workflow.instance.completed.v1"));
 }
 
 /// 一票否决：任一人拒绝 → 轮次/分支不通过，其余席位取消，实例 Rejected。
@@ -202,9 +205,9 @@ fn p0_one_vote_veto() {
     assert_eq!(e.instance.status, InstanceStatus::Rejected);
     assert!(has_event(
         &out,
-        "com.china-workflow.approval.round.rejected"
+        "com.china-workflow.approval.round.rejected.v1"
     ));
-    assert!(has_event(&out, "com.china-workflow.instance.rejected"));
+    assert!(has_event(&out, "com.china-workflow.instance.rejected.v1"));
 }
 
 /// 或签：任一人通过 → 其余席位取消，节点通过。
@@ -776,7 +779,7 @@ fn p0_return_to_node_reopens_history() {
         e.instance.returns[0].comment.as_deref(),
         Some("材料不全，退回重填")
     );
-    assert!(has_event(&out.1, "com.china-workflow.instance.returned"));
+    assert!(has_event(&out.1, "com.china-workflow.instance.returned.v1"));
     assert_eq!(e.instance.status, InstanceStatus::Running);
 
     // 重开 A、走完 B
@@ -1043,7 +1046,7 @@ fn withdraw_only_by_initiator() {
     assert_eq!(e.instance.status, InstanceStatus::Cancelled);
     assert_eq!(e.branches[&b].status, BranchStatus::Cancelled);
     assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Cancelled);
-    assert!(has_event(&out, "com.china-workflow.instance.cancelled"));
+    assert!(has_event(&out, "com.china-workflow.instance.cancelled.v1"));
 }
 
 /// 终止：管理路径级联取消 open 分支/轮次/席位，终态实例拒绝后续命令。
@@ -1081,7 +1084,7 @@ fn terminate_cascades_and_seals_instance() {
     assert_eq!(e.instance.status, InstanceStatus::Terminated);
     assert_eq!(e.branches[&b].status, BranchStatus::Terminated);
     assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Cancelled);
-    assert!(has_event(&out, "com.china-workflow.instance.terminated"));
+    assert!(has_event(&out, "com.china-workflow.instance.terminated.v1"));
     let err = e
         .approve(e.instance.revision, &seats[0], "alice", None, tick(&mut t))
         .unwrap_err();
@@ -1366,7 +1369,7 @@ fn any_reject_takes_precedence_over_exhaustion_and_pass_rules() {
     assert_eq!(e.tasks[&seats[2]].status, TaskStatus::Cancelled);
     assert!(has_event(
         &out,
-        "com.china-workflow.approval.round.rejected"
+        "com.china-workflow.approval.round.rejected.v1"
     ));
 }
 

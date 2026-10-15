@@ -60,6 +60,10 @@ jobs:
         # 注释 / 文档中引用的文件路径必须存在；
         # 同时警告 Rust 注释中的日期（白名单文件除外）。
         run: bash scripts/check-doc-refs.sh
+      - name: Event schema gate (catalog == schemas)
+        # events.rs 目录中每个事件类型必须有对应 JSON Schema，$id == dataschema_for；
+        # 提取为空或存在孤儿 schema 即失败（fail-closed）。纯 bash + python3。
+        run: bash scripts/check-event-schemas.sh
       - name: Consumer doc status labels gate (STATUS.md is the single source)
         # 消费方文档（consumer-contract.md / SDK README）不得残留 EXPERIMENTAL
         # 标注——STATUS.md 已把相应能力提升为 COMMITTED；再漂一次必须机器可见。

@@ -259,7 +259,8 @@ impl Engine {
         Ok((ids, out))
     }
 
-    /// 减签：取消当前 Open 轮次中的未决席位（已表态的席位跳过；重复目标 id 整批拒绝）。
+    /// 减签：取消当前 Open 轮次中的未决席位（已表态的席位跳过；重复目标 id 整批拒绝）；
+    /// 整批目标皆终态 ⇒ 零效果 `Ok(vec![])`（不写审计、不加 revision）。
     pub fn remove_sign(
         &mut self,
         expected: u64,
@@ -678,7 +679,7 @@ impl Engine {
         let jump_count = self.instance.jump_count;
         self.emit(
             &mut out,
-            "com.china-workflow.instance.returned",
+            "com.china-workflow.instance.returned.v1",
             json!({
                 "instance_id": self.instance.id,
                 "from_node": branch.node,
@@ -720,7 +721,7 @@ impl Engine {
         });
         self.emit(
             &mut out,
-            "com.china-workflow.instance.cancelled",
+            "com.china-workflow.instance.cancelled.v1",
             json!({"instance_id": self.instance.id}),
         );
         self.touch(now);
@@ -756,7 +757,7 @@ impl Engine {
         });
         self.emit(
             &mut out,
-            "com.china-workflow.instance.terminated",
+            "com.china-workflow.instance.terminated.v1",
             json!({"instance_id": self.instance.id, "reason": reason}),
         );
         self.touch(now);
@@ -801,9 +802,9 @@ impl Engine {
             to: next,
         }];
         let name = match next {
-            InstanceStatus::Completed => "com.china-workflow.instance.completed",
-            InstanceStatus::Rejected => "com.china-workflow.instance.rejected",
-            _ => "com.china-workflow.instance.status_changed",
+            InstanceStatus::Completed => "com.china-workflow.instance.completed.v1",
+            InstanceStatus::Rejected => "com.china-workflow.instance.rejected.v1",
+            _ => "com.china-workflow.instance.status_changed.v1",
         };
         let id = self.instance.id.clone();
         self.emit(&mut out, name, json!({ "instance_id": id }));
@@ -1209,7 +1210,7 @@ impl Engine {
                     "completed": completed,
                     "rejected": rejected,
                 });
-                self.emit(out, "com.china-workflow.approval.round.passed", data);
+                self.emit(out, "com.china-workflow.approval.round.passed.v1", data);
             }
             Some(RoundStatus::Rejected) => {
                 r.status = RoundStatus::Rejected;
@@ -1230,7 +1231,7 @@ impl Engine {
                     "completed": completed,
                     "rejected": rejected,
                 });
-                self.emit(out, "com.china-workflow.approval.round.rejected", data);
+                self.emit(out, "com.china-workflow.approval.round.rejected.v1", data);
             }
             _ => {
                 self.rounds.insert(r.id.clone(), r);
@@ -1266,7 +1267,7 @@ impl Engine {
                 let id = self.instance.id.clone();
                 self.emit(
                     out,
-                    "com.china-workflow.instance.rejected",
+                    "com.china-workflow.instance.rejected.v1",
                     json!({ "instance_id": id }),
                 );
             }

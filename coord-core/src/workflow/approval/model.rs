@@ -327,8 +327,9 @@ pub enum RoundStatus {
 /// 作用域为**分支**而非单个 Task —— 会签是「一个节点 N 席位」的投票，挂单 task
 /// 无法同时统计多席位。
 ///
-/// 不变量：一个分支同时最多一个 `Open` 轮次；`total_count = 0`（只有阅签）即视为通过；
-/// 轮次不重开（驳回重开的是新分支新轮次）。
+/// 不变量：一个分支同时最多一个 `Open` 轮次；仅当轮次从未创建可计票席位时视为通过
+/// （`approvals.is_empty()`，如纯阅签）——`total_count == 0` 但席位曾创建后全部过期/移除
+/// 的轮次保持 `Open`，处置由人决定（无自动判定）；轮次不重开（驳回重开的是新分支新轮次）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Round {
     pub id: Id,
@@ -711,14 +712,14 @@ mod tests {
     #[test]
     fn test_effect_event_serde_shape() {
         let effect = Effect::Event {
-            name: "com.china-workflow.approval.round.passed".into(),
+            name: "com.china-workflow.approval.round.passed.v1".into(),
             data: json!({"a": 1}),
         };
         assert_eq!(
             serde_json::to_value(&effect).expect("serialize effect"),
             json!({
                 "type": "event",
-                "name": "com.china-workflow.approval.round.passed",
+                "name": "com.china-workflow.approval.round.passed.v1",
                 "data": {"a": 1},
             })
         );
