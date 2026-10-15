@@ -25,11 +25,12 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use super::approval::bridge::ApprovalBridge;
 use super::durable::{DurableSupport, OutboxRecord, TimerKind, TimerRecord};
 use super::engine::WorkflowExecutor;
 use super::model::{
-    EventFilter, InstanceStatus, StepResult, SuspendReason, SuspensionMeta, TaskFrame, TaskStatus,
-    WorkflowDefinition, WorkflowFault, WorkflowInstance,
+    EventFilter, InstanceStatus, StepResult, SuspendReason, SuspensionMeta, Task, TaskFrame,
+    TaskStatus, WorkflowDefinition, WorkflowFault, WorkflowInstance,
 };
 use super::ports::{
     Clock, DispatchResult, EventProvider, ExpressionEval, InstanceLease, LeaseGuard,
@@ -428,6 +429,11 @@ where
     /// 注入后：生命周期事件 append 进 outbox（实例状态仍只由写路径负责）；
     /// wait/retry/timeout 的到期时间落 KV，重启后由扫描器补齐进程内定时器丢失的部分。
     durable: Option<Arc<DurableSupport>>,
+    /// 审批桥（可选注入）：approve 节点挂起前用它开启审批实例。
+    ///
+    /// `None` = 未接线：approve 节点 fail-closed（实例 `Failed` + `workflow.faulted`），
+    /// 绝不静默降级为「无审批继续」。
+    approval: Option<Arc<ApprovalBridge>>,
 }
 
 impl<E, C, S, D, B> WorkflowRuntime<E, C, S, D, B>
@@ -458,6 +464,7 @@ where
             lease_skipped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cas_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             durable: None,
+            approval: None,
         };
         // 启动后台扫描器，定期检查 RunSubflow 挂起的父流程并恢复
         rt.start_subflow_scanner();
@@ -469,6 +476,15 @@ where
     /// builder 形态：不改变 [`Self::new`] 的构造签名，内存路径行为逐字不变。
     pub fn with_durable(mut self, durable: DurableSupport) -> Self {
         self.durable = Some(Arc::new(durable));
+        self
+    }
+
+    /// 注入审批桥：approve 节点挂起前经它开启审批实例。
+    ///
+    /// 不注入时 approve 节点 fail-closed（见字段说明）。builder 形态：不改变
+    /// [`Self::new`] 的构造签名，非 approve 定义的驱动路径逐字不变。
+    pub fn with_approval_bridge(mut self, bridge: Arc<ApprovalBridge>) -> Self {
+        self.approval = Some(bridge);
         self
     }
 
@@ -729,11 +745,12 @@ where
     ///   提交直接退出驱动循环 —— 不会丢更新，只是白跑一轮。注入租约后（经 [`Self::spawn_drive`]
     ///   先取租约）由租约提供互斥：多进程并发时只有一个真正驱动（其余计入 `lease_skipped`）。
     /// - `Waiting`：`listen` 重建事件订阅；`wait` / `retry` 补写持久化定时器（已到期立即触发）。
-    /// - `Suspended`（signal）：人工恢复语义 —— 没有外部 signal 就自动重驱动会把人工审批
-    ///   直接跑过去，故**不**自动驱动（ADR 的「所有非终态」在此显式排除 signal 挂起）。
+    /// - `Suspended`（signal / approve 挂起）：人工/审批恢复语义 —— 没有外部 signal 或审批
+    ///   结论就自动重驱动会把人工审批直接跑过去，故**不**自动驱动（ADR 的「所有非终态」在此
+    ///   显式排除挂起）。
     /// - 终态：跳过。
     ///
-    /// `coord-core` 无 `tracing`，signal 挂起的跳过是设计内非动作（不是故障），故只以注释
+    /// `coord-core` 无 `tracing`，挂起实例的跳过是设计内非动作（不是故障），故只以注释
     /// 记录原因、不新增日志/计数出口（观测出口在上层 `WorkerLiveness` 等）。
     async fn reconcile_resumable_instances(&self, store: Arc<S>) {
         let Ok((instances, _next)) = store.list_instances(None, None, usize::MAX, None).await
@@ -800,8 +817,9 @@ where
                         _ => {}
                     }
                 }
-                // 终态跳过；`Suspended`（signal 挂起）是人工恢复语义，无外部 signal 就
-                // 不自动驱动（见函数文档，ADR 的「所有非终态」在此显式排除 signal 挂起）。
+                // 终态跳过；`Suspended`（signal / approve 挂起）是人工恢复语义，无外部
+                // signal 或审批结论就不自动驱动（见函数文档，ADR 的「所有非终态」在此显式
+                // 排除挂起）。
                 _ => {}
             }
         }
@@ -2552,18 +2570,60 @@ where
                                     .await;
                                 break 'drive_loop;
                             }
-                            SuspendReason::WaitingForApproval { .. } => {
-                                // 原生 approve 节点进入即 fault：本装配无审批接线，
-                                // 不得静默降级为无审批继续（fail-closed）。
-                                let fault = crate::workflow::errors::WorkflowFault::internal(
-                                    "approve node has no runtime approval wiring",
-                                    format!(
+                            SuspendReason::WaitingForApproval { node, .. } => {
+                                // approve 节点：先经审批桥开启审批实例（幂等），再按人工恢复
+                                // 语义挂起 —— 不 spawn 任何自动恢复（审批完成由恢复路径驱动）。
+                                //
+                                // 开不出审批必须 fault-closed：挂起却没开审批会让实例永远
+                                // 等不到「有席可批」，而静默继续执行等于跳过审批。
+                                let approve_task = definition
+                                    .do_tasks
+                                    .get(inst.current_task_index)
+                                    .and_then(|named| match &named.task {
+                                        Task::Approve(task) => Some(task),
+                                        _ => None,
+                                    });
+                                let opened = match (self.approval.as_ref(), approve_task) {
+                                    (Some(bridge), Some(task)) => bridge
+                                        .ensure_node_open(&inst, node, task)
+                                        .await
+                                        .map_err(|e| e.to_string()),
+                                    (None, _) => Err(format!(
                                         "task '{}' suspended for approval, but this runtime has \
-                                         no approval wiring to open an approval instance",
+                                         no approval bridge to open an approval instance",
                                         frame.task_name
-                                    ),
-                                );
-                                self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                                    )),
+                                    (Some(_), None) => Err(format!(
+                                        "task '{}' suspended for approval, but the pinned \
+                                         definition has no approve node at index {}",
+                                        frame.task_name, inst.current_task_index
+                                    )),
+                                };
+                                if let Err(error) = opened {
+                                    let fault = crate::workflow::errors::WorkflowFault::internal(
+                                        "approve node has no approval instance",
+                                        format!(
+                                            "approve node '{}' could not be opened: {error}",
+                                            node
+                                        ),
+                                    );
+                                    self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                                        .await;
+                                    break 'drive_loop;
+                                }
+
+                                inst.task_stack.push(frame);
+                                inst.status = InstanceStatus::Suspended;
+                                inst.suspension_meta = Some(reason.to_meta());
+                                inst.updated_at = self.clock.now_ms();
+                                let _ = self
+                                    .commit_instance(
+                                        &store,
+                                        &inst,
+                                        &mut rev,
+                                        guard,
+                                        &[lifecycle::WORKFLOW_SUSPENDED],
+                                    )
                                     .await;
                                 break 'drive_loop;
                             }
@@ -3064,6 +3124,7 @@ where
             lease_skipped: Arc::clone(&self.lease_skipped),
             cas_conflicts: Arc::clone(&self.cas_conflicts),
             durable: self.durable.clone(),
+            approval: self.approval.clone(),
         }
     }
 }
@@ -5428,6 +5489,235 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let loaded = store.load_instance(&inst.id).await.unwrap().unwrap();
         assert_eq!(loaded.status, InstanceStatus::Waiting);
+    }
+
+    // ─── approve 节点 → Suspended 接线（v2 审批） ───
+
+    use crate::workflow::approval::bridge::ApprovalBridge;
+    use crate::workflow::approval::model::{BranchStatus, JoinPolicy};
+    use crate::workflow::approval::store::{ApprovalStore, MemoryApprovalStore};
+    use crate::workflow::model::ApproveTask;
+
+    /// approve 节点的席位（具体审批人，保证节点有可批的席位）。
+    fn approve_task(approvers: &[&str]) -> ApproveTask {
+        ApproveTask {
+            approvers: approvers.iter().map(|s| s.to_string()).collect(),
+            pool: vec![],
+            readers: vec![],
+            roles: vec![],
+            mode: JoinPolicy::All,
+            veto: true,
+            deadline: None,
+            on_pass: None,
+            on_reject: None,
+            sign_admins: vec![],
+            allow_self_approve: false,
+        }
+    }
+
+    /// approve 节点 + 后继节点：后继节点用于断言挂起/故障时**未**继续执行。
+    fn approve_definition(name: &str) -> WorkflowDefinition {
+        make_definition_ext(
+            name,
+            vec![
+                NamedTask {
+                    name: "review".into(),
+                    task: Task::Approve(approve_task(&["alice"])),
+                },
+                NamedTask {
+                    name: "after".into(),
+                    task: Task::Set(SetTask {
+                        variable: "done".into(),
+                        value: "\"after-approve\"".into(),
+                    }),
+                },
+            ],
+            None,
+            None,
+            None,
+            Default::default(),
+        )
+    }
+
+    /// 审批桥 + 其内存存储（固定时钟）。
+    fn approval_bridge() -> (Arc<ApprovalBridge>, Arc<MemoryApprovalStore>) {
+        let store = Arc::new(MemoryApprovalStore::new());
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1000));
+        let bridge = Arc::new(ApprovalBridge::new(store.clone(), clock, None));
+        (bridge, store)
+    }
+
+    /// 轮询等待实例进入期望相位（drive 由 `start` spawn，等待有界）。
+    async fn await_status(
+        store: &MemoryWorkflowStore,
+        id: &str,
+        want: InstanceStatus,
+    ) -> WorkflowInstance {
+        for _ in 0..200 {
+            let inst = store.load_instance(id).await.unwrap().expect("instance");
+            if inst.status == want {
+                return inst;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("instance {id} never reached {want:?}");
+    }
+
+    /// approve 节点：开审批实例 → 挂起为 `Suspended`（审批元数据 + 审批引擎落库）。
+    #[tokio::test]
+    async fn approve_node_suspends_with_approval_meta_and_engine_persisted() {
+        let (bridge, approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(Arc::clone(&bridge));
+        let def = approve_definition("approve-suspend-wf");
+
+        let started = runtime
+            .start(&def, serde_json::json!({"amount": 100}))
+            .await
+            .unwrap();
+        let suspended =
+            await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        // 标准相位 Suspended + 审批挂起元数据（恢复信号 / 审批实例 id 恒等于 workflow 实例 id）
+        let meta = suspended.suspension_meta.as_ref().expect("suspension meta");
+        assert_eq!(meta.reason, "approval");
+        assert_eq!(meta.expected_signal.as_deref(), Some("approval.completed"));
+        assert_eq!(
+            meta.approval_instance_id.as_deref(),
+            Some(started.id.as_str())
+        );
+
+        // 挂起帧：approve 节点仍在执行中，且未推进到后继节点
+        let frame = suspended.task_stack.last().expect("approve frame");
+        assert_eq!(frame.task_name, "review");
+        assert_eq!(frame.task_type, "approve");
+        assert_eq!(frame.status, TaskStatus::Running);
+        assert_eq!(suspended.current_task_index, 0);
+        assert!(
+            suspended.context.get("done").is_none(),
+            "approve 挂起后不得执行后继节点"
+        );
+
+        // 审批实例已持久化：一条 open 分支 + 一个可批席位
+        let (engine, mod_rev) = approval_store
+            .load(&started.id)
+            .await
+            .unwrap()
+            .expect("approval instance persisted");
+        assert_eq!(mod_rev, 1);
+        assert_eq!(
+            engine.instance.status,
+            crate::workflow::approval::model::InstanceStatus::Running
+        );
+        // 实例未注入发起人 ⇒ 审批实例以 anonymous 起算（自审策略据此判定）
+        assert_eq!(engine.instance.initiator, "anonymous");
+        assert_eq!(engine.branches.len(), 1);
+        let branch = engine.branches.values().next().unwrap();
+        assert_eq!(branch.node, "review");
+        assert_eq!(branch.status, BranchStatus::Open);
+        assert_eq!(engine.rounds.len(), 1);
+        let seat = engine
+            .tasks
+            .values()
+            .find(|t| t.assignee.as_deref() == Some("alice"))
+            .expect("seat for alice");
+        assert!(seat.status.is_open());
+    }
+
+    /// 挂起后强制再驱动：approve 节点幂等复用既有 open 分支，不得重复开分支/轮次。
+    #[tokio::test]
+    async fn re_drive_after_suspend_does_not_double_open() {
+        let (bridge, approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = approve_definition("approve-redrive-wf");
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        let (before, rev_before) = approval_store.load(&started.id).await.unwrap().unwrap();
+
+        runtime
+            .drive(
+                started.id.clone(),
+                def.clone(),
+                Arc::clone(store_of(&runtime)),
+                None,
+            )
+            .await;
+
+        let (after, rev_after) = approval_store.load(&started.id).await.unwrap().unwrap();
+        assert_eq!(rev_after, rev_before, "复用既有分支 ⇒ 审批实例零写入");
+        assert_eq!(after.branches.len(), before.branches.len());
+        assert_eq!(after.rounds.len(), before.rounds.len());
+        assert_eq!(after.tasks.len(), before.tasks.len());
+
+        // workflow 实例仍在 Suspended（重驱动不得把审批节点推进过去）
+        let reloaded = store_of(&runtime)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, InstanceStatus::Suspended);
+        assert_eq!(reloaded.current_task_index, 0);
+        assert!(reloaded.context.get("done").is_none());
+    }
+
+    /// 未注入审批桥：approve 节点没有可开的审批实例 ⇒ fault-closed，不得静默继续。
+    #[tokio::test]
+    async fn approve_node_without_bridge_faults_closed() {
+        let runtime = make_runtime();
+        let def = approve_definition("approve-no-bridge-wf");
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        let failed = await_status(store_of(&runtime), &started.id, InstanceStatus::Failed).await;
+
+        let fault = failed.fault.as_ref().expect("fault");
+        assert_eq!(
+            fault.r#type,
+            crate::workflow::errors::error_type(crate::workflow::errors::kind::INTERNAL)
+        );
+        assert!(
+            fault.detail.contains("approval"),
+            "fault 必须点明审批未开启：{fault:?}"
+        );
+        assert_eq!(failed.current_task_index, 0);
+        assert!(
+            failed.context.get("done").is_none(),
+            "faulted 后不得执行后继节点"
+        );
+    }
+
+    /// v1 回归：注入审批桥不改变非 approve 定义的语义（仍跑到 Completed）。
+    #[tokio::test]
+    async fn non_approve_definition_completes_with_bridge_injected() {
+        let (bridge, approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(bridge);
+        let def = make_definition_ext(
+            "v1-unaffected-wf",
+            vec![NamedTask {
+                name: "finish".into(),
+                task: Task::Set(SetTask {
+                    variable: "done".into(),
+                    value: "\"v1\"".into(),
+                }),
+            }],
+            None,
+            None,
+            None,
+            Default::default(),
+        );
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        let done = await_status(store_of(&runtime), &started.id, InstanceStatus::Completed).await;
+
+        assert_eq!(done.context["done"], "v1");
+        assert!(
+            done.suspension_meta.is_none(),
+            "非 approve 定义不受审批接线影响"
+        );
+        assert!(
+            approval_store.load(&started.id).await.unwrap().is_none(),
+            "非 approve 定义不得开出审批实例"
+        );
     }
 
     /// 从 runtime 中取出 store（测试辅助）
