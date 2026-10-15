@@ -351,6 +351,27 @@ impl ApprovalBridge {
         }
     }
 
+    /// 仍 open 的席位中最早的 `deadline`（无 open 席位或无 deadline 返回 `None`）。
+    ///
+    /// 纯只读：不改引擎状态、不提交。运行时据此在席位到期后重排下一条
+    /// `ApprovalDeadline` 定时器（仍有更晚到期的 open 席位 ⇒ 继续驱动）。
+    pub async fn next_open_deadline(&self, approval_id: &str) -> Result<Option<i64>, BridgeError> {
+        let Some((engine, _)) = self
+            .store
+            .load(approval_id)
+            .await
+            .map_err(BridgeError::from)?
+        else {
+            return Ok(None);
+        };
+        Ok(engine
+            .tasks
+            .values()
+            .filter(|t| t.status.is_open())
+            .filter_map(|t| t.deadline)
+            .min())
+    }
+
     /// 过期所有 `deadline <= now_ms` 的未决席位；返回过期计数。
     ///
     /// 过期只把席位置 `Expired`（经引擎 `recount`，全员过期/减签耗尽保持轮次 `Open`），
