@@ -5,8 +5,11 @@
 // - Multi-node cluster startup (leader election)
 // - Put/Get/Delete through Raft consensus
 
+mod common;
+
 #[cfg(test)]
 mod tests {
+    use crate::common;
     use std::collections::BTreeMap;
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -33,13 +36,6 @@ mod tests {
     use coord_server::watch::WatchDispatcher;
     use tonic::transport::Channel;
 
-    /// Find an available port on localhost
-    fn find_port() -> u16 {
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
-    }
-
     /// A running cluster node with all its handles
     struct TestNode {
         node_id: u64,
@@ -63,16 +59,19 @@ mod tests {
         /// For multi-node clusters, node 1 bootstraps the cluster and other nodes join.
         async fn start_multi(
             node_id: u64,
-            grpc_port: u16,
-            raft_port: u16,
+            grpc_listener: tokio::net::TcpListener,
+            raft_listener: tokio::net::TcpListener,
             all_raft_addrs: BTreeMap<u64, String>,
             initial_members: Vec<u64>,
         ) -> Self {
             let tmpdir = tempfile::tempdir().unwrap();
             let data_dir = tmpdir.path().to_path_buf();
 
-            let grpc_addr: SocketAddr = format!("127.0.0.1:{}", grpc_port).parse().unwrap();
-            let raft_addr: SocketAddr = format!("127.0.0.1:{}", raft_port).parse().unwrap();
+            // 监听器由调用方预绑定并保持（common::bind_listener）：不得改成
+            // 「find_port() 取号 → 稍后 serve(addr)」，并行测试可能拿到同一端口，
+            // 客户端会连到别的监听器上（症状：空 message 的 Unimplemented）。
+            let grpc_addr: SocketAddr = grpc_listener.local_addr().unwrap();
+            let raft_addr: SocketAddr = raft_listener.local_addr().unwrap();
 
             // 1. Initialize storage
             let storage_config = StorageConfig::default();
@@ -176,16 +175,16 @@ mod tests {
 
             // 14. Start Raft RPC gRPC server (internal node communication)
             let raft_rpc_svc = RaftRpcServer::new(raft_rpc_service);
-            let raft_addr_copy = raft_addr;
             let raft_handle = tokio::spawn(async move {
                 let _ = tonic::transport::Server::builder()
                     .add_service(raft_rpc_svc)
-                    .serve(raft_addr_copy)
+                    .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
+                        raft_listener,
+                    ))
                     .await;
             });
 
             // 15. Start client gRPC server
-            let grpc_addr_copy = grpc_addr;
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
             let grpc_handle = tokio::spawn(async move {
                 let _ = tonic::transport::Server::builder()
@@ -194,14 +193,14 @@ mod tests {
                     .add_service(lease_svc)
                     .add_service(watch_svc)
                     .add_service(maint_svc)
-                    .serve_with_shutdown(grpc_addr_copy, async {
-                        let _ = shutdown_rx.await;
-                    })
+                    .serve_with_incoming_shutdown(
+                        tokio_stream::wrappers::TcpListenerStream::new(grpc_listener),
+                        async {
+                            let _ = shutdown_rx.await;
+                        },
+                    )
                     .await;
             });
-
-            // Wait for servers to be ready
-            tokio::time::sleep(Duration::from_millis(200)).await;
 
             TestNode {
                 node_id,
@@ -220,16 +219,19 @@ mod tests {
         /// Bootstraps as a single-node cluster if `bootstrap` is true.
         async fn start(
             node_id: u64,
-            grpc_port: u16,
-            raft_port: u16,
+            grpc_listener: tokio::net::TcpListener,
+            raft_listener: tokio::net::TcpListener,
             all_raft_addrs: BTreeMap<u64, String>,
             bootstrap: bool,
         ) -> Self {
             let tmpdir = tempfile::tempdir().unwrap();
             let data_dir = tmpdir.path().to_path_buf();
 
-            let grpc_addr: SocketAddr = format!("127.0.0.1:{}", grpc_port).parse().unwrap();
-            let raft_addr: SocketAddr = format!("127.0.0.1:{}", raft_port).parse().unwrap();
+            // 监听器由调用方预绑定并保持（common::bind_listener）：不得改成
+            // 「find_port() 取号 → 稍后 serve(addr)」，并行测试可能拿到同一端口，
+            // 客户端会连到别的监听器上（症状：空 message 的 Unimplemented）。
+            let grpc_addr: SocketAddr = grpc_listener.local_addr().unwrap();
+            let raft_addr: SocketAddr = raft_listener.local_addr().unwrap();
 
             // 1. Initialize storage
             let storage_config = StorageConfig::default();
@@ -324,16 +326,16 @@ mod tests {
 
             // 14. Start Raft RPC gRPC server (internal node communication)
             let raft_rpc_svc = RaftRpcServer::new(raft_rpc_service);
-            let raft_addr_copy = raft_addr;
             let raft_handle = tokio::spawn(async move {
                 let _ = tonic::transport::Server::builder()
                     .add_service(raft_rpc_svc)
-                    .serve(raft_addr_copy)
+                    .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
+                        raft_listener,
+                    ))
                     .await;
             });
 
             // 15. Start client gRPC server
-            let grpc_addr_copy = grpc_addr;
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
             let grpc_handle = tokio::spawn(async move {
                 let _ = tonic::transport::Server::builder()
@@ -342,14 +344,14 @@ mod tests {
                     .add_service(lease_svc)
                     .add_service(watch_svc)
                     .add_service(maint_svc)
-                    .serve_with_shutdown(grpc_addr_copy, async {
-                        let _ = shutdown_rx.await;
-                    })
+                    .serve_with_incoming_shutdown(
+                        tokio_stream::wrappers::TcpListenerStream::new(grpc_listener),
+                        async {
+                            let _ = shutdown_rx.await;
+                        },
+                    )
                     .await;
             });
-
-            // Wait for servers to be ready
-            tokio::time::sleep(Duration::from_millis(200)).await;
 
             TestNode {
                 node_id,
@@ -530,13 +532,13 @@ mod tests {
             .with_env_filter("coord=info,openraft=debug")
             .try_init();
 
-        let grpc_port = find_port();
-        let raft_port = find_port();
+        let (grpc_listener, _grpc_addr) = common::bind_listener().await;
+        let (raft_listener, raft_addr) = common::bind_listener().await;
 
         let mut all_addrs = BTreeMap::new();
-        all_addrs.insert(1, format!("127.0.0.1:{}", raft_port));
+        all_addrs.insert(1, raft_addr);
 
-        let node = TestNode::start(1, grpc_port, raft_port, all_addrs, true).await;
+        let node = TestNode::start(1, grpc_listener, raft_listener, all_addrs, true).await;
 
         // Wait for leader election（R-TST-21：100×100ms=10s，消除 CI 满载下 3s 不足的 flaky）
         for i in 0..100 {
@@ -591,13 +593,13 @@ mod tests {
             .with_env_filter("coord=info,openraft=info")
             .try_init();
 
-        let grpc_port = find_port();
-        let raft_port = find_port();
+        let (grpc_listener, _grpc_addr) = common::bind_listener().await;
+        let (raft_listener, raft_addr) = common::bind_listener().await;
 
         let mut all_addrs = BTreeMap::new();
-        all_addrs.insert(1, format!("127.0.0.1:{}", raft_port));
+        all_addrs.insert(1, raft_addr);
 
-        let node = TestNode::start(1, grpc_port, raft_port, all_addrs, true).await;
+        let node = TestNode::start(1, grpc_listener, raft_listener, all_addrs, true).await;
 
         // R-TST-21：100×100ms=10s，消除 CI 满载下 2s 不足的 flaky
         for _ in 0..100 {
@@ -661,17 +663,17 @@ mod tests {
     /// then starts nodes 2 and 3 as non-bootstrapping members.
     /// Returns (n1, n2, n3) where n1 is the initial leader.
     async fn start_3_node_cluster() -> (TestNode, TestNode, TestNode) {
-        let p1_grpc = find_port();
-        let p1_raft = find_port();
-        let p2_grpc = find_port();
-        let p2_raft = find_port();
-        let p3_grpc = find_port();
-        let p3_raft = find_port();
+        let (p1_grpc, _) = common::bind_listener().await;
+        let (p1_raft, p1_raft_addr) = common::bind_listener().await;
+        let (p2_grpc, _) = common::bind_listener().await;
+        let (p2_raft, p2_raft_addr) = common::bind_listener().await;
+        let (p3_grpc, _) = common::bind_listener().await;
+        let (p3_raft, p3_raft_addr) = common::bind_listener().await;
 
         let mut all_addrs = BTreeMap::new();
-        all_addrs.insert(1, format!("127.0.0.1:{}", p1_raft));
-        all_addrs.insert(2, format!("127.0.0.1:{}", p2_raft));
-        all_addrs.insert(3, format!("127.0.0.1:{}", p3_raft));
+        all_addrs.insert(1, p1_raft_addr);
+        all_addrs.insert(2, p2_raft_addr);
+        all_addrs.insert(3, p3_raft_addr);
 
         // Start all 3 nodes — node 1 bootstraps WITH all 3 nodes as initial members
         let (n1, n2, n3) = tokio::join!(
@@ -890,14 +892,14 @@ mod tests {
             .try_init();
 
         // Start single-node cluster
-        let p1_grpc = find_port();
-        let p1_raft = find_port();
-        let p2_grpc = find_port();
-        let p2_raft = find_port();
+        let (p1_grpc, _) = common::bind_listener().await;
+        let (p1_raft, p1_raft_addr) = common::bind_listener().await;
+        let (p2_grpc, _) = common::bind_listener().await;
+        let (p2_raft, p2_raft_addr) = common::bind_listener().await;
 
         let mut all_addrs = BTreeMap::new();
-        all_addrs.insert(1, format!("127.0.0.1:{}", p1_raft));
-        all_addrs.insert(2, format!("127.0.0.1:{}", p2_raft));
+        all_addrs.insert(1, p1_raft_addr);
+        all_addrs.insert(2, p2_raft_addr);
 
         let n1 = TestNode::start(1, p1_grpc, p1_raft, all_addrs.clone(), true).await;
         assert!(
@@ -1363,10 +1365,6 @@ mod tests {
         let (n1, n2, _n3) = start_3_node_cluster().await;
         assert!(n1.is_leader().await, "Node 1 should be leader");
 
-        // Save n3's raft address info before killing it
-        let p3_grpc = find_port();
-        let p3_raft = find_port();
-
         // Write pre-partition data
         let mut kv1 = n1.kv_client().await;
         let pre_partition_keys: Vec<(&[u8], &[u8])> = vec![
@@ -1483,11 +1481,6 @@ mod tests {
 
         // ── Heal partition: restart node 3 and rejoin ──
         tracing::info!("=== Healing partition: restarting node 3 as new node ===");
-        let mut all_addrs = BTreeMap::new();
-        all_addrs.insert(1, format!("127.0.0.1:{}", p3_raft)); // placeholder, real addrs unknown at this point
-                                                               // We construct addresses based on knowledge of running nodes
-                                                               // Actually, we cannot easily get the raft addresses of n1 and n2.
-                                                               // Instead, add node 3 back as a learner via membership API.
 
         // For the healing phase, we add a fresh node to the cluster.
         // Since we don't know n1/n2's raft addresses from outside, we
