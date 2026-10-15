@@ -776,6 +776,79 @@ async fn kv_idem_and_state_are_same_txn() {
     );
 }
 
+// ───────────────────────────── 判据 9b：幂等键谓词是决定因素（同 key 不得重写）
+
+/// 已占用的命令键必须让整笔 Txn 失败：**不同**状态 + 匹配的 `Exact(rev)` + **新**事件 id +
+/// **同一** key ⇒ `Ok(false)`。
+///
+/// 必须走 Txn 而不能靠重放早退（状态不同、事件 id 也是新的）；谓词被删或降级为普通 put 时
+/// 本用例转红（第二次提交会成功、缓存响应被改写、多出一条 outbox 记录）。
+#[tokio::test]
+async fn kv_idem_key_predicate_rejects_a_reused_key() {
+    let env = setup().await;
+    let inner = env.inner();
+    let outbox = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+    let store = KvApprovalStore::new(Arc::clone(&inner), Arc::clone(&outbox));
+    let id = "inst-t6-idem-pred";
+
+    let eng = start_engine(id, "alice", "sha256:t6-idem-pred");
+    let resp = json!({ "instance_id": id, "status": "APPROVED" });
+    assert!(store
+        .commit_with_idem(
+            &eng,
+            &[event(id, "evt-t6-idem-pred-1", 1_001)],
+            ExpectedRev::CreateOnly,
+            Some(&IdemRecord {
+                key: "cmd-1".into(),
+                response: resp.clone(),
+            }),
+        )
+        .await
+        .unwrap());
+    let (first_state, rev) = store.load(id).await.unwrap().expect("committed");
+
+    // 换发起人 ⇒ 与已存状态不同，重放早退不成立；`Exact(rev)` 与事件 id 都满足写入条件。
+    let mut second = eng.clone();
+    second.instance.initiator = "lisi".into();
+    assert!(
+        !store
+            .commit_with_idem(
+                &second,
+                &[event(id, "evt-t6-idem-pred-2", 1_002)],
+                ExpectedRev::Exact(rev),
+                Some(&IdemRecord {
+                    key: "cmd-1".into(),
+                    response: json!({ "instance_id": id, "status": "REJECTED" }),
+                }),
+            )
+            .await
+            .unwrap(),
+        "a reused idempotency key must fail the whole txn"
+    );
+
+    let (after_state, after_rev) = store.load(id).await.unwrap().expect("present");
+    assert_eq!(
+        after_state, first_state,
+        "state must stay at the first commit"
+    );
+    assert_eq!(
+        after_rev, rev,
+        "the rejected txn must not advance the revision"
+    );
+    assert_eq!(
+        store.load_idem(id, "cmd-1").await.unwrap(),
+        Some(resp),
+        "the first response must survive a reused key"
+    );
+    let recs = records_for(&outbox, id).await;
+    assert_eq!(
+        recs.len(),
+        1,
+        "the rejected txn must not add outbox records"
+    );
+    assert_eq!(recs[0].id, "evt-t6-idem-pred-1");
+}
+
 // ────────────────────────────────────────── 判据 10：v4 前缀扫描 + 分页
 
 /// `scan` 只扫 v4 实例前缀：v1 实例、v4 内的幂等键与其他非实例键都不出现，分页不重不漏。
