@@ -69,21 +69,32 @@ impl ApproverResolver for MapApproverResolver {
 /// 审批命令的结果。
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandOutcome {
-    /// 命令已生效：`response` 为返回给调用方的响应；`terminal` 非空表示实例已终态。
+    /// 命令已生效：`response` 为返回给调用方的响应；`node_outcome` 非空表示命令操作的
+    /// 分支本轮已判为通过 / 否决；`terminal` 非空表示实例已终态。
     Applied {
         response: Value,
+        node_outcome: Option<NodeOutcome>,
         terminal: Option<ApprovalOutcome>,
     },
     /// 幂等键命中：命令此前已成功提交，原样返回首次的响应，引擎未被触碰。
     Duplicate(Value),
 }
 
-/// [`ApprovalBridge::expire_due`] 的结果：过期席位数（`terminal` 恒为 `None`，
-/// 过期不产生终态）。
+/// [`ApprovalBridge::expire_due`] 的结果：过期席位数 + 过期导致的分支结论。
+///
+/// 过期本身不产生实例终态；`node_outcome` 只承载「过期把最后一批未决席位收敛成
+/// 通过 / 否决」这一混合判定（全员过期 / 仍 open 为 `None`）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpireOutcome {
     pub expired: u32,
-    pub terminal: Option<ApprovalOutcome>,
+    pub node_outcome: Option<NodeOutcome>,
+}
+
+/// 节点（分支/轮次）本轮的外部上报口径：通过或否决。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeOutcome {
+    Passed,
+    Rejected,
 }
 
 /// 实例终态的外部上报口径。
@@ -328,8 +339,13 @@ impl ApprovalBridge {
                 .await
                 .map_err(BridgeError::from)?
                 .ok_or_else(|| BridgeError::NotFound(approval_id.to_string()))?;
+            let branch_id = self.command_branch(&engine, &cmd);
             let effects = self.apply_command(&mut engine, actor, cmd.clone(), now)?;
             let response = response_for(&engine);
+            let node_outcome = branch_id
+                .as_deref()
+                .and_then(|id| engine.branches.get(id))
+                .and_then(|b| node_outcome_for(b.status));
             let terminal = terminal_outcome(engine.instance.status);
             let rev_after = engine.instance.revision;
             let events = self.effects_to_records(approval_id, &effects, rev_after, now)?;
@@ -343,7 +359,11 @@ impl ApprovalBridge {
                 .await
                 .map_err(BridgeError::from)?;
             if committed {
-                return Ok(CommandOutcome::Applied { response, terminal });
+                return Ok(CommandOutcome::Applied {
+                    response,
+                    node_outcome,
+                    terminal,
+                });
             }
             if attempt >= MAX_COMMIT_ATTEMPTS {
                 return Err(BridgeError::Stale(format!("command on {approval_id}")));
@@ -372,10 +392,11 @@ impl ApprovalBridge {
             .min())
     }
 
-    /// 过期所有 `deadline <= now_ms` 的未决席位；返回过期计数。
+    /// 过期所有 `deadline <= now_ms` 的未决席位；返回过期计数与该次过期导致的节点结论。
     ///
     /// 过期只把席位置 `Expired`（经引擎 `recount`，全员过期/减签耗尽保持轮次 `Open`），
-    /// 不产生终态——超时的最终处置由外部策略决定，桥不代判。
+    /// 不产生实例终态——超时的最终处置由外部策略决定，桥不代判。但过期可能把「已有票 +
+    /// 过期席」的混合轮次收敛为通过 / 否决（`node_outcome`），这是截止路径的恢复触发器。
     pub async fn expire_due(
         &self,
         approval_id: &str,
@@ -399,9 +420,21 @@ impl ApprovalBridge {
             if due.is_empty() {
                 return Ok(ExpireOutcome {
                     expired: 0,
-                    terminal: None,
+                    node_outcome: None,
                 });
             }
+            // 过期前记录 due 席位所属且仍 open 的分支：过期收敛后据此判定是否形成结论。
+            let affected: Vec<Id> = due
+                .iter()
+                .filter_map(|id| engine.tasks.get(id))
+                .filter(|t| {
+                    engine
+                        .branches
+                        .get(&t.branch_id)
+                        .is_some_and(|b| b.status == BranchStatus::Open)
+                })
+                .map(|t| t.branch_id.clone())
+                .collect();
             let mut effects = Vec::new();
             for task_id in &due {
                 let expected = engine.instance.revision;
@@ -415,9 +448,13 @@ impl ApprovalBridge {
                 .await
                 .map_err(BridgeError::from)?;
             if committed {
+                let node_outcome = affected
+                    .iter()
+                    .filter_map(|b| engine.branches.get(b))
+                    .find_map(|b| node_outcome_for(b.status));
                 return Ok(ExpireOutcome {
                     expired: due.len() as u32,
-                    terminal: None,
+                    node_outcome,
                 });
             }
             if attempt >= MAX_COMMIT_ATTEMPTS {
@@ -734,6 +771,24 @@ impl ApprovalBridge {
         }
     }
 
+    /// 命令操作的分支：投票类取席位的 `branch_id`，加签/减签/驳回至节点取给定分支，
+    /// 撤回/终止不指向任何分支。用于命令提交后判定该分支是否已收敛为结论。
+    fn command_branch(&self, engine: &Engine, cmd: &ApprovalCommand<'_>) -> Option<Id> {
+        match cmd {
+            ApprovalCommand::Approve { task_id, .. }
+            | ApprovalCommand::Reject { task_id, .. }
+            | ApprovalCommand::Acknowledge { task_id }
+            | ApprovalCommand::Transfer { task_id, .. }
+            | ApprovalCommand::Delegate { task_id, .. } => {
+                engine.tasks.get(*task_id).map(|t| t.branch_id.clone())
+            }
+            ApprovalCommand::AddSign { branch_id, .. }
+            | ApprovalCommand::ReturnToNode { branch_id, .. } => Some((*branch_id).to_string()),
+            ApprovalCommand::RemoveSign { task_ids } => self.branch_of_tasks(engine, task_ids).ok(),
+            ApprovalCommand::Withdraw | ApprovalCommand::Terminate { .. } => None,
+        }
+    }
+
     /// 减签目标的所属分支：取首个目标的席位分支；空目标退化为当前 open 分支。
     fn branch_of_tasks(&self, engine: &Engine, task_ids: &[String]) -> Result<Id, BridgeError> {
         if let Some(first) = task_ids.first() {
@@ -800,6 +855,15 @@ fn terminal_outcome(status: InstanceStatus) -> Option<ApprovalOutcome> {
         InstanceStatus::Cancelled => Some(ApprovalOutcome::Cancelled),
         InstanceStatus::Terminated => Some(ApprovalOutcome::Terminated),
         InstanceStatus::Pending | InstanceStatus::Running | InstanceStatus::Faulted => None,
+    }
+}
+
+/// 分支状态 → 节点结论：只有通过 / 否决产生结论，其余（含仍 `Open`）为 `None`。
+fn node_outcome_for(status: BranchStatus) -> Option<NodeOutcome> {
+    match status {
+        BranchStatus::Completed => Some(NodeOutcome::Passed),
+        BranchStatus::Rejected => Some(NodeOutcome::Rejected),
+        _ => None,
     }
 }
 
@@ -1216,7 +1280,7 @@ mod tests {
 
         let outcome = bridge.expire_due(ID, deadline).await.unwrap();
         assert_eq!(outcome.expired, 1);
-        assert_eq!(outcome.terminal, None);
+        assert_eq!(outcome.node_outcome, None);
 
         let (engine, _) = store.load(ID).await.unwrap().unwrap();
         assert!(engine
@@ -1229,6 +1293,91 @@ mod tests {
             .values()
             .all(|r| r.status == RoundStatus::Open));
         assert_eq!(engine.instance.status, ApprovalStatus::Running);
+    }
+
+    /// 命令使分支收敛为 `Completed` ⇒ 上报 `Some(Passed)`（实例仍非终态）。
+    #[tokio::test]
+    async fn command_reports_node_passed_when_branch_closes() {
+        let (bridge, store) = build(None);
+        bridge
+            .ensure_node_open(&wf(), "review", &approve_task(&["alice"]))
+            .await
+            .unwrap();
+        let task_id = task_id_for(&store, "alice").await;
+
+        let outcome = bridge
+            .command(
+                ID,
+                "alice",
+                ApprovalCommand::Approve {
+                    task_id: &task_id,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        match outcome {
+            CommandOutcome::Applied {
+                node_outcome,
+                terminal,
+                ..
+            } => {
+                assert_eq!(node_outcome, Some(NodeOutcome::Passed));
+                assert_eq!(terminal, None, "分支通过不自动收口实例");
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+    }
+
+    /// 过期把「1 票通过 + 1 席过期」的混合轮次收敛为通过 ⇒ 上报 `Some(Passed)`。
+    #[tokio::test]
+    async fn expire_due_reports_node_passed_when_last_seat_expires_into_pass() {
+        let (bridge, store) = build(None);
+        let mut task = approve_task(&["alice", "bob"]);
+        task.deadline = Some("PT1H".into());
+        bridge
+            .ensure_node_open(&wf(), "review", &task)
+            .await
+            .unwrap();
+        let deadline = task.deadline_ms(T0).unwrap();
+
+        // alice 先通过：会签未满，轮次仍 Open。
+        let alice = task_id_for(&store, "alice").await;
+        let outcome = bridge
+            .command(
+                ID,
+                "alice",
+                ApprovalCommand::Approve {
+                    task_id: &alice,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                CommandOutcome::Applied {
+                    node_outcome: None,
+                    ..
+                }
+            ),
+            "一票未定不得上报结论：{outcome:?}"
+        );
+
+        // bob 到期：混合判定为通过。
+        let expired = bridge.expire_due(ID, deadline).await.unwrap();
+        assert_eq!(expired.expired, 1);
+        assert_eq!(expired.node_outcome, Some(NodeOutcome::Passed));
+
+        let (engine, _) = store.load(ID).await.unwrap().unwrap();
+        assert_eq!(
+            engine.branches.values().next().unwrap().status,
+            BranchStatus::Completed
+        );
     }
 
     #[tokio::test]

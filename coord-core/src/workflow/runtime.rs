@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::approval::bridge::{ApprovalBridge, ApprovalOutcome, BridgeError, SYSTEM_ACTOR};
+use super::approval::bridge::{ApprovalBridge, BridgeError, NodeOutcome, SYSTEM_ACTOR};
 use super::durable::{DurableSupport, OutboxRecord, TimerKind, TimerRecord};
 use super::engine::WorkflowExecutor;
 use super::model::{
@@ -779,9 +779,11 @@ where
                     Err(_) => return,
                 };
                 let _ = durable.timers.remove(&rec.id).await;
-                // 过期不产生终态（Q4 无自动判定）；一旦桥回报终态则按 Task 9 路径处置。
-                if let Some(terminal) = outcome.terminal {
-                    self.apply_approval_terminal(&rec.instance_id, terminal)
+                // 过期不判终态（Q4 无自动判定）；但过期可能把「已有票 + 过期席」的混合轮次
+                // 收敛为通过/否决 ⇒ 按节点结论恢复/路由/故障，否则保持挂起并重排下一截止。
+                if let Some(node_outcome) = outcome.node_outcome {
+                    let _ = self
+                        .apply_approval_node_outcome(&rec.instance_id, node_outcome)
                         .await;
                     return;
                 }
@@ -795,46 +797,77 @@ where
         }
     }
 
-    /// 审批终态 → 恢复 / 故障（Task 9 路径）。
+    /// 审批节点结论 → 恢复 / 路由 / 故障。
     ///
-    /// `expire_due` 当前恒不产生终态；此臂保证一旦桥回报终态就绝不静默丢弃。
-    /// 节点自身 `on_reject` 路由由服务层负责（彼处有定义上下文），此处只做
-    /// 「已完成⇒顺序推进，其余⇒置 fault」的最小映射。
-    async fn apply_approval_terminal(&self, instance_id: &str, terminal: ApprovalOutcome) {
-        match terminal {
-            ApprovalOutcome::Completed => {
-                let _ = self
-                    .resume_approval(
-                        instance_id,
-                        serde_json::json!({"outcome": "completed"}),
-                        None,
-                    )
-                    .await;
+    /// 通过：清挂起并顺序推进到后继任务；否决：节点声明了 `on_reject` 则路由到目标，
+    /// 否则以 `approval_rejected` 置 fault。截止路径与审批命令的服务层共用本映射，
+    /// 故 `on_reject` 按挂起帧所在节点的 [`ApproveTask`](super::model::ApproveTask) 解析。非审批挂起 / 定义漂移由
+    /// [`Self::resume_approval`]、[`Self::fail_approval`] 的前置守卫 fail-closed。
+    pub async fn apply_approval_node_outcome(
+        &self,
+        instance_id: &str,
+        node_outcome: NodeOutcome,
+    ) -> Result<WorkflowInstance, RuntimeError> {
+        match node_outcome {
+            NodeOutcome::Passed => {
+                self.resume_approval(instance_id, serde_json::json!({"status": "passed"}), None)
+                    .await
             }
-            ApprovalOutcome::Rejected => {
-                let _ = self
-                    .fail_approval(
+            NodeOutcome::Rejected => match self.suspended_approve_on_reject(instance_id).await? {
+                Some(target) => {
+                    self.resume_approval(
+                        instance_id,
+                        serde_json::json!({"status": "rejected"}),
+                        Some(&target),
+                    )
+                    .await
+                }
+                None => {
+                    self.fail_approval(
                         instance_id,
                         "approval_rejected",
                         "approval rejected without an on_reject target",
                     )
-                    .await;
-            }
-            ApprovalOutcome::Cancelled => {
-                let _ = self
-                    .fail_approval(
-                        instance_id,
-                        "approval_cancelled",
-                        "approval cancelled without an on_reject target",
-                    )
-                    .await;
-            }
-            ApprovalOutcome::Terminated => {
-                let _ = self
-                    .fail_approval(instance_id, "approval_terminated", "approval terminated")
-                    .await;
-            }
+                    .await
+                }
+            },
         }
+    }
+
+    /// 解析挂起实例当前 approve 节点的 `on_reject` 目标：按 `current_task_index` 在钉死定义里
+    /// 定位 [`ApproveTask`](super::model::ApproveTask)（与驱动挂起时的口径一致）；非 approve 节点或未声明返回 `None`。
+    async fn suspended_approve_on_reject(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<String>, RuntimeError> {
+        let inst = self
+            .store
+            .load_instance(instance_id)
+            .await
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| RuntimeError::NotFound(instance_id.to_string()))?;
+        let def = self
+            .store
+            .load_definition(
+                &inst.definition_ns,
+                &inst.definition_name,
+                &inst.definition_version,
+            )
+            .await
+            .map_err(|e| RuntimeError::StoreError(e.to_string()))?
+            .ok_or_else(|| {
+                RuntimeError::DefinitionNotFound(format!(
+                    "{}/{}@{}",
+                    inst.definition_ns, inst.definition_name, inst.definition_version
+                ))
+            })?;
+        Ok(def
+            .do_tasks
+            .get(inst.current_task_index)
+            .and_then(|named| match &named.task {
+                Task::Approve(task) => task.on_reject.clone(),
+                _ => None,
+            }))
     }
 
     /// 对账所有非终态可恢复实例：重启后重新驱动/重订阅。
@@ -5906,7 +5939,7 @@ mod tests {
         ApprovalInstanceEntry, ApprovalStore, ExpectedRev, IdemRecord, MemoryApprovalStore,
     };
     use crate::workflow::durable::DurableTimerStore;
-    use crate::workflow::model::ApproveTask;
+    use crate::workflow::model::{ApproveTask, EndTask};
 
     /// approve 节点的席位（具体审批人，保证节点有可批的席位）。
     fn approve_task(approvers: &[&str]) -> ApproveTask {
@@ -6877,6 +6910,46 @@ mod tests {
         )
     }
 
+    /// 定义：`review(approve, deadline PT60S)` → `end`(End) → `rework`(Set)。
+    /// 通过路径顺序推进到 `end` 即收口（不落 `done`）；`on_reject="rework"` 时否决路径跳过
+    /// `end` 直达 `rework`（落 `done`）—— 二者的可区分证据。`veto=false` 时一票否决不立即
+    /// 收口，使「先投一票、余席过期」能在过期时形成混合判定。
+    fn approve_deadline_verdict_definition(
+        name: &str,
+        on_reject: Option<&str>,
+        veto: bool,
+        approvers: &[&str],
+    ) -> WorkflowDefinition {
+        let mut task = approve_task(approvers);
+        task.deadline = Some("PT60S".into());
+        task.veto = veto;
+        task.on_reject = on_reject.map(str::to_string);
+        make_definition_ext(
+            name,
+            vec![
+                NamedTask {
+                    name: "review".into(),
+                    task: Task::Approve(task),
+                },
+                NamedTask {
+                    name: "end".into(),
+                    task: Task::End(EndTask {}),
+                },
+                NamedTask {
+                    name: "rework".into(),
+                    task: Task::Set(SetTask {
+                        variable: "done".into(),
+                        value: "\"rework-done\"".into(),
+                    }),
+                },
+            ],
+            None,
+            None,
+            None,
+            Default::default(),
+        )
+    }
+
     /// 审批截止测试用运行时：注入持久化定时器（内存实现）+ 审批桥。
     ///
     /// 运行时与桥的时钟都从 1000 起，使 `schedule_approval_deadline` 的
@@ -7127,6 +7200,154 @@ mod tests {
         assert!(
             timers.list_all().await.unwrap().is_empty(),
             "无更晚 deadline ⇒ 不得重排"
+        );
+    }
+
+    /// 过期把「一票通过 + 余席过期」收敛为通过 ⇒ 工作流恢复并推进到后继节点。
+    #[tokio::test]
+    async fn expire_triggered_pass_resumes_workflow_to_next_task() {
+        let (rt, bridge, approval_store, timers) = approval_deadline_runtime();
+        let def = approve_deadline_verdict_definition(
+            "approve-expire-pass-wf",
+            None,
+            true,
+            &["alice", "bob"],
+        );
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let _ = await_approval_deadline_timer(&timers, 61_000).await;
+
+        // 会签：alice 先通过，bob 未决 ⇒ 轮次仍 Open，工作流保持挂起。
+        let seat = seat_id_for(&approval_store, &started.id, "alice").await;
+        bridge
+            .command(
+                &started.id,
+                "alice",
+                ApprovalCommand::Approve {
+                    task_id: &seat,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let suspended = store_of(&rt)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            suspended.status,
+            InstanceStatus::Suspended,
+            "一票未定不恢复"
+        );
+
+        // bob 到期 ⇒ 混合判定为通过 ⇒ 恢复，驱动到后继节点。
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+
+        let done = await_status(store_of(&rt), &started.id, InstanceStatus::Completed).await;
+        assert!(
+            done.context.get("done").is_none(),
+            "通过路径顺序推进到 end，不执行 rework"
+        );
+        assert_eq!(done.context["_approval"]["status"], "passed");
+    }
+
+    /// 过期把「一票驳回 + 余席过期」收敛为否决 ⇒ 路由到节点 `on_reject` 目标任务。
+    #[tokio::test]
+    async fn expire_triggered_reject_routes_to_on_reject_target() {
+        let (rt, bridge, approval_store, timers) = approval_deadline_runtime();
+        let def = approve_deadline_verdict_definition(
+            "approve-expire-reject-wf",
+            Some("rework"),
+            false,
+            &["alice", "bob"],
+        );
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let _ = await_approval_deadline_timer(&timers, 61_000).await;
+
+        // 非一票否决：alice 驳回后轮次仍 Open（bob 未决）。
+        let seat = seat_id_for(&approval_store, &started.id, "alice").await;
+        bridge
+            .command(
+                &started.id,
+                "alice",
+                ApprovalCommand::Reject {
+                    task_id: &seat,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let suspended = store_of(&rt)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(suspended.status, InstanceStatus::Suspended, "未收敛不收口");
+
+        // bob 到期 ⇒ completed(0)+rejected(1) >= total(1) ⇒ 否决 ⇒ 路由到 on_reject。
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+
+        let done = await_status(store_of(&rt), &started.id, InstanceStatus::Completed).await;
+        assert_eq!(
+            done.context["done"], "rework-done",
+            "否决 ⇒ 跳到 on_reject 目标任务"
+        );
+        assert_eq!(done.context["_approval"]["status"], "rejected");
+    }
+
+    /// 过期收敛为否决但节点未声明 `on_reject` ⇒ 以 `approval_rejected` 置 fault。
+    #[tokio::test]
+    async fn expire_triggered_reject_without_target_faults_with_approval_rejected() {
+        let (rt, bridge, approval_store, timers) = approval_deadline_runtime();
+        let def = approve_deadline_verdict_definition(
+            "approve-expire-reject-fault-wf",
+            None,
+            false,
+            &["alice", "bob"],
+        );
+        store_of(&rt).save_definition(&def).await.unwrap();
+
+        let started = rt.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&rt), &started.id, InstanceStatus::Suspended).await;
+        let _ = await_approval_deadline_timer(&timers, 61_000).await;
+
+        let seat = seat_id_for(&approval_store, &started.id, "alice").await;
+        bridge
+            .command(
+                &started.id,
+                "alice",
+                ApprovalCommand::Reject {
+                    task_id: &seat,
+                    comment: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        rt.clock.advance(60_000);
+        rt.fire_due_timers().await;
+
+        let failed = await_status(store_of(&rt), &started.id, InstanceStatus::Failed).await;
+        let fault = failed.fault.expect("fault");
+        assert_eq!(fault.title, "approval_rejected");
+        assert_eq!(
+            fault.detail,
+            "approval rejected without an on_reject target"
+        );
+        assert!(
+            failed.suspension_meta.is_none(),
+            "fault 后不得残留挂起元数据"
         );
     }
 
