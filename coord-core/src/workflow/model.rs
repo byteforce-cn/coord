@@ -689,7 +689,11 @@ impl ApproveTask {
     /// 解析失败返回 `None`：调用方必须 fail-closed，不得把无期限当作默认（不 panic）。
     pub fn deadline_ms(&self, now_ms: i64) -> Option<i64> {
         let duration = self.deadline.as_deref()?;
-        Some(now_ms + crate::workflow::engine::parse_iso8601_duration_ms(duration)?)
+        Some(
+            now_ms.saturating_add(crate::workflow::engine::parse_iso8601_duration_ms(
+                duration,
+            )?),
+        )
     }
 }
 
@@ -809,7 +813,7 @@ pub enum TaskStatus {
 /// 挂起元信息 —— 记录暂停原因与恢复所需信息
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SuspensionMeta {
-    /// 暂停原因: "wait" | "call" | "listen" | "signal" | "run" | "retry"
+    /// 暂停原因: "wait" | "call" | "listen" | "signal" | "run" | "retry" | "approval"
     pub reason: String,
     /// wait/retry 到期时间（Unix ms）
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -826,6 +830,9 @@ pub struct SuspensionMeta {
     /// signal 名称（人工审批场景）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_signal: Option<String>,
+    /// v2 审批实例 id（reason="approval" 时记录；恒等于 workflow 实例 id）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_instance_id: Option<String>,
     /// 重试次数（reason="retry" 时记录）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_count: Option<u32>,
@@ -921,6 +928,11 @@ pub enum SuspendReason {
     ListeningForEvent { event_filter: EventFilter },
     /// 等待人工信号
     WaitingForSignal { expected_signal: String },
+    /// 等待 v2 审批完成（审批实例 id 恒等于 workflow 实例 id）
+    WaitingForApproval {
+        approval_instance_id: String,
+        node: String,
+    },
     /// 子流程执行（等待子实例完成）
     RunSubflow {
         workflow: WorkflowRef,
@@ -940,6 +952,7 @@ impl SuspendReason {
                 payload: None,
                 event_filter: None,
                 expected_signal: None,
+                approval_instance_id: None,
                 retry_count: None,
                 error: None,
             },
@@ -954,6 +967,7 @@ impl SuspendReason {
                 payload: Some(input.clone()),
                 event_filter: None,
                 expected_signal: None,
+                approval_instance_id: None,
                 retry_count: None,
                 error: None,
             },
@@ -964,6 +978,7 @@ impl SuspendReason {
                 payload: None,
                 event_filter: Some(event_filter.clone()),
                 expected_signal: None,
+                approval_instance_id: None,
                 retry_count: None,
                 error: None,
             },
@@ -974,6 +989,21 @@ impl SuspendReason {
                 payload: None,
                 event_filter: None,
                 expected_signal: Some(expected_signal.clone()),
+                approval_instance_id: None,
+                retry_count: None,
+                error: None,
+            },
+            SuspendReason::WaitingForApproval {
+                approval_instance_id,
+                node: _,
+            } => SuspensionMeta {
+                reason: "approval".to_string(),
+                until_ms: None,
+                service: None,
+                payload: None,
+                event_filter: None,
+                expected_signal: Some("approval.completed".to_string()),
+                approval_instance_id: Some(approval_instance_id.clone()),
                 retry_count: None,
                 error: None,
             },
@@ -991,6 +1021,7 @@ impl SuspendReason {
                 payload: input.clone(),
                 event_filter: None,
                 expected_signal: None,
+                approval_instance_id: None,
                 retry_count: None,
                 error: None,
             },
@@ -1362,6 +1393,78 @@ mod tests {
         let meta = reason.to_meta();
         assert_eq!(meta.reason, "signal");
         assert_eq!(meta.expected_signal.as_deref(), Some("approval"));
+    }
+
+    #[test]
+    fn waiting_for_approval_to_meta_maps_reason_and_signal() {
+        let reason = SuspendReason::WaitingForApproval {
+            approval_instance_id: "inst-9".to_string(),
+            node: "review".to_string(),
+        };
+        let meta = reason.to_meta();
+        assert_eq!(meta.reason, "approval");
+        assert_eq!(meta.expected_signal.as_deref(), Some("approval.completed"));
+        assert_eq!(meta.approval_instance_id.as_deref(), Some("inst-9"));
+    }
+
+    #[test]
+    fn suspension_meta_legacy_json_deserializes_without_approval_field() {
+        // 旧快照无 approval_instance_id 字段：反序列化必须落 None，且 None 不回写。
+        let legacy = serde_json::json!({
+            "reason": "signal",
+            "expected_signal": "approval.completed"
+        });
+        let meta: SuspensionMeta = serde_json::from_value(legacy).unwrap();
+        assert_eq!(meta.approval_instance_id, None);
+        let value = serde_json::to_value(&meta).unwrap();
+        assert!(
+            value.get("approval_instance_id").is_none(),
+            "None approval_instance_id must be omitted"
+        );
+    }
+
+    #[test]
+    fn approve_to_seats_maps_each_source_in_order() {
+        let task = ApproveTask {
+            approvers: vec!["alice".into()],
+            pool: vec!["bob".into(), "carol".into()],
+            readers: vec!["dave".into()],
+            roles: vec!["manager".into()],
+            mode: JoinPolicy::All,
+            veto: true,
+            deadline: None,
+            on_pass: None,
+            on_reject: None,
+            sign_admins: vec![],
+            allow_self_approve: false,
+        };
+        assert_eq!(
+            task.to_seats(),
+            vec![
+                SeatSpec::approver("alice"),
+                SeatSpec::pool(vec!["bob".into(), "carol".into()]),
+                SeatSpec::reader("dave"),
+            ]
+        );
+    }
+
+    #[test]
+    fn approve_deadline_ms_saturates_on_overflow() {
+        let task = ApproveTask {
+            approvers: vec!["alice".into()],
+            pool: vec![],
+            readers: vec![],
+            roles: vec![],
+            mode: JoinPolicy::All,
+            veto: true,
+            deadline: Some("PT1S".into()),
+            on_pass: None,
+            on_reject: None,
+            sign_admins: vec![],
+            allow_self_approve: false,
+        };
+        assert_eq!(task.deadline_ms(i64::MAX), Some(i64::MAX));
+        assert_eq!(task.deadline_ms(1_000), Some(1_000 + 1_000));
     }
 
     // ─── 序列化/反序列化测试 ───

@@ -195,18 +195,9 @@ impl<E: ExpressionEval, C: Clock> WorkflowExecutor<E, C> {
             }
             Task::Run(run) => super::tasks::run::execute(named, run, inst, &self.clock),
             Task::End(end) => super::tasks::end::execute(named, end, inst, &self.clock),
-            // approve 节点尚未接线：v2 审批挂起执行体在 Task 6 落地。此处显式失败，
-            // 绝不静默推进到下一任务（那会把审批节点当 no-op 绕过）。
-            Task::Approve(_) => StepResult::Failed {
-                fault: crate::workflow::errors::WorkflowFault::internal(
-                    "approve task is not wired yet",
-                    format!(
-                        "task '{}' uses the native approve node, whose v2 suspension executor \
-                         is not wired in this engine version",
-                        named.name
-                    ),
-                ),
-            },
+            Task::Approve(approve) => {
+                super::tasks::approve::execute(named, approve, inst, &self.clock)
+            }
         }
     }
 }
@@ -363,7 +354,8 @@ mod tests {
     use super::*;
     use crate::workflow::expression::ExpressionEvaluator;
     use crate::workflow::model::{
-        ApproveTask, Document, InstanceStatus, NamedTask, Task, WaitTask, WorkflowDefinition,
+        ApproveTask, Document, InstanceStatus, NamedTask, SuspendReason, Task, WaitTask,
+        WorkflowDefinition,
     };
     use crate::workflow::ports::test_utils::TestClock;
 
@@ -458,11 +450,8 @@ mod tests {
         assert!(matches!(result, StepResult::Completed { .. }));
     }
 
-    #[test]
-    fn test_execute_step_approve_is_not_silently_skipped() {
-        // approve 节点的挂起执行体尚未接线：必须显式 Failed，不得静默推进到下一任务。
-        let executor = make_executor();
-        let def = make_definition(vec![NamedTask {
+    fn approve_def() -> WorkflowDefinition {
+        make_definition(vec![NamedTask {
             name: "review".into(),
             task: Task::Approve(ApproveTask {
                 approvers: vec!["alice".into()],
@@ -477,17 +466,40 @@ mod tests {
                 sign_admins: vec![],
                 allow_self_approve: false,
             }),
-        }]);
+        }])
+    }
+
+    #[test]
+    fn test_execute_step_approve_requires_definition_pin() {
+        // 未钉死定义时 approve 必须显式 Failed，不得静默推进到下一任务。
+        let executor = make_executor();
+        let def = approve_def();
         let inst = make_instance(0);
 
         match executor.execute_step(&inst, &def) {
             StepResult::Failed { fault } => {
                 assert!(
-                    fault.title.contains("approve task is not wired yet"),
+                    fault.title.contains("pinned definition"),
                     "unexpected fault: {fault:?}"
                 );
             }
             other => panic!("approve must fail explicitly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_execute_step_approve_suspends_when_pinned() {
+        let executor = make_executor();
+        let def = approve_def();
+        let mut inst = make_instance(0);
+        inst.definition_hash = Some(crate::workflow::model::definition_hash(&def));
+
+        match executor.execute_step(&inst, &def) {
+            StepResult::Suspend { reason, frame } => {
+                assert_eq!(frame.task_type, "approve");
+                assert!(matches!(reason, SuspendReason::WaitingForApproval { .. }));
+            }
+            other => panic!("approve must suspend, got {other:?}"),
         }
     }
 

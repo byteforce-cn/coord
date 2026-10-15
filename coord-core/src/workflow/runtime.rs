@@ -2331,6 +2331,7 @@ where
                                             payload: Some(input.clone()),
                                             event_filter: None,
                                             expected_signal: None,
+                                            approval_instance_id: None,
                                             retry_count: Some(prev_retries + 1),
                                             error: Some(error),
                                         });
@@ -2548,6 +2549,21 @@ where
                                         guard,
                                         &[lifecycle::WORKFLOW_SUSPENDED],
                                     )
+                                    .await;
+                                break 'drive_loop;
+                            }
+                            SuspendReason::WaitingForApproval { .. } => {
+                                // 原生 approve 节点进入即 fault：本装配无审批接线，
+                                // 不得静默降级为无审批继续（fail-closed）。
+                                let fault = crate::workflow::errors::WorkflowFault::internal(
+                                    "approve node has no runtime approval wiring",
+                                    format!(
+                                        "task '{}' suspended for approval, but this runtime has \
+                                         no approval wiring to open an approval instance",
+                                        frame.task_name
+                                    ),
+                                );
+                                self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
                                     .await;
                                 break 'drive_loop;
                             }

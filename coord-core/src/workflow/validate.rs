@@ -1679,7 +1679,24 @@ impl Validator {
         let deadline = match body.get("deadline") {
             None => None,
             Some(v) => match self.parse_duration_value(raw.span, v, "approve.deadline") {
-                Some(dur) => Some(dur),
+                Some(dur) => {
+                    // 解析期就必须可换算：否则运行期 `deadline_ms()==None`，
+                    // 无期限被当成默认（fail-open）。
+                    if crate::workflow::engine::parse_iso8601_duration_ms(&dur).is_none() {
+                        self.errors.push(ValidationError {
+                            span: Some(raw.span),
+                            kind: ValidationErrorKind::UnsupportedConstruct(
+                                "approve.deadline".to_string(),
+                            ),
+                            message: format!(
+                                "approve.deadline must be an ISO8601 duration coord can evaluate, \
+                                 got '{dur}'"
+                            ),
+                        });
+                        return None;
+                    }
+                    Some(dur)
+                }
                 None => return None,
             },
         };
@@ -5150,6 +5167,52 @@ do:
             error_kind_naming(&errs, "approve.deadline.until"),
             "errors: {errs:?}"
         );
+    }
+
+    #[test]
+    fn parse_approve_rejects_unparseable_deadline() {
+        // 解析期必须拒绝引擎无法换算的 deadline：否则运行期 `deadline_ms()==None`，
+        // 无期限被当成默认（fail-open）。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-bad-deadline
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        deadline: "hello"
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("unparseable deadline must reject");
+        assert!(
+            error_kind_naming(&errs, "approve.deadline"),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn parse_approve_accepts_duration_object_deadline() {
+        // 官方相对时长对象路径必须仍可用（合成规范化 duration 串后仍可解析）。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: approve-object-deadline
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+        deadline:
+          minutes: 5
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("duration object deadline must parse");
+        match &def.do_tasks[0].task {
+            Task::Approve(a) => assert_eq!(a.deadline.as_deref(), Some("PT5M")),
+            other => panic!("expected Approve task, got {other:?}"),
+        }
     }
 
     #[test]
