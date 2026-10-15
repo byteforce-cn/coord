@@ -3117,6 +3117,7 @@ mod phase4_tests {
     use coord_core::workflow::approval::bridge::{
         ApprovalBridge, ApprovalCommand, BridgeError, MapApproverResolver,
     };
+    use coord_core::workflow::approval::model::JoinPolicy;
     use coord_core::workflow::approval::store::{ApprovalStore, MemoryApprovalStore};
     use coord_core::workflow::ports::{Clock, SystemClock};
 
@@ -4537,6 +4538,23 @@ do:
         )
     }
 
+    fn sample_approve_quorum_yaml(name: &str) -> String {
+        format!(
+            r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: {name}
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice", "bob"]
+        mode: "quorum:2"
+"#
+        )
+    }
+
     /// 内存审批存储 + 桥的测试服务（驱动路径与命令/查询路径共用同一桥）。
     fn approve_service(
         roles: HashMap<String, Vec<String>>,
@@ -4780,5 +4798,26 @@ do:
         assert_eq!(detail.branches.len(), 1);
         assert_eq!(detail.tasks.len(), 1);
         assert_eq!(detail.rounds.len(), 1);
+        // 缺省 `mode` = 会签（All）。
+        assert_eq!(detail.branches[0].join, JoinPolicy::All);
+
+        // 参数化策略（quorum）必须原样穿过服务投影，不得退化成缺省。
+        // 定义 id 为 `{namespace}-{unix_secs}`：同名前缀会在一秒内碰撞，用不同
+        // namespace 保证两个定义 id 不同。
+        let quorum_def = svc
+            .deploy_definition(
+                "test-quorum",
+                &sample_approve_quorum_yaml("detail-quorum-wf"),
+            )
+            .await
+            .unwrap();
+        assert_ne!(quorum_def, def_id, "不同定义必须得到不同 id");
+        let quorum_inst = svc
+            .start_instance_as(&quorum_def, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        await_open_seat(&store, &quorum_inst.id, "alice").await;
+        let quorum_detail = svc.get_instance_detail(&quorum_inst.id).await.unwrap();
+        assert_eq!(quorum_detail.branches[0].join, JoinPolicy::Quorum(2));
     }
 }

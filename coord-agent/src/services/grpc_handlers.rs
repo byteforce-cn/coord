@@ -103,7 +103,7 @@ use coord_proto::agent::{
 };
 
 use coord_core::workflow::approval::bridge::{ApprovalCommand, BridgeError};
-use coord_core::workflow::approval::model::SeatSpec;
+use coord_core::workflow::approval::model::{JoinPolicy, SeatSpec};
 
 use crate::plugin::GatewayIdentity;
 use crate::services::workflow::phase4::json_label;
@@ -2065,6 +2065,19 @@ fn non_empty(value: &str) -> Option<&str> {
     }
 }
 
+/// 分支通过判定策略的 wire 标签。
+///
+/// 定额/票签是**参数化**策略：serde 形状是对象（`{"quorum":2}`），不能经 `json_label`
+/// 的 `as_str()` 投影，否则 `mode: quorum:N` / `ratio:N/M` 的详情静默报空策略。
+fn join_label(join: &JoinPolicy) -> String {
+    match join {
+        JoinPolicy::All => "all".to_string(),
+        JoinPolicy::Any => "any".to_string(),
+        JoinPolicy::Quorum(n) => format!("quorum:{n}"),
+        JoinPolicy::Ratio { num, den } => format!("ratio:{num}/{den}"),
+    }
+}
+
 #[tonic::async_trait]
 impl Workflow for WorkflowEngineService {
     async fn start(
@@ -2520,6 +2533,18 @@ impl Workflow for WorkflowEngineService {
                 "add_sign requires at least one of approvers/pool/readers",
             ));
         }
+        // 空主体拒绝：空字符串会被引擎原样落成永不可投票的空席位（`assignee = Some("")`）。
+        if req
+            .approvers
+            .iter()
+            .chain(req.pool.iter())
+            .chain(req.readers.iter())
+            .any(|principal| principal.is_empty())
+        {
+            return Err(Status::invalid_argument(
+                "add_sign principals must be non-empty",
+            ));
+        }
         let mut seats: Vec<SeatSpec> = req
             .approvers
             .iter()
@@ -2608,6 +2633,12 @@ impl Workflow for WorkflowEngineService {
     ) -> Result<Response<WorkflowTransferResponse>, Status> {
         let identity = gateway_identity(&request);
         let req = request.into_inner();
+        // 空主体拒绝：空 `to` 会落成不可投票的责任人并写进 `transferred_from` 审计链。
+        if req.to.is_empty() {
+            return Err(Status::invalid_argument(
+                "transfer target must be non-empty",
+            ));
+        }
         let (instance_id, status) = self
             .approval_command(
                 &req.workflow_id,
@@ -2632,6 +2663,12 @@ impl Workflow for WorkflowEngineService {
     ) -> Result<Response<WorkflowDelegateResponse>, Status> {
         let identity = gateway_identity(&request);
         let req = request.into_inner();
+        // 空主体拒绝：空 `to` 会落成不可投票的委派人。
+        if req.to.is_empty() {
+            return Err(Status::invalid_argument(
+                "delegate target must be non-empty",
+            ));
+        }
         let (instance_id, status) = self
             .approval_command(
                 &req.workflow_id,
@@ -2750,7 +2787,7 @@ impl Workflow for WorkflowEngineService {
                     node: b.node.clone(),
                     attempt: b.attempt as i32,
                     status: json_label(&b.status),
-                    join: json_label(&b.join),
+                    join: join_label(&b.join),
                     reject: json_label(&b.reject),
                     round_ids: b.round_ids.clone(),
                 })
@@ -3705,6 +3742,117 @@ do:
         });
         let err = Workflow::add_sign(&svc, req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    /// 空主体（transfer/delegate `to`、add_sign 席位元素）在 RPC 边界拒绝：
+    /// 空字符串会被引擎原样落成不可投票的席位并污染审计链。
+    #[tokio::test]
+    async fn transfer_empty_target_rejected() {
+        let svc = WorkflowEngineService::new_for_test();
+        let req = Request::new(WorkflowTransferRequest {
+            workflow_id: "w".into(),
+            task_id: "t".into(),
+            to: String::new(),
+            comment: String::new(),
+            idempotency_key: String::new(),
+        });
+        let err = Workflow::transfer(&svc, req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn delegate_empty_target_rejected() {
+        let svc = WorkflowEngineService::new_for_test();
+        let req = Request::new(WorkflowDelegateRequest {
+            workflow_id: "w".into(),
+            task_id: "t".into(),
+            to: String::new(),
+            comment: String::new(),
+            idempotency_key: String::new(),
+        });
+        let err = Workflow::delegate(&svc, req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn add_sign_empty_principal_rejected() {
+        let svc = WorkflowEngineService::new_for_test();
+        let req = Request::new(WorkflowAddSignRequest {
+            workflow_id: "w".into(),
+            branch_id: "b".into(),
+            approvers: vec!["alice".into(), String::new()],
+            pool: vec![],
+            readers: vec![],
+            comment: String::new(),
+            idempotency_key: String::new(),
+        });
+        let err = Workflow::add_sign(&svc, req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    fn approve_quorum_yaml(name: &str) -> String {
+        format!(
+            r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: {name}
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice", "bob"]
+        mode: "quorum:2"
+"#
+        )
+    }
+
+    /// `GetInstanceDetail` 的 `join` 投影：参数化策略（quorum）必须给出 `"quorum:N"`，
+    /// 不得因 serde 对象形状而静默报空；缺省会签给 `"all"`。
+    #[tokio::test]
+    async fn get_instance_detail_projects_join_policy() {
+        let (svc, store) = handler_approve_service();
+
+        // 定义 id 为 `{namespace}-{unix_secs}`：同名前缀会在一秒内碰撞，用不同 namespace。
+        let all_def = svc
+            .deploy_definition("test-all", &approve_yaml("join-all-wf"))
+            .await
+            .unwrap();
+        let all_inst = svc
+            .start_instance_as(&all_def, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        await_seat(&store, &all_inst.id, "alice").await;
+        let all_detail = Workflow::get_instance_detail(
+            &svc,
+            Request::new(WorkflowGetInstanceDetailRequest {
+                workflow_id: all_inst.id.clone(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(all_detail.branches[0].join, "all");
+
+        let quorum_def = svc
+            .deploy_definition("test-quorum", &approve_quorum_yaml("join-quorum-wf"))
+            .await
+            .unwrap();
+        let quorum_inst = svc
+            .start_instance_as(&quorum_def, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        await_seat(&store, &quorum_inst.id, "alice").await;
+        let quorum_detail = Workflow::get_instance_detail(
+            &svc,
+            Request::new(WorkflowGetInstanceDetailRequest {
+                workflow_id: quorum_inst.id.clone(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(quorum_detail.branches[0].join, "quorum:2");
     }
 }
 
