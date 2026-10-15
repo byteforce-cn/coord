@@ -954,10 +954,11 @@ fn delegate_allows_proxy_and_keeps_principal() {
     assert_eq!(e2.tasks[&seats2[0]].votes[0].on_behalf_of, None);
 }
 
-/// 减签批量零副作用：`[open, decided]` 混合批次在任何变更前被整批拒绝，状态逐字不变。
+/// 减签批量零副作用：`[open, 未知]` 混合批次在任何变更前被整批拒绝，状态逐字不变。
 ///
 /// 这是对 Spike 原型错误路径行为的**裁定偏离**：原实现在变更循环内校验，会先取消第一个
-/// 席位再报 `InvalidTransition`；命令错误必须零状态变化（模块不变量），故改为先全量校验。
+/// 席位再报错；命令错误必须零状态变化（模块不变量），故改为先全量校验。已终态目标不再报错
+/// 而是被跳过（见 `remove_sign_skips_terminal_targets`），故这里用不存在的目标触发错误路径。
 #[test]
 fn remove_sign_mixed_batch_is_all_or_nothing() {
     let mut e = start();
@@ -981,9 +982,6 @@ fn remove_sign_mixed_batch_is_all_or_nothing() {
             tick(&mut t),
         )
         .unwrap();
-    // bob 已表态（decided），alice 仍未决（open）；轮次仍是 Open。
-    e.approve(e.instance.revision, &seats[1], "bob", None, tick(&mut t))
-        .unwrap();
     assert_eq!(e.rounds[&r].status, RoundStatus::Open);
 
     let before_rev = e.instance.revision;
@@ -992,20 +990,17 @@ fn remove_sign_mixed_batch_is_all_or_nothing() {
     let before_round = e.rounds[&r].clone();
     let before_snapshot = e.snapshot_json().unwrap();
 
-    // 批次顺序 [open, decided]：不得先取消 alice 再报错。
+    // 批次顺序 [open, 未知]：不得先取消 alice 再报错。
     let err = e
         .remove_sign(
             e.instance.revision,
             &b,
-            &[seats[0].clone(), seats[1].clone()],
+            &[seats[0].clone(), "inst-t2:absent".into()],
             "admin",
             tick(&mut t),
         )
         .unwrap_err();
-    assert_eq!(
-        err,
-        ApprovalError::InvalidTransition(format!("task {} already decided", seats[1]))
-    );
+    assert_eq!(err, ApprovalError::NotFound("inst-t2:absent".into()));
 
     assert_eq!(e.instance.revision, before_rev);
     assert_eq!(e.tasks[&seats[0]].status, before_alice);
@@ -1373,4 +1368,317 @@ fn any_reject_takes_precedence_over_exhaustion_and_pass_rules() {
         &out,
         "com.china-workflow.approval.round.rejected"
     ));
+}
+
+// --------------------------------------------- M2-C 硬化（超时 / 减签 / 阅签收口）
+
+/// 超时语义：唯一可计票席位过期后 `total==0`，轮次保持 `Open`，绝不自动通过
+/// （Q4 无自动判定）。断言轮次/实例状态与效果种类，不绑定事件名字面量。
+#[test]
+fn all_seats_expired_keeps_round_open() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "approve",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (r, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::approver("alice")],
+            Some(2_000),
+            tick(&mut t),
+        )
+        .unwrap();
+    let out = e.expire(e.instance.revision, &seats[0], 2_000).unwrap();
+
+    assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Expired);
+    assert_eq!(e.rounds[&r].total_count, 0);
+    assert_eq!(e.rounds[&r].status, RoundStatus::Open);
+    assert_eq!(e.branches[&b].status, BranchStatus::Open);
+    assert_eq!(e.instance.status, InstanceStatus::Running);
+    assert!(!out.iter().any(|ef| matches!(
+        ef,
+        Effect::RoundStatus {
+            to: RoundStatus::Passed,
+            ..
+        }
+    )));
+}
+
+/// 减签至零席：`total==0` 不等于通过，轮次保持 `Open`（减签耗尽绝不自动判定）。
+#[test]
+fn remove_all_unvoted_seats_keeps_round_open() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "approve",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (r, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::approver("alice"), SeatSpec::approver("bob")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let out = e
+        .remove_sign(
+            e.instance.revision,
+            &b,
+            &[seats[0].clone(), seats[1].clone()],
+            "admin",
+            tick(&mut t),
+        )
+        .unwrap();
+
+    assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Cancelled);
+    assert_eq!(e.tasks[&seats[1]].status, TaskStatus::Cancelled);
+    assert_eq!(e.rounds[&r].total_count, 0);
+    assert_eq!(e.rounds[&r].status, RoundStatus::Open);
+    assert_eq!(e.branches[&b].status, BranchStatus::Open);
+    assert_eq!(e.instance.status, InstanceStatus::Running);
+    assert!(!out.iter().any(|ef| matches!(
+        ef,
+        Effect::RoundStatus {
+            to: RoundStatus::Passed,
+            ..
+        }
+    )));
+}
+
+/// 减签重复目标：入口去重，重复 id 在任何变更前整批拒绝（零写入）。
+#[test]
+fn remove_sign_duplicate_targets_rejected() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "approve",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (r, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![SeatSpec::approver("alice"), SeatSpec::approver("bob")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    let before_rev = e.instance.revision;
+    let before_snapshot = e.snapshot_json().unwrap();
+
+    let err = e
+        .remove_sign(
+            e.instance.revision,
+            &b,
+            &[seats[0].clone(), seats[0].clone()],
+            "admin",
+            tick(&mut t),
+        )
+        .unwrap_err();
+    assert_eq!(err, ApprovalError::InvalidArgument("task_ids".into()));
+
+    assert_eq!(e.instance.revision, before_rev);
+    assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Created);
+    assert_eq!(e.tasks[&seats[1]].status, TaskStatus::Created);
+    assert_eq!(e.rounds[&r].status, RoundStatus::Open);
+    assert_eq!(e.snapshot_json().unwrap(), before_snapshot);
+}
+
+/// 减签跳过已终态目标：终态席位零效果（无 `Cancelled→Cancelled` 冗余效果），
+/// 其余 open 席正常取消；整批皆终态则零效果返回且状态不变。
+#[test]
+fn remove_sign_skips_terminal_targets() {
+    let mut e = start();
+    let mut t = 1_000;
+    let (b, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "approve",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (r, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b,
+            vec![
+                SeatSpec::approver("alice"),
+                SeatSpec::approver("bob"),
+                SeatSpec::approver("carol"),
+            ],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    // bob 已表决（Completed）；批次 [bob, carol] 只取消仍未决的 carol。
+    e.approve(e.instance.revision, &seats[1], "bob", None, tick(&mut t))
+        .unwrap();
+    let out = e
+        .remove_sign(
+            e.instance.revision,
+            &b,
+            &[seats[1].clone(), seats[2].clone()],
+            "admin",
+            tick(&mut t),
+        )
+        .unwrap();
+
+    assert!(!out.iter().any(|ef| matches!(
+        ef,
+        Effect::TaskStatus { id, .. } if id == &seats[1]
+    )));
+    assert!(out.iter().any(|ef| matches!(
+        ef,
+        Effect::TaskStatus {
+            id,
+            from: TaskStatus::Created,
+            to: TaskStatus::Cancelled,
+        } if id == &seats[2]
+    )));
+    assert_eq!(e.tasks[&seats[1]].status, TaskStatus::Completed);
+    assert_eq!(e.tasks[&seats[2]].status, TaskStatus::Cancelled);
+    assert_eq!(e.rounds[&r].status, RoundStatus::Open);
+
+    // 整批目标皆已终态 ⇒ 零效果，且 revision / 快照不变。
+    let before_rev = e.instance.revision;
+    let before_snapshot = e.snapshot_json().unwrap();
+    let out2 = e
+        .remove_sign(before_rev, &b, &[seats[1].clone()], "admin", tick(&mut t))
+        .unwrap();
+    assert!(out2.is_empty());
+    assert_eq!(e.instance.revision, before_rev);
+    assert_eq!(e.snapshot_json().unwrap(), before_snapshot);
+}
+
+/// 轮次收口取消该轮全部 open 席位：阅签席与审批席一并 `Cancelled`，不留 open。
+/// 覆盖「驳回重开（superseded 轮次）」与「票决关闭」两条路径。
+#[test]
+fn round_close_cancels_open_read_ack_seats() {
+    let mut e = start();
+    let mut t = 1_000;
+    // 先通过一个节点，使 "apply" 进入驳回白名单。
+    let (b1, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "apply",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (_, ts1, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b1,
+            vec![SeatSpec::approver("alice")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    e.approve(e.instance.revision, &ts1[0], "alice", None, tick(&mut t))
+        .unwrap();
+
+    // review 节点：审批席 + 阅签席；驳回到 apply 会作废 review 轮次。
+    let (b2, _) = e
+        .enter_branch(
+            e.instance.revision,
+            "review",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t),
+        )
+        .unwrap();
+    let (r2, seats, _) = e
+        .open_approval(
+            e.instance.revision,
+            &b2,
+            vec![SeatSpec::approver("bob"), SeatSpec::reader("carol")],
+            None,
+            tick(&mut t),
+        )
+        .unwrap();
+    assert_eq!(e.tasks[&seats[1]].status, TaskStatus::Created);
+    let out = e
+        .return_to_node(
+            e.instance.revision,
+            &b2,
+            "apply",
+            "bob",
+            Some("材料不全，退回重填"),
+            tick(&mut t),
+        )
+        .unwrap();
+
+    assert_eq!(e.rounds[&r2].status, RoundStatus::Superseded);
+    assert_eq!(e.tasks[&seats[0]].status, TaskStatus::Cancelled);
+    assert_eq!(e.tasks[&seats[1]].status, TaskStatus::Cancelled);
+    assert!(out.1.iter().any(|ef| matches!(
+        ef,
+        Effect::TaskStatus {
+            id,
+            to: TaskStatus::Cancelled,
+            ..
+        } if id == &seats[1]
+    )));
+
+    // 票决关闭同样收口阅签席。
+    let mut e2 = start();
+    let mut t2 = 1_000;
+    let (b3, _) = e2
+        .enter_branch(
+            e2.instance.revision,
+            "approve",
+            None,
+            JoinPolicy::All,
+            RejectPolicy::AnyReject,
+            tick(&mut t2),
+        )
+        .unwrap();
+    let (r3, seats2, _) = e2
+        .open_approval(
+            e2.instance.revision,
+            &b3,
+            vec![SeatSpec::approver("alice"), SeatSpec::reader("bob")],
+            None,
+            tick(&mut t2),
+        )
+        .unwrap();
+    e2.approve(
+        e2.instance.revision,
+        &seats2[0],
+        "alice",
+        None,
+        tick(&mut t2),
+    )
+    .unwrap();
+    assert_eq!(e2.rounds[&r3].status, RoundStatus::Passed);
+    assert_eq!(e2.tasks[&seats2[1]].status, TaskStatus::Cancelled);
 }

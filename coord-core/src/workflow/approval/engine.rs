@@ -259,7 +259,7 @@ impl Engine {
         Ok((ids, out))
     }
 
-    /// 减签：取消当前 Open 轮次中的未决席位（已表态的席位不允许被减）。
+    /// 减签：取消当前 Open 轮次中的未决席位（已表态的席位跳过；重复目标 id 整批拒绝）。
     pub fn remove_sign(
         &mut self,
         expected: u64,
@@ -269,6 +269,12 @@ impl Engine {
         now: i64,
     ) -> Result<Vec<Effect>, ApprovalError> {
         self.guard(expected)?;
+        // 入口去重：重复目标 id 是对调用方的输入错误，须在任何变更前整批拒绝（零写入）。
+        let mut sorted: Vec<&str> = task_ids.iter().map(String::as_str).collect();
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|w| w[0] == w[1]) {
+            return Err(ApprovalError::InvalidArgument("task_ids".into()));
+        }
         let branch = self
             .branches
             .get(branch_id)
@@ -289,7 +295,7 @@ impl Engine {
                 ApprovalError::InvalidTransition("no open round to remove seats".into())
             })?;
         let mut out = Vec::new();
-        // 先校验全部目标：任一目标非法即整批零写入（命令错误不改状态）。
+        // 先校验全部目标：任一目标不存在或不属于本轮即整批零写入（命令错误不改状态）。
         for tid in task_ids {
             let t = self
                 .tasks
@@ -301,31 +307,38 @@ impl Engine {
                     t.id
                 )));
             }
-            if !t.status.is_open() {
-                return Err(ApprovalError::InvalidTransition(format!(
-                    "task {} already decided",
-                    t.id
-                )));
-            }
         }
-        // 校验全部通过后才开始变更，保证错误路径对先前目标也零副作用。
+        // 已终态目标无席位可减：整批皆终态时零效果返回，状态不变。
+        if !task_ids.is_empty()
+            && !task_ids.iter().any(|tid| {
+                self.tasks
+                    .get(tid)
+                    .map(|t| t.status.is_open())
+                    .unwrap_or(false)
+            })
+        {
+            return Ok(Vec::new());
+        }
+        // 校验全部通过后才开始变更，保证错误路径对先前目标也零副作用；已终态目标跳过，
+        // 不发出 `Cancelled→Cancelled` 冗余效果。
+        let mut cancelled = 0u32;
         for tid in task_ids {
-            let from = self
-                .tasks
-                .get(tid)
-                .ok_or_else(|| ApprovalError::NotFound(tid.clone()))?
-                .status;
-            let t = self
-                .tasks
-                .get_mut(tid)
-                .ok_or_else(|| ApprovalError::NotFound(tid.clone()))?;
-            t.status = TaskStatus::Cancelled;
-            t.updated_at = now;
-            out.push(Effect::TaskStatus {
-                id: tid.clone(),
-                from,
-                to: TaskStatus::Cancelled,
-            });
+            let Some(from) = self.tasks.get(tid).map(|t| t.status) else {
+                continue;
+            };
+            if !from.is_open() {
+                continue;
+            }
+            if let Some(t) = self.tasks.get_mut(tid) {
+                t.status = TaskStatus::Cancelled;
+                t.updated_at = now;
+                cancelled += 1;
+                out.push(Effect::TaskStatus {
+                    id: tid.clone(),
+                    from,
+                    to: TaskStatus::Cancelled,
+                });
+            }
         }
         self.recount(&rid, now, &mut out);
         self.instance.audit.push(AuditEntry {
@@ -333,7 +346,7 @@ impl Engine {
             action: "remove_sign".into(),
             branch: Some(branch.id.clone()),
             by: by.into(),
-            detail: format!("seats={}", task_ids.len()),
+            detail: format!("seats={cancelled}"),
         });
         self.touch(now);
         Ok(out)
@@ -1154,9 +1167,13 @@ impl Engine {
         let mut verdict: Option<RoundStatus> = None;
         if branch.reject == RejectPolicy::AnyReject && rejected > 0 {
             verdict = Some(RoundStatus::Rejected);
-        } else if total == 0 || completed >= total {
+        } else if approvals.is_empty() {
+            // 从未创建可计票席位的轮次（如仅有阅签席）立即通过。反之 `total == 0`（全员过期
+            // 或被减签）绝不自动通过——超时与减签耗尽保持 `Open`，处置由人决定（Q4 无自动判定）。
             verdict = Some(RoundStatus::Passed);
-        } else {
+        } else if total > 0 && completed >= total {
+            verdict = Some(RoundStatus::Passed);
+        } else if total > 0 {
             let pass = match branch.join {
                 JoinPolicy::All => false,
                 JoinPolicy::Any => completed >= 1,
@@ -1303,13 +1320,12 @@ impl Engine {
         }
     }
 
+    /// 取消一轮的全部未决席位：审批席与阅签席一并收口，轮次关闭后不残留 open 席位。
     fn cancel_pending_tasks(&mut self, round_id: &str, now: i64, out: &mut Vec<Effect>) {
         let ids: Vec<Id> = self
             .tasks
             .values()
-            .filter(|t| {
-                t.round_id == round_id && t.kind == TaskKind::Approval && t.status.is_open()
-            })
+            .filter(|t| t.round_id == round_id && t.status.is_open())
             .map(|t| t.id.clone())
             .collect();
         self.cancel_tasks(&ids, now, out);
