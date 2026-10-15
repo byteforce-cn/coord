@@ -1,5 +1,10 @@
 package cn.byteforce.coord.sdk;
 
+import cn.byteforce.coord.sdk.workflow.ApprovalBranch;
+import cn.byteforce.coord.sdk.workflow.ApprovalInstanceDetail;
+import cn.byteforce.coord.sdk.workflow.ApprovalRound;
+import cn.byteforce.coord.sdk.workflow.ApprovalTask;
+import cn.byteforce.coord.sdk.workflow.PendingApprovalTask;
 import cn.byteforce.coord.sdk.workflow.WorkflowClient;
 import cn.byteforce.coord.sdk.workflow.WorkflowDefinition;
 import cn.byteforce.coord.sdk.workflow.WorkflowDefinitionVersion;
@@ -68,5 +73,118 @@ class WorkflowClientVersioningTest {
         assertThat(rolled.name()).isEqualTo("order-approval");
         assertThat(rolled.version()).isEqualTo("1.1");
         assertThat(rolled.status()).isEqualTo("active");
+    }
+
+    @Test
+    @DisplayName("PendingApprovalTask constructor and getters")
+    void testPendingApprovalTaskGetters() {
+        PendingApprovalTask t = new PendingApprovalTask(
+                "inst-1", "task-9", "approve", "br-1", "rd-1",
+                "APPROVAL", "PENDING", "alice", 1755000000000L, 1754000000000L);
+
+        assertThat(t.instanceId()).isEqualTo("inst-1");
+        assertThat(t.taskId()).isEqualTo("task-9");
+        assertThat(t.node()).isEqualTo("approve");
+        assertThat(t.branchId()).isEqualTo("br-1");
+        assertThat(t.roundId()).isEqualTo("rd-1");
+        assertThat(t.kind()).isEqualTo("APPROVAL");
+        assertThat(t.status()).isEqualTo("PENDING");
+        assertThat(t.assignee()).isEqualTo("alice");
+        assertThat(t.deadlineMs()).isEqualTo(1755000000000L);
+        assertThat(t.createdAtMs()).isEqualTo(1754000000000L);
+        assertThat(t.toString()).contains("task-9");
+    }
+
+    @Test
+    @DisplayName("PendingApprovalTask equals/hashCode")
+    void testPendingApprovalTaskEquality() {
+        PendingApprovalTask a = new PendingApprovalTask(
+                "inst-1", "task-9", "approve", "br-1", "rd-1",
+                "APPROVAL", "PENDING", "alice", 1L, 2L);
+        PendingApprovalTask b = new PendingApprovalTask(
+                "inst-1", "task-9", "approve", "br-1", "rd-1",
+                "APPROVAL", "PENDING", "alice", 1L, 2L);
+        PendingApprovalTask c = new PendingApprovalTask(
+                "inst-1", "task-9", "approve", "br-1", "rd-1",
+                "APPROVAL", "PENDING", "carol", 1L, 2L);
+
+        assertThat(a).isEqualTo(b);
+        assertThat(a).hasSameHashCodeAs(b);
+        assertThat(a).isNotEqualTo(c);
+    }
+
+    @Test
+    @DisplayName("ApprovalBranch/Task/Round getters and equality")
+    void testApprovalModelGettersAndEquality() {
+        ApprovalBranch branch = new ApprovalBranch(
+                "br-1", "approve", 1, "ACTIVE", "all", "any", List.of("rd-1"));
+        ApprovalBranch branchCopy = new ApprovalBranch(
+                "br-1", "approve", 1, "ACTIVE", "all", "any", List.of("rd-1"));
+        assertThat(branch.id()).isEqualTo("br-1");
+        assertThat(branch.node()).isEqualTo("approve");
+        assertThat(branch.attempt()).isEqualTo(1);
+        assertThat(branch.status()).isEqualTo("ACTIVE");
+        assertThat(branch.join()).isEqualTo("all");
+        assertThat(branch.reject()).isEqualTo("any");
+        assertThat(branch.roundIds()).containsExactly("rd-1");
+        assertThat(branch).isEqualTo(branchCopy).hasSameHashCodeAs(branchCopy);
+
+        ApprovalTask task = new ApprovalTask(
+                "task-9", "br-1", "rd-1", "APPROVAL", "PENDING", "alice",
+                List.of("alice", "carol"), 1755000000000L);
+        ApprovalTask taskCopy = new ApprovalTask(
+                "task-9", "br-1", "rd-1", "APPROVAL", "PENDING", "alice",
+                List.of("alice", "carol"), 1755000000000L);
+        assertThat(task.id()).isEqualTo("task-9");
+        assertThat(task.branchId()).isEqualTo("br-1");
+        assertThat(task.roundId()).isEqualTo("rd-1");
+        assertThat(task.kind()).isEqualTo("APPROVAL");
+        assertThat(task.status()).isEqualTo("PENDING");
+        assertThat(task.assignee()).isEqualTo("alice");
+        assertThat(task.candidates()).containsExactly("alice", "carol");
+        assertThat(task.deadlineMs()).isEqualTo(1755000000000L);
+        assertThat(task).isEqualTo(taskCopy).hasSameHashCodeAs(taskCopy);
+
+        ApprovalRound round = new ApprovalRound("rd-1", "br-1", 2, "IN_PROGRESS", 3, 1, 0);
+        ApprovalRound roundCopy = new ApprovalRound("rd-1", "br-1", 2, "IN_PROGRESS", 3, 1, 0);
+        assertThat(round.id()).isEqualTo("rd-1");
+        assertThat(round.branchId()).isEqualTo("br-1");
+        assertThat(round.number()).isEqualTo(2);
+        assertThat(round.status()).isEqualTo("IN_PROGRESS");
+        assertThat(round.totalCount()).isEqualTo(3);
+        assertThat(round.completedCount()).isEqualTo(1);
+        assertThat(round.rejectedCount()).isEqualTo(0);
+        assertThat(round).isEqualTo(roundCopy).hasSameHashCodeAs(roundCopy);
+        assertThat(round).isNotEqualTo(new ApprovalRound("rd-1", "br-1", 3, "IN_PROGRESS", 3, 1, 0));
+    }
+
+    @Test
+    @DisplayName("ApprovalInstanceDetail constructor, getters and equality")
+    void testApprovalInstanceDetail() {
+        List<ApprovalBranch> branches = List.of(
+                new ApprovalBranch("br-1", "approve", 1, "ACTIVE", "all", "any", List.of("rd-1")));
+        List<ApprovalTask> tasks = List.of(
+                new ApprovalTask("task-9", "br-1", "rd-1", "APPROVAL", "PENDING",
+                        "alice", List.of("alice"), 0L));
+        List<ApprovalRound> rounds = List.of(
+                new ApprovalRound("rd-1", "br-1", 1, "IN_PROGRESS", 1, 0, 0));
+
+        ApprovalInstanceDetail d = new ApprovalInstanceDetail(
+                "inst-1", "RUNNING", "bob", 7L, "order-approval", branches, tasks, rounds);
+        ApprovalInstanceDetail dCopy = new ApprovalInstanceDetail(
+                "inst-1", "RUNNING", "bob", 7L, "order-approval", branches, tasks, rounds);
+
+        assertThat(d.instanceId()).isEqualTo("inst-1");
+        assertThat(d.status()).isEqualTo("RUNNING");
+        assertThat(d.initiator()).isEqualTo("bob");
+        assertThat(d.revision()).isEqualTo(7L);
+        assertThat(d.definitionName()).isEqualTo("order-approval");
+        assertThat(d.branches()).hasSize(1);
+        assertThat(d.tasks()).hasSize(1);
+        assertThat(d.rounds()).hasSize(1);
+        assertThat(d.toString()).contains("inst-1");
+        assertThat(d).isEqualTo(dCopy).hasSameHashCodeAs(dCopy);
+        assertThat(d).isNotEqualTo(new ApprovalInstanceDetail(
+                "inst-1", "COMPLETED", "bob", 7L, "order-approval", branches, tasks, rounds));
     }
 }

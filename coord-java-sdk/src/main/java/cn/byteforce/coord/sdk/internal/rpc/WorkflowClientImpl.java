@@ -3,14 +3,24 @@ package cn.byteforce.coord.sdk.internal.rpc;
 import cn.byteforce.coord.sdk.CoordConfig;
 import cn.byteforce.coord.sdk.CoordException;
 import cn.byteforce.coord.sdk.internal.channel.AgentChannelManager;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowAcknowledgeRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowAcknowledgeResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowAddSignRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowAddSignResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowApproveRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowApproveResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowCancelRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowCancelResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowDelegateRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowDelegateResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowDeployRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowDeployResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowDeleteDefinitionRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowDeleteInstanceRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetDefinitionRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetDefinitionResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetInstanceDetailRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetInstanceDetailResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetStatusRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGetStatusResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowGrpc;
@@ -20,6 +30,14 @@ import cn.byteforce.coord.contracts.workflow.v1.WorkflowListDefinitionsRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowListDefinitionsResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowListInstancesRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowListInstancesResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListPendingTasksRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowListPendingTasksResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowRejectRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowRejectResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowRemoveSignRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowRemoveSignResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowReturnToNodeRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowReturnToNodeResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowRollbackDefinitionRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowRollbackDefinitionResponse;
 import cn.byteforce.coord.contracts.workflow.v1.SuspensionMeta;
@@ -27,8 +45,19 @@ import cn.byteforce.coord.contracts.workflow.v1.WorkflowSignalRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowSignalResponse;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowStartRequest;
 import cn.byteforce.coord.contracts.workflow.v1.WorkflowStartResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowTerminateRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowTerminateResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowTransferRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowTransferResponse;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowWithdrawRequest;
+import cn.byteforce.coord.contracts.workflow.v1.WorkflowWithdrawResponse;
 import cn.byteforce.coord.contracts.workflow.v1.TaskFrame;
 import cn.byteforce.coord.sdk.spi.ObservabilityProvider;
+import cn.byteforce.coord.sdk.workflow.ApprovalBranch;
+import cn.byteforce.coord.sdk.workflow.ApprovalInstanceDetail;
+import cn.byteforce.coord.sdk.workflow.ApprovalRound;
+import cn.byteforce.coord.sdk.workflow.ApprovalTask;
+import cn.byteforce.coord.sdk.workflow.PendingApprovalTask;
 import cn.byteforce.coord.sdk.workflow.Suspension;
 import cn.byteforce.coord.sdk.workflow.WorkflowClient;
 import cn.byteforce.coord.sdk.workflow.WorkflowDefinition;
@@ -385,6 +414,279 @@ public final class WorkflowClientImpl extends AgentRpcClient implements Workflow
         log.debug("Workflow listInstances: namespace={}, workflowId={}, statusFilter={}, count={}",
                 namespace, workflowId, statusFilter, result.size());
         return result;
+    }
+
+    // ──── 人工审批 v2（ADR-0013 D7）────
+
+    @Override
+    public String approve(String workflowId, String taskId, String comment, String idempotencyKey) {
+        WorkflowApproveRequest.Builder req = WorkflowApproveRequest.newBuilder()
+                .setWorkflowId(workflowId)
+                .setTaskId(taskId);
+        setOptional(req::setComment, comment);
+        setOptional(req::setIdempotencyKey, idempotencyKey);
+
+        WorkflowApproveResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .approve((WorkflowApproveRequest) r),
+                req.build(), "workflow.approve");
+
+        log.debug("Workflow approve: id={}, taskId={}, status={}",
+                workflowId, taskId, response.getStatus());
+        return response.getStatus();
+    }
+
+    @Override
+    public String reject(String workflowId, String taskId, String comment, String idempotencyKey) {
+        WorkflowRejectRequest.Builder req = WorkflowRejectRequest.newBuilder()
+                .setWorkflowId(workflowId)
+                .setTaskId(taskId);
+        setOptional(req::setComment, comment);
+        setOptional(req::setIdempotencyKey, idempotencyKey);
+
+        WorkflowRejectResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .reject((WorkflowRejectRequest) r),
+                req.build(), "workflow.reject");
+
+        log.debug("Workflow reject: id={}, taskId={}, status={}",
+                workflowId, taskId, response.getStatus());
+        return response.getStatus();
+    }
+
+    @Override
+    public String acknowledge(String workflowId, String taskId, String idempotencyKey) {
+        WorkflowAcknowledgeRequest.Builder req = WorkflowAcknowledgeRequest.newBuilder()
+                .setWorkflowId(workflowId)
+                .setTaskId(taskId);
+        setOptional(req::setIdempotencyKey, idempotencyKey);
+
+        WorkflowAcknowledgeResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .acknowledge((WorkflowAcknowledgeRequest) r),
+                req.build(), "workflow.acknowledge");
+
+        log.debug("Workflow acknowledge: id={}, taskId={}, status={}",
+                workflowId, taskId, response.getStatus());
+        return response.getStatus();
+    }
+
+    @Override
+    public String addSign(String workflowId, String branchId, List<String> approvers,
+                          List<String> pool, List<String> readers, String comment,
+                          String idempotencyKey) {
+        WorkflowAddSignRequest.Builder req = WorkflowAddSignRequest.newBuilder()
+                .setWorkflowId(workflowId)
+                .setBranchId(branchId);
+        if (approvers != null) {
+            req.addAllApprovers(approvers);
+        }
+        if (pool != null) {
+            req.addAllPool(pool);
+        }
+        if (readers != null) {
+            req.addAllReaders(readers);
+        }
+        setOptional(req::setComment, comment);
+        setOptional(req::setIdempotencyKey, idempotencyKey);
+
+        WorkflowAddSignResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .addSign((WorkflowAddSignRequest) r),
+                req.build(), "workflow.addSign");
+
+        log.debug("Workflow addSign: id={}, branchId={}, status={}",
+                workflowId, branchId, response.getStatus());
+        return response.getStatus();
+    }
+
+    @Override
+    public String removeSign(String workflowId, String branchId, List<String> taskIds,
+                             String comment, String idempotencyKey) {
+        WorkflowRemoveSignRequest.Builder req = WorkflowRemoveSignRequest.newBuilder()
+                .setWorkflowId(workflowId)
+                .setBranchId(branchId);
+        if (taskIds != null) {
+            req.addAllTaskIds(taskIds);
+        }
+        setOptional(req::setComment, comment);
+        setOptional(req::setIdempotencyKey, idempotencyKey);
+
+        WorkflowRemoveSignResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .removeSign((WorkflowRemoveSignRequest) r),
+                req.build(), "workflow.removeSign");
+
+        log.debug("Workflow removeSign: id={}, branchId={}, status={}",
+                workflowId, branchId, response.getStatus());
+        return response.getStatus();
+    }
+
+    @Override
+    public String returnToNode(String workflowId, String branchId, String targetNode,
+                               String comment, String idempotencyKey) {
+        WorkflowReturnToNodeRequest.Builder req = WorkflowReturnToNodeRequest.newBuilder()
+                .setWorkflowId(workflowId)
+                .setBranchId(branchId)
+                .setTargetNode(targetNode);
+        setOptional(req::setComment, comment);
+        setOptional(req::setIdempotencyKey, idempotencyKey);
+
+        WorkflowReturnToNodeResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .returnToNode((WorkflowReturnToNodeRequest) r),
+                req.build(), "workflow.returnToNode");
+
+        log.debug("Workflow returnToNode: id={}, branchId={}, targetNode={}, status={}",
+                workflowId, branchId, targetNode, response.getStatus());
+        return response.getStatus();
+    }
+
+    @Override
+    public String transfer(String workflowId, String taskId, String to, String comment,
+                           String idempotencyKey) {
+        WorkflowTransferRequest.Builder req = WorkflowTransferRequest.newBuilder()
+                .setWorkflowId(workflowId)
+                .setTaskId(taskId)
+                .setTo(to);
+        setOptional(req::setComment, comment);
+        setOptional(req::setIdempotencyKey, idempotencyKey);
+
+        WorkflowTransferResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .transfer((WorkflowTransferRequest) r),
+                req.build(), "workflow.transfer");
+
+        log.debug("Workflow transfer: id={}, taskId={}, to={}, status={}",
+                workflowId, taskId, to, response.getStatus());
+        return response.getStatus();
+    }
+
+    @Override
+    public String delegate(String workflowId, String taskId, String to, String comment,
+                           String idempotencyKey) {
+        WorkflowDelegateRequest.Builder req = WorkflowDelegateRequest.newBuilder()
+                .setWorkflowId(workflowId)
+                .setTaskId(taskId)
+                .setTo(to);
+        setOptional(req::setComment, comment);
+        setOptional(req::setIdempotencyKey, idempotencyKey);
+
+        WorkflowDelegateResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .delegate((WorkflowDelegateRequest) r),
+                req.build(), "workflow.delegate");
+
+        log.debug("Workflow delegate: id={}, taskId={}, to={}, status={}",
+                workflowId, taskId, to, response.getStatus());
+        return response.getStatus();
+    }
+
+    @Override
+    public String withdraw(String workflowId, String comment, String idempotencyKey) {
+        WorkflowWithdrawRequest.Builder req = WorkflowWithdrawRequest.newBuilder()
+                .setWorkflowId(workflowId);
+        setOptional(req::setComment, comment);
+        setOptional(req::setIdempotencyKey, idempotencyKey);
+
+        WorkflowWithdrawResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .withdraw((WorkflowWithdrawRequest) r),
+                req.build(), "workflow.withdraw");
+
+        log.debug("Workflow withdraw: id={}, status={}", workflowId, response.getStatus());
+        return response.getStatus();
+    }
+
+    @Override
+    public String terminate(String workflowId, String reason, String idempotencyKey) {
+        WorkflowTerminateRequest.Builder req = WorkflowTerminateRequest.newBuilder()
+                .setWorkflowId(workflowId);
+        setOptional(req::setReason, reason);
+        setOptional(req::setIdempotencyKey, idempotencyKey);
+
+        WorkflowTerminateResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .terminate((WorkflowTerminateRequest) r),
+                req.build(), "workflow.terminate");
+
+        log.debug("Workflow terminate: id={}, status={}", workflowId, response.getStatus());
+        return response.getStatus();
+    }
+
+    @Override
+    public List<PendingApprovalTask> listPendingTasks(int pageSize, String pageToken) {
+        WorkflowListPendingTasksRequest.Builder req = WorkflowListPendingTasksRequest.newBuilder()
+                .setPageSize(Math.max(1, Math.min(pageSize, 200)));
+        setOptional(req::setPageToken, pageToken);
+
+        WorkflowListPendingTasksResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .listPendingTasks((WorkflowListPendingTasksRequest) r),
+                req.build(), "workflow.listPendingTasks");
+
+        List<PendingApprovalTask> result = new ArrayList<>();
+        for (cn.byteforce.coord.contracts.workflow.v1.PendingApprovalTask t : response.getTasksList()) {
+            result.add(new PendingApprovalTask(
+                    t.getInstanceId(), t.getTaskId(), t.getNode(), t.getBranchId(),
+                    t.getRoundId(), t.getKind(), t.getStatus(), t.getAssignee(),
+                    t.getDeadlineMs(), t.getCreatedAtMs()));
+        }
+        log.debug("Workflow listPendingTasks: pageSize={}, count={}", pageSize, result.size());
+        return result;
+    }
+
+    @Override
+    public ApprovalInstanceDetail getInstanceDetail(String workflowId) {
+        WorkflowGetInstanceDetailRequest request = WorkflowGetInstanceDetailRequest.newBuilder()
+                .setWorkflowId(workflowId)
+                .build();
+
+        WorkflowGetInstanceDetailResponse response = callWithRetry(
+                (ch, r) -> WorkflowGrpc.newBlockingStub(ch)
+                        .withDeadlineAfter(config.getRequestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .getInstanceDetail((WorkflowGetInstanceDetailRequest) r),
+                request, "workflow.getInstanceDetail");
+
+        List<ApprovalBranch> branches = new ArrayList<>();
+        for (cn.byteforce.coord.contracts.workflow.v1.ApprovalBranch b : response.getBranchesList()) {
+            branches.add(new ApprovalBranch(b.getId(), b.getNode(), b.getAttempt(),
+                    b.getStatus(), b.getJoin(), b.getReject(), b.getRoundIdsList()));
+        }
+        List<ApprovalTask> tasks = new ArrayList<>();
+        for (cn.byteforce.coord.contracts.workflow.v1.ApprovalTask t : response.getTasksList()) {
+            tasks.add(new ApprovalTask(t.getId(), t.getBranchId(), t.getRoundId(), t.getKind(),
+                    t.getStatus(), t.getAssignee(), t.getCandidatesList(), t.getDeadlineMs()));
+        }
+        List<ApprovalRound> rounds = new ArrayList<>();
+        for (cn.byteforce.coord.contracts.workflow.v1.ApprovalRound r : response.getRoundsList()) {
+            rounds.add(new ApprovalRound(r.getId(), r.getBranchId(), r.getNumber(), r.getStatus(),
+                    r.getTotalCount(), r.getCompletedCount(), r.getRejectedCount()));
+        }
+
+        log.debug("Workflow getInstanceDetail: id={}, status={}, branches={}, tasks={}, rounds={}",
+                workflowId, response.getStatus(), branches.size(), tasks.size(), rounds.size());
+        return new ApprovalInstanceDetail(
+                response.getInstanceId(), response.getStatus(), response.getInitiator(),
+                response.getRevision(), response.getDefinitionName(), branches, tasks, rounds);
+    }
+
+    /** 仅在值非空时写入可选字段（空值保持 proto3 默认，wire 上不出现）。 */
+    private static void setOptional(java.util.function.Consumer<String> setter, String value) {
+        if (value != null && !value.isEmpty()) {
+            setter.accept(value);
+        }
     }
 
     // ──── 异步回调 ────
