@@ -2075,7 +2075,12 @@ where
                     {
                         // 无审批实例可终止（从未开启/已被清除）：no-op。
                         Ok(()) | Err(BridgeError::NotFound(_)) => {}
-                        // 其余错误 fail-closed 传播：宁可不取消，也不留 open 审批孤儿。
+                        // 审批已终态（上次取消在 terminate 后提交失败 / 并发取消重试到已终态 /
+                        // 外部终止）：无 open 审批残留，终止目标已达成，不得阻塞或毒化本次取消。
+                        // 此处的 `InvalidTransition` 只可能来自引擎的终态守卫（`Engine::guard`：
+                        // revision 匹配但 status 已 terminal）——terminate 别无它途返回该变体。
+                        Err(BridgeError::InvalidTransition(_)) => {}
+                        // 其余错误 fail-closed 传播：审批状态未知，宁可不取消也不留孤儿。
                         Err(e) => {
                             return Err(RuntimeError::StoreError(format!(
                                 "approval terminate failed: {e}"
@@ -5732,7 +5737,7 @@ mod tests {
 
     // ─── approve 节点 → Suspended 接线（v2 审批） ───
 
-    use crate::workflow::approval::bridge::{ApprovalBridge, ApprovalCommand};
+    use crate::workflow::approval::bridge::{ApprovalBridge, ApprovalCommand, SYSTEM_ACTOR};
     use crate::workflow::approval::model::{
         BranchStatus, InstanceStatus as ApprovalStatus, JoinPolicy,
     };
@@ -6479,6 +6484,46 @@ mod tests {
             reloaded.status,
             InstanceStatus::Suspended,
             "审批终止失败 ⇒ 不得取消（无孤儿）"
+        );
+    }
+
+    /// 审批已终态（外部终止 / 上次取消部分完成）后取消工作流：`terminate` 返回
+    /// `InvalidTransition` ⇒ no-op，取消照常；二次取消为干净 no-op（不毒化）。
+    #[tokio::test]
+    async fn cancel_after_approval_already_terminated_still_cancels() {
+        let (bridge, approval_store) = approval_bridge();
+        let runtime = make_runtime().with_approval_bridge(Arc::clone(&bridge));
+        let def = approve_resume_definition("cancel-already-terminated-wf", None, &[]);
+
+        let started = runtime.start(&def, serde_json::json!({})).await.unwrap();
+        await_status(store_of(&runtime), &started.id, InstanceStatus::Suspended).await;
+
+        // 审批先被直接终止（模拟外部终止 / 上次取消在 terminate 后提交失败）
+        bridge
+            .terminate(&started.id, SYSTEM_ACTOR, "external")
+            .await
+            .unwrap();
+        let (engine, _) = approval_store
+            .load(&started.id)
+            .await
+            .unwrap()
+            .expect("approval instance");
+        assert_eq!(engine.instance.status, ApprovalStatus::Terminated);
+
+        // 取消不得被「审批已终态」阻塞
+        runtime.cancel_instance(&started.id).await.unwrap();
+        let reloaded = store_of(&runtime)
+            .load_instance(&started.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, InstanceStatus::Cancelled);
+
+        // 二次取消：工作流已终态 ⇒ 干净 no-op（不 panic、不毒化）
+        let second = runtime.cancel_instance(&started.id).await.unwrap_err();
+        assert!(
+            matches!(second, RuntimeError::AlreadyCompleted(_)),
+            "{second:?}"
         );
     }
 
