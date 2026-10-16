@@ -398,7 +398,7 @@ pub fn parse_cncf_sw(input: &str) -> Result<WorkflowDefinition, String> {
 // ─── 转换 ───
 
 /// 终端任务保留名（SW 状态不得占用）
-const END_TASK: &str = "__end";
+pub(crate) const END_TASK: &str = "__end";
 
 fn convert(doc: SwWorkflowDoc) -> Result<WorkflowDefinition, String> {
     // ── 1. 基础校验 ──
@@ -1492,7 +1492,7 @@ fn transition_task(state: &str, target: &str) -> NamedTask {
 }
 
 /// JSON 值 → jq 字面量表达式字符串
-fn json_to_jq_literal(v: &Value) -> String {
+pub(crate) fn json_to_jq_literal(v: &Value) -> String {
     match v {
         Value::Null => "null".into(),
         Value::Bool(b) => b.to_string(),

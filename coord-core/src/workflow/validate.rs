@@ -29,6 +29,28 @@ use super::parser::{
 
 // ─── 校验器 ───
 
+/// 官方 1.0.3 switch case 形状判定：`{<case_name>: {when?, then}}` —— 单键对象，且 case 体
+/// 含 `when`/`then`。按字段集而非排除键名判定，使 case 名恰为 `condition` 等 legacy 键名时
+/// 仍按官方形状解析；legacy `{condition, transition}` 的值为字符串，不会命中。
+fn official_switch_case(cond: &Value) -> Option<(&str, &serde_json::Map<String, Value>)> {
+    let (name, case_obj) = single_key_object_case(cond)?;
+    if !case_obj.contains_key("when") && !case_obj.contains_key("then") {
+        return None;
+    }
+    Some((name, case_obj))
+}
+
+/// 单键对象 + 对象 case 体的形状判定：官方 case 的公共外壳（无论是否含 `when`/`then`）。
+/// legacy 项的值均为字符串（`condition`/`transition`/`defaultCondition`），不会命中。
+fn single_key_object_case(cond: &Value) -> Option<(&str, &serde_json::Map<String, Value>)> {
+    let obj = cond.as_object()?;
+    if obj.len() != 1 {
+        return None;
+    }
+    let (name, body) = obj.iter().next()?;
+    Some((name.as_str(), body.as_object()?))
+}
+
 /// 语义校验器
 pub struct Validator {
     errors: Vec<ValidationError>,
@@ -38,6 +60,8 @@ pub struct Validator {
     function_names: HashSet<String>,
     /// use.retries 已解析映射（任务级 `retry: <name>` 引用解析）
     retry_refs: HashMap<String, RetryPolicy>,
+    /// 官方 switch case `then: end|exit` 命中：需确保定义中存在终端任务 `__end`
+    needs_end: bool,
 }
 
 impl Validator {
@@ -48,6 +72,7 @@ impl Validator {
             task_names: HashSet::new(),
             function_names: HashSet::new(),
             retry_refs: HashMap::new(),
+            needs_end: false,
         };
 
         // 预先收集 function 名
@@ -103,6 +128,33 @@ impl Validator {
         }
 
         // Step 4: 校验 switch transition 引用完整性
+        // 官方 switch case `then: end|exit` 映射为终端任务 `__end`：用户未定义时补一个
+        // Task::End，保证引用校验与运行期跳转都能解析（与 sw.rs 的终端约定同一个保留名）。
+        if v.needs_end {
+            let end_is_terminal = named_tasks
+                .iter()
+                .any(|t| t.name == super::sw::END_TASK && matches!(&t.task, Task::End(_)));
+            if !v.task_names.contains(super::sw::END_TASK) {
+                named_tasks.push(NamedTask {
+                    name: super::sw::END_TASK.to_string(),
+                    task: Task::End(EndTask {}),
+                });
+                v.task_names.insert(super::sw::END_TASK.to_string());
+            } else if !end_is_terminal {
+                // `__end` 为终端保留名：用户定义的非终端同名任务会让 `then: exit` 落到
+                // 普通任务并 fall-through，fail-closed 拒绝并点名保留名。
+                v.errors.push(ValidationError {
+                    span: None,
+                    kind: ValidationErrorKind::UnsupportedConstruct(
+                        super::sw::END_TASK.to_string(),
+                    ),
+                    message: format!(
+                        "task name '{}' is reserved for the switch terminal (then: end|exit) and must be an 'end' task",
+                        super::sw::END_TASK
+                    ),
+                });
+            }
+        }
         v.check_task_refs(&named_tasks);
 
         // Step 5: 校验 use.functions 引用
@@ -236,10 +288,12 @@ impl Validator {
     fn resolve_task(&mut self, raw: &RawNamedTask) -> Option<Task> {
         match &raw.body {
             Value::Object(map) if map.contains_key("call") => self.parse_call(raw, map),
+            // `for` 必须先于裸 `do` 分类：官方 1.0.3 循环体 `do` 与 `for` 同级，若先命中
+            // `do` 会把循环体当顺序任务、静默丢掉迭代语义（Spike 4 corpus 06）。
+            Value::Object(map) if map.contains_key("for") => self.parse_for_each(raw, map),
             Value::Object(map) if map.contains_key("do") => self.parse_do(raw, map),
             Value::Object(map) if map.contains_key("switch") => self.parse_switch(raw, map),
             Value::Object(map) if map.contains_key("fork") => self.parse_fork(raw, map),
-            Value::Object(map) if map.contains_key("for") => self.parse_for_each(raw, map),
             Value::Object(map) if map.contains_key("wait") => self.parse_wait(raw, map),
             Value::Object(map) if map.contains_key("listen") => self.parse_listen(raw, map),
             Value::Object(map) if map.contains_key("emit") => self.parse_emit(raw, map),
@@ -336,11 +390,8 @@ impl Validator {
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let switch_val = &map["switch"];
-        let conditions = match switch_val {
-            Value::Array(arr) => arr
-                .iter()
-                .filter_map(|cond| self.parse_switch_condition(cond, raw.span))
-                .collect(),
+        let arr = match switch_val {
+            Value::Array(arr) => arr,
             _ => {
                 self.errors.push(ValidationError {
                     span: Some(raw.span),
@@ -351,10 +402,113 @@ impl Validator {
             }
         };
 
+        let mut conditions = Vec::new();
+        let mut default_condition: Option<SwitchCondition> = None;
+        for (index, item) in arr.iter().enumerate() {
+            if let Some((case_name, case_obj)) = official_switch_case(item) {
+                // 官方 1.0.3 case：`when` 可选（缺失即默认 case），`then` 必需。
+                if let Some(cond) = self.parse_official_switch_case(case_name, case_obj, raw.span) {
+                    // 无 `when` 的官方 case 提升到 default_condition：运行期在全部 `when`
+                    // 条件之后才求值，而官方按数组顺序求值 when-less case。此为已裁定偏差：
+                    // 单个 default case 语义等价，多个 when-less case 由下方唯一性校验拒绝。
+                    if cond.condition.is_some() {
+                        conditions.push(cond);
+                    } else if default_condition.is_none() {
+                        default_condition = Some(cond);
+                    } else {
+                        // default 只能有一个：多个无 `when` case fail-closed 点名冲突项。
+                        self.reject_switch_field(case_name, "when", raw.span);
+                    }
+                }
+            } else if let Some((case_name, _)) = single_key_object_case(item) {
+                // 官方单键 case 体是对象但缺 `when`/`then`（如 `{high: {}}`）：不得回退 legacy
+                // 报「缺 transition」，fail-closed 点名 `switch.<case>.then`。
+                self.reject_switch_field(case_name, "then", raw.span);
+            } else if let Some(cond) = self.parse_switch_condition(item, raw.span) {
+                // legacy `{condition, transition}` / `{defaultCondition}` 形状保持兼容。
+                conditions.push(cond);
+            } else if !item.is_object() {
+                // `switch: ["foo"]` 非对象项：legacy 路径会静默丢弃 → fail-closed 点名 `switch[i]`。
+                let construct = format!("switch[{index}]");
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                    message: format!(
+                        "unimplemented construct '{construct}': each switch item must be an object"
+                    ),
+                });
+            }
+        }
+
         Some(Task::Switch(SwitchTask {
             conditions,
-            default_condition: None, // defaultCondition 在 conditions 数组中
+            default_condition,
         }))
+    }
+
+    /// 官方 1.0.3 case 形状：`when`（可选）→ condition、`then`（必需，flowDirective）→ transition。
+    /// `then: end|exit` 映射到终端任务 `__end`；`then: continue`（do 列表 fall-through）coord 在
+    /// 不改执行器的前提下无法表达，fail-closed 拒绝并点名 `switch.<case>.then`。
+    fn parse_official_switch_case(
+        &mut self,
+        case_name: &str,
+        case_obj: &serde_json::Map<String, Value>,
+        span: Span,
+    ) -> Option<SwitchCondition> {
+        // 未知键（schema unevaluatedProperties: false）不得静默丢弃。
+        for key in case_obj.keys() {
+            if key != "when" && key != "then" {
+                self.reject_switch_field(case_name, key, span);
+                return None;
+            }
+        }
+        let condition = match case_obj.get("when") {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(_) => {
+                self.reject_switch_field(case_name, "when", span);
+                return None;
+            }
+            None => None,
+        };
+        let Some(then) = case_obj.get("then").and_then(Value::as_str) else {
+            self.reject_switch_field(case_name, "then", span);
+            return None;
+        };
+        let transition = match then {
+            "end" | "exit" => {
+                self.needs_end = true;
+                super::sw::END_TASK.to_string()
+            }
+            "continue" => {
+                self.errors.push(ValidationError {
+                    span: Some(span),
+                    kind: ValidationErrorKind::UnsupportedConstruct(format!(
+                        "switch.{case_name}.then"
+                    )),
+                    message: format!(
+                        "unimplemented construct 'switch.{case_name}.then': 'continue' (do-list fall-through) is not mapped"
+                    ),
+                });
+                return None;
+            }
+            target => target.to_string(),
+        };
+        Some(SwitchCondition {
+            condition,
+            transition,
+        })
+    }
+
+    /// 官方 switch case 缺项/未知键 fail-closed：点名 `switch.<case>.<field>`，绝不回退默认。
+    fn reject_switch_field(&mut self, case_name: &str, field: &str, span: Span) {
+        let construct = format!("switch.{case_name}.{field}");
+        self.errors.push(ValidationError {
+            span: Some(span),
+            kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+            message: format!(
+                "unimplemented construct '{construct}': official switch case requires 'when'/'then' (then: <target>|end|exit)"
+            ),
+        });
     }
 
     fn parse_switch_condition(&mut self, cond: &Value, span: Span) -> Option<SwitchCondition> {
@@ -374,23 +528,12 @@ impl Validator {
         } else if let Some(d) = obj.get("default").and_then(|v| v.as_str()) {
             d.to_string()
         } else {
-            // 官方 1.0 的 switch case 形状为 `{caseName: {when, then}}`；coord 只认
-            // `{condition, transition}`。探测到官方 `then` 时点名构造，避免只看
-            // 「缺 transition」而看不出被忽略的是流程指令（Spike 4 GAP）。
-            let names_then = obj
-                .values()
-                .any(|v| v.as_object().is_some_and(|o| o.contains_key("then")));
-            let detail = if names_then {
-                " (unimplemented construct 'then': coord switch conditions use 'transition')"
-            } else {
-                ""
-            };
             self.errors.push(ValidationError {
                 span: Some(span),
                 kind: ValidationErrorKind::MissingRequiredField(
                     "transition or defaultCondition".into(),
                 ),
-                message: format!("switch condition missing transition target{detail}"),
+                message: "switch condition missing transition target".to_string(),
             });
             return None;
         };
@@ -407,44 +550,97 @@ impl Validator {
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let fork_val = &map["fork"];
-        let branches = match fork_val {
-            Value::Array(arr) => arr
-                .iter()
-                .filter_map(|b| self.parse_fork_branch(b, raw.span))
-                .collect(),
-            Value::Object(obj) if obj.contains_key("branches") => {
-                if let Some(branches_arr) = obj["branches"].as_array() {
-                    branches_arr
-                        .iter()
-                        .filter_map(|b| self.parse_fork_branch(b, raw.span))
-                        .collect()
-                } else {
-                    Vec::new()
-                }
-            }
-            _ => Vec::new(),
+        // 官方 1.0.3 形状 `fork: {compete?, branches: [{<branch_name>: <taskBody>}, ...]}`
+        // 与 coord 既有裸数组/`{branches}` 形状兼容：两者都规约到同一分支数组。
+        let branches_arr = match fork_val {
+            Value::Array(arr) => Some(arr),
+            Value::Object(obj) => obj.get("branches").and_then(|v| v.as_array()),
+            _ => None,
+        };
+        // 官方把 `compete` 放在 `fork` 对象内；coord 既有形状把它放在任务体上。
+        // official-first，legacy 兄弟键回退；裸数组形状没有 `compete` 取 None。
+        let compete = fork_val
+            .get("compete")
+            .or_else(|| map.get("compete"))
+            .and_then(Value::as_bool);
+
+        // 缺 branches / 非数组 / 空列表都不得静默产出 0 分支的 Fork。
+        let Some(branches_arr) = branches_arr.filter(|arr| !arr.is_empty()) else {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("fork.branches".to_string()),
+                message: "unimplemented construct 'fork.branches': fork requires a non-empty \
+                          'branches' list"
+                    .to_string(),
+            });
+            return None;
         };
 
-        let compete = map.get("compete").and_then(|v| v.as_bool());
+        let mut branches = Vec::with_capacity(branches_arr.len());
+        for (index, branch) in branches_arr.iter().enumerate() {
+            if let Some(parsed) = self.parse_fork_branch(branch, index, raw.span) {
+                branches.push(parsed);
+            }
+        }
+        // 有无法映射的分支项时已点名登记错误，整体 fail-closed。
+        if branches.len() != branches_arr.len() {
+            return None;
+        }
 
         Some(Task::Fork(ForkTask { branches, compete }))
     }
 
-    fn parse_fork_branch(&mut self, branch: &Value, span: Span) -> Option<ForkBranch> {
-        let obj = branch.as_object()?;
-        let name = obj
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let tasks = if let Some(do_val) = obj.get("do") {
-            self.parse_sub_tasks(do_val, span)
-        } else if let Some(tasks_val) = obj.get("tasks") {
-            self.parse_sub_tasks(tasks_val, span)
-        } else {
-            Vec::new()
+    fn parse_fork_branch(
+        &mut self,
+        branch: &Value,
+        index: usize,
+        span: Span,
+    ) -> Option<ForkBranch> {
+        let Some(obj) = branch.as_object() else {
+            self.reject_fork_branch(index, span);
+            return None;
         };
-        Some(ForkBranch { name, tasks })
+
+        // coord 既有形状：`{name, do|tasks}`——`name` 必须是字符串才走此路；否则
+        // `{name: <body>}` 是官方单键 map（分支名恰为 `name`），不得落成空名分支。
+        if let Some(name) = obj.get("name").and_then(Value::as_str) {
+            let name = name.to_string();
+            let tasks = if let Some(do_val) = obj.get("do") {
+                self.parse_sub_tasks(do_val, span)
+            } else if let Some(tasks_val) = obj.get("tasks") {
+                self.parse_sub_tasks(tasks_val, span)
+            } else {
+                Vec::new()
+            };
+            return Some(ForkBranch { name, tasks });
+        }
+
+        // 官方 1.0.3 形状：单键 map `{<branch_name>: <taskBody>}`，键名即分支名；
+        // 分支项本身就是一个 taskList 项，交由 parse_sub_tasks 解析其 body。
+        if obj.len() == 1 {
+            if let Some(name) = obj.keys().next() {
+                let tasks = self.parse_sub_tasks(&Value::Array(vec![branch.clone()]), span);
+                return Some(ForkBranch {
+                    name: name.clone(),
+                    tasks,
+                });
+            }
+        }
+
+        self.reject_fork_branch(index, span);
+        None
+    }
+
+    fn reject_fork_branch(&mut self, index: usize, span: Span) {
+        let construct = format!("fork.branches[{index}]");
+        self.errors.push(ValidationError {
+            span: Some(span),
+            kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+            message: format!(
+                "unimplemented construct '{construct}': each fork branch must be a single-key map \
+                 '{{<branch_name>: <task>}}' or an object with a 'name' field"
+            ),
+        });
     }
 
     fn parse_for_each(
@@ -453,25 +649,86 @@ impl Validator {
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let for_val = &map["for"];
-        let obj = for_val.as_object()?;
-
-        let input = obj
-            .get("input")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let iteration = obj
-            .get("iteration")
-            .and_then(|v| v.as_str())
-            .unwrap_or("item")
-            .to_string();
-        let tasks = if let Some(do_val) = obj.get("do") {
-            self.parse_sub_tasks(do_val, raw.span)
-        } else if let Some(tasks_val) = obj.get("tasks") {
-            self.parse_sub_tasks(tasks_val, raw.span)
-        } else {
-            Vec::new()
+        let Some(obj) = for_val.as_object() else {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("for".to_string()),
+                message: "unimplemented construct 'for': 'for' must be an object with \
+                          'each'/'in' (official) or 'input'/'iteration' (legacy)"
+                    .to_string(),
+            });
+            return None;
         };
+
+        // `for.at`（集合路径表达式）是官方 schema 字段，coord 未实现；即使与 each/in 同现
+        // 也不能静默忽略，否则 at 指向的集合被丢弃、迭代语义错位。
+        if obj.contains_key("at") {
+            self.reject_for_field("for.at", raw.span);
+            return None;
+        }
+
+        // `while`（forTask 的循环继续条件，与 `for` 同级）coord 未实现：当前解析不读它，
+        // 条件会被静默忽略而迭代无界——点名 `while` fail-closed。`for` 内出现 `while`
+        // （非 schema 形状）同样拒绝，不静默。
+        if map.contains_key("while") || obj.contains_key("while") {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("while".to_string()),
+                message: "unimplemented construct 'while': coord for-each has no loop \
+                          continuation condition"
+                    .to_string(),
+            });
+            return None;
+        }
+
+        // 官方 1.0.3 形状 `for: {each, in}`，循环体是与 `for` 同级的 `do`；legacy 形状
+        // `for: {input, iteration, do|tasks}`。出现 each/in 即按官方形状严格校验，缺项点名，
+        // 不回退默认值静默丢失迭代语义。既无官方键也无 legacy 键的对象（含 `for: {}`）无
+        // 迭代来源，fail-closed 而非伪造 `iteration="item"`/`input=""`。
+        let official = obj.contains_key("each") || obj.contains_key("in");
+        let legacy = obj.contains_key("input") || obj.contains_key("iteration");
+        if !official && !legacy {
+            self.reject_for_field("for.in", raw.span);
+            return None;
+        }
+        let (iteration, input) = if official {
+            let Some(each) = obj.get("each").and_then(Value::as_str) else {
+                self.reject_for_field("for.each", raw.span);
+                return None;
+            };
+            let Some(input) = obj.get("in").and_then(Value::as_str) else {
+                self.reject_for_field("for.in", raw.span);
+                return None;
+            };
+            (each.to_string(), input.to_string())
+        } else {
+            (
+                obj.get("iteration")
+                    .and_then(Value::as_str)
+                    .unwrap_or("item")
+                    .to_string(),
+                obj.get("input")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        };
+
+        // 循环体：官方在 `for` 同级，legacy 在 `for` 内（`do`/`tasks`）。
+        let body = map
+            .get("do")
+            .or_else(|| obj.get("do"))
+            .or_else(|| obj.get("tasks"));
+        let Some(body) = body else {
+            self.reject_for_field("for.do", raw.span);
+            return None;
+        };
+        let tasks = self.parse_sub_tasks(body, raw.span);
+        // 空循环体等于跑零次迭代——字段在场却无语义，fail-closed 而非静默接受。
+        if tasks.is_empty() {
+            self.reject_for_field("for.do", raw.span);
+            return None;
+        }
 
         Some(Task::ForEach(ForEachTask {
             input,
@@ -480,26 +737,164 @@ impl Validator {
         }))
     }
 
+    /// `for` 形状缺项 fail-closed：点名构造，绝不回退默认值。
+    fn reject_for_field(&mut self, construct: &str, span: Span) {
+        self.errors.push(ValidationError {
+            span: Some(span),
+            kind: ValidationErrorKind::UnsupportedConstruct(construct.to_string()),
+            message: format!(
+                "unimplemented construct '{construct}': coord for-each requires this field \
+                 (official shape: for.each / for.in / sibling for.do)"
+            ),
+        });
+    }
+
     fn parse_wait(
         &mut self,
-        _raw: &RawNamedTask,
+        raw: &RawNamedTask,
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let wait_val = &map["wait"];
         let wait_str = match wait_val {
-            Value::String(s) => s.clone(),
+            Value::String(s) => {
+                // 含 `${` 的字符串是运行时表达式形式：ISO8601 解析失败会落成零等待，
+                // 静默把定时变成 no-op——点名 `wait` 拒绝，不伪装支持。
+                if s.contains("${") {
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct("wait".to_string()),
+                        message: "unimplemented construct 'wait': runtime expression durations \
+                                  are not supported"
+                            .to_string(),
+                    });
+                    return None;
+                }
+                s.clone()
+            }
             Value::Number(_) => wait_val.to_string(),
-            _ => String::new(),
+            Value::Object(obj) => {
+                // 官方 1.0.3 的相对时长是 `{days?, hours?, minutes?, seconds?,
+                // milliseconds?}` 组件对象（schema workflow-1.0.3.yaml `duration`）；
+                // WaitTask.wait 只消费 ISO8601 时长字符串，故把全部在场组件合成一个
+                // duration（如 `{seconds:1, milliseconds:500}` → `PT1.5S`）。`until` 是
+                // 绝对时刻，解析期无时钟；真正未知的键无语义——两者都点名构造
+                // fail-closed，不得静默丢字段（Spike 4 corpus 07 误读）。
+                let recognized = ["days", "hours", "minutes", "seconds", "milliseconds"];
+                let unknown: Vec<String> = obj
+                    .keys()
+                    .filter(|k| k.as_str() != "until" && !recognized.contains(&k.as_str()))
+                    .map(|k| format!("wait.{k}"))
+                    .collect();
+                if !unknown.is_empty() {
+                    let construct = unknown.join(", ");
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                        message: format!(
+                            "unimplemented construct '{construct}': coord wait supports only \
+                             'days'/'hours'/'minutes'/'seconds'/'milliseconds'"
+                        ),
+                    });
+                    return None;
+                }
+                if obj.contains_key("until") {
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct("wait.until".to_string()),
+                        message:
+                            "unimplemented construct 'wait.until': coord has no wall-clock at \
+                                  parse time; use a relative duration"
+                                .to_string(),
+                    });
+                    return None;
+                }
+                // 在场组件必须是非负整数；非法值不得静默忽略（fail-closed）。
+                for key in recognized {
+                    if obj.get(key).is_some_and(|v| v.as_u64().is_none()) {
+                        self.errors.push(ValidationError {
+                            span: Some(raw.span),
+                            kind: ValidationErrorKind::UnsupportedConstruct(format!("wait.{key}")),
+                            message: format!("wait.{key} must be a non-negative integer"),
+                        });
+                        return None;
+                    }
+                }
+                let component = |key: &str| obj.get(key).and_then(|v| v.as_u64());
+                if !recognized.iter().any(|k| obj.contains_key(*k)) {
+                    // 空对象 / 无从映射的时长：拒绝，不静默落成空 wait。
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct("wait".to_string()),
+                        message: "wait duration requires at least one of \
+                                  'days'/'hours'/'minutes'/'seconds'/'milliseconds'"
+                            .to_string(),
+                    });
+                    return None;
+                }
+                let mut dur = String::from("P");
+                if let Some(days) = component("days") {
+                    dur.push_str(&format!("{days}D"));
+                }
+                let mut time = String::new();
+                if let Some(hours) = component("hours") {
+                    time.push_str(&format!("{hours}H"));
+                }
+                if let Some(minutes) = component("minutes") {
+                    time.push_str(&format!("{minutes}M"));
+                }
+                if obj.contains_key("seconds") || obj.contains_key("milliseconds") {
+                    // 秒与毫秒合并成一个（可带小数的）秒分量，避免 `PT1S` + `PT0.5S` 冲突。
+                    let total_ms: u128 = component("seconds").unwrap_or(0) as u128 * 1000
+                        + component("milliseconds").unwrap_or(0) as u128;
+                    let whole = total_ms / 1000;
+                    let frac = total_ms % 1000;
+                    if frac == 0 {
+                        time.push_str(&format!("{whole}S"));
+                    } else {
+                        let mut frac_digits = format!("{frac:03}");
+                        while frac_digits.ends_with('0') {
+                            frac_digits.pop();
+                        }
+                        time.push_str(&format!("{whole}.{frac_digits}S"));
+                    }
+                }
+                if !time.is_empty() {
+                    dur.push('T');
+                    dur.push_str(&time);
+                }
+                dur
+            }
+            _ => {
+                // 非法 wait 形状（bool/array/null）不得静默落成空任务
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::UnsupportedConstruct("wait".to_string()),
+                    message: "wait must be an ISO8601 duration string or a duration object"
+                        .to_string(),
+                });
+                return None;
+            }
         };
         Some(Task::Wait(WaitTask { wait: wait_str }))
     }
 
     fn parse_listen(
         &mut self,
-        _raw: &RawNamedTask,
+        raw: &RawNamedTask,
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let listen_val = &map["listen"];
+
+        // 官方 1.0.3 形状：`listen.to.{one|all|any}.with.{type, source?, subject?}`
+        // （schema workflow-1.0.3.yaml `listenTask`/`eventConsumptionStrategy`）。陷阱：把
+        // `to.one.with` 过滤条件当平铺形状读会静默丢过滤器，故检测到 `to` 即按官方形状
+        // 严格解析；`to` 缺失时保留 coord 既有平铺/字符串形状。
+        if let Some(listen_obj) = listen_val.as_object() {
+            if listen_obj.contains_key("to") {
+                return self.parse_listen_official(raw, listen_obj);
+            }
+        }
+
         let obj = listen_val.as_object();
 
         let event_filter = if let Some(obj) = obj {
@@ -520,12 +915,14 @@ impl Validator {
                 subject: None,
             }
         } else {
-            EventFilter {
-                event_type: None,
-                event_types: vec![],
-                source: None,
-                subject: None,
-            }
+            // 非对象也非字符串的 listen（bool/array/null/number）无过滤器可映射；
+            // 不得静默落成空监听。
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("listen".to_string()),
+                message: "listen must be an object or an event-type string".to_string(),
+            });
+            return None;
         };
 
         Some(Task::Listen(ListenTask {
@@ -533,25 +930,281 @@ impl Validator {
         }))
     }
 
+    /// 解析官方 `listen.to` 消费策略（当前仅 `one`）。返回 `None` 表示已登记错误。
+    ///
+    /// coord 的 `EventFilter` 只有 event_type/source/subject；官方形状里其余键
+    /// （`listen.read`、`eventFilter.correlate`、`eventProperties` 的 id/time/data 等）
+    /// 无映射面，一律点名构造 fail-closed，绝不静默丢字段。
+    fn parse_listen_official(
+        &mut self,
+        raw: &RawNamedTask,
+        listen_obj: &serde_json::Map<String, Value>,
+    ) -> Option<Task> {
+        // `ListenTaskConfiguration` 只声明 `to`/`read`；`read`（envelope/raw 读取模式）
+        // 无对应字段，未知键同样不可映射。
+        let listen_extras: Vec<String> = listen_obj
+            .keys()
+            .filter(|k| !matches!(k.as_str(), "to" | "read"))
+            .map(|k| format!("listen.{k}"))
+            .chain(
+                listen_obj
+                    .contains_key("read")
+                    .then_some("listen.read".to_string()),
+            )
+            .collect();
+        if !listen_extras.is_empty() {
+            let construct = listen_extras.join(", ");
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                message: format!(
+                    "unimplemented construct '{construct}': coord listen supports only \
+                     'listen.to.one.with'"
+                ),
+            });
+            return None;
+        }
+
+        let Some(to) = listen_obj.get("to").and_then(|v| v.as_object()) else {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("listen.to".to_string()),
+                message: "unimplemented construct 'listen.to': expected a consumption strategy \
+                          object"
+                    .to_string(),
+            });
+            return None;
+        };
+
+        // `EventConsumptionStrategy` oneOf all/any/one：本期只实现 `one`。
+        if let Some(strategy) = ["all", "any"].iter().find(|s| to.contains_key(**s)) {
+            let construct = format!("listen.to.{strategy}");
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                message: format!(
+                    "unimplemented construct '{construct}': coord listen supports only 'to.one'"
+                ),
+            });
+            return None;
+        }
+        let to_extras: Vec<String> = to
+            .keys()
+            .filter(|k| k.as_str() != "one")
+            .map(|k| format!("listen.to.{k}"))
+            .collect();
+        if !to_extras.is_empty() {
+            let construct = to_extras.join(", ");
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                message: format!(
+                    "unimplemented construct '{construct}': coord listen supports only 'to.one'"
+                ),
+            });
+            return None;
+        }
+
+        let Some(one) = to.get("one").and_then(|v| v.as_object()) else {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("listen.to.one".to_string()),
+                message: "unimplemented construct 'listen.to.one': expected an event filter object"
+                    .to_string(),
+            });
+            return None;
+        };
+
+        // `eventFilter` 只有 `with`（+`correlate`）；`correlate` 需把事件属性关联到
+        // 输入数据属性，无映射面。
+        let one_extras: Vec<String> = one
+            .keys()
+            .filter(|k| !matches!(k.as_str(), "with" | "correlate"))
+            .map(|k| format!("listen.to.one.{k}"))
+            .chain(
+                one.contains_key("correlate")
+                    .then_some("listen.to.one.correlate".to_string()),
+            )
+            .collect();
+        if !one_extras.is_empty() {
+            let construct = one_extras.join(", ");
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                message: format!(
+                    "unimplemented construct '{construct}': event filter supports only 'with'"
+                ),
+            });
+            return None;
+        }
+
+        let with = one.get("with").and_then(|v| v.as_object());
+        let with_unknown: Vec<String> = with
+            .map(|w| {
+                w.keys()
+                    .filter(|k| !matches!(k.as_str(), "type" | "source" | "subject"))
+                    .map(|k| format!("listen.to.one.with.{k}"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !with_unknown.is_empty() {
+            let construct = with_unknown.join(", ");
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                message: format!(
+                    "unimplemented construct '{construct}': listen filter supports only \
+                     'type'/'source'/'subject'"
+                ),
+            });
+            return None;
+        }
+
+        let Some(event_type) = with.and_then(|w| w.get("type")).and_then(|v| v.as_str()) else {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct(
+                    "listen.to.one.with.type".to_string(),
+                ),
+                message: "listen requires a string 'listen.to.one.with.type'".to_string(),
+            });
+            return None;
+        };
+
+        Some(Task::Listen(ListenTask {
+            listen: EventFilter {
+                event_type: Some(event_type.to_string()),
+                event_types: vec![],
+                source: with
+                    .and_then(|w| w.get("source"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                subject: with
+                    .and_then(|w| w.get("subject"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            },
+        }))
+    }
+
     fn parse_emit(
         &mut self,
-        _raw: &RawNamedTask,
+        raw: &RawNamedTask,
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let emit_val = &map["emit"];
         let obj = emit_val.as_object();
 
-        let (event_type, source, data) = if let Some(obj) = obj {
-            (
+        // 官方 1.0.3 把载荷嵌在 `emit.event.with.{type, source?, data?}`
+        // （schema workflow-1.0.3.yaml `emitTask`/`eventProperties`，Spike 4 corpus 09）。
+        // `event` 在场即官方形状。coord 的 EmitEvent 只有 type/source/data 三个字段：
+        // - schema `EmitEventDefinition` 声明 `additionalProperties: true`，`event`
+        //   兄弟键（如 id）schema 合法但无对应字段；
+        // - eventProperties 另定义 id/time/subject/datacontenttype/dataschema。
+        // 两类超范围键都无法映射，静默丢弃即误读，故一律点名构造 fail-closed。
+        // `with.type` 是必填事件类型，缺失同样点名拒绝，不得落成空 event_type。
+        // 既有平铺 `{type, source, data}` 形状保持不变。
+        let (event_type, source, data) = match obj {
+            Some(obj) if obj.contains_key("event") => {
+                // `event` 的兄弟键在 `emit` 下 schema 非法（EmitTaskConfiguration
+                // `unevaluatedProperties: false`），且无 EmitEvent 映射面；静默丢弃即误读。
+                let emit_siblings: Vec<String> = obj
+                    .keys()
+                    .filter(|k| k.as_str() != "event")
+                    .map(|k| format!("emit.{k}"))
+                    .collect();
+                if !emit_siblings.is_empty() {
+                    let construct = emit_siblings.join(", ");
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                        message: format!(
+                            "unimplemented construct '{construct}': emit supports only \
+                             'emit.event'"
+                        ),
+                    });
+                    return None;
+                }
+                let event = obj.get("event").and_then(|e| e.as_object());
+                if let Some(event) = event {
+                    let unknown: Vec<String> = event
+                        .keys()
+                        .filter(|k| k.as_str() != "with")
+                        .map(|k| format!("emit.event.{k}"))
+                        .collect();
+                    if !unknown.is_empty() {
+                        let construct = unknown.join(", ");
+                        self.errors.push(ValidationError {
+                            span: Some(raw.span),
+                            kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                            message: format!(
+                                "unimplemented construct '{construct}': emit event supports only \
+                                 'with'"
+                            ),
+                        });
+                        return None;
+                    }
+                }
+                let with = event
+                    .and_then(|e| e.get("with"))
+                    .and_then(|w| w.as_object());
+                if let Some(with) = with {
+                    let unknown: Vec<String> = with
+                        .keys()
+                        .filter(|k| !matches!(k.as_str(), "type" | "source" | "data"))
+                        .map(|k| format!("emit.event.with.{k}"))
+                        .collect();
+                    if !unknown.is_empty() {
+                        let construct = unknown.join(", ");
+                        self.errors.push(ValidationError {
+                            span: Some(raw.span),
+                            kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                            message: format!(
+                                "unimplemented construct '{construct}': emit event supports only \
+                                 'type'/'source'/'data'"
+                            ),
+                        });
+                        return None;
+                    }
+                }
+                let Some(event_type) = with.and_then(|w| w.get("type")).and_then(|v| v.as_str())
+                else {
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(
+                            "emit.event.with.type".to_string(),
+                        ),
+                        message: "emit requires a string 'emit.event.with.type'".to_string(),
+                    });
+                    return None;
+                };
+                (
+                    event_type.to_string(),
+                    with.and_then(|w| w.get("source"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    with.and_then(|w| w.get("data")).cloned(),
+                )
+            }
+            Some(obj) => (
                 obj.get("type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
                 obj.get("source").and_then(|v| v.as_str()).map(String::from),
                 obj.get("data").cloned(),
-            )
-        } else {
-            (String::new(), None, None)
+            ),
+            None => {
+                // 非对象 emit（bool/array/null/number）无字段可映射；不得静默落成空事件。
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::UnsupportedConstruct("emit".to_string()),
+                    message: "emit must be an object (`emit.event.with` or flat \
+                              `{type,source,data}`)"
+                        .to_string(),
+                });
+                return None;
+            }
         };
 
         Some(Task::Emit(EmitTask {
@@ -565,28 +1218,100 @@ impl Validator {
 
     fn parse_set(
         &mut self,
-        _raw: &RawNamedTask,
+        raw: &RawNamedTask,
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let set_val = &map["set"];
-        let obj = set_val.as_object();
-
-        let (variable, value) = if let Some(obj) = obj {
-            (
-                obj.get("variable")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                obj.get("value")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            )
-        } else {
-            (String::new(), String::new())
+        let Some(obj) = set_val.as_object() else {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("set".to_string()),
+                message: "set must be an object of variable assignments".to_string(),
+            });
+            return None;
         };
 
-        Some(Task::Set(SetTask { variable, value }))
+        // coord 既有形状：`{variable, value}`（`value` 为 jq 表达式字符串）。必须两键齐备
+        // 才走 native 分支：官方单键 map `set: {variable: "x"}` 的键名恰为 `variable`，
+        // 只看 `variable` 会把它的值误当变量名、丢 `value`。
+        if let (Some(variable), Some(value)) = (
+            obj.get("variable").and_then(Value::as_str),
+            obj.get("value").and_then(Value::as_str),
+        ) {
+            return Some(Task::Set(SetTask {
+                variable: variable.to_string(),
+                value: value.to_string(),
+            }));
+        }
+
+        // 官方 1.0.3 形状：`set: {<var>: <literal-or-${expr}>}`（corpus 01/05/06）。
+        // 单键映射成单变量 SetTask；多键超出单变量模型，逐键点名 fail-closed。
+        if obj.len() == 1 {
+            let Some((variable, value)) = obj.iter().next() else {
+                // 不可达：`len == 1` 必有唯一键；不可达分支不得 panic（panic-path gate）。
+                return None;
+            };
+            // 值里嵌了 `${ ... }`（trim 后不是单个完整 `${ ... }` 表达式）时 coord 无字符串
+            // 插值/部分模板面，当字面量处理会静默丢模板语义或丢尾部——fail-closed 点名
+            // `set.<key>`。`${ .a }${ .b }` 这类多段拼接也算非单段完整表达式。
+            if let Value::String(s) = value {
+                let trimmed = s.trim();
+                let segments = trimmed.matches("${").count();
+                let is_full_expr =
+                    segments == 1 && trimmed.starts_with("${") && trimmed.ends_with('}');
+                if segments > 0 && !is_full_expr {
+                    let construct = format!("set.{variable}");
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                        message: format!(
+                            "unimplemented construct '{construct}': coord set has no string \
+                             interpolation; embedded '${{...}}' would be dropped as a literal"
+                        ),
+                    });
+                    return None;
+                }
+            }
+            // 数组字面量（含对象字面量内嵌）求值器无 `[...]` 分支，会落到 `Ok(context)`——
+            // 静默把整个上下文当变量值。数组字面量支持前解析期点名拒绝。
+            if set_value_contains_array(value) {
+                let construct = format!("set.{variable}");
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                    message: format!(
+                        "unimplemented construct '{construct}': array values are not supported"
+                    ),
+                });
+                return None;
+            }
+            return Some(Task::Set(SetTask {
+                variable: variable.clone(),
+                value: official_set_value_expr(value),
+            }));
+        }
+
+        if obj.is_empty() {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("set".to_string()),
+                message: "set requires at least one variable assignment".to_string(),
+            });
+            return None;
+        }
+
+        for key in obj.keys() {
+            let construct = format!("set.{key}");
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                message: format!(
+                    "unimplemented construct '{construct}': coord set binds a single variable; \
+                     multi-key set is not representable"
+                ),
+            });
+        }
+        None
     }
 
     fn parse_raise(
@@ -682,9 +1407,9 @@ impl Validator {
     ) -> Option<Task> {
         let run_val = &map["run"];
 
-        let workflow = if let Some(s) = run_val.as_str() {
+        let (workflow, nested_input) = if let Some(s) = run_val.as_str() {
             // 简写: "namespace::name@version"
-            Self::parse_workflow_ref_short(s)
+            (Self::parse_workflow_ref_short(s), None)
         } else if let Some(obj) = run_val.as_object() {
             // coord 只实现 `run.workflow`（子流程调用）。`run.script|container|shell`
             // 无执行面，`run.await|return` 无可表达的时序/输出语义；raw 值若原样
@@ -719,11 +1444,33 @@ impl Validator {
                     .unwrap_or("")
                     .to_string()
             };
-            WorkflowRef {
-                namespace: pick("namespace"),
-                name: pick("name"),
-                version: pick("version"),
-            }
+            // 子流程入参嵌在 `run.workflow.input`：与 ref 同处嵌套层，不得只读任务级
+            // `input` 而丢弃（Spike 4 误读）。schema 要求其为对象；present 但非对象
+            // （含 null）fail-closed 点名，绝不静默忽略或遮蔽扁平回退。
+            let nested_input = match nested.and_then(|n| n.get("input")) {
+                None => None,
+                Some(v) if v.is_object() => Some(v.clone()),
+                Some(_) => {
+                    self.errors.push(ValidationError {
+                        span: Some(raw.span),
+                        kind: ValidationErrorKind::UnsupportedConstruct(
+                            "run.workflow.input".to_string(),
+                        ),
+                        message: "unimplemented construct 'run.workflow.input': subflow input \
+                                  must be a JSON object"
+                            .to_string(),
+                    });
+                    return None;
+                }
+            };
+            (
+                WorkflowRef {
+                    namespace: pick("namespace"),
+                    name: pick("name"),
+                    version: pick("version"),
+                },
+                nested_input,
+            )
         } else {
             self.errors.push(ValidationError {
                 span: Some(raw.span),
@@ -744,7 +1491,9 @@ impl Validator {
             return None;
         }
 
-        let input = map.get("input").cloned();
+        // 子流程输入：官方嵌于 `run.workflow.input`（nested_input），旧方言放在任务级
+        // `input`。嵌套优先、缺失回退扁平键，绝不静默丢弃。
+        let input = nested_input.or_else(|| map.get("input").cloned());
         Some(Task::Run(RunTask { workflow, input }))
     }
 
@@ -855,20 +1604,22 @@ impl Validator {
         for task in tasks {
             match &task.task {
                 Task::Switch(switch) => {
-                    for cond in &switch.conditions {
-                        // defaultCondition 不是显式目标（它就是当前分支）
-                        if cond.condition.is_none() {
-                            continue;
-                        }
-                        if !self.task_names.contains(&cond.transition) {
+                    // 每个条件（含 condition=None 的 legacy defaultCondition）与
+                    // default_condition 都是运行期 Goto 目标，必须存在于任务集合；
+                    // 官方 default case 使该洞首次可达（此前官方形状整体被拒）。
+                    let targets = switch
+                        .conditions
+                        .iter()
+                        .map(|c| &c.transition)
+                        .chain(switch.default_condition.iter().map(|c| &c.transition));
+                    for target in targets {
+                        if !self.task_names.contains(target) {
                             self.errors.push(ValidationError {
                                 span: None,
-                                kind: ValidationErrorKind::UnknownTaskReference(
-                                    cond.transition.clone(),
-                                ),
+                                kind: ValidationErrorKind::UnknownTaskReference(target.clone()),
                                 message: format!(
                                     "switch in '{}' references unknown task '{}'",
-                                    task.name, cond.transition
+                                    task.name, target
                                 ),
                             });
                         }
@@ -876,6 +1627,9 @@ impl Validator {
                 }
                 Task::Do(do_task) => {
                     self.check_task_refs(&do_task.tasks);
+                }
+                Task::ForEach(fe) => {
+                    self.check_task_refs(&fe.tasks);
                 }
                 Task::TryCatch(tc) => {
                     self.check_task_refs(&tc.r#try);
@@ -914,6 +1668,9 @@ impl Validator {
                 Task::Do(do_task) => {
                     self.check_function_refs(&do_task.tasks);
                 }
+                Task::ForEach(fe) => {
+                    self.check_function_refs(&fe.tasks);
+                }
                 Task::TryCatch(tc) => {
                     self.check_function_refs(&tc.r#try);
                     for clause in &tc.catch {
@@ -932,19 +1689,24 @@ impl Validator {
 
     /// 循环依赖检测：switch transition 不能形成环
     fn check_cycles(&mut self, tasks: &[NamedTask]) {
-        // 构建 transition 图
+        // 构建 transition 图。`condition` 为 None 的 legacy defaultCondition 与官方 when-less
+        // case 提升出的 `default_condition` 同样是运行期 Goto 目标，必须计入：运行期无步数预算，
+        // 自环会无限循环。本图只含顶层 switch 节点（Goto 目标只解析顶层任务，runtime
+        // `find_task_index`）；经由嵌套 switch 绕回顶层任务的环超出本检查范围（既有缺口，未扩大）。
         let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
         for task in tasks {
             if let Task::Switch(switch) = &task.task {
-                for cond in &switch.conditions {
-                    if cond.condition.is_none() {
-                        continue; // defaultCondition 不形成边
-                    }
-                    edges
-                        .entry(task.name.as_str())
-                        .or_default()
-                        .push(cond.transition.as_str());
-                }
+                let targets = switch
+                    .conditions
+                    .iter()
+                    .map(|c| c.transition.as_str())
+                    .chain(
+                        switch
+                            .default_condition
+                            .iter()
+                            .map(|c| c.transition.as_str()),
+                    );
+                edges.entry(task.name.as_str()).or_default().extend(targets);
             }
         }
 
@@ -1114,6 +1876,15 @@ impl Validator {
                     .or_else(|| fork.get("branches").and_then(|v| v.as_array()));
                 if let Some(branches) = branches {
                     for b in branches {
+                        if let Some(bobj) = b.as_object() {
+                            // 官方单键 map 形状 `{<branch_name>: <task>}`：整个分支项就是一个
+                            // 具名任务，其标准字段（if/input/…）必须按该分支名收集。
+                            if !bobj.contains_key("name") && bobj.len() == 1 {
+                                let nested = extract_raw_sub_tasks(std::slice::from_ref(b));
+                                self.collect_task_meta(&nested, map);
+                                continue;
+                            }
+                        }
                         let tasks = b
                             .get("tasks")
                             .and_then(|v| v.as_array())
@@ -1230,6 +2001,31 @@ impl Validator {
                 after: "P7D".to_string(),
             }
         }
+    }
+}
+
+/// 官方 1.0.3 `set` map 的 value → jq 表达式字符串。
+///
+/// 陷阱：官方 `<var>` 值既可能是 JSON 字面量，也可能是运行时表达式 `"${ ... }"`。
+/// 若把字符串字面量直接当裸标识符传下去，`set.rs` 会当作字段访问；故 JSON 字面量一律
+/// 序列化（`"hi"` → `"\"hi\""`），确保求值结果等于字面量本身。`${ ... }` 由
+/// `ExpressionEvaluator::unwrap_expression` 负责剥壳，原样透传即可。
+fn official_set_value_expr(value: &Value) -> String {
+    match value {
+        Value::String(s) if s.trim().starts_with("${") && s.trim().ends_with('}') => s.clone(),
+        other => crate::workflow::sw::json_to_jq_literal(other),
+    }
+}
+
+/// 官方 `set` 值是否含数组字面量（含对象字面量内嵌）。
+///
+/// `eval_jq_subset` 无 `[...]` 数组字面量分支，数组表达式会落到 `Ok(context.clone())`，
+/// 即把整个上下文写成变量值（Spike 4 式的静默误读）。数组字面量支持前解析期点名拒绝。
+fn set_value_contains_array(value: &Value) -> bool {
+    match value {
+        Value::Array(_) => true,
+        Value::Object(map) => map.values().any(set_value_contains_array),
+        _ => false,
     }
 }
 
@@ -1372,6 +2168,7 @@ pub fn parse_timeout_value(v: &Value) -> Option<TimeoutConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workflow::expression::ExpressionEvaluator;
 
     // ─── 完整解析 + 校验流程测试 ───
 
@@ -1460,6 +2257,362 @@ do:
             }
             _ => panic!("expected Switch task"),
         }
+    }
+
+    #[test]
+    fn test_switch_official_when_then_shape() {
+        // 官方 1.0.3 case 形状 `{<case>: {when, then}}`：`when` → condition、`then` → transition；
+        // `then: end|exit` 映射到终端任务 `__end`（Spike 4 corpus 04）。逐字断言，不得静默丢字段。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-switch
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - high:
+            when: "${ .counter > 10 }"
+            then: exit
+        - low:
+            when: "${ .counter <= 10 }"
+            then: next
+  - next:
+      call: http
+      with:
+        method: GET
+        endpoint: "https://api/next"
+"#;
+
+        let def = parse_and_validate_yaml(yaml).expect("official switch must parse");
+        let s = match &def.do_tasks[0].task {
+            Task::Switch(s) => s,
+            other => panic!("expected Switch task, got {other:?}"),
+        };
+        assert_eq!(s.conditions.len(), 2);
+        assert_eq!(
+            s.conditions[0].condition.as_deref(),
+            Some("${ .counter > 10 }")
+        );
+        assert_eq!(s.conditions[0].transition, "__end");
+        assert_eq!(
+            s.conditions[1].condition.as_deref(),
+            Some("${ .counter <= 10 }")
+        );
+        assert_eq!(s.conditions[1].transition, "next");
+        assert!(s.default_condition.is_none());
+        // `then: exit` 的终端引用必须可解析：定义中补出 `__end` 终端任务。
+        assert!(
+            def.do_tasks
+                .iter()
+                .any(|t| t.name == "__end" && matches!(t.task, Task::End(_))),
+            "exit must map to a synthesized __end terminal task: {:?}",
+            def.do_tasks.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_switch_default_case_maps_to_default_condition() {
+        // 官方 case 的 `when` 可选：无 `when` 的 case（含 `default`）映射到 default_condition，
+        // 不得当作「缺 when」拒绝，也不得产出无名分支。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-switch-default
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - high:
+            when: "${ .counter > 10 }"
+            then: approved
+        - default:
+            then: exit
+  - approved:
+      call: http
+      with:
+        method: GET
+        endpoint: "https://api/approved"
+"#;
+
+        let def = parse_and_validate_yaml(yaml).expect("official default case must parse");
+        let s = match &def.do_tasks[0].task {
+            Task::Switch(s) => s,
+            other => panic!("expected Switch task, got {other:?}"),
+        };
+        assert_eq!(s.conditions.len(), 1);
+        assert_eq!(
+            s.conditions[0].condition.as_deref(),
+            Some("${ .counter > 10 }")
+        );
+        assert_eq!(s.conditions[0].transition, "approved");
+        let default = s.default_condition.as_ref().expect("default case mapped");
+        assert_eq!(default.condition, None);
+        assert_eq!(default.transition, "__end");
+    }
+
+    #[test]
+    fn test_switch_multiple_default_cases_rejected() {
+        // 多个无 `when` case：default 唯一，fail-closed 点名冲突项 `switch.<case>.when`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-switch-multi-default
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - first:
+            when: "${ .counter > 10 }"
+            then: exit
+        - a:
+            then: exit
+        - b:
+            then: exit
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("multiple default cases must reject");
+        assert!(
+            error_kind_naming(&errs, "switch.b.when"),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_switch_case_missing_then_rejected() {
+        // 官方 case 缺 `then`：fail-closed 点名 `switch.<case>.then`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-switch-missing-then
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - high:
+            when: "${ .counter > 10 }"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("missing switch.high.then must reject");
+        assert!(
+            error_kind_naming(&errs, "switch.high.then"),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_switch_case_continue_rejected() {
+        // `then: continue`（do 列表 fall-through）在不改执行器的前提下无法表达：
+        // fail-closed 拒绝并点名 `switch.<case>.then`，不得静默误判为下一任务。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-switch-continue
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - high:
+            when: "${ .counter > 10 }"
+            then: continue
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("then: continue must reject");
+        assert!(
+            error_kind_naming(&errs, "switch.high.then"),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_switch_default_condition_unknown_target_rejected() {
+        // default 分支同样是运行期 Goto 目标：官方 default case 使其首次可达，
+        // 未知目标必须 fail-closed（此前官方形状整体被拒，该洞不可达）。
+        let official = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-switch-default-typo
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - default:
+            then: typoTask
+"#;
+        let legacy = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: legacy-switch-default-typo
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - defaultCondition: typoTask
+"#;
+        for yaml in [official, legacy] {
+            let errs =
+                parse_and_validate_yaml(yaml).expect_err("unknown default target must reject");
+            assert!(
+                errs.iter().any(|e| matches!(
+                    &e.kind,
+                    ValidationErrorKind::UnknownTaskReference(t) if t == "typoTask"
+                )),
+                "errors: {errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_switch_reserved_end_non_terminal_rejected() {
+        // `__end` 是 switch 终端保留名：用户定义的非终端 `__end` 不得被 `then: exit` 当作目标，
+        // 否则 `exit` 会落到普通任务并 fall-through。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: reserved-end-non-terminal
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - high:
+            when: "${ .counter > 10 }"
+            then: exit
+  - __end:
+      set:
+        variable: result
+        value: "\"done\""
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("non-terminal __end must reject");
+        assert!(error_kind_naming(&errs, "__end"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_switch_user_defined_end_terminal_reused() {
+        // 用户已定义 `__end` 终端（end: true）时复用之，不得再补一个重复任务。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: user-end-terminal
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - high:
+            when: "${ .counter > 10 }"
+            then: exit
+  - __end:
+      end: true
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("user __end terminal must be reused");
+        assert_eq!(def.do_tasks.iter().filter(|t| t.name == "__end").count(), 1);
+        assert!(def
+            .do_tasks
+            .iter()
+            .any(|t| t.name == "__end" && matches!(&t.task, Task::End(_))));
+    }
+
+    #[test]
+    fn test_switch_case_named_condition_maps() {
+        // case 名恰为 legacy 键名（condition/transition/defaultCondition）时，
+        // 按字段集（when/then）判定为官方形状，不得误入 legacy 路径报「缺 transition」。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-switch-keyword-case
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - condition:
+            when: "${ .counter > 10 }"
+            then: exit
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("case named `condition` must map");
+        match &def.do_tasks[0].task {
+            Task::Switch(s) => {
+                assert_eq!(s.conditions.len(), 1);
+                assert_eq!(
+                    s.conditions[0].condition.as_deref(),
+                    Some("${ .counter > 10 }")
+                );
+                assert_eq!(s.conditions[0].transition, "__end");
+            }
+            other => panic!("expected Switch task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_switch_default_case_self_reference_rejected() {
+        // 官方 when-less case（default）映射到 default_condition，同样是运行期 Goto 目标：
+        // 自环会让运行期无限循环（运行期无步数预算），必须计入环检测并 fail-closed 拒绝。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: switch-default-self-loop
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - default:
+            then: route
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("self-referential default must reject");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e.kind, ValidationErrorKind::CyclicDependency(_))),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_switch_non_object_item_rejected() {
+        // `switch: ["foo"]` 非对象项：legacy 路径静默丢弃 → fail-closed 点名 `switch[0]`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: switch-non-object-item
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - "foo"
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("non-object switch item must reject");
+        assert!(error_kind_naming(&errs, "switch[0]"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_switch_case_missing_when_and_then_rejected() {
+        // 官方单键 case 体缺 `when`/`then`（`{high: {}}`）：曾回退 legacy 报「缺 transition」，
+        // 现 fail-closed 点名 `switch.high.then`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: switch-case-empty-body
+  version: "1.0"
+do:
+  - route:
+      switch:
+        - high: {}
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("empty official case body must reject");
+        assert!(
+            error_kind_naming(&errs, "switch.high.then"),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
@@ -1708,6 +2861,173 @@ do:
     }
 
     #[test]
+    fn test_fork_official_branch_map_shape() {
+        // 官方 1.0.3 形状：branches 是单键 map 列表 `{<branch_name>: <taskBody>}`。
+        // 分支名取自键名，tasks 取自该 task body；不得再落成空名 0 任务分支。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: fork-map
+  version: "1.0"
+do:
+  - fan:
+      fork:
+        compete: false
+        branches:
+          - branch_a:
+              set:
+                variable: x
+                value: "1"
+          - branch_b:
+              set:
+                variable: y
+                value: "2"
+      then: exit
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official fork branch map must parse");
+        match &def.do_tasks[0].task {
+            Task::Fork(fork) => {
+                assert_eq!(fork.branches.len(), 2);
+                assert_eq!(fork.compete, Some(false));
+                assert_eq!(fork.branches[0].name, "branch_a");
+                assert_eq!(fork.branches[1].name, "branch_b");
+                assert_eq!(
+                    fork.branches[0].tasks,
+                    vec![NamedTask {
+                        name: "branch_a".into(),
+                        task: Task::Set(SetTask {
+                            variable: "x".into(),
+                            value: "1".into(),
+                        }),
+                    }]
+                );
+                assert_eq!(
+                    fork.branches[1].tasks,
+                    vec![NamedTask {
+                        name: "branch_b".into(),
+                        task: Task::Set(SetTask {
+                            variable: "y".into(),
+                            value: "2".into(),
+                        }),
+                    }]
+                );
+            }
+            other => panic!("expected Fork task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fork_official_compete_true_is_read_from_fork_object() {
+        // 官方把 `compete` 放在 `fork` 对象内；误从任务体读会得到 None 并以非竞速模式运行。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: fork-compete
+  version: "1.0"
+do:
+  - race:
+      fork:
+        compete: true
+        branches:
+          - branch_a:
+              set:
+                variable: x
+                value: "1"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official fork compete must parse");
+        match &def.do_tasks[0].task {
+            Task::Fork(fork) => assert_eq!(fork.compete, Some(true)),
+            other => panic!("expected Fork task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fork_branch_keyed_name_is_official_map() {
+        // 分支项键名为 `name` 且值为对象：不是 legacy `{name: <string>, ...}`，而是官方
+        // 单键 map——分支名恰为 `name`，不得落成空名 0 任务分支。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: fork-name-key
+  version: "1.0"
+do:
+  - fan:
+      fork:
+        branches:
+          - name:
+              set:
+                variable: x
+                value: "1"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("branch keyed name must parse");
+        match &def.do_tasks[0].task {
+            Task::Fork(fork) => {
+                assert_eq!(fork.branches.len(), 1);
+                assert_eq!(fork.branches[0].name, "name");
+                assert_eq!(
+                    fork.branches[0].tasks,
+                    vec![NamedTask {
+                        name: "name".into(),
+                        task: Task::Set(SetTask {
+                            variable: "x".into(),
+                            value: "1".into(),
+                        }),
+                    }]
+                );
+            }
+            other => panic!("expected Fork task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fork_empty_branches_rejected() {
+        // 空 branches 不得静默产出 0 分支的 Fork：必须点名 fork.branches 拒绝。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: fork-empty
+  version: "1.0"
+do:
+  - fan:
+      fork:
+        branches: []
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("empty branches must be rejected");
+        assert!(errors_naming(&errs, "fork.branches"), "got {errs:?}");
+    }
+
+    #[test]
+    fn test_fork_branch_item_without_name_rejected() {
+        // 分支项既非单键 map 也无 `name` 时无法确定分支名/body，必须按序号点名拒绝。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: fork-bad-branch
+  version: "1.0"
+do:
+  - fan:
+      fork:
+        branches:
+          - branch_x:
+              set:
+                variable: x
+                value: "1"
+            branch_y:
+              set:
+                variable: y
+                value: "2"
+"#;
+        let errs =
+            parse_and_validate_yaml(yaml).expect_err("malformed branch item must be rejected");
+        assert!(errors_naming(&errs, "fork.branches[0]"), "got {errs:?}");
+    }
+
+    #[test]
     fn test_validate_try_catch_task() {
         let yaml = r#"
 document:
@@ -1784,6 +3104,272 @@ do:
     }
 
     #[test]
+    fn test_for_official_each_in_with_sibling_do() {
+        // 官方 1.0.3 形状（corpus 06）：`for: {each, in}` 且循环体 `do` 与 `for` 同级。
+        // `each` → iteration、`in` → input、同级 `do` → 循环体任务，逐字映射，不得回退默认值。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for
+  version: "1.0"
+do:
+  - loop:
+      for:
+        each: item
+        in: "${ .items }"
+      do:
+        - process:
+            call: http
+            with:
+              method: POST
+              endpoint: "https://api/process"
+"#;
+
+        let def = parse_and_validate_yaml(yaml).expect("official for-each must parse");
+        match &def.do_tasks[0].task {
+            Task::ForEach(fe) => {
+                assert_eq!(fe.iteration, "item");
+                assert_eq!(fe.input, "${ .items }");
+                assert_eq!(fe.tasks.len(), 1);
+                assert_eq!(fe.tasks[0].name, "process");
+            }
+            other => panic!("expected ForEach task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_for_missing_each_rejected() {
+        // 官方形状缺 `each`：fail-closed 点名 `for.each`，不得静默用默认变量名。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-missing-each
+  version: "1.0"
+do:
+  - loop:
+      for:
+        in: "${ .items }"
+      do:
+        - process:
+            call: http
+            with:
+              method: GET
+              endpoint: "https://api/process"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("missing for.each must reject");
+        assert!(error_kind_naming(&errs, "for.each"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_for_missing_in_rejected() {
+        // 官方形状缺 `in`：fail-closed 点名 `for.in`，不回退空 input。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-missing-in
+  version: "1.0"
+do:
+  - loop:
+      for:
+        each: item
+      do:
+        - process:
+            call: http
+            with:
+              method: GET
+              endpoint: "https://api/process"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("missing for.in must reject");
+        assert!(error_kind_naming(&errs, "for.in"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_for_missing_body_rejected() {
+        // 官方形状缺循环体 `do`：fail-closed 点名 `for.do`，不得产出空迭代。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-missing-body
+  version: "1.0"
+do:
+  - loop:
+      for:
+        each: item
+        in: "${ .items }"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("missing for.do must reject");
+        assert!(error_kind_naming(&errs, "for.do"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_for_non_object_rejected() {
+        // 非对象 `for`：fail-closed 点名 `for`，不得静默丢掉整个任务。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-non-object
+  version: "1.0"
+do:
+  - loop:
+      for: "${ .items }"
+      do:
+        - process:
+            call: http
+            with:
+              method: GET
+              endpoint: "https://api/process"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("non-object for must reject");
+        assert!(error_kind_naming(&errs, "for"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_for_empty_object_rejected() {
+        // `for: {}` + 同级 `do`：既无官方键也无 legacy 键，不得伪造 `iteration="item"`
+        // / `input=""`，fail-closed 点名 `for.in`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-empty-object
+  version: "1.0"
+do:
+  - loop:
+      for: {}
+      do:
+        - process:
+            call: http
+            with:
+              method: GET
+              endpoint: "https://api/process"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("empty for object must reject");
+        assert!(error_kind_naming(&errs, "for.in"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_for_at_rejected() {
+        // 官方 schema 的 `for.at`（集合路径）coord 未实现：fail-closed 点名 `for.at`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-at
+  version: "1.0"
+do:
+  - loop:
+      for:
+        each: item
+        at: "${ .items }"
+      do:
+        - process:
+            call: http
+            with:
+              method: GET
+              endpoint: "https://api/process"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("for.at must reject");
+        assert!(errors_naming(&errs, "for.at"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_for_while_rejected() {
+        // 官方 1.0.3 `while`（forTask 循环继续条件，与 `for` 同级）coord 未实现：
+        // 当前不读它，条件会被静默忽略而迭代无界——fail-closed 点名 `while`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-while
+  version: "1.0"
+do:
+  - loop:
+      for:
+        each: item
+        in: "${ .items }"
+      while: "${ .more }"
+      do:
+        - process:
+            call: http
+            with:
+              method: GET
+              endpoint: "https://api/process"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("while must reject");
+        assert!(error_kind_naming(&errs, "while"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_for_body_unknown_function_rejected() {
+        // 优先级改动后 for 体不再当 Do；未知函数引用校验必须递归进 ForEach.tasks。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-body-fn
+  version: "1.0"
+do:
+  - loop:
+      for:
+        each: item
+        in: "${ .items }"
+      do:
+        - process:
+            call: myFunction
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("unknown fn in for body must reject");
+        assert!(
+            errs.iter().any(|e| e.message.contains("myFunction")),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_for_body_invalid_transition_rejected() {
+        // 同上：for 体内 switch 的未知跳转目标必须递归校验（UnknownTaskReference）。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-for-body-transition
+  version: "1.0"
+do:
+  - loop:
+      for:
+        each: item
+        in: "${ .items }"
+      do:
+        - branch:
+            switch:
+              - condition: "${ .x > 0 }"
+                transition: nowhere
+"#;
+
+        let errs =
+            parse_and_validate_yaml(yaml).expect_err("unknown transition in for body must reject");
+        assert!(
+            errs.iter().any(|e| matches!(
+                e.kind,
+                ValidationErrorKind::UnknownTaskReference(ref n) if n == "nowhere"
+            )),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
     fn test_detect_cyclic_dependency() {
         let yaml = r#"
 document:
@@ -1856,6 +3442,237 @@ do:
             }
             _ => panic!("expected Set task"),
         }
+    }
+
+    #[test]
+    fn test_set_official_map_numeric_literal() {
+        // 官方 1.0.3 形状 `set: {counter: 0}`（corpus 01/05）必须映射成 variable=counter、
+        // value 求值为数字 0，不得落成空 SetTask。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-num
+  version: "1.0"
+do:
+  - init:
+      set:
+        counter: 0
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official single-key set must parse");
+        let s = match &def.do_tasks[0].task {
+            Task::Set(s) => s,
+            other => panic!("expected Set task, got {other:?}"),
+        };
+        assert_eq!(s.variable, "counter");
+        let value = ExpressionEvaluator::new()
+            .evaluate(&s.value, &serde_json::json!({}))
+            .expect("evaluate set value");
+        assert_eq!(value, serde_json::json!(0));
+    }
+
+    #[test]
+    fn test_set_official_map_string_literal() {
+        // 字符串字面量必须以 JSON 形式序列化（`"hi"`），求值为字符串而非字段访问：
+        // context 里放同名 `hi` 字段，若误当字段访问会取到 "field"。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-str
+  version: "1.0"
+do:
+  - init:
+      set:
+        greeting: "hi"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official single-key set must parse");
+        let s = match &def.do_tasks[0].task {
+            Task::Set(s) => s,
+            other => panic!("expected Set task, got {other:?}"),
+        };
+        assert_eq!(s.variable, "greeting");
+        let value = ExpressionEvaluator::new()
+            .evaluate(&s.value, &serde_json::json!({"hi": "field"}))
+            .expect("evaluate set value");
+        assert_eq!(value, serde_json::json!("hi"));
+    }
+
+    #[test]
+    fn test_set_official_map_runtime_expression_passthrough() {
+        // 运行时表达式 `${ ... }` 原样透传（求值器负责剥壳），corpus 06 的 `last: "${ $item }"` 走此路。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-expr
+  version: "1.0"
+do:
+  - init:
+      set:
+        last: "${ .amount }"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official single-key set must parse");
+        let s = match &def.do_tasks[0].task {
+            Task::Set(s) => s,
+            other => panic!("expected Set task, got {other:?}"),
+        };
+        assert_eq!(s.variable, "last");
+        assert_eq!(s.value, "${ .amount }");
+        let value = ExpressionEvaluator::new()
+            .evaluate(&s.value, &serde_json::json!({"amount": 7}))
+            .expect("evaluate set value");
+        assert_eq!(value, serde_json::json!(7));
+    }
+
+    #[test]
+    fn test_set_official_multi_key_rejected_naming_key() {
+        // 多键官方 map 超出单变量 SetTask 表达面：fail-closed 点名 `set.<key>`，
+        // 绝不静默只留首键。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-multi
+  version: "1.0"
+do:
+  - init:
+      set:
+        a: 1
+        b: 2
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("multi-key official set must reject");
+        assert!(errors_naming(&errs, "set.b"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_set_official_embedded_expression_rejected() {
+        // 官方 map 值里嵌了 `${ ... }`（trim 后不以 `${` 开头）：coord set 无字符串插值面，
+        // 当字面量处理会静默丢掉模板语义，fail-closed 点名 `set.<key>`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-embedded
+  version: "1.0"
+do:
+  - init:
+      set:
+        greeting: "hello ${ .name }"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("embedded set expression must reject");
+        assert!(errors_naming(&errs, "set.greeting"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_set_official_unbalanced_expression_rejected() {
+        // 以 `${` 开头但未以 `}` 结尾：求值器不会当模板表达式剥壳，`"${ .x } tail"` 会
+        // 被当作字面量、表达式静默不求值——fail-closed 点名 `set.<key>`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-unbalanced
+  version: "1.0"
+do:
+  - init:
+      set:
+        greeting: "${ .name } tail"
+"#;
+
+        let errs =
+            parse_and_validate_yaml(yaml).expect_err("unbalanced set expression must reject");
+        assert!(errors_naming(&errs, "set.greeting"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_set_official_double_expression_rejected() {
+        // 多于一个 `${...}` 段（拼接）无法当一个完整表达式剥壳，求值器会静默丢段或丢尾部；
+        // 只有单个完整 `${...}` 才接受。fail-closed 点名 `set.<key>`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-double-expr
+  version: "1.0"
+do:
+  - init:
+      set:
+        joined: "${ .a }${ .b }"
+"#;
+
+        let errs =
+            parse_and_validate_yaml(yaml).expect_err("multi-segment set expression must reject");
+        assert!(errors_naming(&errs, "set.joined"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_set_official_array_value_rejected() {
+        // 数组字面量求值器无 `[...]` 分支，会落到 `Ok(context)` 静默把整个上下文写成变量值；
+        // 数组字面量支持前 fail-closed 点名 `set.<key>`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-array
+  version: "1.0"
+do:
+  - init:
+      set:
+        items: [1, 2, 3]
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("array set value must reject");
+        assert!(errors_naming(&errs, "set.items"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_set_official_nested_object_array_value_rejected() {
+        // 对象字面量内嵌数组同样会经 try_object_literal 落到数组求值路径：一并 fail-closed。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-nested-array
+  version: "1.0"
+do:
+  - init:
+      set:
+        payload:
+          list: [1, 2]
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("nested array set value must reject");
+        assert!(errors_naming(&errs, "set.payload"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_set_official_single_key_named_variable_survives() {
+        // 官方单键 map 的键名恰为 `variable` 时，不得被 native `{variable, value}` 分支误读：
+        // native 分支现要求两键齐备，故此例应落成 variable="variable"、value 求值为 "x"。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: official-set-var-key
+  version: "1.0"
+do:
+  - init:
+      set:
+        variable: "x"
+"#;
+
+        let def = parse_and_validate_yaml(yaml).expect("single-key official set must parse");
+        let s = match &def.do_tasks[0].task {
+            Task::Set(s) => s,
+            other => panic!("expected Set task, got {other:?}"),
+        };
+        assert_eq!(s.variable, "variable");
+        let value = ExpressionEvaluator::new()
+            .evaluate(&s.value, &serde_json::json!({}))
+            .expect("evaluate set value");
+        assert_eq!(value, serde_json::json!("x"));
     }
 
     // ═══ 任务级标准字段 / 顶层扩展块解析（P0 全特性） ═══
@@ -2055,6 +3872,550 @@ do:
         })
     }
 
+    /// 判别性断言：错误 KIND 载荷里的构造名恰为 `construct`。
+    /// `errors_naming` 只查消息子串，而 `reject_for_field` 的消息列出全部字段名，无法区分。
+    fn error_kind_naming(errs: &[ValidationError], construct: &str) -> bool {
+        errs.iter().any(
+            |e| matches!(&e.kind, ValidationErrorKind::UnsupportedConstruct(c) if c == construct),
+        )
+    }
+
+    #[test]
+    fn test_wait_official_seconds_maps_to_duration() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-seconds
+  version: "1.0"
+do:
+  - pause:
+      wait:
+        seconds: 5
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official wait seconds must parse");
+        match &def.do_tasks[0].task {
+            Task::Wait(w) => assert_eq!(w.wait, "PT5S"),
+            other => panic!("expected Wait task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wait_runtime_expression_rejected() {
+        // 字符串含 `${` 是运行时表达式形式：会落成非法 ISO8601 → 零等待（定时变 no-op），
+        // fail-closed 点名 `wait`。其它非法字符串（如 "INVALID"）仍按零等待兼容。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-expr
+  version: "1.0"
+do:
+  - pause:
+      wait: "${ .delay }"
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("runtime expression wait must reject");
+        assert!(errors_naming(&errs, "wait"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_wait_until_is_rejected_with_construct_name() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-until
+  version: "1.0"
+do:
+  - pause:
+      wait:
+        until: "2026-01-01T00:00:00Z"
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("wait.until must be rejected");
+        assert!(errors_naming(&errs, "wait.until"), "got {errs:?}");
+    }
+
+    #[test]
+    fn test_wait_minutes_only_maps_to_duration() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-minutes
+  version: "1.0"
+do:
+  - pause:
+      wait:
+        minutes: 5
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official wait minutes must parse");
+        match &def.do_tasks[0].task {
+            Task::Wait(w) => assert_eq!(w.wait, "PT5M"),
+            other => panic!("expected Wait task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wait_seconds_and_milliseconds_compose() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-composite
+  version: "1.0"
+do:
+  - pause:
+      wait:
+        seconds: 1
+        milliseconds: 500
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("composite wait must parse");
+        match &def.do_tasks[0].task {
+            Task::Wait(w) => assert_eq!(w.wait, "PT1.5S"),
+            other => panic!("expected Wait task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wait_unknown_key_is_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-unknown
+  version: "1.0"
+do:
+  - pause:
+      wait:
+        weeks: 2
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("unknown wait key must be rejected");
+        assert!(errors_naming(&errs, "wait.weeks"), "got {errs:?}");
+    }
+
+    #[test]
+    fn test_wait_empty_object_is_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-empty
+  version: "1.0"
+do:
+  - pause:
+      wait: {}
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("empty wait object must be rejected");
+        // 判别性断言：构造名必须恰为 `wait`（`wait.weeks`/`wait.until` 不满足），
+        // 且原因指向「至少一个组件」。
+        assert!(
+            errs.iter().any(|e| {
+                matches!(&e.kind, ValidationErrorKind::UnsupportedConstruct(s) if s == "wait")
+                    && e.message.contains("at least one")
+            }),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_emit_official_event_with_shape() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: emit-official
+  version: "1.0"
+do:
+  - notify:
+      emit:
+        event:
+          with:
+            source: "https://example.com/coord"
+            type: com.example.notify
+            data:
+              msg: hi
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official emit event shape must parse");
+        match &def.do_tasks[0].task {
+            Task::Emit(e) => {
+                assert_eq!(e.emit.event_type, "com.example.notify");
+                assert_eq!(e.emit.source.as_deref(), Some("https://example.com/coord"));
+                assert_eq!(e.emit.data, Some(serde_json::json!({ "msg": "hi" })));
+            }
+            other => panic!("expected Emit task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_emit_missing_type_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: emit-missing-type
+  version: "1.0"
+do:
+  - notify:
+      emit:
+        event:
+          with:
+            source: "https://example.com/coord"
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("emit without type must be rejected");
+        assert!(errors_naming(&errs, "emit.event.with.type"), "got {errs:?}");
+    }
+
+    #[test]
+    fn test_emit_official_extra_with_key_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: emit-extra-with
+  version: "1.0"
+do:
+  - notify:
+      emit:
+        event:
+          with:
+            type: com.example.notify
+            source: "https://example.com/coord"
+            subject: approvals
+"#;
+        // eventProperties 额外字段（subject 等）无对应 EmitEvent 字段，不得静默丢弃。
+        let errs = parse_and_validate_yaml(yaml)
+            .expect_err("out-of-range emit.event.with key must be rejected");
+        assert!(
+            errors_naming(&errs, "emit.event.with.subject"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_emit_official_extra_event_key_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: emit-extra-event
+  version: "1.0"
+do:
+  - notify:
+      emit:
+        event:
+          id: evt-1
+          with:
+            type: com.example.notify
+            source: "https://example.com/coord"
+"#;
+        // `event` 的 `with` 兄弟键（schema additionalProperties: true）无法映射，不得静默丢弃。
+        let errs = parse_and_validate_yaml(yaml)
+            .expect_err("unexpected emit.event sibling key must be rejected");
+        assert!(errors_naming(&errs, "emit.event.id"), "got {errs:?}");
+    }
+
+    #[test]
+    fn test_emit_flat_legacy_shape_is_compatible() {
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: emit-flat
+  version: "1.0"
+do:
+  - notify:
+      emit:
+        type: com.example.flat
+        source: "/flat"
+        data:
+          n: 1
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("flat emit must remain accepted");
+        match &def.do_tasks[0].task {
+            Task::Emit(e) => {
+                assert_eq!(e.emit.event_type, "com.example.flat");
+                assert_eq!(e.emit.source.as_deref(), Some("/flat"));
+                assert_eq!(e.emit.data, Some(serde_json::json!({ "n": 1 })));
+            }
+            other => panic!("expected Emit task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_emit_non_object_rejected() {
+        // 非对象 emit 无字段可映射，不得静默落成空事件。fail-closed 点名 `emit`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: emit-non-object
+  version: "1.0"
+do:
+  - notify:
+      emit: []
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("non-object emit must reject");
+        assert!(errors_naming(&errs, "emit"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_listen_official_to_one_with_shape() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-official
+  version: "1.0"
+do:
+  - await_event:
+      listen:
+        to:
+          one:
+            with:
+              type: com.example.approved
+              source: "https://example.com/coord"
+              subject: approvals
+      then: exit
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("official listen to.one.with must parse");
+        match &def.do_tasks[0].task {
+            Task::Listen(l) => {
+                assert_eq!(l.listen.event_type.as_deref(), Some("com.example.approved"));
+                assert_eq!(
+                    l.listen.source.as_deref(),
+                    Some("https://example.com/coord")
+                );
+                assert_eq!(l.listen.subject.as_deref(), Some("approvals"));
+            }
+            other => panic!("expected Listen task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_listen_non_object_rejected() {
+        // 非对象也非字符串的 listen 无过滤器可映射，不得静默落成空监听。fail-closed 点名 `listen`。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-non-object
+  version: "1.0"
+do:
+  - await_event:
+      listen: []
+"#;
+
+        let errs = parse_and_validate_yaml(yaml).expect_err("non-object listen must reject");
+        assert!(errors_naming(&errs, "listen"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_listen_unsupported_strategy_rejected() {
+        // 消费策略 all/any 本期不支持：不得静默丢过滤器后照常接受。
+        let all = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-all
+  version: "1.0"
+do:
+  - await_event:
+      listen:
+        to:
+          all:
+            - with:
+                type: com.example.approved
+"#;
+        let any = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-any
+  version: "1.0"
+do:
+  - await_event:
+      listen:
+        to:
+          any:
+            - with:
+                type: com.example.approved
+"#;
+        for (yaml, strategy) in [(all, "all"), (any, "any")] {
+            let errs = parse_and_validate_yaml(yaml)
+                .expect_err("non-one consumption strategy must be rejected");
+            assert!(
+                errors_naming(&errs, &format!("listen.to.{strategy}")),
+                "got {errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_listen_missing_type_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-missing-type
+  version: "1.0"
+do:
+  - await_event:
+      listen:
+        to:
+          one:
+            with:
+              source: "https://example.com/coord"
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("listen without type must be rejected");
+        assert!(
+            errors_naming(&errs, "listen.to.one.with.type"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_listen_read_rejected() {
+        // `listen.read`（envelope/raw 读取模式）无映射面：不得静默丢字段后照常接受。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-read
+  version: "1.0"
+do:
+  - await_event:
+      listen:
+        read: raw
+        to:
+          one:
+            with:
+              type: com.example.approved
+"#;
+        let errs = parse_and_validate_yaml(yaml).expect_err("listen.read must be rejected");
+        assert!(errors_naming(&errs, "listen.read"), "got {errs:?}");
+    }
+
+    #[test]
+    fn test_listen_to_one_correlate_rejected() {
+        // `eventFilter.correlate` 需把事件属性关联到输入数据属性，无映射面。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-correlate
+  version: "1.0"
+do:
+  - await_event:
+      listen:
+        to:
+          one:
+            correlate:
+              from: "${ .context }"
+            with:
+              type: com.example.approved
+"#;
+        let errs =
+            parse_and_validate_yaml(yaml).expect_err("listen.to.one.correlate must be rejected");
+        assert!(
+            errors_naming(&errs, "listen.to.one.correlate"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_listen_unknown_with_key_rejected() {
+        // `with` 只支持 type/source/subject；其余键（如 id）无映射面，必须点名拒绝。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: listen-with-extra
+  version: "1.0"
+do:
+  - await_event:
+      listen:
+        to:
+          one:
+            with:
+              type: com.example.approved
+              id: evt-1
+"#;
+        let errs = parse_and_validate_yaml(yaml)
+            .expect_err("unknown listen.to.one.with key must be rejected");
+        assert!(
+            errors_naming(&errs, "listen.to.one.with.id"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_emit_extra_emit_level_key_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: emit-extra-emit
+  version: "1.0"
+do:
+  - notify:
+      emit:
+        event:
+          with:
+            type: com.example.notify
+        id: evt-1
+"#;
+        // `emit` 的 `event` 兄弟键 schema 非法（unevaluatedProperties: false），不得静默丢弃。
+        let errs = parse_and_validate_yaml(yaml)
+            .expect_err("unexpected emit-level sibling key must be rejected");
+        assert!(errors_naming(&errs, "emit.id"), "got {errs:?}");
+    }
+
+    #[test]
+    fn test_wait_rejection_messages_are_single_line() {
+        // 三条 wait 拒绝路径的用户可见消息不得内嵌换行/缩进（曾因续行反斜杠缺失而断裂）。
+        let unknown_key = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-msg-unknown
+  version: "1.0"
+do:
+  - pause:
+      wait:
+        weeks: 2
+"#;
+        let until = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-msg-until
+  version: "1.0"
+do:
+  - pause:
+      wait:
+        until: "2026-01-01T00:00:00Z"
+"#;
+        let bad_shape = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: wait-msg-shape
+  version: "1.0"
+do:
+  - pause:
+      wait: true
+"#;
+        for yaml in [unknown_key, until, bad_shape] {
+            let errs = parse_and_validate_yaml(yaml).expect_err("wait variant must be rejected");
+            assert!(
+                errs.iter().all(|e| !e.message.contains('\n')),
+                "user-visible message must be single-line: {errs:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_then_continue_and_top_level_last_exit_accepted() {
         let yaml = r#"
@@ -2243,6 +4604,67 @@ do:
             errs.iter().any(|e| e.message.contains("run.workflow")),
             "errors: {errs:?}"
         );
+    }
+
+    #[test]
+    fn test_run_workflow_nested_input_preserved() {
+        // 官方把子流程输入嵌在 `run.workflow.input`：必须落到 RunTask.input（子流程的入参槽），
+        // 不得只取任务级 `input` 而静默丢弃嵌套载荷（Spike 4 误读之一）。
+        let yaml = r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: run-workflow-input
+  version: "1.0"
+do:
+  - sub:
+      run:
+        workflow:
+          namespace: other
+          name: child
+          version: "1.0"
+          input:
+            orderId: 42
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("nested run.workflow.input must parse");
+        match &def.do_tasks[0].task {
+            Task::Run(run) => {
+                assert_eq!(run.workflow.name, "child");
+                assert_eq!(run.input, Some(serde_json::json!({ "orderId": 42 })));
+            }
+            other => panic!("expected Run task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_workflow_nested_input_non_object_rejected() {
+        // 官方 schema 要求 `workflow.input` 为对象：present 但非对象（含 null）必须
+        // fail-closed 点名 `run.workflow.input`，不得静默忽略或遮蔽扁平回退。
+        for bad in ["\"foo\"", "null", "[1, 2]"] {
+            let yaml = format!(
+                r#"
+document:
+  dsl: "1.0.3"
+  namespace: test
+  name: run-workflow-bad-input
+  version: "1.0"
+do:
+  - sub:
+      run:
+        workflow:
+          namespace: other
+          name: child
+          version: "1.0"
+          input: {bad}
+"#
+            );
+            let errs =
+                parse_and_validate_yaml(&yaml).expect_err("non-object workflow.input must reject");
+            assert!(
+                error_kind_naming(&errs, "run.workflow.input"),
+                "input={bad}: errors: {errs:?}"
+            );
+        }
     }
 
     #[test]
