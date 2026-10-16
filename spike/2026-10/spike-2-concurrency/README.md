@@ -1,7 +1,7 @@
 # Spike 2 · 单写者并发演练（CAS + 实例租约 + StepToken）
 
 > Owner: Spike 执行（AI 协作者）｜ Last verified: 2026-10-13
-> 分支：`spike/2026-10-spike2`（不并入 main）｜ 手册对应：§4「Spike 2」
+> 分支：`spike/2026-10-spike2`｜ 手册对应：§4「Spike 2」
 > 状态：**初版完成**（真实单节点 Raft 上 7/7 全绿，日志与时间线已存档）
 
 本目录是《coord 工作流引擎 Spike 落地执行手册 v1.1》§4 Spike 2 的**决策证据**，

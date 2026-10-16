@@ -1,7 +1,7 @@
 # coord 工作流引擎 Spike — 2026-10
 
 > Owner: Spike 执行（AI 协作者）｜ Last verified: 2026-10-13
-> 状态：进行中｜分支：`spike/2026-10-workflow-v2`（不并入 main）
+> 状态：已归档（决策证据已入 main）｜分支：`spike/2026-10-workflow-v2`
 
 本目录是 CTO 批准《coord 工作流引擎 Spike 落地执行手册 v1.1》的产出物集合。
 所有内容为**决策证据**，不是生产代码，不承诺任何对外契约。

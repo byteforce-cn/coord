@@ -1,7 +1,7 @@
 # Spike 3 · Outbox + 崩溃恢复
 
 > Owner: Spike 执行（AI 协作者）｜ Last verified: 2026-10-13
-> 状态：✅ 初版完成（决策证据，**不是**生产代码；不并入 main）
+> 状态：✅ 初版完成（决策证据，**不是**生产代码；已入 main）
 > 分支：`spike/2026-10-spike3`
 > 对应手册：《coord 工作流引擎 Spike 落地执行手册 v1.1》§4「Spike 3」；证据标准 §5；红线 §10
 
