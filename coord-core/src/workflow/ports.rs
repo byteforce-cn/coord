@@ -13,6 +13,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use super::durable::OutboxRecord;
 use super::expression::ExpressionError;
 use super::model::{WorkflowDefinition, WorkflowInstance};
 
@@ -143,19 +144,50 @@ pub enum DispatchResult {
 /// 任务派发器 —— 负责执行 call 任务的外部调用
 #[async_trait]
 pub trait TaskDispatcher: Send + Sync {
-    /// 派发外部调用并等待结果
-    async fn dispatch(&self, service: &str, with: Option<&Value>, input: &Value) -> DispatchResult;
+    /// 派发外部调用并等待结果。
+    ///
+    /// `idempotency_key` 为 `Some` 时，实现必须把它作为下游去重键透传（HTTP 用
+    /// `Idempotency-Key` 头）；`None` = 本次派发无去重语义（未注入 step token 存储）。
+    async fn dispatch(
+        &self,
+        service: &str,
+        with: Option<&Value>,
+        input: &Value,
+        idempotency_key: Option<&str>,
+    ) -> DispatchResult;
 }
 
 /// 为 Arc<T> 提供 TaskDispatcher 的委托实现（支持 trait object 类型擦除）
 #[async_trait]
 impl<T: TaskDispatcher + Send + Sync + ?Sized> TaskDispatcher for Arc<T> {
-    async fn dispatch(&self, service: &str, with: Option<&Value>, input: &Value) -> DispatchResult {
-        self.as_ref().dispatch(service, with, input).await
+    async fn dispatch(
+        &self,
+        service: &str,
+        with: Option<&Value>,
+        input: &Value,
+        idempotency_key: Option<&str>,
+    ) -> DispatchResult {
+        self.as_ref()
+            .dispatch(service, with, input, idempotency_key)
+            .await
     }
 }
 
 // ─── EventProvider ───
+
+/// 一次事件投递的信封 —— 提交消费位点所需的最小信息。
+///
+/// `subscription` 标识消费位点所属的订阅，`offset` 是本次命中记录在该订阅里的位置。
+/// 调用方把信封原样交回 [`EventProvider::ack_event`]，位点才被提交；因此「状态写成功」
+/// 与「位点提交」之间崩溃只会**重复投递**（由消费方的状态守卫吸收），不会丢投递。
+pub struct EventDelivery {
+    /// 实际到达的事件类型
+    pub event_type: String,
+    /// 消费位点所属的订阅标识
+    pub subscription: String,
+    /// 本次命中记录在订阅内的 offset
+    pub offset: u64,
+}
 
 /// 事件提供者 —— 负责事件的发布与监听
 #[async_trait]
@@ -165,14 +197,21 @@ pub trait EventProvider: Send + Sync {
 
     /// 等待任一匹配的事件（事件类型集合任一命中即返回）
     ///
-    /// 返回实际到达的事件类型（`None` = 超时 / 未匹配 / 不支持）。
+    /// 返回命中事件的投递信封（`None` = 超时 / 未匹配 / 不支持）。**不**提交消费位点：
+    /// 调用方必须在实例状态写成功后调用 [`EventProvider::ack_event`] 才推进位点。
     async fn wait_for_event(
         &self,
         event_types: &[&str],
         source: Option<&str>,
         subject: Option<&str>,
         timeout_ms: u64,
-    ) -> Option<String>;
+    ) -> Option<EventDelivery>;
+
+    /// 确认投递完成：提交 `delivery` 对应的消费位点。
+    ///
+    /// 由 [`EventProvider::wait_for_event`] 的调用方在实例状态写成功后调用。
+    /// 没有持久化位点的实现（如内存广播）为 no-op。
+    async fn ack_event(&self, delivery: &EventDelivery);
 }
 
 /// 为 Arc<T> 提供 EventProvider 的委托实现（支持 trait object 类型擦除）
@@ -188,10 +227,14 @@ impl<T: EventProvider + Send + Sync + ?Sized> EventProvider for Arc<T> {
         source: Option<&str>,
         subject: Option<&str>,
         timeout_ms: u64,
-    ) -> Option<String> {
+    ) -> Option<EventDelivery> {
         self.as_ref()
             .wait_for_event(event_types, source, subject, timeout_ms)
             .await
+    }
+
+    async fn ack_event(&self, delivery: &EventDelivery) {
+        self.as_ref().ack_event(delivery).await
     }
 }
 
@@ -209,9 +252,11 @@ impl EventProvider for NoopEventProvider {
         _source: Option<&str>,
         _subject: Option<&str>,
         _timeout_ms: u64,
-    ) -> Option<String> {
+    ) -> Option<EventDelivery> {
         None
     }
+
+    async fn ack_event(&self, _delivery: &EventDelivery) {}
 }
 
 /// 事件元组类型别名（clippy::type_complexity）
@@ -268,7 +313,7 @@ impl EventProvider for MemoryEventProvider {
         source: Option<&str>,
         _subject: Option<&str>,
         timeout_ms: u64,
-    ) -> Option<String> {
+    ) -> Option<EventDelivery> {
         if event_types.is_empty() {
             return None; // 不支持无过滤的通配监听
         }
@@ -309,7 +354,13 @@ impl EventProvider for MemoryEventProvider {
                             }
                         }
                         if event_types.contains(&recv_type.as_str()) {
-                            return Some(recv_type);
+                            // 订阅以监听的事件类型标识（channel 按事件类型分）；进程内
+                            // broadcast 无持久化位点，ack_event 因此是 no-op。
+                            return Some(EventDelivery {
+                                event_type: recv_type,
+                                subscription: et.clone(),
+                                offset: 0,
+                            });
                         }
                     }
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_n))) => {
@@ -335,6 +386,9 @@ impl EventProvider for MemoryEventProvider {
             }
         }
     }
+
+    /// 进程内 broadcast 无持久化位点：投递即消费，确认是 no-op。
+    async fn ack_event(&self, _delivery: &EventDelivery) {}
 }
 
 // ─── WorkflowStore ───
@@ -569,6 +623,25 @@ pub trait LeaseGuard: Send + Sync {
             "fenced_save is not supported by this lease backend".into(),
         ))
     }
+
+    /// 在 fencing 保护下原子提交实例状态 + 伴生事件（同一次提交）。
+    ///
+    /// `events` 为空时等价 [`Self::fenced_save`]。默认实现 **fail-closed**：
+    /// 不支持「状态 + 事件」批量原子提交的后端返回 [`StoreError::Unsupported`]，
+    /// 不得静默分两次写（那会出现「状态已改而事件缺失」的窗口）。
+    async fn fenced_commit(
+        &self,
+        inst: &WorkflowInstance,
+        expected_mod_rev: i64,
+        events: &[OutboxRecord],
+    ) -> Result<bool, StoreError> {
+        if events.is_empty() {
+            return self.fenced_save(inst, expected_mod_rev).await;
+        }
+        Err(StoreError::Unsupported(
+            "fenced_commit with events is not supported by this lease backend".into(),
+        ))
+    }
 }
 
 // ─── MemoryWorkflowStore（生产可用，RaftWorkflowStore 的热缓存） ───
@@ -781,6 +854,40 @@ impl WorkflowStore for MemoryWorkflowStore {
 
 #[async_trait]
 impl WorkflowStore for Arc<MemoryWorkflowStore> {
+    // 有非平凡默认实现的方法必须显式转发，否则委托层会用 trait 默认值悄悄换掉
+    // 内层的 CAS / 修订号语义（`save_instance_atomic` 退化为普通写并恒真、
+    // `load_instance_with_rev` 恒返回 `None`）。
+    async fn save_definition_atomic(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
+        self.as_ref().save_definition_atomic(def).await
+    }
+
+    async fn list_definition_versions(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Vec<WorkflowDefinition>, StoreError> {
+        self.as_ref()
+            .list_definition_versions(namespace, name)
+            .await
+    }
+
+    async fn save_instance_atomic(
+        &self,
+        inst: &WorkflowInstance,
+        expected_mod_rev: i64,
+    ) -> Result<bool, StoreError> {
+        self.as_ref()
+            .save_instance_atomic(inst, expected_mod_rev)
+            .await
+    }
+
+    async fn load_instance_with_rev(
+        &self,
+        id: &str,
+    ) -> Result<Option<(WorkflowInstance, i64)>, StoreError> {
+        self.as_ref().load_instance_with_rev(id).await
+    }
+
     async fn save_definition(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
         self.as_ref().save_definition(def).await
     }
@@ -858,6 +965,41 @@ impl WorkflowStore for Arc<MemoryWorkflowStore> {
 
 #[async_trait]
 impl WorkflowStore for Arc<dyn WorkflowStore + Send + Sync> {
+    // 有非平凡默认实现的方法必须显式转发。默认 `load_instance_with_rev` 恒返回
+    // `Ok(None)`、`save_instance_atomic` 退化为普通写并恒返回 `Ok(true)`：若不在
+    // 此处转发，经 `Arc<dyn WorkflowStore>` 装配的运行时永远拿不到修订号 ⇒ 写入
+    // 不带 `MOD_REV` 比较 ⇒ 并发驱动者互相覆盖（丢更新）。
+    async fn save_definition_atomic(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
+        self.as_ref().save_definition_atomic(def).await
+    }
+
+    async fn list_definition_versions(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Vec<WorkflowDefinition>, StoreError> {
+        self.as_ref()
+            .list_definition_versions(namespace, name)
+            .await
+    }
+
+    async fn save_instance_atomic(
+        &self,
+        inst: &WorkflowInstance,
+        expected_mod_rev: i64,
+    ) -> Result<bool, StoreError> {
+        self.as_ref()
+            .save_instance_atomic(inst, expected_mod_rev)
+            .await
+    }
+
+    async fn load_instance_with_rev(
+        &self,
+        id: &str,
+    ) -> Result<Option<(WorkflowInstance, i64)>, StoreError> {
+        self.as_ref().load_instance_with_rev(id).await
+    }
+
     async fn save_definition(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
         self.as_ref().save_definition(def).await
     }
@@ -1000,9 +1142,11 @@ pub mod test_utils {
             _source: Option<&str>,
             _subject: Option<&str>,
             _timeout_ms: u64,
-        ) -> Option<String> {
+        ) -> Option<EventDelivery> {
             None
         }
+
+        async fn ack_event(&self, _delivery: &EventDelivery) {}
     }
 
     /// 空任务派发器（测试用）
@@ -1015,6 +1159,7 @@ pub mod test_utils {
             _service: &str,
             _with: Option<&Value>,
             _input: &Value,
+            _idempotency_key: Option<&str>,
         ) -> DispatchResult {
             DispatchResult::Success { data: Value::Null }
         }
@@ -1088,6 +1233,8 @@ mod tests {
             output: None,
             fault: None,
             suspension_meta: None,
+            definition_hash: None,
+            engine_version: None,
         };
 
         store.save_instance(&inst).await.unwrap();
@@ -1158,6 +1305,8 @@ mod tests {
             output: None,
             fault: None,
             suspension_meta: None,
+            definition_hash: None,
+            engine_version: None,
         };
         store.save_instance(&inst).await.unwrap();
         assert!(store.delete_instance("inst-del-1").await.unwrap());
@@ -1234,7 +1383,7 @@ mod tests {
 
         let received = handle.await.unwrap();
         assert_eq!(
-            received.as_deref(),
+            received.map(|d| d.event_type).as_deref(),
             Some("order.created"),
             "should receive the emitted event"
         );
@@ -1283,7 +1432,7 @@ mod tests {
         // source A 的 wait 应该匹配
         let r_a = handle_a.await.unwrap();
         assert_eq!(
-            r_a.as_deref(),
+            r_a.map(|d| d.event_type).as_deref(),
             Some("ping"),
             "should match the emitted source"
         );
@@ -1314,12 +1463,12 @@ mod tests {
         let r1 = h1.await.unwrap();
         let r2 = h2.await.unwrap();
         assert_eq!(
-            r1.as_deref(),
+            r1.map(|d| d.event_type).as_deref(),
             Some("broadcast.test"),
             "subscriber 1 should receive event"
         );
         assert_eq!(
-            r2.as_deref(),
+            r2.map(|d| d.event_type).as_deref(),
             Some("broadcast.test"),
             "subscriber 2 should receive event"
         );
@@ -1342,6 +1491,8 @@ mod tests {
             output: None,
             fault: None,
             suspension_meta: None,
+            definition_hash: None,
+            engine_version: None,
         }
     }
 

@@ -80,7 +80,10 @@ impl Validator {
 
         // Step 3: 解析任务类型（先收集任务名再做引用校验）
         let mut named_tasks: Vec<NamedTask> = Vec::new();
-        for raw_task in &raw.tasks {
+        let last_top_level = raw.tasks.len().saturating_sub(1);
+        for (idx, raw_task) in raw.tasks.iter().enumerate() {
+            // `then` 只有在顶层 do 列表末尾才与顺序执行等价（见方法注释）
+            v.check_then_directive(&raw_task.body, idx == last_top_level, raw_task.span);
             // 重复任务名检测
             if !v.task_names.insert(raw_task.name.clone()) {
                 v.errors.push(ValidationError {
@@ -371,12 +374,23 @@ impl Validator {
         } else if let Some(d) = obj.get("default").and_then(|v| v.as_str()) {
             d.to_string()
         } else {
+            // 官方 1.0 的 switch case 形状为 `{caseName: {when, then}}`；coord 只认
+            // `{condition, transition}`。探测到官方 `then` 时点名构造，避免只看
+            // 「缺 transition」而看不出被忽略的是流程指令（Spike 4 GAP）。
+            let names_then = obj
+                .values()
+                .any(|v| v.as_object().is_some_and(|o| o.contains_key("then")));
+            let detail = if names_then {
+                " (unimplemented construct 'then': coord switch conditions use 'transition')"
+            } else {
+                ""
+            };
             self.errors.push(ValidationError {
                 span: Some(span),
                 kind: ValidationErrorKind::MissingRequiredField(
                     "transition or defaultCondition".into(),
                 ),
-                message: "switch condition missing transition target".to_string(),
+                message: format!("switch condition missing transition target{detail}"),
             });
             return None;
         };
@@ -663,40 +677,72 @@ impl Validator {
 
     fn parse_run(
         &mut self,
-        _raw: &RawNamedTask,
+        raw: &RawNamedTask,
         map: &serde_json::Map<String, Value>,
     ) -> Option<Task> {
         let run_val = &map["run"];
-        let obj = run_val.as_object();
 
-        let workflow = if let Some(obj) = obj {
-            WorkflowRef {
-                namespace: obj
-                    .get("namespace")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                name: obj
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                version: obj
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            }
-        } else if let Some(s) = run_val.as_str() {
+        let workflow = if let Some(s) = run_val.as_str() {
             // 简写: "namespace::name@version"
             Self::parse_workflow_ref_short(s)
-        } else {
-            WorkflowRef {
-                namespace: String::new(),
-                name: String::new(),
-                version: String::new(),
+        } else if let Some(obj) = run_val.as_object() {
+            // coord 只实现 `run.workflow`（子流程调用）。`run.script|container|shell`
+            // 无执行面，`run.await|return` 无可表达的时序/输出语义；raw 值若原样
+            // 落到 `run_subflow`（且 ref 为空）就是「接受但语义不同」的静默误读
+            // （Spike 4 核心发现）。因此这些键一律在解析期显式拒绝。
+            let named: Vec<String> = ["script", "container", "shell", "await", "return"]
+                .iter()
+                .filter(|k| obj.contains_key(**k))
+                .map(|k| format!("run.{k}"))
+                .collect();
+            if !named.is_empty() {
+                let construct = named.join(", ");
+                self.errors.push(ValidationError {
+                    span: Some(raw.span),
+                    kind: ValidationErrorKind::UnsupportedConstruct(construct.clone()),
+                    message: format!(
+                        "unimplemented construct '{construct}': coord only supports 'run.workflow'"
+                    ),
+                });
+                return None;
             }
+
+            // 官方形状把引用嵌在 `workflow` 下（`run: {workflow: {namespace,name,version}}`）；
+            // 旧方言把 namespace/name/version 直接放在 `run` 上。嵌套优先、缺失回退到
+            // 扁平键，否则 schema-legal 文档会被静默编译成空 ref（Spike 4 误读）。
+            let nested = obj.get("workflow").and_then(|v| v.as_object());
+            let pick = |key: &str| -> String {
+                nested
+                    .and_then(|n| n.get(key))
+                    .or_else(|| obj.get(key))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            WorkflowRef {
+                namespace: pick("namespace"),
+                name: pick("name"),
+                version: pick("version"),
+            }
+        } else {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::UnsupportedConstruct("run".to_string()),
+                message: "unimplemented construct 'run': coord only supports 'run.workflow'"
+                    .to_string(),
+            });
+            return None;
         };
+
+        // 有形状无目标（`run: {}` / `run: {workflow: {}}`）同样不许静默通过
+        if workflow.name.is_empty() {
+            self.errors.push(ValidationError {
+                span: Some(raw.span),
+                kind: ValidationErrorKind::MissingRequiredField("run.workflow.name".to_string()),
+                message: "run.workflow requires a non-empty 'name' (subflow target)".to_string(),
+            });
+            return None;
+        }
 
         let input = map.get("input").cloned();
         Some(Task::Run(RunTask { workflow, input }))
@@ -735,6 +781,38 @@ impl Validator {
 
     // ─── 辅助解析方法 ───
 
+    /// 未实现的官方 `then` 流程指令（taskBase / flowDirective）fail-closed 拒绝。
+    ///
+    /// coord 的 document/do 方言按列表顺序执行（分支/跳转用 switch 的 `transition`
+    /// 表达），`then` 一旦被忽略就会改变控制流，属「接受但语义不同」的静默误读：
+    /// - `then: continue` 等价于顺序执行默认行为，接受；
+    /// - `then: exit`/`end` 仅在**顶层 do 列表末尾**与工作流结束等价，接受；
+    /// - 具名跳转（`then: <taskName>`）与嵌套位置（for.do / try.do / catch.do / do）
+    ///   一律显式拒绝，不猜测目标。
+    fn check_then_directive(&mut self, body: &Value, top_level_last: bool, span: Span) {
+        let Some(obj) = body.as_object() else {
+            return;
+        };
+        let Some(then) = obj.get("then") else {
+            return;
+        };
+        let accepted = match then {
+            Value::String(d) if d == "continue" => true,
+            Value::String(d) if d == "exit" || d == "end" => top_level_last,
+            _ => false,
+        };
+        if !accepted {
+            self.errors.push(ValidationError {
+                span: Some(span),
+                kind: ValidationErrorKind::UnsupportedConstruct("then".to_string()),
+                message: format!(
+                    "unimplemented construct 'then': coord executes the do list in order and \
+                     expresses branching with switch 'transition' (got {then})"
+                ),
+            });
+        }
+    }
+
     /// 解析子任务列表（do/try/catch 中的嵌套任务）
     fn parse_sub_tasks(&mut self, val: &Value, parent_span: Span) -> Vec<NamedTask> {
         match val {
@@ -758,6 +836,8 @@ impl Validator {
                         name: name.clone(),
                         body: body.clone(),
                     };
+                    // 嵌套任务不在顶层 do 列表末尾：`then: exit|end` 在此处已被忽略
+                    self.check_then_directive(&raw.body, false, raw.span);
                     self.resolve_task(&raw).map(|task| NamedTask {
                         name: name.clone(),
                         task,
@@ -1964,5 +2044,234 @@ do:
         let def = parse_and_validate_yaml(yaml).expect("parse nested-meta");
         let meta = def.task_meta.get("child").expect("child meta collected");
         assert_eq!(meta.if_condition.as_deref(), Some("${ .flag }"));
+    }
+
+    // ─── 未实现构造 fail-closed ───
+
+    fn errors_naming(errs: &[ValidationError], construct: &str) -> bool {
+        errs.iter().any(|e| {
+            matches!(&e.kind, ValidationErrorKind::UnsupportedConstruct(_))
+                && e.message.contains(construct)
+        })
+    }
+
+    #[test]
+    fn test_then_continue_and_top_level_last_exit_accepted() {
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: then-ok
+  version: "1.0"
+do:
+  - first:
+      set:
+        variable: a
+        value: "1"
+      then: continue
+  - last:
+      set:
+        variable: b
+        value: "2"
+      then: exit
+"#;
+        assert!(
+            parse_and_validate_yaml(yaml).is_ok(),
+            "continue / 末任务 exit 应与顺序执行等价"
+        );
+    }
+
+    #[test]
+    fn test_then_mid_list_exit_rejected() {
+        // 中途 exit 会被忽略 → 控制流失真，必须拒绝
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: then-mid
+  version: "1.0"
+do:
+  - first:
+      set:
+        variable: a
+        value: "1"
+      then: exit
+  - second:
+      set:
+        variable: b
+        value: "2"
+"#;
+        let errs = parse_and_validate_yaml(yaml).unwrap_err();
+        assert!(errors_naming(&errs, "then"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_then_named_jump_rejected() {
+        // 具名跳转 coord 无法表达：不得静默按列表顺序继续
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: then-jump
+  version: "1.0"
+do:
+  - first:
+      set:
+        variable: a
+        value: "1"
+      then: second
+  - second:
+      set:
+        variable: b
+        value: "2"
+"#;
+        let errs = parse_and_validate_yaml(yaml).unwrap_err();
+        assert!(errors_naming(&errs, "then"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_then_nested_exit_rejected() {
+        // 嵌套 do 中的 exit 不在顶层列表末尾，被忽略即失真
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: then-nested
+  version: "1.0"
+do:
+  - group:
+      do:
+        - inner:
+            set:
+              variable: a
+              value: "1"
+            then: exit
+"#;
+        let errs = parse_and_validate_yaml(yaml).unwrap_err();
+        assert!(errors_naming(&errs, "then"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_run_script_rejected_naming_construct() {
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: run-script
+  version: "1.0"
+do:
+  - exec:
+      run:
+        script:
+          language: js
+          code: "return 1;"
+"#;
+        let errs = parse_and_validate_yaml(yaml).unwrap_err();
+        assert!(errors_naming(&errs, "run.script"), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn test_run_workflow_keeps_subflow_semantics() {
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: run-workflow
+  version: "1.0"
+do:
+  - sub:
+      run:
+        workflow:
+          namespace: other
+          name: child
+          version: "1.0"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("run.workflow 是受支持形状");
+        match &def.do_tasks[0].task {
+            Task::Run(run) => {
+                assert_eq!(run.workflow.namespace, "other");
+                assert_eq!(run.workflow.name, "child");
+                assert_eq!(run.workflow.version, "1.0");
+            }
+            other => panic!("expected Run task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_workflow_flat_legacy_ref_extracted() {
+        // 旧方言：namespace/name/version 直接放在 `run` 上（无 `workflow` 层）
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: run-workflow-flat
+  version: "1.0"
+do:
+  - sub:
+      run:
+        namespace: other
+        name: child
+        version: "2.0"
+"#;
+        let def = parse_and_validate_yaml(yaml).expect("扁平 ref 是旧方言受支持形状");
+        match &def.do_tasks[0].task {
+            Task::Run(run) => {
+                assert_eq!(run.workflow.namespace, "other");
+                assert_eq!(run.workflow.name, "child");
+                assert_eq!(run.workflow.version, "2.0");
+            }
+            other => panic!("expected Run task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_workflow_without_name_rejected() {
+        // 有形状无目标：`workflow: {}` 不得静默编译成空 ref
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: run-workflow-empty
+  version: "1.0"
+do:
+  - sub:
+      run:
+        workflow: {}
+"#;
+        let errs = parse_and_validate_yaml(yaml).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.message.contains("run.workflow")),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_use_extensions_rejected() {
+        let yaml = r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: ext
+  version: "1.0"
+use:
+  extensions:
+    - audit:
+        extend: all
+        before:
+          - log_before:
+              set:
+                variable: audited
+                value: "true"
+do:
+  - main:
+      set:
+        variable: x
+        value: "1"
+"#;
+        let errs = parse_and_validate_yaml(yaml).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.message.contains("use.extensions")),
+            "errors: {errs:?}"
+        );
     }
 }

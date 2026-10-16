@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::model::WorkflowInstance;
-use super::ports::StoreError;
+use super::ports::{MemoryWorkflowStore, StoreError, WorkflowStore};
 
 /// 事件契约命名空间前缀（`com.china-workflow.*`）。
 pub const EVENT_TYPE_NAMESPACE: &str = "com.china-workflow";
@@ -171,6 +171,24 @@ pub trait OutboxStore: Send + Sync {
     /// 标记重试耗尽（进死信状态，保留记录可查）。
     async fn mark_dead(&self, id: &str, attempts: u32) -> Result<(), StoreError>;
 
+    /// 回收已终结（`Delivered`/`Dead`）且已过保留窗口的记录，返回本次删除条数。
+    ///
+    /// 删除条件缺一不可：状态是终态，且「计时基准 + `retention_ms` < `now_ms`」。
+    /// `Pending`（未投递）**永不**删除。实现必须保留 per-instance 序号计数器
+    /// （见 [`Self::append`] 的分配契约）：清理后新事件接着已删序号继续递增，
+    /// 否则消费者的 per-instance 序号会回退/重叠。
+    ///
+    /// `limit` 是单批上限（一个 tick 最多删多少条），未清完的由后续 tick 继续。
+    /// 默认实现为空操作：内存实现没有需要回收的持久保留。
+    async fn prune(
+        &self,
+        _now_ms: i64,
+        _retention_ms: i64,
+        _limit: usize,
+    ) -> Result<usize, StoreError> {
+        Ok(0)
+    }
+
     /// 列出全部记录（证据导出/对账）。
     async fn list_all(&self) -> Result<Vec<OutboxRecord>, StoreError>;
 }
@@ -181,7 +199,7 @@ pub trait OutboxStore: Send + Sync {
 /// 「状态已改而事件缺失」的窗口。
 #[async_trait]
 pub trait AtomicOutboxCommit: Send + Sync {
-    /// 同一事务内提交 `inst` 状态与 `rec`（`sequence == 0` 时同事务分配）。
+    /// 同一事务内提交 `inst` 状态与单条 `rec`。
     ///
     /// 返回 `Ok(false)` = 事务比较失败（**什么都没写**），调用方可退化为分步
     /// `append`；返回 `Err` = 基础设施错误，同样什么都没写。
@@ -189,6 +207,20 @@ pub trait AtomicOutboxCommit: Send + Sync {
         &self,
         inst: &WorkflowInstance,
         rec: &OutboxRecord,
+        expected_mod_rev: Option<i64>,
+    ) -> Result<bool, StoreError> {
+        self.commit_state_and_outbox_batch(inst, std::slice::from_ref(rec), expected_mod_rev)
+            .await
+    }
+
+    /// 同一事务内提交 `inst` 状态与一批 `recs`；数组顺序即 `sequence` 顺序。
+    ///
+    /// 语义同 [`Self::commit_state_and_outbox`]（`recs` 为空时只提交状态）。一批
+    /// 伴生事件必须落在**同一个**事务里，否则会出现「状态已改而部分事件缺失」的窗口。
+    async fn commit_state_and_outbox_batch(
+        &self,
+        inst: &WorkflowInstance,
+        recs: &[OutboxRecord],
         expected_mod_rev: Option<i64>,
     ) -> Result<bool, StoreError>;
 }
@@ -267,6 +299,48 @@ pub trait DurableTimerStore: Send + Sync {
     async fn list_all(&self) -> Result<Vec<TimerRecord>, StoreError>;
 }
 
+/// step token 状态：`Pending` = 已登记待确认；`Done` = 外部调用已成功。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepState {
+    Pending,
+    Done,
+}
+
+/// 一条 step token 记录 —— 幂等键与确认状态的持久化形态。
+///
+/// `token` 是确定性派生的幂等键（跨重试/崩溃重建不变）；`at_ms` 是登记时刻。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepRecord {
+    pub token: String,
+    pub state: StepState,
+    pub at_ms: i64,
+}
+
+/// step token 存储契约 —— 「外部副作用去重」的持久基座。
+///
+/// `call` 在派发**前**登记 token，成功后标 `Done`；重试/崩溃重建复用同一 token
+/// （确定性派生），下游按幂等键去重即得「不重」。`register` 是 create-if-absent：
+/// 并发/重放只保留首个 token，后来者读到既有记录。
+#[async_trait]
+pub trait StepTokenStore: Send + Sync {
+    /// create-if-absent；`created=false` 时返回的 `token` 是既有记录的值。
+    async fn register(
+        &self,
+        instance_id: &str,
+        step_id: &str,
+        token: &str,
+        now_ms: i64,
+    ) -> Result<(StepRecord, bool), StoreError>;
+
+    /// 标记该 step 的外部调用已成功。
+    async fn mark_done(&self, instance_id: &str, step_id: &str) -> Result<(), StoreError>;
+
+    /// 读取 step 记录（不存在返回 `None`）。
+    async fn get(&self, instance_id: &str, step_id: &str)
+        -> Result<Option<StepRecord>, StoreError>;
+}
+
 /// 投递面契约 —— 把一条 outbox 记录交给下游（MQ / Event）。
 #[async_trait]
 pub trait OutboxSink: Send + Sync {
@@ -285,6 +359,9 @@ pub struct RelayPolicy {
     pub base_backoff_ms: u64,
     /// 退避上限
     pub max_backoff_ms: u64,
+    /// 已终结记录（`Delivered`/`Dead`）的保留窗口（毫秒）；超窗后由 tick 回收。
+    /// 未投递的 `Pending` 不受它影响。
+    pub retention_ms: u64,
 }
 
 impl Default for RelayPolicy {
@@ -294,6 +371,7 @@ impl Default for RelayPolicy {
             max_attempts: 8,
             base_backoff_ms: 200,
             max_backoff_ms: 30_000,
+            retention_ms: 24 * 60 * 60 * 1000,
         }
     }
 }
@@ -305,6 +383,8 @@ pub struct RelayReport {
     pub delivered: usize,
     pub retried: usize,
     pub dead: usize,
+    /// 本轮回收的已终结记录条数（内部清理，不产生事件）
+    pub pruned: usize,
 }
 
 /// Outbox Relay —— 轮询待投递记录，投递成功后标位，失败指数退避。
@@ -336,7 +416,15 @@ impl OutboxRelay {
 
     /// 推进一轮：取待投递 → 逐条投递 → 标位/退避。
     pub async fn tick(&self, now_ms: i64) -> Result<RelayReport, StoreError> {
-        let records = self.store.pending(now_ms, self.policy.batch).await?;
+        let mut records = self.store.pending(now_ms, self.policy.batch).await?;
+        // `pending` 只保证按 `next_attempt_at_ms` 升序；同一批提交的记录共享该时间戳，
+        // 组内顺序退化为后端键序（KV 按 UUID id，随机）。per-instance `sequence` 顺序
+        // 是交付契约（消费方按 `(instance_id, sequence)` 去重），故投递前重排。
+        records.sort_by(|a, b| {
+            a.aggregate_id
+                .cmp(&b.aggregate_id)
+                .then(a.sequence.cmp(&b.sequence))
+        });
         let mut report = RelayReport {
             polled: records.len(),
             ..RelayReport::default()
@@ -366,6 +454,13 @@ impl OutboxRelay {
                 }
             }
         }
+        // 保留回收挂在本 tick：relay 循环是唯一的周期驱动，没有独立的清理任务。
+        // 放在投递之后，使本轮投递结果先落盘、再按它评估清理窗口。
+        let retention_ms = i64::try_from(self.policy.retention_ms).unwrap_or(i64::MAX);
+        report.pruned = self
+            .store
+            .prune(now_ms, retention_ms, self.policy.batch)
+            .await?;
         Ok(report)
     }
 }
@@ -376,6 +471,8 @@ pub struct DurableSupport {
     pub outbox: Arc<dyn OutboxStore>,
     /// 可用时，生命周期事件走「状态 + outbox 同事务」提交
     pub atomic_commit: Option<Arc<dyn AtomicOutboxCommit>>,
+    /// step token 存储（外部副作用去重）。`None` = 派发不带幂等键（旧行为）。
+    pub steps: Option<Arc<dyn StepTokenStore>>,
 }
 
 impl DurableSupport {
@@ -384,11 +481,17 @@ impl DurableSupport {
             timers,
             outbox,
             atomic_commit: None,
+            steps: None,
         }
     }
 
     pub fn with_atomic_commit(mut self, commit: Arc<dyn AtomicOutboxCommit>) -> Self {
         self.atomic_commit = Some(commit);
+        self
+    }
+
+    pub fn with_steps(mut self, steps: Arc<dyn StepTokenStore>) -> Self {
+        self.steps = Some(steps);
         self
     }
 }
@@ -479,6 +582,41 @@ impl OutboxStore for MemoryOutboxStore {
     }
 }
 
+/// 进程内「状态 + outbox」批量提交（**仅供测试 / 无 KV 装配**）。
+///
+/// 状态写 [`MemoryWorkflowStore`]，事件追加到 [`MemoryOutboxStore`]。两者各自持锁、
+/// 相互独立，**不构成跨存储原子性**：写实例成功而追加事件失败会留下「状态已落、
+/// 事件未落」的半提交，故**不得**用于生产装配——生产路径必须用单事务实现
+/// （`coord-agent` 的 `KvOutboxStore`，KV Txn + CAS）。
+///
+/// `expected_mod_rev` 被忽略：内存存储不暴露 mod_revision，没有可比较的版本。
+pub struct MemoryAtomicCommit {
+    instances: Arc<MemoryWorkflowStore>,
+    outbox: Arc<MemoryOutboxStore>,
+}
+
+impl MemoryAtomicCommit {
+    pub fn new(instances: Arc<MemoryWorkflowStore>, outbox: Arc<MemoryOutboxStore>) -> Self {
+        Self { instances, outbox }
+    }
+}
+
+#[async_trait]
+impl AtomicOutboxCommit for MemoryAtomicCommit {
+    async fn commit_state_and_outbox_batch(
+        &self,
+        inst: &WorkflowInstance,
+        recs: &[OutboxRecord],
+        _expected_mod_rev: Option<i64>,
+    ) -> Result<bool, StoreError> {
+        self.instances.save_instance(inst).await?;
+        for rec in recs {
+            self.outbox.append(rec).await?;
+        }
+        Ok(true)
+    }
+}
+
 /// 进程内定时器存储（测试/降级用；重启即失，**不**提供持久性）。
 #[derive(Debug, Default)]
 pub struct MemoryTimerStore {
@@ -534,6 +672,61 @@ impl DurableTimerStore for MemoryTimerStore {
         let mut out: Vec<TimerRecord> = map.values().cloned().collect();
         out.sort_by_key(|r| (r.fire_at_ms, r.id.clone()));
         Ok(out)
+    }
+}
+
+/// 进程内 step token 存储（测试/降级用；重启即失，**不**提供跨进程去重）。
+#[derive(Debug, Default)]
+pub struct MemoryStepStore {
+    inner: std::sync::Mutex<std::collections::HashMap<(String, String), StepRecord>>,
+}
+
+impl MemoryStepStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl StepTokenStore for MemoryStepStore {
+    async fn register(
+        &self,
+        instance_id: &str,
+        step_id: &str,
+        token: &str,
+        now_ms: i64,
+    ) -> Result<(StepRecord, bool), StoreError> {
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (instance_id.to_string(), step_id.to_string());
+        if let Some(existing) = map.get(&key) {
+            return Ok((existing.clone(), false));
+        }
+        let rec = StepRecord {
+            token: token.to_string(),
+            state: StepState::Pending,
+            at_ms: now_ms,
+        };
+        map.insert(key, rec.clone());
+        Ok((rec, true))
+    }
+
+    async fn mark_done(&self, instance_id: &str, step_id: &str) -> Result<(), StoreError> {
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(rec) = map.get_mut(&(instance_id.to_string(), step_id.to_string())) {
+            rec.state = StepState::Done;
+        }
+        Ok(())
+    }
+
+    async fn get(
+        &self,
+        instance_id: &str,
+        step_id: &str,
+    ) -> Result<Option<StepRecord>, StoreError> {
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(map
+            .get(&(instance_id.to_string(), step_id.to_string()))
+            .cloned())
     }
 }
 
@@ -648,6 +841,43 @@ mod tests {
         });
     }
 
+    #[tokio::test]
+    async fn memory_atomic_commit_writes_state_and_batch() {
+        use crate::workflow::model::WorkflowInstance;
+        use crate::workflow::ports::{MemoryWorkflowStore, WorkflowStore};
+
+        let instances = Arc::new(MemoryWorkflowStore::new());
+        let outbox = Arc::new(MemoryOutboxStore::new());
+        let commit = MemoryAtomicCommit::new(Arc::clone(&instances), Arc::clone(&outbox));
+
+        let inst: WorkflowInstance = serde_json::from_value(serde_json::json!({
+            "id": "mem-1",
+            "definition_ns": "mem",
+            "definition_name": "wf",
+            "definition_version": "1.0.0",
+            "status": "running",
+            "context": {},
+            "current_task_index": 0,
+            "created_at": 1,
+            "updated_at": 1
+        }))
+        .unwrap();
+
+        let recs = vec![rec("m1", "mem-1", 10), rec("m2", "mem-1", 11)];
+        assert!(commit
+            .commit_state_and_outbox_batch(&inst, &recs, None)
+            .await
+            .unwrap());
+
+        let stored = instances.load_instance("mem-1").await.unwrap().unwrap();
+        assert_eq!(stored.id, "mem-1");
+        let all = outbox.list_all().await.unwrap();
+        assert_eq!(all.len(), 2, "两条伴生事件都追加");
+        let seq = |id: &str| all.iter().find(|r| r.id == id).unwrap().sequence;
+        assert_eq!(seq("m1"), 1);
+        assert_eq!(seq("m2"), 2, "数组顺序即 sequence 顺序");
+    }
+
     #[derive(Default)]
     struct FlakySink {
         calls: AtomicUsize,
@@ -662,6 +892,32 @@ mod tests {
             if n < self.fail_first {
                 return Err("injected downstream failure".to_string());
             }
+            self.delivered
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(rec.id.clone());
+            Ok(())
+        }
+    }
+
+    /// 记录投递顺序的 sink（正控制用：断言 per-instance `sequence` 顺序）。
+    #[derive(Default)]
+    struct RecordingSink {
+        delivered: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingSink {
+        fn ids(&self) -> Vec<String> {
+            self.delivered
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl OutboxSink for RecordingSink {
+        async fn deliver(&self, rec: &OutboxRecord) -> Result<(), String> {
             self.delivered
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -728,12 +984,120 @@ mod tests {
                 base_backoff_ms: 1,
                 max_backoff_ms: 1,
                 batch: 8,
+                ..RelayPolicy::default()
             },
         );
         assert_eq!(relay.tick(0).await.unwrap().retried, 1);
         assert_eq!(relay.tick(10).await.unwrap().dead, 1);
         let all = store.list_all().await.unwrap();
         assert_eq!(all[0].status, OutboxStatus::Dead);
+    }
+
+    /// 正控制：同一批提交的事件共享 `next_attempt_at_ms`，`pending` 的组内顺序退化为
+    /// 后端键序（KV 按 UUID id，随机）。relay 必须在投递**前**按 `(aggregate_id, sequence)`
+    /// 重排，否则消费者会先看到 `sequence=3` 再看到 2，破坏 per-instance 顺序契约。
+    ///
+    /// 反（负控制）：本测试的 store 故意按 id 降序返回（与 sequence 顺序相反）；
+    /// 不加排序就会以 `[c, b, a]`（sequence 3,2,1）投递而**失败**。
+    #[tokio::test]
+    async fn relay_delivers_same_batch_in_sequence_order() {
+        use crate::workflow::model::WorkflowInstance;
+        use crate::workflow::ports::MemoryWorkflowStore;
+
+        /// 模拟 KV outbox 键序：`pending` 按 id 降序（不保证 sequence 顺序）。
+        struct IdOrderedStore {
+            inner: Arc<MemoryOutboxStore>,
+        }
+
+        #[async_trait]
+        impl OutboxStore for IdOrderedStore {
+            async fn append(&self, rec: &OutboxRecord) -> Result<(), StoreError> {
+                self.inner.append(rec).await
+            }
+            async fn pending(
+                &self,
+                now_ms: i64,
+                limit: usize,
+            ) -> Result<Vec<OutboxRecord>, StoreError> {
+                let mut v = self.inner.pending(now_ms, limit).await?;
+                v.sort_by(|a, b| b.id.cmp(&a.id));
+                Ok(v)
+            }
+            async fn mark_delivered(
+                &self,
+                id: &str,
+                delivered_at_ms: i64,
+            ) -> Result<(), StoreError> {
+                self.inner.mark_delivered(id, delivered_at_ms).await
+            }
+            async fn mark_retry(
+                &self,
+                id: &str,
+                attempts: u32,
+                next_attempt_at_ms: i64,
+            ) -> Result<(), StoreError> {
+                self.inner
+                    .mark_retry(id, attempts, next_attempt_at_ms)
+                    .await
+            }
+            async fn mark_dead(&self, id: &str, attempts: u32) -> Result<(), StoreError> {
+                self.inner.mark_dead(id, attempts).await
+            }
+            async fn list_all(&self) -> Result<Vec<OutboxRecord>, StoreError> {
+                self.inner.list_all().await
+            }
+        }
+
+        // 同一次批量原子提交：3 条事件共享 `next_attempt_at_ms`，追加顺序 a,b,c
+        // 即 sequence 1,2,3；而模拟的键序（id 降序）与之相反。
+        let mem = Arc::new(MemoryOutboxStore::new());
+        let commit =
+            MemoryAtomicCommit::new(Arc::new(MemoryWorkflowStore::new()), Arc::clone(&mem));
+        let inst: WorkflowInstance = serde_json::from_value(serde_json::json!({
+            "id": "seq-1",
+            "definition_ns": "seq",
+            "definition_name": "wf",
+            "definition_version": "1.0.0",
+            "status": "running",
+            "context": {},
+            "current_task_index": 0,
+            "created_at": 1,
+            "updated_at": 1
+        }))
+        .unwrap();
+        let recs = vec![
+            rec("a", "seq-1", 100),
+            rec("b", "seq-1", 100),
+            rec("c", "seq-1", 100),
+        ];
+        assert!(commit
+            .commit_state_and_outbox_batch(&inst, &recs, None)
+            .await
+            .unwrap());
+        let all = mem.list_all().await.unwrap();
+        let seq_of = |id: &str| all.iter().find(|r| r.id == id).unwrap().sequence;
+        assert_eq!((seq_of("a"), seq_of("b"), seq_of("c")), (1, 2, 3));
+
+        let store: Arc<dyn OutboxStore> = Arc::new(IdOrderedStore {
+            inner: Arc::clone(&mem),
+        });
+        let sink = Arc::new(RecordingSink::default());
+        let relay = OutboxRelay::new(
+            Arc::clone(&store),
+            Arc::clone(&sink) as Arc<dyn OutboxSink>,
+            RelayPolicy {
+                batch: 8,
+                ..RelayPolicy::default()
+            },
+        );
+
+        let report = relay.tick(100).await.unwrap();
+        assert_eq!(report.delivered, 3);
+        assert_eq!(
+            sink.ids(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            "投递顺序必须是 per-instance sequence 顺序，而非 pending 的后端键序"
+        );
     }
 
     #[tokio::test]

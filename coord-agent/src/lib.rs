@@ -1372,26 +1372,86 @@ impl AgentServer {
             }
         }
 
+        // durable 是 workflow 的持久化增强而非独立开关：workflow 未启用时该标记
+        // 无装配目标，静默失效会掩盖配置错误（fail-closed）。
+        if self.config.services.workflow_durable && !self.config.services.workflow {
+            return Err(
+                "services.workflow_durable = true requires services.workflow = true".into(),
+            );
+        }
+
+        // Durable 工作流装配需要 MQ 投递面（outbox relay / listen 订阅）。此处在
+        // workflow 块之前把 MQ 句柄构造一次：构造本身无副作用（redb 在 start()
+        // 才打开），注册与后台任务仍留在下方 `services.mq` 块——注册顺序不变，
+        // 故 `workflow_durable` 关闭时装配路径逐字不变。
+        let mq_handle: Option<Arc<crate::services::mq::MessageQueueService>> =
+            if self.config.services.mq {
+                Some(Arc::new(crate::services::mq::MessageQueueService::new(
+                    std::path::PathBuf::from(&self.config.data_dir),
+                    // 容量上界（B-PL-4——已强制执行）：消息 + DLQ 与数据同事务记账，
+                    // publish 入口逐写严格拒绝（超界 `RESOURCE_EXHAUSTED`）；retention
+                    // reaper 周期回收过期消息/DLQ。残余边界见 boundaries.md B-PL-4。
+                    1024 * 1024 * 1024, // 1GB（强制；超界拒绝，不是事后淘汰）
+                )))
+            } else {
+                None
+            };
+
         if self.config.services.workflow {
-            // 有 server 连接时走 KvWorkflowStore（raft 持久化），
-            // 启动时 init() 全量重建本地缓存 + watch 断连重连对账；
-            // 无连接时退回内存态（单 agent 测试/离线场景）。
-            let workflow_svc = match &inner {
-                Some(inner_ref) => Arc::new(
-                    crate::services::workflow::phase4::WorkflowEngineService::new_with_kv_store_and_dispatch(
-                        inner_ref.clone(),
-                        &self.config.services.workflow_dispatch,
-                    ),
-                ),
-                None => {
-                    tracing::warn!(
-                        "Workflow engine enabled but no server connection; using memory-only store"
+            // durable 装配承诺「事件不丢 / 一实例一驱动 / 副作用不重」：缺前置条件
+            // （Server 连接 = KV 持久化面、`services.mq` = 投递面）必须 fail-closed
+            // 拒绝启动——静默降级到非 durable 路径正是这条装配边界要消除的缺陷：
+            // 前置缺失却照常启动，让承诺（不丢/不重/一实例一驱动）失效而不报错。
+            let workflow_svc = if self.config.services.workflow_durable {
+                // 先查配置级前置（MQ 开关），再查连接级前置：两者都缺时优先报出配置
+                // 错误——它无需外部依赖即可修正。
+                let Some(mq) = mq_handle.as_ref() else {
+                    return Err(
+                        "services.workflow_durable = true requires services.mq = true \
+                         (outbox relay / listen delivery surface)"
+                            .into(),
                     );
-                    Arc::new(
-                        crate::services::workflow::phase4::WorkflowEngineService::new_with_dispatch(
+                };
+                let Some(inner_ref) = inner.as_ref() else {
+                    return Err(
+                        "services.workflow_durable = true requires a server connection \
+                         (KV persistence backend); none is configured"
+                            .into(),
+                    );
+                };
+                Arc::new(
+                    crate::services::workflow::phase4::WorkflowEngineService::new_with_kv_store_durable(
+                        Arc::clone(inner_ref),
+                        &self.config.services.workflow_dispatch,
+                        crate::services::workflow::phase4::DurableEngineOptions {
+                            mq: Arc::clone(mq),
+                            topic: self.config.services.workflow_events_topic.clone(),
+                            relay_enabled: true,
+                            relay_interval_ms: 1000,
+                        },
+                    ),
+                )
+            } else {
+                // 有 server 连接时走 KvWorkflowStore（raft 持久化），
+                // 启动时 init() 全量重建本地缓存 + watch 断连重连对账；
+                // 无连接时退回内存态（单 agent 测试/离线场景）。
+                match &inner {
+                    Some(inner_ref) => Arc::new(
+                        crate::services::workflow::phase4::WorkflowEngineService::new_with_kv_store_and_dispatch(
+                            inner_ref.clone(),
                             &self.config.services.workflow_dispatch,
                         ),
-                    )
+                    ),
+                    None => {
+                        tracing::warn!(
+                            "Workflow engine enabled but no server connection; using memory-only store"
+                        );
+                        Arc::new(
+                            crate::services::workflow::phase4::WorkflowEngineService::new_with_dispatch(
+                                &self.config.services.workflow_dispatch,
+                            ),
+                        )
+                    }
                 }
             };
             let workflow_grpc_svc = register_native_service(
@@ -1576,15 +1636,9 @@ impl AgentServer {
             }
         }
 
-        if self.config.services.mq {
-            let data_dir = std::path::PathBuf::from(&self.config.data_dir);
-            let mq_svc = Arc::new(crate::services::mq::MessageQueueService::new(
-                data_dir.clone(),
-                // 容量上界（B-PL-4——已强制执行）：消息 + DLQ 与数据同事务记账，
-                // publish 入口逐写严格拒绝（超界 `RESOURCE_EXHAUSTED`）；retention
-                // reaper 周期回收过期消息/DLQ。残余边界见 boundaries.md B-PL-4。
-                1024 * 1024 * 1024, // 1GB（强制；超界拒绝，不是事后淘汰）
-            ));
+        // 句柄在上方 workflow 块之前已按 `services.mq` 构造（同一实例）；此处只做
+        // 注册与后台任务，保持既有注册顺序。
+        if let Some(mq_svc) = mq_handle {
             // 绑定自身弱引用：gRPC handler 升级 Arc 走 spawn_blocking；start() 据此
             // 挂载后台 reaper（未绑定则不挂载——单测直接调用 reap_once）。
             mq_svc.bind_self_weak(&mq_svc);

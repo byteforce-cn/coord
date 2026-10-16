@@ -114,6 +114,9 @@ python3 spike/2026-10/spike-4-conformance/scripts/matrix.py \
 1. **立即（不等 Spike 6）**：把未实现构造从「静默误读」改为 **fail-closed 拒绝**
    （至少覆盖 `run.*` 非 workflow、`use.extensions`、非 switch 的 `then`）。
    这是一行级风险/收益比最高的改动，且符合仓库既有 fail-closed 口径。
+   - 落地锚点：`coord/tests/spike4_conformance.rs`（语料 12/13/14/17 解析即拒绝且
+     错误点名构造；15/21/24 保持接受；`then` 仅接受 `continue` 与顶层 do 列表
+     末任务的 `exit`/`end`，具名跳转与嵌套位置拒绝）。
 2. 短期采用 **方案 A + 能力白名单**：满足文档流动场景，不伪装支持脚本/容器。
 3. 中期与 ADR-0010 的 G-WF-1 合同期对齐，按消费方真实需求决定方案 C 的子集
    （优先 `run:workflow` 的正确子流程调用与 `then` 流程控制）。

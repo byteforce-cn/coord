@@ -18,6 +18,7 @@ use coord_agent::services::mq_event_provider::{CursorStore, MqEventProvider};
 use coord_agent::services::outbox_kv::{KvCursorStore, KvOutboxStore};
 use coord_agent::services::outbox_relay::{drain_topic, MqOutboxSink};
 use coord_agent::services::workflow::phase4::{DurableEngineOptions, WorkflowEngineService};
+use coord_agent::services::workflow_store::KvWorkflowStore;
 use coord_agent::{AgentInner, WorkflowDispatchConfig};
 use coord_client::config::Config;
 use coord_client::Client;
@@ -28,7 +29,7 @@ use coord_core::workflow::durable::{
 use coord_core::workflow::model::{
     InstanceStatus, SuspensionMeta, TaskFrame, TaskStatus, WorkflowInstance,
 };
-use coord_core::workflow::ports::EventProvider;
+use coord_core::workflow::ports::{EventProvider, WorkflowStore};
 
 const TOPIC: &str = "com.china-workflow.spike3.events";
 
@@ -200,6 +201,195 @@ async fn state_and_outbox_commit_is_all_or_nothing() {
     assert_eq!(seq_c, 2, "同一 aggregate 的 sequence 单调 +1");
 }
 
+/// 批量同事务：一次提交实例状态 + N 条伴生事件，两条 `sequence` 连续、各一条记录。
+#[tokio::test]
+async fn state_and_multiple_events_commit_atomically() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+    let kv = CoordKv::new(&inner);
+
+    let inst_a = inst("batch-a");
+    let recs = vec![
+        outbox_rec(
+            "batch-a",
+            "com.china-workflow.spike3.created",
+            "evt-batch-a-1",
+            10,
+        ),
+        outbox_rec(
+            "batch-a",
+            "com.china-workflow.spike3.step",
+            "evt-batch-a-2",
+            11,
+        ),
+    ];
+    let committed = store
+        .commit_state_and_outbox_batch(&inst_a, &recs, None)
+        .await
+        .expect("batch txn");
+    assert!(committed, "无 CAS 约束 ⇒ 批量事务应提交");
+
+    let read_back: WorkflowInstance = kv
+        .get_instance("batch-a")
+        .await
+        .expect("state visible with the batch");
+    assert_eq!(read_back.id, "batch-a");
+
+    let all = OutboxStore::list_all(&*store).await.unwrap();
+    let mut got: Vec<OutboxRecord> = all
+        .into_iter()
+        .filter(|r| r.aggregate_id == "batch-a")
+        .collect();
+    got.sort_by_key(|r| r.sequence);
+    assert_eq!(got.len(), 2, "同批两条事件各一条记录");
+    assert_eq!(got[0].id, "evt-batch-a-1");
+    assert_eq!(got[0].sequence, 1);
+    assert_eq!(got[1].id, "evt-batch-a-2");
+    assert_eq!(got[1].sequence, 2, "sequence 连续；数组顺序即序号顺序");
+}
+
+/// 同批重放：全部 id 已存在 ⇒ 幂等 `Ok(true)`，不新增记录。
+#[tokio::test]
+async fn batch_commit_is_idempotent_on_replay() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+
+    let inst = inst("batch-replay");
+    let recs = vec![
+        outbox_rec(
+            "batch-replay",
+            "com.china-workflow.spike3.created",
+            "evt-replay-1",
+            20,
+        ),
+        outbox_rec(
+            "batch-replay",
+            "com.china-workflow.spike3.step",
+            "evt-replay-2",
+            21,
+        ),
+    ];
+    assert!(
+        store
+            .commit_state_and_outbox_batch(&inst, &recs, None)
+            .await
+            .unwrap(),
+        "首次提交成功"
+    );
+    let count = |all: Vec<OutboxRecord>| {
+        all.into_iter()
+            .filter(|r| r.aggregate_id == "batch-replay")
+            .count()
+    };
+    assert_eq!(count(OutboxStore::list_all(&*store).await.unwrap()), 2);
+
+    // 重放同一批 ⇒ 全部 id 已存在 ⇒ 幂等成功，不新增记录
+    assert!(
+        store
+            .commit_state_and_outbox_batch(&inst, &recs, None)
+            .await
+            .unwrap(),
+        "重放应返回幂等成功"
+    );
+    assert_eq!(
+        count(OutboxStore::list_all(&*store).await.unwrap()),
+        2,
+        "重放不新增记录"
+    );
+}
+
+/// 空批次（纯状态提交）：只写实例状态，不碰 outbox 的 seq/记录。
+#[tokio::test]
+async fn empty_batch_commits_state_without_touching_outbox() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+    let kv = CoordKv::new(&inner);
+
+    // 先落一条已有事件：聚合的 seq 计数器已在 KV 里。
+    store
+        .append(&outbox_rec(
+            "empty-batch",
+            "com.china-workflow.spike3.step",
+            "evt-seed",
+            5,
+        ))
+        .await
+        .unwrap();
+
+    let inst = inst("empty-batch");
+    assert!(
+        store
+            .commit_state_and_outbox_batch(&inst, &[], None)
+            .await
+            .unwrap(),
+        "空批次应提交实例状态"
+    );
+
+    let read_back = kv.get_instance("empty-batch").await.expect("state visible");
+    assert_eq!(read_back.id, "empty-batch");
+
+    let all = OutboxStore::list_all(&*store).await.unwrap();
+    let mine: Vec<OutboxRecord> = all
+        .into_iter()
+        .filter(|r| r.aggregate_id == "empty-batch")
+        .collect();
+    assert_eq!(mine.len(), 1, "空批次不新增 outbox 记录");
+    assert_eq!(mine[0].id, "evt-seed");
+    assert_eq!(mine[0].sequence, 1, "空批次不重写 seq 计数器");
+}
+
+/// `Arc<dyn WorkflowStore>` 委托必须转发 CAS 原语。
+///
+/// 默认 `load_instance_with_rev` 恒返回 `Ok(None)`、`save_instance_atomic` 退化为
+/// 普通写并恒返回 `Ok(true)`。若委托不覆盖它们，经 trait object 装配的运行时永远
+/// 拿不到修订号，写入不带 `MOD_REV` 比较，并发驱动者互相覆盖（丢更新）。
+#[tokio::test]
+async fn dyn_workflow_store_forwards_revision_and_cas_primitives() {
+    let env = setup().await;
+    let store: Arc<dyn WorkflowStore + Send + Sync> = Arc::new(KvWorkflowStore::new(env.inner()));
+
+    let mut inst = inst("dyn-cas");
+    store.save_instance(&inst).await.expect("save instance");
+
+    // (a) 经 dyn 路径读回修订号（默认实现会返回 None）。
+    let (loaded, rev) = store
+        .load_instance_with_rev("dyn-cas")
+        .await
+        .expect("load_instance_with_rev")
+        .expect("dyn path must return a revision, not None");
+    assert_eq!(loaded.id, "dyn-cas");
+
+    // (b) 陈旧修订号 CAS 被拒绝，当前修订号 CAS 成功。
+    inst.context = serde_json::json!({"v": 1});
+    let stale = store
+        .save_instance_atomic(&inst, rev + 1)
+        .await
+        .expect("stale save_instance_atomic");
+    assert!(!stale, "dyn path must reject a stale revision CAS");
+
+    inst.context = serde_json::json!({"v": 2});
+    let ok = store
+        .save_instance_atomic(&inst, rev)
+        .await
+        .expect("current save_instance_atomic");
+    assert!(ok, "dyn path must accept the current revision CAS");
+
+    let (after, new_rev) = store
+        .load_instance_with_rev("dyn-cas")
+        .await
+        .expect("reload")
+        .expect("revision after CAS");
+    assert!(new_rev > rev, "CAS must advance the revision");
+    assert_eq!(
+        after.context,
+        serde_json::json!({"v": 2}),
+        "CAS write visible"
+    );
+}
+
 /// 判据 2（问题 2）：Relay 投递 + 标位 + 失败退避，事件不丢、重复靠 event_id 去重。
 #[tokio::test]
 async fn relay_delivers_all_records_and_consumer_dedups_by_event_id() {
@@ -254,6 +444,324 @@ async fn relay_delivers_all_records_and_consumer_dedups_by_event_id() {
         3,
         "重投不产生第 4 条"
     );
+}
+
+// ─── outbox 保留清理（守卫式 prune） ───
+
+/// 未投递不删：`Pending` 记录无论多旧都不在清理范围内。
+#[tokio::test]
+async fn prune_never_deletes_pending_records() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+    let kv = CoordKv::new(&inner);
+
+    let ancient = now_ms() - 365 * 24 * 3600 * 1000;
+    store
+        .append(&outbox_rec(
+            "prune-pending",
+            "com.china-workflow.spike3.step",
+            "evt-ancient-pending",
+            ancient,
+        ))
+        .await
+        .unwrap();
+
+    let pruned = store.prune(now_ms(), 1_000, 64).await.expect("prune");
+    assert_eq!(pruned, 0, "Pending 记录永不删（无论多旧）");
+    assert!(
+        kv.get(&kv_outbox_id_key("evt-ancient-pending"))
+            .await
+            .is_some(),
+        "pending 的幂等索引仍在"
+    );
+    assert!(
+        !store.pending(now_ms(), 64).await.unwrap().is_empty(),
+        "pending 仍可被 relay 轮询到"
+    );
+}
+
+/// 已投递 + 过保留窗口 ⇒ 删记录键、幂等索引与残留 pending 索引；`Pending` 邻居保留。
+#[tokio::test]
+async fn prune_deletes_delivered_records_past_retention() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+    let kv = CoordKv::new(&inner);
+
+    let now = now_ms();
+    let created = now - 10 * 60 * 1000;
+    for (i, id) in ["evt-prune-1", "evt-prune-2"].iter().enumerate() {
+        store
+            .append(&outbox_rec(
+                "prune-delivered",
+                "com.china-workflow.spike3.step",
+                id,
+                created + i as i64,
+            ))
+            .await
+            .unwrap();
+        store.mark_delivered(id, now - 5 * 60 * 1000).await.unwrap();
+    }
+    store
+        .append(&outbox_rec(
+            "prune-delivered",
+            "com.china-workflow.spike3.step",
+            "evt-prune-keep",
+            created,
+        ))
+        .await
+        .unwrap();
+
+    let pruned = store.prune(now, 60_000, 64).await.expect("prune");
+    assert_eq!(pruned, 2, "两条已投递且过窗的记录被回收");
+
+    let mine: Vec<OutboxRecord> = OutboxStore::list_all(&*store)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.aggregate_id == "prune-delivered")
+        .collect();
+    assert_eq!(mine.len(), 1, "只剩未投递的那条: {mine:?}");
+    assert_eq!(mine[0].id, "evt-prune-keep");
+    assert!(
+        kv.get(&kv_outbox_id_key("evt-prune-1")).await.is_none(),
+        "幂等索引 ids/ 随记录一起删"
+    );
+    assert!(
+        kv.get(&kv_outbox_record_key("prune-delivered", 1))
+            .await
+            .is_none(),
+        "权威归档 records/ 已删（直读 KV）"
+    );
+    assert!(
+        kv.get(&kv_outbox_seq_key("prune-delivered"))
+            .await
+            .is_some(),
+        "seq/ 计数器不随清理删除"
+    );
+}
+
+/// `Dead` 以末次尝试时刻计时（无重试时即入库时刻）：刚重试过的死信未过窗不删。
+#[tokio::test]
+async fn prune_dead_records_age_from_last_attempt() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+
+    let now = now_ms();
+    let created = now - 24 * 3600 * 1000;
+    // 入库很旧且末次尝试也已过窗 ⇒ 删
+    store
+        .append(&outbox_rec(
+            "prune-dead",
+            "com.china-workflow.spike3.step",
+            "evt-dead-old",
+            created,
+        ))
+        .await
+        .unwrap();
+    store
+        .mark_retry("evt-dead-old", 3, now - 3600 * 1000)
+        .await
+        .unwrap();
+    store.mark_dead("evt-dead-old", 4).await.unwrap();
+    // 入库同样很旧，但刚重试过 ⇒ 保留（不因 created_at 老就提前删）
+    store
+        .append(&outbox_rec(
+            "prune-dead",
+            "com.china-workflow.spike3.step",
+            "evt-dead-fresh",
+            created,
+        ))
+        .await
+        .unwrap();
+    store
+        .mark_retry("evt-dead-fresh", 3, now - 10_000)
+        .await
+        .unwrap();
+    store.mark_dead("evt-dead-fresh", 4).await.unwrap();
+
+    let pruned = store.prune(now, 60_000, 64).await.expect("prune");
+    assert_eq!(pruned, 1, "只回收末次尝试已过窗的死信");
+    let ids: Vec<String> = OutboxStore::list_all(&*store)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.aggregate_id == "prune-dead")
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(ids, vec!["evt-dead-fresh".to_string()]);
+}
+
+/// 序号不回退：清理后同一聚合的新事件接着已删序号继续 +1。
+#[tokio::test]
+async fn prune_does_not_reset_sequence_counter() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+    let kv = CoordKv::new(&inner);
+
+    let now = now_ms();
+    let created = now - 3600 * 1000;
+    for i in 1..=3u64 {
+        store
+            .append(&outbox_rec(
+                "prune-seq",
+                "com.china-workflow.spike3.step",
+                &format!("evt-seq-{i}"),
+                created + i as i64,
+            ))
+            .await
+            .unwrap();
+    }
+    let seqs: Vec<u64> = OutboxStore::list_all(&*store)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.aggregate_id == "prune-seq")
+        .map(|r| r.sequence)
+        .collect();
+    assert_eq!(seqs, vec![1, 2, 3], "初始序号 1..3");
+
+    for i in 1..=3u64 {
+        store
+            .mark_delivered(&format!("evt-seq-{i}"), now - 1800 * 1000)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store.prune(now, 60_000, 64).await.unwrap(),
+        3,
+        "三条已投递记录全部回收"
+    );
+    assert_eq!(
+        kv.get(&kv_outbox_seq_key("prune-seq")).await,
+        Some(b"3".to_vec()),
+        "seq 计数器在清理后仍是 3"
+    );
+
+    store
+        .append(&outbox_rec(
+            "prune-seq",
+            "com.china-workflow.spike3.step",
+            "evt-seq-4",
+            now,
+        ))
+        .await
+        .unwrap();
+    let next = OutboxStore::list_all(&*store)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == "evt-seq-4")
+        .expect("新事件已入库");
+    assert_eq!(next.sequence, 4, "清理后新事件接着 4，序号不回退/不重叠");
+}
+
+/// 幂等 + 单批上限：重复 prune 返回 0，每轮最多删 `limit` 条。
+#[tokio::test]
+async fn repeated_prune_is_idempotent_and_bounded_by_limit() {
+    let env = setup().await;
+    let inner = env.inner();
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+
+    let now = now_ms();
+    let created = now - 10 * 60 * 1000;
+    for i in 1..=3u64 {
+        let id = format!("evt-idem-{i}");
+        store
+            .append(&outbox_rec(
+                "prune-idem",
+                "com.china-workflow.spike3.step",
+                &id,
+                created + i as i64,
+            ))
+            .await
+            .unwrap();
+        store
+            .mark_delivered(&id, now - 5 * 60 * 1000)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(store.prune(now, 60_000, 1).await.unwrap(), 1, "单批上限");
+    assert_eq!(store.prune(now, 60_000, 1).await.unwrap(), 1);
+    assert_eq!(store.prune(now, 60_000, 1).await.unwrap(), 1);
+    let after = store.prune(now, 60_000, 1).await.unwrap();
+    assert_eq!(after, 0, "同日重复 tick 幂等：已无过窗记录");
+    assert!(
+        OutboxStore::list_all(&*store)
+            .await
+            .unwrap()
+            .into_iter()
+            .all(|r| r.aggregate_id != "prune-idem"),
+        "三次清理后聚合记录已空"
+    );
+}
+
+/// relay tick 出口：投递与回收同轮完成，`RelayReport.pruned` 是清理的可观测出口。
+#[tokio::test]
+async fn relay_tick_reports_pruned_after_delivery() {
+    let env = setup().await;
+    let inner = env.inner();
+    let mq = start_mq(&env.mq_dir()).await;
+    let store = Arc::new(KvOutboxStore::new(Arc::clone(&inner)));
+
+    let now = now_ms();
+    // 早先 tick 已投递、现已过窗的记录：本轮应被回收
+    store
+        .append(&outbox_rec(
+            "prune-relay",
+            "com.china-workflow.spike3.step",
+            "evt-relay-old",
+            now - 600_000,
+        ))
+        .await
+        .unwrap();
+    store
+        .mark_delivered("evt-relay-old", now - 300_000)
+        .await
+        .unwrap();
+    // 本轮新投递的记录：按本 tick 时间计时，同一轮内不回收
+    store
+        .append(&outbox_rec(
+            "prune-relay",
+            "com.china-workflow.spike3.step",
+            "evt-relay-new",
+            now,
+        ))
+        .await
+        .unwrap();
+
+    let sink: Arc<dyn OutboxSink> = Arc::new(MqOutboxSink::new(Arc::clone(&mq), TOPIC));
+    let relay = OutboxRelay::new(
+        Arc::clone(&store) as Arc<dyn OutboxStore>,
+        sink,
+        RelayPolicy {
+            retention_ms: 60_000,
+            ..RelayPolicy::default()
+        },
+    );
+
+    let first = relay.tick(now).await.unwrap();
+    assert_eq!(first.delivered, 1, "本轮投递新记录");
+    assert_eq!(first.pruned, 1, "同轮回收过窗的旧已投递记录");
+    let ids: Vec<String> = OutboxStore::list_all(&*store)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.aggregate_id == "prune-relay")
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(ids, vec!["evt-relay-new".to_string()], "旧记录已回收");
+
+    let within = relay.tick(now + 30_000).await.unwrap();
+    assert_eq!(within.delivered, 0);
+    assert_eq!(within.pruned, 0, "还在保留窗内：不回收");
+
+    let after = relay.tick(now + 61_000).await.unwrap();
+    assert_eq!(after.pruned, 1, "过窗后由后续 tick 回收");
 }
 
 /// 判据 3（问题 4）：持久化定时器可按到期时间扫描与移除。
@@ -491,6 +999,43 @@ async fn wait_instance_recovers_after_engine_restart() {
     );
 }
 
+/// Topic 生命周期回归：真实 `serve_with_shutdown` 中 durable 引擎**先构造**、
+/// MQ 插件**后 `start()`**——构造时的 `create_topic` 因 MQ 未起而失败，topic
+/// 必须由 `start()` 在 MQ 就绪后补建，否则 relay 产出/ listen 订阅都报
+/// topic not found。此处刻意反向于 harness（先造引擎、后起 MQ）复现该顺序。
+#[tokio::test]
+async fn durable_service_creates_events_topic_after_late_mq_start() {
+    let env = setup().await;
+    let inner = env.inner();
+
+    // MQ 构造但**不** start。
+    let mq = Arc::new(MessageQueueService::new(env.mq_dir(), 1024 * 1024 * 1024));
+    let svc = WorkflowEngineService::new_with_kv_store_durable(
+        Arc::clone(&inner),
+        &WorkflowDispatchConfig::default(),
+        DurableEngineOptions {
+            mq: Arc::clone(&mq),
+            topic: TOPIC.to_string(),
+            relay_enabled: true,
+            relay_interval_ms: 100,
+        },
+    );
+    // 构造时 MQ 未起（`get_topic_config` 读表需 MQ 已 start，故此断言只能验证
+    // 未启动这一前置本身）：构造时的 `create_topic` 因而失败。
+    assert!(
+        !mq.is_started(),
+        "MQ must not be started at engine construction"
+    );
+
+    // MQ 就绪后再启引擎：`start()` 必须补建 topic。
+    mq.start().await.expect("start mq");
+    svc.start().await.expect("engine start");
+    assert!(
+        mq.get_topic_config(TOPIC).unwrap().is_some(),
+        "start() must create the durable events topic once MQ is up"
+    );
+}
+
 /// listen 挂起实例在引擎重启后重新订阅，事件到达即恢复。
 #[tokio::test]
 async fn listen_instance_resubscribes_after_engine_restart() {
@@ -672,6 +1217,18 @@ fn now_ms() -> i64 {
 
 fn kv_instance_key(id: &str) -> Vec<u8> {
     format!("/_workflow/v3/instances/{id}").into_bytes()
+}
+
+fn kv_outbox_id_key(id: &str) -> Vec<u8> {
+    format!("/_workflow/v3/outbox/ids/{id}").into_bytes()
+}
+
+fn kv_outbox_record_key(aggregate: &str, sequence: u64) -> Vec<u8> {
+    format!("/_workflow/v3/outbox/records/{aggregate}/{sequence:020}").into_bytes()
+}
+
+fn kv_outbox_seq_key(aggregate: &str) -> Vec<u8> {
+    format!("/_workflow/v3/outbox/seq/{aggregate}").into_bytes()
 }
 
 /// 直读 KV（证据断言用）。

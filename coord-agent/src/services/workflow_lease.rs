@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use coord_core::workflow::durable::OutboxRecord;
 use coord_core::workflow::model::WorkflowInstance;
 use coord_core::workflow::ports::{InstanceLease, LeaseGuard, StoreError};
 use coord_proto::kv::PutRequest;
@@ -24,6 +25,7 @@ use coord_proto::txn::request_op::Op;
 use coord_proto::txn::{Compare, RequestOp};
 
 use crate::proxy::AgentInner;
+use crate::services::outbox_kv::KvOutboxStore;
 use crate::services::workflow_store::KvWorkflowStore;
 
 /// 实例驱动租约 key 前缀。与实例 key 同在 `/_workflow/v3/` 键空间下，
@@ -42,14 +44,18 @@ const DRIVER_PREFIX: &str = "/_workflow/v3/drivers/";
 pub struct KvInstanceLease {
     inner: Arc<AgentInner>,
     ttl_secs: i64,
+    /// outbox 存储：`fenced_commit` 在同一次 Txn 里写状态 + 伴生事件，
+    /// 复用其键布局/序号分配定义。
+    outbox: Arc<KvOutboxStore>,
 }
 
 impl KvInstanceLease {
     /// `ttl_secs` 为租约 TTL（秒）；续租间隔由 TTL 推导（`ttl/3`，下限 1s）。
-    pub fn new(inner: Arc<AgentInner>, ttl_secs: i64) -> Self {
+    pub fn new(inner: Arc<AgentInner>, ttl_secs: i64, outbox: Arc<KvOutboxStore>) -> Self {
         Self {
             inner,
             ttl_secs: ttl_secs.max(2),
+            outbox,
         }
     }
 
@@ -131,6 +137,7 @@ impl InstanceLease for KvInstanceLease {
             key,
             token,
             epoch,
+            outbox: Arc::clone(&self.outbox),
             renew_interval: Duration::from_secs((self.ttl_secs as u64 / 3).max(1)),
         })))
     }
@@ -143,7 +150,39 @@ struct KvLeaseGuard {
     key: Vec<u8>,
     token: String,
     epoch: i64,
+    outbox: Arc<KvOutboxStore>,
     renew_interval: Duration,
+}
+
+impl KvLeaseGuard {
+    /// fencing 三重 compare：实例 `MOD_REV` + 租约 key `MOD_REV == epoch`
+    /// + 租约 key `VALUE == token`。fenced_save 与 fenced_commit 共用，语义一致。
+    fn fence_compares(&self, inst_key: &[u8], expected_mod_rev: i64) -> Vec<Compare> {
+        vec![
+            // 1) 实例状态未被其他驱动者改动（乐观并发）。
+            Compare {
+                result: CompareResult::Equal as i32,
+                target: Target::ModRev as i32,
+                key: inst_key.to_vec(),
+                target_value: Some(TargetValue::ModRevision(expected_mod_rev)),
+            },
+            // 2) 租约仍属本驱动者：driver_key 的 mod_revision == epoch
+            //    （被撤销/重授后 mod_revision 变化，旧驱动者的写被拒绝）。
+            Compare {
+                result: CompareResult::Equal as i32,
+                target: Target::ModRev as i32,
+                key: self.key.clone(),
+                target_value: Some(TargetValue::ModRevision(self.epoch)),
+            },
+            // 3) 且 driver_key 的值 == 本驱动 token（防跨租约复用）。
+            Compare {
+                result: CompareResult::Equal as i32,
+                target: Target::Value as i32,
+                key: self.key.clone(),
+                target_value: Some(TargetValue::Value(self.token.clone().into_bytes())),
+            },
+        ]
+    }
 }
 
 #[async_trait]
@@ -178,34 +217,9 @@ impl LeaseGuard for KvLeaseGuard {
         let value =
             serde_json::to_vec(inst).map_err(|e| StoreError::SerializationError(e.to_string()))?;
 
-        let compares = vec![
-            // 1) 实例状态未被其他驱动者改动（乐观并发）。
-            Compare {
-                result: CompareResult::Equal as i32,
-                target: Target::ModRev as i32,
-                key: inst_key.clone(),
-                target_value: Some(TargetValue::ModRevision(expected_mod_rev)),
-            },
-            // 2) 租约仍属本驱动者：driver_key 的 mod_revision == epoch
-            //    （被撤销/重授后 mod_revision 变化，旧驱动者的写被拒绝）。
-            Compare {
-                result: CompareResult::Equal as i32,
-                target: Target::ModRev as i32,
-                key: self.key.clone(),
-                target_value: Some(TargetValue::ModRevision(self.epoch)),
-            },
-            // 3) 且 driver_key 的值 == 本驱动 token（防跨租约复用）。
-            Compare {
-                result: CompareResult::Equal as i32,
-                target: Target::Value as i32,
-                key: self.key.clone(),
-                target_value: Some(TargetValue::Value(self.token.clone().into_bytes())),
-            },
-        ];
-
         let put = RequestOp {
             op: Some(Op::RequestPut(PutRequest {
-                key: inst_key,
+                key: inst_key.clone(),
                 value,
                 lease_id: 0,
                 prev_kv: false,
@@ -217,7 +231,58 @@ impl LeaseGuard for KvLeaseGuard {
             .inner
             .client
             .txn()
-            .txn(compares, vec![put], vec![])
+            .txn(
+                self.fence_compares(&inst_key, expected_mod_rev),
+                vec![put],
+                vec![],
+            )
+            .await
+            .map_err(|e| StoreError::IoError(e.to_string()))?;
+
+        Ok(resp.succeeded)
+    }
+
+    async fn fenced_commit(
+        &self,
+        inst: &WorkflowInstance,
+        expected_mod_rev: i64,
+        events: &[OutboxRecord],
+    ) -> Result<bool, StoreError> {
+        if events.is_empty() {
+            return self.fenced_save(inst, expected_mod_rev).await;
+        }
+        let inst_key = KvWorkflowStore::instance_key(&inst.id);
+        let value =
+            serde_json::to_vec(inst).map_err(|e| StoreError::SerializationError(e.to_string()))?;
+
+        // 同一次 Txn：三重 fencing compare + outbox 侧 seq/幂等 compare；
+        // 成功写实例 + 分配 seq + 每条 ids/records/pending。键布局与序号分配
+        // 复用 `KvOutboxStore`（单一定义），聚合根取首条记录的 `aggregate_id`。
+        let aggregate = events
+            .first()
+            .map(|r| r.aggregate_id.as_str())
+            .unwrap_or(inst.id.as_str());
+        let (cur, cur_bytes) = self.outbox.read_sequence(aggregate).await?;
+
+        let mut compares = self.fence_compares(&inst_key, expected_mod_rev);
+        compares.extend(KvOutboxStore::outbox_compares(aggregate, cur_bytes, events));
+
+        let mut success = vec![RequestOp {
+            op: Some(Op::RequestPut(PutRequest {
+                key: inst_key,
+                value,
+                lease_id: 0,
+                prev_kv: false,
+                request_id: vec![],
+            })),
+        }];
+        success.extend(KvOutboxStore::outbox_ops(events, cur + 1)?);
+
+        let resp = self
+            .inner
+            .client
+            .txn()
+            .txn(compares, success, vec![])
             .await
             .map_err(|e| StoreError::IoError(e.to_string()))?;
 

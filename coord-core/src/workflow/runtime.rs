@@ -10,6 +10,15 @@
 // 实现基本驱动循环，支持 call/do/switch/wait 任务
 // 补充 任务类型（fork/for-each/listen 等）
 // 对接 coord-agent WorkflowService
+//
+// 实例写路径（收口）：
+// - 对**已存在实例**的状态写一律经 [`WorkflowRuntime::commit_instance`]
+//   （CAS/fencing + 状态与伴生事件同事务）；控制面（无租约）另经
+//   [`WorkflowRuntime::commit_control_plane`] 做「线性一致读修订号 + 冲突重放」。
+// - 仅有的裸写点（新键创建，不存在并发写同一键的问题）：
+//   ① `start` 的首次实例写；② `start` 输入校验失败时的 faulted 实例写；
+//   ③ `run` 子流程内联创建子实例的写。
+//   除这三处（及 `commit_instance` 内部的降级分支）外，任何 `save_instance(` 都是回归。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +49,19 @@ const SUBFLOW_SCAN_INTERVAL_SECS: u64 = 5;
 /// 扫描器只负责「进程内定时器随进程消失」之后的那部分（重启补齐），间隔取小值以
 /// 让到期触发足够及时（补偿延迟 = tick 间隔上界）。
 const DURABLE_TIMER_SCAN_INTERVAL_MS: u64 = 200;
+
+/// `call` 的 step 标识（v1 临时口径：任务索引 + 任务名）。
+///
+/// v2 由分支/轮次/席位替换（见 ADR D2）。retry 时任务索引不前移，故重试派发
+/// 派生出的 `step_id`/`token` 逐字相同 —— 这是「重试复用同一幂等键」的依据。
+fn step_id(task_index: usize, task_name: &str) -> String {
+    format!("{task_index}:{task_name}")
+}
+
+/// 由实例 + step 确定性派生的幂等键（跨重试/崩溃重建不变）。
+fn step_token(instance_id: &str, step_id: &str) -> String {
+    format!("wf:{instance_id}:{step_id}")
+}
 
 // ─── 后台任务存活登记（能力死亡必须可观测） ───
 
@@ -230,7 +252,41 @@ pub mod lifecycle {
     pub const TASK_RETRIED: &str = "io.serverlessworkflow.task.retried.v1";
 }
 
+/// 生命周期事件负载（CloudEvents `data`）—— 纯函数，供提交时构造事件记录。
+fn lifecycle_data(inst: &WorkflowInstance) -> Value {
+    serde_json::json!({
+        "workflowId": inst.id,
+        "workflowName": inst.definition_name,
+        "workflowVersion": inst.definition_version,
+        "namespace": inst.definition_ns,
+        "status": format!("{:?}", inst.status).to_lowercase(),
+        "output": inst.output,
+        "fault": inst.fault,
+    })
+}
+
+/// 生命周期事件的 outbox 形态。`id` 由调用方生成（投递面去重键）。
+fn lifecycle_record(
+    inst: &WorkflowInstance,
+    event_type: &str,
+    now_ms: i64,
+    id: String,
+) -> OutboxRecord {
+    OutboxRecord::lifecycle(&inst.id, event_type, lifecycle_data(inst), now_ms, id)
+}
+
 // ─── 运行时错误 ───
+/// 控制面（无租约）CAS 写的重放次数上界；耗尽即 [`RuntimeError::StaleRevision`]。
+const CONTROL_PLANE_CAS_ATTEMPTS: usize = 3;
+
+/// [`WorkflowRuntime::commit_control_plane`] 的重放结果。
+enum ControlPlaneOutcome {
+    /// 变更已提交；携带提交后的实例（供调用方加载定义 / 驱动）。
+    Committed(Box<WorkflowInstance>),
+    /// 守卫未满足（状态已被他人推进 / 挂起原因不再匹配）：本次不写。
+    Skipped,
+}
+
 /// 运行时错误
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeError {
@@ -246,6 +302,14 @@ pub enum RuntimeError {
     GotoTargetNotFound(String),
     /// signal/事件名与挂起实例期望不匹配
     InvalidSignal(String),
+    /// 控制面 CAS 冲突重放耗尽：实例修订号已被并发写者推进，本次写被拒绝
+    StaleRevision(String),
+    /// 定义内容漂移：实例钉死的定义哈希与当前加载的定义不一致（fail-closed）
+    DefinitionDrift {
+        instance_id: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -263,8 +327,63 @@ impl std::fmt::Display for RuntimeError {
                 write!(f, "goto target not found in do_tasks: {target}")
             }
             RuntimeError::InvalidSignal(msg) => write!(f, "invalid signal: {msg}"),
+            RuntimeError::StaleRevision(id) => {
+                write!(f, "stale revision for instance: {id}")
+            }
+            RuntimeError::DefinitionDrift {
+                instance_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "definition drift: instance {instance_id} pinned {expected}, loaded {actual}"
+            ),
         }
     }
+}
+
+/// 定义钉死守卫 —— 实例钉死的定义内容哈希必须等于当前加载的定义。
+///
+/// `None`（旧快照未钉死）放行：首次成功驱动时回填。返回的 `(expected, actual)` 供
+/// 调用方构造稳定诊断锚点 `definition drift: instance pinned {expected}, loaded {actual}`。
+pub fn assert_definition_pin(
+    inst: &WorkflowInstance,
+    def: &WorkflowDefinition,
+) -> Result<(), RuntimeError> {
+    match definition_content_drift(inst, def) {
+        Some((expected, actual)) => Err(RuntimeError::DefinitionDrift {
+            instance_id: inst.id.clone(),
+            expected,
+            actual,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// 钉死哈希与加载定义不一致时返回 `(expected, actual)`；未钉死则 `None`。
+fn definition_content_drift(
+    inst: &WorkflowInstance,
+    def: &WorkflowDefinition,
+) -> Option<(String, String)> {
+    let expected = inst.definition_hash.as_ref()?;
+    let actual = super::model::definition_hash(def);
+    // 哈希不可计算（类型上不可达）不得放行：按漂移 fail-closed。
+    if actual == super::model::DEFINITION_HASH_UNAVAILABLE {
+        return Some((expected.clone(), actual));
+    }
+    if expected == &actual {
+        None
+    } else {
+        Some((expected.clone(), actual))
+    }
+}
+
+/// 定义漂移 fault —— detail 为跨模块稳定诊断锚点（runbook / 测试逐字断言）。
+fn definition_drift_fault(expected: &str, actual: &str) -> WorkflowFault {
+    crate::workflow::errors::WorkflowFault::conflict(
+        "definition drift",
+        format!("definition drift: instance pinned {expected}, loaded {actual}"),
+    )
 }
 
 impl std::error::Error for RuntimeError {}
@@ -438,6 +557,43 @@ where
             .await;
     }
 
+    /// 派发前登记 step token（幂等键）。
+    ///
+    /// - `Ok(None)`：未注入 [`StepTokenStore`](super::durable::StepTokenStore) ⇒ 本次派发不带幂等键（旧行为）。
+    /// - `Ok(Some(key))`：要透传给 dispatcher 的幂等键。
+    /// - `Err`：存储不可用 ⇒ 调用方折叠为**可重试**的派发失败（由有界重试预算
+    ///   吸收瞬时 KV 抖动）；错误文本带 `step token register failed: ` 前缀，避免
+    ///   被误读为下游调用失败。fail-closed：没有已提交 token 就不派发。
+    async fn register_step(
+        &self,
+        instance_id: &str,
+        task_index: usize,
+        task_name: &str,
+    ) -> Result<Option<String>, String> {
+        let Some(steps) = self.durable.as_ref().and_then(|d| d.steps.as_ref()) else {
+            return Ok(None);
+        };
+        let sid = step_id(task_index, task_name);
+        let token = step_token(instance_id, &sid);
+        steps
+            .register(instance_id, &sid, &token, self.clock.now_ms())
+            .await
+            .map(|(rec, _)| Some(rec.token))
+            .map_err(|e| format!("step token register failed: {e}"))
+    }
+
+    /// 派发成功后把 step token 标 `Done`（未注入 steps 时空操作）。
+    ///
+    /// 标位失败不致命：token 仍为 `Pending` ⇒ 重试复用同一 token，下游按幂等键
+    /// 去重即可（at-least-once）；所以吞掉错误，不把已成功的调用翻成失败。
+    async fn mark_step_done(&self, instance_id: &str, task_index: usize, task_name: &str) {
+        let Some(steps) = self.durable.as_ref().and_then(|d| d.steps.as_ref()) else {
+            return;
+        };
+        let sid = step_id(task_index, task_name);
+        let _ = steps.mark_done(instance_id, &sid).await;
+    }
+
     /// 建立（或重启后重建）一个 listen 挂起实例的事件等待。
     ///
     /// 重启后原订阅随进程消失，必须重订阅 —— 否则实例永远等不到事件。
@@ -465,7 +621,7 @@ where
         let handle = tokio::spawn(async move {
             let timeout_ms = event_timeout_ms.unwrap_or(60 * 60 * 1000);
             let type_refs: Vec<&str> = filter_types.iter().map(|s| s.as_str()).collect();
-            let arrived_type = rt
+            let delivery = rt
                 .event_provider
                 .wait_for_event(
                     &type_refs,
@@ -474,8 +630,16 @@ where
                     timeout_ms,
                 )
                 .await;
-            if let Some(et) = arrived_type {
-                rt.resume_by_event(instance_id, definition, store, et).await;
+            if let Some(delivery) = delivery {
+                // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
+                let _ = rt
+                    .resume_by_event(instance_id, definition, store, delivery.event_type.clone())
+                    .await;
+                // 状态写成功后才提交消费位点：这一步之前崩溃只会重复投递，
+                // 由 `resume_by_event` 的状态守卫（非 `Waiting`/reason 不匹配即返回）
+                // 吸收；反过来（先提交位点）崩溃就是丢投递。守卫 no-op 也照样 ack ——
+                // 那条事件与本实例已无关，位点仍必须推进。
+                rt.event_provider.ack_event(&delivery).await;
             }
             // 走到这一行才算正常收尾；中途 panic 则不置位（由 `WorkerLiveness` 报出）。
             done.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -542,22 +706,35 @@ where
                     _ => return,
                 };
                 let _ = durable.timers.remove(&rec.id).await;
-                self.auto_resume(rec.instance_id.clone(), def, store, &reason)
+                // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
+                let _ = self
+                    .auto_resume(rec.instance_id.clone(), def, store, &reason)
                     .await;
             }
             TimerKind::Timeout { expected_index } => {
                 let _ = durable.timers.remove(&rec.id).await;
-                self.apply_timeout(rec.instance_id.clone(), store, expected_index)
+                // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
+                let _ = self
+                    .apply_timeout(rec.instance_id.clone(), store, expected_index)
                     .await;
             }
         }
     }
 
-    /// 对账可恢复实例：重启后重新驱动/重订阅挂起的 Waiting 实例。
+    /// 对账所有非终态可恢复实例：重启后重新驱动/重订阅。
     ///
-    /// - `listen`：重建事件等待（重订阅）；
-    /// - `wait` / `retry`：补写持久化定时器；已到期则立即触发；
-    /// - 其它（`signal` / 子流程）：人工恢复或由子流程扫描器负责，这里不驱动。
+    /// - `Pending` / `Running`：上个进程的 drive 任务随进程消失（进程内任务无跨进程存活，
+    ///   `drivers/` 租约键也无主）⇒ 重驱动一个。**未注入租约时**同进程重叠驱动是可容忍的：
+    ///   每次 drive 都重读最新实例状态，CAS 失败的
+    ///   提交直接退出驱动循环 —— 不会丢更新，只是白跑一轮。注入租约后（经 [`Self::spawn_drive`]
+    ///   先取租约）由租约提供互斥：多进程并发时只有一个真正驱动（其余计入 `lease_skipped`）。
+    /// - `Waiting`：`listen` 重建事件订阅；`wait` / `retry` 补写持久化定时器（已到期立即触发）。
+    /// - `Suspended`（signal）：人工恢复语义 —— 没有外部 signal 就自动重驱动会把人工审批
+    ///   直接跑过去，故**不**自动驱动（ADR 的「所有非终态」在此显式排除 signal 挂起）。
+    /// - 终态：跳过。
+    ///
+    /// `coord-core` 无 `tracing`，signal 挂起的跳过是设计内非动作（不是故障），故只以注释
+    /// 记录原因、不新增日志/计数出口（观测出口在上层 `WorkerLiveness` 等）。
     async fn reconcile_resumable_instances(&self, store: Arc<S>) {
         let Ok((instances, _next)) = store.list_instances(None, None, usize::MAX, None).await
         else {
@@ -568,14 +745,8 @@ where
         };
         let now = self.clock.now_ms();
         for inst in instances {
-            if inst.status != InstanceStatus::Waiting {
-                continue;
-            }
-            let Some(meta) = inst.suspension_meta.clone() else {
-                continue;
-            };
-            match meta.reason.as_str() {
-                "listen" => {
+            match inst.status {
+                InstanceStatus::Pending | InstanceStatus::Running => {
                     let def = match store
                         .load_definition(
                             &inst.definition_ns,
@@ -585,21 +756,52 @@ where
                         .await
                     {
                         Ok(Some(d)) => d,
+                        // 定义暂读不到：留待下次启动对账（不在此处造状态）。
                         _ => continue,
                     };
-                    let filter = meta.event_filter.clone().unwrap_or(EventFilter {
-                        event_type: None,
-                        event_types: vec![],
-                        source: None,
-                        subject: None,
-                    });
-                    self.spawn_event_wait(inst.id.clone(), def, Arc::clone(&store), filter, None);
+                    self.spawn_drive(inst.id.clone(), def, Arc::clone(&store));
                 }
-                "wait" | "retry" => {
-                    let due = meta.until_ms.unwrap_or(now);
-                    let rec = TimerRecord::auto_resume(&inst.id, &meta.reason, due, now);
-                    let _ = durable.timers.schedule(&rec).await;
+                InstanceStatus::Waiting => {
+                    let Some(meta) = inst.suspension_meta.clone() else {
+                        continue;
+                    };
+                    match meta.reason.as_str() {
+                        "listen" => {
+                            let def = match store
+                                .load_definition(
+                                    &inst.definition_ns,
+                                    &inst.definition_name,
+                                    &inst.definition_version,
+                                )
+                                .await
+                            {
+                                Ok(Some(d)) => d,
+                                _ => continue,
+                            };
+                            let filter = meta.event_filter.clone().unwrap_or(EventFilter {
+                                event_type: None,
+                                event_types: vec![],
+                                source: None,
+                                subject: None,
+                            });
+                            self.spawn_event_wait(
+                                inst.id.clone(),
+                                def,
+                                Arc::clone(&store),
+                                filter,
+                                None,
+                            );
+                        }
+                        "wait" | "retry" => {
+                            let due = meta.until_ms.unwrap_or(now);
+                            let rec = TimerRecord::auto_resume(&inst.id, &meta.reason, due, now);
+                            let _ = durable.timers.schedule(&rec).await;
+                        }
+                        _ => {}
+                    }
                 }
+                // 终态跳过；`Suspended`（signal 挂起）是人工恢复语义，无外部 signal 就
+                // 不自动驱动（见函数文档，ADR 的「所有非终态」在此显式排除 signal 挂起）。
                 _ => {}
             }
         }
@@ -758,7 +960,7 @@ where
             }
 
             if self
-                .resume_parent_after_subflow(parent, &sub_inst, &store)
+                .resume_parent_after_subflow(&parent_id, &sub_inst, &store)
                 .await
             {
                 self.unregister_pending_subflow(&parent_id);
@@ -772,7 +974,7 @@ where
     /// 应保留登记、下一 tick 重试。
     async fn resume_parent_after_subflow(
         &self,
-        mut parent: WorkflowInstance,
+        parent_id: &str,
         sub_inst: &WorkflowInstance,
         store: &Arc<S>,
     ) -> bool {
@@ -785,30 +987,55 @@ where
             }
             _ => Value::Null,
         };
+        let subflow_id = sub_inst.id.clone();
 
-        // 标记 run 任务帧为已完成并推进索引
-        if let Some(last_frame) = parent.task_stack.last_mut() {
-            last_frame.status = TaskStatus::Completed;
-            last_frame.output = Some(signal_payload.clone());
-            last_frame.ended_at = Some(self.clock.now_ms());
-        }
-        parent.current_task_index += 1;
+        let outcome = match self
+            .commit_control_plane(
+                store,
+                parent_id,
+                &[lifecycle::TASK_COMPLETED, lifecycle::WORKFLOW_RESUMED],
+                |parent| {
+                    // 仅当父流程仍挂在这条子流程上才恢复（否则已被他人恢复/取消）。
+                    let still_waiting = matches!(
+                        parent.status,
+                        InstanceStatus::Suspended | InstanceStatus::Waiting
+                    ) && parent
+                        .context
+                        .get("_subflow_instance_id")
+                        .and_then(|v| v.as_str())
+                        == Some(subflow_id.as_str());
+                    if !still_waiting {
+                        return Ok(false);
+                    }
+                    // 标记 run 任务帧为已完成并推进索引
+                    if let Some(last_frame) = parent.task_stack.last_mut() {
+                        last_frame.status = TaskStatus::Completed;
+                        last_frame.output = Some(signal_payload.clone());
+                        last_frame.ended_at = Some(self.clock.now_ms());
+                    }
+                    parent.current_task_index += 1;
+                    parent.status = InstanceStatus::Running;
+                    parent.suspension_meta = None;
+                    parent.context["_signal"] = serde_json::json!({
+                        "name": "_subflow_completed",
+                        "payload": signal_payload.clone(),
+                    });
+                    parent.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await
+        {
+            Ok(o) => o,
+            // CAS 冲突耗尽 / 存储错误：保留登记，下一 tick 重试。
+            Err(_) => return false,
+        };
 
-        parent.status = InstanceStatus::Running;
-        parent.suspension_meta = None;
-        parent.context["_signal"] = serde_json::json!({
-            "name": "_subflow_completed",
-            "payload": signal_payload,
-        });
-        parent.updated_at = self.clock.now_ms();
-
-        if store.save_instance(&parent).await.is_err() {
-            return false;
-        }
-        self.emit_lifecycle(lifecycle::TASK_COMPLETED, &parent)
-            .await;
-        self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &parent)
-            .await;
+        let parent = match outcome {
+            ControlPlaneOutcome::Committed(parent) => *parent,
+            // 守卫未满足：父流程已不再挂在这条子流程上 —— 视为已处理（可注销登记）。
+            ControlPlaneOutcome::Skipped => return true,
+        };
 
         // 加载父流程定义并重新驱动
         let parent_def = match store
@@ -1089,37 +1316,26 @@ where
         Ok(value)
     }
 
-    /// 发布生命周期 CloudEvent（标准 Lifecycle Events）
+    /// 发布生命周期 CloudEvent（标准 Lifecycle Events）。
     ///
-    /// 注入持久化 outbox 后，事件 append 进 outbox 再经 relay 投递：
-    /// 状态与事件的同 Txn 原子提交由 v2 写路径（`persist_instance`/`fenced_save`）
-    /// 承担；本函数**不**写实例状态——否则会绕过 CAS/fencing。
+    /// 仅有[`Self::commit_instance`]的 legacy 降级分支（无 outbox / 无同事务能力）
+    /// 复用它：注入持久化 outbox 时只 append（**不**写实例状态），未注入时直发进程内
+    /// `event_provider`。生产路径的生命周期事件与状态在同一提交里落——见
+    /// [`Self::commit_instance`]。
     ///
     /// 发布出口只有一个：注入 outbox 时**不**再直发进程内 `event_provider`
     /// （否则同一事件会有两条 ID 不同的副本，下游按 `event_id` 去重失效）。
-    /// 未注入时行为与旧路径逐字相同。
     async fn emit_lifecycle(&self, event_type: &str, inst: &WorkflowInstance) {
-        let data = serde_json::json!({
-            "workflowId": inst.id,
-            "workflowName": inst.definition_name,
-            "workflowVersion": inst.definition_version,
-            "namespace": inst.definition_ns,
-            "status": format!("{:?}", inst.status).to_lowercase(),
-            "output": inst.output,
-            "fault": inst.fault,
-        });
+        let data = lifecycle_data(inst);
         if let Some(durable) = &self.durable {
-            let record = OutboxRecord::lifecycle(
-                &inst.id,
+            let record = lifecycle_record(
+                inst,
                 event_type,
-                data,
                 self.clock.now_ms(),
                 format!("evt-{}", uuid::Uuid::new_v4()),
             );
-            // 只 append，**不**写实例状态：实例状态由调用方的 `persist_instance`
-            // （CAS / 租约 `fenced_save`）负责。emit 若另行写实例，会绕过 fencing、
-            // 并推进 mod_revision 使调用方随后的 CAS 失配。状态与 outbox 的同事务
-            // 合并由 v2 写路径承担（见 spike-3 OUTBOX.md G1 / ADR-0013 D4）。
+            // 只 append，**不**写实例状态：emit 若另行写实例会绕过调用方的
+            // CAS/fencing，并推进 mod_revision 使随后的 CAS 失配。
             let _ = durable.outbox.append(&record).await;
             // 注入 outbox 后**不再**直发进程内事件总线：发布职责归 relay 一个出口，
             // 否则同一生命周期事件会出现两条 ID 不同的副本（去重失效）。
@@ -1160,7 +1376,9 @@ where
         let rt = self.clone_runtime();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            rt.auto_resume(instance_id, definition, store, &reason)
+            // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
+            let _ = rt
+                .auto_resume(instance_id, definition, store, &reason)
                 .await;
         });
     }
@@ -1172,42 +1390,75 @@ where
         definition: WorkflowDefinition,
         store: Arc<S>,
         reason: &str,
-    ) {
-        let mut inst = match store.load_instance(&instance_id).await {
-            Ok(Some(i)) => i,
-            _ => return,
-        };
-        // 仅当仍处于同一挂起原因才恢复（避免竞态覆盖已完成的实例）
-        if inst.status != InstanceStatus::Waiting {
-            return;
-        }
-        let meta = match &inst.suspension_meta {
-            Some(m) => m.clone(),
-            None => return,
-        };
-        if meta.reason != reason {
-            return;
+    ) -> Result<(), RuntimeError> {
+        // 定义漂移守卫：自动恢复不得在新语义下推进/重试（fail-closed）。
+        self.fail_closed_on_definition_drift(&store, &instance_id, &definition)
+            .await?;
+
+        if reason == "retry" {
+            // 重试：直接重新 drive（重新执行当前任务），本路径**不写实例**；
+            // 保留「仅当仍处于同一挂起原因才驱动」的守卫（陈旧定时器不得多驱动一轮）。
+            //
+            // 守卫必须走**线性一致读**（`load_instance_with_rev`）：durable 写路径
+            // 绕过本地读缓存，若 Watch 滞后，cache-first 的 `load_instance` 会把已推进/
+            // 已取消的实例读成陈旧快照，本次重试于是被错误地放弃——定时器已在触发前
+            // 移除，实例就永久停在 Waiting 而没有任何驱动者。
+            let still = {
+                let is_still = |inst: &WorkflowInstance| {
+                    inst.status == InstanceStatus::Waiting
+                        && inst.suspension_meta.as_ref().map(|m| m.reason.as_str()) == Some(reason)
+                };
+                match store.load_instance_with_rev(&instance_id).await {
+                    Ok(Some((inst, _))) => is_still(&inst),
+                    // 存储不提供修订号：回退普通读（与 [`Self::commit_control_plane`] 同口径）。
+                    Ok(None) => match store.load_instance(&instance_id).await {
+                        Ok(Some(inst)) => is_still(&inst),
+                        _ => false,
+                    },
+                    // 线性一致读失败：不驱动（fail-closed，不回退到可能陈旧的缓存）。
+                    Err(_) => false,
+                }
+            };
+            if still {
+                self.spawn_drive(instance_id, definition, store);
+            }
+            return Ok(());
         }
 
-        if reason == "wait" {
-            // 完成 wait 帧并推进
-            if let Some(last) = inst.task_stack.last_mut() {
-                last.status = TaskStatus::Completed;
-                last.ended_at = Some(self.clock.now_ms());
-            }
-            inst.current_task_index += 1;
-            inst.status = InstanceStatus::Running;
-            inst.suspension_meta = None;
-            inst.updated_at = self.clock.now_ms();
-            let _ = store.save_instance(&inst).await;
-            self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
-            self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &inst)
-                .await;
-            self.spawn_drive(instance_id, definition, store);
-        } else if reason == "retry" {
-            // 重试：直接重新 drive（重新执行当前任务）
+        let outcome = self
+            .commit_control_plane(
+                &store,
+                &instance_id,
+                &[lifecycle::TASK_COMPLETED, lifecycle::WORKFLOW_RESUMED],
+                |inst| {
+                    // 仅当仍处于同一挂起原因才恢复（避免竞态覆盖已完成的实例）
+                    if inst.status != InstanceStatus::Waiting {
+                        return Ok(false);
+                    }
+                    let Some(meta) = inst.suspension_meta.as_ref() else {
+                        return Ok(false);
+                    };
+                    if meta.reason != reason {
+                        return Ok(false);
+                    }
+                    // 完成 wait 帧并推进
+                    if let Some(last) = inst.task_stack.last_mut() {
+                        last.status = TaskStatus::Completed;
+                        last.ended_at = Some(self.clock.now_ms());
+                    }
+                    inst.current_task_index += 1;
+                    inst.status = InstanceStatus::Running;
+                    inst.suspension_meta = None;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
+
+        if matches!(outcome, ControlPlaneOutcome::Committed(_)) {
             self.spawn_drive(instance_id, definition, store);
         }
+        Ok(())
     }
 
     /// 事件驱动的自动恢复（标准 Events：listen 主动订阅，事件到达 → 恢复）
@@ -1219,42 +1470,50 @@ where
         definition: WorkflowDefinition,
         store: Arc<S>,
         arrived_event_type: String,
-    ) {
-        let mut inst = match store.load_instance(&instance_id).await {
-            Ok(Some(i)) => i,
-            _ => return,
-        };
-        if inst.status != InstanceStatus::Waiting {
-            return;
-        }
-        let meta = match &inst.suspension_meta {
-            Some(m) => m.clone(),
-            None => return,
-        };
-        if meta.reason != "listen" {
-            return;
-        }
-        // 事件到达：完成 listen 帧、推进、注入事件上下文
-        if let Some(last) = inst.task_stack.last_mut() {
-            last.status = TaskStatus::Completed;
-            last.ended_at = Some(self.clock.now_ms());
-        }
-        inst.current_task_index += 1;
-        inst.context["_event"] = serde_json::json!({
-            "arrived": true,
-            "eventType": arrived_event_type,
-        });
-        inst.status = InstanceStatus::Running;
-        inst.suspension_meta = None;
-        inst.updated_at = self.clock.now_ms();
-        let _ = store.save_instance(&inst).await;
-        self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
-        self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &inst)
-            .await;
+    ) -> Result<(), RuntimeError> {
+        // 定义漂移守卫：事件恢复不得在新语义下推进（fail-closed）。
+        self.fail_closed_on_definition_drift(&store, &instance_id, &definition)
+            .await?;
+
+        let outcome = self
+            .commit_control_plane(
+                &store,
+                &instance_id,
+                &[lifecycle::TASK_COMPLETED, lifecycle::WORKFLOW_RESUMED],
+                |inst| {
+                    if inst.status != InstanceStatus::Waiting {
+                        return Ok(false);
+                    }
+                    let Some(meta) = inst.suspension_meta.as_ref() else {
+                        return Ok(false);
+                    };
+                    if meta.reason != "listen" {
+                        return Ok(false);
+                    }
+                    // 事件到达：完成 listen 帧、推进、注入事件上下文
+                    if let Some(last) = inst.task_stack.last_mut() {
+                        last.status = TaskStatus::Completed;
+                        last.ended_at = Some(self.clock.now_ms());
+                    }
+                    inst.current_task_index += 1;
+                    inst.context["_event"] = serde_json::json!({
+                        "arrived": true,
+                        "eventType": arrived_event_type,
+                    });
+                    inst.status = InstanceStatus::Running;
+                    inst.suspension_meta = None;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
 
         // 后台 drive（与子流程扫描器同模式，避免在事件等待任务内嵌套 drive；
         // 受监督：见 [`Self::spawn_drive`]）
-        self.spawn_drive(instance_id, definition, store);
+        if matches!(outcome, ControlPlaneOutcome::Committed(_)) {
+            self.spawn_drive(instance_id, definition, store);
+        }
+        Ok(())
     }
 
     /// 调度超时：after_ms 后若实例仍非终端 → faulted（timeout 错误 408）
@@ -1285,7 +1544,8 @@ where
         let rt = self.clone_runtime();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(after_ms)).await;
-            rt.apply_timeout(instance_id, store, expected_index).await;
+            // 背景路径无消费方：CAS 冲突已计入 `cas_conflict_total`，其余错误（存储/校验/NotFound）在此丢弃、不计入该计数器。
+            let _ = rt.apply_timeout(instance_id, store, expected_index).await;
         });
     }
 
@@ -1295,44 +1555,133 @@ where
         instance_id: String,
         store: Arc<S>,
         expected_index: Option<usize>,
-    ) {
-        let mut inst = match store.load_instance(&instance_id).await {
-            Ok(Some(i)) => i,
-            _ => return,
-        };
-        if inst.status.is_terminal() {
-            return;
-        }
-        // 任务级超时：仅当实例仍停留同一任务索引才 fault
-        if let Some(idx) = expected_index {
-            if inst.current_task_index != idx {
-                return;
-            }
-        }
-        let fault = crate::workflow::errors::WorkflowFault::timeout(
-            "workflow timeout",
-            "the workflow exceeded its configured timeout",
-        );
-        inst.status = InstanceStatus::Failed;
-        inst.fault = Some(fault);
-        inst.updated_at = self.clock.now_ms();
-        let _ = store.save_instance(&inst).await;
-        self.emit_lifecycle(lifecycle::WORKFLOW_FAULTED, &inst)
-            .await;
+    ) -> Result<(), RuntimeError> {
+        self.commit_control_plane(
+            &store,
+            &instance_id,
+            &[lifecycle::WORKFLOW_FAULTED],
+            |inst| {
+                if inst.status.is_terminal() {
+                    return Ok(false);
+                }
+                // 任务级超时：仅当实例仍停留同一任务索引才 fault
+                if let Some(idx) = expected_index {
+                    if inst.current_task_index != idx {
+                        return Ok(false);
+                    }
+                }
+                let fault = crate::workflow::errors::WorkflowFault::timeout(
+                    "workflow timeout",
+                    "the workflow exceeded its configured timeout",
+                );
+                inst.status = InstanceStatus::Failed;
+                inst.fault = Some(fault);
+                inst.updated_at = self.clock.now_ms();
+                Ok(true)
+            },
+        )
+        .await
+        .map(|_| ())
     }
 
-    /// 将实例置为 faulted（Failed + fault + 生命周期事件）
+    /// 将实例置为 faulted（Failed + fault + 生命周期事件）。
+    ///
+    /// 仅在 [`Self::drive`] 内调用：复用 drive 当轮的 `rev`/`guard`，与状态 + 事件
+    /// 走同一次 CAS/fencing 提交（不另起无 CAS 的裸写）。
+    ///
+    /// 有界重试：首次提交失败常是并发控制面已推进修订号（CAS 冲突）。失败后以
+    /// `load_instance_with_rev` 重取最新修订号并重放，至多 [`CONTROL_PLANE_CAS_ATTEMPTS`]
+    /// 次 —— 不重试会让一次冲突静默丢掉终态 fault 写、把实例留在 Running。
+    /// 耗尽仍未提交：实例保持非终态，由启动对账重新驱动；失败已计入
+    /// `cas_conflict_total`，drop 非静默。
     async fn fail_instance(
         &self,
         inst: &mut WorkflowInstance,
-        store: Arc<S>,
+        store: &Arc<S>,
+        rev: &mut Option<i64>,
+        guard: Option<&dyn LeaseGuard>,
         fault: WorkflowFault,
     ) {
-        inst.status = InstanceStatus::Failed;
-        inst.fault = Some(fault);
-        inst.updated_at = self.clock.now_ms();
-        let _ = store.save_instance(inst).await;
-        self.emit_lifecycle(lifecycle::WORKFLOW_FAULTED, inst).await;
+        for _ in 0..CONTROL_PLANE_CAS_ATTEMPTS {
+            inst.status = InstanceStatus::Failed;
+            inst.fault = Some(fault.clone());
+            inst.updated_at = self.clock.now_ms();
+            if self
+                .commit_instance(store, inst, rev, guard, &[lifecycle::WORKFLOW_FAULTED])
+                .await
+            {
+                return;
+            }
+            // 重取最新修订号：下一次 CAS 以新值为期望。
+            match store.load_instance_with_rev(&inst.id).await {
+                // 只在实例仍非终态时重放：并发控制面已提交终态则不覆盖。
+                Ok(Some((latest, r))) if !latest.status.is_terminal() => {
+                    *inst = latest;
+                    *rev = Some(r);
+                }
+                // 实例已终态 / 读不到 / 存储无修订号：重放无意义，停止。
+                _ => break,
+            }
+        }
+    }
+
+    /// 定义漂移 fail-closed（控制面）：置实例 Failed + 伴生 `workflow.faulted`（有界 CAS），
+    /// 并把漂移报成 [`RuntimeError::DefinitionDrift`]。
+    ///
+    /// 控制面没有 drive 当轮的 `rev`/`guard`，故复用 [`Self::commit_control_plane`] 的
+    /// 「线性一致读修订号 + 冲突重放」；fault 提交耗尽也不掩盖返回的漂移错误
+    /// （失败已计入 `cas_conflict_total`，实例保持非终态，由启动对账重新驱动）。
+    async fn definition_drift_error(
+        &self,
+        store: &Arc<S>,
+        instance_id: &str,
+        expected: String,
+        actual: String,
+    ) -> RuntimeError {
+        let fault = definition_drift_fault(&expected, &actual);
+        let _ = self
+            .commit_control_plane(store, instance_id, &[lifecycle::WORKFLOW_FAULTED], |inst| {
+                if inst.status.is_terminal() {
+                    return Ok(false);
+                }
+                inst.status = InstanceStatus::Failed;
+                inst.fault = Some(fault.clone());
+                inst.updated_at = self.clock.now_ms();
+                Ok(true)
+            })
+            .await;
+        RuntimeError::DefinitionDrift {
+            instance_id: instance_id.to_string(),
+            expected,
+            actual,
+        }
+    }
+
+    /// 控制面入口的定义钉死校验：读回实例 → [`assert_definition_pin`] → 漂移时置 Failed
+    /// 并返回 [`RuntimeError::DefinitionDrift`]。
+    ///
+    /// 实例不存在时放行：后续路径会按 NotFound / 状态守卫处理，守卫不在此造状态。
+    /// 读失败是存储错误，不得回退成「实例不存在」——那会让守卫静默失效。
+    async fn fail_closed_on_definition_drift(
+        &self,
+        store: &Arc<S>,
+        instance_id: &str,
+        definition: &WorkflowDefinition,
+    ) -> Result<(), RuntimeError> {
+        let inst = match store.load_instance(instance_id).await {
+            Ok(Some(inst)) => inst,
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(RuntimeError::StoreError(e.to_string())),
+        };
+        match assert_definition_pin(&inst, definition) {
+            Ok(()) => Ok(()),
+            Err(RuntimeError::DefinitionDrift {
+                expected, actual, ..
+            }) => Err(self
+                .definition_drift_error(store, instance_id, expected, actual)
+                .await),
+            Err(other) => Err(other),
+        }
     }
 
     /// 恢复挂起的实例
@@ -1368,110 +1717,167 @@ where
                     .ok_or_else(|| RuntimeError::NotFound(instance_id.to_string()));
             }
         }
-        let mut inst = self
+        // 定义漂移守卫必须在**任何状态写之前**：先读实例 + 加载定义 + 校验钉死哈希。
+        // 先提交 Waiting→Running 再发现漂移会留下一次无效果的状态转换与 `workflow.resumed`。
+        let pre = self
             .store
             .load_instance(instance_id)
             .await
             .map_err(|e| RuntimeError::StoreError(e.to_string()))?
             .ok_or_else(|| RuntimeError::NotFound(instance_id.to_string()))?;
-
-        if !inst.status.is_resumable() {
-            return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()));
-        }
-
-        // signal/事件校验（标准 3.4 节）：signal 名必须匹配挂起实例的期望
-        if let Some(meta) = inst.suspension_meta.as_ref() {
-            // 人工审批挂起（expected_signal）：必须精确匹配
-            if let Some(exp) = meta.expected_signal.as_deref() {
-                let got = signal_name.unwrap_or("");
-                if got != exp {
-                    return Err(RuntimeError::InvalidSignal(format!(
-                        "instance '{}' is waiting for signal '{exp}', got '{got}'",
-                        instance_id
-                    )));
-                }
-            }
-            // 事件监听挂起（listen）：signal 名应匹配事件过滤器（支持多事件类型）
-            if meta.reason == "listen" {
-                if let Some(filter) = meta.event_filter.as_ref() {
-                    let accepted: Vec<&str> = if !filter.event_types.is_empty() {
-                        filter.event_types.iter().map(|s| s.as_str()).collect()
-                    } else {
-                        filter.event_type.iter().map(|s| s.as_str()).collect()
-                    };
-                    if !accepted.is_empty() {
-                        if let Some(name) = signal_name {
-                            if !accepted.contains(&name) {
-                                return Err(RuntimeError::InvalidSignal(format!(
-                                    "instance '{}' is listening for event types {:?}, got signal '{name}'",
-                                    instance_id, accepted
-                                )));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 注入 signal 数据到 context
-        if let Some(name) = signal_name {
-            inst.context["_signal"] = serde_json::json!({
-                "name": name,
-                "payload": payload.clone().unwrap_or(Value::Null),
-            });
-            // 手动 signal 同时注入 `_event`，使 switch+eventConditions /
-            // 多 onEvents 路由对「事件总线自动恢复」与「手动 signal」双路径一致生效
-            inst.context["_event"] = serde_json::json!({
-                "arrived": true,
-                "eventType": name,
-            });
-        }
-
-        // 完成当前挂起任务帧并推进（与 resume_by_event 一致）：
-        // 否则 drive 会重新执行已挂起的 listen/signal 任务，实例回到挂起态——
-        // 这是「signal 推进审批」端到端生效的必要一步（端到端验证发现）
-        if let Some(last) = inst.task_stack.last_mut() {
-            last.status = TaskStatus::Completed;
-            last.ended_at = Some(self.clock.now_ms());
-            if let Some(p) = &payload {
-                last.output = Some(p.clone());
-            }
-        }
-        inst.current_task_index += 1;
-
-        inst.status = InstanceStatus::Running;
-        inst.suspension_meta = None;
-        inst.updated_at = self.clock.now_ms();
-
-        self.store
-            .save_instance(&inst)
-            .await
-            .map_err(|e| RuntimeError::StoreError(e.to_string()))?;
-
-        self.emit_lifecycle(lifecycle::WORKFLOW_RESUMED, &inst)
-            .await;
-
-        // 需要加载 definition
         let def = self
             .store
             .load_definition(
-                &inst.definition_ns,
-                &inst.definition_name,
-                &inst.definition_version,
+                &pre.definition_ns,
+                &pre.definition_name,
+                &pre.definition_version,
             )
             .await
             .map_err(|e| RuntimeError::StoreError(e.to_string()))?
             .ok_or_else(|| {
                 RuntimeError::DefinitionNotFound(format!(
                     "{}/{}@{}",
-                    inst.definition_ns, inst.definition_name, inst.definition_version
+                    pre.definition_ns, pre.definition_name, pre.definition_version
                 ))
             })?;
+        if let Err(drift) = assert_definition_pin(&pre, &def) {
+            let (expected, actual) = match drift {
+                RuntimeError::DefinitionDrift {
+                    expected, actual, ..
+                } => (expected, actual),
+                other => return Err(other),
+            };
+            return Err(self
+                .definition_drift_error(&self.store, instance_id, expected, actual)
+                .await);
+        }
+
+        let outcome = self
+            .commit_control_plane(
+                &self.store,
+                instance_id,
+                &[lifecycle::TASK_COMPLETED, lifecycle::WORKFLOW_RESUMED],
+                |inst| {
+                    if !inst.status.is_resumable() {
+                        return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()));
+                    }
+
+                    // signal/事件校验（标准 3.4 节）：signal 名必须匹配挂起实例的期望
+                    if let Some(meta) = inst.suspension_meta.as_ref() {
+                        // 人工审批挂起（expected_signal）：必须精确匹配
+                        if let Some(exp) = meta.expected_signal.as_deref() {
+                            let got = signal_name.unwrap_or("");
+                            if got != exp {
+                                return Err(RuntimeError::InvalidSignal(format!(
+                                    "instance '{}' is waiting for signal '{exp}', got '{got}'",
+                                    instance_id
+                                )));
+                            }
+                        }
+                        // 事件监听挂起（listen）：signal 名应匹配事件过滤器（支持多事件类型）
+                        if meta.reason == "listen" {
+                            if let Some(filter) = meta.event_filter.as_ref() {
+                                let accepted: Vec<&str> = if !filter.event_types.is_empty() {
+                                    filter.event_types.iter().map(|s| s.as_str()).collect()
+                                } else {
+                                    filter.event_type.iter().map(|s| s.as_str()).collect()
+                                };
+                                if !accepted.is_empty() {
+                                    if let Some(name) = signal_name {
+                                        if !accepted.contains(&name) {
+                                            return Err(RuntimeError::InvalidSignal(format!(
+                                                "instance '{}' is listening for event types {:?}, got signal '{name}'",
+                                                instance_id, accepted
+                                            )));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 注入 signal 数据到 context
+                    if let Some(name) = signal_name {
+                        inst.context["_signal"] = serde_json::json!({
+                            "name": name,
+                            "payload": payload.clone().unwrap_or(Value::Null),
+                        });
+                        // 手动 signal 同时注入 `_event`，使 switch+eventConditions /
+                        // 多 onEvents 路由对「事件总线自动恢复」与「手动 signal」双路径一致生效
+                        inst.context["_event"] = serde_json::json!({
+                            "arrived": true,
+                            "eventType": name,
+                        });
+                    }
+
+                    // 完成当前挂起任务帧并推进（与 resume_by_event 一致）：
+                    // 否则 drive 会重新执行已挂起的 listen/signal 任务，实例回到挂起态——
+                    // 这是「signal 推进审批」端到端生效的必要一步（端到端验证发现）
+                    if let Some(last) = inst.task_stack.last_mut() {
+                        last.status = TaskStatus::Completed;
+                        last.ended_at = Some(self.clock.now_ms());
+                        if let Some(p) = &payload {
+                            last.output = Some(p.clone());
+                        }
+                    }
+                    inst.current_task_index += 1;
+
+                    inst.status = InstanceStatus::Running;
+                    inst.suspension_meta = None;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
+
+        let inst = match outcome {
+            ControlPlaneOutcome::Committed(inst) => *inst,
+            // resume 的守卫不产生 Skip（非可恢复状态走 Err(AlreadyCompleted)）；
+            // 为完整匹配仍按「已不可恢复」返回。
+            ControlPlaneOutcome::Skipped => {
+                return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()))
+            }
+        };
 
         // 后台 drive（受监督：见 [`Self::spawn_drive`]）
         self.spawn_drive(inst.id.clone(), def, Arc::clone(&self.store));
 
         Ok(inst)
+    }
+
+    /// 取消实例：非终态 → `Cancelled` + `workflow.cancelled`（同一次提交）。
+    ///
+    /// 控制面路径（[`Self::commit_control_plane`]）：线性一致读修订号后在 CAS 提交里
+    /// 重新校验状态。一次「取消 vs 完成」的竞态里，若完成先提交则取消读到的是终态
+    /// 而拒绝写入 —— 不会用 `Cancelled` 覆盖已提交的 `Completed`（消费者已见
+    /// `workflow.completed`，再发 `workflow.cancelled` 会撕裂终态）。
+    ///
+    /// 终态 ⇒ [`RuntimeError::AlreadyCompleted`]（服务层映射为 FailedPrecondition），
+    /// 与「实例不存在」的 [`RuntimeError::NotFound`] 区分。
+    ///
+    /// 生命周期事件与状态写同一次提交（durable 装配下同 Txn/同事务；legacy 分步，
+    /// 见 [`Self::commit_instance`]）。
+    pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
+        let outcome = self
+            .commit_control_plane(
+                &self.store,
+                instance_id,
+                &[lifecycle::WORKFLOW_CANCELLED],
+                |inst| {
+                    if inst.status.is_terminal() {
+                        return Err(RuntimeError::AlreadyCompleted(instance_id.to_string()));
+                    }
+                    inst.status = InstanceStatus::Cancelled;
+                    inst.updated_at = self.clock.now_ms();
+                    Ok(true)
+                },
+            )
+            .await?;
+        match outcome {
+            ControlPlaneOutcome::Committed(_) => Ok(()),
+            // 取消守卫不产生 Skip（非终态即提交）；为完整匹配仍按成功处理。
+            ControlPlaneOutcome::Skipped => Ok(()),
+        }
     }
 
     /// 对一个**已存在**的实例（重）启动驱动 —— 恢复/对账入口。
@@ -1501,27 +1907,84 @@ where
                     inst.definition_ns, inst.definition_name, inst.definition_version
                 ))
             })?;
+        // 定义漂移守卫：驱动前先校验钉死哈希（fail-closed），不得在新语义下驱动。
+        self.fail_closed_on_definition_drift(&self.store, &inst.id, &def)
+            .await?;
         self.spawn_drive(inst.id.clone(), def, Arc::clone(&self.store));
         Ok(())
     }
 
-    /// 写回实例状态的一次尝试：优先用租约 fencing / 修订号 CAS，不可用时回退普通写。
+    /// 写回实例状态 + 伴生事件 —— 运行时对**已存在实例**的唯一状态写路径。
     ///
-    /// 返回 `true` = 写入生效（并刷新 `rev` 供后续 CAS 使用）；`false` = CAS 冲突或
-    /// fencing 拒绝 —— 计入 [`Self::cas_conflict_total`]，调用方不得静默吞掉。
-    async fn persist_instance(
+    /// 除模块头列出的三处新键创建（`start` 首写/校验失败写、`run` 子流程内联建子实例）
+    /// 与下方的降级分支外，任何对已存在实例的状态写都必须经此路径，以保证 CAS/fencing
+    /// 与「状态 + 事件同事务」不被绕过。
+    ///
+    /// 选择顺序：① 有租约 guard ⇒ `fenced_commit`（状态 + 事件同一 Txn，fencing 三重比较）；
+    /// ② 有 `durable.atomic_commit` ⇒ `commit_state_and_outbox_batch`（状态 + 事件同一事务）；
+    /// ③ 否则 legacy 分步（仅内存 / 无 KV 装配）：CAS/普通写 + 逐条发事件。
+    ///
+    /// 返回 `true` = 写入生效（并刷新 `rev` 供后续 CAS 使用）；`false` = CAS 冲突 /
+    /// fencing 拒绝 / 原子提交未通过 —— 计入 [`Self::cas_conflict_total`]，
+    /// 调用方不得静默吞掉。
+    async fn commit_instance(
         &self,
         store: &Arc<S>,
         inst: &WorkflowInstance,
         rev: &mut Option<i64>,
         guard: Option<&dyn LeaseGuard>,
+        events: &[&str],
     ) -> bool {
-        let ok = match guard {
-            Some(g) => matches!(g.fenced_save(inst, rev.unwrap_or(-1)).await, Ok(true)),
-            None => match *rev {
+        let now_ms = self.clock.now_ms();
+        let records: Vec<OutboxRecord> = events
+            .iter()
+            .map(|event_type| {
+                lifecycle_record(
+                    inst,
+                    event_type,
+                    now_ms,
+                    format!("evt-{}", uuid::Uuid::new_v4()),
+                )
+            })
+            .collect();
+
+        let ok = if let Some(g) = guard {
+            matches!(
+                g.fenced_commit(inst, rev.unwrap_or(-1), &records).await,
+                Ok(true)
+            )
+        } else if let Some(atomic) = self.durable.as_ref().and_then(|d| d.atomic_commit.as_ref()) {
+            matches!(
+                atomic
+                    .commit_state_and_outbox_batch(inst, &records, *rev)
+                    .await,
+                Ok(true)
+            )
+        } else {
+            // legacy：无 fencing / 无同事务能力的内存与降级路径；
+            // 状态与事件分两步写（生产路径不走这里）。
+            let saved = match *rev {
                 Some(r) => matches!(store.save_instance_atomic(inst, r).await, Ok(true)),
                 None => store.save_instance(inst).await.is_ok(),
-            },
+            };
+            if saved {
+                match self.durable.as_ref() {
+                    // 有 outbox 但无同事务提交：尽力逐条 append（事件不丢，但非原子）。
+                    Some(d) => {
+                        for rec in &records {
+                            let _ = d.outbox.append(rec).await;
+                        }
+                    }
+                    None => {
+                        // 先落状态再发事件（非原子，仅降级路径）：发布口复用统一的
+                        // [`Self::emit_lifecycle`]（`durable` 为 `None` 时它直发进程内总线）。
+                        for event_type in events {
+                            self.emit_lifecycle(event_type, inst).await;
+                        }
+                    }
+                }
+            }
+            saved
         };
         if ok {
             // 刷新修订号：后续 CAS 必须以写入后的新值为期望。
@@ -1535,12 +1998,62 @@ where
         ok
     }
 
+    /// 控制面（无租约）CAS 写：线性一致读修订号 → 施加变更 → 提交。
+    ///
+    /// `mutate` 在**每次**尝试里对刚读到的实例重新求值：`Ok(true)` = 应用并提交；
+    /// `Ok(false)` = 守卫未满足、放弃本次（不写）；`Err` = 致命错误（状态/信号校验等）。
+    ///
+    /// CAS 冲突（[`Self::commit_instance`] 返回 `false`）至多重放
+    /// [`CONTROL_PLANE_CAS_ATTEMPTS`] 次，耗尽返回 [`RuntimeError::StaleRevision`]——
+    /// 绝不盲写覆盖并发写者。
+    async fn commit_control_plane<F>(
+        &self,
+        store: &Arc<S>,
+        instance_id: &str,
+        events: &[&str],
+        mut mutate: F,
+    ) -> Result<ControlPlaneOutcome, RuntimeError>
+    where
+        F: FnMut(&mut WorkflowInstance) -> Result<bool, RuntimeError>,
+    {
+        for _ in 0..CONTROL_PLANE_CAS_ATTEMPTS {
+            let (mut inst, mut rev) = match store.load_instance_with_rev(instance_id).await {
+                Ok(Some((i, r))) => (i, Some(r)),
+                // 存储不提供修订号（内存/降级）：回退普通读，`rev = None`。
+                Ok(None) => match store.load_instance(instance_id).await {
+                    Ok(Some(i)) => (i, None),
+                    Ok(None) => return Err(RuntimeError::NotFound(instance_id.to_string())),
+                    Err(e) => return Err(RuntimeError::StoreError(e.to_string())),
+                },
+                Err(e) => return Err(RuntimeError::StoreError(e.to_string())),
+            };
+            if !mutate(&mut inst)? {
+                return Ok(ControlPlaneOutcome::Skipped);
+            }
+            if self
+                .commit_instance(store, &inst, &mut rev, None, events)
+                .await
+            {
+                return Ok(ControlPlaneOutcome::Committed(Box::new(inst)));
+            }
+            if rev.is_none() {
+                // 无 CAS 能力的存储：提交失败是普通写错误，不是并发冲突；
+                // 重放无意义，也不得谎报成 StaleRevision。
+                return Err(RuntimeError::StoreError(format!(
+                    "instance write failed: {instance_id}"
+                )));
+            }
+        }
+        Err(RuntimeError::StaleRevision(instance_id.to_string()))
+    }
+
     /// 执行驱动循环 —— 在 spawn 后独立运行
     ///
     /// 以 BoxFuture 返回（而非 async fn），避免递归异步造成的 opaque 类型循环。
     ///
-    /// `guard` 为调用方持有的实例驱动租约（未注入租约时为 `None`）；非空时关键
-    /// 写回走 [`LeaseGuard::fenced_save`]（三重 compare），并拒绝失去租约的迟到写。
+    /// `guard` 为调用方持有的实例驱动租约（未注入租约时为 `None`）；非空时状态 +
+    /// 伴生事件经 [`LeaseGuard::fenced_commit`]（三重 compare）同一次提交，
+    /// 并拒绝失去租约的迟到写。
     pub(crate) fn drive<'a>(
         &'a self,
         instance_id: String,
@@ -1565,16 +2078,42 @@ where
                     break;
                 }
 
+                // 定义钉死守卫（fail-closed）：钉死的定义内容与本次加载的定义不一致
+                // ⇒ 不再在新语义上推进，置 Failed + 伴生 workflow.faulted（同一次提交），
+                // 由上层控制面/启动对账以 `DefinitionDrift` 报出。
+                if let Some((expected, actual)) = definition_content_drift(&inst, &definition) {
+                    let fault = definition_drift_fault(&expected, &actual);
+                    self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                        .await;
+                    break 'drive_loop;
+                }
+
+                // 未钉死的旧快照：
+                // 驱动成功即视作「认下这份定义」，在内存回填，随后下一次提交随之落库。
+                if inst.definition_hash.is_none() {
+                    inst.definition_hash = Some(super::model::definition_hash(&definition));
+                }
+                if inst.engine_version.is_none() {
+                    inst.engine_version = Some(super::model::ENGINE_VERSION.to_string());
+                }
+
                 // 标准相位：Pending → Running（start 后首步推进）。
                 // 首写走 CAS/fencing：两个驱动者并发时恰一个赢，输者退出 drive。
                 if inst.status == InstanceStatus::Pending {
                     inst.status = InstanceStatus::Running;
                     inst.updated_at = self.clock.now_ms();
-                    if !self.persist_instance(&store, &inst, &mut rev, guard).await {
+                    if !self
+                        .commit_instance(
+                            &store,
+                            &inst,
+                            &mut rev,
+                            guard,
+                            &[lifecycle::WORKFLOW_STARTED],
+                        )
+                        .await
+                    {
                         break 'drive_loop;
                     }
-                    self.emit_lifecycle(lifecycle::WORKFLOW_STARTED, &inst)
-                        .await;
                     continue;
                 }
 
@@ -1593,20 +2132,25 @@ where
                             }
                         }
                         // 已完成帧：应用 output.as/export.as 数据流管线（Skipped 帧跳过）
-                        if frame.status == TaskStatus::Completed {
+                        let events: &[&str] = if frame.status == TaskStatus::Completed {
                             if let Err(fault) =
                                 self.apply_task_output(&mut inst, &definition, &mut frame)
                             {
                                 inst.task_stack.push(frame);
-                                self.fail_instance(&mut inst, store.clone(), fault).await;
+                                self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                                    .await;
                                 break;
                             }
-                            self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
-                        }
+                            &[lifecycle::TASK_COMPLETED]
+                        } else {
+                            &[]
+                        };
                         inst.task_stack.push(frame);
                         inst.current_task_index += 1;
                         inst.updated_at = self.clock.now_ms();
-                        let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
+                        let _ = self
+                            .commit_instance(&store, &inst, &mut rev, guard, events)
+                            .await;
                     }
 
                     StepResult::Goto { target, frame } => {
@@ -1615,7 +2159,9 @@ where
                             Some(idx) => {
                                 inst.current_task_index = idx;
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
+                                let _ = self
+                                    .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                    .await;
                             }
                             None => {
                                 inst.status = InstanceStatus::Failed;
@@ -1624,7 +2170,9 @@ where
                                 "The switch condition referenced a task that does not exist in do_tasks",
                             ));
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
+                                let _ = self
+                                    .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                    .await;
                                 break;
                             }
                         }
@@ -1656,13 +2204,26 @@ where
                                 with,
                                 input,
                             } => {
-                                let result = self
-                                    .dispatcher
-                                    .dispatch(service, with.as_ref(), input)
-                                    .await;
+                                let task_index = inst.current_task_index;
+                                let task_name = frame.task_name.clone();
+                                let result = match self
+                                    .register_step(&inst.id, task_index, &task_name)
+                                    .await
+                                {
+                                    Ok(key) => {
+                                        self.dispatcher
+                                            .dispatch(service, with.as_ref(), input, key.as_deref())
+                                            .await
+                                    }
+                                    Err(error) => DispatchResult::Failure {
+                                        error,
+                                        retryable: true,
+                                    },
+                                };
 
                                 match result {
                                     DispatchResult::Success { data } => {
+                                        self.mark_step_done(&inst.id, task_index, &task_name).await;
                                         // 派发成功 —— 不挂起，直接推进
                                         let mut completed_frame = frame;
                                         completed_frame.status = TaskStatus::Completed;
@@ -1682,8 +2243,10 @@ where
                                             &mut completed_frame,
                                         ) {
                                             inst.task_stack.push(completed_frame);
-                                            self.fail_instance(&mut inst, store.clone(), fault)
-                                                .await;
+                                            self.fail_instance(
+                                                &mut inst, &store, &mut rev, guard, fault,
+                                            )
+                                            .await;
                                             break 'drive_loop;
                                         }
                                         inst.task_stack.push(completed_frame);
@@ -1691,9 +2254,14 @@ where
                                         inst.updated_at = self.clock.now_ms();
                                         inst.suspension_meta = None;
                                         let _ = self
-                                            .persist_instance(&store, &inst, &mut rev, guard)
+                                            .commit_instance(
+                                                &store,
+                                                &inst,
+                                                &mut rev,
+                                                guard,
+                                                &[lifecycle::TASK_COMPLETED],
+                                            )
                                             .await;
-                                        self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
                                         continue;
                                     }
                                     DispatchResult::Failure { error, retryable } => {
@@ -1701,13 +2269,16 @@ where
                                             // 不可重试的错误 → 直接 faulted
                                             inst.task_stack.push(frame);
                                             self.fail_instance(
-                                            &mut inst,
-                                            store.clone(),
-                                            crate::workflow::errors::WorkflowFault::communication(
-                                                format!("call to '{}' failed: {}", service, error),
-                                                error,
-                                            ),
-                                        ).await;
+                                                &mut inst,
+                                                &store,
+                                                &mut rev,
+                                                guard,
+                                                crate::workflow::errors::WorkflowFault::communication(
+                                                    format!("call to '{}' failed: {}", service, error),
+                                                    error,
+                                                ),
+                                            )
+                                            .await;
                                             break 'drive_loop;
                                         }
                                         // 可重试的错误 → retry 策略接线（标准 Fault Tolerance）
@@ -1727,16 +2298,19 @@ where
                                             // 重试耗尽 → faulted（communication）
                                             inst.task_stack.push(frame);
                                             self.fail_instance(
-                                            &mut inst,
-                                            store.clone(),
-                                            crate::workflow::errors::WorkflowFault::communication(
-                                                format!(
-                                                    "call to '{}' failed after {} retries: {}",
-                                                    service, prev_retries, error
+                                                &mut inst,
+                                                &store,
+                                                &mut rev,
+                                                guard,
+                                                crate::workflow::errors::WorkflowFault::communication(
+                                                    format!(
+                                                        "call to '{}' failed after {} retries: {}",
+                                                        service, prev_retries, error
+                                                    ),
+                                                    error,
                                                 ),
-                                                error,
-                                            ),
-                                        ).await;
+                                            )
+                                            .await;
                                             break 'drive_loop;
                                         }
                                         // 计算下次重试延迟
@@ -1763,9 +2337,14 @@ where
                                         inst.status = InstanceStatus::Waiting;
                                         inst.updated_at = self.clock.now_ms();
                                         let _ = self
-                                            .persist_instance(&store, &inst, &mut rev, guard)
+                                            .commit_instance(
+                                                &store,
+                                                &inst,
+                                                &mut rev,
+                                                guard,
+                                                &[lifecycle::TASK_RETRIED],
+                                            )
                                             .await;
-                                        self.emit_lifecycle(lifecycle::TASK_RETRIED, &inst).await;
                                         self.schedule_auto_resume(
                                             inst.id.clone(),
                                             definition.clone(),
@@ -1804,7 +2383,7 @@ where
                                     ));
                                         inst.updated_at = self.clock.now_ms();
                                         let _ = self
-                                            .persist_instance(&store, &inst, &mut rev, guard)
+                                            .commit_instance(&store, &inst, &mut rev, guard, &[])
                                             .await;
                                         break 'drive_loop;
                                     }
@@ -1818,7 +2397,7 @@ where
                                             ));
                                         inst.updated_at = self.clock.now_ms();
                                         let _ = self
-                                            .persist_instance(&store, &inst, &mut rev, guard)
+                                            .commit_instance(&store, &inst, &mut rev, guard, &[])
                                             .await;
                                         break 'drive_loop;
                                     }
@@ -1840,8 +2419,9 @@ where
                                             e.to_string(),
                                         ));
                                     inst.updated_at = self.clock.now_ms();
-                                    let _ =
-                                        self.persist_instance(&store, &inst, &mut rev, guard).await;
+                                    let _ = self
+                                        .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                        .await;
                                     break 'drive_loop;
                                 }
 
@@ -1859,12 +2439,18 @@ where
                                 inst.context["_subflow_instance_id"] =
                                     Value::String(sub_id.clone());
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
+                                let _ = self
+                                    .commit_instance(
+                                        &store,
+                                        &inst,
+                                        &mut rev,
+                                        guard,
+                                        &[lifecycle::WORKFLOW_WAITING],
+                                    )
+                                    .await;
                                 // 登记父子对，交给 per-tick 的登记表扫描
                                 // （不再依赖每 5 秒的全量列举）。
                                 self.register_pending_subflow(inst.id.clone(), sub_id.clone());
-                                self.emit_lifecycle(lifecycle::WORKFLOW_WAITING, &inst)
-                                    .await;
 
                                 // 子流程监控由后台扫描器 (start_subflow_scanner) 负责，
                                 // 父流程挂起后会在子流程完成时由扫描器自动恢复。
@@ -1876,8 +2462,14 @@ where
                                 inst.status = InstanceStatus::Waiting;
                                 inst.suspension_meta = Some(reason.to_meta());
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
-                                self.emit_lifecycle(lifecycle::WORKFLOW_WAITING, &inst)
+                                let _ = self
+                                    .commit_instance(
+                                        &store,
+                                        &inst,
+                                        &mut rev,
+                                        guard,
+                                        &[lifecycle::WORKFLOW_WAITING],
+                                    )
                                     .await;
 
                                 // 自动恢复定时器（wait 到期后完成帧并推进）
@@ -1898,8 +2490,14 @@ where
                                 inst.status = InstanceStatus::Waiting;
                                 inst.suspension_meta = Some(reason.to_meta());
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
-                                self.emit_lifecycle(lifecycle::WORKFLOW_WAITING, &inst)
+                                let _ = self
+                                    .commit_instance(
+                                        &store,
+                                        &inst,
+                                        &mut rev,
+                                        guard,
+                                        &[lifecycle::WORKFLOW_WAITING],
+                                    )
                                     .await;
 
                                 // 任务级 timeout：事件超时 → faulted（仅当仍停留该任务）
@@ -1942,8 +2540,14 @@ where
                                 inst.status = InstanceStatus::Suspended;
                                 inst.suspension_meta = Some(reason.to_meta());
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
-                                self.emit_lifecycle(lifecycle::WORKFLOW_SUSPENDED, &inst)
+                                let _ = self
+                                    .commit_instance(
+                                        &store,
+                                        &inst,
+                                        &mut rev,
+                                        guard,
+                                        &[lifecycle::WORKFLOW_SUSPENDED],
+                                    )
                                     .await;
                                 break 'drive_loop;
                             }
@@ -1961,14 +2565,22 @@ where
                             self.apply_task_output(&mut inst, &definition, &mut frame)
                         {
                             inst.task_stack.push(frame);
-                            self.fail_instance(&mut inst, store.clone(), fault).await;
+                            self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                                .await;
                             break;
                         }
                         inst.task_stack.push(frame);
                         inst.current_task_index += 1;
                         inst.updated_at = self.clock.now_ms();
-                        let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
-                        self.emit_lifecycle(lifecycle::TASK_COMPLETED, &inst).await;
+                        let _ = self
+                            .commit_instance(
+                                &store,
+                                &inst,
+                                &mut rev,
+                                guard,
+                                &[lifecycle::TASK_COMPLETED],
+                            )
+                            .await;
                     }
 
                     StepResult::Fork {
@@ -2013,7 +2625,7 @@ where
                                         inst.fault = fault;
                                         inst.updated_at = clock.now_ms();
                                         let _ = self
-                                            .persist_instance(&store, &inst, &mut rev, guard)
+                                            .commit_instance(&store, &inst, &mut rev, guard, &[])
                                             .await;
                                         continue 'drive_loop;
                                     }
@@ -2034,7 +2646,9 @@ where
                                 inst.task_stack.push(completed_frame);
                                 inst.current_task_index += 1;
                                 inst.updated_at = clock.now_ms();
-                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
+                                let _ = self
+                                    .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                    .await;
                             }
                         } else {
                             // 非 compete 模式：等待所有分支完成
@@ -2093,14 +2707,18 @@ where
                                 inst.status = InstanceStatus::Failed;
                                 inst.fault = fork_fault;
                                 inst.updated_at = clock.now_ms();
-                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
+                                let _ = self
+                                    .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                    .await;
                                 break;
                             }
 
                             inst.task_stack.push(completed_frame);
                             inst.current_task_index += 1;
                             inst.updated_at = clock.now_ms();
-                            let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
+                            let _ = self
+                                .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                .await;
                         }
                     }
 
@@ -2172,14 +2790,18 @@ where
                             inst.status = InstanceStatus::Failed;
                             inst.fault = foreach_fault;
                             inst.updated_at = self.clock.now_ms();
-                            let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
+                            let _ = self
+                                .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                .await;
                             break;
                         }
 
                         inst.task_stack.push(completed_frame);
                         inst.current_task_index += 1;
                         inst.updated_at = self.clock.now_ms();
-                        let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
+                        let _ = self
+                            .commit_instance(&store, &inst, &mut rev, guard, &[])
+                            .await;
                     }
 
                     StepResult::TryBlock {
@@ -2242,12 +2864,31 @@ where
                                         },
                                     frame: call_frame,
                                 } => {
-                                    let result = self
-                                        .dispatcher
-                                        .dispatch(&service, with.as_ref(), &input)
-                                        .await;
+                                    let task_index = inst.current_task_index;
+                                    let task_name = call_frame.task_name.clone();
+                                    let result = match self
+                                        .register_step(&inst.id, task_index, &task_name)
+                                        .await
+                                    {
+                                        Ok(key) => {
+                                            self.dispatcher
+                                                .dispatch(
+                                                    &service,
+                                                    with.as_ref(),
+                                                    &input,
+                                                    key.as_deref(),
+                                                )
+                                                .await
+                                        }
+                                        Err(error) => DispatchResult::Failure {
+                                            error,
+                                            retryable: true,
+                                        },
+                                    };
                                     match result {
                                         DispatchResult::Success { data } => {
+                                            self.mark_step_done(&inst.id, task_index, &task_name)
+                                                .await;
                                             let mut done = call_frame;
                                             done.status = TaskStatus::Completed;
                                             done.output = Some(data);
@@ -2255,9 +2896,9 @@ where
                                             try_ctx = apply_frame_output(try_ctx, &done);
                                         }
                                         DispatchResult::Failure { error, .. } => {
-                                            // 可重试与否由 catch 子句的 `errors` 匹配决定：
-                                            // 这里统一建模为 communication fault，交给
-                                            // catch 路由（catch-all 会接住它）。
+                                            // 有意**不使用**折叠出的 `retryable`：try 体内的路由
+                                            // 由 catch 子句的 `errors` 匹配决定（catch-all 会接住）；
+                                            // 这里统一建模为 communication fault 再交 catch 路由。
                                             try_failed = true;
                                             try_fault = Some(
                                                 crate::workflow::errors::WorkflowFault::communication(
@@ -2325,7 +2966,9 @@ where
                                 inst.status = InstanceStatus::Failed;
                                 inst.fault = try_fault;
                                 inst.updated_at = self.clock.now_ms();
-                                let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
+                                let _ = self
+                                    .commit_instance(&store, &inst, &mut rev, guard, &[])
+                                    .await;
                                 break;
                             }
 
@@ -2346,7 +2989,9 @@ where
                             inst.current_task_index += 1;
                         }
                         inst.updated_at = self.clock.now_ms();
-                        let _ = self.persist_instance(&store, &inst, &mut rev, guard).await;
+                        let _ = self
+                            .commit_instance(&store, &inst, &mut rev, guard, &[])
+                            .await;
                     }
 
                     StepResult::Completed { output } => {
@@ -2355,7 +3000,8 @@ where
                             match self.apply_workflow_output(&definition, &inst, output) {
                                 Ok(v) => v,
                                 Err(fault) => {
-                                    self.fail_instance(&mut inst, store.clone(), fault).await;
+                                    self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                                        .await;
                                     break;
                                 }
                             };
@@ -2363,16 +3009,24 @@ where
                         inst.output = Some(final_output);
                         inst.updated_at = self.clock.now_ms();
                         // 终态写回不得因 CAS 冲突而“卡住”：冲突则重读重试（下一轮重算）。
-                        if !self.persist_instance(&store, &inst, &mut rev, guard).await {
+                        if !self
+                            .commit_instance(
+                                &store,
+                                &inst,
+                                &mut rev,
+                                guard,
+                                &[lifecycle::WORKFLOW_COMPLETED],
+                            )
+                            .await
+                        {
                             continue 'drive_loop;
                         }
-                        self.emit_lifecycle(lifecycle::WORKFLOW_COMPLETED, &inst)
-                            .await;
                         break;
                     }
 
                     StepResult::Failed { fault } => {
-                        self.fail_instance(&mut inst, store.clone(), fault).await;
+                        self.fail_instance(&mut inst, &store, &mut rev, guard, fault)
+                            .await;
                         break;
                     }
                 }
@@ -2483,6 +3137,7 @@ mod tests {
     use crate::workflow::ports::test_utils::{
         MemoryWorkflowStore, NoopEventProvider, NoopTaskDispatcher, TestClock,
     };
+    use crate::workflow::ports::{StoreError, WorkflowStore};
 
     fn make_runtime() -> WorkflowRuntime<
         ExpressionEvaluator,
@@ -2696,11 +3351,9 @@ mod tests {
         assert_eq!(inst.context, serde_json::json!({"key": "value"}));
     }
 
-    /// 注入 outbox 后，生命周期事件只经 `OutboxStore::append` 入 outbox；实例状态由
-    /// 调用方的 `persist_instance`（CAS / 租约 `fenced_save`）负责。
-    ///
-    /// 负控制：若 emit 走 `AtomicOutboxCommit::commit_state_and_outbox`，就产生了一条
-    /// 无 CAS/无 fencing 的实例写通道，并推进 mod_revision 使调用方随后的 CAS 失配。
+    /// 负控制：legacy 降级发布口 `emit_lifecycle` 只 append 事件到 outbox，
+    /// **不得**调用会写实例状态的 `AtomicOutboxCommit`（那是一条无 CAS/fencing 的
+    /// 实例写通道，并会推进 mod_revision 使调用方随后的 CAS 失配）。
     #[tokio::test]
     async fn durable_emit_appends_without_writing_instance_state() {
         use crate::workflow::durable::{
@@ -2717,10 +3370,10 @@ mod tests {
 
         #[async_trait::async_trait]
         impl AtomicOutboxCommit for RecordingCommit {
-            async fn commit_state_and_outbox(
+            async fn commit_state_and_outbox_batch(
                 &self,
                 _inst: &WorkflowInstance,
-                _rec: &OutboxRecord,
+                _recs: &[OutboxRecord],
                 _expected_mod_rev: Option<i64>,
             ) -> Result<bool, crate::workflow::ports::StoreError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
@@ -2735,24 +3388,439 @@ mod tests {
 
         let rt = make_runtime().with_durable(durable);
         let def = make_simple_definition();
-        let inst = rt.start(&def, serde_json::json!({})).await.unwrap();
-
-        // drive 是 spawn 的后台任务：等实例走到终态（空 `do_tasks` 立即完成）。
-        for _ in 0..200 {
-            match rt.store.load_instance(&inst.id).await {
-                Ok(Some(cur)) if cur.status.is_terminal() => break,
-                _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
-            }
-        }
+        let inst = WorkflowInstance::new(&def, serde_json::json!({}), 1000);
+        rt.emit_lifecycle(lifecycle::WORKFLOW_STARTED, &inst).await;
 
         assert_eq!(
             commit.calls.load(Ordering::SeqCst),
             0,
-            "emit 不得调用会写实例状态的 commit_state_and_outbox（无 CAS/fencing 的写通道）"
+            "emit 不得调用会写实例状态的 AtomicOutboxCommit（无 CAS/fencing 的写通道）"
         );
         assert!(
             !outbox.snapshot().is_empty(),
             "生命周期事件必须仍然写入 outbox（事件不丢）"
+        );
+    }
+
+    /// 正控制：drive 的唯一写路径把状态 + 伴生事件经同一个 `AtomicOutboxCommit` 落库。
+    ///
+    /// 注入 `MemoryAtomicCommit` 的**计数代理**后驱动一个空工作流，断言实例到终态、
+    /// outbox 拿到 started / completed 两个生命周期事件，且确实调用了原子提交
+    /// （计数 ≥ 1）——若走成裸写，测试便能区分出来。
+    #[tokio::test]
+    async fn durable_drive_commits_state_and_events_atomically() {
+        use crate::workflow::durable::{
+            AtomicOutboxCommit, DurableSupport, MemoryAtomicCommit, MemoryOutboxStore,
+            MemoryTimerStore, OutboxStore,
+        };
+        use crate::workflow::ports::{MemoryWorkflowStore, StoreError, WorkflowStore};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        /// 计数代理：委托给 `MemoryAtomicCommit`，同时记录被调用次数，
+        /// 以区分「走原子提交」与「走裸写」。
+        struct CountingAtomicCommit {
+            inner: MemoryAtomicCommit,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl AtomicOutboxCommit for CountingAtomicCommit {
+            async fn commit_state_and_outbox_batch(
+                &self,
+                inst: &WorkflowInstance,
+                recs: &[OutboxRecord],
+                expected_mod_rev: Option<i64>,
+            ) -> Result<bool, StoreError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.inner
+                    .commit_state_and_outbox_batch(inst, recs, expected_mod_rev)
+                    .await
+            }
+        }
+
+        let instances = Arc::new(MemoryWorkflowStore::new());
+        let outbox = Arc::new(MemoryOutboxStore::new());
+        let counting = Arc::new(CountingAtomicCommit {
+            inner: MemoryAtomicCommit::new(Arc::clone(&instances), Arc::clone(&outbox)),
+            calls: AtomicUsize::new(0),
+        });
+        let commit: Arc<dyn AtomicOutboxCommit> = counting.clone();
+        let durable = DurableSupport::new(
+            Arc::new(MemoryTimerStore::new()),
+            Arc::clone(&outbox) as Arc<dyn OutboxStore>,
+        )
+        .with_atomic_commit(commit);
+
+        let expr = ExpressionEvaluator::new();
+        let clock = TestClock::new(1000);
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let rt = WorkflowRuntime::new(
+            executor,
+            clock,
+            Arc::clone(&instances),
+            NoopTaskDispatcher,
+            NoopEventProvider,
+        )
+        .with_durable(durable);
+
+        let def = make_simple_definition();
+        let inst = rt.start(&def, serde_json::json!({})).await.unwrap();
+
+        // drive 是 spawn 的后台任务：等实例走到终态。
+        for _ in 0..200 {
+            if let Ok(Some(cur)) = instances.load_instance(&inst.id).await {
+                if cur.status.is_terminal() {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let stored = instances.load_instance(&inst.id).await.unwrap().unwrap();
+        assert!(
+            stored.status.is_terminal(),
+            "drive 必须把实例状态经原子提交落库"
+        );
+        let types: Vec<String> = outbox
+            .snapshot()
+            .into_iter()
+            .map(|r| r.event_type)
+            .collect();
+        assert!(
+            types.iter().any(|t| t.ends_with("workflow.started.v1")),
+            "同一提交里必须含 started 事件: {types:?}"
+        );
+        assert!(
+            types.iter().any(|t| t.ends_with("workflow.completed.v1")),
+            "同一提交里必须含 completed 事件: {types:?}"
+        );
+        assert!(
+            counting.calls.load(Ordering::SeqCst) >= 1,
+            "drive 的状态写必须经 AtomicOutboxCommit（否则状态与事件可分离落库）"
+        );
+    }
+
+    /// 取消必须把状态写与 `workflow.cancelled` 放进**同一次**提交：durable 装配下走
+    /// `AtomicOutboxCommit`（状态 + outbox 同事务），而不是「先盲写状态、再补发事件」。
+    ///
+    /// 反（负控制）：旧实现（cache-first `load_instance` + 无条件 `save_instance`，且
+    /// 不发事件）两条都不过：事件缺失，且无 CAS 的写会在并发下覆盖终态。本测试断言
+    /// 事件随原子提交落地。
+    #[tokio::test]
+    async fn cancel_commits_state_and_cancelled_event_atomically() {
+        use crate::workflow::durable::{
+            AtomicOutboxCommit, DurableSupport, MemoryAtomicCommit, MemoryOutboxStore,
+            MemoryTimerStore, OutboxRecord, OutboxStore,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct CountingAtomicCommit {
+            inner: MemoryAtomicCommit,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl AtomicOutboxCommit for CountingAtomicCommit {
+            async fn commit_state_and_outbox_batch(
+                &self,
+                inst: &WorkflowInstance,
+                recs: &[OutboxRecord],
+                expected_mod_rev: Option<i64>,
+            ) -> Result<bool, StoreError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.inner
+                    .commit_state_and_outbox_batch(inst, recs, expected_mod_rev)
+                    .await
+            }
+        }
+
+        let instances = Arc::new(MemoryWorkflowStore::new());
+        let outbox = Arc::new(MemoryOutboxStore::new());
+        let counting = Arc::new(CountingAtomicCommit {
+            inner: MemoryAtomicCommit::new(Arc::clone(&instances), Arc::clone(&outbox)),
+            calls: AtomicUsize::new(0),
+        });
+        let durable = DurableSupport::new(
+            Arc::new(MemoryTimerStore::new()),
+            Arc::clone(&outbox) as Arc<dyn OutboxStore>,
+        )
+        .with_atomic_commit(counting.clone() as Arc<dyn AtomicOutboxCommit>);
+
+        let expr = ExpressionEvaluator::new();
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let rt = WorkflowRuntime::new(
+            executor,
+            TestClock::new(1000),
+            Arc::clone(&instances),
+            NoopTaskDispatcher,
+            NoopEventProvider,
+        )
+        .with_durable(durable);
+
+        // 非终态（Running）实例；扫描器只驱动 Suspended/Waiting，不会介入。
+        let def = make_simple_definition();
+        let mut inst = WorkflowInstance::new(&def, serde_json::json!({}), 1000);
+        inst.status = InstanceStatus::Running;
+        instances.save_instance(&inst).await.unwrap();
+
+        let before = counting.calls.load(Ordering::SeqCst);
+        rt.cancel_instance(&inst.id).await.unwrap();
+
+        let stored = instances.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, InstanceStatus::Cancelled);
+        let types: Vec<String> = outbox
+            .snapshot()
+            .into_iter()
+            .map(|r| r.event_type)
+            .collect();
+        assert!(
+            types.iter().any(|t| t.ends_with("workflow.cancelled.v1")),
+            "取消必须经同一原子提交发出 workflow.cancelled：{types:?}"
+        );
+        assert!(
+            counting.calls.load(Ordering::SeqCst) > before,
+            "取消的状态写必须经 AtomicOutboxCommit（状态与事件同一次提交）"
+        );
+    }
+
+    /// 取消与完成的存储替身：`load_instance`（cache-first）返回陈旧快照，
+    /// `load_instance_with_rev`（线性一致）返回真值。取消若走 cache-first 读，
+    /// 就会用陈旧的非终态快照盲写，覆盖已提交的终态。
+    struct StaleCacheStore {
+        inner: Arc<MemoryWorkflowStore>,
+        stale: std::sync::Mutex<Option<WorkflowInstance>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowStore for StaleCacheStore {
+        async fn save_definition(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
+            self.inner.save_definition(def).await
+        }
+        async fn load_definition(
+            &self,
+            namespace: &str,
+            name: &str,
+            version: &str,
+        ) -> Result<Option<WorkflowDefinition>, StoreError> {
+            self.inner.load_definition(namespace, name, version).await
+        }
+        async fn save_instance(&self, inst: &WorkflowInstance) -> Result<(), StoreError> {
+            self.inner.save_instance(inst).await
+        }
+        async fn load_instance(&self, id: &str) -> Result<Option<WorkflowInstance>, StoreError> {
+            if let Some(stale) = self.stale.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                return Ok(Some(stale));
+            }
+            self.inner.load_instance(id).await
+        }
+        async fn load_instance_with_rev(
+            &self,
+            id: &str,
+        ) -> Result<Option<(WorkflowInstance, i64)>, StoreError> {
+            match self.inner.load_instance(id).await? {
+                Some(inst) => Ok(Some((inst, 1))),
+                None => Ok(None),
+            }
+        }
+        async fn list_definitions(
+            &self,
+            namespace: &str,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<Vec<WorkflowDefinition>, StoreError> {
+            self.inner
+                .list_definitions(namespace, page_size, page_token)
+                .await
+        }
+        async fn list_instances(
+            &self,
+            namespace: Option<&str>,
+            definition_name: Option<&str>,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<(Vec<WorkflowInstance>, Option<String>), StoreError> {
+            self.inner
+                .list_instances(namespace, definition_name, page_size, page_token)
+                .await
+        }
+        async fn save_resume_idempotency_key(
+            &self,
+            instance_id: &str,
+            key: &str,
+        ) -> Result<bool, StoreError> {
+            self.inner
+                .save_resume_idempotency_key(instance_id, key)
+                .await
+        }
+    }
+
+    /// 反（负控制）：取消不得覆盖已提交的终态。
+    ///
+    /// 确定性复现「取消 vs 完成」竞态：完成先提交（线性一致真值 = Completed），
+    /// 而读缓存仍滞后在 Running。取消若走 cache-first `load_instance` 并盲写，就会把
+    /// 已提交的 `Completed` 改成 `Cancelled`（消费者却已看到 `workflow.completed`）。
+    /// 新实现经 `load_instance_with_rev` 读到真值并拒绝 ⇒ 状态不变、无事件。
+    ///
+    /// 反（负控制）：本测试的 store 故意让 `load_instance` 返回陈旧 Running；若取消改回
+    /// cache-first 读，`inner` 会变成 Cancelled，断言失败。
+    #[tokio::test]
+    async fn cancel_cannot_clobber_committed_terminal_state() {
+        use std::sync::Arc;
+
+        let inner = Arc::new(MemoryWorkflowStore::new());
+        let def = make_simple_definition();
+        let mut running = WorkflowInstance::new(&def, serde_json::json!({}), 1000);
+        running.status = InstanceStatus::Running;
+        inner.save_instance(&running).await.unwrap();
+
+        // 完成已提交（线性一致真值 = Completed），但读缓存仍滞后在 Running。
+        let mut completed = running.clone();
+        completed.status = InstanceStatus::Completed;
+        completed.updated_at = 2000;
+        inner.save_instance(&completed).await.unwrap();
+
+        let store = StaleCacheStore {
+            inner: Arc::clone(&inner),
+            stale: std::sync::Mutex::new(Some(running.clone())),
+        };
+
+        let events = Arc::new(RecordingEventProvider::new());
+        let expr = ExpressionEvaluator::new();
+        let executor = WorkflowExecutor::new(expr, TestClock::new(1000));
+        let rt = WorkflowRuntime::new(
+            executor,
+            TestClock::new(1000),
+            store,
+            NoopTaskDispatcher,
+            Arc::clone(&events),
+        );
+
+        let err = rt.cancel_instance(&running.id).await.unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::AlreadyCompleted(_)),
+            "已终态实例的取消必须拒绝（AlreadyCompleted ⇒ 服务层 FailedPrecondition）：{err:?}"
+        );
+        let stored = inner.load_instance(&running.id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.status,
+            InstanceStatus::Completed,
+            "取消不得用陈旧缓存快照覆盖已提交的终态"
+        );
+        assert_eq!(
+            events.emitted_count(),
+            0,
+            "取消被拒绝时不得发出任何生命周期事件：{:?}",
+            events.emitted_events.lock().unwrap()
+        );
+    }
+
+    /// `register_step` 瞬时失败折叠为**可重试**失败：任务进 retry 而非立即 faulted；
+    /// token 恢复后同一任务重试派发成功。
+    ///
+    /// fail-closed 不变量：register 未成功前不派发。
+    #[tokio::test]
+    async fn register_step_error_is_retried_not_faulted() {
+        use crate::workflow::durable::{
+            DurableSupport, MemoryOutboxStore, MemoryTimerStore, OutboxStore, StepRecord,
+            StepState, StepTokenStore,
+        };
+        use crate::workflow::model::{CallTask, CallType, RetryPolicy, TaskMeta};
+        use crate::workflow::ports::StoreError;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        #[derive(Default)]
+        struct RecoveringStepStore {
+            attempts: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl StepTokenStore for RecoveringStepStore {
+            async fn register(
+                &self,
+                _instance_id: &str,
+                _step_id: &str,
+                token: &str,
+                now_ms: i64,
+            ) -> Result<(StepRecord, bool), StoreError> {
+                // 首次瞬时失败，之后恢复（模拟 KV 抖动）。
+                if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(StoreError::IoError("kv blip".into()));
+                }
+                Ok((
+                    StepRecord {
+                        token: token.to_string(),
+                        state: StepState::Pending,
+                        at_ms: now_ms,
+                    },
+                    true,
+                ))
+            }
+            async fn mark_done(&self, _i: &str, _s: &str) -> Result<(), StoreError> {
+                Ok(())
+            }
+            async fn get(&self, _i: &str, _s: &str) -> Result<Option<StepRecord>, StoreError> {
+                Ok(None)
+            }
+        }
+
+        let steps = Arc::new(RecoveringStepStore::default());
+        let durable = DurableSupport::new(
+            Arc::new(MemoryTimerStore::new()),
+            Arc::new(MemoryOutboxStore::new()) as Arc<dyn OutboxStore>,
+        )
+        .with_steps(steps.clone());
+
+        let rt = make_runtime().with_durable(durable);
+        let mut def = make_simple_definition();
+        def.do_tasks = vec![NamedTask {
+            name: "call".into(),
+            task: Task::Call(CallTask {
+                call: CallType::Function("svc".into()),
+                with: None,
+            }),
+        }];
+        def.task_meta.insert(
+            "call".into(),
+            TaskMeta {
+                retry: Some(RetryPolicy {
+                    delay: "PT0.1S".into(),
+                    backoff: None,
+                    limit: 2,
+                    jitter: None,
+                }),
+                ..Default::default()
+            },
+        );
+        rt.store.save_definition(&def).await.unwrap();
+
+        let mut inst = WorkflowInstance::new(&def, serde_json::json!({}), 1000);
+        inst.status = InstanceStatus::Running;
+        rt.store.save_instance(&inst).await.unwrap();
+
+        rt.drive_instance(&inst.id).await.unwrap();
+
+        // 第一次 register 失败 ⇒ retry（不 fault）；恢复后重试成功。
+        for _ in 0..300 {
+            if let Ok(Some(cur)) = rt.store.load_instance(&inst.id).await {
+                if cur.status.is_terminal() {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let cur = rt.store.load_instance(&inst.id).await.unwrap().unwrap();
+        assert_eq!(
+            cur.status,
+            InstanceStatus::Completed,
+            "register 瞬时失败必须重试后成功，而不是立即 faulted: {:?}",
+            cur.fault
+        );
+        assert!(
+            steps.attempts.load(Ordering::SeqCst) >= 2,
+            "重试必须再次调用 register"
         );
     }
 
@@ -3269,6 +4337,7 @@ mod tests {
             _service: &str,
             _with: Option<&Value>,
             _input: &Value,
+            _idempotency_key: Option<&str>,
         ) -> DispatchResult {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < self.fail_times {
@@ -4355,5 +5424,220 @@ mod tests {
         B: EventProvider,
     {
         &runtime.store
+    }
+
+    // ─── fail_instance 有界 CAS 重试（可控冲突的假存储） ───
+
+    /// 可控 CAS 冲突的存储：期望修订号匹配时，前 `conflicts_remaining` 次返回冲突并推进
+    /// 存储修订号（模拟并发写者抢先提交）；其余读写转发给内存存储。
+    struct ConflictOnceStore {
+        inner: MemoryWorkflowStore,
+        rev: std::sync::atomic::AtomicI64,
+        conflicts_remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ConflictOnceStore {
+        fn new(conflicts: usize) -> Self {
+            Self {
+                inner: MemoryWorkflowStore::new(),
+                rev: std::sync::atomic::AtomicI64::new(0),
+                conflicts_remaining: std::sync::atomic::AtomicUsize::new(conflicts),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowStore for ConflictOnceStore {
+        async fn save_definition(&self, def: &WorkflowDefinition) -> Result<(), StoreError> {
+            self.inner.save_definition(def).await
+        }
+
+        async fn load_definition(
+            &self,
+            namespace: &str,
+            name: &str,
+            version: &str,
+        ) -> Result<Option<WorkflowDefinition>, StoreError> {
+            self.inner.load_definition(namespace, name, version).await
+        }
+
+        async fn save_instance(&self, inst: &WorkflowInstance) -> Result<(), StoreError> {
+            self.inner.save_instance(inst).await
+        }
+
+        async fn load_instance(&self, id: &str) -> Result<Option<WorkflowInstance>, StoreError> {
+            self.inner.load_instance(id).await
+        }
+
+        async fn list_definitions(
+            &self,
+            namespace: &str,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<Vec<WorkflowDefinition>, StoreError> {
+            self.inner
+                .list_definitions(namespace, page_size, page_token)
+                .await
+        }
+
+        async fn list_instances(
+            &self,
+            namespace: Option<&str>,
+            definition_name: Option<&str>,
+            page_size: usize,
+            page_token: Option<&str>,
+        ) -> Result<(Vec<WorkflowInstance>, Option<String>), StoreError> {
+            self.inner
+                .list_instances(namespace, definition_name, page_size, page_token)
+                .await
+        }
+
+        async fn save_resume_idempotency_key(
+            &self,
+            instance_id: &str,
+            key: &str,
+        ) -> Result<bool, StoreError> {
+            self.inner
+                .save_resume_idempotency_key(instance_id, key)
+                .await
+        }
+
+        async fn load_instance_with_rev(
+            &self,
+            id: &str,
+        ) -> Result<Option<(WorkflowInstance, i64)>, StoreError> {
+            use std::sync::atomic::Ordering;
+            match self.inner.load_instance(id).await? {
+                Some(inst) => Ok(Some((inst, self.rev.load(Ordering::SeqCst)))),
+                None => Ok(None),
+            }
+        }
+
+        async fn save_instance_atomic(
+            &self,
+            inst: &WorkflowInstance,
+            expected_mod_rev: i64,
+        ) -> Result<bool, StoreError> {
+            use std::sync::atomic::Ordering;
+            if expected_mod_rev != self.rev.load(Ordering::SeqCst) {
+                return Ok(false);
+            }
+            if self
+                .conflicts_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                // 模拟并发写者抢先提交：修订号前进，本次 CAS 失去写权。
+                self.rev.fetch_add(1, Ordering::SeqCst);
+                return Ok(false);
+            }
+            self.inner.save_instance(inst).await?;
+            self.rev.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }
+    }
+
+    fn runtime_with_conflict_store(
+        conflicts: usize,
+    ) -> WorkflowRuntime<
+        ExpressionEvaluator,
+        TestClock,
+        ConflictOnceStore,
+        NoopTaskDispatcher,
+        NoopEventProvider,
+    > {
+        let executor = WorkflowExecutor::new(ExpressionEvaluator::new(), TestClock::new(1000));
+        WorkflowRuntime::new(
+            executor,
+            TestClock::new(1000),
+            ConflictOnceStore::new(conflicts),
+            NoopTaskDispatcher,
+            NoopEventProvider,
+        )
+    }
+
+    fn running_instance(id: &str) -> WorkflowInstance {
+        WorkflowInstance {
+            id: id.into(),
+            definition_ns: "test".into(),
+            definition_name: "wf".into(),
+            definition_version: "1.0".into(),
+            status: InstanceStatus::Running,
+            context: serde_json::json!({}),
+            task_stack: vec![],
+            current_task_index: 0,
+            created_at: 0,
+            updated_at: 0,
+            output: None,
+            fault: None,
+            suspension_meta: None,
+            definition_hash: None,
+            engine_version: None,
+        }
+    }
+
+    /// 一次 CAS 冲突后 `fail_instance` 重读修订号并重提 ⇒ 终态写落地，冲突计数为 1。
+    #[tokio::test]
+    async fn fail_instance_recommits_after_one_cas_conflict() {
+        let rt = runtime_with_conflict_store(1);
+        let mut inst = running_instance("inst-cas-retry");
+        store_of(&rt).save_instance(&inst).await.unwrap();
+        let mut rev = Some(0);
+
+        rt.fail_instance(
+            &mut inst,
+            store_of(&rt),
+            &mut rev,
+            None,
+            WorkflowFault::timeout("t", "d"),
+        )
+        .await;
+
+        let saved = store_of(&rt)
+            .load_instance(&inst.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.status,
+            InstanceStatus::Failed,
+            "冲突重提后终态写必须落地"
+        );
+        assert!(saved.fault.is_some());
+        assert_eq!(rt.cas_conflict_total(), 1, "一次冲突只计一次");
+    }
+
+    /// 冲突耗尽 ⇒ 实例保持非终态（由启动对账重新驱动），冲突全部计入 `cas_conflict_total`。
+    #[tokio::test]
+    async fn fail_instance_exhaustion_leaves_instance_non_terminal() {
+        let rt = runtime_with_conflict_store(usize::MAX);
+        let mut inst = running_instance("inst-cas-exhausted");
+        store_of(&rt).save_instance(&inst).await.unwrap();
+        let mut rev = Some(0);
+
+        rt.fail_instance(
+            &mut inst,
+            store_of(&rt),
+            &mut rev,
+            None,
+            WorkflowFault::timeout("t", "d"),
+        )
+        .await;
+
+        let saved = store_of(&rt)
+            .load_instance(&inst.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.status,
+            InstanceStatus::Running,
+            "耗尽后不得留下伪终态"
+        );
+        assert_eq!(
+            rt.cas_conflict_total(),
+            CONTROL_PLANE_CAS_ATTEMPTS as u64,
+            "每次失败尝试都必须计数"
+        );
     }
 }

@@ -242,6 +242,13 @@ FNV-1a 哈希）+ 可注入 `CursorStore`：
 
 修复后的语义（逐字）：**匹配到事件先提交游标再返回** ⇒ 同一订阅不重放（至多一次消费）。
 
+> **M1 更正（`feat/workflow-v2-foundation`，commit `53ce23d`）**：上面这句已被
+> **ack-after-state** 取代 —— `wait_for_event` 只返回投递信封、**不**提交游标，位点由
+> 调用方在实例状态写成功后经 `ack_event` 提交 ⇒ 语义从「至多一次」变为「至少一次 +
+> 状态守卫去重」。覆盖测试：`workflow_foundation::listen_event_is_acked_after_state_commit`、
+> `coord-agent::services::mq_event_provider::delivery_is_acked_only_after_explicit_ack`。
+> 本段其余内容为 Spike 3 当期事实，保留作历史证据。
+
 复现命令：
 
 ```bash
@@ -258,8 +265,13 @@ CARGO_BUILD_JOBS=3 cargo test -p coord-agent --lib services::mq_event_provider
 - 根因：事件游标与实例状态**不在同一事务**。这与 OUTBOX.md §5.1 的 outbox 原子性
   是同一类问题，解法也相同：把「消费位点推进」与「实例状态变更」放进一个 Txn
   （或引入 per-instance 事件台账按 `event_id` 去重后再推进位点）。
-- 现状：**未修**。手册 §4 的失败应对要求「恢复不完整必须记录具体场景」，
-  以上即该场景；阶段二把它列为 listen 语义的前置项。
+- 现状：**M1 已修**（commit `53ce23d` ack-after-state，见 §5 更正框）：位点改为在实例
+  状态写成功后经 `ack_event` 提交 ⇒ 崩溃窗口从「丢投递」变为「重复投递」，由消费方状态
+  守卫吸收，不再有「游标已推进、实例未恢复」的丢事件窗口。覆盖测试：
+  `workflow_foundation::listen_event_is_acked_after_state_commit`、
+  `coord-agent::services::mq_event_provider::delivery_is_acked_only_after_explicit_ack`，
+  进程级 `spike3_durable_kv::listen_instance_resubscribes_after_engine_restart` + kill9
+  listen 场景。本小节的根因分析保留作历史证据；手册 §4 的失败应对仍以「记录具体场景」为准。
 - 影响面：仅 `listen`（wait/retry 走定时器，没有这个窗口）。
 
 ## 6. 复现命令汇总
@@ -277,7 +289,9 @@ CARGO_BUILD_JOBS=3 cargo test -p coord-agent --lib services::mq_event_provider
 
 ## 7. 缺口汇总（阶段二输入）
 
-- **R1（listen 崩溃窗口）**：见 §5.1，未修。
+- **R1（listen 崩溃窗口）**：见 §5.1，**M1 已修**（ack-after-state，commit `53ce23d`；
+  覆盖测试 `workflow_foundation::listen_event_is_acked_after_state_commit`、
+  `coord-agent::services::mq_event_provider::delivery_is_acked_only_after_explicit_ack`）。
 - **R2（`Suspended` 不自动恢复）**：`signal` 挂起是人工语义，重启不做任何动作
   （设计如此）。若审批场景要求「重启后提醒挂起实例」，需要单独的提醒机制，不在本方案内。
 - **R3（对账是全量列举）**：`reconcile_resumable_instances` 启动时

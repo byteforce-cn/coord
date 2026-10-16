@@ -300,6 +300,72 @@ pub struct WorkflowDefinition {
     pub raw_yaml: Option<String>,
 }
 
+/// 当前引擎版本 —— 实例钉死启动时的引擎版本；M2 引入 v2 后按此分派执行语义。
+pub const ENGINE_VERSION: &str = "v1";
+
+/// `definition_hash` 无法计算时的哨兵值。
+///
+/// `WorkflowDefinition` 字段均为 JSON 可表示类型，序列化在类型上不会失败；但生产代码
+/// 不得 panic（panic-path gate），不可达失败也必须走值路径。哨兵不是合法哈希（成功值为
+/// 64 位 hex），钉死比较遇到它必然判漂移（见 `definition_content_drift`）——fail-closed，
+/// 绝不静默按新语义继续。
+pub const DEFINITION_HASH_UNAVAILABLE: &str = "definition-hash-unavailable";
+
+/// 定义内容哈希 —— 规范化 JSON 的 sha256（hex）。
+///
+/// 用于钉死实例启动时的定义内容：同 `(namespace, name, version)` 被重部署成不同内容时，
+/// 实例必须按哈希识别出漂移，而不是在另一份语义上继续推进。
+///
+/// 只哈希**执行语义**，排除两个部署期字段：`id`（部署时按时间戳赋值，同内容重部署会变）
+/// 与 `raw_yaml`（源文本，不参与执行，格式化差异不应触发漂移）。包含它们会让
+/// 「字节相同的 DSL 在不同秒重部署」把该版本上所有健康实例误判成漂移。
+/// `document`（含 namespace/name/version/dsl）与其余执行字段全部保留。
+///
+/// 序列化前先转 `serde_json::Value` 并**递归按键排序**：`use` / `task_meta` / `auth` / `tags`
+/// 等字段是无序 map，直接序列化 struct 会受插入顺序影响（同一文档算出不同哈希，
+/// 把正常重部署误判成漂移）。数组顺序保留（任务顺序是语义的一部分）。
+pub fn definition_hash(def: &WorkflowDefinition) -> String {
+    use sha2::{Digest, Sha256};
+
+    let Ok(mut value) = serde_json::to_value(def) else {
+        return DEFINITION_HASH_UNAVAILABLE.to_string();
+    };
+    // 仅剔顶层部署元信息（按 key 名）；不从嵌套结构中名称相同的字段上剔。
+    if let Value::Object(map) = &mut value {
+        map.remove("id");
+        map.remove("raw_yaml");
+    }
+    let canonical = canonical_json(value);
+    let Ok(bytes) = serde_json::to_vec(&canonical) else {
+        return DEFINITION_HASH_UNAVAILABLE.to_string();
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// 递归按键排序构造可达的 `Value` 副本（数组元素顺序保留）。
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<String> = map.keys().cloned().collect();
+            keys.sort();
+            let mut sorted = serde_json::Map::with_capacity(map.len());
+            for key in keys {
+                let child = map.get(&key).cloned().unwrap_or(Value::Null);
+                sorted.insert(key, canonical_json(child));
+            }
+            Value::Object(sorted)
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical_json).collect()),
+        other => other,
+    }
+}
+
 /// 命名任务（带名称的任务）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NamedTask {
@@ -573,6 +639,12 @@ pub struct WorkflowInstance {
     /// 挂起元信息
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspension_meta: Option<SuspensionMeta>,
+    /// 实例启动时钉死的定义内容哈希；`None` = 旧快照未钉死（首次成功驱动时回填）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_hash: Option<String>,
+    /// 实例启动时钉死的引擎版本；`None` = 旧快照未钉死（首次成功驱动时回填）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_version: Option<String>,
 }
 
 /// 实例状态枚举（对齐标准状态相位）
@@ -879,6 +951,8 @@ pub enum ValidationErrorKind {
     TypeMismatch(String),
     /// 重复任务名
     DuplicateTaskName(String),
+    /// 未实现的 DSL 构造（fail-closed：解析期显式拒绝，不静默误读；消息点名构造）
+    UnsupportedConstruct(String),
 }
 
 /// 校验错误 —— 携带位置信息
@@ -922,6 +996,8 @@ impl WorkflowInstance {
             output: None,
             fault: None,
             suspension_meta: None,
+            definition_hash: Some(definition_hash(definition)),
+            engine_version: Some(ENGINE_VERSION.to_string()),
         }
     }
 }
@@ -967,6 +1043,136 @@ mod tests {
         assert_eq!(inst.context, serde_json::json!({"key": "value"}));
         assert!(inst.task_stack.is_empty());
         assert_eq!(inst.created_at, 1000);
+        // 新建实例钉死定义内容与引擎版本
+        assert_eq!(
+            inst.definition_hash.as_deref(),
+            Some(definition_hash(&def).as_str())
+        );
+        assert_eq!(inst.engine_version.as_deref(), Some(ENGINE_VERSION));
+    }
+
+    #[test]
+    fn definition_hash_is_stable_across_map_order() {
+        fn def_with_auth_order(order: &[&str]) -> WorkflowDefinition {
+            let auth: HashMap<String, AuthConfig> = order
+                .iter()
+                .map(|name| {
+                    (
+                        (*name).to_string(),
+                        AuthConfig {
+                            scheme: Some("bearer".to_string()),
+                            token: Some(format!("tok-{name}")),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect();
+            WorkflowDefinition {
+                id: None,
+                document: Document {
+                    dsl: "1.0.0".to_string(),
+                    namespace: "test".to_string(),
+                    name: "stable-hash".to_string(),
+                    version: "1.0".to_string(),
+                    title: None,
+                    summary: None,
+                    tags: None,
+                },
+                do_tasks: vec![],
+                input: None,
+                output: None,
+                timeout: None,
+                use_components: None,
+                schedule: Default::default(),
+                auth,
+                secrets: Default::default(),
+                constants: Default::default(),
+                task_meta: Default::default(),
+                raw_yaml: None,
+            }
+        }
+
+        // 键足够多，使得「直接按 HashMap 迭代顺序序列化」几乎必然得到不同字节 ——
+        // 这里的相等断言因此能真正区分规范化实现与朴素实现。
+        let forward = def_with_auth_order(&[
+            "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+        ]);
+        let reverse = def_with_auth_order(&[
+            "theta", "eta", "zeta", "epsilon", "delta", "gamma", "beta", "alpha",
+        ]);
+        assert_eq!(
+            definition_hash(&forward),
+            definition_hash(&reverse),
+            "map 插入顺序不得影响定义哈希"
+        );
+
+        // 内容变化必须改变哈希 —— 否则上面的相等断言在「哈希恒为常量」时也会假通过。
+        let mut changed = forward.clone();
+        changed.document.version = "2.0".to_string();
+        assert_ne!(definition_hash(&forward), definition_hash(&changed));
+    }
+
+    #[test]
+    fn definition_hash_ignores_deploy_metadata() {
+        fn sample() -> WorkflowDefinition {
+            WorkflowDefinition {
+                id: None,
+                document: Document {
+                    dsl: "1.0.0".to_string(),
+                    namespace: "test".to_string(),
+                    name: "deploy-metadata".to_string(),
+                    version: "1.0".to_string(),
+                    title: None,
+                    summary: None,
+                    tags: None,
+                },
+                do_tasks: vec![NamedTask {
+                    name: "wait".to_string(),
+                    task: Task::Wait(WaitTask {
+                        wait: "PT1S".to_string(),
+                    }),
+                }],
+                input: None,
+                output: None,
+                timeout: None,
+                use_components: None,
+                schedule: Default::default(),
+                auth: Default::default(),
+                secrets: Default::default(),
+                constants: Default::default(),
+                task_meta: Default::default(),
+                raw_yaml: None,
+            }
+        }
+
+        // 同内容、不同秒重部署：id（时间戳）与 raw_yaml（源文本）变化不得改变哈希。
+        let mut original = sample();
+        original.id = Some("test-1a2b3c".to_string());
+        original.raw_yaml = Some("document:\n  name: deploy-metadata\n".to_string());
+        let mut redeployed = sample();
+        redeployed.id = Some("test-9f8e7d".to_string());
+        redeployed.raw_yaml = Some("document:   \n  name: deploy-metadata\n".to_string());
+        assert_eq!(
+            definition_hash(&original),
+            definition_hash(&redeployed),
+            "部署元信息（id / raw_yaml）不得影响定义哈希"
+        );
+
+        // 执行语义变化必须改变哈希。
+        let mut retitled = original.clone();
+        retitled.document.title = Some("changed".to_string());
+        assert_ne!(definition_hash(&original), definition_hash(&retitled));
+
+        let mut retasked = original.clone();
+        retasked.do_tasks[0].task = Task::Wait(WaitTask {
+            wait: "PT2S".to_string(),
+        });
+        assert_ne!(definition_hash(&original), definition_hash(&retasked));
+
+        // namespace 是定义键 / 执行语义的一部分，不得被排除。
+        let mut renamespaced = original.clone();
+        renamespaced.document.namespace = "other".to_string();
+        assert_ne!(definition_hash(&original), definition_hash(&renamespaced));
     }
 
     #[test]

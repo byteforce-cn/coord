@@ -103,9 +103,15 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   `mod_revision`、租约 key `mod_revision`（epoch）与租约 key 值（holder token），
   旧驱动迟到写被拒。**残余风险**：fencing 只拒绝状态写回，**无法撤回已发出的
   外部副作用**——必须由 StepToken 兜底（外部调用幂等键）。
-- **StepToken = (instance_id, step_seq)** 持久化在实例实体上，与状态同 Txn 写入；
-  外部副作用幂等键 = StepToken，经 `TaskDispatcher` 扩展签名透传（HTTP header）。
-  KV `request_id`（单节点/进程内/60s）**不得**作为幂等或 StepToken 基础。
+- **StepToken = (instance_id, step_id)** 存**独立 CAS 键**
+  `/_workflow/v3/steps/{instance_id}/{step_id}`，**不**与实例实体同键：`register` 是
+  create-if-absent（`Txn(Compare(key VERSION==0) → Put)`），`call` **派发前**登记、
+  成功后标 `Done`。外部副作用幂等键 = 该 token，经 `TaskDispatcher` 扩展签名透传
+  （HTTP header）。为何独立键：token 随 step 数量增长，挂在实例实体会让每次实例写都
+  携带并变胖（实例 bloom）；而 register-before-dispatch 把去重边界前移到「副作用发出
+  之前」——`register` 未成功即 fail-closed 不派发，重试/崩溃重建复用同一确定性 token
+  （at-least-once + 下游按幂等键去重）。KV `request_id`（单节点/进程内/60s）**不得**
+  作为幂等或 StepToken 基础。
 - CAS 冲突语义：立即停止本轮驱动，重读实例后由驱动循环重试；禁止盲写覆盖。
 
 ### D4 事件契约与 Outbox
@@ -123,9 +129,9 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   `MqEventProvider` 的两处缺陷（offset 重启归零、共享单游标）——**Spike 3 已修并
   带回归测试**。
 - **落地要求（Spike 3 集成发现）**：outbox 记录必须搭上状态写同一次 Txn
-  （v2 写路径为 `persist_instance`/`fenced_save` 的 CAS Txn），不得在状态写之后
-  另行 append；否则外部观测者可先见终态、后见伴生事件（证据与缺口见
-  `spike-3-recovery/OUTBOX.md` §2.1 / G1）。
+  （v2 写路径为 `commit_instance` 的 CAS Txn，注入租约时经 `fenced_commit` 做同一 Txn
+  的三重比较），不得在状态写之后另行 append；否则外部观测者可先见终态、后见伴生事件
+  （证据与缺口见 `spike-3-recovery/OUTBOX.md` §2.1 / G1）。
 
 ### D5 崩溃恢复
 

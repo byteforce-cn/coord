@@ -24,6 +24,7 @@ pub mod registry;
 pub mod replication;
 pub mod scheduler;
 pub mod scheduler_store;
+pub mod step_kv;
 pub mod transit;
 pub mod transit_store;
 pub mod workflow;
