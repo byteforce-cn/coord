@@ -154,7 +154,7 @@ try (CoordClient client = CoordClient.create(config)) {
 }
 ```
 
-> 上面是**真 SDK**（`coord-java-sdk`，group `cn.byteforce`，artifact `coord-java-sdk`，当前源码版本 `0.3.2`）的用法——入口是
+> 上面是**真 SDK**（`coord-java-sdk`，group `cn.byteforce`，artifact `coord-java-sdk`，当前源码版本 `0.3.3`）的用法——入口是
 > `CoordClient.create(CoordConfig)`。已发布到 **Maven Central**（`cn.byteforce:coord-java-sdk`；最新发布版为 `0.3.1`）；
 > 也可在仓库内执行 `mvn -pl coord-java-sdk install` 从源码构建。`java-example/` 是**独立的自包含** gRPC 示例；
 > 其中的 `cn.byteforce.coord.example.CoordClient` 是示例本地包装类，**不是** SDK 的类。
@@ -226,7 +226,7 @@ Coord 处于 pre-1.0，并明确列出**不承诺**的事项；完整清单（�
 
 ## 状态
 
-版本 `0.3.2`（pre-1.0）。Raft 引擎（`openraft`）为 alpha 依赖，Coord **暂不建议用于生产**。一致性核心由仓库内 Jepsen 工程与 CI 持续检验；引入前请阅读「测试与验证」与「限制与非目标」。
+版本 `0.3.3`（pre-1.0）。Raft 引擎（`openraft`）为 alpha 依赖，Coord **暂不建议用于生产**。一致性核心由仓库内 Jepsen 工程与 CI 持续检验；引入前请阅读「测试与验证」与「限制与非目标」。
 
 ## 文档
 

@@ -44,14 +44,15 @@ leaks wire types into the public surface.
 
 ## Install
 
-Available on **Maven Central** — repository version `0.3.2`
-(latest published release: `0.3.1`; until `0.3.2` is live there, use `0.3.1` or the from-source path below):
+Available on **Maven Central** — repository version `0.3.3`
+(latest published release: `0.3.1`; `0.3.2` was never published there, so use `0.3.1` — or the
+from-source path below — until `0.3.3` is live):
 
 ```xml
 <dependency>
     <groupId>cn.byteforce</groupId>
     <artifactId>coord-java-sdk</artifactId>
-    <version>0.3.2</version>
+    <version>0.3.3</version>
 </dependency>
 ```
 

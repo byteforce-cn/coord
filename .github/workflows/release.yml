@@ -134,10 +134,18 @@ jobs:
         run: |
           set -euo pipefail
           ls -l dist
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            dist/*
+          # 幂等：同名 release 已存在（被外部手工创建、或上一轮在产物上传前中断）时
+          # 不再让 `create` 失败中断上传，改为把产物补进既有 release；
+          # `--clobber` 允许覆盖上一轮遗留的半截 asset。
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists — uploading assets into it"
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              dist/*
+          fi
 
   docker:
     name: docker image (ghcr.io)
