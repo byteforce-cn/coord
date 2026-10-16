@@ -67,7 +67,7 @@
 `GetStatus.status` 字符串映射见 `grpc_handlers.rs`（`FAULTED` 即 Failed）。
 子流程恢复的轮询边界见 `boundaries.md` B-WF-2 / B-WF-3。
 
-## 6. HTTP 任务派发与凭据注入（`$secrets` / `$constants`）
+## 6. HTTP 任务派发：运行时表达式与凭据注入（`$context` / `$secrets` / `$constants`）
 
 `call` / operation 任务的 `with` 支持 HTTP 调用（`endpoint` / `method` / `headers` /
 `body` / `auth`）。凭据**不写进定义**（定义随 KV / 快照 / 备份流转，`GetDefinition`
@@ -100,10 +100,20 @@ retries = 3
   不会把占位符字面量当请求头发出去（否则远端 401/403 会被误判为对端问题）。
 - 字符串常量按 JSON 序列化（带引号）替换，数字/布尔原样——与 `with_constants`
   既有语义一致。
-- `$context` / `$input` 等运行时绑定由表达式求值器处理；本配置只影响 `with` 内的
-  `$secrets` / `$constants` 占位符。
+- **运行时表达式**：`with` 的任一字符串位置（`body` / `headers` / `auth` / `query` /
+  `endpoint`）支持**整串单段** `${ ... }`，在派发前求值；绑定 `$context`
+  （= 实例上下文）与 `$input`（同值）——其余标准绑定（如 `$workflow` / `$runtime`）
+  在 agent 派发层不可得，出现即 fail-closed。表达式结果替换整个字符串（可为
+  对象/数字/布尔，不限于字符串）；`with` **无字符串插值**：内嵌 `${...}` 或一段
+  字符串里含多段表达式一律拒绝，不会把占位符字面量发给对端。
+- **与 `$secrets` / `$constants` 的先后**：含 `$secrets` / `$constants` 的字符串
+  按配置注入处理（支持内嵌，如 `Bearer ${ $secrets.token }`），不参与运行时求值；
+  两种形态混在同一字符串（如 `${ $context.a + $constants.b }`）⇒ fail-closed。
 - 判据：`test_http_dispatcher_secret_injected_into_authorization_header`、
   `test_http_dispatcher_missing_placeholders_fail_closed`、
+  `test_http_dispatcher_context_expression_evaluated`、
+  `test_http_dispatcher_expression_failure_fails_closed`、
+  `test_engine_context_expression_end_to_end`、
   `test_engine_new_with_dispatch_injects_secret_end_to_end`、
   `test_engine_new_with_dispatch_missing_secret_fails_closed_end_to_end`。
 

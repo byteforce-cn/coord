@@ -1512,6 +1512,193 @@ pub mod phase4 {
                 Err(missing)
             }
         }
+
+        /// 递归求值 `with` 中的整串 `${ ... }` 运行时表达式（#96）。
+        ///
+        /// 绑定白名单：`$context`（= 实例上下文，即 dispatch 的 `input`）与 `$input`。
+        /// `${ $secrets.x }` / `${ $constants.x }` 是配置注入占位符（非运行时表达式）——
+        /// 独立语义、支持内嵌，原样留给后续注入；同一字符串出现其他 `${...}` 或
+        /// 独立表达式中混入 `$secrets`/`$constants` ⇒ fail-closed，绝不静默把字面量
+        /// 发出去。错误只含 JSON 路径与绑定名，不含值。
+        fn evaluate_runtime_expressions(
+            &self,
+            value: &Value,
+            context: &Value,
+        ) -> Result<Value, String> {
+            self.evaluate_runtime_expressions_at(value, context, "with")
+        }
+
+        fn evaluate_runtime_expressions_at(
+            &self,
+            value: &Value,
+            context: &Value,
+            path: &str,
+        ) -> Result<Value, String> {
+            match value {
+                Value::String(s) => {
+                    let trimmed = s.trim();
+                    if !trimmed.contains("${") {
+                        return Ok(value.clone());
+                    }
+                    let standalone = trimmed.starts_with("${")
+                        && trimmed.ends_with('}')
+                        && trimmed.matches("${").count() == 1;
+                    if !standalone {
+                        // 非整串：仅当 `${...}` 全部是纯配置占位符时才放行（支持
+                        // `Bearer ${ $secrets.token }` 这类既有内嵌注入）。
+                        if strip_plain_config_placeholders(s).contains("${") {
+                            return Err(format!(
+                                "{path} 含内嵌表达式——with 仅支持整串单段表达式（无字符串插值）"
+                            ));
+                        }
+                        return Ok(value.clone());
+                    }
+                    let inner = trimmed[2..trimmed.len() - 1].trim();
+                    if is_plain_config_placeholder(inner) {
+                        return Ok(value.clone());
+                    }
+                    self.evaluate_expression_string(inner, context, path)
+                }
+                Value::Array(arr) => arr
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        self.evaluate_runtime_expressions_at(v, context, &format!("{path}[{i}]"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Value::Array),
+                Value::Object(obj) => obj
+                    .iter()
+                    .map(|(k, v)| {
+                        self.evaluate_runtime_expressions_at(v, context, &format!("{path}.{k}"))
+                            .map(|v| (k.clone(), v))
+                    })
+                    .collect::<Result<serde_json::Map<_, _>, _>>()
+                    .map(Value::Object),
+                other => Ok(other.clone()),
+            }
+        }
+
+        /// 求值单个已剥壳的表达式字符串（`inner` 为 `${ ... }` 内层文本）。
+        fn evaluate_expression_string(
+            &self,
+            inner: &str,
+            context: &Value,
+            path: &str,
+        ) -> Result<Value, String> {
+            if inner.is_empty() {
+                return Err(format!("{path} 的运行时表达式为空"));
+            }
+            // 首字符闸门：求值器对无法识别的裸 token 会回退为「整个 context」，这里
+            // 只放行确定是表达式的形态，避免把 `hello` 这类文本静默换成上下文。
+            let first = inner.chars().next().unwrap_or('\0');
+            let literal = matches!(inner, "true" | "false" | "null");
+            let supported = literal
+                || first == '$'
+                || first == '.'
+                || first == '"'
+                || first == '('
+                || first == '{'
+                || first == '-'
+                || first.is_ascii_digit();
+            if !supported {
+                return Err(format!(
+                    "{path} 的运行时表达式不受支持（无法识别起始 token '{first}'）"
+                ));
+            }
+            for binding in expression_bindings(inner) {
+                if !matches!(binding.as_str(), "context" | "input") {
+                    return Err(format!(
+                        "{path} 引用了未知运行时绑定 ${binding}（仅支持 $context / $input；\
+                         $secrets / $constants 仅支持整串占位符形式）"
+                    ));
+                }
+            }
+            let mut vars = HashMap::new();
+            vars.insert("input".to_string(), context.clone());
+            ExpressionEvaluator::new()
+                .evaluate_with_vars(inner, context, &vars)
+                .map_err(|e| format!("{path} 运行时表达式求值失败：{e}"))
+        }
+    }
+
+    /// `${ $secrets.<key> }` / `${ $constants.<key> }` 的纯占位符判定（键为标识符形）。
+    fn is_plain_config_placeholder(inner: &str) -> bool {
+        ["$secrets.", "$constants."].iter().any(|prefix| {
+            inner
+                .strip_prefix(prefix)
+                .map(|key| {
+                    !key.is_empty()
+                        && key
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                })
+                .unwrap_or(false)
+        })
+    }
+
+    /// 去掉字符串中的纯配置占位符片段（残留检测用）；非配置的 `${...}` 原样保留。
+    fn strip_plain_config_placeholders(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut rest = s;
+        while let Some(pos) = rest.find("${") {
+            out.push_str(&rest[..pos]);
+            let after = &rest[pos + 2..];
+            match after.find('}') {
+                Some(end) => {
+                    if !is_plain_config_placeholder(after[..end].trim()) {
+                        out.push_str("${");
+                        out.push_str(&after[..=end]);
+                    }
+                    rest = &after[end + 1..];
+                }
+                None => {
+                    out.push_str("${");
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// 提取表达式中的 `$name` 绑定（忽略字符串字面量）。
+    fn expression_bindings(expr: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut chars = expr.chars().peekable();
+        let mut in_string = false;
+        let mut escape = false;
+        while let Some(c) = chars.next() {
+            if in_string {
+                if escape {
+                    escape = false;
+                } else if c == '\\' {
+                    escape = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '$' => {
+                    let mut name = String::new();
+                    while let Some(&n) = chars.peek() {
+                        if n.is_ascii_alphanumeric() || n == '_' {
+                            name.push(n);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    if !name.is_empty() && !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+                _ => {}
+            }
+        }
+        names
     }
 
     /// 占位符前缀与错误信息里的标签（两者必须一致）。
@@ -1568,23 +1755,35 @@ pub mod phase4 {
             input: &Value,
             idempotency_key: Option<&str>,
         ) -> DispatchResult {
-            // 先解析 secrets/constants 占位符；残留未命中 key ⇒ fail-closed，
-            // 绝不把字面量 `${ $secrets.x }` 当凭据发出去（远端 401/403 看不出
-            // 是本地配置缺失）。错误只含 key 名，不含任何凭据值。
+            // 先求值运行时表达式（$context/$input），再解析 secrets/constants 配置
+            // 占位符；残留未命中 key ⇒ fail-closed，绝不把字面量 `${ $secrets.x }`
+            // 当凭据发出去（远端 401/403 看不出是本地配置缺失）。
+            // 错误只含 key 名/路径与绑定名，不含任何凭据值。
             let resolved_with = match with {
-                Some(w) => match self.resolve_placeholders_checked(w) {
-                    Ok(v) => Some(v),
-                    Err(missing) => {
-                        return DispatchResult::Failure {
-                            error: format!(
-                                "workflow dispatch blocked: unresolved placeholder(s) {} — \
-                                 缺失的 key 未配置于 agent 的 [services.workflow_dispatch]",
-                                missing.join(", ")
-                            ),
-                            retryable: false,
+                Some(w) => {
+                    let evaluated = match self.evaluate_runtime_expressions(w, input) {
+                        Ok(v) => v,
+                        Err(msg) => {
+                            return DispatchResult::Failure {
+                                error: format!("workflow dispatch blocked: {msg}"),
+                                retryable: false,
+                            }
+                        }
+                    };
+                    match self.resolve_placeholders_checked(&evaluated) {
+                        Ok(v) => Some(v),
+                        Err(missing) => {
+                            return DispatchResult::Failure {
+                                error: format!(
+                                    "workflow dispatch blocked: unresolved placeholder(s) {} — \
+                                     缺失的 key 未配置于 agent 的 [services.workflow_dispatch]",
+                                    missing.join(", ")
+                                ),
+                                retryable: false,
+                            }
                         }
                     }
-                },
+                }
                 None => None,
             };
             match service {
@@ -4355,7 +4554,148 @@ events:
         }
     }
 
+    // ═══ P2：`with` 运行时表达式求值（#96）═══
+
+    /// `$context` / `$input` 整串表达式在 query / header / body / auth 中的求值。
+    #[tokio::test]
+    async fn test_http_dispatcher_context_expression_evaluated() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let (addr, log) = spawn_request_recording_server().await;
+        let dispatcher = HttpTaskDispatcher::new();
+        let with = serde_json::json!({
+            "method": "POST",
+            "endpoint": format!("http://{addr}/commands/activate"),
+            "query": {"emp": "${ $context.target.id }"},
+            "headers": {"X-Employee": "${ $context.target.id }"},
+            "body": {"payload": {"employee_id": "${ $context.target.id }"}, "n": "${ $input.count }"},
+            "auth": {"scheme": "bearer", "token": "${ $context.token }"},
+        });
+        let input = serde_json::json!({"target": {"id": "E-42"}, "count": 2, "token": "CTX-TOKEN"});
+        match dispatcher.dispatch("http", Some(&with), &input, None).await {
+            DispatchResult::Success { .. } => {}
+            DispatchResult::Failure { error, .. } => panic!("HTTP dispatch failed: {error}"),
+        }
+        let req = log.lock().join("\n");
+        let req_lower = req.to_lowercase();
+        assert!(
+            req.contains("POST /commands/activate?emp=E-42 "),
+            "query 未求值：{req}"
+        );
+        assert!(
+            req_lower.contains("x-employee: e-42"),
+            "header 未求值：{req}"
+        );
+        assert!(
+            req.contains(r#""employee_id":"E-42""#),
+            "body 未求值：{req}"
+        );
+        assert!(req.contains(r#""n":2"#), "$input 未求值：{req}");
+        assert!(
+            req_lower.contains("authorization: bearer ctx-token"),
+            "auth 未求值：{req}"
+        );
+        assert!(!req.contains("${"), "占位符字面量不得发出：{req}");
+    }
+
+    /// 未知绑定 / 内嵌表达式 / 非表达式文本 ⇒ fail-closed，且请求不发出。
+    #[tokio::test]
+    async fn test_http_dispatcher_expression_failure_fails_closed() {
+        use crate::services::workflow::phase4::HttpTaskDispatcher;
+        let (addr, log) = spawn_request_recording_server().await;
+        let dispatcher = HttpTaskDispatcher::new();
+        let input = serde_json::json!({"target": {"id": "E-42"}, "token": "CTX-TOKEN"});
+        let cases = [
+            serde_json::json!({"method":"GET","endpoint":format!("http://{addr}/x"),
+                               "body": {"v": "${ $workflow.id }"}}),
+            serde_json::json!({"method":"GET","endpoint":format!("http://{addr}/x"),
+                               "query": {"v": "id=${ $context.target.id }"}}),
+            serde_json::json!({"method":"GET","endpoint":format!("http://{addr}/x"),
+                               "body": {"v": "${ $context.target.id } ${ $context.token }"}}),
+            serde_json::json!({"method":"GET","endpoint":format!("http://{addr}/x"),
+                               "body": {"v": "${ strconv }"}}),
+        ];
+        for with in &cases {
+            match dispatcher.dispatch("http", Some(with), &input, None).await {
+                DispatchResult::Failure { error, retryable } => {
+                    assert!(!retryable, "fail-closed 不得可重试：{error}");
+                    assert!(
+                        error.contains("workflow dispatch blocked"),
+                        "error: {error}"
+                    );
+                    assert!(!error.contains("${"), "错误不得回显占位符：{error}");
+                }
+                DispatchResult::Success { .. } => panic!("fail-closed 不得派发成功：{with}"),
+            }
+        }
+        assert!(
+            log.lock().is_empty(),
+            "fail-closed 不得发出任何请求：{:?}",
+            log.lock()
+        );
+    }
+
     // ═══ P2：`new_with_dispatch` 接线端到端（定义里的占位符 → 真实请求）═══
+
+    /// 记录每个连接完整请求原文的服务器（body / header / query 断言用）。
+    async fn spawn_request_recording_server(
+    ) -> (String, std::sync::Arc<parking_lot::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+            haystack.windows(needle.len()).position(|w| w == needle)
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let log: std::sync::Arc<parking_lot::Mutex<Vec<String>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let log_for_task = log.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let log = log_for_task.clone();
+                tokio::spawn(async move {
+                    // 读到 header 结束，再按 Content-Length 读完 body：小请求通常单段到达，
+                    // 但分包时只读第一段会让 body 断言假阴性。
+                    let mut raw = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while let Ok(n) = sock.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        raw.extend_from_slice(&buf[..n]);
+                        if let Some(head_end) = find_subslice(&raw, b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&raw[..head_end]);
+                            let content_len = head
+                                .lines()
+                                .find_map(|l| {
+                                    let (name, value) = l.split_once(':')?;
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().ok())
+                                        .flatten()
+                                })
+                                .unwrap_or(0);
+                            if raw.len() >= head_end + 4 + content_len {
+                                break;
+                            }
+                        }
+                    }
+                    log.lock().push(String::from_utf8_lossy(&raw).to_string());
+                    let body = serde_json::json!({"ok": true}).to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (addr, log)
+    }
 
     /// 记录 Authorization 头的服务器（接线验证用）。
     async fn spawn_auth_recording_server(
@@ -4496,6 +4836,63 @@ events:
             log.lock().is_empty(),
             "fail-closed 不应发出任何请求：{:?}",
             log.lock()
+        );
+    }
+
+    /// 单动作 SW：POST `http://<addr>/commands/activate`，body 用 `$context` 表达式。
+    fn sample_context_dispatch_sw(addr: &str) -> String {
+        format!(
+            r#"{{
+          "id": "dispatch-context-wf",
+          "version": "1.0",
+          "start": "call",
+          "functions": [ {{ "name": "activate", "operation": "http://{addr}/commands/activate" }} ],
+          "states": [
+            {{ "name": "call", "type": "operation",
+              "actions": [ {{ "name": "activateAction",
+                              "functionRef": {{ "refName": "activate",
+                                "arguments": {{ "method": "POST",
+                                  "body": {{ "employee_id": "${{ $context.employee_id }}" }} }} }} }} ],
+              "end": true }}
+          ]
+        }}"#
+        )
+    }
+
+    /// 引擎端到端：实例上下文经 `$context` 表达式进入请求体。
+    #[tokio::test]
+    async fn test_engine_context_expression_end_to_end() {
+        let (addr, log) = spawn_request_recording_server().await;
+        let svc = WorkflowEngineService::new();
+        let def_id = svc
+            .deploy_definition("test", &sample_context_dispatch_sw(&addr))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance(&def_id, serde_json::json!({"employee_id": "E-99"}))
+            .await
+            .unwrap();
+
+        let mut terminal = false;
+        for _ in 0..40 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let cur = svc.get_instance(&inst.id).await.unwrap().unwrap();
+            if cur.status == InstanceStatus::Completed || cur.status == InstanceStatus::Failed {
+                assert_eq!(
+                    cur.status,
+                    InstanceStatus::Completed,
+                    "工作流未成功：{:?}",
+                    cur.fault
+                );
+                terminal = true;
+                break;
+            }
+        }
+        assert!(terminal, "工作流未在限时内终止");
+        let req = log.lock().join("\n");
+        assert!(
+            req.contains(r#""employee_id":"E-99""#),
+            "上下文未经 $context 进入请求体：{req}"
         );
     }
 
