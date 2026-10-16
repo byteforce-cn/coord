@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::workflow::approval::model::{JoinPolicy, RejectPolicy, SeatSpec};
+
 // ─── Document 元信息 ───
 
 /// 工作流文档元信息（对应 DSL `document` 块）
@@ -414,7 +416,7 @@ impl TaskMeta {
     }
 }
 
-// ─── 任务类型枚举（13 种） ───
+// ─── 任务类型枚举（14 种） ───
 
 /// 任务类型 —— 对应 CNCF Serverless Workflow DSL 的任务类型（含 end 终端任务）
 ///
@@ -436,6 +438,7 @@ pub enum Task {
     TryCatch(TryCatchTask),
     Run(RunTask),
     End(EndTask),
+    Approve(ApproveTask),
 }
 
 /// call 任务 —— HTTP/gRPC/function 调用
@@ -606,6 +609,94 @@ pub struct WorkflowRef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EndTask {}
 
+/// approve 任务 —— 原生审批节点，降级为 workflow v2 审批引擎的席位/策略类型。
+///
+/// 四个席位来源在解析期只做形状校验；`roles` 到具体审批人的解析延后到
+/// `ApproverResolver`（启动/命令路径注入）。`deadline` 保存规范化后的 duration 字符串，
+/// 运行期由 [`ApproveTask::deadline_ms`] 相对当前时钟换算。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApproveTask {
+    #[serde(default)]
+    pub approvers: Vec<String>,
+    #[serde(default)]
+    pub pool: Vec<String>,
+    #[serde(default)]
+    pub readers: Vec<String>,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    /// 通过判定策略；缺省为会签（全部通过）。
+    #[serde(default = "default_join_all")]
+    pub mode: JoinPolicy,
+    /// `true` = 一票否决；`false` = 全部投完仍未达通过条件才判不通过。
+    #[serde(default = "default_true")]
+    pub veto: bool,
+    /// 审批截止时长（ISO8601 / 规范化 duration 串）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<String>,
+    /// 通过后跳转的目标任务名（由 runtime 解析）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_pass: Option<String>,
+    /// 否决后跳转的目标任务名（由 runtime 解析）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_reject: Option<String>,
+    #[serde(default)]
+    pub sign_admins: Vec<String>,
+    /// 发起人是否可审批自己发起的节点。
+    #[serde(default)]
+    pub allow_self_approve: bool,
+}
+
+/// approve 默认通过策略：会签。
+fn default_join_all() -> JoinPolicy {
+    JoinPolicy::All
+}
+
+/// approve 默认否决语义：一票否决。
+fn default_true() -> bool {
+    true
+}
+
+impl ApproveTask {
+    /// 展开为 v2 审批席位；`roles` 不在此解析（需 `ApproverResolver`，由启动/命令路径注入）。
+    ///
+    /// `pool` 是候选池，整体合成一个席位 —— 池内人认领或直接投票（隐式认领），
+    /// 拆成多个指定席位会丢失「只能一人代表该池」的语义。
+    pub fn to_seats(&self) -> Vec<SeatSpec> {
+        let mut seats: Vec<SeatSpec> = self
+            .approvers
+            .iter()
+            .map(|p| SeatSpec::approver(p))
+            .collect();
+        if !self.pool.is_empty() {
+            seats.push(SeatSpec::pool(self.pool.clone()));
+        }
+        seats.extend(self.readers.iter().map(|p| SeatSpec::reader(p)));
+        seats
+    }
+
+    /// 不通过判定策略：`veto` = 一票否决，否则全部投完仍未达通过条件才判不通过。
+    pub fn to_reject(&self) -> RejectPolicy {
+        if self.veto {
+            RejectPolicy::AnyReject
+        } else {
+            RejectPolicy::OnExhausted
+        }
+    }
+
+    /// 审批截止（Unix ms）：`deadline` duration 相对 `now_ms` 换算。
+    ///
+    /// 解析失败返回 `None`：调用方必须 fail-closed，不得把无期限当作默认（不 panic）。
+    pub fn deadline_ms(&self, now_ms: i64) -> Option<i64> {
+        let duration = self.deadline.as_deref()?;
+        Some(
+            now_ms.saturating_add(crate::workflow::engine::parse_iso8601_duration_ms(
+                duration,
+            )?),
+        )
+    }
+}
+
 // ─── 工作流实例 ───
 
 /// 工作流实例 —— 一次工作流定义的执行
@@ -639,6 +730,9 @@ pub struct WorkflowInstance {
     /// 挂起元信息
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspension_meta: Option<SuspensionMeta>,
+    /// 实例发起人（Start 命令注入）；`None` = 旧快照无此字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiator: Option<String>,
     /// 实例启动时钉死的定义内容哈希；`None` = 旧快照未钉死（首次成功驱动时回填）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_hash: Option<String>,
@@ -719,7 +813,7 @@ pub enum TaskStatus {
 /// 挂起元信息 —— 记录暂停原因与恢复所需信息
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SuspensionMeta {
-    /// 暂停原因: "wait" | "call" | "listen" | "signal" | "run" | "retry"
+    /// 暂停原因: "wait" | "call" | "listen" | "signal" | "run" | "retry" | "approval"
     pub reason: String,
     /// wait/retry 到期时间（Unix ms）
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -736,6 +830,9 @@ pub struct SuspensionMeta {
     /// signal 名称（人工审批场景）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_signal: Option<String>,
+    /// v2 审批实例 id（reason="approval" 时记录；恒等于 workflow 实例 id）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_instance_id: Option<String>,
     /// 重试次数（reason="retry" 时记录）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_count: Option<u32>,
@@ -831,6 +928,11 @@ pub enum SuspendReason {
     ListeningForEvent { event_filter: EventFilter },
     /// 等待人工信号
     WaitingForSignal { expected_signal: String },
+    /// 等待 v2 审批完成（审批实例 id 恒等于 workflow 实例 id）
+    WaitingForApproval {
+        approval_instance_id: String,
+        node: String,
+    },
     /// 子流程执行（等待子实例完成）
     RunSubflow {
         workflow: WorkflowRef,
@@ -850,6 +952,7 @@ impl SuspendReason {
                 payload: None,
                 event_filter: None,
                 expected_signal: None,
+                approval_instance_id: None,
                 retry_count: None,
                 error: None,
             },
@@ -864,6 +967,7 @@ impl SuspendReason {
                 payload: Some(input.clone()),
                 event_filter: None,
                 expected_signal: None,
+                approval_instance_id: None,
                 retry_count: None,
                 error: None,
             },
@@ -874,6 +978,7 @@ impl SuspendReason {
                 payload: None,
                 event_filter: Some(event_filter.clone()),
                 expected_signal: None,
+                approval_instance_id: None,
                 retry_count: None,
                 error: None,
             },
@@ -884,6 +989,21 @@ impl SuspendReason {
                 payload: None,
                 event_filter: None,
                 expected_signal: Some(expected_signal.clone()),
+                approval_instance_id: None,
+                retry_count: None,
+                error: None,
+            },
+            SuspendReason::WaitingForApproval {
+                approval_instance_id,
+                node: _,
+            } => SuspensionMeta {
+                reason: "approval".to_string(),
+                until_ms: None,
+                service: None,
+                payload: None,
+                event_filter: None,
+                expected_signal: Some("approval.completed".to_string()),
+                approval_instance_id: Some(approval_instance_id.clone()),
                 retry_count: None,
                 error: None,
             },
@@ -901,6 +1021,7 @@ impl SuspendReason {
                 payload: input.clone(),
                 event_filter: None,
                 expected_signal: None,
+                approval_instance_id: None,
                 retry_count: None,
                 error: None,
             },
@@ -996,6 +1117,7 @@ impl WorkflowInstance {
             output: None,
             fault: None,
             suspension_meta: None,
+            initiator: None,
             definition_hash: Some(definition_hash(definition)),
             engine_version: Some(ENGINE_VERSION.to_string()),
         }
@@ -1049,6 +1171,56 @@ mod tests {
             Some(definition_hash(&def).as_str())
         );
         assert_eq!(inst.engine_version.as_deref(), Some(ENGINE_VERSION));
+    }
+
+    #[test]
+    fn approve_task_serde_roundtrip() {
+        let task = ApproveTask {
+            approvers: vec!["alice".into()],
+            pool: vec!["bob".into(), "carol".into()],
+            readers: vec!["dave".into()],
+            roles: vec!["manager".into()],
+            mode: JoinPolicy::Ratio { num: 2, den: 3 },
+            veto: false,
+            deadline: Some("PT1H".into()),
+            on_pass: Some("next".into()),
+            on_reject: Some("rejected".into()),
+            sign_admins: vec!["admin".into()],
+            allow_self_approve: true,
+        };
+        let value = serde_json::to_value(&task).unwrap();
+        // DSL/持久化契约是 camelCase 键；下划线拼写会静默丢字段。
+        for key in ["onPass", "onReject", "signAdmins", "allowSelfApprove"] {
+            assert!(value.get(key).is_some(), "missing camelCase key {key}");
+        }
+        assert_eq!(task.to_reject(), RejectPolicy::OnExhausted);
+        assert_eq!(task.deadline_ms(1_000), Some(1_000 + 3_600_000));
+        let back: ApproveTask = serde_json::from_value(value).unwrap();
+        assert_eq!(task, back);
+    }
+
+    #[test]
+    fn instance_initiator_serde_default_compat() {
+        // 旧快照无 initiator 字段：反序列化必须落 None，且 None 不回写（skip_serializing_if）。
+        let old = serde_json::json!({
+            "id": "inst-1",
+            "definition_ns": "test",
+            "definition_name": "wf",
+            "definition_version": "1.0",
+            "status": "running",
+            "context": {},
+            "task_stack": [],
+            "current_task_index": 0,
+            "created_at": 1,
+            "updated_at": 2
+        });
+        let inst: WorkflowInstance = serde_json::from_value(old).unwrap();
+        assert_eq!(inst.initiator, None);
+        let value = serde_json::to_value(&inst).unwrap();
+        assert!(
+            value.get("initiator").is_none(),
+            "None initiator must be omitted"
+        );
     }
 
     #[test]
@@ -1221,6 +1393,78 @@ mod tests {
         let meta = reason.to_meta();
         assert_eq!(meta.reason, "signal");
         assert_eq!(meta.expected_signal.as_deref(), Some("approval"));
+    }
+
+    #[test]
+    fn waiting_for_approval_to_meta_maps_reason_and_signal() {
+        let reason = SuspendReason::WaitingForApproval {
+            approval_instance_id: "inst-9".to_string(),
+            node: "review".to_string(),
+        };
+        let meta = reason.to_meta();
+        assert_eq!(meta.reason, "approval");
+        assert_eq!(meta.expected_signal.as_deref(), Some("approval.completed"));
+        assert_eq!(meta.approval_instance_id.as_deref(), Some("inst-9"));
+    }
+
+    #[test]
+    fn suspension_meta_legacy_json_deserializes_without_approval_field() {
+        // 旧快照无 approval_instance_id 字段：反序列化必须落 None，且 None 不回写。
+        let legacy = serde_json::json!({
+            "reason": "signal",
+            "expected_signal": "approval.completed"
+        });
+        let meta: SuspensionMeta = serde_json::from_value(legacy).unwrap();
+        assert_eq!(meta.approval_instance_id, None);
+        let value = serde_json::to_value(&meta).unwrap();
+        assert!(
+            value.get("approval_instance_id").is_none(),
+            "None approval_instance_id must be omitted"
+        );
+    }
+
+    #[test]
+    fn approve_to_seats_maps_each_source_in_order() {
+        let task = ApproveTask {
+            approvers: vec!["alice".into()],
+            pool: vec!["bob".into(), "carol".into()],
+            readers: vec!["dave".into()],
+            roles: vec!["manager".into()],
+            mode: JoinPolicy::All,
+            veto: true,
+            deadline: None,
+            on_pass: None,
+            on_reject: None,
+            sign_admins: vec![],
+            allow_self_approve: false,
+        };
+        assert_eq!(
+            task.to_seats(),
+            vec![
+                SeatSpec::approver("alice"),
+                SeatSpec::pool(vec!["bob".into(), "carol".into()]),
+                SeatSpec::reader("dave"),
+            ]
+        );
+    }
+
+    #[test]
+    fn approve_deadline_ms_saturates_on_overflow() {
+        let task = ApproveTask {
+            approvers: vec!["alice".into()],
+            pool: vec![],
+            readers: vec![],
+            roles: vec![],
+            mode: JoinPolicy::All,
+            veto: true,
+            deadline: Some("PT1S".into()),
+            on_pass: None,
+            on_reject: None,
+            sign_admins: vec![],
+            allow_self_approve: false,
+        };
+        assert_eq!(task.deadline_ms(i64::MAX), Some(i64::MAX));
+        assert_eq!(task.deadline_ms(1_000), Some(1_000 + 1_000));
     }
 
     // ─── 序列化/反序列化测试 ───

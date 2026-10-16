@@ -1745,4 +1745,79 @@ mod tests {
         let result = interceptor.validate_request("/coord.kv.KV/Range", Some(&auth_header), None);
         assert!(matches!(result, AuthResult::Allow(_)));
     }
+
+    /// 审批 v2 RPC 的能力门禁与**文档口径**一致（ADR-0013 D7 / consumer-contract）：
+    /// 命令类 = `coord:workflow:execute`，查询类 = `coord:workflow:read`。
+    ///
+    /// agent 表（`grpc_auth::rpc_capability`）是权威 —— 角色被授予这两个能力（无 scope
+    /// 约束）即可经 agent 走通 10 个命令 + 2 个查询（它们不承载 scope，无需资源键）。
+    /// 反证：服务端 catalog 里的旧名（`coord:workflow:start` 等）**不**满足同一条 RPC。
+    #[test]
+    fn workflow_v2_approval_rpcs_accept_documented_capabilities() {
+        fn grants(role: &str, caps: &[&str]) -> Arc<RoleCache> {
+            let cache = Arc::new(RoleCache::new());
+            cache.sync_full(vec![super::super::role_cache::RoleEntry {
+                name: role.to_string(),
+                grants: caps
+                    .iter()
+                    .map(|c| super::super::role_cache::CapabilityGrant {
+                        capability_id: c.to_string(),
+                        scope: String::new(),
+                    })
+                    .collect(),
+                high_sensitive: false,
+            }]);
+            cache
+        }
+
+        let interceptor = AuthInterceptor::new(
+            TEST_KEY.to_vec(),
+            grants(
+                "approver",
+                &["coord:workflow:execute", "coord:workflow:read"],
+            ),
+            300,
+        );
+        let cct = make_test_cct(vec!["approver"], HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+
+        for rpc in [
+            "/coord.workflow.v1.Workflow/Approve",
+            "/coord.workflow.v1.Workflow/Reject",
+            "/coord.workflow.v1.Workflow/Acknowledge",
+            "/coord.workflow.v1.Workflow/AddSign",
+            "/coord.workflow.v1.Workflow/RemoveSign",
+            "/coord.workflow.v1.Workflow/ReturnToNode",
+            "/coord.workflow.v1.Workflow/Transfer",
+            "/coord.workflow.v1.Workflow/Delegate",
+            "/coord.workflow.v1.Workflow/Withdraw",
+            "/coord.workflow.v1.Workflow/Terminate",
+            "/coord.workflow.v1.Workflow/ListPendingTasks",
+            "/coord.workflow.v1.Workflow/GetInstanceDetail",
+        ] {
+            let result = interceptor.validate_request(rpc, Some(&auth_header), None);
+            assert!(
+                matches!(result, AuthResult::Allow(_)),
+                "{rpc} 应接受文档口径能力，实际: {result:?}"
+            );
+        }
+
+        // 反证：只授予 catalog 旧名（`coord:workflow:start`）不得放行审批命令。
+        let stale = AuthInterceptor::new(
+            TEST_KEY.to_vec(),
+            grants("legacy", &["coord:workflow:start"]),
+            300,
+        );
+        let cct = make_test_cct(vec!["legacy"], HashMap::new());
+        let auth_header = format!("Bearer {cct}");
+        let result = stale.validate_request(
+            "/coord.workflow.v1.Workflow/Approve",
+            Some(&auth_header),
+            None,
+        );
+        assert!(
+            matches!(result, AuthResult::Deny(_)),
+            "旧 catalog 名不得放行审批命令（agent 表权威）: {result:?}"
+        );
+    }
 }

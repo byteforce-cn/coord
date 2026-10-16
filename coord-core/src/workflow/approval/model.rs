@@ -156,6 +156,20 @@ pub enum RejectPolicy {
     OnExhausted,
 }
 
+/// 节点的授权策略（Q6 授权落地，见 ADR-0013 D7）。
+///
+/// 由 `approve` DSL 节点降级而来，随分支持久化：授权判定在唯一写路径
+/// （`workflow/approval/bridge.rs`）读它，缺省（`Default`）即最保守口径。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ApprovalPolicy {
+    /// 发起人是否可审批自己发起的节点；缺省 `false`（不允许自审）。
+    #[serde(default)]
+    pub allow_self_approve: bool,
+    /// 管理动作（加签 / 减签 / 驳回至节点 / 终止）的授权人集合。
+    #[serde(default)]
+    pub sign_admins: Vec<Principal>,
+}
+
 /// 分支：一个节点的一次运行实例。
 ///
 /// 不变量（v2.0 线性模型）：同一实例同时最多一个 `Open` 分支。
@@ -171,6 +185,9 @@ pub struct Branch {
     pub status: BranchStatus,
     pub join: JoinPolicy,
     pub reject: RejectPolicy,
+    /// 本节点的授权策略；`serde(default)` 让无该字段的旧文档反序列化为保守缺省。
+    #[serde(default)]
+    pub policy: ApprovalPolicy,
     /// 分支级变量（作用域第二级）。
     pub scope: Scope,
     pub round_ids: Vec<Id>,
@@ -327,8 +344,9 @@ pub enum RoundStatus {
 /// 作用域为**分支**而非单个 Task —— 会签是「一个节点 N 席位」的投票，挂单 task
 /// 无法同时统计多席位。
 ///
-/// 不变量：一个分支同时最多一个 `Open` 轮次；`total_count = 0`（只有阅签）即视为通过；
-/// 轮次不重开（驳回重开的是新分支新轮次）。
+/// 不变量：一个分支同时最多一个 `Open` 轮次；仅当轮次从未创建可计票席位时视为通过
+/// （`approvals.is_empty()`，如纯阅签）——`total_count == 0` 但席位曾创建后全部过期/移除
+/// 的轮次保持 `Open`，处置由人决定（无自动判定）；轮次不重开（驳回重开的是新分支新轮次）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Round {
     pub id: Id,
@@ -515,6 +533,10 @@ mod tests {
             status: BranchStatus::Returned,
             join: JoinPolicy::Ratio { num: 2, den: 3 },
             reject: RejectPolicy::OnExhausted,
+            policy: ApprovalPolicy {
+                allow_self_approve: true,
+                sign_admins: vec!["u-admin".into()],
+            },
             scope: BTreeMap::from([("level".to_string(), json!("l2"))]),
             round_ids: vec!["inst-1:r0002".into()],
             created_at: 120,
@@ -711,14 +733,14 @@ mod tests {
     #[test]
     fn test_effect_event_serde_shape() {
         let effect = Effect::Event {
-            name: "com.china-workflow.approval.round.passed".into(),
+            name: "com.china-workflow.approval.round.passed.v1".into(),
             data: json!({"a": 1}),
         };
         assert_eq!(
             serde_json::to_value(&effect).expect("serialize effect"),
             json!({
                 "type": "event",
-                "name": "com.china-workflow.approval.round.passed",
+                "name": "com.china-workflow.approval.round.passed.v1",
                 "data": {"a": 1},
             })
         );

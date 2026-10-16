@@ -24,16 +24,16 @@ service Workflow {
   rpc Signal(WorkflowSignalRequest) returns (WorkflowSignalResponse);
   rpc Cancel(WorkflowCancelRequest) returns (WorkflowCancelResponse);
 
-  // 新增 — 工作流定义管理
+  // 工作流定义管理
   rpc Deploy(WorkflowDeployRequest) returns (WorkflowDeployResponse);
   rpc ListDefinitions(WorkflowListDefinitionsRequest) returns (WorkflowListDefinitionsResponse);
   rpc GetDefinition(WorkflowGetDefinitionRequest) returns (WorkflowGetDefinitionResponse);
 
-  // 新增 — 工作流定义版本化 / 回滚（对齐 policy PutBundle 语义）
+  // 工作流定义版本化 / 回滚（对齐 policy PutBundle 语义）
   rpc ListDefinitionVersions(WorkflowListDefinitionVersionsRequest) returns (WorkflowListDefinitionVersionsResponse);
   rpc RollbackDefinition(WorkflowRollbackDefinitionRequest) returns (WorkflowRollbackDefinitionResponse);
 
-  // 新增 — 工作流实例管理
+  // 工作流实例管理
   rpc ListInstances(WorkflowListInstancesRequest) returns (WorkflowListInstancesResponse);
 
   // 保留策略：删除定义（能力门禁 `coord:workflow:define`）。
@@ -49,6 +49,22 @@ service Workflow {
   // 仅终态实例可删（COMPLETED / FAULTED / CANCELLED）；运行 / 等待 / 挂起中
   // 返回 FAILED_PRECONDITION（先 Cancel）。删除不可回滚（无归档副本）。
   rpc DeleteInstance(WorkflowDeleteInstanceRequest) returns (WorkflowDeleteInstanceResponse);
+
+  // 人工审批 v2（ADR-0013 D7）。命令类能力门禁 `coord:workflow:execute`。
+  rpc Approve(WorkflowApproveRequest) returns (WorkflowApproveResponse);
+  rpc Reject(WorkflowRejectRequest) returns (WorkflowRejectResponse);
+  rpc Acknowledge(WorkflowAcknowledgeRequest) returns (WorkflowAcknowledgeResponse);
+  rpc AddSign(WorkflowAddSignRequest) returns (WorkflowAddSignResponse);
+  rpc RemoveSign(WorkflowRemoveSignRequest) returns (WorkflowRemoveSignResponse);
+  rpc ReturnToNode(WorkflowReturnToNodeRequest) returns (WorkflowReturnToNodeResponse);
+  rpc Transfer(WorkflowTransferRequest) returns (WorkflowTransferResponse);
+  rpc Delegate(WorkflowDelegateRequest) returns (WorkflowDelegateResponse);
+  rpc Withdraw(WorkflowWithdrawRequest) returns (WorkflowWithdrawResponse);
+  rpc Terminate(WorkflowTerminateRequest) returns (WorkflowTerminateResponse);
+
+  // 人工审批 v2 查询。能力门禁 `coord:workflow:read`。
+  rpc ListPendingTasks(WorkflowListPendingTasksRequest) returns (WorkflowListPendingTasksResponse);
+  rpc GetInstanceDetail(WorkflowGetInstanceDetailRequest) returns (WorkflowGetInstanceDetailResponse);
 }
 
 message WorkflowStartRequest {
@@ -232,6 +248,210 @@ message WorkflowDeleteInstanceRequest {
 }
 
 message WorkflowDeleteInstanceResponse {}
+
+// 人工审批 v2（ADR-0013 D7）。
+//
+// - 命令请求末字段 `idempotency_key` 复用 Signal 的幂等语义：同键重放返回首个
+//   响应，状态与事件只写一次；
+// - 操作主体身份取自认证上下文（CCT），请求体不携带 actor 字段；
+// - 命令响应 `status` 为大写实例状态：RUNNING / COMPLETED / REJECTED /
+//   CANCELLED / TERMINATED；`GetInstanceDetailResponse.status` 同为该大写实例状态，
+//   嵌套的 `branches[].status/join/reject`、`tasks[].status/kind`、`rounds[].status`
+//   则是模型标签（引擎枚举的 wire 标签，非大写实例状态）。
+message WorkflowApproveRequest {
+  string workflow_id = 1;
+  string task_id = 2;
+  string comment = 3;
+  string idempotency_key = 4;
+}
+
+message WorkflowApproveResponse {
+  string instance_id = 1;
+  string status = 2;
+}
+
+message WorkflowRejectRequest {
+  string workflow_id = 1;
+  string task_id = 2;
+  string comment = 3;
+  string idempotency_key = 4;
+}
+
+message WorkflowRejectResponse {
+  string instance_id = 1;
+  string status = 2;
+}
+
+message WorkflowAcknowledgeRequest {
+  string workflow_id = 1;
+  string task_id = 2;
+  string idempotency_key = 3;
+}
+
+message WorkflowAcknowledgeResponse {
+  string instance_id = 1;
+  string status = 2;
+}
+
+message WorkflowAddSignRequest {
+  string workflow_id = 1;
+  string branch_id = 2;
+  repeated string approvers = 3;
+  repeated string pool = 4;
+  repeated string readers = 5;
+  string comment = 6;
+  string idempotency_key = 7;
+}
+
+message WorkflowAddSignResponse {
+  string instance_id = 1;
+  string status = 2;
+}
+
+message WorkflowRemoveSignRequest {
+  string workflow_id = 1;
+  string branch_id = 2;
+  repeated string task_ids = 3;
+  string comment = 4;
+  string idempotency_key = 5;
+}
+
+message WorkflowRemoveSignResponse {
+  string instance_id = 1;
+  string status = 2;
+}
+
+message WorkflowReturnToNodeRequest {
+  string workflow_id = 1;
+  string branch_id = 2;
+  string target_node = 3;
+  string comment = 4;
+  string idempotency_key = 5;
+}
+
+message WorkflowReturnToNodeResponse {
+  string instance_id = 1;
+  string status = 2;
+}
+
+message WorkflowTransferRequest {
+  string workflow_id = 1;
+  string task_id = 2;
+  string to = 3;
+  string comment = 4;
+  string idempotency_key = 5;
+}
+
+message WorkflowTransferResponse {
+  string instance_id = 1;
+  string status = 2;
+}
+
+message WorkflowDelegateRequest {
+  string workflow_id = 1;
+  string task_id = 2;
+  string to = 3;
+  string comment = 4;
+  string idempotency_key = 5;
+}
+
+message WorkflowDelegateResponse {
+  string instance_id = 1;
+  string status = 2;
+}
+
+message WorkflowWithdrawRequest {
+  string workflow_id = 1;
+  string comment = 2;
+  string idempotency_key = 3;
+}
+
+message WorkflowWithdrawResponse {
+  string instance_id = 1;
+  string status = 2;
+}
+
+message WorkflowTerminateRequest {
+  string workflow_id = 1;
+  string reason = 2;
+  string idempotency_key = 3;
+}
+
+message WorkflowTerminateResponse {
+  string instance_id = 1;
+  string status = 2;
+}
+
+// 待办审批席位查询。
+message WorkflowListPendingTasksRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message WorkflowListPendingTasksResponse {
+  repeated PendingApprovalTask tasks = 1;
+  string next_page_token = 2;
+}
+
+message PendingApprovalTask {
+  string instance_id = 1;
+  string task_id = 2;
+  string node = 3;
+  string branch_id = 4;
+  string round_id = 5;
+  string kind = 6;
+  string status = 7;
+  string assignee = 8;
+  int64 deadline_ms = 9; // 超时阈值（Unix ms）；0 = 无超时
+  int64 created_at_ms = 10; // 席位创建时间（Unix ms）
+}
+
+// 实例审批详情查询。
+message WorkflowGetInstanceDetailRequest {
+  string workflow_id = 1;
+}
+
+message WorkflowGetInstanceDetailResponse {
+  string instance_id = 1;
+  string status = 2;
+  string initiator = 3;
+  int64 revision = 4; // 乐观并发守卫值（CAS）；每次状态变更 +1
+  string definition_name = 5;
+  repeated ApprovalBranch branches = 6;
+  repeated ApprovalTask tasks = 7;
+  repeated ApprovalRound rounds = 8;
+}
+
+message ApprovalBranch {
+  string id = 1;
+  string node = 2;
+  int32 attempt = 3;
+  string status = 4;
+  string join = 5;
+  string reject = 6;
+  repeated string round_ids = 7;
+}
+
+message ApprovalTask {
+  string id = 1;
+  string branch_id = 2;
+  string round_id = 3;
+  string kind = 4;
+  string status = 5;
+  string assignee = 6;
+  repeated string candidates = 7;
+  int64 deadline_ms = 8; // 超时阈值（Unix ms）；0 = 无超时
+}
+
+message ApprovalRound {
+  string id = 1;
+  string branch_id = 2;
+  int32 number = 3;
+  string status = 4;
+  int32 total_count = 5;
+  int32 completed_count = 6;
+  int32 rejected_count = 7;
+}
 
 // ============================================================
 // Policy — OPA Policy Engine (Regorus)

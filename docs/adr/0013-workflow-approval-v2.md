@@ -1,6 +1,6 @@
 # ADR-0013: 工作流引擎 v2 —— 中国式审批能力落地（状态模型 / 并发 / 事件 / 恢复 / 契约）
 
-- 状态：proposed（Spike 1–5 证据已齐备；H3 性能判据待 10-18 阈值定稿与目标硬件复测；待 CTO/契约 owner 评审后转 accepted）
+- 状态：accepted（2026-10-15 用户方裁定：EIS/ICPS 无疑问、集成后反馈；Spike 1–5 证据已齐备，惟 H3 性能判据待 10-18 阈值定稿与目标硬件复测后复核）
 - 日期：2026-10-13
 - 决策者：Spike Lead（张三）+ 契约 owner；评审：CTO、平台架构组、EIS/ICPS 接口人
 
@@ -90,7 +90,42 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
   Open 轮次；命令带 `expected_revision` CAS 守卫。
 - 定义表面：coord 原生方言新增**审批节点构造**（`approve` 任务 + 会签/或签/票签/
   一票否决/审批人来源/deadline 等策略字段）；**不**通过官方 SW `extensions` 接入
-  （其现状为静默丢弃，且不在承诺面）。语法细节随 D7 的契约设计一并评审。
+  （其现状为静默丢弃，且不在承诺面）。语法见下「原生 `approve` 节点 DSL（已固化）」。
+
+#### 原生 `approve` 节点 DSL（已固化）
+
+节点体为单键对象 `approve:`，键集合恰为下列 camelCase 字段名；出现未知键即 fail-closed
+（`UnsupportedConstruct("approve.<key>")`，不静默丢弃——把 `allowSelfApprove` 写成 snake_case 的
+`allow_self_approve` 会被拒绝，而不是静默改变审批权）：
+
+```yaml
+- finance:
+    approve:
+      approvers: [alice, bob]   # 静态名单（四来源至少一项非空）
+      pool: [carol]             # 候选池（整体合成为一个席位）
+      readers: [dave]           # 阅签（不计票）
+      roles: [finance]          # 角色来源，经 ApproverResolver 解析
+      mode: all                 # all|any|quorum:<n>|ratio:<num>/<den>，默认 all
+      veto: true                # 默认 true（一票否决）；false = 投尽未达才判不通过
+      deadline: PT24H           # 可选 ISO8601/官方 duration；相对挂起时刻换算
+      onPass: notify            # 可选；缺省 = 顺序推进下一任务
+      onReject: rework          # 可选；缺省 = 工作流 fault（approval_rejected）
+      signAdmins: [admin]       # 可选；加签/减签/驳回重开/终止的授权名单
+      allowSelfApprove: false   # 默认 false（发起人不可自批）
+```
+
+- 席位来源 `approvers/pool/readers/roles` 全空 ⇒ `MissingRequiredField`；`mode` 非法形状
+  （含 `quorum:0`、`ratio:0/<den>`、`ratio:<num>/0` 等零阈值——恒真会退化成「零审批自动通过」）
+  在解析期 fail-closed；`deadline` 必须在解析期可换算为具体时刻，否则拒绝（不得把无期限当默认）。
+- 纯阅签席（只声明 `readers`、无可计票席位）的 `approve` 节点在**开启时即 fail-closed**
+  （`InvalidArgument("approve seats")`，见桥的 `resolve_seats` 守卫）——`readers` 必须与 ≥1 个
+  可计票席位（`approvers`／`pool`／`roles` 解析结果）并存，否则空轮次会被引擎判成自动通过。
+  内部阅签本身不计票；而 `total == 0`（全员过期或被减签）的轮次**保持 Open、绝不自动通过**。
+- `roles` 在启动/命令路径注入 `ApproverResolver` 后展开为具体审批人；未注入或无对应映射时，
+  节点开启即 fail-closed（`approve.role.<name>`），不静默少派席位。
+- `approve` 各策略字段（含 `deadline`）**必须写在 `approve:` 对象内**：写在其**兄弟位置**
+  （任务级）会被解析器当作未知任务级兄弟**静默忽略**（任务级未知兄弟是既有口径，本期不收紧），
+  于是 `deadline` 落到任务级就无声地无期限——解析期校验与运行期都看不到它。
 
 ### D3 实例级并发控制（单写者）
 
@@ -157,16 +192,27 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 
 ### D7 审批契约与授权
 
-- 契约面：`coord.workflow.v1` **增量新增 RPC**（WHITEPAPER §4.2 允许的 Minor）：
-  任务操作 `Approve / Reject / Acknowledge / AddSign / RemoveSign / ReturnToNode /
-  Transfer / Delegate`，实例操作 `Withdraw / Terminate`，查询
-  `ListPendingTasks / GetInstanceDetail`；请求带 `idempotency_key`（复用 Signal 模式），
-  主体身份取自认证上下文（CCT），**不信任请求体里的 actor 字段**。
-- 能力登记：命令类 → `coord:workflow:execute`，查询类 → `coord:workflow:read`，
-  定义新增策略 → `coord:workflow:define`；全部登记 `grpc_auth.rs` 能力表。
-- 授权模型（引擎级，不依赖 RPC 能力粒度）：节点声明审批人来源（静态名单/角色/
-  外部解析服务）；操作权限矩阵覆盖「谁可加签/减签/驳回/转办/终止」；默认职责
-  分离（发起人不可自批，可配置）；转办/委派/代批全程审计。
+- 契约面：`coord.workflow.v1` **增量新增 12 个 RPC**（WHITEPAPER §4.2 允许的 Minor）：
+  命令 10 个——`Approve / Reject / Acknowledge / AddSign / RemoveSign / ReturnToNode /
+  Transfer / Delegate / Withdraw / Terminate`；查询 2 个——`ListPendingTasks /
+  GetInstanceDetail`。命令请求带 `idempotency_key`（复用 Signal 模式），主体身份取自
+  认证上下文（CCT），**不信任请求体里的 actor 字段**。
+- 能力登记：命令 10 个 → `coord:workflow:execute`，查询 2 个 → `coord:workflow:read`，
+  定义新增策略 → `coord:workflow:define`；全部登记 `grpc_auth.rs::rpc_capability`。错误码映射：
+  `StaleRevision → ABORTED`、`NotAuthorized → PERMISSION_DENIED`、
+  `InvalidTransition → FAILED_PRECONDITION`。
+- **授权矩阵（两层，缺一不可）**：引擎 `actor_can_act` 判席位归属，桥在其上补职责分离
+  （见下）；申请体不携带 actor，一律取 CCT。
+
+  | 操作 | 授权主体 |
+  |:--|:--|
+  | `Approve / Reject / Acknowledge / Transfer / Delegate` | 席位责任人 / 候选池成员 / 被委派人（引擎 `actor_can_act`）；当节点 `allowSelfApprove=false` 时附加 `actor != initiator`（`initiator == "anonymous"` 豁免——匿名发起无自审约束） |
+  | `AddSign / RemoveSign` | 分支 `signAdmins` ∪ 实例发起人 |
+  | `ReturnToNode` | 分支未决席位持有人（`assignee`/`candidate`/被委派人）∪ `signAdmins` ∪ 发起人 |
+  | `Withdraw` | 仅发起人（引擎自身强制） |
+  | `Terminate` | `signAdmins`（任一分支声明者）；保留内部 `SYSTEM_ACTOR="system"` 生命周期权威——恒可终止，用于 `cancel_instance` 运行时收口，不对用户暴露 |
+  | `expire` | 仅桥（持久化定时器），无 RPC |
+
 - 契约交付顺序：proto 先行 → 实现 → 验收项；COMMITTED 状态提升在生产验收之后
   （ADR-0001），期间按能力默认关闭。
 
@@ -188,6 +234,15 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 - **实现归属**：`MemoryApprovalStore` 仅测试用（内存同锁临界区原子，禁止生产）；生产走
   `coord-agent` 的 `KvApprovalStore`（outbox 序号取自持久化计数器
   `/_workflow/v3/outbox/seq/{aggregate}`，不随事件日志剪枝回退）。
+- **幂等记录（已固化）**：命令幂等记录键
+  `/_workflow/v4/idempotency/{instance}/{key}`——与实例前缀同属 v4 命名空间但**不同前缀**，
+  实例扫描面不会把幂等记录当实例；`{instance}` 为独立分段（`inst-1` 前缀不吞 `inst-10` 的记录）。
+  幂等记录与状态、本批事件**同一次 CAS 提交**写入：只有提交成功它才存在，失败时读不到——
+  重试方不会拿到从未落库的响应；同一 `key` 只有首次成功提交能写。命中即原样返回首次响应，
+  不再执行命令。
+- **前缀扫描与分页（已固化）**：`scan(after, limit)` 按实例 id 字典序升序，`after` 独占续读；
+  `limit` 经同一处钳制（`0 ⇒ 默认 50`，硬上限 `200`），内存与 KV 实现共用。`ListPendingTasks`
+  的 `page_token` = 上一页最后一条实例 id；`next_page_token` 仅在扫描满页时给出。
 
 ### D9 非目标与边界（永不承诺区不变）
 
@@ -196,6 +251,20 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 - v2.0 不承诺：流程级并行分支（多 Open 分支）与嵌套子流程的结果记账；
   如需要，另立 ADR 扩展（Spike 1 GAPS Q8/Q9）。
 - 查询外部化（评估报告 §11）不在本期承诺；Spike 5 容量评估超阈值时另议。
+- deadline 到期**无自动处置**（Q4）：过期只把席位置 `Expired` 并从计票分母剔除，既不自动
+  通过也不自动驳回；全员过期/被减签的轮次保持 `Open`，实例不因超时收口。处置由人决定
+  （`AddSign` 补席或 `Terminate` 终止是唯一出口）。
+- 命令路径**不产生审批实例 `Faulted`**：RPC 命令只收口为 `Completed / Rejected / Cancelled /
+  Terminated`；`Faulted` 保留给版本级故障——定义漂移时 `resume_approval` 在写前 fail-closed，
+  工作流实例置 `Failed`（`FAULTED`），审批命令不返回 `Faulted`。`cancel_instance` 对所有非终态
+  实例经共享 `finalize_approval_aggregate` 收口（无 open 分支 ⇒ `finish_if_complete` 收 `Completed`；
+  否则内部 `SYSTEM_ACTOR` terminate）；`fail_instance`/`fail_approval` 尽力而为，失败时聚合留待
+  管理员 `Terminate`。
+- carry（本期不接线、不在承诺内）：无 UI 审批面、无 REST facade（`coord-ui` 只做影响评估）；
+  `roles` 的外部解析服务未接线（仅启动/命令路径注入的静态映射，见 D2）；审批实例**未实现**
+  D8 的 watch 驱动按实例有界缓存（KV 实现按实例做线性一致单键读，无缓存/淘汰）。
+- **冻结证据只读**：本里程碑对 `spike/2026-10/**` 的改动仅为 harness 穷尽性补齐
+  （`Task::Approve` 分支与 `approval_roles` 配置字段），不改任何评估产出/证据。
 
 ### D10 验收门与治理动作
 
@@ -227,6 +296,30 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 目标硬件/release 复测后复核：若性能判据不达标，按上表重议（新建独立 crate 或 No-Go，
 新 ADR），不静默顺延。前置输入缺失（`CHARTER-INPUTS.md` 3.2/3.3）为手册允许的
 启动口径，不是本文档可自决项。
+
+### D11 运行时接线：挂起 / 恢复 / 节点结论（已固化）
+
+- **挂起**：工作流走到 `approve` 节点时，运行时经审批桥幂等开启审批实例（**审批实例 id =
+  workflow 实例 id**，跨同一实例的多个 `approve` 节点复用），并把 workflow 置 `Suspended`
+  （人工挂起）：`SuspensionMeta { reason: "approval", expected_signal: "approval.completed",
+  approval_instance_id, node }`。对账（`reconcile_resumable_instances`）**不**重驱动挂起实例
+  （否则会把人工审批直接跑过去），但重建其 deadline 持久化定时器，弥合「先提交 `Suspended`、
+  再异步落定时器」窗口里死亡导致的截止丢失。
+  未注入审批桥或未启用 durable 装配时，`approve` 节点 fail-closed（实例 `Failed` +
+  `workflow.faulted`），**不**静默降级为无审批继续。
+- **`NodeOutcome{Passed,Rejected}` 与实例终态 `ApprovalOutcome` 分离**：`NodeOutcome` 是
+  **分支/轮次级**的本轮结论，用于驱动 workflow 的 `onPass`/`onReject` 路由；`ApprovalOutcome`
+  （`Completed / Rejected / Cancelled / Terminated`）是**实例级**终态。命令路径与截止路径共享同一
+  映射（`apply_approval_node_outcome`）。实例 `Completed` 由工作流驱动收尾
+  （`finish_if_complete`）达成，命令路径无额外动作。
+- **resume-on-pass**：分支本轮 `Passed` ⇒ 清挂起并按节点 `onPass` 恢复（缺省顺序推进下一
+  任务）；实例级 `Rejected` 走同一映射（有 `onReject` 则路由，否则 fault `approval_rejected`）；
+  `Cancelled`/`Terminated` 分别以 `approval_cancelled`/`approval_terminated` 置 fault
+  （`Cancelled`/`Terminated` **不**按 `onReject` 路由）。
+- **`return_to_node` 重开目标节点**：目标席位取该节点**最近一次 attempt** 的席位逐字还原
+  （`kind`/`assignee`/`candidates`）；重开**不设 deadline**（旧的绝对截止早已过期，沿用会立即
+  过期），兜底出口是 `signAdmins` 的 `Terminate`/`AddSign`；目标节点无既有席位可复用 ⇒
+  **fail-closed**（拒绝，绝不留下「Open 但零席位」的不可恢复分支）。重开必须与开轮**同批**提交。
 
 ## 后果
 

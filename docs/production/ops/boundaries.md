@@ -1,6 +1,6 @@
 # 能力边界清单（Scope & non-goals）
 
-> Owner: maintainers ｜ Last verified: 2026-10-12
+> Owner: maintainers ｜ Last verified: 2026-10-15
 
 本清单逐条列出各能力**明确不承诺**的边界，与承诺同等重要（见
 `apis/contracts/WHITEPAPER.md`）。每条都带可核对的实现锚点；凡「不承诺」，
@@ -17,6 +17,12 @@
 | B-WF-2 | 子流程恢复扫描是**周期轮询**（5s）。稳态代价已从 O(全部实例) 降到 O(待恢复父子对)，但**仍是轮询**，且扫描任务本身**不受 supervisor 监督** | `coord-core/src/workflow/runtime.rs`（`SUBFLOW_SCAN_INTERVAL_SECS`、`pending_subflows`） | 事件驱动化 + 把扫描任务纳入监督并配 `coord_dead_background_tasks` |
 | B-WF-3 | 子流程恢复时**若父定义暂时读不到**，该父实例会停在 `Running` 且不再被扫描器接管 | `runtime.rs::resume_parent_after_subflow`（`return false` 分支） | 增加「已恢复但未驱动」的持久标记 + 启动期重扫 |
 | B-WF-4 | `MemoryWorkflowStore` **不是**生产存储（仅在无 KV 的测试/单机路径使用）；生产用 `KvWorkflowStore` | `coord-agent/src/services/workflow_store.rs:32-46` | 无需（这是设计），但接入方必须知道 |
+| B-WF-5 | v2 审批 **deadline 到期无自动处置**：到期只把席位置 `Expired` 并从计票分母剔除，既不自动通过也不自动驳回；全员过期或被减签的轮次保持 `Open`，实例不因超时收口。处置由人（`AddSign` 补席 / `Terminate` 终止）决定 | `coord-core/src/workflow/approval/bridge.rs`（`expire_due`）、`coord-core/src/workflow/approval/engine.rs`（`expire` / `recount` 的 `total==0` 分支）、`coord-core/src/workflow/runtime.rs`（`fire_timer` 的 `ApprovalDeadline` 臂）；判据：`expire_due_marks_expired_without_pass`、`deadline_timer_expires_seat_and_keeps_workflow_suspended` | 若要自动处置（自动通过/驳回/改派）：先定超时策略语义（弃权是否计入分母、是否改派）再接线，不得把无期限当默认 |
+| B-WF-6 | `ListPendingTasks` 是**全 v4 实例前缀扫描** + 实例 id 分页，**没有**按 actor/年龄/状态的索引：待办查询代价随实例总量线性增长 | `coord-agent/src/services/workflow.rs`（`list_pending_tasks`）、`coord-core/src/workflow/approval/store.rs`（`scan` / `clamp_scan_limit`）、`coord-core/src/workflow/approval/keys.rs`（`instance_prefix`）；判据：`list_pending_tasks_paginates_and_filters_actor` | 若要常数级待办查询：增加持久化待办索引（按 actor/到期）并随状态写同事务维护 |
+| B-WF-7 | `MemoryApprovalStore` **不是**生产审批存储（仅在测试/无 KV 路径使用）；生产走 `coord-agent` 的 `KvApprovalStore` | `coord-core/src/workflow/approval/store.rs`（`MemoryApprovalStore`）、`coord-agent/src/services/approval_store.rs`（`KvApprovalStore`） | 无需（这是设计）；接入方必须知道内存实现无跨进程/重启持久语义 |
+| B-WF-8 | 审批面**只有 gRPC**：无 UI 审批界面、无 REST facade（`coord-ui` 本期仅做影响评估）；Web 接入需自行实现 | `apis/contracts/proto/coord/workflow/v1/workflow.proto`（无 REST/HTTP 映射）；语义见 `docs/production/workflow-semantics.md` §7 | 若要 Web 接入：另立里程碑建 REST facade 与 UI 面（先定鉴权/能力映射与防重放口径） |
+| B-WF-9 | `ReturnToNode` 重开目标节点的席位**不设 deadline**（旧绝对截止早已过期，沿用会立即过期）；目标节点无既有席位可复用则 fail-closed（不留「Open 但零席位」死分支） | `coord-core/src/workflow/approval/bridge.rs`（`ApprovalCommand::ReturnToNode` + `prior_seats`）；判据：`return_to_node_reopens_seats_and_can_pass_again` | 若要重开自动提醒：为 reopen 引入新的相对 deadline 语义（与首次挂起区分）后再接线 |
+| B-WF-10 | 审批命令路径**不产生审批实例 `Faulted`**：只收口为 `Completed / Rejected / Cancelled / Terminated`；版本级故障（定义漂移）落在**工作流实例** `FAULTED`（`resume_approval` 写前 fail-closed），不从审批命令返回 `Faulted` | `coord-core/src/workflow/approval/bridge.rs`（`ApprovalOutcome` / `terminal_outcome`）、`coord-core/src/workflow/runtime.rs`（`resume_approval` 漂移守卫）；判据：`resume_approval_fails_closed_on_definition_drift` | 无需（这是口径）；「无审批实例 `Faulted`」不等于「命令不会失败」——命令仍可返回 `ABORTED`/`PERMISSION_DENIED`/`FAILED_PRECONDITION` |
 
 ## 2. 存储 / Raft
 

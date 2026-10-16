@@ -61,6 +61,7 @@ fn summarize_task(t: &Task) -> Value {
             }
         }),
         Task::End(_) => json!({"kind": "end"}),
+        Task::Approve(_) => json!({"kind": "approve"}),
     }
 }
 

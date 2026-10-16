@@ -1428,6 +1428,7 @@ impl AgentServer {
                             topic: self.config.services.workflow_events_topic.clone(),
                             relay_enabled: true,
                             relay_interval_ms: 1000,
+                            approval_roles: self.config.services.workflow_approval_roles.clone(),
                         },
                     ),
                 )

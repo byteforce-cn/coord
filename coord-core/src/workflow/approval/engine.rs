@@ -109,6 +109,11 @@ impl Engine {
     // -------------------------------------------------------------- 流程
 
     /// 进入节点（分支）。线性原型：同一时刻只允许一个 Open 分支。
+    ///
+    /// `policy` 由驱动层从 `approve` 节点降级注入，随分支持久化供授权判定读取。
+    ///
+    /// 参数面由调用契约钉死（节点 / 父分支 / 判定策略 / 时钟逐项注入）。
+    #[allow(clippy::too_many_arguments)]
     pub fn enter_branch(
         &mut self,
         expected: u64,
@@ -116,6 +121,7 @@ impl Engine {
         parent: Option<Id>,
         join: JoinPolicy,
         reject: RejectPolicy,
+        policy: ApprovalPolicy,
         now: i64,
     ) -> Result<(Id, Vec<Effect>), ApprovalError> {
         self.guard(expected)?;
@@ -136,7 +142,7 @@ impl Engine {
                 to: InstanceStatus::Running,
             });
         }
-        let id = self.create_branch(node, parent, join, reject, now, &mut out);
+        let id = self.create_branch(node, parent, join, reject, policy, now, &mut out);
         let attempt = self.branches[&id].attempt;
         self.instance.audit.push(AuditEntry {
             at: now,
@@ -259,7 +265,8 @@ impl Engine {
         Ok((ids, out))
     }
 
-    /// 减签：取消当前 Open 轮次中的未决席位（已表态的席位不允许被减）。
+    /// 减签：取消当前 Open 轮次中的未决席位（已表态的席位跳过；重复目标 id 整批拒绝）；
+    /// 整批目标皆终态 ⇒ 零效果 `Ok(vec![])`（不写审计、不加 revision）。
     pub fn remove_sign(
         &mut self,
         expected: u64,
@@ -269,6 +276,12 @@ impl Engine {
         now: i64,
     ) -> Result<Vec<Effect>, ApprovalError> {
         self.guard(expected)?;
+        // 入口去重：重复目标 id 是对调用方的输入错误，须在任何变更前整批拒绝（零写入）。
+        let mut sorted: Vec<&str> = task_ids.iter().map(String::as_str).collect();
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|w| w[0] == w[1]) {
+            return Err(ApprovalError::InvalidArgument("task_ids".into()));
+        }
         let branch = self
             .branches
             .get(branch_id)
@@ -289,7 +302,7 @@ impl Engine {
                 ApprovalError::InvalidTransition("no open round to remove seats".into())
             })?;
         let mut out = Vec::new();
-        // 先校验全部目标：任一目标非法即整批零写入（命令错误不改状态）。
+        // 先校验全部目标：任一目标不存在或不属于本轮即整批零写入（命令错误不改状态）。
         for tid in task_ids {
             let t = self
                 .tasks
@@ -301,31 +314,38 @@ impl Engine {
                     t.id
                 )));
             }
-            if !t.status.is_open() {
-                return Err(ApprovalError::InvalidTransition(format!(
-                    "task {} already decided",
-                    t.id
-                )));
-            }
         }
-        // 校验全部通过后才开始变更，保证错误路径对先前目标也零副作用。
+        // 已终态目标无席位可减：整批皆终态时零效果返回，状态不变。
+        if !task_ids.is_empty()
+            && !task_ids.iter().any(|tid| {
+                self.tasks
+                    .get(tid)
+                    .map(|t| t.status.is_open())
+                    .unwrap_or(false)
+            })
+        {
+            return Ok(Vec::new());
+        }
+        // 校验全部通过后才开始变更，保证错误路径对先前目标也零副作用；已终态目标跳过，
+        // 不发出 `Cancelled→Cancelled` 冗余效果。
+        let mut cancelled = 0u32;
         for tid in task_ids {
-            let from = self
-                .tasks
-                .get(tid)
-                .ok_or_else(|| ApprovalError::NotFound(tid.clone()))?
-                .status;
-            let t = self
-                .tasks
-                .get_mut(tid)
-                .ok_or_else(|| ApprovalError::NotFound(tid.clone()))?;
-            t.status = TaskStatus::Cancelled;
-            t.updated_at = now;
-            out.push(Effect::TaskStatus {
-                id: tid.clone(),
-                from,
-                to: TaskStatus::Cancelled,
-            });
+            let Some(from) = self.tasks.get(tid).map(|t| t.status) else {
+                continue;
+            };
+            if !from.is_open() {
+                continue;
+            }
+            if let Some(t) = self.tasks.get_mut(tid) {
+                t.status = TaskStatus::Cancelled;
+                t.updated_at = now;
+                cancelled += 1;
+                out.push(Effect::TaskStatus {
+                    id: tid.clone(),
+                    from,
+                    to: TaskStatus::Cancelled,
+                });
+            }
         }
         self.recount(&rid, now, &mut out);
         self.instance.audit.push(AuditEntry {
@@ -333,7 +353,7 @@ impl Engine {
             action: "remove_sign".into(),
             branch: Some(branch.id.clone()),
             by: by.into(),
-            detail: format!("seats={}", task_ids.len()),
+            detail: format!("seats={cancelled}"),
         });
         self.touch(now);
         Ok(out)
@@ -630,10 +650,14 @@ impl Engine {
             .filter(|b| b.node == target_node)
             .max_by_key(|b| b.attempt)
             .cloned();
-        let (join, reject) = target_latest
+        let (join, reject, policy) = target_latest
             .as_ref()
-            .map(|b| (b.join, b.reject))
-            .unwrap_or((JoinPolicy::All, RejectPolicy::AnyReject));
+            .map(|b| (b.join, b.reject, b.policy.clone()))
+            .unwrap_or((
+                JoinPolicy::All,
+                RejectPolicy::AnyReject,
+                ApprovalPolicy::default(),
+            ));
         if let Some(tb) = &target_latest {
             self.set_branch_status(&tb.id, BranchStatus::Superseded, now, &mut out);
         }
@@ -644,6 +668,7 @@ impl Engine {
                 .and_then(|b| b.parent_branch_id.clone()),
             join,
             reject,
+            policy,
             now,
             &mut out,
         );
@@ -665,7 +690,7 @@ impl Engine {
         let jump_count = self.instance.jump_count;
         self.emit(
             &mut out,
-            "com.china-workflow.instance.returned",
+            "com.china-workflow.instance.returned.v1",
             json!({
                 "instance_id": self.instance.id,
                 "from_node": branch.node,
@@ -707,7 +732,7 @@ impl Engine {
         });
         self.emit(
             &mut out,
-            "com.china-workflow.instance.cancelled",
+            "com.china-workflow.instance.cancelled.v1",
             json!({"instance_id": self.instance.id}),
         );
         self.touch(now);
@@ -743,7 +768,7 @@ impl Engine {
         });
         self.emit(
             &mut out,
-            "com.china-workflow.instance.terminated",
+            "com.china-workflow.instance.terminated.v1",
             json!({"instance_id": self.instance.id, "reason": reason}),
         );
         self.touch(now);
@@ -788,9 +813,9 @@ impl Engine {
             to: next,
         }];
         let name = match next {
-            InstanceStatus::Completed => "com.china-workflow.instance.completed",
-            InstanceStatus::Rejected => "com.china-workflow.instance.rejected",
-            _ => "com.china-workflow.instance.status_changed",
+            InstanceStatus::Completed => "com.china-workflow.instance.completed.v1",
+            InstanceStatus::Rejected => "com.china-workflow.instance.rejected.v1",
+            _ => "com.china-workflow.instance.status_changed.v1",
         };
         let id = self.instance.id.clone();
         self.emit(&mut out, name, json!({ "instance_id": id }));
@@ -929,12 +954,14 @@ impl Engine {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_branch(
         &mut self,
         node: &str,
         parent: Option<Id>,
         join: JoinPolicy,
         reject: RejectPolicy,
+        policy: ApprovalPolicy,
         now: i64,
         out: &mut Vec<Effect>,
     ) -> Id {
@@ -952,6 +979,7 @@ impl Engine {
                 status: BranchStatus::Open,
                 join,
                 reject,
+                policy,
                 scope: Scope::new(),
                 round_ids: Vec::new(),
                 created_at: now,
@@ -1154,9 +1182,13 @@ impl Engine {
         let mut verdict: Option<RoundStatus> = None;
         if branch.reject == RejectPolicy::AnyReject && rejected > 0 {
             verdict = Some(RoundStatus::Rejected);
-        } else if total == 0 || completed >= total {
+        } else if approvals.is_empty() {
+            // 从未创建可计票席位的轮次（如仅有阅签席）立即通过。反之 `total == 0`（全员过期
+            // 或被减签）绝不自动通过——超时与减签耗尽保持 `Open`，处置由人决定（Q4 无自动判定）。
             verdict = Some(RoundStatus::Passed);
-        } else {
+        } else if total > 0 && completed >= total {
+            verdict = Some(RoundStatus::Passed);
+        } else if total > 0 {
             let pass = match branch.join {
                 JoinPolicy::All => false,
                 JoinPolicy::Any => completed >= 1,
@@ -1192,7 +1224,7 @@ impl Engine {
                     "completed": completed,
                     "rejected": rejected,
                 });
-                self.emit(out, "com.china-workflow.approval.round.passed", data);
+                self.emit(out, "com.china-workflow.approval.round.passed.v1", data);
             }
             Some(RoundStatus::Rejected) => {
                 r.status = RoundStatus::Rejected;
@@ -1213,7 +1245,7 @@ impl Engine {
                     "completed": completed,
                     "rejected": rejected,
                 });
-                self.emit(out, "com.china-workflow.approval.round.rejected", data);
+                self.emit(out, "com.china-workflow.approval.round.rejected.v1", data);
             }
             _ => {
                 self.rounds.insert(r.id.clone(), r);
@@ -1249,7 +1281,7 @@ impl Engine {
                 let id = self.instance.id.clone();
                 self.emit(
                     out,
-                    "com.china-workflow.instance.rejected",
+                    "com.china-workflow.instance.rejected.v1",
                     json!({ "instance_id": id }),
                 );
             }
@@ -1303,13 +1335,12 @@ impl Engine {
         }
     }
 
+    /// 取消一轮的全部未决席位：审批席与阅签席一并收口，轮次关闭后不残留 open 席位。
     fn cancel_pending_tasks(&mut self, round_id: &str, now: i64, out: &mut Vec<Effect>) {
         let ids: Vec<Id> = self
             .tasks
             .values()
-            .filter(|t| {
-                t.round_id == round_id && t.kind == TaskKind::Approval && t.status.is_open()
-            })
+            .filter(|t| t.round_id == round_id && t.status.is_open())
             .map(|t| t.id.clone())
             .collect();
         self.cancel_tasks(&ids, now, out);

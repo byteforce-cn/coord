@@ -213,6 +213,19 @@ pub fn rpc_capability(rpc_method: &str) -> Option<&'static str> {
         // 保留策略（G-WF-1）：定义删除 = 定义管理面；实例删除 = 执行面。
         "/coord.workflow.v1.Workflow/DeleteDefinition" => Some("coord:workflow:define"),
         "/coord.workflow.v1.Workflow/DeleteInstance" => Some("coord:workflow:execute"),
+        // 人工审批 v2（ADR-0013 D7）：命令 = 执行面，查询 = 读面。
+        "/coord.workflow.v1.Workflow/Approve" => Some("coord:workflow:execute"),
+        "/coord.workflow.v1.Workflow/Reject" => Some("coord:workflow:execute"),
+        "/coord.workflow.v1.Workflow/Acknowledge" => Some("coord:workflow:execute"),
+        "/coord.workflow.v1.Workflow/AddSign" => Some("coord:workflow:execute"),
+        "/coord.workflow.v1.Workflow/RemoveSign" => Some("coord:workflow:execute"),
+        "/coord.workflow.v1.Workflow/ReturnToNode" => Some("coord:workflow:execute"),
+        "/coord.workflow.v1.Workflow/Transfer" => Some("coord:workflow:execute"),
+        "/coord.workflow.v1.Workflow/Delegate" => Some("coord:workflow:execute"),
+        "/coord.workflow.v1.Workflow/Withdraw" => Some("coord:workflow:execute"),
+        "/coord.workflow.v1.Workflow/Terminate" => Some("coord:workflow:execute"),
+        "/coord.workflow.v1.Workflow/ListPendingTasks" => Some("coord:workflow:read"),
+        "/coord.workflow.v1.Workflow/GetInstanceDetail" => Some("coord:workflow:read"),
 
         // Policy —— 策略/OPA
         "/coord.policy.v1.Policy/CheckPermission" => Some("coord:policy:evaluate"),
@@ -672,6 +685,43 @@ mod tests {
         ] {
             assert_eq!(rpc_capability(method), Some(cap), "missing entry: {method}");
         }
+    }
+
+    #[test]
+    fn workflow_v2_approval_rpcs_are_registered() {
+        // 审批 v2 命令面（写）：统一映射到执行能力（ADR-0013 D7）。
+        for method in [
+            "/coord.workflow.v1.Workflow/Approve",
+            "/coord.workflow.v1.Workflow/Reject",
+            "/coord.workflow.v1.Workflow/Acknowledge",
+            "/coord.workflow.v1.Workflow/AddSign",
+            "/coord.workflow.v1.Workflow/RemoveSign",
+            "/coord.workflow.v1.Workflow/ReturnToNode",
+            "/coord.workflow.v1.Workflow/Transfer",
+            "/coord.workflow.v1.Workflow/Delegate",
+            "/coord.workflow.v1.Workflow/Withdraw",
+            "/coord.workflow.v1.Workflow/Terminate",
+        ] {
+            assert_eq!(
+                rpc_capability(method),
+                Some("coord:workflow:execute"),
+                "missing entry: {method}"
+            );
+        }
+        // 审批 v2 查询面（读）。
+        for method in [
+            "/coord.workflow.v1.Workflow/ListPendingTasks",
+            "/coord.workflow.v1.Workflow/GetInstanceDetail",
+        ] {
+            assert_eq!(
+                rpc_capability(method),
+                Some("coord:workflow:read"),
+                "missing entry: {method}"
+            );
+        }
+        // fail-closed：路径必须与 proto 逐字一致，大小写写错即未知方法（None）。
+        assert_eq!(rpc_capability("/coord.workflow.v1.Workflow/approve"), None);
+        assert_eq!(rpc_capability("/coord.workflow.v1.workflow/Approve"), None);
     }
 
     #[test]

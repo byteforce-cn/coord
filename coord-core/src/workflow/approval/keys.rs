@@ -20,6 +20,24 @@ pub fn instance_prefix() -> &'static [u8] {
     APPROVAL_INSTANCE_PREFIX
 }
 
+/// 命令幂等记录键：`APPROVAL_IDEMPOTENCY_PREFIX + instance_id + "/" + key`。
+///
+/// 实例 id 是独立分段：扫描 `idem_prefix(inst-1)` 不会误收 `inst-10` 的记录。
+pub fn idem_key(instance_id: &str, key: &str) -> Vec<u8> {
+    format!("/_workflow/v4/idempotency/{instance_id}/{key}").into_bytes()
+}
+
+/// 幂等记录扫描前缀（[`idem_key`] 的实例段）。
+pub fn idem_prefix(instance_id: &str) -> Vec<u8> {
+    format!("/_workflow/v4/idempotency/{instance_id}/").into_bytes()
+}
+
+/// v2 审批幂等记录前缀。
+///
+/// 与实例前缀同属 v4 命名空间但**不同前缀**：实例扫描面只扫 [`instance_prefix`]，
+/// 幂等记录（可能含任意命令键）不会被当成实例。
+pub const APPROVAL_IDEMPOTENCY_PREFIX: &[u8] = b"/_workflow/v4/idempotency/";
+
 /// 前缀扫描的字典序上界：最后一个字节 +1（逐字节进位），全 0xFF 前缀返回空 Vec。
 ///
 /// 空 Vec 在 KV range 里表示「扫到无穷」——这正是全 0xFF 前缀没有有限上界的情形。
@@ -61,6 +79,23 @@ mod tests {
         let v1_key: &[u8] = b"/_workflow/v3/instances/x";
         assert!(v1_key < start);
         assert!(!(v1_key >= start && v1_key < end.as_slice()));
+    }
+
+    #[test]
+    fn approval_idempotency_key_layout() {
+        assert_eq!(
+            String::from_utf8_lossy(&idem_key("inst-1", "cmd-9")),
+            "/_workflow/v4/idempotency/inst-1/cmd-9"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&idem_prefix("inst-1")),
+            "/_workflow/v4/idempotency/inst-1/"
+        );
+        assert!(idem_key("inst-1", "cmd-9").starts_with(&idem_prefix("inst-1")));
+        // 实例扫描前缀不含幂等键：列表 RPC 不会撞上命令记录。
+        assert!(!idem_key("inst-1", "cmd-9").starts_with(instance_prefix()));
+        // 实例 id 是独立分段：`inst-1` 的前缀不吞 `inst-10` 的记录。
+        assert!(!idem_key("inst-10", "cmd-9").starts_with(&idem_prefix("inst-1")));
     }
 
     #[test]

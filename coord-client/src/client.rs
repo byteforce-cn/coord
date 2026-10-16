@@ -31,6 +31,18 @@ use coord_proto::txn::{
 use coord_proto::watch::{
     watch_client::WatchClient as WatchStub, WatchCreateRequest, WatchEvent, WatchRequest,
 };
+use coord_proto::workflow::v1::workflow_client::WorkflowClient as WorkflowStub;
+use coord_proto::workflow::v1::{
+    WorkflowAcknowledgeRequest, WorkflowAcknowledgeResponse, WorkflowAddSignRequest,
+    WorkflowAddSignResponse, WorkflowApproveRequest, WorkflowApproveResponse,
+    WorkflowDelegateRequest, WorkflowDelegateResponse, WorkflowGetInstanceDetailRequest,
+    WorkflowGetInstanceDetailResponse, WorkflowListPendingTasksRequest,
+    WorkflowListPendingTasksResponse, WorkflowRejectRequest, WorkflowRejectResponse,
+    WorkflowRemoveSignRequest, WorkflowRemoveSignResponse, WorkflowReturnToNodeRequest,
+    WorkflowReturnToNodeResponse, WorkflowTerminateRequest, WorkflowTerminateResponse,
+    WorkflowTransferRequest, WorkflowTransferResponse, WorkflowWithdrawRequest,
+    WorkflowWithdrawResponse,
+};
 
 use crate::config::Config;
 use crate::credential::AuthedChannel;
@@ -218,6 +230,11 @@ impl Client {
     /// 返回 Auth 客户端（认证 / refresh / 用户角色能力管理）
     pub fn auth(&self) -> crate::auth::AuthClient {
         crate::auth::AuthClient::new(self.clone())
+    }
+
+    /// 返回审批客户端（coord.workflow.v1 人工审批 v2）
+    pub fn approval(&self) -> ApprovalClient {
+        ApprovalClient::new(self.clone())
     }
 
     // ──── 内部方法 ────
@@ -1173,6 +1190,433 @@ impl MaintenanceClient {
     }
 }
 
+// ──── 工作流审批客户端（coord.workflow.v1 人工审批 v2） ────
+
+/// 人工审批 v2 客户端（ADR-0013 D7）。
+///
+/// 10 个命令（Approve/Reject/Acknowledge/AddSign/RemoveSign/ReturnToNode/
+/// Transfer/Delegate/Withdraw/Terminate）走 `execute_write_with_retry`：follower
+/// 按 `coord-leader-hint` 重定向，命令按 `idempotency_key` 服务端去重；2 个查询
+/// （ListPendingTasks/GetInstanceDetail）直取 leader 通道强一致读。
+///
+/// 主体身份取自认证上下文（CCT），请求体不携带 actor；`PERMISSION_DENIED`
+/// 表示 CCT 无 `coord:workflow:execute|read` 能力，不是重试目标。
+#[derive(Clone)]
+pub struct ApprovalClient {
+    client: Client,
+}
+
+impl ApprovalClient {
+    fn new(client: Client) -> Self {
+        Self { client }
+    }
+
+    /// 通过当前席位（同意）。返回实例 id 与大写实例状态。
+    pub async fn approve(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        comment: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowApproveResponse> {
+        let request = approve_request(workflow_id, task_id, comment, idempotency_key);
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.approve(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
+    /// 驳回当前席位（实例级否决，按节点 `onReject` 路由或 fault）。
+    pub async fn reject(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        comment: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowRejectResponse> {
+        let request = reject_request(workflow_id, task_id, comment, idempotency_key);
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.reject(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
+    /// 确认（响应）当前席位，不改变计票结果。
+    pub async fn acknowledge(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowAcknowledgeResponse> {
+        let request = acknowledge_request(workflow_id, task_id, idempotency_key);
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.acknowledge(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
+    /// 加签：向分支追加责任人 / 候选池 / 读者。
+    // 参数即 `WorkflowAddSignRequest` 的全部字段（与 Java SDK 同名同形），无聚合收益。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_sign(
+        &self,
+        workflow_id: &str,
+        branch_id: &str,
+        approvers: &[String],
+        pool: &[String],
+        readers: &[String],
+        comment: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowAddSignResponse> {
+        let request = add_sign_request(
+            workflow_id,
+            branch_id,
+            approvers,
+            pool,
+            readers,
+            comment,
+            idempotency_key,
+        );
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.add_sign(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
+    /// 减签：按席位 task id 撤销，并从计票分母剔除。
+    pub async fn remove_sign(
+        &self,
+        workflow_id: &str,
+        branch_id: &str,
+        task_ids: &[String],
+        comment: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowRemoveSignResponse> {
+        let request =
+            remove_sign_request(workflow_id, branch_id, task_ids, comment, idempotency_key);
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.remove_sign(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
+    /// 驳回至节点：重开 `target_node` 分支。
+    pub async fn return_to_node(
+        &self,
+        workflow_id: &str,
+        branch_id: &str,
+        target_node: &str,
+        comment: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowReturnToNodeResponse> {
+        let request = return_to_node_request(
+            workflow_id,
+            branch_id,
+            target_node,
+            comment,
+            idempotency_key,
+        );
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.return_to_node(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
+    /// 转办：把席位指派给 `to`（原责任人让位）。
+    pub async fn transfer(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        to: &str,
+        comment: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowTransferResponse> {
+        let request = transfer_request(workflow_id, task_id, to, comment, idempotency_key);
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.transfer(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
+    /// 委托：代办当前席位，保留原责任人的处置权。
+    pub async fn delegate(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        to: &str,
+        comment: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowDelegateResponse> {
+        let request = delegate_request(workflow_id, task_id, to, comment, idempotency_key);
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.delegate(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
+    /// 撤回：发起人撤销实例（走 `onReject` 或 fault）。
+    pub async fn withdraw(
+        &self,
+        workflow_id: &str,
+        comment: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowWithdrawResponse> {
+        let request = withdraw_request(workflow_id, comment, idempotency_key);
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.withdraw(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
+    /// 终止：`signAdmins` 关闭实例（流程收口，不可恢复）。
+    pub async fn terminate(
+        &self,
+        workflow_id: &str,
+        reason: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<WorkflowTerminateResponse> {
+        let request = terminate_request(workflow_id, reason, idempotency_key);
+        self.client
+            .execute_write_with_retry(move |channel| {
+                let mut stub = WorkflowStub::new(channel);
+                let request = request.clone();
+                async move { stub.terminate(request).await.map(|r| r.into_inner()) }
+            })
+            .await
+    }
+
+    /// 查询当前身份的待办审批席位（分页：`page_size` 0 服务端默认 50、上限 200）。
+    pub async fn list_pending_tasks(
+        &self,
+        page_size: i32,
+        page_token: &str,
+    ) -> Result<WorkflowListPendingTasksResponse> {
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub = WorkflowStub::new(channel.clone());
+        let request = list_pending_tasks_request(page_size, page_token);
+        match stub.list_pending_tasks(request).await {
+            Ok(resp) => {
+                self.client.return_channel(&endpoint, channel);
+                Ok(resp.into_inner())
+            }
+            Err(status) => Err(from_status(status)),
+        }
+    }
+
+    /// 查询实例审批详情（branches / tasks / rounds + `revision` CAS 守卫值）。
+    pub async fn get_instance_detail(
+        &self,
+        workflow_id: &str,
+    ) -> Result<WorkflowGetInstanceDetailResponse> {
+        let (endpoint, channel) = self.client.get_leader_channel().await?;
+        let mut stub = WorkflowStub::new(channel.clone());
+        let request = get_instance_detail_request(workflow_id);
+        match stub.get_instance_detail(request).await {
+            Ok(resp) => {
+                self.client.return_channel(&endpoint, channel);
+                Ok(resp.into_inner())
+            }
+            Err(status) => Err(from_status(status)),
+        }
+    }
+}
+
+// 请求构造与传输分离：字段映射（含 `Option` → proto3 空串归一）可脱网单测。
+
+/// proto3 字符串无 presence：`None`（未提供幂等键）与空串等价，服务端仅在非空时
+/// 按 key 去重（对齐 Java SDK `setOptional` 的 wire 语义）。
+fn optional_idempotency_key(key: Option<&str>) -> String {
+    key.unwrap_or_default().to_string()
+}
+
+fn approve_request(
+    workflow_id: &str,
+    task_id: &str,
+    comment: &str,
+    idempotency_key: Option<&str>,
+) -> WorkflowApproveRequest {
+    WorkflowApproveRequest {
+        workflow_id: workflow_id.to_string(),
+        task_id: task_id.to_string(),
+        comment: comment.to_string(),
+        idempotency_key: optional_idempotency_key(idempotency_key),
+    }
+}
+
+fn reject_request(
+    workflow_id: &str,
+    task_id: &str,
+    comment: &str,
+    idempotency_key: Option<&str>,
+) -> WorkflowRejectRequest {
+    WorkflowRejectRequest {
+        workflow_id: workflow_id.to_string(),
+        task_id: task_id.to_string(),
+        comment: comment.to_string(),
+        idempotency_key: optional_idempotency_key(idempotency_key),
+    }
+}
+
+fn acknowledge_request(
+    workflow_id: &str,
+    task_id: &str,
+    idempotency_key: Option<&str>,
+) -> WorkflowAcknowledgeRequest {
+    WorkflowAcknowledgeRequest {
+        workflow_id: workflow_id.to_string(),
+        task_id: task_id.to_string(),
+        idempotency_key: optional_idempotency_key(idempotency_key),
+    }
+}
+
+fn add_sign_request(
+    workflow_id: &str,
+    branch_id: &str,
+    approvers: &[String],
+    pool: &[String],
+    readers: &[String],
+    comment: &str,
+    idempotency_key: Option<&str>,
+) -> WorkflowAddSignRequest {
+    WorkflowAddSignRequest {
+        workflow_id: workflow_id.to_string(),
+        branch_id: branch_id.to_string(),
+        approvers: approvers.to_vec(),
+        pool: pool.to_vec(),
+        readers: readers.to_vec(),
+        comment: comment.to_string(),
+        idempotency_key: optional_idempotency_key(idempotency_key),
+    }
+}
+
+fn remove_sign_request(
+    workflow_id: &str,
+    branch_id: &str,
+    task_ids: &[String],
+    comment: &str,
+    idempotency_key: Option<&str>,
+) -> WorkflowRemoveSignRequest {
+    WorkflowRemoveSignRequest {
+        workflow_id: workflow_id.to_string(),
+        branch_id: branch_id.to_string(),
+        task_ids: task_ids.to_vec(),
+        comment: comment.to_string(),
+        idempotency_key: optional_idempotency_key(idempotency_key),
+    }
+}
+
+fn return_to_node_request(
+    workflow_id: &str,
+    branch_id: &str,
+    target_node: &str,
+    comment: &str,
+    idempotency_key: Option<&str>,
+) -> WorkflowReturnToNodeRequest {
+    WorkflowReturnToNodeRequest {
+        workflow_id: workflow_id.to_string(),
+        branch_id: branch_id.to_string(),
+        target_node: target_node.to_string(),
+        comment: comment.to_string(),
+        idempotency_key: optional_idempotency_key(idempotency_key),
+    }
+}
+
+fn transfer_request(
+    workflow_id: &str,
+    task_id: &str,
+    to: &str,
+    comment: &str,
+    idempotency_key: Option<&str>,
+) -> WorkflowTransferRequest {
+    WorkflowTransferRequest {
+        workflow_id: workflow_id.to_string(),
+        task_id: task_id.to_string(),
+        to: to.to_string(),
+        comment: comment.to_string(),
+        idempotency_key: optional_idempotency_key(idempotency_key),
+    }
+}
+
+fn delegate_request(
+    workflow_id: &str,
+    task_id: &str,
+    to: &str,
+    comment: &str,
+    idempotency_key: Option<&str>,
+) -> WorkflowDelegateRequest {
+    WorkflowDelegateRequest {
+        workflow_id: workflow_id.to_string(),
+        task_id: task_id.to_string(),
+        to: to.to_string(),
+        comment: comment.to_string(),
+        idempotency_key: optional_idempotency_key(idempotency_key),
+    }
+}
+
+fn withdraw_request(
+    workflow_id: &str,
+    comment: &str,
+    idempotency_key: Option<&str>,
+) -> WorkflowWithdrawRequest {
+    WorkflowWithdrawRequest {
+        workflow_id: workflow_id.to_string(),
+        comment: comment.to_string(),
+        idempotency_key: optional_idempotency_key(idempotency_key),
+    }
+}
+
+fn terminate_request(
+    workflow_id: &str,
+    reason: &str,
+    idempotency_key: Option<&str>,
+) -> WorkflowTerminateRequest {
+    WorkflowTerminateRequest {
+        workflow_id: workflow_id.to_string(),
+        reason: reason.to_string(),
+        idempotency_key: optional_idempotency_key(idempotency_key),
+    }
+}
+
+fn list_pending_tasks_request(page_size: i32, page_token: &str) -> WorkflowListPendingTasksRequest {
+    WorkflowListPendingTasksRequest {
+        page_size,
+        page_token: page_token.to_string(),
+    }
+}
+
+fn get_instance_detail_request(workflow_id: &str) -> WorkflowGetInstanceDetailRequest {
+    WorkflowGetInstanceDetailRequest {
+        workflow_id: workflow_id.to_string(),
+    }
+}
+
 // ──── 对象存储客户端（coord.storage 数据面） ────
 
 /// 默认 chunk 分片字节数（对齐服务端 `[object_storage].chunk_size_bytes` 默认
@@ -1958,5 +2402,76 @@ mod tests {
             !forward_watch_event(&tx, dummy_event(), &mut overflow).await,
             "closed receiver must stop forwarding"
         );
+    }
+
+    // ──── 人工审批 v2 包装（请求构造）────
+
+    #[test]
+    fn test_approval_client_is_clone() {
+        fn assert_clone<T: Clone>() {}
+        assert_clone::<ApprovalClient>();
+    }
+
+    #[test]
+    fn test_approve_request_maps_fields_and_defaults_key() {
+        let req = approve_request("wf-1", "task-1", "ok", None);
+        assert_eq!(req.workflow_id, "wf-1");
+        assert_eq!(req.task_id, "task-1");
+        assert_eq!(req.comment, "ok");
+        assert_eq!(req.idempotency_key, "");
+    }
+
+    #[test]
+    fn test_approve_request_preserves_idempotency_key() {
+        let req = approve_request("wf-1", "task-1", "", Some("idem-7"));
+        assert_eq!(req.idempotency_key, "idem-7");
+        assert_eq!(req.comment, "");
+    }
+
+    #[test]
+    fn test_add_sign_request_copies_seat_lists() {
+        let approvers = vec!["alice".to_string()];
+        let pool = vec!["pool-a".to_string()];
+        let readers = vec!["bob".to_string()];
+        let req = add_sign_request("wf-1", "br-1", &approvers, &pool, &readers, "加签", None);
+        assert_eq!(req.workflow_id, "wf-1");
+        assert_eq!(req.branch_id, "br-1");
+        assert_eq!(req.approvers, approvers);
+        assert_eq!(req.pool, pool);
+        assert_eq!(req.readers, readers);
+        assert_eq!(req.comment, "加签");
+        assert_eq!(req.idempotency_key, "");
+    }
+
+    #[test]
+    fn test_remove_sign_request_copies_task_ids() {
+        let task_ids = vec!["t-1".to_string(), "t-2".to_string()];
+        let req = remove_sign_request("wf-1", "br-1", &task_ids, "减签", Some("k2"));
+        assert_eq!(req.task_ids, task_ids);
+        assert_eq!(req.comment, "减签");
+        assert_eq!(req.idempotency_key, "k2");
+    }
+
+    #[test]
+    fn test_terminate_and_withdraw_requests() {
+        let term = terminate_request("wf-1", "失联", None);
+        assert_eq!(term.workflow_id, "wf-1");
+        assert_eq!(term.reason, "失联");
+        assert_eq!(term.idempotency_key, "");
+
+        let wd = withdraw_request("wf-1", "撤回", Some("k3"));
+        assert_eq!(wd.workflow_id, "wf-1");
+        assert_eq!(wd.comment, "撤回");
+        assert_eq!(wd.idempotency_key, "k3");
+    }
+
+    #[test]
+    fn test_pending_and_detail_requests() {
+        let list = list_pending_tasks_request(50, "token");
+        assert_eq!(list.page_size, 50);
+        assert_eq!(list.page_token, "token");
+
+        let detail = get_instance_detail_request("wf-1");
+        assert_eq!(detail.workflow_id, "wf-1");
     }
 }

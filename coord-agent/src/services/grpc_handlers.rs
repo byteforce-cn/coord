@@ -89,6 +89,25 @@ use coord_proto::agent::{
     WorkflowSignalResponse, WorkflowStartRequest, WorkflowStartResponse,
 };
 
+// 审批 v2（ADR-0013 D7）请求/响应类型。
+use coord_proto::agent::{
+    ApprovalBranch, ApprovalRound, ApprovalTask, PendingApprovalTask, WorkflowAcknowledgeRequest,
+    WorkflowAcknowledgeResponse, WorkflowAddSignRequest, WorkflowAddSignResponse,
+    WorkflowApproveRequest, WorkflowApproveResponse, WorkflowDelegateRequest,
+    WorkflowDelegateResponse, WorkflowGetInstanceDetailRequest, WorkflowGetInstanceDetailResponse,
+    WorkflowListPendingTasksRequest, WorkflowListPendingTasksResponse, WorkflowRejectRequest,
+    WorkflowRejectResponse, WorkflowRemoveSignRequest, WorkflowRemoveSignResponse,
+    WorkflowReturnToNodeRequest, WorkflowReturnToNodeResponse, WorkflowTerminateRequest,
+    WorkflowTerminateResponse, WorkflowTransferRequest, WorkflowTransferResponse,
+    WorkflowWithdrawRequest, WorkflowWithdrawResponse,
+};
+
+use coord_core::workflow::approval::bridge::{ApprovalCommand, BridgeError, SYSTEM_ACTOR};
+use coord_core::workflow::approval::model::{JoinPolicy, SeatSpec};
+
+use crate::plugin::GatewayIdentity;
+use crate::services::workflow::phase4::json_label;
+
 use tonic::{Request, Response, Status};
 /// 内部错误脱敏（与 coord-server 同口径）：详情只进 agent 日志，
 /// gRPC 客户端仅收到通用 `internal error`，不泄露存储/引擎内部细节。
@@ -1870,6 +1889,114 @@ impl Workflow for WorkflowService {
             "workflow instance deletion is provided by WorkflowEngineService (phase4); legacy WorkflowService is deprecated",
         ))
     }
+
+    async fn approve(
+        &self,
+        _request: Request<WorkflowApproveRequest>,
+    ) -> Result<Response<WorkflowApproveResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn reject(
+        &self,
+        _request: Request<WorkflowRejectRequest>,
+    ) -> Result<Response<WorkflowRejectResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn acknowledge(
+        &self,
+        _request: Request<WorkflowAcknowledgeRequest>,
+    ) -> Result<Response<WorkflowAcknowledgeResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn add_sign(
+        &self,
+        _request: Request<WorkflowAddSignRequest>,
+    ) -> Result<Response<WorkflowAddSignResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn remove_sign(
+        &self,
+        _request: Request<WorkflowRemoveSignRequest>,
+    ) -> Result<Response<WorkflowRemoveSignResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn return_to_node(
+        &self,
+        _request: Request<WorkflowReturnToNodeRequest>,
+    ) -> Result<Response<WorkflowReturnToNodeResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn transfer(
+        &self,
+        _request: Request<WorkflowTransferRequest>,
+    ) -> Result<Response<WorkflowTransferResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn delegate(
+        &self,
+        _request: Request<WorkflowDelegateRequest>,
+    ) -> Result<Response<WorkflowDelegateResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn withdraw(
+        &self,
+        _request: Request<WorkflowWithdrawRequest>,
+    ) -> Result<Response<WorkflowWithdrawResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn terminate(
+        &self,
+        _request: Request<WorkflowTerminateRequest>,
+    ) -> Result<Response<WorkflowTerminateResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn list_pending_tasks(
+        &self,
+        _request: Request<WorkflowListPendingTasksRequest>,
+    ) -> Result<Response<WorkflowListPendingTasksResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
+
+    async fn get_instance_detail(
+        &self,
+        _request: Request<WorkflowGetInstanceDetailRequest>,
+    ) -> Result<Response<WorkflowGetInstanceDetailResponse>, Status> {
+        Err(Status::unimplemented(
+            "workflow approval v2 is provided by WorkflowEngineService",
+        ))
+    }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1897,12 +2024,67 @@ fn map_engine_error(e: WorkflowEngineError) -> Status {
     }
 }
 
+// 审批桥错误 typed 映射（ADR-0013 D7）：语义错误保留细节，存储/序列化脱敏，
+// 并发冲突以 ABORTED 提示调用方可安全重试。
+fn map_approval_error(e: BridgeError) -> Status {
+    match e {
+        BridgeError::NotFound(msg) => Status::not_found(msg),
+        BridgeError::NotAuthorized(msg) => Status::permission_denied(msg),
+        BridgeError::InvalidTransition(msg) => Status::failed_precondition(msg),
+        BridgeError::InvalidArgument(msg) => Status::invalid_argument(msg),
+        BridgeError::Stale(msg) => Status::aborted(msg),
+        BridgeError::Store(msg) => sanitized_internal(msg),
+        BridgeError::Serialization(msg) => sanitized_internal(msg),
+    }
+}
+
+/// 从请求扩展取认证身份（由鉴权中间件写入；缺失/鉴权关 = 空身份）。
+fn gateway_identity<T>(request: &Request<T>) -> GatewayIdentity {
+    request
+        .extensions()
+        .get::<GatewayIdentity>()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// 审批操作主体：CCT 主体；未认证（空主体）= `anonymous`（与审批引擎的未知名口径一致）。
+fn approval_actor(identity: &GatewayIdentity) -> String {
+    if identity.subject.is_empty() {
+        "anonymous".to_string()
+    } else {
+        identity.subject.clone()
+    }
+}
+
+/// 空字符串 ⇒ `None`（proto3 无可选标量，空串与缺省同义）。
+fn non_empty(value: &str) -> Option<&str> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// 分支通过判定策略的 wire 标签。
+///
+/// 定额/票签是**参数化**策略：serde 形状是对象（`{"quorum":2}`），不能经 `json_label`
+/// 的 `as_str()` 投影，否则 `mode: quorum:N` / `ratio:N/M` 的详情静默报空策略。
+fn join_label(join: &JoinPolicy) -> String {
+    match join {
+        JoinPolicy::All => "all".to_string(),
+        JoinPolicy::Any => "any".to_string(),
+        JoinPolicy::Quorum(n) => format!("quorum:{n}"),
+        JoinPolicy::Ratio { num, den } => format!("ratio:{num}/{den}"),
+    }
+}
+
 #[tonic::async_trait]
 impl Workflow for WorkflowEngineService {
     async fn start(
         &self,
         request: Request<WorkflowStartRequest>,
     ) -> Result<Response<WorkflowStartResponse>, Status> {
+        let identity = gateway_identity(&request);
         let req = request.into_inner();
 
         // definition_id 与 definition_dsl 互斥（startByDefinition 真契约）
@@ -1928,8 +2110,10 @@ impl Workflow for WorkflowEngineService {
                 .map_err(map_deploy_error)?
         };
 
+        // 发起人取自 CCT（空主体 ⇒ None），注入实例供审批自审判定。
+        let initiator = non_empty(&identity.subject);
         let inst = self
-            .start_instance(&def_id, input)
+            .start_instance_as(&def_id, input, initiator)
             .await
             .map_err(map_engine_error)?;
 
@@ -2264,6 +2448,388 @@ impl Workflow for WorkflowEngineService {
             .await
             .map_err(map_engine_error)?;
         Ok(Response::new(WorkflowDeleteInstanceResponse {}))
+    }
+
+    async fn approve(
+        &self,
+        request: Request<WorkflowApproveRequest>,
+    ) -> Result<Response<WorkflowApproveResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let req = request.into_inner();
+        let (instance_id, status) = self
+            .approval_command(
+                &req.workflow_id,
+                &approval_actor(&identity),
+                ApprovalCommand::Approve {
+                    task_id: &req.task_id,
+                    comment: non_empty(&req.comment),
+                },
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowApproveResponse {
+            instance_id,
+            status,
+        }))
+    }
+
+    async fn reject(
+        &self,
+        request: Request<WorkflowRejectRequest>,
+    ) -> Result<Response<WorkflowRejectResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let req = request.into_inner();
+        let (instance_id, status) = self
+            .approval_command(
+                &req.workflow_id,
+                &approval_actor(&identity),
+                ApprovalCommand::Reject {
+                    task_id: &req.task_id,
+                    comment: non_empty(&req.comment),
+                },
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowRejectResponse {
+            instance_id,
+            status,
+        }))
+    }
+
+    async fn acknowledge(
+        &self,
+        request: Request<WorkflowAcknowledgeRequest>,
+    ) -> Result<Response<WorkflowAcknowledgeResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let req = request.into_inner();
+        let (instance_id, status) = self
+            .approval_command(
+                &req.workflow_id,
+                &approval_actor(&identity),
+                ApprovalCommand::Acknowledge {
+                    task_id: &req.task_id,
+                },
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowAcknowledgeResponse {
+            instance_id,
+            status,
+        }))
+    }
+
+    async fn add_sign(
+        &self,
+        request: Request<WorkflowAddSignRequest>,
+    ) -> Result<Response<WorkflowAddSignResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let req = request.into_inner();
+        // 空批次语义未定义：无席位不得静默当成 no-op，先于命令拒绝。
+        if req.approvers.is_empty() && req.pool.is_empty() && req.readers.is_empty() {
+            return Err(Status::invalid_argument(
+                "add_sign requires at least one of approvers/pool/readers",
+            ));
+        }
+        // 空主体拒绝：空字符串会被引擎原样落成永不可投票的空席位（`assignee = Some("")`）。
+        if req
+            .approvers
+            .iter()
+            .chain(req.pool.iter())
+            .chain(req.readers.iter())
+            .any(|principal| principal.is_empty())
+        {
+            return Err(Status::invalid_argument(
+                "add_sign principals must be non-empty",
+            ));
+        }
+        let mut seats: Vec<SeatSpec> = req
+            .approvers
+            .iter()
+            .map(|a| SeatSpec::approver(a))
+            .collect();
+        if !req.pool.is_empty() {
+            seats.push(SeatSpec::pool(req.pool.clone()));
+        }
+        seats.extend(req.readers.iter().map(|r| SeatSpec::reader(r)));
+        let (instance_id, status) = self
+            .approval_command(
+                &req.workflow_id,
+                &approval_actor(&identity),
+                ApprovalCommand::AddSign {
+                    branch_id: &req.branch_id,
+                    seats,
+                    comment: non_empty(&req.comment),
+                },
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowAddSignResponse {
+            instance_id,
+            status,
+        }))
+    }
+
+    async fn remove_sign(
+        &self,
+        request: Request<WorkflowRemoveSignRequest>,
+    ) -> Result<Response<WorkflowRemoveSignResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let req = request.into_inner();
+        // 空批次语义未定义：无目标不得静默当成 no-op，先于命令拒绝。
+        if req.task_ids.is_empty() {
+            return Err(Status::invalid_argument(
+                "remove_sign requires at least one task_id",
+            ));
+        }
+        let (instance_id, status) = self
+            .approval_command(
+                &req.workflow_id,
+                &approval_actor(&identity),
+                ApprovalCommand::RemoveSign {
+                    task_ids: req.task_ids.clone(),
+                },
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowRemoveSignResponse {
+            instance_id,
+            status,
+        }))
+    }
+
+    async fn return_to_node(
+        &self,
+        request: Request<WorkflowReturnToNodeRequest>,
+    ) -> Result<Response<WorkflowReturnToNodeResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let req = request.into_inner();
+        let (instance_id, status) = self
+            .approval_command(
+                &req.workflow_id,
+                &approval_actor(&identity),
+                ApprovalCommand::ReturnToNode {
+                    branch_id: &req.branch_id,
+                    target_node: &req.target_node,
+                    comment: non_empty(&req.comment),
+                },
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowReturnToNodeResponse {
+            instance_id,
+            status,
+        }))
+    }
+
+    async fn transfer(
+        &self,
+        request: Request<WorkflowTransferRequest>,
+    ) -> Result<Response<WorkflowTransferResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let req = request.into_inner();
+        // 空主体拒绝：空 `to` 会落成不可投票的责任人并写进 `transferred_from` 审计链。
+        if req.to.is_empty() {
+            return Err(Status::invalid_argument(
+                "transfer target must be non-empty",
+            ));
+        }
+        let (instance_id, status) = self
+            .approval_command(
+                &req.workflow_id,
+                &approval_actor(&identity),
+                ApprovalCommand::Transfer {
+                    task_id: &req.task_id,
+                    to: &req.to,
+                },
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowTransferResponse {
+            instance_id,
+            status,
+        }))
+    }
+
+    async fn delegate(
+        &self,
+        request: Request<WorkflowDelegateRequest>,
+    ) -> Result<Response<WorkflowDelegateResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let req = request.into_inner();
+        // 空主体拒绝：空 `to` 会落成不可投票的委派人。
+        if req.to.is_empty() {
+            return Err(Status::invalid_argument(
+                "delegate target must be non-empty",
+            ));
+        }
+        let (instance_id, status) = self
+            .approval_command(
+                &req.workflow_id,
+                &approval_actor(&identity),
+                ApprovalCommand::Delegate {
+                    task_id: &req.task_id,
+                    to: &req.to,
+                },
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowDelegateResponse {
+            instance_id,
+            status,
+        }))
+    }
+
+    async fn withdraw(
+        &self,
+        request: Request<WorkflowWithdrawRequest>,
+    ) -> Result<Response<WorkflowWithdrawResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let req = request.into_inner();
+        let (instance_id, status) = self
+            .approval_command(
+                &req.workflow_id,
+                &approval_actor(&identity),
+                ApprovalCommand::Withdraw,
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowWithdrawResponse {
+            instance_id,
+            status,
+        }))
+    }
+
+    async fn terminate(
+        &self,
+        request: Request<WorkflowTerminateRequest>,
+    ) -> Result<Response<WorkflowTerminateResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let actor = approval_actor(&identity);
+        // 保留内部生命周期权威 actor 不得从 wire 冒充：`system` 恒可终止审批实例
+        // （`guard_terminate`），仅供 `WorkflowRuntime::cancel_instance` 经桥直调；
+        // 放行的话，任何请求只要 `subject="system"`（或鉴权关闭下伪造）就能绕过
+        // `signAdmins`。授权错误按契约返回 PERMISSION_DENIED。
+        if actor == SYSTEM_ACTOR {
+            return Err(Status::permission_denied(
+                "reserved internal actor 'system' cannot be used on the wire",
+            ));
+        }
+        let req = request.into_inner();
+        let (instance_id, status) = self
+            .approval_command(
+                &req.workflow_id,
+                &actor,
+                ApprovalCommand::Terminate {
+                    reason: &req.reason,
+                },
+                non_empty(&req.idempotency_key),
+            )
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowTerminateResponse {
+            instance_id,
+            status,
+        }))
+    }
+
+    async fn list_pending_tasks(
+        &self,
+        request: Request<WorkflowListPendingTasksRequest>,
+    ) -> Result<Response<WorkflowListPendingTasksResponse>, Status> {
+        let identity = gateway_identity(&request);
+        let req = request.into_inner();
+        // `page_size <= 0` ⇒ 服务层按 DEFAULT_LIST_PAGE_SIZE 处理。
+        let page_size = req.page_size.max(0) as usize;
+        let page_token = non_empty(&req.page_token);
+        let (tasks, next) = self
+            .list_pending_tasks(&approval_actor(&identity), page_size, page_token)
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowListPendingTasksResponse {
+            tasks: tasks
+                .into_iter()
+                .map(|t| PendingApprovalTask {
+                    instance_id: t.instance_id,
+                    task_id: t.task_id,
+                    node: t.node,
+                    branch_id: t.branch_id,
+                    round_id: t.round_id,
+                    kind: t.kind,
+                    status: t.status,
+                    assignee: t.assignee,
+                    deadline_ms: t.deadline_ms,
+                    created_at_ms: t.created_at_ms,
+                })
+                .collect(),
+            next_page_token: next.unwrap_or_default(),
+        }))
+    }
+
+    async fn get_instance_detail(
+        &self,
+        request: Request<WorkflowGetInstanceDetailRequest>,
+    ) -> Result<Response<WorkflowGetInstanceDetailResponse>, Status> {
+        let req = request.into_inner();
+        let detail = self
+            .get_instance_detail(&req.workflow_id)
+            .await
+            .map_err(map_approval_error)?;
+        Ok(Response::new(WorkflowGetInstanceDetailResponse {
+            instance_id: detail.instance_id,
+            status: detail.status,
+            initiator: detail.initiator,
+            revision: detail.revision as i64,
+            definition_name: detail.definition_name,
+            branches: detail
+                .branches
+                .iter()
+                .map(|b| ApprovalBranch {
+                    id: b.id.clone(),
+                    node: b.node.clone(),
+                    attempt: b.attempt as i32,
+                    status: json_label(&b.status),
+                    join: join_label(&b.join),
+                    reject: json_label(&b.reject),
+                    round_ids: b.round_ids.clone(),
+                })
+                .collect(),
+            tasks: detail
+                .tasks
+                .iter()
+                .map(|t| ApprovalTask {
+                    id: t.id.clone(),
+                    branch_id: t.branch_id.clone(),
+                    round_id: t.round_id.clone(),
+                    kind: json_label(&t.kind),
+                    status: json_label(&t.status),
+                    assignee: t.assignee.clone().unwrap_or_default(),
+                    candidates: t.candidates.clone(),
+                    deadline_ms: t.deadline.unwrap_or(0),
+                })
+                .collect(),
+            rounds: detail
+                .rounds
+                .iter()
+                .map(|r| ApprovalRound {
+                    id: r.id.clone(),
+                    branch_id: r.branch_id.clone(),
+                    number: r.number as i32,
+                    status: json_label(&r.status),
+                    total_count: r.total_count as i32,
+                    completed_count: r.completed_count as i32,
+                    rejected_count: r.rejected_count as i32,
+                })
+                .collect(),
+        }))
     }
 }
 
@@ -2767,6 +3333,10 @@ impl FeatureFlags for FeatureFlagService {
 mod tests {
     use super::*;
 
+    use coord_core::workflow::approval::bridge::{ApprovalBridge, MapApproverResolver};
+    use coord_core::workflow::approval::store::{ApprovalStore, MemoryApprovalStore};
+    use coord_core::workflow::ports::{Clock, SystemClock};
+
     // 两个 namespace、两个定义、每定义多实例的端到端夹具（issue #56）。
     const LIST_INSTANCES_NS_A_YAML: &str = r#"
 document:
@@ -3017,6 +3587,301 @@ do:
         let invalid = map_engine_error(WorkflowEngineError::InvalidArgument("bad input".into()));
         assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
         assert!(invalid.message().contains("bad input"));
+    }
+
+    /// 审批桥错误逐变体映射：语义错误保留细节，Store/Serialization 脱敏为 INTERNAL。
+    #[test]
+    fn map_approval_error_matrix() {
+        use coord_core::workflow::approval::bridge::BridgeError;
+
+        assert_eq!(
+            map_approval_error(BridgeError::NotFound("missing".into())).code(),
+            tonic::Code::NotFound
+        );
+        let not_authorized = map_approval_error(BridgeError::NotAuthorized("denied".into()));
+        assert_eq!(not_authorized.code(), tonic::Code::PermissionDenied);
+        assert!(not_authorized.message().contains("denied"));
+        assert_eq!(
+            map_approval_error(BridgeError::InvalidTransition("bad state".into())).code(),
+            tonic::Code::FailedPrecondition
+        );
+        assert_eq!(
+            map_approval_error(BridgeError::InvalidArgument("bad input".into())).code(),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(
+            map_approval_error(BridgeError::Stale("cas".into())).code(),
+            tonic::Code::Aborted
+        );
+
+        let store = map_approval_error(BridgeError::Store("sensitive store".into()));
+        assert_eq!(store.code(), tonic::Code::Internal);
+        assert_eq!(store.message(), "internal error");
+        assert!(!store.message().contains("sensitive"));
+        let ser = map_approval_error(BridgeError::Serialization("sensitive ser".into()));
+        assert_eq!(ser.code(), tonic::Code::Internal);
+        assert_eq!(ser.message(), "internal error");
+    }
+
+    fn approve_yaml(name: &str) -> String {
+        format!(
+            r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: {name}
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice"]
+"#
+        )
+    }
+
+    fn handler_approve_service() -> (WorkflowEngineService, Arc<MemoryApprovalStore>) {
+        let store = Arc::new(MemoryApprovalStore::new());
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let bridge = Arc::new(ApprovalBridge::new(
+            store.clone(),
+            clock,
+            Some(Arc::new(MapApproverResolver::new(
+                std::collections::HashMap::new(),
+            ))),
+        ));
+        (
+            WorkflowEngineService::new_for_test_with_approval(Some(bridge)),
+            store,
+        )
+    }
+
+    async fn await_seat(store: &MemoryApprovalStore, instance_id: &str, assignee: &str) -> String {
+        for _ in 0..500 {
+            if let Some((engine, _)) = store.load(instance_id).await.unwrap() {
+                if let Some(t) = engine
+                    .tasks
+                    .values()
+                    .find(|t| t.assignee.as_deref() == Some(assignee) && t.status.is_open())
+                {
+                    return t.id.clone();
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("approval seat for '{assignee}' never opened");
+    }
+
+    /// handler 层身份：actor 取自 `GatewayIdentity`（CCT subject），缺失扩展 ⇒ `anonymous`。
+    #[tokio::test]
+    async fn approval_handler_uses_gateway_identity_as_actor() {
+        // 带身份扩展：alice 是席位持有人 ⇒ 成功。
+        let (svc, store) = handler_approve_service();
+        let def_id = svc
+            .deploy_definition("test", &approve_yaml("identity-wf"))
+            .await
+            .unwrap();
+        let inst = svc
+            .start_instance_as(&def_id, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        let task_id = await_seat(&store, &inst.id, "alice").await;
+        let mut req = Request::new(WorkflowApproveRequest {
+            workflow_id: inst.id.clone(),
+            task_id,
+            comment: String::new(),
+            idempotency_key: String::new(),
+        });
+        req.extensions_mut().insert(GatewayIdentity {
+            subject: "alice".into(),
+            roles: vec![],
+        });
+        let resp = Workflow::approve(&svc, req).await.unwrap().into_inner();
+        assert_eq!(resp.instance_id, inst.id);
+
+        // 缺身份扩展：actor = "anonymous"（非席位）⇒ PERMISSION_DENIED。
+        let (svc2, store2) = handler_approve_service();
+        let def2 = svc2
+            .deploy_definition("test", &approve_yaml("identity-wf-2"))
+            .await
+            .unwrap();
+        let inst2 = svc2
+            .start_instance_as(&def2, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        let task2 = await_seat(&store2, &inst2.id, "alice").await;
+        let req2 = Request::new(WorkflowApproveRequest {
+            workflow_id: inst2.id.clone(),
+            task_id: task2,
+            comment: String::new(),
+            idempotency_key: String::new(),
+        });
+        let err = Workflow::approve(&svc2, req2).await.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::PermissionDenied,
+            "缺失身份 ⇒ anonymous actor 被拒（不得默认放行）"
+        );
+    }
+
+    /// 保留内部生命周期权威 actor 不得从 wire 冒充：`subject="system"` ⇒ PERMISSION_DENIED。
+    /// 该检查先于审批桥（无桥也应先被授权拒，而不是 FailedPrecondition）；内部
+    /// `cancel_instance` 直调桥、不经本 handler，故不受影响。
+    #[tokio::test]
+    async fn terminate_rejects_reserved_system_actor_from_wire() {
+        let svc = WorkflowEngineService::new_for_test();
+        let mut req = Request::new(WorkflowTerminateRequest {
+            workflow_id: "w".into(),
+            reason: "ops".into(),
+            idempotency_key: String::new(),
+        });
+        req.extensions_mut().insert(GatewayIdentity {
+            subject: "system".into(),
+            roles: vec![],
+        });
+        let err = Workflow::terminate(&svc, req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// 空批次在 RPC 边界拒绝（引擎空批次语义未定义）。
+    #[tokio::test]
+    async fn remove_sign_empty_task_ids_rejected() {
+        let svc = WorkflowEngineService::new_for_test();
+        let req = Request::new(WorkflowRemoveSignRequest {
+            workflow_id: "w".into(),
+            branch_id: "b".into(),
+            task_ids: vec![],
+            comment: String::new(),
+            idempotency_key: String::new(),
+        });
+        let err = Workflow::remove_sign(&svc, req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn add_sign_without_seats_rejected() {
+        let svc = WorkflowEngineService::new_for_test();
+        let req = Request::new(WorkflowAddSignRequest {
+            workflow_id: "w".into(),
+            branch_id: "b".into(),
+            approvers: vec![],
+            pool: vec![],
+            readers: vec![],
+            comment: String::new(),
+            idempotency_key: String::new(),
+        });
+        let err = Workflow::add_sign(&svc, req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    /// 空主体（transfer/delegate `to`、add_sign 席位元素）在 RPC 边界拒绝：
+    /// 空字符串会被引擎原样落成不可投票的席位并污染审计链。
+    #[tokio::test]
+    async fn transfer_empty_target_rejected() {
+        let svc = WorkflowEngineService::new_for_test();
+        let req = Request::new(WorkflowTransferRequest {
+            workflow_id: "w".into(),
+            task_id: "t".into(),
+            to: String::new(),
+            comment: String::new(),
+            idempotency_key: String::new(),
+        });
+        let err = Workflow::transfer(&svc, req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn delegate_empty_target_rejected() {
+        let svc = WorkflowEngineService::new_for_test();
+        let req = Request::new(WorkflowDelegateRequest {
+            workflow_id: "w".into(),
+            task_id: "t".into(),
+            to: String::new(),
+            comment: String::new(),
+            idempotency_key: String::new(),
+        });
+        let err = Workflow::delegate(&svc, req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn add_sign_empty_principal_rejected() {
+        let svc = WorkflowEngineService::new_for_test();
+        let req = Request::new(WorkflowAddSignRequest {
+            workflow_id: "w".into(),
+            branch_id: "b".into(),
+            approvers: vec!["alice".into(), String::new()],
+            pool: vec![],
+            readers: vec![],
+            comment: String::new(),
+            idempotency_key: String::new(),
+        });
+        let err = Workflow::add_sign(&svc, req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    fn approve_quorum_yaml(name: &str) -> String {
+        format!(
+            r#"
+document:
+  dsl: "1.0.0"
+  namespace: test
+  name: {name}
+  version: "1.0"
+do:
+  - review:
+      approve:
+        approvers: ["alice", "bob"]
+        mode: "quorum:2"
+"#
+        )
+    }
+
+    /// `GetInstanceDetail` 的 `join` 投影：参数化策略（quorum）必须给出 `"quorum:N"`，
+    /// 不得因 serde 对象形状而静默报空；缺省会签给 `"all"`。
+    #[tokio::test]
+    async fn get_instance_detail_projects_join_policy() {
+        let (svc, store) = handler_approve_service();
+
+        // 定义 id 为 `{namespace}-{unix_secs}`：同名前缀会在一秒内碰撞，用不同 namespace。
+        let all_def = svc
+            .deploy_definition("test-all", &approve_yaml("join-all-wf"))
+            .await
+            .unwrap();
+        let all_inst = svc
+            .start_instance_as(&all_def, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        await_seat(&store, &all_inst.id, "alice").await;
+        let all_detail = Workflow::get_instance_detail(
+            &svc,
+            Request::new(WorkflowGetInstanceDetailRequest {
+                workflow_id: all_inst.id.clone(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(all_detail.branches[0].join, "all");
+
+        let quorum_def = svc
+            .deploy_definition("test-quorum", &approve_quorum_yaml("join-quorum-wf"))
+            .await
+            .unwrap();
+        let quorum_inst = svc
+            .start_instance_as(&quorum_def, serde_json::json!({}), Some("zhangsan"))
+            .await
+            .unwrap();
+        await_seat(&store, &quorum_inst.id, "alice").await;
+        let quorum_detail = Workflow::get_instance_detail(
+            &svc,
+            Request::new(WorkflowGetInstanceDetailRequest {
+                workflow_id: quorum_inst.id.clone(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(quorum_detail.branches[0].join, "quorum:2");
     }
 }
 

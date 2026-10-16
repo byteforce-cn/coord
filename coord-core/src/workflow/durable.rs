@@ -233,6 +233,9 @@ pub enum TimerKind {
     AutoResume { reason: String },
     /// 工作流级 / 任务级超时（`expected_index = None` 为工作流级）
     Timeout { expected_index: Option<usize> },
+    /// 审批席位截止（approve 节点的 `deadline`）：到期由外部扫描驱动
+    /// `ApprovalBridge::expire_due`，过期不产生终态。
+    ApprovalDeadline { approval_instance_id: String },
 }
 
 /// 持久化定时器记录。
@@ -275,6 +278,24 @@ impl TimerRecord {
             instance_id: instance_id.to_string(),
             fire_at_ms,
             kind: TimerKind::Timeout { expected_index },
+            created_at_ms: now_ms,
+        }
+    }
+
+    /// 审批截止定时器。`approval_instance_id` 是审批实例标识（当前恒等于 workflow 实例 id）。
+    pub fn approval_deadline(
+        instance_id: &str,
+        approval_instance_id: &str,
+        fire_at_ms: i64,
+        now_ms: i64,
+    ) -> Self {
+        Self {
+            id: format!("{fire_at_ms:020}:{instance_id}:approval_deadline:{approval_instance_id}"),
+            instance_id: instance_id.to_string(),
+            fire_at_ms,
+            kind: TimerKind::ApprovalDeadline {
+                approval_instance_id: approval_instance_id.to_string(),
+            },
             created_at_ms: now_ms,
         }
     }
@@ -823,6 +844,41 @@ mod tests {
         assert_ne!(a.id, b.id);
         let c = TimerRecord::timeout("i1", Some(2), 1000, 0);
         assert_ne!(a.id, c.id);
+    }
+
+    /// 加性变体（`ApprovalDeadline`）不得破坏既有定时器 JSON 的反序列化：
+    /// 持久化记录跨版本可读，新变体只增不改。
+    #[test]
+    fn legacy_timer_json_with_known_kinds_still_deserializes() {
+        let auto: TimerRecord = serde_json::from_value(serde_json::json!({
+            "id": "00000000000000001000:i1:resume:wait",
+            "instance_id": "i1",
+            "fire_at_ms": 1000,
+            "kind": { "kind": "auto_resume", "reason": "wait" },
+            "created_at_ms": 0
+        }))
+        .expect("legacy auto_resume timer must still deserialize");
+        assert_eq!(
+            auto.kind,
+            TimerKind::AutoResume {
+                reason: "wait".into()
+            }
+        );
+
+        let timeout: TimerRecord = serde_json::from_value(serde_json::json!({
+            "id": "00000000000000001000:i1:timeout:wf",
+            "instance_id": "i1",
+            "fire_at_ms": 1000,
+            "kind": { "kind": "timeout", "expected_index": null },
+            "created_at_ms": 0
+        }))
+        .expect("legacy timeout timer must still deserialize");
+        assert_eq!(
+            timeout.kind,
+            TimerKind::Timeout {
+                expected_index: None
+            }
+        );
     }
 
     #[test]

@@ -220,6 +220,7 @@ fn build_service(
             topic: args.topic.clone(),
             relay_enabled: args.relay,
             relay_interval_ms: 50,
+            approval_roles: std::collections::HashMap::new(),
         },
     )
 }
