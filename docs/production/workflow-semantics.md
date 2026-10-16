@@ -109,10 +109,35 @@ retries = 3
 - **与 `$secrets` / `$constants` 的先后**：含 `$secrets` / `$constants` 的字符串
   按配置注入处理（支持内嵌，如 `Bearer ${ $secrets.token }`），不参与运行时求值；
   两种形态混在同一字符串（如 `${ $context.a + $constants.b }`）⇒ fail-closed。
+
+OAuth2 client_credentials（`auth.scheme: oauth2`）由 agent 取短 TTL 令牌后再
+以 Bearer 发出：
+
+```yaml
+auth:
+  scheme: oauth2
+  tokenUrl: "http://ims-iam:8081/oauth2/token"
+  clientId: "${ $secrets.hrClientId }"
+  clientSecret: "${ $secrets.hrClientSecret }"
+  scope: "hr.employee.activate"
+```
+
+- `clientId` / `clientSecret` **必须来自 `$secrets`**（不落定义存储，不写进日志 /
+  错误信息）；令牌按 (tokenUrl, clientId, scope) 在进程内缓存，提前
+  `min(30s, TTL/10)` 刷新（`expires_in` 缺失 / 非正 = 不缓存，每次取）。
+- 令牌端点 5xx / 连接失败 / 超时 ⇒ `retryable: true`；4xx / 响应缺
+  `access_token` / 非 JSON ⇒ `retryable: false`（与 `DispatchResult::Failure`
+  语义一致）。错误信息只含字段名与 OAuth2 `error`/`error_description`（截断、
+  `client_secret` 脱敏），不含凭据值。
 - 判据：`test_http_dispatcher_secret_injected_into_authorization_header`、
   `test_http_dispatcher_missing_placeholders_fail_closed`、
   `test_http_dispatcher_context_expression_evaluated`、
   `test_http_dispatcher_expression_failure_fails_closed`、
+  `test_http_dispatcher_oauth2_gets_token_and_sends_bearer`、
+  `test_http_dispatcher_oauth2_token_cached_until_expiry`、
+  `test_http_dispatcher_oauth2_token_refreshed_when_expired`、
+  `test_http_dispatcher_oauth2_token_endpoint_failure_semantics`、
+  `test_http_dispatcher_oauth2_missing_config_fails_closed`、
   `test_engine_context_expression_end_to_end`、
   `test_engine_new_with_dispatch_injects_secret_end_to_end`、
   `test_engine_new_with_dispatch_missing_secret_fails_closed_end_to_end`。
