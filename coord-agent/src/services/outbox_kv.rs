@@ -167,7 +167,9 @@ impl KvOutboxStore {
         }
     }
 
-    async fn record_by_id(&self, id: &str) -> Result<Option<OutboxRecord>, StoreError> {
+    /// 按事件 id 读已入库记录（幂等索引 `ids/{id}` → `records/...`）；未入库返回
+    /// `Ok(None)`。
+    pub(crate) async fn record_by_id(&self, id: &str) -> Result<Option<OutboxRecord>, StoreError> {
         let Some(record_key) = self.get(&Self::id_key(id)).await? else {
             return Ok(None);
         };

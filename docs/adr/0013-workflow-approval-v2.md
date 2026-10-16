@@ -177,6 +177,17 @@ MQ `Poll+Ack`、RBAC/能力表、TLS——本 ADR 不重建任何一项。
 - v2 路径**不做启动全量加载**：按实例作用域加载 + watch 驱动的有界缓存
   （淘汰策略在实现中固定），避免 G9 的内存/扫描代价。
 - 保留策略维持 B-WF-1（显式删除、无自动 TTL/归档）；outbox TTL 仅清 outbox。
+- **键布局（已固化）**：状态为单文档 `/_workflow/v4/instances/{instance_id}`；伴生事件仍走
+  共享的 `/_workflow/v3/outbox/**` 传输设施（relay 已认该前缀），仅实例状态换到独立键空间。
+  v4 前缀与 v1 的 `/_workflow/v3/instances/` 全量扫描面互不可见（配双向键空间测试）。
+- **写路径（已固化）**：唯一写路径带 CAS 谓词
+  `ExpectedRev::{CreateOnly, Exact(mod_rev)}`——`CreateOnly` 比较 `VERSION==0`
+  （create-if-absent）、`Exact(n)` 比较 `MOD_REV==n`；**没有无守卫写入形态**。谓词不成立
+  整个 Txn 零写入返回 `Ok(false)`，调用方重读后重试；状态与本批事件在同一 Txn 提交
+  （见 D3/D4）。
+- **实现归属**：`MemoryApprovalStore` 仅测试用（内存同锁临界区原子，禁止生产）；生产走
+  `coord-agent` 的 `KvApprovalStore`（outbox 序号取自持久化计数器
+  `/_workflow/v3/outbox/seq/{aggregate}`，不随事件日志剪枝回退）。
 
 ### D9 非目标与边界（永不承诺区不变）
 

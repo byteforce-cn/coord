@@ -1,6 +1,6 @@
 # 工作流语义（补偿 / 重试 / 信号 / 保留）
 
-> Owner: maintainers ｜ Last verified: 2026-10-13
+> Owner: maintainers ｜ Last verified: 2026-10-14
 
 面向接入方的语义单一归属页（G-WF-1）。事实源：`coord.workflow.v1` 的 proto 声明
 （wire 字段）、`coord-core/src/workflow/`（sw 编译器 + runtime）与
@@ -106,3 +106,28 @@ retries = 3
   `test_http_dispatcher_missing_placeholders_fail_closed`、
   `test_engine_new_with_dispatch_injects_secret_end_to_end`、
   `test_engine_new_with_dispatch_missing_secret_fails_closed_end_to_end`。
+
+## 7. v2 审批模型与存储（未接线，默认关闭）
+
+> 状态：**未接线**——尚无 proto/RPC、无 DSL `approve` 节点构造、无授权判定，也没有生产装配点，
+> 新代码当前只被测试驱动。**契约（RPC、事件 `.v1` 后缀与 JSON Schema）与授权模型归 M2-C**，
+> 经 EIS/ICPS 确认后固化；本节只描述已落库的模型与存储事实，不承诺 M2-C 行为。
+
+- **模型（ADR-0013 D2）**：五层实体 = `Instance`（实例）/ `Branch`（节点实例）/ `Task`（席位）/
+  `Round`（轮次）/ `VoteRecord`（内嵌于席位），加 task > branch > instance 三级变量作用域；
+  分支通过不自动收口实例（驱动方在定义末端调用收口），否决是终局。判定顺序与状态转换的冻结
+  证据在 `spike/2026-10/spike-1-state-model/docs/TRANSITIONS.md`（只读，仅链接不复制），当前
+  口径见 `coord-core/src/workflow/approval/` 的模块 rustdoc。
+- **存储（ADR-0013 D3/D8）**：状态单文档 `/_workflow/v4/instances/{instance_id}`，与 v1 的
+  `/_workflow/v3/instances/` 扫描面互不可见；伴生事件仍走 `/_workflow/v3/outbox/**`。唯一写
+  路径带 CAS（`ExpectedRev::{CreateOnly, Exact(mod_rev)}`），且状态与本批事件在同一 KV Txn
+  提交——谓词不成立即零写入，调用方重读后重试。
+- **事件类型（草案）**：`APPROVAL_EVENT_TYPES` 当前 7 个——实例级
+  `com.china-workflow.instance.returned` / `.cancelled` / `.terminated` / `.completed` /
+  `.rejected`，轮次级 `com.china-workflow.approval.round.passed` / `.rejected`。**这些名称尚
+  无 `.v1` 后缀、无 JSON Schema，是草案**；M2-C 经 EIS/ICPS 确认后固化正式契约，本里程碑不
+  接线，不会有生产事件流出。
+- **已知未落地（当前口径）**：
+  - 未实现 D8 的 watch 驱动按实例有界缓存：KV 实现按实例做线性一致单键读，无缓存/淘汰；
+  - 被作废轮次的阅签（`read_ack`）席位保持 open（与 Spike 1 原型一致，阅签不计票）；
+  - `open_tasks_for` 是单实例内存投影，没有跨实例待办索引（待办查询 RPC 归 M2-C）。
