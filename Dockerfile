@@ -52,6 +52,9 @@ COPY coord-server/ coord-server/
 COPY coord-client/ coord-client/
 COPY coord-agent/ coord-agent/
 COPY coord-test/ coord-test/
+# workspace 成员含 spike harness（Cargo 加载 workspace 需其 manifest）；spike 其余内容不入构建
+COPY spike/2026-10/spike-4-conformance/harness/ spike/2026-10/spike-4-conformance/harness/
+COPY spike/2026-10/spike-3-recovery/harness/ spike/2026-10/spike-3-recovery/harness/
 COPY --from=ui-builder /app/coord-ui/dist/ coord-ui/dist/
 
 # 单步编译（cache mount 跨构建缓存 registry 和 target）

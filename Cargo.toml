@@ -9,7 +9,7 @@ members = [
     "coord-client",
     "coord-agent",
     "coord-test",
-    # SPIKE 2026-10（决策证据，不并入 main；见 spike/2026-10/README.md）
+    # SPIKE 2026-10（决策证据；harness 作为 workspace 成员编译校验，见 spike/2026-10/README.md）
     "spike/2026-10/spike-4-conformance/harness",
     "spike/2026-10/spike-3-recovery/harness",
 ]
